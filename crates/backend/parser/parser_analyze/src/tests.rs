@@ -249,6 +249,9 @@ fn install_type_fixture() {
             if name == ">" && l == INT4OID && r == INT4OID {
                 v.push((521, 11));
             }
+            if name == "=" && l == INT4OID && r == INT4OID {
+                v.push((96, 11));
+            }
             Ok(v)
         });
         syscache_seams::lookup_pg_operator_shape::set(|opno| {
@@ -279,19 +282,32 @@ fn install_type_fixture() {
                     oprcanmerge: true,
                     oprcanhash: false,
                 }),
+                // 96 = int4eq (proc 65 -> bool).
+                96 => Some(syscache_seams::PgOperatorShape {
+                    oprleft: INT4OID,
+                    oprright: INT4OID,
+                    oprresult: BOOLOID,
+                    oprcom: 96,
+                    oprnegate: 518,
+                    oprcode: 65,
+                    oprrest: 101,
+                    oprjoin: 105,
+                    oprcanmerge: true,
+                    oprcanhash: true,
+                }),
                 _ => None,
             })
         });
         syscache_seams::pg_operator_name_candidates_exist::set(|name, _| {
-            Ok(name == "+" || name == ">")
+            Ok(name == "+" || name == ">" || name == "=")
         });
         syscache_seams::lookup_pg_proc_shape::set(|funcid| {
             Ok(match funcid {
                 // 481 = int8(int4), the pg_cast int4->int8 coercion function.
-                177 | 147 | 481 => Some(syscache_seams::PgProcShape {
+                177 | 147 | 481 | 65 => Some(syscache_seams::PgProcShape {
                     pronamespace: 11,
                     prorettype: match funcid {
-                        147 => BOOLOID,
+                        147 | 65 => BOOLOID,
                         481 => INT8OID,
                         _ => INT4OID,
                     },
@@ -736,6 +752,41 @@ mod from_where {
             "{}",
             err.message()
         );
+    }
+
+
+    // transformFromClause appends one RTE + RangeTblRef per comma-separated
+    // from-item (parse_clause.c); explicit JOIN syntax stays loud in
+    // transformFromClauseItem.
+    #[test]
+    fn comma_join_from_items_append_two_rtes() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let q = analyze_sql(mcx, "SELECT t.x FROM t, t u WHERE t.x = u.x").unwrap();
+
+        assert_eq!(q.rtable.len(), 2);
+        let rte1 = q.rtable.nth(0).as_range_tbl_entry().unwrap();
+        let rte2 = q.rtable.nth(1).as_range_tbl_entry().unwrap();
+        assert_eq!(rte1.rtekind, RTEKind::RTE_RELATION);
+        assert_eq!(rte2.rtekind, RTEKind::RTE_RELATION);
+        assert_eq!(rte1.relid, T_OID);
+        assert_eq!(rte2.relid, T_OID);
+        assert!(rte1.alias.is_none());
+        assert_eq!(rte2.alias.unwrap().aliasname, Some("u"));
+        assert_eq!(q.rteperminfos.len(), 2);
+
+        let jt = q.jointree.unwrap();
+        assert_eq!(jt.fromlist.len(), 2);
+        assert_eq!(jt.fromlist.nth(0).as_range_tbl_ref().unwrap().rtindex, 1);
+        assert_eq!(jt.fromlist.nth(1).as_range_tbl_ref().unwrap().rtindex, 2);
+
+        let qual = jt.quals.unwrap().as_op_expr().unwrap();
+        let lv = qual.args.nth(0).as_var().unwrap();
+        let rv = qual.args.nth(1).as_var().unwrap();
+        assert_eq!((lv.varno, lv.varattno), (1, 1));
+        assert_eq!((rv.varno, rv.varattno), (2, 1));
     }
 
     // Query shape asserted against C 18.3: field-by-field vs the Query that

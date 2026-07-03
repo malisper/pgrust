@@ -349,3 +349,139 @@ fn missing_attribute(attno: i16) -> Box<PgError> {
             .with_sqlstate(ERRCODE_INTERNAL_ERROR),
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use mcx::{alloc_leak_in, Mcx, MemoryContext};
+    use types_nodes::nodes_enums::CmdType;
+    use types_nodes::parsenodes::{Query, RTEKind, RTEPermissionInfo, RangeTblEntry};
+    use types_nodes::primnodes::{FromExpr, OpExpr, Var};
+    use types_nodes::{Node, NodeList};
+
+    fn var<'mcx>(mcx: Mcx<'mcx>, varno: i32, attno: i16) -> Node<'mcx> {
+        Node::mk(mcx, Var { varno, varattno: attno, vartype: 23, ..Default::default() }).unwrap()
+    }
+
+    fn tle<'mcx>(mcx: Mcx<'mcx>, expr: Node<'mcx>, resno: i16) -> Node<'mcx> {
+        Node::mk_target_entry(mcx, expr, resno, None, false).unwrap()
+    }
+
+    fn perminfo<'mcx>(mcx: Mcx<'mcx>, relid: u32) -> Node<'mcx> {
+        Node::mk(mcx, RTEPermissionInfo { relid, ..Default::default() }).unwrap()
+    }
+
+    fn from_expr<'mcx>(
+        mcx: Mcx<'mcx>,
+        rti: i32,
+        quals: Option<Node<'mcx>>,
+    ) -> &'mcx FromExpr<'mcx> {
+        let rtr = Node::mk_range_tbl_ref(mcx, rti).unwrap();
+        alloc_leak_in(
+            mcx,
+            FromExpr { fromlist: NodeList::make1(mcx, rtr).unwrap(), quals },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn simple_view_subquery_flattens() {
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let sub_rte = Node::mk(
+            mcx,
+            RangeTblEntry {
+                rtekind: RTEKind::RTE_RELATION,
+                relid: 77,
+                relkind: b'r',
+                perminfoindex: 1,
+                inFromCl: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let sub = alloc_leak_in(
+            mcx,
+            Query {
+                commandType: CmdType::CMD_SELECT,
+                rtable: NodeList::make1(mcx, sub_rte).unwrap(),
+                rteperminfos: NodeList::make1(mcx, perminfo(mcx, 77)).unwrap(),
+                targetList: NodeList::make2(
+                    mcx,
+                    tle(mcx, var(mcx, 1, 1), 1),
+                    tle(mcx, var(mcx, 1, 2), 2),
+                )
+                .unwrap(),
+                jointree: Some(from_expr(mcx, 1, None)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let view_rte = Node::mk(
+            mcx,
+            RangeTblEntry {
+                rtekind: RTEKind::RTE_SUBQUERY,
+                subquery: Some(sub),
+                relid: 99,
+                relkind: b'v',
+                perminfoindex: 1,
+                inFromCl: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let qual = Node::mk(
+            mcx,
+            OpExpr {
+                opno: 521,
+                opresulttype: 16,
+                args: NodeList::make2(
+                    mcx,
+                    var(mcx, 1, 1),
+                    Node::mk_const(mcx, 23, -1, 0, 4, datum::Datum::from_i32(5), false, true)
+                        .unwrap(),
+                )
+                .unwrap(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut parse = Query {
+            commandType: CmdType::CMD_SELECT,
+            rtable: NodeList::make1(mcx, view_rte).unwrap(),
+            rteperminfos: NodeList::make1(mcx, perminfo(mcx, 99)).unwrap(),
+            targetList: NodeList::make1(mcx, tle(mcx, var(mcx, 1, 1), 1)).unwrap(),
+            jointree: Some(from_expr(mcx, 1, Some(qual))),
+            ..Default::default()
+        };
+
+        super::pull_up_subqueries(mcx, &mut parse).unwrap();
+
+        assert_eq!(parse.rtable.len(), 2);
+        let dangling = parse.rtable.nth(0).as_range_tbl_entry().unwrap();
+        assert_eq!(dangling.rtekind, RTEKind::RTE_SUBQUERY);
+        assert!(dangling.subquery.is_none());
+        assert_eq!(dangling.perminfoindex, 1);
+        let base = parse.rtable.nth(1).as_range_tbl_entry().unwrap();
+        assert_eq!(base.relid, 77);
+        assert_eq!(base.perminfoindex, 2);
+        assert_eq!(parse.rteperminfos.len(), 2);
+        assert_eq!(
+            parse.rteperminfos.nth(1).as_rte_permission_info().unwrap().relid,
+            77
+        );
+
+        let jt = parse.jointree.unwrap();
+        assert_eq!(jt.fromlist.len(), 1);
+        assert_eq!(jt.fromlist.nth(0).as_range_tbl_ref().unwrap().rtindex, 2);
+
+        let out_var = parse.targetList.nth(0).as_target_entry().unwrap().expr.as_var().unwrap();
+        assert_eq!((out_var.varno, out_var.varattno), (2, 1));
+
+        let q = jt.quals.unwrap().as_op_expr().unwrap();
+        let qual_var = q.args.nth(0).as_var().unwrap();
+        assert_eq!((qual_var.varno, qual_var.varattno), (2, 1));
+        assert!(q.args.nth(1).as_const().is_some());
+    }
+}

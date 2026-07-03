@@ -289,33 +289,59 @@ mod heap {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn tuple_delete<'mcx>(
         _mcx: Mcx<'mcx>,
-        _rel: &Relation<'mcx>,
-        _tid: &ItemPointerData,
-        _cid: CommandId,
+        rel: &Relation<'mcx>,
+        tid: &ItemPointerData,
+        cid: CommandId,
         _snapshot: &Snapshot<'mcx>,
-        _crosscheck: &Snapshot<'mcx>,
-        _wait: bool,
-        _tmfd: &mut TM_FailureData,
-        _changing_part: bool,
+        crosscheck: &Snapshot<'mcx>,
+        wait: bool,
+        tmfd: &mut TM_FailureData,
+        changing_part: bool,
     ) -> PgResult<TM_Result> {
-        unported(DML_UNIT)
+        ::heapam::heap_delete(rel, tid, cid, crosscheck.as_deref(), wait, tmfd, changing_part)
     }
 
+    // heapam_tuple_update: the TU_* verdict passes through unfiltered.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn tuple_update<'mcx>(
-        _mcx: Mcx<'mcx>,
-        _rel: &Relation<'mcx>,
-        _otid: &ItemPointerData,
-        _slot: &mut SlotData<'mcx>,
-        _cid: CommandId,
+        mcx: Mcx<'mcx>,
+        rel: &Relation<'mcx>,
+        otid: &ItemPointerData,
+        slot: &mut SlotData<'mcx>,
+        cid: CommandId,
         _snapshot: &Snapshot<'mcx>,
-        _crosscheck: &Snapshot<'mcx>,
-        _wait: bool,
-        _tmfd: &mut TM_FailureData,
-        _lockmode: &mut LockTupleMode,
-        _update_indexes: &mut TU_UpdateIndexes,
+        crosscheck: &Snapshot<'mcx>,
+        wait: bool,
+        tmfd: &mut TM_FailureData,
+        lockmode: &mut LockTupleMode,
+        update_indexes: &mut TU_UpdateIndexes,
     ) -> PgResult<TM_Result> {
-        unported(DML_UNIT)
+        exectuples::exec_materialize_slot(slot, mcx)?;
+        slot.base_mut().tts_tableOid = rel.rd_id;
+        let tuple = match slot {
+            SlotData::Heap(h) => h.tuple.as_mut(),
+            SlotData::BufferHeap(b) => b.base.tuple.as_mut(),
+            _ => panic!(
+                "heapam_tuple_update (heapam_handler.c): non-heap slot copy arm \
+                 not ported"
+            ),
+        }
+        .expect("materialized heap slot holds a tuple");
+        tuple.t_tableOid = rel.rd_id;
+        let result = ::heapam::heap_update(
+            rel,
+            otid,
+            tuple,
+            cid,
+            crosscheck.as_deref(),
+            wait,
+            tmfd,
+            lockmode,
+            update_indexes,
+        )?;
+        let t_self = tuple.t_self;
+        slot.base_mut().tts_tid = t_self;
+        Ok(result)
     }
 
     #[allow(clippy::too_many_arguments)]

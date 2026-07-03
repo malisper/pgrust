@@ -680,6 +680,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "catalog_indexing"
+version = "0.1.0"
+
+[[package]]
 name = "catalog_namespace"
 version = "0.0.0"
 dependencies = [
@@ -721,6 +725,10 @@ dependencies = [
  "types_error",
  "types_rel",
 ]
+
+[[package]]
+name = "catalog_storage"
+version = "0.1.0"
 
 [[package]]
 name = "catalog_storage_seams"
@@ -960,6 +968,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "commands_vacuum"
+version = "0.0.0"
+
+[[package]]
 name = "commit_ts_seams"
 version = "0.0.0"
 dependencies = [
@@ -1031,12 +1043,14 @@ version = "0.1.0"
 dependencies = [
  "acl_seams",
  "aclchk_seams",
+ "aio_seams",
  "datum",
  "elog",
  "execindexing",
  "exectuples",
  "fd",
  "fmgr_core",
+ "guc_tables",
  "libc",
  "lsyscache",
  "mbutils",
@@ -1056,8 +1070,10 @@ dependencies = [
  "types_scan",
  "types_slot",
  "types_tuple",
+ "waitevent_seams",
  "wchar",
  "xact",
+ "xact_seams",
 ]
 
 [[package]]
@@ -3475,6 +3491,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "parse_utilcmd"
+version = "0.1.0"
+
+[[package]]
 name = "parser_analyze"
 version = "0.0.0"
 dependencies = [
@@ -4043,54 +4063,107 @@ dependencies = [
 name = "postgres"
 version = "0.1.0"
 dependencies = [
+ "aclchk_seams",
+ "adt_int",
+ "aio_seams",
  "analyze_seams",
+ "async_seams",
+ "autovacuum_seams",
+ "backend_progress_seams",
  "backend_status_seams",
+ "be_fsstubs_seams",
+ "be_secure_seams",
+ "catalog_index_seams",
+ "catalog_storage_seams",
  "cmdtag",
+ "combocid_seams",
+ "condition_variable_seams",
+ "deadlock_seams",
  "elog",
+ "execmain",
  "fmgr_seams",
+ "gram_core",
  "guc",
  "guc_file",
  "guc_tables",
  "init_small",
  "init_small_seams",
  "interrupt",
+ "inval_seams",
  "ipc",
  "ipc_seams",
  "latch",
+ "latch_seams",
  "libc",
  "lmgr_proc",
  "lock_seams",
+ "logical_seams",
+ "logical_worker_seams",
  "lsyscache",
+ "lwlock",
  "mbutils",
+ "mbutils_seams",
  "mcx",
  "mcxt_seams",
  "miscinit",
+ "miscinit_seams",
+ "multixact_seams",
+ "namespace_seams",
+ "origin_seams",
+ "parallel_seams",
+ "parse_expr",
+ "parser_analyze",
  "parser_seams",
+ "pg_enum_seams",
  "pg_sema_seams",
  "pgstat",
  "pgstat_seams",
+ "pgtz",
  "plancache",
+ "planner",
  "planner_seams",
  "pmsignal",
+ "pmsignal_seams",
+ "portalcmds_seams",
  "portalmem",
  "postgres_seams",
  "postinit",
  "pqcomm",
  "pqformat",
  "pquery",
+ "prepare",
  "prepare_seams",
  "printtup",
+ "procarray",
  "procsignal",
  "procsignal_seams",
  "ps_status_seams",
+ "relcache_seams",
+ "resowner_portal_seams",
+ "resowner_seams",
+ "rewrite_handler",
  "rewrite_handler_seams",
  "s_lock_seams",
+ "scalar_seams",
+ "scan_fgram",
  "shmem_seams",
  "sinval",
+ "sinval_seams",
+ "snapbuild_seams",
  "snapmgr",
+ "spi_seams",
  "stringinfo",
+ "subtrans_seams",
+ "syncrep_seams",
+ "syscache_seams",
+ "tablecmds_seams",
  "tcop_dest",
  "timeout_seams",
+ "timestamp_seams",
+ "transam_xlog_seams",
+ "trigger_seams",
+ "tuplestore",
+ "typcache_seams",
  "types_core",
  "types_dest",
  "types_error",
@@ -4098,9 +4171,16 @@ dependencies = [
  "types_guc",
  "types_nodes",
  "types_portal",
+ "types_resowner",
  "types_storage",
+ "types_tuple",
+ "utility",
  "utility_seams",
+ "variable",
+ "varsup",
+ "waitevent_seams",
  "xact",
+ "xloginsert_seams",
 ]
 
 [[package]]
@@ -4945,20 +5025,120 @@ dependencies = [
 name = "rewrite_handler"
 version = "0.1.0"
 dependencies = [
+ "aclchk_seams",
+ "adt_bool",
+ "adt_float",
+ "adt_int",
+ "aio_seams",
+ "async_seams",
+ "autovacuum_seams",
+ "backend_progress_seams",
+ "backend_status_seams",
+ "be_fsstubs_seams",
+ "bufmgr_seams",
+ "catalog_index_seams",
+ "catalog_seams",
+ "catalog_storage_seams",
+ "clog",
+ "combocid_seams",
+ "commit_ts_seams",
+ "condition_variable_seams",
+ "controldata_utils",
  "datum",
+ "dbcommands_seams",
+ "deadlock_seams",
+ "execmain",
+ "execmain_seams",
+ "exectuples",
+ "executils",
+ "explain",
+ "fd",
+ "freespace_seams",
+ "gram_core",
+ "guc",
+ "guc_tables",
+ "heapam_visibility",
+ "init_small",
+ "inval",
+ "ipc_seams",
+ "latch_seams",
+ "lmgr_proc",
+ "lmgr_seams",
+ "lock",
+ "lock_seams",
+ "logical_seams",
+ "logical_worker_seams",
+ "lwlock",
  "mcx",
+ "miscinit_seams",
+ "multixact_seams",
+ "namespace_seams",
  "nodes_core",
+ "nodeseqscan",
+ "origin_seams",
+ "parallel_seams",
+ "parse_expr",
+ "parser_analyze",
+ "parser_driver",
+ "parser_seams",
+ "pg_enum_seams",
+ "pg_sema_seams",
+ "pgstat",
+ "planner",
+ "pmsignal_seams",
+ "predicate_seams",
+ "procarray",
+ "pruneheap_seams",
  "readfuncs",
+ "rel_vocab",
  "relation_seams",
  "relcache",
  "relcache_build_seams",
+ "relcache_seams",
+ "resowner",
  "rewrite_handler_seams",
+ "rmgr",
+ "s_lock_seams",
+ "scan_fgram",
+ "shmem",
+ "sinval_seams",
+ "snapbuild_seams",
+ "snapmgr",
+ "spi_seams",
+ "subtrans",
+ "sync_seams",
+ "syncrep_seams",
+ "syscache_seams",
  "table",
+ "tableam",
+ "tableam_vocab",
+ "tablecmds_seams",
+ "tcop_dest",
+ "timeout_seams",
+ "timestamp_seams",
+ "transam",
+ "transam_seams",
+ "transam_xlog",
+ "transam_xlog_seams",
+ "trigger_seams",
+ "typcache_seams",
  "types_core",
+ "types_dest",
  "types_error",
  "types_nodes",
+ "types_portal",
  "types_rel",
+ "types_scan",
+ "types_slot",
+ "types_snapshot",
+ "types_storage",
  "types_tuple",
+ "varsup",
+ "waitevent_seams",
+ "xact",
+ "xact_seams",
+ "xloginsert",
+ "xloginsert_seams",
 ]
 
 [[package]]
@@ -5702,6 +5882,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "tablecmds"
+version = "0.1.0"
+
+[[package]]
 name = "tablecmds_seams"
 version = "0.0.0"
 dependencies = [
@@ -6306,6 +6490,10 @@ dependencies = [
  "types_portal",
  "types_tuple",
 ]
+
+[[package]]
+name = "vacuumlazy"
+version = "0.0.0"
 
 [[package]]
 name = "var_seams"

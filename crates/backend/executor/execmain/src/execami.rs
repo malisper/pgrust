@@ -35,15 +35,18 @@ pub fn exec_re_scan<'mcx>(
     node: &mut PlanStateNode<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
-    // C ExecReScan's InstrEndLoop: close the finished cycle before the next.
-    if let PlanStateNode::Instrumented(w) = node {
-        ::instrument::instr_end_loop(&mut estate.es_instrumentation[w.instr_idx as usize]);
-        return exec_re_scan(&mut w.inner, estate);
-    }
     if let Some(id) = node.ps_expr_context() {
         estate.ecxt_mut(id).rescan();
     }
     match node {
+        // C ExecReScan's InstrEndLoop: close the finished cycle, then the
+        // recursion runs inner's ecxt reset + node rescan.
+        PlanStateNode::Instrumented(w) => {
+            ::instrument::instr_end_loop(
+                &mut estate.es_instrumentation[w.instr_idx as usize],
+            );
+            exec_re_scan(&mut w.inner, estate)
+        }
         PlanStateNode::Result(rs) => exec_re_scan_result(rs, estate),
         PlanStateNode::SeqScan(ss) => ::nodeseqscan::exec_rescan_seq_scan(ss, estate),
         PlanStateNode::IndexScan(is) => ::nodeindexscan::exec_rescan_index_scan(is, estate),
@@ -97,7 +100,6 @@ pub fn exec_re_scan<'mcx>(
         PlanStateNode::ModifyTable(_) => {
             panic!("ExecReScan (execAmi.c): node type 232 does not support ExecReScan")
         }
-        PlanStateNode::Instrumented(_) => unreachable!("unwrapped above"),
     }
 }
 

@@ -11,6 +11,7 @@ path = "src/lib.rs"
 [dependencies]
 coerce = { path = "../coerce" }
 elog = { path = "../../utils/error/elog" }
+format_type = { path = "../../utils/adt/format_type" }
 mbutils = { path = "../../utils/mb/mbutils" }
 mcx = { path = "../../../_support/mcx" }
 parse_expr = { path = "../parse_expr" }

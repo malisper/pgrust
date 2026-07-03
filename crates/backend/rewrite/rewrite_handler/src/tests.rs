@@ -23,6 +23,7 @@ const TBL: Oid = 1;
 const VIEW: Oid = 2;
 const RLS_TBL: Oid = 3;
 const MATVIEW: Oid = 4;
+const SELF_VIEW: Oid = 5;
 
 thread_local! {
     static OPENS: RefCell<Vec<(Oid, LOCKMODE)>> = const { RefCell::new(Vec::new()) };
@@ -42,8 +43,40 @@ fn entry(oid: Oid) -> Option<(&'static str, u8, bool)> {
         VIEW => Some(("vw", RELKIND_VIEW, false)),
         RLS_TBL => Some(("rls_tbl", RELKIND_RELATION, true)),
         MATVIEW => Some(("mv", RELKIND_MATVIEW, false)),
+        SELF_VIEW => Some(("self_vw", RELKIND_VIEW, false)),
         _ => None,
     }
+}
+
+// Shape of a live-PG-18.3-captured ev_action (see readfuncs tests for the
+// verbatim capture) for a one-column "SELECT a FROM <rel>" rule body.
+fn ev_action(relid: Oid) -> String {
+    format!(
+        r#"({{QUERY :commandType 1 :querySource 0 :canSetTag true :utilityStmt <> :resultRelation 0 :hasAggs false :hasWindowFuncs false :hasTargetSRFs false :hasSubLinks false :hasDistinctOn false :hasRecursive false :hasModifyingCTE false :hasForUpdate false :hasRowSecurity false :hasGroupRTE false :isReturn false :cteList <> :rtable ({{RANGETBLENTRY :alias <> :eref {{ALIAS :aliasname t :colnames ("a")}} :rtekind 0 :relid {relid} :inh true :relkind r :rellockmode 1 :perminfoindex 1 :tablesample <> :lateral false :inFromCl true :securityQuals <>}}) :rteperminfos ({{RTEPERMISSIONINFO :relid {relid} :inh true :requiredPerms 2 :checkAsUser 0 :selectedCols (b 8) :insertedCols (b) :updatedCols (b)}}) :jointree {{FROMEXPR :fromlist ({{RANGETBLREF :rtindex 1}}) :quals <>}} :mergeActionList <> :mergeTargetRelation 0 :mergeJoinCondition <> :targetList ({{TARGETENTRY :expr {{VAR :varno 1 :varattno 1 :vartype 23 :vartypmod -1 :varcollid 0 :varnullingrels (b) :varlevelsup 0 :varreturningtype 0 :varnosyn 1 :varattnosyn 1 :location -1}} :resno 1 :resname a :ressortgroupref 0 :resorigtbl {relid} :resorigcol 1 :resjunk false}}) :override 0 :onConflict <> :returningOldAlias <> :returningNewAlias <> :returningList <> :groupClause <> :groupDistinct false :groupingSets <> :havingQual <> :windowClause <> :distinctClause <> :sortClause <> :limitOffset <> :limitCount <> :limitOption 0 :rowMarks <> :setOperations <> :constraintDeps <> :withCheckOptions <> :stmt_location -1 :stmt_len -1}})"#
+    )
+}
+
+fn fake_scan_pg_rewrite<'mcx>(
+    mcx: Mcx<'mcx>,
+    ev_class: Oid,
+) -> PgResult<PgVec<'mcx, relcache_build_seams::PgRewriteRuleShape<'mcx>>> {
+    let mut rows = mcx::vec_with_capacity_in(mcx, 1)?;
+    let body: Option<Oid> = match ev_class {
+        VIEW => Some(TBL),
+        SELF_VIEW => Some(SELF_VIEW),
+        _ => None,
+    };
+    if let Some(base) = body {
+        rows.push(relcache_build_seams::PgRewriteRuleShape {
+            rule_id: 30000 + ev_class,
+            ev_type: b'1',
+            ev_enabled: b'O',
+            is_instead: true,
+            ev_qual: "<>",
+            ev_action: Box::leak(ev_action(base).into_boxed_str()),
+        });
+    }
+    Ok(rows)
 }
 
 fn make<'mcx>(mcx: Mcx<'mcx>, oid: Oid, name: &str, relkind: u8, rls: bool) -> Relation<'mcx> {
@@ -120,6 +153,7 @@ fn install() {
     static INIT: Once = Once::new();
     INIT.call_once(|| {
         relation_seams::relation_open::set(fake_relation_open);
+        relcache_build_seams::scan_pg_rewrite::set(fake_scan_pg_rewrite);
         table::init_seams();
         crate::init_seams();
     });
@@ -202,6 +236,12 @@ fn no_rules_table_query_passes_through() {
     let mut query = select1(mcx);
     query.rtable = NodeList::make1(mcx, relation_rte(mcx, TBL, RELKIND_RELATION, AccessShareLock))
         .unwrap();
+    query.jointree = Some(
+        leak_in(alloc_in(mcx, types_nodes::primnodes::FromExpr {
+            fromlist: NodeList::make1(mcx, Node::mk_range_tbl_ref(mcx, 1).unwrap()).unwrap(),
+            quals: None,
+        }).unwrap()),
+    );
     let rt_ptr = query.rtable.as_slice().as_ptr();
 
     reset_opens();
@@ -210,6 +250,22 @@ fn no_rules_table_query_passes_through() {
     assert_eq!(results[0].rtable.as_slice().as_ptr(), rt_ptr);
     // fireRIRrules: one rules probe + one RLS probe, both NoLock.
     assert_eq!(opens(), vec![(TBL, NoLock), (TBL, NoLock)]);
+}
+
+#[test]
+fn unreferenced_rte_skips_rules_probe() {
+    install();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut query = select1(mcx);
+    query.rtable = NodeList::make1(mcx, relation_rte(mcx, TBL, RELKIND_RELATION, AccessShareLock))
+        .unwrap();
+
+    reset_opens();
+    let results = QueryRewrite(mcx, query).unwrap();
+    assert_eq!(results.len(), 1);
+    // rangeTableEntry_used = false: only the RLS probe remains.
+    assert_eq!(opens(), vec![(TBL, NoLock)]);
 }
 
 #[test]
@@ -314,13 +370,13 @@ fn acquire_locks_recurses_into_subquery_rte() {
 }
 
 #[test]
-#[should_panic(expected = "rewriteTargetListIU UPDATE/DELETE/MERGE arms")]
-fn dml_rewrite_defers_loud() {
+#[should_panic(expected = "mergeActionList arm")]
+fn merge_rewrite_defers_loud() {
     install();
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
     let mut query = select1(mcx);
-    query.commandType = CmdType::CMD_UPDATE;
+    query.commandType = CmdType::CMD_MERGE;
     query.resultRelation = 1;
     let _ = QueryRewrite(mcx, query);
 }
@@ -347,16 +403,103 @@ fn sublinks_defer_loud() {
     let _ = QueryRewrite(mcx, query);
 }
 
+fn view_query<'mcx>(mcx: Mcx<'mcx>, view_oid: Oid) -> Query<'mcx> {
+    let var = Node::mk(
+        mcx,
+        types_nodes::primnodes::Var { varno: 1, varattno: 1, vartype: 23, ..Default::default() },
+    )
+    .unwrap();
+    let te = Node::mk_target_entry(mcx, var, 1, Some("a"), false).unwrap();
+    let mut colnames = NodeList::nil();
+    colnames.lappend(mcx, Node::mk_string(mcx, "a").unwrap()).unwrap();
+    let eref = leak_in(
+        alloc_in(mcx, types_nodes::primnodes::Alias { aliasname: Some("v"), colnames }).unwrap(),
+    );
+    let rte = rte_node(
+        mcx,
+        RangeTblEntry {
+            rtekind: RTEKind::RTE_RELATION,
+            relid: view_oid,
+            relkind: RELKIND_VIEW,
+            rellockmode: AccessShareLock,
+            perminfoindex: 0,
+            eref: Some(eref),
+            inFromCl: true,
+            ..Default::default()
+        },
+    );
+    let mut query = select1(mcx);
+    query.targetList = NodeList::make1(mcx, te).unwrap();
+    query.rtable = NodeList::make1(mcx, rte).unwrap();
+    query.jointree = Some(leak_in(
+        alloc_in(
+            mcx,
+            types_nodes::primnodes::FromExpr {
+                fromlist: NodeList::make1(mcx, Node::mk_range_tbl_ref(mcx, 1).unwrap()).unwrap(),
+                quals: None,
+            },
+        )
+        .unwrap(),
+    ));
+    query
+}
+
 #[test]
-#[should_panic(expected = "view expansion needs")]
-fn view_expansion_defers_loud() {
+fn view_select_expands_to_subquery_rte() {
     install();
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
-    let mut query = select1(mcx);
-    query.rtable =
-        NodeList::make1(mcx, relation_rte(mcx, VIEW, RELKIND_VIEW, AccessShareLock)).unwrap();
-    let _ = QueryRewrite(mcx, query);
+    let query = view_query(mcx, VIEW);
+
+    reset_opens();
+    let results = QueryRewrite(mcx, query).unwrap();
+    assert_eq!(results.len(), 1);
+    let q = &results[0];
+
+    let rte = q.rtable.nth(0).as_range_tbl_entry().unwrap();
+    assert_eq!(rte.rtekind, RTEKind::RTE_SUBQUERY);
+    // relid/relkind/rellockmode/perminfoindex survive for executor lock+ACL.
+    assert_eq!(rte.relid, VIEW);
+    assert_eq!(rte.relkind, RELKIND_VIEW);
+    assert_eq!(rte.rellockmode, AccessShareLock);
+    assert!(!rte.inh && !rte.security_barrier && rte.tablesample.is_none());
+
+    let sub = rte.subquery.expect("expanded view rule query");
+    assert_eq!(sub.commandType, CmdType::CMD_SELECT);
+    assert_eq!(sub.rtable.len(), 1);
+    let base = sub.rtable.nth(0).as_range_tbl_entry().unwrap();
+    assert_eq!(base.rtekind, RTEKind::RTE_RELATION);
+    assert_eq!(base.relid, TBL);
+    assert_eq!(base.relkind, RELKIND_RELATION);
+    assert_eq!(sub.targetList.len(), 1);
+    let sub_var = sub.targetList.nth(0).as_target_entry().unwrap().expr.as_var().unwrap();
+    assert_eq!((sub_var.varno, sub_var.varattno, sub_var.vartype), (1, 1, 23));
+
+    // setRuleCheckAsUser: view owner (fake relowner = 10) on all perminfos.
+    let p = sub.rteperminfos.nth(0).as_rte_permission_info().unwrap();
+    assert_eq!(p.checkAsUser, 10);
+
+    // view probe, base-table lock (AcquireRewriteLocks, rellockmode), then
+    // the recursion's rules + RLS probes on the base table.
+    assert_eq!(
+        opens(),
+        vec![(VIEW, NoLock), (TBL, AccessShareLock), (TBL, NoLock), (TBL, NoLock)]
+    );
+}
+
+#[test]
+fn self_referential_view_reports_infinite_recursion() {
+    install();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let query = view_query(mcx, SELF_VIEW);
+
+    let Err(err) = QueryRewrite(mcx, query) else {
+        panic!("self-referential view must fail")
+    };
+    assert!(err
+        .message()
+        .contains("infinite recursion detected in rules for relation \"self_vw\""));
 }
 
 #[test]

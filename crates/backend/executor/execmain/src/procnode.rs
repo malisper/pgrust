@@ -103,7 +103,8 @@ impl<'mcx> PlanStateNode<'mcx> {
     #[inline]
     pub fn ps_expr_context(&self) -> Option<EcxtId> {
         match self {
-            PlanStateNode::Instrumented(w) => w.inner.ps_expr_context(),
+            // None: the wrapper defers to inner's rescan/reset (execami arm).
+            PlanStateNode::Instrumented(_) => None,
             PlanStateNode::Result(rs) => rs.ps.ps_ExprContext,
             PlanStateNode::SeqScan(ss) => Some(ss.ss.ps_ExprContext),
             PlanStateNode::IndexScan(is) => Some(is.ss.ps_ExprContext),
@@ -459,8 +460,10 @@ pub fn exec_proc_node<'mcx>(
     }
 }
 
-/// `ExecProcNodeInstr` (execProcnode.c). Outlined so the uninstrumented
-/// dispatch keeps its codegen (compare the exec_proc_node asm before adding).
+/// `ExecProcNodeInstr` (execProcnode.c). Cold-outlined so the uninstrumented
+/// dispatch keeps its codegen (zc slope: +18.7 instr/iter as an inline arm,
+/// parity like this).
+#[cold]
 #[inline(never)]
 fn exec_proc_node_instr<'mcx>(
     w: &mut PgBox<'mcx, InstrumentedNode<'mcx>>,

@@ -4,7 +4,7 @@
 mod tests;
 
 use mcx::Mcx;
-use parse_expr::{expr_type, transformExpr};
+use parse_expr::{expr_location, expr_type, transformExpr};
 use parser_small1::{ParseExprKind, ParseNamespaceItem, ParseState};
 use types_core::catalog::{TEXTOID, UNKNOWNOID};
 use types_core::AttrNumber;
@@ -86,6 +86,290 @@ pub fn transformTargetEntry<'mcx>(
     let resno = pstate.p_next_resno as AttrNumber;
     pstate.p_next_resno += 1;
     Node::mk_target_entry(mcx, expr, resno, colname, resjunk)
+}
+
+/// C `transformExpressionList` (parse_target.c).
+pub fn transformExpressionList<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    exprlist: &NodeList<'mcx>,
+    exprKind: ParseExprKind,
+    allowDefault: bool,
+) -> PgResult<NodeList<'mcx>> {
+    let mut result = NodeList::nil();
+    for e in exprlist {
+        if let Some(cref) = e.as_column_ref() {
+            if cref.fields.last().is_some_and(|f| f.node_tag() == NodeTag::T_A_Star) {
+                panic!(
+                    "transformExpressionList (parse_target.c): foo.* expansion \
+                     (ExpandColumnRefStar make_target_entry=false) unported — \
+                     unit backend-parser-parse-target"
+                );
+            }
+        } else if e.node_tag() == NodeTag::T_A_Indirection {
+            panic!(
+                "transformExpressionList (parse_target.c): ExpandIndirectionStar \
+                 unported — unit backend-parser-parse-target"
+            );
+        }
+        let e = if allowDefault && e.node_tag() == NodeTag::T_SetToDefault {
+            e
+        } else {
+            transformExpr(mcx, pstate, e, exprKind)?
+        };
+        result.lappend(mcx, e)?;
+    }
+    debug_assert!(pstate.p_multiassign_exprs.is_nil());
+    Ok(result)
+}
+
+/// C `transformAssignedExpr` (parse_target.c); the whole-row Var and
+/// indirection arms are loud.
+#[allow(clippy::too_many_arguments)]
+pub fn transformAssignedExpr<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    expr: Node<'mcx>,
+    exprKind: ParseExprKind,
+    colname: Option<&str>,
+    attrno: i32,
+    indirection: &NodeList<'mcx>,
+    location: types_core::ParseLoc,
+) -> PgResult<Node<'mcx>> {
+    debug_assert!(exprKind != ParseExprKind::EXPR_KIND_NONE);
+    let att = {
+        let rel = pstate
+            .p_target_relation
+            .as_ref()
+            .expect("transformAssignedExpr with no target relation");
+        if attrno <= 0 {
+            return Err(cannot_assign_to_system_column(pstate, colname, location));
+        }
+        rel.rd_att.attr((attrno - 1) as usize)
+    };
+    let (attrtype, attrtypmod) = (att.atttypid, att.atttypmod);
+
+    if expr.node_tag() == NodeTag::T_SetToDefault {
+        panic!(
+            "transformAssignedExpr (parse_target.c): SetToDefault type-stamping \
+             arm unported — unit backend-parser-parse-target"
+        );
+    }
+    if !indirection.is_nil() {
+        panic!(
+            "transformAssignedExpr (parse_target.c): transformAssignmentIndirection \
+             (field/subscript store) unported — unit backend-parser-parse-target"
+        );
+    }
+
+    let type_id = expr_type(expr);
+    let coerced = coerce::coerce_to_target_type(
+        mcx,
+        pstate,
+        expr,
+        type_id,
+        attrtype,
+        attrtypmod,
+        coerce::COERCION_ASSIGNMENT,
+        CoercionForm::COERCE_IMPLICIT_CAST,
+        -1,
+    )?;
+    match coerced {
+        Some(e) => Ok(e),
+        None => Err(column_type_mismatch(
+            pstate,
+            colname.unwrap_or("?"),
+            attrtype,
+            type_id,
+            expr_location(expr),
+        )),
+    }
+}
+
+/// C `updateTargetListEntry` (parse_target.c).
+pub fn updateTargetListEntry<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    tle_node: Node<'mcx>,
+    colname: &'mcx str,
+    attrno: i32,
+    indirection: &NodeList<'mcx>,
+    location: types_core::ParseLoc,
+) -> PgResult<()> {
+    let expr = tle_node.as_target_entry().expect("TargetEntry").expr;
+    let new_expr = transformAssignedExpr(
+        mcx,
+        pstate,
+        expr,
+        ParseExprKind::EXPR_KIND_UPDATE_TARGET,
+        Some(colname),
+        attrno,
+        indirection,
+        location,
+    )?;
+    // SAFETY: parser-owned tlist; the `expr` probe above is dead here.
+    unsafe {
+        tle_node.with_mut::<TargetEntry, _>(|t| {
+            t.expr = new_expr;
+            t.resno = attrno as AttrNumber;
+            t.resname = Some(colname);
+        })
+    }
+    .expect("TargetEntry");
+    Ok(())
+}
+
+/// C `checkInsertTargets` (parse_target.c); returns (icolumns, attrnos).
+pub fn checkInsertTargets<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &ParseState<'_, 'mcx>,
+    cols: &NodeList<'mcx>,
+) -> PgResult<(NodeList<'mcx>, mcx::PgVec<'mcx, i32>)> {
+    let rel = pstate
+        .p_target_relation
+        .as_ref()
+        .expect("checkInsertTargets with no target relation");
+    let mut attrnos: mcx::PgVec<'mcx, i32> = mcx::PgVec::new_in(mcx);
+
+    if cols.is_nil() {
+        let mut out = NodeList::nil();
+        for i in 0..rel.rd_att.natts as usize {
+            let att = rel.rd_att.attr(i);
+            if att.attisdropped {
+                continue;
+            }
+            let name = core::str::from_utf8(att.attname.name_str()).expect("attname is UTF-8");
+            let col =
+                Node::mk_res_target(mcx, Some(str_in(mcx, name)?), NodeList::nil(), None, -1)?;
+            out.lappend(mcx, col)?;
+            attrnos.push(i as i32 + 1);
+        }
+        Ok((out, attrnos))
+    } else {
+        let mut wholecols = types_nodes::Bitmapset::empty();
+        let mut partialcols = types_nodes::Bitmapset::empty();
+        for col_node in cols {
+            let col = col_node.as_res_target().expect("insert cols are ResTargets");
+            let name = col.name.expect("insert_column_item always has a name");
+            let attrno = parse_relation::attnameAttNum(rel, name, false);
+            if attrno == 0 {
+                let relname =
+                    core::str::from_utf8(rel.rd_rel.relname.name_str()).expect("relname UTF-8");
+                return Err(undefined_insert_column(pstate, name, relname, col.location));
+            }
+            let attrno = attrno as i32;
+            if col.indirection.is_nil() {
+                if wholecols.is_member(attrno) || partialcols.is_member(attrno) {
+                    return Err(duplicate_insert_column(pstate, name, col.location));
+                }
+                wholecols.add_member(mcx, attrno)?;
+            } else {
+                if wholecols.is_member(attrno) {
+                    return Err(duplicate_insert_column(pstate, name, col.location));
+                }
+                partialcols.add_member(mcx, attrno)?;
+            }
+            attrnos.push(attrno);
+        }
+        Ok((cols.clone_in(mcx)?, attrnos))
+    }
+}
+
+#[cold]
+fn cannot_assign_to_system_column(
+    pstate: &ParseState<'_, '_>,
+    colname: Option<&str>,
+    location: i32,
+) -> Box<types_error::PgError> {
+    use types_error::{ErrorLocation, ERRCODE_SYNTAX_ERROR, ERROR};
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_SYNTAX_ERROR)
+            .errmsg(format!("cannot assign to system column \"{}\"", colname.unwrap_or("?")))
+            .errposition(parser_small1::parser_errposition(
+                pstate,
+                location,
+                mbutils::GetDatabaseEncoding(),
+            ))
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_target.c", 0, "transformAssignedExpr")),
+    )
+}
+
+#[cold]
+fn column_type_mismatch(
+    pstate: &ParseState<'_, '_>,
+    colname: &str,
+    attrtype: types_core::Oid,
+    exprtype: types_core::Oid,
+    location: i32,
+) -> Box<types_error::PgError> {
+    use types_error::{ErrorLocation, ERRCODE_DATATYPE_MISMATCH, ERROR};
+    let (want, got) = match (
+        format_type::format_type_be(attrtype),
+        format_type::format_type_be(exprtype),
+    ) {
+        (Ok(w), Ok(g)) => (w, g),
+        (Err(e), _) | (_, Err(e)) => return e,
+    };
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_DATATYPE_MISMATCH)
+            .errmsg(format!(
+                "column \"{colname}\" is of type {want} but expression is of type {got}",
+            ))
+            .errhint("You will need to rewrite or cast the expression.")
+            .errposition(parser_small1::parser_errposition(
+                pstate,
+                location,
+                mbutils::GetDatabaseEncoding(),
+            ))
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_target.c", 0, "transformAssignedExpr")),
+    )
+}
+
+#[cold]
+fn undefined_insert_column(
+    pstate: &ParseState<'_, '_>,
+    name: &str,
+    relname: &str,
+    location: i32,
+) -> Box<types_error::PgError> {
+    use types_error::{ErrorLocation, ERRCODE_UNDEFINED_COLUMN, ERROR};
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_UNDEFINED_COLUMN)
+            .errmsg(format!("column \"{name}\" of relation \"{relname}\" does not exist"))
+            .errposition(parser_small1::parser_errposition(
+                pstate,
+                location,
+                mbutils::GetDatabaseEncoding(),
+            ))
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_target.c", 0, "checkInsertTargets")),
+    )
+}
+
+#[cold]
+fn duplicate_insert_column(
+    pstate: &ParseState<'_, '_>,
+    name: &str,
+    location: i32,
+) -> Box<types_error::PgError> {
+    use types_error::{ErrorLocation, ERRCODE_DUPLICATE_COLUMN, ERROR};
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_DUPLICATE_COLUMN)
+            .errmsg(format!("column \"{name}\" specified more than once"))
+            .errposition(parser_small1::parser_errposition(
+                pstate,
+                location,
+                mbutils::GetDatabaseEncoding(),
+            ))
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_target.c", 0, "checkInsertTargets")),
+    )
 }
 
 pub fn markTargetListOrigins<'mcx>(
