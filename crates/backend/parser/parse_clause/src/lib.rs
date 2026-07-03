@@ -85,10 +85,10 @@ fn transformJoinExpr<'mcx>(
         types_nodes::JoinType::JOIN_INNER
             | types_nodes::JoinType::JOIN_LEFT
             | types_nodes::JoinType::JOIN_RIGHT
+            | types_nodes::JoinType::JOIN_FULL
     ) {
         panic!(
-            "transformFromClauseItem (parse_clause.c): {:?} planner state \
-             (SpecialJoinInfo/deconstruct FULL arm) unported — join-outer lane",
+            "transformFromClauseItem (parse_clause.c): unrecognized join type {:?}",
             j.jointype
         );
     }
@@ -118,6 +118,10 @@ fn transformJoinExpr<'mcx>(
     match j.jointype {
         types_nodes::JoinType::JOIN_LEFT => markRelsAsNulledBy(mcx, pstate, rarg, rtindex)?,
         types_nodes::JoinType::JOIN_RIGHT => markRelsAsNulledBy(mcx, pstate, larg, rtindex)?,
+        types_nodes::JoinType::JOIN_FULL => {
+            markRelsAsNulledBy(mcx, pstate, larg, rtindex)?;
+            markRelsAsNulledBy(mcx, pstate, rarg, rtindex)?;
+        }
         _ => {}
     }
 

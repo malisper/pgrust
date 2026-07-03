@@ -210,8 +210,13 @@ pub fn deconstruct_jointree<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResult<PgVec<
                 } else {
                     relids_union(mcx, &sjinfo.min_lefthand, &sjinfo.min_righthand)
                 };
+                let full_nonnullable;
                 let nonnullable = if *jointype == types_pathnodes::JOIN_SEMI {
                     &None
+                } else if *jointype == types_pathnodes::JOIN_FULL {
+                    // Each side of a FULL join is both outer and inner.
+                    full_nonnullable = relids_copy(mcx, qualscope);
+                    &full_nonnullable
                 } else {
                     left_rels
                 };
@@ -441,9 +446,86 @@ fn deconstruct_recurse<'mcx>(
                     }
                     Ok((qualscope, inner_join_rels, joinlist))
                 }
+                types_nodes::JoinType::JOIN_FULL => {
+                    // The FULL join's quals get their very own domain; each
+                    // side gets its own child domain.
+                    let fj_domain = run.root.join_domains.len();
+                    run.root
+                        .join_domains
+                        .push(types_pathnodes::JoinDomain { jd_relids: None });
+                    let l_domain = run.root.join_domains.len();
+                    run.root
+                        .join_domains
+                        .push(types_pathnodes::JoinDomain { jd_relids: None });
+                    let (l_relids, l_inner, l_list) =
+                        deconstruct_recurse(run, j.larg, l_domain, items)?;
+                    run.root.join_domains[fj_domain].jd_relids = relids_copy(
+                        mcx,
+                        &run.root.join_domains[l_domain].jd_relids,
+                    );
+                    let r_domain = run.root.join_domains.len();
+                    run.root
+                        .join_domains
+                        .push(types_pathnodes::JoinDomain { jd_relids: None });
+                    let (r_relids, r_inner, r_list) =
+                        deconstruct_recurse(run, j.rarg, r_domain, items)?;
+                    let r_dom_relids =
+                        relids_copy(mcx, &run.root.join_domains[r_domain].jd_relids);
+                    run.root.join_domains[fj_domain].jd_relids = relids_union(
+                        mcx,
+                        &run.root.join_domains[fj_domain].jd_relids,
+                        &r_dom_relids,
+                    );
+                    let fj_relids =
+                        relids_copy(mcx, &run.root.join_domains[fj_domain].jd_relids);
+                    run.root.join_domains[parent_domain].jd_relids = relids_union(
+                        mcx,
+                        &run.root.join_domains[parent_domain].jd_relids,
+                        &fj_relids,
+                    );
+                    let mut qualscope = relids_union(mcx, &l_relids, &r_relids);
+                    assert!(j.rtindex != 0, "FULL JoinExpr lacks an rtindex");
+                    run.root.join_domains[parent_domain].jd_relids = relids_add_member(
+                        mcx,
+                        &run.root.join_domains[parent_domain].jd_relids,
+                        j.rtindex as u32,
+                    );
+                    qualscope = relids_add_member(mcx, &qualscope, j.rtindex as u32);
+                    run.root.outer_join_rels =
+                        relids_add_member(mcx, &run.root.outer_join_rels, j.rtindex as u32);
+                    mark_rels_nulled_by_join(run, j.rtindex, &l_relids);
+                    mark_rels_nulled_by_join(run, j.rtindex, &r_relids);
+                    let inner_join_rels = relids_union(mcx, &l_inner, &r_inner);
+                    items.push(JtItem::Sj {
+                        jointype: types_pathnodes::JOIN_FULL,
+                        quals: j.quals,
+                        qualscope: relids_copy(mcx, &qualscope),
+                        jdomain: fj_domain,
+                        left_rels: relids_copy(mcx, &l_relids),
+                        right_rels: relids_copy(mcx, &r_relids),
+                        inner_join_rels: relids_copy(mcx, &inner_join_rels),
+                        rtindex: j.rtindex,
+                    });
+                    // Force the join order exactly at this node:
+                    // list_make1(list_make2(leftjoinlist, rightjoinlist)).
+                    let mut left_sub = PgVec::new_in(mcx);
+                    for jl in l_list {
+                        left_sub.push(jl);
+                    }
+                    let mut right_sub = PgVec::new_in(mcx);
+                    for jl in r_list {
+                        right_sub.push(jl);
+                    }
+                    let mut pair = PgVec::new_in(mcx);
+                    pair.push(JoinlistNode::Sub(left_sub));
+                    pair.push(JoinlistNode::Sub(right_sub));
+                    let mut joinlist = PgVec::new_in(mcx);
+                    joinlist.push(JoinlistNode::Sub(pair));
+                    Ok((qualscope, inner_join_rels, joinlist))
+                }
                 other => panic!(
                     "deconstruct_recurse (initsplan.c): {other:?} arm; join-outer lane covers \
-                     INNER/LEFT/SEMI/ANTI (RIGHT flips in reduce_outer_joins)"
+                     INNER/LEFT/FULL/SEMI/ANTI (RIGHT flips in reduce_outer_joins)"
                 ),
             }
         }
@@ -508,6 +590,14 @@ fn make_outerjoininfo<'mcx>(
     };
     compute_semijoin_info(run, &mut sjinfo, clause)?;
 
+    // If it's a full join, no need to be very smart.
+    if jointype == types_pathnodes::JOIN_FULL {
+        sjinfo.min_lefthand = relids_copy(mcx, left_rels);
+        sjinfo.min_righthand = relids_copy(mcx, right_rels);
+        sjinfo.lhs_strict = false;
+        return Ok(sjinfo);
+    }
+
     let clause_relids = match clause {
         Some(c) => pull_varnos_relids(run, c)?,
         None => None,
@@ -531,11 +621,37 @@ fn make_outerjoininfo<'mcx>(
     for i in 0..run.root.join_info_list.len() {
         let other = run.root.join_info_list[i].clone();
         assert!(
-            matches!(other.jointype, JOIN_LEFT | types_pathnodes::JOIN_SEMI | JOIN_ANTI),
+            matches!(
+                other.jointype,
+                JOIN_LEFT
+                    | types_pathnodes::JOIN_SEMI
+                    | JOIN_ANTI
+                    | types_pathnodes::JOIN_FULL
+            ),
             "make_outerjoininfo (initsplan.c): lower {} join ordering arm; join-outer lane",
             other.jointype
         );
         debug_assert!(run.root.placeholder_list.is_empty());
+        // A full join is an optimization barrier: expand whichever side
+        // overlaps it to cover the whole full join.
+        if other.jointype == types_pathnodes::JOIN_FULL {
+            debug_assert!(other.ojrelid != 0);
+            if relids_overlap(left_rels, &other.syn_lefthand)
+                || relids_overlap(left_rels, &other.syn_righthand)
+            {
+                min_lefthand = relids_union(mcx, &min_lefthand, &other.syn_lefthand);
+                min_lefthand = relids_union(mcx, &min_lefthand, &other.syn_righthand);
+                min_lefthand = relids_add_member(mcx, &min_lefthand, other.ojrelid);
+            }
+            if relids_overlap(right_rels, &other.syn_lefthand)
+                || relids_overlap(right_rels, &other.syn_righthand)
+            {
+                min_righthand = relids_union(mcx, &min_righthand, &other.syn_lefthand);
+                min_righthand = relids_union(mcx, &min_righthand, &other.syn_righthand);
+                min_righthand = relids_add_member(mcx, &min_righthand, other.ojrelid);
+            }
+            continue;
+        }
         if relids_overlap(left_rels, &other.syn_righthand) {
             if relids_overlap(&clause_relids, &other.syn_righthand)
                 && (is_semi_or_anti
@@ -723,13 +839,18 @@ fn check_redundant_nullability_qual(run: &PlannerRun<'_>, clause: Node<'_>) -> b
 // is dead under eclass-lite (no ECs carry constants), so every set-aside
 // outer-join clause is thrown back to the regular lists.
 pub fn reconsider_outer_join_clauses(run: &mut PlannerRun<'_>) -> PgResult<()> {
-    debug_assert!(run.root.full_join_clauses.is_empty());
     for i in 0..run.root.left_join_clauses.len() {
         let rinfo = run.root.left_join_clauses[i].rinfo;
         distribute_restrictinfo_to_rels(run, rinfo)?;
     }
     for i in 0..run.root.right_join_clauses.len() {
         let rinfo = run.root.right_join_clauses[i].rinfo;
+        distribute_restrictinfo_to_rels(run, rinfo)?;
+    }
+    // reconsider_full_join_clause's const-EC substitution is dead under
+    // eclass-lite; every full-join clause is thrown back too.
+    for i in 0..run.root.full_join_clauses.len() {
+        let rinfo = run.root.full_join_clauses[i].rinfo;
         distribute_restrictinfo_to_rels(run, rinfo)?;
     }
     Ok(())
@@ -845,6 +966,11 @@ fn distribute_qual_to_rels<'mcx>(
         }
         if right_sub && !left_over {
             run.root.right_join_clauses.push(OuterJoinClauseInfo { rinfo, sjinfo });
+            return Ok(());
+        }
+        if sjinfo.jointype == types_pathnodes::JOIN_FULL {
+            // FULL JOIN: the one-sided tests above can never match.
+            run.root.full_join_clauses.push(OuterJoinClauseInfo { rinfo, sjinfo });
             return Ok(());
         }
     }

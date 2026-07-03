@@ -602,10 +602,21 @@ fn reduce_outer_joins_pass2<'mcx>(
                 jointype = types_nodes::JoinType::JOIN_INNER;
             }
         }
+        types_nodes::JoinType::JOIN_FULL => {
+            let l = nonnullable_rels.overlap(&state1.sub_states[0].relids);
+            let r = nonnullable_rels.overlap(&state1.sub_states[1].relids);
+            if l && r {
+                jointype = types_nodes::JoinType::JOIN_INNER;
+            } else if l || r {
+                panic!(
+                    "reduce_outer_joins_pass2 (prepjointree.c): partial FULL reduction \
+                     (report_reduced_full_join nulling-bit removal) unported"
+                );
+            }
+        }
         types_nodes::JoinType::JOIN_SEMI | types_nodes::JoinType::JOIN_ANTI => {}
         other => panic!(
-            "reduce_outer_joins_pass2 (prepjointree.c): {other:?}; join-outer lane covers \
-             INNER/LEFT/RIGHT/SEMI/ANTI"
+            "reduce_outer_joins_pass2 (prepjointree.c): unrecognized join type {other:?}"
         ),
     }
 
@@ -642,9 +653,19 @@ fn reduce_outer_joins_pass2<'mcx>(
     let right_state = &state1.sub_states[right_ix];
     if left_state.contains_outer || right_state.contains_outer {
         // INNER passes local+upper constraints down; LEFT passes upper to the
-        // outer side and local to the nullable side (C's comment block).
-        let mut local_nonnullable = clauses::find_nonnullable_rels(mcx, j.quals)?;
-        let mut local_forced = clauses::find_forced_null_vars(mcx, j.quals)?;
+        // outer side and local to the nullable side; FULL passes nothing
+        // (C's comment block).
+        let is_full = jointype == types_nodes::JoinType::JOIN_FULL;
+        let mut local_nonnullable = if is_full {
+            types_nodes::Bitmapset::empty()
+        } else {
+            clauses::find_nonnullable_rels(mcx, j.quals)?
+        };
+        let mut local_forced = if is_full {
+            mcx::PgVec::new_in(mcx)
+        } else {
+            clauses::find_forced_null_vars(mcx, j.quals)?
+        };
         let inner_or_semi = matches!(
             jointype,
             types_nodes::JoinType::JOIN_INNER | types_nodes::JoinType::JOIN_SEMI
@@ -654,24 +675,25 @@ fn reduce_outer_joins_pass2<'mcx>(
             clauses::mbms_add_members(mcx, &mut local_forced, forced_null_vars)?;
         }
 
+        let empty_nn = types_nodes::Bitmapset::empty();
+        let empty_fv = mcx::PgVec::new_in(mcx);
         if left_state.contains_outer {
             let (nn, fv) = if inner_or_semi {
                 (&local_nonnullable, &local_forced)
-            } else {
+            } else if !is_full {
                 (nonnullable_rels, forced_null_vars)
+            } else {
+                (&empty_nn, &empty_fv)
             };
             larg = reduce_outer_joins_pass2(mcx, parse, larg, left_state, inner_reduced, nn, fv)?;
         }
         if right_state.contains_outer {
-            rarg = reduce_outer_joins_pass2(
-                mcx,
-                parse,
-                rarg,
-                right_state,
-                inner_reduced,
-                &local_nonnullable,
-                &local_forced,
-            )?;
+            let (nn, fv) = if !is_full {
+                (&local_nonnullable, &local_forced)
+            } else {
+                (&empty_nn, &empty_fv)
+            };
+            rarg = reduce_outer_joins_pass2(mcx, parse, rarg, right_state, inner_reduced, nn, fv)?;
         }
     }
 

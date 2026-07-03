@@ -610,25 +610,29 @@ pub mod resowner {
         PgString::from_str_in(&format!("File {}", res.as_i32()), mcx)
     }
 
-    #[cold]
-    #[inline(never)]
-    fn unported(what: &str) -> ! {
-        panic!("unported callee reached from fd.c: {what} (utils/resowner/resowner.c)")
-    }
-
     pub(crate) fn current_resource_owner() -> ResourceOwner {
-        unported("CurrentResourceOwner")
+        resowner_seams::current_resource_owner::call()
     }
 
-    pub(crate) fn resource_owner_enlarge(_owner: ResourceOwner) {
-        unported("ResourceOwnerEnlarge")
+    pub(crate) fn resource_owner_enlarge(owner: ResourceOwner) {
+        resowner_seams::resource_owner_enlarge::call(owner).expect("ResourceOwnerEnlarge");
     }
 
-    pub(crate) fn resource_owner_remember_file(_owner: ResourceOwner, _file: File) {
-        unported("ResourceOwnerRemember")
+    pub(crate) fn resource_owner_remember_file(owner: ResourceOwner, file: File) {
+        resowner_seams::resource_owner_remember::call(
+            owner,
+            Datum::from_i32(file.0),
+            &FILE_RESOWNER_DESC,
+        )
+        .expect("ResourceOwnerRememberFile");
     }
 
-    pub(crate) fn resource_owner_forget_file(_owner: ResourceOwner, _file: File) {
-        unported("ResourceOwnerForget")
+    pub(crate) fn resource_owner_forget_file(owner: ResourceOwner, file: File) {
+        resowner_seams::resource_owner_forget::call(
+            owner,
+            Datum::from_i32(file.0),
+            &FILE_RESOWNER_DESC,
+        )
+        .expect("ResourceOwnerForgetFile");
     }
 }

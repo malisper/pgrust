@@ -393,13 +393,10 @@ impl<'mcx> EStateData<'mcx> {
         self.es_aux_contexts[id.0 as usize].mcx()
     }
 
-    /// Wholesale reset; every pointer into the context is dead after this.
     pub fn reset_aux_context(&mut self, id: AuxCxtId) {
         self.es_aux_contexts[id.0 as usize].reset();
     }
 
-    /// The disjoint borrows a spill consumer needs: one slot plus an aux
-    /// context, without aliasing es_tupleTable.
     #[inline]
     pub fn slot_and_aux_mcx(
         &mut self,
@@ -412,7 +409,6 @@ impl<'mcx> EStateData<'mcx> {
         )
     }
 
-    /// One slot plus an expr context's per-tuple scratch, disjointly.
     #[inline]
     pub fn slot_and_per_tuple_mcx(
         &mut self,

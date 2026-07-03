@@ -2106,14 +2106,18 @@ mod join {
         let mut q = join_on_query(mcx);
         let f = q.jointree.unwrap();
         let join = f.fromlist.nth(0).as_join_expr().unwrap();
-        let nulled_varno = if jointype == types_nodes::JoinType::JOIN_LEFT { 2 } else { 1 };
-        let nulled_var = |attno: i16| {
+        let is_nulled = |varno: i32| match jointype {
+            types_nodes::JoinType::JOIN_LEFT => varno == 2,
+            types_nodes::JoinType::JOIN_FULL => true,
+            _ => varno == 1,
+        };
+        let nulled_var = |varno: i32, attno: i16| {
             let mut nulling = types_nodes::Bitmapset::empty();
             nulling.add_member(mcx, 3).unwrap();
             Node::mk(
                 mcx,
                 types_nodes::primnodes::Var {
-                    varno: nulled_varno,
+                    varno,
                     varattno: attno,
                     vartype: 23,
                     vartypmod: -1,
@@ -2127,7 +2131,7 @@ mod join {
         for (i, te) in q.targetList.iter().enumerate() {
             let te = te.as_target_entry().unwrap();
             let v = te.expr.as_var().unwrap();
-            let expr = if v.varno == nulled_varno { nulled_var(v.varattno) } else { te.expr };
+            let expr = if is_nulled(v.varno) { nulled_var(v.varno, v.varattno) } else { te.expr };
             tlist
                 .lappend(
                     mcx,
@@ -2164,6 +2168,43 @@ mod join {
             jrte.with_mut::<types_nodes::parsenodes::RangeTblEntry, _>(|r| r.jointype = jointype)
         };
         q
+    }
+
+    // Live PG 18.3, same fixture stats:
+    //   Hash Full Join  (cost=1.02..2.06 rows=2 width=16)
+    //     Hash Cond: (jt2.a = jt1.a)
+    //     ->  Seq Scan on jt2  (cost=0.00..1.02 rows=2 width=8)
+    //     ->  Hash  (cost=1.01..1.01 rows=1 width=8)
+    //           ->  Seq Scan on jt1  (cost=0.00..1.01 rows=1 width=8)
+    #[test]
+    fn full_join_plans_hash_full_join() {
+        let _guc = crate::tests::GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cx = cx();
+        let mcx = cx.mcx();
+        // final_cost_hashjoin's get_hash_memory_limit reads work_mem/hash_mem_multiplier.
+        if !guc_tables::vars::work_mem.installed() {
+            init_small::init_seams();
+        }
+        let stmt = planner(
+            mcx,
+            outer_join_query(mcx, types_nodes::JoinType::JOIN_FULL, None),
+            "SELECT * FROM jt1 FULL JOIN jt2 ON jt1.a = jt2.a",
+            CURSOR_OPT_PARALLEL_OK,
+            ParamListHandle::NULL,
+        )
+        .unwrap();
+        let hj = stmt.planTree.unwrap().as_hash_join().expect("HashJoin root");
+        assert_eq!(hj.join.jointype, types_nodes::JoinType::JOIN_FULL);
+        assert!((hj.join.plan.startup_cost - 1.0225).abs() < 1e-3, "{}", hj.join.plan.startup_cost);
+        assert!((hj.join.plan.total_cost - 2.06).abs() < 5e-3, "{}", hj.join.plan.total_cost);
+        assert_eq!(hj.join.plan.plan_rows, 2.0);
+        assert_eq!(hj.join.plan.plan_width, 16);
+        // C picks jt2 (the bigger rel) as outer: probe jt2, hash jt1.
+        let outer = hj.join.plan.lefttree.unwrap().as_seq_scan().expect("outer SeqScan");
+        assert_eq!(outer.scan.scanrelid, 2);
+        let hash = hj.join.plan.righttree.unwrap().as_hash().expect("inner Hash");
+        let inner = hash.plan.lefttree.unwrap().as_seq_scan().expect("hashed SeqScan");
+        assert_eq!(inner.scan.scanrelid, 1);
     }
 
     // Live PG 18.3, same fixture stats:

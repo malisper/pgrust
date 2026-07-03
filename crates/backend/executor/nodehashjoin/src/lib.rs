@@ -1,7 +1,5 @@
-// nodeHashjoin.c serial state machine, all jointypes, single- and multi-batch
-// (outer batch routing + HJ_NEED_NEW_BATCH reload); parallel is loud. The
-// Hash sub-node build runs through nodehash. Per-probe bucket scan is
-// allocation-free.
+// nodeHashjoin.c serial state machine, all jointypes, single- and
+// multi-batch; parallel is loud. Per-probe bucket scan is allocation-free.
 #![allow(non_snake_case)]
 
 use std::rc::Rc;
@@ -67,8 +65,7 @@ pub struct HashJoinState<'mcx> {
     inner_saved_scratch: PgVec<'mcx, u64>,
 }
 
-/// `ExecInitHashJoin` minus child linkage; builds the outer hash program +
-/// recheck qual and hands the inner keys to `init_hash` (nodehash).
+/// `ExecInitHashJoin` minus child linkage.
 #[allow(clippy::too_many_arguments)]
 pub fn exec_init_hash_join<'mcx>(
     node: &'mcx HashJoin<'mcx>,
@@ -211,8 +208,7 @@ fn hashkey_attnums<'mcx>(
     out
 }
 
-/// `ExecHashJoin` (serial `ExecHashJoinImpl`); the Hash sub-node is built once
-/// per (re)build.
+/// `ExecHashJoin` (serial `ExecHashJoinImpl`).
 pub fn exec_hash_join<'mcx, O, C>(
     node: &mut HashJoinState<'mcx>,
     outer: &mut O,
@@ -241,7 +237,6 @@ where
             }
             HJ_NEED_NEW_OUTER => {
                 let Some(hashvalue) = get_outer_tuple(node, outer, hash_state, estate)? else {
-                    // End of batch, or maybe whole join.
                     if node.hj_fill_inner {
                         // ExecPrepHashTableForUnmatched.
                         node.hj_CurBucketNo = 0;
@@ -470,7 +465,6 @@ fn new_batch<'mcx>(
                     tuple,
                 )
             };
-            // NOTE: some tuples may go to future batches; nbatch can grow here.
             hash_state
                 .table
                 .as_mut()
@@ -637,8 +631,7 @@ fn scan_hash_bucket<'mcx>(
     Ok(false)
 }
 
-/// `ExecEndHashJoin` (+ the serial half of `ExecShutdownHash`'s
-/// instrumentation hand-off, keyed by the Hash sub-node's plan_node_id).
+/// `ExecEndHashJoin`.
 pub fn exec_end_hash_join<'mcx>(
     node: &mut HashJoinState<'mcx>,
     hash_state: &mut HashState<'mcx>,
@@ -653,8 +646,8 @@ pub fn exec_end_hash_join<'mcx>(
     Ok(())
 }
 
-/// The `ExecShutdownHash` half exposed to the shutdown walk (EXPLAIN reads
-/// before ExecutorEnd).
+/// `ExecShutdownHash`'s hand-off, keyed by the Hash sub-node's plan_node_id
+/// (EXPLAIN reads before ExecutorEnd).
 pub fn shutdown_accum_instrumentation<'mcx>(
     node: &HashJoinState<'mcx>,
     hash_state: &HashState<'mcx>,
@@ -702,8 +695,7 @@ pub enum RescanInner {
     Rescan,
 }
 
-/// `ExecReScanHashJoin`: reuse the table only for a single-batch join whose
-/// inner subtree is unchanged; otherwise destroy and rebuild.
+/// `ExecReScanHashJoin`.
 pub fn exec_rescan_hash_join<'mcx>(
     node: &mut HashJoinState<'mcx>,
     hash_state: &mut HashState<'mcx>,

@@ -340,6 +340,7 @@ fn jointype_enum(jointype: u32) -> types_nodes::JoinType {
         types_pathnodes::JOIN_INNER => types_nodes::JoinType::JOIN_INNER,
         types_pathnodes::JOIN_LEFT => types_nodes::JoinType::JOIN_LEFT,
         types_pathnodes::JOIN_RIGHT => types_nodes::JoinType::JOIN_RIGHT,
+        types_pathnodes::JOIN_FULL => types_nodes::JoinType::JOIN_FULL,
         types_pathnodes::JOIN_SEMI => types_nodes::JoinType::JOIN_SEMI,
         types_pathnodes::JOIN_ANTI => types_nodes::JoinType::JOIN_ANTI,
         types_pathnodes::JOIN_RIGHT_SEMI => types_nodes::JoinType::JOIN_RIGHT_SEMI,

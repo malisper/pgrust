@@ -59,6 +59,14 @@ datum = { path = "../../../_support/types/datum" }
 
 [dev-dependencies]
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
+fd = { path = "../../storage/file/fd" }
+resowner = { path = "../../utils/resowner/resowner" }
+resowner_seams = { path = "../../utils/resowner/resowner_seams" }
+types_resowner = { path = "../../../_support/types/types_resowner" }
+ipc_seams = { path = "../../storage/ipc/ipc_seams" }
+waitevent_seams = { path = "../../utils/activity/waitevent_seams" }
+pgstat_seams = { path = "../../utils/activity/pgstat_seams" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
 tuplestore = { path = "../../utils/sort/tuplestore" }
 tstore_receiver = { path = "../tstore_receiver" }
 datum = { path = "../../../_support/types/datum" }
