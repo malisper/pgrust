@@ -330,6 +330,70 @@ pub fn makeArrayTypeName(typeName: &str, typeNamespace: Oid) -> PgResult<NameDat
     }
 }
 
+// RenameTypeInternal (pg_type.c): rename the type row, then chase the array
+// type with a fresh makeArrayTypeName.
+pub fn RenameTypeInternal<'mcx>(
+    mcx: Mcx<'mcx>,
+    typeOid: Oid,
+    newTypeName: &str,
+    typeNamespace: Oid,
+) -> PgResult<()> {
+    const Anum_pg_type_typname: usize = 2;
+    const Anum_pg_type_typarray: i32 = 15;
+    if syscache_seams::lookup_pg_type_oid_by_name::call(newTypeName, typeNamespace)? != InvalidOid
+    {
+        return Err(Box::new(
+            PgError::new(ERROR, format!("type \"{newTypeName}\" already exists"))
+                .with_sqlstate(ERRCODE_DUPLICATE_OBJECT),
+        ));
+    }
+    let pg_type_rel = table::table_open(mcx, TYPE_RELATION_ID, RowExclusiveLock)?;
+    let mut key = types_scan::scankey::ScanKeyData::empty();
+    key.sk_attno = Anum_pg_type_oid;
+    key.sk_strategy = types_scan::scankey::BTEqualStrategyNumber;
+    key.sk_collation = 0;
+    key.sk_func = fmgr_seams::fmgr_info::call(types_core::fmgr::F_OIDEQ)
+        .unwrap_or_else(|e| panic!("fmgr_info(F_OIDEQ) failed: {e:?}"));
+    key.sk_argument = Datum::from_oid(typeOid);
+    let mut scan =
+        genam::systable_beginscan(mcx, &pg_type_rel, TypeOidIndexId, true, None, &[key])?;
+    let tup = genam::systable_getnext(mcx, &mut scan)?
+        .unwrap_or_else(|| panic!("cache lookup failed for type {typeOid}"));
+    let desc = pg_type_rel.descr();
+    let mut isnull = false;
+    // SAFETY: fixed NOT NULL pg_type column under its descriptor.
+    let arrayOid = unsafe {
+        types_tuple::heap_getattr(tup, Anum_pg_type_typarray, desc, &mut isnull)
+    }
+    .as_oid();
+
+    assert!(newTypeName.len() < NAMEDATALEN as usize, "type name truncation unported");
+    let mut namebuf: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, 64)?;
+    mcx::vec_append_bytes(&mut namebuf, newTypeName.as_bytes())?;
+    mcx::vec_append_bytes(&mut namebuf, &[0u8; 64][..64 - newTypeName.len()])?;
+    let n = desc.natts as usize;
+    let mut values: mcx::PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, n)?;
+    let mut nulls: mcx::PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, n)?;
+    let mut replace: mcx::PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, n)?;
+    values.resize(n, Datum::null());
+    nulls.resize(n, false);
+    replace.resize(n, false);
+    values[Anum_pg_type_typname - 1] = Datum::from_usize(namebuf.as_ptr() as usize);
+    replace[Anum_pg_type_typname - 1] = true;
+    let mut newtup = heaptuple::heap_modify_tuple(mcx, tup, desc, &values, &nulls, &replace)?;
+    let otid = tup.t_self;
+    genam::systable_endscan(mcx, scan)?;
+    catalog_indexing::CatalogTupleUpdate(mcx, &pg_type_rel, &otid, &mut newtup)?;
+    pg_type_rel.close(RowExclusiveLock)?;
+
+    if arrayOid != InvalidOid {
+        let arr = makeArrayTypeName(newTypeName, typeNamespace)?;
+        let arr_str = core::str::from_utf8(arr.name_str()).expect("array type name UTF-8");
+        RenameTypeInternal(mcx, arrayOid, arr_str, typeNamespace)?;
+    }
+    Ok(())
+}
+
 // RemoveTypeById (typecmds.c); enum/range cleanup arms are loud.
 pub fn RemoveTypeById<'mcx>(mcx: Mcx<'mcx>, typeOid: Oid) -> PgResult<()> {
     const Anum_pg_type_typtype: i32 = 7;

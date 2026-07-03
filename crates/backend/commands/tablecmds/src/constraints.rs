@@ -19,13 +19,22 @@ use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 
 const Anum_pg_class_relchecks: AttrNumber = 20;
 
+pub(crate) struct CookedCon<'mcx> {
+    pub contype: ConstrType,
+    pub conoid: Oid,
+    pub name: &'mcx str,
+    pub attnum: AttrNumber,
+    pub expr: Option<Node<'mcx>>,
+    pub skip_validation: bool,
+}
+
 pub(crate) fn add_relation_new_constraints<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     new_col_defaults: &[(AttrNumber, Node<'mcx>)],
     new_constraints: &NodeList<'mcx>,
     query_string: &str,
-) -> PgResult<()> {
+) -> PgResult<PgVec<'mcx, CookedCon<'mcx>>> {
     let numoldchecks = match rel.rd_att.constr.as_deref() {
         Some(c) => c.num_check as i16,
         None => 0,
@@ -43,6 +52,7 @@ pub(crate) fn add_relation_new_constraints<'mcx>(
         true,
     )?;
     parse_relation::addNSItemToQuery(mcx, &mut pstate, nsitem, true, true, true)?;
+    let mut cooked: PgVec<'mcx, CookedCon<'mcx>> = PgVec::new_in(mcx);
 
     for &(attnum, raw_default) in new_col_defaults {
         let att = rel.rd_att.attr(attnum as usize - 1);
@@ -61,7 +71,15 @@ pub(crate) fn add_relation_new_constraints<'mcx>(
                 continue;
             }
         }
-        pg_attrdef::StoreAttrDefault(mcx, rel, attnum, expr)?;
+        let def_oid = pg_attrdef::StoreAttrDefault(mcx, rel, attnum, expr)?;
+        cooked.push(CookedCon {
+            contype: ConstrType::CONSTR_DEFAULT,
+            conoid: def_oid,
+            name: "",
+            attnum,
+            expr: Some(expr),
+            skip_validation: false,
+        });
     }
 
     let mut numchecks = numoldchecks;
@@ -93,8 +111,16 @@ pub(crate) fn add_relation_new_constraints<'mcx>(
                     return Err(check_constraint_exists(name));
                 }
                 checknames.push(name);
-                // New relation: MergeWithExistingConstraint's probe cannot
-                // match (no pre-existing constraints); ALTER lane unported.
+                // MergeWithExistingConstraint probe: allow_merge is only true
+                // in unported recursing/re-add lanes, so a hit is an error.
+                if pg_constraint::ConstraintNameIsUsed(mcx, rel.rd_id, name)? {
+                    return Err(Box::new(
+                        PgError::error(format!(
+                            "constraint \"{name}\" for relation \"{relname}\" already exists"
+                        ))
+                        .with_sqlstate(ERRCODE_DUPLICATE_OBJECT),
+                    ));
+                }
                 mcx::PgString::from_str_in(name, mcx)?
             }
             None => {
@@ -130,7 +156,7 @@ pub(crate) fn add_relation_new_constraints<'mcx>(
             }
         };
 
-        store_rel_check(
+        let con_oid = store_rel_check(
             mcx,
             rel,
             ccname.as_str(),
@@ -139,13 +165,21 @@ pub(crate) fn add_relation_new_constraints<'mcx>(
             cdef.initially_valid,
         )?;
         numchecks += 1;
+        cooked.push(CookedCon {
+            contype: ConstrType::CONSTR_CHECK,
+            conoid: con_oid,
+            name: str_in(mcx, ccname.as_str())?,
+            attnum: 0,
+            expr: Some(expr),
+            skip_validation: cdef.skip_validation,
+        });
     }
 
-    if numchecks != numoldchecks || !new_col_defaults.is_empty() {
-        set_relation_num_checks(mcx, rel, numchecks)?;
-    }
+    // C updates pg_class.relchecks even when unchanged — the SI message forces
+    // peers to rebuild relcache entries.
+    set_relation_num_checks(mcx, rel, numchecks)?;
     parser_small1::free_parsestate(pstate)?;
-    Ok(())
+    Ok(cooked)
 }
 
 // AddRelationNotNullConstraints, CREATE TABLE column-constraint arm (no
@@ -282,8 +316,6 @@ fn store_rel_check<'mcx>(
             att_nos.push(attno);
         }
     }
-    // Divergence: C also runs recordDependencyOnSingleRelExpr on the cooked
-    // expression (dependency.c walker unported).
     let mut entry = pg_constraint::ConstraintEntry::base(
         ccname,
         rel.rd_rel.relnamespace,
@@ -295,12 +327,13 @@ fn store_rel_check<'mcx>(
     entry.is_enforced = is_enforced;
     entry.is_validated = is_validated;
     entry.conbin = Some(ccbin.as_str());
+    entry.con_expr = Some(expr);
     pg_constraint::CreateConstraintEntry(mcx, &entry)
 }
 
 // SetRelationNumChecks (heap.c): update pg_class.relchecks (also fires the
 // SI message C relies on to rebuild peers' relcache entries).
-fn set_relation_num_checks<'mcx>(
+pub(crate) fn set_relation_num_checks<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     numchecks: i16,

@@ -4,8 +4,9 @@ use types_nodes::parsenodes::{
     AlterTableCmd, AlterTableStmt, AlterTableType, CTEMaterialize, ClosePortalStmt, CommentStmt, CommonTableExpr, CopyStmt, CreateSchemaStmt,
     DeallocateStmt, DeclareCursorStmt, DefElem, DefElemAction, DiscardMode, DiscardStmt,
     AccessPriv, DropBehavior, DropStmt, ExecuteStmt, FetchStmt, GrantStmt, GrantTargetType,
-    GroupingSetKind, ListenStmt, NotifyStmt, ObjectType, PrepareStmt, RoleSpec, RoleSpecType,
-    SetOperation, TransactionStmt, TransactionStmtKind, TruncateStmt, UnlistenStmt, VacuumRelation,
+    GroupingSetKind, ListenStmt, NotifyStmt, ObjectType, PrepareStmt, RenameStmt, RoleSpec,
+    RoleSpecType, SetOperation, TransactionStmt, TransactionStmtKind, TruncateStmt, UnlistenStmt,
+    VacuumRelation,
     VacuumStmt, VariableSetKind, VariableSetStmt, VariableShowStmt, WithClause,
     CURSOR_OPT_ASENSITIVE, CURSOR_OPT_BINARY, CURSOR_OPT_FAST_PLAN, CURSOR_OPT_HOLD,
     CURSOR_OPT_INSENSITIVE, CURSOR_OPT_NO_SCROLL, CURSOR_OPT_SCROLL, FETCH_ALL,
@@ -3525,6 +3526,114 @@ impl<'mcx> Parser<'mcx> {
                 n.missing_ok = rule == 303 || rule == 305;
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
+            // alter_table_cmd: ALTER opt_column ColId alter_column_default
+            306 => {
+                let mut n = Node::build::<AlterTableCmd>(mcx)?;
+                n.subtype = AlterTableType::AT_ColumnDefault;
+                n.name = Some(view.v(3).str_val());
+                n.def = view.v(4).node();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // alter_table_cmd: ALTER opt_column ColId {DROP|SET} NOT NULL_P
+            307 | 308 => {
+                let mut n = Node::build::<AlterTableCmd>(mcx)?;
+                n.subtype = if rule == 307 {
+                    AlterTableType::AT_DropNotNull
+                } else {
+                    AlterTableType::AT_SetNotNull
+                };
+                n.name = Some(view.v(3).str_val());
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // alter_table_cmd: ALTER opt_column ColId opt_set_data TYPE_P
+            // Typename opt_collate_clause alter_using
+            324 => {
+                let mut def = Node::build::<ColumnDef>(mcx)?;
+                def.typeName = view.v(6).node();
+                debug_assert!(view.v(7).node().is_none()); // COLLATE arm rule 366 stays loud
+                def.raw_default = view.v(8).node();
+                def.location = view.l(3);
+                let defnode = def.seal();
+                let mut n = Node::build::<AlterTableCmd>(mcx)?;
+                n.subtype = AlterTableType::AT_AlterColumnType;
+                n.name = Some(view.v(3).str_val());
+                n.def = Some(defnode);
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // alter_table_cmd: ADD_P TableConstraint
+            326 => {
+                let mut n = Node::build::<AlterTableCmd>(mcx)?;
+                n.subtype = AlterTableType::AT_AddConstraint;
+                n.def = view.v(2).node();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // alter_column_default: SET DEFAULT a_expr | DROP DEFAULT
+            364 => *yyval = YYSTYPE::Node(view.v(3).node()),
+            365 => *yyval = YYSTYPE::Node(Option::None),
+            // opt_collate_clause: /*EMPTY*/ (COLLATE arm 366 stays loud)
+            367 => *yyval = YYSTYPE::Node(Option::None),
+            // alter_using: USING a_expr | /*EMPTY*/
+            368 => *yyval = YYSTYPE::Node(view.v(2).node()),
+            369 => *yyval = YYSTYPE::Node(Option::None),
+            // TableConstraint: CONSTRAINT name ConstraintElem | ConstraintElem
+            536 => {
+                let name = view.v(2).str_val();
+                let node = view.v(3).node().expect("ConstraintElem");
+                let loc = view.l(1);
+                // SAFETY: tree is parser-owned; no derived refs live.
+                unsafe {
+                    node.with_mut::<Constraint, _>(|c| {
+                        c.conname = Some(name);
+                        c.location = loc;
+                    })
+                    .expect("ConstraintElem is Constraint");
+                }
+                *yyval = YYSTYPE::Node(Some(node));
+            }
+            537 => *yyval = YYSTYPE::Node(view.v(1).node()),
+            // ConstraintElem: CHECK '(' a_expr ')' ConstraintAttributeSpec
+            // (CAS bits beyond empty ride rule 826, loud).
+            538 => {
+                debug_assert!(view.v(5).ival() == 0);
+                let mut n = Node::build::<Constraint>(mcx)?;
+                n.contype = ConstrType::CONSTR_CHECK;
+                n.location = view.l(1);
+                n.raw_expr = view.v(3).node();
+                n.is_enforced = true;
+                n.skip_validation = false;
+                n.initially_valid = true;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // ConstraintAttributeSpec: /*EMPTY*/
+            825 => *yyval = YYSTYPE::Ival(0),
+            // RenameStmt: ALTER TABLE [IF_P EXISTS] relation_expr RENAME TO name
+            1294 | 1295 => {
+                let (rv, nm) = if rule == 1294 { (3, 6) } else { (5, 8) };
+                let mut n = Node::build::<RenameStmt>(mcx)?;
+                n.renameType = ObjectType::OBJECT_TABLE;
+                n.relation = view.v(rv).node().expect("relation_expr").as_variant::<RangeVar>();
+                n.newname = Some(view.v(nm).str_val());
+                n.missing_ok = rule == 1295;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // RenameStmt: ALTER TABLE [IF_P EXISTS] relation_expr RENAME
+            // opt_column name TO name
+            1306 | 1307 => {
+                let (rv, sub, nm) = if rule == 1306 { (3, 6, 8) } else { (5, 8, 10) };
+                let mut n = Node::build::<RenameStmt>(mcx)?;
+                n.renameType = ObjectType::OBJECT_COLUMN;
+                n.relationType = ObjectType::OBJECT_TABLE;
+                n.relation = view.v(rv).node().expect("relation_expr").as_variant::<RangeVar>();
+                n.subname = Some(view.v(sub).str_val());
+                n.newname = Some(view.v(nm).str_val());
+                n.missing_ok = rule == 1307;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // opt_column: COLUMN | /*EMPTY*/
+            1329 | 1330 => *yyval = YYSTYPE::Ival(0),
+            // opt_set_data: SET DATA_P | /*EMPTY*/
+            1331 => *yyval = YYSTYPE::Ival(1),
+            1332 => *yyval = YYSTYPE::Ival(0),
             // alter_table_cmd: DROP opt_column [IF_P EXISTS] ColId opt_drop_behavior
             322 => {
                 let mut n = Node::build::<AlterTableCmd>(mcx)?;

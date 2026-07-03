@@ -244,6 +244,7 @@ members = [
     "crates/backend/catalog/storage_seams",
     "crates/backend/commands/async_seams",
     "crates/backend/commands/commands_async",
+    "crates/backend/commands/cluster",
     "crates/backend/commands/tablecmds_seams",
     "crates/backend/commands/tablecmds",
     "crates/backend/commands/trigger",

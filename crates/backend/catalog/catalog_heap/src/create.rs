@@ -55,7 +55,7 @@ pub fn CheckAttributeNamesTypes(tupdesc: &TupleDescData<'_>, relkind: u8) -> PgR
                 ));
             }
         }
-        if att.atttypid == InvalidOid {
+        if !att.attisdropped && att.atttypid == InvalidOid {
             panic!("CheckAttributeType (heap.c): full type validation unported; got InvalidOid for \"{name}\"");
         }
     }
@@ -520,6 +520,51 @@ fn AddNewRelationType<'mcx>(
             typeCollation: InvalidOid,
         },
     )
+}
+
+// RelationClearMissing (heap.c): reset atthasmissing/attmissingval on every
+// user column ahead of a table rewrite.
+pub fn RelationClearMissing<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<()> {
+    let rel = table::table_open(mcx, relid, types_rel::NoLock)?;
+    let natts = rel.rd_att.natts;
+    let has_any = (0..natts as usize).any(|i| rel.rd_att.attr(i).atthasmissing);
+    if !has_any {
+        rel.close(types_rel::NoLock)?;
+        return Ok(());
+    }
+    let attrrel = table::table_open(mcx, ATTRIBUTE_RELATION_ID, RowExclusiveLock)?;
+    for attnum in 1..=natts {
+        if !rel.rd_att.attr(attnum as usize - 1).atthasmissing {
+            continue;
+        }
+        let keys = [
+            crate::drop::oid_scankey(1, relid),
+            crate::drop::int2_scankey(5, attnum as AttrNumber),
+        ];
+        let mut scan =
+            genam::systable_beginscan(mcx, &attrrel, 2659, true, None, &keys)?;
+        let tup = genam::systable_getnext(mcx, &mut scan)?.unwrap_or_else(|| {
+            panic!("cache lookup failed for attribute {attnum} of relation {relid}")
+        });
+        let desc = attrrel.descr();
+        let n = desc.natts as usize;
+        let mut values: mcx::PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, n)?;
+        let mut isnull: mcx::PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, n)?;
+        let mut replace: mcx::PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, n)?;
+        values.resize(n, Datum::null());
+        isnull.resize(n, false);
+        replace.resize(n, false);
+        values[14 - 1] = Datum::from_bool(false); // atthasmissing
+        replace[14 - 1] = true;
+        isnull[25 - 1] = true; // attmissingval
+        replace[25 - 1] = true;
+        let mut newtup = heaptuple::heap_modify_tuple(mcx, tup, desc, &values, &isnull, &replace)?;
+        let otid = tup.t_self;
+        genam::systable_endscan(mcx, scan)?;
+        catalog_indexing::CatalogTupleUpdate(mcx, &attrrel, &otid, &mut newtup)?;
+    }
+    attrrel.close(RowExclusiveLock)?;
+    rel.close(types_rel::NoLock)
 }
 
 // StoreAttrMissingVal (heap.c): wrap the evaluated default in a 1-element

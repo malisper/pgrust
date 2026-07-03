@@ -1,5 +1,5 @@
 [package]
-name = "pg_constraint"
+name = "commands_cluster"
 version = "0.1.0"
 edition.workspace = true
 publish.workspace = true
@@ -17,12 +17,17 @@ types_rel = { path = "../../../_support/types/rel" }
 types_tuple = { path = "../../../_support/types/types_tuple" }
 types_scan = { path = "../../../_support/types/types_scan" }
 fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
-outfuncs = { path = "../../nodes/outfuncs" }
 heaptuple = { path = "../../access/common/heaptuple" }
-varlena = { path = "../../utils/adt/varlena" }
 table = { path = "../../access/table/table" }
 genam = { path = "../../access/index/genam" }
-catalog = { path = "../catalog" }
-catalog_indexing = { path = "../catalog_indexing" }
-pg_depend = { path = "../pg_depend" }
-nodes_core = { path = "../../nodes/nodes_core" }
+catalog = { path = "../../catalog/catalog" }
+catalog_heap = { path = "../../catalog/catalog_heap" }
+catalog_indexing = { path = "../../catalog/catalog_indexing" }
+catalog_toasting = { path = "../../catalog/catalog_toasting" }
+catalog_dependency = { path = "../../catalog/catalog_dependency" }
+pg_depend = { path = "../../catalog/pg_depend" }
+relcache = { path = "../../utils/cache/relcache" }
+procarray = { path = "../../storage/ipc/procarray" }
+multixact = { path = "../../access/transam/multixact" }
+xact = { path = "../../access/transam/xact" }
+tablecmds_seams = { path = "../tablecmds_seams" }

@@ -6,8 +6,10 @@ mod constraints;
 mod fk;
 mod drop;
 mod oncommit;
+mod rename;
 mod truncate;
 pub use alter::{AlterTable, AlterTableGetLockLevel, AlterTableLookupRelation};
+pub use rename::{renameatt, RenameRelation, RenameRelationInternal};
 pub use drop::RemoveRelations;
 pub use oncommit::{
     register_on_commit_action, remove_on_commit_action, AtEOSubXact_on_commit_actions,
@@ -16,6 +18,7 @@ pub use oncommit::{
 pub use truncate::ExecuteTruncate;
 
 pub fn init_seams() {
+    tablecmds_seams::rename_relation_internal::set(RenameRelationInternal);
     tablecmds_seams::pre_commit_on_commit_actions::set(PreCommit_on_commit_actions);
     tablecmds_seams::at_eoxact_on_commit_actions::set(AtEOXact_on_commit_actions);
     tablecmds_seams::at_eosubxact_on_commit_actions::set(AtEOSubXact_on_commit_actions);

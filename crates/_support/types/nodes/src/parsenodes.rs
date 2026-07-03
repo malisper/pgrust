@@ -794,6 +794,18 @@ pub struct AlterTableStmt<'mcx> {
     pub missing_ok: bool,
 }
 
+#[derive(Default)]
+pub struct RenameStmt<'mcx> {
+    pub renameType: ObjectType,
+    pub relationType: ObjectType,
+    pub relation: Option<&'mcx crate::primnodes::RangeVar<'mcx>>,
+    pub object: Option<Node<'mcx>>,
+    pub subname: Option<&'mcx str>,
+    pub newname: Option<&'mcx str>,
+    pub behavior: DropBehavior,
+    pub missing_ok: bool,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[repr(u32)]
 pub enum RoleSpecType {
@@ -982,6 +994,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for AlterTableStmt<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for AlterTableCmd<'mcx> {
     const TAG: NodeTag = NodeTag::T_AlterTableCmd;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for RenameStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_RenameStmt;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for WithClause<'mcx> {
     const TAG: NodeTag = NodeTag::T_WithClause;

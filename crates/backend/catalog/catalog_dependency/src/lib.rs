@@ -612,9 +612,7 @@ fn doDeletion<'mcx>(mcx: Mcx<'mcx>, object: &ObjectAddress, flags: i32) -> PgRes
         }
         TYPE_RELATION_ID => pg_type::RemoveTypeById(mcx, object.objectId)?,
         AttrDefaultRelationId => pg_attrdef::RemoveAttrDefaultById(mcx, object.objectId)?,
-        ConstraintRelationId => {
-            unported("doDeletion: RemoveConstraintById (pg_constraint.c)");
-        }
+        ConstraintRelationId => pg_constraint::RemoveConstraintById(mcx, object.objectId)?,
         other => panic!("unported: doDeletion object class {other}"),
     }
     Ok(())
