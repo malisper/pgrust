@@ -165,26 +165,6 @@ fn install_seams() {
     origin_seams::replorigin_session_origin::set(|| 0);
     aio_seams::pgaio_closing_fd::set(|_| {});
     aio_seams::pgaio_io_start_readv::set(|_, _, _| {});
-
-    // xloginsert marshal for fake buffers: tag/page from the fake registry,
-    // then the real record-assembly path.
-    xloginsert_seams::xlog_insert_record::set(|rmid, info, flags, main_data, bufs| {
-        let mut blocks: Vec<xloginsert::RegBlock<'_>> = Vec::with_capacity(bufs.len());
-        for b in bufs {
-            let addr = with_fake(|f| f.pages[(b.buffer - 1) as usize]);
-            blocks.push(xloginsert::RegBlock {
-                block_id: b.block_id,
-                rlocator: RLOC,
-                forknum: ForkNumber::MAIN_FORKNUM,
-                block: (b.buffer - 1) as BlockNumber,
-                // SAFETY: leaked test page, BLCKSZ, pinned by the caller.
-                page: unsafe { core::slice::from_raw_parts(addr as *const u8, BLCKSZ) },
-                flags: b.flags,
-                bufdata: b.bufdata,
-            });
-        }
-        xloginsert::insert_record(rmid, info, flags, main_data, &blocks)
-    });
 }
 
 fn install_proc_boot_seams() {
@@ -277,7 +257,7 @@ fn test_relation<'mcx>(mcx: Mcx<'mcx>) -> RelationData<'mcx> {
         relfrozenxid: 3,
         relminmxid: 1,
     };
-    RelationData { rd_locator: Default::default(), rd_smgr: Default::default(),
+    RelationData { rd_locator: Cell::new(RLOC), rd_smgr: Default::default(),
         rd_id: REL_OID,
         rd_backend: INVALID_PROC_NUMBER,
         rd_islocaltemp: false,
