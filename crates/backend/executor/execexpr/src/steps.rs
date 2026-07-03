@@ -505,6 +505,8 @@ pub enum Kernel {
     JustAssignVar { src: SlotSrc, attnum: u16, resultnum: u16 },
     JustAssignVarVirt { src: SlotSrc, attnum: u16, resultnum: u16 },
     QualScanVarCmpConst { attnum: u16, konst: Datum, cmp: CmpOp },
+    QualVarCmpVar { a_src: SlotSrc, a_attnum: u16, b_src: SlotSrc, b_attnum: u16, cmp: CmpOp },
+    Hash32Var { src: SlotSrc, attnum: u16, frame: u32 },
     JustFunc { fn_addr: PGFunction, frame: u32, nargs: u16, strict: bool },
 }
 
