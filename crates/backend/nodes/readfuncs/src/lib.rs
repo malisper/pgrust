@@ -243,24 +243,6 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
         }
     }
 
-    fn read_int_list(&mut self, name: &str) -> PgResult<IntList<'mcx>> {
-        self.label(name);
-        let t = self.token(name);
-        if t.is_empty() {
-            return Ok(IntList::nil());
-        }
-        assert!(t == b"(", "readfuncs.c: field :{name} is not an int list");
-        self.expect("i");
-        let mut l = IntList::nil();
-        loop {
-            let tok = self.token("int list");
-            if tok == b")" {
-                return Ok(l);
-            }
-            l.lappend(self.mcx, Self::parse_int(tok) as i32)?;
-        }
-    }
-
     fn read_bitmapset(&mut self, name: &str) -> PgResult<Bitmapset<'mcx>> {
         self.label(name);
         self.expect("(");
@@ -881,22 +863,6 @@ fn rte_kind(v: u32) -> RTEKind {
         8 => RTEKind::RTE_RESULT,
         9 => RTEKind::RTE_GROUP,
         other => panic!("readfuncs.c: bad RTEKind {other}"),
-    }
-}
-
-fn join_type(v: u32) -> JoinType {
-    match v {
-        0 => JoinType::JOIN_INNER,
-        1 => JoinType::JOIN_LEFT,
-        2 => JoinType::JOIN_FULL,
-        3 => JoinType::JOIN_RIGHT,
-        4 => JoinType::JOIN_SEMI,
-        5 => JoinType::JOIN_ANTI,
-        6 => JoinType::JOIN_RIGHT_SEMI,
-        7 => JoinType::JOIN_RIGHT_ANTI,
-        8 => JoinType::JOIN_UNIQUE_OUTER,
-        9 => JoinType::JOIN_UNIQUE_INNER,
-        other => panic!("readfuncs.c: bad JoinType {other}"),
     }
 }
 
