@@ -674,12 +674,30 @@ fn btree_vacuum_redo_rebuilds_pages_byte_exact() {
     }
     let max_key = key;
 
-    // Plant a posting tuple on the first leaf (block 1, lowest keyspace) with
-    // one of its 3 TIDs among the dead set, then FPI-log the page (the plant
-    // itself has no WAL producer; dedup is unported).
-    plant_posting_tuple(1, 1);
+    // Rightmost leaf: follow btpo_next from block 1.
+    let opaque_off = BLCKSZ - core::mem::size_of::<BTPageOpaqueData>();
+    let rightmost_leaf = {
+        let mut blk = 1usize;
+        loop {
+            let addr = with_fake(|f| f.forks[0].pages[blk]);
+            // SAFETY: special-space read of a live btree page.
+            let next = unsafe {
+                (addr as *const u8).add(opaque_off).cast::<BTPageOpaqueData>().read().btpo_next
+            };
+            if next == P_NONE {
+                break blk;
+            }
+            blk = next as usize;
+        }
+    };
+
+    // Plant a posting tuple on the rightmost leaf with one of its 3 TIDs among
+    // the dead set, then FPI-log the page (the plant itself has no WAL
+    // producer; dedup is unported). It keeps that leaf nonempty so the level
+    // collapses to exactly one page and UNLINK_PAGE_META fires.
+    plant_posting_tuple(rightmost_leaf, max_key + 2);
     {
-        let _pin = pin_read(0, 1);
+        let _pin = pin_read(0, rightmost_leaf);
         let fpi_lsn = xloginsert_seams::xlog_insert_record::call(
             rmgr::RmgrIds::RM_XLOG_ID as u8,
             transam_xlog::XLOG_FPI,
@@ -687,31 +705,32 @@ fn btree_vacuum_redo_rebuilds_pages_byte_exact() {
             &[],
             &[xloginsert_seams::XLogRegBuf {
                 block_id: 0,
-                buffer: buf_of(ForkNumber::MAIN_FORKNUM, 1),
+                buffer: buf_of(ForkNumber::MAIN_FORKNUM, rightmost_leaf as u32),
                 flags: xloginsert_seams::REGBUF_FORCE_IMAGE | xloginsert_seams::REGBUF_STANDARD,
                 bufdata: &[],
             }],
         )
         .unwrap();
-        let addr = with_fake(|f| f.forks[0].pages[1]);
+        let addr = with_fake(|f| f.forks[0].pages[rightmost_leaf]);
         // SAFETY: leaked test page; single-threaded.
         let mut pm = unsafe {
             types_storage::bufpage::PageMut::from_raw(NonNull::new(addr as *mut u8).unwrap())
         };
         pm.set_lsn(fpi_lsn);
-        bufmgr_seams::release_buffer::call(buf_of(ForkNumber::MAIN_FORKNUM, 1)).unwrap();
+        bufmgr_seams::release_buffer::call(buf_of(ForkNumber::MAIN_FORKNUM, rightmost_leaf as u32))
+            .unwrap();
     }
 
     with_fake(|f| assert!(f.forks[0].pins.iter().all(|p| *p == 0), "leaked pins"));
 
-    // Dead set: every even-key TID with block >= 200 (empties the higher
-    // leaves -> page deletion) plus one TID of the planted posting tuple.
+    // Dead set: every inserted key (empties every leaf except the rightmost,
+    // which keeps the planted posting tuple -> the last unlink sees
+    // leftsib == P_NONE with a rightmost right sibling and must update the
+    // metapage fast root) plus one TID of the planted posting tuple.
     let mut dead: Vec<ItemPointerData> = Vec::new();
     let mut k = 2i32;
     while k <= max_key {
-        if k >= 200 {
-            dead.push(ItemPointerData::new(k as u32, 1));
-        }
+        dead.push(ItemPointerData::new(k as u32, 1));
         k += 2;
     }
     dead.push(ItemPointerData::new(9001, 1));
@@ -779,10 +798,12 @@ fn btree_vacuum_redo_rebuilds_pages_byte_exact() {
         "MARK_PAGE_HALFDEAD replayed"
     );
     assert!(
-        seen[(XLOG_BTREE_UNLINK_PAGE >> 4) as usize]
-            + seen[(XLOG_BTREE_UNLINK_PAGE_META >> 4) as usize]
-            > 0,
+        seen[(XLOG_BTREE_UNLINK_PAGE >> 4) as usize] > 0,
         "UNLINK_PAGE replayed"
+    );
+    assert!(
+        seen[(XLOG_BTREE_UNLINK_PAGE_META >> 4) as usize] > 0,
+        "UNLINK_PAGE_META replayed"
     );
     assert!(
         seen[(XLOG_BTREE_META_CLEANUP >> 4) as usize] > 0,
