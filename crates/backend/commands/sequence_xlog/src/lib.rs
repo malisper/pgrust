@@ -1,5 +1,4 @@
-//! sequence.c rmgr half: XLOG_SEQ_LOG redo + on-page constants shared with
-//! the write side (commands/sequence).
+//! sequence.c rmgr half: XLOG_SEQ_LOG redo + on-page constants.
 
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
@@ -12,7 +11,7 @@ use xlogutils::XLogInitBufferForRedo;
 
 pub const SEQ_MAGIC: u32 = 0x1717;
 pub const XLOG_SEQ_LOG: u8 = 0x00;
-// xl_seq_rec is one RelFileLocator (spcOid, dbOid, relNumber).
+// sizeof(xl_seq_rec): one RelFileLocator.
 pub const SizeOfXlSeqRec: usize = 12;
 const SizeOfSequenceMagic: usize = 4;
 const XLR_INFO_MASK: u8 = 0x0F;
@@ -21,7 +20,7 @@ const FIRST_OFFSET_NUMBER: OffsetNumber = 1;
 pub fn seq_page_init(page: &mut PageMut<'_>) {
     page.init(SizeOfSequenceMagic);
     let off = page.as_ref().pd_special() as usize;
-    // SAFETY: init put pd_special in bounds; magic fits the special area.
+    // SAFETY: pd_special in bounds after init; magic fits.
     unsafe {
         page.as_ref()
             .as_ptr()
@@ -50,14 +49,13 @@ pub fn seq_redo(record: &mut XLogReaderState) -> PgResult<()> {
     if info != XLOG_SEQ_LOG {
         return Err(panic_err(format!("seq_redo: unknown op code {info}")));
     }
-    // SAFETY: points into the reader's decode buffer, valid for this callback.
+    // SAFETY: decode-buffer bytes live for this callback.
     let main = unsafe { rec.main_data_bytes() };
     let item = &main[SizeOfXlSeqRec..];
 
     let buffer = XLogInitBufferForRedo(record, 0)?;
 
-    // C rebuilds the page in local workspace and memcpys it in whole, so a
-    // hot-standby reader never sees a transiently trashed buffer.
+    // Whole-page rebuild in local workspace, memcpy'd in (hot-standby rule).
     let mut local = PageTemp::new(BLCKSZ).map_err(Box::new)?;
     {
         // SAFETY: local is an owned BLCKSZ buffer.

@@ -1273,3 +1273,39 @@ pub fn transformIndexStmt(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ctx() -> &'static mcx::MemoryContext {
+        Box::leak(Box::new(mcx::MemoryContext::new("utilcmd-test")))
+    }
+
+    #[test]
+    fn make_object_name_matches_c() {
+        let mcx = ctx().mcx();
+        assert_eq!(makeObjectName(mcx, "st", Some("id"), "seq").unwrap().as_str(), "st_id_seq");
+        let long_a = "a".repeat(60);
+        let long_b = "b".repeat(60);
+        let n = makeObjectName(mcx, &long_a, Some(&long_b), "seq").unwrap();
+        assert_eq!(n.len(), NAMEDATALEN as usize - 1);
+        assert_eq!(n.as_str(), format!("{}_{}_seq", "a".repeat(29), "b".repeat(29)));
+    }
+
+    #[test]
+    fn quote_identifier_matches_c() {
+        let mcx = ctx().mcx();
+        assert_eq!(quote_identifier(mcx, "st_id_seq").unwrap().as_str(), "st_id_seq");
+        assert_eq!(quote_identifier(mcx, "MiXed").unwrap().as_str(), "\"MiXed\"");
+        assert_eq!(quote_identifier(mcx, "se\"q").unwrap().as_str(), "\"se\"\"q\"");
+        // reserved keyword quoted; unreserved keyword bare.
+        assert_eq!(quote_identifier(mcx, "select").unwrap().as_str(), "\"select\"");
+        assert_eq!(quote_identifier(mcx, "between").unwrap().as_str(), "\"between\"");
+        assert_eq!(quote_identifier(mcx, "cache").unwrap().as_str(), "cache");
+        assert_eq!(
+            quote_qualified_identifier(mcx, Some("public"), "t_id_seq").unwrap().as_str(),
+            "public.t_id_seq"
+        );
+    }
+}

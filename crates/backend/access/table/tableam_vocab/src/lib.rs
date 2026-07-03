@@ -176,6 +176,9 @@ impl TableAm {
     pub fn of(relation: &Relation<'_>) -> Option<TableAm> {
         match relation.rd_rel.relam {
             HEAP_TABLE_AM_OID => Some(TableAm::Heap),
+            // RelationInitTableAccessMethod (relcache.c): sequences always
+            // ride the heap AM despite relam = 0.
+            _ if relation.rd_rel.relkind == types_rel::RELKIND_SEQUENCE => Some(TableAm::Heap),
             _ => None,
         }
     }

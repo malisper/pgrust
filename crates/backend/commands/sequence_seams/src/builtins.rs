@@ -1,7 +1,5 @@
-//! fmgr adapters for sequence.c's pg_proc surface. They live here (not in the
-//! sequence crate) because fmgr_core cannot depend on the DDL stack; the
-//! seam load is one relaxed load + indirect call on top of fmgr's own
-//! indirect call.
+//! fmgr adapters for sequence.c's pg_proc surface; hosted here because
+//! fmgr_core cannot depend on the DDL stack (one extra seam-slot load).
 use datum::Datum;
 use types_error::PgResult;
 use types_fmgr::{FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction};

@@ -17,7 +17,7 @@ use crate::{
     SearchSysCache3, SearchSysCache4, SearchSysCacheExists, SearchSysCacheList, SearchSysCacheList1,
     SysCacheKey,
 };
-use crate::cacheinfo::{COLLOID, AGGFNOID, AMOPOPID, AMOPSTRATEGY, AMPROCNUM, ATTNUM, CLAOID, OPFAMILYOID, PROCNAMEARGSNSP, AUTHNAME, AUTHOID, CASTSOURCETARGET, CONSTROID, INDEXRELID, NAMESPACENAME, NAMESPACEOID, OPERNAMENSP, TYPENAMENSP, OPEROID, PROCOID, RELNAMENSP, RELOID, SEQRELID, STATRELATTINH, TYPEOID};
+use crate::cacheinfo::{COLLOID, AGGFNOID, AMOPOPID, AMOPSTRATEGY, AMPROCNUM, ATTNUM, CLAOID, OPFAMILYOID, PROCNAMEARGSNSP, AUTHNAME, AUTHOID, CASTSOURCETARGET, CONSTROID, INDEXRELID, NAMESPACENAME, NAMESPACEOID, OPERNAMENSP, TYPENAMENSP, ATTNAME, OPEROID, PROCOID, RELNAMENSP, RELOID, SEQRELID, STATRELATTINH, TYPEOID};
 
 const ANUM_PG_CLASS_OID: i32 = 1;
 const ANUM_PG_CLASS_RELISSHARED: i32 = 16;
@@ -44,6 +44,7 @@ const ANUM_PG_SEQUENCE_SEQMIN: i32 = 6;
 const ANUM_PG_SEQUENCE_SEQCACHE: i32 = 7;
 const ANUM_PG_SEQUENCE_SEQCYCLE: i32 = 8;
 const ANUM_PG_ATTRIBUTE_ATTRELID: i32 = 1;
+const ANUM_PG_ATTRIBUTE_ATTNUM: i32 = 5;
 const ANUM_PG_INDEX_INDEXRELID: i32 = 1;
 const ANUM_PG_INDEX_INDNATTS: i32 = 3;
 const ANUM_PG_INDEX_INDNKEYATTS: i32 = 4;
@@ -454,6 +455,26 @@ fn lookup_pg_class_relid_by_name(relname: &str, relnamespace: Oid) -> PgResult<O
         SysCacheKey::UNUSED,
         SysCacheKey::UNUSED,
     )
+}
+
+// get_attnum (lsyscache.c): InvalidAttrNumber when no such column.
+fn lookup_pg_attribute_attnum_by_name(
+    relid: Oid,
+    attname: &str,
+) -> PgResult<types_core::AttrNumber> {
+    let Some(tuple) = SearchSysCache2(
+        ATTNAME,
+        SysCacheKey::Value(Datum::from_oid(relid)),
+        SysCacheKey::Str(attname),
+    )?
+    else {
+        return Ok(0);
+    };
+    let t = tuple.tuple();
+    let attnum = getattr(&t, ATTNAME, ANUM_PG_ATTRIBUTE_ATTNUM).as_i16();
+    drop(t);
+    ReleaseSysCache(tuple);
+    Ok(attnum)
 }
 
 fn lookup_pg_type_oid_by_name(typname: &str, typnamespace: Oid) -> PgResult<Oid> {
@@ -1471,6 +1492,7 @@ pub(crate) fn install() {
     syscache_seams::pg_constraint_fk_target::set(pg_constraint_fk_target);
     syscache_seams::lookup_pg_type_shape::set(lookup_pg_type_shape);
     syscache_seams::lookup_pg_sequence_form::set(lookup_pg_sequence_form);
+    syscache_seams::lookup_pg_attribute_attnum_by_name::set(lookup_pg_attribute_attnum_by_name);
     syscache_seams::pg_type_isdefined::set(pg_type_isdefined);
     syscache_seams::pg_type_typtype::set(pg_type_typtype);
     syscache_seams::pg_type_category::set(pg_type_category);
