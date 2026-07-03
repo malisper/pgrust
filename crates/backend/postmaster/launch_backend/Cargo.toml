@@ -9,6 +9,7 @@ name = "launch_backend"
 path = "src/lib.rs"
 
 [dependencies]
+guc = { path = "../../utils/misc/guc" }
 types_core = { path = "../../../_support/types/types_core" }
 types_startup = { path = "../../../_support/types/types_startup" }
 init_small = { path = "../../utils/init/init_small" }
@@ -27,6 +28,9 @@ ipc = { path = "../../storage/ipc/ipc" }
 libc = "0.2"
 
 [dev-dependencies]
+xact_seams = { path = "../../access/transam/xact_seams" }
+scalar_seams = { path = "../../utils/adt/scalar_seams" }
+types_guc = { path = "../../../_support/types/types_guc" }
 ip = { path = "../../../common/ip" }
 libpq_pqsignal = { path = "../../libpq/libpq_pqsignal" }
 guc_tables = { path = "../../utils/misc/guc_tables" }

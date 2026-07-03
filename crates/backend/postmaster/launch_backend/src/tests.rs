@@ -36,6 +36,13 @@ fn install() {
     ONCE.call_once(|| {
         timestamp_seams::get_current_timestamp::set(|| 777);
         guc_tables::init_seams();
+        // Child threads run InitializeGUCOptions; its check hooks reach xact.
+        xact_seams::is_in_parallel_mode::set(|| false);
+        scalar_seams::parse_bool::set(|v| match v {
+            "on" | "true" | "yes" | "1" => Some(true),
+            "off" | "false" | "no" | "0" => Some(false),
+            _ => None,
+        });
         init_small::init_seams();
         waiteventset_seams::create_wait_event_set::set(|_| {
             Ok(types_storage::waiteventset::WaitEventSetHandle::new(1))
@@ -120,7 +127,14 @@ fn launch_backend_thread_runs_child_init_in_order() {
 
     init_small::globals::SetIsPostmasterEnvironment(true);
     init_small::globals::SetIsUnderPostmaster(false);
-    init_small::globals::set_work_mem(4321);
+    guc::initialize_guc_options().unwrap();
+    guc::SetConfigOption(
+        "work_mem",
+        Some("4321"),
+        types_guc::PGC_POSTMASTER,
+        types_guc::PGC_S_ARGV,
+    )
+    .unwrap();
     init_small::globals::SetPostmasterPid(42);
     init_small::globals::SetDataDir("/tmp/pg-launch-test");
 

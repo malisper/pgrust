@@ -227,6 +227,7 @@ pub fn postmaster_child_launch(
 
     let child_pid = reserve_child_pid();
     let inherited = Inherited::capture();
+    let guc_snapshot = guc::store::capture_nondefault_variables();
 
     let spawned = std::thread::Builder::new()
         .name(format!("pg:{}:{}", kind.name, child_pid))
@@ -235,6 +236,10 @@ pub fn postmaster_child_launch(
 
             // C records the stack base once in main(); each thread owns its own.
             let _ = stack_depth::set_stack_base();
+
+            guc::initialize_guc_options()
+                .and_then(|()| guc::store::restore_nondefault_variables(&guc_snapshot))
+                .unwrap_or_else(|e| panic!("child GUC restore failed: {e:?}"));
 
             if is_external_connection_backend(child_type) {
                 let StartupData::Backend(bsdata) = &startup_data else { unreachable!() };
