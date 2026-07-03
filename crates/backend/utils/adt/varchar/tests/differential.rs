@@ -239,7 +239,9 @@ fn pg_batch(sqls: &[String]) -> Option<Vec<String>> {
     sql.push_str("\n) AS v(id, q) ORDER BY v.id;\n");
 
     let dir = std::env::temp_dir();
-    let path = dir.join("pgrust_varchar_diff.sql");
+    // pid-unique: a fixed name strands another user's file in sticky /tmp
+    // when an oracle-less run precedes the gated one (quote precedent).
+    let path = dir.join(format!("pgrust_varchar_diff_{}.sql", std::process::id()));
     std::fs::File::create(&path).ok()?.write_all(sql.as_bytes()).ok()?;
 
     let out = Command::new("psql")
