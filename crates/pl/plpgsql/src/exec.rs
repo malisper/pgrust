@@ -956,6 +956,7 @@ impl<'a> Estate<'a> {
     // ------------------------------------------------------------------
 
     pub fn exec_toplevel_block(&mut self, block: &'a PlBlock) -> PgResult<i32> {
+        self.err_stmt = Some((block.lineno, "statement block"));
         self.exec_stmt_block(block)
     }
 
@@ -1091,13 +1092,12 @@ impl<'a> Estate<'a> {
     }
 
     fn exec_stmt_block(&mut self, block: &'a PlBlock) -> PgResult<i32> {
+        self.err_text = Some("during statement block local variable initialization");
         for &dno in &block.initvarnos {
             match &self.func.datums[dno as usize] {
                 PlDatum::Var(v) => {
                     if let Some(default_val) = &v.default_val {
-                        self.err_text = Some("during statement block local variable initialization");
                         self.exec_assign_expr(dno, default_val)?;
-                        self.err_text = None;
                     } else {
                         self.set_var(dno, Datum::null(), true);
                         if v.notnull {
@@ -1123,6 +1123,7 @@ impl<'a> Estate<'a> {
                 _ => {}
             }
         }
+        self.err_text = None;
         self.exec_stmts(&block.body)
     }
 

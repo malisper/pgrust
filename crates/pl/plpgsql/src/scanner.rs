@@ -336,20 +336,12 @@ pub struct PlScanner<'mcx> {
     scanbuf: &'mcx [u8],
     pub yyleng: i32,
     yytoken: i32,
-    latest_lloc: i32,
     num_pushbacks: usize,
     pushback_token: [i32; MAX_PUSHBACKS],
     pushback_aux: [TokenAux; MAX_PUSHBACKS],
     cur_line_start: usize,
     cur_line_end: Option<usize>,
     cur_line_num: i32,
-}
-
-pub fn location_to_lineno(scanbuf: &[u8], location: i32) -> i32 {
-    if location < 0 || location as usize >= scanbuf.len() {
-        return 0;
-    }
-    1 + scanbuf[..location as usize].iter().filter(|&&c| c == b'\n').count() as i32
 }
 
 impl<'mcx> PlScanner<'mcx> {
@@ -359,12 +351,11 @@ impl<'mcx> PlScanner<'mcx> {
             scanbuf,
             yyleng: 0,
             yytoken: 0,
-            latest_lloc: 0,
             num_pushbacks: 0,
             pushback_token: [0; MAX_PUSHBACKS],
             pushback_aux: Default::default(),
             cur_line_start: 0,
-            cur_line_end: None,
+            cur_line_end: scanbuf.iter().position(|&c| c == b'\n'),
             cur_line_num: 1,
         }
     }
@@ -571,7 +562,6 @@ impl<'mcx> PlScanner<'mcx> {
 
         self.yyleng = aux1.leng;
         self.yytoken = tok1;
-        self.latest_lloc = aux1.lloc;
         Ok((tok1, aux1.lval, aux1.lloc, aux1.leng))
     }
 
@@ -580,15 +570,38 @@ impl<'mcx> PlScanner<'mcx> {
         self.yyleng
     }
 
-    /// plpgsql_location_to_lineno.
-    pub fn lineno_for(&mut self, location: i32) -> i32 {
-        let _ = (self.cur_line_start, self.cur_line_end, self.cur_line_num);
-        location_to_lineno(self.scanbuf, location)
+    fn location_lineno_init(&mut self) {
+        self.cur_line_start = 0;
+        self.cur_line_num = 1;
+        self.cur_line_end = self.scanbuf.iter().position(|&c| c == b'\n');
     }
 
-    /// plpgsql_latest_lineno.
+    /// plpgsql_location_to_lineno: incremental walk; updates the "latest" line.
+    pub fn lineno_for(&mut self, location: i32) -> i32 {
+        if location < 0 || location as usize > self.scanbuf.len() {
+            return 0;
+        }
+        let loc = location as usize;
+        if loc < self.cur_line_start {
+            self.location_lineno_init();
+        }
+        while let Some(end) = self.cur_line_end {
+            if loc <= end {
+                break;
+            }
+            self.cur_line_start = end + 1;
+            self.cur_line_num += 1;
+            self.cur_line_end = self.scanbuf[self.cur_line_start..]
+                .iter()
+                .position(|&c| c == b'\n')
+                .map(|i| self.cur_line_start + i);
+        }
+        self.cur_line_num
+    }
+
+    /// plpgsql_latest_lineno: line of the most recently computed location.
     pub fn latest_lineno(&self) -> i32 {
-        location_to_lineno(self.scanbuf, self.latest_lloc)
+        self.cur_line_num
     }
 
     /// plpgsql_scanner_errposition (pl_scanner.c): 1-based char position.
