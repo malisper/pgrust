@@ -545,7 +545,6 @@ pub fn exec_init_window_agg<'mcx>(
                 // need argtypes error loud rather than silently diverge.
                 arg_types: &[],
                 args: &agg_specs_args[aggno],
-                aggref: None,
                 pergroup: pg,
                 ordered: None,
                 transtype_byval: true,

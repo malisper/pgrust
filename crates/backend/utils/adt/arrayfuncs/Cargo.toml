@@ -17,7 +17,6 @@ pqformat = { path = "../../../libpq/pqformat" }
 detoast_seams = { path = "../../../access/common/detoast_seams" }
 arrayutils = { path = "../arrayutils" }
 numutils = { path = "../numutils" }
-types_nodes = { path = "../../../../_support/types/nodes" }
 
 [dev-dependencies]
 adt_int = { path = "../int" }

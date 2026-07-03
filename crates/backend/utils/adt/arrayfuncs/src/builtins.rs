@@ -138,18 +138,13 @@ pub fn fc_array_agg_transfn(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) 
     use ::datum::array_build::ArrayBuildState;
 
     let flinfo = flinfo.expect("array_agg_transfn: NULL flinfo");
-    let arg1_typeid = flinfo
-        .fn_expr
-        .as_ref()
-        .and_then(|e| e.downcast_ref::<::types_nodes::Node<'static>>())
-        .and_then(|n| n.as_aggref())
-        .and_then(|a| a.aggargtypes.first());
-    let Some(arg1_typeid) = arg1_typeid else {
+    let arg1_typeid = fmgr_seams::get_fn_expr_argtype::call(flinfo, 1);
+    if arg1_typeid == ::types_core::InvalidOid {
         return Err(Box::new(
             PgError::error("could not determine input data type")
                 .with_sqlstate(::types_error::ERRCODE_INVALID_PARAMETER_VALUE),
         ));
-    };
+    }
     // SAFETY: fcinfo.context is the executor's live AggStateNode.
     let Some(aggmcx) = (unsafe { fcinfo.agg_context() }) else {
         panic!("array_agg_transfn called in non-aggregate context");

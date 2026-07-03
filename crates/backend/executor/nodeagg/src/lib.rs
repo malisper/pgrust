@@ -103,7 +103,6 @@ struct PerTransSortData<'mcx> {
 
 fn init_pertrans_sort<'mcx>(
     mcx: ::mcx::Mcx<'mcx>,
-    aggref_node: Node<'mcx>,
     aggref: &'mcx Aggref<'mcx>,
     transno: usize,
     transfn_oid: Oid,
@@ -170,7 +169,19 @@ fn init_pertrans_sort<'mcx>(
     }
 
     let mut transfn = fmgr_core::fmgr_info(transfn_oid)?;
-    transfn.fn_expr = Some(::execexpr::erase_fn_expr(mcx, aggref_node)?);
+    let mut fnexpr_types: PgVec<'mcx, Oid> = vec_with_capacity_in(mcx, num_trans_inputs + 1)?;
+    fnexpr_types.push(aggref.aggtranstype);
+    for t in aggref.aggargtypes.iter() {
+        fnexpr_types.push(t);
+    }
+    // SAFETY: leaked into the query arena; the replay flinfo dies with the
+    // plan it serves — from_node_ref's contract (same carrier as
+    // build_agg_trans's AggFnArgTypes).
+    let fnexpr_types: &'static [Oid] = unsafe { core::mem::transmute(fnexpr_types.leak()) };
+    let carrier =
+        ::mcx::alloc_leak_in(mcx, ::types_core::fmgr::AggFnArgTypes(fnexpr_types))?;
+    // SAFETY: carrier is arena-backed for the query, see above.
+    transfn.fn_expr = Some(unsafe { ::types_core::fmgr::FnExprErased::from_node_ref(carrier) });
 
     let scratch_layout = Layout::array::<NullableDatum>(num_inputs.max(1))
         .expect("ordered scratch layout");
@@ -541,7 +552,6 @@ pub fn exec_init_agg<'mcx>(
                     }
                     let (ps, ospec) = init_pertrans_sort(
                         mcx,
-                        aggref_node,
                         aggref,
                         transno,
                         shape.aggtransfn,
@@ -562,9 +572,10 @@ pub fn exec_init_agg<'mcx>(
                 if trans_init[transno].isnull
                     && fmgr_core::fmgr_info(shape.aggtransfn)?.fn_strict
                 {
-                    // C requires IsBinaryCoercible(input, transtype) here; the
-                    // exact-match arm covers every live agg (min/max).
-                    let input_type = aggref.aggargtypes.iter().last();
+                    // C checks the FIRST aggregated input (nodeAgg.c
+                    // IsBinaryCoercible gate) — the strict first-value path
+                    // copies args[1]; exact-match covers every live agg.
+                    let input_type = aggref.aggargtypes.first();
                     if input_type != Some(transtype) {
                         panic!(
                             "ExecInitAgg (nodeAgg.c): strict transfn with NULL initval and \
@@ -596,7 +607,7 @@ pub fn exec_init_agg<'mcx>(
 
     let mut specs: PgVec<'mcx, AggTransSpec<'mcx, 'mcx>> = vec_with_capacity_in(mcx, numtrans)?;
     for transno in 0..numtrans {
-        let (aggref_node, aggref) =
+        let (_, aggref) =
             trans_aggref[transno].expect("planner aggtransno numbering has gaps");
         // SAFETY: transno < numtrans elements of the once-allocated pergroup.
         let pg = unsafe { NonNull::new_unchecked(pergroup_base.as_ptr().add(transno)) };
@@ -612,7 +623,6 @@ pub fn exec_init_agg<'mcx>(
             init_value_is_null: trans_init[transno].isnull,
             arg_types: arg_types.leak(),
             args: &aggref.args,
-            aggref: Some(aggref_node),
             pergroup: pg,
             transtype_byval: trans_typ[transno].byval,
             transtype_len: trans_typ[transno].len,
