@@ -44,7 +44,8 @@ fn create_plan_recurse<'mcx>(
             if p.pathtype == crate::pathnode::tag16(NodeTag::T_SeqScan)
                 || p.pathtype == crate::pathnode::tag16(NodeTag::T_FunctionScan)
                 || p.pathtype == crate::pathnode::tag16(NodeTag::T_ValuesScan)
-                || p.pathtype == crate::pathnode::tag16(NodeTag::T_CteScan) =>
+                || p.pathtype == crate::pathnode::tag16(NodeTag::T_CteScan)
+                || p.pathtype == crate::pathnode::tag16(NodeTag::T_Result) =>
         {
             create_scan_plan(run, path_id, flags)
         }
@@ -340,6 +341,9 @@ fn create_scan_plan<'mcx>(
         t if t == crate::pathnode::tag16(NodeTag::T_SubqueryScan) => {
             create_subqueryscan_plan(run, best_path, tlist, scan_clauses)?
         }
+        t if t == crate::pathnode::tag16(NodeTag::T_Result) => {
+            create_resultscan_plan(run, best_path, tlist, scan_clauses)?
+        }
         other => panic!("create_scan_plan (createplan.c): pathtype {other}; M2 scan lane"),
     };
 
@@ -604,6 +608,36 @@ fn create_valuesscan_plan<'mcx>(
     plan.scan.scanrelid = scan_relid;
     plan.values_lists = values_lists;
     copy_generic_path_info(run, &mut plan.scan.plan, best_path);
+    Ok(plan.seal())
+}
+
+// create_resultscan_plan (createplan.c): an RTE_RESULT scan is a childless
+// Result whose quals ride resconstantqual (C's make_result second arg).
+fn create_resultscan_plan<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    best_path: PathId,
+    tlist: NodeList<'mcx>,
+    scan_clauses: mcx::PgVec<'mcx, RinfoId>,
+) -> PgResult<Node<'mcx>> {
+    let mcx = run.mcx;
+    let rel_id = run.root.path(best_path).base().parent;
+    debug_assert!(run.root.rel(rel_id).relid > 0);
+    debug_assert!(
+        run.root.rel(rel_id).rtekind == types_nodes::parsenodes::RTEKind::RTE_RESULT as u32
+    );
+
+    let ordered = order_qual_clauses(run, &scan_clauses)?;
+    let mut quals = extract_actual_clauses(run, &ordered);
+    if run.root.path(best_path).base().param_info.is_some() {
+        quals = replace_nestloop_params_list(run, &quals)?;
+    }
+
+    let mut plan = Node::build::<types_nodes::plannodes::Result<'mcx>>(mcx)?;
+    plan.plan.targetlist = tlist;
+    plan.plan.qual = NodeList::nil();
+    plan.resconstantqual =
+        if quals.is_nil() { None } else { Some(Node::mk_list(mcx, quals)?) };
+    copy_generic_path_info(run, &mut plan.plan, best_path);
     Ok(plan.seal())
 }
 
