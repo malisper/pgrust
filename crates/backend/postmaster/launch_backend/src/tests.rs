@@ -155,12 +155,12 @@ fn launch_backend_thread_runs_child_init_in_order() {
 }
 
 #[test]
-#[should_panic(expected = "CheckpointerMain (backend-postmaster-checkpointer) unported")]
+#[should_panic(expected = "IoWorkerMain (backend-storage-aio-method-worker) unported")]
 fn unported_child_kind_panics_loudly() {
     install();
     init_small::globals::SetIsPostmasterEnvironment(true);
     init_small::globals::SetIsUnderPostmaster(false);
-    postmaster_child_launch(BackendType::Checkpointer, 1, StartupData::None, None);
+    postmaster_child_launch(BackendType::IoWorker, 1, StartupData::None, None);
 }
 
 #[test]

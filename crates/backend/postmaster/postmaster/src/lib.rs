@@ -374,7 +374,10 @@ pub fn process_pm_pmsignal() -> PgResult<()> {
         with_pm(|pm| pm.wal_receiver_requested = true);
     }
 
+    let mut request_state_update = false;
+
     if pmsignal::CheckPostmasterSignal(PMSIGNAL_XLOG_IS_SHUTDOWN) {
+        request_state_update = true;
         if with_pm(|pm| pm.pm_state == PMState::PM_WAIT_XLOG_SHUTDOWN) {
             debug_assert!(with_pm(|pm| pm.shutdown > NoShutdown));
             let pgarch = with_pm(|pm| pm.pgarch);
@@ -389,17 +392,204 @@ pub fn process_pm_pmsignal() -> PgResult<()> {
     }
 
     if pmsignal::CheckPostmasterSignal(PMSIGNAL_ADVANCE_STATE_MACHINE) {
+        request_state_update = true;
+    }
+
+    if request_state_update {
         statemachine::PostmasterStateMachine()?;
     }
 
     Ok(())
 }
 
-/// process_pm_child_exit — the SIGCHLD reaper. No SIGCHLD exists under the
-/// thread model; the pmchild unit owns the replacement exit channel.
-pub fn process_pm_child_exit() -> PgResult<()> {
-    PENDING_PM_CHILD_EXIT.store(false, Ordering::Release);
-    panic!("process_pm_child_exit: child-exit reaping is the pmchild unit's thread-model redesign (backend-postmaster-pmchild)");
+// The waitpid channel's thread-model rendering: launch_backend announces a
+// finished child thread through postmaster_seams; the queue is the zombie
+// table process_pm_child_exit reaps. C wait-status encoding throughout.
+static CHILD_EXIT_QUEUE: std::sync::Mutex<Vec<(pid_t, i32)>> = std::sync::Mutex::new(Vec::new());
+
+fn announce_child_exit(pid: pid_t, exitstatus: i32) {
+    CHILD_EXIT_QUEUE.lock().unwrap_or_else(|e| e.into_inner()).push((pid, exitstatus));
+    handle_pm_child_exit_signal(0);
 }
 
-pub fn init_seams() {}
+fn reap_one() -> Option<(pid_t, i32)> {
+    let mut q = CHILD_EXIT_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+    if q.is_empty() {
+        None
+    } else {
+        Some(q.remove(0))
+    }
+}
+
+fn exit_status_code(exitstatus: i32) -> Option<i32> {
+    // WIFEXITED / WEXITSTATUS.
+    (exitstatus & 0x7f == 0).then_some((exitstatus >> 8) & 0xff)
+}
+
+fn log_child_exit(procname: &str, pid: pid_t, exitstatus: i32) {
+    match exit_status_code(exitstatus) {
+        Some(code) => report(
+            LOG,
+            format!("{procname} (PID {pid}) exited with exit code {code}"),
+            3830,
+            "LogChildExit",
+        ),
+        None => report(
+            LOG,
+            format!("{procname} (PID {pid}) was terminated by signal {}", exitstatus & 0x7f),
+            3844,
+            "LogChildExit",
+        ),
+    }
+}
+
+/// process_pm_child_exit — the SIGCHLD reaper over the thread-exit queue.
+pub fn process_pm_child_exit() -> PgResult<()> {
+    PENDING_PM_CHILD_EXIT.store(false, Ordering::Release);
+
+    report_internal(DEBUG2, "reaping dead processes".into(), 2240, "process_pm_child_exit");
+
+    while let Some((pid, exitstatus)) = reap_one() {
+        let status0 = exit_status_code(exitstatus) == Some(0);
+        let status1 = exit_status_code(exitstatus) == Some(1);
+        let status3 = exit_status_code(exitstatus) == Some(3);
+
+        if with_pm(|pm| pm.startup.map(|c| c.pid)) == Some(pid) {
+            let startup = with_pm(|pm| pm.startup.take()).expect("checked");
+            pmchild_seams::release_postmaster_child_slot::call(startup.child_slot);
+
+            if with_pm(|pm| pm.shutdown > NoShutdown) && (status0 || status1) {
+                with_pm(|pm| pm.startup_status = StartupStatusEnum::NotRunning);
+                statemachine::UpdatePMState(PMState::PM_WAIT_BACKENDS);
+                continue;
+            }
+
+            if status3 {
+                report(LOG, "shutdown at recovery target".into(), 2273, "process_pm_child_exit");
+                with_pm(|pm| {
+                    pm.startup_status = StartupStatusEnum::NotRunning;
+                    pm.shutdown = pm.shutdown.max(SmartShutdown);
+                });
+                statemachine::TerminateChildren(libc::SIGTERM);
+                statemachine::UpdatePMState(PMState::PM_WAIT_BACKENDS);
+                continue;
+            }
+
+            if with_pm(|pm| {
+                pm.pm_state == PMState::PM_STARTUP
+                    && pm.startup_status != StartupStatusEnum::Signaled
+            }) && !status0
+            {
+                log_child_exit("startup process", pid, exitstatus);
+                report(
+                    LOG,
+                    "aborting startup due to startup process failure".into(),
+                    2292,
+                    "process_pm_child_exit",
+                );
+                statemachine::ExitPostmaster(1);
+            }
+
+            if !status0 {
+                if with_pm(|pm| pm.startup_status == StartupStatusEnum::Signaled) {
+                    with_pm(|pm| pm.startup_status = StartupStatusEnum::NotRunning);
+                    if with_pm(|pm| pm.pm_state == PMState::PM_STARTUP) {
+                        statemachine::UpdatePMState(PMState::PM_WAIT_BACKENDS);
+                    }
+                } else {
+                    with_pm(|pm| pm.startup_status = StartupStatusEnum::Crashed);
+                }
+                handle_child_crash("startup process", pid, exitstatus);
+            }
+
+            with_pm(|pm| {
+                pm.startup_status = StartupStatusEnum::NotRunning;
+                pm.fatal_error = false;
+                pm.abort_start_time = 0;
+            });
+            statemachine::UpdatePMState(PMState::PM_RUN);
+            with_pm(|pm| pm.conns_allowed = true);
+
+            // StartWorkerNeeded: bgworker registry statically empty.
+
+            report(
+                LOG,
+                "database system is ready to accept connections".into(),
+                2345,
+                "process_pm_child_exit",
+            );
+            miscinit::AddToDataDirLockFile(LOCK_FILE_LINE_PM_STATUS, PM_STATUS_READY)?;
+            continue;
+        }
+
+        if with_pm(|pm| pm.bgwriter.map(|c| c.pid)) == Some(pid) {
+            let bgwriter = with_pm(|pm| pm.bgwriter.take()).expect("checked");
+            pmchild_seams::release_postmaster_child_slot::call(bgwriter.child_slot);
+            if !status0 {
+                handle_child_crash("background writer process", pid, exitstatus);
+            }
+            continue;
+        }
+
+        if with_pm(|pm| pm.checkpointer.map(|c| c.pid)) == Some(pid) {
+            let checkpointer = with_pm(|pm| pm.checkpointer.take()).expect("checked");
+            pmchild_seams::release_postmaster_child_slot::call(checkpointer.child_slot);
+            if status0 && with_pm(|pm| pm.pm_state == PMState::PM_WAIT_CHECKPOINTER) {
+                statemachine::UpdatePMState(PMState::PM_WAIT_DEAD_END);
+                serverloop::ConfigurePostmasterWaitSet(false)?;
+                statemachine::SignalChildren(
+                    libc::SIGTERM,
+                    btmask_all_except(&[BackendType::Logger]),
+                );
+            } else {
+                handle_child_crash("checkpointer process", pid, exitstatus);
+            }
+            continue;
+        }
+
+        if with_pm(|pm| pm.walwriter.map(|c| c.pid)) == Some(pid) {
+            let walwriter = with_pm(|pm| pm.walwriter.take()).expect("checked");
+            pmchild_seams::release_postmaster_child_slot::call(walwriter.child_slot);
+            if !status0 {
+                handle_child_crash("WAL writer process", pid, exitstatus);
+            }
+            continue;
+        }
+
+        match pmchild_seams::find_postmaster_child_by_pid::call(pid) {
+            Some((child_slot, btype))
+                if matches!(btype, BackendType::Backend | BackendType::DeadEndBackend) =>
+            {
+                // CleanupBackend: bgworker-notify n/a (registry empty).
+                pmchild_seams::release_postmaster_child_slot::call(child_slot);
+                if !(status0 || status1) {
+                    handle_child_crash("server process", pid, exitstatus);
+                }
+            }
+            Some((_slot, btype)) => panic!(
+                "process_pm_child_exit: reaper arm for {} unported (its owner extends the reaper when its main lands)",
+                miscinit::GetBackendTypeDesc(btype)
+            ),
+            None => {
+                log_child_exit("untracked child process", pid, exitstatus);
+            }
+        }
+    }
+
+    statemachine::PostmasterStateMachine()
+}
+
+// HandleChildCrash: the crash-restart cycle (TerminateChildren(SIGQUIT/SIGABRT),
+// FatalError, shmem reset) is undesigned under threads — a crashed thread may
+// have poisoned the shared address space, so die loudly instead.
+fn handle_child_crash(procname: &str, pid: pid_t, exitstatus: i32) -> ! {
+    log_child_exit(procname, pid, exitstatus);
+    panic!(
+        "HandleChildCrash({procname}, pid {pid}): crash-restart cycle is undesigned under the thread model (backend-postmaster-pmchild redesign)"
+    );
+}
+
+pub fn init_seams() {
+    postmaster_seams::announce_child_exit::set(announce_child_exit);
+    postmaster_seams::signal_postmaster_sigusr1::set(|| handle_pm_pmsignal_signal(libc::SIGUSR1));
+}

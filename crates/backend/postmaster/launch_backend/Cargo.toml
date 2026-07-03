@@ -16,6 +16,13 @@ miscinit = { path = "../../utils/init/miscinit" }
 stack_depth = { path = "../../utils/misc/stack_depth" }
 backend_startup = { path = "../../tcop/backend_startup" }
 timestamp_seams = { path = "../../utils/adt/timestamp_seams" }
+bgwriter = { path = "../bgwriter" }
+checkpointer = { path = "../checkpointer" }
+postmaster_startup = { path = "../startup" }
+walwriter = { path = "../walwriter" }
+postmaster_seams = { path = "../postmaster_seams" }
+ipc = { path = "../../storage/ipc/ipc" }
+libc = "0.2"
 
 [dev-dependencies]
 ip = { path = "../../../common/ip" }

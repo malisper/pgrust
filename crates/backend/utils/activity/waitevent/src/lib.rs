@@ -1,7 +1,5 @@
-//! wait_event.c core: the my_wait_event_info indirection. Before
-//! pgstat_set_wait_event_storage redirects to the PGPROC slot, writes go to
-//! C's never-read process-local fallback — dropped here (same observable
-//! behavior). Wait-event NAME resolution and custom events defer.
+//! wait_event.c core (my_wait_event_info indirection); C's never-read local
+//! fallback is dropped; name resolution + custom events defer.
 
 use core::cell::Cell;
 use core::sync::atomic::{AtomicU32, Ordering::Relaxed};
