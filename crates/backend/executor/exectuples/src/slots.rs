@@ -400,6 +400,7 @@ fn store_buffer<'mcx>(
 
     b.base.base.tts_nvalid = 0;
     b.base.base.tts_tid = tuple.t_self;
+    b.base.base.tts_tableOid = tuple.t_tableOid;
     b.base.tuple = Some(tuple);
     b.base.off = 0;
     b.base.base.tts_flags &= !TTS_FLAG_EMPTY;

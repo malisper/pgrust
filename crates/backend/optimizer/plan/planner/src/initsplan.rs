@@ -1267,13 +1267,14 @@ pub fn distribute_restrictinfo_to_rels(run: &mut PlannerRun<'_>, rinfo: RinfoId)
     Ok(())
 }
 
-// add_base_clause_to_rel (initsplan.c), non-inherited arm.
+// add_base_clause_to_rel (initsplan.c); the NullTest shortcuts are only
+// valid for non-inheritance parents (C matches: children may differ).
 fn add_base_clause_to_rel(run: &mut PlannerRun<'_>, relid: i32, rinfo: RinfoId) -> PgResult<()> {
-    debug_assert!(!run.rte(relid as usize).inh);
-    if restriction_is_always_true(run, rinfo) {
+    let inh = run.rte(relid as usize).inh;
+    if !inh && restriction_is_always_true(run, rinfo) {
         return Ok(());
     }
-    let rinfo = substitute_false_if_always_false(run, rinfo)?;
+    let rinfo = if inh { rinfo } else { substitute_false_if_always_false(run, rinfo)? };
     let rel_id = find_base_rel(&run.root, relid);
     let security_level = run.root.rinfo(rinfo).security_level;
     let rel = run.root.rel_mut(rel_id);
