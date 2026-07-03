@@ -11,6 +11,7 @@ path = "src/lib.rs"
 aclchk = { path = "../../catalog/aclchk" }
 parse_utilcmd = { path = "../../parser/parse_utilcmd" }
 tablecmds = { path = "../../commands/tablecmds" }
+trigger = { path = "../../commands/trigger" }
 schemacmds = { path = "../../commands/schemacmds" }
 dbcommands = { path = "../../commands/dbcommands" }
 functioncmds = { path = "../../commands/functioncmds" }
