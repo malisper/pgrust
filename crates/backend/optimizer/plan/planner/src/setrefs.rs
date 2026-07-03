@@ -337,7 +337,7 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
                 unsafe {
                     plan.with_mut::<types_nodes::plannodes::Memoize, _>(|p| {
                         p.param_exprs = fixed;
-                    })
+                    });
                 }
             }
         }
