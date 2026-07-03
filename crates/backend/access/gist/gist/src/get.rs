@@ -287,7 +287,7 @@ fn fetch_recontup(
     let natts = rel.rd_att.natts as usize;
     let mut fetchatt = [Datum::null(); K];
     let mut isnull = [false; K];
-    {
+    let (off, len) = {
         let mcx = so.temp.mcx();
         gistFetchTupleValues(mcx, &mut so.giststate, rel, it, &mut fetchatt[..natts], &mut isnull[..natts])?;
         let tupdesc = so
@@ -305,9 +305,10 @@ fn fetch_recontup(
         while so.fetch_buf.len() % 8 != 0 {
             so.fetch_buf.push(0);
         }
-        so.temp.reset();
-        Ok((off, img.len() as u32))
-    }
+        (off, img.len() as u32)
+    };
+    so.temp.reset();
+    Ok((off, len))
 }
 
 fn get_next_search_item(so: &mut GISTScanOpaqueData<'_>) -> Option<GISTSearchItem> {
