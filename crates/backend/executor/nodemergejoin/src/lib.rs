@@ -82,7 +82,7 @@ pub struct MergeJoinState<'mcx> {
     pub ps_ExprContext: EcxtId,
     mj_OuterEContext: EcxtId,
     mj_InnerEContext: EcxtId,
-    pub ps_ResultTupleDesc: Rc<TupleDescData<'static>>,
+    pub ps_ResultTupleDesc: Option<Rc<TupleDescData<'static>>>,
     pub ps_ResultTupleSlot: ExecSlotId,
     proj: PgBox<'mcx, ExprState<'mcx>>,
     joinqual: Option<PgBox<'mcx, ExprState<'mcx>>>,
@@ -173,7 +173,7 @@ pub fn exec_init_merge_join<'mcx>(
         ps_ExprContext,
         mj_OuterEContext,
         mj_InnerEContext,
-        ps_ResultTupleDesc: result_desc,
+        ps_ResultTupleDesc: Some(result_desc),
         ps_ResultTupleSlot,
         proj,
         joinqual,
@@ -701,7 +701,13 @@ where
 }
 
 /// `ExecEndMergeJoin`: children ended by the caller.
-pub fn exec_end_merge_join(_node: &mut MergeJoinState<'_>) {}
+pub fn exec_end_merge_join(node: &mut MergeJoinState<'_>) {
+    node.joinqual = None;
+    node.otherqual = None;
+    node.clauses.clear();
+    node.proj.release_frames();
+    node.ps_ResultTupleDesc = None;
+}
 
 /// `ExecReScanMergeJoin` node-local half; the caller rescans both children.
 pub fn exec_rescan_merge_join<'mcx>(node: &mut MergeJoinState<'mcx>, estate: &mut EStateData<'mcx>) {
@@ -716,5 +722,19 @@ pub fn exec_rescan_merge_join<'mcx>(node: &mut MergeJoinState<'mcx>, estate: &mu
 
 /// `ExecGetResultType` for a MergeJoin node.
 pub fn merge_join_result_type(node: &MergeJoinState<'_>) -> Rc<TupleDescData<'static>> {
-    node.ps_ResultTupleDesc.clone()
+    node.ps_ResultTupleDesc.clone().expect("merge join already ended")
 }
+
+// Exempt: all released in exec_end_merge_join; SortSupport no-drop, proven below.
+const _: () = assert!(!core::mem::needs_drop::<SortSupport>());
+mcx::forget_safe_struct!(
+    MergeJoinClause<'_> { ldatum, rdatum, lisnull, risnull;
+        lexpr, rexpr, ssup },
+    MergeJoinState<'_> { plan, ps_ExprContext, mj_OuterEContext,
+        mj_InnerEContext, ps_ResultTupleSlot, mj_JoinState,
+        mj_SkipMarkRestore, mj_ExtraMarks, js_single_match, mj_FillOuter,
+        mj_FillInner, mj_NullInnerTupleSlot, mj_NullOuterTupleSlot,
+        mj_MatchedOuter, mj_MatchedInner, mj_OuterTupleSlot,
+        mj_InnerTupleSlot, mj_MarkedTupleSlot;
+        ps_ResultTupleDesc, proj, joinqual, otherqual, clauses },
+);

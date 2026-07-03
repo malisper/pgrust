@@ -215,3 +215,9 @@ pub fn exec_seq_scan_reinitialize_dsm(_node: &mut SeqScanState<'_>) -> ! {
 pub fn exec_seq_scan_initialize_worker(_node: &mut SeqScanState<'_>) -> ! {
     panic!("nodeseqscan: ExecSeqScanInitializeWorker pending parallel DSM/shm_toc")
 }
+
+mcx::forget_safe_nodrop!(SeqScanVariant);
+
+mcx::forget_safe_struct!(
+    SeqScanState<'_> { ss, variant },
+);

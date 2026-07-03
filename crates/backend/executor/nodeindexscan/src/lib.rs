@@ -309,6 +309,8 @@ pub fn exec_end_index_scan(node: &mut IndexScanState<'_>) -> PgResult<()> {
     if let Some(index_rel) = node.iss_RelationDesc.take() {
         index_close(index_rel, NoLock)?;
     }
+    node.indexqualorig = None;
+    node.iss_ScanKeys.clear();
     Ok(())
 }
 
@@ -367,3 +369,11 @@ pub fn exec_index_scan_initialize_worker(_node: &mut IndexScanState<'_>) -> ! {
 pub fn exec_index_scan_retrieve_instrumentation(_node: &mut IndexScanState<'_>) -> ! {
     panic!("nodeindexscan: ExecIndexScanRetrieveInstrumentation pending parallel DSM/shm_toc")
 }
+
+// Exempt: droppy owners, all released in exec_end_index_scan; ScanDirection
+// is no-drop, const-proven below.
+const _: () = assert!(!core::mem::needs_drop::<ScanDirection>());
+mcx::forget_safe_struct!(
+    IndexScanState<'_> { ss, iss_PlanNodeId;
+        indexqualorig, iss_ScanDesc, iss_RelationDesc, iss_ScanKeys, iss_OrderDir },
+);

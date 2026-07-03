@@ -60,36 +60,24 @@ pub struct FmgrInfo {
 }
 
 // Erased `fn_expr` carrier: the node is a `types-nodes` `Expr` this crate
-// must not name. `Rc` (not `Box`) keeps `FmgrInfo` `Clone` — C copies the
-// bare pointer; the arena owns the node.
-#[derive(Clone)]
-pub struct FnExprErased(alloc::rc::Rc<dyn core::any::Any>);
+// must not name. Copy raw pointer — C copies the bare `fmNodePtr`; the arena
+// owns the node, so FmgrInfo carries no drop glue.
+#[derive(Clone, Copy)]
+pub struct FnExprErased(*const dyn core::any::Any);
 
 impl FnExprErased {
-    pub fn new<T: core::any::Any>(expr: T) -> Self {
-        Self(alloc::rc::Rc::new(expr))
-    }
-
-    /// SAFETY: caller must guarantee the node's backing context outlives every
-    /// `downcast_ref` read of this carrier. `STATIC` must be the `'static`
-    /// form of the `'mcx`-branded `MCX` type (same concrete type, lifetime
-    /// forgotten) — callers pass `Expr<'mcx>` / `Expr<'static>`.
-    pub fn from_node_erased<MCX, STATIC: core::any::Any>(expr: MCX) -> Self {
-        debug_assert_eq!(
-            core::mem::size_of::<MCX>(),
-            core::mem::size_of::<STATIC>(),
-            "from_node_erased: MCX and STATIC must be the same type up to lifetime"
-        );
-        let boxed: alloc::rc::Rc<MCX> = alloc::rc::Rc::new(expr);
-        // SAFETY: MCX and STATIC are the same type up to the lifetime
-        // parameter, so this is a no-op reinterpretation of identical layout.
-        let restamped: alloc::rc::Rc<STATIC> =
-            unsafe { core::mem::transmute::<alloc::rc::Rc<MCX>, alloc::rc::Rc<STATIC>>(boxed) };
-        Self(restamped)
+    /// # Safety
+    /// `expr`'s backing context must outlive every `downcast_ref` read of
+    /// this carrier (the resolved-once FmgrInfo dies with the plan it serves).
+    /// `STATIC` must be the `'static` form of the caller's `'mcx`-branded
+    /// node type (same concrete type, lifetime forgotten).
+    pub unsafe fn from_node_ref<STATIC: core::any::Any>(expr: &STATIC) -> Self {
+        Self(expr as &dyn core::any::Any as *const dyn core::any::Any)
     }
 
     pub fn downcast_ref<T: core::any::Any>(&self) -> Option<&T> {
-        self.0.downcast_ref::<T>()
+        // SAFETY: pointee live per from_node_ref's contract.
+        unsafe { (*self.0).downcast_ref::<T>() }
     }
 }
 
@@ -139,7 +127,8 @@ mod tests {
         assert!(finfo.fn_expr.is_none());
 
         let expr = FakeExpr { argtypes: [23, 25] };
-        finfo.fn_expr = Some(FnExprErased::new(expr));
+        // SAFETY: `expr` outlives every read below.
+        finfo.fn_expr = Some(unsafe { FnExprErased::from_node_ref(&expr) });
 
         let recovered = finfo
             .fn_expr

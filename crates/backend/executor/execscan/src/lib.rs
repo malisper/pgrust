@@ -468,6 +468,13 @@ fn length_coercion_typmod(f: &types_nodes::primnodes::FuncExpr<'_>) -> Option<i3
     Some(con.constvalue.as_i32())
 }
 
+// Exempt: droppy owners, released by execmain's exec_end_node/end_scan.
+mcx::forget_safe_struct!(
+    ProjectionInfo<'_> { pi_result_slot; pi_state },
+    ScanState<'_> { ps_ExprContext, scanrelid, ss_ScanTupleSlot;
+        qual, ps_ProjInfo, ss_currentRelation, ss_currentScanDesc },
+);
+
 /// C `exprCollation` over the ported primnode families.
 pub fn expr_collation(node: Node<'_>) -> Oid {
     match node.node_tag() {

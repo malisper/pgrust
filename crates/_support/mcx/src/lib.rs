@@ -249,6 +249,30 @@ impl<T> PoolMutex<T> {
 type AcctPool = PoolMutex<alloc::vec::Vec<NonNull<AcctInner>>>;
 static ACCT_POOL: AcctPool = AcctPool::new(alloc::vec::Vec::new());
 
+// Children-vec capacity pool: C's child links are intrusive (no allocation);
+// per-query context churn must not pay a malloc/free for a 1-2 entry Vec.
+type ChildVecPool = PoolMutex<alloc::vec::Vec<alloc::vec::Vec<AcctWeak>>>;
+static CHILD_VEC_POOL: ChildVecPool = ChildVecPool::new(alloc::vec::Vec::new());
+const CHILD_VEC_POOL_MAX: usize = 64;
+
+#[inline]
+fn child_vec_take() -> alloc::vec::Vec<AcctWeak> {
+    CHILD_VEC_POOL.with(|s| s.pop()).unwrap_or_default()
+}
+
+#[inline]
+fn child_vec_give(v: alloc::vec::Vec<AcctWeak>) {
+    debug_assert!(v.is_empty());
+    if v.capacity() == 0 {
+        return;
+    }
+    CHILD_VEC_POOL.with(|s| {
+        if s.len() < CHILD_VEC_POOL_MAX {
+            s.push(v);
+        }
+    });
+}
+
 #[inline]
 fn acct_take() -> NonNull<AcctInner> {
     #[cfg(not(test))]
@@ -361,6 +385,12 @@ impl Drop for AcctRc {
             strong.set(s);
             if s != 0 {
                 return;
+            }
+            {
+                let val = (*inner).val.assume_init_ref();
+                let mut children = val.children.borrow_mut();
+                children.clear();
+                child_vec_give(core::mem::take(&mut *children));
             }
             core::ptr::drop_in_place(core::ptr::addr_of_mut!((*inner).val).cast::<Acct>());
             let weak = &(*inner).weak;
@@ -552,7 +582,7 @@ impl MemoryContext {
             arena_nblocks: Cell::new(init_nblocks),
             is_bump,
             parent,
-            children: RefCell::new(alloc::vec::Vec::new()),
+            children: RefCell::new(child_vec_take()),
         });
         if let Some(p) = &acct.parent {
             let mut children = p.children.borrow_mut();

@@ -130,3 +130,5 @@ pub fn eval_plan_qual_end<'mcx>(
     estate.es_epq_active = false;
     Ok(())
 }
+
+::mcx::forget_safe_struct!(EpqState<'_> { plan, recheck, result_rti });

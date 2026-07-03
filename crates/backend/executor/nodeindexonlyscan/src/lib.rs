@@ -392,6 +392,8 @@ pub fn exec_end_index_only_scan(node: &mut IndexOnlyScanState<'_>) -> PgResult<(
     if let Some(index_rel) = node.ioss_RelationDesc.take() {
         index_close(index_rel, NoLock)?;
     }
+    node.recheckqual = None;
+    node.ioss_ScanKeys.clear();
     Ok(())
 }
 
@@ -438,3 +440,13 @@ pub fn exec_index_only_scan_initialize_worker(_node: &mut IndexOnlyScanState<'_>
 pub fn exec_index_only_scan_retrieve_instrumentation(_node: &mut IndexOnlyScanState<'_>) -> ! {
     panic!("nodeindexonlyscan: ExecIndexOnlyScanRetrieveInstrumentation pending parallel DSM/shm_toc")
 }
+
+// Exempt: droppy owners, all released in exec_end_index_only_scan;
+// ScanDirection is no-drop, const-proven below.
+const _: () = assert!(!core::mem::needs_drop::<ScanDirection>());
+mcx::forget_safe_struct!(
+    IndexOnlyScanState<'_> { ss, ioss_TableSlot, ioss_NameCStringAttNums,
+        ioss_PlanNodeId;
+        recheckqual, ioss_ScanDesc, ioss_RelationDesc, ioss_ScanKeys,
+        ioss_OrderDir, ioss_VMBuffer },
+);

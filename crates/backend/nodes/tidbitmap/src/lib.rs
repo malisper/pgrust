@@ -625,5 +625,12 @@ impl TbmIterator {
     }
 }
 
+mcx::forget_safe_nodrop!(TbmStatus, TbmIterating, PagetableEntry, TbmPrivateIterator, TbmIterator);
+
+mcx::forget_safe_struct!(
+    TIDBitmap<'_> { mcx, status, pagetable, nentries, maxentries, npages,
+        nchunks, iterating, lossify_start, entry1, spages, schunks },
+);
+
 #[cfg(test)]
 mod tests;

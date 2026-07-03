@@ -37,11 +37,11 @@ enum ExecStatus {
 pub struct IncrementalSortState<'mcx> {
     pub plan: &'mcx IncrementalSort<'mcx>,
     pub ps_ExprContext: EcxtId,
-    pub ps_ResultTupleDesc: Rc<TupleDescData<'static>>,
+    pub ps_ResultTupleDesc: Option<Rc<TupleDescData<'static>>>,
     pub ps_ResultTupleSlot: ExecSlotId,
     pub bounded: bool,
     pub bound: i64,
-    outer_desc: Rc<TupleDescData<'static>>,
+    outer_desc: Option<Rc<TupleDescData<'static>>>,
     execution_status: ExecStatus,
     outer_node_done: bool,
     bound_done: i64,
@@ -75,11 +75,11 @@ pub fn exec_init_incremental_sort<'mcx>(
     IncrementalSortState {
         plan: node,
         ps_ExprContext,
-        ps_ResultTupleDesc: result_desc,
+        ps_ResultTupleDesc: Some(result_desc),
         ps_ResultTupleSlot,
         bounded: false,
         bound: 0,
-        outer_desc: outer_desc.clone(),
+        outer_desc: Some(outer_desc.clone()),
         execution_status: ExecStatus::LoadFullsort,
         outer_node_done: false,
         bound_done: 0,
@@ -109,8 +109,8 @@ fn prepare_presorted_cols<'mcx>(
     }
     node.presorted_eq = Some(exec_build_grouping_equal(
         mcx,
-        &node.outer_desc,
-        &node.outer_desc,
+        node.outer_desc.as_ref().expect("incremental sort already ended"),
+        node.outer_desc.as_ref().expect("incremental sort already ended"),
         &node.plan.sort.sortColIdx[..n],
         &eqfuncoids,
         &node.plan.sort.collations[..n],
@@ -174,7 +174,7 @@ fn switch_to_presorted_prefix_mode<'mcx>(
         None => {
             // Prefix columns are all equal within a group; sort only the rest.
             node.prefixsort_state = Some(Tuplesort::begin_heap(
-                node.outer_desc.clone(),
+                node.outer_desc.clone().expect("incremental sort already ended"),
                 &plan.sort.sortColIdx[n_presorted..],
                 &plan.sort.sortOperators[n_presorted..],
                 &plan.sort.collations[n_presorted..],
@@ -299,7 +299,7 @@ where
             None => {
                 prepare_presorted_cols(node, mcx)?;
                 node.fullsort_state = Some(Tuplesort::begin_heap(
-                    node.outer_desc.clone(),
+                    node.outer_desc.clone().expect("incremental sort already ended"),
                     plan.sort.sortColIdx,
                     plan.sort.sortOperators,
                     plan.sort.collations,
@@ -472,7 +472,23 @@ where
 pub fn exec_end_incremental_sort(node: &mut IncrementalSortState<'_>) {
     node.fullsort_state = None;
     node.prefixsort_state = None;
+    node.presorted_eq = None;
+    node.ps_ResultTupleDesc = None;
+    node.outer_desc = None;
+    node.group_pivot.base_mut().tts_tupleDescriptor = None;
+    node.transfer_tuple.base_mut().tts_tupleDescriptor = None;
 }
+
+mcx::forget_safe_nodrop!(ExecStatus);
+
+// Exempt: all released in exec_end_incremental_sort.
+mcx::forget_safe_struct!(
+    IncrementalSortState<'_> { plan, ps_ExprContext, ps_ResultTupleSlot,
+        bounded, bound, execution_status, outer_node_done, bound_done,
+        n_fullsort_remaining;
+        ps_ResultTupleDesc, outer_desc, fullsort_state, prefixsort_state,
+        group_pivot, transfer_tuple, presorted_eq },
+);
 
 /// `ExecReScanIncrementalSort` node-local half. The caller always rescans the
 /// outer child (C's chgParam is always NULL until the Param lanes land).

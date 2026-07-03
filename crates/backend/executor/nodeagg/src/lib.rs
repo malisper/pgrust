@@ -47,7 +47,7 @@ pub struct AggStateData<'mcx> {
     // C's curaggcontext, in the FmNode the transfn fcinfos carry; raw arena
     // cell so the pointer survives self moving (drop: make_agg_state_node).
     agg_node: NonNull<AggStateNode>,
-    pub ps_ResultTupleDesc: Rc<TupleDescData<'static>>,
+    pub ps_ResultTupleDesc: Option<Rc<TupleDescData<'static>>>,
     pub ps_ResultTupleSlot: ExecSlotId,
     proj: PgBox<'mcx, ExprState<'mcx>>,
     evaltrans: PgBox<'mcx, ExprState<'mcx>>,
@@ -424,7 +424,7 @@ pub fn exec_init_agg<'mcx>(
         ps_ExprContext,
         tmpcontext,
         agg_node,
-        ps_ResultTupleDesc: result_desc,
+        ps_ResultTupleDesc: Some(result_desc),
         ps_ResultTupleSlot,
         proj,
         evaltrans,
@@ -1126,7 +1126,17 @@ fn agg_retrieve_hash_table<'mcx>(
 
 /// `ExecEndAgg` node-local half; the caller ends the outer child (contexts
 /// are freed with the EState).
-pub fn exec_end_agg(_node: &mut AggStateData<'_>) {}
+pub fn exec_end_agg(node: &mut AggStateData<'_>) {
+    node.qual = None;
+    node.perhash = None;
+    node.persort = None;
+    for pa in node.peragg.iter_mut() {
+        pa.finalfn = None;
+    }
+    node.proj.release_frames();
+    node.evaltrans.release_frames();
+    node.ps_ResultTupleDesc = None;
+}
 
 /// `ExecReScanAgg` (nodeAgg.c) AGG_PLAIN arm; the caller rescans the outer
 /// child (chgParam is always NULL until the Param lanes land).
@@ -1162,3 +1172,20 @@ pub fn exec_rescan_agg<'mcx>(node: &mut AggStateData<'mcx>, _estate: &mut EState
     // SAFETY: sole access path to the node during the reset.
     unsafe { node.agg_node.as_mut() }.reset();
 }
+
+mcx::forget_safe_nodrop!(TransTyp);
+
+// Exempt: all released in exec_end_agg (proj/evaltrans via release_frames).
+mcx::forget_safe_struct!(
+    PerAggData { transno, num_final_args, agg_collation, resulttype_len;
+        finalfn },
+    PerSortData<'_> { have_pending; first_slot, pending_slot, eq },
+    PerHashData<'_> { num_cols, hash_grp_col_idx_input, largest_grp_col_idx,
+        outer_natts, pergroup_cell, hash_ngroups_limit, hash_ngroups_current,
+        table_filled, hashiter;
+        hashtable, hashslot, retrieve_slot, first_slot },
+    AggStateData<'_> { plan, ps_ExprContext, tmpcontext, agg_node,
+        ps_ResultTupleSlot, peragg, trans_init, trans_typ, _pergroup,
+        pergroup_base, agg_values_base, agg_nulls_base, agg_done, numtrans;
+        ps_ResultTupleDesc, proj, evaltrans, perhash, persort, qual },
+);

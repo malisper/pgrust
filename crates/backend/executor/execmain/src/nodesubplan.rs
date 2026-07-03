@@ -471,10 +471,7 @@ fn init_hashed_state<'mcx>(
         )?;
 
         let mut flinfo = fmgr_core::fmgr_info(opexpr.opfuncid)?;
-        flinfo.fn_expr = Some(::types_core::fmgr::FnExprErased::from_node_erased::<
-            Node<'mcx>,
-            Node<'static>,
-        >(*op_node));
+        flinfo.fn_expr = Some(::execexpr::erase_fn_expr(mcx, *op_node)?);
         cur_eq_funcs.push(flinfo);
 
         let (_, rhs_eq_oper) = lsyscache::get_compatible_hash_operators(opexpr.opno)?

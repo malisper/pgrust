@@ -20,7 +20,7 @@ pub trait MaterialChild<'mcx> {
 
 pub struct MaterialState<'mcx> {
     pub plan: &'mcx Material<'mcx>,
-    pub ps_ResultTupleDesc: Rc<TupleDescData<'static>>,
+    pub ps_ResultTupleDesc: Option<Rc<TupleDescData<'static>>>,
     pub ps_ResultTupleSlot: ExecSlotId,
     eflags: i32,
     tuplestorestate: Option<Tuplestore>,
@@ -41,7 +41,7 @@ pub fn exec_init_material<'mcx>(
         estate.exec_init_extra_tuple_slot(Some(result_desc.clone()), TupleSlotKind::MinimalTuple);
     Ok(MaterialState {
         plan: node,
-        ps_ResultTupleDesc: result_desc,
+        ps_ResultTupleDesc: Some(result_desc),
         ps_ResultTupleSlot,
         eflags: eflags & (EXEC_FLAG_REWIND | EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK),
         tuplestorestate: None,
@@ -98,6 +98,7 @@ pub fn exec_material<'mcx, C: MaterialChild<'mcx>>(
 
 pub fn exec_end_material(node: &mut MaterialState<'_>) {
     node.tuplestorestate = None;
+    node.ps_ResultTupleDesc = None;
 }
 
 /// `ExecReScanMaterial`; chgParam is always NULL until the Param lanes land,
@@ -132,3 +133,9 @@ pub fn exec_rescan_material<'mcx>(
         true
     }
 }
+
+// Exempt: released in exec_end_material.
+mcx::forget_safe_struct!(
+    MaterialState<'_> { plan, ps_ResultTupleSlot, eflags, eof_underlying;
+        ps_ResultTupleDesc, tuplestorestate },
+);

@@ -24,7 +24,7 @@ mod tests;
 pub struct UniqueState<'mcx> {
     pub plan: &'mcx Unique<'mcx>,
     pub ps_ExprContext: EcxtId,
-    pub ps_ResultTupleDesc: Rc<TupleDescData<'static>>,
+    pub ps_ResultTupleDesc: Option<Rc<TupleDescData<'static>>>,
     pub ps_ResultTupleSlot: ExecSlotId,
     prev_slot: SlotData<'mcx>,
     eq: PgBox<'mcx, ExprState<'mcx>>,
@@ -65,7 +65,7 @@ pub fn exec_init_unique<'mcx>(
     Ok(UniqueState {
         plan: node,
         ps_ExprContext,
-        ps_ResultTupleDesc: result_desc,
+        ps_ResultTupleDesc: Some(result_desc),
         ps_ResultTupleSlot,
         prev_slot,
         eq,
@@ -142,7 +142,11 @@ impl<'mcx> UniqueState<'mcx> {
 }
 
 /// `ExecEndUnique` node-local half; the caller ends the outer child.
-pub fn exec_end_unique(_node: &mut UniqueState<'_>) {}
+pub fn exec_end_unique(node: &mut UniqueState<'_>) {
+    node.prev_slot.base_mut().tts_tupleDescriptor = None;
+    node.eq.release_frames();
+    node.ps_ResultTupleDesc = None;
+}
 
 /// `ExecReScanUnique`; the caller rescans the outer child.
 pub fn exec_rescan_unique<'mcx>(node: &mut UniqueState<'mcx>, estate: &mut EStateData<'mcx>) {
@@ -152,3 +156,9 @@ pub fn exec_rescan_unique<'mcx>(node: &mut UniqueState<'mcx>, estate: &mut EStat
     let result_slot = estate.slot_mut(node.ps_ResultTupleSlot);
     exectuples::exec_clear_tuple(result_slot, mcx);
 }
+
+// Exempt: all released in exec_end_unique (eq via release_frames).
+mcx::forget_safe_struct!(
+    UniqueState<'_> { plan, ps_ExprContext, ps_ResultTupleSlot, have_prev;
+        ps_ResultTupleDesc, prev_slot, eq },
+);

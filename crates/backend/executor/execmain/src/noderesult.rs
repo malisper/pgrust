@@ -157,3 +157,8 @@ pub fn exec_end_result<'mcx>(
         None => Ok(()),
     }
 }
+
+// resconstantqual exempt: an ExprState (fn_extra memos); release_owned takes it.
+::mcx::forget_safe_struct!(
+    ResultState<'_> { ps, outer, rs_done, rs_checkqual; resconstantqual },
+);

@@ -97,6 +97,7 @@ pub fn exec_end_bitmap_index_scan(node: &mut BitmapIndexScanState<'_>) -> PgResu
     if let Some(index_rel) = node.biss_RelationDesc.take() {
         index_close(index_rel, NoLock)?;
     }
+    node.biss_ScanKeys.clear();
     Ok(())
 }
 
@@ -120,3 +121,10 @@ fn check_for_interrupts() {
         interrupt_unported();
     }
 }
+
+// Exempt (every field): droppy owners, all released in
+// exec_end_bitmap_index_scan; the destructure keeps the census exhaustive.
+unsafe impl mcx::ForgetSafe for BitmapIndexScanState<'_> {}
+const _: fn(&BitmapIndexScanState<'_>) = |v| {
+    let BitmapIndexScanState { biss_ScanDesc: _, biss_RelationDesc: _, biss_ScanKeys: _ } = v;
+};

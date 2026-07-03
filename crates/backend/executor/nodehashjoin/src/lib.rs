@@ -42,7 +42,7 @@ pub trait HashJoinOuter<'mcx> {
 pub struct HashJoinState<'mcx> {
     pub plan: &'mcx HashJoin<'mcx>,
     pub ps_ExprContext: EcxtId,
-    pub ps_ResultTupleDesc: Rc<TupleDescData<'static>>,
+    pub ps_ResultTupleDesc: Option<Rc<TupleDescData<'static>>>,
     pub ps_ResultTupleSlot: ExecSlotId,
     proj: PgBox<'mcx, ExprState<'mcx>>,
     hashclauses: Option<PgBox<'mcx, ExprState<'mcx>>>,
@@ -188,7 +188,7 @@ pub fn exec_init_hash_join<'mcx>(
     let hjstate = HashJoinState {
         plan: node,
         ps_ExprContext,
-        ps_ResultTupleDesc: result_desc,
+        ps_ResultTupleDesc: Some(result_desc),
         ps_ResultTupleSlot,
         proj,
         hashclauses,
@@ -676,6 +676,12 @@ pub fn exec_end_hash_join<'mcx>(
         table.destroy()?;
         hash_state.table = None;
     }
+    node.hashclauses = None;
+    node.joinqual = None;
+    node.otherqual = None;
+    node.proj.release_frames();
+    node.outer_hash_expr.release_frames();
+    node.ps_ResultTupleDesc = None;
     ::nodehash::exec_end_hash(hash_state);
     Ok(())
 }
@@ -822,3 +828,14 @@ fn project_result<'mcx>(
     exec_project(&mut node.proj, &mut slots, result, mcx)?;
     Ok(result_id)
 }
+
+// Exempt: all released in exec_end_hash_join.
+mcx::forget_safe_struct!(
+    HashJoinState<'_> { plan, ps_ExprContext, ps_ResultTupleSlot,
+        js_single_match, hj_fill_outer, hj_fill_inner, hj_NullInnerTupleSlot,
+        hj_NullOuterTupleSlot, hj_JoinState, hj_CurHashValue, hj_CurBucketNo,
+        hj_CurTuple, hj_MatchedOuter, hj_OuterNotEmpty, hj_OuterTupleSlot,
+        outer_saved_scratch, inner_saved_scratch, hash_instr;
+        ps_ResultTupleDesc, proj, hashclauses, joinqual, otherqual,
+        outer_hash_expr },
+);

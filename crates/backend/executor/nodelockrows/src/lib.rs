@@ -279,3 +279,9 @@ fn serialization_failure() -> Box<PgError> {
 fn internal(msg: &str) -> Box<PgError> {
     Box::new(PgError::error(msg.to_string()))
 }
+
+mcx::forget_safe_nodrop!(ExecAuxRowMark);
+
+mcx::forget_safe_struct!(
+    LockRowsState<'_> { plan, lr_arowMarks, lr_epq_arowMarks },
+);

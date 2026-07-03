@@ -173,6 +173,14 @@ pub fn get_hash_memory_limit() -> usize {
 }
 
 impl<'mcx> TupleHashTable<'mcx> {
+    /// Global-heap + fn_extra release; the table is then safe to forget.
+    pub fn release(&mut self) {
+        self.hashtab = hashbrown::HashTable::new();
+        self.tab_hash_expr.release_frames();
+        self.tab_eq_func.release_frames();
+        self.tableslot.base_mut().tts_tupleDescriptor = None;
+    }
+
     // C MemoryContextMemAllocated(hash_metacxt); 5 = swiss-table slot+control.
     pub fn meta_mem(&self) -> usize {
         self.entries.capacity() * core::mem::size_of::<TupleHashEntryData>()

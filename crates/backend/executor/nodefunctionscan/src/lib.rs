@@ -35,7 +35,7 @@ struct SetExprState<'mcx> {
 pub struct FunctionScanState<'mcx> {
     pub ss: ScanState<'mcx>,
     setexpr: SetExprState<'mcx>,
-    tupdesc: Rc<TupleDescData<'mcx>>,
+    tupdesc: Option<Rc<TupleDescData<'mcx>>>,
     tstore: Option<Tuplestore>,
     eflags: i32,
 }
@@ -50,7 +50,7 @@ impl<'mcx> ScanNode<'mcx> for FunctionScanState<'mcx> {
         if self.tstore.is_none() {
             let mut store = exec_make_table_function_result(
                 &mut self.setexpr,
-                &self.tupdesc,
+                self.tupdesc.as_ref().expect("function scan already ended"),
                 self.eflags & EXEC_FLAG_BACKWARD != 0,
                 estate,
                 self.ss.ps_ExprContext,
@@ -121,7 +121,7 @@ pub fn exec_init_function_scan<'mcx>(
     execscan::exec_assign_scan_projection_info(mcx, estate, &mut ss, &node.scan.plan.targetlist)?;
     ss.qual = exec_init_qual(mcx, &node.scan.plan.qual, estate.param_bind())?;
 
-    Ok(FunctionScanState { ss, setexpr, tupdesc: Rc::new(tupdesc), tstore: None, eflags })
+    Ok(FunctionScanState { ss, setexpr, tupdesc: Some(Rc::new(tupdesc)), tstore: None, eflags })
 }
 
 fn exec_init_table_function_result<'mcx>(
@@ -269,6 +269,9 @@ pub fn exec_end_function_scan(node: &mut FunctionScanState<'_>) {
     if let Some(store) = node.tstore.take() {
         store.end();
     }
+    node.setexpr.flinfo.fn_extra = None;
+    node.setexpr.args.clear();
+    node.tupdesc = None;
 }
 
 /// `ExecReScanFunctionScan`; the chgParam recompute leg is dead, rewind only.
@@ -282,3 +285,9 @@ pub fn exec_rescan_function_scan<'mcx>(
     }
     Ok(())
 }
+
+// Exempt: all released in exec_end_function_scan.
+mcx::forget_safe_struct!(
+    SetExprState<'_> { collation, returns_set; flinfo, args },
+    FunctionScanState<'_> { ss, setexpr, eflags; tupdesc, tstore },
+);

@@ -1076,6 +1076,18 @@ fn init_case_expr<'mcx>(
     Ok(())
 }
 
+// C sets fn_expr to the bare node pointer; the node value is arena-leaked so
+// the Copy carrier owns nothing.
+pub fn erase_fn_expr<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>) -> PgResult<FnExprErased> {
+    let stored: &Node<'mcx> = ::mcx::forget_box_in(mcx, node)?;
+    // SAFETY: same-layout lifetime erasure for the Any cast; the plan arena
+    // owns the node and outlives the FmgrInfo (from_node_ref's contract).
+    let stored: &Node<'static> =
+        unsafe { core::mem::transmute::<&Node<'mcx>, &Node<'static>>(stored) };
+    // SAFETY: as above — the arena outlives every downcast_ref reader.
+    Ok(unsafe { FnExprErased::from_node_ref(stored) })
+}
+
 fn alloc_bool(mcx: Mcx<'_>) -> PgResult<NonNull<bool>> {
     let layout = core::alloc::Layout::new::<bool>();
     let raw = mcx.allocate(layout).map_err(|_| mcx.oom(layout.size()))?;
@@ -1104,7 +1116,7 @@ fn init_minmax<'mcx>(
         return Err(no_cmp_function(mm.minmaxtype)?);
     }
     let mut flinfo = fmgr_core::fmgr_info(cmp_proc)?;
-    flinfo.fn_expr = Some(FnExprErased::from_node_erased::<Node<'mcx>, Node<'static>>(node));
+    flinfo.fn_expr = Some(erase_fn_expr(mcx, node)?);
     let fn_addr = flinfo.fn_addr;
     let frame = FuncFrame::new_in(mcx, flinfo, 2, mm.inputcollid)?;
     let frame_ix = state.frames.len() as u32;
@@ -1254,7 +1266,7 @@ fn init_func<'mcx>(
     }
 
     let mut flinfo = fmgr_core::fmgr_info(funcid)?;
-    flinfo.fn_expr = Some(FnExprErased::from_node_erased::<Node<'mcx>, Node<'static>>(node));
+    flinfo.fn_expr = Some(erase_fn_expr(mcx, node)?);
     if flinfo.fn_retset {
         return Err(retset_error());
     }

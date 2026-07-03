@@ -15,8 +15,8 @@ exectuples = { path = "../exectuples" }
 executils = { path = "../executils" }
 postgres_seams = { path = "../../tcop/postgres_seams" }
 tuplesort = { path = "../../utils/sort/tuplesort" }
+mcx = { path = "../../../_support/mcx" }
 init_small = { path = "../../utils/init/init_small" }
 
 [dev-dependencies]
-mcx = { path = "../../../_support/mcx" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
