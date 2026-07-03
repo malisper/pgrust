@@ -2092,13 +2092,22 @@ fn deparse_var<'mcx>(
             return Ok(());
         }
     };
-    if varattno <= 0 {
-        node_gap("get_variable", "whole-row/system column deparse (ruleutils lane)");
+    if varattno < 0 {
+        node_gap("get_variable", "system column deparse (ruleutils lane)");
     }
     let rtable = es.rtable.expect("deparse before rtable capture");
     debug_assert!(varno >= 1 && varno as usize <= rtable.len());
     let rte = rtable.nth(varno as usize - 1).as_range_tbl_entry().expect("rtable cell");
     let eref = rte.eref.expect("analyzed RTE always has eref");
+    // C get_variable: whole-row prints refname regardless of varprefix.
+    if varattno == 0 {
+        let refname = es.rtable_names[varno as usize - 1]
+            .or(eref.aliasname)
+            .expect("relation RTE has a refname");
+        push_identifier(buf, refname)?;
+        buf.try_push_str(".*")?;
+        return Ok(());
+    }
     if useprefix {
         let refname = es.rtable_names[varno as usize - 1]
             .or(eref.aliasname)

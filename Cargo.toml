@@ -383,6 +383,7 @@ members = [
     "crates/backend/utils/adt/uuid",
     "crates/backend/utils/adt/network",
     "crates/backend/utils/adt/regproc",
+    "crates/backend/utils/adt/rowtypes",
     "crates/backend/utils/adt/like",
     "crates/backend/utils/adt/oracle_compat",
     "crates/backend/utils/adt/formatting",

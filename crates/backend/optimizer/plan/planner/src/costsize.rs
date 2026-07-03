@@ -1110,7 +1110,27 @@ pub fn set_rel_width<'mcx>(run: &mut PlannerRun<'mcx>, rel: RelId) -> PgResult<(
     }
 
     if have_wholerow_var {
-        panic!("set_rel_width (costsize.c): whole-row Var; M2 lane");
+        let mut wholerow_width: i64 =
+            types_tuple::MAXALIGN(types_tuple::SizeofHeapTupleHeader) as i64;
+        if reloid != 0 {
+            let relation = table::table_open(run.mcx, reloid, types_rel::NoLock)?;
+            let empty = mcx::PgVec::new_in(run.mcx);
+            let mut widths = core::mem::replace(&mut run.root.rel_mut(rel).attr_widths, empty);
+            wholerow_width += crate::plancat::get_rel_data_width(
+                &relation,
+                Some(&mut widths),
+                min_attr,
+            )? as i64;
+            run.root.rel_mut(rel).attr_widths = widths;
+            relation.close(types_rel::NoLock)?;
+        } else {
+            for i in 1..=max_attr {
+                wholerow_width += run.root.rel(rel).attr_widths[(i - min_attr) as usize] as i64;
+            }
+        }
+        let clamped = clamp_width_est(wholerow_width);
+        run.root.rel_mut(rel).attr_widths[(0 - min_attr) as usize] = clamped;
+        tuple_width += wholerow_width;
     }
 
     let width = clamp_width_est(tuple_width);
