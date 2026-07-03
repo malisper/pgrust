@@ -5,7 +5,7 @@ use pg_database::{
     Anum_pg_database_datconnlimit, Anum_pg_database_datname, DatabaseNameIndexId,
     DATCONNLIMIT_INVALID_DB,
 };
-use types_core::catalog::DATABASE_RELATION_ID;
+use types_core::catalog::{C_COLLATION_OID, DATABASE_RELATION_ID};
 use types_core::fmgr::F_NAMEEQ;
 use types_core::{AttrNumber, InvalidOid, Oid};
 use types_error::{
@@ -33,6 +33,7 @@ fn oid_key(attno: i32, arg: Oid) -> ScanKeyData {
     let mut key = ScanKeyData::empty();
     key.sk_attno = attno as AttrNumber;
     key.sk_strategy = BTEqualStrategyNumber;
+    key.sk_collation = C_COLLATION_OID;
     key.sk_func = fmgr_seams::fmgr_info::call(types_core::fmgr::F_OIDEQ)
         .unwrap_or_else(|e| panic!("fmgr_info(oideq) failed: {e:?}"));
     key.sk_argument = Datum::from_oid(arg);
@@ -96,6 +97,7 @@ fn name_key<'mcx>(mcx: Mcx<'mcx>, name: &str) -> PgResult<(mcx::PgBox<'mcx, Name
     let mut key = ScanKeyData::empty();
     key.sk_attno = Anum_pg_database_datname as AttrNumber;
     key.sk_strategy = BTEqualStrategyNumber;
+    key.sk_collation = C_COLLATION_OID;
     key.sk_func = fmgr_seams::fmgr_info::call(F_NAMEEQ)
         .unwrap_or_else(|e| panic!("fmgr_info(nameeq) failed: {e:?}"));
     key.sk_argument = Datum::from_usize(boxed.as_ref() as *const NameData as usize);

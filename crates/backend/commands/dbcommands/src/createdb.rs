@@ -259,6 +259,7 @@ pub fn createdb<'mcx>(mcx: Mcx<'mcx>, stmt: &CreatedbStmt<'mcx>) -> PgResult<Oid
                 return Err(ereport(ERROR)
                     .errcode(ERRCODE_SYNTAX_ERROR)
                     .errmsg(format!("option \"{other}\" not recognized"))
+                    .errposition(defel.location + 1)
                     .into_error()
                     .into());
             }

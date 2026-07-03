@@ -3,7 +3,7 @@
 
 use datum::Datum;
 use mcx::Mcx;
-use types_core::catalog::DATABASE_RELATION_ID;
+use types_core::catalog::{C_COLLATION_OID, DATABASE_RELATION_ID};
 use types_core::fmgr::F_OIDEQ;
 use types_core::{AttrNumber, Oid};
 use types_error::PgResult;
@@ -27,6 +27,7 @@ fn oid_eq_key(attno: i32, arg: Oid) -> ScanKeyData {
     let mut key = ScanKeyData::empty();
     key.sk_attno = attno as AttrNumber;
     key.sk_strategy = BTEqualStrategyNumber;
+    key.sk_collation = C_COLLATION_OID;
     key.sk_func = fmgr_seams::fmgr_info::call(F_OIDEQ)
         .unwrap_or_else(|e| panic!("fmgr_info({F_OIDEQ}) failed: {e:?}"));
     key.sk_argument = Datum::from_oid(arg);

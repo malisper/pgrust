@@ -2062,6 +2062,7 @@ dependencies = [
  "transam_xlog",
  "types_core",
  "types_error",
+ "types_fmgr",
  "types_nodes",
  "types_rel",
  "types_scan",
