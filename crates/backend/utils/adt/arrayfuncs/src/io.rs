@@ -499,6 +499,12 @@ fn read_array_str<'mcx>(
                 if !ok {
                     return Ok(None);
                 }
+                if !is_null && !meta.typbyval {
+                    // Input fc wrappers may return flinfo-scratch-backed bytes
+                    // (fc_textin); batched element datums must own theirs
+                    // (C: per-call palloc inside the input function).
+                    result = copy_byref_datum(mcx, result, meta.typlen)?;
+                }
                 if values.try_reserve(1).is_err() {
                     return Err(Box::new(mcx.oom(8)));
                 }
@@ -521,6 +527,20 @@ fn read_array_str<'mcx>(
     *pos = reader.pos;
     *ndim_p = ndim;
     Ok(Some((nitems, values, nulls)))
+}
+
+fn copy_byref_datum(mcx: Mcx<'_>, d: Datum, typlen: i32) -> PgResult<Datum> {
+    let p = d.as_usize() as *const u8;
+    let size = match typlen {
+        -1 => unsafe { varsize_any(p) },
+        // SAFETY (both arms): d is a live by-ref datum of its declared layout.
+        -2 => unsafe { CStr::from_ptr(p.cast()) }.to_bytes_with_nul().len(),
+        n if n > 0 => n as usize,
+        other => panic!("copy_byref_datum: unexpected typlen {other}"),
+    };
+    // SAFETY: size bytes readable per the datum layout above.
+    let image = unsafe { core::slice::from_raw_parts(p, size) };
+    ::types_fmgr::byref_result(mcx, image)
 }
 
 fn dimension_error<T>(escontext: Option<&mut ErrorSaveNode>, orig: &str, specified: bool) -> PgResult<Option<T>> {
