@@ -324,3 +324,86 @@ fn insert_flush_smoke() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+#[ignore = "child of checkpoint_without_sync_seams_is_loud"]
+fn checkpoint_no_sync_seams_child() {
+    use crate::control_file::*;
+    use std::sync::atomic::Ordering::Relaxed;
+
+    let dir = std::env::temp_dir().join(format!("pgrust_ckpt_test_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for sub in ["global", "pg_wal/archive_status", "pg_wal/summaries"] {
+        std::fs::create_dir_all(dir.join(sub)).unwrap();
+    }
+    std::env::set_current_dir(&dir).unwrap();
+    init_small::globals::SetDataDir(dir.to_str().unwrap());
+    init_small::globals::set_enableFsync(false);
+    shmem::init_seams();
+    guc_tables::init_seams();
+    crate::init_seams();
+    fd::InitFileAccess();
+    lwlock::CreateLWLocks(false).unwrap();
+
+    let seg = 16 * 1024 * 1024;
+    let redo = seg as u64 + SizeOfXLogLongPHD as u64;
+    let mut cf = ControlFileData::ZEROED;
+    cf.system_identifier = 0x1122_3344_5566_7788;
+    cf.pg_control_version = PG_CONTROL_VERSION;
+    cf.catalog_version_no = CATALOG_VERSION_NO;
+    cf.state = DB_SHUTDOWNED;
+    cf.checkPoint = redo;
+    cf.checkPointCopy.redo = redo;
+    cf.checkPointCopy.ThisTimeLineID = 1;
+    cf.checkPointCopy.PrevTimeLineID = 1;
+    cf.checkPointCopy.nextXid = types_core::FullTransactionId::from_epoch_and_xid(0, 3);
+    cf.unloggedLSN = FirstNormalUnloggedLSN;
+    cf.maxAlign = 8;
+    cf.floatFormat = FLOATFORMAT_VALUE;
+    cf.blcksz = 8192;
+    cf.relseg_size = 131072;
+    cf.xlog_blcksz = 8192;
+    cf.xlog_seg_size = seg as u32;
+    cf.nameDataLen = 64;
+    cf.indexMaxKeys = 32;
+    cf.toast_max_chunk_size = TOAST_MAX_CHUNK_SIZE;
+    cf.loblksize = 2048;
+    cf.float8ByVal = true;
+    cf.crc = controldata_utils::crc_of_image(&cf.to_disk_bytes());
+    let mut image = vec![0u8; PG_CONTROL_FILE_SIZE];
+    image[..controldata_utils::SIZEOF_CONTROL_FILE_DATA].copy_from_slice(&cf.to_disk_bytes());
+    std::fs::write(dir.join("global/pg_control"), &image).unwrap();
+    ReadControlFile().unwrap();
+    XLOGShmemInit();
+    crate::ctl::XLogCtl().SharedRecoveryState.store(RECOVERY_STATE_DONE, Relaxed);
+    xlogutils::set_in_recovery(false);
+
+    // Sync seams deliberately NOT installed: the checkpoint must panic
+    // loudly, never report success without fsync.
+    let _ = crate::CreateCheckPoint(CHECKPOINT_IMMEDIATE);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn checkpoint_without_sync_seams_is_loud() {
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "tests::checkpoint_no_sync_seams_child",
+            "--exact",
+            "--ignored",
+            "--test-threads=1",
+            "--nocapture",
+        ])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "checkpoint must not succeed: {out:?}");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        text.contains("seam not installed: sync_seams::"),
+        "must fail loudly at the sync seam, got: {text}"
+    );
+}

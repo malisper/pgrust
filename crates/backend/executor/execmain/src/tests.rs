@@ -18,6 +18,7 @@ use crate::{exec_init_node, exec_proc_node, exec_re_scan};
 
 const INT4OID: u32 = 23;
 const BOOLOID: u32 = 16;
+const INT8OID: u32 = 20;
 
 static SEAMS: Once = Once::new();
 
@@ -42,6 +43,52 @@ fn install_seams() {
                     typstorage: TYPSTORAGE_PLAIN,
                     typcollation: 0,
                 }),
+                INT8OID => Some(PgTypeShape {
+                    typlen: 8,
+                    typbyval: true,
+                    typalign: ::types_tuple::TYPALIGN_DOUBLE,
+                    typstorage: TYPSTORAGE_PLAIN,
+                    typcollation: 0,
+                }),
+                _ => None,
+            })
+        });
+        // pg_aggregate.dat rows for count() 2803 / sum(int4) 2108.
+        syscache_seams::lookup_pg_aggregate_shape::set(|aggfnoid| {
+            Ok(match aggfnoid {
+                2803 => Some(::syscache_seams::PgAggregateShape {
+                    aggkind: b'n' as i8,
+                    aggnumdirectargs: 0,
+                    aggtransfn: 1219,
+                    aggfinalfn: 0,
+                    aggcombinefn: 463,
+                    aggserialfn: 0,
+                    aggdeserialfn: 0,
+                    aggfinalextra: false,
+                    aggfinalmodify: b'r' as i8,
+                    aggtranstype: INT8OID,
+                    aggtransspace: 0,
+                }),
+                2108 => Some(::syscache_seams::PgAggregateShape {
+                    aggkind: b'n' as i8,
+                    aggnumdirectargs: 0,
+                    aggtransfn: 1841,
+                    aggfinalfn: 0,
+                    aggcombinefn: 463,
+                    aggserialfn: 0,
+                    aggdeserialfn: 0,
+                    aggfinalextra: false,
+                    aggfinalmodify: b'r' as i8,
+                    aggtranstype: INT8OID,
+                    aggtransspace: 0,
+                }),
+                _ => None,
+            })
+        });
+        syscache_seams::pg_aggregate_agginitval::set(|mcx, aggfnoid| {
+            Ok(match aggfnoid {
+                2803 => Some(Some(::mcx::PgString::from_str_in("0", mcx).unwrap())),
+                2108 => Some(None),
                 _ => None,
             })
         });
@@ -240,6 +287,8 @@ mod scanfix {
 
     pub static CLOSED: AtomicUsize = AtomicUsize::new(0);
     pub static ACLCHECKED_RELID: AtomicU32 = AtomicU32::new(0);
+    // Serializes fixture users: quiesced()/CLOSED read fixture-global state.
+    pub static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     struct Fake {
         tables: HashMap<Oid, Vec<Buffer>>,
@@ -259,6 +308,11 @@ mod scanfix {
     }
 
     pub fn install() {
+        static INSTALLED: std::sync::Once = std::sync::Once::new();
+        INSTALLED.call_once(install_once);
+    }
+
+    fn install_once() {
         bufmgr_seams::read_buffer::set(|rel, block| {
             with_fake(|f| {
                 let buf = f.tables[&rel.rd_id][block as usize];
@@ -315,8 +369,12 @@ mod scanfix {
 
         miscinit_seams::get_user_id::set(|| 10);
         aclchk_seams::object_aclcheck::set(|classid, objid, _roleid, _mode| {
-            assert_eq!(classid, ::types_core::catalog::RELATION_RELATION_ID);
-            ACLCHECKED_RELID.store(objid, Ordering::Relaxed);
+            // Relations (scans) and procedures (ExecInitAgg's aggfnoid check).
+            if classid == ::types_core::catalog::RELATION_RELATION_ID {
+                ACLCHECKED_RELID.store(objid, Ordering::Relaxed);
+            } else {
+                assert_eq!(classid, ::types_core::catalog::PROCEDURE_RELATION_ID);
+            }
             Ok(0)
         });
 
@@ -535,6 +593,8 @@ fn mk_seqscan_pstmt<'mcx>(mcx: ::mcx::Mcx<'mcx>, relid: u32) -> &'mcx PlannedStm
 fn seqscan_end_to_end_through_real_init_path() {
     install_seams();
     scanfix::install();
+    let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let closed_before = scanfix::CLOSED.load(std::sync::atomic::Ordering::Relaxed);
     let mcx = leaked_mcx();
 
     let relid: u32 = 70001;
@@ -574,7 +634,10 @@ fn seqscan_end_to_end_through_real_init_path() {
         estate.exec_reset_tuple_table(false);
         estate.exec_close_range_table_relations().unwrap();
     });
-    assert_eq!(scanfix::CLOSED.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert_eq!(
+        scanfix::CLOSED.load(std::sync::atomic::Ordering::Relaxed) - closed_before,
+        1
+    );
     scanfix::quiesced();
 }
 
@@ -629,4 +692,242 @@ fn desc_context_stays_flat_across_statements() {
     }
     assert_eq!(ctx.used(), used_after_first, "desc context grew across statements");
     assert_eq!(ctx.peak(), peak_after_first, "desc context peak grew across statements");
+}
+
+#[test]
+fn no_movement_run_does_not_mark_already_executed() {
+    install_seams();
+    let mcx = leaked_mcx();
+    let pstmt = mk_select1_pstmt(mcx, None);
+    let qd = execmain_seams::create_query_desc::call(
+        pstmt,
+        "SELECT 1",
+        None,
+        None,
+        CommandDest::None,
+        ParamListHandle::NULL,
+        QueryEnvHandle::NULL,
+        0,
+    )
+    .unwrap();
+    execmain_seams::executor_start::call(qd, 0).unwrap();
+    let mut dest = DestReceiver::DoNothing;
+
+    // C sets already_executed inside ExecutePlan (execMain.c), which a
+    // NoMovement run never reaches.
+    execmain_seams::executor_run::call(qd, NoMovementScanDirection, 0, &mut dest).unwrap();
+    assert!(!crate::querydesc::with_qd(qd, |d| d.already_executed));
+
+    execmain_seams::executor_run::call(qd, ForwardScanDirection, 0, &mut dest).unwrap();
+    assert!(crate::querydesc::with_qd(qd, |d| d.already_executed));
+
+    execmain_seams::executor_finish::call(qd).unwrap();
+    execmain_seams::executor_end::call(qd).unwrap();
+    execmain_seams::free_query_desc::call(qd);
+}
+
+#[test]
+fn abort_path_free_reclaims_registry_entry() {
+    install_seams();
+    let mcx = leaked_mcx();
+    let pstmt = mk_select1_pstmt(mcx, None);
+    let before = crate::querydesc::registry_len();
+    let qd = execmain_seams::create_query_desc::call(
+        pstmt,
+        "SELECT 1",
+        None,
+        None,
+        CommandDest::None,
+        ParamListHandle::NULL,
+        QueryEnvHandle::NULL,
+        0,
+    )
+    .unwrap();
+    execmain_seams::executor_start::call(qd, 0).unwrap();
+    assert_eq!(crate::querydesc::registry_len(), before + 1);
+
+    // Abort semantics: error recovery releases without ExecutorFinish/End
+    // (C never runs them on abort; portal context reset frees the memory).
+    execmain_seams::release_query_desc::call(qd);
+    assert_eq!(crate::querydesc::registry_len(), before);
+}
+
+// Agg(AGG_PLAIN) over SeqScan on the fake-heap fixture, through the REAL
+// InitPlan path: count(*) child scans with an empty targetlist, sum(a)
+// projects the column and the Aggref arg reads it as an OUTER_VAR.
+fn mk_agg_pstmt<'mcx>(
+    mcx: ::mcx::Mcx<'mcx>,
+    relid: u32,
+    aggfnoid: u32,
+    with_arg: bool,
+) -> &'mcx PlannedStmt<'mcx> {
+    use ::types_nodes::bitmapset::Bitmapset;
+    use ::types_nodes::parsenodes::{RTEKind, RTEPermissionInfo, RangeTblEntry};
+    use ::types_nodes::plannodes::{Agg, Plan, Scan, SeqScan};
+    use ::types_nodes::primnodes::{Aggref, OUTER_VAR};
+
+    let scan_tlist = if with_arg {
+        let var = Node::mk_var(mcx, 1, 1, INT4OID, -1, 0, 0).unwrap();
+        let tle = Node::mk_target_entry(mcx, var, 1, Some("a"), false).unwrap();
+        NodeList::make1(mcx, tle).unwrap()
+    } else {
+        NodeList::nil()
+    };
+    let scan_node = Node::mk(
+        mcx,
+        SeqScan {
+            scan: Scan {
+                plan: Plan { targetlist: scan_tlist, ..Default::default() },
+                scanrelid: 1,
+            },
+        },
+    )
+    .unwrap();
+
+    let mut aggref = Node::build::<Aggref>(mcx).unwrap();
+    aggref.aggfnoid = aggfnoid;
+    aggref.aggtype = INT8OID;
+    aggref.aggtranstype = INT8OID;
+    aggref.aggstar = !with_arg;
+    aggref.aggno = 0;
+    aggref.aggtransno = 0;
+    if with_arg {
+        let arg_var = Node::mk_var(mcx, OUTER_VAR, 1, INT4OID, -1, 0, 0).unwrap();
+        let arg_tle = Node::mk_target_entry(mcx, arg_var, 1, None, false).unwrap();
+        aggref.args = NodeList::make1(mcx, arg_tle).unwrap();
+    }
+    let agg_tle =
+        Node::mk_target_entry(mcx, aggref.seal(), 1, Some("agg"), false).unwrap();
+    let mut agg = Node::build::<Agg>(mcx).unwrap();
+    agg.plan.targetlist = NodeList::make1(mcx, agg_tle).unwrap();
+    agg.plan.lefttree = Some(scan_node);
+    agg.numGroups = 1;
+    let agg_node = agg.seal();
+
+    let rte = Node::mk(
+        mcx,
+        RangeTblEntry {
+            rtekind: RTEKind::RTE_RELATION,
+            relid,
+            relkind: ::types_rel::RELKIND_RELATION,
+            rellockmode: ::types_rel::AccessShareLock,
+            perminfoindex: 1,
+            inFromCl: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let perminfo = Node::mk(
+        mcx,
+        RTEPermissionInfo {
+            relid,
+            requiredPerms: 1 << 1,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let mut unpruned = Bitmapset::empty();
+    unpruned.add_member(mcx, 1).unwrap();
+
+    let mut pstmt = Node::build::<PlannedStmt>(mcx).unwrap();
+    pstmt.commandType = CmdType::CMD_SELECT;
+    pstmt.canSetTag = true;
+    pstmt.planTree = Some(agg_node);
+    pstmt.rtable = NodeList::make1(mcx, rte).unwrap();
+    pstmt.permInfos = NodeList::make1(mcx, perminfo).unwrap();
+    pstmt.unprunableRelids = unpruned;
+    pstmt.seal_ref()
+}
+
+fn run_agg_pstmt(pstmt: &'static PlannedStmt<'static>) -> (Datum, bool) {
+    let snap_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("snap")));
+    let snapshot: snapmgr::Snapshot = std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
+        snap_ctx.mcx(),
+        ::types_snapshot::SnapshotType::SNAPSHOT_MVCC,
+    ));
+    with_exec_data(pstmt, |data, pstmt| {
+        data.estate.es_snapshot = Some(snapshot);
+        let desc = crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap();
+        assert_eq!(desc.natts, 1);
+        assert_eq!(desc.attr(0).atttypid, INT8OID);
+
+        let ExecData { estate, planstate } = data;
+        let ps = planstate.as_mut().unwrap();
+        let slot_id = exec_proc_node(ps, estate).unwrap().expect("one agg row");
+        let (v, isnull) = {
+            let base = estate.slot_mut(slot_id).base();
+            (base.tts_values[0], base.tts_isnull[0])
+        };
+        assert!(exec_proc_node(ps, estate).unwrap().is_none(), "agg emits exactly one row");
+
+        // Rescan re-runs the whole aggregation.
+        exec_re_scan(ps, estate).unwrap();
+        let again = exec_proc_node(ps, estate).unwrap().expect("one agg row after rescan");
+        {
+            let base = estate.slot_mut(again).base();
+            assert_eq!(base.tts_values[0].as_i64(), v.as_i64());
+            assert_eq!(base.tts_isnull[0], isnull);
+        }
+        assert!(exec_proc_node(ps, estate).unwrap().is_none());
+
+        crate::exec_end_node(ps, estate).unwrap();
+        estate.exec_reset_tuple_table(false);
+        estate.exec_close_range_table_relations().unwrap();
+        (v, isnull)
+    })
+}
+
+#[test]
+fn agg_count_star_over_fake_heap_end_to_end() {
+    install_seams();
+    scanfix::install();
+    let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mcx = leaked_mcx();
+    let relid: u32 = 70002;
+    scanfix::register_table(relid, &[&[1, 2, 3], &[4, 5]]);
+    let (v, isnull) = run_agg_pstmt(mk_agg_pstmt(mcx, relid, 2803, false));
+    assert!(!isnull);
+    assert_eq!(v.as_i64(), 5);
+    scanfix::quiesced();
+}
+
+#[test]
+fn agg_sum_over_fake_heap_end_to_end() {
+    install_seams();
+    scanfix::install();
+    let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mcx = leaked_mcx();
+    let relid: u32 = 70003;
+    scanfix::register_table(relid, &[&[1, 2, 3], &[4, 5]]);
+    let (v, isnull) = run_agg_pstmt(mk_agg_pstmt(mcx, relid, 2108, true));
+    assert!(!isnull);
+    assert_eq!(v.as_i64(), 15);
+    scanfix::quiesced();
+}
+
+#[test]
+fn agg_count_star_of_empty_table_is_zero() {
+    install_seams();
+    scanfix::install();
+    let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mcx = leaked_mcx();
+    let relid: u32 = 70004;
+    scanfix::register_table(relid, &[]);
+    let (v, isnull) = run_agg_pstmt(mk_agg_pstmt(mcx, relid, 2803, false));
+    assert!(!isnull);
+    assert_eq!(v.as_i64(), 0);
+    scanfix::quiesced();
+}
+
+#[test]
+fn agg_sum_of_empty_table_is_null() {
+    install_seams();
+    scanfix::install();
+    let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mcx = leaked_mcx();
+    let relid: u32 = 70005;
+    scanfix::register_table(relid, &[]);
+    let (_, isnull) = run_agg_pstmt(mk_agg_pstmt(mcx, relid, 2108, true));
+    assert!(isnull);
+    scanfix::quiesced();
 }

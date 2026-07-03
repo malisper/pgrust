@@ -142,6 +142,21 @@ fn ProcessQuery(
         0,
     )?;
 
+    // C leaves an aborted QueryDesc for the portal-context reset; the
+    // registry entry is owning, so an error here must release it explicitly.
+    run_process_query(query_desc, dest, qc)
+        .inspect_err(|_| execmain_seams::release_query_desc::call(query_desc))?;
+
+    FreeQueryDesc(query_desc);
+
+    Ok(())
+}
+
+fn run_process_query(
+    query_desc: QueryDescHandle,
+    dest: &mut DestReceiver<'_>,
+    qc: Option<&mut QueryCompletion>,
+) -> PgResult<()> {
     execmain_seams::executor_start::call(query_desc, 0)?;
 
     execmain_seams::executor_run::call(query_desc, ForwardScanDirection, 0, dest)?;
@@ -160,11 +175,7 @@ fn ProcessQuery(
     }
 
     execmain_seams::executor_finish::call(query_desc)?;
-    execmain_seams::executor_end::call(query_desc)?;
-
-    FreeQueryDesc(query_desc);
-
-    Ok(())
+    execmain_seams::executor_end::call(query_desc)
 }
 
 pub fn ChoosePortalStrategy(stmts: &[PlannedStmt<'_>]) -> PortalStrategy {
@@ -310,7 +321,10 @@ pub fn PortalStart(
                         eflags
                     };
 
-                execmain_seams::executor_start::call(query_desc, myeflags)?;
+                // Not yet reachable from the portal: release on error or
+                // the registry entry strands.
+                execmain_seams::executor_start::call(query_desc, myeflags)
+                    .inspect_err(|_| execmain_seams::release_query_desc::call(query_desc))?;
 
                 let tup_desc = execmain_seams::query_desc_result_tupdesc::call(query_desc);
                 let mut p = portal.borrow_mut();
@@ -571,10 +585,9 @@ fn FillPortalStore(portal: &Portal<'static>, is_top_level: bool) -> PgResult<()>
     InitializeQueryCompletion(&mut qc);
 
     portalmem::PortalCreateHoldStore(portal)?;
-    // Panics until the tuplestore receiver unit lands; its
-    // SetTuplestoreDestReceiverParams(holdStore, holdContext, false) call
-    // belongs to that unit and lands with the constructor.
+    // C also passes holdContext; it lives inside the store behind the handle.
     let mut treceiver = tcop_dest::CreateDestReceiver(CommandDest::Tuplestore);
+    tcop_dest::SetTuplestoreDestReceiverParams(&mut treceiver, portal.borrow().holdStore, false);
 
     let strategy = portal.borrow().strategy;
     match strategy {
@@ -635,7 +648,7 @@ fn RunFromStore(
     };
     let mcx = ctx.mcx();
 
-    dest.startup(mcx, CmdType::CMD_SELECT as i32, &tup_desc)?;
+    dest.startup(CmdType::CMD_SELECT as i32, &tup_desc)?;
 
     let mut slot =
         exectuples::make_tuple_table_slot(mcx, TupleSlotKind::MinimalTuple, Some(tup_desc));

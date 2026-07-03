@@ -537,9 +537,9 @@ fn CheckPointGuts(check_point_redo: XLogRecPtr, flags: i32) -> PgResult<()> {
     }
     bufmgr_seams::check_point_buffers::call(flags)?;
 
-    if sync_seams::process_sync_requests::is_installed() {
-        sync_seams::process_sync_requests::call()?;
-    }
+    // Unconditional (loud panic if uninstalled): a checkpoint that skips
+    // ProcessSyncRequests fsyncs nothing yet still updates pg_control.
+    sync_seams::process_sync_requests::call()?;
 
     if twophase_seams::check_point_two_phase::is_installed() {
         twophase_seams::check_point_two_phase::call(check_point_redo)?;
@@ -575,9 +575,7 @@ pub fn CreateCheckPoint(flags: i32) -> PgResult<bool> {
     CKPT_SEGS_ADDED.set(0);
     CKPT_SLRU_WRITTEN.set(0);
 
-    if sync_seams::sync_pre_checkpoint::is_installed() {
-        sync_seams::sync_pre_checkpoint::call()?;
-    }
+    sync_seams::sync_pre_checkpoint::call()?;
 
     init_small::globals::StartCriticalSection();
 
@@ -731,9 +729,7 @@ pub fn CreateCheckPoint(flags: i32) -> PgResult<bool> {
 
     init_small::globals::EndCriticalSection();
 
-    if sync_seams::sync_post_checkpoint::is_installed() {
-        sync_seams::sync_post_checkpoint::call()?;
-    }
+    sync_seams::sync_post_checkpoint::call()?;
 
     // RemoveOldXlogFiles / KeepLogSeg / slot invalidation: WAL retention is
     // deferred (M1 clusters never fill a segment budget); segments accumulate.

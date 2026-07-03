@@ -477,6 +477,32 @@ fn checkpoint_balances_across_tablespaces() {
 }
 
 #[test]
+fn checksum_copy_leaves_shared_page_untouched() {
+    setup_write_seams();
+    let mut page = Box::new([0u8; BLCKSZ]);
+    for (i, b) in page.iter_mut().enumerate() {
+        *b = (i & 0xff) as u8;
+    }
+    page[14..16].copy_from_slice(&100u16.to_ne_bytes()); // not PageIsNew
+    let orig = *page;
+    crate::write::with_checksummed_page(page.as_ptr(), 7, |out| {
+        assert_ne!(out.as_ptr(), page.as_ptr(), "checksummed image must be a private copy");
+        let mut want = orig;
+        want[8..10].fill(0);
+        let sum = crate::write::page_checksum_for_tests(&want, 7);
+        assert_eq!(u16::from_ne_bytes([out[8], out[9]]), sum);
+        assert_eq!(out[10..], want[10..]);
+    });
+    assert_eq!(page[..], orig[..], "shared page must not be mutated");
+
+    // C PageSetChecksumCopy returns the input page itself when PageIsNew.
+    let newpage = Box::new([0u8; BLCKSZ]);
+    crate::write::with_checksummed_page(newpage.as_ptr(), 7, |out| {
+        assert_eq!(out.as_ptr(), newpage.as_ptr());
+    });
+}
+
+#[test]
 fn checksum_matches_c_reference() {
     // clang -O2 of storage/checksum_impl.h on this machine (pd_checksum
     // zeroed, patterned page byte = (i*37+11) & 0xff).

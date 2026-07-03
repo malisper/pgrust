@@ -14,15 +14,19 @@ catalog_namespace = { path = "../../catalog/catalog_namespace" }
 coerce = { path = "../coerce" }
 datum = { path = "../../../_support/types/datum" }
 elog = { path = "../../utils/error/elog" }
+format_type = { path = "../../utils/adt/format_type" }
 inval = { path = "../../utils/cache/inval" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
 mbutils = { path = "../../utils/mb/mbutils" }
 mcx = { path = "../../../_support/mcx" }
 parser_small1 = { path = "../parser_small1" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
+typcache = { path = "../../utils/cache/typcache" }
 types_core = { path = "../../../_support/types/types_core" }
 types_error = { path = "../../../_support/types/types_error" }
 types_nodes = { path = "../../../_support/types/nodes" }
 
 [dev-dependencies]
+types_tuple = { path = "../../../_support/types/types_tuple" }
 miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+indexcmds_seams = { path = "../../commands/indexcmds_seams" }

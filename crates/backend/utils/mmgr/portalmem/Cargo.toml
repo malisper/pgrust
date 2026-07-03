@@ -13,8 +13,8 @@ types_portal = { path = "../../../../_support/types/portal" }
 types_resowner = { path = "../../../../_support/types/types_resowner" }
 types_snapshot = { path = "../../../../_support/types/snapshot" }
 
+execmain_seams = { path = "../../../executor/execmain_seams" }
 ipc_portal_seams = { path = "../../../storage/ipc/ipc_portal_seams" }
-portalmem_seams = { path = "../portalmem_seams" }
 plancache_portal_seams = { path = "../../cache/plancache_portal_seams" }
 portalcmds_seams = { path = "../../../commands/portalcmds_seams" }
 resowner_portal_seams = { path = "../../resowner/resowner_portal_seams" }

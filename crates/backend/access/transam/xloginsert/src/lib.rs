@@ -83,6 +83,14 @@ fn too_much_wal_data(detail: String) -> Box<PgError> {
     Box::new(PgError::new(ERROR, format!("too much WAL data: {detail}")))
 }
 
+#[cold]
+fn misordered_block_ids(prev: u8, cur: u8) -> Box<PgError> {
+    Box::new(PgError::new(
+        ERROR,
+        format!("block IDs must be registered in ascending order: {cur} after {prev}"),
+    ))
+}
+
 fn page_lsn(page: &[u8]) -> XLogRecPtr {
     // pd_lsn is two u32 halves (PageXLogRecPtr): xlogid @0, xrecoff @4.
     let hi = u32::from_ne_bytes(page[0..4].try_into().unwrap());
@@ -179,7 +187,11 @@ fn assemble(
     // a non-empty setting), so no per-rmid probe here.
 
     for (i, blk) in blocks.iter().enumerate() {
-        debug_assert!(i == 0 || blk.block_id > blocks[i - 1].block_id);
+        // C indexes registered_buffers by block_id; unchecked disorder here
+        // would emit CRC-valid undecodable WAL.
+        if i > 0 && blk.block_id <= blocks[i - 1].block_id {
+            return Err(misordered_block_ids(blocks[i - 1].block_id, blk.block_id));
+        }
         if blk.block_id as usize > XLR_MAX_BLOCK_ID {
             return Err(Box::new(PgError::new(
                 ERROR,
@@ -331,7 +343,12 @@ fn assemble(
     }
 
     if record_flags & transam_xlog::XLOG_INCLUDE_ORIGIN != 0 {
-        let origin = origin_seams::replorigin_session_origin::call();
+        // Uninstalled seam = C default InvalidRepOriginId (origin.c).
+        let origin = if origin_seams::replorigin_session_origin::is_installed() {
+            origin_seams::replorigin_session_origin::call()
+        } else {
+            InvalidRepOriginId
+        };
         if origin != InvalidRepOriginId {
             hdr[sp] = XLR_BLOCK_ID_ORIGIN;
             hdr[sp + 1..sp + 3].copy_from_slice(&origin.to_ne_bytes());

@@ -10,6 +10,16 @@ use types_core::{Oid, TransactionId};
 use types_core::xact::XlXactStatsItem;
 use types_storage::{RelFileLocator, SharedInvalidationMessage, SHARED_INVALIDATION_MESSAGE_SIZE};
 
+// C default: replorigin_session_origin = InvalidRepOriginId (origin.c);
+// seam uninstalled until replication origins land.
+fn session_origin_or_default() -> types_core::RepOriginId {
+    if origin_seams::replorigin_session_origin::is_installed() {
+        origin_seams::replorigin_session_origin::call()
+    } else {
+        types_core::InvalidRepOriginId
+    }
+}
+
 fn oom() -> Box<PgError> {
     Box::new(PgError::error("out of memory building transaction WAL record"))
 }
@@ -125,7 +135,7 @@ pub fn XactLogCommitRecord(
         }
     }
 
-    let session_origin = origin_seams::replorigin_session_origin::call();
+    let session_origin = session_origin_or_default();
     if session_origin != types_core::InvalidRepOriginId {
         xinfo |= XACT_XINFO_HAS_ORIGIN;
     }
@@ -284,7 +294,7 @@ pub fn XactLogAbortRecord(
         ts_id = init_small::globals::MyDatabaseTableSpace();
     }
 
-    let session_origin = origin_seams::replorigin_session_origin::call();
+    let session_origin = session_origin_or_default();
     if session_origin != types_core::InvalidRepOriginId {
         xinfo |= XACT_XINFO_HAS_ORIGIN;
     }

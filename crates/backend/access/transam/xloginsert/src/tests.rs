@@ -104,6 +104,94 @@ fn assemble_unsafe_patterns() {
     scratch.rdatas.clear();
 }
 
+#[test]
+fn misordered_block_ids_error_in_release() {
+    init_once();
+    let mut scratch = Scratch {
+        hdr: Box::new([0u8; HEADER_SCRATCH_SIZE]),
+        rdatas: Vec::with_capacity(XLR_NORMAL_RDATAS),
+        compressed: Vec::new(),
+    };
+    let page = standard_page(0x00, 64, 8000);
+    let rloc = RelFileLocator::new(1663, 5, 24576);
+    let mk = |id: u8| RegBlock {
+        block_id: id,
+        rlocator: rloc,
+        forknum: ForkNumber::MAIN_FORKNUM,
+        block: id as BlockNumber,
+        page: &page[..],
+        flags: REGBUF_NO_IMAGE,
+        bufdata: &[],
+    };
+
+    for ids in [[1u8, 0u8], [1u8, 1u8]] {
+        let err = assemble(
+            &mut scratch,
+            RM_XLOG_ID,
+            0x20,
+            0,
+            false,
+            0,
+            &[],
+            &[mk(ids[0]), mk(ids[1])],
+        );
+        let err = match err {
+            Err(e) => e,
+            Ok(_) => panic!("misordered block IDs must fail"),
+        };
+        assert!(
+            err.message().contains("ascending order"),
+            "got: {}",
+            err.message()
+        );
+        scratch.rdatas.clear();
+    }
+}
+
+#[test]
+#[ignore = "child of include_origin_works_without_origin_seam"]
+fn include_origin_uninstalled_child() {
+    // Runs in a fresh process: origin seam deliberately NOT installed.
+    assert!(!origin_seams::replorigin_session_origin::is_installed());
+    shmem::init_seams();
+    guc_tables::init_seams();
+    transam_xlog::init_seams();
+    let mut scratch = Scratch {
+        hdr: Box::new([0u8; HEADER_SCRATCH_SIZE]),
+        rdatas: Vec::with_capacity(XLR_NORMAL_RDATAS),
+        compressed: Vec::new(),
+    };
+    let main = [0x77u8; 10];
+    let asm = assemble(
+        &mut scratch,
+        RM_XLOG_ID,
+        0x20,
+        0,
+        false,
+        transam_xlog::XLOG_INCLUDE_ORIGIN,
+        &[&main],
+        &[],
+    )
+    .unwrap();
+    // InvalidRepOriginId default: record header + short main-data header only.
+    assert_eq!(asm.hdr_len, SizeOfXLogRecord + 2);
+    scratch.rdatas.clear();
+}
+
+#[test]
+fn include_origin_works_without_origin_seam() {
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "tests::include_origin_uninstalled_child",
+            "--exact",
+            "--ignored",
+            "--test-threads=1",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "child failed: {out:?}");
+}
+
 struct SegFileRead {
     wal_dir: std::path::PathBuf,
 }
@@ -324,7 +412,18 @@ fn assemble_insert_decode_roundtrip() {
     )
     .unwrap();
 
-    transam_xlog::XLogFlush(lsn4).unwrap();
+    // Record 5: XLOG_INCLUDE_ORIGIN with the session origin at its C default
+    // (InvalidRepOriginId) must emit no origin field.
+    let main5 = [0x55u8; 8];
+    let lsn5 = xloginsert_seams::xlog_insert_with_flags::call(
+        RM_XLOG_ID,
+        0x20,
+        transam_xlog::XLOG_INCLUDE_ORIGIN,
+        &[&main5],
+    )
+    .unwrap();
+
+    transam_xlog::XLogFlush(lsn5).unwrap();
 
     // Decode everything back off disk.
     let context: &'static mcx::MemoryContext =
@@ -378,6 +477,11 @@ fn assemble_insert_decode_roundtrip() {
     assert_eq!(reader.XLogRecGetBlockData(1).unwrap(), &want_d1[..]);
     let (loc1, _, blk1, _) = reader.XLogRecGetBlockTagExtended(1).unwrap();
     assert_eq!((loc1, blk1), (rloc, 10)); // BKPBLOCK_SAME_REL round-trips
+
+    let _ = reader.XLogReadRecord(&mut routine).unwrap().unwrap();
+    assert_eq!(reader.v.EndRecPtr, lsn5);
+    assert_eq!(reader.XLogRecGetData(), &main5[..]);
+    assert_eq!(reader.XLogRecGetOrigin(), 0); // no origin block emitted
 
     let _ = std::fs::remove_dir_all(&dir);
 }

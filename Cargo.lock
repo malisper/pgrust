@@ -2802,9 +2802,11 @@ dependencies = [
  "parser_small1",
  "stack_depth",
  "syscache_seams",
+ "table",
  "types_core",
  "types_error",
  "types_nodes",
+ "types_rel",
  "types_tuple",
  "vars",
 ]

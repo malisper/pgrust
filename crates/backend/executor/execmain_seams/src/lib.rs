@@ -33,6 +33,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // Abort-path reclamation: C frees the QueryDesc with the portal context
+    // and never runs ExecutorEnd; snapshot registrations are the resource
+    // owner's to release.
+    pub fn release_query_desc(query_desc: QueryDescHandle)
+);
+
+seam_core::seam!(
     pub fn executor_start(query_desc: QueryDescHandle, eflags: i32) -> PgResult<()>
 );
 

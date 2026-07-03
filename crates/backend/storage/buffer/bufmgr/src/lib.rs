@@ -210,8 +210,6 @@ pub fn init_seams() {
     bufmgr_seams::buffer_page_get_lsn::set(ops::buffer_page_get_lsn);
     bufmgr_seams::buffer_page_set_lsn::set(ops::buffer_page_set_lsn);
     bufmgr_seams::overwrite_buffer_page::set(ops::overwrite_buffer_page);
-    bufmgr_seams::at_eoxact_buffers::set(pin::AtEOXact_Buffers);
-    bufmgr_seams::unlock_buffers::set(pin::UnlockBuffers);
     bufmgr_seams::read_buffer::set(ReadBuffer);
     bufmgr_seams::release_and_read_buffer::set(ReleaseAndReadBuffer);
     bufmgr_seams::read_buffer_strategy::set(|rel, blkno, strategy| {
