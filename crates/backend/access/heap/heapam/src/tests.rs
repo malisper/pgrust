@@ -829,6 +829,7 @@ fn install_dml_seams() {
         });
         miscinit_seams::is_bootstrap_processing_mode::set(|| false);
         catalog_seams::is_catalog_relation::set(|_rel| false);
+        snapmgr_seams::transaction_xmin::set(|| FAKE_XID);
     });
 }
 
@@ -1163,5 +1164,82 @@ fn dml_row_too_big_is_54000() {
     let rel = test_relation(mcx, oid);
     let err = hio::RelationGetBufferForTuple(&rel, BLCKSZ, None, 0, None, 0).unwrap_err();
     assert_eq!(err.sqlstate(), ::types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED);
+    quiesced();
+}
+
+#[test]
+fn dml_speculative_insert_finish() {
+    install_dml_seams();
+    let _serial = serial();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let oid = fresh_oid();
+    register_table(oid, vec![]);
+    let rel = test_relation(mcx, oid);
+    let _ = take_xlog();
+
+    let mut tup = make_writable_tuple(&tuple_image(0, 0, 41));
+    tup.t_data_mut().set_speculative_token(7);
+    dml::heap_insert(&rel, &mut tup, 7, hio::HEAP_INSERT_SPECULATIVE).unwrap();
+    let tid = tup.t_self;
+
+    let stored = page_tuple_at(oid, 0, 1);
+    assert!(stored.t_data().is_speculative());
+    assert_eq!(stored.t_data().speculative_token(), 7);
+
+    dml::heap_finish_speculative(&rel, &tid).unwrap();
+    let stored = page_tuple_at(oid, 0, 1);
+    assert!(!stored.t_data().is_speculative());
+    assert_eq!(stored.t_data().t_ctid, tid);
+    assert_eq!(stored.t_data().xmin_raw(), FAKE_XID);
+
+    let recs = take_xlog();
+    assert_eq!(recs.len(), 2);
+    assert_eq!(recs[0].0, dml::XLOG_HEAP_INSERT | dml::XLOG_HEAP_INIT_PAGE);
+    // xl_heap_insert flags carry XLH_INSERT_IS_SPECULATIVE
+    assert_eq!(recs[0].1[2] & dml::XLH_INSERT_IS_SPECULATIVE, dml::XLH_INSERT_IS_SPECULATIVE);
+    assert_eq!(recs[1].0, dml::XLOG_HEAP_CONFIRM);
+    // xl_heap_confirm: offnum
+    assert_eq!(u16::from_ne_bytes([recs[1].1[0], recs[1].1[1]]), 1);
+    quiesced();
+}
+
+#[test]
+fn dml_speculative_insert_abort_super_deletes() {
+    install_dml_seams();
+    let _serial = serial();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let oid = fresh_oid();
+    register_table(oid, vec![]);
+    let rel = test_relation(mcx, oid);
+    let _ = take_xlog();
+
+    let mut tup = make_writable_tuple(&tuple_image(0, 0, 41));
+    tup.t_data_mut().set_speculative_token(9);
+    dml::heap_insert(&rel, &mut tup, 7, hio::HEAP_INSERT_SPECULATIVE).unwrap();
+    let tid = tup.t_self;
+    let _ = take_xlog();
+
+    dml::heap_abort_speculative(&rel, &tid).unwrap();
+    let stored = page_tuple_at(oid, 0, 1);
+    assert_eq!(stored.t_data().xmin_raw(), 0, "xmin invalid: dead to everyone");
+    assert!(!stored.t_data().is_speculative());
+    assert_eq!(stored.t_data().t_ctid, tid);
+    assert!((stored.t_data().t_infomask2 & HEAP_KEYS_UPDATED) == 0);
+
+    let buf = with_fake(|f| f.tables[&oid][0]);
+    let addr = with_fake(|f| f.pages[(buf - 1) as usize]);
+    // SAFETY: leaked test page.
+    let page = unsafe { PageRef::from_raw(NonNull::new(addr as *mut u8).unwrap()) };
+    assert_eq!(page.prune_xid(), FAKE_XID);
+
+    let recs = take_xlog();
+    assert_eq!(recs.len(), 1);
+    assert_eq!(recs[0].0, dml::XLOG_HEAP_DELETE);
+    // xl_heap_delete: xmax(4) offnum(2) infobits(1) flags(1)
+    assert_eq!(u32::from_ne_bytes(recs[0].1[0..4].try_into().unwrap()), FAKE_XID);
+    assert_eq!(u16::from_ne_bytes([recs[0].1[4], recs[0].1[5]]), 1);
+    assert_eq!(recs[0].1[7], dml::XLH_DELETE_IS_SUPER);
     quiesced();
 }

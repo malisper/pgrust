@@ -256,27 +256,51 @@ mod heap {
         Ok(())
     }
 
+    // heapam_tuple_insert_speculative (heapam_handler.c): the token is stamped
+    // into t_ctid before insert; hio asserts it when placing the tuple.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn tuple_insert_speculative<'mcx>(
-        _mcx: Mcx<'mcx>,
-        _rel: &Relation<'mcx>,
-        _slot: &mut SlotData<'mcx>,
-        _cid: CommandId,
-        _options: i32,
-        _bistate: Option<&mut BulkInsertStateData>,
-        _spec_token: u32,
+        mcx: Mcx<'mcx>,
+        rel: &Relation<'mcx>,
+        slot: &mut SlotData<'mcx>,
+        cid: CommandId,
+        options: i32,
+        bistate: Option<&mut BulkInsertStateData>,
+        spec_token: u32,
     ) -> PgResult<()> {
-        unported(DML_UNIT)
+        debug_assert!(bistate.is_none(), "GetBulkInsertState lane (COPY) not ported");
+        exectuples::exec_materialize_slot(slot, mcx)?;
+        slot.base_mut().tts_tableOid = rel.rd_id;
+        let tuple = match slot {
+            SlotData::Heap(h) => h.tuple.as_mut(),
+            SlotData::BufferHeap(b) => b.base.tuple.as_mut(),
+            _ => panic!(
+                "heapam_tuple_insert_speculative (heapam_handler.c): non-heap slot \
+                 copy arm not ported"
+            ),
+        }
+        .expect("materialized heap slot holds a tuple");
+        tuple.t_tableOid = rel.rd_id;
+        tuple.t_data_mut().set_speculative_token(spec_token);
+        ::heapam::heap_insert(rel, tuple, cid, options | ::heapam::hio::HEAP_INSERT_SPECULATIVE)?;
+        let t_self = tuple.t_self;
+        slot.base_mut().tts_tid = t_self;
+        Ok(())
     }
 
     pub(super) fn tuple_complete_speculative<'mcx>(
         _mcx: Mcx<'mcx>,
-        _rel: &Relation<'mcx>,
-        _slot: &mut SlotData<'mcx>,
+        rel: &Relation<'mcx>,
+        slot: &mut SlotData<'mcx>,
         _spec_token: u32,
-        _succeeded: bool,
+        succeeded: bool,
     ) -> PgResult<()> {
-        unported(DML_UNIT)
+        let tid = slot.base().tts_tid;
+        if succeeded {
+            ::heapam::heap_finish_speculative(rel, &tid)
+        } else {
+            ::heapam::heap_abort_speculative(rel, &tid)
+        }
     }
 
     // heapam_multi_insert (heapam_handler.c).

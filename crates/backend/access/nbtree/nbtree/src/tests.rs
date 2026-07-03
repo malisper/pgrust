@@ -989,6 +989,44 @@ fn unique_index_rejects_live_duplicate() {
 }
 
 #[test]
+fn unique_check_partial_reports_conflict_and_inserts_anyway() {
+    install();
+    build_empty_index(false);
+    HEAP_PAGES.with(|p| {
+        p.borrow_mut().push(build_heap_page(&[10, 20, 30]));
+    });
+    let cx = MemoryContext::new("t");
+    let rel = index_rel_opts(cx.mcx(), true);
+    prime_supportinfo(&rel);
+    let heap = heap_relation(cx.mcx());
+
+    let partial_insert = |k: i32, htid: ItemPointerData| {
+        let icx = MemoryContext::new("ins");
+        crate::btinsert(
+            icx.mcx(),
+            &rel,
+            &[Datum::from_i32(k)],
+            &[false],
+            &htid,
+            &heap,
+            ::types_nbtree::genam::IndexUniqueCheck::UNIQUE_CHECK_PARTIAL,
+            false,
+        )
+    };
+
+    assert!(partial_insert(10, tid(0, 1)).unwrap());
+    assert!(partial_insert(20, tid(0, 2)).unwrap());
+    assert!(partial_insert(30, tid(0, 3)).unwrap());
+
+    // Duplicate under PARTIAL: no error, is_unique=false, entry still inserted.
+    assert!(!partial_insert(20, tid(0, 3)).unwrap());
+    let seen = drain_forward(cx.mcx(), &rel);
+    assert_eq!(seen.len(), 4, "conflicting entry was inserted");
+
+    assert_eq!(PINS.with(Cell::get), 0, "no pins leaked");
+}
+
+#[test]
 fn allequalimage_distinct_keys_dedup_is_noop_then_split() {
     install();
     build_empty_index(true);

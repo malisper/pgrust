@@ -55,6 +55,12 @@ pub struct SnapshotData<'mcx> {
     // (SnapshotSetCommandId / UpdateActiveSnapshotCommandId).
     pub curcid: Cell<CommandId>,
     pub speculativeToken: u32,
+    // SnapshotDirty out-params for probes behind the shared &Snapshot seam
+    // (index fetch): the marshal copies the per-tuple write-back here, since
+    // the C &mut xmin/xmax channel isn't reachable through that seam.
+    pub dirty_xmin: Cell<TransactionId>,
+    pub dirty_xmax: Cell<TransactionId>,
+    pub dirty_speculative_token: Cell<u32>,
     pub vistest: GlobalVisStateHandle,
     pub active_count: Cell<u32>,
     pub regd_count: Cell<u32>,
@@ -77,6 +83,9 @@ impl<'mcx> SnapshotData<'mcx> {
             copied: false,
             curcid: Cell::new(0),
             speculativeToken: 0,
+            dirty_xmin: Cell::new(0),
+            dirty_xmax: Cell::new(0),
+            dirty_speculative_token: Cell::new(0),
             vistest: GlobalVisStateHandle::new(0),
             active_count: Cell::new(0),
             regd_count: Cell::new(0),
