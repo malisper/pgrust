@@ -78,6 +78,7 @@ lmgr = { path = "../../backend/storage/lmgr/lmgr" }
 lock = { path = "../../backend/storage/lmgr/lock" }
 smgr = { path = "../../backend/storage/smgr/smgr" }
 sync = { path = "../../backend/storage/sync/sync" }
+freespace = { path = "../../backend/storage/freespace/freespace" }
 backend_startup = { path = "../../backend/tcop/backend_startup" }
 tcop_dest = { path = "../../backend/tcop/dest" }
 postgres = { path = "../../backend/tcop/postgres" }
@@ -119,7 +120,6 @@ queryenvironment = { path = "../../backend/utils/misc/queryenvironment" }
 stack_depth = { path = "../../backend/utils/misc/stack_depth" }
 superuser = { path = "../../backend/utils/misc/superuser" }
 timeout = { path = "../../backend/utils/misc/timeout" }
-portalmem = { path = "../../backend/utils/mmgr/portalmem" }
 tuplestore = { path = "../../backend/utils/sort/tuplestore" }
 resowner = { path = "../../backend/utils/resowner/resowner" }
 snapmgr = { path = "../../backend/utils/time/snapmgr" }

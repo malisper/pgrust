@@ -130,6 +130,8 @@ members = [
     "crates/backend/executor/nodemodifytable",
     "crates/backend/executor/nodeseqscan",
     "crates/backend/executor/nodeindexscan",
+    "crates/backend/executor/nodebitmapindexscan",
+    "crates/backend/executor/nodebitmapheapscan",
     "crates/backend/executor/nodeindexonlyscan",
     "crates/backend/executor/nodesort",
     "crates/backend/executor/nodelimit",
