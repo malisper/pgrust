@@ -1209,16 +1209,19 @@ fn match_clause_to_partition_key<'mcx>(
                     }
                     return Ok(PartClauseMatchStatus::MatchContradict);
                 }
-                let mut c = Node::build::<types_nodes::primnodes::Const>(mcx)?;
-                c.consttype = elemtype;
-                c.consttypmod = -1;
-                c.constcollid = arr.constcollid;
-                c.constlen = elmlen as i32;
-                c.constvalue = v;
-                c.constisnull = false;
-                c.constbyval = elmbyval;
-                c.location = -1;
-                elem_exprs.push(c.seal());
+                elem_exprs.push(Node::mk(
+                    mcx,
+                    types_nodes::primnodes::Const {
+                        consttype: elemtype,
+                        consttypmod: -1,
+                        constcollid: arr.constcollid,
+                        constlen: elmlen as i32,
+                        constvalue: v,
+                        constisnull: false,
+                        constbyval: elmbyval,
+                        location: -1,
+                    },
+                )?);
             }
         } else if let Some(arrexpr) = rightop.as_array_expr() {
             if arrexpr.multidims {
