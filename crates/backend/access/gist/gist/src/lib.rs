@@ -86,7 +86,7 @@ pub fn gistinsert<'mcx>(
     if amcache.is_none() {
         *amcache = Some(GistInsertAmCache {
             giststate: initGISTstate(r)?,
-            temp: MemoryContext::new("GiST temporary context"),
+            temp: MemoryContext::new_bump("GiST temporary context"),
         });
     }
     let cache = amcache.as_mut().expect("just initialized");

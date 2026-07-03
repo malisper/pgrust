@@ -36,7 +36,7 @@ pub fn gistbeginscan<'mcx>(
     let giststate = initGISTstate(r)?;
     let so = GISTScanOpaqueData {
         giststate,
-        temp: ::mcx::MemoryContext::new("GiST temporary context"),
+        temp: ::mcx::MemoryContext::new_bump("GiST temporary context"),
         queue: PairingHeap::new(
             gist_search_item_cmp
                 as fn(
