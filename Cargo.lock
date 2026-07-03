@@ -8638,6 +8638,7 @@ dependencies = [
  "parse_relation",
  "readfuncs",
  "relcache",
+ "rewrite_manip",
  "rls_seams",
  "table",
  "types_core",
