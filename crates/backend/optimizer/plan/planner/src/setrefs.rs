@@ -211,6 +211,36 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
             fix_scan_list(run, &s.scan.plan.qual, rtoffset, 2.0 * s.scan.plan.plan_rows)?;
             fix_scan_list(run, &s.bitmapqualorig, rtoffset, 2.0 * s.scan.plan.plan_rows)?;
         }
+        NodeTag::T_BitmapAnd => {
+            let s = plan.as_bitmap_and().unwrap();
+            debug_assert!(s.plan.targetlist.is_nil() && s.plan.qual.is_nil());
+            let mut fixed = NodeList::nil();
+            for child in &s.bitmapplans {
+                fixed.lappend(run.mcx, set_plan_refs(run, child, rtoffset)?)?;
+            }
+            // SAFETY: exclusive plan-tree ownership (prologue note).
+            unsafe {
+                plan.with_mut::<types_nodes::plannodes::BitmapAnd, _>(|s| {
+                    s.bitmapplans = fixed;
+                })
+            }
+            .expect("BitmapAnd node");
+        }
+        NodeTag::T_BitmapOr => {
+            let s = plan.as_bitmap_or().unwrap();
+            debug_assert!(s.plan.targetlist.is_nil() && s.plan.qual.is_nil());
+            let mut fixed = NodeList::nil();
+            for child in &s.bitmapplans {
+                fixed.lappend(run.mcx, set_plan_refs(run, child, rtoffset)?)?;
+            }
+            // SAFETY: exclusive plan-tree ownership (prologue note).
+            unsafe {
+                plan.with_mut::<types_nodes::plannodes::BitmapOr, _>(|s| {
+                    s.bitmapplans = fixed;
+                })
+            }
+            .expect("BitmapOr node");
+        }
         NodeTag::T_FunctionScan => {
             let s = plan.as_function_scan().unwrap();
             debug_assert!(s.scan.scanrelid as i32 + rtoffset > 0);

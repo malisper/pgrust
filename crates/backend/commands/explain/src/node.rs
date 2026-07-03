@@ -123,6 +123,17 @@ fn ExplainPreScanNode<'mcx>(
                 ExplainPreScanNode(mcx, child, subplans, rels_used)?;
             }
         }
+        // planstate_tree_walker's special-member leg for bitmap combiners.
+        NodeTag::T_BitmapAnd => {
+            for child in &node.as_bitmap_and().unwrap().bitmapplans {
+                ExplainPreScanNode(mcx, child, subplans, rels_used)?;
+            }
+        }
+        NodeTag::T_BitmapOr => {
+            for child in &node.as_bitmap_or().unwrap().bitmapplans {
+                ExplainPreScanNode(mcx, child, subplans, rels_used)?;
+            }
+        }
         _ => {}
     }
     let plan = plan_of(node);
@@ -346,6 +357,8 @@ pub fn ExplainNode<'mcx>(
         NodeTag::T_IndexOnlyScan => "Index Only Scan",
         NodeTag::T_BitmapIndexScan => "Bitmap Index Scan",
         NodeTag::T_BitmapHeapScan => "Bitmap Heap Scan",
+        NodeTag::T_BitmapAnd => "BitmapAnd",
+        NodeTag::T_BitmapOr => "BitmapOr",
         NodeTag::T_FunctionScan => "Function Scan",
         NodeTag::T_CteScan => "CTE Scan",
         // C interpolates the join type into the node name in TEXT format:
@@ -675,7 +688,7 @@ pub fn ExplainNode<'mcx>(
         }
         // Unique, Limit, Append, SetOp, LockRows show nothing extra without ANALYZE.
         NodeTag::T_Unique | NodeTag::T_Limit | NodeTag::T_Append | NodeTag::T_SetOp
-        | NodeTag::T_LockRows => {}
+        | NodeTag::T_LockRows | NodeTag::T_BitmapAnd | NodeTag::T_BitmapOr => {}
         _ => unreachable!(),
     }
 
@@ -694,7 +707,9 @@ pub fn ExplainNode<'mcx>(
     let haschildren = plan.lefttree.is_some()
         || plan.righttree.is_some()
         || node.node_tag() == NodeTag::T_Append
-        || node.node_tag() == NodeTag::T_SubqueryScan;
+        || node.node_tag() == NodeTag::T_SubqueryScan
+        || node.node_tag() == NodeTag::T_BitmapAnd
+        || node.node_tag() == NodeTag::T_BitmapOr;
     if haschildren {
         ExplainOpenGroup("Plans", Some("Plans"), false, es);
     }
@@ -706,6 +721,17 @@ pub fn ExplainNode<'mcx>(
     }
     if let Some(a) = node.as_append() {
         for child in &a.appendplans {
+            ExplainNode(child, Some("Member"), None, Some(&pushed), es)?;
+        }
+    }
+    // ExplainMemberNodes over the bitmap combiners' member lists.
+    if let Some(ba) = node.as_bitmap_and() {
+        for child in &ba.bitmapplans {
+            ExplainNode(child, Some("Member"), None, Some(&pushed), es)?;
+        }
+    }
+    if let Some(bo) = node.as_bitmap_or() {
+        for child in &bo.bitmapplans {
             ExplainNode(child, Some("Member"), None, Some(&pushed), es)?;
         }
     }

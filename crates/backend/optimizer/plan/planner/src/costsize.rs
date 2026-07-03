@@ -531,13 +531,69 @@ pub fn cost_bitmap_tree_node(
     }
 }
 
+// cost_bitmap_and_node (costsize.c): AND selectivity assumes independent
+// inputs; 100x cpu_operator_cost per tbm_intersect.
+pub fn cost_bitmap_and_node(run: &mut PlannerRun<'_>, path_id: types_pathnodes::PathId) {
+    let subs = {
+        let PathNode::BitmapAndPath(p) = run.root.path(path_id) else { unreachable!() };
+        p.bitmapquals.clone()
+    };
+    let mut total_cost = 0.0;
+    let mut selec = 1.0;
+    for (i, &sub) in subs.iter().enumerate() {
+        let (sub_cost, sub_selec) = cost_bitmap_tree_node(run, sub);
+        selec *= sub_selec;
+        total_cost += sub_cost;
+        if i > 0 {
+            total_cost += 100.0 * gucs::cpu_operator_cost();
+        }
+    }
+    let PathNode::BitmapAndPath(p) = run.root.path_mut(path_id) else { unreachable!() };
+    p.bitmapselectivity = selec;
+    p.path.rows = 0.0;
+    p.path.disabled_nodes = 0;
+    p.path.startup_cost = total_cost;
+    p.path.total_cost = total_cost;
+}
+
+// cost_bitmap_or_node (costsize.c): OR selectivity assumes non-overlapping
+// inputs, clamped to 1; tbm_unions are free when the input is an IndexPath.
+pub fn cost_bitmap_or_node(run: &mut PlannerRun<'_>, path_id: types_pathnodes::PathId) {
+    let subs = {
+        let PathNode::BitmapOrPath(p) = run.root.path(path_id) else { unreachable!() };
+        p.bitmapquals.clone()
+    };
+    let mut total_cost = 0.0;
+    let mut selec = 0.0;
+    for (i, &sub) in subs.iter().enumerate() {
+        let (sub_cost, sub_selec) = cost_bitmap_tree_node(run, sub);
+        selec += sub_selec;
+        total_cost += sub_cost;
+        if i > 0 && !matches!(run.root.path(sub), PathNode::IndexPath(_)) {
+            total_cost += 100.0 * gucs::cpu_operator_cost();
+        }
+    }
+    let PathNode::BitmapOrPath(p) = run.root.path_mut(path_id) else { unreachable!() };
+    p.bitmapselectivity = selec.min(1.0);
+    p.path.rows = 0.0;
+    p.path.startup_cost = total_cost;
+    p.path.total_cost = total_cost;
+}
+
 fn get_indexpath_pages(run: &PlannerRun<'_>, path_id: types_pathnodes::PathId) -> f64 {
     match run.root.path(path_id) {
         PathNode::IndexPath(ip) => {
             ip.indexinfo.as_ref().expect("indexinfo set").pages as f64
         }
-        _ => panic!(
-            "get_indexpath_pages (costsize.c): BitmapAnd/Or subtree; M2 bitmap-combine lane"
+        PathNode::BitmapAndPath(p) => {
+            p.bitmapquals.clone().iter().map(|&q| get_indexpath_pages(run, q)).sum()
+        }
+        PathNode::BitmapOrPath(p) => {
+            p.bitmapquals.clone().iter().map(|&q| get_indexpath_pages(run, q)).sum()
+        }
+        other => panic!(
+            "get_indexpath_pages (costsize.c): pathtype {}",
+            other.base().pathtype
         ),
     }
 }

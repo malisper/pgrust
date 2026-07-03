@@ -589,55 +589,47 @@ pub fn create_ctescan_path<'mcx>(run: &mut PlannerRun<'mcx>, rel_id: RelId) -> P
     Ok(id)
 }
 
-// choose_bitmap_and (indxpath.c), single-candidate + all-clauseless arms.
-pub fn choose_bitmap_and(run: &PlannerRun<'_>, _rel_id: RelId, paths: &[PathId]) -> PathId {
-    debug_assert!(!paths.is_empty());
-    if paths.len() == 1 {
-        return paths[0];
+// create_bitmap_and_path (pathnode.c); required_outer empty on this lane
+// (children are unparameterized, asserted).
+pub fn create_bitmap_and_path<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel_id: RelId,
+    bitmapquals: PgVec<'mcx, PathId>,
+) -> PgResult<PathId> {
+    for &q in bitmapquals.iter() {
+        assert!(
+            run.root.path(q).base().param_info.is_none(),
+            "create_bitmap_and_path (pathnode.c): parameterized subpath; M2 join lane"
+        );
     }
-    // Bounded greedy arm: sort by path_usage_comparator (selectivity, then
-    // cost), take the first; every other candidate whose clause set is a
-    // subset of the winner's is subsumed exactly as in C's inner loop. A
-    // candidate with a clause the winner lacks is the genuine AND lane.
-    let clauseids = |p: types_pathnodes::PathId| -> mcx::PgVec<'_, u32> {
-        let mut ids: mcx::PgVec<'_, u32> = mcx::PgVec::new_in(run.mcx);
-        if let types_pathnodes::PathNode::IndexPath(ip) = run.root.path(p) {
-            for ic in ip.indexclauses.iter() {
-                ids.push(ic.rinfo.expect("IndexClause rinfo").0);
-            }
-        }
-        ids.sort_unstable();
-        ids
-    };
-    let mut best = paths[0];
-    for &p in &paths[1..] {
-        let (ps, pc) = {
-            let types_pathnodes::PathNode::IndexPath(ip) = run.root.path(p) else {
-                panic!("choose_bitmap_and: non-IndexPath candidate; M2 bitmap-combine lane")
-            };
-            (ip.indexselectivity, ip.path.total_cost)
-        };
-        let (bs, bc) = {
-            let types_pathnodes::PathNode::IndexPath(ip) = run.root.path(best) else {
-                unreachable!()
-            };
-            (ip.indexselectivity, ip.path.total_cost)
-        };
-        if ps < bs || (ps == bs && pc < bc) {
-            best = p;
-        }
+    let mut path = base_path(run, NodeTag::T_BitmapAndPath, NodeTag::T_BitmapAnd, rel_id);
+    path.parallel_aware = false;
+    path.parallel_safe = run.root.rel(rel_id).consider_parallel;
+    let node = types_pathnodes::BitmapAndPath { path, bitmapquals, bitmapselectivity: 0.0 };
+    let id = run.root.alloc_path(PathNode::BitmapAndPath(node));
+    crate::costsize::cost_bitmap_and_node(run, id);
+    Ok(id)
+}
+
+// create_bitmap_or_path (pathnode.c); required_outer empty on this lane.
+pub fn create_bitmap_or_path<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel_id: RelId,
+    bitmapquals: PgVec<'mcx, PathId>,
+) -> PgResult<PathId> {
+    for &q in bitmapquals.iter() {
+        assert!(
+            run.root.path(q).base().param_info.is_none(),
+            "create_bitmap_or_path (pathnode.c): parameterized subpath; M2 join lane"
+        );
     }
-    let best_ids = clauseids(best);
-    for &p in paths {
-        if p == best {
-            continue;
-        }
-        let ids = clauseids(p);
-        if !ids.iter().all(|id| best_ids.contains(id)) {
-            panic!("choose_bitmap_and (indxpath.c): AND/OR path reduction; M2 bitmap-combine lane");
-        }
-    }
-    best
+    let mut path = base_path(run, NodeTag::T_BitmapOrPath, NodeTag::T_BitmapOr, rel_id);
+    path.parallel_aware = false;
+    path.parallel_safe = run.root.rel(rel_id).consider_parallel;
+    let node = types_pathnodes::BitmapOrPath { path, bitmapquals, bitmapselectivity: 0.0 };
+    let id = run.root.alloc_path(PathNode::BitmapOrPath(node));
+    crate::costsize::cost_bitmap_or_node(run, id);
+    Ok(id)
 }
 
 // create_bitmap_heap_path (pathnode.c); required_outer/parallel loud upstream.

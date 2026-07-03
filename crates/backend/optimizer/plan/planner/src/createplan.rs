@@ -730,14 +730,112 @@ fn create_bitmap_scan_plan<'mcx>(
     Ok(plan.seal())
 }
 
-// create_bitmap_subplan (createplan.c), IndexPath arm -> (plan, indexquals,
-// bitmapqualorig); the BitmapAnd/OrPath arms ride the bitmap-combine lane.
+// create_bitmap_subplan (createplan.c) -> (plan, indexquals, bitmapqualorig).
 // indexECs output is dropped (eq_classes empty on this lane).
 fn create_bitmap_subplan<'mcx>(
     run: &mut PlannerRun<'mcx>,
     bitmapqual: PathId,
 ) -> PgResult<(Node<'mcx>, NodeList<'mcx>, NodeList<'mcx>)> {
     let mcx = run.mcx;
+    match run.root.path(bitmapqual) {
+        PathNode::BitmapAndPath(ap) => {
+            let subs = ap.bitmapquals.clone();
+            let (startup_cost, total_cost, selectivity, parent, parallel_safe) = (
+                ap.path.startup_cost,
+                ap.path.total_cost,
+                ap.bitmapselectivity,
+                ap.path.parent,
+                ap.path.parallel_safe,
+            );
+            let mut subplans = NodeList::nil();
+            let mut subquals = NodeList::nil();
+            let mut subindexquals = NodeList::nil();
+            for &sub in subs.iter() {
+                let (subplan, subindexqual, subqual) = create_bitmap_subplan(run, sub)?;
+                subplans.lappend(mcx, subplan)?;
+                list_concat_unique(mcx, &mut subquals, &subqual)?;
+                list_concat_unique(mcx, &mut subindexquals, &subindexqual)?;
+            }
+            let mut plan = Node::build::<types_nodes::plannodes::BitmapAnd<'mcx>>(mcx)?;
+            plan.bitmapplans = subplans;
+            plan.plan.startup_cost = startup_cost;
+            plan.plan.total_cost = total_cost;
+            plan.plan.plan_rows = crate::costsize::clamp_row_est(
+                selectivity * run.root.rel(parent).tuples,
+            );
+            plan.plan.plan_width = 0;
+            plan.plan.parallel_aware = false;
+            plan.plan.parallel_safe = parallel_safe;
+            return Ok((plan.seal(), subindexquals, subquals));
+        }
+        PathNode::BitmapOrPath(op) => {
+            let subs = op.bitmapquals.clone();
+            let (startup_cost, total_cost, selectivity, parent, parallel_safe) = (
+                op.path.startup_cost,
+                op.path.total_cost,
+                op.bitmapselectivity,
+                op.path.parent,
+                op.path.parallel_safe,
+            );
+            let mut subplans = NodeList::nil();
+            let mut subquals = NodeList::nil();
+            let mut subindexquals = NodeList::nil();
+            let mut const_true_subqual = false;
+            let mut const_true_subindexqual = false;
+            for &sub in subs.iter() {
+                let (subplan, subindexqual, subqual) = create_bitmap_subplan(run, sub)?;
+                subplans.lappend(mcx, subplan)?;
+                if subqual.is_nil() {
+                    const_true_subqual = true;
+                } else if !const_true_subqual {
+                    subquals.lappend(mcx, clauses::make_ands_explicit(mcx, &subqual)?)?;
+                }
+                if subindexqual.is_nil() {
+                    const_true_subindexqual = true;
+                } else if !const_true_subindexqual {
+                    subindexquals
+                        .lappend(mcx, clauses::make_ands_explicit(mcx, &subindexqual)?)?;
+                }
+            }
+            // SAOP-built single-subpath ORs skip the OR step.
+            let plan = if subplans.len() == 1 {
+                subplans.nth(0)
+            } else {
+                let mut plan = Node::build::<types_nodes::plannodes::BitmapOr<'mcx>>(mcx)?;
+                plan.isshared = false;
+                plan.bitmapplans = subplans;
+                plan.plan.startup_cost = startup_cost;
+                plan.plan.total_cost = total_cost;
+                plan.plan.plan_rows = crate::costsize::clamp_row_est(
+                    selectivity * run.root.rel(parent).tuples,
+                );
+                plan.plan.plan_width = 0;
+                plan.plan.parallel_aware = false;
+                plan.plan.parallel_safe = parallel_safe;
+                plan.seal()
+            };
+            let qual = if const_true_subqual {
+                NodeList::nil()
+            } else if subquals.len() <= 1 {
+                subquals
+            } else {
+                let mut l = NodeList::nil();
+                l.lappend(mcx, clauses::make_orclause(mcx, subquals)?)?;
+                l
+            };
+            let indexqual = if const_true_subindexqual {
+                NodeList::nil()
+            } else if subindexquals.len() <= 1 {
+                subindexquals
+            } else {
+                let mut l = NodeList::nil();
+                l.lappend(mcx, clauses::make_orclause(mcx, subindexquals)?)?;
+                l
+            };
+            return Ok((plan, indexqual, qual));
+        }
+        _ => {}
+    }
     let (indexclauses, indexselectivity, parent, parallel_safe, has_indpred) = {
         match run.root.path(bitmapqual) {
             PathNode::IndexPath(ip) => (
@@ -746,9 +844,6 @@ fn create_bitmap_subplan<'mcx>(
                 ip.path.parent,
                 ip.path.parallel_safe,
                 !ip.indexinfo.as_ref().expect("indexinfo set").indpred.is_empty(),
-            ),
-            PathNode::BitmapAndPath(_) | PathNode::BitmapOrPath(_) => panic!(
-                "create_bitmap_subplan (createplan.c): BitmapAnd/Or; M2 bitmap-combine lane"
             ),
             other => panic!(
                 "create_bitmap_subplan (createplan.c): pathtype {}",
@@ -2779,4 +2874,19 @@ fn create_subqueryscan_plan<'mcx>(
     plan.scanstatus = 0;
     copy_generic_path_info(run, &mut plan.scan.plan, best_path);
     Ok(plan.seal())
+}
+
+// list_concat_unique (list.c): append members of `add` not already equal()-
+// present in `dest`.
+fn list_concat_unique<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    dest: &mut NodeList<'mcx>,
+    add: &NodeList<'mcx>,
+) -> PgResult<()> {
+    for n in add {
+        if !dest.iter().any(|d| types_nodes::equal(d, n)) {
+            dest.lappend(mcx, n)?;
+        }
+    }
+    Ok(())
 }
