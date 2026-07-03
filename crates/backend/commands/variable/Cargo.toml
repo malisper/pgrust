@@ -10,6 +10,7 @@ path = "src/lib.rs"
 
 [dependencies]
 adt_datetime = { path = "../../utils/adt/adt_datetime" }
+adt_timestamp = { path = "../../utils/adt/adt_timestamp" }
 pg_string = { path = "../../../common/string" }
 tzparser = { path = "../../utils/misc/tzparser" }
 adt_acl = { path = "../../utils/adt/acl" }

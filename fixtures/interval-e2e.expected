@@ -1,0 +1,1050 @@
+-- interval-lane differential corpus: interval I/O (all four IntervalStyles,
+-- ISO8601/postgres/sql_standard verbose input forms), typmod encode/rounding,
+-- arithmetic incl. DST-aware timestamptz +/- interval, comparisons, justify,
+-- part/extract, trunc, make_interval, age, izone/timetz zone forms,
+-- SET TIME ZONE INTERVAL, OVERLAPS, error arms (22007/22008/22015/22023).
+-- Run via scripts/regress-diff.sh --sql fixtures/interval-e2e.sql.
+\set VERBOSITY verbose
+\pset pager off
+SET TIME ZONE 'UTC';
+SET datestyle = 'ISO, MDY';
+SET intervalstyle = 'postgres';
+-- ===== interval_in: postgres + SQL + ISO8601 formats =====
+SELECT '1 year 2 mons 3 days 04:05:06.789'::interval;
+             interval              
+-----------------------------------
+ 1 year 2 mons 3 days 04:05:06.789
+(1 row)
+
+SELECT '-1 day +5 hours'::interval;
+     interval      
+-------------------
+ -1 days +05:00:00
+(1 row)
+
+SELECT '1-2'::interval;
+   interval    
+---------------
+ 1 year 2 mons
+(1 row)
+
+SELECT '3 12:34:56'::interval;
+    interval     
+-----------------
+ 3 days 12:34:56
+(1 row)
+
+SELECT '@ 1 day ago'::interval;
+ interval 
+----------
+ -1 days
+(1 row)
+
+SELECT '@ 2 years 5 months 12 hours ago'::interval;
+          interval          
+----------------------------
+ -2 years -5 mons -12:00:00
+(1 row)
+
+SELECT 'P1Y2M3DT4H5M6.7S'::interval;
+            interval             
+---------------------------------
+ 1 year 2 mons 3 days 04:05:06.7
+(1 row)
+
+SELECT 'P0001-02-03T04:05:06'::interval;
+           interval            
+-------------------------------
+ 1 year 2 mons 3 days 04:05:06
+(1 row)
+
+SELECT 'PT0S'::interval;
+ interval 
+----------
+ 00:00:00
+(1 row)
+
+SELECT 'P-1M10DT-1H'::interval;
+          interval          
+----------------------------
+ -1 mons +10 days -01:00:00
+(1 row)
+
+SELECT 'infinity'::interval;
+ interval 
+----------
+ infinity
+(1 row)
+
+SELECT '-infinity'::interval;
+ interval  
+-----------
+ -infinity
+(1 row)
+
+SELECT '1.5 mons'::interval;
+   interval    
+---------------
+ 1 mon 15 days
+(1 row)
+
+SELECT '1.5 weeks'::interval;
+     interval     
+------------------
+ 10 days 12:00:00
+(1 row)
+
+SELECT '1.5 days'::interval;
+    interval    
+----------------
+ 1 day 12:00:00
+(1 row)
+
+SELECT '0.7 secs'::interval;
+  interval  
+------------
+ 00:00:00.7
+(1 row)
+
+SELECT '2 years -5 months 3 days -10:00:00'::interval;
+            interval            
+--------------------------------
+ 1 year 7 mons 3 days -10:00:00
+(1 row)
+
+SELECT '12:34'::interval;
+ interval 
+----------
+ 12:34:00
+(1 row)
+
+SELECT '12:34:56.789'::interval;
+   interval   
+--------------
+ 12:34:56.789
+(1 row)
+
+SELECT '-00:00:01'::interval;
+ interval  
+-----------
+ -00:00:01
+(1 row)
+
+SELECT interval '1' second;
+ interval 
+----------
+ 00:00:01
+(1 row)
+
+SELECT interval '1' minute;
+ interval 
+----------
+ 00:01:00
+(1 row)
+
+SELECT interval '100' hour;
+ interval  
+-----------
+ 100:00:00
+(1 row)
+
+SELECT interval '7' day;
+ interval 
+----------
+ 7 days
+(1 row)
+
+SELECT interval '4' month;
+ interval 
+----------
+ 4 mons
+(1 row)
+
+SELECT interval '3' year;
+ interval 
+----------
+ 3 years
+(1 row)
+
+SELECT interval '1 2:03:04' day to second;
+    interval    
+----------------
+ 1 day 02:03:04
+(1 row)
+
+SELECT interval '1 2:03:04.5678' day to second(2);
+     interval      
+-------------------
+ 1 day 02:03:04.57
+(1 row)
+
+SELECT interval '12:34' hour to minute;
+ interval 
+----------
+ 12:34:00
+(1 row)
+
+SELECT interval '12:34' minute to second;
+ interval 
+----------
+ 00:12:34
+(1 row)
+
+SELECT interval '5 4:03:02.1' day to minute;
+    interval     
+-----------------
+ 5 days 04:03:00
+(1 row)
+
+SELECT interval '1-2' year to month;
+   interval    
+---------------
+ 1 year 2 mons
+(1 row)
+
+SELECT interval(3) '1.123456 sec';
+   interval   
+--------------
+ 00:00:01.123
+(1 row)
+
+SELECT interval '2.7 secs'(0);
+ERROR:  42601: syntax error at or near "("
+LINE 1: SELECT interval '2.7 secs'(0);
+                                  ^
+SELECT '1 day 02:03:04.55555'::interval(3);
+      interval      
+--------------------
+ 1 day 02:03:04.556
+(1 row)
+
+SELECT interval '999' second(2);
+ interval 
+----------
+ 00:16:39
+(1 row)
+
+-- ===== error arms =====
+SELECT 'bogus'::interval;
+ERROR:  22007: invalid input syntax for type interval: "bogus"
+LINE 1: SELECT 'bogus'::interval;
+               ^
+SELECT '100000000000000000000 years'::interval;
+ERROR:  22015: interval field value out of range: "100000000000000000000 years"
+LINE 1: SELECT '100000000000000000000 years'::interval;
+               ^
+SELECT '2147483647 years'::interval;
+ERROR:  22008: interval out of range
+LINE 1: SELECT '2147483647 years'::interval;
+               ^
+SELECT interval '1 day' second(9);
+WARNING:  22023: INTERVAL(9) precision reduced to maximum allowed, 6
+LINE 1: SELECT interval '1 day' second(9);
+               ^
+ interval 
+----------
+ 1 day
+(1 row)
+
+SELECT '5 seconds 3 minutes'::interval;
+ interval 
+----------
+ 00:03:05
+(1 row)
+
+SELECT '1 year ago 2 days'::interval;
+ERROR:  22007: invalid input syntax for type interval: "1 year ago 2 days"
+LINE 1: SELECT '1 year ago 2 days'::interval;
+               ^
+-- ===== IntervalStyle output styles =====
+SET intervalstyle = 'sql_standard';
+SELECT '1 year 2 mons 3 days 04:05:06.789'::interval;
+       interval       
+----------------------
+ +1-2 +3 +4:05:06.789
+(1 row)
+
+SELECT '-1 year -2 mons -3 days -04:05:06.789'::interval;
+       interval       
+----------------------
+ -1-2 -3 -4:05:06.789
+(1 row)
+
+SELECT '-1 day +5 hours'::interval;
+     interval     
+------------------
+ +0-0 -1 +5:00:00
+(1 row)
+
+SELECT '1-2'::interval;
+ interval 
+----------
+ 1-2
+(1 row)
+
+SELECT '04:05:06'::interval;
+ interval 
+----------
+ 4:05:06
+(1 row)
+
+SET intervalstyle = 'postgres_verbose';
+SELECT '1 year 2 mons 3 days 04:05:06.789'::interval;
+                     interval                     
+--------------------------------------------------
+ @ 1 year 2 mons 3 days 4 hours 5 mins 6.789 secs
+(1 row)
+
+SELECT '-1 day +5 hours'::interval;
+       interval       
+----------------------
+ @ 1 day -5 hours ago
+(1 row)
+
+SELECT '0'::interval;
+ interval 
+----------
+ @ 0
+(1 row)
+
+SELECT '@ 1 day ago'::interval;
+  interval   
+-------------
+ @ 1 day ago
+(1 row)
+
+SET intervalstyle = 'iso_8601';
+SELECT '1 year 2 mons 3 days 04:05:06.789'::interval;
+      interval      
+--------------------
+ P1Y2M3DT4H5M6.789S
+(1 row)
+
+SELECT '-1 day +5 hours'::interval;
+ interval 
+----------
+ P-1DT5H
+(1 row)
+
+SELECT '0'::interval;
+ interval 
+----------
+ PT0S
+(1 row)
+
+SET intervalstyle = 'postgres';
+-- ===== sql_standard input sign semantics =====
+SET intervalstyle = 'sql_standard';
+SELECT interval '-1 2:03:04';
+  interval  
+------------
+ -1 2:03:04
+(1 row)
+
+SELECT interval '-1-2 3 -4:05:06';
+     interval     
+------------------
+ -1-2 +3 -4:05:06
+(1 row)
+
+SET intervalstyle = 'postgres';
+SELECT interval '-1 2:03:04';
+     interval      
+-------------------
+ -1 days +02:03:04
+(1 row)
+
+-- ===== arithmetic: interval +/- interval, unary minus =====
+SELECT interval '1 day 3 hours' + interval '2 mons -1 day';
+    ?column?     
+-----------------
+ 2 mons 03:00:00
+(1 row)
+
+SELECT interval '3 mons' - interval '1 day';
+    ?column?    
+----------------
+ 3 mons -1 days
+(1 row)
+
+SELECT - interval '1 mon -3 days +04:00:00';
+         ?column?          
+---------------------------
+ -1 mons +3 days -04:00:00
+(1 row)
+
+SELECT interval 'infinity' + interval '1 day';
+ ?column? 
+----------
+ infinity
+(1 row)
+
+SELECT interval '-infinity' + interval '1 day';
+ ?column?  
+-----------
+ -infinity
+(1 row)
+
+SELECT interval 'infinity' + interval '-infinity';
+ERROR:  22008: interval out of range
+SELECT interval 'infinity' - interval 'infinity';
+ERROR:  22008: interval out of range
+SELECT - interval '-infinity';
+ ?column? 
+----------
+ infinity
+(1 row)
+
+-- ===== timestamp/date/time/timetz +/- interval =====
+SELECT timestamp '2025-01-31 10:00:00' + interval '1 mon';
+      ?column?       
+---------------------
+ 2025-02-28 10:00:00
+(1 row)
+
+SELECT timestamp '2025-01-31 10:00:00' - interval '1 mon';
+      ?column?       
+---------------------
+ 2024-12-31 10:00:00
+(1 row)
+
+SELECT timestamp '2024-02-29 10:00:00' + interval '1 year';
+      ?column?       
+---------------------
+ 2025-02-28 10:00:00
+(1 row)
+
+SELECT timestamp '2025-03-15 12:00:00' - interval '90 days';
+      ?column?       
+---------------------
+ 2024-12-15 12:00:00
+(1 row)
+
+SELECT timestamp '2025-03-15 12:00:00' + interval '1 mon 2 days 03:04:05.678';
+        ?column?         
+-------------------------
+ 2025-04-17 15:04:05.678
+(1 row)
+
+SELECT timestamp 'infinity' + interval '1 day';
+ ?column? 
+----------
+ infinity
+(1 row)
+
+SELECT timestamp 'infinity' + interval '-infinity';
+ERROR:  22008: timestamp out of range
+SELECT date '2025-06-01' + interval '1 mon 2 days 03:04:05';
+      ?column?       
+---------------------
+ 2025-07-03 03:04:05
+(1 row)
+
+SELECT date '2025-06-01' - interval '36 hours';
+      ?column?       
+---------------------
+ 2025-05-30 12:00:00
+(1 row)
+
+SELECT time '23:30:00' + interval '2 hours';
+ ?column? 
+----------
+ 01:30:00
+(1 row)
+
+SELECT time '01:00:00' - interval '2 hours';
+ ?column? 
+----------
+ 23:00:00
+(1 row)
+
+SELECT time '12:00:00' + interval '1 day 1 hour';
+ ?column? 
+----------
+ 13:00:00
+(1 row)
+
+SELECT timetz '10:00:00-04' + interval '30 hours';
+  ?column?   
+-------------
+ 16:00:00-04
+(1 row)
+
+SELECT timetz '01:00:00+05:30' - interval '2 hours';
+    ?column?    
+----------------
+ 23:00:00+05:30
+(1 row)
+
+SELECT time '12:00:00' + interval 'infinity';
+ERROR:  22008: cannot add infinite interval to time
+-- ===== DST-aware timestamptz arithmetic: '1 day' vs '24 hours' =====
+SET TIME ZONE 'America/New_York';
+SELECT timestamptz '2025-03-08 12:00:00' + interval '1 day';
+        ?column?        
+------------------------
+ 2025-03-09 12:00:00-04
+(1 row)
+
+SELECT timestamptz '2025-03-08 12:00:00' + interval '24 hours';
+        ?column?        
+------------------------
+ 2025-03-09 13:00:00-04
+(1 row)
+
+SELECT timestamptz '2025-11-01 12:00:00' + interval '1 day';
+        ?column?        
+------------------------
+ 2025-11-02 12:00:00-05
+(1 row)
+
+SELECT timestamptz '2025-11-01 12:00:00' + interval '24 hours';
+        ?column?        
+------------------------
+ 2025-11-02 11:00:00-05
+(1 row)
+
+SELECT timestamptz '2025-03-09 12:00:00' - interval '1 day';
+        ?column?        
+------------------------
+ 2025-03-08 12:00:00-05
+(1 row)
+
+SELECT timestamptz '2025-03-09 12:00:00' - interval '24 hours';
+        ?column?        
+------------------------
+ 2025-03-08 11:00:00-05
+(1 row)
+
+SELECT timestamptz '2025-03-08 01:30:00' + interval '1 mon';
+        ?column?        
+------------------------
+ 2025-04-08 01:30:00-04
+(1 row)
+
+SELECT timestamptz '2025-01-31 23:30:00' + interval '1 mon';
+        ?column?        
+------------------------
+ 2025-02-28 23:30:00-05
+(1 row)
+
+SELECT timestamptz '2025-11-02 01:30:00-04' + interval '1 hour';
+        ?column?        
+------------------------
+ 2025-11-02 01:30:00-05
+(1 row)
+
+-- ===== timestamp_mi and age =====
+SELECT timestamp '2025-01-02 03:00:00' - timestamp '2024-12-31 00:00:00';
+    ?column?     
+-----------------
+ 2 days 03:00:00
+(1 row)
+
+SELECT timestamp '2024-12-31 00:00:00' - timestamp '2025-01-02 03:00:00';
+     ?column?      
+-------------------
+ -2 days -03:00:00
+(1 row)
+
+SELECT timestamptz '2025-11-02 06:30:00+00' - timestamptz '2025-11-01 06:30:00+00';
+ ?column? 
+----------
+ 1 day
+(1 row)
+
+SELECT timestamp 'infinity' - timestamp '2025-01-01';
+ ?column? 
+----------
+ infinity
+(1 row)
+
+SELECT timestamp 'infinity' - timestamp 'infinity';
+ERROR:  22008: interval out of range
+SELECT age(timestamp '2025-03-15 10:30:00', timestamp '2024-01-20 08:00:00');
+              age              
+-------------------------------
+ 1 year 1 mon 26 days 02:30:00
+(1 row)
+
+SELECT age(timestamp '2024-01-20 08:00:00', timestamp '2025-03-15 10:30:00');
+                 age                 
+-------------------------------------
+ -1 years -1 mons -26 days -02:30:00
+(1 row)
+
+SELECT age(timestamp '2025-03-01', timestamp '2025-01-30');
+     age      
+--------------
+ 1 mon 2 days
+(1 row)
+
+SELECT age(timestamptz '2025-03-15 10:30:00+00', timestamptz '2024-01-20 08:00:00+00');
+              age              
+-------------------------------
+ 1 year 1 mon 26 days 03:30:00
+(1 row)
+
+SELECT age(timestamp 'infinity', timestamp '2025-01-01');
+   age    
+----------
+ infinity
+(1 row)
+
+SELECT age(timestamp 'infinity', timestamp 'infinity');
+ERROR:  22008: interval out of range
+-- ===== comparisons + hash-driven plans =====
+SELECT interval '30 days' = interval '1 mon';
+ ?column? 
+----------
+ t
+(1 row)
+
+SELECT interval '24 hours' = interval '1 day';
+ ?column? 
+----------
+ t
+(1 row)
+
+SELECT interval '25 hours' > interval '1 day';
+ ?column? 
+----------
+ t
+(1 row)
+
+SELECT interval '1 mon' < interval '31 days';
+ ?column? 
+----------
+ t
+(1 row)
+
+SELECT interval 'infinity' > interval '999999 years';
+ ?column? 
+----------
+ t
+(1 row)
+
+SELECT interval '-infinity' < interval '-999999 years';
+ ?column? 
+----------
+ t
+(1 row)
+
+-- ===== justify + make_interval =====
+SELECT justify_hours(interval '27 hours');
+ justify_hours  
+----------------
+ 1 day 03:00:00
+(1 row)
+
+SELECT justify_days(interval '35 days');
+ justify_days 
+--------------
+ 1 mon 5 days
+(1 row)
+
+SELECT justify_interval(interval '29 days 25 hours');
+ justify_interval 
+------------------
+ 1 mon 01:00:00
+(1 row)
+
+SELECT justify_interval(interval '1 mon -1 hour');
+ justify_interval 
+------------------
+ 29 days 23:00:00
+(1 row)
+
+SELECT justify_hours(interval '-30 hours');
+   justify_hours   
+-------------------
+ -1 days -06:00:00
+(1 row)
+
+SELECT justify_days(interval '-35 days');
+  justify_days   
+-----------------
+ -1 mons -5 days
+(1 row)
+
+SELECT justify_interval(interval 'infinity');
+ justify_interval 
+------------------
+ infinity
+(1 row)
+
+SELECT make_interval(1, 2, 3, 4, 5, 6, 7.5);
+          make_interval           
+----------------------------------
+ 1 year 2 mons 25 days 05:06:07.5
+(1 row)
+
+SELECT make_interval(0, 0, 0, 0, 0, 0, -0.5);
+ make_interval 
+---------------
+ -00:00:00.5
+(1 row)
+
+SELECT make_interval(0, 0, 0, 0, 0, 0, 'Infinity'::float8);
+ERROR:  22008: interval out of range
+-- ===== extract / date_part / date_trunc on interval =====
+SELECT date_part('day', interval '2 years 5 mons 10 days 12:30:45.678');
+ date_part 
+-----------
+        10
+(1 row)
+
+SELECT date_part('epoch', interval '2 years 5 mons 10 days 12:30:45.678');
+  date_part   
+--------------
+ 76984245.678
+(1 row)
+
+SELECT extract(epoch from interval '2 years 5 mons 10 days 12:30:45.678');
+     extract     
+-----------------
+ 76984245.678000
+(1 row)
+
+SELECT extract(year from interval '2 years 5 mons'), extract(month from interval '2 years 5 mons');
+ extract | extract 
+---------+---------
+       2 |       5
+(1 row)
+
+SELECT extract(quarter from interval '-4 mons');
+ extract 
+---------
+      -2
+(1 row)
+
+SELECT extract(second from interval '00:00:45.678');
+  extract  
+-----------
+ 45.678000
+(1 row)
+
+SELECT extract(millisecond from interval '00:00:45.678');
+  extract  
+-----------
+ 45678.000
+(1 row)
+
+SELECT extract(microseconds from interval '00:00:45.678');
+ extract  
+----------
+ 45678000
+(1 row)
+
+SELECT extract(hour from interval '123:45:06');
+ extract 
+---------
+     123
+(1 row)
+
+SELECT extract(decade from interval '25 years'), extract(century from interval '250 years'), extract(millennium from interval '2500 years');
+ extract | extract | extract 
+---------+---------+---------
+       2 |       2 |       2
+(1 row)
+
+SELECT extract(week from interval '15 days');
+ extract 
+---------
+       2
+(1 row)
+
+SELECT extract(month from '-infinity'::interval);
+ extract 
+---------
+        
+(1 row)
+
+SELECT extract(year from 'infinity'::interval);
+ extract  
+----------
+ Infinity
+(1 row)
+
+SELECT extract(epoch from '-infinity'::interval);
+  extract  
+-----------
+ -Infinity
+(1 row)
+
+SELECT extract(timezone from interval '1 day');
+ERROR:  0A000: unit "timezone" not supported for type interval
+SELECT extract(bogus from interval '1 day');
+ERROR:  22023: unit "bogus" not recognized for type interval
+SELECT date_trunc('hour', interval '2 years 5 mons 10 days 12:30:45.678');
+           date_trunc            
+---------------------------------
+ 2 years 5 mons 10 days 12:00:00
+(1 row)
+
+SELECT date_trunc('month', interval '2 years 5 mons 10 days 12:30:45.678');
+   date_trunc   
+----------------
+ 2 years 5 mons
+(1 row)
+
+SELECT date_trunc('second', interval '2 years 5 mons 10 days 12:30:45.678');
+           date_trunc            
+---------------------------------
+ 2 years 5 mons 10 days 12:30:45
+(1 row)
+
+SELECT date_trunc('milliseconds', interval '00:00:45.678999');
+  date_trunc  
+--------------
+ 00:00:45.678
+(1 row)
+
+SELECT date_trunc('decade', interval '25 years 3 mons');
+ date_trunc 
+------------
+ 20 years
+(1 row)
+
+SELECT date_trunc('week', interval '1 year');
+ERROR:  0A000: unit "week" not supported for type interval
+DETAIL:  Months usually have fractional weeks.
+SELECT date_trunc('day', interval 'infinity');
+ date_trunc 
+------------
+ infinity
+(1 row)
+
+-- ===== extract on date/time/timetz =====
+SELECT extract(year from date '2025-03-15'), extract(dow from date '2025-03-15'), extract(doy from date '2025-03-15');
+ extract | extract | extract 
+---------+---------+---------
+    2025 |       6 |      74
+(1 row)
+
+SELECT extract(epoch from date '2025-03-15');
+  extract   
+------------
+ 1741996800
+(1 row)
+
+SELECT extract(hour from time '12:34:56.789'), extract(minute from time '12:34:56.789');
+ extract | extract 
+---------+---------
+      12 |      34
+(1 row)
+
+SELECT extract(second from time '12:34:56.789'), extract(epoch from time '12:34:56.789');
+  extract  |   extract    
+-----------+--------------
+ 56.789000 | 45296.789000
+(1 row)
+
+SELECT date_part('second', time '12:34:56.789');
+ date_part 
+-----------
+    56.789
+(1 row)
+
+SELECT extract(timezone from timetz '12:34:56-04:30'), extract(timezone_hour from timetz '12:34:56-04:30'), extract(timezone_minute from timetz '12:34:56-04:30');
+ extract | extract | extract 
+---------+---------+---------
+  -16200 |      -4 |     -30
+(1 row)
+
+SELECT extract(epoch from timetz '13:30:25.123456-04:30');
+   extract    
+--------------
+ 64825.123456
+(1 row)
+
+SELECT extract(day from time '12:00:00');
+ERROR:  0A000: unit "day" not supported for type time without time zone
+-- ===== isfinite, casts, time/interval conversions =====
+SELECT isfinite(interval '1 day'), isfinite(interval 'infinity'), isfinite(interval '-infinity');
+ isfinite | isfinite | isfinite 
+----------+----------+----------
+ t        | f        | f
+(1 row)
+
+SELECT time '12:34:56'::interval;
+ interval 
+----------
+ 12:34:56
+(1 row)
+
+SELECT interval '25:34:56'::time;
+   time   
+----------
+ 01:34:56
+(1 row)
+
+SELECT interval '-1 hour'::time;
+   time   
+----------
+ 23:00:00
+(1 row)
+
+SELECT interval 'infinity'::time;
+ERROR:  22008: cannot convert infinite interval to time
+-- ===== timezone(interval/text, ...) forms =====
+SET TIME ZONE 'UTC';
+SELECT timezone(interval '-5 hours', timestamp '2025-06-01 12:00:00');
+        timezone        
+------------------------
+ 2025-06-01 17:00:00+00
+(1 row)
+
+SELECT timezone(interval '5 hours 30 minutes', timestamptz '2025-06-01 12:00:00+00');
+      timezone       
+---------------------
+ 2025-06-01 17:30:00
+(1 row)
+
+SELECT timezone(interval '1 mon', timestamp '2025-06-01 12:00:00');
+ERROR:  22023: interval time zone "1 mon" must not include months or days
+SELECT timezone(interval 'infinity', timestamp '2025-06-01 12:00:00');
+ERROR:  22023: interval time zone "infinity" must be finite
+SELECT timezone('EST', timetz '12:00:00+00');
+  timezone   
+-------------
+ 07:00:00-05
+(1 row)
+
+SELECT timezone(interval '-5 hours', timetz '12:00:00+00');
+  timezone   
+-------------
+ 07:00:00-05
+(1 row)
+
+SELECT timezone(interval '+05:30', timetz '23:00:00-08');
+    timezone    
+----------------
+ 12:30:00+05:30
+(1 row)
+
+SELECT timezone(interval '1 mon', timetz '12:00:00+00');
+ERROR:  22023: interval time zone "1 mon" must not include months or days
+SELECT timestamp '2025-06-01 12:00:00' AT TIME ZONE interval '-5 hours';
+        timezone        
+------------------------
+ 2025-06-01 17:00:00+00
+(1 row)
+
+-- ===== SET TIME ZONE INTERVAL =====
+SET TIME ZONE INTERVAL '+05:30' HOUR TO MINUTE;
+SHOW timezone;
+    TimeZone    
+----------------
+ <+05:30>-05:30
+(1 row)
+
+SELECT '2025-01-01 00:00:00+00'::timestamptz;
+        timestamptz        
+---------------------------
+ 2025-01-01 05:30:00+05:30
+(1 row)
+
+SET TIME ZONE INTERVAL '-08:00' HOUR TO MINUTE;
+SHOW timezone;
+ TimeZone 
+----------
+ <-08>+08
+(1 row)
+
+SELECT '2025-01-01 00:00:00+00'::timestamptz;
+      timestamptz       
+------------------------
+ 2024-12-31 16:00:00-08
+(1 row)
+
+SET TIME ZONE 'UTC';
+-- ===== OVERLAPS =====
+SELECT (timestamp '2025-01-01', timestamp '2025-02-01') OVERLAPS (timestamp '2025-01-15', timestamp '2025-03-01');
+ overlaps 
+----------
+ t
+(1 row)
+
+SELECT (timestamp '2025-01-01', timestamp '2025-02-01') OVERLAPS (timestamp '2025-02-01', timestamp '2025-03-01');
+ overlaps 
+----------
+ f
+(1 row)
+
+SELECT (timestamp '2025-02-01', timestamp '2025-01-01') OVERLAPS (timestamp '2025-01-15', timestamp '2025-01-20');
+ overlaps 
+----------
+ t
+(1 row)
+
+SELECT (timestamp '2025-01-01', NULL::timestamp) OVERLAPS (timestamp '2025-01-15', timestamp '2025-03-01');
+ overlaps 
+----------
+ 
+(1 row)
+
+SELECT (NULL::timestamp, NULL::timestamp) OVERLAPS (timestamp '2025-01-15', timestamp '2025-03-01');
+ overlaps 
+----------
+ 
+(1 row)
+
+-- ===== interval columns e2e: CREATE/INSERT/SELECT/ORDER BY/GROUP BY =====
+CREATE TABLE iv_e2e(id int, iv interval);
+INSERT INTO iv_e2e VALUES (1, '1 day'), (2, '25 hours'), (3, '-1 mon'), (4, '30 days'), (5, '1 mon'), (6, NULL), (7, '24 hours');
+SELECT id, iv FROM iv_e2e ORDER BY iv, id;
+ id |    iv    
+----+----------
+  3 | -1 mons
+  1 | 1 day
+  7 | 24:00:00
+  2 | 25:00:00
+  4 | 30 days
+  5 | 1 mon
+  6 | 
+(7 rows)
+
+SELECT iv, count(*) FROM iv_e2e GROUP BY iv ORDER BY iv;
+    iv    | count 
+----------+-------
+ -1 mons  |     1
+ 1 day    |     2
+ 25:00:00 |     1
+ 30 days  |     2
+          |     1
+(5 rows)
+
+SELECT id, iv FROM iv_e2e WHERE iv > interval '20 hours' ORDER BY id;
+ id |    iv    
+----+----------
+  1 | 1 day
+  2 | 25:00:00
+  4 | 30 days
+  5 | 1 mon
+  7 | 24:00:00
+(5 rows)
+
+SELECT id, iv + interval '1 hour' FROM iv_e2e ORDER BY id;
+ id |     ?column?      
+----+-------------------
+  1 | 1 day 01:00:00
+  2 | 26:00:00
+  3 | -1 mons +01:00:00
+  4 | 30 days 01:00:00
+  5 | 1 mon 01:00:00
+  6 | 
+  7 | 25:00:00
+(7 rows)
+
+DROP TABLE iv_e2e;
+-- ===== interval columns with typmod =====
+CREATE TABLE iv_tm(a interval hour to minute, b interval(2), c interval day to second(1), d interval year to month);
+INSERT INTO iv_tm VALUES ('1 day 02:03:04.5', '00:00:00.789', '5 days 01:02:03.45', '2 years 7 mons');
+SELECT * FROM iv_tm;
+       a        |      b      |         c         |       d        
+----------------+-------------+-------------------+----------------
+ 1 day 02:03:00 | 00:00:00.79 | 5 days 01:02:03.5 | 2 years 7 mons
+(1 row)
+
+DROP TABLE iv_tm;

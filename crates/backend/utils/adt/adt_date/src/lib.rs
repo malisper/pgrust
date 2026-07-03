@@ -1,28 +1,33 @@
 //! date.c core: date/time/timetz text I/O over adt_datetime, comparison and
-//! arithmetic cores, and the date<->timestamp conversions through
-//! adt_timestamp. Zero-allocation I/O like adt_timestamp: parse fields borrow
-//! a caller workbuf, output writes into a caller-owned MAXDATELEN buffer.
-//! Interval-typed operators, extract/date_part (numeric image plumbing),
-//! typmod in/out, sortsupport/skipsupport, and timetz_zone/izone/at_local
-//! defer; their OIDs stay out of DATE_BUILTINS so fmgr resolves them to its
-//! loud not-ported panic. recv/send ride the binary-wire fmgr frame.
+//! arithmetic cores, the date<->timestamp conversions and interval
+//! arithmetic/zone rotation through adt_timestamp, and the
+//! extract/date_part arms. Zero-allocation I/O like adt_timestamp: parse
+//! fields borrow a caller workbuf, output writes into a caller-owned
+//! MAXDATELEN buffer. typmod in/out and sortsupport/skipsupport still defer;
+//! their OIDs stay out of DATE_BUILTINS so fmgr resolves them to its loud
+//! not-ported panic. recv/send ride the binary-wire fmgr frame.
 
 #![allow(non_snake_case)]
 
 use adt_datetime::tz::{self};
 use adt_datetime::{
-    date2j, fsec_t, j2date, pg_tm, DateTimeErrorExtra, DateTimeParseError, DecodeDateTime,
-    DecodeTimeOnly, EncodeDateOnly, EncodeTimeOnly, ParseDateTime, Timestamp, TimeOffset,
-    ValidateDate, DTERR_BAD_FORMAT, DTK_DATE, DTK_DATE_M, DTK_EARLY, DTK_EPOCH, DTK_LATE,
-    IS_VALID_JULIAN, MAXDATEFIELDS, MAXDATELEN, MAX_TIME_PRECISION,
-    MINS_PER_HOUR, POSTGRES_EPOCH_JDATE, SECS_PER_MINUTE, USECS_PER_DAY, USECS_PER_HOUR,
-    USECS_PER_MINUTE, USECS_PER_SEC,
+    date2isoweek, date2isoyear, date2j, fsec_t, j2date, j2day, pg_tm, DateTimeErrorExtra,
+    DateTimeParseError, DecodeDateTime, DecodeSpecial, DecodeTimeOnly, DecodeUnits,
+    EncodeDateOnly, EncodeTimeOnly, Interval, ParseDateTime, Timestamp, TimeOffset,
+    ValidateDate, DTERR_BAD_FORMAT, DTK_CENTURY, DTK_DATE, DTK_DATE_M, DTK_DAY, DTK_DECADE,
+    DTK_DOW, DTK_DOY, DTK_EARLY, DTK_EPOCH, DTK_HOUR, DTK_ISODOW, DTK_ISOYEAR, DTK_JULIAN,
+    DTK_LATE, DTK_MICROSEC, DTK_MILLENNIUM, DTK_MILLISEC, DTK_MINUTE, DTK_MONTH, DTK_QUARTER,
+    DTK_SECOND, DTK_TZ, DTK_TZ_HOUR, DTK_TZ_MINUTE, DTK_WEEK, DTK_YEAR, IS_VALID_JULIAN,
+    MAXDATEFIELDS, MAXDATELEN, MAX_TIME_PRECISION, MINS_PER_HOUR, POSTGRES_EPOCH_JDATE, RESERV,
+    SECS_PER_DAY, SECS_PER_HOUR, SECS_PER_MINUTE, UNITS, UNIX_EPOCH_JDATE, UNKNOWN_FIELD,
+    USECS_PER_DAY, USECS_PER_HOUR, USECS_PER_MINUTE, USECS_PER_SEC,
 };
-use adt_datetime::Interval;
 use adt_timestamp::{
-    interval, timestamp2tm, GetEpochTime, DT_NOBEGIN, DT_NOEND, IS_VALID_TIMESTAMP,
-    MIN_TIMESTAMP, TIMESTAMP_IS_NOBEGIN, TIMESTAMP_IS_NOEND, TIMESTAMP_NOT_FINITE,
+    interval, timestamp2tm, DecodeTimezoneName, DetermineTimeZoneAbbrevOffsetTS, GetEpochTime,
+    PartValue, TzLookup, DT_NOBEGIN, DT_NOEND, IS_VALID_TIMESTAMP, MIN_TIMESTAMP,
+    TIMESTAMP_IS_NOBEGIN, TIMESTAMP_IS_NOEND, TIMESTAMP_NOT_FINITE,
 };
+use numeric::{int64_div_fast_to_numeric, int64_to_numeric, numeric_in};
 use adt_datetime::consts::TZDISP_LIMIT;
 use datum::Bytea;
 use mcx::Mcx;
@@ -30,8 +35,10 @@ use stringinfo::StringInfo;
 use types_core::TimestampTz;
 use types_error::{
     ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_DATETIME_FIELD_OVERFLOW,
-    ERRCODE_DATETIME_VALUE_OUT_OF_RANGE, ERRCODE_INVALID_TIME_ZONE_DISPLACEMENT_VALUE,
+    ERRCODE_DATETIME_VALUE_OUT_OF_RANGE, ERRCODE_FEATURE_NOT_SUPPORTED,
+    ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_INVALID_TIME_ZONE_DISPLACEMENT_VALUE,
 };
+use xact::GetCurrentTransactionStartTimestamp;
 
 pub mod builtins;
 
@@ -966,4 +973,308 @@ pub fn timetz_mi_interval(time: &TimeTzADT, span: &Interval) -> PgResult<TimeTzA
         t += USECS_PER_DAY;
     }
     Ok(TimeTzADT { time: t, zone: time.zone })
+}
+
+// C99 modulo has the wrong sign convention for negative input (C comment).
+fn timetz_rotate(t: &TimeTzADT, tz: i32) -> TimeTzADT {
+    let mut time = t.time + (t.zone - tz) as i64 * USECS_PER_SEC;
+    while time < 0 {
+        time += USECS_PER_DAY;
+    }
+    if time >= USECS_PER_DAY {
+        time %= USECS_PER_DAY;
+    }
+    TimeTzADT { time, zone: tz }
+}
+
+// C text_to_cstring_buffer(zone, buf, TZ_STRLEN_MAX + 1); adt_timestamp's
+// byte-truncation divergence note applies.
+fn text_to_tzname(zone: &[u8]) -> &[u8] {
+    let z = &zone[..zone.len().min(255)];
+    match z.iter().position(|&b| b == 0) {
+        Some(i) => &z[..i],
+        None => z,
+    }
+}
+
+/// C `timetz_zone` on the zone text payload.
+pub fn timetz_zone(zone: &[u8], t: &TimeTzADT) -> PgResult<TimeTzADT> {
+    let tzname = text_to_tzname(zone);
+    let tz = match DecodeTimezoneName(tzname)? {
+        TzLookup::FixedOffset(val) => -val,
+        TzLookup::DynTz(tzp) => {
+            let now = GetCurrentTransactionStartTimestamp();
+            let mut isdst = 0;
+            DetermineTimeZoneAbbrevOffsetTS(now, tzname, tzp, &mut isdst)?
+        }
+        TzLookup::Zone(tzp) => {
+            let now = GetCurrentTransactionStartTimestamp();
+            let mut tm = pg_tm::default();
+            let mut fsec: fsec_t = 0;
+            let mut tz = 0;
+            if timestamp2tm(now, Some(&mut tz), &mut tm, &mut fsec, None, Some(tzp)).is_err() {
+                return Err(timestamp_out_of_range());
+            }
+            tz
+        }
+    };
+    Ok(timetz_rotate(t, tz))
+}
+
+pub fn timetz_izone(zone: &Interval, time: &TimeTzADT) -> PgResult<TimeTzADT> {
+    let tz = -(interval::izone_offset(zone)?) as i32;
+    Ok(timetz_rotate(time, tz))
+}
+
+pub fn timetz_at_local(t: &TimeTzADT) -> PgResult<TimeTzADT> {
+    let z = tz::session_timezone()
+        .unwrap_or_else(|| panic!("session timezone not initialized (pg_timezone_initialize) — timetz_at_local"));
+    let tzn = tz::pg_get_timezone_name(z).unwrap_or("");
+    timetz_zone(tzn.as_bytes(), t)
+}
+
+fn downcase_ident<'a>(src: &[u8], out: &'a mut [u8; 64]) -> &'a [u8] {
+    let n = src.len().min(63);
+    for (dst, b) in out.iter_mut().zip(&src[..n]) {
+        *dst = b.to_ascii_lowercase();
+    }
+    &out[..n]
+}
+
+#[cold]
+fn unit_not_supported(lowunits: &[u8], typename: &str) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!(
+            "unit \"{}\" not supported for type {typename}",
+            String::from_utf8_lossy(lowunits)
+        ))
+        .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+    )
+}
+
+#[cold]
+fn unit_not_recognized(lowunits: &[u8], typename: &str) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!(
+            "unit \"{}\" not recognized for type {typename}",
+            String::from_utf8_lossy(lowunits)
+        ))
+        .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE),
+    )
+}
+
+pub fn extract_date(units: &[u8], date: DateADT) -> PgResult<PartValue> {
+    let mut low = [0u8; 64];
+    let lowunits = downcase_ident(units, &mut low);
+
+    let mut val = 0;
+    let mut type_ = DecodeUnits(0, lowunits, &mut val);
+    if type_ == UNKNOWN_FIELD {
+        type_ = DecodeSpecial(0, lowunits, &mut val);
+    }
+
+    if DATE_NOT_FINITE(date) && (type_ == UNITS || type_ == RESERV) {
+        return match val {
+            // Oscillating units
+            DTK_DAY | DTK_MONTH | DTK_QUARTER | DTK_WEEK | DTK_DOW | DTK_ISODOW | DTK_DOY => {
+                Ok(PartValue::Null)
+            }
+            // Monotonically-increasing units
+            DTK_YEAR | DTK_DECADE | DTK_CENTURY | DTK_MILLENNIUM | DTK_JULIAN | DTK_ISOYEAR
+            | DTK_EPOCH => {
+                let lit = if DATE_IS_NOBEGIN(date) { "-Infinity" } else { "Infinity" };
+                Ok(PartValue::Numeric(
+                    numeric_in(lit, -1, None)?.expect("infinity literal parses"),
+                ))
+            }
+            _ => Err(unit_not_supported(lowunits, "date")),
+        };
+    }
+
+    let intresult: i64 = if type_ == UNITS {
+        let (mut year, mut mon, mut mday) = (0, 0, 0);
+        j2date(date + POSTGRES_EPOCH_JDATE, &mut year, &mut mon, &mut mday);
+        match val {
+            DTK_DAY => mday as i64,
+            DTK_MONTH => mon as i64,
+            DTK_QUARTER => ((mon - 1) / 3 + 1) as i64,
+            DTK_WEEK => date2isoweek(year, mon, mday) as i64,
+            DTK_YEAR => {
+                if year > 0 {
+                    year as i64
+                } else {
+                    // there is no year 0, just 1 BC and 1 AD
+                    (year - 1) as i64
+                }
+            }
+            DTK_DECADE => {
+                if year >= 0 {
+                    (year / 10) as i64
+                } else {
+                    -(((8 - (year - 1)) / 10) as i64)
+                }
+            }
+            DTK_CENTURY => {
+                if year > 0 {
+                    ((year + 99) / 100) as i64
+                } else {
+                    -(((99 - (year - 1)) / 100) as i64)
+                }
+            }
+            DTK_MILLENNIUM => {
+                if year > 0 {
+                    ((year + 999) / 1000) as i64
+                } else {
+                    -(((999 - (year - 1)) / 1000) as i64)
+                }
+            }
+            DTK_JULIAN => (date + POSTGRES_EPOCH_JDATE) as i64,
+            DTK_ISOYEAR => {
+                let mut r = date2isoyear(year, mon, mday) as i64;
+                // Adjust BC years
+                if r <= 0 {
+                    r -= 1;
+                }
+                r
+            }
+            DTK_DOW | DTK_ISODOW => {
+                let mut r = j2day(date + POSTGRES_EPOCH_JDATE) as i64;
+                if val == DTK_ISODOW && r == 0 {
+                    r = 7;
+                }
+                r
+            }
+            DTK_DOY => (date2j(year, mon, mday) - date2j(year, 1, 1) + 1) as i64,
+            _ => return Err(unit_not_supported(lowunits, "date")),
+        }
+    } else if type_ == RESERV {
+        match val {
+            DTK_EPOCH => {
+                (date as i64 + POSTGRES_EPOCH_JDATE as i64 - UNIX_EPOCH_JDATE as i64)
+                    * SECS_PER_DAY as i64
+            }
+            _ => return Err(unit_not_supported(lowunits, "date")),
+        }
+    } else {
+        return Err(unit_not_recognized(lowunits, "date"));
+    };
+
+    Ok(PartValue::Numeric(int64_to_numeric(intresult)))
+}
+
+fn part_units_time(
+    val: i32,
+    sec: i32,
+    fsec: fsec_t,
+    min: i32,
+    hour: i32,
+    retnumeric: bool,
+) -> PgResult<Option<PartValue>> {
+    Ok(Some(match val {
+        DTK_MICROSEC => finish_time_part(sec as i64 * 1_000_000 + fsec as i64, retnumeric),
+        DTK_MILLISEC => {
+            if retnumeric {
+                PartValue::Numeric(int64_div_fast_to_numeric(
+                    sec as i64 * 1_000_000 + fsec as i64,
+                    3,
+                )?)
+            } else {
+                PartValue::Float(sec as f64 * 1000.0 + fsec as f64 / 1000.0)
+            }
+        }
+        DTK_SECOND => {
+            if retnumeric {
+                PartValue::Numeric(int64_div_fast_to_numeric(
+                    sec as i64 * 1_000_000 + fsec as i64,
+                    6,
+                )?)
+            } else {
+                PartValue::Float(sec as f64 + fsec as f64 / 1_000_000.0)
+            }
+        }
+        DTK_MINUTE => finish_time_part(min as i64, retnumeric),
+        DTK_HOUR => finish_time_part(hour as i64, retnumeric),
+        _ => return Ok(None),
+    }))
+}
+
+fn finish_time_part(intresult: i64, retnumeric: bool) -> PartValue {
+    if retnumeric {
+        PartValue::Numeric(int64_to_numeric(intresult))
+    } else {
+        PartValue::Float(intresult as f64)
+    }
+}
+
+pub fn time_part_common(units: &[u8], time: TimeADT, retnumeric: bool) -> PgResult<PartValue> {
+    let mut low = [0u8; 64];
+    let lowunits = downcase_ident(units, &mut low);
+
+    let mut val = 0;
+    let mut type_ = DecodeUnits(0, lowunits, &mut val);
+    if type_ == UNKNOWN_FIELD {
+        type_ = DecodeSpecial(0, lowunits, &mut val);
+    }
+
+    if type_ == UNITS {
+        let mut tm = pg_tm::default();
+        let mut fsec: fsec_t = 0;
+        time2tm(time, &mut tm, &mut fsec);
+        match part_units_time(val, tm.tm_sec, fsec, tm.tm_min, tm.tm_hour, retnumeric)? {
+            Some(v) => Ok(v),
+            None => Err(unit_not_supported(lowunits, "time without time zone")),
+        }
+    } else if type_ == RESERV && val == DTK_EPOCH {
+        if retnumeric {
+            Ok(PartValue::Numeric(int64_div_fast_to_numeric(time, 6)?))
+        } else {
+            Ok(PartValue::Float(time as f64 / 1_000_000.0))
+        }
+    } else {
+        Err(unit_not_recognized(lowunits, "time without time zone"))
+    }
+}
+
+pub fn timetz_part_common(
+    units: &[u8],
+    time: &TimeTzADT,
+    retnumeric: bool,
+) -> PgResult<PartValue> {
+    let mut low = [0u8; 64];
+    let lowunits = downcase_ident(units, &mut low);
+
+    let mut val = 0;
+    let mut type_ = DecodeUnits(0, lowunits, &mut val);
+    if type_ == UNKNOWN_FIELD {
+        type_ = DecodeSpecial(0, lowunits, &mut val);
+    }
+
+    if type_ == UNITS {
+        let mut tm = pg_tm::default();
+        let mut fsec: fsec_t = 0;
+        let mut tz = 0;
+        timetz2tm(time, &mut tm, &mut fsec, Some(&mut tz));
+        match val {
+            DTK_TZ => Ok(finish_time_part(-tz as i64, retnumeric)),
+            DTK_TZ_MINUTE => {
+                Ok(finish_time_part(((-tz / SECS_PER_MINUTE) % MINS_PER_HOUR) as i64, retnumeric))
+            }
+            DTK_TZ_HOUR => Ok(finish_time_part((-tz / SECS_PER_HOUR) as i64, retnumeric)),
+            _ => match part_units_time(val, tm.tm_sec, fsec, tm.tm_min, tm.tm_hour, retnumeric)? {
+                Some(v) => Ok(v),
+                None => Err(unit_not_supported(lowunits, "time with time zone")),
+            },
+        }
+    } else if type_ == RESERV && val == DTK_EPOCH {
+        if retnumeric {
+            Ok(PartValue::Numeric(int64_div_fast_to_numeric(
+                time.time + time.zone as i64 * 1_000_000,
+                6,
+            )?))
+        } else {
+            Ok(PartValue::Float(time.time as f64 / 1_000_000.0 + time.zone as f64))
+        }
+    } else {
+        Err(unit_not_recognized(lowunits, "time with time zone"))
+    }
 }

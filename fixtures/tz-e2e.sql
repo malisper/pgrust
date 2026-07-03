@@ -165,3 +165,18 @@ SELECT id, t, ts FROM tz_e2e ORDER BY id;
 SELECT id, t AT TIME ZONE 'America/New_York', ts AT TIME ZONE 'America/New_York' FROM tz_e2e ORDER BY id;
 SELECT id, EXTRACT(epoch FROM t) FROM tz_e2e ORDER BY id;
 DROP TABLE tz_e2e;
+
+-- ===== interval lane: tz-relevant interval surface =====
+SET TIME ZONE 'America/New_York';
+SELECT timestamptz '2025-03-08 12:00:00' + interval '1 day';
+SELECT timestamptz '2025-03-08 12:00:00' + interval '24 hours';
+SELECT timestamptz '2025-11-01 12:00:00' + interval '1 day';
+SELECT timestamptz '2025-11-01 12:00:00' + interval '24 hours';
+SELECT timestamptz '2025-11-02 06:30:00+00' - timestamptz '2025-11-01 06:30:00+00';
+SELECT timestamp '2025-06-01 12:00:00' AT TIME ZONE interval '-5 hours';
+SET TIME ZONE INTERVAL '+05:30' HOUR TO MINUTE;
+SHOW timezone;
+SELECT '2025-01-01 00:00:00+00'::timestamptz;
+SET TIME ZONE 'UTC';
+SELECT age(timestamptz '2025-03-15 10:30:00+00', timestamptz '2024-01-20 08:00:00+00');
+SELECT extract(epoch from interval '2 years 5 mons 10 days 12:30:45.678');

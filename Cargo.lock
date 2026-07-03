@@ -130,6 +130,7 @@ name = "adt_date"
 version = "0.1.0"
 dependencies = [
  "adt_datetime",
+ "adt_numeric",
  "adt_timestamp",
  "datum",
  "elog",
@@ -143,6 +144,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_fmgr",
+ "xact",
  "xact_seams",
 ]
 
@@ -153,6 +155,7 @@ dependencies = [
  "elog",
  "fd",
  "guc_tables",
+ "init_small",
  "localtime",
  "numutils",
  "pgtz",
@@ -479,6 +482,7 @@ dependencies = [
  "libc",
  "localtime",
  "mcx",
+ "numutils",
  "pgtz",
  "pqformat",
  "strftime",
@@ -2804,6 +2808,8 @@ version = "0.0.0"
 dependencies = [
  "aclchk_seams",
  "adt_acl",
+ "adt_datetime",
+ "adt_timestamp",
  "datum",
  "elog",
  "exectuples_output",
@@ -2814,6 +2820,7 @@ dependencies = [
  "mbutils_seams",
  "mcx",
  "miscinit",
+ "parse_utilcmd",
  "pgtz",
  "pqcomm_seams",
  "scalar_seams",
@@ -5108,10 +5115,16 @@ name = "parse_utilcmd"
 version = "0.1.0"
 dependencies = [
  "catalog_namespace",
+ "datum",
+ "elog",
+ "fmgr_core",
+ "mbutils",
  "mcx",
+ "parser_small1",
  "syscache_seams",
  "types_core",
  "types_error",
+ "types_fmgr",
  "types_nodes",
 ]
 
@@ -8306,6 +8319,8 @@ dependencies = [
 name = "tuplesort"
 version = "0.1.0"
 dependencies = [
+ "adt_datetime",
+ "adt_timestamp",
  "datum",
  "exectuples",
  "fmgr_seams",
@@ -8750,6 +8765,7 @@ dependencies = [
  "aclchk_seams",
  "adt_acl",
  "adt_datetime",
+ "adt_timestamp",
  "backend_status",
  "elog",
  "guc",

@@ -192,7 +192,33 @@ pub fn assign_datestyle(_newval: Option<&str>, extra: Option<&GucHookExtra>) {
 fn check_timezone_value(value: &str, log_only: bool) -> PgResult<Option<&'static PgTz>> {
     if !log_only {
         if value.len() >= 8 && value.as_bytes()[..8].eq_ignore_ascii_case(b"interval") {
-            unported("check_timezone INTERVAL 'x' (interval_in lane)");
+            // INTERVAL 'foo': SQL spec compliance arm.
+            let rest = value[8..].trim_start_matches([' ', '\t', '\n', '\x0b', '\x0c', '\r']);
+            let Some(rest) = rest.strip_prefix('\'') else {
+                return Ok(None);
+            };
+            let Some(end) = rest.find('\'') else {
+                return Ok(None);
+            };
+            if end + 1 != rest.len() {
+                return Ok(None);
+            }
+            let interval = adt_timestamp::interval::interval_in(&rest[..end], -1, None)?;
+            if interval.month != 0 {
+                GUC_check_errdetail("Cannot specify months in time zone interval.");
+                return Ok(None);
+            }
+            if interval.day != 0 {
+                GUC_check_errdetail("Cannot specify days in time zone interval.");
+                return Ok(None);
+            }
+            // SQL to Unix sign convention
+            let gmtoffset = -(interval.time / 1_000_000);
+            let new_tz = tz::pg_tzset_offset(gmtoffset);
+            if new_tz.is_none() {
+                GUC_check_errdetail("UTC timezone offset is out of range.");
+            }
+            return Ok(new_tz);
         }
         if let Ok(hours) = value.parse::<f64>() {
             let gmtoffset = (-hours * SECS_PER_HOUR as f64) as i64;

@@ -1,23 +1,23 @@
 //! fmgr wrappers (`fc_*`) + `DATE_BUILTINS` for fmgr-core, hosting the
 //! timestamp.c rows too (adt_timestamp has no fmgr table; adt_date already
 //! deps it). Not registrable (established precedents): typmodin (ArrayType),
-//! sortsupport/skipsupport/time_support (planner nodes), extract/date_part
-//! rows (numeric image frame), trunc/zone/izone/at_local, age/overlaps_
-//! timestamp, in_range, generate_series, interval aggregates. recv/send ride
-//! the binary-wire fmgr frame (types_fmgr::wire); interval/timetz by-ref
-//! results are 16/12-byte images via byref_result.
+//! sortsupport/skipsupport/time_support (planner nodes), age/overlaps_
+//! timestamp, in_range, generate_series, interval aggregates,
+//! date_part(text,date) 1384 (SQL-language). recv/send ride the binary-wire
+//! fmgr frame (types_fmgr::wire); interval/timetz by-ref results are
+//! 16/12-byte images via byref_result.
 
 use ::datum::Datum;
 use ::types_core::Oid;
 use ::types_error::PgResult;
 use ::types_fmgr::{
-    byref_result, varlena_result, FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo,
-    PGFunction,
+    byref_result, overlaps_common, varlena_result, FmgrBuiltin, FmgrInfo,
+    FunctionCallInfoBaseData as Fcinfo, PGFunction,
 };
 
 use crate::{DateADT, TimeTzADT};
 use adt_datetime::{Interval, MAXDATELEN};
-use adt_timestamp::{interval, TIMESTAMP_NOT_FINITE};
+use adt_timestamp::{interval, PartValue, TIMESTAMP_NOT_FINITE};
 
 // C pallocs the cstring per row; the backend thread owns retained scratch
 // (the nameout precedent). The Datum aliases it until the next out call.
@@ -437,69 +437,6 @@ pub fn fc_timetz_smaller(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) ->
     Ok(fcinfo.arg(i))
 }
 
-// SQL OVERLAPS; non-strict, argument normalization per spec (nulls swapped
-// toward ts, ordering swapped so ts <= te).
-fn overlaps_common(
-    fcinfo: &mut Fcinfo,
-    gt: impl Fn(&Fcinfo, usize, usize) -> bool,
-) -> PgResult<Datum> {
-    let mut s1 = 0usize;
-    let mut e1 = 1usize;
-    let mut s2 = 2usize;
-    let mut e2 = 3usize;
-    let mut e1_null = fcinfo.argisnull(e1);
-    let mut e2_null = fcinfo.argisnull(e2);
-
-    if fcinfo.argisnull(s1) {
-        if e1_null {
-            return Ok(fcinfo.return_null());
-        }
-        core::mem::swap(&mut s1, &mut e1);
-        e1_null = true;
-    } else if !e1_null && gt(fcinfo, s1, e1) {
-        core::mem::swap(&mut s1, &mut e1);
-    }
-
-    if fcinfo.argisnull(s2) {
-        if e2_null {
-            return Ok(fcinfo.return_null());
-        }
-        core::mem::swap(&mut s2, &mut e2);
-        e2_null = true;
-    } else if !e2_null && gt(fcinfo, s2, e2) {
-        core::mem::swap(&mut s2, &mut e2);
-    }
-
-    if gt(fcinfo, s1, s2) {
-        if e2_null {
-            return Ok(fcinfo.return_null());
-        }
-        if gt(fcinfo, e2, s1) {
-            return Ok(Datum::from_bool(true));
-        }
-        if e1_null {
-            return Ok(fcinfo.return_null());
-        }
-        Ok(Datum::from_bool(false))
-    } else if gt(fcinfo, s2, s1) {
-        if e1_null {
-            return Ok(fcinfo.return_null());
-        }
-        if gt(fcinfo, e1, s2) {
-            return Ok(Datum::from_bool(true));
-        }
-        if e2_null {
-            return Ok(fcinfo.return_null());
-        }
-        Ok(Datum::from_bool(false))
-    } else {
-        if e1_null || e2_null {
-            return Ok(fcinfo.return_null());
-        }
-        Ok(Datum::from_bool(true))
-    }
-}
-
 pub fn fc_overlaps_time(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     overlaps_common(fcinfo, |fc, i, j| fc.arg_i64(i) > fc.arg_i64(j))
 }
@@ -858,6 +795,14 @@ pub fn fc_timestamptz_mi_interval(
     )?))
 }
 
+fn part_result(fcinfo: &mut Fcinfo, v: PartValue) -> PgResult<Datum> {
+    match v {
+        PartValue::Null => Ok(fcinfo.return_null()),
+        PartValue::Float(f) => Ok(Datum::from_f64(f)),
+        PartValue::Numeric(img) => byref_result(fcinfo.result_mcx(), img.as_bytes()),
+    }
+}
+
 pub fn fc_date_pl_interval(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let iv = arg_interval(fcinfo, 1);
     Ok(Datum::from_i64(crate::date_pl_interval(arg_date(fcinfo, 0), &iv)?))
@@ -951,6 +896,54 @@ pub fn fc_timestamptz_timestamp(
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
     Ok(Datum::from_i64(interval::timestamptz2timestamp(fcinfo.arg_i64(0))?))
+}
+
+pub fn fc_timetz_zone(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: strict fn — arg 0 is a non-null text varlena.
+    let zone = unsafe { fcinfo.arg_varlena_packed(0)? };
+    let t = arg_timetz(fcinfo, 1);
+    timetz_result(fcinfo, &crate::timetz_zone(zone.data(), &t)?)
+}
+
+pub fn fc_timetz_izone(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let zone = arg_interval(fcinfo, 0);
+    let t = arg_timetz(fcinfo, 1);
+    timetz_result(fcinfo, &crate::timetz_izone(&zone, &t)?)
+}
+
+pub fn fc_timetz_at_local(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let t = arg_timetz(fcinfo, 0);
+    timetz_result(fcinfo, &crate::timetz_at_local(&t)?)
+}
+
+pub fn fc_extract_date(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: strict fn — arg 0 is a non-null text varlena.
+    let units = unsafe { fcinfo.arg_varlena_packed(0)? };
+    let v = crate::extract_date(units.data(), arg_date(fcinfo, 1))?;
+    part_result(fcinfo, v)
+}
+
+macro_rules! time_part_fns {
+    ($($fc:ident: $timetz:literal, $retnumeric:literal;)*) => {$(
+        pub fn $fc(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+            // SAFETY: strict fn — arg 0 is a non-null text varlena.
+            let units = unsafe { fcinfo.arg_varlena_packed(0)? };
+            let v = if $timetz {
+                let t = arg_timetz(fcinfo, 1);
+                crate::timetz_part_common(units.data(), &t, $retnumeric)?
+            } else {
+                crate::time_part_common(units.data(), fcinfo.arg_i64(1), $retnumeric)?
+            };
+            part_result(fcinfo, v)
+        }
+    )*};
+}
+
+time_part_fns! {
+    fc_time_part: false, false;
+    fc_extract_time: false, true;
+    fc_timetz_part: true, false;
+    fc_extract_timetz: true, true;
 }
 
 pub fn fc_timetz_in(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
@@ -1126,4 +1119,12 @@ pub const DATE_BUILTINS: &[FmgrBuiltin] = &[
     b(1969, "timetz_scale", 2, fc_timetz_scale),
     b(2047, "time_timetz", 1, fc_time_timetz),
     b(1388, "timestamptz_timetz", 1, fc_timestamptz_timetz),
+    b(1273, "timetz_part", 2, fc_timetz_part),
+    b(1385, "time_part", 2, fc_time_part),
+    b(2037, "timetz_zone", 2, fc_timetz_zone),
+    b(2038, "timetz_izone", 2, fc_timetz_izone),
+    b(6199, "extract_date", 2, fc_extract_date),
+    b(6200, "extract_time", 2, fc_extract_time),
+    b(6201, "extract_timetz", 2, fc_extract_timetz),
+    b(6336, "timetz_at_local", 1, fc_timetz_at_local),
 ];
