@@ -640,6 +640,17 @@ fn offset_jointree<'mcx>(
             let r = node.as_range_tbl_ref().expect("RangeTblRef");
             Node::mk_range_tbl_ref(mcx, r.rtindex + rtoffset)
         }
+        NodeTag::T_FromExpr => {
+            let f = node.as_from_expr().expect("FromExpr");
+            let mut fromlist = NodeList::nil();
+            for child in &f.fromlist {
+                fromlist.lappend(mcx, offset_jointree(mcx, child, rtoffset)?)?;
+            }
+            Node::mk(
+                mcx,
+                FromExpr { fromlist, quals: offset_opt(mcx, f.quals, rtoffset)? },
+            )
+        }
         NodeTag::T_JoinExpr => {
             let j = node.as_join_expr().expect("JoinExpr");
             let quals = offset_opt(mcx, j.quals, rtoffset)?;
@@ -654,7 +665,8 @@ fn offset_jointree<'mcx>(
                     join_using_alias: j.join_using_alias,
                     quals,
                     alias: j.alias,
-                    rtindex: j.rtindex + rtoffset,
+                    // C: if (j->rtindex) j->rtindex += offset.
+                    rtindex: if j.rtindex != 0 { j.rtindex + rtoffset } else { 0 },
                 },
             )
         }
