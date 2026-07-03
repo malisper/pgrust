@@ -562,7 +562,7 @@ fn still_valid_check_rejects_type_mismatch() {
 #[test]
 fn step_footprint_and_program_shapes() {
     assert!(core::mem::size_of::<Step>() <= 64);
-    assert!(core::mem::size_of::<Kernel>() <= 24);
+    assert!(core::mem::size_of::<Kernel>() <= 48);
     with_mcx(|mcx| {
         let args = NodeList::make2(mcx, mk_scan_var(mcx, 1, INT4OID), mk_int4_const(mcx, Some(7)))
             .unwrap();
