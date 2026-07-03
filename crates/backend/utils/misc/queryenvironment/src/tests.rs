@@ -214,6 +214,7 @@ fn fake_relation_open(mcx: Mcx<'_>, oid: Oid, lockmode: LOCKMODE) -> PgResult<Re
         pgstat_enabled: Cell::new(false),
         rd_amcache: Default::default(),
         rd_supportinfo: Default::default(),
+        rd_indexlist: Default::default(),
     };
     Ok(Relation::open(data, Some(record_close)))
 }

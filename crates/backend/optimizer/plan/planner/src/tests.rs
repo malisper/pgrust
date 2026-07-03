@@ -118,13 +118,42 @@ fn install_scan_fixtures() {
             other => panic!("fixture relation_open: unknown oid {other}"),
         })
     });
-    relcache_seams::relation_get_index_list::set(|mcx, relid| {
+    // Real relcache path: the index list comes off relcache's rd_indexlist
+    // cache, fed by pg_class/pg_index fixtures underneath its build seams.
+    relcache_build_seams::scan_pg_relation::set(|relid, _, _| {
+        Ok((relid == TBL).then(|| relcache_build_seams::ScannedPgClass {
+            form: make_pg_class(TBL, "t", b'r', 2, true),
+            options: None,
+        }))
+    });
+    relcache_build_seams::relation_build_tuple_desc::set(|mcx, _, _| {
+        Ok(std::rc::Rc::new(types_tuple::TupleDescData {
+            natts: 0,
+            tdtypeid: 0,
+            tdtypmod: -1,
+            tdrefcount: 1,
+            constr: None,
+            compact_attrs: mcx::PgVec::new_in(mcx),
+            attrs: mcx::PgVec::new_in(mcx),
+        }))
+    });
+    relcache_build_seams::scan_pg_index_shapes::set(|mcx, indrelid| {
         let mut v = mcx::PgVec::new_in(mcx);
-        if relid == TBL {
-            v.push(IDX);
+        if indrelid == TBL {
+            v.push(relcache_build_seams::PgIndexListShape {
+                indexrelid: IDX,
+                indislive: true,
+                indisunique: true,
+                indisprimary: true,
+                indimmediate: true,
+                indisvalid: true,
+                indisreplident: false,
+                has_indpred: false,
+            });
         }
         Ok(v)
     });
+    relcache_seams::relation_get_index_list::set(relcache::RelationGetIndexList);
     bufmgr_seams::relation_get_number_of_blocks_in_fork::set(|rel, _fork| {
         Ok(match rel.rd_id {
             TBL => 100,
@@ -199,6 +228,7 @@ fn make_rel_data<'mcx>(
         pgstat_enabled: Cell::new(false),
         rd_amcache: Default::default(),
         rd_supportinfo: Default::default(),
+        rd_indexlist: Default::default(),
     }
 }
 

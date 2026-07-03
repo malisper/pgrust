@@ -72,6 +72,7 @@ fn make<'mcx>(mcx: Mcx<'mcx>, oid: Oid, relkind: u8, relam: Oid) -> Relation<'mc
         pgstat_enabled: Cell::new(false),
         rd_amcache: Default::default(),
         rd_supportinfo: Default::default(),
+        rd_indexlist: Default::default(),
     };
     Relation::open(data, None)
 }

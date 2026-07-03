@@ -112,6 +112,7 @@ pub(crate) fn build_desc_data(target_rel_id: Oid) -> PgResult<Option<RelationDat
             pgstat_enabled: Cell::new(false),
             rd_amcache: Default::default(),
             rd_supportinfo: Default::default(),
+            rd_indexlist: Default::default(),
         };
 
         if with_state(|st| st.in_progress[offset].invalidated) {
@@ -225,6 +226,7 @@ pub fn formrdesc(cat: &BootstrapCatalog) -> PgResult<()> {
         pgstat_enabled: Cell::new(false),
         rd_amcache: Default::default(),
         rd_supportinfo: Default::default(),
+        rd_indexlist: Default::default(),
     };
 
     store::insert(Rc::new(data), true, false)

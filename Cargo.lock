@@ -158,6 +158,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "adt_like"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "mbutils",
+ "pg_locale",
+ "stack_depth",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "wchar",
+]
+
+[[package]]
 name = "adt_mac"
 version = "0.1.0"
 dependencies = [
@@ -1363,6 +1377,7 @@ dependencies = [
  "adt_float",
  "adt_int",
  "adt_int8",
+ "adt_like",
  "adt_mac",
  "adt_mac8",
  "adt_numeric",
@@ -1806,6 +1821,7 @@ dependencies = [
  "nbtree",
  "relation_seams",
  "tableam",
+ "tidbitmap",
  "types_core",
  "types_error",
  "types_nbtree",
@@ -2468,6 +2484,7 @@ dependencies = [
  "nbt_compare",
  "predicate_seams",
  "seam_core",
+ "tidbitmap",
  "transam_xlog_seams",
  "types_core",
  "types_error",
@@ -2486,6 +2503,25 @@ dependencies = [
 [[package]]
 name = "nodeagg"
 version = "0.0.0"
+dependencies = [
+ "aclchk_seams",
+ "adt_int8",
+ "adt_numeric",
+ "datum",
+ "execexpr",
+ "exectuples",
+ "executils",
+ "lsyscache",
+ "mcx",
+ "miscinit_seams",
+ "syscache_seams",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_pathnodes",
+ "types_slot",
+ "types_tuple",
+]
 
 [[package]]
 name = "nodeindexonlyscan"
@@ -2749,6 +2785,21 @@ dependencies = [
 [[package]]
 name = "parse_func"
 version = "0.0.0"
+dependencies = [
+ "catalog_namespace",
+ "coerce",
+ "elog",
+ "format_type",
+ "mbutils",
+ "mcx",
+ "miscinit_seams",
+ "parse_agg",
+ "parser_small1",
+ "syscache_seams",
+ "types_core",
+ "types_error",
+ "types_nodes",
+]
 
 [[package]]
 name = "parse_oper"
@@ -2760,6 +2811,7 @@ dependencies = [
  "datum",
  "elog",
  "format_type",
+ "indexcmds_seams",
  "inval",
  "lsyscache",
  "mbutils",
@@ -2779,6 +2831,7 @@ name = "parse_relation"
 version = "0.0.0"
 dependencies = [
  "catalog_namespace",
+ "datum",
  "elog",
  "lmgr_seams",
  "lsyscache",
@@ -2824,18 +2877,25 @@ dependencies = [
  "analyze_seams",
  "backend_status",
  "datum",
+ "gram_core",
  "guc_tables",
  "mcx",
  "miscinit_seams",
  "parse_clause",
  "parse_collate",
  "parse_target",
+ "parser_seams",
  "parser_small1",
+ "rel_vocab",
+ "relation_seams",
  "syscache_seams",
+ "table",
+ "tupdesc",
  "types_core",
  "types_error",
  "types_nodes",
  "types_portal",
+ "types_rel",
  "types_tuple",
 ]
 
@@ -3032,7 +3092,6 @@ dependencies = [
  "mcx",
  "miscinit",
  "pgstat_seams",
- "pgstat_xact_seams",
  "timestamp_seams",
  "types_core",
  "types_error",
@@ -3133,6 +3192,7 @@ dependencies = [
 name = "planner"
 version = "0.1.0"
 dependencies = [
+ "adt_int8",
  "backend_status_seams",
  "bufmgr_seams",
  "clauses",
@@ -4767,6 +4827,19 @@ dependencies = [
  "types_slot",
  "types_tuple",
  "xact_seams",
+]
+
+[[package]]
+name = "tidbitmap"
+version = "0.1.0"
+dependencies = [
+ "hashbrown",
+ "mcx",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_storage",
+ "types_tuple",
 ]
 
 [[package]]

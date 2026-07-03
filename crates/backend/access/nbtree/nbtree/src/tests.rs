@@ -292,6 +292,7 @@ fn index_rel(mcx: Mcx<'_>) -> Relation<'_> {
         pgstat_enabled: Cell::new(false),
         rd_amcache: Default::default(),
         rd_supportinfo: Default::default(),
+        rd_indexlist: Default::default(),
     };
     Relation::open(data, Some(noop_close))
 }

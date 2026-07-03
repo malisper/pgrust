@@ -22,6 +22,45 @@ thread_local! {
     static IN_XACT: Cell<bool> = const { Cell::new(true) };
     static CUR_SUBID: Cell<u32> = const { Cell::new(1) };
     static HAS_SYSCACHE: RefCell<Vec<Oid>> = const { RefCell::new(Vec::new()) };
+    static PG_INDEX_ROWS: RefCell<Vec<(Oid, FakeIndexRow)>> = const { RefCell::new(Vec::new()) };
+    static INDEX_SCANS: Cell<usize> = const { Cell::new(0) };
+}
+
+#[derive(Clone, Copy)]
+struct FakeIndexRow {
+    indexrelid: Oid,
+    indislive: bool,
+    indisunique: bool,
+    indisprimary: bool,
+    indimmediate: bool,
+    indisvalid: bool,
+    indisreplident: bool,
+    has_indpred: bool,
+}
+
+fn fake_index_scan(
+    mcx: Mcx<'_>,
+    indrelid: Oid,
+) -> PgResult<PgVec<'_, relcache_build_seams::PgIndexListShape>> {
+    INDEX_SCANS.with(|c| c.set(c.get() + 1));
+    let mut out = PgVec::new_in(mcx);
+    PG_INDEX_ROWS.with(|rows| {
+        for (rel, r) in rows.borrow().iter() {
+            if *rel == indrelid {
+                out.push(relcache_build_seams::PgIndexListShape {
+                    indexrelid: r.indexrelid,
+                    indislive: r.indislive,
+                    indisunique: r.indisunique,
+                    indisprimary: r.indisprimary,
+                    indimmediate: r.indimmediate,
+                    indisvalid: r.indisvalid,
+                    indisreplident: r.indisreplident,
+                    has_indpred: r.has_indpred,
+                });
+            }
+        }
+    });
+    Ok(out)
 }
 
 #[derive(Clone)]
@@ -149,6 +188,7 @@ fn install() {
         relcache_build_seams::scan_pg_relation::set(fake_scan);
         relcache_build_seams::relation_build_tuple_desc::set(fake_tupdesc);
         relcache_build_seams::relation_init_index_access_info::set(fake_index_info);
+        relcache_build_seams::scan_pg_index_shapes::set(fake_index_scan);
         catalog_seams::is_catalog_relation_oid::set(|_| false);
         miscinit_seams::is_bootstrap_processing_mode::set(|| false);
         xact_seams::is_transaction_state::set(|| IN_XACT.with(|c| c.get()));
@@ -553,4 +593,78 @@ fn bootstrap_descriptor_oids_match_headers() {
             assert_eq!(a.attnum as usize, i + 1);
         }
     }
+}
+
+fn idxrow(indexrelid: Oid) -> FakeIndexRow {
+    FakeIndexRow {
+        indexrelid,
+        indislive: true,
+        indisunique: false,
+        indisprimary: false,
+        indimmediate: true,
+        indisvalid: true,
+        indisreplident: false,
+        has_indpred: false,
+    }
+}
+
+#[test]
+fn index_list_scans_once_then_serves_cached() {
+    install();
+    seed(16500, "idxlist_tbl", RELKIND_RELATION);
+    PG_INDEX_ROWS.with(|rows| {
+        let mut rows = rows.borrow_mut();
+        rows.push((16500, FakeIndexRow { indisunique: true, indisprimary: true, ..idxrow(16510) }));
+        rows.push((16500, FakeIndexRow { indislive: false, ..idxrow(16511) }));
+        rows.push((16500, idxrow(16505)));
+        rows.push((16999, idxrow(16600)));
+    });
+    let ctx = mcx::MemoryContext::new("caller");
+    let scans_before = INDEX_SCANS.with(|c| c.get());
+
+    let first = crate::indexlist::RelationGetIndexList(ctx.mcx(), 16500).unwrap();
+    assert_eq!(first.as_slice(), &[16505, 16510]);
+    assert_eq!(INDEX_SCANS.with(|c| c.get()), scans_before + 1);
+
+    let second = crate::indexlist::RelationGetIndexList(ctx.mcx(), 16500).unwrap();
+    assert_eq!(second.as_slice(), &[16505, 16510]);
+    assert_eq!(INDEX_SCANS.with(|c| c.get()), scans_before + 1);
+
+    let rel = get(16500);
+    {
+        let cached = rel.rd_indexlist.borrow();
+        let cached = cached.as_ref().expect("rd_indexvalid");
+        assert_eq!(cached.list.as_slice(), &[16505, 16510]);
+        assert_eq!(cached.pkindex, 16510);
+        assert!(!cached.ispkdeferrable);
+        // relreplident 'd' + live pkey => pkey is the replica identity.
+        assert_eq!(cached.replidindex, 16510);
+    }
+    drop(rel);
+}
+
+#[test]
+fn index_list_invalidation_forces_rescan() {
+    install();
+    seed(16520, "idxlist_inval", RELKIND_RELATION);
+    PG_INDEX_ROWS.with(|rows| rows.borrow_mut().push((16520, idxrow(16521))));
+    let ctx = mcx::MemoryContext::new("caller");
+
+    let held = get(16520);
+    assert_eq!(
+        crate::indexlist::RelationGetIndexList(ctx.mcx(), 16520).unwrap().as_slice(),
+        &[16521]
+    );
+    let scans = INDEX_SCANS.with(|c| c.get());
+
+    invalidate::RelationCacheInvalidateEntry(16520).unwrap();
+    assert!(held.rd_indexlist.borrow().is_none());
+
+    PG_INDEX_ROWS.with(|rows| rows.borrow_mut().push((16520, idxrow(16522))));
+    assert_eq!(
+        crate::indexlist::RelationGetIndexList(ctx.mcx(), 16520).unwrap().as_slice(),
+        &[16521, 16522]
+    );
+    assert_eq!(INDEX_SCANS.with(|c| c.get()), scans + 1);
+    drop(held);
 }

@@ -17,6 +17,7 @@ types_pathnodes = { path = "../../../../_support/types/pathnodes" }
 types_portal = { path = "../../../../_support/types/portal" }
 planner_seams = { path = "../planner_seams" }
 backend_status_seams = { path = "../../../utils/activity/backend_status_seams" }
+adt_int8 = { path = "../../../utils/adt/int8" }
 clauses = { path = "../../util/clauses" }
 lsyscache = { path = "../../../utils/cache/lsyscache" }
 guc_tables = { path = "../../../utils/misc/guc_tables" }
@@ -35,5 +36,7 @@ vars = { path = "../../util/vars" }
 
 [dev-dependencies]
 clauses_seams = { path = "../../util/clauses_seams" }
+relcache = { path = "../../../utils/cache/relcache" }
+relcache_build_seams = { path = "../../../utils/cache/relcache_build_seams" }
 relation_seams = { path = "../../../access/common/relation_seams" }
 types_nbtree = { path = "../../../../_support/types/types_nbtree" }

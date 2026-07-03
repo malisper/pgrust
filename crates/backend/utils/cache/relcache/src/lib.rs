@@ -1,6 +1,7 @@
 #![allow(non_snake_case)]
 
 pub mod build;
+pub mod indexlist;
 pub mod initfile;
 pub mod invalidate;
 pub mod schemapg;
@@ -17,6 +18,7 @@ use types_core::Oid;
 use types_rel::RelationData;
 
 pub use build::{formrdesc, RelationBuildDesc};
+pub use indexlist::RelationGetIndexList;
 pub use initfile::{
     RelationCacheInitFilePostInvalidate, RelationCacheInitFilePreInvalidate,
     RelationCacheInitFileRemove, RelationCacheInitialize, RelationCacheInitializePhase2,
@@ -99,7 +101,10 @@ pub fn criticalSharedRelcachesBuilt() -> bool {
 }
 
 pub fn init_seams() {
+    relcache_seams::critical_relcaches_built::set(criticalRelcachesBuilt);
+    relcache_seams::critical_shared_relcaches_built::set(criticalSharedRelcachesBuilt);
     relcache_seams::relation_id_get_relation::set(store::RelationIdGetRelation);
+    relcache_seams::relation_get_index_list::set(indexlist::RelationGetIndexList);
     relcache_seams::relation_cache_invalidate::set(invalidate::RelationCacheInvalidate);
     relcache_seams::relation_cache_invalidate_entry::set(invalidate::RelationCacheInvalidateEntry);
     relcache_seams::relation_id_is_in_init_file::set(initfile::RelationIdIsInInitFile);

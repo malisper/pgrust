@@ -11,8 +11,11 @@ use crate::{build, cache_mcx, store, with_state, RelCacheEnt};
 const RELATION_RELATION_ID: Oid = types_core::RELATION_RELATION_ID;
 
 // RelationInvalidateRelation; C also closes smgr / frees rd_amcache (absent fields).
+// rd_indexlist cleared here = C freeing it in RelationClearRelation/rebuild;
+// every inval arm passes through here before the entry is dropped or replaced.
 pub(crate) fn RelationInvalidateRelation(rel: &RelationData<'static>) {
     rel.rd_isvalid.set(false);
+    *rel.rd_indexlist.borrow_mut() = None;
 }
 
 // RelationClearRelation: caller has verified refcount-zero, not nailed, and
@@ -142,6 +145,7 @@ fn RelationReloadIndexInfo(
         pgstat_enabled: Cell::new(false),
         rd_amcache: Default::default(),
         rd_supportinfo: Default::default(),
+        rd_indexlist: Default::default(),
     });
     copy_preserved(held, &newrel);
     with_state(|st| {
@@ -192,6 +196,7 @@ fn RelationReloadNailed(
         pgstat_enabled: Cell::new(false),
         rd_amcache: Default::default(),
         rd_supportinfo: Default::default(),
+        rd_indexlist: Default::default(),
     });
     copy_preserved(held, &newrel);
     with_state(|st| {

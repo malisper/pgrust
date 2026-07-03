@@ -91,6 +91,7 @@ fn make_entry(mcx: Mcx<'static>, oid: Oid, name: &str, relpersistence: u8) -> Re
         pgstat_enabled: Cell::new(false),
         rd_amcache: Default::default(),
         rd_supportinfo: Default::default(),
+        rd_indexlist: Default::default(),
     }
 }
 
