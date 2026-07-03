@@ -3129,6 +3129,7 @@ name = "execmain"
 version = "0.1.0"
 dependencies = [
  "aclchk_seams",
+ "arrayfuncs",
  "backend_status_seams",
  "bufmgr_seams",
  "datum",
@@ -7412,6 +7413,7 @@ dependencies = [
  "exectuples",
  "fmgr_core",
  "fmgr_seams",
+ "format_type",
  "gin",
  "gist",
  "guc_tables",

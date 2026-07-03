@@ -1210,9 +1210,11 @@ pub fn expr_type_typmod(node: Node<'_>) -> (u32, i32) {
             use types_nodes::primnodes::SubLinkType;
             let sp = node.as_sub_plan().unwrap();
             match sp.subLinkType {
-                SubLinkType::EXPR_SUBLINK | SubLinkType::ARRAY_SUBLINK => {
-                    (sp.firstColType, sp.firstColTypmod)
-                }
+                SubLinkType::EXPR_SUBLINK => (sp.firstColType, sp.firstColTypmod),
+                SubLinkType::ARRAY_SUBLINK => (
+                    nodes_core::node_funcs::promoted_array_type(sp.firstColType),
+                    sp.firstColTypmod,
+                ),
                 SubLinkType::MULTIEXPR_SUBLINK => {
                     panic!("exprType (nodeFuncs.c): MULTIEXPR SubPlan not ported")
                 }
@@ -1222,6 +1224,30 @@ pub fn expr_type_typmod(node: Node<'_>) -> (u32, i32) {
         NodeTag::T_AlternativeSubPlan => expr_type_typmod(
             node.as_alternative_sub_plan().unwrap().subplans.first().expect("alternatives"),
         ),
+        NodeTag::T_SubLink => {
+            use types_nodes::primnodes::SubLinkType;
+            let sl = node.as_sub_link().unwrap();
+            match sl.subLinkType {
+                SubLinkType::EXPR_SUBLINK | SubLinkType::ARRAY_SUBLINK => {
+                    let tent = sl
+                        .subselect
+                        .as_query()
+                        .unwrap_or_else(|| panic!("cannot get type for untransformed sublink"))
+                        .targetList
+                        .first()
+                        .expect("sublink tlist")
+                        .as_target_entry()
+                        .expect("tlist entry");
+                    let (ty, tm) = expr_type_typmod(tent.expr);
+                    if sl.subLinkType == SubLinkType::ARRAY_SUBLINK {
+                        (nodes_core::node_funcs::promoted_array_type(ty), tm)
+                    } else {
+                        (ty, tm)
+                    }
+                }
+                _ => (types_core::catalog::BOOLOID, -1),
+            }
+        }
         NodeTag::T_CaseTestExpr => {
             let ct = node.as_case_test_expr().unwrap();
             (ct.typeId, ct.typeMod)
