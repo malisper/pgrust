@@ -62,7 +62,7 @@ pub enum Token {
 
 pub struct Lexeme<'mcx> {
     pub token: Token,
-    pub value: Option<PgVec<'mcx, u8>>,
+    pub value: Option<&'mcx [u8]>,
     pub start: usize,
     pub end: usize,
 }
@@ -456,8 +456,10 @@ impl<'a, 'mcx> Lexer<'a, 'mcx> {
         ::mcx::vec_append_bytes(&mut self.scanstring, &[c])
     }
 
-    fn ss_take(&mut self) -> PgVec<'mcx, u8> {
-        core::mem::replace(&mut self.scanstring, PgVec::new_in(self.mcx))
+    // C's per-token palloc'd scanstring buffer: leaked into the mcx, bulk
+    // freed at context reset.
+    fn ss_take(&mut self) -> &'mcx [u8] {
+        core::mem::replace(&mut self.scanstring, PgVec::new_in(self.mcx)).leak()
     }
 
     fn emit_value(&mut self, token: Token) -> Step<'mcx> {

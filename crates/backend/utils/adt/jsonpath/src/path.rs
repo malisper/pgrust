@@ -9,6 +9,7 @@ use ::types_error::{ERRCODE_INVALID_TEXT_REPRESENTATION, ERRCODE_SYNTAX_ERROR};
 
 use crate::gram::{parsejsonpath, ParseItem, ParseValue};
 
+
 /// On-disk item-type bytes (jsonpath.h JsonPathItemType); pg_upgrade freezes
 /// the order, first four share jbvType discriminants.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -195,7 +196,7 @@ fn flatten_item(
 
     match item.typ {
         ItemType::String | ItemType::Variable | ItemType::Key => {
-            let ParseValue::String(s) = &item.value else {
+            let ParseValue::String(s) = item.value else {
                 unreachable!("String/Variable/Key carries String value");
             };
             vec_append_bytes(buf, &(s.len() as i32).to_ne_bytes())?;
@@ -203,16 +204,16 @@ fn flatten_item(
             vec_append_bytes(buf, &[0])?;
         }
         ItemType::Numeric => {
-            let ParseValue::Numeric(num) = &item.value else {
+            let ParseValue::Numeric(num) = item.value else {
                 unreachable!("Numeric carries Numeric value");
             };
             vec_append_bytes(buf, num)?;
         }
         ItemType::Bool => {
-            let ParseValue::Boolean(b) = &item.value else {
+            let ParseValue::Boolean(b) = item.value else {
                 unreachable!("Bool carries Boolean value");
             };
-            vec_append_bytes(buf, &[*b as u8])?;
+            vec_append_bytes(buf, &[b as u8])?;
         }
         ItemType::And
         | ItemType::Or
@@ -229,8 +230,8 @@ fn flatten_item(
         | ItemType::Mod
         | ItemType::StartsWith
         | ItemType::Decimal => {
-            let (left_item, right_item) = match &item.value {
-                ParseValue::Args { left, right } => (left.as_deref(), right.as_deref()),
+            let (left_item, right_item) = match item.value {
+                ParseValue::Args { left, right } => (left, right),
                 _ => unreachable!("binary op carries Args value"),
             };
 
@@ -272,10 +273,8 @@ fn flatten_item(
             patch_i32(buf, right, chld - pos);
         }
         ItemType::LikeRegex => {
-            let (expr, pattern, flags) = match &item.value {
-                ParseValue::LikeRegex { expr, pattern, flags } => {
-                    (expr.as_deref(), pattern, *flags)
-                }
+            let (expr, pattern, flags) = match item.value {
+                ParseValue::LikeRegex { expr, pattern, flags } => (expr, pattern, flags),
                 _ => unreachable!("LikeRegex carries LikeRegex value"),
             };
 
@@ -307,8 +306,8 @@ fn flatten_item(
                 arg_nesting_level += 1;
             }
 
-            let arg_item = match &item.value {
-                ParseValue::Arg(a) => a.as_deref(),
+            let arg_item = match item.value {
+                ParseValue::Arg(a) => a,
                 ParseValue::None => None,
                 _ => unreachable!("unary op carries Arg value"),
             };
@@ -354,7 +353,7 @@ fn flatten_item(
             }
         }
         ItemType::IndexArray => {
-            let elems = match &item.value {
+            let elems = match item.value {
                 ParseValue::Array(elems) => elems,
                 _ => unreachable!("IndexArray carries Array value"),
             };
@@ -364,14 +363,14 @@ fn flatten_item(
             buf_zeros(buf, 4 * 2 * elems.len())?;
 
             for (i, elem) in elems.iter().enumerate() {
-                let from = elem.from.as_deref().expect("subscript from is non-null");
+                let from = elem.from.expect("subscript from is non-null");
                 let frompos =
                     match flatten_item(buf, escontext, from, nesting_level, true)? {
                         Some(p) => p - pos,
                         None => return Ok(None),
                     };
 
-                let topos = if let Some(to) = elem.to.as_deref() {
+                let topos = if let Some(to) = elem.to {
                     match flatten_item(buf, escontext, to, nesting_level, true)? {
                         Some(p) => p - pos,
                         None => return Ok(None),
@@ -386,8 +385,8 @@ fn flatten_item(
             }
         }
         ItemType::Any => {
-            let (first, last) = match &item.value {
-                ParseValue::AnyBounds { first, last } => (*first, *last),
+            let (first, last) = match item.value {
+                ParseValue::AnyBounds { first, last } => (first, last),
                 _ => unreachable!("Any carries AnyBounds value"),
             };
             vec_append_bytes(buf, &first.to_ne_bytes())?;
@@ -411,7 +410,7 @@ fn flatten_item(
         }
     }
 
-    if let Some(next_item) = item.next.as_deref() {
+    if let Some(next_item) = item.next.get() {
         match flatten_item(
             buf,
             escontext,
@@ -473,7 +472,7 @@ pub fn json_path_from_cstring<'mcx>(
     buf_zeros(&mut buf, JSONPATH_HDRSZ)?;
 
     let mut esc = escontext;
-    if flatten_item(&mut buf, &mut esc, &parsed.expr, 0, false)?.is_none() {
+    if flatten_item(&mut buf, &mut esc, parsed.expr, 0, false)?.is_none() {
         return Ok(None);
     }
 
