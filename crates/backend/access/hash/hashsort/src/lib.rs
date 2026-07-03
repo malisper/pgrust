@@ -39,8 +39,6 @@ pub fn hashbuild<'mcx>(
 
     let num_buckets = hash::_hash_init(index, reltuples_est, ForkNumber::MAIN_FORKNUM)?;
 
-    // Sort by bucket when the initial index exceeds what fits in memory
-    // (maintenance_work_mem or NBuffers, whichever is smaller).
     let mut sort_threshold =
         (init_small::globals::maintenance_work_mem() as u64 * 1024) / ::types_core::BLCKSZ as u64;
     if index.rd_rel.relpersistence != ::types_core::RELPERSISTENCE_TEMP {
@@ -106,7 +104,7 @@ pub fn hashbuildempty(index: &Relation<'_>) -> PgResult<()> {
 
 /// _h_spoolinit.
 fn _h_spoolinit(heap: &Relation<'_>, index: &Relation<'_>, num_buckets: u32) -> HSpool {
-    // Mask derivation stays in sync with _hash_init_metabuffer.
+    // Stays in sync with _hash_init_metabuffer.
     let high_mask = (num_buckets + 1).next_power_of_two() - 1;
     let low_mask = high_mask >> 1;
     let max_buckets = num_buckets - 1;

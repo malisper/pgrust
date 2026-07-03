@@ -681,6 +681,7 @@ fn _hash_alloc_buckets(rel: &Relation<'_>, firstblock: BlockNumber, nblocks: u32
     }
 
     bufmgr::PageSetChecksumInplace(&mut zerobuf.0, lastblock);
+    smgr::RelationGetSmgr(rel)?;
     smgr::smgrextend(
         bm::relation_smgr_locator::call(rel),
         ForkNumber::MAIN_FORKNUM,

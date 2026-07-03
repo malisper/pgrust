@@ -1411,4 +1411,86 @@ mod tests {
         assert_eq!(r.max_offset_number(), 0);
         assert!(!r.has_free_line_pointers());
     }
+
+    fn fill_index_page(pm: &mut PageMut<'_>, n: usize) -> alloc::vec::Vec<[u8; 16]> {
+        pm.init(16);
+        let mut items = Vec::new();
+        for i in 0..n {
+            let mut item = [0u8; 16];
+            item[0] = i as u8;
+            item[8..12].copy_from_slice(&(i as u32).to_ne_bytes());
+            assert_eq!(pm.add_item(&item, (i + 1) as OffsetNumber, 0), Some((i + 1) as OffsetNumber));
+            items.push(item);
+        }
+        items
+    }
+
+    fn surviving_payloads(pm: &PageMut<'_>) -> alloc::vec::Vec<u8> {
+        let r = pm.as_ref();
+        (1..=r.max_offset_number())
+            .map(|off| {
+                let id = r.item_id(off);
+                assert!(id.has_storage());
+                let (p, l) = r.item_raw(id);
+                assert_eq!(l, 16);
+                // SAFETY: item_raw bounds-checked.
+                unsafe { *p }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn index_tuple_delete_shifts_and_repoints() {
+        let mut t = temp_page();
+        let mut pm = page_mut(&mut t);
+        fill_index_page(&mut pm, 5);
+        pm.index_tuple_delete(3);
+        assert_eq!(surviving_payloads(&pm), [0, 1, 3, 4]);
+        pm.index_tuple_delete(1);
+        assert_eq!(surviving_payloads(&pm), [1, 3, 4]);
+        pm.index_tuple_delete(3);
+        assert_eq!(surviving_payloads(&pm), [1, 3]);
+    }
+
+    #[test]
+    fn index_multi_delete_matches_retail_deletes() {
+        // <=2 items go through the retail path; >2 through compactify.
+        let cases: [&[OffsetNumber]; 4] =
+            [&[2, 5], &[1, 4, 7, 8], &[3], &[1, 2, 3, 4, 5, 6, 7, 8]];
+        for dels in cases {
+            let mut t1 = temp_page();
+            let mut pm1 = page_mut(&mut t1);
+            fill_index_page(&mut pm1, 8);
+            pm1.index_multi_delete(&dels);
+
+            let mut t2 = temp_page();
+            let mut pm2 = page_mut(&mut t2);
+            fill_index_page(&mut pm2, 8);
+            for &off in dels.iter().rev() {
+                pm2.index_tuple_delete(off);
+            }
+
+            assert_eq!(surviving_payloads(&pm1), surviving_payloads(&pm2), "dels {dels:?}");
+            assert_eq!(
+                (pm1.as_ref().pd_lower(), pm1.as_ref().pd_upper()),
+                (pm2.as_ref().pd_lower(), pm2.as_ref().pd_upper()),
+                "dels {dels:?}"
+            );
+            // physical layout parity too (both keep remaining tuples in
+            // original relative order)
+            for off in 1..=pm1.as_ref().max_offset_number() {
+                assert_eq!(pm1.as_ref().item_id(off), pm2.as_ref().item_id(off));
+            }
+        }
+    }
+
+    #[test]
+    fn index_multi_delete_all_items_empties_page() {
+        let mut t = temp_page();
+        let mut pm = page_mut(&mut t);
+        fill_index_page(&mut pm, 4);
+        pm.index_multi_delete(&[1, 2, 3, 4]);
+        assert_eq!(pm.as_ref().max_offset_number(), 0);
+        assert_eq!(pm.as_ref().pd_upper(), pm.as_ref().pd_special());
+    }
 }
