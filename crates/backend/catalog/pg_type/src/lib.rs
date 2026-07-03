@@ -419,7 +419,7 @@ pub fn RemoveTypeById<'mcx>(mcx: Mcx<'mcx>, typeOid: Oid) -> PgResult<()> {
     const TYPTYPE_ENUM: i8 = b'e' as i8;
     const TYPTYPE_RANGE: i8 = b'r' as i8;
     if typtype == TYPTYPE_ENUM {
-        panic!("unported: RemoveTypeById EnumValuesDelete (pg_enum.c)");
+        pg_enum::EnumValuesDelete(mcx, typeOid)?;
     }
     if typtype == TYPTYPE_RANGE {
         panic!("unported: RemoveTypeById RangeDelete (pg_range.c)");
