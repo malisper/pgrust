@@ -735,6 +735,49 @@ unsafe impl<'mcx> NodeVariant<'mcx> for StatsElem<'mcx> {
     const TAG: NodeTag = NodeTag::T_StatsElem;
 }
 
+// timing/events use the TRIGGER_TYPE bits of catalog/pg_trigger.h.
+#[derive(Default)]
+pub struct CreateTrigStmt<'mcx> {
+    pub replace: bool,
+    pub isconstraint: bool,
+    pub trigname: Option<&'mcx str>,
+    pub relation: Option<&'mcx crate::primnodes::RangeVar<'mcx>>,
+    pub funcname: NodeList<'mcx>,
+    pub args: NodeList<'mcx>,
+    pub row: bool,
+    pub timing: i16,
+    pub events: i16,
+    pub columns: NodeList<'mcx>,
+    pub whenClause: Option<Node<'mcx>>,
+    pub transitionRels: NodeList<'mcx>,
+    pub deferrable: bool,
+    pub initdeferred: bool,
+    pub constrrel: Option<&'mcx crate::primnodes::RangeVar<'mcx>>,
+}
+
+#[derive(Default)]
+pub struct TriggerTransition<'mcx> {
+    pub name: Option<&'mcx str>,
+    pub isNew: bool,
+    pub isTable: bool,
+}
+
+#[derive(Default)]
+pub struct ConstraintsSetStmt<'mcx> {
+    pub constraints: NodeList<'mcx>,
+    pub deferred: bool,
+}
+
+unsafe impl<'mcx> NodeVariant<'mcx> for CreateTrigStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CreateTrigStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for TriggerTransition<'mcx> {
+    const TAG: NodeTag = NodeTag::T_TriggerTransition;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for ConstraintsSetStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_ConstraintsSetStmt;
+}
+
 impl<'mcx> Node<'mcx> {
     pub fn mk_raw_stmt(
         mcx: Mcx<'mcx>,
@@ -921,6 +964,21 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_create_domain_stmt(self) -> Option<&'mcx CreateDomainStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_create_trig_stmt(self) -> Option<&'mcx CreateTrigStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_trigger_transition(self) -> Option<&'mcx TriggerTransition<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_constraints_set_stmt(self) -> Option<&'mcx ConstraintsSetStmt<'mcx>> {
         self.as_variant()
     }
 }

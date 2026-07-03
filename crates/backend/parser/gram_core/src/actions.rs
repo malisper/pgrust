@@ -24,8 +24,8 @@ use types_nodes::rawnodes::CreateDomainStmt;
 use types_nodes::JoinType;
 use types_nodes::rawnodes::A_Expr_Kind::{self, AEXPR_OP};
 use types_nodes::rawnodes::{
-    ColumnDef, Constraint, ConstrType, CreateSeqStmt, CreateStmt, IndexElem, IndexStmt,
-    OnCommitAction,
+    ColumnDef, Constraint, ConstrType, ConstraintsSetStmt, CreateSeqStmt, CreateStmt,
+    CreateTrigStmt, IndexElem, IndexStmt, OnCommitAction, TriggerTransition,
     FKCONSTR_ACTION_CASCADE, FKCONSTR_ACTION_NOACTION, FKCONSTR_ACTION_RESTRICT,
     FKCONSTR_ACTION_SETDEFAULT, FKCONSTR_ACTION_SETNULL, FKCONSTR_MATCH_FULL,
     FKCONSTR_MATCH_SIMPLE,
@@ -89,6 +89,15 @@ struct CasBits {
 
 static MATH_OPS: [&str; 12] =
     ["+", "-", "*", "/", "%", "^", "<", ">", "=", "<=", ">=", "<>"];
+
+// TRIGGER_TYPE bits, verified against catalog/pg_trigger.h.
+const TRIGGER_TYPE_BEFORE: i16 = 1 << 1;
+const TRIGGER_TYPE_INSERT: i16 = 1 << 2;
+const TRIGGER_TYPE_DELETE: i16 = 1 << 3;
+const TRIGGER_TYPE_UPDATE: i16 = 1 << 4;
+const TRIGGER_TYPE_TRUNCATE: i16 = 1 << 5;
+const TRIGGER_TYPE_INSTEAD: i16 = 1 << 6;
+const TRIGGER_TYPE_AFTER: i16 = 0;
 
 // INTERVAL_MASK(MONTH/YEAR/DAY/HOUR/MINUTE/SECOND) and INTERVAL_FULL_RANGE,
 // values verified against datetime.h / timestamp.h.
@@ -4102,6 +4111,171 @@ impl<'mcx> Parser<'mcx> {
                 list.lcons(mcx, Node::mk_string(mcx, s)?)?;
                 *yyval = YYSTYPE::List(list);
             }
+            // DropStmt: DROP object_type_name_on_any_name [IF_P EXISTS] name
+            // ON any_name opt_drop_behavior
+            922 | 923 => {
+                let (nm, an, bh) = if rule == 922 { (3, 5, 6) } else { (5, 7, 8) };
+                let mut n = Node::build::<DropStmt>(mcx)?;
+                n.removeType = object_type(view.v(2).ival());
+                let mut any_name = view.v(an).list();
+                any_name.lappend(mcx, Node::mk_string(mcx, view.v(nm).str_val())?)?;
+                n.objects = NodeList::make1(mcx, Node::mk_list(mcx, any_name)?)?;
+                n.behavior = drop_behavior(view.v(bh).ival());
+                n.missing_ok = rule == 923;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // CreateTrigStmt: CREATE opt_or_replace TRIGGER name
+            // TriggerActionTime TriggerEvents ON qualified_name
+            // TriggerReferencing TriggerForSpec TriggerWhen EXECUTE ...
+            784 => {
+                let mut n = Node::build::<CreateTrigStmt>(mcx)?;
+                n.replace = view.v(2).boolean();
+                n.trigname = Some(view.v(4).str_val());
+                n.relation =
+                    view.v(8).node().expect("qualified_name").as_variant::<RangeVar>();
+                n.funcname = view.v(14).list();
+                n.args = view.v(16).list();
+                n.row = view.v(10).boolean();
+                n.timing = view.v(5).ival() as i16;
+                let (events, columns) = trigger_events(mcx, view.v(6))?;
+                n.events = events;
+                n.columns = columns;
+                n.whenClause = view.v(11).node();
+                n.transitionRels = view.v(9).list();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // CONSTRAINT TRIGGER form (OptConstrFromTable + CAS bits)
+            785 => {
+                let mut n = Node::build::<CreateTrigStmt>(mcx)?;
+                n.replace = view.v(2).boolean();
+                if n.replace {
+                    return Err(Box::new(
+                        (*self.errposition_error(
+                            "CREATE OR REPLACE CONSTRAINT TRIGGER is not supported".into(),
+                            view.l(1),
+                        ))
+                        .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+                    ));
+                }
+                n.isconstraint = true;
+                n.trigname = Some(view.v(5).str_val());
+                n.relation =
+                    view.v(9).node().expect("qualified_name").as_variant::<RangeVar>();
+                n.funcname = view.v(18).list();
+                n.args = view.v(20).list();
+                n.row = true;
+                n.timing = TRIGGER_TYPE_AFTER;
+                let (events, columns) = trigger_events(mcx, view.v(7))?;
+                n.events = events;
+                n.columns = columns;
+                n.whenClause = view.v(15).node();
+                let cas = self.process_cas_bits(
+                    view.v(11).ival(),
+                    view.l(11),
+                    "TRIGGER",
+                    CasTargets {
+                        deferrable: true,
+                        initdeferred: true,
+                        is_enforced: false,
+                        not_valid: false,
+                        no_inherit: false,
+                    },
+                )?;
+                n.deferrable = cas.deferrable;
+                n.initdeferred = cas.initdeferred;
+                n.constrrel = view
+                    .v(10)
+                    .node()
+                    .and_then(|rv| rv.as_variant::<RangeVar>());
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            786 => *yyval = YYSTYPE::Ival(TRIGGER_TYPE_BEFORE as i32),
+            787 => *yyval = YYSTYPE::Ival(TRIGGER_TYPE_AFTER as i32),
+            788 => *yyval = YYSTYPE::Ival(TRIGGER_TYPE_INSTEAD as i32),
+            790 => {
+                let (e1, c1) = trigger_events(mcx, view.v(1))?;
+                let (e2, c2) = trigger_events(mcx, view.v(3))?;
+                if e1 & e2 != 0 {
+                    return Err(self.parser_yyerror("duplicate trigger events specified"));
+                }
+                let mut cols = c1;
+                cols.concat(mcx, &c2)?;
+                *yyval = trigger_one_event(mcx, (e1 | e2) as i32, cols)?;
+            }
+            791 => {
+                *yyval = trigger_one_event(mcx, TRIGGER_TYPE_INSERT as i32, NodeList::nil())?
+            }
+            792 => {
+                *yyval = trigger_one_event(mcx, TRIGGER_TYPE_DELETE as i32, NodeList::nil())?
+            }
+            793 => {
+                *yyval = trigger_one_event(mcx, TRIGGER_TYPE_UPDATE as i32, NodeList::nil())?
+            }
+            794 => {
+                *yyval = trigger_one_event(mcx, TRIGGER_TYPE_UPDATE as i32, view.v(3).list())?
+            }
+            795 => {
+                *yyval = trigger_one_event(mcx, TRIGGER_TYPE_TRUNCATE as i32, NodeList::nil())?
+            }
+            798 => {
+                let t = view.v(1).node().expect("TriggerTransition");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, t)?);
+            }
+            799 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(2).node().expect("TriggerTransition"))?;
+                *yyval = YYSTYPE::List(list);
+            }
+            // TriggerTransition: OldOrNew RowOrTable opt_as RelName
+            800 => {
+                let mut n = Node::build::<TriggerTransition>(mcx)?;
+                n.name = Some(view.v(4).str_val());
+                n.isNew = view.v(1).boolean();
+                n.isTable = view.v(2).boolean();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            801 | 803 => *yyval = YYSTYPE::Boolean(true),
+            802 | 804 => *yyval = YYSTYPE::Boolean(false),
+            807 => *yyval = YYSTYPE::Boolean(false),
+            810 => *yyval = YYSTYPE::Boolean(true),
+            811 => *yyval = YYSTYPE::Boolean(false),
+            816 => {
+                let a = view.v(1).node().expect("TriggerFuncArg");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, a)?);
+            }
+            817 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(3).node().expect("TriggerFuncArg"))?;
+                *yyval = YYSTYPE::List(list);
+            }
+            819 => {
+                let s = arena_int_str(mcx, view.v(1).ival())?;
+                *yyval = YYSTYPE::Node(Some(Node::mk_string(mcx, s)?));
+            }
+            820..=822 => {
+                *yyval =
+                    YYSTYPE::Node(Some(Node::mk_string(mcx, view.v(1).str_val())?));
+            }
+            // ConstraintsSetStmt: SET CONSTRAINTS list mode
+            264 => {
+                let mut n = Node::build::<ConstraintsSetStmt>(mcx)?;
+                n.constraints = view.v(3).list();
+                n.deferred = view.v(4).boolean();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            265 => *yyval = YYSTYPE::List(NodeList::nil()),
+            267 => *yyval = YYSTYPE::Boolean(true),
+            268 => *yyval = YYSTYPE::Boolean(false),
+            // RenameStmt: ALTER TRIGGER name ON qualified_name RENAME TO name
+            1317 => {
+                let mut n = Node::build::<RenameStmt>(mcx)?;
+                n.renameType = ObjectType::OBJECT_TRIGGER;
+                n.relation =
+                    view.v(5).node().expect("qualified_name").as_variant::<RangeVar>();
+                n.subname = Some(view.v(3).str_val());
+                n.newname = Some(view.v(8).str_val());
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
             // CreateSchemaStmt (AUTHORIZATION forms 189/191 and non-empty
             // element lists 193 stay unimplemented-rule louds).
             190 | 192 => {
@@ -5071,6 +5245,38 @@ fn make_range_var<'mcx>(
 }
 
 // doNegateFloat: strip a leading '+'/'-' pair-wise or prepend '-'.
+// C's list_make2(makeInteger(events), columns) TriggerEvents carrier,
+// flattened to [Integer(events), columns...]; never escapes into the tree.
+fn trigger_one_event<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    events: i32,
+    columns: NodeList<'mcx>,
+) -> PgResult<YYSTYPE<'mcx>> {
+    let mut l = NodeList::make1(mcx, Node::mk_integer(mcx, events)?)?;
+    l.concat(mcx, &columns)?;
+    Ok(YYSTYPE::List(l))
+}
+
+fn trigger_events<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    v: YYSTYPE<'mcx>,
+) -> PgResult<(i16, NodeList<'mcx>)> {
+    let l = v.list();
+    let events = l.nth(0).as_integer().expect("events Integer").ival as i16;
+    let mut cols = NodeList::nil();
+    for c in l.as_slice()[1..].iter().copied() {
+        cols.lappend(mcx, c)?;
+    }
+    Ok((events, cols))
+}
+
+fn arena_int_str<'mcx>(mcx: mcx::Mcx<'mcx>, v: i32) -> PgResult<&'mcx str> {
+    use core::fmt::Write;
+    let mut s = mcx::PgString::new_in(mcx);
+    write!(s, "{v}").expect("int fmt");
+    Ok(core::str::from_utf8(s.into_bytes().leak()).expect("was ASCII"))
+}
+
 fn negate_float<'mcx>(mcx: mcx::Mcx<'mcx>, fval: &'mcx str) -> PgResult<&'mcx str> {
     let s = fval.strip_prefix('+').unwrap_or(fval);
     if let Some(stripped) = s.strip_prefix('-') {
