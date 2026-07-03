@@ -103,6 +103,9 @@ pub fn finish_heap_swap<'mcx>(
         if has_indexes {
             unported("finish_heap_swap reindex_relation (index rebuild lane)");
         }
+        // reindex_relation's trailing CCI: the swap's pg_class/pg_depend
+        // writes must be visible to the deletion traversal below.
+        xact::CommandCounterIncrement()?;
     }
 
     eprintln!("finish_heap_swap: performDeletion transient {new_heap_oid}");
