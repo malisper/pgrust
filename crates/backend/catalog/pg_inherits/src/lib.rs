@@ -107,6 +107,34 @@ pub fn find_inheritance_children<'mcx>(
     Ok(result)
 }
 
+// get_partition_parent (catalog/partition.c), non-detached arm.
+pub fn get_partition_parent<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<Oid> {
+    let rel = table::table_open(mcx, InheritsRelationId, AccessShareLock)?;
+    let keys = [
+        eq_key(Anum_pg_inherits_inhrelid, F_OIDEQ, Datum::from_oid(relid)),
+        eq_key(Anum_pg_inherits_inhseqno, types_core::fmgr::F_INT4EQ, Datum::from_i32(1)),
+    ];
+    let mut scan =
+        genam::systable_beginscan(mcx, &rel, InheritsRelidSeqnoIndexId, true, None, &keys)?;
+    let desc = rel.descr();
+    let tup = genam::systable_getnext(mcx, &mut scan)?
+        .unwrap_or_else(|| panic!("could not find tuple for parent of relation {relid}"));
+    let mut isnull = false;
+    // SAFETY: fixed NOT NULL pg_inherits columns under its descriptor.
+    let parent = unsafe {
+        types_tuple::heap_getattr(tup, Anum_pg_inherits_inhparent as i32, desc, &mut isnull)
+    }
+    .as_oid();
+    let pending = unsafe {
+        types_tuple::heap_getattr(tup, Anum_pg_inherits_inhdetachpending as i32, desc, &mut isnull)
+    }
+    .as_bool();
+    assert!(!pending, "pg_inherits: DETACH CONCURRENTLY pending partition unported");
+    genam::systable_endscan(mcx, scan)?;
+    rel.close(AccessShareLock)?;
+    Ok(parent)
+}
+
 pub fn find_all_inheritors<'mcx>(
     mcx: Mcx<'mcx>,
     parent_rel_id: Oid,

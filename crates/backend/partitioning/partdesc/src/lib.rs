@@ -13,6 +13,7 @@ use mcx::{Mcx, MemoryContext, PgHashMap, PgVec};
 use types_core::{InvalidOid, Oid};
 use types_error::PgResult;
 use types_nodes::rawnodes::PartitionBoundSpec;
+use types_nodes::NodeList;
 use types_rel::{Relation, RELKIND_PARTITIONED_TABLE};
 
 use partbounds::PartitionBoundInfoData;
@@ -34,6 +35,8 @@ pub struct PartitionDescData {
 struct PartDescState {
     mcx: Mcx<'static>,
     descs: PgHashMap<'static, Oid, Rc<PartitionDescData>>,
+    // C rd_partcheck: cached partition constraint per partition relid.
+    quals: PgHashMap<'static, Oid, NodeList<'static>>,
     callbacks_registered: bool,
 }
 
@@ -49,6 +52,7 @@ fn with_state<R>(f: impl FnOnce(&mut PartDescState) -> R) -> R {
             ManuallyDrop::new(PartDescState {
                 mcx,
                 descs: PgHashMap::with_capacity_in(8, mcx),
+                quals: PgHashMap::with_capacity_in(8, mcx),
                 callbacks_registered: false,
             })
         });
@@ -60,8 +64,10 @@ fn PartDescRelCallback(_arg: Datum, relid: Oid) {
     with_state(|st| {
         if relid != InvalidOid {
             st.descs.remove(&relid);
+            st.quals.remove(&relid);
         } else {
             st.descs.clear();
+            st.quals.clear();
         }
     });
 }
@@ -136,9 +142,6 @@ fn RelationBuildPartitionDesc(rel: &Relation<'_>) -> PgResult<Rc<PartitionDescDa
         let spec = node
             .as_variant::<PartitionBoundSpec>()
             .unwrap_or_else(|| panic!("invalid relpartbound for relation {inhrelid}"));
-        if spec.is_default {
-            panic!("partdesc: default partitions unported (relation {inhrelid})");
-        }
         boundspecs.push(spec);
         oids.push(inhrelid);
         is_leaf.push(lsyscache::get_rel_relkind(inhrelid)? != RELKIND_PARTITIONED_TABLE as i8);
@@ -181,4 +184,65 @@ fn RelationBuildPartitionDesc(rel: &Relation<'_>) -> PgResult<Rc<PartitionDescDa
     let desc = Rc::new(desc);
     with_state(|st| st.descs.insert(relid, Rc::clone(&desc)));
     Ok(desc)
+}
+
+// RelationGetPartitionQual + generate_partition_qual (partcache.c), hosted
+// here for partdesc access (partcache -> partbounds would cycle); cached per
+// relid under the same relcache invalidation as the descriptors.
+pub fn RelationGetPartitionQual<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+) -> PgResult<NodeList<'static>> {
+    let _ = mcx;
+    if !rel.rd_rel.relispartition {
+        return Ok(NodeList::nil());
+    }
+    generate_partition_qual(rel)
+}
+
+fn generate_partition_qual<'mcx>(rel: &Relation<'mcx>) -> PgResult<NodeList<'static>> {
+    let relid = rel.rd_id;
+    let cmcx0 = with_state(|st| st.mcx);
+    if let Some(q) = with_state(|st| st.quals.get(&relid).map(|q| q.clone_in(cmcx0))) {
+        return q;
+    }
+    if !with_state(|st| st.callbacks_registered) {
+        inval::invalidate::CacheRegisterRelcacheCallback(
+            PartDescRelCallback,
+            Datum::from_oid(InvalidOid),
+        )?;
+        with_state(|st| st.callbacks_registered = true);
+    }
+    let cmcx = with_state(|st| st.mcx);
+    let parent_oid = pg_inherits::get_partition_parent(cmcx, relid)?;
+    let parent = table::table_open(cmcx, parent_oid, types_rel::AccessShareLock)?;
+    let spec = partbounds::read_boundspec(cmcx, relid)?;
+    let key = partcache::RelationGetPartitionKey(&parent)?;
+    let pdesc = RelationGetPartitionDesc(&parent)?;
+    let my_qual = partbounds::get_qual_from_partbound(
+        cmcx,
+        &key,
+        parent_oid,
+        pdesc.boundinfo.as_ref(),
+        &pdesc.oids,
+        spec,
+    )?;
+    let mut result = NodeList::nil();
+    if parent.rd_rel.relispartition {
+        for q in generate_partition_qual(&parent)?.iter() {
+            result.lappend(cmcx, q)?;
+        }
+    }
+    for q in my_qual.iter() {
+        result.lappend(cmcx, q)?;
+    }
+    // map_partition_varattnos: attno-remapped partitions are loud repo-wide.
+    assert_eq!(
+        rel.rd_att.natts, parent.rd_att.natts,
+        "partdesc: attno-remapped partition (map_partition_varattnos) unported"
+    );
+    parent.close(types_rel::NoLock)?;
+    let out = result.clone_in(cmcx)?;
+    with_state(|st| st.quals.insert(relid, result));
+    Ok(out)
 }

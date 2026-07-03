@@ -1,17 +1,30 @@
-// partbounds.c, LIST/RANGE create + search lane. HASH, DEFAULT partitions,
-// merge/join pruning, and get_qual_from_partbound are unported (loud).
+// partbounds.c, LIST/RANGE/HASH create + search lane; merge/join pruning is
+// unported (loud).
 #![allow(non_snake_case)]
+
+mod qual;
+#[cfg(test)]
+mod tests;
+
+pub use qual::{
+    check_default_partition_contents, get_proposed_default_constraint, get_qual_from_partbound,
+    make_ands_explicit, read_boundspec, PARTBOUNDS_BUILTINS,
+};
 
 use datum::Datum;
 use mcx::{Mcx, PgVec};
 use types_core::Oid;
 use types_error::{PgError, PgResult, ERRCODE_INVALID_OBJECT_DEFINITION, ERROR};
+use types_fmgr::{FmgrInfo, LocalFcinfo};
 use types_nodes::primnodes::Const;
 use types_nodes::rawnodes::{PartitionBoundSpec, PartitionRangeDatum, PartitionRangeDatumKind};
 use partcache::PartitionKeyData;
 
 pub const PARTITION_STRATEGY_LIST: u8 = b'l';
 pub const PARTITION_STRATEGY_RANGE: u8 = b'r';
+pub const PARTITION_STRATEGY_HASH: u8 = b'h';
+
+pub const HASH_PARTITION_SEED: u64 = 0x7A5B22367996DCFD;
 
 pub struct PartitionBoundInfoData<'m> {
     pub strategy: i8,
@@ -49,7 +62,12 @@ pub const KIND_VALUE: i8 = 0;
 pub const KIND_MAXVALUE: i8 = 1;
 
 // datumCopy (datum.c) into `mcx`; cstring datums unreachable for key types.
-fn datum_copy<'m>(mcx: Mcx<'m>, value: Datum, typbyval: bool, typlen: i16) -> PgResult<Datum> {
+pub(crate) fn datum_copy<'m>(
+    mcx: Mcx<'m>,
+    value: Datum,
+    typbyval: bool,
+    typlen: i16,
+) -> PgResult<Datum> {
     if typbyval {
         return Ok(value);
     }
@@ -276,11 +294,55 @@ pub fn partition_bounds_create<'m>(
     assert!(!boundspecs.is_empty());
     let mut mapping = vec![-1i32; boundspecs.len()];
     let info = match key.strategy as u8 {
+        PARTITION_STRATEGY_HASH => create_hash_bounds(mcx, boundspecs, key, &mut mapping)?,
         PARTITION_STRATEGY_LIST => create_list_bounds(mcx, boundspecs, key, &mut mapping)?,
         PARTITION_STRATEGY_RANGE => create_range_bounds(mcx, boundspecs, key, &mut mapping)?,
-        other => panic!("partition_bounds_create: strategy {:?} unported", other as char),
+        other => panic!("unexpected partition strategy: {}", other as char),
     };
     Ok((info, mapping))
+}
+
+fn create_hash_bounds<'m>(
+    mcx: Mcx<'m>,
+    boundspecs: &[&PartitionBoundSpec<'_>],
+    key: &PartitionKeyData,
+    mapping: &mut [i32],
+) -> PgResult<PartitionBoundInfoData<'m>> {
+    let nparts = boundspecs.len();
+    let mut hbounds: Vec<(i32, i32, i32)> = Vec::with_capacity(nparts);
+    for (i, spec) in boundspecs.iter().enumerate() {
+        assert!(
+            spec.strategy == PARTITION_STRATEGY_HASH,
+            "invalid strategy in partition bound spec"
+        );
+        hbounds.push((spec.modulus, spec.remainder, i as i32));
+    }
+    hbounds.sort_by(|a, b| partition_hbound_cmp(a.0, a.1, b.0, b.1).cmp(&0));
+
+    let greatest_modulus = hbounds[nparts - 1].0;
+    let mut info = PartitionBoundInfoData {
+        strategy: key.strategy,
+        ndatums: nparts,
+        width: 2,
+        datums: mcx::vec_with_capacity_in(mcx, nparts * 2)?,
+        kind: PgVec::new_in(mcx),
+        indexes: mcx::vec_with_capacity_in(mcx, greatest_modulus as usize)?,
+        null_index: -1,
+        default_index: -1,
+    };
+    info.indexes.resize(greatest_modulus as usize, -1);
+    for (i, &(modulus, remainder, orig_index)) in hbounds.iter().enumerate() {
+        info.datums.push(Datum::from_i32(modulus));
+        info.datums.push(Datum::from_i32(remainder));
+        let mut remainder = remainder;
+        while remainder < greatest_modulus {
+            assert!(info.indexes[remainder as usize] == -1);
+            info.indexes[remainder as usize] = i as i32;
+            remainder += modulus;
+        }
+        mapping[orig_index as usize] = i as i32;
+    }
+    Ok(info)
 }
 
 fn create_list_bounds<'m>(
@@ -290,12 +352,16 @@ fn create_list_bounds<'m>(
     mapping: &mut [i32],
 ) -> PgResult<PartitionBoundInfoData<'m>> {
     let mut null_index: i32 = -1;
+    let mut default_index: i32 = -1;
     let mut next_index: i32 = 0;
     let mut all_values: Vec<(i32, Datum)> = Vec::new();
 
     for (i, spec) in boundspecs.iter().enumerate() {
         assert!(spec.strategy == PARTITION_STRATEGY_LIST, "invalid strategy in partition bound spec");
-        assert!(!spec.is_default, "default partitions unported");
+        if spec.is_default {
+            default_index = i as i32;
+            continue;
+        }
         for c in spec.listdatums.iter() {
             let val = spec_const(c);
             if !val.constisnull {
@@ -335,6 +401,12 @@ fn create_list_bounds<'m>(
         }
         info.null_index = mapping[null_index as usize];
     }
+    if default_index != -1 {
+        assert!(mapping[default_index as usize] == -1);
+        mapping[default_index as usize] = next_index;
+        next_index += 1;
+        info.default_index = mapping[default_index as usize];
+    }
     assert_eq!(next_index as usize, boundspecs.len());
     Ok(info)
 }
@@ -348,11 +420,15 @@ fn create_range_bounds<'m>(
     let nparts = boundspecs.len();
     let partnatts = key.partnatts as usize;
     let mut next_index: i32 = 0;
+    let mut default_index: i32 = -1;
     let mut all_bounds: Vec<PartitionRangeBound> = Vec::with_capacity(2 * nparts);
 
     for (i, spec) in boundspecs.iter().enumerate() {
         assert!(spec.strategy == PARTITION_STRATEGY_RANGE, "invalid strategy in partition bound spec");
-        assert!(!spec.is_default, "default partitions unported");
+        if spec.is_default {
+            default_index = i as i32;
+            continue;
+        }
         all_bounds.push(make_one_partition_rbound(key, i as i32, &spec.lowerdatums, true));
         all_bounds.push(make_one_partition_rbound(key, i as i32, &spec.upperdatums, false));
     }
@@ -421,9 +497,108 @@ fn create_range_bounds<'m>(
             info.indexes.push(mapping[orig_index]);
         }
     }
+    if default_index != -1 {
+        assert!(mapping[default_index as usize] == -1);
+        mapping[default_index as usize] = next_index;
+        next_index += 1;
+        info.default_index = mapping[default_index as usize];
+    }
     info.indexes.push(-1);
     assert_eq!(next_index as usize, nparts);
     Ok(info)
+}
+
+pub fn partition_hbound_cmp(modulus1: i32, remainder1: i32, modulus2: i32, remainder2: i32) -> i32 {
+    if modulus1 < modulus2 {
+        return -1;
+    }
+    if modulus1 > modulus2 {
+        return 1;
+    }
+    if modulus1 == modulus2 && remainder1 != remainder2 {
+        return if remainder1 > remainder2 { 1 } else { -1 };
+    }
+    0
+}
+
+pub fn partition_hash_bsearch(
+    boundinfo: &PartitionBoundInfoData<'_>,
+    modulus: i32,
+    remainder: i32,
+) -> i32 {
+    let mut lo: i32 = -1;
+    let mut hi: i32 = boundinfo.ndatums as i32 - 1;
+    while lo < hi {
+        let mid = (lo + hi + 1) / 2;
+        let bound_modulus = boundinfo.datum(mid as usize, 0).as_i32();
+        let bound_remainder = boundinfo.datum(mid as usize, 1).as_i32();
+        let cmpval = partition_hbound_cmp(bound_modulus, bound_remainder, modulus, remainder);
+        if cmpval <= 0 {
+            lo = mid;
+            if cmpval == 0 {
+                break;
+            }
+        } else {
+            hi = mid - 1;
+        }
+    }
+    lo
+}
+
+// src/include/common/hashfn.h hash_combine64.
+#[inline]
+pub fn hash_combine64(a: u64, b: u64) -> u64 {
+    a ^ (b
+        .wrapping_add(0x49a0f4dd15e5a8e3)
+        .wrapping_add(a << 54)
+        .wrapping_add(a >> 7))
+}
+
+pub fn compute_partition_hash_value(
+    partsupfunc: &mut [FmgrInfo],
+    partcollation: &[Oid],
+    values: &[Datum],
+    isnull: &[bool],
+) -> PgResult<u64> {
+    let seed = Datum::from_u64(HASH_PARTITION_SEED);
+    let mut row_hash: u64 = 0;
+    for i in 0..partsupfunc.len() {
+        if isnull[i] {
+            continue;
+        }
+        let mut fcinfo = LocalFcinfo::<2>::new(partcollation[i]);
+        fcinfo.set_arg(0, values[i]);
+        fcinfo.set_arg(1, seed);
+        let hash = partsupfunc[i].invoke(&mut fcinfo)?;
+        assert!(!fcinfo.isnull, "partition hash support function returned NULL");
+        row_hash = hash_combine64(row_hash, hash.as_u64());
+    }
+    Ok(row_hash)
+}
+
+pub fn get_hash_partition_greatest_modulus(bound: &PartitionBoundInfoData<'_>) -> i32 {
+    debug_assert!(bound.strategy as u8 == PARTITION_STRATEGY_HASH);
+    bound.indexes.len() as i32
+}
+
+#[cold]
+fn modulus_factor_error(
+    new_modulus: i32,
+    other_modulus: i32,
+    how: &str,
+    with_name: &str,
+) -> Box<PgError> {
+    Box::new(
+        PgError::new(
+            ERROR,
+            "every hash partition modulus must be a factor of the next larger modulus".to_string(),
+        )
+        .with_detail(format!(
+            "The new modulus {new_modulus} is {how} {other_modulus}, the modulus of existing \
+             partition \"{with_name}\"."
+        ))
+        .with_sqlstate(ERRCODE_INVALID_OBJECT_DEFINITION),
+    )
 }
 
 #[cold]
@@ -455,11 +630,81 @@ pub fn check_new_partition_bound(
     part_oids: &[Oid],
     spec: &PartitionBoundSpec<'_>,
 ) -> PgResult<()> {
-    assert!(!spec.is_default, "default partitions unported");
+    if spec.is_default {
+        let Some(boundinfo) = boundinfo else { return Ok(()) };
+        if !boundinfo.has_default() {
+            return Ok(());
+        }
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                format!(
+                    "partition \"{relname}\" conflicts with existing default partition \"{}\"",
+                    rel_name(mcx, part_oids[boundinfo.default_index as usize])
+                ),
+            )
+            .with_sqlstate(ERRCODE_INVALID_OBJECT_DEFINITION),
+        ));
+    }
     let mut with: i32 = -1;
     let mut overlap = false;
 
     match key.strategy as u8 {
+        PARTITION_STRATEGY_HASH => {
+            assert!(spec.strategy == PARTITION_STRATEGY_HASH);
+            debug_assert!(spec.remainder >= 0 && spec.remainder < spec.modulus);
+            if let Some(boundinfo) = boundinfo {
+                let offset = partition_hash_bsearch(boundinfo, spec.modulus, spec.remainder);
+                if offset < 0 {
+                    let next_modulus = boundinfo.datum(0, 0).as_i32();
+                    if next_modulus % spec.modulus != 0 {
+                        return Err(modulus_factor_error(
+                            spec.modulus,
+                            next_modulus,
+                            "not a factor of",
+                            &rel_name(mcx, part_oids[0]),
+                        ));
+                    }
+                } else {
+                    let prev_modulus = boundinfo.datum(offset as usize, 0).as_i32();
+                    if spec.modulus % prev_modulus != 0 {
+                        return Err(modulus_factor_error(
+                            spec.modulus,
+                            prev_modulus,
+                            "not divisible by",
+                            &rel_name(mcx, part_oids[offset as usize]),
+                        ));
+                    }
+                    if ((offset + 1) as usize) < boundinfo.ndatums {
+                        let next_modulus = boundinfo.datum(offset as usize + 1, 0).as_i32();
+                        if next_modulus % spec.modulus != 0 {
+                            return Err(modulus_factor_error(
+                                spec.modulus,
+                                next_modulus,
+                                "not a factor of",
+                                &rel_name(mcx, part_oids[offset as usize + 1]),
+                            ));
+                        }
+                    }
+                }
+                let greatest_modulus = boundinfo.indexes.len() as i32;
+                let mut remainder = spec.remainder;
+                if remainder >= greatest_modulus {
+                    remainder %= greatest_modulus;
+                }
+                loop {
+                    if boundinfo.indexes[remainder as usize] != -1 {
+                        overlap = true;
+                        with = boundinfo.indexes[remainder as usize];
+                        break;
+                    }
+                    remainder += spec.modulus;
+                    if remainder >= greatest_modulus {
+                        break;
+                    }
+                }
+            }
+        }
         PARTITION_STRATEGY_LIST => {
             if let Some(boundinfo) = boundinfo {
                 for cell in spec.listdatums.iter() {
@@ -536,7 +781,7 @@ pub fn check_new_partition_bound(
                 }
             }
         }
-        other => panic!("check_new_partition_bound: strategy {:?} unported", other as char),
+        other => panic!("unexpected partition strategy: {}", other as char),
     }
 
     if overlap {

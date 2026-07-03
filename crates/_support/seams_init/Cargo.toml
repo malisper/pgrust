@@ -142,6 +142,7 @@ brin_minmax_multi = { path = "../../backend/access/brin/brin_minmax_multi" }
 adt_acl = { path = "../../backend/utils/adt/acl" }
 adt_misc = { path = "../../backend/utils/adt/adt_misc" }
 adt_rowtypes = { path = "../../backend/utils/adt/rowtypes" }
+partbounds = { path = "../../backend/partitioning/partbounds" }
 adt_timestamp = { path = "../../backend/utils/adt/adt_timestamp" }
 pgtz = { path = "../../backend/timezone/pgtz" }
 adt_bool = { path = "../../backend/utils/adt/bool" }
