@@ -14,4 +14,5 @@ ts_locale = { path = "../ts_locale" }
 ts_parse = { path = "../ts_parse" }
 adt_tsvector_core = { path = "../../utils/adt/tsvector_core" }
 fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+ts_cache = { path = "../../utils/cache/ts_cache" }
 adt_tsquery_core = { path = "../../utils/adt/tsquery_core" }

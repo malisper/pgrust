@@ -78,3 +78,8 @@ seam_core::seam!(
     pub fn find_default_conversion_proc(for_encoding: i32, to_encoding: i32) -> PgResult<Oid>
 );
 
+
+seam_core::seam!(
+    // LookupExplicitNamespace (namespace.c); InvalidOid when missing_ok.
+    pub fn lookup_explicit_namespace(nspname: &str, missing_ok: bool) -> PgResult<Oid>
+);

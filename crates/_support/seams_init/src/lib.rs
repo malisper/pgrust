@@ -184,6 +184,7 @@ pub fn init_all() {
     pg_prng::init_seams();
     regex_core::init_seams();
     adt_regexp::init_seams();
+    ts_cache::init_hooks();
 
     static EXTRA_BUILTINS: [&[types_fmgr::FmgrBuiltin]; 4] = [
         adt_misc::builtins::MISC_BUILTINS,

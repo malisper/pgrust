@@ -3,9 +3,6 @@ use ::types_core::Oid;
 use ::types_error::PgResult;
 use ::types_fmgr::FmgrInfo;
 
-// The ts_cache touchpoints, isolated: bodies bind to the ts_cache crate at
-// integration; unbound = loud panic (never a silent stub).
-
 pub struct ParserFns {
     pub start: FmgrInfo,
     pub token: FmgrInfo,
@@ -18,18 +15,36 @@ pub struct ConfigMap<'mcx> {
     pub map: PgVec<'mcx, PgVec<'mcx, Oid>>,
 }
 
-pub fn config_map<'mcx>(_mcx: Mcx<'mcx>, _cfg: Oid) -> PgResult<ConfigMap<'mcx>> {
-    unimplemented!("to_tsany::cache_bind::config_map -> ts_cache::lookup_ts_config_cache (tsearch-lane integration)")
+pub fn config_map<'mcx>(mcx: Mcx<'mcx>, cfg: Oid) -> PgResult<ConfigMap<'mcx>> {
+    let entry = ::ts_cache::lookup_ts_config_cache(cfg)?;
+    let mut map = ::mcx::vec_with_capacity_in(mcx, entry.map.len())?;
+    for ld in entry.map.iter() {
+        let mut dicts: PgVec<'mcx, Oid> = ::mcx::vec_with_capacity_in(mcx, ld.dict_ids.len())?;
+        for &d in ld.dict_ids.iter() {
+            dicts.push(d);
+        }
+        map.push(dicts);
+    }
+    Ok(ConfigMap { prs_id: entry.prs_id, map })
 }
 
-pub fn parser_fns(_prs_oid: Oid) -> PgResult<ParserFns> {
-    unimplemented!("to_tsany::cache_bind::parser_fns -> ts_cache::lookup_ts_parser_cache (tsearch-lane integration)")
+pub fn parser_fns(prs_oid: Oid) -> PgResult<ParserFns> {
+    let entry = ::ts_cache::lookup_ts_parser_cache(prs_oid)?;
+    Ok(ParserFns {
+        start: fmgr_seams::fmgr_info::call(entry.start_oid)?,
+        token: fmgr_seams::fmgr_info::call(entry.token_oid)?,
+        end: fmgr_seams::fmgr_info::call(entry.end_oid)?,
+    })
 }
 
-pub fn dict_carrier(_dict: Oid) -> PgResult<(::datum::Datum, FmgrInfo)> {
-    unimplemented!("to_tsany::cache_bind::dict_carrier -> ts_cache::lookup_ts_dictionary_cache (tsearch-lane integration)")
+pub fn dict_carrier(dict: Oid) -> PgResult<(::datum::Datum, FmgrInfo)> {
+    let entry = ::ts_cache::lookup_ts_dictionary_cache(dict)?;
+    Ok((
+        ::datum::Datum::from_usize(entry.dict_data),
+        fmgr_seams::fmgr_info::call(entry.lexize_oid)?,
+    ))
 }
 
 pub fn current_config() -> PgResult<Oid> {
-    unimplemented!("to_tsany::cache_bind::current_config -> ts_cache::getTSCurrentConfig (tsearch-lane integration)")
+    ::ts_cache::getTSCurrentConfig(true)
 }
