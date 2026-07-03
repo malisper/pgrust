@@ -127,6 +127,10 @@ pub fn expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
                 || walk_opt(wf.aggfilter, w)?
                 || walk_list(&wf.runCondition, w)?)
         }
+        NodeTag::T_GroupingFunc => {
+            let g = node.as_grouping_func().unwrap();
+            walk_list(&g.args, w)
+        }
         NodeTag::T_FuncExpr => {
             let f = node.as_variant::<FuncExpr>().unwrap();
             walk_list(&f.args, w)
@@ -426,6 +430,22 @@ pub fn raw_expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
             let rt = node.as_res_target().unwrap();
             Ok(walk_list(&rt.indirection, w)? || walk_opt(rt.val, w)?)
         }
+        NodeTag::T_SortBy => walk_opt(node.as_sort_by().unwrap().node, w),
+        NodeTag::T_TypeCast => {
+            let tc = node.as_type_cast().unwrap();
+            Ok(walk_opt(tc.arg, w)? || walk_opt(tc.typeName, w)?)
+        }
+        NodeTag::T_TypeName => {
+            let tn = node.as_type_name().unwrap();
+            Ok(walk_list(&tn.typmods, w)? || walk_list(&tn.arrayBounds, w)?)
+        }
+        NodeTag::T_FuncCall => {
+            let fc = node.as_func_call().unwrap();
+            Ok(walk_list(&fc.args, w)?
+                || walk_list(&fc.agg_order, w)?
+                || walk_opt(fc.agg_filter, w)?
+                || walk_opt(fc.over, w)?)
+        }
         NodeTag::T_SelectStmt => walk_select_stmt(node.as_select_stmt().unwrap(), w),
         NodeTag::T_WindowDef => {
             let wd = node.as_window_def().unwrap();
@@ -453,7 +473,7 @@ fn coerce_io_arg_type(node: Node<'_>) -> Oid {
         NodeTag::T_OpExpr => node.as_op_expr().unwrap().opresulttype,
         NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resulttype,
         NodeTag::T_CoerceViaIO => node.as_coerce_via_io().unwrap().resulttype,
-        other => deferred("coerce_io_arg_type (exprType)", other),
+        _ => expr_type(node),
     }
 }
 
@@ -627,6 +647,22 @@ where
                     location: a.location,
                 },
             )?))
+        }
+        NodeTag::T_GroupingFunc => {
+            let g = node.as_grouping_func().unwrap();
+            match mutate_list(mcx, &g.args, m)? {
+                None => Ok(None),
+                Some(args) => Ok(Some(Node::mk(
+                    mcx,
+                    types_nodes::primnodes::GroupingFunc {
+                        args,
+                        refs: g.refs.clone_in(mcx)?,
+                        cols: g.cols.clone_in(mcx)?,
+                        agglevelsup: g.agglevelsup,
+                        location: g.location,
+                    },
+                )?)),
+            }
         }
         NodeTag::T_WindowFunc => {
             let wf = node.as_window_func().unwrap();

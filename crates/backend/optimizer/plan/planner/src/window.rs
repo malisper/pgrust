@@ -300,6 +300,82 @@ fn pull_window_input_vars<'mcx>(node: Node<'mcx>, out: &mut PgVec<'_, Node<'mcx>
                 pull_window_input_vars(a, out);
             }
         }
+        // PVC_INCLUDE_AGGREGATES treats GroupingFunc exactly like Aggref.
+        NodeTag::T_GroupingFunc => out.push(node),
+        NodeTag::T_CaseTestExpr
+        | NodeTag::T_SQLValueFunction
+        | NodeTag::T_NextValueExpr
+        | NodeTag::T_CoerceToDomainValue => {}
+        NodeTag::T_List => {
+            for a in node.as_list().unwrap() {
+                pull_window_input_vars(a, out);
+            }
+        }
+        NodeTag::T_BoolExpr => {
+            for a in &node.as_bool_expr().unwrap().args {
+                pull_window_input_vars(a, out);
+            }
+        }
+        NodeTag::T_NullTest => {
+            if let Some(arg) = node.as_null_test().unwrap().arg {
+                pull_window_input_vars(arg, out);
+            }
+        }
+        NodeTag::T_BooleanTest => {
+            if let Some(arg) = node.as_boolean_test().unwrap().arg {
+                pull_window_input_vars(arg, out);
+            }
+        }
+        NodeTag::T_DistinctExpr => {
+            for a in &node.as_distinct_expr().unwrap().args {
+                pull_window_input_vars(a, out);
+            }
+        }
+        NodeTag::T_RowExpr => {
+            for a in &node.as_row_expr().unwrap().args {
+                pull_window_input_vars(a, out);
+            }
+        }
+        NodeTag::T_CaseExpr => {
+            let c = node.as_case_expr().unwrap();
+            if let Some(arg) = c.arg {
+                pull_window_input_vars(arg, out);
+            }
+            for w in &c.args {
+                let cw = w.as_case_when().expect("CaseWhen");
+                pull_window_input_vars(cw.expr.expect("CaseWhen.expr"), out);
+                pull_window_input_vars(cw.result.expect("CaseWhen.result"), out);
+            }
+            if let Some(d) = c.defresult {
+                pull_window_input_vars(d, out);
+            }
+        }
+        NodeTag::T_CoalesceExpr => {
+            for a in &node.as_coalesce_expr().unwrap().args {
+                pull_window_input_vars(a, out);
+            }
+        }
+        NodeTag::T_MinMaxExpr => {
+            for a in &node.as_min_max_expr().unwrap().args {
+                pull_window_input_vars(a, out);
+            }
+        }
+        NodeTag::T_ArrayExpr => {
+            for a in &node.as_array_expr().unwrap().elements {
+                pull_window_input_vars(a, out);
+            }
+        }
+        NodeTag::T_ScalarArrayOpExpr => {
+            for a in &node.as_scalar_array_op_expr().unwrap().args {
+                pull_window_input_vars(a, out);
+            }
+        }
+        NodeTag::T_CoerceViaIO => {
+            pull_window_input_vars(node.as_coerce_via_io().unwrap().arg, out)
+        }
+        NodeTag::T_CoerceToDomain => {
+            pull_window_input_vars(node.as_coerce_to_domain().unwrap().arg, out)
+        }
         other => panic!("pull_var_clause (var.c): {other:?}; window-input lane"),
     }
 }

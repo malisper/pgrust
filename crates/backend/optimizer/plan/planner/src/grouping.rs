@@ -507,6 +507,16 @@ fn pull_agg_input_vars<'mcx>(
                 pull_agg_input_vars(f, out);
             }
         }
+        // PVC_RECURSE_WINDOWFUNCS: window args feed the grouped input target.
+        NodeTag::T_WindowFunc => {
+            let wf = node.as_window_func().unwrap();
+            for arg in &wf.args {
+                pull_agg_input_vars(arg, out);
+            }
+            if let Some(f) = wf.aggfilter {
+                pull_agg_input_vars(f, out);
+            }
+        }
         // PVC_RECURSE_AGGREGATES treats GroupingFunc like Aggref.
         NodeTag::T_GroupingFunc => {
             let g = node.as_grouping_func().unwrap();
@@ -575,6 +585,48 @@ fn pull_agg_input_vars<'mcx>(
             for a in &sp.args {
                 pull_agg_input_vars(a, out);
             }
+        }
+        NodeTag::T_CaseTestExpr
+        | NodeTag::T_SQLValueFunction
+        | NodeTag::T_NextValueExpr
+        | NodeTag::T_CoerceToDomainValue => {}
+        NodeTag::T_CaseExpr => {
+            let c = node.as_case_expr().unwrap();
+            if let Some(arg) = c.arg {
+                pull_agg_input_vars(arg, out);
+            }
+            for w in &c.args {
+                let cw = w.as_case_when().expect("CaseWhen");
+                pull_agg_input_vars(cw.expr.expect("CaseWhen.expr"), out);
+                pull_agg_input_vars(cw.result.expect("CaseWhen.result"), out);
+            }
+            if let Some(d) = c.defresult {
+                pull_agg_input_vars(d, out);
+            }
+        }
+        NodeTag::T_CoalesceExpr => {
+            for a in &node.as_coalesce_expr().unwrap().args {
+                pull_agg_input_vars(a, out);
+            }
+        }
+        NodeTag::T_MinMaxExpr => {
+            for a in &node.as_min_max_expr().unwrap().args {
+                pull_agg_input_vars(a, out);
+            }
+        }
+        NodeTag::T_ArrayExpr => {
+            for a in &node.as_array_expr().unwrap().elements {
+                pull_agg_input_vars(a, out);
+            }
+        }
+        NodeTag::T_ScalarArrayOpExpr => {
+            for a in &node.as_scalar_array_op_expr().unwrap().args {
+                pull_agg_input_vars(a, out);
+            }
+        }
+        NodeTag::T_CoerceViaIO => pull_agg_input_vars(node.as_coerce_via_io().unwrap().arg, out),
+        NodeTag::T_CoerceToDomain => {
+            pull_agg_input_vars(node.as_coerce_to_domain().unwrap().arg, out)
         }
         other => panic!("pull_var_clause (var.c): {other:?}; M3 expression lane"),
     }
