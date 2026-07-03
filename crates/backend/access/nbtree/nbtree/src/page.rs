@@ -1,6 +1,6 @@
 //! nbtpage.c: metapage decode + rd_amcache, _bt_getroot (read + root-creation
-//! arms), buffer traffic helpers, _bt_allocbuf. Vacuum/page-deletion write
-//! arms stay loud.
+//! arms), buffer traffic helpers, _bt_allocbuf incl. FSM recycling, deleted-
+//! page helpers. Page-deletion write arms live in pagedel.rs.
 
 use ::bufmgr_seams::{self as bufmgr, BufferPin};
 use ::types_core::xact::{FirstNormalFullTransactionId, FullTransactionId};

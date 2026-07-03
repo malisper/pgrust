@@ -1,7 +1,8 @@
-//! B-tree access method, READ path (nbtree.c/nbtsearch.c/nbtpage.c/
-//! nbtutils.c/nbtpreprocesskeys.c). Phase 2, loud panics, never silent:
-//! insert/split/vacuum/dedup/parallel scans, SAOP arrays, skip scan, row
-//! comparisons, mark/restore across primitive scans.
+//! B-tree access method (nbtree.c/nbtsearch.c/nbtinsert.c/nbtpage.c/
+//! nbtutils.c/nbtpreprocesskeys.c): read path, insert/split, and the VACUUM
+//! lane (bulkdelete/cleanup + page deletion). Phase 2, loud panics, never
+//! silent: dedup, parallel scans, SAOP arrays, skip scan, row comparisons,
+//! mark/restore across primitive scans.
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 #![allow(clippy::too_many_arguments)]
