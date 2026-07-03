@@ -429,6 +429,60 @@ fn dispatch_switch<'mcx>(
                 >(stmt)
             };
             schemacmds::CreateSchemaCommand(mcx, stmt)?;
+}
+
+        T_IndexStmt => {
+            // Retention contract as unify_stmt_lifetime: the statement arena
+            // outlives the utility call; nothing derived escapes it.
+            let stmt_node =
+                unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::rawnodes::IndexStmt>()
+                .expect("IndexStmt");
+            if stmt.concurrent {
+                xact::PreventInTransactionBlock(is_top_level, "CREATE INDEX CONCURRENTLY")?;
+            }
+            let lockmode = if stmt.concurrent {
+                types_rel::ShareUpdateExclusiveLock
+            } else {
+                types_rel::ShareLock
+            };
+            let rv_node = stmt.relation.expect("IndexStmt without relation");
+            let rv = rel_vocab::RangeVar {
+                catalogname: rv_node.catalogname,
+                schemaname: rv_node.schemaname,
+                relname: rv_node.relname.expect("IndexStmt relation without relname"),
+                inh: rv_node.inh,
+                relpersistence: rv_node.relpersistence,
+                location: rv_node.location,
+            };
+            let mut cb = |rv2: &rel_vocab::RangeVar<'_>,
+                          rel_id: types_core::Oid,
+                          old_rel_id: types_core::Oid|
+             -> PgResult<()> {
+                range_var_callback_owns_relation(mcx, rv2, rel_id, old_rel_id)
+            };
+            let relid =
+                catalog_namespace::RangeVarGetRelidExtended(&rv, lockmode, 0, Some(&mut cb))?;
+            if rv.inh
+                && lsyscache::get_rel_relkind(relid)? as u8
+                    == types_rel::RELKIND_PARTITIONED_TABLE
+            {
+                handler_gap("CREATE INDEX partitioned-table recursion");
+            }
+            let is_alter_table = stmt.transformed;
+            parse_utilcmd::transformIndexStmt(relid, stmt, source_text)?;
+            indexcmds::DefineIndex(
+                mcx,
+                relid,
+                stmt,
+                types_core::InvalidOid,
+                is_alter_table,
+                true,
+                true,
+                false,
+                false,
+            )?;
         }
 
         // Everything else — the GRANT/DROP/RENAME/ALTER.../COMMENT/SECURITY
@@ -462,6 +516,35 @@ fn dispatch_switch<'mcx>(
             }
         }
         _ => handler_gap("ProcessUtilitySlow DDL fan-out (utility slow lane)"),
+    }
+    Ok(())
+}
+
+// RangeVarCallbackOwnsRelation (tablecmds.c): object_ownercheck superuser
+// fastpath (role-ACL walk loud, drop.rs precedent) + IsSystemClass guard.
+fn range_var_callback_owns_relation(
+    _mcx: Mcx<'_>,
+    rv: &rel_vocab::RangeVar<'_>,
+    rel_id: types_core::Oid,
+    _old_rel_id: types_core::Oid,
+) -> PgResult<()> {
+    if rel_id == types_core::InvalidOid {
+        return Ok(());
+    }
+    if !superuser::superuser_arg(miscinit::GetUserId())? {
+        handler_gap("RangeVarCallbackOwnsRelation object_ownercheck for non-superusers");
+    }
+    let relnamespace = lsyscache::get_rel_namespace(rel_id)?;
+    let is_system =
+        catalog::IsCatalogRelationOid(rel_id) || catalog::IsToastNamespace(relnamespace);
+    if is_system && !init_small::globals::allowSystemTableMods() {
+        return Err(Box::new(
+            types_error::PgError::new(
+                types_error::ERROR,
+                format!("permission denied: \"{}\" is a system catalog", rv.relname),
+            )
+            .with_sqlstate(types_error::ERRCODE_INSUFFICIENT_PRIVILEGE),
+        ));
     }
     Ok(())
 }

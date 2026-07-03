@@ -5,7 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
-autovacuum = { path = "../../postmaster/autovacuum" }
+autovacuum_seams = { path = "../../postmaster/autovacuum_seams" }
 bufmgr = { path = "../../storage/buffer/bufmgr" }
 catalog = { path = "../catalog" }
 catalog_heap = { path = "../catalog_heap" }

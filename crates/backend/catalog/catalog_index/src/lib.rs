@@ -573,7 +573,7 @@ fn index_update_stats<'mcx>(
         rel.rd_rel.relkind,
         RELKIND_RELATION | RELKIND_TOASTVALUE | RELKIND_MATVIEW
     ) {
-        if autovacuum::AutoVacuumingActive() {
+        if autovacuum_seams::autovacuuming_active::call() {
             if rel.rd_options.is_some() {
                 unported("index_update_stats: StdRdOptions autovacuum.enabled check");
             }

@@ -4,6 +4,9 @@
 #[cfg(test)]
 mod tests;
 
+mod define;
+pub use define::DefineIndex;
+
 use datum::Datum;
 use mcx::MemoryContext;
 use types_core::catalog::C_COLLATION_OID;

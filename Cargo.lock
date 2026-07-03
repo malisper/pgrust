@@ -919,7 +919,7 @@ dependencies = [
 name = "catalog_index"
 version = "0.1.0"
 dependencies = [
- "autovacuum",
+ "autovacuum_seams",
  "bufmgr",
  "catalog",
  "catalog_heap",
@@ -2975,19 +2975,27 @@ dependencies = [
 name = "indexcmds"
 version = "0.0.0"
 dependencies = [
+ "aclchk_seams",
+ "catalog_heap",
+ "catalog_index",
  "coerce",
  "datum",
  "elog",
+ "execindexing",
  "fmgr_seams",
  "format_type",
  "genam",
+ "guc",
  "indexcmds_seams",
  "lsyscache",
  "mcx",
+ "miscinit",
+ "miscinit_seams",
  "syscache_seams",
  "table",
  "types_core",
  "types_error",
+ "types_nodes",
  "types_rel",
  "types_scan",
  "types_tuple",
@@ -7973,6 +7981,8 @@ version = "0.1.0"
 name = "utility"
 version = "0.1.0"
 dependencies = [
+ "catalog",
+ "catalog_namespace",
  "catalog_toasting",
  "cmdtag",
  "commands_analyze",
@@ -7984,6 +7994,9 @@ dependencies = [
  "explain",
  "guc_funcs",
  "guc_tables",
+ "indexcmds",
+ "init_small",
+ "lsyscache",
  "mcx",
  "miscinit",
  "parallel_seams",
@@ -7991,7 +8004,9 @@ dependencies = [
  "portalcmds",
  "portalmem",
  "prepare",
+ "rel_vocab",
  "schemacmds",
+ "superuser",
  "syscache_seams",
  "tablecmds",
  "tcop_dest",

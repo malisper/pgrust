@@ -24,6 +24,14 @@ types_error = { path = "../../../_support/types/types_error" }
 types_rel = { path = "../../../_support/types/rel" }
 types_scan = { path = "../../../_support/types/types_scan" }
 types_tuple = { path = "../../../_support/types/types_tuple" }
+types_nodes = { path = "../../../_support/types/nodes" }
+catalog_index = { path = "../../catalog/catalog_index" }
+catalog_heap = { path = "../../catalog/catalog_heap" }
+execindexing = { path = "../../executor/execindexing" }
+miscinit = { path = "../../utils/init/miscinit" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+aclchk_seams = { path = "../../catalog/aclchk_seams" }
+guc = { path = "../../utils/misc/guc" }
 
 [dev-dependencies]
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
