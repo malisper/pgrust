@@ -504,6 +504,7 @@ members = [
     "crates/backend/utils/adt/numeric",
     "crates/backend/access/common/toastdesc",
     "crates/backend/utils/fmgr/funcapi",
+    "crates/backend/utils/fmgr/funcapi_srf",
     "crates/backend/utils/misc/ps_status",
     "crates/backend/parser/gram_core",
     "crates/backend/catalog/pg_database",

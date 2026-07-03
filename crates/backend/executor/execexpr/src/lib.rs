@@ -14,6 +14,7 @@
 
 extern crate alloc;
 
+mod arrayops;
 mod compile;
 pub mod domain;
 mod interp;

@@ -156,6 +156,23 @@ fn cost_qual_eval_walker(node: Node<'_>, cost: &mut QualCost) -> PgResult<()> {
             }
             Ok(())
         }
+        // SubscriptingRef carries no per-node charge in C; recurse.
+        NodeTag::T_SubscriptingRef => {
+            let sr = node.as_subscripting_ref().unwrap();
+            for e in sr.refupperindexpr.iter().flatten() {
+                cost_qual_eval_walker(e, cost)?;
+            }
+            for e in sr.reflowerindexpr.iter().flatten() {
+                cost_qual_eval_walker(e, cost)?;
+            }
+            if let Some(e) = sr.refexpr {
+                cost_qual_eval_walker(e, cost)?;
+            }
+            if let Some(e) = sr.refassgnexpr {
+                cost_qual_eval_walker(e, cost)?;
+            }
+            Ok(())
+        }
         NodeTag::T_NullTest => match node.as_null_test().unwrap().arg {
             Some(arg) => cost_qual_eval_walker(arg, cost),
             None => Ok(()),
@@ -1050,6 +1067,12 @@ pub fn expr_type_typmod(node: Node<'_>) -> (u32, i32) {
             (cd.resulttype, cd.resulttypmod)
         }
         NodeTag::T_OpExpr => (node.as_op_expr().unwrap().opresulttype, -1),
+        NodeTag::T_ScalarArrayOpExpr => (types_core::catalog::BOOLOID, -1),
+        NodeTag::T_ArrayExpr => (node.as_array_expr().unwrap().array_typeid, -1),
+        NodeTag::T_SubscriptingRef => {
+            let sr = node.as_subscripting_ref().unwrap();
+            (sr.refrestype, sr.reftypmod)
+        }
         NodeTag::T_DistinctExpr => (node.as_distinct_expr().unwrap().opresulttype, -1),
         NodeTag::T_BooleanTest
         | NodeTag::T_BoolExpr
