@@ -335,16 +335,22 @@ impl<'mcx> EStateData<'mcx> {
         self.create_expr_context()
     }
 
+    // Ids are estate-minted, tables append-only: index always in bounds
+    // (bounds checks were a per-row tax in every node's fetch loop).
     #[inline]
     pub fn ecxt(&self, id: EcxtId) -> &ExprContextData<'mcx> {
-        self.es_exprcontexts[id.0 as usize]
+        debug_assert!((id.0 as usize) < self.es_exprcontexts.len());
+        // SAFETY: id provenance above.
+        unsafe { self.es_exprcontexts.get_unchecked(id.0 as usize) }
             .as_ref()
             .expect("ExprContext used after FreeExprContext")
     }
 
     #[inline]
     pub fn ecxt_mut(&mut self, id: EcxtId) -> &mut ExprContextData<'mcx> {
-        self.es_exprcontexts[id.0 as usize]
+        debug_assert!((id.0 as usize) < self.es_exprcontexts.len());
+        // SAFETY: id provenance above.
+        unsafe { self.es_exprcontexts.get_unchecked_mut(id.0 as usize) }
             .as_mut()
             .expect("ExprContext used after FreeExprContext")
     }
@@ -420,12 +426,16 @@ impl<'mcx> EStateData<'mcx> {
 
     #[inline]
     pub fn slot(&self, id: ExecSlotId) -> &SlotData<'mcx> {
-        &self.es_tupleTable[id.0 as usize]
+        debug_assert!((id.0 as usize) < self.es_tupleTable.len());
+        // SAFETY: id provenance (ecxt note).
+        unsafe { self.es_tupleTable.get_unchecked(id.0 as usize) }
     }
 
     #[inline]
     pub fn slot_mut(&mut self, id: ExecSlotId) -> &mut SlotData<'mcx> {
-        &mut self.es_tupleTable[id.0 as usize]
+        debug_assert!((id.0 as usize) < self.es_tupleTable.len());
+        // SAFETY: id provenance (ecxt note).
+        unsafe { self.es_tupleTable.get_unchecked_mut(id.0 as usize) }
     }
 
     /// `ExecResetTupleTable(estate->es_tupleTable, shouldFree)` (execTuples.c).
