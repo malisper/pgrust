@@ -475,7 +475,7 @@ fn run_program<'mcx>(
                     crate::steps::SlotSrc::Outer => need_slot(&mut outer),
                 };
                 let (value, isnull) = eval_whole_row(frames, slot, *wr, *frame)?;
-                write_out(*out, &mut regs, value, isnull);
+                write_out(*out, value, isnull);
             }
             Step::ScanSysVar { attnum, out } => {
                 let mut isnull = false;
