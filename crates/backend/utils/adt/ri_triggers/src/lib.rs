@@ -897,8 +897,21 @@ unsafe fn array_image_bytes<'a>(d: Datum) -> &'a [u8] {
     core::slice::from_raw_parts(p, len)
 }
 
+// C: a stale plan is rebuilt from scratch (query text too — renames), not
+// re-analyzed by the plancache; validity is trustworthy only under the
+// caller's FK+PK locks.
 fn ri_FetchPreparedPlan(key: &(Oid, i32)) -> Option<spi::SpiPlanPtr> {
-    RI_QUERY_CACHE.with(|c| c.borrow().as_ref().and_then(|m| m.get(key).copied()))
+    let plan = RI_QUERY_CACHE.with(|c| c.borrow().as_ref().and_then(|m| m.get(key).copied()))?;
+    if spi::SPI_plan_is_valid(plan) {
+        return Some(plan);
+    }
+    RI_QUERY_CACHE.with(|c| {
+        if let Some(m) = c.borrow_mut().as_mut() {
+            m.remove(key);
+        }
+    });
+    spi::SPI_freeplan(plan);
+    None
 }
 
 // ri_PlanCheck (ri_triggers.c). The C owner-uid switch is the superuser fast
