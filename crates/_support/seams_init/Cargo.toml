@@ -18,6 +18,8 @@ genam = { path = "../../backend/access/index/genam" }
 indexam = { path = "../../backend/access/index/indexam" }
 table = { path = "../../backend/access/table/table" }
 tableam = { path = "../../backend/access/table/tableam" }
+vacuumlazy = { path = "../../backend/access/heap/vacuumlazy" }
+commands_vacuum = { path = "../../backend/commands/vacuum" }
 clog = { path = "../../backend/access/transam/clog" }
 multixact = { path = "../../backend/access/transam/multixact" }
 rmgr = { path = "../../backend/access/transam/rmgr" }
@@ -46,8 +48,10 @@ nodeindexscan = { path = "../../backend/executor/nodeindexscan" }
 nodeindexonlyscan = { path = "../../backend/executor/nodeindexonlyscan" }
 nodeagg = { path = "../../backend/executor/nodeagg" }
 nodesort = { path = "../../backend/executor/nodesort" }
+nodeunique = { path = "../../backend/executor/nodeunique" }
 nodelimit = { path = "../../backend/executor/nodelimit" }
 nodenestloop = { path = "../../backend/executor/nodenestloop" }
+nodemergejoin = { path = "../../backend/executor/nodemergejoin" }
 tuplesort = { path = "../../backend/utils/sort/tuplesort" }
 auth = { path = "../../backend/libpq/auth" }
 be_secure = { path = "../../backend/libpq/be_secure" }
@@ -84,6 +88,7 @@ sinval = { path = "../../backend/storage/ipc/sinval" }
 waiteventset = { path = "../../backend/storage/ipc/waiteventset" }
 lmgr_proc = { path = "../../backend/storage/lmgr/lmgr_proc" }
 s_lock = { path = "../../backend/storage/lmgr/s_lock" }
+standby = { path = "../../backend/storage/ipc/standby" }
 condition_variable = { path = "../../backend/storage/lmgr/condition_variable" }
 deadlock = { path = "../../backend/storage/lmgr/deadlock" }
 predicate = { path = "../../backend/storage/lmgr/predicate" }
@@ -146,6 +151,7 @@ tuplestore = { path = "../../backend/utils/sort/tuplestore" }
 resowner = { path = "../../backend/utils/resowner/resowner" }
 snapmgr = { path = "../../backend/utils/time/snapmgr" }
 pg_prng = { path = "../../common/pg_prng" }
+regex_core = { path = "../../backend/regex/regex_core" }
 twophase_config = { path = "../../backend/access/transam/twophase_config" }
 pg_sema = { path = "../../backend/port/pg_sema" }
 autovacuum = { path = "../../backend/postmaster/autovacuum" }

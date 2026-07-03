@@ -9,6 +9,8 @@ pub fn init_all() {
     indexam::init_seams();
     table::init_seams();
     tableam::init_seams();
+    vacuumlazy::init_seams();
+    commands_vacuum::init_seams();
     clog::init_seams();
     multixact::init_seams();
     rmgr::init_seams();
@@ -38,8 +40,10 @@ pub fn init_all() {
     nodeindexonlyscan::init_seams();
     nodeagg::init_seams();
     nodesort::init_seams();
+    nodeunique::init_seams();
     nodelimit::init_seams();
     nodenestloop::init_seams();
+    nodemergejoin::init_seams();
     tuplesort::init_seams();
     auth::init_seams();
     be_secure::init_seams();
@@ -83,6 +87,7 @@ pub fn init_all() {
     procsignal::init_seams();
     shmem::init_seams();
     sinval::init_seams();
+    standby::init_seams();
     waiteventset::init_seams();
     lmgr_proc::init_seams();
     s_lock::init_seams();
@@ -148,4 +153,5 @@ pub fn init_all() {
     resowner::init_seams();
     snapmgr::init_seams();
     pg_prng::init_seams();
+    regex_core::init_seams();
 }

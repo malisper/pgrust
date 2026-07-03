@@ -1,0 +1,12 @@
+[package]
+name = "locale"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "locale"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../mcx" }
