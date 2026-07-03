@@ -310,13 +310,16 @@ impl<'mcx> TupleHashTable<'mcx> {
         self.entries[ix as usize].first_tuple
     }
 
-    /// C `TupleHashEntryGetAdditional` (maxaligned, zero-initialized).
+    /// C `TupleHashEntryGetAdditional` (maxaligned, zero-initialized;
+    /// None is C's NULL for additionalsize-0 tables, e.g. hashed DISTINCT).
     #[inline]
-    pub fn entry_additional(&self, ix: u32) -> NonNull<u8> {
-        assert!(self.additionalsize > 0);
+    pub fn entry_additional(&self, ix: u32) -> Option<NonNull<u8>> {
+        if self.additionalsize == 0 {
+            return None;
+        }
         let t = self.entries[ix as usize].first_tuple.as_ptr().cast::<u8>();
         // SAFETY: the tuple sits additionalsize bytes into its allocation.
-        unsafe { NonNull::new_unchecked(t.sub(self.additionalsize)) }
+        unsafe { Some(NonNull::new_unchecked(t.sub(self.additionalsize))) }
     }
 
     /// C `ResetTupleHashTable`; the caller resets the entry context.

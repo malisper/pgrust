@@ -943,7 +943,11 @@ fn lookup_hash_entry<'mcx>(
         }
     }
     if !trans_init.is_empty() {
-        let pergroup = ph.hashtable.entry_additional(ix).cast::<AggPerGroup>();
+        let pergroup = ph
+            .hashtable
+            .entry_additional(ix)
+            .expect("numtrans > 0 tables carry additional space")
+            .cast::<AggPerGroup>();
         if isnew {
             for (transno, init) in trans_init.iter().enumerate() {
                 // SAFETY: the entry's additional block holds numtrans
@@ -1006,9 +1010,10 @@ fn agg_retrieve_hash_table<'mcx>(
                     dst.tts_isnull[v] = src.tts_isnull[i];
                 }
             }
-            ph.hashtable.entry_additional(ix).cast::<AggPerGroup>()
+            ph.hashtable.entry_additional(ix).map_or(NonNull::dangling(), |p| p.cast())
         };
-        // Written by lookup_hash_entry; unread when peragg is empty.
+        // Written by lookup_hash_entry; unread (and dangling) when peragg is
+        // empty.
         finalize_aggregates(node, estate, pergroup)?;
 
         {
