@@ -967,7 +967,7 @@ mod acct_pool {
 
     fn dummy_acct(name: &'static str) -> Acct {
         Acct {
-            name,
+            name: Cell::new(name),
             ident: RefCell::new(None),
             self_used: Cell::new(0),
             self_peak: Cell::new(0),
@@ -984,14 +984,14 @@ mod acct_pool {
     #[test]
     fn refcounts_match_rc_semantics() {
         let a = AcctRc::new(dummy_acct("a"));
-        assert_eq!(a.name, "a");
+        assert_eq!(a.name.get(), "a");
         let b = a.clone();
         let w = a.downgrade();
         assert_eq!(w.strong_count(), 2);
         drop(b);
         assert_eq!(w.strong_count(), 1);
         let c = w.upgrade().expect("value still alive");
-        assert_eq!(c.name, "a");
+        assert_eq!(c.name.get(), "a");
         assert_eq!(w.strong_count(), 2);
         drop(c);
         drop(a);
@@ -1011,7 +1011,7 @@ mod acct_pool {
             core::ptr::addr_of_mut!((*p1.as_ptr()).weak).write(Cell::new(1));
             core::ptr::addr_of_mut!((*p1.as_ptr()).val)
                 .write(core::mem::MaybeUninit::new(dummy_acct("first")));
-            assert_eq!((*p1.as_ptr()).val.assume_init_ref().name, "first");
+            assert_eq!((*p1.as_ptr()).val.assume_init_ref().name.get(), "first");
             core::ptr::drop_in_place(core::ptr::addr_of_mut!((*p1.as_ptr()).val).cast::<Acct>());
             (*p1.as_ptr()).strong.set(0);
             (*p1.as_ptr()).weak.set(0);
@@ -1026,7 +1026,7 @@ mod acct_pool {
             core::ptr::addr_of_mut!((*p2.as_ptr()).weak).write(Cell::new(1));
             core::ptr::addr_of_mut!((*p2.as_ptr()).val)
                 .write(core::mem::MaybeUninit::new(dummy_acct("second")));
-            assert_eq!((*p2.as_ptr()).val.assume_init_ref().name, "second");
+            assert_eq!((*p2.as_ptr()).val.assume_init_ref().name.get(), "second");
             core::ptr::drop_in_place(core::ptr::addr_of_mut!((*p2.as_ptr()).val).cast::<Acct>());
             Global.deallocate(p2.cast(), core::alloc::Layout::new::<AcctInner>());
         }

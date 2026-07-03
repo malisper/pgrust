@@ -111,9 +111,7 @@ pub fn heap_drop_with_catalog<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<()> 
 
     CheckTableNotInUse(&rel, "DROP TABLE")?;
 
-    if xact::IsolationIsSerializable() {
-        unported("heap_drop_with_catalog: CheckTableForSerializableConflictIn (predicate.c)");
-    }
+    predicate_seams::check_table_for_serializable_conflict_in::call(&rel)?;
 
     match rel.rd_rel.relkind {
         types_rel::RELKIND_RELATION | types_rel::RELKIND_TOASTVALUE

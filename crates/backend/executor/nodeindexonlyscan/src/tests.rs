@@ -162,9 +162,11 @@ fn install_seams() {
         transam_xlog_seams::xlog_standby_info_active::set(|| false);
 
         predicate_seams::predicate_lock_page::set(|_rel, _blkno, _snap| Ok(()));
+        predicate_seams::check_table_for_serializable_conflict_in::set(|_rel| Ok(()));
+        predicate_seams::transfer_predicate_locks_to_heap_relation::set(|_rel| Ok(()));
         predicate_seams::predicate_lock_relation::set(|_rel, _snap| Ok(()));
         predicate_seams::predicate_lock_tid::set(|_rel, _tid, _snap, _xid| Ok(()));
-        predicate_seams::check_for_serializable_conflict_out_needed::set(|_rel, _snap| false);
+        predicate_seams::check_for_serializable_conflict_out_needed::set(|_rel, _snap| Ok(false));
 
         heapam_visibility_seams::heap_tuple_satisfies_visibility::set(
             |_htup, _snap, _buf| Ok(true),

@@ -68,11 +68,17 @@ fn lookup(h: StmtListHandle) -> Entry {
 }
 
 pub fn with<R>(h: StmtListHandle, f: impl FnOnce(&[PlannedStmt<'_>]) -> R) -> R {
+    f(resolve(h))
+}
+
+/// One validated lookup for a whole entry point (C dereferences
+/// portal->stmts). The slice is live under register()'s contract; callers
+/// must not cache it past [`free`]/[`reset_all`].
+pub fn resolve(h: StmtListHandle) -> &'static [PlannedStmt<'static>] {
     let e = lookup(h);
     // SAFETY: register()'s liveness contract; no RefCell borrow is held here,
     // so re-entrant access (PortalRunMulti -> ProcessQuery) is fine.
-    let stmts = unsafe { core::slice::from_raw_parts(e.ptr, e.len) };
-    f(stmts)
+    unsafe { core::slice::from_raw_parts(e.ptr, e.len) }
 }
 
 pub fn free(h: StmtListHandle) {

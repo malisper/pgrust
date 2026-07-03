@@ -339,11 +339,12 @@ pub fn PortalStart(
         portal.borrow_mut().portalParams = params;
 
         let stmts_handle = portal.borrow().stmts;
-        let strategy = if stmts_handle.is_null() {
-            ChoosePortalStrategy(&[])
+        let stmts: &[PlannedStmt<'static>] = if stmts_handle.is_null() {
+            &[]
         } else {
-            stmt_list::with(stmts_handle, ChoosePortalStrategy)
+            stmt_list::resolve(stmts_handle)
         };
+        let strategy = ChoosePortalStrategy(stmts);
         portal.borrow_mut().strategy = strategy;
 
         match strategy {
@@ -360,18 +361,16 @@ pub fn PortalStart(
                     let p = portal.borrow();
                     let source_text = p.sourceText.as_ref().map(|s| s.as_str()).unwrap_or("");
                     let query_env = p.queryEnv;
-                    stmt_list::with(stmts_handle, |stmts| {
-                        CreateQueryDesc(
-                            &stmts[0], /* linitial_node(PlannedStmt, portal->stmts) */
-                            source_text,
-                            Some(snapmgr::GetActiveSnapshot()),
-                            None, /* InvalidSnapshot */
-                            CommandDest::None,
-                            params,
-                            query_env,
-                            0,
-                        )
-                    })?
+                    CreateQueryDesc(
+                        &stmts[0], /* linitial_node(PlannedStmt, portal->stmts) */
+                        source_text,
+                        Some(snapmgr::GetActiveSnapshot()),
+                        None, /* InvalidSnapshot */
+                        CommandDest::None,
+                        params,
+                        query_env,
+                        0,
+                    )?
                 };
 
                 let myeflags =
@@ -398,11 +397,9 @@ pub fn PortalStart(
                 snapmgr::PopActiveSnapshot()?;
             }
             PORTAL_ONE_RETURNING | PORTAL_ONE_MOD_WITH => {
-                let tup_desc = stmt_list::with(stmts_handle, |stmts| {
-                    let primary = PortalGetPrimaryStmt(stmts)
-                        .expect("PORTAL_ONE_RETURNING portal has a primary stmt");
-                    execmain_seams::exec_clean_type_from_tl::call(&stmts[primary])
-                })?;
+                let primary = PortalGetPrimaryStmt(stmts)
+                    .expect("PORTAL_ONE_RETURNING portal has a primary stmt");
+                let tup_desc = execmain_seams::exec_clean_type_from_tl::call(&stmts[primary])?;
                 let mut p = portal.borrow_mut();
                 p.tupDesc = Some(tup_desc);
                 p.atStart = true;
@@ -410,14 +407,12 @@ pub fn PortalStart(
                 p.portalPos = 0;
             }
             PORTAL_UTIL_SELECT => {
-                let tup_desc = stmt_list::with(stmts_handle, |stmts| {
-                    let primary = PortalGetPrimaryStmt(stmts)
-                        .expect("PORTAL_UTIL_SELECT portal has a primary stmt");
-                    let pstmt = &stmts[primary];
-                    debug_assert_eq!(pstmt.commandType, CmdType::CMD_UTILITY);
-                    let u = pstmt.utilityStmt.expect("utility stmt present");
-                    utility_seams::utility_tuple_descriptor::call(u)
-                })?;
+                let primary = PortalGetPrimaryStmt(stmts)
+                    .expect("PORTAL_UTIL_SELECT portal has a primary stmt");
+                let pstmt = &stmts[primary];
+                debug_assert_eq!(pstmt.commandType, CmdType::CMD_UTILITY);
+                let u = pstmt.utilityStmt.expect("utility stmt present");
+                let tup_desc = utility_seams::utility_tuple_descriptor::call(u)?;
                 let mut p = portal.borrow_mut();
                 p.tupDesc = tup_desc;
                 p.atStart = true;
@@ -748,7 +743,10 @@ fn PortalRunUtility(
     dest: &mut DestReceiver<'_>,
     qc: Option<&mut QueryCompletion>,
 ) -> PgResult<()> {
-    let requires_snapshot = stmt_list::with(stmts, |s| PlannedStmtRequiresSnapshot(&s[idx]));
+    // One validated resolve for the whole call; ProcessUtility runs with the
+    // slice live exactly as the previous with()-scoped form did.
+    let pstmt = &stmt_list::resolve(stmts)[idx];
+    let requires_snapshot = PlannedStmtRequiresSnapshot(pstmt);
 
     if requires_snapshot {
         let mut snapshot = snapmgr::GetTransactionSnapshot()?;
@@ -794,23 +792,21 @@ fn PortalRunUtility(
             p.sourceText.as_ref().map(|s| s.as_str()).unwrap_or(""),
         )
     };
-    stmt_list::with(stmts, |s| {
-        let (params, query_env) = {
-            let p = portal.borrow();
-            (p.portalParams, p.queryEnv)
-        };
-        utility_seams::process_utility::call(
-            mcx,
-            &s[idx],
-            source_text,
-            read_only_tree,
-            context,
-            params,
-            query_env,
-            dest,
-            qc,
-        )
-    })?;
+    let (params, query_env) = {
+        let p = portal.borrow();
+        (p.portalParams, p.queryEnv)
+    };
+    utility_seams::process_utility::call(
+        mcx,
+        pstmt,
+        source_text,
+        read_only_tree,
+        context,
+        params,
+        query_env,
+        dest,
+        qc,
+    )?;
 
     let portal_snapshot = portal.borrow_mut().portalSnapshot.take();
     if let Some(snap) = portal_snapshot {
@@ -845,14 +841,16 @@ fn PortalRunMulti<'mcx>(
     let nstmts = if stmts.is_null() {
         0
     } else {
-        stmt_list::with(stmts, |s| s.len())
+        stmt_list::resolve(stmts).len()
     };
 
     for i in 0..nstmts {
         postgres_seams::check_for_interrupts::call()?;
 
-        let (is_plannable, can_set_tag) =
-            stmt_list::with(stmts, |s| (s[i].utilityStmt.is_none(), s[i].canSetTag));
+        // Re-resolved per iteration: a utility in an earlier statement can
+        // release the portal's stmts (the null check below mirrors C).
+        let pstmt = &stmt_list::resolve(stmts)[i];
+        let (is_plannable, can_set_tag) = (pstmt.utilityStmt.is_none(), pstmt.canSetTag);
 
         if is_plannable {
             if guc_tables::backing::log_executor_stats() {
@@ -888,14 +886,12 @@ fn PortalRunMulti<'mcx>(
             };
             let stmt_qc = if can_set_tag { qc.as_deref_mut() } else { None };
 
-            stmt_list::with(stmts, |s| {
-                let (params, query_env) = {
-                    let p = portal.borrow();
-                    (p.portalParams, p.queryEnv)
-                };
-                with_source_text(portal, |source_text| {
-                    ProcessQuery(&s[i], source_text, params, query_env, receiver, stmt_qc)
-                })
+            let (params, query_env) = {
+                let p = portal.borrow();
+                (p.portalParams, p.queryEnv)
+            };
+            with_source_text(portal, |source_text| {
+                ProcessQuery(pstmt, source_text, params, query_env, receiver, stmt_qc)
             })?;
 
             if guc_tables::backing::log_executor_stats() {

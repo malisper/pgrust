@@ -225,7 +225,7 @@ pub fn HeapCheckForSerializableConflictOut(
     buffer: Buffer,
     snapshot: &SnapshotData<'_>,
 ) -> PgResult<()> {
-    if !predicate_seams::check_for_serializable_conflict_out_needed::call(relation, snapshot) {
+    if !predicate_seams::check_for_serializable_conflict_out_needed::call(relation, snapshot)? {
         return Ok(());
     }
 
@@ -456,7 +456,7 @@ pub fn heap_prepare_pagescan(scan: &mut HeapScanDescData<'_>) -> PgResult<()> {
         .as_deref()
         .expect("page-at-a-time mode requires an MVCC snapshot");
     let check_serializable =
-        predicate_seams::check_for_serializable_conflict_out_needed::call(relation, snapshot);
+        predicate_seams::check_for_serializable_conflict_out_needed::call(relation, snapshot)?;
 
     let pin = scan.rs_cbuf.as_ref().expect("pagescan without buffer");
     debug_assert!(pin.block_number() == block);
