@@ -41,10 +41,13 @@ const REL_OID: Oid = 61000;
 const REL2_OID: Oid = 61001;
 const REL3_OID: Oid = 61002;
 const IDX_OID: Oid = 61003;
+const REL5_OID: Oid = 61005;
 const RLOC: RelFileLocator = RelFileLocator::new(1663, 5, REL_OID);
 const RLOC2: RelFileLocator = RelFileLocator::new(1663, 5, REL2_OID);
 const RLOC3: RelFileLocator = RelFileLocator::new(1663, 5, REL3_OID);
 const RLOC4: RelFileLocator = RelFileLocator::new(1663, 5, IDX_OID);
+const RLOC5: RelFileLocator = RelFileLocator::new(1663, 5, REL5_OID);
+const WIDE: usize = 1536;
 // evens then odds: forces rightmost and interior leaf splits (SPLIT_R,
 // SPLIT_L + right-sibling arm, INSERT_UPPER) plus NEWROOT.
 const NIDX_KEYS: i32 = 900;
@@ -783,8 +786,9 @@ fn crash_recovery_replays_dml_to_precrash_state() {
     let mcx = ctx.mcx();
     let rel = test_relation(mcx, REL_OID);
     let rel3 = test_relation(mcx, REL3_OID);
+    let rel5 = test_relation(mcx, REL5_OID);
     let tupdesc = int4_tupdesc(mcx);
-    for rloc in [RLOC, RLOC3] {
+    for rloc in [RLOC, RLOC3, RLOC5] {
         smgr::smgropen(rloc, INVALID_PROC_NUMBER).unwrap();
         smgr::smgrcreate(
             types_storage::RelFileLocatorBackend { locator: rloc, backend: INVALID_PROC_NUMBER },
@@ -824,6 +828,79 @@ fn crash_recovery_replays_dml_to_precrash_state() {
     // cid 0: cmin is not WAL-logged and the INIT_PAGE replay re-stamps
     // FirstCommandId, so a nonzero cid would break the byte comparison.
     assert_eq!(insert_into(&rel3, 51, 0), ItemPointerData::new(0, 1));
+
+    // rel5 update lane: wide rows, a HOT update (same page), then a wide
+    // update that overflows the page — the write side emits xl_heap_lock on
+    // the old row plus a cross-page XLOG_HEAP_UPDATE|INIT_PAGE.
+    {
+        let wide_tuple = |fill: u8| {
+            let mut img = vec![0u8; WIDE];
+            img[18..20].copy_from_slice(&1u16.to_ne_bytes()); // natts
+            img[20..22].copy_from_slice(&types_tuple::HEAP_XMAX_INVALID.to_ne_bytes());
+            img[22] = 24; // t_hoff
+            img[24..].fill(fill);
+            let words = WIDE.div_ceil(8);
+            // Leaked (test-only): moving a Box would invalidate the pointer.
+            let buf: &'static mut [u64] = Box::leak(vec![0u64; words].into_boxed_slice());
+            // SAFETY: buf is words*8 >= img.len() writable bytes.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    img.as_ptr(),
+                    buf.as_mut_ptr().cast::<u8>(),
+                    img.len(),
+                )
+            };
+            // SAFETY: 8-aligned leaked image, header-complete, unique.
+            unsafe {
+                HeapTupleData::from_raw_parts(
+                    buf.as_mut_ptr().cast::<u8>(),
+                    WIDE as u32,
+                    ItemPointerData::invalid(),
+                    0,
+                )
+            }
+        };
+        for v in 1u8..=4 {
+            let mut tup = wide_tuple(v);
+            heapam::heap_insert(&rel5, &mut tup, 0, 0).unwrap();
+            assert_eq!(tup.t_self, ItemPointerData::new(0, v as u16));
+        }
+        let mut lockmode = tableam_vocab::LockTupleMode::LockTupleNoKeyExclusive;
+        let mut update_indexes = tableam_vocab::TU_UpdateIndexes::TU_None;
+        // HOT: 1540 fits the 2008 bytes free on page 0.
+        let mut tup = wide_tuple(0x22);
+        let r = heapam::heap_update(
+            &rel5,
+            &ItemPointerData::new(0, 2),
+            &mut tup,
+            1,
+            None,
+            true,
+            &mut tmfd,
+            &mut lockmode,
+            &mut update_indexes,
+        )
+        .unwrap();
+        assert_eq!(r, TM_Result::TM_Ok);
+        assert_eq!(tup.t_self, ItemPointerData::new(0, 5));
+        // Non-HOT: 1540 > the 468 bytes now free forces the new page.
+        let mut tup = wide_tuple(0x33);
+        let r = heapam::heap_update(
+            &rel5,
+            &ItemPointerData::new(0, 1),
+            &mut tup,
+            2,
+            None,
+            true,
+            &mut tmfd,
+            &mut lockmode,
+            &mut update_indexes,
+        )
+        .unwrap();
+        assert_eq!(r, TM_Result::TM_Ok);
+        assert_eq!(tup.t_self, ItemPointerData::new(1, 1));
+    }
+
     xact::CommitTransactionCommand().unwrap();
     assert!(transam::TransactionIdDidCommit(xid1).unwrap());
 
@@ -943,6 +1020,8 @@ fn crash_recovery_replays_dml_to_precrash_state() {
     std::fs::write(base.join("expected_page.bin"), expected_page).unwrap();
     let expected_page3 = read_page_from_buffer(&rel3, 0);
     std::fs::write(base.join("expected_page3.bin"), expected_page3).unwrap();
+    let expected_page5: Vec<[u8; BLCKSZ]> =
+        (0..2).map(|b| read_page_from_buffer(&rel5, b)).collect();
 
     // Clean(-shutdown) control for the VM: the buffered map byte is cleared.
     {
@@ -1037,6 +1116,36 @@ fn crash_recovery_replays_dml_to_precrash_state() {
     // re-added, PD_ALL_VISIBLE cleared), VM bit cleared on disk.
     let replayed3 = std::fs::read(dd2.join("base/5").join(REL3_OID.to_string())).unwrap();
     assert_eq!(replayed3, expected_page3.to_vec(), "VM-cleared heap page is byte-exact");
+
+    // The update lane: HOT + cross-page (lock, INIT_PAGE) replay byte-exact.
+    // cmin/cmax (t_field3) of the update-touched tuples and the PD_PAGE_FULL
+    // writer hint are not WAL-logged; both sides are normalized (C-exact).
+    let replayed5 = std::fs::read(dd2.join("base/5").join(REL5_OID.to_string())).unwrap();
+    assert_eq!(replayed5.len(), 2 * BLCKSZ);
+    let cid_tuples: [&[u16]; 2] = [&[1, 2, 5], &[1]];
+    for b in 0..2usize {
+        let mut got = replayed5[b * BLCKSZ..(b + 1) * BLCKSZ].to_vec();
+        let mut want = expected_page5[b].to_vec();
+        for &off in cid_tuples[b] {
+            for page in [&mut got, &mut want] {
+                let r = unsafe {
+                    PageRef::from_raw(core::ptr::NonNull::new(page.as_mut_ptr()).unwrap())
+                };
+                let o = r.item_id(off).lp_off() as usize;
+                page[o + 8..o + 12].fill(0);
+            }
+        }
+        got[10] &= !0x02;
+        want[10] &= !0x02;
+        if got != want {
+            let first = got.iter().zip(&want).position(|(a, c)| a != c).unwrap();
+            panic!(
+                "replayed update-lane block {b} differs at byte {first}: got {:02x?} want {:02x?}",
+                &got[first..(first + 16).min(BLCKSZ)],
+                &want[first..(first + 16).min(BLCKSZ)]
+            );
+        }
+    }
     let vm3 = std::fs::read(dd2.join("base/5").join(format!("{REL3_OID}_vm"))).unwrap();
     assert_eq!(vm3[VM_FIRST_MAP_BYTE], 0, "replay cleared the VM bit");
 

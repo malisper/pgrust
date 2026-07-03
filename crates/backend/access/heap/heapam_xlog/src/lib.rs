@@ -1,7 +1,8 @@
-//! heapam_xlog.c — heap/heap2 rmgr redo. Live arms: XLOG_HEAP_INSERT,
-//! XLOG_HEAP_DELETE, XLOG_HEAP2_MULTI_INSERT (the record types the write side
-//! emits and round-trip proves) plus the C no-op arms (TRUNCATE,
-//! HEAP2_NEW_CID). Everything else is a loud panic naming its op.
+//! heapam_xlog.c — heap/heap2 rmgr redo. Live arms: INSERT, DELETE, UPDATE,
+//! HOT_UPDATE, CONFIRM, LOCK, INPLACE, MULTI_INSERT, LOCK_UPDATED (the shapes
+//! our write side emits plus what C 18.3 writes into a shared datadir) and
+//! the C no-op arms (TRUNCATE, HEAP2_NEW_CID). Everything else is a loud
+//! panic naming its op.
 
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
@@ -13,7 +14,8 @@ use types_storage::bufpage::{
 };
 use types_tuple::{
     HeapTupleHeaderData, ItemPointerData, HEAP_KEYS_UPDATED, HEAP_MOVED, HEAP_XMAX_BITS,
-    HEAP_XMAX_EXCL_LOCK, HEAP_XMAX_IS_MULTI, HEAP_XMAX_KEYSHR_LOCK, HEAP_XMAX_LOCK_ONLY,
+    HEAP_XMAX_EXCL_LOCK, HEAP_XMAX_IS_LOCKED_ONLY, HEAP_XMAX_IS_MULTI, HEAP_XMAX_KEYSHR_LOCK,
+    HEAP_XMAX_LOCK_ONLY,
 };
 use xlogreader_seams::XLogReaderState;
 use xlogutils::{XLogInitBufferForRedo, XLogReadBufferForRedo, BLK_NEEDS_REDO};
@@ -40,9 +42,14 @@ pub const XLOG_HEAP2_NEW_CID: u8 = 0x70;
 
 pub const XLH_INSERT_ALL_VISIBLE_CLEARED: u8 = 1 << 0;
 pub const XLH_INSERT_ALL_FROZEN_SET: u8 = 1 << 5;
+pub const XLH_UPDATE_OLD_ALL_VISIBLE_CLEARED: u8 = 1 << 0;
+pub const XLH_UPDATE_NEW_ALL_VISIBLE_CLEARED: u8 = 1 << 1;
+pub const XLH_UPDATE_PREFIX_FROM_OLD: u8 = 1 << 5;
+pub const XLH_UPDATE_SUFFIX_FROM_OLD: u8 = 1 << 6;
 pub const XLH_DELETE_ALL_VISIBLE_CLEARED: u8 = 1 << 0;
 pub const XLH_DELETE_IS_SUPER: u8 = 1 << 3;
 pub const XLH_DELETE_IS_PARTITION_MOVE: u8 = 1 << 4;
+pub const XLH_LOCK_ALL_FROZEN_CLEARED: u8 = 1 << 0;
 
 pub const XLHL_XMAX_IS_MULTI: u8 = 0x01;
 pub const XLHL_XMAX_LOCK_ONLY: u8 = 0x02;
@@ -104,16 +111,12 @@ fn fix_infomask_from_infobits(infobits: u8, infomask: &mut u16, infomask2: &mut 
 fn clear_vm_bits(
     rlocator: types_storage::RelFileLocator,
     blkno: types_core::BlockNumber,
+    flags: u8,
 ) -> PgResult<()> {
     let reln = xlogutils::CreateFakeRelcacheEntry(rlocator);
     let mut vmbuffer = visibilitymap::VmBuffer::new();
     visibilitymap::visibilitymap_pin(&reln, blkno, &mut vmbuffer)?;
-    visibilitymap::visibilitymap_clear(
-        &reln,
-        blkno,
-        &vmbuffer,
-        visibilitymap::VISIBILITYMAP_VALID_BITS,
-    )?;
+    visibilitymap::visibilitymap_clear(&reln, blkno, &vmbuffer, flags)?;
     vmbuffer.release();
     xlogutils::FreeFakeRelcacheEntry(reln);
     Ok(())
@@ -141,7 +144,7 @@ fn heap_xlog_delete(record: &mut XLogReaderState) -> PgResult<()> {
     let target_tid = ItemPointerData::new(blkno, offnum);
 
     if flags & XLH_DELETE_ALL_VISIBLE_CLEARED != 0 {
-        clear_vm_bits(target_locator, blkno)?;
+        clear_vm_bits(target_locator, blkno, visibilitymap::VISIBILITYMAP_VALID_BITS)?;
     }
 
     let (action, buffer) = XLogReadBufferForRedo(record, 0)?;
@@ -213,7 +216,7 @@ fn heap_xlog_insert(record: &mut XLogReaderState) -> PgResult<()> {
     debug_assert!(flags & XLH_INSERT_ALL_FROZEN_SET == 0);
 
     if flags & XLH_INSERT_ALL_VISIBLE_CLEARED != 0 {
-        clear_vm_bits(target_locator, blkno)?;
+        clear_vm_bits(target_locator, blkno, visibilitymap::VISIBILITYMAP_VALID_BITS)?;
     }
 
     let info = record.record.as_ref().unwrap().xl_info & !XLR_INFO_MASK;
@@ -312,7 +315,7 @@ fn heap_xlog_multi_insert(record: &mut XLogReaderState) -> PgResult<()> {
     );
 
     if flags & XLH_INSERT_ALL_VISIBLE_CLEARED != 0 {
-        clear_vm_bits(target_locator, blkno)?;
+        clear_vm_bits(target_locator, blkno, visibilitymap::VISIBILITYMAP_VALID_BITS)?;
     }
 
     let info = record.record.as_ref().unwrap().xl_info & !XLR_INFO_MASK;
@@ -483,6 +486,326 @@ fn heap_xlog_inplace(record: &mut XLogReaderState) -> PgResult<()> {
     )
 }
 
+fn heap_xlog_update(record: &mut XLogReaderState, hot_update: bool) -> PgResult<()> {
+    let lsn = record.EndRecPtr;
+    let (old_xmax, old_offnum, old_infobits_set, flags, new_xmax, new_offnum) = {
+        let x = main_data(record);
+        (
+            u32::from_ne_bytes(x[0..4].try_into().unwrap()),
+            u16::from_ne_bytes(x[4..6].try_into().unwrap()),
+            x[6],
+            x[7],
+            u32::from_ne_bytes(x[8..12].try_into().unwrap()),
+            u16::from_ne_bytes(x[12..14].try_into().unwrap()),
+        )
+    };
+
+    let (rlocator, _fork, newblk, _) = record
+        .block_tag_extended(0)
+        .expect("heap_xlog_update: no block 0");
+    let oldblk = match record.block_tag_extended(1) {
+        Some((_, _, blk, _)) => {
+            debug_assert!(!hot_update);
+            blk
+        }
+        None => newblk,
+    };
+    let newtid = ItemPointerData::new(newblk, new_offnum);
+
+    if flags & XLH_UPDATE_OLD_ALL_VISIBLE_CLEARED != 0 {
+        clear_vm_bits(rlocator, oldblk, visibilitymap::VISIBILITYMAP_VALID_BITS)?;
+    }
+
+    // The old page stays locked until the new tuple is in place (C's Hot
+    // Standby consistency rule); the raw old-tuple slice below relies on it.
+    let (oldaction, obuffer) =
+        XLogReadBufferForRedo(record, if oldblk == newblk { 0 } else { 1 })?;
+    let mut old_item: Option<(*const u8, u32)> = None;
+    if oldaction == BLK_NEEDS_REDO {
+        // SAFETY: pin + exclusive lock per the redo protocol (module contract).
+        let mut pm = unsafe { page_mut(obuffer) };
+        let page = pm.as_ref();
+        let lp = if page.max_offset_number() >= old_offnum {
+            Some(page.item_id(old_offnum))
+        } else {
+            None
+        };
+        let Some(lp) = lp.filter(|id| id.is_normal()) else {
+            return Err(panic_err("invalid lp".into()));
+        };
+        let (ptr, len) = page.item_raw(lp);
+        old_item = Some((ptr, len));
+        // SAFETY: in-page tuple image under the pin+lock; exclusive for this arm.
+        let htup = unsafe { &mut *(ptr.cast_mut().cast::<HeapTupleHeaderData>()) };
+
+        htup.t_infomask &= !(HEAP_XMAX_BITS | HEAP_MOVED);
+        htup.t_infomask2 &= !HEAP_KEYS_UPDATED;
+        if hot_update {
+            htup.set_hot_updated();
+        } else {
+            htup.clear_hot_updated();
+        }
+        let (mut im, mut im2) = (htup.t_infomask, htup.t_infomask2);
+        fix_infomask_from_infobits(old_infobits_set, &mut im, &mut im2);
+        htup.t_infomask = im;
+        htup.t_infomask2 = im2;
+        htup.set_xmax(old_xmax);
+        htup.set_cmax(FirstCommandId, false);
+        htup.t_ctid = newtid;
+
+        page_set_prunable(&mut pm, record_xid(record));
+
+        if flags & XLH_UPDATE_OLD_ALL_VISIBLE_CLEARED != 0 {
+            pm.clear_all_visible();
+        }
+
+        pm.set_lsn(lsn);
+        bufmgr_seams::mark_buffer_dirty::call(obuffer)?;
+    }
+
+    let info = record.record.as_ref().unwrap().xl_info & !XLR_INFO_MASK;
+    let (newaction, nbuffer) = if oldblk == newblk {
+        (oldaction, obuffer)
+    } else if info & XLOG_HEAP_INIT_PAGE != 0 {
+        let buffer = XLogInitBufferForRedo(record, 0)?;
+        // SAFETY: pin + exclusive lock per the redo protocol (module contract).
+        let mut pm = unsafe { page_mut(buffer) };
+        pm.init(0);
+        (BLK_NEEDS_REDO, buffer)
+    } else {
+        XLogReadBufferForRedo(record, 0)?
+    };
+
+    if flags & XLH_UPDATE_NEW_ALL_VISIBLE_CLEARED != 0 {
+        clear_vm_bits(rlocator, newblk, visibilitymap::VISIBILITYMAP_VALID_BITS)?;
+    }
+
+    let mut freespace = 0usize;
+    if newaction == BLK_NEEDS_REDO {
+        let blk = record.block(0);
+        debug_assert!(blk.has_data);
+        // SAFETY: block data points into the decode buffer, live for this arm.
+        let data = unsafe { blk.data_bytes() };
+
+        // SAFETY: pin + exclusive lock per the redo protocol (module contract).
+        let mut pm = unsafe { page_mut(nbuffer) };
+        if pm.as_ref().max_offset_number() + 1 < new_offnum {
+            return Err(panic_err("invalid max offset number".into()));
+        }
+
+        let mut rec = 0usize;
+        let mut prefixlen = 0usize;
+        let mut suffixlen = 0usize;
+        if flags & XLH_UPDATE_PREFIX_FROM_OLD != 0 {
+            debug_assert!(newblk == oldblk);
+            prefixlen = u16::from_ne_bytes(data[rec..rec + 2].try_into().unwrap()) as usize;
+            rec += 2;
+        }
+        if flags & XLH_UPDATE_SUFFIX_FROM_OLD != 0 {
+            debug_assert!(newblk == oldblk);
+            suffixlen = u16::from_ne_bytes(data[rec..rec + 2].try_into().unwrap()) as usize;
+            rec += 2;
+        }
+
+        let xl_infomask2 = u16::from_ne_bytes(data[rec..rec + 2].try_into().unwrap());
+        let xl_infomask = u16::from_ne_bytes(data[rec + 2..rec + 4].try_into().unwrap());
+        let xl_hoff = data[rec + 4];
+        rec += SizeOfHeapHeader;
+
+        let tuplen = data.len() - rec;
+        debug_assert!(tuplen <= MaxHeapTupleSize);
+
+        #[repr(align(8))]
+        struct TBuf([u8; MaxHeapTupleSize + SizeofHeapTupleHeader]);
+        let mut tbuf = TBuf([0u8; MaxHeapTupleSize + SizeofHeapTupleHeader]);
+        let mut newp = SizeofHeapTupleHeader;
+        if prefixlen > 0 {
+            let (optr, olen) = old_item.expect("prefix decode without old tuple");
+            // SAFETY: old tuple image under obuffer's pin + lock, still held.
+            let old = unsafe { core::slice::from_raw_parts(optr, olen as usize) };
+            // SAFETY: header-sized normal item under the same pin + lock.
+            let old_hoff =
+                unsafe { (*(optr.cast::<HeapTupleHeaderData>())).t_hoff } as usize;
+
+            let len = xl_hoff as usize - SizeofHeapTupleHeader;
+            tbuf.0[newp..newp + len].copy_from_slice(&data[rec..rec + len]);
+            rec += len;
+            newp += len;
+
+            tbuf.0[newp..newp + prefixlen]
+                .copy_from_slice(&old[old_hoff..old_hoff + prefixlen]);
+            newp += prefixlen;
+
+            let len = tuplen - (xl_hoff as usize - SizeofHeapTupleHeader);
+            tbuf.0[newp..newp + len].copy_from_slice(&data[rec..rec + len]);
+            rec += len;
+            newp += len;
+        } else {
+            tbuf.0[newp..newp + tuplen].copy_from_slice(&data[rec..rec + tuplen]);
+            rec += tuplen;
+            newp += tuplen;
+        }
+        debug_assert_eq!(rec, data.len());
+
+        if suffixlen > 0 {
+            let (optr, olen) = old_item.expect("suffix decode without old tuple");
+            // SAFETY: old tuple image under obuffer's pin + lock, still held.
+            let old = unsafe { core::slice::from_raw_parts(optr, olen as usize) };
+            tbuf.0[newp..newp + suffixlen]
+                .copy_from_slice(&old[olen as usize - suffixlen..]);
+        }
+
+        let newlen = SizeofHeapTupleHeader + tuplen + prefixlen + suffixlen;
+        {
+            // SAFETY: 8-aligned zeroed buffer at least header-sized.
+            let htup = unsafe { &mut *(tbuf.0.as_mut_ptr().cast::<HeapTupleHeaderData>()) };
+            htup.t_infomask2 = xl_infomask2;
+            htup.t_infomask = xl_infomask;
+            htup.t_hoff = xl_hoff;
+            htup.set_xmin(record_xid(record));
+            htup.set_cmin(FirstCommandId);
+            htup.set_xmax(new_xmax);
+            htup.t_ctid = newtid;
+        }
+
+        if pm
+            .add_item(&tbuf.0[..newlen], new_offnum, PAI_OVERWRITE | PAI_IS_HEAP)
+            .is_none()
+        {
+            return Err(panic_err("failed to add tuple".into()));
+        }
+
+        if flags & XLH_UPDATE_NEW_ALL_VISIBLE_CLEARED != 0 {
+            pm.clear_all_visible();
+        }
+
+        freespace = pm.as_ref().heap_free_space();
+
+        pm.set_lsn(lsn);
+        bufmgr_seams::mark_buffer_dirty::call(nbuffer)?;
+    }
+
+    if nbuffer != InvalidBuffer && nbuffer != obuffer {
+        unlock_release(nbuffer)?;
+    }
+    if obuffer != InvalidBuffer {
+        unlock_release(obuffer)?;
+    }
+
+    // No FSM update on HOT updates: post-recovery pruning restores the space.
+    if newaction == BLK_NEEDS_REDO && !hot_update && freespace < BLCKSZ / 5 {
+        freespace::XLogRecordPageWithFreeSpace(rlocator, newblk, freespace)?;
+    }
+    Ok(())
+}
+
+fn heap_xlog_confirm(record: &mut XLogReaderState) -> PgResult<()> {
+    let lsn = record.EndRecPtr;
+    let offnum = {
+        let x = main_data(record);
+        u16::from_ne_bytes(x[0..2].try_into().unwrap())
+    };
+
+    let (action, buffer) = XLogReadBufferForRedo(record, 0)?;
+    if action == BLK_NEEDS_REDO {
+        // SAFETY: pin + exclusive lock per the redo protocol (module contract).
+        let mut pm = unsafe { page_mut(buffer) };
+        let page = pm.as_ref();
+        let lp = if page.max_offset_number() >= offnum {
+            Some(page.item_id(offnum))
+        } else {
+            None
+        };
+        let Some(lp) = lp.filter(|id| id.is_normal()) else {
+            return Err(panic_err("invalid lp".into()));
+        };
+        let (ptr, _len) = page.item_raw(lp);
+        // SAFETY: in-page tuple image under the pin+lock; exclusive for this arm.
+        let htup = unsafe { &mut *(ptr.cast_mut().cast::<HeapTupleHeaderData>()) };
+
+        htup.t_ctid = ItemPointerData::new(
+            bufmgr_seams::buffer_get_block_number::call(buffer),
+            offnum,
+        );
+
+        pm.set_lsn(lsn);
+        bufmgr_seams::mark_buffer_dirty::call(buffer)?;
+    }
+    if buffer != InvalidBuffer {
+        unlock_release(buffer)?;
+    }
+    Ok(())
+}
+
+// xl_heap_lock and xl_heap_lock_updated share one layout; `lock_updated`
+// selects XLOG_HEAP2_LOCK_UPDATED's semantics (no lock-only ctid reset, no
+// cmax stamp).
+fn heap_xlog_lock_common(record: &mut XLogReaderState, lock_updated: bool) -> PgResult<()> {
+    let lsn = record.EndRecPtr;
+    let (xmax, offnum, infobits_set, flags) = {
+        let x = main_data(record);
+        (
+            u32::from_ne_bytes(x[0..4].try_into().unwrap()),
+            u16::from_ne_bytes(x[4..6].try_into().unwrap()),
+            x[6],
+            x[7],
+        )
+    };
+
+    if flags & XLH_LOCK_ALL_FROZEN_CLEARED != 0 {
+        let (rlocator, _fork, block, _) = record
+            .block_tag_extended(0)
+            .expect("heap_xlog_lock: no block 0");
+        clear_vm_bits(rlocator, block, visibilitymap::VISIBILITYMAP_ALL_FROZEN)?;
+    }
+
+    let (action, buffer) = XLogReadBufferForRedo(record, 0)?;
+    if action == BLK_NEEDS_REDO {
+        // SAFETY: pin + exclusive lock per the redo protocol (module contract).
+        let mut pm = unsafe { page_mut(buffer) };
+        let page = pm.as_ref();
+        let lp = if page.max_offset_number() >= offnum {
+            Some(page.item_id(offnum))
+        } else {
+            None
+        };
+        let Some(lp) = lp.filter(|id| id.is_normal()) else {
+            return Err(panic_err("invalid lp".into()));
+        };
+        let (ptr, _len) = page.item_raw(lp);
+        // SAFETY: in-page tuple image under the pin+lock; exclusive for this arm.
+        let htup = unsafe { &mut *(ptr.cast_mut().cast::<HeapTupleHeaderData>()) };
+
+        htup.t_infomask &= !(HEAP_XMAX_BITS | HEAP_MOVED);
+        htup.t_infomask2 &= !HEAP_KEYS_UPDATED;
+        let (mut im, mut im2) = (htup.t_infomask, htup.t_infomask2);
+        fix_infomask_from_infobits(infobits_set, &mut im, &mut im2);
+        htup.t_infomask = im;
+        htup.t_infomask2 = im2;
+
+        if !lock_updated {
+            if HEAP_XMAX_IS_LOCKED_ONLY(htup.t_infomask) {
+                htup.clear_hot_updated();
+                htup.t_ctid = ItemPointerData::new(
+                    bufmgr_seams::buffer_get_block_number::call(buffer),
+                    offnum,
+                );
+            }
+            htup.set_xmax(xmax);
+            htup.set_cmax(FirstCommandId, false);
+        } else {
+            htup.set_xmax(xmax);
+        }
+
+        pm.set_lsn(lsn);
+        bufmgr_seams::mark_buffer_dirty::call(buffer)?;
+    }
+    if buffer != InvalidBuffer {
+        unlock_release(buffer)?;
+    }
+    Ok(())
+}
+
 pub fn heap_redo(record: &mut XLogReaderState) -> PgResult<()> {
     let info = record.record.as_ref().expect("heap_redo with no decoded record").xl_info
         & !XLR_INFO_MASK;
@@ -491,10 +814,10 @@ pub fn heap_redo(record: &mut XLogReaderState) -> PgResult<()> {
         XLOG_HEAP_DELETE => heap_xlog_delete(record),
         // TRUNCATE exists for logical decoding only; replay is a no-op.
         XLOG_HEAP_TRUNCATE => Ok(()),
-        XLOG_HEAP_UPDATE => panic!("heap_redo arm not ported: heap_xlog_update"),
-        XLOG_HEAP_HOT_UPDATE => panic!("heap_redo arm not ported: heap_xlog_update (HOT)"),
-        XLOG_HEAP_CONFIRM => panic!("heap_redo arm not ported: heap_xlog_confirm"),
-        XLOG_HEAP_LOCK => panic!("heap_redo arm not ported: heap_xlog_lock"),
+        XLOG_HEAP_UPDATE => heap_xlog_update(record, false),
+        XLOG_HEAP_HOT_UPDATE => heap_xlog_update(record, true),
+        XLOG_HEAP_CONFIRM => heap_xlog_confirm(record),
+        XLOG_HEAP_LOCK => heap_xlog_lock_common(record, false),
         XLOG_HEAP_INPLACE => heap_xlog_inplace(record),
         other => Err(panic_err(format!("heap_redo: unknown op code {other}"))),
     }
@@ -510,7 +833,7 @@ pub fn heap2_redo(record: &mut XLogReaderState) -> PgResult<()> {
         }
         XLOG_HEAP2_VISIBLE => panic!("heap2_redo arm not ported: heap_xlog_visible"),
         XLOG_HEAP2_MULTI_INSERT => heap_xlog_multi_insert(record),
-        XLOG_HEAP2_LOCK_UPDATED => panic!("heap2_redo arm not ported: heap_xlog_lock_updated"),
+        XLOG_HEAP2_LOCK_UPDATED => heap_xlog_lock_common(record, true),
         // Logical decoding only; nothing to do on a real replay.
         XLOG_HEAP2_NEW_CID => Ok(()),
         XLOG_HEAP2_REWRITE => panic!("heap2_redo arm not ported: heap_xlog_logical_rewrite"),
