@@ -151,8 +151,9 @@ pub fn exec_init_memoize<'mcx>(
         exectuples::make_tuple_table_slot(mcx, TupleSlotKind::Virtual, Some(hashkeydesc.clone()));
 
     let params = estate.param_bind();
-    let mut param_exprs: PgVec<'mcx, PgBox<'mcx, ExprState<'mcx>>> =
-        ::mcx::vec_with_capacity_in(mcx, nkeys)?;
+    // Droppy elements: released in exec_end_memoize (windowagg argstates
+    // precedent), so the no-drop vec ctors don't apply.
+    let mut param_exprs: PgVec<'mcx, PgBox<'mcx, ExprState<'mcx>>> = PgVec::new_in(mcx);
     for expr in &node.param_exprs {
         param_exprs
             .push(execexpr::exec_init_expr(mcx, Some(expr), params)?.expect("cache key expr"));
