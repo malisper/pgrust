@@ -118,6 +118,9 @@ fn install_seams() {
         heapam_visibility_seams::heap_tuple_satisfies_visibility::set(|htup, _snap, _buf| {
             Ok(htup.t_data().xmin_raw() != INVISIBLE_XMIN)
         });
+        heapam_visibility_seams::heap_tuple_satisfies_mvcc_page::set(|htup, _snap, _buf, _memo| {
+            Ok(htup.t_data().xmin_raw() != INVISIBLE_XMIN)
+        });
         heapam_visibility_seams::heap_tuple_is_surely_dead::set(|_htup, _vt| {
             Ok(SURELY_DEAD.load(Ordering::Relaxed))
         });
