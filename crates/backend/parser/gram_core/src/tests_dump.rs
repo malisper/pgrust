@@ -99,7 +99,13 @@ fn node(out: &mut String, n: Node<'_>) {
         out.push('}');
     } else if let Some(s) = n.as_select_stmt() {
         out.push_str("{SELECTSTMT");
-        list_field(out, "distinctClause", &s.distinctClause);
+        // C: plain DISTINCT is a one-NULL-cell list -> "(<>)".
+        out.push_str(" :distinctClause ");
+        match &s.distinctClause {
+            types_nodes::DistinctClause::None => out.push_str("<>"),
+            types_nodes::DistinctClause::All => out.push_str("(<>)"),
+            types_nodes::DistinctClause::On(l) => list(out, l),
+        }
         node_field(out, "intoClause", s.intoClause);
         list_field(out, "targetList", &s.targetList);
         list_field(out, "fromClause", &s.fromClause);
@@ -189,6 +195,62 @@ fn node(out: &mut String, n: Node<'_>) {
             None => out.push_str("<>"),
         }
         int_field(out, "location", rv.location);
+        out.push('}');
+    } else if let Some(sb) = n.as_sort_by() {
+        out.push_str("{SORTBY");
+        node_field(out, "node", sb.node);
+        int_field(out, "sortby_dir", sb.sortby_dir as i32);
+        int_field(out, "sortby_nulls", sb.sortby_nulls as i32);
+        list_field(out, "useOp", &sb.useOp);
+        int_field(out, "location", sb.location);
+        out.push('}');
+    } else if let Some(f) = n.as_func_call() {
+        out.push_str("{FUNCCALL");
+        list_field(out, "funcname", &f.funcname);
+        list_field(out, "args", &f.args);
+        list_field(out, "agg_order", &f.agg_order);
+        node_field(out, "agg_filter", f.agg_filter);
+        node_field(out, "over", f.over);
+        bool_field(out, "agg_within_group", f.agg_within_group);
+        bool_field(out, "agg_star", f.agg_star);
+        bool_field(out, "agg_distinct", f.agg_distinct);
+        bool_field(out, "func_variadic", f.func_variadic);
+        int_field(out, "funcformat", f.funcformat as i32);
+        int_field(out, "location", f.location);
+        out.push('}');
+    } else if let Some(t) = n.as_type_name() {
+        out.push_str("{TYPENAME");
+        list_field(out, "names", &t.names);
+        int_field(out, "typeOid", t.typeOid as i32);
+        bool_field(out, "setof", t.setof);
+        bool_field(out, "pct_type", t.pct_type);
+        list_field(out, "typmods", &t.typmods);
+        int_field(out, "typemod", t.typemod);
+        list_field(out, "arrayBounds", &t.arrayBounds);
+        int_field(out, "location", t.location);
+        out.push('}');
+    } else if let Some(tc) = n.as_type_cast() {
+        out.push_str("{TYPECAST");
+        node_field(out, "arg", tc.arg);
+        node_field(out, "typeName", tc.typeName);
+        int_field(out, "location", tc.location);
+        out.push('}');
+    } else if let Some(b) = n.as_bool_expr() {
+        out.push_str("{BOOLEXPR :boolop ");
+        out.push_str(match b.boolop {
+            types_nodes::BoolExprType::AND_EXPR => "and",
+            types_nodes::BoolExprType::OR_EXPR => "or",
+            types_nodes::BoolExprType::NOT_EXPR => "not",
+        });
+        list_field(out, "args", &b.args);
+        int_field(out, "location", b.location);
+        out.push('}');
+    } else if let Some(nt) = n.as_null_test() {
+        out.push_str("{NULLTEST");
+        node_field(out, "arg", nt.arg);
+        int_field(out, "nulltesttype", nt.nulltesttype as i32);
+        bool_field(out, "argisrow", nt.argisrow);
+        int_field(out, "location", nt.location);
         out.push('}');
     } else if let Some(s) = n.as_string() {
         out.push('"');

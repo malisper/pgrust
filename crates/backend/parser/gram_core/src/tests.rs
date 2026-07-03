@@ -37,7 +37,7 @@ fn select_of<'a>(rs: &RawStmt<'a>) -> &'a types_nodes::SelectStmt<'a> {
 
 #[track_caller]
 fn assert_bare_select(sel: &types_nodes::SelectStmt<'_>) {
-    assert!(sel.distinctClause.is_nil());
+    assert!(sel.distinctClause.is_none());
     assert!(sel.intoClause.is_none());
     assert!(sel.whereClause.is_none());
     assert!(sel.groupClause.is_nil());
@@ -198,4 +198,75 @@ fn multiline_error_position() {
     let e = parse_err("SELECT\n1\n1;");
     assert_eq!(e.message(), "syntax error at or near \"1\"");
     assert_eq!(e.cursor_position(), Some(10));
+}
+
+#[test]
+fn order_by_limit_offset() {
+    let list = parse("SELECT a FROM t ORDER BY a DESC NULLS LAST, b LIMIT 10 OFFSET 2;");
+    let sel = select_of(only_stmt(&list));
+    assert_eq!(sel.sortClause.len(), 2);
+    let s0 = sel.sortClause.nth(0).as_sort_by().expect("SortBy");
+    assert_eq!(s0.sortby_dir, types_nodes::SortByDir::SORTBY_DESC);
+    assert_eq!(s0.sortby_nulls, types_nodes::SortByNulls::SORTBY_NULLS_LAST);
+    assert!(s0.useOp.is_nil());
+    let s1 = sel.sortClause.nth(1).as_sort_by().unwrap();
+    assert_eq!(s1.sortby_dir, types_nodes::SortByDir::SORTBY_DEFAULT);
+    let count = sel.limitCount.expect("limitCount").as_a_const().unwrap();
+    let Some(ValUnion::Integer(c)) = count.val else { panic!("Integer") };
+    assert_eq!(c.ival, 10);
+    let off = sel.limitOffset.expect("limitOffset").as_a_const().unwrap();
+    let Some(ValUnion::Integer(o)) = off.val else { panic!("Integer") };
+    assert_eq!(o.ival, 2);
+    assert_eq!(sel.limitOption, types_nodes::LimitOption::LIMIT_OPTION_COUNT);
+}
+
+#[test]
+fn count_star_func_call() {
+    let list = parse("SELECT count(*) FROM t;");
+    let sel = select_of(only_stmt(&list));
+    let rt = sel.targetList.nth(0).as_res_target().unwrap();
+    let f = rt.val.unwrap().as_func_call().expect("FuncCall");
+    assert_eq!(f.funcname.nth(0).as_string().unwrap().sval, "count");
+    assert!(f.args.is_nil() && f.agg_star && !f.agg_distinct);
+    assert!(f.agg_order.is_nil() && f.agg_filter.is_none() && f.over.is_none());
+}
+
+#[test]
+fn typecast_and_bool_where() {
+    let list = parse("SELECT 'x'::text FROM t WHERE a = 1 AND b IS NOT NULL AND c;");
+    let sel = select_of(only_stmt(&list));
+    let rt = sel.targetList.nth(0).as_res_target().unwrap();
+    let tc = rt.val.unwrap().as_type_cast().expect("TypeCast");
+    let tn = tc.typeName.unwrap().as_type_name().expect("TypeName");
+    assert_eq!(tn.names.nth(0).as_string().unwrap().sval, "text");
+    assert_eq!(tn.typemod, -1);
+    // AND flattens onto one BoolExpr (makeAndExpr).
+    let w = sel.whereClause.unwrap().as_bool_expr().expect("BoolExpr");
+    assert_eq!(w.boolop, types_nodes::BoolExprType::AND_EXPR);
+    assert_eq!(w.args.len(), 3);
+    let nt = w.args.nth(1).as_null_test().expect("NullTest");
+    assert_eq!(nt.nulltesttype, types_nodes::NullTestType::IS_NOT_NULL);
+    assert!(!nt.argisrow);
+}
+
+#[test]
+fn distinct_clause_repr() {
+    let list = parse("SELECT DISTINCT a FROM t;");
+    let sel = select_of(only_stmt(&list));
+    assert!(matches!(sel.distinctClause, types_nodes::DistinctClause::All));
+    let list = parse("SELECT DISTINCT ON (a, b) a FROM t;");
+    let sel = select_of(only_stmt(&list));
+    let types_nodes::DistinctClause::On(ref l) = sel.distinctClause else { panic!("On") };
+    assert_eq!(l.len(), 2);
+}
+
+#[test]
+fn select_options_errors() {
+    let e = parse_err("SELECT a FROM t LIMIT 1, 2;");
+    assert_eq!(e.message(), "LIMIT #,# syntax is not supported");
+    let e = parse_err("(SELECT a FROM t ORDER BY a) ORDER BY b;");
+    assert_eq!(e.message(), "multiple ORDER BY clauses not allowed");
+    assert_eq!(e.cursor_position(), Some(39));
+    let e = parse_err("SELECT a FROM t FETCH FIRST 2 ROWS WITH TIES;");
+    assert_eq!(e.message(), "WITH TIES cannot be specified without ORDER BY clause");
 }

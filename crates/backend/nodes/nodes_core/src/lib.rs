@@ -251,8 +251,12 @@ pub fn walk_select_stmt<'mcx, W: NodeWalker<'mcx> + ?Sized>(
     s: &'mcx SelectStmt<'mcx>,
     w: &mut W,
 ) -> PgResult<bool> {
-    if walk_list(&s.distinctClause, w)?
-        || walk_opt(s.intoClause, w)?
+    if let types_nodes::DistinctClause::On(l) = &s.distinctClause {
+        if walk_list(l, w)? {
+            return Ok(true);
+        }
+    }
+    if walk_opt(s.intoClause, w)?
         || walk_list(&s.targetList, w)?
         || walk_list(&s.fromClause, w)?
         || walk_opt(s.whereClause, w)?

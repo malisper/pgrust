@@ -273,11 +273,11 @@ fn transformSelectStmt<'mcx>(
     )?;
     qry.groupDistinct = stmt.groupDistinct;
 
-    if !stmt.distinctClause.is_nil() {
+    if !stmt.distinctClause.is_none() {
         panic!(
             "transformSelectStmt (analyze.c): transformDistinctClause/\
-             transformDistinctOnClause unported (NB: C encodes plain DISTINCT as a \
-             one-NULL-cell list; the NodeList vocabulary cannot hold a NULL cell) — \
+             transformDistinctOnClause unported (gram repr: DistinctClause::All = \
+             C's one-NULL-cell list, DistinctClause::On = DISTINCT ON exprs) — \
              unit backend-parser-clause"
         );
     }
