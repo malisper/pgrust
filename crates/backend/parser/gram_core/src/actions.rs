@@ -28,7 +28,7 @@ use types_nodes::rawnodes::{
     FKCONSTR_ACTION_CASCADE, FKCONSTR_ACTION_NOACTION, FKCONSTR_ACTION_RESTRICT,
     FKCONSTR_ACTION_SETDEFAULT, FKCONSTR_ACTION_SETNULL, FKCONSTR_MATCH_FULL,
     FKCONSTR_MATCH_SIMPLE,
-    RangeSubselect, TableLikeClause, WindowDef, CREATE_TABLE_LIKE_ALL,
+    RangeSubselect, TableLikeClause, ViewCheckOption, ViewStmt, WindowDef, CREATE_TABLE_LIKE_ALL,
     CREATE_TABLE_LIKE_COMMENTS, CREATE_TABLE_LIKE_COMPRESSION, CREATE_TABLE_LIKE_CONSTRAINTS,
     CREATE_TABLE_LIKE_DEFAULTS, CREATE_TABLE_LIKE_GENERATED, CREATE_TABLE_LIKE_IDENTITY,
     CREATE_TABLE_LIKE_INDEXES, CREATE_TABLE_LIKE_STATISTICS, CREATE_TABLE_LIKE_STORAGE,
@@ -396,6 +396,33 @@ impl<'mcx> Parser<'mcx> {
             // OptTemp (GLOBAL-deprecated and UNLOGGED variants stay unported).
             461..=464 => *yyval = YYSTYPE::Ival(RELPERSISTENCE_TEMP as i32),
             468 => *yyval = YYSTYPE::Ival(RELPERSISTENCE_PERMANENT as i32),
+            // ViewStmt: CREATE [OR REPLACE] OptTemp VIEW qualified_name
+            // opt_column_list opt_reloptions AS SelectStmt opt_check_option
+            // (RECURSIVE variants 1490/1491 stay unported).
+            1488 | 1489 => {
+                let replace = rule == 1489;
+                let off = if replace { 2 } else { 0 };
+                let persistence = view.v(2 + off).ival() as u8;
+                let relation = view.v(4 + off).node().expect("qualified_name");
+                // SAFETY: tree is parser-owned; no derived refs live.
+                unsafe {
+                    relation
+                        .with_mut::<RangeVar, _>(|r| r.relpersistence = persistence)
+                        .expect("qualified_name is RangeVar");
+                }
+                let mut n = Node::build::<ViewStmt>(mcx)?;
+                n.view = relation.as_variant::<RangeVar>();
+                n.aliases = view.v(5 + off).list();
+                n.query = view.v(8 + off).node();
+                n.replace = replace;
+                n.options = view.v(6 + off).list();
+                n.withCheckOption = view_check_option(view.v(9 + off).ival());
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // opt_check_option
+            1492 | 1493 => *yyval = YYSTYPE::Ival(ViewCheckOption::CASCADED_CHECK_OPTION as i32),
+            1494 => *yyval = YYSTYPE::Ival(ViewCheckOption::LOCAL_CHECK_OPTION as i32),
+            1495 => *yyval = YYSTYPE::Ival(ViewCheckOption::NO_CHECK_OPTION as i32),
             // TableElementList: TableElement | TableElementList ',' TableElement
             473 => {
                 let el = view.v(1).node().expect("TableElement");
@@ -4756,6 +4783,15 @@ fn on_commit_action(v: i32) -> OnCommitAction {
         2 => OnCommitAction::ONCOMMIT_DELETE_ROWS,
         3 => OnCommitAction::ONCOMMIT_DROP,
         _ => panic!("invalid OnCommitAction {v}"),
+    }
+}
+
+fn view_check_option(v: i32) -> ViewCheckOption {
+    match v {
+        0 => ViewCheckOption::NO_CHECK_OPTION,
+        1 => ViewCheckOption::LOCAL_CHECK_OPTION,
+        2 => ViewCheckOption::CASCADED_CHECK_OPTION,
+        other => panic!("gram.y: bad ViewCheckOption {other}"),
     }
 }
 

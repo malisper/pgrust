@@ -99,7 +99,11 @@ pub fn DefineRelation<'mcx>(
     owner_id: Oid,
     query_string: &str,
 ) -> PgResult<Oid> {
-    debug_assert!(relkind == RELKIND_RELATION || relkind == RELKIND_SEQUENCE);
+    debug_assert!(
+        relkind == RELKIND_RELATION
+            || relkind == RELKIND_SEQUENCE
+            || relkind == types_rel::RELKIND_VIEW
+    );
     let rv = stmt.relation.expect("CreateStmt.relation");
     let relname = rv.relname.expect("RangeVar.relname");
     if relname.len() >= NAMEDATALEN as usize {
