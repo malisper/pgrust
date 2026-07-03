@@ -61,7 +61,7 @@ fn compile_check(
     let mut state = ExprState::new_boxed_in(mcx)?;
     crate::compile::create_expr_setup_steps(&mut state, mcx, &[expr])?;
     state.innermost_domain = Some(OutRef(Some(slot)));
-    crate::compile::init_expr_rec(expr, &mut state, mcx, OutRef::RESULT, None, ParamBind::NONE)?;
+    crate::compile::init_expr_rec(expr, &mut state, mcx, OutRef::RESULT, None, ParamBind::NONE, None)?;
     crate::compile::push_step(&mut state, mcx, Step::DoneReturn)?;
     crate::compile::ready_expr(&mut state);
     Ok(CompiledCheck { name, slot, state })

@@ -176,7 +176,7 @@ pub fn DefineDomain<'mcx>(
         .as_type_name()
         .expect("TypeName");
     let typ_ndims = type_name.arrayBounds.len() as i32;
-    let (basetypeoid, basetype_mod) = parse_utilcmd::typenameTypeIdAndMod(mcx, type_name)?;
+    let (basetypeoid, basetype_mod) = parse_utilcmd::typenameTypeIdAndMod(mcx, None, type_name)?;
     let base = base_type_row(mcx, basetypeoid)?;
 
     let typtype = base.typtype;
