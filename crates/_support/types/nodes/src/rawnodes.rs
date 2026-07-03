@@ -127,6 +127,25 @@ pub struct ReturningClause<'mcx> {
     pub exprs: NodeList<'mcx>,
 }
 
+/// `infer` is an InferClause node; `targetList` cells are ResTarget.
+#[derive(Default)]
+pub struct OnConflictClause<'mcx> {
+    pub action: crate::primnodes::OnConflictAction,
+    pub infer: Option<Node<'mcx>>,
+    pub targetList: NodeList<'mcx>,
+    pub whereClause: Option<Node<'mcx>>,
+    pub location: ParseLoc,
+}
+
+/// `indexElems` cells are IndexElem.
+#[derive(Default)]
+pub struct InferClause<'mcx> {
+    pub indexElems: NodeList<'mcx>,
+    pub whereClause: Option<Node<'mcx>>,
+    pub conname: Option<&'mcx str>,
+    pub location: ParseLoc,
+}
+
 #[derive(Default)]
 pub struct DeleteStmt<'mcx> {
     pub relation: Option<Node<'mcx>>,
@@ -462,6 +481,12 @@ unsafe impl<'mcx> NodeVariant<'mcx> for InsertStmt<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for ReturningClause<'mcx> {
     const TAG: NodeTag = NodeTag::T_ReturningClause;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for OnConflictClause<'mcx> {
+    const TAG: NodeTag = NodeTag::T_OnConflictClause;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for InferClause<'mcx> {
+    const TAG: NodeTag = NodeTag::T_InferClause;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for DeleteStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_DeleteStmt;
 }
@@ -602,6 +627,16 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_returning_clause(self) -> Option<&'mcx ReturningClause<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_on_conflict_clause(self) -> Option<&'mcx OnConflictClause<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_infer_clause(self) -> Option<&'mcx InferClause<'mcx>> {
         self.as_variant()
     }
 
