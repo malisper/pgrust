@@ -5110,6 +5110,7 @@ dependencies = [
  "nodeindexonlyscan",
  "nodeindexscan",
  "nodelimit",
+ "nodenestloop",
  "nodeseqscan",
  "nodesort",
  "parallel",

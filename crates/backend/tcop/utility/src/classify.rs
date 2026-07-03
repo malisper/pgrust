@@ -136,8 +136,15 @@ pub fn ClassifyUtilityCommandAsReadOnly(parsetree: Node<'_>) -> PgResult<i32> {
 
         T_ClusterStmt | T_ReindexStmt | T_VacuumStmt => COMMAND_OK_IN_READ_ONLY_TXN,
 
-        // C splits on stmt->is_from; the CopyStmt payload lands with copy.c.
-        T_CopyStmt => payload_gap("ClassifyUtilityCommandAsReadOnly", "CopyStmt"),
+        // COPY FROM into a temp table is fine read-only; DoCopy itself calls
+        // PreventCommandIfReadOnly for non-temp targets.
+        T_CopyStmt => {
+            if parsetree.as_copy_stmt().unwrap().is_from {
+                COMMAND_OK_IN_READ_ONLY_TXN
+            } else {
+                COMMAND_IS_STRICTLY_READ_ONLY
+            }
+        }
 
         T_ExplainStmt | T_VariableShowStmt => COMMAND_IS_STRICTLY_READ_ONLY,
 

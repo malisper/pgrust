@@ -3,7 +3,7 @@ use tcop_dest::DestReceiver;
 use types_error::PgResult;
 use types_nodes::node_tree::Node;
 use types_nodes::nodes_enums::CmdType;
-use types_nodes::parsenodes::ExplainStmt;
+use types_nodes::parsenodes::{DeclareCursorStmt, ExplainStmt};
 use types_nodes::parsenodes::TransactionStmtKind::*;
 use types_nodes::plannodes::PlannedStmt;
 use types_nodes::NodeTag;
@@ -137,6 +137,12 @@ unsafe fn unify_stmt_lifetime<'u>(s: &ExplainStmt<'_>) -> &'u ExplainStmt<'u> {
     unsafe { core::mem::transmute::<&ExplainStmt<'_>, &'u ExplainStmt<'u>>(s) }
 }
 
+// Same retention contract, PerformCursorOpen's copy-into-portal note applies
+// on top (portalcmds.c:109).
+unsafe fn unify_cursor_lifetime<'u>(s: &DeclareCursorStmt<'_>) -> &'u DeclareCursorStmt<'u> {
+    unsafe { core::mem::transmute::<&DeclareCursorStmt<'_>, &'u DeclareCursorStmt<'u>>(s) }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn dispatch_switch<'mcx>(
     mcx: Mcx<'mcx>,
@@ -220,15 +226,21 @@ fn dispatch_switch<'mcx>(
             }
         }
 
-        T_DeclareCursorStmt => handler_gap("PerformCursorOpen (portalcmds lane)"),
-        T_ClosePortalStmt => {
-            CheckRestrictedOperation("CLOSE")?;
-            handler_gap("PerformPortalClose (portalcmds lane)")
+        T_DeclareCursorStmt => {
+            let stmt = parsetree.as_declare_cursor_stmt().unwrap();
+            // SAFETY: see unify_cursor_lifetime.
+            let stmt = unsafe { unify_cursor_lifetime(stmt) };
+            portalcmds::PerformCursorOpen(mcx, stmt, source_text, params, is_top_level)?;
         }
-        T_FetchStmt => handler_gap(
-            "PerformPortalFetch (portalcmds lane; FetchStmt vocabulary and \
-             pquery PortalRunFetch are live)",
-        ),
+        T_ClosePortalStmt => {
+            let stmt = parsetree.as_close_portal_stmt().unwrap();
+            CheckRestrictedOperation("CLOSE")?;
+            portalcmds::PerformPortalClose(stmt.portalname)?;
+        }
+        T_FetchStmt => {
+            let stmt = parsetree.as_fetch_stmt().unwrap();
+            portalcmds::PerformPortalFetch(stmt, dest, qc.as_deref_mut())?;
+        }
 
         T_DoStmt => handler_gap("ExecuteDoStmt (functioncmds lane)"),
 
@@ -243,7 +255,14 @@ fn dispatch_switch<'mcx>(
         T_AlterTableSpaceOptionsStmt => handler_gap("AlterTableSpaceOptions (tablespace lane)"),
 
         T_TruncateStmt => handler_gap("ExecuteTruncate (tablecmds lane)"),
-        T_CopyStmt => handler_gap("DoCopy (copy lane)"),
+        T_CopyStmt => {
+            let stmt = parsetree.as_copy_stmt().unwrap();
+            let processed = copy_cmd::DoCopy(mcx, stmt)?;
+            if let Some(qc) = qc.as_mut() {
+                qc.commandTag = crate::consts::CMDTAG_COPY;
+                qc.nprocessed = processed;
+            }
+        }
 
         T_PrepareStmt => {
             CheckRestrictedOperation("PREPARE")?;

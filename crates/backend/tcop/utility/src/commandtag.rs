@@ -41,7 +41,13 @@ pub fn CreateCommandTag(parsetree: Node<'_>) -> CommandTag {
         }
 
         T_DeclareCursorStmt => CMDTAG_DECLARE_CURSOR,
-        T_ClosePortalStmt => payload_gap("CreateCommandTag", "ClosePortalStmt"),
+        T_ClosePortalStmt => {
+            if parsetree.as_close_portal_stmt().unwrap().portalname.is_none() {
+                CMDTAG_CLOSE_CURSOR_ALL
+            } else {
+                CMDTAG_CLOSE_CURSOR
+            }
+        }
         T_FetchStmt => {
             if parsetree.as_fetch_stmt().unwrap().ismove {
                 CMDTAG_MOVE

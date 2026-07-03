@@ -41,6 +41,7 @@ pub use pquery_seams::TargetEntrySummary;
 
 pub fn init_seams() {
     pquery_seams::fetch_portal_target_list::set(FetchPortalTargetList);
+    pquery_seams::stmt_list_free::set(stmt_list::free);
 }
 
 thread_local! {
@@ -946,14 +947,60 @@ fn DoPortalRunFetch(
                 count = -count;
             }
         }
-        FetchDirection::FETCH_ABSOLUTE => panic!(
-            "DoPortalRunFetch (pquery.c): FETCH_ABSOLUTE arm unported — \
-             unit backend-tcop-pquery"
-        ),
-        FetchDirection::FETCH_RELATIVE => panic!(
-            "DoPortalRunFetch (pquery.c): FETCH_RELATIVE arm unported — \
-             unit backend-tcop-pquery"
-        ),
+        FetchDirection::FETCH_ABSOLUTE => {
+            let mut none = DestReceiver::DoNothing;
+            if count > 0 {
+                // Rewind + advance count-1, unless the goal is past halfway
+                // (then scan from here); either way fetch the target forwards.
+                // portalPos >= i64::MAX excluded so counts never look like
+                // FETCH_ALL.
+                let portal_pos = portal.borrow().portalPos;
+                if (count - 1) as u64 <= portal_pos / 2 || portal_pos >= i64::MAX as u64 {
+                    DoPortalRewind(portal)?;
+                    if count > 1 {
+                        PortalRunSelect(portal, true, count - 1, &mut none)?;
+                    }
+                } else {
+                    let mut pos = portal_pos as i64;
+                    if portal.borrow().atEnd {
+                        pos += 1; /* need one extra fetch if off end */
+                    }
+                    if count <= pos {
+                        PortalRunSelect(portal, false, pos - count + 1, &mut none)?;
+                    } else if count > pos + 1 {
+                        PortalRunSelect(portal, true, count - pos - 1, &mut none)?;
+                    }
+                }
+                return PortalRunSelect(portal, true, 1, dest);
+            } else if count < 0 {
+                // Advance to end, back up abs(count)-1, return the prior row.
+                PortalRunSelect(portal, true, FETCH_ALL, &mut none)?;
+                if count < -1 {
+                    PortalRunSelect(portal, false, -count - 1, &mut none)?;
+                }
+                return PortalRunSelect(portal, false, 1, dest);
+            } else {
+                DoPortalRewind(portal)?;
+                return PortalRunSelect(portal, true, 0, dest);
+            }
+        }
+        FetchDirection::FETCH_RELATIVE => {
+            let mut none = DestReceiver::DoNothing;
+            if count > 0 {
+                if count > 1 {
+                    PortalRunSelect(portal, true, count - 1, &mut none)?;
+                }
+                return PortalRunSelect(portal, true, 1, dest);
+            } else if count < 0 {
+                if count < -1 {
+                    PortalRunSelect(portal, false, -count - 1, &mut none)?;
+                }
+                return PortalRunSelect(portal, false, 1, dest);
+            } else {
+                /* Same as FETCH FORWARD 0. */
+                fdirection = FetchDirection::FETCH_FORWARD;
+            }
+        }
     }
 
     let mut forward = fdirection == FetchDirection::FETCH_FORWARD;
@@ -1007,10 +1054,11 @@ fn DoPortalRewind(portal: &Portal<'static>) -> PgResult<()> {
 
     let query_desc = portal.borrow().queryDesc;
     if !query_desc.is_null() {
-        panic!(
-            "DoPortalRewind (pquery.c): ExecutorRewind over a live executor \
-             unported — unit backend-tcop-pquery live-cursor lane"
-        );
+        let snap = execmain_seams::query_desc_snapshot::call(query_desc)
+            .expect("queryDesc->snapshot set while executor is active");
+        snapmgr::PushActiveSnapshot(&snap)?;
+        execmain_seams::executor_rewind::call(query_desc)?;
+        snapmgr::PopActiveSnapshot()?;
     }
 
     let mut p = portal.borrow_mut();

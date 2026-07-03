@@ -34,8 +34,10 @@ aclchk = { path = "../../backend/catalog/aclchk" }
 catalog_namespace = { path = "../../backend/catalog/catalog_namespace" }
 catalog = { path = "../../backend/catalog/catalog" }
 pg_database = { path = "../../backend/catalog/pg_database" }
+pg_db_role_setting = { path = "../../backend/catalog/pg_db_role_setting" }
 dbcommands = { path = "../../backend/commands/dbcommands" }
 executils = { path = "../../backend/executor/executils" }
+execjunk = { path = "../../backend/executor/execjunk" }
 execmain = { path = "../../backend/executor/execmain" }
 execscan = { path = "../../backend/executor/execscan" }
 nodeseqscan = { path = "../../backend/executor/nodeseqscan" }
@@ -44,6 +46,7 @@ nodeindexonlyscan = { path = "../../backend/executor/nodeindexonlyscan" }
 nodeagg = { path = "../../backend/executor/nodeagg" }
 nodesort = { path = "../../backend/executor/nodesort" }
 nodelimit = { path = "../../backend/executor/nodelimit" }
+nodenestloop = { path = "../../backend/executor/nodenestloop" }
 tuplesort = { path = "../../backend/utils/sort/tuplesort" }
 auth = { path = "../../backend/libpq/auth" }
 be_secure = { path = "../../backend/libpq/be_secure" }
@@ -98,6 +101,8 @@ tcop_dest = { path = "../../backend/tcop/dest" }
 postgres = { path = "../../backend/tcop/postgres" }
 pquery = { path = "../../backend/tcop/pquery" }
 explain = { path = "../../backend/commands/explain" }
+prepare = { path = "../../backend/commands/prepare" }
+portalcmds = { path = "../../backend/commands/portalcmds" }
 utility = { path = "../../backend/tcop/utility" }
 backend_status = { path = "../../backend/utils/activity/backend_status" }
 waitevent = { path = "../../backend/utils/activity/waitevent" }
@@ -115,6 +120,7 @@ inval = { path = "../../backend/utils/cache/inval" }
 lsyscache = { path = "../../backend/utils/cache/lsyscache" }
 plancache = { path = "../../backend/utils/cache/plancache" }
 relcache = { path = "../../backend/utils/cache/relcache" }
+relcache_build = { path = "../../backend/utils/cache/relcache_build" }
 relmapper = { path = "../../backend/utils/cache/relmapper" }
 typcache = { path = "../../backend/utils/cache/typcache" }
 elog = { path = "../../backend/utils/error/elog" }

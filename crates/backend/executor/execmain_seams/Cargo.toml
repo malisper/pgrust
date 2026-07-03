@@ -9,6 +9,7 @@ path = "src/lib.rs"
 
 [dependencies]
 seam_core = { path = "../../../_support/seam_core" }
+types_core = { path = "../../../_support/types/types_core" }
 types_nodes = { path = "../../../_support/types/nodes" }
 types_error = { path = "../../../_support/types/types_error" }
 types_portal = { path = "../../../_support/types/portal" }

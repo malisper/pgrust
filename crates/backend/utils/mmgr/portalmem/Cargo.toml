@@ -17,6 +17,7 @@ execmain_seams = { path = "../../../executor/execmain_seams" }
 ipc_portal_seams = { path = "../../../storage/ipc/ipc_portal_seams" }
 plancache_portal_seams = { path = "../../cache/plancache_portal_seams" }
 portalcmds_seams = { path = "../../../commands/portalcmds_seams" }
+pquery_seams = { path = "../../../tcop/pquery_seams" }
 resowner_portal_seams = { path = "../../resowner/resowner_portal_seams" }
 snapmgr_portal_seams = { path = "../../time/snapmgr_portal_seams" }
 tuplestore_hold_seams = { path = "../../sort/tuplestore_hold_seams" }
