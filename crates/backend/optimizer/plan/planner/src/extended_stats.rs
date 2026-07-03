@@ -214,7 +214,7 @@ fn compatible_internal<'mcx>(
 
 fn strip_relabel(clause: Node<'_>) -> Node<'_> {
     match clause.as_relabel_type() {
-        Some(r) => r.arg.expect("RelabelType arg"),
+        Some(r) => r.arg,
         None => clause,
     }
 }
