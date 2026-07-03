@@ -8228,6 +8228,7 @@ dependencies = [
  "format_type",
  "indexcmds",
  "lsyscache",
+ "mbutils",
  "mcx",
  "namespace_seams",
  "parse_expr",
@@ -8235,12 +8236,18 @@ dependencies = [
  "parse_oper",
  "parser_small1",
  "readfuncs",
+ "rel_vocab",
+ "relcache",
  "syscache_seams",
+ "typcache",
  "types_core",
  "types_error",
  "types_fmgr",
  "types_nodes",
+ "types_rel",
  "types_tuple",
+ "varlena",
+ "vars",
 ]
 
 [[package]]
