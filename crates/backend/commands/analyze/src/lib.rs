@@ -221,12 +221,27 @@ fn do_analyze_rel(
         }
     }
 
-    // ComputeExtStatisticsRows: no CREATE STATISTICS lane, so no extended
-    // statistics objects can exist; contributes 0.
+    let mut colstats: PgVec<'_, statistics::ColStats> = PgVec::new_in(anl_mcx);
+    for s in vacattrstats.iter() {
+        colstats.push(statistics::ColStats {
+            tupattnum: s.tupattnum,
+            attstattarget: s.attstattarget,
+            attrtypid: s.attrtypid,
+            attrcollid: s.attrcollid,
+            typlen: s.typlen,
+            typbyval: s.typbyval,
+        });
+    }
+
     let mut targrows: i32 = 100;
     for s in vacattrstats.iter() {
         targrows = targrows.max(s.minrows);
     }
+    targrows = targrows.max(statistics::ComputeExtStatisticsRows(
+        anl_mcx,
+        onerel.rd_id,
+        &colstats,
+    )?);
 
     let mut totalrows = 0.0f64;
     let mut totaldeadrows = 0.0f64;
@@ -254,6 +269,15 @@ fn do_analyze_rel(
             col_cx.reset();
         }
         update_attstats(onerel.rd_id, false, &vacattrstats)?;
+
+        statistics::BuildRelationExtStatistics(
+            anl_mcx,
+            onerel,
+            false,
+            totalrows,
+            &rows[..numrows as usize],
+            &colstats,
+        )?;
     }
 
     let (relallvisible, relallfrozen) = visibilitymap::visibilitymap_count(onerel)?;

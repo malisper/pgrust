@@ -1071,6 +1071,46 @@ impl<'mcx> Parser<'mcx> {
                 }
                 *yyval = YYSTYPE::Node(Some(node));
             }
+            // opt_qualified_name
+            139 => *yyval = view.v(1),
+            140 => *yyval = YYSTYPE::List(NodeList::nil()),
+            // opt_name_list
+            1579 => *yyval = view.v(2),
+            1580 => *yyval = YYSTYPE::List(NodeList::nil()),
+            // CreateStatsStmt: CREATE STATISTICS [IF NOT EXISTS]
+            // opt_qualified_name opt_name_list ON stats_params FROM from_list
+            611 | 612 => {
+                let b = if rule == 612 { 3 } else { 0 };
+                let mut n = Node::build::<types_nodes::rawnodes::CreateStatsStmt>(mcx)?;
+                n.defnames = view.v(3 + b).list();
+                n.stat_types = view.v(4 + b).list();
+                n.exprs = view.v(6 + b).list();
+                n.relations = view.v(8 + b).list();
+                n.if_not_exists = rule == 612;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // stats_params
+            613 => {
+                let el = view.v(1).node().expect("stats_param");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, el)?);
+            }
+            614 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(3).node().expect("stats_param"))?;
+                *yyval = YYSTYPE::List(list);
+            }
+            // stats_param: ColId | func_expr_windowless | '(' a_expr ')'
+            615 => {
+                let mut n = Node::build::<types_nodes::rawnodes::StatsElem>(mcx)?;
+                n.name = Some(view.v(1).str_val());
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            616 | 617 => {
+                let i = if rule == 617 { 2 } else { 1 };
+                let mut n = Node::build::<types_nodes::rawnodes::StatsElem>(mcx)?;
+                n.expr = view.v(i).node();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
             // OnCommitOption
             602 => *yyval = YYSTYPE::Ival(OnCommitAction::ONCOMMIT_DROP as i32),
             603 => *yyval = YYSTYPE::Ival(OnCommitAction::ONCOMMIT_DELETE_ROWS as i32),

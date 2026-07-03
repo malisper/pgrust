@@ -17,7 +17,7 @@ use crate::{
     SearchSysCache3, SearchSysCache4, SearchSysCacheExists, SearchSysCacheList, SearchSysCacheList1,
     SysCacheKey,
 };
-use crate::cacheinfo::{COLLOID, AGGFNOID, AMOPOPID, AMOPSTRATEGY, AMPROCNUM, ATTNUM, CLAOID, OPFAMILYOID, PROCNAMEARGSNSP, AUTHNAME, AUTHOID, CASTSOURCETARGET, CONSTROID, INDEXRELID, NAMESPACENAME, NAMESPACEOID, OPERNAMENSP, TYPENAMENSP, ATTNAME, OPEROID, PROCOID, RANGEMULTIRANGE, RANGETYPE, RELNAMENSP, RELOID, SEQRELID, STATRELATTINH, TYPEOID};
+use crate::cacheinfo::{COLLOID, AGGFNOID, AMOPOPID, AMOPSTRATEGY, AMPROCNUM, ATTNUM, CLAOID, OPFAMILYOID, PROCNAMEARGSNSP, AUTHNAME, AUTHOID, CASTSOURCETARGET, CONSTROID, INDEXRELID, NAMESPACENAME, NAMESPACEOID, OPERNAMENSP, TYPENAMENSP, ATTNAME, OPEROID, PROCOID, RANGEMULTIRANGE, RANGETYPE, RELNAMENSP, RELOID, SEQRELID, STATEXTDATASTXOID, STATEXTOID, STATRELATTINH, TYPEOID};
 
 const ANUM_PG_CLASS_OID: i32 = 1;
 const ANUM_PG_CLASS_RELISSHARED: i32 = 16;
@@ -1213,6 +1213,105 @@ fn varlena_image<'mcx>(
     Ok(Some(detoast::detoast_attr(mcx, src)?))
 }
 
+const ANUM_PG_STATISTIC_EXT_STXRELID: i32 = 2;
+const ANUM_PG_STATISTIC_EXT_STXKEYS: i32 = 6;
+const ANUM_PG_STATISTIC_EXT_STXSTATTARGET: i32 = 7;
+const ANUM_PG_STATISTIC_EXT_STXKIND: i32 = 8;
+const ANUM_PG_STATISTIC_EXT_STXEXPRS: i32 = 9;
+const ANUM_PG_STATISTIC_EXT_DATA_STXDNDISTINCT: i32 = 3;
+const ANUM_PG_STATISTIC_EXT_DATA_STXDDEPENDENCIES: i32 = 4;
+const ANUM_PG_STATISTIC_EXT_DATA_STXDMCV: i32 = 5;
+const ANUM_PG_STATISTIC_EXT_DATA_STXDEXPR: i32 = 6;
+
+fn statext_form<'mcx>(
+    mcx: Mcx<'mcx>,
+    statoid: Oid,
+) -> PgResult<Option<syscache_seams::StatExtForm<'mcx>>> {
+    let Some(tuple) = SearchSysCache1(STATEXTOID, SysCacheKey::Value(Datum::from_oid(statoid)))?
+    else {
+        return Ok(None);
+    };
+    let t = tuple.tuple();
+    let stxrelid = getattr(&t, STATEXTOID, ANUM_PG_STATISTIC_EXT_STXRELID).as_oid();
+    let keys_img = varlena_image(mcx, &t, STATEXTOID, ANUM_PG_STATISTIC_EXT_STXKEYS)?
+        .expect("stxkeys is not null");
+    let kinds_img = varlena_image(mcx, &t, STATEXTOID, ANUM_PG_STATISTIC_EXT_STXKIND)?
+        .expect("stxkind is not null");
+    let (target_d, target_null) =
+        SysCacheGetAttr(STATEXTOID, &tuple, ANUM_PG_STATISTIC_EXT_STXSTATTARGET)?;
+    let stattarget = if target_null { -1 } else { target_d.as_i16() as i32 };
+    let (_, exprs_null) = SysCacheGetAttr(STATEXTOID, &tuple, ANUM_PG_STATISTIC_EXT_STXEXPRS)?;
+
+    let nkeys = datum::array_build::array_image_nelems(&keys_img);
+    let mut keys: PgVec<'mcx, i16> = mcx::vec_with_capacity_in(mcx, nkeys)?;
+    for i in 0..nkeys {
+        let off = 4 + 20 + i * 2;
+        keys.push(i16::from_ne_bytes(keys_img[off..off + 2].try_into().unwrap()));
+    }
+    let nkinds = datum::array_build::array_image_nelems(&kinds_img);
+    let mut kinds: PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, nkinds)?;
+    for i in 0..nkinds {
+        kinds.push(kinds_img[4 + 20 + i]);
+    }
+
+    drop(t);
+    ReleaseSysCache(tuple);
+    Ok(Some(syscache_seams::StatExtForm {
+        stxrelid,
+        keys,
+        kinds,
+        stattarget,
+        has_exprs: !exprs_null,
+    }))
+}
+
+fn statext_data_kinds(statoid: Oid, inh: bool) -> PgResult<Option<(bool, bool, bool, bool)>> {
+    let Some(tuple) = SearchSysCache2(
+        STATEXTDATASTXOID,
+        SysCacheKey::Value(Datum::from_oid(statoid)),
+        SysCacheKey::Value(Datum::from_bool(inh)),
+    )?
+    else {
+        return Ok(None);
+    };
+    let mut flags = [false; 4];
+    for (i, anum) in [
+        ANUM_PG_STATISTIC_EXT_DATA_STXDNDISTINCT,
+        ANUM_PG_STATISTIC_EXT_DATA_STXDDEPENDENCIES,
+        ANUM_PG_STATISTIC_EXT_DATA_STXDMCV,
+        ANUM_PG_STATISTIC_EXT_DATA_STXDEXPR,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let (_, isnull) = SysCacheGetAttr(STATEXTDATASTXOID, &tuple, anum)?;
+        flags[i] = !isnull;
+    }
+    ReleaseSysCache(tuple);
+    Ok(Some((flags[0], flags[1], flags[2], flags[3])))
+}
+
+fn statext_data_blob<'mcx>(
+    mcx: Mcx<'mcx>,
+    statoid: Oid,
+    inh: bool,
+    anum: i32,
+) -> PgResult<Option<PgVec<'mcx, u8>>> {
+    let Some(tuple) = SearchSysCache2(
+        STATEXTDATASTXOID,
+        SysCacheKey::Value(Datum::from_oid(statoid)),
+        SysCacheKey::Value(Datum::from_bool(inh)),
+    )?
+    else {
+        return Ok(None);
+    };
+    let t = tuple.tuple();
+    let img = varlena_image(mcx, &t, STATEXTDATASTXOID, anum)?;
+    drop(t);
+    ReleaseSysCache(tuple);
+    Ok(img)
+}
+
 fn pg_statistic_stawidth(
     relid: Oid,
     attnum: types_core::AttrNumber,
@@ -1593,6 +1692,9 @@ pub(crate) fn install() {
     syscache_seams::pg_class_relname::set(pg_class_relname);
     syscache_seams::pg_attribute_attrelid::set(pg_attribute_attrelid);
     syscache_seams::pg_index_indexrelid::set(pg_index_indexrelid);
+    syscache_seams::statext_form::set(statext_form);
+    syscache_seams::statext_data_kinds::set(statext_data_kinds);
+    syscache_seams::statext_data_blob::set(statext_data_blob);
     syscache_seams::pg_constraint_fk_target::set(pg_constraint_fk_target);
     syscache_seams::lookup_pg_type_shape::set(lookup_pg_type_shape);
     syscache_seams::lookup_pg_sequence_form::set(lookup_pg_sequence_form);
