@@ -659,6 +659,7 @@ fn exprs_collation(node: Node<'_>) -> u32 {
         NodeTag::T_OpExpr => node.as_op_expr().unwrap().opcollid,
         NodeTag::T_WindowFunc => node.as_window_func().unwrap().wincollid,
         NodeTag::T_CaseExpr => node.as_case_expr().unwrap().casecollid,
+        NodeTag::T_RowExpr => 0,
         tag => panic!("exprCollation (nodeFuncs.c): {tag:?} not ported here"),
     }
 }
@@ -986,6 +987,26 @@ fn fix_upper_expr<'mcx>(
             let chosen =
                 fix_alternative_subplan(run, node.as_alternative_sub_plan().unwrap(), num_exec);
             fix_upper_expr(run, chosen, subplan_tlist, rtoffset, newvarno, num_exec)
+        }
+        NodeTag::T_RowExpr => {
+            let r = node.as_row_expr().unwrap();
+            let mut args = NodeList::nil();
+            for a in &r.args {
+                args.lappend(
+                    mcx,
+                    fix_upper_expr(run, a, subplan_tlist, rtoffset, newvarno, num_exec)?,
+                )?;
+            }
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::RowExpr {
+                    args,
+                    row_typeid: r.row_typeid,
+                    row_format: r.row_format,
+                    colnames: r.colnames.clone_in(mcx)?,
+                    location: r.location,
+                },
+            )
         }
         other => panic!("fix_upper_expr_mutator (setrefs.c): {other:?}; M3 expression lane"),
     }
@@ -1315,6 +1336,23 @@ fn fix_scan_expr_mutator<'mcx>(
                 },
             )
         }
+        NodeTag::T_RowExpr => {
+            let r = node.as_row_expr().unwrap();
+            let mut args = NodeList::nil();
+            for a in &r.args {
+                args.lappend(mcx, fix_scan_expr_mutator(run, a, rtoffset, num_exec)?)?;
+            }
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::RowExpr {
+                    args,
+                    row_typeid: r.row_typeid,
+                    row_format: r.row_format,
+                    colnames: r.colnames.clone_in(mcx)?,
+                    location: r.location,
+                },
+            )
+        }
         other => panic!("fix_scan_expr_mutator (setrefs.c): {other:?}; M2 expression lane"),
     }
 }
@@ -1439,6 +1477,12 @@ fn fix_scan_expr_walker<'mcx>(run: &mut PlannerRun<'mcx>, node: Node<'mcx>) -> P
         NodeTag::T_CoerceViaIO => fix_scan_expr_walker(run, node.as_coerce_via_io().unwrap().arg),
         NodeTag::T_ArrayExpr => {
             for e in &node.as_array_expr().unwrap().elements {
+                fix_scan_expr_walker(run, e)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_RowExpr => {
+            for e in &node.as_row_expr().unwrap().args {
                 fix_scan_expr_walker(run, e)?;
             }
             Ok(())
@@ -1951,6 +1995,26 @@ fn fix_join_expr_mutator<'mcx>(
             let chosen =
                 fix_alternative_subplan(run, node.as_alternative_sub_plan().unwrap(), num_exec);
             fix_join_expr_mutator(run, chosen, outer_tlist, inner_tlist, rtoffset, nrm_match, acceptable_rel, num_exec)
+        }
+        NodeTag::T_RowExpr => {
+            let r = node.as_row_expr().unwrap();
+            let mut args = NodeList::nil();
+            for a in &r.args {
+                args.lappend(
+                    mcx,
+                    fix_join_expr_mutator(run, a, outer_tlist, inner_tlist, rtoffset, nrm_match, acceptable_rel, num_exec)?,
+                )?;
+            }
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::RowExpr {
+                    args,
+                    row_typeid: r.row_typeid,
+                    row_format: r.row_format,
+                    colnames: r.colnames.clone_in(mcx)?,
+                    location: r.location,
+                },
+            )
         }
         other => panic!("fix_join_expr_mutator (setrefs.c): {other:?}; M2 expression lane"),
     }

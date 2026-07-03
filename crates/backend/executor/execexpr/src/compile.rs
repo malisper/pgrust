@@ -752,6 +752,7 @@ pub fn expr_type(node: Node<'_>) -> Oid {
         | NodeTag::T_BooleanTest
         | NodeTag::T_DistinctExpr => 16,
         NodeTag::T_ArrayExpr => node.as_array_expr().unwrap().array_typeid,
+        NodeTag::T_RowExpr => node.as_row_expr().unwrap().row_typeid,
         NodeTag::T_SubPlan => {
             use ::types_nodes::primnodes::SubLinkType;
             let sp = node.as_sub_plan().unwrap();
@@ -904,6 +905,11 @@ fn setup_walker(node: Node<'_>, info: &mut SetupInfo) {
         }
         NodeTag::T_ArrayExpr => {
             for e in node.as_array_expr().unwrap().elements.iter() {
+                setup_walker(e, info);
+            }
+        }
+        NodeTag::T_RowExpr => {
+            for e in node.as_row_expr().unwrap().args.iter() {
                 setup_walker(e, info);
             }
         }
@@ -1171,6 +1177,11 @@ fn init_expr_rec<'mcx>(
             let step = init_array_expr(arr, state, mcx, out, agg, params, sub)?;
             push_step(state, mcx, step)
         }
+        NodeTag::T_RowExpr => {
+            let r = node.as_row_expr().unwrap();
+            let step = init_row_expr(r, state, mcx, out, agg, params, sub)?;
+            push_step(state, mcx, step)
+        }
         tag => panic!("execexpr ExecInitExprRec: node family {tag:?} not ported"),
     }
 }
@@ -1287,6 +1298,88 @@ fn init_array_expr<'mcx>(
         elmalign: elmalign as u8,
         out,
     })
+}
+
+// exprTypmod (nodeFuncs.c) over the families RowExpr args carry.
+fn expr_typmod_closed(node: Node<'_>) -> i32 {
+    match node.node_tag() {
+        NodeTag::T_Var => node.as_var().unwrap().vartypmod,
+        NodeTag::T_Const => node.as_const().unwrap().consttypmod,
+        NodeTag::T_Param => node.as_param().unwrap().paramtypmod,
+        NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resulttypmod,
+        NodeTag::T_CoerceViaIO => -1,
+        _ => -1,
+    }
+}
+
+// C ExecInitExprRec T_RowExpr, anonymous-RECORD leg (named-rowtype casts are
+// unported loud); the blessed tupdesc is built once at compile.
+#[allow(clippy::too_many_arguments)]
+fn init_row_expr<'mcx>(
+    r: &::types_nodes::primnodes::RowExpr<'mcx>,
+    state: &mut ExprState<'mcx>,
+    mcx: Mcx<'mcx>,
+    out: OutRef,
+    agg: Option<Bind<'_, 'mcx>>,
+    params: ParamBind<'mcx>,
+    sub: Option<SubplanCompileEnv>,
+) -> PgResult<Step> {
+    if r.row_typeid != ::types_core::catalog::RECORDOID {
+        unported("EEOP_ROWEXPR named-rowtype leg");
+    }
+    let nelems = r.args.len();
+    let mut desc = ::tupdesc::CreateTemplateTupleDesc(mcx, nelems as i32)?;
+    for (i, e) in r.args.iter().enumerate() {
+        let colname = r
+            .colnames
+            .nth(i)
+            .as_string()
+            .expect("RowExpr colnames are String nodes")
+            .sval;
+        ::tupdesc::TupleDescInitEntry(
+            &mut desc,
+            (i + 1) as i16,
+            Some(colname),
+            expr_type(e),
+            expr_typmod_closed(e),
+            0,
+        )?;
+    }
+    desc.tdtypeid = ::types_core::catalog::RECORDOID;
+    desc.tdtypmod = -1;
+    ::typcache::assign_record_type_typmod(&mut desc)?;
+
+    let layout = core::alloc::Layout::array::<::datum::NullableDatum>(nelems.max(1))
+        .expect("elem scratch layout");
+    let elems: NonNull<::datum::NullableDatum> =
+        mcx.allocate(layout).map_err(|_| mcx.oom(layout.size()))?.cast();
+
+    // An argless frame whose armed fcinfo supplies the per-eval result mcx.
+    let frame_ix = state.frames.len() as u32;
+    let frame = FuncFrame::new_in(mcx, FmgrInfo::unresolved(), 0, 0)?;
+    state.frames.try_reserve(1).map_err(|_| mcx.oom(core::mem::size_of::<FuncFrame<'_>>()))?;
+    state.frames.push(frame);
+
+    for (i, e) in r.args.iter().enumerate() {
+        // SAFETY: i < nelems slots of the fresh scratch allocation.
+        let slot = unsafe { NonNull::new_unchecked(elems.as_ptr().add(i)) };
+        init_expr_rec(e, state, mcx, OutRef(Some(slot)), agg, params, sub)?;
+    }
+
+    let desc_layout = core::alloc::Layout::new::<TupleDescData<'static>>();
+    let desc_ptr: NonNull<TupleDescData<'static>> = mcx
+        .allocate(desc_layout)
+        .map_err(|_| mcx.oom(desc_layout.size()))?
+        .cast();
+    // SAFETY: fresh allocation of the exact layout; the plan mcx outlives
+    // every eval of this step, so the 'static restamp never escapes it.
+    unsafe {
+        desc_ptr
+            .as_ptr()
+            .write(core::mem::transmute::<TupleDescData<'mcx>, TupleDescData<'static>>(desc));
+    }
+
+    Ok(Step::RowExprStep { elems, nelems: nelems as u16, frame: frame_ix, desc: desc_ptr, out })
 }
 
 // C ExecInitExprRec T_BoolExpr: args evaluate into the BoolExpr's own output,

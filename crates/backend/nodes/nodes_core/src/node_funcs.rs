@@ -156,6 +156,7 @@ pub fn expr_typmod(node: Node<'_>) -> i32 {
                 _ => -1,
             }
         }
+        NodeTag::T_RowExpr => -1,
         other => deferred("exprTypmod", other),
     }
 }
@@ -168,6 +169,7 @@ pub fn expr_collation(node: Node<'_>) -> Oid {
         NodeTag::T_OpExpr => node.as_op_expr().unwrap().opcollid,
         NodeTag::T_ScalarArrayOpExpr => types_core::InvalidOid,
         NodeTag::T_ArrayExpr => node.as_array_expr().unwrap().array_collid,
+        NodeTag::T_RowExpr => types_core::InvalidOid,
         NodeTag::T_FuncExpr => node.as_func_expr().unwrap().funccollid,
         NodeTag::T_Aggref => node.as_aggref().unwrap().aggcollid,
         NodeTag::T_WindowFunc => node.as_window_func().unwrap().wincollid,
@@ -250,6 +252,7 @@ pub fn expr_location(node: Node<'_>) -> ParseLoc {
         }
         // C: the ARRAY or [ keyword is always leftmost.
         NodeTag::T_ArrayExpr => node.as_array_expr().unwrap().location,
+        NodeTag::T_RowExpr => node.as_row_expr().unwrap().location,
         NodeTag::T_FuncExpr => {
             let f = node.as_func_expr().unwrap();
             leftmost_loc(f.location, expr_location_list(&f.args))

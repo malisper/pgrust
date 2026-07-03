@@ -143,6 +143,10 @@ pub fn expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
             let a = node.as_array_expr().unwrap();
             walk_list(&a.elements, w)
         }
+        NodeTag::T_RowExpr => {
+            let r = node.as_row_expr().unwrap();
+            walk_list(&r.args, w)
+        }
         NodeTag::T_BoolExpr => {
             let b = node.as_bool_expr().unwrap();
             walk_list(&b.args, w)
@@ -710,6 +714,22 @@ where
                         list_start: a.list_start,
                         list_end: a.list_end,
                         location: a.location,
+                    },
+                )?)),
+            }
+        }
+        NodeTag::T_RowExpr => {
+            let r = node.as_row_expr().unwrap();
+            match mutate_list(mcx, &r.args, m)? {
+                None => Ok(None),
+                Some(args) => Ok(Some(Node::mk(
+                    mcx,
+                    types_nodes::primnodes::RowExpr {
+                        args,
+                        row_typeid: r.row_typeid,
+                        row_format: r.row_format,
+                        colnames: r.colnames.clone_in(mcx)?,
+                        location: r.location,
                     },
                 )?)),
             }

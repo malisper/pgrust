@@ -107,6 +107,7 @@ pub fn transformExprRecurse<'mcx>(
                 transformExpr(mcx, pstate, arg, kind)
             },
         ),
+        NodeTag::T_RowExpr => transformRowExpr(mcx, pstate, expr),
         NodeTag::T_CaseTestExpr | NodeTag::T_Var => Ok(expr),
         // Everywhere DEFAULT is legal the caller strips it before transformExpr.
         NodeTag::T_SetToDefault => Err(default_not_allowed(
@@ -309,6 +310,55 @@ fn transformAExprIn<'mcx>(
     }
 
     Ok(result.expect("IN list is never empty"))
+}
+
+// C: MaxTupleAttributeNumber (htup_details.h).
+const MAX_TUPLE_ATTRIBUTE_NUMBER: usize = 1664;
+
+fn transformRowExpr<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    expr: Node<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    let r = expr.as_row_expr().unwrap();
+    // C: transformExpressionList (the SRF/a_star expansion legs surface
+    // through transformColumnRef's own louds).
+    let mut args = types_nodes::NodeList::nil();
+    for a in r.args.iter() {
+        args.lappend(mcx, transformExprRecurse(mcx, pstate, a)?)?;
+    }
+    if args.len() > MAX_TUPLE_ATTRIBUTE_NUMBER {
+        use types_error::{ErrorLocation, ERRCODE_TOO_MANY_COLUMNS, ERROR};
+        let encoding = mbutils::GetDatabaseEncoding();
+        return Err(Box::new(
+            elog::ereport(ERROR)
+                .errcode(ERRCODE_TOO_MANY_COLUMNS)
+                .errmsg(format!(
+                    "ROW expressions can have at most {MAX_TUPLE_ATTRIBUTE_NUMBER} entries"
+                ))
+                .errposition(parser_small1::parser_errposition(pstate, r.location, encoding))
+                .into_error()
+                .with_error_location(ErrorLocation::new(file!(), line!())),
+        ));
+    }
+    // C: anonymous RECORD row until cast; colnames invented as f1..fN.
+    let mut colnames = types_nodes::NodeList::nil();
+    for fnum in 1..=args.len() {
+        let fname: &'mcx [u8] = mcx::slice_in(mcx, format!("f{fnum}").as_bytes())?.leak();
+        // SAFETY: "f{N}" is ASCII.
+        let fname = unsafe { core::str::from_utf8_unchecked(fname) };
+        colnames.lappend(mcx, Node::mk_string(mcx, fname)?)?;
+    }
+    Node::mk(
+        mcx,
+        types_nodes::primnodes::RowExpr {
+            args,
+            row_typeid: types_core::catalog::RECORDOID,
+            row_format: types_nodes::CoercionForm::COERCE_IMPLICIT_CAST,
+            colnames,
+            location: r.location,
+        },
+    )
 }
 
 fn transformNullTest<'mcx>(

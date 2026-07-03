@@ -2365,6 +2365,7 @@ dependencies = [
  "miscinit_seams",
  "pgtz",
  "syscache_seams",
+ "tupdesc",
  "typcache",
  "types_core",
  "types_error",
