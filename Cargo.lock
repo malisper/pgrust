@@ -381,6 +381,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "adt_multirangetypes"
+version = "0.1.0"
+dependencies = [
+ "adt_rangetypes",
+ "arrayfuncs",
+ "datum",
+ "detoast_seams",
+ "fmgr_core",
+ "fmgr_seams",
+ "format_type",
+ "funcapi",
+ "hashfn",
+ "indexcmds_seams",
+ "lsyscache",
+ "mcx",
+ "pqformat",
+ "stringinfo",
+ "syscache_seams",
+ "typcache",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_tuple",
+]
+
+[[package]]
 name = "adt_network"
 version = "0.1.0"
 dependencies = [
@@ -472,6 +498,30 @@ dependencies = [
  "types_error",
  "types_fmgr",
  "varlena",
+]
+
+[[package]]
+name = "adt_rangetypes"
+version = "0.1.0"
+dependencies = [
+ "adt_date",
+ "adt_numeric",
+ "arrayfuncs",
+ "datum",
+ "detoast_seams",
+ "fmgr_seams",
+ "format_type",
+ "funcapi",
+ "hashfn",
+ "lsyscache",
+ "mcx",
+ "pqformat",
+ "stringinfo",
+ "typcache",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_tuple",
 ]
 
 [[package]]
@@ -2775,12 +2825,14 @@ dependencies = [
  "adt_like",
  "adt_mac",
  "adt_mac8",
+ "adt_multirangetypes",
  "adt_network",
  "adt_numeric",
  "adt_oracle_compat",
  "adt_pg_lsn",
  "adt_pseudotypes",
  "adt_quote",
+ "adt_rangetypes",
  "adt_regexp",
  "adt_regproc",
  "adt_scalar",
@@ -8949,6 +9001,7 @@ version = "0.1.0"
 dependencies = [
  "datum",
  "fmgr_core",
+ "fmgr_seams",
  "indexcmds_seams",
  "inval",
  "lsyscache",

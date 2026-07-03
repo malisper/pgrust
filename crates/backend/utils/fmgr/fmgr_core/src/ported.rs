@@ -22,6 +22,8 @@ const TABLES: &[&[FmgrBuiltin]] = &[
     ::dbsize::builtins::DBSIZE_BUILTINS,
     ::adt_uuid::builtins::UUID_BUILTINS,
     ::adt_network::builtins::NETWORK_BUILTINS,
+    ::adt_rangetypes::builtins::RANGETYPES_BUILTINS,
+    ::adt_multirangetypes::builtins::MULTIRANGETYPES_BUILTINS,
     ::adt_regproc::builtins::REGPROC_BUILTINS,
     ::adt_numeric::builtins::NUMERIC_BUILTINS,
     ::adt_oracle_compat::builtins::ORACLE_COMPAT_BUILTINS,

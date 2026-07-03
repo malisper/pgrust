@@ -12,4 +12,4 @@ pub mod varlena;
 
 pub use datum::*;
 pub use expandeddatum::{ExpandedObjectHeader, ExpandedObjectMethods};
-pub use varlena::{Bytea, Varlena, VarlenaRef, VARHDRSZ};
+pub use varlena::{set_varsize_4b, Bytea, Varlena, VarlenaRef, VARHDRSZ};

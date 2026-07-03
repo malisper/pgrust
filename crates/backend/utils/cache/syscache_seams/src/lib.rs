@@ -279,8 +279,11 @@ pub struct PgTypeDefaultShape<'mcx> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PgRangeShape {
     pub rngsubtype: Oid,
-    pub rngcollation: Oid,
     pub rngmultitypid: Oid,
+    pub rngcollation: Oid,
+    pub rngsubopc: Oid,
+    pub rngcanonical: Oid,
+    pub rngsubdiff: Oid,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -124,6 +124,14 @@ fn call_expr_node(flinfo: &FmgrInfo) -> Option<Node<'static>> {
     })
 }
 
+/// C: get_fn_expr_rettype (fmgr.c); InvalidOid mirrors the NULL-fn_expr case.
+pub fn get_fn_expr_rettype(flinfo: &FmgrInfo) -> Oid {
+    match call_expr_node(flinfo) {
+        None => InvalidOid,
+        Some(n) => expr_type(Some(n)),
+    }
+}
+
 /// C: get_fn_expr_argtype (fmgr.c). Aggregate transfns carry an
 /// `AggFnArgTypes` vector where C builds a fake transfn FuncExpr.
 pub fn get_fn_expr_argtype(flinfo: Option<&FmgrInfo>, argnum: usize) -> Oid {

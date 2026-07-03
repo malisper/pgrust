@@ -36,6 +36,8 @@ adt_pg_lsn = { path = "../../adt/pg_lsn" }
 dbsize = { path = "../../adt/dbsize" }
 adt_uuid = { path = "../../adt/uuid" }
 adt_network = { path = "../../adt/network" }
+adt_rangetypes = { path = "../../adt/rangetypes" }
+adt_multirangetypes = { path = "../../adt/multirangetypes" }
 adt_numeric = { path = "../../adt/numeric" }
 adt_like = { path = "../../adt/like" }
 adt_regexp = { path = "../../adt/regexp" }
