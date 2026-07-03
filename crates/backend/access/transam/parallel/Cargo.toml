@@ -1,0 +1,14 @@
+[package]
+name = "parallel"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "parallel"
+path = "src/lib.rs"
+
+[dependencies]
+parallel_seams = { path = "../parallel_seams" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }

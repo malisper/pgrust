@@ -4,7 +4,6 @@
 pub mod compute;
 mod graph;
 mod init;
-pub mod scan_seam;
 mod inval;
 mod list;
 mod search;

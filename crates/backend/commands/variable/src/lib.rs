@@ -622,17 +622,8 @@ pub fn check_canonical_path(
     Ok(true)
 }
 
-// pg_clean_ascii (common/string.c), inlined until the common unit lands.
 fn pg_clean_ascii(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for &b in s.as_bytes() {
-        if !(32..=126).contains(&b) {
-            out.push_str(&format!("\\x{b:02x}"));
-        } else {
-            out.push(b as char);
-        }
-    }
-    out
+    pg_string::pg_clean_ascii(s, 0).expect("pg_clean_ascii with alloc_flags=0 cannot fail")
 }
 
 pub fn check_application_name(

@@ -318,7 +318,7 @@ fn search_miss(cache_id: i32, hash_value: u32, keys: &[CatCKey<'_>; 4]) -> PgRes
 
     let mut slot: Option<u32> = None;
     let mut create_err: Option<Box<types_error::PgError>> = None;
-    crate::scan_seam::systable_scan_catalog::call(
+    genam_seams::systable_scan_catalog::call(
         &relation,
         indexoid,
         index_ok,
@@ -378,10 +378,9 @@ pub(crate) fn build_scan_keys<'mcx>(
         sk.sk_strategy = BTEqualStrategyNumber;
         sk.sk_subtype = 0;
         sk.sk_collation = types_core::catalog::C_COLLATION_OID;
-        sk.sk_func = types_fmgr::FmgrInfo {
-            fn_oid: eqfunc[i],
-            ..types_fmgr::FmgrInfo::unresolved()
-        };
+        // C resolves cc_skey[i].sk_func at cache init; heap-fallback scans
+        // (pre-critical-relcache misses) invoke it via heap_key_test.
+        sk.sk_func = fmgr_seams::fmgr_info::call(eqfunc[i])?;
         sk.sk_argument = frame_scan_arg(scan_mcx, kinds[i], &keys[i])?;
     }
     Ok(out)

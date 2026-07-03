@@ -100,6 +100,18 @@ fn name_arg_is_zero_padded_namedata() {
 
 #[test]
 fn eq_key_shape() {
+    static INSTALL: std::sync::Once = std::sync::Once::new();
+    INSTALL.call_once(|| {
+        fmgr_seams::fmgr_info::set(|oid| {
+            Ok(types_fmgr::FmgrInfo::new(
+                |_, _| panic!("not invoked"),
+                oid,
+                2,
+                true,
+                false,
+            ))
+        });
+    });
     let key = eq_key(Anum_pg_database_oid, F_OIDEQ, Datum::from_oid(5));
     assert_eq!(key.sk_attno, 1);
     assert_eq!(key.sk_strategy, BTEqualStrategyNumber);

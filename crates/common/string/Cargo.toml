@@ -1,0 +1,12 @@
+[package]
+name = "pg_string"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pg_string"
+path = "src/lib.rs"
+
+[dependencies]
+string_seams = { path = "../string_seams" }

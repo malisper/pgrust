@@ -190,6 +190,52 @@ pub fn is_initialized() -> bool {
     GUC_STORE.with(|c| c.borrow().is_some())
 }
 
+pub struct NondefaultGuc {
+    pub name: String,
+    pub value: Option<String>,
+    pub scontext: GucContext,
+    pub source: GucSource,
+    pub srole: Oid,
+}
+
+// write_nondefault_variables (guc.c): the EXEC_BACKEND parameter file,
+// rendered as an in-memory snapshot taken on the spawning (postmaster)
+// thread; backend threads have no fork to inherit the TLS store through.
+pub fn capture_nondefault_variables() -> Vec<NondefaultGuc> {
+    with_store(|reg| {
+        reg.iter()
+            .filter(|v| v.gen().source != types_guc::GucSource::PGC_S_DEFAULT)
+            .map(|v| NondefaultGuc {
+                name: v.name().to_string(),
+                value: Some(crate::registry::show_guc_option(v, false)),
+                scontext: v.gen().scontext,
+                source: v.gen().source,
+                srole: v.gen().srole,
+            })
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+// read_nondefault_variables (guc.c): InitializeGUCOptions must already have
+// run on this thread (SubPostmasterMain order).
+pub fn restore_nondefault_variables(vars: &[NondefaultGuc]) -> PgResult<()> {
+    for v in vars {
+        crate::set_config_option_ext(
+            &v.name,
+            v.value.as_deref(),
+            v.scontext,
+            v.source,
+            v.srole,
+            crate::GUC_ACTION_SET,
+            true,
+            ErrorLevel(0),
+            true,
+        )?;
+    }
+    Ok(())
+}
+
 pub fn with_store<R>(f: impl FnOnce(&GucRegistry) -> R) -> Option<R> {
     GUC_STORE.with(|c| {
         let guard = c.borrow();

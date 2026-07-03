@@ -1025,6 +1025,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "copy_cmd"
+version = "0.1.0"
+
+[[package]]
 name = "crc32c"
 version = "0.1.0"
 
@@ -1199,6 +1203,7 @@ dependencies = [
 name = "execgrouping"
 version = "0.1.0"
 dependencies = [
+ "aclchk_seams",
  "datum",
  "execexpr",
  "exectuples",
@@ -1208,8 +1213,10 @@ dependencies = [
  "hashbrown",
  "hashfn",
  "heaptuple",
+ "init_small",
  "lsyscache",
  "mcx",
+ "miscinit_seams",
  "types_core",
  "types_error",
  "types_fmgr",
@@ -1221,26 +1228,37 @@ dependencies = [
 name = "execindexing"
 version = "0.1.0"
 dependencies = [
+ "aclchk_seams",
  "bufmgr_seams",
+ "catalog_seams",
  "datum",
  "exectuples",
  "executils",
  "freespace_seams",
  "heapam",
  "heapam_visibility",
+ "heapam_visibility_seams",
+ "heaptuple",
  "indexam",
  "mcx",
+ "miscinit_seams",
  "nbtree",
  "nodeindexscan",
  "predicate_seams",
+ "pruneheap_seams",
  "relation_seams",
  "relcache_seams",
+ "rmgr",
  "seam_core",
+ "smgr_seams",
+ "syscache_seams",
+ "tableam",
  "transam_xlog_seams",
  "types_core",
  "types_error",
  "types_fmgr",
  "types_nbtree",
+ "types_nodes",
  "types_rel",
  "types_relscan",
  "types_scan",
@@ -1248,6 +1266,7 @@ dependencies = [
  "types_snapshot",
  "types_storage",
  "types_tuple",
+ "xact_seams",
  "xloginsert_seams",
 ]
 
@@ -1463,6 +1482,7 @@ dependencies = [
  "timeout_seams",
  "transam_xlog_seams",
  "tupdesc",
+ "typcache",
  "types_core",
  "types_dest",
  "types_error",
@@ -2131,6 +2151,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "instrument"
+version = "0.1.0"
+dependencies = [
+ "bufmgr",
+ "types_core",
+]
+
+[[package]]
 name = "interrupt"
 version = "0.0.0"
 dependencies = [
@@ -2324,6 +2352,7 @@ dependencies = [
  "stack_depth",
  "timestamp_seams",
  "types_core",
+ "types_guc",
  "types_startup",
  "types_storage",
  "waiteventset_seams",
@@ -2816,6 +2845,7 @@ dependencies = [
  "execscan",
  "exectuples",
  "executils",
+ "guc_tables",
  "init_small",
  "lsyscache",
  "mcx",
@@ -2996,6 +3026,7 @@ dependencies = [
  "commit_ts_seams",
  "condition_variable_seams",
  "controldata_utils",
+ "dbcommands_seams",
  "deadlock_seams",
  "execmain",
  "execmain_seams",
@@ -3038,15 +3069,18 @@ dependencies = [
  "rel_vocab",
  "relation_seams",
  "relcache_seams",
+ "resowner",
  "rewrite_handler",
  "rmgr",
  "s_lock_seams",
  "scan_fgram",
  "shmem",
+ "sinval_seams",
  "snapbuild_seams",
  "snapmgr",
  "spi_seams",
  "subtrans",
+ "sync_seams",
  "syncrep_seams",
  "syscache_seams",
  "table",
@@ -3080,6 +3114,10 @@ dependencies = [
  "xlogreader_seams",
  "xlogutils",
 ]
+
+[[package]]
+name = "nodenestloop"
+version = "0.1.0"
 
 [[package]]
 name = "nodes_core"
@@ -3447,6 +3485,7 @@ version = "0.0.0"
 dependencies = [
  "cache_syscache",
  "datum",
+ "fmgr_seams",
  "genam",
  "heaptuple",
  "mcx",
@@ -3782,6 +3821,10 @@ version = "0.0.0"
 dependencies = [
  "seam_core",
 ]
+
+[[package]]
+name = "portalcmds"
+version = "0.1.0"
 
 [[package]]
 name = "portalcmds_seams"
@@ -4465,6 +4508,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dfbc457d0c7a0759a614551b11a6409e5951f6c7537be1f1b7682b9ae9230368"
 dependencies = [
  "proc-macro2",
+]
+
+[[package]]
+name = "readfuncs"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "mcx",
+ "types_core",
+ "types_error",
+ "types_nodes",
 ]
 
 [[package]]
@@ -5814,6 +5868,7 @@ dependencies = [
  "mcx",
  "types_core",
  "types_error",
+ "types_tuple",
 ]
 
 [[package]]
@@ -6417,23 +6472,100 @@ dependencies = [
 name = "xlogrecovery"
 version = "0.0.0"
 dependencies = [
+ "aclchk_seams",
+ "adt_bool",
+ "adt_float",
+ "aio_seams",
+ "async_seams",
+ "autovacuum_seams",
+ "backend_progress_seams",
+ "backend_status_seams",
+ "be_fsstubs_seams",
+ "bufmgr",
+ "bufmgr_seams",
+ "catalog_index_seams",
+ "catalog_seams",
+ "catalog_storage_seams",
+ "clog",
+ "combocid_seams",
+ "commit_ts_seams",
+ "condition_variable_seams",
  "controldata_utils",
  "crc32c",
+ "datum",
+ "dbcommands_seams",
+ "deadlock_seams",
  "elog",
  "fd",
+ "freespace_seams",
+ "guc",
  "guc_tables",
+ "heapam",
+ "heapam_visibility",
+ "heapam_visibility_seams",
+ "heaptuple",
  "init_small",
+ "inval",
+ "ipc_seams",
+ "latch_seams",
  "libc",
+ "lmgr_proc",
+ "lmgr_seams",
+ "lock_seams",
+ "logical_seams",
+ "lwlock",
  "mcx",
  "miscinit",
+ "miscinit_seams",
+ "multixact_seams",
+ "namespace_seams",
+ "origin_seams",
+ "parallel_seams",
+ "pg_enum_seams",
+ "pg_sema_seams",
+ "pgstat",
  "pmsignal",
+ "pmsignal_seams",
+ "predicate_seams",
+ "procarray",
+ "pruneheap_seams",
  "ps_status_seams",
+ "relcache_seams",
+ "relpath",
  "rmgr",
+ "s_lock_seams",
+ "shmem",
+ "sinval_seams",
+ "smgr",
+ "snapbuild_seams",
+ "snapmgr",
+ "spi_seams",
  "startup_seams",
+ "subtrans",
+ "sync",
+ "syncrep_seams",
+ "syscache_seams",
+ "tableam_vocab",
+ "tablecmds_seams",
+ "tablespace_seams",
+ "timeout_seams",
+ "timestamp_seams",
+ "transam",
  "transam_xlog",
+ "transam_xlog_seams",
+ "trigger_seams",
+ "typcache_seams",
  "types_core",
  "types_error",
+ "types_rel",
+ "types_snapshot",
+ "types_storage",
+ "types_tuple",
  "varsup",
+ "waitevent_seams",
+ "xact",
+ "xloginsert",
+ "xloginsert_seams",
  "xlogreader",
  "xlogreader_seams",
  "xlogrecovery_seams",

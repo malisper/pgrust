@@ -60,10 +60,8 @@ fn eq_key(attno: i32, eqfunc: types_core::primitive::RegProcedure, arg: Datum) -
     key.sk_attno = attno as AttrNumber;
     key.sk_strategy = BTEqualStrategyNumber;
     key.sk_collation = C_COLLATION_OID;
-    key.sk_func = types_fmgr::FmgrInfo {
-        fn_oid: eqfunc,
-        ..types_fmgr::FmgrInfo::unresolved()
-    };
+    key.sk_func = fmgr_seams::fmgr_info::call(eqfunc)
+        .unwrap_or_else(|e| panic!("fmgr_info({eqfunc}) failed: {e:?}"));
     key.sk_argument = arg;
     key
 }

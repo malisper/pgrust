@@ -19,7 +19,6 @@ mod tests;
 mod token;
 mod tokenize;
 
-use std::cell::RefCell;
 
 use elog::ereport;
 use types_core::init::UserAuth;
@@ -74,17 +73,18 @@ pub struct TokenizedAuthLine {
     pub err_msg: Option<String>,
 }
 
-thread_local! {
-    static PARSED_HBA_LINES: RefCell<Vec<HbaLine>> = const { RefCell::new(Vec::new()) };
-    static PARSED_IDENT_LINES: RefCell<Vec<IdentLine>> = const { RefCell::new(Vec::new()) };
-}
+// C's parsed_hba_lines live in the postmaster and reach backends via fork;
+// the thread rendering is a process global (loads at startup/SIGHUP on the
+// postmaster thread, each backend reads once at auth).
+static PARSED_HBA_LINES: std::sync::RwLock<Vec<HbaLine>> = std::sync::RwLock::new(Vec::new());
+static PARSED_IDENT_LINES: std::sync::RwLock<Vec<IdentLine>> = std::sync::RwLock::new(Vec::new());
 
 pub(crate) fn with_parsed_hba_lines<R>(f: impl FnOnce(&[HbaLine]) -> R) -> R {
-    PARSED_HBA_LINES.with(|s| f(&s.borrow()))
+    f(&PARSED_HBA_LINES.read().unwrap_or_else(|e| e.into_inner()))
 }
 
 pub(crate) fn with_parsed_ident_lines<R>(f: impl FnOnce(&[IdentLine]) -> R) -> R {
-    PARSED_IDENT_LINES.with(|s| f(&s.borrow()))
+    f(&PARSED_IDENT_LINES.read().unwrap_or_else(|e| e.into_inner()))
 }
 
 pub(crate) fn token_is_member_check(t: &AuthToken) -> bool {
@@ -206,7 +206,7 @@ pub fn load_hba() -> PgResult<bool> {
         return Ok(false);
     }
 
-    PARSED_HBA_LINES.with(|s| *s.borrow_mut() = new_parsed_lines);
+    *PARSED_HBA_LINES.write().unwrap_or_else(|e| e.into_inner()) = new_parsed_lines;
     Ok(true)
 }
 
@@ -243,7 +243,7 @@ pub fn load_ident() -> PgResult<bool> {
         return Ok(false);
     }
 
-    PARSED_IDENT_LINES.with(|s| *s.borrow_mut() = new_parsed_lines);
+    *PARSED_IDENT_LINES.write().unwrap_or_else(|e| e.into_inner()) = new_parsed_lines;
     Ok(true)
 }
 

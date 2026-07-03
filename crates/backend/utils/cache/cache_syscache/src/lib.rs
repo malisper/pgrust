@@ -380,4 +380,5 @@ pub fn RelationSupportsSysCache(relid: Oid) -> bool {
 
 pub fn init_seams() {
     projections::install();
+    syscache_seams::relation_has_sys_cache::set(RelationHasSysCache);
 }

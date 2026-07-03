@@ -256,7 +256,7 @@ fn build_list_scan(
         let index_ok = crate::init::IndexScanOK(cache_id);
 
         let mut inner_err: Option<Box<types_error::PgError>> = None;
-        let ordered = crate::scan_seam::systable_scan_catalog::call(
+        let ordered = genam_seams::systable_scan_catalog::call(
             &relation,
             indexoid,
             index_ok,

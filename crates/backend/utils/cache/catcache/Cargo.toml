@@ -13,11 +13,13 @@ types_tuple = { path = "../../../../_support/types/types_tuple" }
 types_scan = { path = "../../../../_support/types/types_scan" }
 types_storage = { path = "../../../../_support/types/types_storage" }
 types_fmgr = { path = "../../../../_support/types/fmgr" }
+fmgr_seams = { path = "../../fmgr/fmgr_seams" }
 types_rel = { path = "../../../../_support/types/rel" }
 hashfn = { path = "../../../../common/hashfn" }
 tupdesc = { path = "../../../access/common/tupdesc" }
 table = { path = "../../../access/table/table" }
 indexam = { path = "../../../access/index/indexam" }
+genam_seams = { path = "../../../access/index/genam_seams" }
 catcache_seams = { path = "../catcache_seams" }
 relcache_seams = { path = "../relcache_seams" }
 lmgr_seams = { path = "../../../storage/lmgr/lmgr_seams" }
