@@ -53,7 +53,7 @@ CREATE VIEW v_lateral AS SELECT t1.a, x.bb FROM t1, LATERAL (SELECT t1.b + 1 AS 
 CREATE VIEW v_lateral_fn AS SELECT t1.a, g.g FROM t1, LATERAL generate_series(1, t1.a) g(g);
 CREATE VIEW v_srf AS SELECT g.n FROM generate_series(1, 3) g(n);
 CREATE VIEW v_unnest AS SELECT u.x FROM unnest(ARRAY[1, 2, 3]) u(x);
-CREATE VIEW v_ordset AS SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY b) AS med, percentile_cont(0.25) WITHIN GROUP (ORDER BY e) AS q1 FROM t1;
+CREATE VIEW v_ordset AS SELECT percentile_cont(0.5::double precision) WITHIN GROUP (ORDER BY b) AS med, percentile_cont(0.25::double precision) WITHIN GROUP (ORDER BY e) AS q1 FROM t1;
 CREATE VIEW v_collate AS SELECT c COLLATE "C" AS cc FROM t1 WHERE c > ('a' COLLATE "POSIX");
 CREATE VIEW v_ties AS SELECT a FROM t1 ORDER BY b FETCH FIRST 3 ROWS WITH TIES;
 
