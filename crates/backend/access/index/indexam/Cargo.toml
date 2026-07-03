@@ -14,6 +14,9 @@ types_scan = { path = "../../../../_support/types/types_scan" }
 types_snapshot = { path = "../../../../_support/types/snapshot" }
 types_slot = { path = "../../../../_support/types/types_slot" }
 types_tuple = { path = "../../../../_support/types/types_tuple" }
+types_brin = { path = "../../../../_support/types/types_brin" }
+brin = { path = "../../brin/brin" }
+predicate = { path = "../../../storage/lmgr/predicate" }
 types_nbtree = { path = "../../../../_support/types/types_nbtree" }
 relation_seams = { path = "../../common/relation_seams" }
 tableam = { path = "../../table/tableam" }

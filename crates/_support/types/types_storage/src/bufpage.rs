@@ -677,6 +677,65 @@ impl<'a> PageMut<'a> {
         true
     }
 
+    /// `PageIndexTupleDeleteNoCompact`: unused line pointer instead of
+    /// compaction (removed outright only when last). Panics on corruption
+    /// (C ereport ERROR, DATA_CORRUPTED).
+    pub fn index_tuple_delete_no_compact(&mut self, offnum: OffsetNumber) {
+        let r = self.as_ref();
+        let pd_lower = r.pd_lower() as usize;
+        let pd_upper = r.pd_upper() as usize;
+        let pd_special = r.pd_special() as usize;
+        assert!(
+            pd_lower >= SizeOfPageHeaderData
+                && pd_lower <= pd_upper
+                && pd_upper <= pd_special
+                && pd_special <= BLCKSZ
+                && pd_special == (pd_special + 7) & !7,
+            "corrupted page pointers: lower = {pd_lower}, upper = {pd_upper}, special = {pd_special}"
+        );
+
+        let mut nline = r.max_offset_number();
+        assert!(offnum >= 1 && offnum <= nline, "invalid index offnum: {offnum}");
+
+        let tup = r.item_id(offnum);
+        debug_assert!(tup.has_storage());
+        let size = tup.lp_len() as usize;
+        let offset = tup.lp_off() as usize;
+        assert!(
+            offset >= pd_upper && offset + size <= pd_special && offset == (offset + 7) & !7,
+            "corrupted line pointer: offset = {offset}, size = {size}"
+        );
+
+        let size = (size + 7) & !7;
+
+        if offnum < nline {
+            let mut id = tup;
+            id.set_unused();
+            self.set_item_id(offnum, id);
+        } else {
+            self.set_pd_lower((pd_lower - core::mem::size_of::<ItemIdData>()) as uint16);
+            nline -= 1;
+        }
+
+        if offset > pd_upper {
+            // SAFETY: [pd_upper, offset) shifts up by `size`, staying within
+            // [pd_upper, pd_special) per the line-pointer check above.
+            unsafe {
+                let addr = self.ptr.as_ptr().add(pd_upper);
+                core::ptr::copy(addr, addr.add(size), offset - pd_upper);
+            }
+        }
+        self.set_pd_upper((pd_upper + size) as uint16);
+
+        for i in 1..=nline {
+            let mut ii = self.as_ref().item_id(i);
+            if ii.has_storage() && (ii.lp_off() as usize) <= offset {
+                ii.set_storage(ii.lp_off() + size as ItemOffset, ii.lp_len());
+                self.set_item_id(i, ii);
+            }
+        }
+    }
+
     /// `PageRepairFragmentation`; caller holds the buffer cleanup lock.
     /// Panics on corruption (in prune's crit section C's ERROR promotes to PANIC).
     pub fn repair_fragmentation(&mut self) {

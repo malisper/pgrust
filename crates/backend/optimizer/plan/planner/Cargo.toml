@@ -45,6 +45,7 @@ bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
 table = { path = "../../../access/table/table" }
 tableam = { path = "../../../access/table/tableam" }
 indexam = { path = "../../../access/index/indexam" }
+brin = { path = "../../../access/brin/brin" }
 gist = { path = "../../../access/gist/gist" }
 nbtree = { path = "../../../access/nbtree/nbtree" }
 nodeagg = { path = "../../../executor/nodeagg" }

@@ -20,10 +20,13 @@ const OID_BTREE_OPS_OID: Oid = 1981;
 const INT2_BTREE_OPS_OID: Oid = 1979;
 const BTREE_AM_OID: Oid = 403;
 const HASH_AM_OID: Oid = 405;
+const BRIN_AM_OID: Oid = 3580;
 const GIST_AM_OID: Oid = 783;
 const BTNProcs: usize = 6;
 const GISTNProcs: usize = 12;
-const MAX_AM_PROCS: usize = GISTNProcs;
+// BRIN_LAST_OPTIONAL_PROCNUM (brin_internal.h).
+const BRINNProcs: usize = 15;
+const MAX_AM_PROCS: usize = BRINNProcs;
 // BTORDER_PROC == HASHSTANDARD_PROC == 1: slot 0 is the preloaded proc for
 // btree and hash.
 const BTORDER_PROC: usize = 1;
@@ -102,9 +105,10 @@ pub(crate) fn relation_init_index_access_info(
         HASH_AM_OID => HASHNProcs,
         GIN_AM_OID => GINNProcs,
         GIST_AM_OID => GISTNProcs,
+        BRIN_AM_OID => BRINNProcs,
         other => panic!(
             "relcache_build: index AM {other} for index {relid} unported \
-             (amapi closed set is btree+hash+gin+gist)"
+             (amapi closed set is btree+hash+gin+gist+brin)"
         ),
     };
     let mut opfamily: PgVec<'static, Oid> = mcx::vec_with_capacity_in(mcx, nkey)?;
@@ -122,8 +126,11 @@ pub(crate) fn relation_init_index_access_info(
         support.extend_from_slice(&ent.support[..amsupport]);
         // slot-0 FmgrInfo preload: BTORDER_PROC == HASHSTANDARD_PROC == 1; gin
         // dispatches its support procs by OID (rule-4 closed set); gist
-        // resolves its procs in initGISTstate.
-        let proc = if form.relam == GIN_AM_OID || form.relam == GIST_AM_OID {
+        // resolves its procs in initGISTstate; brin via lsyscache at use.
+        let proc = if form.relam == GIN_AM_OID
+            || form.relam == GIST_AM_OID
+            || form.relam == BRIN_AM_OID
+        {
             0
         } else {
             ent.support[BTORDER_PROC - 1]

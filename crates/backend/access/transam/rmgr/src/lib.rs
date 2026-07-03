@@ -132,7 +132,6 @@ unported_redo! {
     tblspc_redo => "backend-commands-tablespace";
     gin_redo => "backend-access-gin-xlog";
     spg_redo => "backend-access-spgist-xlog";
-    brin_redo => "backend-access-brin-xlog";
     commit_ts_redo => "backend-access-transam-commit-ts";
     replorigin_redo => "backend-replication-origin";
     generic_redo => "backend-access-transam-generic-xlog";
@@ -144,7 +143,6 @@ unported_desc! {
     gin_desc => "backend-rmgrdesc-next";
     gist_desc => "backend-rmgrdesc-next";
     spg_desc => "backend-rmgrdesc-next";
-    brin_desc => "backend-rmgrdesc-next";
     commit_ts_desc => "backend-access-rmgrdesc-small";
     replorigin_desc => "backend-rmgrdesc-extra-small";
     logicalmsg_desc => "backend-access-rmgrdesc-small";
@@ -155,7 +153,6 @@ unported_identify! {
     gin_identify => "backend-rmgrdesc-next";
     gist_identify => "backend-rmgrdesc-next";
     spg_identify => "backend-rmgrdesc-next";
-    brin_identify => "backend-rmgrdesc-next";
     commit_ts_identify => "backend-access-rmgrdesc-small";
     replorigin_identify => "backend-rmgrdesc-extra-small";
     logicalmsg_identify => "backend-access-rmgrdesc-small";
@@ -332,9 +329,9 @@ pub static RmgrTable: [RmgrData; RM_N_BUILTIN_IDS] = [
     },
     RmgrData {
         rm_name: "BRIN",
-        rm_redo: brin_redo,
-        rm_desc: brin_desc,
-        rm_identify: brin_identify,
+        rm_redo: brin_xlog::brin_redo,
+        rm_desc: rmgrdesc::brindesc::brin_desc,
+        rm_identify: rmgrdesc::brindesc::brin_identify,
         rm_startup: None,
         rm_cleanup: None,
         rm_mask: Some(brin_mask),

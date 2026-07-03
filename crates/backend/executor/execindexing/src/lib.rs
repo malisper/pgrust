@@ -164,9 +164,9 @@ pub fn ExecOpenIndices<'mcx>(
 }
 
 /// ExecCloseIndices.
-pub fn ExecCloseIndices(state: ResultRelIndexState<'_>) -> PgResult<()> {
-    for indexDesc in state.descs.iter() {
-        indexam::index_insert_cleanup(indexDesc)?;
+pub fn ExecCloseIndices(mut state: ResultRelIndexState<'_>) -> PgResult<()> {
+    for (i, indexDesc) in state.descs.iter().enumerate() {
+        indexam::index_insert_cleanup(indexDesc, &mut state.infos[i].ii_AmCache)?;
     }
     // index_close(RowExclusiveLock): the Relation close hook runs on drop.
     Ok(())
