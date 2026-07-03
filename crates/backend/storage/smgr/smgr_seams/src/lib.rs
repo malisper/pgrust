@@ -75,6 +75,18 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // smgrzeroextend(smgropen(rlocator), forknum, blocknum, nblocks, skipFsync)
+    // (smgr.c).
+    pub fn smgr_zeroextend(
+        rlocator: RelFileLocatorBackend,
+        forknum: ForkNumber,
+        blocknum: BlockNumber,
+        nblocks: i32,
+        skip_fsync: bool,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
     // smgrwriteback(smgropen(rlocator), forknum, blocknum, nblocks) (smgr.c).
     pub fn smgr_writeback(
         rlocator: RelFileLocatorBackend,

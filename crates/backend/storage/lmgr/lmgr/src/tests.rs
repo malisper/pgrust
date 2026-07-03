@@ -98,7 +98,7 @@ fn install() {
 fn make_rel(mcx: mcx::Mcx<'_>, oid: Oid) -> RelationData<'_> {
     let mut relname = NameData::default();
     relname.namestrcpy("reltest");
-    RelationData {
+    RelationData { rd_locator: Default::default(), rd_smgr: Default::default(),
         rd_id: oid,
         rd_backend: types_core::INVALID_PROC_NUMBER,
         rd_islocaltemp: false,

@@ -110,6 +110,21 @@ pub fn UnlockRelation(rel: &RelationData<'_>, lockmode: LOCKMODE) -> PgResult<()
     Ok(())
 }
 
+#[inline]
+fn extend_tag(rel: &RelationData<'_>) -> LOCKTAG {
+    LOCKTAG::relation_extend(rel.rd_lockInfo.lockRelId.dbId, rel.rd_lockInfo.lockRelId.relId)
+}
+
+pub fn LockRelationForExtension(rel: &RelationData<'_>, lockmode: LOCKMODE) -> PgResult<()> {
+    lock_seams::lock_acquire_extended::call(extend_tag(rel), lockmode, false, false, true, false)?;
+    Ok(())
+}
+
+pub fn UnlockRelationForExtension(rel: &RelationData<'_>, lockmode: LOCKMODE) -> PgResult<()> {
+    lock_seams::lock_release::call(extend_tag(rel), lockmode, false)?;
+    Ok(())
+}
+
 pub fn CheckRelationLockedByMe(
     rel: &RelationData<'_>,
     lockmode: LOCKMODE,

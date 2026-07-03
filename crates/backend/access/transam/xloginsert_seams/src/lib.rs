@@ -57,3 +57,18 @@ seam_core::seam!(
         bufs: &[XLogRegBuf<'_>],
     ) -> PgResult<XLogRecPtr>
 );
+
+seam_core::seam!(
+    // log_newpage_buffer(buffer, page_std) (xloginsert.c): FPI of a pinned,
+    // exclusively locked buffer inside a critical section.
+    pub fn log_newpage_buffer(buffer: types_core::Buffer, page_std: bool) -> PgResult<XLogRecPtr>
+);
+
+seam_core::seam!(
+    // XLogSaveBufferForHint(buffer, buffer_std) (xloginsert.c): caller holds
+    // pin + at least share lock; InvalidXLogRecPtr when no FPI was needed.
+    pub fn xlog_save_buffer_for_hint(
+        buffer: types_core::Buffer,
+        buffer_std: bool,
+    ) -> PgResult<XLogRecPtr>
+);
