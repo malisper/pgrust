@@ -1,12 +1,11 @@
-//! fmgr wrappers (`fc_*`) + `DATE_BUILTINS` for fmgr-core. Not registrable
-//! (established precedents): typmodin (ArrayType), sortsupport/skipsupport/
-//! time_support (planner nodes), the interval-typed rows (interval unit
-//! deferred), extract/date_part rows (numeric image frame), timetz_zone/izone/
-//! at_local (DecodeTimezoneName), and the fresh-TimeTzADT constructors
-//! timetz_in/timetz_scale/time_timetz/timestamptz_timetz (their value cores
-//! live in the crate root). date/time/timetz recv/send ride the binary-wire
-//! fmgr frame (types_fmgr::wire); timetz_recv builds its 12-byte by-ref image
-//! via byref_result.
+//! fmgr wrappers (`fc_*`) + `DATE_BUILTINS` for fmgr-core, hosting the
+//! timestamp.c rows too (adt_timestamp has no fmgr table; adt_date already
+//! deps it). Not registrable (established precedents): typmodin (ArrayType),
+//! sortsupport/skipsupport/time_support (planner nodes), extract/date_part
+//! rows (numeric image frame), trunc/zone/izone/at_local, age/overlaps_
+//! timestamp, in_range, generate_series, interval aggregates. recv/send ride
+//! the binary-wire fmgr frame (types_fmgr::wire); interval/timetz by-ref
+//! results are 16/12-byte images via byref_result.
 
 use ::datum::Datum;
 use ::types_core::Oid;
@@ -17,7 +16,8 @@ use ::types_fmgr::{
 };
 
 use crate::{DateADT, TimeTzADT};
-use adt_datetime::MAXDATELEN;
+use adt_datetime::{Interval, MAXDATELEN};
+use adt_timestamp::{interval, TIMESTAMP_NOT_FINITE};
 
 // C pallocs the cstring per row; the backend thread owns retained scratch
 // (the nameout precedent). The Datum aliases it until the next out call.
@@ -510,6 +510,474 @@ pub fn fc_overlaps_timetz(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -
     })
 }
 
+
+#[inline]
+fn arg_interval(fcinfo: &Fcinfo, i: usize) -> Interval {
+    // SAFETY: catalog arg i is a non-null interval (typlen 16, typalign d),
+    // live for the call; read field-wise like arg_timetz.
+    unsafe {
+        let p = fcinfo.arg_ptr(i);
+        Interval {
+            time: (p as *const i64).read_unaligned(),
+            day: (p.add(8) as *const i32).read_unaligned(),
+            month: (p.add(12) as *const i32).read_unaligned(),
+        }
+    }
+}
+
+fn interval_result(fcinfo: &Fcinfo, iv: &Interval) -> PgResult<Datum> {
+    let mut img = [0u8; 16];
+    img[..8].copy_from_slice(&iv.time.to_ne_bytes());
+    img[8..12].copy_from_slice(&iv.day.to_ne_bytes());
+    img[12..].copy_from_slice(&iv.month.to_ne_bytes());
+    byref_result(fcinfo.result_mcx(), &img)
+}
+
+fn timetz_result(fcinfo: &Fcinfo, t: &crate::TimeTzADT) -> PgResult<Datum> {
+    let mut img = [0u8; 12];
+    img[..8].copy_from_slice(&t.time.to_ne_bytes());
+    img[8..].copy_from_slice(&t.zone.to_ne_bytes());
+    byref_result(fcinfo.result_mcx(), &img)
+}
+
+pub fn fc_interval_in(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let typmod = fcinfo.arg_i32(2);
+    let s = in_arg(fcinfo);
+    // SAFETY: context, if set, rides per the ErrorSaveNode contract for this call.
+    let esc = unsafe { fcinfo.soft_error_context() };
+    let iv = interval::interval_in(&s, typmod, esc)?;
+    interval_result(fcinfo, &iv)
+}
+
+pub fn fc_interval_out(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let iv = arg_interval(fcinfo, 0);
+    OUT_SCRATCH.with(|c| {
+        // SAFETY: single-threaded backend; the sole live access is this call.
+        let buf = unsafe { &mut *c.get() };
+        let len = interval::interval_out(&iv, buf);
+        buf[len] = 0;
+        Ok(Datum::from_usize(buf.as_ptr() as usize))
+    })
+}
+
+pub fn fc_interval_recv(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let typmod = fcinfo.arg_i32(2);
+    // SAFETY: recv arg0 is the live StringInfo pointer per the recv ABI.
+    let buf = unsafe { fcinfo.arg_stringinfo(0) };
+    let iv = interval::interval_recv(buf, typmod)?;
+    interval_result(fcinfo, &iv)
+}
+
+pub fn fc_interval_send(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let iv = arg_interval(fcinfo, 0);
+    let mcx = fcinfo.result_mcx();
+    Ok(varlena_result(interval::interval_send(mcx, &iv)?))
+}
+
+macro_rules! interval_cmp_ops {
+    ($($fc:ident: $op:tt;)*) => {$(
+        pub fn $fc(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+            let a = arg_interval(fcinfo, 0);
+            let b = arg_interval(fcinfo, 1);
+            Ok(Datum::from_bool(interval::interval_cmp_internal(&a, &b) $op 0))
+        }
+    )*};
+}
+
+interval_cmp_ops! {
+    fc_interval_eq: ==;
+    fc_interval_ne: !=;
+    fc_interval_lt: <;
+    fc_interval_le: <=;
+    fc_interval_gt: >;
+    fc_interval_ge: >=;
+}
+
+pub fn fc_interval_cmp(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let a = arg_interval(fcinfo, 0);
+    let b = arg_interval(fcinfo, 1);
+    Ok(Datum::from_i32(interval::interval_cmp_internal(&a, &b)))
+}
+
+// C hashes only the low 64 bits of the 128-bit span (pre-INT128 hash compat).
+pub fn fc_interval_hash(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let span64 = interval::interval_cmp_value(&arg_interval(fcinfo, 0)) as i64;
+    Ok(Datum::from_i32(hashfn::hash_bytes_uint32(crate::int64_hash_fold(span64)) as i32))
+}
+
+pub fn fc_interval_hash_extended(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let span64 = interval::interval_cmp_value(&arg_interval(fcinfo, 0)) as i64;
+    Ok(Datum::from_i64(hashfn::hash_bytes_uint32_extended(
+        crate::int64_hash_fold(span64),
+        fcinfo.arg_i64(1) as u64,
+    ) as i64))
+}
+
+pub fn fc_interval_um(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let iv = interval::interval_um(&arg_interval(fcinfo, 0))?;
+    interval_result(fcinfo, &iv)
+}
+
+pub fn fc_interval_pl(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let iv = interval::interval_pl(&arg_interval(fcinfo, 0), &arg_interval(fcinfo, 1))?;
+    interval_result(fcinfo, &iv)
+}
+
+pub fn fc_interval_mi(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let iv = interval::interval_mi(&arg_interval(fcinfo, 0), &arg_interval(fcinfo, 1))?;
+    interval_result(fcinfo, &iv)
+}
+
+pub fn fc_interval_mul(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let iv = interval::interval_mul(&arg_interval(fcinfo, 0), fcinfo.arg_f64(1))?;
+    interval_result(fcinfo, &iv)
+}
+
+pub fn fc_mul_d_interval(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let iv = interval::interval_mul(&arg_interval(fcinfo, 1), fcinfo.arg_f64(0))?;
+    interval_result(fcinfo, &iv)
+}
+
+pub fn fc_interval_div(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let iv = interval::interval_div(&arg_interval(fcinfo, 0), fcinfo.arg_f64(1))?;
+    interval_result(fcinfo, &iv)
+}
+
+// C returns one of the input pointers: no allocation.
+pub fn fc_interval_smaller(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let [a, b] = fcinfo.args_n::<2>();
+    let c =
+        interval::interval_cmp_internal(&arg_interval(fcinfo, 0), &arg_interval(fcinfo, 1));
+    Ok(if c < 0 { a.value } else { b.value })
+}
+
+pub fn fc_interval_larger(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let [a, b] = fcinfo.args_n::<2>();
+    let c =
+        interval::interval_cmp_internal(&arg_interval(fcinfo, 0), &arg_interval(fcinfo, 1));
+    Ok(if c > 0 { a.value } else { b.value })
+}
+
+pub fn fc_interval_justify_hours(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let iv = interval::interval_justify_hours(&arg_interval(fcinfo, 0))?;
+    interval_result(fcinfo, &iv)
+}
+
+pub fn fc_interval_justify_days(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let iv = interval::interval_justify_days(&arg_interval(fcinfo, 0))?;
+    interval_result(fcinfo, &iv)
+}
+
+pub fn fc_interval_justify_interval(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let iv = interval::interval_justify_interval(&arg_interval(fcinfo, 0))?;
+    interval_result(fcinfo, &iv)
+}
+
+pub fn fc_interval_scale(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let iv = interval::interval_scale(&arg_interval(fcinfo, 0), fcinfo.arg_i32(1))?;
+    interval_result(fcinfo, &iv)
+}
+
+pub fn fc_interval_finite(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    Ok(Datum::from_bool(!arg_interval(fcinfo, 0).not_finite()))
+}
+
+pub fn fc_timestamp_in(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let typmod = fcinfo.arg_i32(2);
+    let s = in_arg(fcinfo);
+    // SAFETY: context, if set, rides per the ErrorSaveNode contract for this call.
+    let esc = unsafe { fcinfo.soft_error_context() };
+    Ok(Datum::from_i64(adt_timestamp::timestamp_in(&s, typmod, esc)?))
+}
+
+pub fn fc_timestamptz_in(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let typmod = fcinfo.arg_i32(2);
+    let s = in_arg(fcinfo);
+    // SAFETY: context, if set, rides per the ErrorSaveNode contract for this call.
+    let esc = unsafe { fcinfo.soft_error_context() };
+    Ok(Datum::from_i64(adt_timestamp::timestamptz_in(&s, typmod, esc)?))
+}
+
+pub fn fc_timestamp_out(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let t = fcinfo.arg_i64(0);
+    OUT_SCRATCH.with(|c| {
+        // SAFETY: single-threaded backend; the sole live access is this call.
+        let buf = unsafe { &mut *c.get() };
+        let len = adt_timestamp::timestamp_out(t, buf)?;
+        buf[len] = 0;
+        Ok(Datum::from_usize(buf.as_ptr() as usize))
+    })
+}
+
+pub fn fc_timestamptz_out(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let t = fcinfo.arg_i64(0);
+    OUT_SCRATCH.with(|c| {
+        // SAFETY: single-threaded backend; the sole live access is this call.
+        let buf = unsafe { &mut *c.get() };
+        let len = adt_timestamp::timestamptz_out(t, buf)?;
+        buf[len] = 0;
+        Ok(Datum::from_usize(buf.as_ptr() as usize))
+    })
+}
+
+pub fn fc_timestamp_recv(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let typmod = fcinfo.arg_i32(2);
+    // SAFETY: recv arg0 is the live StringInfo pointer per the recv ABI.
+    let buf = unsafe { fcinfo.arg_stringinfo(0) };
+    Ok(Datum::from_i64(adt_timestamp::timestamp_recv(buf, typmod)?))
+}
+
+pub fn fc_timestamptz_recv(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let typmod = fcinfo.arg_i32(2);
+    // SAFETY: recv arg0 is the live StringInfo pointer per the recv ABI.
+    let buf = unsafe { fcinfo.arg_stringinfo(0) };
+    Ok(Datum::from_i64(adt_timestamp::timestamptz_recv(buf, typmod)?))
+}
+
+pub fn fc_timestamp_send(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let t = fcinfo.arg_i64(0);
+    let mcx = fcinfo.result_mcx();
+    Ok(varlena_result(adt_timestamp::timestamp_send(mcx, t)?))
+}
+
+macro_rules! ts_cmp_ops {
+    ($($fc:ident: $op:tt;)*) => {$(
+        pub fn $fc(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+            let (a, b) = (fcinfo.arg_i64(0), fcinfo.arg_i64(1));
+            Ok(Datum::from_bool(a $op b))
+        }
+    )*};
+}
+
+ts_cmp_ops! {
+    fc_timestamp_eq: ==;
+    fc_timestamp_ne: !=;
+    fc_timestamp_lt: <;
+    fc_timestamp_le: <=;
+    fc_timestamp_gt: >;
+    fc_timestamp_ge: >=;
+}
+
+pub fn fc_timestamp_cmp(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    Ok(Datum::from_i32(crate::timestamp_cmp_internal(
+        fcinfo.arg_i64(0),
+        fcinfo.arg_i64(1),
+    )))
+}
+
+pub fn fc_timestamp_hash(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let folded = crate::int64_hash_fold(fcinfo.arg_i64(0));
+    Ok(Datum::from_i32(hashfn::hash_bytes_uint32(folded) as i32))
+}
+
+pub fn fc_timestamp_hash_extended(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let folded = crate::int64_hash_fold(fcinfo.arg_i64(0));
+    Ok(Datum::from_i64(
+        hashfn::hash_bytes_uint32_extended(folded, fcinfo.arg_i64(1) as u64) as i64,
+    ))
+}
+
+pub fn fc_timestamp_larger(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let (a, b) = (fcinfo.arg_i64(0), fcinfo.arg_i64(1));
+    Ok(Datum::from_i64(if a > b { a } else { b }))
+}
+
+pub fn fc_timestamp_smaller(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let (a, b) = (fcinfo.arg_i64(0), fcinfo.arg_i64(1));
+    Ok(Datum::from_i64(if a < b { a } else { b }))
+}
+
+pub fn fc_timestamp_finite(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    Ok(Datum::from_bool(!TIMESTAMP_NOT_FINITE(fcinfo.arg_i64(0))))
+}
+
+pub fn fc_timestamp_scale(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    Ok(Datum::from_i64(adt_timestamp::timestamp_scale(
+        fcinfo.arg_i64(0),
+        fcinfo.arg_i32(1),
+    )?))
+}
+
+pub fn fc_timestamp_mi(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let iv = interval::timestamp_mi(fcinfo.arg_i64(0), fcinfo.arg_i64(1))?;
+    interval_result(fcinfo, &iv)
+}
+
+pub fn fc_timestamp_pl_interval(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let iv = arg_interval(fcinfo, 1);
+    Ok(Datum::from_i64(interval::timestamp_pl_interval(fcinfo.arg_i64(0), &iv)?))
+}
+
+pub fn fc_timestamp_mi_interval(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let iv = arg_interval(fcinfo, 1);
+    Ok(Datum::from_i64(interval::timestamp_mi_interval(fcinfo.arg_i64(0), &iv)?))
+}
+
+pub fn fc_timestamptz_pl_interval(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let iv = arg_interval(fcinfo, 1);
+    Ok(Datum::from_i64(interval::timestamptz_pl_interval_internal(
+        fcinfo.arg_i64(0),
+        &iv,
+        None,
+    )?))
+}
+
+pub fn fc_timestamptz_mi_interval(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let iv = arg_interval(fcinfo, 1);
+    Ok(Datum::from_i64(interval::timestamptz_mi_interval_internal(
+        fcinfo.arg_i64(0),
+        &iv,
+        None,
+    )?))
+}
+
+pub fn fc_date_pl_interval(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let iv = arg_interval(fcinfo, 1);
+    Ok(Datum::from_i64(crate::date_pl_interval(arg_date(fcinfo, 0), &iv)?))
+}
+
+pub fn fc_date_mi_interval(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let iv = arg_interval(fcinfo, 1);
+    Ok(Datum::from_i64(crate::date_mi_interval(arg_date(fcinfo, 0), &iv)?))
+}
+
+pub fn fc_time_pl_interval(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let iv = arg_interval(fcinfo, 1);
+    Ok(Datum::from_i64(crate::time_pl_interval(fcinfo.arg_i64(0), &iv)?))
+}
+
+pub fn fc_time_mi_interval(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let iv = arg_interval(fcinfo, 1);
+    Ok(Datum::from_i64(crate::time_mi_interval(fcinfo.arg_i64(0), &iv)?))
+}
+
+pub fn fc_timetz_pl_interval(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let t = arg_timetz(fcinfo, 0);
+    let iv = arg_interval(fcinfo, 1);
+    timetz_result(fcinfo, &crate::timetz_pl_interval(&t, &iv)?)
+}
+
+pub fn fc_timetz_mi_interval(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let t = arg_timetz(fcinfo, 0);
+    let iv = arg_interval(fcinfo, 1);
+    timetz_result(fcinfo, &crate::timetz_mi_interval(&t, &iv)?)
+}
+
+pub fn fc_time_interval(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    interval_result(fcinfo, &crate::time_interval(fcinfo.arg_i64(0)))
+}
+
+pub fn fc_interval_time(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    Ok(Datum::from_i64(crate::interval_time(&arg_interval(fcinfo, 0))?))
+}
+
+pub fn fc_time_mi_time(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    interval_result(fcinfo, &crate::time_mi_time(fcinfo.arg_i64(0), fcinfo.arg_i64(1)))
+}
+
+macro_rules! ts_tstz_cross {
+    ($($fc:ident: ($swap:literal) $test:tt;)*) => {$(
+        pub fn $fc(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+            let (ts, tstz) = if $swap {
+                (fcinfo.arg_i64(1), fcinfo.arg_i64(0))
+            } else {
+                (fcinfo.arg_i64(0), fcinfo.arg_i64(1))
+            };
+            let c = interval::timestamp_cmp_timestamptz_internal(ts, tstz)?;
+            Ok(ts_tstz_cross!(@ret c, $swap, $test))
+        }
+    )*};
+    (@ret $c:ident, $swap:literal, cmp) => {
+        Datum::from_i32(if $swap { -$c } else { $c })
+    };
+    (@ret $c:ident, $swap:literal, ($op:tt)) => {
+        Datum::from_bool(if $swap { 0 $op $c } else { $c $op 0 })
+    };
+}
+
+ts_tstz_cross! {
+    fc_timestamp_lt_timestamptz: (false) (<);
+    fc_timestamp_le_timestamptz: (false) (<=);
+    fc_timestamp_eq_timestamptz: (false) (==);
+    fc_timestamp_gt_timestamptz: (false) (>);
+    fc_timestamp_ge_timestamptz: (false) (>=);
+    fc_timestamp_ne_timestamptz: (false) (!=);
+    fc_timestamp_cmp_timestamptz: (false) cmp;
+    fc_timestamptz_lt_timestamp: (true) (<);
+    fc_timestamptz_le_timestamp: (true) (<=);
+    fc_timestamptz_eq_timestamp: (true) (==);
+    fc_timestamptz_gt_timestamp: (true) (>);
+    fc_timestamptz_ge_timestamp: (true) (>=);
+    fc_timestamptz_ne_timestamp: (true) (!=);
+    fc_timestamptz_cmp_timestamp: (true) cmp;
+}
+
+pub fn fc_timestamp_timestamptz(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    Ok(Datum::from_i64(interval::timestamp2timestamptz(fcinfo.arg_i64(0))?))
+}
+
+pub fn fc_timestamptz_timestamp(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    Ok(Datum::from_i64(interval::timestamptz2timestamp(fcinfo.arg_i64(0))?))
+}
+
+pub fn fc_timetz_in(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let typmod = fcinfo.arg_i32(2);
+    let s = in_arg(fcinfo);
+    // SAFETY: context, if set, rides per the ErrorSaveNode contract for this call.
+    let esc = unsafe { fcinfo.soft_error_context() };
+    let t = crate::timetz_in(&s, typmod, esc)?;
+    timetz_result(fcinfo, &t)
+}
+
+pub fn fc_timetz_scale(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let t = arg_timetz(fcinfo, 0);
+    timetz_result(fcinfo, &crate::timetz_scale(&t, fcinfo.arg_i32(1)))
+}
+
+pub fn fc_time_timetz(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    timetz_result(fcinfo, &crate::time_timetz(fcinfo.arg_i64(0)))
+}
+
+pub fn fc_timestamptz_timetz(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    match crate::timestamptz_timetz(fcinfo.arg_i64(0))? {
+        Some(t) => timetz_result(fcinfo, &t),
+        None => Ok(fcinfo.return_null()),
+    }
+}
+
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin { foid, name, nargs, strict: true, retset: false, func }
 }
@@ -613,4 +1081,97 @@ pub const DATE_BUILTINS: &[FmgrBuiltin] = &[
     b(3847, "make_time", 3, fc_make_time),
     b(6415, "hashdate", 1, fc_hashdate),
     b(6416, "hashdateextended", 2, fc_hashdateextended),
+    b(1160, "interval_in", 3, fc_interval_in),
+    b(1161, "interval_out", 1, fc_interval_out),
+    b(2478, "interval_recv", 3, fc_interval_recv),
+    b(2479, "interval_send", 1, fc_interval_send),
+    b(1162, "interval_eq", 2, fc_interval_eq),
+    b(1163, "interval_ne", 2, fc_interval_ne),
+    b(1164, "interval_lt", 2, fc_interval_lt),
+    b(1165, "interval_le", 2, fc_interval_le),
+    b(1166, "interval_ge", 2, fc_interval_ge),
+    b(1167, "interval_gt", 2, fc_interval_gt),
+    b(1315, "interval_cmp", 2, fc_interval_cmp),
+    b(1697, "interval_hash", 1, fc_interval_hash),
+    b(3418, "interval_hash_extended", 2, fc_interval_hash_extended),
+    b(1168, "interval_um", 1, fc_interval_um),
+    b(1169, "interval_pl", 2, fc_interval_pl),
+    b(1170, "interval_mi", 2, fc_interval_mi),
+    b(1618, "interval_mul", 2, fc_interval_mul),
+    b(1624, "mul_d_interval", 2, fc_mul_d_interval),
+    b(1326, "interval_div", 2, fc_interval_div),
+    b(1197, "interval_smaller", 2, fc_interval_smaller),
+    b(1198, "interval_larger", 2, fc_interval_larger),
+    b(1175, "interval_justify_hours", 1, fc_interval_justify_hours),
+    b(1295, "interval_justify_days", 1, fc_interval_justify_days),
+    b(2711, "interval_justify_interval", 1, fc_interval_justify_interval),
+    b(1200, "interval_scale", 2, fc_interval_scale),
+    b(1390, "interval_finite", 1, fc_interval_finite),
+    b(1312, "timestamp_in", 3, fc_timestamp_in),
+    b(1313, "timestamp_out", 1, fc_timestamp_out),
+    b(1150, "timestamptz_in", 3, fc_timestamptz_in),
+    b(1151, "timestamptz_out", 1, fc_timestamptz_out),
+    b(2474, "timestamp_recv", 3, fc_timestamp_recv),
+    b(2475, "timestamp_send", 1, fc_timestamp_send),
+    b(2476, "timestamptz_recv", 3, fc_timestamptz_recv),
+    b(2477, "timestamptz_send", 1, fc_timestamp_send),
+    b(1152, "timestamp_eq", 2, fc_timestamp_eq),
+    b(1153, "timestamp_ne", 2, fc_timestamp_ne),
+    b(1154, "timestamp_lt", 2, fc_timestamp_lt),
+    b(1155, "timestamp_le", 2, fc_timestamp_le),
+    b(1156, "timestamp_ge", 2, fc_timestamp_ge),
+    b(1157, "timestamp_gt", 2, fc_timestamp_gt),
+    b(1314, "timestamp_cmp", 2, fc_timestamp_cmp),
+    b(2052, "timestamp_eq", 2, fc_timestamp_eq),
+    b(2053, "timestamp_ne", 2, fc_timestamp_ne),
+    b(2054, "timestamp_lt", 2, fc_timestamp_lt),
+    b(2055, "timestamp_le", 2, fc_timestamp_le),
+    b(2056, "timestamp_ge", 2, fc_timestamp_ge),
+    b(2057, "timestamp_gt", 2, fc_timestamp_gt),
+    b(2045, "timestamp_cmp", 2, fc_timestamp_cmp),
+    b(2039, "timestamp_hash", 1, fc_timestamp_hash),
+    b(3411, "timestamp_hash_extended", 2, fc_timestamp_hash_extended),
+    b(1195, "timestamp_smaller", 2, fc_timestamp_smaller),
+    b(1196, "timestamp_larger", 2, fc_timestamp_larger),
+    b(2035, "timestamp_smaller", 2, fc_timestamp_smaller),
+    b(2036, "timestamp_larger", 2, fc_timestamp_larger),
+    b(1389, "timestamp_finite", 1, fc_timestamp_finite),
+    b(2048, "timestamp_finite", 1, fc_timestamp_finite),
+    b(1961, "timestamp_scale", 2, fc_timestamp_scale),
+    b(1967, "timestamptz_scale", 2, fc_timestamp_scale),
+    b(1188, "timestamp_mi", 2, fc_timestamp_mi),
+    b(2031, "timestamp_mi", 2, fc_timestamp_mi),
+    b(2032, "timestamp_pl_interval", 2, fc_timestamp_pl_interval),
+    b(2033, "timestamp_mi_interval", 2, fc_timestamp_mi_interval),
+    b(1189, "timestamptz_pl_interval", 2, fc_timestamptz_pl_interval),
+    b(1190, "timestamptz_mi_interval", 2, fc_timestamptz_mi_interval),
+    b(2071, "date_pl_interval", 2, fc_date_pl_interval),
+    b(2072, "date_mi_interval", 2, fc_date_mi_interval),
+    b(1747, "time_pl_interval", 2, fc_time_pl_interval),
+    b(1748, "time_mi_interval", 2, fc_time_mi_interval),
+    b(1749, "timetz_pl_interval", 2, fc_timetz_pl_interval),
+    b(1750, "timetz_mi_interval", 2, fc_timetz_mi_interval),
+    b(1370, "time_interval", 1, fc_time_interval),
+    b(1419, "interval_time", 1, fc_interval_time),
+    b(1690, "time_mi_time", 2, fc_time_mi_time),
+    b(2520, "timestamp_lt_timestamptz", 2, fc_timestamp_lt_timestamptz),
+    b(2521, "timestamp_le_timestamptz", 2, fc_timestamp_le_timestamptz),
+    b(2522, "timestamp_eq_timestamptz", 2, fc_timestamp_eq_timestamptz),
+    b(2523, "timestamp_gt_timestamptz", 2, fc_timestamp_gt_timestamptz),
+    b(2524, "timestamp_ge_timestamptz", 2, fc_timestamp_ge_timestamptz),
+    b(2525, "timestamp_ne_timestamptz", 2, fc_timestamp_ne_timestamptz),
+    b(2526, "timestamp_cmp_timestamptz", 2, fc_timestamp_cmp_timestamptz),
+    b(2527, "timestamptz_lt_timestamp", 2, fc_timestamptz_lt_timestamp),
+    b(2528, "timestamptz_le_timestamp", 2, fc_timestamptz_le_timestamp),
+    b(2529, "timestamptz_eq_timestamp", 2, fc_timestamptz_eq_timestamp),
+    b(2530, "timestamptz_gt_timestamp", 2, fc_timestamptz_gt_timestamp),
+    b(2531, "timestamptz_ge_timestamp", 2, fc_timestamptz_ge_timestamp),
+    b(2532, "timestamptz_ne_timestamp", 2, fc_timestamptz_ne_timestamp),
+    b(2533, "timestamptz_cmp_timestamp", 2, fc_timestamptz_cmp_timestamp),
+    b(2027, "timestamptz_timestamp", 1, fc_timestamptz_timestamp),
+    b(2028, "timestamp_timestamptz", 1, fc_timestamp_timestamptz),
+    b(1350, "timetz_in", 3, fc_timetz_in),
+    b(1969, "timetz_scale", 2, fc_timetz_scale),
+    b(2047, "time_timetz", 1, fc_time_timetz),
+    b(1388, "timestamptz_timetz", 1, fc_timestamptz_timetz),
 ];

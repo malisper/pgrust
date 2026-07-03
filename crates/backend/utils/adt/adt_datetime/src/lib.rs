@@ -19,13 +19,14 @@ pub use calendar::{
 };
 pub use consts::*;
 pub use decode::{
-    datebsearch, dt2time, float_time_overflows, time_overflows, CheckDateTokenTables, ClearTimeZoneAbbrevCache,
-    DecodeDate, DecodeDateTime, DecodeNumber, DecodeNumberField, DecodeSpecial, DecodeTime,
-    DecodeTimeOnly, DecodeTimezone, DecodeTimezoneAbbrev, DecodeUnits, ParseDateTime,
-    ParseFraction, ParseFractionalSecond, ValidateDate,
+    datebsearch, dt2time, float_time_overflows, time_overflows, CheckDateTokenTables,
+    ClearTimeZoneAbbrevCache, DecodeDate, DecodeDateTime, DecodeISO8601Interval, DecodeInterval,
+    DecodeNumber, DecodeNumberField, DecodeSpecial, DecodeTime, DecodeTimeOnly, DecodeTimezone,
+    DecodeTimezoneAbbrev, DecodeUnits, ParseDateTime, ParseFraction, ParseFractionalSecond,
+    ValidateDate,
 };
 pub use encode::{
-    AppendSeconds, EncodeDateOnly, EncodeDateTime, EncodeTimeOnly, EncodeTimezone,
+    AppendSeconds, EncodeDateOnly, EncodeDateTime, EncodeInterval, EncodeTimeOnly, EncodeTimezone,
 };
 pub use errors::DateTimeParseError;
 pub use settings::{
