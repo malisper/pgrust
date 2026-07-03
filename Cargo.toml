@@ -191,7 +191,6 @@ members = [
     "crates/backend/utils/hash/dynahash",
     "crates/backend/utils/adt/int",
     "crates/backend/utils/adt/arrayfuncs",
-    "crates/backend/utils/adt/arrayfuncs_seams",
     "crates/backend/utils/adt/arrayutils",
     "crates/backend/utils/adt/int8",
     "crates/backend/access/index/amapi",

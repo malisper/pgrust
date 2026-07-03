@@ -584,7 +584,7 @@ pub fn fc_numerictypmodin(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -
     // SAFETY: catalog arg 0 of numerictypmodin is a non-null cstring[] datum
     // (strict fn); typenameTypeMod builds it flat (never toasted).
     let arr = unsafe { fcinfo.arg_varlena_raw(0) };
-    let tl = ::arrayfuncs_seams::array_get_integer_typmods::call(mcx, arr)?;
+    let tl = ::arrayfuncs::array_get_integer_typmods(mcx, arr)?;
 
     #[cold]
     #[inline(never)]
