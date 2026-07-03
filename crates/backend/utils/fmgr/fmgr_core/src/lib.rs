@@ -230,11 +230,12 @@ pub fn fmgr_info_from_builtin(fbp: &FmgrBuiltin, function_id: Oid) -> FmgrInfo {
 /// C: `fmgr_info`/`fmgr_info_cxt` (fn_mcxt dropped: fn_extra owns its storage).
 /// Field-wise fill of the caller's carrier, like C — a by-value return spills
 /// the 56B carrier through an sret and its droppy slots stop folding (bench).
-/// Non-builtin legs (pg_proc syscache, secdef, SQL/PL languages) are not
-/// ported; C's "cache lookup failed for function %u" cannot be told apart from
-/// an unported leg without pg_proc, so both panic loudly. In-core C-language
-/// functions (C's fmgr_info_C_lang dlopen leg) resolve from NATIVE_CLANG
-/// instead of pg_proc — their FmgrBuiltin rows carry the pg_proc metadata.
+/// Non-builtin OIDs resolve through pg_proc (syscache seam): prolang internal
+/// dispatches by prosrc name, prolang sql through the registered SQL-language
+/// handler (resolved once here, never per row); other languages and secdef
+/// panic loudly. In-core C-language functions (C's fmgr_info_C_lang dlopen
+/// leg) resolve from NATIVE_CLANG instead of pg_proc — their FmgrBuiltin rows
+/// carry the pg_proc metadata.
 #[inline]
 pub fn fmgr_info_into(function_id: Oid, finfo: &mut FmgrInfo) -> PgResult<()> {
     match fmgr_isbuiltin(function_id) {
@@ -247,9 +248,70 @@ pub fn fmgr_info_into(function_id: Oid, finfo: &mut FmgrInfo) -> PgResult<()> {
                 fmgr_info_from_builtin_into(fbp, function_id, finfo);
                 Ok(())
             }
-            None => non_builtin_unported(function_id),
+            None => fmgr_info_pg_proc(function_id, finfo),
         },
     }
+}
+
+pub const INTERNAL_LANGUAGE_ID: Oid = 12;
+pub const C_LANGUAGE_ID: Oid = 13;
+pub const SQL_LANGUAGE_ID: Oid = 14;
+
+static SQL_HANDLER: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+pub fn register_sql_language_handler(handler: ::fmgr::PGFunction) {
+    SQL_HANDLER.store(handler as usize, core::sync::atomic::Ordering::Release);
+}
+
+#[cold]
+#[inline(never)]
+fn fmgr_info_pg_proc(function_id: Oid, finfo: &mut FmgrInfo) -> PgResult<()> {
+    use ::types_error::{PgError, ERRCODE_UNDEFINED_FUNCTION};
+    let Some(row) = syscache_seams::lookup_pg_proc_fmgr::call(function_id)? else {
+        return Err(alloc::boxed::Box::new(PgError::error(alloc::format!(
+            "cache lookup failed for function {function_id}"
+        ))));
+    };
+    let fn_addr = match row.prolang {
+        INTERNAL_LANGUAGE_ID => {
+            let cx = ::mcx::MemoryContext::new("fmgr_info prosrc");
+            let prosrc = syscache_seams::lookup_pg_proc_prosrc::call(cx.mcx(), function_id)?
+                .unwrap_or_else(|| panic!("fmgr: null prosrc for function {function_id}"));
+            match fmgr_lookup_by_name(&prosrc) {
+                Some(fbp) => fbp.func,
+                None => {
+                    return Err(alloc::boxed::Box::new(
+                        PgError::error(alloc::format!(
+                            "internal function \"{}\" is not in internal lookup table",
+                            prosrc.as_str()
+                        ))
+                        .with_sqlstate(ERRCODE_UNDEFINED_FUNCTION),
+                    ))
+                }
+            }
+        }
+        SQL_LANGUAGE_ID => {
+            let h = SQL_HANDLER.load(core::sync::atomic::Ordering::Acquire);
+            if h == 0 {
+                panic!("fmgr: SQL-language handler not registered (function {function_id})");
+            }
+            // SAFETY: written only by register_sql_language_handler from a
+            // valid PGFunction.
+            unsafe { core::mem::transmute::<usize, ::fmgr::PGFunction>(h) }
+        }
+        lang => panic!(
+            "fmgr: language {lang} handler not ported (function {function_id})"
+        ),
+    };
+    finfo.fn_addr = fn_addr;
+    finfo.fn_nargs = row.pronargs;
+    finfo.fn_strict = row.proisstrict;
+    finfo.fn_retset = row.proretset;
+    finfo.fn_stats = TRACK_FUNC_ALL;
+    finfo.fn_extra = None;
+    finfo.fn_expr = None;
+    finfo.fn_oid = function_id;
+    Ok(())
 }
 
 #[inline]
@@ -262,12 +324,6 @@ pub fn fmgr_info(function_id: Oid) -> PgResult<FmgrInfo> {
 #[cold]
 fn native_clang_builtin(function_id: Oid) -> Option<&'static FmgrBuiltin> {
     ::conv::conv_builtin(function_id)
-}
-
-#[cold]
-#[inline(never)]
-fn non_builtin_unported(function_id: Oid) -> ! {
-    panic!("fmgr: function {function_id} is not a builtin; pg_proc resolution not ported");
 }
 
 pub fn oid_function_call0_coll(function_id: Oid, collation: Oid) -> PgResult<Datum> {

@@ -13,6 +13,7 @@ parse_utilcmd = { path = "../../parser/parse_utilcmd" }
 tablecmds = { path = "../../commands/tablecmds" }
 schemacmds = { path = "../../commands/schemacmds" }
 dbcommands = { path = "../../commands/dbcommands" }
+functioncmds = { path = "../../commands/functioncmds" }
 commands_comment = { path = "../../commands/comment" }
 elog_seams = { path = "../../utils/error/elog_seams" }
 sequence = { path = "../../commands/sequence" }

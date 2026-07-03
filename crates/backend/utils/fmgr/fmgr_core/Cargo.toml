@@ -51,8 +51,9 @@ adt_windowfuncs = { path = "../../adt/windowfuncs" }
 cryptohashfuncs = { path = "../../adt/cryptohashfuncs" }
 pseudorandomfuncs = { path = "../../adt/pseudorandomfuncs" }
 conv = { path = "../../mb/conv" }
+mcx = { path = "../../../../_support/mcx" }
+syscache_seams = { path = "../../cache/syscache_seams" }
 
 [dev-dependencies]
-mcx = { path = "../../../../_support/mcx" }
 stringinfo = { path = "../../../../_support/types/stringinfo" }
 nodes = { package = "types_nodes", path = "../../../../_support/types/nodes" }

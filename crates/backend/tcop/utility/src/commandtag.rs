@@ -161,7 +161,13 @@ pub fn CreateCommandTag(parsetree: Node<'_>) -> CommandTag {
         T_CreateRangeStmt => CMDTAG_CREATE_TYPE,
         T_AlterEnumStmt => CMDTAG_ALTER_TYPE,
         T_ViewStmt => CMDTAG_CREATE_VIEW,
-        T_CreateFunctionStmt => payload_gap("CreateCommandTag", "CreateFunctionStmt"),
+        T_CreateFunctionStmt => {
+            if parsetree.as_create_function_stmt().unwrap().is_procedure {
+                CMDTAG_CREATE_PROCEDURE
+            } else {
+                CMDTAG_CREATE_FUNCTION
+            }
+        }
         T_IndexStmt => CMDTAG_CREATE_INDEX,
         T_RuleStmt => CMDTAG_CREATE_RULE,
         T_CreateSeqStmt => CMDTAG_CREATE_SEQUENCE,

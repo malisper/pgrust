@@ -476,6 +476,18 @@ fn dispatch_switch<'mcx>(
             schemacmds::CreateSchemaCommand(mcx, stmt)?;
 }
 
+        T_CreateFunctionStmt => {
+            let stmt = parsetree.as_create_function_stmt().unwrap();
+            // Retention contract as unify_stmt_lifetime.
+            let stmt = unsafe {
+                core::mem::transmute::<
+                    &types_nodes::parsenodes::CreateFunctionStmt<'_>,
+                    &types_nodes::parsenodes::CreateFunctionStmt<'mcx>,
+                >(stmt)
+            };
+            functioncmds::CreateFunction(mcx, stmt)?;
+        }
+
         T_IndexStmt => {
             // Retention contract as unify_stmt_lifetime: the statement arena
             // outlives the utility call; nothing derived escapes it.

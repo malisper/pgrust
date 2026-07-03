@@ -151,6 +151,7 @@ pub fn init_all() {
     fmgr_core::register_late_builtins(adt_acl::builtins::ACL_BUILTINS);
     fmgr_core::register_late_builtins(adt_misc::MISC_BUILTINS);
     fmgr_core::register_late_builtins(dbcommands::builtins::DBCOMMANDS_BUILTINS);
+    sql_functions::init_seams();
     funcapi::init_seams();
     init_small::init_seams();
     miscinit::init_seams();

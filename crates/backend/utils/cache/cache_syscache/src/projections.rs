@@ -631,6 +631,8 @@ const ANUM_PG_RANGE_RNGSUBTYPE: i32 = 2;
 const ANUM_PG_RANGE_RNGMULTITYPID: i32 = 3;
 const ANUM_PG_RANGE_RNGCOLLATION: i32 = 4;
 const ANUM_PG_PROC_PROARGDEFAULTS: i32 = 24;
+const ANUM_PG_PROC_PROLANG: i32 = 5;
+const ANUM_PG_PROC_PROSRC: i32 = 26;
 const ANUM_PG_AMPROC_AMPROCRIGHTTYPE: i32 = 4;
 const ANUM_PG_AMPROC_AMPROCNUM: i32 = 5;
 const ANUM_PG_AMPROC_AMPROC: i32 = 6;
@@ -895,6 +897,40 @@ fn lookup_pg_proc_shape(funcid: Oid) -> PgResult<Option<syscache_seams::PgProcSh
     drop(t);
     ReleaseSysCache(tuple);
     Ok(Some(shape))
+}
+
+fn lookup_pg_proc_fmgr(funcid: Oid) -> PgResult<Option<syscache_seams::PgProcFmgrShape>> {
+    let Some(tuple) = SearchSysCache1(PROCOID, SysCacheKey::Value(Datum::from_oid(funcid)))? else {
+        return Ok(None);
+    };
+    let t = tuple.tuple();
+    let shape = syscache_seams::PgProcFmgrShape {
+        prolang: getattr(&t, PROCOID, ANUM_PG_PROC_PROLANG).as_oid(),
+        prorettype: getattr(&t, PROCOID, ANUM_PG_PROC_PRORETTYPE).as_oid(),
+        pronargs: getattr(&t, PROCOID, ANUM_PG_PROC_PRONARGS).as_i16(),
+        proisstrict: getattr(&t, PROCOID, ANUM_PG_PROC_PROISSTRICT).as_bool(),
+        proretset: getattr(&t, PROCOID, ANUM_PG_PROC_PRORETSET).as_bool(),
+    };
+    drop(t);
+    ReleaseSysCache(tuple);
+    Ok(Some(shape))
+}
+
+fn lookup_pg_proc_prosrc<'mcx>(mcx: Mcx<'mcx>, funcid: Oid) -> PgResult<Option<PgString<'mcx>>> {
+    let Some(tuple) = SearchSysCache1(PROCOID, SysCacheKey::Value(Datum::from_oid(funcid)))? else {
+        return Ok(None);
+    };
+    let t = tuple.tuple();
+    let out = match varlena_image(mcx, &t, PROCOID, ANUM_PG_PROC_PROSRC)? {
+        Some(img) => {
+            let s = core::str::from_utf8(&img[4..]).expect("prosrc is server-encoding text");
+            Some(PgString::from_str_in(s, mcx)?)
+        }
+        None => None,
+    };
+    drop(t);
+    ReleaseSysCache(tuple);
+    Ok(out)
 }
 
 fn lookup_pg_proc_name_candidates<'mcx>(
@@ -1569,6 +1605,8 @@ pub(crate) fn install() {
     syscache_seams::pg_type_typrelid::set(pg_type_typrelid);
     syscache_seams::pg_proc_proname::set(pg_proc_proname);
     syscache_seams::lookup_pg_proc_shape::set(lookup_pg_proc_shape);
+    syscache_seams::lookup_pg_proc_fmgr::set(lookup_pg_proc_fmgr);
+    syscache_seams::lookup_pg_proc_prosrc::set(lookup_pg_proc_prosrc);
     syscache_seams::lookup_pg_proc_name_candidates::set(lookup_pg_proc_name_candidates);
     syscache_seams::lookup_pg_operator_candidates::set(lookup_pg_operator_candidates);
     syscache_seams::pg_operator_name_candidates_exist::set(pg_operator_name_candidates_exist);

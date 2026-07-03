@@ -211,6 +211,15 @@ pub struct PgProcShape {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PgProcFmgrShape {
+    pub prolang: Oid,
+    pub prorettype: Oid,
+    pub pronargs: i16,
+    pub proisstrict: bool,
+    pub proretset: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PgClassLsShape {
     pub relnamespace: Oid,
     pub reltype: Oid,
@@ -444,6 +453,18 @@ seam_core::seam!(
 
 seam_core::seam!(
     pub fn pg_operator_oprname(opno: Oid) -> PgResult<Option<NameData>>
+);
+
+seam_core::seam!(
+    // fmgr_info's non-builtin leg: the pg_proc fields FmgrInfo needs.
+    pub fn lookup_pg_proc_fmgr(funcid: Oid) -> PgResult<Option<PgProcFmgrShape>>
+);
+
+seam_core::seam!(
+    pub fn lookup_pg_proc_prosrc<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        funcid: Oid,
+    ) -> PgResult<Option<mcx::PgString<'mcx>>>
 );
 
 seam_core::seam!(

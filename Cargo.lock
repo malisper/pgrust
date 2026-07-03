@@ -1474,7 +1474,6 @@ dependencies = [
  "arrayfuncs",
  "clauses_seams",
  "datum",
- "fmgr_core",
  "lsyscache",
  "mcx",
  "nodes_core",
@@ -2800,6 +2799,7 @@ dependencies = [
  "pseudorandomfuncs",
  "sequence_seams",
  "stringinfo",
+ "syscache_seams",
  "types_core",
  "types_error",
  "types_fmgr",
@@ -2896,6 +2896,26 @@ dependencies = [
  "types_nodes",
  "types_tuple",
  "varlena",
+]
+
+[[package]]
+name = "functioncmds"
+version = "0.1.0"
+dependencies = [
+ "aclchk",
+ "aclchk_seams",
+ "cache_syscache",
+ "catalog_namespace",
+ "lsyscache",
+ "mcx",
+ "miscinit",
+ "pg_proc",
+ "rel_vocab",
+ "superuser",
+ "syscache_seams",
+ "types_core",
+ "types_error",
+ "types_nodes",
 ]
 
 [[package]]
@@ -5720,6 +5740,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "pg_proc"
+version = "0.1.0"
+dependencies = [
+ "cache_syscache",
+ "catalog",
+ "catalog_indexing",
+ "datum",
+ "fmgr_core",
+ "format_type",
+ "heaptuple",
+ "mcx",
+ "pg_depend",
+ "superuser",
+ "table",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_rel",
+ "types_tuple",
+ "varlena",
+ "xact",
+]
+
+[[package]]
 name = "pg_sema"
 version = "0.0.0"
 dependencies = [
@@ -7642,6 +7686,7 @@ dependencies = [
  "smgr",
  "snapmgr",
  "spi",
+ "sql_functions",
  "stack_depth",
  "standby",
  "subtrans",
@@ -8092,6 +8137,49 @@ dependencies = [
  "types_error",
  "types_slot",
  "types_tuple",
+]
+
+[[package]]
+name = "sql_functions"
+version = "0.1.0"
+dependencies = [
+ "analyze_seams",
+ "cache_syscache",
+ "cmdtag",
+ "coerce",
+ "datum",
+ "detoast",
+ "elog",
+ "execmain_seams",
+ "exectuples",
+ "fmgr_core",
+ "format_type",
+ "guc_tables",
+ "init_small",
+ "lsyscache",
+ "mcx",
+ "parse_collate",
+ "parse_expr",
+ "parser_seams",
+ "parser_small1",
+ "plancache",
+ "rewrite_handler_seams",
+ "snapmgr",
+ "tcop_dest",
+ "tuplestore",
+ "types_array",
+ "types_core",
+ "types_dest",
+ "types_error",
+ "types_fmgr",
+ "types_nodes",
+ "types_portal",
+ "types_scan",
+ "types_slot",
+ "types_tuple",
+ "utility",
+ "utility_seams",
+ "xact",
 ]
 
 [[package]]
@@ -9135,6 +9223,7 @@ dependencies = [
  "elog",
  "elog_seams",
  "explain",
+ "functioncmds",
  "guc_funcs",
  "guc_tables",
  "indexcmds",
