@@ -954,6 +954,63 @@ fn dml_delete_stamps_xmax_and_logs() {
 }
 
 #[test]
+fn dml_lock_tuple_stamps_xmax_and_logs() {
+    install_dml_seams();
+    let _serial = serial();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let oid = fresh_oid();
+    register_table(
+        oid,
+        vec![build_page(&[Item::Tuple(tuple_image(10, 0, 1))], false)],
+    );
+    let rel = test_relation(mcx, oid);
+    let _ = take_xlog();
+
+    let tid = ItemPointerData::new(0, 1);
+    let mut tmfd = TM_FailureData::default();
+    let (r, pin) = dml::heap_lock_tuple(
+        &rel,
+        &tid,
+        7,
+        LockTupleMode::LockTupleExclusive,
+        ::tableam_vocab::LockWaitPolicy::LockWaitBlock,
+        false,
+        &mut tmfd,
+    )
+    .unwrap();
+    assert_eq!(r, TM_Result::TM_Ok);
+    drop(pin);
+
+    let stored = page_tuple_at(oid, 0, 1);
+    let im = stored.t_data().t_infomask;
+    assert_eq!(stored.t_data().xmax_raw(), FAKE_XID);
+    assert!((im & HEAP_XMAX_INVALID) == 0);
+    assert!((im & ::types_tuple::HEAP_XMAX_EXCL_LOCK) != 0);
+    assert!((im & ::types_tuple::HEAP_XMAX_LOCK_ONLY) != 0);
+    assert!((stored.t_data().t_infomask2 & HEAP_KEYS_UPDATED) != 0);
+    // Lock-only mark resets the forward ctid to self.
+    assert_eq!(stored.t_data().t_ctid, tid);
+
+    let recs = take_xlog();
+    assert_eq!(recs.len(), 1);
+    assert_eq!(recs[0].0, dml::XLOG_HEAP_LOCK);
+    // xl_heap_lock: xmax(4) offnum(2) infobits_set(1) flags(1)
+    assert_eq!(
+        u32::from_ne_bytes(recs[0].1[0..4].try_into().unwrap()),
+        FAKE_XID
+    );
+    assert_eq!(u16::from_ne_bytes([recs[0].1[4], recs[0].1[5]]), 1);
+    let infobits = recs[0].1[6];
+    assert_eq!(
+        infobits,
+        dml::XLHL_XMAX_LOCK_ONLY | dml::XLHL_XMAX_EXCL_LOCK | dml::XLHL_KEYS_UPDATED
+    );
+    assert_eq!(recs[0].1[7], 0);
+    quiesced();
+}
+
+#[test]
 fn dml_delete_self_modified_fails_without_wal() {
     install_dml_seams();
     let _serial = serial();

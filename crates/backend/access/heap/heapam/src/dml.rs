@@ -738,6 +738,294 @@ pub fn heap_delete(
     Ok(TM_Result::TM_Ok)
 }
 
+/// `heap_lock_tuple` core (heapam.c). Live: single-locker stamp + the
+/// LockWaitBlock wait-then-reread path. LOUD: MultiXact xmax arms, update-chain
+/// following (`follow_updates` / EPQ), all-visible VM pin/clear, and the
+/// NOWAIT/SKIP-LOCKED wait branches. Returns the pinned (content-unlocked)
+/// buffer; the caller stores the locked on-page tuple from it.
+#[allow(clippy::too_many_arguments)]
+pub fn heap_lock_tuple(
+    relation: &RelationData<'_>,
+    tid: &ItemPointerData,
+    cid: CommandId,
+    mode: LockTupleMode,
+    wait_policy: LockWaitPolicy,
+    follow_updates: bool,
+    tmfd: &mut TM_FailureData,
+) -> PgResult<(TM_Result, BufferPin)> {
+    use ::types_tuple::{
+        HEAP_XMAX_IS_EXCL_LOCKED, HEAP_XMAX_IS_KEYSHR_LOCKED, HEAP_XMAX_IS_SHR_LOCKED,
+    };
+
+    let block = ItemPointerGetBlockNumber(tid);
+    let offnum = ItemPointerGetOffsetNumber(tid);
+    let pin = BufferPin::adopt(bufmgr_seams::read_buffer::call(relation, block)?)
+        .expect("ReadBuffer returned InvalidBuffer");
+
+    if pin.page().is_all_visible() {
+        unported("visibilitymap_pin write side (heap_lock_tuple all-visible page, visibilitymap.c)");
+    }
+    bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_EXCLUSIVE)?;
+
+    let lp = pin.page().item_id(offnum);
+    debug_assert!(lp.is_normal());
+
+    let mut have_tuple_lock = false;
+    let mut first_time = true;
+    // SAFETY: pin + exclusive lock held.
+    let mut tp = unsafe { page_tuple(pin.page(), lp, *tid, relation) };
+    macro_rules! relock_tp {
+        () => {{
+            // SAFETY: pin + exclusive lock held.
+            tp = unsafe { page_tuple(pin.page(), pin.page().item_id(offnum), *tid, relation) };
+        }};
+    }
+
+    let result = 'l3: loop {
+        let mut result = hv_seam::heap_tuple_satisfies_update::call(&mut tp, cid, pin.buffer())?;
+
+        if result == TM_Result::TM_Invisible {
+            break 'l3 TM_Result::TM_Invisible;
+        }
+
+        if matches!(
+            result,
+            TM_Result::TM_BeingModified | TM_Result::TM_Updated | TM_Result::TM_Deleted
+        ) {
+            let xwait = tp.t_data().xmax_raw();
+            let infomask = tp.t_data().t_infomask;
+            let infomask2 = tp.t_data().t_infomask2;
+            let t_ctid = tp.t_data().t_ctid;
+
+            bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_UNLOCK)?;
+
+            if (infomask & HEAP_XMAX_IS_MULTI) != 0 {
+                unported("MultiXact lock arms (heap_lock_tuple, multixact.c)");
+            }
+
+            if first_time {
+                first_time = false;
+                if xact_seams::transaction_id_is_current_transaction_id::call(xwait) {
+                    let already = match mode {
+                        LockTupleMode::LockTupleKeyShare => true,
+                        LockTupleMode::LockTupleShare => {
+                            HEAP_XMAX_IS_SHR_LOCKED(infomask) || HEAP_XMAX_IS_EXCL_LOCKED(infomask)
+                        }
+                        LockTupleMode::LockTupleNoKeyExclusive => HEAP_XMAX_IS_EXCL_LOCKED(infomask),
+                        LockTupleMode::LockTupleExclusive => {
+                            HEAP_XMAX_IS_EXCL_LOCKED(infomask)
+                                && (infomask2 & HEAP_KEYS_UPDATED) != 0
+                        }
+                    };
+                    if already {
+                        if have_tuple_lock {
+                            lmgr::UnlockTuple(relation, tid, tuple_lock_hwlock(mode))?;
+                        }
+                        return Ok((TM_Result::TM_Ok, pin));
+                    }
+                }
+            }
+
+            let mut require_sleep = true;
+            match mode {
+                LockTupleMode::LockTupleKeyShare => {
+                    if (infomask2 & HEAP_KEYS_UPDATED) == 0 {
+                        let updated = !HEAP_XMAX_IS_LOCKED_ONLY(infomask);
+                        if follow_updates && updated && tp.t_self != t_ctid {
+                            unported("heap_lock_updated_tuple (follow_updates; EPQ lane)");
+                        }
+                        bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_EXCLUSIVE)?;
+                        relock_tp!();
+                        if !hv_seam::heap_tuple_header_is_only_locked::call(tp.t_data())?
+                            && (((tp.t_data().t_infomask2 & HEAP_KEYS_UPDATED) != 0) || !updated)
+                        {
+                            continue 'l3;
+                        }
+                        require_sleep = false;
+                    }
+                }
+                LockTupleMode::LockTupleShare => {
+                    if HEAP_XMAX_IS_LOCKED_ONLY(infomask) && !HEAP_XMAX_IS_EXCL_LOCKED(infomask) {
+                        bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_EXCLUSIVE)?;
+                        relock_tp!();
+                        if !HEAP_XMAX_IS_LOCKED_ONLY(tp.t_data().t_infomask)
+                            || HEAP_XMAX_IS_EXCL_LOCKED(tp.t_data().t_infomask)
+                        {
+                            continue 'l3;
+                        }
+                        require_sleep = false;
+                    }
+                }
+                LockTupleMode::LockTupleNoKeyExclusive => {
+                    if HEAP_XMAX_IS_KEYSHR_LOCKED(infomask) {
+                        bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_EXCLUSIVE)?;
+                        relock_tp!();
+                        if xmax_infomask_changed(tp.t_data().t_infomask, infomask)
+                            || tp.t_data().xmax_raw() != xwait
+                        {
+                            continue 'l3;
+                        }
+                        require_sleep = false;
+                    }
+                }
+                LockTupleMode::LockTupleExclusive => {}
+            }
+
+            if require_sleep
+                && (infomask & HEAP_XMAX_IS_MULTI) == 0
+                && xact_seams::transaction_id_is_current_transaction_id::call(xwait)
+            {
+                bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_EXCLUSIVE)?;
+                relock_tp!();
+                if xmax_infomask_changed(tp.t_data().t_infomask, infomask)
+                    || tp.t_data().xmax_raw() != xwait
+                {
+                    continue 'l3;
+                }
+                debug_assert!(HEAP_XMAX_IS_LOCKED_ONLY(tp.t_data().t_infomask));
+                require_sleep = false;
+            }
+
+            if require_sleep
+                && (result == TM_Result::TM_Updated || result == TM_Result::TM_Deleted)
+            {
+                bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_EXCLUSIVE)?;
+                relock_tp!();
+                break 'l3 result;
+            } else if require_sleep {
+                if !heap_acquire_tuplock(relation, tid, mode, wait_policy, &mut have_tuple_lock)? {
+                    bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_EXCLUSIVE)?;
+                    relock_tp!();
+                    break 'l3 TM_Result::TM_WouldBlock;
+                }
+                match wait_policy {
+                    LockWaitPolicy::LockWaitBlock => {
+                        lmgr::XactLockTableWait(
+                            xwait,
+                            Some(relation),
+                            Some(&tp.t_self),
+                            ::types_storage::lock::XLTW_Oper::Lock,
+                        )?;
+                    }
+                    LockWaitPolicy::LockWaitSkip | LockWaitPolicy::LockWaitError => {
+                        unported("heap_lock_tuple NOWAIT/SKIP LOCKED wait branch")
+                    }
+                }
+                if follow_updates && !HEAP_XMAX_IS_LOCKED_ONLY(infomask) && tp.t_self != t_ctid {
+                    unported("heap_lock_updated_tuple (follow_updates after sleep; EPQ lane)");
+                }
+                bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_EXCLUSIVE)?;
+                relock_tp!();
+                if xmax_infomask_changed(tp.t_data().t_infomask, infomask)
+                    || tp.t_data().xmax_raw() != xwait
+                {
+                    continue 'l3;
+                }
+                update_xmax_hint_bits(&mut tp, pin.buffer(), xwait)?;
+            }
+
+            result = if !require_sleep
+                || (tp.t_data().t_infomask & HEAP_XMAX_INVALID) != 0
+                || HEAP_XMAX_IS_LOCKED_ONLY(tp.t_data().t_infomask)
+                || hv_seam::heap_tuple_header_is_only_locked::call(tp.t_data())?
+            {
+                TM_Result::TM_Ok
+            } else if tp.t_self != tp.t_data().t_ctid {
+                TM_Result::TM_Updated
+            } else {
+                TM_Result::TM_Deleted
+            };
+        }
+        break 'l3 result;
+    };
+
+    if result != TM_Result::TM_Ok {
+        tmfd.ctid = tp.t_data().t_ctid;
+        tmfd.xmax = HeapTupleHeaderGetUpdateXid(tp.t_data())?;
+        tmfd.cmax = if result == TM_Result::TM_SelfModified {
+            combocid_seams::heap_tuple_header_get_cmax::call(tp.t_data())
+        } else {
+            ::types_core::xact::InvalidCommandId
+        };
+        bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_UNLOCK)?;
+        if have_tuple_lock {
+            lmgr::UnlockTuple(relation, tid, tuple_lock_hwlock(mode))?;
+        }
+        return Ok((result, pin));
+    }
+
+    if pin.page().is_all_visible() {
+        unported("visibilitymap_pin re-lock window (heap_lock_tuple, visibilitymap.c)");
+    }
+
+    let xmax = tp.t_data().xmax_raw();
+    let old_infomask = tp.t_data().t_infomask;
+    let old_infomask2 = tp.t_data().t_infomask2;
+
+    multixact_seams::multi_xact_id_set_oldest_member::call()?;
+
+    let (xid, new_infomask, new_infomask2) = compute_new_xmax_infomask(
+        xmax,
+        old_infomask,
+        old_infomask2,
+        xact_seams::get_current_transaction_id::call()?,
+        mode,
+        false,
+    )?;
+
+    {
+        let hdr = tp.t_data_mut();
+        hdr.t_infomask &= !HEAP_XMAX_BITS;
+        hdr.t_infomask2 &= !HEAP_KEYS_UPDATED;
+        hdr.t_infomask |= new_infomask;
+        hdr.t_infomask2 |= new_infomask2;
+        if HEAP_XMAX_IS_LOCKED_ONLY(new_infomask) {
+            hdr.clear_hot_updated();
+        }
+        hdr.set_xmax(xid);
+        if HEAP_XMAX_IS_LOCKED_ONLY(new_infomask) {
+            hdr.t_ctid = *tid;
+        }
+    }
+
+    if pin.page().is_all_visible() {
+        unported("visibilitymap_clear ALL_FROZEN (heap_lock_tuple, visibilitymap.c)");
+    }
+
+    bufmgr_seams::mark_buffer_dirty::call(pin.buffer())?;
+
+    if relation_needs_wal(relation) {
+        let mut xlrec = [0u8; 8];
+        xlrec[0..4].copy_from_slice(&xid.to_ne_bytes());
+        xlrec[4..6].copy_from_slice(&offnum.to_ne_bytes());
+        xlrec[6] = compute_infobits(new_infomask, tp.t_data().t_infomask2);
+        xlrec[7] = 0;
+
+        let recptr = xloginsert_seams::xlog_insert_record::call(
+            RM_HEAP_ID,
+            XLOG_HEAP_LOCK,
+            0,
+            &[&xlrec],
+            &[XLogRegBuf {
+                block_id: 0,
+                buffer: pin.buffer(),
+                flags: REGBUF_STANDARD,
+                bufdata: &[],
+            }],
+        )?;
+        // SAFETY: pin + exclusive lock held.
+        let mut pm =
+            unsafe { PageMut::from_raw(bufmgr_seams::buffer_get_page::call(pin.buffer())) };
+        pm.set_lsn(recptr);
+    }
+
+    bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_UNLOCK)?;
+    if have_tuple_lock {
+        lmgr::UnlockTuple(relation, tid, tuple_lock_hwlock(mode))?;
+    }
+    Ok((TM_Result::TM_Ok, pin))
+}
+
 /// `simple_heap_delete`.
 pub fn simple_heap_delete(relation: &RelationData<'_>, tid: &ItemPointerData) -> PgResult<()> {
     let mut tmfd = TM_FailureData::default();
