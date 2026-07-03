@@ -1204,6 +1204,7 @@ dependencies = [
  "pg_depend",
  "pg_type",
  "sequence_seams",
+ "statscmds",
  "table",
  "types_core",
  "types_error",
@@ -1773,6 +1774,7 @@ dependencies = [
  "snapbuild_seams",
  "snapmgr",
  "spi_seams",
+ "statistics",
  "subtrans",
  "sync_seams",
  "syncrep_seams",
@@ -6342,6 +6344,7 @@ dependencies = [
  "execmain",
  "exectuples",
  "fmgr_core",
+ "fmgr_seams",
  "gin",
  "gist",
  "guc_tables",
@@ -6366,6 +6369,7 @@ dependencies = [
  "relcache",
  "relcache_build_seams",
  "relcache_seams",
+ "statistics",
  "syscache_seams",
  "table",
  "tableam",
@@ -8666,6 +8670,65 @@ dependencies = [
 ]
 
 [[package]]
+name = "statistics"
+version = "0.0.0"
+dependencies = [
+ "catalog_indexing",
+ "datum",
+ "detoast",
+ "elog",
+ "fmgr_seams",
+ "genam",
+ "guc_tables",
+ "heaptuple",
+ "lsyscache",
+ "mcx",
+ "statscmds",
+ "table",
+ "typcache",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_rel",
+ "types_scan",
+ "types_tuple",
+]
+
+[[package]]
+name = "statscmds"
+version = "0.0.0"
+dependencies = [
+ "cache_syscache",
+ "catalog",
+ "catalog_heap",
+ "catalog_indexing",
+ "catalog_namespace",
+ "datum",
+ "elog",
+ "fmgr_seams",
+ "format_type",
+ "genam",
+ "heaptuple",
+ "init_small",
+ "inval",
+ "mcx",
+ "miscinit_seams",
+ "pg_class_seams",
+ "pg_depend",
+ "rel_vocab",
+ "relation_seams",
+ "superuser",
+ "table",
+ "typcache",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_rel",
+ "types_scan",
+ "types_tuple",
+]
+
+[[package]]
 name = "storage_xlog"
 version = "0.1.0"
 dependencies = [
@@ -9730,6 +9793,7 @@ dependencies = [
  "rel_vocab",
  "schemacmds",
  "sequence",
+ "statscmds",
  "superuser",
  "syscache_seams",
  "tablecmds",
