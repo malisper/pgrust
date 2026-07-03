@@ -654,6 +654,13 @@ fn run_program<'mcx>(
                     continue;
                 }
             }
+            Step::JumpIfNull { jumpdone, out } => {
+                if read_out(*out, &regs).isnull {
+                    // SAFETY: jump targets validated < steps.len() at ready.
+                    sp = unsafe { base.add(*jumpdone as usize) };
+                    continue;
+                }
+            }
             Step::CaseTestVal { slot, out } => {
                 // SAFETY: compile-allocated workspace, live for 'mcx.
                 let nd = unsafe { slot.read() };
@@ -672,6 +679,46 @@ fn run_program<'mcx>(
                         });
                     }
                 }
+            }
+            Step::ArrayExprEval { state, out } => {
+                // SAFETY: compile-allocated state, live for 'mcx, sole access.
+                let st = unsafe { &mut *state.as_ptr() };
+                let r = crate::arrayops::eval_array_expr(st)?;
+                write_out(*out, &mut regs, r.value, r.isnull);
+            }
+            Step::SbsrefSubscripts { state, jumpdone, out } => {
+                // SAFETY: as ArrayExprEval.
+                let st = unsafe { &mut *state.as_ptr() };
+                if !crate::arrayops::sbsref_check_subscripts(st)? {
+                    write_out(*out, &mut regs, Datum::null(), true);
+                    // SAFETY: jump targets validated < steps.len() at ready.
+                    sp = unsafe { base.add(*jumpdone as usize) };
+                    continue;
+                }
+            }
+            Step::SbsrefFetch { state, slice, out } => {
+                // SAFETY: as ArrayExprEval.
+                let st = unsafe { &mut *state.as_ptr() };
+                let cur = read_out(*out, &regs);
+                let r = if *slice {
+                    crate::arrayops::sbsref_fetch_slice(st, cur)?
+                } else {
+                    crate::arrayops::sbsref_fetch(st, cur)?
+                };
+                write_out(*out, &mut regs, r.value, r.isnull);
+            }
+            Step::SbsrefOld { state, out } => {
+                // SAFETY: as ArrayExprEval.
+                let st = unsafe { &mut *state.as_ptr() };
+                let cur = read_out(*out, &regs);
+                crate::arrayops::sbsref_fetch_old(st, cur)?;
+            }
+            Step::SbsrefAssign { state, out } => {
+                // SAFETY: as ArrayExprEval.
+                let st = unsafe { &mut *state.as_ptr() };
+                let cur = read_out(*out, &regs);
+                let r = crate::arrayops::sbsref_assign(st, cur)?;
+                write_out(*out, &mut regs, r.value, r.isnull);
             }
             Step::Qual { jumpdone } => {
                 if regs.isnull || !regs.value.as_bool() {

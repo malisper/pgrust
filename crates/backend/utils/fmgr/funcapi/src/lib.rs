@@ -10,11 +10,10 @@ use types_core::{AttrNumber, InvalidOid, Oid, RECORDOID, VOIDOID};
 use types_error::{PgError, PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_WRONG_OBJECT_TYPE};
 use types_tuple::TupleDescData;
 
-mod srf;
 #[cfg(test)]
 mod tests;
 
-pub use srf::{
+pub use funcapi_srf::{
     end_MultiFuncCall, init_MultiFuncCall, per_MultiFuncCall, srf_return_done, srf_return_next,
     srf_return_next_null,
     FuncCallContext, InitMaterializedSRF, MaterializedSRF, MAT_SRF_BLESS,

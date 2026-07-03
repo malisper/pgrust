@@ -435,6 +435,135 @@ pub fn make_op<'mcx>(
     )
 }
 
+/// C `make_scalar_array_op`: "scalar op ANY/ALL (array)".
+#[allow(clippy::too_many_arguments)]
+pub fn make_scalar_array_op<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    opname: &NodeList<'mcx>,
+    use_or: bool,
+    ltree: Node<'mcx>,
+    rtree: Node<'mcx>,
+    ltype_id: Oid,
+    atype_id: Oid,
+    location: ParseLoc,
+) -> PgResult<Node<'mcx>> {
+    use types_core::catalog::BOOLOID;
+
+    let rtype_id = if atype_id == UNKNOWNOID {
+        UNKNOWNOID
+    } else {
+        let r = lsyscache::typ::get_base_element_type(atype_id)?;
+        if !OidIsValid(r) {
+            return Err(any_all_shape_error(
+                pstate,
+                "op ANY/ALL (array) requires array on right side",
+                location,
+            ));
+        }
+        r
+    };
+
+    let op = oper(pstate, opname, ltype_id, rtype_id, false, location)?
+        .expect("oper(noError=false) always returns an operator");
+
+    if !OidIsValid(op.shape.oprcode) {
+        let mut buf = [""; 4];
+        let parts = name_parts(opname, &mut buf);
+        return Err(shell_error(pstate, parts, &op, location));
+    }
+
+    let actual_arg_types = [ltype_id, rtype_id];
+    let mut declared_arg_types = [op.shape.oprleft, op.shape.oprright];
+
+    let rettype = coerce::enforce_generic_type_consistency(
+        &actual_arg_types,
+        &mut declared_arg_types,
+        op.shape.oprresult,
+        false,
+    )?;
+
+    if rettype != BOOLOID {
+        return Err(any_all_shape_error(
+            pstate,
+            "op ANY/ALL (array) requires operator to yield boolean",
+            location,
+        ));
+    }
+    if lsyscache::get_func_retset(op.shape.oprcode)? {
+        return Err(any_all_shape_error(
+            pstate,
+            "op ANY/ALL (array) requires operator not to return a set",
+            location,
+        ));
+    }
+
+    // Switch the right input back to the array type; polymorphic operators
+    // trust the actual array type.
+    let res_atype_id = if coerce::IsPolymorphicType(declared_arg_types[1]) {
+        atype_id
+    } else {
+        let a = lsyscache::typ::get_array_type(declared_arg_types[1])?;
+        if !OidIsValid(a) {
+            return Err(no_array_type_error(pstate, declared_arg_types[1], location));
+        }
+        a
+    };
+
+    let ltree = coerce_arg(mcx, pstate, ltree, actual_arg_types[0], declared_arg_types[0])?;
+    let rtree = coerce_arg(mcx, pstate, rtree, atype_id, res_atype_id)?;
+
+    let args = NodeList::make2(mcx, ltree, rtree)?;
+    Node::mk(
+        mcx,
+        types_nodes::ScalarArrayOpExpr {
+            opno: op.oid,
+            opfuncid: op.shape.oprcode,
+            hashfuncid: InvalidOid,
+            negfuncid: InvalidOid,
+            useOr: use_or,
+            inputcollid: InvalidOid,
+            args,
+            location,
+        },
+    )
+}
+
+#[cold]
+fn no_array_type_error(
+    pstate: &ParseState<'_, '_>,
+    elemtype: Oid,
+    location: ParseLoc,
+) -> Box<PgError> {
+    use types_error::ERRCODE_UNDEFINED_OBJECT;
+    let t = format_type::format_type_be(elemtype).unwrap_or_else(|_| elemtype.to_string());
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_UNDEFINED_OBJECT)
+            .errmsg(format!("could not find array type for data type {t}"))
+            .errposition(parser_errposition(pstate, location, mbutils::GetDatabaseEncoding()))
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_oper.c", 0, "make_scalar_array_op")),
+    )
+}
+
+#[cold]
+fn any_all_shape_error(
+    pstate: &ParseState<'_, '_>,
+    msg: &str,
+    location: ParseLoc,
+) -> Box<PgError> {
+    use types_error::ERRCODE_WRONG_OBJECT_TYPE;
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_WRONG_OBJECT_TYPE)
+            .errmsg(msg.to_string())
+            .errposition(parser_errposition(pstate, location, mbutils::GetDatabaseEncoding()))
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_oper.c", 0, "make_scalar_array_op")),
+    )
+}
+
 fn coerce_arg<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &ParseState<'_, 'mcx>,

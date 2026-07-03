@@ -34,11 +34,14 @@ pub fn transformTargetList<'mcx>(
                     p_target.concat(mcx, &ExpandColumnRefStar(mcx, pstate, cref)?)?;
                     continue;
                 }
-            } else if val.node_tag() == NodeTag::T_A_Indirection {
-                panic!(
-                    "transformTargetList (parse_target.c): ExpandIndirectionStar \
-                     unported — unit backend-parser-parse-target"
-                );
+            } else if let Some(ind) = val.as_a_indirection() {
+                // C expands only when the LAST indirection item is A_Star.
+                if ind.indirection.last().is_some_and(|n| n.node_tag() == NodeTag::T_A_Star) {
+                    panic!(
+                        "transformTargetList (parse_target.c): ExpandIndirectionStar \
+                         unported — unit backend-parser-parse-target"
+                    );
+                }
             }
         }
 
@@ -112,11 +115,13 @@ pub fn transformExpressionList<'mcx>(
                      unit backend-parser-parse-target"
                 );
             }
-        } else if e.node_tag() == NodeTag::T_A_Indirection {
-            panic!(
-                "transformExpressionList (parse_target.c): ExpandIndirectionStar \
-                 unported — unit backend-parser-parse-target"
-            );
+        } else if let Some(ind) = e.as_a_indirection() {
+            if ind.indirection.last().is_some_and(|n| n.node_tag() == NodeTag::T_A_Star) {
+                panic!(
+                    "transformExpressionList (parse_target.c): ExpandIndirectionStar \
+                     unported — unit backend-parser-parse-target"
+                );
+            }
         }
         let e = if allowDefault && e.node_tag() == NodeTag::T_SetToDefault {
             e
@@ -143,6 +148,28 @@ pub fn transformAssignedExpr<'mcx>(
     location: types_core::ParseLoc,
 ) -> PgResult<Node<'mcx>> {
     debug_assert!(exprKind != ParseExprKind::EXPR_KIND_NONE);
+    // C sets p_expr_kind for the whole call (the subscript transforms below
+    // read it outside any transformExpr scope).
+    let sv_expr_kind = pstate.p_expr_kind;
+    pstate.p_expr_kind = exprKind;
+    let r = transformAssignedExprInternal(
+        mcx, pstate, expr, exprKind, colname, attrno, indirection, location,
+    );
+    pstate.p_expr_kind = sv_expr_kind;
+    r
+}
+
+#[allow(clippy::too_many_arguments)]
+fn transformAssignedExprInternal<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    expr: Node<'mcx>,
+    exprKind: ParseExprKind,
+    colname: Option<&str>,
+    attrno: i32,
+    indirection: &NodeList<'mcx>,
+    location: types_core::ParseLoc,
+) -> PgResult<Node<'mcx>> {
     let att = {
         let rel = pstate
             .p_target_relation
@@ -153,7 +180,7 @@ pub fn transformAssignedExpr<'mcx>(
         }
         rel.rd_att.attr((attrno - 1) as usize)
     };
-    let (attrtype, attrtypmod) = (att.atttypid, att.atttypmod);
+    let (attrtype, attrtypmod, attrcollation) = (att.atttypid, att.atttypmod, att.attcollation);
 
     // Stamp the placeholder with the column's type so exprType is usable;
     // the rewriter substitutes the real default (rewriteTargetListIU).
@@ -171,9 +198,28 @@ pub fn transformAssignedExpr<'mcx>(
         expr
     };
     if !indirection.is_nil() {
-        panic!(
-            "transformAssignedExpr (parse_target.c): transformAssignmentIndirection \
-             (field/subscript store) unported — unit backend-parser-parse-target"
+        let col_var = if pstate.p_is_insert {
+            Node::mk_const(mcx, attrtype, attrtypmod, attrcollation, -2, ::datum::Datum::null(), true, false)?
+        } else {
+            let rtindex = pstate
+                .p_target_nsitem
+                .expect("UPDATE with no target nsitem")
+                .p_rtindex;
+            Node::mk_var(mcx, rtindex, attrno as i16, attrtype, attrtypmod, attrcollation, 0)?
+        };
+        return transformAssignmentIndirection(
+            mcx,
+            pstate,
+            Some(col_var),
+            colname.unwrap_or("?"),
+            false,
+            attrtype,
+            attrtypmod,
+            attrcollation,
+            indirection,
+            0,
+            expr,
+            location,
         );
     }
 
@@ -742,6 +788,22 @@ fn FigureColnameInternal<'mcx>(node: Node<'mcx>, name: &mut Option<&'mcx str>) -
             *name = Some("coalesce");
             2
         }
+        // C: ARRAY[] columns are named "array"; indirection names from the
+        // last field selection, else the base expression.
+        NodeTag::T_A_ArrayExpr => {
+            *name = Some("array");
+            2
+        }
+        NodeTag::T_A_Indirection => {
+            let ind = node.as_a_indirection().unwrap();
+            for n in ind.indirection.iter().rev() {
+                if let Some(s) = n.as_string() {
+                    *name = Some(s.sval);
+                    return 2;
+                }
+            }
+            ind.arg.map_or(0, |arg| FigureColnameInternal(arg, name))
+        }
         NodeTag::T_MinMaxExpr => {
             *name = Some(match node.as_min_max_expr().unwrap().op {
                 types_nodes::primnodes::MinMaxOp::IS_GREATEST => "greatest",
@@ -832,4 +894,191 @@ fn FigureColnameInternal<'mcx>(node: Node<'mcx>, name: &mut Option<&'mcx str>) -
              unit backend-parser-parse-target"
         ),
     }
+}
+
+// transformAssignmentIndirection (parse_target.c), subscript arms only —
+// field selection (String cells) needs FieldStore, loud below. `start` is
+// C's indirection_cell; basenode None at start builds the CaseTestExpr
+// substitute (only reachable through nested stores, unreachable today).
+#[allow(clippy::too_many_arguments)]
+fn transformAssignmentIndirection<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    basenode: Option<Node<'mcx>>,
+    target_name: &str,
+    target_is_subscripting: bool,
+    target_type_id: types_core::Oid,
+    target_typmod: i32,
+    target_collation: types_core::Oid,
+    indirection: &NodeList<'mcx>,
+    start: usize,
+    rhs: Node<'mcx>,
+    location: types_core::ParseLoc,
+) -> PgResult<Node<'mcx>> {
+    debug_assert!(
+        basenode.is_some() || start > 0,
+        "CaseTestExpr substitution only arises in nested stores"
+    );
+    let mut subscripts: NodeList<'mcx> = NodeList::nil();
+    for n in indirection.as_slice()[start..].iter() {
+        match n.node_tag() {
+            NodeTag::T_A_Indices => subscripts.lappend(mcx, *n)?,
+            _ => panic!(
+                "transformAssignmentIndirection (parse_target.c): field store \
+                 (FieldStore) unported — misc2 rowtypes lane"
+            ),
+        }
+    }
+    if !subscripts.is_nil() {
+        return transformAssignmentSubscripts(
+            mcx,
+            pstate,
+            basenode,
+            target_name,
+            target_type_id,
+            target_typmod,
+            target_collation,
+            &subscripts,
+            indirection,
+            rhs,
+            location,
+        );
+    }
+
+    let rhs_type = expr_type(rhs);
+    let result = coerce::coerce_to_target_type(
+        mcx,
+        pstate,
+        rhs,
+        rhs_type,
+        target_type_id,
+        target_typmod,
+        coerce::COERCION_ASSIGNMENT,
+        CoercionForm::COERCE_IMPLICIT_CAST,
+        -1,
+    )?;
+    match result {
+        Some(r) => Ok(r),
+        None if target_is_subscripting => Err(subscript_assign_type_mismatch(
+            pstate,
+            target_name,
+            target_type_id,
+            rhs_type,
+            location,
+        )),
+        None => Err(column_type_mismatch(
+            pstate,
+            target_name,
+            target_type_id,
+            rhs_type,
+            expr_location(rhs),
+        )),
+    }
+}
+
+// transformAssignmentSubscripts (parse_target.c); the whole remaining
+// indirection is subscripts here (field stores are loud above), so the RHS
+// recursion always reaches the base-coercion arm.
+#[allow(clippy::too_many_arguments)]
+fn transformAssignmentSubscripts<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    basenode: Option<Node<'mcx>>,
+    target_name: &str,
+    target_type_id: types_core::Oid,
+    target_typmod: i32,
+    target_collation: types_core::Oid,
+    subscripts: &NodeList<'mcx>,
+    indirection: &NodeList<'mcx>,
+    rhs: Node<'mcx>,
+    location: types_core::ParseLoc,
+) -> PgResult<Node<'mcx>> {
+    debug_assert!(!subscripts.is_nil());
+    let mut container_type = target_type_id;
+    let mut container_typmod = target_typmod;
+    parser_small1::transformContainerType(&mut container_type, &mut container_typmod)?;
+
+    let sbsref_node = parse_expr::transformContainerSubscripts(
+        mcx,
+        pstate,
+        basenode.expect("nested subscript stores unreachable (field stores loud)"),
+        container_type,
+        container_typmod,
+        subscripts,
+        true,
+    )?;
+    let (type_needed, typmod_needed) = {
+        let sr = sbsref_node.as_subscripting_ref().unwrap();
+        (sr.refrestype, sr.reftypmod)
+    };
+    let collation_needed = if container_type == target_type_id {
+        target_collation
+    } else {
+        ::lsyscache::get_typcollation(container_type)?
+    };
+
+    let rhs = transformAssignmentIndirection(
+        mcx,
+        pstate,
+        None,
+        target_name,
+        true,
+        type_needed,
+        typmod_needed,
+        collation_needed,
+        indirection,
+        indirection.len(),
+        rhs,
+        location,
+    )?;
+
+    // SAFETY: parse analysis exclusively owns the just-built node.
+    unsafe {
+        Node::with_mut::<types_nodes::SubscriptingRef, ()>(sbsref_node, |sr| {
+            sr.refassgnexpr = Some(rhs);
+            sr.refrestype = container_type;
+            sr.reftypmod = container_typmod;
+        });
+    }
+
+    if container_type != target_type_id {
+        panic!(
+            "transformAssignmentSubscripts (parse_target.c): domain-over-container \
+             re-coercion unported — domains lane"
+        );
+    }
+    Ok(sbsref_node)
+}
+
+#[cold]
+fn subscript_assign_type_mismatch(
+    pstate: &ParseState<'_, '_>,
+    target_name: &str,
+    target_type: types_core::Oid,
+    rhs_type: types_core::Oid,
+    location: types_core::ParseLoc,
+) -> Box<types_error::PgError> {
+    use types_error::{ErrorLocation, ERRCODE_DATATYPE_MISMATCH, ERROR};
+    let t = format_type::format_type_be(target_type).unwrap_or_else(|_| target_type.to_string());
+    let r = format_type::format_type_be(rhs_type).unwrap_or_else(|_| rhs_type.to_string());
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_DATATYPE_MISMATCH)
+            .errmsg(format!(
+                "subscripted assignment to \"{target_name}\" requires type {t} \
+                 but expression is of type {r}"
+            ))
+            .errhint("You will need to rewrite or cast the expression.".to_string())
+            .errposition(parser_small1::parser_errposition(
+                pstate,
+                location,
+                mbutils::GetDatabaseEncoding(),
+            ))
+            .into_error()
+            .with_error_location(ErrorLocation::new(
+                "parse_target.c",
+                0,
+                "transformAssignmentIndirection",
+            )),
+    )
 }

@@ -193,6 +193,12 @@ pub enum Step {
     DomainNotNull { resulttype: Oid, out: OutRef },
     // name/check: compile-allocated in 'mcx (BoolAndStep anynull precedent).
     DomainCheck { resulttype: Oid, name: NonNull<str>, check: NonNull<NullableDatum> },
+    JumpIfNull { jumpdone: u32, out: OutRef },
+    ArrayExprEval { state: NonNull<crate::arrayops::ArrayExprState>, out: OutRef },
+    SbsrefSubscripts { state: NonNull<crate::arrayops::SbsRefState>, jumpdone: u32, out: OutRef },
+    SbsrefFetch { state: NonNull<crate::arrayops::SbsRefState>, slice: bool, out: OutRef },
+    SbsrefOld { state: NonNull<crate::arrayops::SbsRefState>, out: OutRef },
+    SbsrefAssign { state: NonNull<crate::arrayops::SbsRefState>, out: OutRef },
     // slots: nelems compile-allocated NullableDatum arg targets (C's
     // d.minmax.values/nulls); call is the type's btree cmp proc.
     MinMax { call: FuncCall, slots: NonNull<NullableDatum>, nelems: u16, least: bool, out: OutRef },
@@ -518,6 +524,8 @@ pub struct ExprState<'mcx> {
     pub(crate) param_exec_deps: PgVec<'mcx, u32>,
     // C ExprState.innermost_domainval/innermost_domainnull: compile-time only.
     pub(crate) innermost_domain: Option<OutRef>,
+    // resmcx fields of allocating array-op step states, armed with frames.
+    pub(crate) alloc_mcx_slots: PgVec<'mcx, NonNull<crate::arrayops::ResMcx>>,
 }
 
 impl<'mcx> ExprState<'mcx> {
@@ -539,6 +547,7 @@ impl<'mcx> ExprState<'mcx> {
                 innermost_case: None,
                 param_exec_deps: PgVec::new_in(mcx),
                 innermost_domain: None,
+                alloc_mcx_slots: PgVec::new_in(mcx),
             });
             Ok(::mcx::PgBox::from_raw_in(p.as_ptr(), mcx))
         }
@@ -565,14 +574,17 @@ impl<'mcx> ExprState<'mcx> {
         self.flags & EEO_FLAG_HAS_SUBPLAN != 0
     }
 
-    // Result-mcx convention: every frame's fcinfo is armed with the context
-    // that owns by-ref call results (C's CurrentMemoryContext at eval).
     pub fn arm_result_mcx(&mut self, mcx: Mcx<'mcx>) {
         for f in self.frames.iter() {
             // SAFETY: the frame's fcinfo image is live for 'mcx and this is
             // the sole reference; 'mcx also bounds the armed context, so it
             // outlives every call through the frame.
             unsafe { fcinfo_mut(f.fcinfo, f.nargs).set_result_mcx(mcx) };
+        }
+        for slot in self.alloc_mcx_slots.iter() {
+            // SAFETY: slot points at a compile-allocated state's resmcx field,
+            // live for 'mcx; the armed context outlives evaluation.
+            unsafe { slot.write(Some(NonNull::from(mcx.context()))) };
         }
     }
 
@@ -583,6 +595,11 @@ impl<'mcx> ExprState<'mcx> {
             // SAFETY: frame image live for 'mcx, sole reference; the caller
             // guarantees the armed context outlives every call.
             unsafe { fcinfo_mut(f.fcinfo, f.nargs).set_result_mcx(mcx) };
+        }
+        for slot in self.alloc_mcx_slots.iter() {
+            // SAFETY: slot points at a compile-allocated state's resmcx field;
+            // the caller guarantees the armed context outlives evaluation.
+            unsafe { slot.write(Some(NonNull::from(mcx.context()))) };
         }
     }
 

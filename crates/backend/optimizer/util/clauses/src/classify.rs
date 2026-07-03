@@ -305,9 +305,16 @@ impl<'mcx> NodeWalker<'mcx> for ContainNonstrict {
                     return Ok(true);
                 }
             }
-            t @ (NodeTag::T_SubscriptingRef
-            | NodeTag::T_CoerceViaIO
-            | NodeTag::T_ArrayCoerceExpr) => {
+            NodeTag::T_SubscriptingRef => {
+                // C: subscripting assignment is nonstrict; fetch is strict
+                // only per typsubscript — conservatively nonstrict unless the
+                // closed array handler (fetch_strict = true).
+                let sr = node.as_subscripting_ref().unwrap();
+                if sr.refassgnexpr.is_some() {
+                    return Ok(true);
+                }
+            }
+            t @ (NodeTag::T_CoerceViaIO | NodeTag::T_ArrayCoerceExpr) => {
                 deferred("contain_nonstrict_functions_walker", t)
             }
             _ => {}
@@ -396,8 +403,10 @@ impl<'mcx> NodeWalker<'mcx> for ContainLeakedVars {
                     return Ok(true);
                 }
             }
-            t @ (NodeTag::T_SubscriptingRef
-            | NodeTag::T_RowCompareExpr
+            // C: SubscriptingRef fetch is leakproof for the array handler;
+            // assignment (store) is not, but stores never reach quals.
+            NodeTag::T_SubscriptingRef => {}
+            t @ (NodeTag::T_RowCompareExpr
             | NodeTag::T_MinMaxExpr) => deferred("contain_leaked_vars_walker", t),
             NodeTag::T_CurrentOfExpr => return Ok(false),
             // Unrecognized node: assume it might be leaky (C default arm).
@@ -1066,4 +1075,38 @@ pub fn make_ands_explicit<'mcx>(
         1 => Ok(andclauses.nth(0)),
         _ => make_andclause(mcx, andclauses.clone_in(mcx)?),
     }
+}
+
+// is_strict_saop (clauses.c): can this SAOP be treated as strict?
+fn is_strict_saop(sa: &types_nodes::ScalarArrayOpExpr<'_>, false_ok: bool) -> PgResult<bool> {
+    let opfuncid = if sa.opfuncid == 0 { lsyscache::get_opcode(sa.opno)? } else { sa.opfuncid };
+    if !func_strict(opfuncid)? {
+        return Ok(false);
+    }
+    if sa.useOr && false_ok {
+        return Ok(true);
+    }
+    debug_assert!(sa.args.len() == 2);
+    let rightop = sa.args.nth(1);
+    if let Some(c) = rightop.as_const() {
+        if c.constisnull {
+            return Ok(false);
+        }
+        let p = c.constvalue.as_usize() as *const u8;
+        // SAFETY: non-null array Const addresses a live flat varlena image
+        // (planner Consts are never toasted).
+        let arr = unsafe {
+            core::slice::from_raw_parts(p, ::types_tuple::varatt::varsize_any(p))
+        };
+        let ndim = arrayfuncs::arr_ndim(arr);
+        let mut dims = [0i32; 6];
+        for i in 0..ndim as usize {
+            dims[i] = arrayfuncs::arr_dim(arr, i);
+        }
+        return Ok(arrayutils::array_get_n_items(ndim, &dims)? > 0);
+    }
+    if let Some(a) = rightop.as_array_expr() {
+        return Ok(!a.elements.is_nil() && !a.multidims);
+    }
+    Ok(false)
 }

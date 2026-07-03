@@ -12,6 +12,7 @@ types_core = { path = "../../../_support/types/types_core" }
 types_error = { path = "../../../_support/types/types_error" }
 types_nodes = { path = "../../../_support/types/nodes" }
 catalog_namespace = { path = "../../catalog/catalog_namespace" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
 datum = { path = "../../../_support/types/datum" }
 types_fmgr = { package = "types_fmgr", path = "../../../_support/types/fmgr" }
@@ -26,7 +27,6 @@ parser_small1 = { path = "../parser_small1" }
 mbutils = { path = "../../utils/mb/mbutils" }
 gram_core = { path = "../gram_core" }
 parser_seams = { path = "../parser_seams" }
-lsyscache = { path = "../../utils/cache/lsyscache" }
 keywords = { path = "../../../common/keywords" }
 table = { path = "../../access/table/table" }
 relation = { path = "../../access/common/relation" }
