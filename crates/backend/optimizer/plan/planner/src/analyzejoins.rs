@@ -136,7 +136,16 @@ fn remove_leftjoinrel_from_query<'mcx>(
     }
 
     debug_assert!(run.root.placeholder_list.is_empty());
-    debug_assert!(run.root.eq_classes.is_empty());
+    // Pathkey ECs (single-member, from qp_callback) never reference a
+    // removable rel or its ojrelid; a referencing EC is the unported
+    // remove_rel_from_eclass arm.
+    for ec in run.root.eq_classes.iter() {
+        assert!(
+            !relids_is_member(relid, &ec.ec_relids)
+                && !relids_is_member(ojrelid, &ec.ec_relids),
+            "remove_rel_from_eclass (analyzejoins.c): EC references removed rel; eclass lane"
+        );
+    }
 
     // Reset attr_needed to only the "relation 0" bits; rebuilt below.
     for rti in 1..run.root.simple_rel_array_size as usize {
