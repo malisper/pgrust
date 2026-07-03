@@ -35,7 +35,10 @@ pub struct QueryDescData {
     pub query_env: QueryEnvHandle,
     pub instrument_options: i32,
     pub tup_desc: Option<Rc<TupleDescData<'static>>>,
-    pub exec: Option<ExecutorHandle>,
+    // Boxed: inline ExecData is ~1.7KB, and QueryDescData moves through the
+    // registry by value — unboxed it cost ~10k memcpy instr per SELECT 1
+    // (select1-gate attribution, 2026-07-03).
+    pub exec: Option<Box<ExecutorHandle>>,
     pub already_executed: bool,
 }
 
