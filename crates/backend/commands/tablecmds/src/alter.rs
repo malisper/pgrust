@@ -1190,7 +1190,7 @@ fn ATPrepAlterColumnType<'mcx>(
     let att = *rel.rd_att.attr(attnum as usize - 1);
 
     let mut pstate = parser_small1::make_parsestate(mcx, None);
-    pstate.p_sourcetext = Some(str_arena(mcx, query_string)?);
+    pstate.p_sourcetext = Some(str_arena(mcx, query_string)?.as_bytes());
     let var = Node::mk(
         mcx,
         types_nodes::primnodes::Var {
@@ -1259,7 +1259,7 @@ fn at_column_change_requires_rewrite(expr: Node<'_>, varattno: AttrNumber) -> bo
             return v.varattno != varattno;
         }
         if let Some(r) = e.as_variant::<types_nodes::primnodes::RelabelType>() {
-            e = r.arg.expect("RelabelType.arg");
+            e = r.arg;
             continue;
         }
         return true;
