@@ -270,3 +270,38 @@ fn feature_not_supported(msg: &str) -> Box<PgError> {
 fn invalid_object(msg: &str) -> Box<PgError> {
     Box::new(PgError::error(msg.to_string()).with_sqlstate(ERRCODE_INVALID_OBJECT_DEFINITION))
 }
+
+// contain_vars_of_level's walker (var.c), shared with transformValuesClause's
+// CREATE RULE lateral arm.
+pub(crate) struct VarsOfLevel {
+    pub(crate) sublevels_up: u32,
+}
+
+impl<'mcx> nodes_core::NodeWalker<'mcx> for VarsOfLevel {
+    fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+        match node.node_tag() {
+            NodeTag::T_Var => {
+                Ok(node.as_var().expect("Var").varlevelsup == self.sublevels_up)
+            }
+            NodeTag::T_CurrentOfExpr => Ok(self.sublevels_up == 0),
+            NodeTag::T_Query => {
+                self.sublevels_up += 1;
+                let r = nodes_core::query_tree_walker(
+                    node.as_query().expect("Query"),
+                    self,
+                    0,
+                )?;
+                self.sublevels_up -= 1;
+                Ok(r)
+            }
+            _ => nodes_core::expression_tree_walker(node, self),
+        }
+    }
+
+    fn visit_query_ref(&mut self, q: &'mcx Query<'mcx>) -> PgResult<bool> {
+        self.sublevels_up += 1;
+        let r = nodes_core::query_tree_walker(q, self, 0)?;
+        self.sublevels_up -= 1;
+        Ok(r)
+    }
+}
