@@ -240,6 +240,32 @@ pub unsafe fn fastgetattr(
     }
 }
 
+/// C GETSTRUCT-shape read: `attnum` is a fixed-width NOT NULL leading column
+/// (no varlena and no null can precede it), so the null-bitmap checks C skips
+/// via struct overlay are skipped here too.
+///
+/// # Safety
+/// As [`fastgetattr`], plus the GETSTRUCT invariant above.
+#[inline]
+pub unsafe fn fastgetattr_fixed(
+    tup: &HeapTupleData<'_>,
+    attnum: i32,
+    tupleDesc: &TupleDescData<'_>,
+) -> Datum {
+    debug_assert!(attnum > 0 && attnum <= tupleDesc.natts);
+    debug_assert!(tup.no_nulls() || !unsafe { att_isnull((attnum - 1) as usize, tup.bits_ptr()) });
+    // SAFETY: attnum <= natts == compact_attrs.len() (caller contract).
+    let att = unsafe { tupleDesc.compact_attrs.get_unchecked((attnum - 1) as usize) };
+    let off = att.attcacheoff.get();
+    if off >= 0 {
+        // SAFETY: cached offset points at the live attribute within the image.
+        unsafe { fetchatt(att, tup.getstruct().add(off as usize)) }
+    } else {
+        // SAFETY: caller contract; populates attcacheoff for the fixed prefix.
+        unsafe { nocachegetattr(tup, attnum, tupleDesc) }
+    }
+}
+
 /// # Safety
 /// For attnum > 0, as [`fastgetattr`] minus tuple-presence (checked here).
 #[inline]

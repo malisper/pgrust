@@ -68,6 +68,9 @@ pub struct HeapScanDescData<'mcx> {
     pub rs_parallelworkerdata: Option<::tableam_vocab::ParallelBlockTableScanWorkerData>,
     pub rs_cindex: u32,
     pub rs_ntuples: u32,
+    // Page image of rs_cbuf, cached by pagemode_next_page; null whenever the
+    // pin moves. Keeps the per-tuple walk free of the seam-derive call edge.
+    rs_cpage: *mut u8,
     pub rs_vistuples: [OffsetNumber; MaxHeapTuplesPerPage],
     // One-probe pgstat accumulators (indexam precedent); pgstat_relation flushes.
     pub rs_pgstat_numscans: u64,
@@ -580,6 +583,7 @@ fn parallel_next_block(scan: &mut HeapScanDescData<'_>, first: bool) -> PgResult
 }
 
 fn heap_fetch_next_buffer(scan: &mut HeapScanDescData<'_>, dir: ScanDirection) -> PgResult<()> {
+    scan.rs_cpage = core::ptr::null_mut();
     if let Some(pin) = scan.rs_cbuf.take() {
         pin.release();
     }
@@ -655,6 +659,7 @@ fn heapgettup_continue_page(
 
 fn end_of_scan(scan: &mut HeapScanDescData<'_>) {
     scan.rs_ctup = None;
+    scan.rs_cpage = core::ptr::null_mut();
     if let Some(pin) = scan.rs_cbuf.take() {
         pin.release();
     }
@@ -819,6 +824,13 @@ fn pagemode_next_page(scan: &mut HeapScanDescData<'_>, dir: ScanDirection) -> Pg
     }
     debug_assert!(scan.rs_cbuf.as_ref().unwrap().block_number() == scan.rs_cblock);
     heap_prepare_pagescan(scan)?;
+    scan.rs_cpage = scan
+        .rs_cbuf
+        .as_ref()
+        .expect("pagescan without buffer")
+        .page()
+        .as_ptr()
+        .cast_mut();
     Ok(true)
 }
 
@@ -855,22 +867,12 @@ fn heapgettup_pagemode<'mcx>(scan: &mut HeapScanDescData<'mcx>, dir: ScanDirecti
         }
         continue_page = false;
 
-        // C's `page = BufferGetPage(scan->rs_cbuf)`: read once per call. The
-        // lifetime is erased from the rs_cbuf borrow so the walk can write
-        // scan fields directly (C writes rs_ctup inside the same loop).
-        // SAFETY: the rs_cbuf pin stays held until the next
-        // heap_fetch_next_buffer/end_of_scan; `page` is re-derived before any
-        // use after those.
-        let page: PageRef<'_> = unsafe {
-            PageRef::from_raw(NonNull::new_unchecked(
-                scan.rs_cbuf
-                    .as_ref()
-                    .expect("scan lost its buffer")
-                    .page()
-                    .as_ptr()
-                    .cast_mut(),
-            ))
-        };
+        debug_assert!(!scan.rs_cpage.is_null() && scan.rs_cbuf.is_some());
+        // SAFETY: rs_cpage is the image of the page pinned by rs_cbuf
+        // (pagemode_next_page set it; every pin move nulls it), so it stays
+        // valid across this walk. No call edge on the per-tuple path.
+        let page: PageRef<'_> =
+            unsafe { PageRef::from_raw(NonNull::new_unchecked(scan.rs_cpage)) };
 
         // No content lock: rs_vistuples entries stay good under the pin.
         while linesleft > 0 {
@@ -976,6 +978,7 @@ pub fn heap_beginscan<'mcx>(
         rs_parallelworkerdata: parallel_scan.map(|_| Default::default()),
         rs_cindex: 0,
         rs_ntuples: 0,
+        rs_cpage: core::ptr::null_mut(),
         rs_vistuples: [0; MaxHeapTuplesPerPage],
         rs_pgstat_numscans: 0,
         rs_pgstat_getnext: 0,
@@ -1012,6 +1015,7 @@ pub fn heap_rescan(
     }
 
     scan.rs_ctup = None;
+    scan.rs_cpage = core::ptr::null_mut();
     if let Some(pin) = scan.rs_cbuf.take() {
         pin.release();
     }

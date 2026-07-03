@@ -571,16 +571,106 @@ seam_core::seam!(
     pub fn pg_statistic_slot_shape(tuple: &HeapTupleData<'_>) -> PgStatisticSlotShape
 );
 
-// One decoded pg_statistic slot; byref `values` datums point into
-// `values_image`, whose heap buffer is stable across moves of this struct.
+// One pg_statistic slot, arrays decoded on first access (C's get_attstatsslot
+// laziness: eqsel-only plans never deconstruct the histogram). Byref `values`
+// datums point into `values_image`, whose heap buffer is stable across moves
+// of this struct; decode allocates from the images' own allocator.
 pub struct PgStatisticSlotData<'mcx> {
     pub kind: i16,
     pub staop: Oid,
     pub stacoll: Oid,
     pub valuetype: Oid,
-    pub values: PgVec<'mcx, Datum>,
-    pub numbers: PgVec<'mcx, f32>,
-    pub values_image: PgVec<'mcx, u8>,
+    values: core::cell::OnceCell<PgVec<'mcx, Datum>>,
+    numbers: core::cell::OnceCell<PgVec<'mcx, f32>>,
+    values_image: PgVec<'mcx, u8>,
+    numbers_image: PgVec<'mcx, u8>,
+}
+
+impl<'mcx> PgStatisticSlotData<'mcx> {
+    // Empty images mirror SQL NULL (decode to empty slices).
+    pub fn from_images(
+        kind: i16,
+        staop: Oid,
+        stacoll: Oid,
+        valuetype: Oid,
+        values_image: PgVec<'mcx, u8>,
+        numbers_image: PgVec<'mcx, u8>,
+    ) -> Self {
+        PgStatisticSlotData {
+            kind,
+            staop,
+            stacoll,
+            valuetype,
+            values: core::cell::OnceCell::new(),
+            numbers: core::cell::OnceCell::new(),
+            values_image,
+            numbers_image,
+        }
+    }
+
+    pub fn from_decoded(
+        kind: i16,
+        staop: Oid,
+        stacoll: Oid,
+        valuetype: Oid,
+        values: PgVec<'mcx, Datum>,
+        numbers: PgVec<'mcx, f32>,
+        values_image: PgVec<'mcx, u8>,
+    ) -> Self {
+        let s = PgStatisticSlotData::from_images(
+            kind,
+            staop,
+            stacoll,
+            valuetype,
+            values_image,
+            PgVec::new_in(*values.allocator()),
+        );
+        let _ = s.values.set(values);
+        let _ = s.numbers.set(numbers);
+        s
+    }
+
+    pub fn values(&self) -> PgResult<&[Datum]> {
+        if let Some(v) = self.values.get() {
+            return Ok(v);
+        }
+        let mcx = *self.values_image.allocator();
+        let v = if self.values_image.is_empty() {
+            PgVec::new_in(mcx)
+        } else {
+            let ty = lookup_pg_type_shape::call(self.valuetype)?
+                .expect("stavalues element type has a pg_type row");
+            datum::array_build::deconstruct_array_image(
+                mcx,
+                &self.values_image,
+                ty.typlen,
+                ty.typbyval,
+                ty.typalign as u8,
+            )?
+        };
+        Ok(self.values.get_or_init(|| v))
+    }
+
+    pub fn numbers(&self) -> PgResult<&[f32]> {
+        if let Some(n) = self.numbers.get() {
+            return Ok(n);
+        }
+        let mcx = *self.numbers_image.allocator();
+        let n = if self.numbers_image.is_empty() {
+            PgVec::new_in(mcx)
+        } else {
+            let elems =
+                datum::array_build::deconstruct_array_image(mcx, &self.numbers_image, 4, true, b'i')?;
+            let mut out: PgVec<'mcx, f32> = mcx::vec_with_capacity_in(mcx, elems.len())?;
+            out.extend(elems.iter().map(|d| d.as_f32()));
+            out
+        };
+        Ok(self.numbers.get_or_init(|| n))
+    }
+
+    pub fn values_image(&self) -> &[u8] {
+        &self.values_image
+    }
 }
 
 pub struct PgStatisticBundle<'mcx> {
