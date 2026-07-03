@@ -159,7 +159,26 @@ fn match_clause_to_indexcol<'mcx>(
         NodeTag::T_FuncExpr | NodeTag::T_RelabelType => panic!(
             "match_funcclause_to_indexcol (indxpath.c): M2 support-function lane"
         ),
-        // SAOP/RowCompare/NullTest/OR can't be built by the live qual lane.
+        NodeTag::T_NullTest if index.amsearchnulls => {
+            let nt = clause.as_null_test().unwrap();
+            if !nt.argisrow
+                && match_index_to_operand(run, nt.arg.expect("NullTest.arg"), indexcol, index)
+            {
+                return Ok(Some(IndexClause {
+                    rinfo: Some(rinfo),
+                    indexquals: {
+                        let mut v = PgVec::new_in(run.mcx);
+                        v.push(rinfo);
+                        v
+                    },
+                    lossy: false,
+                    indexcol: indexcol as i16,
+                    indexcols: PgVec::new_in(run.mcx),
+                }));
+            }
+            Ok(None)
+        }
+        // SAOP/RowCompare/OR can't be built by the live qual lane.
         _ => Ok(None),
     }
 }
@@ -427,6 +446,14 @@ fn collect_varattnos(run: &PlannerRun<'_>, node: Node<'_>, relid: i32, out: &mut
         }
         NodeTag::T_RelabelType => {
             collect_varattnos(run, node.as_relabel_type().unwrap().arg, relid, out)
+        }
+        NodeTag::T_NullTest => {
+            collect_varattnos(run, node.as_null_test().unwrap().arg.expect("NullTest.arg"), relid, out)
+        }
+        NodeTag::T_BoolExpr => {
+            for a in &node.as_bool_expr().unwrap().args {
+                collect_varattnos(run, a, relid, out);
+            }
         }
         other => panic!("pull_varattnos (var.c) via check_index_only: {other:?}; M2 lane"),
     }

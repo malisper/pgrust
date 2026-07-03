@@ -91,6 +91,9 @@ pub struct PlannerRun<'mcx> {
     /// C rel->subroot for planned RTE_SUBQUERY rels, keyed by
     /// RelOptInfo.subroot_idx (RelOptInfo can't own a PlannerRun-tlist pair).
     pub rel_subroots: PgVec<'mcx, SubrootState<'mcx>>,
+    /// planagg subroots (C MinMaxAggInfo.subroot), parked between
+    /// build_minmax_path and create_minmaxagg_plan; winners move to subroots.
+    pub minmax_subroots: PgVec<'mcx, Option<SubrootState<'mcx>>>,
     /// C qp_extra.activeWindows (WindowClause nodes in execution order).
     pub active_windows: PgVec<'mcx, types_nodes::Node<'mcx>>,
     /// C qp_extra.setop.
@@ -113,7 +116,7 @@ mcx::forget_safe_struct!(
     SubrootState<'_> { root, processed_tlist },
     PlannerRun<'_> { mcx, root, glob, queries, processed_tlist,
         assess_parallel, suspended_roots, subroots, rel_subroots,
-        active_windows, qp_setop, rowmarks },
+        minmax_subroots, active_windows, qp_setop, rowmarks },
 );
 
 impl<'mcx> PlannerRun<'mcx> {
@@ -128,6 +131,7 @@ impl<'mcx> PlannerRun<'mcx> {
             suspended_roots: PgVec::new_in(mcx),
             subroots: PgVec::new_in(mcx),
             rel_subroots: PgVec::new_in(mcx),
+            minmax_subroots: PgVec::new_in(mcx),
             active_windows: PgVec::new_in(mcx),
             qp_setop: None,
             rowmarks: PgVec::new_in(mcx),
@@ -159,6 +163,29 @@ impl<'mcx> PlannerRun<'mcx> {
         let processed_tlist = self.processed_tlist.take();
         self.suspended_roots.push(SubrootState { root: old, processed_tlist });
         Ok(())
+    }
+
+    /// push_root for a planagg subroot: C memcpy's the parent PlannerInfo
+    /// (make_minmax_subroot carries the copied fields) instead of starting
+    /// blank, then plans with query_planner directly.
+    pub fn push_minmax_root(&mut self) -> types_error::PgResult<()> {
+        let outer = self.identify_outer_params()?;
+        let mut new_root = self.root.make_minmax_subroot();
+        new_root.outer_params = outer;
+        let old = core::mem::replace(&mut self.root, new_root);
+        let processed_tlist = self.processed_tlist.take();
+        self.suspended_roots.push(SubrootState { root: old, processed_tlist });
+        Ok(())
+    }
+
+    /// Restore the parent level, parking the finished minmax subroot; returns
+    /// its index (MinMaxAggInfo.subroot_idx).
+    pub fn pop_root_to_minmax_subroot(&mut self) -> usize {
+        let parent = self.suspended_roots.pop().expect("pop_root_to_minmax_subroot without push");
+        let sub = core::mem::replace(&mut self.root, parent.root);
+        let sub_tlist = core::mem::replace(&mut self.processed_tlist, parent.processed_tlist);
+        self.minmax_subroots.push(Some(SubrootState { root: sub, processed_tlist: sub_tlist }));
+        self.minmax_subroots.len() - 1
     }
 
     /// Restore the parent level; the finished child joins glob's subroots.

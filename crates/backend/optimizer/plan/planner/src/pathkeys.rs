@@ -920,3 +920,31 @@ pub fn get_cheapest_path_for_pathkeys(
     }
     matched_path
 }
+
+// get_cheapest_fractional_path_for_pathkeys (pathkeys.c); required_outer is
+// always empty on this lane.
+pub fn get_cheapest_fractional_path_for_pathkeys(
+    run: &PlannerRun<'_>,
+    paths: &[types_pathnodes::PathId],
+    pathkeys: &[PathKey],
+    fraction: f64,
+) -> Option<types_pathnodes::PathId> {
+    let mut matched_path: Option<types_pathnodes::PathId> = None;
+    for &pid in paths {
+        let path = run.root.path(pid).base();
+        if let Some(m) = matched_path {
+            if crate::pathnode::compare_fractional_path_costs(
+                run.root.path(m).base(),
+                path,
+                fraction,
+            ) <= 0
+            {
+                continue;
+            }
+        }
+        if pathkeys_contained_in(pathkeys, &path.pathkeys) && path.param_info.is_none() {
+            matched_path = Some(pid);
+        }
+    }
+    matched_path
+}

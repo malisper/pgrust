@@ -102,6 +102,9 @@ pub fn grouping_planner<'mcx>(
         // away; limit_tuples below reads the original flag (unreachable
         // difference on this lane: nothing folds a WindowFunc).
     }
+    if parse.hasAggs {
+        crate::planagg::preprocess_minmax_aggregates(run)?;
+    }
     debug_assert!(!parse.hasTargetSRFs);
     run.root.limit_tuples = if !parse.groupClause.is_nil()
         || !parse.groupingSets.is_nil()

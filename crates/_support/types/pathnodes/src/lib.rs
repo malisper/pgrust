@@ -818,18 +818,18 @@ pub struct GroupingSetsPath<'mcx> {
     pub transitionSpace: u64,
 }
 
+/// C MinMaxAggInfo (pathnodes.h): `subroot`/`path` live in
+/// `PlannerRun::minmax_subroots[subroot_idx]`; `subroot_path` is a PathId in
+/// THAT root's arena. `target` and `param` are NodeIds in the outer root.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct MinMaxAggInfo {
     pub aggfnoid: Oid,
     pub aggsortop: Oid,
     pub target: NodeId,
-    pub path: Option<PathId>,
     pub pathcost: Cost,
     pub param: NodeId,
     pub subroot_idx: Option<usize>,
     pub subroot_path: Option<PathId>,
-    pub subplan_node: Option<NodeId>,
-    pub subplan_plan_id: Option<PlanId>,
 }
 
 #[derive(Clone, Debug)]

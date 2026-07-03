@@ -57,6 +57,7 @@ fn agg_shape(transfn: Oid, transtype: Oid) -> syscache_seams::PgAggregateShape {
         aggdeserialfn: InvalidOid,
         aggfinalextra: false,
         aggfinalmodify: b'r' as i8,
+        aggsortop: 0,
         aggtranstype: transtype,
         aggmtransfn: 0,
         aggminvtransfn: 0,

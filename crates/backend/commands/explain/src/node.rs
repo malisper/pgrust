@@ -167,6 +167,7 @@ fn select_rtable_names_for_explain<'mcx>(
     rels_used: &Bitmapset<'mcx>,
 ) -> PgResult<PgVec<'mcx, Option<&'mcx str>>> {
     let mut names: PgVec<'mcx, Option<&'mcx str>> = PgVec::new_in(mcx);
+    let mut counters: std::collections::HashMap<&'mcx str, i32> = std::collections::HashMap::new();
     for (i, rte_node) in rtable.iter().enumerate() {
         let rte = rte_node.as_range_tbl_entry().expect("rtable holds RTEs");
         let rtindex = i as i32 + 1;
@@ -184,14 +185,24 @@ fn select_rtable_names_for_explain<'mcx>(
         } else {
             rte.eref.expect("RTE without eref").aliasname
         };
-        if let Some(name) = refname {
-            if names.iter().any(|n| *n == Some(name)) {
-                node_gap(
-                    "set_rtable_names",
-                    "duplicate refname needs the \"_%d\" unique-ifier (ruleutils lane)",
-                );
+        // Duplicate names take the C "_%d" unique-ifier (counter per base
+        // name, resuming where the last collision left off). The NAMEDATALEN
+        // clip leg is dead: identifiers are already truncated to 63 bytes and
+        // "_%d" keeps modname under 64 only for >48-digit counters.
+        let refname = match refname {
+            Some(name) if names.iter().any(|n| *n == Some(name)) => {
+                let counter = counters.entry(name).or_insert(0);
+                loop {
+                    *counter += 1;
+                    let modname = format!("{name}_{counter}");
+                    assert!(modname.len() < 64, "set_rtable_names: NAMEDATALEN clip leg");
+                    if !names.iter().any(|n| *n == Some(modname.as_str())) {
+                        break Some(str_in(mcx, &modname)?);
+                    }
+                }
             }
-        }
+            other => other,
+        };
         names.push(refname);
     }
     Ok(names)
@@ -528,7 +539,7 @@ pub fn ExplainNode<'mcx>(
             show_scan_qual(&s.indexorderbyorig, "Order By", node, ancestors, es)?;
             show_scan_qual(&plan.qual, "Filter", node, ancestors, es)?;
             filtered_count_gap(&plan.qual, es);
-            show_indexsearches_info(es);
+            show_indexsearches_info(node, es);
         }
         NodeTag::T_IndexOnlyScan => {
             let s = node.as_index_only_scan().unwrap();
@@ -548,20 +559,20 @@ pub fn ExplainNode<'mcx>(
                     es,
                 );
             }
-            show_indexsearches_info(es);
+            show_indexsearches_info(node, es);
         }
         NodeTag::T_BitmapIndexScan => {
             let s = node.as_bitmap_index_scan().unwrap();
-            show_scan_qual(&s.indexqualorig, "Index Cond", node, es)?;
-            show_indexsearches_info(es);
+            show_scan_qual(&s.indexqualorig, "Index Cond", node, ancestors, es)?;
+            show_indexsearches_info(node, es);
         }
         NodeTag::T_BitmapHeapScan => {
             let s = node.as_bitmap_heap_scan().unwrap();
-            show_scan_qual(&s.bitmapqualorig, "Recheck Cond", node, es)?;
+            show_scan_qual(&s.bitmapqualorig, "Recheck Cond", node, ancestors, es)?;
             if !s.bitmapqualorig.is_nil() {
                 show_instrumentation_count("Rows Removed by Index Recheck", 2, &instrument, es);
             }
-            show_scan_qual(&plan.qual, "Filter", node, es)?;
+            show_scan_qual(&plan.qual, "Filter", node, ancestors, es)?;
             filtered_count_gap(&plan.qual, es);
             if es.analyze {
                 node_gap(
@@ -1288,17 +1299,6 @@ fn show_instrumentation_count(
     }
 }
 
-// show_indexsearches_info (explain.c): the AM never counts nsearches
-// (IndexScanInstrumentation lane), so ANALYZE output would silently print 0
-// where C reports the real descent count.
-fn show_indexsearches_info(es: &ExplainState<'_>) {
-    if es.analyze {
-        node_gap(
-            "show_indexsearches_info",
-            "Index Searches needs nsearches counting (nbtree IndexScanInstrumentation lane)",
-        );
-    }
-}
 
 // show_instrumentation_count's nfiltered read: the executor never counts
 // qual-filtered tuples (InstrCountFiltered, execScan.c), so printing would be
@@ -1922,23 +1922,6 @@ fn ExplainScanTarget(scanrelid: types_core::Index, es: &mut ExplainState<'_>) ->
     ExplainTargetRel(scanrelid, es)
 }
 
-// ExplainIndexScanDetails (explain.c), TEXT arm (nontext panics upstream).
-fn ExplainIndexScanDetails(
-    indexid: types_core::primitive::Oid,
-    indexorderdir: i32,
-    es: &mut ExplainState<'_>,
-) -> PgResult<()> {
-    let mcx = es.str.allocator();
-    let indexname = lsyscache::get_rel_name(mcx, indexid)?
-        .expect("explain_get_index_name: cache lookup failed");
-    let indexname = str_in(mcx, indexname.as_str())?;
-    if indexorderdir < 0 {
-        append!(es, " Backward");
-    }
-    append!(es, " using {}", quote_identifier(indexname));
-    Ok(())
-}
-
 // show_indexsearches_info (explain.c); no parallel workers on this lane.
 fn show_indexsearches_info<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) {
     if !es.analyze {
@@ -1951,19 +1934,6 @@ fn show_indexsearches_info<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) 
         execmain_seams::query_desc_index_instrument::call(es.qd, id).unwrap_or(0)
     };
     ExplainPropertyInteger("Index Searches", None, nsearches as i64, es);
-}
-
-// show_instrumentation_count("Rows Removed by Index Recheck"): the executor
-// counts no nfiltered2; a lossy recheck is unreachable (btree never sets
-// xs_recheck, non-btree AMs loud in plancat), so C's count is provably 0 and
-// TEXT suppresses zero. Assert the invariant rather than print.
-fn recheck_count_gap(node: Node<'_>, es: &ExplainState<'_>, has_recheck: bool) {
-    if es.analyze && has_recheck && node.node_tag() == NodeTag::T_BitmapHeapScan {
-        node_gap(
-            "show_instrumentation_count",
-            "Rows Removed by Index Recheck needs nfiltered2 counting (bitmap lossy lane)",
-        );
-    }
 }
 
 // ExplainTargetRel's T_FunctionScan arm: objectname is the function's name

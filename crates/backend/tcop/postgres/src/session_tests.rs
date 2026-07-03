@@ -413,6 +413,7 @@ fn install_catalog_fixture() {
             aggdeserialfn: 0,
             aggfinalextra: false,
             aggfinalmodify: b'r' as i8,
+            aggsortop: 0,
             aggtranstype: INT8OID,
             aggmtransfn: 0,
             aggminvtransfn: 0,

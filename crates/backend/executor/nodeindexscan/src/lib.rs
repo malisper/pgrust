@@ -20,7 +20,7 @@ use ::types_nodes::list::NodeList;
 use ::types_nodes::plannodes::IndexScan;
 use ::types_nodes::NodeTag;
 use ::types_rel::{NoLock, Relation};
-use ::types_scan::scankey::{ScanKeyData, StrategyNumber, SK_ISNULL};
+use ::types_scan::scankey::{ScanKeyData, StrategyNumber, SK_ISNULL, SK_SEARCHNOTNULL, SK_SEARCHNULL};
 use ::types_scan::sdir::{ScanDirection, ScanDirectionCombine};
 
 pub fn init_seams() {}
@@ -231,7 +231,28 @@ pub fn exec_index_build_scan_keys<'mcx>(
             NodeTag::T_OpExpr => clause.as_op_expr().unwrap(),
             NodeTag::T_RowCompareExpr => scankey_case_unported("RowCompareExpr"),
             NodeTag::T_ScalarArrayOpExpr => scankey_case_unported("ScalarArrayOpExpr"),
-            NodeTag::T_NullTest => scankey_case_unported("NullTest"),
+            NodeTag::T_NullTest => {
+                let nt = clause.as_null_test().unwrap();
+                let var = nt
+                    .arg
+                    .expect("NullTest.arg")
+                    .as_var()
+                    .filter(|v| v.varno == INDEX_VAR)
+                    .unwrap_or_else(|| panic!("NullTest indexqual has wrong key"));
+                let flags = SK_ISNULL
+                    | match nt.nulltesttype {
+                        types_nodes::primnodes::NullTestType::IS_NULL => SK_SEARCHNULL,
+                        types_nodes::primnodes::NullTestType::IS_NOT_NULL => SK_SEARCHNOTNULL,
+                    };
+                let mut key = ScanKeyData::empty();
+                key.sk_flags = flags;
+                key.sk_attno = var.varattno;
+                key.sk_strategy = 0;
+                key.sk_subtype = 0;
+                key.sk_collation = 0;
+                scan_keys.push(key);
+                continue;
+            }
             tag => panic!("unsupported indexqual type: {tag:?}"),
         };
 

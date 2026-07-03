@@ -999,6 +999,7 @@ fn index_other_operands_eval_cost(
         let other_operand = match clause.node_tag() {
             // indexkey is always the left operand of a fixed indexqual.
             NodeTag::T_OpExpr => Some(clause.as_op_expr().unwrap().args.nth(1)),
+            NodeTag::T_NullTest => None,
             other => panic!("index_other_operands_eval_cost (selfuncs.c): {other:?}; M2 lane"),
         };
         if let Some(op) = other_operand {
@@ -1053,6 +1054,7 @@ fn btcostestimate(
     let mut indexcol: i32 = 0;
     let mut eq_qual_here = false;
     let mut found_array = false;
+    let mut found_is_null_op = false;
     let mut num_sa_scans = 1.0f64;
 
     'buildquals: for iclause in indexclauses.iter() {
@@ -1125,13 +1127,25 @@ fn btcostestimate(
             let clause = *run.root.expr_node(run.root.rinfo(rid).clause);
             let clause_op = match clause.node_tag() {
                 NodeTag::T_OpExpr => clause.as_op_expr().unwrap().opno,
+                NodeTag::T_NullTest => {
+                    if clause.as_null_test().unwrap().nulltesttype
+                        == types_nodes::primnodes::NullTestType::IS_NULL
+                    {
+                        found_is_null_op = true;
+                        // IS NULL is like = for selectivity/skip-scan purposes.
+                        eq_qual_here = true;
+                    }
+                    0
+                }
                 other => panic!("btcostestimate (selfuncs.c): indexqual {other:?}; M2 lane"),
             };
-            let op_strategy =
-                lsyscache::get_op_opfamily_strategy(clause_op, opfamilies[indexcol as usize])?;
-            debug_assert!(op_strategy != 0);
-            if op_strategy == lsyscache::BTEqualStrategyNumber as i32 {
-                eq_qual_here = true;
+            if clause_op != 0 {
+                let op_strategy =
+                    lsyscache::get_op_opfamily_strategy(clause_op, opfamilies[indexcol as usize])?;
+                debug_assert!(op_strategy != 0);
+                if op_strategy == lsyscache::BTEqualStrategyNumber as i32 {
+                    eq_qual_here = true;
+                }
             }
             index_bound_quals.push(rid);
             if !eq_qual_here && indexcol < index_nkeycolumns - 1 {
@@ -1144,6 +1158,7 @@ fn btcostestimate(
         && indexcol == index_nkeycolumns - 1
         && eq_qual_here
         && !found_array
+        && !found_is_null_op
     {
         1.0
     } else {
