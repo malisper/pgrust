@@ -110,31 +110,13 @@ pub(crate) fn object_keys_rows(mcx: Mcx<'_>, json: &[u8]) -> PgResult<SrfRows> {
     Ok(SrfRows::Texts(state.keys))
 }
 
-fn make_each_desc<'mcx>(mcx: Mcx<'mcx>, as_text: bool) -> PgResult<tupdesc::TupleDescData<'mcx>> {
-    let mut desc = tupdesc::CreateTemplateTupleDesc(mcx, 2)?;
-    tupdesc::TupleDescInitEntry(&mut desc, 1, Some("key"), TEXTOID, -1, 0)?;
-    tupdesc::TupleDescInitEntry(
-        &mut desc,
-        2,
-        Some("value"),
-        if as_text { TEXTOID } else { JSONOID },
-        -1,
-        0,
-    )?;
-    desc.tdtypeid = RECORDOID;
-    desc.tdtypmod = -1;
-    Ok(desc)
-}
-
 struct EachState<'a, 'mcx> {
-    mcx: Mcx<'mcx>,
     input: &'a [u8],
-    desc: tupdesc::TupleDescData<'mcx>,
     normalize: bool,
     next_scalar: bool,
     normalized_scalar: Option<&'mcx [u8]>,
     result_start: usize,
-    rows: Vec<Vec<u8>>,
+    pairs: Vec<(Vec<u8>, Option<Vec<u8>>)>,
 }
 
 impl<'mcx> JsonSem<'mcx> for EachState<'_, 'mcx> {
@@ -163,24 +145,16 @@ impl<'mcx> JsonSem<'mcx> for EachState<'_, 'mcx> {
         if lex.lex_level != 1 {
             return Ok(true);
         }
-        let key_datum = varlena_result(varlena::cstring_to_text(self.mcx, fname)?);
-        let (val_datum, val_null) = if isnull && self.normalize {
-            (Datum::null(), true)
+        let val = if isnull && self.normalize {
+            None
         } else if self.next_scalar {
             let s = self.normalized_scalar.expect("scalar recorded");
             self.next_scalar = false;
-            (varlena_result(varlena::cstring_to_text(self.mcx, s)?), false)
+            Some(s.to_vec())
         } else {
-            let raw = &self.input[self.result_start..lex.prev_token_terminator];
-            (varlena_result(varlena::cstring_to_text(self.mcx, raw)?), false)
+            Some(self.input[self.result_start..lex.prev_token_terminator].to_vec())
         };
-        let tuple = heaptuple::heap_form_tuple(
-            self.mcx,
-            &self.desc,
-            &[key_datum, val_datum],
-            &[false, val_null],
-        )?;
-        self.rows.push(tuple.image().to_vec());
+        self.pairs.push((fname.to_vec(), val));
         Ok(true)
     }
 
@@ -207,22 +181,45 @@ impl<'mcx> JsonSem<'mcx> for EachState<'_, 'mcx> {
     }
 }
 
-/// C: each_worker's parse — rows materialized as composite images.
+/// C: each_worker — rows materialized as composite images with a freshly
+/// built 2-column rowtype.
 pub(crate) fn each_rows(mcx: Mcx<'_>, json: &[u8], as_text: bool) -> PgResult<SrfRows> {
-    let desc = make_each_desc(mcx, as_text)?;
     let mut lex = JsonLexDe::new(mcx, json, mbutils::GetDatabaseEncoding());
     let mut state = EachState {
-        mcx,
         input: json,
-        desc,
         normalize: as_text,
         next_scalar: false,
         normalized_scalar: None,
         result_start: 0,
-        rows: Vec::new(),
+        pairs: Vec::new(),
     };
     parse_sem_or_ereport(&mut lex, &mut state)?;
-    Ok(SrfRows::Tuples(state.rows))
+
+    let mut desc = tupdesc::CreateTemplateTupleDesc(mcx, 2)?;
+    tupdesc::TupleDescInitEntry(&mut desc, 1, Some("key"), TEXTOID, -1, 0)?;
+    tupdesc::TupleDescInitEntry(
+        &mut desc,
+        2,
+        Some("value"),
+        if as_text { TEXTOID } else { JSONOID },
+        -1,
+        0,
+    )?;
+    desc.tdtypeid = RECORDOID;
+    desc.tdtypmod = -1;
+
+    let mut rows: Vec<Vec<u8>> = Vec::with_capacity(state.pairs.len());
+    for (key, val) in &state.pairs {
+        let key_datum = varlena_result(varlena::cstring_to_text(mcx, key)?);
+        let (val_datum, val_null) = match val {
+            None => (Datum::null(), true),
+            Some(bytes) => (varlena_result(varlena::cstring_to_text(mcx, bytes)?), false),
+        };
+        let tuple =
+            heaptuple::heap_form_tuple(mcx, &desc, &[key_datum, val_datum], &[false, val_null])?;
+        rows.push(tuple.image().to_vec());
+    }
+    Ok(SrfRows::Tuples(rows))
 }
 
 struct ElementsState<'a, 'mcx> {
