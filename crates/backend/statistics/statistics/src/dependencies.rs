@@ -90,11 +90,10 @@ fn dependency_degree(
             n_violations = 0;
             group_size = 1;
             continue;
-        } else if {
-            let (av, an) = store.value(items[i - 1], k - 1);
-            let (bv, bn) = store.value(items[i], k - 1);
-            mss.compare_dim(k - 1, av, an, bv, bn) != 0
-        } {
+        }
+        let (av, an) = store.value(items[i - 1], k - 1);
+        let (bv, bn) = store.value(items[i], k - 1);
+        if mss.compare_dim(k - 1, av, an, bv, bn) != 0 {
             n_violations += 1;
         }
         group_size += 1;
