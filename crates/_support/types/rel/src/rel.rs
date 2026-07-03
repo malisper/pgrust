@@ -140,8 +140,8 @@ impl<'mcx> RelationData<'mcx> {
 
     #[inline]
     pub fn get_fillfactor(&self, defaultff: i32) -> i32 {
-        match self.rd_options.as_ref().and_then(|o| o.std()) {
-            Some(opts) => opts.fillfactor,
+        match self.rd_options.as_ref().and_then(|o| o.fillfactor()) {
+            Some(ff) => ff,
             None => defaultff,
         }
     }

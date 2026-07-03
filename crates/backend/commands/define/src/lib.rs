@@ -1,5 +1,4 @@
-// define.c slice (defGetString/defGetBoolean); its CATALOG row stays todo and
-// points here for these two.
+// define.c slice (defGetString/defGetBoolean).
 #![allow(non_snake_case)]
 
 use core::fmt::Write;
@@ -31,9 +30,25 @@ pub fn defGetString<'r, 'mcx: 'r, 'a: 'r>(
         NodeTag::T_Float => Ok(arg.as_float().unwrap().fval),
         NodeTag::T_Boolean => Ok(if arg.as_boolean().unwrap().boolval { "true" } else { "false" }),
         NodeTag::T_String => Ok(arg.as_string().unwrap().sval),
-        t @ (NodeTag::T_TypeName | NodeTag::T_List | NodeTag::T_A_Star) => panic!(
-            "defGetString (define.c): {t:?} arg needs TypeNameToString/NameListToString \
-             (define lane)"
+        NodeTag::T_TypeName => {
+            // TypeNameToString bare-name arm: gram's def_arg func_type wraps
+            // any simple identifier as a TypeName.
+            let tn = arg.as_variant::<types_nodes::rawnodes::TypeName>().unwrap();
+            if tn.setof || tn.pct_type || !tn.typmods.is_nil() || !tn.arrayBounds.is_nil() {
+                panic!("defGetString (define.c): decorated TypeName arg (define lane)");
+            }
+            let mut s = PgString::new_in(mcx);
+            for (i, n) in tn.names.iter().enumerate() {
+                if i > 0 {
+                    s.try_push_str(".").expect("PgString write");
+                }
+                s.try_push_str(n.as_string().expect("TypeName name").sval)
+                    .expect("PgString write");
+            }
+            Ok(str_in(mcx, s.as_str())?)
+        }
+        t @ (NodeTag::T_List | NodeTag::T_A_Star) => panic!(
+            "defGetString (define.c): {t:?} arg needs NameListToString (define lane)"
         ),
         t => panic!("unrecognized node type: {t:?}"),
     }
@@ -78,7 +93,7 @@ pub fn defGetBoolean(def: &DefElem<'_>) -> PgResult<bool> {
         .into())
 }
 
-pub(crate) fn str_in<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<&'mcx str> {
+pub fn str_in<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<&'mcx str> {
     let bytes = mcx::slice_borrow_in(mcx, s.as_bytes())?;
     // SAFETY: byte-for-byte copy of a &str.
     Ok(unsafe { core::str::from_utf8_unchecked(bytes) })

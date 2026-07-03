@@ -316,6 +316,8 @@ members = [
     "crates/backend/utils/fmgr/fmgr_seams",
     "crates/backend/tcop/pquery_seams",
     "crates/backend/access/common/printtup",
+    "crates/backend/access/common/reloptions",
+    "crates/backend/commands/define",
     "crates/backend/access/transam/xact_portal_seams",
     "crates/backend/commands/discard",
     "crates/backend/commands/lockcmds",

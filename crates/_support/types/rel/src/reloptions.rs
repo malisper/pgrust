@@ -64,12 +64,61 @@ pub struct ViewOptions {
     pub check_option: ViewOptCheckOption,
 }
 
-// rd_options payload: the heap/view parses land with the reloptions unit; the
-// AM-opaque index blobs are a later widening.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(i32)]
+pub enum GistOptBufferingMode {
+    GIST_OPTION_BUFFERING_AUTO = 0,
+    GIST_OPTION_BUFFERING_ON = 1,
+    GIST_OPTION_BUFFERING_OFF = 2,
+}
+
+pub use GistOptBufferingMode::*;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BTOptions {
+    pub fillfactor: i32,
+    pub vacuum_cleanup_index_scale_factor: f64,
+    pub deduplicate_items: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HashOptions {
+    pub fillfactor: i32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GinOptions {
+    pub use_fast_update: bool,
+    pub pending_list_cleanup_size: i32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GistOptions {
+    pub fillfactor: i32,
+    pub buffering_mode: GistOptBufferingMode,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SpGistOptions {
+    pub fillfactor: i32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BrinOptions {
+    pub pages_per_range: i32,
+    pub autosummarize: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum RdOptions {
     Std(StdRdOptions),
     View(ViewOptions),
+    BTree(BTOptions),
+    Hash(HashOptions),
+    Gin(GinOptions),
+    Gist(GistOptions),
+    SpGist(SpGistOptions),
+    Brin(BrinOptions),
 }
 
 impl RdOptions {
@@ -77,15 +126,77 @@ impl RdOptions {
     pub fn std(&self) -> Option<&StdRdOptions> {
         match self {
             RdOptions::Std(o) => Some(o),
-            RdOptions::View(_) => None,
+            _ => None,
         }
     }
 
     #[inline]
     pub fn view(&self) -> Option<&ViewOptions> {
         match self {
-            RdOptions::Std(_) => None,
             RdOptions::View(o) => Some(o),
+            _ => None,
+        }
+    }
+
+    // RelationGetFillFactor is used by C against whichever option struct the
+    // relkind/AM parsed; variants without a fillfactor member fall to default.
+    #[inline]
+    pub fn fillfactor(&self) -> Option<i32> {
+        match self {
+            RdOptions::Std(o) => Some(o.fillfactor),
+            RdOptions::BTree(o) => Some(o.fillfactor),
+            RdOptions::Hash(o) => Some(o.fillfactor),
+            RdOptions::Gist(o) => Some(o.fillfactor),
+            RdOptions::SpGist(o) => Some(o.fillfactor),
+            RdOptions::View(_) | RdOptions::Gin(_) | RdOptions::Brin(_) => None,
+        }
+    }
+
+    #[inline]
+    pub fn btree(&self) -> Option<&BTOptions> {
+        match self {
+            RdOptions::BTree(o) => Some(o),
+            _ => None,
+        }
+    }
+
+    #[inline]
+    pub fn hash(&self) -> Option<&HashOptions> {
+        match self {
+            RdOptions::Hash(o) => Some(o),
+            _ => None,
+        }
+    }
+
+    #[inline]
+    pub fn gin(&self) -> Option<&GinOptions> {
+        match self {
+            RdOptions::Gin(o) => Some(o),
+            _ => None,
+        }
+    }
+
+    #[inline]
+    pub fn gist(&self) -> Option<&GistOptions> {
+        match self {
+            RdOptions::Gist(o) => Some(o),
+            _ => None,
+        }
+    }
+
+    #[inline]
+    pub fn spgist(&self) -> Option<&SpGistOptions> {
+        match self {
+            RdOptions::SpGist(o) => Some(o),
+            _ => None,
+        }
+    }
+
+    #[inline]
+    pub fn brin(&self) -> Option<&BrinOptions> {
+        match self {
+            RdOptions::Brin(o) => Some(o),
+            _ => None,
         }
     }
 }
