@@ -6,8 +6,8 @@ use mcx::PgVec;
 use types_error::PgResult;
 use types_nodes::{Node, NodeTag};
 use types_pathnodes::{
-    is_outer_join, pathkeys_contained_in, tag16, HashPath, MergePath, MergeScanSelCache,
-    NestPath, NodeId, PathId, PathKey, PathNode, QualCost, RelId, RinfoId, SemiAntiJoinFactors,
+    is_outer_join, pathkeys_contained_in, tag16, HashPath, MergePath, MergeScanSelCache, NestPath,
+    NodeId, PathId, PathKey, PathNode, QualCost, RelId, RinfoId, SemiAntiJoinFactors,
     SpecialJoinInfo, JOIN_INNER, JOIN_LEFT, JOIN_RIGHT, RTE_RELATION,
 };
 
@@ -104,16 +104,18 @@ fn cost_qual_eval_walker(node: Node<'_>, cost: &mut QualCost) -> PgResult<()> {
         NodeTag::T_OpExpr => {
             let o = node.as_op_expr().unwrap();
             // set_opfuncid memo write-back is unmodeled (walker.rs note).
-            let opfuncid = if o.opfuncid != 0 { o.opfuncid } else { lsyscache::get_opcode(o.opno)? };
+            let opfuncid = if o.opfuncid != 0 {
+                o.opfuncid
+            } else {
+                lsyscache::get_opcode(o.opno)?
+            };
             planner_seams::add_function_cost::call(opfuncid, cost)?;
             for arg in &o.args {
                 cost_qual_eval_walker(arg, cost)?;
             }
             Ok(())
         }
-        NodeTag::T_RelabelType => {
-            cost_qual_eval_walker(node.as_relabel_type().unwrap().arg, cost)
-        }
+        NodeTag::T_RelabelType => cost_qual_eval_walker(node.as_relabel_type().unwrap().arg, cost),
         // C charges both I/O functions of the coercion.
         NodeTag::T_CoerceViaIO => {
             let c = node.as_coerce_via_io().unwrap();
@@ -150,7 +152,10 @@ fn cost_qual_eval_walker(node: Node<'_>, cost: &mut QualCost) -> PgResult<()> {
                 panic!("cost_qual_eval_walker (costsize.c): hashed SAOP; M2 lane");
             }
             let arraynode = sa.args.nth(1);
-            let mut sacosts = QualCost { startup: 0.0, per_tuple: 0.0 };
+            let mut sacosts = QualCost {
+                startup: 0.0,
+                per_tuple: 0.0,
+            };
             planner_seams::add_function_cost::call(opfuncid, &mut sacosts)?;
             // C: the operator runs against about half the array elements.
             cost.startup += sacosts.startup;
@@ -174,7 +179,11 @@ fn cost_qual_eval_walker(node: Node<'_>, cost: &mut QualCost) -> PgResult<()> {
         // C charges DistinctExpr like OpExpr; BooleanTest itself is free.
         NodeTag::T_DistinctExpr => {
             let d = node.as_distinct_expr().unwrap();
-            let opfuncid = if d.opfuncid != 0 { d.opfuncid } else { lsyscache::get_opcode(d.opno)? };
+            let opfuncid = if d.opfuncid != 0 {
+                d.opfuncid
+            } else {
+                lsyscache::get_opcode(d.opno)?
+            };
             planner_seams::add_function_cost::call(opfuncid, cost)?;
             for arg in &d.args {
                 cost_qual_eval_walker(arg, cost)?;
@@ -285,7 +294,14 @@ pub fn get_parameterized_baserel_size<'mcx>(
 pub fn cost_seqscan(run: &mut PlannerRun<'_>, path_id: types_pathnodes::PathId, rel: RelId) {
     let (relid, rtekind, reltablespace, pages, tuples, base_rows) = {
         let baserel = run.root.rel(rel);
-        (baserel.relid, baserel.rtekind, baserel.reltablespace, baserel.pages, baserel.tuples, baserel.rows)
+        (
+            baserel.relid,
+            baserel.rtekind,
+            baserel.reltablespace,
+            baserel.pages,
+            baserel.tuples,
+            baserel.rows,
+        )
     };
     debug_assert!(relid > 0 && rtekind == RTE_RELATION);
     assert!(
@@ -410,7 +426,10 @@ pub fn set_cte_size_estimates(run: &mut PlannerRun<'_>, rel: RelId, cte_rows: f6
 pub fn set_values_size_estimates(run: &mut PlannerRun<'_>, rel: RelId) -> PgResult<()> {
     let rti = run.root.rel(rel).relid as usize;
     debug_assert!(rti > 0);
-    debug_assert_eq!(run.rte(rti).rtekind, types_nodes::parsenodes::RTEKind::RTE_VALUES);
+    debug_assert_eq!(
+        run.rte(rti).rtekind,
+        types_nodes::parsenodes::RTEKind::RTE_VALUES
+    );
     run.root.rel_mut(rel).tuples = run.rte(rti).values_lists.len() as f64;
     set_baserel_size_estimates(run, rel)
 }
@@ -521,8 +540,11 @@ pub fn expression_returns_set_rows(clause: Node<'_>) -> PgResult<f64> {
 }
 
 // cost_index (costsize.c); partial paths are loud.
-pub fn cost_index(run: &mut PlannerRun<'_>, path_id: types_pathnodes::PathId, loop_count: f64) -> PgResult<()> {
-
+pub fn cost_index(
+    run: &mut PlannerRun<'_>,
+    path_id: types_pathnodes::PathId,
+    loop_count: f64,
+) -> PgResult<()> {
     let (baserel_id, indexonly, index_total_pages, indrestrictinfo) = {
         let PathNode::IndexPath(ip) = run.root.path(path_id) else {
             panic!("cost_index: not an IndexPath")
@@ -546,7 +568,9 @@ pub fn cost_index(run: &mut PlannerRun<'_>, path_id: types_pathnodes::PathId, lo
 
     // qpquals: restrictions not redundant with the index clauses.
     let indexclause_rinfos: mcx::PgVec<'_, (RinfoId, bool, Option<types_pathnodes::EcId>)> = {
-        let PathNode::IndexPath(ip) = run.root.path(path_id) else { unreachable!() };
+        let PathNode::IndexPath(ip) = run.root.path(path_id) else {
+            unreachable!()
+        };
         let mut v = mcx::PgVec::new_in(run.mcx);
         for ic in ip.indexclauses.iter() {
             let rid = ic.rinfo.expect("IndexClause rinfo");
@@ -569,15 +593,10 @@ pub fn cost_index(run: &mut PlannerRun<'_>, path_id: types_pathnodes::PathId, lo
         if run.root.rinfo(rid).pseudoconstant {
             continue;
         }
-        if indexclause_rinfos
-            .iter()
-            .any(|&(c, lossy, parent_ec)| {
-                !lossy
-                    && (c == rid
-                        || (parent_ec.is_some()
-                            && run.root.rinfo(rid).parent_ec == parent_ec))
-            })
-        {
+        if indexclause_rinfos.iter().any(|&(c, lossy, parent_ec)| {
+            !lossy
+                && (c == rid || (parent_ec.is_some() && run.root.rinfo(rid).parent_ec == parent_ec))
+        }) {
             continue;
         }
         qpquals.push(rid);
@@ -597,7 +616,12 @@ pub fn cost_index(run: &mut PlannerRun<'_>, path_id: types_pathnodes::PathId, lo
 
     let (baserel_tuples, baserel_pages, baserel_allvisfrac, reltablespace) = {
         let baserel = run.root.rel(baserel_id);
-        (baserel.tuples, baserel.pages, baserel.allvisfrac, baserel.reltablespace)
+        (
+            baserel.tuples,
+            baserel.pages,
+            baserel.allvisfrac,
+            baserel.reltablespace,
+        )
     };
     let tuples_fetched = clamp_row_est(am.index_selectivity * baserel_tuples);
     let (spc_random_page_cost, spc_seq_page_cost) = get_tablespace_page_costs(reltablespace);
@@ -675,10 +699,7 @@ pub fn cost_index(run: &mut PlannerRun<'_>, path_id: types_pathnodes::PathId, lo
 }
 
 // cost_bitmap_tree_node (costsize.c): (cost, selectivity) of a bitmapqual.
-pub fn cost_bitmap_tree_node(
-    run: &PlannerRun<'_>,
-    path_id: types_pathnodes::PathId,
-) -> (f64, f64) {
+pub fn cost_bitmap_tree_node(run: &PlannerRun<'_>, path_id: types_pathnodes::PathId) -> (f64, f64) {
     match run.root.path(path_id) {
         PathNode::IndexPath(ip) => (
             // Per-tuple bitmap-manipulation charge: a one-tuple bitmap scan
@@ -699,7 +720,9 @@ pub fn cost_bitmap_tree_node(
 // inputs; 100x cpu_operator_cost per tbm_intersect.
 pub fn cost_bitmap_and_node(run: &mut PlannerRun<'_>, path_id: types_pathnodes::PathId) {
     let subs = {
-        let PathNode::BitmapAndPath(p) = run.root.path(path_id) else { unreachable!() };
+        let PathNode::BitmapAndPath(p) = run.root.path(path_id) else {
+            unreachable!()
+        };
         p.bitmapquals.clone()
     };
     let mut total_cost = 0.0;
@@ -712,7 +735,9 @@ pub fn cost_bitmap_and_node(run: &mut PlannerRun<'_>, path_id: types_pathnodes::
             total_cost += 100.0 * gucs::cpu_operator_cost();
         }
     }
-    let PathNode::BitmapAndPath(p) = run.root.path_mut(path_id) else { unreachable!() };
+    let PathNode::BitmapAndPath(p) = run.root.path_mut(path_id) else {
+        unreachable!()
+    };
     p.bitmapselectivity = selec;
     p.path.rows = 0.0;
     p.path.disabled_nodes = 0;
@@ -724,7 +749,9 @@ pub fn cost_bitmap_and_node(run: &mut PlannerRun<'_>, path_id: types_pathnodes::
 // inputs, clamped to 1; tbm_unions are free when the input is an IndexPath.
 pub fn cost_bitmap_or_node(run: &mut PlannerRun<'_>, path_id: types_pathnodes::PathId) {
     let subs = {
-        let PathNode::BitmapOrPath(p) = run.root.path(path_id) else { unreachable!() };
+        let PathNode::BitmapOrPath(p) = run.root.path(path_id) else {
+            unreachable!()
+        };
         p.bitmapquals.clone()
     };
     let mut total_cost = 0.0;
@@ -737,7 +764,9 @@ pub fn cost_bitmap_or_node(run: &mut PlannerRun<'_>, path_id: types_pathnodes::P
             total_cost += 100.0 * gucs::cpu_operator_cost();
         }
     }
-    let PathNode::BitmapOrPath(p) = run.root.path_mut(path_id) else { unreachable!() };
+    let PathNode::BitmapOrPath(p) = run.root.path_mut(path_id) else {
+        unreachable!()
+    };
     p.bitmapselectivity = selec.min(1.0);
     p.path.rows = 0.0;
     p.path.startup_cost = total_cost;
@@ -746,15 +775,19 @@ pub fn cost_bitmap_or_node(run: &mut PlannerRun<'_>, path_id: types_pathnodes::P
 
 fn get_indexpath_pages(run: &PlannerRun<'_>, path_id: types_pathnodes::PathId) -> f64 {
     match run.root.path(path_id) {
-        PathNode::IndexPath(ip) => {
-            ip.indexinfo.as_ref().expect("indexinfo set").pages as f64
-        }
-        PathNode::BitmapAndPath(p) => {
-            p.bitmapquals.clone().iter().map(|&q| get_indexpath_pages(run, q)).sum()
-        }
-        PathNode::BitmapOrPath(p) => {
-            p.bitmapquals.clone().iter().map(|&q| get_indexpath_pages(run, q)).sum()
-        }
+        PathNode::IndexPath(ip) => ip.indexinfo.as_ref().expect("indexinfo set").pages as f64,
+        PathNode::BitmapAndPath(p) => p
+            .bitmapquals
+            .clone()
+            .iter()
+            .map(|&q| get_indexpath_pages(run, q))
+            .sum(),
+        PathNode::BitmapOrPath(p) => p
+            .bitmapquals
+            .clone()
+            .iter()
+            .map(|&q| get_indexpath_pages(run, q))
+            .sum(),
         other => panic!(
             "get_indexpath_pages (costsize.c): pathtype {}",
             other.base().pathtype
@@ -789,7 +822,11 @@ pub fn compute_bitmap_pages(
         );
         pages_fetched /= loop_count;
     }
-    pages_fetched = if pages_fetched >= t { t } else { pages_fetched.ceil() };
+    pages_fetched = if pages_fetched >= t {
+        t
+    } else {
+        pages_fetched.ceil()
+    };
     if maxentries < heap_pages {
         // tbm_lossify() sheds pages sharply once memory runs short; this
         // matches C's crude estimate of that shape.
@@ -815,14 +852,19 @@ pub fn cost_bitmap_heap_scan(
 ) {
     let (relid, rtekind, reltablespace, pages, base_rows) = {
         let baserel = run.root.rel(rel);
-        (baserel.relid, baserel.rtekind, baserel.reltablespace, baserel.pages, baserel.rows)
+        (
+            baserel.relid,
+            baserel.rtekind,
+            baserel.reltablespace,
+            baserel.pages,
+            baserel.rows,
+        )
     };
     debug_assert!(relid > 0 && rtekind == RTE_RELATION);
-    assert!(
-        run.root.path(path_id).base().param_info.is_none(),
-        "cost_bitmap_heap_scan (costsize.c): parameterized path; M2 join lane"
-    );
-    let rows = base_rows;
+    let rows = match run.root.path(path_id).base().param_info.as_deref() {
+        Some(ppi) => ppi.ppi_rows,
+        None => base_rows,
+    };
 
     let (pages_fetched, index_total_cost, tuples_fetched) =
         compute_bitmap_pages(run, rel, bitmapqual, loop_count);
@@ -861,7 +903,6 @@ pub fn cost_bitmap_heap_scan(
     p.total_cost = startup_cost + run_cost;
 }
 
-
 pub fn cost_material(
     input_disabled_nodes: i32,
     input_startup_cost: f64,
@@ -897,7 +938,12 @@ pub fn cost_tidscan(
 ) -> PgResult<()> {
     let (relid, rtekind, reltablespace, base_rows) = {
         let baserel = run.root.rel(rel);
-        (baserel.relid, baserel.rtekind, baserel.reltablespace, baserel.rows)
+        (
+            baserel.relid,
+            baserel.rtekind,
+            baserel.reltablespace,
+            baserel.rows,
+        )
     };
     debug_assert!(relid > 0 && rtekind == RTE_RELATION);
     debug_assert!(!tidquals.is_empty());
@@ -1064,7 +1110,10 @@ pub fn cost_agg_shape(
 
     // HAVING quals: charged per output tuple, then filter selectivity.
     if !quals.is_empty() {
-        let mut qual_cost = QualCost { startup: 0.0, per_tuple: 0.0 };
+        let mut qual_cost = QualCost {
+            startup: 0.0,
+            per_tuple: 0.0,
+        };
         for &q in quals {
             let c = cost_qual_eval_node(*run.root.expr_node(q))?;
             qual_cost.startup += c.startup;
@@ -1142,8 +1191,15 @@ pub fn index_pages_fetched(
 // set_baserel_size_estimates (costsize.c).
 pub fn set_baserel_size_estimates<'mcx>(run: &mut PlannerRun<'mcx>, rel: RelId) -> PgResult<()> {
     debug_assert!(run.root.rel(rel).relid > 0);
-    let quals = types_pathnodes::relids::pgvec_clone_shallow(run.mcx, &run.root.rel(rel).baserestrictinfo);
-    let selec = planner_seams::clauselist_selectivity::call(run, &quals, 0, types_pathnodes::JOIN_INNER, None)?;
+    let quals =
+        types_pathnodes::relids::pgvec_clone_shallow(run.mcx, &run.root.rel(rel).baserestrictinfo);
+    let selec = planner_seams::clauselist_selectivity::call(
+        run,
+        &quals,
+        0,
+        types_pathnodes::JOIN_INNER,
+        None,
+    )?;
     let nrows = run.root.rel(rel).tuples * selec;
     run.root.rel_mut(rel).rows = clamp_row_est(nrows);
     let qcost = cost_qual_eval(run, &quals)?;
@@ -1158,7 +1214,13 @@ pub fn get_expr_width(run: &PlannerRun<'_>, expr: NodeId) -> PgResult<i32> {
     if let Some(var) = node.as_var() {
         debug_assert!(var.varlevelsup == 0);
         if var.varno >= 0 && var.varno < run.root.simple_rel_array_size {
-            if let Some(rel_id) = run.root.simple_rel_array.get(var.varno as usize).copied().flatten() {
+            if let Some(rel_id) = run
+                .root
+                .simple_rel_array
+                .get(var.varno as usize)
+                .copied()
+                .flatten()
+            {
                 let rel = run.root.rel(rel_id);
                 if var.varattno >= rel.min_attr && var.varattno <= rel.max_attr {
                     let ndx = (var.varattno - rel.min_attr) as usize;
@@ -1199,9 +1261,9 @@ pub fn expr_type_typmod(node: Node<'_>) -> (u32, i32) {
         }
         NodeTag::T_OpExpr => (node.as_op_expr().unwrap().opresulttype, -1),
         NodeTag::T_DistinctExpr => (node.as_distinct_expr().unwrap().opresulttype, -1),
-        NodeTag::T_BooleanTest
-        | NodeTag::T_BoolExpr
-        | NodeTag::T_NullTest => (types_core::catalog::BOOLOID, -1),
+        NodeTag::T_BooleanTest | NodeTag::T_BoolExpr | NodeTag::T_NullTest => {
+            (types_core::catalog::BOOLOID, -1)
+        }
         NodeTag::T_RowExpr => (node.as_row_expr().unwrap().row_typeid, -1),
         NodeTag::T_FuncExpr => (node.as_func_expr().unwrap().funcresulttype, -1),
         NodeTag::T_Aggref => (node.as_aggref().unwrap().aggtype, -1),
@@ -1229,7 +1291,11 @@ pub fn expr_type_typmod(node: Node<'_>) -> (u32, i32) {
             }
         }
         NodeTag::T_AlternativeSubPlan => expr_type_typmod(
-            node.as_alternative_sub_plan().unwrap().subplans.first().expect("alternatives"),
+            node.as_alternative_sub_plan()
+                .unwrap()
+                .subplans
+                .first()
+                .expect("alternatives"),
         ),
         NodeTag::T_CaseTestExpr => {
             let ct = node.as_case_test_expr().unwrap();
@@ -1242,7 +1308,9 @@ pub fn expr_type_typmod(node: Node<'_>) -> (u32, i32) {
         }
         NodeTag::T_CoerceViaIO => (node.as_coerce_via_io().unwrap().resulttype, -1),
         NodeTag::T_NextValueExpr => (
-            node.as_variant::<types_nodes::primnodes::NextValueExpr>().unwrap().typeId,
+            node.as_variant::<types_nodes::primnodes::NextValueExpr>()
+                .unwrap()
+                .typeId,
             -1,
         ),
         _ => (nodes_core::expr_type(node), nodes_core::expr_typmod(node)),
@@ -1250,13 +1318,19 @@ pub fn expr_type_typmod(node: Node<'_>) -> (u32, i32) {
 }
 
 fn case_expr_typmod(c: &types_nodes::primnodes::CaseExpr<'_>) -> i32 {
-    let Some(defresult) = c.defresult else { return -1 };
+    let Some(defresult) = c.defresult else {
+        return -1;
+    };
     let (dtype, typmod) = expr_type_typmod(defresult);
     if dtype != c.casetype || typmod < 0 {
         return -1;
     }
     for w in &c.args {
-        let result = w.as_case_when().expect("CaseWhen").result.expect("CaseWhen.result");
+        let result = w
+            .as_case_when()
+            .expect("CaseWhen")
+            .result
+            .expect("CaseWhen.result");
         let (rtype, rtypmod) = expr_type_typmod(result);
         if rtype != c.casetype || rtypmod != typmod {
             return -1;
@@ -1281,7 +1355,9 @@ pub fn set_rel_width<'mcx>(run: &mut PlannerRun<'mcx>, rel: RelId) -> PgResult<(
     }
 
     let exprs = match run.root.rel(rel).pathtarget_id {
-        Some(id) => types_pathnodes::relids::pgvec_clone_shallow(run.mcx, &run.root.pathtarget(id).exprs),
+        Some(id) => {
+            types_pathnodes::relids::pgvec_clone_shallow(run.mcx, &run.root.pathtarget(id).exprs)
+        }
         None => mcx::PgVec::new_in(run.mcx),
     };
 
@@ -1337,11 +1413,9 @@ pub fn set_rel_width<'mcx>(run: &mut PlannerRun<'mcx>, rel: RelId) -> PgResult<(
             let relation = table::table_open(run.mcx, reloid, types_rel::NoLock)?;
             let empty = mcx::PgVec::new_in(run.mcx);
             let mut widths = core::mem::replace(&mut run.root.rel_mut(rel).attr_widths, empty);
-            wholerow_width += planner_seams::get_rel_data_width::call(
-                &relation,
-                Some(&mut widths),
-                min_attr,
-            )? as i64;
+            wholerow_width +=
+                planner_seams::get_rel_data_width::call(&relation, Some(&mut widths), min_attr)?
+                    as i64;
             run.root.rel_mut(rel).attr_widths = widths;
             relation.close(types_rel::NoLock)?;
         } else {
@@ -1395,8 +1469,11 @@ fn cost_tuplesort(
         let npages = (input_bytes / BLCKSZ as f64).ceil();
         let nruns = input_bytes / sort_mem_bytes as f64;
         let mergeorder = tuplesort_merge_order(sort_mem_bytes);
-        let log_runs =
-            if nruns > mergeorder { (nruns.ln() / mergeorder.ln()).ceil() } else { 1.0 };
+        let log_runs = if nruns > mergeorder {
+            (nruns.ln() / mergeorder.ln()).ceil()
+        } else {
+            1.0
+        };
         let npageaccesses = 2.0 * npages * log_runs;
         comparison_cost * tuples * log2(tuples)
             + npageaccesses * (gucs::seq_page_cost() * 0.75 + gucs::random_page_cost() * 0.25)
@@ -1471,7 +1548,8 @@ pub fn cost_incremental_sort_shape<'mcx>(
         }
     }
     if !unknown_varno {
-        input_groups = planner_seams::estimate_num_groups::call(run, &presorted_exprs, input_tuples)?;
+        input_groups =
+            planner_seams::estimate_num_groups::call(run, &presorted_exprs, input_tuples)?;
     }
 
     let group_tuples = input_tuples / input_groups;
@@ -1487,7 +1565,12 @@ pub fn cost_incremental_sort_shape<'mcx>(
     run_cost += 2.0 * gucs::cpu_tuple_cost() * input_groups;
 
     debug_assert!(gucs::enable_incremental_sort());
-    Ok((input_disabled_nodes, startup_cost, startup_cost + run_cost, input_tuples))
+    Ok((
+        input_disabled_nodes,
+        startup_cost,
+        startup_cost + run_cost,
+        input_tuples,
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1622,15 +1705,14 @@ fn get_windowclause_startup_tuples<'mcx>(
 ) -> PgResult<f64> {
     use types_nodes::rawnodes::{
         FRAMEOPTION_END_CURRENT_ROW, FRAMEOPTION_END_OFFSET_FOLLOWING,
-        FRAMEOPTION_END_OFFSET_PRECEDING, FRAMEOPTION_END_UNBOUNDED_FOLLOWING,
-        FRAMEOPTION_GROUPS, FRAMEOPTION_RANGE, FRAMEOPTION_ROWS,
+        FRAMEOPTION_END_OFFSET_PRECEDING, FRAMEOPTION_END_UNBOUNDED_FOLLOWING, FRAMEOPTION_GROUPS,
+        FRAMEOPTION_RANGE, FRAMEOPTION_ROWS,
     };
     let wc = wc_node.as_window_clause().expect("WindowClause");
     let frame_options = wc.frameOptions;
 
     let partition_tuples = if !wc.partitionClause.is_nil() {
-        let mut clause_ids: mcx::PgVec<'mcx, types_pathnodes::NodeId> =
-            mcx::PgVec::new_in(run.mcx);
+        let mut clause_ids: mcx::PgVec<'mcx, types_pathnodes::NodeId> = mcx::PgVec::new_in(run.mcx);
         for n in &wc.partitionClause {
             clause_ids.push(run.intern_expr(n));
         }
@@ -1644,8 +1726,7 @@ fn get_windowclause_startup_tuples<'mcx>(
 
     let wc = wc_node.as_window_clause().expect("WindowClause");
     let peer_tuples = if !wc.orderClause.is_nil() {
-        let mut clause_ids: mcx::PgVec<'mcx, types_pathnodes::NodeId> =
-            mcx::PgVec::new_in(run.mcx);
+        let mut clause_ids: mcx::PgVec<'mcx, types_pathnodes::NodeId> = mcx::PgVec::new_in(run.mcx);
         for n in &wc.orderClause {
             clause_ids.push(run.intern_expr(n));
         }
@@ -1664,7 +1745,11 @@ fn get_windowclause_startup_tuples<'mcx>(
         if frame_options & FRAMEOPTION_ROWS != 0 {
             1.0
         } else if frame_options & (FRAMEOPTION_RANGE | FRAMEOPTION_GROUPS) != 0 {
-            if wc.orderClause.is_nil() { partition_tuples } else { peer_tuples }
+            if wc.orderClause.is_nil() {
+                partition_tuples
+            } else {
+                peer_tuples
+            }
         } else {
             unreachable!()
         }
@@ -1719,7 +1804,10 @@ pub fn cost_append(run: &mut PlannerRun<'_>, path_id: types_pathnodes::PathId) {
         ),
         _ => panic!("cost_append: not an AppendPath"),
     };
-    assert!(!parallel_aware, "cost_append (costsize.c): parallel append; M3 parallel lane");
+    assert!(
+        !parallel_aware,
+        "cost_append (costsize.c): parallel append; M3 parallel lane"
+    );
     {
         let p = run.root.path_mut(path_id).base_mut();
         p.disabled_nodes = 0;
@@ -1762,13 +1850,11 @@ pub fn cost_subqueryscan(
 ) -> PgResult<()> {
     debug_assert!(run.root.rel(rel).relid > 0);
     debug_assert!(
-        run.root.rel(rel).rtekind
-            == types_nodes::parsenodes::RTEKind::RTE_SUBQUERY as u32
+        run.root.rel(rel).rtekind == types_nodes::parsenodes::RTEKind::RTE_SUBQUERY as u32
     );
     let qpquals = match run.root.path(path_id).base().param_info.as_deref() {
         Some(ppi) => {
-            let mut q =
-                types_pathnodes::relids::pgvec_clone_shallow(run.mcx, &ppi.ppi_clauses);
+            let mut q = types_pathnodes::relids::pgvec_clone_shallow(run.mcx, &ppi.ppi_clauses);
             for i in 0..run.root.rel(rel).baserestrictinfo.len() {
                 q.push(run.root.rel(rel).baserestrictinfo[i]);
             }
@@ -1817,11 +1903,18 @@ pub fn cost_subqueryscan(
 // set_subquery_size_estimates (costsize.c).
 pub fn set_subquery_size_estimates(run: &mut PlannerRun<'_>, rel: RelId) -> PgResult<()> {
     debug_assert!(run.root.rel(rel).relid > 0);
-    let idx = run.root.rel(rel).subroot_idx.expect("subquery rel has a subroot");
+    let idx = run
+        .root
+        .rel(rel)
+        .subroot_idx
+        .expect("subquery rel has a subroot");
 
     run.swap_with_rel_subroot(idx);
     let (tuples, widths) = {
-        let final_rel = types_pathnodes::relids::fetch_upper_rel(&mut run.root, types_pathnodes::UPPERREL_FINAL);
+        let final_rel = types_pathnodes::relids::fetch_upper_rel(
+            &mut run.root,
+            types_pathnodes::UPPERREL_FINAL,
+        );
         let cheapest = run
             .root
             .rel(final_rel)
@@ -1968,8 +2061,10 @@ pub fn initial_cost_nestloop(
     let inner_run_cost = inner.total_cost - inner.startup_cost;
     let inner_rescan_run_cost = inner_rescan_total - inner_rescan_start;
 
-    let early_stop = matches!(jointype, types_pathnodes::JOIN_SEMI | types_pathnodes::JOIN_ANTI)
-        || inner_unique;
+    let early_stop = matches!(
+        jointype,
+        types_pathnodes::JOIN_SEMI | types_pathnodes::JOIN_ANTI
+    ) || inner_unique;
     if !early_stop {
         run_cost += inner_run_cost;
         if outer_path_rows > 1.0 {
@@ -1984,7 +2079,11 @@ pub fn initial_cost_nestloop(
         disabled_nodes,
         numbatches: 1,
         inner_run_cost: if early_stop { inner_run_cost } else { 0.0 },
-        inner_rescan_run_cost: if early_stop { inner_rescan_run_cost } else { 0.0 },
+        inner_rescan_run_cost: if early_stop {
+            inner_rescan_run_cost
+        } else {
+            0.0
+        },
         ..Default::default()
     }
 }
@@ -2016,8 +2115,7 @@ pub fn final_cost_nestloop(
         let sf = semifactors.expect("SEMI/ANTI/inner_unique costing has semifactors");
         let inner_run_cost = workspace.inner_run_cost;
         let inner_rescan_run_cost = workspace.inner_rescan_run_cost;
-        let mut outer_matched_rows =
-            (outer_path_rows * sf.outer_match_frac).round_ties_even();
+        let mut outer_matched_rows = (outer_path_rows * sf.outer_match_frac).round_ties_even();
         let mut outer_unmatched_rows = outer_path_rows - outer_matched_rows;
         let inner_scan_frac = 2.0 / (sf.match_count + 1.0);
 
@@ -2214,7 +2312,8 @@ pub fn final_cost_hashjoin(
     }
 
     let hash_qual_cost = crate::cost_qual_eval(run, &hcls)?;
-    let joinrestrict = types_pathnodes::relids::pgvec_clone_shallow(run.mcx, &path.jpath.joinrestrictinfo);
+    let joinrestrict =
+        types_pathnodes::relids::pgvec_clone_shallow(run.mcx, &path.jpath.joinrestrictinfo);
     let qp_qual_cost = crate::cost_qual_eval(run, &joinrestrict)?;
     let qp_startup = qp_qual_cost.startup - hash_qual_cost.startup;
     let qp_per_tuple = qp_qual_cost.per_tuple - hash_qual_cost.per_tuple;
@@ -2226,8 +2325,7 @@ pub fn final_cost_hashjoin(
     let hashjointuples;
     if early_stop {
         let sf = semifactors.expect("SEMI/ANTI/inner_unique costing has semifactors");
-        let outer_matched_rows =
-            (outer_path_rows * sf.outer_match_frac).round_ties_even();
+        let outer_matched_rows = (outer_path_rows * sf.outer_match_frac).round_ties_even();
         let inner_scan_frac = 2.0 / (sf.match_count + 1.0);
 
         startup_cost += hash_qual_cost.startup;
@@ -2279,7 +2377,6 @@ pub fn final_cost_hashjoin(
     Ok(())
 }
 
-
 // ExecSupportsMarkRestore (execAmi.c), keyed on pathtype like C.
 fn exec_supports_mark_restore(run: &PlannerRun<'_>, path_id: PathId) -> bool {
     let node = run.root.path(path_id);
@@ -2304,7 +2401,6 @@ fn exec_supports_mark_restore(run: &PlannerRun<'_>, path_id: PathId) -> bool {
     false
 }
 
-
 // cached_scansel (costsize.c): mergejoinscansel memoized on the RestrictInfo
 // (leaving scansel_cache unwritten cost fabled 53x on joinplan).
 pub fn cached_scansel(
@@ -2325,13 +2421,14 @@ pub fn cached_scansel(
             return Ok(*cache);
         }
     }
-    let (leftstartsel, leftendsel, rightstartsel, rightendsel) = planner_seams::mergejoinscansel::call(
-        run,
-        rinfo,
-        pathkey.pk_opfamily,
-        pathkey.pk_cmptype,
-        pathkey.pk_nulls_first,
-    )?;
+    let (leftstartsel, leftendsel, rightstartsel, rightendsel) =
+        planner_seams::mergejoinscansel::call(
+            run,
+            rinfo,
+            pathkey.pk_opfamily,
+            pathkey.pk_cmptype,
+            pathkey.pk_nulls_first,
+        )?;
     let cache = MergeScanSelCache {
         opfamily: pathkey.pk_opfamily,
         collation,
@@ -2345,7 +2442,6 @@ pub fn cached_scansel(
     run.root.rinfo_mut(rinfo).scansel_cache.push(cache);
     Ok(cache)
 }
-
 
 #[allow(clippy::too_many_arguments)]
 pub fn initial_cost_mergejoin(
@@ -2522,7 +2618,6 @@ pub fn initial_cost_mergejoin(
     })
 }
 
-
 // approx_tuple_count (costsize.c).
 pub fn approx_tuple_count(
     run: &mut PlannerRun<'_>,
@@ -2570,8 +2665,10 @@ pub fn final_cost_mergejoin(
     path.jpath.path.rows = run.root.rel(path.jpath.path.parent).rows;
     debug_assert!(path.jpath.path.parallel_workers == 0);
 
-    let mergeclauses = types_pathnodes::relids::pgvec_clone_shallow(run.mcx, &path.path_mergeclauses);
-    let restrictinfos = types_pathnodes::relids::pgvec_clone_shallow(run.mcx, &path.jpath.joinrestrictinfo);
+    let mergeclauses =
+        types_pathnodes::relids::pgvec_clone_shallow(run.mcx, &path.path_mergeclauses);
+    let restrictinfos =
+        types_pathnodes::relids::pgvec_clone_shallow(run.mcx, &path.jpath.joinrestrictinfo);
     let merge_qual_cost = crate::cost_qual_eval(run, &mergeclauses)?;
     let mut qp_qual_cost = crate::cost_qual_eval(run, &restrictinfos)?;
     qp_qual_cost.startup -= merge_qual_cost.startup;
@@ -2613,7 +2710,11 @@ pub fn final_cost_mergejoin(
         false
     };
 
-    run_cost += if path.materialize_inner { mat_inner_cost } else { bare_inner_cost };
+    run_cost += if path.materialize_inner {
+        mat_inner_cost
+    } else {
+        bare_inner_cost
+    };
 
     startup_cost += merge_qual_cost.startup;
     startup_cost += merge_qual_cost.per_tuple * (outer_skip_rows + inner_skip_rows * rescanratio);
@@ -2651,7 +2752,8 @@ pub fn set_joinrel_size_estimates<'mcx>(
     let jointype = sjinfo.jointype;
     let is_outer = is_outer_join(jointype);
     let (jselec, pselec) = if is_outer {
-        let joinrelids = types_pathnodes::relids::relids_copy(run.mcx, &run.root.rel(joinrel).relids);
+        let joinrelids =
+            types_pathnodes::relids::relids_copy(run.mcx, &run.root.rel(joinrel).relids);
         let mut joinquals: PgVec<'mcx, types_pathnodes::RinfoId> = PgVec::new_in(run.mcx);
         let mut pushedquals: PgVec<'mcx, types_pathnodes::RinfoId> = PgVec::new_in(run.mcx);
         for &rid in restrictlist {

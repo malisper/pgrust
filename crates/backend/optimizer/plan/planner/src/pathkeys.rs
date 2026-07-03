@@ -8,7 +8,9 @@ use types_nodes::parsenodes::SortGroupClause;
 use types_nodes::Node;
 use types_pathnodes::{EcId, PathKey, COMPARE_EQ, COMPARE_GT, COMPARE_LT};
 
-pub use types_pathnodes::{compare_pathkeys, pathkeys_contained_in, pathkeys_count_contained_in, PathKeysComparison};
+pub use types_pathnodes::{
+    compare_pathkeys, pathkeys_contained_in, pathkeys_count_contained_in, PathKeysComparison,
+};
 
 use crate::run::PlannerRun;
 
@@ -17,7 +19,9 @@ pub fn get_sortgroupclause_expr<'mcx>(
     tlist: &NodeList<'mcx>,
 ) -> Node<'mcx> {
     for tle_node in tlist {
-        let tle = tle_node.as_target_entry().expect("tlist holds TargetEntries");
+        let tle = tle_node
+            .as_target_entry()
+            .expect("tlist holds TargetEntries");
         if tle.ressortgroupref == sortcl.tleSortGroupRef {
             return tle.expr;
         }
@@ -34,9 +38,14 @@ pub fn make_pathkeys_for_sortclauses<'mcx>(
 ) -> PgResult<PgVec<'mcx, PathKey>> {
     let mut pathkeys: PgVec<'mcx, PathKey> = PgVec::new_in(run.mcx);
     for sc_node in sortclauses {
-        let sortcl = sc_node.as_sort_group_clause().expect("sortClause holds SortGroupClauses");
+        let sortcl = sc_node
+            .as_sort_group_clause()
+            .expect("sortClause holds SortGroupClauses");
         let sortkey = get_sortgroupclause_expr(sortcl, tlist);
-        assert!(sortcl.sortop != 0, "make_pathkeys_for_sortclauses: unsortable clause");
+        assert!(
+            sortcl.sortop != 0,
+            "make_pathkeys_for_sortclauses: unsortable clause"
+        );
         let pathkey = make_pathkey_from_sortop(
             run,
             sortkey,
@@ -178,15 +187,13 @@ pub fn get_useful_group_keys_orderings<'mcx>(
     if !run.parse().groupingSets.is_nil() {
         return infos;
     }
-    if !path_pathkeys.is_empty()
-        && !pathkeys_contained_in(path_pathkeys, &run.root.group_pathkeys)
+    if !path_pathkeys.is_empty() && !pathkeys_contained_in(path_pathkeys, &run.root.group_pathkeys)
     {
-        let mut pathkeys =
-            crate::relnode::pgvec_clone_shallow(mcx, &run.root.group_pathkeys);
-        let mut clauses =
-            crate::relnode::pgvec_clone_shallow(mcx, &run.root.processed_groupClause);
+        let mut pathkeys = crate::relnode::pgvec_clone_shallow(mcx, &run.root.group_pathkeys);
+        let mut clauses = crate::relnode::pgvec_clone_shallow(mcx, &run.root.processed_groupClause);
         let num = run.root.num_groupby_pathkeys as usize;
-        let n = group_keys_reorder_by_pathkeys(run, path_pathkeys, &mut pathkeys, &mut clauses, num);
+        let n =
+            group_keys_reorder_by_pathkeys(run, path_pathkeys, &mut pathkeys, &mut clauses, num);
         if n > 0
             && (crate::gucs::enable_incremental_sort() || n == num)
             && compare_pathkeys(&pathkeys, &run.root.group_pathkeys) != PathKeysComparison::Equal
@@ -209,7 +216,15 @@ fn make_pathkey_from_sortop<'mcx>(
         .unwrap_or_else(|| panic!("operator {ordering_op} is not a valid ordering operator"));
     let collation = expr_collation(expr);
     Ok(make_pathkey_from_sortinfo(
-        run, expr, opfamily, opcintype, collation, reverse_sort, nulls_first, sortref, true,
+        run,
+        expr,
+        opfamily,
+        opcintype,
+        collation,
+        reverse_sort,
+        nulls_first,
+        sortref,
+        true,
     )?
     .expect("create_it pathkey"))
 }
@@ -227,21 +242,37 @@ fn make_pathkey_from_sortinfo<'mcx>(
     create_it: bool,
 ) -> PgResult<Option<PathKey>> {
     let cmptype = if reverse_sort { COMPARE_GT } else { COMPARE_LT };
-    let equality_op =
-        lsyscache::amop::get_opfamily_member_for_cmptype(opfamily, opcintype, opcintype, COMPARE_EQ)?;
+    let equality_op = lsyscache::amop::get_opfamily_member_for_cmptype(
+        opfamily, opcintype, opcintype, COMPARE_EQ,
+    )?;
     assert!(
         equality_op != 0,
         "missing operator {COMPARE_EQ}({opcintype},{opcintype}) in opfamily {opfamily}"
     );
     let opfamilies = lsyscache::amop::get_mergejoin_opfamilies(run.mcx, equality_op)?;
-    assert!(!opfamilies.is_empty(), "could not find opfamilies for equality operator {equality_op}");
+    assert!(
+        !opfamilies.is_empty(),
+        "could not find opfamilies for equality operator {equality_op}"
+    );
     let Some(eclass) = crate::equivclass::get_eclass_for_sort_expr(
-        run, expr, &opfamilies, opcintype, collation, sortref, create_it,
+        run,
+        expr,
+        &opfamilies,
+        opcintype,
+        collation,
+        sortref,
+        create_it,
     )?
     else {
         return Ok(None);
     };
-    Ok(Some(make_canonical_pathkey(run, eclass, opfamily, cmptype, nulls_first)))
+    Ok(Some(make_canonical_pathkey(
+        run,
+        eclass,
+        opfamily,
+        cmptype,
+        nulls_first,
+    )))
 }
 
 // build_index_pathkeys (pathkeys.c): key columns of an ordered (btree) index;
@@ -257,7 +288,10 @@ pub fn build_index_pathkeys<'mcx>(
     }
     for i in 0..index.nkeycolumns as usize {
         let indexkey = *run.root.expr_node(index.indextlist[i]);
-        let indexkey = indexkey.as_target_entry().expect("indextlist holds TargetEntries").expr;
+        let indexkey = indexkey
+            .as_target_entry()
+            .expect("indextlist holds TargetEntries")
+            .expr;
         let (reverse_sort, nulls_first) = if scandir == types_pathnodes::BackwardScanDirection {
             (!index.reverse_sort[i], !index.nulls_first[i])
         } else {
@@ -281,14 +315,9 @@ pub fn build_index_pathkeys<'mcx>(
                 }
             }
             None => {
-                // indexcol_is_bool_constant_for_query: bool equality never
-                // reaches an EC; the continue leg must be loud, not a lost
-                // sort order.
-                const BOOLOID: u32 = 16;
-                assert!(
-                    index.opcintype[i] != BOOLOID,
-                    "indexcol_is_bool_constant_for_query (pathkeys.c): M2 boolean-index lane"
-                );
+                if crate::indxpath::indexcol_is_bool_constant_for_query(run, index, i)? {
+                    continue;
+                }
                 break;
             }
         }
@@ -303,7 +332,10 @@ pub fn make_canonical_pathkey(
     cmptype: i32,
     nulls_first: bool,
 ) -> PathKey {
-    assert!(run.root.ec_merging_done, "too soon to build canonical pathkeys");
+    assert!(
+        run.root.ec_merging_done,
+        "too soon to build canonical pathkeys"
+    );
     debug_assert!(run.root.ec(eclass).ec_merged.is_none());
     for pk in run.root.canon_pathkeys.iter() {
         if pk.pk_eclass == Some(eclass)
@@ -329,7 +361,9 @@ fn pathkey_is_redundant(run: &PlannerRun<'_>, new_pathkey: PathKey, pathkeys: &[
     if run.root.ec(new_pathkey.pk_eclass.unwrap()).ec_has_const {
         return true;
     }
-    pathkeys.iter().any(|old| old.pk_eclass == new_pathkey.pk_eclass)
+    pathkeys
+        .iter()
+        .any(|old| old.pk_eclass == new_pathkey.pk_eclass)
 }
 
 pub fn initialize_mergeclause_eclasses(
@@ -345,10 +379,22 @@ pub fn initialize_mergeclause_eclasses(
     let opfamilies =
         crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.rinfo(rinfo).mergeopfamilies);
     let left_ec = crate::equivclass::get_eclass_for_sort_expr(
-        run, o.args.nth(0), &opfamilies, lefttype, o.inputcollid, 0, true,
+        run,
+        o.args.nth(0),
+        &opfamilies,
+        lefttype,
+        o.inputcollid,
+        0,
+        true,
     )?;
     let right_ec = crate::equivclass::get_eclass_for_sort_expr(
-        run, o.args.nth(1), &opfamilies, righttype, o.inputcollid, 0, true,
+        run,
+        o.args.nth(1),
+        &opfamilies,
+        righttype,
+        o.inputcollid,
+        0,
+        true,
     )?;
     let r = run.root.rinfo_mut(rinfo);
     r.left_ec = left_ec;
@@ -361,8 +407,16 @@ pub fn update_mergeclause_eclasses(
     rinfo: types_pathnodes::RinfoId,
 ) -> PgResult<()> {
     debug_assert!(!run.root.rinfo(rinfo).mergeopfamilies.is_empty());
-    let left = run.root.rinfo(rinfo).left_ec.expect("mergeclause left_ec set");
-    let right = run.root.rinfo(rinfo).right_ec.expect("mergeclause right_ec set");
+    let left = run
+        .root
+        .rinfo(rinfo)
+        .left_ec
+        .expect("mergeclause left_ec set");
+    let right = run
+        .root
+        .rinfo(rinfo)
+        .right_ec
+        .expect("mergeclause right_ec set");
     let left = run.root.ec_canonical(left);
     let right = run.root.ec_canonical(right);
     let r = run.root.rinfo_mut(rinfo);
@@ -511,7 +565,10 @@ pub fn make_inner_pathkeys_for_merge<'mcx>(
             };
             opathkey = Some(opk);
             lastoeclass = opk.pk_eclass;
-            assert!(oeclass == lastoeclass, "outer pathkeys do not match mergeclause");
+            assert!(
+                oeclass == lastoeclass,
+                "outer pathkeys do not match mergeclause"
+            );
         }
         let opk = opathkey.unwrap();
         let pathkey = if ieclass == oeclass {
@@ -577,9 +634,7 @@ pub fn build_join_pathkeys<'mcx>(
 ) -> PgResult<PgVec<'mcx, PathKey>> {
     if matches!(
         jointype,
-        types_pathnodes::JOIN_FULL
-            | types_pathnodes::JOIN_RIGHT
-            | types_pathnodes::JOIN_RIGHT_ANTI
+        types_pathnodes::JOIN_FULL | types_pathnodes::JOIN_RIGHT | types_pathnodes::JOIN_RIGHT_ANTI
     ) {
         return Ok(PgVec::new_in(run.mcx));
     }
@@ -755,7 +810,9 @@ pub fn expr_collation(node: Node<'_>) -> u32 {
         NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resultcollid,
         NodeTag::T_OpExpr => node.as_op_expr().unwrap().opcollid,
         NodeTag::T_DistinctExpr => node.as_distinct_expr().unwrap().opcollid,
-        NodeTag::T_BooleanTest | NodeTag::T_RowExpr | NodeTag::T_BoolExpr | NodeTag::T_NullTest => 0,
+        NodeTag::T_BooleanTest | NodeTag::T_RowExpr | NodeTag::T_BoolExpr | NodeTag::T_NullTest => {
+            0
+        }
         NodeTag::T_FuncExpr => node.as_func_expr().unwrap().funccollid,
         NodeTag::T_Param => node.as_param().unwrap().paramcollid,
         NodeTag::T_Aggref => node.as_aggref().unwrap().aggcollid,
@@ -772,7 +829,11 @@ pub fn expr_collation(node: Node<'_>) -> u32 {
             }
         }
         NodeTag::T_AlternativeSubPlan => expr_collation(
-            node.as_alternative_sub_plan().unwrap().subplans.first().expect("alternatives"),
+            node.as_alternative_sub_plan()
+                .unwrap()
+                .subplans
+                .first()
+                .expect("alternatives"),
         ),
         NodeTag::T_CaseExpr => node.as_case_expr().unwrap().casecollid,
         NodeTag::T_CaseTestExpr => node.as_case_test_expr().unwrap().collation,
