@@ -280,6 +280,7 @@ members = [
     "crates/backend/storage/ipc/standby_seams",
     "crates/backend/executor/spi",
     "crates/backend/executor/sql_functions",
+    "crates/pl/plpgsql",
     "crates/backend/executor/spi_seams",
     "crates/backend/utils/time/combocid_seams",
     "crates/backend/utils/time/combocid",
