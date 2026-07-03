@@ -20,7 +20,7 @@ use ::types_core::{BlockNumber, Buffer, ForkNumber, InvalidBlockNumber, Size, BL
 use ::types_error::{PgError, PgResult};
 use ::types_rel::RelationData;
 use ::types_storage::bufpage::{MaxHeapTupleSize, PageMut};
-use ::types_storage::{ReadBufferMode, RelFileLocator, RelFileLocatorBackend};
+use ::types_storage::{ReadBufferMode, RelFileLocator};
 
 const FSM_CATEGORIES: Size = 256;
 const FSM_CAT_STEP: Size = BLCKSZ / FSM_CATEGORIES;

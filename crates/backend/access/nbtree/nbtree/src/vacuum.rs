@@ -23,7 +23,7 @@ use ::types_tuple::itemptr::{ItemPointerCompare, ItemPointerData};
 use crate::itup::{
     bt_tuple_get_nposting, bt_tuple_get_posting_n, bt_tuple_get_posting_offset,
     bt_tuple_is_pivot, bt_tuple_is_posting, bt_tuple_set_posting, copy_index_tuple,
-    index_tuple_size, maxalign, set_t_info, t_info, t_tid, ITup, ItupBuf, INDEX_SIZE_MASK,
+    maxalign, set_t_info, t_info, t_tid, ITup, ItupBuf, INDEX_SIZE_MASK,
 };
 use crate::page::{
     bt_checkpage, bt_lockbuf, bt_page_is_recyclable, bt_relbuf, bt_upgradelockbufcleanup,
