@@ -440,12 +440,13 @@ fn build_agg_trans<'mcx>(
         state.frames.push(frame);
         let mut filter_jump: Option<usize> = None;
         if let Some(f) = spec.aggfilter {
-            init_expr_rec(f, &mut state, mcx, OutRef::RESULT, None, params, None)?;
+            let rout = state.result_out();
+            init_expr_rec(f, &mut state, mcx, rout, None, params, None)?;
             filter_jump = Some(state.steps.len());
             push_step(
                 &mut state,
                 mcx,
-                Step::JumpIfNotTrue { jumpdone: u32::MAX, out: OutRef::RESULT },
+                Step::JumpIfNotTrue { jumpdone: u32::MAX, out: rout },
             )?;
         }
         for (argno, tle_node) in spec.args.iter().enumerate() {
@@ -2178,11 +2179,11 @@ fn select_hash32_var(state: &ExprState<'_>) -> Option<Kernel> {
     let Step::HashDatumFirst { call, out } = &steps[2] else {
         return None;
     };
-    if !out.is_result() || !matches!(steps[3], Step::DoneReturn) {
+    if !state.is_result(*out) || !matches!(steps[3], Step::DoneReturn) {
         return None;
     }
     let frame = &state.frames[call.frame as usize];
-    if var_out.0 != Some(frame.arg_slot(0)) {
+    if var_out.0 != frame.arg_slot(0) {
         return None;
     }
     Some(Kernel::Hash32Var { src, attnum, frame: call.frame })
@@ -2201,7 +2202,7 @@ fn select_qual_var_cmp_var(state: &ExprState<'_>) -> Option<Kernel> {
     let Step::FuncExprStrict2 { call, out } = &steps[4] else {
         return None;
     };
-    if !out.is_result() {
+    if !state.is_result(*out) {
         return None;
     }
     let Step::Qual { jumpdone } = steps[5] else {
@@ -2211,11 +2212,12 @@ fn select_qual_var_cmp_var(state: &ExprState<'_>) -> Option<Kernel> {
         return None;
     }
     let frame = &state.frames[call.frame as usize];
-    let cmp = CmpOp::for_fn_oid(frame.flinfo.fn_oid)?;
+    // SAFETY: frame-owned mcx-boxed FmgrInfo, read-only here.
+    let cmp = CmpOp::for_fn_oid(unsafe { frame.flinfo.as_ref() }.fn_oid)?;
     let (arg0, arg1) = (frame.arg_slot(0), frame.arg_slot(1));
-    let (a, b) = if out0.0 == Some(arg0) && out1.0 == Some(arg1) {
+    let (a, b) = if out0.0 == arg0 && out1.0 == arg1 {
         ((s0, a0), (s1, a1))
-    } else if out1.0 == Some(arg0) && out0.0 == Some(arg1) {
+    } else if out1.0 == arg0 && out0.0 == arg1 {
         ((s1, a1), (s0, a0))
     } else {
         return None;

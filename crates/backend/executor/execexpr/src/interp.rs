@@ -295,12 +295,14 @@ fn eval_kernel<'mcx>(
                 return Ok(NullableDatum { value: Datum::from_u32(0), isnull: false });
             }
             let f = &mut state.frames[frame as usize];
-            // SAFETY: the frame's 1-arg fcinfo image is live and exclusively
-            // referenced during this call (HashDatumFirst's contract).
+            // SAFETY: the frame's 1-arg fcinfo image and mcx-boxed FmgrInfo
+            // are live and exclusively referenced during this call
+            // (HashDatumFirst's contract).
             let fcinfo = unsafe { fcinfo_mut(f.fcinfo, 1) };
             unsafe { f.arg_slot(0).write(NullableDatum { value: v, isnull: false }) };
             fcinfo.isnull = false;
-            let value = (f.flinfo.fn_addr)(Some(&mut f.flinfo), fcinfo)?;
+            let flinfo = unsafe { &mut *f.flinfo.as_ptr() };
+            let value = (flinfo.fn_addr)(Some(flinfo), fcinfo)?;
             Ok(NullableDatum { value, isnull: false })
         }
         Kernel::AggTransByVal { call, pergroup, strict } => {
