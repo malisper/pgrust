@@ -136,6 +136,9 @@ pub fn getObjectTypeDescription<'mcx>(
         NAMESPACE_RELATION_ID => "schema".into(),
         x if x == statscmds::StatisticExtRelationId => "statistics object".into(),
         crate::EventTriggerRelationId => "event trigger".into(),
+        types_core::PROCEDURE_RELATION_ID => {
+            getProcedureTypeDescription(object.objectId, missing_ok)?
+        }
         other => panic!("unported: objectaddress.c getObjectTypeDescription class {other}"),
     };
     Ok(Some(s))
@@ -461,7 +464,89 @@ pub fn getObjectIdentityParts<'mcx>(
                 objargs: vec![],
             }))
         }
+        types_core::PROCEDURE_RELATION_ID => {
+            let Some(row) = proc_row(object.objectId)? else {
+                if !missing_ok {
+                    return Err(lookup_err(format!(
+                        "cache lookup failed for procedure {}",
+                        object.objectId
+                    )));
+                }
+                return Ok(None);
+            };
+            let schema = namespace_name_or_temp(mcx, row.namespace)?;
+            let mut args = String::new();
+            let mut objargs = Vec::with_capacity(row.argtypes.len());
+            for (i, &t) in row.argtypes.iter().enumerate() {
+                let tn = format_type::format_type_be_qualified(t)?;
+                if i > 0 {
+                    args.push(',');
+                }
+                args.push_str(&tn);
+                objargs.push(tn);
+            }
+            let identity = format!("{}({})", quote_qualified(&schema, &row.name), args);
+            Ok(Some(ObjectIdentity {
+                identity,
+                objname: vec![schema, row.name],
+                objargs,
+            }))
+        }
         other => panic!("unported: objectaddress.c getObjectIdentityParts class {other}"),
+    }
+}
+
+struct ProcNaming {
+    name: String,
+    namespace: Oid,
+    kind: i8,
+    argtypes: Vec<Oid>,
+}
+
+fn proc_row(oid: Oid) -> PgResult<Option<ProcNaming>> {
+    const Anum_pg_proc_proname: i32 = 2;
+    const Anum_pg_proc_pronamespace: i32 = 3;
+    const Anum_pg_proc_prokind: i32 = 10;
+    const Anum_pg_proc_proargtypes: i32 = 20;
+    let Some(ht) = cache_syscache::SearchSysCache1(
+        cache_syscache::PROCOID,
+        cache_syscache::SysCacheKey::Value(Datum::from_oid(oid)),
+    )?
+    else {
+        return Ok(None);
+    };
+    let get = |anum: i32| cache_syscache::SysCacheGetAttr(cache_syscache::PROCOID, &ht, anum);
+    let name = name_at(get(Anum_pg_proc_proname)?.0);
+    let namespace = get(Anum_pg_proc_pronamespace)?.0.as_oid();
+    let kind = get(Anum_pg_proc_prokind)?.0.as_i8();
+    let (argd, argnull) = get(Anum_pg_proc_proargtypes)?;
+    debug_assert!(!argnull);
+    // oidvector image: 24B 1-D array header, then n 4-byte oids.
+    let p = argd.as_usize() as *const u8;
+    // SAFETY: NOT NULL pg_proc.proargtypes oidvector under its declared size.
+    let argtypes = unsafe {
+        let n = u32::from_ne_bytes(*(p.add(16) as *const [u8; 4])) as usize;
+        (0..n)
+            .map(|i| u32::from_ne_bytes(*(p.add(24 + i * 4) as *const [u8; 4])) as Oid)
+            .collect::<Vec<Oid>>()
+    };
+    cache_syscache::ReleaseSysCache(ht);
+    Ok(Some(ProcNaming { name, namespace, kind, argtypes }))
+}
+
+fn getProcedureTypeDescription(oid: Oid, missing_ok: bool) -> PgResult<String> {
+    match proc_row(oid)? {
+        Some(row) => Ok(match row.kind as u8 {
+            b'a' => "aggregate".into(),
+            b'p' => "procedure".into(),
+            _ => "function".into(),
+        }),
+        None => {
+            if !missing_ok {
+                return Err(lookup_err(format!("cache lookup failed for procedure {oid}")));
+            }
+            Ok("routine".into())
+        }
     }
 }
 
