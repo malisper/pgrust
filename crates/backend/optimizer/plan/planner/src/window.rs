@@ -1,8 +1,7 @@
-//! grouping_planner's window lane: select_active_windows /
-//! make_window_input_target / create_window_paths (planner.c).
-//! optimize_window_clauses is not ported: it only swaps frame options /
-//! adds run conditions for prosupport-monotonic functions (results
-//! identical); the executor's default-frame machinery covers its absence.
+//! grouping_planner's window lane: optimize_window_clauses /
+//! select_active_windows / make_window_input_target / create_window_paths
+//! (planner.c). The runCondition half of C's monotonic-function machinery
+//! stays unported (WFuncMonotonic requests are loud in the prosupports).
 
 use clauses::classify::WindowFuncLists;
 use mcx::{Mcx, PgVec};
@@ -18,6 +17,101 @@ fn mcx_str<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<&'mcx str> {
     let b = mcx::slice_borrow_in(mcx, s.as_bytes())?;
     // SAFETY: bytes copied from a valid &str.
     Ok(unsafe { core::str::from_utf8_unchecked(b) })
+}
+
+// optimize_window_clauses (planner.c): prosupport frame-option rewrite +
+// duplicate-WindowClause merge.
+pub(crate) fn optimize_window_clauses<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    wflists: &mut WindowFuncLists<'mcx>,
+) -> PgResult<()> {
+    use types_nodes::equal::{equal_opt, NodeEqual};
+    use types_nodes::primnodes::SupportRequestOptimizeWindowClause;
+
+    let window_clause = &run.parse().windowClause;
+    for wc_node in window_clause {
+        let wc = wc_node.as_window_clause().expect("windowClause cell");
+        let winref = wc.winref as usize;
+        debug_assert!(wc.winref <= wflists.max_win_ref);
+        if wflists.window_funcs[winref].is_empty() {
+            continue;
+        }
+        let mut optimized_frame_options = 0;
+        let mut all_agree = true;
+        for (i, wfunc_node) in wflists.window_funcs[winref].iter().enumerate() {
+            let wfunc = wfunc_node.as_window_func().expect("WindowFunc");
+            let prosupport = lsyscache::get_func_support(wfunc.winfnoid)?;
+            if prosupport == 0 {
+                all_agree = false;
+                break;
+            }
+            let mut req = SupportRequestOptimizeWindowClause {
+                tag: NodeTag::T_SupportRequestOptimizeWindowClause,
+                frame_options: wc.frameOptions,
+            };
+            let res = fmgr_core::oid_function_call1_coll(
+                prosupport,
+                0,
+                datum::Datum::from_usize(&mut req as *mut _ as usize),
+            )?;
+            if res.as_usize() == 0 {
+                all_agree = false;
+                break;
+            }
+            if i == 0 {
+                optimized_frame_options = req.frame_options;
+            } else if optimized_frame_options != req.frame_options {
+                all_agree = false;
+                break;
+            }
+        }
+        if !all_agree || wc.frameOptions == optimized_frame_options {
+            continue;
+        }
+        // SAFETY: parse tree is planner-owned; no derived refs live.
+        unsafe {
+            wc_node
+                .with_mut::<WindowClause, _>(|w| w.frameOptions = optimized_frame_options)
+                .expect("WindowClause");
+        }
+        if window_clause.len() == 1 {
+            continue;
+        }
+        let wc = wc_node.as_window_clause().expect("windowClause cell");
+        for existing_node in window_clause {
+            if existing_node.ptr_eq(wc_node) {
+                continue;
+            }
+            let existing = existing_node.as_window_clause().expect("windowClause cell");
+            if wc.partitionClause.node_equal(&existing.partitionClause)
+                && wc.orderClause.node_equal(&existing.orderClause)
+                && wc.frameOptions == existing.frameOptions
+                && equal_opt(wc.startOffset, existing.startOffset)
+                && equal_opt(wc.endOffset, existing.endOffset)
+            {
+                let existing_winref = existing.winref as usize;
+                for wfunc_node in &wflists.window_funcs[winref] {
+                    // SAFETY: parse tree is planner-owned; no derived refs live.
+                    unsafe {
+                        wfunc_node
+                            .with_mut::<types_nodes::primnodes::WindowFunc, _>(|f| {
+                                f.winref = existing.winref;
+                            })
+                            .expect("WindowFunc");
+                    }
+                }
+                let moved = core::mem::replace(
+                    &mut wflists.window_funcs[winref],
+                    PgVec::new_in(run.mcx),
+                );
+                for n in moved {
+                    wflists.window_funcs[existing_winref].push(n);
+                }
+                break;
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn select_active_windows<'mcx>(
@@ -285,8 +379,9 @@ pub(crate) fn create_window_paths<'mcx>(
             )
         };
         let w = run.root.rel_mut(window_rel);
-        // is_parallel_safe(activeWindows) is vacuous: default frame carries no
-        // offset exprs (asserted in subquery preprocessing).
+        // is_parallel_safe(activeWindows) is vacuous: frame offsets are
+        // Var-free Consts of builtin types after preprocessing (parser
+        // rejects variables; C divergence recorded).
         w.consider_parallel = in_parallel && output_target_parallel_safe;
         w.serverid = serverid;
         w.userid = userid;

@@ -458,6 +458,12 @@ fn install_type_fixture() {
                 aggfinalextra: false,
                 aggfinalmodify: b'r' as i8,
                 aggtranstype: 20,
+                aggmtransfn: 0,
+                aggminvtransfn: 0,
+                aggmfinalfn: 0,
+                aggmfinalextra: false,
+                aggmfinalmodify: b'r' as i8,
+                aggmtranstype: 0,
                 aggtransspace: 0,
             }))
         });

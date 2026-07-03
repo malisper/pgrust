@@ -4,7 +4,7 @@
 mod tests;
 
 use mcx::Mcx;
-use parse_expr::{expr_location, expr_type, transformExpr, ParseExprKindName};
+use parse_expr::{expr_collation, expr_location, expr_type, transformExpr, ParseExprKindName};
 use parse_relation::{addRangeTableEntry, checkNameSpaceConflicts};
 use parser_small1::{parser_errposition, ParseExprKind, ParseNamespaceItem, ParseState};
 use types_core::catalog::{INT8OID, TEXTOID, UNKNOWNOID};
@@ -17,8 +17,10 @@ use types_error::{
 use types_nodes::nodes_enums::LimitOption;
 use types_nodes::parsenodes::{SortGroupClause, WindowClause};
 use types_nodes::primnodes::TargetEntry;
-use types_nodes::rawnodes::{SortBy, SortByDir, SortByNulls, ValUnion, FRAMEOPTION_DEFAULTS,
-    FRAMEOPTION_END_OFFSET, FRAMEOPTION_START_OFFSET};
+use types_nodes::rawnodes::{
+    SortBy, SortByDir, SortByNulls, ValUnion, FRAMEOPTION_DEFAULTS, FRAMEOPTION_END_OFFSET,
+    FRAMEOPTION_GROUPS, FRAMEOPTION_RANGE, FRAMEOPTION_ROWS, FRAMEOPTION_START_OFFSET,
+};
 use types_nodes::{CoercionForm, Node, NodeList, NodeTag};
 
 pub fn transformFromClause<'mcx>(
@@ -1318,15 +1320,40 @@ pub fn transformWindowDefinitions<'mcx>(
         }
         wc.frameOptions = windef.frameOptions;
 
-        if (wc.frameOptions & (FRAMEOPTION_START_OFFSET | FRAMEOPTION_END_OFFSET)) != 0
-            || windef.startOffset.is_some()
-            || windef.endOffset.is_some()
+        let mut rangeopfamily = InvalidOid;
+        let mut rangeopcintype = InvalidOid;
+        if (wc.frameOptions & FRAMEOPTION_RANGE) != 0
+            && (wc.frameOptions & (FRAMEOPTION_START_OFFSET | FRAMEOPTION_END_OFFSET)) != 0
         {
-            panic!(
-                "transformWindowDefinitions (parse_clause.c): RANGE/ROWS/GROUPS offset \
-                 frames unported (in_range lookup + transformFrameOffset) — window lane"
-            );
+            if wc.orderClause.len() != 1 {
+                return Err(window_error(
+                    pstate,
+                    "RANGE with offset PRECEDING/FOLLOWING requires exactly one ORDER BY \
+                     column"
+                        .into(),
+                    types_error::ERRCODE_WINDOWING_ERROR,
+                    windef.location,
+                ));
+            }
+            let sortcl = wc
+                .orderClause
+                .first()
+                .unwrap()
+                .as_sort_group_clause()
+                .expect("SortGroupClause");
+            let sortkey = get_sortgroupclause_expr(sortcl.tleSortGroupRef, targetlist);
+            let Some((opfamily, opcintype, _cmptype)) =
+                lsyscache::get_ordering_op_properties(sortcl.sortop)?
+            else {
+                panic!("operator {} is not a valid ordering operator", sortcl.sortop);
+            };
+            rangeopfamily = opfamily;
+            rangeopcintype = opcintype;
+            wc.inRangeColl = expr_collation(sortkey);
+            wc.inRangeAsc = !sortcl.reverse_sort;
+            wc.inRangeNullsFirst = sortcl.nulls_first;
         }
+
         if (wc.frameOptions & types_nodes::rawnodes::FRAMEOPTION_GROUPS) != 0
             && wc.orderClause.is_nil()
         {
@@ -1337,6 +1364,25 @@ pub fn transformWindowDefinitions<'mcx>(
                 windef.location,
             ));
         }
+
+        wc.startOffset = transformFrameOffset(
+            mcx,
+            pstate,
+            wc.frameOptions,
+            rangeopfamily,
+            rangeopcintype,
+            &mut wc.startInRangeFunc,
+            windef.startOffset,
+        )?;
+        wc.endOffset = transformFrameOffset(
+            mcx,
+            pstate,
+            wc.frameOptions,
+            rangeopfamily,
+            rangeopcintype,
+            &mut wc.endInRangeFunc,
+            windef.endOffset,
+        )?;
         wc.winref = winref;
 
         result.lappend(mcx, Node::mk(mcx, wc)?)?;
@@ -1400,6 +1446,177 @@ fn window_error_hint(
                 "transformWindowDefinitions",
             )),
     )
+}
+
+// get_sortgroupclause_expr (tlist.c) over the transform-time targetlist.
+fn get_sortgroupclause_expr<'mcx>(
+    sort_group_ref: Index,
+    targetlist: &NodeList<'mcx>,
+) -> Node<'mcx> {
+    for n in targetlist {
+        let tle = n.as_target_entry().expect("tlist holds TargetEntry");
+        if tle.ressortgroupref == sort_group_ref {
+            return tle.expr;
+        }
+    }
+    panic!("ORDER/GROUP BY expression not found in targetlist");
+}
+
+// BTINRANGE_PROC (nbtree.h); single home is types_nbtree, re-stated here to
+// keep the parser off the btree types crate.
+const BTINRANGE_PROC: i16 = 3;
+
+fn transformFrameOffset<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    frame_options: i32,
+    rangeopfamily: Oid,
+    rangeopcintype: Oid,
+    in_range_func: &mut Oid,
+    clause: Option<Node<'mcx>>,
+) -> PgResult<Option<Node<'mcx>>> {
+    *in_range_func = InvalidOid;
+    let Some(clause) = clause else {
+        return Ok(None);
+    };
+
+    let node;
+    let construct_name;
+    if frame_options & FRAMEOPTION_ROWS != 0 {
+        construct_name = "ROWS";
+        let n = transformExpr(mcx, pstate, clause, ParseExprKind::EXPR_KIND_WINDOW_FRAME_ROWS)?;
+        node = coerce::coerce_to_specific_type(
+            mcx,
+            pstate,
+            n,
+            expr_type(n),
+            expr_location(n),
+            INT8OID,
+            construct_name,
+        )?;
+    } else if frame_options & FRAMEOPTION_RANGE != 0 {
+        construct_name = "RANGE";
+        let n = transformExpr(mcx, pstate, clause, ParseExprKind::EXPR_KIND_WINDOW_FRAME_RANGE)?;
+        let node_type = expr_type(n);
+        let preferred_type = if node_type != UNKNOWNOID { node_type } else { rangeopcintype };
+
+        let mut nfuncs = 0;
+        let mut nmatches = 0;
+        let mut selected_type = InvalidOid;
+        let mut selected_func = InvalidOid;
+        let procs = syscache_seams::lookup_pg_amproc_members::call(
+            mcx,
+            rangeopfamily,
+            rangeopcintype,
+        )?;
+        for proc in procs.iter() {
+            if proc.amprocnum != BTINRANGE_PROC {
+                continue;
+            }
+            nfuncs += 1;
+            if !coerce::can_coerce_type(
+                &[node_type],
+                &[proc.amprocrighttype],
+                coerce::CoercionContext::COERCION_IMPLICIT,
+            )? {
+                continue;
+            }
+            nmatches += 1;
+            if selected_type != preferred_type {
+                selected_type = proc.amprocrighttype;
+                selected_func = proc.amproc;
+            }
+        }
+
+        if nfuncs == 0 {
+            return Err(frame_offset_error(
+                pstate,
+                format!(
+                    "RANGE with offset PRECEDING/FOLLOWING is not supported for column type {}",
+                    format_type::format_type_be(rangeopcintype)?
+                ),
+                None,
+                expr_location(n),
+            ));
+        }
+        if nmatches == 0 {
+            return Err(frame_offset_error(
+                pstate,
+                format!(
+                    "RANGE with offset PRECEDING/FOLLOWING is not supported for column type \
+                     {} and offset type {}",
+                    format_type::format_type_be(rangeopcintype)?,
+                    format_type::format_type_be(node_type)?
+                ),
+                Some("Cast the offset value to an appropriate type."),
+                expr_location(n),
+            ));
+        }
+        if nmatches != 1 && selected_type != preferred_type {
+            return Err(frame_offset_error(
+                pstate,
+                format!(
+                    "RANGE with offset PRECEDING/FOLLOWING has multiple interpretations for \
+                     column type {} and offset type {}",
+                    format_type::format_type_be(rangeopcintype)?,
+                    format_type::format_type_be(node_type)?
+                ),
+                Some("Cast the offset value to the exact intended type."),
+                expr_location(n),
+            ));
+        }
+
+        node = coerce::coerce_to_specific_type(
+            mcx,
+            pstate,
+            n,
+            expr_type(n),
+            expr_location(n),
+            selected_type,
+            construct_name,
+        )?;
+        *in_range_func = selected_func;
+    } else if frame_options & FRAMEOPTION_GROUPS != 0 {
+        construct_name = "GROUPS";
+        let n =
+            transformExpr(mcx, pstate, clause, ParseExprKind::EXPR_KIND_WINDOW_FRAME_GROUPS)?;
+        node = coerce::coerce_to_specific_type(
+            mcx,
+            pstate,
+            n,
+            expr_type(n),
+            expr_location(n),
+            INT8OID,
+            construct_name,
+        )?;
+    } else {
+        panic!("unrecognized frame_options {frame_options:#x} in transformFrameOffset");
+    }
+
+    checkExprIsVarFree(pstate, node, construct_name)?;
+    Ok(Some(node))
+}
+
+#[cold]
+#[inline(never)]
+fn frame_offset_error(
+    pstate: &ParseState<'_, '_>,
+    msg: String,
+    hint: Option<&'static str>,
+    location: ParseLoc,
+) -> Box<PgError> {
+    let mut b = elog::ereport(ERROR)
+        .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+        .errmsg(msg)
+        .errposition(parser_errposition(pstate, location, mbutils::GetDatabaseEncoding()));
+    if let Some(hint) = hint {
+        b = b.errhint(hint);
+    }
+    Box::new(b.into_error().with_error_location(ErrorLocation::new(
+        "parse_clause.c",
+        0,
+        "transformFrameOffset",
+    )))
 }
 
 #[cold]

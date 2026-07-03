@@ -343,7 +343,8 @@ fn pathways_and_predicates() {
 
     let mut declared = [INT4OID, INT4OID];
     assert_eq!(
-        enforce_generic_type_consistency(&[INT4OID, INT4OID], &mut declared, INT4OID, false),
+        enforce_generic_type_consistency(&[INT4OID, INT4OID], &mut declared, INT4OID, false)
+            .unwrap(),
         INT4OID
     );
 }

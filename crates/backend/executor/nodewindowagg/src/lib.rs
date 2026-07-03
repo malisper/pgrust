@@ -1,8 +1,8 @@
-// nodeWindowAgg.c, default-frame slice: frameheadpos is pinned at 0, no
-// inverse transitions, frame end = peer-group boundary. The rank family is
-// enum-dispatched (C: fmgr + WindowObject; the set is closed here). Explicit
-// frames/exclusion/GROUPS/runCondition/FILTER/other window functions/by-ref
-// transtypes are loud panics at init.
+// nodeWindowAgg.c: default-frame fast lane (compiled evaltrans, frame head
+// pinned) + C-exact framed lane (ROWS/RANGE offsets, per-agg carriers,
+// inverse transitions). Window functions are enum-dispatched (C: fmgr +
+// WindowObject; the set is closed here). GROUPS mode, EXCLUDE, FILTER,
+// runCondition and by-ref plain transtypes are loud panics at init.
 #![allow(non_snake_case)]
 
 use std::ptr::NonNull;
@@ -11,8 +11,8 @@ use std::rc::Rc;
 use ::datum::{Datum, NullableDatum};
 use ::execexpr::{
     exec_build_agg_trans, exec_build_grouping_equal, exec_build_window_projection_info,
-    exec_eval_expr, exec_project, exec_qual, AggBind, AggPerGroup, AggTransSpec, EvalSlots,
-    ExprState, WinBind,
+    exec_eval_expr, exec_init_expr, exec_project, exec_qual, expr_type, AggBind, AggPerGroup,
+    AggTransSpec, EvalSlots, ExprState, WinBind,
 };
 use ::executils::{EStateData, EcxtId, ExecSlotId};
 use ::mcx::{vec_with_capacity_in, PgBox, PgVec};
@@ -20,11 +20,18 @@ use ::tuplestore::Tuplestore;
 use ::types_core::catalog::PROCEDURE_RELATION_ID;
 use ::types_core::{Oid, INT8OID};
 use ::types_error::{PgError, PgResult};
+use ::types_fmgr::{FmgrInfo, LocalFcinfo};
 use ::types_nodes::list::NodeList;
 use ::types_nodes::node_tree::Node;
 use ::types_nodes::plannodes::WindowAgg;
 use ::types_nodes::primnodes::WindowFunc;
-use ::types_nodes::rawnodes::FRAMEOPTION_DEFAULTS;
+use ::types_nodes::rawnodes::{
+    FRAMEOPTION_DEFAULTS, FRAMEOPTION_END_CURRENT_ROW, FRAMEOPTION_END_OFFSET,
+    FRAMEOPTION_END_OFFSET_PRECEDING, FRAMEOPTION_END_UNBOUNDED_FOLLOWING, FRAMEOPTION_EXCLUSION,
+    FRAMEOPTION_GROUPS, FRAMEOPTION_RANGE, FRAMEOPTION_ROWS, FRAMEOPTION_START_CURRENT_ROW,
+    FRAMEOPTION_START_OFFSET, FRAMEOPTION_START_OFFSET_PRECEDING,
+    FRAMEOPTION_START_UNBOUNDED_PRECEDING,
+};
 use ::types_nodes::NodeTag;
 use ::types_slot::{SlotData, TupleSlotKind, EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK};
 use ::types_tuple::TupleDescData;
@@ -37,32 +44,98 @@ mod tests;
 const ACL_EXECUTE: u64 = 1 << 7;
 const ACLCHECK_OK: i32 = 0;
 const AGGKIND_NORMAL: i8 = b'n' as i8;
+const AGGMODIFY_READ_ONLY: i8 = b'r' as i8;
 
 const F_WINDOW_ROW_NUMBER: Oid = 3100;
 const F_WINDOW_RANK: Oid = 3101;
 const F_WINDOW_DENSE_RANK: Oid = 3102;
+const F_WINDOW_PERCENT_RANK: Oid = 3103;
+const F_WINDOW_CUME_DIST: Oid = 3104;
+const F_WINDOW_NTILE: Oid = 3105;
+const F_WINDOW_LAG: Oid = 3106;
+const F_WINDOW_LAG_WITH_OFFSET: Oid = 3107;
+const F_WINDOW_LAG_WITH_OFFSET_AND_DEFAULT: Oid = 3108;
+const F_WINDOW_LEAD: Oid = 3109;
+const F_WINDOW_LEAD_WITH_OFFSET: Oid = 3110;
+const F_WINDOW_LEAD_WITH_OFFSET_AND_DEFAULT: Oid = 3111;
+const F_WINDOW_FIRST_VALUE: Oid = 3112;
+const F_WINDOW_LAST_VALUE: Oid = 3113;
+const F_WINDOW_NTH_VALUE: Oid = 3114;
+
+const F_INT2_AVG_ACCUM: Oid = 1962;
+const F_INT4_AVG_ACCUM: Oid = 1963;
+const F_INT2_AVG_ACCUM_INV: Oid = 3570;
+const F_INT4_AVG_ACCUM_INV: Oid = 3571;
+const F_INT2INT4_SUM: Oid = 3572;
 
 #[derive(Clone, Copy, PartialEq)]
 enum WfKind {
     RowNumber,
     Rank,
     DenseRank,
+    PercentRank,
+    CumeDist,
+    Ntile,
+    LeadLag { forward: bool, withoffset: bool, withdefault: bool },
+    FirstValue,
+    LastValue,
+    NthValue,
     PlainAgg { aggno: u16 },
 }
 
 // C WindowStatePerFuncData + the WindowObject position fields (markptr is
 // bookkeeping only: tuplestore_trim is unported, so no mark read pointer).
-struct PerFuncData {
+// Rank/ntile state is C's WinGetPartitionLocalMemory chunk, inline.
+struct PerFuncData<'mcx> {
     kind: WfKind,
     wfuncno: u16,
     readptr: i32,
     seekpos: i64,
     markpos: i64,
     rank: i64,
+    ntile: i32,
+    rows_per_bucket: i64,
+    boundary: i64,
+    remainder: i64,
+    arg1_stable: bool,
+    argstates: PgVec<'mcx, PgBox<'mcx, ExprState<'mcx>>>,
+}
+
+// Int8TransTypeData (numeric.c): the {count,sum} pair C wraps in an int8[2]
+// ArrayType; inline here (state never leaves the node — DIVERGENCE, rule 4).
+#[derive(Clone, Copy, Default)]
+struct Int8TransState {
+    count: i64,
+    sum: i64,
+}
+
+enum AggKernel {
+    Generic { transfn: FmgrInfo },
+    MovingByVal { transfn: FmgrInfo, invtransfn: FmgrInfo },
+    MovingIntSum { int2: bool },
+}
+
+// C WindowStatePerAggData, byval-transtype closed set (framed lane only; the
+// default frame rides the compiled evaltrans program).
+struct PerAggData<'mcx> {
+    wfuncno: u16,
+    num_arguments: i16,
+    win_collation: Oid,
+    kernel: AggKernel,
+    fn_strict: bool,
+    has_inverse: bool,
+    argstates: PgVec<'mcx, PgBox<'mcx, ExprState<'mcx>>>,
+    init_value: NullableDatum,
+    trans_value: NullableDatum,
+    trans_count: i64,
+    int_sum: Int8TransState,
+    result_value: NullableDatum,
+    restart: bool,
 }
 
 pub struct WindowAggStateData<'mcx> {
     plan: &'mcx WindowAgg<'mcx>,
+    frameOptions: i32,
     pub ps_ExprContext: EcxtId,
     tmpcontext: EcxtId,
     pub ps_ResultTupleDesc: Rc<TupleDescData<'static>>,
@@ -78,21 +151,40 @@ pub struct WindowAggStateData<'mcx> {
     agg_row_valid: bool,
     temp_slot_1: SlotData<'mcx>,
     temp_slot_2: SlotData<'mcx>,
-    perfunc: PgVec<'mcx, PerFuncData>,
+    framehead_slot: SlotData<'mcx>,
+    frametail_slot: SlotData<'mcx>,
+    perfunc: PgVec<'mcx, PerFuncData<'mcx>>,
     evaltrans: Option<PgBox<'mcx, ExprState<'mcx>>>,
     trans_init: PgVec<'mcx, NullableDatum>,
     _pergroup: PgVec<'mcx, AggPerGroup>,
     pergroup_base: NonNull<AggPerGroup>,
     peragg_wfuncno: PgVec<'mcx, u16>,
+    peragg: PgVec<'mcx, PerAggData<'mcx>>,
     agg_saved: PgVec<'mcx, NullableDatum>,
     agg_readptr: i32,
     agg_seekpos: i64,
+    agg_markpos: i64,
+    agg_mark_active: bool,
     agg_values_base: NonNull<Datum>,
     agg_nulls_base: NonNull<bool>,
     numaggs: usize,
     currentpos: i64,
-    spooled_rows: i64,
+    frameheadpos: i64,
+    frametailpos: i64,
+    framehead_valid: bool,
+    frametail_valid: bool,
+    framehead_ptr: i32,
+    frametail_ptr: i32,
+    aggregatedbase: i64,
     aggregatedupto: i64,
+    spooled_rows: i64,
+    start_offset_state: Option<PgBox<'mcx, ExprState<'mcx>>>,
+    end_offset_state: Option<PgBox<'mcx, ExprState<'mcx>>>,
+    start_offset_value: Datum,
+    end_offset_value: Datum,
+    start_in_range: Option<FmgrInfo>,
+    end_in_range: Option<FmgrInfo>,
+    all_first: bool,
     partition_spooled: bool,
     more_partitions: bool,
     next_partition: bool,
@@ -114,6 +206,53 @@ fn wfunc_permission_denied(fnoid: Oid) -> Box<PgError> {
     )
 }
 
+#[cold]
+#[inline(never)]
+fn ntile_arg_error() -> Box<PgError> {
+    Box::new(
+        PgError::error("argument of ntile must be greater than zero".to_string())
+            .with_sqlstate(::types_error::ERRCODE_INVALID_ARGUMENT_FOR_NTILE),
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn nth_value_arg_error() -> Box<PgError> {
+    Box::new(
+        PgError::error("argument of nth_value must be greater than zero".to_string())
+            .with_sqlstate(::types_error::ERRCODE_INVALID_ARGUMENT_FOR_NTH_VALUE),
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn frame_offset_null(starting: bool) -> Box<PgError> {
+    let which = if starting { "starting" } else { "ending" };
+    Box::new(
+        PgError::error(format!("frame {which} offset must not be null"))
+            .with_sqlstate(::types_error::ERRCODE_NULL_VALUE_NOT_ALLOWED),
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn frame_offset_negative(starting: bool) -> Box<PgError> {
+    let which = if starting { "starting" } else { "ending" };
+    Box::new(
+        PgError::error(format!("frame {which} offset must not be negative"))
+            .with_sqlstate(::types_error::ERRCODE_INVALID_PRECEDING_OR_FOLLOWING_SIZE),
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn moving_transfn_returned_null() -> Box<PgError> {
+    Box::new(
+        PgError::error("moving-aggregate transition function must not return null".to_string())
+            .with_sqlstate(::types_error::ERRCODE_NULL_VALUE_NOT_ALLOWED),
+    )
+}
+
 // GetAggInitVal (nodeWindowAgg.c keeps its own copy, as nodeAgg.c does);
 // only the int8 arm is live (count/sum transtypes).
 fn get_agg_init_val(text: &str, transtype: Oid) -> PgResult<Datum> {
@@ -124,26 +263,6 @@ fn get_agg_init_val(text: &str, transtype: Oid) -> PgResult<Datum> {
         );
     }
     Ok(Datum::from_i64(::adt_int8::int8in(text, None)?))
-}
-
-#[cold]
-#[inline(never)]
-fn unported_window_function(fnoid: Oid) -> ! {
-    let name = match fnoid {
-        3103 => "percent_rank",
-        3104 => "cume_dist",
-        3105 => "ntile",
-        3106..=3108 => "lag",
-        3109..=3111 => "lead",
-        3112 => "first_value",
-        3113 => "last_value",
-        3114 => "nth_value",
-        _ => "unknown",
-    };
-    panic!(
-        "eval_windowfunction (nodeWindowAgg.c): window function {name} (oid {fnoid}) \
-         not ported (row_number/rank/dense_rank + plain aggregates only)"
-    )
 }
 
 fn collect_window_funcs<'mcx>(
@@ -173,6 +292,69 @@ fn collect_window_funcs<'mcx>(
     }
 }
 
+// contain_volatile_functions (clauses.c) over the arg shapes this lane
+// admits; unknown tags are loud rather than assumed stable.
+fn contain_volatile_functions(node: Node<'_>) -> PgResult<bool> {
+    match node.node_tag() {
+        NodeTag::T_Var | NodeTag::T_Const | NodeTag::T_Param => Ok(false),
+        NodeTag::T_RelabelType => {
+            contain_volatile_functions(node.as_relabel_type().unwrap().arg)
+        }
+        NodeTag::T_FuncExpr => {
+            let f = node.as_func_expr().unwrap();
+            if lsyscache::func_volatile(f.funcid)? == b'v' as i8 {
+                return Ok(true);
+            }
+            for a in f.args.iter() {
+                if contain_volatile_functions(a)? {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+        NodeTag::T_OpExpr => {
+            let o = node.as_op_expr().unwrap();
+            if lsyscache::func_volatile(o.opfuncid)? == b'v' as i8 {
+                return Ok(true);
+            }
+            for a in o.args.iter() {
+                if contain_volatile_functions(a)? {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+        tag => panic!(
+            "contain_volatile_functions (clauses.c): node family {tag:?} not ported \
+             (window-agg lane)"
+        ),
+    }
+}
+
+// get_fn_expr_arg_stable (fmgr.c): Const or extern Param.
+fn arg_is_stable(node: Node<'_>) -> bool {
+    match node.node_tag() {
+        NodeTag::T_Const => true,
+        NodeTag::T_Param => node
+            .as_param()
+            .map(|p| p.paramkind == ::types_nodes::primnodes::ParamKind::PARAM_EXTERN)
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
+fn build_argstates<'mcx>(
+    mcx: ::mcx::Mcx<'mcx>,
+    args: &NodeList<'mcx>,
+    params: ::execexpr::ParamBind<'mcx>,
+) -> PgResult<PgVec<'mcx, PgBox<'mcx, ExprState<'mcx>>>> {
+    let mut out = PgVec::new_in(mcx);
+    for a in args.iter() {
+        out.push(exec_init_expr(mcx, Some(a), params)?.expect("window arg ExprState"));
+    }
+    Ok(out)
+}
+
 /// `ExecInitWindowAgg` minus child linkage: the caller (execProcnode's
 /// T_WindowAgg arm) inits the outer child and passes its result type.
 pub fn exec_init_window_agg<'mcx>(
@@ -184,22 +366,21 @@ pub fn exec_init_window_agg<'mcx>(
 ) -> PgResult<WindowAggStateData<'mcx>> {
     debug_assert!(eflags & (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK) == 0);
     let mcx = estate.es_query_cxt;
+    let frameOptions = node.frameOptions;
 
-    if node.frameOptions != FRAMEOPTION_DEFAULTS {
-        panic!(
-            "ExecInitWindowAgg (nodeWindowAgg.c): frameOptions {:#x} not ported \
-             (default frame RANGE UNBOUNDED PRECEDING..CURRENT ROW only)",
-            node.frameOptions
-        );
+    if frameOptions & FRAMEOPTION_GROUPS != 0 {
+        panic!("ExecInitWindowAgg (nodeWindowAgg.c): GROUPS frame mode not ported");
     }
-    assert!(node.startOffset.is_none() && node.endOffset.is_none());
-    assert!(node.startInRangeFunc == 0 && node.endInRangeFunc == 0);
+    if frameOptions & FRAMEOPTION_EXCLUSION != 0 {
+        panic!("ExecInitWindowAgg (nodeWindowAgg.c): frame EXCLUDE clause not ported");
+    }
     if !node.runCondition.is_nil() || !node.runConditionOrig.is_nil() {
         panic!("ExecInitWindowAgg (nodeWindowAgg.c): runCondition not ported");
     }
     if !node.plan.qual.is_nil() {
         panic!("ExecInitWindowAgg (nodeWindowAgg.c): top-window qual not ported");
     }
+    let default_frame = frameOptions == FRAMEOPTION_DEFAULTS;
 
     let tmpcontext = estate.create_expr_context();
     let ps_ExprContext = estate.exec_assign_expr_context();
@@ -215,8 +396,9 @@ pub fn exec_init_window_agg<'mcx>(
     // identical, duplicated evaluation).
     let numfuncs = wfuncs.len();
     let userid = miscinit_seams::get_user_id::call();
+    let params = estate.param_bind();
 
-    let mut perfunc: PgVec<'mcx, PerFuncData> = vec_with_capacity_in(mcx, numfuncs)?;
+    let mut perfunc: PgVec<'mcx, PerFuncData<'mcx>> = PgVec::new_in(mcx);
     let mut wfuncnos: PgVec<'mcx, (Node<'mcx>, u16)> = vec_with_capacity_in(mcx, numfuncs)?;
     let mut agg_specs_args: PgVec<'mcx, NodeList<'mcx>> = PgVec::new_in(mcx);
     let mut trans_init: PgVec<'mcx, NullableDatum> = PgVec::new_in(mcx);
@@ -224,6 +406,7 @@ pub fn exec_init_window_agg<'mcx>(
     let mut trans_collid: PgVec<'mcx, Oid> = PgVec::new_in(mcx);
     let mut trans_typlen: PgVec<'mcx, i16> = PgVec::new_in(mcx);
     let mut peragg_wfuncno: PgVec<'mcx, u16> = PgVec::new_in(mcx);
+    let mut peragg: PgVec<'mcx, PerAggData<'mcx>> = PgVec::new_in(mcx);
 
     for (wfuncno, &(wnode, wfunc)) in wfuncs.iter().enumerate() {
         if wfunc.winref != node.winref {
@@ -249,26 +432,71 @@ pub fn exec_init_window_agg<'mcx>(
         }
         wfuncnos.push((wnode, wfuncno as u16));
 
+        let mut argstates: PgVec<'mcx, PgBox<'mcx, ExprState<'mcx>>> = PgVec::new_in(mcx);
+        let mut arg1_stable = false;
         let kind = if wfunc.winagg {
             let aggno = agg_specs_args.len() as u16;
-            initialize_peragg(
-                mcx,
-                wfunc,
-                &mut agg_specs_args,
-                &mut trans_init,
-                &mut trans_fnoid,
-                &mut trans_collid,
-                &mut trans_typlen,
-            )?;
+            if default_frame {
+                initialize_peragg_default(
+                    mcx,
+                    wfunc,
+                    &mut agg_specs_args,
+                    &mut trans_init,
+                    &mut trans_fnoid,
+                    &mut trans_collid,
+                    &mut trans_typlen,
+                )?;
+            } else {
+                peragg.push(initialize_peragg_framed(
+                    mcx,
+                    wfunc,
+                    frameOptions,
+                    wfuncno as u16,
+                    params,
+                )?);
+                agg_specs_args.push(NodeList::nil());
+            }
             peragg_wfuncno.push(wfuncno as u16);
             WfKind::PlainAgg { aggno }
         } else {
-            match wfunc.winfnoid {
+            let kind = match wfunc.winfnoid {
                 F_WINDOW_ROW_NUMBER => WfKind::RowNumber,
                 F_WINDOW_RANK => WfKind::Rank,
                 F_WINDOW_DENSE_RANK => WfKind::DenseRank,
-                other => unported_window_function(other),
+                F_WINDOW_PERCENT_RANK => WfKind::PercentRank,
+                F_WINDOW_CUME_DIST => WfKind::CumeDist,
+                F_WINDOW_NTILE => WfKind::Ntile,
+                F_WINDOW_LAG => {
+                    WfKind::LeadLag { forward: false, withoffset: false, withdefault: false }
+                }
+                F_WINDOW_LAG_WITH_OFFSET => {
+                    WfKind::LeadLag { forward: false, withoffset: true, withdefault: false }
+                }
+                F_WINDOW_LAG_WITH_OFFSET_AND_DEFAULT => {
+                    WfKind::LeadLag { forward: false, withoffset: true, withdefault: true }
+                }
+                F_WINDOW_LEAD => {
+                    WfKind::LeadLag { forward: true, withoffset: false, withdefault: false }
+                }
+                F_WINDOW_LEAD_WITH_OFFSET => {
+                    WfKind::LeadLag { forward: true, withoffset: true, withdefault: false }
+                }
+                F_WINDOW_LEAD_WITH_OFFSET_AND_DEFAULT => {
+                    WfKind::LeadLag { forward: true, withoffset: true, withdefault: true }
+                }
+                F_WINDOW_FIRST_VALUE => WfKind::FirstValue,
+                F_WINDOW_LAST_VALUE => WfKind::LastValue,
+                F_WINDOW_NTH_VALUE => WfKind::NthValue,
+                other => panic!(
+                    "eval_windowfunction (nodeWindowAgg.c): window function oid {other} \
+                     not ported"
+                ),
+            };
+            argstates = build_argstates(mcx, &wfunc.args, params)?;
+            if wfunc.args.len() >= 2 {
+                arg1_stable = arg_is_stable(wfunc.args.nth(1));
             }
+            kind
         };
         perfunc.push(PerFuncData {
             kind,
@@ -277,6 +505,12 @@ pub fn exec_init_window_agg<'mcx>(
             seekpos: -1,
             markpos: -1,
             rank: 0,
+            ntile: 0,
+            rows_per_bucket: 0,
+            boundary: 0,
+            remainder: 0,
+            arg1_stable,
+            argstates,
         });
     }
     let numaggs = agg_specs_args.len();
@@ -298,8 +532,7 @@ pub fn exec_init_window_agg<'mcx>(
         )
     };
 
-    let params = estate.param_bind();
-    let evaltrans = if numaggs > 0 {
+    let evaltrans = if default_frame && numaggs > 0 {
         let mut specs: PgVec<'mcx, AggTransSpec<'_, 'mcx>> = vec_with_capacity_in(mcx, numaggs)?;
         for aggno in 0..numaggs {
             // SAFETY: aggno < numaggs elements of the once-allocated pergroup.
@@ -347,7 +580,7 @@ pub fn exec_init_window_agg<'mcx>(
         node.ordCollations,
     )?;
 
-    let mut mk_slot = || {
+    let mk_slot = || {
         exectuples::make_tuple_table_slot(
             mcx,
             TupleSlotKind::MinimalTuple,
@@ -359,11 +592,35 @@ pub fn exec_init_window_agg<'mcx>(
     let agg_row_slot = mk_slot();
     let temp_slot_1 = mk_slot();
     let temp_slot_2 = mk_slot();
+    let framehead_slot = mk_slot();
+    let frametail_slot = mk_slot();
     let mut agg_saved: PgVec<'mcx, NullableDatum> = vec_with_capacity_in(mcx, numaggs)?;
     agg_saved.resize(numaggs, NullableDatum::null());
 
+    let start_offset_state = exec_init_expr(mcx, node.startOffset, params)?;
+    let end_offset_state = exec_init_expr(mcx, node.endOffset, params)?;
+    if let Some(off) = node.startOffset {
+        let (_len, byval) = lsyscache::get_typlenbyval(expr_type(off))?;
+        assert!(byval, "calculate_frame_offsets: by-ref frame offset type not ported");
+    }
+    if let Some(off) = node.endOffset {
+        let (_len, byval) = lsyscache::get_typlenbyval(expr_type(off))?;
+        assert!(byval, "calculate_frame_offsets: by-ref frame offset type not ported");
+    }
+    let start_in_range = if node.startInRangeFunc != 0 {
+        Some(fmgr_core::fmgr_info(node.startInRangeFunc)?)
+    } else {
+        None
+    };
+    let end_in_range = if node.endInRangeFunc != 0 {
+        Some(fmgr_core::fmgr_info(node.endInRangeFunc)?)
+    } else {
+        None
+    };
+
     Ok(WindowAggStateData {
         plan: node,
+        frameOptions,
         ps_ExprContext,
         tmpcontext,
         ps_ResultTupleDesc: result_desc,
@@ -379,21 +636,40 @@ pub fn exec_init_window_agg<'mcx>(
         agg_row_valid: false,
         temp_slot_1,
         temp_slot_2,
+        framehead_slot,
+        frametail_slot,
         perfunc,
         evaltrans,
         trans_init,
         _pergroup: pergroup,
         pergroup_base,
         peragg_wfuncno,
+        peragg,
         agg_saved,
         agg_readptr: -1,
         agg_seekpos: -1,
+        agg_markpos: -1,
+        agg_mark_active: false,
         agg_values_base,
         agg_nulls_base,
         numaggs,
         currentpos: 0,
-        spooled_rows: 0,
+        frameheadpos: 0,
+        frametailpos: 0,
+        framehead_valid: false,
+        frametail_valid: false,
+        framehead_ptr: -1,
+        frametail_ptr: -1,
+        aggregatedbase: 0,
         aggregatedupto: 0,
+        spooled_rows: 0,
+        start_offset_state,
+        end_offset_state,
+        start_offset_value: Datum::null(),
+        end_offset_value: Datum::null(),
+        start_in_range,
+        end_in_range,
+        all_first: true,
         partition_spooled: false,
         more_partitions: false,
         next_partition: true,
@@ -420,9 +696,9 @@ fn build_eq<'mcx>(
     Ok(Some(exec_build_grouping_equal(mcx, desc, desc, col_idx, &eqfuncoids, collations)?))
 }
 
-// initialize_peragg (nodeWindowAgg.c), byval no-finalfn slice (nodeAgg
-// precedent); invtransfn ignored: the default frame never moves its head.
-fn initialize_peragg<'mcx>(
+// initialize_peragg (nodeWindowAgg.c), byval no-finalfn default-frame slice
+// (nodeAgg precedent); invtransfn ignored: the frame head cannot move.
+fn initialize_peragg_default<'mcx>(
     mcx: ::mcx::Mcx<'mcx>,
     wfunc: &'mcx WindowFunc<'mcx>,
     agg_specs_args: &mut PgVec<'mcx, NodeList<'mcx>>,
@@ -474,29 +750,226 @@ fn initialize_peragg<'mcx>(
     Ok(())
 }
 
-#[derive(Clone, Copy)]
+// initialize_peragg (nodeWindowAgg.c), framed lane: C's moving-aggregate
+// selection verbatim, then closed-set kernel dispatch. Component-fn ACL
+// checks vs the aggregate owner are skipped (proowner projection unported;
+// C divergence, superuser-owned builtins in the live set).
+fn initialize_peragg_framed<'mcx>(
+    mcx: ::mcx::Mcx<'mcx>,
+    wfunc: &'mcx WindowFunc<'mcx>,
+    frame_options: i32,
+    wfuncno: u16,
+    params: ::execexpr::ParamBind<'mcx>,
+) -> PgResult<PerAggData<'mcx>> {
+    let shape = syscache_seams::lookup_pg_aggregate_shape::call(wfunc.winfnoid)?
+        .ok_or_else(|| wfunc_lookup_failed(wfunc.winfnoid))?;
+    if shape.aggkind != AGGKIND_NORMAL {
+        panic!(
+            "initialize_peragg (nodeWindowAgg.c): ordered-set/hypothetical aggkind {} \
+             cannot be a window aggregate",
+            shape.aggkind
+        );
+    }
+    let mut volatile = false;
+    for a in wfunc.args.iter() {
+        if contain_volatile_functions(a)? {
+            volatile = true;
+        }
+    }
+    let use_ma_code = if shape.aggminvtransfn == 0 {
+        false
+    } else if shape.aggmfinalmodify == AGGMODIFY_READ_ONLY
+        && shape.aggfinalmodify != AGGMODIFY_READ_ONLY
+    {
+        true
+    } else if frame_options & FRAMEOPTION_START_UNBOUNDED_PRECEDING != 0 {
+        false
+    } else {
+        !volatile
+    };
+    let (transfn_oid, invtransfn_oid, finalfn_oid, finalmodify, aggtranstype, minit) =
+        if use_ma_code {
+            (
+                shape.aggmtransfn,
+                shape.aggminvtransfn,
+                shape.aggmfinalfn,
+                shape.aggmfinalmodify,
+                shape.aggmtranstype,
+                true,
+            )
+        } else {
+            (shape.aggtransfn, 0, shape.aggfinalfn, shape.aggfinalmodify, shape.aggtranstype, false)
+        };
+    if finalmodify != AGGMODIFY_READ_ONLY {
+        panic!(
+            "initialize_peragg (nodeWindowAgg.c): non-read-only finalfn error arm \
+             (format_procedure) not ported; aggregate {}",
+            wfunc.winfnoid
+        );
+    }
+    let initval = if minit {
+        syscache_seams::pg_aggregate_aggminitval::call(mcx, wfunc.winfnoid)?
+    } else {
+        syscache_seams::pg_aggregate_agginitval::call(mcx, wfunc.winfnoid)?
+    }
+    .ok_or_else(|| wfunc_lookup_failed(wfunc.winfnoid))?;
+
+    let kernel;
+    let fn_strict;
+    let init_value;
+    let mut has_inverse = invtransfn_oid != 0;
+    match (transfn_oid, invtransfn_oid) {
+        (F_INT2_AVG_ACCUM, F_INT2_AVG_ACCUM_INV) | (F_INT4_AVG_ACCUM, F_INT4_AVG_ACCUM_INV) => {
+            assert!(
+                finalfn_oid == F_INT2INT4_SUM,
+                "MovingIntSum kernel: unexpected mfinalfn {finalfn_oid}"
+            );
+            assert!(
+                initval.as_ref().map(|s| s.as_str()) == Some("{0,0}"),
+                "MovingIntSum kernel: unexpected minitval {initval:?}"
+            );
+            kernel = AggKernel::MovingIntSum { int2: transfn_oid == F_INT2_AVG_ACCUM };
+            fn_strict = true;
+            has_inverse = true;
+            init_value = NullableDatum { value: Datum::null(), isnull: false };
+        }
+        (t, 0) => {
+            if finalfn_oid != 0 {
+                panic!(
+                    "finalize_windowaggregate (nodeWindowAgg.c): finalfn {finalfn_oid} arm \
+                     not ported"
+                );
+            }
+            let (_len, byval) = lsyscache::get_typlenbyval(aggtranstype)?;
+            if !byval {
+                panic!(
+                    "advance_windowaggregate (nodeWindowAgg.c): by-ref transtype \
+                     {aggtranstype} not ported"
+                );
+            }
+            let transfn = fmgr_core::fmgr_info(t)?;
+            fn_strict = transfn.fn_strict;
+            kernel = AggKernel::Generic { transfn };
+            init_value = match initval {
+                Some(ref text) => NullableDatum {
+                    value: get_agg_init_val(text.as_str(), aggtranstype)?,
+                    isnull: false,
+                },
+                None => NullableDatum::null(),
+            };
+        }
+        (t, inv) => {
+            if finalfn_oid != 0 {
+                panic!(
+                    "finalize_windowaggregate (nodeWindowAgg.c): moving finalfn \
+                     {finalfn_oid} arm not ported"
+                );
+            }
+            let (_len, byval) = lsyscache::get_typlenbyval(aggtranstype)?;
+            if !byval {
+                panic!(
+                    "advance_windowaggregate_base (nodeWindowAgg.c): by-ref moving \
+                     transtype {aggtranstype} not ported"
+                );
+            }
+            let transfn = fmgr_core::fmgr_info(t)?;
+            let invtransfn = fmgr_core::fmgr_info(inv)?;
+            if transfn.fn_strict != invtransfn.fn_strict {
+                panic!(
+                    "strictness of aggregate's forward and inverse transition functions \
+                     must match (aggregate {})",
+                    wfunc.winfnoid
+                );
+            }
+            fn_strict = transfn.fn_strict;
+            kernel = AggKernel::MovingByVal { transfn, invtransfn };
+            init_value = match initval {
+                Some(ref text) => NullableDatum {
+                    value: get_agg_init_val(text.as_str(), aggtranstype)?,
+                    isnull: false,
+                },
+                None => NullableDatum::null(),
+            };
+        }
+    }
+    // C's IsBinaryCoercible guard for strict transfn + NULL initval; only the
+    // equal-types case is ported.
+    if fn_strict && init_value.isnull {
+        let first_type = wfunc.args.first().map(expr_type);
+        if first_type != Some(aggtranstype) {
+            panic!(
+                "initialize_peragg (nodeWindowAgg.c): IsBinaryCoercible input/transtype \
+                 check not ported (aggregate {})",
+                wfunc.winfnoid
+            );
+        }
+    }
+
+    Ok(PerAggData {
+        wfuncno,
+        num_arguments: wfunc.args.len() as i16,
+        win_collation: wfunc.inputcollid,
+        kernel,
+        fn_strict,
+        has_inverse,
+        argstates: build_argstates(mcx, &wfunc.args, params)?,
+        init_value,
+        trans_value: init_value,
+        trans_count: 0,
+        int_sum: Int8TransState::default(),
+        result_value: NullableDatum::null(),
+        restart: false,
+    })
+}
+
+#[derive(Clone, Copy, PartialEq)]
 enum WhichSlot {
     AggRow,
     Temp1,
     Temp2,
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum SeekType {
+    Current,
+    Head,
+    Tail,
+}
+
 impl<'mcx> WindowAggStateData<'mcx> {
-    // prepare_tuplestore (nodeWindowAgg.c), default-frame pointer set: ptr 0
-    // is the current row, one forward-only agg pointer (frame head cannot
-    // move: no agg mark/backward pointer), a BACKWARD pointer per rank-family
-    // function. Mark pointers are position bookkeeping only (no trim).
+    // prepare_tuplestore (nodeWindowAgg.c). Mark pointers are position
+    // bookkeeping only (no tuplestore_trim); the agg read pointer gets
+    // BACKWARD capability when the frame head can move (restart re-reads).
     fn prepare_tuplestore(&mut self) {
         debug_assert!(self.buffer.is_none());
         let work_mem = init_small::globals::work_mem();
         let mut buffer = Tuplestore::begin_heap(false, false, work_mem);
         buffer.set_eflags(0);
         if self.numaggs > 0 {
-            self.agg_readptr = buffer.alloc_read_pointer(0);
+            let mut flags = 0;
+            if self.frameOptions & FRAMEOPTION_START_UNBOUNDED_PRECEDING == 0 {
+                self.agg_mark_active = true;
+                flags |= EXEC_FLAG_BACKWARD;
+            }
+            self.agg_readptr = buffer.alloc_read_pointer(flags);
         }
         for pf in self.perfunc.iter_mut() {
             if !matches!(pf.kind, WfKind::PlainAgg { .. }) {
                 pf.readptr = buffer.alloc_read_pointer(EXEC_FLAG_BACKWARD);
+            }
+        }
+        if self.frameOptions & (FRAMEOPTION_RANGE | FRAMEOPTION_GROUPS) != 0 {
+            if (self.frameOptions & FRAMEOPTION_START_CURRENT_ROW != 0
+                && self.plan.ordNumCols != 0)
+                || self.frameOptions & FRAMEOPTION_START_OFFSET != 0
+            {
+                self.framehead_ptr = buffer.alloc_read_pointer(0);
+            }
+            if (self.frameOptions & FRAMEOPTION_END_CURRENT_ROW != 0
+                && self.plan.ordNumCols != 0)
+                || self.frameOptions & FRAMEOPTION_END_OFFSET != 0
+            {
+                self.frametail_ptr = buffer.alloc_read_pointer(0);
             }
         }
         self.buffer = Some(buffer);
@@ -508,10 +981,16 @@ impl<'mcx> WindowAggStateData<'mcx> {
     {
         let mcx = estate.es_query_cxt;
         self.partition_spooled = false;
+        self.framehead_valid = false;
+        self.frametail_valid = false;
         self.spooled_rows = 0;
         self.currentpos = 0;
+        self.frameheadpos = 0;
+        self.frametailpos = 0;
         self.agg_row_valid = false;
         exectuples::exec_clear_tuple(&mut self.agg_row_slot, mcx);
+        exectuples::exec_clear_tuple(&mut self.framehead_slot, mcx);
+        exectuples::exec_clear_tuple(&mut self.frametail_slot, mcx);
 
         if !self.first_part_valid {
             match fetch(estate)? {
@@ -533,7 +1012,9 @@ impl<'mcx> WindowAggStateData<'mcx> {
         self.next_partition = false;
 
         if self.numaggs > 0 {
+            self.agg_markpos = -1;
             self.agg_seekpos = -1;
+            self.aggregatedbase = 0;
             self.aggregatedupto = 0;
         }
         for pf in self.perfunc.iter_mut() {
@@ -541,6 +1022,10 @@ impl<'mcx> WindowAggStateData<'mcx> {
                 pf.seekpos = -1;
                 pf.markpos = -1;
                 pf.rank = 0;
+                pf.ntile = 0;
+                pf.rows_per_bucket = 0;
+                pf.boundary = 0;
+                pf.remainder = 0;
             }
         }
         self.buffer.as_mut().unwrap().puttupleslot(&mut self.first_part_slot, mcx)?;
@@ -597,8 +1082,8 @@ impl<'mcx> WindowAggStateData<'mcx> {
 
     fn release_partition(&mut self, estate: &mut EStateData<'mcx>) {
         let mcx = estate.es_query_cxt;
-        // Rank state lives in perfunc (C: partcontext localmem); byval trans
-        // values need no aggcontext reset.
+        // Rank/ntile state lives in perfunc (C: partcontext localmem); byval
+        // trans values need no aggcontext reset.
         if let Some(buffer) = self.buffer.as_mut() {
             buffer.clear();
         }
@@ -652,7 +1137,7 @@ impl<'mcx> WindowAggStateData<'mcx> {
                 let pf = &self.perfunc[i];
                 (pf.readptr, pf.seekpos, pf.markpos)
             }
-            None => (self.agg_readptr, self.agg_seekpos, -1),
+            None => (self.agg_readptr, self.agg_seekpos, self.agg_markpos),
         };
         if pos < markpos {
             panic!("cannot fetch row before WindowObject's mark position");
@@ -715,6 +1200,45 @@ impl<'mcx> WindowAggStateData<'mcx> {
         }
     }
 
+    fn set_agg_mark_position(&mut self, markpos: i64) {
+        if markpos < self.agg_markpos {
+            panic!("cannot move WindowObject's mark position backward");
+        }
+        self.agg_markpos = markpos;
+        if markpos > self.agg_seekpos {
+            let buffer = self.buffer.as_mut().unwrap();
+            buffer.select_read_pointer(self.agg_readptr);
+            buffer.skiptuples(markpos - self.agg_seekpos, true);
+            self.agg_seekpos = markpos;
+        }
+    }
+
+    // WinRowsArePeers over the perfunc's read pointer.
+    fn rows_are_peers<F>(
+        &mut self,
+        estate: &mut EStateData<'mcx>,
+        fetch: &mut F,
+        perfunc_ix: usize,
+        pos1: i64,
+        pos2: i64,
+    ) -> PgResult<bool>
+    where
+        F: FnMut(&mut EStateData<'mcx>) -> PgResult<Option<ExecSlotId>>,
+    {
+        if self.plan.ordNumCols == 0 {
+            return Ok(true);
+        }
+        if !self.gettupleslot_at(estate, fetch, Some(perfunc_ix), pos1, WhichSlot::Temp1)? {
+            panic!("specified position is out of window: {pos1}");
+        }
+        if !self.gettupleslot_at(estate, fetch, Some(perfunc_ix), pos2, WhichSlot::Temp2)? {
+            panic!("specified position is out of window: {pos2}");
+        }
+        let Self { ref mut temp_slot_1, ref mut temp_slot_2, ref mut ord_eq, tmpcontext, .. } =
+            *self;
+        Self::are_peers(estate, ord_eq.as_deref_mut(), tmpcontext, temp_slot_1, temp_slot_2)
+    }
+
     // rank_up (windowfuncs.c): peer check against the prior row, then the
     // mark advances to the current row.
     fn rank_up<F>(
@@ -733,26 +1257,560 @@ impl<'mcx> WindowAggStateData<'mcx> {
             self.perfunc[perfunc_ix].rank = 1;
         } else {
             debug_assert!(curpos > 0);
-            // WinRowsArePeers(curpos - 1, curpos).
-            if !self.gettupleslot_at(estate, fetch, Some(perfunc_ix), curpos - 1, WhichSlot::Temp1)?
-            {
-                panic!("specified position is out of window: {}", curpos - 1);
-            }
-            if !self.gettupleslot_at(estate, fetch, Some(perfunc_ix), curpos, WhichSlot::Temp2)? {
-                panic!("specified position is out of window: {curpos}");
-            }
-            let Self { ref mut temp_slot_1, ref mut temp_slot_2, ref mut ord_eq, tmpcontext, .. } =
-                *self;
-            up = !Self::are_peers(
-                estate,
-                ord_eq.as_deref_mut(),
-                tmpcontext,
-                temp_slot_1,
-                temp_slot_2,
-            )?;
+            up = !self.rows_are_peers(estate, fetch, perfunc_ix, curpos - 1, curpos)?;
         }
         self.set_mark_position(perfunc_ix, curpos);
         Ok(up)
+    }
+
+    // update_frameheadpos (nodeWindowAgg.c); GROUPS arms blocked at init.
+    fn update_frameheadpos<F>(
+        &mut self,
+        estate: &mut EStateData<'mcx>,
+        fetch: &mut F,
+    ) -> PgResult<()>
+    where
+        F: FnMut(&mut EStateData<'mcx>) -> PgResult<Option<ExecSlotId>>,
+    {
+        if self.framehead_valid {
+            return Ok(());
+        }
+        let fo = self.frameOptions;
+        let mcx = estate.es_query_cxt;
+        if fo & FRAMEOPTION_START_UNBOUNDED_PRECEDING != 0 {
+            self.frameheadpos = 0;
+            self.framehead_valid = true;
+        } else if fo & FRAMEOPTION_START_CURRENT_ROW != 0 {
+            if fo & FRAMEOPTION_ROWS != 0 {
+                self.frameheadpos = self.currentpos;
+                self.framehead_valid = true;
+            } else {
+                debug_assert!(fo & FRAMEOPTION_RANGE != 0);
+                if self.plan.ordNumCols == 0 {
+                    self.frameheadpos = 0;
+                    self.framehead_valid = true;
+                    return Ok(());
+                }
+                if self.frameheadpos == 0 && self.framehead_slot.base().is_empty() {
+                    let Self { ref mut buffer, ref mut framehead_slot, framehead_ptr, .. } =
+                        *self;
+                    let buffer = buffer.as_mut().unwrap();
+                    buffer.select_read_pointer(framehead_ptr);
+                    if !buffer.gettupleslot(true, false, framehead_slot, mcx)? {
+                        panic!("unexpected end of tuplestore");
+                    }
+                }
+                while !self.framehead_slot.base().is_empty() {
+                    let peers = {
+                        let Self {
+                            ref mut framehead_slot,
+                            ref mut scan_slot,
+                            ref mut ord_eq,
+                            tmpcontext,
+                            ..
+                        } = *self;
+                        Self::are_peers(
+                            estate,
+                            ord_eq.as_deref_mut(),
+                            tmpcontext,
+                            framehead_slot,
+                            scan_slot,
+                        )?
+                    };
+                    if peers {
+                        break;
+                    }
+                    self.frameheadpos += 1;
+                    self.spool_tuples(estate, fetch, self.frameheadpos)?;
+                    let more_rows = self.frameheadpos < self.spooled_rows;
+                    let Self { ref mut buffer, ref mut framehead_slot, framehead_ptr, .. } =
+                        *self;
+                    let buffer = buffer.as_mut().unwrap();
+                    buffer.select_read_pointer(framehead_ptr);
+                    if !more_rows || !buffer.gettupleslot(true, false, framehead_slot, mcx)? {
+                        exectuples::exec_clear_tuple(framehead_slot, mcx);
+                        break;
+                    }
+                }
+                self.framehead_valid = true;
+            }
+        } else if fo & FRAMEOPTION_START_OFFSET != 0 {
+            if fo & FRAMEOPTION_ROWS != 0 {
+                let mut offset = self.start_offset_value.as_i64();
+                if fo & FRAMEOPTION_START_OFFSET_PRECEDING != 0 {
+                    offset = -offset;
+                }
+                self.frameheadpos = self.currentpos + offset;
+                if self.frameheadpos < 0 {
+                    self.frameheadpos = 0;
+                } else if self.frameheadpos > self.currentpos + 1 {
+                    self.spool_tuples(estate, fetch, self.frameheadpos - 1)?;
+                    if self.frameheadpos > self.spooled_rows {
+                        self.frameheadpos = self.spooled_rows;
+                    }
+                }
+                self.framehead_valid = true;
+            } else {
+                debug_assert!(fo & FRAMEOPTION_RANGE != 0);
+                debug_assert!(self.plan.ordNumCols == 1);
+                let sort_col = self.plan.ordColIdx[0] as i32;
+                let mut sub = fo & FRAMEOPTION_START_OFFSET_PRECEDING != 0;
+                let mut less = false;
+                if !self.plan.inRangeAsc {
+                    sub = !sub;
+                    less = true;
+                }
+                if self.frameheadpos == 0 && self.framehead_slot.base().is_empty() {
+                    let Self { ref mut buffer, ref mut framehead_slot, framehead_ptr, .. } =
+                        *self;
+                    let buffer = buffer.as_mut().unwrap();
+                    buffer.select_read_pointer(framehead_ptr);
+                    if !buffer.gettupleslot(true, false, framehead_slot, mcx)? {
+                        panic!("unexpected end of tuplestore");
+                    }
+                }
+                while !self.framehead_slot.base().is_empty() {
+                    let stop = {
+                        let Self {
+                            ref mut framehead_slot,
+                            ref mut scan_slot,
+                            ref mut start_in_range,
+                            start_offset_value,
+                            plan,
+                            ..
+                        } = *self;
+                        let mut headisnull = false;
+                        let mut currisnull = false;
+                        let headval =
+                            exectuples::slot_getattr(framehead_slot, sort_col, &mut headisnull);
+                        let currval =
+                            exectuples::slot_getattr(scan_slot, sort_col, &mut currisnull);
+                        if headisnull || currisnull {
+                            if plan.inRangeNullsFirst {
+                                !headisnull || currisnull
+                            } else {
+                                headisnull || !currisnull
+                            }
+                        } else {
+                            fmgr_core::function_call5_coll(
+                                start_in_range.as_mut().unwrap(),
+                                plan.inRangeColl,
+                                headval,
+                                currval,
+                                start_offset_value,
+                                Datum::from_bool(sub),
+                                Datum::from_bool(less),
+                            )?
+                            .as_bool()
+                        }
+                    };
+                    if stop {
+                        break;
+                    }
+                    self.frameheadpos += 1;
+                    self.spool_tuples(estate, fetch, self.frameheadpos)?;
+                    let more_rows = self.frameheadpos < self.spooled_rows;
+                    let Self { ref mut buffer, ref mut framehead_slot, framehead_ptr, .. } =
+                        *self;
+                    let buffer = buffer.as_mut().unwrap();
+                    buffer.select_read_pointer(framehead_ptr);
+                    if !more_rows || !buffer.gettupleslot(true, false, framehead_slot, mcx)? {
+                        exectuples::exec_clear_tuple(framehead_slot, mcx);
+                        break;
+                    }
+                }
+                self.framehead_valid = true;
+            }
+        } else {
+            unreachable!()
+        }
+        Ok(())
+    }
+
+    // update_frametailpos (nodeWindowAgg.c); GROUPS arms blocked at init.
+    fn update_frametailpos<F>(
+        &mut self,
+        estate: &mut EStateData<'mcx>,
+        fetch: &mut F,
+    ) -> PgResult<()>
+    where
+        F: FnMut(&mut EStateData<'mcx>) -> PgResult<Option<ExecSlotId>>,
+    {
+        if self.frametail_valid {
+            return Ok(());
+        }
+        let fo = self.frameOptions;
+        let mcx = estate.es_query_cxt;
+        if fo & FRAMEOPTION_END_UNBOUNDED_FOLLOWING != 0 {
+            self.spool_tuples(estate, fetch, -1)?;
+            self.frametailpos = self.spooled_rows;
+            self.frametail_valid = true;
+        } else if fo & FRAMEOPTION_END_CURRENT_ROW != 0 {
+            if fo & FRAMEOPTION_ROWS != 0 {
+                self.frametailpos = self.currentpos + 1;
+                self.frametail_valid = true;
+            } else {
+                debug_assert!(fo & FRAMEOPTION_RANGE != 0);
+                if self.plan.ordNumCols == 0 {
+                    self.spool_tuples(estate, fetch, -1)?;
+                    self.frametailpos = self.spooled_rows;
+                    self.frametail_valid = true;
+                    return Ok(());
+                }
+                if self.frametailpos == 0 && self.frametail_slot.base().is_empty() {
+                    let Self { ref mut buffer, ref mut frametail_slot, frametail_ptr, .. } =
+                        *self;
+                    let buffer = buffer.as_mut().unwrap();
+                    buffer.select_read_pointer(frametail_ptr);
+                    if !buffer.gettupleslot(true, false, frametail_slot, mcx)? {
+                        panic!("unexpected end of tuplestore");
+                    }
+                }
+                while !self.frametail_slot.base().is_empty() {
+                    if self.frametailpos > self.currentpos {
+                        let peers = {
+                            let Self {
+                                ref mut frametail_slot,
+                                ref mut scan_slot,
+                                ref mut ord_eq,
+                                tmpcontext,
+                                ..
+                            } = *self;
+                            Self::are_peers(
+                                estate,
+                                ord_eq.as_deref_mut(),
+                                tmpcontext,
+                                frametail_slot,
+                                scan_slot,
+                            )?
+                        };
+                        if !peers {
+                            break;
+                        }
+                    }
+                    self.frametailpos += 1;
+                    self.spool_tuples(estate, fetch, self.frametailpos)?;
+                    let more_rows = self.frametailpos < self.spooled_rows;
+                    let Self { ref mut buffer, ref mut frametail_slot, frametail_ptr, .. } =
+                        *self;
+                    let buffer = buffer.as_mut().unwrap();
+                    buffer.select_read_pointer(frametail_ptr);
+                    if !more_rows || !buffer.gettupleslot(true, false, frametail_slot, mcx)? {
+                        exectuples::exec_clear_tuple(frametail_slot, mcx);
+                        break;
+                    }
+                }
+                self.frametail_valid = true;
+            }
+        } else if fo & FRAMEOPTION_END_OFFSET != 0 {
+            if fo & FRAMEOPTION_ROWS != 0 {
+                let mut offset = self.end_offset_value.as_i64();
+                if fo & FRAMEOPTION_END_OFFSET_PRECEDING != 0 {
+                    offset = -offset;
+                }
+                self.frametailpos = self.currentpos + offset + 1;
+                if self.frametailpos < 0 {
+                    self.frametailpos = 0;
+                } else if self.frametailpos > self.currentpos + 1 {
+                    self.spool_tuples(estate, fetch, self.frametailpos - 1)?;
+                    if self.frametailpos > self.spooled_rows {
+                        self.frametailpos = self.spooled_rows;
+                    }
+                }
+                self.frametail_valid = true;
+            } else {
+                debug_assert!(fo & FRAMEOPTION_RANGE != 0);
+                debug_assert!(self.plan.ordNumCols == 1);
+                let sort_col = self.plan.ordColIdx[0] as i32;
+                let mut sub = fo & FRAMEOPTION_END_OFFSET_PRECEDING != 0;
+                let mut less = true;
+                if !self.plan.inRangeAsc {
+                    sub = !sub;
+                    less = false;
+                }
+                if self.frametailpos == 0 && self.frametail_slot.base().is_empty() {
+                    let Self { ref mut buffer, ref mut frametail_slot, frametail_ptr, .. } =
+                        *self;
+                    let buffer = buffer.as_mut().unwrap();
+                    buffer.select_read_pointer(frametail_ptr);
+                    if !buffer.gettupleslot(true, false, frametail_slot, mcx)? {
+                        panic!("unexpected end of tuplestore");
+                    }
+                }
+                while !self.frametail_slot.base().is_empty() {
+                    let stop = {
+                        let Self {
+                            ref mut frametail_slot,
+                            ref mut scan_slot,
+                            ref mut end_in_range,
+                            end_offset_value,
+                            plan,
+                            ..
+                        } = *self;
+                        let mut tailisnull = false;
+                        let mut currisnull = false;
+                        let tailval =
+                            exectuples::slot_getattr(frametail_slot, sort_col, &mut tailisnull);
+                        let currval =
+                            exectuples::slot_getattr(scan_slot, sort_col, &mut currisnull);
+                        if tailisnull || currisnull {
+                            if plan.inRangeNullsFirst {
+                                !tailisnull
+                            } else {
+                                !currisnull
+                            }
+                        } else {
+                            !fmgr_core::function_call5_coll(
+                                end_in_range.as_mut().unwrap(),
+                                plan.inRangeColl,
+                                tailval,
+                                currval,
+                                end_offset_value,
+                                Datum::from_bool(sub),
+                                Datum::from_bool(less),
+                            )?
+                            .as_bool()
+                        }
+                    };
+                    if stop {
+                        break;
+                    }
+                    self.frametailpos += 1;
+                    self.spool_tuples(estate, fetch, self.frametailpos)?;
+                    let more_rows = self.frametailpos < self.spooled_rows;
+                    let Self { ref mut buffer, ref mut frametail_slot, frametail_ptr, .. } =
+                        *self;
+                    let buffer = buffer.as_mut().unwrap();
+                    buffer.select_read_pointer(frametail_ptr);
+                    if !more_rows || !buffer.gettupleslot(true, false, frametail_slot, mcx)? {
+                        exectuples::exec_clear_tuple(frametail_slot, mcx);
+                        break;
+                    }
+                }
+                self.frametail_valid = true;
+            }
+        } else {
+            unreachable!()
+        }
+        Ok(())
+    }
+
+    // row_is_in_frame (nodeWindowAgg.c): -1 out of frame and none follow,
+    // 0 out of frame, 1 in frame. Exclusion arms unreachable (init blocks).
+    fn row_is_in_frame<F>(
+        &mut self,
+        estate: &mut EStateData<'mcx>,
+        fetch: &mut F,
+        pos: i64,
+        which_slot: WhichSlot,
+    ) -> PgResult<i32>
+    where
+        F: FnMut(&mut EStateData<'mcx>) -> PgResult<Option<ExecSlotId>>,
+    {
+        let fo = self.frameOptions;
+        debug_assert!(pos >= 0);
+        self.update_frameheadpos(estate, fetch)?;
+        if pos < self.frameheadpos {
+            return Ok(0);
+        }
+        if fo & FRAMEOPTION_END_CURRENT_ROW != 0 {
+            if fo & FRAMEOPTION_ROWS != 0 {
+                if pos > self.currentpos {
+                    return Ok(-1);
+                }
+            } else {
+                debug_assert!(fo & FRAMEOPTION_RANGE != 0);
+                if pos > self.currentpos {
+                    let peers = {
+                        let Self {
+                            ref mut agg_row_slot,
+                            ref mut temp_slot_1,
+                            ref mut temp_slot_2,
+                            ref mut scan_slot,
+                            ref mut ord_eq,
+                            tmpcontext,
+                            ..
+                        } = *self;
+                        let slot = match which_slot {
+                            WhichSlot::AggRow => agg_row_slot,
+                            WhichSlot::Temp1 => temp_slot_1,
+                            WhichSlot::Temp2 => temp_slot_2,
+                        };
+                        Self::are_peers(estate, ord_eq.as_deref_mut(), tmpcontext, slot, scan_slot)?
+                    };
+                    if !peers {
+                        return Ok(-1);
+                    }
+                }
+            }
+        } else if fo & FRAMEOPTION_END_OFFSET != 0 {
+            if fo & FRAMEOPTION_ROWS != 0 {
+                let mut offset = self.end_offset_value.as_i64();
+                if fo & FRAMEOPTION_END_OFFSET_PRECEDING != 0 {
+                    offset = -offset;
+                }
+                if pos > self.currentpos + offset {
+                    return Ok(-1);
+                }
+            } else {
+                debug_assert!(fo & FRAMEOPTION_RANGE != 0);
+                self.update_frametailpos(estate, fetch)?;
+                if pos >= self.frametailpos {
+                    return Ok(-1);
+                }
+            }
+        }
+        Ok(1)
+    }
+
+    // calculate_frame_offsets (nodeWindowAgg.c); offset types are byval
+    // (asserted at init), so no query-lifespan datumCopy.
+    fn calculate_frame_offsets(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
+        debug_assert!(self.all_first);
+        let fo = self.frameOptions;
+        if fo & FRAMEOPTION_START_OFFSET != 0 {
+            let state = self.start_offset_state.as_deref_mut().expect("startOffset ExprState");
+            let mut slots = EvalSlots::default();
+            let nd = exec_eval_expr(state, &mut slots)?;
+            if nd.isnull {
+                return Err(frame_offset_null(true));
+            }
+            self.start_offset_value = nd.value;
+            if fo & (FRAMEOPTION_ROWS | FRAMEOPTION_GROUPS) != 0 && nd.value.as_i64() < 0 {
+                return Err(frame_offset_negative(true));
+            }
+        }
+        if fo & FRAMEOPTION_END_OFFSET != 0 {
+            let state = self.end_offset_state.as_deref_mut().expect("endOffset ExprState");
+            let mut slots = EvalSlots::default();
+            let nd = exec_eval_expr(state, &mut slots)?;
+            if nd.isnull {
+                return Err(frame_offset_null(false));
+            }
+            self.end_offset_value = nd.value;
+            if fo & (FRAMEOPTION_ROWS | FRAMEOPTION_GROUPS) != 0 && nd.value.as_i64() < 0 {
+                return Err(frame_offset_negative(false));
+            }
+        }
+        estate.reset_expr_context(self.ps_ExprContext);
+        self.all_first = false;
+        Ok(())
+    }
+
+    fn eval_arg_on_slot(
+        &mut self,
+        perfunc_ix: usize,
+        argno: usize,
+        which: WhichSlot,
+    ) -> PgResult<NullableDatum> {
+        let Self {
+            ref mut perfunc,
+            ref mut agg_row_slot,
+            ref mut temp_slot_1,
+            ref mut temp_slot_2,
+            ..
+        } = *self;
+        let slot = match which {
+            WhichSlot::AggRow => agg_row_slot,
+            WhichSlot::Temp1 => temp_slot_1,
+            WhichSlot::Temp2 => temp_slot_2,
+        };
+        let mut slots = EvalSlots { scan: None, inner: None, outer: Some(slot) };
+        exec_eval_expr(&mut perfunc[perfunc_ix].argstates[argno], &mut slots)
+    }
+
+    // WinGetFuncArgCurrent: evaluate on the current row (scan slot).
+    fn win_get_func_arg_current(
+        &mut self,
+        perfunc_ix: usize,
+        argno: usize,
+    ) -> PgResult<NullableDatum> {
+        let Self { ref mut perfunc, ref mut scan_slot, .. } = *self;
+        let mut slots = EvalSlots { scan: None, inner: None, outer: Some(scan_slot) };
+        exec_eval_expr(&mut perfunc[perfunc_ix].argstates[argno], &mut slots)
+    }
+
+    // WinGetFuncArgInPartition; the result may borrow tuplestore memory
+    // (stable within the partition), so C's numfuncs>1 datumCopy is skipped.
+    fn win_get_func_arg_in_partition<F>(
+        &mut self,
+        estate: &mut EStateData<'mcx>,
+        fetch: &mut F,
+        perfunc_ix: usize,
+        argno: usize,
+        relpos: i64,
+        seektype: SeekType,
+        set_mark: bool,
+    ) -> PgResult<(NullableDatum, bool)>
+    where
+        F: FnMut(&mut EStateData<'mcx>) -> PgResult<Option<ExecSlotId>>,
+    {
+        let abs_pos = match seektype {
+            SeekType::Current => self.currentpos + relpos,
+            SeekType::Head => relpos,
+            SeekType::Tail => {
+                self.spool_tuples(estate, fetch, -1)?;
+                self.spooled_rows - 1 + relpos
+            }
+        };
+        if !self.gettupleslot_at(estate, fetch, Some(perfunc_ix), abs_pos, WhichSlot::Temp1)? {
+            return Ok((NullableDatum::null(), true));
+        }
+        if set_mark {
+            self.set_mark_position(perfunc_ix, abs_pos);
+        }
+        let nd = self.eval_arg_on_slot(perfunc_ix, argno, WhichSlot::Temp1)?;
+        Ok((nd, false))
+    }
+
+    // WinGetFuncArgInFrame, no-exclusion shape.
+    fn win_get_func_arg_in_frame<F>(
+        &mut self,
+        estate: &mut EStateData<'mcx>,
+        fetch: &mut F,
+        perfunc_ix: usize,
+        argno: usize,
+        relpos: i64,
+        seektype: SeekType,
+        set_mark: bool,
+    ) -> PgResult<(NullableDatum, bool)>
+    where
+        F: FnMut(&mut EStateData<'mcx>) -> PgResult<Option<ExecSlotId>>,
+    {
+        let abs_pos;
+        let mark_pos;
+        match seektype {
+            SeekType::Current => {
+                panic!("WINDOW_SEEK_CURRENT is not supported for WinGetFuncArgInFrame")
+            }
+            SeekType::Head => {
+                if relpos < 0 {
+                    return Ok((NullableDatum::null(), true));
+                }
+                self.update_frameheadpos(estate, fetch)?;
+                abs_pos = self.frameheadpos + relpos;
+                mark_pos = abs_pos;
+            }
+            SeekType::Tail => {
+                if relpos > 0 {
+                    return Ok((NullableDatum::null(), true));
+                }
+                self.update_frametailpos(estate, fetch)?;
+                abs_pos = self.frametailpos - 1 + relpos;
+                mark_pos = abs_pos;
+            }
+        }
+        if !self.gettupleslot_at(estate, fetch, Some(perfunc_ix), abs_pos, WhichSlot::Temp1)? {
+            return Ok((NullableDatum::null(), true));
+        }
+        if self.row_is_in_frame(estate, fetch, abs_pos, WhichSlot::Temp1)? <= 0 {
+            return Ok((NullableDatum::null(), true));
+        }
+        if set_mark {
+            self.set_mark_position(perfunc_ix, mark_pos);
+        }
+        let nd = self.eval_arg_on_slot(perfunc_ix, argno, WhichSlot::Temp1)?;
+        Ok((nd, false))
     }
 
     fn eval_windowfunction<F>(
@@ -764,40 +1822,194 @@ impl<'mcx> WindowAggStateData<'mcx> {
     where
         F: FnMut(&mut EStateData<'mcx>) -> PgResult<Option<ExecSlotId>>,
     {
-        let result = match self.perfunc[perfunc_ix].kind {
+        let result: NullableDatum = match self.perfunc[perfunc_ix].kind {
             WfKind::RowNumber => {
                 let curpos = self.currentpos;
                 self.set_mark_position(perfunc_ix, curpos);
-                curpos + 1
+                NullableDatum::value(Datum::from_i64(curpos + 1))
             }
             WfKind::Rank => {
                 let up = self.rank_up(estate, fetch, perfunc_ix)?;
                 if up {
                     self.perfunc[perfunc_ix].rank = self.currentpos + 1;
                 }
-                self.perfunc[perfunc_ix].rank
+                NullableDatum::value(Datum::from_i64(self.perfunc[perfunc_ix].rank))
             }
             WfKind::DenseRank => {
                 let up = self.rank_up(estate, fetch, perfunc_ix)?;
                 if up {
                     self.perfunc[perfunc_ix].rank += 1;
                 }
-                self.perfunc[perfunc_ix].rank
+                NullableDatum::value(Datum::from_i64(self.perfunc[perfunc_ix].rank))
+            }
+            WfKind::PercentRank => {
+                self.spool_tuples(estate, fetch, -1)?;
+                let totalrows = self.spooled_rows;
+                debug_assert!(totalrows > 0);
+                let up = self.rank_up(estate, fetch, perfunc_ix)?;
+                if up {
+                    self.perfunc[perfunc_ix].rank = self.currentpos + 1;
+                }
+                if totalrows <= 1 {
+                    NullableDatum::value(Datum::from_f64(0.0))
+                } else {
+                    let rank = self.perfunc[perfunc_ix].rank;
+                    NullableDatum::value(Datum::from_f64(
+                        (rank - 1) as f64 / (totalrows - 1) as f64,
+                    ))
+                }
+            }
+            WfKind::CumeDist => {
+                self.spool_tuples(estate, fetch, -1)?;
+                let totalrows = self.spooled_rows;
+                debug_assert!(totalrows > 0);
+                let up = self.rank_up(estate, fetch, perfunc_ix)?;
+                if up || self.perfunc[perfunc_ix].rank == 1 {
+                    self.perfunc[perfunc_ix].rank = self.currentpos + 1;
+                    let mut row = self.perfunc[perfunc_ix].rank;
+                    while row < totalrows {
+                        if !self.rows_are_peers(estate, fetch, perfunc_ix, row - 1, row)? {
+                            break;
+                        }
+                        self.perfunc[perfunc_ix].rank += 1;
+                        row += 1;
+                    }
+                }
+                let rank = self.perfunc[perfunc_ix].rank;
+                NullableDatum::value(Datum::from_f64(rank as f64 / totalrows as f64))
+            }
+            WfKind::Ntile => {
+                if self.perfunc[perfunc_ix].ntile == 0 {
+                    self.spool_tuples(estate, fetch, -1)?;
+                    let total = self.spooled_rows;
+                    let nd = self.win_get_func_arg_current(perfunc_ix, 0)?;
+                    if nd.isnull {
+                        self.write_result(perfunc_ix, NullableDatum::null());
+                        return Ok(());
+                    }
+                    let nbuckets = nd.value.as_i32();
+                    if nbuckets <= 0 {
+                        return Err(ntile_arg_error());
+                    }
+                    let pf = &mut self.perfunc[perfunc_ix];
+                    pf.ntile = 1;
+                    pf.rows_per_bucket = 0;
+                    pf.boundary = total / nbuckets as i64;
+                    if pf.boundary <= 0 {
+                        pf.boundary = 1;
+                    } else {
+                        pf.remainder = total % nbuckets as i64;
+                        if pf.remainder != 0 {
+                            pf.boundary += 1;
+                        }
+                    }
+                }
+                let pf = &mut self.perfunc[perfunc_ix];
+                pf.rows_per_bucket += 1;
+                if pf.boundary < pf.rows_per_bucket {
+                    if pf.remainder != 0 && pf.ntile as i64 == pf.remainder {
+                        pf.remainder = 0;
+                        pf.boundary -= 1;
+                    }
+                    pf.ntile += 1;
+                    pf.rows_per_bucket = 1;
+                }
+                NullableDatum::value(Datum::from_i32(pf.ntile))
+            }
+            WfKind::LeadLag { forward, withoffset, withdefault } => {
+                let (offset, const_offset) = if withoffset {
+                    let nd = self.win_get_func_arg_current(perfunc_ix, 1)?;
+                    if nd.isnull {
+                        self.write_result(perfunc_ix, NullableDatum::null());
+                        return Ok(());
+                    }
+                    (nd.value.as_i32(), self.perfunc[perfunc_ix].arg1_stable)
+                } else {
+                    (1, true)
+                };
+                let relpos = if forward { offset as i64 } else { -(offset as i64) };
+                let (mut nd, isout) = self.win_get_func_arg_in_partition(
+                    estate,
+                    fetch,
+                    perfunc_ix,
+                    0,
+                    relpos,
+                    SeekType::Current,
+                    const_offset,
+                )?;
+                if isout && withdefault {
+                    nd = self.win_get_func_arg_current(perfunc_ix, 2)?;
+                }
+                nd
+            }
+            WfKind::FirstValue => {
+                let (nd, _isout) = self.win_get_func_arg_in_frame(
+                    estate,
+                    fetch,
+                    perfunc_ix,
+                    0,
+                    0,
+                    SeekType::Head,
+                    true,
+                )?;
+                nd
+            }
+            WfKind::LastValue => {
+                let (nd, _isout) = self.win_get_func_arg_in_frame(
+                    estate,
+                    fetch,
+                    perfunc_ix,
+                    0,
+                    0,
+                    SeekType::Tail,
+                    true,
+                )?;
+                nd
+            }
+            WfKind::NthValue => {
+                let nd = self.win_get_func_arg_current(perfunc_ix, 1)?;
+                if nd.isnull {
+                    self.write_result(perfunc_ix, NullableDatum::null());
+                    return Ok(());
+                }
+                let nth = nd.value.as_i32();
+                let const_offset = self.perfunc[perfunc_ix].arg1_stable;
+                if nth <= 0 {
+                    return Err(nth_value_arg_error());
+                }
+                let (nd, _isout) = self.win_get_func_arg_in_frame(
+                    estate,
+                    fetch,
+                    perfunc_ix,
+                    0,
+                    (nth - 1) as i64,
+                    SeekType::Head,
+                    const_offset,
+                )?;
+                nd
             }
             WfKind::PlainAgg { .. } => unreachable!("plain aggs go through eval_windowaggregates"),
         };
+        self.write_result(perfunc_ix, result);
+        Ok(())
+    }
+
+    fn write_result(&mut self, perfunc_ix: usize, result: NullableDatum) {
         let wfuncno = self.perfunc[perfunc_ix].wfuncno as usize;
+        self.write_agg_result(wfuncno, result);
+    }
+
+    fn write_agg_result(&mut self, wfuncno: usize, result: NullableDatum) {
         // SAFETY: wfuncno < numfuncs elements of the once-allocated arrays.
         unsafe {
-            self.agg_values_base.as_ptr().add(wfuncno).write(Datum::from_i64(result));
-            self.agg_nulls_base.as_ptr().add(wfuncno).write(false);
+            self.agg_values_base.as_ptr().add(wfuncno).write(result.value);
+            self.agg_nulls_base.as_ptr().add(wfuncno).write(result.isnull);
         }
-        Ok(())
     }
 
     // eval_windowaggregates, default-frame arm: aggregates restart only on
     // the partition's first row; row_is_in_frame collapses to the peer test.
-    fn eval_windowaggregates<F>(
+    fn eval_windowaggregates_default<F>(
         &mut self,
         estate: &mut EStateData<'mcx>,
         fetch: &mut F,
@@ -810,11 +2022,7 @@ impl<'mcx> WindowAggStateData<'mcx> {
             for aggno in 0..self.numaggs {
                 let wfuncno = self.peragg_wfuncno[aggno] as usize;
                 let saved = self.agg_saved[aggno];
-                // SAFETY: as eval_windowfunction.
-                unsafe {
-                    self.agg_values_base.as_ptr().add(wfuncno).write(saved.value);
-                    self.agg_nulls_base.as_ptr().add(wfuncno).write(saved.isnull);
-                }
+                self.write_agg_result(wfuncno, saved);
             }
             return Ok(());
         }
@@ -883,11 +2091,288 @@ impl<'mcx> WindowAggStateData<'mcx> {
             let pg = unsafe { *self.pergroup_base.as_ptr().add(aggno) };
             let result = NullableDatum { value: pg.trans_value, isnull: pg.trans_value_is_null };
             self.agg_saved[aggno] = result;
-            // SAFETY: as eval_windowfunction.
-            unsafe {
-                self.agg_values_base.as_ptr().add(wfuncno).write(result.value);
-                self.agg_nulls_base.as_ptr().add(wfuncno).write(result.isnull);
+            self.write_agg_result(wfuncno, result);
+        }
+        Ok(())
+    }
+
+    // initialize_windowaggregate (framed lane).
+    fn initialize_windowaggregate(&mut self, aggno: usize) {
+        let pa = &mut self.peragg[aggno];
+        pa.trans_value = pa.init_value;
+        pa.trans_count = 0;
+        pa.int_sum = Int8TransState::default();
+        pa.result_value = NullableDatum::null();
+    }
+
+    fn eval_agg_args(
+        &mut self,
+        aggno: usize,
+        which: WhichSlot,
+        out: &mut [NullableDatum],
+    ) -> PgResult<()> {
+        let Self {
+            ref mut peragg,
+            ref mut agg_row_slot,
+            ref mut temp_slot_1,
+            ref mut temp_slot_2,
+            ..
+        } = *self;
+        let slot = match which {
+            WhichSlot::AggRow => agg_row_slot,
+            WhichSlot::Temp1 => temp_slot_1,
+            WhichSlot::Temp2 => temp_slot_2,
+        };
+        let pa = &mut peragg[aggno];
+        for (i, st) in pa.argstates.iter_mut().enumerate() {
+            let mut slots = EvalSlots { scan: None, inner: None, outer: Some(&mut *slot) };
+            out[i] = exec_eval_expr(st, &mut slots)?;
+        }
+        Ok(())
+    }
+
+    // advance_windowaggregate (nodeWindowAgg.c), byval closed set.
+    fn advance_windowaggregate(&mut self, aggno: usize, which: WhichSlot) -> PgResult<()> {
+        let nargs = self.peragg[aggno].num_arguments as usize;
+        let mut args = [NullableDatum::null(); 4];
+        assert!(nargs < 4);
+        self.eval_agg_args(aggno, which, &mut args[..nargs])?;
+        let pa = &mut self.peragg[aggno];
+
+        if pa.fn_strict {
+            for a in &args[..nargs] {
+                if a.isnull {
+                    return Ok(());
+                }
             }
+            if pa.trans_count == 0 && pa.trans_value.isnull {
+                pa.trans_value = args[0];
+                pa.trans_count = 1;
+                return Ok(());
+            }
+            if pa.trans_value.isnull {
+                debug_assert!(!pa.has_inverse);
+                return Ok(());
+            }
+        }
+
+        match &mut pa.kernel {
+            AggKernel::MovingIntSum { int2 } => {
+                let v = if *int2 {
+                    args[0].value.as_i16() as i64
+                } else {
+                    args[0].value.as_i32() as i64
+                };
+                pa.int_sum.count += 1;
+                pa.int_sum.sum += v;
+                pa.trans_count += 1;
+            }
+            AggKernel::Generic { transfn } | AggKernel::MovingByVal { transfn, .. } => {
+                let mut fcinfo = LocalFcinfo::<4>::fresh(pa.win_collation);
+                fcinfo.nargs = (nargs + 1) as i16;
+                fcinfo.args[0] = pa.trans_value;
+                fcinfo.args[1..=nargs].copy_from_slice(&args[..nargs]);
+                let newval = transfn.invoke(&mut fcinfo)?;
+                if fcinfo.isnull && pa.has_inverse {
+                    return Err(moving_transfn_returned_null());
+                }
+                pa.trans_count += 1;
+                pa.trans_value = NullableDatum { value: newval, isnull: fcinfo.isnull };
+            }
+        }
+        Ok(())
+    }
+
+    // advance_windowaggregate_base: remove the oldest row via the inverse
+    // transition; false forces a restart.
+    fn advance_windowaggregate_base(&mut self, aggno: usize) -> PgResult<bool> {
+        let nargs = self.peragg[aggno].num_arguments as usize;
+        let mut args = [NullableDatum::null(); 4];
+        assert!(nargs < 4);
+        self.eval_agg_args(aggno, WhichSlot::Temp1, &mut args[..nargs])?;
+
+        if self.peragg[aggno].fn_strict {
+            for a in &args[..nargs] {
+                if a.isnull {
+                    return Ok(true);
+                }
+            }
+        }
+        debug_assert!(self.peragg[aggno].trans_count > 0);
+        if self.peragg[aggno].trans_value.isnull {
+            panic!("aggregate transition value is NULL before inverse transition");
+        }
+        if self.peragg[aggno].trans_count == 1 {
+            self.initialize_windowaggregate(aggno);
+            return Ok(true);
+        }
+
+        let pa = &mut self.peragg[aggno];
+        match &mut pa.kernel {
+            AggKernel::MovingIntSum { int2 } => {
+                let v = if *int2 {
+                    args[0].value.as_i16() as i64
+                } else {
+                    args[0].value.as_i32() as i64
+                };
+                pa.int_sum.count -= 1;
+                pa.int_sum.sum -= v;
+                pa.trans_count -= 1;
+            }
+            AggKernel::MovingByVal { invtransfn, .. } => {
+                let mut fcinfo = LocalFcinfo::<4>::fresh(pa.win_collation);
+                fcinfo.nargs = (nargs + 1) as i16;
+                fcinfo.args[0] = pa.trans_value;
+                fcinfo.args[1..=nargs].copy_from_slice(&args[..nargs]);
+                let newval = invtransfn.invoke(&mut fcinfo)?;
+                if fcinfo.isnull {
+                    return Ok(false);
+                }
+                pa.trans_count -= 1;
+                pa.trans_value = NullableDatum { value: newval, isnull: false };
+            }
+            AggKernel::Generic { .. } => unreachable!("no inverse transition"),
+        }
+        Ok(true)
+    }
+
+    // finalize_windowaggregate: int2int4_sum kernel or bare transValue.
+    fn finalize_windowaggregate(&self, aggno: usize) -> NullableDatum {
+        let pa = &self.peragg[aggno];
+        match &pa.kernel {
+            AggKernel::MovingIntSum { .. } => {
+                if pa.int_sum.count == 0 {
+                    NullableDatum::null()
+                } else {
+                    NullableDatum::value(Datum::from_i64(pa.int_sum.sum))
+                }
+            }
+            _ => pa.trans_value,
+        }
+    }
+
+    // eval_windowaggregates (nodeWindowAgg.c), framed lane: full restart /
+    // inverse-transition discipline. Exclusion arms unreachable.
+    fn eval_windowaggregates_framed<F>(
+        &mut self,
+        estate: &mut EStateData<'mcx>,
+        fetch: &mut F,
+    ) -> PgResult<()>
+    where
+        F: FnMut(&mut EStateData<'mcx>) -> PgResult<Option<ExecSlotId>>,
+    {
+        let numaggs = self.numaggs;
+        let fo = self.frameOptions;
+
+        self.update_frameheadpos(estate, fetch)?;
+        if self.frameheadpos < self.aggregatedbase {
+            panic!("window frame head moved backward");
+        }
+
+        if self.aggregatedbase == self.frameheadpos
+            && fo & (FRAMEOPTION_END_UNBOUNDED_FOLLOWING | FRAMEOPTION_END_CURRENT_ROW) != 0
+            && self.aggregatedbase <= self.currentpos
+            && self.aggregatedupto > self.currentpos
+        {
+            for aggno in 0..numaggs {
+                let wfuncno = self.peragg[aggno].wfuncno as usize;
+                let saved = self.peragg[aggno].result_value;
+                self.write_agg_result(wfuncno, saved);
+            }
+            return Ok(());
+        }
+
+        let mut numaggs_restart = 0;
+        for aggno in 0..numaggs {
+            let restart = self.currentpos == 0
+                || (self.aggregatedbase != self.frameheadpos && !self.peragg[aggno].has_inverse)
+                || self.aggregatedupto <= self.frameheadpos;
+            self.peragg[aggno].restart = restart;
+            if restart {
+                numaggs_restart += 1;
+            }
+        }
+
+        while numaggs_restart < numaggs && self.aggregatedbase < self.frameheadpos {
+            if !self.gettupleslot_at(estate, fetch, None, self.aggregatedbase, WhichSlot::Temp1)?
+            {
+                panic!("could not re-fetch previously fetched frame row");
+            }
+            for aggno in 0..numaggs {
+                if self.peragg[aggno].restart {
+                    continue;
+                }
+                if !self.advance_windowaggregate_base(aggno)? {
+                    self.peragg[aggno].restart = true;
+                    numaggs_restart += 1;
+                }
+            }
+            estate.reset_expr_context(self.tmpcontext);
+            self.aggregatedbase += 1;
+            let mcx = estate.es_query_cxt;
+            exectuples::exec_clear_tuple(&mut self.temp_slot_1, mcx);
+        }
+
+        self.aggregatedbase = self.frameheadpos;
+        if self.agg_mark_active && self.buffer.is_some() {
+            self.set_agg_mark_position(self.frameheadpos);
+        }
+
+        for aggno in 0..numaggs {
+            if self.peragg[aggno].restart {
+                self.initialize_windowaggregate(aggno);
+            } else if !self.peragg[aggno].result_value.isnull {
+                self.peragg[aggno].result_value = NullableDatum::null();
+            }
+        }
+
+        let aggregatedupto_nonrestarted = self.aggregatedupto;
+        if numaggs_restart > 0 && self.aggregatedupto != self.frameheadpos {
+            self.aggregatedupto = self.frameheadpos;
+            self.agg_row_valid = false;
+            let mcx = estate.es_query_cxt;
+            exectuples::exec_clear_tuple(&mut self.agg_row_slot, mcx);
+        }
+
+        loop {
+            if !self.agg_row_valid {
+                if !self.gettupleslot_at(
+                    estate,
+                    fetch,
+                    None,
+                    self.aggregatedupto,
+                    WhichSlot::AggRow,
+                )? {
+                    break;
+                }
+                self.agg_row_valid = true;
+            }
+            let ret =
+                self.row_is_in_frame(estate, fetch, self.aggregatedupto, WhichSlot::AggRow)?;
+            if ret < 0 {
+                break;
+            }
+            if ret > 0 {
+                for aggno in 0..numaggs {
+                    if !self.peragg[aggno].restart
+                        && self.aggregatedupto < aggregatedupto_nonrestarted
+                    {
+                        continue;
+                    }
+                    self.advance_windowaggregate(aggno, WhichSlot::AggRow)?;
+                }
+            }
+            estate.reset_expr_context(self.tmpcontext);
+            self.aggregatedupto += 1;
+            self.agg_row_valid = false;
+        }
+        debug_assert!(aggregatedupto_nonrestarted <= self.aggregatedupto);
+
+        for aggno in 0..numaggs {
+            let result = self.finalize_windowaggregate(aggno);
+            self.peragg[aggno].result_value = result;
+            let wfuncno = self.peragg[aggno].wfuncno as usize;
+            self.write_agg_result(wfuncno, result);
         }
         Ok(())
     }
@@ -909,12 +2394,17 @@ where
     if state.done {
         return Ok(None);
     }
+    if state.all_first {
+        state.calculate_frame_offsets(estate)?;
+    }
     let fetch = &mut fetch_outer;
 
     if state.next_partition {
         state.begin_partition(estate, fetch)?;
     } else {
         state.currentpos += 1;
+        state.framehead_valid = false;
+        state.frametail_valid = false;
     }
     state.spool_tuples(estate, fetch, state.currentpos)?;
     if state.partition_spooled && state.currentpos >= state.spooled_rows {
@@ -945,8 +2435,14 @@ where
         }
     }
     if state.numaggs > 0 {
-        state.eval_windowaggregates(estate, fetch)?;
+        if state.frameOptions == FRAMEOPTION_DEFAULTS {
+            state.eval_windowaggregates_default(estate, fetch)?;
+        } else {
+            state.eval_windowaggregates_framed(estate, fetch)?;
+        }
     }
+    // C force-updates framehead/frametail/grouptail pointers and trims the
+    // tuplestore here; trim is unported, so the pointers stay lazy.
 
     let mcx = estate.es_query_cxt;
     let result_slot = estate.slot_mut(state.ps_ResultTupleSlot);
@@ -968,12 +2464,15 @@ pub fn exec_rescan_window_agg<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) {
     node.done = false;
+    node.all_first = true;
     node.release_partition(estate);
     let mcx = estate.es_query_cxt;
     exectuples::exec_clear_tuple(&mut node.first_part_slot, mcx);
     node.first_part_valid = false;
     exectuples::exec_clear_tuple(&mut node.temp_slot_1, mcx);
     exectuples::exec_clear_tuple(&mut node.temp_slot_2, mcx);
+    exectuples::exec_clear_tuple(&mut node.framehead_slot, mcx);
+    exectuples::exec_clear_tuple(&mut node.frametail_slot, mcx);
     let numfuncs = node.perfunc.len();
     let ecxt = estate.ecxt_mut(node.ps_ExprContext);
     for i in 0..numfuncs {

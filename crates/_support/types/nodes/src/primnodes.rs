@@ -759,3 +759,12 @@ impl<'mcx> Node<'mcx> {
         self.as_variant()
     }
 }
+
+// SupportRequestOptimizeWindowClause (supportnodes.h), tag + frameOptions
+// slice: the window_clause/window_func pointers are unread by every in-core
+// window prosupport's OptimizeWindowClause arm (C divergence recorded).
+#[repr(C)]
+pub struct SupportRequestOptimizeWindowClause {
+    pub tag: crate::NodeTag,
+    pub frame_options: i32,
+}

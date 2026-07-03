@@ -233,10 +233,12 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
         NodeTag::T_WindowAgg => {
             let w = plan.as_window_agg().unwrap();
             debug_assert!(w.runCondition.is_nil() && w.runConditionOrig.is_nil());
-            assert!(
-                w.startOffset.is_none() && w.endOffset.is_none(),
-                "set_plan_refs (setrefs.c): WindowAgg frame offsets unported"
-            );
+            if let Some(off) = w.startOffset {
+                fix_frame_offset(run, off, rtoffset)?;
+            }
+            if let Some(off) = w.endOffset {
+                fix_frame_offset(run, off, rtoffset)?;
+            }
             set_upper_references(run, plan, rtoffset)?;
         }
         NodeTag::T_Sort | NodeTag::T_IncrementalSort | NodeTag::T_Unique
@@ -749,6 +751,18 @@ fn search_indexed_tlist_for_var<'mcx>(
         }
     }
     panic!("variable not found in subplan target list");
+}
+
+// fix_scan_expr over a WindowAgg frame offset: offsets are Var-free (parser
+// enforced), so C's mutator leg is the identity copy; the walker leg covers
+// fix_expr_common bookkeeping.
+fn fix_frame_offset<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    off: Node<'mcx>,
+    rtoffset: i32,
+) -> PgResult<()> {
+    let _ = rtoffset;
+    fix_scan_expr_walker(run, off)
 }
 
 // fix_scan_expr (setrefs.c): rtoffset==0 walks in place (fix_expr_common

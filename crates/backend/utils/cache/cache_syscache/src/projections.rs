@@ -84,11 +84,18 @@ const ANUM_PG_AGGREGATE_AGGFINALFN: i32 = 5;
 const ANUM_PG_AGGREGATE_AGGCOMBINEFN: i32 = 6;
 const ANUM_PG_AGGREGATE_AGGSERIALFN: i32 = 7;
 const ANUM_PG_AGGREGATE_AGGDESERIALFN: i32 = 8;
+const ANUM_PG_AGGREGATE_AGGMTRANSFN: i32 = 9;
+const ANUM_PG_AGGREGATE_AGGMINVTRANSFN: i32 = 10;
+const ANUM_PG_AGGREGATE_AGGMFINALFN: i32 = 11;
 const ANUM_PG_AGGREGATE_AGGFINALEXTRA: i32 = 12;
+const ANUM_PG_AGGREGATE_AGGMFINALEXTRA: i32 = 13;
 const ANUM_PG_AGGREGATE_AGGFINALMODIFY: i32 = 14;
+const ANUM_PG_AGGREGATE_AGGMFINALMODIFY: i32 = 15;
 const ANUM_PG_AGGREGATE_AGGTRANSTYPE: i32 = 17;
 const ANUM_PG_AGGREGATE_AGGTRANSSPACE: i32 = 18;
+const ANUM_PG_AGGREGATE_AGGMTRANSTYPE: i32 = 19;
 const ANUM_PG_AGGREGATE_AGGINITVAL: i32 = 21;
+const ANUM_PG_AGGREGATE_AGGMINITVAL: i32 = 22;
 const ANUM_PG_CAST_OID: i32 = 1;
 const ANUM_PG_CAST_CASTFUNC: i32 = 4;
 const ANUM_PG_CAST_CASTCONTEXT: i32 = 5;
@@ -505,6 +512,8 @@ const ANUM_PG_PROC_PRORETTYPE: i32 = 19;
 const ANUM_PG_PROC_OID: i32 = 1;
 const ANUM_PG_PROC_PRONARGDEFAULTS: i32 = 18;
 const ANUM_PG_PROC_PROARGTYPES: i32 = 20;
+const ANUM_PG_AMPROC_AMPROCRIGHTTYPE: i32 = 4;
+const ANUM_PG_AMPROC_AMPROCNUM: i32 = 5;
 const ANUM_PG_AMPROC_AMPROC: i32 = 6;
 
 // get_opfamily_proc (lsyscache.c): GetSysCacheOid4(AMPROCNUM, Anum_pg_amproc_amproc, ...).
@@ -630,6 +639,33 @@ fn lookup_pg_opfamily_shape(
     drop(t);
     ReleaseSysCache(tuple);
     Ok(Some(shape))
+}
+
+fn lookup_pg_amproc_members<'mcx>(
+    mcx: Mcx<'mcx>,
+    opfamily: Oid,
+    lefttype: Oid,
+) -> PgResult<PgVec<'mcx, syscache_seams::PgAmprocMemberShape>> {
+    let list = SearchSysCacheList(
+        AMPROCNUM,
+        2,
+        SysCacheKey::Value(Datum::from_oid(opfamily)),
+        SysCacheKey::Value(Datum::from_oid(lefttype)),
+        SysCacheKey::UNUSED,
+    )?;
+    let n = list.n_members() as usize;
+    let mut out = mcx::vec_with_capacity_in(mcx, n)?;
+    for i in 0..n {
+        let m = list.member(i);
+        let t = m.tuple();
+        out.push(syscache_seams::PgAmprocMemberShape {
+            amprocrighttype: getattr(&t, AMPROCNUM, ANUM_PG_AMPROC_AMPROCRIGHTTYPE).as_oid(),
+            amprocnum: getattr(&t, AMPROCNUM, ANUM_PG_AMPROC_AMPROCNUM).as_i16(),
+            amproc: getattr(&t, AMPROCNUM, ANUM_PG_AMPROC_AMPROC).as_oid(),
+        });
+    }
+    ReleaseSysCacheList(list);
+    Ok(out)
 }
 
 fn lookup_pg_amproc(opfamily: Oid, lefttype: Oid, righttype: Oid, procnum: i16) -> PgResult<Oid> {
@@ -1069,26 +1105,47 @@ fn lookup_pg_aggregate_shape(
         aggcombinefn: getattr(&t, AGGFNOID, ANUM_PG_AGGREGATE_AGGCOMBINEFN).as_oid(),
         aggserialfn: getattr(&t, AGGFNOID, ANUM_PG_AGGREGATE_AGGSERIALFN).as_oid(),
         aggdeserialfn: getattr(&t, AGGFNOID, ANUM_PG_AGGREGATE_AGGDESERIALFN).as_oid(),
+        aggmtransfn: getattr(&t, AGGFNOID, ANUM_PG_AGGREGATE_AGGMTRANSFN).as_oid(),
+        aggminvtransfn: getattr(&t, AGGFNOID, ANUM_PG_AGGREGATE_AGGMINVTRANSFN).as_oid(),
+        aggmfinalfn: getattr(&t, AGGFNOID, ANUM_PG_AGGREGATE_AGGMFINALFN).as_oid(),
         aggfinalextra: getattr(&t, AGGFNOID, ANUM_PG_AGGREGATE_AGGFINALEXTRA).as_bool(),
+        aggmfinalextra: getattr(&t, AGGFNOID, ANUM_PG_AGGREGATE_AGGMFINALEXTRA).as_bool(),
         aggfinalmodify: getattr(&t, AGGFNOID, ANUM_PG_AGGREGATE_AGGFINALMODIFY).as_i8(),
+        aggmfinalmodify: getattr(&t, AGGFNOID, ANUM_PG_AGGREGATE_AGGMFINALMODIFY).as_i8(),
         aggtranstype: getattr(&t, AGGFNOID, ANUM_PG_AGGREGATE_AGGTRANSTYPE).as_oid(),
         aggtransspace: getattr(&t, AGGFNOID, ANUM_PG_AGGREGATE_AGGTRANSSPACE).as_i32(),
+        aggmtranstype: getattr(&t, AGGFNOID, ANUM_PG_AGGREGATE_AGGMTRANSTYPE).as_oid(),
     };
     drop(t);
     ReleaseSysCache(tuple);
     Ok(Some(shape))
 }
 
+fn pg_aggregate_aggminitval<'mcx>(
+    mcx: Mcx<'mcx>,
+    aggfnoid: Oid,
+) -> PgResult<Option<Option<PgString<'mcx>>>> {
+    pg_aggregate_initval_attr(mcx, aggfnoid, ANUM_PG_AGGREGATE_AGGMINITVAL)
+}
+
 fn pg_aggregate_agginitval<'mcx>(
     mcx: Mcx<'mcx>,
     aggfnoid: Oid,
+) -> PgResult<Option<Option<PgString<'mcx>>>> {
+    pg_aggregate_initval_attr(mcx, aggfnoid, ANUM_PG_AGGREGATE_AGGINITVAL)
+}
+
+fn pg_aggregate_initval_attr<'mcx>(
+    mcx: Mcx<'mcx>,
+    aggfnoid: Oid,
+    attnum: i32,
 ) -> PgResult<Option<Option<PgString<'mcx>>>> {
     let Some(tuple) = SearchSysCache1(AGGFNOID, SysCacheKey::Value(Datum::from_oid(aggfnoid)))?
     else {
         return Ok(None);
     };
     let t = tuple.tuple();
-    let out = match varlena_image(mcx, &t, AGGFNOID, ANUM_PG_AGGREGATE_AGGINITVAL)? {
+    let out = match varlena_image(mcx, &t, AGGFNOID, attnum)? {
         Some(img) => {
             let s = core::str::from_utf8(&img[4..]).expect("agginitval is server-encoding text");
             Some(PgString::from_str_in(s, mcx)?)
@@ -1157,6 +1214,7 @@ pub(crate) fn install() {
     syscache_seams::pg_operator_oprname::set(pg_operator_oprname);
     syscache_seams::lookup_pg_operator_oid_exact::set(lookup_pg_operator_oid_exact);
     syscache_seams::lookup_pg_amproc::set(lookup_pg_amproc);
+    syscache_seams::lookup_pg_amproc_members::set(lookup_pg_amproc_members);
     syscache_seams::lookup_pg_class_ls_shape::set(lookup_pg_class_ls_shape);
     syscache_seams::lookup_pg_amop_by_operator::set(lookup_pg_amop_by_operator);
     syscache_seams::lookup_pg_amop_by_strategy::set(lookup_pg_amop_by_strategy);
@@ -1178,6 +1236,7 @@ pub(crate) fn install() {
     syscache_seams::pg_type_typanalyze::set(pg_type_typanalyze);
     syscache_seams::lookup_pg_aggregate_shape::set(lookup_pg_aggregate_shape);
     syscache_seams::pg_aggregate_agginitval::set(pg_aggregate_agginitval);
+    syscache_seams::pg_aggregate_aggminitval::set(pg_aggregate_aggminitval);
     install_pg_statistic();
 }
 

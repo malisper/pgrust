@@ -317,7 +317,7 @@ pub fn make_op<'mcx>(
         &mut declared_arg_types,
         op.shape.oprresult,
         false,
-    );
+    )?;
 
     // make_fn_arguments (parse_func.c) hosted here until backend-parser-func.
     let ltree = coerce_arg(mcx, pstate, ltree, actual_arg_types[0], declared_arg_types[0])?;
