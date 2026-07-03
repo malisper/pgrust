@@ -61,8 +61,6 @@ pub fn BuildDescForRelation<'mcx>(
         let attcollation = syscache_seams::lookup_pg_type_shape::call(atttypid)?
             .expect("pg_type row vanished")
             .typcollation;
-        debug_assert!(tn.arrayBounds.is_nil()); // loud in typenameTypeIdAndMod
-
         tupdesc::TupleDescInitEntry(&mut desc, attnum, Some(colname), atttypid, atttypmod, 0)?;
         tupdesc::TupleDescInitEntryCollation(&mut desc, attnum, attcollation);
 
