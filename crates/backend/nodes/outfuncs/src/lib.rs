@@ -1,5 +1,5 @@
 //! outfuncs.c minimal arm: nodeToString for the expression node set stored in
-//! pg_attrdef.adbin / pg_constraint.conbin (DEFAULT/CHECK corpus). Every other
+//! pg_attrdef.adbin / pg_constraint.conbin / pg_trigger.tgqual. Every other
 //! node tag is a loud panic naming the C writer. Output is byte-compatible
 //! with C 18.3 nodeToString (locations stripped to -1, WRITE_LOCATION_FIELD).
 
@@ -14,7 +14,7 @@ use types_nodes::bitmapset::Bitmapset;
 use types_nodes::list::NodeList;
 use types_nodes::primnodes::{
     BoolExpr, BoolExprType, CoerceToDomain, CoerceToDomainValue, CoerceViaIO, Const, FuncExpr,
-    OpExpr, RelabelType, Var,
+    NullTest, OpExpr, RelabelType, Var,
 };
 use types_nodes::rawnodes::{PartitionBoundSpec, PartitionRangeDatum};
 use types_nodes::{Node, NodeTag};
@@ -41,6 +41,9 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
         }
         NodeTag::T_BoolExpr => {
             out_bool_expr(out, node.as_variant::<BoolExpr>().expect("BoolExpr"))?
+        }
+        NodeTag::T_NullTest => {
+            out_null_test(out, node.as_variant::<NullTest>().expect("NullTest"))?
         }
         NodeTag::T_RelabelType => {
             out_relabel_type(out, node.as_variant::<RelabelType>().expect("RelabelType"))?
@@ -222,6 +225,18 @@ fn out_bool_expr(out: &mut PgString<'_>, b: &BoolExpr<'_>) -> PgResult<()> {
     };
     w!(out, "{{BOOLEXPR :boolop {opstr} :args ");
     out_list(out, &b.args)?;
+    w!(out, " :location -1}}");
+    Ok(())
+}
+
+fn out_null_test(out: &mut PgString<'_>, n: &NullTest<'_>) -> PgResult<()> {
+    w!(out, "{{NULLTEST :arg ");
+    match n.arg {
+        Some(arg) => out_node(out, arg)?,
+        None => w!(out, "<>"),
+    }
+    w!(out, " :nulltesttype {} :argisrow ", n.nulltesttype as u32);
+    out_bool(out, n.argisrow);
     w!(out, " :location -1}}");
     Ok(())
 }
