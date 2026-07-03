@@ -35,6 +35,11 @@ pub fn exec_re_scan<'mcx>(
     node: &mut PlanStateNode<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
+    // C ExecReScan's InstrEndLoop: close the finished cycle before the next.
+    if let PlanStateNode::Instrumented(w) = node {
+        ::instrument::instr_end_loop(&mut estate.es_instrumentation[w.instr_idx as usize]);
+        return exec_re_scan(&mut w.inner, estate);
+    }
     if let Some(id) = node.ps_expr_context() {
         estate.ecxt_mut(id).rescan();
     }
@@ -80,10 +85,19 @@ pub fn exec_re_scan<'mcx>(
             }
             Ok(())
         }
+        // ExecReScanNestLoop: outer rescanned when its chgParam is NULL
+        // (always, until the Param lanes land); the inner is NOT rescanned
+        // here -- ExecNestLoop rescans it per outer tuple.
+        PlanStateNode::NestLoop(nl) => {
+            exec_re_scan(&mut nl.outer, estate)?;
+            ::nodenestloop::exec_rescan_nest_loop(&mut nl.state);
+            Ok(())
+        }
         // execAmi.c has no ModifyTable rescan arm ("node type not supported").
         PlanStateNode::ModifyTable(_) => {
             panic!("ExecReScan (execAmi.c): node type 232 does not support ExecReScan")
         }
+        PlanStateNode::Instrumented(_) => unreachable!("unwrapped above"),
     }
 }
 

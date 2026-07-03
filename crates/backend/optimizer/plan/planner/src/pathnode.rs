@@ -94,6 +94,7 @@ pub fn is_projection_capable_pathtype(pathtype: u16) -> bool {
         t if t == tag16(NodeTag::T_SeqScan) => true,
         t if t == tag16(NodeTag::T_IndexScan) => true,
         t if t == tag16(NodeTag::T_IndexOnlyScan) => true,
+        t if t == tag16(NodeTag::T_NestLoop) => true,
         _ => panic!(
             "is_projection_capable_path (createplan.c): pathtype {pathtype}; \
              M2 plan lane"
@@ -170,8 +171,9 @@ pub fn create_projection_path<'mcx>(
     PathNode::ProjectionPath(ProjectionPath { path, subpath: Some(subpath_id), dummypp })
 }
 
-// create_modifytable_path (pathnode.c), single-relation INSERT arm: no
-// RETURNING/WCO/rowmarks/ON CONFLICT/MERGE lists (loud upstream), rows = 0.
+// create_modifytable_path (pathnode.c), single-relation INSERT/UPDATE/DELETE
+// arm: no RETURNING/WCO/rowmarks/ON CONFLICT/MERGE lists (loud upstream),
+// rows = 0.
 pub fn create_modifytable_path<'mcx>(
     run: &mut PlannerRun<'mcx>,
     rel_id: RelId,
@@ -180,6 +182,7 @@ pub fn create_modifytable_path<'mcx>(
     can_set_tag: bool,
     // (operation is stored as the C CmdType value; types_pathnodes uses u32)
     result_relation: u32,
+    update_colnos: Option<PgVec<'mcx, i16>>,
 ) -> PathNode<'mcx> {
     let sub = run.root.path(subpath_id).base();
     let path = Path {
@@ -210,7 +213,14 @@ pub fn create_modifytable_path<'mcx>(
         rootRelation: 0,
         partColsUpdated: false,
         resultRelations: result_relations,
-        updateColnosLists: PgVec::new_in(run.mcx),
+        updateColnosLists: match update_colnos {
+            Some(colnos) => {
+                let mut lists = PgVec::new_in(run.mcx);
+                lists.push(colnos);
+                lists
+            }
+            None => PgVec::new_in(run.mcx),
+        },
         withCheckOptionLists: PgVec::new_in(run.mcx),
         returningLists: PgVec::new_in(run.mcx),
         rowMarks: PgVec::new_in(run.mcx),
@@ -689,7 +699,6 @@ pub fn get_cheapest_fractional_path(run: &PlannerRun<'_>, rel_id: RelId, tuple_f
     best
 }
 
-// compare_fractional_path_costs (pathnode.c).
 fn compare_fractional_path_costs(path1: &Path<'_>, path2: &Path<'_>, fraction: f64) -> i32 {
     if path1.disabled_nodes != path2.disabled_nodes {
         return if path1.disabled_nodes < path2.disabled_nodes { -1 } else { 1 };
@@ -708,7 +717,6 @@ fn compare_fractional_path_costs(path1: &Path<'_>, path2: &Path<'_>, fraction: f
     0
 }
 
-// create_sort_path (pathnode.c).
 pub fn create_sort_path<'mcx>(
     run: &mut PlannerRun<'mcx>,
     rel_id: RelId,
@@ -756,7 +764,6 @@ pub fn create_sort_path<'mcx>(
     id
 }
 
-// create_limit_path (pathnode.c).
 #[allow(clippy::too_many_arguments)]
 pub fn create_limit_path<'mcx>(
     run: &mut PlannerRun<'mcx>,
@@ -805,7 +812,6 @@ pub fn create_limit_path<'mcx>(
     }))
 }
 
-// adjust_limit_rows_costs (pathnode.c).
 pub fn adjust_limit_rows_costs(
     rows: &mut f64,
     startup_cost: &mut f64,

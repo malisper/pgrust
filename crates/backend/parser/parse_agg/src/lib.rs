@@ -303,6 +303,10 @@ fn check_agg_arguments_walker<'mcx>(
     }
 }
 
+/// DIVERGENCE from C 18.3: substitute_grouped_columns' RTE_GROUP rewrite
+/// (grouped Vars retargeted at an RTE_GROUP entry, qry.hasGroupRTE) is not
+/// performed — the Query keeps the pre-18 direct-Var shape and the planner's
+/// grouping arm consumes it directly; the 42803 checks are C-equivalent.
 pub fn parseCheckAggregates<'mcx>(
     pstate: &ParseState<'_, 'mcx>,
     qry: &Query<'mcx>,
@@ -319,17 +323,37 @@ pub fn parseCheckAggregates<'mcx>(
              backend-parser-agg grouping-sets lane"
         );
     }
-    if !qry.groupClause.is_nil() {
-        panic!(
-            "parseCheckAggregates (parse_agg.c): GROUP BY needs substitute_grouped_columns \
-             + RTE_GROUP (addRangeTableEntryForGroup) — backend-parser-agg grouping lane"
-        );
-    }
     if qry.havingQual.is_some() {
         panic!(
             "parseCheckAggregates (parse_agg.c): HAVING walk unported — \
              backend-parser-agg having lane"
         );
+    }
+    for rte in &qry.rtable {
+        let rte = rte.as_range_tbl_entry().expect("rtable cell");
+        if rte.rtekind == types_nodes::parsenodes::RTEKind::RTE_JOIN {
+            panic!(
+                "parseCheckAggregates (parse_agg.c): flatten_join_alias_vars unported — \
+                 backend-parser-agg join lane"
+            );
+        }
+    }
+
+    for gc_node in &qry.groupClause {
+        let gc = gc_node.as_sort_group_clause().expect("groupClause cell");
+        let tle = qry
+            .targetList
+            .iter()
+            .find(|n| {
+                n.as_target_entry().expect("tlist cell").ressortgroupref == gc.tleSortGroupRef
+            })
+            .expect("groupClause sortgroupref has a tlist entry");
+        if tle.as_target_entry().unwrap().expr.as_var().is_none() {
+            panic!(
+                "parseCheckAggregates (parse_agg.c): non-Var grouping expression needs \
+                 equal() matching (have_non_var_grouping) — backend-parser-agg lane"
+            );
+        }
     }
 
     for tle in &qry.targetList {
@@ -338,8 +362,31 @@ pub fn parseCheckAggregates<'mcx>(
     Ok(())
 }
 
-// substitute_grouped_columns_mutator's no-GROUP-BY leg: any level-zero Var
-// outside an aggregate is ungrouped.
+// is_var_grouped: the substitute_grouped_columns Var match, direct-Var shape.
+fn is_var_grouped(qry: &Query<'_>, var: &types_nodes::primnodes::Var<'_>) -> bool {
+    for gc_node in &qry.groupClause {
+        let gc = gc_node.as_sort_group_clause().expect("groupClause cell");
+        let tle = qry
+            .targetList
+            .iter()
+            .find(|n| {
+                n.as_target_entry().expect("tlist cell").ressortgroupref == gc.tleSortGroupRef
+            })
+            .expect("groupClause sortgroupref has a tlist entry");
+        if let Some(gvar) = tle.as_target_entry().unwrap().expr.as_var() {
+            if gvar.varno == var.varno
+                && gvar.varattno == var.varattno
+                && gvar.varlevelsup == var.varlevelsup
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+// substitute_grouped_columns_mutator's 42803 check (all grouping exprs are
+// Vars on this lane): a level-zero Var outside an aggregate must be grouped.
 fn check_ungrouped_columns<'mcx>(
     pstate: &ParseState<'_, 'mcx>,
     qry: &Query<'mcx>,
@@ -348,7 +395,7 @@ fn check_ungrouped_columns<'mcx>(
     match node.node_tag() {
         NodeTag::T_Var => {
             let var = node.as_var().unwrap();
-            if var.varlevelsup == 0 {
+            if var.varlevelsup == 0 && !is_var_grouped(qry, var) {
                 return Err(ungrouped_var_error(pstate, qry, var));
             }
             Ok(())

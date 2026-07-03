@@ -11,7 +11,12 @@ pub fn relids_singleton<'mcx>(mcx: Mcx<'mcx>, x: u32) -> Relids<'mcx> {
     Some(box_new_in(mcx, Bitmapset { words }))
 }
 
-fn relids_equal(a: &Relids<'_>, b: &Relids<'_>) -> bool {
+pub fn relids_overlap(a: &Relids<'_>, b: &Relids<'_>) -> bool {
+    let (Some(a), Some(b)) = (a, b) else { return false };
+    a.words.iter().zip(b.words.iter()).any(|(x, y)| x & y != 0)
+}
+
+pub fn relids_equal(a: &Relids<'_>, b: &Relids<'_>) -> bool {
     match (a, b) {
         (None, None) => true,
         (Some(a), Some(b)) => a.words.as_slice() == b.words.as_slice(),

@@ -47,6 +47,7 @@ fn create_plan_recurse<'mcx>(
         PathNode::GroupResultPath(_) => create_group_result_plan(run, path_id),
         PathNode::AggPath(_) => create_agg_plan(run, path_id),
         PathNode::SortPath(_) => create_sort_plan(run, path_id, flags),
+        PathNode::NestPath(_) => create_join_plan(run, path_id),
         PathNode::LimitPath(_) => create_limit_plan(run, path_id, flags),
         PathNode::ModifyTablePath(_) => create_modifytable_plan(run, path_id),
         other => panic!(
@@ -581,7 +582,8 @@ fn create_projection_plan<'mcx>(
 }
 
 // create_modifytable_plan + make_modifytable (createplan.c), single-relation
-// INSERT arm: no FDW result rels, no ON CONFLICT/MERGE/RETURNING lists.
+// INSERT/UPDATE/DELETE arm: no FDW result rels, no ON CONFLICT/MERGE/
+// RETURNING lists.
 fn create_modifytable_plan<'mcx>(
     run: &mut PlannerRun<'mcx>,
     path_id: PathId,
@@ -590,8 +592,7 @@ fn create_modifytable_plan<'mcx>(
     let (subpath_id, operation, can_set_tag, nominal, root_rel, result_relations, epq_param) = {
         let PathNode::ModifyTablePath(p) = run.root.path(path_id) else { unreachable!() };
         debug_assert!(
-            p.updateColnosLists.is_empty()
-                && p.withCheckOptionLists.is_empty()
+            p.withCheckOptionLists.is_empty()
                 && p.returningLists.is_empty()
                 && p.rowMarks.is_empty()
                 && p.onconflict.is_none()
@@ -607,17 +608,35 @@ fn create_modifytable_plan<'mcx>(
             p.epqParam,
         )
     };
-    assert!(
-        operation == types_nodes::nodes_enums::CmdType::CMD_INSERT as u32,
-        "make_modifytable (createplan.c): UPDATE/DELETE/MERGE; M4 DML lane"
-    );
+    use types_nodes::nodes_enums::CmdType;
+    let operation = match operation {
+        x if x == CmdType::CMD_INSERT as u32 => CmdType::CMD_INSERT,
+        x if x == CmdType::CMD_UPDATE as u32 => CmdType::CMD_UPDATE,
+        x if x == CmdType::CMD_DELETE as u32 => CmdType::CMD_DELETE,
+        other => panic!("make_modifytable (createplan.c): operation {other}; M4 MERGE lane"),
+    };
 
     let subplan = create_plan_recurse(run, subpath_id, CP_EXACT_TLIST)?;
     apply_tlist_labeling(subplan, run.processed_tlist());
 
+    let update_colnos_lists = {
+        let PathNode::ModifyTablePath(p) = run.root.path(path_id) else { unreachable!() };
+        debug_assert!(p.updateColnosLists.len() <= 1);
+        let mut lists = types_nodes::list::NodeList::nil();
+        for colnos in p.updateColnosLists.iter() {
+            let mut il = types_nodes::list::IntList::nil();
+            for &c in colnos.iter() {
+                il.lappend(mcx, c as i32)?;
+            }
+            lists.lappend(mcx, Node::mk_int_list(mcx, il)?)?;
+        }
+        lists
+    };
+
     let mut plan = Node::build::<types_nodes::plannodes::ModifyTable>(mcx)?;
     plan.plan.lefttree = Some(subplan);
-    plan.operation = types_nodes::nodes_enums::CmdType::CMD_INSERT;
+    plan.operation = operation;
+    plan.updateColnosLists = update_colnos_lists;
     plan.canSetTag = can_set_tag;
     plan.nominalRelation = nominal;
     plan.rootRelation = root_rel;
@@ -975,5 +994,57 @@ fn create_limit_plan<'mcx>(
     plan.limitCount = limit_count;
     plan.limitOption = types_nodes::nodes_enums::LimitOption::LIMIT_OPTION_COUNT;
     copy_generic_path_info(run, &mut plan.plan, path_id);
+    Ok(plan.seal())
+}
+
+// create_join_plan (createplan.c), T_NestLoop arm -> create_nestloop_plan +
+// make_nestloop. Gating (pseudoconstant) clauses are loud upstream; the
+// reparameterize/nestParams legs are dead while param_info is always None.
+fn create_join_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> PgResult<Node<'mcx>> {
+    let mcx = run.mcx;
+    let (outer_path, inner_path, jointype, inner_unique, restrict, target_id) =
+        match run.root.path(path_id) {
+            PathNode::NestPath(np) => {
+                debug_assert!(np.jpath.path.param_info.is_none());
+                (
+                    np.jpath.outerjoinpath.expect("nestloop outer path"),
+                    np.jpath.innerjoinpath.expect("nestloop inner path"),
+                    np.jpath.jointype,
+                    np.jpath.inner_unique,
+                    crate::relnode::pgvec_clone_shallow(mcx, &np.jpath.joinrestrictinfo),
+                    np.jpath.path.pathtarget_id.unwrap(),
+                )
+            }
+            other => panic!(
+                "create_join_plan (createplan.c): pathtype {}; M2 merge/hash lane",
+                other.base().pathtype
+            ),
+        };
+    assert!(
+        jointype == types_pathnodes::JOIN_INNER,
+        "create_nestloop_plan (createplan.c): jointype {jointype}; M2 outer-join lane"
+    );
+    debug_assert!(restrict.iter().all(|&r| !run.root.rinfo(r).pseudoconstant));
+
+    let tlist = build_path_tlist(run, target_id)?;
+    // NestLoop can project, so no need to be picky about child tlists.
+    let outer_plan = create_plan_recurse(run, outer_path, 0)?;
+    debug_assert!(run.root.curOuterRels.is_none() && run.root.curOuterParams.is_empty());
+    let inner_plan = create_plan_recurse(run, inner_path, 0)?;
+
+    let ordered = order_qual_clauses(run, &restrict)?;
+    // Inner join: all clauses alike become joinquals, otherclauses stay NIL.
+    let joinclauses = extract_actual_clauses(run, &ordered);
+
+    let mut plan = Node::build::<types_nodes::plannodes::NestLoop>(mcx)?;
+    plan.join.plan.targetlist = tlist;
+    plan.join.plan.qual = NodeList::nil();
+    plan.join.plan.lefttree = Some(outer_plan);
+    plan.join.plan.righttree = Some(inner_plan);
+    plan.join.jointype = types_nodes::JoinType::JOIN_INNER;
+    plan.join.inner_unique = inner_unique;
+    plan.join.joinqual = joinclauses;
+    plan.nestParams = NodeList::nil();
+    copy_generic_path_info(run, &mut plan.join.plan, path_id);
     Ok(plan.seal())
 }

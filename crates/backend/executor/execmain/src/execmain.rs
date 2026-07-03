@@ -96,14 +96,15 @@ fn exec_check_permissions(pstmt: &PlannedStmt<'_>) -> PgResult<()> {
     Ok(())
 }
 
-/// `ExecCheckOneRelPerms`: the RTE_RELATION SELECT/INSERT arms; other write
-/// privileges and the column-level fallback are loud.
+/// `ExecCheckOneRelPerms`: the RTE_RELATION SELECT/INSERT/UPDATE/DELETE arms;
+/// other write privileges and the column-level fallback are loud.
 fn exec_check_one_rel_perms(pi: &RTEPermissionInfo<'_>) -> PgResult<()> {
+    use types_nodes::parsenodes::{ACL_DELETE, ACL_UPDATE};
     let required = pi.requiredPerms;
     debug_assert!(required != 0);
-    if required & !(ACL_SELECT | ACL_INSERT) != 0 {
+    if required & !(ACL_SELECT | ACL_INSERT | ACL_UPDATE | ACL_DELETE) != 0 {
         panic!(
-            "ExecCheckOneRelPerms (execMain.c): UPDATE/DELETE requiredPerms lane not ported"
+            "ExecCheckOneRelPerms (execMain.c): requiredPerms 0x{required:x} lane not ported"
         );
     }
     let userid = if pi.checkAsUser != 0 {

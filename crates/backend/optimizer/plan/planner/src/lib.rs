@@ -9,12 +9,15 @@ pub mod createplan;
 pub mod grouping;
 pub mod indxpath;
 pub mod initsplan;
+pub mod joinpath;
+pub mod joinrels;
 pub mod pathkeys;
 pub mod pathnode;
 pub mod plancat;
 pub mod selfuncs;
 pub mod planmain;
 pub mod prep;
+pub mod prepjointree;
 pub mod prepagg;
 pub mod relnode;
 pub mod run;
@@ -99,6 +102,8 @@ pub mod gucs {
     bool_guc!(ENABLE_BITMAPSCAN, enable_bitmapscan, set_enable_bitmapscan, true);
     bool_guc!(ENABLE_HASHAGG, enable_hashagg, set_enable_hashagg, true);
     bool_guc!(ENABLE_SORT, enable_sort, set_enable_sort, true);
+    bool_guc!(ENABLE_NESTLOOP, enable_nestloop, set_enable_nestloop, true);
+    bool_guc!(ENABLE_MATERIAL, enable_material, set_enable_material, true);
     bool_guc!(ENABLE_INCREMENTAL_SORT, enable_incremental_sort, set_enable_incremental_sort, true);
     real_guc!(CURSOR_TUPLE_FRACTION, cursor_tuple_fraction, set_cursor_tuple_fraction, 0.1);
     real_guc!(JIT_ABOVE_COST, jit_above_cost, set_jit_above_cost, 100000.0);
@@ -148,6 +153,10 @@ pub fn init_seams() {
     });
     guc_tables::vars::enable_sort
         .install(GucVarAccessors { get: gucs::enable_sort, set: gucs::set_enable_sort });
+    guc_tables::vars::enable_nestloop
+        .install(GucVarAccessors { get: gucs::enable_nestloop, set: gucs::set_enable_nestloop });
+    guc_tables::vars::enable_material
+        .install(GucVarAccessors { get: gucs::enable_material, set: gucs::set_enable_material });
     guc_tables::vars::enable_incremental_sort.install(GucVarAccessors {
         get: gucs::enable_incremental_sort,
         set: gucs::set_enable_incremental_sort,
@@ -204,9 +213,8 @@ pub fn standard_planner<'mcx>(
     cursor_options: i32,
     bound_params: ParamListHandle,
 ) -> PgResult<PlannedStmt<'mcx>> {
-    // boundParams substitution is unthreaded (clauses::fold top note).
-    let _ = bound_params;
     let mut run = PlannerRun::new(mcx);
+    run.glob.bound_params = bound_params;
 
     // Divergence: the max_parallel_hazard scan runs in subquery_planner after
     // the Query is arena-sealed (walker needs &'mcx Query); C scans first.

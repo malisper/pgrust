@@ -193,10 +193,11 @@ pub fn get_relation_info<'mcx>(
         r.amflags |= AMFLAG_HAS_TID_RANGE;
     }
 
-    // get_relation_foreign_keys: single-relation queries skip FK collection.
-    if run.parse().rtable.len() >= 2 {
-        panic!("get_relation_foreign_keys (plancat.c): M2 join lane");
-    }
+    // Divergence: get_relation_foreign_keys is skipped (RelationGetFKeyList
+    // unported), so fkey_list stays empty and join size estimation uses
+    // fkselec = 1.0 even where C would match FK constraints. Estimate-only:
+    // affects plan choice, never results. The plancat FK unit owns the fix.
+    debug_assert!(run.root.fkey_list.is_empty());
 
     relation.close(NoLock)?;
     Ok(())
@@ -301,6 +302,40 @@ pub fn restriction_selectivity<'mcx>(
     };
     if !(0.0..=1.0).contains(&result) {
         panic!("invalid restriction selectivity: {result}");
+    }
+    Ok(result)
+}
+
+// join_selectivity (plancat.c): closed-set oprjoin dispatch. The scalar
+// inequality estimators return DEFAULT_INEQ_SEL with no arg inspection.
+pub fn join_selectivity<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    operatorid: Oid,
+    args: &[NodeId],
+    inputcollid: Oid,
+    jointype: types_pathnodes::JoinType,
+    sjinfo: Option<&types_pathnodes::SpecialJoinInfo<'mcx>>,
+) -> PgResult<f64> {
+    const F_EQJOINSEL: Oid = 105;
+    const F_SCALARLTJOINSEL: Oid = 107;
+    const F_SCALARGTJOINSEL: Oid = 108;
+    const F_SCALARLEJOINSEL: Oid = 386;
+    const F_SCALARGEJOINSEL: Oid = 398;
+    const DEFAULT_INEQ_SEL: f64 = 0.3333333333333333;
+    let _ = inputcollid;
+    let oprjoin = lsyscache::get_oprjoin(operatorid)?;
+    if oprjoin == 0 {
+        return Ok(0.5);
+    }
+    let result = match oprjoin {
+        F_EQJOINSEL => crate::selfuncs::eqjoinsel(run, operatorid, args, jointype, sjinfo)?,
+        F_SCALARLTJOINSEL | F_SCALARGTJOINSEL | F_SCALARLEJOINSEL | F_SCALARGEJOINSEL => {
+            DEFAULT_INEQ_SEL
+        }
+        other => panic!("join_selectivity (plancat.c): oprjoin {other}; M2 selfuncs lane"),
+    };
+    if !(0.0..=1.0).contains(&result) {
+        panic!("invalid join selectivity: {result}");
     }
     Ok(result)
 }

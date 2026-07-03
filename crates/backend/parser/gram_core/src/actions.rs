@@ -1,7 +1,11 @@
 use types_core::catalog::RELPERSISTENCE_PERMANENT;
 use types_error::PgResult;
+use types_nodes::parsenodes::{CopyStmt, DefElem, DefElemAction};
 use types_nodes::rawnodes::A_Expr_Kind::AEXPR_OP;
-use types_nodes::{Alias, Node, NodeList, RangeVar, RawStmt, SelectStmt, ValUnion};
+use types_nodes::{
+    Alias, DeleteStmt, InsertStmt, Node, NodeList, RangeVar, RawStmt, SelectStmt, UpdateStmt,
+    ValUnion,
+};
 use types_nodes::{BitString, Boolean, Float, Integer};
 use types_nodes::{
     BoolExpr, BoolExprType, CoercionForm, DistinctClause, FuncCall, LimitOption, NodeMut,
@@ -118,6 +122,10 @@ impl<'mcx> Parser<'mcx> {
             1123 => *yyval = YYSTYPE::Ival(SortByNulls::SORTBY_NULLS_FIRST as i32),
             1124 => *yyval = YYSTYPE::Ival(SortByNulls::SORTBY_NULLS_LAST as i32),
             1125 => *yyval = YYSTYPE::Ival(SortByNulls::SORTBY_NULLS_DEFAULT as i32),
+            // set_quantifier: ALL | DISTINCT | EMPTY (SetQuantifier values).
+            1756 => *yyval = YYSTYPE::Ival(1),
+            1757 => *yyval = YYSTYPE::Ival(2),
+            1758 => *yyval = YYSTYPE::Ival(0),
             1759 => *yyval = YYSTYPE::DistinctAll,
             1768 => {
                 let s = stk.v(yylen, 1).node().expect("sortby");
@@ -244,6 +252,24 @@ impl<'mcx> Parser<'mcx> {
             }
             // row_or_rows / first_or_next (values unused downstream).
             1794..=1797 => *yyval = YYSTYPE::Ival(0),
+            // group_clause: GROUP_P BY set_quantifier group_by_list | EMPTY.
+            1798 => {
+                let quantifier = stk.v(yylen, 3).ival();
+                let list = stk.v(yylen, 4).list();
+                *yyval = YYSTYPE::Group { distinct: quantifier == 2, list };
+            }
+            // group_by_list; group_by_item's a_expr arm passes through, the
+            // grouping-sets arms (empty/CUBE/ROLLUP/SETS) panic loudly.
+            1800 => {
+                let item = stk.v(yylen, 1).node().expect("group_by_item");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, item)?);
+            }
+            1801 => {
+                let mut list = stk.v(yylen, 1).list();
+                let item = stk.v(yylen, 3).node().expect("group_by_item");
+                list.lappend(mcx, item)?;
+                *yyval = YYSTYPE::List(list);
+            }
             1799 => {
                 *yyval = YYSTYPE::Group { distinct: false, list: NodeList::nil() };
             }
@@ -256,6 +282,185 @@ impl<'mcx> Parser<'mcx> {
                 let t = stk.v(yylen, 3).node().expect("table_ref");
                 list.lappend(mcx, t)?;
                 *yyval = YYSTYPE::List(list);
+            }
+            // InsertStmt: opt_with_clause INSERT INTO insert_target insert_rest
+            //             opt_on_conflict returning_clause
+            1617 => {
+                let istmt = stk.v(yylen, 5).node().expect("insert_rest");
+                let relation = stk.v(yylen, 4).node();
+                let onconflict = stk.v(yylen, 6).node();
+                let retclause = stk.v(yylen, 7).node();
+                let with = stk.v(yylen, 1).node();
+                // SAFETY: as rule 8 — parser-owned tree, no live derived refs.
+                unsafe {
+                    istmt
+                        .with_mut::<InsertStmt, _>(|n| {
+                            n.relation = relation;
+                            n.onConflictClause = onconflict;
+                            n.returningClause = retclause;
+                            n.withClause = with;
+                        })
+                        .expect("insert_rest is InsertStmt");
+                }
+                *yyval = YYSTYPE::Node(Some(istmt));
+            }
+            // returning_clause: RETURNING returning_with_clause target_list
+            1636 => panic!(
+                "gram_core: RETURNING clause (ReturningClause vocabulary) not ported"
+            ),
+            // DeleteStmt: opt_with_clause DELETE_P FROM relation_expr_opt_alias
+            //             using_clause where_or_current_clause returning_clause
+            1645 => {
+                let n = Node::mk(
+                    mcx,
+                    DeleteStmt {
+                        relation: stk.v(yylen, 4).node(),
+                        usingClause: stk.v(yylen, 5).list(),
+                        whereClause: stk.v(yylen, 6).node(),
+                        returningClause: stk.v(yylen, 7).node(),
+                        withClause: stk.v(yylen, 1).node(),
+                    },
+                )?;
+                *yyval = YYSTYPE::Node(Some(n));
+            }
+            // UpdateStmt: opt_with_clause UPDATE relation_expr_opt_alias SET
+            //             set_clause_list from_clause where_or_current_clause
+            //             returning_clause
+            1664 => {
+                let n = Node::mk(
+                    mcx,
+                    UpdateStmt {
+                        relation: stk.v(yylen, 3).node(),
+                        targetList: stk.v(yylen, 5).list(),
+                        whereClause: stk.v(yylen, 7).node(),
+                        fromClause: stk.v(yylen, 6).list(),
+                        returningClause: stk.v(yylen, 8).node(),
+                        withClause: stk.v(yylen, 1).node(),
+                    },
+                )?;
+                *yyval = YYSTYPE::Node(Some(n));
+            }
+            // set_clause_list: set_clause_list ',' set_clause (list_concat)
+            1666 => {
+                let mut list = stk.v(yylen, 1).list();
+                list.concat(mcx, &stk.v(yylen, 3).list())?;
+                *yyval = YYSTYPE::List(list);
+            }
+            // set_clause: set_target '=' a_expr
+            1667 => {
+                let target = stk.v(yylen, 1).node().expect("set_target");
+                let val = stk.v(yylen, 3).node();
+                // SAFETY: as rule 8 — parser-owned tree, no live derived refs.
+                unsafe {
+                    target
+                        .with_mut::<types_nodes::ResTarget, _>(|r| r.val = val)
+                        .expect("set_target is ResTarget");
+                }
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, target)?);
+            }
+            // set_clause: '(' set_target_list ')' '=' a_expr
+            1668 => panic!(
+                "gram_core: multiple-assignment SET (MultiAssignRef) not ported"
+            ),
+            // set_target: ColId opt_indirection (check_indirection is a no-op:
+            // A_Indices construction is an unported loud).
+            1669 => {
+                let name = stk.v(yylen, 1).str_val();
+                let indirection = stk.v(yylen, 2).list();
+                *yyval = YYSTYPE::Node(Some(Node::mk_res_target(
+                    mcx,
+                    Some(name),
+                    indirection,
+                    None,
+                    stk.l(yylen, 1),
+                )?));
+            }
+            1670 => {
+                let t = stk.v(yylen, 1).node().expect("set_target");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, t)?);
+            }
+            1671 => {
+                let mut list = stk.v(yylen, 1).list();
+                list.lappend(mcx, stk.v(yylen, 3).node().expect("set_target"))?;
+                *yyval = YYSTYPE::List(list);
+            }
+            // relation_expr_opt_alias: relation_expr [AS] ColId
+            1879 | 1880 => {
+                let rv = stk.v(yylen, 1).node().expect("relation_expr");
+                let name_i = if rule == 1880 { 3 } else { 2 };
+                let alias = mk_alias(mcx, stk.v(yylen, name_i).str_val())?;
+                // SAFETY: as rule 8.
+                unsafe {
+                    rv.with_mut::<RangeVar, _>(|r| r.alias = Some(alias))
+                        .expect("relation_expr is RangeVar");
+                }
+                *yyval = YYSTYPE::Node(Some(rv));
+            }
+            // where_or_current_clause: WHERE CURRENT_P OF cursor_name
+            1896 => panic!(
+                "gram_core: WHERE CURRENT OF (CurrentOfExpr) not ported"
+            ),
+            // insert_target: qualified_name AS ColId
+            1619 => {
+                let rv = stk.v(yylen, 1).node().expect("qualified_name");
+                let alias = mk_alias(mcx, stk.v(yylen, 3).str_val())?;
+                // SAFETY: as rule 8.
+                unsafe {
+                    rv.with_mut::<RangeVar, _>(|r| r.alias = Some(alias))
+                        .expect("insert_target is RangeVar");
+                }
+                *yyval = YYSTYPE::Node(Some(rv));
+            }
+            // insert_rest: SelectStmt | '(' insert_column_list ')' SelectStmt
+            //            | DEFAULT VALUES
+            1620 | 1622 | 1624 => {
+                let mut n = Node::build::<InsertStmt>(mcx)?;
+                if rule == 1622 {
+                    n.cols = stk.v(yylen, 2).list();
+                }
+                if rule != 1624 {
+                    n.selectStmt = stk.v(yylen, yylen).node();
+                }
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1627 => {
+                let t = stk.v(yylen, 1).node().expect("insert_column_item");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, t)?);
+            }
+            1628 => {
+                let mut list = stk.v(yylen, 1).list();
+                list.lappend(mcx, stk.v(yylen, 3).node().expect("insert_column_item"))?;
+                *yyval = YYSTYPE::List(list);
+            }
+            // insert_column_item: ColId opt_indirection (check_indirection is
+            // a no-op here: A_Indices construction is an unported loud).
+            1629 => {
+                let name = stk.v(yylen, 1).str_val();
+                let indirection = stk.v(yylen, 2).list();
+                *yyval = YYSTYPE::Node(Some(Node::mk_res_target(
+                    mcx,
+                    Some(name),
+                    indirection,
+                    None,
+                    stk.l(yylen, 1),
+                )?));
+            }
+            // values_clause: VALUES '(' expr_list ')' | values_clause ',' ...
+            1826 => {
+                let row = Node::mk_list(mcx, stk.v(yylen, 3).list())?;
+                let mut n = Node::build::<SelectStmt>(mcx)?;
+                n.valuesLists = NodeList::make1(mcx, row)?;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1827 => {
+                let stmt = stk.v(yylen, 1).node().expect("values_clause");
+                let row = Node::mk_list(mcx, stk.v(yylen, 4).list())?;
+                // SAFETY: as rule 8.
+                unsafe {
+                    stmt.with_mut::<SelectStmt, _>(|n| n.valuesLists.lappend(mcx, row))
+                        .expect("values_clause is SelectStmt")?;
+                }
+                *yyval = YYSTYPE::Node(Some(stmt));
             }
             1832 => {
                 let rv = stk.v(yylen, 1).node().expect("relation_expr");
@@ -873,6 +1078,175 @@ impl<'mcx> Parser<'mcx> {
             2455 => *yyval = YYSTYPE::Ival(stk.v(yylen, 2).ival()),
             2456 => *yyval = YYSTYPE::Ival(-stk.v(yylen, 2).ival()),
             2470..=2486 => *yyval = YYSTYPE::Str(stk.v(yylen, 1).str_val()),
+            // opt_boolean_or_string keyword arms.
+            232 => *yyval = YYSTYPE::Str("true"),
+            233 => *yyval = YYSTYPE::Str("false"),
+            234 => *yyval = YYSTYPE::Str("on"),
+            // CopyStmt: COPY opt_binary qualified_name opt_column_list
+            //   copy_from opt_program copy_file_name copy_delimiter opt_with
+            //   copy_options where_clause
+            409 => {
+                let mut n = Node::build::<CopyStmt>(mcx)?;
+                n.relation = stk.v(yylen, 3).node();
+                n.attlist = stk.v(yylen, 4).list();
+                n.is_from = stk.v(yylen, 5).boolean();
+                n.is_program = stk.v(yylen, 6).boolean();
+                n.filename = opt_str(stk.v(yylen, 7));
+                n.whereClause = stk.v(yylen, 11).node();
+                if n.is_program && n.filename.is_none() {
+                    return Err(self.errposition_error(
+                        "STDIN/STDOUT not allowed with PROGRAM".into(),
+                        stk.l(yylen, 8),
+                    ));
+                }
+                if !n.is_from && n.whereClause.is_some() {
+                    return Err(self.errposition_error(
+                        "WHERE clause not allowed with COPY TO".into(),
+                        stk.l(yylen, 11),
+                    ));
+                }
+                let mut options = NodeList::nil();
+                if let Some(d) = stk.v(yylen, 2).node() {
+                    options.lappend(mcx, d)?;
+                }
+                if let Some(d) = stk.v(yylen, 8).node() {
+                    options.lappend(mcx, d)?;
+                }
+                options.concat(mcx, &stk.v(yylen, 10).list())?;
+                n.options = options;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // CopyStmt: COPY '(' PreparableStmt ')' TO opt_program
+            //   copy_file_name opt_with copy_options
+            410 => {
+                let mut n = Node::build::<CopyStmt>(mcx)?;
+                n.query = stk.v(yylen, 3).node();
+                n.is_program = stk.v(yylen, 6).boolean();
+                n.filename = opt_str(stk.v(yylen, 7));
+                n.options = stk.v(yylen, 9).list();
+                if n.is_program && n.filename.is_none() {
+                    return Err(self.errposition_error(
+                        "STDIN/STDOUT not allowed with PROGRAM".into(),
+                        stk.l(yylen, 5),
+                    ));
+                }
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // copy_from / opt_program.
+            411 | 413 => *yyval = YYSTYPE::Boolean(true),
+            412 | 414 => *yyval = YYSTYPE::Boolean(false),
+            // copy_opt_list: copy_opt_list copy_opt_item.
+            420 => {
+                let mut list = stk.v(yylen, 1).list();
+                if let Some(d) = stk.v(yylen, 2).node() {
+                    list.lappend(mcx, d)?;
+                }
+                *yyval = YYSTYPE::List(list);
+            }
+            // copy_opt_item arms (legacy WITH syntax) + opt_binary (437).
+            422 | 437 => {
+                let arg = Node::mk_string(mcx, "binary")?;
+                *yyval = def_elem(mcx, "format", Some(arg), stk.l(yylen, 1))?;
+            }
+            423 => {
+                let arg = Node::mk(mcx, Boolean { boolval: true })?;
+                *yyval = def_elem(mcx, "freeze", Some(arg), stk.l(yylen, 1))?;
+            }
+            424 => {
+                let arg = Node::mk_string(mcx, stk.v(yylen, 3).str_val())?;
+                *yyval = def_elem(mcx, "delimiter", Some(arg), stk.l(yylen, 1))?;
+            }
+            425 => {
+                let arg = Node::mk_string(mcx, stk.v(yylen, 3).str_val())?;
+                *yyval = def_elem(mcx, "null", Some(arg), stk.l(yylen, 1))?;
+            }
+            426 => {
+                let arg = Node::mk_string(mcx, "csv")?;
+                *yyval = def_elem(mcx, "format", Some(arg), stk.l(yylen, 1))?;
+            }
+            427 => {
+                let arg = Node::mk(mcx, Boolean { boolval: true })?;
+                *yyval = def_elem(mcx, "header", Some(arg), stk.l(yylen, 1))?;
+            }
+            428 => {
+                let arg = Node::mk_string(mcx, stk.v(yylen, 3).str_val())?;
+                *yyval = def_elem(mcx, "quote", Some(arg), stk.l(yylen, 1))?;
+            }
+            429 => {
+                let arg = Node::mk_string(mcx, stk.v(yylen, 3).str_val())?;
+                *yyval = def_elem(mcx, "escape", Some(arg), stk.l(yylen, 1))?;
+            }
+            430 | 434 => {
+                let name = if rule == 430 { "force_quote" } else { "force_null" };
+                let arg = Node::mk_list(mcx, stk.v(yylen, 3).list())?;
+                *yyval = def_elem(mcx, name, Some(arg), stk.l(yylen, 1))?;
+            }
+            431 | 435 => {
+                let name = if rule == 431 { "force_quote" } else { "force_null" };
+                let arg = Node::mk(mcx, types_nodes::A_Star {})?;
+                *yyval = def_elem(mcx, name, Some(arg), stk.l(yylen, 1))?;
+            }
+            432 => {
+                let arg = Node::mk_list(mcx, stk.v(yylen, 4).list())?;
+                *yyval = def_elem(mcx, "force_not_null", Some(arg), stk.l(yylen, 1))?;
+            }
+            433 => {
+                let arg = Node::mk(mcx, types_nodes::A_Star {})?;
+                *yyval = def_elem(mcx, "force_not_null", Some(arg), stk.l(yylen, 1))?;
+            }
+            436 => {
+                let arg = Node::mk_string(mcx, stk.v(yylen, 2).str_val())?;
+                *yyval = def_elem(mcx, "encoding", Some(arg), stk.l(yylen, 1))?;
+            }
+            // copy_delimiter: opt_using DELIMITERS Sconst.
+            439 => {
+                let arg = Node::mk_string(mcx, stk.v(yylen, 3).str_val())?;
+                *yyval = def_elem(mcx, "delimiter", Some(arg), stk.l(yylen, 2))?;
+            }
+            // copy_generic_opt_list.
+            443 => {
+                let d = stk.v(yylen, 1).node().expect("copy_generic_opt_elem");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, d)?);
+            }
+            444 => {
+                let mut list = stk.v(yylen, 1).list();
+                let d = stk.v(yylen, 3).node().expect("copy_generic_opt_elem");
+                list.lappend(mcx, d)?;
+                *yyval = YYSTYPE::List(list);
+            }
+            // copy_generic_opt_elem: ColLabel copy_generic_opt_arg.
+            445 => {
+                let name = stk.v(yylen, 1).str_val();
+                let arg = stk.v(yylen, 2).node();
+                *yyval = def_elem(mcx, name, arg, stk.l(yylen, 1))?;
+            }
+            // copy_generic_opt_arg arms.
+            446 => {
+                let s = stk.v(yylen, 1).str_val();
+                *yyval = YYSTYPE::Node(Some(Node::mk_string(mcx, s)?));
+            }
+            447 => *yyval = YYSTYPE::Node(stk.v(yylen, 1).node()),
+            448 => *yyval = YYSTYPE::Node(Some(Node::mk(mcx, types_nodes::A_Star {})?)),
+            449 => *yyval = YYSTYPE::Node(Some(Node::mk_string(mcx, "default")?)),
+            450 => {
+                let list = stk.v(yylen, 2).list();
+                *yyval = YYSTYPE::Node(Some(Node::mk_list(mcx, list)?));
+            }
+            // copy_generic_opt_arg_list (+ _item) and columnList / columnElem.
+            452 | 556 => {
+                let n = stk.v(yylen, 1).node().expect("list item");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, n)?);
+            }
+            453 | 557 => {
+                let mut list = stk.v(yylen, 1).list();
+                let n = stk.v(yylen, 3).node().expect("list item");
+                list.lappend(mcx, n)?;
+                *yyval = YYSTYPE::List(list);
+            }
+            454 | 562 => {
+                let s = stk.v(yylen, 1).str_val();
+                *yyval = YYSTYPE::Node(Some(Node::mk_string(mcx, s)?));
+            }
             _ => unimplemented_rule(rule),
         }
         Ok(())
@@ -1076,6 +1450,35 @@ impl<'mcx> Parser<'mcx> {
                 .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE),
         )
     }
+}
+
+// copy_file_name yields Sconst (Str) or NULL for STDIN/STDOUT (Node(None)).
+fn opt_str<'mcx>(v: YYSTYPE<'mcx>) -> Option<&'mcx str> {
+    match v {
+        YYSTYPE::Str(s) => Some(s),
+        YYSTYPE::Keyword(s) => Some(s),
+        YYSTYPE::Node(None) => None,
+        _ => panic!("gram_core: grammar value stack type confusion (wanted opt Str)"),
+    }
+}
+
+// makeDefElem (makefuncs.c).
+fn def_elem<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    name: &'mcx str,
+    arg: Option<Node<'mcx>>,
+    location: i32,
+) -> PgResult<YYSTYPE<'mcx>> {
+    Ok(YYSTYPE::Node(Some(Node::mk(
+        mcx,
+        DefElem {
+            defnamespace: None,
+            defname: Some(name),
+            arg,
+            defaction: DefElemAction::DEFELEM_UNSPEC,
+            location,
+        },
+    )?)))
 }
 
 // makeA_Expr (makefuncs.c): makeNode zero-fill leaves rexpr_list_start/end 0

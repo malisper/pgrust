@@ -48,8 +48,14 @@ pub fn create_index_paths<'mcx>(run: &mut PlannerRun<'mcx>, rel: RelId) -> PgRes
     if run.root.rel(rel).indexlist.is_empty() {
         return Ok(());
     }
+    // Single-member, non-const ECs (sort-expr ECs) derive no implied
+    // equalities; anything richer is the join lane.
+    let ec_can_derive = (0..run.root.eq_classes.len()).any(|i| {
+        let ec = run.root.ec(types_pathnodes::EcId(i as u32));
+        ec.ec_members.len() > 1 || ec.ec_has_const
+    });
     assert!(
-        run.root.rel(rel).joininfo.is_empty() && run.root.eq_classes.is_empty(),
+        run.root.rel(rel).joininfo.is_empty() && !ec_can_derive,
         "match_join_clauses_to_index/match_eclass_clauses_to_index (indxpath.c): M2 join lane"
     );
 
@@ -287,8 +293,7 @@ fn build_index_paths<'mcx>(
     let loop_count = 1.0;
 
     // build_index_pathkeys is unported: an index whose leading column could
-    // satisfy query_pathkeys is loud (losing that plan silently would diverge
-    // from C's plan choice); otherwise useful_pathkeys is NIL as C computes.
+    // satisfy query_pathkeys must be loud, not a silently lost plan.
     if !run.root.query_pathkeys.is_empty() && !index.sortopfamily.is_empty() {
         let leading_attno = index.indexkeys[0];
         for pk in run.root.query_pathkeys.iter() {

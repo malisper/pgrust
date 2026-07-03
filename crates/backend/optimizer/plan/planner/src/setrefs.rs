@@ -154,6 +154,11 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
             }
             debug_assert!(l.uniqNumCols == 0);
         }
+        NodeTag::T_NestLoop => {
+            let nl = plan.as_nest_loop().unwrap();
+            debug_assert!(nl.nestParams.is_nil());
+            set_join_references(run, plan, rtoffset)?;
+        }
         NodeTag::T_ModifyTable => {
             let m = plan.as_modify_table().unwrap();
             debug_assert!(m.plan.targetlist.is_nil() && m.plan.qual.is_nil());
@@ -173,11 +178,17 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
     }
 
     let base = plan.as_plan().expect("plan node");
-    assert!(base.righttree.is_none(), "set_plan_refs (setrefs.c): righttree; M2 join lane");
     if let Some(child) = base.lefttree {
         let new_child = set_plan_refs(run, child, rtoffset)?;
         // SAFETY: same exclusive plan-tree ownership as the prologue above.
         unsafe { plan.with_plan_mut(|p| p.lefttree = Some(new_child)) }.expect("plan node");
+    }
+    let base = plan.as_plan().expect("plan node");
+    if let Some(child) = base.righttree {
+        debug_assert!(plan.node_tag() == NodeTag::T_NestLoop);
+        let new_child = set_plan_refs(run, child, rtoffset)?;
+        // SAFETY: same exclusive plan-tree ownership as the prologue above.
+        unsafe { plan.with_plan_mut(|p| p.righttree = Some(new_child)) }.expect("plan node");
     }
     Ok(plan)
 }
@@ -227,8 +238,7 @@ fn set_upper_references<'mcx>(
     Ok(())
 }
 
-// search_indexed_tlist_for_sortgroupref (setrefs.c): sortgroupref + equal()
-// match against the subplan tlist -> OUTER_VAR reference.
+// search_indexed_tlist_for_sortgroupref (setrefs.c).
 fn search_indexed_tlist_for_sortgroupref<'mcx>(
     run: &mut PlannerRun<'mcx>,
     node: Node<'mcx>,
@@ -444,7 +454,6 @@ fn record_plan_function_dependency(funcid: u32) {
     }
 }
 
-// set_dummy_tlist_references (setrefs.c).
 fn set_dummy_tlist_references<'mcx>(
     run: &mut PlannerRun<'mcx>,
     plan: Node<'mcx>,
@@ -498,4 +507,180 @@ fn set_dummy_tlist_references<'mcx>(
     // SAFETY: exclusive plan-tree ownership (C rewrites the list in place).
     unsafe { plan.with_plan_mut(|p| p.targetlist = output_targetlist) }.expect("plan node");
     Ok(())
+}
+
+// set_join_references (setrefs.c), inner-nestloop arm: joinqual and tlist
+// Vars retarget onto the child tlists as OUTER_VAR/INNER_VAR. C builds
+// indexed_tlists; the linear probe is the set_upper_references divergence
+// (cold, tlists tiny). nestParams/merge/hash legs are dead or loud upstream.
+fn set_join_references<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    plan: Node<'mcx>,
+    rtoffset: i32,
+) -> PgResult<()> {
+    let nl = plan.as_nest_loop().expect("NestLoop");
+    debug_assert!(nl.join.jointype == types_nodes::JoinType::JOIN_INNER);
+    let outer_tlist = &nl.join.plan.lefttree.expect("join outer plan").as_plan().unwrap().targetlist;
+    let inner_tlist = &nl.join.plan.righttree.expect("join inner plan").as_plan().unwrap().targetlist;
+
+    let joinqual = fix_join_expr_list(run, &nl.join.joinqual, outer_tlist, inner_tlist, rtoffset)?;
+    let targetlist =
+        fix_join_expr_list(run, &nl.join.plan.targetlist, outer_tlist, inner_tlist, rtoffset)?;
+    debug_assert!(nl.join.plan.qual.is_nil());
+
+    // SAFETY: exclusive plan-tree ownership (C rewrites the same node in place).
+    unsafe {
+        plan.with_mut::<types_nodes::plannodes::NestLoop, _>(|p| {
+            p.join.joinqual = joinqual;
+            p.join.plan.targetlist = targetlist;
+        })
+    }
+    .expect("NestLoop node");
+    Ok(())
+}
+
+fn fix_join_expr_list<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    list: &NodeList<'mcx>,
+    outer_tlist: &NodeList<'mcx>,
+    inner_tlist: &NodeList<'mcx>,
+    rtoffset: i32,
+) -> PgResult<NodeList<'mcx>> {
+    let mut out = NodeList::nil();
+    for node in list {
+        out.lappend(run.mcx, fix_join_expr_mutator(run, node, outer_tlist, inner_tlist, rtoffset)?)?;
+    }
+    Ok(out)
+}
+
+// fix_join_expr_mutator (setrefs.c) over the shapes this lane can carry.
+fn fix_join_expr_mutator<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    node: Node<'mcx>,
+    outer_tlist: &NodeList<'mcx>,
+    inner_tlist: &NodeList<'mcx>,
+    rtoffset: i32,
+) -> PgResult<Node<'mcx>> {
+    let mcx = run.mcx;
+    match node.node_tag() {
+        NodeTag::T_Var => {
+            let var = node.as_var().unwrap();
+            if let Some(new) = search_join_tlist_for_var(
+                run,
+                var,
+                outer_tlist,
+                types_nodes::primnodes::OUTER_VAR,
+                rtoffset,
+            )? {
+                return Ok(new);
+            }
+            if let Some(new) = search_join_tlist_for_var(
+                run,
+                var,
+                inner_tlist,
+                types_nodes::primnodes::INNER_VAR,
+                rtoffset,
+            )? {
+                return Ok(new);
+            }
+            panic!("variable not found in subplan target lists");
+        }
+        NodeTag::T_Const => {
+            fix_scan_expr_walker(run, node)?;
+            Ok(node)
+        }
+        NodeTag::T_TargetEntry => {
+            let tle = node.as_target_entry().unwrap();
+            let newexpr =
+                fix_join_expr_mutator(run, tle.expr, outer_tlist, inner_tlist, rtoffset)?;
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::TargetEntry {
+                    expr: newexpr,
+                    resno: tle.resno,
+                    resname: tle.resname,
+                    ressortgroupref: tle.ressortgroupref,
+                    resorigtbl: tle.resorigtbl,
+                    resorigcol: tle.resorigcol,
+                    resjunk: tle.resjunk,
+                },
+            )
+        }
+        NodeTag::T_OpExpr => {
+            let o = node.as_op_expr().unwrap();
+            record_plan_function_dependency(o.opfuncid);
+            let mut args = NodeList::nil();
+            for arg in &o.args {
+                args.lappend(
+                    mcx,
+                    fix_join_expr_mutator(run, arg, outer_tlist, inner_tlist, rtoffset)?,
+                )?;
+            }
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::OpExpr {
+                    opno: o.opno,
+                    opfuncid: o.opfuncid,
+                    opresulttype: o.opresulttype,
+                    opretset: o.opretset,
+                    opcollid: o.opcollid,
+                    inputcollid: o.inputcollid,
+                    args,
+                    location: o.location,
+                },
+            )
+        }
+        NodeTag::T_RelabelType => {
+            let r = node.as_relabel_type().unwrap();
+            let arg = fix_join_expr_mutator(run, r.arg, outer_tlist, inner_tlist, rtoffset)?;
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::RelabelType {
+                    arg,
+                    resulttype: r.resulttype,
+                    resulttypmod: r.resulttypmod,
+                    resultcollid: r.resultcollid,
+                    relabelformat: r.relabelformat,
+                    location: r.location,
+                },
+            )
+        }
+        other => panic!("fix_join_expr_mutator (setrefs.c): {other:?}; M2 expression lane"),
+    }
+}
+
+// search_indexed_tlist_for_var, join leg: miss returns None so the caller can
+// probe the other side. NRM_EQUAL nullingrels matching over empty sets.
+fn search_join_tlist_for_var<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    var: &types_nodes::primnodes::Var<'mcx>,
+    tlist: &NodeList<'mcx>,
+    newvarno: i32,
+    rtoffset: i32,
+) -> PgResult<Option<Node<'mcx>>> {
+    debug_assert!(var.varlevelsup == 0 && var.varnullingrels.is_empty());
+    for tle_node in tlist {
+        let tle = tle_node.as_target_entry().expect("TargetEntry");
+        let Some(sub) = tle.expr.as_var() else { continue };
+        if sub.varno == var.varno && sub.varattno == var.varattno {
+            let mut newvar = types_nodes::primnodes::Var {
+                varno: newvarno,
+                varattno: tle.resno,
+                vartype: var.vartype,
+                vartypmod: var.vartypmod,
+                varcollid: var.varcollid,
+                varnullingrels: types_nodes::bitmapset::Bitmapset::empty(),
+                varlevelsup: 0,
+                varreturningtype: var.varreturningtype,
+                varnosyn: var.varnosyn,
+                varattnosyn: var.varattnosyn,
+                location: var.location,
+            };
+            if newvar.varnosyn > 0 {
+                newvar.varnosyn += rtoffset as u32;
+            }
+            return Ok(Some(Node::mk(run.mcx, newvar)?));
+        }
+    }
+    Ok(None)
 }
