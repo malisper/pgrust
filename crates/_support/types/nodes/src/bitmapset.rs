@@ -73,6 +73,8 @@ pub struct Bitmapset<'mcx> {
 
 // SAFETY: no Drop; the word buffer is arena memory reclaimed at reset.
 unsafe impl mcx::ArenaSafe for Bitmapset<'_> {}
+// SAFETY: same — nothing to run, nothing to leak.
+unsafe impl mcx::ForgetSafe for Bitmapset<'_> {}
 
 const _: () = assert!(!core::mem::needs_drop::<Bitmapset<'static>>());
 const _: () = assert!(core::mem::size_of::<Bitmapset<'static>>() == 16);

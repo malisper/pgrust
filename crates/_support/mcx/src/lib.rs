@@ -21,7 +21,7 @@ mod generation;
 mod owned;
 mod slab;
 mod string;
-pub use arena_safe::ArenaSafe;
+pub use arena_safe::{ArenaForget, ArenaSafe, ForgetSafe};
 pub use aset::alloc_stats;
 pub use owned::{Bind, McxOwned};
 pub use string::PgString;
@@ -1221,6 +1221,13 @@ pub fn arena_string_in<'mcx>(
     debug_assert!(registered, "arena_string_in: use a BumpDrop context");
     // SAFETY: sole &'mcx mut to the live header; child retag of `raw`.
     Ok(unsafe { &mut *raw })
+}
+
+/// Leak into `&'mcx T` with drop glue never run (C: objects die with the
+/// context, zero per-object teardown); `ForgetSafe` bounds the loss to arena
+/// bytes, so any arena backend qualifies.
+pub fn forget_box_in<'mcx, T: ForgetSafe>(mcx: Mcx<'mcx>, value: T) -> PgResult<&'mcx mut T> {
+    Ok(PgBox::leak(alloc_in(mcx, value)?))
 }
 
 pub fn arena_box_in_forget<'mcx, T: ArenaSafe>(

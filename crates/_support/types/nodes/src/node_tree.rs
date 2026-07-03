@@ -24,6 +24,9 @@ pub struct Node<'mcx> {
 }
 
 const _: () = assert!(core::mem::size_of::<Node<'static>>() == 8);
+const _: () = assert!(!core::mem::needs_drop::<Node<'static>>());
+// SAFETY: Copy arena pointer — nothing to run, nothing to leak.
+unsafe impl mcx::ForgetSafe for Node<'_> {}
 
 impl Node<'_> {
     /// Arena identity (C pointer equality).

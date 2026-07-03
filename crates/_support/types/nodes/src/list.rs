@@ -53,6 +53,8 @@ pub type XidList<'mcx> = List<'mcx, XidFlavor>;
 
 // SAFETY: no Drop anywhere; the cell buffer is arena memory reclaimed at reset.
 unsafe impl<'mcx, F: ListFlavor> mcx::ArenaSafe for List<'mcx, F> {}
+// SAFETY: same — nothing to run, nothing to leak.
+unsafe impl<'mcx, F: ListFlavor> mcx::ForgetSafe for List<'mcx, F> {}
 
 const _: () = assert!(!core::mem::needs_drop::<NodeList<'static>>());
 const _: () = assert!(core::mem::size_of::<NodeList<'static>>() == 16);

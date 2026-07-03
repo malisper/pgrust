@@ -245,7 +245,10 @@ pub fn standard_planner<'mcx>(
     cursor_options: i32,
     bound_params: ParamListHandle,
 ) -> PgResult<PlannedStmt<'mcx>> {
-    let mut run = PlannerRun::new(mcx);
+    // C frees the planner's data with one context reset; the run is forgotten
+    // (drop glue never runs), success or error — mcx reclaims it wholesale.
+    let mut run_owner = mcx::ArenaForget::new(PlannerRun::new(mcx));
+    let mut run = &mut *run_owner;
     run.glob.bound_params = bound_params;
 
     // Divergence: the max_parallel_hazard scan runs in subquery_planner after
@@ -303,13 +306,12 @@ pub fn standard_planner<'mcx>(
         let mut fixed_subplans = NodeList::nil();
         for i in 0..run.glob.subplans.len() {
             let subplan = run.glob.subplans.nth(i);
-            let placeholder = types_pathnodes::PlannerInfo::new(mcx);
-            let sub_root = core::mem::replace(&mut run.subroots[i].root, placeholder);
-            let top_root = core::mem::replace(&mut run.root, sub_root);
+            // Swaps, not replace-with-placeholder: no PlannerInfo ever drops.
+            core::mem::swap(&mut run.subroots[i].root, &mut run.root);
             let top_tlist =
                 core::mem::replace(&mut run.processed_tlist, run.subroots[i].processed_tlist);
             let fixed = set_plan_references(&mut run, subplan)?;
-            run.subroots[i].root = core::mem::replace(&mut run.root, top_root);
+            core::mem::swap(&mut run.subroots[i].root, &mut run.root);
             run.processed_tlist = top_tlist;
             fixed_subplans.lappend(mcx, fixed)?;
         }
@@ -338,7 +340,7 @@ pub fn standard_planner<'mcx>(
         }
     }
 
-    let glob = run.glob;
+    let glob = core::mem::replace(&mut run.glob, run::Glob::new());
     Ok(PlannedStmt {
         commandType: parse.commandType,
         queryId: parse.queryId,

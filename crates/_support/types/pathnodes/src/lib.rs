@@ -4,9 +4,10 @@
 //! and is shared by `Copy` u32 handle (fabled #295: PathTarget arena ids took
 //! the planner 3.50x->2.52x; Rc there is refuted, fabled #401). Arenas only
 //! grow within a planner run, so handles never dangle. Exceptions where C
-//! mutates through a densely shared pointer built once: `Rc<IndexOptInfo>`
-//! with `Cell`/`RefCell` on exactly the C-mutated fields (fabled #356) and
-//! `Rc<SpecialJoinInfo>` in `JoinPathExtraData` (fabled #401).
+//! mutates through a densely shared pointer built once: `&'mcx IndexOptInfo`
+//! (forget-leaked into the planner arena) with `Cell`/`RefCell` on exactly
+//! the C-mutated fields (fabled #356), and a borrowed `SpecialJoinInfo` in
+//! `JoinPathExtraData` (fabled #401 refuted the by-value clone).
 //!
 //! types-nodes boundary (in-flight crate; no dep taken): expression/parse
 //! payloads are opaque [`NodeId`]/[`QueryId`] handles. Deferred until
@@ -28,7 +29,6 @@ extern crate alloc;
 
 pub mod optimizer_plan;
 
-use alloc::rc::Rc;
 use core::cell::{Cell, RefCell};
 
 pub use ::mcx::{Mcx, PgBox, PgString, PgVec};
@@ -588,7 +588,7 @@ pub struct IndexClause<'mcx> {
 #[derive(Clone, Debug)]
 pub struct IndexPath<'mcx> {
     pub path: Path<'mcx>,
-    pub indexinfo: Option<Rc<IndexOptInfo<'mcx>>>,
+    pub indexinfo: Option<&'mcx IndexOptInfo<'mcx>>,
     pub indexclauses: PgVec<'mcx, IndexClause<'mcx>>,
     pub indexorderbys: PgVec<'mcx, NodeId>,
     pub indexorderbycols: PgVec<'mcx, i32>,
@@ -1307,7 +1307,7 @@ pub struct RelOptInfo<'mcx> {
     pub has_fdwroutine: bool,
     pub attr_needed: PgVec<'mcx, Relids<'mcx>>,
     pub notnullattnums: Relids<'mcx>,
-    pub indexlist: PgVec<'mcx, Rc<IndexOptInfo<'mcx>>>,
+    pub indexlist: PgVec<'mcx, &'mcx IndexOptInfo<'mcx>>,
     pub statlist: PgVec<'mcx, NodeId>,
     pub eclass_indexes: Relids<'mcx>,
     pub subroot: Subroot<'mcx>,
@@ -2050,10 +2050,10 @@ mod tests {
     }
 
     #[test]
-    fn indexoptinfo_shared_mutation_through_rc() {
+    fn indexoptinfo_shared_mutation_through_borrow() {
         let cx = MemoryContext::new("pathnodes_test");
-        let index = Rc::new(IndexOptInfo::new(cx.mcx()));
-        let alias = Rc::clone(&index);
+        let index = &*mcx::forget_box_in(cx.mcx(), IndexOptInfo::new(cx.mcx())).unwrap();
+        let alias = index;
         assert_eq!(index.tree_height.get(), -1);
         alias.tree_height.set(3);
         alias.predOK.set(true);
@@ -2127,3 +2127,138 @@ mod tests {
         assert_eq!(inc.base().parent, RelId(1));
     }
 }
+
+// The planner never drops these: a PlannerRun is forgotten whole and its
+// arenas die with the query context (C: one wholesale context reset). The
+// census below makes a droppy-beyond-the-arena field a compile error.
+mcx::forget_safe_nodrop!(
+    RelId, PathId, PtId, RinfoId, EcId, EmId, PhInfoId, NodeId, PlanId,
+    QueryId, RangeTblEntryId, PlanRowMarkId, RtePermInfoId, JoinSearchPrivate,
+    ECDerivesKey, ECDerivesEntry, MergeScanSelCache, QualCost, PathKey,
+    MinMaxAggInfo, PlannerParamItem, AggClauseCosts,
+);
+
+mcx::forget_safe_struct!(
+    Bitmapset<'_> { words },
+    DerivesHash<'_> { size, sizemask, members, grow_threshold, data },
+    PartitionBoundInfoData<'_> { strategy, ndatums, nindexes, null_index, default_index, indexes, datums, kind, interleaved_parts },
+    JoinDomain<'_> { jd_relids },
+    AppendRelInfo<'_> { parent_relid, child_relid, parent_reltype, child_reltype, translated_vars, num_child_cols, parent_colnos, parent_reloid },
+    IndexOptInfo<'_> { indexoid, reltablespace, rel, pages, tuples, tree_height, ncolumns, nkeycolumns, indexkeys, indexcollations, opfamily, opcintype, sortopfamily, reverse_sort, nulls_first, canreturn, relam, indexprs, indpred, indextlist, indrestrictinfo, predOK, unique, nullsnotdistinct, immediate, hypothetical, amcanorderbyop, amoptionalkey, amsearcharray, amsearchnulls, amhasgettuple, amhasgetbitmap, amcanparallel, amcanmarkpos },
+    GroupByOrdering<'_> { pathkeys, clauses },
+    PathTarget<'_> { exprs, sortgrouprefs, cost, width, has_volatile_expr },
+    ParamPathInfo<'_> { ppi_req_outer, ppi_rows, ppi_clauses, ppi_serials },
+    Path<'_> { type_, pathtype, parent, pathtarget_id, param_info, parallel_aware, parallel_safe, parallel_workers, rows, disabled_nodes, startup_cost, total_cost, pathkeys },
+    JoinPath<'_> { path, jointype, inner_unique, outerjoinpath, innerjoinpath, joinrestrictinfo },
+    NestPath<'_> { jpath },
+    MergePath<'_> { jpath, path_mergeclauses, outersortkeys, innersortkeys, outer_presorted_keys, skip_mark_restore, materialize_inner },
+    HashPath<'_> { jpath, path_hashclauses, num_batches, inner_rows_total },
+    IndexClause<'_> { rinfo, indexquals, lossy, indexcol, indexcols },
+    IndexPath<'_> { path, indexinfo, indexclauses, indexorderbys, indexorderbycols, indexscandir, indextotalcost, indexselectivity },
+    BitmapHeapPath<'_> { path, bitmapqual },
+    BitmapAndPath<'_> { path, bitmapquals, bitmapselectivity },
+    BitmapOrPath<'_> { path, bitmapquals, bitmapselectivity },
+    TidPath<'_> { path, tidquals },
+    TidRangePath<'_> { path, tidrangequals },
+    SubqueryScanPath<'_> { path, subpath, subroot_subpath },
+    ForeignPath<'_> { path, fdw_outerpath, fdw_restrictinfo, fdw_private },
+    CustomPath<'_> { path, flags, custom_paths, custom_restrictinfo, custom_private },
+    AppendPath<'_> { path, subpaths, first_partial_path, limit_tuples },
+    MergeAppendPath<'_> { path, subpaths, limit_tuples },
+    GroupResultPath<'_> { path, quals },
+    MaterialPath<'_> { path, subpath },
+    MemoizePath<'_> { path, subpath, hash_operators, param_exprs, singlerow, binary_mode, calls, est_entries },
+    UniquePath<'_> { path, subpath, umethod, in_operators, uniq_exprs },
+    GatherPath<'_> { path, subpath, single_copy, num_workers },
+    GatherMergePath<'_> { path, subpath, num_workers },
+    ProjectionPath<'_> { path, subpath, dummypp },
+    ProjectSetPath<'_> { path, subpath },
+    SortPath<'_> { path, subpath },
+    IncrementalSortPath<'_> { spath, nPresortedCols },
+    GroupPath<'_> { path, subpath, groupClause, qual },
+    UpperUniquePath<'_> { path, subpath, numkeys },
+    AggPath<'_> { path, subpath, aggstrategy, aggsplit, numGroups, transitionSpace, groupClause, qual },
+    GroupingSetData<'_> { set, numGroups },
+    RollupData<'_> { groupClause, gsets, gsets_data, numGroups, hashable, is_hashed },
+    GroupingSetsPath<'_> { path, subpath, aggstrategy, rollups, qual, transitionSpace },
+    MinMaxAggPath<'_> { path, mmaggregates, quals },
+    WindowAggPath<'_> { path, subpath, winclause, qual, runCondition, topwindow },
+    SetOpPath<'_> { path, leftpath, rightpath, cmd, strategy, groupList, numGroups },
+    RecursiveUnionPath<'_> { path, leftpath, rightpath, distinctList, wtParam, numGroups },
+    LockRowsPath<'_> { path, subpath, rowMarks, epqParam },
+    ModifyTablePath<'_> { path, subpath, operation, canSetTag, nominalRelation, rootRelation, partColsUpdated, resultRelations, updateColnosLists, withCheckOptionLists, returningLists, rowMarks, onconflict, epqParam, mergeActionLists, mergeJoinConditions },
+    LimitPath<'_> { path, subpath, limitOffset, limitCount, limitOption },
+    RestrictInfo<'_> { clause, is_pushed_down, can_join, pseudoconstant, has_clone, is_clone, leakproof, has_volatile, security_level, num_base_rels, clause_relids, required_relids, incompatible_relids, outer_relids, left_relids, right_relids, orclause, rinfo_serial, parent_ec, eval_cost, norm_selec, outer_selec, mergeopfamilies, left_ec, right_ec, left_em, right_em, scansel_cache, outer_is_left, hashjoinoperator, left_bucketsize, right_bucketsize, left_mcvfreq, right_mcvfreq, left_hasheqoperator, right_hasheqoperator },
+    EquivalenceClass<'_> { ec_opfamilies, ec_collation, ec_childmembers_size, ec_members, ec_childmembers, ec_sources, ec_derives_list, ec_derives_hash, ec_relids, ec_has_const, ec_has_volatile, ec_broken, ec_sortref, ec_min_security, ec_max_security, ec_merged },
+    EquivalenceMember<'_> { em_expr, em_relids, em_is_const, em_is_child, em_datatype, em_jdomain, em_parent },
+    EquivalenceMemberIterator<'_> { ec, current_relid, child_relids, current_cell, current_list },
+    ForeignKeyOptInfo<'_> { con_relid, ref_relid, nkeys, conkey, confkey, conpfeqop, nmatched_ec, nconst_ec, nmatched_rcols, nmatched_ri, eclass, fk_eclass_member, rinfos },
+    StatisticExtInfo<'_> { stat_oid, inherit, rel, kind, keys, exprs },
+    SpecialJoinInfo<'_> { min_lefthand, min_righthand, syn_lefthand, syn_righthand, jointype, ojrelid, commute_above_l, commute_above_r, commute_below_l, commute_below_r, lhs_strict, semi_can_btree, semi_can_hash, semi_operators, semi_rhs_exprs },
+    OuterJoinClauseInfo<'_> { rinfo, sjinfo },
+    PlaceHolderInfo<'_> { phid, ph_var_phexpr, ph_var_phrels, ph_eval_at, ph_lateral, ph_needed, ph_width },
+    UniqueRelInfo<'_> { outerrelids, self_join, extra_clauses },
+    RelOptInfo<'_> { reloptkind, relids, rows, consider_startup, consider_param_startup, consider_parallel, pathtarget_id, pathlist, ppilist, partial_pathlist, cheapest_startup_path, cheapest_total_path, cheapest_unique_path, cheapest_parameterized_paths, direct_lateral_relids, lateral_relids, lateral_vars, relid, reltablespace, rtekind, min_attr, max_attr, attr_widths, nulling_relids, lateral_referencers, pages, tuples, allvisfrac, baserestrictinfo, baserestrictcost, baserestrict_min_security, joininfo, has_eclass_joins, consider_partitionwise_join, serverid, userid, useridiscurrent, parent, top_parent, top_parent_relids, rel_parallel_workers, amflags, has_fdwroutine, attr_needed, notnullattnums, indexlist, statlist, eclass_indexes, subroot, subplan_params, fdw_private, unique_for_rels, non_unique_for_rels, part_scheme, nparts, boundinfo, partbounds_merged, partition_qual, part_rels, live_parts, all_partrels, partexprs, nullable_partexprs },
+    PlannerGlobal<'_> { subplans, subpaths, subroots, rewind_plan_ids, finalrtable, all_relids, prunable_relids, finalrteperminfos, finalrowmarks, result_relations, relation_oids, param_exec_types, last_ph_id, last_row_mark_id, last_plan_node_id, transient_plan, depends_on_role, parallel_mode_ok, parallel_mode_needed, max_parallel_hazard },
+    WindowClauseNode<'_> { name, partitionClause, orderClause, frameOptions, startOffset, endOffset, startInRangeFunc, endInRangeFunc, inRangeColl, inRangeAsc, inRangeNullsFirst, winref },
+    AggInfo<'_> { aggrefs, transno, shareable, finalfn_oid },
+    AggTransInfo<'_> { args, aggfilter, transfn_oid, serialfn_oid, deserialfn_oid, combinefn_oid, aggtranstype, aggtranstypmod, transtypeLen, transtypeByVal, aggtransspace, initValue, initValueIsNull, initValueImage },
+    TargetEntryNode<'_> { expr, resno, resname, ressortgroupref, resorigtbl, resorigcol, resjunk },
+    PlannerInfo<'_> { mcx, parse, glob, query_level, parent_root, plan_params, outer_params, simple_rel_array, simple_rel_array_size, simple_rte_array, append_rel_array, all_baserels, outer_join_rels, all_query_rels, join_rel_list, join_rel_hash, join_rel_level, join_cur_level, init_plans, cte_plan_ids, multiexpr_params, join_domains, eq_classes, ec_merging_done, canon_pathkeys, left_join_clauses, right_join_clauses, full_join_clauses, join_info_list, last_rinfo_serial, all_result_relids, leaf_result_relids, append_rel_list, row_identity_vars, rowMarks, placeholder_list, placeholder_array, placeholder_array_size, fkey_list, query_pathkeys, group_pathkeys, num_groupby_pathkeys, window_pathkeys, distinct_pathkeys, sort_pathkeys, setop_pathkeys, part_schemes, initial_rels, upper_rels, upper_targets, processed_groupClause, processed_distinctClause, processed_tlist, update_colnos, grouping_map, minmax_aggs, total_table_pages, tuple_fraction, limit_tuples, qual_security_level, hasJoinRTEs, hasLateralRTEs, hasHavingQual, hasPseudoConstantQuals, hasAlternativeSubPlans, placeholdersFrozen, hasRecursion, group_rtindex, agginfos, aggtransinfos, numOrderedAggs, hasNonPartialAggs, hasNonSerialAggs, wt_param_id, non_recursive_path, non_recursive_rows, curOuterRels, curOuterParams, partColsUpdated, join_search_private, isAltSubplan, isUsedSubplan, rel_arena, path_arena, rinfo_arena, em_arena, ph_info_arena, node_arena, pathtarget_arena },
+);
+
+// partsupfunc exempt: plain fmgr_info resolutions, fn_expr never set on the
+// plancat path, so forgetting leaks nothing; revisit when partitionwise
+// planning fills part_schemes.
+mcx::forget_safe_struct!(
+    PartitionSchemeData<'_> { strategy, partnatts, partopfamily, partopcintype,
+        partcollation, parttyplen, parttypbyval; partsupfunc },
+);
+
+mcx::forget_safe_tuple!(Subroot<'_>(inner));
+
+mcx::forget_safe_enum!(
+    JoinlistNode<'_> { Rel(x), Sub(x) },
+    DatumImage<'_> { ByVal(x), Bytes(x) },
+    ArenaNode<'_> { Reserved, Expr(x), TargetEntry(x), ForeignKey(x),
+        StatisticExt(x), AggInfo(x), AggTransInfo(x), PlannerParamItem(x),
+        MinMaxAggInfo(x), WindowClause(x) },
+    PathNode<'_> {
+        Path(x),
+        IndexPath(x),
+        BitmapHeapPath(x),
+        BitmapAndPath(x),
+        BitmapOrPath(x),
+        TidPath(x),
+        TidRangePath(x),
+        SubqueryScanPath(x),
+        ForeignPath(x),
+        CustomPath(x),
+        NestPath(x),
+        MergePath(x),
+        HashPath(x),
+        AppendPath(x),
+        MergeAppendPath(x),
+        GroupResultPath(x),
+        MaterialPath(x),
+        MemoizePath(x),
+        UniquePath(x),
+        GatherPath(x),
+        GatherMergePath(x),
+        ProjectionPath(x),
+        ProjectSetPath(x),
+        SortPath(x),
+        IncrementalSortPath(x),
+        GroupPath(x),
+        UpperUniquePath(x),
+        AggPath(x),
+        GroupingSetsPath(x),
+        MinMaxAggPath(x),
+        WindowAggPath(x),
+        SetOpPath(x),
+        RecursiveUnionPath(x),
+        LockRowsPath(x),
+        ModifyTablePath(x),
+        LimitPath(x),
+    },
+);

@@ -1,5 +1,3 @@
-use alloc::rc::Rc;
-
 use ::types_core::primitive::{Cardinality, Cost, Selectivity};
 
 use crate::SpecialJoinInfo;
@@ -16,12 +14,12 @@ pub struct SemiAntiJoinFactors {
     pub match_count: Selectivity,
 }
 
-// `sjinfo` is `Rc`: joinpath builds one SpecialJoinInfo and threads it through
-// every cost workspace; cloning by value was fabled #401's alloc storm.
-#[derive(Debug, Clone)]
-pub struct JoinPathExtraData<'mcx> {
+// `sjinfo` is borrowed: joinpath builds one SpecialJoinInfo and threads it
+// through every cost workspace; cloning by value was fabled #401's alloc storm.
+#[derive(Debug, Clone, Copy)]
+pub struct JoinPathExtraData<'a, 'mcx> {
     pub inner_unique: bool,
-    pub sjinfo: Option<Rc<SpecialJoinInfo<'mcx>>>,
+    pub sjinfo: Option<&'a SpecialJoinInfo<'mcx>>,
     pub semifactors: SemiAntiJoinFactors,
 }
 

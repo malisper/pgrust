@@ -221,7 +221,7 @@ fn check_unique_semijoins(run: &mut PlannerRun<'_>) -> PgResult<()> {
         }
         let n_indexes = run.root.rel(innerrel).indexlist.len();
         for k in 0..n_indexes {
-            let ind = std::rc::Rc::clone(&run.root.rel(innerrel).indexlist[k]);
+            let ind = run.root.rel(innerrel).indexlist[k];
             if !ind.unique || !ind.immediate || !ind.indpred.is_empty() {
                 continue;
             }
