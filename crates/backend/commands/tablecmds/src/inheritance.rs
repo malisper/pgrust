@@ -78,7 +78,7 @@ pub(crate) fn MergeAttributes<'mcx>(
     mcx: Mcx<'mcx>,
     columns: &NodeList<'mcx>,
     supers: &[Oid],
-    relpersistence: i8,
+    relpersistence: u8,
 ) -> PgResult<MergedAttributes<'mcx>> {
     if columns.len() > MaxHeapAttributeNumber {
         return Err(too_many_columns());
@@ -261,7 +261,7 @@ pub(crate) fn MergeAttributes<'mcx>(
                 None => {
                     // Local columns append after all inherited ones; keep the
                     // parse-tree node so raw defaults survive untouched.
-                    inh_defs.push(clone_column_def(newdef));
+                    inh_defs.push(clone_column_def(mcx, newdef)?);
                 }
             }
         }
@@ -304,8 +304,8 @@ fn make_column_def<'mcx>(
     })
 }
 
-fn clone_column_def<'mcx>(d: &ColumnDef<'mcx>) -> ColumnDef<'mcx> {
-    ColumnDef {
+fn clone_column_def<'mcx>(mcx: Mcx<'mcx>, d: &ColumnDef<'mcx>) -> PgResult<ColumnDef<'mcx>> {
+    Ok(ColumnDef {
         colname: d.colname,
         typeName: d.typeName,
         compression: d.compression,
@@ -322,10 +322,10 @@ fn clone_column_def<'mcx>(d: &ColumnDef<'mcx>) -> ColumnDef<'mcx> {
         generated: d.generated,
         collClause: d.collClause,
         collOid: d.collOid,
-        constraints: d.constraints,
-        fdwoptions: d.fdwoptions,
+        constraints: d.constraints.clone_in(mcx)?,
+        fdwoptions: d.fdwoptions.clone_in(mcx)?,
         location: d.location,
-    }
+    })
 }
 
 fn coldef_type(def: &ColumnDef<'_>) -> (Oid, i32) {
