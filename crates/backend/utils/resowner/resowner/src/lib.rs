@@ -166,7 +166,9 @@ impl Arena {
 
     #[inline]
     fn data(&self, owner: ResourceOwner) -> &ResourceOwnerData {
-        let slot = &self.slots[owner.slot() as usize];
+        let Some(slot) = self.slots.get(owner.slot() as usize) else {
+            bad_owner(owner);
+        };
         debug_assert!(slot.live, "ResourceOwner already freed");
         debug_assert_eq!(slot.generation, owner.generation(), "stale ResourceOwner");
         &slot.data
@@ -174,7 +176,9 @@ impl Arena {
 
     #[inline]
     fn data_mut(&mut self, owner: ResourceOwner) -> &mut ResourceOwnerData {
-        let slot = &mut self.slots[owner.slot() as usize];
+        let Some(slot) = self.slots.get_mut(owner.slot() as usize) else {
+            bad_owner(owner);
+        };
         debug_assert!(slot.live, "ResourceOwner already freed");
         debug_assert_eq!(slot.generation, owner.generation(), "stale ResourceOwner");
         &mut slot.data
@@ -226,6 +230,18 @@ fn with_arena<R>(f: impl FnOnce(&mut Arena) -> R) -> R {
         ARENA_ENTERED.with(|e| e.set(false));
         r
     })
+}
+
+#[cold]
+#[inline(never)]
+fn bad_owner(owner: ResourceOwner) -> ! {
+    if owner.is_null() {
+        // C dereferences CurrentResourceOwner unconditionally; NULL here means
+        // a resource op ran outside any owner (e.g. a guard dropped after
+        // owner teardown) — a call-site bug, kept loud but catchable.
+        panic!("resowner: operation on NULL ResourceOwner (CurrentResourceOwner not set)");
+    }
+    panic!("resowner: stale ResourceOwner {owner:?} (slot out of range)");
 }
 
 #[cold]

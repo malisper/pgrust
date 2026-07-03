@@ -74,10 +74,15 @@ struct Entry {
     qd: QueryDescData,
 }
 
-// Droppy TLS + std Vec: registry infrastructure, pquery::stmt_list precedent.
+// ManuallyDrop: entries reach guard drops (BufferPin, Relation closers) that
+// call seams, and a panic in a TLS destructor is a process abort (rust
+// runtime aborts the whole postmaster). Entries surviving a FATAL exit leak,
+// exactly as C's backend-process death leaves them.
 thread_local! {
-    static ENTRIES: RefCell<Vec<Option<Entry>>> = const { RefCell::new(Vec::new()) };
-    static FREE: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
+    static ENTRIES: RefCell<core::mem::ManuallyDrop<Vec<Option<Entry>>>> =
+        const { RefCell::new(core::mem::ManuallyDrop::new(Vec::new())) };
+    static FREE: RefCell<core::mem::ManuallyDrop<Vec<u32>>> =
+        const { RefCell::new(core::mem::ManuallyDrop::new(Vec::new())) };
     static GENERATION: Cell<u32> = const { Cell::new(0) };
 }
 

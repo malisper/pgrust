@@ -457,6 +457,71 @@ fn ProcArrayGroupClearXid(procno: ProcNumber, latestXid: TransactionId) -> PgRes
     Ok(())
 }
 
+// XidCacheRemoveRunningXids (procarray.c): subxact-abort xid cache
+// maintenance. ProcArrayLock exclusive per transam/README.
+pub fn XidCacheRemoveRunningXids(
+    xid: TransactionId,
+    xids: &[TransactionId],
+    latestXid: TransactionId,
+) -> PgResult<()> {
+    debug_assert!(TransactionIdIsValid(xid));
+    let my_procno = MyProc().expect("XidCacheRemoveRunningXids without MyProc");
+    let proc = GetPGProcByNumber(my_procno);
+
+    LWLockAcquire(ProcArrayLock(), LW_EXCLUSIVE, my_procno)?;
+
+    let hdr = ProcGlobal();
+    let pgxactoff = proc.pgxactoff.load(Relaxed) as usize;
+    let mysubxidstat = &hdr.subxidStates[pgxactoff];
+
+    let remove_one = |anxid: TransactionId| -> bool {
+        let mut status = proc.subxidStatus.get();
+        let count = status.count as usize;
+        for j in (0..count).rev() {
+            // SAFETY: own PGPROC subxid slot; owner-only writes serialized by
+            // ProcArrayLock exclusive; readers pair with the Release fence.
+            unsafe {
+                let cache = proc.subxids.ptr();
+                if (*cache).xids[j] == anxid {
+                    (*cache).xids[j] = (*cache).xids[count - 1];
+                    fence(Ordering::Release); // pg_write_barrier
+                    let mut shared = mysubxidstat.get();
+                    shared.count -= 1;
+                    mysubxidstat.set(shared);
+                    status.count -= 1;
+                    proc.subxidStatus.set(status);
+                    return true;
+                }
+            }
+        }
+        false
+    };
+
+    // A miss without overflow can happen on repeated invocation during a
+    // failed AbortSubTransaction — WARNING, as in C.
+    for &anxid in xids.iter().rev() {
+        if !remove_one(anxid) && !proc.subxidStatus.get().overflowed {
+            let _ = elog::elog(
+                types_error::WARNING,
+                format!("did not find subXID {anxid} in MyProc"),
+            );
+        }
+    }
+    if !remove_one(xid) && !proc.subxidStatus.get().overflowed {
+        let _ = elog::elog(
+            types_error::WARNING,
+            format!("did not find subXID {xid} in MyProc"),
+        );
+    }
+
+    MaintainLatestCompletedXid(latestXid);
+    let tv = TransamVariables();
+    tv.xactCompletionCount
+        .store(tv.xactCompletionCount.load(Relaxed) + 1, Relaxed);
+
+    LWLockRelease(ProcArrayLock())
+}
+
 fn MaintainLatestCompletedXid(latestXid: TransactionId) {
     let tv = TransamVariables();
     let cur_latest = FullTransactionId::from_u64(tv.latestCompletedXid.load(Relaxed));
@@ -1014,6 +1079,7 @@ pub fn init_seams() {
     procarray_seams::proc_array_remove::set(ProcArrayRemove);
     procarray_seams::proc_array_end_transaction::set(ProcArrayEndTransaction);
     procarray_seams::transaction_id_is_in_progress::set(TransactionIdIsInProgress);
+    procarray_seams::xid_cache_remove_running_xids::set(XidCacheRemoveRunningXids);
     // Tests pre-install controllable global-vis fakes; keep them.
     if !procarray_seams::global_vis_test_for::is_installed() {
         procarray_seams::global_vis_test_for::set(GlobalVisTestFor);

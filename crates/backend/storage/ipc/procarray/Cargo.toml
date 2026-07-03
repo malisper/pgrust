@@ -25,6 +25,7 @@ varsup = { path = "../../../access/transam/varsup" }
 types_rel = { path = "../../../../_support/types/rel" }
 catalog_seams = { path = "../../../catalog/catalog_seams" }
 init_small = { path = "../../../utils/init/init_small" }
+elog = { path = "../../../utils/error/elog" }
 
 [dev-dependencies]
 pg_sema_seams = { path = "../../../port/pg_sema_seams" }

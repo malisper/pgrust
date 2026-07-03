@@ -398,11 +398,13 @@ fn force_generic_plan_mode_skips_customs() {
 }
 
 #[test]
-#[should_panic(expected = "outlives its CachedPlanSource")]
-fn drop_with_live_plan_reference_is_loud() {
+fn drop_with_live_plan_reference_defers_source_free() {
     install();
     push_snapshot();
     let h = make_saved_source(false);
-    let _p = GetCachedPlan(h, ParamListHandle::NULL, None, QueryEnvHandle::NULL).unwrap();
+    let p = GetCachedPlan(h, ParamListHandle::NULL, None, QueryEnvHandle::NULL).unwrap();
     DropCachedPlan(h);
+    // Plan survives its dropped source until the last release (C refcount).
+    assert!(!CachedPlanStmtList(p).is_empty());
+    ReleaseCachedPlan(p);
 }
