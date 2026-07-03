@@ -83,9 +83,18 @@ pub(crate) struct SpiConnection {
 
 thread_local! {
     pub(crate) static SPI_STACK: RefCell<Vec<SpiConnection>> = const { RefCell::new(Vec::new()) };
+    // C's _SPI_connected: the per-transaction empty-stack guards (AtEOXact_SPI
+    // and SPI_inside_nonatomic_context run per commit) must stay one Cell
+    // load, not a RefCell borrow (+53 instr/q on the select1 gate).
+    static SPI_CONNECTED: Cell<i32> = const { Cell::new(-1) };
     static SPI_PROCESSED: Cell<u64> = const { Cell::new(0) };
     static SPI_RESULT: Cell<i32> = const { Cell::new(0) };
     static SPI_TUPTABLE: Cell<Option<TuptabHandle>> = const { Cell::new(None) };
+}
+
+fn sync_connected() {
+    let depth = SPI_STACK.with(|s| s.borrow().len());
+    SPI_CONNECTED.with(|c| c.set(depth as i32 - 1));
 }
 
 pub fn SPI_processed() -> u64 {
@@ -165,6 +174,7 @@ pub fn SPI_connect_ext(options: i32) -> PgResult<i32> {
         outer_result: SPI_result(),
     };
     SPI_STACK.with(|s| s.borrow_mut().push(conn));
+    sync_connected();
     set_spi_processed(0);
     set_spi_tuptable(None);
     set_spi_result(0);
@@ -183,6 +193,7 @@ pub fn SPI_finish() -> PgResult<i32> {
         return Ok(SPI_ERROR_UNCONNECTED);
     }
     let conn = SPI_STACK.with(|s| s.borrow_mut().pop()).expect("checked nonempty");
+    sync_connected();
     set_spi_processed(conn.outer_processed);
     set_spi_tuptable(conn.outer_tuptable);
     set_spi_result(conn.outer_result);
@@ -221,6 +232,9 @@ pub(crate) fn current_exec_mcx() -> Mcx<'static> {
 }
 
 pub fn AtEOXact_SPI(is_commit: bool) -> PgResult<()> {
+    if SPI_CONNECTED.with(Cell::get) < 0 {
+        return Ok(());
+    }
     let mut found = false;
     loop {
         let popped = SPI_STACK.with(|s| {
@@ -231,6 +245,7 @@ pub fn AtEOXact_SPI(is_commit: bool) -> PgResult<()> {
             }
         });
         let Some(conn) = popped else { break };
+        sync_connected();
         found = true;
         set_spi_processed(conn.outer_processed);
         set_spi_tuptable(conn.outer_tuptable);
@@ -248,6 +263,9 @@ pub fn AtEOXact_SPI(is_commit: bool) -> PgResult<()> {
 }
 
 pub fn AtEOSubXact_SPI(is_commit: bool, my_subid: SubTransactionId) -> PgResult<()> {
+    if SPI_CONNECTED.with(Cell::get) < 0 {
+        return Ok(());
+    }
     let mut found = false;
     loop {
         let popped = SPI_STACK.with(|s| {
@@ -258,6 +276,7 @@ pub fn AtEOSubXact_SPI(is_commit: bool, my_subid: SubTransactionId) -> PgResult<
             }
         });
         let Some(conn) = popped else { break };
+        sync_connected();
         found = true;
         set_spi_processed(conn.outer_processed);
         set_spi_tuptable(conn.outer_tuptable);
@@ -303,6 +322,9 @@ pub fn AtEOSubXact_SPI(is_commit: bool, my_subid: SubTransactionId) -> PgResult<
 }
 
 pub fn SPI_inside_nonatomic_context() -> bool {
+    if SPI_CONNECTED.with(Cell::get) < 0 {
+        return false;
+    }
     // Must match _SPI_commit's atomicity tests.
     with_current(|conn| conn.atomic).is_some_and(|atomic| !atomic && !xact::IsSubTransaction())
 }
