@@ -832,9 +832,6 @@ pub fn init_seams() {
     use relmapper_seams as s;
     s::relation_map_invalidate::set(RelationMapInvalidate);
     s::relation_map_invalidate_all::set(RelationMapInvalidateAll);
-    s::at_eoxact_relation_map::set(AtEOXact_RelationMap);
-    s::at_cci_relation_map::set(AtCCI_RelationMap);
-    s::at_prepare_relation_map::set(AtPrepare_RelationMap);
     s::relation_map_initialize::set(RelationMapInitialize);
     s::relation_map_initialize_phase2::set(RelationMapInitializePhase2);
     s::relation_map_initialize_phase3::set(RelationMapInitializePhase3);

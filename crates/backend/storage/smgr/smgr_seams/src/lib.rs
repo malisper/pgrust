@@ -58,10 +58,6 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    pub fn at_eoxact_smgr()
-);
-
-seam_core::seam!(
     // ProcessBarrierSmgrRelease() (smgr.c); barrier processors may ereport.
     pub fn process_barrier_smgr_release() -> PgResult<bool>
 );

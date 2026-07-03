@@ -640,6 +640,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "catalog_heap"
+version = "0.0.0"
+dependencies = [
+ "types_core",
+ "types_tuple",
+]
+
+[[package]]
 name = "catalog_index_seams"
 version = "0.0.0"
 dependencies = [
@@ -2728,9 +2736,14 @@ dependencies = [
 name = "nodemodifytable"
 version = "0.1.0"
 dependencies = [
+ "exectuples",
+ "executils",
  "mcx",
+ "tableam",
  "types_error",
  "types_nodes",
+ "types_rel",
+ "types_slot",
 ]
 
 [[package]]
@@ -2817,6 +2830,11 @@ dependencies = [
 [[package]]
 name = "parallel"
 version = "0.0.0"
+dependencies = [
+ "parallel_seams",
+ "types_core",
+ "types_error",
+]
 
 [[package]]
 name = "parallel_seams"
@@ -4646,6 +4664,11 @@ dependencies = [
 [[package]]
 name = "spi"
 version = "0.0.0"
+dependencies = [
+ "spi_seams",
+ "types_core",
+ "types_error",
+]
 
 [[package]]
 name = "spi_seams"

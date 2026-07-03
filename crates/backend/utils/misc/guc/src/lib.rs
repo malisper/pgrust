@@ -358,10 +358,10 @@ pub fn init_seams() {
         AtEOXact_GUC(is_commit, nest_level);
         Ok(())
     });
-    s::at_start_guc::set(AtStart_GUC);
     s::set_config_option_internal_dynamic_default::set(|name, value| {
         SetConfigOption(name, Some(value), PGC_INTERNAL, PGC_S_DYNAMIC_DEFAULT)
     });
+    s::set_config_option::set(SetConfigOption);
     s::process_config_file_internal::set(|context, apply_settings, elevel| {
         process_config::process_config_file_internal(context, apply_settings, elevel).map(|_| ())
     });

@@ -129,7 +129,6 @@ fn remember_without_enlarge_errors_when_full() {
     let err = ResourceOwnerRemember(o, Datum::from_usize(99), &PIN_DESC).unwrap_err();
     assert!(err.message().contains("array was full"));
 
-    // Forgetting the most recent entry makes room again (documented exception).
     ResourceOwnerForget(o, Datum::from_usize(31), &PIN_DESC).unwrap();
     ResourceOwnerRemember(o, Datum::from_usize(99), &PIN_DESC).unwrap();
 
@@ -146,7 +145,6 @@ fn spill_to_hash_at_c_threshold() {
     for v in 0..33usize {
         remember(o, v, &PIN_DESC);
     }
-    // The 33rd enlarge moved the full array into a fresh 64-slot hash.
     assert_eq!(nhash(o), 32);
     assert_eq!(narr(o), 1);
     assert_eq!(capacity(o), RESOWNER_HASH_INIT_SIZE);
@@ -282,7 +280,6 @@ fn release_all_of_kind_releases_only_that_kind() {
     let pins = released();
     assert_eq!(pins.len(), 20);
     assert!(pins.iter().all(|&(k, _)| k == "pin"));
-    // Owner is usable again afterwards.
     remember(o, 1000, &PIN_DESC);
     ResourceOwnerForget(o, Datum::from_usize(1000), &PIN_DESC).unwrap();
     release_all_phases(o, false);
@@ -310,7 +307,6 @@ fn locks_cache_overflows_lossily() {
         ResourceOwnerRememberLock(o, tag(i));
     }
     assert_eq!(with_arena(|a| a.data(o).nlocks), MAX_RESOWNER_LOCKS + 1);
-    // Overflowed: forget becomes a no-op and delete tolerates the sentinel.
     ResourceOwnerForgetLock(o, tag(3)).unwrap();
     assert_eq!(with_arena(|a| a.data(o).nlocks), MAX_RESOWNER_LOCKS + 1);
     ResourceOwnerDelete(o);
@@ -329,7 +325,6 @@ fn reparent_and_delete_recurse() {
     assert_eq!(ResourceOwnerGetParent(c1), b);
     ResourceOwnerNewParent(c2, b);
 
-    // Deleting b deletes c1/c2; a is then leaf and deletable.
     ResourceOwnerDelete(b);
     ResourceOwnerDelete(a);
 }
@@ -410,7 +405,6 @@ fn aux_process_owner_lifecycle() {
     remember(aux, 5, &PIN_DESC);
     ReleaseAuxProcessResources(false).unwrap();
     assert_eq!(released(), vec![("pin", 5)]);
-    // Reusable after release.
     remember(aux, 6, &PIN_DESC);
     ReleaseAuxProcessResources(false).unwrap();
     assert_eq!(released(), vec![("pin", 6)]);
@@ -418,40 +412,43 @@ fn aux_process_owner_lifecycle() {
 }
 
 #[test]
-fn xact_seam_choreography() {
+fn xact_owner_choreography() {
     setup();
-    resowner_seams::at_start_resource_owner::call().unwrap();
-    let top = TopTransactionResourceOwner();
+    let top = ResourceOwnerCreate(ResourceOwner::NULL, "TopTransaction").unwrap();
+    SetTopTransactionResourceOwner(top);
+    SetCurTransactionResourceOwner(top);
+    SetCurrentResourceOwner(top);
     assert!(!top.is_null());
-    assert_eq!(CurTransactionResourceOwner(), top);
-    assert_eq!(CurrentResourceOwner(), top);
     assert_eq!(resowner_seams::current_resource_owner::call(), top);
 
-    resowner_seams::at_substart_resource_owner::call().unwrap();
-    let sub = CurTransactionResourceOwner();
+    let sub = ResourceOwnerCreate(CurTransactionResourceOwner(), "SubTransaction").unwrap();
+    SetCurTransactionResourceOwner(sub);
+    SetCurrentResourceOwner(sub);
     assert_ne!(sub, top);
-    assert_eq!(resowner_seams::resource_owner_get_parent::call(sub), top);
-
-    let tok = resowner_seams::swap_current_to_cur_transaction_ancestor::call(1);
-    assert_eq!(CurrentResourceOwner(), top);
-    resowner_seams::restore_current_resource_owner::call(tok);
-    assert_eq!(CurrentResourceOwner(), sub);
+    assert_eq!(ResourceOwnerGetParent(sub), top);
 
     remember(sub, 300, &PIN_DESC);
-    resowner_seams::release_subxact_owner_before_locks::call(false).unwrap();
+    ResourceOwnerRelease(sub, RESOURCE_RELEASE_BEFORE_LOCKS, false, false).unwrap();
     assert_eq!(released(), vec![("pin", 300)]);
-    resowner_seams::release_subxact_owner_locks::call(false).unwrap();
-    resowner_seams::set_current_to_cur_transaction::call();
-    resowner_seams::cleanup_subxact_owner::call().unwrap();
+    ResourceOwnerRelease(sub, RESOURCE_RELEASE_LOCKS, false, false).unwrap();
+    ResourceOwnerRelease(sub, RESOURCE_RELEASE_AFTER_LOCKS, false, false).unwrap();
+    SetCurrentResourceOwner(CurTransactionResourceOwner());
+    let parent = ResourceOwnerGetParent(sub);
+    SetCurrentResourceOwner(parent);
+    SetCurTransactionResourceOwner(parent);
+    ResourceOwnerDelete(sub);
     assert_eq!(CurTransactionResourceOwner(), top);
 
     remember(top, 400, &PIN_DESC);
-    resowner_seams::reset_current_resource_owner::call();
+    SetCurrentResourceOwner(ResourceOwner::NULL);
     assert!(CurrentResourceOwner().is_null());
-    resowner_seams::release_transaction_owner_before_locks::call(true).unwrap();
+    ResourceOwnerRelease(top, RESOURCE_RELEASE_BEFORE_LOCKS, true, true).unwrap();
     assert_eq!(released(), vec![("pin", 400)]);
-    resowner_seams::release_transaction_owner_locks::call(true).unwrap();
-    resowner_seams::delete_transaction_owner::call().unwrap();
+    ResourceOwnerRelease(top, RESOURCE_RELEASE_LOCKS, true, true).unwrap();
+    ResourceOwnerRelease(top, RESOURCE_RELEASE_AFTER_LOCKS, true, true).unwrap();
+    ResourceOwnerDelete(top);
+    SetCurTransactionResourceOwner(ResourceOwner::NULL);
+    SetTopTransactionResourceOwner(ResourceOwner::NULL);
     assert!(TopTransactionResourceOwner().is_null());
     assert!(CurTransactionResourceOwner().is_null());
 }
@@ -459,8 +456,10 @@ fn xact_seam_choreography() {
 #[test]
 fn portal_seams_create_release_delete() {
     setup();
-    resowner_seams::at_start_resource_owner::call().unwrap();
-    let top = TopTransactionResourceOwner();
+    let top = ResourceOwnerCreate(ResourceOwner::NULL, "TopTransaction").unwrap();
+    SetTopTransactionResourceOwner(top);
+    SetCurTransactionResourceOwner(top);
+    SetCurrentResourceOwner(top);
 
     let portal = resowner_portal_seams::resource_owner_create_portal::call();
     assert_eq!(ResourceOwnerGetParent(portal), top);
@@ -488,10 +487,13 @@ fn portal_seams_create_release_delete() {
     resowner_portal_seams::resource_owner_new_parent::call(portal, ResourceOwner::NULL);
     resowner_portal_seams::resource_owner_delete::call(portal);
 
-    resowner_seams::reset_current_resource_owner::call();
-    resowner_seams::release_transaction_owner_before_locks::call(true).unwrap();
-    resowner_seams::release_transaction_owner_locks::call(true).unwrap();
-    resowner_seams::delete_transaction_owner::call().unwrap();
+    SetCurrentResourceOwner(ResourceOwner::NULL);
+    ResourceOwnerRelease(top, RESOURCE_RELEASE_BEFORE_LOCKS, true, true).unwrap();
+    ResourceOwnerRelease(top, RESOURCE_RELEASE_LOCKS, true, true).unwrap();
+    ResourceOwnerRelease(top, RESOURCE_RELEASE_AFTER_LOCKS, true, true).unwrap();
+    ResourceOwnerDelete(top);
+    SetCurTransactionResourceOwner(ResourceOwner::NULL);
+    SetTopTransactionResourceOwner(ResourceOwner::NULL);
 }
 
 #[test]
@@ -502,9 +504,9 @@ fn lock_seams_delegate_to_cache() {
         lock: Default::default(),
         mode: 3,
     };
-    resowner_seams::resource_owner_remember_lock::call(o, tag);
+    ResourceOwnerRememberLock(o, tag);
     assert_eq!(with_arena(|a| a.data(o).nlocks), 1);
-    resowner_seams::resource_owner_forget_lock::call(o, tag);
+    ResourceOwnerForgetLock(o, tag).unwrap();
     assert_eq!(with_arena(|a| a.data(o).nlocks), 0);
     ResourceOwnerDelete(o);
 }

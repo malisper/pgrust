@@ -229,6 +229,7 @@ members = [
     "crates/backend/storage/ipc/shmem",
     "crates/backend/catalog/catalog",
     "crates/backend/catalog/catalog_namespace",
+    "crates/backend/catalog/catalog_heap",
     "crates/backend/access/index/genam_seams",
     "crates/backend/utils/cache/catcache",
     "crates/backend/utils/cache/cache_syscache",

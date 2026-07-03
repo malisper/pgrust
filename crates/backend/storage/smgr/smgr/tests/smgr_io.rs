@@ -97,7 +97,7 @@ fn create_extend_write_read_nblocks_roundtrip() {
     // The installed seam surface: release + destroy paths run end to end.
     smgr_seams::smgr_release_rel_locator::call(key).unwrap();
     assert!(smgr_seams::process_barrier_smgr_release::call().unwrap());
-    smgr_seams::at_eoxact_smgr::call();
+    smgr::AtEOXact_SMgr().unwrap();
     smgr_seams::smgr_create::call(key, ForkNumber::FSM_FORKNUM, false).unwrap();
     assert!(smgr::smgrexists(key, ForkNumber::FSM_FORKNUM).unwrap());
 }

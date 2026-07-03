@@ -698,10 +698,6 @@ pub fn init_seams() {
         })?
     });
     smgr_seams::smgr_destroy_all::set(smgrdestroyall);
-    smgr_seams::at_eoxact_smgr::set(|| {
-        // C's AtEOXact_SMgr is void; md close failures are not ERROR in C.
-        let _ = AtEOXact_SMgr();
-    });
     smgr_seams::process_barrier_smgr_release::set(ProcessBarrierSmgrRelease);
 }
 

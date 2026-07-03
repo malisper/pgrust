@@ -67,3 +67,18 @@ seam_core::seam!(
     // pgstat_discard_stats() (pgstat.c).
     pub fn pgstat_discard_stats() -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    // pgstat_report_checkpointer() (pgstat_checkpointer.c).
+    pub fn pgstat_report_checkpointer()
+);
+
+seam_core::seam!(
+    // pgstat_report_bgwriter() (pgstat_bgwriter.c).
+    pub fn pgstat_report_bgwriter()
+);
+
+seam_core::seam!(
+    // pgstat_report_wal(force) (pgstat_wal.c).
+    pub fn pgstat_report_wal(force: bool)
+);
