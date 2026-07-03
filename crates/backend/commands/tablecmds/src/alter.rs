@@ -1172,7 +1172,7 @@ fn ATPrepAlterColumnType<'mcx>(
                 .with_sqlstate(ERRCODE_INVALID_TABLE_DEFINITION),
         ));
     }
-    let (targettype, targettypmod) = parse_utilcmd::typenameTypeIdAndMod(mcx, tn)?;
+    let (targettype, targettypmod) = parse_utilcmd::typenameTypeIdAndMod(mcx, None, tn)?;
     // GetColumnDefCollation: no COLLATE clause (loud at parse) -> type default.
     let att = *rel.rd_att.attr(attnum as usize - 1);
 
@@ -1285,7 +1285,7 @@ fn ATExecAlterColumnType<'mcx>(
             .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
         ));
     }
-    let (targettype, targettypmod) = parse_utilcmd::typenameTypeIdAndMod(mcx, tn)?;
+    let (targettype, targettypmod) = parse_utilcmd::typenameTypeIdAndMod(mcx, None, tn)?;
     let shape = syscache_seams::lookup_pg_type_shape::call(targettype)?
         .expect("pg_type row vanished");
     let targetcollid = shape.typcollation;
