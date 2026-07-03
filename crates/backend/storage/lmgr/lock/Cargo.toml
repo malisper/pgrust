@@ -29,7 +29,7 @@ guc_tables = { path = "../../../utils/misc/guc_tables" }
 timeout_seams = { path = "../../../utils/misc/timeout_seams" }
 ps_status_seams = { path = "../../../utils/misc/ps_status_seams" }
 elog_seams = { path = "../../../utils/error/elog_seams" }
-resowner_seams = { path = "../../../utils/resowner/resowner_seams" }
+resowner = { path = "../../../utils/resowner/resowner" }
 transam_xlog_seams = { path = "../../../access/transam/transam_xlog_seams" }
 timestamp_seams = { path = "../../../utils/adt/timestamp_seams" }
 

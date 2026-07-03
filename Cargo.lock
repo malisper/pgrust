@@ -2535,6 +2535,18 @@ dependencies = [
 [[package]]
 name = "nodelimit"
 version = "0.1.0"
+dependencies = [
+ "datum",
+ "execexpr",
+ "exectuples",
+ "executils",
+ "mcx",
+ "types_error",
+ "types_nodes",
+ "types_scan",
+ "types_slot",
+ "types_tuple",
+]
 
 [[package]]
 name = "nodes_core"
@@ -2979,27 +2991,36 @@ dependencies = [
 name = "plancache"
 version = "0.1.0"
 dependencies = [
+ "aclchk_seams",
  "cache_syscache",
  "catalog_namespace",
+ "catalog_seams",
  "datum",
  "elog",
  "execscan",
  "guc_tables",
  "inval",
+ "inval_seams",
  "lmgr",
+ "lock_seams",
  "mcx",
  "miscinit",
+ "miscinit_seams",
  "parser_analyze",
  "plancache_portal_seams",
  "planner_seams",
  "snapmgr",
+ "syscache_seams",
  "types_core",
  "types_error",
  "types_nodes",
  "types_portal",
  "types_resowner",
+ "types_snapshot",
+ "types_storage",
  "types_tuple",
  "utility_seams",
+ "xact_seams",
 ]
 
 [[package]]
@@ -3966,6 +3987,7 @@ dependencies = [
  "postmaster",
  "postmaster_startup",
  "pqcomm",
+ "pqcomm_seams",
  "pqformat",
  "pquery",
  "printtup",

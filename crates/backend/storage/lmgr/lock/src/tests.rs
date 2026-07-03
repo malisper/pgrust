@@ -123,12 +123,7 @@ fn setup() {
         deadlock_seams::remember_simple_deadlock::set(|_, _, _, _| {});
         deadlock_seams::get_blocking_autovacuum_procno::set(|| None);
 
-        resowner_seams::current_resource_owner::set(|| {
-            types_resowner::ResourceOwner::from_parts(1, 1)
-        });
-        resowner_seams::resource_owner_remember_lock::set(|_, _| {});
-        resowner_seams::resource_owner_forget_lock::set(|_, _| {});
-        resowner_seams::resource_owner_get_parent::set(|_| types_resowner::ResourceOwner::NULL);
+        resowner::init_seams();
 
         transam_xlog_seams::recovery_in_progress::set(|| false);
         transam_xlog_seams::xlog_standby_info_active::set(|| false);
@@ -170,6 +165,10 @@ fn become_backend() {
             .databaseId
             .store(TESTDB, SeqCst);
         InitLockManagerAccess();
+        let owner =
+            resowner::ResourceOwnerCreate(types_resowner::ResourceOwner::NULL, "lock tests")
+                .unwrap();
+        resowner::SetCurrentResourceOwner(owner);
     }
 }
 
