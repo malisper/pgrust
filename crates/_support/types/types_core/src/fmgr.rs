@@ -59,6 +59,13 @@ pub struct FmgrInfo {
     pub fn_expr: Option<FnExprErased>,
 }
 
+// C: build_aggregate_transfn_expr's constructed FuncExpr, reduced to its only
+// consumer (get_fn_expr_argtype): slot 0 is the transition type, slots 1..
+// the aggregate input types. The slice is arena-backed with the lifetime
+// forgotten (from_node_ref's contract); Copy, so FmgrInfo stays drop-free.
+#[derive(Clone, Copy)]
+pub struct AggFnArgTypes(pub &'static [crate::primitive::Oid]);
+
 // Erased `fn_expr` carrier: the node is a `types-nodes` `Expr` this crate
 // must not name. Copy raw pointer — C copies the bare `fmNodePtr`; the arena
 // owns the node, so FmgrInfo carries no drop glue.

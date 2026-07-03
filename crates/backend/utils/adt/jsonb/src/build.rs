@@ -179,6 +179,19 @@ impl<'mcx> JsonbBuildState<'mcx> {
         self.stack.len()
     }
 
+    /// C: clone_parse_state — shallow: frames alias the ArenaVec buffers, so
+    /// a repeated finalfn re-runs the idempotent uniqueify exactly as C.
+    /// The clone lives in the same arena (C uses the calling context; one
+    /// small stack per finalization is retained until the agg ends).
+    pub fn clone_shallow(&self) -> PgResult<JsonbBuildState<'mcx>> {
+        let mut stack: PgVec<'mcx, Frame<'mcx>> =
+            mcx::vec_with_capacity_in(self.mcx, self.stack.len().max(1))?;
+        for f in self.stack.iter() {
+            stack.push(*f);
+        }
+        Ok(JsonbBuildState { mcx: self.mcx, stack })
+    }
+
     pub fn in_array(&self) -> bool {
         matches!(
             self.stack.last().map(|f| &f.val),

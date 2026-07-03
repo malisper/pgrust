@@ -17,6 +17,7 @@ pub use construct::{
     deconstruct_array, deconstruct_array_builtin,
 };
 pub use foundation::{
-    arr_data_offset, arr_dim, arr_elemtype, arr_hasnull, arr_lbound, arr_ndim, arr_size, MAXDIM,
+    arr_data_offset, arr_dim, arr_elemtype, arr_hasnull, arr_lbound, arr_ndim, arr_size,
+    read_dims_lbounds, MAXDIM,
 };
 pub use io::{array_in, array_out, array_recv, array_send, ArrayIoMeta};

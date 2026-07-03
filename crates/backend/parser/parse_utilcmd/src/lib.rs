@@ -30,9 +30,6 @@ pub fn typenameTypeIdAndMod<'mcx>(mcx: Mcx<'mcx>, tn: &TypeName<'_>) -> PgResult
     if !tn.typmods.is_nil() || tn.typemod != -1 {
         unported("typenameTypeMod (type modifiers)");
     }
-    if !tn.arrayBounds.is_nil() {
-        unported("array types (arrayBounds)");
-    }
     if tn.typeOid != InvalidOid {
         unported("pre-resolved TypeName.typeOid lane");
     }
@@ -67,6 +64,16 @@ pub fn typenameTypeIdAndMod<'mcx>(mcx: Mcx<'mcx>, tn: &TypeName<'_>) -> PgResult
     if typoid == InvalidOid {
         return Err(type_does_not_exist(typname));
     }
+    // C LookupTypeNameExtended: array bounds convert to the array type.
+    let typoid = if tn.arrayBounds.is_nil() {
+        typoid
+    } else {
+        let arr = syscache_seams::pg_type_typarray::call(typoid)?.unwrap_or(InvalidOid);
+        if arr == InvalidOid {
+            return Err(type_does_not_exist(typname));
+        }
+        arr
+    };
     match syscache_seams::pg_type_isdefined::call(typoid)? {
         Some(true) => {}
         _ => unported("shell types (typisdefined = false)"),

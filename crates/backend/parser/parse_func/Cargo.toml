@@ -9,6 +9,7 @@ name = "parse_func"
 path = "src/lib.rs"
 
 [dependencies]
+readfuncs = { path = "../../nodes/readfuncs" }
 catalog_namespace = { path = "../../catalog/catalog_namespace" }
 coerce = { path = "../coerce" }
 elog = { path = "../../utils/error/elog" }

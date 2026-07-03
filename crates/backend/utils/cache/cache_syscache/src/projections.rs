@@ -513,6 +513,14 @@ const ANUM_PG_PROC_PRORETTYPE: i32 = 19;
 const ANUM_PG_PROC_OID: i32 = 1;
 const ANUM_PG_PROC_PRONARGDEFAULTS: i32 = 18;
 const ANUM_PG_PROC_PROARGTYPES: i32 = 20;
+const ANUM_PG_PROC_PROALLARGTYPES: i32 = 21;
+const ANUM_PG_PROC_PROARGMODES: i32 = 22;
+const ANUM_PG_PROC_PROARGNAMES: i32 = 23;
+const ANUM_PG_RANGE_RNGTYPID: i32 = 1;
+const ANUM_PG_RANGE_RNGSUBTYPE: i32 = 2;
+const ANUM_PG_RANGE_RNGMULTITYPID: i32 = 3;
+const ANUM_PG_RANGE_RNGCOLLATION: i32 = 4;
+const ANUM_PG_PROC_PROARGDEFAULTS: i32 = 24;
 const ANUM_PG_AMPROC_AMPROCRIGHTTYPE: i32 = 4;
 const ANUM_PG_AMPROC_AMPROCNUM: i32 = 5;
 const ANUM_PG_AMPROC_AMPROC: i32 = 6;
@@ -1179,6 +1187,175 @@ fn pg_aggregate_initval_attr<'mcx>(
     Ok(Some(out))
 }
 
+fn pg_proc_proargdefaults<'mcx>(
+    mcx: Mcx<'mcx>,
+    funcid: Oid,
+) -> PgResult<Option<Option<PgString<'mcx>>>> {
+    let Some(tuple) = SearchSysCache1(PROCOID, SysCacheKey::Value(Datum::from_oid(funcid)))?
+    else {
+        return Ok(None);
+    };
+    let t = tuple.tuple();
+    let out = match varlena_image(mcx, &t, PROCOID, ANUM_PG_PROC_PROARGDEFAULTS)? {
+        Some(img) => {
+            let s = core::str::from_utf8(&img[4..]).expect("proargdefaults is pg_node_tree text");
+            Some(PgString::from_str_in(s, mcx)?)
+        }
+        None => None,
+    };
+    drop(t);
+    ReleaseSysCache(tuple);
+    Ok(Some(out))
+}
+
+fn lookup_pg_range_shape(
+    range_oid: Oid,
+) -> PgResult<Option<syscache_seams::PgRangeShape>> {
+    let Some(tuple) = SearchSysCache1(
+        crate::cacheinfo::RANGETYPE,
+        SysCacheKey::Value(Datum::from_oid(range_oid)),
+    )?
+    else {
+        return Ok(None);
+    };
+    let t = tuple.tuple();
+    let shape = syscache_seams::PgRangeShape {
+        rngsubtype: getattr(&t, crate::cacheinfo::RANGETYPE, ANUM_PG_RANGE_RNGSUBTYPE).as_oid(),
+        rngcollation: getattr(&t, crate::cacheinfo::RANGETYPE, ANUM_PG_RANGE_RNGCOLLATION)
+            .as_oid(),
+        rngmultitypid: getattr(&t, crate::cacheinfo::RANGETYPE, ANUM_PG_RANGE_RNGMULTITYPID)
+            .as_oid(),
+    };
+    drop(t);
+    ReleaseSysCache(tuple);
+    Ok(Some(shape))
+}
+
+fn lookup_pg_proc_signature<'mcx>(
+    mcx: Mcx<'mcx>,
+    funcid: Oid,
+) -> PgResult<Option<(Oid, PgVec<'mcx, Oid>)>> {
+    let Some(tuple) = SearchSysCache1(PROCOID, SysCacheKey::Value(Datum::from_oid(funcid)))?
+    else {
+        return Ok(None);
+    };
+    let t = tuple.tuple();
+    let rettype = getattr(&t, PROCOID, ANUM_PG_PROC_PRORETTYPE).as_oid();
+    let argv = getattr(&t, PROCOID, ANUM_PG_PROC_PROARGTYPES);
+    // SAFETY: proargtypes is a not-null plain-storage oidvector; values tail
+    // follows the 24-byte header in place, dim1 == pronargs.
+    let args = unsafe {
+        let p = argv.as_usize() as *const array::oidvector;
+        core::slice::from_raw_parts(p.add(1) as *const Oid, (*p).dim1 as usize)
+    };
+    let mut proargtypes = mcx::vec_with_capacity_in(mcx, args.len())?;
+    proargtypes.extend_from_slice(args);
+    drop(t);
+    ReleaseSysCache(tuple);
+    Ok(Some((rettype, proargtypes)))
+}
+
+fn lookup_pg_range_by_multirange(multirange_oid: Oid) -> PgResult<Option<Oid>> {
+    let Some(tuple) = SearchSysCache1(
+        crate::cacheinfo::RANGEMULTIRANGE,
+        SysCacheKey::Value(Datum::from_oid(multirange_oid)),
+    )?
+    else {
+        return Ok(None);
+    };
+    let oid = getattr(&tuple.tuple(), crate::cacheinfo::RANGEMULTIRANGE, ANUM_PG_RANGE_RNGTYPID)
+        .as_oid();
+    ReleaseSysCache(tuple);
+    Ok(Some(oid))
+}
+
+// Minimal flat-array reads for the pg_proc result arrays (1-D, no nulls).
+fn flat_array_meta(img: &[u8]) -> (i32, bool, usize, usize) {
+    let ndim = i32::from_ne_bytes(img[4..8].try_into().unwrap());
+    let dataoffset = i32::from_ne_bytes(img[8..12].try_into().unwrap());
+    let nelems = if ndim == 1 {
+        i32::from_ne_bytes(img[16..20].try_into().unwrap()) as usize
+    } else {
+        0
+    };
+    // No-null arrays have dataoffset 0: data starts after ndim/lbound words.
+    let data_off = if dataoffset == 0 { 16 + 8 * ndim as usize } else { dataoffset as usize };
+    (ndim, dataoffset != 0, nelems, data_off)
+}
+
+fn pg_proc_result_arrays<'mcx>(
+    mcx: Mcx<'mcx>,
+    funcid: Oid,
+) -> PgResult<Option<syscache_seams::PgProcResultArraysShape<'mcx>>> {
+    let Some(tuple) = SearchSysCache1(PROCOID, SysCacheKey::Value(Datum::from_oid(funcid)))?
+    else {
+        return Ok(None);
+    };
+    let t = tuple.tuple();
+
+    let proallargtypes = match varlena_image(mcx, &t, PROCOID, ANUM_PG_PROC_PROALLARGTYPES)? {
+        None => None,
+        Some(img) => {
+            let (ndim, hasnull, nelems, off) = flat_array_meta(&img);
+            assert!(ndim == 1 && !hasnull, "proallargtypes is not a 1-D Oid array or it contains nulls");
+            let mut v: PgVec<'mcx, Oid> = mcx::vec_with_capacity_in(mcx, nelems)?;
+            for i in 0..nelems {
+                v.push(Oid::from_ne_bytes(img[off + 4 * i..off + 4 * i + 4].try_into().unwrap()));
+            }
+            Some(v)
+        }
+    };
+    let proargmodes = match varlena_image(mcx, &t, PROCOID, ANUM_PG_PROC_PROARGMODES)? {
+        None => None,
+        Some(img) => {
+            let (ndim, hasnull, nelems, off) = flat_array_meta(&img);
+            assert!(ndim == 1 && !hasnull, "proargmodes is not a 1-D char array or it contains nulls");
+            let mut v: PgVec<'mcx, i8> = mcx::vec_with_capacity_in(mcx, nelems)?;
+            for i in 0..nelems {
+                v.push(img[off + i] as i8);
+            }
+            Some(v)
+        }
+    };
+    let proargnames = match varlena_image(mcx, &t, PROCOID, ANUM_PG_PROC_PROARGNAMES)? {
+        None => None,
+        Some(img) => {
+            let (ndim, hasnull, nelems, mut off) = flat_array_meta(&img);
+            assert!(ndim == 1 && !hasnull, "proargnames is not a 1-D text array or it contains nulls");
+            let mut v: PgVec<'mcx, PgString<'mcx>> = PgVec::new_in(mcx);
+            v.try_reserve_exact(nelems).map_err(|_| mcx.oom(nelems))?;
+            for _ in 0..nelems {
+                // text elements: short (1B) or 4B headers, 'i' alignment for
+                // the 4B form only when the preceding byte run requires it —
+                // PG packs short varlenas unaligned.
+                let (payload, adv): (&[u8], usize) = if img[off] & 0x01 == 0x01 {
+                    let total = ((img[off] >> 1) & 0x7F) as usize;
+                    (&img[off + 1..off + total], total)
+                } else {
+                    let aligned = (off + 3) & !3;
+                    let total =
+                        (u32::from_ne_bytes(img[aligned..aligned + 4].try_into().unwrap()) >> 2)
+                            as usize;
+                    off = aligned;
+                    (&img[off + 4..off + total], total)
+                };
+                let s = core::str::from_utf8(payload).expect("proargnames is server-encoding text");
+                v.push(PgString::from_str_in(s, mcx)?);
+                off += adv;
+            }
+            Some(v)
+        }
+    };
+
+    drop(t);
+    ReleaseSysCache(tuple);
+    Ok(Some(syscache_seams::PgProcResultArraysShape {
+        proallargtypes,
+        proargmodes,
+        proargnames,
+    }))
+}
+
 fn lookup_pg_statistic_shape(
     relid: Oid,
     attnum: types_core::AttrNumber,
@@ -1226,6 +1403,11 @@ pub(crate) fn install() {
     syscache_seams::lookup_authid_session_by_rolname::set(lookup_authid_session_by_rolname);
     syscache_seams::lookup_authid_session_by_oid::set(lookup_authid_session_by_oid);
     syscache_seams::lookup_pg_type_typcache_shape::set(lookup_pg_type_typcache_shape);
+    syscache_seams::lookup_pg_range_by_multirange::set(lookup_pg_range_by_multirange);
+    syscache_seams::pg_proc_result_arrays::set(pg_proc_result_arrays);
+    syscache_seams::pg_proc_proargdefaults::set(pg_proc_proargdefaults);
+    syscache_seams::lookup_pg_range_shape::set(lookup_pg_range_shape);
+    syscache_seams::lookup_pg_proc_signature::set(lookup_pg_proc_signature);
     syscache_seams::syscache_hash_value_typeoid::set(syscache_hash_value_typeoid);
     syscache_seams::syscache_hash_value_procoid::set(syscache_hash_value_procoid);
     syscache_seams::lookup_pg_class_relid_by_name::set(lookup_pg_class_relid_by_name);

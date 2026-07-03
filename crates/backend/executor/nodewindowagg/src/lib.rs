@@ -541,6 +541,9 @@ pub fn exec_init_window_agg<'mcx>(
                 transfn_oid: trans_fnoid[aggno],
                 inputcollid: trans_collid[aggno],
                 init_value_is_null: trans_init[aggno].isnull,
+                // Empty = get_fn_expr_argtype yields InvalidOid; transfns that
+                // need argtypes error loud rather than silently diverge.
+                arg_types: &[],
                 args: &agg_specs_args[aggno],
                 pergroup: pg,
                 transtype_byval: true,

@@ -28,7 +28,15 @@ const PROKIND_PROCEDURE: i8 = b'p' as i8;
 const PROKIND_WINDOW: i8 = b'w' as i8;
 
 enum FuncDetail<'mcx> {
-    Normal { funcid: Oid, rettype: Oid, retset: bool, declared_arg_types: PgVec<'mcx, Oid> },
+    Normal {
+        funcid: Oid,
+        rettype: Oid,
+        retset: bool,
+        declared_arg_types: PgVec<'mcx, Oid>,
+        vatype: Oid,
+        nvargs: i16,
+        argdefaults: PgVec<'mcx, Node<'mcx>>,
+    },
     Aggregate { funcid: Oid, rettype: Oid, retset: bool, declared_arg_types: PgVec<'mcx, Oid> },
     Coercion { rettype: Oid },
     Multiple,
@@ -83,7 +91,14 @@ pub fn ParseFuncOrColumn<'mcx>(
         return Err(too_many_arguments(pstate, location));
     }
 
-    let fdresult = func_get_detail(mcx, parts, &fargs, fargs.len() as i16, actual_arg_types)?;
+    let fdresult = func_get_detail(
+        mcx,
+        parts,
+        &fargs,
+        fargs.len() as i16,
+        actual_arg_types,
+        !fn_call.func_variadic,
+    )?;
 
     match fdresult {
         FuncDetail::Coercion { rettype } => coerce::coerce_type(
@@ -98,7 +113,15 @@ pub fn ParseFuncOrColumn<'mcx>(
             location,
         ),
         FuncDetail::Multiple => Err(ambiguous_function(pstate, parts, actual_arg_types, location)),
-        FuncDetail::Normal { funcid, rettype, retset, declared_arg_types } => {
+        FuncDetail::Normal {
+            funcid,
+            rettype,
+            retset,
+            declared_arg_types,
+            vatype,
+            nvargs,
+            argdefaults,
+        } => {
             if fn_call.agg_star {
                 return Err(wrong_object_type(
                     pstate,
@@ -153,6 +176,27 @@ pub fn ParseFuncOrColumn<'mcx>(
             }
 
             let mut declared_arg_types = declared_arg_types;
+            // C: append omitted-argument defaults to the arg list.
+            let mut all_arg_types: PgVec<'mcx, Oid> =
+                mcx::vec_with_capacity_in(mcx, actual_arg_types.len() + argdefaults.len())?;
+            for &t in actual_arg_types {
+                all_arg_types.push(t);
+            }
+            let fargs = if argdefaults.is_empty() {
+                fargs
+            } else {
+                let mut cells: PgVec<'mcx, Node<'mcx>> =
+                    mcx::vec_with_capacity_in(mcx, fargs.len() + argdefaults.len())?;
+                for c in fargs.iter() {
+                    cells.push(c);
+                }
+                for d in argdefaults.iter() {
+                    cells.push(*d);
+                    all_arg_types.push(default_expr_type(*d));
+                }
+                NodeList::from_slice(mcx, cells.as_slice())?
+            };
+            let actual_arg_types = all_arg_types.as_slice();
             let rettype = coerce::enforce_generic_type_consistency(
                 actual_arg_types,
                 declared_arg_types.as_mut_slice(),
@@ -161,6 +205,33 @@ pub fn ParseFuncOrColumn<'mcx>(
             )?;
             let fargs =
                 make_fn_arguments(mcx, pstate, fargs, actual_arg_types, &declared_arg_types)?;
+
+            // C: forget VARIADIC decoration on a non-variadic function.
+            let mut func_variadic = fn_call.func_variadic && OidIsValid(vatype);
+            if nvargs > 0 && vatype != types_core::catalog::ANYOID {
+                panic!(
+                    "ParseFuncOrColumn (parse_func.c): implicit variadic array \
+                     (ArrayExpr) unported — function {funcid}"
+                );
+            }
+            if !fargs.is_nil() && vatype == types_core::catalog::ANYOID && func_variadic {
+                let va_arr_typid = actual_arg_types[actual_arg_types.len() - 1];
+                if !OidIsValid(lsyscache::get_base_element_type(va_arr_typid)?) {
+                    let encoding = mbutils::GetDatabaseEncoding();
+                    return Err(Box::new(
+                        ereport(ERROR)
+                            .errcode(types_error::ERRCODE_DATATYPE_MISMATCH)
+                            .errmsg("VARIADIC argument must be an array".to_string())
+                            .errposition(parser_errposition(pstate, location, encoding))
+                            .into_error()
+                            .with_error_location(ErrorLocation::new(
+                                "parse_func.c",
+                                0,
+                                "ParseFuncOrColumn",
+                            )),
+                    ));
+                }
+            }
             if retset {
                 check_srf_call_placement(pstate, _last_srf, location)?;
             }
@@ -171,7 +242,7 @@ pub fn ParseFuncOrColumn<'mcx>(
                     funcid,
                     funcresulttype: rettype,
                     funcretset: retset,
-                    funcvariadic: false,
+                    funcvariadic: func_variadic,
                     funcformat: fn_call.funcformat,
                     funccollid: InvalidOid,
                     inputcollid: InvalidOid,
@@ -661,18 +732,32 @@ fn FuncNameAsType(parts: &[&str]) -> PgResult<Oid> {
     }
 }
 
+// exprType over the node families proargdefaults carries (system_functions
+// defaults are Consts, occasionally coerced).
+fn default_expr_type(node: Node<'_>) -> Oid {
+    match node.node_tag() {
+        NodeTag::T_Const => node.as_const().unwrap().consttype,
+        NodeTag::T_FuncExpr => node.as_func_expr().unwrap().funcresulttype,
+        NodeTag::T_CoerceViaIO => node.as_coerce_via_io().unwrap().resulttype,
+        NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resulttype,
+        tag => panic!("default_expr_type: node family {tag:?} not ported"),
+    }
+}
+
 fn func_get_detail<'mcx>(
     mcx: Mcx<'mcx>,
     parts: &[&str],
     fargs: &NodeList<'mcx>,
     nargs: i16,
     argtypes: &[Oid],
+    expand_variadic: bool,
 ) -> PgResult<FuncDetail<'mcx>> {
-    let candidates = FuncnameGetCandidates(mcx, parts, nargs, true, true)?;
+    let candidates = FuncnameGetCandidates(mcx, parts, nargs, expand_variadic, true)?;
 
     let mut best: Option<&FuncCandidate<'_>> = None;
     for cand in candidates.iter() {
-        if cand.args.as_slice() == argtypes {
+        // C: memcmp over nargs entries (variadic/default tails excluded).
+        if cand.args.as_slice()[..argtypes.len().min(cand.args.len())] == *argtypes {
             best = Some(cand);
             break;
         }
@@ -726,11 +811,37 @@ fn func_get_detail<'mcx>(
 
     let shape = syscache_seams::lookup_pg_proc_shape::call(funcid)?
         .unwrap_or_else(|| panic!("cache lookup failed for function {funcid} (parse_func.c)"));
-    if OidIsValid(shape.provariadic) {
+    if OidIsValid(shape.provariadic) && shape.prokind != PROKIND_FUNCTION {
         panic!(
-            "func_get_detail (parse_func.c): variadic function {funcid} escaped \
-             FuncnameGetCandidates' variadic panic"
+            "func_get_detail (parse_func.c): variadic {} {funcid} unported",
+            shape.prokind
         );
+    }
+    // C: fetch and parse the trailing argument defaults the call omitted.
+    let mut argdefaults: PgVec<'mcx, Node<'mcx>> = PgVec::new_in(mcx);
+    if best.ndargs > 0 {
+        if shape.prokind != PROKIND_FUNCTION {
+            panic!(
+                "func_get_detail (parse_func.c): defaulted {} {funcid} unported",
+                shape.prokind
+            );
+        }
+        let src = syscache_seams::pg_proc_proargdefaults::call(mcx, funcid)?
+            .unwrap_or_else(|| panic!("cache lookup failed for function {funcid} (parse_func.c)"))
+            .unwrap_or_else(|| {
+                panic!("not enough default arguments (proargdefaults null for {funcid})")
+            });
+        let defaults = readfuncs::stringToNode(mcx, src.as_str())?;
+        let Some(list) = defaults.as_list() else {
+            panic!("proargdefaults of {funcid} is not a List");
+        };
+        // Defaults attach to the trailing parameters: take the list tail.
+        let skip = list.len() - best.ndargs as usize;
+        for (i, cell) in list.iter().enumerate() {
+            if i >= skip {
+                argdefaults.push(cell);
+            }
+        }
     }
     Ok(match shape.prokind {
         PROKIND_AGGREGATE => FuncDetail::Aggregate {
@@ -744,6 +855,9 @@ fn func_get_detail<'mcx>(
             rettype: shape.prorettype,
             retset: shape.proretset,
             declared_arg_types,
+            vatype: shape.provariadic,
+            nvargs: best.nvargs,
+            argdefaults,
         },
         PROKIND_PROCEDURE => FuncDetail::Procedure { funcid },
         PROKIND_WINDOW => FuncDetail::WindowFunc {

@@ -1,16 +1,20 @@
-//! jsonb core: the on-disk JEntry tree, I/O via the shared JSON lexer, the
-//! operator slice, btree comparison and hash opclass support.
-//! Loud lanes (unported-OID fmgr panic): the jsonb_set/insert/delete/concat
-//! mutation family, jsonpath, subscripting, jsonb_agg/jsonb_object_agg, GIN,
-//! to_jsonb/jsonb_build_*, jsonb-to-scalar casts, jsonb_pretty, jbvDatetime.
+//! jsonb core + tier 2: the on-disk JEntry tree, I/O via the shared JSON
+//! lexer, the operator slice, btree comparison and hash opclass support, the
+//! mutation family (set/insert/delete/concat), jsonb_pretty, scalar casts.
+//! Loud lanes (unported-OID fmgr panic): jsonpath, subscripting, GIN,
+//! jbvDatetime, the *_strict/_unique aggregate variants.
 
+pub mod aggs;
 pub mod build;
 pub mod builtins;
 pub mod container;
 pub mod getfield;
 pub mod io;
 pub mod iter;
+pub mod mutate;
 pub mod ops;
+pub mod srfs;
+pub mod tojsonb;
 #[cfg(test)]
 mod tests;
 

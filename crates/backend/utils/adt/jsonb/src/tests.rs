@@ -382,3 +382,119 @@ fn recv_send_round_trip() {
     let img2 = io::jsonb_recv(mcx, &mut buf).unwrap();
     assert_eq!(hex(&img[..]), hex(&img2[..]));
 }
+
+// On-disk byte identity of the mutation family: golden_mutations.tsv carries
+// the pageinspect-captured datum payloads of C 18.3 evaluating each case.
+#[test]
+fn mutations_match_c_on_disk() {
+    setup();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let data = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/fixtures/golden_mutations.tsv"
+    ))
+    .unwrap();
+    for line in data.lines().filter(|l| !l.starts_with('#') && !l.is_empty()) {
+        let cols: Vec<&str> = line.split('\t').collect();
+        let (op, target, a1, a2, a3, expected) = (
+            cols[0],
+            unhex(cols[1]),
+            unhex(cols[2]),
+            unhex(cols[3]),
+            cols[4],
+            unhex(cols[5]),
+        );
+        let image = jsonb_image(mcx, &target);
+        let payload: &[u8] = mcx::slice_in(mcx, &image[4..]).unwrap().leak();
+        let path: Vec<Option<&[u8]>> = if matches!(op, "del_keys" | "del_path" | "set" | "insert")
+        {
+            a1.split(|b| *b == b',')
+                .map(|e| Some(mcx::slice_in(mcx, e).unwrap().leak() as &[u8]))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let newval_image;
+        let newval = if matches!(op, "set" | "insert") {
+            newval_image = jsonb_image(mcx, &a2);
+            let p: &[u8] = mcx::slice_in(mcx, &newval_image[4..]).unwrap().leak();
+            Some(match crate::io::extract_scalar(p) {
+                Some(v) => v,
+                None => JsonbItem::Binary(p),
+            })
+        } else {
+            None
+        };
+        let flag = a3 == "true";
+        let result = match op {
+            "concat" => {
+                let other = jsonb_image(mcx, &a1);
+                let op2: &[u8] = mcx::slice_in(mcx, &other[4..]).unwrap().leak();
+                crate::mutate::concat(mcx, payload, op2)
+            }
+            "del_key" => crate::mutate::delete_key(mcx, payload, &a1),
+            "del_idx" => crate::mutate::delete_idx(
+                mcx,
+                payload,
+                std::str::from_utf8(&a1).unwrap().parse().unwrap(),
+            ),
+            "del_keys" => {
+                let keys: Vec<&[u8]> = path.iter().map(|p| p.unwrap()).collect();
+                crate::mutate::delete_keys(mcx, payload, &keys)
+            }
+            "del_path" => crate::mutate::set_path(
+                mcx,
+                payload,
+                &crate::mutate::SetPathArgs {
+                    path: &path,
+                    newval: None,
+                    op_type: crate::mutate::JB_PATH_DELETE,
+                },
+            ),
+            "set" => crate::mutate::set_path(
+                mcx,
+                payload,
+                &crate::mutate::SetPathArgs {
+                    path: &path,
+                    newval,
+                    op_type: if flag {
+                        crate::mutate::JB_PATH_CREATE
+                    } else {
+                        crate::mutate::JB_PATH_REPLACE
+                    },
+                },
+            ),
+            "insert" => crate::mutate::set_path(
+                mcx,
+                payload,
+                &crate::mutate::SetPathArgs {
+                    path: &path,
+                    newval,
+                    op_type: if flag {
+                        crate::mutate::JB_PATH_INSERT_AFTER
+                    } else {
+                        crate::mutate::JB_PATH_INSERT_BEFORE
+                    },
+                },
+            ),
+            other => panic!("unknown op {other}"),
+        }
+        .unwrap_or_else(|e| {
+            panic!(
+                "{op} on {:?} failed: {}",
+                String::from_utf8_lossy(&target),
+                e.message()
+            )
+        });
+        assert_eq!(
+            hex(&result[4..]),
+            hex(&expected),
+            "{op} {} {} {} {}",
+            String::from_utf8_lossy(&target),
+            String::from_utf8_lossy(&a1),
+            String::from_utf8_lossy(&a2),
+            a3,
+        );
+    }
+}

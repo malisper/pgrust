@@ -411,6 +411,10 @@ pub fn RangeVarGetRelidExtended(
 pub struct FuncCandidate<'mcx> {
     pub oid: Oid,
     pub nargs: i16,
+    pub nominal_nargs: i16,
+    pub nvargs: i16,
+    pub ndargs: i16,
+    pub va_elem_type: Oid,
     pub args: mcx::PgVec<'mcx, Oid>,
 }
 
@@ -444,25 +448,16 @@ pub fn FuncnameGetCandidates<'mcx>(
         // C considers variadic expansion only when pronargs <= nargs; an
         // undersupplied variadic candidate falls through to the arg-count
         // skip (e.g. rank() never sees the hypothetical-set aggregate 3986).
-        if OidIsValid(cand.provariadic) && expand_variadic && cand.pronargs <= nargs {
-            panic!(
-                "FuncnameGetCandidates (namespace.c): expand_variadic arm unported — \
-                 candidate {} for \"{funcname}\" is variadic",
-                cand.oid
-            );
+        let mut va_elem_type = InvalidOid;
+        let mut variadic = false;
+        if expand_variadic && OidIsValid(cand.provariadic) && cand.pronargs <= nargs {
+            va_elem_type = cand.provariadic;
+            variadic = true;
         }
-        if cand.pronargdefaults > 0
+        let use_defaults = cand.pronargs > nargs
             && expand_defaults
-            && nargs >= cand.pronargs - cand.pronargdefaults
-            && nargs < cand.pronargs
-        {
-            panic!(
-                "FuncnameGetCandidates (namespace.c): expand_defaults arm unported — \
-                 candidate {} for \"{funcname}\" needs default-argument expansion",
-                cand.oid
-            );
-        }
-        if cand.pronargs != nargs {
+            && nargs + cand.pronargdefaults >= cand.pronargs;
+        if cand.pronargs != nargs && !variadic && !use_defaults {
             continue;
         }
         let visible = match namespace_id {
@@ -481,18 +476,52 @@ pub fn FuncnameGetCandidates<'mcx>(
         if !visible {
             continue;
         }
-        if result.iter().any(|prev: &FuncCandidate<'mcx>| prev.args.as_slice() == cand.proargtypes.as_slice()) {
-            panic!(
-                "FuncnameGetCandidates (namespace.c): same-signature shadowing across \
-                 schemas unported — duplicate candidate {} for \"{funcname}\"",
-                cand.oid
-            );
-        }
-        let mut args = mcx::vec_with_capacity_in(mcx, cand.proargtypes.len())?;
+        let effective_nargs = cand.pronargs.max(nargs);
+        let mut args = mcx::vec_with_capacity_in(mcx, effective_nargs as usize)?;
         for &a in cand.proargtypes.iter() {
             args.push(a);
         }
-        result.push(FuncCandidate { oid: cand.oid, nargs: cand.pronargs, args });
+        let nvargs = if variadic {
+            // C: expand the variadic slot into N copies of the element type.
+            args.truncate(cand.pronargs as usize - 1);
+            while args.len() < effective_nargs as usize {
+                args.push(va_elem_type);
+            }
+            effective_nargs - cand.pronargs + 1
+        } else {
+            0
+        };
+        let ndargs = if use_defaults { cand.pronargs - nargs } else { 0 };
+        // C's duplicate-argument-list resolution, pathpos-equal slice only
+        // (cross-schema shadowing still unported): the non-variadic match
+        // wins over the variadic expansion of the same signature.
+        // C ignores defaulted arguments when deciding what is a duplicate.
+        let cmp_nargs = (effective_nargs - ndargs) as usize;
+        if let Some(pos) = result.iter().position(|prev: &FuncCandidate<'mcx>| {
+            (prev.nargs - prev.ndargs) as usize == cmp_nargs
+                && prev.args.as_slice()[..cmp_nargs] == args.as_slice()[..cmp_nargs]
+        }) {
+            if variadic && result[pos].nvargs == 0 {
+                continue;
+            } else if !variadic && result[pos].nvargs > 0 {
+                result.remove(pos);
+            } else {
+                panic!(
+                    "FuncnameGetCandidates (namespace.c): ambiguous duplicate candidate {} \
+                     for \"{funcname}\" (cross-schema shadowing unported)",
+                    cand.oid
+                );
+            }
+        }
+        result.push(FuncCandidate {
+            oid: cand.oid,
+            nargs: effective_nargs,
+            nominal_nargs: cand.pronargs,
+            nvargs,
+            ndargs,
+            va_elem_type,
+            args,
+        });
     }
     Ok(result)
 }

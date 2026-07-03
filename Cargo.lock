@@ -270,18 +270,27 @@ dependencies = [
 name = "adt_jsonb"
 version = "0.1.0"
 dependencies = [
+ "adt_date",
+ "adt_datetime",
  "adt_json",
  "adt_numeric",
+ "adt_timestamp",
  "arrayfuncs",
  "datum",
  "detoast_seams",
+ "fmgr_seams",
+ "funcapi",
  "hashfn",
+ "heaptuple",
+ "lsyscache",
  "mbutils",
  "mcx",
  "pg_locale_seams",
  "pqformat",
  "stack_depth",
  "stringinfo",
+ "tupdesc",
+ "typcache_seams",
  "types_core",
  "types_error",
  "types_fmgr",
@@ -2629,8 +2638,10 @@ dependencies = [
 name = "funcapi"
 version = "0.1.0"
 dependencies = [
+ "arrayfuncs",
  "catalog_seams",
  "datum",
+ "detoast_seams",
  "format_type",
  "lsyscache",
  "mcx",
@@ -2642,6 +2653,7 @@ dependencies = [
  "types_fmgr",
  "types_nodes",
  "types_tuple",
+ "varlena",
 ]
 
 [[package]]
@@ -4904,6 +4916,7 @@ dependencies = [
  "miscinit_seams",
  "parse_agg",
  "parser_small1",
+ "readfuncs",
  "syscache_seams",
  "types_core",
  "types_error",
@@ -8254,11 +8267,14 @@ dependencies = [
  "inval",
  "lsyscache",
  "mcx",
+ "relation_seams",
  "syscache_seams",
+ "tupdesc",
  "typcache_seams",
  "types_core",
  "types_error",
  "types_fmgr",
+ "types_rel",
  "types_tuple",
 ]
 

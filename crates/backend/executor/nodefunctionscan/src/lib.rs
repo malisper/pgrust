@@ -30,6 +30,8 @@ struct SetExprState<'mcx> {
     args: PgVec<'mcx, PgBox<'mcx, ExprState<'mcx>>>,
     collation: u32,
     returns_set: bool,
+    // C's returnsTuple: composite results are exploded into columns.
+    returns_tuple: bool,
 }
 
 pub struct FunctionScanState<'mcx> {
@@ -98,8 +100,9 @@ pub fn exec_init_function_scan<'mcx>(
         .nth(0)
         .as_range_tbl_function()
         .expect("FunctionScan functions cell is RangeTblFunction");
-    let setexpr = exec_init_table_function_result(mcx, rtfunc, estate)?;
-    let tupdesc = build_function_tupdesc(mcx, rtfunc)?;
+    let mut setexpr = exec_init_table_function_result(mcx, rtfunc, estate)?;
+    let (tupdesc, returns_tuple) = build_function_tupdesc(mcx, rtfunc)?;
+    setexpr.returns_tuple = returns_tuple;
 
     let mut scan_tupdesc = tupdesc::CreateTupleDescCopy(mcx, &tupdesc)?;
     scan_tupdesc.tdtypeid = types_core::catalog::RECORDOID;
@@ -152,28 +155,41 @@ fn exec_init_table_function_result<'mcx>(
         args,
         collation: func.inputcollid,
         returns_set: func.funcretset,
+        returns_tuple: false,
     })
 }
 
 fn build_function_tupdesc<'mcx>(
     mcx: Mcx<'mcx>,
     rtfunc: &RangeTblFunction<'mcx>,
-) -> PgResult<TupleDescData<'mcx>> {
+) -> PgResult<(TupleDescData<'mcx>, bool)> {
     debug_assert!(rtfunc.funccolnames.is_nil());
     let fexpr = rtfunc.funcexpr.expect("RangeTblFunction has funcexpr");
     let resolved = funcapi::get_expr_result_type(mcx, Some(fexpr))?;
-    if resolved.class != funcapi::TypeFuncClass::Scalar {
-        panic!(
-            "ExecInitFunctionScan (nodeFunctionscan.c): non-scalar function result \
-             ({:?}) unported — record/composite lane",
-            resolved.class
-        );
+    match resolved.class {
+        funcapi::TypeFuncClass::Scalar => {
+            let mut d = tupdesc::CreateTemplateTupleDesc(mcx, 1)?;
+            tupdesc::TupleDescInitEntry(&mut d, 1, None, resolved.result_type_id, -1, 0)?;
+            tupdesc::TupleDescInitEntryCollation(&mut d, 1, execscan::expr_collation(fexpr));
+            debug_assert_eq!(rtfunc.funccolcount, 1);
+            Ok((d, false))
+        }
+        funcapi::TypeFuncClass::Composite | funcapi::TypeFuncClass::Record => {
+            let d = resolved.result_tuple_desc.unwrap_or_else(|| {
+                panic!(
+                    "ExecInitFunctionScan (nodeFunctionscan.c): {:?} result without a \
+                     tupdesc (coldeflist lane unported)",
+                    resolved.class
+                )
+            });
+            debug_assert_eq!(rtfunc.funccolcount as i32, d.natts);
+            Ok((d, true))
+        }
+        other => panic!(
+            "ExecInitFunctionScan (nodeFunctionscan.c): function result class {other:?} \
+             unported"
+        ),
     }
-    let mut d = tupdesc::CreateTemplateTupleDesc(mcx, 1)?;
-    tupdesc::TupleDescInitEntry(&mut d, 1, None, resolved.result_type_id, -1, 0)?;
-    tupdesc::TupleDescInitEntryCollation(&mut d, 1, execscan::expr_collation(fexpr));
-    debug_assert_eq!(rtfunc.funccolcount, 1);
-    Ok(d)
 }
 
 #[cold]
@@ -218,6 +234,10 @@ fn run_value_per_call<'mcx, const N: usize>(
     let mut rsinfo = ReturnSetInfo::new(allowed);
     let mut fcinfo = LocalFcinfo::<N>::new(setexpr.collation);
     fcinfo.resultinfo = rsinfo.as_fmnode_ptr();
+    // C evaluates the SRF in econtext per-tuple memory (reset per call); the
+    // row is copied into the tuplestore before the next call's reset.
+    // SAFETY: the ExprContext outlives this loop's stack frame.
+    unsafe { fcinfo.set_result_mcx(estate.ecxt(ecxt).per_tuple_mcx()) };
 
     // ExecEvalFuncArgs; C's argContext hop is unneeded: only Consts and
     // by-value datums feed args on this lane, surviving the resets below.
@@ -249,7 +269,11 @@ fn run_value_per_call<'mcx, const N: usize>(
                 if rsinfo.isDone == ExprDoneCond::ExprEndResult {
                     break;
                 }
-                store.putvalues(expected_desc, &[result], &[fcinfo.isnull])?;
+                if setexpr.returns_tuple {
+                    put_composite_row(&mut store, expected_desc, result, fcinfo.isnull, estate)?;
+                } else {
+                    store.putvalues(expected_desc, &[result], &[fcinfo.isnull])?;
+                }
                 if rsinfo.isDone != ExprDoneCond::ExprMultipleResult {
                     break;
                 }
@@ -264,6 +288,43 @@ fn run_value_per_call<'mcx, const N: usize>(
         }
     }
     Ok(store)
+}
+
+// C execSRF.c returnsTuple arm: explode the composite datum into columns
+// (tuplestore_puttuple of the embedded tuple data; the rowtype-consistency
+// check C performs for RECORD results is subsumed by deforming with the
+// scan's expected descriptor).
+fn put_composite_row<'mcx>(
+    store: &mut Tuplestore,
+    expected_desc: &TupleDescData<'mcx>,
+    result: ::datum::Datum,
+    isnull: bool,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    let natts = expected_desc.natts as usize;
+    let mcx = estate.es_query_cxt;
+    let mut values: PgVec<'_, ::datum::Datum> = ::mcx::vec_with_capacity_in(mcx, natts)?;
+    let mut nulls: PgVec<'_, bool> = ::mcx::vec_with_capacity_in(mcx, natts)?;
+    values.resize(natts, ::datum::Datum::null());
+    nulls.resize(natts, true);
+    if !isnull {
+        let p = result.as_usize() as *const u8;
+        // SAFETY: a non-null composite result datum is a live HeapTupleHeader
+        // image readable for its datum length.
+        let header = unsafe { &*(p as *const ::types_tuple::htup::HeapTupleHeaderData) };
+        let t_len = header.datum_length();
+        // SAFETY: same image, exclusive for this call.
+        let tuple = unsafe {
+            ::types_tuple::htup::HeapTupleData::from_raw_parts(
+                p,
+                t_len,
+                Default::default(),
+                ::types_core::InvalidOid,
+            )
+        };
+        ::types_tuple::getattr::heap_deform_tuple(&tuple, expected_desc, &mut values, &mut nulls);
+    }
+    store.putvalues(expected_desc, &values, &nulls)
 }
 
 pub fn exec_end_function_scan(node: &mut FunctionScanState<'_>) {
@@ -289,6 +350,6 @@ pub fn exec_rescan_function_scan<'mcx>(
 
 // Exempt: all released in exec_end_function_scan.
 mcx::forget_safe_struct!(
-    SetExprState<'_> { collation, returns_set; flinfo, args },
+    SetExprState<'_> { collation, returns_set, returns_tuple; flinfo, args },
     FunctionScanState<'_> { ss, setexpr, eflags; tupdesc, tstore },
 );

@@ -333,7 +333,8 @@ pub fn can_coerce_type(
     target_typeids: &[Oid],
     ccontext: CoercionContext,
 ) -> PgResult<bool> {
-    debug_assert_eq!(input_typeids.len(), target_typeids.len());
+    // C compares nargs entries; defaulted candidates carry longer target lists.
+    debug_assert!(input_typeids.len() <= target_typeids.len());
     let mut have_generics = false;
     for (&inputTypeId, &targetTypeId) in input_typeids.iter().zip(target_typeids) {
         if inputTypeId == targetTypeId || targetTypeId == ANYOID {

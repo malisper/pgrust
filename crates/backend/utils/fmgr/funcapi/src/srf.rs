@@ -101,6 +101,19 @@ pub fn srf_return_next(
     result
 }
 
+// SRF_RETURN_NEXT with a SQL NULL row value.
+pub fn srf_return_next_null(
+    flinfo: &mut FmgrInfo,
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> Datum {
+    per_MultiFuncCall(flinfo).call_cntr += 1;
+    match fcinfo.rsinfo_mut() {
+        Some(rsi) => rsi.isDone = ExprDoneCond::ExprMultipleResult,
+        None => no_rsinfo(),
+    }
+    fcinfo.return_null()
+}
+
 // SRF_RETURN_DONE: teardown + ExprEndResult + a null result.
 pub fn srf_return_done(flinfo: &mut FmgrInfo, fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     end_MultiFuncCall(flinfo);
