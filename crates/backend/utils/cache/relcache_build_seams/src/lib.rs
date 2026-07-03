@@ -101,3 +101,10 @@ seam_core::seam!(
         relid: Oid,
     ) -> PgResult<Option<types_trigger::TriggerDesc<'static>>>
 );
+
+seam_core::seam!(
+    pub fn scan_pg_statistic_ext_oids<'mcx>(
+        mcx: Mcx<'mcx>,
+        stxrelid: Oid,
+    ) -> PgResult<PgVec<'mcx, Oid>>
+);

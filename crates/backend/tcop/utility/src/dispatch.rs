@@ -499,6 +499,19 @@ fn dispatch_switch<'mcx>(
             functioncmds::CreateFunction(mcx, stmt)?;
         }
 
+        T_CreateStatsStmt => {
+            // Retention contract as unify_stmt_lifetime: the statement arena
+            // outlives the utility call; nothing derived escapes it.
+            let stmt_node =
+                unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::rawnodes::CreateStatsStmt>()
+                .expect("CreateStatsStmt");
+            // transformStatsStmt is a no-op for plain column references; the
+            // expression lane panics inside CreateStatistics.
+            statscmds::CreateStatistics(mcx, stmt)?;
+        }
+
         T_IndexStmt => {
             // Retention contract as unify_stmt_lifetime: the statement arena
             // outlives the utility call; nothing derived escapes it.

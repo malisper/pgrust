@@ -711,6 +711,30 @@ unsafe impl<'mcx> NodeVariant<'mcx> for PartitionRangeDatum<'mcx> {
     const TAG: NodeTag = NodeTag::T_PartitionRangeDatum;
 }
 
+#[derive(Default)]
+pub struct CreateStatsStmt<'mcx> {
+    pub defnames: NodeList<'mcx>,
+    pub stat_types: NodeList<'mcx>,
+    pub exprs: NodeList<'mcx>,
+    pub relations: NodeList<'mcx>,
+    pub stxcomment: Option<&'mcx str>,
+    pub transformed: bool,
+    pub if_not_exists: bool,
+}
+
+#[derive(Default)]
+pub struct StatsElem<'mcx> {
+    pub name: Option<&'mcx str>,
+    pub expr: Option<Node<'mcx>>,
+}
+
+unsafe impl<'mcx> NodeVariant<'mcx> for CreateStatsStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CreateStatsStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for StatsElem<'mcx> {
+    const TAG: NodeTag = NodeTag::T_StatsElem;
+}
+
 impl<'mcx> Node<'mcx> {
     pub fn mk_raw_stmt(
         mcx: Mcx<'mcx>,

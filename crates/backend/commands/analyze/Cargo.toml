@@ -27,6 +27,7 @@ catalog_indexing = { path = "../../catalog/catalog_indexing" }
 heaptuple = { path = "../../access/common/heaptuple" }
 visibilitymap = { path = "../../access/heap/visibilitymap" }
 genam = { path = "../../access/index/genam" }
+statistics = { path = "../../statistics/statistics" }
 bufmgr_seams = { path = "../../storage/buffer/bufmgr_seams" }
 procarray = { path = "../../storage/ipc/procarray" }
 xact = { path = "../../access/transam/xact" }

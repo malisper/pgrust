@@ -269,6 +269,31 @@ pub(crate) fn scan_pg_index_shapes<'mcx>(
     Ok(out)
 }
 
+const STATISTIC_EXT_RELATION_ID: Oid = 3381;
+const STATISTIC_EXT_RELID_INDEX_ID: Oid = 3379;
+const Anum_pg_statistic_ext_oid: i32 = 1;
+const Anum_pg_statistic_ext_stxrelid: i32 = 2;
+
+pub(crate) fn scan_pg_statistic_ext_oids<'mcx>(
+    mcx: Mcx<'mcx>,
+    stxrelid: Oid,
+) -> PgResult<PgVec<'mcx, Oid>> {
+    let cx = MemoryContext::new("RelationGetStatExtList");
+    let smcx = cx.mcx();
+    let rel = table::table_open(smcx, STATISTIC_EXT_RELATION_ID, AccessShareLock)?;
+    let keys = [oid_key(Anum_pg_statistic_ext_stxrelid, stxrelid)];
+    let mut scan =
+        genam::systable_beginscan(smcx, &rel, STATISTIC_EXT_RELID_INDEX_ID, true, None, &keys)?;
+    let mut out: PgVec<'mcx, Oid> = PgVec::new_in(mcx);
+    while let Some(tup) = genam::systable_getnext(smcx, &mut scan)? {
+        out.push(req(rel.descr(), tup, Anum_pg_statistic_ext_oid)?.as_oid());
+    }
+    genam::systable_endscan(smcx, scan)?;
+    rel.close(AccessShareLock)?;
+    out.sort_unstable();
+    Ok(out)
+}
+
 #[cold]
 #[inline(never)]
 fn cache_lookup_failed(relid: Oid) -> Box<PgError> {

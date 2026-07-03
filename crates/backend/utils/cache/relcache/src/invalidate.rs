@@ -24,6 +24,7 @@ pub(crate) fn RelationInvalidateRelation(rel: &RelationData<'static>) {
     *rel.rd_trigdesc.borrow_mut() = None;
     crate::rules::forget(rel.rd_id);
     crate::indexattr::forget(rel.rd_id);
+    crate::statextlist::forget(rel.rd_id);
 }
 
 // RelationClearRelation: caller has verified refcount-zero, not nailed, and
@@ -285,6 +286,7 @@ pub fn RelationCacheInvalidateEntry(relationId: Oid) -> PgResult<()> {
     // The rules side-cache can hold relids that never entered id_cache.
     crate::rules::forget(relationId);
     crate::indexattr::forget(relationId);
+    crate::statextlist::forget(relationId);
     let cached = with_state(|st| st.id_cache.contains_key(&relationId));
     if cached {
         with_state(|st| st.invals_received += 1);
@@ -309,6 +311,7 @@ pub fn RelationCacheInvalidate(debug_discard: bool) -> PgResult<()> {
     with_state(|st| {
         st.rules_cache.clear();
         st.indexattr_cache.clear();
+        st.statext_cache.clear();
     });
 
     let snapshot: Vec<(Oid, Rc<RelationData<'static>>, bool)> = with_state(|st| {
