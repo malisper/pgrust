@@ -2451,6 +2451,7 @@ dependencies = [
  "adt_int",
  "adt_timestamp",
  "arrayfuncs",
+ "clauses",
  "clauses_seams",
  "datum",
  "elog",

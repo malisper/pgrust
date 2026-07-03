@@ -36,6 +36,7 @@ typcache_seams = { path = "../../utils/cache/typcache_seams" }
 bench-internals = []
 
 [dev-dependencies]
+clauses = { path = "../../optimizer/util/clauses" }
 adt_int = { path = "../../utils/adt/int" }
 adt_datetime = { path = "../../utils/adt/adt_datetime" }
 pgtz = { path = "../../timezone/pgtz" }
