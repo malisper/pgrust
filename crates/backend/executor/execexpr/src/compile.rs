@@ -14,9 +14,28 @@ use ::types_nodes::primnodes::{Var, VarReturningType};
 use ::types_nodes::NodeTag;
 use ::types_tuple::TupleDescData;
 
+use core::ptr::NonNull;
+
 use crate::steps::{
-    CmpOp, ExprState, FuncCall, FuncFrame, Kernel, OutRef, SlotSrc, Step, EEO_FLAG_IS_QUAL,
+    AggPerGroup, CmpOp, ExprState, FuncCall, FuncFrame, Kernel, OutRef, SlotSrc, Step,
+    EEO_FLAG_IS_QUAL,
 };
+
+// Bindings into the AggState's once-allocated result arrays.
+#[derive(Clone, Copy)]
+pub struct AggBind {
+    pub values: NonNull<::datum::Datum>,
+    pub nulls: NonNull<bool>,
+    pub naggs: u16,
+}
+
+pub struct AggTransSpec<'a, 'mcx> {
+    pub transfn_oid: Oid,
+    pub inputcollid: Oid,
+    pub init_value_is_null: bool,
+    pub args: &'a NodeList<'mcx>,
+    pub pergroup: NonNull<AggPerGroup>,
+}
 
 pub const INNER_VAR: i32 = -1;
 pub const OUTER_VAR: i32 = -2;
@@ -53,7 +72,7 @@ pub fn exec_init_expr<'mcx>(
     };
     let mut state = alloc_in(mcx, ExprState::new_in(mcx)?)?;
     create_expr_setup_steps(&mut state, mcx, &[node])?;
-    init_expr_rec(node, &mut state, mcx, OutRef::RESULT)?;
+    init_expr_rec(node, &mut state, mcx, OutRef::RESULT, None)?;
     push_step(&mut state, mcx, Step::DoneReturn)?;
     ready_expr(&mut state);
     Ok(Some(state))
@@ -72,7 +91,7 @@ pub fn exec_init_qual<'mcx>(
     create_expr_setup_steps(&mut state, mcx, qual.as_slice())?;
 
     for node in qual.iter() {
-        init_expr_rec(node, &mut state, mcx, OutRef::RESULT)?;
+        init_expr_rec(node, &mut state, mcx, OutRef::RESULT, None)?;
         push_step(&mut state, mcx, Step::Qual { jumpdone: u32::MAX })?;
     }
     let done = state.steps.len() as u32;
@@ -93,6 +112,25 @@ pub fn exec_build_projection_info<'mcx>(
     mcx: Mcx<'mcx>,
     target_list: &NodeList<'mcx>,
     input_desc: Option<&TupleDescData<'mcx>>,
+) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
+    build_projection_info(mcx, target_list, input_desc, None)
+}
+
+/// Agg-node projection: Aggrefs bound to the AggState's result arrays.
+pub fn exec_build_agg_projection_info<'mcx>(
+    mcx: Mcx<'mcx>,
+    target_list: &NodeList<'mcx>,
+    input_desc: Option<&TupleDescData<'mcx>>,
+    agg: AggBind,
+) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
+    build_projection_info(mcx, target_list, input_desc, Some(agg))
+}
+
+fn build_projection_info<'mcx>(
+    mcx: Mcx<'mcx>,
+    target_list: &NodeList<'mcx>,
+    input_desc: Option<&TupleDescData<'mcx>>,
+    agg: Option<AggBind>,
 ) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
     let mut state = alloc_in(mcx, ExprState::new_in(mcx)?)?;
     create_expr_setup_steps(&mut state, mcx, target_list.as_slice())?;
@@ -133,7 +171,7 @@ pub fn exec_build_projection_info<'mcx>(
             };
             push_step(&mut state, mcx, step)?;
         } else {
-            init_expr_rec(tle.expr, &mut state, mcx, OutRef::RESULT)?;
+            init_expr_rec(tle.expr, &mut state, mcx, OutRef::RESULT, agg)?;
             let resultnum = (tle.resno - 1) as u16;
             let step = if lsyscache::get_typlen(expr_type(tle.expr))? == -1 {
                 Step::AssignTmpMakeRo { resultnum }
@@ -149,6 +187,72 @@ pub fn exec_build_projection_info<'mcx>(
     Ok(state)
 }
 
+/// C `ExecBuildAggTrans`, AGG_PLAIN one-set byval slice; unported trans
+/// shapes panic at build, never at run.
+pub fn exec_build_agg_trans<'mcx>(
+    mcx: Mcx<'mcx>,
+    specs: &[AggTransSpec<'_, 'mcx>],
+) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
+    let mut state = alloc_in(mcx, ExprState::new_in(mcx)?)?;
+    let mut info = SetupInfo::default();
+    for spec in specs {
+        for tle in spec.args.iter() {
+            setup_walker(tle, &mut info);
+        }
+    }
+    push_fetch_steps(&mut state, mcx, &info)?;
+
+    for spec in specs {
+        let num_trans_inputs = spec.args.len();
+        let nargs = num_trans_inputs + 1;
+        if nargs > FUNC_MAX_ARGS {
+            return Err(too_many_args(nargs));
+        }
+        let flinfo = fmgr_core::fmgr_info(spec.transfn_oid)?;
+        if flinfo.fn_retset {
+            return Err(retset_error());
+        }
+        if flinfo.fn_strict && num_trans_inputs > 0 {
+            unported("EEOP_AGG_STRICT_INPUT_CHECK_ARGS (strict transfn with aggregated args)");
+        }
+        if flinfo.fn_strict && spec.init_value_is_null {
+            unported("EEOP_AGG_PLAIN_TRANS_INIT_STRICT_BYVAL (strict transfn, NULL initval)");
+        }
+        let fn_addr = flinfo.fn_addr;
+        let fn_strict = flinfo.fn_strict;
+        let frame = FuncFrame::new_in(mcx, flinfo, nargs as u16, spec.inputcollid)?;
+        let frame_ix = state.frames.len() as u32;
+        let call =
+            FuncCall { fn_addr, fcinfo: frame.fcinfo, frame: frame_ix, nargs: nargs as u16 };
+        state
+            .frames
+            .try_reserve(1)
+            .map_err(|_| mcx.oom(core::mem::size_of::<FuncFrame<'_>>()))?;
+        state.frames.push(frame);
+        for (argno, tle_node) in spec.args.iter().enumerate() {
+            let tle = tle_node.as_target_entry().unwrap_or_else(|| {
+                panic!("Aggref.args cell: expected TargetEntry, got {:?}", tle_node.node_tag())
+            });
+            if tle.resjunk {
+                continue;
+            }
+            // SAFETY: argno + 1 <= num_trans_inputs < nargs of `call.fcinfo`.
+            let arg_out =
+                OutRef(Some(unsafe { crate::steps::arg_slot_of(call.fcinfo, argno + 1) }));
+            init_expr_rec(tle.expr, &mut state, mcx, arg_out, None)?;
+        }
+        let step = if fn_strict {
+            Step::AggPlainTransStrictByVal { call, pergroup: spec.pergroup }
+        } else {
+            Step::AggPlainTransByVal { call, pergroup: spec.pergroup }
+        };
+        push_step(&mut state, mcx, step)?;
+    }
+    push_step(&mut state, mcx, Step::DoneNoReturn)?;
+    ready_expr(&mut state);
+    Ok(state)
+}
+
 /// C `exprType` over the ported primnode families.
 pub fn expr_type(node: Node<'_>) -> Oid {
     match node.node_tag() {
@@ -157,6 +261,7 @@ pub fn expr_type(node: Node<'_>) -> Oid {
         NodeTag::T_Param => node.as_param().unwrap().paramtype,
         NodeTag::T_FuncExpr => node.as_func_expr().unwrap().funcresulttype,
         NodeTag::T_OpExpr => node.as_op_expr().unwrap().opresulttype,
+        NodeTag::T_Aggref => node.as_aggref().unwrap().aggtype,
         tag => panic!("execexpr exprType: node family {tag:?} not ported"),
     }
 }
@@ -180,6 +285,14 @@ fn create_expr_setup_steps<'mcx>(
     for &n in nodes {
         setup_walker(n, &mut info);
     }
+    push_fetch_steps(state, mcx, &info)
+}
+
+fn push_fetch_steps<'mcx>(
+    state: &mut ExprState<'mcx>,
+    mcx: Mcx<'mcx>,
+    info: &SetupInfo,
+) -> PgResult<()> {
     if info.last_inner > 0 {
         push_step(state, mcx, Step::InnerFetchSome { last_var: info.last_inner as u16 })?;
     }
@@ -208,6 +321,8 @@ fn setup_walker(node: Node<'_>, info: &mut SetupInfo) {
             }
         }
         NodeTag::T_Const | NodeTag::T_Param => {}
+        // C expr_setup_walker: Aggref args never eval in the caller's econtext.
+        NodeTag::T_Aggref => {}
         NodeTag::T_FuncExpr => {
             for a in node.as_func_expr().unwrap().args.iter() {
                 setup_walker(a, info);
@@ -229,6 +344,7 @@ fn init_expr_rec<'mcx>(
     state: &mut ExprState<'mcx>,
     mcx: Mcx<'mcx>,
     out: OutRef,
+    agg: Option<AggBind>,
 ) -> PgResult<()> {
     match node.node_tag() {
         NodeTag::T_Var => {
@@ -264,13 +380,36 @@ fn init_expr_rec<'mcx>(
         NodeTag::T_Param => unported("EEOP_PARAM_EXEC/EEOP_PARAM_EXTERN (ParamListInfo)"),
         NodeTag::T_FuncExpr => {
             let func = node.as_func_expr().unwrap();
-            let step = init_func(node, &func.args, func.funcid, func.inputcollid, state, mcx, out)?;
+            let step =
+                init_func(node, &func.args, func.funcid, func.inputcollid, state, mcx, out, agg)?;
             push_step(state, mcx, step)
         }
         NodeTag::T_OpExpr => {
             let op = node.as_op_expr().unwrap();
-            let step = init_func(node, &op.args, op.opfuncid, op.inputcollid, state, mcx, out)?;
+            let step =
+                init_func(node, &op.args, op.opfuncid, op.inputcollid, state, mcx, out, agg)?;
             push_step(state, mcx, step)
+        }
+        NodeTag::T_Aggref => {
+            let aggref = node.as_aggref().unwrap();
+            let Some(bind) = agg else {
+                unported("EEOP_AGGREF outside an Agg projection (nodeAgg.c)");
+            };
+            let aggno = aggref.aggno;
+            assert!(
+                aggno >= 0 && (aggno as u16) < bind.naggs,
+                "Aggref.aggno {aggno} outside the AggState's {} slots (planner must set it)",
+                bind.naggs
+            );
+            // SAFETY: aggno bounds-checked against the bind's array length;
+            // the arrays are allocated once and stable (steps.rs note).
+            let (value, null) = unsafe {
+                (
+                    NonNull::new_unchecked(bind.values.as_ptr().add(aggno as usize)),
+                    NonNull::new_unchecked(bind.nulls.as_ptr().add(aggno as usize)),
+                )
+            };
+            push_step(state, mcx, Step::AggrefEval { value, null, out })
         }
         tag => panic!("execexpr ExecInitExprRec: node family {tag:?} not ported"),
     }
@@ -323,6 +462,7 @@ fn init_func<'mcx>(
     state: &mut ExprState<'mcx>,
     mcx: Mcx<'mcx>,
     out: OutRef,
+    agg: Option<AggBind>,
 ) -> PgResult<Step> {
     let nargs = args.len();
 
@@ -378,7 +518,7 @@ fn init_func<'mcx>(
         if arg.as_const().is_none() {
             // SAFETY: argno < nargs of the image `call.fcinfo` points at.
             let arg_out = OutRef(Some(unsafe { crate::steps::arg_slot_of(call.fcinfo, argno) }));
-            init_expr_rec(arg, state, mcx, arg_out)?;
+            init_expr_rec(arg, state, mcx, arg_out, agg)?;
         }
     }
 
@@ -425,7 +565,9 @@ fn ready_expr(state: &mut ExprState<'_>) {
             Step::FuncExpr { call, .. }
             | Step::FuncExprStrict1 { call, .. }
             | Step::FuncExprStrict2 { call, .. }
-            | Step::FuncExprStrict { call, .. } => {
+            | Step::FuncExprStrict { call, .. }
+            | Step::AggPlainTransByVal { call, .. }
+            | Step::AggPlainTransStrictByVal { call, .. } => {
                 let f = &state.frames[call.frame as usize];
                 assert!(call.nargs == f.nargs && call.fcinfo == f.fcinfo);
             }

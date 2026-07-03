@@ -31,6 +31,10 @@ pub fn init_all() {
     nodeseqscan::init_seams();
     nodeindexscan::init_seams();
     nodeindexonlyscan::init_seams();
+    nodeagg::init_seams();
+    nodesort::init_seams();
+    nodelimit::init_seams();
+    tuplesort::init_seams();
     auth::init_seams();
     be_secure::init_seams();
     hba::init_seams();

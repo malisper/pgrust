@@ -18,8 +18,9 @@ mod steps;
 mod tests;
 
 pub use compile::{
-    exec_build_projection_info, exec_init_expr, exec_init_qual, expr_type, INDEX_VAR, INNER_VAR,
+    exec_build_agg_projection_info, exec_build_agg_trans, exec_build_projection_info,
+    exec_init_expr, exec_init_qual, expr_type, AggBind, AggTransSpec, INDEX_VAR, INNER_VAR,
     OUTER_VAR,
 };
 pub use interp::{exec_eval_expr, exec_project, exec_qual, EvalSlots};
-pub use steps::{CmpOp, ExprState, Kernel, OutRef, SlotSrc, Step};
+pub use steps::{AggPerGroup, CmpOp, ExprState, Kernel, OutRef, SlotSrc, Step};

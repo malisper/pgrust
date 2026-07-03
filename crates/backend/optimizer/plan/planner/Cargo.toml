@@ -8,6 +8,7 @@ publish.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+parse_relation = { path = "../../../parser/parse_relation" }
 mcx = { path = "../../../../_support/mcx" }
 datum = { path = "../../../../_support/types/datum" }
 types_core = { path = "../../../../_support/types/types_core" }
@@ -22,6 +23,7 @@ clauses = { path = "../../util/clauses" }
 lsyscache = { path = "../../../utils/cache/lsyscache" }
 guc_tables = { path = "../../../utils/misc/guc_tables" }
 init_small = { path = "../../../utils/init/init_small" }
+tidbitmap = { path = "../../../nodes/tidbitmap" }
 types_rel = { path = "../../../../_support/types/rel" }
 types_tuple = { path = "../../../../_support/types/types_tuple" }
 types_relscan = { path = "../../../access/index/relscan" }

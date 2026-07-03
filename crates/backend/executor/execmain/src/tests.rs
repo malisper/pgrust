@@ -19,6 +19,10 @@ use crate::{exec_init_node, exec_proc_node, exec_re_scan};
 const INT4OID: u32 = 23;
 const BOOLOID: u32 = 16;
 const INT8OID: u32 = 20;
+const INT4_LT: u32 = 97;
+const INTEGER_BTREE_FAM: u32 = 1976;
+const BTREE_AM: u32 = 403;
+const F_BTINT4SORTSUPPORT: u32 = 3130;
 
 static SEAMS: Once = Once::new();
 
@@ -91,6 +95,26 @@ fn install_seams() {
                 2108 => Some(None),
                 _ => None,
             })
+        });
+        // int4 btree sort-operator lookups (nodesort seam recipe).
+        syscache_seams::lookup_pg_amop_members_by_operator::set(|mcx, opno| {
+            assert_eq!(opno, INT4_LT);
+            let mut v = ::mcx::PgVec::new_in(mcx);
+            v.push(syscache_seams::PgAmopMemberShape {
+                amopfamily: INTEGER_BTREE_FAM,
+                amoplefttype: INT4OID,
+                amoprighttype: INT4OID,
+                amopstrategy: 1,
+                amopmethod: BTREE_AM,
+            });
+            Ok(v)
+        });
+        syscache_seams::lookup_pg_amproc::set(|opfamily, left, right, procnum| {
+            assert_eq!(
+                (opfamily, left, right, procnum),
+                (INTEGER_BTREE_FAM, INT4OID, INT4OID, 2)
+            );
+            Ok(F_BTINT4SORTSUPPORT)
         });
     });
 }
@@ -929,5 +953,222 @@ fn agg_sum_of_empty_table_is_null() {
     scanfix::register_table(relid, &[]);
     let (_, isnull) = run_agg_pstmt(mk_agg_pstmt(mcx, relid, 2108, true));
     assert!(isnull);
+    scanfix::quiesced();
+}
+
+// Sort/Limit dispatch flips (notes/sort-limit-execmain-wiring.md): hand-built
+// plans over the fake-heap fixture through the real InitPlan path.
+fn mk_sort_limit_pstmt<'mcx>(
+    mcx: ::mcx::Mcx<'mcx>,
+    relid: u32,
+    with_sort: bool,
+    offset: Option<i64>,
+    count: Option<i64>,
+) -> &'mcx PlannedStmt<'mcx> {
+    use ::types_nodes::bitmapset::Bitmapset;
+    use ::types_nodes::parsenodes::{RTEKind, RTEPermissionInfo, RangeTblEntry};
+    use ::types_nodes::plannodes::{Limit, Plan, Scan, SeqScan, Sort};
+    use ::types_nodes::primnodes::OUTER_VAR;
+
+    let scan_var = Node::mk_var(mcx, 1, 1, INT4OID, -1, 0, 0).unwrap();
+    let scan_tle = Node::mk_target_entry(mcx, scan_var, 1, Some("a"), false).unwrap();
+    let mut tree = Node::mk(
+        mcx,
+        SeqScan {
+            scan: Scan {
+                plan: Plan {
+                    targetlist: NodeList::make1(mcx, scan_tle).unwrap(),
+                    ..Default::default()
+                },
+                scanrelid: 1,
+            },
+        },
+    )
+    .unwrap();
+
+    let outer_tle = |mcx| {
+        let v = Node::mk_var(mcx, OUTER_VAR, 1, INT4OID, -1, 0, 0).unwrap();
+        NodeList::make1(mcx, Node::mk_target_entry(mcx, v, 1, Some("a"), false).unwrap())
+            .unwrap()
+    };
+
+    if with_sort {
+        let mut sort = Node::build::<Sort>(mcx).unwrap();
+        sort.plan.targetlist = outer_tle(mcx);
+        sort.plan.lefttree = Some(tree);
+        sort.numCols = 1;
+        sort.sortColIdx = ::mcx::slice_borrow_in(mcx, &[1i16]).unwrap();
+        sort.sortOperators = ::mcx::slice_borrow_in(mcx, &[INT4_LT]).unwrap();
+        sort.collations = ::mcx::slice_borrow_in(mcx, &[0u32]).unwrap();
+        sort.nullsFirst = ::mcx::slice_borrow_in(mcx, &[false]).unwrap();
+        tree = sort.seal();
+    }
+
+    if offset.is_some() || count.is_some() {
+        let mk_i8 = |v: i64| {
+            Node::mk_const(mcx, INT8OID, -1, 0, 8, Datum::from_i64(v), false, true).unwrap()
+        };
+        let mut limit = Node::build::<Limit>(mcx).unwrap();
+        limit.plan.targetlist = outer_tle(mcx);
+        limit.plan.lefttree = Some(tree);
+        limit.limitOffset = offset.map(mk_i8);
+        limit.limitCount = count.map(mk_i8);
+        tree = limit.seal();
+    }
+
+    let rte = Node::mk(
+        mcx,
+        RangeTblEntry {
+            rtekind: RTEKind::RTE_RELATION,
+            relid,
+            relkind: ::types_rel::RELKIND_RELATION,
+            rellockmode: ::types_rel::AccessShareLock,
+            perminfoindex: 1,
+            inFromCl: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let perminfo = Node::mk(
+        mcx,
+        RTEPermissionInfo { relid, requiredPerms: 1 << 1, ..Default::default() },
+    )
+    .unwrap();
+    let mut unpruned = Bitmapset::empty();
+    unpruned.add_member(mcx, 1).unwrap();
+
+    let mut pstmt = Node::build::<PlannedStmt>(mcx).unwrap();
+    pstmt.commandType = CmdType::CMD_SELECT;
+    pstmt.canSetTag = true;
+    pstmt.planTree = Some(tree);
+    pstmt.rtable = NodeList::make1(mcx, rte).unwrap();
+    pstmt.permInfos = NodeList::make1(mcx, perminfo).unwrap();
+    pstmt.unprunableRelids = unpruned;
+    pstmt.seal_ref()
+}
+
+fn drain_int4_rows(pstmt: &'static PlannedStmt<'static>, rescan: bool) -> Vec<Vec<i32>> {
+    let snap_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("snap")));
+    let snapshot: snapmgr::Snapshot = std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
+        snap_ctx.mcx(),
+        ::types_snapshot::SnapshotType::SNAPSHOT_MVCC,
+    ));
+    with_exec_data(pstmt, |data, pstmt| {
+        data.estate.es_snapshot = Some(snapshot);
+        let desc = crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap();
+        assert_eq!(desc.natts, 1);
+        assert_eq!(desc.attr(0).atttypid, INT4OID);
+
+        let ExecData { estate, planstate } = data;
+        let ps = planstate.as_mut().unwrap();
+        let mut runs = Vec::new();
+        let passes = if rescan { 2 } else { 1 };
+        for pass in 0..passes {
+            if pass > 0 {
+                exec_re_scan(ps, estate).unwrap();
+            }
+            let mut vals = Vec::new();
+            while let Some(slot_id) = exec_proc_node(ps, estate).unwrap() {
+                let mut isnull = false;
+                let v = exectuples::slot_getattr(estate.slot_mut(slot_id), 1, &mut isnull);
+                assert!(!isnull);
+                vals.push(v.as_i32());
+            }
+            runs.push(vals);
+        }
+        crate::exec_end_node(ps, estate).unwrap();
+        estate.exec_reset_tuple_table(false);
+        estate.exec_close_range_table_relations().unwrap();
+        runs
+    })
+}
+
+#[test]
+fn sort_over_seqscan_orders_output() {
+    install_seams();
+    scanfix::install();
+    let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mcx = leaked_mcx();
+    let relid: u32 = 70006;
+    scanfix::register_table(relid, &[&[3, 1, 2], &[5, 4]]);
+    let runs = drain_int4_rows(mk_sort_limit_pstmt(mcx, relid, true, None, None), false);
+    assert_eq!(runs, vec![vec![1, 2, 3, 4, 5]]);
+    scanfix::quiesced();
+}
+
+#[test]
+fn limit_bounds_sort_under_it() {
+    install_seams();
+    scanfix::install();
+    let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mcx = leaked_mcx();
+    let relid: u32 = 70007;
+    scanfix::register_table(relid, &[&[3, 1, 2], &[5, 4]]);
+    let runs = drain_int4_rows(mk_sort_limit_pstmt(mcx, relid, true, None, Some(2)), false);
+    assert_eq!(runs, vec![vec![1, 2]]);
+    scanfix::quiesced();
+}
+
+#[test]
+fn offset_limit_window_over_seqscan() {
+    install_seams();
+    scanfix::install();
+    let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mcx = leaked_mcx();
+    let relid: u32 = 70008;
+    scanfix::register_table(relid, &[&[1, 2, 3], &[4, 5]]);
+    let runs = drain_int4_rows(mk_sort_limit_pstmt(mcx, relid, false, Some(1), Some(2)), false);
+    assert_eq!(runs, vec![vec![2, 3]]);
+    scanfix::quiesced();
+}
+
+#[test]
+fn rescan_of_sort_under_limit_repeats() {
+    install_seams();
+    scanfix::install();
+    let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mcx = leaked_mcx();
+    let relid: u32 = 70009;
+    scanfix::register_table(relid, &[&[3, 1, 2], &[5, 4]]);
+    let runs = drain_int4_rows(mk_sort_limit_pstmt(mcx, relid, true, Some(1), Some(3)), true);
+    assert_eq!(runs, vec![vec![2, 3, 4], vec![2, 3, 4]]);
+    scanfix::quiesced();
+}
+
+#[test]
+fn limit_pushes_bound_into_sort_state() {
+    install_seams();
+    scanfix::install();
+    let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mcx = leaked_mcx();
+    let relid: u32 = 70010;
+    scanfix::register_table(relid, &[&[3, 1, 2], &[5, 4]]);
+    let pstmt = mk_sort_limit_pstmt(mcx, relid, true, None, Some(2));
+
+    let snap_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("snap")));
+    let snapshot: snapmgr::Snapshot = std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
+        snap_ctx.mcx(),
+        ::types_snapshot::SnapshotType::SNAPSHOT_MVCC,
+    ));
+    with_exec_data(pstmt, |data, pstmt| {
+        data.estate.es_snapshot = Some(snapshot);
+        crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap();
+        let ExecData { estate, planstate } = data;
+        let ps = planstate.as_mut().unwrap();
+        exec_proc_node(ps, estate).unwrap().expect("first sorted row");
+        match ps {
+            crate::procnode::PlanStateNode::Limit(l) => match &*l.outer {
+                crate::procnode::PlanStateNode::Sort(s) => {
+                    assert!(s.state.bounded, "recompute_limits pushed the bound");
+                    assert_eq!(s.state.bound, 2);
+                }
+                _ => panic!("expected Sort under Limit"),
+            },
+            _ => panic!("expected Limit root"),
+        }
+        crate::exec_end_node(ps, estate).unwrap();
+        estate.exec_reset_tuple_table(false);
+        estate.exec_close_range_table_relations().unwrap();
+    });
     scanfix::quiesced();
 }

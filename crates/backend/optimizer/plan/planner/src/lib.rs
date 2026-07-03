@@ -14,6 +14,7 @@ pub mod plancat;
 pub mod selfuncs;
 pub mod planmain;
 pub mod prep;
+pub mod prepagg;
 pub mod relnode;
 pub mod run;
 pub mod setrefs;
@@ -94,6 +95,7 @@ pub mod gucs {
     bool_guc!(ENABLE_SEQSCAN, enable_seqscan, set_enable_seqscan, true);
     bool_guc!(ENABLE_INDEXSCAN, enable_indexscan, set_enable_indexscan, true);
     bool_guc!(ENABLE_INDEXONLYSCAN, enable_indexonlyscan, set_enable_indexonlyscan, true);
+    bool_guc!(ENABLE_BITMAPSCAN, enable_bitmapscan, set_enable_bitmapscan, true);
     real_guc!(CURSOR_TUPLE_FRACTION, cursor_tuple_fraction, set_cursor_tuple_fraction, 0.1);
     real_guc!(JIT_ABOVE_COST, jit_above_cost, set_jit_above_cost, 100000.0);
     real_guc!(JIT_OPTIMIZE_ABOVE_COST, jit_optimize_above_cost, set_jit_optimize_above_cost, 500000.0);
@@ -135,6 +137,10 @@ pub fn init_seams() {
     guc_tables::vars::enable_indexonlyscan.install(GucVarAccessors {
         get: gucs::enable_indexonlyscan,
         set: gucs::set_enable_indexonlyscan,
+    });
+    guc_tables::vars::enable_bitmapscan.install(GucVarAccessors {
+        get: gucs::enable_bitmapscan,
+        set: gucs::set_enable_bitmapscan,
     });
     guc_tables::vars::cursor_tuple_fraction.install(GucVarAccessors {
         get: gucs::cursor_tuple_fraction,

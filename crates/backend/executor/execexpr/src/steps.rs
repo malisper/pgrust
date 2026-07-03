@@ -52,6 +52,19 @@ pub enum Step {
     FuncExprStrict2 { call: FuncCall, out: OutRef },
     FuncExprStrict { call: FuncCall, out: OutRef },
     Qual { jumpdone: u32 },
+    // Agg pointers resolve at build into once-allocated never-moved AggState arrays.
+    AggrefEval { value: NonNull<Datum>, null: NonNull<bool>, out: OutRef },
+    AggPlainTransByVal { call: FuncCall, pergroup: NonNull<AggPerGroup> },
+    AggPlainTransStrictByVal { call: FuncCall, pergroup: NonNull<AggPerGroup> },
+}
+
+// C nodeAgg.h AggStatePerGroupData; the trans steps read/write it in place.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct AggPerGroup {
+    pub trans_value: Datum,
+    pub trans_value_is_null: bool,
+    pub no_trans_value: bool,
 }
 
 const _: () = assert!(core::mem::size_of::<Step>() <= 64);

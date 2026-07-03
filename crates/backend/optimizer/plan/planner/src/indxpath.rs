@@ -65,9 +65,11 @@ pub fn create_index_paths<'mcx>(run: &mut PlannerRun<'mcx>, rel: RelId) -> PgRes
         get_index_paths(run, rel, &index, &rclauseset, &mut bitindexpaths)?;
     }
 
-    // C divergence until the M2 bitmap lane: the BitmapHeapPath built over
-    // bitindexpaths would only compete, never uniquely enable a plan shape.
-    let _ = bitindexpaths;
+    if !bitindexpaths.is_empty() {
+        let bitmapqual = crate::pathnode::choose_bitmap_and(run, rel, &bitindexpaths);
+        let bpath = crate::pathnode::create_bitmap_heap_path(run, rel, bitmapqual, 1.0)?;
+        add_path(run, rel, bpath);
+    }
     Ok(())
 }
 

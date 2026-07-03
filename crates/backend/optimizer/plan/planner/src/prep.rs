@@ -61,16 +61,100 @@ pub fn preprocess_rowmarks(parse: &Query<'_>) {
     }
 }
 
-// No-result-relation arm: processed tlist = parse targetList (C shares it).
-pub fn preprocess_targetlist<'mcx>(run: &mut PlannerRun<'mcx>) {
+// SELECT arm shares the parse targetList (as C); the INSERT arm NULL-fills
+// missing columns (expand_insert_targetlist). UPDATE/DELETE/MERGE row-identity
+// lanes are loud.
+pub fn preprocess_targetlist<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResult<()> {
+    let mcx = run.mcx;
     let parse = run.parse();
-    if parse.resultRelation != 0 {
+    debug_assert!(run.root.rowMarks.is_empty());
+    if parse.resultRelation == 0 {
+        debug_assert!(parse.commandType == CmdType::CMD_SELECT);
+        run.processed_tlist = Some(&parse.targetList);
+        return Ok(());
+    }
+    let command_type = parse.commandType;
+    if command_type != CmdType::CMD_INSERT {
         panic!(
-            "preprocess_targetlist (preptlist.c): result relation (table_open/\
-             expand_insert_targetlist); M2 DML lane"
+            "preprocess_targetlist (preptlist.c): UPDATE/DELETE/MERGE row-identity \
+             lane (rewriteTargetListUD/add_row_identity_var); M4 DML lane"
         );
     }
-    debug_assert!(parse.commandType == CmdType::CMD_SELECT);
-    debug_assert!(run.root.rowMarks.is_empty());
-    run.processed_tlist = Some(&parse.targetList);
+    let rte = parse
+        .rtable
+        .nth(parse.resultRelation as usize - 1)
+        .as_range_tbl_entry()
+        .expect("rtable cell");
+    debug_assert!(rte.rtekind == RTEKind::RTE_RELATION);
+    let rel = table::table_open(mcx, rte.relid, types_rel::NoLock)?;
+    let tlist = expand_insert_targetlist(mcx, &parse.targetList, &rel)?;
+    table::table_close(rel, types_rel::NoLock)?;
+    debug_assert!(parse.returningList.is_nil());
+    run.processed_tlist = Some(mcx::leak_in(mcx::alloc_in(mcx, tlist)?));
+    Ok(())
+}
+
+// expand_insert_targetlist (preptlist.c): produce one entry per attribute in
+// attno order, NULL Consts for unassigned columns. Domain columns need
+// coerce_null_to_domain's CoerceToDomain wrapper — loud.
+fn expand_insert_targetlist<'mcx>(
+    mcx: Mcx<'mcx>,
+    tlist: &NodeList<'mcx>,
+    rel: &types_rel::Relation<'mcx>,
+) -> PgResult<NodeList<'mcx>> {
+    let mut new_tlist = NodeList::nil();
+    let mut tlist_iter = tlist.iter().peekable();
+    let numattrs = rel.rd_att.natts;
+    for attrno in 1..=numattrs {
+        let att = rel.rd_att.attr(attrno as usize - 1);
+        let mut new_tle = None;
+        if let Some(&tle_node) = tlist_iter.peek() {
+            let tle = tle_node.as_target_entry().expect("tlist cell");
+            if !tle.resjunk && tle.resno == attrno as i16 {
+                new_tle = Some(tle_node);
+                tlist_iter.next();
+            }
+        }
+        let tle_node = match new_tle {
+            Some(t) => t,
+            None => {
+                let new_expr = if !att.attisdropped {
+                    debug_assert!(att.attgenerated == 0);
+                    if lsyscache::typ::getBaseType(att.atttypid)? != att.atttypid {
+                        panic!(
+                            "expand_insert_targetlist (preptlist.c): \
+                             coerce_null_to_domain (CoerceToDomain wrapper); M4 domain lane"
+                        );
+                    }
+                    Node::mk_const(
+                        mcx,
+                        att.atttypid,
+                        att.atttypmod,
+                        att.attcollation,
+                        att.attlen as i32,
+                        datum::Datum::null(),
+                        true,
+                        att.attbyval,
+                    )?
+                } else {
+                    Node::mk_const(mcx, 23, -1, 0, 4, datum::Datum::null(), true, true)?
+                };
+                let name =
+                    core::str::from_utf8(att.attname.name_str()).expect("attname is UTF-8");
+                let name = mcx::slice_borrow_in(mcx, name.as_bytes())?;
+                // SAFETY: byte-for-byte copy of a &str.
+                let name = unsafe { core::str::from_utf8_unchecked(name) };
+                Node::mk_target_entry(mcx, new_expr, attrno as i16, Some(name), false)?
+            }
+        };
+        new_tlist.lappend(mcx, tle_node)?;
+    }
+    for tle_node in tlist_iter {
+        let tle = tle_node.as_target_entry().expect("tlist cell");
+        assert!(tle.resjunk, "targetlist is not sorted correctly");
+        panic!(
+            "expand_insert_targetlist (preptlist.c): junk tlist entries; M4 lane"
+        );
+    }
+    Ok(new_tlist)
 }

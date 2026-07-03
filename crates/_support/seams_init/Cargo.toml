@@ -39,6 +39,10 @@ execscan = { path = "../../backend/executor/execscan" }
 nodeseqscan = { path = "../../backend/executor/nodeseqscan" }
 nodeindexscan = { path = "../../backend/executor/nodeindexscan" }
 nodeindexonlyscan = { path = "../../backend/executor/nodeindexonlyscan" }
+nodeagg = { path = "../../backend/executor/nodeagg" }
+nodesort = { path = "../../backend/executor/nodesort" }
+nodelimit = { path = "../../backend/executor/nodelimit" }
+tuplesort = { path = "../../backend/utils/sort/tuplesort" }
 auth = { path = "../../backend/libpq/auth" }
 be_secure = { path = "../../backend/libpq/be_secure" }
 hba = { path = "../../backend/libpq/hba" }

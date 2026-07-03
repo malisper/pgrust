@@ -1,6 +1,6 @@
 use types_error::PgResult;
 use types_nodes::list::NodeList;
-use types_nodes::plannodes::{IndexScan, Plan, Result as ResultPlan, SeqScan};
+use types_nodes::plannodes::{Agg, IndexScan, Plan, Result as ResultPlan, SeqScan};
 use types_nodes::primnodes::{OpExpr, TargetEntry};
 use types_nodes::{Node, NodeTag};
 use types_pathnodes::{IndexOptInfo, PathId, PathNode, PtId, RinfoId};
@@ -42,8 +42,11 @@ fn create_plan_recurse<'mcx>(
             create_scan_plan(run, path_id, flags)
         }
         PathNode::IndexPath(_) => create_scan_plan(run, path_id, flags),
+        PathNode::BitmapHeapPath(_) => create_scan_plan(run, path_id, flags),
         PathNode::ProjectionPath(_) => create_projection_plan(run, path_id, flags),
         PathNode::GroupResultPath(_) => create_group_result_plan(run, path_id),
+        PathNode::AggPath(_) => create_agg_plan(run, path_id),
+        PathNode::ModifyTablePath(_) => create_modifytable_plan(run, path_id),
         other => panic!(
             "create_plan_recurse (createplan.c): pathtype {}; M2 plan lane",
             other.base().pathtype
@@ -51,12 +54,66 @@ fn create_plan_recurse<'mcx>(
     }
 }
 
-// use_physical_tlist (createplan.c): live callers demand exact/ignored.
-fn use_physical_tlist(flags: i32) -> bool {
+// use_physical_tlist (createplan.c), plain-baserel arm.
+fn use_physical_tlist(run: &PlannerRun<'_>, best_path: PathId, flags: i32) -> bool {
     if flags & (CP_EXACT_TLIST | CP_SMALL_TLIST) != 0 {
         return false;
     }
-    panic!("build_physical_tlist (plancat.c): M2 physical-tlist lane");
+    let base = run.root.path(best_path).base();
+    let rel_id = base.parent;
+    let rel = run.root.rel(rel_id);
+    if rel.rtekind != types_pathnodes::RTE_RELATION
+        || rel.reloptkind != types_pathnodes::RELOPT_BASEREL
+    {
+        return false;
+    }
+    for attno in rel.min_attr..=0 {
+        let ndx = (attno - rel.min_attr) as usize;
+        if !crate::relnode::relids_is_empty(&rel.attr_needed[ndx]) {
+            return false;
+        }
+    }
+    debug_assert!(run.root.placeholder_list.is_empty());
+    if base.pathtype == crate::pathnode::tag16(NodeTag::T_IndexOnlyScan) {
+        panic!("use_physical_tlist (createplan.c): index-only indextlist; M2 IOS lane");
+    }
+    if flags & CP_LABEL_TLIST != 0 {
+        let target = run.root.pathtarget(base.pathtarget_id.unwrap());
+        if target.sortgrouprefs.iter().any(|&s| s != 0) {
+            return false;
+        }
+    }
+    true
+}
+
+// build_physical_tlist (plancat.c), heap-relation arm.
+fn build_physical_tlist<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel_id: types_pathnodes::RelId,
+) -> PgResult<NodeList<'mcx>> {
+    let mcx = run.mcx;
+    let varno = run.root.rel(rel_id).relid;
+    let reloid = run.rte(varno as usize).relid;
+    let relation = table::table_open(mcx, reloid, 0)?;
+    let mut tlist = NodeList::nil();
+    for att in relation.rd_att.attrs.iter() {
+        assert!(
+            !att.attisdropped,
+            "build_physical_tlist (plancat.c): dropped column NULL Const; M2 lane"
+        );
+        let var = Node::mk_var(
+            mcx,
+            varno as i32,
+            att.attnum,
+            att.atttypid,
+            att.atttypmod,
+            att.attcollation,
+            0,
+        )?;
+        let tle = Node::mk_target_entry(mcx, var, att.attnum, None, false)?;
+        tlist.lappend(mcx, tle)?;
+    }
+    Ok(tlist)
 }
 
 // create_scan_plan (createplan.c).
@@ -93,8 +150,13 @@ fn create_scan_plan<'mcx>(
 
     let tlist = if flags == CP_IGNORE_TLIST {
         NodeList::nil()
-    } else if use_physical_tlist(flags) {
-        unreachable!()
+    } else if use_physical_tlist(run, best_path, flags) {
+        let physical = build_physical_tlist(run, rel_id)?;
+        if flags & CP_LABEL_TLIST != 0 {
+            // apply_pathtarget_labeling_to_tlist: no sortgrouprefs to copy
+            // (use_physical_tlist refused any labeled target).
+        }
+        physical
     } else {
         let target_id = run.root.path(best_path).base().pathtarget_id.unwrap();
         build_path_tlist(run, target_id)?
@@ -109,6 +171,9 @@ fn create_scan_plan<'mcx>(
         }
         t if t == crate::pathnode::tag16(NodeTag::T_IndexOnlyScan) => {
             panic!("create_indexscan_plan (createplan.c): index-only scan; M2 IOS lane")
+        }
+        t if t == crate::pathnode::tag16(NodeTag::T_BitmapHeapScan) => {
+            create_bitmap_scan_plan(run, best_path, tlist, scan_clauses)
         }
         other => panic!("create_scan_plan (createplan.c): pathtype {other}; M2 scan lane"),
     }
@@ -248,6 +313,139 @@ fn create_indexscan_plan<'mcx>(
     Ok(plan.seal())
 }
 
+// create_bitmap_scan_plan (createplan.c). indexECs bookkeeping is dead while
+// eq_classes are empty; nestloop-param replacement loud upstream (param_info).
+fn create_bitmap_scan_plan<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    best_path: PathId,
+    tlist: NodeList<'mcx>,
+    scan_clauses: mcx::PgVec<'mcx, RinfoId>,
+) -> PgResult<Node<'mcx>> {
+    let mcx = run.mcx;
+    let (baserelid, bitmapqual) = {
+        let PathNode::BitmapHeapPath(p) = run.root.path(best_path) else {
+            panic!("create_bitmap_scan_plan: not a BitmapHeapPath")
+        };
+        debug_assert!(!p.path.parallel_aware);
+        (p.path.parent, p.bitmapqual.expect("BitmapHeapPath bitmapqual"))
+    };
+    let scan_relid = run.root.rel(baserelid).relid;
+    debug_assert!(scan_relid > 0);
+
+    let (bitmapqualplan, indexquals, mut bitmapqualorig) =
+        create_bitmap_subplan(run, bitmapqual)?;
+
+    // scan_clauses minus indexquals; arena identity stands in for C's equal()
+    // (this lane shares the RestrictInfo clause nodes verbatim).
+    let mut qpqual_rinfos: mcx::PgVec<'mcx, RinfoId> = mcx::PgVec::new_in(mcx);
+    for &rid in scan_clauses.iter() {
+        if run.root.rinfo(rid).pseudoconstant {
+            continue;
+        }
+        let clause = *run.root.expr_node(run.root.rinfo(rid).clause);
+        if indexquals.iter().any(|q| q.ptr_eq(clause)) {
+            continue;
+        }
+        if !clauses::contain_mutable_functions(clause)? {
+            panic!("predicate_implied_by (predtest.c): M2 predicate lane");
+        }
+        qpqual_rinfos.push(rid);
+    }
+    let ordered = order_qual_clauses(run, &qpqual_rinfos)?;
+    let qpqual = extract_actual_clauses(run, &ordered);
+
+    // list_difference_ptr(bitmapqualorig, qpqual): drop double-tested clauses.
+    if !qpqual.is_nil() {
+        let mut kept = NodeList::nil();
+        for orig in bitmapqualorig.iter() {
+            if !qpqual.iter().any(|q| q.ptr_eq(orig)) {
+                kept.lappend(mcx, orig)?;
+            }
+        }
+        bitmapqualorig = kept;
+    }
+
+    let mut plan = Node::build::<types_nodes::plannodes::BitmapHeapScan<'mcx>>(mcx)?;
+    plan.scan.plan.targetlist = tlist;
+    plan.scan.plan.qual = qpqual;
+    plan.scan.plan.lefttree = Some(bitmapqualplan);
+    plan.scan.scanrelid = scan_relid;
+    plan.bitmapqualorig = bitmapqualorig;
+    copy_generic_path_info(run, &mut plan.scan.plan, best_path);
+    Ok(plan.seal())
+}
+
+// create_bitmap_subplan (createplan.c), IndexPath arm -> (plan, indexquals,
+// bitmapqualorig); the BitmapAnd/OrPath arms ride the bitmap-combine lane.
+// indexECs output is dropped (eq_classes empty on this lane).
+fn create_bitmap_subplan<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    bitmapqual: PathId,
+) -> PgResult<(Node<'mcx>, NodeList<'mcx>, NodeList<'mcx>)> {
+    let mcx = run.mcx;
+    let (indexclauses, indexselectivity, parent, parallel_safe, has_indpred) = {
+        match run.root.path(bitmapqual) {
+            PathNode::IndexPath(ip) => (
+                ip.indexclauses.clone(),
+                ip.indexselectivity,
+                ip.path.parent,
+                ip.path.parallel_safe,
+                !ip.indexinfo.as_ref().expect("indexinfo set").indpred.is_empty(),
+            ),
+            PathNode::BitmapAndPath(_) | PathNode::BitmapOrPath(_) => panic!(
+                "create_bitmap_subplan (createplan.c): BitmapAnd/Or; M2 bitmap-combine lane"
+            ),
+            other => panic!(
+                "create_bitmap_subplan (createplan.c): pathtype {}",
+                other.base().pathtype
+            ),
+        }
+    };
+    assert!(
+        !has_indpred,
+        "create_bitmap_subplan (createplan.c): partial-index indpred; M2 predicate lane"
+    );
+
+    // C builds a throwaway IndexScan via create_indexscan_plan and moves its
+    // qual lists over; the direct fix_indexqual_references call is the same
+    // computation without the discarded node.
+    let (stripped_indexquals, fixed_indexquals) = fix_indexqual_references(run, bitmapqual)?;
+
+    let (indexoid, indextotalcost, tuples) = {
+        let PathNode::IndexPath(ip) = run.root.path(bitmapqual) else { unreachable!() };
+        (
+            ip.indexinfo.as_ref().expect("indexinfo set").indexoid,
+            ip.indextotalcost,
+            run.root.rel(parent).tuples,
+        )
+    };
+    let mut plan = Node::build::<types_nodes::plannodes::BitmapIndexScan<'mcx>>(mcx)?;
+    plan.scan.scanrelid = run.root.rel(parent).relid;
+    plan.indexid = indexoid;
+    plan.isshared = false;
+    plan.indexqual = fixed_indexquals;
+    plan.indexqualorig = stripped_indexquals;
+    plan.scan.plan.startup_cost = 0.0;
+    plan.scan.plan.total_cost = indextotalcost;
+    plan.scan.plan.plan_rows =
+        crate::costsize::clamp_row_est(indexselectivity * tuples);
+    plan.scan.plan.plan_width = 0;
+    plan.scan.plan.parallel_aware = false;
+    plan.scan.plan.parallel_safe = parallel_safe;
+
+    let mut subquals = NodeList::nil();
+    let mut subindexquals = NodeList::nil();
+    for ic in indexclauses.iter() {
+        let rid = ic.rinfo.expect("IndexClause rinfo");
+        debug_assert!(!run.root.rinfo(rid).pseudoconstant);
+        subquals.lappend(mcx, *run.root.expr_node(run.root.rinfo(rid).clause))?;
+        for &qid in ic.indexquals.iter() {
+            subindexquals.lappend(mcx, *run.root.expr_node(run.root.rinfo(qid).clause))?;
+        }
+    }
+    Ok((plan.seal(), subindexquals, subquals))
+}
+
 // fix_indexqual_references (createplan.c) -> (stripped, fixed) qual lists.
 fn fix_indexqual_references<'mcx>(
     run: &mut PlannerRun<'mcx>,
@@ -381,6 +579,59 @@ fn create_projection_plan<'mcx>(
     Ok(subplan)
 }
 
+// create_modifytable_plan + make_modifytable (createplan.c), single-relation
+// INSERT arm: no FDW result rels, no ON CONFLICT/MERGE/RETURNING lists.
+fn create_modifytable_plan<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    path_id: PathId,
+) -> PgResult<Node<'mcx>> {
+    let mcx = run.mcx;
+    let (subpath_id, operation, can_set_tag, nominal, root_rel, result_relations, epq_param) = {
+        let PathNode::ModifyTablePath(p) = run.root.path(path_id) else { unreachable!() };
+        debug_assert!(
+            p.updateColnosLists.is_empty()
+                && p.withCheckOptionLists.is_empty()
+                && p.returningLists.is_empty()
+                && p.rowMarks.is_empty()
+                && p.onconflict.is_none()
+                && p.mergeActionLists.is_empty()
+        );
+        (
+            p.subpath.expect("ModifyTablePath has a subpath"),
+            p.operation,
+            p.canSetTag,
+            p.nominalRelation,
+            p.rootRelation,
+            crate::relnode::pgvec_clone_shallow(mcx, &p.resultRelations),
+            p.epqParam,
+        )
+    };
+    assert!(
+        operation == types_nodes::nodes_enums::CmdType::CMD_INSERT as u32,
+        "make_modifytable (createplan.c): UPDATE/DELETE/MERGE; M4 DML lane"
+    );
+
+    let subplan = create_plan_recurse(run, subpath_id, CP_EXACT_TLIST)?;
+    apply_tlist_labeling(subplan, run.processed_tlist());
+
+    let mut plan = Node::build::<types_nodes::plannodes::ModifyTable>(mcx)?;
+    plan.plan.lefttree = Some(subplan);
+    plan.operation = types_nodes::nodes_enums::CmdType::CMD_INSERT;
+    plan.canSetTag = can_set_tag;
+    plan.nominalRelation = nominal;
+    plan.rootRelation = root_rel;
+    let mut rr = types_nodes::list::IntList::nil();
+    for &rti in result_relations.iter() {
+        rr.lappend(mcx, rti)?;
+    }
+    plan.resultRelations = rr;
+    plan.epqParam = epq_param;
+    plan.returningOldAlias = run.parse().returningOldAlias;
+    plan.returningNewAlias = run.parse().returningNewAlias;
+    copy_generic_path_info(run, &mut plan.plan, path_id);
+    Ok(plan.seal())
+}
+
 fn create_group_result_plan<'mcx>(
     run: &mut PlannerRun<'mcx>,
     path_id: PathId,
@@ -414,6 +665,52 @@ fn create_group_result_plan<'mcx>(
     plan.plan.plan_width = width;
     plan.plan.parallel_safe = costs.3;
     Ok(plan.seal())
+}
+
+// create_agg_plan + make_agg (createplan.c), plain-aggregation arm.
+fn create_agg_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> PgResult<Node<'mcx>> {
+    let (subpath_id, target_id, aggstrategy, aggsplit, num_groups, transition_space) =
+        match run.root.path(path_id) {
+            PathNode::AggPath(ap) => {
+                assert!(
+                    ap.groupClause.is_empty() && ap.qual.is_empty(),
+                    "create_agg_plan (createplan.c): grouping cols/HAVING; M3 grouping lane"
+                );
+                (
+                    ap.subpath.expect("AggPath has a subpath"),
+                    ap.path.pathtarget_id.unwrap(),
+                    ap.aggstrategy,
+                    ap.aggsplit,
+                    ap.numGroups,
+                    ap.transitionSpace,
+                )
+            }
+            _ => unreachable!(),
+        };
+
+    // Agg can project, so no need to be picky about the child tlist.
+    let subplan = create_plan_recurse(run, subpath_id, CP_LABEL_TLIST)?;
+    let tlist = build_path_tlist(run, target_id)?;
+
+    let mut plan = Node::build::<Agg>(run.mcx)?;
+    plan.plan.targetlist = tlist;
+    plan.plan.qual = NodeList::nil();
+    plan.plan.lefttree = Some(subplan);
+    plan.aggstrategy = aggstrategy;
+    plan.aggsplit = aggsplit;
+    plan.numCols = 0;
+    plan.numGroups = clamp_cardinality_to_long(num_groups);
+    plan.transitionSpace = transition_space;
+    copy_generic_path_info(run, &mut plan.plan, path_id);
+    Ok(plan.seal())
+}
+
+fn clamp_cardinality_to_long(x: f64) -> i64 {
+    if x < i64::MAX as f64 {
+        x as i64
+    } else {
+        i64::MAX
+    }
 }
 
 // build_path_tlist; parameterized paths can't reach here.

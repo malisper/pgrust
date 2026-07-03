@@ -1,0 +1,425 @@
+//! prepagg.c slice hosted here (unit backend-optimizer-prep-core):
+//! preprocess_aggrefs + get_agg_clause_costs for the plain no-GROUP-BY lane.
+
+use types_error::PgResult;
+use types_nodes::list::NodeList;
+use types_nodes::primnodes::Aggref;
+use types_nodes::{Node, NodeTag};
+use types_pathnodes::{AggClauseCosts, AggInfo, AggSplit, AggTransInfo, AGGSPLIT_SIMPLE};
+
+use crate::costsize::{cost_qual_eval_node, expr_type_typmod};
+use crate::pathnode::equal_expr;
+use crate::run::PlannerRun;
+
+const INT8OID: u32 = 20;
+const INTERNALOID: u32 = 2281;
+const AGGMODIFY_READ_WRITE: i8 = b'w' as i8;
+const POLYMORPHIC_TYPEOIDS: &[u32] =
+    &[2276, 2277, 2283, 2776, 3500, 3831, 4537, 4538, 5077, 5078, 5079, 5080];
+
+pub fn preprocess_aggrefs<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    tlist: &NodeList<'mcx>,
+) -> PgResult<()> {
+    for node in tlist {
+        preprocess_aggrefs_walker(run, node)?;
+    }
+    Ok(())
+}
+
+// C returns without descending into a matched Aggref (no same-level nesting).
+fn preprocess_aggrefs_walker<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    node: Node<'mcx>,
+) -> PgResult<()> {
+    match node.node_tag() {
+        NodeTag::T_Aggref => preprocess_aggref(run, node),
+        NodeTag::T_TargetEntry => {
+            preprocess_aggrefs_walker(run, node.as_target_entry().unwrap().expr)
+        }
+        NodeTag::T_Var | NodeTag::T_Const => Ok(()),
+        NodeTag::T_OpExpr => {
+            for a in &node.as_op_expr().unwrap().args {
+                preprocess_aggrefs_walker(run, a)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_FuncExpr => {
+            for a in &node.as_func_expr().unwrap().args {
+                preprocess_aggrefs_walker(run, a)?;
+            }
+            Ok(())
+        }
+        other => panic!(
+            "preprocess_aggrefs_walker (prepagg.c): {other:?}; M3 expression lane"
+        ),
+    }
+}
+
+fn preprocess_aggref<'mcx>(run: &mut PlannerRun<'mcx>, node: Node<'mcx>) -> PgResult<()> {
+    let mcx = run.mcx;
+    let aggref = node.as_aggref().expect("Aggref");
+    debug_assert!(aggref.agglevelsup == 0);
+
+    let shape = syscache_seams::lookup_pg_aggregate_shape::call(aggref.aggfnoid)?
+        .unwrap_or_else(|| {
+            panic!("cache lookup failed for aggregate {}", aggref.aggfnoid)
+        });
+
+    if POLYMORPHIC_TYPEOIDS.contains(&shape.aggtranstype) {
+        panic!(
+            "resolve_aggregate_transtype (parse_agg.c): polymorphic transtype for \
+             aggregate {}; M3 polymorphic lane",
+            aggref.aggfnoid
+        );
+    }
+    let aggtranstype = shape.aggtranstype;
+
+    let mut aggtranstypmod = -1;
+    if !aggref.args.is_nil() {
+        let first = aggref.args.nth(0).as_target_entry().expect("agg arg is a TLE");
+        let (argtype, argtypmod) = expr_type_typmod(first.expr);
+        if aggtranstype == argtype {
+            aggtranstypmod = argtypmod;
+        }
+    }
+
+    let shareable = shape.aggfinalmodify != AGGMODIFY_READ_WRITE;
+    lsyscache::get_typlenbyval(aggref.aggtype)?;
+
+    let (init_value, init_value_is_null) =
+        match syscache_seams::pg_aggregate_agginitval::call(mcx, aggref.aggfnoid)? {
+            None => panic!("cache lookup failed for aggregate {}", aggref.aggfnoid),
+            Some(None) => (datum::Datum::null(), true),
+            Some(Some(text)) => (get_agg_init_val(&text, aggtranstype)?, false),
+        };
+
+    let (aggno, transno);
+    let mut same_input_transnos: mcx::PgVec<'_, i32> = mcx::PgVec::new_in(mcx);
+    if let Some(existing) =
+        find_compatible_agg(run, node, aggtranstype, &mut same_input_transnos)?
+    {
+        let aggref_id = run.root.alloc_expr_node(node);
+        run.root.agg_info_mut(existing.1).aggrefs.push(aggref_id);
+        aggno = existing.0;
+        transno = run.root.agg_info(existing.1).transno;
+    } else {
+        let aggref_id = run.root.alloc_expr_node(node);
+        let mut agginfo = AggInfo::new(mcx);
+        agginfo.finalfn_oid = shape.aggfinalfn;
+        agginfo.aggrefs.push(aggref_id);
+        agginfo.shareable = shareable;
+
+        aggno = run.root.agginfos.len() as i32;
+
+        if !aggref.aggorder.is_nil() || !aggref.aggdistinct.is_nil() {
+            run.root.numOrderedAggs += 1;
+            run.root.hasNonPartialAggs = true;
+        }
+
+        let (transtype_len, transtype_byval) = lsyscache::get_typlenbyval(aggtranstype)?;
+
+        transno = match find_compatible_trans(
+            run,
+            shareable,
+            shape.aggtransfn,
+            aggtranstype,
+            transtype_byval,
+            shape.aggcombinefn,
+            shape.aggserialfn,
+            shape.aggdeserialfn,
+            init_value,
+            init_value_is_null,
+            &same_input_transnos,
+        ) {
+            Some(t) => t,
+            None => {
+                let mut ti = AggTransInfo::new(mcx);
+                for arg in &aggref.args {
+                    let id = run.root.alloc_expr_node(arg);
+                    ti.args.push(id);
+                }
+                assert!(
+                    aggref.aggfilter.is_none(),
+                    "preprocess_aggref (prepagg.c): FILTER; M3 filter lane"
+                );
+                ti.transfn_oid = shape.aggtransfn;
+                ti.combinefn_oid = shape.aggcombinefn;
+                ti.serialfn_oid = shape.aggserialfn;
+                ti.deserialfn_oid = shape.aggdeserialfn;
+                ti.aggtranstype = aggtranstype;
+                ti.aggtranstypmod = aggtranstypmod;
+                ti.transtypeLen = transtype_len as i32;
+                ti.transtypeByVal = transtype_byval;
+                ti.aggtransspace = shape.aggtransspace;
+                ti.initValue = init_value;
+                ti.initValueIsNull = init_value_is_null;
+
+                let t = run.root.aggtransinfos.len() as i32;
+                let has_serde = ti.serialfn_oid != 0 && ti.deserialfn_oid != 0;
+                let no_combine = ti.combinefn_oid == 0;
+                let internal_transtype = ti.aggtranstype == INTERNALOID;
+                let id = run.root.alloc_agg_trans_info(ti);
+                run.root.aggtransinfos.push(id);
+                if !run.root.hasNonPartialAggs {
+                    if no_combine {
+                        run.root.hasNonPartialAggs = true;
+                    } else if internal_transtype && !has_serde {
+                        run.root.hasNonSerialAggs = true;
+                    }
+                }
+                t
+            }
+        };
+        let mut agginfo = agginfo;
+        agginfo.transno = transno;
+        let id = run.root.alloc_agg_info(agginfo);
+        run.root.agginfos.push(id);
+    }
+
+    // SAFETY: the planner exclusively owns the sealed parse tree during
+    // planning (C scribbles these same fields through shared pointers); every
+    // reference derived from this node above is dead here.
+    unsafe {
+        node.with_mut::<Aggref, _>(|a| {
+            a.aggtranstype = aggtranstype;
+            a.aggno = aggno;
+            a.aggtransno = transno;
+        })
+    }
+    .unwrap();
+    Ok(())
+}
+
+// GetAggInitVal (prepagg.c): the general form goes through the transtype's
+// typinput; only the int8 arm is live (count/sum lane), others are loud.
+fn get_agg_init_val(text: &str, transtype: u32) -> PgResult<datum::Datum> {
+    match transtype {
+        INT8OID => Ok(datum::Datum::from_i64(adt_int8::int8in(text, None)?)),
+        other => panic!(
+            "GetAggInitVal (prepagg.c): typinput for transtype {other}; \
+             M3 OidInputFunctionCall lane"
+        ),
+    }
+}
+
+// Returns (aggno, agginfo NodeId) of an identical previous aggregate, and
+// collects shareable same-input transnos for find_compatible_trans.
+fn find_compatible_agg<'mcx>(
+    run: &PlannerRun<'mcx>,
+    node: Node<'mcx>,
+    aggtranstype: u32,
+    same_input_transnos: &mut mcx::PgVec<'_, i32>,
+) -> PgResult<Option<(i32, types_pathnodes::NodeId)>> {
+    let newagg = node.as_aggref().unwrap();
+
+    if clauses::contain_volatile_functions(node)? {
+        return Ok(None);
+    }
+
+    for (aggno, &info_id) in run.root.agginfos.iter().enumerate() {
+        let agginfo = run.root.agg_info(info_id);
+        let existing_node = *run.root.expr_node(agginfo.aggrefs[0]);
+        let existing = existing_node.as_aggref().expect("AggInfo holds Aggrefs");
+
+        if newagg.inputcollid != existing.inputcollid
+            || aggtranstype != existing.aggtranstype
+            || newagg.aggstar != existing.aggstar
+            || newagg.aggvariadic != existing.aggvariadic
+            || newagg.aggkind != existing.aggkind
+            || !equal_node_list(run, &newagg.args, &existing.args)
+            || !equal_node_list(run, &newagg.aggorder, &existing.aggorder)
+            || !equal_node_list(run, &newagg.aggdistinct, &existing.aggdistinct)
+            || !equal_opt(run, newagg.aggfilter, existing.aggfilter)
+        {
+            continue;
+        }
+
+        if newagg.aggfnoid == existing.aggfnoid
+            && newagg.aggtype == existing.aggtype
+            && newagg.aggcollid == existing.aggcollid
+            && equal_node_list(run, &newagg.aggdirectargs, &existing.aggdirectargs)
+        {
+            same_input_transnos.clear();
+            return Ok(Some((aggno as i32, info_id)));
+        }
+
+        if agginfo.shareable {
+            same_input_transnos.push(agginfo.transno);
+        }
+    }
+    Ok(None)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn find_compatible_trans(
+    run: &PlannerRun<'_>,
+    shareable: bool,
+    aggtransfn: u32,
+    aggtranstype: u32,
+    transtype_byval: bool,
+    aggcombinefn: u32,
+    aggserialfn: u32,
+    aggdeserialfn: u32,
+    init_value: datum::Datum,
+    init_value_is_null: bool,
+    transnos: &[i32],
+) -> Option<i32> {
+    if !shareable {
+        return None;
+    }
+    for &transno in transnos {
+        let id = run.root.aggtransinfos[transno as usize];
+        let pertrans = run.root.agg_trans_info(id);
+        if aggtransfn != pertrans.transfn_oid || aggtranstype != pertrans.aggtranstype {
+            continue;
+        }
+        if aggserialfn != pertrans.serialfn_oid || aggdeserialfn != pertrans.deserialfn_oid {
+            continue;
+        }
+        if aggcombinefn != pertrans.combinefn_oid {
+            continue;
+        }
+        if init_value_is_null && pertrans.initValueIsNull {
+            return Some(transno);
+        }
+        if !init_value_is_null && !pertrans.initValueIsNull {
+            assert!(
+                transtype_byval,
+                "find_compatible_trans (prepagg.c): by-ref datumIsEqual; M3 lane"
+            );
+            if init_value.as_u64() == pertrans.initValue.as_u64() {
+                return Some(transno);
+            }
+        }
+    }
+    None
+}
+
+// equal() (equalfuncs.c) over the agg-argument shapes this lane carries.
+fn equal_node(run: &PlannerRun<'_>, a: Node<'_>, b: Node<'_>) -> bool {
+    if a.node_tag() != b.node_tag() {
+        return false;
+    }
+    match a.node_tag() {
+        NodeTag::T_TargetEntry => {
+            let (x, y) = (a.as_target_entry().unwrap(), b.as_target_entry().unwrap());
+            x.resno == y.resno
+                && x.resname == y.resname
+                && x.ressortgroupref == y.ressortgroupref
+                && x.resorigtbl == y.resorigtbl
+                && x.resorigcol == y.resorigcol
+                && x.resjunk == y.resjunk
+                && equal_node(run, x.expr, y.expr)
+        }
+        NodeTag::T_OpExpr => {
+            let (x, y) = (a.as_op_expr().unwrap(), b.as_op_expr().unwrap());
+            x.opno == y.opno
+                && x.opresulttype == y.opresulttype
+                && x.opretset == y.opretset
+                && x.opcollid == y.opcollid
+                && x.inputcollid == y.inputcollid
+                && equal_node_list(run, &x.args, &y.args)
+        }
+        NodeTag::T_FuncExpr => {
+            let (x, y) = (a.as_func_expr().unwrap(), b.as_func_expr().unwrap());
+            x.funcid == y.funcid
+                && x.funcresulttype == y.funcresulttype
+                && x.funcretset == y.funcretset
+                && x.funcvariadic == y.funcvariadic
+                && x.funccollid == y.funccollid
+                && x.inputcollid == y.inputcollid
+                && equal_node_list(run, &x.args, &y.args)
+        }
+        NodeTag::T_Var | NodeTag::T_Const => equal_expr(run, a, b),
+        other => panic!("equal() (equalfuncs.c): {other:?}; M3 agg-argument lane"),
+    }
+}
+
+fn equal_node_list(run: &PlannerRun<'_>, a: &NodeList<'_>, b: &NodeList<'_>) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b.iter()).all(|(x, y)| equal_node(run, x, y))
+}
+
+fn equal_opt(run: &PlannerRun<'_>, a: Option<Node<'_>>, b: Option<Node<'_>>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(x), Some(y)) => equal_node(run, x, y),
+        _ => false,
+    }
+}
+
+pub fn get_agg_clause_costs(
+    run: &mut PlannerRun<'_>,
+    aggsplit: AggSplit,
+    costs: &mut AggClauseCosts,
+) -> PgResult<()> {
+    assert!(
+        aggsplit == AGGSPLIT_SIMPLE,
+        "get_agg_clause_costs (prepagg.c): partial aggsplit; M3 parallel-agg lane"
+    );
+    for i in 0..run.root.aggtransinfos.len() {
+        let id = run.root.aggtransinfos[i];
+        let (transfn_oid, byval, transtype, transtypmod, transspace, transfn, nargs) = {
+            let ti = run.root.agg_trans_info(id);
+            debug_assert!(ti.aggfilter.is_none());
+            (
+                ti.transfn_oid,
+                ti.transtypeByVal,
+                ti.aggtranstype,
+                ti.aggtranstypmod,
+                ti.aggtransspace,
+                ti.transfn_oid,
+                ti.args.len(),
+            )
+        };
+        let _ = transfn;
+        crate::plancat::add_function_cost(transfn_oid, &mut costs.transCost)?;
+
+        for a in 0..nargs {
+            let arg_id = run.root.agg_trans_info(id).args[a];
+            let arg = *run.root.expr_node(arg_id);
+            let expr = arg.as_target_entry().map(|t| t.expr).unwrap_or(arg);
+            let argcost = cost_qual_eval_node(expr)?;
+            costs.transCost.startup += argcost.startup;
+            costs.transCost.per_tuple += argcost.per_tuple;
+        }
+
+        if !byval {
+            let avgwidth = if transspace > 0 {
+                transspace
+            } else {
+                // F_ARRAY_APPEND's expanded-array arm is unreachable while
+                // by-ref transtypes stay in this branch's typavgwidth form.
+                lsyscache::get_typavgwidth(transtype, transtypmod)?
+            };
+            let maxaligned = (avgwidth as usize + 7) & !7;
+            costs.transitionSpace += maxaligned + 2 * 8;
+        } else if transtype == INTERNALOID {
+            const ALLOCSET_DEFAULT_INITSIZE: usize = 8 * 1024;
+            costs.transitionSpace += if transspace > 0 {
+                transspace as usize
+            } else {
+                ALLOCSET_DEFAULT_INITSIZE
+            };
+        }
+    }
+
+    for i in 0..run.root.agginfos.len() {
+        let id = run.root.agginfos[i];
+        let (finalfn_oid, aggref_id) = {
+            let info = run.root.agg_info(id);
+            (info.finalfn_oid, info.aggrefs[0])
+        };
+        if finalfn_oid != 0 {
+            crate::plancat::add_function_cost(finalfn_oid, &mut costs.finalCost)?;
+        }
+        let aggref_node = *run.root.expr_node(aggref_id);
+        let aggref = aggref_node.as_aggref().expect("AggInfo holds Aggrefs");
+        assert!(
+            aggref.aggdirectargs.is_nil(),
+            "get_agg_clause_costs (prepagg.c): direct args; M3 ordered-set lane"
+        );
+    }
+    Ok(())
+}
