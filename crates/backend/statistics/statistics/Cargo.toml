@@ -24,6 +24,7 @@ heaptuple = { path = "../../access/common/heaptuple" }
 catalog_indexing = { path = "../../catalog/catalog_indexing" }
 detoast = { path = "../../access/common/detoast" }
 typcache = { path = "../../utils/cache/typcache" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
 elog = { path = "../../utils/error/elog" }
 statscmds = { path = "../../commands/statscmds" }

@@ -36,8 +36,6 @@ const ANUM_PG_STATISTIC_STAVALUES1: usize = 27;
 
 const FLOAT4OID: Oid = 700;
 const WIDTH_THRESHOLD: usize = 1024;
-// default_statistics_target GUC; unregistered in guc_tables, boot default.
-const DEFAULT_STATISTICS_TARGET: i32 = 100;
 
 const SHARE_UPDATE_EXCLUSIVE_LOCK: types_rel::LOCKMODE = 4;
 const ROW_EXCLUSIVE_LOCK: types_rel::LOCKMODE = 3;
@@ -369,7 +367,7 @@ fn examine_attribute<'mcx>(
 
 fn std_typanalyze(stats: &mut VacAttrStats<'_>) -> PgResult<bool> {
     if stats.attstattarget < 0 {
-        stats.attstattarget = DEFAULT_STATISTICS_TARGET;
+        stats.attstattarget = guc_tables::vars::default_statistics_target.read();
     }
     let entry = typcache::lookup_type_cache(
         stats.attrtypid,

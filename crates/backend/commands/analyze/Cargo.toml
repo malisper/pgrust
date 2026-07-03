@@ -32,6 +32,7 @@ bufmgr_seams = { path = "../../storage/buffer/bufmgr_seams" }
 procarray = { path = "../../storage/ipc/procarray" }
 xact = { path = "../../access/transam/xact" }
 typcache = { path = "../../utils/cache/typcache" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
 relcache_seams = { path = "../../utils/cache/relcache_seams" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
 vacuum_seams = { path = "../vacuum_seams" }
@@ -67,7 +68,6 @@ fd = { path = "../../storage/file/fd" }
 fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
 freespace_seams = { path = "../../storage/freespace/freespace_seams" }
 guc = { path = "../../utils/misc/guc" }
-guc_tables = { path = "../../utils/misc/guc_tables" }
 heapam_visibility = { path = "../../access/heap/heapam_visibility" }
 indexcmds_seams = { path = "../indexcmds_seams" }
 init_small = { path = "../../utils/init/init_small" }

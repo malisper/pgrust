@@ -163,28 +163,73 @@ pub fn statext_dependencies_deserialize<'mcx>(
     data: &[u8],
 ) -> PgResult<MVDependencies<'mcx>> {
     // `data` is the varlena body (header already stripped by the caller).
-    if data.len() < 12 {
-        return Err(PgError::error(format!("invalid MVDependencies size {}", data.len())).into());
+    const SIZE_OF_HEADER: usize = 3 * 4;
+    if data.len() < SIZE_OF_HEADER {
+        return Err(PgError::error(format!(
+            "invalid MVDependencies size {} (expected at least {SIZE_OF_HEADER})",
+            data.len()
+        ))
+        .into());
     }
     let magic = u32::from_ne_bytes(data[0..4].try_into().unwrap());
     let typ = u32::from_ne_bytes(data[4..8].try_into().unwrap());
     let ndeps = u32::from_ne_bytes(data[8..12].try_into().unwrap()) as usize;
     if magic != STATS_DEPS_MAGIC {
-        return Err(PgError::error(format!("invalid dependency magic {magic}")).into());
+        return Err(PgError::error(format!(
+            "invalid dependency magic {} (expected {})",
+            magic as i32, STATS_DEPS_MAGIC as i32
+        ))
+        .into());
     }
     if typ != STATS_DEPS_TYPE_BASIC {
-        return Err(PgError::error(format!("invalid dependency type {typ}")).into());
+        return Err(PgError::error(format!(
+            "invalid dependency type {} (expected {})",
+            typ as i32, STATS_DEPS_TYPE_BASIC as i32
+        ))
+        .into());
     }
     if ndeps == 0 {
         return Err(PgError::error("invalid zero-length item array in MVDependencies").into());
     }
+    // dependencies.c:539 computes SizeOfItem(ndeps), not MinSizeOfItems(ndeps).
+    let min_expected_size = 8 + 2 * (1 + ndeps);
+    if data.len() < min_expected_size {
+        return Err(PgError::error(format!(
+            "invalid dependencies size {} (expected at least {min_expected_size})",
+            data.len()
+        ))
+        .into());
+    }
     let mut deps: PgVec<'mcx, MVDependency<'mcx>> = PgVec::new_in(mcx);
     let mut off = 12usize;
     for _ in 0..ndeps {
+        if data.len() - off < 10 {
+            return Err(PgError::error(format!(
+                "invalid dependencies size {} (expected at least {})",
+                data.len(),
+                off + 10
+            ))
+            .into());
+        }
         let degree = f64::from_ne_bytes(data[off..off + 8].try_into().unwrap());
         off += 8;
-        let natts = i16::from_ne_bytes(data[off..off + 2].try_into().unwrap()) as usize;
+        let k = i16::from_ne_bytes(data[off..off + 2].try_into().unwrap());
         off += 2;
+        if k < 2 || k > crate::STATS_MAX_DIMENSIONS as i16 {
+            return Err(PgError::error(format!(
+                "invalid number of attributes ({k}) in MVDependencies"
+            ))
+            .into());
+        }
+        let natts = k as usize;
+        if data.len() - off < natts * 2 {
+            return Err(PgError::error(format!(
+                "invalid dependencies size {} (expected at least {})",
+                data.len(),
+                off + natts * 2
+            ))
+            .into());
+        }
         let mut attributes: PgVec<'mcx, AttrNumber> = mcx::vec_with_capacity_in(mcx, natts)?;
         for _ in 0..natts {
             attributes.push(i16::from_ne_bytes(data[off..off + 2].try_into().unwrap()));
@@ -194,4 +239,70 @@ pub fn statext_dependencies_deserialize<'mcx>(
     }
     debug_assert_eq!(off, data.len());
     Ok(MVDependencies { deps })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn blob(ndeps: u32, deps: &[(f64, &[i16])]) -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend_from_slice(&STATS_DEPS_MAGIC.to_ne_bytes());
+        b.extend_from_slice(&STATS_DEPS_TYPE_BASIC.to_ne_bytes());
+        b.extend_from_slice(&ndeps.to_ne_bytes());
+        for (degree, atts) in deps {
+            b.extend_from_slice(&degree.to_ne_bytes());
+            b.extend_from_slice(&(atts.len() as i16).to_ne_bytes());
+            for a in *atts {
+                b.extend_from_slice(&a.to_ne_bytes());
+            }
+        }
+        b
+    }
+
+    #[test]
+    fn deserialize_truncated_returns_err() {
+        let cx = mcx::MemoryContext::new("test");
+        let full = blob(1, &[(1.0, &[1, 2, 3])]);
+        for cut in [0, 4, 11, 12, 13, 21, full.len() - 1] {
+            assert!(statext_dependencies_deserialize(cx.mcx(), &full[..cut]).is_err());
+        }
+    }
+
+    #[test]
+    fn deserialize_ndeps_too_large_returns_err() {
+        let cx = mcx::MemoryContext::new("test");
+        let b = blob(1000, &[(1.0, &[1, 2])]);
+        assert!(statext_dependencies_deserialize(cx.mcx(), &b).is_err());
+    }
+
+    #[test]
+    fn deserialize_bad_nattributes_returns_err() {
+        let cx = mcx::MemoryContext::new("test");
+        for atts in [&[1i16][..], &[1; 9][..]] {
+            let b = blob(1, &[(1.0, atts)]);
+            assert!(statext_dependencies_deserialize(cx.mcx(), &b).is_err());
+        }
+    }
+
+    #[test]
+    fn deserialize_bad_magic_and_type_return_err() {
+        let cx = mcx::MemoryContext::new("test");
+        let mut b = blob(1, &[(1.0, &[1, 2])]);
+        b[0] ^= 0xFF;
+        assert!(statext_dependencies_deserialize(cx.mcx(), &b).is_err());
+        let mut b = blob(1, &[(1.0, &[1, 2])]);
+        b[4] ^= 0xFF;
+        assert!(statext_dependencies_deserialize(cx.mcx(), &b).is_err());
+    }
+
+    #[test]
+    fn deserialize_valid_roundtrip() {
+        let cx = mcx::MemoryContext::new("test");
+        let b = blob(2, &[(1.0, &[1, 2]), (0.5, &[3, 4, 5])]);
+        let d = statext_dependencies_deserialize(cx.mcx(), &b).unwrap();
+        assert_eq!(d.deps.len(), 2);
+        assert_eq!(d.deps[1].degree, 0.5);
+        assert_eq!(&d.deps[0].attributes[..], &[1, 2]);
+    }
 }

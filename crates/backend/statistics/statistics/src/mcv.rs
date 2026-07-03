@@ -403,26 +403,72 @@ pub fn statext_mcv_serialize<'mcx>(
     Ok(out)
 }
 
+fn mcv_read<'a>(data: &'a [u8], off: &mut usize, n: usize) -> PgResult<&'a [u8]> {
+    let s = data.get(*off..*off + n).ok_or_else(|| {
+        PgError::error(format!(
+            "invalid MCV size {} (expected at least {})",
+            data.len() + 4,
+            *off + n + 4
+        ))
+    })?;
+    *off += n;
+    Ok(s)
+}
+
 pub fn statext_mcv_deserialize<'mcx>(mcx: Mcx<'mcx>, data: &[u8]) -> PgResult<MCVList<'mcx>> {
-    // `data` is the varlena body (header already stripped by the caller).
-    if data.len() < 3 * 4 + 2 {
-        return Err(PgError::error(format!("invalid MCV size {}", data.len())).into());
+    // `data` is the varlena body; C's size checks and messages use
+    // VARSIZE_ANY, i.e. body + 4-byte varlena header.
+    const VARHDRSZ: usize = 4;
+    const MIN_SIZE_OF_MCVLIST: usize = VARHDRSZ + 4 * 3 + 2;
+    let varsize = data.len() + VARHDRSZ;
+    if varsize < MIN_SIZE_OF_MCVLIST {
+        return Err(PgError::error(format!(
+            "invalid MCV size {varsize} (expected at least {MIN_SIZE_OF_MCVLIST})"
+        ))
+        .into());
     }
     let magic = u32::from_ne_bytes(data[0..4].try_into().unwrap());
     let typ = u32::from_ne_bytes(data[4..8].try_into().unwrap());
-    let nitems = u32::from_ne_bytes(data[8..12].try_into().unwrap()) as usize;
-    let ndims = u16::from_ne_bytes(data[12..14].try_into().unwrap()) as usize;
+    let nitems = u32::from_ne_bytes(data[8..12].try_into().unwrap());
+    let ndimensions = i16::from_ne_bytes(data[12..14].try_into().unwrap());
     if magic != STATS_MCV_MAGIC {
-        return Err(PgError::error(format!("invalid MCV magic {magic}")).into());
+        return Err(PgError::error(format!(
+            "invalid MCV magic {magic} (expected {STATS_MCV_MAGIC})"
+        ))
+        .into());
     }
     if typ != STATS_MCV_TYPE_BASIC {
-        return Err(PgError::error(format!("invalid MCV type {typ}")).into());
+        return Err(PgError::error(format!(
+            "invalid MCV type {typ} (expected {STATS_MCV_TYPE_BASIC})"
+        ))
+        .into());
     }
-    if ndims == 0 || ndims > STATS_MAX_DIMENSIONS {
-        return Err(PgError::error(format!("invalid MCV ndimensions {ndims}")).into());
+    if ndimensions == 0 {
+        return Err(PgError::error("invalid zero-length dimension array in MCVList").into());
+    } else if ndimensions > STATS_MAX_DIMENSIONS as i16 || ndimensions < 0 {
+        return Err(PgError::error(format!(
+            "invalid length ({ndimensions}) dimension array in MCVList"
+        ))
+        .into());
     }
-    if nitems == 0 || nitems > STATS_MCVLIST_MAX_ITEMS {
-        return Err(PgError::error(format!("invalid MCV nitems {nitems}")).into());
+    if nitems == 0 {
+        return Err(PgError::error("invalid zero-length item array in MCVList").into());
+    } else if nitems as usize > STATS_MCVLIST_MAX_ITEMS {
+        return Err(
+            PgError::error(format!("invalid length ({nitems}) item array in MCVList")).into()
+        );
+    }
+    let nitems = nitems as usize;
+    let ndims = ndimensions as usize;
+
+    let item_size = ndims * (2 + 1) + 2 * 8;
+    let mut expected_size =
+        MIN_SIZE_OF_MCVLIST + 4 * ndims + 20 * ndims + nitems * item_size;
+    if varsize < expected_size {
+        return Err(PgError::error(format!(
+            "invalid MCV size {varsize} (expected {expected_size})"
+        ))
+        .into());
     }
 
     let mut off = 14usize;
@@ -440,27 +486,53 @@ pub fn statext_mcv_deserialize<'mcx>(mcx: Mcx<'mcx>, data: &[u8]) -> PgResult<MC
     }
     let mut info: PgVec<'_, DimInfo> = mcx::vec_with_capacity_in(mcx, ndims)?;
     for _ in 0..ndims {
+        let nvalues = i32::from_ne_bytes(data[off..off + 4].try_into().unwrap());
+        let nbytes = i32::from_ne_bytes(data[off + 4..off + 8].try_into().unwrap());
+        let typlen = i32::from_ne_bytes(data[off + 12..off + 16].try_into().unwrap());
+        let typbyval = data[off + 16] != 0;
+        if nvalues < 0 {
+            return Err(
+                PgError::error(format!("invalid MCV nvalues ({nvalues}) in MCVList")).into()
+            );
+        }
+        if nbytes < 0 {
+            return Err(
+                PgError::error(format!("invalid MCV nbytes ({nbytes}) in MCVList")).into()
+            );
+        }
+        if typbyval && !(1..=8).contains(&typlen) {
+            return Err(
+                PgError::error(format!("invalid MCV typlen ({typlen}) in MCVList")).into()
+            );
+        }
         info.push(DimInfo {
-            nvalues: i32::from_ne_bytes(data[off..off + 4].try_into().unwrap()) as usize,
-            nbytes: i32::from_ne_bytes(data[off + 4..off + 8].try_into().unwrap()) as usize,
-            typlen: i32::from_ne_bytes(data[off + 12..off + 16].try_into().unwrap()),
-            typbyval: data[off + 16] != 0,
+            nvalues: nvalues as usize,
+            nbytes: nbytes as usize,
+            typlen,
+            typbyval,
         });
         off += 20;
+        expected_size += nbytes as usize;
+    }
+
+    if varsize != expected_size {
+        return Err(PgError::error(format!(
+            "invalid MCV size {varsize} (expected {expected_size})"
+        ))
+        .into());
     }
 
     // Deduplicated value maps; by-ref copies land in u64-backed (8-aligned)
     // arena buffers, as C's single-chunk MAXALIGN layout does.
     let mut map: PgVec<'_, PgVec<'_, Datum>> = PgVec::new_in(mcx);
-    for di in info.iter() {
+    for (dim, di) in info.iter().enumerate() {
         let mut m: PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, di.nvalues)?;
         let start = off;
         if di.typbyval {
             for _ in 0..di.nvalues {
                 let mut raw = [0u8; 8];
                 raw[..di.typlen as usize]
-                    .copy_from_slice(&data[off..off + di.typlen as usize]);
-                off += di.typlen as usize;
+                    .copy_from_slice(mcv_read(data, &mut off, di.typlen as usize)?);
                 let v = u64::from_ne_bytes(raw);
                 // fetch_att sign-extends narrow integers.
                 let v = match di.typlen {
@@ -473,34 +545,40 @@ pub fn statext_mcv_deserialize<'mcx>(mcx: Mcx<'mcx>, data: &[u8]) -> PgResult<MC
             }
         } else if di.typlen > 0 {
             for _ in 0..di.nvalues {
+                let src = mcv_read(data, &mut off, di.typlen as usize)?;
                 let buf = alloc_aligned(mcx, di.typlen as usize)?;
-                buf.copy_from_slice(&data[off..off + di.typlen as usize]);
-                off += di.typlen as usize;
+                buf.copy_from_slice(src);
                 m.push(Datum::from_usize(buf.as_ptr() as usize));
             }
         } else if di.typlen == -1 {
             for _ in 0..di.nvalues {
-                let len =
-                    u32::from_ne_bytes(data[off..off + 4].try_into().unwrap()) as usize;
-                off += 4;
+                let len = u32::from_ne_bytes(
+                    mcv_read(data, &mut off, 4)?.try_into().unwrap(),
+                ) as usize;
+                let src = mcv_read(data, &mut off, len)?;
                 let buf = alloc_aligned(mcx, len + 4)?;
                 buf[..4].copy_from_slice(&(((len + 4) as u32) << 2).to_ne_bytes());
-                buf[4..].copy_from_slice(&data[off..off + len]);
-                off += len;
+                buf[4..].copy_from_slice(src);
                 m.push(Datum::from_usize(buf.as_ptr() as usize));
             }
         } else if di.typlen == -2 {
             for _ in 0..di.nvalues {
-                let len =
-                    u32::from_ne_bytes(data[off..off + 4].try_into().unwrap()) as usize;
-                off += 4;
+                let len = u32::from_ne_bytes(
+                    mcv_read(data, &mut off, 4)?.try_into().unwrap(),
+                ) as usize;
+                let src = mcv_read(data, &mut off, len)?;
                 let buf = alloc_aligned(mcx, len)?;
-                buf.copy_from_slice(&data[off..off + len]);
-                off += len;
+                buf.copy_from_slice(src);
                 m.push(Datum::from_usize(buf.as_ptr() as usize));
             }
         }
-        debug_assert_eq!(off, start + di.nbytes);
+        if off != start + di.nbytes {
+            return Err(PgError::error(format!(
+                "invalid MCV nbytes ({}) in MCVList (dimension {dim})",
+                di.nbytes
+            ))
+            .into());
+        }
         map.push(m);
     }
 
@@ -522,7 +600,13 @@ pub fn statext_mcv_deserialize<'mcx>(mcx: Mcx<'mcx>, data: &[u8]) -> PgResult<MC
             if isnull[d] {
                 values.push(Datum::null());
             } else {
-                values.push(map[d][index]);
+                let Some(&v) = map[d].get(index) else {
+                    return Err(PgError::error(format!(
+                        "invalid MCV item index {index} (dimension {d})"
+                    ))
+                    .into());
+                };
+                values.push(v);
             }
         }
         items.push(MCVItem { values, isnull, frequency, base_frequency });
@@ -530,6 +614,95 @@ pub fn statext_mcv_deserialize<'mcx>(mcx: Mcx<'mcx>, data: &[u8]) -> PgResult<MC
     debug_assert_eq!(off, data.len());
 
     Ok(MCVList { ndimensions: ndims, types, items })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn blob(nitems: u32, index: u16) -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend_from_slice(&STATS_MCV_MAGIC.to_ne_bytes());
+        b.extend_from_slice(&STATS_MCV_TYPE_BASIC.to_ne_bytes());
+        b.extend_from_slice(&nitems.to_ne_bytes());
+        b.extend_from_slice(&1i16.to_ne_bytes());
+        b.extend_from_slice(&23u32.to_ne_bytes());
+        b.extend_from_slice(&1i32.to_ne_bytes());
+        b.extend_from_slice(&4i32.to_ne_bytes());
+        b.extend_from_slice(&0i32.to_ne_bytes());
+        b.extend_from_slice(&4i32.to_ne_bytes());
+        b.push(1);
+        b.extend_from_slice(&[0u8; 3]);
+        b.extend_from_slice(&42i32.to_ne_bytes());
+        for _ in 0..nitems {
+            b.push(0);
+            b.extend_from_slice(&0.5f64.to_ne_bytes());
+            b.extend_from_slice(&0.25f64.to_ne_bytes());
+            b.extend_from_slice(&index.to_ne_bytes());
+        }
+        b
+    }
+
+    #[test]
+    fn deserialize_valid_roundtrip() {
+        let cx = mcx::MemoryContext::new("test");
+        let m = statext_mcv_deserialize(cx.mcx(), &blob(1, 0)).unwrap();
+        assert_eq!(m.ndimensions, 1);
+        assert_eq!(m.items.len(), 1);
+        assert_eq!(m.items[0].values[0].as_i32(), 42);
+        assert_eq!(m.items[0].frequency, 0.5);
+    }
+
+    #[test]
+    fn deserialize_truncated_returns_err() {
+        let cx = mcx::MemoryContext::new("test");
+        let full = blob(1, 0);
+        for cut in [0, 8, 13, 14, 20, 34, 40, full.len() - 1] {
+            assert!(statext_mcv_deserialize(cx.mcx(), &full[..cut]).is_err());
+        }
+    }
+
+    #[test]
+    fn deserialize_trailing_garbage_returns_err() {
+        let cx = mcx::MemoryContext::new("test");
+        let mut b = blob(1, 0);
+        b.push(0);
+        assert!(statext_mcv_deserialize(cx.mcx(), &b).is_err());
+    }
+
+    #[test]
+    fn deserialize_out_of_range_index_returns_err() {
+        let cx = mcx::MemoryContext::new("test");
+        assert!(statext_mcv_deserialize(cx.mcx(), &blob(1, 5)).is_err());
+    }
+
+    #[test]
+    fn deserialize_nitems_too_large_returns_err() {
+        let cx = mcx::MemoryContext::new("test");
+        let mut b = blob(1, 0);
+        b[8..12].copy_from_slice(&20000u32.to_ne_bytes());
+        assert!(statext_mcv_deserialize(cx.mcx(), &b).is_err());
+        let mut b = blob(1, 0);
+        b[8..12].copy_from_slice(&2u32.to_ne_bytes());
+        assert!(statext_mcv_deserialize(cx.mcx(), &b).is_err());
+    }
+
+    #[test]
+    fn deserialize_bad_magic_type_ndims_return_err() {
+        let cx = mcx::MemoryContext::new("test");
+        let mut b = blob(1, 0);
+        b[0] ^= 0xFF;
+        assert!(statext_mcv_deserialize(cx.mcx(), &b).is_err());
+        let mut b = blob(1, 0);
+        b[4] ^= 0xFF;
+        assert!(statext_mcv_deserialize(cx.mcx(), &b).is_err());
+        let mut b = blob(1, 0);
+        b[12..14].copy_from_slice(&9i16.to_ne_bytes());
+        assert!(statext_mcv_deserialize(cx.mcx(), &b).is_err());
+        let mut b = blob(1, 0);
+        b[12..14].copy_from_slice(&0i16.to_ne_bytes());
+        assert!(statext_mcv_deserialize(cx.mcx(), &b).is_err());
+    }
 }
 
 fn alloc_aligned<'mcx>(mcx: Mcx<'mcx>, len: usize) -> PgResult<&'mcx mut [u8]> {

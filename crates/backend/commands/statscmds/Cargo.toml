@@ -23,9 +23,12 @@ miscinit_seams = { path = "../../utils/init/miscinit_seams" }
 init_small = { path = "../../utils/init/init_small" }
 superuser = { path = "../../utils/misc/superuser" }
 table = { path = "../../access/table/table" }
+relation_seams = { path = "../../access/common/relation_seams" }
 genam = { path = "../../access/index/genam" }
 heaptuple = { path = "../../access/common/heaptuple" }
 catalog = { path = "../../catalog/catalog" }
+catalog_heap = { path = "../../catalog/catalog_heap" }
+format_type = { path = "../../utils/adt/format_type" }
 catalog_indexing = { path = "../../catalog/catalog_indexing" }
 catalog_namespace = { path = "../../catalog/catalog_namespace" }
 pg_depend = { path = "../../catalog/pg_depend" }

@@ -47,7 +47,6 @@ pub const Anum_pg_statistic_ext_data_stxddependencies: i32 = 4;
 pub const Anum_pg_statistic_ext_data_stxdmcv: i32 = 5;
 pub const Anum_pg_statistic_ext_data_stxdexpr: i32 = 6;
 
-const DEFAULT_STATISTICS_TARGET: i32 = 100;
 const WIDTH_THRESHOLD: usize = 1024;
 
 const ROW_EXCLUSIVE_LOCK: types_rel::LOCKMODE = 3;
@@ -72,6 +71,7 @@ pub struct StatsBuildData<'mcx> {
 
 pub struct StatExtEntry<'mcx> {
     pub statOid: Oid,
+    pub schema: PgVec<'mcx, u8>,
     pub name: PgVec<'mcx, u8>,
     pub columns: PgVec<'mcx, AttrNumber>,
     pub types: PgVec<'mcx, u8>,
@@ -140,6 +140,11 @@ pub fn fetch_statentries_for_relation<'mcx>(
     let desc = pg_statext.descr();
     while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
         let (oid_d, _) = getattr(tup, Anum_pg_statistic_ext_oid, desc);
+        let (nsp_d, _) = getattr(tup, Anum_pg_statistic_ext_stxnamespace, desc);
+        let mut schema: PgVec<'mcx, u8> = PgVec::new_in(mcx);
+        if let Some(s) = lsyscache::get_namespace_name(mcx, nsp_d.as_oid())? {
+            schema.extend_from_slice(s.as_str().as_bytes());
+        }
         let (name_d, _) = getattr(tup, Anum_pg_statistic_ext_stxname, desc);
         let mut name: PgVec<'mcx, u8> = PgVec::new_in(mcx);
         // SAFETY: NameData is a 64-byte NUL-padded field inside the tuple.
@@ -172,7 +177,14 @@ pub fn fetch_statentries_for_relation<'mcx>(
             panic!("fetch_statentries_for_relation (extended_stats.c): expression statistics lane");
         }
 
-        result.push(StatExtEntry { statOid: oid_d.as_oid(), name, columns, types, stattarget });
+        result.push(StatExtEntry {
+            statOid: oid_d.as_oid(),
+            schema,
+            name,
+            columns,
+            types,
+            stattarget,
+        });
     }
     genam::systable_endscan(mcx, scan)?;
     Ok(result)
@@ -204,7 +216,7 @@ fn statext_compute_stattarget(stattarget: i32, stats: &[ColStats]) -> i32 {
         }
     }
     if target < 0 {
-        target = DEFAULT_STATISTICS_TARGET;
+        target = guc_tables::vars::default_statistics_target.read();
     }
     target
 }
@@ -253,7 +265,8 @@ pub fn BuildRelationExtStatistics(
             ereport(WARNING)
                 .errcode(types_error::ERRCODE_INVALID_OBJECT_DEFINITION)
                 .errmsg(format!(
-                    "statistics object \"{}\" could not be computed for relation \"{}.{}\"",
+                    "statistics object \"{}.{}\" could not be computed for relation \"{}.{}\"",
+                    core::str::from_utf8(&stat.schema).unwrap_or("?"),
                     core::str::from_utf8(&stat.name).unwrap_or("?"),
                     nsp,
                     onerel.name(),

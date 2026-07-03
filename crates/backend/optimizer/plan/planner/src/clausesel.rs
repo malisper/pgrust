@@ -52,7 +52,7 @@ pub(crate) fn clauselist_selectivity_ext<'mcx>(
     let mut estimated: PgVec<'_, bool> = mcx::vec_from_elem_in(run.mcx, false, clauses.len());
     if use_extended_stats {
         if let Some(rel) =
-            crate::extended_stats::find_single_rel_for_clauses(run, clauses, varrelid)
+            crate::extended_stats::find_single_rel_for_clauses(run, clauses)
         {
             if run.root.rel(rel).rtekind == types_pathnodes::RTE_RELATION
                 && !run.root.rel(rel).statlist.is_empty()

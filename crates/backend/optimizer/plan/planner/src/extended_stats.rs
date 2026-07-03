@@ -63,7 +63,7 @@ pub fn get_relation_statistics<'mcx>(
             panic!("get_relation_statistics (plancat.c): expression statistics lane");
         }
         let keys = attnums_from_members(run, &form.keys);
-        for inh in [false, true] {
+        for inh in [true, false] {
             let Some((nd, deps, mcv, exprs)) =
                 syscache_seams::statext_data_kinds::call(statoid, inh)?
             else {
@@ -112,27 +112,31 @@ fn has_stats_of_kind(run: &PlannerRun<'_>, rel: RelId, requiredkind: i8) -> bool
         .any(|&id| run.root.statistic_ext(id).kind == requiredkind)
 }
 
-// find_single_rel_for_clauses (clausesel.c).
+// find_single_rel_for_clauses (clausesel.c). Every input is a RestrictInfo,
+// so C's bare-AND-clause and non-RestrictInfo arms have no analog here.
 pub fn find_single_rel_for_clauses<'mcx>(
     run: &PlannerRun<'mcx>,
     clauses: &[RinfoId],
-    varrelid: i32,
 ) -> Option<RelId> {
-    if varrelid != 0 {
-        return run.root.simple_rel_array.get(varrelid as usize).copied().flatten();
-    }
-    let mut lastrelid: Option<i32> = None;
+    let mut lastrelid: i32 = 0;
     for &rid in clauses {
         let r = run.root.rinfo(rid);
-        let relid = crate::relnode::relids_singleton_member(&r.clause_relids)?;
-        match lastrelid {
-            None => lastrelid = Some(relid),
-            Some(l) if l == relid => {}
-            _ => return None,
+        if crate::relnode::relids_is_empty(&r.clause_relids) {
+            continue;
+        }
+        let Some(relid) = crate::relnode::relids_singleton_member(&r.clause_relids) else {
+            return None;
+        };
+        if lastrelid == 0 {
+            lastrelid = relid;
+        } else if relid != lastrelid {
+            return None;
         }
     }
-    let relid = lastrelid?;
-    run.root.simple_rel_array.get(relid as usize).copied().flatten()
+    if lastrelid != 0 {
+        return run.root.simple_rel_array.get(lastrelid as usize).copied().flatten();
+    }
+    None
 }
 
 // statext_clauselist_selectivity (extended_stats.c), AND-list leg (the OR
@@ -185,6 +189,29 @@ fn compatible_internal<'mcx>(
         }
         // Non-leakproof operators demand per-column read permission; the
         // superuser context makes all_rows_selectable() vacuously true.
+        // Sound only while subquery.rs:142 panics on RLS securityQuals.
+        if expr.as_var().is_some() {
+            return compatible_internal(run, expr, relid, attnums);
+        }
+        return Ok(false);
+    }
+
+    if let Some(saop) = clause.as_scalar_array_op_expr() {
+        if saop.args.len() != 2 {
+            return Ok(false);
+        }
+        let Some((expr, _cst, expronleft)) = examine_opclause_args(saop.args.nth(0), saop.args.nth(1))
+        else {
+            return Ok(false);
+        };
+        if !expronleft {
+            return Ok(false);
+        }
+        match lsyscache::get_oprrest(saop.opno)? {
+            F_EQSEL | F_NEQSEL | F_SCALARLTSEL | F_SCALARLESEL | F_SCALARGTSEL
+            | F_SCALARGESEL => {}
+            _ => return Ok(false),
+        }
         if expr.as_var().is_some() {
             return compatible_internal(run, expr, relid, attnums);
         }
@@ -202,8 +229,8 @@ fn compatible_internal<'mcx>(
 
     if let Some(nt) = clause.as_null_test() {
         let arg = nt.arg.expect("NullTest arg");
-        if strip_relabel(arg).as_var().is_some() {
-            return compatible_internal(run, strip_relabel(arg), relid, attnums);
+        if arg.as_var().is_some() {
+            return compatible_internal(run, arg, relid, attnums);
         }
         return Ok(false);
     }
@@ -354,13 +381,11 @@ fn statext_mcv_clauselist_selectivity<'mcx>(
         };
 
         let mut stat_clauses: Vec<RinfoId> = Vec::new();
-        let mut simple_clauses: Vec<bool> = Vec::new();
         for (i, &rid) in clauses.iter().enumerate() {
             let Some(ca) = &list_attnums[i] else { continue };
             if !relids_is_subset(ca, &stat_keys) {
                 continue;
             }
-            simple_clauses.push(relids_num_members(ca) == 1);
             stat_clauses.push(rid);
             estimated[i] = true;
             list_attnums[i] = None;
@@ -438,8 +463,8 @@ fn bms_member_index(keys: &Relids<'_>, attnum: i16) -> usize {
     panic!("variable not found in statistics object")
 }
 
-// mcv_get_match_bitmap (mcv.c); SAOP/expression arms unreachable (nodes
-// unported / stats have no expressions).
+// mcv_get_match_bitmap (mcv.c); expression arms unreachable (stats have no
+// expressions).
 fn mcv_get_match_bitmap<'mcx>(
     run: &mut PlannerRun<'mcx>,
     clauses: &[Node<'mcx>],
@@ -486,8 +511,74 @@ fn mcv_get_match_bitmap<'mcx>(
                 };
                 matches[i] = result_merge(matches[i], is_or, m.as_bool());
             }
+        } else if let Some(saop) = clause.as_scalar_array_op_expr() {
+            let opcode = lsyscache::get_opcode(saop.opno)?;
+            let mut opproc = fmgr_seams::fmgr_info::call(opcode)?;
+            let Some((clause_expr, cst, expronleft)) =
+                examine_opclause_args(saop.args.nth(0), saop.args.nth(1))
+            else {
+                panic!("incompatible clause")
+            };
+            if !expronleft {
+                panic!("incompatible clause");
+            }
+            let elems = if !cst.constisnull {
+                let p = cst.constvalue.as_usize() as *const u8;
+                // SAFETY: non-null array datum; planner consts carry inline
+                // 4-byte headers (as scalararraysel).
+                let b0 = unsafe { *p };
+                assert!(
+                    b0 != 0x01 && b0 & 0x03 == 0,
+                    "mcv_get_match_bitmap (mcv.c): toasted/packed array const"
+                );
+                // SAFETY: 4-byte varlena header verified; image is VARSIZE bytes.
+                let img = unsafe {
+                    core::slice::from_raw_parts(
+                        p,
+                        arrayfuncs::arr_size(core::slice::from_raw_parts(p, 4)),
+                    )
+                };
+                let elemtype = arrayfuncs::arr_elemtype(img);
+                let (elmlen, elmbyval, elmalign) = lsyscache::get_typlenbyvalalign(elemtype)?;
+                Some(arrayfuncs::deconstruct_array(
+                    run.mcx, img, elmlen as i32, elmbyval, elmalign as u8, true,
+                )?)
+            } else {
+                None
+            };
+            let var = clause_expr.as_var().expect("statistics clause Var");
+            let collid = var.varcollid;
+            let idx = bms_member_index(keys, var.varattno);
+            for (i, item) in mcvlist.items.iter().enumerate() {
+                let mut m = !saop.useOr;
+                if item.isnull[idx] || cst.constisnull {
+                    matches[i] = result_merge(matches[i], is_or, false);
+                    continue;
+                }
+                if result_is_final(matches[i], is_or) {
+                    continue;
+                }
+                let (elem_values, elem_nulls) = elems.as_ref().expect("deconstructed array");
+                for (j, &elem_value) in elem_values.iter().enumerate() {
+                    if elem_nulls[j] {
+                        m = result_merge(m, saop.useOr, false);
+                        continue;
+                    }
+                    if result_is_final(m, saop.useOr) {
+                        break;
+                    }
+                    let em = types_fmgr::function_call2_coll(
+                        &mut opproc,
+                        collid,
+                        item.values[idx],
+                        elem_value,
+                    )?;
+                    m = result_merge(m, saop.useOr, em.as_bool());
+                }
+                matches[i] = result_merge(matches[i], is_or, m);
+            }
         } else if let Some(nt) = clause.as_null_test() {
-            let arg = strip_relabel(nt.arg.expect("NullTest arg"));
+            let arg = nt.arg.expect("NullTest arg");
             let var = arg.as_var().expect("statistics NullTest Var");
             let idx = bms_member_index(keys, var.varattno);
             use types_nodes::primnodes::NullTestType;
@@ -589,6 +680,20 @@ fn dependency_compatible_node<'mcx>(
             return Ok(None);
         }
         if lsyscache::get_oprrest(op.opno)? != F_EQSEL {
+            return Ok(None);
+        }
+    } else if let Some(saop) = clause.as_scalar_array_op_expr() {
+        if !saop.useOr {
+            return Ok(None);
+        }
+        if saop.args.len() != 2 {
+            return Ok(None);
+        }
+        if !clauses::is_pseudo_constant_clause(saop.args.nth(1))? {
+            return Ok(None);
+        }
+        clause_expr = saop.args.nth(0);
+        if lsyscache::get_oprrest(saop.opno)? != F_EQSEL {
             return Ok(None);
         }
     } else if let Some(b) = clause.as_bool_expr() {
@@ -738,14 +843,7 @@ fn dependencies_clauselist_selectivity<'mcx>(
 
     let mut applied: Vec<usize> = Vec::new();
     let mut remaining = clone_relids(run, &clauses_attnums);
-    loop {
-        let live: Vec<usize> = (0..deps.len()).filter(|i| !applied.contains(i)).collect();
-        let candidates: Vec<DepItem> = live
-            .iter()
-            .map(|&i| DepItem { degree: deps[i].degree, attributes: deps[i].attributes.clone() })
-            .collect();
-        let Some(ci) = find_strongest_dependency(&candidates, &remaining) else { break };
-        let di = live[ci];
+    while let Some(di) = find_strongest_dependency(&deps, &remaining) {
         applied.push(di);
         let implied = *deps[di].attributes.last().expect("dependency attributes");
         remaining = relids_del_member(run, &remaining, implied as i32);
@@ -835,7 +933,14 @@ pub fn estimate_multivariate_ndistinct<'mcx>(
     let relid = run.root.rel(rel).relid as i32;
     let inh = run.rte(relid as usize).inh;
 
-    let attnums = attnums_from_members(run, varattnos);
+    let mut attnums: Relids<'mcx> = None;
+    for &a in varattnos {
+        if a <= 0 {
+            continue;
+        }
+        let single = crate::relnode::relids_singleton(run.mcx, a as u32);
+        attnums = crate::relnode::relids_union(run.mcx, &attnums, &single);
+    }
 
     let mut best: Option<(types_core::Oid, Relids<'mcx>, i32)> = None;
     let statlist: Vec<types_pathnodes::NodeId> =
@@ -883,5 +988,5 @@ pub fn estimate_multivariate_ndistinct<'mcx>(
             return Ok(Some((item.ndistinct, covered)));
         }
     }
-    Ok(None)
+    panic!("corrupt MVNDistinct entry");
 }

@@ -48,7 +48,7 @@ const ShareUpdateExclusiveLock: types_rel::LOCKMODE = 4;
 const RowExclusiveLock: types_rel::LOCKMODE = 3;
 const NoLock: types_rel::LOCKMODE = 0;
 
-const STATEXTNAMENSP: i32 = 63;
+use cache_syscache::cacheinfo::STATEXTNAMENSP;
 
 fn loc(funcname: &str) -> ErrorLocation {
     ErrorLocation {
@@ -152,7 +152,7 @@ pub fn CreateStatistics<'mcx>(mcx: Mcx<'mcx>, stmt: &CreateStatsStmt<'_>) -> PgR
         relpersistence: rv.relpersistence as u8,
         location: rv.location,
     };
-    let rel = table::table_openrv(mcx, &rvv, ShareUpdateExclusiveLock)?;
+    let rel = relation_seams::relation_openrv::call(mcx, &rvv, ShareUpdateExclusiveLock)?;
     let relid = rel.rd_id;
 
     let relkind = rel.rd_rel.relkind;
@@ -183,27 +183,12 @@ pub fn CreateStatistics<'mcx>(mcx: Mcx<'mcx>, stmt: &CreateStatsStmt<'_>) -> PgR
     }
 
     let (namespace_id, namestr): (Oid, String) = if !stmt.defnames.is_nil() {
-        let mut schemaname: Option<&str> = None;
-        let mut name: Option<&str> = None;
-        let mut count = 0;
-        for n in stmt.defnames.iter() {
-            let s = n.as_string().expect("name String").sval;
-            count += 1;
-            match count {
-                1 => name = Some(s),
-                2 => {
-                    schemaname = name;
-                    name = Some(s);
-                }
-                _ => {
-                    return Err(err(
-                        types_error::ERRCODE_SYNTAX_ERROR,
-                        "improper qualified name (too many dotted names)".into(),
-                    ));
-                }
-            }
+        let mut parts: [&str; 4] = [""; 4];
+        let nparts = stmt.defnames.len().min(4);
+        for (i, n) in stmt.defnames.iter().take(4).enumerate() {
+            parts[i] = n.as_string().expect("name String").sval;
         }
-        let name = name.expect("statistics name");
+        let (schemaname, name) = catalog_namespace::DeconstructQualifiedName(&parts[..nparts])?;
         let nsp_rv = rel_vocab::RangeVar {
             catalogname: None,
             schemaname,
@@ -256,6 +241,12 @@ pub fn CreateStatistics<'mcx>(mcx: Mcx<'mcx>, stmt: &CreateStatsStmt<'_>) -> PgR
         let i = (1..=tupdesc.natts)
             .find(|&i| tupdesc.attr(i as usize - 1).attname.name_str() == attname.as_bytes());
         let Some(i) = i else {
+            if catalog_heap::SystemAttributeByName(attname).is_some() {
+                return Err(err(
+                    types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+                    "statistics creation on system columns is not supported".into(),
+                ));
+            }
             return Err(err(
                 types_error::ERRCODE_UNDEFINED_COLUMN,
                 format!("column \"{attname}\" does not exist"),
@@ -270,10 +261,11 @@ pub fn CreateStatistics<'mcx>(mcx: Mcx<'mcx>, stmt: &CreateStatsStmt<'_>) -> PgR
         }
         let entry = typcache::lookup_type_cache(att.atttypid, typcache::TYPECACHE_LT_OPR)?;
         if entry.lt_opr() == InvalidOid {
+            let typname = format_type::format_type_be(att.atttypid)?;
             return Err(err(
                 types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
                 format!(
-                    "column \"{attname}\" cannot be used in statistics because its type has no default btree operator class"
+                    "column \"{attname}\" cannot be used in statistics because its type {typname} has no default btree operator class"
                 ),
             ));
         }
@@ -404,14 +396,37 @@ fn ChooseExtendedStatisticName(
     }
 }
 
-// makeObjectName without the truncation lane (loud on overflow).
+// makeObjectName (indexcmds.c); names are valid UTF-8, so pg_mbcliplen is a
+// char-boundary clip.
 fn make_object_name(name1: &str, name2: &str, label: &str) -> String {
-    let s = if name2.is_empty() {
-        format!("{name1}_{label}")
-    } else {
-        format!("{name1}_{name2}_{label}")
+    let mut overhead = label.len() + 1;
+    if !name2.is_empty() {
+        overhead += 1;
+    }
+    let availchars = NAMEDATALEN - 1 - overhead;
+    let mut name1chars = name1.len();
+    let mut name2chars = name2.len();
+    while name1chars + name2chars > availchars {
+        if name1chars > name2chars {
+            name1chars -= 1;
+        } else {
+            name2chars -= 1;
+        }
+    }
+    let clip = |s: &str, mut n: usize| {
+        while !s.is_char_boundary(n) {
+            n -= 1;
+        }
+        &s[..n]
     };
-    assert!(s.len() < NAMEDATALEN, "makeObjectName: identifier truncation unported ({s:?})");
+    let mut s = String::with_capacity(NAMEDATALEN);
+    s.push_str(clip(name1, name1chars));
+    if !name2.is_empty() {
+        s.push('_');
+        s.push_str(clip(name2, name2chars));
+    }
+    s.push('_');
+    s.push_str(label);
     s
 }
 
@@ -425,7 +440,10 @@ fn ChooseExtendedStatisticNameAddition(exprs: &types_nodes::NodeList<'_>) -> Str
         if !buf.is_empty() {
             buf.push('_');
         }
-        let copy_len = name.len().min(NAMEDATALEN - 1);
+        let mut copy_len = name.len().min(NAMEDATALEN - 1);
+        while !name.is_char_boundary(copy_len) {
+            copy_len -= 1;
+        }
         buf.push_str(&name[..copy_len]);
         if buf.len() >= NAMEDATALEN {
             break;
