@@ -2943,7 +2943,6 @@ dependencies = [
  "fmgr_seams",
  "keywords",
  "mbutils_seams",
- "mcx",
  "namespace_seams",
  "syscache_seams",
  "types_core",
