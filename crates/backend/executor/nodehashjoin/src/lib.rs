@@ -257,9 +257,12 @@ where
                 }
                 let ecxt = node.ps_ExprContext;
                 let inner_id = hash_state.hash_tuple_slot;
-                let joinqual = node.joinqual.as_deref_mut();
-                let matched =
-                    with_probe_slots(ecxt, inner_id, estate, |slots| exec_qual(joinqual, slots))?;
+                let matched = match node.joinqual.as_deref_mut() {
+                    None => true,
+                    joinqual @ Some(_) => {
+                        with_probe_slots(ecxt, inner_id, estate, |slots| exec_qual(joinqual, slots))?
+                    }
+                };
                 if matched {
                     node.hj_MatchedOuter = true;
                     hash_state
@@ -279,10 +282,12 @@ where
                     if node.plan.join.jointype == JoinType::JOIN_RIGHT_ANTI {
                         continue;
                     }
-                    let otherqual = node.otherqual.as_deref_mut();
-                    let pass = with_probe_slots(ecxt, inner_id, estate, |slots| {
-                        exec_qual(otherqual, slots)
-                    })?;
+                    let pass = match node.otherqual.as_deref_mut() {
+                        None => true,
+                        otherqual @ Some(_) => with_probe_slots(ecxt, inner_id, estate, |slots| {
+                            exec_qual(otherqual, slots)
+                        })?,
+                    };
                     if pass {
                         return Ok(Some(project_result(node, inner_id, estate)?));
                     }
@@ -294,10 +299,12 @@ where
                     let null_inner = node.hj_NullInnerTupleSlot.expect("null inner slot");
                     estate.ecxt_mut(node.ps_ExprContext).ecxt_innertuple = Some(null_inner);
                     let ecxt = node.ps_ExprContext;
-                    let otherqual = node.otherqual.as_deref_mut();
-                    let pass = with_probe_slots(ecxt, null_inner, estate, |slots| {
-                        exec_qual(otherqual, slots)
-                    })?;
+                    let pass = match node.otherqual.as_deref_mut() {
+                        None => true,
+                        otherqual @ Some(_) => with_probe_slots(ecxt, null_inner, estate, |slots| {
+                            exec_qual(otherqual, slots)
+                        })?,
+                    };
                     if pass {
                         return Ok(Some(project_result(node, null_inner, estate)?));
                     }
@@ -312,10 +319,12 @@ where
                 estate.ecxt_mut(node.ps_ExprContext).ecxt_outertuple = Some(null_outer);
                 let ecxt = node.ps_ExprContext;
                 let inner_id = hash_state.hash_tuple_slot;
-                let otherqual = node.otherqual.as_deref_mut();
-                let pass = with_probe_slots(ecxt, inner_id, estate, |slots| {
-                    exec_qual(otherqual, slots)
-                })?;
+                let pass = match node.otherqual.as_deref_mut() {
+                    None => true,
+                    otherqual @ Some(_) => with_probe_slots(ecxt, inner_id, estate, |slots| {
+                        exec_qual(otherqual, slots)
+                    })?,
+                };
                 if pass {
                     return Ok(Some(project_result(node, inner_id, estate)?));
                 }
@@ -418,7 +427,9 @@ fn scan_hash_bucket<'mcx>(
 
     while cur != ::nodehash::HashJoinTable::chain_end() {
         let e = table.entry(cur);
+        let next = e.next;
         if e.hashvalue == hashvalue {
+            let tuple = e.tuple;
             let hslot = hash_state.hash_tuple_slot;
             let mcx = estate.es_query_cxt;
             // SAFETY: entry images live in the query arena until reset.
@@ -426,7 +437,7 @@ fn scan_hash_bucket<'mcx>(
                 exectuples::exec_store_minimal_tuple_ptr(
                     &mut estate.es_tupleTable[hslot.0 as usize],
                     mcx,
-                    e.tuple,
+                    tuple,
                 )
             };
             estate.ecxt_mut(node.ps_ExprContext).ecxt_innertuple = Some(hslot);
@@ -438,7 +449,7 @@ fn scan_hash_bucket<'mcx>(
                 return Ok(true);
             }
         }
-        cur = table.entry(cur).next;
+        cur = next;
     }
     Ok(false)
 }
