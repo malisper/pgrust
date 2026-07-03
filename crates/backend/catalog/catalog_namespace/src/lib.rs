@@ -95,7 +95,7 @@ pub(crate) fn base_path_nth(i: usize) -> Oid {
     with_path_state(|st| st.base_search_path[i])
 }
 
-pub(crate) fn my_temp_namespace() -> Oid {
+pub fn my_temp_namespace() -> Oid {
     MY_TEMP_NAMESPACE.with(Cell::get)
 }
 
