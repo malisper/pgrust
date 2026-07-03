@@ -40,6 +40,7 @@ procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
 varsup = { path = "../../transam/varsup" }
 guc_tables = { path = "../../../utils/misc/guc_tables" }
 xloginsert_seams = { path = "../../transam/xloginsert_seams" }
+smgr = { path = "../../../storage/smgr/smgr" }
 
 [dev-dependencies]
 seam_core = { path = "../../../../_support/seam_core" }
@@ -47,7 +48,6 @@ syscache_seams = { path = "../../../utils/cache/syscache_seams" }
 heapam_visibility = { path = "../../heap/heapam_visibility" }
 pruneheap_seams = { path = "../../heap/pruneheap_seams" }
 smgr_seams = { path = "../../../storage/smgr/smgr_seams" }
-smgr = { path = "../../../storage/smgr/smgr" }
 xloginsert = { path = "../../transam/xloginsert" }
 xlogreader = { path = "../../transam/xlogreader" }
 xlogreader_seams = { path = "../../transam/xlogreader_seams" }

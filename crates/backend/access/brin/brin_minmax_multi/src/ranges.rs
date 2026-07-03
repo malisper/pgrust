@@ -690,34 +690,34 @@ pub fn ensure_free_space_in_buffer(
 
     // Scratch context per compaction (C's local AllocSet): distance/comparator
     // calls may allocate heavily and this can run many times per page range.
-    let ctx = ::mcx::MemoryContext::new_bump("minmax-multi context");
-    let cmcx = ctx.mcx();
+    {
+        let ctx = ::mcx::MemoryContext::new_bump("minmax-multi context");
+        let cmcx = ctx.mcx();
 
-    let (mut eranges, mut neranges) = build_expanded_ranges(cmcx, &cmp, colloid, range)?;
-    assert_check_expanded_ranges(cmcx, bdesc, colloid, attno, typid, &eranges[..neranges])?;
+        let (mut eranges, mut neranges) = build_expanded_ranges(cmcx, &cmp, colloid, range)?;
+        assert_check_expanded_ranges(cmcx, bdesc, colloid, attno, typid, &eranges[..neranges])?;
 
-    let distance_fn = minmax_multi_get_procinfo(bdesc, attno, PROCNUM_DISTANCE)?;
-    let distances = build_distances(cmcx, &distance_fn, colloid, &eranges[..neranges])?;
+        let distance_fn = minmax_multi_get_procinfo(bdesc, attno, PROCNUM_DISTANCE)?;
+        let distances = build_distances(cmcx, &distance_fn, colloid, &eranges[..neranges])?;
 
-    neranges = reduce_expanded_ranges(
-        cmcx,
-        &mut eranges,
-        neranges,
-        distances.as_deref(),
-        (range.maxvalues as f64 * MINMAX_BUFFER_LOAD_FACTOR) as i32,
-        &cmp,
-        colloid,
-    )?;
-    assert_check_expanded_ranges(cmcx, bdesc, colloid, attno, typid, &eranges[..neranges])?;
+        neranges = reduce_expanded_ranges(
+            cmcx,
+            &mut eranges,
+            neranges,
+            distances.as_deref(),
+            (range.maxvalues as f64 * MINMAX_BUFFER_LOAD_FACTOR) as i32,
+            &cmp,
+            colloid,
+        )?;
+        assert_check_expanded_ranges(cmcx, bdesc, colloid, attno, typid, &eranges[..neranges])?;
 
-    debug_assert!(
-        count_values(&eranges[..neranges]) as f64
-            <= range.maxvalues as f64 * MINMAX_BUFFER_LOAD_FACTOR
-    );
+        debug_assert!(
+            count_values(&eranges[..neranges]) as f64
+                <= range.maxvalues as f64 * MINMAX_BUFFER_LOAD_FACTOR
+        );
 
-    store_expanded_ranges(range, &eranges[..neranges]);
-
-    drop(ctx);
+        store_expanded_ranges(range, &eranges[..neranges]);
+    }
     assert_check_ranges(mcx, &cmp, colloid, range)?;
 
     Ok(true)
@@ -780,27 +780,27 @@ pub fn compactify_ranges(
     )?;
     let distance_fn = minmax_multi_get_procinfo(bdesc, ranges.attno, PROCNUM_DISTANCE)?;
 
-    let ctx = ::mcx::MemoryContext::new_bump("minmax-multi context");
-    let cmcx = ctx.mcx();
+    {
+        let ctx = ::mcx::MemoryContext::new_bump("minmax-multi context");
+        let cmcx = ctx.mcx();
 
-    let (mut eranges, mut neranges) = build_expanded_ranges(cmcx, &cmp, colloid, ranges)?;
-    let distances = build_distances(cmcx, &distance_fn, colloid, &eranges[..neranges])?;
+        let (mut eranges, mut neranges) = build_expanded_ranges(cmcx, &cmp, colloid, ranges)?;
+        let distances = build_distances(cmcx, &distance_fn, colloid, &eranges[..neranges])?;
 
-    neranges = reduce_expanded_ranges(
-        cmcx,
-        &mut eranges,
-        neranges,
-        distances.as_deref(),
-        max_values,
-        &cmp,
-        colloid,
-    )?;
+        neranges = reduce_expanded_ranges(
+            cmcx,
+            &mut eranges,
+            neranges,
+            distances.as_deref(),
+            max_values,
+            &cmp,
+            colloid,
+        )?;
 
-    debug_assert!(count_values(&eranges[..neranges]) <= max_values);
+        debug_assert!(count_values(&eranges[..neranges]) <= max_values);
 
-    store_expanded_ranges(ranges, &eranges[..neranges]);
-
-    drop(ctx);
+        store_expanded_ranges(ranges, &eranges[..neranges]);
+    }
     assert_check_ranges(mcx, &cmp, colloid, ranges)?;
     Ok(())
 }

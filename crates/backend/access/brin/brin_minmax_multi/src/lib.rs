@@ -256,38 +256,39 @@ pub fn brin_minmax_multi_union(
 
     let cmp = minmax_multi_get_strategy_procinfo(bdesc, attno, atttypid, BTLessStrategyNumber)?;
 
-    let ctx = ::mcx::MemoryContext::new_bump("minmax-multi context");
-    let cmcx = ctx.mcx();
+    {
+        let ctx = ::mcx::MemoryContext::new_bump("minmax-multi context");
+        let cmcx = ctx.mcx();
 
-    let mut eranges: ::mcx::PgVec<'_, ExpandedRange> =
-        ::mcx::vec_with_capacity_in(cmcx, n_a + n_b)?;
-    eranges.resize(
-        n_a + n_b,
-        ExpandedRange { minval: Datum::null(), maxval: Datum::null(), collapsed: false },
-    );
-    fill_expanded_ranges(&mut eranges[..n_a], n_a, &ranges_a);
-    fill_expanded_ranges(&mut eranges[n_a..], n_b, &ranges_b);
+        let mut eranges: ::mcx::PgVec<'_, ExpandedRange> =
+            ::mcx::vec_with_capacity_in(cmcx, n_a + n_b)?;
+        eranges.resize(
+            n_a + n_b,
+            ExpandedRange { minval: Datum::null(), maxval: Datum::null(), collapsed: false },
+        );
+        fill_expanded_ranges(&mut eranges[..n_a], n_a, &ranges_a);
+        fill_expanded_ranges(&mut eranges[n_a..], n_b, &ranges_b);
 
-    let mut neranges = sort_expanded_ranges(cmcx, &cmp, colloid, &mut eranges)?;
-    neranges = merge_overlapping_ranges(cmcx, &cmp, colloid, &mut eranges, neranges)?;
-    assert_check_expanded_ranges(cmcx, bdesc, colloid, attno, atttypid, &eranges[..neranges])?;
+        let mut neranges = sort_expanded_ranges(cmcx, &cmp, colloid, &mut eranges)?;
+        neranges = merge_overlapping_ranges(cmcx, &cmp, colloid, &mut eranges, neranges)?;
+        assert_check_expanded_ranges(cmcx, bdesc, colloid, attno, atttypid, &eranges[..neranges])?;
 
-    let distance_fn = minmax_multi_get_procinfo(bdesc, attno, PROCNUM_DISTANCE)?;
-    let distances = build_distances(cmcx, &distance_fn, colloid, &eranges[..neranges])?;
+        let distance_fn = minmax_multi_get_procinfo(bdesc, attno, PROCNUM_DISTANCE)?;
+        let distances = build_distances(cmcx, &distance_fn, colloid, &eranges[..neranges])?;
 
-    neranges = reduce_expanded_ranges(
-        cmcx,
-        &mut eranges,
-        neranges,
-        distances.as_deref(),
-        ranges_a.maxvalues,
-        &cmp,
-        colloid,
-    )?;
-    assert_check_expanded_ranges(cmcx, bdesc, colloid, attno, atttypid, &eranges[..neranges])?;
+        neranges = reduce_expanded_ranges(
+            cmcx,
+            &mut eranges,
+            neranges,
+            distances.as_deref(),
+            ranges_a.maxvalues,
+            &cmp,
+            colloid,
+        )?;
+        assert_check_expanded_ranges(cmcx, bdesc, colloid, attno, atttypid, &eranges[..neranges])?;
 
-    store_expanded_ranges(&mut ranges_a, &eranges[..neranges]);
-    drop(ctx);
+        store_expanded_ranges(&mut ranges_a, &eranges[..neranges]);
+    }
 
     col_a.bv_values[0] = brin_range_serialize(mcx, &mut ranges_a)?;
     Ok(())
