@@ -217,19 +217,7 @@ pub fn ParseFuncOrColumn<'mcx>(
             if !fargs.is_nil() && vatype == types_core::catalog::ANYOID && func_variadic {
                 let va_arr_typid = actual_arg_types[actual_arg_types.len() - 1];
                 if !OidIsValid(lsyscache::get_base_element_type(va_arr_typid)?) {
-                    let encoding = mbutils::GetDatabaseEncoding();
-                    return Err(Box::new(
-                        ereport(ERROR)
-                            .errcode(types_error::ERRCODE_DATATYPE_MISMATCH)
-                            .errmsg("VARIADIC argument must be an array".to_string())
-                            .errposition(parser_errposition(pstate, location, encoding))
-                            .into_error()
-                            .with_error_location(ErrorLocation::new(
-                                "parse_func.c",
-                                0,
-                                "ParseFuncOrColumn",
-                            )),
-                    ));
+                    return Err(variadic_not_array(pstate, &fargs));
                 }
             }
             if retset {
@@ -806,6 +794,10 @@ fn func_get_detail<'mcx>(
     let Some(best) = best else {
         return Ok(FuncDetail::NotFound);
     };
+    // C: an InvalidOid "best candidate" is the ambiguous-set placeholder.
+    if !OidIsValid(best.oid) {
+        return Ok(FuncDetail::Multiple);
+    }
     let funcid = best.oid;
     let declared_arg_types = mcx::slice_in(mcx, best.args.as_slice())?;
 
@@ -994,6 +986,78 @@ fn func_signature_string(parts: &[&str], argtypes: &[Oid]) -> PgResult<String> {
     }
     sig.push(')');
     Ok(sig)
+}
+
+#[cold]
+#[inline(never)]
+fn variadic_not_array(pstate: &ParseState<'_, '_>, fargs: &NodeList<'_>) -> Box<PgError> {
+    let encoding = mbutils::GetDatabaseEncoding();
+    let loc = fargs.last().map_or(-1, expr_location);
+    Box::new(
+        ereport(ERROR)
+            .errcode(types_error::ERRCODE_DATATYPE_MISMATCH)
+            .errmsg("VARIADIC argument must be an array")
+            .errposition(parser_errposition(pstate, loc, encoding))
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_func.c", 0, "ParseFuncOrColumn")),
+    )
+}
+
+// C exprLocation (nodeFuncs.c) over transformed call arguments; closed-set
+// copy of parse_expr::node_funcs (dependency cycle forbids sharing).
+fn expr_location(node: Node<'_>) -> ParseLoc {
+    fn leftmost(a: ParseLoc, b: ParseLoc) -> ParseLoc {
+        if a < 0 { b } else if b < 0 { a } else { a.min(b) }
+    }
+    fn list_loc(l: &NodeList<'_>) -> ParseLoc {
+        let mut loc = -1;
+        for n in l.iter() {
+            loc = leftmost(loc, expr_location(n));
+            if loc == 0 {
+                break;
+            }
+        }
+        loc
+    }
+    match node.node_tag() {
+        NodeTag::T_Const => node.as_const().unwrap().location,
+        NodeTag::T_Var => node.as_var().unwrap().location,
+        NodeTag::T_Param => node.as_param().unwrap().location,
+        NodeTag::T_Aggref => node.as_aggref().unwrap().location,
+        NodeTag::T_WindowFunc => node.as_window_func().unwrap().location,
+        NodeTag::T_OpExpr => {
+            let op = node.as_op_expr().unwrap();
+            leftmost(op.location, list_loc(&op.args))
+        }
+        NodeTag::T_FuncExpr => {
+            let f = node.as_func_expr().unwrap();
+            leftmost(f.location, list_loc(&f.args))
+        }
+        NodeTag::T_RelabelType => {
+            let r = node.as_relabel_type().unwrap();
+            leftmost(r.location, expr_location(r.arg))
+        }
+        NodeTag::T_CoerceViaIO => {
+            let c = node.as_coerce_via_io().unwrap();
+            leftmost(c.location, expr_location(c.arg))
+        }
+        NodeTag::T_CaseExpr => node.as_case_expr().unwrap().location,
+        NodeTag::T_CaseTestExpr => -1,
+        NodeTag::T_CoalesceExpr => node.as_coalesce_expr().unwrap().location,
+        NodeTag::T_MinMaxExpr => node.as_min_max_expr().unwrap().location,
+        NodeTag::T_SQLValueFunction => node.as_sql_value_function().unwrap().location,
+        NodeTag::T_SubLink => node.as_sub_link().unwrap().location,
+        NodeTag::T_SetToDefault => node.as_set_to_default().unwrap().location,
+        NodeTag::T_BoolExpr => {
+            let b = node.as_bool_expr().unwrap();
+            leftmost(b.location, list_loc(&b.args))
+        }
+        NodeTag::T_NullTest => {
+            let n = node.as_null_test().unwrap();
+            leftmost(n.location, n.arg.map_or(-1, expr_location))
+        }
+        other => panic!("exprLocation (nodeFuncs.c): arm for {other:?} unported"),
+    }
 }
 
 #[cold]

@@ -311,6 +311,18 @@ fn install_proc_candidates() {
                 "vf" => {
                     v.push(cand(9004, PG_CATALOG_NAMESPACE, &[2277], 2283, 0));
                 }
+                "pf" => {
+                    v.push(cand(9005, PG_CATALOG_NAMESPACE, &[23], InvalidOid, 0));
+                    v.push(cand(9006, PG_CATALOG_NAMESPACE, &[1007], 23, 0));
+                }
+                "df" => {
+                    v.push(cand(9007, PG_CATALOG_NAMESPACE, &[23], InvalidOid, 0));
+                    v.push(cand(9008, PG_CATALOG_NAMESPACE, &[23, 23], InvalidOid, 1));
+                }
+                "amb" => {
+                    v.push(cand(9010, PG_CATALOG_NAMESPACE, &[23, 1007], 23, 0));
+                    v.push(cand(9011, PG_CATALOG_NAMESPACE, &[1007], 23, 0));
+                }
                 _ => {}
             }
             Ok(v)
@@ -352,4 +364,47 @@ fn variadic_candidate_expands() {
     assert_eq!(cands.len(), 1);
     assert_eq!(cands[0].nvargs, 0);
     assert_eq!(cands[0].args.as_slice(), &[2277]);
+}
+
+#[test]
+fn nonvariadic_masks_variadic_with_same_expansion() {
+    install_fakes();
+    install_proc_candidates();
+    set_search_path("public");
+
+    let ctx = MemoryContext::new("t");
+    let cands = crate::FuncnameGetCandidates(ctx.mcx(), &["pf"], 1, true, true).unwrap();
+    assert_eq!(cands.len(), 1);
+    assert_eq!(cands[0].oid, 9005);
+    assert_eq!(cands[0].nvargs, 0);
+}
+
+#[test]
+fn defaults_candidate_admitted_with_ndargs() {
+    install_fakes();
+    install_proc_candidates();
+    set_search_path("public");
+
+    let ctx = MemoryContext::new("t");
+    let cands = crate::FuncnameGetCandidates(ctx.mcx(), &["df"], 1, true, true).unwrap();
+    assert_eq!(cands.len(), 2);
+    let d = cands.iter().find(|c| c.oid == 9008).unwrap();
+    assert_eq!(d.ndargs, 1);
+    assert_eq!(d.nargs, 2);
+    assert_eq!(d.args.as_slice(), &[23, 23]);
+}
+
+#[test]
+fn undecidable_duplicate_marked_ambiguous() {
+    install_fakes();
+    install_proc_candidates();
+    set_search_path("public");
+
+    // f(int, VARIADIC int[]) vs f(VARIADIC int[]) at 2 args: C marks the
+    // surviving entry InvalidOid (parse_func turns it into "not unique").
+    let ctx = MemoryContext::new("t");
+    let cands = crate::FuncnameGetCandidates(ctx.mcx(), &["amb"], 2, true, true).unwrap();
+    assert_eq!(cands.len(), 1);
+    assert_eq!(cands[0].oid, InvalidOid);
+    assert_eq!(cands[0].args.as_slice(), &[23, 23]);
 }
