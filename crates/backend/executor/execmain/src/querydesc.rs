@@ -35,9 +35,10 @@ pub struct QueryDescData {
     pub query_env: QueryEnvHandle,
     pub instrument_options: i32,
     pub tup_desc: Option<Rc<TupleDescData<'static>>>,
-    // McxOwned state lives in its arena, so the handle is pointer-sized here
-    // (select1-gate attribution: inline ExecData cost ~10k memcpy instr/q).
-    pub exec: Option<ExecutorHandle>,
+    // Boxed: inline ExecData is ~1.7KB, and QueryDescData moves through the
+    // registry by value — unboxed it cost ~10k memcpy instr per SELECT 1
+    // (select1-gate attribution, 2026-07-03).
+    pub exec: Option<Box<ExecutorHandle>>,
     pub already_executed: bool,
 }
 
@@ -227,6 +228,21 @@ pub(crate) fn query_desc_instrument_seam(
             // C's ExplainNode forcibly InstrEndLoops before reading.
             ::instrument::instr_end_loop(i);
             Some(*i)
+        })
+    })
+}
+
+pub(crate) fn query_desc_agg_instrument_seam(
+    h: QueryDescHandle,
+    plan_node_id: i32,
+) -> Option<types_core::instrument::AggregateInstrumentation> {
+    with_qd(h, |qd| {
+        let exec = qd.exec.as_ref()?;
+        exec.with(|d| {
+            d.estate
+                .es_agg_instrumentation
+                .iter()
+                .find_map(|(id, ai)| (*id == plan_node_id).then_some(*ai))
         })
     })
 }

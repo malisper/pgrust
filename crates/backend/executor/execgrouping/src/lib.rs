@@ -173,10 +173,8 @@ pub fn get_hash_memory_limit() -> usize {
 }
 
 impl<'mcx> TupleHashTable<'mcx> {
-    // C MemoryContextMemAllocated(hash_metacxt): the entry array + open
-    // hashing live here instead of a dedicated metacxt.
+    // C MemoryContextMemAllocated(hash_metacxt); 5 = swiss-table slot+control.
     pub fn meta_mem(&self) -> usize {
-        // 5 = 4-byte slot + 1 control byte (hashbrown swiss-table shape).
         self.entries.capacity() * core::mem::size_of::<TupleHashEntryData>()
             + self.hashtab.capacity() * 5
     }

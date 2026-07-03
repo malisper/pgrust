@@ -215,7 +215,7 @@ pub fn standard_executor_start(qd: &mut QueryDescData, mut eflags: i32) -> PgRes
         init_plan(data, pstmt, operation, eflags)
     })?;
     qd.tup_desc = Some(tup_desc);
-    qd.exec = Some(exec);
+    qd.exec = Some(Box::new(exec));
     Ok(())
 }
 
