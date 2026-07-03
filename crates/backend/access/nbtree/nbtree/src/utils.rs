@@ -16,7 +16,7 @@ use ::types_rel::Relation;
 use ::types_scan::scankey::{
     BTEqualStrategyNumber, InvalidStrategy, ScanKeyData, SK_BT_INDOPTION_SHIFT, SK_BT_MAXVAL,
     SK_BT_MINVAL, SK_BT_NEXT, SK_BT_PRIOR, SK_BT_REQBKWD, SK_BT_REQFWD, SK_BT_SKIP, SK_ISNULL,
-    SK_ROW_HEADER, SK_SEARCHARRAY, SK_SEARCHNULL, SK_BT_NULLS_FIRST,
+    SK_ROW_HEADER, SK_SEARCHARRAY, SK_SEARCHNULL, SK_BT_DESC, SK_BT_NULLS_FIRST,
 };
 use ::types_scan::sdir::{
     BackwardScanDirection, ForwardScanDirection, ScanDirection, ScanDirectionIsBackward,
