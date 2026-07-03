@@ -1196,7 +1196,10 @@ fn ATPrepAlterColumnType<'mcx>(
         ));
     }
     let (targettype, targettypmod) = parse_utilcmd::typenameTypeIdAndMod(mcx, None, tn)?;
-    // GetColumnDefCollation: no COLLATE clause (loud at parse) -> type default.
+    if def.collClause.is_some() {
+        unported("ATPrepAlterColumnType COLLATE clause (GetColumnDefCollation)");
+    }
+    // GetColumnDefCollation: no COLLATE clause -> type default.
     let att = *rel.rd_att.attr(attnum as usize - 1);
 
     let mut pstate = parser_small1::make_parsestate(mcx, None);
