@@ -394,6 +394,222 @@ fn int64_div_fast() {
 }
 
 #[test]
+fn sqrt_family() {
+    assert_eq!(out(&numeric_sqrt(n("2").num()).unwrap()), "1.414213562373095");
+    assert_eq!(out(&numeric_sqrt(n("0").num()).unwrap()), "0.000000000000000");
+    assert_eq!(
+        out(&numeric_sqrt(n("1e100").num()).unwrap()),
+        format!("1{}", "0".repeat(50))
+    );
+    assert_eq!(
+        out(&numeric_sqrt(n("0.5").num()).unwrap()),
+        "0.70710678118654752"
+    );
+    // rounds at every requested digit: 30-digit perfect square
+    let sq = numeric_mul_common(n("123456789.987654321").num(), n("123456789.987654321").num())
+        .unwrap();
+    assert_eq!(
+        out(&numeric_sqrt(sq.num()).unwrap()),
+        "123456789.987654321000000000"
+    );
+    let e = numeric_sqrt(n("-1").num()).unwrap_err();
+    assert_eq!(e.message(), "cannot take square root of a negative number");
+    assert_eq!(e.sqlstate(), types_error::ERRCODE_INVALID_ARGUMENT_FOR_POWER_FUNCTION);
+    assert!(numeric_sqrt(NumericImage::ninf().num()).is_err());
+    assert_eq!(out(&numeric_sqrt(NumericImage::pinf().num()).unwrap()), "Infinity");
+    assert_eq!(out(&numeric_sqrt(NumericImage::nan().num()).unwrap()), "NaN");
+}
+
+#[test]
+fn exp_ln_log() {
+    assert_eq!(out(&numeric_exp(n("1").num()).unwrap()), "2.7182818284590452");
+    assert_eq!(out(&numeric_exp(n("0").num()).unwrap()), "1.0000000000000000");
+    assert_eq!(out(&numeric_exp(n("-1").num()).unwrap()), "0.3678794411714423");
+    assert_eq!(out(&numeric_exp(n("10.5").num()).unwrap()), "36315.502674246638");
+    // exp overflow threshold and the underflow-to-zero arm
+    let e = numeric_exp(n("6000").num()).unwrap_err();
+    assert_eq!(e.message(), "value overflows numeric format");
+    let z = numeric_exp(n("-6000").num()).unwrap();
+    assert_eq!(out(&z), format!("0.{}", "0".repeat(1000)));
+    assert_eq!(out(&numeric_exp(NumericImage::ninf().num()).unwrap()), "0");
+    assert_eq!(out(&numeric_exp(NumericImage::pinf().num()).unwrap()), "Infinity");
+
+    assert_eq!(out(&numeric_ln(n("2").num()).unwrap()), "0.6931471805599453");
+    assert_eq!(out(&numeric_ln(n("0.5").num()).unwrap()), "-0.6931471805599453");
+    // ln(1) picks rscale off a zero estimate
+    assert_eq!(out(&numeric_ln(n("1").num()).unwrap()), "0.0000000000000000");
+    assert_eq!(out(&numeric_ln(n("1e100").num()).unwrap()), "230.25850929940457");
+    let e = numeric_ln(n("0").num()).unwrap_err();
+    assert_eq!(e.message(), "cannot take logarithm of zero");
+    assert_eq!(e.sqlstate(), types_error::ERRCODE_INVALID_ARGUMENT_FOR_LOG);
+    assert!(numeric_ln(n("-2").num()).is_err());
+    assert!(numeric_ln(NumericImage::ninf().num()).is_err());
+
+    assert_eq!(
+        out(&numeric_log(n("2").num(), n("64").num()).unwrap()),
+        "6.0000000000000000"
+    );
+    assert_eq!(
+        out(&numeric_log(n("10").num(), n("100").num()).unwrap()),
+        "2.0000000000000000"
+    );
+    assert!(numeric_log(n("0").num(), n("64").num()).is_err());
+    assert!(numeric_log(n("-2").num(), n("64").num()).is_err());
+    assert_eq!(
+        out(&numeric_log(NumericImage::pinf().num(), n("2").num()).unwrap()),
+        "0"
+    );
+    assert_eq!(
+        out(&numeric_log(n("2").num(), NumericImage::pinf().num()).unwrap()),
+        "Infinity"
+    );
+}
+
+#[test]
+fn power_family() {
+    assert_eq!(
+        out(&numeric_power(n("2").num(), n("10").num()).unwrap()),
+        "1024.0000000000000"
+    );
+    assert_eq!(
+        out(&numeric_power(n("2").num(), n("0.5").num()).unwrap()),
+        "1.4142135623730950"
+    );
+    assert_eq!(
+        out(&numeric_power(n("2.5").num(), n("-3.7").num()).unwrap()),
+        "0.03369938443095648"
+    );
+    assert_eq!(
+        out(&numeric_power(n("0").num(), n("0").num()).unwrap()),
+        "1.0000000000000000"
+    );
+    assert_eq!(
+        out(&numeric_power(n("-2").num(), n("3").num()).unwrap()),
+        "-8.0000000000000000"
+    );
+    assert_eq!(
+        out(&numeric_power(n("1.000000001").num(), n("10000000").num()).unwrap()),
+        "1.0100501670791178"
+    );
+    let e = numeric_power(n("0").num(), n("-1").num()).unwrap_err();
+    assert_eq!(e.message(), "zero raised to a negative power is undefined");
+    assert_eq!(e.sqlstate(), types_error::ERRCODE_INVALID_ARGUMENT_FOR_POWER_FUNCTION);
+    let e = numeric_power(n("-2").num(), n("0.5").num()).unwrap_err();
+    assert_eq!(
+        e.message(),
+        "a negative number raised to a non-integer power yields a complex result"
+    );
+    // NaN^0 = 1 and 1^NaN = 1 per POSIX
+    assert_eq!(
+        out(&numeric_power(NumericImage::nan().num(), n("0").num()).unwrap()),
+        "1"
+    );
+    assert_eq!(
+        out(&numeric_power(n("1").num(), NumericImage::nan().num()).unwrap()),
+        "1"
+    );
+    assert_eq!(
+        out(&numeric_power(n("0.5").num(), NumericImage::ninf().num()).unwrap()),
+        "Infinity"
+    );
+    assert_eq!(
+        out(&numeric_power(NumericImage::ninf().num(), n("3").num()).unwrap()),
+        "-Infinity"
+    );
+    assert_eq!(
+        out(&numeric_power(NumericImage::ninf().num(), n("2").num()).unwrap()),
+        "Infinity"
+    );
+}
+
+#[test]
+fn mod_gcd_lcm_fac() {
+    assert_eq!(out(&numeric_mod_common(n("11").num(), n("4").num()).unwrap()), "3");
+    assert_eq!(out(&numeric_mod_common(n("-11").num(), n("4").num()).unwrap()), "-3");
+    assert_eq!(
+        out(&numeric_mod_common(n("11.5").num(), n("4.2").num()).unwrap()),
+        "3.1"
+    );
+    assert!(numeric_mod_common(n("1").num(), n("0").num()).is_err());
+    assert!(numeric_mod_common(NumericImage::pinf().num(), n("0").num()).is_err());
+    assert_eq!(
+        out(&numeric_mod_common(NumericImage::pinf().num(), n("2").num()).unwrap()),
+        "NaN"
+    );
+    assert_eq!(
+        out(&numeric_mod_common(n("7").num(), NumericImage::ninf().num()).unwrap()),
+        "7"
+    );
+
+    assert_eq!(out(&numeric_gcd_common(n("48").num(), n("18").num()).unwrap()), "6");
+    assert_eq!(
+        out(&numeric_gcd_common(n("4.8").num(), n("1.8").num()).unwrap()),
+        "0.6"
+    );
+    assert_eq!(
+        out(&numeric_gcd_common(NumericImage::pinf().num(), n("1").num()).unwrap()),
+        "NaN"
+    );
+    assert_eq!(out(&numeric_lcm_common(n("4").num(), n("6").num()).unwrap()), "12");
+    assert_eq!(out(&numeric_lcm_common(n("0").num(), n("6").num()).unwrap()), "0");
+
+    assert_eq!(out(&numeric_fac(5).unwrap()), "120");
+    assert_eq!(out(&numeric_fac(0).unwrap()), "1");
+    assert_eq!(out(&numeric_fac(20).unwrap()), "2432902008176640000");
+    let e = numeric_fac(-1).unwrap_err();
+    assert_eq!(e.message(), "factorial of a negative number is undefined");
+    assert!(numeric_fac(32178).is_err());
+}
+
+#[test]
+fn out_sci_and_width_bucket() {
+    let sci = |s: &str, scale: i32| {
+        let mut buf = Vec::new();
+        numeric_out_sci(n(s).num(), scale, &mut buf);
+        String::from_utf8(buf).unwrap()
+    };
+    assert_eq!(sci("1234.5678", 3), "1.235e+03");
+    assert_eq!(sci("0", 3), "0.000e+00");
+    assert_eq!(sci("0.00001234", 2), "1.23e-05");
+    assert_eq!(sci("-1234.5678", 3), "-1.235e+03");
+    assert_eq!(sci("1e100", 1), "1.0e+100");
+    let mut buf = Vec::new();
+    numeric_out_sci(NumericImage::ninf().num(), 3, &mut buf);
+    assert_eq!(buf, b"-Infinity");
+
+    let wb = |op: &str, b1: &str, b2: &str, c: i32| {
+        width_bucket_numeric(n(op).num(), n(b1).num(), n(b2).num(), c)
+    };
+    assert_eq!(wb("5.0", "0.0", "10.0", 5).unwrap(), 3);
+    assert_eq!(wb("-1", "0.0", "10.0", 5).unwrap(), 0);
+    assert_eq!(wb("11", "0.0", "10.0", 5).unwrap(), 6);
+    assert_eq!(wb("9.99", "10.0", "0.0", 5).unwrap(), 1);
+    let e = wb("1", "0", "10", 0).unwrap_err();
+    assert_eq!(e.message(), "count must be greater than zero");
+    assert_eq!(e.sqlstate(), types_error::ERRCODE_INVALID_ARGUMENT_FOR_WIDTH_BUCKET_FUNCTION);
+    let e = wb("1", "5", "5", 3).unwrap_err();
+    assert_eq!(e.message(), "lower bound cannot equal upper bound");
+    assert!(width_bucket_numeric(
+        NumericImage::nan().num(),
+        n("0").num(),
+        n("1").num(),
+        2
+    )
+    .is_err());
+    assert!(width_bucket_numeric(
+        n("1").num(),
+        NumericImage::pinf().num(),
+        n("1").num(),
+        2
+    )
+    .is_err());
+    assert_eq!(
+        width_bucket_numeric(NumericImage::pinf().num(), n("0").num(), n("1").num(), 2).unwrap(),
+        3
+    );
+}
+
+#[test]
 fn maximum_size() {
     assert_eq!(numeric_maximum_size(-1), -1);
     assert_eq!(numeric_maximum_size(make_numeric_typmod(10, 2)), 8 + 4 * 2);

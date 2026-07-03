@@ -382,24 +382,35 @@ pub fn mul_var(var1: VarView<'_>, var2: VarView<'_>, result: &mut NumericVar, rs
         let mut scratch = scratch.borrow_mut();
         let (dig, var2digitpairs) = &mut *scratch;
         dig.clear();
-        dig.resize(res_ndigitpairs as usize, 0);
+        dig.reserve(res_ndigitpairs as usize);
         var2digitpairs.clear();
         var2digitpairs.reserve(var2ndigitpairs as usize);
-
-        for i2 in 0..var2ndigitpairs - 1 {
-            var2digitpairs.push(
-                (var2digits[2 * i2 as usize] as i32 * NBASE
-                    + var2digits[2 * i2 as usize + 1] as i32) as u32,
-            );
+        // SAFETY: capacities reserved; u64/u32 have no invalid bit patterns.
+        // Every dig[] word is written before read: the head memset below
+        // covers [0, i1+pair_offset) and the first product loop covers the
+        // tail exactly (i2limit = res_ndigitpairs - i1 - pair_offset by the
+        // pair_offset identity) — C zero-fills only the head the same way.
+        unsafe {
+            dig.set_len(res_ndigitpairs as usize);
+            var2digitpairs.set_len(var2ndigitpairs as usize);
         }
-        let i2 = var2ndigitpairs - 1;
-        if 2 * i2 + 1 < var2ndigits {
-            var2digitpairs.push(
+
+        let v2p = var2digitpairs.as_mut_ptr();
+        // SAFETY: writes are at i2 < var2ndigitpairs; digit reads 2*i2(+1)
+        // are < var2ndigits per the last-pair case split.
+        unsafe {
+            for i2 in 0..var2ndigitpairs - 1 {
+                *v2p.add(i2 as usize) = (var2digits[2 * i2 as usize] as i32 * NBASE
+                    + var2digits[2 * i2 as usize + 1] as i32)
+                    as u32;
+            }
+            let i2 = var2ndigitpairs - 1;
+            *v2p.add(i2 as usize) = if 2 * i2 + 1 < var2ndigits {
                 (var2digits[2 * i2 as usize] as i32 * NBASE
-                    + var2digits[2 * i2 as usize + 1] as i32) as u32,
-            );
-        } else {
-            var2digitpairs.push((var2digits[2 * i2 as usize] as i32 * NBASE) as u32);
+                    + var2digits[2 * i2 as usize + 1] as i32) as u32
+            } else {
+                (var2digits[2 * i2 as usize] as i32 * NBASE) as u32
+            };
         }
 
         let mut i1 = var1ndigitpairs - 1;
@@ -414,6 +425,8 @@ pub fn mul_var(var1: VarView<'_>, var2: VarView<'_>, result: &mut NumericVar, rs
         let i2limit = var2ndigitpairs.min(res_ndigitpairs - i1 - pair_offset);
         {
             let base = (i1 + pair_offset) as usize;
+            // SAFETY: base <= res_ndigitpairs (pair_offset identity above).
+            unsafe { core::ptr::write_bytes(dig.as_mut_ptr(), 0, base) };
             let dseg = &mut dig[base..base + i2limit as usize];
             for (d, &v2) in dseg.iter_mut().zip(&var2digitpairs[..i2limit as usize]) {
                 *d = var1digitpair as u64 * v2 as u64;
@@ -430,16 +443,20 @@ pub fn mul_var(var1: VarView<'_>, var2: VarView<'_>, result: &mut NumericVar, rs
 
             maxdig += var1digitpair as u64;
             if maxdig > (u64::MAX - u64::MAX / NBASE_SQR as u64) / (NBASE_SQR as u64 - 1) {
+                let digp = dig.as_mut_ptr();
                 let mut carry: u64 = 0;
                 for i in (0..res_ndigitpairs as usize).rev() {
-                    let mut newdig = dig[i] + carry;
-                    if newdig >= NBASE_SQR as u64 {
-                        carry = newdig / NBASE_SQR as u64;
-                        newdig -= carry * NBASE_SQR as u64;
-                    } else {
-                        carry = 0;
+                    // SAFETY: i < res_ndigitpairs = dig.len().
+                    unsafe {
+                        let mut newdig = *digp.add(i) + carry;
+                        if newdig >= NBASE_SQR as u64 {
+                            carry = newdig / NBASE_SQR as u64;
+                            newdig -= carry * NBASE_SQR as u64;
+                        } else {
+                            carry = 0;
+                        }
+                        *digp.add(i) = newdig;
                     }
-                    dig[i] = newdig;
                 }
                 debug_assert_eq!(carry, 0);
                 maxdig = 1 + var1digitpair as u64;
@@ -455,18 +472,23 @@ pub fn mul_var(var1: VarView<'_>, var2: VarView<'_>, result: &mut NumericVar, rs
 
         result.alloc(res_ndigits);
         {
-            let res_digits = result.digits_mut();
+            let res_digits = result.digits_mut().as_mut_ptr();
+            let digp = dig.as_ptr();
             let mut carry: u64 = 0;
             for i in (0..res_ndigitpairs as usize).rev() {
-                let mut newdig = dig[i] + carry;
-                if newdig >= NBASE_SQR as u64 {
-                    carry = newdig / NBASE_SQR as u64;
-                    newdig -= carry * NBASE_SQR as u64;
-                } else {
-                    carry = 0;
+                // SAFETY: i < res_ndigitpairs = dig.len(); writes at 2*i and
+                // 2*i+1 are < res_ndigits = 2*res_ndigitpairs.
+                unsafe {
+                    let mut newdig = *digp.add(i) + carry;
+                    if newdig >= NBASE_SQR as u64 {
+                        carry = newdig / NBASE_SQR as u64;
+                        newdig -= carry * NBASE_SQR as u64;
+                    } else {
+                        carry = 0;
+                    }
+                    *res_digits.add(2 * i + 1) = (newdig as u32 % NBASE as u32) as NumericDigit;
+                    *res_digits.add(2 * i) = (newdig as u32 / NBASE as u32) as NumericDigit;
                 }
-                res_digits[2 * i + 1] = (newdig as u32 % NBASE as u32) as NumericDigit;
-                res_digits[2 * i] = (newdig as u32 / NBASE as u32) as NumericDigit;
             }
             debug_assert_eq!(carry, 0);
         }
@@ -980,30 +1002,35 @@ pub fn div_var_int(
     let var_ndigits = var.ndigits;
 
     {
-        let res_digits = result.digits_mut();
-        if divisor <= u32::MAX / NBASE as u32 {
-            let mut carry: u32 = 0;
-            for i in 0..res_ndigits {
-                carry = carry * NBASE as u32
-                    + if i < var_ndigits {
-                        var_digits[i as usize] as u32
-                    } else {
-                        0
-                    };
-                res_digits[i as usize] = (carry / divisor) as NumericDigit;
-                carry %= divisor;
-            }
-        } else {
-            let mut carry: u64 = 0;
-            for i in 0..res_ndigits {
-                carry = carry * NBASE as u64
-                    + if i < var_ndigits {
-                        var_digits[i as usize] as u64
-                    } else {
-                        0
-                    };
-                res_digits[i as usize] = (carry / divisor as u64) as NumericDigit;
-                carry %= divisor as u64;
+        let res_digits = result.digits_mut().as_mut_ptr();
+        let vd = var_digits.as_ptr();
+        // SAFETY: writes cover exactly the res_ndigits digits just allocated;
+        // reads are index-guarded to [0, var_ndigits).
+        unsafe {
+            if divisor <= u32::MAX / NBASE as u32 {
+                let mut carry: u32 = 0;
+                for i in 0..res_ndigits {
+                    carry = carry * NBASE as u32
+                        + if i < var_ndigits {
+                            *vd.add(i as usize) as u32
+                        } else {
+                            0
+                        };
+                    *res_digits.add(i as usize) = (carry / divisor) as NumericDigit;
+                    carry %= divisor;
+                }
+            } else {
+                let mut carry: u64 = 0;
+                for i in 0..res_ndigits {
+                    carry = carry * NBASE as u64
+                        + if i < var_ndigits {
+                            *vd.add(i as usize) as u64
+                        } else {
+                            0
+                        };
+                    *res_digits.add(i as usize) = (carry / divisor as u64) as NumericDigit;
+                    carry %= divisor as u64;
+                }
             }
         }
     }
@@ -1062,30 +1089,35 @@ pub fn div_var_int64(
     let var_ndigits = var.ndigits;
 
     {
-        let res_digits = result.digits_mut();
-        if divisor <= u64::MAX / NBASE as u64 {
-            let mut carry: u64 = 0;
-            for i in 0..res_ndigits {
-                carry = carry * NBASE as u64
-                    + if i < var_ndigits {
-                        var_digits[i as usize] as u64
-                    } else {
-                        0
-                    };
-                res_digits[i as usize] = (carry / divisor) as NumericDigit;
-                carry %= divisor;
-            }
-        } else {
-            let mut carry: u128 = 0;
-            for i in 0..res_ndigits {
-                carry = carry * NBASE as u128
-                    + if i < var_ndigits {
-                        var_digits[i as usize] as u128
-                    } else {
-                        0
-                    };
-                res_digits[i as usize] = (carry / divisor as u128) as NumericDigit;
-                carry %= divisor as u128;
+        let res_digits = result.digits_mut().as_mut_ptr();
+        let vd = var_digits.as_ptr();
+        // SAFETY: writes cover exactly the res_ndigits digits just allocated;
+        // reads are index-guarded to [0, var_ndigits).
+        unsafe {
+            if divisor <= u64::MAX / NBASE as u64 {
+                let mut carry: u64 = 0;
+                for i in 0..res_ndigits {
+                    carry = carry * NBASE as u64
+                        + if i < var_ndigits {
+                            *vd.add(i as usize) as u64
+                        } else {
+                            0
+                        };
+                    *res_digits.add(i as usize) = (carry / divisor) as NumericDigit;
+                    carry %= divisor;
+                }
+            } else {
+                let mut carry: u128 = 0;
+                for i in 0..res_ndigits {
+                    carry = carry * NBASE as u128
+                        + if i < var_ndigits {
+                            *vd.add(i as usize) as u128
+                        } else {
+                            0
+                        };
+                    *res_digits.add(i as usize) = (carry / divisor as u128) as NumericDigit;
+                    carry %= divisor as u128;
+                }
             }
         }
     }

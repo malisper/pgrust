@@ -126,7 +126,7 @@ pub fn apply_typmod_special(
     )
 }
 
-fn numeric_sign_internal(num: Num<'_>) -> i32 {
+pub(crate) fn numeric_sign_internal(num: Num<'_>) -> i32 {
     if num.is_special() {
         debug_assert!(!num.is_nan());
         if num.is_pinf() {
@@ -733,24 +733,13 @@ macro_rules! unported {
     )*};
 }
 
-// Deferred loud (M3+ / other lanes): transcendentals, mod/gcd family, wire
-// format, sortsupport/hash, to_char support, selectivity.
+// Deferred loud (M3+ / other lanes): wire format, sortsupport/hash,
+// in_range/series, stddev finals.
 unported! {
-    numeric_sqrt_unported,
-    numeric_exp_unported,
-    numeric_ln_unported,
-    numeric_log_unported,
-    numeric_power_unported,
-    numeric_mod_unported,
-    numeric_gcd_unported,
-    numeric_lcm_unported,
-    numeric_fac_unported,
     numeric_recv_unported,
     numeric_send_unported,
     numeric_sortsupport_unported,
     hash_numeric_unported,
-    numeric_out_sci_unported,
-    width_bucket_numeric_unported,
     in_range_numeric_unported,
     generate_series_numeric_unported,
     numeric_stddev_unported,

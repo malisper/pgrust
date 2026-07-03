@@ -5,6 +5,7 @@ pub mod aggregates;
 pub mod arith;
 pub mod builtins;
 pub mod io;
+pub mod math;
 pub mod ops;
 pub mod var;
 
@@ -26,6 +27,12 @@ pub use arith::{
     select_div_scale, sub_var,
 };
 pub use io::{numeric_in, numeric_out_into};
+pub use math::{
+    div_mod_var, exp_var, gcd_var, ln_var, log_var, mod_var, numeric_exp, numeric_exp_into,
+    numeric_fac, numeric_gcd_common, numeric_lcm_common, numeric_ln, numeric_ln_into,
+    numeric_log, numeric_mod_common, numeric_out_sci, numeric_power, numeric_power_into,
+    numeric_sqrt, numeric_sqrt_into, power_var, sqrt_var, width_bucket_numeric,
+};
 pub use ops::*;
 pub use var::{make_result, make_result_opt_error, NumericImage, NumericVar, VarView};
 
@@ -73,6 +80,7 @@ pub const NUMERIC_MIN_SCALE: i32 = -1000;
 pub const NUMERIC_MAX_SCALE: i32 = 1000;
 pub const NUMERIC_MAX_DISPLAY_SCALE: i32 = NUMERIC_MAX_PRECISION;
 pub const NUMERIC_MIN_DISPLAY_SCALE: i32 = 0;
+pub const NUMERIC_MAX_RESULT_SCALE: i32 = NUMERIC_MAX_PRECISION * 2;
 pub const NUMERIC_MIN_SIG_DIGITS: i32 = 16;
 
 #[inline]

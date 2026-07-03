@@ -1301,6 +1301,7 @@ dependencies = [
  "guc_tables",
  "heapam_visibility_seams",
  "init_small",
+ "instrument",
  "mcx",
  "miscinit_seams",
  "nodeagg",
@@ -1345,6 +1346,7 @@ version = "0.1.0"
 dependencies = [
  "seam_core",
  "tcop_dest",
+ "types_core",
  "types_dest",
  "types_error",
  "types_nodes",
@@ -3732,6 +3734,7 @@ dependencies = [
  "parser_analyze",
  "plancache_portal_seams",
  "planner_seams",
+ "pquery_seams",
  "snapmgr",
  "syscache_seams",
  "types_core",
@@ -3857,6 +3860,24 @@ dependencies = [
 [[package]]
 name = "portalcmds"
 version = "0.1.0"
+dependencies = [
+ "elog",
+ "execmain",
+ "execmain_seams",
+ "mcx",
+ "miscinit",
+ "portalcmds_seams",
+ "portalmem",
+ "postgres",
+ "pquery",
+ "rewrite_handler_seams",
+ "snapmgr",
+ "tcop_dest",
+ "types_error",
+ "types_nodes",
+ "types_portal",
+ "xact",
+]
 
 [[package]]
 name = "portalcmds_seams"
@@ -4148,12 +4169,17 @@ name = "pqformat"
 version = "0.1.0"
 dependencies = [
  "datum",
+ "fmgr_seams",
  "mbutils",
  "mbutils_seams",
  "mcx",
+ "namespace_seams",
  "pqcomm_seams",
  "stringinfo",
  "types_error",
+ "types_fmgr",
+ "wchar",
+ "xact_seams",
 ]
 
 [[package]]
