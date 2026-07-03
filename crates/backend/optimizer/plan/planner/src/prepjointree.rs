@@ -416,7 +416,7 @@ fn pull_up_simple_subquery<'mcx>(
                         offset_expr(mcx, n, rtoffset)
                     })? {
                         Some(l) => l,
-                        None => crte.joinaliasvars,
+                        None => crte.joinaliasvars.clone_in(mcx)?,
                     };
                 // SAFETY: exclusive pre-seal fixup of the fresh copy.
                 unsafe { copy.with_mut::<RangeTblEntry, _>(|r| r.joinaliasvars = off_aliasvars) };
@@ -1036,7 +1036,7 @@ fn copy_expr<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>, levels_delta: u32) -> PgRes
             let f = node.as_func_expr().expect("FuncExpr");
             let mut args = NodeList::nil();
             for a in &f.args {
-                args.lappend(mcx, copy_expr(mcx, a)?)?;
+                args.lappend(mcx, copy_expr(mcx, a, levels_delta)?)?;
             }
             Node::mk(
                 mcx,
@@ -1057,7 +1057,7 @@ fn copy_expr<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>, levels_delta: u32) -> PgRes
             let a = node.as_array_expr().expect("ArrayExpr");
             let mut elements = NodeList::nil();
             for e in &a.elements {
-                elements.lappend(mcx, copy_expr(mcx, e)?)?;
+                elements.lappend(mcx, copy_expr(mcx, e, levels_delta)?)?;
             }
             Node::mk(
                 mcx,
@@ -1078,7 +1078,7 @@ fn copy_expr<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>, levels_delta: u32) -> PgRes
             Node::mk(
                 mcx,
                 types_nodes::primnodes::CoerceViaIO {
-                    arg: copy_expr(mcx, c.arg)?,
+                    arg: copy_expr(mcx, c.arg, levels_delta)?,
                     resulttype: c.resulttype,
                     resultcollid: c.resultcollid,
                     coerceformat: c.coerceformat,
@@ -1091,7 +1091,7 @@ fn copy_expr<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>, levels_delta: u32) -> PgRes
             Node::mk(
                 mcx,
                 types_nodes::primnodes::RelabelType {
-                    arg: copy_expr(mcx, r.arg)?,
+                    arg: copy_expr(mcx, r.arg, levels_delta)?,
                     resulttype: r.resulttype,
                     resulttypmod: r.resulttypmod,
                     resultcollid: r.resultcollid,

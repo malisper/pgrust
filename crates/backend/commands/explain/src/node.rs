@@ -2064,7 +2064,7 @@ fn deparse_param<'mcx>(
                             if nlp.paramno == p.paramid {
                                 // push_ancestor_plan: deparse the outer Var
                                 // in the NestLoop's context, prefixes forced.
-                                deparse_expr(es, pn, a.parent, nlp.paramval, true, buf)?;
+                                deparse_expr(es, pn, a.parent, nlp.paramval, true, false, buf)?;
                                 return Ok(());
                             }
                         }
