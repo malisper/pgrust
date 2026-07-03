@@ -276,18 +276,17 @@ pub fn exec_simple_query<'mcx>(mcx: Mcx<'mcx>, query_string: &'mcx str) -> PgRes
 
         pquery::PortalStart(&portal, ParamListHandle::NULL, 0, None)?;
 
-        /*
-         * Output format: text unless FETCH from a binary cursor. The
-         * FetchStmt payload lands with the grammar; reaching one here is
-         * impossible until then.
-         */
-        let format: i16 = if stmt.node_tag() == NodeTag::T_FetchStmt {
-            panic!(
-                "exec_simple_query (postgres.c:1243): FETCH binary-cursor format \
-                 probe needs the FetchStmt node (parser/portalcmds lanes)"
-            );
-        } else {
-            0 /* TEXT is default */
+        /* Output format: text unless FETCH from a binary cursor. */
+        let format: i16 = match stmt.node_tag() {
+            NodeTag::T_FetchStmt => {
+                let fstmt = stmt.as_fetch_stmt().expect("T_FetchStmt");
+                let binary = !fstmt.ismove
+                    && portalmem::GetPortalByName(fstmt.portalname).is_some_and(|fportal| {
+                        fportal.borrow().cursorOptions & types_portal::CURSOR_OPT_BINARY != 0
+                    });
+                i16::from(binary)
+            }
+            _ => 0, /* TEXT is default */
         };
         pquery::PortalSetResultFormat(&portal, &[format])?;
 

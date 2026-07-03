@@ -393,6 +393,17 @@ pub enum FetchDirection {
 // C: #define FETCH_ALL LONG_MAX (parsenodes.h).
 pub const FETCH_ALL: i64 = i64::MAX;
 
+pub const CURSOR_OPT_BINARY: i32 = 0x0001;
+pub const CURSOR_OPT_SCROLL: i32 = 0x0002;
+pub const CURSOR_OPT_NO_SCROLL: i32 = 0x0004;
+pub const CURSOR_OPT_INSENSITIVE: i32 = 0x0008;
+pub const CURSOR_OPT_ASENSITIVE: i32 = 0x0010;
+pub const CURSOR_OPT_HOLD: i32 = 0x0020;
+pub const CURSOR_OPT_FAST_PLAN: i32 = 0x0100;
+pub const CURSOR_OPT_GENERIC_PLAN: i32 = 0x0200;
+pub const CURSOR_OPT_CUSTOM_PLAN: i32 = 0x0400;
+pub const CURSOR_OPT_PARALLEL_OK: i32 = 0x0800;
+
 #[derive(Default)]
 pub struct FetchStmt<'mcx> {
     pub direction: FetchDirection,

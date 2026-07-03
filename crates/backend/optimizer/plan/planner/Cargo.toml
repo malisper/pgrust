@@ -8,6 +8,7 @@ publish.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+execmain = { path = "../../../executor/execmain" }
 nodes_core = { path = "../../../nodes/nodes_core" }
 parse_relation = { path = "../../../parser/parse_relation" }
 mcx = { path = "../../../../_support/mcx" }

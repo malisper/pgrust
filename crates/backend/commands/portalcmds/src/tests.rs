@@ -102,10 +102,30 @@ fn install_fixtures() {
     static INSTALL: Once = Once::new();
     INSTALL.call_once(|| {
         std::env::set_var("PGRUST_TZDIR", "/usr/share/zoneinfo");
+        // Fake global-vis BEFORE procarray::init_seams (its set is guarded;
+        // scanfix's controllable fake must win).
+        procarray_seams::global_vis_test_for::set(|_r| types_core::GlobalVisStateHandle::new(0));
         install_proc_fixture();
         crate::init_seams();
         pquery::init_seams();
         planner::init_seams();
+        scan_fgram::init_seams();
+        parser_seams::raw_parser::set(|mcx, q, mode| {
+            let list = gram_core::raw_parser(mcx, q, mode)?;
+            let mut v = mcx::PgVec::new_in(mcx);
+            v.try_reserve_exact(list.len()).map_err(|_| mcx.oom(list.len()))?;
+            for n in list.iter() {
+                let rs = n.as_raw_stmt().expect("raw_parser yields RawStmt");
+                v.push(::types_nodes::rawnodes::RawStmt {
+                    stmt: rs.stmt,
+                    stmt_location: rs.stmt_location,
+                    stmt_len: rs.stmt_len,
+                });
+            }
+            Ok(v)
+        });
+        parse_expr::init_seams();
+        parser_analyze::init_seams();
         rewrite_handler::init_seams();
         execmain::init_seams();
         xact::init_seams();
@@ -269,8 +289,15 @@ fn declare_fetch_close_select1_e2e() {
 
     let before = execmain::registry_len();
     let cstmt = mk_declare(mcx, "c1", 0);
-    PerformCursorOpen(mcx, cstmt, "DECLARE c1 CURSOR FOR SELECT 1", ParamListHandle::NULL, false)
-        .unwrap();
+    PerformCursorOpen(
+        mcx,
+        cstmt,
+        "DECLARE c1 CURSOR FOR SELECT 1",
+        "DECLARE c1 CURSOR FOR SELECT 1",
+        ParamListHandle::NULL,
+        false,
+    )
+    .unwrap();
     snapmgr::PopActiveSnapshot().unwrap();
     assert_eq!(execmain::registry_len(), before + 1);
 
@@ -390,6 +417,7 @@ fn declare_requires_transaction_block_at_top_level() {
         mcx,
         cstmt,
         "DECLARE c3 CURSOR FOR SELECT 1",
+        "DECLARE c3 CURSOR FOR SELECT 1",
         ParamListHandle::NULL,
         true,
     )
@@ -408,8 +436,8 @@ fn cursor_name_errors_match_c_sqlstates() {
         d.portalname = Some("");
         d.seal_ref()
     };
-    let err =
-        PerformCursorOpen(mcx, cstmt, "DECLARE", ParamListHandle::NULL, false).unwrap_err();
+    let err = PerformCursorOpen(mcx, cstmt, "DECLARE", "DECLARE", ParamListHandle::NULL, false)
+        .unwrap_err();
     assert_eq!(err.sqlstate(), types_error::ERRCODE_INVALID_CURSOR_NAME);
 
     let stmt = FetchStmt { portalname: Some("no-such"), howMany: 1, ..FetchStmt::default() };
@@ -584,7 +612,7 @@ mod scanfix {
 
     use ::mcx::{Mcx, PgVec};
     use ::types_core::{
-        Buffer, GlobalVisStateHandle, Oid, BLCKSZ, INVALID_PROC_NUMBER, RELPERSISTENCE_PERMANENT,
+        Buffer, Oid, BLCKSZ, INVALID_PROC_NUMBER, RELPERSISTENCE_PERMANENT,
     };
     use ::types_rel::{
         FormData_pg_class, LockInfoData, LockRelId, Relation, RelationData, LOCKMODE,
@@ -669,7 +697,6 @@ mod scanfix {
         predicate_seams::predicate_lock_relation::set(|_r, _s| Ok(()));
         predicate_seams::predicate_lock_tid::set(|_r, _t, _s, _x| Ok(()));
         pruneheap_seams::heap_page_prune_opt::set(|_r, _b| Ok(()));
-        procarray_seams::global_vis_test_for::set(|_r| GlobalVisStateHandle::new(0));
 
         miscinit_seams::get_user_id::set(|| 10);
         aclchk_seams::object_aclcheck::set(|_classid, _objid, _roleid, _mode| Ok(0));

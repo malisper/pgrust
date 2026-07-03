@@ -267,6 +267,23 @@ fn node(out: &mut String, n: Node<'_>) {
         bool_field(out, "isall", d.isall);
         int_field(out, "location", d.location);
         out.push('}');
+    } else if let Some(d) = n.as_declare_cursor_stmt() {
+        out.push_str("{DECLARECURSORSTMT");
+        string_field(out, "portalname", d.portalname);
+        int_field(out, "options", d.options);
+        node_field(out, "query", d.query);
+        out.push('}');
+    } else if let Some(c) = n.as_close_portal_stmt() {
+        out.push_str("{CLOSEPORTALSTMT");
+        string_field(out, "portalname", c.portalname);
+        out.push('}');
+    } else if let Some(f) = n.as_fetch_stmt() {
+        out.push_str("{FETCHSTMT");
+        int_field(out, "direction", f.direction as i32);
+        out.push_str(&format!(" :howMany {}", f.howMany));
+        string_field(out, "portalname", f.portalname);
+        bool_field(out, "ismove", f.ismove);
+        out.push('}');
     } else if let Some(d) = n.as_drop_stmt() {
         out.push_str("{DROPSTMT");
         list_field(out, "objects", &d.objects);

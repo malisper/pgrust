@@ -1010,6 +1010,65 @@ fn simple_query_prepare_execute_deallocate_round_trip() {
     );
 }
 
+// Rows + completion tags pinned against live PG 18.3 (Homebrew) running the
+// identical script in one transaction. The FunctionScan cursor takes the
+// auto-SCROLL heuristic leg (ExecSupportsBackwardScan(FunctionScan) is true),
+// so FETCH BACKWARD works without SCROLL, exactly as C.
+#[test]
+fn simple_query_cursor_fetch_move_close_round_trip() {
+    install_generate_series_fixture();
+
+    let input: Vec<u8> = [
+        simple_query_msg("BEGIN"),
+        simple_query_msg("DECLARE c CURSOR FOR SELECT g FROM generate_series(1,10) g"),
+        simple_query_msg("FETCH 3 c"),
+        simple_query_msg("FETCH BACKWARD 2 c"),
+        simple_query_msg("MOVE 2 c"),
+        simple_query_msg("FETCH ALL c"),
+        simple_query_msg("CLOSE c"),
+        simple_query_msg("COMMIT"),
+        simple_query_msg("FETCH 1 c"),
+        msg(b'X', &[]),
+    ]
+    .concat();
+    let wire = run_session(input);
+    let all = frames(&wire);
+
+    let tags: Vec<&[u8]> =
+        all.iter().filter(|(t, _)| *t == b'C').map(|(_, b)| b.as_slice()).collect();
+    assert_eq!(
+        tags,
+        [
+            b"BEGIN\0".as_slice(),
+            b"DECLARE CURSOR\0",
+            b"FETCH 3\0",
+            b"FETCH 2\0",
+            b"MOVE 2\0",
+            b"FETCH 7\0",
+            b"CLOSE CURSOR\0",
+            b"COMMIT\0",
+        ],
+        "frame types: {:?}",
+        all.iter().map(|f| f.0 as char).collect::<Vec<_>>()
+    );
+
+    let rows: Vec<String> = all
+        .iter()
+        .filter(|(t, _)| *t == b'D')
+        .map(|(_, b)| datarow_cols(b).join(","))
+        .collect();
+    assert_eq!(rows, ["1", "2", "3", "2", "1", "4", "5", "6", "7", "8", "9", "10"]);
+
+    // FETCH after CLOSE+COMMIT: C's 34000 through the same wire path.
+    let errs: Vec<&Vec<u8>> = all.iter().filter(|(t, _)| *t == b'E').map(|(_, b)| b).collect();
+    assert_eq!(errs.len(), 1);
+    assert_eq!(error_field(errs[0], b'C').as_deref(), Some("34000"));
+    assert_eq!(
+        error_field(errs[0], b'M').as_deref(),
+        Some("cursor \"c\" does not exist")
+    );
+}
+
 #[test]
 fn explain_generate_series_matches_live_pg_shape() {
     install_generate_series_fixture();

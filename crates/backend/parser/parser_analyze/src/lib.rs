@@ -223,10 +223,12 @@ pub fn transformStmt<'mcx>(
         NodeTag::T_ExplainStmt => {
             transformExplainStmt(mcx, pstate, parse_tree)?
         }
+        NodeTag::T_DeclareCursorStmt => {
+            transformDeclareCursorStmt(mcx, pstate, parse_tree)?
+        }
         t @ (NodeTag::T_MergeStmt
         | NodeTag::T_ReturnStmt
         | NodeTag::T_PLAssignStmt
-        | NodeTag::T_DeclareCursorStmt
         | NodeTag::T_CreateTableAsStmt
         | NodeTag::T_CallStmt) => panic!(
             "transformStmt (analyze.c): transform arm for {t:?} unported — \
@@ -242,6 +244,79 @@ pub fn transformStmt<'mcx>(
 
     result.querySource = QuerySource::QSRC_ORIGINAL;
     result.canSetTag = true;
+    Ok(result)
+}
+
+fn transformDeclareCursorStmt<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    cursor_node: Node<'mcx>,
+) -> PgResult<Query<'mcx>> {
+    use types_error::{ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_CURSOR_DEFINITION};
+    use types_portal::{
+        CURSOR_OPT_ASENSITIVE, CURSOR_OPT_HOLD, CURSOR_OPT_INSENSITIVE, CURSOR_OPT_NO_SCROLL,
+        CURSOR_OPT_SCROLL,
+    };
+
+    let stmt = cursor_node.as_declare_cursor_stmt().unwrap();
+
+    if stmt.options & CURSOR_OPT_SCROLL != 0 && stmt.options & CURSOR_OPT_NO_SCROLL != 0 {
+        return Err(elog::ereport(types_error::ERROR)
+            .errcode(ERRCODE_INVALID_CURSOR_DEFINITION)
+            .errmsg("cannot specify both SCROLL and NO SCROLL")
+            .into_error()
+            .into());
+    }
+    if stmt.options & CURSOR_OPT_ASENSITIVE != 0 && stmt.options & CURSOR_OPT_INSENSITIVE != 0 {
+        return Err(elog::ereport(types_error::ERROR)
+            .errcode(ERRCODE_INVALID_CURSOR_DEFINITION)
+            .errmsg("cannot specify both ASENSITIVE and INSENSITIVE")
+            .into_error()
+            .into());
+    }
+
+    let inner = stmt.query.expect("DECLARE CURSOR has a query");
+    let query = transformStmt(mcx, pstate, inner)?;
+
+    if query.commandType != CmdType::CMD_SELECT {
+        return Err(elog::ereport(types_error::ERROR)
+            .errmsg_internal("unexpected non-SELECT command in DECLARE CURSOR")
+            .into_error()
+            .into());
+    }
+
+    if query.hasModifyingCTE {
+        return Err(elog::ereport(types_error::ERROR)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg("DECLARE CURSOR must not contain data-modifying statements in WITH")
+            .into_error()
+            .into());
+    }
+
+    // C's three FOR UPDATE conflict ereports (WITH HOLD / SCROLL /
+    // INSENSITIVE): rowMarks is always NIL today — transformLockingClause is
+    // a loud panic upstream — so a non-NIL list here is a missed wire-up.
+    if !query.rowMarks.is_nil() {
+        assert!(
+            stmt.options & (CURSOR_OPT_HOLD | CURSOR_OPT_SCROLL | CURSOR_OPT_INSENSITIVE) == 0,
+            "transformDeclareCursorStmt (analyze.c): FOR UPDATE conflict ereports need \
+             LCS_asString (LockingClause vocabulary) — unit backend-parser-analyze"
+        );
+    }
+
+    let query_node = Node::mk(mcx, query)?;
+    // SAFETY: raw tree owned by this analysis; no derived reference is live.
+    unsafe {
+        cursor_node
+            .with_mut::<types_nodes::parsenodes::DeclareCursorStmt, _>(|d| {
+                d.query = Some(query_node)
+            })
+            .expect("node built as DeclareCursorStmt");
+    }
+
+    let mut result = Query::default();
+    result.commandType = CmdType::CMD_UTILITY;
+    result.utilityStmt = Some(cursor_node);
     Ok(result)
 }
 

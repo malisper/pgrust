@@ -281,8 +281,13 @@ pub fn standard_planner<'mcx>(
     let best_path = get_cheapest_fractional_path(&run, final_rel, tuple_fraction);
     let top_plan = create_plan(&mut run, best_path)?;
 
-    if (cursor_options & CURSOR_OPT_SCROLL) != 0 {
-        panic!("materialize_finished_plan (createplan.c): scrollable cursor; M2 cursor lane");
+    if (cursor_options & CURSOR_OPT_SCROLL) != 0
+        && !execmain::exec_supports_backward_scan(Some(top_plan))
+    {
+        panic!(
+            "materialize_finished_plan (createplan.c): SCROLL cursor over a \
+             non-backward plan needs a Material wrapper; M2 cursor lane"
+        );
     }
     if run.glob.parallel_mode_needed {
         panic!("standard_planner (planner.c): debug_parallel_query Gather; M3 parallel lane");
