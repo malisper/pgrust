@@ -1686,6 +1686,13 @@ fn fix_scan_expr_mutator<'mcx>(
                 },
             )
         }
+        NodeTag::T_List => {
+            let mut out = NodeList::nil();
+            for cell in node.as_list().unwrap() {
+                out.lappend(mcx, fix_scan_expr_mutator(run, cell, rtoffset, num_exec)?)?;
+            }
+            Node::mk_list(mcx, out)
+        }
         other => panic!("fix_scan_expr_mutator (setrefs.c): {other:?}; M2 expression lane"),
     }
 }
