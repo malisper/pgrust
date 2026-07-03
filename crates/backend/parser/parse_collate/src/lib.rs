@@ -235,55 +235,11 @@ fn assign_collations_walker<'mcx>(
         tag @ (NodeTag::T_OpExpr
         | NodeTag::T_FuncExpr
         | NodeTag::T_RelabelType
-        | NodeTag::T_CoerceViaIO
-        | NodeTag::T_BoolExpr
-        | NodeTag::T_CaseExpr
-        | NodeTag::T_CoalesceExpr
-        | NodeTag::T_MinMaxExpr
         | NodeTag::T_Aggref
         | NodeTag::T_SubLink) => {
             match tag {
-                // C: never recurse into the CASE test expression — it was
-                // collation-marked in transformCaseExpr and doesn't affect
-                // the result; when-conditions are boolean, safe to recurse.
-                NodeTag::T_CaseExpr => {
-                    let c = node.as_case_expr().unwrap();
-                    for w in &c.args {
-                        let w = w.as_case_when().expect("CaseWhen");
-                        if let Some(expr) = w.expr {
-                            assign_collations_walker(expr, &mut loccontext)?;
-                        }
-                        if let Some(result) = w.result {
-                            assign_collations_walker(result, &mut loccontext)?;
-                        }
-                    }
-                    if let Some(defresult) = c.defresult {
-                        assign_collations_walker(defresult, &mut loccontext)?;
-                    }
-                }
-                NodeTag::T_CoalesceExpr => {
-                    for arg in &node.as_coalesce_expr().unwrap().args {
-                        assign_collations_walker(arg, &mut loccontext)?;
-                    }
-                }
-                NodeTag::T_MinMaxExpr => {
-                    for arg in &node.as_min_max_expr().unwrap().args {
-                        assign_collations_walker(arg, &mut loccontext)?;
-                    }
-                }
                 NodeTag::T_OpExpr => {
                     for arg in &node.as_op_expr().unwrap().args {
-                        assign_collations_walker(arg, &mut loccontext)?;
-                    }
-                }
-                NodeTag::T_CoerceViaIO => {
-                    assign_collations_walker(
-                        node.as_coerce_via_io().unwrap().arg,
-                        &mut loccontext,
-                    )?;
-                }
-                NodeTag::T_BoolExpr => {
-                    for arg in &node.as_bool_expr().unwrap().args {
                         assign_collations_walker(arg, &mut loccontext)?;
                     }
                 }
@@ -361,27 +317,6 @@ fn assign_collations_walker<'mcx>(
                         .unwrap(),
                     NodeTag::T_RelabelType => node
                         .with_mut::<types_nodes::RelabelType, _>(|r| r.resultcollid = set_coll)
-                        .unwrap(),
-                    NodeTag::T_CoerceViaIO => node
-                        .with_mut::<types_nodes::CoerceViaIO, _>(|c| c.resultcollid = set_coll)
-                        .unwrap(),
-                    // exprSetCollation(BoolExpr) is assert-only in C.
-                    NodeTag::T_BoolExpr => debug_assert!(!OidIsValid(set_coll)),
-                    NodeTag::T_CaseExpr => node
-                        .with_mut::<types_nodes::primnodes::CaseExpr, _>(|c| {
-                            c.casecollid = set_coll
-                        })
-                        .unwrap(),
-                    NodeTag::T_CoalesceExpr => node
-                        .with_mut::<types_nodes::primnodes::CoalesceExpr, _>(|c| {
-                            c.coalescecollid = set_coll
-                        })
-                        .unwrap(),
-                    NodeTag::T_MinMaxExpr => node
-                        .with_mut::<types_nodes::primnodes::MinMaxExpr, _>(|m| {
-                            m.minmaxcollid = set_coll;
-                            m.inputcollid = input_coll;
-                        })
                         .unwrap(),
                     NodeTag::T_Aggref => node
                         .with_mut::<types_nodes::primnodes::Aggref, _>(|a| {
