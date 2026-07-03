@@ -6,7 +6,7 @@
 
 use ::datum::Datum;
 use ::mcx::{Mcx, PgBox, PgVec};
-use ::types_nodes::{Node, NodeList};
+use ::types_nodes::NodeList;
 use ::types_core::{AttrNumber, Oid, INDEX_MAX_KEYS};
 use ::types_error::{PgError, PgResult, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE};
 use ::types_nbtree::genam::IndexUniqueCheck;
