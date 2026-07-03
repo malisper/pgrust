@@ -166,9 +166,10 @@ struct CmpCtx<'a> {
     mcx: ::mcx::Mcx<'a>,
     keys: &'a [SortSupport],
     only_key: bool,
-    // ApplySortAbbrevFullComparator identity when abbreviation is armed:
-    // tiebreaks re-compare the leading key's ORIGINALS with it.
-    abbrev_full: Option<SortComparator>,
+    // Armed abbreviation (tiebreaks re-compare leading-key ORIGINALS with its
+    // full_comparator). Borrow, not a resolved Option: ctx! runs per bounded
+    // put and the resolve cost 7 instr/put there (micro tsort_bound100_100k).
+    abbrev: &'a Option<Box<AbbrevState>>,
     variant: &'a SortVariant,
     unique_violation: &'a Cell<Option<Box<PgError>>>,
 }
@@ -240,7 +241,8 @@ impl CmpCtx<'_> {
     fn comparetup_tiebreak(&self, a: &SortTuple, b: &SortTuple) -> i32 {
         match self.variant {
             SortVariant::Heap { tup_desc } => {
-                if let Some(full) = self.abbrev_full {
+                if let Some(abbrev) = self.abbrev {
+                    let full = abbrev.full_comparator;
                     let key0 = &self.keys[0];
                     let attno = key0.ssup_attno as i32;
                     let (mut isnull1, mut isnull2) = (false, false);
@@ -277,10 +279,10 @@ impl CmpCtx<'_> {
                 }
                 0
             }
-            SortVariant::Datum { .. } => match self.abbrev_full {
+            SortVariant::Datum { .. } => match self.abbrev {
                 // datumCopy images parked in `tuple` are the originals.
-                Some(full) => ssup::apply_sort_comparator_as_in(
-                    full,
+                Some(abbrev) => ssup::apply_sort_comparator_as_in(
+                    abbrev.full_comparator,
                     self.mcx,
                     Datum::from_usize(a.tuple as usize),
                     a.isnull1,
@@ -294,7 +296,7 @@ impl CmpCtx<'_> {
             SortVariant::IndexHash { .. } => unreachable!("comparetup dispatches IndexHash whole"),
             // Index/cluster sorts never arm abbrev (index-build abbrev lane).
             SortVariant::Cluster { tup_desc, attnums, nkeys } => {
-                debug_assert!(self.abbrev_full.is_none());
+                debug_assert!(self.abbrev.is_none());
                 // comparetup_cluster_tiebreak, simple-column haveDatum1 lane;
                 // no TID tiebreak (C leaves equal keys in qsort order).
                 let (ta, tb) = unsafe {
@@ -325,7 +327,7 @@ impl CmpCtx<'_> {
     /// `comparetup_index_btree_tiebreak`, no abbrev arm. C divergence: the
     /// unique violation is deferred to performsort (no mid-qsort ereport).
     fn comparetup_index_btree_tiebreak(&self, a: &SortTuple, b: &SortTuple) -> i32 {
-        debug_assert!(self.abbrev_full.is_none());
+        debug_assert!(self.abbrev.is_none());
         let SortVariant::Index {
             tup_desc,
             nkeys,
@@ -393,7 +395,7 @@ macro_rules! ctx {
             mcx: $st.mcx,
             keys: &$st.sort_keys,
             only_key: $st.only_key,
-            abbrev_full: $st.abbrev.as_ref().map(|a| a.full_comparator),
+            abbrev: &$st.abbrev,
             variant: &$st.variant,
             unique_violation: &$st.unique_violation,
         }
