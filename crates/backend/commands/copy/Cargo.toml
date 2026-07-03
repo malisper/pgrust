@@ -32,6 +32,8 @@ wchar = { path = "../../../common/wchar" }
 snapmgr = { path = "../../utils/time/snapmgr" }
 table = { path = "../../access/table/table" }
 tableam = { path = "../../access/table/tableam" }
+tableam_vocab = { path = "../../access/table/tableam_vocab" }
+heapam = { path = "../../access/heap/heapam" }
 xact = { path = "../../access/transam/xact" }
 acl_seams = { path = "../../utils/adt/acl_seams" }
 aclchk_seams = { path = "../../catalog/aclchk_seams" }

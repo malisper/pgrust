@@ -1,7 +1,7 @@
-//! heapam_xlog.c — heap/heap2 rmgr redo. Live arms: XLOG_HEAP_INSERT and
-//! XLOG_HEAP_DELETE (the record types the write side emits and round-trip
-//! proves) plus the C no-op arms (TRUNCATE, HEAP2_NEW_CID). Everything else
-//! is a loud panic naming its op.
+//! heapam_xlog.c — heap/heap2 rmgr redo. Live arms: XLOG_HEAP_INSERT,
+//! XLOG_HEAP_DELETE, XLOG_HEAP2_MULTI_INSERT (the record types the write side
+//! emits and round-trip proves) plus the C no-op arms (TRUNCATE,
+//! HEAP2_NEW_CID). Everything else is a loud panic naming its op.
 
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
@@ -294,6 +294,127 @@ fn heap_xlog_insert(record: &mut XLogReaderState) -> PgResult<()> {
     Ok(())
 }
 
+fn heap_xlog_multi_insert(record: &mut XLogReaderState) -> PgResult<()> {
+    const SizeOfHeapMultiInsert: usize = 4;
+    const SizeOfMultiInsertTuple: usize = 7;
+
+    let lsn = record.EndRecPtr;
+    let xlrec = main_data(record).to_vec();
+    let flags = xlrec[0];
+    let ntuples = u16::from_ne_bytes(xlrec[2..4].try_into().unwrap()) as usize;
+
+    let (target_locator, _fork, blkno, _) = record
+        .block_tag_extended(0)
+        .expect("heap_xlog_multi_insert: no block 0");
+
+    debug_assert!(
+        !(flags & XLH_INSERT_ALL_VISIBLE_CLEARED != 0 && flags & XLH_INSERT_ALL_FROZEN_SET != 0)
+    );
+
+    if flags & XLH_INSERT_ALL_VISIBLE_CLEARED != 0 {
+        clear_vm_bits(target_locator, blkno)?;
+    }
+
+    let info = record.record.as_ref().unwrap().xl_info & !XLR_INFO_MASK;
+    let isinit = info & XLOG_HEAP_INIT_PAGE != 0;
+    let (action, buffer) = if isinit {
+        let buffer = XLogInitBufferForRedo(record, 0)?;
+        // SAFETY: pin + exclusive lock per the redo protocol (module contract).
+        let mut pm = unsafe { page_mut(buffer) };
+        pm.init(0);
+        (BLK_NEEDS_REDO, buffer)
+    } else {
+        XLogReadBufferForRedo(record, 0)?
+    };
+
+    let mut freespace = 0usize;
+    if action == BLK_NEEDS_REDO {
+        let blk = record.block(0);
+        debug_assert!(blk.has_data);
+        // SAFETY: block data points into the decode buffer, live for this arm.
+        let tupdata = unsafe { blk.data_bytes() }.to_vec();
+
+        // SAFETY: pin + exclusive lock per the redo protocol (module contract).
+        let mut pm = unsafe { page_mut(buffer) };
+
+        let mut off = 0usize;
+        for i in 0..ntuples {
+            let offnum = if isinit {
+                i as u16 + 1
+            } else {
+                u16::from_ne_bytes(
+                    xlrec[SizeOfHeapMultiInsert + 2 * i..SizeOfHeapMultiInsert + 2 * i + 2]
+                        .try_into()
+                        .unwrap(),
+                )
+            };
+            if pm.as_ref().max_offset_number() + 1 < offnum {
+                return Err(panic_err("invalid max offset number".into()));
+            }
+
+            // xl_multi_insert_tuple is SHORTALIGNed relative to the block
+            // data base (matches the writer's scratch-relative padding).
+            off = (off + 1) & !1;
+            let datalen =
+                u16::from_ne_bytes(tupdata[off..off + 2].try_into().unwrap()) as usize;
+            let xl_infomask2 = u16::from_ne_bytes(tupdata[off + 2..off + 4].try_into().unwrap());
+            let xl_infomask = u16::from_ne_bytes(tupdata[off + 4..off + 6].try_into().unwrap());
+            let xl_hoff = tupdata[off + 6];
+            off += SizeOfMultiInsertTuple;
+            debug_assert!(datalen <= MaxHeapTupleSize);
+
+            #[repr(align(8))]
+            struct TBuf([u8; MaxHeapTupleSize + SizeofHeapTupleHeader]);
+            let mut tbuf = TBuf([0u8; MaxHeapTupleSize + SizeofHeapTupleHeader]);
+            tbuf.0[SizeofHeapTupleHeader..SizeofHeapTupleHeader + datalen]
+                .copy_from_slice(&tupdata[off..off + datalen]);
+            off += datalen;
+            let tuple_len = SizeofHeapTupleHeader + datalen;
+            {
+                // SAFETY: 8-aligned zeroed buffer at least header-sized.
+                let htup = unsafe { &mut *(tbuf.0.as_mut_ptr().cast::<HeapTupleHeaderData>()) };
+                htup.t_infomask2 = xl_infomask2;
+                htup.t_infomask = xl_infomask;
+                htup.t_hoff = xl_hoff;
+                htup.set_xmin(record_xid(record));
+                htup.set_cmin(FirstCommandId);
+                htup.t_ctid = ItemPointerData::new(blkno, offnum);
+            }
+
+            if pm
+                .add_item(&tbuf.0[..tuple_len], offnum, PAI_OVERWRITE | PAI_IS_HEAP)
+                .is_none()
+            {
+                return Err(panic_err("failed to add tuple".into()));
+            }
+        }
+        if off != tupdata.len() {
+            return Err(panic_err("total tuple length mismatch".into()));
+        }
+
+        freespace = pm.as_ref().heap_free_space();
+
+        pm.set_lsn(lsn);
+
+        if flags & XLH_INSERT_ALL_VISIBLE_CLEARED != 0 {
+            pm.clear_all_visible();
+        }
+        if flags & XLH_INSERT_ALL_FROZEN_SET != 0 {
+            pm.set_all_visible();
+        }
+
+        bufmgr_seams::mark_buffer_dirty::call(buffer)?;
+    }
+    if buffer != InvalidBuffer {
+        unlock_release(buffer)?;
+    }
+
+    if action == BLK_NEEDS_REDO && freespace < BLCKSZ / 5 {
+        freespace::XLogRecordPageWithFreeSpace(target_locator, blkno, freespace)?;
+    }
+    Ok(())
+}
+
 fn heap_xlog_inplace(record: &mut XLogReaderState) -> PgResult<()> {
     let lsn = record.EndRecPtr;
     // xl_heap_inplace layout (heapam_xlog.h).
@@ -388,7 +509,7 @@ pub fn heap2_redo(record: &mut XLogReaderState) -> PgResult<()> {
             panic!("heap2_redo arm not ported: heap_xlog_prune_freeze")
         }
         XLOG_HEAP2_VISIBLE => panic!("heap2_redo arm not ported: heap_xlog_visible"),
-        XLOG_HEAP2_MULTI_INSERT => panic!("heap2_redo arm not ported: heap_xlog_multi_insert"),
+        XLOG_HEAP2_MULTI_INSERT => heap_xlog_multi_insert(record),
         XLOG_HEAP2_LOCK_UPDATED => panic!("heap2_redo arm not ported: heap_xlog_lock_updated"),
         // Logical decoding only; nothing to do on a real replay.
         XLOG_HEAP2_NEW_CID => Ok(()),

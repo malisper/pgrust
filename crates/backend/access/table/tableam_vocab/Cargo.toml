@@ -17,3 +17,4 @@ types_storage = { path = "../../../../_support/types/types_storage" }
 types_tuple = { path = "../../../../_support/types/types_tuple" }
 s_lock_seams = { path = "../../../storage/lmgr/s_lock_seams" }
 syncscan_seams = { path = "../../common/syncscan_seams" }
+bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }

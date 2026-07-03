@@ -1,7 +1,6 @@
-// copyfrom.c, text format from file, single-insert lane. C's default here is
-// CIM_MULTI (heap_multi_insert buffering); tableam::multi_insert is loud in
-// heapam, so this port runs the CIM_SINGLE shape — tracked as an M3 perf gap
-// in CATALOG.tsv, not a silent behavior change.
+// copyfrom.c, text format from file, CIM_MULTI lane (heap_multi_insert
+// buffering with a shared BulkInsertState, matching C's default insert method
+// and its bulk relation-extension page geometry).
 
 use elog::ereport;
 use mcx::{vec_from_elem_in, Mcx, MemoryContext, PgVec};
@@ -183,7 +182,13 @@ pub fn BeginCopyFrom<'mcx, 's>(
     })
 }
 
-/// `CopyFrom` (copyfrom.c): read rows, insert into the heap + indexes.
+// copyfrom.c MAX_BUFFERED_TUPLES / MAX_BUFFERED_BYTES.
+const MAX_BUFFERED_TUPLES: usize = 1000;
+const MAX_BUFFERED_BYTES: usize = 65535;
+
+/// `CopyFrom` (copyfrom.c): read rows, insert into the heap + indexes. Every
+/// CIM_SINGLE trigger in C (BEFORE/INSTEAD triggers, FDW, volatile defaults,
+/// volatile WHERE) is unported-loud upstream, so this is always CIM_MULTI.
 pub fn CopyFrom<'mcx>(
     mcx: Mcx<'mcx>,
     cstate: &mut CopyFromState<'mcx, '_>,
@@ -197,11 +202,21 @@ pub fn CopyFrom<'mcx>(
     let ti_options = 0;
 
     let mut index_state = execindexing::ExecOpenIndices(mcx, rel, false)?;
-    let mut slot = tableam::table_slot_create(mcx, rel)?;
+
+    // std Vec: SlotData owns droppy state via the arena-erased views; the
+    // slot pool itself is per-statement (CopyMultiInsertBuffer.slots).
+    let mut slots: Vec<types_slot::SlotData<'mcx>> = Vec::new();
+    let mut bistate = heapam::GetBulkInsertState();
+    let mut nused = 0usize;
+    let mut buffered_bytes = 0usize;
 
     let mut processed: u64 = 0;
     loop {
-        exectuples::exec_clear_tuple(&mut slot, mcx);
+        if nused == slots.len() {
+            slots.push(tableam::table_slot_create(mcx, rel)?);
+        }
+        let slot = &mut slots[nused];
+        exectuples::exec_clear_tuple(slot, mcx);
 
         // Input-function results and the materialized tuple land in the
         // statement mcx and are reclaimed at statement end (nodemodifytable
@@ -212,7 +227,7 @@ pub fn CopyFrom<'mcx>(
                 break;
             }
         }
-        exectuples::exec_store_virtual_tuple(&mut slot);
+        exectuples::exec_store_virtual_tuple(slot);
         slot.base_mut().tts_tableOid = rel.rd_id;
 
         if let Some(constr) = rel.rd_att.constr.as_deref() {
@@ -220,19 +235,65 @@ pub fn CopyFrom<'mcx>(
                 panic!("ExecConstraints (execMain.c): CHECK constraints not ported");
             }
             if constr.has_not_null {
-                not_null_constraints(rel, &mut slot)?;
+                not_null_constraints(rel, slot)?;
             }
         }
 
-        tableam::table_tuple_insert(mcx, rel, &mut slot, mycid, ti_options, None)?;
-
-        if index_state.num_indices() > 0 {
-            execindexing::ExecInsertIndexTuples(mcx, &mut index_state, rel, &mut slot)?;
-        }
+        exectuples::exec_materialize_slot(slot, mcx)?;
+        nused += 1;
+        buffered_bytes += cstate.line_buf.len();
         processed += 1;
+
+        if nused >= MAX_BUFFERED_TUPLES || buffered_bytes >= MAX_BUFFERED_BYTES {
+            flush_multi_insert(
+                mcx,
+                rel,
+                &mut slots[..nused],
+                mycid,
+                ti_options,
+                &mut bistate,
+                &mut index_state,
+            )?;
+            nused = 0;
+            buffered_bytes = 0;
+        }
     }
 
+    if nused > 0 {
+        flush_multi_insert(
+            mcx,
+            rel,
+            &mut slots[..nused],
+            mycid,
+            ti_options,
+            &mut bistate,
+            &mut index_state,
+        )?;
+    }
+
+    tableam::table_finish_bulk_insert(rel, ti_options)?;
     Ok(processed)
+}
+
+// CopyMultiInsertBufferFlush (copyfrom.c), single non-partitioned table.
+fn flush_multi_insert<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    slots: &mut [types_slot::SlotData<'mcx>],
+    mycid: types_core::CommandId,
+    ti_options: i32,
+    bistate: &mut tableam_vocab::BulkInsertStateData,
+    index_state: &mut execindexing::ResultRelIndexState<'mcx>,
+) -> PgResult<()> {
+    let mut refs: Vec<&mut types_slot::SlotData<'mcx>> = slots.iter_mut().collect();
+    tableam::table_multi_insert(mcx, rel, &mut refs, mycid, ti_options, Some(bistate))?;
+
+    if index_state.num_indices() > 0 {
+        for slot in refs {
+            execindexing::ExecInsertIndexTuples(mcx, index_state, rel, slot)?;
+        }
+    }
+    Ok(())
 }
 
 fn not_null_constraints<'mcx>(

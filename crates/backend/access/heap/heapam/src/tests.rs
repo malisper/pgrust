@@ -1160,7 +1160,7 @@ fn dml_row_too_big_is_54000() {
     let oid = fresh_oid();
     register_table(oid, vec![]);
     let rel = test_relation(mcx, oid);
-    let err = hio::RelationGetBufferForTuple(&rel, BLCKSZ, None, 0).unwrap_err();
+    let err = hio::RelationGetBufferForTuple(&rel, BLCKSZ, None, 0, None, 0).unwrap_err();
     assert_eq!(err.sqlstate(), ::types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED);
     quiesced();
 }

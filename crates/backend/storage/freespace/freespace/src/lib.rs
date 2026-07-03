@@ -510,6 +510,7 @@ pub fn init_seams() {
     freespace_seams::get_page_with_free_space::set(GetPageWithFreeSpace);
     freespace_seams::record_and_get_page_with_free_space::set(RecordAndGetPageWithFreeSpace);
     freespace_seams::record_page_with_free_space::set(RecordPageWithFreeSpace);
+    freespace_seams::free_space_map_vacuum_range::set(FreeSpaceMapVacuumRange);
 }
 
 #[cfg(test)]

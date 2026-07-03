@@ -1656,6 +1656,7 @@ dependencies = [
  "fd",
  "fmgr_core",
  "guc_tables",
+ "heapam",
  "libc",
  "lsyscache",
  "mbutils",
@@ -1667,6 +1668,7 @@ dependencies = [
  "stringinfo",
  "table",
  "tableam",
+ "tableam_vocab",
  "types_core",
  "types_error",
  "types_fmgr",
@@ -7081,6 +7083,7 @@ dependencies = [
 name = "tableam_vocab"
 version = "0.1.0"
 dependencies = [
+ "bufmgr_seams",
  "mcx",
  "s_lock_seams",
  "syncscan_seams",

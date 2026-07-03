@@ -44,8 +44,8 @@ pub mod fetch;
 pub mod hio;
 pub mod inplace;
 pub use fetch::{heap_fetch, heap_get_latest_tid, heap_hot_search_buffer};
-pub use dml::{heap_delete, heap_insert, heap_update, simple_heap_delete, simple_heap_insert, simple_heap_update};
-pub use hio::{RelationGetBufferForTuple, RelationPutHeapTuple};
+pub use dml::{heap_delete, heap_insert, heap_multi_insert, heap_update, simple_heap_delete, simple_heap_insert, simple_heap_update};
+pub use hio::{GetBulkInsertState, RelationGetBufferForTuple, RelationPutHeapTuple, ReleaseBulkInsertStatePin};
 pub use inplace::{heap_inplace_lock, heap_inplace_unlock, heap_inplace_update_and_unlock};
 #[cfg(test)]
 mod tests;
