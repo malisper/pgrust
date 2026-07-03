@@ -367,6 +367,10 @@ impl<'mcx> EStateData<'mcx> {
                 .expect("rtable cell is a RangeTblEntry");
             match rte.rtekind {
                 RTEKind::RTE_RELATION | RTEKind::RTE_RESULT => {}
+                // A pulled-up (dead) subquery RTE stays in the range table
+                // for its lock/ACL surface, as in C; a live subquery is the
+                // unported SubqueryScan lane.
+                RTEKind::RTE_SUBQUERY if rte.subquery.is_none() => {}
                 other => panic!(
                     "ExecInitRangeTable (execUtils.c): {other:?} lane not ported"
                 ),

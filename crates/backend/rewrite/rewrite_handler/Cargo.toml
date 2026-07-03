@@ -29,7 +29,6 @@ sinval_seams = { path = "../../storage/ipc/sinval_seams" }
 sync_seams = { path = "../../storage/sync/sync_seams" }
 adt_float = { path = "../../utils/adt/float" }
 adt_bool = { path = "../../utils/adt/bool" }
-adt_int = { path = "../../utils/adt/int" }
 guc = { path = "../../utils/misc/guc" }
 relcache_seams = { path = "../../utils/cache/relcache_seams" }
 aclchk_seams = { path = "../../catalog/aclchk_seams" }
@@ -119,6 +118,7 @@ varsup = { path = "../../access/transam/varsup" }
 waitevent_seams = { path = "../../utils/activity/waitevent_seams" }
 xact = { path = "../../access/transam/xact" }
 xact_seams = { path = "../../access/transam/xact_seams" }
+xlogutils = { path = "../../access/transam/xlogutils" }
 xloginsert = { path = "../../access/transam/xloginsert" }
 xloginsert_seams = { path = "../../access/transam/xloginsert_seams" }
 relation_seams = { path = "../../access/common/relation_seams" }

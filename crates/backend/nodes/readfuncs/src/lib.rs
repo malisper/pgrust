@@ -1,0 +1,624 @@
+//! read.c + readfuncs.c, minimal arm: exactly the node set a stored view
+//! SELECT rule (pg_rewrite ev_action) can contain; every other node label or
+//! token shape is a loud panic naming the C reader.
+
+#![allow(non_snake_case)]
+
+use datum::Datum;
+use mcx::Mcx;
+use types_core::Oid;
+use types_error::PgResult;
+use types_nodes::bitmapset::Bitmapset;
+use types_nodes::list::{IntList, NodeList, OidList};
+use types_nodes::nodes_enums::{CmdType, LimitOption};
+use types_nodes::parsenodes::{Query, QuerySource, RTEKind, RTEPermissionInfo, RangeTblEntry};
+use types_nodes::primnodes::{
+    Alias, Const, FromExpr, OverridingKind, RangeTblRef, TargetEntry, Var, VarReturningType,
+};
+use types_nodes::Node;
+
+#[cfg(test)]
+mod tests;
+
+pub fn stringToNode<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<Node<'mcx>> {
+    let mut r = Reader { mcx, buf: s.as_bytes(), pos: 0 };
+    let node = r.node_read().expect("stringToNode: empty input")?;
+    Ok(node.expect("stringToNode: <> input"))
+}
+
+struct Reader<'a, 'mcx> {
+    mcx: Mcx<'mcx>,
+    buf: &'a [u8],
+    pos: usize,
+}
+
+const SPECIALS: &[u8] = b"(){}";
+
+fn is_space(c: u8) -> bool {
+    c == b' ' || c == b'\n' || c == b'\t'
+}
+
+impl<'a, 'mcx> Reader<'a, 'mcx> {
+    // pg_strtok (read.c): "<>" comes back as an empty token (NULL marker).
+    fn next_token(&mut self) -> Option<&'a [u8]> {
+        while self.pos < self.buf.len() && is_space(self.buf[self.pos]) {
+            self.pos += 1;
+        }
+        if self.pos >= self.buf.len() {
+            return None;
+        }
+        let start = self.pos;
+        if SPECIALS.contains(&self.buf[self.pos]) {
+            self.pos += 1;
+            return Some(&self.buf[start..self.pos]);
+        }
+        while self.pos < self.buf.len() {
+            let c = self.buf[self.pos];
+            if is_space(c) || SPECIALS.contains(&c) {
+                break;
+            }
+            if c == b'\\' && self.pos + 1 < self.buf.len() {
+                self.pos += 2;
+            } else {
+                self.pos += 1;
+            }
+        }
+        let tok = &self.buf[start..self.pos];
+        if tok == b"<>" {
+            return Some(b"");
+        }
+        Some(tok)
+    }
+
+    fn token(&mut self, what: &str) -> &'a [u8] {
+        match self.next_token() {
+            Some(t) => t,
+            None => panic!("nodeRead (read.c): unterminated input reading {what}"),
+        }
+    }
+
+    fn expect(&mut self, lit: &str) {
+        let t = self.token(lit);
+        assert!(
+            t == lit.as_bytes(),
+            "pg_strtok (read.c): expected {lit:?}, got {:?}",
+            String::from_utf8_lossy(t)
+        );
+    }
+
+    fn label(&mut self, name: &str) {
+        let t = self.token(name);
+        assert!(
+            t.len() == name.len() + 1 && t[0] == b':' && &t[1..] == name.as_bytes(),
+            "readfuncs.c: expected field :{name}, got {:?}",
+            String::from_utf8_lossy(t)
+        );
+    }
+
+    // debackslash (read.c) into the arena.
+    fn arena_str(&self, tok: &[u8]) -> PgResult<&'mcx str> {
+        let mut v: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(self.mcx, tok.len())?;
+        let mut i = 0;
+        while i < tok.len() {
+            if tok[i] == b'\\' && i + 1 < tok.len() {
+                i += 1;
+            }
+            v.push(tok[i]);
+            i += 1;
+        }
+        let bytes = v.leak();
+        Ok(core::str::from_utf8(bytes).expect("non-UTF-8 node token"))
+    }
+
+    fn read_bool(&mut self, name: &str) -> bool {
+        self.label(name);
+        match self.token(name) {
+            b"true" => true,
+            b"false" => false,
+            t => panic!("READ_BOOL_FIELD: bad bool {:?}", String::from_utf8_lossy(t)),
+        }
+    }
+
+    fn parse_int(tok: &[u8]) -> i64 {
+        core::str::from_utf8(tok)
+            .ok()
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or_else(|| {
+                panic!("readfuncs.c: bad integer token {:?}", String::from_utf8_lossy(tok))
+            })
+    }
+
+    fn read_i32(&mut self, name: &str) -> i32 {
+        self.label(name);
+        Self::parse_int(self.token(name)) as i32
+    }
+
+    fn read_u32(&mut self, name: &str) -> u32 {
+        self.label(name);
+        Self::parse_int(self.token(name)) as u32
+    }
+
+    fn read_u64(&mut self, name: &str) -> u64 {
+        self.label(name);
+        Self::parse_int(self.token(name)) as u64
+    }
+
+    // READ_LOCATION_FIELD: consumed but restored to -1.
+    fn read_location(&mut self, name: &str) -> i32 {
+        self.label(name);
+        let _ = self.token(name);
+        -1
+    }
+
+    fn read_char(&mut self, name: &str) -> u8 {
+        self.label(name);
+        let t = self.token(name);
+        if t.is_empty() {
+            0
+        } else if t[0] == b'\\' && t.len() > 1 {
+            t[1]
+        } else {
+            t[0]
+        }
+    }
+
+    fn read_str(&mut self, name: &str) -> PgResult<Option<&'mcx str>> {
+        self.label(name);
+        let t = self.token(name);
+        if t.is_empty() {
+            return Ok(None);
+        }
+        if t == b"\"\"" {
+            return Ok(Some(""));
+        }
+        Ok(Some(self.arena_str(t)?))
+    }
+
+    fn read_node(&mut self, name: &str) -> PgResult<Option<Node<'mcx>>> {
+        self.label(name);
+        match self.node_read() {
+            None => panic!("nodeRead (read.c): unterminated input at :{name}"),
+            Some(n) => n,
+        }
+    }
+
+    fn read_node_list(&mut self, name: &str) -> PgResult<NodeList<'mcx>> {
+        self.label(name);
+        let t = self.token(name);
+        if t.is_empty() {
+            return Ok(NodeList::nil());
+        }
+        assert!(t == b"(", "readfuncs.c: field :{name} is not a node list");
+        let mut l = NodeList::nil();
+        loop {
+            let tok = self.token("list");
+            if tok == b")" {
+                return Ok(l);
+            }
+            let elem = self
+                .node_read_token(tok)?
+                .expect("nodeRead: <> is not a valid list element here");
+            l.lappend(self.mcx, elem)?;
+        }
+    }
+
+    fn read_oid_list(&mut self, name: &str) -> PgResult<OidList<'mcx>> {
+        self.label(name);
+        let t = self.token(name);
+        if t.is_empty() {
+            return Ok(OidList::nil());
+        }
+        assert!(t == b"(", "readfuncs.c: field :{name} is not an oid list");
+        self.expect("o");
+        let mut l = OidList::nil();
+        loop {
+            let tok = self.token("oid list");
+            if tok == b")" {
+                return Ok(l);
+            }
+            l.lappend(self.mcx, Self::parse_int(tok) as Oid)?;
+        }
+    }
+
+    fn read_bitmapset(&mut self, name: &str) -> PgResult<Bitmapset<'mcx>> {
+        self.label(name);
+        self.expect("(");
+        self.expect("b");
+        let mut bms = Bitmapset::empty();
+        loop {
+            let t = self.token("bitmapset");
+            if t == b")" {
+                return Ok(bms);
+            }
+            bms.add_member(self.mcx, Self::parse_int(t) as i32)?;
+        }
+    }
+
+    // nodeRead (read.c). None = end of input; Ok(None) = the "<>" token.
+    fn node_read(&mut self) -> Option<PgResult<Option<Node<'mcx>>>> {
+        let t = self.next_token()?;
+        Some(self.node_read_token(t))
+    }
+
+    fn node_read_token(&mut self, t: &'a [u8]) -> PgResult<Option<Node<'mcx>>> {
+        if t.is_empty() {
+            return Ok(None);
+        }
+        if t == b"{" {
+            let n = self.parse_node_string()?;
+            self.expect("}");
+            return Ok(Some(n));
+        }
+        if t == b"(" {
+            return Ok(Some(self.read_list_body()?));
+        }
+        // Value tokens (list elements): the SELECT-rule set only carries
+        // quoted strings (Alias colnames) and integers.
+        if t.len() >= 2 && t[0] == b'"' && t[t.len() - 1] == b'"' {
+            let s = self.arena_str(&t[1..t.len() - 1])?;
+            return Ok(Some(Node::mk_string(self.mcx, s)?));
+        }
+        if t[0].is_ascii_digit() || (t[0] == b'-' && t.len() > 1 && t[1].is_ascii_digit()) {
+            return Ok(Some(Node::mk_integer(self.mcx, Self::parse_int(t) as i32)?));
+        }
+        panic!(
+            "nodeRead (read.c): unhandled token {:?} (view SELECT-rule read set)",
+            String::from_utf8_lossy(t)
+        );
+    }
+
+    fn read_list_body(&mut self) -> PgResult<Node<'mcx>> {
+        let first = self.token("list");
+        match first {
+            b"i" => {
+                let mut l = IntList::nil();
+                loop {
+                    let t = self.token("int list");
+                    if t == b")" {
+                        return Node::mk_int_list(self.mcx, l);
+                    }
+                    l.lappend(self.mcx, Self::parse_int(t) as i32)?;
+                }
+            }
+            b"o" => {
+                let mut l = OidList::nil();
+                loop {
+                    let t = self.token("oid list");
+                    if t == b")" {
+                        return Node::mk_oid_list(self.mcx, l);
+                    }
+                    l.lappend(self.mcx, Self::parse_int(t) as Oid)?;
+                }
+            }
+            b"x" => panic!("nodeRead (read.c): xid list unported"),
+            _ => {}
+        }
+        let mut l = NodeList::nil();
+        let mut tok = first;
+        loop {
+            if tok == b")" {
+                return Node::mk_list(self.mcx, l);
+            }
+            let elem = self
+                .node_read_token(tok)?
+                .expect("nodeRead: <> is not a valid list element here");
+            l.lappend(self.mcx, elem)?;
+            tok = self.token("list");
+        }
+    }
+
+    fn parse_node_string(&mut self) -> PgResult<Node<'mcx>> {
+        let name = self.token("node label");
+        match name {
+            b"QUERY" => self.read_query(),
+            b"RANGETBLENTRY" => self.read_range_tbl_entry(),
+            b"RTEPERMISSIONINFO" => self.read_rte_permission_info(),
+            b"ALIAS" => self.read_alias(),
+            b"FROMEXPR" => self.read_from_expr(),
+            b"RANGETBLREF" => self.read_range_tbl_ref(),
+            b"TARGETENTRY" => self.read_target_entry(),
+            b"VAR" => self.read_var(),
+            b"CONST" => self.read_const(),
+            other => panic!(
+                "parseNodeString (readfuncs.c): {} read arm unported (view SELECT-rule set only)",
+                String::from_utf8_lossy(other)
+            ),
+        }
+    }
+
+    // _readQuery (readfuncs.funcs.c); queryId is read_write_ignore/read_as(0).
+    fn read_query(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let mut q = Node::build::<Query>(mcx)?;
+        q.commandType = cmd_type(self.read_u32("commandType"));
+        q.querySource = query_source(self.read_u32("querySource"));
+        q.queryId = 0;
+        q.canSetTag = self.read_bool("canSetTag");
+        q.utilityStmt = self.read_node("utilityStmt")?;
+        q.resultRelation = self.read_i32("resultRelation");
+        q.hasAggs = self.read_bool("hasAggs");
+        q.hasWindowFuncs = self.read_bool("hasWindowFuncs");
+        q.hasTargetSRFs = self.read_bool("hasTargetSRFs");
+        q.hasSubLinks = self.read_bool("hasSubLinks");
+        q.hasDistinctOn = self.read_bool("hasDistinctOn");
+        q.hasRecursive = self.read_bool("hasRecursive");
+        q.hasModifyingCTE = self.read_bool("hasModifyingCTE");
+        q.hasForUpdate = self.read_bool("hasForUpdate");
+        q.hasRowSecurity = self.read_bool("hasRowSecurity");
+        q.hasGroupRTE = self.read_bool("hasGroupRTE");
+        q.isReturn = self.read_bool("isReturn");
+        q.cteList = self.read_node_list("cteList")?;
+        q.rtable = self.read_node_list("rtable")?;
+        q.rteperminfos = self.read_node_list("rteperminfos")?;
+        q.jointree = match self.read_node("jointree")? {
+            None => None,
+            Some(n) => Some(n.as_from_expr().expect("jointree is a FromExpr")),
+        };
+        q.mergeActionList = self.read_node_list("mergeActionList")?;
+        q.mergeTargetRelation = self.read_i32("mergeTargetRelation");
+        q.mergeJoinCondition = self.read_node("mergeJoinCondition")?;
+        q.targetList = self.read_node_list("targetList")?;
+        q.r#override = overriding_kind(self.read_u32("override"));
+        q.onConflict = self.read_node("onConflict")?;
+        q.returningOldAlias = self.read_str("returningOldAlias")?;
+        q.returningNewAlias = self.read_str("returningNewAlias")?;
+        q.returningList = self.read_node_list("returningList")?;
+        q.groupClause = self.read_node_list("groupClause")?;
+        q.groupDistinct = self.read_bool("groupDistinct");
+        q.groupingSets = self.read_node_list("groupingSets")?;
+        q.havingQual = self.read_node("havingQual")?;
+        q.windowClause = self.read_node_list("windowClause")?;
+        q.distinctClause = self.read_node_list("distinctClause")?;
+        q.sortClause = self.read_node_list("sortClause")?;
+        q.limitOffset = self.read_node("limitOffset")?;
+        q.limitCount = self.read_node("limitCount")?;
+        q.limitOption = limit_option(self.read_u32("limitOption"));
+        q.rowMarks = self.read_node_list("rowMarks")?;
+        q.setOperations = self.read_node("setOperations")?;
+        q.constraintDeps = self.read_oid_list("constraintDeps")?;
+        q.withCheckOptions = self.read_node_list("withCheckOptions")?;
+        q.stmt_location = self.read_location("stmt_location");
+        q.stmt_len = self.read_location("stmt_len");
+        Ok(q.seal())
+    }
+
+    // _readRangeTblEntry (readfuncs.c, custom_read_write): common head,
+    // per-rtekind middle, common tail. Only the arms a stored view SELECT
+    // rule can contain are live.
+    fn read_range_tbl_entry(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let mut rte = Node::build::<RangeTblEntry>(mcx)?;
+        rte.alias = self.read_alias_ref("alias")?;
+        rte.eref = self.read_alias_ref("eref")?;
+        rte.rtekind = rte_kind(self.read_u32("rtekind"));
+        match rte.rtekind {
+            RTEKind::RTE_RELATION => {
+                rte.relid = self.read_u32("relid");
+                rte.inh = self.read_bool("inh");
+                rte.relkind = self.read_char("relkind");
+                rte.rellockmode = self.read_i32("rellockmode");
+                rte.perminfoindex = self.read_u32("perminfoindex");
+                rte.tablesample = self.read_node("tablesample")?;
+            }
+            RTEKind::RTE_SUBQUERY => {
+                rte.subquery = match self.read_node("subquery")? {
+                    None => None,
+                    Some(n) => Some(n.as_query().expect("subquery is a Query")),
+                };
+                rte.security_barrier = self.read_bool("security_barrier");
+                rte.relid = self.read_u32("relid");
+                rte.inh = self.read_bool("inh");
+                rte.relkind = self.read_char("relkind");
+                rte.rellockmode = self.read_i32("rellockmode");
+                rte.perminfoindex = self.read_u32("perminfoindex");
+            }
+            other => panic!(
+                "_readRangeTblEntry (readfuncs.c): {other:?} arm unported (view SELECT-rule set)"
+            ),
+        }
+        rte.lateral = self.read_bool("lateral");
+        rte.inFromCl = self.read_bool("inFromCl");
+        rte.securityQuals = self.read_node_list("securityQuals")?;
+        Ok(rte.seal())
+    }
+
+    fn read_alias_ref(&mut self, name: &str) -> PgResult<Option<&'mcx Alias<'mcx>>> {
+        match self.read_node(name)? {
+            None => Ok(None),
+            Some(n) => Ok(Some(n.as_alias().expect("Alias field"))),
+        }
+    }
+
+    fn read_rte_permission_info(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let mut p = Node::build::<RTEPermissionInfo>(mcx)?;
+        p.relid = self.read_u32("relid");
+        p.inh = self.read_bool("inh");
+        p.requiredPerms = self.read_u64("requiredPerms");
+        p.checkAsUser = self.read_u32("checkAsUser");
+        p.selectedCols = self.read_bitmapset("selectedCols")?;
+        p.insertedCols = self.read_bitmapset("insertedCols")?;
+        p.updatedCols = self.read_bitmapset("updatedCols")?;
+        Ok(p.seal())
+    }
+
+    fn read_alias(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let mut a = Node::build::<Alias>(mcx)?;
+        a.aliasname = self.read_str("aliasname")?;
+        a.colnames = self.read_node_list("colnames")?;
+        Ok(a.seal())
+    }
+
+    fn read_from_expr(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let mut f = Node::build::<FromExpr>(mcx)?;
+        f.fromlist = self.read_node_list("fromlist")?;
+        f.quals = self.read_node("quals")?;
+        Ok(f.seal())
+    }
+
+    fn read_range_tbl_ref(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let mut r = Node::build::<RangeTblRef>(mcx)?;
+        r.rtindex = self.read_i32("rtindex");
+        Ok(r.seal())
+    }
+
+    fn read_target_entry(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let expr = self.read_node("expr")?.expect("TargetEntry has an expr");
+        let te = TargetEntry {
+            expr,
+            resno: self.read_i32("resno") as i16,
+            resname: self.read_str("resname")?,
+            ressortgroupref: self.read_u32("ressortgroupref"),
+            resorigtbl: self.read_u32("resorigtbl"),
+            resorigcol: self.read_i32("resorigcol") as i16,
+            resjunk: self.read_bool("resjunk"),
+        };
+        Node::mk(mcx, te)
+    }
+
+    fn read_var(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let mut v = Node::build::<Var>(mcx)?;
+        v.varno = self.read_i32("varno");
+        v.varattno = self.read_i32("varattno") as i16;
+        v.vartype = self.read_u32("vartype");
+        v.vartypmod = self.read_i32("vartypmod");
+        v.varcollid = self.read_u32("varcollid");
+        v.varnullingrels = self.read_bitmapset("varnullingrels")?;
+        v.varlevelsup = self.read_u32("varlevelsup");
+        v.varreturningtype = var_returning_type(self.read_u32("varreturningtype"));
+        v.varnosyn = self.read_u32("varnosyn");
+        v.varattnosyn = self.read_i32("varattnosyn") as i16;
+        v.location = self.read_location("location");
+        Ok(v.seal())
+    }
+
+    // _readConst (readfuncs.c, handwritten): trailing constvalue via readDatum.
+    fn read_const(&mut self) -> PgResult<Node<'mcx>> {
+        let consttype = self.read_u32("consttype");
+        let consttypmod = self.read_i32("consttypmod");
+        let constcollid = self.read_u32("constcollid");
+        let constlen = self.read_i32("constlen");
+        let constbyval = self.read_bool("constbyval");
+        let constisnull = self.read_bool("constisnull");
+        let location = self.read_location("location");
+        self.label("constvalue");
+        let constvalue = if constisnull {
+            let t = self.token("constvalue");
+            assert!(t.is_empty(), "_readConst: null Const with a value");
+            Datum::from_usize(0)
+        } else {
+            self.read_datum(constbyval)?
+        };
+        Node::mk(
+            self.mcx,
+            Const {
+                consttype,
+                consttypmod,
+                constcollid,
+                constlen,
+                constvalue,
+                constisnull,
+                constbyval,
+                location,
+            },
+        )
+    }
+
+    // readDatum (readfuncs.c): "<len> [ <byte> ... ]"; byval always carries
+    // sizeof(Datum) byte tokens regardless of the leading length.
+    fn read_datum(&mut self, typbyval: bool) -> PgResult<Datum> {
+        let length = Self::parse_int(self.token("datum length")) as usize;
+        self.expect("[");
+        if typbyval {
+            assert!(length <= 8, "readDatum: byval length {length} too large");
+            let mut word = [0u8; 8];
+            for b in word.iter_mut() {
+                *b = Self::parse_int(self.token("datum byte")) as u8;
+            }
+            self.expect("]");
+            return Ok(Datum::from_u64(u64::from_le_bytes(word)));
+        }
+        if length == 0 {
+            self.expect("]");
+            return Ok(Datum::from_usize(0));
+        }
+        let mut v: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(self.mcx, length)?;
+        for _ in 0..length {
+            v.push(Self::parse_int(self.token("datum byte")) as u8);
+        }
+        self.expect("]");
+        Ok(Datum::from_usize(v.leak().as_ptr() as usize))
+    }
+}
+
+fn cmd_type(v: u32) -> CmdType {
+    match v {
+        0 => CmdType::CMD_UNKNOWN,
+        1 => CmdType::CMD_SELECT,
+        2 => CmdType::CMD_UPDATE,
+        3 => CmdType::CMD_INSERT,
+        4 => CmdType::CMD_DELETE,
+        5 => CmdType::CMD_MERGE,
+        6 => CmdType::CMD_UTILITY,
+        7 => CmdType::CMD_NOTHING,
+        other => panic!("readfuncs.c: bad CmdType {other}"),
+    }
+}
+
+fn query_source(v: u32) -> QuerySource {
+    match v {
+        0 => QuerySource::QSRC_ORIGINAL,
+        1 => QuerySource::QSRC_PARSER,
+        2 => QuerySource::QSRC_INSTEAD_RULE,
+        3 => QuerySource::QSRC_QUAL_INSTEAD_RULE,
+        4 => QuerySource::QSRC_NON_INSTEAD_RULE,
+        other => panic!("readfuncs.c: bad QuerySource {other}"),
+    }
+}
+
+fn rte_kind(v: u32) -> RTEKind {
+    match v {
+        0 => RTEKind::RTE_RELATION,
+        1 => RTEKind::RTE_SUBQUERY,
+        2 => RTEKind::RTE_JOIN,
+        3 => RTEKind::RTE_FUNCTION,
+        4 => RTEKind::RTE_TABLEFUNC,
+        5 => RTEKind::RTE_VALUES,
+        6 => RTEKind::RTE_CTE,
+        7 => RTEKind::RTE_NAMEDTUPLESTORE,
+        8 => RTEKind::RTE_RESULT,
+        9 => RTEKind::RTE_GROUP,
+        other => panic!("readfuncs.c: bad RTEKind {other}"),
+    }
+}
+
+fn overriding_kind(v: u32) -> OverridingKind {
+    match v {
+        0 => OverridingKind::OVERRIDING_NOT_SET,
+        1 => OverridingKind::OVERRIDING_USER_VALUE,
+        2 => OverridingKind::OVERRIDING_SYSTEM_VALUE,
+        other => panic!("readfuncs.c: bad OverridingKind {other}"),
+    }
+}
+
+fn limit_option(v: u32) -> LimitOption {
+    match v {
+        0 => LimitOption::LIMIT_OPTION_COUNT,
+        1 => LimitOption::LIMIT_OPTION_WITH_TIES,
+        other => panic!("readfuncs.c: bad LimitOption {other}"),
+    }
+}
+
+fn var_returning_type(v: u32) -> VarReturningType {
+    match v {
+        0 => VarReturningType::VAR_RETURNING_DEFAULT,
+        1 => VarReturningType::VAR_RETURNING_OLD,
+        2 => VarReturningType::VAR_RETURNING_NEW,
+        other => panic!("readfuncs.c: bad VarReturningType {other}"),
+    }
+}

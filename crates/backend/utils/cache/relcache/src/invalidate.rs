@@ -18,6 +18,7 @@ pub(crate) fn RelationInvalidateRelation(rel: &RelationData<'static>) {
     let _ = smgr::RelationCloseSmgr(rel);
     rel.rd_isvalid.set(false);
     *rel.rd_indexlist.borrow_mut() = None;
+    crate::rules::forget(rel.rd_id);
 }
 
 // RelationClearRelation: caller has verified refcount-zero, not nailed, and
@@ -268,6 +269,8 @@ pub fn RelationForgetRelation(rid: Oid) -> PgResult<()> {
 }
 
 pub fn RelationCacheInvalidateEntry(relationId: Oid) -> PgResult<()> {
+    // The rules side-cache can hold relids that never entered id_cache.
+    crate::rules::forget(relationId);
     let cached = with_state(|st| st.id_cache.contains_key(&relationId));
     if cached {
         with_state(|st| st.invals_received += 1);
@@ -289,6 +292,7 @@ pub fn RelationCacheInvalidateEntry(relationId: Oid) -> PgResult<()> {
 // before they reload the rest. Phase lists are transient per call, as in C.
 pub fn RelationCacheInvalidate(debug_discard: bool) -> PgResult<()> {
     relmapper_seams::relation_map_invalidate_all::call()?;
+    with_state(|st| st.rules_cache.clear());
 
     let snapshot: Vec<(Oid, Rc<RelationData<'static>>, bool)> = with_state(|st| {
         st.id_cache.iter().map(|(k, e)| (*k, Rc::clone(&e.rel), e.nailed)).collect()

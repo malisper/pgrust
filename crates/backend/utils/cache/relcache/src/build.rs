@@ -109,7 +109,7 @@ pub(crate) fn build_desc_data(target_rel_id: Oid) -> PgResult<Option<RelationDat
         let rd_att =
             relcache_build_seams::relation_build_tuple_desc::call(mcx, target_rel_id, &scanned.form)?;
 
-        let (rd_index, opcintype, opfamily, indoption, indcollation) = if matches!(
+        let (rd_index, opcintype, opfamily, indoption, indcollation, supportinfo) = if matches!(
             scanned.form.relkind,
             RELKIND_INDEX | RELKIND_PARTITIONED_INDEX
         ) {
@@ -118,9 +118,16 @@ pub(crate) fn build_desc_data(target_rel_id: Oid) -> PgResult<Option<RelationDat
                 target_rel_id,
                 &scanned.form,
             )?;
-            (Some(ii.index), ii.opcintype, ii.opfamily, ii.indoption, ii.indcollation)
+            (Some(ii.index), ii.opcintype, ii.opfamily, ii.indoption, ii.indcollation, ii.supportinfo)
         } else {
-            (None, PgVec::new_in(mcx), PgVec::new_in(mcx), PgVec::new_in(mcx), PgVec::new_in(mcx))
+            (
+                None,
+                PgVec::new_in(mcx),
+                PgVec::new_in(mcx),
+                PgVec::new_in(mcx),
+                PgVec::new_in(mcx),
+                Vec::new(),
+            )
         };
 
         // rules/triggers/RLS live with the nodexform unit (no rd_rules/
@@ -148,7 +155,7 @@ pub(crate) fn build_desc_data(target_rel_id: Oid) -> PgResult<Option<RelationDat
             rd_options: scanned.options,
             pgstat_enabled: Cell::new(false),
             rd_amcache: Default::default(),
-            rd_supportinfo: Default::default(),
+            rd_supportinfo: core::cell::RefCell::new(supportinfo),
             rd_indexlist: Default::default(),
         };
         RelationInitPhysicalAddr(&data)?;
