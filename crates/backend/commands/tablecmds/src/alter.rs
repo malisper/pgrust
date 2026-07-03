@@ -80,6 +80,12 @@ pub fn AlterTableGetLockLevel(cmds: &NodeList<'_>) -> LOCKMODE {
             | AlterTableType::AT_CookedColumnDefault => {
                 return AccessExclusiveLock;
             }
+            AlterTableType::AT_EnableRowSecurity
+            | AlterTableType::AT_DisableRowSecurity
+            | AlterTableType::AT_ForceRowSecurity
+            | AlterTableType::AT_NoForceRowSecurity => {
+                return AccessExclusiveLock;
+            }
             AlterTableType::AT_AddConstraint
             | AlterTableType::AT_EnableRule
             | AlterTableType::AT_EnableAlwaysRule
@@ -295,6 +301,10 @@ fn ATPrepCmd<'mcx>(
         | AlterTableType::AT_EnableAlwaysRule
         | AlterTableType::AT_EnableReplicaRule
         | AlterTableType::AT_DisableRule => AT_PASS_MISC,
+        AlterTableType::AT_EnableRowSecurity
+        | AlterTableType::AT_DisableRowSecurity
+        | AlterTableType::AT_ForceRowSecurity
+        | AlterTableType::AT_NoForceRowSecurity => AT_PASS_MISC,
         other => unported(&format!("ATPrepCmd {other:?}")),
     };
     tab.subcmds[pass].lappend(mcx, cnode)?;
@@ -375,6 +385,18 @@ fn ATRewriteCatalogs<'mcx>(
                         cmd.name.expect("DISABLE RULE has a name"),
                         b'D',
                     )?;
+                }
+                AlterTableType::AT_EnableRowSecurity => {
+                    ATExecSetRowSecurity(mcx, &rel, true)?;
+                }
+                AlterTableType::AT_DisableRowSecurity => {
+                    ATExecSetRowSecurity(mcx, &rel, false)?;
+                }
+                AlterTableType::AT_ForceRowSecurity => {
+                    ATExecForceNoForceRowSecurity(mcx, &rel, true)?;
+                }
+                AlterTableType::AT_NoForceRowSecurity => {
+                    ATExecForceNoForceRowSecurity(mcx, &rel, false)?;
                 }
                 other => unported(&format!("ATExecCmd {other:?}")),
             }
@@ -1618,4 +1640,54 @@ pub(crate) fn find_inheritance_children_exist<'mcx>(mcx: Mcx<'mcx>, relid: Oid) 
     genam::systable_endscan(mcx, scan)?;
     rel.close(types_rel::AccessShareLock)?;
     Ok(found)
+}
+
+const Anum_pg_class_relrowsecurity: usize = 24;
+const Anum_pg_class_relforcerowsecurity: usize = 25;
+
+fn set_pg_class_bool<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    attnum: usize,
+    value: bool,
+) -> PgResult<()> {
+    let pg_class = table::table_open(mcx, RELATION_RELATION_ID, RowExclusiveLock)?;
+    let key = oid_scankey(1, rel.rd_id);
+    let mut scan =
+        genam::systable_beginscan(mcx, &pg_class, catalog::ClassOidIndexId, true, None, &[key])?;
+    let reltup = genam::systable_getnext(mcx, &mut scan)?
+        .unwrap_or_else(|| panic!("cache lookup failed for relation {}", rel.rd_id));
+    let natts = pg_class.descr().natts as usize;
+    let mut repl_values: PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
+    let mut repl_isnull: PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+    let mut repl: PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+    repl_values.resize(natts, Datum::null());
+    repl_isnull.resize(natts, false);
+    repl.resize(natts, false);
+    repl_values[attnum - 1] = Datum::from_bool(value);
+    repl[attnum - 1] = true;
+    let mut newtup = heaptuple::heap_modify_tuple(
+        mcx,
+        reltup,
+        pg_class.descr(),
+        &repl_values,
+        &repl_isnull,
+        &repl,
+    )?;
+    let otid = reltup.t_self;
+    genam::systable_endscan(mcx, scan)?;
+    catalog_indexing::CatalogTupleUpdate(mcx, &pg_class, &otid, &mut newtup)?;
+    pg_class.close(RowExclusiveLock)
+}
+
+fn ATExecSetRowSecurity<'mcx>(mcx: Mcx<'mcx>, rel: &Relation<'mcx>, rls: bool) -> PgResult<()> {
+    set_pg_class_bool(mcx, rel, Anum_pg_class_relrowsecurity, rls)
+}
+
+fn ATExecForceNoForceRowSecurity<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    force_rls: bool,
+) -> PgResult<()> {
+    set_pg_class_bool(mcx, rel, Anum_pg_class_relforcerowsecurity, force_rls)
 }

@@ -28,6 +28,8 @@ pub fn init_all() {
     xlogutils::init_seams();
     twophase_config::init_seams();
     aclchk::init_seams();
+    rls::init_seams();
+    commands_policy::init_seams();
     catalog_namespace::init_seams();
     catalog_dependency::init_seams();
     tablecmds::init_seams();
@@ -157,6 +159,7 @@ pub fn init_all() {
     elog::init_seams();
     fmgr_core::init_seams();
     fmgr_core::register_late_builtins(adt_acl::builtins::ACL_BUILTINS);
+    fmgr_core::register_late_builtins(rls::RLS_BUILTINS);
     fmgr_core::register_late_builtins(adt_misc::MISC_BUILTINS);
     fmgr_core::register_late_builtins(dbcommands::builtins::DBCOMMANDS_BUILTINS);
     fmgr_core::register_late_builtins(adt_rowtypes::ROWTYPES_BUILTINS);

@@ -8,6 +8,7 @@ pub mod invalidate;
 pub mod local;
 pub mod indexattr;
 pub mod statextlist;
+pub mod rowsecurity;
 pub mod rules;
 pub mod schemapg;
 pub mod store;
@@ -34,6 +35,7 @@ pub use invalidate::{
     AtEOSubXact_RelationCache, AtEOXact_RelationCache, RelationCacheInvalidate,
     RelationCacheInvalidateEntry, RelationForgetRelation,
 };
+pub use rowsecurity::RelationGetRowSecurityDesc;
 pub use rules::RelationGetRules;
 pub use store::RelationIdGetRelation;
 
@@ -59,6 +61,7 @@ pub(crate) struct RelcacheState {
     pub(crate) mcx: Mcx<'static>,
     pub(crate) id_cache: PgHashMap<'static, Oid, RelCacheEnt>,
     pub(crate) rules_cache: PgHashMap<'static, Oid, std::rc::Rc<rules::RdRules>>,
+    pub(crate) policies_cache: PgHashMap<'static, Oid, std::rc::Rc<rowsecurity::RdRowSecurity>>,
     pub(crate) indexattr_cache:
         PgHashMap<'static, Oid, std::rc::Rc<relcache_seams::IndexAttrBitmaps>>,
     pub(crate) statext_cache: PgHashMap<'static, Oid, std::rc::Rc<[Oid]>>,
@@ -87,6 +90,7 @@ pub(crate) fn with_state<R>(f: impl FnOnce(&mut RelcacheState) -> R) -> R {
                 mcx,
                 id_cache: PgHashMap::with_capacity_in(INITRELCACHESIZE, mcx),
                 rules_cache: PgHashMap::new_in(mcx),
+                policies_cache: PgHashMap::new_in(mcx),
                 indexattr_cache: PgHashMap::new_in(mcx),
                 statext_cache: PgHashMap::new_in(mcx),
                 in_progress: PgVec::new_in(mcx),

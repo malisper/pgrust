@@ -67,7 +67,7 @@ fn warn(msg: String, sqlstate: types_error::SqlState) -> PgResult<()> {
 }
 
 // get_rolespec_oid (acl.c).
-fn get_rolespec_oid(role: &RoleSpec<'_>, missing_ok: bool) -> PgResult<Oid> {
+pub fn get_rolespec_oid(role: &RoleSpec<'_>, missing_ok: bool) -> PgResult<Oid> {
     use RoleSpecType::*;
     match role.roletype {
         ROLESPEC_CSTRING => {

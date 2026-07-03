@@ -12,7 +12,7 @@ use crate::node_tree::{BitString, Boolean, Float, Integer, Node, String};
 use crate::parsenodes::{
     CommonTableExpr, DeallocateStmt, DefElem, ExecuteStmt, ExplainStmt, FetchStmt, PrepareStmt,
     GroupingSet, Query, RTEPermissionInfo, RangeTblEntry, TransactionStmt, VariableSetStmt, VariableShowStmt,
-    WithClause,
+    WithCheckOption, WithClause,
 };
 use crate::primnodes::{
     Aggref, Alias, ArrayExpr, BoolExpr, BooleanTest, CoerceViaIO, CollateExpr, Const,
@@ -74,6 +74,7 @@ pub fn equal(a: Node<'_>, b: Node<'_>) -> bool {
         NodeTag::T_Query => cmp!(as_query),
         NodeTag::T_RangeTblEntry => cmp!(as_range_tbl_entry),
         NodeTag::T_WithClause => cmp!(as_with_clause),
+        NodeTag::T_WithCheckOption => cmp!(as_with_check_option),
         NodeTag::T_CommonTableExpr => cmp!(as_common_table_expr),
         NodeTag::T_RTEPermissionInfo => cmp!(as_rte_permission_info),
         NodeTag::T_SortGroupClause => {
@@ -569,6 +570,16 @@ impl NodeEqual for RangeTblEntry<'_> {
             && self.lateral == b.lateral
             && self.inFromCl == b.inFromCl
             && self.securityQuals.node_equal(&b.securityQuals)
+    }
+}
+
+impl NodeEqual for WithCheckOption<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.kind == b.kind
+            && self.relname == b.relname
+            && self.polname == b.polname
+            && equal_opt(self.qual, b.qual)
+            && self.cascaded == b.cascaded
     }
 }
 

@@ -430,6 +430,29 @@ fn dispatch_switch<'mcx>(
             discard::DiscardCommand(parsetree.as_discard_stmt().unwrap(), is_top_level)?;
         }
 
+        T_CreatePolicyStmt => {
+            let stmt = parsetree.as_create_policy_stmt().unwrap();
+            // Retention contract as unify_stmt_lifetime.
+            let stmt = unsafe {
+                core::mem::transmute::<
+                    &types_nodes::parsenodes::CreatePolicyStmt<'_>,
+                    &types_nodes::parsenodes::CreatePolicyStmt<'mcx>,
+                >(stmt)
+            };
+            commands_policy::CreatePolicy(mcx, stmt)?;
+        }
+        T_AlterPolicyStmt => {
+            let stmt = parsetree.as_alter_policy_stmt().unwrap();
+            // Retention contract as unify_stmt_lifetime.
+            let stmt = unsafe {
+                core::mem::transmute::<
+                    &types_nodes::parsenodes::AlterPolicyStmt<'_>,
+                    &types_nodes::parsenodes::AlterPolicyStmt<'mcx>,
+                >(stmt)
+            };
+            commands_policy::AlterPolicy(mcx, stmt)?;
+        }
+
         T_CreateEventTrigStmt => handler_gap("CreateEventTrigger (event_trigger lane)"),
         T_AlterEventTrigStmt => handler_gap("AlterEventTrigger (event_trigger lane)"),
 
@@ -490,6 +513,7 @@ fn dispatch_switch<'mcx>(
                 OBJECT_INDEX | OBJECT_TABLE | OBJECT_SEQUENCE | OBJECT_VIEW | OBJECT_MATVIEW
                 | OBJECT_FOREIGN_TABLE => tablecmds::RemoveRelations(mcx, stmt)?,
                 OBJECT_RULE => dropcmds::RemoveObjects(mcx, stmt)?,
+                OBJECT_POLICY => commands_policy::RemovePolicyObjects(mcx, stmt)?,
                 _ => handler_gap("RemoveObjects (dropcmds lane)"),
             }
         }
@@ -602,6 +626,16 @@ fn dispatch_switch<'mcx>(
                 }
                 types_nodes::parsenodes::ObjectType::OBJECT_COLUMN => {
                     tablecmds::renameatt(mcx, stmt)?;
+                }
+                types_nodes::parsenodes::ObjectType::OBJECT_POLICY => {
+                    // Retention contract as unify_stmt_lifetime.
+                    let stmt = unsafe {
+                        core::mem::transmute::<
+                            &types_nodes::parsenodes::RenameStmt<'_>,
+                            &types_nodes::parsenodes::RenameStmt<'mcx>,
+                        >(stmt)
+                    };
+                    commands_policy::rename_policy(mcx, stmt)?;
                 }
                 other => panic!("unported: ExecRenameStmt {other:?}"),
             }

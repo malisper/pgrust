@@ -1,5 +1,5 @@
-// getObjectDescription (objectaddress.c), pg_class arm only; every other
-// object class is loud.
+// getObjectDescription (objectaddress.c), pg_class + pg_policy arms only;
+// every other object class is loud.
 use mcx::Mcx;
 use pg_depend::ObjectAddress;
 use types_core::{AttrNumber, Oid, RELATION_RELATION_ID};
@@ -36,8 +36,46 @@ pub fn getObjectDescription<'mcx>(
                 Ok(Some(format!("column {attname} of {rel}")))
             }
         }
+        3256 => {
+            let (polname, polrelid) = policy_name_rel(mcx, object.objectId)?;
+            let rel = getRelationDescription(mcx, polrelid)?;
+            Ok(Some(format!("policy {polname} on {rel}")))
+        }
         other => panic!("unported: objectaddress.c getObjectDescription class {other}"),
     }
+}
+
+// getObjectDescription's PolicyRelationId arm (objectaddress.c): polname +
+// polrelid off the pg_policy row.
+fn policy_name_rel<'mcx>(mcx: Mcx<'mcx>, policy_id: Oid) -> PgResult<(String, Oid)> {
+    const POLICY_RELATION_ID: Oid = 3256;
+    const POLICY_OID_INDEX_ID: Oid = 3257;
+    let rel = table::table_open(mcx, POLICY_RELATION_ID, types_rel::AccessShareLock)?;
+    let keys = [crate::oid_key(1, policy_id)];
+    let mut scan =
+        genam::systable_beginscan(mcx, &rel, POLICY_OID_INDEX_ID, true, None, &keys)?;
+    let Some(tup) = genam::systable_getnext(mcx, &mut scan)? else {
+        return Err(Box::new(PgError::error(format!(
+            "could not find tuple for policy {policy_id}"
+        ))));
+    };
+    let td = rel.descr();
+    let mut isnull = false;
+    // SAFETY: pg_policy row read under its relation's descriptor.
+    let (name_d, relid_d) = unsafe {
+        (
+            types_tuple::heap_getattr(tup, 2, td, &mut isnull),
+            types_tuple::heap_getattr(tup, 3, td, &mut isnull),
+        )
+    };
+    // SAFETY: a non-null pg_policy name column is a 64-byte NameData image.
+    let bytes = unsafe { core::slice::from_raw_parts(name_d.as_usize() as *const u8, 64) };
+    let len = bytes.iter().position(|&b| b == 0).unwrap_or(64);
+    let polname = String::from_utf8_lossy(&bytes[..len]).into_owned();
+    let polrelid = relid_d.as_oid();
+    genam::systable_endscan(mcx, scan)?;
+    rel.close(types_rel::AccessShareLock)?;
+    Ok((polname, polrelid))
 }
 
 fn getRelationDescription<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<String> {

@@ -348,6 +348,24 @@ pub fn deleteDependencyRecordsFor<'mcx>(
     Ok(count)
 }
 
+pub const SHARED_DEPENDENCY_POLICY: u8 = b'r';
+
+// Pinned referenced objects record nothing (C skips them); an unpinned role
+// would need a real pg_shdepend row → loud (CREATE ROLE lane).
+pub fn recordSharedDependencyOn(
+    depender: &ObjectAddress,
+    referenced: &ObjectAddress,
+    deptype: u8,
+) {
+    if !catalog::IsPinnedObject(referenced.classId, referenced.objectId) {
+        panic!(
+            "recordSharedDependencyOn (pg_shdepend.c): pg_shdepend recording unported              (depender class {} object {} → class {} object {} deptype {})",
+            depender.classId, depender.objectId, referenced.classId, referenced.objectId,
+            deptype as char
+        );
+    }
+}
+
 // A pinned owner records nothing; pg_shdepend writes unported → loud.
 pub fn recordDependencyOnOwner(classId: Oid, objectId: Oid, owner: Oid) {
     if !catalog::IsPinnedObject(types_core::AUTH_ID_RELATION_ID, owner) {

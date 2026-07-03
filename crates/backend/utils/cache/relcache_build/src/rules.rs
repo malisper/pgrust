@@ -18,7 +18,7 @@ const Anum_pg_rewrite_ev_action: i32 = 8;
 
 // Detoast a text attr datum (in-tuple varlena) into an mcx str; ev_action is
 // routinely pglz-compressed inline for system views.
-fn text_attr<'mcx>(
+pub(crate) fn text_attr<'mcx>(
     mcx: Mcx<'mcx>,
     td: &TupleDescData<'_>,
     tup: &HeapTupleData<'_>,

@@ -912,6 +912,44 @@ pub struct RoleSpec<'mcx> {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[repr(u32)]
+pub enum WCOKind {
+    #[default]
+    WCO_VIEW_CHECK = 0,
+    WCO_RLS_INSERT_CHECK = 1,
+    WCO_RLS_UPDATE_CHECK = 2,
+    WCO_RLS_CONFLICT_CHECK = 3,
+    WCO_RLS_MERGE_UPDATE_CHECK = 4,
+    WCO_RLS_MERGE_DELETE_CHECK = 5,
+}
+
+pub struct WithCheckOption<'mcx> {
+    pub kind: WCOKind,
+    pub relname: Option<&'mcx str>,
+    pub polname: Option<&'mcx str>,
+    pub qual: Option<Node<'mcx>>,
+    pub cascaded: bool,
+}
+
+pub struct CreatePolicyStmt<'mcx> {
+    pub policy_name: Option<&'mcx str>,
+    pub table: Option<&'mcx crate::primnodes::RangeVar<'mcx>>,
+    pub cmd_name: Option<&'mcx str>,
+    pub permissive: bool,
+    pub roles: NodeList<'mcx>,
+    pub qual: Option<Node<'mcx>>,
+    pub with_check: Option<Node<'mcx>>,
+}
+
+pub struct AlterPolicyStmt<'mcx> {
+    pub policy_name: Option<&'mcx str>,
+    pub table: Option<&'mcx crate::primnodes::RangeVar<'mcx>>,
+    pub roles: NodeList<'mcx>,
+    pub qual: Option<Node<'mcx>>,
+    pub with_check: Option<Node<'mcx>>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u32)]
 pub enum GrantTargetType {
     #[default]
     ACL_TARGET_OBJECT = 0,
@@ -1123,6 +1161,15 @@ unsafe impl<'mcx> NodeVariant<'mcx> for VacuumRelation<'mcx> {
 unsafe impl NodeVariant<'_> for RowMarkClause {
     const TAG: NodeTag = NodeTag::T_RowMarkClause;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for WithCheckOption<'mcx> {
+    const TAG: NodeTag = NodeTag::T_WithCheckOption;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for CreatePolicyStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CreatePolicyStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for AlterPolicyStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_AlterPolicyStmt;
+}
 
 impl<'mcx> Node<'mcx> {
     #[inline]
@@ -1231,6 +1278,21 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_role_spec(self) -> Option<&'mcx RoleSpec<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_with_check_option(self) -> Option<&'mcx WithCheckOption<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_create_policy_stmt(self) -> Option<&'mcx CreatePolicyStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_alter_policy_stmt(self) -> Option<&'mcx AlterPolicyStmt<'mcx>> {
         self.as_variant()
     }
 

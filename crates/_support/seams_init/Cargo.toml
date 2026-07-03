@@ -36,6 +36,8 @@ xlogreader = { path = "../../backend/access/transam/xlogreader" }
 xlogrecovery = { path = "../../backend/access/transam/xlogrecovery" }
 xlogutils = { path = "../../backend/access/transam/xlogutils" }
 aclchk = { path = "../../backend/catalog/aclchk" }
+rls = { path = "../../backend/utils/misc/rls" }
+commands_policy = { path = "../../backend/commands/policy" }
 catalog_namespace = { path = "../../backend/catalog/catalog_namespace" }
 catalog_dependency = { path = "../../backend/catalog/catalog_dependency" }
 commands_cluster = { path = "../../backend/commands/cluster" }

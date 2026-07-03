@@ -76,6 +76,25 @@ seam_core::seam!(
     ) -> PgResult<PgVec<'mcx, PgRewriteRuleShape<'mcx>>>
 );
 
+// One pg_policy row (RelationBuildRowSecurity's scan, policy.c); the quals are
+// detoasted nodeToString texts, roles the decoded polroles oid[] elements.
+pub struct PgPolicyShape<'mcx> {
+    pub polname: &'mcx str,
+    pub polcmd: u8,
+    pub polpermissive: bool,
+    pub polroles: PgVec<'mcx, Oid>,
+    pub polqual: Option<&'mcx str>,
+    pub polwithcheck: Option<&'mcx str>,
+}
+
+seam_core::seam!(
+    // pg_policy scan over PolicyPolrelidPolnameIndexId (polname order, as C).
+    pub fn scan_pg_policy<'mcx>(
+        mcx: Mcx<'mcx>,
+        polrelid: Oid,
+    ) -> PgResult<PgVec<'mcx, PgPolicyShape<'mcx>>>
+);
+
 pub struct PgIndexListShape {
     pub indexrelid: Oid,
     pub indislive: bool,
