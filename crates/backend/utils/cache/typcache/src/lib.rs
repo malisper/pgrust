@@ -1,6 +1,7 @@
 #![allow(non_snake_case)]
 
 pub mod domain;
+mod enum_cmp;
 mod invalidate;
 #[cfg(test)]
 mod tests;
@@ -25,6 +26,7 @@ pub use domain::{
     DomConstraintType, DomainConstraintCache, DomainConstraintRef, DomainConstraintState,
     DomainHasConstraints,
 };
+pub use enum_cmp::compare_values_of_enum;
 pub use invalidate::{AtEOSubXact_TypeCache, AtEOXact_TypeCache};
 
 // typcache.h
@@ -142,6 +144,7 @@ pub struct TypeCacheEntry {
     flags: Cell<i32>,
     ready: Cell<i32>,
     next_domain: Cell<Oid>,
+    enum_data: RefCell<Option<enum_cmp::EnumData>>,
 }
 
 impl core::fmt::Debug for TypeCacheEntry {
@@ -203,6 +206,7 @@ impl TypeCacheEntry {
             flags: Cell::new(0),
             ready: Cell::new(0),
             next_domain: Cell::new(InvalidOid),
+            enum_data: RefCell::new(None),
         }
     }
 
@@ -962,6 +966,7 @@ pub(crate) fn compute_ready(e: &TypeCacheEntry) -> i32 {
 
 pub fn init_seams() {
     typcache_seams::domain_has_constraints::set(domain::DomainHasConstraints);
+    enum_cmp::install_seam();
     typcache_seams::at_eoxact_type_cache::set(AtEOXact_TypeCache);
     typcache_seams::at_eosubxact_type_cache::set(AtEOSubXact_TypeCache);
     typcache_seams::assign_record_type_typmod::set(assign_record_type_typmod);

@@ -53,3 +53,9 @@ seam_core::seam!(
     // with execexpr; adt_domains sits under fmgr_core and calls through here).
     pub fn domain_check_input(value: datum::Datum, isnull: bool, domain_type: Oid) -> PgResult<()>
 );
+
+seam_core::seam!(
+    // compare_values_of_enum (typcache.c) keyed by the enum type OID — the
+    // enum.c odd-OID comparison fallback consumer.
+    pub fn compare_values_of_enum(type_id: Oid, arg1: Oid, arg2: Oid) -> PgResult<i32>
+);
