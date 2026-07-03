@@ -19,6 +19,7 @@ use ::types_core::instrument::MemoizeInstrumentation;
 use ::types_core::Oid;
 use ::types_error::{PgError, PgResult};
 use ::types_nodes::plannodes::Memoize;
+use ::types_nodes::primnodes::ParamKind;
 use ::types_slot::{SlotData, TupleSlotKind, EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK};
 use ::types_tuple::{varatt, MinimalTupleData, TupleDescData};
 
@@ -69,6 +70,11 @@ struct CacheEntry {
     lru_next: u32,
 }
 
+enum KeyExpr<'mcx> {
+    Param(u32),
+    Expr(PgBox<'mcx, ExprState<'mcx>>),
+}
+
 pub trait MemoizeChild<'mcx> {
     fn exec_proc(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<Option<ExecSlotId>>;
 }
@@ -82,7 +88,7 @@ pub struct MemoizeState<'mcx> {
     nkeys: usize,
     tableslot: SlotData<'mcx>,
     probeslot: SlotData<'mcx>,
-    param_exprs: PgVec<'mcx, PgBox<'mcx, ExprState<'mcx>>>,
+    param_exprs: PgVec<'mcx, KeyExpr<'mcx>>,
     hash_expr: Option<PgBox<'mcx, ExprState<'mcx>>>,
     eq_expr: Option<PgBox<'mcx, ExprState<'mcx>>>,
     key_attrs: PgVec<'mcx, KeyAttr>,
@@ -151,11 +157,17 @@ pub fn exec_init_memoize<'mcx>(
 
     let params = estate.param_bind();
     // Droppy elements: released in exec_end_memoize (windowagg argstates
-    // precedent), so the no-drop vec ctors don't apply.
-    let mut param_exprs: PgVec<'mcx, PgBox<'mcx, ExprState<'mcx>>> = PgVec::new_in(mcx);
+    // precedent), so the no-drop vec ctors don't apply. Bare PARAM_EXEC keys
+    // (the common shape replace_nestloop_params produces) read the param
+    // slot directly instead of an interpreter round trip per probe.
+    let mut param_exprs: PgVec<'mcx, KeyExpr<'mcx>> = PgVec::new_in(mcx);
     for expr in &node.param_exprs {
-        param_exprs
-            .push(execexpr::exec_init_expr(mcx, Some(expr), params)?.expect("cache key expr"));
+        match expr.as_param().filter(|p| p.paramkind == ParamKind::PARAM_EXEC) {
+            Some(p) => param_exprs.push(KeyExpr::Param(p.paramid as u32)),
+            None => param_exprs.push(KeyExpr::Expr(
+                execexpr::exec_init_expr(mcx, Some(expr), params)?.expect("cache key expr"),
+            )),
+        }
     }
 
     let mut key_attrs: PgVec<'mcx, KeyAttr> = ::mcx::vec_with_capacity_in(mcx, nkeys)?;
@@ -381,16 +393,26 @@ fn prepare_probe_slot<'mcx>(
     node: &mut MemoizeState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
-    let per_tuple = estate.ecxt(node.ps_ExprContext).per_tuple_mcx();
     exectuples::exec_clear_tuple(&mut node.probeslot, estate.es_query_cxt);
-    for (i, expr) in node.param_exprs.iter_mut().enumerate() {
-        // SAFETY: the per-tuple context outlives this eval (reset-only).
-        unsafe { expr.arm_result_mcx_raw(per_tuple) };
-        let mut slots = EvalSlots { scan: None, inner: None, outer: None };
-        let r = exec_eval_expr(expr, &mut slots)?;
+    for i in 0..node.param_exprs.len() {
+        let (value, isnull) = match &mut node.param_exprs[i] {
+            KeyExpr::Param(pid) => {
+                let prm = &estate.es_param_exec_vals[*pid as usize];
+                debug_assert!(!prm.exec_plan, "nestloop params are never pending");
+                (prm.value, prm.isnull)
+            }
+            KeyExpr::Expr(expr) => {
+                let per_tuple = estate.ecxt(node.ps_ExprContext).per_tuple_mcx();
+                // SAFETY: the per-tuple context outlives this eval (reset-only).
+                unsafe { expr.arm_result_mcx_raw(per_tuple) };
+                let mut slots = EvalSlots { scan: None, inner: None, outer: None };
+                let r = exec_eval_expr(expr, &mut slots)?;
+                (r.value, r.isnull)
+            }
+        };
         let base = node.probeslot.base_mut();
-        base.tts_values[i] = r.value;
-        base.tts_isnull[i] = r.isnull;
+        base.tts_values[i] = value;
+        base.tts_isnull[i] = isnull;
     }
     exectuples::exec_store_virtual_tuple(&mut node.probeslot);
     Ok(())
@@ -859,7 +881,9 @@ pub fn exec_end_memoize(node: &mut MemoizeState<'_>) {
     cache_free_all(node);
     node.hashtab = hashbrown::HashTable::new();
     for e in node.param_exprs.iter_mut() {
-        e.release_frames();
+        if let KeyExpr::Expr(e) = e {
+            e.release_frames();
+        }
     }
     if let Some(e) = node.hash_expr.as_mut() {
         e.release_frames();
