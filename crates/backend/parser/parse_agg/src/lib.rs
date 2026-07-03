@@ -408,6 +408,22 @@ fn check_agg_arguments_walker<'mcx>(
             }
             Ok(())
         }
+        NodeTag::T_SubscriptingRef => {
+            let sr = node.as_subscripting_ref().unwrap();
+            for e in sr.refupperindexpr.iter().flatten() {
+                check_agg_arguments_walker(pstate, e, ctx)?;
+            }
+            for e in sr.reflowerindexpr.iter().flatten() {
+                check_agg_arguments_walker(pstate, e, ctx)?;
+            }
+            if let Some(e) = sr.refexpr {
+                check_agg_arguments_walker(pstate, e, ctx)?;
+            }
+            if let Some(e) = sr.refassgnexpr {
+                check_agg_arguments_walker(pstate, e, ctx)?;
+            }
+            Ok(())
+        }
         NodeTag::T_CoerceViaIO => {
             check_agg_arguments_walker(pstate, node.as_coerce_via_io().unwrap().arg, ctx)
         }

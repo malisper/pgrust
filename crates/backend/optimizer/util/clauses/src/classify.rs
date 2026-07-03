@@ -342,9 +342,16 @@ impl<'mcx> NodeWalker<'mcx> for ContainNonstrict {
                     return Ok(true);
                 }
             }
-            t @ (NodeTag::T_SubscriptingRef
-            | NodeTag::T_CoerceViaIO
-            | NodeTag::T_ArrayCoerceExpr) => {
+            NodeTag::T_SubscriptingRef => {
+                // C: subscripting assignment is nonstrict; fetch is strict
+                // only per typsubscript — conservatively nonstrict unless the
+                // closed array handler (fetch_strict = true).
+                let sr = node.as_subscripting_ref().unwrap();
+                if sr.refassgnexpr.is_some() {
+                    return Ok(true);
+                }
+            }
+            t @ (NodeTag::T_CoerceViaIO | NodeTag::T_ArrayCoerceExpr) => {
                 deferred("contain_nonstrict_functions_walker", t)
             }
             _ => {}
@@ -433,8 +440,10 @@ impl<'mcx> NodeWalker<'mcx> for ContainLeakedVars {
                     return Ok(true);
                 }
             }
-            t @ (NodeTag::T_SubscriptingRef
-            | NodeTag::T_RowCompareExpr
+            // C: SubscriptingRef fetch is leakproof for the array handler;
+            // assignment (store) is not, but stores never reach quals.
+            NodeTag::T_SubscriptingRef => {}
+            t @ (NodeTag::T_RowCompareExpr
             | NodeTag::T_MinMaxExpr) => deferred("contain_leaked_vars_walker", t),
             NodeTag::T_CurrentOfExpr => return Ok(false),
             // Unrecognized node: assume it might be leaky (C default arm).

@@ -10,6 +10,8 @@ path = "src/lib.rs"
 
 [dependencies]
 coerce = { path = "../coerce" }
+datum = { path = "../../../_support/types/datum" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
 elog = { path = "../../utils/error/elog" }
 format_type = { path = "../../utils/adt/format_type" }
 mbutils = { path = "../../utils/mb/mbutils" }
