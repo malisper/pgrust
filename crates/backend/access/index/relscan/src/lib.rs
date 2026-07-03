@@ -91,8 +91,7 @@ impl IndexAmKind {
 #[cold]
 #[inline(never)]
 fn unported_index_am(relam: Oid) -> ! {
-    panic!("unported: index AM {relam} (IndexAmKind covers btree+gin)")
-    panic!("unported: index AM {relam} (IndexAmKind covers btree+hash+gist)")
+    panic!("unported: index AM {relam} (IndexAmKind covers btree+hash+gin+gist)")
 }
 
 pub enum IndexScanOpaque<'mcx> {
