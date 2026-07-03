@@ -8421,6 +8421,7 @@ dependencies = [
  "relmapper",
  "shmem",
  "snapbuild_seams",
+ "standby_seams",
  "startup_seams",
  "subtrans_seams",
  "sync_seams",
