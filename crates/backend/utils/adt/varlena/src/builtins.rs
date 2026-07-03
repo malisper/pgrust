@@ -467,6 +467,13 @@ fc_unported! {
     fc_bttextsortsupport: "bttextsortsupport", "abbreviated-key SortSupport unported (sort lane)";
 }
 
+pub fn fc_unistr(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog arg 0 is a non-null text varlena (strict fn).
+    let a = unsafe { fcinfo.arg_varlena_packed(0)? };
+    let mcx = fcinfo.result_mcx();
+    Ok(varlena_result(crate::unistr(mcx, a.data())?))
+}
+
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin {
         foid,
@@ -558,6 +565,7 @@ pub const VARLENA_BUILTINS: &[FmgrBuiltin] = &[
     n(6299, "string_agg_combine", 2, fc_string_agg_combine),
     b(6300, "string_agg_serialize", 1, fc_string_agg_serialize),
     b(6301, "string_agg_deserialize", 2, fc_string_agg_deserialize),
+    b(6198, "unistr", 1, fc_unistr),
     b(6393, "bytea_larger", 2, fc_bytea_larger),
     b(6394, "bytea_smaller", 2, fc_bytea_smaller),
 ];

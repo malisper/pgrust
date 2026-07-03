@@ -362,6 +362,7 @@ members = [
     "crates/backend/utils/adt/mac",
     "crates/backend/utils/adt/mac8",
     "crates/backend/utils/adt/pg_lsn",
+    "crates/backend/utils/adt/dbsize",
     "crates/backend/utils/adt/uuid",
     "crates/backend/utils/adt/network",
     "crates/backend/utils/adt/regproc",

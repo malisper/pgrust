@@ -752,3 +752,24 @@ mod string_agg_fns {
         let _ = fc_string_agg_combine(None, &mut fcinfo);
     }
 }
+
+// unistr rows diffed vs live C 18.3 (psql, 2026-07-03); server encoding UTF8.
+#[test]
+fn unistr_rows() {
+    mbutils::SetDatabaseEncoding(wchar::PG_UTF8).unwrap();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let u = |s: &str| {
+        crate::unistr(mcx, s.as_bytes()).map(|v| String::from_utf8_lossy(v.data()).into_owned())
+    };
+    assert_eq!(u(r"d\0061t\+000061 \\ A \U0001F603").unwrap(), "data \\ A \u{1F603}");
+    assert_eq!(u(r"perl \0441\043B\043E\043D").unwrap(), "perl слон");
+    assert_eq!(u(r"\D83D\DE03").unwrap(), "\u{1F603}");
+    assert_eq!(u("plain").unwrap(), "plain");
+    assert_eq!(u(r"\D83D").unwrap_err().to_string(), "invalid Unicode surrogate pair");
+    assert_eq!(u(r"\DE03\D83D").unwrap_err().to_string(), "invalid Unicode surrogate pair");
+    assert_eq!(u(r"\D83Dx").unwrap_err().to_string(), "invalid Unicode surrogate pair");
+    assert_eq!(u(r"\xyz").unwrap_err().to_string(), "invalid Unicode escape");
+    assert_eq!(u(r"\+00D800").unwrap_err().to_string(), "invalid Unicode surrogate pair");
+    assert_eq!(u(r"\0000").unwrap_err().to_string(), "invalid Unicode code point: 0000");
+}

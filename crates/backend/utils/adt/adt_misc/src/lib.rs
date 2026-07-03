@@ -159,11 +159,78 @@ pub fn fc_pg_input_error_info(
     Ok(d)
 }
 
+
+// C `count_nulls` (misc.c); false = SQL NULL result (VARIADIC NULL array).
+fn count_nulls(
+    flinfo: Option<&FmgrInfo>,
+    fcinfo: &Fcinfo,
+) -> PgResult<Option<(i32, i32)>> {
+    if funcapi::get_fn_expr_variadic(flinfo) {
+        if fcinfo.argisnull(0) {
+            return Ok(None);
+        }
+        let mcx = fcinfo.result_mcx();
+        // SAFETY: arg 0 is a non-null array (varlena) datum.
+        let p = unsafe { fcinfo.arg_ptr(0) };
+        let total = arrayfuncs::foundation::varsize_any(p);
+        // SAFETY: a live varlena of `total` bytes.
+        let raw = unsafe { core::slice::from_raw_parts(p, total) };
+        let arr = detoast_seams::detoast_attr::call(mcx, raw)?;
+        let (ndim, dims, _lbs) = arrayfuncs::foundation::read_dims_lbounds(&arr);
+        let nitems = arrayutils::array_get_n_items(ndim, &dims[..ndim.max(0) as usize])?;
+        let mut count = 0;
+        if let Some(off) = arrayfuncs::foundation::arr_nullbitmap_off(&arr) {
+            let bitmap = &arr[off..];
+            for i in 0..nitems as usize {
+                if bitmap[i / 8] & (1 << (i % 8)) == 0 {
+                    count += 1;
+                }
+            }
+        }
+        Ok(Some((nitems, count)))
+    } else {
+        let nargs = fcinfo.nargs();
+        let mut count = 0;
+        for i in 0..nargs {
+            if fcinfo.argisnull(i) {
+                count += 1;
+            }
+        }
+        Ok(Some((nargs as i32, count)))
+    }
+}
+
+pub fn fc_pg_num_nulls(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    match count_nulls(flinfo.as_deref(), fcinfo)? {
+        Some((_nargs, nulls)) => Ok(Datum::from_i32(nulls)),
+        None => Ok(fcinfo.return_null()),
+    }
+}
+
+pub fn fc_pg_num_nonnulls(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    match count_nulls(flinfo.as_deref(), fcinfo)? {
+        Some((nargs, nulls)) => Ok(Datum::from_i32(nargs - nulls)),
+        None => Ok(fcinfo.return_null()),
+    }
+}
+
+pub fn fc_pg_typeof(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let _ = fcinfo;
+    Ok(Datum::from_oid(funcapi::get_fn_expr_argtype(flinfo.as_deref(), 0)))
+}
+
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin { foid, name, nargs, strict: true, retset: false, func }
 }
 
+const fn bn(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
+    FmgrBuiltin { foid, name, nargs, strict: false, retset: false, func }
+}
+
 pub const MISC_BUILTINS: &[FmgrBuiltin] = &[
+    bn(438, "pg_num_nulls", 1, fc_pg_num_nulls),
+    bn(440, "pg_num_nonnulls", 1, fc_pg_num_nonnulls),
+    b(1619, "pg_typeof", 1, fc_pg_typeof),
     b(6210, "pg_input_is_valid", 2, fc_pg_input_is_valid),
     b(6211, "pg_input_error_info", 2, fc_pg_input_error_info),
 ];

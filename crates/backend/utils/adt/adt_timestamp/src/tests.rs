@@ -728,3 +728,51 @@ fn interval_part_and_trunc_match_c() {
     assert!(err.detail.as_deref() == Some("Months usually have fractional weeks."), "{err:?}");
     assert_eq!(interval_trunc(b"day", &Interval::NOEND).unwrap(), Interval::NOEND);
 }
+
+// date_bin rows diffed vs live C 18.3 (psql, 2026-07-03).
+#[test]
+fn date_bin_rows() {
+    use crate::interval::{interval_in, timestamp_bin};
+    gmt_session();
+    let iv = |s: &str| interval_in(s, -1, None).unwrap();
+    let bin = |st: &str, ts: &str, org: &str| {
+        ts_out(timestamp_bin(&iv(st), ts_in(ts), ts_in(org)).unwrap())
+    };
+    assert_eq!(
+        bin("15 minutes", "2020-02-11 15:44:17", "2001-01-01"),
+        "2020-02-11 15:30:00"
+    );
+    assert_eq!(
+        bin("1 day", "2020-02-11 15:44:17", "2001-01-01 01:00:00"),
+        "2020-02-11 01:00:00"
+    );
+    assert_eq!(bin("5 min", "1999-12-31 23:59:59", "2000-01-01"), "1999-12-31 23:55:00");
+    assert_eq!(
+        timestamp_bin(&iv("2 hours"), ts_in("infinity"), ts_in("2001-01-01")).unwrap(),
+        DT_NOEND
+    );
+    assert_eq!(
+        timestamp_bin(&iv("0 min"), ts_in("2020-01-01"), ts_in("2001-01-01"))
+            .unwrap_err()
+            .to_string(),
+        "stride must be greater than zero"
+    );
+    assert_eq!(
+        timestamp_bin(&iv("1 month"), ts_in("2020-01-01"), ts_in("2001-01-01"))
+            .unwrap_err()
+            .to_string(),
+        "timestamps cannot be binned into intervals containing months or years"
+    );
+    assert_eq!(
+        timestamp_bin(&iv("2 hours"), ts_in("2020-01-01"), ts_in("infinity"))
+            .unwrap_err()
+            .to_string(),
+        "origin out of range"
+    );
+    assert_eq!(
+        timestamp_bin(&Interval::NOEND, ts_in("2020-01-01"), ts_in("2001-01-01"))
+            .unwrap_err()
+            .to_string(),
+        "timestamps cannot be binned into infinite intervals"
+    );
+}
