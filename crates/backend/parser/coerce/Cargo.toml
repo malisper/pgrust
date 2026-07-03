@@ -10,6 +10,9 @@ path = "src/lib.rs"
 
 [dependencies]
 datum = { path = "../../../_support/types/datum" }
+detoast = { path = "../../access/common/detoast" }
+elog = { path = "../../utils/error/elog" }
+format_type = { path = "../../utils/adt/format_type" }
 fmgr = { package = "types_fmgr", path = "../../../_support/types/fmgr" }
 fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
 lsyscache = { path = "../../utils/cache/lsyscache" }

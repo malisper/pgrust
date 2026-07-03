@@ -27,21 +27,39 @@ fn install_fixture() {
             }))
         });
         syscache_seams::pg_type_io_shape::set(|typid| {
-            Ok((typid == TEXTOID).then_some(syscache_seams::PgTypeIoShape {
-                oid: TEXTOID,
-                typinput: 46,
-                typoutput: 47,
-                typreceive: 2414,
-                typsend: 2415,
-                typmodin: InvalidOid,
-                typmodout: InvalidOid,
-                typelem: InvalidOid,
-                typlen: -1,
-                typbyval: false,
-                typalign: b'i' as i8,
-                typdelim: b',' as i8,
-                typisdefined: true,
-            }))
+            Ok(match typid {
+                TEXTOID => Some(syscache_seams::PgTypeIoShape {
+                    oid: TEXTOID,
+                    typinput: 46,
+                    typoutput: 47,
+                    typreceive: 2414,
+                    typsend: 2415,
+                    typmodin: InvalidOid,
+                    typmodout: InvalidOid,
+                    typelem: InvalidOid,
+                    typlen: -1,
+                    typbyval: false,
+                    typalign: b'i' as i8,
+                    typdelim: b',' as i8,
+                    typisdefined: true,
+                }),
+                INT4OID => Some(syscache_seams::PgTypeIoShape {
+                    oid: INT4OID,
+                    typinput: 42,
+                    typoutput: 43,
+                    typreceive: 2406,
+                    typsend: 2407,
+                    typmodin: InvalidOid,
+                    typmodout: InvalidOid,
+                    typelem: InvalidOid,
+                    typlen: 4,
+                    typbyval: true,
+                    typalign: b'i' as i8,
+                    typdelim: b',' as i8,
+                    typisdefined: true,
+                }),
+                _ => None,
+            })
         });
         syscache_seams::lookup_pg_type_shape::set(|typid| {
             Ok(Some(types_tuple::PgTypeShape {
@@ -142,6 +160,82 @@ fn null_unknown_const_coerces_without_calling_input() {
     let c = out.as_const().unwrap();
     assert_eq!((c.consttype, c.constisnull), (TEXTOID, true));
     assert_eq!(c.constvalue, datum::Datum::null());
+}
+
+#[test]
+fn unknown_const_coercion_error_carries_cursor_position() {
+    install_fixture();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+    pstate.p_sourcetext = Some(b"SELECT 'notanint'::int4");
+
+    let mut buf: mcx::PgVec<'_, u8> = mcx::vec_with_capacity_in(mcx, 9).unwrap();
+    mcx::vec_append_bytes(&mut buf, b"notanint\0").unwrap();
+    let d = datum::Datum::from_usize(buf.leak().as_ptr() as usize);
+    let node = Node::mk(
+        mcx,
+        types_nodes::Const {
+            consttype: UNKNOWNOID,
+            consttypmod: -1,
+            constcollid: InvalidOid,
+            constlen: -2,
+            constvalue: d,
+            constisnull: false,
+            constbyval: false,
+            location: 7,
+        },
+    )
+    .unwrap();
+
+    let err = coerce_type(
+        mcx,
+        &pstate,
+        node,
+        UNKNOWNOID,
+        INT4OID,
+        -1,
+        COERCION_IMPLICIT,
+        CoercionForm::COERCE_IMPLICIT_CAST,
+        17,
+    )
+    .unwrap_err();
+
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_INVALID_TEXT_REPRESENTATION);
+    // C: setup_parser_errposition_callback(con->location=7) -> char pos 8.
+    assert_eq!(err.cursor_position(), Some(8));
+}
+
+#[test]
+fn own_datum_flattens_short_varlena() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut short = [0u8; 4];
+    // SAFETY: local buffer, len 4 <= VARATT_SHORT_MAX.
+    unsafe { types_tuple::varatt::set_varsize_short(short.as_mut_ptr(), 4) };
+    short[1] = b'h';
+    short[2] = b'i';
+    short[3] = b'!';
+    let d = datum::Datum::from_usize(short.as_ptr() as usize);
+
+    let out = crate::own_datum(mcx, d, -1, false).unwrap();
+    // SAFETY: own_datum returned a flat varlena owned by mcx.
+    let v = unsafe { datum::varlena::VarlenaRef::from_ptr(out.as_usize() as *const u8) };
+    assert_eq!(v.data(), b"hi!");
+    // SAFETY: header byte of the returned varlena.
+    assert!(unsafe { types_tuple::varatt::varatt_is_4b_u(out.as_usize() as *const u8) });
+}
+
+#[test]
+#[should_panic(expected = "expanded-object TOAST pointer")]
+fn own_datum_rejects_expanded_datum() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut img = [0u8; 10];
+    img[0] = if cfg!(target_endian = "little") { 0x01 } else { 0x80 };
+    img[1] = types_tuple::varatt::VARTAG_EXPANDED_RO;
+    let d = datum::Datum::from_usize(img.as_ptr() as usize);
+    let _ = crate::own_datum(mcx, d, -1, false);
 }
 
 #[test]

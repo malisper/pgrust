@@ -352,7 +352,7 @@ mod from_where {
     use types_error::{PgResult, ERRCODE_UNDEFINED_TABLE};
     use types_nodes::nodes_enums::CmdType;
     use types_nodes::parsenodes::ACL_SELECT;
-    use types_nodes::{Node, RTEKind};
+    use types_nodes::RTEKind;
     use types_rel::{
         AccessShareLock, FormData_pg_class, LockInfoData, LockRelId, Relation, RelationData,
         LOCKMODE, RELKIND_RELATION, REPLICA_IDENTITY_DEFAULT,

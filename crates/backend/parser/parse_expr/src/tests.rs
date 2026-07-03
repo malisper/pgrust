@@ -133,6 +133,36 @@ fn a_expr_op_transforms_to_op_expr() {
     assert_eq!(op.args.nth(0).as_const().unwrap().consttype, INT4OID);
     assert_eq!(op.location, 9);
     assert_eq!(expr_type(out), INT4OID);
+    assert_eq!(expr_location(out), 7);
+}
+
+#[test]
+fn expr_location_takes_leftmost_of_node_and_args() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+
+    let name = NodeList::make1(mcx, Node::mk(mcx, PgStr { sval: "+" }).unwrap()).unwrap();
+    let aexpr = Node::mk_a_expr(
+        mcx,
+        A_Expr_Kind::AEXPR_OP,
+        name,
+        Some(int_const(mcx, 1, 7)),
+        Some(int_const(mcx, 1, 11)),
+        9,
+    )
+    .unwrap();
+    assert_eq!(expr_location(aexpr), 7);
+
+    let noleft = Node::mk_a_expr(
+        mcx,
+        A_Expr_Kind::AEXPR_OP,
+        NodeList::default(),
+        None,
+        Some(int_const(mcx, 1, 11)),
+        9,
+    )
+    .unwrap();
+    assert_eq!(expr_location(noleft), 9);
 }
 
 #[test]

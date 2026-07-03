@@ -21,6 +21,7 @@ use types_rel::{AccessShareLock, NoLock, Relation, RowShareLock, LOCKMODE};
 use types_tuple::htup::FirstLowInvalidHeapAttributeNumber;
 use types_tuple::tupdesc::TupleDescData;
 
+#[allow(non_upper_case_globals)]
 const InvalidAttrNumber: AttrNumber = 0;
 
 fn loc(funcname: &'static str) -> ErrorLocation {
@@ -117,7 +118,7 @@ fn scanNameSpaceForRelid<'p, 'mcx>(
         }
         if rte.rtekind == RTEKind::RTE_RELATION && rte.relid == relid && rte.alias.is_none() {
             if result.is_some() {
-                return Err(ambiguous_table_ref(pstate, &relid.to_string(), location));
+                return Err(ambiguous_table_relid(pstate, relid, location));
             }
             check_lateral_ref_ok(pstate, nsitem, location)?;
             result = Some(nsitem);
@@ -126,9 +127,9 @@ fn scanNameSpaceForRelid<'p, 'mcx>(
     Ok(result)
 }
 
-fn check_lateral_ref_ok(
-    pstate: &ParseState<'_, '_>,
-    nsitem: &ParseNamespaceItem<'_>,
+fn check_lateral_ref_ok<'p, 'mcx>(
+    pstate: &'p ParseState<'p, 'mcx>,
+    nsitem: &ParseNamespaceItem<'mcx>,
     location: ParseLoc,
 ) -> PgResult<()> {
     if nsitem.p_lateral_only && !nsitem.p_lateral_ok {
@@ -1048,7 +1049,10 @@ fn findNSItemForRTE<'p, 'mcx>(
     None
 }
 
-fn rte_visible_if_lateral(pstate: &ParseState<'_, '_>, rte: &RangeTblEntry<'_>) -> bool {
+fn rte_visible_if_lateral<'p, 'mcx>(
+    pstate: &'p ParseState<'p, 'mcx>,
+    rte: &RangeTblEntry<'mcx>,
+) -> bool {
     if pstate.p_lateral_active {
         return false;
     }
@@ -1058,14 +1062,17 @@ fn rte_visible_if_lateral(pstate: &ParseState<'_, '_>, rte: &RangeTblEntry<'_>) 
     }
 }
 
-fn rte_visible_if_qualified(pstate: &ParseState<'_, '_>, rte: &RangeTblEntry<'_>) -> bool {
+fn rte_visible_if_qualified<'p, 'mcx>(
+    pstate: &'p ParseState<'p, 'mcx>,
+    rte: &RangeTblEntry<'mcx>,
+) -> bool {
     match findNSItemForRTE(pstate, rte) {
         Some(nsitem) => nsitem.p_rel_visible && !nsitem.p_cols_visible,
         None => false,
     }
 }
 
-fn to_rel_vocab<'a>(rv: &'a types_nodes::RangeVar<'a>) -> rel_vocab::RangeVar<'a> {
+fn to_rel_vocab<'a>(rv: &types_nodes::RangeVar<'a>) -> rel_vocab::RangeVar<'a> {
     rel_vocab::RangeVar {
         catalogname: rv.catalogname,
         schemaname: rv.schemaname,
@@ -1101,6 +1108,23 @@ fn ambiguous_table_ref(
 
 #[cold]
 #[inline(never)]
+fn ambiguous_table_relid(
+    pstate: &ParseState<'_, '_>,
+    relid: Oid,
+    location: ParseLoc,
+) -> Box<PgError> {
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_AMBIGUOUS_ALIAS)
+            .errmsg(format!("table reference {relid} is ambiguous"))
+            .errposition(errpos(pstate, location))
+            .into_error()
+            .with_error_location(loc("scanNameSpaceForRelid")),
+    )
+}
+
+#[cold]
+#[inline(never)]
 fn ambiguous_column_ref(
     pstate: &ParseState<'_, '_>,
     colname: &str,
@@ -1118,9 +1142,9 @@ fn ambiguous_column_ref(
 
 #[cold]
 #[inline(never)]
-fn bad_lateral_ref(
-    pstate: &ParseState<'_, '_>,
-    nsitem: &ParseNamespaceItem<'_>,
+fn bad_lateral_ref<'p, 'mcx>(
+    pstate: &'p ParseState<'p, 'mcx>,
+    nsitem: &ParseNamespaceItem<'mcx>,
     location: ParseLoc,
 ) -> Box<PgError> {
     let refname = nsitem.p_names.aliasname.unwrap_or("");

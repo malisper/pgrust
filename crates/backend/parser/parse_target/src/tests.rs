@@ -115,15 +115,18 @@ fn unknown_target_resolves_to_text() {
 }
 
 #[test]
-#[should_panic(expected = "ExpandColumnRefStar")]
-fn star_target_panics_at_expansion() {
+fn bare_star_with_no_tables_is_42601() {
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
     let mut pstate = make_parsestate(mcx, None);
     let star = Node::mk_a_star(mcx).unwrap();
     let cref = Node::mk_column_ref(mcx, NodeList::make1(mcx, star).unwrap(), 7).unwrap();
     let raw = NodeList::make1(mcx, res_target(mcx, None, cref)).unwrap();
-    let _ = transformTargetList(mcx, &mut pstate, &raw, ParseExprKind::EXPR_KIND_SELECT_TARGET);
+    let err = transformTargetList(mcx, &mut pstate, &raw, ParseExprKind::EXPR_KIND_SELECT_TARGET)
+        .map(|_| ())
+        .unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_SYNTAX_ERROR);
+    assert_eq!(err.message, "SELECT * with no tables specified is not valid");
 }
 
 #[test]

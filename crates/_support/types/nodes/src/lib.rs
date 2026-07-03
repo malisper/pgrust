@@ -30,6 +30,7 @@ pub use parsenodes::{
     AclMode, Query, QuerySource, RTEKind, RTEPermissionInfo, RangeTblEntry, SetOperation,
 };
 pub use plannodes::{Plan, PlanVariant, PlannedStmt, Result};
+pub use plannodes::{BitmapAnd, BitmapHeapScan, BitmapIndexScan, BitmapOr};
 pub use primnodes::{
     Alias, BoolExpr, BoolExprType, CoercionForm, Const, FromExpr, FuncExpr, NullTest,
     NullTestType, OpExpr, OverridingKind, Param, ParamKind, RangeTblRef, RangeVar, RelabelType,

@@ -9,8 +9,23 @@ name = "parse_clause"
 path = "src/lib.rs"
 
 [dependencies]
+coerce = { path = "../coerce" }
+elog = { path = "../../utils/error/elog" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+mbutils = { path = "../../utils/mb/mbutils" }
 mcx = { path = "../../../_support/mcx" }
 parse_expr = { path = "../parse_expr" }
+parse_oper = { path = "../parse_oper" }
+parse_relation = { path = "../parse_relation" }
 parser_small1 = { path = "../parser_small1" }
+stack_depth = { path = "../../utils/misc/stack_depth" }
+types_core = { path = "../../../_support/types/types_core" }
 types_error = { path = "../../../_support/types/types_error" }
 types_nodes = { path = "../../../_support/types/nodes" }
+vars = { path = "../../optimizer/util/vars" }
+
+[dev-dependencies]
+datum = { path = "../../../_support/types/datum" }
+indexcmds_seams = { path = "../../commands/indexcmds_seams" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+types_tuple = { path = "../../../_support/types/types_tuple" }

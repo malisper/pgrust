@@ -13,6 +13,7 @@ analyze_seams = { path = "../analyze_seams" }
 backend_status = { path = "../../utils/activity/backend_status" }
 guc_tables = { path = "../../utils/misc/guc_tables" }
 mcx = { path = "../../../_support/mcx" }
+parse_agg = { path = "../parse_agg" }
 parse_clause = { path = "../parse_clause" }
 parse_collate = { path = "../parse_collate" }
 parse_target = { path = "../parse_target" }
@@ -25,5 +26,12 @@ types_portal = { path = "../../../_support/types/portal" }
 [dev-dependencies]
 miscinit_seams = { path = "../../utils/init/miscinit_seams" }
 datum = { path = "../../../_support/types/datum" }
+gram_core = { path = "../gram_core" }
+parser_seams = { path = "../parser_seams" }
+rel_vocab = { path = "../../../_support/types/rel_vocab" }
+relation_seams = { path = "../../access/common/relation_seams" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
+table = { path = "../../access/table/table" }
+tupdesc = { path = "../../access/common/tupdesc" }
+types_rel = { path = "../../../_support/types/rel" }
 types_tuple = { path = "../../../_support/types/types_tuple" }

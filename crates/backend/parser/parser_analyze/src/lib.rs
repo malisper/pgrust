@@ -255,6 +255,7 @@ fn transformSelectStmt<'mcx>(
     )?;
 
     qry.sortClause = transformSortClause(
+        mcx,
         pstate,
         &stmt.sortClause,
         &mut qry.targetList,
@@ -333,10 +334,7 @@ fn transformSelectStmt<'mcx>(
         || !qry.groupingSets.is_nil()
         || qry.havingQual.is_some()
     {
-        panic!(
-            "transformSelectStmt (analyze.c): parseCheckAggregates (parse_agg.c) \
-             unported — unit backend-parser-agg"
-        );
+        parse_agg::parseCheckAggregates(pstate, &qry)?;
     }
 
     Ok(qry)

@@ -8,16 +8,20 @@ mod tests;
 use datum::Datum;
 use fmgr::FmgrInfo;
 use mcx::Mcx;
-use parser_small1::{variable_coerce_param_hook, ParseRefHookState, ParseState};
+use parser_small1::{
+    parser_errposition, variable_coerce_param_hook, ParseRefHookState, ParseState,
+};
 use types_core::catalog::{
     ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYCOMPATIBLEMULTIRANGEOID, ANYCOMPATIBLENONARRAYOID,
     ANYCOMPATIBLEOID, ANYCOMPATIBLERANGEOID, ANYELEMENTOID, ANYENUMOID, ANYMULTIRANGEOID,
-    ANYNONARRAYOID, ANYOID, ANYRANGEOID, INT2VECTOROID, INTERVALOID, OIDVECTOROID, RECORDARRAYOID,
-    RECORDOID, UNKNOWNOID,
+    ANYNONARRAYOID, ANYOID, ANYRANGEOID, BOOLOID, INT2VECTOROID, INT4OID, INTERVALOID,
+    OIDVECTOROID, RECORDARRAYOID, RECORDOID, UNKNOWNOID,
 };
 use types_core::{InvalidOid, Oid, OidIsValid, ParseLoc};
-use types_error::{PgError, PgResult};
-use types_nodes::{CoercionForm, Const, Node, NodeTag, Param, RelabelType};
+use types_error::{
+    ErrorLocation, PgError, PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_QUERY_CANCELED, ERROR,
+};
+use types_nodes::{CoercionForm, Const, FuncExpr, Node, NodeList, NodeTag, Param, RelabelType};
 
 // primnodes.h CoercionContext; ordering is load-bearing (ccontext >= castcontext).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -128,7 +132,15 @@ pub fn coerce_type<'mcx>(
         return Ok(node);
     }
     if inputTypeId == UNKNOWNOID && node.node_tag() == NodeTag::T_Const {
-        return coerce_unknown_const(mcx, node, targetTypeId, targetTypeMod, ccontext, location);
+        return coerce_unknown_const(
+            mcx,
+            pstate,
+            node,
+            targetTypeId,
+            targetTypeMod,
+            ccontext,
+            location,
+        );
     }
     if node.node_tag() == NodeTag::T_Param
         && matches!(pstate.p_ref_hook_state, ParseRefHookState::VarParams(_))
@@ -149,18 +161,17 @@ pub fn coerce_type<'mcx>(
     if node.node_tag() == NodeTag::T_CollateExpr {
         unported("coerce_type (parse_coerce.c): CollateExpr push-down arm");
     }
-    let (pathtype, _funcId) = find_coercion_pathway(targetTypeId, inputTypeId, ccontext)?;
+    let (pathtype, funcId) = find_coercion_pathway(targetTypeId, inputTypeId, ccontext)?;
     if pathtype != COERCION_PATH_NONE {
         let mut baseTypeMod = targetTypeMod;
         let baseTypeId = lsyscache::getBaseTypeAndTypmod(targetTypeId, &mut baseTypeMod)?;
-        if pathtype != COERCION_PATH_RELABELTYPE {
-            unported(
-                "coerce_type (parse_coerce.c): build_coercion_expression \
-                 (FUNC/COERCEVIAIO/ARRAYCOERCE paths)",
-            );
-        }
         if targetTypeId != baseTypeId {
             unported("coerce_type (parse_coerce.c): coerce_to_domain");
+        }
+        if pathtype != COERCION_PATH_RELABELTYPE {
+            return build_coercion_expression(
+                mcx, node, pathtype, funcId, baseTypeId, baseTypeMod, ccontext, cformat, location,
+            );
         }
         return Node::mk(
             mcx,
@@ -189,6 +200,7 @@ pub fn coerce_type<'mcx>(
 // C's coerce_type CONSTANT arm: typinput through fmgr (stringTypeDatum).
 fn coerce_unknown_const<'mcx>(
     mcx: Mcx<'mcx>,
+    pstate: &ParseState<'_, 'mcx>,
     node: Node<'mcx>,
     targetTypeId: Oid,
     targetTypeMod: i32,
@@ -206,7 +218,16 @@ fn coerce_unknown_const<'mcx>(
     };
     let constcollid = lsyscache::get_typcollation(baseTypeId)?;
 
-    let constvalue = string_type_datum(mcx, &io, con.constvalue, inputTypeMod, con.constisnull)?;
+    // C: setup_parser_errposition_callback(pcbstate, pstate, con->location)
+    // around stringTypeDatum; retired-callback pattern attaches on Err.
+    let constvalue = string_type_datum(mcx, &io, con.constvalue, inputTypeMod, con.constisnull)
+        .map_err(|e| {
+            if e.sqlstate() == ERRCODE_QUERY_CANCELED {
+                return e;
+            }
+            let pos = parser_errposition(pstate, con.location, mbutils::GetDatabaseEncoding());
+            Box::new((*e).with_cursor_position(pos))
+        })?;
 
     let result = Node::mk(
         mcx,
@@ -265,12 +286,23 @@ fn own_datum<'mcx>(mcx: Mcx<'mcx>, d: Datum, typlen: i16, typbyval: bool) -> PgR
         return Ok(d);
     }
     let p = d.as_usize() as *const u8;
+    if typlen == -1 {
+        // SAFETY: a strict input function returned a non-null by-reference
+        // varlena datum; varsize_any reads only the header, valid for every
+        // varlena form including a TOAST-pointer image.
+        let image =
+            unsafe { core::slice::from_raw_parts(p, types_tuple::varatt::varsize_any(p)) };
+        // C: PG_DETOAST_DATUM over the new Const's value (parse_coerce.c) —
+        // flattens external/expanded/compressed/short before the copy.
+        return Ok(Datum::from_usize(
+            detoast::detoast_attr(mcx, image)?.leak().as_ptr() as usize,
+        ));
+    }
     // SAFETY: a strict input function returned a non-null by-reference datum
-    // of this type's declared layout (flat varlena / NUL-terminated cstring /
-    // fixed typlen bytes).
+    // of this type's declared layout (NUL-terminated cstring / fixed typlen
+    // bytes).
     let bytes: &[u8] = unsafe {
         let len = match typlen {
-            -1 => types_tuple::varatt::varsize_any(p),
             -2 => core::ffi::CStr::from_ptr(p.cast()).to_bytes_with_nul().len(),
             n if n > 0 => n as usize,
             n => panic!("own_datum: unexpected typlen {n}"),
@@ -466,4 +498,280 @@ fn conversion_not_found(inputTypeId: Oid, targetTypeId: Oid) -> Box<PgError> {
 #[inline(never)]
 fn type_lookup_failed(typid: Oid) -> Box<PgError> {
     Box::new(PgError::error(format!("cache lookup failed for type {typid}")))
+}
+
+fn build_coercion_expression<'mcx>(
+    mcx: Mcx<'mcx>,
+    node: Node<'mcx>,
+    pathtype: CoercionPathType,
+    funcId: Oid,
+    targetTypeId: Oid,
+    targetTypMod: i32,
+    ccontext: CoercionContext,
+    cformat: CoercionForm,
+    location: ParseLoc,
+) -> PgResult<Node<'mcx>> {
+    let mut nargs: i16 = 0;
+    if OidIsValid(funcId) {
+        let Some(procs) = syscache_seams::lookup_pg_proc_shape::call(funcId)? else {
+            return Err(function_lookup_failed(funcId));
+        };
+        debug_assert!(!procs.proretset && procs.prokind == b'f' as i8);
+        nargs = procs.pronargs;
+        debug_assert!((1..=3).contains(&nargs));
+    }
+
+    match pathtype {
+        COERCION_PATH_FUNC => {
+            debug_assert!(OidIsValid(funcId));
+            let mut args = NodeList::make1(mcx, node)?;
+            if nargs >= 2 {
+                let typmod_const = Const {
+                    consttype: INT4OID,
+                    consttypmod: -1,
+                    constcollid: InvalidOid,
+                    constlen: 4,
+                    constvalue: Datum::from_i32(targetTypMod),
+                    constisnull: false,
+                    constbyval: true,
+                    location: -1,
+                };
+                args.lappend(mcx, Node::mk(mcx, typmod_const)?)?;
+            }
+            if nargs == 3 {
+                let explicit_const = Const {
+                    consttype: BOOLOID,
+                    consttypmod: -1,
+                    constcollid: InvalidOid,
+                    constlen: 1,
+                    constvalue: Datum::from_bool(ccontext == COERCION_EXPLICIT),
+                    constisnull: false,
+                    constbyval: true,
+                    location: -1,
+                };
+                args.lappend(mcx, Node::mk(mcx, explicit_const)?)?;
+            }
+            Node::mk(
+                mcx,
+                FuncExpr {
+                    funcid: funcId,
+                    funcresulttype: targetTypeId,
+                    funcretset: false,
+                    funcvariadic: false,
+                    funcformat: cformat,
+                    funccollid: InvalidOid,
+                    inputcollid: InvalidOid,
+                    args,
+                    location,
+                },
+            )
+        }
+        COERCION_PATH_ARRAYCOERCE => {
+            unported("build_coercion_expression (parse_coerce.c): ArrayCoerceExpr path")
+        }
+        COERCION_PATH_COERCEVIAIO => {
+            unported("build_coercion_expression (parse_coerce.c): CoerceViaIO path")
+        }
+        _ => Err(Box::new(PgError::error(format!(
+            "unsupported pathtype {pathtype:?} in build_coercion_expression"
+        )))),
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn function_lookup_failed(funcid: Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!("cache lookup failed for function {funcid}")))
+}
+
+/// Divergences from C: caller passes exprType(expr) (the nodeFuncs slice
+/// lives in parse_expr — parse_oper precedent); Ok(None) is C's NULL return.
+#[allow(clippy::too_many_arguments)]
+pub fn coerce_to_target_type<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &ParseState<'_, 'mcx>,
+    expr: Node<'mcx>,
+    exprtype: Oid,
+    targettype: Oid,
+    targettypmod: i32,
+    ccontext: CoercionContext,
+    cformat: CoercionForm,
+    location: ParseLoc,
+) -> PgResult<Option<Node<'mcx>>> {
+    if !can_coerce_type(&[exprtype], &[targettype], ccontext)? {
+        return Ok(None);
+    }
+    if expr.node_tag() == NodeTag::T_CollateExpr {
+        unported("coerce_to_target_type (parse_coerce.c): CollateExpr strip/reinstall arm");
+    }
+    let result = coerce_type(
+        mcx, pstate, expr, exprtype, targettype, targettypmod, ccontext, cformat, location,
+    )?;
+    if targettypmod >= 0 {
+        unported(
+            "coerce_to_target_type (parse_coerce.c): coerce_type_typmod \
+             (find_typmod_coercion_function length-coercion lane)",
+        );
+    }
+    Ok(Some(result))
+}
+
+/// Divergence from C: caller passes exprType/exprLocation of `node` (the
+/// nodeFuncs slice lives in parse_expr — parse_oper precedent).
+pub fn coerce_to_boolean<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &ParseState<'_, 'mcx>,
+    node: Node<'mcx>,
+    input_type_id: Oid,
+    node_location: ParseLoc,
+    construct_name: &str,
+) -> PgResult<Node<'mcx>> {
+    let node = if input_type_id != BOOLOID {
+        match coerce_to_target_type(
+            mcx,
+            pstate,
+            node,
+            input_type_id,
+            BOOLOID,
+            -1,
+            COERCION_ASSIGNMENT,
+            CoercionForm::COERCE_IMPLICIT_CAST,
+            -1,
+        )? {
+            Some(newnode) => newnode,
+            None => {
+                return Err(construct_type_mismatch(
+                    pstate,
+                    construct_name,
+                    BOOLOID,
+                    input_type_id,
+                    node_location,
+                ))
+            }
+        }
+    } else {
+        node
+    };
+
+    if expression_returns_set(node) {
+        return Err(returns_set(pstate, construct_name, node_location));
+    }
+    Ok(node)
+}
+
+/// C `coerce_to_specific_type` (typmod -1); same precomputed exprType/
+/// exprLocation divergence as [`coerce_to_boolean`].
+pub fn coerce_to_specific_type<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &ParseState<'_, 'mcx>,
+    node: Node<'mcx>,
+    input_type_id: Oid,
+    node_location: ParseLoc,
+    target_type_id: Oid,
+    construct_name: &str,
+) -> PgResult<Node<'mcx>> {
+    let node = if input_type_id != target_type_id {
+        match coerce_to_target_type(
+            mcx,
+            pstate,
+            node,
+            input_type_id,
+            target_type_id,
+            -1,
+            COERCION_ASSIGNMENT,
+            CoercionForm::COERCE_IMPLICIT_CAST,
+            -1,
+        )? {
+            Some(newnode) => newnode,
+            None => {
+                return Err(construct_type_mismatch(
+                    pstate,
+                    construct_name,
+                    target_type_id,
+                    input_type_id,
+                    node_location,
+                ))
+            }
+        }
+    } else {
+        node
+    };
+
+    if expression_returns_set(node) {
+        return Err(returns_set(pstate, construct_name, node_location));
+    }
+    Ok(node)
+}
+
+// Closed-set slice of nodeFuncs.c expression_returns_set over the tags this
+// parser lane can produce.
+fn expression_returns_set(node: Node<'_>) -> bool {
+    match node.node_tag() {
+        NodeTag::T_FuncExpr => {
+            let f = node.as_func_expr().unwrap();
+            f.funcretset || f.args.iter().any(expression_returns_set)
+        }
+        NodeTag::T_OpExpr => {
+            let op = node.as_op_expr().unwrap();
+            op.opretset || op.args.iter().any(expression_returns_set)
+        }
+        NodeTag::T_BoolExpr => {
+            node.as_bool_expr().unwrap().args.iter().any(expression_returns_set)
+        }
+        NodeTag::T_RelabelType => expression_returns_set(node.as_relabel_type().unwrap().arg),
+        NodeTag::T_NullTest => {
+            node.as_null_test().unwrap().arg.is_some_and(expression_returns_set)
+        }
+        NodeTag::T_Const | NodeTag::T_Param | NodeTag::T_Var | NodeTag::T_CaseTestExpr => false,
+        other => panic!(
+            "expression_returns_set (nodeFuncs.c): arm for {other:?} unported — \
+             backend-nodes-core lane"
+        ),
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn construct_type_mismatch(
+    pstate: &ParseState<'_, '_>,
+    construct_name: &str,
+    target_type_id: Oid,
+    input_type_id: Oid,
+    location: ParseLoc,
+) -> Box<PgError> {
+    let (target, input) = match (
+        format_type::format_type_be(target_type_id),
+        format_type::format_type_be(input_type_id),
+    ) {
+        (Ok(t), Ok(i)) => (t, i),
+        (Err(e), _) | (_, Err(e)) => return e,
+    };
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_DATATYPE_MISMATCH)
+            .errmsg(format!(
+                "argument of {construct_name} must be type {target}, not type {input}"
+            ))
+            .errposition(parser_errposition(pstate, location, mbutils::GetDatabaseEncoding()))
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_coerce.c", 0, "coerce_to_boolean")),
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn returns_set(
+    pstate: &ParseState<'_, '_>,
+    construct_name: &str,
+    location: ParseLoc,
+) -> Box<PgError> {
+    use types_error::{ErrorLocation, ERRCODE_DATATYPE_MISMATCH, ERROR};
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_DATATYPE_MISMATCH)
+            .errmsg(format!("argument of {construct_name} must not return a set"))
+            .errposition(parser_errposition(pstate, location, mbutils::GetDatabaseEncoding()))
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_coerce.c", 0, "coerce_to_boolean")),
+    )
 }
