@@ -2573,6 +2573,7 @@ dependencies = [
  "mcx",
  "miscinit_seams",
  "namespace_seams",
+ "parser_small1",
  "postgres_seams",
  "pqcomm",
  "pqformat",

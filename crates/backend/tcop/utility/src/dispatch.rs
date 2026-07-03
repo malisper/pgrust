@@ -284,7 +284,7 @@ fn dispatch_switch<'mcx>(
         }
         T_CopyStmt => {
             let stmt = parsetree.as_copy_stmt().unwrap();
-            let processed = copy_cmd::DoCopy(mcx, stmt)?;
+            let processed = copy_cmd::DoCopy(mcx, stmt, source_text)?;
             if let Some(qc) = qc.as_mut() {
                 qc.commandTag = crate::consts::CMDTAG_COPY;
                 qc.nprocessed = processed;
