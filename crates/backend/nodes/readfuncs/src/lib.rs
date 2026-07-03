@@ -11,10 +11,13 @@ use types_error::PgResult;
 use types_nodes::bitmapset::Bitmapset;
 use types_nodes::list::{IntList, NodeList, OidList};
 use types_nodes::nodes_enums::{CmdType, LimitOption};
-use types_nodes::parsenodes::{Query, QuerySource, RTEKind, RTEPermissionInfo, RangeTblEntry};
+use types_nodes::jointype::JoinType;
+use types_nodes::parsenodes::{
+    Query, QuerySource, RTEKind, RTEPermissionInfo, RangeTblEntry, SortGroupClause,
+};
 use types_nodes::primnodes::{
-    Alias, BoolExpr, BoolExprType, CoercionForm, Const, FromExpr, FuncExpr, OpExpr,
-    OverridingKind, RangeTblRef, RelabelType, TargetEntry, Var, VarReturningType,
+    Aggref, Alias, BoolExpr, BoolExprType, CoercionForm, Const, FromExpr, FuncExpr, JoinExpr,
+    OpExpr, OverridingKind, RangeTblRef, RelabelType, TargetEntry, Var, VarReturningType,
 };
 use types_nodes::Node;
 
@@ -203,6 +206,24 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
         }
     }
 
+    fn read_int_list(&mut self, name: &str) -> PgResult<IntList<'mcx>> {
+        self.label(name);
+        let t = self.token(name);
+        if t.is_empty() {
+            return Ok(IntList::nil());
+        }
+        assert!(t == b"(", "readfuncs.c: field :{name} is not an int list");
+        self.expect("i");
+        let mut l = IntList::nil();
+        loop {
+            let tok = self.token("int list");
+            if tok == b")" {
+                return Ok(l);
+            }
+            l.lappend(self.mcx, Self::parse_int(tok) as i32)?;
+        }
+    }
+
     fn read_oid_list(&mut self, name: &str) -> PgResult<OidList<'mcx>> {
         self.label(name);
         let t = self.token(name);
@@ -325,6 +346,9 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
             b"BOOLEXPR" => self.read_bool_expr(),
             b"RELABELTYPE" => self.read_relabel_type(),
             b"COERCEVIAIO" => self.read_coerce_via_io(),
+            b"JOINEXPR" => self.read_join_expr(),
+            b"SORTGROUPCLAUSE" => self.read_sort_group_clause(),
+            b"AGGREF" => self.read_aggref(),
             other => panic!(
                 "parseNodeString (readfuncs.c): {} read arm unported (view SELECT-rule + \
                  DEFAULT/CHECK expr sets only)",
@@ -418,6 +442,17 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
                 rte.relkind = self.read_char("relkind");
                 rte.rellockmode = self.read_i32("rellockmode");
                 rte.perminfoindex = self.read_u32("perminfoindex");
+            }
+            RTEKind::RTE_JOIN => {
+                rte.jointype = join_type(self.read_u32("jointype"));
+                rte.joinmergedcols = self.read_i32("joinmergedcols");
+                rte.joinaliasvars = self.read_node_list("joinaliasvars")?;
+                rte.joinleftcols = self.read_int_list("joinleftcols")?;
+                rte.joinrightcols = self.read_int_list("joinrightcols")?;
+                rte.join_using_alias = self.read_alias_ref("join_using_alias")?;
+            }
+            RTEKind::RTE_GROUP => {
+                rte.groupexprs = self.read_node_list("groupexprs")?;
             }
             other => panic!(
                 "_readRangeTblEntry (readfuncs.c): {other:?} arm unported (view SELECT-rule set)"
@@ -609,6 +644,63 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
         Node::mk(self.mcx, r)
     }
 
+    fn read_join_expr(&mut self) -> PgResult<Node<'mcx>> {
+        let jointype = join_type(self.read_u32("jointype"));
+        let isNatural = self.read_bool("isNatural");
+        let larg = self.read_node("larg")?.expect("JoinExpr has larg");
+        let rarg = self.read_node("rarg")?.expect("JoinExpr has rarg");
+        let j = JoinExpr {
+            jointype,
+            isNatural,
+            larg,
+            rarg,
+            usingClause: self.read_node_list("usingClause")?,
+            join_using_alias: self.read_alias_ref("join_using_alias")?,
+            quals: self.read_node("quals")?,
+            alias: self.read_alias_ref("alias")?,
+            rtindex: self.read_i32("rtindex"),
+        };
+        Node::mk(self.mcx, j)
+    }
+
+    fn read_sort_group_clause(&mut self) -> PgResult<Node<'mcx>> {
+        let s = SortGroupClause {
+            tleSortGroupRef: self.read_u32("tleSortGroupRef"),
+            eqop: self.read_u32("eqop"),
+            sortop: self.read_u32("sortop"),
+            reverse_sort: self.read_bool("reverse_sort"),
+            nulls_first: self.read_bool("nulls_first"),
+            hashable: self.read_bool("hashable"),
+        };
+        Node::mk(self.mcx, s)
+    }
+
+    fn read_aggref(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let mut a = Node::build::<Aggref>(mcx)?;
+        a.aggfnoid = self.read_u32("aggfnoid");
+        a.aggtype = self.read_u32("aggtype");
+        a.aggcollid = self.read_u32("aggcollid");
+        a.inputcollid = self.read_u32("inputcollid");
+        a.aggtranstype = self.read_u32("aggtranstype");
+        a.aggargtypes = self.read_oid_list("aggargtypes")?;
+        a.aggdirectargs = self.read_node_list("aggdirectargs")?;
+        a.args = self.read_node_list("args")?;
+        a.aggorder = self.read_node_list("aggorder")?;
+        a.aggdistinct = self.read_node_list("aggdistinct")?;
+        a.aggfilter = self.read_node("aggfilter")?;
+        a.aggstar = self.read_bool("aggstar");
+        a.aggvariadic = self.read_bool("aggvariadic");
+        a.aggkind = self.read_char("aggkind") as i8;
+        a.aggpresorted = self.read_bool("aggpresorted");
+        a.agglevelsup = self.read_u32("agglevelsup");
+        a.aggsplit = self.read_u32("aggsplit");
+        a.aggno = self.read_i32("aggno");
+        a.aggtransno = self.read_i32("aggtransno");
+        a.location = self.read_location("location");
+        Ok(a.seal())
+    }
+
     // readDatum (readfuncs.c): "<len> [ <byte> ... ]"; byval always carries
     // sizeof(Datum) byte tokens regardless of the leading length.
     fn read_datum(&mut self, typbyval: bool) -> PgResult<Datum> {
@@ -658,6 +750,22 @@ fn query_source(v: u32) -> QuerySource {
         3 => QuerySource::QSRC_QUAL_INSTEAD_RULE,
         4 => QuerySource::QSRC_NON_INSTEAD_RULE,
         other => panic!("readfuncs.c: bad QuerySource {other}"),
+    }
+}
+
+fn join_type(v: u32) -> JoinType {
+    match v {
+        0 => JoinType::JOIN_INNER,
+        1 => JoinType::JOIN_LEFT,
+        2 => JoinType::JOIN_FULL,
+        3 => JoinType::JOIN_RIGHT,
+        4 => JoinType::JOIN_SEMI,
+        5 => JoinType::JOIN_ANTI,
+        6 => JoinType::JOIN_RIGHT_SEMI,
+        7 => JoinType::JOIN_RIGHT_ANTI,
+        8 => JoinType::JOIN_UNIQUE_OUTER,
+        9 => JoinType::JOIN_UNIQUE_INNER,
+        other => panic!("readfuncs.c: bad JoinType {other}"),
     }
 }
 

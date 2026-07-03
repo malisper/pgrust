@@ -5,6 +5,7 @@ mod attrs;
 mod index;
 mod triggers;
 mod pg_class;
+mod rewrite;
 #[cfg(test)]
 mod tests;
 
@@ -27,6 +28,7 @@ pub fn init_seams() {
     );
     relcache_build_seams::scan_pg_index_shapes::set(index::scan_pg_index_shapes);
     relcache_build_seams::build_trigger_desc::set(triggers::build_trigger_desc);
+    relcache_build_seams::scan_pg_rewrite::set(rewrite::scan_pg_rewrite);
 }
 
 pub(crate) fn scan_key(attno: i32, strategy: StrategyNumber, func: RegProcedure, arg: Datum) -> ScanKeyData {
