@@ -44,7 +44,8 @@ pub fn RelationGetIndexAttrBitmap(relid: Oid) -> PgResult<Rc<IndexAttrBitmaps>> 
             .ok_or_else(|| index_missing(index_oid))?;
         let form = irel.rd_index.as_ref().ok_or_else(|| index_missing(index_oid))?;
         let summarizing = irel.rd_rel.relam == BRIN_AM_OID;
-        let is_key = form.indisunique && form.indimmediate;
+        let is_key =
+            form.indisunique && form.indexprs_src.is_none() && form.indpred_src.is_none();
         let is_id_key = index_oid == replident_index;
         for (i, &attnum) in form.indkey.iter().enumerate() {
             if attnum == 0 {
@@ -65,8 +66,8 @@ pub fn RelationGetIndexAttrBitmap(relid: Oid) -> PgResult<Rc<IndexAttrBitmaps>> 
                 }
             }
         }
-        // pull_varattnos over indexprs/indpred (the RelationGetIndexExpressions/
-        // Predicate result; eval_const_expressions matches C's parsed form).
+        // pull_varattnos over the untransformed stringToNode trees (relcache.c
+        // 5392-5398): folding could drop a Var from the HOT-blocking set.
         for src in [form.indexprs_src.as_ref(), form.indpred_src.as_ref()]
             .into_iter()
             .flatten()
@@ -115,7 +116,6 @@ fn pull_expr_attrs(src: &str, out: &mut PgVec<'static, i16>) -> PgResult<()> {
     let cx = mcx::MemoryContext::new("IndexAttrExprPull");
     let smcx = cx.mcx();
     let node = readfuncs::stringToNode(smcx, src)?;
-    let node = clauses::eval_const_expressions(smcx, node)?;
     nodes_core::NodeWalker::visit(&mut W { out }, node)?;
     Ok(())
 }
