@@ -346,6 +346,79 @@ macro_rules! ctx {
     };
 }
 
+/// C's ssup pattern: comparator identity resolved ONCE per sort operation,
+/// compares monomorphized (no per-compare variant/shim ladder). M1-hot arms
+/// first. One `$body` instantiation per arm = C's ST_DEFINE cost shape.
+macro_rules! dispatch_cmp {
+    ($ctx:expr, |$cmp:ident| $body:expr) => {{
+        let __c = &$ctx;
+        match __c.variant {
+            SortVariant::IndexHash { high_mask, low_mask, max_buckets, .. } => {
+                let (high_mask, low_mask, max_buckets) = (*high_mask, *low_mask, *max_buckets);
+                let $cmp = |a: &SortTuple, b: &SortTuple| {
+                    CmpCtx::comparetup_index_hash(high_mask, low_mask, max_buckets, a, b)
+                };
+                $body
+            }
+            _ => match __c.keys[0].comparator {
+                SortComparator::Unsigned => {
+                    let $cmp = |a: &SortTuple, b: &SortTuple| {
+                        __c.comparetup_spec(SortComparator::Unsigned, a, b)
+                    };
+                    $body
+                }
+                SortComparator::SignedI64 => {
+                    let $cmp = |a: &SortTuple, b: &SortTuple| {
+                        __c.comparetup_spec(SortComparator::SignedI64, a, b)
+                    };
+                    $body
+                }
+                SortComparator::Int32 => {
+                    let $cmp = |a: &SortTuple, b: &SortTuple| {
+                        __c.comparetup_spec(SortComparator::Int32, a, b)
+                    };
+                    $body
+                }
+                SortComparator::Int16 => {
+                    let $cmp = |a: &SortTuple, b: &SortTuple| {
+                        __c.comparetup_spec(SortComparator::Int16, a, b)
+                    };
+                    $body
+                }
+                SortComparator::Uint32 => {
+                    let $cmp = |a: &SortTuple, b: &SortTuple| {
+                        __c.comparetup_spec(SortComparator::Uint32, a, b)
+                    };
+                    $body
+                }
+                SortComparator::TextC => {
+                    let $cmp = |a: &SortTuple, b: &SortTuple| {
+                        __c.comparetup_spec(SortComparator::TextC, a, b)
+                    };
+                    $body
+                }
+                SortComparator::Interval => {
+                    let $cmp = |a: &SortTuple, b: &SortTuple| {
+                        __c.comparetup_spec(SortComparator::Interval, a, b)
+                    };
+                    $body
+                }
+                SortComparator::BpcharC => {
+                    let $cmp = |a: &SortTuple, b: &SortTuple| {
+                        __c.comparetup_spec(SortComparator::BpcharC, a, b)
+                    };
+                    $body
+                }
+                // Shim'd comparisons are fmgr calls; nothing to fold.
+                SortComparator::Shim(_) => {
+                    let $cmp = |a: &SortTuple, b: &SortTuple| __c.comparetup(a, b);
+                    $body
+                }
+            },
+        }
+    }};
+}
+
 impl Tuplesort {
     /// `tuplesort_begin_heap`.
     #[allow(clippy::too_many_arguments)]
@@ -1188,7 +1261,10 @@ impl<'m> TuplesortData<'m> {
     /// (C's shape: the arm's work is behind the comparetup fn pointer).
     #[inline(never)]
     fn puttuple_bounded(&mut self, tuple: SortTuple) -> PgResult<()> {
-        let compare = ctx!(self).comparetup(&tuple, &self.memtuples[0]);
+        let compare = {
+            let ctx = ctx!(self);
+            dispatch_cmp!(ctx, |cmp| cmp(&tuple, &self.memtuples[0]))
+        };
         if compare <= 0 {
             self.free_sort_tuple(&tuple);
             cfi()?;
@@ -1197,7 +1273,10 @@ impl<'m> TuplesortData<'m> {
             self.free_sort_tuple(&top);
             let mut tuples = mem::replace(&mut self.memtuples, PgVec::new_in(self.mcx));
             let count = tuples.len();
-            heap_replace_top(&ctx!(self), &mut tuples, count, tuple)?;
+            {
+                let ctx = ctx!(self);
+                dispatch_cmp!(ctx, |cmp| heap_replace_top(cmp, &mut tuples, count, tuple))?;
+            }
             self.memtuples = tuples;
         }
         Ok(())
@@ -1270,39 +1349,8 @@ impl<'m> TuplesortData<'m> {
         let mut tuples = mem::replace(&mut self.memtuples, PgVec::new_in(self.mcx));
         let result = {
             let ctx = ctx!(self);
-            if let SortVariant::IndexHash { high_mask, low_mask, max_buckets, .. } = self.variant {
-                qsort_tuple(&mut tuples, |a, b| {
-                    CmpCtx::comparetup_index_hash(high_mask, low_mask, max_buckets, a, b)
-                })
-            } else if self.have_datum1 {
-                match self.sort_keys[0].comparator {
-                    SortComparator::Unsigned => qsort_tuple(&mut tuples, |a, b| {
-                        ctx.comparetup_spec(SortComparator::Unsigned, a, b)
-                    }),
-                    SortComparator::SignedI64 => qsort_tuple(&mut tuples, |a, b| {
-                        ctx.comparetup_spec(SortComparator::SignedI64, a, b)
-                    }),
-                    SortComparator::Int32 => qsort_tuple(&mut tuples, |a, b| {
-                        ctx.comparetup_spec(SortComparator::Int32, a, b)
-                    }),
-                    SortComparator::Int16 => qsort_tuple(&mut tuples, |a, b| {
-                        ctx.comparetup_spec(SortComparator::Int16, a, b)
-                    }),
-                    SortComparator::Uint32 => qsort_tuple(&mut tuples, |a, b| {
-                        ctx.comparetup_spec(SortComparator::Uint32, a, b)
-                    }),
-                    SortComparator::TextC => qsort_tuple(&mut tuples, |a, b| {
-                        ctx.comparetup_spec(SortComparator::TextC, a, b)
-                    }),
-                    SortComparator::Interval => qsort_tuple(&mut tuples, |a, b| {
-                        ctx.comparetup_spec(SortComparator::Interval, a, b)
-                    }),
-                    SortComparator::BpcharC => qsort_tuple(&mut tuples, |a, b| {
-                        ctx.comparetup_spec(SortComparator::BpcharC, a, b)
-                    }),
-                    // Shim'd comparisons are fmgr calls; nothing to fold.
-                    SortComparator::Shim(_) => qsort_tuple(&mut tuples, |a, b| ctx.comparetup(a, b)),
-                }
+            if self.have_datum1 || matches!(self.variant, SortVariant::IndexHash { .. }) {
+                dispatch_cmp!(ctx, |cmp| qsort_tuple(&mut tuples, cmp))
             } else if self.only_key {
                 qsort_tuple(&mut tuples, |a, b| {
                     ssup::apply_sort_comparator_in(
@@ -1335,22 +1383,24 @@ impl<'m> TuplesortData<'m> {
         let mut freed: i64 = 0;
         let result = (|| {
             let ctx = ctx!(self);
-            let mut count = 0usize;
-            for i in 0..tupcount {
-                if count < bound {
-                    let stup = tuples[i];
-                    heap_insert(&ctx, &mut tuples, &mut count, stup)?;
-                } else if ctx.comparetup(&tuples[i], &tuples[0]) <= 0 {
-                    freed += freed_space(free_typlen, &tuples[i]);
-                    cfi()?;
-                } else {
-                    let stup = tuples[i];
-                    freed += freed_space(free_typlen, &tuples[0]);
-                    heap_replace_top(&ctx, &mut tuples, count, stup)?;
+            dispatch_cmp!(ctx, |cmp| {
+                let mut count = 0usize;
+                for i in 0..tupcount {
+                    if count < bound {
+                        let stup = tuples[i];
+                        heap_insert(cmp, &mut tuples, &mut count, stup)?;
+                    } else if cmp(&tuples[i], &tuples[0]) <= 0 {
+                        freed += freed_space(free_typlen, &tuples[i]);
+                        cfi()?;
+                    } else {
+                        let stup = tuples[i];
+                        freed += freed_space(free_typlen, &tuples[0]);
+                        heap_replace_top(cmp, &mut tuples, count, stup)?;
+                    }
                 }
-            }
-            debug_assert!(count == bound);
-            Ok(())
+                debug_assert!(count == bound);
+                Ok(())
+            })
         })();
         tuples.truncate(bound);
         self.memtuples = tuples;
@@ -1368,14 +1418,14 @@ impl<'m> TuplesortData<'m> {
         let result = {
             let ctx = ctx!(self);
             let mut count = tupcount;
-            (|| {
+            dispatch_cmp!(ctx, |cmp| (|| {
                 while count > 1 {
                     let stup = tuples[0];
-                    heap_delete_top(&ctx, &mut tuples, &mut count)?;
+                    heap_delete_top(cmp, &mut tuples, &mut count)?;
                     tuples[count] = stup;
                 }
                 Ok(())
-            })()
+            })())
         };
         self.memtuples = tuples;
         self.reversedirection();
@@ -1449,7 +1499,7 @@ fn freed_space(free_typlen: i16, stup: &SortTuple) -> i64 {
 }
 
 fn heap_insert(
-    ctx: &CmpCtx<'_>,
+    cmp: impl Fn(&SortTuple, &SortTuple) -> i32 + Copy,
     heap: &mut [SortTuple],
     count: &mut usize,
     tuple: SortTuple,
@@ -1459,7 +1509,7 @@ fn heap_insert(
     *count += 1;
     while j > 0 {
         let i = (j - 1) >> 1;
-        if ctx.comparetup(&tuple, &heap[i]) >= 0 {
+        if cmp(&tuple, &heap[i]) >= 0 {
             break;
         }
         heap[j] = heap[i];
@@ -1469,28 +1519,32 @@ fn heap_insert(
     Ok(())
 }
 
-fn heap_delete_top(ctx: &CmpCtx<'_>, heap: &mut [SortTuple], count: &mut usize) -> PgResult<()> {
+fn heap_delete_top(
+    cmp: impl Fn(&SortTuple, &SortTuple) -> i32 + Copy,
+    heap: &mut [SortTuple],
+    count: &mut usize,
+) -> PgResult<()> {
     *count -= 1;
     if *count == 0 {
         return Ok(());
     }
     let tuple = heap[*count];
-    heap_replace_top_n(ctx, heap, *count, tuple)
+    heap_replace_top_n(cmp, heap, *count, tuple)
 }
 
 /// `tuplesort_heap_replace_top` (Knuth 5.2.3H sift-up).
 fn heap_replace_top(
-    ctx: &CmpCtx<'_>,
+    cmp: impl Fn(&SortTuple, &SortTuple) -> i32 + Copy,
     heap: &mut [SortTuple],
     count: usize,
     tuple: SortTuple,
 ) -> PgResult<()> {
     debug_assert!(count >= 1);
-    heap_replace_top_n(ctx, heap, count, tuple)
+    heap_replace_top_n(cmp, heap, count, tuple)
 }
 
 fn heap_replace_top_n(
-    ctx: &CmpCtx<'_>,
+    cmp: impl Fn(&SortTuple, &SortTuple) -> i32 + Copy,
     heap: &mut [SortTuple],
     n: usize,
     tuple: SortTuple,
@@ -1502,10 +1556,10 @@ fn heap_replace_top_n(
         if j >= n {
             break;
         }
-        if j + 1 < n && ctx.comparetup(&heap[j], &heap[j + 1]) > 0 {
+        if j + 1 < n && cmp(&heap[j], &heap[j + 1]) > 0 {
             j += 1;
         }
-        if ctx.comparetup(&tuple, &heap[j]) <= 0 {
+        if cmp(&tuple, &heap[j]) <= 0 {
             break;
         }
         heap[i] = heap[j];
