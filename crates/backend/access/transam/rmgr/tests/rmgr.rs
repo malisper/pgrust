@@ -117,10 +117,10 @@ fn get_rmgr_unregistered_errors_like_rmgr_not_found() {
 }
 
 #[test]
-#[should_panic(expected = "rmgr callback not ported: hash_redo — land backend-access-hash-xlog")]
+#[should_panic(expected = "rmgr callback not ported: gin_redo — land backend-access-gin-xlog")]
 fn unported_redo_panics_loudly() {
     let mut record = xlogreader_seams::XLogReaderState::default();
-    let _ = (GetRmgr(RM_HASH_ID as u8).unwrap().rm_redo)(&mut record);
+    let _ = (GetRmgr(RM_GIN_ID as u8).unwrap().rm_redo)(&mut record);
 }
 
 #[test]
@@ -136,7 +136,7 @@ fn btree_redo_vacuum_arm_panics_loudly() {
 }
 
 #[test]
-#[should_panic(expected = "rmgr callback not ported: xlog_identify")]
+#[should_panic(expected = "rmgr callback not ported: hash_identify")]
 fn unported_identify_panics_loudly() {
-    let _ = (GetRmgr(RM_XLOG_ID as u8).unwrap().rm_identify)(0x10);
+    let _ = (GetRmgr(RM_HASH_ID as u8).unwrap().rm_identify)(0x10);
 }
