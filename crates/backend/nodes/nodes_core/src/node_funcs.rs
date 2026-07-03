@@ -29,7 +29,6 @@ pub fn expr_type(node: Node<'_>) -> Oid {
             types_core::catalog::BOOLOID
         }
         NodeTag::T_DistinctExpr => node.as_distinct_expr().unwrap().opresulttype,
-        NodeTag::T_RowExpr => node.as_row_expr().unwrap().row_typeid,
         NodeTag::T_SetToDefault => node.as_set_to_default().unwrap().typeId,
         NodeTag::T_CaseExpr => node.as_case_expr().unwrap().casetype,
         NodeTag::T_CaseTestExpr => node.as_case_test_expr().unwrap().typeId,
@@ -156,7 +155,6 @@ pub fn expr_typmod(node: Node<'_>) -> i32 {
                 _ => -1,
             }
         }
-        NodeTag::T_RowExpr => -1,
         other => deferred("exprTypmod", other),
     }
 }
@@ -169,7 +167,6 @@ pub fn expr_collation(node: Node<'_>) -> Oid {
         NodeTag::T_OpExpr => node.as_op_expr().unwrap().opcollid,
         NodeTag::T_ScalarArrayOpExpr => types_core::InvalidOid,
         NodeTag::T_ArrayExpr => node.as_array_expr().unwrap().array_collid,
-        NodeTag::T_RowExpr => types_core::InvalidOid,
         NodeTag::T_FuncExpr => node.as_func_expr().unwrap().funccollid,
         NodeTag::T_Aggref => node.as_aggref().unwrap().aggcollid,
         NodeTag::T_WindowFunc => node.as_window_func().unwrap().wincollid,
@@ -308,7 +305,6 @@ pub fn expr_location(node: Node<'_>) -> ParseLoc {
             let d = node.as_distinct_expr().unwrap();
             leftmost_loc(d.location, expr_location_list(&d.args))
         }
-        NodeTag::T_RowExpr => node.as_row_expr().unwrap().location,
         NodeTag::T_CollateClause => {
             let c = node.as_collate_clause().unwrap();
             leftmost_loc(c.arg.map_or(-1, expr_location), c.location)

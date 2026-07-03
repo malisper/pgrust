@@ -1713,9 +1713,6 @@ pub fn expression_returns_set(node: Node<'_>) -> bool {
         NodeTag::T_DistinctExpr => {
             node.as_distinct_expr().unwrap().args.iter().any(expression_returns_set)
         }
-        NodeTag::T_RowExpr => {
-            node.as_row_expr().unwrap().args.iter().any(expression_returns_set)
-        }
         NodeTag::T_Const | NodeTag::T_Param | NodeTag::T_Var | NodeTag::T_CaseTestExpr => false,
         NodeTag::T_CaseExpr => {
             let c = node.as_case_expr().unwrap();

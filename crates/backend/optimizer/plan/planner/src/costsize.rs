@@ -175,12 +175,6 @@ fn cost_qual_eval_walker(node: Node<'_>, cost: &mut QualCost) -> PgResult<()> {
             Some(arg) => cost_qual_eval_walker(arg, cost),
             None => Ok(()),
         },
-        NodeTag::T_RowExpr => {
-            for arg in &node.as_row_expr().unwrap().args {
-                cost_qual_eval_walker(arg, cost)?;
-            }
-            Ok(())
-        }
         // C arbitrarily uses the first alternative's cost.
         NodeTag::T_AlternativeSubPlan => {
             let asp = node.as_alternative_sub_plan().unwrap();
@@ -1019,7 +1013,6 @@ pub fn expr_type_typmod(node: Node<'_>) -> (u32, i32) {
             (r.resulttype, r.resulttypmod)
         }
         NodeTag::T_CoerceViaIO => (node.as_coerce_via_io().unwrap().resulttype, -1),
-        NodeTag::T_RowExpr => (node.as_row_expr().unwrap().row_typeid, -1),
         other => panic!("exprType (nodeFuncs.c): {other:?}; M2 expression lane"),
     }
 }
