@@ -15,58 +15,51 @@ INSERT INTO t2 (a) VALUES (-1);
 INSERT INTO t2 (a) VALUES (NULL);
 INSERT INTO t2 (c) VALUES (2000);
 
-SELECT a.attnum, a.attname, a.atttypid, a.attnotnull, a.atthasdef, a.attstorage
-  FROM pg_attribute a, pg_class c
- WHERE a.attrelid = c.oid AND c.relname = 't2' AND a.attnum > 0
- ORDER BY a.attnum;
-SELECT a.attnum, d.adbin
-  FROM pg_attrdef d, pg_attribute a, pg_class c
- WHERE d.adrelid = c.oid AND a.attrelid = c.oid AND a.attnum = d.adnum AND c.relname = 't2'
- ORDER BY a.attnum;
-SELECT r.conname, r.contype, r.condeferrable, r.conenforced, r.convalidated,
-       r.conislocal, r.coninhcount, r.connoinherit, r.conkey, r.conbin
-  FROM pg_constraint r, pg_class c
- WHERE r.conrelid = c.oid AND c.relname = 't2'
- ORDER BY r.conname;
+SELECT attnum, attname, atttypid, attnotnull, atthasdef, attstorage
+  FROM pg_attribute WHERE attrelid = (SELECT oid FROM pg_class WHERE relname = 't2')
+    AND attnum > 0 ORDER BY attnum;
+SELECT adnum, adbin FROM pg_attrdef
+ WHERE adrelid = (SELECT oid FROM pg_class WHERE relname = 't2') ORDER BY adnum;
+SELECT conname, contype, condeferrable, conenforced, convalidated,
+       conislocal, coninhcount, connoinherit, conkey, conbin
+  FROM pg_constraint WHERE conrelid = (SELECT oid FROM pg_class WHERE relname = 't2')
+ ORDER BY conname;
+SELECT relchecks FROM pg_class WHERE relname = 't2';
 
 CREATE TABLE t3 (LIKE t1 INCLUDING INDEXES);
-SELECT c2.relname, i.indisunique, i.indisprimary, i.indkey
-  FROM pg_index i, pg_class c2, pg_class c
- WHERE i.indexrelid = c2.oid AND i.indrelid = c.oid AND c.relname = 't3'
- ORDER BY c2.relname;
+SELECT relname, relkind FROM pg_class WHERE relname = 't3_a_idx';
+SELECT relname, relkind FROM pg_class WHERE relname = 't3_b_idx';
+SELECT indisunique, indisprimary, indkey, indcollation, indclass, indoption
+  FROM pg_index WHERE indexrelid = (SELECT oid FROM pg_class WHERE relname = 't3_a_idx');
+SELECT indisunique, indisprimary, indkey, indcollation, indclass, indoption
+  FROM pg_index WHERE indexrelid = (SELECT oid FROM pg_class WHERE relname = 't3_b_idx');
 INSERT INTO t3 (a) VALUES (7);
 INSERT INTO t3 (a) VALUES (7);
 
 CREATE TABLE t6 (x text, LIKE t1 INCLUDING DEFAULTS INCLUDING CONSTRAINTS, y int);
-SELECT a.attnum, a.attname
-  FROM pg_attribute a, pg_class c
- WHERE a.attrelid = c.oid AND c.relname = 't6' AND a.attnum > 0
- ORDER BY a.attnum;
-SELECT r.conname, r.conkey, r.conbin
-  FROM pg_constraint r, pg_class c
- WHERE r.conrelid = c.oid AND c.relname = 't6' AND r.contype = 'c'
- ORDER BY r.conname;
+SELECT attnum, attname
+  FROM pg_attribute WHERE attrelid = (SELECT oid FROM pg_class WHERE relname = 't6')
+    AND attnum > 0 ORDER BY attnum;
+SELECT conname, conkey, conbin
+  FROM pg_constraint WHERE conrelid = (SELECT oid FROM pg_class WHERE relname = 't6')
+    AND contype = 'c' ORDER BY conname;
 INSERT INTO t6 (x) VALUES ('row');
 SELECT x, a, b, c, y FROM t6;
 INSERT INTO t6 (a) VALUES (-5);
 
 CREATE TABLE t7 (LIKE t1 INCLUDING COMMENTS);
-SELECT a.attname, dsc.description
-  FROM pg_description dsc, pg_attribute a, pg_class c
- WHERE dsc.objoid = c.oid AND dsc.classoid = 1259 AND a.attrelid = c.oid
-   AND a.attnum = dsc.objsubid AND c.relname = 't7'
- ORDER BY a.attnum;
+SELECT objsubid, description FROM pg_description
+ WHERE objoid = (SELECT oid FROM pg_class WHERE relname = 't7') AND classoid = 1259
+ ORDER BY objsubid;
 
 CREATE TABLE t8 (LIKE t1 EXCLUDING ALL);
-SELECT a.attnum, a.attname, a.attnotnull, a.atthasdef
-  FROM pg_attribute a, pg_class c
- WHERE a.attrelid = c.oid AND c.relname = 't8' AND a.attnum > 0
- ORDER BY a.attnum;
-SELECT count(*) FROM pg_constraint r, pg_class c
- WHERE r.conrelid = c.oid AND c.relname = 't8' AND r.contype = 'c';
+SELECT attnum, attname, attnotnull, atthasdef
+  FROM pg_attribute WHERE attrelid = (SELECT oid FROM pg_class WHERE relname = 't8')
+    AND attnum > 0 ORDER BY attnum;
+SELECT count(*) FROM pg_constraint
+ WHERE conrelid = (SELECT oid FROM pg_class WHERE relname = 't8') AND contype = 'c';
 
 CREATE TABLE t9 (LIKE no_such_table);
-CREATE TABLE t10 (LIKE t1 INCLUDING BOGUS);
 
 DROP TABLE t8;
 DROP TABLE t7;

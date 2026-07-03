@@ -457,6 +457,43 @@ fn lookup_pg_class_relid_by_name(relname: &str, relnamespace: Oid) -> PgResult<O
     )
 }
 
+const ANUM_PG_ATTRIBUTE_ATTNAME: i32 = 2;
+const ANUM_PG_ATTRIBUTE_ATTTYPID: i32 = 3;
+const ANUM_PG_ATTRIBUTE_ATTTYPMOD: i32 = 6;
+const ANUM_PG_ATTRIBUTE_ATTGENERATED: i32 = 16;
+const ANUM_PG_ATTRIBUTE_ATTISDROPPED2: i32 = 17;
+const ANUM_PG_ATTRIBUTE_ATTCOLLATION: i32 = 20;
+
+fn lookup_pg_attribute_shape(
+    relid: Oid,
+    attnum: types_core::AttrNumber,
+) -> PgResult<Option<syscache_seams::PgAttributeLsShape>> {
+    let Some(tuple) = SearchSysCache2(
+        ATTNUM,
+        SysCacheKey::Value(Datum::from_oid(relid)),
+        SysCacheKey::Value(Datum::from_i16(attnum)),
+    )?
+    else {
+        return Ok(None);
+    };
+    let t = tuple.tuple();
+    if getattr(&t, ATTNUM, ANUM_PG_ATTRIBUTE_ATTISDROPPED2).as_bool() {
+        drop(t);
+        ReleaseSysCache(tuple);
+        return Ok(None);
+    }
+    let shape = syscache_seams::PgAttributeLsShape {
+        attname: getattr_name(&t, ATTNUM, ANUM_PG_ATTRIBUTE_ATTNAME),
+        atttypid: getattr(&t, ATTNUM, ANUM_PG_ATTRIBUTE_ATTTYPID).as_oid(),
+        atttypmod: getattr(&t, ATTNUM, ANUM_PG_ATTRIBUTE_ATTTYPMOD).as_i32(),
+        attcollation: getattr(&t, ATTNUM, ANUM_PG_ATTRIBUTE_ATTCOLLATION).as_oid(),
+        attgenerated: getattr(&t, ATTNUM, ANUM_PG_ATTRIBUTE_ATTGENERATED).as_i8(),
+    };
+    drop(t);
+    ReleaseSysCache(tuple);
+    Ok(Some(shape))
+}
+
 // get_attnum (lsyscache.c): InvalidAttrNumber when no such column.
 fn lookup_pg_attribute_attnum_by_name(
     relid: Oid,
@@ -1492,6 +1529,7 @@ pub(crate) fn install() {
     syscache_seams::pg_constraint_fk_target::set(pg_constraint_fk_target);
     syscache_seams::lookup_pg_type_shape::set(lookup_pg_type_shape);
     syscache_seams::lookup_pg_sequence_form::set(lookup_pg_sequence_form);
+    syscache_seams::lookup_pg_attribute_shape::set(lookup_pg_attribute_shape);
     syscache_seams::lookup_pg_attribute_attnum_by_name::set(lookup_pg_attribute_attnum_by_name);
     syscache_seams::pg_type_isdefined::set(pg_type_isdefined);
     syscache_seams::pg_type_typtype::set(pg_type_typtype);
