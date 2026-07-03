@@ -172,12 +172,9 @@ fn pagestate<'mcx>(wstate: &mut BTWriteState<'_, '_>, level: u32) -> BTPageState
     BTPageState { buf, blkno, lowkey: None, lastoff: P_HIKEY, level, full }
 }
 
-// BTGetTargetPageFreeSpace; reloptions fillfactor rides the reloptions lane.
+// BTGetTargetPageFreeSpace
 fn bt_get_target_page_free_space(index: &Relation<'_>) -> usize {
-    if index.rd_options.is_some() {
-        unported("BTGetTargetPageFreeSpace: btree reloptions fillfactor");
-    }
-    BLCKSZ * (100 - BTREE_DEFAULT_FILLFACTOR as usize) / 100
+    BLCKSZ * (100 - index.get_fillfactor(BTREE_DEFAULT_FILLFACTOR as i32) as usize) / 100
 }
 
 fn slideleft(page: &mut PageMut<'_>) {

@@ -33,20 +33,19 @@ fn unported(what: &str) -> ! {
     panic!("unported: {what}")
 }
 
-/// BrinGetPagesPerRange: reloptions are loud at DefineIndex, so every live
-/// index carries the default.
+/// BrinGetPagesPerRange / BrinGetAutoSummarize
 pub fn brin_get_pages_per_range(rel: &Relation<'_>) -> BlockNumber {
-    if rel.rd_options.is_some() {
-        unported("BRIN reloptions (pages_per_range/autosummarize)");
+    match rel.rd_options.as_ref().and_then(|o| o.brin()) {
+        Some(o) => o.pages_per_range as BlockNumber,
+        None => BRIN_DEFAULT_PAGES_PER_RANGE,
     }
-    BRIN_DEFAULT_PAGES_PER_RANGE
 }
 
 fn brin_get_auto_summarize(rel: &Relation<'_>) -> bool {
-    if rel.rd_options.is_some() {
-        unported("BRIN reloptions (pages_per_range/autosummarize)");
+    match rel.rd_options.as_ref().and_then(|o| o.brin()) {
+        Some(o) => o.autosummarize,
+        None => false,
     }
-    false
 }
 
 pub fn brin_build_desc<'mcx>(mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgResult<BrinDesc<'mcx>> {
