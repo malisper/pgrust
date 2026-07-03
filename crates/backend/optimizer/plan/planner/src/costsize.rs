@@ -211,6 +211,49 @@ fn cost_qual_eval_walker(node: Node<'_>, cost: &mut QualCost) -> PgResult<()> {
             }
         }
         NodeTag::T_CoerceToDomainValue => Ok(()),
+        // C charges JsonExpr cpu_operator_cost; the constructor/predicate
+        // nodes are free themselves, children charged (default arm).
+        NodeTag::T_JsonExpr => {
+            let j = node.as_json_expr().unwrap();
+            cost.per_tuple += gucs::cpu_operator_cost();
+            for e in [j.formatted_expr, j.path_spec, j.on_empty, j.on_error]
+                .into_iter()
+                .flatten()
+            {
+                cost_qual_eval_walker(e, cost)?;
+            }
+            for v in &j.passing_values {
+                cost_qual_eval_walker(v, cost)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_JsonValueExpr => {
+            let j = node.as_json_value_expr().unwrap();
+            for e in [j.raw_expr, j.formatted_expr].into_iter().flatten() {
+                cost_qual_eval_walker(e, cost)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_JsonConstructorExpr => {
+            let c = node.as_json_constructor_expr().unwrap();
+            for arg in &c.args {
+                cost_qual_eval_walker(arg, cost)?;
+            }
+            for e in [c.func, c.coercion].into_iter().flatten() {
+                cost_qual_eval_walker(e, cost)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_JsonIsPredicate => {
+            match node.as_json_is_predicate().unwrap().expr {
+                Some(e) => cost_qual_eval_walker(e, cost),
+                None => Ok(()),
+            }
+        }
+        NodeTag::T_JsonBehavior => match node.as_json_behavior().unwrap().expr {
+            Some(e) => cost_qual_eval_walker(e, cost),
+            None => Ok(()),
+        },
         other => panic!("cost_qual_eval_walker (costsize.c): {other:?}; M2 expression lane"),
     }
 }

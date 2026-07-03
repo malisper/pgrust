@@ -39,6 +39,9 @@ pub use primnodes::{
     Alias, ArrayExpr, BoolExpr, BoolExprType, BoolTestType, BooleanTest, CaseTestExpr,
     CoerceToDomain, CoerceToDomainValue, CoerceViaIO, CoercionForm, CollateExpr, Const,
     DistinctExpr, FromExpr, FuncExpr, InferenceElem, JoinExpr, NullTest, NullTestType,
+    JsonBehavior, JsonBehaviorType, JsonConstructorExpr, JsonConstructorType, JsonEncoding,
+    JsonExpr, JsonExprOp, JsonFormat, JsonFormatType, JsonIsPredicate, JsonReturning,
+    JsonValueExpr, JsonValueType, JsonWrapper,
     OnConflictAction, OnConflictExpr, OpExpr, OverridingKind, Param, ParamKind, RangeTblRef,
     RangeVar, RelabelType, RowExpr, SQLValueFunction, SQLValueFunctionOp, ScalarArrayOpExpr,
     SetToDefault, SubLink, SubLinkType, SubPlan, TargetEntry, Var, VarReturningType,
@@ -47,7 +50,10 @@ pub use plannodes::ModifyTable;
 pub use rawnodes::{
     A_Const, A_Expr, A_Expr_Kind, A_Star, AlterEnumStmt, AlterSeqStmt, CollateClause, ColumnRef,
     CreateDomainStmt, CreateEnumStmt, CreateSeqStmt, DeleteStmt, DistinctClause, FuncCall, IndexElem, IndexStmt,
-    InferClause, InsertStmt, LockingClause, OnConflictClause, ParamRef, RangeFunction, RawStmt,
+    InferClause, InsertStmt, JsonAggConstructor, JsonArgument, JsonArrayAgg,
+    JsonArrayConstructor, JsonArrayQueryConstructor, JsonFuncExpr, JsonKeyValue, JsonObjectAgg,
+    JsonObjectConstructor, JsonOutput, JsonParseExpr, JsonQuotes, JsonScalarExpr,
+    JsonSerializeExpr, LockingClause, OnConflictClause, ParamRef, RangeFunction, RawStmt,
     ResTarget, ReturningClause, SelectStmt, SortBy, SortByDir, SortByNulls, TypeCast, TypeName,
     UpdateStmt, ValUnion,
 };

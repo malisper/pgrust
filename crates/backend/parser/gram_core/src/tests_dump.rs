@@ -828,9 +828,156 @@ fn node(out: &mut String, n: Node<'_>) {
         int_field(out, "strength", lc.strength as i32);
         int_field(out, "waitPolicy", lc.waitPolicy as i32);
         out.push('}');
+    } else if let Some(f) = n.as_json_format() {
+        json_format(out, f);
+    } else if let Some(r) = n.as_json_returning() {
+        json_returning(out, r);
+    } else if let Some(v) = n.as_json_value_expr() {
+        out.push_str("{JSONVALUEEXPR");
+        node_field(out, "raw_expr", v.raw_expr);
+        node_field(out, "formatted_expr", v.formatted_expr);
+        json_format_field(out, "format", v.format);
+        out.push('}');
+    } else if let Some(b) = n.as_json_behavior() {
+        out.push_str("{JSONBEHAVIOR");
+        int_field(out, "btype", b.btype as i32);
+        node_field(out, "expr", b.expr);
+        bool_field(out, "coerce", b.coerce);
+        int_field(out, "location", b.location);
+        out.push('}');
+    } else if let Some(p) = n.as_json_is_predicate() {
+        out.push_str("{JSONISPREDICATE");
+        node_field(out, "expr", p.expr);
+        json_format_field(out, "format", p.format);
+        int_field(out, "item_type", p.item_type as i32);
+        bool_field(out, "unique_keys", p.unique_keys);
+        int_field(out, "location", p.location);
+        out.push('}');
+    } else if let Some(o) = n.as_json_output() {
+        out.push_str("{JSONOUTPUT");
+        node_field(out, "typeName", o.typeName);
+        out.push_str(" :returning ");
+        match o.returning {
+            Some(r) => json_returning(out, r),
+            None => out.push_str("<>"),
+        }
+        out.push('}');
+    } else if let Some(a) = n.as_json_argument() {
+        out.push_str("{JSONARGUMENT");
+        node_field(out, "val", a.val);
+        string_field(out, "name", a.name);
+        out.push('}');
+    } else if let Some(f) = n.as_json_func_expr() {
+        out.push_str("{JSONFUNCEXPR");
+        int_field(out, "op", f.op as i32);
+        string_field(out, "column_name", f.column_name);
+        node_field(out, "context_item", f.context_item);
+        node_field(out, "pathspec", f.pathspec);
+        list_field(out, "passing", &f.passing);
+        node_field(out, "output", f.output);
+        node_field(out, "on_empty", f.on_empty);
+        node_field(out, "on_error", f.on_error);
+        int_field(out, "wrapper", f.wrapper as i32);
+        int_field(out, "quotes", f.quotes as i32);
+        int_field(out, "location", f.location);
+        out.push('}');
+    } else if let Some(kv) = n.as_json_key_value() {
+        out.push_str("{JSONKEYVALUE");
+        node_field(out, "key", kv.key);
+        node_field(out, "value", kv.value);
+        out.push('}');
+    } else if let Some(p) = n.as_json_parse_expr() {
+        out.push_str("{JSONPARSEEXPR");
+        node_field(out, "expr", p.expr);
+        node_field(out, "output", p.output);
+        bool_field(out, "unique_keys", p.unique_keys);
+        int_field(out, "location", p.location);
+        out.push('}');
+    } else if let Some(s) = n.as_json_scalar_expr() {
+        out.push_str("{JSONSCALAREXPR");
+        node_field(out, "expr", s.expr);
+        node_field(out, "output", s.output);
+        int_field(out, "location", s.location);
+        out.push('}');
+    } else if let Some(s) = n.as_json_serialize_expr() {
+        out.push_str("{JSONSERIALIZEEXPR");
+        node_field(out, "expr", s.expr);
+        node_field(out, "output", s.output);
+        int_field(out, "location", s.location);
+        out.push('}');
+    } else if let Some(c) = n.as_json_object_constructor() {
+        out.push_str("{JSONOBJECTCONSTRUCTOR");
+        list_field(out, "exprs", &c.exprs);
+        node_field(out, "output", c.output);
+        bool_field(out, "absent_on_null", c.absent_on_null);
+        bool_field(out, "unique", c.unique);
+        int_field(out, "location", c.location);
+        out.push('}');
+    } else if let Some(c) = n.as_json_array_constructor() {
+        out.push_str("{JSONARRAYCONSTRUCTOR");
+        list_field(out, "exprs", &c.exprs);
+        node_field(out, "output", c.output);
+        bool_field(out, "absent_on_null", c.absent_on_null);
+        int_field(out, "location", c.location);
+        out.push('}');
+    } else if let Some(c) = n.as_json_array_query_constructor() {
+        out.push_str("{JSONARRAYQUERYCONSTRUCTOR");
+        node_field(out, "query", c.query);
+        node_field(out, "output", c.output);
+        json_format_field(out, "format", c.format);
+        bool_field(out, "absent_on_null", c.absent_on_null);
+        int_field(out, "location", c.location);
+        out.push('}');
+    } else if let Some(c) = n.as_json_agg_constructor() {
+        out.push_str("{JSONAGGCONSTRUCTOR");
+        node_field(out, "output", c.output);
+        node_field(out, "agg_filter", c.agg_filter);
+        list_field(out, "agg_order", &c.agg_order);
+        node_field(out, "over", c.over);
+        int_field(out, "location", c.location);
+        out.push('}');
+    } else if let Some(a) = n.as_json_object_agg() {
+        out.push_str("{JSONOBJECTAGG");
+        node_field(out, "constructor", a.constructor);
+        node_field(out, "arg", a.arg);
+        bool_field(out, "absent_on_null", a.absent_on_null);
+        bool_field(out, "unique", a.unique);
+        out.push('}');
+    } else if let Some(a) = n.as_json_array_agg() {
+        out.push_str("{JSONARRAYAGG");
+        node_field(out, "constructor", a.constructor);
+        node_field(out, "arg", a.arg);
+        bool_field(out, "absent_on_null", a.absent_on_null);
+        out.push('}');
     } else {
         panic!("tests_dump: unrendered node tag {:?}", n.node_tag());
     }
+}
+
+fn json_format(out: &mut String, f: &types_nodes::JsonFormat) {
+    out.push_str("{JSONFORMAT");
+    int_field(out, "format_type", f.format_type as i32);
+    int_field(out, "encoding", f.encoding as i32);
+    int_field(out, "location", f.location);
+    out.push('}');
+}
+
+fn json_format_field(out: &mut String, name: &str, f: Option<&types_nodes::JsonFormat>) {
+    out.push_str(" :");
+    out.push_str(name);
+    out.push(' ');
+    match f {
+        Some(f) => json_format(out, f),
+        None => out.push_str("<>"),
+    }
+}
+
+fn json_returning(out: &mut String, r: &types_nodes::JsonReturning<'_>) {
+    out.push_str("{JSONRETURNING");
+    json_format_field(out, "format", r.format);
+    int_field(out, "typid", r.typid as i32);
+    int_field(out, "typmod", r.typmod);
+    out.push('}');
 }
 
 fn role_spec(out: &mut String, r: &types_nodes::parsenodes::RoleSpec<'_>) {

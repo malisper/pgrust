@@ -252,8 +252,291 @@ pub(crate) fn get_rule_expr<'mcx>(
             }
             Ok(())
         }
+        NodeTag::T_JsonValueExpr => {
+            let jve = node.as_json_value_expr().unwrap();
+            get_rule_expr(jve.raw_expr.expect("raw_expr"), ctx, false)?;
+            get_json_format(jve.format, ctx);
+            Ok(())
+        }
+        NodeTag::T_JsonConstructorExpr => {
+            get_json_constructor(node.as_json_constructor_expr().unwrap(), ctx, false)
+        }
+        NodeTag::T_JsonIsPredicate => {
+            let pred = node.as_json_is_predicate().unwrap();
+            if !ctx.pretty_paren() {
+                ctx.buf.push('(');
+            }
+            get_rule_expr_paren(pred.expr.expect("expr"), ctx, true, Some(node))?;
+            ctx.buf.push_str(" IS JSON");
+            match pred.item_type {
+                types_nodes::JsonValueType::JS_TYPE_SCALAR => ctx.buf.push_str(" SCALAR"),
+                types_nodes::JsonValueType::JS_TYPE_ARRAY => ctx.buf.push_str(" ARRAY"),
+                types_nodes::JsonValueType::JS_TYPE_OBJECT => ctx.buf.push_str(" OBJECT"),
+                types_nodes::JsonValueType::JS_TYPE_ANY => {}
+            }
+            if pred.unique_keys {
+                ctx.buf.push_str(" WITH UNIQUE KEYS");
+            }
+            if !ctx.pretty_paren() {
+                ctx.buf.push(')');
+            }
+            Ok(())
+        }
+        NodeTag::T_JsonExpr => get_json_expr(node.as_json_expr().unwrap(), ctx, showimplicit),
         other => gap("get_rule_expr", &format!("{other:?} deparse arm")),
     }
+}
+
+fn get_json_format(format: Option<&types_nodes::JsonFormat>, ctx: &mut DeparseContext<'_>) {
+    use types_nodes::primnodes::{JsonEncoding, JsonFormatType};
+    let Some(format) = format else { return };
+    if format.format_type == JsonFormatType::JS_FORMAT_DEFAULT {
+        return;
+    }
+    ctx.buf.push_str(if format.format_type == JsonFormatType::JS_FORMAT_JSONB {
+        " FORMAT JSONB"
+    } else {
+        " FORMAT JSON"
+    });
+    if format.encoding != JsonEncoding::JS_ENC_DEFAULT {
+        ctx.buf.push_str(" ENCODING ");
+        ctx.buf.push_str(match format.encoding {
+            JsonEncoding::JS_ENC_UTF16 => "UTF16",
+            JsonEncoding::JS_ENC_UTF32 => "UTF32",
+            _ => "UTF8",
+        });
+    }
+}
+
+fn get_json_returning(
+    returning: &types_nodes::JsonReturning<'_>,
+    ctx: &mut DeparseContext<'_>,
+    json_format_by_default: bool,
+) -> PgResult<()> {
+    use types_nodes::primnodes::JsonFormatType;
+    if returning.typid == 0 {
+        return Ok(());
+    }
+    ctx.buf.push_str(" RETURNING ");
+    ctx.buf.push_str(&format_type_with_typemod(returning.typid, returning.typmod)?);
+    let expected = if returning.typid == types_core::catalog::JSONBOID {
+        JsonFormatType::JS_FORMAT_JSONB
+    } else {
+        JsonFormatType::JS_FORMAT_JSON
+    };
+    if !json_format_by_default
+        || returning.format.expect("format").format_type != expected
+    {
+        get_json_format(returning.format, ctx);
+    }
+    Ok(())
+}
+
+fn get_json_constructor_options(
+    ctor: &types_nodes::JsonConstructorExpr<'_>,
+    ctx: &mut DeparseContext<'_>,
+) -> PgResult<()> {
+    use types_nodes::JsonConstructorType as JC;
+    if ctor.absent_on_null {
+        if matches!(ctor.r#type, JC::JSCTOR_JSON_OBJECT | JC::JSCTOR_JSON_OBJECTAGG) {
+            ctx.buf.push_str(" ABSENT ON NULL");
+        }
+    } else if matches!(ctor.r#type, JC::JSCTOR_JSON_ARRAY | JC::JSCTOR_JSON_ARRAYAGG) {
+        ctx.buf.push_str(" NULL ON NULL");
+    }
+    if ctor.unique {
+        ctx.buf.push_str(" WITH UNIQUE KEYS");
+    }
+    if !matches!(ctor.r#type, JC::JSCTOR_JSON_PARSE | JC::JSCTOR_JSON_SCALAR) {
+        get_json_returning(ctor.returning.expect("returning"), ctx, true)?;
+    }
+    Ok(())
+}
+
+fn get_json_constructor<'mcx>(
+    ctor: &'mcx types_nodes::JsonConstructorExpr<'mcx>,
+    ctx: &mut DeparseContext<'mcx>,
+    _showimplicit: bool,
+) -> PgResult<()> {
+    use types_nodes::JsonConstructorType as JC;
+    match ctor.r#type {
+        JC::JSCTOR_JSON_OBJECTAGG => {
+            return get_json_agg_constructor(ctor, ctx, "JSON_OBJECTAGG", true)
+        }
+        JC::JSCTOR_JSON_ARRAYAGG => {
+            return get_json_agg_constructor(ctor, ctx, "JSON_ARRAYAGG", false)
+        }
+        _ => {}
+    }
+    let funcname = match ctor.r#type {
+        JC::JSCTOR_JSON_OBJECT => "JSON_OBJECT",
+        JC::JSCTOR_JSON_ARRAY => "JSON_ARRAY",
+        JC::JSCTOR_JSON_PARSE => "JSON",
+        JC::JSCTOR_JSON_SCALAR => "JSON_SCALAR",
+        JC::JSCTOR_JSON_SERIALIZE => "JSON_SERIALIZE",
+        other => panic!("invalid JsonConstructorType {other:?}"),
+    };
+    ctx.buf.push_str(funcname);
+    ctx.buf.push('(');
+    let is_json_object = ctor.r#type == JC::JSCTOR_JSON_OBJECT;
+    for (curridx, arg) in ctor.args.iter().enumerate() {
+        if curridx > 0 {
+            ctx.buf.push_str(if is_json_object && curridx % 2 != 0 { " : " } else { ", " });
+        }
+        get_rule_expr(arg, ctx, true)?;
+    }
+    get_json_constructor_options(ctor, ctx)?;
+    ctx.buf.push(')');
+    Ok(())
+}
+
+fn get_json_agg_constructor<'mcx>(
+    ctor: &'mcx types_nodes::JsonConstructorExpr<'mcx>,
+    ctx: &mut DeparseContext<'mcx>,
+    funcname: &str,
+    is_json_objectagg: bool,
+) -> PgResult<()> {
+    let func = ctor.func.expect("func");
+    let Some(aggref) = func.as_aggref() else {
+        gap("get_json_agg_constructor", "WindowFunc (OVER) deparse");
+    };
+    // get_agg_expr_helper: funcname override + options suffix.
+    if aggref.aggsplit != types_nodes::primnodes::AGGSPLIT_SIMPLE {
+        gap("get_json_agg_constructor", "partial/combining aggregate deparse");
+    }
+    ctx.buf.push_str(funcname);
+    ctx.buf.push('(');
+    let mut i = 0;
+    for tle_node in aggref.args.iter() {
+        let tle = tle_node.as_target_entry().expect("Aggref args are TargetEntries");
+        if tle.resjunk {
+            continue;
+        }
+        if i > 0 {
+            ctx.buf.push_str(if is_json_objectagg { " : " } else { ", " });
+        }
+        i += 1;
+        get_rule_expr(tle.expr, ctx, true)?;
+    }
+    if !aggref.aggorder.is_nil() {
+        ctx.buf.push_str(" ORDER BY ");
+        query::get_rule_orderby(&aggref.aggorder, &aggref.args, false, ctx)?;
+    }
+    get_json_constructor_options(ctor, ctx)?;
+    if let Some(filter) = aggref.aggfilter {
+        ctx.buf.push_str(") FILTER (WHERE ");
+        get_rule_expr(filter, ctx, false)?;
+    }
+    ctx.buf.push(')');
+    Ok(())
+}
+
+fn get_json_behavior<'mcx>(
+    behavior: &types_nodes::JsonBehavior<'mcx>,
+    ctx: &mut DeparseContext<'mcx>,
+    on: &str,
+) -> PgResult<()> {
+    use types_nodes::JsonBehaviorType::*;
+    ctx.buf.push_str(match behavior.btype {
+        JSON_BEHAVIOR_NULL => " NULL",
+        JSON_BEHAVIOR_ERROR => " ERROR",
+        JSON_BEHAVIOR_EMPTY => " EMPTY",
+        JSON_BEHAVIOR_TRUE => " TRUE",
+        JSON_BEHAVIOR_FALSE => " FALSE",
+        JSON_BEHAVIOR_UNKNOWN => " UNKNOWN",
+        JSON_BEHAVIOR_EMPTY_ARRAY => " EMPTY ARRAY",
+        JSON_BEHAVIOR_EMPTY_OBJECT => " EMPTY OBJECT",
+        JSON_BEHAVIOR_DEFAULT => " DEFAULT ",
+    });
+    if behavior.btype == JSON_BEHAVIOR_DEFAULT {
+        get_rule_expr(behavior.expr.expect("DEFAULT expr"), ctx, false)?;
+    }
+    ctx.buf.push_str(" ON ");
+    ctx.buf.push_str(on);
+    Ok(())
+}
+
+fn get_json_expr_options<'mcx>(
+    jexpr: &types_nodes::JsonExpr<'mcx>,
+    ctx: &mut DeparseContext<'mcx>,
+    default_behavior: types_nodes::JsonBehaviorType,
+) -> PgResult<()> {
+    use types_nodes::JsonExprOp;
+    use types_nodes::JsonWrapper::*;
+    if jexpr.op == JsonExprOp::JSON_QUERY_OP {
+        match jexpr.wrapper {
+            JSW_CONDITIONAL => ctx.buf.push_str(" WITH CONDITIONAL WRAPPER"),
+            JSW_UNCONDITIONAL => ctx.buf.push_str(" WITH UNCONDITIONAL WRAPPER"),
+            JSW_NONE | JSW_UNSPEC => ctx.buf.push_str(" WITHOUT WRAPPER"),
+        }
+        ctx.buf.push_str(if jexpr.omit_quotes { " OMIT QUOTES" } else { " KEEP QUOTES" });
+    }
+    if let Some(oe) = jexpr.on_empty {
+        let b = oe.as_json_behavior().expect("JsonBehavior");
+        if b.btype != default_behavior {
+            get_json_behavior(b, ctx, "EMPTY")?;
+        }
+    }
+    if let Some(oe) = jexpr.on_error {
+        let b = oe.as_json_behavior().expect("JsonBehavior");
+        if b.btype != default_behavior {
+            get_json_behavior(b, ctx, "ERROR")?;
+        }
+    }
+    Ok(())
+}
+
+fn get_json_expr<'mcx>(
+    jexpr: &'mcx types_nodes::JsonExpr<'mcx>,
+    ctx: &mut DeparseContext<'mcx>,
+    showimplicit: bool,
+) -> PgResult<()> {
+    use types_nodes::JsonBehaviorType;
+    use types_nodes::JsonExprOp::*;
+    ctx.buf.push_str(match jexpr.op {
+        JSON_EXISTS_OP => "JSON_EXISTS(",
+        JSON_QUERY_OP => "JSON_QUERY(",
+        JSON_VALUE_OP => "JSON_VALUE(",
+        JSON_TABLE_OP => panic!("unrecognized JsonExpr op"),
+    });
+    get_rule_expr(jexpr.formatted_expr.expect("formatted_expr"), ctx, showimplicit)?;
+    ctx.buf.push_str(", ");
+    let path_spec = jexpr.path_spec.expect("path_spec");
+    if let Some(c) = path_spec.as_const() {
+        get_const_expr(c, ctx, -1)?;
+    } else {
+        get_rule_expr(path_spec, ctx, showimplicit)?;
+    }
+    if !jexpr.passing_values.is_nil() {
+        ctx.buf.push_str(" PASSING ");
+        let mut needcomma = false;
+        for (name, value) in jexpr.passing_names.iter().zip(jexpr.passing_values.iter()) {
+            if needcomma {
+                ctx.buf.push_str(", ");
+            }
+            needcomma = true;
+            get_rule_expr(value, ctx, showimplicit)?;
+            ctx.buf.push_str(" AS ");
+            ctx.buf.push_str(&quote_identifier(
+                name.as_string().expect("passing name").sval,
+            ));
+        }
+    }
+    let returning = jexpr.returning.expect("returning");
+    if jexpr.op != JSON_EXISTS_OP || returning.typid != types_core::catalog::BOOLOID {
+        get_json_returning(returning, ctx, jexpr.op == JSON_QUERY_OP)?;
+    }
+    get_json_expr_options(
+        jexpr,
+        ctx,
+        if jexpr.op != JSON_EXISTS_OP {
+            JsonBehaviorType::JSON_BEHAVIOR_NULL
+        } else {
+            JsonBehaviorType::JSON_BEHAVIOR_FALSE
+        },
+    )?;
+    ctx.buf.push(')');
+    Ok(())
 }
 
 pub(crate) fn get_rule_expr_paren<'mcx>(

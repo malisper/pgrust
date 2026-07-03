@@ -157,6 +157,24 @@ pub fn json_strip_nulls<'mcx>(
     varlena::cstring_to_text(mcx, out.as_bytes())
 }
 
+/// C: json_validate (json.c). unique-keys lane (json_unique hash) unported.
+pub fn json_validate(json: &[u8], check_unique_keys: bool, throw_error: bool) -> PgResult<bool> {
+    assert!(
+        !check_unique_keys,
+        "json_validate: WITH UNIQUE KEYS (json_unique hash) unported — sqljson-lane loud"
+    );
+    let mut lex = JsonLex::new(json, mbutils::GetDatabaseEncoding());
+    let r = crate::jsonapi::parse(&mut lex)?;
+    if r != JsonError::Success {
+        if throw_error {
+            crate::errsave_parse_error(r, &lex, None)?;
+            unreachable!("hard errsave without escontext returns Err");
+        }
+        return Ok(false);
+    }
+    Ok(true)
+}
+
 /// C: json_typeof — a single json_lex over the validated text.
 pub fn json_typeof(json: &[u8]) -> PgResult<&'static str> {
     let mut lex = JsonLex::new(json, mbutils::GetDatabaseEncoding());

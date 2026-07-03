@@ -48,6 +48,40 @@ pub(crate) fn arg_jsonb<'a, 'mcx>(
     varlena::open_image(mcx, image)
 }
 
+/// C: json_get_first_token (jsonfuncs.c), throw_error=false form:
+/// None = lex error.
+pub fn json_get_first_token(
+    json: &[u8],
+) -> PgResult<Option<adt_json::jsonapi::JsonToken>> {
+    let mut lex = adt_json::jsonapi::JsonLex::new(json, mbutils::GetDatabaseEncoding());
+    let r = lex.lex();
+    if r != adt_json::jsonapi::JsonError::Success {
+        return Ok(None);
+    }
+    Ok(Some(lex.token_type))
+}
+
+/// arg_jsonb over a bare Datum (executor step paths carry no fcinfo).
+/// # Safety: `d` is a non-null jsonb varlena live for `'mcx`.
+pub unsafe fn jsonb_payload_from_datum<'mcx>(
+    mcx: Mcx<'mcx>,
+    d: Datum,
+) -> PgResult<VarPayload<'mcx, 'mcx>> {
+    let p = d.as_usize() as *const u8;
+    // SAFETY: caller contract — a live varlena readable through VARSIZE_ANY.
+    let image = unsafe {
+        core::slice::from_raw_parts(p, types_tuple::varatt::varsize_any(p))
+    };
+    if image[0] & 0x01 == 0x01 && image[0] != 0x01 {
+        let payload = &image[1..];
+        let mut v: PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, 4 + payload.len())?;
+        mcx::vec_append_bytes(&mut v, &(((4 + payload.len()) as u32) << 2).to_ne_bytes())?;
+        mcx::vec_append_bytes(&mut v, payload)?;
+        return Ok(VarPayload::Detoasted(v));
+    }
+    varlena::open_image(mcx, image)
+}
+
 pub fn fc_jsonb_in(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: catalog arg 0 of jsonb_in is a non-null cstring (strict fn).
     let (d, had_esc) = {

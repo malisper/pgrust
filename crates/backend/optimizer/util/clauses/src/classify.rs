@@ -87,9 +87,27 @@ impl<'mcx> NodeWalker<'mcx> for ContainMutable {
             return Ok(true);
         }
         match node.node_tag() {
-            t @ (NodeTag::T_JsonConstructorExpr | NodeTag::T_JsonExpr) => {
-                deferred("contain_mutable_functions: json immutability probe", t)
+            NodeTag::T_JsonConstructorExpr => {
+                let c = node.as_json_constructor_expr().unwrap();
+                let is_jsonb = c.returning.expect("returning").format.expect("format").format_type
+                    == types_nodes::primnodes::JsonFormatType::JS_FORMAT_JSONB;
+                for arg in &c.args {
+                    let typid = nodes_core::node_funcs::expr_type(arg);
+                    let immutable = if is_jsonb {
+                        adt_jsonb::tojsonb::to_jsonb_is_immutable(typid)?
+                    } else {
+                        adt_json::tojson::to_json_is_immutable(typid)?
+                    };
+                    if !immutable {
+                        return Ok(true);
+                    }
+                }
+                expression_tree_walker(node, self)
             }
+            // jspIsMutable (jsonpath.c) is jsonpath-lane scope: constant
+            // immutable paths are conservatively treated as mutable until it
+            // lands (C clauses.c:416; blocks const-folding only).
+            NodeTag::T_JsonExpr => Ok(true),
             // All SQLValueFunction variants are stable; NextValueExpr volatile.
             NodeTag::T_SQLValueFunction | NodeTag::T_NextValueExpr => Ok(true),
             NodeTag::T_GroupingFunc => walk_grouping_func_args(node, self),

@@ -473,6 +473,32 @@ pub fn to_json<'mcx>(mcx: Mcx<'mcx>, val: Datum, val_type: Oid) -> PgResult<datu
     varlena::cstring_to_text(mcx, result.as_bytes())
 }
 
+/// C: to_json_is_immutable (json.c).
+pub fn to_json_is_immutable(typoid: Oid) -> PgResult<bool> {
+    use JsonTypeCategory::*;
+    let cat = json_categorize_type(typoid)?;
+    Ok(match cat.category {
+        Bool | Json | Jsonb | Null => true,
+        Date | Timestamp | Timestamptz => false,
+        Array => false,
+        Composite => false,
+        // 'i' = PROVOLATILE_IMMUTABLE.
+        Numeric | Other => lsyscache::func_volatile(cat.outfuncoid)? == b'i' as i8,
+    })
+}
+
+/// datum_to_json over a compile-resolved category carrier
+/// (execExprInterp.c ExecEvalJsonConstructor JSCTOR_JSON_SCALAR).
+pub fn datum_to_json_cat<'mcx>(
+    mcx: Mcx<'mcx>,
+    val: Datum,
+    cat: &mut TypeCat,
+) -> PgResult<datum::Varlena<'mcx>> {
+    let mut result = StringInfo::new_in(mcx)?;
+    datum_to_json_internal(mcx, &mut result, val, false, cat, false)?;
+    varlena::cstring_to_text(mcx, result.as_bytes())
+}
+
 #[cold]
 #[inline(never)]
 fn odd_argument_list() -> Box<PgError> {

@@ -9,7 +9,10 @@ name = "parse_expr"
 path = "src/lib.rs"
 
 [dependencies]
+adt_jsonb = { path = "../../utils/adt/jsonb" }
 analyze_seams = { path = "../analyze_seams" }
+datum = { path = "../../../_support/types/datum" }
+typcache_seams = { path = "../../utils/cache/typcache_seams" }
 coerce = { path = "../coerce" }
 catalog_namespace = { path = "../../catalog/catalog_namespace" }
 parse_collate_seams = { path = "../parse_collate_seams" }
