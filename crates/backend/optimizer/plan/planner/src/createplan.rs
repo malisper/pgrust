@@ -110,13 +110,62 @@ fn use_physical_tlist(run: &PlannerRun<'_>, best_path: PathId, flags: i32) -> bo
         }
     }
     let base = run.root.path(best_path).base();
+    // CP_LABEL_TLIST: labeled sort/group columns must be distinct simple Vars
+    // (they appear in the physical tlist and are relabeled by
+    // apply_pathtarget_labeling_to_tlist); anything else forces the path tlist.
     if flags & CP_LABEL_TLIST != 0 {
         let target = run.root.pathtarget(base.pathtarget_id.unwrap());
-        if target.sortgrouprefs.iter().any(|&s| s != 0) {
-            return false;
+        let mut sortgroupatts: mcx::PgVec<'_, i16> = mcx::PgVec::new_in(run.mcx);
+        for (i, &sgr) in target.sortgrouprefs.iter().enumerate() {
+            if sgr == 0 {
+                continue;
+            }
+            let expr = *run.root.expr_node(target.exprs[i]);
+            let Some(var) = expr.as_var() else {
+                return false;
+            };
+            if sortgroupatts.contains(&var.varattno) {
+                return false;
+            }
+            sortgroupatts.push(var.varattno);
         }
     }
     true
+}
+
+// apply_pathtarget_labeling_to_tlist (tlist.c), Var-only leg —
+// use_physical_tlist admitted only distinct simple-Var labels.
+fn apply_pathtarget_labeling_to_tlist(
+    run: &PlannerRun<'_>,
+    tlist: &NodeList<'_>,
+    target_id: PtId,
+) {
+    let target = run.root.pathtarget(target_id);
+    for (i, &sgr) in target.sortgrouprefs.iter().enumerate() {
+        if sgr == 0 {
+            continue;
+        }
+        let expr = *run.root.expr_node(target.exprs[i]);
+        let var = expr.as_var().expect("use_physical_tlist admitted only Var labels");
+        let tle_node = tlist
+            .iter()
+            .find(|n| {
+                let tle = n.as_target_entry().expect("TargetEntry");
+                tle.expr
+                    .as_var()
+                    .is_some_and(|v| v.varno == var.varno && v.varattno == var.varattno)
+            })
+            .expect("ORDER/GROUP BY expression not found in targetlist");
+        // SAFETY: physical-tlist entries were freshly built; no reference
+        // derived from them is live across this mutation.
+        unsafe {
+            tle_node.with_mut::<TargetEntry, _>(|tle| {
+                debug_assert!(tle.ressortgroupref == 0 || tle.ressortgroupref == sgr);
+                tle.ressortgroupref = sgr;
+            })
+        }
+        .expect("tlist cell is a TargetEntry");
+    }
 }
 
 // build_physical_tlist (plancat.c), heap-relation arm.
@@ -193,8 +242,8 @@ fn create_scan_plan<'mcx>(
             build_physical_tlist(run, rel_id)?
         };
         if flags & CP_LABEL_TLIST != 0 {
-            // apply_pathtarget_labeling_to_tlist: no sortgrouprefs to copy
-            // (use_physical_tlist refused any labeled target).
+            let target_id = run.root.path(best_path).base().pathtarget_id.unwrap();
+            apply_pathtarget_labeling_to_tlist(run, &physical, target_id);
         }
         physical
     } else {
