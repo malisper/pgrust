@@ -1406,70 +1406,14 @@ pub fn exprs_known_equal(
 }
 
 pub fn match_eclasses_to_foreign_key_col(
-    run: &mut PlannerRun<'_>,
-    fkinfo_idx: usize,
-    colno: usize,
+    _run: &mut PlannerRun<'_>,
+    _fkinfo_idx: usize,
+    _colno: usize,
 ) -> Option<EcId> {
-    let mcx = run.mcx;
-    let (var1varno, var1attno, var2varno, var2attno, eqop) = {
-        let fk = &run.root.fkey_list[fkinfo_idx];
-        (
-            fk.con_relid as i32,
-            fk.conkey[colno],
-            fk.ref_relid as i32,
-            fk.confkey[colno],
-            fk.conpfeqop[colno],
-        )
-    };
-    debug_assert!(run.root.ec_merging_done);
-    let rel1 = find_base_rel(&run.root, var1varno);
-    let rel2 = find_base_rel(&run.root, var2varno);
-    let matching_ecs = crate::relnode::relids_intersect(
-        mcx,
-        &run.root.rel(rel1).eclass_indexes,
-        &run.root.rel(rel2).eclass_indexes,
-    );
-    let mut opfamilies: Option<PgVec<'_, u32>> = None;
-    for i in relids_members(&matching_ecs) {
-        let ec = EcId(i as u32);
-        if run.root.ec(ec).ec_has_volatile {
-            continue;
-        }
-        let mut item1_em: Option<EmId> = None;
-        let mut item2_em: Option<EmId> = None;
-        for m in 0..run.root.ec(ec).ec_members.len() {
-            let em_id = run.root.ec(ec).ec_members[m];
-            debug_assert!(!run.root.em(em_id).em_is_child);
-            let mut expr = *run.root.expr_node(run.root.em(em_id).em_expr);
-            while expr.node_tag() == NodeTag::T_RelabelType {
-                expr = expr.as_relabel_type().unwrap().arg;
-            }
-            let Some(var) = expr.as_var() else { continue };
-            if var.varno == var1varno && var.varattno == var1attno {
-                item1_em = Some(em_id);
-            } else if var.varno == var2varno && var.varattno == var2attno {
-                item2_em = Some(em_id);
-            }
-            if let (Some(_), Some(em2)) = (item1_em, item2_em) {
-                if opfamilies.is_none() {
-                    opfamilies =
-                        Some(lsyscache::get_mergejoin_opfamilies(mcx, eqop).unwrap_or_else(
-                            |_| panic!("get_mergejoin_opfamilies failed for {eqop}"),
-                        ));
-                }
-                if opfamilies.as_ref().unwrap().as_slice()
-                    == run.root.ec(ec).ec_opfamilies.as_slice()
-                {
-                    let fk = &mut run.root.fkey_list[fkinfo_idx];
-                    fk.eclass[colno] = Some(ec);
-                    fk.fk_eclass_member[colno] = Some(em2);
-                    return Some(ec);
-                }
-                break;
-            }
-        }
-    }
-    None
+    panic!(
+        "match_eclasses_to_foreign_key_col (equivclass.c): fkey_list is empty until the \
+         FK-selectivity lane ports get_relation_foreign_keys"
+    )
 }
 
 pub fn find_derived_clause_for_ec_member(

@@ -546,29 +546,6 @@ fn match_join_clauses_to_index<'mcx>(
     Ok(())
 }
 
-// join_clause_is_movable_to (restrictinfo.c).
-fn join_clause_is_movable_to(run: &PlannerRun<'_>, rid: RinfoId, rel: RelId) -> bool {
-    let ri = run.root.rinfo(rid);
-    let baserel = run.root.rel(rel);
-    let relid = baserel.relid as i32;
-    if !relids_is_member(relid, &ri.clause_relids) {
-        return false;
-    }
-    if relids_is_member(relid, &ri.outer_relids) {
-        return false;
-    }
-    if crate::relnode::relids_overlap(&ri.clause_relids, &baserel.nulling_relids) {
-        return false;
-    }
-    if crate::relnode::relids_overlap(&baserel.lateral_referencers, &ri.clause_relids) {
-        return false;
-    }
-    if ri.is_clone {
-        return false;
-    }
-    true
-}
-
 // match_eclass_clauses_to_index (indxpath.c).
 fn match_eclass_clauses_to_index<'mcx>(
     run: &mut PlannerRun<'mcx>,
