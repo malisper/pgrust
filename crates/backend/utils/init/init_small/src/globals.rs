@@ -158,9 +158,14 @@ fn claim_interrupt_pending_flag() -> &'static std::sync::atomic::AtomicBool {
     flag
 }
 
-#[inline]
+// Per-tuple hot (C's `if (INTERRUPT_PENDING)` shape): leaf, no claim edge —
+// unclaimed reads false; every setter/publisher claims via
+// interrupt_pending_flag() first, so null never hides a raised interrupt.
+#[inline(always)]
 pub fn InterruptPending() -> bool {
-    interrupt_pending_flag().load(std::sync::atomic::Ordering::Relaxed)
+    let p = INTERRUPT_PENDING.get();
+    // SAFETY: only ever null or Box::leak'd.
+    !p.is_null() && unsafe { &*p }.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 #[inline]
