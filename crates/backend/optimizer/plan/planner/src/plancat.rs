@@ -401,7 +401,8 @@ fn copy_boundinfo_for_planner<'mcx>(
     let mut kinds: PgVec<'mcx, PgVec<'mcx, i8>> = PgVec::new_in(mcx);
     out.datums.reserve(bi.ndatums);
     for i in 0..bi.ndatums {
-        let mut row: PgVec<'mcx, DatumImage<'mcx>> = mcx::vec_with_capacity_in(mcx, width)?;
+        let mut row: PgVec<'mcx, DatumImage<'mcx>> = PgVec::new_in(mcx);
+        row.reserve(width);
         let mut krow: PgVec<'mcx, i8> = PgVec::new_in(mcx);
         for j in 0..width {
             let kind = if has_kind { bi.kind_at(i, j) } else { partbounds::KIND_VALUE };
@@ -478,10 +479,13 @@ fn set_baserel_partition_key_exprs<'mcx>(
         v.location = -1;
         ids.push(run.intern_expr(v.seal()));
     }
-    let mut partexprs: PgVec<'mcx, PgVec<'mcx, NodeId>> = mcx::vec_with_capacity_in(mcx, n)?;
-    let mut nullable: PgVec<'mcx, PgVec<'mcx, NodeId>> = mcx::vec_with_capacity_in(mcx, n)?;
+    let mut partexprs: PgVec<'mcx, PgVec<'mcx, NodeId>> = PgVec::new_in(mcx);
+    let mut nullable: PgVec<'mcx, PgVec<'mcx, NodeId>> = PgVec::new_in(mcx);
+    partexprs.reserve(n);
+    nullable.reserve(n);
     for &id in ids.iter() {
-        let mut col: PgVec<'mcx, NodeId> = mcx::vec_with_capacity_in(mcx, 1)?;
+        let mut col: PgVec<'mcx, NodeId> = PgVec::new_in(mcx);
+        col.reserve(1);
         col.push(id);
         partexprs.push(col);
         nullable.push(PgVec::new_in(mcx));
