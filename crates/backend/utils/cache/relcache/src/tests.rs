@@ -36,8 +36,6 @@ struct FakeIndexRow {
     indisvalid: bool,
     indisreplident: bool,
     has_indpred: bool,
-        indexprs_src: None,
-        indpred_src: None,
 }
 
 fn fake_index_scan(
@@ -614,8 +612,6 @@ fn idxrow(indexrelid: Oid) -> FakeIndexRow {
         indisvalid: true,
         indisreplident: false,
         has_indpred: false,
-        indexprs_src: None,
-        indpred_src: None,
     }
 }
 
