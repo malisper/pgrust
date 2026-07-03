@@ -7856,7 +7856,9 @@ dependencies = [
 name = "predicate"
 version = "0.0.0"
 dependencies = [
+ "deadlock_seams",
  "dynahash",
+ "elog_seams",
  "guc_seams",
  "guc_tables",
  "init_small",
@@ -7872,11 +7874,14 @@ dependencies = [
  "predicate_seams",
  "procarray",
  "procarray_seams",
+ "ps_status_seams",
  "s_lock_seams",
  "shmem",
  "shmem_seams",
  "slru",
  "snapmgr",
+ "timeout_seams",
+ "timestamp_seams",
  "transam_xlog_seams",
  "types_core",
  "types_error",
