@@ -146,16 +146,16 @@ impl Codec {
 
 const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
-const B64LOOKUP: [i8; 128] = [
-    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, //
-    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, //
-    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 62, -1, -1, -1, 63, //
-    52, 53, 54, 55, 56, 57, 58, 59, 60, 61, -1, -1, -1, -1, -1, -1, //
-    -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, //
-    15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, -1, -1, -1, -1, -1, //
-    -1, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, //
-    41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, -1, -1, -1, -1, -1, //
-];
+// C's b64lookup widened to 256 (high half -1): raw-byte index, no 127 guard.
+const B64LOOKUP: [i8; 256] = {
+    let mut t = [-1i8; 256];
+    let mut i = 0;
+    while i < 64 {
+        t[B64[i] as usize] = i as i8;
+        i += 1;
+    }
+    t
+};
 
 // C: 3 bytes -> 4 chars, a linefeed after each 76 output chars (upper bound).
 fn b64_enc_len(srclen: usize) -> u64 {
@@ -250,6 +250,33 @@ fn b64_decode(src: &[u8], out: &mut PgVec<'_, u8>) -> PgResult<()> {
     let mut end: i32 = 0;
     let mut i = 0usize;
     while i < src.len() {
+        // 4 independent lookups per triple (one-symbol shift-or is latency-
+        // bound on V2); negative lookups defer to the scalar arm — C-exact.
+        if pos == 0 && end == 0 {
+            while i + 4 <= src.len() {
+                let b0 = B64LOOKUP[src[i] as usize] as i32;
+                let b1 = B64LOOKUP[src[i + 1] as usize] as i32;
+                let b2 = B64LOOKUP[src[i + 2] as usize] as i32;
+                let b3 = B64LOOKUP[src[i + 3] as usize] as i32;
+                if (b0 | b1 | b2 | b3) < 0 {
+                    break;
+                }
+                assert!(written + 3 <= spare);
+                let v = ((b0 as u32) << 18) | ((b1 as u32) << 12) | ((b2 as u32) << 6) | b3 as u32;
+                // SAFETY: 3 bytes at old+written, within the asserted spare.
+                unsafe {
+                    let p = out.as_mut_ptr().add(old + written);
+                    p.write((v >> 16) as u8);
+                    p.add(1).write((v >> 8) as u8);
+                    p.add(2).write(v as u8);
+                }
+                written += 3;
+                i += 4;
+            }
+            if i >= src.len() {
+                break;
+            }
+        }
         let c = src[i];
         i += 1;
         if c == b' ' || c == b'\t' || c == b'\n' || c == b'\r' {
@@ -268,10 +295,7 @@ fn b64_decode(src: &[u8], out: &mut PgVec<'_, u8>) -> PgResult<()> {
             }
             b = 0;
         } else {
-            let mut bb: i32 = -1;
-            if c > 0 && c < 127 {
-                bb = B64LOOKUP[c as usize] as i32;
-            }
+            let bb = B64LOOKUP[c as usize] as i32;
             if bb < 0 {
                 return Err(b64_invalid_symbol(&src[i - 1..])?);
             }

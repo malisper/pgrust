@@ -271,37 +271,41 @@ pub fn copy_attribute_out_text(
     let mut ptr = 0usize;
     while ptr < s.len() {
         let c = s[ptr];
-        if c < 0x20 {
-            let esc = match c {
-                b'\x08' => b'b',
-                b'\x0c' => b'f',
-                b'\n' => b'n',
-                b'\r' => b'r',
-                b'\t' => b't',
-                b'\x0b' => b'v',
-                _ => {
-                    if c == delimc {
-                        c
-                    } else {
-                        ptr += 1;
-                        continue;
+        // Bitwise-OR'd predicate: one predicted branch per clean byte (the
+        // 3-branch ladder stalled 65% of cycles on V2 — see copy_cmd record).
+        if (c < 0x20) | (c == b'\\') | (c == delimc) {
+            if c < 0x20 {
+                let esc = match c {
+                    b'\x08' => b'b',
+                    b'\x0c' => b'f',
+                    b'\n' => b'n',
+                    b'\r' => b'r',
+                    b'\t' => b't',
+                    b'\x0b' => b'v',
+                    _ => {
+                        if c == delimc {
+                            c
+                        } else {
+                            ptr += 1;
+                            continue;
+                        }
                     }
+                };
+                if ptr > start {
+                    buf.append_bytes(&s[start..ptr])?;
                 }
-            };
-            if ptr > start {
-                buf.append_bytes(&s[start..ptr])?;
+                buf.append_byte(b'\\')?;
+                buf.append_byte(esc)?;
+                ptr += 1;
+                start = ptr;
+            } else {
+                if ptr > start {
+                    buf.append_bytes(&s[start..ptr])?;
+                }
+                buf.append_byte(b'\\')?;
+                start = ptr;
+                ptr += 1;
             }
-            buf.append_byte(b'\\')?;
-            buf.append_byte(esc)?;
-            ptr += 1;
-            start = ptr;
-        } else if c == b'\\' || c == delimc {
-            if ptr > start {
-                buf.append_bytes(&s[start..ptr])?;
-            }
-            buf.append_byte(b'\\')?;
-            start = ptr;
-            ptr += 1;
         } else {
             ptr += 1;
         }
