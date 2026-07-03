@@ -28,4 +28,8 @@ xact_seams = { path = "../../../access/transam/xact_seams" }
 spi = { path = "../../../executor/spi" }
 miscinit = { path = "../../init/miscinit" }
 superuser = { path = "../../misc/superuser" }
+guc = { path = "../../misc/guc" }
+types_guc = { path = "../../../../_support/types/types_guc" }
+snapmgr = { path = "../../time/snapmgr" }
+init_small = { path = "../../init/init_small" }
 varlena = { path = "../varlena" }
