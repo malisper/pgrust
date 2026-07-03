@@ -793,8 +793,8 @@ fn func_lookup_failed(funcid: Oid) -> Box<PgError> {
 
 /// Returns (simplified-expression,
 /// possibly-rewritten args); `None` args = unchanged. The executor-evaluation
-/// leg rides the clauses_seams::evaluate_expr seam; SupportRequestSimplify
-/// dispatch and SQL-function inlining defer loud.
+/// leg rides the clauses_seams::evaluate_expr seam; a prosupport
+/// SupportRequestSimplify rewrite and SQL-function inlining defer loud.
 #[allow(clippy::too_many_arguments)]
 fn simplify_function<'mcx>(
     cx: &EceContext<'mcx>,
@@ -831,12 +831,28 @@ fn simplify_function<'mcx>(
     )?;
 
     if newexpr.is_none() && allow_non_const && shape.prosupport != InvalidOid {
-        // like_regex_support (like_support.c) ignores SupportRequestSimplify:
-        // textlike/texticlike/texticregexeq/textregexeq/text_starts_with.
-        const LIKE_REGEX_SUPPORT: [Oid; 5] = [1023, 1024, 1025, 1364, 6242];
-        if !LIKE_REGEX_SUPPORT.contains(&shape.prosupport) {
+        let fcall = Node::mk(
+            cx.mcx,
+            FuncExpr {
+                funcid,
+                funcresulttype: result_type,
+                funcretset: shape.proretset,
+                funcvariadic,
+                funcformat: CoercionForm::COERCE_EXPLICIT_CALL,
+                funccollid: result_collid,
+                inputcollid: input_collid,
+                args: eff_args.clone_in(cx.mcx)?,
+                location: -1,
+            },
+        )?;
+        let mut req = types_nodes::supportnodes::SupportRequestSimplify::new(Some(fcall));
+        let addr = core::ptr::from_mut(&mut req) as usize;
+        let result =
+            fmgr_core::oid_function_call1_coll(shape.prosupport, 0, Datum::from_usize(addr))?;
+        if result.as_usize() != 0 {
             panic!(
-                "simplify_function deferred: SupportRequestSimplify dispatch for prosupport {} (funcid {funcid})",
+                "simplify_function deferred: prosupport {} produced a SupportRequestSimplify \
+                 rewrite for funcid {funcid}; result plumbing unported",
                 shape.prosupport
             );
         }

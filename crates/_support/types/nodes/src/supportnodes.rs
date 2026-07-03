@@ -16,6 +16,18 @@ pub struct SupportRequestRows<'mcx> {
 }
 
 #[repr(C)]
+pub struct SupportRequestSimplify<'mcx> {
+    tag: NodeTag,
+    pub fcall: Option<Node<'mcx>>,
+}
+
+impl<'mcx> SupportRequestSimplify<'mcx> {
+    pub fn new(fcall: Option<Node<'mcx>>) -> Self {
+        SupportRequestSimplify { tag: NodeTag::T_SupportRequestSimplify, fcall }
+    }
+}
+
+#[repr(C)]
 pub struct SupportRequestCost<'mcx> {
     tag: NodeTag,
     pub funcid: Oid,
@@ -27,6 +39,7 @@ pub struct SupportRequestCost<'mcx> {
 const _: () = {
     assert!(core::mem::offset_of!(SupportRequestRows, tag) == 0);
     assert!(core::mem::offset_of!(SupportRequestCost, tag) == 0);
+    assert!(core::mem::offset_of!(SupportRequestSimplify, tag) == 0);
 };
 
 impl<'mcx> SupportRequestRows<'mcx> {
