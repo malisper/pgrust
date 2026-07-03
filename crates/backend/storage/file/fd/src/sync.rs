@@ -438,7 +438,7 @@ pub(crate) fn walkdir(
     let dir = AllocateDir(path)?;
 
     while let Some(de) = ReadDirExtended(dir, path, elevel)? {
-        check_for_interrupts();
+        postgres_seams::check_for_interrupts::call()?;
 
         if de.d_name == "." || de.d_name == ".." {
             continue;
@@ -465,19 +465,6 @@ pub(crate) fn walkdir(
         action.apply(path, true, elevel)?;
     }
     Ok(())
-}
-
-// CHECK_FOR_INTERRUPTS(): ProcessInterrupts (tcop/postgres.c) is unported.
-fn check_for_interrupts() {
-    if init_small::globals::InterruptPending() {
-        interrupts_unported();
-    }
-}
-
-#[cold]
-#[inline(never)]
-fn interrupts_unported() -> ! {
-    panic!("unported callee reached from fd.c: ProcessInterrupts (tcop/postgres.c)")
 }
 
 fn pre_sync_fname(fname: &str, isdir: bool, elevel: ErrorLevel) -> PgResult<()> {

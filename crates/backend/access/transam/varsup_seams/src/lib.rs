@@ -1,4 +1,4 @@
-use types_core::{FullTransactionId, TransactionId};
+use types_core::{FullTransactionId, Oid, TransactionId};
 use types_error::PgResult;
 
 seam_core::seam!(
@@ -20,4 +20,9 @@ seam_core::seam!(
 seam_core::seam!(
     // AdvanceOldestClogXid (varsup.c); clog truncation + redo.
     pub fn advance_oldest_clog_xid(oldest_datfrozenxid: TransactionId) -> PgResult<()>
+);
+
+seam_core::seam!(
+    // SetTransactionIdLimit (varsup.c); StartupXLOG + vacuum wraparound limits.
+    pub fn set_transaction_id_limit(oldest_datfrozenxid: TransactionId, oldest_datoid: Oid) -> PgResult<()>
 );

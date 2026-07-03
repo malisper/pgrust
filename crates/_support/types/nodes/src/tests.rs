@@ -547,6 +547,11 @@ fn enum_values_match_c_headers() {
     check_enum!(prim_h, "VarReturningType", VarReturningType, [
         VAR_RETURNING_DEFAULT, VAR_RETURNING_OLD, VAR_RETURNING_NEW,
     ]);
+    use crate::primnodes::SubLinkType;
+    check_enum!(prim_h, "SubLinkType", SubLinkType, [
+        EXISTS_SUBLINK, ALL_SUBLINK, ANY_SUBLINK, ROWCOMPARE_SUBLINK, EXPR_SUBLINK,
+        MULTIEXPR_SUBLINK, ARRAY_SUBLINK, CTE_SUBLINK,
+    ]);
     use crate::parsenodes::{DefElemAction, VariableSetKind};
     check_enum!(parse_h, "VariableSetKind", VariableSetKind, [
         VAR_SET_VALUE, VAR_SET_DEFAULT, VAR_SET_CURRENT, VAR_SET_MULTI, VAR_RESET, VAR_RESET_ALL,
@@ -674,6 +679,14 @@ fn variable_set_stmt_field_order_matches_c() {
     assert_eq!(c_struct_fields(parse_h, "ExplainStmt"), ["query", "options"]);
     let crate::parsenodes::ExplainStmt { query: _, options: _ } =
         crate::parsenodes::ExplainStmt::default();
+
+    assert_eq!(c_struct_fields(parse_h, "VacuumStmt"), ["options", "rels", "is_vacuumcmd"]);
+    let crate::parsenodes::VacuumStmt { options: _, rels: _, is_vacuumcmd: _ } =
+        crate::parsenodes::VacuumStmt::default();
+
+    assert_eq!(c_struct_fields(parse_h, "VacuumRelation"), ["relation", "oid", "va_cols"]);
+    let crate::parsenodes::VacuumRelation { relation: _, oid: _, va_cols: _ } =
+        crate::parsenodes::VacuumRelation::default();
 
     assert_eq!(
         c_struct_fields(parse_h, "FetchStmt"),
@@ -993,6 +1006,34 @@ fn select1_parse_and_analyze_shape() {
     assert_eq!(c.constvalue.as_i32(), 1);
     assert_eq!(c.location, -1);
     assert_eq!(q.stmt_len, 8);
+}
+
+#[test]
+fn sublink_field_order_matches_c() {
+    let prim_h = include_str!("../vendor/primnodes.h");
+    let rust_order =
+        ["subLinkType", "subLinkId", "testexpr", "operName", "subselect", "location"];
+    let mut c_fields = c_struct_fields(prim_h, "SubLink");
+    assert_eq!(c_fields.remove(0), "xpr");
+    assert_eq!(c_fields, rust_order);
+}
+
+#[test]
+fn subplan_field_order_matches_c() {
+    let prim_h = include_str!("../vendor/primnodes.h");
+    let rust_order = [
+        "subLinkType", "testexpr", "paramIds", "plan_id", "plan_name", "firstColType",
+        "firstColTypmod", "firstColCollation", "useHashTable", "unknownEqFalse",
+        "parallel_safe", "setParam", "parParam", "args", "startup_cost", "per_call_cost",
+    ];
+    let mut c_fields = c_struct_fields(prim_h, "SubPlan");
+    assert_eq!(c_fields.remove(0), "xpr");
+    assert_eq!(c_fields, rust_order);
+    let crate::primnodes::SubPlan {
+        subLinkType: _, testexpr: _, paramIds: _, plan_id: _, plan_name: _, firstColType: _,
+        firstColTypmod: _, firstColCollation: _, useHashTable: _, unknownEqFalse: _,
+        parallel_safe: _, setParam: _, parParam: _, args: _, startup_cost: _, per_call_cost: _,
+    } = crate::primnodes::SubPlan::default();
 }
 
 #[test]

@@ -43,6 +43,72 @@ pub enum ParamKind {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[repr(u32)]
+pub enum SubLinkType {
+    #[default]
+    EXISTS_SUBLINK = 0,
+    ALL_SUBLINK = 1,
+    ANY_SUBLINK = 2,
+    ROWCOMPARE_SUBLINK = 3,
+    EXPR_SUBLINK = 4,
+    MULTIEXPR_SUBLINK = 5,
+    ARRAY_SUBLINK = 6,
+    CTE_SUBLINK = 7,
+}
+
+// C `Node *subselect` is never NULL in a live SubLink; modeled non-optional.
+pub struct SubLink<'mcx> {
+    pub subLinkType: SubLinkType,
+    pub subLinkId: i32,
+    pub testexpr: Option<Node<'mcx>>,
+    pub operName: NodeList<'mcx>,
+    pub subselect: Node<'mcx>,
+    pub location: ParseLoc,
+}
+
+pub struct SubPlan<'mcx> {
+    pub subLinkType: SubLinkType,
+    pub testexpr: Option<Node<'mcx>>,
+    pub paramIds: crate::list::IntList<'mcx>,
+    pub plan_id: i32,
+    pub plan_name: Option<&'mcx str>,
+    pub firstColType: Oid,
+    pub firstColTypmod: i32,
+    pub firstColCollation: Oid,
+    pub useHashTable: bool,
+    pub unknownEqFalse: bool,
+    pub parallel_safe: bool,
+    pub setParam: crate::list::IntList<'mcx>,
+    pub parParam: crate::list::IntList<'mcx>,
+    pub args: NodeList<'mcx>,
+    pub startup_cost: f64,
+    pub per_call_cost: f64,
+}
+
+impl Default for SubPlan<'_> {
+    fn default() -> Self {
+        SubPlan {
+            subLinkType: SubLinkType::EXISTS_SUBLINK,
+            testexpr: None,
+            paramIds: crate::list::IntList::nil(),
+            plan_id: 0,
+            plan_name: None,
+            firstColType: 0,
+            firstColTypmod: -1,
+            firstColCollation: 0,
+            useHashTable: false,
+            unknownEqFalse: false,
+            parallel_safe: false,
+            setParam: crate::list::IntList::nil(),
+            parParam: crate::list::IntList::nil(),
+            args: NodeList::nil(),
+            startup_cost: 0.0,
+            per_call_cost: 0.0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u32)]
 pub enum VarReturningType {
     #[default]
     VAR_RETURNING_DEFAULT = 0,
@@ -319,6 +385,12 @@ unsafe impl<'mcx> NodeVariant<'mcx> for BoolExpr<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for NullTest<'mcx> {
     const TAG: NodeTag = NodeTag::T_NullTest;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for SubLink<'mcx> {
+    const TAG: NodeTag = NodeTag::T_SubLink;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for SubPlan<'mcx> {
+    const TAG: NodeTag = NodeTag::T_SubPlan;
+}
 
 impl<'mcx> Node<'mcx> {
     /// C `makeConst` (constvalue passed in, location -1).
@@ -500,6 +572,16 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_null_test(self) -> Option<&'mcx NullTest<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_sub_link(self) -> Option<&'mcx SubLink<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_sub_plan(self) -> Option<&'mcx SubPlan<'mcx>> {
         self.as_variant()
     }
 }

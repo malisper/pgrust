@@ -112,7 +112,13 @@ pub fn CreateCommandTag(parsetree: Node<'_>) -> CommandTag {
         T_LoadStmt => CMDTAG_LOAD,
         T_CallStmt => CMDTAG_CALL,
         T_ClusterStmt => CMDTAG_CLUSTER,
-        T_VacuumStmt => payload_gap("CreateCommandTag", "VacuumStmt"),
+        T_VacuumStmt => {
+            if parsetree.as_vacuum_stmt().unwrap().is_vacuumcmd {
+                CMDTAG_VACUUM
+            } else {
+                CMDTAG_ANALYZE
+            }
+        }
         T_ExplainStmt => CMDTAG_EXPLAIN,
         T_CreateTableAsStmt => payload_gap("CreateCommandTag", "CreateTableAsStmt"),
         T_RefreshMatViewStmt => CMDTAG_REFRESH_MATERIALIZED_VIEW,

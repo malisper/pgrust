@@ -26,6 +26,11 @@ pub enum YYSTYPE<'mcx> {
     Node(Option<Node<'mcx>>),
     List(NodeList<'mcx>),
     Alias(Option<&'mcx Alias<'mcx>>),
+    // func_alias_clause's list_make2(alias, coldeflist), destructured.
+    FuncAlias {
+        alias: Option<&'mcx Alias<'mcx>>,
+        coldeflist: NodeList<'mcx>,
+    },
     Group {
         distinct: bool,
         list: NodeList<'mcx>,
@@ -84,6 +89,13 @@ impl<'mcx> YYSTYPE<'mcx> {
         match self {
             YYSTYPE::Alias(a) => a,
             _ => confusion("Alias"),
+        }
+    }
+
+    pub fn func_alias(self) -> (Option<&'mcx Alias<'mcx>>, NodeList<'mcx>) {
+        match self {
+            YYSTYPE::FuncAlias { alias, coldeflist } => (alias, coldeflist),
+            _ => confusion("FuncAlias"),
         }
     }
 

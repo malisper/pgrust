@@ -236,7 +236,11 @@ pub fn GetNewTransactionId(isSubXact: bool) -> PgResult<FullTransactionId> {
     // Zero any fresh commit-log page under XidGenLock, else a later XID
     // could commit before the page exists.
     clog::ExtendCLOG(xid)?;
-    commit_ts_seams::extend_commit_ts::call(xid)?;
+    // commit_ts unit unported; C's ExtendCommitTs no-ops with
+    // track_commit_timestamp off (startup.rs is_installed precedent).
+    if commit_ts_seams::extend_commit_ts::is_installed() {
+        commit_ts_seams::extend_commit_ts::call(xid)?;
+    }
     subtrans_seams::extend_subtrans::call(xid)?;
 
     let mut next = full_xid;
@@ -541,6 +545,7 @@ pub fn init_seams() {
         AdvanceNextFullTransactionIdPastXid,
     );
     varsup_seams::advance_oldest_clog_xid::set(AdvanceOldestClogXid);
+    varsup_seams::set_transaction_id_limit::set(SetTransactionIdLimit);
 }
 
 #[cfg(test)]

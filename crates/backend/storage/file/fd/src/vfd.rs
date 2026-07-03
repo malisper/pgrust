@@ -195,7 +195,7 @@ pub(crate) fn LruDelete(fd: &mut FdState, file: i32) -> PgResult<()> {
     debug_assert!(file != 0);
 
     let handle = fd.vfd_cache[file as usize].fd.take().expect("LruDelete on closed VFD");
-    aio_seams::pgaio_closing_fd::call(handle.as_raw());
+    crate::pgaio_closing_fd_if_engine_present(handle.as_raw());
 
     let raw = handle.into_raw_fd();
     // SAFETY: `raw` is the live descriptor just released from the guard;

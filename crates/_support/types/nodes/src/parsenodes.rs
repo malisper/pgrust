@@ -155,6 +155,30 @@ pub struct RangeTblEntry<'mcx> {
     pub securityQuals: NodeList<'mcx>,
 }
 
+pub struct RangeTblFunction<'mcx> {
+    pub funcexpr: Option<Node<'mcx>>,
+    pub funccolcount: i32,
+    pub funccolnames: NodeList<'mcx>,
+    pub funccoltypes: OidList<'mcx>,
+    pub funccoltypmods: IntList<'mcx>,
+    pub funccolcollations: OidList<'mcx>,
+    pub funcparams: Bitmapset<'mcx>,
+}
+
+impl Default for RangeTblFunction<'_> {
+    fn default() -> Self {
+        RangeTblFunction {
+            funcexpr: None,
+            funccolcount: 0,
+            funccolnames: NodeList::nil(),
+            funccoltypes: OidList::nil(),
+            funccoltypmods: IntList::nil(),
+            funccolcollations: OidList::nil(),
+            funcparams: Bitmapset::empty(),
+        }
+    }
+}
+
 pub struct RTEPermissionInfo<'mcx> {
     pub relid: Oid,
     pub inh: bool,
@@ -354,6 +378,21 @@ pub struct ClosePortalStmt<'mcx> {
     pub portalname: Option<&'mcx str>,
 }
 
+#[derive(Default)]
+pub struct VacuumStmt<'mcx> {
+    pub options: NodeList<'mcx>,
+    pub rels: NodeList<'mcx>,
+    pub is_vacuumcmd: bool,
+}
+
+// C: relation is a RangeVar; oid InvalidOid until vacuum looks it up.
+#[derive(Default)]
+pub struct VacuumRelation<'mcx> {
+    pub relation: Option<Node<'mcx>>,
+    pub oid: Oid,
+    pub va_cols: NodeList<'mcx>,
+}
+
 // C: isall is redundant with name == NULL but kept for query jumbling.
 pub struct DeallocateStmt<'mcx> {
     pub name: Option<&'mcx str>,
@@ -373,6 +412,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for Query<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for RangeTblEntry<'mcx> {
     const TAG: NodeTag = NodeTag::T_RangeTblEntry;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for RangeTblFunction<'mcx> {
+    const TAG: NodeTag = NodeTag::T_RangeTblFunction;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for RTEPermissionInfo<'mcx> {
     const TAG: NodeTag = NodeTag::T_RTEPermissionInfo;
@@ -416,6 +458,12 @@ unsafe impl<'mcx> NodeVariant<'mcx> for ClosePortalStmt<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for DeallocateStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_DeallocateStmt;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for VacuumStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_VacuumStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for VacuumRelation<'mcx> {
+    const TAG: NodeTag = NodeTag::T_VacuumRelation;
+}
 
 impl<'mcx> Node<'mcx> {
     #[inline]
@@ -425,6 +473,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_range_tbl_entry(self) -> Option<&'mcx RangeTblEntry<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_range_tbl_function(self) -> Option<&'mcx RangeTblFunction<'mcx>> {
         self.as_variant()
     }
 
@@ -495,6 +548,16 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_deallocate_stmt(self) -> Option<&'mcx DeallocateStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_vacuum_stmt(self) -> Option<&'mcx VacuumStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_vacuum_relation(self) -> Option<&'mcx VacuumRelation<'mcx>> {
         self.as_variant()
     }
 }

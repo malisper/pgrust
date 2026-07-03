@@ -681,7 +681,23 @@ dependencies = [
 name = "catalog_heap"
 version = "0.0.0"
 dependencies = [
+ "catalog",
+ "catalog_indexing",
+ "catalog_storage",
+ "datum",
+ "elog",
+ "heaptuple",
+ "init_small",
+ "lmgr",
+ "lsyscache",
+ "mcx",
+ "miscinit_seams",
+ "relcache",
+ "table",
+ "tableam",
  "types_core",
+ "types_error",
+ "types_rel",
  "types_tuple",
 ]
 
@@ -697,6 +713,17 @@ dependencies = [
 [[package]]
 name = "catalog_indexing"
 version = "0.1.0"
+dependencies = [
+ "execindexing",
+ "exectuples",
+ "heapam",
+ "heaptuple",
+ "mcx",
+ "types_error",
+ "types_rel",
+ "types_slot",
+ "types_tuple",
+]
 
 [[package]]
 name = "catalog_namespace"
@@ -3025,6 +3052,36 @@ dependencies = [
  "types_nodes",
  "types_rel",
  "types_scan",
+]
+
+[[package]]
+name = "nodehash"
+version = "0.1.0"
+dependencies = [
+ "execexpr",
+ "executils",
+ "init_small",
+ "mcx",
+ "types_error",
+ "types_nodes",
+ "types_slot",
+ "types_tuple",
+]
+
+[[package]]
+name = "nodehashjoin"
+version = "0.1.0"
+dependencies = [
+ "execexpr",
+ "executils",
+ "init_small",
+ "mcx",
+ "nodehash",
+ "postgres_seams",
+ "types_error",
+ "types_nodes",
+ "types_slot",
+ "types_tuple",
 ]
 
 [[package]]
@@ -5383,6 +5440,7 @@ dependencies = [
  "snapmgr",
  "spi",
  "stack_depth",
+ "standby",
  "subtrans",
  "superuser",
  "sync",
@@ -5661,6 +5719,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "standby"
+version = "0.0.0"
+dependencies = [
+ "elog",
+ "lwlock",
+ "procarray",
+ "standby_seams",
+ "transam_xlog",
+ "types_core",
+ "types_error",
+ "xloginsert",
+]
+
+[[package]]
 name = "standby_seams"
 version = "0.0.0"
 dependencies = [
@@ -5917,6 +5989,18 @@ dependencies = [
  "types_storage",
  "types_tuple",
  "xact_seams",
+]
+
+[[package]]
+name = "tableam_seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam_core",
+ "tableam_vocab",
+ "types_error",
+ "types_rel",
+ "types_storage",
 ]
 
 [[package]]
@@ -6543,6 +6627,16 @@ dependencies = [
  "types_nodes",
  "types_portal",
  "types_tuple",
+]
+
+[[package]]
+name = "vacuum_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+ "types_core",
+ "types_error",
+ "types_rel",
 ]
 
 [[package]]

@@ -13,8 +13,8 @@ pub mod temp;
 pub mod vfd;
 
 pub use desc::{
-    closeAllVfds, with_allocated_dir, AllocateDir, AllocateFile, ClosePipeStream,
-    CloseTransientFile, FreeDir, FreeFile, OpenPipeStream, OpenTransientFile,
+    closeAllVfds, with_allocated_dir, with_allocated_stdio, AllocateDir, AllocateFile,
+    ClosePipeStream, CloseTransientFile, FreeDir, FreeFile, OpenPipeStream, OpenTransientFile,
     OpenTransientFilePerm, ReadDir, ReadDirExtended, TransientFileRawFd,
 };
 pub use io::{
@@ -87,3 +87,11 @@ pub fn init_seams() {
 
 #[cfg(test)]
 mod tests;
+
+// AIO engine unported => no in-flight AIO can reference any fd; skipping the
+// uninstalled seam is C's empty-drain arm.
+pub(crate) fn pgaio_closing_fd_if_engine_present(fd: i32) {
+    if aio_seams::pgaio_closing_fd::is_installed() {
+        aio_seams::pgaio_closing_fd::call(fd);
+    }
+}

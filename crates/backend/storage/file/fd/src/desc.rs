@@ -92,7 +92,7 @@ pub(crate) fn FreeDesc(index: i32) -> i32 {
             0
         }
         AllocatedHandle::RawFd(file) => {
-            aio_seams::pgaio_closing_fd::call(file.as_raw_fd());
+            crate::pgaio_closing_fd_if_engine_present(file.as_raw_fd());
             let raw = file.into_raw_fd();
             // SAFETY: live descriptor released from its guard; closed once here.
             unsafe { libc::close(raw) }
@@ -198,7 +198,7 @@ pub fn CloseTransientFile(fd_to_close: i32) -> i32 {
         .errmsg("fd passed to CloseTransientFile was not obtained from OpenTransientFile")
         .finish(loc("CloseTransientFile"));
 
-    aio_seams::pgaio_closing_fd::call(fd_to_close);
+    crate::pgaio_closing_fd_if_engine_present(fd_to_close);
     // SAFETY: caller asserts ownership of this descriptor, as in C.
     unsafe { libc::close(fd_to_close) }
 }

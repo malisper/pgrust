@@ -25,4 +25,5 @@ waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
 xact_seams = { path = "../../../access/transam/xact_seams" }
 aio_seams = { path = "../../aio/aio_seams" }
 startup_seams = { path = "../../../postmaster/startup_seams" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
 libc = "0.2"

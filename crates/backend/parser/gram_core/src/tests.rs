@@ -367,3 +367,107 @@ fn copy_stmt_query_form_and_errors() {
     let e = parse_err("COPY foo TO '/tmp/x' WHERE a > 1");
     assert!(format!("{e:?}").contains("WHERE clause not allowed with COPY TO"), "{e:?}");
 }
+
+fn vacuum_of<'a>(list: &NodeList<'a>) -> &'a types_nodes::parsenodes::VacuumStmt<'a> {
+    only_stmt(list).stmt.unwrap().as_vacuum_stmt().expect("VacuumStmt")
+}
+
+#[test]
+fn analyze_stmt_forms() {
+    let list = parse("ANALYZE");
+    let vs = vacuum_of(&list);
+    assert!(!vs.is_vacuumcmd && vs.options.is_nil() && vs.rels.is_nil());
+
+    let list = parse("ANALYZE t");
+    let vs = vacuum_of(&list);
+    assert!(!vs.is_vacuumcmd && vs.options.is_nil());
+    assert_eq!(vs.rels.len(), 1);
+    let vr = vs.rels.nth(0).as_vacuum_relation().expect("VacuumRelation");
+    assert_eq!(vr.relation.unwrap().as_range_var().unwrap().relname, Some("t"));
+    assert_eq!(vr.oid, 0);
+    assert!(vr.va_cols.is_nil());
+
+    let list = parse("ANALYZE VERBOSE t (a, b)");
+    let vs = vacuum_of(&list);
+    assert!(!vs.is_vacuumcmd);
+    assert_eq!(vs.options.len(), 1);
+    let d = vs.options.nth(0).as_def_elem().unwrap();
+    assert_eq!(d.defname, Some("verbose"));
+    assert!(d.arg.is_none());
+    let vr = vs.rels.nth(0).as_vacuum_relation().unwrap();
+    assert_eq!(vr.va_cols.len(), 2);
+    assert_eq!(vr.va_cols.nth(0).as_string().unwrap().sval, "a");
+    assert_eq!(vr.va_cols.nth(1).as_string().unwrap().sval, "b");
+}
+
+#[test]
+fn analyze_stmt_parenthesized_options() {
+    let list = parse("ANALYZE (VERBOSE) t");
+    let vs = vacuum_of(&list);
+    assert!(!vs.is_vacuumcmd);
+    let d = vs.options.nth(0).as_def_elem().unwrap();
+    assert_eq!(d.defname, Some("verbose"));
+    assert!(d.arg.is_none());
+    assert_eq!(vs.rels.len(), 1);
+
+    let list = parse("ANALYZE (VERBOSE false) t");
+    let vs = vacuum_of(&list);
+    let d = vs.options.nth(0).as_def_elem().unwrap();
+    assert_eq!(d.defname, Some("verbose"));
+    assert_eq!(d.arg.unwrap().as_string().unwrap().sval, "false");
+}
+
+#[test]
+fn vacuum_stmt_forms() {
+    let list = parse("VACUUM t");
+    let vs = vacuum_of(&list);
+    assert!(vs.is_vacuumcmd && vs.options.is_nil());
+    assert_eq!(vs.rels.len(), 1);
+
+    let list = parse("VACUUM (ANALYZE) t");
+    let vs = vacuum_of(&list);
+    assert!(vs.is_vacuumcmd);
+    let d = vs.options.nth(0).as_def_elem().unwrap();
+    assert_eq!(d.defname, Some("analyze"));
+    assert!(d.arg.is_none());
+
+    let list = parse("VACUUM FULL FREEZE VERBOSE ANALYZE t");
+    let vs = vacuum_of(&list);
+    assert!(vs.is_vacuumcmd);
+    let names: Vec<_> = (0..vs.options.len())
+        .map(|i| vs.options.nth(i).as_def_elem().unwrap().defname.unwrap())
+        .collect();
+    assert_eq!(names, ["full", "freeze", "verbose", "analyze"]);
+}
+
+#[test]
+fn vacuum_analyze_rule_numbers_match_tables() {
+    use crate::tables::names::{YYRLINE, YYTNAME};
+    use crate::tables::YYR1;
+    for (rule, name, line) in [
+        (1556, "VacuumStmt", 11908),
+        (1557, "VacuumStmt", 11929),
+        (1558, "AnalyzeStmt", 11940),
+        (1559, "AnalyzeStmt", 11952),
+        (1560, "utility_option_list", 11964),
+        (1561, "utility_option_list", 11968),
+        (1564, "utility_option_elem", 11980),
+        (1566, "utility_option_name", 11988),
+        (1567, "utility_option_name", 11989),
+        (1568, "utility_option_arg", 11993),
+        (1571, "opt_analyze", 11999),
+        (1572, "opt_analyze", 12000),
+        (1573, "opt_verbose", 12004),
+        (1574, "opt_verbose", 12005),
+        (1575, "opt_full", 12008),
+        (1576, "opt_full", 12009),
+        (1577, "opt_freeze", 12012),
+        (1578, "opt_freeze", 12013),
+        (1581, "vacuum_relation", 12022),
+        (1582, "vacuum_relation_list", 12029),
+        (1583, "vacuum_relation_list", 12031),
+    ] {
+        assert_eq!(YYTNAME[YYR1[rule] as usize], name, "rule {rule}");
+        assert_eq!(YYRLINE[rule], line, "rule {rule}");
+    }
+}
