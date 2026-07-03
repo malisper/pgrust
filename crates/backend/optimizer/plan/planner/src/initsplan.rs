@@ -631,11 +631,17 @@ fn make_outerjoininfo<'mcx>(
             "make_outerjoininfo (initsplan.c): lower {} join ordering arm; join-outer lane",
             other.jointype
         );
-        debug_assert!(run.root.placeholder_list.is_empty());
+        assert!(
+            run.root.placeholder_list.is_empty(),
+            "make_outerjoininfo (initsplan.c): placeholder_list crawl unported"
+        );
         // A full join is an optimization barrier: expand whichever side
         // overlaps it to cover the whole full join.
         if other.jointype == types_pathnodes::JOIN_FULL {
-            debug_assert!(other.ojrelid != 0);
+            assert!(
+                other.ojrelid != 0,
+                "make_outerjoininfo (initsplan.c): FULL JOIN without ojrelid"
+            );
             if relids_overlap(left_rels, &other.syn_lefthand)
                 || relids_overlap(left_rels, &other.syn_righthand)
             {

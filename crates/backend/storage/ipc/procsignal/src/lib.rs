@@ -125,6 +125,9 @@ pub fn ProcSignalShmemResetAfterCrash() {
         slot.pss_barrierGeneration.store(u64::MAX, Relaxed);
         slot.pss_barrierCheckMask.store(0, Relaxed);
     }
+    if condition_variable_seams::proc_signal_barrier_cvs_reset_after_crash::is_installed() {
+        condition_variable_seams::proc_signal_barrier_cvs_reset_after_crash::call();
+    }
 }
 
 pub fn ProcSignalInit(cancel_key: &[u8]) -> PgResult<()> {

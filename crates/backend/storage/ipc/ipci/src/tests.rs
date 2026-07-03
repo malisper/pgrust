@@ -5,6 +5,8 @@ use super::*;
 
 static BE_STATUS_INITS: AtomicUsize = AtomicUsize::new(0);
 static BE_STATUS_RESETS: AtomicUsize = AtomicUsize::new(0);
+static BARRIER_CV_RESETS: AtomicUsize = AtomicUsize::new(0);
+static CHECKPOINTER_CV_RESETS: AtomicUsize = AtomicUsize::new(0);
 
 // Recorded on_shmem_exit registry: lets the reset test replay shmem_exit(1)
 // (LIFO) so the dsm control segment is torn down before the walk re-creates it.
@@ -80,6 +82,12 @@ fn bringup() {
             }
             Ok(ret)
         });
+        condition_variable_seams::proc_signal_barrier_cvs_reset_after_crash::set(|| {
+            BARRIER_CV_RESETS.fetch_add(1, Ordering::Relaxed);
+        });
+        condition_variable_seams::checkpointer_cvs_reset_after_crash::set(|| {
+            CHECKPOINTER_CV_RESETS.fetch_add(1, Ordering::Relaxed);
+        });
         transam_xlog::init_seams();
         install_test_gucs();
         init_seams();
@@ -135,6 +143,8 @@ fn create_shared_memory_and_semaphores_end_to_end() {
     assert_eq!(varsup::TransamVariables().nextOid.load(Ordering::Relaxed), 0);
     assert_eq!(lock0.state.load(Ordering::Relaxed), lwlock::LW_FLAG_RELEASE_OK);
     assert_eq!(BE_STATUS_RESETS.load(Ordering::Relaxed), 1);
+    assert_eq!(BARRIER_CV_RESETS.load(Ordering::Relaxed), 1);
+    assert_eq!(CHECKPOINTER_CV_RESETS.load(Ordering::Relaxed), 1);
     pmsignal::MarkPostmasterChildSlotAssigned(1).unwrap();
     assert!(pmsignal::MarkPostmasterChildSlotUnassigned(1));
 }

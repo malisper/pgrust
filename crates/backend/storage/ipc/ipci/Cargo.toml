@@ -51,3 +51,4 @@ aclchk_seams = { path = "../../../catalog/aclchk_seams" }
 mbutils_seams = { path = "../../../utils/mb/mbutils_seams" }
 init_small_seams = { path = "../../../utils/init/init_small_seams" }
 pgstat = { path = "../../../utils/activity/pgstat" }
+condition_variable_seams = { path = "../../lmgr/condition_variable_seams" }

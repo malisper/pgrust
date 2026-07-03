@@ -201,6 +201,9 @@ pub fn CheckpointerShmemResetAfterCrash() {
     for r in cp.requests {
         r.set(zero);
     }
+    if condition_variable_seams::checkpointer_cvs_reset_after_crash::is_installed() {
+        condition_variable_seams::checkpointer_cvs_reset_after_crash::call();
+    }
     SHUTDOWN_XLOG_PENDING.store(false, Relaxed);
 }
 
