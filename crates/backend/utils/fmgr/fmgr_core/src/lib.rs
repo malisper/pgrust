@@ -76,7 +76,7 @@ impl<const N: usize> BuiltinOidIndex<N> {
 // Builtin tables from crates that sit above fmgr_core in the crate graph
 // (adt_acl needs syscache). Consulted only where the entry would otherwise
 // panic as unported; fn metadata still comes from the canonical row.
-const MAX_LATE_TABLES: usize = 8;
+const MAX_LATE_TABLES: usize = 16;
 static LATE_TABLE_PTR: [core::sync::atomic::AtomicPtr<FmgrBuiltin>; MAX_LATE_TABLES] =
     [const { core::sync::atomic::AtomicPtr::new(core::ptr::null_mut()) }; MAX_LATE_TABLES];
 static LATE_TABLE_LEN: [core::sync::atomic::AtomicUsize; MAX_LATE_TABLES] =

@@ -1148,6 +1148,7 @@ name = "brin"
 version = "0.1.0"
 dependencies = [
  "brin_minmax",
+ "brin_minmax_multi",
  "brin_pageops",
  "brin_tuple",
  "bufmgr_seams",
@@ -1205,6 +1206,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "brin_minmax_multi"
+version = "0.1.0"
+dependencies = [
+ "adt_numeric",
+ "datum",
+ "detoast",
+ "fmgr_core",
+ "lsyscache",
+ "mcx",
+ "types_brin",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_scan",
+ "types_storage",
+ "types_tuple",
+]
+
+[[package]]
 name = "brin_pageops"
 version = "0.1.0"
 dependencies = [
@@ -1212,6 +1232,7 @@ dependencies = [
  "freespace",
  "lmgr",
  "mcx",
+ "smgr",
  "transam_xlog_seams",
  "types_brin",
  "types_core",
@@ -1226,6 +1247,7 @@ dependencies = [
 name = "brin_tuple"
 version = "0.1.0"
 dependencies = [
+ "brin_minmax_multi",
  "datum",
  "detoast",
  "heaptoast_seams",
@@ -4934,6 +4956,7 @@ dependencies = [
  "s_lock_seams",
  "seam_core",
  "shmem",
+ "smgr",
  "smgr_seams",
  "syncrep_seams",
  "syscache_seams",
@@ -8428,6 +8451,7 @@ dependencies = [
  "backend_status",
  "be_secure",
  "bgwriter",
+ "brin_minmax_multi",
  "bufmgr",
  "cache_syscache",
  "catalog",
@@ -10065,6 +10089,7 @@ dependencies = [
  "datum",
  "mcx",
  "types_core",
+ "types_error",
  "types_fmgr",
  "types_storage",
  "types_tuple",
