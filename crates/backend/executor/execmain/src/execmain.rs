@@ -215,7 +215,7 @@ pub fn standard_executor_start(qd: &mut QueryDescData, mut eflags: i32) -> PgRes
         init_plan(data, pstmt, operation, eflags)
     })?;
     qd.tup_desc = Some(tup_desc);
-    qd.exec = Some(exec);
+    qd.exec = Some(Box::new(exec));
     Ok(())
 }
 
@@ -264,6 +264,7 @@ pub(crate) fn init_plan<'mcx>(
             ));
         }
         data.estate.es_subplan_hook = Some(crate::nodesubplan::subplan_hook);
+        data.estate.es_cte_proc_hook = Some(crate::nodesubplan::cte_proc_hook);
     }
 
     let plan_node = pstmt.planTree.expect("PlannedStmt without planTree");
