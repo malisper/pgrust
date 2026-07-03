@@ -624,81 +624,95 @@ check_hook_caller!(call_enum_check_hook, config_enum, i32, |c: &config_enum, v: 
 
 // InitializeOneGUCOption's hook step (guc.c:1644): run the check hook on the
 // boot value for its extra, fire the assign hook, stash extra in gen.extra and
-// reset_extra.
-pub fn initialize_one_guc_option_hooks(var: &mut GucVariable) -> PgResult<()> {
+// reset_extra. `publish` false suppresses the assign hook and the backing-var
+// write: in C both only touch the child's own address space, but our backing
+// vars are process-shared, so a child bring-up installing a boot value that
+// its snapshot restore immediately overwrites would publish a transient wrong
+// value to concurrently running threads.
+pub fn initialize_one_guc_option_hooks(var: &mut GucVariable, publish: bool) -> PgResult<()> {
     match var {
         GucVariable::Bool(conf) => {
             let mut newval = conf.boot_val;
             let extra = call_bool_check_hook(conf, &mut newval, PGC_S_DEFAULT)?;
-            if let Some(slot) = conf.assign_hook {
-                if slot.installed() {
-                    (slot.get())(newval, extra.as_deref());
+            if publish {
+                if let Some(slot) = conf.assign_hook {
+                    if slot.installed() {
+                        (slot.get())(newval, extra.as_deref());
+                    }
+                }
+                if conf.variable.installed() {
+                    conf.variable.write(newval);
                 }
             }
             conf.value = Some(newval);
-            if conf.variable.installed() {
-                conf.variable.write(newval);
-            }
             conf.gen.extra = extra.clone();
             conf.reset_extra = extra;
         }
         GucVariable::Int(conf) => {
             let mut newval = conf.boot_val;
             let extra = call_int_check_hook(conf, &mut newval, PGC_S_DEFAULT)?;
-            if let Some(slot) = conf.assign_hook {
-                if slot.installed() {
-                    (slot.get())(newval, extra.as_deref());
+            if publish {
+                if let Some(slot) = conf.assign_hook {
+                    if slot.installed() {
+                        (slot.get())(newval, extra.as_deref());
+                    }
+                }
+                if conf.variable.installed() {
+                    conf.variable.write(newval);
                 }
             }
             conf.value = Some(newval);
-            if conf.variable.installed() {
-                conf.variable.write(newval);
-            }
             conf.gen.extra = extra.clone();
             conf.reset_extra = extra;
         }
         GucVariable::Real(conf) => {
             let mut newval = conf.boot_val;
             let extra = call_real_check_hook(conf, &mut newval, PGC_S_DEFAULT)?;
-            if let Some(slot) = conf.assign_hook {
-                if slot.installed() {
-                    (slot.get())(newval, extra.as_deref());
+            if publish {
+                if let Some(slot) = conf.assign_hook {
+                    if slot.installed() {
+                        (slot.get())(newval, extra.as_deref());
+                    }
+                }
+                if conf.variable.installed() {
+                    conf.variable.write(newval);
                 }
             }
             conf.value = Some(newval);
-            if conf.variable.installed() {
-                conf.variable.write(newval);
-            }
             conf.gen.extra = extra.clone();
             conf.reset_extra = extra;
         }
         GucVariable::String(conf) => {
             let mut newval = conf.boot_val.clone();
             let extra = call_string_check_hook(conf, &mut newval, PGC_S_DEFAULT)?;
-            if let Some(slot) = conf.assign_hook {
-                if slot.installed() {
-                    (slot.get())(newval.as_deref(), extra.as_deref());
+            if publish {
+                if let Some(slot) = conf.assign_hook {
+                    if slot.installed() {
+                        (slot.get())(newval.as_deref(), extra.as_deref());
+                    }
+                }
+                if conf.variable.installed() {
+                    conf.variable.write(newval.clone());
                 }
             }
-            conf.value = Some(newval.clone());
-            if conf.variable.installed() {
-                conf.variable.write(newval);
-            }
+            conf.value = Some(newval);
             conf.gen.extra = extra.clone();
             conf.reset_extra = extra;
         }
         GucVariable::Enum(conf) => {
             let mut newval = conf.boot_val;
             let extra = call_enum_check_hook(conf, &mut newval, PGC_S_DEFAULT)?;
-            if let Some(slot) = conf.assign_hook {
-                if slot.installed() {
-                    (slot.get())(newval, extra.as_deref());
+            if publish {
+                if let Some(slot) = conf.assign_hook {
+                    if slot.installed() {
+                        (slot.get())(newval, extra.as_deref());
+                    }
+                }
+                if conf.variable.installed() {
+                    conf.variable.write(newval);
                 }
             }
             conf.value = Some(newval);
-            if conf.variable.installed() {
-                conf.variable.write(newval);
-            }
             conf.gen.extra = extra.clone();
             conf.reset_extra = extra;
         }

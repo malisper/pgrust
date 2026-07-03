@@ -236,7 +236,7 @@ pub fn postmaster_child_launch(
             // C records the stack base once in main(); each thread owns its own.
             let _ = stack_depth::set_stack_base();
 
-            guc::initialize_guc_options()
+            guc::store::initialize_guc_options_for_child(&guc_snapshot)
                 .and_then(|()| guc::store::restore_nondefault_variables(&guc_snapshot))
                 .unwrap_or_else(|e| panic!("child GUC restore failed: {e:?}"));
 
