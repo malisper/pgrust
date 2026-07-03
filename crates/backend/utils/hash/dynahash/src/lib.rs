@@ -774,6 +774,24 @@ pub fn hash_update_hash_key(
             (*curr).link = ptr::null_mut();
         }
 
+        // DIVERGENCE from C (which leaves nentries keyed by the insert-time
+        // hashvalue): move the accounting to the new hashvalue's freelist, so
+        // a later HASH_REMOVE under the new key never underflows a freelist
+        // C only avoids by slack (lock.c 2PC proclock reassignment hits it).
+        let hctl = (*hashp).hctl;
+        let old_idx = FREELIST_IDX(hctl, (*curr).hashvalue);
+        let new_idx = FREELIST_IDX(hctl, newhashvalue);
+        if old_idx != new_idx {
+            let (lo, hi) = (old_idx.min(new_idx), old_idx.max(new_idx));
+            SpinLockAcquire(&mut (*hctl).freeList[lo].mutex);
+            SpinLockAcquire(&mut (*hctl).freeList[hi].mutex);
+            debug_assert!((*hctl).freeList[old_idx].nentries > 0);
+            (*hctl).freeList[old_idx].nentries -= 1;
+            (*hctl).freeList[new_idx].nentries += 1;
+            SpinLockRelease(&mut (*hctl).freeList[hi].mutex);
+            SpinLockRelease(&mut (*hctl).freeList[lo].mutex);
+        }
+
         (*curr).hashvalue = newhashvalue;
         let keycopy = (*hashp).keycopy.unwrap_unchecked();
         keycopy(
