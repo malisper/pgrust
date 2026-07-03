@@ -208,12 +208,71 @@ pub fn ParseFuncOrColumn<'mcx>(
 
             // C: forget VARIADIC decoration on a non-variadic function.
             let mut func_variadic = fn_call.func_variadic && OidIsValid(vatype);
-            if nvargs > 0 && vatype != types_core::catalog::ANYOID {
-                panic!(
-                    "ParseFuncOrColumn (parse_func.c): implicit variadic array \
-                     (ArrayExpr) unported — function {funcid}"
-                );
-            }
+            let fargs = if nvargs > 0 && vatype != types_core::catalog::ANYOID {
+                // C: pack the trailing nvargs coerced arguments into an
+                // ArrayExpr — the call becomes VARIADIC.
+                let non_var_args = fargs.len() - nvargs as usize;
+                let mut plain: PgVec<'mcx, Node<'mcx>> =
+                    mcx::vec_with_capacity_in(mcx, non_var_args + 1)?;
+                let mut vargs: PgVec<'mcx, Node<'mcx>> =
+                    mcx::vec_with_capacity_in(mcx, nvargs as usize)?;
+                for (i, n) in fargs.iter().enumerate() {
+                    if i < non_var_args {
+                        plain.push(n);
+                    } else {
+                        vargs.push(n);
+                    }
+                }
+                let element_typeid = post_coercion_type(
+                    actual_arg_types[non_var_args],
+                    declared_arg_types[non_var_args],
+                )?;
+                let array_typeid = lsyscache::get_array_type(element_typeid)?;
+                let vargs = NodeList::from_slice(mcx, vargs.as_slice())?;
+                if !OidIsValid(array_typeid) {
+                    let encoding = mbutils::GetDatabaseEncoding();
+                    let loc = vargs.first().map_or(-1, expr_location);
+                    return Err(Box::new(
+                        ereport(ERROR)
+                            .errcode(types_error::ERRCODE_UNDEFINED_OBJECT)
+                            .errmsg(format!(
+                                "could not find array type for data type {}",
+                                format_type::format_type_be(element_typeid)?
+                            ))
+                            .errposition(parser_errposition(pstate, loc, encoding))
+                            .into_error(),
+                    ));
+                }
+                let list_loc = {
+                    let mut loc = -1;
+                    for n in vargs.iter() {
+                        loc = if loc < 0 {
+                            expr_location(n)
+                        } else {
+                            let l = expr_location(n);
+                            if l < 0 { loc } else { loc.min(l) }
+                        };
+                    }
+                    loc
+                };
+                let newa = Node::mk(
+                    mcx,
+                    types_nodes::primnodes::ArrayExpr {
+                        elements: vargs,
+                        element_typeid,
+                        array_typeid,
+                        multidims: false,
+                        location: list_loc,
+                        ..Default::default()
+                    },
+                )?;
+                plain.push(newa);
+                debug_assert!(!func_variadic);
+                func_variadic = true;
+                NodeList::from_slice(mcx, plain.as_slice())?
+            } else {
+                fargs
+            };
             if !fargs.is_nil() && vatype == types_core::catalog::ANYOID && func_variadic {
                 let va_arr_typid = actual_arg_types[actual_arg_types.len() - 1];
                 if !OidIsValid(lsyscache::get_base_element_type(va_arr_typid)?) {

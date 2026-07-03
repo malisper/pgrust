@@ -1252,6 +1252,17 @@ impl<'mcx> Parser<'mcx> {
                     view.l(1),
                 )?));
             }
+            // JSON_OBJECT '(' func_arg_list ')' -- legacy json_object().
+            2186 => {
+                let f = make_func_call(
+                    mcx,
+                    system_func_name(mcx, "json_object")?,
+                    view.v(3).list(),
+                    CoercionForm::COERCE_EXPLICIT_CALL,
+                    view.l(1),
+                )?;
+                *yyval = YYSTYPE::Node(Some(f.seal()));
+            }
             // GROUPING '(' expr_list ')' -> GroupingFunc.
             2125 => {
                 *yyval = YYSTYPE::Node(Some(Node::mk(
