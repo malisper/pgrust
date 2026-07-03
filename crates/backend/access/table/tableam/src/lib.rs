@@ -1022,6 +1022,35 @@ pub fn table_index_fetch_tuple<'mcx>(
     }
 }
 
+pub use ::heapam_handler::{BatchFetch, INDEX_FETCH_BATCH_MAX};
+
+pub fn table_index_fetch_batch_fill<'mcx>(
+    mcx: Mcx<'mcx>,
+    scan: &mut IndexFetchTableData<'mcx>,
+    first_tid: &ItemPointerData,
+    rest: &[ItemPointerData],
+    snapshot: &Snapshot<'mcx>,
+) -> PgResult<()> {
+    match scan {
+        IndexFetchTableData::Heap(h) => {
+            ::heapam_handler::heapam_index_fetch_batch_fill(mcx, h, first_tid, rest, snapshot)
+        }
+    }
+}
+
+pub fn table_index_fetch_batch_next<'mcx>(
+    mcx: Mcx<'mcx>,
+    scan: &mut IndexFetchTableData<'mcx>,
+    tid: &mut ItemPointerData,
+    slot: &mut SlotData<'mcx>,
+) -> ::heapam_handler::BatchFetch {
+    match scan {
+        IndexFetchTableData::Heap(h) => {
+            ::heapam_handler::heapam_index_fetch_batch_next(mcx, h, tid, slot)
+        }
+    }
+}
+
 pub fn table_index_fetch_tuple_check<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
