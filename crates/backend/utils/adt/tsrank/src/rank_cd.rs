@@ -203,7 +203,8 @@ fn get_docrep<'mcx>(
             .then(a.1.cmp(&b.1))
     });
 
-    let mut doc: PgVec<DocRep> = vec_with_capacity_in(mcx, raw.len())?;
+    let mut doc: PgVec<DocRep> = PgVec::new_in(mcx);
+    doc.try_reserve_exact(raw.len()).map_err(|_| mcx.oom(raw.len()))?;
     let mut cur: Option<DocRep> = None;
     for (p, entry, item) in raw.iter().copied() {
         match cur.as_mut() {
@@ -244,7 +245,10 @@ pub fn calc_rank_cd(
         invws[i] = 1.0 / v as f64;
     }
 
-    let mut op_data: PgVec<QrOperand> = vec_with_capacity_in(mcx, query.size())?;
+    let mut op_data: PgVec<QrOperand> = PgVec::new_in(mcx);
+    op_data
+        .try_reserve_exact(query.size())
+        .map_err(|_| mcx.oom(query.size()))?;
     let mut by_distance: PgVec<(usize, usize)> = PgVec::new_in(mcx);
     for i in 0..query.size() {
         op_data.push(QrOperand { exists: false, reverseinsert: false, pos: PgVec::new_in(mcx) });

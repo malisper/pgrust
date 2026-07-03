@@ -15,7 +15,8 @@ pub struct QtNode<'mcx> {
 pub fn qt2qtn<'mcx>(mcx: Mcx<'mcx>, q: TsQueryRef<'_>, idx: usize) -> PgResult<QtNode<'mcx>> {
     match q.item(idx) {
         Item::Opr(opr) => {
-            let mut children: PgVec<QtNode> = vec_with_capacity_in(mcx, 2)?;
+            let mut children: PgVec<QtNode> = PgVec::new_in(mcx);
+            children.try_reserve_exact(2).map_err(|_| mcx.oom(2))?;
             children.push(qt2qtn(mcx, q, idx + 1)?);
             let mut sign = children[0].sign;
             if opr.oper != OP_NOT {
@@ -160,7 +161,8 @@ pub fn qtn_binary<'mcx>(mcx: Mcx<'mcx>, n: &mut QtNode<'mcx>) {
         let c0 = core::mem::replace(&mut n.children[0], dummy());
         let c1 = core::mem::replace(&mut n.children[1], dummy());
         let sign = c0.sign | c1.sign;
-        let mut sub: PgVec<QtNode> = vec_with_capacity_in(mcx, 2).expect("qtn_binary alloc");
+        let mut sub: PgVec<QtNode> = PgVec::new_in(mcx);
+        sub.try_reserve_exact(2).map_err(|_| mcx.oom(2)).expect("qtn_binary alloc");
         sub.push(c0);
         sub.push(c1);
         let nn = QtNode {
