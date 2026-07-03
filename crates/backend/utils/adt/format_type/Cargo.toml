@@ -1,0 +1,15 @@
+[package]
+name = "format_type"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+keywords = { path = "../../../../common/keywords" }
+lsyscache = { path = "../../cache/lsyscache" }
+syscache_seams = { path = "../../cache/syscache_seams" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+
+[dev-dependencies]
+types_tuple = { path = "../../../../_support/types/types_tuple" }

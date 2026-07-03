@@ -1,0 +1,11 @@
+[package]
+name = "parse_func"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "parse_func"
+path = "src/lib.rs"
+
+[dependencies]

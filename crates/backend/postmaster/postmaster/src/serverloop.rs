@@ -267,7 +267,7 @@ fn report_fork_failure_to_client(client_sock: &ClientSocket) {
                 msg.len(),
                 0,
             );
-            if rc >= 0 || *libc::__error() != libc::EINTR {
+            if rc >= 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
                 break;
             }
         }

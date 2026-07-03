@@ -1,0 +1,11 @@
+[package]
+name = "nodeagg"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "nodeagg"
+path = "src/lib.rs"
+
+[dependencies]

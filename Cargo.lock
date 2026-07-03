@@ -885,7 +885,9 @@ version = "0.0.0"
 dependencies = [
  "datum",
  "detoast",
+ "elog",
  "fmgr_core",
+ "format_type",
  "lsyscache",
  "mbutils",
  "mcx",
@@ -2578,6 +2580,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "nodemodifytable"
+version = "0.1.0"
+dependencies = [
+ "mcx",
+ "types_error",
+ "types_nodes",
+]
+
+[[package]]
 name = "nodes_core"
 version = "0.1.0"
 dependencies = [
@@ -2669,19 +2680,34 @@ dependencies = [
 [[package]]
 name = "parse_agg"
 version = "0.0.0"
+dependencies = [
+ "elog",
+ "mbutils",
+ "mcx",
+ "parser_small1",
+ "types_core",
+ "types_error",
+ "types_nodes",
+]
 
 [[package]]
 name = "parse_clause"
 version = "0.0.0"
 dependencies = [
  "coerce",
+ "elog",
+ "lsyscache",
+ "mbutils",
  "mcx",
  "parse_expr",
+ "parse_oper",
  "parse_relation",
  "parser_small1",
  "stack_depth",
+ "types_core",
  "types_error",
  "types_nodes",
+ "vars",
 ]
 
 [[package]]
@@ -2710,6 +2736,7 @@ dependencies = [
  "mcx",
  "miscinit_seams",
  "parse_oper",
+ "parse_relation",
  "parser_small1",
  "stack_depth",
  "syscache_seams",
@@ -2740,6 +2767,7 @@ dependencies = [
  "miscinit_seams",
  "parser_small1",
  "syscache_seams",
+ "typcache",
  "types_core",
  "types_error",
  "types_nodes",
@@ -2776,8 +2804,11 @@ version = "0.0.0"
 dependencies = [
  "coerce",
  "datum",
+ "elog",
+ "mbutils",
  "mcx",
  "parse_expr",
+ "parse_relation",
  "parser_small1",
  "syscache_seams",
  "types_core",
@@ -3115,6 +3146,8 @@ dependencies = [
  "nbtree",
  "planner_seams",
  "relation_seams",
+ "relcache",
+ "relcache_build_seams",
  "relcache_seams",
  "syscache_seams",
  "table",
@@ -4906,6 +4939,9 @@ dependencies = [
 name = "tstore_receiver"
 version = "0.1.0"
 dependencies = [
+ "datum",
+ "exectuples",
+ "mcx",
  "tuplestore",
  "types_error",
  "types_portal",
@@ -5504,7 +5540,7 @@ dependencies = [
  "backend_progress_seams",
  "backend_status_seams",
  "be_fsstubs_seams",
- "bufmgr_seams",
+ "bufmgr",
  "catalog_index_seams",
  "catalog_storage_seams",
  "combocid_seams",
@@ -5513,35 +5549,35 @@ dependencies = [
  "datum",
  "elog",
  "fd",
- "guc_seams",
+ "guc",
  "guc_tables",
  "init_small",
  "inval",
- "launcher_seams",
+ "launcher",
  "libpq_pqsignal",
  "lmgr_proc",
  "lmgr_seams",
- "lock_seams",
+ "lock",
  "logical_seams",
  "logical_worker_seams",
  "lwlock",
  "mcx",
- "miscinit_seams",
+ "miscinit",
  "multixact_seams",
  "namespace_seams",
  "origin_seams",
  "parallel_seams",
  "pg_enum_seams",
- "pg_prng_seams",
- "pgstat_xact_seams",
- "portalmem_seams",
+ "pg_prng",
+ "pgstat",
+ "portalmem",
  "predicate_seams",
  "procarray_seams",
  "relcache_seams",
- "relmapper_seams",
- "resowner_seams",
- "sinval_seams",
- "smgr_seams",
+ "relmapper",
+ "resowner",
+ "sinval",
+ "smgr",
  "snapbuild_seams",
  "snapmgr_seams",
  "spi_seams",
@@ -5558,6 +5594,7 @@ dependencies = [
  "typcache_seams",
  "types_core",
  "types_error",
+ "types_resowner",
  "types_storage",
  "varsup_seams",
  "waitevent_seams",
