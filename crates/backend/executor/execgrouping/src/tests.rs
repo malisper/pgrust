@@ -99,7 +99,7 @@ fn lookup_groups_and_isolates_keys() {
     assert_eq!(table.num_entries(), 3);
 
     // The additional block precedes the stored tuple, zeroed.
-    let add = table.entry_additional(i1);
+    let add = table.entry_additional(i1).unwrap();
     // SAFETY: 16 zeroed additional bytes per entry (build arg above).
     let bytes = unsafe { core::slice::from_raw_parts(add.as_ptr(), 16) };
     assert_eq!(bytes, &[0u8; 16]);
@@ -108,6 +108,45 @@ fn lookup_groups_and_isolates_keys() {
     assert_eq!(table.num_entries(), 0);
     let (_, renew) = put(&mut table, &mut slot, &table_ctx, mcx, 7, false);
     assert!(renew);
+}
+
+// Hashed DISTINCT: no per-group transition state, additionalsize 0.
+#[test]
+fn lookup_zero_additionalsize() {
+    install();
+    let ctx = MemoryContext::new("execgrouping-test0");
+    let mcx = ctx.mcx();
+    let table_ctx = MemoryContext::new("entries0");
+    let desc = one_int4_desc(mcx);
+    let mut table =
+        build_tuple_hash_table(mcx, &desc, &[1], &[65], &[450], &[0], 16, 0, false).unwrap();
+    let mut slot = exectuples::make_tuple_table_slot(mcx, TupleSlotKind::Virtual, Some(desc));
+
+    fn put<'mcx>(
+        table: &mut crate::TupleHashTable<'mcx>,
+        slot: &mut ::types_slot::SlotData<'mcx>,
+        table_ctx: &MemoryContext,
+        mcx: Mcx<'mcx>,
+        v: i32,
+    ) -> (u32, bool) {
+        exectuples::exec_clear_tuple(slot, mcx);
+        slot.base_mut().tts_values[0] = Datum::from_i32(v);
+        slot.base_mut().tts_isnull[0] = false;
+        exectuples::exec_store_virtual_tuple(slot);
+        let hash = table.hash_slot(slot).unwrap();
+        let (ix, isnew) = table.lookup(slot, hash, Some(table_ctx.mcx()), mcx).unwrap();
+        (ix.unwrap(), isnew)
+    }
+
+    let (i1, new1) = put(&mut table, &mut slot, &table_ctx, mcx, 5);
+    let (i2, new2) = put(&mut table, &mut slot, &table_ctx, mcx, 6);
+    let (i3, new3) = put(&mut table, &mut slot, &table_ctx, mcx, 5);
+    assert!(new1 && new2 && !new3);
+    assert_eq!(i1, i3);
+    assert_ne!(i1, i2);
+    assert_eq!(table.num_entries(), 2);
+    assert!(table.entry_additional(i1).is_none());
+    assert!(table.entry_additional(i2).is_none());
 }
 
 fn two_int4_desc(mcx: Mcx<'_>) -> Rc<TupleDescData<'_>> {
