@@ -15,5 +15,9 @@ types_nbtree = { path = "../../../../_support/types/types_nbtree" }
 exectuples = { path = "../../../executor/exectuples" }
 heaptuple = { path = "../../../access/common/heaptuple" }
 lsyscache = { path = "../../cache/lsyscache" }
+types_rel = { path = "../../../../_support/types/rel" }
+nbtree = { path = "../../../access/nbtree/nbtree" }
+varlena = { path = "../../../utils/adt/varlena" }
+pg_locale = { path = "../../adt/pg_locale" }
 init_small = { path = "../../init/init_small" }
 postgres_seams = { path = "../../../tcop/postgres_seams" }

@@ -5,10 +5,12 @@ use ::lsyscache::COMPARE_GT;
 use ::types_nbtree::{BTORDER_PROC, BTSORTSUPPORT_PROC};
 
 // pg_proc.dat oids for the sortsupport routines with a live comparator arm.
+const F_BTINT2SORTSUPPORT: Oid = 3129;
 const F_BTINT4SORTSUPPORT: Oid = 3130;
 const F_BTINT8SORTSUPPORT: Oid = 3131;
 const F_DATE_SORTSUPPORT: Oid = 3136;
 const F_TIMESTAMP_SORTSUPPORT: Oid = 3137;
+const F_BTTEXTSORTSUPPORT: Oid = 3255;
 
 /// C's `ssup->comparator` fn pointer as a closed enum: identity is switchable
 /// (tuplesort_sort_memtuples specialization dispatch) and calls monomorphize.
@@ -20,6 +22,11 @@ pub enum SortComparator {
     SignedI64,
     /// `ssup_datum_int32_cmp` (btint4/date sortsupport).
     Int32,
+    /// `btint2fastcmp` (btint2sortsupport).
+    Int16,
+    /// `varstrfastcmp_c`, no abbreviation (bttextsortsupport, collate-is-C
+    /// only); datums must point at live untoasted varlenas.
+    TextC,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -46,6 +53,29 @@ pub fn apply_cmp(cmp: SortComparator, x: Datum, y: Datum) -> i32 {
             let (x, y) = (x.as_i32(), y.as_i32());
             (x > y) as i32 - (x < y) as i32
         }
+        SortComparator::Int16 => {
+            let (x, y) = (x.as_i16(), y.as_i16());
+            (x > y) as i32 - (x < y) as i32
+        }
+        // SAFETY: TextC contract (enum doc) — both datums are live untoasted
+        // varlena pointers owned by the sort's tuplecontext.
+        SortComparator::TextC => unsafe {
+            varlena::varstrfastcmp_c(varlena_payload(x), varlena_payload(y))
+        },
+    }
+}
+
+/// # Safety
+/// `d` points at a live untoasted varlena (short 1B or full 4B header).
+#[inline]
+unsafe fn varlena_payload<'a>(d: Datum) -> &'a [u8] {
+    use ::types_tuple::varatt::{varatt_is_1b, varatt_is_1b_e, varsize_1b, varsize_4b};
+    let p = d.as_usize() as *const u8;
+    debug_assert!(!varatt_is_1b_e(p));
+    if varatt_is_1b(p) {
+        core::slice::from_raw_parts(p.add(1), varsize_1b(p) - 1)
+    } else {
+        core::slice::from_raw_parts(p.add(4), varsize_4b(p) - 4)
     }
 }
 
@@ -152,4 +182,42 @@ pub struct SortSupportInit {
     pub ssup_collation: Oid,
     pub ssup_nulls_first: bool,
     pub ssup_attno: i16,
+}
+
+/// `PrepareSortSupportFromIndexRel` comparator resolve, btree arm; text keys
+/// are C-collation only (varstr_sortsupport locale arms unported).
+pub fn comparator_for_index_col(
+    opfamily: Oid,
+    opcintype: Oid,
+    collation: Oid,
+) -> PgResult<SortComparator> {
+    let ssup_proc =
+        lsyscache::get_opfamily_proc(opfamily, opcintype, opcintype, BTSORTSUPPORT_PROC as i16)?;
+    Ok(match ssup_proc {
+        F_BTINT4SORTSUPPORT | F_DATE_SORTSUPPORT => SortComparator::Int32,
+        F_BTINT8SORTSUPPORT | F_TIMESTAMP_SORTSUPPORT => SortComparator::SignedI64,
+        F_BTINT2SORTSUPPORT => SortComparator::Int16,
+        F_BTTEXTSORTSUPPORT => {
+            let locale = pg_locale::pg_newlocale_from_collation(collation)?;
+            if !locale.collate_is_c {
+                panic!(
+                    "varstr_sortsupport (varlena.c): non-C collation {collation} \
+                     index sort not ported"
+                );
+            }
+            SortComparator::TextC
+        }
+        0 => {
+            let sort_function =
+                lsyscache::get_opfamily_proc(opfamily, opcintype, opcintype, BTORDER_PROC as i16)?;
+            panic!(
+                "PrepareSortSupportComparisonShim (sortsupport.c) not ported: \
+                 btree comparison proc {sort_function} for opfamily {opfamily}"
+            );
+        }
+        other => panic!(
+            "sortsupport routine {other} (opfamily {opfamily}) has no comparator arm; \
+             abbreviated-key sortsupport not ported"
+        ),
+    })
 }
