@@ -65,6 +65,7 @@ fn create_plan_recurse<'mcx>(
         PathNode::SortPath(_) => create_sort_plan(run, path_id, flags),
         PathNode::IncrementalSortPath(_) => create_incremental_sort_plan(run, path_id, flags),
         PathNode::MaterialPath(_) => create_material_plan(run, path_id, flags),
+        PathNode::MemoizePath(_) => create_memoize_plan(run, path_id, flags),
         PathNode::NestPath(_) => create_join_plan(run, path_id),
         PathNode::MergePath(_) => create_mergejoin_plan(run, path_id),
         PathNode::HashPath(_) => create_hashjoin_plan(run, path_id),
@@ -2374,6 +2375,84 @@ fn create_material_plan<'mcx>(
     plan.plan.righttree = None;
     copy_generic_path_info(run, &mut plan.plan, path_id);
     Ok(plan.seal())
+}
+
+// create_memoize_plan + make_memoize (createplan.c).
+fn create_memoize_plan<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    path_id: PathId,
+    flags: i32,
+) -> PgResult<Node<'mcx>> {
+    let mcx = run.mcx;
+    let (subpath, hash_ops, param_expr_ids, singlerow, binary_mode, est_entries) =
+        match run.root.path(path_id) {
+            PathNode::MemoizePath(mp) => (
+                mp.subpath.expect("Memoize subpath"),
+                crate::relnode::pgvec_clone_shallow(mcx, &mp.hash_operators),
+                crate::relnode::pgvec_clone_shallow(mcx, &mp.param_exprs),
+                mp.singlerow,
+                mp.binary_mode,
+                mp.est_entries,
+            ),
+            other => {
+                panic!("create_memoize_plan (createplan.c): pathtype {}", other.base().pathtype)
+            }
+        };
+    let subplan = create_plan_recurse(run, subpath, flags | CP_SMALL_TLIST)?;
+
+    let mut param_exprs = NodeList::nil();
+    for &e in param_expr_ids.iter() {
+        let node = *run.root.expr_node(e);
+        param_exprs.lappend(mcx, replace_nestloop_params(run, node)?)?;
+    }
+    let nkeys = param_exprs.len();
+    debug_assert!(nkeys > 0 && hash_ops.len() == nkeys);
+
+    let mut collations: mcx::PgVec<'mcx, types_core::Oid> = mcx::vec_with_capacity_in(mcx, nkeys)?;
+    for e in &param_exprs {
+        collations.push(crate::pathkeys::expr_collation(e));
+    }
+    let mut keyparamids = types_nodes::bitmapset::Bitmapset::empty();
+    for e in &param_exprs {
+        pull_paramids(run.mcx, e, &mut keyparamids)?;
+    }
+
+    let mut tlist = NodeList::nil();
+    for te in subplan.as_plan().expect("subplan").targetlist.iter() {
+        tlist.lappend(mcx, te)?;
+    }
+    let mut plan = Node::build::<types_nodes::plannodes::Memoize>(mcx)?;
+    plan.plan.targetlist = tlist;
+    plan.plan.qual = NodeList::nil();
+    plan.plan.lefttree = Some(subplan);
+    plan.plan.righttree = None;
+    plan.numKeys = nkeys as i32;
+    plan.hashOperators = mcx::slice_borrow_in(mcx, &hash_ops)?;
+    plan.collations = mcx::slice_borrow_in(mcx, &collations)?;
+    plan.param_exprs = param_exprs;
+    plan.singlerow = singlerow;
+    plan.binary_mode = binary_mode;
+    plan.est_entries = est_entries;
+    plan.keyparamids = keyparamids;
+    copy_generic_path_info(run, &mut plan.plan, path_id);
+    Ok(plan.seal())
+}
+
+// pull_paramids (createplan.c) over the replaced (plan-side) exprs.
+fn pull_paramids<'mcx>(
+    mcx: ::mcx::Mcx<'mcx>,
+    node: Node<'mcx>,
+    out: &mut types_nodes::bitmapset::Bitmapset<'mcx>,
+) -> PgResult<()> {
+    if let Some(p) = node.as_param() {
+        out.add_member(mcx, p.paramid)?;
+        return Ok(());
+    }
+    clauses::walker::expression_tree_mutator(mcx, node, &mut |n| {
+        pull_paramids(mcx, n, out)?;
+        Ok(None)
+    })?;
+    Ok(())
 }
 
 fn create_join_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> PgResult<Node<'mcx>> {

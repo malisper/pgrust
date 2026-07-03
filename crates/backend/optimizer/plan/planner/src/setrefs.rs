@@ -326,6 +326,21 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
             }
             set_upper_references(run, plan, rtoffset)?;
         }
+        NodeTag::T_Memoize => {
+            // The tlist is the child's (never evaluated); only the cache-key
+            // exprs need fixing.
+            set_dummy_tlist_references(run, plan, rtoffset)?;
+            let m = plan.as_memoize().unwrap();
+            debug_assert!(m.plan.qual.is_nil());
+            if let Some(fixed) = fix_scan_list(run, &m.param_exprs, rtoffset, m.plan.plan_rows)? {
+                // SAFETY: exclusive plan-tree ownership (prologue note).
+                unsafe {
+                    plan.with_mut::<types_nodes::plannodes::Memoize, _>(|p| {
+                        p.param_exprs = fixed;
+                    })
+                }
+            }
+        }
         NodeTag::T_Sort | NodeTag::T_IncrementalSort | NodeTag::T_Unique
         | NodeTag::T_Material => {
             // Neither evaluates its tlist; fixed up for EXPLAIN only.

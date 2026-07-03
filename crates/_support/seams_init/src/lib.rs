@@ -57,6 +57,7 @@ pub fn init_all() {
     nodenestloop::init_seams();
     nodemergejoin::init_seams();
     nodematerial::init_seams();
+    nodememoize::init_seams();
     tuplesort::init_seams();
     auth::init_seams();
     be_secure::init_seams();

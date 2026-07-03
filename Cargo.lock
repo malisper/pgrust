@@ -2844,6 +2844,7 @@ dependencies = [
  "nodelimit",
  "nodelockrows",
  "nodematerial",
+ "nodememoize",
  "nodemergejoin",
  "nodemodifytable",
  "nodenestloop",
@@ -5346,6 +5347,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "nodememoize"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "detoast_seams",
+ "execexpr",
+ "exectuples",
+ "executils",
+ "guc_tables",
+ "hashbrown",
+ "hashfn",
+ "heaptuple",
+ "init_small",
+ "lsyscache",
+ "mcx",
+ "postgres_seams",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_slot",
+ "types_tuple",
+]
+
+[[package]]
 name = "nodemergejoin"
 version = "0.1.0"
 dependencies = [
@@ -6690,6 +6715,7 @@ dependencies = [
  "nbtree",
  "nodeagg",
  "nodehash",
+ "nodememoize",
  "nodes_core",
  "parse_agg",
  "parse_relation",
@@ -8438,6 +8464,7 @@ dependencies = [
  "nodelimit",
  "nodelockrows",
  "nodematerial",
+ "nodememoize",
  "nodemergejoin",
  "nodenestloop",
  "nodeseqscan",

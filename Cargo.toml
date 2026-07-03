@@ -163,6 +163,7 @@ members = [
     "crates/backend/executor/nodehash",
     "crates/backend/executor/nodehashjoin",
     "crates/backend/executor/nodematerial",
+    "crates/backend/executor/nodememoize",
     "crates/backend/executor/nodemergejoin",
     "crates/backend/executor/nodenestloop",
     "crates/backend/executor/nodeagg",

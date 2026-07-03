@@ -66,6 +66,7 @@ nodelockrows = { path = "../../backend/executor/nodelockrows" }
 nodenestloop = { path = "../../backend/executor/nodenestloop" }
 nodemergejoin = { path = "../../backend/executor/nodemergejoin" }
 nodematerial = { path = "../../backend/executor/nodematerial" }
+nodememoize = { path = "../../backend/executor/nodememoize" }
 tuplesort = { path = "../../backend/utils/sort/tuplesort" }
 auth = { path = "../../backend/libpq/auth" }
 be_secure = { path = "../../backend/libpq/be_secure" }
