@@ -127,6 +127,10 @@ pub fn expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
                 || walk_opt(wf.aggfilter, w)?
                 || walk_list(&wf.runCondition, w)?)
         }
+        NodeTag::T_GroupingFunc => {
+            let g = node.as_grouping_func().unwrap();
+            walk_list(&g.args, w)
+        }
         NodeTag::T_FuncExpr => {
             let f = node.as_variant::<FuncExpr>().unwrap();
             walk_list(&f.args, w)
@@ -627,6 +631,22 @@ where
                     location: a.location,
                 },
             )?))
+        }
+        NodeTag::T_GroupingFunc => {
+            let g = node.as_grouping_func().unwrap();
+            match mutate_list(mcx, &g.args, m)? {
+                None => Ok(None),
+                Some(args) => Ok(Some(Node::mk(
+                    mcx,
+                    types_nodes::primnodes::GroupingFunc {
+                        args,
+                        refs: g.refs.clone_in(mcx)?,
+                        cols: g.cols.clone_in(mcx)?,
+                        agglevelsup: g.agglevelsup,
+                        location: g.location,
+                    },
+                )?)),
+            }
         }
         NodeTag::T_WindowFunc => {
             let wf = node.as_window_func().unwrap();

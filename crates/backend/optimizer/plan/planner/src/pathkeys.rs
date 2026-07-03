@@ -498,7 +498,7 @@ pub fn expr_collation(node: Node<'_>) -> u32 {
         NodeTag::T_CoerceToDomainValue => node.as_coerce_to_domain_value().unwrap().collation,
         NodeTag::T_CoalesceExpr => node.as_coalesce_expr().unwrap().coalescecollid,
         NodeTag::T_MinMaxExpr => node.as_min_max_expr().unwrap().minmaxcollid,
-        other => panic!("exprCollation (nodeFuncs.c): {other:?}; M2 expression lane"),
+        _ => nodes_core::expr_collation(node),
     }
 }
 
