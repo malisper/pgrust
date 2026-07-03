@@ -668,92 +668,194 @@ fn instrument_node<'mcx>(
     )?))
 }
 
-/// `ExecProcNode`: one match over the closed node set, Result arm inlined.
-#[inline]
+/// `ExecProcNode`: one match over the closed node set. Every arm is an
+/// `#[inline(never)]` helper: inner nodes recurse here per row, and one
+/// inlined arm grows every recursion's frame to the union of all arms
+/// (fullscan gate profile: 11 saved pairs + 1.4KB frame per fetched tuple).
 pub fn exec_proc_node<'mcx>(
     node: &mut PlanStateNode<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<ExecSlotId>> {
     match node {
         PlanStateNode::Instrumented(w) => exec_proc_node_instr(w, estate),
-        PlanStateNode::Result(rs) => exec_result(rs, estate),
-        PlanStateNode::SeqScan(ss) => ::nodeseqscan::exec_seq_scan(ss, estate),
-        PlanStateNode::FunctionScan(fs) => ::nodefunctionscan::exec_function_scan(fs, estate),
-        PlanStateNode::ValuesScan(vs) => ::nodevaluesscan::exec_values_scan(vs, estate),
-        PlanStateNode::CteScan(cs) => ::nodectescan::exec_cte_scan(cs, estate),
-        PlanStateNode::IndexScan(is) => ::nodeindexscan::exec_index_scan(is, estate),
-        PlanStateNode::IndexOnlyScan(ios) => {
-            ::nodeindexonlyscan::exec_index_only_scan(ios, estate)
-        }
-        PlanStateNode::Agg(aps) => {
-            let aps = &mut **aps;
-            let outer = &mut aps.outer;
-            ::nodeagg::exec_agg(&mut aps.agg, estate, |e| exec_proc_node(outer, e))
-        }
-        PlanStateNode::WindowAgg(w) => {
-            let w = &mut **w;
-            let outer = &mut w.outer;
-            ::nodewindowagg::exec_window_agg(&mut w.state, estate, |e| exec_proc_node(outer, e))
-        }
-        PlanStateNode::Sort(s) => {
-            let SortNode { state, outer, outer_desc } = s;
-            ::nodesort::exec_sort(state, estate, outer_desc.clone(), |es| {
-                exec_proc_node(outer, es)
-            })
-        }
-        PlanStateNode::Material(m) => {
-            let m = &mut **m;
-            ::nodematerial::exec_material(&mut m.state, &mut *m.outer, estate)
-        }
-        PlanStateNode::Unique(u) => {
-            let u = &mut **u;
-            let outer = &mut u.outer;
-            ::nodeunique::exec_unique(&mut u.state, estate, |e| exec_proc_node(outer, e))
-        }
-        PlanStateNode::Limit(l) => {
-            let LimitNode { state, outer } = l;
-            ::nodelimit::exec_limit(state, &mut **outer, estate)
-        }
-        PlanStateNode::BitmapHeapScan(b) => {
-            let b = &mut **b;
-            if !b.scan.initialized {
-                let tbm = multi_exec_bitmap_node(&mut b.bitmapqual, estate)?;
-                ::nodebitmapheapscan::bitmap_table_scan_setup(&mut b.scan, estate, tbm)?;
-            }
-            ::nodebitmapheapscan::exec_bitmap_heap_scan(&mut b.scan, estate)
-        }
+        PlanStateNode::Result(rs) => result_arm(rs, estate),
+        PlanStateNode::SeqScan(ss) => seq_scan_arm(ss, estate),
+        PlanStateNode::FunctionScan(fs) => function_scan_arm(fs, estate),
+        PlanStateNode::ValuesScan(vs) => values_scan_arm(vs, estate),
+        PlanStateNode::CteScan(cs) => cte_scan_arm(cs, estate),
+        PlanStateNode::IndexScan(is) => index_scan_arm(is, estate),
+        PlanStateNode::IndexOnlyScan(ios) => index_only_scan_arm(ios, estate),
+        PlanStateNode::Agg(aps) => agg_arm(aps, estate),
+        PlanStateNode::WindowAgg(w) => window_agg_arm(w, estate),
+        PlanStateNode::Sort(s) => sort_arm(s, estate),
+        PlanStateNode::Material(m) => material_arm(m, estate),
+        PlanStateNode::Unique(u) => unique_arm(u, estate),
+        PlanStateNode::Limit(l) => limit_arm(l, estate),
+        PlanStateNode::BitmapHeapScan(b) => bitmap_heap_scan_arm(b, estate),
         PlanStateNode::BitmapIndexScan(_)
         | PlanStateNode::BitmapAnd(_)
         | PlanStateNode::BitmapOr(_) => {
             panic!("bitmap-producing node does not support ExecProcNode call convention")
         }
-        PlanStateNode::ModifyTable(mps) => {
-            let mps = &mut **mps;
-            let subplan = &mut mps.subplan;
-            ::nodemodifytable::exec_modify_table(&mut mps.mt, estate, |e| {
-                exec_proc_node(subplan, e)
-            })
-        }
-        PlanStateNode::NestLoop(nl) => {
-            let NestLoopNode { state, outer, inner } = nl;
-            ::nodenestloop::exec_nest_loop(state, &mut **outer, &mut **inner, estate)
-        }
-        PlanStateNode::HashJoin(hj) => {
-            let hj = &mut **hj;
-            let HashSubNode { state: hstate, child } = &mut *hj.hash;
-            ::nodehashjoin::exec_hash_join(
-                &mut hj.state,
-                &mut *hj.outer,
-                hstate,
-                &mut **child,
-                estate,
-            )
-        }
-        PlanStateNode::MergeJoin(mj) => {
-            let MergeJoinNode { state, outer, inner } = &mut **mj;
-            ::nodemergejoin::exec_merge_join(state, &mut **outer, &mut **inner, estate)
-        }
+        PlanStateNode::ModifyTable(mps) => modify_table_arm(mps, estate),
+        PlanStateNode::NestLoop(nl) => nest_loop_arm(nl, estate),
+        PlanStateNode::HashJoin(hj) => hash_join_arm(hj, estate),
+        PlanStateNode::MergeJoin(mj) => merge_join_arm(mj, estate),
     }
+}
+
+type ProcResult = PgResult<Option<ExecSlotId>>;
+
+#[inline(never)]
+fn result_arm<'mcx>(rs: &mut ResultState<'mcx>, estate: &mut EStateData<'mcx>) -> ProcResult {
+    exec_result(rs, estate)
+}
+
+#[inline(never)]
+fn seq_scan_arm<'mcx>(
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> ProcResult {
+    ::nodeseqscan::exec_seq_scan(ss, estate)
+}
+
+#[inline(never)]
+fn function_scan_arm<'mcx>(
+    fs: &mut PgBox<'mcx, ::nodefunctionscan::FunctionScanState<'mcx>>,
+    estate: &mut EStateData<'mcx>,
+) -> ProcResult {
+    ::nodefunctionscan::exec_function_scan(fs, estate)
+}
+
+#[inline(never)]
+fn values_scan_arm<'mcx>(
+    vs: &mut PgBox<'mcx, ::nodevaluesscan::ValuesScanState<'mcx>>,
+    estate: &mut EStateData<'mcx>,
+) -> ProcResult {
+    ::nodevaluesscan::exec_values_scan(vs, estate)
+}
+
+#[inline(never)]
+fn cte_scan_arm<'mcx>(
+    cs: &mut PgBox<'mcx, ::nodectescan::CteScanState<'mcx>>,
+    estate: &mut EStateData<'mcx>,
+) -> ProcResult {
+    ::nodectescan::exec_cte_scan(cs, estate)
+}
+
+#[inline(never)]
+fn index_scan_arm<'mcx>(
+    is: &mut ::nodeindexscan::IndexScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> ProcResult {
+    ::nodeindexscan::exec_index_scan(is, estate)
+}
+
+#[inline(never)]
+fn index_only_scan_arm<'mcx>(
+    ios: &mut ::nodeindexonlyscan::IndexOnlyScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> ProcResult {
+    ::nodeindexonlyscan::exec_index_only_scan(ios, estate)
+}
+
+#[inline(never)]
+fn agg_arm<'mcx>(
+    aps: &mut PgBox<'mcx, AggPlanState<'mcx>>,
+    estate: &mut EStateData<'mcx>,
+) -> ProcResult {
+    let aps = &mut **aps;
+    let outer = &mut aps.outer;
+    ::nodeagg::exec_agg(&mut aps.agg, estate, |e| exec_proc_node(outer, e))
+}
+
+#[inline(never)]
+fn window_agg_arm<'mcx>(
+    w: &mut PgBox<'mcx, WindowAggNode<'mcx>>,
+    estate: &mut EStateData<'mcx>,
+) -> ProcResult {
+    let w = &mut **w;
+    let outer = &mut w.outer;
+    ::nodewindowagg::exec_window_agg(&mut w.state, estate, |e| exec_proc_node(outer, e))
+}
+
+#[inline(never)]
+fn sort_arm<'mcx>(s: &mut SortNode<'mcx>, estate: &mut EStateData<'mcx>) -> ProcResult {
+    let SortNode { state, outer, outer_desc } = s;
+    ::nodesort::exec_sort(state, estate, outer_desc.clone(), |es| exec_proc_node(outer, es))
+}
+
+#[inline(never)]
+fn material_arm<'mcx>(
+    m: &mut PgBox<'mcx, MaterialNode<'mcx>>,
+    estate: &mut EStateData<'mcx>,
+) -> ProcResult {
+    let m = &mut **m;
+    ::nodematerial::exec_material(&mut m.state, &mut *m.outer, estate)
+}
+
+#[inline(never)]
+fn unique_arm<'mcx>(
+    u: &mut PgBox<'mcx, UniqueNode<'mcx>>,
+    estate: &mut EStateData<'mcx>,
+) -> ProcResult {
+    let u = &mut **u;
+    let outer = &mut u.outer;
+    ::nodeunique::exec_unique(&mut u.state, estate, |e| exec_proc_node(outer, e))
+}
+
+#[inline(never)]
+fn limit_arm<'mcx>(l: &mut LimitNode<'mcx>, estate: &mut EStateData<'mcx>) -> ProcResult {
+    let LimitNode { state, outer } = l;
+    ::nodelimit::exec_limit(state, &mut **outer, estate)
+}
+
+#[inline(never)]
+fn bitmap_heap_scan_arm<'mcx>(
+    b: &mut PgBox<'mcx, BitmapHeapPlanState<'mcx>>,
+    estate: &mut EStateData<'mcx>,
+) -> ProcResult {
+    let b = &mut **b;
+    if !b.scan.initialized {
+        let tbm = multi_exec_bitmap_node(&mut b.bitmapqual, estate)?;
+        ::nodebitmapheapscan::bitmap_table_scan_setup(&mut b.scan, estate, tbm)?;
+    }
+    ::nodebitmapheapscan::exec_bitmap_heap_scan(&mut b.scan, estate)
+}
+
+#[inline(never)]
+fn modify_table_arm<'mcx>(
+    mps: &mut PgBox<'mcx, ModifyTablePlanState<'mcx>>,
+    estate: &mut EStateData<'mcx>,
+) -> ProcResult {
+    let mps = &mut **mps;
+    let subplan = &mut mps.subplan;
+    ::nodemodifytable::exec_modify_table(&mut mps.mt, estate, |e| exec_proc_node(subplan, e))
+}
+
+#[inline(never)]
+fn nest_loop_arm<'mcx>(nl: &mut NestLoopNode<'mcx>, estate: &mut EStateData<'mcx>) -> ProcResult {
+    let NestLoopNode { state, outer, inner } = nl;
+    ::nodenestloop::exec_nest_loop(state, &mut **outer, &mut **inner, estate)
+}
+
+#[inline(never)]
+fn hash_join_arm<'mcx>(
+    hj: &mut PgBox<'mcx, HashJoinNode<'mcx>>,
+    estate: &mut EStateData<'mcx>,
+) -> ProcResult {
+    let hj = &mut **hj;
+    let HashSubNode { state: hstate, child } = &mut *hj.hash;
+    ::nodehashjoin::exec_hash_join(&mut hj.state, &mut *hj.outer, hstate, &mut **child, estate)
+}
+
+#[inline(never)]
+fn merge_join_arm<'mcx>(
+    mj: &mut PgBox<'mcx, MergeJoinNode<'mcx>>,
+    estate: &mut EStateData<'mcx>,
+) -> ProcResult {
+    let MergeJoinNode { state, outer, inner } = &mut **mj;
+    ::nodemergejoin::exec_merge_join(state, &mut **outer, &mut **inner, estate)
 }
 
 /// `ExecProcNodeInstr` (execProcnode.c). Cold-outlined so the uninstrumented
