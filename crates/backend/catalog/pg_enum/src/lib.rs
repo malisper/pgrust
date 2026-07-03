@@ -518,4 +518,5 @@ fn not_existing_label(label: &str) -> Box<PgError> {
 pub fn init_seams() {
     pg_enum_seams::at_eoxact_enum::set(AtEOXact_Enum);
     pg_enum_seams::enum_uncommitted::set(EnumUncommitted);
+    pg_enum_seams::scan_enum_members::set(scan_enum_members);
 }

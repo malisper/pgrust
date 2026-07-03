@@ -24,6 +24,8 @@ readfuncs = { path = "../../../nodes/readfuncs" }
 nodes_core = { path = "../../../nodes/nodes_core" }
 clauses_seams = { path = "../../../optimizer/util/clauses_seams" }
 types_nodes = { path = "../../../../_support/types/nodes" }
+pg_enum_seams = { path = "../../../catalog/pg_enum_seams" }
+format_type = { path = "../../adt/format_type" }
 
 [dev-dependencies]
 types_tuple = { path = "../../../../_support/types/types_tuple" }
