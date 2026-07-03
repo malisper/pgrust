@@ -226,16 +226,40 @@ fn own_datum_flattens_short_varlena() {
     assert!(unsafe { types_tuple::varatt::varatt_is_4b_u(out.as_usize() as *const u8) });
 }
 
+#[repr(C)]
+struct FakeExpanded {
+    hdr: datum::ExpandedObjectHeader,
+    payload: [u8; 4],
+}
+
+static FAKE_METHODS: datum::ExpandedObjectMethods = datum::ExpandedObjectMethods {
+    get_flat_size: |_| 8,
+    flatten_into: |eohptr, result, n| unsafe {
+        assert_eq!(n, 8);
+        let obj = eohptr as *mut FakeExpanded;
+        core::ptr::copy_nonoverlapping(((n as u32) << 2).to_ne_bytes().as_ptr(), result, 4);
+        core::ptr::copy_nonoverlapping((*obj).payload.as_ptr(), result.add(4), 4);
+    },
+};
+
 #[test]
-#[should_panic(expected = "expanded-object TOAST pointer")]
-fn own_datum_rejects_expanded_datum() {
+fn own_datum_flattens_expanded_datum() {
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
-    let mut img = [0u8; 10];
-    img[0] = if cfg!(target_endian = "little") { 0x01 } else { 0x80 };
-    img[1] = types_tuple::varatt::VARTAG_EXPANDED_RO;
-    let d = datum::Datum::from_usize(img.as_ptr() as usize);
-    let _ = crate::own_datum(mcx, d, -1, false);
+    let obj = Box::into_raw(Box::new(FakeExpanded {
+        hdr: datum::ExpandedObjectHeader::empty(),
+        payload: *b"flat",
+    }));
+    let d = unsafe {
+        let hdr = core::ptr::addr_of_mut!((*obj).hdr);
+        datum::expandeddatum::eoh_init_header(hdr, &FAKE_METHODS, core::ptr::null());
+        datum::expandeddatum::eohp_get_ro_datum(hdr)
+    };
+    let out = crate::own_datum(mcx, d, -1, false).unwrap();
+    let image =
+        unsafe { core::slice::from_raw_parts(out.as_usize() as *const u8, 8) };
+    assert_eq!(&image[4..], b"flat");
+    drop(unsafe { Box::from_raw(obj) });
 }
 
 #[test]

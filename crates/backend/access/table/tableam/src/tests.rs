@@ -18,7 +18,7 @@ use crate::*;
 fn make<'mcx>(mcx: Mcx<'mcx>, oid: Oid, relkind: u8, relam: Oid) -> Relation<'mcx> {
     let mut relname = NameData::default();
     relname.namestrcpy("t");
-    let data = RelationData {
+    let data = RelationData { rd_locator: Default::default(), rd_smgr: Default::default(),
         rd_id: oid,
         rd_backend: INVALID_PROC_NUMBER,
         rd_islocaltemp: false,

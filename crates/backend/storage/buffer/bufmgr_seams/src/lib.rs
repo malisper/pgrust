@@ -234,3 +234,9 @@ seam_core::seam!(
         extend_by: u32,
     ) -> PgResult<(Buffer, u32)>
 );
+
+seam_core::seam!(
+    // ConditionalLockBufferForCleanup(buffer) (bufmgr.c): pin held by caller;
+    // true = exclusive lock acquired and no other pins.
+    pub fn conditional_lock_buffer_for_cleanup(buffer: Buffer) -> bool
+);

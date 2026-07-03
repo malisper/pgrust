@@ -338,3 +338,39 @@ mod result_convention {
         );
     }
 }
+
+#[test]
+fn error_save_context_tag_matches_nodetags() {
+    assert_eq!(
+        ::fmgr::T_ERROR_SAVE_CONTEXT,
+        ::nodes::NodeTag::T_ErrorSaveContext as u32
+    );
+}
+
+#[test]
+fn input_function_call_safe_over_resolved_int4in() {
+    let ctx = ::mcx::MemoryContext::new_bump("ifcs-test");
+    let mut flinfo = fmgr_info(42).unwrap();
+    let mut result = Datum::null();
+
+    assert!(input_function_call_safe(
+        &mut flinfo, Some(c"1234"), 0, -1, ctx.mcx(), None, &mut result
+    )
+    .unwrap());
+    assert_eq!(result.as_i32(), 1234);
+
+    let mut esc = ErrorSaveNode::new(true);
+    assert!(!input_function_call_safe(
+        &mut flinfo, Some(c"not-an-int"), 0, -1, ctx.mcx(), Some(&mut esc), &mut result
+    )
+    .unwrap());
+    assert!(esc.ctx.error_occurred());
+    let saved = esc.ctx.error().unwrap();
+    assert_eq!(saved.sqlstate(), ::types_error::ERRCODE_INVALID_TEXT_REPRESENTATION);
+
+    let err = input_function_call_safe(
+        &mut flinfo, Some(c"not-an-int"), 0, -1, ctx.mcx(), None, &mut result
+    )
+    .unwrap_err();
+    assert_eq!(err.sqlstate(), ::types_error::ERRCODE_INVALID_TEXT_REPRESENTATION);
+}

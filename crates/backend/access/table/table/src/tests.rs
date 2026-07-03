@@ -45,7 +45,7 @@ fn record_close(oid: Oid, lockmode: LOCKMODE) -> PgResult<()> {
 fn make<'mcx>(mcx: Mcx<'mcx>, oid: Oid, name: &str, relkind: u8) -> Relation<'mcx> {
     let mut relname = NameData::default();
     relname.namestrcpy(name);
-    let data = RelationData {
+    let data = RelationData { rd_locator: Default::default(), rd_smgr: Default::default(),
         rd_id: oid,
         rd_backend: INVALID_PROC_NUMBER,
         rd_islocaltemp: false,

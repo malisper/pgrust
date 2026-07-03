@@ -275,7 +275,7 @@ fn test_relation<'mcx>(mcx: Mcx<'mcx>) -> RelationData<'mcx> {
         relfrozenxid: 3,
         relminmxid: 1,
     };
-    RelationData {
+    RelationData { rd_locator: Default::default(), rd_smgr: Default::default(),
         rd_id: REL_OID,
         rd_backend: INVALID_PROC_NUMBER,
         rd_islocaltemp: false,
@@ -529,31 +529,21 @@ fn dml_wal_roundtrip_page_parity_and_visibility() {
         assert_eq!(main[2], 0);
         let (loc, fork, blk, _) = reader.XLogRecGetBlockTagExtended(0).unwrap();
         assert_eq!((loc, fork, blk), (RLOC, ForkNumber::MAIN_FORKNUM, 0));
-        if i == 0 {
-            // Fresh page, LSN 0 <= RedoRecPtr: C takes an FPI and omits the
-            // block data (first write after checkpoint).
-            assert!(reader.XLogRecHasBlockImage(0));
-            assert!(reader.XLogRecBlockImageApply(0));
-            assert!(reader.XLogRecGetBlockData(0).is_none());
-            let mut restored = vec![0u8; BLCKSZ];
-            assert!(reader.RestoreBlockImage(0, &mut restored));
-            assert_eq!(u16::from_ne_bytes(restored[12..14].try_into().unwrap()), 28);
-            assert_eq!(u16::from_ne_bytes(restored[14..16].try_into().unwrap()), 8160);
-            // tuple 41's image was final before the WAL insert
-            assert_eq!(&restored[8160..8188], &page0()[8160..8188]);
-        } else {
-            assert!(!reader.XLogRecHasBlockImage(0));
-            // xl_heap_header { infomask2; infomask; t_hoff } + tuple body
-            let bd = reader.XLogRecGetBlockData(0).unwrap();
-            assert_eq!(bd.len(), 5 + 5); // header + (t_len 28 - SizeofHeapTupleHeader 23)
-            assert_eq!(u16::from_ne_bytes(bd[0..2].try_into().unwrap()), 1); // natts
-            assert_eq!(
-                u16::from_ne_bytes(bd[2..4].try_into().unwrap()),
-                HEAP_XMAX_INVALID
-            );
-            assert_eq!(bd[4], 24); // t_hoff
-            assert_eq!(i32::from_ne_bytes(bd[6..10].try_into().unwrap()), *val);
-        }
+        // REGBUF_WILL_INIT implies REGBUF_NO_IMAGE (C xloginsert.h): even on
+        // a fresh page whose LSN 0 <= RedoRecPtr, C takes no FPI for an
+        // INIT_PAGE record — redo rebuilds the page from the block data
+        // (pinned against pg_waldump 18.3: INSERT+INIT is 59 bytes, no FPW).
+        assert!(!reader.XLogRecHasBlockImage(0));
+        // xl_heap_header { infomask2; infomask; t_hoff } + tuple body
+        let bd = reader.XLogRecGetBlockData(0).unwrap();
+        assert_eq!(bd.len(), 5 + 5); // header + (t_len 28 - SizeofHeapTupleHeader 23)
+        assert_eq!(u16::from_ne_bytes(bd[0..2].try_into().unwrap()), 1); // natts
+        assert_eq!(
+            u16::from_ne_bytes(bd[2..4].try_into().unwrap()),
+            HEAP_XMAX_INVALID
+        );
+        assert_eq!(bd[4], 24); // t_hoff
+        assert_eq!(i32::from_ne_bytes(bd[6..10].try_into().unwrap()), *val);
     }
 
     reader.XLogReadRecord(&mut routine).unwrap().unwrap();

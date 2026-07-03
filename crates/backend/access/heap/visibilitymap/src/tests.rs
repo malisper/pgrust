@@ -2,7 +2,7 @@ use super::*;
 use ::mcx::{Mcx, MemoryContext, PgVec};
 use ::types_core::{Oid, INVALID_PROC_NUMBER, RELPERSISTENCE_PERMANENT};
 use ::types_rel::{FormData_pg_class, LockInfoData, LockRelId, RELKIND_RELATION};
-use ::types_storage::RelFileLocator;
+use ::types_storage::{RelFileLocator, RelFileLocatorBackend};
 use ::types_tuple::{CompactAttribute, FormData_pg_attribute, NameData, TupleDescData};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::rc::Rc;
@@ -21,12 +21,24 @@ struct Fake {
     pages: Vec<Box<AlignedPage>>,
     pins: Vec<i32>,
     locks: Vec<i32>,
+    dirty: Vec<u32>,
     lock_calls: usize,
     fork_exists: bool,
     fork_nblocks: BlockNumber,
     cached_nblocks: BlockNumber,
     exists_calls: usize,
     read_calls: usize,
+    checksums: bool,
+    wal: Vec<WalRec>,
+    newpage_calls: Vec<Buffer>,
+    next_lsn: XLogRecPtr,
+}
+
+struct WalRec {
+    rmid: u8,
+    info: u8,
+    main: Vec<u8>,
+    bufs: Vec<(u8, Buffer, u8)>,
 }
 
 static FAKE: Mutex<Option<Fake>> = Mutex::new(None);
@@ -44,17 +56,29 @@ fn with_fake<R>(f: impl FnOnce(&mut Fake) -> R) -> R {
 }
 
 fn setup(pages: Vec<Box<AlignedPage>>, fork_exists: bool) {
+    let n = pages.len();
+    setup_n(pages, fork_exists, n as BlockNumber);
+}
+
+// `fork_nblocks` may be smaller than `pages.len()`: trailing pages are
+// non-VM buffers (heap pages) addressable only by buffer id.
+fn setup_n(pages: Vec<Box<AlignedPage>>, fork_exists: bool, fork_nblocks: BlockNumber) {
     install_seams();
     let n = pages.len();
     *FAKE.lock().unwrap_or_else(|e| e.into_inner()) = Some(Fake {
         pins: vec![0; n],
         locks: vec![0; n],
+        dirty: vec![0; n],
         lock_calls: 0,
         fork_exists,
-        fork_nblocks: n as BlockNumber,
+        fork_nblocks,
         cached_nblocks: InvalidBlockNumber,
         exists_calls: 0,
         read_calls: 0,
+        checksums: false,
+        wal: Vec::new(),
+        newpage_calls: Vec::new(),
+        next_lsn: 0x0100_0000,
         pages,
     });
 }
@@ -127,6 +151,37 @@ fn install_seams() {
                 Ok(f.fork_nblocks)
             })
         });
+        bufmgr_seams::mark_buffer_dirty::set(|buf| {
+            with_fake(|f| {
+                assert!(f.pins[(buf - 1) as usize] > 0, "dirtying unpinned buffer");
+                f.dirty[(buf - 1) as usize] += 1;
+            });
+            Ok(())
+        });
+        bufmgr_seams::buffer_get_block_number::set(|buf| (buf - 1) as BlockNumber);
+        transam_xlog_seams::data_checksums_enabled::set(|| with_fake(|f| f.checksums));
+        xlogutils_seams::in_recovery::set(|| false);
+        guc_tables::vars::wal_log_hints
+            .install(guc_tables::GucVarAccessors { get: || false, set: |_| {} });
+        xloginsert_seams::xlog_insert_record::set(|rmid, info, _flags, main_data, bufs| {
+            with_fake(|f| {
+                f.wal.push(WalRec {
+                    rmid,
+                    info,
+                    main: main_data.concat(),
+                    bufs: bufs.iter().map(|b| (b.block_id, b.buffer, b.flags)).collect(),
+                });
+                f.next_lsn += 8;
+                Ok(f.next_lsn)
+            })
+        });
+        xloginsert_seams::log_newpage_buffer::set(|buf, _std| {
+            with_fake(|f| {
+                f.newpage_calls.push(buf);
+                f.next_lsn += 8;
+                Ok(f.next_lsn)
+            })
+        });
     });
 }
 
@@ -165,7 +220,7 @@ fn test_relation<'mcx>(mcx: Mcx<'mcx>, oid: Oid) -> RelationData<'mcx> {
     });
     let mut relname = NameData::default();
     relname.namestrcpy("t");
-    RelationData {
+    RelationData { rd_locator: Default::default(), rd_smgr: Default::default(),
         rd_id: oid,
         rd_backend: INVALID_PROC_NUMBER,
         rd_islocaltemp: false,
@@ -393,33 +448,217 @@ fn new_page_initialized_under_lock() {
     vmbuf2.release();
 }
 
+fn map_byte(i: usize) -> u8 {
+    with_fake(|f| f.pages[0].0[CONTENTS_OFF + i])
+}
+
+fn heap_pages() -> (Box<AlignedPage>, Box<AlignedPage>) {
+    let vm = vm_page(&[]);
+    let mut heap = Box::new(AlignedPage([0u8; BLCKSZ]));
+    // SAFETY: local BLCKSZ buffer, exclusively owned.
+    let mut pm =
+        unsafe { PageMut::from_raw(core::ptr::NonNull::new(heap.as_mut_ptr()).unwrap()) };
+    pm.init(0);
+    pm.set_all_visible();
+    (vm, heap)
+}
+
 #[test]
-fn write_lane_panics_are_named() {
+fn set_bits_wal_record_and_lsns() {
     let _s = serial();
     let ctx = MemoryContext::new("test");
     let rel = test_relation(ctx.mcx(), 4242);
-    setup(vec![], true);
-    let mut vmbuf = VmBuffer::new();
+    let (vm, heap) = heap_pages();
+    setup_n(vec![vm, heap], true, 1); // heap page = buffer 2, block 1
 
-    for (what, f) in [
-        ("visibilitymap_set", catch_unwind(AssertUnwindSafe(|| {
-            visibilitymap_set(&rel, 0, 0, 0, &mut vmbuf, 0, VISIBILITYMAP_ALL_VISIBLE)
-        }))),
-        ("visibilitymap_clear", catch_unwind(AssertUnwindSafe(|| {
-            visibilitymap_clear(&rel, 0, &vmbuf, VISIBILITYMAP_VALID_BITS)
-        }))),
-        ("visibilitymap_prepare_truncate", catch_unwind(AssertUnwindSafe(|| {
-            visibilitymap_prepare_truncate(&rel, 0)
-        }))),
-    ] {
-        let err = f.unwrap_err();
-        let msg = err
-            .downcast_ref::<String>()
-            .cloned()
-            .or_else(|| err.downcast_ref::<&str>().map(|s| s.to_string()))
-            .unwrap_or_default();
-        assert!(msg.contains(what), "expected {what} in panic: {msg}");
-    }
+    let heap_buf: Buffer = 2;
+    let heap_blk: BlockNumber = 1; // mapByte 0, offset 2
+    let mut vmbuf = VmBuffer::new();
+    visibilitymap_pin(&rel, heap_blk, &mut vmbuf).unwrap();
+
+    let prev = visibilitymap_set(
+        &rel, heap_blk, heap_buf, 0, &vmbuf, 57, VISIBILITYMAP_ALL_VISIBLE,
+    )
+    .unwrap();
+    assert_eq!(prev, 0);
+    assert_eq!(map_byte(0), 0b0100);
+    with_fake(|f| {
+        assert_eq!(f.dirty[0], 1);
+        assert_eq!(f.wal.len(), 1);
+        let rec = &f.wal[0];
+        assert_eq!(rec.rmid, 9); // RM_HEAP2_ID
+        assert_eq!(rec.info, 0x40); // XLOG_HEAP2_VISIBLE
+        // xl_heap_visible { snapshotConflictHorizon; flags }
+        assert_eq!(rec.main.len(), 5);
+        assert_eq!(u32::from_ne_bytes(rec.main[0..4].try_into().unwrap()), 57);
+        assert_eq!(rec.main[4], VISIBILITYMAP_ALL_VISIBLE);
+        assert_eq!(rec.bufs.len(), 2);
+        assert_eq!(rec.bufs[0], (0, 1, 0));
+        // Checksums off, wal_log_hints off: heap FPI omitted.
+        assert_eq!(
+            rec.bufs[1],
+            (1, heap_buf, xloginsert_seams::REGBUF_STANDARD | xloginsert_seams::REGBUF_NO_IMAGE)
+        );
+        // VM page LSN advanced; heap page LSN untouched (no FPI protection).
+        let vm_lsn = unsafe {
+            PageRef::from_raw(core::ptr::NonNull::new(f.pages[0].as_mut_ptr()).unwrap())
+        }
+        .lsn();
+        assert_eq!(vm_lsn, f.next_lsn);
+        let heap_lsn = unsafe {
+            PageRef::from_raw(core::ptr::NonNull::new(f.pages[1].as_mut_ptr()).unwrap())
+        }
+        .lsn();
+        assert_eq!(heap_lsn, 0);
+        assert_eq!(f.locks[0], 0);
+    });
+
+    // Same flags already set: returns them, no new WAL, no new dirty.
+    let prev = visibilitymap_set(
+        &rel, heap_blk, heap_buf, 0, &vmbuf, 57, VISIBILITYMAP_ALL_VISIBLE,
+    )
+    .unwrap();
+    assert_eq!(prev, VISIBILITYMAP_ALL_VISIBLE);
+    with_fake(|f| {
+        assert_eq!(f.wal.len(), 1);
+        assert_eq!(f.dirty[0], 1);
+    });
+
+    // Checksums on: heap page is registered with an FPI and its LSN moves.
+    with_fake(|f| f.checksums = true);
+    let prev = visibilitymap_set(
+        &rel, heap_blk, heap_buf, 0, &vmbuf, 0, VISIBILITYMAP_VALID_BITS,
+    )
+    .unwrap();
+    assert_eq!(prev, VISIBILITYMAP_ALL_VISIBLE);
+    assert_eq!(map_byte(0), 0b1100);
+    with_fake(|f| {
+        assert_eq!(f.wal.len(), 2);
+        assert_eq!(f.wal[1].bufs[1], (1, heap_buf, xloginsert_seams::REGBUF_STANDARD));
+        let heap_lsn = unsafe {
+            PageRef::from_raw(core::ptr::NonNull::new(f.pages[1].as_mut_ptr()).unwrap())
+        }
+        .lsn();
+        assert_eq!(heap_lsn, f.next_lsn);
+    });
+
+    vmbuf.release();
+}
+
+#[test]
+fn set_rejects_wrong_buffers() {
+    let _s = serial();
+    let ctx = MemoryContext::new("test");
+    let rel = test_relation(ctx.mcx(), 4242);
+    let (vm, heap) = heap_pages();
+    setup_n(vec![vm, heap], true, 1);
+
+    let mut vmbuf = VmBuffer::new();
+    visibilitymap_pin(&rel, 1, &mut vmbuf).unwrap();
+
+    // Heap buffer 2 is block 1, not block 3.
+    let err = visibilitymap_set(&rel, 3, 2, 0, &vmbuf, 0, VISIBILITYMAP_ALL_VISIBLE)
+        .unwrap_err();
+    assert!(err.message.contains("wrong heap buffer"), "{}", err.message);
+
+    // Unpinned VmBuffer.
+    let empty = VmBuffer::new();
+    let err = visibilitymap_set(&rel, 1, 2, 0, &empty, 0, VISIBILITYMAP_ALL_VISIBLE)
+        .unwrap_err();
+    assert!(err.message.contains("wrong VM buffer"), "{}", err.message);
+
+    let err = visibilitymap_clear(&rel, 1, &empty, VISIBILITYMAP_VALID_BITS).unwrap_err();
+    assert!(
+        err.message.contains("wrong buffer passed to visibilitymap_clear"),
+        "{}",
+        err.message
+    );
+    vmbuf.release();
+}
+
+#[test]
+fn clear_bit_operations() {
+    let _s = serial();
+    let ctx = MemoryContext::new("test");
+    let rel = test_relation(ctx.mcx(), 4242);
+    setup(vec![vm_page(&[(0, 0b1111)])], true);
+
+    let mut vmbuf = VmBuffer::new();
+    visibilitymap_pin(&rel, 0, &mut vmbuf).unwrap();
+
+    // Clear only all_frozen of block 0: low 2 bits keep all_visible.
+    assert!(visibilitymap_clear(&rel, 0, &vmbuf, VISIBILITYMAP_ALL_FROZEN).unwrap());
+    assert_eq!(map_byte(0), 0b1101);
+    with_fake(|f| assert_eq!(f.dirty[0], 1));
+
+    // Both bits of block 1.
+    assert!(visibilitymap_clear(&rel, 1, &vmbuf, VISIBILITYMAP_VALID_BITS).unwrap());
+    assert_eq!(map_byte(0), 0b0001);
+
+    // Already clear: false, not re-dirtied, lock still cycled.
+    let locks_before = with_fake(|f| f.lock_calls);
+    assert!(!visibilitymap_clear(&rel, 1, &vmbuf, VISIBILITYMAP_VALID_BITS).unwrap());
+    with_fake(|f| {
+        assert_eq!(f.dirty[0], 2);
+        assert_eq!(f.lock_calls, locks_before + 2);
+        assert_eq!(f.locks[0], 0);
+    });
+    vmbuf.release();
+}
+
+#[test]
+fn prepare_truncate_clears_tail() {
+    let _s = serial();
+    let ctx = MemoryContext::new("test");
+    let rel = test_relation(ctx.mcx(), 4242);
+
+    // No VM fork at all.
+    setup(vec![], false);
+    assert_eq!(visibilitymap_prepare_truncate(&rel, 5).unwrap(), InvalidBlockNumber);
+
+    // nheapblocks 5: truncByte 1, truncOffset 2 -> byte 1 masked, tail zeroed.
+    setup(
+        vec![vm_page(&[(0, 0xff), (1, 0xff), (2, 0xff), (MAPSIZE as usize - 1, 0xff)]), vm_page(&[])],
+        true,
+    );
+    assert_eq!(visibilitymap_prepare_truncate(&rel, 5).unwrap(), 1);
+    assert_eq!(map_byte(0), 0xff);
+    assert_eq!(map_byte(1), 0x03);
+    assert_eq!(map_byte(2), 0);
+    assert_eq!(map_byte(MAPSIZE as usize - 1), 0);
+    with_fake(|f| {
+        assert_eq!(f.dirty[0], 1);
+        assert!(f.newpage_calls.is_empty()); // no checksums/wal_log_hints
+        assert_eq!(f.pins[0], 0);
+        assert_eq!(f.locks[0], 0);
+    });
+
+    // Checksums on: the torn-page FPI is emitted.
+    setup(vec![vm_page(&[(1, 0xff)]), vm_page(&[])], true);
+    with_fake(|f| f.checksums = true);
+    assert_eq!(visibilitymap_prepare_truncate(&rel, 5).unwrap(), 1);
+    with_fake(|f| assert_eq!(f.newpage_calls, vec![1]));
+
+    // Map-page boundary: nothing to clear; file already small enough.
+    setup(vec![vm_page(&[])], true);
+    assert_eq!(
+        visibilitymap_prepare_truncate(&rel, HEAPBLOCKS_PER_PAGE).unwrap(),
+        InvalidBlockNumber
+    );
+
+    // Boundary with a larger file: truncate down to exactly truncBlock.
+    setup(vec![vm_page(&[]), vm_page(&[])], true);
+    assert_eq!(
+        visibilitymap_prepare_truncate(&rel, HEAPBLOCKS_PER_PAGE).unwrap(),
+        1
+    );
+
+    // File already smaller than the block holding the cutoff.
+    setup(vec![vm_page(&[])], true);
+    assert_eq!(
+        visibilitymap_prepare_truncate(&rel, HEAPBLOCKS_PER_PAGE + 5).unwrap(),
+        InvalidBlockNumber
+    );
 }
 
 #[test]

@@ -12,8 +12,9 @@ use ::types_core::primitive::{
     BlockNumber, ForkNumber, InvalidBlockNumber, ProcNumber, INVALID_PROC_NUMBER,
 };
 use ::types_error::{PgError, PgResult, ERRCODE_OUT_OF_MEMORY, ERROR};
+use ::types_rel::RelationData;
 use ::types_storage::file::File;
-use ::types_storage::smgr::{MdRelnState, SMGR_NFORKS};
+use ::types_storage::smgr::{MdRelnState, SmgrHandle, SMGR_NFORKS};
 use ::types_storage::sync::{FileTag, FileTagOpResult};
 use ::types_storage::{RelFileLocator, RelFileLocatorBackend};
 
@@ -24,6 +25,7 @@ pub enum SmgrKind {
 }
 
 pub struct SMgrRelation {
+    pub smgr_rlocator: RelFileLocatorBackend,
     pub smgr_targblock: BlockNumber,
     pub smgr_cached_nblocks: [BlockNumber; SMGR_NFORKS],
     which: SmgrKind,
@@ -33,11 +35,12 @@ pub struct SMgrRelation {
     md: MdRelnState,
 }
 
-const _: () = assert!(core::mem::size_of::<SMgrRelation>() <= 152);
+const _: () = assert!(core::mem::size_of::<SMgrRelation>() <= 168);
 
 impl SMgrRelation {
-    fn new() -> Self {
+    fn new(smgr_rlocator: RelFileLocatorBackend) -> Self {
         SMgrRelation {
+            smgr_rlocator,
             smgr_targblock: InvalidBlockNumber,
             smgr_cached_nblocks: [InvalidBlockNumber; SMGR_NFORKS],
             which: SmgrKind::Md,
@@ -48,11 +51,39 @@ impl SMgrRelation {
     }
 }
 
+// C's stable SMgrRelation pointer, as a slab slot: slots never move, so an
+// SmgrHandle (idx+gen) survives map rehash; destroy bumps gen so a stale
+// cached handle fails loudly instead of aliasing a recycled slot.
+struct Slot {
+    gen: u32,
+    reln: Option<SMgrRelation>,
+}
+
 struct SmgrCache {
     cx: &'static MemoryContext,
-    relns: PgHashMap<'static, RelFileLocatorBackend, SMgrRelation>,
+    relns: PgHashMap<'static, RelFileLocatorBackend, u32>,
+    // std Vec justified: backend-lifetime owner structure already holding md's
+    // droppy fd vectors (MdRelnState precedent), outside context accounting.
+    slab: Vec<Slot>,
+    free: Vec<u32>,
     // |unpinned_relns|: AtEOXact_SMgr skips the walk when all are pinned.
     unpinned: Cell<usize>,
+}
+
+impl SmgrCache {
+    fn slot(&mut self, key: RelFileLocatorBackend) -> Option<&mut SMgrRelation> {
+        let idx = *self.relns.get(&key)?;
+        self.slab[idx as usize].reln.as_mut()
+    }
+
+    fn handle_for(&self, idx: u32) -> SmgrHandle {
+        SmgrHandle {
+            idx,
+            gen: core::num::NonZeroU32::new(self.slab[idx as usize].gen)
+                .expect("smgr slot gen is never zero"),
+        }
+    }
+
 }
 
 thread_local! {
@@ -78,7 +109,7 @@ fn with_cache<R>(f: impl FnOnce(&mut SmgrCache) -> R) -> R {
                 Box::leak(Box::new(MemoryContext::new("smgr relation table")));
             let mut relns = PgHashMap::new_in(cx.mcx());
             let _ = relns.try_reserve(400);
-            SmgrCache { cx, relns, unpinned: Cell::new(0) }
+            SmgrCache { cx, relns, slab: Vec::new(), free: Vec::new(), unpinned: Cell::new(0) }
         });
         f(cache)
     })
@@ -89,7 +120,7 @@ fn scratch_mcx() -> Mcx<'static> {
 }
 
 fn with_reln<R>(key: RelFileLocatorBackend, f: impl FnOnce(&mut SMgrRelation) -> R) -> Option<R> {
-    with_cache(|c| c.relns.get_mut(&key).map(f))
+    with_cache(|c| c.slot(key).map(f))
 }
 
 #[track_caller]
@@ -102,36 +133,49 @@ fn reln<R>(key: RelFileLocatorBackend, f: impl FnOnce(&mut SMgrRelation) -> R) -
 // reservation the fallible-insert contract needs.
 #[cold]
 #[inline(never)]
-fn open_entry<'c>(
-    c: &'c mut SmgrCache,
-    key: RelFileLocatorBackend,
-) -> PgResult<&'c mut SMgrRelation> {
+fn open_entry(c: &mut SmgrCache, key: RelFileLocatorBackend) -> PgResult<u32> {
     if c.relns.len() == c.relns.capacity() && c.relns.try_reserve(1).is_err() {
         return Err(oom("SMgrRelation hashtable"));
     }
-    let r = c.relns.entry(key).or_insert_with(|| {
-        let mut r = SMgrRelation::new();
-        match r.which {
-            SmgrKind::Md => md::mdopen(&mut r.md),
+    let mut r = SMgrRelation::new(key);
+    match r.which {
+        SmgrKind::Md => md::mdopen(&mut r.md),
+    }
+    let idx = match c.free.pop() {
+        Some(idx) => {
+            let slot = &mut c.slab[idx as usize];
+            debug_assert!(slot.reln.is_none());
+            slot.reln = Some(r);
+            idx
         }
-        r
-    });
+        None => {
+            let idx = u32::try_from(c.slab.len()).expect("smgr slab index fits u32");
+            c.slab.push(Slot { gen: 1, reln: Some(r) });
+            idx
+        }
+    };
+    c.relns.insert(key, idx);
     c.unpinned.set(c.unpinned.get() + 1);
-    Ok(r)
+    Ok(idx)
+}
+
+fn opened_idx(c: &mut SmgrCache, key: RelFileLocatorBackend) -> PgResult<u32> {
+    debug_assert!(key.locator.relNumber != 0, "smgropen: invalid RelFileNumber");
+    // Warm hit = ONE probe (C smgropen's HASH_ENTER-found), no capacity
+    // bookkeeping.
+    if let Some(&idx) = c.relns.get(&key) {
+        return Ok(idx);
+    }
+    open_entry(c, key)
 }
 
 fn opened<R>(
     key: RelFileLocatorBackend,
     f: impl FnOnce(&mut SMgrRelation) -> R,
 ) -> PgResult<R> {
-    debug_assert!(key.locator.relNumber != 0, "smgropen: invalid RelFileNumber");
     with_cache(|c| {
-        // Warm hit = ONE probe (C smgropen's HASH_ENTER-found), no capacity
-        // bookkeeping.
-        if let Some(r) = c.relns.get_mut(&key) {
-            return Ok(f(r));
-        }
-        open_entry(c, key).map(f)
+        let idx = opened_idx(c, key)?;
+        Ok(f(c.slab[idx as usize].reln.as_mut().expect("open smgr slot is live")))
     })
 }
 
@@ -153,50 +197,70 @@ pub fn smgropen(rlocator: RelFileLocator, backend: ProcNumber) -> PgResult<()> {
     opened(key, |_| ())
 }
 
+pub fn smgropen_handle(rlocator: RelFileLocator, backend: ProcNumber) -> PgResult<SmgrHandle> {
+    let key = RelFileLocatorBackend { locator: rlocator, backend };
+    with_cache(|c| {
+        let idx = opened_idx(c, key)?;
+        Ok(c.handle_for(idx))
+    })
+}
+
+fn with_reln_at(
+    c: &mut SmgrCache,
+    key: RelFileLocatorBackend,
+    f: impl FnOnce(&mut SMgrRelation, &Cell<usize>),
+) {
+    if let Some(&idx) = c.relns.get(&key) {
+        if let Some(r) = c.slab[idx as usize].reln.as_mut() {
+            f(r, &c.unpinned);
+        }
+    }
+}
+
 pub fn smgrpin(key: RelFileLocatorBackend) {
     with_cache(|c| {
-        if let Some(r) = c.relns.get_mut(&key) {
+        with_reln_at(c, key, |r, unpinned| {
             let old = r.pincount;
             r.pincount += 1;
-            note_pin_transition(&c.unpinned, old, r.pincount);
-        }
+            note_pin_transition(unpinned, old, r.pincount);
+        })
     });
 }
 
 pub fn smgrunpin(key: RelFileLocatorBackend) {
     with_cache(|c| {
-        if let Some(r) = c.relns.get_mut(&key) {
+        with_reln_at(c, key, |r, unpinned| {
             debug_assert!(r.pincount > 0, "smgrunpin: pincount must be positive");
             let old = r.pincount;
             r.pincount -= 1;
-            note_pin_transition(&c.unpinned, old, r.pincount);
-        }
+            note_pin_transition(unpinned, old, r.pincount);
+        })
     });
 }
 
 pub fn smgrpin_relcache(key: RelFileLocatorBackend) {
     with_cache(|c| {
-        if let Some(r) = c.relns.get_mut(&key) {
+        with_reln_at(c, key, |r, unpinned| {
             if !r.relcache_pinned {
                 r.relcache_pinned = true;
                 let old = r.pincount;
                 r.pincount += 1;
-                note_pin_transition(&c.unpinned, old, r.pincount);
+                note_pin_transition(unpinned, old, r.pincount);
             }
-        }
+        })
     });
 }
 
 pub fn smgrunpin_relcache(key: RelFileLocatorBackend) {
     with_cache(|c| {
-        if let Some(r) = c.relns.get_mut(&key) {
+        with_reln_at(c, key, |r, unpinned| {
             if r.relcache_pinned {
                 r.relcache_pinned = false;
                 let old = r.pincount;
                 r.pincount -= 1;
-                note_pin_transition(&c.unpinned, old, r.pincount);
+                note_pin_transition(unpinned, old, r.pincount);
             }
-        }
+        })
     });
 }
 
@@ -228,9 +292,17 @@ pub fn smgrdestroy(key: RelFileLocatorBackend) -> PgResult<()> {
         Ok(())
     })?;
     with_cache(|c| {
-        if c.relns.remove(&key).is_none() {
+        let Some(idx) = c.relns.remove(&key) else {
             return Err(Box::new(PgError::error("SMgrRelation hashtable corrupted")));
+        };
+        let slot = &mut c.slab[idx as usize];
+        slot.reln = None;
+        // gen 0 is the Option<SmgrHandle> niche; skip it on wrap.
+        slot.gen = slot.gen.wrapping_add(1);
+        if slot.gen == 0 {
+            slot.gen = 1;
         }
+        c.free.push(idx);
         c.unpinned.set(c.unpinned.get() - 1);
         Ok(())
     })
@@ -246,8 +318,8 @@ pub fn smgrdestroyall() -> PgResult<()> {
         if keys.try_reserve(c.unpinned.get()).is_err() {
             return Err(oom("smgrdestroyall scratch"));
         }
-        for (k, r) in c.relns.iter() {
-            if r.pincount == 0 {
+        for (k, &idx) in c.relns.iter() {
+            if c.slab[idx as usize].reln.as_ref().is_some_and(|r| r.pincount == 0) {
                 keys.push(*k);
             }
         }
@@ -645,6 +717,85 @@ pub fn mdfiletagmatches(ftag: FileTag, candidate: FileTag) -> bool {
     md::mdfiletagmatches(ftag, candidate)
 }
 
+fn with_handle<R>(h: SmgrHandle, f: impl FnOnce(&mut SMgrRelation, &Cell<usize>) -> R) -> R {
+    with_cache(|c| {
+        let slot = &mut c.slab[h.idx as usize];
+        assert!(
+            slot.gen == h.gen.get() && slot.reln.is_some(),
+            "stale SmgrHandle: smgr entry destroyed under a cached rd_smgr (pin contract violated)"
+        );
+        f(slot.reln.as_mut().unwrap(), &c.unpinned)
+    })
+}
+
+pub fn smgrpin_h(h: SmgrHandle) {
+    with_handle(h, |r, unpinned| {
+        let old = r.pincount;
+        r.pincount += 1;
+        note_pin_transition(unpinned, old, r.pincount);
+    })
+}
+
+pub fn smgrunpin_h(h: SmgrHandle) {
+    with_handle(h, |r, unpinned| {
+        debug_assert!(r.pincount > 0, "smgrunpin: pincount must be positive");
+        let old = r.pincount;
+        r.pincount -= 1;
+        note_pin_transition(unpinned, old, r.pincount);
+    })
+}
+
+pub fn smgrnblocks_h(h: SmgrHandle, forknum: ForkNumber) -> PgResult<BlockNumber> {
+    with_handle(h, |r, _| {
+        let cached = r.smgr_cached_nblocks[forknum as usize];
+        // Believed only in recovery: no shared inval for fork-size changes.
+        if xlogutils::in_recovery() && cached != InvalidBlockNumber {
+            return Ok(cached);
+        }
+        let key = r.smgr_rlocator;
+        let result = match r.which {
+            SmgrKind::Md => md::mdnblocks(key, &mut r.md, forknum)?,
+        };
+        r.smgr_cached_nblocks[forknum as usize] = result;
+        Ok(result)
+    })
+}
+
+pub fn smgrclose_h(h: SmgrHandle) -> PgResult<()> {
+    let key = with_handle(h, |r, _| r.smgr_rlocator);
+    smgrrelease(key)
+}
+
+// rel.h RelationGetSmgr: warm hit is a plain Cell load, zero probes (the
+// relcache pin keeps the slot alive, so the cached handle cannot go stale).
+pub fn RelationGetSmgr(rel: &RelationData<'_>) -> PgResult<SmgrHandle> {
+    if let Some(h) = rel.rd_smgr.get() {
+        return Ok(h);
+    }
+    rel_open_smgr(rel)
+}
+
+// One plain pin per cached handle (C pins per relcache-entry pointer; a
+// rebuilt entry coexisting with held old entries must each hold their own).
+#[cold]
+#[inline(never)]
+fn rel_open_smgr(rel: &RelationData<'_>) -> PgResult<SmgrHandle> {
+    let h = smgropen_handle(rel.rd_locator.get(), rel.rd_backend)?;
+    smgrpin_h(h);
+    rel.rd_smgr.set(Some(h));
+    Ok(h)
+}
+
+// rel.h RelationCloseSmgr.
+pub fn RelationCloseSmgr(rel: &RelationData<'_>) -> PgResult<()> {
+    let Some(h) = rel.rd_smgr.get() else {
+        return Ok(());
+    };
+    smgrunpin_h(h);
+    rel.rd_smgr.set(None);
+    smgrclose_h(h)
+}
+
 pub fn init_seams() {
     smgr_seams::smgr_release_rel_locator::set(smgrreleaserellocator);
     smgr_seams::smgr_exists::set(|rlocator, forknum| {
@@ -692,6 +843,7 @@ pub fn init_seams() {
             }
         })?
     });
+    smgr_seams::smgr_zeroextend::set(smgrzeroextend);
     smgr_seams::smgr_writeback::set(|rlocator, forknum, blocknum, nblocks| {
         opened(rlocator, |r| match r.which {
             SmgrKind::Md => md::mdwriteback(rlocator, &mut r.md, forknum, blocknum, nblocks),
@@ -776,6 +928,128 @@ mod tests {
             assert_eq!(r.smgr_cached_nblocks[0], InvalidBlockNumber);
         });
         smgrdestroy(k).unwrap();
+    }
+
+    #[test]
+    fn handle_stable_across_rehash_and_release() {
+        let k = key(31007);
+        let h = smgropen_handle(k.locator, k.backend).unwrap();
+        smgrpin_h(h);
+        // Force map growth past the initial reservation; slab slots must not move.
+        for i in 0..600u32 {
+            smgropen(RelFileLocator { spcOid: 1, dbOid: 2, relNumber: 40000 + i }, k.backend)
+                .unwrap();
+        }
+        assert_eq!(with_handle(h, |r, _| r.smgr_rlocator), k);
+        smgrrelease(k).unwrap();
+        assert_eq!(with_handle(h, |r, _| r.smgr_targblock), InvalidBlockNumber);
+        smgrdestroyall().unwrap();
+        assert!(contains(k), "pinned entry must survive smgrdestroyall");
+        smgrunpin_h(h);
+        smgrdestroyall().unwrap();
+        assert!(!contains(k));
+    }
+
+    #[test]
+    fn stale_handle_fails_loudly_and_slot_gen_advances() {
+        let k = key(31008);
+        let h = smgropen_handle(k.locator, k.backend).unwrap();
+        smgrdestroy(k).unwrap();
+        let r = std::panic::catch_unwind(|| with_handle(h, |_, _| ()));
+        assert!(r.is_err(), "stale handle use must panic");
+        let k2 = key(31009);
+        let h2 = smgropen_handle(k2.locator, k2.backend).unwrap();
+        if h2.idx == h.idx {
+            assert_ne!(h2.gen, h.gen, "slot reuse must bump gen");
+        }
+        smgrdestroy(k2).unwrap();
+    }
+
+    fn test_rel(k: RelFileLocatorBackend) -> RelationData<'static> {
+        use ::types_rel::{FormData_pg_class, LockInfoData, LockRelId};
+        use ::types_tuple::{NameData, TupleDescData};
+        use core::cell::Cell;
+        use std::rc::Rc;
+        let cx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("test rel")));
+        let mut relname = NameData::default();
+        relname.namestrcpy("t");
+        let mut form = FormData_pg_class {
+            relname,
+            relnamespace: 2200,
+            reltype: 0,
+            relowner: 10,
+            relam: 2,
+            relfilenode: k.locator.relNumber,
+            reltablespace: k.locator.spcOid,
+            relpages: 0,
+            reltuples: -1.0,
+            relallvisible: 0,
+            reltoastrelid: 0,
+            relhasindex: false,
+            relisshared: false,
+            relpersistence: ::types_core::RELPERSISTENCE_PERMANENT,
+            relkind: ::types_rel::RELKIND_RELATION,
+            relhassubclass: false,
+            relrowsecurity: false,
+            relispopulated: true,
+            relreplident: b'd',
+            relispartition: false,
+            relfrozenxid: 3,
+            relminmxid: 1,
+        };
+        form.relfilenode = k.locator.relNumber;
+        RelationData {
+            rd_locator: Cell::new(k.locator),
+            rd_smgr: Cell::new(None),
+            rd_id: k.locator.relNumber,
+            rd_backend: k.backend,
+            rd_islocaltemp: false,
+            rd_isvalid: Cell::new(true),
+            rd_createSubid: Cell::new(0),
+            rd_newRelfilelocatorSubid: Cell::new(0),
+            rd_firstRelfilelocatorSubid: Cell::new(0),
+            rd_droppedSubid: Cell::new(0),
+            rd_lockInfo: LockInfoData {
+                lockRelId: LockRelId { relId: k.locator.relNumber, dbId: k.locator.dbOid },
+            },
+            rd_rel: form,
+            rd_att: Rc::new(TupleDescData {
+                natts: 0,
+                tdtypeid: 0,
+                tdtypmod: -1,
+                tdrefcount: 1,
+                constr: None,
+                compact_attrs: PgVec::new_in(cx.mcx()),
+                attrs: PgVec::new_in(cx.mcx()),
+            }),
+            rd_index: None,
+            rd_opcintype: PgVec::new_in(cx.mcx()),
+            rd_opfamily: PgVec::new_in(cx.mcx()),
+            rd_indoption: PgVec::new_in(cx.mcx()),
+            rd_indcollation: PgVec::new_in(cx.mcx()),
+            rd_options: None,
+            pgstat_enabled: Cell::new(false),
+            rd_amcache: Default::default(),
+            rd_supportinfo: Default::default(),
+            rd_indexlist: Default::default(),
+        }
+    }
+
+    #[test]
+    fn relation_get_smgr_caches_and_pins() {
+        let k = key(31010);
+        let rel = test_rel(k);
+        let h = RelationGetSmgr(&rel).unwrap();
+        assert_eq!(rel.rd_smgr.get(), Some(h));
+        let h2 = RelationGetSmgr(&rel).unwrap();
+        assert_eq!(h, h2);
+        smgrdestroyall().unwrap();
+        assert!(contains(k), "rd_smgr pin must survive smgrdestroyall");
+        RelationCloseSmgr(&rel).unwrap();
+        assert_eq!(rel.rd_smgr.get(), None);
+        RelationCloseSmgr(&rel).unwrap();
+        smgrdestroyall().unwrap();
+        assert!(!contains(k));
     }
 
     #[test]

@@ -108,6 +108,7 @@ fn page_set_lsn(page: &mut [u8], lsn: XLogRecPtr) {
 }
 
 /// One block reference, already resolved (C's registered_buffer essentials).
+#[derive(Clone, Copy)]
 pub struct RegBlock<'a> {
     pub block_id: u8,
     pub rlocator: RelFileLocator,
@@ -707,8 +708,82 @@ pub fn log_newpage_buffer(buffer: Buffer, page_std: bool) -> PgResult<XLogRecPtr
     Ok(recptr)
 }
 
-pub fn log_newpage_range() -> ! {
-    panic!("log_newpage_range not ported (xloginsert.c): needs relation-driven buffer sweep");
+pub fn log_newpage_range(
+    rel: &::types_rel::RelationData<'_>,
+    forknum: ForkNumber,
+    startblk: BlockNumber,
+    endblk: BlockNumber,
+    page_std: bool,
+) -> PgResult<()> {
+    use ::types_storage::ReadBufferMode;
+
+    let mut flags = REGBUF_FORCE_IMAGE;
+    if page_std {
+        flags |= REGBUF_STANDARD;
+    }
+
+    let mut blkno = startblk;
+    while blkno < endblk {
+        postgres_seams::check_for_interrupts::call()?;
+
+        let mut bufpack = [0 as Buffer; XLR_MAX_BLOCK_ID];
+        let mut pages: [&[u8]; XLR_MAX_BLOCK_ID] = [&[]; XLR_MAX_BLOCK_ID];
+        let mut nbufs = 0usize;
+        while nbufs < XLR_MAX_BLOCK_ID && blkno < endblk {
+            let buf =
+                bufmgr::ReadBufferExtended(rel, forknum, blkno, ReadBufferMode::Normal, None)?;
+            bufmgr::LockBuffer(buf, bufmgr::BUFFER_LOCK_EXCLUSIVE)?;
+            let page = bufmgr::BufferGetPagePtr(buf).as_ptr() as *const u8;
+            // SAFETY: exclusive lock + pin held for the batch; BLCKSZ readable.
+            let page = unsafe { core::slice::from_raw_parts(page, BLCKSZ) };
+            // Empty pages stay un-WAL-logged so their LSN stays zero.
+            if !page_is_new(page) {
+                bufpack[nbufs] = buf;
+                pages[nbufs] = page;
+                nbufs += 1;
+            } else {
+                bufmgr::UnlockReleaseBuffer(buf)?;
+            }
+            blkno += 1;
+        }
+        if nbufs == 0 {
+            break;
+        }
+
+        let mut blocks = [RegBlock {
+            block_id: 0,
+            rlocator: RelFileLocator::new(0, 0, 0),
+            forknum,
+            block: 0,
+            page: &[],
+            flags,
+            bufdata: &[],
+        }; XLR_MAX_BLOCK_ID];
+        for i in 0..nbufs {
+            let tag = bufmgr::BufferGetTag(bufpack[i]);
+            blocks[i] = RegBlock {
+                block_id: i as u8,
+                rlocator: RelFileLocator::new(tag.spcOid, tag.dbOid, tag.relNumber),
+                forknum: tag.forkNum,
+                block: tag.blockNum,
+                page: pages[i],
+                flags,
+                bufdata: &[],
+            };
+        }
+
+        init_small::globals::StartCriticalSection();
+        for buf in &bufpack[..nbufs] {
+            bufmgr::MarkBufferDirty(*buf)?;
+        }
+        let recptr = insert_record(RM_XLOG_ID, XLOG_FPI, 0, &[], &blocks[..nbufs])?;
+        for buf in &bufpack[..nbufs] {
+            bufmgr::buffer_page_set_lsn(*buf, recptr);
+            bufmgr::UnlockReleaseBuffer(*buf)?;
+        }
+        init_small::globals::EndCriticalSection();
+    }
+    Ok(())
 }
 
 pub fn init_seams() {

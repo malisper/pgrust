@@ -8,6 +8,8 @@ publish.workspace = true
 adt_datetime = { path = "../../adt/adt_datetime" }
 guc = { path = "../guc" }
 mcx = { path = "../../../../_support/mcx" }
+pg_path = { path = "../../../../port/pg_path" }
+init_small = { path = "../../init/init_small" }
 
 [dev-dependencies]
 pgtz = { path = "../../../timezone/pgtz" }

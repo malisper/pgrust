@@ -37,7 +37,7 @@ fn take_events() -> Vec<(&'static str, Oid, LOCKMODE)> {
 fn make_entry(mcx: Mcx<'static>, oid: Oid, name: &str, relpersistence: u8) -> RelationData<'static> {
     let mut relname = NameData::default();
     relname.namestrcpy(name);
-    RelationData {
+    RelationData { rd_locator: Default::default(), rd_smgr: Default::default(),
         rd_id: oid,
         rd_backend: INVALID_PROC_NUMBER,
         rd_islocaltemp: false,

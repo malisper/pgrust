@@ -606,7 +606,7 @@ mod from_where {
             a.attname.namestrcpy(name);
             attrs.push(a);
         }
-        let data = RelationData {
+        let data = RelationData { rd_locator: Default::default(), rd_smgr: Default::default(),
             rd_id: T_OID,
             rd_backend: INVALID_PROC_NUMBER,
             rd_islocaltemp: false,

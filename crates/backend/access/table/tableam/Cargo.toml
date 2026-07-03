@@ -17,8 +17,10 @@ types_tuple = { path = "../../../../_support/types/types_tuple" }
 types_snapshot = { path = "../../../../_support/types/snapshot" }
 guc_tables = { path = "../../../utils/misc/guc_tables" }
 bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
+smgr = { path = "../../../storage/smgr/smgr" }
 xact_seams = { path = "../../transam/xact_seams" }
 exectuples = { path = "../../../executor/exectuples" }
 tableam_vocab = { path = "../tableam_vocab" }
 heapam = { path = "../../heap/heapam" }
 heapam_handler = { path = "../../heap/heapam_handler" }
+tidbitmap = { path = "../../../nodes/tidbitmap" }

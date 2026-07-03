@@ -33,3 +33,4 @@ varlena = { path = "../../adt/varlena" }
 
 [dev-dependencies]
 mcx = { path = "../../../../_support/mcx" }
+nodes = { package = "types_nodes", path = "../../../../_support/types/nodes" }

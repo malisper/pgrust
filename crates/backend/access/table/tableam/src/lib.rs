@@ -350,15 +350,20 @@ mod heap {
         unported("backend-access-heap-heapam (ANALYZE lane)")
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn scan_bitmap_next_tuple<'mcx>(
-        _mcx: Mcx<'mcx>,
-        _scan: &mut HeapScanDescData<'mcx>,
-        _slot: &mut SlotData<'mcx>,
-        _recheck: &mut bool,
-        _lossy_pages: &mut u64,
-        _exact_pages: &mut u64,
+        mcx: Mcx<'mcx>,
+        scan: &mut HeapScanDescData<'mcx>,
+        tbm: &tidbitmap::TIDBitmap<'_>,
+        iterator: &mut tidbitmap::TbmIterator,
+        slot: &mut SlotData<'mcx>,
+        recheck: &mut bool,
+        lossy_pages: &mut u64,
+        exact_pages: &mut u64,
     ) -> PgResult<bool> {
-        unported("backend-access-heap-heapam (bitmap scan lane)")
+        heapam::bitmap::heap_scan_bitmap_next_tuple(
+            mcx, scan, tbm, iterator, slot, recheck, lossy_pages, exact_pages,
+        )
     }
 
     pub(super) fn scan_sample_next_block<'mcx>(
@@ -1089,9 +1094,14 @@ pub fn table_scan_analyze_next_tuple<'mcx>(
     }
 }
 
+// C divergence: the TBM iterator + bitmap arrive as parameters (C rides them
+// in rs_base.st.rs_tbmiterator; ours carries no bitmap back-pointer).
+#[allow(clippy::too_many_arguments)]
 pub fn table_scan_bitmap_next_tuple<'mcx>(
     mcx: Mcx<'mcx>,
     scan: &mut TableScanDesc<'mcx>,
+    tbm: &tidbitmap::TIDBitmap<'_>,
+    iterator: &mut tidbitmap::TbmIterator,
     slot: &mut SlotData<'mcx>,
     recheck: &mut bool,
     lossy_pages: &mut u64,
@@ -1099,7 +1109,7 @@ pub fn table_scan_bitmap_next_tuple<'mcx>(
 ) -> PgResult<bool> {
     match scan {
         TableScanDesc::Heap(h) => {
-            heap::scan_bitmap_next_tuple(mcx, h, slot, recheck, lossy_pages, exact_pages)
+            heap::scan_bitmap_next_tuple(mcx, h, tbm, iterator, slot, recheck, lossy_pages, exact_pages)
         }
     }
 }
@@ -1251,9 +1261,21 @@ pub fn table_block_parallelscan_reinitialize(
 // --- Relation-sizing helpers for block-oriented AMs (tableam.c) ---
 
 pub fn table_block_relation_size(rel: &Relation<'_>, forkNumber: ForkNumber) -> PgResult<u64> {
-    let _ = (rel, forkNumber);
-    // smgrnblocks(fork) * BLCKSZ, summed below MAX_FORKNUM for InvalidForkNumber.
-    unported("backend-storage-smgr (smgrnblocks) / relcache rd_locator")
+    let h = smgr::RelationGetSmgr(rel)?;
+    let mut nblocks: u64 = 0;
+    if forkNumber == ForkNumber::InvalidForkNumber {
+        // C sums forks i < MAX_FORKNUM, i.e. INIT_FORKNUM excluded (bug-compat).
+        for fork in [
+            ForkNumber::MAIN_FORKNUM,
+            ForkNumber::FSM_FORKNUM,
+            ForkNumber::VISIBILITYMAP_FORKNUM,
+        ] {
+            nblocks += smgr::smgrnblocks_h(h, fork)? as u64;
+        }
+    } else {
+        nblocks = smgr::smgrnblocks_h(h, forkNumber)? as u64;
+    }
+    Ok(nblocks * ::types_core::BLCKSZ as u64)
 }
 
 /// `table_relation_estimate_size` for the heap AM (heapam_estimate_rel_size ->
@@ -1383,12 +1405,12 @@ fn block_relation_estimate_size_math(
 
 // --- Unported providers, loud per rule 5 ---
 
-fn relation_locator(_rel: &Relation<'_>) -> RelFileLocator {
-    unported("relcache rd_locator (backend-utils-cache-relcache storage fields)")
+fn relation_locator(rel: &Relation<'_>) -> RelFileLocator {
+    bufmgr_seams::relation_smgr_locator::call(rel).locator
 }
 
-fn relation_nblocks(_rel: &Relation<'_>) -> PgResult<BlockNumber> {
-    unported("backend-storage-buffer-bufmgr (RelationGetNumberOfBlocksInFork)")
+fn relation_nblocks(rel: &Relation<'_>) -> PgResult<BlockNumber> {
+    bufmgr_seams::relation_get_number_of_blocks_in_fork::call(rel, ForkNumber::MAIN_FORKNUM)
 }
 
 fn nbuffers() -> PgResult<i32> {

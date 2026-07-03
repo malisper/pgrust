@@ -29,6 +29,43 @@ fn invalid_relpersistence(c: u8) -> Box<PgError> {
     )
 }
 
+// Steady-state arms only: the historic-snapshot (logical decoding) refresh and
+// the parallel-worker rd_firstRelfilelocatorSubid restore are unported.
+pub(crate) fn RelationInitPhysicalAddr(data: &RelationData<'_>) -> PgResult<()> {
+    if !types_rel::RELKIND_HAS_STORAGE(data.rd_rel.relkind) {
+        return Ok(());
+    }
+    let spc = if data.rd_rel.reltablespace != InvalidOid {
+        data.rd_rel.reltablespace
+    } else {
+        init_small::globals::MyDatabaseTableSpace()
+    };
+    let db = if spc == GLOBALTABLESPACE_OID {
+        InvalidOid
+    } else {
+        init_small::globals::MyDatabaseId()
+    };
+    let rel_number = if data.rd_rel.relfilenode != InvalidRelFileNumber {
+        data.rd_rel.relfilenode
+    } else {
+        let n = relmapper_seams::relation_map_oid_to_filenumber::call(
+            data.rd_id,
+            data.rd_rel.relisshared,
+        );
+        if n == InvalidRelFileNumber {
+            return Err(Box::new(PgError::error(format!(
+                "could not find relation mapping for relation \"{}\", OID {}",
+                String::from_utf8_lossy(data.rd_rel.relname.name_str()),
+                data.rd_id
+            ))));
+        }
+        n
+    };
+    data.rd_locator
+        .set(types_storage::RelFileLocator::new(spc, db, rel_number));
+    Ok(())
+}
+
 fn resolve_backend(form: &FormData_pg_class) -> PgResult<(ProcNumber, bool)> {
     match form.relpersistence {
         RELPERSISTENCE_UNLOGGED | RELPERSISTENCE_PERMANENT => Ok((INVALID_PROC_NUMBER, false)),
@@ -91,7 +128,7 @@ pub(crate) fn build_desc_data(target_rel_id: Oid) -> PgResult<Option<RelationDat
         // wait on the storage unit (RelationInitPhysicalAddr absent).
         let rd_lockInfo = lmgr::RelationInitLockInfo(target_rel_id, scanned.form.relisshared);
 
-        let data = RelationData {
+        let data = RelationData { rd_locator: Default::default(), rd_smgr: Default::default(),
             rd_id: target_rel_id,
             rd_backend,
             rd_islocaltemp,
@@ -114,6 +151,7 @@ pub(crate) fn build_desc_data(target_rel_id: Oid) -> PgResult<Option<RelationDat
             rd_supportinfo: Default::default(),
             rd_indexlist: Default::default(),
         };
+        RelationInitPhysicalAddr(&data)?;
 
         if with_state(|st| st.in_progress[offset].invalidated) {
             continue;
@@ -205,7 +243,7 @@ pub fn formrdesc(cat: &BootstrapCatalog) -> PgResult<()> {
         relmapper_seams::relation_map_update_map::call(relid, relid, cat.shared, true)?;
     }
 
-    let data = RelationData {
+    let data = RelationData { rd_locator: Default::default(), rd_smgr: Default::default(),
         rd_id: relid,
         rd_backend: INVALID_PROC_NUMBER,
         rd_islocaltemp: false,
@@ -228,6 +266,7 @@ pub fn formrdesc(cat: &BootstrapCatalog) -> PgResult<()> {
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
     };
+    RelationInitPhysicalAddr(&data)?;
 
     store::insert(Rc::new(data), true, false)
 }

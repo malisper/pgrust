@@ -437,6 +437,21 @@ impl<'a> PageMut<'a> {
     }
 
     #[inline]
+    pub fn clear_full(&mut self) {
+        self.set_pd_flags(self.as_ref().pd_flags() & !PD_PAGE_FULL);
+    }
+
+    #[inline]
+    pub fn set_has_free_line_pointers(&mut self) {
+        self.set_pd_flags(self.as_ref().pd_flags() | PD_HAS_FREE_LINES);
+    }
+
+    #[inline]
+    pub fn clear_has_free_line_pointers(&mut self) {
+        self.set_pd_flags(self.as_ref().pd_flags() & !PD_HAS_FREE_LINES);
+    }
+
+    #[inline]
     pub fn set_lsn(&mut self, lsn: XLogRecPtr) {
         let v = PageXLogRecPtr::from_lsn(lsn);
         // SAFETY: in-bounds at offset 0; two 4-aligned u32 stores.
@@ -582,6 +597,237 @@ impl<'a> PageMut<'a> {
 
         Some(offset_number)
     }
+
+    /// `PageRepairFragmentation`; caller holds the buffer cleanup lock.
+    /// Panics on corruption (inside prune's critical section C's
+    /// ereport(ERROR) promotes to PANIC).
+    pub fn repair_fragmentation(&mut self) {
+        // SAFETY: same exclusively-held image; the read view is used only
+        // between the interleaved header/line-pointer stores below.
+        let r = unsafe { PageRef::from_raw(self.ptr) };
+        let pd_lower = r.pd_lower() as usize;
+        let pd_upper = r.pd_upper() as usize;
+        let pd_special = r.pd_special() as usize;
+        assert!(
+            pd_lower >= SizeOfPageHeaderData
+                && pd_lower <= pd_upper
+                && pd_upper <= pd_special
+                && pd_special <= BLCKSZ
+                && pd_special == (pd_special + 7) & !7,
+            "corrupted page pointers: lower = {pd_lower}, upper = {pd_upper}, special = {pd_special}"
+        );
+
+        let nline = r.max_offset_number();
+        let mut itemidbase = [ItemIdCompact::ZERO; MaxHeapTuplesPerPage];
+        let mut nstorage = 0usize;
+        let mut nunused = 0usize;
+        let mut totallen = 0usize;
+        let mut last_offset = pd_special;
+        let mut presorted = true;
+        let mut finalusedlp: OffsetNumber = 0;
+
+        for i in 1..=nline {
+            // SAFETY: i <= max_offset_number.
+            let lp = unsafe { r.item_id_unchecked(i) };
+            if lp.is_used() {
+                if lp.has_storage() {
+                    let itemoff = lp.lp_off() as usize;
+                    if last_offset > itemoff {
+                        last_offset = itemoff;
+                    } else {
+                        presorted = false;
+                    }
+                    assert!(
+                        itemoff >= pd_upper && itemoff < pd_special,
+                        "corrupted line pointer: {itemoff}"
+                    );
+                    let alignedlen = (lp.lp_len() as usize + 7) & !7;
+                    itemidbase[nstorage] = ItemIdCompact {
+                        offsetindex: i - 1,
+                        itemoff: itemoff as u16,
+                        alignedlen: alignedlen as u16,
+                    };
+                    totallen += alignedlen;
+                    nstorage += 1;
+                }
+                finalusedlp = i;
+            } else {
+                debug_assert!(!lp.has_storage());
+                self.set_item_id(i, ItemIdData::new(0, LP_UNUSED, 0));
+                nunused += 1;
+            }
+        }
+
+        if nstorage == 0 {
+            self.set_pd_upper(pd_special as uint16);
+        } else {
+            assert!(
+                totallen <= pd_special - pd_lower,
+                "corrupted item lengths: total {totallen}, available space {}",
+                pd_special - pd_lower
+            );
+            self.compactify_tuples(&itemidbase[..nstorage], presorted);
+        }
+
+        if finalusedlp != nline {
+            // Trailing unused line pointers: truncate the array.
+            let nunusedend = (nline - finalusedlp) as usize;
+            debug_assert!(nunused >= nunusedend && nunusedend > 0);
+            nunused -= nunusedend;
+            self.set_pd_lower(
+                (pd_lower - core::mem::size_of::<ItemIdData>() * nunusedend) as uint16,
+            );
+        }
+
+        if nunused > 0 {
+            self.set_has_free_line_pointers();
+        } else {
+            self.clear_has_free_line_pointers();
+        }
+    }
+
+    // compactify_tuples(itemidbase, nitems, page, presorted): close the gaps
+    // left by removed items and restore reverse line-pointer order.
+    fn compactify_tuples(&mut self, itemidbase: &[ItemIdCompact], presorted: bool) {
+        debug_assert!(!itemidbase.is_empty());
+        let nitems = itemidbase.len();
+        let pd_special = self.as_ref().pd_special() as usize;
+        let page = self.ptr.as_ptr();
+
+        let mut upper = pd_special;
+        if presorted {
+            #[cfg(debug_assertions)]
+            {
+                let mut lastoff = pd_special;
+                for it in itemidbase {
+                    debug_assert!(lastoff > it.itemoff as usize);
+                    lastoff = it.itemoff as usize;
+                }
+            }
+            // Skip the prefix already packed against pd_special, then memmove
+            // runs of adjacent tuples up, one call per gap.
+            let mut i = 0;
+            while i < nitems {
+                let it = &itemidbase[i];
+                if upper != it.itemoff as usize + it.alignedlen as usize {
+                    break;
+                }
+                upper -= it.alignedlen as usize;
+                i += 1;
+            }
+            if i < nitems {
+                let mut copy_tail =
+                    itemidbase[i].itemoff as usize + itemidbase[i].alignedlen as usize;
+                let mut copy_head = copy_tail;
+                for it in &itemidbase[i..] {
+                    if copy_head != it.itemoff as usize + it.alignedlen as usize {
+                        // SAFETY: all offsets/lengths validated against
+                        // pd_upper..pd_special by repair_fragmentation; upper
+                        // only decreases from pd_special by the same lengths.
+                        unsafe {
+                            core::ptr::copy(
+                                page.add(copy_head),
+                                page.add(upper),
+                                copy_tail - copy_head,
+                            )
+                        };
+                        copy_tail = it.itemoff as usize + it.alignedlen as usize;
+                    }
+                    upper -= it.alignedlen as usize;
+                    copy_head = it.itemoff as usize;
+                    let mut lp = self.as_ref().item_id(it.offsetindex + 1);
+                    lp.set_storage(upper as ItemOffset, lp.lp_len());
+                    self.set_item_id(it.offsetindex + 1, lp);
+                }
+                // SAFETY: as above.
+                unsafe {
+                    core::ptr::copy(page.add(copy_head), page.add(upper), copy_tail - copy_head)
+                };
+            }
+        } else {
+            // Not presorted: stage moving tuples in a scratch block, then copy
+            // back in reverse line-pointer order.
+            let mut scratch = [0u8; BLCKSZ];
+            let pd_upper = self.as_ref().pd_upper() as usize;
+            let mut i = 0;
+            if nitems < self.as_ref().max_offset_number() as usize / 4 {
+                for it in itemidbase {
+                    let off = it.itemoff as usize;
+                    // SAFETY: validated item range within the page.
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            page.add(off),
+                            scratch.as_mut_ptr().add(off),
+                            it.alignedlen as usize,
+                        )
+                    };
+                }
+            } else {
+                while i < nitems {
+                    let it = &itemidbase[i];
+                    if upper != it.itemoff as usize + it.alignedlen as usize {
+                        break;
+                    }
+                    upper -= it.alignedlen as usize;
+                    i += 1;
+                }
+                if i == nitems {
+                    self.set_pd_upper(upper as uint16);
+                    return;
+                }
+                // SAFETY: pd_upper..upper is the whole moving region.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        page.add(pd_upper),
+                        scratch.as_mut_ptr().add(pd_upper),
+                        upper - pd_upper,
+                    )
+                };
+            }
+            let mut copy_tail = itemidbase[i].itemoff as usize + itemidbase[i].alignedlen as usize;
+            let mut copy_head = copy_tail;
+            for it in &itemidbase[i..] {
+                if copy_head != it.itemoff as usize + it.alignedlen as usize {
+                    // SAFETY: scratch holds the staged tuples; target range is
+                    // within pd_upper..pd_special.
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            scratch.as_ptr().add(copy_head),
+                            page.add(upper),
+                            copy_tail - copy_head,
+                        )
+                    };
+                    copy_tail = it.itemoff as usize + it.alignedlen as usize;
+                }
+                upper -= it.alignedlen as usize;
+                copy_head = it.itemoff as usize;
+                let mut lp = self.as_ref().item_id(it.offsetindex + 1);
+                lp.set_storage(upper as ItemOffset, lp.lp_len());
+                self.set_item_id(it.offsetindex + 1, lp);
+            }
+            // SAFETY: as above.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    scratch.as_ptr().add(copy_head),
+                    page.add(upper),
+                    copy_tail - copy_head,
+                )
+            };
+        }
+        self.set_pd_upper(upper as uint16);
+    }
+}
+
+// bufpage.c itemIdCompactData.
+#[derive(Clone, Copy)]
+struct ItemIdCompact {
+    offsetindex: u16,
+    itemoff: u16,
+    alignedlen: u16,
+}
+
+impl ItemIdCompact {
+    const ZERO: ItemIdCompact = ItemIdCompact { offsetindex: 0, itemoff: 0, alignedlen: 0 };
 }
 
 // Owned local scratch page: PageGetTempPage*'s palloc(pageSize), always a full

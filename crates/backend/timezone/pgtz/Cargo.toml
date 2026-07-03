@@ -18,6 +18,7 @@ fd = { path = "../../storage/file/fd" }
 elog = { path = "../../utils/error/elog" }
 init_small = { path = "../../utils/init/init_small" }
 types_storage = { path = "../../../_support/types/types_storage" }
+pg_path = { path = "../../../port/pg_path" }
 
 [dev-dependencies]
 guc_tables = { path = "../../utils/misc/guc_tables" }

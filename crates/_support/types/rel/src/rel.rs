@@ -9,6 +9,8 @@ use ::types_core::{
     RELPERSISTENCE_TEMP,
 };
 use ::types_error::PgResult;
+use ::types_storage::smgr::SmgrHandle;
+use ::types_storage::RelFileLocator;
 use ::types_tuple::TupleDescData;
 
 use crate::lock::{LockInfoData, NoLock, LOCKMODE};
@@ -19,9 +21,13 @@ use crate::reloptions::RdOptions;
 // RelationData (utils/rel.h) trimmed to the fields ports consume. Cell fields are
 // the ones C writes through the backend-shared relcache entry pointer (inval, subxact
 // tracking, pgstat arming); one backend = one thread, so Cell is the plain-store
-// rendering. rd_locator/rd_smgr wait on storage; rd_refcnt is the Rc strong count.
+// rendering. rd_refcnt is the Rc strong count. rd_locator/rd_smgr carry no
+// lifetime (Copy payloads), keeping RelationData covariant in 'mcx.
 #[derive(Debug)]
 pub struct RelationData<'mcx> {
+    // rd_locator: RelationInitPhysicalAddr writes; rd_smgr: only smgr's RelationGetSmgr/CloseSmgr touch (they own the pin).
+    pub rd_locator: Cell<RelFileLocator>,
+    pub rd_smgr: Cell<Option<SmgrHandle>>,
     pub rd_id: Oid,
     pub rd_backend: ProcNumber,
     pub rd_islocaltemp: bool,
@@ -40,8 +46,7 @@ pub struct RelationData<'mcx> {
     pub rd_indcollation: PgVec<'mcx, Oid>,
     pub rd_options: Option<RdOptions>,
     pub pgstat_enabled: Cell<bool>,
-    // C rd_amcache (rule-5 cache): btree's BTMetaPageData copy, so descents skip
-    // the metapage read; enum when another AM lands; cleared with the entry as C pfrees it.
+    // C rd_amcache (rule-5 cache): btree metapage copy so descents skip the read; enum when another AM lands; cleared with the entry as C pfrees it.
     pub rd_amcache: Cell<Option<RdAmCacheBtree>>,
     // C rd_support/rd_supportinfo (rule-5 cache), resolved once per column;
     // std Vec justified: Rc-owned owner structure outside the arenas, FmgrInfo is droppy.
@@ -283,6 +288,8 @@ mod tests {
             attrs: PgVec::new_in(mcx),
         };
         RelationData {
+            rd_locator: Default::default(),
+            rd_smgr: Default::default(),
             rd_id: oid,
             rd_backend: INVALID_PROC_NUMBER,
             rd_islocaltemp: false,

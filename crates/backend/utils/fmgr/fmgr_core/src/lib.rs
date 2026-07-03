@@ -14,6 +14,10 @@ use ::types_core::{primitive::InvalidOid, Oid};
 use ::types_error::PgResult;
 
 pub use ::fmgr::{
+    direct_input_function_call_safe, input_function_call, input_function_call_safe,
+    ErrorSaveNode,
+};
+pub use ::fmgr::{
     direct_function_call1_coll, direct_function_call1_coll_in, direct_function_call2_coll,
     direct_function_call2_coll_in, direct_function_call3_coll, direct_function_call3_coll_in,
     function_call0_coll, function_call1_coll, function_call1_coll_in, function_call2_coll,

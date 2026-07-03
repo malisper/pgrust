@@ -39,33 +39,26 @@ pub fn set_log_timezone(tz: Option<&'static PgTz>) {
     LOG_TIMEZONE.with(|c| c.set(tz));
 }
 
-// DIVERGENCE from pg_TZDIR: get_share_path (unported src/port/path.c) is
-// stood in for by PGRUST_TZDIR (runtime) / PGRUST_PGSHAREDIR (build); swap to
-// a direct path-unit dep when it lands.
-fn pg_tzdir() -> Option<&'static str> {
-    static TZDIR: OnceLock<Option<String>> = OnceLock::new();
-    TZDIR
-        .get_or_init(|| {
-            if let Ok(dir) = std::env::var("PGRUST_TZDIR") {
-                return Some(dir);
-            }
-            option_env!("PGRUST_PGSHAREDIR").map(|share| {
-                let mut dir = String::from(share);
-                dir.push_str("/timezone");
-                dir.truncate(MAXPGPATH - 1);
-                dir
-            })
-        })
-        .as_deref()
-}
-
-#[cold]
-fn tzdir_unknown() -> ! {
-    panic!(
-        "pg_TZDIR: timezone directory unknown \
-         (get_share_path in src/port/path.c is unported; \
-         set PGRUST_TZDIR or build with PGRUST_PGSHAREDIR)"
-    );
+// DIVERGENCE from pg_TZDIR: PGRUST_TZDIR (runtime) / PGRUST_PGSHAREDIR
+// (build) take precedence over C's get_share_path resolution (harness
+// override; boot-smoke.sh exports them).
+fn pg_tzdir() -> &'static str {
+    static TZDIR: OnceLock<String> = OnceLock::new();
+    TZDIR.get_or_init(|| {
+        if let Ok(dir) = std::env::var("PGRUST_TZDIR") {
+            return dir;
+        }
+        let mut dir = if let Some(share) = option_env!("PGRUST_PGSHAREDIR") {
+            String::from(share)
+        } else {
+            let exec = init_small::globals::my_exec_path();
+            let len = exec.iter().position(|&b| b == 0).unwrap_or(exec.len());
+            pg_path::get_share_path(&String::from_utf8_lossy(&exec[..len]))
+        };
+        dir.push_str("/timezone");
+        dir.truncate(MAXPGPATH - 1);
+        dir
+    })
 }
 
 fn read_file_into(path: &str, buf: &mut [u8]) -> Option<usize> {
@@ -88,14 +81,7 @@ pub fn pg_open_tzfile(
     canonname: Option<&mut [u8; TZ_STRLEN_MAX + 1]>,
     buf: &mut [u8],
 ) -> PgResult<Option<usize>> {
-    let Some(tzdir) = pg_tzdir() else {
-        // gmtload's GMT probe keeps C's open-failure -> tzparse fallback even
-        // before the tz directory is configured; other zones panic loudly.
-        if name == b"GMT" {
-            return Ok(None);
-        }
-        tzdir_unknown();
-    };
+    let tzdir = pg_tzdir();
     let orignamelen = tzdir.len();
 
     if orignamelen + 1 + name.len() >= MAXPGPATH {
@@ -331,7 +317,7 @@ pub struct PgTzEnum {
 }
 
 pub fn pg_tzenumerate_start() -> PgResult<PgTzEnum> {
-    let startdir = pg_tzdir().unwrap_or_else(|| tzdir_unknown()).to_string();
+    let startdir = pg_tzdir().to_string();
     let baselen = startdir.len() + 1;
     let dirdesc = fd::AllocateDir(&startdir)?;
     if dirdesc.is_none() {
