@@ -347,18 +347,20 @@ mod heap {
 
     #[allow(clippy::too_many_arguments)]
     pub(super) fn tuple_lock<'mcx>(
-        _mcx: Mcx<'mcx>,
-        _rel: &Relation<'mcx>,
-        _tid: &ItemPointerData,
-        _snapshot: &Snapshot<'mcx>,
-        _slot: &mut SlotData<'mcx>,
-        _cid: CommandId,
-        _mode: LockTupleMode,
-        _wait_policy: LockWaitPolicy,
-        _flags: u8,
-        _tmfd: &mut TM_FailureData,
+        mcx: Mcx<'mcx>,
+        rel: &Relation<'mcx>,
+        tid: &ItemPointerData,
+        snapshot: &Snapshot<'mcx>,
+        slot: &mut SlotData<'mcx>,
+        cid: CommandId,
+        mode: LockTupleMode,
+        wait_policy: LockWaitPolicy,
+        flags: u8,
+        tmfd: &mut TM_FailureData,
     ) -> PgResult<TM_Result> {
-        unported(DML_UNIT)
+        ::heapam_handler::heapam_tuple_lock(
+            mcx, rel, tid, snapshot, slot, cid, mode, wait_policy, flags, tmfd,
+        )
     }
 
     pub(super) fn relation_set_new_filelocator(

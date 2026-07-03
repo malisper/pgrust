@@ -13,6 +13,16 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // HeapTupleSatisfiesDirty (heapam_visibility.c): the EPQ chain-follow
+    // lane; writes xmin/xmax/speculativeToken back into the snapshot.
+    pub fn heap_tuple_satisfies_dirty<'a, 'tup, 'mcx>(
+        htup: &'a mut HeapTupleData<'tup>,
+        snapshot: &'a mut SnapshotData<'mcx>,
+        buffer: Buffer,
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
     pub fn heap_tuple_satisfies_vacuum<'a, 'tup>(
         htup: &'a mut HeapTupleData<'tup>,
         oldest_xmin: TransactionId,

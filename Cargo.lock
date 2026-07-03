@@ -2693,9 +2693,11 @@ name = "heapam_handler"
 version = "0.1.0"
 dependencies = [
  "bufmgr_seams",
+ "combocid_seams",
  "exectuples",
  "heapam",
  "heapam_visibility_seams",
+ "lmgr",
  "mcx",
  "predicate_seams",
  "procarray_seams",
@@ -2710,6 +2712,7 @@ dependencies = [
  "types_snapshot",
  "types_storage",
  "types_tuple",
+ "xact_seams",
 ]
 
 [[package]]

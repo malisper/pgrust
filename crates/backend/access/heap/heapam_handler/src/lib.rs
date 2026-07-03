@@ -227,3 +227,180 @@ pub fn heapam_tuple_satisfies_snapshot<'mcx>(
     bufmgr_seams::lock_buffer::call(bslot.buffer, BUFFER_LOCK_UNLOCK)?;
     res
 }
+
+#[cold]
+#[inline(never)]
+fn moved_partitions_err() -> Box<::types_error::PgError> {
+    Box::new(
+        ::types_error::PgError::error(
+            "tuple to be locked was already moved to another partition due to concurrent update",
+        )
+        .with_sqlstate(::types_error::ERRCODE_T_R_SERIALIZATION_FAILURE),
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn uncommitted_xmin_err(
+    xmin: ::types_core::TransactionId,
+    tid: &ItemPointerData,
+    rel: &Relation<'_>,
+) -> Box<::types_error::PgError> {
+    Box::new(
+        ::types_error::PgError::error(format!(
+            "t_xmin {xmin} is uncommitted in tuple ({},{}) to be updated in table \"{}\"",
+            ItemPointerGetBlockNumber(tid),
+            ::types_tuple::ItemPointerGetOffsetNumber(tid),
+            rel.name(),
+        ))
+        .with_sqlstate(::types_error::ERRCODE_DATA_CORRUPTED),
+    )
+}
+
+/// `heapam_tuple_lock` (heapam_handler.c): lock via `heap_lock_tuple`, and on
+/// `TUPLE_LOCK_FLAG_FIND_LAST_VERSION` chase the update chain to the latest
+/// version (the EPQ input), waiting out in-progress updaters per policy.
+#[allow(clippy::too_many_arguments)]
+pub fn heapam_tuple_lock<'mcx>(
+    mcx: Mcx<'mcx>,
+    relation: &Relation<'mcx>,
+    tid: &ItemPointerData,
+    _snapshot: &Snapshot<'mcx>,
+    slot: &mut SlotData<'mcx>,
+    cid: ::types_core::CommandId,
+    mode: ::tableam_vocab::LockTupleMode,
+    wait_policy: ::tableam_vocab::LockWaitPolicy,
+    flags: u8,
+    tmfd: &mut ::tableam_vocab::TM_FailureData,
+) -> PgResult<::tableam_vocab::TM_Result> {
+    use ::tableam_vocab::{
+        LockWaitPolicy, TM_Result, TUPLE_LOCK_FLAG_FIND_LAST_VERSION,
+        TUPLE_LOCK_FLAG_LOCK_UPDATE_IN_PROGRESS,
+    };
+    use ::types_core::xact::TransactionIdIsValid;
+    use ::types_tuple::{ItemPointerEquals, ItemPointerIndicatesMovedPartitions};
+
+    if !matches!(slot, SlotData::BufferHeap(_)) {
+        wrong_slot();
+    }
+    let follow_updates = flags & TUPLE_LOCK_FLAG_LOCK_UPDATE_IN_PROGRESS != 0;
+    tmfd.traversed = false;
+    let mut cur_tid = *tid;
+
+    'tuple_lock_retry: loop {
+        let traversed = tmfd.traversed;
+        let (result, pin) = ::heapam::heap_lock_tuple(
+            relation,
+            &cur_tid,
+            cid,
+            mode,
+            wait_policy,
+            follow_updates,
+            tmfd,
+        )?;
+        tmfd.traversed = traversed;
+
+        if result == TM_Result::TM_Updated && (flags & TUPLE_LOCK_FLAG_FIND_LAST_VERSION) != 0 {
+            pin.release();
+
+            if ItemPointerEquals(&tmfd.ctid, &cur_tid) {
+                // deleted (t_ctid points at itself): latest version is gone
+                return Ok(TM_Result::TM_Deleted);
+            }
+
+            cur_tid = tmfd.ctid;
+            let mut prior_xmax = tmfd.xmax;
+            tmfd.traversed = true;
+
+            let mut dirty = SnapshotData::sentinel(mcx, ::types_snapshot::SNAPSHOT_DIRTY);
+            loop {
+                if ItemPointerIndicatesMovedPartitions(&cur_tid) {
+                    return Err(moved_partitions_err());
+                }
+
+                let mut res = ::heapam::heap_fetch_dirty(relation, &mut dirty, cur_tid, true)?;
+                if res.found {
+                    let xmin =
+                        res.tuple().expect("heap_fetch found without tuple").t_data().xmin();
+                    if xmin != prior_xmax {
+                        // xmin recycled: latest version was deleted
+                        res.pin.take().expect("found holds a pin").release();
+                        return Ok(TM_Result::TM_Deleted);
+                    }
+                    if TransactionIdIsValid(dirty.xmin) {
+                        return Err(uncommitted_xmin_err(dirty.xmin, &cur_tid, relation));
+                    }
+                    if TransactionIdIsValid(dirty.xmax) {
+                        res.pin.take().expect("found holds a pin").release();
+                        match wait_policy {
+                            LockWaitPolicy::LockWaitBlock => {
+                                lmgr::XactLockTableWait(
+                                    dirty.xmax,
+                                    Some(relation),
+                                    Some(&cur_tid),
+                                    ::types_storage::lock::XLTW_Oper::FetchUpdated,
+                                )?;
+                            }
+                            LockWaitPolicy::LockWaitSkip | LockWaitPolicy::LockWaitError => {
+                                panic!(
+                                    "heapam_tuple_lock (heapam_handler.c): NOWAIT/SKIP LOCKED \
+                                     chase wait not ported (FOR UPDATE lane)"
+                                );
+                            }
+                        }
+                        continue;
+                    }
+                    if xact_seams::transaction_id_is_current_transaction_id::call(prior_xmax) {
+                        // GetCmin asserts our-own-xmin; only reachable here
+                        let cmin = combocid_seams::heap_tuple_header_get_cmin::call(
+                            res.tuple().expect("heap_fetch found without tuple").t_data(),
+                        );
+                        if cmin >= cid {
+                            tmfd.xmax = prior_xmax;
+                            tmfd.cmax = cmin;
+                            res.pin.take().expect("found holds a pin").release();
+                            return Ok(TM_Result::TM_SelfModified);
+                        }
+                    }
+                    res.pin.take().expect("found holds a pin").release();
+                    continue 'tuple_lock_retry;
+                }
+
+                let Some(pin) = res.pin.take() else {
+                    // t_data == NULL: line pointer gone, row deleted
+                    return Ok(TM_Result::TM_Deleted);
+                };
+                let (xmin, t_ctid, self_is_ctid, upd_xmax) = {
+                    let t = res.tuple().expect("keep_buf pin without tuple");
+                    let hdr = t.t_data();
+                    (
+                        hdr.xmin(),
+                        hdr.t_ctid,
+                        ItemPointerEquals(&t.t_self, &hdr.t_ctid),
+                        ::heapam::HeapTupleHeaderGetUpdateXid(hdr)?,
+                    )
+                };
+                if xmin != prior_xmax || self_is_ctid {
+                    pin.release();
+                    return Ok(TM_Result::TM_Deleted);
+                }
+                cur_tid = t_ctid;
+                prior_xmax = upd_xmax;
+                pin.release();
+            }
+        }
+
+        // Store the (locked) tuple in the slot, transferring the pin.
+        let offnum = ::types_tuple::ItemPointerGetOffsetNumber(&cur_tid);
+        let lp = pin.page().item_id(offnum);
+        // SAFETY: pin held; heap_lock_tuple verified a normal line pointer.
+        let (ptr, len) = unsafe { pin.page().item_raw_unchecked(lp) };
+        // SAFETY: image on the page pinned by `pin`, whose pin transfers to
+        // the slot (ExecStorePinnedBufferHeapTuple contract).
+        let tuple =
+            unsafe { HeapTupleData::from_raw_parts(ptr, len, cur_tid, relation.rd_id) };
+        slot.base_mut().tts_tableOid = relation.rd_id;
+        exectuples::exec_store_pinned_buffer_heap_tuple(slot, mcx, tuple, pin.into_buffer());
+        return Ok(result);
+    }
+}

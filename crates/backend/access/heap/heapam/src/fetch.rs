@@ -113,6 +113,79 @@ pub fn heap_fetch<'mcx>(
     Ok(not_found)
 }
 
+/// `heap_fetch` under a caller-owned SnapshotDirty: xmin/xmax written back
+/// (the EPQ update-chain wait probe; heapam_handler.c heapam_tuple_lock).
+pub fn heap_fetch_dirty<'mcx>(
+    relation: &RelationData<'mcx>,
+    snapshot: &mut SnapshotData<'_>,
+    tid: ItemPointerData,
+    keep_buf: bool,
+) -> PgResult<HeapFetchResult> {
+    debug_assert!(snapshot.snapshot_type == ::types_snapshot::SNAPSHOT_DIRTY);
+    let not_found = HeapFetchResult {
+        found: false,
+        pin: None,
+        tid,
+        table_oid: relation.rd_id,
+        lp: ItemIdData::new(0, 0, 0),
+    };
+
+    let pin = BufferPin::adopt(bufmgr_seams::read_buffer::call(
+        relation,
+        ItemPointerGetBlockNumber(&tid),
+    )?)
+    .expect("ReadBuffer returned InvalidBuffer");
+
+    let lock = pin.lock_share()?;
+    let page = pin.page();
+
+    let offnum = ItemPointerGetOffsetNumber(&tid);
+    if offnum < FirstOffsetNumber || offnum > page.max_offset_number() {
+        drop(lock);
+        pin.release();
+        return Ok(not_found);
+    }
+    let lp = page.item_id(offnum);
+    if !lp.is_normal() {
+        drop(lock);
+        pin.release();
+        return Ok(not_found);
+    }
+
+    // SAFETY: pinned + share-locked page, normal line pointer (page
+    // invariant, item_raw_unchecked contract).
+    let (ptr, len) = unsafe { page.item_raw_unchecked(lp) };
+    // SAFETY: pinned + share-locked page, normal line pointer.
+    let mut tuple =
+        unsafe { HeapTupleData::from_raw_parts(ptr, len, tid, relation.rd_id) };
+
+    let valid = hv_seam::heap_tuple_satisfies_dirty::call(&mut tuple, snapshot, pin.buffer())?;
+
+    if valid {
+        predicate_seams::predicate_lock_tid::call(
+            relation,
+            tid,
+            snapshot,
+            tuple.t_data().xmin(),
+        )?;
+    }
+    HeapCheckForSerializableConflictOut(valid, relation, &mut tuple, pin.buffer(), snapshot)?;
+
+    drop(lock);
+
+    if valid || keep_buf {
+        return Ok(HeapFetchResult {
+            found: valid,
+            pin: Some(pin),
+            tid,
+            table_oid: relation.rd_id,
+            lp,
+        });
+    }
+    pin.release();
+    Ok(not_found)
+}
+
 pub struct HotSearchResult<'p> {
     pub found: bool,
     /// The matching member's TID on success; the input TID otherwise.

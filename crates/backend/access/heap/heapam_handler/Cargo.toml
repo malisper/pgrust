@@ -20,6 +20,10 @@ exectuples = { path = "../../../executor/exectuples" }
 bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
 pruneheap_seams = { path = "../pruneheap_seams" }
 heapam_visibility_seams = { path = "../heapam_visibility_seams" }
+lmgr = { path = "../../../storage/lmgr/lmgr" }
+xact_seams = { path = "../../transam/xact_seams" }
+combocid_seams = { path = "../../../utils/time/combocid_seams" }
+types_storage = { path = "../../../../_support/types/types_storage" }
 
 [dev-dependencies]
 predicate_seams = { path = "../../../storage/lmgr/predicate_seams" }

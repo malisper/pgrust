@@ -1102,6 +1102,7 @@ pub fn init_seams() {
     heapam_visibility_seams::heap_tuple_satisfies_visibility::set(
         heap_tuple_satisfies_visibility_read,
     );
+    heapam_visibility_seams::heap_tuple_satisfies_dirty::set(HeapTupleSatisfiesDirty);
     heapam_visibility_seams::heap_tuple_satisfies_vacuum::set(HeapTupleSatisfiesVacuum);
     heapam_visibility_seams::heap_tuple_satisfies_update::set(HeapTupleSatisfiesUpdate);
     heapam_visibility_seams::heap_tuple_set_hint_bits::set(HeapTupleSetHintBits);
