@@ -1,16 +1,18 @@
 //! heapam_xlog.c — heap/heap2 rmgr redo. Live arms: INSERT, DELETE, UPDATE,
-//! HOT_UPDATE, CONFIRM, LOCK, INPLACE, MULTI_INSERT, LOCK_UPDATED (the shapes
-//! our write side emits plus what C 18.3 writes into a shared datadir) and
-//! the C no-op arms (TRUNCATE, HEAP2_NEW_CID). Everything else is a loud
+//! HOT_UPDATE, CONFIRM, LOCK, INPLACE, MULTI_INSERT, LOCK_UPDATED,
+//! PRUNE_ON_ACCESS/PRUNE_VACUUM_SCAN/PRUNE_VACUUM_CLEANUP, VISIBLE (the
+//! shapes our write side emits plus what C 18.3 writes into a shared datadir)
+//! and the C no-op arms (TRUNCATE, HEAP2_NEW_CID). Everything else is a loud
 //! panic naming its op.
 
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
-use types_core::{Buffer, InvalidBuffer, TransactionId, BLCKSZ};
+use types_core::{Buffer, InvalidBuffer, OffsetNumber, TransactionId, BLCKSZ};
 use types_error::{PgError, PgResult};
 use types_storage::bufpage::{
-    MaxHeapTupleSize, PageMut, SizeofHeapTupleHeader, PAI_IS_HEAP, PAI_OVERWRITE,
+    MaxHeapTupleSize, MaxHeapTuplesPerPage, PageMut, SizeofHeapTupleHeader, PAI_IS_HEAP,
+    PAI_OVERWRITE,
 };
 use types_tuple::{
     HeapTupleHeaderData, ItemPointerData, HEAP_KEYS_UPDATED, HEAP_MOVED, HEAP_XMAX_BITS,
@@ -50,6 +52,17 @@ pub const XLH_DELETE_ALL_VISIBLE_CLEARED: u8 = 1 << 0;
 pub const XLH_DELETE_IS_SUPER: u8 = 1 << 3;
 pub const XLH_DELETE_IS_PARTITION_MOVE: u8 = 1 << 4;
 pub const XLH_LOCK_ALL_FROZEN_CLEARED: u8 = 1 << 0;
+
+pub const XLHP_IS_CATALOG_REL: u8 = 1 << 1;
+pub const XLHP_CLEANUP_LOCK: u8 = 1 << 2;
+pub const XLHP_HAS_CONFLICT_HORIZON: u8 = 1 << 3;
+pub const XLHP_HAS_FREEZE_PLANS: u8 = 1 << 4;
+pub const XLHP_HAS_REDIRECTIONS: u8 = 1 << 5;
+pub const XLHP_HAS_DEAD_ITEMS: u8 = 1 << 6;
+pub const XLHP_HAS_NOW_UNUSED_ITEMS: u8 = 1 << 7;
+
+pub const XLH_FREEZE_XVAC: u8 = 0x02;
+pub const XLH_INVALID_XVAC: u8 = 0x04;
 
 pub const XLHL_XMAX_IS_MULTI: u8 = 0x01;
 pub const XLHL_XMAX_LOCK_ONLY: u8 = 0x02;
@@ -806,6 +819,232 @@ fn heap_xlog_lock_common(record: &mut XLogReaderState, lock_updated: bool) -> Pg
     Ok(())
 }
 
+fn heap_execute_freeze_tuple(
+    htup: &mut HeapTupleHeaderData,
+    xmax: TransactionId,
+    t_infomask2: u16,
+    t_infomask: u16,
+    frzflags: u8,
+) {
+    htup.set_xmax(xmax);
+    if frzflags & XLH_FREEZE_XVAC != 0 {
+        htup.set_xvac(types_core::FrozenTransactionId);
+    }
+    if frzflags & XLH_INVALID_XVAC != 0 {
+        htup.set_xvac(types_core::InvalidTransactionId);
+    }
+    htup.t_infomask = t_infomask;
+    htup.t_infomask2 = t_infomask2;
+}
+
+fn heap_xlog_prune_freeze(record: &mut XLogReaderState) -> PgResult<()> {
+    let lsn = record.EndRecPtr;
+    // xl_heap_prune { uint8 reason; uint8 flags }; the conflict horizon
+    // follows unaligned when XLHP_HAS_CONFLICT_HORIZON is set (its only
+    // consumer is the Hot Standby conflict arm, gated below).
+    let flags = main_data(record)[1];
+
+    let (rlocator, _fork, blkno, _) = record
+        .block_tag_extended(0)
+        .expect("heap_xlog_prune_freeze: no block 0");
+
+    debug_assert!(
+        flags & XLHP_CLEANUP_LOCK != 0
+            || flags & (XLHP_HAS_REDIRECTIONS | XLHP_HAS_DEAD_ITEMS) == 0
+    );
+
+    if flags & XLHP_HAS_CONFLICT_HORIZON != 0 && xlogutils::InHotStandby() {
+        panic!("heap_xlog_prune_freeze: ResolveRecoveryConflictWithSnapshot (standby lane)");
+    }
+
+    let (action, buffer) = xlogutils::XLogReadBufferForRedoExtended(
+        record,
+        0,
+        types_storage::ReadBufferMode::Normal,
+        flags & XLHP_CLEANUP_LOCK != 0,
+    )?;
+    if action == BLK_NEEDS_REDO {
+        let blk = record.block(0);
+        debug_assert!(blk.has_data);
+        // SAFETY: block data points into the decode buffer, live for this arm.
+        let data = unsafe { blk.data_bytes() };
+        let mut cur = 0usize;
+        let rd = |cur: usize| u16::from_ne_bytes(data[cur..cur + 2].try_into().unwrap());
+
+        let mut nplans = 0usize;
+        let plans_off;
+        if flags & XLHP_HAS_FREEZE_PLANS != 0 {
+            nplans = rd(cur) as usize;
+            debug_assert!(nplans > 0);
+            // xlhp_freeze_plans: uint16 nplans, 2 pad bytes, 12-byte plans.
+            cur += 4;
+            plans_off = cur;
+            cur += 12 * nplans;
+        } else {
+            plans_off = 0;
+        }
+
+        let mut redirected = [0 as OffsetNumber; MaxHeapTuplesPerPage];
+        let mut nowdead = [0 as OffsetNumber; MaxHeapTuplesPerPage];
+        let mut nowunused = [0 as OffsetNumber; MaxHeapTuplesPerPage];
+        let mut nredirected = 0usize;
+        let mut ndead = 0usize;
+        let mut nunused = 0usize;
+        let read_items = |cur: &mut usize, out: &mut [OffsetNumber], pairs: bool| {
+            let n = rd(*cur) as usize;
+            debug_assert!(n > 0);
+            *cur += 2;
+            let count = if pairs { 2 * n } else { n };
+            for slot in out[..count].iter_mut() {
+                *slot = rd(*cur);
+                *cur += 2;
+            }
+            n
+        };
+        if flags & XLHP_HAS_REDIRECTIONS != 0 {
+            nredirected = read_items(&mut cur, &mut redirected, true);
+        }
+        if flags & XLHP_HAS_DEAD_ITEMS != 0 {
+            ndead = read_items(&mut cur, &mut nowdead, false);
+        }
+        if flags & XLHP_HAS_NOW_UNUSED_ITEMS != 0 {
+            nunused = read_items(&mut cur, &mut nowunused, false);
+        }
+
+        if nredirected > 0 || ndead > 0 || nunused > 0 {
+            pruneheap_seams::heap_page_prune_execute::call(
+                buffer,
+                flags & XLHP_CLEANUP_LOCK == 0,
+                &redirected[..2 * nredirected],
+                &nowdead[..ndead],
+                &nowunused[..nunused],
+            );
+        }
+
+        // SAFETY: pin + (cleanup or exclusive) lock per the redo protocol.
+        let mut pm = unsafe { page_mut(buffer) };
+        for p in 0..nplans {
+            let plan = plans_off + 12 * p;
+            let xmax = u32::from_ne_bytes(data[plan..plan + 4].try_into().unwrap());
+            let t_infomask2 = rd(plan + 4);
+            let t_infomask = rd(plan + 6);
+            let frzflags = data[plan + 8];
+            let ntuples = rd(plan + 10) as usize;
+            for _ in 0..ntuples {
+                let offset = rd(cur);
+                cur += 2;
+                let page = pm.as_ref();
+                let lp = page.item_id(offset);
+                let (ptr, _len) = page.item_raw(lp);
+                // SAFETY: in-page tuple image under the pin+lock.
+                let htup = unsafe { &mut *(ptr.cast_mut().cast::<HeapTupleHeaderData>()) };
+                heap_execute_freeze_tuple(htup, xmax, t_infomask2, t_infomask, frzflags);
+            }
+        }
+        debug_assert_eq!(cur, data.len());
+
+        // C leaves the page's prunability hints stale here; at worst an extra
+        // prune cycle occurs soon.
+        pm.set_lsn(lsn);
+        bufmgr_seams::mark_buffer_dirty::call(buffer)?;
+    }
+
+    if buffer != InvalidBuffer {
+        if flags & (XLHP_HAS_REDIRECTIONS | XLHP_HAS_DEAD_ITEMS | XLHP_HAS_NOW_UNUSED_ITEMS) != 0
+        {
+            // SAFETY: pin + lock still held until the unlock below.
+            let freespace = unsafe { page_mut(buffer) }.as_ref().heap_free_space();
+            unlock_release(buffer)?;
+            freespace::XLogRecordPageWithFreeSpace(rlocator, blkno, freespace)?;
+        } else {
+            unlock_release(buffer)?;
+        }
+    }
+    Ok(())
+}
+
+fn heap_xlog_visible(record: &mut XLogReaderState) -> PgResult<()> {
+    const VISIBILITYMAP_XLOG_CATALOG_REL: u8 = 0x04;
+    let lsn = record.EndRecPtr;
+    let (conflict_horizon, flags) = {
+        let x = main_data(record);
+        (u32::from_ne_bytes(x[0..4].try_into().unwrap()), x[4])
+    };
+    debug_assert!(
+        flags & (visibilitymap::VISIBILITYMAP_VALID_BITS | VISIBILITYMAP_XLOG_CATALOG_REL)
+            == flags
+    );
+
+    let (rlocator, _fork, blkno, _) = record
+        .block_tag_extended(1)
+        .expect("heap_xlog_visible: no block 1");
+
+    if xlogutils::InHotStandby() {
+        panic!("heap_xlog_visible: ResolveRecoveryConflictWithSnapshot (standby lane)");
+    }
+
+    let (action, buffer) = XLogReadBufferForRedo(record, 1)?;
+    if action == BLK_NEEDS_REDO {
+        // The heap LSN only moves when checksums/wal_log_hints demand it; the
+        // torn-page hazard is benign because redo never reads this page.
+        // SAFETY: pin + exclusive lock per the redo protocol (module contract).
+        let mut pm = unsafe { page_mut(buffer) };
+        pm.set_all_visible();
+        if visibilitymap::xlog_hint_bit_is_needed() {
+            pm.set_lsn(lsn);
+        }
+        bufmgr_seams::mark_buffer_dirty::call(buffer)?;
+    }
+
+    if buffer != InvalidBuffer {
+        // SAFETY: pin + lock still held until the unlock below.
+        let space = unsafe { page_mut(buffer) }.as_ref().free_space();
+        unlock_release(buffer)?;
+        if flags & visibilitymap::VISIBILITYMAP_VALID_BITS != 0 {
+            freespace::XLogRecordPageWithFreeSpace(rlocator, blkno, space)?;
+        }
+    }
+
+    let (vmaction, vmbuffer) = xlogutils::XLogReadBufferForRedoExtended(
+        record,
+        0,
+        types_storage::ReadBufferMode::ZeroOnError,
+        false,
+    )?;
+    if vmaction == BLK_NEEDS_REDO {
+        {
+            // SAFETY: pin + exclusive lock from the redo read.
+            let mut vp = unsafe { page_mut(vmbuffer) };
+            if vp.as_ref().is_new() {
+                vp.init(0);
+            }
+        }
+        let vmbits = flags & visibilitymap::VISIBILITYMAP_VALID_BITS;
+
+        // visibilitymap_set locks the VM buffer itself.
+        bufmgr_seams::lock_buffer::call(vmbuffer, bufmgr_seams::BUFFER_LOCK_UNLOCK)?;
+
+        let reln = xlogutils::CreateFakeRelcacheEntry(rlocator);
+        let mut vmbuf = visibilitymap::VmBuffer::new();
+        visibilitymap::visibilitymap_pin(&reln, blkno, &mut vmbuf)?;
+        visibilitymap::visibilitymap_set(
+            &reln,
+            blkno,
+            InvalidBuffer,
+            lsn,
+            &vmbuf,
+            conflict_horizon,
+            vmbits,
+        )?;
+        vmbuf.release();
+        bufmgr_seams::release_buffer::call(vmbuffer)?;
+        xlogutils::FreeFakeRelcacheEntry(reln);
+    } else if vmbuffer != InvalidBuffer {
+        unlock_release(vmbuffer)?;
+    }
+    Ok(())
+}
+
 pub fn heap_redo(record: &mut XLogReaderState) -> PgResult<()> {
     let info = record.record.as_ref().expect("heap_redo with no decoded record").xl_info
         & !XLR_INFO_MASK;
@@ -828,10 +1067,8 @@ pub fn heap2_redo(record: &mut XLogReaderState) -> PgResult<()> {
         & !XLR_INFO_MASK;
     match info & XLOG_HEAP_OPMASK {
         XLOG_HEAP2_PRUNE_ON_ACCESS | XLOG_HEAP2_PRUNE_VACUUM_SCAN
-        | XLOG_HEAP2_PRUNE_VACUUM_CLEANUP => {
-            panic!("heap2_redo arm not ported: heap_xlog_prune_freeze")
-        }
-        XLOG_HEAP2_VISIBLE => panic!("heap2_redo arm not ported: heap_xlog_visible"),
+        | XLOG_HEAP2_PRUNE_VACUUM_CLEANUP => heap_xlog_prune_freeze(record),
+        XLOG_HEAP2_VISIBLE => heap_xlog_visible(record),
         XLOG_HEAP2_MULTI_INSERT => heap_xlog_multi_insert(record),
         XLOG_HEAP2_LOCK_UPDATED => heap_xlog_lock_common(record, true),
         // Logical decoding only; nothing to do on a real replay.

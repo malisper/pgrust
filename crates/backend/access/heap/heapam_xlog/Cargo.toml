@@ -16,9 +16,29 @@ bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
 freespace = { path = "../../../storage/freespace/freespace" }
 visibilitymap = { path = "../visibilitymap" }
 inval = { path = "../../../utils/cache/inval" }
+pruneheap_seams = { path = "../pruneheap_seams" }
 
 [dev-dependencies]
 heapam = { path = "../heapam" }
+pruneheap = { path = "../pruneheap" }
+types_snapshot = { path = "../../../../_support/types/snapshot" }
+procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
+transam_seams = { path = "../../transam/transam_seams" }
+subtrans_seams = { path = "../../transam/subtrans_seams" }
+lock = { path = "../../../storage/lmgr/lock" }
+async_seams = { path = "../../../commands/async_seams" }
+tablecmds_seams = { path = "../../../commands/tablecmds_seams" }
+be_fsstubs_seams = { path = "../../../libpq/be_fsstubs_seams" }
+namespace_seams = { path = "../../../catalog/namespace_seams" }
+catalog_index_seams = { path = "../../../catalog/catalog_index_seams" }
+catalog_storage_seams = { path = "../../../catalog/storage_seams" }
+pg_enum_seams = { path = "../../../catalog/pg_enum_seams" }
+relcache_seams = { path = "../../../utils/cache/relcache_seams" }
+typcache_seams = { path = "../../../utils/cache/typcache_seams" }
+logical_seams = { path = "../../../replication/logical_seams" }
+logical_worker_seams = { path = "../../../replication/logical_worker_seams" }
+snapbuild_seams = { path = "../../../replication/snapbuild_seams" }
+commit_ts_seams = { path = "../../transam/commit_ts_seams" }
 heapam_visibility = { path = "../heapam_visibility" }
 mcx = { path = "../../../../_support/mcx" }
 types_rel = { path = "../../../../_support/types/rel" }
@@ -45,7 +65,6 @@ smgr_seams = { path = "../../../storage/smgr/smgr_seams" }
 sync_seams = { path = "../../../storage/sync/sync_seams" }
 relpath_seams = { path = "../../../../common/relpath_seams" }
 predicate_seams = { path = "../../../storage/lmgr/predicate_seams" }
-pruneheap_seams = { path = "../pruneheap_seams" }
 freespace_seams = { path = "../../../storage/freespace/freespace_seams" }
 catalog_seams = { path = "../../../catalog/catalog_seams" }
 aclchk_seams = { path = "../../../catalog/aclchk_seams" }

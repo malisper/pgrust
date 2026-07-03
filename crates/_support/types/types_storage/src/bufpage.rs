@@ -756,6 +756,48 @@ impl<'a> PageMut<'a> {
         }
     }
 
+    /// `PageTruncateLinePointerArray`: shorten a trailing run of LP_UNUSED
+    /// line pointers, always keeping at least one entry; caller guarantees at
+    /// least one LP_UNUSED exists on the page.
+    pub fn truncate_line_pointer_array(&mut self) {
+        // SAFETY: same exclusively-held image; read view used between stores.
+        let r = unsafe { PageRef::from_raw(self.ptr) };
+        let mut countdone = false;
+        let mut sethint = false;
+        let mut nunusedend = 0usize;
+
+        let mut i = r.max_offset_number();
+        while i >= 1 {
+            let lp = r.item_id(i);
+            debug_assert!(lp.is_used() || !lp.has_storage());
+            if !countdone && i > 1 {
+                if lp.is_used() {
+                    countdone = true;
+                } else {
+                    nunusedend += 1;
+                }
+            } else if !lp.is_used() {
+                sethint = true;
+                break;
+            }
+            i -= 1;
+        }
+
+        if nunusedend > 0 {
+            let new_lower =
+                r.pd_lower() as usize - core::mem::size_of::<ItemIdData>() * nunusedend;
+            self.set_pd_lower(new_lower as uint16);
+        } else {
+            debug_assert!(sethint);
+        }
+
+        if sethint {
+            self.set_has_free_line_pointers();
+        } else {
+            self.clear_has_free_line_pointers();
+        }
+    }
+
     // compactify_tuples: close removed-item gaps, restore reverse line-pointer order.
     fn compactify_tuples(&mut self, itemidbase: &[ItemIdCompact], presorted: bool) {
         debug_assert!(!itemidbase.is_empty());
