@@ -243,6 +243,56 @@ pub struct TypeCast<'mcx> {
     pub location: ParseLoc,
 }
 
+// C OnCommitAction (primnodes.h).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum OnCommitAction {
+    #[default]
+    ONCOMMIT_NOOP = 0,
+    ONCOMMIT_PRESERVE_ROWS,
+    ONCOMMIT_DELETE_ROWS,
+    ONCOMMIT_DROP,
+}
+
+#[derive(Default)]
+pub struct CreateStmt<'mcx> {
+    pub relation: Option<&'mcx crate::primnodes::RangeVar<'mcx>>,
+    pub tableElts: NodeList<'mcx>,
+    pub inhRelations: NodeList<'mcx>,
+    pub partbound: Option<Node<'mcx>>,
+    pub partspec: Option<Node<'mcx>>,
+    pub ofTypename: Option<Node<'mcx>>,
+    pub constraints: NodeList<'mcx>,
+    pub nnconstraints: NodeList<'mcx>,
+    pub options: NodeList<'mcx>,
+    pub oncommit: OnCommitAction,
+    pub tablespacename: Option<&'mcx str>,
+    pub accessMethod: Option<&'mcx str>,
+    pub if_not_exists: bool,
+}
+
+#[derive(Default)]
+pub struct ColumnDef<'mcx> {
+    pub colname: Option<&'mcx str>,
+    pub typeName: Option<Node<'mcx>>,
+    pub compression: Option<&'mcx str>,
+    pub inhcount: i16,
+    pub is_local: bool,
+    pub is_not_null: bool,
+    pub is_from_type: bool,
+    pub storage: u8,
+    pub storage_name: Option<&'mcx str>,
+    pub raw_default: Option<Node<'mcx>>,
+    pub cooked_default: Option<Node<'mcx>>,
+    pub identity: u8,
+    pub identitySequence: Option<&'mcx crate::primnodes::RangeVar<'mcx>>,
+    pub generated: u8,
+    pub collClause: Option<Node<'mcx>>,
+    pub collOid: Oid,
+    pub constraints: NodeList<'mcx>,
+    pub fdwoptions: NodeList<'mcx>,
+    pub location: ParseLoc,
+}
+
 // SAFETY (each): tag/type pairing mirrors parsenodes.h.
 unsafe impl<'mcx> NodeVariant<'mcx> for RawStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_RawStmt;
@@ -291,6 +341,12 @@ unsafe impl<'mcx> NodeVariant<'mcx> for TypeName<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for TypeCast<'mcx> {
     const TAG: NodeTag = NodeTag::T_TypeCast;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for CreateStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CreateStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for ColumnDef<'mcx> {
+    const TAG: NodeTag = NodeTag::T_ColumnDef;
 }
 
 impl<'mcx> Node<'mcx> {

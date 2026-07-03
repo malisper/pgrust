@@ -353,6 +353,44 @@ pub struct NestLoop<'mcx> {
     pub nestParams: NodeList<'mcx>,
 }
 
+/// Per-clause arrays parallel `mergeclauses` (C's `array_size(mergeclauses)`).
+#[derive(Default)]
+#[repr(C)]
+pub struct MergeJoin<'mcx> {
+    pub join: Join<'mcx>,
+    pub skip_mark_restore: bool,
+    pub mergeclauses: NodeList<'mcx>,
+    pub mergeFamilies: &'mcx [Oid],
+    pub mergeCollations: &'mcx [Oid],
+    pub mergeReversals: &'mcx [bool],
+    pub mergeNullsFirst: &'mcx [bool],
+}
+
+/// `hashkeys` are the OUTER-side hash expressions (Hash node carries the
+/// inner-side keys); operator/collation arrays parallel `hashclauses`.
+#[derive(Default)]
+#[repr(C)]
+pub struct HashJoin<'mcx> {
+    pub join: Join<'mcx>,
+    pub hashclauses: NodeList<'mcx>,
+    pub hashoperators: OidList<'mcx>,
+    pub hashcollations: OidList<'mcx>,
+    pub hashkeys: NodeList<'mcx>,
+}
+
+/// `hashkeys` are the inner-side hash expressions. skew fields carry the C
+/// values (InvalidOid/0/false when no single simple outer Var key).
+#[derive(Default)]
+#[repr(C)]
+pub struct Hash<'mcx> {
+    pub plan: Plan<'mcx>,
+    pub hashkeys: NodeList<'mcx>,
+    pub skewTable: Oid,
+    pub skewColumn: i16,
+    pub skewInherit: bool,
+    pub rows_total: Cardinality,
+}
+
 #[derive(Default)]
 #[repr(C)]
 pub struct Limit<'mcx> {
@@ -366,6 +404,13 @@ pub struct Limit<'mcx> {
     pub uniqCollations: &'mcx [Oid],
 }
 
+/// A syscache-keyed plan dependency (plannodes.h). Not a plan-tree node.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PlanInvalItem {
+    pub cacheId: i32,
+    pub hashValue: u32,
+}
+
 /// # Safety: implementors must be `repr(C)` with a [`Plan`] first field, so a
 /// `NodeRep<Self>` reads as a `NodeRep<Plan>` prefix, and their tag must be
 /// listed in [`is_plan_tag`].
@@ -374,6 +419,9 @@ pub unsafe trait PlanVariant<'mcx>: NodeVariant<'mcx> {}
 // SAFETY (each): tag/type pairing mirrors plannodes.h.
 unsafe impl<'mcx> NodeVariant<'mcx> for PlannedStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_PlannedStmt;
+}
+unsafe impl NodeVariant<'_> for PlanInvalItem {
+    const TAG: NodeTag = NodeTag::T_PlanInvalItem;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for Result<'mcx> {
     const TAG: NodeTag = NodeTag::T_Result;
@@ -420,6 +468,15 @@ unsafe impl<'mcx> NodeVariant<'mcx> for Limit<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for NestLoop<'mcx> {
     const TAG: NodeTag = NodeTag::T_NestLoop;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for MergeJoin<'mcx> {
+    const TAG: NodeTag = NodeTag::T_MergeJoin;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for HashJoin<'mcx> {
+    const TAG: NodeTag = NodeTag::T_HashJoin;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for Hash<'mcx> {
+    const TAG: NodeTag = NodeTag::T_Hash;
+}
 // SAFETY: repr(C), Plan first (offset asserted below), tag in is_plan_tag.
 unsafe impl<'mcx> PlanVariant<'mcx> for Result<'mcx> {}
 // SAFETY: repr(C), Plan first via the Scan base (offsets asserted below).
@@ -450,6 +507,12 @@ unsafe impl<'mcx> PlanVariant<'mcx> for ModifyTable<'mcx> {}
 unsafe impl<'mcx> PlanVariant<'mcx> for Limit<'mcx> {}
 // SAFETY: repr(C), Plan first via the Join base (offsets asserted below).
 unsafe impl<'mcx> PlanVariant<'mcx> for NestLoop<'mcx> {}
+// SAFETY: repr(C), Plan first via the Join base (offsets asserted below).
+unsafe impl<'mcx> PlanVariant<'mcx> for MergeJoin<'mcx> {}
+// SAFETY: repr(C), Plan first via the Join base (offsets asserted below).
+unsafe impl<'mcx> PlanVariant<'mcx> for HashJoin<'mcx> {}
+// SAFETY: repr(C), Plan first (offset asserted below), tag in is_plan_tag.
+unsafe impl<'mcx> PlanVariant<'mcx> for Hash<'mcx> {}
 
 const _: () = {
     assert!(offset_of!(Result, plan) == 0);
@@ -506,6 +569,16 @@ const _: () = {
     assert!(
         offset_of!(NodeRep<NestLoop>, payload) == offset_of!(NodeRep<Plan>, payload)
     );
+    assert!(offset_of!(MergeJoin, join) == 0);
+    assert!(
+        offset_of!(NodeRep<MergeJoin>, payload) == offset_of!(NodeRep<Plan>, payload)
+    );
+    assert!(offset_of!(HashJoin, join) == 0);
+    assert!(
+        offset_of!(NodeRep<HashJoin>, payload) == offset_of!(NodeRep<Plan>, payload)
+    );
+    assert!(offset_of!(Hash, plan) == 0);
+    assert!(offset_of!(NodeRep<Hash>, payload) == offset_of!(NodeRep<Plan>, payload));
 };
 
 fn is_plan_tag(tag: NodeTag) -> bool {
@@ -526,6 +599,9 @@ fn is_plan_tag(tag: NodeTag) -> bool {
             | NodeTag::T_ModifyTable
             | NodeTag::T_Limit
             | NodeTag::T_NestLoop
+            | NodeTag::T_MergeJoin
+            | NodeTag::T_HashJoin
+            | NodeTag::T_Hash
     )
 }
 
@@ -607,6 +683,26 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_nest_loop(self) -> Option<&'mcx NestLoop<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_merge_join(self) -> Option<&'mcx MergeJoin<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_hash_join(self) -> Option<&'mcx HashJoin<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_hash(self) -> Option<&'mcx Hash<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_plan_inval_item(self) -> Option<&'mcx PlanInvalItem> {
         self.as_variant()
     }
 

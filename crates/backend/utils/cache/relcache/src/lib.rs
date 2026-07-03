@@ -4,6 +4,7 @@ pub mod build;
 pub mod indexlist;
 pub mod initfile;
 pub mod invalidate;
+pub mod local;
 pub mod rules;
 pub mod schemapg;
 pub mod store;

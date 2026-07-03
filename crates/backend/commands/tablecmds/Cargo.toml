@@ -1,0 +1,22 @@
+[package]
+name = "tablecmds"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_nodes = { path = "../../../_support/types/nodes" }
+types_rel = { path = "../../../_support/types/rel" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+tupdesc = { path = "../../access/common/tupdesc" }
+parse_utilcmd = { path = "../../parser/parse_utilcmd" }
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+catalog_heap = { path = "../../catalog/catalog_heap" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+miscinit = { path = "../../utils/init/miscinit" }
+xact = { path = "../../access/transam/xact" }

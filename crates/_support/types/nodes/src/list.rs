@@ -60,6 +60,18 @@ const _: () = assert!(core::mem::size_of::<NodeList<'static>>() == 16);
 // list.c LIST_HEADER_OVERHEAD: 24-byte header / 8-byte ListCell on 64-bit.
 const LIST_HEADER_OVERHEAD: i32 = 3;
 
+// Every cell buffer carries its capacity in an 8-byte in-allocation prefix so
+// a (elements, length) pair round-trips through a 16-byte carrier without the
+// by-value max_length (gram_core's parser stack; C's List* points at a header
+// the same way). Invariant: elements was produced by first_cell_alloc/enlarge.
+const CELL_PREFIX: usize = 8;
+
+#[inline]
+fn buf_layout<T>(cells: usize) -> Option<Layout> {
+    let arr = Layout::array::<T>(cells).ok()?;
+    Layout::from_size_align(CELL_PREFIX + arr.size(), arr.align().max(CELL_PREFIX)).ok()
+}
+
 #[inline]
 fn nextpower2(v: i32) -> i32 {
     (v as u32).next_power_of_two() as i32
@@ -141,9 +153,13 @@ impl<'mcx, F: ListFlavor> List<'mcx, F> {
     fn first_cell_alloc(&mut self, mcx: Mcx<'mcx>) -> PgResult<()> {
         const FIRST_CAP: usize = 5;
         debug_assert!(self.max_length == 0);
-        let layout = Layout::array::<F::Cell<'mcx>>(FIRST_CAP).expect("const layout");
+        let layout = buf_layout::<F::Cell<'mcx>>(FIRST_CAP).expect("const layout");
         let ptr = Allocator::allocate(&mcx, layout).map_err(|_| crate::oom(mcx, layout.size()))?;
-        self.elements = ptr.cast();
+        // SAFETY: CELL_PREFIX bytes precede the cells in the fresh block.
+        unsafe {
+            ptr.cast::<i32>().write(FIRST_CAP as i32);
+            self.elements = ptr.byte_add(CELL_PREFIX).cast();
+        }
         self.max_length = FIRST_CAP as i32;
         Ok(())
     }
@@ -170,18 +186,31 @@ impl<'mcx, F: ListFlavor> List<'mcx, F> {
             nextpower2(core::cmp::max(16, min_size))
         };
         check_alloc_size(new_max as usize * cell)?;
-        let new_layout = Layout::array::<F::Cell<'mcx>>(new_max as usize)
-            .map_err(|_| crate::oom(mcx, new_max as usize * cell))?;
+        let new_layout = buf_layout::<F::Cell<'mcx>>(new_max as usize)
+            .ok_or_else(|| crate::oom(mcx, new_max as usize * cell))?;
         let ptr = if self.max_length == 0 {
             Allocator::allocate(&mcx, new_layout)
         } else {
             let old_layout =
-                Layout::array::<F::Cell<'mcx>>(self.max_length as usize).expect("valid old layout");
-            // SAFETY: elements holds max_length cells allocated from this arena
-            // with old_layout; new_layout is strictly larger.
-            unsafe { Allocator::grow(&mcx, self.elements.cast(), old_layout, new_layout) }
+                buf_layout::<F::Cell<'mcx>>(self.max_length as usize).expect("valid old layout");
+            // SAFETY: the block starts CELL_PREFIX bytes before elements and
+            // holds max_length cells (alloc-site invariant); new_layout is
+            // strictly larger.
+            unsafe {
+                Allocator::grow(
+                    &mcx,
+                    self.elements.cast::<u8>().byte_sub(CELL_PREFIX),
+                    old_layout,
+                    new_layout,
+                )
+            }
         };
-        self.elements = ptr.map_err(|_| crate::oom(mcx, new_layout.size()))?.cast();
+        let base = ptr.map_err(|_| crate::oom(mcx, new_layout.size()))?;
+        // SAFETY: CELL_PREFIX bytes precede the cells in the new block.
+        unsafe {
+            base.cast::<i32>().write(new_max);
+            self.elements = base.byte_add(CELL_PREFIX).cast();
+        }
         self.max_length = new_max;
         Ok(())
     }
@@ -290,6 +319,33 @@ impl<'mcx, F: ListFlavor> List<'mcx, F> {
 
     pub fn clone_in(&self, mcx: Mcx<'mcx>) -> PgResult<Self> {
         Self::from_slice(mcx, self.as_slice())
+    }
+
+    // 12-byte carrier form: null pointer <=> no buffer; capacity rides the
+    // CELL_PREFIX header, so only (elements, length) must be stored.
+    #[inline]
+    pub fn into_raw_parts(self) -> (*mut F::Cell<'mcx>, u32) {
+        if self.max_length == 0 {
+            (core::ptr::null_mut(), 0)
+        } else {
+            (self.elements.as_ptr(), self.length as u32)
+        }
+    }
+
+    /// # Safety: `(p, len)` must come from `into_raw_parts` of a live list
+    /// whose buffer has not been reused since.
+    #[inline]
+    pub unsafe fn from_raw_parts(p: *mut F::Cell<'mcx>, len: u32) -> Self {
+        match NonNull::new(p) {
+            None => Self::nil(),
+            Some(elements) => List {
+                length: len as i32,
+                // SAFETY: caller contract; every buffer carries CELL_PREFIX.
+                max_length: unsafe { elements.cast::<u8>().byte_sub(CELL_PREFIX).cast().read() },
+                elements,
+                _flavor: PhantomData,
+            },
+        }
     }
 }
 

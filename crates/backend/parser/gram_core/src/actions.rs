@@ -2,6 +2,7 @@ use types_core::catalog::RELPERSISTENCE_PERMANENT;
 use types_error::PgResult;
 use types_nodes::parsenodes::{CopyStmt, DefElem, DefElemAction, VacuumRelation, VacuumStmt};
 use types_nodes::rawnodes::A_Expr_Kind::AEXPR_OP;
+use types_nodes::rawnodes::{ColumnDef, CreateStmt, OnCommitAction};
 use types_nodes::{
     Alias, DeleteStmt, InsertStmt, Node, NodeList, RangeFunction, RangeVar, RawStmt, SelectStmt,
     UpdateStmt,
@@ -79,6 +80,69 @@ impl<'mcx> Parser<'mcx> {
                     None => NodeList::nil(),
                 });
             }
+            // CreateStmt: CREATE OptTemp TABLE qualified_name '('
+            // OptTableElementList ')' OptInherit OptPartitionSpec
+            // table_access_method_clause OptWith OnCommitOption OptTableSpace
+            455 => {
+                let persistence = stk.v(yylen, 2).ival() as u8;
+                let relation = stk.v(yylen, 4).node().expect("qualified_name");
+                // SAFETY: tree is parser-owned; no derived refs live.
+                unsafe {
+                    relation
+                        .with_mut::<RangeVar, _>(|r| r.relpersistence = persistence)
+                        .expect("qualified_name is RangeVar");
+                }
+                let mut n = Node::build::<CreateStmt>(mcx)?;
+                n.relation = relation.as_variant::<RangeVar>();
+                n.tableElts = stk.v(yylen, 6).list();
+                n.inhRelations = stk.v(yylen, 8).list();
+                n.partspec = stk.v(yylen, 9).node();
+                n.accessMethod = opt_str(stk.v(yylen, 10));
+                n.options = stk.v(yylen, 11).list();
+                n.oncommit = on_commit_action(stk.v(yylen, 12).ival());
+                n.tablespacename = opt_str(stk.v(yylen, 13));
+                n.if_not_exists = false;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // OptTemp: /*EMPTY*/ (TEMP/UNLOGGED variants stay unported).
+            468 => *yyval = YYSTYPE::Ival(RELPERSISTENCE_PERMANENT as i32),
+            // TableElementList: TableElement | TableElementList ',' TableElement
+            473 => {
+                let el = stk.v(yylen, 1).node().expect("TableElement");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, el)?);
+            }
+            474 => {
+                let mut list = stk.v(yylen, 1).list();
+                let el = stk.v(yylen, 3).node().expect("TableElement");
+                list.lappend(mcx, el)?;
+                *yyval = YYSTYPE::List(list);
+            }
+            // columnDef: ColId Typename opt_column_storage
+            // opt_column_compression create_generic_options ColQualList
+            482 => {
+                let colname = stk.v(yylen, 1).str_val();
+                let type_name = stk.v(yylen, 2).node();
+                let storage_name = opt_str(stk.v(yylen, 3));
+                let compression = opt_str(stk.v(yylen, 4));
+                let fdwoptions = stk.v(yylen, 5).list();
+                let quals = stk.v(yylen, 6).list();
+                if !quals.is_nil() {
+                    panic!(
+                        "gram_core: SplitColQualList unported (column constraints/COLLATE)"
+                    );
+                }
+                let mut n = Node::build::<ColumnDef>(mcx)?;
+                n.colname = Some(colname);
+                n.typeName = type_name;
+                n.storage_name = storage_name;
+                n.compression = compression;
+                n.is_local = true;
+                n.fdwoptions = fdwoptions;
+                n.location = stk.l(yylen, 1);
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // OnCommitOption: /*EMPTY*/
+            605 => *yyval = YYSTYPE::Ival(OnCommitAction::ONCOMMIT_NOOP as i32),
             1719 | 1720 => {
                 let mut n = Node::build::<SelectStmt>(mcx)?;
                 if rule == 1720 {
@@ -1646,6 +1710,17 @@ fn make_a_expr<'mcx>(
             location,
         },
     )
+}
+
+
+fn on_commit_action(v: i32) -> OnCommitAction {
+    match v {
+        0 => OnCommitAction::ONCOMMIT_NOOP,
+        1 => OnCommitAction::ONCOMMIT_PRESERVE_ROWS,
+        2 => OnCommitAction::ONCOMMIT_DELETE_ROWS,
+        3 => OnCommitAction::ONCOMMIT_DROP,
+        _ => panic!("invalid OnCommitAction {v}"),
+    }
 }
 
 // makeRangeVar (makefuncs.c): inh = true, permanent persistence.

@@ -1134,24 +1134,96 @@ dependencies = [
 name = "commands_analyze"
 version = "0.0.0"
 dependencies = [
+ "aclchk_seams",
+ "adt_bool",
+ "adt_float",
+ "aio_seams",
+ "async_seams",
+ "autovacuum_seams",
+ "backend_progress_seams",
+ "backend_status_seams",
+ "be_fsstubs_seams",
  "bufmgr",
  "bufmgr_seams",
+ "cache_syscache",
+ "catalog_index_seams",
+ "catalog_seams",
+ "catalog_storage_seams",
+ "catcache",
+ "clog",
+ "combocid_seams",
+ "commit_ts_seams",
+ "condition_variable_seams",
+ "controldata_utils",
  "datum",
+ "dbcommands_seams",
+ "deadlock_seams",
+ "exectuples",
+ "fd",
+ "fmgr_core",
  "fmgr_seams",
+ "freespace_seams",
  "genam",
+ "guc",
+ "guc_tables",
  "heapam",
+ "heapam_visibility",
  "heaptuple",
+ "indexcmds_seams",
+ "init_small",
+ "inval",
+ "ipc_seams",
+ "latch_seams",
+ "lmgr_proc",
+ "lmgr_seams",
+ "lock",
+ "lock_seams",
+ "logical_seams",
+ "logical_worker_seams",
+ "lwlock",
  "mcx",
  "miscinit",
+ "miscinit_seams",
+ "multixact_seams",
+ "namespace_seams",
+ "origin_seams",
+ "parallel_seams",
+ "pg_enum_seams",
  "pg_prng",
+ "pg_sema_seams",
+ "pgstat",
+ "pmsignal_seams",
+ "predicate_seams",
  "procarray",
+ "pruneheap_seams",
  "rel_vocab",
+ "relation_seams",
  "relcache_seams",
+ "resowner",
+ "rmgr",
+ "s_lock_seams",
+ "shmem",
+ "sinval_seams",
+ "smgr_seams",
+ "snapbuild_seams",
+ "snapmgr",
+ "spi_seams",
+ "subtrans",
+ "sync_seams",
+ "syncrep_seams",
  "syscache_seams",
  "table",
  "tableam",
  "tableam_vocab",
+ "tablecmds_seams",
+ "timeout_seams",
+ "timestamp_seams",
+ "transam",
+ "transam_xlog",
+ "transam_xlog_seams",
+ "trigger_seams",
  "typcache",
+ "typcache_seams",
  "types_core",
  "types_error",
  "types_fmgr",
@@ -1159,10 +1231,17 @@ dependencies = [
  "types_rel",
  "types_scan",
  "types_slot",
+ "types_snapshot",
+ "types_storage",
  "types_tuple",
  "vacuum_seams",
+ "varsup",
  "visibilitymap",
+ "waitevent_seams",
  "xact",
+ "xloginsert",
+ "xloginsert_seams",
+ "xlogutils",
 ]
 
 [[package]]
@@ -1188,6 +1267,7 @@ dependencies = [
  "types_nodes",
  "types_rel",
  "types_storage",
+ "vacuum_seams",
  "varsup",
  "xact",
 ]
@@ -1577,6 +1657,9 @@ dependencies = [
  "nodeagg",
  "nodebitmapheapscan",
  "nodebitmapindexscan",
+ "nodefunctionscan",
+ "nodehash",
+ "nodehashjoin",
  "nodeindexonlyscan",
  "nodeindexscan",
  "nodelimit",
@@ -2762,6 +2845,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "locale"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+]
+
+[[package]]
 name = "localtime"
 version = "0.1.0"
 dependencies = [
@@ -2912,6 +3002,7 @@ version = "0.1.0"
 dependencies = [
  "mcx",
  "seam_core",
+ "types_core",
  "types_error",
 ]
 
@@ -3231,6 +3322,29 @@ dependencies = [
  "types_nodes",
  "types_rel",
  "types_scan",
+]
+
+[[package]]
+name = "nodefunctionscan"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "execexpr",
+ "execscan",
+ "executils",
+ "fmgr_core",
+ "funcapi",
+ "init_small",
+ "mcx",
+ "tupdesc",
+ "tuplestore",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_nodes",
+ "types_scan",
+ "types_slot",
+ "types_tuple",
 ]
 
 [[package]]
@@ -5124,6 +5238,53 @@ dependencies = [
 ]
 
 [[package]]
+name = "regex"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "types_core",
+]
+
+[[package]]
+name = "regex_core"
+version = "0.0.0"
+dependencies = [
+ "locale",
+ "mbutils_seams",
+ "mcx",
+ "pg_locale",
+ "pg_locale_seams",
+ "regex",
+ "regex_core_seams",
+ "seam_core",
+ "stack_depth",
+ "types_core",
+ "types_error",
+]
+
+[[package]]
+name = "regex_core_seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "regex",
+ "seam_core",
+ "types_core",
+ "types_error",
+]
+
+[[package]]
+name = "regexp_seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "regex",
+ "seam_core",
+ "types_core",
+ "types_error",
+]
+
+[[package]]
 name = "rel_vocab"
 version = "0.1.0"
 
@@ -5564,6 +5725,7 @@ dependencies = [
  "catcache",
  "checkpointer",
  "clog",
+ "commands_vacuum",
  "condition_variable",
  "conffiles",
  "dbcommands",
@@ -5679,6 +5841,7 @@ dependencies = [
  "twophase_config",
  "typcache",
  "utility",
+ "vacuumlazy",
  "variable",
  "varlena",
  "vars",
@@ -6831,6 +6994,7 @@ version = "0.1.0"
 dependencies = [
  "cmdtag",
  "commands_analyze",
+ "commands_vacuum",
  "copy_cmd",
  "elog",
  "explain",

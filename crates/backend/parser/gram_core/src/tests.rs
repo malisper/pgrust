@@ -471,3 +471,27 @@ fn vacuum_analyze_rule_numbers_match_tables() {
         assert_eq!(YYRLINE[rule], line, "rule {rule}");
     }
 }
+
+#[test]
+fn create_table_two_columns() {
+    use types_nodes::rawnodes::{ColumnDef, CreateStmt, OnCommitAction, TypeName};
+    let list = parse("CREATE TABLE t2 (a int4, b int8)");
+    let rs = only_stmt(&list);
+    let n = rs.stmt.expect("stmt").as_variant::<CreateStmt>().expect("CreateStmt");
+    let rv = n.relation.expect("relation");
+    assert_eq!(rv.relname, Some("t2"));
+    assert_eq!(rv.relpersistence, b'p');
+    assert!(n.inhRelations.is_nil() && n.options.is_nil() && !n.if_not_exists);
+    assert!(n.partspec.is_none() && n.accessMethod.is_none() && n.tablespacename.is_none());
+    assert_eq!(n.oncommit, OnCommitAction::ONCOMMIT_NOOP);
+    assert_eq!(n.tableElts.len(), 2);
+    let expect = [("a", "int4"), ("b", "int8")];
+    for (i, (name, tyname)) in expect.iter().enumerate() {
+        let cd = n.tableElts.nth(i).as_variant::<ColumnDef>().expect("ColumnDef");
+        assert_eq!(cd.colname, Some(*name));
+        assert!(cd.is_local && !cd.is_not_null && cd.constraints.is_nil());
+        let tn = cd.typeName.expect("typeName").as_variant::<TypeName>().expect("TypeName");
+        let last = tn.names.nth(tn.names.len() - 1).as_string().expect("name").sval;
+        assert_eq!(last, *tyname);
+    }
+}
