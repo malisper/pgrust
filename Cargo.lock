@@ -678,6 +678,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "adt_varbit"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "mcx",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+]
+
+[[package]]
 name = "adt_varchar"
 version = "0.1.0"
 dependencies = [
@@ -2621,7 +2632,7 @@ dependencies = [
  "fmgr_core",
  "format_type",
  "guc_tables",
- "heaptoast_seams",
+ "heaptoast",
  "heaptuple",
  "indexcmds_seams",
  "lsyscache",
@@ -3086,6 +3097,7 @@ dependencies = [
  "adt_scalar",
  "adt_timestamp",
  "adt_uuid",
+ "adt_varbit",
  "adt_varchar",
  "adt_windowfuncs",
  "arrayfuncs",
@@ -5949,6 +5961,7 @@ name = "parser_small1"
 version = "0.0.0"
 dependencies = [
  "adt_numeric",
+ "adt_varbit",
  "datum",
  "elog",
  "format_type",

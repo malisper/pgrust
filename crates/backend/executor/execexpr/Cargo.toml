@@ -23,7 +23,7 @@ typcache = { path = "../../utils/cache/typcache" }
 heaptuple = { path = "../../access/common/heaptuple" }
 format_type = { path = "../../utils/adt/format_type" }
 exectuples = { path = "../exectuples" }
-heaptoast_seams = { path = "../../access/heap/heaptoast_seams" }
+heaptoast = { path = "../../access/heap/heaptoast" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
 arrayfuncs = { path = "../../utils/adt/arrayfuncs" }
 clauses_seams = { path = "../../optimizer/util/clauses_seams" }
