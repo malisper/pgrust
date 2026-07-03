@@ -87,9 +87,15 @@ fn set_rel_size(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResult<()
     match rte.rtekind {
         RTEKind::RTE_RELATION => {
             // Toast relations are plain heaps in C's set_plain_rel_size arm
-            // (direct SELECT from pg_toast.* is legal). A partitioned rel
-            // without inh only reaches here dummy (C matches).
-            debug_assert!(
+            // (direct SELECT from pg_toast.* is legal).
+            if rte.relkind == types_rel::RELKIND_PARTITIONED_TABLE {
+                // allpaths.c:394: ONLY on a partitioned table, or a
+                // zero-partition parent whose stale relhassubclass cleared
+                // inh -- storageless, always empty.
+                set_dummy_rel_pathlist(run, rel)?;
+                return Ok(());
+            }
+            assert!(
                 rte.relkind == types_rel::RELKIND_RELATION
                     || rte.relkind == types_rel::RELKIND_TOASTVALUE
                     || rte.relkind == types_rel::RELKIND_SEQUENCE,
@@ -258,6 +264,11 @@ fn relation_excluded_by_constraints(run: &mut PlannerRun<'_>, rel: RelId, rti: u
         _ => {}
     }
     if run.root.rel(rel).reloptkind == types_pathnodes::RELOPT_OTHER_MEMBER_REL {
+        // DIVERGENCE (predtest unported): C also refutes self-contradictory
+        // child quals here (plancat.c:1695 predicate_refuted_by(safe, safe))
+        // -- e.g. WHERE x > 10 AND x < 5 leaves children un-pruned; rows
+        // identical, plan/EXPLAIN differ. Cannot be loud without evaluating
+        // the refutation itself.
         // C proves exclusion from the child's CHECK constraints
         // (get_relation_constraints + predicate_refuted_by).
         let rte = run.rte(rti);
@@ -459,10 +470,10 @@ fn set_append_rel_size(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgRe
             r.tuples = parent_tuples;
             r.rows = parent_rows;
         }
-        run.root.rel_reltarget_mut(rel).width = (parent_size / parent_rows).round() as i32;
+        run.root.rel_reltarget_mut(rel).width = (parent_size / parent_rows).round_ties_even() as i32;
         for i in 0..nattrs {
             run.root.rel_mut(rel).attr_widths[i] =
-                (parent_attrsizes[i] / parent_rows).round() as i32;
+                (parent_attrsizes[i] / parent_rows).round_ties_even() as i32;
         }
         // rel->pages stays zero: appendrels must not double-count in
         // total_table_pages.

@@ -179,6 +179,9 @@ pub(crate) fn MergeAttributes<'mcx>(
             if attribute.attgenerated != 0 || attribute.attidentity != 0 {
                 unported("inherited generated/identity columns");
             }
+            if attribute.attcompression != 0 {
+                unported("inherited column compression (tablecmds.c:2788)");
+            }
             let mut newdef = make_column_def(
                 mcx,
                 att_name,

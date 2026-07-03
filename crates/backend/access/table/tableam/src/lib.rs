@@ -223,8 +223,8 @@ mod heap {
     }
 
     // heapam_tuple_insert (heapam_handler.c): fetch the slot's heap tuple in
-    // place, heap_insert it, copy t_self back. Callers pass table-format
-    // slots (ri_newTupleSlot / table_slot_create), so no copy arm exists.
+    // place (virtual/minimal sources take the ExecFetchSlotHeapTuple copy
+    // arm), heap_insert it, copy t_self back.
     pub(super) fn tuple_insert<'mcx>(
         mcx: Mcx<'mcx>,
         rel: &Relation<'mcx>,

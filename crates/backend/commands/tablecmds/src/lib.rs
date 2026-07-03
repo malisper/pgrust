@@ -218,7 +218,9 @@ pub fn DefineRelation<'mcx>(
                 ERROR,
                 "cannot create partitioned table as inheritance child".to_string(),
             )
-            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+            // C raises this in transformCreateStmt (parse_utilcmd.c:261);
+            // here parents are already locked -- the error unwinds them.
+            .with_sqlstate(types_error::ERRCODE_INVALID_OBJECT_DEFINITION),
         ));
     }
     let merged = if stmt.partbound.is_none() && !inherit_oids.is_empty() {
@@ -389,22 +391,46 @@ pub fn DefineRelation<'mcx>(
             )?;
             xact::CommandCounterIncrement()?;
         }
+        let mut connames: mcx::PgVec<'_, &str> = mcx::PgVec::new_in(mcx);
         if !stmt.constraints.is_nil() {
-            constraints::add_relation_new_constraints(
+            let conlist = constraints::add_relation_new_constraints(
                 mcx,
                 &rel,
                 &[],
                 &stmt.constraints,
                 query_string,
             )?;
+            for con in conlist.iter() {
+                connames.push(con.name);
+            }
         }
         if !stmt.nnconstraints.is_nil() || !old_notnulls.is_empty() {
-            constraints::add_relation_not_null_constraints(
+            let nncols = constraints::add_relation_not_null_constraints(
                 mcx,
                 &rel,
                 &stmt.nnconstraints,
                 old_notnulls,
+                &connames,
             )?;
+            // set_attnotnull leg (tablecmds.c:1357): a table-level NOT NULL
+            // naming an inherited column has no local ColumnDef carrying it.
+            let mut updated = false;
+            for &attnum in nncols.iter() {
+                let att = rel.rd_att.attr(attnum as usize - 1);
+                if att.attisdropped || att.attnotnull {
+                    continue;
+                }
+                alter::update_pg_attribute(
+                    mcx,
+                    rel.rd_id,
+                    attnum,
+                    &[(alter::Anum_pg_attribute_attnotnull, ::datum::Datum::from_bool(true))],
+                )?;
+                updated = true;
+            }
+            if updated {
+                xact::CommandCounterIncrement()?;
+            }
         }
         table::table_close(rel, types_rel::NoLock)?;
         xact::CommandCounterIncrement()?;
