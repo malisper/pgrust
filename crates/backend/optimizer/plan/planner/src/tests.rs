@@ -385,6 +385,7 @@ fn install_scan_fixtures() {
         Ok(v)
     });
     relcache_seams::relation_get_index_list::set(relcache::RelationGetIndexList);
+    relcache_seams::relation_get_stat_ext_list::set(|mcx, _relid| Ok(mcx::PgVec::new_in(mcx)));
     bufmgr_seams::relation_get_number_of_blocks_in_fork::set(|rel, _fork| {
         Ok(match rel.rd_id {
             TBL => 100,
