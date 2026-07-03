@@ -29,6 +29,7 @@ const TYPCATEGORY_INVALID: i8 = 0;
 
 pub fn init_seams() {
     indexcmds_seams::get_default_opclass::set(GetDefaultOpClass);
+    indexcmds_seams::define_index_for_alter::set(define::define_index_for_alter);
 }
 
 fn oid_key(attno: i32, oid: Oid) -> ScanKeyData {

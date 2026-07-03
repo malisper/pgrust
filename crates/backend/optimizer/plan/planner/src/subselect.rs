@@ -653,7 +653,7 @@ fn offset_and_pull_down<'mcx>(
             if v.varlevelsup == 0 {
                 nv.varno += rtoffset;
                 if nv.varnosyn > 0 {
-                    nv.varnosyn += rtoffset as u32;
+                    nv.varnosyn = nv.varnosyn.wrapping_add(rtoffset as u32);
                 }
             } else {
                 nv.varlevelsup -= 1;

@@ -675,7 +675,11 @@ fn exprs_collation(node: Node<'_>) -> u32 {
         NodeTag::T_WindowFunc => node.as_window_func().unwrap().wincollid,
         NodeTag::T_CaseExpr => node.as_case_expr().unwrap().casecollid,
         NodeTag::T_RowExpr => 0,
-        tag => panic!("exprCollation (nodeFuncs.c): {tag:?} not ported here"),
+        NodeTag::T_CoalesceExpr => node.as_coalesce_expr().unwrap().coalescecollid,
+        NodeTag::T_MinMaxExpr => node.as_min_max_expr().unwrap().minmaxcollid,
+        NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resultcollid,
+        NodeTag::T_CoerceViaIO => node.as_coerce_via_io().unwrap().resultcollid,
+        _ => nodes_core::expr_collation(node),
     }
 }
 
@@ -1053,6 +1057,199 @@ fn fix_upper_expr<'mcx>(
                 },
             )
         }
+        NodeTag::T_CaseTestExpr => Ok(node),
+        NodeTag::T_CaseExpr => {
+            let c = node.as_case_expr().unwrap();
+            let arg = match c.arg {
+                Some(a) => Some(fix_upper_expr(run, a, subplan_tlist, rtoffset, newvarno, num_exec)?),
+                None => None,
+            };
+            let mut args = NodeList::nil();
+            for w in &c.args {
+                let cw = w.as_case_when().expect("CaseWhen");
+                let expr = fix_upper_expr(
+                    run,
+                    cw.expr.expect("CaseWhen.expr"),
+                    subplan_tlist,
+                    rtoffset,
+                    newvarno,
+                    num_exec,
+                )?;
+                let result = fix_upper_expr(
+                    run,
+                    cw.result.expect("CaseWhen.result"),
+                    subplan_tlist,
+                    rtoffset,
+                    newvarno,
+                    num_exec,
+                )?;
+                args.lappend(
+                    mcx,
+                    Node::mk(
+                        mcx,
+                        types_nodes::primnodes::CaseWhen {
+                            expr: Some(expr),
+                            result: Some(result),
+                            location: cw.location,
+                        },
+                    )?,
+                )?;
+            }
+            let defresult = match c.defresult {
+                Some(d) => Some(fix_upper_expr(run, d, subplan_tlist, rtoffset, newvarno, num_exec)?),
+                None => None,
+            };
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::CaseExpr {
+                    casetype: c.casetype,
+                    casecollid: c.casecollid,
+                    arg,
+                    args,
+                    defresult,
+                    location: c.location,
+                },
+            )
+        }
+        NodeTag::T_CoalesceExpr => {
+            let co = node.as_coalesce_expr().unwrap();
+            let mut args = NodeList::nil();
+            for a in &co.args {
+                args.lappend(mcx, fix_upper_expr(run, a, subplan_tlist, rtoffset, newvarno, num_exec)?)?;
+            }
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::CoalesceExpr {
+                    coalescetype: co.coalescetype,
+                    coalescecollid: co.coalescecollid,
+                    args,
+                    location: co.location,
+                },
+            )
+        }
+        NodeTag::T_MinMaxExpr => {
+            let mm = node.as_min_max_expr().unwrap();
+            let mut args = NodeList::nil();
+            for a in &mm.args {
+                args.lappend(mcx, fix_upper_expr(run, a, subplan_tlist, rtoffset, newvarno, num_exec)?)?;
+            }
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::MinMaxExpr {
+                    minmaxtype: mm.minmaxtype,
+                    minmaxcollid: mm.minmaxcollid,
+                    inputcollid: mm.inputcollid,
+                    op: mm.op,
+                    args,
+                    location: mm.location,
+                },
+            )
+        }
+        NodeTag::T_ScalarArrayOpExpr => {
+            let sa = node.as_scalar_array_op_expr().unwrap();
+            // fix_expr_common: set_sa_opfuncid + dependency; eval_const_
+            // expressions resolved opfuncid on every live path here.
+            debug_assert!(sa.opfuncid != 0, "fix_upper_expr_mutator: unresolved sa opfuncid");
+            record_plan_function_dependency(run, sa.opfuncid)?;
+            if sa.hashfuncid != 0 {
+                record_plan_function_dependency(run, sa.hashfuncid)?;
+            }
+            if sa.negfuncid != 0 {
+                record_plan_function_dependency(run, sa.negfuncid)?;
+            }
+            let mut args = NodeList::nil();
+            for a in &sa.args {
+                args.lappend(mcx, fix_upper_expr(run, a, subplan_tlist, rtoffset, newvarno, num_exec)?)?;
+            }
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::ScalarArrayOpExpr {
+                    opno: sa.opno,
+                    opfuncid: sa.opfuncid,
+                    hashfuncid: sa.hashfuncid,
+                    negfuncid: sa.negfuncid,
+                    useOr: sa.useOr,
+                    inputcollid: sa.inputcollid,
+                    args,
+                    location: sa.location,
+                },
+            )
+        }
+        NodeTag::T_ArrayExpr => {
+            let a = node.as_array_expr().unwrap();
+            let mut elements = NodeList::nil();
+            for e in &a.elements {
+                elements.lappend(mcx, fix_upper_expr(run, e, subplan_tlist, rtoffset, newvarno, num_exec)?)?;
+            }
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::ArrayExpr {
+                    array_typeid: a.array_typeid,
+                    array_collid: a.array_collid,
+                    element_typeid: a.element_typeid,
+                    elements,
+                    multidims: a.multidims,
+                    list_start: a.list_start,
+                    list_end: a.list_end,
+                    location: a.location,
+                },
+            )
+        }
+        NodeTag::T_CoerceViaIO => {
+            let cv = node.as_coerce_via_io().unwrap();
+            let arg = fix_upper_expr(run, cv.arg, subplan_tlist, rtoffset, newvarno, num_exec)?;
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::CoerceViaIO {
+                    arg,
+                    resulttype: cv.resulttype,
+                    resultcollid: cv.resultcollid,
+                    coerceformat: cv.coerceformat,
+                    location: cv.location,
+                },
+            )
+        }
+        NodeTag::T_SubscriptingRef => {
+            let sr = node.as_subscripting_ref().unwrap();
+            let mut upper = types_nodes::OptNodeList::nil();
+            for e in &sr.refupperindexpr {
+                let e = match e {
+                    Some(e) => Some(fix_upper_expr(run, e, subplan_tlist, rtoffset, newvarno, num_exec)?),
+                    None => None,
+                };
+                upper.lappend(mcx, e)?;
+            }
+            let mut lower = types_nodes::OptNodeList::nil();
+            for e in &sr.reflowerindexpr {
+                let e = match e {
+                    Some(e) => Some(fix_upper_expr(run, e, subplan_tlist, rtoffset, newvarno, num_exec)?),
+                    None => None,
+                };
+                lower.lappend(mcx, e)?;
+            }
+            let refexpr = match sr.refexpr {
+                Some(e) => Some(fix_upper_expr(run, e, subplan_tlist, rtoffset, newvarno, num_exec)?),
+                None => None,
+            };
+            let refassgnexpr = match sr.refassgnexpr {
+                Some(e) => Some(fix_upper_expr(run, e, subplan_tlist, rtoffset, newvarno, num_exec)?),
+                None => None,
+            };
+            Node::mk(
+                mcx,
+                types_nodes::SubscriptingRef {
+                    refcontainertype: sr.refcontainertype,
+                    refelemtype: sr.refelemtype,
+                    refrestype: sr.refrestype,
+                    reftypmod: sr.reftypmod,
+                    refcollid: sr.refcollid,
+                    refupperindexpr: upper,
+                    reflowerindexpr: lower,
+                    refexpr,
+                    refassgnexpr,
+                },
+            )
+        }
         other => panic!("fix_upper_expr_mutator (setrefs.c): {other:?}; M3 expression lane"),
     }
 }
@@ -1084,7 +1281,7 @@ fn search_indexed_tlist_for_var<'mcx>(
                 location: var.location,
             };
             if newvar.varnosyn > 0 {
-                newvar.varnosyn += rtoffset as u32;
+                newvar.varnosyn = newvar.varnosyn.wrapping_add(rtoffset as u32);
             }
             return Node::mk(run.mcx, newvar);
         }
@@ -1156,7 +1353,9 @@ fn fix_scan_expr_mutator<'mcx>(
                 newvar.varno += rtoffset;
             }
             if newvar.varnosyn > 0 {
-                newvar.varnosyn += rtoffset as u32;
+                // C Index is unsigned: special-varno Vars (varnosyn = INDEX_VAR
+                // as unsigned) wrap here in C too; the value is never read.
+                newvar.varnosyn = newvar.varnosyn.wrapping_add(rtoffset as u32);
             }
             Node::mk(mcx, newvar)
         }
@@ -1399,6 +1598,47 @@ fn fix_scan_expr_mutator<'mcx>(
                 },
             )
         }
+        NodeTag::T_SubscriptingRef => {
+            let sr = node.as_subscripting_ref().unwrap();
+            let mut upper = types_nodes::OptNodeList::nil();
+            for e in &sr.refupperindexpr {
+                let e = match e {
+                    Some(e) => Some(fix_scan_expr_mutator(run, e, rtoffset, num_exec)?),
+                    None => None,
+                };
+                upper.lappend(mcx, e)?;
+            }
+            let mut lower = types_nodes::OptNodeList::nil();
+            for e in &sr.reflowerindexpr {
+                let e = match e {
+                    Some(e) => Some(fix_scan_expr_mutator(run, e, rtoffset, num_exec)?),
+                    None => None,
+                };
+                lower.lappend(mcx, e)?;
+            }
+            let refexpr = match sr.refexpr {
+                Some(e) => Some(fix_scan_expr_mutator(run, e, rtoffset, num_exec)?),
+                None => None,
+            };
+            let refassgnexpr = match sr.refassgnexpr {
+                Some(e) => Some(fix_scan_expr_mutator(run, e, rtoffset, num_exec)?),
+                None => None,
+            };
+            Node::mk(
+                mcx,
+                types_nodes::SubscriptingRef {
+                    refcontainertype: sr.refcontainertype,
+                    refelemtype: sr.refelemtype,
+                    refrestype: sr.refrestype,
+                    reftypmod: sr.reftypmod,
+                    refcollid: sr.refcollid,
+                    refupperindexpr: upper,
+                    reflowerindexpr: lower,
+                    refexpr,
+                    refassgnexpr,
+                },
+            )
+        }
         NodeTag::T_RowExpr => {
             let r = node.as_row_expr().unwrap();
             let mut args = NodeList::nil();
@@ -1415,6 +1655,140 @@ fn fix_scan_expr_mutator<'mcx>(
                     location: r.location,
                 },
             )
+        }
+        NodeTag::T_CoalesceExpr => {
+            let co = node.as_coalesce_expr().unwrap();
+            let mut args = NodeList::nil();
+            for a in &co.args {
+                args.lappend(mcx, fix_scan_expr_mutator(run, a, rtoffset, num_exec)?)?;
+            }
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::CoalesceExpr {
+                    coalescetype: co.coalescetype,
+                    coalescecollid: co.coalescecollid,
+                    args,
+                    location: co.location,
+                },
+            )
+        }
+        NodeTag::T_MinMaxExpr => {
+            let mm = node.as_min_max_expr().unwrap();
+            let mut args = NodeList::nil();
+            for a in &mm.args {
+                args.lappend(mcx, fix_scan_expr_mutator(run, a, rtoffset, num_exec)?)?;
+            }
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::MinMaxExpr {
+                    minmaxtype: mm.minmaxtype,
+                    minmaxcollid: mm.minmaxcollid,
+                    inputcollid: mm.inputcollid,
+                    op: mm.op,
+                    args,
+                    location: mm.location,
+                },
+            )
+        }
+        NodeTag::T_WindowFunc => {
+            let wf = node.as_window_func().expect("WindowFunc");
+            record_plan_function_dependency(run, wf.winfnoid)?;
+            debug_assert!(wf.runCondition.is_nil());
+            let mut args = NodeList::nil();
+            for arg in &wf.args {
+                args.lappend(mcx, fix_scan_expr_mutator(run, arg, rtoffset, num_exec)?)?;
+            }
+            let aggfilter = match wf.aggfilter {
+                None => None,
+                Some(f) => Some(fix_scan_expr_mutator(run, f, rtoffset, num_exec)?),
+            };
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::WindowFunc {
+                    winfnoid: wf.winfnoid,
+                    wintype: wf.wintype,
+                    wincollid: wf.wincollid,
+                    inputcollid: wf.inputcollid,
+                    args,
+                    aggfilter,
+                    runCondition: NodeList::nil(),
+                    winref: wf.winref,
+                    winstar: wf.winstar,
+                    winagg: wf.winagg,
+                    location: wf.location,
+                },
+            )
+        }
+        NodeTag::T_ScalarArrayOpExpr => {
+            let sa = node.as_scalar_array_op_expr().unwrap();
+            // fix_expr_common: set_sa_opfuncid + dependency; eval_const_
+            // expressions resolved opfuncid on every live path here.
+            debug_assert!(sa.opfuncid != 0, "fix_scan_expr_mutator: unresolved sa opfuncid");
+            record_plan_function_dependency(run, sa.opfuncid)?;
+            if sa.hashfuncid != 0 {
+                record_plan_function_dependency(run, sa.hashfuncid)?;
+            }
+            if sa.negfuncid != 0 {
+                record_plan_function_dependency(run, sa.negfuncid)?;
+            }
+            let mut args = NodeList::nil();
+            for arg in &sa.args {
+                args.lappend(mcx, fix_scan_expr_mutator(run, arg, rtoffset, num_exec)?)?;
+            }
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::ScalarArrayOpExpr {
+                    opno: sa.opno,
+                    opfuncid: sa.opfuncid,
+                    hashfuncid: sa.hashfuncid,
+                    negfuncid: sa.negfuncid,
+                    useOr: sa.useOr,
+                    inputcollid: sa.inputcollid,
+                    args,
+                    location: sa.location,
+                },
+            )
+        }
+        NodeTag::T_ArrayExpr => {
+            let a = node.as_array_expr().unwrap();
+            let mut elements = NodeList::nil();
+            for e in &a.elements {
+                elements.lappend(mcx, fix_scan_expr_mutator(run, e, rtoffset, num_exec)?)?;
+            }
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::ArrayExpr {
+                    array_typeid: a.array_typeid,
+                    array_collid: a.array_collid,
+                    element_typeid: a.element_typeid,
+                    elements,
+                    multidims: a.multidims,
+                    list_start: a.list_start,
+                    list_end: a.list_end,
+                    location: a.location,
+                },
+            )
+        }
+        NodeTag::T_CoerceViaIO => {
+            let cv = node.as_coerce_via_io().unwrap();
+            let arg = fix_scan_expr_mutator(run, cv.arg, rtoffset, num_exec)?;
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::CoerceViaIO {
+                    arg,
+                    resulttype: cv.resulttype,
+                    resultcollid: cv.resultcollid,
+                    coerceformat: cv.coerceformat,
+                    location: cv.location,
+                },
+            )
+        }
+        NodeTag::T_List => {
+            let mut out = NodeList::nil();
+            for cell in node.as_list().unwrap() {
+                out.lappend(mcx, fix_scan_expr_mutator(run, cell, rtoffset, num_exec)?)?;
+            }
+            Node::mk_list(mcx, out)
         }
         other => panic!("fix_scan_expr_mutator (setrefs.c): {other:?}; M2 expression lane"),
     }
@@ -1547,11 +1921,51 @@ fn fix_scan_expr_walker<'mcx>(run: &mut PlannerRun<'mcx>, node: Node<'mcx>) -> P
             }
             Ok(())
         }
+        NodeTag::T_SubscriptingRef => {
+            let sr = node.as_subscripting_ref().unwrap();
+            for e in sr.refupperindexpr.iter().flatten() {
+                fix_scan_expr_walker(run, e)?;
+            }
+            for e in sr.reflowerindexpr.iter().flatten() {
+                fix_scan_expr_walker(run, e)?;
+            }
+            if let Some(e) = sr.refexpr {
+                fix_scan_expr_walker(run, e)?;
+            }
+            if let Some(e) = sr.refassgnexpr {
+                fix_scan_expr_walker(run, e)?;
+            }
+            Ok(())
+        }
         NodeTag::T_RowExpr => {
             for e in &node.as_row_expr().unwrap().args {
                 fix_scan_expr_walker(run, e)?;
             }
             Ok(())
+        }
+        NodeTag::T_CoalesceExpr => {
+            for e in &node.as_coalesce_expr().unwrap().args {
+                fix_scan_expr_walker(run, e)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_MinMaxExpr => {
+            for e in &node.as_min_max_expr().unwrap().args {
+                fix_scan_expr_walker(run, e)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_WindowFunc => {
+            let wf = node.as_window_func().unwrap();
+            record_plan_function_dependency(run, wf.winfnoid)?;
+            debug_assert!(wf.runCondition.is_nil());
+            for arg in &wf.args {
+                fix_scan_expr_walker(run, arg)?;
+            }
+            match wf.aggfilter {
+                Some(f) => fix_scan_expr_walker(run, f),
+                None => Ok(()),
+            }
         }
         other => panic!("fix_scan_expr_walker (setrefs.c): {other:?}; M2 expression lane"),
     }
@@ -1634,7 +2048,7 @@ fn set_dummy_tlist_references<'mcx>(
         };
         if let Some(oldvar) = oldexpr.as_var() {
             if oldvar.varnosyn > 0 {
-                newvar.varnosyn = oldvar.varnosyn + rtoffset as u32;
+                newvar.varnosyn = oldvar.varnosyn.wrapping_add(rtoffset as u32);
                 newvar.varattnosyn = oldvar.varattnosyn;
             }
         }
@@ -2140,6 +2554,180 @@ fn fix_join_expr_mutator<'mcx>(
                 },
             )
         }
+        NodeTag::T_CaseTestExpr => Ok(node),
+        NodeTag::T_CaseExpr => {
+            let c = node.as_case_expr().unwrap();
+            let arg = match c.arg {
+                Some(a) => Some(fix_join_expr_mutator(
+                    run, a, outer_tlist, inner_tlist, rtoffset, nrm_match, acceptable_rel, num_exec,
+                )?),
+                None => None,
+            };
+            let mut args = NodeList::nil();
+            for w in &c.args {
+                let cw = w.as_case_when().expect("CaseWhen");
+                let expr = fix_join_expr_mutator(
+                    run,
+                    cw.expr.expect("CaseWhen.expr"),
+                    outer_tlist,
+                    inner_tlist,
+                    rtoffset,
+                    nrm_match,
+                    acceptable_rel,
+                    num_exec,
+                )?;
+                let result = fix_join_expr_mutator(
+                    run,
+                    cw.result.expect("CaseWhen.result"),
+                    outer_tlist,
+                    inner_tlist,
+                    rtoffset,
+                    nrm_match,
+                    acceptable_rel,
+                    num_exec,
+                )?;
+                args.lappend(
+                    mcx,
+                    Node::mk(
+                        mcx,
+                        types_nodes::primnodes::CaseWhen {
+                            expr: Some(expr),
+                            result: Some(result),
+                            location: cw.location,
+                        },
+                    )?,
+                )?;
+            }
+            let defresult = match c.defresult {
+                Some(d) => Some(fix_join_expr_mutator(
+                    run, d, outer_tlist, inner_tlist, rtoffset, nrm_match, acceptable_rel, num_exec,
+                )?),
+                None => None,
+            };
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::CaseExpr {
+                    casetype: c.casetype,
+                    casecollid: c.casecollid,
+                    arg,
+                    args,
+                    defresult,
+                    location: c.location,
+                },
+            )
+        }
+        NodeTag::T_CoerceViaIO => {
+            let cv = node.as_coerce_via_io().unwrap();
+            let arg = fix_join_expr_mutator(
+                run, cv.arg, outer_tlist, inner_tlist, rtoffset, nrm_match, acceptable_rel, num_exec,
+            )?;
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::CoerceViaIO {
+                    arg,
+                    resulttype: cv.resulttype,
+                    resultcollid: cv.resultcollid,
+                    coerceformat: cv.coerceformat,
+                    location: cv.location,
+                },
+            )
+        }
+        NodeTag::T_ScalarArrayOpExpr => {
+            let sa = node.as_scalar_array_op_expr().unwrap();
+            // fix_expr_common: set_sa_opfuncid + dependency; eval_const_
+            // expressions resolved opfuncid on every live path here.
+            debug_assert!(sa.opfuncid != 0, "fix_join_expr_mutator: unresolved sa opfuncid");
+            record_plan_function_dependency(run, sa.opfuncid)?;
+            if sa.hashfuncid != 0 {
+                record_plan_function_dependency(run, sa.hashfuncid)?;
+            }
+            if sa.negfuncid != 0 {
+                record_plan_function_dependency(run, sa.negfuncid)?;
+            }
+            let mut args = NodeList::nil();
+            for arg in &sa.args {
+                args.lappend(
+                    mcx,
+                    fix_join_expr_mutator(run, arg, outer_tlist, inner_tlist, rtoffset, nrm_match, acceptable_rel, num_exec)?,
+                )?;
+            }
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::ScalarArrayOpExpr {
+                    opno: sa.opno,
+                    opfuncid: sa.opfuncid,
+                    hashfuncid: sa.hashfuncid,
+                    negfuncid: sa.negfuncid,
+                    useOr: sa.useOr,
+                    inputcollid: sa.inputcollid,
+                    args,
+                    location: sa.location,
+                },
+            )
+        }
+        NodeTag::T_CoalesceExpr => {
+            let co = node.as_coalesce_expr().unwrap();
+            let mut args = NodeList::nil();
+            for arg in &co.args {
+                args.lappend(
+                    mcx,
+                    fix_join_expr_mutator(run, arg, outer_tlist, inner_tlist, rtoffset, nrm_match, acceptable_rel, num_exec)?,
+                )?;
+            }
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::CoalesceExpr {
+                    coalescetype: co.coalescetype,
+                    coalescecollid: co.coalescecollid,
+                    args,
+                    location: co.location,
+                },
+            )
+        }
+        NodeTag::T_ArrayExpr => {
+            let a = node.as_array_expr().unwrap();
+            let mut elements = NodeList::nil();
+            for e in &a.elements {
+                elements.lappend(
+                    mcx,
+                    fix_join_expr_mutator(run, e, outer_tlist, inner_tlist, rtoffset, nrm_match, acceptable_rel, num_exec)?,
+                )?;
+            }
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::ArrayExpr {
+                    array_typeid: a.array_typeid,
+                    array_collid: a.array_collid,
+                    element_typeid: a.element_typeid,
+                    elements,
+                    multidims: a.multidims,
+                    list_start: a.list_start,
+                    list_end: a.list_end,
+                    location: a.location,
+                },
+            )
+        }
+        NodeTag::T_MinMaxExpr => {
+            let mm = node.as_min_max_expr().unwrap();
+            let mut args = NodeList::nil();
+            for a in &mm.args {
+                args.lappend(
+                    mcx,
+                    fix_join_expr_mutator(run, a, outer_tlist, inner_tlist, rtoffset, nrm_match, acceptable_rel, num_exec)?,
+                )?;
+            }
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::MinMaxExpr {
+                    minmaxtype: mm.minmaxtype,
+                    minmaxcollid: mm.minmaxcollid,
+                    inputcollid: mm.inputcollid,
+                    op: mm.op,
+                    args,
+                    location: mm.location,
+                },
+            )
+        }
         other => panic!("fix_join_expr_mutator (setrefs.c): {other:?}; M2 expression lane"),
     }
 }
@@ -2184,7 +2772,7 @@ fn search_join_tlist_for_var<'mcx>(
                 location: var.location,
             };
             if newvar.varnosyn > 0 {
-                newvar.varnosyn += rtoffset as u32;
+                newvar.varnosyn = newvar.varnosyn.wrapping_add(rtoffset as u32);
             }
             return Ok(Some(Node::mk(run.mcx, newvar)?));
         }

@@ -3,7 +3,7 @@
 // opclasses/collations, WITH options, TABLESPACE, exclusion/WITHOUT OVERLAPS,
 // partitioned tables, non-btree/hash AMs.
 use catalog_index::{
-    IndexCreateExtra, BTREE_AM_OID, INDEX_CONSTR_CREATE_MARK_AS_PRIMARY,
+    IndexCreateExtra, BTREE_AM_OID,
     INDEX_CREATE_ADD_CONSTRAINT, INDEX_CREATE_IS_PRIMARY,
 };
 use datum::Datum;
@@ -46,6 +46,16 @@ fn err(msg: String, sqlstate: types_error::SqlState) -> Box<PgError> {
     Box::new(PgError::new(ERROR, msg).with_sqlstate(sqlstate))
 }
 
+pub(crate) fn define_index_for_alter<'mcx>(
+    mcx: Mcx<'mcx>,
+    table_id: Oid,
+    stmt_node: types_nodes::Node<'mcx>,
+    skip_build: bool,
+) -> PgResult<Oid> {
+    let stmt = stmt_node.as_variant::<IndexStmt>().expect("IndexStmt");
+    DefineIndex(mcx, table_id, stmt, InvalidOid, true, true, false, skip_build, false)
+}
+
 pub fn DefineIndex<'mcx>(
     mcx: Mcx<'mcx>,
     tableId: Oid,
@@ -79,9 +89,6 @@ pub fn DefineIndex<'mcx>(
     if stmt.deferrable || stmt.initdeferred {
         unported("DefineIndex: DEFERRABLE constraint indexes");
     }
-    if is_alter_table && stmt.primary {
-        unported("DefineIndex: index_check_primary_key (ALTER TABLE ADD PRIMARY KEY)");
-    }
     if stmt.oldNumber != 0 || skip_build {
         unported("DefineIndex: skip_build / oldNumber reuse");
     }
@@ -92,6 +99,7 @@ pub fn DefineIndex<'mcx>(
             Some("hash") => (catalog_index::HASH_AM_OID, "hash", false, false, false),
             Some("gin") => (catalog_index::GIN_AM_OID, "gin", false, false, true),
             Some("gist") => (catalog_index::GIST_AM_OID, "gist", false, false, true),
+            Some("spgist") => (types_core::SPGIST_AM_OID, "spgist", false, false, true),
             Some("brin") => (types_core::BRIN_AM_OID, "brin", false, false, true),
             other => unported(&format!("DefineIndex: access method {other:?} (AMNAME lookup)")),
         };
@@ -106,7 +114,7 @@ pub fn DefineIndex<'mcx>(
         CheckPredicate(mcx, wc)?;
     }
 
-    let root_save_nestlevel = guc::NewGUCNestLevel();
+    let mut root_save_nestlevel = guc::NewGUCNestLevel();
     guc::RestrictSearchPath()?;
 
     let numberOfKeyAttributes = stmt.indexParams.len();
@@ -223,7 +231,12 @@ pub fn DefineIndex<'mcx>(
         accessMethodId,
         amname,
         amcanorder,
+        &mut root_save_nestlevel,
     )?;
+
+    if stmt.primary {
+        catalog_index::index_check_primary_key(mcx, &rel, &indexInfo, is_alter_table)?;
+    }
 
     for i in 0..numberOfAttributes {
         if indexInfo.ii_IndexAttrNumbers[i] < 0 {
@@ -273,7 +286,7 @@ pub fn DefineIndex<'mcx>(
         &IndexCreateExtra {
             flags: (if stmt.primary { INDEX_CREATE_IS_PRIMARY } else { 0 })
                 | (if stmt.isconstraint { INDEX_CREATE_ADD_CONSTRAINT } else { 0 }),
-            constr_flags: if stmt.primary { INDEX_CONSTR_CREATE_MARK_AS_PRIMARY } else { 0 },
+            constr_flags: 0,
             allow_system_table_mods: false,
             is_internal: !check_rights,
         },
@@ -284,6 +297,68 @@ pub fn DefineIndex<'mcx>(
 
     rel.close(types_rel::NoLock)?;
     Ok(indexRelationId)
+}
+
+// ResolveOpClass (indexcmds.c), named-opclass arm; the NIL arm stays inline
+// in ComputeIndexAttrs.
+fn ResolveOpClass(
+    opclass: &types_nodes::NodeList<'_>,
+    attrType: Oid,
+    accessMethodName: &str,
+    accessMethodId: Oid,
+) -> PgResult<Oid> {
+    let mut names: [&str; 4] = [""; 4];
+    let nnames = opclass.len();
+    if nnames == 0 || nnames > 3 {
+        unported("ResolveOpClass: improper qualified opclass name");
+    }
+    for (i, n) in opclass.iter().enumerate() {
+        names[i] = n.as_string().expect("opclass holds Strings").sval;
+    }
+    let (schemaname, opcname) = catalog_namespace::DeconstructQualifiedName(&names[..nnames])?;
+
+    let opClassId = if let Some(schemaname) = schemaname {
+        let namespaceId = catalog_namespace::LookupExplicitNamespace(schemaname, false)?;
+        syscache_seams::lookup_pg_opclass_oid_by_name::call(
+            accessMethodId,
+            opcname,
+            namespaceId,
+        )?
+    } else {
+        catalog_namespace::OpclassnameGetOpcid(accessMethodId, opcname)?
+    };
+    if opClassId == InvalidOid {
+        return Err(err(
+            format!(
+                "operator class \"{}\" does not exist for access method \"{}\"",
+                if schemaname.is_some() { names[..nnames].join(".") } else { opcname.to_string() },
+                accessMethodName
+            ),
+            ERRCODE_UNDEFINED_OBJECT,
+        ));
+    }
+
+    let Some(shape) = syscache_seams::lookup_pg_opclass_shape::call(opClassId)? else {
+        return Err(err(
+            format!(
+                "operator class \"{}\" does not exist for access method \"{}\"",
+                names[..nnames].join("."),
+                accessMethodName
+            ),
+            ERRCODE_UNDEFINED_OBJECT,
+        ));
+    };
+    if !coerce::IsBinaryCoercible(attrType, shape.opcintype)? {
+        return Err(err(
+            format!(
+                "operator class \"{}\" does not accept data type {}",
+                names[..nnames].join("."),
+                format_type::format_type_be(attrType)?
+            ),
+            ERRCODE_DATATYPE_MISMATCH,
+        ));
+    }
+    Ok(opClassId)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -299,13 +374,14 @@ fn ComputeIndexAttrs<'mcx>(
     accessMethodId: Oid,
     amname: &str,
     amcanorder: bool,
+    ddl_save_nestlevel: &mut i32,
 ) -> PgResult<()> {
     for (attn, node) in attList.iter().enumerate() {
         let attribute = node
             .as_variant::<IndexElem>()
             .unwrap_or_else(|| panic!("IndexElem expected in indexParams"));
-        if !attribute.opclass.is_nil() || !attribute.opclassopts.is_nil() {
-            unported("ComputeIndexAttrs: named operator classes (ResolveOpClass)");
+        if !attribute.opclassopts.is_nil() {
+            unported("ComputeIndexAttrs: opclass options (attoptions)");
         }
         let (atttype, attcollation) = if let Some(name) = attribute.name {
             let desc = rel.descr();
@@ -315,6 +391,13 @@ fn ComputeIndexAttrs<'mcx>(
                 if !att.attisdropped && att.attname.name_str() == name.as_bytes() {
                     found = Some(*att);
                     break;
+                }
+            }
+            // C SearchSysCacheAttName resolves system columns to negative
+            // attnums; DefineIndex then rejects them with 0A000.
+            if found.is_none() {
+                if let Some(sysatt) = catalog_heap::SystemAttributeByName(name) {
+                    found = Some(*sysatt);
                 }
             }
             let Some(attform) = found else {
@@ -348,7 +431,11 @@ fn ComputeIndexAttrs<'mcx>(
         // COLLATE clause overrides either leg's collation (indexcmds.c:2050-2062,
         // resolved before the collatable check).
         if !attribute.collation.is_nil() {
-            attcollation = catalog_namespace::get_collation_oid_list(&attribute.collation, false)?;
+            guc::AtEOXact_GUC(false, *ddl_save_nestlevel);
+            let resolved = catalog_namespace::get_collation_oid_list(&attribute.collation, false);
+            *ddl_save_nestlevel = guc::NewGUCNestLevel();
+            guc::RestrictSearchPath()?;
+            attcollation = resolved?;
         }
 
         if lsyscache::type_is_collatable(atttype)? {
@@ -372,15 +459,28 @@ fn ComputeIndexAttrs<'mcx>(
         }
         collationIds[attn] = attcollation;
 
-        opclassIds[attn] = GetDefaultOpClass(atttype, accessMethodId)?;
-        if opclassIds[attn] == InvalidOid {
-            return Err(err(
-                format!(
-                    "data type {} has no default operator class for access method \"{amname}\"",
-                    format_type::format_type_be(atttype)?
-                ),
-                ERRCODE_UNDEFINED_OBJECT,
-            ));
+        // Opclass (and collation above) resolve under the DDL owner's original
+        // search path: the RestrictSearchPath nest level pops around the
+        // lookup (indexcmds.c ComputeIndexAttrs, ddl_save_nestlevel dance).
+        guc::AtEOXact_GUC(false, *ddl_save_nestlevel);
+        let resolved = if !attribute.opclass.is_nil() {
+            ResolveOpClass(&attribute.opclass, atttype, amname, accessMethodId)
+        } else {
+            GetDefaultOpClass(atttype, accessMethodId)
+        };
+        *ddl_save_nestlevel = guc::NewGUCNestLevel();
+        guc::RestrictSearchPath()?;
+        opclassIds[attn] = resolved?;
+        if attribute.opclass.is_nil() {
+            if opclassIds[attn] == InvalidOid {
+                return Err(err(
+                    format!(
+                        "data type {} has no default operator class for access method \"{amname}\"",
+                        format_type::format_type_be(atttype)?
+                    ),
+                    ERRCODE_UNDEFINED_OBJECT,
+                ));
+            }
         }
 
         coloptions[attn] = 0;

@@ -389,12 +389,12 @@ fn heap_relation_data(mcx: Mcx<'_>) -> RelationData<'_> {
         rd_options: None,
         pgstat_enabled: Cell::new(false),
         rd_amcache: Default::default(),
-        rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(),
+        rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(), rd_amcache_spgist: Default::default(),
         rd_support: PgVec::new_in(mcx),
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
-            rd_hastriggers: false,
+            rd_hastriggers: false, rd_hasrules: false,
     }
 }
 
@@ -448,12 +448,12 @@ fn index_relation_data(mcx: Mcx<'_>, unique: bool) -> RelationData<'_> {
         rd_options: None,
         pgstat_enabled: Cell::new(false),
         rd_amcache: Default::default(),
-        rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(),
+        rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(), rd_amcache_spgist: Default::default(),
         rd_support: PgVec::new_in(mcx),
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
-            rd_hastriggers: false,
+            rd_hastriggers: false, rd_hasrules: false,
     }
 }
 
@@ -467,7 +467,7 @@ fn insert_row<'mcx>(
 ) -> ::types_error::PgResult<()> {
     let mut tuple =
         ::heaptuple::heap_form_tuple(mcx, &heap.rd_att, &[Datum::from_i32(val)], &[false])?;
-    ::heapam::heap_insert(heap, tuple.as_tuple_mut(), 0, 0)?;
+    ::heapam::heap_insert(heap, tuple.as_tuple_mut(), 0, 0, None)?;
 
     let mut slot = exectuples::make_tuple_table_slot(
         mcx,

@@ -221,6 +221,13 @@ pub struct PgProcFmgrShape {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PgLanguageFmgrShape {
+    pub lanplcallfoid: Oid,
+    pub laninline: Oid,
+    pub lanvalidator: Oid,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PgClassLsShape {
     pub relnamespace: Oid,
     pub reltype: Oid,
@@ -448,8 +455,67 @@ seam_core::seam!(
     pub fn lookup_pg_opclass_shape(opclass: Oid) -> PgResult<Option<PgOpclassShape>>
 );
 
+// GetSysCacheOid3(CLAAMNAMENSP): pg_opclass by (opcmethod, opcname,
+// opcnamespace); InvalidOid when absent.
+seam_core::seam!(
+    pub fn lookup_pg_opclass_oid_by_name(amid: Oid, opcname: &str, opcnamespace: Oid) -> PgResult<Oid>
+);
+
 seam_core::seam!(
     pub fn lookup_pg_opfamily_shape(opfid: Oid) -> PgResult<Option<PgOpfamilyShape>>
+);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PgAmopRow {
+    pub amopfamily: Oid,
+    pub amoplefttype: Oid,
+    pub amoprighttype: Oid,
+    pub amopstrategy: i16,
+    pub amoppurpose: i8,
+    pub amopopr: Oid,
+    pub amopsortfamily: Oid,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PgAmprocRow {
+    pub amprocfamily: Oid,
+    pub amproclefttype: Oid,
+    pub amprocrighttype: Oid,
+    pub amprocnum: i16,
+    pub amproc: Oid,
+}
+
+seam_core::seam!(
+    // SearchSysCacheList1(AMOPSTRATEGY, opfamily): (rows, list.ordered).
+    pub fn lookup_pg_amop_rows<'mcx>(
+        mcx: Mcx<'mcx>,
+        opfamily: Oid,
+    ) -> PgResult<(PgVec<'mcx, PgAmopRow>, bool)>
+);
+
+seam_core::seam!(
+    // SearchSysCacheList1(AMPROCNUM, opfamily): (rows, list.ordered).
+    pub fn lookup_pg_amproc_rows<'mcx>(
+        mcx: Mcx<'mcx>,
+        opfamily: Oid,
+    ) -> PgResult<(PgVec<'mcx, PgAmprocRow>, bool)>
+);
+
+seam_core::seam!(
+    // SearchSysCacheList1(CLAAMNAMENSP, amoid): (oid, opcfamily, opcintype,
+    // opcdefault, opcname) per opclass of the AM, catcache list order.
+    pub fn lookup_pg_opclass_rows_by_am<'mcx>(
+        mcx: Mcx<'mcx>,
+        amoid: Oid,
+    ) -> PgResult<PgVec<'mcx, (Oid, Oid, Oid, bool, NameData)>>
+);
+
+seam_core::seam!(
+    pub fn pg_opclass_opcname(opclass: Oid) -> PgResult<Option<NameData>>
+);
+
+seam_core::seam!(
+    pub fn lookup_pg_opfamily_oid_exact(amoid: Oid, opfname: &str, nsp: Oid) -> PgResult<Oid>
 );
 
 seam_core::seam!(
@@ -463,6 +529,11 @@ seam_core::seam!(
 seam_core::seam!(
     // fmgr_info's non-builtin leg: the pg_proc fields FmgrInfo needs.
     pub fn lookup_pg_proc_fmgr(funcid: Oid) -> PgResult<Option<PgProcFmgrShape>>
+);
+
+seam_core::seam!(
+    // fmgr_info_other_lang's pg_language read (fmgr.c).
+    pub fn lookup_pg_language_fmgr(langoid: Oid) -> PgResult<Option<PgLanguageFmgrShape>>
 );
 
 seam_core::seam!(

@@ -35,6 +35,7 @@ pub fn expr_type(node: Node<'_>) -> Oid {
         NodeTag::T_SetToDefault => node.as_set_to_default().unwrap().typeId,
         NodeTag::T_CollateExpr => expr_type(node.as_collate_expr().unwrap().arg),
         NodeTag::T_SQLValueFunction => node.as_sql_value_function().unwrap().r#type,
+        NodeTag::T_SubscriptingRef => node.as_subscripting_ref().unwrap().refrestype,
         NodeTag::T_CaseTestExpr => node.as_case_test_expr().unwrap().typeId,
         NodeTag::T_CaseExpr => node.as_case_expr().unwrap().casetype,
         NodeTag::T_CoalesceExpr => node.as_coalesce_expr().unwrap().coalescetype,
@@ -112,6 +113,7 @@ pub fn expr_typmod(node: Node<'_>) -> i32 {
         NodeTag::T_FuncExpr => length_coercion_typmod(node.as_func_expr().unwrap()),
         NodeTag::T_CoerceToDomain => node.as_coerce_to_domain().unwrap().resulttypmod,
         NodeTag::T_CoerceToDomainValue => node.as_coerce_to_domain_value().unwrap().typeMod,
+        NodeTag::T_SubscriptingRef => node.as_subscripting_ref().unwrap().reftypmod,
         NodeTag::T_OpExpr
         | NodeTag::T_ScalarArrayOpExpr
         | NodeTag::T_ArrayExpr
@@ -194,6 +196,7 @@ pub fn expr_collation(node: Node<'_>) -> Oid {
         NodeTag::T_CoerceToDomainValue => node.as_coerce_to_domain_value().unwrap().collation,
         NodeTag::T_SetToDefault => node.as_set_to_default().unwrap().collation,
         NodeTag::T_CollateExpr => node.as_collate_expr().unwrap().collOid,
+        NodeTag::T_SubscriptingRef => node.as_subscripting_ref().unwrap().refcollid,
         NodeTag::T_CaseTestExpr => node.as_case_test_expr().unwrap().collation,
         NodeTag::T_SQLValueFunction => {
             if node.as_sql_value_function().unwrap().r#type == types_core::catalog::NAMEOID {
@@ -288,6 +291,14 @@ pub fn expr_location(node: Node<'_>) -> ParseLoc {
         NodeTag::T_FuncCall => {
             let f = node.as_func_call().unwrap();
             leftmost_loc(f.location, expr_location_list(&f.args))
+        }
+        // C: SubscriptingRef has no location; report the container's.
+        NodeTag::T_SubscriptingRef => {
+            node.as_subscripting_ref().unwrap().refexpr.map_or(-1, expr_location)
+        }
+        NodeTag::T_A_ArrayExpr => node.as_a_array_expr().unwrap().location,
+        NodeTag::T_A_Indirection => {
+            node.as_a_indirection().unwrap().arg.map_or(-1, expr_location)
         }
         NodeTag::T_ParamRef => node.as_param_ref().unwrap().location,
         NodeTag::T_ResTarget => node.as_res_target().unwrap().location,

@@ -794,6 +794,7 @@ pub fn expr_type(node: Node<'_>) -> Oid {
         | NodeTag::T_BooleanTest
         | NodeTag::T_DistinctExpr => 16,
         NodeTag::T_ArrayExpr => node.as_array_expr().unwrap().array_typeid,
+        NodeTag::T_SubscriptingRef => node.as_subscripting_ref().unwrap().refrestype,
         NodeTag::T_RowExpr => node.as_row_expr().unwrap().row_typeid,
         NodeTag::T_NextValueExpr => {
             node.as_variant::<::types_nodes::primnodes::NextValueExpr>().unwrap().typeId
@@ -810,6 +811,7 @@ pub fn expr_type(node: Node<'_>) -> Oid {
             }
         }
         NodeTag::T_CaseExpr => node.as_case_expr().unwrap().casetype,
+        NodeTag::T_CoalesceExpr => node.as_coalesce_expr().unwrap().coalescetype,
         NodeTag::T_CaseTestExpr => node.as_case_test_expr().unwrap().typeId,
         NodeTag::T_CoerceViaIO => node.as_coerce_via_io().unwrap().resulttype,
         NodeTag::T_CoerceToDomain => node.as_coerce_to_domain().unwrap().resulttype,
@@ -955,6 +957,21 @@ fn setup_walker(node: Node<'_>, info: &mut SetupInfo) {
                 setup_walker(e, info);
             }
         }
+        NodeTag::T_SubscriptingRef => {
+            let sr = node.as_subscripting_ref().unwrap();
+            for a in sr.refupperindexpr.iter().flatten() {
+                setup_walker(a, info);
+            }
+            for a in sr.reflowerindexpr.iter().flatten() {
+                setup_walker(a, info);
+            }
+            if let Some(a) = sr.refexpr {
+                setup_walker(a, info);
+            }
+            if let Some(a) = sr.refassgnexpr {
+                setup_walker(a, info);
+            }
+        }
         NodeTag::T_RowExpr => {
             for e in node.as_row_expr().unwrap().args.iter() {
                 setup_walker(e, info);
@@ -962,6 +979,11 @@ fn setup_walker(node: Node<'_>, info: &mut SetupInfo) {
         }
         NodeTag::T_CoerceToDomain => setup_walker(node.as_coerce_to_domain().unwrap().arg, info),
         NodeTag::T_CoerceToDomainValue => {}
+        NodeTag::T_CoalesceExpr => {
+            for e in node.as_coalesce_expr().unwrap().args.iter() {
+                setup_walker(e, info);
+            }
+        }
         tag => panic!("execexpr setup walker: node family {tag:?} not ported"),
     }
 }
@@ -1281,9 +1303,14 @@ pub(crate) fn init_expr_rec<'mcx>(
         }
         NodeTag::T_ArrayExpr => {
             let arr = node.as_array_expr().unwrap();
-            let step = init_array_expr(arr, state, mcx, out, agg, params, sub)?;
-            push_step(state, mcx, step)
+            if arr.multidims {
+                init_array_expr_multidim(node, state, mcx, out, agg, params, sub)
+            } else {
+                let step = init_array_expr(arr, state, mcx, out, agg, params, sub)?;
+                push_step(state, mcx, step)
+            }
         }
+        NodeTag::T_SubscriptingRef => init_subscripting_ref(node, state, mcx, out, agg, params, sub),
         NodeTag::T_RowExpr => {
             let r = node.as_row_expr().unwrap();
             let step = init_row_expr(r, state, mcx, out, agg, params, sub)?;
@@ -1296,6 +1323,28 @@ pub(crate) fn init_expr_rec<'mcx>(
                 "EEOP_DOMAIN_TESTVAL_EXT (CoerceToDomainValue outside a domain-check compile)",
             ),
         },
+        // Each arg evaluates into the result slot; a non-null short-circuits.
+        NodeTag::T_CoalesceExpr => {
+            let co = node.as_coalesce_expr().unwrap();
+            debug_assert!(!co.args.is_nil());
+            let mut adjust_jumps: PgVec<'_, usize> = PgVec::new_in(mcx);
+            for e in co.args.iter() {
+                init_expr_rec(e, state, mcx, out, agg, params, sub)?;
+                adjust_jumps.push(state.steps.len());
+                push_step(state, mcx, Step::JumpIfNotNull { jumpdone: u32::MAX, out })?;
+            }
+            let done = state.steps.len() as u32;
+            for ix in adjust_jumps.iter() {
+                match &mut state.steps[*ix] {
+                    Step::JumpIfNotNull { jumpdone, .. } => {
+                        debug_assert_eq!(*jumpdone, u32::MAX);
+                        *jumpdone = done;
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            Ok(())
+        }
         tag => panic!("execexpr ExecInitExprRec: node family {tag:?} not ported"),
     }
 }
@@ -1411,6 +1460,245 @@ fn init_array_expr<'mcx>(
         elmalign: elmalign as u8,
         out,
     })
+}
+
+
+// C ExecInitExprRec T_ArrayExpr, multidims leg (ExecEvalArrayExpr concat arm).
+fn init_array_expr_multidim<'mcx>(
+    node: Node<'mcx>,
+    state: &mut ExprState<'mcx>,
+    mcx: Mcx<'mcx>,
+    out: OutRef,
+    agg: Option<Bind<'_, 'mcx>>,
+    params: ParamBind<'mcx>,
+    sub: Option<SubplanCompileEnv>,
+) -> PgResult<()> {
+    let a = node.as_array_expr().unwrap();
+    let nelems = a.elements.len();
+    let (elemlength, elembyval, elemalign) = lsyscache::get_typlenbyvalalign(a.element_typeid)
+        .map(|(l, b, al)| (l as i32, b, al as u8))?;
+
+    let elemvalues: NonNull<::datum::NullableDatum> = alloc_array(mcx, nelems)?;
+    let scratch_values: NonNull<::datum::Datum> = alloc_array(mcx, nelems)?;
+    let scratch_nulls: NonNull<bool> = alloc_array(mcx, nelems)?;
+
+    for (i, e) in a.elements.iter().enumerate() {
+        // SAFETY: i < nelems freshly allocated slots.
+        let arg_out = OutRef(unsafe { NonNull::new_unchecked(elemvalues.as_ptr().add(i)) });
+        init_expr_rec(e, state, mcx, arg_out, agg, params, sub)?;
+    }
+
+    let st = crate::arrayops::ArrayExprState {
+        elemtype: a.element_typeid,
+        elemlength,
+        elembyval,
+        elemalign,
+        multidims: a.multidims,
+        nelems: nelems as u32,
+        elemvalues,
+        scratch_values,
+        scratch_nulls,
+        resmcx: None,
+    };
+    let stp = alloc_state(mcx, st)?;
+    register_alloc_state(state, mcx, stp)?;
+    push_step(state, mcx, Step::ArrayExprEval { state: stp, out })
+}
+
+fn alloc_array<'mcx, T>(mcx: Mcx<'mcx>, n: usize) -> PgResult<NonNull<T>> {
+    const { assert!(!core::mem::needs_drop::<T>()) };
+    let layout = core::alloc::Layout::array::<T>(n.max(1)).expect("array layout");
+    let raw = mcx.allocate(layout).map_err(|_| mcx.oom(layout.size()))?;
+    // SAFETY: fresh allocation; zero-init keeps padding deterministic.
+    unsafe { core::ptr::write_bytes(raw.as_ptr().cast::<u8>(), 0, layout.size()) };
+    Ok(raw.cast())
+}
+
+fn alloc_state<'mcx, T>(mcx: Mcx<'mcx>, v: T) -> PgResult<NonNull<T>> {
+    const { assert!(!core::mem::needs_drop::<T>()) };
+    let layout = core::alloc::Layout::new::<T>();
+    let raw = mcx.allocate(layout).map_err(|_| mcx.oom(layout.size()))?;
+    let p: NonNull<T> = raw.cast();
+    // SAFETY: fresh allocation of the exact layout.
+    unsafe { p.write(v) };
+    Ok(p)
+}
+
+// The state's resmcx field is the first-arm target of arm_result_mcx.
+fn register_alloc_state<'mcx, T>(
+    state: &mut ExprState<'mcx>,
+    mcx: Mcx<'mcx>,
+    stp: NonNull<T>,
+) -> PgResult<()>
+where
+    T: HasResMcx,
+{
+    // SAFETY: stp is a live compile-allocated state; the field pointer stays
+    // valid for 'mcx.
+    let slot = unsafe { NonNull::new_unchecked(T::resmcx_ptr(stp.as_ptr())) };
+    let _ = mcx;
+    state.alloc_mcx_slots.push(slot);
+    Ok(())
+}
+
+trait HasResMcx {
+    /// # Safety
+    /// `p` points at a live value.
+    unsafe fn resmcx_ptr(p: *mut Self) -> *mut crate::arrayops::ResMcx;
+}
+impl HasResMcx for crate::arrayops::ArrayExprState {
+    unsafe fn resmcx_ptr(p: *mut Self) -> *mut crate::arrayops::ResMcx {
+        unsafe { core::ptr::addr_of_mut!((*p).resmcx) }
+    }
+}
+impl HasResMcx for crate::arrayops::SbsRefState {
+    unsafe fn resmcx_ptr(p: *mut Self) -> *mut crate::arrayops::ResMcx {
+        unsafe { core::ptr::addr_of_mut!((*p).resmcx) }
+    }
+}
+
+// C ExecInitSubscriptingRef over the closed array handler (arraysubs.c
+// array_exec_setup inlined: fetch_strict = true).
+fn init_subscripting_ref<'mcx>(
+    node: Node<'mcx>,
+    state: &mut ExprState<'mcx>,
+    mcx: Mcx<'mcx>,
+    out: OutRef,
+    agg: Option<Bind<'_, 'mcx>>,
+    params: ParamBind<'mcx>,
+    sub: Option<SubplanCompileEnv>,
+) -> PgResult<()> {
+    use crate::arrayops::MAXDIM;
+    let sbsref = node.as_subscripting_ref().unwrap();
+    let is_assignment = sbsref.refassgnexpr.is_some();
+    let nupper = sbsref.refupperindexpr.len();
+    let nlower = sbsref.reflowerindexpr.len();
+    assert!(nupper <= MAXDIM && nlower <= MAXDIM, "too many subscripts");
+    assert!(
+        nlower == 0 || nupper == nlower,
+        "upper and lower index lists are not same length"
+    );
+    let is_slice = nlower != 0;
+
+    let refattrlength = lsyscache::get_typlen(sbsref.refcontainertype)? as i32;
+    let (refelemlength, refelembyval, refelemalign) =
+        lsyscache::get_typlenbyvalalign(sbsref.refelemtype)
+            .map(|(l, b, al)| (l as i32, b, al as u8))?;
+
+    let st = crate::arrayops::SbsRefState {
+        isassignment: is_assignment,
+        numupper: nupper as u8,
+        numlower: nlower as u8,
+        upperprovided: [false; MAXDIM],
+        lowerprovided: [false; MAXDIM],
+        upperindex: [::datum::NullableDatum::null(); MAXDIM],
+        lowerindex: [::datum::NullableDatum::null(); MAXDIM],
+        replace: ::datum::NullableDatum::null(),
+        prev: ::datum::NullableDatum::null(),
+        refelemtype: sbsref.refelemtype,
+        refattrlength,
+        refelemlength,
+        refelembyval,
+        refelemalign,
+        upperidx: [0; MAXDIM],
+        loweridx: [0; MAXDIM],
+        resmcx: None,
+    };
+    let stp = alloc_state(mcx, st)?;
+    register_alloc_state(state, mcx, stp)?;
+
+    // Container value evaluates into `out` (overwritten by the final step).
+    init_expr_rec(sbsref.refexpr.expect("SubscriptingRef.refexpr"), state, mcx, out, agg, params, sub)?;
+
+    let mut adjust_jumps: PgVec<'_, usize> = PgVec::new_in(mcx);
+    if !is_assignment {
+        // fetch_strict: NULL container => NULL result.
+        adjust_jumps.push(state.steps.len());
+        push_step(state, mcx, Step::JumpIfNull { jumpdone: u32::MAX, out })?;
+    }
+
+    for (i, e) in sbsref.refupperindexpr.iter().enumerate() {
+        // SAFETY: compile-owned state; i < MAXDIM.
+        let stref = unsafe { &mut *stp.as_ptr() };
+        match e {
+            None => {
+                stref.upperprovided[i] = false;
+                stref.upperindex[i].isnull = true;
+            }
+            Some(e) => {
+                stref.upperprovided[i] = true;
+                let slot = unsafe {
+                    NonNull::new_unchecked(
+                        core::ptr::addr_of_mut!((*stp.as_ptr()).upperindex[i]),
+                    )
+                };
+                init_expr_rec(e, state, mcx, OutRef(slot), agg, params, sub)?;
+            }
+        }
+    }
+    for (i, e) in sbsref.reflowerindexpr.iter().enumerate() {
+        let stref = unsafe { &mut *stp.as_ptr() };
+        match e {
+            None => {
+                stref.lowerprovided[i] = false;
+                stref.lowerindex[i].isnull = true;
+            }
+            Some(e) => {
+                stref.lowerprovided[i] = true;
+                let slot = unsafe {
+                    NonNull::new_unchecked(
+                        core::ptr::addr_of_mut!((*stp.as_ptr()).lowerindex[i]),
+                    )
+                };
+                init_expr_rec(e, state, mcx, OutRef(slot), agg, params, sub)?;
+            }
+        }
+    }
+
+    adjust_jumps.push(state.steps.len());
+    push_step(state, mcx, Step::SbsrefSubscripts { state: stp, jumpdone: u32::MAX, out })?;
+
+    if is_assignment {
+        if is_slice {
+            unported("EEOP_SBSREF_ASSIGN slice (array_set_slice lane)");
+        }
+        let assgn = sbsref.refassgnexpr.unwrap();
+        if assgn_needs_old(assgn) {
+            unported("EEOP_SBSREF_OLD (nested-assignment CaseTestExpr passing)");
+        }
+        let replace_slot = unsafe {
+            NonNull::new_unchecked(core::ptr::addr_of_mut!((*stp.as_ptr()).replace))
+        };
+        init_expr_rec(assgn, state, mcx, OutRef(replace_slot), agg, params, sub)?;
+        push_step(state, mcx, Step::SbsrefAssign { state: stp, out })?;
+    } else {
+        push_step(state, mcx, Step::SbsrefFetch { state: stp, slice: is_slice, out })?;
+    }
+
+    let done = state.steps.len() as u32;
+    for ix in adjust_jumps.iter() {
+        match &mut state.steps[*ix] {
+            Step::JumpIfNull { jumpdone, .. } | Step::SbsrefSubscripts { jumpdone, .. } => {
+                debug_assert_eq!(*jumpdone, u32::MAX);
+                *jumpdone = done;
+            }
+            _ => unreachable!(),
+        }
+    }
+    Ok(())
+}
+
+// isAssignmentIndirectionExpr: does the replacement value reference the old
+// element (CaseTestExpr under FieldStore/SubscriptingRef)?
+fn assgn_needs_old(expr: Node<'_>) -> bool {
+    match expr.node_tag() {
+        NodeTag::T_SubscriptingRef => {
+            let sr = expr.as_subscripting_ref().unwrap();
+            sr.refexpr.is_some_and(|e| e.node_tag() == NodeTag::T_CaseTestExpr)
+        }
+        NodeTag::T_RelabelType => assgn_needs_old(expr.as_relabel_type().unwrap().arg),
+        _ => false,
+    }
 }
 
 // exprTypmod (nodeFuncs.c) over the families RowExpr args carry.
@@ -2039,8 +2327,13 @@ pub(crate) fn ready_expr(state: &mut ExprState<'_>) {
             | Step::AggStrictInputCheck1 { jumpnull, .. } => {
                 assert!((*jumpnull as usize) < len, "strict-input jump target out of range");
             }
-            Step::Jump { jumpdone } | Step::JumpIfNotTrue { jumpdone, .. } => {
+            Step::Jump { jumpdone }
+            | Step::JumpIfNotTrue { jumpdone, .. }
+            | Step::JumpIfNotNull { jumpdone, .. } => {
                 assert!((*jumpdone as usize) < len, "case jump target out of range");
+            }
+            Step::JumpIfNull { jumpdone, .. } | Step::SbsrefSubscripts { jumpdone, .. } => {
+                assert!((*jumpdone as usize) < len, "sbsref jump target out of range");
             }
             Step::FuncExpr { call, .. }
             | Step::FuncExprStrict1 { call, .. }

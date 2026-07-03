@@ -11,7 +11,7 @@ mod oncommit;
 mod rename;
 mod truncate;
 pub use alter::{AlterTable, AlterTableGetLockLevel, AlterTableLookupRelation};
-pub use rename::{renameatt, RenameRelation, RenameRelationInternal};
+pub use rename::{renameatt, RenameConstraint, RenameRelation, RenameRelationInternal};
 pub use drop::RemoveRelations;
 pub use oncommit::{
     register_on_commit_action, remove_on_commit_action, AtEOSubXact_on_commit_actions,
@@ -165,7 +165,12 @@ pub fn DefineRelation<'mcx>(
     owner_id: Oid,
     query_string: &str,
 ) -> PgResult<Oid> {
-    debug_assert!(relkind == RELKIND_RELATION || relkind == RELKIND_SEQUENCE);
+    debug_assert!(
+        relkind == RELKIND_RELATION
+            || relkind == RELKIND_SEQUENCE
+            || relkind == types_rel::RELKIND_VIEW
+            || relkind == types_rel::RELKIND_MATVIEW
+    );
     let partitioned = stmt.partspec.is_some();
     let relkind = if partitioned { types_rel::RELKIND_PARTITIONED_TABLE } else { relkind };
     let rv = stmt.relation.expect("CreateStmt.relation");

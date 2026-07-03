@@ -545,3 +545,106 @@ pub fn ProcedureCreate<'mcx>(
 
     Ok(myself)
 }
+
+// function_parse_error_transpose (pg_proc.c): remap a validator error's
+// cursor from function-body offsets onto the CREATE statement's literal.
+// Positions are character-based; multibyte-aware via char counting.
+pub fn function_parse_error_transpose(e: &mut types_error::PgError, prosrc: &str) -> bool {
+    let Some(origpos) = e.cursor_position.filter(|&p| p > 0) else {
+        return false;
+    };
+    let query = pquery::ActivePortal()
+        .and_then(|p| p.borrow().sourceText.as_ref().map(|s| s.as_str().to_string()));
+    if let Some(q) = query {
+        let newpos = match_prosrc_to_query(prosrc, &q, origpos);
+        if newpos > 0 {
+            e.cursor_position = Some(newpos);
+            return true;
+        }
+    }
+    e.cursor_position = None;
+    e.internal_position = Some(origpos);
+    e.internal_query = Some(prosrc.to_string());
+    true
+}
+
+fn mbstrlen_with_len(s: &str, byte_len: usize) -> i32 {
+    s[..byte_len.min(s.len())].chars().count() as i32
+}
+
+fn match_prosrc_to_query(prosrc: &str, query_text: &str, cursorpos: i32) -> i32 {
+    let pb = prosrc.as_bytes();
+    let qb = query_text.as_bytes();
+    if qb.len() < pb.len() {
+        return 0;
+    }
+    let mut matchpos = 0i32;
+    for curpos in 0..(qb.len() - pb.len()) {
+        if qb[curpos] == b'$'
+            && qb[curpos + 1..].starts_with(pb)
+            && qb.get(curpos + 1 + pb.len()) == Some(&b'$')
+        {
+            if matchpos != 0 {
+                return 0;
+            }
+            matchpos = mbstrlen_with_len(query_text, curpos + 1) + cursorpos;
+        } else if qb[curpos] == b'\'' {
+            if let Some(newcursorpos) =
+                match_prosrc_to_literal(pb, &qb[curpos + 1..], cursorpos)
+            {
+                if matchpos != 0 {
+                    return 0;
+                }
+                matchpos = mbstrlen_with_len(query_text, curpos + 1) + newcursorpos;
+            }
+        }
+    }
+    matchpos
+}
+
+fn match_prosrc_to_literal(prosrc: &[u8], literal: &[u8], mut cursorpos: i32) -> Option<i32> {
+    let mut newcp = cursorpos;
+    let mut pi = 0usize;
+    let mut li = 0usize;
+    while pi < prosrc.len() {
+        cursorpos -= 1;
+        if literal.get(li) == Some(&b'\\') {
+            li += 1;
+            if cursorpos > 0 {
+                newcp += 1;
+            }
+        } else if literal.get(li) == Some(&b'\'') {
+            if literal.get(li + 1) != Some(&b'\'') {
+                return None;
+            }
+            li += 1;
+            if cursorpos > 0 {
+                newcp += 1;
+            }
+        }
+        // One character (multibyte-aware): consume the full UTF-8 sequence.
+        let chlen = utf8_len(prosrc[pi]);
+        if literal.len() < li + chlen || prosrc[pi..pi + chlen] != literal[li..li + chlen] {
+            return None;
+        }
+        pi += chlen;
+        li += chlen;
+    }
+    if literal.get(li) == Some(&b'\'') && literal.get(li + 1) != Some(&b'\'') {
+        Some(newcp)
+    } else {
+        None
+    }
+}
+
+fn utf8_len(b: u8) -> usize {
+    if b < 0x80 {
+        1
+    } else if b >> 5 == 0b110 {
+        2
+    } else if b >> 4 == 0b1110 {
+        3
+    } else {
+        4
+    }
+}

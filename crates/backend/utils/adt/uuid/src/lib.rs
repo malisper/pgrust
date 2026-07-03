@@ -2,6 +2,7 @@
 //! until the SortSupport/SkipSupport node frame lands (macaddr_sortsupport
 //! precedent).
 
+pub mod abbrev;
 pub mod builtins;
 #[cfg(test)]
 mod tests;

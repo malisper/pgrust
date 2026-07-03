@@ -183,6 +183,118 @@ pub fn SPI_prepare_cursor(src: &str, argtypes: &[Oid], cursor_options: i32) -> P
     Ok(ptr)
 }
 
+// SPI_prepare_extended's plpgsql leg (spi.c): raw-parse under the plpgsql
+// parse mode, analyze with the flattened var-resolution hooks. Plan argtypes
+// cover every hook-referenceable datum slot (paramid = dno+1; InvalidOid
+// holes for datums a plan never references).
+pub fn SPI_prepare_plpgsql(
+    src: &str,
+    parse_mode: parser_seams::RawParseMode,
+    hooks: &parser_small1::PlpgsqlHookState<'_>,
+    cursor_options: i32,
+) -> PgResult<SpiPlanPtr> {
+    let res = _SPI_begin_call(true);
+    if res < 0 {
+        set_spi_result(res);
+        return Ok(SpiPlanPtr::NULL);
+    }
+
+    let mut argtypes: Vec<Oid> = Vec::with_capacity(hooks.params_by_dno.len());
+    for slot in hooks.params_by_dno {
+        argtypes.push(match slot {
+            Some((t, _, _)) => *t,
+            None => InvalidOid,
+        });
+    }
+
+    let outcome = (|| -> PgResult<Vec<(plancache::CachedPlanSourceHandle, usize)>> {
+        let mcx = current_exec_mcx();
+        let raw_list = parser_seams::raw_parser::call(mcx, src, parse_mode)?;
+        let mut sources = Vec::with_capacity(raw_list.len());
+        let inner = (|| -> PgResult<()> {
+            for (i, raw) in raw_list.iter().enumerate() {
+                let stmt = raw.stmt.expect("RawStmt has a stmt");
+                let tag = utility_seams::create_command_tag::call(stmt);
+                let psrc = plancache::CreateCachedPlan(Some(raw), src, tag)?;
+                sources.push((psrc, i));
+                let qmcx = plancache::SourceQueryMcx(psrc);
+                let qsrc = plancache::CachedPlanQueryString(psrc);
+                let qraw_list = parser_seams::raw_parser::call(qmcx, qsrc, parse_mode)?;
+                let qraw = qraw_list.get(i).expect("re-parse reproduces the statement");
+                let query = analyze_seams::parse_analyze_plpgsql::call(
+                    qmcx,
+                    qraw,
+                    qsrc,
+                    hooks,
+                    QueryEnvHandle::NULL,
+                )?;
+                let query_list = if query.commandType == CmdType::CMD_UTILITY {
+                    let mut v = PgVec::new_in(qmcx);
+                    v.try_reserve_exact(1).map_err(|_| qmcx.oom(1))?;
+                    v.push(query);
+                    v
+                } else {
+                    rewrite_handler_seams::query_rewrite::call(qmcx, query)?
+                };
+                plancache::CompleteCachedPlan(psrc, query_list, &argtypes, cursor_options, false)?;
+            }
+            Ok(())
+        })();
+        if let Err(e) = inner {
+            for (psrc, _) in sources {
+                plancache::DropCachedPlan(psrc);
+            }
+            return Err(e);
+        }
+        Ok(sources)
+    })();
+    let sources = outcome?;
+
+    let state = SpiPlanState {
+        sources,
+        oneshot: false,
+        saved: false,
+        cursor_options,
+        argtypes,
+    };
+
+    let ptr = PLANS.with(|p| {
+        let mut plans = p.borrow_mut();
+        match plans.iter().position(Option::is_none) {
+            Some(i) => {
+                plans[i] = Some(state);
+                encode(i)
+            }
+            None => {
+                plans.push(Some(state));
+                encode(plans.len() - 1)
+            }
+        }
+    });
+    with_current(|conn| conn.plans.push(ptr));
+
+    _SPI_end_call(true);
+    set_spi_result(0);
+    Ok(ptr)
+}
+
+/// SPI_plan_get_cached_plan's single-source precondition (SPI_is_cursor_plan
+/// shape): the one plansource of a single-statement plan.
+pub fn SPI_plan_single_source(ptr: SpiPlanPtr) -> Option<(plancache::CachedPlanSourceHandle, i32)> {
+    single_source(ptr)
+}
+
+pub(crate) fn single_source(ptr: SpiPlanPtr) -> Option<(plancache::CachedPlanSourceHandle, i32)> {
+    with_plan(ptr, |p| {
+        if p.sources.len() == 1 {
+            Some((p.sources[0].0, p.cursor_options))
+        } else {
+            None
+        }
+    })
+    .flatten()
+}
+
 pub(crate) fn state_snapshot(ptr: SpiPlanPtr) -> Option<SpiPlanState> {
     with_plan(ptr, |p| SpiPlanState {
         sources: p.sources.clone(),
@@ -250,6 +362,14 @@ pub(crate) fn free_connection_plans(plans: &[SpiPlanPtr]) {
             drop_state_sources(&mut state);
         }
     }
+}
+
+/// Command tags of the plan's sources (plpgsql mod_stmt detection).
+pub fn SPI_plan_command_tags(ptr: SpiPlanPtr) -> Vec<types_core::CommandTag> {
+    with_plan(ptr, |p| {
+        p.sources.iter().map(|&(s, _)| plancache::CachedPlanCommandTag(s)).collect()
+    })
+    .unwrap_or_default()
 }
 
 pub fn SPI_getargcount(ptr: SpiPlanPtr) -> i32 {

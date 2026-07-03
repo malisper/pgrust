@@ -283,8 +283,11 @@ fn dispatch_switch<'mcx>(
             tablecmds::ExecuteTruncate(mcx, stmt)?;
         }
         T_CopyStmt => {
-            let stmt = parsetree.as_copy_stmt().unwrap();
-            let processed = copy_cmd::DoCopy(mcx, stmt)?;
+            // Retention contract as unify_stmt_lifetime: the statement arena
+            // outlives the utility call; nothing derived escapes it.
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node.as_copy_stmt().unwrap();
+            let processed = copy_cmd::DoCopy(mcx, stmt, source_text)?;
             if let Some(qc) = qc.as_mut() {
                 qc.commandTag = crate::consts::CMDTAG_COPY;
                 qc.nprocessed = processed;
@@ -489,6 +492,7 @@ fn dispatch_switch<'mcx>(
                 }
                 OBJECT_INDEX | OBJECT_TABLE | OBJECT_SEQUENCE | OBJECT_VIEW | OBJECT_MATVIEW
                 | OBJECT_FOREIGN_TABLE => tablecmds::RemoveRelations(mcx, stmt)?,
+                OBJECT_RULE => dropcmds::RemoveObjects(mcx, stmt)?,
                 _ => handler_gap("RemoveObjects (dropcmds lane)"),
             }
         }
@@ -602,6 +606,9 @@ fn dispatch_switch<'mcx>(
                 types_nodes::parsenodes::ObjectType::OBJECT_COLUMN => {
                     tablecmds::renameatt(mcx, stmt)?;
                 }
+                types_nodes::parsenodes::ObjectType::OBJECT_TABCONSTRAINT => {
+                    tablecmds::RenameConstraint(mcx, stmt)?;
+                }
                 other => panic!("unported: ExecRenameStmt {other:?}"),
             }
         }
@@ -683,6 +690,79 @@ fn dispatch_switch<'mcx>(
                 }
             }
         }
+        T_DefineStmt => {
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::parsenodes::DefineStmt>()
+                .expect("DefineStmt");
+            match stmt.kind {
+                types_nodes::parsenodes::ObjectType::OBJECT_OPERATOR => {
+                    debug_assert!(!stmt.oldstyle);
+                    operatorcmds::DefineOperator(mcx, &stmt.defnames, &stmt.definition)?;
+                }
+                other => handler_gap(&format!("DefineStmt kind {other:?} (define lanes)")),
+            }
+        }
+
+        T_CreateOpClassStmt => {
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::parsenodes::CreateOpClassStmt>()
+                .expect("CreateOpClassStmt");
+            opclasscmds::DefineOpClass(mcx, stmt)?;
+        }
+
+        T_CreateOpFamilyStmt => {
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::parsenodes::CreateOpFamilyStmt>()
+                .expect("CreateOpFamilyStmt");
+            opclasscmds::DefineOpFamily(mcx, stmt)?;
+        }
+
+        T_AlterOpFamilyStmt => {
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::parsenodes::AlterOpFamilyStmt>()
+                .expect("AlterOpFamilyStmt");
+            opclasscmds::AlterOpFamily(mcx, stmt)?;
+        }
+
+        T_AlterOperatorStmt => {
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::parsenodes::AlterOperatorStmt>()
+                .expect("AlterOperatorStmt");
+            operatorcmds::AlterOperator(mcx, stmt)?;
+        }
+
+        T_CreateTableAsStmt => {
+            // Retention contract as unify_stmt_lifetime: the statement arena
+            // outlives the utility call; nothing derived escapes it.
+            let stmt_node =
+                unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::rawnodes::CreateTableAsStmt>()
+                .expect("CreateTableAsStmt");
+            commands_createas::ExecCreateTableAs(
+                mcx,
+                stmt,
+                source_text,
+                params,
+                query_env,
+                qc.as_deref_mut(),
+            )?;
+        }
+        T_RefreshMatViewStmt => {
+            // C wraps this in EventTriggerInhibitCommandCollection; no event
+            // trigger surface exists.
+            let stmt_node =
+                unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::rawnodes::RefreshMatViewStmt>()
+                .expect("RefreshMatViewStmt");
+            commands_matview::ExecRefreshMatView(mcx, stmt, source_text, qc.as_deref_mut())?;
+        }
         T_CreateSeqStmt => {
             let stmt_node =
                 unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
@@ -725,6 +805,39 @@ fn dispatch_switch<'mcx>(
             let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
             let stmt = stmt_node.as_alter_enum_stmt().expect("AlterEnumStmt");
             typecmds::AlterEnum(mcx, stmt)?;
+        }
+        T_RuleStmt => {
+            // Retention contract as unify_stmt_lifetime.
+            let stmt = parsetree
+                .as_variant::<types_nodes::rawnodes::RuleStmt>()
+                .expect("RuleStmt");
+            let stmt = unsafe {
+                core::mem::transmute::<
+                    &types_nodes::rawnodes::RuleStmt<'_>,
+                    &types_nodes::rawnodes::RuleStmt<'mcx>,
+                >(stmt)
+            };
+            rewrite_define::DefineRule(mcx, stmt, source_text)?;
+        }
+        T_ViewStmt => {
+            // Retention contract as unify_stmt_lifetime: the statement arena
+            // outlives the utility call; nothing derived escapes it.
+            let stmt = parsetree
+                .as_variant::<types_nodes::rawnodes::ViewStmt>()
+                .expect("ViewStmt");
+            let stmt = unsafe {
+                core::mem::transmute::<
+                    &types_nodes::rawnodes::ViewStmt<'_>,
+                    &types_nodes::rawnodes::ViewStmt<'mcx>,
+                >(stmt)
+            };
+            commands_view::DefineView(
+                mcx,
+                stmt,
+                source_text,
+                pstmt.stmt_location,
+                pstmt.stmt_len,
+            )?;
         }
         _ => handler_gap("ProcessUtilitySlow DDL fan-out (utility slow lane)"),
     }

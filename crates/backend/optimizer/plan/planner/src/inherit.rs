@@ -209,7 +209,7 @@ fn expand_single_inheritance_child<'mcx>(
         inFromCl: parentrte.inFromCl,
         securityQuals: NodeList::nil(),
     };
-    let assigned_rti = run.add_child_rte(Node::mk(mcx, childrte)?)?;
+    let assigned_rti = add_child_rte(run, Node::mk(mcx, childrte)?)?;
     debug_assert_eq!(assigned_rti, child_rti);
 
     appinfo.child_relid = child_rti;
@@ -501,4 +501,29 @@ fn attribute_mismatch(
         )
         .with_sqlstate(types_error::ERRCODE_INVALID_COLUMN_DEFINITION),
     )
+}
+
+// expand_planner_arrays + the parse->rtable append from
+// expand_single_inheritance_child (inherit.c), fused per child.
+fn add_child_rte<'mcx>(run: &mut PlannerRun<'mcx>, rte_node: Node<'mcx>) -> PgResult<u32> {
+    let mcx = run.mcx;
+    let parse = run.parse();
+    // SAFETY: the sealed Query is exclusively planner-owned (interned by
+    // subquery_planner from a planner-local copy); no other &mut aliases
+    // exist and cell handles copied out earlier stay valid across the
+    // cell-array regrow.
+    let rtable = &parse.rtable as *const NodeList<'mcx> as *mut NodeList<'mcx>;
+    unsafe { (*rtable).lappend(mcx, rte_node)? };
+    let index = unsafe { (*rtable).len() as u32 - 1 };
+    let rti = index + 1;
+    run.root
+        .simple_rte_array
+        .push(types_pathnodes::RangeTblEntryId::Parse { query: run.root.parse, index });
+    run.root.simple_rel_array.push(None);
+    run.root.simple_rel_array_size = run.root.simple_rel_array.len() as i32;
+    while run.root.append_rel_array.len() <= rti as usize {
+        run.root.append_rel_array.push(None);
+    }
+    debug_assert_eq!(run.root.simple_rte_array.len() as u32, rti + 1);
+    Ok(rti)
 }

@@ -264,8 +264,11 @@ fn truncate_check_perms(relid: Oid, relkind: u8, relname: &str) -> PgResult<()> 
 }
 
 fn truncate_check_activity(rel: &Relation<'_>) -> PgResult<()> {
-    if rel.rd_rel.relpersistence == types_core::RELPERSISTENCE_TEMP {
-        unported("truncate_check_activity: temp tables");
+    if rel.rd_rel.relpersistence == types_core::RELPERSISTENCE_TEMP && !rel.rd_islocaltemp {
+        return Err(Box::new(
+            types_error::PgError::error("cannot truncate temporary tables of other sessions")
+                .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+        ));
     }
     catalog_heap::CheckTableNotInUse(rel, "TRUNCATE")
 }

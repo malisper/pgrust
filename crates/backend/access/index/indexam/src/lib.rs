@@ -6,9 +6,11 @@ pub use types_relscan::*;
 #[cfg(test)]
 mod tests;
 
+use core::mem::MaybeUninit;
 use std::rc::Rc;
 
 use datum::Datum;
+use tableam::{BatchFetch, INDEX_FETCH_BATCH_MAX};
 use mcx::Mcx;
 use types_core::Oid;
 use types_error::{
@@ -183,6 +185,10 @@ pub fn index_bulk_delete<'mcx>(
             gist::gistbulkdelete(info.index)?;
             Ok(istat.unwrap_or_default())
         }
+        IndexAmKind::Spgist => {
+            spgist::spgbulkdelete(info.index)?;
+            Ok(istat.unwrap_or_default())
+        }
         IndexAmKind::Brin => brin::brinbulkdelete(),
         #[cfg(test)]
         IndexAmKind::Mock => Ok(istat.unwrap_or_default()),
@@ -211,6 +217,10 @@ pub fn index_vacuum_cleanup<'mcx>(
         }
         IndexAmKind::Gist => {
             gist::gistvacuumcleanup(info.index, info.analyze_only)?;
+            Ok(istat)
+        }
+        IndexAmKind::Spgist => {
+            spgist::spgvacuumcleanup(info.index, info.analyze_only)?;
             Ok(istat)
         }
         IndexAmKind::Brin => {
@@ -296,6 +306,7 @@ fn am_getbitmap(
         IndexScanOpaque::Hash(_) => hash::hashgetbitmap(scan, bitmap),
         IndexScanOpaque::Gin(_) => gin::gingetbitmap(scan, bitmap),
         IndexScanOpaque::Gist(_) => gist::gistgetbitmap(scan, bitmap),
+        IndexScanOpaque::Spgist(_) => spgist::spggetbitmap(scan, bitmap),
         IndexScanOpaque::Brin(_) => brin::bringetbitmap(scan, bitmap),
         #[cfg(test)]
         IndexScanOpaque::Mock(_) => unreachable!("Mock lacks amgetbitmap"),
@@ -428,6 +439,56 @@ pub fn index_fetch_heap<'mcx>(
     scan: &mut IndexScanDescData<'mcx>,
     slot: &mut SlotData<'mcx>,
 ) -> PgResult<bool> {
+    // Serve from an active same-page run first; Miss falls through with the
+    // batch invalidated.
+    let outcome = {
+        let IndexScanDescData {
+            xs_heapfetch,
+            xs_heaptid,
+            ..
+        } = scan;
+        match xs_heapfetch.as_mut() {
+            Some(heapfetch) => fetch::batch_next(mcx, heapfetch, xs_heaptid, slot),
+            None => BatchFetch::Miss,
+        }
+    };
+    if let Some(found) = batch_outcome(scan, outcome) {
+        return Ok(found);
+    }
+
+    // Start a run when the index holds more TIDs for this heap page. MVCC
+    // verdicts are fill-time-independent; non-MVCC keeps the per-tuple path.
+    if !scan.xs_heap_continue && scan.xs_snapshot.as_deref().is_some_and(IsMVCCSnapshot) {
+        if let IndexScanOpaque::Btree(so) = &scan.opaque {
+            let mut run: [MaybeUninit<ItemPointerData>; INDEX_FETCH_BATCH_MAX] =
+                [const { MaybeUninit::uninit() }; INDEX_FETCH_BATCH_MAX];
+            let n = nbtree::bt_peek_same_block_tids(so, &mut run[..INDEX_FETCH_BATCH_MAX - 1]);
+            if n > 0 {
+                // SAFETY: prefix written by the peek.
+                let rest = unsafe {
+                    core::slice::from_raw_parts(run.as_ptr() as *const ItemPointerData, n)
+                };
+                let outcome = {
+                    let IndexScanDescData {
+                        xs_heapfetch,
+                        xs_heaptid,
+                        xs_snapshot,
+                        ..
+                    } = scan;
+                    let heapfetch = xs_heapfetch
+                        .as_mut()
+                        .expect("index_fetch_heap: xs_heapfetch not armed (C would dereference NULL)");
+                    fetch::batch_fill(mcx, heapfetch, xs_heaptid, rest, xs_snapshot)?;
+                    fetch::batch_next(mcx, heapfetch, xs_heaptid, slot)
+                };
+                debug_assert!(!matches!(outcome, BatchFetch::Miss));
+                if let Some(found) = batch_outcome(scan, outcome) {
+                    return Ok(found);
+                }
+            }
+        }
+    }
+
     let mut all_dead = false;
 
     // Disjoint field borrows: the fetch mutates xs_heaptid/xs_heap_continue
@@ -462,6 +523,26 @@ pub fn index_fetch_heap<'mcx>(
     }
 
     Ok(found)
+}
+
+#[inline]
+fn batch_outcome(scan: &mut IndexScanDescData<'_>, outcome: BatchFetch) -> Option<bool> {
+    match outcome {
+        BatchFetch::Stored => {
+            pgstat_count_heap_fetch(scan);
+            if !scan.xactStartedInRecovery {
+                scan.kill_prior_tuple = false;
+            }
+            Some(true)
+        }
+        BatchFetch::NotVisible { all_dead } => {
+            if !scan.xactStartedInRecovery {
+                scan.kill_prior_tuple = all_dead;
+            }
+            Some(false)
+        }
+        BatchFetch::Miss => None,
+    }
 }
 
 /// True when a tuple satisfying the scan keys and snapshot landed in `slot`.
@@ -517,6 +598,7 @@ fn am_beginscan<'mcx>(
         IndexAmKind::Hash => hash::hashbeginscan(mcx, indexRelation, nkeys, norderbys),
         IndexAmKind::Gin => gin::ginbeginscan(mcx, indexRelation, nkeys, norderbys),
         IndexAmKind::Gist => gist::gistbeginscan(mcx, indexRelation, nkeys, norderbys),
+        IndexAmKind::Spgist => spgist::spgbeginscan(mcx, indexRelation, nkeys, norderbys),
         IndexAmKind::Brin => brin::brinbeginscan(mcx, indexRelation, nkeys, norderbys),
         #[cfg(test)]
         IndexAmKind::Mock => Ok(mock::beginscan(mcx, indexRelation, nkeys, norderbys)),
@@ -536,6 +618,7 @@ fn am_rescan(
         IndexScanOpaque::Hash(_) => hash::hashrescan(scan, keys),
         IndexScanOpaque::Gin(_) => gin::ginrescan(scan, keys),
         IndexScanOpaque::Gist(_) => gist::gistrescan(scan, keys, orderbys),
+        IndexScanOpaque::Spgist(_) => spgist::spgrescan(scan, keys, orderbys),
         IndexScanOpaque::Brin(_) => brin::brinrescan(scan, keys),
         #[cfg(test)]
         IndexScanOpaque::Mock(_) => Ok(mock::rescan(scan)),
@@ -550,6 +633,7 @@ fn am_endscan(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
         IndexScanOpaque::Hash(_) => hash::hashendscan(scan),
         IndexScanOpaque::Gin(_) => gin::ginendscan(scan),
         IndexScanOpaque::Gist(_) => gist::gistendscan(scan),
+        IndexScanOpaque::Spgist(_) => spgist::spgendscan(scan),
         IndexScanOpaque::Brin(_) => brin::brinendscan(scan),
         #[cfg(test)]
         IndexScanOpaque::Mock(_) => Ok(()),
@@ -564,6 +648,7 @@ fn am_markpos(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
         IndexScanOpaque::Hash(_) => unreachable!("hash lacks ammarkpos (guarded by has_ammarkpos)"),
         IndexScanOpaque::Gin(_) => unreachable!("gin lacks ammarkpos (guarded by has_ammarkpos)"),
         IndexScanOpaque::Gist(_) => Err(missing_procedure("ammarkpos", &scan.indexRelation)),
+        IndexScanOpaque::Spgist(_) => unreachable!("has_ammarkpos gate"),
         IndexScanOpaque::Brin(_) => unreachable!("has_ammarkpos gate"),
         #[cfg(test)]
         IndexScanOpaque::Mock(_) => Ok(mock::markpos(scan)),
@@ -578,6 +663,7 @@ fn am_restrpos(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
         IndexScanOpaque::Hash(_) => unreachable!("hash lacks amrestrpos (guarded by has_amrestrpos)"),
         IndexScanOpaque::Gin(_) => unreachable!("gin lacks amrestrpos (guarded by has_amrestrpos)"),
         IndexScanOpaque::Gist(_) => Err(missing_procedure("amrestrpos", &scan.indexRelation)),
+        IndexScanOpaque::Spgist(_) => unreachable!("has_amrestrpos gate"),
         IndexScanOpaque::Brin(_) => unreachable!("has_amrestrpos gate"),
         #[cfg(test)]
         IndexScanOpaque::Mock(_) => unreachable!("Mock lacks amrestrpos"),
@@ -597,6 +683,7 @@ fn am_gettuple(scan: &mut IndexScanDescData<'_>, direction: ScanDirection) -> Pg
             scan.indexRelation.name()
         ),
         IndexScanOpaque::Gist(_) => gist::gistgettuple(scan, direction),
+        IndexScanOpaque::Spgist(_) => spgist::spggettuple(scan, direction),
         // CHECK_SCAN_PROCEDURE(amgettuple): BRIN is bitmap-only.
         IndexScanOpaque::Brin(_) => Err(missing_procedure("amgettuple", &scan.indexRelation)),
         #[cfg(test)]
@@ -667,6 +754,23 @@ fn am_insert<'mcx>(
                 unsafe { core::mem::transmute(slot) };
             gist::gistinsert(indexRelation, values, isnull, heap_t_ctid, heapRelation, slot)
         }
+        IndexAmKind::Spgist => {
+            debug_assert!(checkUnique == IndexUniqueCheck::UNIQUE_CHECK_NO);
+            if am_cache.is_none() {
+                *am_cache = Some(Box::new(
+                    None::<spgist::SpgInsertAmCache<'static>>,
+                ));
+            }
+            let slot = am_cache
+                .as_mut()
+                .expect("just filled")
+                .downcast_mut::<Option<spgist::SpgInsertAmCache<'static>>>()
+                .expect("spgist ii_AmCache slot type");
+            // SAFETY: same relcache-outlives-slot argument as the gist arm.
+            let slot: &mut Option<spgist::SpgInsertAmCache<'mcx>> =
+                unsafe { core::mem::transmute(slot) };
+            spgist::spginsert(indexRelation, values, isnull, heap_t_ctid, slot)
+        }
         IndexAmKind::Brin => {
             if am_cache.is_none() {
                 *am_cache = Some(Box::new(
@@ -701,6 +805,7 @@ fn am_insert_cleanup(
         IndexAmKind::Hash => unreachable!("hash lacks aminsertcleanup (guarded)"),
         IndexAmKind::Gin => unreachable!("gin lacks aminsertcleanup (guarded)"),
         IndexAmKind::Gist => Ok(()),
+        IndexAmKind::Spgist => unreachable!("spgist lacks aminsertcleanup (guarded)"),
         IndexAmKind::Brin => {
             let Some(boxed) = am_cache else { return Ok(()) };
             let slot = boxed
@@ -771,6 +876,37 @@ mod fetch {
             ),
             #[allow(unreachable_patterns)]
             other => mock::tuple(other, tid, slot, call_again, all_dead),
+        }
+    }
+
+    pub fn batch_fill<'mcx>(
+        mcx: Mcx<'mcx>,
+        heapfetch: &mut IndexFetchTableData<'mcx>,
+        first_tid: &ItemPointerData,
+        rest: &[ItemPointerData],
+        snapshot: &Option<Rc<SnapshotData<'mcx>>>,
+    ) -> PgResult<()> {
+        match heapfetch {
+            IndexFetchTableData::Table(t) => {
+                tableam::table_index_fetch_batch_fill(mcx, t, first_tid, rest, snapshot)
+            }
+            #[allow(unreachable_patterns)]
+            _ => unreachable!("batch fill on a mock table fetch"),
+        }
+    }
+
+    pub fn batch_next<'mcx>(
+        mcx: Mcx<'mcx>,
+        heapfetch: &mut IndexFetchTableData<'mcx>,
+        tid: &mut ItemPointerData,
+        slot: &mut SlotData<'mcx>,
+    ) -> BatchFetch {
+        match heapfetch {
+            IndexFetchTableData::Table(t) => {
+                tableam::table_index_fetch_batch_next(mcx, t, tid, slot)
+            }
+            #[allow(unreachable_patterns)]
+            _ => BatchFetch::Miss,
         }
     }
 

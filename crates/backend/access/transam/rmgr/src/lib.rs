@@ -131,7 +131,6 @@ fn dbase_redo(record: &mut XLogReaderState) -> PgResult<()> {
 unported_redo! {
     tblspc_redo => "backend-commands-tablespace";
     gin_redo => "backend-access-gin-xlog";
-    spg_redo => "backend-access-spgist-xlog";
     commit_ts_redo => "backend-access-transam-commit-ts";
     replorigin_redo => "backend-replication-origin";
     generic_redo => "backend-access-transam-generic-xlog";
@@ -142,7 +141,6 @@ unported_desc! {
     hash_desc => "backend-rmgrdesc-next";
     gin_desc => "backend-rmgrdesc-next";
     gist_desc => "backend-rmgrdesc-next";
-    spg_desc => "backend-rmgrdesc-next";
     commit_ts_desc => "backend-access-rmgrdesc-small";
     replorigin_desc => "backend-rmgrdesc-extra-small";
     logicalmsg_desc => "backend-access-rmgrdesc-small";
@@ -152,7 +150,6 @@ unported_identify! {
     hash_identify => "backend-rmgrdesc-next";
     gin_identify => "backend-rmgrdesc-next";
     gist_identify => "backend-rmgrdesc-next";
-    spg_identify => "backend-rmgrdesc-next";
     commit_ts_identify => "backend-access-rmgrdesc-small";
     replorigin_identify => "backend-rmgrdesc-extra-small";
     logicalmsg_identify => "backend-access-rmgrdesc-small";
@@ -166,7 +163,6 @@ unported_mask! {
     btree_mask => "backend-access-nbtree-nbtxlog";
     gin_mask => "backend-access-gin-xlog";
     seq_mask => "backend-commands-sequence";
-    spg_mask => "backend-access-spgist-xlog";
     brin_mask => "backend-access-brin-xlog";
     generic_mask => "backend-access-transam-generic-xlog";
 }
@@ -320,12 +316,12 @@ pub static RmgrTable: [RmgrData; RM_N_BUILTIN_IDS] = [
     },
     RmgrData {
         rm_name: "SPGist",
-        rm_redo: spg_redo,
-        rm_desc: spg_desc,
-        rm_identify: spg_identify,
+        rm_redo: spgist_xlog::spg_redo,
+        rm_desc: rmgrdesc::spgdesc::spg_desc,
+        rm_identify: rmgrdesc::spgdesc::spg_identify,
         rm_startup: None,
         rm_cleanup: None,
-        rm_mask: Some(spg_mask),
+        rm_mask: Some(spgist_xlog::spg_mask),
     },
     RmgrData {
         rm_name: "BRIN",

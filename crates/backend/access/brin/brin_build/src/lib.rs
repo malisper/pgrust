@@ -204,7 +204,7 @@ fn form_and_insert_tuple(state: &mut BrinBuildState<'_, '_>) -> PgResult<()> {
         scratch.mcx(),
         &state.bs_bdesc,
         state.bs_currRangeStart,
-        &state.bs_dtuple,
+        &mut state.bs_dtuple,
     )?;
     brin_doinsert(
         state.bs_irel,
@@ -235,8 +235,9 @@ fn brin_fill_empty_ranges<'mcx>(
 
     while blkno < nextRange {
         if state.bs_emptyTuple.is_none() {
-            let dtuple = brin_new_memtuple(&state.bs_bdesc);
-            state.bs_emptyTuple = Some(brin_form_tuple(mcx, &state.bs_bdesc, blkno, &dtuple)?);
+            let mut dtuple = brin_new_memtuple(&state.bs_bdesc);
+            state.bs_emptyTuple =
+                Some(brin_form_tuple(mcx, &state.bs_bdesc, blkno, &mut dtuple)?);
         }
 
         let BrinBuildState {
