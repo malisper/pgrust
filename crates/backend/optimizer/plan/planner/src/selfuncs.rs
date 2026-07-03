@@ -1675,26 +1675,30 @@ fn btcostestimate(
     costs.index_startup_cost += descent_cost;
     costs.index_total_cost += costs.num_sa_scans * descent_cost;
 
-    // btcost_correlation over the leading simple column.
+    // btcost_correlation over the leading column; expression columns read the
+    // index's own pg_statistic row (colnum 1, inh false), as C.
     {
-        let (attno, opfamily0, opcintype0, reverse0, nkeycols) = {
+        let (attno, indexoid, opfamily0, opcintype0, reverse0, nkeycols) = {
             let PathNode::IndexPath(ip) = run.root.path(path_id) else { unreachable!() };
             let index = ip.indexinfo.as_ref().unwrap();
             (
                 index.indexkeys[0] as i16,
+                index.indexoid,
                 index.opfamily[0],
                 index.opcintype[0],
                 index.reverse_sort[0],
                 index.nkeycolumns,
             )
         };
-        if attno == 0 {
-            panic!("btcost_correlation (selfuncs.c): expression index column; M2 lane");
-        }
-        let rte = run.rte(index_rel_relid as usize);
-        if let Some(bundle) =
-            syscache_seams::lookup_pg_statistic_bundle::call(run.mcx, rte.relid, attno, rte.inh)?
-        {
+        let (stat_relid, stat_attno, stat_inh) = if attno != 0 {
+            let rte = run.rte(index_rel_relid as usize);
+            (rte.relid, attno, rte.inh)
+        } else {
+            (indexoid, 1, false)
+        };
+        if let Some(bundle) = syscache_seams::lookup_pg_statistic_bundle::call(
+            run.mcx, stat_relid, stat_attno, stat_inh,
+        )? {
             let sortop = lsyscache::get_opfamily_member(
                 opfamily0,
                 opcintype0,
