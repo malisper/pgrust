@@ -5565,6 +5565,7 @@ dependencies = [
  "rel_vocab",
  "relation",
  "relcache",
+ "rewrite_manip",
  "syscache_seams",
  "table",
  "tupdesc",
