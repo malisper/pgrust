@@ -10,4 +10,3 @@ types_core = { path = "../../../_support/types/types_core" }
 mcx = { path = "../../../_support/mcx" }
 rel_vocab = { path = "../../../_support/types/rel_vocab" }
 types_error = { path = "../../../_support/types/types_error" }
-mcx = { path = "../../../_support/mcx" }

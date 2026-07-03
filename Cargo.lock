@@ -1236,6 +1236,7 @@ dependencies = [
  "catalog_indexing",
  "catalog_storage",
  "datum",
+ "elog",
  "elog_seams",
  "execindexing",
  "fmgr_seams",
@@ -1596,6 +1597,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "cluster_seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam_core",
+ "types_core",
+ "types_error",
+ "types_rel",
+]
+
+[[package]]
 name = "cmdtag"
 version = "0.1.0"
 dependencies = [
@@ -1807,27 +1819,55 @@ dependencies = [
 name = "commands_cluster"
 version = "0.1.0"
 dependencies = [
+ "aclchk",
+ "adt_acl",
+ "bufmgr",
+ "bufmgr_seams",
  "catalog",
  "catalog_dependency",
  "catalog_heap",
+ "catalog_index",
  "catalog_indexing",
+ "catalog_namespace",
  "catalog_toasting",
+ "cluster_seams",
+ "commands_vacuum",
  "datum",
+ "elog_seams",
+ "exectuples",
+ "explain",
  "fmgr_seams",
  "genam",
+ "guc",
+ "heapam_visibility",
  "heaptuple",
+ "indexam",
+ "init_small",
+ "inval",
+ "lsyscache",
  "mcx",
+ "miscinit",
  "multixact",
  "pg_depend",
+ "planner",
+ "postgres_seams",
  "procarray",
+ "rel_vocab",
  "relcache",
+ "rewriteheap",
+ "snapmgr",
  "table",
+ "tableam",
+ "tableam_vocab",
  "tablecmds_seams",
+ "tuplesort",
  "types_core",
  "types_error",
  "types_nodes",
  "types_rel",
  "types_scan",
+ "types_slot",
+ "types_snapshot",
  "types_tuple",
  "xact",
 ]
@@ -1888,6 +1928,7 @@ dependencies = [
  "catalog_seams",
  "catalog_storage_seams",
  "clog",
+ "cluster_seams",
  "combocid_seams",
  "commit_ts_seams",
  "condition_variable_seams",
@@ -3707,30 +3748,38 @@ dependencies = [
 name = "indexcmds"
 version = "0.0.0"
 dependencies = [
+ "aclchk",
  "aclchk_seams",
+ "adt_acl",
  "catalog_heap",
  "catalog_index",
+ "catalog_namespace",
  "coerce",
  "datum",
  "elog",
  "execindexing",
+ "explain",
  "fmgr_seams",
  "format_type",
  "genam",
  "guc",
  "indexcmds_seams",
+ "lmgr",
  "lsyscache",
  "mcx",
  "miscinit",
  "miscinit_seams",
+ "rel_vocab",
  "syscache_seams",
  "table",
+ "tablecmds",
  "types_core",
  "types_error",
  "types_nodes",
  "types_rel",
  "types_scan",
  "types_tuple",
+ "xact",
 ]
 
 [[package]]
@@ -7521,6 +7570,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "rewriteheap"
+version = "0.0.0"
+dependencies = [
+ "bufmgr",
+ "bulkwrite",
+ "catalog",
+ "heapam",
+ "heapam_visibility",
+ "heaptoast",
+ "heaptuple",
+ "mcx",
+ "transam_xlog",
+ "types_core",
+ "types_error",
+ "types_rel",
+ "types_storage",
+ "types_tuple",
+]
+
+[[package]]
 name = "ri_triggers"
 version = "0.1.0"
 dependencies = [
@@ -7716,6 +7785,7 @@ dependencies = [
  "clog",
  "combocid",
  "commands_async",
+ "commands_cluster",
  "commands_tablespace",
  "commands_vacuum",
  "condition_variable",
@@ -8694,6 +8764,7 @@ dependencies = [
  "mbutils",
  "mcx",
  "miscinit",
+ "multixact",
  "nodes_core",
  "outfuncs",
  "parse_collate",
@@ -8707,6 +8778,7 @@ dependencies = [
  "pg_type",
  "pgstat",
  "predicate_seams",
+ "procarray",
  "readfuncs",
  "rel_vocab",
  "relation_seams",
@@ -8740,6 +8812,7 @@ name = "tablecmds_seams"
 version = "0.0.0"
 dependencies = [
  "mcx",
+ "rel_vocab",
  "seam_core",
  "types_core",
  "types_error",
@@ -9360,6 +9433,7 @@ dependencies = [
  "cmdtag",
  "commands_analyze",
  "commands_async",
+ "commands_cluster",
  "commands_comment",
  "commands_vacuum",
  "copy_cmd",
