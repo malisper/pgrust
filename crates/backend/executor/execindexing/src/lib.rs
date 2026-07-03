@@ -72,8 +72,9 @@ pub fn RelationGetIndexExpressions<'mcx>(
 }
 
 /// RelationGetIndexPredicate (relcache.c), implicit-AND result. DIVERGENCE:
-/// canonicalize_qual lives in the planner (prepqual), which reapplies it in
-/// get_relation_info; the executor's ExecQual result is form-independent.
+/// C canonicalize_quals here (relcache.c:5254-5257); this executor path skips
+/// it — ExecQual truth values are form-independent — and the planner copy
+/// (plancat.rs get_relation_info) canonicalizes independently.
 pub fn RelationGetIndexPredicate<'mcx>(
     mcx: Mcx<'mcx>,
     index: &Relation<'_>,
@@ -112,7 +113,9 @@ pub fn BuildIndexInfo<'mcx>(mcx: Mcx<'mcx>, index: &Relation<'_>) -> PgResult<In
         ii_PredicateState: None,
         ii_Unique: indexstruct.indisunique,
         ii_NullsNotDistinct: indexstruct.indnullsnotdistinct,
-        ii_ReadyForInserts: indexstruct.indisready && indexstruct.indisvalid,
+        // indisready only (index.c:2452): an invalid-but-ready index still
+        // receives inserts.
+        ii_ReadyForInserts: indexstruct.indisready,
         ii_Summarizing: false, // btree only (relam gates in indexam)
         ii_Concurrent: false,
         ii_BrokenHotChain: false,
@@ -214,8 +217,11 @@ pub fn ExecCloseIndices(mut state: ResultRelIndexState<'_>) -> PgResult<()> {
 /// states resolve once onto the IndexInfo (C's lazy ExecPrepareExprList; the
 /// exprs already passed eval_const_expressions in RelationGetIndexExpressions,
 /// so ExecPrepareExpr's expression_planner rerun is skipped as a no-op).
+/// `eval_mcx` is C's per-tuple context: results land there and the caller
+/// resets it per row.
 pub fn FormIndexDatum<'mcx>(
     mcx: Mcx<'mcx>,
+    eval_mcx: Mcx<'_>,
     indexInfo: &mut IndexInfo<'mcx>,
     slot: &mut SlotData<'mcx>,
     values: &mut [Datum],
@@ -223,11 +229,15 @@ pub fn FormIndexDatum<'mcx>(
 ) -> PgResult<()> {
     if !indexInfo.ii_Expressions.is_nil() && indexInfo.ii_ExpressionsState.is_empty() {
         for expr in indexInfo.ii_Expressions.iter() {
-            let mut state = execexpr::exec_init_expr(mcx, Some(expr), execexpr::ParamBind::NONE)?
+            let state = execexpr::exec_init_expr(mcx, Some(expr), execexpr::ParamBind::NONE)?
                 .expect("index expression");
-            state.arm_result_mcx(mcx);
             indexInfo.ii_ExpressionsState.push(state);
         }
+    }
+    for state in indexInfo.ii_ExpressionsState.iter_mut() {
+        // SAFETY: eval_mcx outlives this call; by-ref results are consumed
+        // (copied into the index tuple) before the caller resets it.
+        unsafe { state.arm_result_mcx_raw(eval_mcx) };
     }
     let mut indexpr_item = indexInfo.ii_ExpressionsState.iter_mut();
 
@@ -259,6 +269,7 @@ pub fn FormIndexDatum<'mcx>(
 // ExecPrepareQual + ExecQual over the scan slot.
 pub fn index_predicate_passes<'mcx>(
     mcx: Mcx<'mcx>,
+    eval_mcx: Mcx<'_>,
     indexInfo: &mut IndexInfo<'mcx>,
     slot: &mut SlotData<'mcx>,
 ) -> PgResult<bool> {
@@ -266,6 +277,11 @@ pub fn index_predicate_passes<'mcx>(
     if indexInfo.ii_PredicateState.is_none() {
         indexInfo.ii_PredicateState =
             execexpr::exec_init_qual(mcx, &indexInfo.ii_Predicate, execexpr::ParamBind::NONE)?;
+    }
+    if let Some(state) = indexInfo.ii_PredicateState.as_deref_mut() {
+        // SAFETY: eval_mcx outlives this call; the qual result is consumed
+        // before the caller resets it.
+        unsafe { state.arm_result_mcx_raw(eval_mcx) };
     }
     let mut slots = execexpr::EvalSlots { scan: Some(slot), inner: None, outer: None };
     execexpr::exec_qual(indexInfo.ii_PredicateState.as_deref_mut(), &mut slots)
@@ -279,6 +295,7 @@ pub fn index_predicate_passes<'mcx>(
 /// lane, loud below.
 pub fn ExecInsertIndexTuples<'mcx>(
     mcx: Mcx<'mcx>,
+    eval_mcx: Mcx<'_>,
     state: &mut ResultRelIndexState<'mcx>,
     heap_relation: &Relation<'mcx>,
     slot: &mut SlotData<'mcx>,
@@ -299,11 +316,13 @@ pub fn ExecInsertIndexTuples<'mcx>(
             continue;
         }
 
-        if !indexInfo.ii_Predicate.is_nil() && !index_predicate_passes(mcx, indexInfo, slot)? {
+        if !indexInfo.ii_Predicate.is_nil()
+            && !index_predicate_passes(mcx, eval_mcx, indexInfo, slot)?
+        {
             continue;
         }
 
-        FormIndexDatum(mcx, indexInfo, slot, &mut values, &mut isnull)?;
+        FormIndexDatum(mcx, eval_mcx, indexInfo, slot, &mut values, &mut isnull)?;
         let n_index_attrs = indexInfo.ii_NumIndexAttrs as usize;
 
         let indexInfo = &state.infos[i];
@@ -354,6 +373,7 @@ pub fn ExecInsertIndexTuples<'mcx>(
 #[allow(clippy::too_many_arguments)]
 pub fn ExecCheckIndexConstraints<'mcx>(
     mcx: Mcx<'mcx>,
+    eval_mcx: Mcx<'_>,
     state: &mut ResultRelIndexState<'mcx>,
     heap_relation: &Relation<'mcx>,
     slot: &mut SlotData<'mcx>,
@@ -386,11 +406,13 @@ pub fn ExecCheckIndexConstraints<'mcx>(
         }
         checked_index = true;
 
-        if !indexInfo.ii_Predicate.is_nil() && !index_predicate_passes(mcx, indexInfo, slot)? {
+        if !indexInfo.ii_Predicate.is_nil()
+            && !index_predicate_passes(mcx, eval_mcx, indexInfo, slot)?
+        {
             continue;
         }
 
-        FormIndexDatum(mcx, indexInfo, slot, &mut values, &mut isnull)?;
+        FormIndexDatum(mcx, eval_mcx, indexInfo, slot, &mut values, &mut isnull)?;
         let indexInfo = &state.infos[i];
 
         if !check_unique_constraint(

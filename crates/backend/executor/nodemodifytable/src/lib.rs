@@ -53,6 +53,10 @@ pub struct ModifyTableState<'mcx> {
     ri_RowIdAttNo: i16,
     update_cols: mcx::PgVec<'mcx, NewColSrc>,
     indexes: Option<execindexing::ResultRelIndexState<'mcx>>,
+    // C's per-tuple econtext for index expression/predicate eval, reset per
+    // outer row; node-owned because estate can't lend its per-tuple mcx while
+    // relation/slot field borrows are live.
+    index_eval_cx: mcx::MemoryContext,
     snapshot_any: Option<Rc<SnapshotData<'mcx>>>,
     returning_slot: Option<ExecSlotId>,
     project_returning: Option<PgBox<'mcx, ExprState<'mcx>>>,
@@ -295,6 +299,7 @@ pub fn exec_init_modify_table<'mcx>(
         ri_RowIdAttNo: rowid_attno,
         update_cols: mcx::PgVec::new_in(estate.es_query_cxt),
         indexes: None,
+        index_eval_cx: mcx::MemoryContext::new("IndexEvalPerTuple"),
         snapshot_any: Some(Rc::new(SnapshotData::sentinel(estate.es_query_cxt, SNAPSHOT_ANY))),
         returning_slot,
         project_returning,
@@ -360,6 +365,7 @@ pub fn exec_modify_table<'mcx>(
 
     loop {
         estate.reset_per_tuple_expr_context();
+        mt.index_eval_cx.reset();
 
         let Some(plan_slot) = fetch_outer(estate)? else {
             break;
@@ -896,7 +902,16 @@ fn exec_update<'mcx>(
                      index maintenance (BRIN lane) not ported"
                 );
             }
-            execindexing::ExecInsertIndexTuples(mcx, indexes, rel, slot, false, None, &[])?;
+            execindexing::ExecInsertIndexTuples(
+                mcx,
+                mt.index_eval_cx.mcx(),
+                indexes,
+                rel,
+                slot,
+                false,
+                None,
+                &[],
+            )?;
         }
     }
 
@@ -1228,6 +1243,7 @@ fn exec_insert<'mcx>(
                 let (slot, existing) = unsafe { (&mut *base.add(s), &mut *base.add(e)) };
                 execindexing::ExecCheckIndexConstraints(
                     mcx,
+                    mt.index_eval_cx.mcx(),
                     indexes,
                     rel,
                     slot,
@@ -1266,6 +1282,7 @@ fn exec_insert<'mcx>(
                 )?;
                 execindexing::ExecInsertIndexTuples(
                     mcx,
+                    mt.index_eval_cx.mcx(),
                     indexes,
                     rel,
                     slot,
@@ -1309,7 +1326,16 @@ fn exec_insert<'mcx>(
 
         if let Some(indexes) = indexes.as_mut() {
             if indexes.num_indices() > 0 {
-                execindexing::ExecInsertIndexTuples(mcx, indexes, rel, slot, false, None, &[])?;
+                execindexing::ExecInsertIndexTuples(
+                    mcx,
+                    mt.index_eval_cx.mcx(),
+                    indexes,
+                    rel,
+                    slot,
+                    false,
+                    None,
+                    &[],
+                )?;
             }
         }
     }

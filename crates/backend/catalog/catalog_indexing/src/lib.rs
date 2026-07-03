@@ -41,7 +41,16 @@ fn CatalogIndexInsert<'mcx>(
         HeapTupleData::from_raw_parts(tup.header_ptr(), tup.t_len, tup.t_self, tup.t_tableOid)
     };
     exectuples::exec_store_heap_tuple(&mut slot, mcx, view);
-    execindexing::ExecInsertIndexTuples(mcx, indstate, heap_rel, &mut slot, false, None, &[])?;
+    // System catalogs never carry expression/partial indexes (CatalogIndexInsert
+    // asserts likewise), so eval never allocates — mcx stands in for the
+    // per-tuple context.
+    for ii in indstate.infos.iter() {
+        assert!(
+            ii.ii_Expressions.is_nil() && ii.ii_Predicate.is_nil(),
+            "system catalog with expression/partial index"
+        );
+    }
+    execindexing::ExecInsertIndexTuples(mcx, mcx, indstate, heap_rel, &mut slot, false, None, &[])?;
     exectuples::exec_clear_tuple(&mut slot, mcx);
     Ok(())
 }
