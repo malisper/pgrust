@@ -797,15 +797,14 @@ fn bt_unlink_halfdead_page(
             };
             n += 1;
         }
+        let md_bufdata: [&[u8]; 1];
         let info = if let Some(md) = &xlmeta {
+            md_bufdata = [md];
             regbufs[n] = XLogRegBuf {
                 block_id: 4,
                 buffer: metabuf.as_ref().expect("metad set with metabuf").buffer(),
                 flags: REGBUF_WILL_INIT | REGBUF_STANDARD,
-                bufdata: core::slice::from_ref(unsafe {
-                    // SAFETY: md borrows past the closure; reborrow as &[u8].
-                    &*(md as *const [u8; 28] as *const &[u8])
-                }),
+                bufdata: &md_bufdata,
             };
             n += 1;
             XLOG_BTREE_UNLINK_PAGE_META
