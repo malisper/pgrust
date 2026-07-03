@@ -17,7 +17,7 @@ use crate::{
     SearchSysCache3, SearchSysCache4, SearchSysCacheExists, SearchSysCacheList, SearchSysCacheList1,
     SysCacheGetAttr, SysCacheKey,
 };
-use crate::cacheinfo::{COLLOID, AGGFNOID, AMOPOPID, AMOPSTRATEGY, AMPROCNUM, ATTNUM, CLAOID, OPFAMILYOID, PROCNAMEARGSNSP, AUTHNAME, AUTHOID, CASTSOURCETARGET, CONSTROID, INDEXRELID, NAMESPACENAME, NAMESPACEOID, OPERNAMENSP, TYPENAMENSP, ATTNAME, OPEROID, PROCOID, RANGEMULTIRANGE, RANGETYPE, RELNAMENSP, RELOID, SEQRELID, STATEXTDATASTXOID, STATEXTOID, STATRELATTINH, TYPEOID};
+use crate::cacheinfo::{COLLOID, AGGFNOID, AMOPOPID, AMOPSTRATEGY, AMPROCNUM, ATTNUM, CLAOID, OPFAMILYOID, PROCNAMEARGSNSP, AUTHNAME, ENUMOID, ENUMTYPOIDNAME, AUTHOID, CASTSOURCETARGET, CONSTROID, INDEXRELID, NAMESPACENAME, NAMESPACEOID, OPERNAMENSP, TYPENAMENSP, ATTNAME, OPEROID, PROCOID, RANGEMULTIRANGE, RANGETYPE, RELNAMENSP, RELOID, SEQRELID, STATEXTDATASTXOID, STATEXTOID, STATRELATTINH, TYPEOID};
 
 const ANUM_PG_CLASS_OID: i32 = 1;
 const ANUM_PG_CLASS_RELISSHARED: i32 = 16;
@@ -1724,7 +1724,52 @@ fn pg_type_typnamespace(typid: Oid) -> PgResult<Option<Oid>> {
     Ok(Some(nsp))
 }
 
+const ANUM_PG_ENUM_OID: i32 = 1;
+const ANUM_PG_ENUM_ENUMTYPID: i32 = 2;
+const ANUM_PG_ENUM_ENUMLABEL: i32 = 4;
+
+fn pg_enum_shape(tuple: &crate::CatCTuple, cache_id: i32) -> syscache_seams::PgEnumShape {
+    let t = tuple.tuple();
+    let hdr = t.t_data();
+    syscache_seams::PgEnumShape {
+        oid: getattr(&t, cache_id, ANUM_PG_ENUM_OID).as_oid(),
+        enumtypid: getattr(&t, cache_id, ANUM_PG_ENUM_ENUMTYPID).as_oid(),
+        enumlabel: getattr_name(&t, cache_id, ANUM_PG_ENUM_ENUMLABEL),
+        xmin: hdr.xmin(),
+        xmin_committed: hdr.xmin_committed(),
+    }
+}
+
+fn lookup_pg_enum_by_oid(enum_oid: Oid) -> PgResult<Option<syscache_seams::PgEnumShape>> {
+    let Some(tuple) = SearchSysCache1(ENUMOID, SysCacheKey::Value(Datum::from_oid(enum_oid)))?
+    else {
+        return Ok(None);
+    };
+    let shape = pg_enum_shape(&tuple, ENUMOID);
+    ReleaseSysCache(tuple);
+    Ok(Some(shape))
+}
+
+fn lookup_pg_enum_by_typid_label(
+    typid: Oid,
+    label: &str,
+) -> PgResult<Option<syscache_seams::PgEnumShape>> {
+    let Some(tuple) = SearchSysCache2(
+        ENUMTYPOIDNAME,
+        SysCacheKey::Value(Datum::from_oid(typid)),
+        SysCacheKey::Str(label),
+    )?
+    else {
+        return Ok(None);
+    };
+    let shape = pg_enum_shape(&tuple, ENUMTYPOIDNAME);
+    ReleaseSysCache(tuple);
+    Ok(Some(shape))
+}
+
 pub(crate) fn install() {
+    syscache_seams::lookup_pg_enum_by_oid::set(lookup_pg_enum_by_oid);
+    syscache_seams::lookup_pg_enum_by_typid_label::set(lookup_pg_enum_by_typid_label);
     syscache_seams::pg_attribute_attoptions::set(pg_attribute_attoptions);
     syscache_seams::pg_type_typnamespace::set(pg_type_typnamespace);
     syscache_seams::search_syscache_exists_reloid::set(search_syscache_exists_reloid);
