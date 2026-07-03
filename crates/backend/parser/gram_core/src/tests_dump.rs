@@ -977,7 +977,19 @@ fn c_reference_vectors() {
         if stmt.is_empty() && want.is_empty() {
             continue;
         }
-        let got = run_one(stmt);
+        let got = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_one(stmt)))
+        {
+            Ok(g) => g,
+            Err(e) => {
+                let msg = e
+                    .downcast_ref::<&str>()
+                    .map(|s| s.to_string())
+                    .or_else(|| e.downcast_ref::<String>().cloned())
+                    .unwrap_or_default();
+                failures.push(format!("stmt {stmt:?} PANICKED: {msg}"));
+                continue;
+            }
+        };
         if got != *want {
             failures.push(format!("stmt {stmt:?}\n  C:    {want}\n  rust: {got}"));
         }
