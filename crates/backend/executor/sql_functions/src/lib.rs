@@ -281,6 +281,33 @@ fn build_sources<'mcx>(
     Ok(sources)
 }
 
+
+fn copy_result_desc<'mcx>(
+    mcx: Mcx<'mcx>,
+    src: &types_tuple::TupleDescData<'_>,
+) -> PgResult<std::rc::Rc<types_tuple::TupleDescData<'mcx>>> {
+    let n = src.attrs.len();
+    let mut attrs: PgVec<'mcx, types_tuple::FormData_pg_attribute> = PgVec::new_in(mcx);
+    attrs.try_reserve_exact(n).map_err(|_| mcx.oom(n))?;
+    for a in src.attrs.iter() {
+        attrs.push(*a);
+    }
+    let mut compact: PgVec<'mcx, types_tuple::CompactAttribute> = PgVec::new_in(mcx);
+    compact.try_reserve_exact(n).map_err(|_| mcx.oom(n))?;
+    for c in src.compact_attrs.iter() {
+        compact.push(c.clone());
+    }
+    Ok(std::rc::Rc::new(types_tuple::TupleDescData {
+        natts: src.natts,
+        tdtypeid: src.tdtypeid,
+        tdtypmod: src.tdtypmod,
+        tdrefcount: -1,
+        constr: None,
+        compact_attrs: compact,
+        attrs,
+    }))
+}
+
 fn check_body_utility_query(q: &Query<'_>) -> PgResult<()> {
     if q.commandType != CmdType::CMD_UTILITY {
         return Ok(());
@@ -482,6 +509,10 @@ fn execute_body<'mcx>(
         let last = *state.sources.last().expect("nonempty body");
         let desc = plancache::CachedPlanResultDesc(last)
             .expect("retval check guaranteed a result tupdesc");
+        // C CreateTupleDescCopy into the fcache context: the source's desc
+        // storage dies with the plancache entry; the cached slot must not
+        // outlive-borrow it.
+        let desc = copy_result_desc(mcx, &desc)?;
         state.slot =
             Some(exectuples::make_tuple_table_slot(mcx, TupleSlotKind::MinimalTuple, Some(desc)));
     }
