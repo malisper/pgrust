@@ -2113,6 +2113,16 @@ fn select_kernel(state: &ExprState<'_>) -> Kernel {
                     strict: !matches!(steps[0], Step::FuncExpr { .. }),
                 }
             }
+            Step::AggPlainTransByVal { call, pergroup }
+                if matches!(steps[1], Step::DoneNoReturn) =>
+            {
+                Kernel::AggTransByVal { call: *call, pergroup: *pergroup, strict: false }
+            }
+            Step::AggPlainTransStrictByVal { call, pergroup }
+                if matches!(steps[1], Step::DoneNoReturn) =>
+            {
+                Kernel::AggTransByVal { call: *call, pergroup: *pergroup, strict: true }
+            }
             _ => match (var_src(&steps[0]), assign_var_src(&steps[0])) {
                 (Some((src, attnum, out)), _) if out.is_result() => {
                     Kernel::JustVarVirt { src, attnum }
