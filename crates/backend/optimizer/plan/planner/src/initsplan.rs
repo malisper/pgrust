@@ -1279,6 +1279,9 @@ fn distribute_qual_to_rels<'mcx>(
         for pidx in idx + 1..items.len() {
             let pscope = match &items[pidx] {
                 JtItem::Plain { qualscope, .. } | JtItem::Sj { qualscope, .. } => qualscope,
+                // C postpones onto jointree-level jtitems; SecQuals items are
+                // this port's RTE-attached extras — never a postponement target.
+                JtItem::SecQuals { .. } => continue,
             };
             if crate::relnode::relids_is_subset(&relids, pscope) {
                 lateral_pending[pidx].push(clause);
