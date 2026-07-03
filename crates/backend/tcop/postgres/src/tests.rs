@@ -192,3 +192,82 @@ fn show_usage_reports_without_reset() {
     // Without ResetUsage, ShowUsage still reports (totals leg).
     let _ = ShowUsage("TEST STATISTICS");
 }
+
+fn install_ipc_stubs() {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        use init_small::globals as g;
+        s_lock_seams::perform_spin_delay::set(|_| std::thread::yield_now());
+        s_lock_seams::finish_spin_delay::set(|_| {});
+        shmem_seams::mul_size::set(|a, b| Ok(a * b));
+        shmem_seams::add_size::set(|a, b| Ok(a + b));
+        ipc_seams::on_shmem_exit::set(|_, _| {});
+        pg_sema_seams::pg_semaphore_create::set(|_| {});
+        g::SetMaxConnections(4);
+        g::set_max_worker_processes(2);
+        g::SetMaxBackends(4 + 3 + 2 + 2 + types_storage::storage::NUM_SPECIAL_WORKER_PROCS);
+        lmgr_proc::InitProcGlobal(&lmgr_proc::ProcGlobalConfig {
+            autovacuum_worker_slots: 3,
+            max_wal_senders: 2,
+            max_prepared_xacts: 2,
+            fastpath_lock_groups_per_backend: 1,
+        });
+        procsignal::ProcSignalShmemInit();
+    });
+}
+
+// The shutdown/cancel delivery spine end-to-end: another thread "kills" this
+// backend through the procsignal surface; the parked backend wakes, drains,
+// and its CFI raises C's exact SQLSTATEs (57014 cancel, 57P01 die).
+#[test]
+fn thread_signal_sigint_cancels_and_sigterm_terminates() {
+    install_test_seams();
+    install_ipc_stubs();
+    let _serial = CANCEL_ARM.lock().unwrap();
+
+    let (err_tx, err_rx) = std::sync::mpsc::channel();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let backend = std::thread::spawn(move || {
+        use init_small::globals as g;
+        g::SetMyProcNumber(2);
+        g::SetMyProcPid(6161);
+        procsignal::ProcSignalInit(&[]).unwrap();
+        let h = latch::allocate_local_latch();
+        latch::InitLatch(h);
+        g::SetMyLatch(Some(h));
+        install_thread_signal_handlers();
+        ready_tx.send(()).unwrap();
+
+        let proc_latch = &lmgr_proc::GetPGProcByNumber(2).procLatch;
+        loop {
+            while !proc_latch.is_set() {
+                std::thread::yield_now();
+            }
+            proc_latch.is_set.store(0, Ordering::SeqCst);
+            // The WaitLatch wake path: drain dispositions, then CFI.
+            if let Err(e) = procsignal::DrainThreadSignals().and_then(|_| check_for_interrupts())
+            {
+                let fatal = e.level() >= types_error::FATAL;
+                err_tx.send(e).unwrap();
+                if fatal {
+                    return;
+                }
+            }
+        }
+    });
+
+    ready_rx.recv().unwrap();
+    let timeout = std::time::Duration::from_secs(10);
+
+    assert_eq!(procsignal::SendThreadSignal(6161, libc::SIGINT), 0);
+    let err = err_rx.recv_timeout(timeout).expect("backend must surface the cancel");
+    assert_eq!(err.level(), types_error::ERROR);
+    assert_eq!(err.sqlstate, types_error::ERRCODE_QUERY_CANCELED); /* 57014 */
+    assert!(err.message.contains("user request"));
+
+    assert_eq!(procsignal::SendThreadSignal(6161, libc::SIGTERM), 0);
+    let err = err_rx.recv_timeout(timeout).expect("backend must surface the die");
+    assert_eq!(err.level(), types_error::FATAL);
+    assert_eq!(err.sqlstate, types_error::ERRCODE_ADMIN_SHUTDOWN); /* 57P01 */
+    backend.join().unwrap();
+}

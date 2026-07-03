@@ -5,7 +5,7 @@ use std::sync::Mutex;
 use elog::{elog as report, ereport};
 use types_core::init::{BackendType, BACKEND_NUM_TYPES};
 use types_core::pid_t;
-use types_error::{DEBUG2, DEBUG4};
+use types_error::{DEBUG2, DEBUG3, DEBUG4};
 use types_storage::storage::MAX_IO_WORKERS;
 
 #[cfg(test)]
@@ -263,15 +263,32 @@ pub fn CountChildren(target_mask: u32) -> i32 {
 
 pub fn SignalChildren(signal: i32, target_mask: u32) -> bool {
     let matched = for_each_match(target_mask, |bp| {
-        // C kill(pid, signal); a silent drop would hang shutdown, so the
-        // undesigned per-thread delivery fails with its owner's name.
-        panic!(
-            "SignalChildren: delivering signal {} to {} thread pid {} — per-thread \
-             signal delivery is undesigned (pmchild redesign, tcop/interrupt drain)",
-            signal,
-            launch_backend::postmaster_child_name(bp.bkend_type),
-            bp.pid
+        let _ = report(
+            DEBUG3,
+            format!(
+                "sending signal {} to {} process with pid {}",
+                signal,
+                launch_backend::postmaster_child_name(bp.bkend_type),
+                bp.pid
+            ),
         );
+        if bp.bkend_type == BackendType::DeadEndBackend {
+            // Dead-end children never ProcSignalInit (no slot to pend on);
+            // C reaches them because kill hits the whole process.
+            panic!(
+                "SignalChildren: signal {} to dead-end backend pid {} undeliverable \
+                 (no ProcSignal slot; backend_startup dead-end lane)",
+                signal, bp.pid
+            );
+        }
+        // kill(pid, signal): pend on the target's ProcSignal slot + procLatch
+        // wake (procsignal::SendThreadSignal). ESRCH matches C only for an
+        // exit race; a launched-but-unregistered thread would drop the signal
+        // and hang shutdown, and the ServerLoop SIGKILL escalation is the
+        // loud backstop for that window.
+        if procsignal::SendThreadSignal(bp.pid, signal) < 0 {
+            let _ = report(DEBUG3, format!("kill({},{}) failed: No such process", bp.pid, signal));
+        }
     });
     matched > 0
 }
@@ -284,5 +301,8 @@ pub fn init_seams() {
     pmchild_seams::release_postmaster_child_slot::set(ReleasePostmasterChildSlot);
     pmchild_seams::set_child_pid::set(SetChildPid);
     pmchild_seams::count_children::set(CountChildren);
+    pmchild_seams::find_postmaster_child_by_pid::set(|pid| {
+        FindPostmasterChildByPid(pid).map(|c| (c.child_slot, c.bkend_type))
+    });
     pmchild_seams::signal_children::set(SignalChildren);
 }

@@ -11,6 +11,7 @@ use ::types_error::{ErrorLocation, PgResult, ERRCODE_QUERY_CANCELED, ERROR, FATA
 
 pub mod main_loop;
 pub mod simple_query;
+pub mod switches;
 #[cfg(test)]
 mod tests;
 
@@ -35,8 +36,7 @@ pub fn init_seams() {
     postgres_seams::set_debug_options::set(set_debug_options);
     postgres_seams::set_plan_disabling_options::set(set_plan_disabling_options);
     postgres_seams::get_stats_option_name::set(get_stats_option_name);
-    // postgres_seams::process_postgres_switches stays uninstalled (loud):
-    // the getopt surface lands with the single-user/postmaster consumers.
+    postgres_seams::process_postgres_switches::set(switches::process_postgres_switches);
 }
 
 fn postgres_main_seam(dbname: &str, username: &str) -> ! {
@@ -264,6 +264,30 @@ pub fn ProcessInterrupts() -> PgResult<()> {
     Ok(())
 }
 
+// The C pqsignal block at PostgresMain entry (postgres.c:4217-4251), rendered
+// as pqsignal_thread dispositions drained at this thread's latch/client-IO
+// wakes. am_walsender arm absent (walsender unported).
+pub fn install_thread_signal_handlers() {
+    use procsignal::ThreadSignalHandler::{Fallible, Ignore, Simple};
+    procsignal::pqsignal_thread(libc::SIGHUP, Simple(interrupt::SignalHandlerForConfigReload));
+    procsignal::pqsignal_thread(libc::SIGINT, Simple(StatementCancelHandler));
+    procsignal::pqsignal_thread(libc::SIGTERM, Fallible(die));
+    if init_small::globals::IsUnderPostmaster() {
+        procsignal::pqsignal_thread(libc::SIGQUIT, Simple(quickdie_handler));
+    } else {
+        procsignal::pqsignal_thread(libc::SIGQUIT, Fallible(die));
+    }
+    procsignal::pqsignal_thread(libc::SIGPIPE, Ignore);
+    procsignal::pqsignal_thread(libc::SIGUSR1, Simple(procsignal::procsignal_sigusr1_handler));
+    procsignal::pqsignal_thread(libc::SIGUSR2, Ignore);
+    procsignal::pqsignal_thread(libc::SIGFPE, Fallible(FloatExceptionHandler));
+    procsignal::pqsignal_thread(libc::SIGCHLD, Ignore);
+}
+
+fn quickdie_handler() {
+    quickdie()
+}
+
 pub fn die() -> PgResult<()> {
     use init_small::globals as g;
     if !elog::config::proc_exit_inprogress() {
@@ -351,6 +375,7 @@ pub fn FloatExceptionHandler() -> PgResult<()> {
 
 pub fn ProcessClientReadInterrupt(blocked: bool) -> PgResult<()> {
     use init_small::globals as g;
+    procsignal::DrainThreadSignals()?;
     if DoingCommandRead() {
         check_for_interrupts()?;
 
@@ -370,6 +395,7 @@ pub fn ProcessClientReadInterrupt(blocked: bool) -> PgResult<()> {
 
 pub fn ProcessClientWriteInterrupt(blocked: bool) -> PgResult<()> {
     use init_small::globals as g;
+    procsignal::DrainThreadSignals()?;
     if g::ProcDiePending() {
         if blocked {
             if g::InterruptHoldoffCount() == 0 && g::CritSectionCount() == 0 {
