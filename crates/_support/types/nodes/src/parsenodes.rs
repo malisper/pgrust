@@ -598,6 +598,32 @@ pub struct VacuumStmt<'mcx> {
     pub is_vacuumcmd: bool,
 }
 
+#[derive(Default)]
+pub struct ClusterStmt<'mcx> {
+    pub relation: Option<Node<'mcx>>,
+    pub indexname: Option<&'mcx str>,
+    pub params: NodeList<'mcx>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(u32)]
+pub enum ReindexObjectType {
+    #[default]
+    REINDEX_OBJECT_INDEX = 0,
+    REINDEX_OBJECT_TABLE,
+    REINDEX_OBJECT_SCHEMA,
+    REINDEX_OBJECT_SYSTEM,
+    REINDEX_OBJECT_DATABASE,
+}
+
+#[derive(Default)]
+pub struct ReindexStmt<'mcx> {
+    pub kind: ReindexObjectType,
+    pub relation: Option<Node<'mcx>>,
+    pub name: Option<&'mcx str>,
+    pub params: NodeList<'mcx>,
+}
+
 // C: relation is a RangeVar; oid InvalidOid until vacuum looks it up.
 #[derive(Default)]
 pub struct VacuumRelation<'mcx> {
@@ -1047,6 +1073,12 @@ unsafe impl<'mcx> NodeVariant<'mcx> for CommonTableExpr<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for VacuumStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_VacuumStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for ClusterStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_ClusterStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for ReindexStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_ReindexStmt;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for VacuumRelation<'mcx> {
     const TAG: NodeTag = NodeTag::T_VacuumRelation;

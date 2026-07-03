@@ -377,7 +377,18 @@ fn dispatch_switch<'mcx>(
 
         T_LoadStmt => handler_gap("load_file (dfmgr lane)"),
         T_CallStmt => handler_gap("ExecuteCallStmt (functioncmds lane)"),
-        T_ClusterStmt => handler_gap("cluster (cluster lane)"),
+        T_ClusterStmt => {
+            let stmt = parsetree
+                .as_variant::<types_nodes::parsenodes::ClusterStmt>()
+                .expect("ClusterStmt");
+            cluster::cluster(mcx, stmt, is_top_level)?;
+        }
+        T_ReindexStmt => {
+            let stmt = parsetree
+                .as_variant::<types_nodes::parsenodes::ReindexStmt>()
+                .expect("ReindexStmt");
+            indexcmds::ExecReindex(mcx, stmt, is_top_level)?;
+        }
         T_VacuumStmt => {
             // ExecVacuum's VACUUM half lives in commands_vacuum, the ANALYZE
             // half in commands_analyze (each panics on the other's lane).

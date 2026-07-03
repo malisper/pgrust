@@ -41,6 +41,7 @@ use heapam_visibility_seams as hv_seam;
 pub mod bitmap;
 pub mod dml;
 pub mod fetch;
+pub mod freeze;
 pub mod hio;
 pub mod index_delete;
 pub mod inplace;

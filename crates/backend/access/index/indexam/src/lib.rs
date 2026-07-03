@@ -89,10 +89,9 @@ fn relation_checks(indexRelation: &Relation<'_>) -> PgResult<()> {
     Ok(())
 }
 
-// REINDEX is unimplemented repo-wide (C's list statically empty); reroute via catalog/index.c when it lands.
 #[inline]
-fn reindex_is_processing_index(_indexId: Oid) -> bool {
-    false
+fn reindex_is_processing_index(indexId: Oid) -> bool {
+    types_rel::reindex::ReindexIsProcessingIndex(indexId)
 }
 
 #[cold]

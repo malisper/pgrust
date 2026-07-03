@@ -19,6 +19,7 @@ catalog_namespace = { path = "../../catalog/catalog_namespace" }
 catalog_heap = { path = "../../catalog/catalog_heap" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
 miscinit = { path = "../../utils/init/miscinit" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
 xact = { path = "../../access/transam/xact" }
 datum = { path = "../../../_support/types/datum" }
 types_scan = { path = "../../../_support/types/types_scan" }
@@ -38,6 +39,7 @@ tablecmds_seams = { path = "../tablecmds_seams" }
 snapmgr = { path = "../../utils/time/snapmgr" }
 catalog_indexing = { path = "../../catalog/catalog_indexing" }
 catalog_index = { path = "../../catalog/catalog_index" }
+catalog_index_seams = { path = "../../catalog/catalog_index_seams" }
 lmgr = { path = "../../storage/lmgr/lmgr" }
 pg_attrdef = { path = "../../catalog/pg_attrdef" }
 pg_constraint = { path = "../../catalog/pg_constraint" }
