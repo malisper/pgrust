@@ -187,22 +187,17 @@ pub(crate) fn add_relation_not_null_constraints<'mcx>(
             &nnnames,
         )?;
         nnnames.push(str_in(mcx, name.as_str())?);
-        pg_constraint::CreateConstraintEntry(
-            mcx,
-            &pg_constraint::CheckOrNotNullEntry {
-                name: name.as_str(),
-                namespace_id: rel.rd_rel.relnamespace,
-                contype: pg_constraint::CONSTRAINT_NOTNULL,
-                is_enforced: true,
-                is_validated: true,
-                relid: rel.rd_id,
-                conkey: &[attnum],
-                conbin: None,
-                is_local: true,
-                inhcount: 0,
-                is_no_inherit: cdef.is_no_inherit,
-            },
-        )?;
+        let conkey = [attnum];
+        let mut entry = pg_constraint::ConstraintEntry::base(
+            name.as_str(),
+            rel.rd_rel.relnamespace,
+            pg_constraint::CONSTRAINT_NOTNULL,
+            rel.rd_id,
+        );
+        entry.conkey = &conkey;
+        entry.n_keys = 1;
+        entry.is_no_inherit = cdef.is_no_inherit;
+        pg_constraint::CreateConstraintEntry(mcx, &entry)?;
     }
     Ok(())
 }
@@ -287,22 +282,20 @@ fn store_rel_check<'mcx>(
             att_nos.push(attno);
         }
     }
-    pg_constraint::CreateConstraintEntry(
-        mcx,
-        &pg_constraint::CheckOrNotNullEntry {
-            name: ccname,
-            namespace_id: rel.rd_rel.relnamespace,
-            contype: pg_constraint::CONSTRAINT_CHECK,
-            is_enforced,
-            is_validated,
-            relid: rel.rd_id,
-            conkey: &att_nos,
-            conbin: Some(ccbin.as_str()),
-            is_local: true,
-            inhcount: 0,
-            is_no_inherit: false,
-        },
-    )
+    // Divergence: C also runs recordDependencyOnSingleRelExpr on the cooked
+    // expression (dependency.c walker unported).
+    let mut entry = pg_constraint::ConstraintEntry::base(
+        ccname,
+        rel.rd_rel.relnamespace,
+        pg_constraint::CONSTRAINT_CHECK,
+        rel.rd_id,
+    );
+    entry.conkey = &att_nos;
+    entry.n_keys = att_nos.len();
+    entry.is_enforced = is_enforced;
+    entry.is_validated = is_validated;
+    entry.conbin = Some(ccbin.as_str());
+    pg_constraint::CreateConstraintEntry(mcx, &entry)
 }
 
 // SetRelationNumChecks (heap.c): update pg_class.relchecks (also fires the
