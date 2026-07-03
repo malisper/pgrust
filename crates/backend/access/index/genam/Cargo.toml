@@ -23,6 +23,10 @@ exectuples = { path = "../../../executor/exectuples" }
 heaptuple = { path = "../../common/heaptuple" }
 xact = { path = "../../transam/xact" }
 miscinit = { path = "../../../utils/init/miscinit" }
+aclchk_seams = { path = "../../../catalog/aclchk_seams" }
+types_nodes = { path = "../../../../_support/types/nodes" }
+lsyscache = { path = "../../../utils/cache/lsyscache" }
+fmgr_core = { path = "../../../utils/fmgr/fmgr_core" }
 init_small = { path = "../../../utils/init/init_small" }
 elog = { path = "../../../utils/error/elog" }
 snapmgr_seams = { path = "../../../utils/time/snapmgr_seams" }

@@ -246,6 +246,7 @@ pub fn init_seams() {
     namespace_seams::at_eoxact_namespace::set(AtEOXact_Namespace);
     namespace_seams::at_eosubxact_namespace::set(AtEOSubXact_Namespace);
     namespace_seams::is_temp_toast_namespace::set(isTempToastNamespace);
+    namespace_seams::is_temp_namespace::set(isTempNamespace);
     namespace_seams::is_temp_or_temp_toast_namespace::set(isTempOrTempToastNamespace);
     namespace_seams::get_temp_namespace_proc_number::set(GetTempNamespaceProcNumber);
     namespace_seams::initialize_search_path::set(InitializeSearchPath);

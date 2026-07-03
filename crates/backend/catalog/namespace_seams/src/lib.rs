@@ -24,6 +24,12 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // isTempNamespace(namespaceId) (namespace.c): infallible, reads only
+    // myTempNamespace.
+    pub fn is_temp_namespace(namespace_id: Oid) -> bool
+);
+
+seam_core::seam!(
     pub fn at_eosubxact_namespace(
         is_commit: bool,
         my_subid: types_core::SubTransactionId,

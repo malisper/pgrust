@@ -514,6 +514,18 @@ pub fn ExplainNode<'mcx>(
         show_plan_tlist(node, ancestors, es)?;
     }
 
+    let unique_join = match node.node_tag() {
+        NodeTag::T_NestLoop => Some(node.as_nest_loop().unwrap().join.inner_unique),
+        NodeTag::T_HashJoin => Some(node.as_hash_join().unwrap().join.inner_unique),
+        NodeTag::T_MergeJoin => Some(node.as_merge_join().unwrap().join.inner_unique),
+        _ => None,
+    };
+    if let Some(iu) = unique_join {
+        if es.verbose && iu {
+            ExplainPropertyBool("Inner Unique", iu, es);
+        }
+    }
+
     match node.node_tag() {
         NodeTag::T_SeqScan | NodeTag::T_FunctionScan | NodeTag::T_CteScan => {
             show_scan_qual(&plan.qual, "Filter", node, ancestors, es)?;
@@ -2097,18 +2109,23 @@ fn ExplainFunctionTarget<'mcx>(
             objectname = lsyscache::get_func_name(mcx, fe.funcid)?;
         }
     }
+    let namespace = match (es.verbose, &objectname) {
+        (true, Some(_)) => {
+            let rtfunc = rte.functions.nth(0).as_range_tbl_function().expect("functions cell");
+            let fe = rtfunc.funcexpr.and_then(|n| n.as_func_expr()).expect("FuncExpr");
+            lsyscache::get_namespace_name_or_temp(mcx, lsyscache::get_func_namespace(fe.funcid)?)?
+        }
+        _ => None,
+    };
     let objectname = objectname.as_ref().map(|s| s.as_str());
-    if es.verbose {
-        node_gap(
-            "ExplainTargetRel",
-            "VERBOSE schema qualification needs get_namespace_name_or_temp (lsyscache lane)",
-        );
-    }
     let refname = es.rtable_names[rti as usize - 1]
         .or_else(|| rte.eref.expect("RTE without eref").aliasname)
         .expect("scan RTE has a refname");
     append!(es, " on");
-    if let Some(obj) = objectname {
+    if let Some(ns) = &namespace {
+        let obj = objectname.expect("namespace implies objectname");
+        append!(es, " {}.{}", quote_identifier(ns.as_str()), quote_identifier(obj));
+    } else if let Some(obj) = objectname {
         append!(es, " {}", quote_identifier(obj));
     }
     if objectname != Some(refname) {
@@ -2138,17 +2155,19 @@ fn ExplainTargetRel<'mcx>(rti: types_core::Index, es: &mut ExplainState<'mcx>) -
             &format!("{other:?} target arm unported (M2+ plan lanes)"),
         ),
     };
-    if es.verbose {
-        node_gap(
-            "ExplainTargetRel",
-            "VERBOSE schema qualification needs get_namespace_name_or_temp (lsyscache lane)",
-        );
-    }
+    let namespace = if es.verbose && rte.rtekind == RTEKind::RTE_RELATION {
+        lsyscache::get_namespace_name_or_temp(mcx, lsyscache::get_rel_namespace(rte.relid)?)?
+    } else {
+        None
+    };
     let refname = es.rtable_names[rti as usize - 1]
         .or_else(|| rte.eref.expect("RTE without eref").aliasname)
         .expect("scan RTE has a refname");
     append!(es, " on");
-    if let Some(obj) = objectname {
+    if let Some(ns) = &namespace {
+        let obj = objectname.expect("namespace implies objectname");
+        append!(es, " {}.{}", quote_identifier(ns.as_str()), quote_identifier(obj));
+    } else if let Some(obj) = objectname {
         append!(es, " {}", quote_identifier(obj));
     }
     if objectname != Some(refname) {

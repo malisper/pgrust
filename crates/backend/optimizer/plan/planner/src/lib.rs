@@ -3,6 +3,7 @@
 //! needs; everything past the lane is a named panic citing C fn + lane.
 
 pub mod allpaths;
+pub mod analyzejoins;
 pub mod clausesel;
 pub mod costsize;
 pub mod createplan;

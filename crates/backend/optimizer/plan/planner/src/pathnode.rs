@@ -1383,7 +1383,7 @@ pub fn create_unique_path<'mcx>(
 
     if rel_rtekind == types_pathnodes::RTE_RELATION
         && sjinfo.semi_can_btree
-        && relation_has_unique_index_for(run, rel_id, &uniq_exprs, &in_operators)?
+        && relation_has_unique_index_for(run, rel_id, &[], &uniq_exprs, &in_operators)?
     {
         path.rows = rel_rows;
         path.disabled_nodes = sub_disabled;
@@ -1513,18 +1513,23 @@ pub fn create_unique_path<'mcx>(
     Ok(Some(id))
 }
 
-// relation_has_unique_index_for (indxpath.c), restrictlist from the rel's
-// mergejoinable var-op-pseudoconstant baserestrictinfo clauses plus the
-// caller's expr/operator pairs.
-fn relation_has_unique_index_for<'mcx>(
+// relation_has_unique_index_for (indxpath.c): the caller's join clauses
+// (outer_is_left already set) plus the rel's mergejoinable
+// var-op-pseudoconstant baserestrictinfo clauses plus expr/operator pairs.
+pub(crate) fn relation_has_unique_index_for<'mcx>(
     run: &mut PlannerRun<'mcx>,
     rel_id: RelId,
+    restrictlist: &[types_pathnodes::RinfoId],
     exprlist: &[types_pathnodes::NodeId],
     oprlist: &[types_pathnodes::Oid],
 ) -> PgResult<bool> {
     debug_assert!(exprlist.len() == oprlist.len());
+    if run.root.rel(rel_id).indexlist.is_empty() {
+        return Ok(false);
+    }
     let rel_relid = run.root.rel(rel_id).relid;
     let mut restrict_rids: PgVec<'_, types_pathnodes::RinfoId> = PgVec::new_in(run.mcx);
+    restrict_rids.extend(restrictlist.iter().copied());
     for i in 0..run.root.rel(rel_id).baserestrictinfo.len() {
         let rid = run.root.rel(rel_id).baserestrictinfo[i];
         let ri = run.root.rinfo(rid);

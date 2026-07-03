@@ -166,15 +166,14 @@ pub fn get_namespace_name<'mcx>(mcx: Mcx<'mcx>, nspid: Oid) -> PgResult<Option<P
 }
 
 pub fn get_namespace_name_or_temp<'mcx>(
-    _mcx: Mcx<'mcx>,
+    mcx: Mcx<'mcx>,
     nspid: Oid,
 ) -> PgResult<Option<PgString<'mcx>>> {
-    // C: isTempNamespace(nspid) ? "pg_temp" : get_namespace_name(nspid).
-    panic!(
-        "get_namespace_name_or_temp({nspid}): isTempNamespace is ported \
-         (catalog_namespace) but lsyscache cannot dep it (cycle) — needs a \
-         namespace_seams isTempNamespace seam"
-    );
+    if namespace_seams::is_temp_namespace::call(nspid) {
+        Ok(Some(PgString::from_str_in("pg_temp", mcx)?))
+    } else {
+        get_namespace_name(mcx, nspid)
+    }
 }
 
 pub fn get_range_subtype(range_oid: Oid) -> PgResult<Oid> {

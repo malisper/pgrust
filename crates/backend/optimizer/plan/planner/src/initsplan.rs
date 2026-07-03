@@ -39,7 +39,7 @@ pub fn build_base_rel_tlists<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResult<()> {
 }
 
 // pull_var_clause, PVC_RECURSE_AGGREGATES|WINDOWFUNCS + INCLUDE_PLACEHOLDERS.
-fn pull_var_nodes<'mcx>(node: Node<'mcx>, out: &mut PgVec<'mcx, Node<'mcx>>) {
+pub(crate) fn pull_var_nodes<'mcx>(node: Node<'mcx>, out: &mut PgVec<'mcx, Node<'mcx>>) {
     match node.node_tag() {
         NodeTag::T_Var => out.push(node),
         NodeTag::T_Const => {}
@@ -173,6 +173,32 @@ pub fn add_vars_to_targetlist<'mcx>(
         run.root.rel_mut(rel_id).attr_needed[ndx] = relids_union(mcx, &cur, where_needed);
     }
     Ok(())
+}
+
+// add_vars_to_attr_needed (initsplan.c): attr_needed bits only, no reltarget
+// additions (the rebuild path after join removal).
+pub(crate) fn add_vars_to_attr_needed<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    vars: &[Node<'mcx>],
+    where_needed: &types_pathnodes::Relids<'mcx>,
+) {
+    let mcx = run.mcx;
+    debug_assert!(!relids_is_empty(where_needed));
+    for &node in vars {
+        let var = node.as_var().expect("Var");
+        let rel_id = find_base_rel(&run.root, var.varno);
+        let min_attr = {
+            let rel = run.root.rel(rel_id);
+            if crate::relnode::relids_is_subset(where_needed, &rel.relids) {
+                continue;
+            }
+            debug_assert!(var.varattno >= rel.min_attr && var.varattno <= rel.max_attr);
+            rel.min_attr
+        };
+        let ndx = (var.varattno - min_attr) as usize;
+        let cur = run.root.rel_mut(rel_id).attr_needed[ndx].take();
+        run.root.rel_mut(rel_id).attr_needed[ndx] = relids_union(mcx, &cur, where_needed);
+    }
 }
 
 enum JtItem<'mcx> {
