@@ -3,20 +3,32 @@ use types_error::PgResult;
 use types_storage::{RelFileLocatorBackend, SharedInvalidationMessage};
 
 use crate::invalidate::{CallRelSyncCallbacks, CallSyscacheCallbacks};
-use crate::msgs::{subgroup_slice, InvalidationMsgsGroup, MsgArrays};
-use crate::{with_state, CALLBACKS};
+use crate::msgs::InvalidationMsgsGroup;
+use crate::CALLBACKS;
 
+// Catcache is the dominant replay kind (every catalog tuple change); its arm
+// stays inline in the walk like C's switch, the rest go through one call.
+#[inline]
 pub fn LocalExecuteInvalidationMessage(msg: &SharedInvalidationMessage) -> PgResult<()> {
-    let my_database_id = init_small::globals::MyDatabaseId();
-
     match *msg {
         SharedInvalidationMessage::Catcache(m) => {
-            if m.dbId == my_database_id || m.dbId == InvalidOid {
+            if m.dbId == init_small::globals::MyDatabaseId() || m.dbId == InvalidOid {
                 snapmgr_seams::invalidate_catalog_snapshot::call();
                 syscache_seams::sys_cache_invalidate::call(m.id as i32, m.hashValue)?;
                 CallSyscacheCallbacks(m.id as i32, m.hashValue)?;
             }
+            Ok(())
         }
+        _ => local_execute_other(msg),
+    }
+}
+
+#[inline(never)]
+fn local_execute_other(msg: &SharedInvalidationMessage) -> PgResult<()> {
+    let my_database_id = init_small::globals::MyDatabaseId();
+
+    match *msg {
+        SharedInvalidationMessage::Catcache(_) => unreachable!("dispatched inline"),
         SharedInvalidationMessage::Catalog(m) => {
             if m.dbId == my_database_id || m.dbId == InvalidOid {
                 snapmgr_seams::invalidate_catalog_snapshot::call();
@@ -133,12 +145,5 @@ pub fn ProcessInvalidationMessages(
     group: &InvalidationMsgsGroup,
     func: &mut dyn FnMut(&SharedInvalidationMessage) -> PgResult<()>,
 ) -> PgResult<()> {
-    with_state(|state| {
-        for subgroup in [crate::CAT_CACHE_MSGS, crate::REL_CACHE_MSGS] {
-            for msg in subgroup_slice(&state.msg_arrays, group, subgroup) {
-                func(msg)?;
-            }
-        }
-        Ok(())
-    })
+    crate::eoxact::process_group_with(group, func)
 }

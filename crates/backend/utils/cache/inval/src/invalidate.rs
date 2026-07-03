@@ -271,11 +271,11 @@ pub fn CacheRegisterSyscacheCallback(
         }
 
         let count = t.syscache_count as i16;
-        let cidx = cacheid as usize;
-        if t.syscache_links[cidx] == 0 {
-            t.syscache_links[cidx] = count + 1;
+        let head = crate::SYSCACHE_LINKS.with(|links| links[cacheid as usize].get());
+        if head == 0 {
+            crate::SYSCACHE_LINKS.with(|links| links[cacheid as usize].set(count + 1));
         } else {
-            let mut i = (t.syscache_links[cidx] - 1) as usize;
+            let mut i = (head - 1) as usize;
             while t.syscache_list[i].expect("linked slot populated").link > 0 {
                 i = (t.syscache_list[i].expect("linked slot populated").link - 1) as usize;
             }
@@ -317,12 +317,22 @@ pub fn CacheRegisterRelSyncCallback(func: RelSyncCallbackFunction, arg: Datum) -
     })
 }
 
+#[inline]
 pub fn CallSyscacheCallbacks(cacheid: i32, hashvalue: u32) -> PgResult<()> {
     if cacheid < 0 || cacheid >= SYS_CACHE_SIZE as i32 {
         return Err(err_invalid_cache_id(ERROR, cacheid));
     }
 
-    let mut i = CALLBACKS.with(|c| c.borrow().syscache_links[cacheid as usize]) as i32 - 1;
+    let head = crate::SYSCACHE_LINKS.with(|links| links[cacheid as usize].get());
+    if head > 0 {
+        call_syscache_chain(head, cacheid, hashvalue);
+    }
+    Ok(())
+}
+
+#[inline(never)]
+fn call_syscache_chain(head: i16, cacheid: i32, hashvalue: u32) {
+    let mut i = head as i32 - 1;
     while i >= 0 {
         let ccitem = CALLBACKS
             .with(|c| c.borrow().syscache_list[i as usize])
@@ -337,8 +347,6 @@ pub fn CallSyscacheCallbacks(cacheid: i32, hashvalue: u32) -> PgResult<()> {
         }) as i32
             - 1;
     }
-
-    Ok(())
 }
 
 pub fn CallRelSyncCallbacks(relid: Oid) -> PgResult<()> {
