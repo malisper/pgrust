@@ -687,16 +687,9 @@ fn plpgsql_exec_event_trigger(
         Ok(rc) => rc,
         Err(e) => return Err(attach_exec_context(e, &estate)),
     };
-    if rc != RC_RETURN {
-        debug_assert_eq!(rc, RC_OK);
-        return Err(Box::new(
-            elog::ereport(ERROR)
-                .errcode(types_error::ERRCODE_S_R_E_FUNCTION_EXECUTED_NO_RETURN_STATEMENT)
-                .errmsg("control reached end of trigger procedure without RETURN")
-                .errcontext_msg(format!("PL/pgSQL function {}", func.fn_signature))
-                .into_error(),
-        ));
-    }
+    // C appends an implicit RETURN at compile (pl_comp.c), so falling off the
+    // end is success; this port accepts RC_OK directly (void-fn precedent).
+    debug_assert!(rc == RC_RETURN || rc == RC_OK);
     Ok(())
 }
 
