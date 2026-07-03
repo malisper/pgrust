@@ -1133,6 +1133,89 @@ fn srf_not_allowed_in(
     )
 }
 
+// C transformWholeRowRef + makeWholeRowVar (parse_expr.c, makefuncs.c):
+// whole-row Var leg over RELATION/SUBQUERY RTEs; the JOIN USING alias
+// RowExpr expansion and FUNCTION/VALUES/CTE rowtypes are loud.
+fn transformWholeRowRef<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    nsitem: &parser_small1::ParseNamespaceItem<'mcx>,
+    sublevels_up: i32,
+    location: types_core::ParseLoc,
+) -> PgResult<Node<'mcx>> {
+    use types_core::{InvalidOid, OidIsValid};
+    use types_nodes::parsenodes::RTEKind;
+    use types_nodes::primnodes::VarReturningType;
+
+    let rte = nsitem.p_rte;
+    let is_eref = match rte.eref {
+        Some(eref) => core::ptr::eq(nsitem.p_names, eref),
+        None => false,
+    };
+    if !(is_eref || nsitem.p_returning_type != VarReturningType::VAR_RETURNING_DEFAULT) {
+        panic!(
+            "transformWholeRowRef (parse_expr.c): JOIN USING alias RowExpr expansion \
+             unported — unit backend-parser-expr"
+        );
+    }
+    let toid = match rte.rtekind {
+        RTEKind::RTE_RELATION => {
+            let toid = lsyscache::get_rel_type_id(rte.relid)?;
+            if !OidIsValid(toid) {
+                return Err(no_composite_type(mcx, rte.relid));
+            }
+            toid
+        }
+        RTEKind::RTE_SUBQUERY => {
+            if OidIsValid(rte.relid) {
+                let toid = lsyscache::get_rel_type_id(rte.relid)?;
+                if !OidIsValid(toid) {
+                    return Err(no_composite_type(mcx, rte.relid));
+                }
+                toid
+            } else {
+                debug_assert!(rte.functions.is_nil());
+                types_core::catalog::RECORDOID
+            }
+        }
+        other => panic!(
+            "makeWholeRowVar (makefuncs.c): {other:?} whole-row rowtype unported — \
+             unit backend-parser-expr"
+        ),
+    };
+    let mut var = types_nodes::Var {
+        varno: nsitem.p_rtindex,
+        varattno: 0,
+        vartype: toid,
+        vartypmod: -1,
+        varcollid: InvalidOid,
+        varnullingrels: types_nodes::Bitmapset::empty(),
+        varlevelsup: sublevels_up as types_core::Index,
+        varreturningtype: nsitem.p_returning_type,
+        varnosyn: nsitem.p_rtindex as types_core::Index,
+        varattnosyn: 0,
+        location,
+    };
+    parse_relation::markNullableIfNeeded(mcx, pstate, &mut var)?;
+    parse_relation::markVarForSelectPriv(mcx, pstate, &var)?;
+    Node::mk(mcx, var)
+}
+
+// C makeWholeRowVar's ereport carries no error position.
+#[cold]
+fn no_composite_type(mcx: Mcx<'_>, relid: types_core::Oid) -> Box<types_error::PgError> {
+    use types_error::{ErrorLocation, ERRCODE_WRONG_OBJECT_TYPE, ERROR};
+    let name = lsyscache::get_rel_name(mcx, relid).ok().flatten();
+    let name = name.as_ref().map(|s| s.as_str()).unwrap_or("");
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_WRONG_OBJECT_TYPE)
+            .errmsg(format!("relation \"{name}\" does not have a composite type"))
+            .into_error()
+            .with_error_location(ErrorLocation::new("makefuncs.c", 0, "makeWholeRowVar")),
+    )
+}
+
 // C's PreParseColumnRefHook/PostParseColumnRefHook slots are absent: the
 // closed ParseRefHookState set carries no columnref hooks yet (they arrive
 // with their installer units).
@@ -1182,11 +1265,13 @@ fn transformColumnRef<'mcx>(
                         Some(&mut levels_up),
                     )?;
                     match nsitem {
-                        Some(_) => panic!(
-                            "transformColumnRef (parse_expr.c): transformWholeRowRef \
-                             (PostQUEL bare-relation reference) unported — \
-                             unit backend-parser-expr"
-                        ),
+                        Some(nsitem) => Some(transformWholeRowRef(
+                            mcx,
+                            pstate,
+                            nsitem,
+                            levels_up,
+                            cref.location,
+                        )?),
                         None => None,
                     }
                 }
@@ -1214,10 +1299,7 @@ fn transformColumnRef<'mcx>(
                 None => None,
                 Some(nsitem) => {
                     if field2.node_tag() == NodeTag::T_A_Star {
-                        panic!(
-                            "transformColumnRef (parse_expr.c): transformWholeRowRef \
-                             (rel.* outside a SELECT list) unported — unit backend-parser-expr"
-                        );
+                        return transformWholeRowRef(mcx, pstate, nsitem, levels_up, cref.location);
                     }
                     let name = field_str(*field2).expect("column field is a String");
                     colname = Some(name);

@@ -112,6 +112,11 @@ pub enum Step {
         typalign: u8,
         out: OutRef,
     },
+    // C EEOP_WHOLEROW, named-composite leg over a scan/inner/outer slot
+    // (RECORD/subquery whole-row and OLD/NEW are compile louds). The var's
+    // typcache tupdesc resolves at compile; the slot-compat check runs once
+    // at first eval, per C.
+    WholeRow { src: SlotSrc, wr: NonNull<WholeRowState>, frame: u32, out: OutRef },
     // EEOP_ARRAYEXPR, 1-D: elements evaluate into the `elems` scratch;
     // `frame` is an argless FuncFrame carried only for its armed result mcx.
     ArrayExprStep {
@@ -205,6 +210,13 @@ pub enum Step {
         timetz: NonNull<u8>,
         out: OutRef,
     },
+}
+
+// C ExprEvalStep d.wholerow minus var/junkFilter: first-eval compat state.
+pub struct WholeRowState {
+    pub tupdesc: NonNull<::types_tuple::TupleDescData<'static>>,
+    pub first: bool,
+    pub slow: bool,
 }
 
 // By-ref copy target: C d.agg_trans.aggcontext + the transtype's typlen.
