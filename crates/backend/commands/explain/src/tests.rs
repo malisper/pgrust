@@ -646,6 +646,7 @@ mod order_by_limit_e2e {
     use types_nodes::primnodes::Alias;
 
     const TBL: u32 = 24680;
+    const IDX: u32 = 24681;
     const INT4EQ_OP: u32 = 96;
     const INT4_LT_OP: u32 = 97;
     const INT4_GT_OP: u32 = 521;
@@ -663,8 +664,20 @@ mod order_by_limit_e2e {
             bufmgr_seams::relation_get_number_of_blocks_in_fork::set(|_rel, _fork| Ok(100));
             syscache_seams::pg_class_relname::set(|relid| {
                 let mut n = types_tuple::NameData::default();
-                n.namestrcpy("t");
-                Ok((relid == TBL).then_some(n))
+                match relid {
+                    TBL => n.namestrcpy("t"),
+                    IDX => n.namestrcpy("t_pk_idx"),
+                    _ => return Ok(None),
+                }
+                Ok(Some(n))
+            });
+            syscache_seams::pg_operator_oprname::set(|opno| {
+                let mut n = types_tuple::NameData::default();
+                match opno {
+                    INT4EQ_OP => n.namestrcpy("="),
+                    _ => return Ok(None),
+                }
+                Ok(Some(n))
             });
             syscache_seams::lookup_pg_statistic_shape::set(|_, _, _| Ok(None));
             syscache_seams::lookup_pg_statistic_bundle::set(|_, _, _, _| Ok(None));
@@ -906,4 +919,127 @@ mod order_by_limit_e2e {
             ]
         );
     }
+
+    // C 18: EXPLAIN SELECT * FROM t WHERE pk = 5 (unique index t_pk_idx on pk),
+    // and the covering variant for the IOS shape.
+    fn index_scan_pstmt<'mcx>(mcx: Mcx<'mcx>, index_only: bool) -> &'mcx PlannedStmt<'mcx> {
+        let mut eref_cols = NodeList::make1(mcx, Node::mk_string(mcx, "pk").unwrap()).unwrap();
+        eref_cols.lappend(mcx, Node::mk_string(mcx, "payload").unwrap()).unwrap();
+        let eref = mcx::alloc_leak_in(
+            mcx,
+            Alias { aliasname: Some("t"), colnames: eref_cols },
+        )
+        .unwrap();
+        let mut rte = Node::build::<types_nodes::parsenodes::RangeTblEntry>(mcx).unwrap();
+        rte.rtekind = RTEKind::RTE_RELATION;
+        rte.relid = TBL;
+        rte.relkind = b'r';
+        rte.rellockmode = 1;
+        rte.eref = Some(eref);
+        let rtable = NodeList::make1(mcx, rte.seal()).unwrap();
+
+        let qual_var = if index_only {
+            Node::mk_var(mcx, types_nodes::primnodes::INDEX_VAR, 1, INT4OID, -1, 0, 0).unwrap()
+        } else {
+            Node::mk_var(mcx, 1, 1, INT4OID, -1, 0, 0).unwrap()
+        };
+        let konst =
+            Node::mk_const(mcx, INT4OID, -1, 0, 4, Datum::from_i32(5), false, true).unwrap();
+        let op = Node::mk(
+            mcx,
+            types_nodes::primnodes::OpExpr {
+                opno: INT4EQ_OP,
+                opfuncid: 65,
+                opresulttype: 16,
+                opretset: false,
+                opcollid: 0,
+                inputcollid: 0,
+                args: NodeList::make2(mcx, qual_var, konst).unwrap(),
+                location: -1,
+            },
+        )
+        .unwrap();
+        let indexqual = NodeList::make1(mcx, op).unwrap();
+
+        let plan_tree = if index_only {
+            let ios_var =
+                Node::mk_var(mcx, types_nodes::primnodes::INDEX_VAR, 1, INT4OID, -1, 0, 0).unwrap();
+            let tle = Node::mk_target_entry(mcx, ios_var, 1, Some("pk"), false).unwrap();
+            let itl_var = Node::mk_var(mcx, 1, 1, INT4OID, -1, 0, 0).unwrap();
+            let itl_tle = Node::mk_target_entry(mcx, itl_var, 1, None, false).unwrap();
+            let mut s = Node::build::<types_nodes::plannodes::IndexOnlyScan>(mcx).unwrap();
+            s.scan.plan.targetlist = NodeList::make1(mcx, tle).unwrap();
+            s.scan.plan.startup_cost = 0.29;
+            s.scan.plan.total_cost = 8.30;
+            s.scan.plan.plan_rows = 1.0;
+            s.scan.plan.plan_width = 4;
+            s.scan.scanrelid = 1;
+            s.indexid = IDX;
+            s.indexqual = indexqual;
+            s.indexorderdir = 1;
+            s.indextlist = NodeList::make1(mcx, itl_tle).unwrap();
+            s.seal()
+        } else {
+            let v1 = Node::mk_var(mcx, 1, 1, INT4OID, -1, 0, 0).unwrap();
+            let v2 = Node::mk_var(mcx, 1, 2, 20, -1, 0, 0).unwrap();
+            let tle1 = Node::mk_target_entry(mcx, v1, 1, Some("pk"), false).unwrap();
+            let tle2 = Node::mk_target_entry(mcx, v2, 2, Some("payload"), false).unwrap();
+            let mut tl = NodeList::make1(mcx, tle1).unwrap();
+            tl.lappend(mcx, tle2).unwrap();
+            let mut s = Node::build::<types_nodes::plannodes::IndexScan>(mcx).unwrap();
+            s.scan.plan.targetlist = tl;
+            s.scan.plan.startup_cost = 0.29;
+            s.scan.plan.total_cost = 8.30;
+            s.scan.plan.plan_rows = 1.0;
+            s.scan.plan.plan_width = 12;
+            s.scan.scanrelid = 1;
+            s.indexid = IDX;
+            s.indexqualorig = indexqual;
+            s.indexorderdir = 1;
+            s.seal()
+        };
+
+        mcx::alloc_leak_in(
+            mcx,
+            PlannedStmt {
+                commandType: CmdType::CMD_SELECT,
+                canSetTag: true,
+                planTree: Some(plan_tree),
+                rtable,
+                ..PlannedStmt::default()
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn explain_index_scan_matches_pg() {
+        super::install_fixtures();
+        install_scan_fixtures();
+        let mcx = leaked_mcx();
+        let pstmt = index_scan_pstmt(mcx, false);
+        let mut es = crate::state::NewExplainState(mcx).unwrap();
+        crate::node::ExplainPrintPlan(mcx, &mut es, pstmt).unwrap();
+        assert_eq!(
+            es_text(&es),
+            "Index Scan using t_pk_idx on t  (cost=0.29..8.30 rows=1 width=12)\n\
+             \x20 Index Cond: (pk = 5)\n"
+        );
+    }
+
+    #[test]
+    fn explain_index_only_scan_matches_pg() {
+        super::install_fixtures();
+        install_scan_fixtures();
+        let mcx = leaked_mcx();
+        let pstmt = index_scan_pstmt(mcx, true);
+        let mut es = crate::state::NewExplainState(mcx).unwrap();
+        crate::node::ExplainPrintPlan(mcx, &mut es, pstmt).unwrap();
+        assert_eq!(
+            es_text(&es),
+            "Index Only Scan using t_pk_idx on t  (cost=0.29..8.30 rows=1 width=4)\n\
+             \x20 Index Cond: (pk = 5)\n"
+        );
+    }
+
 }

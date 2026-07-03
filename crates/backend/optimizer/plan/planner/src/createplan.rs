@@ -94,8 +94,15 @@ fn use_physical_tlist(run: &PlannerRun<'_>, best_path: PathId, flags: i32) -> bo
     }
     debug_assert!(run.root.placeholder_list.is_empty());
     if base.pathtype == crate::pathnode::tag16(NodeTag::T_IndexOnlyScan) {
-        panic!("use_physical_tlist (createplan.c): index-only indextlist; M2 IOS lane");
+        let PathNode::IndexPath(ip) = run.root.path(best_path) else { unreachable!() };
+        let info = ip.indexinfo.as_ref().expect("indexinfo set");
+        for i in 0..info.ncolumns as usize {
+            if !info.canreturn[i] {
+                return false;
+            }
+        }
     }
+    let base = run.root.path(best_path).base();
     if flags & CP_LABEL_TLIST != 0 {
         let target = run.root.pathtarget(base.pathtarget_id.unwrap());
         if target.sortgrouprefs.iter().any(|&s| s != 0) {
@@ -171,7 +178,13 @@ fn create_scan_plan<'mcx>(
     let tlist = if flags == CP_IGNORE_TLIST {
         NodeList::nil()
     } else if use_physical_tlist(run, best_path, flags) {
-        let physical = build_physical_tlist(run, rel_id)?;
+        let physical = if pathtype == crate::pathnode::tag16(NodeTag::T_IndexOnlyScan) {
+            // copyObject(indexinfo->indextlist): fresh TLE nodes so the
+            // plan tlist stays independent of the plan's own indextlist.
+            ios_indextlist_copy(run, best_path, false)?
+        } else {
+            build_physical_tlist(run, rel_id)?
+        };
         if flags & CP_LABEL_TLIST != 0 {
             // apply_pathtarget_labeling_to_tlist: no sortgrouprefs to copy
             // (use_physical_tlist refused any labeled target).
@@ -187,10 +200,10 @@ fn create_scan_plan<'mcx>(
             create_seqscan_plan(run, best_path, tlist, scan_clauses)?
         }
         t if t == crate::pathnode::tag16(NodeTag::T_IndexScan) => {
-            create_indexscan_plan(run, best_path, tlist, scan_clauses)?
+            create_indexscan_plan(run, best_path, tlist, scan_clauses, false)?
         }
         t if t == crate::pathnode::tag16(NodeTag::T_IndexOnlyScan) => {
-            panic!("create_indexscan_plan (createplan.c): index-only scan; M2 IOS lane")
+            create_indexscan_plan(run, best_path, tlist, scan_clauses, true)?
         }
         t if t == crate::pathnode::tag16(NodeTag::T_BitmapHeapScan) => {
             create_bitmap_scan_plan(run, best_path, tlist, scan_clauses)?
@@ -473,6 +486,7 @@ fn create_indexscan_plan<'mcx>(
     best_path: PathId,
     tlist: NodeList<'mcx>,
     scan_clauses: mcx::PgVec<'mcx, RinfoId>,
+    indexonly: bool,
 ) -> PgResult<Node<'mcx>> {
     let mcx = run.mcx;
     let (indexoid, indexscandir, baserelid, indexclause_rinfos) = {
@@ -515,6 +529,22 @@ fn create_indexscan_plan<'mcx>(
     let ordered = order_qual_clauses(run, &qpqual_rinfos)?;
     let qpqual = extract_actual_clauses(run, &ordered);
 
+    if indexonly {
+        let indextlist = ios_indextlist_copy(run, best_path, true)?;
+        let mut plan = Node::build::<types_nodes::plannodes::IndexOnlyScan<'mcx>>(mcx)?;
+        plan.scan.plan.targetlist = tlist;
+        plan.scan.plan.qual = qpqual;
+        plan.scan.scanrelid = scan_relid;
+        plan.indexid = indexoid;
+        plan.indexqual = fixed_indexquals;
+        plan.recheckqual = stripped_indexquals;
+        plan.indexorderby = NodeList::nil();
+        plan.indextlist = indextlist;
+        plan.indexorderdir = indexscandir;
+        copy_generic_path_info(run, &mut plan.scan.plan, best_path);
+        return Ok(plan.seal());
+    }
+
     let mut plan = Node::build::<IndexScan<'mcx>>(mcx)?;
     plan.scan.plan.targetlist = tlist;
     plan.scan.plan.qual = qpqual;
@@ -528,6 +558,33 @@ fn create_indexscan_plan<'mcx>(
     plan.indexorderdir = indexscandir;
     copy_generic_path_info(run, &mut plan.scan.plan, best_path);
     Ok(plan.seal())
+}
+
+// Fresh TLE copies of indexinfo->indextlist. mark_returnable = the C
+// scribble `indextle->resjunk = !indexinfo->canreturn[i]` applied to the
+// copy that becomes the plan's indextlist (setrefs drops resjunk entries).
+fn ios_indextlist_copy<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    best_path: PathId,
+    mark_returnable: bool,
+) -> PgResult<NodeList<'mcx>> {
+    let mcx = run.mcx;
+    let index = {
+        let PathNode::IndexPath(p) = run.root.path(best_path) else { unreachable!() };
+        std::rc::Rc::clone(p.indexinfo.as_ref().expect("indexinfo set"))
+    };
+    let mut tlist = NodeList::nil();
+    for (i, &tle_id) in index.indextlist.iter().enumerate() {
+        let tle = run
+            .root
+            .expr_node(tle_id)
+            .as_target_entry()
+            .expect("indextlist holds TargetEntries");
+        let resjunk = if mark_returnable { !index.canreturn[i] } else { tle.resjunk };
+        let new_tle = Node::mk_target_entry(mcx, tle.expr, tle.resno, tle.resname, resjunk)?;
+        tlist.lappend(mcx, new_tle)?;
+    }
+    Ok(tlist)
 }
 
 // create_bitmap_scan_plan (createplan.c). indexECs bookkeeping is dead while
