@@ -1408,12 +1408,11 @@ fn init_scalar_array_op<'mcx>(
     if saop.hashfuncid != 0 {
         let mut hash_flinfo = fmgr_core::fmgr_info(saop.hashfuncid)?;
         hash_flinfo.fn_expr = Some(erase_fn_expr(mcx, node)?);
-        let hash_fn_addr = hash_flinfo.fn_addr;
         let hash_frame = FuncFrame::new_in(mcx, hash_flinfo, 1, saop.inputcollid)?;
         let hash_frame_ix = state.frames.len() as u32;
         let hashcall = FuncCall {
-            fn_addr: hash_fn_addr,
             fcinfo: hash_frame.fcinfo,
+            flinfo: hash_frame.flinfo,
             frame: hash_frame_ix,
             nargs: 1,
         };
