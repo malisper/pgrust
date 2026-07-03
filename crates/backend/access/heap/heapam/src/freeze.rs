@@ -31,7 +31,8 @@ pub fn heap_freeze_tuple(
     let mut replace_xvac = false;
     let mut freeze_xmax = false;
 
-    let xid = tuple.xmin_raw();
+    // HeapTupleHeaderGetXmin: FrozenTransactionId when HEAP_XMIN_FROZEN.
+    let xid = tuple.xmin();
     if TransactionIdIsNormal(xid) {
         if TransactionIdPrecedes(xid, relfrozenxid) {
             panic!("found xmin {xid} from before relfrozenxid {relfrozenxid}");
