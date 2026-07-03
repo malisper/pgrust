@@ -2164,6 +2164,92 @@ dependencies = [
 ]
 
 [[package]]
+name = "commands_createas"
+version = "0.1.0"
+dependencies = [
+ "catalog_namespace",
+ "catalog_toasting",
+ "commands_matview",
+ "commands_view",
+ "createas_seams",
+ "elog",
+ "elog_seams",
+ "execmain_seams",
+ "format_type",
+ "guc_tables",
+ "heapam",
+ "lsyscache",
+ "mcx",
+ "parse_expr",
+ "postgres",
+ "rel_vocab",
+ "rewrite_handler_seams",
+ "snapmgr",
+ "table",
+ "tableam",
+ "tableam_vocab",
+ "tablecmds",
+ "tcop_dest",
+ "types_core",
+ "types_dest",
+ "types_error",
+ "types_nodes",
+ "types_portal",
+ "types_rel",
+ "types_scan",
+ "types_slot",
+ "types_tuple",
+ "xact",
+]
+
+[[package]]
+name = "commands_matview"
+version = "0.1.0"
+dependencies = [
+ "catalog_heap",
+ "catalog_indexing",
+ "catalog_namespace",
+ "commands_cluster",
+ "datum",
+ "elog",
+ "execmain_seams",
+ "fmgr_seams",
+ "genam",
+ "guc",
+ "heapam",
+ "heaptuple",
+ "lsyscache",
+ "matview_seams",
+ "mcx",
+ "miscinit",
+ "multixact",
+ "pgstat",
+ "postgres",
+ "procarray",
+ "readfuncs",
+ "rel_vocab",
+ "relcache",
+ "rewrite_handler",
+ "ruleutils",
+ "snapmgr",
+ "table",
+ "tableam",
+ "tableam_vocab",
+ "tablecmds_seams",
+ "tcop_dest",
+ "types_core",
+ "types_dest",
+ "types_error",
+ "types_nodes",
+ "types_portal",
+ "types_rel",
+ "types_scan",
+ "types_slot",
+ "types_tuple",
+ "xact",
+]
+
+[[package]]
 name = "commands_tablespace"
 version = "0.0.0"
 dependencies = [
@@ -2461,6 +2547,21 @@ dependencies = [
 [[package]]
 name = "crc32c"
 version = "0.1.0"
+
+[[package]]
+name = "createas_seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam_core",
+ "tableam_vocab",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_rel",
+ "types_slot",
+ "types_tuple",
+]
 
 [[package]]
 name = "crypt"
@@ -4735,6 +4836,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "matview_seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam_core",
+ "tableam_vocab",
+ "types_core",
+ "types_error",
+ "types_rel",
+ "types_slot",
+ "types_tuple",
+]
+
+[[package]]
 name = "mbutils"
 version = "0.1.0"
 dependencies = [
@@ -6063,6 +6178,7 @@ version = "0.0.0"
 dependencies = [
  "analyze_seams",
  "backend_status",
+ "catalog_namespace",
  "coerce",
  "datum",
  "elog",
@@ -8513,6 +8629,8 @@ dependencies = [
  "commands_analyze",
  "commands_async",
  "commands_cluster",
+ "commands_createas",
+ "commands_matview",
  "commands_tablespace",
  "commands_vacuum",
  "condition_variable",
@@ -9718,6 +9836,8 @@ name = "tcop_dest"
 version = "0.1.0"
 dependencies = [
  "cmdtag",
+ "createas_seams",
+ "matview_seams",
  "mcx",
  "pqcomm_seams",
  "pqformat",
@@ -10416,6 +10536,8 @@ dependencies = [
  "commands_async",
  "commands_cluster",
  "commands_comment",
+ "commands_createas",
+ "commands_matview",
  "commands_vacuum",
  "commands_view",
  "copy_cmd",
