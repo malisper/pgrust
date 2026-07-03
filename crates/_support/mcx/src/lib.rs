@@ -614,10 +614,30 @@ impl MemoryContext {
         self.reset_cbs.borrow_mut().push(alloc::boxed::Box::new(cb));
     }
 
+    // Bump re-opens the keeper's window at reset (BumpArena::reset), so the
+    // keeper stays charged (C's mem_allocated shape). Per-tuple/per-query
+    // resets ride the plain-Bump arm; every other backend is out of line.
     pub fn reset(&mut self) {
         if !self.reset_cbs.get_mut().is_empty() {
             self.fire_reset_callbacks();
         }
+        if let Backend::Bump(a) | Backend::BumpForget(a) = &mut self.backend {
+            let a = a.get_mut();
+            a.reset();
+            let footprint = a.footprint();
+            let acct = &*self.acct;
+            acct.self_used.set(footprint);
+            acct.self_peak.set(footprint);
+            acct.arena_footprint.set(footprint);
+            acct.arena_nblocks.set(a.nblocks());
+            return;
+        }
+        self.reset_noncore();
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn reset_noncore(&mut self) {
         // Leak check only for exact-accounting backends (bump charges release wholesale here).
         if !self.acct.is_bump {
             debug_assert_eq!(
@@ -641,17 +661,7 @@ impl MemoryContext {
                 acct.arena_nblocks.set(0);
                 acct.self_peak.set(0);
             }
-            // Bump re-opens the keeper's window at reset (BumpArena::reset), so
-            // the keeper stays charged here (C's mem_allocated shape).
-            Backend::Bump(a) | Backend::BumpForget(a) => {
-                let a = a.get_mut();
-                a.reset();
-                let footprint = a.footprint();
-                acct.self_used.set(footprint);
-                acct.self_peak.set(footprint);
-                acct.arena_footprint.set(footprint);
-                acct.arena_nblocks.set(a.nblocks());
-            }
+            Backend::Bump(_) | Backend::BumpForget(_) => unreachable!("handled in reset()"),
             Backend::BumpDrop(a, droplist) => {
                 // Run destructors BEFORE the bytes are reclaimed (order load-bearing).
                 droplist.get_mut().run();

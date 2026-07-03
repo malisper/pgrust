@@ -4,7 +4,6 @@ use alloc::format;
 use ::datum::{Datum, NullableDatum};
 use ::types_error::{PgError, PgResult, ERRCODE_DATATYPE_MISMATCH};
 use ::types_slot::SlotData;
-use ::types_tuple::varatt::varatt_is_external_expanded;
 
 use crate::steps::{
     fcinfo_mut, ExprState, FuncCall, Kernel, OutRef, SlotSrc, Step, EEO_FLAG_STILL_VALID_CHECKED,
@@ -38,12 +37,6 @@ impl<'a, 'mcx> EvalSlots<'a, 'mcx> {
 #[inline(never)]
 fn missing_slot(src: SlotSrc) -> ! {
     panic!("execexpr: expression references the {src:?} slot but none was supplied")
-}
-
-#[cold]
-#[inline(never)]
-fn expanded_ro_unported() -> ! {
-    panic!("execexpr: MakeExpandedObjectReadOnly not ported (expandeddatum unit)")
 }
 
 #[cold]
@@ -310,12 +303,12 @@ fn run_program<'mcx>(
                 let rslot = result_slot.as_deref_mut().unwrap_or_else(|| no_result_slot());
                 // SAFETY: a non-null by-ref result datum points at a live
                 // varlena image (same read exectuples materialize performs).
-                if !regs.isnull
-                    && unsafe { varatt_is_external_expanded(regs.value.as_usize() as *const u8) }
-                {
-                    expanded_ro_unported();
-                }
-                assign_to_result(rslot, *resultnum, regs.value, regs.isnull);
+                let value = if !regs.isnull {
+                    unsafe { datum::expandeddatum::make_expanded_object_read_only_internal(regs.value) }
+                } else {
+                    regs.value
+                };
+                assign_to_result(rslot, *resultnum, value, regs.isnull);
             }
             Step::Const { value, isnull, out } => {
                 write_out(*out, &mut regs, *value, *isnull);
@@ -400,6 +393,75 @@ fn run_program<'mcx>(
                         (*pg).trans_value = value;
                         (*pg).trans_value_is_null = isnull;
                     }
+                }
+            }
+            Step::AggTransByValIndirect { call, base, transno } => {
+                // SAFETY: base is a live cell nodeAgg repoints at the current
+                // group's once-allocated pergroup array before evaluation;
+                // transno < that array's length (build invariant).
+                unsafe {
+                    let pg = base.read().as_ptr().add(*transno as usize);
+                    crate::steps::arg_slot_of(call.fcinfo, 0).write(NullableDatum {
+                        value: (*pg).trans_value,
+                        isnull: (*pg).trans_value_is_null,
+                    });
+                    let (value, isnull) = invoke(frames, call)?;
+                    (*pg).trans_value = value;
+                    (*pg).trans_value_is_null = isnull;
+                }
+            }
+            Step::AggTransStrictByValIndirect { call, base, transno } => {
+                // SAFETY: as AggTransByValIndirect.
+                unsafe {
+                    let pg = base.read().as_ptr().add(*transno as usize);
+                    if !(*pg).trans_value_is_null {
+                        crate::steps::arg_slot_of(call.fcinfo, 0).write(NullableDatum {
+                            value: (*pg).trans_value,
+                            isnull: false,
+                        });
+                        let (value, isnull) = invoke(frames, call)?;
+                        (*pg).trans_value = value;
+                        (*pg).trans_value_is_null = isnull;
+                    }
+                }
+            }
+            Step::HashDatumSetInitVal { init_value, out } => {
+                write_out(*out, &mut regs, *init_value, false);
+            }
+            Step::HashDatumFirst { call, out } => {
+                // SAFETY: arg 0 of the call's live fcinfo image; hash fns
+                // never return NULL (C reads fn_addr's Datum directly).
+                let a0 = unsafe { crate::steps::arg_slot_of(call.fcinfo, 0).read() };
+                let v = if a0.isnull { Datum::null() } else { invoke(frames, call)?.0 };
+                write_out(*out, &mut regs, v, false);
+            }
+            Step::HashDatumNext32 { call, iresult, out } => {
+                // SAFETY: iresult is a build-owned once-allocated slot; arg 0
+                // as HashDatumFirst.
+                let existing = unsafe { iresult.read() }.value.as_u32().rotate_left(1);
+                let a0 = unsafe { crate::steps::arg_slot_of(call.fcinfo, 0).read() };
+                let combined = if a0.isnull {
+                    existing
+                } else {
+                    existing ^ invoke(frames, call)?.0.as_u32()
+                };
+                write_out(*out, &mut regs, Datum::from_u32(combined), false);
+            }
+            Step::NotDistinct { call, out } => {
+                // SAFETY: args 0/1 of the call's live fcinfo image.
+                let (a0, a1) = unsafe {
+                    (
+                        crate::steps::arg_slot_of(call.fcinfo, 0).read(),
+                        crate::steps::arg_slot_of(call.fcinfo, 1).read(),
+                    )
+                };
+                if a0.isnull && a1.isnull {
+                    write_out(*out, &mut regs, Datum::from_bool(true), false);
+                } else if a0.isnull || a1.isnull {
+                    write_out(*out, &mut regs, Datum::from_bool(false), false);
+                } else {
+                    let (value, isnull) = invoke(frames, call)?;
+                    write_out(*out, &mut regs, value, isnull);
                 }
             }
         }

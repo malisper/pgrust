@@ -59,6 +59,19 @@ pub enum Step {
     AggrefEval { value: NonNull<Datum>, null: NonNull<bool>, out: OutRef },
     AggPlainTransByVal { call: FuncCall, pergroup: NonNull<AggPerGroup> },
     AggPlainTransStrictByVal { call: FuncCall, pergroup: NonNull<AggPerGroup> },
+    // Hashed-agg trans: pergroup resolves per tuple through a cell nodeAgg
+    // repoints after each hash lookup (C's setoff into all_pergroups).
+    AggTransByValIndirect { call: FuncCall, base: NonNull<NonNull<AggPerGroup>>, transno: u16 },
+    AggTransStrictByValIndirect {
+        call: FuncCall,
+        base: NonNull<NonNull<AggPerGroup>>,
+        transno: u16,
+    },
+    HashDatumSetInitVal { init_value: Datum, out: OutRef },
+    HashDatumFirst { call: FuncCall, out: OutRef },
+    // iresult: build-owned intermediate hash slot the rotate-xor chain reads.
+    HashDatumNext32 { call: FuncCall, iresult: NonNull<NullableDatum>, out: OutRef },
+    NotDistinct { call: FuncCall, out: OutRef },
 }
 
 // C nodeAgg.h AggStatePerGroupData; the trans steps read/write it in place.
@@ -345,15 +358,24 @@ pub struct ExprState<'mcx> {
 }
 
 impl<'mcx> ExprState<'mcx> {
-    // C ExprEvalPushStep allocates 16 steps up front on the first push.
+    // C makeNode(ExprState) + ExprEvalPushStep's 16-step first allocation: box written in place.
     #[inline]
-    pub(crate) fn new_in(mcx: Mcx<'mcx>) -> PgResult<ExprState<'mcx>> {
-        Ok(ExprState {
-            steps: ::mcx::vec_with_capacity_in(mcx, 16)?,
-            frames: PgVec::new_in(mcx),
-            kernel: Kernel::Program,
-            flags: 0,
-        })
+    pub(crate) fn new_boxed_in(mcx: Mcx<'mcx>) -> PgResult<::mcx::PgBox<'mcx, ExprState<'mcx>>> {
+        let layout = Layout::new::<ExprState<'mcx>>();
+        let raw = mcx.allocate(layout).map_err(|_| mcx.oom(layout.size()))?;
+        let p = raw.cast::<ExprState<'mcx>>();
+        // On steps-alloc failure the header chunk stays until reset (C's palloc-then-throw shape).
+        let steps = ::mcx::vec_with_capacity_in(mcx, 16)?;
+        // SAFETY: fresh exclusive layout-sized allocation from `mcx`; written once, then box-owned.
+        unsafe {
+            p.write(ExprState {
+                steps,
+                frames: PgVec::new_in(mcx),
+                kernel: Kernel::Program,
+                flags: 0,
+            });
+            Ok(::mcx::PgBox::from_raw_in(p.as_ptr(), mcx))
+        }
     }
 
     pub fn steps(&self) -> &[Step] {

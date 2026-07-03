@@ -1,7 +1,7 @@
 use alloc::boxed::Box;
 use alloc::format;
 
-use ::mcx::{alloc_in, Mcx, PgBox};
+use ::mcx::{Allocator, Mcx, PgBox};
 use ::types_core::fmgr::FnExprErased;
 use ::types_core::{Oid, FUNC_MAX_ARGS};
 use ::types_error::{
@@ -77,7 +77,7 @@ pub fn exec_init_expr<'mcx>(
     let Some(node) = node else {
         return Ok(None);
     };
-    let mut state = alloc_in(mcx, ExprState::new_in(mcx)?)?;
+    let mut state = ExprState::new_boxed_in(mcx)?;
     create_expr_setup_steps(&mut state, mcx, &[node])?;
     init_expr_rec(node, &mut state, mcx, OutRef::RESULT, None)?;
     push_step(&mut state, mcx, Step::DoneReturn)?;
@@ -93,7 +93,7 @@ pub fn exec_init_qual<'mcx>(
     if qual.is_nil() {
         return Ok(None);
     }
-    let mut state = alloc_in(mcx, ExprState::new_in(mcx)?)?;
+    let mut state = ExprState::new_boxed_in(mcx)?;
     state.flags = EEO_FLAG_IS_QUAL;
     create_expr_setup_steps(&mut state, mcx, qual.as_slice())?;
 
@@ -139,7 +139,7 @@ fn build_projection_info<'mcx>(
     input_desc: Option<&TupleDescData<'mcx>>,
     agg: Option<AggBind>,
 ) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
-    let mut state = alloc_in(mcx, ExprState::new_in(mcx)?)?;
+    let mut state = ExprState::new_boxed_in(mcx)?;
     create_expr_setup_steps(&mut state, mcx, target_list.as_slice())?;
 
     for tle_node in target_list.iter() {
@@ -200,7 +200,26 @@ pub fn exec_build_agg_trans<'mcx>(
     mcx: Mcx<'mcx>,
     specs: &[AggTransSpec<'_, 'mcx>],
 ) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
-    let mut state = alloc_in(mcx, ExprState::new_in(mcx)?)?;
+    build_agg_trans(mcx, specs, None)
+}
+
+/// AGG_HASHED variant: pergroup resolves per tuple through `base`, the cell
+/// nodeAgg repoints at the current hash entry's pergroup array (spec order is
+/// transno order).
+pub fn exec_build_agg_trans_hashed<'mcx>(
+    mcx: Mcx<'mcx>,
+    specs: &[AggTransSpec<'_, 'mcx>],
+    base: NonNull<NonNull<AggPerGroup>>,
+) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
+    build_agg_trans(mcx, specs, Some(base))
+}
+
+fn build_agg_trans<'mcx>(
+    mcx: Mcx<'mcx>,
+    specs: &[AggTransSpec<'_, 'mcx>],
+    indirect_base: Option<NonNull<NonNull<AggPerGroup>>>,
+) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
+    let mut state = ExprState::new_boxed_in(mcx)?;
     let mut info = SetupInfo::default();
     for spec in specs {
         for tle in spec.args.iter() {
@@ -209,7 +228,7 @@ pub fn exec_build_agg_trans<'mcx>(
     }
     push_fetch_steps(&mut state, mcx, &info)?;
 
-    for spec in specs {
+    for (transno, spec) in specs.iter().enumerate() {
         let num_trans_inputs = spec.args.len();
         let nargs = num_trans_inputs + 1;
         if nargs > FUNC_MAX_ARGS {
@@ -248,16 +267,173 @@ pub fn exec_build_agg_trans<'mcx>(
                 OutRef(Some(unsafe { crate::steps::arg_slot_of(call.fcinfo, argno + 1) }));
             init_expr_rec(tle.expr, &mut state, mcx, arg_out, None)?;
         }
-        let step = if fn_strict {
-            Step::AggPlainTransStrictByVal { call, pergroup: spec.pergroup }
-        } else {
-            Step::AggPlainTransByVal { call, pergroup: spec.pergroup }
+        let step = match (indirect_base, fn_strict) {
+            (None, true) => Step::AggPlainTransStrictByVal { call, pergroup: spec.pergroup },
+            (None, false) => Step::AggPlainTransByVal { call, pergroup: spec.pergroup },
+            (Some(base), true) => {
+                Step::AggTransStrictByValIndirect { call, base, transno: transno as u16 }
+            }
+            (Some(base), false) => {
+                Step::AggTransByValIndirect { call, base, transno: transno as u16 }
+            }
         };
         push_step(&mut state, mcx, step)?;
     }
     push_step(&mut state, mcx, Step::DoneNoReturn)?;
     ready_expr(&mut state);
     Ok(state)
+}
+
+/// C `ExecBuildHash32FromAttrs` (execExpr.c): hash the inner slot's
+/// `key_col_idx` attnums (1-based) through the given hash-proc oids, combining
+/// per-column values by rotate-xor; resolve-once frames, murmur finish is the
+/// caller's (execGrouping.c contract).
+pub fn exec_build_hash32_from_attrs<'mcx>(
+    mcx: Mcx<'mcx>,
+    desc: &TupleDescData<'_>,
+    hash_fn_oids: &[Oid],
+    collations: &[Oid],
+    key_col_idx: &[i16],
+    init_value: u32,
+) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
+    debug_assert!(hash_fn_oids.len() == key_col_idx.len() && collations.len() == key_col_idx.len());
+    let num_cols = key_col_idx.len();
+    let mut state = ExprState::new_boxed_in(mcx)?;
+
+    let iresult = if num_cols as u64 + (init_value != 0) as u64 > 1 {
+        Some(alloc_nullable_datum(mcx)?)
+    } else {
+        None
+    };
+
+    let last_attnum = key_col_idx.iter().copied().max().unwrap_or(0);
+    if last_attnum > 0 {
+        push_step(&mut state, mcx, Step::InnerFetchSome { last_var: last_attnum as u16 })?;
+    }
+
+    let mut first = true;
+    if init_value != 0 {
+        let out = if num_cols > 0 { OutRef(iresult) } else { OutRef::RESULT };
+        push_step(
+            &mut state,
+            mcx,
+            Step::HashDatumSetInitVal { init_value: ::datum::Datum::from_u32(init_value), out },
+        )?;
+        first = false;
+    }
+
+    for i in 0..num_cols {
+        let attnum = (key_col_idx[i] - 1) as u16;
+        let flinfo = fmgr_core::fmgr_info(hash_fn_oids[i])?;
+        let fn_addr = flinfo.fn_addr;
+        let frame = FuncFrame::new_in(mcx, flinfo, 1, collations[i])?;
+        let frame_ix = state.frames.len() as u32;
+        let call = FuncCall { fn_addr, fcinfo: frame.fcinfo, frame: frame_ix, nargs: 1 };
+        state
+            .frames
+            .try_reserve(1)
+            .map_err(|_| mcx.oom(core::mem::size_of::<FuncFrame<'_>>()))?;
+        state.frames.push(frame);
+
+        // SAFETY: arg 0 of the frame's freshly allocated 1-arg fcinfo.
+        let arg_out = OutRef(Some(unsafe { crate::steps::arg_slot_of(call.fcinfo, 0) }));
+        let vartype = desc.attrs[attnum as usize].atttypid;
+        push_step(&mut state, mcx, Step::InnerVar { attnum, vartype, out: arg_out })?;
+
+        let out = if i == num_cols - 1 { OutRef::RESULT } else { OutRef(iresult) };
+        let step = if first {
+            Step::HashDatumFirst { call, out }
+        } else {
+            Step::HashDatumNext32 {
+                call,
+                iresult: iresult.expect("NEXT32 requires an intermediate slot"),
+                out,
+            }
+        };
+        push_step(&mut state, mcx, step)?;
+        first = false;
+    }
+
+    push_step(&mut state, mcx, Step::DoneReturn)?;
+    ready_expr(&mut state);
+    Ok(state)
+}
+
+/// C `ExecBuildGroupingEqual` (execExpr.c): NOT DISTINCT comparison of the
+/// inner (input) and outer (table) slots on `key_col_idx`, compared last
+/// column first as C does; evaluated via [`crate::exec_qual`].
+pub fn exec_build_grouping_equal<'mcx>(
+    mcx: Mcx<'mcx>,
+    ldesc: &TupleDescData<'_>,
+    rdesc: &TupleDescData<'_>,
+    key_col_idx: &[i16],
+    eqfuncoids: &[Oid],
+    collations: &[Oid],
+) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
+    debug_assert!(!key_col_idx.is_empty());
+    debug_assert!(eqfuncoids.len() == key_col_idx.len() && collations.len() == key_col_idx.len());
+    let mut state = ExprState::new_boxed_in(mcx)?;
+    state.flags = EEO_FLAG_IS_QUAL;
+
+    let maxatt = key_col_idx.iter().copied().max().unwrap();
+    push_step(&mut state, mcx, Step::InnerFetchSome { last_var: maxatt as u16 })?;
+    push_step(&mut state, mcx, Step::OuterFetchSome { last_var: maxatt as u16 })?;
+
+    let userid = miscinit_seams::get_user_id::call();
+    for natt in (0..key_col_idx.len()).rev() {
+        let attno = key_col_idx[natt];
+        let attnum = (attno - 1) as u16;
+        let foid = eqfuncoids[natt];
+        let aclresult =
+            aclchk_seams::object_aclcheck::call(PROCEDURE_RELATION_ID, foid, userid, ACL_EXECUTE)?;
+        if aclresult != ACLCHECK_OK {
+            return Err(permission_denied(mcx, foid)?);
+        }
+        let flinfo = fmgr_core::fmgr_info(foid)?;
+        let fn_addr = flinfo.fn_addr;
+        let frame = FuncFrame::new_in(mcx, flinfo, 2, collations[natt])?;
+        let frame_ix = state.frames.len() as u32;
+        let call = FuncCall { fn_addr, fcinfo: frame.fcinfo, frame: frame_ix, nargs: 2 };
+        state
+            .frames
+            .try_reserve(1)
+            .map_err(|_| mcx.oom(core::mem::size_of::<FuncFrame<'_>>()))?;
+        state.frames.push(frame);
+
+        // SAFETY: args 0/1 of the frame's freshly allocated 2-arg fcinfo.
+        let (arg0, arg1) = unsafe {
+            (
+                OutRef(Some(crate::steps::arg_slot_of(call.fcinfo, 0))),
+                OutRef(Some(crate::steps::arg_slot_of(call.fcinfo, 1))),
+            )
+        };
+        let ltype = ldesc.attrs[attnum as usize].atttypid;
+        let rtype = rdesc.attrs[attnum as usize].atttypid;
+        push_step(&mut state, mcx, Step::InnerVar { attnum, vartype: ltype, out: arg0 })?;
+        push_step(&mut state, mcx, Step::OuterVar { attnum, vartype: rtype, out: arg1 })?;
+        push_step(&mut state, mcx, Step::NotDistinct { call, out: OutRef::RESULT })?;
+        push_step(&mut state, mcx, Step::Qual { jumpdone: u32::MAX })?;
+    }
+
+    let done = state.steps.len() as u32;
+    for step in state.steps.iter_mut() {
+        if let Step::Qual { jumpdone } = step {
+            debug_assert_eq!(*jumpdone, u32::MAX);
+            *jumpdone = done;
+        }
+    }
+    push_step(&mut state, mcx, Step::DoneReturn)?;
+    ready_expr(&mut state);
+    Ok(state)
+}
+
+fn alloc_nullable_datum(mcx: Mcx<'_>) -> PgResult<NonNull<::datum::NullableDatum>> {
+    let layout = core::alloc::Layout::new::<::datum::NullableDatum>();
+    let raw = mcx.allocate(layout).map_err(|_| mcx.oom(layout.size()))?;
+    let p: NonNull<::datum::NullableDatum> = raw.cast();
+    // SAFETY: fresh allocation of the exact layout.
+    unsafe { p.write(::datum::NullableDatum::null()) };
+    Ok(p)
 }
 
 /// C `exprType` over the ported primnode families.
@@ -565,12 +741,9 @@ fn init_func<'mcx>(
     }
 }
 
-// C ExecReadyExpr -> ExecReadyInterpretedExpr: program sanity + fast-path
-// kernel selection (the ExecJust* table, plus the fused monomorphized shapes).
-// The interpreter's unchecked cursor/frame accesses rest on construction
-// invariants of this module's private program build (Done-terminated, Qual
-// jumps patched to a valid index, FuncCall mirrors its pushed frame) —
-// debug-asserted here, unreachable to break from outside the crate.
+// C ExecReadyExpr: kernel selection. The interpreter's unchecked cursor/frame
+// accesses rest on this module's private build invariants (Done-terminated,
+// Qual jumps valid, FuncCall mirrors its frame) — debug-asserted here.
 #[inline]
 fn ready_expr(state: &mut ExprState<'_>) {
     let steps = state.steps.as_slice();
@@ -588,7 +761,12 @@ fn ready_expr(state: &mut ExprState<'_>) {
             | Step::FuncExprStrict2 { call, .. }
             | Step::FuncExprStrict { call, .. }
             | Step::AggPlainTransByVal { call, .. }
-            | Step::AggPlainTransStrictByVal { call, .. } => {
+            | Step::AggPlainTransStrictByVal { call, .. }
+            | Step::AggTransByValIndirect { call, .. }
+            | Step::AggTransStrictByValIndirect { call, .. }
+            | Step::HashDatumFirst { call, .. }
+            | Step::HashDatumNext32 { call, .. }
+            | Step::NotDistinct { call, .. } => {
                 let f = &state.frames[call.frame as usize];
                 assert!(call.nargs == f.nargs && call.fcinfo == f.fcinfo);
             }
