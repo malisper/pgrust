@@ -415,12 +415,13 @@ pub struct FuncCandidate<'mcx> {
     pub nvargs: i16,
     pub ndargs: i16,
     pub va_elem_type: Oid,
+    pathpos: i32,
     pub args: mcx::PgVec<'mcx, Oid>,
 }
 
-// FuncnameGetCandidates (namespace.c), exact-arity slice: candidates that C
-// would only admit via variadic or default-argument expansion panic instead
-// of being silently dropped.
+// FuncnameGetCandidates (namespace.c), positional notation only (argnames and
+// include_out_arguments have no in-tree callers; both stay on the loud path in
+// parse_func). An oid of InvalidOid marks C's ambiguous-set placeholder.
 pub fn FuncnameGetCandidates<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     names: &[&str],
@@ -444,84 +445,113 @@ pub fn FuncnameGetCandidates<'mcx>(
 
     let raw = syscache_seams::lookup_pg_proc_name_candidates::call(mcx, funcname)?;
     let mut result: mcx::PgVec<'mcx, FuncCandidate<'mcx>> = mcx::PgVec::new_in(mcx);
+    let mut any_special = false;
+    let mtn = my_temp_namespace();
     for cand in raw {
+        let pronargs = cand.pronargs;
+        let mut pathpos: i32 = 0;
+        match namespace_id {
+            Some(id) => {
+                if cand.pronamespace != id {
+                    continue;
+                }
+            }
+            None => {
+                let mut found = false;
+                for i in 0..base_path_len() {
+                    if cand.pronamespace == base_path_nth(i) && cand.pronamespace != mtn {
+                        found = true;
+                        break;
+                    }
+                    pathpos += 1;
+                }
+                if !found {
+                    continue;
+                }
+            }
+        }
+
         // C considers variadic expansion only when pronargs <= nargs; an
         // undersupplied variadic candidate falls through to the arg-count
         // skip (e.g. rank() never sees the hypothetical-set aggregate 3986).
-        let mut va_elem_type = InvalidOid;
-        let mut variadic = false;
-        if expand_variadic && OidIsValid(cand.provariadic) && cand.pronargs <= nargs {
-            va_elem_type = cand.provariadic;
-            variadic = true;
-        }
-        let use_defaults = cand.pronargs > nargs
-            && expand_defaults
-            && nargs + cand.pronargdefaults >= cand.pronargs;
-        if cand.pronargs != nargs && !variadic && !use_defaults {
-            continue;
-        }
-        let visible = match namespace_id {
-            Some(id) => cand.pronamespace == id,
-            None => {
-                let mut pathpos = None;
-                for i in 0..base_path_len() {
-                    if base_path_nth(i) == cand.pronamespace {
-                        pathpos = Some(i);
-                        break;
-                    }
-                }
-                pathpos.is_some()
-            }
+        let (variadic, va_elem_type) = if pronargs <= nargs && expand_variadic {
+            (OidIsValid(cand.provariadic), cand.provariadic)
+        } else {
+            (false, InvalidOid)
         };
-        if !visible {
+        any_special |= variadic;
+
+        let use_defaults = pronargs > nargs && expand_defaults && {
+            if nargs + cand.pronargdefaults < pronargs {
+                continue;
+            }
+            any_special = true;
+            true
+        };
+
+        if pronargs != nargs && !variadic && !use_defaults {
             continue;
         }
-        let effective_nargs = cand.pronargs.max(nargs);
+
+        let effective_nargs = pronargs.max(nargs);
         let mut args = mcx::vec_with_capacity_in(mcx, effective_nargs as usize)?;
         for &a in cand.proargtypes.iter() {
             args.push(a);
         }
         let nvargs = if variadic {
             // C: expand the variadic slot into N copies of the element type.
-            args.truncate(cand.pronargs as usize - 1);
+            args.truncate(pronargs as usize - 1);
             while args.len() < effective_nargs as usize {
                 args.push(va_elem_type);
             }
-            effective_nargs - cand.pronargs + 1
+            effective_nargs - pronargs + 1
         } else {
             0
         };
-        let ndargs = if use_defaults { cand.pronargs - nargs } else { 0 };
-        // C's duplicate-argument-list resolution, pathpos-equal slice only
-        // (cross-schema shadowing still unported): the non-variadic match
-        // wins over the variadic expansion of the same signature.
-        // C ignores defaulted arguments when deciding what is a duplicate.
-        let cmp_nargs = (effective_nargs - ndargs) as usize;
-        if let Some(pos) = result.iter().position(|prev: &FuncCandidate<'mcx>| {
-            (prev.nargs - prev.ndargs) as usize == cmp_nargs
-                && prev.args.as_slice()[..cmp_nargs] == args.as_slice()[..cmp_nargs]
-        }) {
-            if variadic && result[pos].nvargs == 0 {
-                continue;
-            } else if !variadic && result[pos].nvargs > 0 {
-                result.remove(pos);
-            } else {
-                panic!(
-                    "FuncnameGetCandidates (namespace.c): ambiguous duplicate candidate {} \
-                     for \"{funcname}\" (cross-schema shadowing unported)",
-                    cand.oid
-                );
-            }
-        }
-        result.push(FuncCandidate {
+        let ndargs = if use_defaults { pronargs - nargs } else { 0 };
+        let new = FuncCandidate {
             oid: cand.oid,
             nargs: effective_nargs,
-            nominal_nargs: cand.pronargs,
+            nominal_nargs: pronargs,
             nvargs,
             ndargs,
-            va_elem_type,
+            va_elem_type: if variadic { va_elem_type } else { InvalidOid },
+            pathpos,
             args,
-        });
+        };
+
+        // C ignores defaulted arguments when deciding what is a duplicate,
+        // prefers the earlier-in-path then the non-variadic form, and marks
+        // an undecidable pair ambiguous (oid = InvalidOid, new one dropped).
+        if !result.is_empty() && (any_special || namespace_id.is_none()) {
+            let cmp_nargs = (new.nargs - new.ndargs) as usize;
+            let prev = result.iter().position(|p| {
+                cmp_nargs == (p.nargs - p.ndargs) as usize
+                    && new.args[..cmp_nargs] == p.args[..cmp_nargs]
+            });
+            if let Some(prev) = prev {
+                let preference = if pathpos != result[prev].pathpos {
+                    pathpos - result[prev].pathpos
+                } else if variadic && result[prev].nvargs == 0 {
+                    1
+                } else if !variadic && result[prev].nvargs > 0 {
+                    -1
+                } else {
+                    0
+                };
+                if preference > 0 {
+                    continue;
+                } else if preference < 0 {
+                    result.remove(prev);
+                } else {
+                    result[prev].oid = InvalidOid;
+                    continue;
+                }
+            }
+        }
+        result.push(new);
     }
+    // C prepends; head-first order = reverse acceptance order.
+    result.reverse();
     Ok(result)
 }
