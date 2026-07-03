@@ -165,6 +165,12 @@ pub fn catchupInterruptPending() -> bool {
 }
 
 fn current_seg() -> SISeg {
+    if let Some(seg) = LOCAL.with(|st| st.seg.get()) {
+        return seg;
+    }
+    // C maps shmInvalBuffer at shmem attach, so threads without a
+    // SharedInvalBackendInit (startup redo) can still insert; bind lazily.
+    attach_seg();
     LOCAL
         .with(|st| st.seg.get())
         .expect("shared invalidation memory is not attached (SharedInvalShmemInit)")

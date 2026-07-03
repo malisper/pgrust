@@ -267,7 +267,18 @@ fn dispatch_switch<'mcx>(
         }
         T_AlterTableSpaceOptionsStmt => handler_gap("AlterTableSpaceOptions (tablespace lane)"),
 
-        T_TruncateStmt => handler_gap("ExecuteTruncate (tablecmds lane)"),
+        T_TruncateStmt => {
+            let stmt = parsetree.as_truncate_stmt().unwrap();
+            // Retention contract as unify_stmt_lifetime: nothing derived from
+            // the statement arena escapes the utility call.
+            let stmt = unsafe {
+                core::mem::transmute::<
+                    &types_nodes::parsenodes::TruncateStmt<'_>,
+                    &types_nodes::parsenodes::TruncateStmt<'mcx>,
+                >(stmt)
+            };
+            tablecmds::ExecuteTruncate(mcx, stmt)?;
+        }
         T_CopyStmt => {
             let stmt = parsetree.as_copy_stmt().unwrap();
             let processed = copy_cmd::DoCopy(mcx, stmt)?;
@@ -394,6 +405,30 @@ fn dispatch_switch<'mcx>(
                 | OBJECT_FOREIGN_TABLE => tablecmds::RemoveRelations(mcx, stmt)?,
                 _ => handler_gap("RemoveObjects (dropcmds lane)"),
             }
+        }
+
+        T_CommentStmt => {
+            let stmt = parsetree.as_comment_stmt().unwrap();
+            // Retention contract as unify_stmt_lifetime.
+            let stmt = unsafe {
+                core::mem::transmute::<
+                    &types_nodes::parsenodes::CommentStmt<'_>,
+                    &types_nodes::parsenodes::CommentStmt<'mcx>,
+                >(stmt)
+            };
+            commands_comment::CommentObject(mcx, stmt)?;
+        }
+
+        T_CreateSchemaStmt => {
+            let stmt = parsetree.as_create_schema_stmt().unwrap();
+            // Retention contract as unify_stmt_lifetime.
+            let stmt = unsafe {
+                core::mem::transmute::<
+                    &types_nodes::parsenodes::CreateSchemaStmt<'_>,
+                    &types_nodes::parsenodes::CreateSchemaStmt<'mcx>,
+                >(stmt)
+            };
+            schemacmds::CreateSchemaCommand(mcx, stmt)?;
         }
 
         // Everything else — the GRANT/DROP/RENAME/ALTER.../COMMENT/SECURITY

@@ -596,6 +596,30 @@ pub struct DropStmt<'mcx> {
     pub concurrent: bool,
 }
 
+#[derive(Default)]
+pub struct TruncateStmt<'mcx> {
+    pub relations: NodeList<'mcx>,
+    pub restart_seqs: bool,
+    pub behavior: DropBehavior,
+}
+
+// C: authrole is a RoleSpec node.
+#[derive(Default)]
+pub struct CreateSchemaStmt<'mcx> {
+    pub schemaname: Option<&'mcx str>,
+    pub authrole: Option<Node<'mcx>>,
+    pub schemaElts: NodeList<'mcx>,
+    pub if_not_exists: bool,
+}
+
+// C: object is a List for TABLE/COLUMN forms; comment NULL removes it.
+#[derive(Default)]
+pub struct CommentStmt<'mcx> {
+    pub objtype: ObjectType,
+    pub object: Option<Node<'mcx>>,
+    pub comment: Option<&'mcx str>,
+}
+
 // C: isall is redundant with name == NULL but kept for query jumbling.
 pub struct DeallocateStmt<'mcx> {
     pub name: Option<&'mcx str>,
@@ -678,6 +702,15 @@ unsafe impl<'mcx> NodeVariant<'mcx> for DeallocateStmt<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for DropStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_DropStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for TruncateStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_TruncateStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for CreateSchemaStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CreateSchemaStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for CommentStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CommentStmt;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for WithClause<'mcx> {
     const TAG: NodeTag = NodeTag::T_WithClause;
@@ -825,6 +858,21 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_drop_stmt(self) -> Option<&'mcx DropStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_truncate_stmt(self) -> Option<&'mcx TruncateStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_create_schema_stmt(self) -> Option<&'mcx CreateSchemaStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_comment_stmt(self) -> Option<&'mcx CommentStmt<'mcx>> {
         self.as_variant()
     }
 }

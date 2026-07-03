@@ -45,3 +45,11 @@ parse_collate = { path = "../../parser/parse_collate" }
 coerce = { path = "../../parser/coerce" }
 vars = { path = "../../optimizer/util/vars" }
 format_type = { path = "../../utils/adt/format_type" }
+catalog_storage = { path = "../../catalog/catalog_storage" }
+tableam = { path = "../../access/table/tableam" }
+adt_acl = { path = "../../utils/adt/acl" }
+aclchk = { path = "../../catalog/aclchk" }
+aclchk_seams = { path = "../../catalog/aclchk_seams" }
+pgstat = { path = "../../utils/activity/pgstat" }
+predicate_seams = { path = "../../storage/lmgr/predicate_seams" }
+relcache_seams = { path = "../../utils/cache/relcache_seams" }

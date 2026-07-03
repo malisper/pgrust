@@ -1436,6 +1436,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "commands_comment"
+version = "0.1.0"
+dependencies = [
+ "catalog_indexing",
+ "catalog_namespace",
+ "datum",
+ "fmgr_seams",
+ "genam",
+ "heaptuple",
+ "mcx",
+ "miscinit",
+ "parse_relation",
+ "rel_vocab",
+ "superuser",
+ "table",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_rel",
+ "types_scan",
+ "varlena",
+]
+
+[[package]]
 name = "commands_tablespace"
 version = "0.0.0"
 dependencies = [
@@ -4891,6 +4915,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "pg_namespace"
+version = "0.1.0"
+dependencies = [
+ "catalog",
+ "catalog_indexing",
+ "datum",
+ "heaptuple",
+ "mcx",
+ "pg_depend",
+ "syscache_seams",
+ "table",
+ "types_core",
+ "types_error",
+ "types_rel",
+ "types_tuple",
+]
+
+[[package]]
 name = "pg_path"
 version = "0.1.0"
 dependencies = [
@@ -6545,6 +6587,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "schemacmds"
+version = "0.1.0"
+dependencies = [
+ "aclchk",
+ "aclchk_seams",
+ "adt_acl",
+ "catalog",
+ "catalog_namespace",
+ "dbcommands",
+ "elog_seams",
+ "init_small",
+ "mcx",
+ "miscinit",
+ "pg_namespace",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "xact",
+]
+
+[[package]]
 name = "seam_core"
 version = "0.1.0"
 
@@ -7276,11 +7339,15 @@ dependencies = [
 name = "tablecmds"
 version = "0.1.0"
 dependencies = [
+ "aclchk",
+ "aclchk_seams",
+ "adt_acl",
  "catalog",
  "catalog_dependency",
  "catalog_heap",
  "catalog_indexing",
  "catalog_namespace",
+ "catalog_storage",
  "coerce",
  "datum",
  "elog_seams",
@@ -7301,10 +7368,14 @@ dependencies = [
  "pg_attrdef",
  "pg_constraint",
  "pg_depend",
+ "pgstat",
+ "predicate_seams",
  "rel_vocab",
+ "relcache_seams",
  "superuser",
  "syscache_seams",
  "table",
+ "tableam",
  "tupdesc",
  "types_core",
  "types_error",
@@ -7887,6 +7958,7 @@ dependencies = [
  "catalog_toasting",
  "cmdtag",
  "commands_analyze",
+ "commands_comment",
  "commands_vacuum",
  "copy_cmd",
  "discard",
@@ -7901,6 +7973,7 @@ dependencies = [
  "portalcmds",
  "portalmem",
  "prepare",
+ "schemacmds",
  "syscache_seams",
  "tablecmds",
  "tcop_dest",

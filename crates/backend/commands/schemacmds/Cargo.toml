@@ -1,0 +1,25 @@
+[package]
+name = "schemacmds"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_nodes = { path = "../../../_support/types/nodes" }
+adt_acl = { path = "../../utils/adt/acl" }
+aclchk = { path = "../../catalog/aclchk" }
+aclchk_seams = { path = "../../catalog/aclchk_seams" }
+catalog = { path = "../../catalog/catalog" }
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+pg_namespace = { path = "../../catalog/pg_namespace" }
+dbcommands = { path = "../dbcommands" }
+elog_seams = { path = "../../utils/error/elog_seams" }
+init_small = { path = "../../utils/init/init_small" }
+miscinit = { path = "../../utils/init/miscinit" }
+xact = { path = "../../access/transam/xact" }
