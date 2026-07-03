@@ -108,13 +108,12 @@ pub fn get_relation_info<'mcx>(
             if index_rel.rd_rel.relkind != types_rel::RELKIND_INDEX {
                 panic!("get_relation_info (plancat.c): partitioned index; M2 partition lane");
             }
-            let am_is_btree = match index_rel.rd_rel.relam {
-                BTREE_AM_OID => true,
-                types_core::HASH_AM_OID => false,
-                other => panic!(
-                    "get_relation_info (plancat.c): index AM {other}; M2 non-btree lane"
-                ),
-            };
+            let relam = index_rel.rd_rel.relam;
+            let am_is_btree = relam == BTREE_AM_OID;
+            let am_is_gin = relam == types_core::GIN_AM_OID;
+            if !am_is_btree && !am_is_gin && relam != types_core::HASH_AM_OID {
+                panic!("get_relation_info (plancat.c): index AM {relam}; M2 index-AM lane");
+            }
             if ind.has_indpred {
                 panic!("get_relation_info (plancat.c): partial index; M2 partial-index lane");
             }
@@ -142,14 +141,14 @@ pub fn get_relation_info<'mcx>(
                 info.opcintype.push(index_rel.rd_opcintype[i]);
                 info.canreturn.push(if am_is_btree { btcanreturn() } else { false });
             }
-            info.relam = index_rel.rd_rel.relam;
+            info.relam = relam;
             info.amcanorderbyop = false;
-            // Per-AM IndexAmRoutine flags (bthandler/hashhandler).
-            info.amoptionalkey = am_is_btree;
+            // Per-AM IndexAmRoutine flags (bthandler/hashhandler/ginhandler).
+            info.amoptionalkey = am_is_btree || am_is_gin;
             info.amsearcharray = am_is_btree;
             info.amsearchnulls = am_is_btree;
             info.amcanparallel = am_is_btree;
-            info.amhasgettuple = true;
+            info.amhasgettuple = !am_is_gin;
             info.amhasgetbitmap = true;
             info.amcanmarkpos = am_is_btree;
 
@@ -202,6 +201,17 @@ pub fn get_relation_info<'mcx>(
             } else {
                 -1
             });
+            if am_is_gin {
+                let gs = gin::ginGetStats(&index_rel)?;
+                info.gin_stats = Some(types_pathnodes::GinIndexStats {
+                    pending_pages: gs.nPendingPages,
+                    total_pages: gs.nTotalPages,
+                    entry_pages: gs.nEntryPages,
+                    data_pages: gs.nDataPages,
+                    entries: gs.nEntries,
+                    version: gs.ginVersion,
+                });
+            }
 
             indexam::index_close(index_rel, NoLock)?;
             indexinfos.insert(0, &*mcx::forget_box_in(mcx, info)?);
@@ -341,8 +351,12 @@ pub fn restriction_selectivity<'mcx>(
     const F_ICREGEXNESEL: Oid = 1823;
     const F_PREFIXSEL: Oid = 3437;
     use crate::like_support::PatternType;
+    const F_MATCHINGSEL: Oid = 5040;
     let result = match oprrest {
         F_EQSEL => crate::selfuncs::eqsel(run, operatorid, args, varrelid, inputcollid)?,
+        F_MATCHINGSEL => {
+            crate::selfuncs::matchingsel(run, operatorid, args, varrelid, inputcollid)?
+        }
         F_NEQSEL => crate::selfuncs::neqsel(run, operatorid, args, varrelid, inputcollid)?,
         F_SCALARLTSEL | F_SCALARGTSEL | F_SCALARLESEL | F_SCALARGESEL => {
             let isgt = oprrest == F_SCALARGTSEL || oprrest == F_SCALARGESEL;

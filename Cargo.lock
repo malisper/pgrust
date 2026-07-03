@@ -1240,6 +1240,7 @@ dependencies = [
  "execindexing",
  "fmgr_seams",
  "genam",
+ "ginbuild",
  "guc",
  "hashsort",
  "heaptuple",
@@ -3026,6 +3027,82 @@ dependencies = [
 ]
 
 [[package]]
+name = "gin"
+version = "0.1.0"
+dependencies = [
+ "adt_jsonb",
+ "bufmgr_seams",
+ "datum",
+ "detoast",
+ "freespace",
+ "freespace_seams",
+ "gin_vocab",
+ "guc_tables",
+ "init_small",
+ "lsyscache",
+ "mcx",
+ "nbtree",
+ "pg_prng",
+ "predicate_seams",
+ "tidbitmap",
+ "transam_xlog_seams",
+ "types_core",
+ "types_error",
+ "types_rel",
+ "types_relscan",
+ "types_scan",
+ "types_snapshot",
+ "types_storage",
+ "types_tuple",
+ "xact",
+ "xloginsert",
+ "xloginsert_seams",
+]
+
+[[package]]
+name = "gin_vocab"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "mcx",
+ "tidbitmap",
+ "types_core",
+ "types_error",
+ "types_scan",
+ "types_tuple",
+]
+
+[[package]]
+name = "gin_xlog"
+version = "0.1.0"
+dependencies = [
+ "bufmgr_seams",
+ "gin_vocab",
+ "types_core",
+ "types_error",
+ "types_storage",
+ "types_tuple",
+ "xlogreader_seams",
+ "xlogutils",
+]
+
+[[package]]
+name = "ginbuild"
+version = "0.1.0"
+dependencies = [
+ "bufmgr_seams",
+ "execindexing",
+ "gin",
+ "gin_vocab",
+ "init_small",
+ "mcx",
+ "types_core",
+ "types_error",
+ "types_rel",
+ "xloginsert",
+]
+
+[[package]]
 name = "gram_core"
 version = "0.1.0"
 dependencies = [
@@ -3595,6 +3672,7 @@ name = "indexam"
 version = "0.1.0"
 dependencies = [
  "datum",
+ "gin",
  "hash",
  "indexam_seams",
  "mcx",
@@ -6010,6 +6088,7 @@ dependencies = [
  "execmain",
  "exectuples",
  "fmgr_core",
+ "gin",
  "guc_tables",
  "indexam",
  "init_small",
@@ -7484,6 +7563,7 @@ dependencies = [
  "clog",
  "dbcommands_seams",
  "elog",
+ "gin_xlog",
  "hash_xlog",
  "heapam_xlog",
  "mcx",
@@ -7652,6 +7732,7 @@ dependencies = [
  "freespace",
  "funcapi",
  "genam",
+ "gin",
  "guc",
  "guc_file",
  "guc_funcs",
@@ -9144,6 +9225,7 @@ dependencies = [
 name = "types_relscan"
 version = "0.1.0"
 dependencies = [
+ "gin_vocab",
  "mcx",
  "tableam",
  "types_core",

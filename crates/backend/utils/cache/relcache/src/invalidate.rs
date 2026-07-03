@@ -17,6 +17,9 @@ pub(crate) fn RelationInvalidateRelation(rel: &RelationData<'static>) {
     // C RelationCloseSmgr is void; mdclose cannot fail.
     let _ = smgr::RelationCloseSmgr(rel);
     rel.rd_isvalid.set(false);
+    rel.rd_amcache.set(None);
+    *rel.rd_amcache_hash.borrow_mut() = None;
+    rel.rd_amcache_gin.set(None);
     *rel.rd_indexlist.borrow_mut() = None;
     *rel.rd_trigdesc.borrow_mut() = None;
     crate::rules::forget(rel.rd_id);
@@ -149,7 +152,7 @@ fn RelationReloadIndexInfo(
         rd_options: scanned.options,
         pgstat_enabled: Cell::new(false),
         rd_amcache: Default::default(),
-        rd_amcache_hash: Default::default(),
+        rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(),
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
@@ -204,7 +207,7 @@ fn RelationReloadNailed(
         rd_options: scanned.options,
         pgstat_enabled: Cell::new(false),
         rd_amcache: Default::default(),
-        rd_amcache_hash: Default::default(),
+        rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(),
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),

@@ -143,7 +143,7 @@ pub fn RelationBuildLocalRelation(
         rd_options: None,
         pgstat_enabled: Cell::new(false),
         rd_amcache: Default::default(),
-        rd_amcache_hash: Default::default(),
+        rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(),
         rd_supportinfo: core::cell::RefCell::new(Vec::new()),
         rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),

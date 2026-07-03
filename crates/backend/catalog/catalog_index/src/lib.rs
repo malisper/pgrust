@@ -36,6 +36,8 @@ pub const INDEX_CONSTR_CREATE_WITHOUT_OVERLAPS: u16 = 1 << 5;
 
 pub const BTREE_AM_OID: Oid = 403;
 pub const HASH_AM_OID: Oid = 405;
+pub const GIN_AM_OID: Oid = 2742;
+const TEXTOID: Oid = 25;
 const INT4OID: Oid = 23;
 const OpclassOidIndexId: Oid = 2687;
 const IndexRelidIndexId: Oid = 2679;
@@ -97,9 +99,9 @@ fn ConstructTupleDescriptor<'mcx>(
     collationIds: &[Oid],
     opclassIds: &[Oid],
 ) -> PgResult<TupleDescData<'mcx>> {
-    // amroutine->amkeytype: InvalidOid for btree, INT4OID for hash.
+    // amroutine->amkeytype: InvalidOid for btree/gin, INT4OID for hash.
     let amkeytype = match accessMethodId {
-        BTREE_AM_OID => InvalidOid,
+        BTREE_AM_OID | GIN_AM_OID => InvalidOid,
         HASH_AM_OID => INT4OID,
         other => unported(&format!("ConstructTupleDescriptor: index AM {other}")),
     };
@@ -156,18 +158,28 @@ fn ConstructTupleDescriptor<'mcx>(
             }
         }
         if keyType != InvalidOid && keyType != indexTupDesc.attr(i).atttypid {
-            // C reads the pg_type row for keyType; the only keytype reachable
-            // through the closed AM set is INT4 (hash amkeytype).
-            if keyType != INT4OID {
-                unported("ConstructTupleDescriptor: non-int4 opclass keytype override");
-            }
+            // C reads the pg_type row for keyType; the closed AM set reaches
+            // INT4 (hash amkeytype) and text (jsonb_ops opckeytype).
             let to = indexTupDesc.attr_mut(i);
+            match keyType {
+                INT4OID => {
+                    to.attlen = 4;
+                    to.attbyval = true;
+                    to.attalign = b'i' as i8;
+                    to.attstorage = b'p' as i8;
+                }
+                TEXTOID => {
+                    to.attlen = -1;
+                    to.attbyval = false;
+                    to.attalign = b'i' as i8;
+                    to.attstorage = b'x' as i8;
+                }
+                other => unported(&format!(
+                    "ConstructTupleDescriptor: opclass keytype override to {other}"
+                )),
+            }
             to.atttypid = keyType;
             to.atttypmod = -1;
-            to.attlen = 4;
-            to.attbyval = true;
-            to.attalign = b'i' as i8;
-            to.attstorage = b'p' as i8;
             to.attcompression = 0;
         }
         tupdesc::populate_compact_attribute(&mut indexTupDesc, i);
@@ -335,8 +347,11 @@ pub fn index_create<'mcx>(
     {
         unported("index_create: deferrable/existing-index/temporal constraint flags");
     }
-    if accessMethodId != BTREE_AM_OID && accessMethodId != HASH_AM_OID {
-        unported("index_create: index AMs beyond btree/hash");
+    if accessMethodId != BTREE_AM_OID
+        && accessMethodId != HASH_AM_OID
+        && accessMethodId != GIN_AM_OID
+    {
+        unported("index_create: index AMs beyond btree/hash/gin");
     }
 
     let pg_class = table::table_open(mcx, RELATION_RELATION_ID, RowExclusiveLock)?;
@@ -604,8 +619,9 @@ pub fn index_build<'mcx>(
 ) -> PgResult<()> {
     if indexRelation.rd_rel.relam != BTREE_AM_OID
         && indexRelation.rd_rel.relam != HASH_AM_OID
+        && indexRelation.rd_rel.relam != GIN_AM_OID
     {
-        unported("index_build: index AMs beyond btree/hash");
+        unported("index_build: index AMs beyond btree/hash/gin");
     }
 
     let guard = miscinit::SecContextGuard::security_restricted(heapRelation.rd_rel.relowner);
@@ -615,8 +631,11 @@ pub fn index_build<'mcx>(
     let stats = if indexRelation.rd_rel.relam == BTREE_AM_OID {
         let r = nbtsort::btbuild(mcx, heapRelation, indexRelation, indexInfo)?;
         (r.heap_tuples, r.index_tuples)
-    } else {
+    } else if indexRelation.rd_rel.relam == HASH_AM_OID {
         let r = hashsort::hashbuild(mcx, heapRelation, indexRelation, indexInfo)?;
+        (r.heap_tuples, r.index_tuples)
+    } else {
+        let r = ginbuild::ginbuild(mcx, heapRelation, indexRelation, indexInfo)?;
         (r.heap_tuples, r.index_tuples)
     };
 

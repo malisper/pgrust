@@ -162,6 +162,7 @@ pub fn init_all() {
     guc::init_seams();
     guc_funcs::init_seams();
     variable::init_seams();
+    gin::init_seams();
     ps_status::init_seams();
     queryenvironment::init_seams();
     stack_depth::init_seams();

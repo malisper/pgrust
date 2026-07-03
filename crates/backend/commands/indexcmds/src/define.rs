@@ -94,6 +94,7 @@ pub fn DefineIndex<'mcx>(
         match stmt.accessMethod {
             Some("btree") => (BTREE_AM_OID, "btree", true, true, true),
             Some("hash") => (catalog_index::HASH_AM_OID, "hash", false, false, false),
+            Some("gin") => (catalog_index::GIN_AM_OID, "gin", false, false, true),
             other => unported(&format!("DefineIndex: access method {other:?} (AMNAME lookup)")),
         };
     if stmt.unique && !amcanunique {

@@ -182,6 +182,11 @@ pub fn exec_qual_with_subplans<'mcx>(
     let Some(state) = state else {
         return Ok(true);
     };
+    // Quals evaluate in the per-tuple context (C ecxt_per_tuple_memory):
+    // strict-bool programs never allocate, but arg-detoasting operators
+    // (jsonb @> ...) scribble scratch through the frame's result mcx.
+    // SAFETY: the per-tuple context object outlives the plan (reset-only).
+    unsafe { state.arm_result_mcx_raw(estate.ecxt(ecxt).per_tuple_mcx()) };
     let mut resume: Option<execexpr::Resume> = None;
     loop {
         let outcome = {

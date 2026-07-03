@@ -207,6 +207,13 @@ fn exec_scan_impl<'mcx, N: ScanNode<'mcx>, const QUAL: bool, const PROJ: bool, c
                 let ecxt = ss.ps_ExprContext;
                 executils::exec_qual_with_subplans(ss.qual.as_deref_mut(), estate, ecxt)?
             } else {
+                // Per-tuple result mcx for arg-detoasting quals (C's
+                // ecxt_per_tuple_memory; ExprContext reset frees it).
+                let per_tuple = estate.ecxt(ss.ps_ExprContext).per_tuple_mcx();
+                // SAFETY: reset-only context, outlives the plan.
+                unsafe {
+                    ss.qual.as_deref_mut().unwrap().arm_result_mcx_raw(per_tuple);
+                }
                 let mut slots = EvalSlots {
                     scan: Some(estate.slot_mut(scan_id)),
                     inner: None,

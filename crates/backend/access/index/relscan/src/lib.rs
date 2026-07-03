@@ -5,7 +5,8 @@
 use std::rc::Rc;
 
 use ::mcx::{Mcx, PgBox, PgVec};
-use ::types_core::{Oid, BTREE_AM_OID, HASH_AM_OID};
+use ::gin_vocab::GinScanOpaqueData;
+use ::types_core::{Oid, BTREE_AM_OID, GIN_AM_OID, HASH_AM_OID};
 use ::types_hash::HashScanOpaqueData;
 use ::types_error::PgResult;
 use ::types_nbtree::BTScanOpaqueData;
@@ -22,6 +23,7 @@ pub const MOCK_AM_OID: Oid = 9999;
 pub enum IndexAmKind {
     Btree,
     Hash,
+    Gin,
     #[cfg(feature = "mock")]
     Mock,
 }
@@ -31,6 +33,7 @@ impl IndexAmKind {
         match relam {
             BTREE_AM_OID => IndexAmKind::Btree,
             HASH_AM_OID => IndexAmKind::Hash,
+            GIN_AM_OID => IndexAmKind::Gin,
             #[cfg(feature = "mock")]
             MOCK_AM_OID => IndexAmKind::Mock,
             other => unported_index_am(other),
@@ -41,6 +44,7 @@ impl IndexAmKind {
         match self {
             IndexAmKind::Btree => true,
             IndexAmKind::Hash => true,
+            IndexAmKind::Gin => true,
             #[cfg(feature = "mock")]
             IndexAmKind::Mock => true,
         }
@@ -50,6 +54,7 @@ impl IndexAmKind {
         match self {
             IndexAmKind::Btree => true,
             IndexAmKind::Hash => false,
+            IndexAmKind::Gin => false,
             #[cfg(feature = "mock")]
             IndexAmKind::Mock => true,
         }
@@ -59,6 +64,7 @@ impl IndexAmKind {
         match self {
             IndexAmKind::Btree => true,
             IndexAmKind::Hash => false,
+            IndexAmKind::Gin => false,
             #[cfg(feature = "mock")]
             IndexAmKind::Mock => false,
         }
@@ -68,6 +74,7 @@ impl IndexAmKind {
         match self {
             IndexAmKind::Btree => false,
             IndexAmKind::Hash => false,
+            IndexAmKind::Gin => false,
             #[cfg(feature = "mock")]
             IndexAmKind::Mock => false,
         }
@@ -77,12 +84,13 @@ impl IndexAmKind {
 #[cold]
 #[inline(never)]
 fn unported_index_am(relam: Oid) -> ! {
-    panic!("unported: index AM {relam} (IndexAmKind covers btree only)")
+    panic!("unported: index AM {relam} (IndexAmKind covers btree+gin)")
 }
 
 pub enum IndexScanOpaque<'mcx> {
     Btree(PgBox<'mcx, BTScanOpaqueData<'mcx>>),
     Hash(PgBox<'mcx, HashScanOpaqueData<'mcx>>),
+    Gin(PgBox<'mcx, GinScanOpaqueData>),
     #[cfg(feature = "mock")]
     Mock(MockOpaque),
 }
@@ -93,6 +101,7 @@ impl IndexScanOpaque<'_> {
         match self {
             IndexScanOpaque::Btree(_) => IndexAmKind::Btree,
             IndexScanOpaque::Hash(_) => IndexAmKind::Hash,
+            IndexScanOpaque::Gin(_) => IndexAmKind::Gin,
             #[cfg(feature = "mock")]
             IndexScanOpaque::Mock(_) => IndexAmKind::Mock,
         }
