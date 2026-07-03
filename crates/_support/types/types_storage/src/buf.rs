@@ -4,8 +4,6 @@ use core::cell::RefCell;
 
 use ::types_core::{uint32, BlockNumber, ForkNumber, Oid, RelFileNumber};
 
-use crate::storage::{pg_atomic_uint32, LWLock};
-
 pub use ::types_core::{Buffer, BufferIsValid, InvalidBuffer};
 
 #[inline]
@@ -86,18 +84,6 @@ pub struct PgAioWaitRef {
     pub aio_index: uint32,
     pub generation_upper: uint32,
     pub generation_lower: uint32,
-}
-
-// Shmem-resident, reached by pointer in C — never Copy/Clone.
-#[derive(Debug, Default)]
-pub struct BufferDesc {
-    pub tag: buftag,
-    pub buf_id: i32,
-    pub state: pg_atomic_uint32,
-    pub wait_backend_pgprocno: i32,
-    pub freeNext: i32,
-    pub io_wref: PgAioWaitRef,
-    pub content_lock: LWLock,
 }
 
 pub const FREENEXT_END_OF_LIST: i32 = -1;

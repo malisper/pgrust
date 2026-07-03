@@ -263,6 +263,21 @@ pub struct LWLockPadded {
 
 const _: () = assert!(core::mem::size_of::<LWLockPadded>() == LWLOCK_PADDED_SIZE);
 
+// false sharing: 128B-isolates hot shmem atomics that C separates only by
+// allocation order (CACHELINEALIGN / palloc layout).
+#[repr(C, align(128))]
+#[derive(Debug, Default)]
+pub struct CacheAligned<T>(pub T);
+
+impl<T> core::ops::Deref for CacheAligned<T> {
+    type Target = T;
+
+    #[inline]
+    fn deref(&self) -> &T {
+        &self.0
+    }
+}
+
 pub const MAX_BACKENDS_BITS: i32 = 18;
 pub const MAX_BACKENDS: uint32 = (1_u32 << MAX_BACKENDS_BITS) - 1;
 
@@ -694,8 +709,9 @@ pub struct PROC_HDR {
     pub autovacFreeProcs: SyncCell<proclist_head>,   // [PSL]
     pub bgworkerFreeProcs: SyncCell<proclist_head>,  // [PSL]
     pub walsenderFreeProcs: SyncCell<proclist_head>, // [PSL]
-    pub procArrayGroupFirst: pg_atomic_uint32,
-    pub clogGroupFirst: pg_atomic_uint32,
+    // false sharing: group-commit leaders CAS these from every backend.
+    pub procArrayGroupFirst: CacheAligned<pg_atomic_uint32>,
+    pub clogGroupFirst: CacheAligned<pg_atomic_uint32>,
     pub walwriterProc: AtomicI32,    // ProcNumber
     pub checkpointerProc: AtomicI32, // ProcNumber
     pub spins_per_delay: SyncCell<i32>, // [PSL]
@@ -800,8 +816,8 @@ impl PROC_HDR {
             autovacFreeProcs: SyncCell::new(proclist_head::default()),
             bgworkerFreeProcs: SyncCell::new(proclist_head::default()),
             walsenderFreeProcs: SyncCell::new(proclist_head::default()),
-            procArrayGroupFirst: pg_atomic_uint32::new(INVALID_PROC_NUMBER as u32),
-            clogGroupFirst: pg_atomic_uint32::new(INVALID_PROC_NUMBER as u32),
+            procArrayGroupFirst: CacheAligned(pg_atomic_uint32::new(INVALID_PROC_NUMBER as u32)),
+            clogGroupFirst: CacheAligned(pg_atomic_uint32::new(INVALID_PROC_NUMBER as u32)),
             walwriterProc: AtomicI32::new(INVALID_PROC_NUMBER),
             checkpointerProc: AtomicI32::new(INVALID_PROC_NUMBER),
             spins_per_delay: SyncCell::new(0),

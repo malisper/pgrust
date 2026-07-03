@@ -9,6 +9,7 @@ use types_storage::buf::{
     BufferAccessStrategy, BufferAccessStrategyData, BufferAccessStrategyType, IOContext, Victim,
     BM_LOCKED, BUF_REFCOUNT_MASK, BUF_USAGECOUNT_MASK, BUF_USAGECOUNT_ONE, FREENEXT_NOT_IN_LIST,
 };
+use types_storage::storage::CacheAligned;
 use types_storage::NUM_AUXILIARY_PROCS;
 
 use crate::buf_hdr::{
@@ -54,12 +55,20 @@ impl SpinLock {
     }
 }
 
-struct BufferStrategyControl {
-    buffer_strategy_lock: SpinLock,
+struct ClockSweep {
     next_victim_buffer: AtomicU32,
+    complete_passes: UnsafeCell<u32>,
+}
+
+// false sharing: every backend fetch-adds the clock hand under buffer
+// pressure; C CACHELINEALIGNs StrategyControl in shmem. Keep the hand (and
+// the complete_passes it advances with) off the spinlock's line.
+#[repr(C)]
+struct BufferStrategyControl {
+    clock: CacheAligned<ClockSweep>,
+    buffer_strategy_lock: SpinLock,
     first_free_buffer: AtomicI32,
     last_free_buffer: UnsafeCell<i32>,
-    complete_passes: UnsafeCell<u32>,
     num_buffer_allocs: AtomicU32,
     bgwprocno: AtomicI32,
 }
@@ -82,11 +91,13 @@ pub fn StrategyInitialize(nbuffers: i32) -> PgResult<()> {
     InitBufTable(nbuffers + lwlock::NUM_BUFFER_PARTITIONS)?;
     STRATEGY
         .set(BufferStrategyControl {
+            clock: CacheAligned(ClockSweep {
+                next_victim_buffer: AtomicU32::new(0),
+                complete_passes: UnsafeCell::new(0),
+            }),
             buffer_strategy_lock: SpinLock::new(),
-            next_victim_buffer: AtomicU32::new(0),
             first_free_buffer: AtomicI32::new(0),
             last_free_buffer: UnsafeCell::new(nbuffers - 1),
-            complete_passes: UnsafeCell::new(0),
             num_buffer_allocs: AtomicU32::new(0),
             bgwprocno: AtomicI32::new(-1),
         })
@@ -99,12 +110,12 @@ pub fn StrategyInitialize(nbuffers: i32) -> PgResult<()> {
 pub(crate) fn StrategyResetAfterCrash(nbuffers: i32) {
     let c = ctl();
     c.buffer_strategy_lock.release();
-    c.next_victim_buffer.store(0, Ordering::Relaxed);
+    c.clock.next_victim_buffer.store(0, Ordering::Relaxed);
     c.first_free_buffer.store(0, Ordering::Relaxed);
     // SAFETY: exclusive postmaster access (crash choreography).
     unsafe {
         *c.last_free_buffer.get() = nbuffers - 1;
-        *c.complete_passes.get() = 0;
+        *c.clock.complete_passes.get() = 0;
     }
     c.num_buffer_allocs.store(0, Ordering::Relaxed);
     c.bgwprocno.store(-1, Ordering::Relaxed);
@@ -115,7 +126,7 @@ pub(crate) fn StrategyResetAfterCrash(nbuffers: i32) {
 fn ClockSweepTick() -> i32 {
     let c = ctl();
     let nbuffers = NBuffersInited() as u32;
-    let mut victim = c.next_victim_buffer.fetch_add(1, Ordering::Relaxed);
+    let mut victim = c.clock.next_victim_buffer.fetch_add(1, Ordering::Relaxed);
     if victim >= nbuffers {
         let original_victim = victim;
         victim %= nbuffers;
@@ -123,7 +134,7 @@ fn ClockSweepTick() -> i32 {
             let mut expected = original_victim + 1;
             c.buffer_strategy_lock.with(|| loop {
                 let wrapped = expected % nbuffers;
-                match c.next_victim_buffer.compare_exchange(
+                match c.clock.next_victim_buffer.compare_exchange(
                     expected,
                     wrapped,
                     Ordering::Relaxed,
@@ -131,7 +142,7 @@ fn ClockSweepTick() -> i32 {
                 ) {
                     Ok(_) => {
                         // SAFETY: strategy spinlock held.
-                        unsafe { *c.complete_passes.get() += 1 };
+                        unsafe { *c.clock.complete_passes.get() += 1 };
                         break;
                     }
                     Err(v) => {
@@ -259,10 +270,10 @@ pub fn StrategySyncStart() -> (i32, u32, u32) {
     let c = ctl();
     let nbuffers = NBuffersInited() as u32;
     c.buffer_strategy_lock.with(|| {
-        let hand = c.next_victim_buffer.load(Ordering::Relaxed);
+        let hand = c.clock.next_victim_buffer.load(Ordering::Relaxed);
         let result = (hand % nbuffers) as i32;
         // SAFETY: strategy spinlock held.
-        let complete_passes = unsafe { *c.complete_passes.get() } + hand / nbuffers;
+        let complete_passes = unsafe { *c.clock.complete_passes.get() } + hand / nbuffers;
         let num_buf_alloc = c.num_buffer_allocs.swap(0, Ordering::Relaxed);
         (result, complete_passes, num_buf_alloc)
     })
