@@ -14,7 +14,7 @@ const MULTI_OID: Oid = 90007;
 const F_INT4RANGE_CANONICAL: Oid = 3914;
 const SHELL_OID: Oid = 90003;
 const NOHASH_OID: Oid = 90006;
-const ENUM_OID: Oid = 90007;
+const ENUM_OID: Oid = 90008;
 
 const INT4_BTREE_OPCLASS: Oid = 1978;
 const INT4_HASH_OPCLASS: Oid = 1979;
