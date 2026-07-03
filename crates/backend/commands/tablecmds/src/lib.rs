@@ -71,7 +71,8 @@ pub fn RangeVarCallbackMaintainsTable(
         aclchk::pg_class_aclcheck(relId, miscinit::GetUserId(), adt_acl::ACL_MAINTAIN)?;
     if aclresult != aclchk::ACLCHECK_OK {
         // get_relkind_objtype: every reachable relkind maps to OBJECT_TABLE
-        // except matview; both render the same aclcheck_error message class.
+        // except matview, where C says "permission denied for materialized
+        // view" — error-text divergence until the matview lane lands.
         aclchk_seams::aclcheck_error::call(
             aclresult,
             types_nodes::parsenodes::ObjectType::OBJECT_TABLE as i32,

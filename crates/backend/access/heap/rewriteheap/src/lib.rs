@@ -63,9 +63,11 @@ pub fn begin_heap_rewrite<'mcx>(
     cutoff_multi: TransactionId,
 ) -> PgResult<RewriteState<'mcx>> {
     // logical_begin_heap_rewrite gate: RelationIsAccessibleInLogicalDecoding.
+    // rd_options.is_some() over-approximates RelationIsUsedAsCatalogTable
+    // (user_catalog_table reloption): loud beats a silent mapping-file skip.
     if transam_xlog::XLogLogicalInfoActive()
         && old_heap.is_permanent()
-        && catalog::IsCatalogRelation(old_heap)
+        && (catalog::IsCatalogRelation(old_heap) || old_heap.rd_options.is_some())
     {
         unported("logical_begin_heap_rewrite (logical decoding mapping files)");
     }
