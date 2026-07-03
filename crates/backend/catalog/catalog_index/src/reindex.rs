@@ -95,11 +95,7 @@ pub fn RelationSetNewRelfilenumber<'mcx>(
     // RelationAssumeNewRelfilelocator + the physical-addr refresh the C
     // in-place rebuild would perform on this same entry.
     rel.rd_locator.set(newrlocator);
-    let subid = xact::GetCurrentSubTransactionId();
-    rel.rd_newRelfilelocatorSubid.set(subid);
-    if rel.rd_firstRelfilelocatorSubid.get() == types_core::InvalidSubTransactionId {
-        rel.rd_firstRelfilelocatorSubid.set(subid);
-    }
+    relcache::invalidate::RelationAssumeNewRelfilelocator(rel);
 
     xact::CommandCounterIncrement()
 }

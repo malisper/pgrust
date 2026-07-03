@@ -38,6 +38,11 @@ const ANUM_PG_TYPE_TYPSTORAGE: i32 = 24;
 const ANUM_PG_TYPE_TYPCOLLATION: i32 = 29;
 const ANUM_PG_ATTRIBUTE_ATTRELID: i32 = 1;
 const ANUM_PG_INDEX_INDEXRELID: i32 = 1;
+const ANUM_PG_INDEX_INDNATTS: i32 = 3;
+const ANUM_PG_INDEX_INDNKEYATTS: i32 = 4;
+const ANUM_PG_INDEX_INDISCLUSTERED: i32 = 10;
+const ANUM_PG_INDEX_INDISVALID: i32 = 11;
+const ANUM_PG_INDEX_INDISREPLIDENT: i32 = 15;
 const ANUM_PG_CONSTRAINT_CONTYPE: i32 = 4;
 const ANUM_PG_CONSTRAINT_CONRELID: i32 = 9;
 const ANUM_PG_AUTHID_OID: i32 = 1;
@@ -134,6 +139,27 @@ fn pg_attribute_attrelid(tuple: &HeapTupleData<'_>) -> Oid {
 
 fn pg_index_indexrelid(tuple: &HeapTupleData<'_>) -> Oid {
     getattr(tuple, INDEXRELID, ANUM_PG_INDEX_INDEXRELID).as_oid()
+}
+
+fn lookup_pg_index_ls_shape(
+    index_oid: Oid,
+) -> PgResult<Option<syscache_seams::PgIndexLsShape>> {
+    let Some(tuple) =
+        SearchSysCache1(INDEXRELID, SysCacheKey::Value(Datum::from_oid(index_oid)))?
+    else {
+        return Ok(None);
+    };
+    let t = tuple.tuple();
+    let shape = syscache_seams::PgIndexLsShape {
+        indnatts: getattr(&t, INDEXRELID, ANUM_PG_INDEX_INDNATTS).as_i16(),
+        indnkeyatts: getattr(&t, INDEXRELID, ANUM_PG_INDEX_INDNKEYATTS).as_i16(),
+        indisreplident: getattr(&t, INDEXRELID, ANUM_PG_INDEX_INDISREPLIDENT).as_bool(),
+        indisvalid: getattr(&t, INDEXRELID, ANUM_PG_INDEX_INDISVALID).as_bool(),
+        indisclustered: getattr(&t, INDEXRELID, ANUM_PG_INDEX_INDISCLUSTERED).as_bool(),
+    };
+    drop(t);
+    ReleaseSysCache(tuple);
+    Ok(Some(shape))
 }
 
 fn pg_constraint_fk_target(tuple: &HeapTupleData<'_>) -> Option<Oid> {
@@ -1445,6 +1471,7 @@ pub(crate) fn install() {
     syscache_seams::lookup_pg_amproc::set(lookup_pg_amproc);
     syscache_seams::lookup_pg_amproc_members::set(lookup_pg_amproc_members);
     syscache_seams::lookup_pg_class_ls_shape::set(lookup_pg_class_ls_shape);
+    syscache_seams::lookup_pg_index_ls_shape::set(lookup_pg_index_ls_shape);
     syscache_seams::lookup_pg_amop_by_operator::set(lookup_pg_amop_by_operator);
     syscache_seams::lookup_pg_amop_by_strategy::set(lookup_pg_amop_by_strategy);
     syscache_seams::lookup_pg_amop_members_by_operator::set(lookup_pg_amop_members_by_operator);
