@@ -7,17 +7,19 @@ SET max_parallel_workers_per_gather = 0;
 SET jit = off;
 
 CREATE TABLE ec_big(a int, b int, c numeric, d text);
-INSERT INTO ec_big SELECT g, g % 97, (g % 13)::numeric / 7, 'row' || (g % 31)
+INSERT INTO ec_big SELECT g, g % 97, (g % 13)::numeric / 7, 'row' || ((g % 31)::text)
   FROM generate_series(1, 20000) g;
-CREATE INDEX ec_big_a ON ec_big(a);
-CREATE INDEX ec_big_b ON ec_big(b);
 CREATE TABLE ec_small(x int, y int, z text);
-INSERT INTO ec_small SELECT g, g % 11, 'v' || g FROM generate_series(1, 500) g;
+INSERT INTO ec_small SELECT g, g % 11, 'v' || (g::text) FROM generate_series(1, 500) g;
 CREATE TABLE ec_dup(k int, v int);
 INSERT INTO ec_dup SELECT g % 50, g FROM generate_series(1, 5000) g;
+-- ANALYZE before CREATE INDEX: do_analyze_rel's index-stats leg is a loud
+-- unported lane.
 ANALYZE ec_big;
 ANALYZE ec_small;
 ANALYZE ec_dup;
+CREATE INDEX ec_big_a ON ec_big(a);
+CREATE INDEX ec_big_b ON ec_big(b);
 
 -- scans
 EXPLAIN SELECT * FROM ec_big;
