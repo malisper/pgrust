@@ -117,6 +117,7 @@ name = "adt_char"
 version = "0.1.0"
 dependencies = [
  "datum",
+ "hashfn",
  "mcx",
  "pqformat",
  "stringinfo",
@@ -222,6 +223,7 @@ dependencies = [
  "datum",
  "fmgr_core",
  "guc_tables",
+ "hashfn",
  "pqformat",
  "ryu",
  "stringinfo",
@@ -488,6 +490,7 @@ dependencies = [
  "adt_float",
  "arrayfuncs",
  "datum",
+ "hashfn",
  "init_small",
  "mcx",
  "pg_prng",
@@ -691,13 +694,32 @@ dependencies = [
 name = "adt_tsquery_core"
 version = "0.1.0"
 dependencies = [
+ "adt_tsvector_core",
+ "crc32c",
+ "datum",
+ "elog",
+ "mbutils",
+ "mcx",
+ "pqformat",
+ "stringinfo",
+ "ts_locale",
+ "types_core",
+ "types_error",
  "types_fmgr",
+ "varlena",
 ]
 
 [[package]]
 name = "adt_tsrank"
 version = "0.1.0"
 dependencies = [
+ "adt_tsquery_core",
+ "adt_tsvector_core",
+ "arrayfuncs",
+ "datum",
+ "mcx",
+ "types_core",
+ "types_error",
  "types_fmgr",
 ]
 
@@ -705,7 +727,19 @@ dependencies = [
 name = "adt_tsvector_core"
 version = "0.1.0"
 dependencies = [
+ "arrayfuncs",
+ "datum",
+ "funcapi",
+ "heaptuple",
+ "mbutils",
+ "mcx",
+ "pqformat",
+ "stringinfo",
+ "tupdesc",
+ "types_core",
+ "types_error",
  "types_fmgr",
+ "varlena",
 ]
 
 [[package]]
@@ -852,11 +886,13 @@ dependencies = [
  "datum",
  "detoast_seams",
  "fmgr_seams",
+ "hashfn",
  "lsyscache",
  "mcx",
  "numutils",
  "pqformat",
  "stringinfo",
+ "typcache",
  "types_core",
  "types_error",
  "types_fmgr",
@@ -2604,7 +2640,13 @@ dependencies = [
 name = "dict_snowball"
 version = "0.1.0"
 dependencies = [
+ "datum",
+ "mbutils",
+ "mcx",
+ "ts_locale",
+ "types_error",
  "types_fmgr",
+ "wchar",
 ]
 
 [[package]]
@@ -4868,6 +4910,7 @@ dependencies = [
  "arrayfuncs",
  "datum",
  "elog",
+ "hashfn",
  "lsyscache",
  "mbutils_seams",
  "mcx",
@@ -6555,6 +6598,7 @@ dependencies = [
  "mcx",
  "miscinit_seams",
  "pg_depend",
+ "pg_enum",
  "syscache_seams",
  "table",
  "types_core",
@@ -8559,6 +8603,7 @@ dependencies = [
  "transam",
  "transam_xlog",
  "trigger",
+ "ts_cache",
  "tuplesort",
  "tuplestore",
  "twophase_config",
@@ -9703,6 +9748,16 @@ dependencies = [
 name = "to_tsany"
 version = "0.1.0"
 dependencies = [
+ "adt_tsquery_core",
+ "adt_tsvector_core",
+ "datum",
+ "fmgr_seams",
+ "mcx",
+ "ts_cache",
+ "ts_locale",
+ "ts_parse",
+ "types_core",
+ "types_error",
  "types_fmgr",
 ]
 
@@ -9867,22 +9922,52 @@ dependencies = [
 name = "ts_cache"
 version = "0.1.0"
 dependencies = [
+ "adt_regproc",
+ "datum",
+ "dbcommands_seams",
+ "elog",
+ "fmgr_seams",
+ "format_type",
+ "guc_tables",
+ "init_small",
+ "inval",
+ "lsyscache",
+ "mcx",
+ "namespace_seams",
+ "syscache_seams",
+ "ts_locale",
+ "types_core",
+ "types_error",
  "types_fmgr",
+ "types_guc",
+ "xact_seams",
 ]
 
 [[package]]
 name = "ts_locale"
 version = "0.1.0"
 dependencies = [
+ "adt_oracle_compat",
+ "init_small",
+ "libc",
+ "mbutils",
  "mcx",
+ "pg_locale",
+ "pg_path",
+ "types_core",
  "types_error",
- "types_fmgr",
+ "wchar",
 ]
 
 [[package]]
 name = "ts_parse"
 version = "0.1.0"
 dependencies = [
+ "elog_seams",
+ "mcx",
+ "ts_locale",
+ "types_core",
+ "types_error",
  "types_fmgr",
 ]
 
@@ -9890,6 +9975,14 @@ dependencies = [
 name = "tsearch_dict"
 version = "0.1.0"
 dependencies = [
+ "adt_regproc",
+ "datum",
+ "mbutils",
+ "mcx",
+ "ts_cache",
+ "ts_locale",
+ "types_core",
+ "types_error",
  "types_fmgr",
 ]
 
@@ -9897,6 +9990,15 @@ dependencies = [
 name = "tsearch_spell"
 version = "0.1.0"
 dependencies = [
+ "datum",
+ "mbutils",
+ "mcx",
+ "regex",
+ "regex_core",
+ "stack_depth",
+ "ts_locale",
+ "types_core",
+ "types_error",
  "types_fmgr",
 ]
 
@@ -9904,7 +10006,35 @@ dependencies = [
 name = "tsearchcmds"
 version = "0.1.0"
 dependencies = [
+ "aclchk",
+ "cache_syscache",
+ "catalog",
+ "catalog_dependency",
+ "catalog_indexing",
+ "catalog_namespace",
+ "datum",
+ "elog_seams",
+ "fmgr_seams",
+ "format_type",
+ "genam",
+ "heaptuple",
+ "lsyscache",
+ "mcx",
+ "miscinit",
+ "pg_depend",
+ "rel_vocab",
+ "superuser",
+ "table",
+ "ts_locale",
+ "types_core",
+ "types_error",
  "types_fmgr",
+ "types_nodes",
+ "types_rel",
+ "types_scan",
+ "types_tuple",
+ "varlena",
+ "xact",
 ]
 
 [[package]]
@@ -10052,6 +10182,7 @@ version = "0.1.0"
 dependencies = [
  "aclchk",
  "adt_acl",
+ "catalog_dependency",
  "catalog_namespace",
  "coerce",
  "datum",
@@ -10069,11 +10200,14 @@ dependencies = [
  "parse_utilcmd",
  "parser_small1",
  "pg_constraint",
+ "pg_depend",
  "pg_enum",
  "pg_type",
+ "rel_vocab",
  "superuser",
  "syscache_seams",
  "table",
+ "tablecmds",
  "types_core",
  "types_error",
  "types_nodes",
@@ -10409,6 +10543,7 @@ dependencies = [
  "tcop_dest",
  "transam_xlog",
  "transam_xlog_seams",
+ "tsearchcmds",
  "twophase_seams",
  "typecmds",
  "types_core",
@@ -10755,7 +10890,20 @@ version = "0.1.0"
 name = "wparser_def"
 version = "0.1.0"
 dependencies = [
+ "datum",
+ "funcapi",
+ "heaptuple",
+ "libc",
+ "mbutils",
+ "mcx",
+ "pg_locale",
+ "ts_locale",
+ "tupdesc",
+ "types_core",
+ "types_error",
  "types_fmgr",
+ "varlena",
+ "wchar",
 ]
 
 [[package]]
