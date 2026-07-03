@@ -1704,6 +1704,42 @@ impl<'mcx> Parser<'mcx> {
                     },
                 )?));
             }
+            // a_expr [NOT_LA] LIKE/ILIKE a_expr [ESCAPE a_expr] (gram.y:15023)
+            2045..=2052 => {
+                let (kind, op) = match rule {
+                    2045 | 2046 => (A_Expr_Kind::AEXPR_LIKE, "~~"),
+                    2047 | 2048 => (A_Expr_Kind::AEXPR_LIKE, "!~~"),
+                    2049 | 2050 => (A_Expr_Kind::AEXPR_ILIKE, "~~*"),
+                    _ => (A_Expr_Kind::AEXPR_ILIKE, "!~~*"),
+                };
+                let pat_i = if matches!(rule, 2047 | 2048 | 2051 | 2052) { 4 } else { 3 };
+                let loc = view.l(2);
+                let pattern = view.v(pat_i).node().expect("a_expr");
+                let rexpr = if matches!(rule, 2046 | 2048 | 2050 | 2052) {
+                    make_func_call(
+                        mcx,
+                        system_func_name(mcx, "like_escape")?,
+                        NodeList::make2(mcx, pattern, view.v(pat_i + 2).node().expect("a_expr"))?,
+                        CoercionForm::COERCE_EXPLICIT_CALL,
+                        loc,
+                    )?
+                    .seal()
+                } else {
+                    pattern
+                };
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    types_nodes::A_Expr {
+                        kind,
+                        name: NodeList::make1(mcx, Node::mk_string(mcx, op)?)?,
+                        lexpr: view.v(1).node(),
+                        rexpr: Some(rexpr),
+                        rexpr_list_start: 0,
+                        rexpr_list_end: 0,
+                        location: loc,
+                    },
+                )?));
+            }
             // IS [NOT] NULL / ISNULL / NOTNULL
             2057..=2060 => {
                 let arg = view.v(1).node();

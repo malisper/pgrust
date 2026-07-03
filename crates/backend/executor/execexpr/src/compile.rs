@@ -679,6 +679,7 @@ pub fn expr_type(node: Node<'_>) -> Oid {
         NodeTag::T_WindowFunc => node.as_window_func().unwrap().wintype,
         NodeTag::T_GroupingFunc => 23,
         NodeTag::T_MinMaxExpr => node.as_min_max_expr().unwrap().minmaxtype,
+        NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resulttype,
         NodeTag::T_SQLValueFunction => node.as_sql_value_function().unwrap().r#type,
         NodeTag::T_BoolExpr | NodeTag::T_NullTest | NodeTag::T_ScalarArrayOpExpr => 16,
         NodeTag::T_ArrayExpr => node.as_array_expr().unwrap().array_typeid,

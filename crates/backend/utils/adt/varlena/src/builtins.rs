@@ -534,6 +534,7 @@ pub const VARLENA_BUILTINS: &[FmgrBuiltin] = &[
     b(724, "byteaSetBit", 3, fc_bytea_set_bit),
     b(740, "text_lt", 2, fc_text_lt),
     b(849, "textpos", 2, fc_textpos),
+    b(868, "strpos", 2, fc_textpos),
     b(877, "text_substr", 3, fc_text_substr),
     b(883, "text_substr_no_len", 2, fc_text_substr_no_len),
     b(936, "text_substr", 3, fc_text_substr),

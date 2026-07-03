@@ -146,6 +146,19 @@ fn datum_copy_in<'mcx>(mcx: Mcx<'mcx>, value: Datum, typlen: i16) -> PgResult<Da
 fn ece_mutator<'mcx>(node: Node<'mcx>, cx: &EceContext<'mcx>) -> PgResult<Option<Node<'mcx>>> {
     match node.node_tag() {
         NodeTag::T_Param => substitute_bound_param(node, cx),
+        NodeTag::T_RelabelType => {
+            let r = node.as_relabel_type().unwrap();
+            let arg = ece_mutator(r.arg, cx)?.unwrap_or(r.arg);
+            Ok(Some(nodes_core::node_funcs::apply_relabel_type(
+                cx.mcx,
+                arg,
+                r.resulttype,
+                r.resulttypmod,
+                r.resultcollid,
+                r.relabelformat,
+                r.location,
+            )?))
+        }
         NodeTag::T_FuncExpr => {
             let f = node.as_func_expr().unwrap();
             let (simple, new_args) = simplify_function(
@@ -1005,28 +1018,6 @@ fn coerce_arg_type(node: Node<'_>) -> Oid {
     }
 }
 
-fn coerce_arg_typmod(node: Node<'_>) -> i32 {
-    match node.node_tag() {
-        NodeTag::T_Const => node.as_const().unwrap().consttypmod,
-        NodeTag::T_Var => node.as_var().unwrap().vartypmod,
-        NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resulttypmod,
-        _ => -1,
-    }
-}
-
-fn coerce_arg_collation(node: Node<'_>) -> Oid {
-    match node.node_tag() {
-        NodeTag::T_Const => node.as_const().unwrap().constcollid,
-        NodeTag::T_Var => node.as_var().unwrap().varcollid,
-        NodeTag::T_Param => node.as_param().unwrap().paramcollid,
-        NodeTag::T_FuncExpr => node.as_func_expr().unwrap().funccollid,
-        NodeTag::T_OpExpr => node.as_op_expr().unwrap().opcollid,
-        NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resultcollid,
-        NodeTag::T_CoerceViaIO => node.as_coerce_via_io().unwrap().resultcollid,
-        other => deferred("coerce_arg_collation (exprCollation)", other),
-    }
-}
-
 pub fn is_polymorphic_type(t: Oid) -> bool {
     use types_core::catalog::{
         ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYCOMPATIBLEMULTIRANGEOID,
@@ -1049,45 +1040,7 @@ pub fn is_polymorphic_type(t: Oid) -> bool {
     )
 }
 
-/// C applyRelabelType (nodeFuncs.c), overwrite_ok=false (Consts rebuilt).
-pub fn apply_relabel_type<'mcx>(
-    mcx: Mcx<'mcx>,
-    arg: Node<'mcx>,
-    rtype: Oid,
-    rtypmod: i32,
-    rcollid: Oid,
-    rformat: CoercionForm,
-    rlocation: i32,
-) -> PgResult<Node<'mcx>> {
-    use types_nodes::primnodes::RelabelType;
-    let mut arg = arg;
-    while let Some(r) = arg.as_relabel_type() {
-        arg = r.arg;
-    }
-    if let Some(c) = arg.as_const() {
-        return Node::mk(
-            mcx,
-            Const { consttype: rtype, consttypmod: rtypmod, constcollid: rcollid, ..*c },
-        );
-    }
-    if coerce_arg_type(arg) == rtype
-        && coerce_arg_typmod(arg) == rtypmod
-        && coerce_arg_collation(arg) == rcollid
-    {
-        return Ok(arg);
-    }
-    Node::mk(
-        mcx,
-        RelabelType {
-            arg,
-            resulttype: rtype,
-            resulttypmod: rtypmod,
-            resultcollid: rcollid,
-            relabelformat: rformat,
-            location: rlocation,
-        },
-    )
-}
+pub use nodes_core::node_funcs::apply_relabel_type;
 
 /// Reduce "x = true" to "x", "x = false" to NOT x (ditto <>, inverted).
 fn simplify_boolean_equality<'mcx>(
