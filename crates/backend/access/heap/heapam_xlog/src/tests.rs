@@ -10,7 +10,17 @@ fn wal_constants_match_write_side() {
     assert_eq!(XLOG_HEAP_HOT_UPDATE, heapam::dml::XLOG_HEAP_HOT_UPDATE);
     assert_eq!(XLOG_HEAP_LOCK, heapam::dml::XLOG_HEAP_LOCK);
     assert_eq!(XLOG_HEAP_INIT_PAGE, heapam::dml::XLOG_HEAP_INIT_PAGE);
+    assert_eq!(XLOG_HEAP_INPLACE, heapam::dml::XLOG_HEAP_INPLACE);
     assert_eq!(XLH_INSERT_ALL_VISIBLE_CLEARED, heapam::dml::XLH_INSERT_ALL_VISIBLE_CLEARED);
+    assert_eq!(
+        XLH_UPDATE_OLD_ALL_VISIBLE_CLEARED,
+        heapam::dml::XLH_UPDATE_OLD_ALL_VISIBLE_CLEARED
+    );
+    assert_eq!(
+        XLH_UPDATE_NEW_ALL_VISIBLE_CLEARED,
+        heapam::dml::XLH_UPDATE_NEW_ALL_VISIBLE_CLEARED
+    );
+    assert_eq!(XLH_LOCK_ALL_FROZEN_CLEARED, heapam::dml::XLH_LOCK_ALL_FROZEN_CLEARED);
     assert_eq!(XLH_DELETE_ALL_VISIBLE_CLEARED, heapam::dml::XLH_DELETE_ALL_VISIBLE_CLEARED);
     assert_eq!(XLH_DELETE_IS_PARTITION_MOVE, heapam::dml::XLH_DELETE_IS_PARTITION_MOVE);
     assert_eq!(XLHL_XMAX_IS_MULTI, heapam::dml::XLHL_XMAX_IS_MULTI);
