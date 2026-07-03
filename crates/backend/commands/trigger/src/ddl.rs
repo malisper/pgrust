@@ -90,13 +90,14 @@ pub fn RemoveTriggers<'mcx>(mcx: Mcx<'mcx>, stmt: &DropStmt<'mcx>) -> PgResult<(
         };
         let rel = table::table_openrv_extended(mcx, &rv, AccessExclusiveLock, stmt.missing_ok)?;
         let Some(rel) = rel else {
-            elog_seams::ereport_msg::call(
-                NOTICE,
-                format!(
-                    "trigger \"{trigname}\" for relation \"{display}\" does not exist, skipping"
-                ),
-                None,
-            )?;
+            // owningrel_does_not_exist_skipping (dropcmds.c).
+            let msg = match schemaname {
+                Some(s) if catalog_namespace::LookupNamespaceNoError(s)? == InvalidOid => {
+                    format!("schema \"{s}\" does not exist, skipping")
+                }
+                _ => format!("relation \"{display}\" does not exist, skipping"),
+            };
+            elog_seams::ereport_msg::call(NOTICE, msg, None)?;
             continue;
         };
         let tgoid = get_trigger_oid(mcx, rel.rd_id, trigname, stmt.missing_ok)?;
