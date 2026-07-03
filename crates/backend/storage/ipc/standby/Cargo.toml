@@ -8,6 +8,7 @@ path = "src/lib.rs"
 
 [dependencies]
 elog = { path = "../../../utils/error/elog" }
+init_small = { path = "../../../utils/init/init_small" }
 lock = { path = "../../lmgr/lock" }
 lwlock = { path = "../../lmgr/lwlock" }
 procarray = { path = "../procarray" }
@@ -20,3 +21,16 @@ xact_seams = { path = "../../../access/transam/xact_seams" }
 xloginsert = { path = "../../../access/transam/xloginsert" }
 xlogreader_seams = { path = "../../../access/transam/xlogreader_seams" }
 xlogutils = { path = "../../../access/transam/xlogutils" }
+
+[dev-dependencies]
+aio_seams = { path = "../../aio/aio_seams" }
+origin_seams = { path = "../../../replication/origin_seams" }
+controldata_utils = { path = "../../../../common/controldata_utils" }
+fd = { path = "../../file/fd" }
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+mcx = { path = "../../../../_support/mcx" }
+rmgrdesc = { path = "../../../access/rmgrdesc" }
+shmem = { path = "../shmem" }
+stringinfo = { path = "../../../../_support/types/stringinfo" }
+waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
+xlogreader = { path = "../../../access/transam/xlogreader" }

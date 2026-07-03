@@ -18,5 +18,8 @@ transam_xlog = { path = "../../access/transam/transam_xlog" }
 xloginsert_seams = { path = "../../access/transam/xloginsert_seams" }
 catalog_storage_seams = { path = "../storage_seams" }
 storage_xlog = { path = "../storage_xlog" }
+xloginsert = { path = "../../access/transam/xloginsert" }
+xlogutils = { path = "../../access/transam/xlogutils" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
 
 [dev-dependencies]

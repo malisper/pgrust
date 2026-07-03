@@ -50,3 +50,40 @@ fn subcommit_lowers_nest_level() {
     PENDING.with_borrow(|p| assert_eq!(p[0].nest_level, xact::GetCurrentTransactionNestLevel() - 1));
     PENDING.with_borrow_mut(|p| p.clear());
 }
+
+#[test]
+fn pending_syncs_registry_abort_and_parallel_discard() {
+    PENDING_SYNCS.with_borrow_mut(|p| p.clear());
+    let a = RelFileLocator::new(1663, 5, 16500);
+    AddPendingSync(a);
+    assert!(RelFileLocatorSkippingWAL(a));
+    assert!(!RelFileLocatorSkippingWAL(RelFileLocator::new(1663, 5, 16501)));
+
+    smgrDoPendingSyncs(false, false).unwrap();
+    assert!(!RelFileLocatorSkippingWAL(a));
+
+    AddPendingSync(a);
+    smgrDoPendingSyncs(true, true).unwrap();
+    assert!(!RelFileLocatorSkippingWAL(a));
+}
+
+#[test]
+fn pending_syncs_commit_skips_locators_pending_delete() {
+    PENDING_SYNCS.with_borrow_mut(|p| p.clear());
+    PENDING.with_borrow_mut(|p| p.clear());
+    let a = RelFileLocator::new(1663, 5, 16510);
+    AddPendingSync(a);
+    PENDING.with_borrow_mut(|p| {
+        p.push(PendingRelDelete {
+            rlocator: a,
+            proc_number: INVALID_PROC_NUMBER,
+            at_commit: true,
+            nest_level: 1,
+        });
+    });
+    // The only registered sync is also a commit-time delete: the commit pass
+    // must touch no storage (no smgr wiring installed here).
+    smgrDoPendingSyncs(true, false).unwrap();
+    assert!(!RelFileLocatorSkippingWAL(a));
+    PENDING.with_borrow_mut(|p| p.clear());
+}

@@ -255,6 +255,16 @@ pub fn MarkBufferDirtyHint(buffer: Buffer, buffer_std: bool) -> PgResult<()> {
     let mut lsn: types_core::XLogRecPtr = 0;
     let mut delay_chkpt = false;
     if xlog_hint_bit_is_needed() && state & BM_PERMANENT != 0 {
+        // No WAL in recovery or for a WAL-skipped relfilelocator: leave the
+        // page clean so the hint is lost on eviction instead of torn on disk.
+        let tag = ops::BufferGetTag(buffer);
+        if transam_xlog_seams::recovery_in_progress::call()
+            || catalog_storage_seams::rel_file_locator_skipping_wal::call(
+                types_storage::RelFileLocator::new(tag.spcOid, tag.dbOid, tag.relNumber),
+            )
+        {
+            return Ok(());
+        }
         // The dirty-page-without-usable-LSN window must not span a
         // checkpoint's REDO-pointer read (C delayChkptFlags contract).
         if let Some(procno) = lmgr_proc::MyProc() {
@@ -349,9 +359,7 @@ pub fn init_seams() {
         panic!("unported callee reached from bufmgr.c: DropRelationBuffers (phase 2)")
     });
     bufmgr_seams::drop_relations_all_buffers::set(drop_buffers::DropRelationsAllBuffers);
-    bufmgr_seams::flush_relations_all_buffers::set(|_| {
-        panic!("unported callee reached from bufmgr.c: FlushRelationsAllBuffers (write-back, phase 2)")
-    });
+    bufmgr_seams::flush_relations_all_buffers::set(write::FlushRelationsAllBuffers);
     bufmgr_seams::mark_buffer_dirty_hint::set(MarkBufferDirtyHint);
     bufmgr_seams::buffer_is_permanent::set(BufferIsPermanent);
     bufmgr_seams::buffer_get_lsn_atomic::set(BufferGetLSNAtomic);

@@ -14,13 +14,13 @@ use crate::buf_table::{BufMappingPartitionLock, BufTableDelete, BufTableHashCode
 use crate::freelist::StrategyFreeBuffer;
 use lwlock::{LWLockAcquire, LWLockRelease, LW_EXCLUSIVE, LW_SHARED};
 
-const RELS_BSEARCH_THRESHOLD: usize = 20;
+pub(crate) const RELS_BSEARCH_THRESHOLD: usize = 20;
 
 fn buf_drop_full_scan_threshold() -> u64 {
     (NBuffersInited() as u64) / 32
 }
 
-fn tag_matches(tag: &types_storage::buf::buftag, rlocator: &RelFileLocator) -> bool {
+pub(crate) fn tag_matches(tag: &types_storage::buf::buftag, rlocator: &RelFileLocator) -> bool {
     tag.spcOid == rlocator.spcOid
         && tag.dbOid == rlocator.dbOid
         && tag.relNumber == rlocator.relNumber

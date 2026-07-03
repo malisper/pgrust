@@ -15,6 +15,10 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    pub fn rel_file_locator_skipping_wal(rlocator: RelFileLocator) -> bool
+);
+
+seam_core::seam!(
     pub fn smgr_do_pending_deletes(is_commit: bool) -> PgResult<()>
 );
 
