@@ -245,6 +245,7 @@ fn install_xact_periphery_seams() {
     multixact_seams::multi_xact_id_is_running::set(|_, _| Ok(false));
     pg_enum_seams::at_eoxact_enum::set(|| {});
     relcache_seams::at_eoxact_relation_cache::set(|_| Ok(()));
+    relcache_seams::relation_get_stat_ext_list::set(|mcx, _relid| Ok(mcx::PgVec::new_in(mcx)));
     typcache_seams::at_eoxact_type_cache::set(|| {});
     logical_seams::reset_logical_streaming_state::set(|| {});
     snapbuild_seams::snap_build_reset_exported_snapshot_state::set(|| {});
