@@ -28,9 +28,6 @@ mod temp;
 mod visibility;
 #[cfg(test)]
 mod tests;
-mod visibility;
-
-pub use visibility::{FunctionIsVisible, RelationIsVisible, TypeIsVisible};
 
 pub use temp::{
     AccessTempTableNamespace, GetTempTableNamespace, RangeVarAdjustRelationPersistence,
