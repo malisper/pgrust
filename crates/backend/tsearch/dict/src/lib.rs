@@ -5,7 +5,7 @@ pub mod thesaurus;
 mod tests;
 
 use ::datum::Datum;
-use ::mcx::{alloc_in, leak_in, vec_with_capacity_in, Mcx};
+use ::mcx::{alloc_in, vec_with_capacity_in, Mcx};
 use ::ts_cache::lookup_ts_dictionary_cache;
 use ::ts_locale::dict_api::{lexize_result_ref, DictInitData, LexizeResult};
 use ::ts_locale::DictSubState;
@@ -74,7 +74,10 @@ fn arg_token<'a>(fcinfo: &'a Fcinfo) -> &'a [u8] {
 fn lexize_datum<'m>(mcx: Mcx<'m>, res: Option<LexizeResult<'m>>) -> PgResult<Datum> {
     match res {
         None => Ok(Datum::from_usize(0)),
-        Some(r) => Ok(Datum::from_usize(leak_in(alloc_in(mcx, r)?) as *mut _ as usize)),
+        Some(r) => {
+            let (ptr, _) = ::mcx::PgBox::into_raw_with_allocator(alloc_in(mcx, r)?);
+            Ok(Datum::from_usize(ptr as usize))
+        }
     }
 }
 
@@ -82,7 +85,10 @@ pub fn fc_dsimple_init(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> P
     // SAFETY: arg0 is the DictInitData built by the ts_cache dictionary loader.
     let init = unsafe { &*(arg_dict_ptr(fcinfo) as *const DictInitData<'static>) };
     let d = simple::dsimple_init(init)?;
-    Ok(Datum::from_usize(leak_in(alloc_in(init.mcx, d)?) as *mut _ as usize))
+    {
+        let (ptr, _) = ::mcx::PgBox::into_raw_with_allocator(alloc_in(init.mcx, d)?);
+        Ok(Datum::from_usize(ptr as usize))
+    }
 }
 
 pub fn fc_dsimple_lexize(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
@@ -97,7 +103,10 @@ pub fn fc_dsynonym_init(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> 
     // SAFETY: arg0 is the DictInitData built by the ts_cache dictionary loader.
     let init = unsafe { &*(arg_dict_ptr(fcinfo) as *const DictInitData<'static>) };
     let d = synonym::dsynonym_init(init)?;
-    Ok(Datum::from_usize(leak_in(alloc_in(init.mcx, d)?) as *mut _ as usize))
+    {
+        let (ptr, _) = ::mcx::PgBox::into_raw_with_allocator(alloc_in(init.mcx, d)?);
+        Ok(Datum::from_usize(ptr as usize))
+    }
 }
 
 pub fn fc_dsynonym_lexize(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
@@ -112,7 +121,10 @@ pub fn fc_thesaurus_init(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) ->
     // SAFETY: arg0 is the DictInitData built by the ts_cache dictionary loader.
     let init = unsafe { &*(arg_dict_ptr(fcinfo) as *const DictInitData<'static>) };
     let d = thesaurus::thesaurus_init(init)?;
-    Ok(Datum::from_usize(leak_in(alloc_in(init.mcx, d)?) as *mut _ as usize))
+    {
+        let (ptr, _) = ::mcx::PgBox::into_raw_with_allocator(alloc_in(init.mcx, d)?);
+        Ok(Datum::from_usize(ptr as usize))
+    }
 }
 
 pub fn fc_thesaurus_lexize(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
