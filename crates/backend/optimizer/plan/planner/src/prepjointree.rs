@@ -234,11 +234,11 @@ fn pull_up_simple_subquery<'mcx>(
         parse.targetList = l;
     }
     parse.havingQual = replace_opt(mcx, parse.havingQual, varno, &off_tlist)?;
-    assert!(
-        parse.returningList.is_nil(),
-        "pull_up_simple_subquery (prepjointree.c): pullup_replace_vars over \
-         returningList unported"
-    );
+    if let Some(l) = clauses::walker::mutate_list(mcx, &parse.returningList, &mut |n| {
+        replace_var_expr(mcx, n, varno, &off_tlist)
+    })? {
+        parse.returningList = l;
+    }
 
     // pullup_replace_vars over the jointree: substitute Vars in every qual
     // and splice the offset sub-jointree in place of the RangeTblRef.

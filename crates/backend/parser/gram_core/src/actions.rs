@@ -1571,6 +1571,18 @@ impl<'mcx> Parser<'mcx> {
                     },
                 )?));
             }
+            // a_expr: DEFAULT (parse analysis errors it outside VALUES/SET)
+            2089 => {
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    types_nodes::SetToDefault {
+                        typeId: 0,
+                        typeMod: 0,
+                        collation: 0,
+                        location: view.l(1),
+                    },
+                )?));
+            }
             // b_expr: the a_expr forms without boolean/IS tails (DISTINCT and
             // IS DOCUMENT arms 2108-2111 stay unimplemented-rule loud).
             2091 => {
