@@ -941,6 +941,10 @@ pub fn expr_type_typmod(node: Node<'_>) -> (u32, i32) {
             let v = node.as_var().unwrap();
             (v.vartype, v.vartypmod)
         }
+        NodeTag::T_RelabelType => {
+            let r = node.as_relabel_type().unwrap();
+            (r.resulttype, r.resulttypmod)
+        }
         NodeTag::T_OpExpr => (node.as_op_expr().unwrap().opresulttype, -1),
         NodeTag::T_FuncExpr => (node.as_func_expr().unwrap().funcresulttype, -1),
         NodeTag::T_Aggref => (node.as_aggref().unwrap().aggtype, -1),

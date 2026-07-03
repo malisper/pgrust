@@ -507,6 +507,7 @@ pub fn expr_collation(node: Node<'_>) -> u32 {
     match node.node_tag() {
         NodeTag::T_Var => node.as_var().unwrap().varcollid,
         NodeTag::T_Const => node.as_const().unwrap().constcollid,
+        NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resultcollid,
         NodeTag::T_OpExpr => node.as_op_expr().unwrap().opcollid,
         NodeTag::T_FuncExpr => node.as_func_expr().unwrap().funccollid,
         NodeTag::T_Param => node.as_param().unwrap().paramcollid,

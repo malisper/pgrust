@@ -239,7 +239,8 @@ fn examine_quals<'mcx>(
             "cannot merge using non-equality operator {}",
             op.opno
         );
-        let comparator = ::tuplesort::comparator_for_opfamily(opfamily, lefttype, righttype)?;
+        let comparator =
+            ::tuplesort::comparator_for_opfamily(opfamily, lefttype, righttype, collation)?;
         let ssup = SortSupport {
             ssup_collation: collation,
             ssup_reverse: reversed,
