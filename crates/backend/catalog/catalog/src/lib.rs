@@ -1,9 +1,10 @@
-// catalog.c classification predicates. The OID-generation half
-// (GetNewOidWithIndex, GetNewRelFileNumber, pg_nextoid,
-// pg_stop_making_pinned_objects) waits on genam/varsup/superuser owners —
-// nothing in-tree calls it yet.
+// catalog.c: classification predicates + OID generation (pg_nextoid and
+// pg_stop_making_pinned_objects stay with the fmgr-callable surface).
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
+
+mod oid;
+pub use oid::{Anum_pg_class_oid, ClassOidIndexId, GetNewOidWithIndex, GetNewRelFileNumber};
 
 use types_core::{
     FirstUnpinnedObjectId, Oid, DATABASE_RELATION_ID, PG_CATALOG_NAMESPACE, PG_TOAST_NAMESPACE,
@@ -211,4 +212,7 @@ pub fn init_seams() {
     catalog_seams::is_toast_relation::set(IsToastRelation);
     catalog_seams::is_shared_relation::set(IsSharedRelation);
     catalog_seams::is_catalog_relation_oid::set(IsCatalogRelationOid);
+    catalog_seams::get_new_oid_with_index::set(|mcx, rel, index_id, oidcolumn| {
+        GetNewOidWithIndex(mcx, rel, index_id, oidcolumn)
+    });
 }

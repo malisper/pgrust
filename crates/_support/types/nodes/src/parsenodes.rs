@@ -507,6 +507,16 @@ impl<'mcx> Node<'mcx> {
     }
 
     #[inline]
+    pub fn as_vacuum_stmt(self) -> Option<&'mcx VacuumStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_vacuum_relation(self) -> Option<&'mcx VacuumRelation<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
     pub fn as_variable_set_stmt(self) -> Option<&'mcx VariableSetStmt<'mcx>> {
         self.as_variant()
     }
@@ -548,16 +558,6 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_deallocate_stmt(self) -> Option<&'mcx DeallocateStmt<'mcx>> {
-        self.as_variant()
-    }
-
-    #[inline]
-    pub fn as_vacuum_stmt(self) -> Option<&'mcx VacuumStmt<'mcx>> {
-        self.as_variant()
-    }
-
-    #[inline]
-    pub fn as_vacuum_relation(self) -> Option<&'mcx VacuumRelation<'mcx>> {
         self.as_variant()
     }
 }

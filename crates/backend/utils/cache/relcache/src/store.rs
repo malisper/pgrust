@@ -107,9 +107,6 @@ pub(crate) fn delete(relation_id: Oid) -> PgResult<()> {
     Ok(())
 }
 
-// EOXactListAdd: callers (RelationBuildLocalRelation,
-// RelationAssumeNewRelfilelocator) are this crate's deferred DDL surface.
-#[allow(dead_code)]
 pub(crate) fn eoxact_list_add(relid: Oid) {
     with_state(|st| {
         if st.eoxact_list_len < MAX_EOXACT_LIST {

@@ -31,6 +31,20 @@ impl Node<'_> {
     pub fn ptr_eq(self, other: Node<'_>) -> bool {
         self.p == other.p
     }
+
+    #[inline]
+    pub fn as_raw(self) -> NonNull<()> {
+        self.p
+    }
+}
+
+impl<'mcx> Node<'mcx> {
+    /// # Safety: `p` must come from `as_raw` of a `Node<'mcx>` still live in
+    /// its arena.
+    #[inline]
+    pub unsafe fn from_raw(p: NonNull<()>) -> Node<'mcx> {
+        Node { p, _arena: PhantomData }
+    }
 }
 
 /// # Safety: `TAG` must uniquely identify `Self` among all `NodeVariant` impls

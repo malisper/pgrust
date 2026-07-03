@@ -3,6 +3,9 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
+pub mod create;
+pub use create::{heap_create, heap_create_with_catalog, HeapCreateParams};
+
 use types_core::catalog::{CIDOID, OIDOID, TIDOID, XIDOID};
 use types_core::{AttrNumber, InvalidOid, NAMEDATALEN};
 use types_tuple::htup::{
