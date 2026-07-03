@@ -21,7 +21,10 @@ types_dest = { path = "../../../_support/types/types_dest" }
 elog = { path = "../../utils/error/elog" }
 execmain_seams = { path = "../../executor/execmain_seams" }
 exectuples_output = { path = "../../executor/exectuples_output" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+format_type = { path = "../../utils/adt/format_type" }
 guc_tables = { path = "../../utils/misc/guc_tables" }
+types_fmgr = { path = "../../../_support/types/fmgr" }
 keywords = { path = "../../../common/keywords" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
 postgres = { path = "../../tcop/postgres" }

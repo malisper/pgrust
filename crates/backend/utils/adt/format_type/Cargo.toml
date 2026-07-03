@@ -5,8 +5,11 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+datum = { path = "../../../../_support/types/datum" }
+fmgr_seams = { path = "../../fmgr/fmgr_seams" }
 keywords = { path = "../../../../common/keywords" }
 lsyscache = { path = "../../cache/lsyscache" }
+types_fmgr = { path = "../../../../_support/types/fmgr" }
 syscache_seams = { path = "../../cache/syscache_seams" }
 types_core = { path = "../../../../_support/types/types_core" }
 types_error = { path = "../../../../_support/types/types_error" }

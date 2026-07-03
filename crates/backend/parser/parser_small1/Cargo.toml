@@ -11,10 +11,12 @@ path = "src/lib.rs"
 [dependencies]
 datum = { path = "../../../_support/types/datum" }
 elog = { path = "../../utils/error/elog" }
+format_type = { path = "../../utils/adt/format_type" }
 libc = "0.2"
 lsyscache = { path = "../../utils/cache/lsyscache" }
 mbutils = { path = "../../utils/mb/mbutils" }
 mcx = { path = "../../../_support/mcx" }
+adt_numeric = { path = "../../utils/adt/numeric" }
 numutils = { path = "../../utils/adt/numutils" }
 queryenvironment = { path = "../../utils/misc/queryenvironment" }
 table = { path = "../../access/table/table" }

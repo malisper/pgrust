@@ -4,7 +4,8 @@ use mcx::{vec_with_capacity_in, Mcx, PgVec};
 use numutils::pg_strtoint64_safe;
 use queryenvironment::QueryEnvironment;
 use types_core::catalog::{
-    BOOLOID, INT2ARRAYOID, INT2VECTOROID, INT4OID, INT8OID, OIDARRAYOID, OIDVECTOROID, UNKNOWNOID,
+    BOOLOID, INT2ARRAYOID, INT2VECTOROID, INT4OID, INT8OID, NUMERICOID, OIDARRAYOID, OIDVECTOROID,
+    UNKNOWNOID,
 };
 use types_core::fmgr::FLOAT8PASSBYVAL;
 use types_core::{AttrNumber, Index, InvalidOid, Oid, ParseLoc};
@@ -262,10 +263,12 @@ pub fn make_const<'mcx>(
                     }
                 }
                 _ => {
-                    panic!(
-                        "make_const (parse_node.c): numeric literal needs numeric_in \
-                         (adt-numeric unported; direct dep when it lands)"
-                    );
+                    let img = adt_numeric::io::numeric_in(f.fval, -1, None)?
+                        .expect("numeric_in: soft-error escape without an escontext");
+                    let bytes = img.as_bytes();
+                    let mut buf: PgVec<'mcx, u8> = vec_with_capacity_in(mcx, bytes.len())?;
+                    mcx::vec_append_bytes(&mut buf, bytes)?;
+                    (Datum::from_usize(buf.leak().as_ptr() as usize), NUMERICOID, -1, false)
                 }
             }
         }

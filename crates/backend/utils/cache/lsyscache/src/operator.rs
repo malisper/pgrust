@@ -48,7 +48,9 @@ pub fn op_mergejoinable(opno: Oid, inputtype: Oid) -> PgResult<bool> {
         // C asks the typcache (lookup_type_cache TYPECACHE_CMP_PROC) whether
         // the element/field types are sortable.
         panic!(
-            "op_mergejoinable({opno}, {inputtype}): lookup_type_cache unported (typcache.c)"
+            "op_mergejoinable({opno}, {inputtype}): typcache crate landed but lsyscache \
+             cannot dep it (cycle) — needs a typcache_seams lookup seam; RECORD_EQ also \
+             needs typcache's composite cmp_proc lane"
         );
     }
     Ok(match syscache_seams::lookup_pg_operator_shape::call(opno)? {
@@ -60,7 +62,9 @@ pub fn op_mergejoinable(opno: Oid, inputtype: Oid) -> PgResult<bool> {
 pub fn op_hashjoinable(opno: Oid, inputtype: Oid) -> PgResult<bool> {
     if opno == ARRAY_EQ_OP || opno == RECORD_EQ_OP {
         panic!(
-            "op_hashjoinable({opno}, {inputtype}): lookup_type_cache unported (typcache.c)"
+            "op_hashjoinable({opno}, {inputtype}): typcache crate landed but lsyscache \
+             cannot dep it (cycle) — needs a typcache_seams lookup seam; RECORD_EQ also \
+             needs typcache's composite hash_proc lane"
         );
     }
     Ok(match syscache_seams::lookup_pg_operator_shape::call(opno)? {

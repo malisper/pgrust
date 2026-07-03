@@ -282,8 +282,9 @@ fn dispatch_message<'mcx>(
                 b'S' => {
                     if !close_target.is_empty() {
                         panic!(
-                            "PostgresMain: Close(statement) needs DropPreparedStatement \
-                             (commands/prepare.c lane)"
+                            "PostgresMain: Close(named statement) unreachable until \
+                             extended-protocol Parse lands (prepare crate has \
+                             DropPreparedStatement; named stmts only arrive via 'P')"
                         );
                     }
                     simple_query::drop_unnamed_stmt();

@@ -159,9 +159,10 @@ pub fn get_typavgwidth(typid: Oid, typmod: i32) -> PgResult<i32> {
     if typlen > 0 {
         return Ok(typlen as i32);
     }
-    // C consults type_maximum_size (format_type.c, unported); it yields a
-    // positive bound only for typmod-constrained types, and typmod == -1
-    // always falls through to the guess below.
+    // C consults type_maximum_size (format_type.c; ~29 lines, not yet in the
+    // landed format_type crate); it yields a positive bound only for
+    // typmod-constrained types, and typmod == -1 always falls through to the
+    // guess below.
     if typmod >= 0 {
         panic!("get_typavgwidth({typid}, {typmod}): type_maximum_size unported (format_type.c)");
     }
@@ -248,7 +249,8 @@ pub fn get_base_element_type(mut typid: Oid) -> PgResult<Oid> {
 
 #[cold]
 fn shell_type_error(typid: Oid) -> Box<PgError> {
-    // C renders the type name via format_type_be (format_type.c, unported).
+    // C renders the type name via format_type_be; the format_type crate deps
+    // lsyscache, so this error keeps the raw oid (cycle).
     Box::new(
         PgError::error(format!("type {typid} is only a shell"))
             .with_sqlstate(ERRCODE_UNDEFINED_OBJECT),

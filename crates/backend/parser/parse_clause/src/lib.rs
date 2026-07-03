@@ -12,7 +12,7 @@ use types_core::{Index, InvalidOid, Oid, ParseLoc};
 use types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_INVALID_COLUMN_REFERENCE,
     ERRCODE_INVALID_ROW_COUNT_IN_LIMIT_CLAUSE, ERRCODE_QUERY_CANCELED, ERRCODE_SYNTAX_ERROR,
-    ERROR,
+    ERRCODE_WRONG_OBJECT_TYPE, ERROR,
 };
 use types_nodes::nodes_enums::LimitOption;
 use types_nodes::parsenodes::SortGroupClause;
@@ -356,10 +356,35 @@ fn addTargetToSortList<'mcx>(
                 .map_err(attach_pos)?;
             (ops.gt_opr, ops.eq_opr, ops.hashable, true)
         }
-        SortByDir::SORTBY_USING => panic!(
-            "addTargetToSortList (parse_clause.c): USING arm (compatible_oper_opid + \
-             get_equality_op_for_ordering_op) unported — unit backend-parser-parse-oper"
-        ),
+        SortByDir::SORTBY_USING => {
+            debug_assert!(!sortby.useOp.is_nil());
+            let sortop =
+                parse_oper::compatible_oper_opid(pstate, &sortby.useOp, restype, restype, false)
+                    .map_err(attach_pos)?;
+            let Some((eqop, reverse)) =
+                lsyscache::amop::get_equality_op_for_ordering_op(sortop)?.filter(|(eq, _)| *eq != InvalidOid)
+            else {
+                let opname = sortby
+                    .useOp
+                    .nth(sortby.useOp.len() - 1)
+                    .as_string()
+                    .expect("operator name list holds String nodes")
+                    .sval;
+                return Err(Box::new(
+                    elog::ereport(ERROR)
+                        .errcode(ERRCODE_WRONG_OBJECT_TYPE)
+                        .errmsg(format!("operator {opname} is not a valid ordering operator"))
+                        .errhint(
+                            "Ordering operators must be \"<\" or \">\" members of btree operator \
+                             families."
+                                .to_string(),
+                        )
+                        .into_error(),
+                ));
+            };
+            let hashable = lsyscache::op_hashjoinable(eqop, restype)?;
+            (sortop, eqop, hashable, reverse)
+        }
     };
 
     if !targetIsInSortList(tle, sortop, &sortlist)? {

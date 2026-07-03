@@ -13,7 +13,8 @@ pub const CONSTRAINT_EXCLUSION: i8 = b'x' as i8;
 pub fn get_cast_oid(sourcetypeid: Oid, targettypeid: Oid, missing_ok: bool) -> PgResult<Oid> {
     let oid = syscache_seams::lookup_pg_cast_oid::call(sourcetypeid, targettypeid)?;
     if oid == InvalidOid && !missing_ok {
-        // C renders type names via format_type_be (format_type.c, unported).
+        // C renders type names via format_type_be; the format_type crate deps
+        // lsyscache, so this error keeps raw oids (cycle).
         return Err(Box::new(
             PgError::error(format!(
                 "cast from type {sourcetypeid} to type {targettypeid} does not exist"
@@ -169,7 +170,11 @@ pub fn get_namespace_name_or_temp<'mcx>(
     nspid: Oid,
 ) -> PgResult<Option<PgString<'mcx>>> {
     // C: isTempNamespace(nspid) ? "pg_temp" : get_namespace_name(nspid).
-    panic!("get_namespace_name_or_temp({nspid}): isTempNamespace unported (namespace.c)");
+    panic!(
+        "get_namespace_name_or_temp({nspid}): isTempNamespace is ported \
+         (catalog_namespace) but lsyscache cannot dep it (cycle) — needs a \
+         namespace_seams isTempNamespace seam"
+    );
 }
 
 pub fn get_range_subtype(range_oid: Oid) -> PgResult<Oid> {

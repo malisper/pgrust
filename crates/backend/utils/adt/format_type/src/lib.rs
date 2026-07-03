@@ -3,8 +3,10 @@
 #[cfg(test)]
 mod tests;
 
+use datum::Datum;
 use keywords::{KeywordCategory, ScanKeywordCategories, ScanKeywordLookup, ScanKeywords};
 use syscache_seams::PgTypeTypcacheShape;
+use types_core::primitive::InvalidOid;
 use types_core::catalog::{
     FirstNormalObjectId, BITOID, BOOLOID, BPCHAROID, FLOAT4OID, FLOAT8OID, INT2OID, INT4OID,
     INT8OID, INTERVALOID, JSONOID, NUMERICOID, TIMEOID, TIMESTAMPOID, TIMESTAMPTZOID, TIMETZOID,
@@ -34,6 +36,16 @@ fn lookup(type_oid: Oid) -> PgResult<PgTypeTypcacheShape> {
 
 /// C `format_type_be` = `format_type_extended(type_oid, -1, 0)`.
 pub fn format_type_be(type_oid: Oid) -> PgResult<String> {
+    format_type_extended(type_oid, -1, false)
+}
+
+/// C `format_type_with_typemod` = `format_type_extended(type_oid, typemod,
+/// FORMAT_TYPE_TYPEMOD_GIVEN)`.
+pub fn format_type_with_typemod(type_oid: Oid, typemod: i32) -> PgResult<String> {
+    format_type_extended(type_oid, typemod, true)
+}
+
+fn format_type_extended(type_oid: Oid, typemod: i32, typemod_given: bool) -> PgResult<String> {
     let mut shape = lookup(type_oid)?;
     let mut named_oid = type_oid;
     let mut is_array = false;
@@ -45,30 +57,45 @@ pub fn format_type_be(type_oid: Oid) -> PgResult<String> {
         is_array = true;
     }
 
-    // Built-in special cases; with_typemod is always false on this path.
-    let special: Option<&str> = match named_oid {
-        BITOID => Some("bit"),
-        BOOLOID => Some("boolean"),
-        BPCHAROID => Some("character"),
-        FLOAT4OID => Some("real"),
-        FLOAT8OID => Some("double precision"),
-        INT2OID => Some("smallint"),
-        INT4OID => Some("integer"),
-        INT8OID => Some("bigint"),
-        NUMERICOID => Some("numeric"),
-        INTERVALOID => Some("interval"),
-        TIMEOID => Some("time without time zone"),
-        TIMETZOID => Some("time with time zone"),
-        TIMESTAMPOID => Some("timestamp without time zone"),
-        TIMESTAMPTZOID => Some("timestamp with time zone"),
-        VARBITOID => Some("bit varying"),
-        VARCHAROID => Some("character varying"),
-        JSONOID => Some("json"),
+    let with_typemod = typemod_given && typemod >= 0;
+
+    let special: Option<String> = match named_oid {
+        // bit/bpchar with TYPEMOD_GIVEN and typemod -1 fall to the quoted
+        // catalog name (BIT means BIT(1), CHARACTER means CHARACTER(1)).
+        BITOID if with_typemod => Some(print_typmod("bit", typemod, named_oid)?),
+        BITOID if typemod_given => None,
+        BITOID => Some("bit".to_string()),
+        BOOLOID => Some("boolean".to_string()),
+        BPCHAROID if with_typemod => Some(print_typmod("character", typemod, named_oid)?),
+        BPCHAROID if typemod_given => None,
+        BPCHAROID => Some("character".to_string()),
+        FLOAT4OID => Some("real".to_string()),
+        FLOAT8OID => Some("double precision".to_string()),
+        INT2OID => Some("smallint".to_string()),
+        INT4OID => Some("integer".to_string()),
+        INT8OID => Some("bigint".to_string()),
+        NUMERICOID if with_typemod => Some(print_typmod("numeric", typemod, named_oid)?),
+        NUMERICOID => Some("numeric".to_string()),
+        INTERVALOID if with_typemod => Some(print_typmod("interval", typemod, named_oid)?),
+        INTERVALOID => Some("interval".to_string()),
+        TIMEOID if with_typemod => Some(print_typmod("time", typemod, named_oid)?),
+        TIMEOID => Some("time without time zone".to_string()),
+        TIMETZOID if with_typemod => Some(print_typmod("time", typemod, named_oid)?),
+        TIMETZOID => Some("time with time zone".to_string()),
+        TIMESTAMPOID if with_typemod => Some(print_typmod("timestamp", typemod, named_oid)?),
+        TIMESTAMPOID => Some("timestamp without time zone".to_string()),
+        TIMESTAMPTZOID if with_typemod => Some(print_typmod("timestamp", typemod, named_oid)?),
+        TIMESTAMPTZOID => Some("timestamp with time zone".to_string()),
+        VARBITOID if with_typemod => Some(print_typmod("bit varying", typemod, named_oid)?),
+        VARBITOID => Some("bit varying".to_string()),
+        VARCHAROID if with_typemod => Some(print_typmod("character varying", typemod, named_oid)?),
+        VARCHAROID => Some("character varying".to_string()),
+        JSONOID => Some("json".to_string()),
         _ => None,
     };
 
     let mut buf = match special {
-        Some(name) => name.to_string(),
+        Some(name) => name,
         None => {
             // C schema-qualifies when !TypeIsVisible; unported, so only
             // builtin (pg_catalog, visible barring shadowing) types render.
@@ -77,13 +104,34 @@ pub fn format_type_be(type_oid: Oid) -> PgResult<String> {
             }
             let name = core::str::from_utf8(shape.typname.name_str())
                 .expect("pg_type.typname is ASCII for builtin types");
-            quote_identifier(name).into_owned()
+            let quoted = quote_identifier(name).into_owned();
+            if with_typemod {
+                print_typmod(&quoted, typemod, named_oid)?
+            } else {
+                quoted
+            }
         }
     };
     if is_array {
         buf.push_str("[]");
     }
     Ok(buf)
+}
+
+/// C `printTypmod`; takes the type oid instead of a pre-fetched typmodout.
+fn print_typmod(typname: &str, typmod: i32, type_oid: Oid) -> PgResult<String> {
+    debug_assert!(typmod >= 0);
+    let typmodout = lsyscache::typ::get_typmodout(type_oid)?;
+    if typmodout == InvalidOid {
+        return Ok(format!("{typname}({typmod})"));
+    }
+    let mut finfo = fmgr_seams::fmgr_info::call(typmodout)?;
+    let mut fcinfo = types_fmgr::LocalFcinfo::<1>::fresh(InvalidOid);
+    fcinfo.set_arg(0, Datum::from_i32(typmod));
+    let out = finfo.invoke(&mut fcinfo)?;
+    // SAFETY: typmodout fns return a NUL-terminated cstring datum.
+    let s = unsafe { core::ffi::CStr::from_ptr(out.as_usize() as *const core::ffi::c_char) };
+    Ok(format!("{typname}{}", s.to_str().expect("typmodout output is ASCII")))
 }
 
 /// C `quote_identifier` (ruleutils.c) minus the quote_all_identifiers GUC.

@@ -190,6 +190,69 @@ pub fn oper(
     }
 }
 
+fn compatible_oper(
+    pstate: &ParseState<'_, '_>,
+    opname: &NodeList<'_>,
+    arg1: Oid,
+    arg2: Oid,
+    noError: bool,
+    location: ParseLoc,
+) -> PgResult<Option<Operator>> {
+    let Some(optup) = oper(pstate, opname, arg1, arg2, noError, location)? else {
+        return Ok(None);
+    };
+    if coerce::IsBinaryCoercible(arg1, optup.shape.oprleft)?
+        && coerce::IsBinaryCoercible(arg2, optup.shape.oprright)?
+    {
+        return Ok(Some(optup));
+    }
+    if !noError {
+        let mut buf = [""; 4];
+        let parts = name_parts(opname, &mut buf);
+        return Err(coercion_error(pstate, parts, arg1, arg2, location));
+    }
+    Ok(None)
+}
+
+/// C `compatible_oper_opid`; C passes a NULL pstate and location -1, so
+/// errors carry no position (callers attach one).
+pub fn compatible_oper_opid(
+    pstate: &ParseState<'_, '_>,
+    opname: &NodeList<'_>,
+    arg1: Oid,
+    arg2: Oid,
+    noError: bool,
+) -> PgResult<Oid> {
+    Ok(match compatible_oper(pstate, opname, arg1, arg2, noError, -1)? {
+        Some(op) => op.oid,
+        None => InvalidOid,
+    })
+}
+
+#[cold]
+#[inline(never)]
+fn coercion_error(
+    pstate: &ParseState<'_, '_>,
+    parts: &[&str],
+    arg1: Oid,
+    arg2: Oid,
+    location: ParseLoc,
+) -> Box<PgError> {
+    let encoding = mbutils::GetDatabaseEncoding();
+    let sig = match op_signature_string(parts, arg1, arg2) {
+        Ok(sig) => sig,
+        Err(e) => return e,
+    };
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_UNDEFINED_FUNCTION)
+            .errmsg(format!("operator requires run-time type coercion: {sig}"))
+            .errposition(parser_errposition(pstate, location, encoding))
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_oper.c", 0, "compatible_oper")),
+    )
+}
+
 /// C `make_op`, with the operand types precomputed by the caller (exprType's
 /// closed-set slice lives in parse_expr pending backend-nodes-core).
 #[allow(clippy::too_many_arguments)]

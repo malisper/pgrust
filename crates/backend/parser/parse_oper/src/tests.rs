@@ -8,7 +8,7 @@ use types_core::InvalidOid;
 use types_error::ERRCODE_UNDEFINED_FUNCTION;
 use types_nodes::{Node, NodeList, String as PgStr};
 
-use crate::{make_op, oper};
+use crate::{compatible_oper_opid, make_op, oper};
 
 const INT4_PLUS_OP: types_core::Oid = 551;
 const INT4PL_PROC: types_core::Oid = 177;
@@ -316,4 +316,22 @@ fn sort_group_operators_missing_is_42883() {
         crate::get_sort_group_operators(NOSORT_OID, false, true, false, true).unwrap_err();
     assert_eq!(err.message(), "could not identify an equality operator for type nosort");
     assert_eq!(err.hint(), None);
+}
+
+#[test]
+fn compatible_oper_opid_exact_and_missing() {
+    install_fixture();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let pstate = make_parsestate(mcx, None);
+
+    let opid =
+        compatible_oper_opid(&pstate, &plus_name(mcx), INT4OID, INT4OID, false).unwrap();
+    assert_eq!(opid, INT4_PLUS_OP);
+
+    let missing = NodeList::make1(mcx, Node::mk(mcx, PgStr { sval: "<%>" }).unwrap()).unwrap();
+    assert_eq!(
+        compatible_oper_opid(&pstate, &missing, INT4OID, INT4OID, true).unwrap(),
+        InvalidOid
+    );
 }

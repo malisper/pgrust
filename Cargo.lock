@@ -208,6 +208,7 @@ version = "0.1.0"
 dependencies = [
  "adt_float",
  "datum",
+ "init_small",
  "mcx",
  "types_core",
  "types_error",
@@ -596,6 +597,8 @@ dependencies = [
  "guc_tables",
  "init_small",
  "latch",
+ "lmgr",
+ "lmgr_proc",
  "lwlock",
  "mcx",
  "procsignal_seams",
@@ -609,6 +612,7 @@ dependencies = [
  "types_hash",
  "types_rel",
  "types_storage",
+ "xloginsert_seams",
 ]
 
 [[package]]
@@ -1077,6 +1081,7 @@ dependencies = [
 name = "detoast"
 version = "0.1.0"
 dependencies = [
+ "datum",
  "detoast_seams",
  "mcx",
  "pglz",
@@ -1479,6 +1484,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_fmgr",
+ "types_nodes",
  "varlena",
 ]
 
@@ -2548,6 +2554,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "multixact"
+version = "0.0.0"
+dependencies = [
+ "dbcommands_seams",
+ "elog",
+ "file_seams",
+ "guc_seams",
+ "guc_tables",
+ "init_small",
+ "libc",
+ "lwlock",
+ "mcx",
+ "multixact_seams",
+ "pgstat_seams",
+ "pmsignal",
+ "procarray_seams",
+ "shmem_seams",
+ "slru",
+ "sync_seams",
+ "transam_seams",
+ "transam_xlog_seams",
+ "types_core",
+ "types_error",
+ "types_guc",
+ "types_storage",
+ "varsup_seams",
+ "waitevent_seams",
+ "xact_seams",
+ "xloginsert_seams",
+ "xlogreader_seams",
+ "xlogutils_seams",
+]
+
+[[package]]
 name = "multixact_seams"
 version = "0.0.0"
 dependencies = [
@@ -3337,7 +3377,10 @@ dependencies = [
  "types_error",
  "types_guc",
  "types_tuple",
+ "unicode_case",
+ "unicode_category",
  "varlena",
+ "wchar",
 ]
 
 [[package]]
@@ -3353,6 +3396,9 @@ dependencies = [
 [[package]]
 name = "pg_path"
 version = "0.1.0"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "pg_prng"
@@ -3435,6 +3481,7 @@ dependencies = [
  "init_small",
  "localtime",
  "mcx",
+ "pg_path",
  "pgtz_seams",
  "types_core",
  "types_error",
@@ -3775,6 +3822,7 @@ dependencies = [
  "mcx",
  "miscinit",
  "miscinit_seams",
+ "pg_path",
  "pg_prng",
  "pmchild_seams",
  "pmsignal",
@@ -4273,6 +4321,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_rel",
+ "types_storage",
  "types_tuple",
  "xact_seams",
 ]
@@ -4769,6 +4818,7 @@ dependencies = [
  "tablespace_seams",
  "types_core",
  "types_error",
+ "types_rel",
  "types_storage",
  "waitevent_seams",
  "xact_seams",
@@ -5676,7 +5726,9 @@ dependencies = [
  "fd",
  "guc",
  "guc_tables",
+ "init_small",
  "mcx",
+ "pg_path",
  "pgtz",
  "xact_seams",
 ]
