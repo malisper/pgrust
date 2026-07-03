@@ -88,3 +88,23 @@ pub fn CatalogTupleInsertWithInfo<'mcx>(
     heapam::simple_heap_insert(heap_rel.data_rc(), tup.as_tuple_mut())?;
     CatalogIndexInsert(mcx, indstate, heap_rel, tup.as_tuple())
 }
+
+pub fn CatalogTupleUpdateWithInfo<'mcx>(
+    mcx: Mcx<'mcx>,
+    heap_rel: &Relation<'mcx>,
+    otid: &ItemPointerData,
+    tup: &mut HeapTuple<'mcx>,
+    indstate: &mut CatalogIndexState<'mcx>,
+) -> PgResult<()> {
+    let mut update_indexes = tableam_vocab::TU_UpdateIndexes::TU_All;
+    heapam::simple_heap_update(heap_rel.data_rc(), otid, tup.as_tuple_mut(), &mut update_indexes)?;
+    match update_indexes {
+        tableam_vocab::TU_UpdateIndexes::TU_All => {
+            CatalogIndexInsert(mcx, indstate, heap_rel, tup.as_tuple())
+        }
+        tableam_vocab::TU_UpdateIndexes::TU_None => Ok(()),
+        tableam_vocab::TU_UpdateIndexes::TU_Summarizing => panic!(
+            "CatalogIndexInsert (indexing.c): TU_Summarizing on a catalog index"
+        ),
+    }
+}

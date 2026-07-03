@@ -350,6 +350,20 @@ pub fn systable_endscan_ordered<'mcx>(
     Ok(())
 }
 
+// The buffer stays pinned by the scan slot; the erased-lifetime view must not
+// outlive the open scan.
+fn slot_buffer_tuple<'any>(slot: &SlotData<'_>) -> (HeapTupleData<'any>, types_core::Buffer) {
+    let SlotData::BufferHeap(s) = slot else {
+        panic!("systable_inplace_update: non-buffer slot from catalog scan");
+    };
+    let src = s.base.tuple.as_ref().expect("stored scan tuple");
+    // SAFETY: aliases the tuple pinned by the slot's buffer (see above).
+    let view = unsafe {
+        HeapTupleData::from_raw_parts(src.header_ptr(), src.t_len, src.t_self, src.t_tableOid)
+    };
+    (view, s.buffer)
+}
+
 /// C's begin/finish/cancel out-param protocol: `state` is the live scan.
 pub fn systable_inplace_update_begin<'mcx>(
     mcx: Mcx<'mcx>,
@@ -377,19 +391,35 @@ pub fn systable_inplace_update_begin<'mcx>(
             return Ok(None);
         }
 
-        heapam_unported("heap_inplace_lock");
+        let (oldtup, buffer) = slot_buffer_tuple(&scan.slot);
+        let mut scan_opt = Some(scan);
+        let locked = heapam::heap_inplace_lock(relation, &oldtup, buffer, &mut || {
+            systable_endscan(mcx, scan_opt.take().expect("scan released twice"))
+        })?;
+        if locked {
+            let copy = heaptuple::heap_copytuple(mcx, &oldtup)?;
+            return Ok(Some((copy, scan_opt.take().expect("scan released on success"))));
+        }
     }
 }
 
 pub fn systable_inplace_update_finish(
-    _state: SysScanDescData<'_>,
-    _tuple: &HeapTupleData<'_>,
+    mcx: Mcx<'_>,
+    state: SysScanDescData<'_>,
+    tuple: &HeapTupleData<'_>,
 ) -> PgResult<()> {
-    heapam_unported("heap_inplace_update_and_unlock")
+    let (oldtup, buffer) = slot_buffer_tuple(&state.slot);
+    heapam::heap_inplace_update_and_unlock(mcx, &state.heap_rel, &oldtup, tuple, buffer)?;
+    systable_endscan(mcx, state)
 }
 
-pub fn systable_inplace_update_cancel(_state: SysScanDescData<'_>) -> PgResult<()> {
-    heapam_unported("heap_inplace_unlock")
+pub fn systable_inplace_update_cancel(
+    mcx: Mcx<'_>,
+    state: SysScanDescData<'_>,
+) -> PgResult<()> {
+    let (oldtup, buffer) = slot_buffer_tuple(&state.slot);
+    heapam::heap_inplace_unlock(&state.heap_rel, &oldtup, buffer)?;
+    systable_endscan(mcx, state)
 }
 
 pub fn BuildIndexValueDescription<'mcx>(
@@ -578,10 +608,4 @@ fn non_heap_sysscan_slot() -> ! {
 #[inline(never)]
 fn unported(what: &str) -> ! {
     panic!("unported: {what}")
-}
-
-#[cold]
-#[inline(never)]
-fn heapam_unported(f: &str) -> ! {
-    panic!("unported: heapam {f} (backend-access-heap-heapam in flight)")
 }

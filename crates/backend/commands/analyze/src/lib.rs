@@ -876,15 +876,10 @@ fn update_attstats(relid: Oid, inh: bool, vacattrstats: &[VacAttrStats<'_>]) -> 
     if vacattrstats.is_empty() {
         return Ok(());
     }
-    if !miscinit::IgnoreSystemIndexes() {
-        panic!(
-            "update_attstats (analyze.c): CatalogTupleInsert/UpdateWithInfo index maintenance \
-             (indexing.c) unported; pg_statistic writes require IgnoreSystemIndexes"
-        );
-    }
     let scratch = MemoryContext::new("update_attstats");
     let mcx = scratch.mcx();
     let sd = table::table_open(mcx, STATISTIC_RELATION_ID, ROW_EXCLUSIVE_LOCK)?;
+    let mut indstate: Option<catalog_indexing::CatalogIndexState<'_>> = None;
 
     for stats in vacattrstats {
         if !stats.stats_valid {
@@ -936,6 +931,10 @@ fn update_attstats(relid: Oid, inh: bool, vacattrstats: &[VacAttrStats<'_>]) -> 
         }
 
         let old = find_stats_tuple(mcx, &sd, relid, stats.tupattnum as i16, inh)?;
+        if indstate.is_none() {
+            indstate = Some(catalog_indexing::CatalogOpenIndexes(mcx, &sd)?);
+        }
+        let ind = indstate.as_mut().expect("opened above");
         match old {
             Some((otid, oldtup)) => {
                 let replaces = [true; NATTS_PG_STATISTIC];
@@ -947,14 +946,16 @@ fn update_attstats(relid: Oid, inh: bool, vacattrstats: &[VacAttrStats<'_>]) -> 
                     &nulls,
                     &replaces,
                 )?;
-                let mut update_indexes = tableam_vocab::TU_UpdateIndexes::TU_None;
-                heapam::simple_heap_update(&sd, &otid, newtup.as_tuple_mut(), &mut update_indexes)?;
+                catalog_indexing::CatalogTupleUpdateWithInfo(mcx, &sd, &otid, &mut newtup, ind)?;
             }
             None => {
                 let mut stup = heaptuple::heap_form_tuple(mcx, sd.descr(), &values, &nulls)?;
-                heapam::simple_heap_insert(&sd, stup.as_tuple_mut())?;
+                catalog_indexing::CatalogTupleInsertWithInfo(mcx, &sd, &mut stup, ind)?;
             }
         }
+    }
+    if let Some(ind) = indstate {
+        catalog_indexing::CatalogCloseIndexes(ind)?;
     }
     table::table_close(sd, ROW_EXCLUSIVE_LOCK)?;
     Ok(())

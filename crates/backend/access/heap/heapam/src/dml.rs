@@ -39,6 +39,7 @@ pub const XLOG_HEAP_DELETE: u8 = 0x10;
 pub const XLOG_HEAP_UPDATE: u8 = 0x20;
 pub const XLOG_HEAP_HOT_UPDATE: u8 = 0x40;
 pub const XLOG_HEAP_LOCK: u8 = 0x60;
+pub const XLOG_HEAP_INPLACE: u8 = 0x70;
 pub const XLOG_HEAP_INIT_PAGE: u8 = 0x80;
 
 pub const XLH_INSERT_ALL_VISIBLE_CLEARED: u8 = 1 << 0;
@@ -72,7 +73,7 @@ const fn tuple_lock_hwlock(mode: LockTupleMode) -> LOCKMODE {
     }
 }
 
-fn relation_needs_wal(rel: &RelationData<'_>) -> bool {
+pub(crate) fn relation_needs_wal(rel: &RelationData<'_>) -> bool {
     rel.is_permanent()
 }
 
@@ -760,6 +761,23 @@ pub fn simple_heap_delete(relation: &RelationData<'_>, tid: &ItemPointerData) ->
     }
 }
 
+// PageClearAllVisible + visibilitymap_clear, pin-at-clear (heap_insert shape).
+fn clear_page_all_visible(relation: &RelationData<'_>, pin: &BufferPin) -> PgResult<()> {
+    let mut vmb = visibilitymap::VmBuffer::new();
+    visibilitymap::visibilitymap_pin(relation, pin.block_number(), &mut vmb)?;
+    // SAFETY: pinned + exclusive content lock held by the caller.
+    let mut pm = unsafe { PageMut::from_raw(bufmgr_seams::buffer_get_page::call(pin.buffer())) };
+    pm.clear_all_visible();
+    visibilitymap::visibilitymap_clear(
+        relation,
+        pin.block_number(),
+        &vmb,
+        visibilitymap::VISIBILITYMAP_VALID_BITS,
+    )?;
+    vmb.release();
+    Ok(())
+}
+
 fn log_heap_update(
     relation: &RelationData<'_>,
     oldbuf: &BufferPin,
@@ -884,9 +902,7 @@ pub fn heap_update(
     let block = ItemPointerGetBlockNumber(otid);
     let pin = BufferPin::adopt(bufmgr_seams::read_buffer::call(relation, block)?)
         .expect("ReadBuffer returned InvalidBuffer");
-    if pin.page().is_all_visible() {
-        unported("visibilitymap_clear write side (heap_update all-visible page, visibilitymap.c)");
-    }
+    // C pins the VM page here; pin-at-clear is the heap_insert divergence.
     bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_EXCLUSIVE)?;
 
     let lp = pin.page().item_id(ItemPointerGetOffsetNumber(otid));
@@ -996,13 +1012,6 @@ pub fn heap_update(
             }
         }
 
-        if result != TM_Result::TM_Ok {
-            break 'l2 result;
-        }
-
-        if pin.page().is_all_visible() {
-            unported("visibilitymap_clear write side (heap_update all-visible page, visibilitymap.c)");
-        }
         break 'l2 result;
     };
 
@@ -1108,10 +1117,6 @@ pub fn heap_update(
             hdr.set_cmax(cid, iscombo);
             hdr.t_ctid = self_tid;
         }
-        if pin.page().is_all_visible() {
-            unported("visibilitymap_clear (heap_update lock step, visibilitymap.c)");
-        }
-
         bufmgr_seams::mark_buffer_dirty::call(pin.buffer())?;
 
         if relation_needs_wal(relation) {
@@ -1243,12 +1248,16 @@ pub fn heap_update(
         hdr.t_ctid = new_tid;
     }
 
+    let mut all_visible_cleared = false;
+    let mut all_visible_cleared_new = false;
     if pin.page().is_all_visible() {
-        unported("visibilitymap_clear (heap_update old page, visibilitymap.c)");
+        all_visible_cleared = true;
+        clear_page_all_visible(relation, &pin)?;
     }
     if let Some(np) = &newpin {
         if np.page().is_all_visible() {
-            unported("visibilitymap_clear (heap_update new page, visibilitymap.c)");
+            all_visible_cleared_new = true;
+            clear_page_all_visible(relation, np)?;
         }
         bufmgr_seams::mark_buffer_dirty::call(np.buffer())?;
     }
@@ -1261,8 +1270,8 @@ pub fn heap_update(
             put_pin,
             &oldtup,
             heaptup,
-            false,
-            false,
+            all_visible_cleared,
+            all_visible_cleared_new,
         )?;
         if let Some(np) = &newpin {
             // SAFETY: pin + exclusive lock held.

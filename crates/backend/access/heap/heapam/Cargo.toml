@@ -37,6 +37,7 @@ pgstat = { path = "../../../utils/activity/pgstat" }
 rmgr = { path = "../../transam/rmgr" }
 transam_seams = { path = "../../transam/transam_seams" }
 combocid_seams = { path = "../../../utils/time/combocid_seams" }
+transam_xlog_seams = { path = "../../transam/transam_xlog_seams" }
 xloginsert_seams = { path = "../../transam/xloginsert_seams" }
 freespace_seams = { path = "../../../storage/freespace/freespace_seams" }
 tidbitmap = { path = "../../../nodes/tidbitmap" }

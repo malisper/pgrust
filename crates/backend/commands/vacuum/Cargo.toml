@@ -31,6 +31,13 @@ xact = { path = "../../access/transam/xact" }
 bufmgr_seams = { path = "../../storage/buffer/bufmgr_seams" }
 namespace_seams = { path = "../../catalog/namespace_seams" }
 vacuum_seams = { path = "../vacuum_seams" }
+datum = { path = "../../../_support/types/datum" }
+types_scan = { path = "../../../_support/types/types_scan" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+table = { path = "../../access/table/table" }
+genam = { path = "../../access/index/genam" }
+heaptuple = { path = "../../access/common/heaptuple" }
 
 [dev-dependencies]
 bufmgr = { path = "../../storage/buffer/bufmgr" }

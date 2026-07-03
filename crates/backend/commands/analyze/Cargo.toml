@@ -23,7 +23,7 @@ fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
 pg_prng = { path = "../../../common/pg_prng" }
 table = { path = "../../access/table/table" }
 tableam = { path = "../../access/table/tableam" }
-heapam = { path = "../../access/heap/heapam" }
+catalog_indexing = { path = "../../catalog/catalog_indexing" }
 heaptuple = { path = "../../access/common/heaptuple" }
 visibilitymap = { path = "../../access/heap/visibilitymap" }
 genam = { path = "../../access/index/genam" }
@@ -34,11 +34,12 @@ typcache = { path = "../../utils/cache/typcache" }
 relcache_seams = { path = "../../utils/cache/relcache_seams" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
 vacuum_seams = { path = "../vacuum_seams" }
-miscinit = { path = "../../utils/init/miscinit" }
-tableam_vocab = { path = "../../access/table/tableam_vocab" }
 rel_vocab = { path = "../../../_support/types/rel_vocab" }
 
 [dev-dependencies]
+heapam = { path = "../../access/heap/heapam" }
+miscinit = { path = "../../utils/init/miscinit" }
+tableam_vocab = { path = "../../access/table/tableam_vocab" }
 adt_bool = { path = "../../utils/adt/bool" }
 adt_float = { path = "../../utils/adt/float" }
 aclchk_seams = { path = "../../catalog/aclchk_seams" }
