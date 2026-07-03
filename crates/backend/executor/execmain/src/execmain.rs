@@ -399,7 +399,7 @@ pub(crate) fn init_plan<'mcx>(
         .exec_init_range_table(&pstmt.rtable, &pstmt.permInfos, unpruned)?;
     data.estate.es_plannedstmt = Some(pstmt);
     if !pstmt.partPruneInfos.is_nil() {
-        panic!("ExecDoInitialPruning (execPartition.c) not ported");
+        ::execpartition::pruning::exec_do_initial_pruning(&mut data.estate)?;
     }
     if !pstmt.rowMarks.is_nil() {
         let estate = &mut data.estate;

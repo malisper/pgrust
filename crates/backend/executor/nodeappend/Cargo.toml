@@ -6,6 +6,8 @@ publish.workspace = true
 
 [dependencies]
 executils = { path = "../executils" }
+execpartition = { path = "../execpartition" }
+partprune = { path = "../../partitioning/partprune" }
 mcx = { path = "../../../_support/mcx" }
 init_small = { path = "../../utils/init/init_small" }
 postgres_seams = { path = "../../tcop/postgres_seams" }
