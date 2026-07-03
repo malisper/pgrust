@@ -433,7 +433,7 @@ fn build_agg_trans<'mcx>(
         unsafe { crate::steps::fcinfo_mut(frame.fcinfo, nargs as u16).context = agg_node };
         let frame_ix = state.frames.len() as u32;
         let call =
-            FuncCall { fn_addr, fcinfo: frame.fcinfo, frame: frame_ix, nargs: nargs as u16 };
+            FuncCall { fn_addr, fcinfo: frame.fcinfo, flinfo: frame.flinfo, frame: frame_ix, nargs: nargs as u16 };
         state
             .frames
             .try_reserve(1)
@@ -662,7 +662,7 @@ pub fn exec_build_hash32_from_attrs<'mcx>(
         let fn_addr = flinfo.fn_addr;
         let frame = FuncFrame::new_in(mcx, flinfo, 1, collations[i])?;
         let frame_ix = state.frames.len() as u32;
-        let call = FuncCall { fn_addr, fcinfo: frame.fcinfo, frame: frame_ix, nargs: 1 };
+        let call = FuncCall { fn_addr, fcinfo: frame.fcinfo, flinfo: frame.flinfo, frame: frame_ix, nargs: 1 };
         state
             .frames
             .try_reserve(1)
@@ -732,7 +732,7 @@ pub fn exec_build_grouping_equal<'mcx>(
         let fn_addr = flinfo.fn_addr;
         let frame = FuncFrame::new_in(mcx, flinfo, 2, collations[natt])?;
         let frame_ix = state.frames.len() as u32;
-        let call = FuncCall { fn_addr, fcinfo: frame.fcinfo, frame: frame_ix, nargs: 2 };
+        let call = FuncCall { fn_addr, fcinfo: frame.fcinfo, flinfo: frame.flinfo, frame: frame_ix, nargs: 2 };
         state
             .frames
             .try_reserve(1)
@@ -1348,7 +1348,7 @@ fn init_scalar_array_op<'mcx>(
             })
         };
     }
-    let call = FuncCall { fn_addr, fcinfo: frame.fcinfo, frame: frame_ix, nargs: 2 };
+    let call = FuncCall { fn_addr, fcinfo: frame.fcinfo, flinfo: frame.flinfo, frame: frame_ix, nargs: 2 };
     state.frames.try_reserve(1).map_err(|_| mcx.oom(core::mem::size_of::<FuncFrame<'_>>()))?;
     state.frames.push(frame);
 
@@ -1744,7 +1744,7 @@ fn init_minmax<'mcx>(
     let fn_addr = flinfo.fn_addr;
     let frame = FuncFrame::new_in(mcx, flinfo, 2, mm.inputcollid)?;
     let frame_ix = state.frames.len() as u32;
-    let call = FuncCall { fn_addr, fcinfo: frame.fcinfo, frame: frame_ix, nargs: 2 };
+    let call = FuncCall { fn_addr, fcinfo: frame.fcinfo, flinfo: frame.flinfo, frame: frame_ix, nargs: 2 };
     state.frames.try_reserve(1).map_err(|_| mcx.oom(core::mem::size_of::<FuncFrame<'_>>()))?;
     state.frames.push(frame);
 
@@ -1888,6 +1888,7 @@ fn init_coerce_via_io<'mcx>(
     let outcall = FuncCall {
         fn_addr: out_addr,
         fcinfo: frame_out.fcinfo,
+        flinfo: frame_out.flinfo,
         frame: state.frames.len() as u32,
         nargs: 1,
     };
@@ -1913,6 +1914,7 @@ fn init_coerce_via_io<'mcx>(
     let incall = FuncCall {
         fn_addr: in_addr,
         fcinfo: frame_in.fcinfo,
+        flinfo: frame_in.flinfo,
         frame: state.frames.len() as u32,
         nargs: 3,
     };
@@ -1987,7 +1989,7 @@ fn init_func<'mcx>(
     }
     frame.const_args = const_bits;
     frame.const_null_args = const_null_bits;
-    let call = FuncCall { fn_addr, fcinfo: frame.fcinfo, frame: frame_ix, nargs: nargs as u16 };
+    let call = FuncCall { fn_addr, fcinfo: frame.fcinfo, flinfo: frame.flinfo, frame: frame_ix, nargs: nargs as u16 };
     state.frames.try_reserve(1).map_err(|_| mcx.oom(core::mem::size_of::<FuncFrame<'_>>()))?;
     state.frames.push(frame);
     for (argno, arg) in args.iter().enumerate() {
@@ -2268,7 +2270,8 @@ fn select_fused_qual(state: &ExprState<'_>) -> Option<Kernel> {
     }
 
     let frame = &state.frames[call.frame as usize];
-    let cmp = CmpOp::for_fn_oid(frame.flinfo.fn_oid)?;
+    // SAFETY: frame-owned mcx-boxed FmgrInfo, read-only here.
+    let cmp = CmpOp::for_fn_oid(unsafe { frame.flinfo.as_ref() }.fn_oid)?;
     let var_is_arg0 = var_out.0 == frame.arg_slot(0);
     let const_argno = if var_is_arg0 { 1usize } else { 0 };
     if var_out.0 != frame.arg_slot(if var_is_arg0 { 0 } else { 1 }) {

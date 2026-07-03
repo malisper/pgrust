@@ -313,7 +313,7 @@ fn eval_kernel<'mcx>(
                         value: (*pg).trans_value,
                         isnull: (*pg).trans_value_is_null,
                     });
-                    let (value, isnull) = invoke(&mut state.frames, &call)?;
+                    let (value, isnull) = invoke(&call)?;
                     (*pg).trans_value = value;
                     (*pg).trans_value_is_null = isnull;
                 }
@@ -322,14 +322,14 @@ fn eval_kernel<'mcx>(
         }
         Kernel::JustFunc { fn_addr, frame, nargs, strict } => {
             let f = &mut state.frames[frame as usize];
-            // SAFETY: the frame's fcinfo image is live for 'mcx; no other
-            // reference exists during this call.
+            // SAFETY: the frame's fcinfo image and mcx-boxed FmgrInfo are
+            // live for 'mcx; no other references exist during this call.
             let fcinfo = unsafe { fcinfo_mut(f.fcinfo, nargs) };
             if strict && fcinfo.has_null_args() {
                 return Ok(NullableDatum::null());
             }
             fcinfo.isnull = false;
-            let value = fn_addr(Some(&mut f.flinfo), fcinfo)?;
+            let value = fn_addr(Some(unsafe { &mut *f.flinfo.as_ptr() }), fcinfo)?;
             Ok(NullableDatum { value, isnull: fcinfo.isnull })
         }
     }
@@ -543,7 +543,7 @@ fn run_program<'mcx>(
                 write_out(*out, p.value, p.isnull);
             }
             Step::FuncExpr { call, out } => {
-                let (value, isnull) = invoke(frames, call)?;
+                let (value, isnull) = invoke(call)?;
                 write_out(*out, value, isnull);
             }
             Step::IoCoerce { calls, out } => {
@@ -558,7 +558,7 @@ fn run_program<'mcx>(
                         crate::steps::arg_slot_of(c.outcall.fcinfo, 0)
                             .write(NullableDatum { value: nd.value, isnull: false })
                     };
-                    let (v, isnull) = invoke(frames, &c.outcall)?;
+                    let (v, isnull) = invoke(&c.outcall)?;
                     NullableDatum { value: v, isnull }
                 };
                 if strv.isnull && c.in_strict {
@@ -566,14 +566,14 @@ fn run_program<'mcx>(
                 } else {
                     // SAFETY: arg 0 of the incall's live fcinfo image.
                     unsafe { crate::steps::arg_slot_of(c.incall.fcinfo, 0).write(strv) };
-                    let (v, isnull) = invoke(frames, &c.incall)?;
+                    let (v, isnull) = invoke(&c.incall)?;
                     write_out(*out, v, isnull);
                 }
             }
             Step::ScalarArrayOp { call, use_or, strict, typlen, typbyval, typalign, out } => {
                 let arr = read_out(*out);
                 let (value, isnull) = eval_scalar_array_op(
-                    frames, call, *use_or, *strict, *typlen, *typbyval, *typalign, arr,
+                    call, *use_or, *strict, *typlen, *typbyval, *typalign, arr,
                 )?;
                 write_out(*out, value, isnull);
             }
@@ -602,7 +602,7 @@ fn run_program<'mcx>(
                 if a0.isnull {
                     write_out(*out, Datum::null(), true);
                 } else {
-                    let (value, isnull) = invoke(frames, call)?;
+                    let (value, isnull) = invoke(call)?;
                     write_out(*out, value, isnull);
                 }
             }
@@ -617,7 +617,7 @@ fn run_program<'mcx>(
                 if a0.isnull || a1.isnull {
                     write_out(*out, Datum::null(), true);
                 } else {
-                    let (value, isnull) = invoke(frames, call)?;
+                    let (value, isnull) = invoke(call)?;
                     write_out(*out, value, isnull);
                 }
             }
@@ -628,7 +628,7 @@ fn run_program<'mcx>(
                 if anynull {
                     write_out(*out, Datum::null(), true);
                 } else {
-                    let (value, isnull) = invoke(frames, call)?;
+                    let (value, isnull) = invoke(call)?;
                     write_out(*out, value, isnull);
                 }
             }
@@ -653,7 +653,7 @@ fn run_program<'mcx>(
                         crate::steps::arg_slot_of(call.fcinfo, 1)
                             .write(NullableDatum { value: nd.value, isnull: false });
                     }
-                    let (cmp, cmpnull) = invoke(frames, call)?;
+                    let (cmp, cmpnull) = invoke(call)?;
                     if cmpnull {
                         continue;
                     }
@@ -881,7 +881,7 @@ fn run_program<'mcx>(
                         value: (*pg).trans_value,
                         isnull: (*pg).trans_value_is_null,
                     });
-                    let (value, isnull) = invoke(frames, call)?;
+                    let (value, isnull) = invoke(call)?;
                     (*pg).trans_value = value;
                     (*pg).trans_value_is_null = isnull;
                 }
@@ -895,7 +895,7 @@ fn run_program<'mcx>(
                             value: (*pg).trans_value,
                             isnull: false,
                         });
-                        let (value, isnull) = invoke(frames, call)?;
+                        let (value, isnull) = invoke(call)?;
                         (*pg).trans_value = value;
                         (*pg).trans_value_is_null = isnull;
                     }
@@ -914,7 +914,7 @@ fn run_program<'mcx>(
                             value: (*pg).trans_value,
                             isnull: false,
                         });
-                        let (value, isnull) = invoke(frames, call)?;
+                        let (value, isnull) = invoke(call)?;
                         (*pg).trans_value = value;
                         (*pg).trans_value_is_null = isnull;
                     }
@@ -934,7 +934,7 @@ fn run_program<'mcx>(
                             value: (*pg).trans_value,
                             isnull: false,
                         });
-                        let (value, isnull) = invoke(frames, call)?;
+                        let (value, isnull) = invoke(call)?;
                         (*pg).trans_value = value;
                         (*pg).trans_value_is_null = isnull;
                     }
@@ -950,7 +950,7 @@ fn run_program<'mcx>(
                         value: (*pg).trans_value,
                         isnull: (*pg).trans_value_is_null,
                     });
-                    let (value, isnull) = invoke(frames, call)?;
+                    let (value, isnull) = invoke(call)?;
                     (*pg).trans_value = value;
                     (*pg).trans_value_is_null = isnull;
                 }
@@ -964,7 +964,7 @@ fn run_program<'mcx>(
                             value: (*pg).trans_value,
                             isnull: false,
                         });
-                        let (value, isnull) = invoke(frames, call)?;
+                        let (value, isnull) = invoke(call)?;
                         (*pg).trans_value = value;
                         (*pg).trans_value_is_null = isnull;
                     }
@@ -977,7 +977,7 @@ fn run_program<'mcx>(
                     if (*pg).no_trans_value {
                         agg_init_group(call, pg, *byref)?;
                     } else if !(*pg).trans_value_is_null {
-                        agg_plain_trans_byref(frames, call, pg, *byref)?;
+                        agg_plain_trans_byref(call, pg, *byref)?;
                     }
                 }
             }
@@ -986,13 +986,13 @@ fn run_program<'mcx>(
                 unsafe {
                     let pg = pergroup.as_ptr();
                     if !(*pg).trans_value_is_null {
-                        agg_plain_trans_byref(frames, call, pg, *byref)?;
+                        agg_plain_trans_byref(call, pg, *byref)?;
                     }
                 }
             }
             Step::AggPlainTransByRef { call, pergroup, byref } => {
                 // SAFETY: as AggPlainTransInitStrictByRef.
-                unsafe { agg_plain_trans_byref(frames, call, pergroup.as_ptr(), *byref)? }
+                unsafe { agg_plain_trans_byref(call, pergroup.as_ptr(), *byref)? }
             }
             Step::AggTransInitStrictByRefIndirect { call, base, transno, byref } => {
                 // SAFETY: as AggTransByValIndirect + AggPlainTransByRef.
@@ -1001,7 +1001,7 @@ fn run_program<'mcx>(
                     if (*pg).no_trans_value {
                         agg_init_group(call, pg, *byref)?;
                     } else if !(*pg).trans_value_is_null {
-                        agg_plain_trans_byref(frames, call, pg, *byref)?;
+                        agg_plain_trans_byref(call, pg, *byref)?;
                     }
                 }
             }
@@ -1010,7 +1010,7 @@ fn run_program<'mcx>(
                 unsafe {
                     let pg = base.read().as_ptr().add(*transno as usize);
                     if !(*pg).trans_value_is_null {
-                        agg_plain_trans_byref(frames, call, pg, *byref)?;
+                        agg_plain_trans_byref(call, pg, *byref)?;
                     }
                 }
             }
@@ -1018,7 +1018,7 @@ fn run_program<'mcx>(
                 // SAFETY: as AggTransInitStrictByRefIndirect.
                 unsafe {
                     let pg = base.read().as_ptr().add(*transno as usize);
-                    agg_plain_trans_byref(frames, call, pg, *byref)?
+                    agg_plain_trans_byref(call, pg, *byref)?
                 }
             }
             Step::HashDatumSetInitVal { init_value, out } => {
@@ -1028,7 +1028,7 @@ fn run_program<'mcx>(
                 // SAFETY: arg 0 of the call's live fcinfo image; hash fns
                 // never return NULL (C reads fn_addr's Datum directly).
                 let a0 = unsafe { crate::steps::arg_slot_of(call.fcinfo, 0).read() };
-                let v = if a0.isnull { Datum::null() } else { invoke(frames, call)?.0 };
+                let v = if a0.isnull { Datum::null() } else { invoke(call)?.0 };
                 write_out(*out, v, false);
             }
             Step::HashDatumNext32 { call, iresult, out } => {
@@ -1039,7 +1039,7 @@ fn run_program<'mcx>(
                 let combined = if a0.isnull {
                     existing
                 } else {
-                    existing ^ invoke(frames, call)?.0.as_u32()
+                    existing ^ invoke(call)?.0.as_u32()
                 };
                 write_out(*out, Datum::from_u32(combined), false);
             }
@@ -1076,7 +1076,7 @@ fn run_program<'mcx>(
                 } else if a0.isnull || a1.isnull {
                     write_out(*out, Datum::from_bool(true), false);
                 } else {
-                    let (value, isnull) = invoke(frames, call)?;
+                    let (value, isnull) = invoke(call)?;
                     write_out(*out, Datum::from_bool(!value.as_bool()), isnull);
                 }
             }
@@ -1093,7 +1093,7 @@ fn run_program<'mcx>(
                 } else if a0.isnull || a1.isnull {
                     write_out(*out, Datum::from_bool(false), false);
                 } else {
-                    let (value, isnull) = invoke(frames, call)?;
+                    let (value, isnull) = invoke(call)?;
                     write_out(*out, value, isnull);
                 }
             }
@@ -1123,7 +1123,6 @@ fn missing_slot_hoisted() -> ! {
 // image; the scalar operand sits in args[0], each element lands in args[1].
 #[allow(clippy::too_many_arguments)]
 fn eval_scalar_array_op(
-    frames: &mut [crate::steps::FuncFrame<'_>],
     call: &FuncCall,
     use_or: bool,
     strict: bool,
@@ -1190,7 +1189,7 @@ fn eval_scalar_array_op(
                 crate::steps::arg_slot_of(call.fcinfo, 1)
                     .write(NullableDatum { value: elt, isnull: this_null })
             };
-            invoke(frames, call)?
+            invoke(call)?
         };
 
         if thisnull {
@@ -1290,18 +1289,14 @@ fn eval_array_expr(
 }
 
 #[inline(always)]
-fn invoke(
-    frames: &mut [crate::steps::FuncFrame<'_>],
-    call: &FuncCall,
-) -> PgResult<(Datum, bool)> {
-    debug_assert!((call.frame as usize) < frames.len());
-    // SAFETY: frame index validated against frames.len() at ready time.
-    let f = unsafe { frames.get_unchecked_mut(call.frame as usize) };
-    // SAFETY: the call's fcinfo image is live for 'mcx; this is the only
-    // reference during the call (arg OutRef raw writes are not live borrows).
+fn invoke(call: &FuncCall) -> PgResult<(Datum, bool)> {
+    // SAFETY: the call's mcx-boxed FmgrInfo and fcinfo image are live for
+    // 'mcx; these are the only references during the call (arg OutRef raw
+    // writes are not live borrows).
+    let flinfo = unsafe { &mut *call.flinfo.as_ptr() };
     let fcinfo = unsafe { fcinfo_mut(call.fcinfo, call.nargs) };
     fcinfo.isnull = false;
-    let d = (call.fn_addr)(Some(&mut f.flinfo), fcinfo)?;
+    let d = (call.fn_addr)(Some(flinfo), fcinfo)?;
     Ok((d, fcinfo.isnull))
 }
 
@@ -1328,7 +1323,6 @@ unsafe fn agg_init_group(
 // transvalue, the bump aggcontext reclaims it at group reset instead.
 // SAFETY contract: as agg_init_group, with `frames` owning `call`'s frame.
 unsafe fn agg_plain_trans_byref(
-    frames: &mut [crate::steps::FuncFrame<'_>],
     call: &FuncCall,
     pg: *mut crate::steps::AggPerGroup,
     byref: crate::steps::AggByRef,
@@ -1339,7 +1333,7 @@ unsafe fn agg_plain_trans_byref(
             value: (*pg).trans_value,
             isnull: (*pg).trans_value_is_null,
         });
-        let (new_val, isnull) = invoke(frames, call)?;
+        let (new_val, isnull) = invoke(call)?;
         // NULL transvalues stay at word 0, so the raw compare is null-safe.
         let new_val = if new_val.as_usize() != (*pg).trans_value.as_usize() {
             if !isnull {

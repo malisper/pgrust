@@ -253,6 +253,9 @@ pub struct IoCoerceCalls {
 pub struct FuncCall {
     pub fn_addr: PGFunction,
     pub(crate) fcinfo: NonNull<u8>,
+    // Resolved once at compile (C keeps the same extra copies in d.func "to
+    // save an indirection at runtime"); the interpreter never indexes frames.
+    pub(crate) flinfo: NonNull<FmgrInfo>,
     pub frame: u32,
     pub nargs: u16,
 }
@@ -260,7 +263,8 @@ pub struct FuncCall {
 // Step-owned call state: the FmgrInfo carrier plus its heap fcinfo image
 // (header + nargs NullableDatum tail) bump-allocated in 'mcx.
 pub struct FuncFrame<'mcx> {
-    pub flinfo: FmgrInfo,
+    // mcx-boxed so FuncCall's copy stays valid across frames-vec growth.
+    pub flinfo: NonNull<FmgrInfo>,
     pub(crate) fcinfo: NonNull<u8>,
     pub nargs: u16,
     pub(crate) const_args: u16,
@@ -280,6 +284,13 @@ fn fcinfo_layout(nargs: usize) -> Layout {
 
 impl<'mcx> FuncFrame<'mcx> {
     pub(crate) fn new_in(mcx: Mcx<'mcx>, flinfo: FmgrInfo, nargs: u16, collation: Oid) -> PgResult<Self> {
+        let fl_layout = Layout::new::<FmgrInfo>();
+        let fl: NonNull<FmgrInfo> =
+            mcx.allocate(fl_layout).map_err(|_| mcx.oom(fl_layout.size()))?.cast();
+        // SAFETY: fresh exclusive allocation; fn_extra Box ownership moves in
+        // (released via release_frames, never by arena drop — C fn_mcxt shape).
+        unsafe { fl.write(flinfo) };
+        let flinfo = fl;
         let layout = fcinfo_layout(nargs as usize);
         let raw = mcx.allocate(layout).map_err(|_| mcx.oom(layout.size()))?;
         let base: NonNull<u8> = raw.cast();
@@ -619,7 +630,8 @@ impl<'mcx> ExprState<'mcx> {
     /// Drops each frame's fn_extra; the program is then safe to forget.
     pub fn release_frames(&mut self) {
         for f in self.frames.iter_mut() {
-            f.flinfo.fn_extra = None;
+            // SAFETY: frame-owned mcx-boxed FmgrInfo, sole reference here.
+            unsafe { f.flinfo.as_mut() }.fn_extra = None;
         }
     }
 
