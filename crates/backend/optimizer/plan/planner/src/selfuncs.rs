@@ -1525,6 +1525,9 @@ fn index_other_operands_eval_cost(
         let other_operand = match clause.node_tag() {
             // indexkey is always the left operand of a fixed indexqual.
             NodeTag::T_OpExpr => Some(clause.as_op_expr().unwrap().args.nth(1)),
+            NodeTag::T_ScalarArrayOpExpr => {
+                Some(clause.as_scalar_array_op_expr().unwrap().args.nth(1))
+            }
             NodeTag::T_NullTest => None,
             other => panic!("index_other_operands_eval_cost (selfuncs.c): {other:?}; M2 lane"),
         };
@@ -1794,6 +1797,15 @@ fn btcostestimate(
             let clause = *run.root.expr_node(run.root.rinfo(rid).clause);
             let clause_op = match clause.node_tag() {
                 NodeTag::T_OpExpr => clause.as_op_expr().unwrap().opno,
+                NodeTag::T_ScalarArrayOpExpr => {
+                    let saop = clause.as_scalar_array_op_expr().unwrap();
+                    let alength = estimate_array_length(saop.args.nth(1));
+                    found_array = true;
+                    if alength > 1.0 {
+                        num_sa_scans *= alength;
+                    }
+                    saop.opno
+                }
                 NodeTag::T_NullTest => {
                     if clause.as_null_test().unwrap().nulltesttype
                         == types_nodes::primnodes::NullTestType::IS_NULL
