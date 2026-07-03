@@ -1413,6 +1413,7 @@ dependencies = [
  "pg_attrdef",
  "pg_constraint",
  "pg_depend",
+ "pg_shdepend",
  "pg_type",
  "sequence_seams",
  "statscmds",
@@ -6290,11 +6291,13 @@ dependencies = [
 name = "pg_db_role_setting"
 version = "0.0.0"
 dependencies = [
+ "catalog_indexing",
  "datum",
  "fmgr_seams",
  "genam",
  "mcx",
  "pg_db_role_setting_seams",
+ "table",
  "types_core",
  "types_error",
  "types_guc",
@@ -6329,6 +6332,7 @@ dependencies = [
  "mcx",
  "miscinit_seams",
  "nodes_core",
+ "pg_shdepend",
  "table",
  "types_core",
  "types_error",
@@ -6526,12 +6530,21 @@ dependencies = [
 name = "pg_shdepend"
 version = "0.0.0"
 dependencies = [
+ "catalog",
  "catalog_indexing",
  "datum",
+ "dbcommands_seams",
  "fmgr_seams",
+ "format_type",
  "genam",
  "heaptuple",
+ "init_small",
+ "lmgr",
+ "lsyscache",
  "mcx",
+ "miscinit_seams",
+ "namespace_seams",
+ "syscache_seams",
  "table",
  "types_core",
  "types_error",
@@ -8606,6 +8619,7 @@ dependencies = [
  "twophase_config",
  "typcache",
  "types_fmgr",
+ "user",
  "utility",
  "vacuumlazy",
  "variable",
@@ -10356,6 +10370,43 @@ name = "unicode_category"
 version = "0.1.0"
 
 [[package]]
+name = "user"
+version = "0.1.0"
+dependencies = [
+ "adt_acl",
+ "adt_bool",
+ "adt_timestamp",
+ "cache_syscache",
+ "catalog",
+ "catalog_indexing",
+ "catcache",
+ "datum",
+ "elog",
+ "fmgr_seams",
+ "genam",
+ "guc",
+ "guc_tables",
+ "heaptuple",
+ "lmgr",
+ "mbutils",
+ "mcx",
+ "miscinit",
+ "pg_db_role_setting",
+ "pg_shdepend",
+ "superuser",
+ "table",
+ "types_core",
+ "types_error",
+ "types_guc",
+ "types_nodes",
+ "types_rel",
+ "types_scan",
+ "types_tuple",
+ "varlena",
+ "xact",
+]
+
+[[package]]
 name = "utility"
 version = "0.1.0"
 dependencies = [
@@ -10414,6 +10465,7 @@ dependencies = [
  "types_rel",
  "types_storage",
  "types_tuple",
+ "user",
  "utility_seams",
  "xact",
 ]

@@ -709,7 +709,7 @@ pub fn createdb<'mcx>(mcx: Mcx<'mcx>, stmt: &CreatedbStmt<'mcx>) -> PgResult<Oid
     let mut tuple = heaptuple::heap_form_tuple(mcx, pg_database_rel.descr(), &values, &nulls)?;
     catalog_indexing::CatalogTupleInsert(mcx, &pg_database_rel, &mut tuple)?;
 
-    pg_depend::recordDependencyOnOwner(DATABASE_RELATION_ID, dboid, datdba);
+    pg_depend::recordDependencyOnOwner(mcx, DATABASE_RELATION_ID, dboid, datdba)?;
     pg_shdepend::copyTemplateDependencies(mcx, src_dboid, dboid)?;
 
     let copy = CreateDatabaseUsingFileCopy(
