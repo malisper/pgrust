@@ -9,10 +9,12 @@ use crate::{CollectedCommandData, CURRENT_STATE};
 #[cold]
 #[inline(never)]
 fn protocol_violation(fname: &str, ctx: &str) -> Box<types_error::PgError> {
-    elog::ereport(ERROR)
-        .errcode(ERRCODE_E_R_I_E_EVENT_TRIGGER_PROTOCOL_VIOLATED)
-        .errmsg(format!("{fname}() can only be called in {ctx} event trigger function"))
-        .into_error()
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_E_R_I_E_EVENT_TRIGGER_PROTOCOL_VIOLATED)
+            .errmsg(format!("{fname}() can only be called in {ctx} event trigger function"))
+            .into_error(),
+    )
 }
 
 fn text_datum(mcx: Mcx<'_>, s: &str) -> PgResult<Datum> {
@@ -147,13 +149,13 @@ fn fc_pg_event_trigger_ddl_commands(
             };
 
             let Some(identity) =
-                catalog_dependency::description::getObjectIdentityParts(mcx, &addr, true)?
+                catalog_dependency::getObjectIdentityParts(mcx, &addr, true)?
             else {
                 // Object dropped by the same command; skip rather than fail.
                 continue;
             };
             let typedesc =
-                catalog_dependency::description::getObjectTypeDescription(mcx, &addr, true)?
+                catalog_dependency::getObjectTypeDescription(mcx, &addr, true)?
                     .expect("object type description is never NULL");
             let schema = object_schema_name(mcx, &addr)?;
 
