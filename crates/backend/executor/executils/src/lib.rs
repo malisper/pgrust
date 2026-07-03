@@ -824,8 +824,77 @@ impl<'mcx> EStateData<'mcx> {
                 self.free_expr_context(EcxtId(i as u32), true);
             }
         }
+        self.es_junkFilter = None;
+        for slot in self.es_cte_shared.iter_mut() {
+            *slot = None;
+        }
+        self.es_aux_contexts.clear();
+    }
+
+    /// True iff every census-exempt owner has been released — the
+    /// `free_forget` precondition (forgetting a live one leaks).
+    pub fn owners_released(&self) -> bool {
+        self.es_snapshot.is_none()
+            && self.es_crosscheck_snapshot.is_none()
+            && self.es_junkFilter.is_none()
+            && self.es_relations.iter().all(Option::is_none)
+            && self.es_exprcontexts.iter().all(Option::is_none)
+            && self.es_cte_shared.iter().all(Option::is_none)
+            && self.es_aux_contexts.is_empty()
+            && self.es_subplan_expr_states.is_empty()
+            && self
+                .es_tupleTable
+                .iter()
+                .all(|s| s.base().tts_tupleDescriptor.is_none())
     }
 }
+
+mcx::forget_safe_nodrop!(
+    SubplanStateCell, ResultRelInfo, EcxtId, ExecSlotId, ExecRowMark,
+);
+
+// Exempt groups: [1] droppy owners, all released before the exec bundle is
+// forgotten (teardown/exec_reset_tuple_table/exec_close_range_table_relations/
+// UnregisterSnapshot in standard_executor_end; owners_released() asserts it);
+// [2] no-drop foreign types without ForgetSafe impls, const-proven here.
+const _: () = assert!(!core::mem::needs_drop::<ScanDirection>());
+const _: () = assert!(!core::mem::needs_drop::<Option<PartPruneP3>>());
+const _: () = assert!(!core::mem::needs_drop::<Option<SubplanInitHook>>());
+const _: () = assert!(!core::mem::needs_drop::<Option<SubplanEvalHook>>());
+const _: () = assert!(!core::mem::needs_drop::<(core::ptr::NonNull<()>, unsafe fn(core::ptr::NonNull<()>))>());
+const _: () = assert!(!core::mem::needs_drop::<ModifyTableP3>());
+const _: () = assert!(!core::mem::needs_drop::<Instrumentation>());
+const _: () = assert!(!core::mem::needs_drop::<(i32, AggregateInstrumentation)>());
+const _: () = assert!(!core::mem::needs_drop::<(i32, TuplesortInstrumentation)>());
+const _: () = assert!(!core::mem::needs_drop::<Option<SubplanHook>>());
+const _: () = assert!(!core::mem::needs_drop::<Option<CteProcHook>>());
+const _: () = assert!(!core::mem::needs_drop::<Option<ParamExecData>>());
+const _: () = assert!(!core::mem::needs_drop::<(i32, IncrementalSortInfo)>());
+const _: () = assert!(!core::mem::needs_drop::<(i32, HashInstrumentation)>());
+mcx::forget_safe_struct!(
+    EpqSubs<'_> { relsubs_slot, relsubs_done, relsubs_blocked },
+    EStateData<'_> {
+        es_query_cxt, es_range_table, es_range_table_size,
+        es_rteperminfos, es_plannedstmt,
+        es_unpruned_relids, es_output_cid, es_result_relations,
+        es_opened_result_relations, es_tuple_routing_result_relations,
+        es_trig_target_relations, es_insert_pending_result_relations,
+        es_param_list_info, es_queryEnv, es_processed, es_total_processed,
+        es_top_eflags, es_instrument, es_finished, es_subplanstates,
+        es_param_subplans, es_per_tuple_exprcontext,
+        es_sourceText, es_use_parallel_mode, es_parallel_workers_to_launch,
+        es_parallel_workers_launched, es_jit_flags, es_epq, es_epq_active,
+        es_rowmarks;
+        es_snapshot, es_crosscheck_snapshot, es_relations, es_junkFilter,
+        es_tupleTable, es_exprcontexts, es_cte_shared, es_aux_contexts,
+        es_direction, es_part_prune_infos,
+        es_insert_pending_modifytables, es_auxmodifytables,
+        es_param_exec_vals, es_instrumentation, es_agg_instrumentation,
+        es_sort_instrumentation, es_incsort_instrumentation,
+        es_hash_instrumentation, es_index_instrumentation, es_subplan_hook, es_subplan_init_hook,
+        es_subplan_eval_hook, es_subplan_expr_states, es_cte_proc_hook,
+    },
+);
 
 #[cold]
 #[inline(never)]

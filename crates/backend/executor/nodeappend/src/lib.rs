@@ -85,3 +85,7 @@ pub fn exec_rescan_append(node: &mut AppendState<'_>) {
     node.as_whichplan = INVALID_SUBPLAN_INDEX;
     node.as_begun = false;
 }
+
+mcx::forget_safe_struct!(
+    AppendState<'_> { plan, as_whichplan, as_begun, as_nplans },
+);

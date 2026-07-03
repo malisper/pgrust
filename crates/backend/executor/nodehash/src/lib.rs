@@ -516,7 +516,7 @@ pub struct HashState<'mcx> {
     ntuples_est: f64,
     tupwidth: i32,
     #[allow(dead_code)]
-    inner_desc: Rc<TupleDescData<'static>>,
+    inner_desc: Option<Rc<TupleDescData<'static>>>,
 }
 
 /// `ExecInitHash`.
@@ -560,7 +560,7 @@ pub fn exec_init_hash<'mcx>(
         ps_ExprContext,
         ntuples_est,
         tupwidth: child.plan_width,
-        inner_desc,
+        inner_desc: Some(inner_desc),
     })
 }
 
@@ -607,7 +607,10 @@ pub fn multi_exec_hash<'mcx, C: HashBuildInput<'mcx>>(
 }
 
 /// `ExecEndHash`: the table lives in the query arena (wholesale reset).
-pub fn exec_end_hash(_hs: &mut HashState<'_>) {}
+pub fn exec_end_hash(hs: &mut HashState<'_>) {
+    hs.hash_expr.release_frames();
+    hs.inner_desc = None;
+}
 
 // C constants (hashjoin.h / htup_details.h), 64-bit build.
 const HJTUPLE_OVERHEAD: usize = 16; // MAXALIGN(sizeof(HashJoinTupleData))
@@ -751,3 +754,12 @@ fn prevpower2(n: usize) -> usize {
 fn oom_entries(mcx: Mcx<'_>, add: usize) -> Box<PgError> {
     Box::new(mcx.oom(add * core::mem::size_of::<HashJoinTupleEntry>()))
 }
+
+mcx::forget_safe_nodrop!(HashJoinTupleEntry);
+
+// Exempt: released in exec_end_hash_join/exec_end_hash — table (BufFile fds)
+// is destroyed and taken there, hash_expr via release_frames, inner_desc taken.
+mcx::forget_safe_struct!(
+    HashState<'_> { hash_tuple_slot, ps_ExprContext, ntuples_est, tupwidth;
+        table, hash_expr, inner_desc },
+);

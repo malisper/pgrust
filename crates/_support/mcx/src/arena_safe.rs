@@ -23,11 +23,16 @@ unsafe impl<T: ForgetSafe> ForgetSafe for core::cell::RefCell<T> {}
 unsafe impl<T: ForgetSafe, const N: usize> ForgetSafe for [T; N] {}
 unsafe impl<'mcx, T: ForgetSafe> ForgetSafe for crate::PgVec<'mcx, T> {}
 unsafe impl<'mcx, T: ForgetSafe + ?Sized> ForgetSafe for crate::PgBox<'mcx, T> {}
+unsafe impl<'mcx, K: ForgetSafe, V: ForgetSafe> ForgetSafe
+    for hashbrown::HashMap<K, V, rustc_hash::FxBuildHasher, crate::Mcx<'mcx>>
+{
+}
 // SAFETY (each): no drop glue at all.
 unsafe impl<'a, T: ?Sized> ForgetSafe for &'a T {}
 unsafe impl<'a, T: ?Sized> ForgetSafe for &'a mut T {}
 unsafe impl<T: ?Sized> ForgetSafe for *const T {}
 unsafe impl<T: ?Sized> ForgetSafe for *mut T {}
+unsafe impl<T: ?Sized> ForgetSafe for core::ptr::NonNull<T> {}
 // SAFETY: PgString's only drop is its arena-backed byte buffer's.
 unsafe impl ForgetSafe for crate::PgString<'_> {}
 // SAFETY: Copy handle.

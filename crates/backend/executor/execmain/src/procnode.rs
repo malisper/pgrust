@@ -136,7 +136,8 @@ pub struct MaterialNode<'mcx> {
 pub struct SortNode<'mcx> {
     pub state: ::nodesort::SortState<'mcx>,
     pub outer: PgBox<'mcx, PlanStateNode<'mcx>>,
-    pub outer_desc: Rc<TupleDescData<'static>>,
+    // None only after exec_end_node (released for the forget path).
+    pub outer_desc: Option<Rc<TupleDescData<'static>>>,
 }
 
 // The IncrementalSort node's outer child lives here (nodesort precedent).
@@ -258,16 +259,18 @@ impl<'mcx> PlanStateNode<'mcx> {
             // The tlist is NIL (empty type) without RETURNING, else the first
             // RETURNING list setrefs installed.
             PlanStateNode::ModifyTable(_) => crate::exec_type_from_tl(&plan.targetlist),
-            PlanStateNode::Agg(aps) => Ok(aps.agg.ps_ResultTupleDesc.clone()),
+            PlanStateNode::Agg(aps) => Ok(aps.agg.ps_ResultTupleDesc.clone().expect("agg already ended")),
             PlanStateNode::Sort(s) => Ok(::nodesort::sort_result_type(&s.state)),
-            PlanStateNode::IncrementalSort(s) => Ok(s.state.ps_ResultTupleDesc.clone()),
-            PlanStateNode::Material(m) => Ok(m.state.ps_ResultTupleDesc.clone()),
-            PlanStateNode::Unique(u) => Ok(u.state.ps_ResultTupleDesc.clone()),
-            PlanStateNode::NestLoop(nl) => Ok(nl.state.ps_ResultTupleDesc.clone()),
-            PlanStateNode::HashJoin(hj) => Ok(hj.state.ps_ResultTupleDesc.clone()),
-            PlanStateNode::MergeJoin(mj) => Ok(mj.state.ps_ResultTupleDesc.clone()),
-            PlanStateNode::WindowAgg(w) => Ok(w.state.ps_ResultTupleDesc.clone()),
-            PlanStateNode::SetOp(s) => Ok(s.state.ps_ResultTupleDesc.clone()),
+            PlanStateNode::IncrementalSort(s) => {
+                Ok(s.state.ps_ResultTupleDesc.clone().expect("incremental sort already ended"))
+            }
+            PlanStateNode::Material(m) => Ok(m.state.ps_ResultTupleDesc.clone().expect("material already ended")),
+            PlanStateNode::Unique(u) => Ok(u.state.ps_ResultTupleDesc.clone().expect("unique already ended")),
+            PlanStateNode::NestLoop(nl) => Ok(nl.state.ps_ResultTupleDesc.clone().expect("nest loop already ended")),
+            PlanStateNode::HashJoin(hj) => Ok(hj.state.ps_ResultTupleDesc.clone().expect("hash join already ended")),
+            PlanStateNode::MergeJoin(mj) => Ok(mj.state.ps_ResultTupleDesc.clone().expect("merge join already ended")),
+            PlanStateNode::WindowAgg(w) => Ok(w.state.ps_ResultTupleDesc.clone().expect("window agg already ended")),
+            PlanStateNode::SetOp(s) => Ok(s.state.ps_ResultTupleDesc.clone().expect("set op already ended")),
             PlanStateNode::BitmapIndexScan(_)
             | PlanStateNode::BitmapAnd(_)
             | PlanStateNode::BitmapOr(_) => {
@@ -457,7 +460,7 @@ pub fn exec_init_node<'mcx>(
             PlanStateNode::Sort(SortNode {
                 state,
                 outer: ::mcx::alloc_in(estate.es_query_cxt, outer)?,
-                outer_desc,
+                outer_desc: Some(outer_desc),
             })
         }
         NodeTag::T_IncrementalSort => {
@@ -974,7 +977,8 @@ fn window_agg_arm<'mcx>(
 #[inline(never)]
 fn sort_arm<'mcx>(s: &mut SortNode<'mcx>, estate: &mut EStateData<'mcx>) -> ProcResult {
     let SortNode { state, outer, outer_desc } = s;
-    ::nodesort::exec_sort(state, estate, outer_desc.clone(), |es| exec_proc_node(outer, es))
+    let outer_desc = outer_desc.as_ref().expect("Sort already ended").clone();
+    ::nodesort::exec_sort(state, estate, outer_desc, |es| exec_proc_node(outer, es))
 }
 
 #[inline(never)]
@@ -1200,8 +1204,67 @@ pub fn multi_exec_bitmap_node<'mcx>(
     }
 }
 
+fn end_base(ps: &mut PlanStateBase<'_>) {
+    ps.ps_ResultTupleDesc = None;
+    ps.ps_ProjInfo = None;
+    ps.qual = None;
+}
+
+fn end_scan(ss: &mut ::execscan::ScanState<'_>) {
+    ss.qual = None;
+    ss.ps_ProjInfo = None;
+    ss.ss_currentScanDesc = None;
+    ss.ss_currentRelation = None;
+}
+
+// Census-exempt owners the per-node end fns don't reach; releasing them here
+// is the free_forget precondition (Drop stays the abort path).
+fn release_owned(node: &mut PlanStateNode<'_>) {
+    match node {
+        PlanStateNode::Instrumented(_) => {}
+        PlanStateNode::Result(rs) => {
+            end_base(&mut rs.ps);
+            rs.resconstantqual = None;
+        }
+        PlanStateNode::SeqScan(ss) => end_scan(&mut ss.ss),
+        PlanStateNode::FunctionScan(fs) => end_scan(&mut fs.ss),
+        PlanStateNode::ValuesScan(vs) => end_scan(&mut vs.ss),
+        PlanStateNode::CteScan(cs) => end_scan(&mut cs.ss),
+        PlanStateNode::IndexScan(is) => end_scan(&mut is.ss),
+        PlanStateNode::IndexOnlyScan(ios) => end_scan(&mut ios.ss),
+        PlanStateNode::BitmapHeapScan(b) => end_scan(&mut b.scan.ss),
+        PlanStateNode::Sort(s) => s.outer_desc = None,
+        PlanStateNode::SubqueryScan(s) => end_scan(&mut s.ss),
+        PlanStateNode::LockRows(_)
+        | PlanStateNode::Append(_)
+        | PlanStateNode::SetOp(_)
+        | PlanStateNode::IncrementalSort(_)
+        | PlanStateNode::Agg(_)
+        | PlanStateNode::BitmapIndexScan(_)
+        | PlanStateNode::BitmapAnd(_)
+        | PlanStateNode::BitmapOr(_)
+        | PlanStateNode::ModifyTable(_)
+        | PlanStateNode::NestLoop(_)
+        | PlanStateNode::HashJoin(_)
+        | PlanStateNode::MergeJoin(_)
+        | PlanStateNode::WindowAgg(_)
+        | PlanStateNode::Material(_)
+        | PlanStateNode::Unique(_)
+        | PlanStateNode::Limit(_) => {}
+    }
+}
+
 /// `ExecEndNode` (execProcnode.c).
 pub fn exec_end_node<'mcx>(
+    node: &mut PlanStateNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    exec_end_node_inner(node, estate)?;
+    release_owned(node);
+    Ok(())
+}
+
+fn exec_end_node_inner<'mcx>(
     node: &mut PlanStateNode<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
@@ -1249,8 +1312,10 @@ pub fn exec_end_node<'mcx>(
             ::nodeunique::exec_end_unique(&mut u.state);
             exec_end_node(&mut u.outer, estate)
         }
-        // C ExecEndLimit only ends the child.
-        PlanStateNode::Limit(l) => exec_end_node(&mut l.outer, estate),
+        PlanStateNode::Limit(l) => {
+            ::nodelimit::exec_end_limit(&mut l.state);
+            exec_end_node(&mut l.outer, estate)
+        }
         // C ExecEndLockRows: EvalPlanQualEnd + child.
         PlanStateNode::LockRows(l) => {
             crate::epq::eval_plan_qual_end(&mut l.epq, estate)?;
@@ -1516,3 +1581,39 @@ pub(crate) fn with_eval_slots<'mcx, R>(
     };
     f(&mut slots, get(result), mcx)
 }
+
+// Exempt fields: released by release_owned/the per-node end fns before
+// standard_executor_end forgets the bundle (Drop stays the abort path).
+::mcx::forget_safe_struct!(
+    PlanStateBase<'_> { plan, ps_ExprContext, ps_ResultTupleSlot;
+        ps_ResultTupleDesc, ps_ProjInfo, qual },
+    InstrumentedNode<'_> { inner, instr_idx },
+    ModifyTablePlanState<'_> { mt, subplan, epq },
+    BitmapHeapPlanState<'_> { scan, bitmapqual },
+    BitmapCombineState<'_> { substates },
+    AggPlanState<'_> { agg, outer },
+    WindowAggNode<'_> { state, outer },
+    MaterialNode<'_> { state, outer },
+    SortNode<'_> { state, outer; outer_desc },
+    IncrementalSortNode<'_> { state, outer },
+    AppendNode<'_> { state, substates },
+    SubqueryScanNode<'_> { ss, subplan },
+    SetOpNode<'_> { state, outer, inner },
+    LockRowsNode<'_> { state, outer, epq },
+    LimitNode<'_> { state, outer },
+    UniqueNode<'_> { state, outer },
+    NestLoopNode<'_> { state, outer, inner },
+    HashSubNode<'_> { state, child },
+    HashJoinNode<'_> { state, outer, hash },
+    MergeJoinNode<'_> { state, outer, inner },
+);
+::mcx::forget_safe_enum!(
+    PlanStateNode<'_> {
+        Result(x), SeqScan(x), FunctionScan(x), ValuesScan(x), CteScan(x),
+        IndexScan(x), IndexOnlyScan(x), Agg(x), Sort(x), Material(x),
+        IncrementalSort(x), Unique(x), Limit(x), BitmapHeapScan(x),
+        BitmapIndexScan(x), Append(x), SubqueryScan(x), SetOp(x), LockRows(x),
+        BitmapAnd(x), BitmapOr(x), ModifyTable(x), NestLoop(x), HashJoin(x),
+        MergeJoin(x), WindowAgg(x), Instrumented(x),
+    },
+);

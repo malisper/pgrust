@@ -183,6 +183,7 @@ pub fn exec_end_bitmap_heap_scan(node: &mut BitmapHeapScanState<'_>) -> PgResult
         table_endscan(scandesc)?;
     }
     node.tbm = None;
+    node.bitmapqualorig = None;
     Ok(())
 }
 
@@ -215,3 +216,9 @@ fn check_for_interrupts() {
         interrupt_unported();
     }
 }
+
+// Exempt: bitmapqualorig is released in exec_end_bitmap_heap_scan.
+mcx::forget_safe_struct!(
+    BitmapHeapScanState<'_> { ss, tbm, tbmiterator, initialized, recheck,
+        stats_exact_pages, stats_lossy_pages; bitmapqualorig },
+);

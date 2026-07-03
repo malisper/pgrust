@@ -112,6 +112,22 @@ impl<B: Bind> McxOwned<B> {
     }
 }
 
+impl<B: Bind> McxOwned<B> {
+    /// C's FreeExecutorState shape: one context delete, the state's drop glue
+    /// never runs. `ForgetSafe` bounds the loss to arena bytes; census-exempt
+    /// fields must have been released by the caller (Drop remains the abort
+    /// path).
+    pub fn free_forget(self)
+    where
+        B::Out<'static>: crate::ForgetSafe,
+    {
+        let ctx = self.ctx;
+        core::mem::forget(self);
+        // SAFETY: unique heap context from try_new; the arena state dies with it.
+        drop(unsafe { alloc::boxed::Box::from_raw(ctx.as_ptr()) });
+    }
+}
+
 impl<B: Bind> Drop for McxOwned<B> {
     fn drop(&mut self) {
         // SAFETY: state dropped in place exactly once, first (its arena memory

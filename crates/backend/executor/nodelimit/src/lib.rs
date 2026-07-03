@@ -336,3 +336,19 @@ fn negative_limit() -> Box<PgError> {
             .with_sqlstate(ERRCODE_INVALID_ROW_COUNT_IN_LIMIT_CLAUSE),
     )
 }
+
+/// `ExecEndLimit`.
+pub fn exec_end_limit(node: &mut LimitState<'_>) {
+    node.limitOffset = None;
+    node.limitCount = None;
+}
+
+mcx::forget_safe_nodrop!(LimitStateCond);
+
+// Exempt: limitOffset/limitCount are released in exec_end_limit; LimitOption
+// is no-drop, const-proven below.
+const _: () = assert!(!core::mem::needs_drop::<LimitOption>());
+mcx::forget_safe_struct!(
+    LimitState<'_> { plan, ps_ExprContext, offset, count, noCount, lstate,
+        position, subSlot; limitOffset, limitCount, limitOption },
+);

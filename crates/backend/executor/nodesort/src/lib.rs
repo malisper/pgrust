@@ -30,7 +30,7 @@ mod tests;
 
 pub struct SortState<'mcx> {
     pub plan: &'mcx Sort<'mcx>,
-    pub ps_ResultTupleDesc: Rc<TupleDescData<'static>>,
+    pub ps_ResultTupleDesc: Option<Rc<TupleDescData<'static>>>,
     pub ps_ResultTupleSlot: ExecSlotId,
     pub randomAccess: bool,
     pub bounded: bool,
@@ -57,7 +57,7 @@ pub fn exec_init_sort<'mcx>(
         .exec_init_extra_tuple_slot(Some(result_desc.clone()), TupleSlotKind::MinimalTuple);
     Ok(SortState {
         plan: node,
-        ps_ResultTupleDesc: result_desc,
+        ps_ResultTupleDesc: Some(result_desc),
         ps_ResultTupleSlot,
         randomAccess,
         bounded: false,
@@ -182,6 +182,7 @@ where
 /// `ExecEndSort` node-local half; the caller ends the outer child.
 pub fn exec_end_sort(node: &mut SortState<'_>) {
     node.tuplesortstate = None;
+    node.ps_ResultTupleDesc = None;
 }
 
 /// `ExecSortMarkPos`.
@@ -249,5 +250,12 @@ pub fn sort_set_tuple_bound(node: &mut SortState<'_>, tuples_needed: i64) {
 
 /// `ExecGetResultType` for a Sort node.
 pub fn sort_result_type(node: &SortState<'_>) -> Rc<TupleDescData<'static>> {
-    node.ps_ResultTupleDesc.clone()
+    node.ps_ResultTupleDesc.clone().expect("sort already ended")
 }
+
+// Exempt: released in exec_end_sort.
+mcx::forget_safe_struct!(
+    SortState<'_> { plan, ps_ResultTupleSlot, randomAccess, bounded, bound,
+        sort_Done, bounded_Done, bound_Done, datumSort;
+        ps_ResultTupleDesc, tuplesortstate },
+);

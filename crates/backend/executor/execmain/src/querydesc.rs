@@ -20,6 +20,8 @@ pub struct ExecData<'mcx> {
 
 ::mcx::bind!(pub ExecTy => ExecData<'mcx>);
 
+::mcx::forget_safe_struct!(ExecData<'_> { estate, planstate });
+
 /// The C `EState*` + root PlanState: the "ExecutorState" context bundle.
 pub type ExecutorHandle = McxOwned<ExecTy>;
 
@@ -185,10 +187,10 @@ pub(crate) fn release_query_desc_seam(h: QueryDescHandle) {
 
 /// `FreeQueryDesc` (pquery.c).
 pub(crate) fn free_query_desc_seam(h: QueryDescHandle) {
-    let qd = remove(h);
+    let mut qd = remove(h);
     assert!(qd.exec.is_none(), "FreeQueryDesc of a live query");
-    snapmgr::UnregisterSnapshot(qd.snapshot.as_ref());
-    snapmgr::UnregisterSnapshot(qd.crosscheck_snapshot.as_ref());
+    snapmgr::UnregisterSnapshot(qd.snapshot.take().as_ref());
+    snapmgr::UnregisterSnapshot(qd.crosscheck_snapshot.take().as_ref());
 }
 
 pub(crate) fn query_desc_es_processed_seam(h: QueryDescHandle) -> u64 {

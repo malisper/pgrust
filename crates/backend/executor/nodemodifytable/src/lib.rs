@@ -279,6 +279,9 @@ pub fn exec_end_modify_table(mt: &mut ModifyTableState<'_>) {
     if let Some(indexes) = mt.indexes.take() {
         execindexing::ExecCloseIndices(indexes).expect("ExecCloseIndices");
     }
+    mt.snapshot_any = None;
+    mt.project_returning = None;
+    mt.check_exprs = None;
 }
 
 // ExecInitInsertProjection (nodeModifyTable.c). INSERT subplans carry no junk
@@ -1172,3 +1175,17 @@ fn plan_output_mismatch(detail: &'static str) -> Box<PgError> {
             .with_detail(detail),
     )
 }
+
+mcx::forget_safe_nodrop!(NewColSrc);
+
+// Exempt: indexes/snapshot_any/project_returning/check_exprs (and each
+// CheckExpr's state) are released in exec_end_modify_table; CmdType is
+// no-drop, const-proven below.
+const _: () = assert!(!core::mem::needs_drop::<CmdType>());
+mcx::forget_safe_struct!(
+    CheckExpr<'_> { name; state },
+    ModifyTableState<'_> { plan, canSetTag, mt_done, result_rti,
+        ri_newTupleSlot, ri_oldTupleSlot, ri_ReturningSlot,
+        ri_projectNewInfoValid, ri_RowIdAttNo, update_cols, returning_slot;
+        operation, indexes, snapshot_any, project_returning, check_exprs },
+);

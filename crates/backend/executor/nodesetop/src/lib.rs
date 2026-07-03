@@ -38,7 +38,7 @@ struct SetOpPerGroup {
 pub struct SetOpState<'mcx> {
     pub plan: &'mcx SetOp<'mcx>,
     pub ps_ExprContext: EcxtId,
-    pub ps_ResultTupleDesc: Rc<TupleDescData<'static>>,
+    pub ps_ResultTupleDesc: Option<Rc<TupleDescData<'static>>>,
     pub ps_ResultTupleSlot: ExecSlotId,
     setop_done: bool,
     num_output: i64,
@@ -147,7 +147,7 @@ pub fn exec_init_set_op<'mcx>(
     Ok(SetOpState {
         plan: node,
         ps_ExprContext,
-        ps_ResultTupleDesc: result_desc,
+        ps_ResultTupleDesc: Some(result_desc),
         ps_ResultTupleSlot,
         setop_done: false,
         num_output: 0,
@@ -479,7 +479,25 @@ fn setop_retrieve_hash_table<'mcx>(
 }
 
 /// `ExecEndSetOp` node-local half; the caller ends both children.
-pub fn exec_end_set_op(_node: &mut SetOpState<'_>) {}
+pub fn exec_end_set_op(node: &mut SetOpState<'_>) {
+    node.ps_ResultTupleDesc = None;
+    match &mut node.strategy {
+        StrategyState::Hashed(h) => h.hashtable.release(),
+        StrategyState::Sorted(s) => {
+            s.left.first_slot.base_mut().tts_tupleDescriptor = None;
+            s.right.first_slot.base_mut().tts_tupleDescriptor = None;
+        }
+    }
+}
+
+const _: () = assert!(!core::mem::needs_drop::<SortSupport>());
+
+// Exempt: released in exec_end_set_op (hash table + fn_extras via
+// TupleHashTable::release, slot descs cleared).
+mcx::forget_safe_struct!(
+    SetOpState<'_> { plan, ps_ExprContext, ps_ResultTupleSlot, setop_done,
+        num_output; ps_ResultTupleDesc, strategy },
+);
 
 /// `ExecReScanSetOp` node-local half; returns true when the caller must
 /// rescan both children (chgParam is always NULL until the Param lanes land,

@@ -172,3 +172,7 @@ pub fn exec_rescan_values_scan<'mcx>(
     node.curr_idx = -1;
     Ok(())
 }
+
+mcx::forget_safe_struct!(
+    ValuesScanState<'_> { ss, rowcontext, exprlists, curr_idx, array_len },
+);

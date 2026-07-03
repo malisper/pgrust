@@ -204,3 +204,7 @@ pub fn exec_rescan_cte_scan<'mcx>(
     ts.rescan();
     Ok(())
 }
+
+mcx::forget_safe_struct!(
+    CteScanState<'_> { ss, readptr, cte_plan_id, cte_param, is_leader },
+);

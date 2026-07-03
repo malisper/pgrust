@@ -33,7 +33,7 @@ pub trait NestLoopChild<'mcx> {
 pub struct NestLoopState<'mcx> {
     pub plan: &'mcx NestLoop<'mcx>,
     pub ps_ExprContext: EcxtId,
-    pub ps_ResultTupleDesc: Rc<TupleDescData<'static>>,
+    pub ps_ResultTupleDesc: Option<Rc<TupleDescData<'static>>>,
     pub ps_ResultTupleSlot: ExecSlotId,
     proj: PgBox<'mcx, ExprState<'mcx>>,
     joinqual: Option<PgBox<'mcx, ExprState<'mcx>>>,
@@ -96,7 +96,7 @@ pub fn exec_init_nest_loop<'mcx>(
     Ok(NestLoopState {
         plan: node,
         ps_ExprContext,
-        ps_ResultTupleDesc: result_desc,
+        ps_ResultTupleDesc: Some(result_desc),
         ps_ResultTupleSlot,
         proj,
         joinqual,
@@ -182,7 +182,12 @@ where
 }
 
 /// `ExecEndNestLoop`: child-only teardown; the caller ends the children.
-pub fn exec_end_nest_loop(_node: &mut NestLoopState<'_>) {}
+pub fn exec_end_nest_loop(node: &mut NestLoopState<'_>) {
+    node.joinqual = None;
+    node.otherqual = None;
+    node.proj.release_frames();
+    node.ps_ResultTupleDesc = None;
+}
 
 /// `ExecReScanNestLoop`: caller rescans the outer child; the inner MUST NOT
 /// be rescanned here (ExecNestLoop rescans it per outer tuple).
@@ -232,3 +237,11 @@ fn project_join_tuple<'mcx>(
     let mut slots = EvalSlots { scan: None, inner: Some(inner), outer: Some(outer) };
     exec_project(proj, &mut slots, result, mcx)
 }
+
+// Exempt: all released in exec_end_nest_loop (proj via release_frames).
+mcx::forget_safe_struct!(
+    NestLoopState<'_> { plan, ps_ExprContext, ps_ResultTupleSlot,
+        js_single_match, nl_fill_outer, nl_NullInnerTupleSlot,
+        nl_NeedNewOuter, nl_MatchedOuter;
+        ps_ResultTupleDesc, proj, joinqual, otherqual },
+);

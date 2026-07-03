@@ -6,6 +6,7 @@ publish.workspace = true
 
 [dependencies]
 executils = { path = "../executils" }
+mcx = { path = "../../../_support/mcx" }
 init_small = { path = "../../utils/init/init_small" }
 postgres_seams = { path = "../../tcop/postgres_seams" }
 types_error = { path = "../../../_support/types/types_error" }

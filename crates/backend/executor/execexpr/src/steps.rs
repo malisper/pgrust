@@ -160,6 +160,8 @@ pub struct AggPerGroup {
     pub no_trans_value: bool,
 }
 
+::mcx::forget_safe_nodrop!(AggPerGroup);
+
 const _: () = assert!(core::mem::size_of::<Step>() <= 64);
 
 // C ExprEvalStep.d.func minus the FmgrInfo pointer: fn_addr/fcinfo are the
@@ -501,6 +503,13 @@ impl<'mcx> ExprState<'mcx> {
             // SAFETY: frame image live for 'mcx, sole reference; the caller
             // guarantees the armed context outlives every call.
             unsafe { fcinfo_mut(f.fcinfo, f.nargs).set_result_mcx(mcx) };
+        }
+    }
+
+    /// Drops each frame's fn_extra; the program is then safe to forget.
+    pub fn release_frames(&mut self) {
+        for f in self.frames.iter_mut() {
+            f.flinfo.fn_extra = None;
         }
     }
 

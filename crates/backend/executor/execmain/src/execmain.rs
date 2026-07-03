@@ -606,9 +606,12 @@ pub fn standard_executor_end(qd: &mut QueryDescData) -> PgResult<()> {
         snapmgr::UnregisterSnapshot(estate.es_snapshot.take().as_ref());
         snapmgr::UnregisterSnapshot(estate.es_crosscheck_snapshot.take().as_ref());
         estate.teardown();
+        debug_assert!(estate.owners_released());
         Ok(())
     })?;
-    drop(exec);
+    // FreeExecutorState: one context delete, no per-object glue (the walk
+    // above released every census-exempt owner; Drop stays the abort path).
+    (*exec).free_forget();
     qd.tup_desc = None;
     Ok(())
 }

@@ -138,7 +138,7 @@ pub struct WindowAggStateData<'mcx> {
     frameOptions: i32,
     pub ps_ExprContext: EcxtId,
     tmpcontext: EcxtId,
-    pub ps_ResultTupleDesc: Rc<TupleDescData<'static>>,
+    pub ps_ResultTupleDesc: Option<Rc<TupleDescData<'static>>>,
     pub ps_ResultTupleSlot: ExecSlotId,
     proj: PgBox<'mcx, ExprState<'mcx>>,
     part_eq: Option<PgBox<'mcx, ExprState<'mcx>>>,
@@ -623,7 +623,7 @@ pub fn exec_init_window_agg<'mcx>(
         frameOptions,
         ps_ExprContext,
         tmpcontext,
-        ps_ResultTupleDesc: result_desc,
+        ps_ResultTupleDesc: Some(result_desc),
         ps_ResultTupleSlot,
         proj,
         part_eq,
@@ -2456,6 +2456,40 @@ pub fn exec_end_window_agg(node: &mut WindowAggStateData<'_>) {
     if let Some(buffer) = node.buffer.take() {
         buffer.end();
     }
+    node.part_eq = None;
+    node.ord_eq = None;
+    node.evaltrans = None;
+    node.start_offset_state = None;
+    node.end_offset_state = None;
+    node.start_in_range = None;
+    node.end_in_range = None;
+    node.proj.release_frames();
+    node.ps_ResultTupleDesc = None;
+    for pf in node.perfunc.iter_mut() {
+        pf.argstates.clear();
+    }
+    for pa in node.peragg.iter_mut() {
+        pa.argstates.clear();
+        match &mut pa.kernel {
+            AggKernel::Generic { transfn } => transfn.fn_extra = None,
+            AggKernel::MovingByVal { transfn, invtransfn } => {
+                transfn.fn_extra = None;
+                invtransfn.fn_extra = None;
+            }
+            AggKernel::MovingIntSum { .. } => {}
+        }
+    }
+    for slot in [
+        &mut node.scan_slot,
+        &mut node.first_part_slot,
+        &mut node.agg_row_slot,
+        &mut node.temp_slot_1,
+        &mut node.temp_slot_2,
+        &mut node.framehead_slot,
+        &mut node.frametail_slot,
+    ] {
+        slot.base_mut().tts_tupleDescriptor = None;
+    }
 }
 
 /// `ExecReScanWindowAgg`; the caller (execami) rescans the outer child.
@@ -2480,3 +2514,29 @@ pub fn exec_rescan_window_agg<'mcx>(
         ecxt.ecxt_aggnulls[i] = false;
     }
 }
+
+mcx::forget_safe_nodrop!(WfKind, Int8TransState);
+
+// Exempt: all released in exec_end_window_agg (argstates cleared, offset/
+// in_range/eq ExprStates and FmgrInfos taken, buffer ended, slot descs
+// cleared).
+mcx::forget_safe_struct!(
+    PerFuncData<'_> { kind, wfuncno, readptr, seekpos, markpos, rank, ntile,
+        rows_per_bucket, boundary, remainder, arg1_stable; argstates },
+    PerAggData<'_> { wfuncno, num_arguments, win_collation, fn_strict,
+        has_inverse, init_value, trans_value, trans_count, int_sum,
+        result_value, restart; argstates, kernel },
+    WindowAggStateData<'_> { plan, frameOptions, ps_ExprContext, tmpcontext,
+        ps_ResultTupleSlot, first_part_valid, agg_row_valid, perfunc, peragg,
+        trans_init, _pergroup, pergroup_base, peragg_wfuncno, agg_saved,
+        agg_readptr, agg_seekpos, agg_markpos, agg_mark_active,
+        agg_values_base, agg_nulls_base, numaggs, currentpos, frameheadpos,
+        frametailpos, framehead_valid, frametail_valid, framehead_ptr,
+        frametail_ptr, aggregatedbase, aggregatedupto, spooled_rows,
+        start_offset_value, end_offset_value, all_first, partition_spooled,
+        more_partitions, next_partition, done;
+        ps_ResultTupleDesc, proj, part_eq, ord_eq, buffer, scan_slot,
+        first_part_slot, agg_row_slot, temp_slot_1, temp_slot_2,
+        framehead_slot, frametail_slot, evaltrans, start_offset_state,
+        end_offset_state, start_in_range, end_in_range },
+);
