@@ -1,0 +1,12 @@
+[package]
+name = "types_trigger"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../mcx" }
+types_core = { path = "../types_core" }
