@@ -553,9 +553,8 @@ pub fn function_parse_error_transpose(e: &mut types_error::PgError, prosrc: &str
     let Some(origpos) = e.cursor_position.filter(|&p| p > 0) else {
         return false;
     };
-    let query = elog::backend_log_context()
-        .and_then(|c| c.query_string())
-        .map(|s| s.to_string());
+    let query = pquery::ActivePortal()
+        .and_then(|p| p.borrow().sourceText.as_ref().map(|s| s.as_str().to_string()));
     if let Some(q) = query {
         let newpos = match_prosrc_to_query(prosrc, &q, origpos);
         if newpos > 0 {

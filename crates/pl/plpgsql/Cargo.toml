@@ -11,6 +11,10 @@ path = "src/lib.rs"
 [dependencies]
 array = { package = "types_array", path = "../../_support/types/array" }
 cache_syscache = { path = "../../backend/utils/cache/cache_syscache" }
+catalog_namespace = { path = "../../backend/catalog/catalog_namespace" }
+rel_vocab = { path = "../../_support/types/rel_vocab" }
+syscache_seams = { path = "../../backend/utils/cache/syscache_seams" }
+types_rel = { path = "../../_support/types/rel" }
 coerce = { path = "../../backend/parser/coerce" }
 datum = { path = "../../_support/types/datum" }
 detoast = { path = "../../backend/access/common/detoast" }

@@ -188,7 +188,10 @@ impl CompState {
         let coll = if OidIsValid(collation) { collation } else { typcollation };
         let (typinput, typioparam) = lsyscache::typ::getTypeInputInfo(typoid)?;
         let elem = lsyscache::typ::get_element_type(typoid)?;
-        let ttype = if typtype == TYPTYPE_PSEUDO {
+        const RECORDOID: Oid = 2249;
+        let ttype = if typoid == RECORDOID {
+            TypeKind::Rec
+        } else if typtype == TYPTYPE_PSEUDO {
             TypeKind::Pseudo
         } else {
             TypeKind::Scalar
@@ -215,6 +218,9 @@ impl CompState {
         datatype: PlType,
         add2namespace: bool,
     ) -> PgResult<Dno> {
+        if datatype.ttype == TypeKind::Rec {
+            return Ok(self.build_rec(refname, lineno, add2namespace));
+        }
         if datatype.ttype == TypeKind::Pseudo {
             return Err(comp_err(
                 ERRCODE_FEATURE_NOT_SUPPORTED,
@@ -303,13 +309,56 @@ impl CompState {
         ))
     }
 
-    // plpgsql_parse_cwordtype (table.column%TYPE / schema.table.column%TYPE).
+    // plpgsql_parse_cwordtype: block-qualified var %TYPE, else table.column
+    // (or schema.table.column) %TYPE from pg_attribute.
     pub fn parse_cwordtype(&self, idents: &[String]) -> PgResult<PlType> {
-        panic!(
-            "plpgsql_parse_cwordtype (pl_comp.c): qualified %TYPE ({}) unported — \
-             unit backend-pl-plpgsql-comp",
-            idents.join(".")
-        );
+        let (schemaname, relname, fldname) = match idents.len() {
+            2 => {
+                if let Some((idx, nnames)) =
+                    self.ns_lookup(self.ns_top, false, &idents[0], Some(&idents[1]), None)
+                {
+                    let item = &self.ns[idx as usize];
+                    if item.itemtype == NsType::Var {
+                        if let PlDatum::Var(v) = &self.datums[item.itemno as usize] {
+                            return Ok(v.datatype.clone());
+                        }
+                    }
+                    if item.itemtype == NsType::Rec && nnames == 2 {
+                        panic!(
+                            "plpgsql_parse_cwordtype (pl_comp.c): record %TYPE unported — \
+                             unit backend-pl-plpgsql-comp"
+                        );
+                    }
+                }
+                (None, idents[0].as_str(), idents[1].as_str())
+            }
+            3 => (Some(idents[0].as_str()), idents[1].as_str(), idents[2].as_str()),
+            _ => {
+                return Err(comp_err(
+                    types_error::ERRCODE_SYNTAX_ERROR,
+                    format!("improper qualified name (too many dotted names): {}", idents.join(".")),
+                ));
+            }
+        };
+        let rv = rel_vocab::RangeVar {
+            catalogname: None,
+            schemaname,
+            relname,
+            inh: true,
+            relpersistence: b'p',
+            location: -1,
+        };
+        let class_oid = catalog_namespace::RangeVarGetRelid(&rv, types_rel::NoLock, false)?;
+        let attnum = syscache_seams::lookup_pg_attribute_attnum_by_name::call(class_oid, fldname)?;
+        if attnum <= 0 {
+            return Err(comp_err(
+                types_error::ERRCODE_UNDEFINED_COLUMN,
+                format!("column \"{fldname}\" of relation \"{relname}\" does not exist"),
+            ));
+        }
+        let shape = syscache_seams::lookup_pg_attribute_shape::call(class_oid, attnum)?
+            .unwrap_or_else(|| panic!("cache lookup failed for attribute {attnum} of relation {class_oid}"));
+        Self::build_datatype(shape.atttypid, shape.atttypmod, shape.attcollation)
     }
 }
 

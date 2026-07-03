@@ -11,6 +11,7 @@ pub type Dno = i32;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TypeKind {
     Scalar,
+    Rec,
     Pseudo,
 }
 
