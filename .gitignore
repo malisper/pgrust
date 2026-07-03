@@ -3,3 +3,4 @@
 fleet-results/
 *.profraw
 **/target-*/
+scripts/__pycache__/

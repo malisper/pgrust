@@ -332,9 +332,11 @@ fn install_builtin_cutf8_collation_stub() {
                 collnamespace: 11,
                 collprovider: pg_locale::COLLPROVIDER_BUILTIN,
                 collisdeterministic: true,
+                collencoding: -1,
                 collcollate: None,
                 collctype: None,
                 colllocale: Some(mcx::PgString::from_str_in("C.UTF-8", mcx)?),
+                collicurules: None,
                 collversion: None,
             }))
         });
