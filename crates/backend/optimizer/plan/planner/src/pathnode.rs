@@ -998,8 +998,7 @@ pub fn create_limit_path<'mcx>(
     }))
 }
 
-// create_lockrows_path (pathnode.c): result order is not assumed preserved
-// (pathkeys NIL); row locking charged at cpu_tuple_cost per row.
+// create_lockrows_path (pathnode.c): pathkeys NIL (locking can reorder).
 pub fn create_lockrows_path<'mcx>(
     run: &mut PlannerRun<'mcx>,
     rel_id: RelId,

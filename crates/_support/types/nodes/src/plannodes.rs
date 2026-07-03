@@ -566,6 +566,8 @@ pub struct PlanRowMark {
     pub isParent: bool,
 }
 
+mcx::forget_safe_nodrop!(PlanRowMark);
+
 #[derive(Default)]
 #[repr(C)]
 pub struct Limit<'mcx> {

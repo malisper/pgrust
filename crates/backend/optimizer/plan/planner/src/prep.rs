@@ -51,9 +51,7 @@ pub fn remove_useless_result_rtes(run: &PlannerRun<'_>, parse: &Query<'_>) {
     );
 }
 
-// preprocess_rowmarks (planner.c). For UPDATE/DELETE the target rel takes no
-// mark and every other jointree rel would; the join lane (multi-rel DML) is
-// loud in the parser, so that mark loop's input is empty.
+// preprocess_rowmarks (planner.c); UPDATE/DELETE non-target marks stay loud.
 pub fn preprocess_rowmarks<'mcx>(
     run: &mut PlannerRun<'mcx>,
     parse: &Query<'mcx>,
@@ -148,9 +146,7 @@ pub fn preprocess_rowmarks<'mcx>(
     Ok(())
 }
 
-// preprocess_targetlist's rowmark stanza (preptlist.c): junk ctid (and, for
-// inheritance parents, tableoid) columns for each rowmarked rel; ROW_MARK_COPY
-// wholerow vars are the non-relation-RTE lane, loud upstream.
+// preptlist.c rowmark stanza: junk ctid (+ parent tableoid) columns.
 fn add_rowmark_junk_columns<'mcx>(
     mcx: Mcx<'mcx>,
     run: &PlannerRun<'mcx>,
@@ -208,8 +204,7 @@ fn arena_str<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<&'mcx str> {
     Ok(unsafe { core::str::from_utf8_unchecked(bytes) })
 }
 
-// get_relids_in_jointree (prepjointree.c), include_outer_joins=false shape:
-// RangeTblRefs collected, JoinExpr rtindexes skipped.
+// get_relids_in_jointree (prepjointree.c), include_outer_joins=false shape.
 fn collect_jointree_relids<'mcx>(
     mcx: Mcx<'mcx>,
     f: &types_nodes::primnodes::FromExpr<'mcx>,

@@ -334,6 +334,7 @@ pub fn simple_heap_insert(relation: &RelationData<'_>, tup: &mut HeapTupleData<'
 }
 
 const XLOG_HEAP2_MULTI_INSERT: u8 = 0x50;
+const XLOG_HEAP2_LOCK_UPDATED: u8 = 0x60;
 const XLH_INSERT_LAST_IN_MULTI: u8 = 1 << 1;
 const SizeOfHeapMultiInsert: usize = 4;
 const SizeOfMultiInsertTuple: usize = 7;
@@ -1113,7 +1114,23 @@ pub fn heap_lock_tuple(
                     if (infomask2 & HEAP_KEYS_UPDATED) == 0 {
                         let updated = !HEAP_XMAX_IS_LOCKED_ONLY(infomask);
                         if follow_updates && updated && tp.t_self != t_ctid {
-                            unported("heap_lock_updated_tuple (follow_updates; EPQ lane)");
+                            let res = heap_lock_updated_tuple(
+                                relation,
+                                infomask,
+                                xwait,
+                                &t_ctid,
+                                xact_seams::get_current_transaction_id::call()?,
+                                mode,
+                            )?;
+                            if res != TM_Result::TM_Ok {
+                                // C's goto failed expects the buffer lock held.
+                                bufmgr_seams::lock_buffer::call(
+                                    pin.buffer(),
+                                    BUFFER_LOCK_EXCLUSIVE,
+                                )?;
+                                relock_tp!();
+                                break 'l3 res;
+                            }
                         }
                         bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_EXCLUSIVE)?;
                         relock_tp!();
@@ -1193,7 +1210,20 @@ pub fn heap_lock_tuple(
                     }
                 }
                 if follow_updates && !HEAP_XMAX_IS_LOCKED_ONLY(infomask) && tp.t_self != t_ctid {
-                    unported("heap_lock_updated_tuple (follow_updates after sleep; EPQ lane)");
+                    let res = heap_lock_updated_tuple(
+                        relation,
+                        infomask,
+                        xwait,
+                        &t_ctid,
+                        xact_seams::get_current_transaction_id::call()?,
+                        mode,
+                    )?;
+                    if res != TM_Result::TM_Ok {
+                        // C's goto failed expects the buffer lock held.
+                        bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_EXCLUSIVE)?;
+                        relock_tp!();
+                        break 'l3 res;
+                    }
                 }
                 bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_EXCLUSIVE)?;
                 relock_tp!();
@@ -2019,4 +2049,210 @@ fn datum_is_equal(v1: ::datum::Datum, v2: ::datum::Datum, typbyval: bool, typlen
 #[inline(never)]
 fn unported_ret(typlen: i32) -> ! {
     panic!("backend-access-heap-heapam reached unported unit: datumIsEqual cstring typlen {typlen} (datum.c)")
+}
+
+/// `heap_lock_updated_tuple` (heapam.c): lock all descendant versions of an
+/// updated tuple so the acquired mode survives the chain. LOUD in the rec:
+/// MultiXact member scans and all-visible VM maintenance.
+fn heap_lock_updated_tuple(
+    relation: &RelationData<'_>,
+    prior_infomask: u16,
+    prior_raw_xmax: TransactionId,
+    prior_ctid: &ItemPointerData,
+    xid: TransactionId,
+    mode: LockTupleMode,
+) -> PgResult<TM_Result> {
+    if ::types_tuple::ItemPointerIndicatesMovedPartitions(prior_ctid) {
+        return Ok(TM_Result::TM_Ok);
+    }
+    multixact_seams::multi_xact_id_set_oldest_member::call()?;
+    let prior_xmax = if (prior_infomask & HEAP_XMAX_IS_MULTI) != 0 {
+        MultiXactIdGetUpdateXid(prior_raw_xmax, prior_infomask)?
+    } else {
+        prior_raw_xmax
+    };
+    heap_lock_updated_tuple_rec(relation, prior_xmax, *prior_ctid, xid, mode)
+}
+
+fn heap_lock_updated_tuple_rec(
+    relation: &RelationData<'_>,
+    prior_xmax: TransactionId,
+    tid: ItemPointerData,
+    xid: TransactionId,
+    mode: LockTupleMode,
+) -> PgResult<TM_Result> {
+    use ::types_tuple::{
+        HEAP_XMAX_IS_EXCL_LOCKED, HEAP_XMAX_IS_KEYSHR_LOCKED, HEAP_XMAX_IS_SHR_LOCKED,
+    };
+
+    let mut prior_xmax = prior_xmax;
+    let mut tupid = tid;
+    'chain: loop {
+        let block = ItemPointerGetBlockNumber(&tupid);
+        let offnum = ItemPointerGetOffsetNumber(&tupid);
+        let pin = BufferPin::adopt(bufmgr_seams::read_buffer::call(relation, block)?)
+            .expect("ReadBuffer returned InvalidBuffer");
+
+        'l4: loop {
+            if pin.page().is_all_visible() {
+                unported("visibilitymap_pin (heap_lock_updated_tuple_rec, visibilitymap.c)");
+            }
+            bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_EXCLUSIVE)?;
+            macro_rules! done {
+                ($res:expr) => {{
+                    bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_UNLOCK)?;
+                    pin.release();
+                    return Ok($res);
+                }};
+            }
+
+            // heap_fetch(SnapshotAny) miss: the chain member was pruned after
+            // its creator aborted — chain end.
+            let page = pin.page();
+            if offnum < FirstOffsetNumber || offnum > page.max_offset_number() {
+                done!(TM_Result::TM_Ok);
+            }
+            let lp = page.item_id(offnum);
+            if !lp.is_normal() {
+                done!(TM_Result::TM_Ok);
+            }
+            // SAFETY: pin + exclusive lock held.
+            let mut mytup = unsafe { page_tuple(page, lp, tupid, relation) };
+
+            if TransactionIdIsValid(prior_xmax) && mytup.t_data().xmin() != prior_xmax {
+                done!(TM_Result::TM_Ok);
+            }
+            if transam_seams::transaction_id_did_abort::call(mytup.t_data().xmin())? {
+                done!(TM_Result::TM_Ok);
+            }
+
+            let old_infomask = mytup.t_data().t_infomask;
+            let old_infomask2 = mytup.t_data().t_infomask2;
+            let xmax = mytup.t_data().xmax_raw();
+            let mut stamp = true;
+
+            if (old_infomask & HEAP_XMAX_INVALID) == 0 {
+                if (old_infomask & HEAP_XMAX_IS_MULTI) != 0 {
+                    unported("GetMultiXactIdMembers (heap_lock_updated_tuple_rec, multixact.c)");
+                }
+                let held_locked_only = HEAP_XMAX_IS_LOCKED_ONLY(old_infomask);
+                let held_mode = if held_locked_only {
+                    if HEAP_XMAX_IS_KEYSHR_LOCKED(old_infomask) {
+                        LockTupleMode::LockTupleKeyShare
+                    } else if HEAP_XMAX_IS_SHR_LOCKED(old_infomask) {
+                        LockTupleMode::LockTupleShare
+                    } else if HEAP_XMAX_IS_EXCL_LOCKED(old_infomask) {
+                        if (old_infomask2 & HEAP_KEYS_UPDATED) != 0 {
+                            LockTupleMode::LockTupleExclusive
+                        } else {
+                            LockTupleMode::LockTupleNoKeyExclusive
+                        }
+                    } else {
+                        return Err(Box::new(PgError::error("invalid lock status in tuple")));
+                    }
+                } else if (old_infomask2 & HEAP_KEYS_UPDATED) != 0 {
+                    LockTupleMode::LockTupleExclusive
+                } else {
+                    LockTupleMode::LockTupleNoKeyExclusive
+                };
+                // test_lockmode_for_conflict (heapam.c), single-xact form.
+                if xact_seams::transaction_id_is_current_transaction_id::call(xmax) {
+                    stamp = false;
+                } else if procarray_seams::transaction_id_is_in_progress::call(xmax)? {
+                    if ::lock_seams::do_lock_modes_conflict::call(
+                        tuple_lock_hwlock(held_mode),
+                        tuple_lock_hwlock(mode),
+                    ) {
+                        bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_UNLOCK)?;
+                        lmgr::XactLockTableWait(
+                            xmax,
+                            Some(relation),
+                            Some(&mytup.t_self),
+                            ::types_storage::lock::XLTW_Oper::LockUpdated,
+                        )?;
+                        continue 'l4;
+                    }
+                } else if transam_seams::transaction_id_did_abort::call(xmax)? {
+                    // lock gone with the aborted xact
+                } else if transam_seams::transaction_id_did_commit::call(xmax)? {
+                    if !held_locked_only
+                        && ::lock_seams::do_lock_modes_conflict::call(
+                            tuple_lock_hwlock(held_mode),
+                            tuple_lock_hwlock(mode),
+                        )
+                    {
+                        if mytup.t_self != mytup.t_data().t_ctid {
+                            done!(TM_Result::TM_Updated);
+                        }
+                        done!(TM_Result::TM_Deleted);
+                    }
+                }
+                // else: crashed — locks are gone
+            }
+
+            if stamp {
+                let (new_xmax, new_infomask, new_infomask2) = compute_new_xmax_infomask(
+                    xmax,
+                    old_infomask,
+                    mytup.t_data().t_infomask2,
+                    xid,
+                    mode,
+                    false,
+                )?;
+                if pin.page().is_all_visible() {
+                    unported(
+                        "visibilitymap_clear ALL_FROZEN (heap_lock_updated_tuple_rec, \
+                         visibilitymap.c)",
+                    );
+                }
+                {
+                    let hdr = mytup.t_data_mut();
+                    hdr.set_xmax(new_xmax);
+                    hdr.t_infomask &= !HEAP_XMAX_BITS;
+                    hdr.t_infomask2 &= !HEAP_KEYS_UPDATED;
+                    hdr.t_infomask |= new_infomask;
+                    hdr.t_infomask2 |= new_infomask2;
+                }
+                bufmgr_seams::mark_buffer_dirty::call(pin.buffer())?;
+                if relation_needs_wal(relation) {
+                    let mut xlrec = [0u8; 8];
+                    xlrec[0..4].copy_from_slice(&new_xmax.to_ne_bytes());
+                    xlrec[4..6].copy_from_slice(&offnum.to_ne_bytes());
+                    xlrec[6] = compute_infobits(new_infomask, new_infomask2);
+                    xlrec[7] = 0;
+                    let recptr = xloginsert_seams::xlog_insert_record::call(
+                        RM_HEAP2_ID,
+                        XLOG_HEAP2_LOCK_UPDATED,
+                        0,
+                        &[&xlrec],
+                        &[XLogRegBuf {
+                            block_id: 0,
+                            buffer: pin.buffer(),
+                            flags: REGBUF_STANDARD,
+                            bufdata: &[],
+                        }],
+                    )?;
+                    // SAFETY: pin + exclusive lock held.
+                    let mut pm = unsafe {
+                        PageMut::from_raw(bufmgr_seams::buffer_get_page::call(pin.buffer()))
+                    };
+                    pm.set_lsn(recptr);
+                }
+            }
+
+            let hdr = mytup.t_data();
+            if (hdr.t_infomask & HEAP_XMAX_INVALID) != 0
+                || ::types_tuple::ItemPointerIndicatesMovedPartitions(&hdr.t_ctid)
+                || mytup.t_self == hdr.t_ctid
+                || hv_seam::heap_tuple_header_is_only_locked::call(hdr)?
+            {
+                done!(TM_Result::TM_Ok);
+            }
+            prior_xmax = HeapTupleHeaderGetUpdateXid(hdr)?;
+            tupid = hdr.t_ctid;
+            bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_UNLOCK)?;
+            pin.release();
+            continue 'chain;
+        }
+    }
 }
