@@ -522,6 +522,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_fmgr",
+ "types_nodes",
  "types_tuple",
 ]
 

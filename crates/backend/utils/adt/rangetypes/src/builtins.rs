@@ -71,7 +71,12 @@ fn flinfo_ri<'f>(
             None => true,
         };
         if stale {
-            *slot = Some(core::mem::ManuallyDrop::new(RangeInfo::lookup(rngtypid)?));
+            let fresh = core::mem::ManuallyDrop::new(RangeInfo::lookup(rngtypid)?);
+            if let Some(old) = slot.replace(fresh) {
+                // SAFETY: the displaced memo has no outstanding borrow (the
+                // slot borrow above is the only path in) and is never reused.
+                drop(core::mem::ManuallyDrop::into_inner(old));
+            }
         }
         // SAFETY: as above — the slot outlives the call and is not re-entered.
         Ok(unsafe { &mut *(&mut **slot.as_mut().unwrap() as *mut RangeInfo) })
@@ -520,18 +525,45 @@ pub fn fc_range_sortsupport(_f: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> 
     panic!("range_sortsupport not ported: sorts ride the cmp-proc shim on range_cmp");
 }
 
+// C simplifies only when the range arg is a non-null Const
+// (find_simplified_clause); that rewrite lane stays loud — fold.rs's result
+// plumbing is loud too. Everything else is C's NULL return.
+fn range_elem_support(fcinfo: &mut Fcinfo, range_is_left: bool, name: &str) -> PgResult<Datum> {
+    use ::types_nodes::{supportnodes::SupportRequestSimplify, NodeTag};
+    let [a] = fcinfo.args_n::<1>();
+    let p = a.value.as_usize() as *const NodeTag;
+    // SAFETY: prosupport contract — arg points at a live tag-first node.
+    if unsafe { *p } != NodeTag::T_SupportRequestSimplify {
+        return Ok(Datum::from_usize(0));
+    }
+    // SAFETY: tag checked; the planner owns the request node for the call.
+    let req = unsafe { &*(a.value.as_usize() as *const SupportRequestSimplify) };
+    let fexpr = req
+        .fcall
+        .and_then(|n| n.as_func_expr())
+        .unwrap_or_else(|| panic!("{name}: SupportRequestSimplify without a FuncExpr fcall"));
+    assert_eq!(fexpr.args.len(), 2);
+    let range_arg = fexpr.args.nth(if range_is_left { 0 } else { 1 });
+    match range_arg.as_const() {
+        Some(c) if !c.constisnull => {
+            panic!("{name}: const-range SupportRequestSimplify rewrite lane unported")
+        }
+        _ => Ok(Datum::from_usize(0)),
+    }
+}
+
 pub fn fc_range_contains_elem_support(
     _f: Option<&mut FmgrInfo>,
-    _fcinfo: &mut Fcinfo,
+    fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
-    panic!("range_contains_elem_support not ported (planner SupportRequestSimplify lane)");
+    range_elem_support(fcinfo, true, "range_contains_elem_support")
 }
 
 pub fn fc_elem_contained_by_range_support(
     _f: Option<&mut FmgrInfo>,
-    _fcinfo: &mut Fcinfo,
+    fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
-    panic!("elem_contained_by_range_support not ported (planner SupportRequestSimplify lane)");
+    range_elem_support(fcinfo, false, "elem_contained_by_range_support")
 }
 
 const fn b(foid: Oid, name: &'static str, nargs: i16, strict: bool, func: PGFunction) -> FmgrBuiltin {
