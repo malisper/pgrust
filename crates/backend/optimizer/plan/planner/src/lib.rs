@@ -9,6 +9,7 @@ pub mod cluster;
 pub mod extended_stats;
 pub mod costsize;
 pub mod createplan;
+pub mod equivclass;
 pub mod grouping;
 pub mod groupingsets;
 pub mod indxpath;

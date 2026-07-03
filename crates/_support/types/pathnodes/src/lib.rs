@@ -212,7 +212,7 @@ pub enum JoinlistNode<'mcx> {
     Sub(PgVec<'mcx, JoinlistNode<'mcx>>),
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct ECDerivesKey {
     pub em1: Option<EmId>,
     pub em2: Option<EmId>,
@@ -1068,7 +1068,7 @@ pub struct EquivalenceClass<'mcx> {
     pub ec_childmembers: PgVec<'mcx, PgVec<'mcx, EmId>>,
     pub ec_sources: PgVec<'mcx, RinfoId>,
     pub ec_derives_list: PgVec<'mcx, RinfoId>,
-    pub ec_derives_hash: Option<PgBox<'mcx, DerivesHash<'mcx>>>,
+    pub ec_derives_hash: Option<mcx::PgFxHashMap<'mcx, ECDerivesKey, RinfoId>>,
     pub ec_relids: Relids<'mcx>,
     pub ec_has_const: bool,
     pub ec_has_volatile: bool,
@@ -1109,7 +1109,8 @@ pub struct EquivalenceMember<'mcx> {
     pub em_is_const: bool,
     pub em_is_child: bool,
     pub em_datatype: Oid,
-    pub em_jdomain: Option<PgBox<'mcx, JoinDomain<'mcx>>>,
+    /// Index into PlannerInfo.join_domains; C's pointer identity.
+    pub em_jdomain: usize,
     pub em_parent: Option<EmId>,
 }
 

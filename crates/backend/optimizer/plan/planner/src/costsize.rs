@@ -495,9 +495,8 @@ pub(crate) fn expression_returns_set_rows(clause: Node<'_>) -> PgResult<f64> {
     Ok(1.0)
 }
 
-// cost_index (costsize.c); nestloop loop_count and partial paths are loud.
+// cost_index (costsize.c); partial paths are loud.
 pub fn cost_index(run: &mut PlannerRun<'_>, path_id: types_pathnodes::PathId, loop_count: f64) -> PgResult<()> {
-    assert!(loop_count == 1.0, "cost_index (costsize.c): loop_count > 1; M2 join lane");
 
     let (baserel_id, indexonly, index_total_pages, indrestrictinfo) = {
         let PathNode::IndexPath(ip) = run.root.path(path_id) else {
@@ -515,38 +514,50 @@ pub fn cost_index(run: &mut PlannerRun<'_>, path_id: types_pathnodes::PathId, lo
         let baserel = run.root.rel(baserel_id);
         debug_assert!(baserel.relid > 0 && baserel.rtekind == RTE_RELATION);
     }
-    assert!(
-        run.root.path(path_id).base().param_info.is_none(),
-        "cost_index (costsize.c): parameterized path; M2 join lane"
-    );
 
     let mut startup_cost = 0.0;
     let mut run_cost = 0.0;
     let mut cpu_run_cost = 0.0;
 
     // qpquals: restrictions not redundant with the index clauses.
-    let indexclause_rinfos: mcx::PgVec<'_, (RinfoId, bool)> = {
+    let indexclause_rinfos: mcx::PgVec<'_, (RinfoId, bool, Option<types_pathnodes::EcId>)> = {
         let PathNode::IndexPath(ip) = run.root.path(path_id) else { unreachable!() };
         let mut v = mcx::PgVec::new_in(run.mcx);
         for ic in ip.indexclauses.iter() {
-            v.push((ic.rinfo.expect("IndexClause rinfo"), ic.lossy));
+            let rid = ic.rinfo.expect("IndexClause rinfo");
+            v.push((rid, ic.lossy, run.root.rinfo(rid).parent_ec));
         }
         v
     };
+    // extract_nonindex_conditions over indrestrictinfo, plus ppi_clauses for
+    // a parameterized path.
+    let mut cond_sources: mcx::PgVec<'_, RinfoId> = mcx::PgVec::new_in(run.mcx);
+    cond_sources.extend(indrestrictinfo.iter().copied());
+    let new_rows = if let Some(ppi) = run.root.path(path_id).base().param_info.as_deref() {
+        cond_sources.extend(ppi.ppi_clauses.iter().copied());
+        ppi.ppi_rows
+    } else {
+        run.root.rel(baserel_id).rows
+    };
     let mut qpquals: mcx::PgVec<'_, RinfoId> = mcx::PgVec::new_in(run.mcx);
-    for &rid in indrestrictinfo.iter() {
+    for &rid in cond_sources.iter() {
         if run.root.rinfo(rid).pseudoconstant {
             continue;
         }
-        // is_redundant_with_indexclauses: no EC parents, so rinfo identity;
-        // a lossy indexclause does not enforce the condition exactly.
-        if indexclause_rinfos.iter().any(|&(c, lossy)| c == rid && !lossy) {
+        if indexclause_rinfos
+            .iter()
+            .any(|&(c, lossy, parent_ec)| {
+                !lossy
+                    && (c == rid
+                        || (parent_ec.is_some()
+                            && run.root.rinfo(rid).parent_ec == parent_ec))
+            })
+        {
             continue;
         }
         qpquals.push(rid);
     }
 
-    let new_rows = run.root.rel(baserel_id).rows;
     run.root.path_mut(path_id).base_mut().rows = new_rows;
     run.root.path_mut(path_id).base_mut().disabled_nodes =
         if gucs::enable_indexscan() { 0 } else { 1 };
@@ -566,25 +577,54 @@ pub fn cost_index(run: &mut PlannerRun<'_>, path_id: types_pathnodes::PathId, lo
     let tuples_fetched = clamp_row_est(am.index_selectivity * baserel_tuples);
     let (spc_random_page_cost, spc_seq_page_cost) = get_tablespace_page_costs(reltablespace);
 
-    let mut pages_fetched =
-        index_pages_fetched(run, tuples_fetched, baserel_pages, index_total_pages as f64);
-    if indexonly {
-        pages_fetched = (pages_fetched * (1.0 - baserel_allvisfrac)).ceil();
-    }
-    let max_io_cost = pages_fetched * spc_random_page_cost;
-
-    pages_fetched = (am.index_selectivity * baserel_pages as f64).ceil();
-    if indexonly {
-        pages_fetched = (pages_fetched * (1.0 - baserel_allvisfrac)).ceil();
-    }
-    let min_io_cost = if pages_fetched > 0.0 {
-        let mut m = spc_random_page_cost;
-        if pages_fetched > 1.0 {
-            m += (pages_fetched - 1.0) * spc_seq_page_cost;
+    let (max_io_cost, min_io_cost) = if loop_count > 1.0 {
+        // Repeated scans: scale tuples by the scan count in the Mackert and
+        // Lohman formula, then pro-rate per scan; all fetches random.
+        let mut pages_fetched = index_pages_fetched(
+            run,
+            tuples_fetched * loop_count,
+            baserel_pages,
+            index_total_pages as f64,
+        );
+        if indexonly {
+            pages_fetched = (pages_fetched * (1.0 - baserel_allvisfrac)).ceil();
         }
-        m
+        let max_io_cost = (pages_fetched * spc_random_page_cost) / loop_count;
+
+        let mut pages_fetched = (am.index_selectivity * baserel_pages as f64).ceil();
+        pages_fetched = index_pages_fetched(
+            run,
+            pages_fetched * loop_count,
+            baserel_pages,
+            index_total_pages as f64,
+        );
+        if indexonly {
+            pages_fetched = (pages_fetched * (1.0 - baserel_allvisfrac)).ceil();
+        }
+        let min_io_cost = (pages_fetched * spc_random_page_cost) / loop_count;
+        (max_io_cost, min_io_cost)
     } else {
-        0.0
+        let mut pages_fetched =
+            index_pages_fetched(run, tuples_fetched, baserel_pages, index_total_pages as f64);
+        if indexonly {
+            pages_fetched = (pages_fetched * (1.0 - baserel_allvisfrac)).ceil();
+        }
+        let max_io_cost = pages_fetched * spc_random_page_cost;
+
+        pages_fetched = (am.index_selectivity * baserel_pages as f64).ceil();
+        if indexonly {
+            pages_fetched = (pages_fetched * (1.0 - baserel_allvisfrac)).ceil();
+        }
+        let min_io_cost = if pages_fetched > 0.0 {
+            let mut m = spc_random_page_cost;
+            if pages_fetched > 1.0 {
+                m += (pages_fetched - 1.0) * spc_seq_page_cost;
+            }
+            m
+        } else {
+            0.0
+        };
+        (max_io_cost, min_io_cost)
     };
 
     let csquared = am.index_correlation * am.index_correlation;
