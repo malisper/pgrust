@@ -15,7 +15,7 @@ use crate::parsenodes::{
     WithClause,
 };
 use crate::primnodes::{
-    GroupingFunc,
+    GroupingFunc, RowExpr,
     Aggref, Alias, BoolExpr, CoerceViaIO, Const, FromExpr, FuncExpr, NullTest, OpExpr, Param,
     RangeTblRef, RangeVar, RelabelType, TargetEntry, Var, WindowFunc,
 };
@@ -53,6 +53,7 @@ pub fn equal(a: Node<'_>, b: Node<'_>) -> bool {
         NodeTag::T_GroupingFunc => cmp!(as_grouping_func),
         NodeTag::T_WindowFunc => cmp!(as_window_func),
         NodeTag::T_GroupingSet => cmp!(as_grouping_set),
+        NodeTag::T_RowExpr => cmp!(as_row_expr),
         NodeTag::T_FuncExpr => cmp!(as_func_expr),
         NodeTag::T_OpExpr => cmp!(as_op_expr),
         NodeTag::T_BoolExpr => cmp!(as_bool_expr),
@@ -317,6 +318,15 @@ impl NodeEqual for GroupingFunc<'_> {
 impl NodeEqual for GroupingSet<'_> {
     fn node_equal(&self, b: &Self) -> bool {
         self.kind == b.kind && self.content.node_equal(&b.content)
+    }
+}
+
+// C: row_format is a CoercionForm field (never compared).
+impl NodeEqual for RowExpr<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.args.node_equal(&b.args)
+            && self.row_typeid == b.row_typeid
+            && self.colnames.node_equal(&b.colnames)
     }
 }
 

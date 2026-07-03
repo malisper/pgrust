@@ -179,6 +179,14 @@ fn node(out: &mut String, n: Node<'_>) {
         list_field(out, "useOp", &sb.useOp);
         int_field(out, "location", sb.location);
         out.push('}');
+    } else if let Some(r) = n.as_row_expr() {
+        out.push_str("{ROWEXPR");
+        list_field(out, "args", &r.args);
+        int_field(out, "row_typeid", r.row_typeid as i32);
+        int_field(out, "row_format", r.row_format as i32);
+        list_field(out, "colnames", &r.colnames);
+        int_field(out, "location", r.location);
+        out.push('}');
     } else if let Some(gs) = n.as_grouping_set() {
         out.push_str("{GROUPINGSET");
         int_field(out, "kind", gs.kind as i32);

@@ -258,6 +258,26 @@ impl Default for Aggref<'_> {
     }
 }
 
+pub struct RowExpr<'mcx> {
+    pub args: NodeList<'mcx>,
+    pub row_typeid: Oid,
+    pub row_format: CoercionForm,
+    pub colnames: NodeList<'mcx>,
+    pub location: ParseLoc,
+}
+
+impl Default for RowExpr<'_> {
+    fn default() -> Self {
+        RowExpr {
+            args: NodeList::nil(),
+            row_typeid: 0,
+            row_format: CoercionForm::COERCE_EXPLICIT_CALL,
+            colnames: NodeList::nil(),
+            location: -1,
+        }
+    }
+}
+
 pub struct GroupingFunc<'mcx> {
     pub args: NodeList<'mcx>,
     pub refs: crate::list::IntList<'mcx>,
@@ -515,6 +535,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for Aggref<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for GroupingFunc<'mcx> {
     const TAG: NodeTag = NodeTag::T_GroupingFunc;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for RowExpr<'mcx> {
+    const TAG: NodeTag = NodeTag::T_RowExpr;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for WindowFunc<'mcx> {
     const TAG: NodeTag = NodeTag::T_WindowFunc;
 }
@@ -702,6 +725,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_grouping_func(self) -> Option<&'mcx GroupingFunc<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_row_expr(self) -> Option<&'mcx RowExpr<'mcx>> {
         self.as_variant()
     }
 

@@ -712,9 +712,37 @@ fn findTargetlistEntrySQL92<'mcx>(
     findTargetlistEntrySQL99(mcx, pstate, node, tlist, expr_kind)
 }
 
-// C findTargetlistEntrySQL99, Var-equality leg: the transformed expression
-// matches an existing tlist Var or lands as a resjunk entry; non-Var equal()
-// matching (equalfuncs.c) is loud.
+// C strip_implicit_coercions (nodeFuncs.c) over the ported coercion families.
+fn strip_implicit_coercions(node: Node<'_>) -> Node<'_> {
+    use types_nodes::primnodes::CoercionForm;
+    match node.node_tag() {
+        NodeTag::T_FuncExpr => {
+            let f = node.as_func_expr().unwrap();
+            if f.funcformat == CoercionForm::COERCE_IMPLICIT_CAST {
+                return strip_implicit_coercions(f.args.nth(0));
+            }
+            node
+        }
+        NodeTag::T_RelabelType => {
+            let r = node.as_relabel_type().unwrap();
+            if r.relabelformat == CoercionForm::COERCE_IMPLICIT_CAST {
+                return strip_implicit_coercions(r.arg);
+            }
+            node
+        }
+        NodeTag::T_CoerceViaIO => {
+            let c = node.as_coerce_via_io().unwrap();
+            if c.coerceformat == CoercionForm::COERCE_IMPLICIT_CAST {
+                return strip_implicit_coercions(c.arg);
+            }
+            node
+        }
+        _ => node,
+    }
+}
+
+// C findTargetlistEntrySQL99: equal() match against implicit-coercion-
+// stripped tlist exprs, else a resjunk entry.
 fn findTargetlistEntrySQL99<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'_, 'mcx>,
@@ -723,22 +751,11 @@ fn findTargetlistEntrySQL99<'mcx>(
     expr_kind: ParseExprKind,
 ) -> PgResult<Node<'mcx>> {
     let expr = transformExpr(mcx, pstate, node, expr_kind)?;
-    let Some(evar) = expr.as_var() else {
-        panic!(
-            "findTargetlistEntrySQL99 (parse_clause.c): non-Var expression needs equal() \
-             (equalfuncs.c) — unit backend-parser-clause"
-        );
-    };
     for tle_node in &*tlist {
         let tle = tle_node.as_target_entry().expect("tlist holds TargetEntry");
-        if let Some(tvar) = tle.expr.as_var() {
-            if tvar.varno == evar.varno
-                && tvar.varattno == evar.varattno
-                && tvar.varlevelsup == evar.varlevelsup
-                && tvar.vartype == evar.vartype
-            {
-                return Ok(tle_node);
-            }
+        let texpr = strip_implicit_coercions(tle.expr);
+        if types_nodes::equal::equal(expr, texpr) {
+            return Ok(tle_node);
         }
     }
     // transformTargetEntry (parse_target.c) resjunk arm.
@@ -986,10 +1003,15 @@ fn flatten_grouping_sets<'mcx>(
     has_grouping_sets: Option<&mut bool>,
 ) -> PgResult<Flattened<'mcx>> {
     match expr.node_tag() {
-        NodeTag::T_RowExpr => panic!(
-            "flatten_grouping_sets (parse_clause.c): implicit RowExpr arm unported — \
-             unit backend-parser-clause"
-        ),
+        NodeTag::T_RowExpr => {
+            let r = expr.as_row_expr().unwrap();
+            if r.row_format == CoercionForm::COERCE_IMPLICIT_CAST {
+                return Ok(Flattened::Many(flatten_grouping_sets_list(
+                    mcx, &r.args, false, None,
+                )?));
+            }
+            Ok(Flattened::One(expr))
+        }
         NodeTag::T_GroupingSet => {
             let gset = expr.as_grouping_set().unwrap();
             if let Some(flag) = has_grouping_sets {
@@ -1015,10 +1037,12 @@ fn flatten_grouping_sets<'mcx>(
                 } else {
                     match n2 {
                         Flattened::One(node) => result_set.lappend(mcx, node)?,
-                        // A `List *` cell only arises from the RowExpr arm,
-                        // loud above; Nil is never appended by the C walk.
-                        Flattened::Nil | Flattened::Many(_) => unreachable!(
-                            "flatten_grouping_sets: non-node cell in a grouping list"
+                        // C lappends the RowExpr arm's List* as one cell.
+                        Flattened::Many(nodes) => {
+                            result_set.lappend(mcx, Node::mk_list(mcx, nodes)?)?
+                        }
+                        Flattened::Nil => unreachable!(
+                            "flatten_grouping_sets: NIL cell in a grouping list"
                         ),
                     }
                 }

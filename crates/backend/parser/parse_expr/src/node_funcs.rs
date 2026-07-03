@@ -227,6 +227,10 @@ pub fn expr_location(node: Node<'_>) -> ParseLoc {
             leftmost_loc(a.location, a.lexpr.map_or(-1, expr_location))
         }
         NodeTag::T_ColumnRef => node.as_column_ref().unwrap().location,
+        NodeTag::T_FuncCall => {
+            let f = node.as_func_call().unwrap();
+            leftmost_loc(f.location, expr_location_list(&f.args))
+        }
         NodeTag::T_ParamRef => node.as_param_ref().unwrap().location,
         NodeTag::T_ResTarget => node.as_res_target().unwrap().location,
         NodeTag::T_SubLink => node.as_sub_link().unwrap().location,

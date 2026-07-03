@@ -239,8 +239,8 @@ pub fn exec_init_agg<'mcx>(
     // numaggs == 0 is C's hashed-DISTINCT shape.
     let numaggs = aggrefs.iter().map(|a| a.aggno + 1).max().unwrap_or(0) as usize;
     assert!(
-        numaggs > 0 || node.aggstrategy == AGG_HASHED,
-        "ExecInitAgg: Agg node without Aggrefs outside AGG_HASHED"
+        numaggs > 0 || node.aggstrategy == AGG_HASHED || has_grouping_sets,
+        "ExecInitAgg: Agg node without Aggrefs outside AGG_HASHED/grouping sets"
     );
 
     let mut by_aggno: PgVec<'mcx, Option<&'mcx Aggref<'mcx>>> =

@@ -416,6 +416,7 @@ pub fn expr_typmod(node: Node<'_>) -> i32 {
         }
         NodeTag::T_OpExpr => -1,
         NodeTag::T_Aggref => -1,
+        NodeTag::T_GroupingFunc => -1,
         NodeTag::T_WindowFunc => -1,
         NodeTag::T_SubLink => -1,
         NodeTag::T_SubPlan => {
@@ -486,6 +487,7 @@ pub fn expr_collation(node: Node<'_>) -> Oid {
         NodeTag::T_FuncExpr => node.as_func_expr().unwrap().funccollid,
         NodeTag::T_OpExpr => node.as_op_expr().unwrap().opcollid,
         NodeTag::T_Aggref => node.as_aggref().unwrap().aggcollid,
+        NodeTag::T_GroupingFunc => 0,
         NodeTag::T_WindowFunc => node.as_window_func().unwrap().wincollid,
         NodeTag::T_SubPlan => {
             use types_nodes::primnodes::SubLinkType;
