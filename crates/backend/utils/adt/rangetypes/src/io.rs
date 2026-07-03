@@ -414,9 +414,8 @@ pub fn range_recv<'m>(
             return Ok(Datum::from_usize(0));
         }
         let bound_len = ::pqformat::pq_getmsgint(buf, 4)? as usize;
-        let bound_data = ::pqformat::pq_getmsgbytes(buf, bound_len)?.to_vec();
         let mut bound_buf = ::stringinfo::StringInfo::with_capacity_in(mcx, bound_len)?;
-        bound_buf.append_bytes(&bound_data)?;
+        bound_buf.append_bytes(::pqformat::pq_getmsgbytes(buf, bound_len)?)?;
         receive_function_call(
             &mut cache.typioproc,
             Some(&mut bound_buf),

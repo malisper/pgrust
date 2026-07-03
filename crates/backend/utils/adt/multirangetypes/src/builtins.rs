@@ -46,7 +46,12 @@ fn flinfo_mi<'f>(
             None => true,
         };
         if stale {
-            *slot = Some(core::mem::ManuallyDrop::new(MultirangeInfo::lookup(mltrngtypid)?));
+            let fresh = core::mem::ManuallyDrop::new(MultirangeInfo::lookup(mltrngtypid)?);
+            if let Some(old) = slot.replace(fresh) {
+                // SAFETY: the displaced memo has no outstanding borrow (the
+                // slot borrow above is the only path in) and is never reused.
+                drop(core::mem::ManuallyDrop::into_inner(old));
+            }
         }
         // SAFETY: as above.
         Ok(unsafe { &mut *(&mut **slot.as_mut().unwrap() as *mut MultirangeInfo) })
