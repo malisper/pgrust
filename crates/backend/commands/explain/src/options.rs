@@ -33,7 +33,7 @@ pub fn defGetString<'r, 'mcx: 'r, 'a: 'r>(
         NodeTag::T_String => Ok(arg.as_string().unwrap().sval),
         NodeTag::T_TypeName => {
             let tn = arg.as_type_name().expect("TypeName");
-            if tn.names.is_empty() {
+            if tn.names.is_nil() {
                 panic!("defGetString (define.c): precooked TypeName needs format_type_be");
             }
             let mut s = PgString::new_in(mcx);
