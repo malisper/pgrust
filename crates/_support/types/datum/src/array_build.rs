@@ -100,6 +100,20 @@ unsafe fn cstring_len(p: *const u8) -> usize {
     n
 }
 
+// buildint2vector/buildoidvector (int.c/oid.c): fixed-len by-val elements,
+// lbound 0 (the int2vector/oidvector on-disk shape; arrays use lbound 1).
+pub fn construct_vector_image<'mcx>(
+    mcx: Mcx<'mcx>,
+    values: &[Datum],
+    elmtype: Oid,
+    elmlen: i16,
+    elmalign: u8,
+) -> PgResult<PgVec<'mcx, u8>> {
+    let mut out = construct_array_image(mcx, values, elmtype, elmlen, true, elmalign)?;
+    out[20..24].copy_from_slice(&0i32.to_ne_bytes());
+    Ok(out)
+}
+
 // construct_array (arrayfuncs.c) restricted to 1-D no-nulls; short varlena
 // inputs are canonicalized to 4-byte headers so element alignment holds.
 pub fn construct_array_image<'mcx>(

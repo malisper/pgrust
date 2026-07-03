@@ -327,6 +327,8 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
             b"COERCEVIAIO" => self.read_coerce_via_io(),
             b"COERCETODOMAIN" => self.read_coerce_to_domain(),
             b"COERCETODOMAINVALUE" => self.read_coerce_to_domain_value(),
+            b"PARTITIONBOUNDSPEC" => self.read_partition_bound_spec(),
+            b"PARTITIONRANGEDATUM" => self.read_partition_range_datum(),
             other => panic!(
                 "parseNodeString (readfuncs.c): {} read arm unported (view SELECT-rule + \
                  DEFAULT/CHECK expr sets only)",
@@ -536,6 +538,34 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
                 location,
             },
         )
+    }
+
+    fn read_partition_bound_spec(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let mut b = Node::build::<types_nodes::rawnodes::PartitionBoundSpec>(mcx)?;
+        b.strategy = self.read_char("strategy");
+        b.is_default = self.read_bool("is_default");
+        b.modulus = self.read_i32("modulus");
+        b.remainder = self.read_i32("remainder");
+        b.listdatums = self.read_node_list("listdatums")?;
+        b.lowerdatums = self.read_node_list("lowerdatums")?;
+        b.upperdatums = self.read_node_list("upperdatums")?;
+        b.location = self.read_location("location");
+        Ok(b.seal())
+    }
+
+    fn read_partition_range_datum(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let mut d = Node::build::<types_nodes::rawnodes::PartitionRangeDatum>(mcx)?;
+        d.kind = match self.read_i32("kind") {
+            -1 => types_nodes::rawnodes::PartitionRangeDatumKind::Minvalue,
+            0 => types_nodes::rawnodes::PartitionRangeDatumKind::Value,
+            1 => types_nodes::rawnodes::PartitionRangeDatumKind::Maxvalue,
+            k => panic!("_readPartitionRangeDatum: bad kind {k}"),
+        };
+        d.value = self.read_node("value")?;
+        d.location = self.read_location("location");
+        Ok(d.seal())
     }
 
     fn read_op_expr(&mut self) -> PgResult<Node<'mcx>> {

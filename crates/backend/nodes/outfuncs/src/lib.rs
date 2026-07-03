@@ -16,6 +16,7 @@ use types_nodes::primnodes::{
     BoolExpr, BoolExprType, CoerceToDomain, CoerceToDomainValue, CoerceViaIO, Const, FuncExpr,
     OpExpr, RelabelType, Var,
 };
+use types_nodes::rawnodes::{PartitionBoundSpec, PartitionRangeDatum};
 use types_nodes::{Node, NodeTag};
 
 pub fn nodeToString<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>) -> PgResult<PgString<'mcx>> {
@@ -59,6 +60,14 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
                 v.typeId, v.typeMod, v.collation
             );
         }
+        NodeTag::T_PartitionBoundSpec => out_partition_bound_spec(
+            out,
+            node.as_variant::<PartitionBoundSpec>().expect("PartitionBoundSpec"),
+        )?,
+        NodeTag::T_PartitionRangeDatum => out_partition_range_datum(
+            out,
+            node.as_variant::<PartitionRangeDatum>().expect("PartitionRangeDatum"),
+        )?,
         other => panic!(
             "outNode (outfuncs.c): {other:?} write arm unported (DEFAULT/CHECK expr set only)"
         ),
@@ -225,6 +234,41 @@ fn out_coerce_to_domain(out: &mut PgString<'_>, c: &CoerceToDomain<'_>) -> PgRes
         " :resulttype {} :resulttypmod {} :resultcollid {} :coercionformat {} :location -1}}",
         c.resulttype, c.resulttypmod, c.resultcollid, c.coercionformat as u32
     );
+    Ok(())
+}
+
+fn out_partition_bound_spec(
+    out: &mut PgString<'_>,
+    b: &PartitionBoundSpec<'_>,
+) -> PgResult<()> {
+    w!(out, "{{PARTITIONBOUNDSPEC :strategy ");
+    if b.strategy == 0 {
+        w!(out, "<>");
+    } else {
+        w!(out, "{}", b.strategy as char);
+    }
+    w!(out, " :is_default ");
+    out_bool(out, b.is_default);
+    w!(out, " :modulus {} :remainder {} :listdatums ", b.modulus, b.remainder);
+    out_list(out, &b.listdatums)?;
+    w!(out, " :lowerdatums ");
+    out_list(out, &b.lowerdatums)?;
+    w!(out, " :upperdatums ");
+    out_list(out, &b.upperdatums)?;
+    w!(out, " :location -1}}");
+    Ok(())
+}
+
+fn out_partition_range_datum(
+    out: &mut PgString<'_>,
+    d: &PartitionRangeDatum<'_>,
+) -> PgResult<()> {
+    w!(out, "{{PARTITIONRANGEDATUM :kind {} :value ", d.kind as i32);
+    match d.value {
+        Some(v) => out_node(out, v)?,
+        None => w!(out, "<>"),
+    }
+    w!(out, " :location -1}}");
     Ok(())
 }
 

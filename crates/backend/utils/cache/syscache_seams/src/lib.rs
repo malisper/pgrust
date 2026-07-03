@@ -230,6 +230,7 @@ pub struct PgClassLsShape {
     pub relkind: i8,
     pub relpersistence: i8,
     pub relispartition: bool,
+    pub relhassubclass: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

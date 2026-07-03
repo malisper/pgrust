@@ -1217,10 +1217,12 @@ dependencies = [
  "heaptuple",
  "indexam",
  "init_small",
+ "inval",
  "lmgr",
  "lsyscache",
  "mcx",
  "miscinit_seams",
+ "outfuncs",
  "pg_constraint",
  "pg_depend",
  "pg_type",
@@ -1233,9 +1235,11 @@ dependencies = [
  "tablecmds_seams",
  "types_core",
  "types_error",
+ "types_nodes",
  "types_rel",
  "types_scan",
  "types_tuple",
+ "varlena",
  "xact",
 ]
 
@@ -2673,6 +2677,26 @@ dependencies = [
  "types_scan",
  "types_snapshot",
  "types_tuple",
+]
+
+[[package]]
+name = "execpartition"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "exectuples",
+ "fmgr_core",
+ "lsyscache",
+ "mcx",
+ "partbounds",
+ "partcache",
+ "partdesc",
+ "table",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_rel",
+ "types_slot",
 ]
 
 [[package]]
@@ -5025,6 +5049,7 @@ dependencies = [
  "execindexing",
  "execmain",
  "execmain_seams",
+ "execpartition",
  "execscan",
  "exectuples",
  "executils",
@@ -5700,6 +5725,54 @@ dependencies = [
 ]
 
 [[package]]
+name = "partbounds"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "lsyscache",
+ "mcx",
+ "partcache",
+ "types_core",
+ "types_error",
+ "types_nodes",
+]
+
+[[package]]
+name = "partcache"
+version = "0.1.0"
+dependencies = [
+ "cache_syscache",
+ "datum",
+ "fmgr_seams",
+ "inval",
+ "lsyscache",
+ "mcx",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_rel",
+]
+
+[[package]]
+name = "partdesc"
+version = "0.1.0"
+dependencies = [
+ "cache_syscache",
+ "datum",
+ "inval",
+ "lsyscache",
+ "mcx",
+ "partbounds",
+ "partcache",
+ "pg_inherits",
+ "readfuncs",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_rel",
+]
+
+[[package]]
 name = "pg_attrdef"
 version = "0.1.0"
 dependencies = [
@@ -5864,6 +5937,25 @@ name = "pg_ffi_fgram"
 version = "0.0.0"
 dependencies = [
  "types_core",
+]
+
+[[package]]
+name = "pg_inherits"
+version = "0.1.0"
+dependencies = [
+ "catalog_indexing",
+ "datum",
+ "fmgr_seams",
+ "genam",
+ "heaptuple",
+ "lsyscache",
+ "mcx",
+ "table",
+ "types_core",
+ "types_error",
+ "types_rel",
+ "types_scan",
+ "types_tuple",
 ]
 
 [[package]]
@@ -8780,6 +8872,7 @@ dependencies = [
  "genam",
  "heapam",
  "heaptuple",
+ "indexcmds_seams",
  "init_small",
  "inval",
  "lmgr",
@@ -8795,9 +8888,13 @@ dependencies = [
  "parse_relation",
  "parse_utilcmd",
  "parser_small1",
+ "partbounds",
+ "partcache",
+ "partdesc",
  "pg_attrdef",
  "pg_constraint",
  "pg_depend",
+ "pg_inherits",
  "pg_type",
  "pgstat",
  "predicate_seams",
