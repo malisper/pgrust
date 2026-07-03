@@ -392,11 +392,11 @@ fn checkclass_str<'mcx>(
     }
 }
 
-pub fn ts_match_vq_core(mcx: Mcx<'_>, v: TsVec<'_>, q: TsQueryRef<'_>) -> PgResult<bool> {
+pub fn ts_match_vq_core<'mcx>(mcx: Mcx<'mcx>, v: TsVec<'_>, q: TsQueryRef<'_>) -> PgResult<bool> {
     if q.size() == 0 {
         return Ok(false);
     }
-    let mut chk = |val: &Operand, data: Option<&mut ExecPhraseData<'_>>| {
+    let mut chk = |val: &Operand, data: Option<&mut ExecPhraseData<'mcx>>| {
         Ok(checkcondition_str(mcx, v, q, val, data))
     };
     crate::execute::ts_execute(mcx, q, crate::execute::TS_EXEC_EMPTY, &mut chk)
