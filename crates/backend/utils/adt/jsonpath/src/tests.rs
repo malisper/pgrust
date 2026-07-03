@@ -97,7 +97,9 @@ static EXTRA_ERR: &[(&str, &str)] = &[
     ("$?(1)", "syntax error at or near \")\" of jsonpath input"),
     ("exists(1 == 2)", "syntax error at or near \"==\" of jsonpath input"),
     ("!(1)", "syntax error at or near \")\" of jsonpath input"),
-    ("(1) is unknown", "syntax error at or near \"is\" of jsonpath input"),
+    // yytext for a keyword token emitted by the xnq {blank}+ rule is the
+    // blank run (flex), hence " " not "is".
+    ("(1) is unknown", "syntax error at or near \" \" of jsonpath input"),
     ("$[1 == 1]", "syntax error at or near \"==\" of jsonpath input"),
     ("(1 == 1) + 2", "syntax error at or near \"+\" of jsonpath input"),
     ("exists($.a) + 1", "syntax error at or near \"+\" of jsonpath input"),
