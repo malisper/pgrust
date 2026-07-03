@@ -146,16 +146,25 @@ fn cost_qual_eval_walker(node: Node<'_>, cost: &mut QualCost) -> PgResult<()> {
             } else {
                 sa.opfuncid
             };
-            if sa.hashfuncid != 0 {
-                panic!("cost_qual_eval_walker (costsize.c): hashed SAOP; M2 lane");
-            }
             let arraynode = sa.args.nth(1);
             let mut sacosts = QualCost { startup: 0.0, per_tuple: 0.0 };
             planner_seams::add_function_cost::call(opfuncid, &mut sacosts)?;
-            // C: the operator runs against about half the array elements.
-            cost.startup += sacosts.startup;
-            cost.per_tuple +=
-                sacosts.per_tuple * planner_seams::estimate_array_length::call(arraynode) * 0.5;
+            if sa.hashfuncid != 0 {
+                // Hashed SAOP: build the table at startup, then one hash +
+                // one comparison per tuple.
+                let mut hcosts = QualCost { startup: 0.0, per_tuple: 0.0 };
+                planner_seams::add_function_cost::call(sa.hashfuncid, &mut hcosts)?;
+                cost.startup += sacosts.startup + hcosts.startup;
+                cost.startup +=
+                    planner_seams::estimate_array_length::call(arraynode) * hcosts.per_tuple;
+                cost.per_tuple += hcosts.per_tuple + sacosts.per_tuple;
+            } else {
+                // C: the operator runs against about half the array elements.
+                cost.startup += sacosts.startup;
+                cost.per_tuple += sacosts.per_tuple
+                    * planner_seams::estimate_array_length::call(arraynode)
+                    * 0.5;
+            }
             for arg in sa.args.iter() {
                 cost_qual_eval_walker(arg, cost)?;
             }
