@@ -11,9 +11,10 @@ use types_nodes::parsenodes::{
     CURSOR_OPT_INSENSITIVE, CURSOR_OPT_NO_SCROLL, CURSOR_OPT_SCROLL, FETCH_ALL,
 };
 use types_nodes::primnodes::{
-    CaseExpr, CaseWhen, CoalesceExpr, GroupingFunc, JoinExpr, MinMaxExpr, MinMaxOp,
+    CaseExpr, CaseWhen, CoalesceExpr, GroupingFunc, JoinExpr, MinMaxExpr, MinMaxOp, RowExpr,
     SQLValueFunction, SQLValueFunctionOp,
 };
+
 use types_nodes::JoinType;
 use types_nodes::rawnodes::A_Expr_Kind::AEXPR_OP;
 use types_nodes::rawnodes::{
@@ -852,6 +853,25 @@ impl<'mcx> Parser<'mcx> {
                     view.v(4).list(),
                     view.l(1),
                 )?));
+            }
+            // implicit_row -> RowExpr (COERCE_IMPLICIT_CAST "abuse").
+            2124 => {
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    RowExpr {
+                        args: view.v(1).list(),
+                        row_format: CoercionForm::COERCE_IMPLICIT_CAST,
+                        location: view.l(1),
+                        ..Default::default()
+                    },
+                )?));
+            }
+            // implicit_row: '(' expr_list ',' a_expr ')'.
+            2262 => {
+                let mut list = view.v(2).list();
+                let item = view.v(4).node().expect("a_expr");
+                list.lappend(mcx, item)?;
+                *yyval = YYSTYPE::List(list);
             }
             // GROUPING '(' expr_list ')' -> GroupingFunc.
             2125 => {
