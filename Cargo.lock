@@ -2164,6 +2164,7 @@ dependencies = [
  "exectuples",
  "executils",
  "freespace_seams",
+ "genam_seams",
  "heapam",
  "heapam_visibility",
  "heapam_visibility_seams",
@@ -2647,15 +2648,18 @@ dependencies = [
 name = "genam"
 version = "0.1.0"
 dependencies = [
+ "aclchk_seams",
  "bufmgr_seams",
  "datum",
  "elog",
  "exectuples",
+ "fmgr_core",
  "genam_seams",
  "heapam",
  "heaptuple",
  "indexam",
  "init_small",
+ "lsyscache",
  "mcx",
  "miscinit",
  "postgres_seams",
@@ -2669,6 +2673,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_nbtree",
+ "types_nodes",
  "types_rel",
  "types_scan",
  "types_slot",
@@ -2681,6 +2686,7 @@ dependencies = [
 name = "genam_seams"
 version = "0.0.0"
 dependencies = [
+ "datum",
  "seam_core",
  "types_core",
  "types_error",
@@ -3692,6 +3698,7 @@ dependencies = [
  "lsyscache_seams",
  "mcx",
  "miscinit_seams",
+ "namespace_seams",
  "syscache_seams",
  "types_core",
  "types_error",
@@ -3954,6 +3961,7 @@ dependencies = [
  "fd",
  "fmgr_core",
  "freespace",
+ "genam_seams",
  "guc_tables",
  "heapam_visibility",
  "heaptuple",
@@ -3979,6 +3987,7 @@ dependencies = [
  "shmem",
  "smgr_seams",
  "syncrep_seams",
+ "syscache_seams",
  "tableam",
  "tidbitmap",
  "timeout_seams",

@@ -27,6 +27,16 @@ use types_tuple::HeapTupleData;
 
 pub fn init_seams() {
     genam_seams::systable_scan_catalog::set(systable_scan_catalog);
+    genam_seams::build_index_value_description::set(build_index_value_description);
+}
+
+fn build_index_value_description(
+    index_relation: &RelationData<'_>,
+    values: &[datum::Datum],
+    isnull: &[bool],
+) -> PgResult<Option<String>> {
+    let cx = MemoryContext::new("BuildIndexValueDescription");
+    BuildIndexValueDescription(cx.mcx(), index_relation, values, isnull)
 }
 
 // The per-scan context stands in for C's CurrentMemoryContext palloc of the
@@ -423,12 +433,70 @@ pub fn systable_inplace_update_cancel(
 }
 
 pub fn BuildIndexValueDescription<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _indexRelation: &Relation<'mcx>,
-    _values: &[datum::Datum],
-    _isnull: &[bool],
-) -> PgResult<Option<mcx::PgString<'mcx>>> {
-    unported("BuildIndexValueDescription (needs rls check_enable_rls, aclchk pg_class_aclcheck, ruleutils pg_get_indexdef_columns; callers are unique/exclusion ereport DETAILs)")
+    mcx: Mcx<'mcx>,
+    indexRelation: &RelationData<'_>,
+    values: &[datum::Datum],
+    isnull: &[bool],
+) -> PgResult<Option<String>> {
+    let indnkeyatts = indexRelation.indnkeyatts() as usize;
+    let idxrec = indexRelation
+        .rd_index
+        .as_ref()
+        .expect("BuildIndexValueDescription on non-index relation");
+    let indrelid = idxrec.indrelid;
+
+    // check_enable_rls (rls.c) is unported; relrowsecurity=false is its
+    // RLS_NONE outcome (a set flag hides the detail even from owners).
+    let heap = relation_seams::relation_open::call(mcx, indrelid, NoLock)?;
+    let rls_enabled = heap.rd_rel.relrowsecurity;
+    heap.close(NoLock)?;
+    if rls_enabled {
+        return Ok(None);
+    }
+
+    let user = miscinit::GetUserId();
+    let select = types_nodes::parsenodes::ACL_SELECT;
+    if aclchk_seams::pg_class_aclcheck_ext::call(indrelid, user, select)?.0 != 0 {
+        for keyno in 0..indnkeyatts {
+            let attnum = idxrec.indkey[keyno];
+            if attnum == 0
+                || aclchk_seams::pg_attribute_aclcheck::call(indrelid, attnum, user, select)? != 0
+            {
+                return Ok(None);
+            }
+        }
+    }
+
+    let tupdesc = indexRelation.descr();
+    let mut buf = String::from("(");
+    // C divergence: pg_get_indexdef_columns unported; attnames lack quoting/expr deparse.
+    for i in 0..indnkeyatts {
+        if i > 0 {
+            buf.push_str(", ");
+        }
+        buf.push_str(core::str::from_utf8(tupdesc.attr(i).attname.name_str()).expect("non-UTF-8 attname"));
+    }
+    buf.push_str(")=(");
+    for i in 0..indnkeyatts {
+        if i > 0 {
+            buf.push_str(", ");
+        }
+        if isnull[i] {
+            buf.push_str("null");
+        } else {
+            let (foutoid, _) = lsyscache::typ::getTypeOutputInfo(indexRelation.rd_opcintype[i])?;
+            let mut finfo = fmgr_core::fmgr_info(foutoid)?;
+            let out = fmgr_core::function_call1_coll_in(&mut finfo, 0, mcx, values[i])?;
+            // SAFETY: output fns return a NUL-terminated cstring datum.
+            let s = unsafe {
+                core::ffi::CStr::from_ptr(out.as_usize() as *const core::ffi::c_char)
+            }
+            .to_bytes();
+            buf.push_str(core::str::from_utf8(s).expect("type output is UTF-8"));
+        }
+    }
+    buf.push(')');
+    Ok(Some(buf))
 }
 
 pub fn index_compute_xid_horizon_for_tuples(

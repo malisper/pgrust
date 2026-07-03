@@ -1,7 +1,19 @@
+use datum::Datum;
 use types_error::PgResult;
 use types_rel::RelationData;
 use types_scan::scankey::ScanKeyData;
 use types_tuple::HeapTupleData;
+
+seam_core::seam!(
+    // BuildIndexValueDescription (genam.c) for callers below genam in the
+    // crate graph (nbtree unique violations). None mirrors C's NULL: the
+    // ACL/RLS gate hid the key, the caller omits the DETAIL line.
+    pub fn build_index_value_description(
+        index_relation: &RelationData<'_>,
+        values: &[Datum],
+        isnull: &[bool],
+    ) -> PgResult<Option<String>>
+);
 
 seam_core::seam!(
     // systable_beginscan(relation, index_oid, index_ok, NULL /*snapshot*/,

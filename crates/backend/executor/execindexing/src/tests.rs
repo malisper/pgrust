@@ -134,6 +134,8 @@ fn reset_fixture() {
 fn install() {
     static INIT: Once = Once::new();
     INIT.call_once(|| {
+        genam_seams::build_index_value_description::set(|_, _, _| Ok(None));
+        syscache_seams::pg_namespace_nspname::set(|_| Ok(None));
         bufmgr_seams::read_buffer::set(|rel, block| {
             with_fake(|f| {
                 let buf = f.tables[&rel.rd_id][block as usize];

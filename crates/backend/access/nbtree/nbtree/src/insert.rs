@@ -9,7 +9,7 @@ use std::cell::Cell;
 use ::bufmgr_seams::{self as bufmgr, BufferPin};
 use ::datum::Datum;
 use ::mcx::Mcx;
-use ::types_core::{BlockNumber, InvalidBlockNumber, OffsetNumber, Oid};
+use ::types_core::{AttrNumber, BlockNumber, InvalidBlockNumber, OffsetNumber, Oid, INDEX_MAX_KEYS};
 use ::types_error::{PgError, PgResult, ERRCODE_UNIQUE_VIOLATION};
 use ::types_nbtree::{
     BTMetaPageData, BTPageOpaqueData, BTP_HAS_GARBAGE, BTP_INCOMPLETE_SPLIT, BTP_ROOT,
@@ -615,9 +615,7 @@ unsafe fn bt_check_unique<'mcx>(
                     bt_relbuf(rel, leafpin)?;
                     insertstate.bounds_valid = false;
 
-                    // C divergence: errdetail Key/BuildIndexValueDescription
-                    // omitted (genam lane unported); primary + SQLSTATE match.
-                    return Err(unique_violation(rel));
+                    return Err(unique_violation(mcx, rel, heap_rel, itup));
                 } else if all_dead {
                     mark_item_dead(&page, offset);
                     set_page_has_garbage(&page);
@@ -669,13 +667,44 @@ unsafe fn bt_check_unique<'mcx>(
 
 #[cold]
 #[inline(never)]
-fn unique_violation(rel: &Relation<'_>) -> Box<PgError> {
+fn unique_violation<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    heap_rel: &Relation<'mcx>,
+    itup: crate::itup::ITup,
+) -> Box<PgError> {
+    let mut e = PgError::error(format!(
+        "duplicate key value violates unique constraint \"{}\"",
+        rel.name()
+    ))
+    .with_sqlstate(ERRCODE_UNIQUE_VIOLATION);
+
+    let tupdesc = rel.descr();
+    let natts = tupdesc.natts as usize;
+    let mut values = [Datum::null(); INDEX_MAX_KEYS as usize];
+    let mut isnull = [false; INDEX_MAX_KEYS as usize];
+    for i in 0..natts {
+        // SAFETY: itup is the caller-owned insert tuple, live and MAXALIGNed
+        // for this call; attnums 1..=natts of its own tupdesc.
+        values[i] = unsafe {
+            crate::itup::index_getattr(itup, (i + 1) as AttrNumber, tupdesc, &mut isnull[i])
+        };
+    }
+    match genam_seams::build_index_value_description::call(rel, &values[..natts], &isnull[..natts])
+    {
+        Ok(Some(desc)) => e = e.with_detail(format!("Key {desc} already exists.")),
+        Ok(None) => {}
+        Err(err) => return err,
+    }
+
+    match lsyscache::misc::get_namespace_name(mcx, heap_rel.namespace()) {
+        Ok(Some(nsp)) => e = e.with_schema_name(nsp.as_str().to_owned()),
+        Ok(None) => {}
+        Err(err) => return err,
+    }
     Box::new(
-        PgError::error(format!(
-            "duplicate key value violates unique constraint \"{}\"",
-            rel.name()
-        ))
-        .with_sqlstate(ERRCODE_UNIQUE_VIOLATION),
+        e.with_table_name(heap_rel.name().to_owned())
+            .with_constraint_name(rel.name().to_owned()),
     )
 }
 

@@ -237,8 +237,8 @@ impl CmpCtx<'_> {
     }
 }
 
-// BuildIndexValueDescription/errtableconstraint unported: C's key_desc==NULL
-// arm ("Duplicate keys exist.") is emitted instead.
+// BuildIndexValueDescription wiring deferred here (ported in genam): C's
+// key_desc==NULL arm ("Duplicate keys exist.") is emitted instead.
 #[cold]
 #[inline(never)]
 fn unique_violation_error(index_name: &str) -> Box<PgError> {

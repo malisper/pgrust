@@ -55,3 +55,4 @@ heapam_visibility_seams = { path = "../../access/heap/heapam_visibility_seams" }
 smgr_seams = { path = "../../storage/smgr/smgr_seams" }
 miscinit_seams = { path = "../../utils/init/miscinit_seams" }
 aclchk_seams = { path = "../../catalog/aclchk_seams" }
+genam_seams = { path = "../../access/index/genam_seams" }
