@@ -465,6 +465,12 @@ fn install_relation_seams() {
             }
         },
     );
+    bufmgr_seams::extend_buffered_rel_to_rel::set(|rel, fork, strategy, flags, extend_to, mode| {
+        bufmgr_seams::extend_buffered_rel_to::call(
+            bufmgr_seams::relation_smgr_locator::call(rel),
+            fork, strategy, flags, extend_to, mode,
+        )
+    });
 }
 
 fn install_parser_fixture_seams() {

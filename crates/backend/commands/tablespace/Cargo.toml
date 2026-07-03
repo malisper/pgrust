@@ -1,0 +1,16 @@
+[package]
+name = "commands_tablespace"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "commands_tablespace"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+relpath = { path = "../../../common/relpath" }
+tablespace_seams = { path = "../tablespace_seams" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }

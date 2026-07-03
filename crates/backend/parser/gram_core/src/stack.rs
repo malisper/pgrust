@@ -20,9 +20,8 @@ pub(crate) struct Stacks<'mcx> {
     arena_backed: bool,
 }
 
-// The action fn's window onto the popped RHS slots: two base pointers passed
-// by value, so `Stacks` itself never escapes into the outlined reduce call
-// (C keeps yyvsp/yylsp register-resident the same way).
+// The action fn's window onto the popped RHS slots, passed by value so
+// `Stacks` never escapes into the outlined reduce call (C's yyvsp/yylsp).
 #[derive(Clone, Copy)]
 pub(crate) struct ActionView<'mcx> {
     vs: NonNull<YYSTYPE<'mcx>>,
@@ -30,8 +29,7 @@ pub(crate) struct ActionView<'mcx> {
 }
 
 impl<'mcx> ActionView<'mcx> {
-    // The action's $n / @n (moves; single read per slot, n is 1-based and
-    // bounded by the rule's yylen — the LALR discipline).
+    // $n / @n: moves, 1-based, n <= the rule's yylen (the LALR discipline).
     #[inline(always)]
     pub(crate) fn v(&self, n: usize) -> YYSTYPE<'mcx> {
         // SAFETY: base + yylen slots are live (reduce_and_goto contract).

@@ -28,8 +28,7 @@ pub use interp::{exec_eval_expr, exec_project, exec_qual, EvalSlots};
 pub use steps::{AggPerGroup, CmpOp, ExprState, Kernel, OutRef, SlotSrc, Step};
 pub use types_portal::params::ParamBind;
 
-/// evaluate_expr (optimizer/util/clauses.c): execute a const-foldable
-/// expression once and wrap the result Datum in a Const.
+/// evaluate_expr (clauses.c): run a const-foldable expression once, Const-wrap.
 pub fn evaluate_expr<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     expr: types_nodes::Node<'mcx>,
@@ -46,7 +45,6 @@ pub fn evaluate_expr<'mcx>(
     let r = exec_eval_expr(&mut state, &mut slots)?;
 
     let (typlen, typbyval) = lsyscache::get_typlenbyval(result_type)?;
-    // datumCopy into the caller's context (C copies out of the per-tuple ctx).
     let constvalue = if r.isnull || typbyval {
         r.value
     } else {

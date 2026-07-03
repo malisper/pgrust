@@ -17,7 +17,7 @@ use crate::{
     SearchSysCache3, SearchSysCache4, SearchSysCacheExists, SearchSysCacheList, SearchSysCacheList1,
     SysCacheKey,
 };
-use crate::cacheinfo::{AMPROCNUM, ATTNUM, PROCNAMEARGSNSP, AUTHNAME, AUTHOID, CASTSOURCETARGET, CONSTROID, INDEXRELID, NAMESPACENAME, NAMESPACEOID, OPERNAMENSP, TYPENAMENSP, OPEROID, PROCOID, RELNAMENSP, RELOID, STATRELATTINH, TYPEOID};
+use crate::cacheinfo::{AMOPOPID, AMOPSTRATEGY, AMPROCNUM, ATTNUM, OPFAMILYOID, PROCNAMEARGSNSP, AUTHNAME, AUTHOID, CASTSOURCETARGET, CONSTROID, INDEXRELID, NAMESPACENAME, NAMESPACEOID, OPERNAMENSP, TYPENAMENSP, OPEROID, PROCOID, RELNAMENSP, RELOID, STATRELATTINH, TYPEOID};
 
 const ANUM_PG_CLASS_OID: i32 = 1;
 const ANUM_PG_CLASS_RELISSHARED: i32 = 16;
@@ -420,6 +420,130 @@ const ANUM_PG_PROC_PROARGTYPES: i32 = 20;
 const ANUM_PG_AMPROC_AMPROC: i32 = 6;
 
 // get_opfamily_proc (lsyscache.c): GetSysCacheOid4(AMPROCNUM, Anum_pg_amproc_amproc, ...).
+const ANUM_PG_AMOP_AMOPFAMILY: i32 = 2;
+const ANUM_PG_AMOP_AMOPLEFTTYPE: i32 = 3;
+const ANUM_PG_AMOP_AMOPRIGHTTYPE: i32 = 4;
+const ANUM_PG_AMOP_AMOPSTRATEGY: i32 = 5;
+const ANUM_PG_AMOP_AMOPOPR: i32 = 7;
+const ANUM_PG_AMOP_AMOPMETHOD: i32 = 8;
+const ANUM_PG_AMOP_AMOPSORTFAMILY: i32 = 9;
+const ANUM_PG_CLASS_RELNAMESPACE: i32 = 3;
+const ANUM_PG_CLASS_RELTYPE: i32 = 4;
+const ANUM_PG_CLASS_RELAM: i32 = 7;
+const ANUM_PG_CLASS_RELTABLESPACE: i32 = 9;
+const ANUM_PG_CLASS_RELPERSISTENCE: i32 = 17;
+const ANUM_PG_CLASS_RELKIND: i32 = 18;
+const ANUM_PG_CLASS_RELNATTS: i32 = 19;
+const ANUM_PG_CLASS_RELISPARTITION: i32 = 28;
+const ANUM_PG_OPFAMILY_OPFMETHOD: i32 = 2;
+const ANUM_PG_OPFAMILY_OPFNAME: i32 = 3;
+
+fn lookup_pg_class_ls_shape(relid: Oid) -> PgResult<Option<syscache_seams::PgClassLsShape>> {
+    let Some(tuple) = SearchSysCache1(RELOID, SysCacheKey::Value(Datum::from_oid(relid)))? else {
+        return Ok(None);
+    };
+    let t = tuple.tuple();
+    let shape = syscache_seams::PgClassLsShape {
+        relnamespace: getattr(&t, RELOID, ANUM_PG_CLASS_RELNAMESPACE).as_oid(),
+        reltype: getattr(&t, RELOID, ANUM_PG_CLASS_RELTYPE).as_oid(),
+        relam: getattr(&t, RELOID, ANUM_PG_CLASS_RELAM).as_oid(),
+        reltablespace: getattr(&t, RELOID, ANUM_PG_CLASS_RELTABLESPACE).as_oid(),
+        relnatts: getattr(&t, RELOID, ANUM_PG_CLASS_RELNATTS).as_i16(),
+        relkind: getattr(&t, RELOID, ANUM_PG_CLASS_RELKIND).as_i8(),
+        relpersistence: getattr(&t, RELOID, ANUM_PG_CLASS_RELPERSISTENCE).as_i8(),
+        relispartition: getattr(&t, RELOID, ANUM_PG_CLASS_RELISPARTITION).as_bool(),
+    };
+    drop(t);
+    ReleaseSysCache(tuple);
+    Ok(Some(shape))
+}
+
+fn lookup_pg_amop_by_operator(
+    opno: Oid,
+    purpose: u8,
+    opfamily: Oid,
+) -> PgResult<Option<syscache_seams::PgAmopShape>> {
+    let Some(tuple) = SearchSysCache3(
+        AMOPOPID,
+        SysCacheKey::Value(Datum::from_oid(opno)),
+        SysCacheKey::Value(Datum::from_char(purpose as i8)),
+        SysCacheKey::Value(Datum::from_oid(opfamily)),
+    )?
+    else {
+        return Ok(None);
+    };
+    let t = tuple.tuple();
+    let shape = syscache_seams::PgAmopShape {
+        amopstrategy: getattr(&t, AMOPOPID, ANUM_PG_AMOP_AMOPSTRATEGY).as_i16(),
+        amopsortfamily: getattr(&t, AMOPOPID, ANUM_PG_AMOP_AMOPSORTFAMILY).as_oid(),
+        amoplefttype: getattr(&t, AMOPOPID, ANUM_PG_AMOP_AMOPLEFTTYPE).as_oid(),
+        amoprighttype: getattr(&t, AMOPOPID, ANUM_PG_AMOP_AMOPRIGHTTYPE).as_oid(),
+    };
+    drop(t);
+    ReleaseSysCache(tuple);
+    Ok(Some(shape))
+}
+
+fn lookup_pg_amop_by_strategy(
+    opfamily: Oid,
+    lefttype: Oid,
+    righttype: Oid,
+    strategy: i16,
+) -> PgResult<Oid> {
+    crate::GetSysCacheOid(
+        AMOPSTRATEGY,
+        ANUM_PG_AMOP_AMOPOPR,
+        SysCacheKey::Value(Datum::from_oid(opfamily)),
+        SysCacheKey::Value(Datum::from_oid(lefttype)),
+        SysCacheKey::Value(Datum::from_oid(righttype)),
+        SysCacheKey::Value(Datum::from_i16(strategy)),
+    )
+}
+
+fn lookup_pg_amop_members_by_operator<'mcx>(
+    mcx: Mcx<'mcx>,
+    opno: Oid,
+) -> PgResult<PgVec<'mcx, syscache_seams::PgAmopMemberShape>> {
+    let list = SearchSysCacheList1(AMOPOPID, SysCacheKey::Value(Datum::from_oid(opno)))?;
+    let n = list.n_members() as usize;
+    let mut out = mcx::vec_with_capacity_in(mcx, n)?;
+    for i in 0..n {
+        let m = list.member(i);
+        let t = m.tuple();
+        out.push(syscache_seams::PgAmopMemberShape {
+            amopfamily: getattr(&t, AMOPOPID, ANUM_PG_AMOP_AMOPFAMILY).as_oid(),
+            amoplefttype: getattr(&t, AMOPOPID, ANUM_PG_AMOP_AMOPLEFTTYPE).as_oid(),
+            amoprighttype: getattr(&t, AMOPOPID, ANUM_PG_AMOP_AMOPRIGHTTYPE).as_oid(),
+            amopstrategy: getattr(&t, AMOPOPID, ANUM_PG_AMOP_AMOPSTRATEGY).as_i16(),
+            amopmethod: getattr(&t, AMOPOPID, ANUM_PG_AMOP_AMOPMETHOD).as_oid(),
+        });
+    }
+    ReleaseSysCacheList(list);
+    Ok(out)
+}
+
+fn lookup_pg_opfamily_shape(
+    opfid: Oid,
+) -> PgResult<Option<syscache_seams::PgOpfamilyShape>> {
+    let Some(tuple) =
+        SearchSysCache1(OPFAMILYOID, SysCacheKey::Value(Datum::from_oid(opfid)))?
+    else {
+        return Ok(None);
+    };
+    let t = tuple.tuple();
+    let d = getattr(&t, OPFAMILYOID, ANUM_PG_OPFAMILY_OPFNAME);
+    // SAFETY: opfname is a NameData column; the datum points at its 64-byte
+    // in-tuple image.
+    let opfname = unsafe { *(d.as_usize() as *const NameData) };
+    let shape = syscache_seams::PgOpfamilyShape {
+        opfmethod: getattr(&t, OPFAMILYOID, ANUM_PG_OPFAMILY_OPFMETHOD).as_oid(),
+        opfname,
+    };
+    drop(t);
+    ReleaseSysCache(tuple);
+    Ok(Some(shape))
+}
+
 fn lookup_pg_amproc(opfamily: Oid, lefttype: Oid, righttype: Oid, procnum: i16) -> PgResult<Oid> {
     crate::GetSysCacheOid(
         AMPROCNUM,
@@ -723,6 +847,27 @@ fn varlena_image<'mcx>(
     Ok(Some(out))
 }
 
+fn pg_statistic_stawidth(
+    relid: Oid,
+    attnum: types_core::AttrNumber,
+    inh: bool,
+) -> PgResult<Option<i32>> {
+    let Some(tuple) = SearchSysCache3(
+        STATRELATTINH,
+        SysCacheKey::Value(Datum::from_oid(relid)),
+        SysCacheKey::Value(Datum::from_i16(attnum)),
+        SysCacheKey::Value(Datum::from_bool(inh)),
+    )?
+    else {
+        return Ok(None);
+    };
+    let t = tuple.tuple();
+    let stawidth = getattr(&t, STATRELATTINH, ANUM_PG_STATISTIC_STAWIDTH).as_i32();
+    drop(t);
+    ReleaseSysCache(tuple);
+    Ok(Some(stawidth))
+}
+
 fn lookup_pg_statistic_bundle<'mcx>(
     mcx: Mcx<'mcx>,
     relid: Oid,
@@ -840,6 +985,11 @@ pub(crate) fn install() {
     syscache_seams::lookup_pg_operator_shape::set(lookup_pg_operator_shape);
     syscache_seams::lookup_pg_operator_oid_exact::set(lookup_pg_operator_oid_exact);
     syscache_seams::lookup_pg_amproc::set(lookup_pg_amproc);
+    syscache_seams::lookup_pg_class_ls_shape::set(lookup_pg_class_ls_shape);
+    syscache_seams::lookup_pg_amop_by_operator::set(lookup_pg_amop_by_operator);
+    syscache_seams::lookup_pg_amop_by_strategy::set(lookup_pg_amop_by_strategy);
+    syscache_seams::lookup_pg_amop_members_by_operator::set(lookup_pg_amop_members_by_operator);
+    syscache_seams::lookup_pg_opfamily_shape::set(lookup_pg_opfamily_shape);
     syscache_seams::pg_type_base_shape::set(pg_type_base_shape);
     syscache_seams::pg_type_io_shape::set(pg_type_io_shape);
     syscache_seams::pg_type_typarray::set(pg_type_typarray);
@@ -859,4 +1009,5 @@ pub(crate) fn install() {
 pub(crate) fn install_pg_statistic() {
     syscache_seams::lookup_pg_statistic_shape::set(lookup_pg_statistic_shape);
     syscache_seams::lookup_pg_statistic_bundle::set(lookup_pg_statistic_bundle);
+    syscache_seams::pg_statistic_stawidth::set(pg_statistic_stawidth);
 }

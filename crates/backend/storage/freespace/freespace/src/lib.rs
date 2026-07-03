@@ -312,7 +312,7 @@ fn fsm_readbuf(
         if !extend {
             return Ok(None);
         }
-        fsm_extend(rlocator, blkno + 1)?
+        fsm_extend(rel, blkno + 1)?
     } else {
         bufmgr_seams::read_buffer_extended::call(
             rel,
@@ -339,9 +339,9 @@ fn fsm_readbuf(
 }
 
 /// Extends with zero-filled pages: all-zero = no free space.
-fn fsm_extend(rlocator: RelFileLocatorBackend, fsm_nblocks: BlockNumber) -> PgResult<Buffer> {
-    bufmgr_seams::extend_buffered_rel_to::call(
-        rlocator,
+fn fsm_extend(rel: &RelationData<'_>, fsm_nblocks: BlockNumber) -> PgResult<Buffer> {
+    bufmgr_seams::extend_buffered_rel_to_rel::call(
+        rel,
         ForkNumber::FSM_FORKNUM,
         None,
         EB_CREATE_FORK_IF_NEEDED | EB_CLEAR_SIZE_CACHE,

@@ -11,6 +11,7 @@ pub fn init_all() {
     tableam::init_seams();
     vacuumlazy::init_seams();
     commands_vacuum::init_seams();
+    commands_tablespace::init_seams();
     clog::init_seams();
     multixact::init_seams();
     rmgr::init_seams();

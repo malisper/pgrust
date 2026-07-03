@@ -43,6 +43,18 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // BMR_REL form: fork creation takes the relation extension lock inside.
+    pub fn extend_buffered_rel_to_rel<'a, 'mcx>(
+        rel: &'a types_rel::RelationData<'mcx>,
+        forknum: ForkNumber,
+        strategy: BufferAccessStrategy,
+        flags: u32,
+        extend_to: BlockNumber,
+        mode: ReadBufferMode,
+    ) -> PgResult<Buffer>
+);
+
+seam_core::seam!(
     pub fn release_buffer(buffer: Buffer) -> PgResult<()>
 );
 
