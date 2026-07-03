@@ -611,6 +611,13 @@ pub struct OnConflictExpr<'mcx> {
 }
 
 #[derive(Default)]
+pub struct CollateClause<'mcx> {
+    pub arg: Option<Node<'mcx>>,
+    pub collname: NodeList<'mcx>,
+    pub location: ParseLoc,
+}
+
+#[derive(Default)]
 pub struct FuncExpr<'mcx> {
     pub funcid: Oid,
     pub funcresulttype: Oid,
@@ -632,6 +639,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for RangeVar<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for Var<'mcx> {
     const TAG: NodeTag = NodeTag::T_Var;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for CollateClause<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CollateClause;
 }
 unsafe impl NodeVariant<'_> for Const {
     const TAG: NodeTag = NodeTag::T_Const;
