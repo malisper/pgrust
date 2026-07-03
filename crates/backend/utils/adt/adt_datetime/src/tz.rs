@@ -4,10 +4,13 @@
 //! (tm_year-1900, 0-based tm_mon) and pg_localtime/pg_gmtime results keep
 //! that convention, exactly as C's callers expect; timestamp2tm converts.
 
+use core::cell::Cell;
+use core::sync::atomic::{AtomicPtr, Ordering};
+
 use crate::calendar::date2j;
 use crate::consts::{
-    fsec_t, pg_tm, DateTimeErrorExtra, DateTkn, IS_VALID_JULIAN, MINS_PER_HOUR, SECS_PER_DAY,
-    SECS_PER_MINUTE, UNIX_EPOCH_JDATE,
+    fsec_t, pg_tm, DateTimeErrorExtra, DateTkn, DTZ, DYNTZ, IS_VALID_JULIAN, MINS_PER_HOUR,
+    SECS_PER_DAY, SECS_PER_MINUTE, TOKMAXLEN, TZ, UNIX_EPOCH_JDATE,
 };
 
 pub use localtime::PgTz;
@@ -195,24 +198,97 @@ pub fn pg_gmtime(t: i64) -> Option<pg_tm> {
     localtime::pg_gmtime(t).map(convert)
 }
 
+/// tzparser's tzEntry, minus the source-location fields ConvertTimeZoneAbbrevs
+/// ignores. `abbrev` must be downcased and the slice sorted by strcmp order.
+pub struct TzEntry<'a> {
+    pub abbrev: &'a [u8],
+    pub zone: Option<&'a [u8]>,
+    pub offset: i32,
+    pub is_dst: bool,
+}
+
+pub struct DynamicZoneAbbrev {
+    tz: AtomicPtr<PgTz>,
+    zone: &'static [u8],
+}
+
 /// C `zoneabbrevtbl` (installed by the `timezone_abbreviations` GUC via
-/// `InstallTimeZoneAbbrevs`; NULL until then).
+/// `InstallTimeZoneAbbrevs`; NULL until then). DYNTZ tokens hold an index
+/// into `dynamic` (C: a byte offset into the same guc_malloc chunk).
 pub struct ZoneAbbrevTable {
     pub abbrevs: &'static [DateTkn],
+    dynamic: &'static [DynamicZoneAbbrev],
+}
+
+thread_local! {
+    static ZONEABBREVTBL: Cell<Option<&'static ZoneAbbrevTable>> = const { Cell::new(None) };
 }
 
 #[inline]
 pub fn zoneabbrevtbl() -> Option<&'static ZoneAbbrevTable> {
-    None
+    ZONEABBREVTBL.with(Cell::get)
+}
+
+// DIVERGENCE: C guc_mallocs one chunk freed with the superseded GUC extra;
+// here the table leaks (cold, once per SET of timezone_abbreviations —
+// pgtz's permanent-entry precedent).
+#[allow(non_snake_case)]
+pub fn ConvertTimeZoneAbbrevs(abbrevs: &[TzEntry<'_>]) -> &'static ZoneAbbrevTable {
+    let mut tokens: Vec<DateTkn> = Vec::with_capacity(abbrevs.len());
+    let mut dynamic: Vec<DynamicZoneAbbrev> = Vec::new();
+    for abbr in abbrevs {
+        let mut token = [0u8; TOKMAXLEN + 1];
+        let n = abbr.abbrev.len().min(TOKMAXLEN);
+        token[..n].copy_from_slice(&abbr.abbrev[..n]);
+        let (typ, value) = match abbr.zone {
+            Some(zone) => {
+                dynamic.push(DynamicZoneAbbrev {
+                    tz: AtomicPtr::new(core::ptr::null_mut()),
+                    zone: Box::leak(zone.to_vec().into_boxed_slice()),
+                });
+                (DYNTZ, (dynamic.len() - 1) as i32)
+            }
+            None => (if abbr.is_dst { DTZ } else { TZ }, abbr.offset),
+        };
+        tokens.push(DateTkn { token, typ: typ as i8, value });
+    }
+    debug_assert!(crate::decode::CheckDateTokenTable(&tokens));
+    Box::leak(Box::new(ZoneAbbrevTable {
+        abbrevs: Box::leak(tokens.into_boxed_slice()),
+        dynamic: Box::leak(dynamic.into_boxed_slice()),
+    }))
 }
 
 #[allow(non_snake_case)]
-pub fn FetchDynamicTimeZone(
-    _tbl: &ZoneAbbrevTable,
-    _tp: &DateTkn,
-    _extra: &mut DateTimeErrorExtra<'_>,
+pub fn InstallTimeZoneAbbrevs(tbl: &'static ZoneAbbrevTable) {
+    ZONEABBREVTBL.with(|c| c.set(Some(tbl)));
+    crate::decode::ClearTimeZoneAbbrevCache();
+}
+
+#[allow(non_snake_case)]
+pub fn FetchDynamicTimeZone<'a>(
+    tbl: &'a ZoneAbbrevTable,
+    tp: &'a DateTkn,
+    extra: &mut DateTimeErrorExtra<'a>,
 ) -> Option<&'static PgTz> {
-    unported("FetchDynamicTimeZone (zoneabbrevtbl)");
+    debug_assert_eq!(tp.typ as i32, DYNTZ);
+    let dtza = &tbl.dynamic[tp.value as usize];
+    let cached = dtza.tz.load(Ordering::Relaxed);
+    if !cached.is_null() {
+        // SAFETY: the slot only ever holds &'static PgTz from pg_tzset below.
+        return Some(unsafe { &*cached });
+    }
+    match pg_tzset(dtza.zone) {
+        Some(tz) => {
+            dtza.tz.store(tz as *const PgTz as *mut PgTz, Ordering::Relaxed);
+            Some(tz)
+        }
+        None => {
+            extra.dtee_timezone = Some(dtza.zone);
+            extra.dtee_abbrev = Some(tp.token_bytes());
+            None
+        }
+    }
 }
 
 /// C `GetCurrentDateTime` (needs timestamp2tm + session_timezone).

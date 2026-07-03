@@ -271,21 +271,32 @@ pub fn show_log_timezone() -> String {
 
 pub fn check_timezone_abbreviations(
     newval: &mut Option<String>,
-    _extra: &mut Option<GucHookExtra>,
+    extra: &mut Option<GucHookExtra>,
     source: GucSource,
 ) -> PgResult<bool> {
-    if newval.is_none() {
+    // The boot_val is NULL; pg_timezone_abbrev_initialize supplies "Default"
+    // later, so nothing is loaded during InitializeGUCOptions.
+    let Some(value) = newval.as_deref() else {
         debug_assert_eq!(source, PGC_S_DEFAULT);
         return Ok(true);
+    };
+    match tzparser::load_tzoffsets(value) {
+        Some(tbl) => {
+            *extra = Some(Box::new(tbl));
+            Ok(true)
+        }
+        None => Ok(false),
     }
-    unported("check_timezone_abbreviations: load_tzoffsets (tzparser lane)");
 }
 
 pub fn assign_timezone_abbreviations(_newval: Option<&str>, extra: Option<&GucHookExtra>) {
-    if extra.is_none() {
+    let Some(extra) = extra else {
         return;
-    }
-    unported("assign_timezone_abbreviations: InstallTimeZoneAbbrevs (datetime lane)");
+    };
+    let tbl = extra
+        .downcast_ref::<&'static tz::ZoneAbbrevTable>()
+        .expect("assign_timezone_abbreviations extra");
+    tz::InstallTimeZoneAbbrevs(tbl);
 }
 
 pub fn check_transaction_read_only(
