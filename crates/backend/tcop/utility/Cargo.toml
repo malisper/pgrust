@@ -66,3 +66,4 @@ syscache_seams = { path = "../../utils/cache/syscache_seams" }
 types_dest = { path = "../../../_support/types/types_dest" }
 parallel_seams = { path = "../../access/transam/parallel_seams" }
 transam_xlog_seams = { path = "../../access/transam/transam_xlog_seams" }
+tsearchcmds = { path = "../../commands/tsearchcmds" }

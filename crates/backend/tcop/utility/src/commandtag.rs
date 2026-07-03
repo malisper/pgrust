@@ -155,7 +155,20 @@ pub fn CreateCommandTag(parsetree: Node<'_>) -> CommandTag {
         }
         T_GrantRoleStmt => payload_gap("CreateCommandTag", "GrantRoleStmt"),
         T_AlterDefaultPrivilegesStmt => CMDTAG_ALTER_DEFAULT_PRIVILEGES,
-        T_DefineStmt => payload_gap("CreateCommandTag", "DefineStmt"),
+        T_DefineStmt => {
+            let stmt = parsetree
+                .as_variant::<types_nodes::rawnodes::DefineStmt>()
+                .expect("DefineStmt");
+            match stmt.kind {
+                types_nodes::parsenodes::ObjectType::OBJECT_TSDICTIONARY => {
+                    CMDTAG_CREATE_TEXT_SEARCH_DICTIONARY
+                }
+                types_nodes::parsenodes::ObjectType::OBJECT_TSCONFIGURATION => {
+                    CMDTAG_CREATE_TEXT_SEARCH_CONFIGURATION
+                }
+                _ => payload_gap("CreateCommandTag", "DefineStmt non-tsearch"),
+            }
+        }
         T_CompositeTypeStmt => CMDTAG_CREATE_TYPE,
         T_CreateEnumStmt => CMDTAG_CREATE_TYPE,
         T_CreateRangeStmt => CMDTAG_CREATE_TYPE,

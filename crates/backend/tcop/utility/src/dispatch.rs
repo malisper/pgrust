@@ -490,6 +490,9 @@ fn dispatch_switch<'mcx>(
                 OBJECT_INDEX | OBJECT_TABLE | OBJECT_SEQUENCE | OBJECT_VIEW | OBJECT_MATVIEW
                 | OBJECT_FOREIGN_TABLE => tablecmds::RemoveRelations(mcx, stmt)?,
                 OBJECT_TYPE => typecmds::RemoveTypes(mcx, stmt)?,
+                OBJECT_TSDICTIONARY | OBJECT_TSCONFIGURATION => {
+                    tsearchcmds::RemoveTSObjects(mcx, stmt)?
+                }
                 _ => handler_gap("RemoveObjects (dropcmds lane)"),
             }
         }
@@ -733,6 +736,36 @@ fn dispatch_switch<'mcx>(
             let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
             let stmt = stmt_node.as_alter_enum_stmt().expect("AlterEnumStmt");
             typecmds::AlterEnum(mcx, stmt)?;
+        }
+        T_DefineStmt => {
+            // Retention contract as unify_stmt_lifetime.
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::rawnodes::DefineStmt>()
+                .expect("DefineStmt");
+            match stmt.kind {
+                types_nodes::parsenodes::ObjectType::OBJECT_TSDICTIONARY => {
+                    tsearchcmds::DefineTSDictionary(mcx, stmt)?;
+                }
+                types_nodes::parsenodes::ObjectType::OBJECT_TSCONFIGURATION => {
+                    tsearchcmds::DefineTSConfiguration(mcx, stmt)?;
+                }
+                other => handler_gap(&format!("DefineStmt kind {other:?} (defrem lanes)")),
+            }
+        }
+        T_AlterTSDictionaryStmt => {
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::rawnodes::AlterTSDictionaryStmt>()
+                .expect("AlterTSDictionaryStmt");
+            tsearchcmds::AlterTSDictionary(mcx, stmt)?;
+        }
+        T_AlterTSConfigurationStmt => {
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::rawnodes::AlterTSConfigurationStmt>()
+                .expect("AlterTSConfigurationStmt");
+            tsearchcmds::AlterTSConfiguration(mcx, stmt)?;
         }
         _ => handler_gap("ProcessUtilitySlow DDL fan-out (utility slow lane)"),
     }

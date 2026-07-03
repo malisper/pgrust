@@ -617,9 +617,49 @@ fn doDeletion<'mcx>(mcx: Mcx<'mcx>, object: &ObjectAddress, flags: i32) -> PgRes
         AttrDefaultRelationId => pg_attrdef::RemoveAttrDefaultById(mcx, object.objectId)?,
         ConstraintRelationId => pg_constraint::RemoveConstraintById(mcx, object.objectId)?,
         statscmds::StatisticExtRelationId => statscmds::RemoveStatisticsById(mcx, object.objectId)?,
+        // C routes pg_ts_dict through generic DropObjectById and pg_ts_config
+        // through RemoveTSConfigurationById (tsearchcmds.c) — hosted here
+        // because dependency deletion cannot call back into tsearchcmds.
+        TSDictionaryRelationId => {
+            drop_row_by_oid(mcx, TSDictionaryRelationId, TSDictionaryOidIndexId, object.objectId)?
+        }
+        TSConfigRelationId => {
+            drop_row_by_oid(mcx, TSConfigRelationId, TSConfigOidIndexId, object.objectId)?;
+            let rel = table::table_open(mcx, TSConfigMapRelationId, RowExclusiveLock)?;
+            let keys = [oid_key(1, object.objectId)];
+            let mut scan =
+                genam::systable_beginscan(mcx, &rel, TSConfigMapIndexId, true, None, &keys)?;
+            while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+                let tid = tup.t_self;
+                catalog_indexing::CatalogTupleDelete(&rel, &tid)?;
+            }
+            genam::systable_endscan(mcx, scan)?;
+            rel.close(RowExclusiveLock)?;
+        }
         other => panic!("unported: doDeletion object class {other}"),
     }
     Ok(())
+}
+
+const TSDictionaryRelationId: Oid = 3600;
+const TSDictionaryOidIndexId: Oid = 3605;
+const TSConfigRelationId: Oid = 3602;
+const TSConfigOidIndexId: Oid = 3712;
+const TSConfigMapRelationId: Oid = 3603;
+const TSConfigMapIndexId: Oid = 3609;
+
+// DropObjectById's row-removal core: single-row delete located by oid index.
+fn drop_row_by_oid<'mcx>(mcx: Mcx<'mcx>, reloid: Oid, indexoid: Oid, oid: Oid) -> PgResult<()> {
+    let rel = table::table_open(mcx, reloid, RowExclusiveLock)?;
+    let keys = [oid_key(1, oid)];
+    let mut scan = genam::systable_beginscan(mcx, &rel, indexoid, true, None, &keys)?;
+    let Some(tup) = genam::systable_getnext(mcx, &mut scan)? else {
+        panic!("drop_row_by_oid: cache lookup failed for object {oid} of catalog {reloid}");
+    };
+    let tid = tup.t_self;
+    catalog_indexing::CatalogTupleDelete(&rel, &tid)?;
+    genam::systable_endscan(mcx, scan)?;
+    rel.close(RowExclusiveLock)
 }
 
 // deleteSharedDependencyRecordsFor (pg_shdepend.c) via shdepDropDependency's
