@@ -85,6 +85,13 @@ enum SortVariant {
         unique_nulls_not_distinct: bool,
         index_name: std::rc::Rc<str>,
     },
+    // tuplesort_begin_index_hash: (bucket, hash, TID) ordering off datum1.
+    IndexHash {
+        tup_desc: std::rc::Rc<TupleDescData<'static>>,
+        high_mask: u32,
+        low_mask: u32,
+        max_buckets: u32,
+    },
 }
 
 pub struct TuplesortData<'m> {
@@ -134,6 +141,9 @@ struct CmpCtx<'a> {
 impl CmpCtx<'_> {
     #[inline]
     fn comparetup(&self, a: &SortTuple, b: &SortTuple) -> i32 {
+        if let SortVariant::IndexHash { high_mask, low_mask, max_buckets, .. } = self.variant {
+            return Self::comparetup_index_hash(*high_mask, *low_mask, *max_buckets, a, b);
+        }
         let compare = ssup::apply_sort_comparator_in(
             self.mcx, a.datum1, a.isnull1, b.datum1, b.isnull1, &self.keys[0],
         );
@@ -141,6 +151,32 @@ impl CmpCtx<'_> {
             return compare;
         }
         self.comparetup_tiebreak(a, b)
+    }
+
+    /// comparetup_index_hash (+_tiebreak): bucket, then hash, then TID.
+    fn comparetup_index_hash(
+        high_mask: u32,
+        low_mask: u32,
+        max_buckets: u32,
+        a: &SortTuple,
+        b: &SortTuple,
+    ) -> i32 {
+        debug_assert!(!a.isnull1 && !b.isnull1);
+        let hash1 = a.datum1.as_u32();
+        let hash2 = b.datum1.as_u32();
+        let bucket1 = types_hash::_hash_hashkey2bucket(hash1, max_buckets, high_mask, low_mask);
+        let bucket2 = types_hash::_hash_hashkey2bucket(hash2, max_buckets, high_mask, low_mask);
+        if bucket1 != bucket2 {
+            return if bucket1 > bucket2 { 1 } else { -1 };
+        }
+        if hash1 != hash2 {
+            return if hash1 > hash2 { 1 } else { -1 };
+        }
+        let tuple1: nbtree::itup::ITup = a.tuple.cast_const().cast();
+        let tuple2: nbtree::itup::ITup = b.tuple.cast_const().cast();
+        // SAFETY: t_tid header read of live images.
+        let (tid1, tid2) = unsafe { (nbtree::itup::t_tid(tuple1), nbtree::itup::t_tid(tuple2)) };
+        ::types_tuple::itemptr::ItemPointerCompare(&tid1, &tid2)
     }
 
     /// `qsort_tuple_{unsigned,signed,int32}_compare`: `cmp` folds per instantiation.
@@ -182,6 +218,7 @@ impl CmpCtx<'_> {
             }
             SortVariant::Datum => 0,
             SortVariant::Index { .. } => self.comparetup_index_btree_tiebreak(a, b),
+            SortVariant::IndexHash { .. } => unreachable!("comparetup dispatches IndexHash whole"),
         }
     }
 
@@ -348,6 +385,30 @@ impl Tuplesort {
             work_mem,
             sortopt,
         ))
+    }
+
+    /// `tuplesort_begin_index_hash`, serial arm.
+    pub fn begin_index_hash(
+        _heap_rel: &types_rel::Relation<'_>,
+        index_rel: &types_rel::Relation<'_>,
+        high_mask: u32,
+        low_mask: u32,
+        max_buckets: u32,
+        work_mem: i32,
+        sortopt: i32,
+    ) -> Tuplesort {
+        // SAFETY: lifetime erasure on the relcache tupdesc; the caller keeps
+        // the index relation open for the life of the sort (hashbuild holds
+        // it open across the whole build, as C does).
+        let tup_desc: std::rc::Rc<TupleDescData<'static>> =
+            unsafe { mem::transmute(index_rel.rd_att.clone()) };
+        Self::begin_common(
+            work_mem,
+            sortopt,
+            &[],
+            false,
+            SortVariant::IndexHash { tup_desc, high_mask, low_mask, max_buckets },
+        )
     }
 
     /// C divergence: as [`Tuplesort::begin_heap_with_keys`], index variant.
@@ -553,7 +614,9 @@ impl Tuplesort {
         isnull: &[bool],
     ) -> PgResult<()> {
         self.0.with_mut(|st| {
-            let SortVariant::Index { tup_desc, .. } = &st.variant else {
+            let (SortVariant::Index { tup_desc, .. } | SortVariant::IndexHash { tup_desc, .. }) =
+                &st.variant
+            else {
                 panic!("tuplesort_putindextuplevalues on a non-index tuplesort")
             };
             let mut buf =
@@ -582,7 +645,10 @@ impl Tuplesort {
     #[inline]
     pub fn getindextuple(&mut self, forward: bool) -> PgResult<Option<nbtree::itup::ITup>> {
         self.0.with_mut(|st| {
-            debug_assert!(matches!(st.variant, SortVariant::Index { .. }));
+            debug_assert!(matches!(
+                st.variant,
+                SortVariant::Index { .. } | SortVariant::IndexHash { .. }
+            ));
             Ok(st
                 .gettuple_common(forward)?
                 .map(|stup| stup.tuple.cast_const().cast::<u8>()))
@@ -986,7 +1052,11 @@ impl<'m> TuplesortData<'m> {
         let mut tuples = mem::replace(&mut self.memtuples, PgVec::new_in(self.mcx));
         let result = {
             let ctx = ctx!(self);
-            if self.have_datum1 {
+            if let SortVariant::IndexHash { high_mask, low_mask, max_buckets, .. } = self.variant {
+                qsort_tuple(&mut tuples, |a, b| {
+                    CmpCtx::comparetup_index_hash(high_mask, low_mask, max_buckets, a, b)
+                })
+            } else if self.have_datum1 {
                 match self.sort_keys[0].comparator {
                     SortComparator::Unsigned => qsort_tuple(&mut tuples, |a, b| {
                         ctx.comparetup_spec(SortComparator::Unsigned, a, b)

@@ -798,6 +798,145 @@ impl<'a> PageMut<'a> {
         }
     }
 
+    /// `PageIndexTupleDelete`. Panics on corruption (C ereport ERROR,
+    /// DATA_CORRUPTED).
+    pub fn index_tuple_delete(&mut self, offnum: OffsetNumber) {
+        let r = self.as_ref();
+        let pd_lower = r.pd_lower() as usize;
+        let pd_upper = r.pd_upper() as usize;
+        let pd_special = r.pd_special() as usize;
+        assert!(
+            pd_lower >= SizeOfPageHeaderData
+                && pd_lower <= pd_upper
+                && pd_upper <= pd_special
+                && pd_special <= BLCKSZ
+                && pd_special == (pd_special + 7) & !7,
+            "corrupted page pointers: lower = {pd_lower}, upper = {pd_upper}, special = {pd_special}"
+        );
+        let nline = r.max_offset_number();
+        assert!(offnum >= 1 && offnum <= nline, "invalid index offnum: {offnum}");
+        let tup = r.item_id(offnum);
+        debug_assert!(tup.has_storage());
+        let size = tup.lp_len() as usize;
+        let offset = tup.lp_off() as usize;
+        assert!(
+            offset >= pd_upper && offset + size <= pd_special && offset == (offset + 7) & !7,
+            "corrupted line pointer: offset = {offset}, size = {size}"
+        );
+        let size = (size + 7) & !7;
+        let offidx = (offnum - 1) as usize;
+        let id_sz = core::mem::size_of::<ItemIdData>();
+        let nbytes = pd_lower - (SizeOfPageHeaderData + (offidx + 1) * id_sz);
+        if nbytes > 0 {
+            // SAFETY: overlapping shift within the validated line-pointer array.
+            unsafe {
+                let dst = self.ptr.as_ptr().add(SizeOfPageHeaderData + offidx * id_sz);
+                core::ptr::copy(dst.add(id_sz), dst, nbytes);
+            }
+        }
+        if offset != pd_upper {
+            // SAFETY: [pd_upper, offset) shifts up by `size`; both ranges lie
+            // inside the validated tuple region.
+            unsafe {
+                let base = self.ptr.as_ptr();
+                core::ptr::copy(base.add(pd_upper), base.add(pd_upper + size), offset - pd_upper);
+            }
+        }
+        self.set_pd_upper((pd_upper + size) as uint16);
+        self.set_pd_lower((pd_lower - id_sz) as uint16);
+        let nline = nline - 1;
+        for i in 1..=nline {
+            let mut ii = self.as_ref().item_id(i);
+            debug_assert!(ii.has_storage());
+            if (ii.lp_off() as usize) <= offset {
+                ii.set_storage((ii.lp_off() as usize + size) as ItemOffset, ii.lp_len());
+                self.set_item_id(i, ii);
+            }
+        }
+    }
+
+    /// `PageIndexMultiDelete`; `itemnos` sorted ascending. Panics on
+    /// corruption (C ereport ERROR, DATA_CORRUPTED).
+    pub fn index_multi_delete(&mut self, itemnos: &[OffsetNumber]) {
+        const MaxIndexTuplesPerPage: usize = (BLCKSZ - SizeOfPageHeaderData) / (16 + 4);
+        debug_assert!(itemnos.len() <= MaxIndexTuplesPerPage);
+        if itemnos.len() <= 2 {
+            for &offnum in itemnos.iter().rev() {
+                self.index_tuple_delete(offnum);
+            }
+            return;
+        }
+
+        let r = self.as_ref();
+        let pd_lower = r.pd_lower() as usize;
+        let pd_upper = r.pd_upper() as usize;
+        let pd_special = r.pd_special() as usize;
+        assert!(
+            pd_lower >= SizeOfPageHeaderData
+                && pd_lower <= pd_upper
+                && pd_upper <= pd_special
+                && pd_special <= BLCKSZ
+                && pd_special == (pd_special + 7) & !7,
+            "corrupted page pointers: lower = {pd_lower}, upper = {pd_upper}, special = {pd_special}"
+        );
+
+        let nline = r.max_offset_number();
+        let mut itemidbase = [ItemIdCompact::ZERO; MaxIndexTuplesPerPage];
+        let mut newitemids = [ItemIdData::new(0, LP_UNUSED, 0); MaxIndexTuplesPerPage];
+        let mut nused = 0usize;
+        let mut totallen = 0usize;
+        let mut nextitm = 0usize;
+        let mut last_offset = pd_special;
+        let mut presorted = true;
+        for offnum in 1..=nline {
+            let lp = r.item_id(offnum);
+            debug_assert!(lp.has_storage());
+            let size = lp.lp_len() as usize;
+            let offset = lp.lp_off() as usize;
+            assert!(
+                offset >= pd_upper && offset + size <= pd_special && offset == (offset + 7) & !7,
+                "corrupted line pointer: offset = {offset}, size = {size}"
+            );
+            if nextitm < itemnos.len() && offnum == itemnos[nextitm] {
+                nextitm += 1;
+            } else {
+                if last_offset > offset {
+                    last_offset = offset;
+                } else {
+                    presorted = false;
+                }
+                let alignedlen = (size + 7) & !7;
+                itemidbase[nused] = ItemIdCompact {
+                    offsetindex: nused as u16,
+                    itemoff: offset as u16,
+                    alignedlen: alignedlen as u16,
+                };
+                totallen += alignedlen;
+                newitemids[nused] = lp;
+                nused += 1;
+            }
+        }
+        assert!(nextitm == itemnos.len(), "incorrect index offsets supplied");
+        assert!(
+            totallen <= pd_special - pd_lower,
+            "corrupted item lengths: total {totallen}, available space {}",
+            pd_special - pd_lower
+        );
+
+        for (i, id) in newitemids[..nused].iter().enumerate() {
+            self.set_item_id((i + 1) as OffsetNumber, *id);
+        }
+        self.set_pd_lower(
+            (SizeOfPageHeaderData + nused * core::mem::size_of::<ItemIdData>()) as uint16,
+        );
+
+        if nused > 0 {
+            self.compactify_tuples(&itemidbase[..nused], presorted);
+        } else {
+            self.set_pd_upper(pd_special as uint16);
+        }
+    }
+
     // compactify_tuples: close removed-item gaps, restore reverse line-pointer order.
     fn compactify_tuples(&mut self, itemidbase: &[ItemIdCompact], presorted: bool) {
         debug_assert!(!itemidbase.is_empty());

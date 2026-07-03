@@ -160,6 +160,7 @@ pub(crate) fn build_desc_data(target_rel_id: Oid) -> PgResult<Option<RelationDat
             rd_options: scanned.options,
             pgstat_enabled: Cell::new(false),
             rd_amcache: Default::default(),
+            rd_amcache_hash: Default::default(),
             rd_supportinfo: core::cell::RefCell::new(supportinfo),
             rd_indexlist: Default::default(),
         };
@@ -275,6 +276,7 @@ pub fn formrdesc(cat: &BootstrapCatalog) -> PgResult<()> {
         rd_options: None,
         pgstat_enabled: Cell::new(false),
         rd_amcache: Default::default(),
+        rd_amcache_hash: Default::default(),
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
     };

@@ -127,7 +127,6 @@ macro_rules! unported_mask {
 unported_redo! {
     dbase_redo => "backend-commands-dbcommands";
     tblspc_redo => "backend-commands-tablespace";
-    hash_redo => "backend-access-hash-xlog";
     gin_redo => "backend-access-gin-xlog";
     gist_redo => "backend-access-gist-xlog";
     seq_redo => "backend-commands-sequence";
@@ -167,7 +166,6 @@ unported_identify! {
 unported_mask! {
     heap_mask => "backend-access-heap-heapam-xlog";
     btree_mask => "backend-access-nbtree-nbtxlog";
-    hash_mask => "backend-access-hash-xlog";
     gin_mask => "backend-access-gin-xlog";
     gist_mask => "backend-access-gist-xlog";
     seq_mask => "backend-commands-sequence";
@@ -289,12 +287,12 @@ pub static RmgrTable: [RmgrData; RM_N_BUILTIN_IDS] = [
     },
     RmgrData {
         rm_name: "Hash",
-        rm_redo: hash_redo,
+        rm_redo: hash_xlog::hash_redo,
         rm_desc: hash_desc,
         rm_identify: hash_identify,
         rm_startup: None,
         rm_cleanup: None,
-        rm_mask: Some(hash_mask),
+        rm_mask: Some(hash_xlog::hash_mask),
     },
     RmgrData {
         rm_name: "Gin",

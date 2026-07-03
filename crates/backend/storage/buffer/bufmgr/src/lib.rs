@@ -45,7 +45,7 @@ pub use freelist::{
 pub use ops::{
     buffer_page_get_lsn, buffer_page_is_new, buffer_page_ref, buffer_page_set_lsn,
     overwrite_buffer_page, BufferGetBlockNumber, BufferGetPagePtr, BufferGetTag,
-    ConditionalLockBuffer, LockBuffer, LockBufferForCleanup, MarkBufferDirty,
+    ConditionalLockBuffer, IsBufferCleanupOK, LockBuffer, LockBufferForCleanup, MarkBufferDirty,
     UnlockReleaseBuffer, BUFFER_LOCK_EXCLUSIVE, BUFFER_LOCK_SHARE, BUFFER_LOCK_UNLOCK,
 };
 pub use bgwriter_sync::{bgwriter_writeback_context_init, pending_bgwriter_stats, BgBufferSync};
@@ -220,7 +220,6 @@ pub fn FlushRelationBuffers(rlocator: RelFileLocatorBackend) -> PgResult<()> {
 unported! {
     fn FlushDatabaseBuffers(Oid) -> (), "FlushDatabaseBuffers";
     fn DropDatabaseBuffers(Oid) -> (), "DropDatabaseBuffers";
-    fn IsBufferCleanupOK(Buffer) -> bool, "IsBufferCleanupOK";
     fn HoldingBufferPinThatDelaysRecovery() -> bool, "HoldingBufferPinThatDelaysRecovery";
     fn PrefetchBuffer(RelFileLocatorBackend, ForkNumber, BlockNumber) -> (), "PrefetchBuffer";
 }

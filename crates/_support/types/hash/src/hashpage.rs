@@ -25,6 +25,7 @@ pub const LH_PAGE_TYPE: uint16 =
 pub const HASHO_PAGE_ID: uint16 = 0xFF80;
 
 // hasho_prevblkno also carries hashm_maxbucket on a primary bucket page.
+#[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct HashPageOpaqueData {
     pub hasho_prevblkno: BlockNumber,
@@ -77,6 +78,7 @@ pub const HASH_MAX_SPLITPOINTS: usize = (((HASH_MAX_SPLITPOINT_GROUP
     * HASH_SPLITPOINT_PHASES_PER_GRP)
     + HASH_SPLITPOINT_GROUPS_WITH_ONE_PHASE) as usize;
 
+#[repr(C)]
 #[derive(Clone, Debug)]
 pub struct HashMetaPageData {
     pub hashm_magic: uint32,
@@ -149,7 +151,8 @@ pub struct HashScanPosItem {
     pub indexOffset: OffsetNumber,
 }
 
-#[derive(Clone, Debug)]
+// items live as MaybeUninit: only [firstItem, lastItem] is ever written
+// before a read (a zeroing Default would memset 3.3KB per scan).
 pub struct HashScanPosData {
     pub buf: Buffer,
     pub currPage: BlockNumber,
@@ -158,7 +161,21 @@ pub struct HashScanPosData {
     pub firstItem: i32,
     pub lastItem: i32,
     pub itemIndex: i32,
-    pub items: [HashScanPosItem; MaxIndexTuplesPerPage],
+    pub items: [core::mem::MaybeUninit<HashScanPosItem>; MaxIndexTuplesPerPage],
+}
+
+impl HashScanPosData {
+    /// # Safety
+    /// `i` must have been written by `set_item` since the last page load.
+    #[inline]
+    pub unsafe fn item(&self, i: usize) -> HashScanPosItem {
+        unsafe { self.items[i].assume_init() }
+    }
+
+    #[inline]
+    pub fn set_item(&mut self, i: usize, item: HashScanPosItem) {
+        self.items[i] = core::mem::MaybeUninit::new(item);
+    }
 }
 
 impl Default for HashScanPosData {
@@ -171,7 +188,7 @@ impl Default for HashScanPosData {
             firstItem: 0,
             lastItem: 0,
             itemIndex: 0,
-            items: [HashScanPosItem::default(); MaxIndexTuplesPerPage],
+            items: [core::mem::MaybeUninit::uninit(); MaxIndexTuplesPerPage],
         }
     }
 }
@@ -197,7 +214,6 @@ pub fn HashScanPosInvalidate(scanpos: &mut HashScanPosData) {
     scanpos.itemIndex = 0;
 }
 
-#[derive(Debug)]
 pub struct HashScanOpaqueData<'mcx> {
     pub hashso_sk_hash: uint32,
     pub hashso_bucket_buf: Buffer,
@@ -211,23 +227,141 @@ pub struct HashScanOpaqueData<'mcx> {
 }
 
 impl<'mcx> HashScanOpaqueData<'mcx> {
-    pub fn new_in(mcx: Mcx<'mcx>) -> Self {
-        HashScanOpaqueData {
-            hashso_sk_hash: 0,
-            hashso_bucket_buf: InvalidBuffer,
-            hashso_split_bucket_buf: InvalidBuffer,
-            hashso_buc_populated: false,
-            hashso_buc_split: false,
-            killedItems: PgVec::new_in(mcx),
-            numKilled: 0,
-            currPos: HashScanPosData::default(),
+    // hashbeginscan's palloc + assignments, in place (a by-value Self would
+    // memcpy ~3.3KB through the stack); currPos.items stays uninit.
+    pub fn alloc_in(mcx: Mcx<'mcx>) -> ::types_error::PgResult<::mcx::PgBox<'mcx, Self>> {
+        use ::mcx::Allocator;
+        let layout = core::alloc::Layout::new::<Self>();
+        let ptr = Allocator::allocate(&mcx, layout).map_err(|_| mcx.oom(layout.size()))?;
+        let p = ptr.as_ptr() as *mut Self;
+        // SAFETY: fresh allocation of `layout`; every field except
+        // currPos.items (MaybeUninit by type) is written exactly once.
+        unsafe {
+            (&raw mut (*p).hashso_sk_hash).write(0);
+            (&raw mut (*p).hashso_bucket_buf).write(InvalidBuffer);
+            (&raw mut (*p).hashso_split_bucket_buf).write(InvalidBuffer);
+            (&raw mut (*p).hashso_buc_populated).write(false);
+            (&raw mut (*p).hashso_buc_split).write(false);
+            (&raw mut (*p).killedItems).write(PgVec::new_in(mcx));
+            (&raw mut (*p).numKilled).write(0);
+            let cp = &raw mut (*p).currPos;
+            (&raw mut (*cp).buf).write(InvalidBuffer);
+            (&raw mut (*cp).currPage).write(InvalidBlockNumber);
+            (&raw mut (*cp).nextPage).write(InvalidBlockNumber);
+            (&raw mut (*cp).prevPage).write(InvalidBlockNumber);
+            (&raw mut (*cp).firstItem).write(0);
+            (&raw mut (*cp).lastItem).write(0);
+            (&raw mut (*cp).itemIndex).write(0);
+            Ok(::mcx::PgBox::from_raw_in(p, mcx))
         }
     }
 }
 
+pub const XLOG_HASH_INIT_META_PAGE: u8 = 0x00;
+pub const XLOG_HASH_INIT_BITMAP_PAGE: u8 = 0x10;
+pub const XLOG_HASH_INSERT: u8 = 0x20;
+pub const XLOG_HASH_ADD_OVFL_PAGE: u8 = 0x30;
+pub const XLOG_HASH_SPLIT_ALLOCATE_PAGE: u8 = 0x40;
+pub const XLOG_HASH_SPLIT_PAGE: u8 = 0x50;
+pub const XLOG_HASH_SPLIT_COMPLETE: u8 = 0x60;
+pub const XLOG_HASH_MOVE_PAGE_CONTENTS: u8 = 0x70;
+pub const XLOG_HASH_SQUEEZE_PAGE: u8 = 0x80;
+pub const XLOG_HASH_DELETE: u8 = 0x90;
+pub const XLOG_HASH_SPLIT_CLEANUP: u8 = 0xA0;
+pub const XLOG_HASH_UPDATE_META_PAGE: u8 = 0xB0;
+pub const XLOG_HASH_VACUUM_ONE_PAGE: u8 = 0xC0;
+
+pub const XLH_SPLIT_META_UPDATE_MASKS: u8 = 1 << 0;
+pub const XLH_SPLIT_META_UPDATE_SPLITPOINT: u8 = 1 << 1;
+
+pub const HASH_XLOG_FREE_OVFL_BUFS: usize = 6;
+
+#[inline]
+pub fn _hash_hashkey2bucket(hashkey: uint32, maxbucket: uint32, highmask: uint32, lowmask: uint32) -> Bucket {
+    let mut bucket = hashkey & highmask;
+    if bucket > maxbucket {
+        bucket &= lowmask;
+    }
+    bucket
+}
+
+#[inline]
+pub fn pg_ceil_log2_32(num: uint32) -> uint32 {
+    if num < 2 {
+        return 0;
+    }
+    32 - (num - 1).leading_zeros()
+}
+
+pub fn _hash_spareindex(num_bucket: uint32) -> uint32 {
+    let splitpoint_group = pg_ceil_log2_32(num_bucket);
+    if splitpoint_group < HASH_SPLITPOINT_GROUPS_WITH_ONE_PHASE {
+        return splitpoint_group;
+    }
+    let mut splitpoint_phases = HASH_SPLITPOINT_GROUPS_WITH_ONE_PHASE;
+    splitpoint_phases +=
+        (splitpoint_group - HASH_SPLITPOINT_GROUPS_WITH_ONE_PHASE) << HASH_SPLITPOINT_PHASE_BITS;
+    splitpoint_phases += ((num_bucket - 1) >> (splitpoint_group - (HASH_SPLITPOINT_PHASE_BITS + 1)))
+        & HASH_SPLITPOINT_PHASE_MASK;
+    splitpoint_phases
+}
+
+pub fn _hash_get_totalbuckets(splitpoint_phase: uint32) -> uint32 {
+    if splitpoint_phase < HASH_SPLITPOINT_GROUPS_WITH_ONE_PHASE {
+        return 1 << splitpoint_phase;
+    }
+    let splitpoint_group = HASH_SPLITPOINT_GROUPS_WITH_ONE_PHASE
+        + ((splitpoint_phase - HASH_SPLITPOINT_GROUPS_WITH_ONE_PHASE) >> HASH_SPLITPOINT_PHASE_BITS);
+    let mut total_buckets = 1 << (splitpoint_group - 1);
+    let phases_within_splitpoint_group =
+        ((splitpoint_phase - HASH_SPLITPOINT_GROUPS_WITH_ONE_PHASE) & HASH_SPLITPOINT_PHASE_MASK) + 1;
+    total_buckets +=
+        ((1 << (splitpoint_group - 1)) >> HASH_SPLITPOINT_PHASE_BITS) * phases_within_splitpoint_group;
+    total_buckets
+}
+
+impl HashMetaPageData {
+    /// BUCKET_TO_BLKNO.
+    #[inline]
+    pub fn bucket_to_blkno(&self, bucket: Bucket) -> BlockNumber {
+        let spare = if bucket != 0 {
+            self.hashm_spares[(_hash_spareindex(bucket + 1) - 1) as usize]
+        } else {
+            0
+        };
+        bucket + spare + 1
+    }
+}
+
+const _: () = assert!(core::mem::size_of::<HashPageOpaqueData>() == 16);
+const _: () = assert!(core::mem::size_of::<HashMetaPageData>() == 4544);
+const _: () = assert!(core::mem::offset_of!(HashMetaPageData, hashm_ntuples) == 8);
+const _: () = assert!(core::mem::offset_of!(HashMetaPageData, hashm_maxbucket) == 24);
+const _: () = assert!(core::mem::offset_of!(HashMetaPageData, hashm_procid) == 48);
+const _: () = assert!(core::mem::offset_of!(HashMetaPageData, hashm_spares) == 52);
+const _: () = assert!(core::mem::offset_of!(HashMetaPageData, hashm_mapp) == 444);
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn splitpoint_functions_match_c() {
+        assert_eq!(_hash_spareindex(1), 0);
+        assert_eq!(_hash_spareindex(2), 1);
+        assert_eq!(_hash_spareindex(3), 2);
+        assert_eq!(_hash_spareindex(4), 2);
+        assert_eq!(_hash_spareindex(512), 9);
+        assert_eq!(_hash_spareindex(513), 10);
+        assert_eq!(_hash_spareindex(1024), 13);
+        for phase in 0..30 {
+            let total = _hash_get_totalbuckets(phase);
+            assert_eq!(_hash_spareindex(total), phase);
+            if total > 1 {
+                assert_eq!(_hash_spareindex(total + 1), phase + 1);
+            }
+        }
+    }
 
     #[test]
     fn derived_constants_match_c() {

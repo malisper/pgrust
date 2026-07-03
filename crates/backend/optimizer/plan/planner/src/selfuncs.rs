@@ -873,6 +873,7 @@ pub fn amcostestimate(
     };
     match types_relscan::IndexAmKind::from_relam(relam) {
         types_relscan::IndexAmKind::Btree => btcostestimate(run, path_id, loop_count),
+        types_relscan::IndexAmKind::Hash => hashcostestimate(run, path_id, loop_count),
         #[allow(unreachable_patterns)]
         other => panic!("amcostestimate (selfuncs.c): {other:?}; M2 index-AM lane"),
     }
@@ -1008,6 +1009,32 @@ fn index_other_operands_eval_cost(
         }
     }
     Ok(qual_arg_cost)
+}
+
+// hashcostestimate (selfuncs.c): pure genericcostestimate; no descent costs
+// (bucket lookup is O(1); the deliberate C choice is kept verbatim).
+fn hashcostestimate(
+    run: &mut PlannerRun<'_>,
+    path_id: types_pathnodes::PathId,
+    loop_count: f64,
+) -> PgResult<AmCostEstimate> {
+    let mut costs = GenericCosts {
+        num_index_tuples: 0.0,
+        num_sa_scans: 1.0,
+        index_startup_cost: 0.0,
+        index_total_cost: 0.0,
+        index_selectivity: 0.0,
+        index_correlation: 0.0,
+        num_index_pages: 0.0,
+    };
+    genericcostestimate(run, path_id, loop_count, &mut costs)?;
+    Ok(AmCostEstimate {
+        index_startup_cost: costs.index_startup_cost,
+        index_total_cost: costs.index_total_cost,
+        index_selectivity: costs.index_selectivity,
+        index_correlation: 0.0,
+        index_pages: costs.num_index_pages,
+    })
 }
 
 // btcostestimate (selfuncs.c); the boundary-qual walk sees only OpExprs.

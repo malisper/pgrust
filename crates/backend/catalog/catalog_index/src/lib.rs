@@ -28,6 +28,8 @@ pub const INDEX_CREATE_PARTITIONED: u16 = 1 << 5;
 pub const INDEX_CREATE_INVALID: u16 = 1 << 6;
 
 pub const BTREE_AM_OID: Oid = 403;
+pub const HASH_AM_OID: Oid = 405;
+const INT4OID: Oid = 23;
 const OpclassOidIndexId: Oid = 2687;
 const IndexRelidIndexId: Oid = 2679;
 const Anum_pg_opclass_opcintype: usize = 7;
@@ -88,7 +90,12 @@ fn ConstructTupleDescriptor<'mcx>(
     collationIds: &[Oid],
     opclassIds: &[Oid],
 ) -> PgResult<TupleDescData<'mcx>> {
-    debug_assert!(accessMethodId == BTREE_AM_OID); // amkeytype == InvalidOid
+    // amroutine->amkeytype: InvalidOid for btree, INT4OID for hash.
+    let amkeytype = match accessMethodId {
+        BTREE_AM_OID => InvalidOid,
+        HASH_AM_OID => INT4OID,
+        other => unported(&format!("ConstructTupleDescriptor: index AM {other}")),
+    };
     let numatts = indexInfo.ii_NumIndexAttrs as usize;
     let numkeyatts = indexInfo.ii_NumIndexKeyAttrs as usize;
     let heapTupDesc = heapRelation.descr();
@@ -128,9 +135,8 @@ fn ConstructTupleDescriptor<'mcx>(
             to.attrelid = InvalidOid;
         }
 
-        // amroutine->amkeytype (InvalidOid for btree), overridable by
-        // pg_opclass.opckeytype.
-        let mut keyType = InvalidOid;
+        // amkeytype, overridable by pg_opclass.opckeytype.
+        let mut keyType = amkeytype;
         if i < numkeyatts {
             let (opckeytype, opcintype) = lookup_opclass_keytype(mcx, opclassIds[i])?;
             if opckeytype != InvalidOid {
@@ -143,7 +149,19 @@ fn ConstructTupleDescriptor<'mcx>(
             }
         }
         if keyType != InvalidOid && keyType != indexTupDesc.attr(i).atttypid {
-            unported("ConstructTupleDescriptor: opclass keytype override");
+            // C reads the pg_type row for keyType; the only keytype reachable
+            // through the closed AM set is INT4 (hash amkeytype).
+            if keyType != INT4OID {
+                unported("ConstructTupleDescriptor: non-int4 opclass keytype override");
+            }
+            let to = indexTupDesc.attr_mut(i);
+            to.atttypid = keyType;
+            to.atttypmod = -1;
+            to.attlen = 4;
+            to.attbyval = true;
+            to.attalign = b'i' as i8;
+            to.attstorage = b'p' as i8;
+            to.attcompression = 0;
         }
         tupdesc::populate_compact_attribute(&mut indexTupDesc, i);
     }
@@ -303,8 +321,8 @@ pub fn index_create<'mcx>(
         unported("index_create: constraint/concurrent/partitioned/skip-build flags");
     }
     debug_assert!(extra.constr_flags == 0);
-    if accessMethodId != BTREE_AM_OID {
-        unported("index_create: non-btree access methods");
+    if accessMethodId != BTREE_AM_OID && accessMethodId != HASH_AM_OID {
+        unported("index_create: index AMs beyond btree/hash");
     }
 
     let pg_class = table::table_open(mcx, RELATION_RELATION_ID, RowExclusiveLock)?;
@@ -501,15 +519,23 @@ pub fn index_build<'mcx>(
     indexInfo: &mut IndexInfo,
     isreindex: bool,
 ) -> PgResult<()> {
-    if indexRelation.rd_rel.relam != BTREE_AM_OID {
-        unported("index_build: non-btree ambuild");
+    if indexRelation.rd_rel.relam != BTREE_AM_OID
+        && indexRelation.rd_rel.relam != HASH_AM_OID
+    {
+        unported("index_build: index AMs beyond btree/hash");
     }
 
     let guard = miscinit::SecContextGuard::security_restricted(heapRelation.rd_rel.relowner);
     let save_nestlevel = guc::NewGUCNestLevel();
     guc::RestrictSearchPath()?;
 
-    let stats = nbtsort::btbuild(mcx, heapRelation, indexRelation, indexInfo)?;
+    let stats = if indexRelation.rd_rel.relam == BTREE_AM_OID {
+        let r = nbtsort::btbuild(mcx, heapRelation, indexRelation, indexInfo)?;
+        (r.heap_tuples, r.index_tuples)
+    } else {
+        let r = hashsort::hashbuild(mcx, heapRelation, indexRelation, indexInfo)?;
+        (r.heap_tuples, r.index_tuples)
+    };
 
     if indexRelation.rd_rel.relpersistence == types_core::RELPERSISTENCE_UNLOGGED {
         unported("index_build: unlogged-index INIT_FORKNUM ambuildempty");
@@ -519,8 +545,8 @@ pub fn index_build<'mcx>(
         set_indcheckxmin(mcx, indexRelation.rd_id)?;
     }
 
-    index_update_stats(mcx, heapRelation, true, stats.heap_tuples)?;
-    index_update_stats(mcx, indexRelation, false, stats.index_tuples)?;
+    index_update_stats(mcx, heapRelation, true, stats.0)?;
+    index_update_stats(mcx, indexRelation, false, stats.1)?;
 
     xact::CommandCounterIncrement()?;
 

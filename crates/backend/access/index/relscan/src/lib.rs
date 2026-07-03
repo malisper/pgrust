@@ -5,7 +5,8 @@
 use std::rc::Rc;
 
 use ::mcx::{Mcx, PgBox, PgVec};
-use ::types_core::{Oid, BTREE_AM_OID};
+use ::types_core::{Oid, BTREE_AM_OID, HASH_AM_OID};
+use ::types_hash::HashScanOpaqueData;
 use ::types_error::PgResult;
 use ::types_nbtree::BTScanOpaqueData;
 use ::types_rel::Relation;
@@ -20,6 +21,7 @@ pub const MOCK_AM_OID: Oid = 9999;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IndexAmKind {
     Btree,
+    Hash,
     #[cfg(feature = "mock")]
     Mock,
 }
@@ -28,6 +30,7 @@ impl IndexAmKind {
     pub fn from_relam(relam: Oid) -> Self {
         match relam {
             BTREE_AM_OID => IndexAmKind::Btree,
+            HASH_AM_OID => IndexAmKind::Hash,
             #[cfg(feature = "mock")]
             MOCK_AM_OID => IndexAmKind::Mock,
             other => unported_index_am(other),
@@ -37,6 +40,7 @@ impl IndexAmKind {
     pub const fn ampredlocks(self) -> bool {
         match self {
             IndexAmKind::Btree => true,
+            IndexAmKind::Hash => true,
             #[cfg(feature = "mock")]
             IndexAmKind::Mock => true,
         }
@@ -45,6 +49,7 @@ impl IndexAmKind {
     pub const fn has_ammarkpos(self) -> bool {
         match self {
             IndexAmKind::Btree => true,
+            IndexAmKind::Hash => false,
             #[cfg(feature = "mock")]
             IndexAmKind::Mock => true,
         }
@@ -53,6 +58,7 @@ impl IndexAmKind {
     pub const fn has_amrestrpos(self) -> bool {
         match self {
             IndexAmKind::Btree => true,
+            IndexAmKind::Hash => false,
             #[cfg(feature = "mock")]
             IndexAmKind::Mock => false,
         }
@@ -61,6 +67,7 @@ impl IndexAmKind {
     pub const fn has_aminsertcleanup(self) -> bool {
         match self {
             IndexAmKind::Btree => false,
+            IndexAmKind::Hash => false,
             #[cfg(feature = "mock")]
             IndexAmKind::Mock => false,
         }
@@ -75,6 +82,7 @@ fn unported_index_am(relam: Oid) -> ! {
 
 pub enum IndexScanOpaque<'mcx> {
     Btree(PgBox<'mcx, BTScanOpaqueData<'mcx>>),
+    Hash(PgBox<'mcx, HashScanOpaqueData<'mcx>>),
     #[cfg(feature = "mock")]
     Mock(MockOpaque),
 }
@@ -84,6 +92,7 @@ impl IndexScanOpaque<'_> {
     pub fn kind(&self) -> IndexAmKind {
         match self {
             IndexScanOpaque::Btree(_) => IndexAmKind::Btree,
+            IndexScanOpaque::Hash(_) => IndexAmKind::Hash,
             #[cfg(feature = "mock")]
             IndexScanOpaque::Mock(_) => IndexAmKind::Mock,
         }

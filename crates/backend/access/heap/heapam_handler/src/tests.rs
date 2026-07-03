@@ -299,6 +299,7 @@ fn test_relation<'mcx>(mcx: Mcx<'mcx>, oid: Oid) -> Relation<'mcx> {
         rd_indcollation: PgVec::new_in(mcx),
         rd_options: None,
         rd_amcache: Default::default(),
+        rd_amcache_hash: Default::default(),
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
         pgstat_enabled: std::cell::Cell::new(false),
