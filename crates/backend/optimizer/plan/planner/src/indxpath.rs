@@ -352,6 +352,7 @@ fn get_index_clause_from_support<'mcx>(
     }))
 }
 
+
 // match_network_function (network.c).
 fn match_network_function<'mcx>(
     run: &mut PlannerRun<'mcx>,
@@ -696,6 +697,9 @@ fn collect_varattnos(run: &PlannerRun<'_>, node: Node<'_>, relid: i32, out: &mut
             for a in &node.as_func_expr().unwrap().args {
                 collect_varattnos(run, a, relid, out);
             }
+        }
+        NodeTag::T_CoerceViaIO => {
+            collect_varattnos(run, node.as_coerce_via_io().unwrap().arg, relid, out)
         }
         other => panic!("pull_varattnos (var.c) via check_index_only: {other:?}; M2 lane"),
     }

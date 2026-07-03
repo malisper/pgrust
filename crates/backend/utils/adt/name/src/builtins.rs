@@ -1,11 +1,13 @@
-//! fmgr wrappers (`fc_*`) + `NAME_BUILTINS` for fmgr-core. Registrable rows
-//! are the by-val comparisons and the scratch-backed in/out functions;
-//! recv / send / current_* / nameconcatoid stay value-core-only.
+//! fmgr wrappers (`fc_*`) + `NAME_BUILTINS` for fmgr-core. Still value-core-only:
+//! namerecv/namesend (wire frame) and nameconcatoid.
 
 use datum::Datum;
+use types_core::catalog::NAMEOID;
 use types_core::Oid;
 use types_error::PgResult;
-use types_fmgr::{FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction};
+use types_fmgr::{
+    byref_result, FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction,
+};
 use types_tuple::NameData;
 
 use crate::NAMELEN;
@@ -119,6 +121,44 @@ pub fn fc_nameout(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResu
     })
 }
 
+pub fn fc_current_user(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let n = crate::current_user(fcinfo.result_mcx())?;
+    byref_result(fcinfo.result_mcx(), &n.data)
+}
+
+pub fn fc_session_user(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let n = crate::session_user(fcinfo.result_mcx())?;
+    byref_result(fcinfo.result_mcx(), &n.data)
+}
+
+pub fn fc_current_schema(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    match crate::current_schema(fcinfo.result_mcx())? {
+        Some(n) => byref_result(fcinfo.result_mcx(), &n.data),
+        None => Ok(fcinfo.return_null()),
+    }
+}
+
+pub fn fc_current_schemas(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let include_implicit = fcinfo.arg_bool(0);
+    let mcx = fcinfo.result_mcx();
+    let names = crate::current_schemas(mcx, include_implicit)?;
+    let mut datums: mcx::PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, names.len())?;
+    for n in names.iter() {
+        datums.push(Datum::from_usize(core::ptr::from_ref(n) as usize));
+    }
+    let image = arrayfuncs::construct_array(
+        mcx,
+        &datums,
+        NAMEOID,
+        NAMELEN as i32,
+        false,
+        arrayfuncs::foundation::TYPALIGN_CHAR,
+    )?;
+    let d = Datum::from_usize(image.as_ptr() as usize);
+    core::mem::forget(image);
+    Ok(d)
+}
+
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin {
         foid,
@@ -155,4 +195,9 @@ pub const NAME_BUILTINS: &[FmgrBuiltin] = &[
     b(657, "namegt", 2, fc_namegt),
     b(658, "namege", 2, fc_namege),
     b(659, "namene", 2, fc_namene),
+    b(710, "current_user", 0, fc_current_user),
+    b(745, "current_user", 0, fc_current_user),
+    b(746, "session_user", 0, fc_session_user),
+    b(1402, "current_schema", 0, fc_current_schema),
+    b(1403, "current_schemas", 1, fc_current_schemas),
 ];

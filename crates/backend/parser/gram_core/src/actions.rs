@@ -3188,8 +3188,7 @@ impl<'mcx> Parser<'mcx> {
                 )?;
                 *yyval = YYSTYPE::Node(Some(f.seal()));
             }
-            // CURRENT_DATE .. LOCALTIMESTAMP[(n)] (makeSQLValueFunction; the
-            // CURRENT_ROLE..CURRENT_SCHEMA name ops 2149-2155 stay louds).
+            // CURRENT_DATE .. LOCALTIMESTAMP[(n)] (makeSQLValueFunction).
             2140..=2148 => {
                 use SQLValueFunctionOp as Op;
                 let (op, typmod) = match rule {
@@ -3208,6 +3207,42 @@ impl<'mcx> Parser<'mcx> {
                     SQLValueFunction { op, r#type: 0, typmod, location: view.l(1) },
                 )?;
                 *yyval = YYSTYPE::Node(Some(n));
+            }
+            2149 | 2150 | 2151 | 2153 | 2154 | 2155 => {
+                use types_nodes::SQLValueFunctionOp::*;
+                let op = match rule {
+                    2149 => SVFOP_CURRENT_ROLE,
+                    2150 => SVFOP_CURRENT_USER,
+                    2151 => SVFOP_SESSION_USER,
+                    2153 => SVFOP_USER,
+                    2154 => SVFOP_CURRENT_CATALOG,
+                    _ => SVFOP_CURRENT_SCHEMA,
+                };
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    types_nodes::SQLValueFunction {
+                        op,
+                        r#type: 0,
+                        typmod: -1,
+                        location: view.l(1),
+                    },
+                )?));
+            }
+            // SYSTEM_USER: FuncCall via SystemFuncName.
+            2152 => {
+                let names = NodeList::make2(
+                    mcx,
+                    Node::mk_string(mcx, "pg_catalog")?,
+                    Node::mk_string(mcx, "system_user")?,
+                )?;
+                let f = make_func_call(
+                    mcx,
+                    names,
+                    NodeList::nil(),
+                    CoercionForm::COERCE_SQL_SYNTAX,
+                    view.l(1),
+                )?;
+                *yyval = YYSTYPE::Node(Some(f.seal()));
             }
             // EXTRACT '(' extract_list ')'.
             2157 => {

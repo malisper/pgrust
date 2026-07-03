@@ -1,16 +1,15 @@
 #![allow(non_snake_case)]
 
+pub mod builtins;
 #[cfg(test)]
 mod tests;
 
 use datum::Datum;
 use keywords::{KeywordCategory, ScanKeywordCategories, ScanKeywordLookup, ScanKeywords};
-use syscache_seams::PgTypeTypcacheShape;
 use types_core::primitive::InvalidOid;
 use types_core::catalog::{
-    FirstNormalObjectId, BITOID, BOOLOID, BPCHAROID, FLOAT4OID, FLOAT8OID, INT2OID, INT4OID,
-    INT8OID, INTERVALOID, JSONOID, NUMERICOID, TIMEOID, TIMESTAMPOID, TIMESTAMPTZOID, TIMETZOID,
-    VARBITOID, VARCHAROID,
+    BITOID, BOOLOID, BPCHAROID, FLOAT4OID, FLOAT8OID, INT2OID, INT4OID, INT8OID, INTERVALOID,
+    JSONOID, NUMERICOID, TIMEOID, TIMESTAMPOID, TIMESTAMPTZOID, TIMETZOID, VARBITOID, VARCHAROID,
 };
 use types_core::Oid;
 use types_error::{PgError, PgResult};
@@ -26,41 +25,47 @@ fn is_true_array_type(typelem: Oid, typsubscript: Oid) -> bool {
 
 #[cold]
 #[inline(never)]
-fn unported(what: &str) -> ! {
-    panic!("{what} unported — unit backend-utils-adt-format-type")
-}
-
-#[cold]
-#[inline(never)]
 fn type_lookup_failed(typid: Oid) -> Box<PgError> {
     Box::new(PgError::error(format!("cache lookup failed for type {typid}")))
 }
 
-fn lookup(type_oid: Oid) -> PgResult<PgTypeTypcacheShape> {
-    syscache_seams::lookup_pg_type_typcache_shape::call(type_oid)?
-        .ok_or_else(|| type_lookup_failed(type_oid))
-}
-
 /// C `format_type_be` = `format_type_extended(type_oid, -1, 0)`.
 pub fn format_type_be(type_oid: Oid) -> PgResult<String> {
-    format_type_extended(type_oid, -1, false)
+    format_type_extended(type_oid, -1, false, false)
 }
 
 /// C `format_type_with_typemod` = `format_type_extended(type_oid, typemod,
 /// FORMAT_TYPE_TYPEMOD_GIVEN)`.
 pub fn format_type_with_typemod(type_oid: Oid, typemod: i32) -> PgResult<String> {
-    format_type_extended(type_oid, typemod, true)
+    format_type_extended(type_oid, typemod, true, false)
 }
 
-fn format_type_extended(type_oid: Oid, typemod: i32, typemod_given: bool) -> PgResult<String> {
-    let mut shape = lookup(type_oid)?;
+pub(crate) fn format_type_extended(
+    type_oid: Oid,
+    typemod: i32,
+    typemod_given: bool,
+    allow_invalid: bool,
+) -> PgResult<String> {
+    if type_oid == InvalidOid && allow_invalid {
+        return Ok("-".to_string());
+    }
+    let Some(mut shape) = syscache_seams::lookup_pg_type_typcache_shape::call(type_oid)? else {
+        if allow_invalid {
+            return Ok("???".to_string());
+        }
+        return Err(type_lookup_failed(type_oid));
+    };
     let mut named_oid = type_oid;
     let mut is_array = false;
     if is_true_array_type(shape.typelem, shape.typsubscript)
         && shape.typstorage != TYPSTORAGE_PLAIN
     {
         named_oid = shape.typelem;
-        shape = lookup(named_oid)?;
+        shape = match syscache_seams::lookup_pg_type_typcache_shape::call(named_oid)? {
+            Some(s) => s,
+            None if allow_invalid => return Ok("???[]".to_string()),
+            None => return Err(type_lookup_failed(type_oid)),
+        };
         is_array = true;
     }
 
@@ -140,6 +145,9 @@ fn format_type_extended(type_oid: Oid, typemod: i32, typemod_given: bool) -> PgR
     Ok(buf)
 }
 
+
+
+
 /// C `printTypmod`; takes the type oid instead of a pre-fetched typmodout.
 fn print_typmod(typname: &str, typmod: i32, type_oid: Oid) -> PgResult<String> {
     debug_assert!(typmod >= 0);
@@ -152,6 +160,9 @@ fn print_typmod(typname: &str, typmod: i32, type_oid: Oid) -> PgResult<String> {
     }
     let mut finfo = fmgr_seams::fmgr_info::call(typmodout)?;
     let mut fcinfo = types_fmgr::LocalFcinfo::<1>::fresh(InvalidOid);
+    let ctx = mcx::MemoryContext::new("printTypmod");
+    // SAFETY: ctx outlives the single invoke below and the copy out of `out`.
+    unsafe { fcinfo.set_result_mcx(ctx.mcx()) };
     fcinfo.set_arg(0, Datum::from_i32(typmod));
     let out = finfo.invoke(&mut fcinfo)?;
     // SAFETY: typmodout fns return a NUL-terminated cstring datum.

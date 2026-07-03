@@ -113,6 +113,7 @@ pub fn assign_list_collations<'mcx>(
     walk_top_list(mcx, pstate, exprs)
 }
 
+
 pub fn assign_expr_collations<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &ParseState<'_, 'mcx>,
@@ -270,6 +271,16 @@ fn assign_collations_walker<'mcx>(
             };
             location = expr_location(node);
         }
+        // COLLATE sets an explicitly derived collation regardless of the
+        // child state; still recurse to set up collation info below.
+        NodeTag::T_CollateExpr => {
+            let ce = node.as_collate_expr().unwrap();
+            assign_collations_walker(ce.arg, &mut loccontext)?;
+            collation = ce.collOid;
+            debug_assert!(OidIsValid(collation));
+            strength = CollateStrength::Explicit;
+            location = ce.location;
+        }
         // C's default arm over the closed set this lane can produce.
         // SubLink: children walked (T_Query arm supplies the EXPR sublink's
         // first-column collation); exprSetCollation on SubLink is a C no-op.
@@ -291,6 +302,9 @@ fn assign_collations_walker<'mcx>(
         | NodeTag::T_NullTest
         | NodeTag::T_BooleanTest
         | NodeTag::T_DistinctExpr
+        | NodeTag::T_ScalarArrayOpExpr
+        | NodeTag::T_ArrayExpr
+        | NodeTag::T_SQLValueFunction
         | NodeTag::T_SubLink) => {
             match tag {
                 // C: never recurse into the CASE test expression — it was
@@ -417,6 +431,17 @@ fn assign_collations_walker<'mcx>(
                         assign_collations_walker(arg, &mut loccontext)?;
                     }
                 }
+                NodeTag::T_ScalarArrayOpExpr => {
+                    for arg in &node.as_scalar_array_op_expr().unwrap().args {
+                        assign_collations_walker(arg, &mut loccontext)?;
+                    }
+                }
+                NodeTag::T_ArrayExpr => {
+                    for el in &node.as_array_expr().unwrap().elements {
+                        assign_collations_walker(el, &mut loccontext)?;
+                    }
+                }
+                NodeTag::T_SQLValueFunction => {}
                 _ => unreachable!(),
             }
 
@@ -527,6 +552,29 @@ fn assign_collations_walker<'mcx>(
                         .unwrap(),
                     // exprSetCollation(SubLink) is assert-only in C.
                     NodeTag::T_SubLink => {}
+                    // exprSetCollation(ScalarArrayOpExpr) is assert-only
+                    // (boolean result); only inputcollid is written.
+                    NodeTag::T_ScalarArrayOpExpr => {
+                        debug_assert!(!OidIsValid(set_coll));
+                        node.with_mut::<types_nodes::ScalarArrayOpExpr, _>(|s| {
+                            s.inputcollid = input_coll;
+                        })
+                        .unwrap()
+                    }
+                    NodeTag::T_ArrayExpr => node
+                        .with_mut::<types_nodes::ArrayExpr, _>(|a| a.array_collid = set_coll)
+                        .unwrap(),
+                    NodeTag::T_SQLValueFunction => {
+                        debug_assert!(
+                            if node.as_sql_value_function().unwrap().r#type
+                                == types_core::catalog::NAMEOID
+                            {
+                                set_coll == types_core::catalog::C_COLLATION_OID
+                            } else {
+                                !OidIsValid(set_coll)
+                            }
+                        );
+                    }
                     _ => unreachable!(),
                 }
             }
