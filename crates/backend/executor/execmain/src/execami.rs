@@ -7,8 +7,9 @@ use crate::noderesult::ResultState;
 use crate::procnode::PlanStateNode;
 
 /// `ExecSupportsBackwardScan` (execAmi.c). Unlanded node types take C's
-/// default-false arms; the true-returning unlanded ones (Append, Material,
-/// TidScan…) cannot appear in a plan today, so false is never wrongly returned.
+/// default-false arms; the true-returning unlanded ones (Append, TidScan,
+/// SubqueryScan…) cannot appear in a plan today. Material/CteScan match C's
+/// `true`; their runtime backward gaps are loud panics, never silent reads.
 pub fn exec_supports_backward_scan(node: Option<Node<'_>>) -> bool {
     let Some(node) = node else { return false };
     let plan = node.as_plan().expect("plan-tree node has a Plan prefix");
@@ -23,7 +24,12 @@ pub fn exec_supports_backward_scan(node: Option<Node<'_>>) -> bool {
         // amcanbackward: the only live index AM is btree (plancat.c port
         // loud-panics on any other relam before a plan can carry it).
         NodeTag::T_IndexScan | NodeTag::T_IndexOnlyScan => true,
-        NodeTag::T_SeqScan | NodeTag::T_Sort => true,
+        NodeTag::T_SeqScan
+        | NodeTag::T_FunctionScan
+        | NodeTag::T_ValuesScan
+        | NodeTag::T_CteScan
+        | NodeTag::T_Material
+        | NodeTag::T_Sort => true,
         NodeTag::T_Limit => exec_supports_backward_scan(plan.lefttree),
         _ => false,
     }

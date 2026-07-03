@@ -254,11 +254,19 @@ pub fn FetchPortalTargetList<'a, 'mcx>(
         let pstmt = &stmts[primary];
         if pstmt.commandType == CmdType::CMD_UTILITY {
             let tag = pstmt.utilityStmt.map(Node::node_tag);
+            // C FetchStatementTargetList T_FetchStmt arm: MOVE returns NIL;
+            // FETCH recurses into the referenced portal's target list.
             if tag == Some(NodeTag::T_FetchStmt) {
-                panic!(
-                    "FetchStatementTargetList (pquery.c:349): FETCH target-list recursion \
-                     not ported — needs the portalcmds lane + FetchStmt grammar payload"
-                );
+                let fstmt = pstmt
+                    .utilityStmt
+                    .and_then(Node::as_fetch_stmt)
+                    .expect("utilityStmt is FetchStmt");
+                if !fstmt.ismove {
+                    let sub = portalmem::GetPortalByName(fstmt.portalname)
+                        .expect("PortalIsValid(subportal)");
+                    out = FetchPortalTargetList(mcx, &sub.borrow())?;
+                }
+                return Ok(());
             }
             // C FetchStatementTargetList T_ExecuteStmt arm:
             // FetchPreparedStatementTargetList = CachedPlanGetTargetList(plansource, NULL).

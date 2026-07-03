@@ -53,6 +53,11 @@ miscinit_seams = { path = "../../utils/init/miscinit_seams" }
 parallel_seams = { path = "../../access/transam/parallel_seams" }
 pg_sema_seams = { path = "../../port/pg_sema_seams" }
 planner = { path = "../../optimizer/plan/planner" }
+gram_core = { path = "../../parser/gram_core" }
+scan_fgram = { path = "../../parser/scan_fgram" }
+parser_seams = { path = "../../parser/parser_seams" }
+parse_expr = { path = "../../parser/parse_expr" }
+parser_analyze = { path = "../../parser/parser_analyze" }
 pmsignal_seams = { path = "../../storage/ipc/pmsignal_seams" }
 postgres_seams = { path = "../../tcop/postgres_seams" }
 pqcomm_seams = { path = "../../libpq/pqcomm_seams" }

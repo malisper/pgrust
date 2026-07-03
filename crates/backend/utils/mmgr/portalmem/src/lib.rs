@@ -99,8 +99,7 @@ struct PortalManager {
 }
 
 thread_local! {
-    // ManuallyDrop keeps the TLS payload !needs_drop; C's TopPortalContext
-    // lives for the whole backend anyway.
+    // ManuallyDrop keeps the TLS payload !needs_drop (backend-lifetime in C too).
     static PORTAL_MGR: RefCell<Option<ManuallyDrop<PortalManager>>> =
         const { RefCell::new(None) };
 }
@@ -216,6 +215,7 @@ pub fn CreatePortal(name: &str, allowDup: bool, dupSilent: bool) -> PgResult<Por
             qc: QueryCompletion::default(),
             stmts: StmtListHandle::NULL,
             cplan: CachedPlanHandle::NULL,
+            planContext: core::ptr::null_mut(),
             portalParams: ParamListHandle::NULL,
             queryEnv: QueryEnvHandle::NULL,
             strategy: PORTAL_MULTI_QUERY,
@@ -473,6 +473,7 @@ pub fn PortalDrop(portal: &Portal<'static>, isTopCommit: bool) -> PgResult<()> {
 
     release_portal_registry_handles(portal);
     PortalReleaseCachedPlan(portal);
+    free_plan_context(portal);
 
     let resowner = portal.borrow().resowner;
     let hold_snapshot = portal.borrow_mut().holdSnapshot.take();
@@ -535,6 +536,24 @@ pub fn PortalDrop(portal: &Portal<'static>, isTopCommit: bool) -> PgResult<()> {
         }
     });
     Ok(())
+}
+
+/// portalcmds.c:109's copy-into-portalContext analog: the portal owns the plan's arena.
+pub fn PortalAttachPlanContext(portal: &Portal<'static>, ctx: Box<MemoryContext>) {
+    let mut p = portal.borrow_mut();
+    assert!(p.planContext.is_null(), "portal already owns a plan context");
+    p.planContext = Box::into_raw(ctx);
+}
+
+fn free_plan_context(portal: &Portal<'static>) {
+    let ctx = {
+        let mut p = portal.borrow_mut();
+        core::mem::replace(&mut p.planContext, core::ptr::null_mut())
+    };
+    if !ctx.is_null() {
+        // SAFETY: PortalAttachPlanContext's Box::into_raw, nulled above.
+        drop(unsafe { Box::from_raw(ctx) });
+    }
 }
 
 pub fn PortalHashTableDeleteAll() -> PgResult<()> {

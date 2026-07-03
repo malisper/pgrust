@@ -60,16 +60,11 @@ pub enum PortalStatus {
 
 pub use PortalStatus::*;
 
-pub const CURSOR_OPT_BINARY: i32 = 0x0001;
-pub const CURSOR_OPT_SCROLL: i32 = 0x0002;
-pub const CURSOR_OPT_NO_SCROLL: i32 = 0x0004;
-pub const CURSOR_OPT_INSENSITIVE: i32 = 0x0008;
-pub const CURSOR_OPT_ASENSITIVE: i32 = 0x0010;
-pub const CURSOR_OPT_HOLD: i32 = 0x0020;
-pub const CURSOR_OPT_FAST_PLAN: i32 = 0x0100;
-pub const CURSOR_OPT_GENERIC_PLAN: i32 = 0x0200;
-pub const CURSOR_OPT_CUSTOM_PLAN: i32 = 0x0400;
-pub const CURSOR_OPT_PARALLEL_OK: i32 = 0x0800;
+pub use ::types_nodes::parsenodes::{
+    CURSOR_OPT_ASENSITIVE, CURSOR_OPT_BINARY, CURSOR_OPT_CUSTOM_PLAN, CURSOR_OPT_FAST_PLAN,
+    CURSOR_OPT_GENERIC_PLAN, CURSOR_OPT_HOLD, CURSOR_OPT_INSENSITIVE, CURSOR_OPT_NO_SCROLL,
+    CURSOR_OPT_PARALLEL_OK, CURSOR_OPT_SCROLL,
+};
 
 // MAX_PORTALNAME_LEN (portalmem.c) == NAMEDATALEN.
 pub const MAX_PORTALNAME_LEN: usize = 64;
@@ -128,6 +123,8 @@ pub struct PortalData<'mcx> {
     pub qc: QueryCompletion,
     pub stmts: StmtListHandle,
     pub cplan: CachedPlanHandle,
+    // DECLARE's plan arena, C's copy-into-portalContext analog (leaked Box; PortalDrop reclaims).
+    pub planContext: *mut MemoryContext,
 
     pub portalParams: ParamListHandle,
     pub queryEnv: QueryEnvHandle,
@@ -180,10 +177,9 @@ impl<'mcx> Portal<'mcx> {
         Rc::ptr_eq(&self.0, &other.0)
     }
 
-    /// True iff this is the only handle (no other clone can observe a reuse).
-    /// Portal-slot recycling gate: portalmem parks dropped portals and only
-    /// overwrites one whose every outstanding clone is gone (C pfrees the
-    /// PortalData into an aset freelist; this is that reuse, made alias-safe).
+    /// True iff this is the only handle: portalmem's slot-recycling gate —
+    /// a parked portal is overwritten only when every outstanding clone is
+    /// gone (C's pfree-into-aset-freelist reuse, made alias-safe).
     pub fn is_unique(&self) -> bool {
         Rc::strong_count(&self.0) == 1
     }

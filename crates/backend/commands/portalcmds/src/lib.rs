@@ -3,7 +3,7 @@
 #![allow(non_snake_case)]
 
 use ::elog::ereport;
-use ::mcx::{Mcx, PgBox};
+use ::mcx::{Mcx, MemoryContext, PgBox};
 use ::types_error::{
     PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_CURSOR_NAME,
     ERRCODE_UNDEFINED_CURSOR, ERROR,
@@ -27,9 +27,10 @@ pub fn init_seams() {
     portalcmds_seams::persist_holdable_portal::set(PersistHoldablePortal);
 }
 
-pub fn PerformCursorOpen<'mcx>(
-    mcx: Mcx<'mcx>,
-    cstmt: &DeclareCursorStmt<'mcx>,
+pub fn PerformCursorOpen(
+    _mcx: Mcx<'_>,
+    cstmt: &DeclareCursorStmt<'_>,
+    stmt_text: &str,
     source_text: &str,
     params: ParamListHandle,
     is_top_level: bool,
@@ -52,14 +53,52 @@ pub fn PerformCursorOpen<'mcx>(
     // C: JumbleQuery + post_parse_analyze_hook — compute_query_id is off at
     // boot and no hook surface exists.
 
-    let query_node = cstmt.query.expect("DECLARE CURSOR has a query");
-    // SAFETY: the statement tree is single-owner at utility dispatch and the
-    // Query is consumed exactly as C's QueryRewrite consumes its argument; no
-    // derived refs are live.
+    // C copies the finished plan into portalContext (portalcmds.c:109); node
+    // deep-copy is unported, so the plan is DERIVED inside a portal-owned
+    // arena instead: re-parse this DECLARE's own statement text and run
+    // analyze/rewrite/plan with the arena's Mcx. Identical text under the
+    // same snapshot yields the identical plan; the analysis re-run is the
+    // once-per-DECLARE cost of the missing copyObject. C's error order is
+    // preserved (rewrite/plan errors fire before CreatePortal's 42P03).
+    assert!(
+        params.is_null(),
+        "PerformCursorOpen: DECLARE with outer params needs copyParamList + the \
+         plansource retention lane (re-analysis rejects $n with no param types)"
+    );
+
+    let plan_ctx = Box::new(MemoryContext::new_bump("PortalPlanContext"));
+    // SAFETY: the Box gives the context a stable address; PortalDrop reclaims
+    // it only after the stmts registry handle below is released.
+    let pctx: &'static MemoryContext = unsafe { &*(&*plan_ctx as *const MemoryContext) };
+    let pmcx = pctx.mcx();
+
+    let raw = postgres::pg_parse_query(pmcx, stmt_text)?;
+    assert!(raw.len() == 1, "DECLARE statement slice re-parsed to {} statements", raw.len());
+    let queries = postgres::pg_analyze_and_rewrite_fixedparams(
+        pmcx,
+        &raw[0],
+        stmt_text,
+        &[],
+        types_portal::QueryEnvHandle::NULL,
+    )?;
+    assert!(queries.len() == 1, "DECLARE analysis yielded {} queries", queries.len());
+    let util = queries.into_iter().next().expect("len == 1");
+    let cstmt_node = util
+        .utilityStmt
+        .filter(|n| n.node_tag() == types_nodes::NodeTag::T_DeclareCursorStmt)
+        .expect("re-parsed DECLARE slice is a DeclareCursorStmt");
+    // SAFETY: the re-parsed tree is single-owner here; the Query is consumed
+    // exactly as C's QueryRewrite consumes its argument.
+    let query_node = unsafe {
+        cstmt_node.with_mut::<DeclareCursorStmt, _>(|d| d.query.take())
+    }
+    .flatten()
+    .ok_or_else(non_select_in_declare)?;
+    // SAFETY: as above; no derived refs are live.
     let query = unsafe { query_node.with_mut::<Query, _>(core::mem::take) }
         .ok_or_else(non_select_in_declare)?;
 
-    let rewritten = rewrite_handler_seams::query_rewrite::call(mcx, query)?;
+    let rewritten = rewrite_handler_seams::query_rewrite::call(pmcx, query)?;
     if rewritten.len() != 1 {
         return Err(non_select_in_declare());
     }
@@ -68,18 +107,14 @@ pub fn PerformCursorOpen<'mcx>(
         return Err(non_select_in_declare());
     }
 
-    let plan = postgres::pg_plan_query(mcx, query, source_text, cstmt.options, params)?
+    let plan = postgres::pg_plan_query(pmcx, query, source_text, cstmt.options, params)?
         .expect("planner output for a SELECT");
 
     let portal = portalmem::CreatePortal(name, false, false)?;
 
-    // C copies the plan + query string into portalContext (portalcmds.c:109);
-    // node clone_in is unported (plancache lane), so the plan stays in the
-    // caller's arena under stmt_list::register's liveness contract — every
-    // caller today (the DECLARE grammar is unported) holds the statement
-    // arena for the portal's life; a violation is a stale-handle panic.
-    let plan: &'mcx PlannedStmt<'mcx> = ::mcx::leak_in(PgBox::new_in(plan, mcx));
-    // SAFETY: `plan` is arena-backed by `mcx`; see the retention note above.
+    let plan: &'static PlannedStmt<'static> = ::mcx::leak_in(PgBox::new_in(plan, pmcx));
+    // SAFETY: `plan` lives in plan_ctx, which the portal owns until PortalDrop
+    // (which releases this handle first).
     let stmts = unsafe { pquery::stmt_list::register(core::slice::from_ref(plan)) };
 
     if let Err(e) = portalmem::PortalDefineQuery(
@@ -94,8 +129,10 @@ pub fn PerformCursorOpen<'mcx>(
         return Err(e);
     }
 
-    // C: params = copyParamList(params) into portalContext — a handle copy
-    // (real param lists loud-panic upstream).
+    portalmem::PortalAttachPlanContext(&portal, plan_ctx);
+
+    // C: params = copyParamList(params) into portalContext — NULL-asserted
+    // above until the plansource retention lane.
 
     {
         let mut p = portal.borrow_mut();

@@ -3,7 +3,7 @@ use tcop_dest::DestReceiver;
 use types_error::PgResult;
 use types_nodes::node_tree::Node;
 use types_nodes::nodes_enums::CmdType;
-use types_nodes::parsenodes::{DeclareCursorStmt, ExplainStmt};
+use types_nodes::parsenodes::ExplainStmt;
 use types_nodes::parsenodes::TransactionStmtKind::*;
 use types_nodes::plannodes::PlannedStmt;
 use types_nodes::NodeTag;
@@ -137,12 +137,6 @@ unsafe fn unify_stmt_lifetime<'u>(s: &ExplainStmt<'_>) -> &'u ExplainStmt<'u> {
     unsafe { core::mem::transmute::<&ExplainStmt<'_>, &'u ExplainStmt<'u>>(s) }
 }
 
-// Same retention contract, PerformCursorOpen's copy-into-portal note applies
-// on top (portalcmds.c:109).
-unsafe fn unify_cursor_lifetime<'u>(s: &DeclareCursorStmt<'_>) -> &'u DeclareCursorStmt<'u> {
-    unsafe { core::mem::transmute::<&DeclareCursorStmt<'_>, &'u DeclareCursorStmt<'u>>(s) }
-}
-
 // Same retention contract: EvaluateParams transforms the raw param exprs in
 // the statement arena, which outlives the utility call.
 unsafe fn unify_execute_lifetime<'u>(
@@ -241,9 +235,15 @@ fn dispatch_switch<'mcx>(
 
         T_DeclareCursorStmt => {
             let stmt = parsetree.as_declare_cursor_stmt().unwrap();
-            // SAFETY: see unify_cursor_lifetime.
-            let stmt = unsafe { unify_cursor_lifetime(stmt) };
-            portalcmds::PerformCursorOpen(mcx, stmt, source_text, params, is_top_level)?;
+            // This DECLARE's own slice of the (possibly multi-statement)
+            // source text; PerformCursorOpen re-derives its plan from it.
+            let loc = pstmt.stmt_location.max(0) as usize;
+            let stmt_text = if pstmt.stmt_len > 0 {
+                &source_text[loc..loc + pstmt.stmt_len as usize]
+            } else {
+                &source_text[loc..]
+            };
+            portalcmds::PerformCursorOpen(mcx, stmt, stmt_text, source_text, params, is_top_level)?;
         }
         T_ClosePortalStmt => {
             let stmt = parsetree.as_close_portal_stmt().unwrap();

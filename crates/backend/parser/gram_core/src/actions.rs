@@ -1,11 +1,13 @@
 use types_core::catalog::RELPERSISTENCE_PERMANENT;
 use types_error::PgResult;
 use types_nodes::parsenodes::{
-    CTEMaterialize, CommonTableExpr, CopyStmt, DeallocateStmt, DefElem, DefElemAction,
-    CommentStmt, CreateSchemaStmt, DiscardMode, DiscardStmt, DropBehavior, DropStmt,
-    ExecuteStmt, ListenStmt, NotifyStmt, ObjectType, PrepareStmt, TransactionStmt,
-    TransactionStmtKind, TruncateStmt, UnlistenStmt, VacuumRelation, VacuumStmt,
-    VariableSetKind, VariableSetStmt, VariableShowStmt, WithClause,
+    CTEMaterialize, ClosePortalStmt, CommentStmt, CommonTableExpr, CopyStmt, CreateSchemaStmt,
+    DeallocateStmt, DeclareCursorStmt, DefElem, DefElemAction, DiscardMode, DiscardStmt,
+    DropBehavior, DropStmt, ExecuteStmt, FetchStmt, ListenStmt, NotifyStmt, ObjectType,
+    PrepareStmt, TransactionStmt, TransactionStmtKind, TruncateStmt, UnlistenStmt, VacuumRelation,
+    VacuumStmt, VariableSetKind, VariableSetStmt, VariableShowStmt, WithClause,
+    CURSOR_OPT_ASENSITIVE, CURSOR_OPT_BINARY, CURSOR_OPT_FAST_PLAN, CURSOR_OPT_HOLD,
+    CURSOR_OPT_INSENSITIVE, CURSOR_OPT_NO_SCROLL, CURSOR_OPT_SCROLL, FETCH_ALL,
 };
 use types_nodes::primnodes::{CaseExpr, CaseWhen, CoalesceExpr, JoinExpr, MinMaxExpr, MinMaxOp};
 use types_nodes::JoinType;
@@ -1765,6 +1767,79 @@ impl<'mcx> Parser<'mcx> {
                 let n = Node::mk(mcx, DeallocateStmt { name: None, isall: true, location: -1 })?;
                 *yyval = YYSTYPE::Node(Some(n));
             }
+            // ClosePortalStmt: CLOSE cursor_name | CLOSE ALL.
+            407 => {
+                let n = Node::mk(mcx, ClosePortalStmt { portalname: Some(view.v(2).str_val()) })?;
+                *yyval = YYSTYPE::Node(Some(n));
+            }
+            408 => {
+                let n = Node::mk(mcx, ClosePortalStmt { portalname: None })?;
+                *yyval = YYSTYPE::Node(Some(n));
+            }
+            // FetchStmt: FETCH fetch_args | MOVE fetch_args.
+            1005 | 1006 => {
+                let node = view.v(2).node().expect("fetch_args");
+                let ismove = rule == 1006;
+                // SAFETY: tree is parser-owned; no derived refs live.
+                unsafe {
+                    node.with_mut::<FetchStmt, _>(|f| f.ismove = ismove)
+                        .expect("fetch_args is FetchStmt");
+                }
+                *yyval = YYSTYPE::Node(Some(node));
+            }
+            // fetch_args: all sixteen direction forms (gram.y 7462-7623).
+            1007..=1022 => {
+                use types_nodes::parsenodes::FetchDirection::*;
+                let (name_slot, direction, how_many) = match rule {
+                    1007 => (1, FETCH_FORWARD, 1),
+                    1008 => (2, FETCH_FORWARD, 1),
+                    1009 => (3, FETCH_FORWARD, 1),
+                    1010 => (3, FETCH_BACKWARD, 1),
+                    1011 => (3, FETCH_ABSOLUTE, 1),
+                    1012 => (3, FETCH_ABSOLUTE, -1),
+                    1013 => (4, FETCH_ABSOLUTE, view.v(2).ival() as i64),
+                    1014 => (4, FETCH_RELATIVE, view.v(2).ival() as i64),
+                    1015 => (3, FETCH_FORWARD, view.v(1).ival() as i64),
+                    1016 => (3, FETCH_FORWARD, FETCH_ALL),
+                    1017 => (3, FETCH_FORWARD, 1),
+                    1018 => (4, FETCH_FORWARD, view.v(2).ival() as i64),
+                    1019 => (4, FETCH_FORWARD, FETCH_ALL),
+                    1020 => (3, FETCH_BACKWARD, 1),
+                    1021 => (4, FETCH_BACKWARD, view.v(2).ival() as i64),
+                    _ => (4, FETCH_BACKWARD, FETCH_ALL),
+                };
+                let n = Node::mk(
+                    mcx,
+                    FetchStmt {
+                        direction,
+                        howMany: how_many,
+                        portalname: Some(view.v(name_slot).str_val()),
+                        ismove: false,
+                    },
+                )?;
+                *yyval = YYSTYPE::Node(Some(n));
+            }
+            // DeclareCursorStmt: DECLARE cursor_name cursor_options CURSOR
+            // opt_hold FOR SelectStmt; FAST_PLAN always set (gram.y 12756).
+            1694 => {
+                let n = Node::mk(
+                    mcx,
+                    DeclareCursorStmt {
+                        portalname: Some(view.v(2).str_val()),
+                        options: view.v(3).ival() | view.v(5).ival() | CURSOR_OPT_FAST_PLAN,
+                        query: view.v(7).node(),
+                    },
+                )?;
+                *yyval = YYSTYPE::Node(Some(n));
+            }
+            1696 => *yyval = YYSTYPE::Ival(0),
+            1697 => *yyval = YYSTYPE::Ival(view.v(1).ival() | CURSOR_OPT_NO_SCROLL),
+            1698 => *yyval = YYSTYPE::Ival(view.v(1).ival() | CURSOR_OPT_SCROLL),
+            1699 => *yyval = YYSTYPE::Ival(view.v(1).ival() | CURSOR_OPT_BINARY),
+            1700 => *yyval = YYSTYPE::Ival(view.v(1).ival() | CURSOR_OPT_ASENSITIVE),
+            1701 => *yyval = YYSTYPE::Ival(view.v(1).ival() | CURSOR_OPT_INSENSITIVE),
+            1702 | 1704 => *yyval = YYSTYPE::Ival(0),
+            1703 => *yyval = YYSTYPE::Ival(CURSOR_OPT_HOLD),
             2299 => {
                 let t = view.v(1).node().expect("Typename");
                 *yyval = YYSTYPE::List(NodeList::make1(mcx, t)?);
