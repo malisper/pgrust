@@ -1,12 +1,12 @@
 // nodeSeqscan.c. ExecProcNode dispatch is the variant enum resolved once at
-// init (C installs one of five function pointers). Parallel-scan entries and
-// the EPQ variant loud-panic pending DSM/shm_toc and execMain's EPQState.
+// init (C installs one of five function pointers). Parallel-scan entries
+// loud-panic pending DSM/shm_toc.
 #![allow(non_snake_case)]
 
 extern crate alloc;
 
 use ::execexpr::exec_init_qual;
-use ::execscan::{exec_scan_extended, ScanNode, ScanState};
+use ::execscan::{exec_scan_epq, exec_scan_extended, ScanNode, ScanState};
 use ::executils::{EStateData, ExecSlotId};
 use ::mcx::{Mcx, PgVec};
 use ::tableam::{
@@ -48,6 +48,16 @@ impl<'mcx> ScanNode<'mcx> for SeqScanState<'mcx> {
         &mut self.ss
     }
 
+    /// `SeqRecheck`: seqscans have no access-method conditions to re-verify.
+    #[inline(always)]
+    fn epq_recheck(
+        &mut self,
+        _estate: &mut EStateData<'mcx>,
+        _slot: ExecSlotId,
+    ) -> PgResult<bool> {
+        Ok(true)
+    }
+
     /// `SeqNext`.
     #[inline(always)]
     fn scan_next(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<bool> {
@@ -84,14 +94,8 @@ pub fn exec_seq_scan<'mcx>(
         SeqScanVariant::WithQual => exec_scan_extended::<_, true, false>(node, estate),
         SeqScanVariant::WithProject => exec_scan_extended::<_, false, true>(node, estate),
         SeqScanVariant::WithQualProject => exec_scan_extended::<_, true, true>(node, estate),
-        SeqScanVariant::Epq => exec_seq_scan_epq(),
+        SeqScanVariant::Epq => exec_scan_epq(node, estate),
     }
-}
-
-#[cold]
-#[inline(never)]
-fn exec_seq_scan_epq() -> ! {
-    panic!("nodeseqscan: ExecSeqScanEPQ pending execMain EPQState")
 }
 
 /// `ExecInitSeqScan`; opens the scan relation through the estate range table.
@@ -159,12 +163,15 @@ pub fn exec_init_seq_scan_rel<'mcx>(
     execscan::exec_assign_scan_projection_info(mcx, estate, &mut ss, &node.scan.plan.targetlist)?;
     ss.qual = exec_init_qual(mcx, &node.scan.plan.qual, estate.param_bind())?;
 
-    // es_epq_active selection arm lands with execMain's EPQState.
-    let variant = match (ss.qual.is_some(), ss.ps_ProjInfo.is_some()) {
-        (false, false) => SeqScanVariant::Plain,
-        (true, false) => SeqScanVariant::WithQual,
-        (false, true) => SeqScanVariant::WithProject,
-        (true, true) => SeqScanVariant::WithQualProject,
+    let variant = if estate.es_epq_active {
+        SeqScanVariant::Epq
+    } else {
+        match (ss.qual.is_some(), ss.ps_ProjInfo.is_some()) {
+            (false, false) => SeqScanVariant::Plain,
+            (true, false) => SeqScanVariant::WithQual,
+            (false, true) => SeqScanVariant::WithProject,
+            (true, true) => SeqScanVariant::WithQualProject,
+        }
     };
     Ok(SeqScanState { ss, variant })
 }

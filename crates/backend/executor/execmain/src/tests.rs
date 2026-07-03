@@ -3009,3 +3009,186 @@ fn window_agg_empty_input_end_to_end() {
     });
     scanfix::quiesced();
 }
+
+// mk_seqscan_pstmt over a 2-col rel with qual `a = 1` (int4eq).
+fn mk_epq_update_subplan_pstmt<'mcx>(
+    mcx: ::mcx::Mcx<'mcx>,
+    relid: u32,
+) -> &'mcx PlannedStmt<'mcx> {
+    use ::types_nodes::bitmapset::Bitmapset;
+    use ::types_nodes::parsenodes::{RTEKind, RTEPermissionInfo, RangeTblEntry};
+    use ::types_nodes::plannodes::{Plan, Scan, SeqScan};
+    use ::types_nodes::primnodes::OpExpr;
+    const INT4OID: u32 = 23;
+    const BOOLOID: u32 = 16;
+    const F_INT4EQ: u32 = 65;
+
+    let var_a = Node::mk_var(mcx, 1, 1, INT4OID, -1, 0, 0).unwrap();
+    let var_b = Node::mk_var(mcx, 1, 2, INT4OID, -1, 0, 0).unwrap();
+    let tle1 = Node::mk_target_entry(mcx, var_a, 1, Some("a"), false).unwrap();
+    let tle2 = Node::mk_target_entry(mcx, var_b, 2, Some("b"), false).unwrap();
+    // The junk column forces a projection, like a real UPDATE subplan's ctid.
+    let var_j = Node::mk_var(mcx, 1, 1, INT4OID, -1, 0, 0).unwrap();
+    let tle3 = Node::mk_target_entry(mcx, var_j, 3, Some("junk"), true).unwrap();
+    let mut tlist = NodeList::make2(mcx, tle1, tle2).unwrap();
+    tlist.lappend(mcx, tle3).unwrap();
+
+    let qual_var = Node::mk_var(mcx, 1, 1, INT4OID, -1, 0, 0).unwrap();
+    let qual_const = Node::mk_const(
+        mcx, INT4OID, -1, 0, 4, Datum::from_i32(1), false, true,
+    )
+    .unwrap();
+    let args = NodeList::make2(mcx, qual_var, qual_const).unwrap();
+    let op = Node::mk(
+        mcx,
+        OpExpr {
+            opno: 96,
+            opfuncid: F_INT4EQ,
+            opresulttype: BOOLOID,
+            opretset: false,
+            opcollid: 0,
+            inputcollid: 0,
+            args,
+            location: -1,
+        },
+    )
+    .unwrap();
+    let qual = NodeList::make1(mcx, op).unwrap();
+
+    let scan_node = Node::mk(
+        mcx,
+        SeqScan {
+            scan: Scan {
+                plan: Plan { targetlist: tlist, qual, ..Default::default() },
+                scanrelid: 1,
+            },
+        },
+    )
+    .unwrap();
+
+    let rte = Node::mk(
+        mcx,
+        RangeTblEntry {
+            rtekind: RTEKind::RTE_RELATION,
+            relid,
+            relkind: ::types_rel::RELKIND_RELATION,
+            rellockmode: ::types_rel::AccessShareLock,
+            perminfoindex: 1,
+            inFromCl: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let perminfo = Node::mk(
+        mcx,
+        RTEPermissionInfo { relid, requiredPerms: 1 << 1, ..Default::default() },
+    )
+    .unwrap();
+    let mut unpruned = Bitmapset::empty();
+    unpruned.add_member(mcx, 1).unwrap();
+
+    let mut pstmt = Node::build::<PlannedStmt>(mcx).unwrap();
+    pstmt.commandType = CmdType::CMD_SELECT;
+    pstmt.canSetTag = true;
+    pstmt.planTree = Some(scan_node);
+    pstmt.rtable = NodeList::make1(mcx, rte).unwrap();
+    pstmt.permInfos = NodeList::make1(mcx, perminfo).unwrap();
+    pstmt.unprunableRelids = unpruned;
+    pstmt.seal_ref()
+}
+
+fn epq_store_test_tuple(
+    estate: &mut EStateData<'_>,
+    slot: ::executils::ExecSlotId,
+    a: i32,
+    b: i32,
+) {
+    let mcx = estate.es_query_cxt;
+    let s = estate.slot_mut(slot);
+    exectuples::exec_clear_tuple(s, mcx);
+    {
+        let base = s.base_mut();
+        base.tts_values[0] = Datum::from_i32(a);
+        base.tts_isnull[0] = false;
+        base.tts_values[1] = Datum::from_i32(b);
+        base.tts_isnull[1] = false;
+    }
+    exectuples::exec_store_virtual_tuple(s);
+}
+
+fn epq_slot_vals(estate: &mut EStateData<'_>, slot: ::executils::ExecSlotId) -> (i32, i32) {
+    let s = estate.slot_mut(slot);
+    let mut isnull = false;
+    let a = exectuples::slot_getattr(s, 1, &mut isnull).as_i32();
+    assert!(!isnull);
+    let b = exectuples::slot_getattr(s, 2, &mut isnull).as_i32();
+    assert!(!isnull);
+    (a, b)
+}
+
+// EvalPlanQual over a SeqScan recheck: the test tuple is substituted for the
+// scan, the plan qual (a = 1) decides proceed/skip, and the second call
+// exercises EvalPlanQualBegin's reset+rescan arm.
+#[test]
+fn eval_plan_qual_recheck_over_seqscan() {
+    install_seams();
+    scanfix::install();
+    let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mcx = leaked_mcx();
+
+    let relid: u32 = 70021;
+    scanfix::register_table_2col(relid, &[&[(1, 10), (2, 20)]]);
+    let pstmt = mk_epq_update_subplan_pstmt(mcx, relid);
+
+    let snap_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("snap")));
+    let snapshot: snapmgr::Snapshot = std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
+        snap_ctx.mcx(),
+        ::types_snapshot::SnapshotType::SNAPSHOT_MVCC,
+    ));
+
+    with_exec_data(pstmt, |data, pstmt| {
+        data.estate.es_snapshot = Some(snapshot);
+        crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap();
+        let ExecData { estate, planstate } = data;
+
+        let mut epq = crate::epq::EpqState {
+            plan: pstmt.planTree,
+            recheck: None,
+            result_rti: 1,
+        };
+        estate.epq_ensure(1);
+        let desc = estate.es_relations[0].as_ref().unwrap().rd_att.clone();
+        let test = estate.exec_init_extra_tuple_slot(
+            Some(desc),
+            ::types_slot::TupleSlotKind::Virtual,
+        );
+        estate.es_epq.as_mut().unwrap().relsubs_slot[0] = Some(test);
+
+        // Latest version still matches the qual: proceed with (1, 99).
+        epq_store_test_tuple(estate, test, 1, 99);
+        let got = crate::epq::eval_plan_qual(&mut epq, estate, test).unwrap();
+        let got = got.expect("qual passes; EPQ returns the candidate tuple");
+        assert_ne!(got, test, "projection result, not the test slot");
+        assert_eq!(epq_slot_vals(estate, got), (1, 99));
+        assert!(estate.slot(test).base().is_empty(), "test slot cleared after EPQ");
+        assert!(!estate.es_epq_active, "flag dropped outside the recheck run");
+
+        // Reset path: latest version no longer matches -> skip.
+        epq_store_test_tuple(estate, test, 2, 99);
+        assert!(crate::epq::eval_plan_qual(&mut epq, estate, test).unwrap().is_none());
+
+        // And matches again on a third round.
+        epq_store_test_tuple(estate, test, 1, 5);
+        let got = crate::epq::eval_plan_qual(&mut epq, estate, test).unwrap();
+        assert_eq!(epq_slot_vals(estate, got.expect("passes")), (1, 5));
+
+        crate::epq::eval_plan_qual_end(&mut epq, estate).unwrap();
+        assert!(epq.recheck.is_none());
+
+        let ps = planstate.as_mut().unwrap();
+        crate::exec_end_node(ps, estate).unwrap();
+        estate.exec_reset_tuple_table(false);
+        estate.exec_close_range_table_relations().unwrap();
+    });
+    scanfix::quiesced();
+}

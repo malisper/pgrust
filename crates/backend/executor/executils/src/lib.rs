@@ -258,6 +258,16 @@ pub struct EStateData<'mcx> {
     pub es_parallel_workers_to_launch: i32,
     pub es_parallel_workers_launched: i32,
     pub es_jit_flags: i32,
+    // C EPQState.relsubs_*, hosted on the (shared) estate — no child EState.
+    pub es_epq: Option<EpqSubs<'mcx>>,
+    // C `es_epq_active != NULL`; scan nodes select their EPQ variant on it.
+    pub es_epq_active: bool,
+}
+
+pub struct EpqSubs<'mcx> {
+    pub relsubs_slot: PgVec<'mcx, Option<ExecSlotId>>,
+    pub relsubs_done: PgVec<'mcx, bool>,
+    pub relsubs_blocked: PgVec<'mcx, bool>,
 }
 
 impl<'mcx> EStateData<'mcx> {
@@ -309,7 +319,29 @@ impl<'mcx> EStateData<'mcx> {
             es_parallel_workers_to_launch: 0,
             es_parallel_workers_launched: 0,
             es_jit_flags: 0,
+            es_epq: None,
+            es_epq_active: false,
         }
+    }
+
+    /// `EvalPlanQualInit` relsubs alloc, deferred to first EPQ use;
+    /// `result_rti` starts blocked (C EvalPlanQualStart).
+    pub fn epq_ensure(&mut self, result_rti: u32) -> &mut EpqSubs<'mcx> {
+        if self.es_epq.is_none() {
+            let mcx = self.es_query_cxt;
+            let n = self.es_range_table_size as usize;
+            debug_assert!(result_rti >= 1 && result_rti as usize <= n);
+            let mut relsubs_slot = PgVec::new_in(mcx);
+            relsubs_slot.resize(n, None);
+            let mut relsubs_done = PgVec::new_in(mcx);
+            relsubs_done.resize(n, false);
+            let mut relsubs_blocked = PgVec::new_in(mcx);
+            relsubs_blocked.resize(n, false);
+            relsubs_blocked[(result_rti - 1) as usize] = true;
+            relsubs_done[(result_rti - 1) as usize] = true;
+            self.es_epq = Some(EpqSubs { relsubs_slot, relsubs_done, relsubs_blocked });
+        }
+        self.es_epq.as_mut().expect("just ensured")
     }
 
     /// `CreateExprContext(estate)`.
