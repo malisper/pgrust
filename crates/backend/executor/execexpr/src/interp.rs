@@ -529,6 +529,10 @@ fn run_program<'mcx>(
                 )?;
                 write_out(*out, &mut regs, value, isnull);
             }
+            Step::RowExprStep { elems, nelems, frame, desc, out } => {
+                let (value, isnull) = eval_row_expr(frames, *elems, *nelems, *frame, *desc)?;
+                write_out(*out, &mut regs, value, isnull);
+            }
             Step::FuncExprStrict1 { call, out } => {
                 // SAFETY: arg 0 of the call's live fcinfo image.
                 let a0 = unsafe { crate::steps::arg_slot_of(call.fcinfo, 0).read() };
@@ -1117,6 +1121,35 @@ fn eval_scalar_array_op(
         return Ok((Datum::null(), true));
     }
     Ok((Datum::from_bool(result), false))
+}
+
+// C ExecEvalRow (execExprInterp.c): form the composite in the armed
+// per-eval result context; the header carries the blessed RECORD typmod.
+fn eval_row_expr(
+    frames: &mut [crate::steps::FuncFrame<'_>],
+    elems: core::ptr::NonNull<NullableDatum>,
+    nelems: u16,
+    frame: u32,
+    desc: core::ptr::NonNull<::types_tuple::TupleDescData<'static>>,
+) -> PgResult<(Datum, bool)> {
+    let f = &mut frames[frame as usize];
+    // SAFETY: the argless frame's fcinfo image is live; armed per eval.
+    let mcx = unsafe { fcinfo_mut(f.fcinfo, 0) }.result_mcx();
+    let n = nelems as usize;
+    // SAFETY: n scratch slots written by the element steps just executed.
+    let src = unsafe { core::slice::from_raw_parts(elems.as_ptr(), n) };
+    let mut values: ::mcx::PgVec<'_, Datum> = ::mcx::vec_with_capacity_in(mcx, n)?;
+    let mut nulls: ::mcx::PgVec<'_, bool> = ::mcx::vec_with_capacity_in(mcx, n)?;
+    for nd in src {
+        values.push(nd.value);
+        nulls.push(nd.isnull);
+    }
+    // SAFETY: the compile-time blessed tupdesc is plan-mcx-lived.
+    let desc = unsafe { desc.as_ref() };
+    let tuple = ::heaptuple::heap_form_tuple(mcx, desc, &values, &nulls)?;
+    let d = Datum::from_usize(tuple.image().as_ptr() as usize);
+    core::mem::forget(tuple);
+    Ok((d, false))
 }
 
 // ExecEvalArrayExpr (execExprInterp.c), 1-D leg; the result array lives in

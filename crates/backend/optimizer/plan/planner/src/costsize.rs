@@ -151,6 +151,12 @@ fn cost_qual_eval_walker(node: Node<'_>, cost: &mut QualCost) -> PgResult<()> {
             }
             Ok(())
         }
+        NodeTag::T_RowExpr => {
+            for e in node.as_row_expr().unwrap().args.iter() {
+                cost_qual_eval_walker(e, cost)?;
+            }
+            Ok(())
+        }
         NodeTag::T_NullTest => match node.as_null_test().unwrap().arg {
             Some(arg) => cost_qual_eval_walker(arg, cost),
             None => Ok(()),

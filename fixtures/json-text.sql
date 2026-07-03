@@ -212,13 +212,13 @@ select json_agg(j -> 'x') from jagg where g = 1;
 select json_object_agg(k, to_json(n)) from jagg where g = 2;
 drop table jagg;
 
--- to_json over table composites
+-- to_json over table-fed composites (whole-row refs are the wholerow lane)
 create table jrow(a int, txt text);
 insert into jrow values (1, 'one'), (2, null);
-select row_to_json(jrow) from jrow;
-select to_json(jrow) from jrow;
-select json_agg(jrow) from jrow;
-select array_to_json(array_agg(jrow)) from jrow;
+select row_to_json(row(a, txt)) from jrow;
+select to_json(row(a, txt)) from jrow;
+select json_agg(row(a, txt)) from jrow;
+select array_to_json(array_agg(row(a, txt))) from jrow;
 drop table jrow;
 
 -- operator + builder composition

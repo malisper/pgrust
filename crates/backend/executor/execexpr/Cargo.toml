@@ -17,6 +17,7 @@ types_tuple = { path = "../../../_support/types/types_tuple" }
 fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
 adt_date = { path = "../../utils/adt/adt_date" }
 adt_timestamp = { path = "../../utils/adt/adt_timestamp" }
+tupdesc = { path = "../../access/common/tupdesc" }
 typcache = { path = "../../utils/cache/typcache" }
 format_type = { path = "../../utils/adt/format_type" }
 exectuples = { path = "../exectuples" }

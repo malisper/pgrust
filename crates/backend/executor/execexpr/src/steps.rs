@@ -124,6 +124,15 @@ pub enum Step {
         elmalign: u8,
         out: OutRef,
     },
+    // C EEOP_ROWEXPR: elements evaluate into `elems`; `desc` is the blessed
+    // anonymous-RECORD tupdesc, arena-lived for the plan.
+    RowExprStep {
+        elems: NonNull<NullableDatum>,
+        nelems: u16,
+        frame: u32,
+        desc: NonNull<::types_tuple::TupleDescData<'static>>,
+        out: OutRef,
+    },
     // C EEOP_AGG_STRICT_INPUT_CHECK_ARGS(_1): args = fcinfo args[1..].
     AggStrictInputCheck { args: NonNull<NullableDatum>, nargs: u16, jumpnull: u32 },
     // Ordered/DISTINCT agg row survived filter+strict checks: flag it for

@@ -284,6 +284,22 @@ fn ece_mutator<'mcx>(node: Node<'mcx>, cx: &EceContext<'mcx>) -> PgResult<Option
             }
             Ok(Some(new_node))
         }
+        NodeTag::T_RowExpr => {
+            let r = node.as_row_expr().unwrap();
+            match mutate_list(cx.mcx, &r.args, &mut |n| ece_mutator(n, cx))? {
+                None => Ok(None),
+                Some(args) => Ok(Some(Node::mk(
+                    cx.mcx,
+                    types_nodes::primnodes::RowExpr {
+                        args,
+                        row_typeid: r.row_typeid,
+                        row_format: r.row_format,
+                        colnames: r.colnames.clone_in(cx.mcx)?,
+                        location: r.location,
+                    },
+                )?)),
+            }
+        }
         NodeTag::T_ArrayExpr => {
             use types_nodes::primnodes::ArrayExpr;
             let a = node.as_array_expr().unwrap();

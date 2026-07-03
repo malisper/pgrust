@@ -276,6 +276,7 @@ fn assign_collations_walker<'mcx>(
         tag @ (NodeTag::T_OpExpr
         | NodeTag::T_ScalarArrayOpExpr
         | NodeTag::T_ArrayExpr
+        | NodeTag::T_RowExpr
         | NodeTag::T_FuncExpr
         | NodeTag::T_RelabelType
         | NodeTag::T_CoerceViaIO
@@ -331,6 +332,11 @@ fn assign_collations_walker<'mcx>(
                 }
                 NodeTag::T_ArrayExpr => {
                     for e in &node.as_array_expr().unwrap().elements {
+                        assign_collations_walker(e, &mut loccontext)?;
+                    }
+                }
+                NodeTag::T_RowExpr => {
+                    for e in &node.as_row_expr().unwrap().args {
                         assign_collations_walker(e, &mut loccontext)?;
                     }
                 }
@@ -452,6 +458,9 @@ fn assign_collations_walker<'mcx>(
                     NodeTag::T_ArrayExpr => node
                         .with_mut::<types_nodes::ArrayExpr, _>(|a| a.array_collid = set_coll)
                         .unwrap(),
+                    // exprSetCollation(RowExpr) is assert-only in C (RECORD
+                    // is not collatable).
+                    NodeTag::T_RowExpr => debug_assert!(!OidIsValid(set_coll)),
                     NodeTag::T_FuncExpr => node
                         .with_mut::<types_nodes::FuncExpr, _>(|f| {
                             f.funccollid = set_coll;

@@ -1699,6 +1699,9 @@ pub fn expression_returns_set(node: Node<'_>) -> bool {
         NodeTag::T_ArrayExpr => {
             node.as_array_expr().unwrap().elements.iter().any(expression_returns_set)
         }
+        NodeTag::T_RowExpr => {
+            node.as_row_expr().unwrap().args.iter().any(expression_returns_set)
+        }
         NodeTag::T_RelabelType => expression_returns_set(node.as_relabel_type().unwrap().arg),
         NodeTag::T_NullTest => {
             node.as_null_test().unwrap().arg.is_some_and(expression_returns_set)
