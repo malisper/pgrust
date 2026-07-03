@@ -18,7 +18,7 @@ use ::types_rel::{
     FormData_pg_class, FormData_pg_index, LockInfoData, LockRelId, Relation, RelationData,
     LOCKMODE, RELKIND_INDEX, REPLICA_IDENTITY_DEFAULT,
 };
-use ::types_relscan::IndexScanDescData;
+use ::types_relscan::{IndexScanDescData, IndexScanOpaque};
 use ::types_scan::scankey::{ScanKeyData, BTEqualStrategyNumber, BTGreaterStrategyNumber};
 use ::types_scan::sdir::ForwardScanDirection;
 use ::types_storage::bufpage::SizeOfPageHeaderData;
@@ -392,6 +392,49 @@ fn point_lookup_returns_matching_tids() {
     crate::btendscan(&mut scan).unwrap();
     assert_eq!(PINS.with(Cell::get), 0, "no pins leaked");
     assert_eq!(scan.xs_pgstat_index_scans, 0, "pgstat disabled: no counts");
+}
+
+#[test]
+fn want_itup_publishes_page_copied_tuples() {
+    install();
+    build_single_leaf_index(&[10, 20, 20, 30]);
+    let cx = MemoryContext::new("t");
+    let rel = index_rel(cx.mcx());
+    prime_supportinfo(&rel);
+
+    let keys = [key(1, 20, test_int4eq, BTEqualStrategyNumber)];
+    let mut scan = crate::btbeginscan(cx.mcx(), &rel, keys.len() as i32, 0).unwrap();
+    scan.heapRelation = Some(rel.alias());
+    scan.xs_want_itup = true;
+    crate::btrescan(&mut scan, Some(&keys)).unwrap();
+    assert!(scan.xs_itupdesc.is_some());
+    {
+        let IndexScanOpaque::Btree(so) = &scan.opaque else { unreachable!() };
+        assert!(so.currTuples.is_some() && so.markTuples.is_some());
+        assert!(!so.dropPin);
+    }
+
+    let mut vals = Vec::new();
+    while crate::btgettuple(&mut scan, ForwardScanDirection).unwrap() {
+        let itup = scan.xs_itup.expect("xs_want_itup publishes xs_itup").as_ptr();
+        let desc = scan.xs_itupdesc.as_deref().unwrap();
+        let mut isnull = false;
+        // SAFETY: xs_itup points at a MAXALIGNed copy in so.currTuples.
+        let v = unsafe { crate::itup::index_getattr(itup, 1, desc, &mut isnull) };
+        assert!(!isnull);
+        // xs_itup is a currTuples copy, not a page pointer.
+        {
+            let IndexScanOpaque::Btree(so) = &scan.opaque else { unreachable!() };
+            let buf = so.currTuples.as_ref().unwrap();
+            let off = itup as usize - buf.as_ptr() as usize;
+            assert!(off < ::types_core::BLCKSZ as usize);
+        }
+        vals.push(v.as_i32());
+    }
+    assert_eq!(vals, vec![20, 20]);
+
+    crate::btendscan(&mut scan).unwrap();
+    assert_eq!(PINS.with(Cell::get), 0, "no pins leaked");
 }
 
 #[test]

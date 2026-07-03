@@ -69,6 +69,7 @@ pub(crate) struct ScanCtx<'a, 'mcx> {
     pub ignore_killed_tuples: bool,
     pub input_keys: &'a mut [ScanKeyData],
     pub xs_heaptid: &'a mut ItemPointerData,
+    pub xs_itup: &'a mut Option<core::ptr::NonNull<u8>>,
     pub xs_pgstat_index_scans: &'a mut u64,
     pub frame: OrderProcFrame,
 }
@@ -944,6 +945,11 @@ fn bt_returnitem(ctx: &mut ScanCtx<'_, '_>) {
     // SAFETY: itemIndex within [firstItem, lastItem] (asserted): written slot.
     let item = unsafe { so.currPos.item(so.currPos.itemIndex as usize) };
     *ctx.xs_heaptid = item.heapTid;
+    if let Some(curr_tuples) = so.currTuples.as_ref() {
+        *ctx.xs_itup =
+            core::ptr::NonNull::new(curr_tuples.as_ptr().wrapping_add(item.tupleOffset as usize)
+                as *mut u8);
+    }
 }
 
 /// _bt_steppage.

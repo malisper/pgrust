@@ -1,30 +1,30 @@
-// nodeIndexonlyscan.c. Init and the TID walk are live; the per-tuple
-// VM_ALL_VISIBLE probe loud-panics until visibilitymap.c lands, so execution
-// stops at the first returned TID. StoreIndexTuple is live for btree tuple
-// formats (deform loop pending indextuple.c's index_deform_tuple home).
+// nodeIndexonlyscan.c. StoreIndexTuple's deform loop is C's
+// index_deform_tuple; it moves to indextuple.c's unit when that lands.
 #![allow(non_snake_case)]
 
 extern crate alloc;
 
-use ::execexpr::{exec_init_qual, ExprState, INDEX_VAR};
+use ::execexpr::{exec_init_qual, exec_qual, EvalSlots, ExprState, INDEX_VAR};
 use ::execscan::{ScanNode, ScanState};
 use ::executils::{EStateData, ExecSlotId};
 use ::indexam::{
-    index_beginscan, index_close, index_endscan, index_getnext_tid, index_markpos,
-    index_rescan, index_restrpos, IndexScanDescData,
+    index_beginscan, index_close, index_endscan, index_fetch_heap, index_getnext_tid,
+    index_markpos, index_rescan, index_restrpos, IndexScanDescData,
 };
 use ::mcx::{Mcx, PgBox, PgVec};
 use ::nbtree::itup::{index_getattr, ITup};
 use ::nodeindexscan::exec_index_build_scan_keys;
 use ::tableam::table_slot_callbacks;
 use ::types_core::{AttrNumber, CSTRINGOID, NAMEOID};
-use ::types_error::PgResult;
+use ::types_error::{PgError, PgResult};
 use ::types_nodes::plannodes::IndexOnlyScan;
 use ::types_rel::{NoLock, Relation};
 use ::types_scan::scankey::ScanKeyData;
 use ::types_scan::sdir::{ScanDirection, ScanDirectionCombine};
 use ::types_slot::{SlotData, TupleSlotKind};
+use ::types_tuple::itemptr::ItemPointerGetBlockNumber;
 use ::types_tuple::TupleDescData;
+use ::visibilitymap::VmBuffer;
 
 pub fn init_seams() {}
 
@@ -40,6 +40,7 @@ pub struct IndexOnlyScanState<'mcx> {
     pub ioss_TableSlot: ExecSlotId,
     pub ioss_OrderDir: ScanDirection,
     pub ioss_NameCStringAttNums: PgVec<'mcx, AttrNumber>,
+    pub ioss_VMBuffer: VmBuffer,
 }
 
 impl<'mcx> ScanNode<'mcx> for IndexOnlyScanState<'mcx> {
@@ -48,7 +49,7 @@ impl<'mcx> ScanNode<'mcx> for IndexOnlyScanState<'mcx> {
         &mut self.ss
     }
 
-    /// `IndexOnlyNext`, cut off at the visibility-map probe.
+    /// `IndexOnlyNext`.
     fn scan_next(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<bool> {
         let mcx = estate.es_query_cxt;
         let direction = ScanDirectionCombine(estate.es_direction, self.ioss_OrderDir);
@@ -74,26 +75,116 @@ impl<'mcx> ScanNode<'mcx> for IndexOnlyScanState<'mcx> {
         }
 
         let slot_id = self.ss.ss_ScanTupleSlot;
+        let table_slot_id = self.ioss_TableSlot;
+        let ecxt = self.ss.ps_ExprContext;
+        let IndexOnlyScanState {
+            ss,
+            recheckqual,
+            ioss_ScanDesc,
+            ioss_VMBuffer,
+            ioss_NameCStringAttNums,
+            ..
+        } = self;
         loop {
             // SAFETY: written just above when None; single test+branch like
             // C's scandesc == NULL check.
-            let scandesc = unsafe { self.ioss_ScanDesc.as_deref_mut().unwrap_unchecked() };
-            let Some(_tid) = index_getnext_tid(scandesc, direction)? else {
+            let scandesc = unsafe { ioss_ScanDesc.as_deref_mut().unwrap_unchecked() };
+            let Some(tid) = index_getnext_tid(scandesc, direction)? else {
                 exectuples::exec_clear_tuple(estate.slot_mut(slot_id), mcx);
                 return Ok(false);
             };
+            let mut tuple_from_heap = false;
             check_for_interrupts();
-            vm_probe_unported();
+
+            // Skip the heap fetch when the VM says the TID's page is
+            // all-visible; caller-recheck caveats are C's (visibilitymap.c).
+            if !::visibilitymap::vm_all_visible(
+                &ss.ss_currentRelation,
+                ItemPointerGetBlockNumber(&tid),
+                ioss_VMBuffer,
+            )? {
+                if !index_fetch_heap(mcx, scandesc, estate.slot_mut(table_slot_id))? {
+                    continue;
+                }
+                exectuples::exec_clear_tuple(estate.slot_mut(table_slot_id), mcx);
+                // Only MVCC snapshots here (no HOT continuation), as C asserts.
+                debug_assert!(!scandesc.xs_heap_continue);
+                tuple_from_heap = true;
+            }
+
+            // xs_hitup arm pending an AM that returns whole heap tuples.
+            let Some(itup) = scandesc.xs_itup else {
+                return Err(no_data_returned());
+            };
+            let itupdesc = scandesc
+                .xs_itupdesc
+                .as_deref()
+                .expect("amgettuple published xs_itup without xs_itupdesc");
+            // SAFETY: xs_itup points at the AM's page-copy buffer, live until
+            // the next amgettuple/amendscan on this descriptor.
+            unsafe {
+                store_index_tuple(
+                    estate.slot_mut(slot_id),
+                    mcx,
+                    itup.as_ptr(),
+                    itupdesc,
+                    ioss_NameCStringAttNums,
+                )
+            };
+
+            // Lossy index: recheck the index quals (ExecQualAndReset shape).
+            // Btree never sets xs_recheck.
+            if scandesc.xs_recheck {
+                estate.ecxt_mut(ecxt).ecxt_scantuple = Some(slot_id);
+                let passes = {
+                    let mut slots = EvalSlots {
+                        scan: Some(estate.slot_mut(slot_id)),
+                        inner: None,
+                        outer: None,
+                    };
+                    exec_qual(recheckqual.as_deref_mut(), &mut slots)?
+                };
+                estate.ecxt_mut(ecxt).reset();
+                if !passes {
+                    continue;
+                }
+                if scandesc.numberOfOrderBys > 0 {
+                    lossy_distance_unported();
+                }
+            }
+
+            // Index-only predicate locks are page-level: the tuple-level lock
+            // taken by the heap fetch is skipped on the VM fast path.
+            if !tuple_from_heap {
+                let snap = estate
+                    .es_snapshot
+                    .as_deref()
+                    .expect("index-only scan requires es_snapshot");
+                predicate_seams::predicate_lock_page::call(
+                    &ss.ss_currentRelation,
+                    ItemPointerGetBlockNumber(&tid),
+                    snap,
+                )?;
+            }
+            return Ok(true);
         }
     }
 }
 
 #[cold]
 #[inline(never)]
-fn vm_probe_unported() -> ! {
+fn no_data_returned() -> Box<PgError> {
+    Box::new(PgError::error(
+        "no data returned for index-only scan".to_string(),
+    ))
+}
+
+#[cold]
+#[inline(never)]
+fn lossy_distance_unported() -> ! {
     panic!(
-        "nodeindexonlyscan: VM_ALL_VISIBLE probe pending visibilitymap.c \
-         (backend-access-heap-visibilitymap); index-only scans stop at the first TID"
+        "nodeindexonlyscan: lossy distance recheck ereport (0A000) not ported \
+         (indexorderby lane loud-panics at init)"
     )
 }
 
@@ -236,6 +327,7 @@ pub fn exec_init_index_only_scan_rel<'mcx>(
         ioss_TableSlot,
         ioss_OrderDir: order_dir(node.indexorderdir),
         ioss_NameCStringAttNums,
+        ioss_VMBuffer: VmBuffer::new(),
     })
 }
 
@@ -272,9 +364,10 @@ fn orderby_unported() -> ! {
     panic!("nodeindexonlyscan: indexorderby (amcanorderbyop lane) not ported")
 }
 
-/// `ExecEndIndexOnlyScan`; the VM-buffer release arm lands with
-/// visibilitymap.c, the parallel-worker instrumentation copy-back with DSM.
+/// `ExecEndIndexOnlyScan`; the parallel-worker instrumentation copy-back
+/// lands with DSM.
 pub fn exec_end_index_only_scan(node: &mut IndexOnlyScanState<'_>) -> PgResult<()> {
+    node.ioss_VMBuffer.release();
     if let Some(scandesc) = node.ioss_ScanDesc.take() {
         index_endscan(PgBox::into_inner(scandesc))?;
     }

@@ -1,7 +1,7 @@
 //! B-tree access method, READ path (nbtree.c/nbtsearch.c/nbtpage.c/
 //! nbtutils.c/nbtpreprocesskeys.c). Phase 2, loud panics, never silent:
 //! insert/split/vacuum/dedup/parallel scans, SAOP arrays, skip scan, row
-//! comparisons, mark/restore across primitive scans, index-only xs_itup.
+//! comparisons, mark/restore across primitive scans.
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 #![allow(clippy::too_many_arguments)]
@@ -61,6 +61,7 @@ macro_rules! split_scan {
             keyData,
             ignore_killed_tuples,
             xs_heaptid,
+            xs_itup,
             xs_pgstat_index_scans,
             opaque,
             ..
@@ -75,6 +76,7 @@ macro_rules! split_scan {
             ignore_killed_tuples: *ignore_killed_tuples,
             input_keys: keyData.as_mut_slice(),
             xs_heaptid,
+            xs_itup,
             xs_pgstat_index_scans,
             frame: crate::fcframe::OrderProcFrame::new(),
         }
@@ -90,14 +92,16 @@ pub fn btbeginscan<'mcx>(
 ) -> PgResult<IndexScanDescData<'mcx>> {
     debug_assert!(norderbys == 0);
     let so = BTScanOpaqueData::alloc_in(mcx)?;
-    relation_get_index_scan(
+    let mut scan = relation_get_index_scan(
         mcx,
         rel,
         nkeys,
         norderbys,
         IndexScanOpaque::Btree(so),
         xact::TransactionStartedDuringRecovery(),
-    )
+    )?;
+    scan.xs_itupdesc = Some(rel.rd_att.clone());
+    Ok(scan)
 }
 
 // RelationNeedsWAL (rel.h); XLogIsNeeded ≡ the xlog_standby_info_active seam.
