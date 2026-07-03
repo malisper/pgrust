@@ -848,10 +848,11 @@ fn cost_rescan(run: &PlannerRun<'_>, path: PathId) -> (f64, f64) {
             run_cost += gucs::seq_page_cost() * npages;
         }
         (0.0, run_cost)
-    } else if pathtype == tag16(NodeTag::T_FunctionScan)
-        || pathtype == tag16(NodeTag::T_HashJoin)
-        || pathtype == tag16(NodeTag::T_Memoize)
-    {
+    } else if pathtype == tag16(NodeTag::T_FunctionScan) {
+        // nodeFunctionscan runs the function to completion into a tuplestore:
+        // the eval cost is all startup and not repaid on rescans.
+        (0.0, p.total_cost - p.startup_cost)
+    } else if pathtype == tag16(NodeTag::T_HashJoin) || pathtype == tag16(NodeTag::T_Memoize) {
         panic!("cost_rescan (costsize.c): pathtype {pathtype}; M2 lane");
     } else {
         (p.startup_cost, p.total_cost)
