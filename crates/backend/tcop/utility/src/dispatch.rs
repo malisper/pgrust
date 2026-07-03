@@ -489,7 +489,7 @@ fn dispatch_switch<'mcx>(
                 }
                 OBJECT_INDEX | OBJECT_TABLE | OBJECT_SEQUENCE | OBJECT_VIEW | OBJECT_MATVIEW
                 | OBJECT_FOREIGN_TABLE => tablecmds::RemoveRelations(mcx, stmt)?,
-                _ => handler_gap("RemoveObjects (dropcmds lane)"),
+                _ => commands_dropcmds::RemoveObjects(mcx, stmt)?,
             }
         }
 
