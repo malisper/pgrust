@@ -393,7 +393,7 @@ pub(crate) fn IsTransactionExitStmt(parsetree: Option<Node<'_>>) -> bool {
 }
 
 
-pub fn drop_unnamed_stmt() {}
+use crate::extended_query::drop_unnamed_stmt;
 
 fn check_log_statement(stmt_list: &PgVec<'_, RawStmt<'_>>) -> bool {
     use guc_tables::consts::{LOGSTMT_ALL, LOGSTMT_NONE};
@@ -419,7 +419,7 @@ fn check_log_statement(stmt_list: &PgVec<'_, RawStmt<'_>>) -> bool {
 // check_log_duration (postgres.c:2427). The log_min_duration_sample /
 // log_statement_sample_rate refinement rides in_sample state the guc lane
 // owns; with those GUCs at boot defaults (-1 / 1.0) this matches C.
-fn check_log_duration(was_logged: bool) -> (i32, String) {
+pub(crate) fn check_log_duration(was_logged: bool) -> (i32, String) {
     let log_duration = guc_tables::backing::log_duration();
     let log_min = guc_tables::backing::log_min_duration_statement();
     if !log_duration && log_min < 0 {
@@ -467,7 +467,7 @@ fn enable_statement_timeout() -> PgResult<()> {
     Ok(())
 }
 
-fn disable_statement_timeout() -> PgResult<()> {
+pub(crate) fn disable_statement_timeout() -> PgResult<()> {
     if timeout_seams::get_timeout_active::call(timeout_seams::STATEMENT_TIMEOUT) {
         timeout_seams::disable_timeout::call(timeout_seams::STATEMENT_TIMEOUT, false)?;
     }

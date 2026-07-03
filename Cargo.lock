@@ -138,6 +138,7 @@ name = "adt_int"
 version = "0.1.0"
 dependencies = [
  "datum",
+ "funcapi",
  "hashfn",
  "mcx",
  "numutils",
@@ -145,6 +146,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_fmgr",
+ "types_nodes",
 ]
 
 [[package]]
@@ -337,6 +339,7 @@ name = "analyze_seams"
 version = "0.1.0"
 dependencies = [
  "mcx",
+ "parser_small1",
  "seam_core",
  "types_core",
  "types_error",
@@ -381,6 +384,7 @@ dependencies = [
  "pqformat",
  "stringinfo",
  "types_core",
+ "types_dest",
  "types_error",
  "types_startup",
  "waitevent_seams",
@@ -655,11 +659,22 @@ name = "catalog"
 version = "0.0.0"
 dependencies = [
  "catalog_seams",
+ "datum",
+ "fmgr_seams",
+ "genam",
+ "init_small",
  "mcx",
+ "miscinit_seams",
  "namespace_seams",
+ "relpath",
  "types_core",
+ "types_error",
  "types_rel",
+ "types_scan",
+ "types_snapshot",
+ "types_storage",
  "types_tuple",
+ "varsup",
 ]
 
 [[package]]
@@ -729,6 +744,18 @@ dependencies = [
 [[package]]
 name = "catalog_storage"
 version = "0.1.0"
+dependencies = [
+ "catalog_storage_seams",
+ "mcx",
+ "smgr",
+ "storage_xlog",
+ "transam_xlog",
+ "types_core",
+ "types_error",
+ "types_storage",
+ "xact",
+ "xloginsert_seams",
+]
 
 [[package]]
 name = "catalog_storage_seams"
@@ -3384,6 +3411,7 @@ dependencies = [
 name = "parse_expr"
 version = "0.0.0"
 dependencies = [
+ "analyze_seams",
  "elog",
  "guc_tables",
  "mbutils",
@@ -4614,6 +4642,7 @@ name = "procarray"
 version = "0.0.0"
 dependencies = [
  "autovacuum_seams",
+ "catalog_seams",
  "condition_variable_seams",
  "deadlock_seams",
  "init_small",
@@ -4637,6 +4666,7 @@ dependencies = [
  "transam_xlog_seams",
  "types_core",
  "types_error",
+ "types_rel",
  "types_snapshot",
  "types_storage",
  "varsup",
@@ -5170,6 +5200,7 @@ dependencies = [
  "mcx",
  "multixact",
  "relmapper",
+ "storage_xlog",
  "stringinfo",
  "transam_xlog_seams",
  "types_core",
@@ -5251,6 +5282,7 @@ dependencies = [
  "cache_syscache",
  "catalog",
  "catalog_namespace",
+ "catalog_storage",
  "catcache",
  "checkpointer",
  "clog",
@@ -5647,6 +5679,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "storage_xlog"
+version = "0.1.0"
+dependencies = [
+ "smgr",
+ "types_core",
+ "types_error",
+ "types_storage",
+ "xlogreader_seams",
+]
+
+[[package]]
 name = "strftime"
 version = "0.1.0"
 dependencies = [
@@ -5859,6 +5902,7 @@ dependencies = [
  "guc_tables",
  "heapam",
  "heapam_handler",
+ "heapam_visibility_seams",
  "mcx",
  "smgr",
  "tableam_vocab",

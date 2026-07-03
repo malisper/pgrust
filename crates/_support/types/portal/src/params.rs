@@ -1,0 +1,151 @@
+// params.c ParamListInfo as a registry (stmt_list precedent); stale handle = loud panic.
+use core::cell::RefCell;
+
+use ::datum::Datum;
+use ::types_core::Oid;
+
+use crate::ParamListHandle;
+
+pub const PARAM_FLAG_CONST: u16 = 0x0001;
+
+#[derive(Clone, Copy, Debug)]
+pub struct ParamExternData {
+    pub value: Datum,
+    pub isnull: bool,
+    pub pflags: u16,
+    pub ptype: Oid,
+}
+
+#[derive(Clone, Copy)]
+struct Entry {
+    ptr: *const ParamExternData,
+    len: usize,
+    generation: u32,
+}
+
+thread_local! {
+    static ENTRIES: RefCell<Vec<Option<Entry>>> = const { RefCell::new(Vec::new()) };
+    static FREE: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
+    static GENERATION: core::cell::Cell<u32> = const { core::cell::Cell::new(0) };
+}
+
+fn encode(idx: u32, generation: u32) -> ParamListHandle {
+    ParamListHandle((u64::from(generation) << 32) | u64::from(idx + 1))
+}
+
+fn decode(h: ParamListHandle) -> (u32, u32) {
+    ((h.0 as u32) - 1, (h.0 >> 32) as u32)
+}
+
+/// # Safety
+/// `params` (with its by-ref datums) must outlive [`free`] (PortalDrop's job).
+pub unsafe fn register(params: &[ParamExternData]) -> ParamListHandle {
+    let generation = GENERATION.with(|g| {
+        let v = g.get().wrapping_add(1);
+        g.set(v);
+        v
+    });
+    let entry = Entry { ptr: params.as_ptr(), len: params.len(), generation };
+    let idx = match FREE.with(|f| f.borrow_mut().pop()) {
+        Some(i) => {
+            ENTRIES.with(|e| e.borrow_mut()[i as usize] = Some(entry));
+            i
+        }
+        None => ENTRIES.with(|e| {
+            let mut e = e.borrow_mut();
+            e.push(Some(entry));
+            (e.len() - 1) as u32
+        }),
+    };
+    encode(idx, generation)
+}
+
+fn lookup(h: ParamListHandle) -> Entry {
+    assert!(!h.is_null(), "params: NULL handle dereferenced");
+    let (idx, generation) = decode(h);
+    let entry = ENTRIES.with(|e| e.borrow().get(idx as usize).copied().flatten());
+    match entry {
+        Some(e) if e.generation == generation => e,
+        _ => panic!("params: stale ParamListHandle {h:?} (freed)"),
+    }
+}
+
+pub fn with<R>(h: ParamListHandle, f: impl FnOnce(&[ParamExternData]) -> R) -> R {
+    let e = lookup(h);
+    // SAFETY: register()'s liveness contract; no RefCell borrow held here.
+    let params = unsafe { core::slice::from_raw_parts(e.ptr, e.len) };
+    f(params)
+}
+
+pub fn num_params(h: ParamListHandle) -> usize {
+    if h.is_null() {
+        return 0;
+    }
+    lookup(h).len
+}
+
+pub fn free(h: ParamListHandle) {
+    if h.is_null() {
+        return;
+    }
+    let (idx, generation) = decode(h);
+    ENTRIES.with(|e| {
+        let mut e = e.borrow_mut();
+        if let Some(slot) = e.get_mut(idx as usize) {
+            if slot.map(|en| en.generation) == Some(generation) {
+                *slot = None;
+                FREE.with(|f| f.borrow_mut().push(idx));
+            }
+        }
+    });
+}
+
+pub fn is_live(h: ParamListHandle) -> bool {
+    if h.is_null() {
+        return false;
+    }
+    let (idx, generation) = decode(h);
+    ENTRIES.with(|e| {
+        e.borrow().get(idx as usize).copied().flatten().map(|en| en.generation)
+            == Some(generation)
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn register_with_free_roundtrip() {
+        let params = vec![ParamExternData {
+            value: Datum::from_i32(42),
+            isnull: false,
+            pflags: PARAM_FLAG_CONST,
+            ptype: 23,
+        }];
+        let h = unsafe { register(&params) };
+        assert!(is_live(h));
+        assert_eq!(num_params(h), 1);
+        with(h, |p| {
+            assert_eq!(p[0].value.as_i32(), 42);
+            assert_eq!(p[0].ptype, 23);
+        });
+        free(h);
+        assert!(!is_live(h));
+        free(h); /* idempotent */
+    }
+
+    #[test]
+    #[should_panic(expected = "stale ParamListHandle")]
+    fn stale_handle_is_loud() {
+        let params = [ParamExternData {
+            value: Datum::null(),
+            isnull: true,
+            pflags: 0,
+            ptype: 23,
+        }];
+        let h = unsafe { register(&params) };
+        free(h);
+        with(h, |_| ());
+    }
+}

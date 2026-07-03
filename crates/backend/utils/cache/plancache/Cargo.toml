@@ -26,6 +26,7 @@ lmgr = { path = "../../../storage/lmgr/lmgr" }
 miscinit = { path = "../../init/miscinit" }
 parser_analyze = { path = "../../../parser/parser_analyze" }
 planner_seams = { path = "../../../optimizer/plan/planner_seams" }
+pquery_seams = { path = "../../../tcop/pquery_seams" }
 snapmgr = { path = "../../time/snapmgr" }
 utility_seams = { path = "../../../tcop/utility_seams" }
 plancache_portal_seams = { path = "../plancache_portal_seams" }

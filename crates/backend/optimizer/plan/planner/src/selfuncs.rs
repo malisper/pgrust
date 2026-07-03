@@ -116,6 +116,9 @@ pub fn examine_variable<'mcx>(
     }
     match node.node_tag() {
         NodeTag::T_Const => Ok(vardata),
+        // A var-free Aggref (HAVING quals): C's expression leg finds no
+        // relids and returns "don't know" (no rel, no stats).
+        NodeTag::T_Aggref => Ok(vardata),
         other => panic!("examine_variable (selfuncs.c): {other:?}; M2 expression lane"),
     }
 }

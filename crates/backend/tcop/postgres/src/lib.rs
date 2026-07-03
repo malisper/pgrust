@@ -1,7 +1,7 @@
-// postgres.c — the backend command processor (PG 18.3): exec_simple_query and
-// PostgresMain's message loop. Simple-query protocol is end-to-end; the
-// extended protocol ('P'/'B'/'E'/'D') and fastpath ('F') arms panic loudly
-// (their exec_* family is a later unit).
+// postgres.c — the backend command processor (PG 18.3): exec_simple_query,
+// the extended-query protocol (exec_parse/bind/execute/describe_message), and
+// PostgresMain's message loop. Fastpath ('F') panics loudly (tcop/fastpath.c
+// is a later unit).
 #![allow(non_snake_case)]
 
 use core::cell::Cell;
@@ -9,12 +9,19 @@ use core::cell::Cell;
 use ::elog::ereport;
 use ::types_error::{ErrorLocation, PgResult, ERRCODE_QUERY_CANCELED, ERROR, FATAL};
 
+pub mod extended_query;
 pub mod main_loop;
 pub mod simple_query;
 pub mod switches;
 #[cfg(test)]
+mod session_tests;
+#[cfg(test)]
 mod tests;
 
+pub use extended_query::{
+    drop_unnamed_stmt, exec_bind_message, exec_describe_portal_message,
+    exec_describe_statement_message, exec_execute_message, exec_parse_message,
+};
 pub use main_loop::PostgresMain;
 pub use simple_query::{
     exec_simple_query, finish_xact_command, pg_analyze_and_rewrite_fixedparams, pg_parse_query,

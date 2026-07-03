@@ -22,7 +22,14 @@ pub fn build_base_rel_tlists<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResult<()> {
         let where_needed = relids_singleton(mcx, 0);
         add_vars_to_targetlist(run, &tlist_vars, &where_needed)?;
     }
-    debug_assert!(run.parse().havingQual.is_none());
+    if let Some(having) = run.parse().havingQual {
+        let mut having_vars: PgVec<'mcx, Node<'mcx>> = PgVec::new_in(mcx);
+        pull_var_nodes(having, &mut having_vars);
+        if !having_vars.is_empty() {
+            let where_needed = relids_singleton(mcx, 0);
+            add_vars_to_targetlist(run, &having_vars, &where_needed)?;
+        }
+    }
     Ok(())
 }
 

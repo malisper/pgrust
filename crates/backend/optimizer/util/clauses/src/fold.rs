@@ -1,17 +1,20 @@
 //! eval_const_expressions / estimate_expression_value (clauses.c).
 //!
 //! C divergences: the mutator is identity-preserving (walker.rs module doc);
-//! `root` is unthreaded — C reads it only for boundParams substitution and
-//! invalItems recording, neither modeled yet (PlannerGlobal carries no
-//! boundParams). The evaluate_expr seam installer must record invalItems.
+//! `root` is unthreaded — its boundParams read is an explicit ParamListHandle
+//! argument here; invalItems recording is not modeled (the evaluate_expr seam
+//! installer must record invalItems).
 
+use datum::Datum;
 use lsyscache::get_typlenbyval;
 use mcx::Mcx;
 use syscache_seams::PgProcShape;
-use types_core::{InvalidOid, Oid};
+use types_core::{InvalidOid, Oid, OidIsValid};
 use types_error::{PgError, PgResult};
-use types_nodes::primnodes::{CoercionForm, Const, FuncExpr, OpExpr};
+use types_nodes::primnodes::{CoercionForm, Const, FuncExpr, OpExpr, ParamKind};
 use types_nodes::{Node, NodeList, NodeTag};
+use types_portal::params::{ParamExternData, PARAM_FLAG_CONST};
+use types_portal::{params, ParamListHandle};
 
 use crate::walker::{deferred, expression_tree_mutator, mutate_list};
 
@@ -25,10 +28,19 @@ use crate::classify::{PROVOLATILE_IMMUTABLE, PROVOLATILE_STABLE};
 struct EceContext<'mcx> {
     mcx: Mcx<'mcx>,
     estimate: bool,
+    bound_params: ParamListHandle,
 }
 
 pub fn eval_const_expressions<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>) -> PgResult<Node<'mcx>> {
-    let cx = EceContext { mcx, estimate: false };
+    eval_const_expressions_with_params(mcx, node, ParamListHandle::NULL)
+}
+
+pub fn eval_const_expressions_with_params<'mcx>(
+    mcx: Mcx<'mcx>,
+    node: Node<'mcx>,
+    bound_params: ParamListHandle,
+) -> PgResult<Node<'mcx>> {
+    let cx = EceContext { mcx, estimate: false, bound_params };
     Ok(ece_mutator(node, &cx)?.unwrap_or(node))
 }
 
@@ -36,14 +48,89 @@ pub fn estimate_expression_value<'mcx>(
     mcx: Mcx<'mcx>,
     node: Node<'mcx>,
 ) -> PgResult<Node<'mcx>> {
-    let cx = EceContext { mcx, estimate: true };
+    let cx = EceContext { mcx, estimate: true, bound_params: ParamListHandle::NULL };
     Ok(ece_mutator(node, &cx)?.unwrap_or(node))
+}
+
+// The T_Param arm's substitution leg: a bound PARAM_FLAG_CONST extern param
+// becomes a Const (custom plans see the value; estimate mode substitutes any
+// bound value, exactly C).
+fn substitute_bound_param<'mcx>(
+    node: Node<'mcx>,
+    cx: &EceContext<'mcx>,
+) -> PgResult<Option<Node<'mcx>>> {
+    let param = node.as_param().unwrap();
+    if param.paramkind != ParamKind::PARAM_EXTERN
+        || cx.bound_params.is_null()
+        || param.paramid <= 0
+        || param.paramid as usize > params::num_params(cx.bound_params)
+    {
+        return Ok(None);
+    }
+    let prm: ParamExternData =
+        params::with(cx.bound_params, |p| p[(param.paramid - 1) as usize]);
+    if !OidIsValid(prm.ptype) {
+        return Ok(None);
+    }
+    if !(cx.estimate || (prm.pflags & PARAM_FLAG_CONST) != 0) {
+        return Ok(None);
+    }
+    debug_assert_eq!(prm.ptype, param.paramtype);
+    let (typlen, typbyval) = get_typlenbyval(param.paramtype)?;
+    let pval = if prm.isnull || typbyval {
+        prm.value
+    } else {
+        datum_copy_in(cx.mcx, prm.value, typlen)?
+    };
+    Ok(Some(Node::mk(
+        cx.mcx,
+        Const {
+            consttype: param.paramtype,
+            consttypmod: param.paramtypmod,
+            constcollid: param.paramcollid,
+            constlen: typlen as i32,
+            constvalue: pval,
+            constisnull: prm.isnull,
+            constbyval: typbyval,
+            location: param.location,
+        },
+    )?))
+}
+
+// datumCopy (datum.c) scoped to bound-parameter substitution; by-ref sources
+// here are input-function results (4B-header varlenas, never toast pointers).
+fn datum_copy_in<'mcx>(mcx: Mcx<'mcx>, value: Datum, typlen: i16) -> PgResult<Datum> {
+    let p = value.as_usize() as *const u8;
+    if p.is_null() {
+        return Ok(Datum::null());
+    }
+    let size = match typlen {
+        -1 => {
+            // SAFETY: non-null by-ref varlena datum (see above).
+            unsafe { datum::VarlenaRef::from_ptr(p).varsize() }
+        }
+        -2 => {
+            let mut n = 0usize;
+            // SAFETY: non-null NUL-terminated cstring datum.
+            while unsafe { *p.add(n) } != 0 {
+                n += 1;
+            }
+            n + 1
+        }
+        l => {
+            debug_assert!(l > 0);
+            l as usize
+        }
+    };
+    // SAFETY: `size` bytes readable per the arms above.
+    let src = unsafe { core::slice::from_raw_parts(p, size) };
+    let out = mcx::slice_in(mcx, src)?;
+    Ok(Datum::from_usize(out.leak().as_ptr() as usize))
 }
 
 fn ece_mutator<'mcx>(node: Node<'mcx>, cx: &EceContext<'mcx>) -> PgResult<Option<Node<'mcx>>> {
     match node.node_tag() {
-        // PARAM_EXTERN substitution needs boundParams (unthreaded, see top).
-        NodeTag::T_Param => Ok(None),
+        NodeTag::T_Param => substitute_bound_param(node, cx),
         NodeTag::T_FuncExpr => {
             let f = node.as_func_expr().unwrap();
             let (simple, new_args) = simplify_function(
@@ -137,7 +224,12 @@ fn ece_mutator<'mcx>(node: Node<'mcx>, cx: &EceContext<'mcx>) -> PgResult<Option
         | NodeTag::T_CaseTestExpr
         | NodeTag::T_CurrentOfExpr
         | NodeTag::T_SortGroupClause => Ok(None),
-        NodeTag::T_TargetEntry | NodeTag::T_FromExpr | NodeTag::T_List => {
+        // Aggref takes C's default ece_generic_processing arm: fold inside
+        // the aggregate's arguments, never the Aggref itself.
+        NodeTag::T_Aggref
+        | NodeTag::T_TargetEntry
+        | NodeTag::T_FromExpr
+        | NodeTag::T_List => {
             expression_tree_mutator(cx.mcx, node, &mut |n| ece_mutator(n, cx))
         }
         other => deferred("eval_const_expressions_mutator", other),

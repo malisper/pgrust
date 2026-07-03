@@ -9,8 +9,9 @@ use ::types_error::{
 };
 
 use crate::{
-    check_for_interrupts, loc, set_doing_command_read, set_doing_extended_query_message,
-    set_ignore_till_sync, set_xact_started, simple_query, ignore_till_sync,
+    check_for_interrupts, extended_query, loc, set_doing_command_read,
+    set_doing_extended_query_message, set_ignore_till_sync, set_xact_started, simple_query,
+    ignore_till_sync,
 };
 
 mod pqmsg {
@@ -123,13 +124,13 @@ fn ReadCommand(in_buf: &mut StringInfo<'_>) -> PgResult<i32> {
     }
 }
 
-struct LoopState {
-    send_ready_for_query: bool,
-    idle_in_transaction_timeout_enabled: bool,
-    idle_session_timeout_enabled: bool,
+pub(crate) struct LoopState {
+    pub(crate) send_ready_for_query: bool,
+    pub(crate) idle_in_transaction_timeout_enabled: bool,
+    pub(crate) idle_session_timeout_enabled: bool,
 }
 
-fn error_recovery(err: &PgError, state: &mut LoopState) -> PgResult<()> {
+pub(crate) fn error_recovery(err: &PgError, state: &mut LoopState) -> PgResult<()> {
     use init_small::globals as g;
 
     /* error_context_stack = NULL: the ambient callback chain is Err-carried. */
@@ -249,14 +250,75 @@ fn dispatch_message<'mcx>(
             state.send_ready_for_query = true;
         }
 
-        x if x == pqmsg::PARSE || x == pqmsg::BIND || x == pqmsg::EXECUTE
-            || x == pqmsg::DESCRIBE =>
-        {
-            panic!(
-                "PostgresMain: extended-query protocol message {:?} not ported \
-                 (exec_parse/bind/execute/describe_message, postgres.c:1389-2780)",
-                firstchar as u8 as char
-            );
+        x if x == pqmsg::PARSE => {
+            xact::SetCurrentStatementStartTimestamp();
+
+            let stmt_name = extended_query::owned_msg_string(mcx, input_message)?;
+            let query_string = extended_query::owned_msg_string(mcx, input_message)?;
+            let num_params = pqformat::pq_getmsgint(input_message, 2)? as usize;
+            let mut param_types: PgVec<'_, types_core::Oid> = PgVec::new_in(mcx);
+            param_types
+                .try_reserve_exact(num_params)
+                .map_err(|_| mcx.oom(num_params))?;
+            for _ in 0..num_params {
+                param_types.push(pqformat::pq_getmsgint(input_message, 4)?);
+            }
+            pqformat::pq_getmsgend(input_message)?;
+
+            extended_query::exec_parse_message(
+                mcx,
+                query_string.as_str(),
+                stmt_name.as_str(),
+                &param_types,
+            )?;
+        }
+
+        x if x == pqmsg::BIND => {
+            xact::SetCurrentStatementStartTimestamp();
+
+            /* this message is complex enough that the field extraction is
+             * out-of-line, as in C */
+            extended_query::exec_bind_message(mcx, input_message)?;
+        }
+
+        x if x == pqmsg::EXECUTE => {
+            xact::SetCurrentStatementStartTimestamp();
+
+            let portal_name = extended_query::owned_msg_string(mcx, input_message)?;
+            let max_rows = pqformat::pq_getmsgint(input_message, 4)? as i32;
+            pqformat::pq_getmsgend(input_message)?;
+
+            extended_query::exec_execute_message(mcx, portal_name.as_str(), max_rows as i64)?;
+        }
+
+        x if x == pqmsg::DESCRIBE => {
+            xact::SetCurrentStatementStartTimestamp();
+
+            let describe_type = pqformat::pq_getmsgbyte(input_message)?;
+            let describe_target = extended_query::owned_msg_string(mcx, input_message)?;
+            pqformat::pq_getmsgend(input_message)?;
+
+            match describe_type as u8 {
+                b'S' => {
+                    extended_query::exec_describe_statement_message(
+                        mcx,
+                        describe_target.as_str(),
+                    )?;
+                }
+                b'P' => {
+                    extended_query::exec_describe_portal_message(
+                        mcx,
+                        describe_target.as_str(),
+                    )?;
+                }
+                other => {
+                    return Err(ereport(ERROR)
+                        .errcode(ERRCODE_PROTOCOL_VIOLATION)
+                        .errmsg(format!("invalid DESCRIBE message subtype {other}"))
+                        .into_error()
+                        .into());
+                }
+            }
         }
 
         x if x == pqmsg::FUNCTION_CALL => {
@@ -281,13 +343,10 @@ fn dispatch_message<'mcx>(
             match close_type as u8 {
                 b'S' => {
                     if !close_target.is_empty() {
-                        panic!(
-                            "PostgresMain: Close(named statement) unreachable until \
-                             extended-protocol Parse lands (prepare crate has \
-                             DropPreparedStatement; named stmts only arrive via 'P')"
-                        );
+                        prepare_seams::drop_prepared_statement::call(&close_target, false)?;
+                    } else {
+                        extended_query::drop_unnamed_stmt();
                     }
-                    simple_query::drop_unnamed_stmt();
                 }
                 b'P' => {
                     if let Some(portal) = portalmem::GetPortalByName(Some(&close_target)) {
@@ -428,10 +487,10 @@ fn postgres_main_inner(dbname: &str, username: &str) -> PgResult<()> {
     loop {
         /*
          * Release storage left over from prior query cycle. C resets the
-         * long-lived MessageContext; this is that reset (stale stmt-list
-         * handles die with it).
+         * long-lived MessageContext; this is that reset. Stmt-list registry
+         * handles are NOT reset here: extended-protocol portals carry them
+         * across messages, and PortalDrop frees them.
          */
-        pquery::stmt_list::reset_all();
         message_context.reset();
         let mcx = message_context.mcx();
 
@@ -484,7 +543,7 @@ fn postgres_main_inner(dbname: &str, username: &str) -> PgResult<()> {
 // One iteration of the C for(;;) body (postgres.c:4516-5021), Err = the
 // sigsetjmp path. Panics from unported seams are mapped to ERROR-level errors
 // so the backend recovers as C does from ereport(ERROR).
-fn run_one_iteration(mcx: Mcx<'_>, state: &mut LoopState) -> PgResult<()> {
+pub(crate) fn run_one_iteration(mcx: Mcx<'_>, state: &mut LoopState) -> PgResult<()> {
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         run_one_iteration_inner(mcx, state)
     }));

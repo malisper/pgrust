@@ -39,7 +39,9 @@ pub fn grouping_planner<'mcx>(run: &mut PlannerRun<'mcx>, tuple_fraction: f64) -
 
     if parse.hasAggs {
         crate::prepagg::preprocess_aggrefs(run, run.processed_tlist())?;
-        debug_assert!(parse.havingQual.is_none());
+        if let Some(having) = parse.havingQual {
+            crate::prepagg::preprocess_aggrefs_node(run, having)?;
+        }
     }
     if parse.hasWindowFuncs {
         panic!("find_window_functions (clauses.c): M2 window lane");
@@ -73,13 +75,12 @@ pub fn grouping_planner<'mcx>(run: &mut PlannerRun<'mcx>, tuple_fraction: f64) -
     } else {
         (final_target, final_target_parallel_safe)
     };
-    if !parse.distinctClause.is_nil() || parse.havingQual.is_some() {
-        panic!("create_distinct_paths/HAVING (planner.c): M2 lane");
-    }
     // No window functions: grouping_target = sort_input_target.
     let grouping_target = sort_input_target;
     let grouping_target_parallel_safe = sort_input_target_parallel_safe;
-    let scanjoin_target = if parse.hasAggs || !parse.groupClause.is_nil() {
+    let have_grouping =
+        parse.hasAggs || !parse.groupClause.is_nil() || run.root.hasHavingQual;
+    let scanjoin_target = if have_grouping {
         make_group_input_target(run, final_target)?
     } else {
         grouping_target
@@ -106,12 +107,16 @@ pub fn grouping_planner<'mcx>(run: &mut PlannerRun<'mcx>, tuple_fraction: f64) -
     run.root.upper_targets[UPPERREL_WINDOW as usize] = Some(sort_input_target);
     run.root.upper_targets[UPPERREL_GROUP_AGG as usize] = Some(grouping_target);
 
-    let mut current_rel = if parse.hasAggs || !parse.groupClause.is_nil() {
+    let mut current_rel = if have_grouping {
         let _ = grouping_target_parallel_safe;
         create_grouping_paths(run, current_rel, grouping_target)?
     } else {
         current_rel
     };
+
+    if !parse.distinctClause.is_nil() {
+        current_rel = create_distinct_paths(run, current_rel, sort_input_target)?;
+    }
 
     if !parse.sortClause.is_nil() {
         current_rel = create_ordered_paths(
@@ -270,7 +275,6 @@ fn make_group_input_target<'mcx>(
     final_target: types_pathnodes::PtId,
 ) -> PgResult<types_pathnodes::PtId> {
     let mcx = run.mcx;
-    debug_assert!(run.parse().havingQual.is_none());
 
     let mut tlist = types_nodes::list::NodeList::nil();
     let mut group_exprs: mcx::PgVec<'mcx, types_nodes::Node<'mcx>> = mcx::PgVec::new_in(mcx);
@@ -298,6 +302,9 @@ fn make_group_input_target<'mcx>(
         } else {
             pull_agg_input_vars(expr, &mut vars);
         }
+    }
+    if let Some(having) = run.parse().havingQual {
+        pull_agg_input_vars(having, &mut vars);
     }
 
     // add_new_columns_to_pathtarget: dedupe by equal().
@@ -348,22 +355,63 @@ fn pull_agg_input_vars<'mcx>(
                 pull_agg_input_vars(a, out);
             }
         }
+        NodeTag::T_RelabelType => {
+            pull_agg_input_vars(node.as_relabel_type().unwrap().arg, out)
+        }
         other => panic!("pull_var_clause (var.c): {other:?}; M3 expression lane"),
     }
 }
 
-// create_grouping_paths + create_ordinary_grouping_paths +
-// add_paths_to_grouping_rel (planner.c). DIVERGENCE: sorted-grouping
-// candidates (can_sort arm) are not generated, so plan choice (not results)
-// can differ from C where a sorted plan would win.
+// grouping_is_sortable/grouping_is_hashable (tlist.c) over interned clauses.
+fn grouping_is_sortable(run: &PlannerRun<'_>, clauses: &[types_pathnodes::NodeId]) -> bool {
+    clauses.iter().all(|&id| {
+        run.root.expr_node(id).as_sort_group_clause().expect("group clause cell").sortop != 0
+    })
+}
+
+fn grouping_is_hashable(run: &PlannerRun<'_>, clauses: &[types_pathnodes::NodeId]) -> bool {
+    clauses.iter().all(|&id| {
+        run.root.expr_node(id).as_sort_group_clause().expect("group clause cell").hashable
+    })
+}
+
+// make_ordered_path (planner.c); the incremental-sort leg is loud.
+fn make_ordered_path<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel: RelId,
+    path: types_pathnodes::PathId,
+    cheapest_path: types_pathnodes::PathId,
+    pathkeys: &mcx::PgVec<'mcx, types_pathnodes::PathKey>,
+    limit_tuples: f64,
+) -> Option<types_pathnodes::PathId> {
+    let (is_sorted, presorted_keys) = crate::pathkeys::pathkeys_count_contained_in(
+        pathkeys,
+        &run.root.path(path).base().pathkeys,
+    );
+    if is_sorted {
+        return Some(path);
+    }
+    let use_full_sort = presorted_keys == 0 || !crate::gucs::enable_incremental_sort();
+    if path != cheapest_path && use_full_sort {
+        return None;
+    }
+    if use_full_sort {
+        let keys = crate::relnode::pgvec_clone_shallow(run.mcx, pathkeys);
+        Some(crate::pathnode::create_sort_path(run, rel, path, keys, limit_tuples))
+    } else {
+        panic!("create_incremental_sort_path (pathnode.c): M2 incremental-sort lane");
+    }
+}
+
+// create_grouping_paths + make_grouping_rel + create_ordinary_grouping_paths
+// + add_paths_to_grouping_rel (planner.c), single grouping set.
 fn create_grouping_paths<'mcx>(
     run: &mut PlannerRun<'mcx>,
     input_rel: RelId,
     grouping_target: types_pathnodes::PtId,
 ) -> PgResult<RelId> {
     let parse = run.parse();
-    debug_assert!(parse.hasAggs || !parse.groupClause.is_nil());
-    debug_assert!(parse.groupingSets.is_nil() && parse.havingQual.is_none());
+    debug_assert!(parse.groupingSets.is_nil());
 
     let grouped_rel =
         crate::relnode::fetch_upper_rel(&mut run.root, UPPERREL_GROUP_AGG);
@@ -378,7 +426,8 @@ fn create_grouping_paths<'mcx>(
                 input.consider_parallel,
             )
         };
-        let target_safe = is_parallel_safe_exprs(run, grouping_target)?;
+        let target_safe = is_parallel_safe_exprs(run, grouping_target)?
+            && is_parallel_safe_opt(run, parse.havingQual)?;
         let g = run.root.rel_mut(grouped_rel);
         g.serverid = serverid;
         g.userid = userid;
@@ -396,43 +445,21 @@ fn create_grouping_paths<'mcx>(
     )?;
     debug_assert!(run.root.rel(input_rel).partial_pathlist.is_empty());
 
-    if parse.groupClause.is_nil() {
-        let num_groups = 1.0;
-        let paths =
-            crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.rel(input_rel).pathlist);
-        for path_id in paths.iter() {
-            let agg_path = crate::pathnode::create_agg_path(
-                run,
-                grouped_rel,
-                *path_id,
-                grouping_target,
-                types_pathnodes::AGG_PLAIN,
-                types_pathnodes::AGGSPLIT_SIMPLE,
-                mcx::PgVec::new_in(run.mcx),
-                mcx::PgVec::new_in(run.mcx),
-                &agg_costs,
-                num_groups,
-            );
-            crate::pathnode::add_path(run, grouped_rel, agg_path);
-        }
-        crate::pathnode::set_cheapest(run, grouped_rel)?;
-        return Ok(grouped_rel);
-    }
-
-    if !parse.hasAggs {
-        panic!("create_group_path (pathnode.c): GROUP BY without aggregates; M3 group lane");
-    }
-    let can_hash = run.root.numOrderedAggs == 0
-        && parse
-            .groupClause
-            .iter()
-            .all(|n| n.as_sort_group_clause().expect("groupClause cell").hashable);
-    if !can_hash {
+    // is_degenerate_grouping: HAVING with no aggs and no GROUP BY.
+    if (run.root.hasHavingQual || !parse.groupingSets.is_nil())
+        && !parse.hasAggs
+        && parse.groupClause.is_nil()
+    {
         panic!(
-            "add_paths_to_grouping_rel (planner.c): grouping not hashable \
-             (AGG_SORTED); M3 sorted-grouping lane"
+            "create_degenerate_grouping_paths (planner.c): HAVING without \
+             aggregates/GROUP BY (GroupResultPath quals); M3 lane"
         );
     }
+
+    let can_sort = grouping_is_sortable(run, &run.root.processed_groupClause);
+    let can_hash = !parse.groupClause.is_nil()
+        && run.root.numOrderedAggs == 0
+        && grouping_is_hashable(run, &run.root.processed_groupClause);
 
     let num_groups = get_number_of_groups(run, input_rel)?;
     let cheapest = run
@@ -440,53 +467,301 @@ fn create_grouping_paths<'mcx>(
         .rel(input_rel)
         .cheapest_total_path
         .expect("input rel has a cheapest path");
-    let group_clause =
-        crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.processed_groupClause);
-    let agg_path = crate::pathnode::create_agg_path(
-        run,
-        grouped_rel,
-        cheapest,
-        grouping_target,
-        types_pathnodes::AGG_HASHED,
-        types_pathnodes::AGGSPLIT_SIMPLE,
-        group_clause,
-        mcx::PgVec::new_in(run.mcx),
-        &agg_costs,
-        num_groups,
-    );
-    crate::pathnode::add_path(run, grouped_rel, agg_path);
+    let having_qual: mcx::PgVec<'mcx, types_pathnodes::NodeId> = {
+        let mut v = mcx::PgVec::new_in(run.mcx);
+        if let Some(h) = parse.havingQual {
+            v.push(run.intern_expr(h));
+        }
+        v
+    };
+
+    if can_sort {
+        let paths =
+            crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.rel(input_rel).pathlist);
+        for &path_id in paths.iter() {
+            let path_keys =
+                crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.path(path_id).base().pathkeys);
+            let orderings = crate::pathkeys::get_useful_group_keys_orderings(run, &path_keys);
+            for info in orderings {
+                let Some(sorted) =
+                    make_ordered_path(run, grouped_rel, path_id, cheapest, &info.pathkeys, -1.0)
+                else {
+                    continue;
+                };
+                if !parse.hasAggs {
+                    panic!(
+                        "create_group_path (pathnode.c): GROUP BY without aggregates \
+                         (nodeGroup); M3 group lane"
+                    );
+                }
+                let strategy = if parse.groupClause.is_nil() {
+                    types_pathnodes::AGG_PLAIN
+                } else {
+                    types_pathnodes::AGG_SORTED
+                };
+                let agg_path = crate::pathnode::create_agg_path(
+                    run,
+                    grouped_rel,
+                    sorted,
+                    grouping_target,
+                    strategy,
+                    types_pathnodes::AGGSPLIT_SIMPLE,
+                    info.clauses,
+                    crate::relnode::pgvec_clone_shallow(run.mcx, &having_qual),
+                    &agg_costs,
+                    num_groups,
+                )?;
+                crate::pathnode::add_path(run, grouped_rel, agg_path);
+            }
+        }
+    }
+
+    if can_hash {
+        let group_clause =
+            crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.processed_groupClause);
+        let agg_path = crate::pathnode::create_agg_path(
+            run,
+            grouped_rel,
+            cheapest,
+            grouping_target,
+            types_pathnodes::AGG_HASHED,
+            types_pathnodes::AGGSPLIT_SIMPLE,
+            group_clause,
+            crate::relnode::pgvec_clone_shallow(run.mcx, &having_qual),
+            &agg_costs,
+            num_groups,
+        )?;
+        crate::pathnode::add_path(run, grouped_rel, agg_path);
+    }
+
+    if run.root.rel(grouped_rel).pathlist.is_empty() {
+        return Err(could_not_implement("GROUP BY"));
+    }
     crate::pathnode::set_cheapest(run, grouped_rel)?;
     Ok(grouped_rel)
 }
 
-// get_number_of_groups (planner.c), plain-GROUP-BY leg.
-fn get_number_of_groups<'mcx>(run: &mut PlannerRun<'mcx>, input_rel: RelId) -> PgResult<f64> {
-    let path_rows = {
-        let cheapest = run.root.rel(input_rel).cheapest_total_path.unwrap();
-        run.root.path(cheapest).base().rows
-    };
-    let mut group_exprs: mcx::PgVec<'mcx, (types_pathnodes::NodeId, types_nodes::Node<'mcx>)> =
-        mcx::PgVec::new_in(run.mcx);
-    for i in 0..run.root.processed_groupClause.len() {
-        let gc_id = run.root.processed_groupClause[i];
+#[cold]
+#[inline(never)]
+fn could_not_implement(what: &str) -> Box<types_error::PgError> {
+    Box::new(
+        types_error::PgError::error(format!("could not implement {what}"))
+            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+            .with_detail(
+                "Some of the datatypes only support hashing, while others only support sorting.",
+            ),
+    )
+}
+
+// get_sortgrouplist_exprs (tlist.c) into estimate_num_groups' input shape.
+fn sortgrouplist_exprs<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    clauses: &[types_pathnodes::NodeId],
+    tlist: &types_nodes::list::NodeList<'mcx>,
+) -> mcx::PgVec<'mcx, (types_pathnodes::NodeId, types_nodes::Node<'mcx>)> {
+    let mut exprs = mcx::PgVec::new_in(run.mcx);
+    for &gc_id in clauses {
         let sgref = run
             .root
             .expr_node(gc_id)
             .as_sort_group_clause()
-            .expect("processed_groupClause cell")
+            .expect("sortgroup clause cell")
             .tleSortGroupRef;
-        let tle_node = run
-            .processed_tlist()
+        let tle_node = tlist
             .iter()
-            .find(|n| {
-                n.as_target_entry().expect("tlist cell").ressortgroupref == sgref
-            })
-            .expect("groupClause sortgroupref has a tlist entry");
+            .find(|n| n.as_target_entry().expect("tlist cell").ressortgroupref == sgref)
+            .expect("sortgroupref has a tlist entry");
         let expr = tle_node.as_target_entry().unwrap().expr;
         let id = run.intern_expr(expr);
-        group_exprs.push((id, expr));
+        exprs.push((id, expr));
     }
+    exprs
+}
+
+// get_number_of_groups (planner.c), no-grouping-sets legs.
+fn get_number_of_groups<'mcx>(run: &mut PlannerRun<'mcx>, input_rel: RelId) -> PgResult<f64> {
+    if run.parse().groupClause.is_nil() {
+        return Ok(1.0);
+    }
+    let path_rows = {
+        let cheapest = run.root.rel(input_rel).cheapest_total_path.unwrap();
+        run.root.path(cheapest).base().rows
+    };
+    let clauses =
+        crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.processed_groupClause);
+    let tlist = run.processed_tlist();
+    let group_exprs = sortgrouplist_exprs(run, &clauses, tlist);
     crate::selfuncs::estimate_num_groups(run, &group_exprs, path_rows)
+}
+
+// create_distinct_paths + create_final_distinct_paths (planner.c); partial
+// paths are always empty so create_partial_distinct_paths is a no-op.
+fn create_distinct_paths<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    input_rel: RelId,
+    target: types_pathnodes::PtId,
+) -> PgResult<RelId> {
+    let parse = run.parse();
+    assert!(!parse.hasDistinctOn, "DISTINCT ON is loud upstream");
+
+    let distinct_rel = crate::relnode::fetch_upper_rel(&mut run.root, UPPERREL_DISTINCT);
+    {
+        let (serverid, userid, useridiscurrent, has_fdw, in_parallel) = {
+            let input = run.root.rel(input_rel);
+            (
+                input.serverid,
+                input.userid,
+                input.useridiscurrent,
+                input.has_fdwroutine,
+                input.consider_parallel,
+            )
+        };
+        let d = run.root.rel_mut(distinct_rel);
+        d.serverid = serverid;
+        d.userid = userid;
+        d.useridiscurrent = useridiscurrent;
+        d.has_fdwroutine = has_fdw;
+        d.consider_parallel = in_parallel;
+        d.pathtarget_id = Some(target);
+    }
+
+    let cheapest = run
+        .root
+        .rel(input_rel)
+        .cheapest_total_path
+        .expect("input rel has a cheapest path");
+    let num_distinct_rows = if !parse.groupClause.is_nil()
+        || !parse.groupingSets.is_nil()
+        || parse.hasAggs
+        || run.root.hasHavingQual
+    {
+        run.root.path(cheapest).base().rows
+    } else {
+        let clauses =
+            crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.processed_distinctClause);
+        let exprs = sortgrouplist_exprs(run, &clauses, &parse.targetList);
+        let rows = run.root.path(cheapest).base().rows;
+        crate::selfuncs::estimate_num_groups(run, &exprs, rows)?
+    };
+
+    if grouping_is_sortable(run, &run.root.processed_distinctClause) {
+        let limittuples = if run.root.distinct_pathkeys.is_empty() { 1.0 } else { -1.0 };
+        let needed_pathkeys =
+            crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.distinct_pathkeys);
+        let paths =
+            crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.rel(input_rel).pathlist);
+        for &input_path in paths.iter() {
+            let useful_list = get_useful_pathkeys_for_distinct(
+                run,
+                &needed_pathkeys,
+                &crate::relnode::pgvec_clone_shallow(
+                    run.mcx,
+                    &run.root.path(input_path).base().pathkeys,
+                ),
+            );
+            for useful in useful_list {
+                let Some(sorted) = make_ordered_path(
+                    run,
+                    distinct_rel,
+                    input_path,
+                    cheapest,
+                    &useful,
+                    limittuples,
+                ) else {
+                    continue;
+                };
+                if run.root.distinct_pathkeys.is_empty() {
+                    panic!(
+                        "create_final_distinct_paths (planner.c): all-redundant \
+                         DISTINCT keys (LIMIT 1 uniqification); M2 const-EC lane"
+                    );
+                }
+                let numkeys = run.root.distinct_pathkeys.len() as i32;
+                let unique = crate::pathnode::create_upper_unique_path(
+                    run,
+                    distinct_rel,
+                    sorted,
+                    numkeys,
+                    num_distinct_rows,
+                );
+                crate::pathnode::add_path(run, distinct_rel, unique);
+            }
+        }
+    }
+
+    let allow_hash = if run.root.rel(distinct_rel).pathlist.is_empty() {
+        true
+    } else {
+        crate::gucs::enable_hashagg()
+    };
+    if allow_hash && grouping_is_hashable(run, &run.root.processed_distinctClause) {
+        let distinct_clause =
+            crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.processed_distinctClause);
+        let input_target = run
+            .root
+            .path(cheapest)
+            .base()
+            .pathtarget_id
+            .expect("input path has a pathtarget");
+        let agg_path = crate::pathnode::create_agg_path(
+            run,
+            distinct_rel,
+            cheapest,
+            input_target,
+            types_pathnodes::AGG_HASHED,
+            types_pathnodes::AGGSPLIT_SIMPLE,
+            distinct_clause,
+            mcx::PgVec::new_in(run.mcx),
+            &types_pathnodes::AggClauseCosts::default(),
+            num_distinct_rows,
+        )?;
+        crate::pathnode::add_path(run, distinct_rel, agg_path);
+    }
+
+    if run.root.rel(distinct_rel).pathlist.is_empty() {
+        return Err(could_not_implement("DISTINCT"));
+    }
+    crate::pathnode::set_cheapest(run, distinct_rel)?;
+    Ok(distinct_rel)
+}
+
+// get_useful_pathkeys_for_distinct (planner.c), hasDistinctOn loud upstream.
+fn get_useful_pathkeys_for_distinct<'mcx>(
+    run: &PlannerRun<'mcx>,
+    needed_pathkeys: &mcx::PgVec<'mcx, types_pathnodes::PathKey>,
+    path_pathkeys: &[types_pathnodes::PathKey],
+) -> Vec<mcx::PgVec<'mcx, types_pathnodes::PathKey>> {
+    let mcx = run.mcx;
+    let mut list = Vec::new();
+    list.push(crate::relnode::pgvec_clone_shallow(mcx, needed_pathkeys));
+    if !crate::gucs::enable_distinct_reordering() {
+        return list;
+    }
+    let mut useful: mcx::PgVec<'mcx, types_pathnodes::PathKey> = mcx::PgVec::new_in(mcx);
+    for pk in path_pathkeys {
+        if !needed_pathkeys.contains(pk) {
+            break;
+        }
+        useful.push(*pk);
+    }
+    if useful.is_empty() {
+        return list;
+    }
+    if useful.len() < needed_pathkeys.len() && !crate::gucs::enable_incremental_sort() {
+        return list;
+    }
+    for pk in needed_pathkeys.iter() {
+        if !useful.contains(pk) {
+            useful.push(*pk);
+        }
+    }
+    if crate::pathkeys::compare_pathkeys(&useful, needed_pathkeys)
+        == crate::pathkeys::PathKeysComparison::Equal
+    {
+        return list;
+    }
+    list.push(useful);
+    list
 }
 
 pub fn limit_needed(parse: &types_nodes::parsenodes::Query<'_>) -> bool {
@@ -718,25 +993,62 @@ fn create_ordered_paths<'mcx>(
     Ok(ordered_rel)
 }
 
-// DIVERGENCE: group_pathkeys are not built (sorted-grouping lane); only
-// hashed grouping paths are generated, so input order is never consumed.
+// standard_qp_callback (planner.c): grouping sets/windows/setops loud
+// upstream; setop_pathkeys always NIL.
 fn standard_qp_callback<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResult<()> {
     let parse = run.parse();
+    let tlist = run.processed_tlist();
     if run.root.numOrderedAggs > 0 {
-        panic!("make_pathkeys_for_sortclauses_extended (pathkeys.c): M3 ordered-agg lane");
+        panic!("adjust_group_pathkeys_for_groupagg (planner.c): M3 ordered-agg lane");
     }
+
+    if !parse.groupClause.is_nil() {
+        let mut clauses = core::mem::replace(
+            &mut run.root.processed_groupClause,
+            mcx::PgVec::new_in(run.mcx),
+        );
+        let (pathkeys, sortable) = crate::pathkeys::make_pathkeys_for_sortclauses_extended(
+            run, &mut clauses, tlist, true, true,
+        )?;
+        run.root.processed_groupClause = clauses;
+        if sortable {
+            run.root.num_groupby_pathkeys = pathkeys.len() as i32;
+            run.root.group_pathkeys = pathkeys;
+        } else {
+            run.root.group_pathkeys = mcx::PgVec::new_in(run.mcx);
+            run.root.num_groupby_pathkeys = 0;
+        }
+    } else {
+        run.root.group_pathkeys = mcx::PgVec::new_in(run.mcx);
+        run.root.num_groupby_pathkeys = 0;
+    }
+
     if !parse.distinctClause.is_nil() {
-        panic!("make_pathkeys_for_sortclauses (pathkeys.c): M2 distinct lane");
+        let mut clauses: mcx::PgVec<'mcx, types_pathnodes::NodeId> =
+            mcx::PgVec::new_in(run.mcx);
+        for n in &parse.distinctClause {
+            clauses.push(run.intern_expr(n));
+        }
+        let (pathkeys, sortable) = crate::pathkeys::make_pathkeys_for_sortclauses_extended(
+            run, &mut clauses, tlist, true, false,
+        )?;
+        run.root.processed_distinctClause = clauses;
+        run.root.distinct_pathkeys =
+            if sortable { pathkeys } else { mcx::PgVec::new_in(run.mcx) };
+    } else {
+        run.root.distinct_pathkeys = mcx::PgVec::new_in(run.mcx);
     }
-    run.root.num_groupby_pathkeys = 0;
-    run.root.sort_pathkeys = crate::pathkeys::make_pathkeys_for_sortclauses(
-        run,
-        &parse.sortClause,
-        run.processed_tlist(),
-    )?;
-    // group/window/distinct/setop pathkeys are all NIL here.
-    run.root.query_pathkeys =
-        crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.sort_pathkeys);
+
+    run.root.sort_pathkeys =
+        crate::pathkeys::make_pathkeys_for_sortclauses(run, &parse.sortClause, tlist)?;
+
+    run.root.query_pathkeys = if !run.root.group_pathkeys.is_empty() {
+        crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.group_pathkeys)
+    } else if run.root.distinct_pathkeys.len() > run.root.sort_pathkeys.len() {
+        crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.distinct_pathkeys)
+    } else {
+        crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.sort_pathkeys)
+    };
     Ok(())
 }
 

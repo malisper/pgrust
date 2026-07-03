@@ -1,33 +1,16 @@
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, Once};
+use std::sync::atomic::Ordering;
+use std::sync::Mutex;
 
 use super::*;
 
-static LOCK_TIMEOUT_INDICATOR: AtomicBool = AtomicBool::new(false);
-static STMT_TIMEOUT_INDICATOR: AtomicBool = AtomicBool::new(false);
+use crate::session_tests::{LOCK_TIMEOUT_INDICATOR, STMT_TIMEOUT_INDICATOR};
+
 // Serializes tests that reach the QueryCancel arm: the timeout-indicator
 // stubs are process-global while the flags they mimic are per-backend.
 static CANCEL_ARM: Mutex<()> = Mutex::new(());
 
 fn install_test_seams() {
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        lock_seams::abort_strong_lock_acquire::set(|| {});
-        lock_seams::get_awaited_lock_hashcode::set(|| None);
-        timeout_seams::get_timeout_indicator::set(|id, reset| {
-            let slot = match id {
-                timeout_seams::LOCK_TIMEOUT => &LOCK_TIMEOUT_INDICATOR,
-                timeout_seams::STATEMENT_TIMEOUT => &STMT_TIMEOUT_INDICATOR,
-                _ => return false,
-            };
-            if reset {
-                slot.swap(false, Ordering::Relaxed)
-            } else {
-                slot.load(Ordering::Relaxed)
-            }
-        });
-        timeout_seams::get_timeout_finish_time::set(|_| 0);
-    });
+    crate::session_tests::install_shared_stubs();
 }
 
 fn my_latch() {
@@ -194,26 +177,8 @@ fn show_usage_reports_without_reset() {
 }
 
 fn install_ipc_stubs() {
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        use init_small::globals as g;
-        s_lock_seams::perform_spin_delay::set(|_| std::thread::yield_now());
-        s_lock_seams::finish_spin_delay::set(|_| {});
-        shmem_seams::mul_size::set(|a, b| Ok(a * b));
-        shmem_seams::add_size::set(|a, b| Ok(a + b));
-        ipc_seams::on_shmem_exit::set(|_, _| {});
-        pg_sema_seams::pg_semaphore_create::set(|_| {});
-        g::SetMaxConnections(4);
-        g::set_max_worker_processes(2);
-        g::SetMaxBackends(4 + 3 + 2 + 2 + types_storage::storage::NUM_SPECIAL_WORKER_PROCS);
-        lmgr_proc::InitProcGlobal(&lmgr_proc::ProcGlobalConfig {
-            autovacuum_worker_slots: 3,
-            max_wal_senders: 2,
-            max_prepared_xacts: 2,
-            fastpath_lock_groups_per_backend: 1,
-        });
-        procsignal::ProcSignalShmemInit();
-    });
+    crate::session_tests::install_shared_stubs();
+    crate::session_tests::install_shared_proc_fixture();
 }
 
 // The shutdown/cancel delivery spine end-to-end: another thread "kills" this

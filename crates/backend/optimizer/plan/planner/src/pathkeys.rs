@@ -93,6 +93,147 @@ pub fn make_pathkeys_for_sortclauses<'mcx>(
     Ok(pathkeys)
 }
 
+/// The `_extended` form over interned SortGroupClause ids (GROUP BY/DISTINCT
+/// lanes); returns (pathkeys, sortable). `remove_group_rtindex` is dead (no
+/// RTE_GROUP on this lane, loud upstream).
+pub fn make_pathkeys_for_sortclauses_extended<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    sortclauses: &mut PgVec<'mcx, types_pathnodes::NodeId>,
+    tlist: &NodeList<'mcx>,
+    remove_redundant: bool,
+    set_ec_sortref: bool,
+) -> PgResult<(PgVec<'mcx, PathKey>, bool)> {
+    let mut pathkeys: PgVec<'mcx, PathKey> = PgVec::new_in(run.mcx);
+    let mut sortable = true;
+    let mut i = 0;
+    while i < sortclauses.len() {
+        let sortcl = *run
+            .root
+            .expr_node(sortclauses[i])
+            .as_sort_group_clause()
+            .expect("sortclause cell");
+        let sortkey = get_sortgroupclause_expr(&sortcl, tlist);
+        if sortcl.sortop == 0 {
+            sortable = false;
+            i += 1;
+            continue;
+        }
+        let pathkey = make_pathkey_from_sortop(
+            run,
+            sortkey,
+            sortcl.sortop,
+            sortcl.reverse_sort,
+            sortcl.nulls_first,
+            sortcl.tleSortGroupRef,
+        )?;
+        if set_ec_sortref {
+            let ec = pathkey.pk_eclass.expect("canonical pathkey has an eclass");
+            if run.root.ec(ec).ec_sortref == 0 {
+                run.root.ec_mut(ec).ec_sortref = sortcl.tleSortGroupRef;
+            }
+        }
+        if !pathkey_is_redundant(run, pathkey, &pathkeys) {
+            pathkeys.push(pathkey);
+            i += 1;
+        } else if remove_redundant {
+            sortclauses.remove(i);
+        } else {
+            i += 1;
+        }
+    }
+    Ok((pathkeys, sortable))
+}
+
+pub struct GroupByOrdering<'mcx> {
+    pub pathkeys: PgVec<'mcx, PathKey>,
+    pub clauses: PgVec<'mcx, types_pathnodes::NodeId>,
+}
+
+// group_keys_reorder_by_pathkeys (pathkeys.c): clauses matched by ec_sortref.
+fn group_keys_reorder_by_pathkeys<'mcx>(
+    run: &PlannerRun<'mcx>,
+    path_pathkeys: &[PathKey],
+    group_pathkeys: &mut PgVec<'mcx, PathKey>,
+    group_clauses: &mut PgVec<'mcx, types_pathnodes::NodeId>,
+    num_groupby_pathkeys: usize,
+) -> usize {
+    if group_pathkeys.is_empty() || group_clauses.is_empty() {
+        return 0;
+    }
+    let mcx = run.mcx;
+    let mut new_pathkeys: PgVec<'mcx, PathKey> = PgVec::new_in(mcx);
+    let mut new_clauses: PgVec<'mcx, types_pathnodes::NodeId> = PgVec::new_in(mcx);
+    for (i, pk) in path_pathkeys.iter().enumerate() {
+        if i >= num_groupby_pathkeys || !group_pathkeys.contains(pk) {
+            break;
+        }
+        let ec = pk.pk_eclass.expect("canonical pathkey has an eclass");
+        let sortref = run.root.ec(ec).ec_sortref;
+        assert!(sortref > 0, "pathkey EC of a group clause has no sortref");
+        let sgc = group_clauses
+            .iter()
+            .copied()
+            .find(|&id| {
+                run.root
+                    .expr_node(id)
+                    .as_sort_group_clause()
+                    .expect("group clause cell")
+                    .tleSortGroupRef
+                    == sortref
+            })
+            .expect("group clause matching the pathkey sortref");
+        new_pathkeys.push(*pk);
+        new_clauses.push(sgc);
+    }
+    let n = new_pathkeys.len();
+    for pk in group_pathkeys.iter() {
+        if !new_pathkeys.contains(pk) {
+            new_pathkeys.push(*pk);
+        }
+    }
+    for &c in group_clauses.iter() {
+        if !new_clauses.contains(&c) {
+            new_clauses.push(c);
+        }
+    }
+    *group_pathkeys = new_pathkeys;
+    *group_clauses = new_clauses;
+    n
+}
+
+/// C `get_useful_group_keys_orderings` (grouping sets loud upstream).
+pub fn get_useful_group_keys_orderings<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    path_pathkeys: &[PathKey],
+) -> Vec<GroupByOrdering<'mcx>> {
+    let mcx = run.mcx;
+    let mut infos = Vec::new();
+    infos.push(GroupByOrdering {
+        pathkeys: crate::relnode::pgvec_clone_shallow(mcx, &run.root.group_pathkeys),
+        clauses: crate::relnode::pgvec_clone_shallow(mcx, &run.root.processed_groupClause),
+    });
+    if !crate::gucs::enable_group_by_reordering() {
+        return infos;
+    }
+    if !path_pathkeys.is_empty()
+        && !pathkeys_contained_in(path_pathkeys, &run.root.group_pathkeys)
+    {
+        let mut pathkeys =
+            crate::relnode::pgvec_clone_shallow(mcx, &run.root.group_pathkeys);
+        let mut clauses =
+            crate::relnode::pgvec_clone_shallow(mcx, &run.root.processed_groupClause);
+        let num = run.root.num_groupby_pathkeys as usize;
+        let n = group_keys_reorder_by_pathkeys(run, path_pathkeys, &mut pathkeys, &mut clauses, num);
+        if n > 0
+            && (crate::gucs::enable_incremental_sort() || n == num)
+            && compare_pathkeys(&pathkeys, &run.root.group_pathkeys) != PathKeysComparison::Equal
+        {
+            infos.push(GroupByOrdering { pathkeys, clauses });
+        }
+    }
+    infos
+}
+
 fn make_pathkey_from_sortop<'mcx>(
     run: &mut PlannerRun<'mcx>,
     expr: Node<'mcx>,

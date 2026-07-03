@@ -21,7 +21,10 @@ pub use classify::{
     find_window_functions, is_parallel_safe, is_pseudo_constant_clause,
     is_pseudo_constant_clause_relids, max_parallel_hazard, num_relids, pull_paramids,
 };
-pub use fold::{all_arguments_const, estimate_expression_value, eval_const_expressions};
+pub use fold::{
+    all_arguments_const, estimate_expression_value, eval_const_expressions,
+    eval_const_expressions_with_params,
+};
 pub use walker::{
     check_functions_in_node, expression_tree_mutator, expression_tree_walker, mutate_list,
     query_or_expression_tree_walker, query_tree_walker, range_table_entry_walker,

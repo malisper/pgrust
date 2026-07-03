@@ -591,8 +591,7 @@ pub fn create_index_path<'mcx>(
     Ok(id)
 }
 
-// create_agg_path (pathnode.c); AGG_SORTED pathkey preservation is the M3
-// grouping lane (AGG_PLAIN output is unordered).
+// create_agg_path (pathnode.c).
 #[allow(clippy::too_many_arguments)]
 pub fn create_agg_path<'mcx>(
     run: &mut PlannerRun<'mcx>,
@@ -605,13 +604,19 @@ pub fn create_agg_path<'mcx>(
     qual: PgVec<'mcx, types_pathnodes::NodeId>,
     aggcosts: &types_pathnodes::AggClauseCosts,
     num_groups: f64,
-) -> PathId {
+) -> PgResult<PathId> {
     assert!(
-        aggstrategy == types_pathnodes::AGG_PLAIN || aggstrategy == types_pathnodes::AGG_HASHED,
-        "create_agg_path (pathnode.c): AGG_SORTED pathkey preservation; M3 sorted-grouping lane"
+        aggstrategy != types_pathnodes::AGG_MIXED,
+        "create_agg_path (pathnode.c): AGG_MIXED; M3 grouping-sets lane"
     );
     let sub = run.root.path(subpath_id).base();
     let rel = run.root.rel(rel_id);
+    let pathkeys = if aggstrategy == types_pathnodes::AGG_SORTED {
+        crate::relnode::pgvec_clone_shallow(run.mcx, &sub.pathkeys)
+    } else {
+        // AGG_HASHED/AGG_PLAIN output is unordered.
+        PgVec::new_in(run.mcx)
+    };
     let path = Path {
         type_: tag16(NodeTag::T_AggPath),
         pathtype: tag16(NodeTag::T_Agg),
@@ -625,13 +630,13 @@ pub fn create_agg_path<'mcx>(
         disabled_nodes: 0,
         startup_cost: 0.0,
         total_cost: 0.0,
-        pathkeys: PgVec::new_in(run.mcx),
+        pathkeys,
     };
     let (sub_disabled, sub_startup, sub_total, sub_rows) =
         (sub.disabled_nodes, sub.startup_cost, sub.total_cost, sub.rows);
     let sub_width = sub.pathtarget_id.map_or(0, |pt| run.root.pathtarget(pt).width);
     let num_group_cols = group_clause.len() as i32;
-    let quals_empty = qual.is_empty();
+    let quals = crate::relnode::pgvec_clone_shallow(run.mcx, &qual);
     let transition_space = aggcosts.transitionSpace as u64;
 
     let id = run.root.alloc_path(PathNode::AggPath(types_pathnodes::AggPath {
@@ -651,13 +656,13 @@ pub fn create_agg_path<'mcx>(
         aggcosts,
         num_group_cols,
         num_groups,
-        quals_empty,
+        &quals,
         sub_disabled,
         sub_startup,
         sub_total,
         sub_rows,
         sub_width,
-    );
+    )?;
 
     let target = run.root.pathtarget(target_id);
     let (t_startup, t_per_tuple) = (target.cost.startup, target.cost.per_tuple);
@@ -665,7 +670,42 @@ pub fn create_agg_path<'mcx>(
     let rows = p.rows;
     p.startup_cost += t_startup;
     p.total_cost += t_startup + t_per_tuple * rows;
-    id
+    Ok(id)
+}
+
+/// C `create_upper_unique_path` (pathnode.c): one cpu_operator_cost per
+/// compared column per input tuple; input ordering preserved.
+pub fn create_upper_unique_path<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel_id: RelId,
+    subpath_id: PathId,
+    num_cols: i32,
+    num_groups: f64,
+) -> PathId {
+    let sub = run.root.path(subpath_id).base();
+    let rel = run.root.rel(rel_id);
+    let path = Path {
+        type_: tag16(NodeTag::T_UpperUniquePath),
+        pathtype: tag16(NodeTag::T_Unique),
+        parent: rel_id,
+        // Unique doesn't project, so use the source path's pathtarget.
+        pathtarget_id: sub.pathtarget_id,
+        param_info: None,
+        parallel_aware: false,
+        parallel_safe: rel.consider_parallel && sub.parallel_safe,
+        parallel_workers: sub.parallel_workers,
+        rows: num_groups,
+        disabled_nodes: sub.disabled_nodes,
+        startup_cost: sub.startup_cost,
+        total_cost: sub.total_cost
+            + gucs::cpu_operator_cost() * sub.rows * num_cols as f64,
+        pathkeys: crate::relnode::pgvec_clone_shallow(run.mcx, &sub.pathkeys),
+    };
+    run.root.alloc_path(PathNode::UpperUniquePath(types_pathnodes::UpperUniquePath {
+        path,
+        subpath: Some(subpath_id),
+        numkeys: num_cols,
+    }))
 }
 
 // get_cheapest_fractional_path (planner.c).
