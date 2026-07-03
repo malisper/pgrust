@@ -1956,6 +1956,7 @@ version = "0.1.0"
 dependencies = [
  "aclchk_seams",
  "bufmgr_seams",
+ "catalog",
  "catalog_seams",
  "datum",
  "exectuples",
@@ -1971,6 +1972,8 @@ dependencies = [
  "nbtree",
  "nodeindexscan",
  "predicate_seams",
+ "procarray",
+ "pruneheap",
  "pruneheap_seams",
  "relation_seams",
  "relcache_seams",
@@ -1979,6 +1982,7 @@ dependencies = [
  "smgr_seams",
  "syscache_seams",
  "tableam",
+ "tableam_vocab",
  "transam_xlog_seams",
  "types_core",
  "types_error",
@@ -1992,6 +1996,7 @@ dependencies = [
  "types_snapshot",
  "types_storage",
  "types_tuple",
+ "xact",
  "xact_seams",
  "xloginsert_seams",
 ]

@@ -946,10 +946,11 @@ pub fn heap_beginscan<'mcx>(
     }
 
     if (flags & (SO_TYPE_SEQSCAN | SO_TYPE_SAMPLESCAN)) != 0 {
-        let snap = snapshot
-            .as_deref()
-            .expect("seqscan/samplescan requires a snapshot");
-        predicate_seams::predicate_lock_relation::call(relation, snap)?;
+        // None (SnapshotAny) never needs serialization (C
+        // SerializationNeededForRead requires an MVCC snapshot).
+        if let Some(snap) = snapshot.as_deref() {
+            predicate_seams::predicate_lock_relation::call(relation, snap)?;
+        }
     }
 
     let mut scan = HeapScanDescData {
