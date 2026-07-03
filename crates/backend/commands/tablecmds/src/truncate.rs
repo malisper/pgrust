@@ -59,10 +59,33 @@ pub fn ExecuteTruncate<'mcx>(mcx: Mcx<'mcx>, stmt: &TruncateStmt<'mcx>) -> PgRes
         let rel = table::table_open(mcx, myrelid, NoLock)?;
         truncate_check_activity(&rel)?;
 
-        if rv.inh && rel.rd_rel.relhassubclass {
-            unported("ExecuteTruncate: find_all_inheritors (inheritance/partition lane)");
-        }
-        if !rv.inh && rel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE {
+        rels.push(rel);
+        relids.push(myrelid);
+
+        if rv.inh {
+            let children = pg_inherits::find_all_inheritors(mcx, myrelid, AccessExclusiveLock)?;
+            for &childrelid in children.iter() {
+                if relids.contains(&childrelid) {
+                    continue;
+                }
+                let child = table::table_open(mcx, childrelid, NoLock)?;
+                debug_assert!(
+                    !(child.rd_rel.relpersistence == types_core::RELPERSISTENCE_TEMP
+                        && !child.rd_islocaltemp),
+                    "other-session temp children unreachable (temp lane is session-local)"
+                );
+                // Inherited TRUNCATE checks permissions on the parent only.
+                truncate_check_rel(
+                    childrelid,
+                    child.rd_rel.relkind,
+                    child.namespace(),
+                    child.name(),
+                )?;
+                truncate_check_activity(&child)?;
+                rels.push(child);
+                relids.push(childrelid);
+            }
+        } else if rels.last().expect("just pushed").rd_rel.relkind == RELKIND_PARTITIONED_TABLE {
             return Err(Box::new(
                 PgError::new(ERROR, "cannot truncate only a partitioned table".to_string())
                     .with_sqlstate(ERRCODE_WRONG_OBJECT_TYPE)
@@ -72,8 +95,6 @@ pub fn ExecuteTruncate<'mcx>(mcx: Mcx<'mcx>, stmt: &TruncateStmt<'mcx>) -> PgRes
                     ),
             ));
         }
-        rels.push(rel);
-        relids.push(myrelid);
     }
 
     let n_explicit = rels.len();

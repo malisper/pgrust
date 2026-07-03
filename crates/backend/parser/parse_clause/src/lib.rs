@@ -1069,6 +1069,7 @@ fn contains_aggref(node: Node<'_>) -> bool {
         NodeTag::T_FuncExpr => node.as_func_expr().unwrap().args.iter().any(contains_aggref),
         NodeTag::T_OpExpr => node.as_op_expr().unwrap().args.iter().any(contains_aggref),
         NodeTag::T_RelabelType => contains_aggref(node.as_relabel_type().unwrap().arg),
+        NodeTag::T_CollateExpr => contains_aggref(node.as_collate_expr().unwrap().arg),
         NodeTag::T_BoolExpr => node.as_bool_expr().unwrap().args.iter().any(contains_aggref),
         NodeTag::T_NullTest => {
             node.as_null_test().unwrap().arg.is_some_and(contains_aggref)
@@ -1107,6 +1108,7 @@ fn locate_aggref(node: Node<'_>) -> ParseLoc {
             .find(|&a| contains_aggref(a))
             .map_or(-1, locate_aggref),
         NodeTag::T_RelabelType => locate_aggref(node.as_relabel_type().unwrap().arg),
+        NodeTag::T_CollateExpr => locate_aggref(node.as_collate_expr().unwrap().arg),
         _ => -1,
     }
 }

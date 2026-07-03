@@ -13,13 +13,14 @@ use types_nodes::list::{IntList, NodeList, OidList};
 use types_nodes::jointype::JoinType;
 use types_nodes::nodes_enums::{CmdType, LimitOption};
 use types_nodes::parsenodes::{
-    Query, QuerySource, RTEKind, RTEPermissionInfo, RangeTblEntry, RangeTblFunction,
-    SortGroupClause,
+    Query, QuerySource, RTEKind, RTEPermissionInfo, RangeTblEntry, RangeTblFunction, SetOperation,
+    SetOperationStmt, SortGroupClause,
 };
 use types_nodes::primnodes::{
-    Aggref, Alias, BoolExpr, BoolExprType, CoerceViaIO, CoercionForm, Const, FromExpr, FuncExpr,
-    JoinExpr, NullTest, NullTestType, OpExpr, OverridingKind, RangeTblRef, RelabelType,
-    TargetEntry, Var, VarReturningType,
+    Aggref, Alias, ArrayExpr, BoolExpr, BoolExprType, CaseExpr, CaseTestExpr, CaseWhen,
+    CoalesceExpr, CoerceViaIO, CoercionForm, Const, FromExpr, FuncExpr, JoinExpr, MinMaxExpr,
+    MinMaxOp, NullTest, NullTestType, OpExpr, OverridingKind, Param, ParamKind, RangeTblRef,
+    RelabelType, ScalarArrayOpExpr, SubLink, SubLinkType, TargetEntry, Var, VarReturningType,
 };
 use types_nodes::Node;
 
@@ -354,9 +355,19 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
             b"COERCETODOMAINVALUE" => self.read_coerce_to_domain_value(),
             b"PARTITIONBOUNDSPEC" => self.read_partition_bound_spec(),
             b"PARTITIONRANGEDATUM" => self.read_partition_range_datum(),
-            b"SORTGROUPCLAUSE" => self.read_sort_group_clause(),
-            b"AGGREF" => self.read_aggref(),
             b"NULLTEST" => self.read_null_test(),
+            b"SORTGROUPCLAUSE" => self.read_sort_group_clause(),
+            b"SETOPERATIONSTMT" => self.read_set_operation_stmt(),
+            b"AGGREF" => self.read_aggref(),
+            b"CASEEXPR" => self.read_case_expr(),
+            b"CASEWHEN" => self.read_case_when(),
+            b"CASETESTEXPR" => self.read_case_test_expr(),
+            b"COALESCEEXPR" => self.read_coalesce_expr(),
+            b"MINMAXEXPR" => self.read_min_max_expr(),
+            b"SCALARARRAYOPEXPR" => self.read_scalar_array_op_expr(),
+            b"SUBLINK" => self.read_sub_link(),
+            b"PARAM" => self.read_param(),
+            b"ARRAYEXPR" => self.read_array_expr(),
             other => panic!(
                 "parseNodeString (readfuncs.c): {} read arm unported (view SELECT-rule + \
                  DEFAULT/CHECK expr sets only)",
@@ -451,6 +462,9 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
                 rte.rellockmode = self.read_i32("rellockmode");
                 rte.perminfoindex = self.read_u32("perminfoindex");
             }
+            RTEKind::RTE_GROUP => {
+                rte.groupexprs = self.read_node_list("groupexprs")?;
+            }
             RTEKind::RTE_JOIN => {
                 rte.jointype = join_type(self.read_u32("jointype"));
                 rte.joinmergedcols = self.read_i32("joinmergedcols");
@@ -462,9 +476,6 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
             RTEKind::RTE_FUNCTION => {
                 rte.functions = self.read_node_list("functions")?;
                 rte.funcordinality = self.read_bool("funcordinality");
-            }
-            RTEKind::RTE_GROUP => {
-                rte.groupexprs = self.read_node_list("groupexprs")?;
             }
             other => panic!(
                 "_readRangeTblEntry (readfuncs.c): {other:?} arm unported (view SELECT-rule set)"
@@ -746,6 +757,21 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
         Node::mk(self.mcx, c)
     }
 
+    fn read_null_test(&mut self) -> PgResult<Node<'mcx>> {
+        let arg = self.read_node("arg")?;
+        let n = NullTest {
+            arg,
+            nulltesttype: match self.read_u32("nulltesttype") {
+                0 => NullTestType::IS_NULL,
+                1 => NullTestType::IS_NOT_NULL,
+                other => panic!("readfuncs.c: bad NullTestType {other}"),
+            },
+            argisrow: self.read_bool("argisrow"),
+            location: self.read_location("location"),
+        };
+        Node::mk(self.mcx, n)
+    }
+
     fn read_sort_group_clause(&mut self) -> PgResult<Node<'mcx>> {
         let s = SortGroupClause {
             tleSortGroupRef: self.read_u32("tleSortGroupRef"),
@@ -756,6 +782,20 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
             hashable: self.read_bool("hashable"),
         };
         Node::mk(self.mcx, s)
+    }
+
+    fn read_set_operation_stmt(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let mut s = Node::build::<SetOperationStmt>(mcx)?;
+        s.op = set_operation(self.read_u32("op"));
+        s.all = self.read_bool("all");
+        s.larg = self.read_node("larg")?;
+        s.rarg = self.read_node("rarg")?;
+        s.colTypes = self.read_oid_list("colTypes")?;
+        s.colTypmods = self.read_int_list("colTypmods")?;
+        s.colCollations = self.read_oid_list("colCollations")?;
+        s.groupClauses = self.read_node_list("groupClauses")?;
+        Ok(s.seal())
     }
 
     fn read_aggref(&mut self) -> PgResult<Node<'mcx>> {
@@ -784,19 +824,119 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
         Ok(a.seal())
     }
 
-    fn read_null_test(&mut self) -> PgResult<Node<'mcx>> {
-        let arg = self.read_node("arg")?;
-        let n = NullTest {
-            arg,
-            nulltesttype: match self.read_u32("nulltesttype") {
-                0 => NullTestType::IS_NULL,
-                1 => NullTestType::IS_NOT_NULL,
-                other => panic!("readfuncs.c: bad NullTestType {other}"),
+    fn read_case_expr(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let mut c = Node::build::<CaseExpr>(mcx)?;
+        c.casetype = self.read_u32("casetype");
+        c.casecollid = self.read_u32("casecollid");
+        c.arg = self.read_node("arg")?;
+        c.args = self.read_node_list("args")?;
+        c.defresult = self.read_node("defresult")?;
+        c.location = self.read_location("location");
+        Ok(c.seal())
+    }
+
+    fn read_case_when(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let mut w = Node::build::<CaseWhen>(mcx)?;
+        w.expr = self.read_node("expr")?;
+        w.result = self.read_node("result")?;
+        w.location = self.read_location("location");
+        Ok(w.seal())
+    }
+
+    fn read_case_test_expr(&mut self) -> PgResult<Node<'mcx>> {
+        let c = CaseTestExpr {
+            typeId: self.read_u32("typeId"),
+            typeMod: self.read_i32("typeMod"),
+            collation: self.read_u32("collation"),
+        };
+        Node::mk(self.mcx, c)
+    }
+
+    fn read_coalesce_expr(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let mut c = Node::build::<CoalesceExpr>(mcx)?;
+        c.coalescetype = self.read_u32("coalescetype");
+        c.coalescecollid = self.read_u32("coalescecollid");
+        c.args = self.read_node_list("args")?;
+        c.location = self.read_location("location");
+        Ok(c.seal())
+    }
+
+    fn read_min_max_expr(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let mut m = Node::build::<MinMaxExpr>(mcx)?;
+        m.minmaxtype = self.read_u32("minmaxtype");
+        m.minmaxcollid = self.read_u32("minmaxcollid");
+        m.inputcollid = self.read_u32("inputcollid");
+        m.op = match self.read_u32("op") {
+            0 => MinMaxOp::IS_GREATEST,
+            1 => MinMaxOp::IS_LEAST,
+            other => panic!("readfuncs.c: bad MinMaxOp {other}"),
+        };
+        m.args = self.read_node_list("args")?;
+        m.location = self.read_location("location");
+        Ok(m.seal())
+    }
+
+    fn read_scalar_array_op_expr(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let mut s = Node::build::<ScalarArrayOpExpr>(mcx)?;
+        s.opno = self.read_u32("opno");
+        s.opfuncid = self.read_u32("opfuncid");
+        s.hashfuncid = self.read_u32("hashfuncid");
+        s.negfuncid = self.read_u32("negfuncid");
+        s.useOr = self.read_bool("useOr");
+        s.inputcollid = self.read_u32("inputcollid");
+        s.args = self.read_node_list("args")?;
+        s.location = self.read_location("location");
+        Ok(s.seal())
+    }
+
+    fn read_sub_link(&mut self) -> PgResult<Node<'mcx>> {
+        let subLinkType = sub_link_type(self.read_u32("subLinkType"));
+        let subLinkId = self.read_i32("subLinkId");
+        let testexpr = self.read_node("testexpr")?;
+        let operName = self.read_node_list("operName")?;
+        let subselect = self.read_node("subselect")?.expect("SubLink has a subselect");
+        let location = self.read_location("location");
+        Node::mk(
+            self.mcx,
+            SubLink { subLinkType, subLinkId, testexpr, operName, subselect, location },
+        )
+    }
+
+    fn read_param(&mut self) -> PgResult<Node<'mcx>> {
+        let p = Param {
+            paramkind: match self.read_u32("paramkind") {
+                0 => ParamKind::PARAM_EXTERN,
+                1 => ParamKind::PARAM_EXEC,
+                2 => ParamKind::PARAM_SUBLINK,
+                3 => ParamKind::PARAM_MULTIEXPR,
+                other => panic!("readfuncs.c: bad ParamKind {other}"),
             },
-            argisrow: self.read_bool("argisrow"),
+            paramid: self.read_i32("paramid"),
+            paramtype: self.read_u32("paramtype"),
+            paramtypmod: self.read_i32("paramtypmod"),
+            paramcollid: self.read_u32("paramcollid"),
             location: self.read_location("location"),
         };
-        Node::mk(self.mcx, n)
+        Node::mk(self.mcx, p)
+    }
+
+    fn read_array_expr(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let mut a = Node::build::<ArrayExpr>(mcx)?;
+        a.array_typeid = self.read_u32("array_typeid");
+        a.array_collid = self.read_u32("array_collid");
+        a.element_typeid = self.read_u32("element_typeid");
+        a.elements = self.read_node_list("elements")?;
+        a.multidims = self.read_bool("multidims");
+        a.list_start = self.read_location("list_start");
+        a.list_end = self.read_location("list_end");
+        a.location = self.read_location("location");
+        Ok(a.seal())
     }
 
     // readDatum (readfuncs.c): "<len> [ <byte> ... ]"; byval always carries
@@ -851,22 +991,6 @@ fn query_source(v: u32) -> QuerySource {
     }
 }
 
-fn join_type(v: u32) -> JoinType {
-    match v {
-        0 => JoinType::JOIN_INNER,
-        1 => JoinType::JOIN_LEFT,
-        2 => JoinType::JOIN_FULL,
-        3 => JoinType::JOIN_RIGHT,
-        4 => JoinType::JOIN_SEMI,
-        5 => JoinType::JOIN_ANTI,
-        6 => JoinType::JOIN_RIGHT_SEMI,
-        7 => JoinType::JOIN_RIGHT_ANTI,
-        8 => JoinType::JOIN_UNIQUE_OUTER,
-        9 => JoinType::JOIN_UNIQUE_INNER,
-        other => panic!("readfuncs.c: bad JoinType {other}"),
-    }
-}
-
 fn rte_kind(v: u32) -> RTEKind {
     match v {
         0 => RTEKind::RTE_RELATION,
@@ -880,6 +1004,22 @@ fn rte_kind(v: u32) -> RTEKind {
         8 => RTEKind::RTE_RESULT,
         9 => RTEKind::RTE_GROUP,
         other => panic!("readfuncs.c: bad RTEKind {other}"),
+    }
+}
+
+fn join_type(v: u32) -> JoinType {
+    match v {
+        0 => JoinType::JOIN_INNER,
+        1 => JoinType::JOIN_LEFT,
+        2 => JoinType::JOIN_FULL,
+        3 => JoinType::JOIN_RIGHT,
+        4 => JoinType::JOIN_SEMI,
+        5 => JoinType::JOIN_ANTI,
+        6 => JoinType::JOIN_RIGHT_SEMI,
+        7 => JoinType::JOIN_RIGHT_ANTI,
+        8 => JoinType::JOIN_UNIQUE_OUTER,
+        9 => JoinType::JOIN_UNIQUE_INNER,
+        other => panic!("readfuncs.c: bad JoinType {other}"),
     }
 }
 
@@ -897,6 +1037,30 @@ fn limit_option(v: u32) -> LimitOption {
         0 => LimitOption::LIMIT_OPTION_COUNT,
         1 => LimitOption::LIMIT_OPTION_WITH_TIES,
         other => panic!("readfuncs.c: bad LimitOption {other}"),
+    }
+}
+
+fn set_operation(v: u32) -> SetOperation {
+    match v {
+        0 => SetOperation::SETOP_NONE,
+        1 => SetOperation::SETOP_UNION,
+        2 => SetOperation::SETOP_INTERSECT,
+        3 => SetOperation::SETOP_EXCEPT,
+        other => panic!("readfuncs.c: bad SetOperation {other}"),
+    }
+}
+
+fn sub_link_type(v: u32) -> SubLinkType {
+    match v {
+        0 => SubLinkType::EXISTS_SUBLINK,
+        1 => SubLinkType::ALL_SUBLINK,
+        2 => SubLinkType::ANY_SUBLINK,
+        3 => SubLinkType::ROWCOMPARE_SUBLINK,
+        4 => SubLinkType::EXPR_SUBLINK,
+        5 => SubLinkType::MULTIEXPR_SUBLINK,
+        6 => SubLinkType::ARRAY_SUBLINK,
+        7 => SubLinkType::CTE_SUBLINK,
+        other => panic!("readfuncs.c: bad SubLinkType {other}"),
     }
 }
 

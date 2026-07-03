@@ -113,7 +113,7 @@ fn RelationBuildPartitionDesc(rel: &Relation<'_>) -> PgResult<Rc<PartitionDescDa
     let scratch = MemoryContext::new("partition descriptor scratch");
     let smcx = scratch.mcx();
 
-    let inhoids = pg_inherits::find_inheritance_children(smcx, relid)?;
+    let inhoids = pg_inherits::find_inheritance_children(smcx, relid, types_rel::NoLock)?;
     let nparts = inhoids.len();
 
     let mut oids: PgVec<'_, Oid> = mcx::vec_with_capacity_in(smcx, nparts)?;

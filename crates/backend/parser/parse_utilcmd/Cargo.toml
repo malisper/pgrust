@@ -24,6 +24,7 @@ types_array = { path = "../../../_support/types/array" }
 rel_vocab = { path = "../../../_support/types/rel_vocab" }
 parser_small1 = { path = "../parser_small1" }
 mbutils = { path = "../../utils/mb/mbutils" }
+format_type = { path = "../../utils/adt/format_type" }
 gram_core = { path = "../gram_core" }
 parser_seams = { path = "../parser_seams" }
 lsyscache = { path = "../../utils/cache/lsyscache" }

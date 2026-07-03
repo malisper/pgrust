@@ -85,3 +85,4 @@ partcache = { path = "../../utils/cache/partcache" }
 partbounds = { path = "../../partitioning/partbounds" }
 partdesc = { path = "../../partitioning/partdesc" }
 pg_inherits = { path = "../../catalog/pg_inherits" }
+rewrite_manip = { path = "../../rewrite/rewrite_manip" }

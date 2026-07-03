@@ -27,8 +27,8 @@ use types_nodes::rawnodes::CreateDomainStmt;
 use types_nodes::JoinType;
 use types_nodes::rawnodes::A_Expr_Kind::{self, AEXPR_OP};
 use types_nodes::rawnodes::{
-    ColumnDef, Constraint, ConstrType, CreateSeqStmt, CreateStmt, CreateTableAsStmt, IndexElem,
-    IndexStmt, IntoClause, OnCommitAction,
+    AlterEnumStmt, ColumnDef, Constraint, ConstrType, CreateEnumStmt, CreateSeqStmt, CreateStmt,
+    CreateTableAsStmt, IndexElem, IndexStmt, IntoClause, OnCommitAction,
     FKCONSTR_ACTION_CASCADE, FKCONSTR_ACTION_NOACTION, FKCONSTR_ACTION_RESTRICT,
     FKCONSTR_ACTION_SETDEFAULT, FKCONSTR_ACTION_SETNULL, FKCONSTR_MATCH_FULL,
     FKCONSTR_MATCH_SIMPLE,
@@ -683,16 +683,24 @@ impl<'mcx> Parser<'mcx> {
                 let quals = view.v(6).list();
                 // SplitColQualList: COLLATE splits out; Constraints stay.
                 let mut constraints = NodeList::nil();
+                let mut coll_clause: Option<Node<'_>> = None;
                 for q in quals.iter() {
                     match q.node_tag() {
                         NodeTag::T_Constraint => constraints.lappend(mcx, q)?,
-                        NodeTag::T_CollateClause => panic!(
-                            "gram_core: SplitColQualList COLLATE arm unported"
-                        ),
+                        NodeTag::T_CollateClause => {
+                            if coll_clause.is_some() {
+                                return Err(self.errposition_error(
+                                    "multiple COLLATE clauses not allowed".into(),
+                                    q.as_collate_clause().unwrap().location,
+                                ));
+                            }
+                            coll_clause = Some(q);
+                        }
                         other => panic!("unexpected node type {other:?} in ColQualList"),
                     }
                 }
                 let mut n = Node::build::<ColumnDef>(mcx)?;
+                n.collClause = coll_clause;
                 n.colname = Some(colname);
                 n.typeName = type_name;
                 n.storage_name = storage_name;
@@ -702,6 +710,14 @@ impl<'mcx> Parser<'mcx> {
                 n.fdwoptions = fdwoptions;
                 n.location = view.l(1);
                 *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // ColConstraintElem: COLLATE any_name
+            498 => {
+                let collname = view.v(2).list();
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    CollateClause { arg: None, collname, location: view.l(1) },
+                )?));
             }
             // ColQualList: ColQualList ColConstraint
             493 => {
@@ -4889,6 +4905,56 @@ impl<'mcx> Parser<'mcx> {
                 n.comment = if c.is_null_node() { None } else { Some(c.str_val()) };
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
+            // DefineStmt: CREATE TYPE_P any_name AS ENUM_P '(' opt_enum_val_list ')'
+            854 => {
+                let mut n = Node::build::<CreateEnumStmt>(mcx)?;
+                n.typeName = view.v(3).list();
+                n.vals = view.v(7).list();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // opt_enum_val_list: enum_val_list | /*EMPTY*/
+            879 => *yyval = YYSTYPE::List(view.v(1).list()),
+            880 => *yyval = YYSTYPE::List(NodeList::nil()),
+            // enum_val_list: Sconst | enum_val_list ',' Sconst
+            881 => {
+                let s = Node::mk_string(mcx, view.v(1).str_val())?;
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, s)?);
+            }
+            882 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, Node::mk_string(mcx, view.v(3).str_val())?)?;
+                *yyval = YYSTYPE::List(list);
+            }
+            // AlterEnumStmt: ALTER TYPE_P any_name ADD_P VALUE_P opt_if_not_exists Sconst
+            //   [ BEFORE Sconst | AFTER Sconst ] / RENAME VALUE_P / DROP VALUE_P
+            883 | 884 | 885 => {
+                let mut n = Node::build::<AlterEnumStmt>(mcx)?;
+                n.typeName = view.v(3).list();
+                n.newVal = Some(view.v(7).str_val());
+                n.skipIfNewValExists = view.v(6).boolean();
+                if rule != 883 {
+                    n.newValNeighbor = Some(view.v(9).str_val());
+                }
+                n.newValIsAfter = rule != 884;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            886 => {
+                let mut n = Node::build::<AlterEnumStmt>(mcx)?;
+                n.typeName = view.v(3).list();
+                n.oldVal = Some(view.v(6).str_val());
+                n.newVal = Some(view.v(8).str_val());
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            887 => {
+                return Err(self.errposition_error_code(
+                    types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+                    "dropping an enum value is not implemented".into(),
+                    view.l(4),
+                ))
+            }
+            // opt_if_not_exists: IF_P NOT EXISTS | /*EMPTY*/
+            888 => *yyval = YYSTYPE::Boolean(true),
+            889 => *yyval = YYSTYPE::Boolean(false),
             1876 => {
                 let n = view.v(1).node().expect("relation_expr");
                 *yyval = YYSTYPE::List(NodeList::make1(mcx, n)?);

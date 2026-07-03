@@ -44,6 +44,12 @@ pub enum SortComparator {
     BpcharC,
     /// `namefastcmp_c` (btnamesortsupport); no abbreviation (sort-perf lane).
     NameC,
+    /// `varlenafastcmp_locale`: resolved-once locale, no abbreviation (C too:
+    /// pg_strxfrm_enabled false for libc), no last-pair result cache (order-
+    /// identical; extra strcoll on repeated pairs — CATALOG watch).
+    TextLocale(&'static pg_locale::PgLocale),
+    /// `varlenafastcmp_locale` bpchar arm (bpchartruelen trim).
+    BpcharLocale(&'static pg_locale::PgLocale),
     /// `PrepareSortSupportComparisonShim`: the opfamily's BTORDER_PROC,
     /// resolved once, invoked per comparison (C builds an fcinfo per call
     /// too). Needs an mcx-threaded apply; the mcx-less lane panics.
@@ -99,7 +105,7 @@ pub fn apply_cmp(cmp: SortComparator, x: Datum, y: Datum) -> i32 {
             let b = &*(y.as_usize() as *const adt_datetime::consts::Interval);
             adt_timestamp::interval::interval_cmp_internal(a, b)
         },
-        // SAFETY: as TextC.
+        // SAFETY: as TextC (all three arms).
         SortComparator::BpcharC => unsafe {
             varlena::bpcharfastcmp_c(varlena_payload(x), varlena_payload(y))
         },
@@ -113,6 +119,14 @@ pub fn apply_cmp(cmp: SortComparator, x: Datum, y: Datum) -> i32 {
             };
             namefastcmp_c(a, b)
         }
+        // SAFETY: as TextC.
+        SortComparator::TextLocale(locale) => unsafe {
+            varstrfastcmp_locale(varlena_payload(x), varlena_payload(y), locale, false)
+        },
+        // SAFETY: as TextC.
+        SortComparator::BpcharLocale(locale) => unsafe {
+            varstrfastcmp_locale(varlena_payload(x), varlena_payload(y), locale, true)
+        },
         SortComparator::Shim(shim) => panic!(
             "comparison shim (proc {}) reached an mcx-less comparator lane \
              (merge join over shim-compared types not ported)",
@@ -154,6 +168,28 @@ pub fn apply_cmp_in(cmp: SortComparator, x: Datum, y: Datum, collation: Oid, mcx
         }
         other => apply_cmp(other, x, y),
     }
+}
+
+// varstrfastcmp_locale (varlena.c); the tie-break memcmp+len equals C's
+// strcmp (text carries no NULs).
+fn varstrfastcmp_locale(a1: &[u8], a2: &[u8], locale: &pg_locale::PgLocale, bpchar: bool) -> i32 {
+    if a1.len() == a2.len() && a1 == a2 {
+        return 0;
+    }
+    let (a1, a2) = if bpchar {
+        (bpchartruelen(a1), bpchartruelen(a2))
+    } else {
+        (a1, a2)
+    };
+    let result = locale.pg_strncoll(a1, a2);
+    if result == 0 && locale.deterministic {
+        return varlena::varstrfastcmp_c(a1, a2);
+    }
+    result
+}
+
+fn bpchartruelen(s: &[u8]) -> &[u8] {
+    &s[..s.len() - s.iter().rev().take_while(|&&b| b == b' ').count()]
 }
 
 /// # Safety
@@ -319,19 +355,7 @@ pub fn comparator_for_opfamily(
         F_BTINT8SORTSUPPORT | F_TIMESTAMP_SORTSUPPORT => SortComparator::SignedI64,
         F_BTINT2SORTSUPPORT => SortComparator::Int16,
         F_BTTEXTSORTSUPPORT | F_BPCHAR_SORTSUPPORT => {
-            // varstr_sortsupport (varlena.c): C collation installs the fastcmp
-            // comparator; abbreviation is order-neutral and stays absent.
-            if !pg_locale::pg_newlocale_from_collation(collation)?.collate_is_c {
-                panic!(
-                    "varstr_sortsupport (varlena.c): non-C collation {collation} \
-                     comparator (varlenafastcmp_locale/pg_strncoll) not ported"
-                );
-            }
-            if sort_support_function == F_BPCHAR_SORTSUPPORT {
-                SortComparator::BpcharC
-            } else {
-                SortComparator::TextC
-            }
+            varstr_comparator(sort_support_function == F_BPCHAR_SORTSUPPORT, collation)?
         }
         F_BTNAMESORTSUPPORT => SortComparator::NameC,
         // C DIVERGENCE: uuid 3300 / network 5033 abbrev routines and
@@ -365,6 +389,18 @@ pub fn comparator_for_opfamily(
     })
 }
 
+// varstr_sortsupport (varlena.c) comparator selection.
+fn varstr_comparator(bpchar: bool, collation: Oid) -> PgResult<SortComparator> {
+    varlena::check_collation_set(collation)?;
+    let locale = pg_locale::pg_newlocale_from_collation(collation)?;
+    Ok(match (locale.collate_is_c, bpchar) {
+        (true, false) => SortComparator::TextC,
+        (true, true) => SortComparator::BpcharC,
+        (false, false) => SortComparator::TextLocale(locale),
+        (false, true) => SortComparator::BpcharLocale(locale),
+    })
+}
+
 /// The caller-filled prefix of C's zeroed SortSupportData.
 pub struct SortSupportInit {
     pub ssup_collation: Oid,
@@ -372,8 +408,7 @@ pub struct SortSupportInit {
     pub ssup_attno: i16,
 }
 
-/// `PrepareSortSupportFromIndexRel` comparator resolve, btree arm; text keys
-/// are C-collation only (varstr_sortsupport locale arms unported).
+/// `PrepareSortSupportFromIndexRel` comparator resolve, btree arm.
 pub fn comparator_for_index_col(
     opfamily: Oid,
     opcintype: Oid,
@@ -388,18 +423,7 @@ pub fn comparator_for_index_col(
         F_BTOIDSORTSUPPORT => SortComparator::Uint32,
         F_BTNAMESORTSUPPORT => SortComparator::NameC,
         F_BTTEXTSORTSUPPORT | F_BPCHAR_SORTSUPPORT => {
-            let locale = pg_locale::pg_newlocale_from_collation(collation)?;
-            if !locale.collate_is_c {
-                panic!(
-                    "varstr_sortsupport (varlena.c): non-C collation {collation} \
-                     index sort not ported"
-                );
-            }
-            if ssup_proc == F_BPCHAR_SORTSUPPORT {
-                SortComparator::BpcharC
-            } else {
-                SortComparator::TextC
-            }
+            varstr_comparator(ssup_proc == F_BPCHAR_SORTSUPPORT, collation)?
         }
         // C DIVERGENCE: uuid/network/range abbrev routines unported; the
         // BTORDER_PROC shim is order-identical (CATALOG perf watch).

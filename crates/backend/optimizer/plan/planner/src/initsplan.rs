@@ -1267,13 +1267,18 @@ pub fn distribute_restrictinfo_to_rels(run: &mut PlannerRun<'_>, rinfo: RinfoId)
     Ok(())
 }
 
-// add_base_clause_to_rel (initsplan.c), non-inherited arm.
+// add_base_clause_to_rel (initsplan.c:3003); the NullTest shortcuts are only
+// valid for non-inheritance parents, except partitioned tables where a
+// constant qual must hold for every partition too.
 fn add_base_clause_to_rel(run: &mut PlannerRun<'_>, relid: i32, rinfo: RinfoId) -> PgResult<()> {
-    debug_assert!(!run.rte(relid as usize).inh);
-    if restriction_is_always_true(run, rinfo) {
+    let rte = run.rte(relid as usize);
+    let apply_shortcuts =
+        !rte.inh || rte.relkind == ::types_rel::RELKIND_PARTITIONED_TABLE;
+    if apply_shortcuts && restriction_is_always_true(run, rinfo) {
         return Ok(());
     }
-    let rinfo = substitute_false_if_always_false(run, rinfo)?;
+    let rinfo =
+        if apply_shortcuts { substitute_false_if_always_false(run, rinfo)? } else { rinfo };
     let rel_id = find_base_rel(&run.root, relid);
     let security_level = run.root.rinfo(rinfo).security_level;
     let rel = run.root.rel_mut(rel_id);
@@ -1285,11 +1290,11 @@ fn add_base_clause_to_rel(run: &mut PlannerRun<'_>, relid: i32, rinfo: RinfoId) 
 // restriction_is_always_true / _false (initsplan.c), NullTest leg only: the
 // OR leg reads orclause sub-RestrictInfos, which stay None here (documented
 // make_restrictinfo divergence).
-fn restriction_is_always_true(run: &PlannerRun<'_>, rinfo: RinfoId) -> bool {
+pub(crate) fn restriction_is_always_true(run: &PlannerRun<'_>, rinfo: RinfoId) -> bool {
     restriction_nulltest_verdict(run, rinfo, types_nodes::primnodes::NullTestType::IS_NOT_NULL)
 }
 
-fn restriction_is_always_false(run: &PlannerRun<'_>, rinfo: RinfoId) -> bool {
+pub(crate) fn restriction_is_always_false(run: &PlannerRun<'_>, rinfo: RinfoId) -> bool {
     restriction_nulltest_verdict(run, rinfo, types_nodes::primnodes::NullTestType::IS_NULL)
 }
 
