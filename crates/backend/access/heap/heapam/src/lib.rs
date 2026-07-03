@@ -105,10 +105,18 @@ fn unexpected_during_logical_decoding() -> bool {
     TransactionIdIsValid(CHECK_XID_ALIVE)
 }
 
-fn check_for_interrupts() {
+#[cold]
+#[inline(never)]
+fn process_interrupts() -> PgResult<()> {
+    postgres_seams::check_for_interrupts::call()
+}
+
+#[inline(always)]
+fn check_for_interrupts() -> PgResult<()> {
     if init_small::globals::InterruptPending() {
-        unported("ProcessInterrupts (tcop/postgres.c)");
+        return process_interrupts();
     }
+    Ok(())
 }
 
 #[inline]
@@ -591,7 +599,7 @@ fn heap_fetch_next_buffer(scan: &mut HeapScanDescData<'_>, dir: ScanDirection) -
         pin.release();
     }
 
-    check_for_interrupts();
+    check_for_interrupts()?;
 
     // Direction change = read_stream_reset: prefetch restarts at the current block.
     if scan.rs_dir != dir {
