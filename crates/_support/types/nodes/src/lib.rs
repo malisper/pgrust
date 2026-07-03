@@ -28,10 +28,10 @@ pub use equal::{equal, equal_opt, NodeEqual};
 pub use jointype::JoinType;
 pub use list::{IntList, List, ListFlavor, NodeList, OidList, XidList};
 pub use node_tree::{BitString, Boolean, Float, Integer, Node, NodeMut, NodeVariant, String};
-pub use nodes_enums::{CmdType, LimitOption};
+pub use nodes_enums::{CmdType, LimitOption, LockClauseStrength, LockWaitPolicy};
 pub use parsenodes::{
     AclMode, Query, QuerySource, RTEKind, RTEPermissionInfo, RangeTblEntry, RangeTblFunction,
-    SetOperation,
+    RowMarkClause, SetOperation,
 };
 pub use plannodes::{Plan, PlanVariant, PlannedStmt, Result};
 pub use plannodes::{BitmapAnd, BitmapHeapScan, BitmapIndexScan, BitmapOr};
@@ -43,9 +43,9 @@ pub use primnodes::{
 pub use plannodes::ModifyTable;
 pub use rawnodes::{
     A_Const, A_Expr, A_Expr_Kind, A_Star, ColumnRef, DeleteStmt, DistinctClause, FuncCall,
-    IndexElem, IndexStmt, InsertStmt, ParamRef, RangeFunction, RawStmt, ResTarget,
-    ReturningClause, SelectStmt, SortBy, SortByDir, SortByNulls, TypeCast, TypeName, UpdateStmt,
-    ValUnion,
+    IndexElem, IndexStmt, InsertStmt, LockingClause, ParamRef, RangeFunction, RawStmt,
+    ResTarget, ReturningClause, SelectStmt, SortBy, SortByDir, SortByNulls, TypeCast, TypeName,
+    UpdateStmt, ValUnion,
 };
 pub use tags::NodeTag;
 

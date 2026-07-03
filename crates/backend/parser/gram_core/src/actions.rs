@@ -32,8 +32,9 @@ use types_nodes::{
 };
 use types_nodes::{BitString, Boolean, Float, Integer};
 use types_nodes::{
-    BoolExpr, BoolExprType, CoercionForm, DistinctClause, FuncCall, LimitOption, NodeMut,
-    NullTest, NullTestType, SortBy, SortByDir, SortByNulls, TypeCast, TypeName,
+    BoolExpr, BoolExprType, CoercionForm, DistinctClause, FuncCall, LimitOption,
+    LockClauseStrength, LockWaitPolicy, NodeMut, NullTest, NullTestType, SortBy, SortByDir,
+    SortByNulls, TypeCast, TypeName,
 };
 
 use crate::parse::Parser;
@@ -639,6 +640,36 @@ impl<'mcx> Parser<'mcx> {
             1123 => *yyval = YYSTYPE::Ival(SortByNulls::SORTBY_NULLS_FIRST as i32),
             1124 => *yyval = YYSTYPE::Ival(SortByNulls::SORTBY_NULLS_LAST as i32),
             1125 => *yyval = YYSTYPE::Ival(SortByNulls::SORTBY_NULLS_DEFAULT as i32),
+            // opt_nowait_or_skip: NOWAIT | SKIP LOCKED | EMPTY.
+            1661 => *yyval = YYSTYPE::Ival(LockWaitPolicy::LockWaitError as i32),
+            1662 => *yyval = YYSTYPE::Ival(LockWaitPolicy::LockWaitSkip as i32),
+            1663 => *yyval = YYSTYPE::Ival(LockWaitPolicy::LockWaitBlock as i32),
+            // for_locking_items: item | items item.
+            1817 => {
+                let item = view.v(1).node().expect("for_locking_item");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, item)?);
+            }
+            1818 => {
+                let mut list = view.v(1).list();
+                let item = view.v(2).node().expect("for_locking_item");
+                list.lappend(mcx, item)?;
+                *yyval = YYSTYPE::List(list);
+            }
+            // for_locking_item: for_locking_strength locked_rels_list opt_nowait_or_skip
+            1819 => {
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    types_nodes::LockingClause {
+                        lockedRels: view.v(2).list(),
+                        strength: lock_strength(view.v(1).ival()),
+                        waitPolicy: lock_wait_policy(view.v(3).ival()),
+                    },
+                )?));
+            }
+            1820 => *yyval = YYSTYPE::Ival(LockClauseStrength::LCS_FORUPDATE as i32),
+            1821 => *yyval = YYSTYPE::Ival(LockClauseStrength::LCS_FORNOKEYUPDATE as i32),
+            1822 => *yyval = YYSTYPE::Ival(LockClauseStrength::LCS_FORSHARE as i32),
+            1823 => *yyval = YYSTYPE::Ival(LockClauseStrength::LCS_FORKEYSHARE as i32),
             // set_quantifier: ALL | DISTINCT | EMPTY (SetQuantifier values).
             1756 => *yyval = YYSTYPE::Ival(1),
             1757 => *yyval = YYSTYPE::Ival(2),
@@ -2958,8 +2989,7 @@ impl<'mcx> Parser<'mcx> {
         )
     }
 
-    // insertSelectOptions; SKIP LOCKED × WITH TIES check unreachable
-    // (for_locking_items is an unported loud).
+    // insertSelectOptions.
     fn insert_select_options(
         &self,
         stmt: Node<'mcx>,
@@ -3016,6 +3046,19 @@ impl<'mcx> Parser<'mcx> {
                         l.optionLoc,
                     ));
                     return;
+                }
+                if l.limitOption == LimitOption::LIMIT_OPTION_WITH_TIES {
+                    for lock_node in &n.lockingClause {
+                        let lock = lock_node.as_locking_clause().expect("LockingClause");
+                        if lock.waitPolicy == types_nodes::LockWaitPolicy::LockWaitSkip {
+                            err = Err(self.errposition_error(
+                                "SKIP LOCKED and WITH TIES options cannot be used together"
+                                    .into(),
+                                l.optionLoc,
+                            ));
+                            return;
+                        }
+                    }
                 }
                 n.limitOption = l.limitOption;
             })
@@ -3249,6 +3292,24 @@ fn sortby_dir(v: i32) -> SortByDir {
         2 => SortByDir::SORTBY_DESC,
         3 => SortByDir::SORTBY_USING,
         _ => SortByDir::SORTBY_DEFAULT,
+    }
+}
+
+fn lock_strength(v: i32) -> LockClauseStrength {
+    match v {
+        1 => LockClauseStrength::LCS_FORKEYSHARE,
+        2 => LockClauseStrength::LCS_FORSHARE,
+        3 => LockClauseStrength::LCS_FORNOKEYUPDATE,
+        4 => LockClauseStrength::LCS_FORUPDATE,
+        _ => LockClauseStrength::LCS_NONE,
+    }
+}
+
+fn lock_wait_policy(v: i32) -> LockWaitPolicy {
+    match v {
+        1 => LockWaitPolicy::LockWaitSkip,
+        2 => LockWaitPolicy::LockWaitError,
+        _ => LockWaitPolicy::LockWaitBlock,
     }
 }
 

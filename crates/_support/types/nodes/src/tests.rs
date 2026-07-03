@@ -585,6 +585,56 @@ fn enum_values_match_c_headers() {
         OBJECT_TYPE, OBJECT_USER_MAPPING, OBJECT_VIEW,
     ]);
     check_enum!(parse_h, "DropBehavior", DropBehavior, [DROP_RESTRICT, DROP_CASCADE]);
+    let lockopt_h = include_str!("../vendor/lockoptions.h");
+    use crate::nodes_enums::{LockClauseStrength, LockWaitPolicy};
+    check_enum!(lockopt_h, "LockClauseStrength", LockClauseStrength, [
+        LCS_NONE, LCS_FORKEYSHARE, LCS_FORSHARE, LCS_FORNOKEYUPDATE, LCS_FORUPDATE,
+    ]);
+    check_enum!(lockopt_h, "LockWaitPolicy", LockWaitPolicy, [
+        LockWaitBlock, LockWaitSkip, LockWaitError,
+    ]);
+    let plan_h = include_str!("../vendor/plannodes.h");
+    use crate::plannodes::RowMarkType;
+    check_enum!(plan_h, "RowMarkType", RowMarkType, [
+        ROW_MARK_EXCLUSIVE, ROW_MARK_NOKEYEXCLUSIVE, ROW_MARK_SHARE, ROW_MARK_KEYSHARE,
+        ROW_MARK_REFERENCE, ROW_MARK_COPY,
+    ]);
+}
+
+#[test]
+fn rowmark_node_field_order_matches_c() {
+    let parse_h = include_str!("../vendor/parsenodes.h");
+    let plan_h = include_str!("../vendor/plannodes.h");
+
+    assert_eq!(
+        c_struct_fields(parse_h, "LockingClause"),
+        ["lockedRels", "strength", "waitPolicy"]
+    );
+    let crate::rawnodes::LockingClause { lockedRels: _, strength: _, waitPolicy: _ } =
+        crate::rawnodes::LockingClause::default();
+
+    assert_eq!(
+        c_struct_fields(parse_h, "RowMarkClause"),
+        ["rti", "strength", "waitPolicy", "pushedDown"]
+    );
+    let crate::parsenodes::RowMarkClause { rti: _, strength: _, waitPolicy: _, pushedDown: _ } =
+        crate::parsenodes::RowMarkClause::default();
+
+    assert_eq!(
+        c_struct_fields(plan_h, "PlanRowMark"),
+        [
+            "rti", "prti", "rowmarkId", "markType", "allMarkTypes", "strength", "waitPolicy",
+            "isParent",
+        ]
+    );
+    let crate::plannodes::PlanRowMark {
+        rti: _, prti: _, rowmarkId: _, markType: _, allMarkTypes: _, strength: _, waitPolicy: _,
+        isParent: _,
+    } = crate::plannodes::PlanRowMark::default();
+
+    assert_eq!(c_struct_fields(plan_h, "LockRows"), ["plan", "rowMarks", "epqParam"]);
+    let crate::plannodes::LockRows { plan: _, rowMarks: _, epqParam: _ } =
+        crate::plannodes::LockRows::default();
 }
 
 #[test]

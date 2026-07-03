@@ -9,7 +9,7 @@ use types_core::{Cardinality, Cost, Index, Oid, ParseLoc};
 use crate::bitmapset::Bitmapset;
 use crate::list::{IntList, NodeList, OidList};
 use crate::node_tree::{Node, NodeRep, NodeVariant};
-use crate::nodes_enums::{CmdType, LimitOption};
+use crate::nodes_enums::{CmdType, LimitOption, LockClauseStrength, LockWaitPolicy};
 use crate::tags::NodeTag;
 
 pub struct PlannedStmt<'mcx> {
@@ -528,6 +528,46 @@ pub struct Material<'mcx> {
 
 #[derive(Default)]
 #[repr(C)]
+pub struct LockRows<'mcx> {
+    pub plan: Plan<'mcx>,
+    pub rowMarks: NodeList<'mcx>,
+    pub epqParam: i32,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum RowMarkType {
+    #[default]
+    ROW_MARK_EXCLUSIVE = 0,
+    ROW_MARK_NOKEYEXCLUSIVE = 1,
+    ROW_MARK_SHARE = 2,
+    ROW_MARK_KEYSHARE = 3,
+    ROW_MARK_REFERENCE = 4,
+    ROW_MARK_COPY = 5,
+}
+
+impl RowMarkType {
+    /// C `RowMarkRequiresRowShareLock(marktype)`.
+    #[inline]
+    pub fn requires_row_share_lock(self) -> bool {
+        (self as u32) <= (RowMarkType::ROW_MARK_KEYSHARE as u32)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PlanRowMark {
+    pub rti: Index,
+    pub prti: Index,
+    pub rowmarkId: Index,
+    pub markType: RowMarkType,
+    pub allMarkTypes: i32,
+    pub strength: LockClauseStrength,
+    pub waitPolicy: LockWaitPolicy,
+    pub isParent: bool,
+}
+
+#[derive(Default)]
+#[repr(C)]
 pub struct Limit<'mcx> {
     pub plan: Plan<'mcx>,
     pub limitOffset: Option<Node<'mcx>>,
@@ -636,6 +676,12 @@ unsafe impl<'mcx> NodeVariant<'mcx> for Hash<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for Material<'mcx> {
     const TAG: NodeTag = NodeTag::T_Material;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for LockRows<'mcx> {
+    const TAG: NodeTag = NodeTag::T_LockRows;
+}
+unsafe impl NodeVariant<'_> for PlanRowMark {
+    const TAG: NodeTag = NodeTag::T_PlanRowMark;
+}
 // SAFETY: repr(C), Plan first (offset asserted below), tag in is_plan_tag.
 unsafe impl<'mcx> PlanVariant<'mcx> for Result<'mcx> {}
 // SAFETY: repr(C), Plan first via the Scan base (offsets asserted below).
@@ -686,6 +732,8 @@ unsafe impl<'mcx> PlanVariant<'mcx> for HashJoin<'mcx> {}
 unsafe impl<'mcx> PlanVariant<'mcx> for Hash<'mcx> {}
 // SAFETY: repr(C), Plan first (offset asserted below), tag in is_plan_tag.
 unsafe impl<'mcx> PlanVariant<'mcx> for Material<'mcx> {}
+// SAFETY: repr(C), Plan first (offset asserted below), tag in is_plan_tag.
+unsafe impl<'mcx> PlanVariant<'mcx> for LockRows<'mcx> {}
 
 const _: () = {
     assert!(offset_of!(Result, plan) == 0);
@@ -772,6 +820,8 @@ const _: () = {
     );
     assert!(offset_of!(Hash, plan) == 0);
     assert!(offset_of!(NodeRep<Hash>, payload) == offset_of!(NodeRep<Plan>, payload));
+    assert!(offset_of!(LockRows, plan) == 0);
+    assert!(offset_of!(NodeRep<LockRows>, payload) == offset_of!(NodeRep<Plan>, payload));
 };
 
 fn is_plan_tag(tag: NodeTag) -> bool {
@@ -803,6 +853,7 @@ fn is_plan_tag(tag: NodeTag) -> bool {
             | NodeTag::T_HashJoin
             | NodeTag::T_Hash
             | NodeTag::T_Material
+            | NodeTag::T_LockRows
     )
 }
 
@@ -939,6 +990,16 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_hash(self) -> Option<&'mcx Hash<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_lock_rows(self) -> Option<&'mcx LockRows<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_plan_row_mark(self) -> Option<&'mcx PlanRowMark> {
         self.as_variant()
     }
 
