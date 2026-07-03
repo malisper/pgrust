@@ -340,11 +340,7 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
         NodeTag::T_ModifyTable => {
             let m = plan.as_modify_table().unwrap();
             debug_assert!(m.plan.targetlist.is_nil() && m.plan.qual.is_nil());
-            debug_assert!(
-                m.withCheckOptionLists.is_nil()
-                    && m.onConflictSet.is_nil()
-                    && m.mergeActionLists.is_nil()
-            );
+            debug_assert!(m.withCheckOptionLists.is_nil() && m.mergeActionLists.is_nil());
             debug_assert!(m.rootRelation == 0 && m.rowMarks.is_nil());
             assert_eq!(rtoffset, 0, "set_plan_refs (setrefs.c): ModifyTable rtoffset leg; M4 lane");
             // set_returning_clause_references: the other-relations index over
@@ -360,6 +356,51 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
                     let fixed = fix_scan_list(run, rlist, rtoffset, m.plan.plan_rows)?;
                     debug_assert!(fixed.is_none());
                 }
+            }
+            // The EXCLUDED pseudo-rel is a 'pseudo join' inner side: its Vars
+            // in onConflictSet/onConflictWhere become INNER_VAR over the
+            // exclRelTlist; result-relation Vars pass through unchanged.
+            if !m.onConflictSet.is_nil() {
+                let empty = NodeList::nil();
+                let acceptable_rel =
+                    m.resultRelations.iter().next().expect("ModifyTable result relation");
+                let new_set = fix_join_expr_list(
+                    run,
+                    &m.onConflictSet,
+                    &empty,
+                    &m.exclRelTlist,
+                    rtoffset,
+                    NrmMatch::Equal,
+                    acceptable_rel,
+                    2.0 * m.plan.plan_rows,
+                )?;
+                let new_where = match m.onConflictWhere {
+                    None => None,
+                    Some(w) => {
+                        let wl = w.as_list().expect("preprocessed onConflictWhere is a list");
+                        let mapped = fix_join_expr_list(
+                            run,
+                            wl,
+                            &empty,
+                            &m.exclRelTlist,
+                            rtoffset,
+                            NrmMatch::Equal,
+                            acceptable_rel,
+                            2.0 * m.plan.plan_rows,
+                        )?;
+                        Some(Node::mk_list(run.mcx, mapped)?)
+                    }
+                };
+                let fixed = fix_scan_list(run, &m.exclRelTlist, rtoffset, 1.0)?;
+                debug_assert!(fixed.is_none());
+                // SAFETY: exclusive plan-tree ownership (prologue note).
+                unsafe {
+                    plan.with_mut::<types_nodes::plannodes::ModifyTable, _>(|p| {
+                        p.onConflictSet = new_set;
+                        p.onConflictWhere = new_where;
+                    })
+                }
+                .expect("ModifyTable node");
             }
             for rti in m.resultRelations.iter() {
                 run.glob.result_relations.lappend(run.mcx, rti)?;
@@ -1420,14 +1461,14 @@ fn set_join_references<'mcx>(
         NrmMatch::Superset
     };
     let joinqual = fix_join_expr_list(
-        run, joinqual_src, outer_tlist, inner_tlist, rtoffset, NrmMatch::Equal,
+        run, joinqual_src, outer_tlist, inner_tlist, rtoffset, NrmMatch::Equal, 0,
         2.0 * base.plan_rows,
     )?;
     let targetlist = fix_join_expr_list(
-        run, &base.targetlist, outer_tlist, inner_tlist, rtoffset, above_nrm, base.plan_rows,
+        run, &base.targetlist, outer_tlist, inner_tlist, rtoffset, above_nrm, 0, base.plan_rows,
     )?;
     let qual = fix_join_expr_list(
-        run, &base.qual, outer_tlist, inner_tlist, rtoffset, above_nrm, 2.0 * base.plan_rows,
+        run, &base.qual, outer_tlist, inner_tlist, rtoffset, above_nrm, 0, 2.0 * base.plan_rows,
     )?;
 
     if is_hash {
@@ -1439,12 +1480,13 @@ fn set_join_references<'mcx>(
             inner_tlist,
             rtoffset,
             NrmMatch::Equal,
+            0,
             2.0 * base.plan_rows,
         )?;
         // HashJoin's hashkeys look up outer tuples: outer itlist -> OUTER_VAR.
         let empty = NodeList::nil();
         let hashkeys = fix_join_expr_list(
-            run, &hj.hashkeys, outer_tlist, &empty, rtoffset, NrmMatch::Equal,
+            run, &hj.hashkeys, outer_tlist, &empty, rtoffset, NrmMatch::Equal, 0,
             2.0 * base.plan_rows,
         )?;
         // SAFETY: exclusive plan-tree ownership (C rewrites in place).
@@ -1467,6 +1509,7 @@ fn set_join_references<'mcx>(
             inner_tlist,
             rtoffset,
             NrmMatch::Equal,
+            0,
             2.0 * base.plan_rows,
         )?;
         // SAFETY: exclusive plan-tree ownership (C rewrites in place).
@@ -1513,7 +1556,7 @@ fn set_hash_references<'mcx>(
         &hash.plan.lefttree.expect("Hash outer plan").as_plan().unwrap().targetlist;
     let empty = NodeList::nil();
     let hashkeys =
-        fix_join_expr_list(run, &hash.hashkeys, outer_tlist, &empty, rtoffset, NrmMatch::Equal, 2.0 * hash.plan.plan_rows)?;
+        fix_join_expr_list(run, &hash.hashkeys, outer_tlist, &empty, rtoffset, NrmMatch::Equal, 0, 2.0 * hash.plan.plan_rows)?;
     // SAFETY: exclusive plan-tree ownership (C rewrites in place).
     unsafe { plan.with_mut::<types_nodes::plannodes::Hash, _>(|p| p.hashkeys = hashkeys) }
         .expect("Hash node");
@@ -1529,13 +1572,14 @@ fn fix_join_expr_list<'mcx>(
     inner_tlist: &NodeList<'mcx>,
     rtoffset: i32,
     nrm_match: NrmMatch,
+    acceptable_rel: i32,
     num_exec: f64,
 ) -> PgResult<NodeList<'mcx>> {
     let mut out = NodeList::nil();
     for node in list {
         out.lappend(
             run.mcx,
-            fix_join_expr_mutator(run, node, outer_tlist, inner_tlist, rtoffset, nrm_match, num_exec)?,
+            fix_join_expr_mutator(run, node, outer_tlist, inner_tlist, rtoffset, nrm_match, acceptable_rel, num_exec)?,
         )?;
     }
     Ok(out)
@@ -1549,6 +1593,7 @@ fn fix_join_expr_mutator<'mcx>(
     inner_tlist: &NodeList<'mcx>,
     rtoffset: i32,
     nrm_match: NrmMatch,
+    acceptable_rel: i32,
     num_exec: f64,
 ) -> PgResult<Node<'mcx>> {
     let mcx = run.mcx;
@@ -1575,6 +1620,12 @@ fn fix_join_expr_mutator<'mcx>(
             )? {
                 return Ok(new);
             }
+            // ON CONFLICT's result-relation Vars stay scan Vars (C adds
+            // rtoffset, asserted 0 on this lane).
+            if acceptable_rel != 0 && var.varno == acceptable_rel {
+                debug_assert_eq!(rtoffset, 0);
+                return Ok(node);
+            }
             panic!("variable not found in subplan target lists");
         }
         NodeTag::T_Const | NodeTag::T_SQLValueFunction => {
@@ -1584,7 +1635,7 @@ fn fix_join_expr_mutator<'mcx>(
         NodeTag::T_TargetEntry => {
             let tle = node.as_target_entry().unwrap();
             let newexpr =
-                fix_join_expr_mutator(run, tle.expr, outer_tlist, inner_tlist, rtoffset, nrm_match, num_exec)?;
+                fix_join_expr_mutator(run, tle.expr, outer_tlist, inner_tlist, rtoffset, nrm_match, acceptable_rel, num_exec)?;
             Node::mk(
                 mcx,
                 types_nodes::primnodes::TargetEntry {
@@ -1606,7 +1657,7 @@ fn fix_join_expr_mutator<'mcx>(
             for arg in &o.args {
                 args.lappend(
                     mcx,
-                    fix_join_expr_mutator(run, arg, outer_tlist, inner_tlist, rtoffset, nrm_match, num_exec)?,
+                    fix_join_expr_mutator(run, arg, outer_tlist, inner_tlist, rtoffset, nrm_match, acceptable_rel, num_exec)?,
                 )?;
             }
             Node::mk(
@@ -1625,7 +1676,7 @@ fn fix_join_expr_mutator<'mcx>(
         }
         NodeTag::T_RelabelType => {
             let r = node.as_relabel_type().unwrap();
-            let arg = fix_join_expr_mutator(run, r.arg, outer_tlist, inner_tlist, rtoffset, nrm_match, num_exec)?;
+            let arg = fix_join_expr_mutator(run, r.arg, outer_tlist, inner_tlist, rtoffset, nrm_match, acceptable_rel, num_exec)?;
             Node::mk(
                 mcx,
                 types_nodes::primnodes::RelabelType {
@@ -1644,7 +1695,7 @@ fn fix_join_expr_mutator<'mcx>(
             for arg in &b.args {
                 args.lappend(
                     mcx,
-                    fix_join_expr_mutator(run, arg, outer_tlist, inner_tlist, rtoffset, nrm_match, num_exec)?,
+                    fix_join_expr_mutator(run, arg, outer_tlist, inner_tlist, rtoffset, nrm_match, acceptable_rel, num_exec)?,
                 )?;
             }
             Node::mk(
@@ -1659,7 +1710,7 @@ fn fix_join_expr_mutator<'mcx>(
             for arg in &f.args {
                 args.lappend(
                     mcx,
-                    fix_join_expr_mutator(run, arg, outer_tlist, inner_tlist, rtoffset, nrm_match, num_exec)?,
+                    fix_join_expr_mutator(run, arg, outer_tlist, inner_tlist, rtoffset, nrm_match, acceptable_rel, num_exec)?,
                 )?;
             }
             Node::mk(
@@ -1682,7 +1733,7 @@ fn fix_join_expr_mutator<'mcx>(
             let arg = match nt.arg {
                 None => None,
                 Some(a) => Some(fix_join_expr_mutator(
-                    run, a, outer_tlist, inner_tlist, rtoffset, nrm_match, num_exec,
+                    run, a, outer_tlist, inner_tlist, rtoffset, nrm_match, acceptable_rel, num_exec,
                 )?),
             };
             Node::mk(
@@ -1704,14 +1755,14 @@ fn fix_join_expr_mutator<'mcx>(
             let testexpr = match sp.testexpr {
                 None => None,
                 Some(te) => Some(fix_join_expr_mutator(
-                    run, te, outer_tlist, inner_tlist, rtoffset, nrm_match, num_exec,
+                    run, te, outer_tlist, inner_tlist, rtoffset, nrm_match, acceptable_rel, num_exec,
                 )?),
             };
             let mut args = NodeList::nil();
             for arg in &sp.args {
                 args.lappend(
                     mcx,
-                    fix_join_expr_mutator(run, arg, outer_tlist, inner_tlist, rtoffset, nrm_match, num_exec)?,
+                    fix_join_expr_mutator(run, arg, outer_tlist, inner_tlist, rtoffset, nrm_match, acceptable_rel, num_exec)?,
                 )?;
             }
             Node::mk(
@@ -1739,7 +1790,7 @@ fn fix_join_expr_mutator<'mcx>(
         NodeTag::T_AlternativeSubPlan => {
             let chosen =
                 fix_alternative_subplan(run, node.as_alternative_sub_plan().unwrap(), num_exec);
-            fix_join_expr_mutator(run, chosen, outer_tlist, inner_tlist, rtoffset, nrm_match, num_exec)
+            fix_join_expr_mutator(run, chosen, outer_tlist, inner_tlist, rtoffset, nrm_match, acceptable_rel, num_exec)
         }
         other => panic!("fix_join_expr_mutator (setrefs.c): {other:?}; M2 expression lane"),
     }

@@ -18,6 +18,7 @@ pub const EXPRKIND_TARGET: i32 = 1;
 pub const EXPRKIND_RTFUNC: i32 = 2;
 pub const EXPRKIND_VALUES: i32 = 4;
 pub const EXPRKIND_LIMIT: i32 = 6;
+pub const EXPRKIND_ARBITER_ELEM: i32 = 10;
 
 // Top-level arm plus the make_subplan recursion (run.push_root pre-sets the
 // child root's query_level); hasRecursion/setops stay behind the panics below.
@@ -175,8 +176,39 @@ pub fn subquery_planner<'mcx>(
         preprocess_expression(run, parse.limitOffset, EXPRKIND_LIMIT, has_sublinks)?;
     parse.limitCount =
         preprocess_expression(run, parse.limitCount, EXPRKIND_LIMIT, has_sublinks)?;
-    if parse.onConflict.is_some() || !parse.mergeActionList.is_nil() {
-        panic!("preprocess_expression (planner.c): ON CONFLICT/MERGE; M2 DML lane");
+    if !parse.mergeActionList.is_nil() {
+        panic!("preprocess_expression (planner.c): MERGE; M4 MERGE lane");
+    }
+    if let Some(oc_node) = parse.onConflict {
+        let oc = oc_node.as_on_conflict_expr().expect("onConflict is OnConflictExpr");
+        for elem_node in &oc.arbiterElems {
+            let elem = elem_node.as_inference_elem().expect("arbiterElems cell");
+            let new_expr =
+                preprocess_expression(run, elem.expr, EXPRKIND_ARBITER_ELEM, has_sublinks)?;
+            // SAFETY: parse tree is planner-owned; no derived refs live.
+            unsafe {
+                elem_node
+                    .with_mut::<types_nodes::primnodes::InferenceElem, _>(|e| e.expr = new_expr)
+            }
+            .expect("InferenceElem");
+        }
+        let arbiter_where =
+            preprocess_expression(run, oc.arbiterWhere, EXPRKIND_QUAL, has_sublinks)?;
+        let conflict_set = oc.onConflictSet.clone_in(run.mcx)?;
+        let conflict_set =
+            preprocess_expression_list(run, conflict_set, EXPRKIND_TARGET, has_sublinks)?;
+        let conflict_where =
+            preprocess_expression(run, oc.onConflictWhere, EXPRKIND_QUAL, has_sublinks)?;
+        // exclRelTlist contains only Vars, so no preprocessing needed.
+        // SAFETY: same exclusive parse-tree ownership as above.
+        unsafe {
+            oc_node.with_mut::<types_nodes::primnodes::OnConflictExpr, _>(|o| {
+                o.arbiterWhere = arbiter_where;
+                o.onConflictSet = conflict_set;
+                o.onConflictWhere = conflict_where;
+            })
+        }
+        .expect("OnConflictExpr");
     }
     debug_assert!(run.root.append_rel_list.is_empty());
     // Per-RTE expression preprocessing: expression-bearing RTEs panicked above.

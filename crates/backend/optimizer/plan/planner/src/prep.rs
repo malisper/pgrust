@@ -324,7 +324,7 @@ pub fn preprocess_targetlist<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResult<()> {
 
 // extract_update_targetlist_colnos (preptlist.c): collect the target column
 // numbers, then renumber the shared TLEs consecutively (C mutates in place).
-fn extract_update_targetlist_colnos<'mcx>(
+pub(crate) fn extract_update_targetlist_colnos<'mcx>(
     mcx: Mcx<'mcx>,
     tlist: &NodeList<'mcx>,
 ) -> mcx::PgVec<'mcx, i16> {

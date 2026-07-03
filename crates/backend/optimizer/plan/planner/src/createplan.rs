@@ -970,18 +970,17 @@ fn create_projection_plan<'mcx>(
 }
 
 // create_modifytable_plan + make_modifytable (createplan.c), single-relation
-// INSERT/UPDATE/DELETE arm: no FDW result rels, no ON CONFLICT/MERGE lists.
+// INSERT/UPDATE/DELETE arm: no FDW result rels, no MERGE lists.
 fn create_modifytable_plan<'mcx>(
     run: &mut PlannerRun<'mcx>,
     path_id: PathId,
 ) -> PgResult<Node<'mcx>> {
     let mcx = run.mcx;
-    let (subpath_id, operation, can_set_tag, nominal, root_rel, result_relations, epq_param) = {
+    let (subpath_id, operation, can_set_tag, nominal, root_rel, result_relations, epq_param, onconflict_id) = {
         let PathNode::ModifyTablePath(p) = run.root.path(path_id) else { unreachable!() };
         debug_assert!(
             p.withCheckOptionLists.is_empty()
                 && p.rowMarks.is_empty()
-                && p.onconflict.is_none()
                 && p.mergeActionLists.is_empty()
         );
         (
@@ -992,6 +991,7 @@ fn create_modifytable_plan<'mcx>(
             p.rootRelation,
             crate::relnode::pgvec_clone_shallow(mcx, &p.resultRelations),
             p.epqParam,
+            p.onconflict,
         )
     };
     use types_nodes::nodes_enums::CmdType;
@@ -1054,6 +1054,27 @@ fn create_modifytable_plan<'mcx>(
     plan.epqParam = epq_param;
     plan.returningOldAlias = run.parse().returningOldAlias;
     plan.returningNewAlias = run.parse().returningNewAlias;
+    if let Some(ocid) = onconflict_id {
+        let oc = run
+            .root
+            .expr_node(ocid)
+            .as_on_conflict_expr()
+            .expect("ModifyTablePath onconflict is OnConflictExpr");
+        plan.onConflictAction = oc.action as u32;
+        // The executor wants consecutive resnos in onConflictSet; the real
+        // target column numbers move to onConflictCols (C make_modifytable).
+        plan.onConflictSet = oc.onConflictSet.clone_in(mcx)?;
+        let colnos = crate::prep::extract_update_targetlist_colnos(mcx, &plan.onConflictSet);
+        let mut cols = types_nodes::list::IntList::nil();
+        for &c in colnos.iter() {
+            cols.lappend(mcx, c as i32)?;
+        }
+        plan.onConflictCols = cols;
+        plan.onConflictWhere = oc.onConflictWhere;
+        plan.arbiterIndexes = crate::plancat::infer_arbiter_indexes(run, oc)?;
+        plan.exclRelRTI = oc.exclRelIndex as u32;
+        plan.exclRelTlist = oc.exclRelTlist.clone_in(mcx)?;
+    }
     copy_generic_path_info(run, &mut plan.plan, path_id);
     Ok(plan.seal())
 }

@@ -180,7 +180,7 @@ pub fn create_projection_path<'mcx>(
 }
 
 // create_modifytable_path (pathnode.c), single-relation INSERT/UPDATE/DELETE
-// arm: no WCO/rowmarks/ON CONFLICT/MERGE lists (loud upstream), rows = 0.
+// arm: no WCO/rowmarks/MERGE lists (loud upstream), rows = 0.
 pub fn create_modifytable_path<'mcx>(
     run: &mut PlannerRun<'mcx>,
     rel_id: RelId,
@@ -191,6 +191,7 @@ pub fn create_modifytable_path<'mcx>(
     result_relation: u32,
     update_colnos: Option<PgVec<'mcx, i16>>,
     returning_list: Option<PgVec<'mcx, types_pathnodes::NodeId>>,
+    onconflict: Option<types_pathnodes::NodeId>,
 ) -> PathNode<'mcx> {
     let sub = run.root.path(subpath_id).base();
     let path = Path {
@@ -239,7 +240,7 @@ pub fn create_modifytable_path<'mcx>(
             None => PgVec::new_in(run.mcx),
         },
         rowMarks: PgVec::new_in(run.mcx),
-        onconflict: None,
+        onconflict,
         epqParam: 0,
         mergeActionLists: PgVec::new_in(run.mcx),
         mergeJoinConditions: PgVec::new_in(run.mcx),

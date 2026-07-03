@@ -464,3 +464,90 @@ pub fn get_function_rows(funcid: Oid, node: Option<types_nodes::Node<'_>>) -> Pg
     }
     Ok(shape.prorows as f64)
 }
+
+// infer_arbiter_indexes (plancat.c): plain-Var inference elements matched
+// against unique, valid, non-partial, non-expression btree indexes. ON
+// CONSTRAINT, expression/COLLATE/opclass elements, and arbiter WHERE are loud.
+pub fn infer_arbiter_indexes<'mcx>(
+    run: &crate::run::PlannerRun<'mcx>,
+    oc: &types_nodes::primnodes::OnConflictExpr<'mcx>,
+) -> PgResult<types_nodes::list::OidList<'mcx>> {
+    let mcx = run.mcx;
+    let mut results = types_nodes::list::OidList::nil();
+    if oc.arbiterElems.is_nil() && oc.constraint == 0 {
+        return Ok(results);
+    }
+    if oc.constraint != 0 {
+        panic!("infer_arbiter_indexes (plancat.c): ON CONSTRAINT arbiter; M2 upsert lane");
+    }
+    if oc.arbiterWhere.is_some() {
+        panic!("infer_arbiter_indexes (plancat.c): arbiter WHERE; M2 partial-index lane");
+    }
+
+    let parse = run.parse();
+    let rte = run.rte(parse.resultRelation as usize);
+    let mut infer_attrs: Vec<i16> = Vec::new();
+    for elem_node in &oc.arbiterElems {
+        let elem = elem_node.as_inference_elem().expect("arbiterElems cell");
+        if elem.infercollid != 0 || elem.inferopclass != 0 {
+            panic!("infer_arbiter_indexes (plancat.c): COLLATE/opclass element; M2 upsert lane");
+        }
+        let var = elem
+            .expr
+            .and_then(|e| e.as_var())
+            .unwrap_or_else(|| {
+                panic!("infer_arbiter_indexes (plancat.c): expression element; M2 upsert lane")
+            });
+        if var.varattno == 0 {
+            return Err(Box::new(
+                types_error::PgError::error(
+                    "whole row unique index inference specifications are not supported",
+                )
+                .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+            ));
+        }
+        if !infer_attrs.contains(&var.varattno) {
+            infer_attrs.push(var.varattno);
+        }
+    }
+    infer_attrs.sort_unstable();
+
+    let relation = table::table_open(mcx, rte.relid, NoLock)?;
+    let indexoidlist = relcache_seams::relation_get_index_list::call(mcx, rte.relid)?;
+    for &indexoid in indexoidlist.iter() {
+        let idx_rel = indexam::index_open(mcx, indexoid, rte.rellockmode)?;
+        let ind = idx_rel.rd_index.as_ref().expect("index relation carries rd_index");
+        let matches = ind.indisvalid && ind.indisunique && !ind.indisexclusion && {
+            let mut indexed_attrs: Vec<i16> = Vec::new();
+            let mut has_expr_col = false;
+            for natt in 0..ind.indnkeyatts as usize {
+                let attno = ind.indkey[natt];
+                if attno == 0 {
+                    has_expr_col = true;
+                } else if !indexed_attrs.contains(&attno) {
+                    indexed_attrs.push(attno);
+                }
+            }
+            indexed_attrs.sort_unstable();
+            // Expression columns can't be matched without expression elements,
+            // and a partial index's predicate is never implied by the absent
+            // (loud) arbiter WHERE: both fall through to no-match, as in C.
+            !has_expr_col && !ind.has_indpred && indexed_attrs == infer_attrs
+        };
+        if matches {
+            results.lappend(mcx, ind.indexrelid)?;
+        }
+        indexam::index_close(idx_rel, NoLock)?;
+    }
+    table::table_close(relation, NoLock)?;
+
+    if results.is_nil() {
+        return Err(Box::new(
+            types_error::PgError::error(
+                "there is no unique or exclusion constraint matching the ON CONFLICT specification",
+            )
+            .with_sqlstate(types_error::ERRCODE_INVALID_COLUMN_REFERENCE),
+        ));
+    }
+    Ok(results)
+}
