@@ -284,11 +284,10 @@ pub fn fc_numeric_float8(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) ->
     Ok(Datum::from_f64(crate::numeric_float8(num)?))
 }
 
-// C PolyNumAggState under HAVE_INT128 = Int128AggState, allocated by the
-// transfn in the aggcontext bump arena (fcinfo->context/AggCheckCallContext);
-// the arena is wholesale-reset, so the state must stay drop-free.
-const _: () = assert!(!core::mem::needs_drop::<crate::aggregates::Int128AggState>());
-
+// C PolyNumAggState under HAVE_INT128 = Int128AggState; INTERNAL agg states
+// are allocated by the transfn in the aggcontext bump arena (fcinfo->context/
+// AggCheckCallContext). The arena is wholesale-reset, so states stay
+// drop-free (const-asserted per-type in agg_state_arg).
 #[cold]
 #[inline(never)]
 fn non_aggregate_context() -> Box<::types_error::PgError> {
@@ -297,29 +296,104 @@ fn non_aggregate_context() -> Box<::types_error::PgError> {
     ))
 }
 
+// makeNumericAggState/makePolyNumAggState (numeric.c): allocate the INTERNAL
+// state in the agg context; also hands the context back for the digit
+// buffers (C's state->agg_context).
+fn agg_state_arg<'a, T>(
+    fcinfo: &Fcinfo,
+    arg0: ::datum::NullableDatum,
+    init: impl FnOnce() -> T,
+) -> PgResult<(*mut T, ::mcx::Mcx<'a>)> {
+    const { assert!(!core::mem::needs_drop::<T>()) }
+    // SAFETY: context, if set, is the evaltrans build's AggStateNode, live
+    // across every call through this frame.
+    let Some(agg_mcx) = (unsafe { fcinfo.agg_context() }) else {
+        return Err(non_aggregate_context());
+    };
+    if !arg0.isnull {
+        return Ok((arg0.value.as_usize() as *mut T, agg_mcx));
+    }
+    let layout = core::alloc::Layout::new::<T>();
+    let raw = ::mcx::Allocator::allocate(&agg_mcx, layout)
+        .map_err(|_| agg_mcx.oom(layout.size()))?;
+    let p = raw.cast::<T>().as_ptr();
+    // SAFETY: fresh allocation of the exact layout.
+    unsafe { p.write(init()) };
+    Ok((p, agg_mcx))
+}
+
 pub fn fc_int8_avg_accum(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     use crate::aggregates::Int128AggState;
     let [a, b] = *fcinfo.args_n::<2>();
-    let state: *mut Int128AggState = if a.isnull {
-        // SAFETY: context, if set, is the evaltrans build's AggStateNode,
-        // live across every call through this frame.
-        let Some(agg_mcx) = (unsafe { fcinfo.agg_context() }) else {
-            return Err(non_aggregate_context());
-        };
-        let layout = core::alloc::Layout::new::<Int128AggState>();
-        let raw = ::mcx::Allocator::allocate(&agg_mcx, layout)
-            .map_err(|_| agg_mcx.oom(layout.size()))?;
-        let p = raw.cast::<Int128AggState>().as_ptr();
-        // SAFETY: fresh allocation of the exact layout.
-        unsafe { p.write(Int128AggState::new(false)) };
-        p
-    } else {
-        a.value.as_usize() as *mut Int128AggState
-    };
+    let (state, _) = agg_state_arg(fcinfo, a, || Int128AggState::new(false))?;
     if !b.isnull {
         // SAFETY: a non-null arg0 is the aggcontext-lived state this transfn
         // chain returned; no other reference is live during the call.
         unsafe { crate::aggregates::do_int128_accum(&mut *state, b.value.as_i64() as i128) };
+    }
+    Ok(Datum::from_usize(state as usize))
+}
+
+// int2_accum/int4_accum (numeric.c), HAVE_INT128 arm: PolyNumAggState with
+// sumX2.
+macro_rules! fc_poly_accum {
+    ($($fc:ident: $get:ident;)*) => {$(
+        pub fn $fc(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+            use crate::aggregates::Int128AggState;
+            let [a, b] = *fcinfo.args_n::<2>();
+            let (state, _) = agg_state_arg(fcinfo, a, || Int128AggState::new(true))?;
+            if !b.isnull {
+                // SAFETY: as fc_int8_avg_accum.
+                unsafe {
+                    crate::aggregates::do_int128_accum(&mut *state, b.value.$get() as i128)
+                };
+            }
+            Ok(Datum::from_usize(state as usize))
+        }
+    )*};
+}
+
+fc_poly_accum! {
+    fc_int2_accum: as_i16;
+    fc_int4_accum: as_i32;
+}
+
+// numeric_accum/numeric_avg_accum (numeric.c).
+fn numeric_accum_common(fcinfo: &mut Fcinfo, calc_sum_x2: bool) -> PgResult<Datum> {
+    use crate::aggregates::NumericAggState;
+    let [a, b] = *fcinfo.args_n::<2>();
+    let (state, agg_mcx) = agg_state_arg(fcinfo, a, || NumericAggState::new(calc_sum_x2))?;
+    if !b.isnull {
+        // SAFETY: arg1 read guarded by the isnull check; state as
+        // fc_int8_avg_accum.
+        unsafe {
+            let num = num_arg(fcinfo, 1)?;
+            crate::aggregates::do_numeric_accum(&mut *state, agg_mcx, num)?;
+        }
+    }
+    Ok(Datum::from_usize(state as usize))
+}
+
+pub fn fc_numeric_accum(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    numeric_accum_common(fcinfo, true)
+}
+
+pub fn fc_numeric_avg_accum(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    numeric_accum_common(fcinfo, false)
+}
+
+pub fn fc_int8_accum(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    use crate::aggregates::NumericAggState;
+    let [a, b] = *fcinfo.args_n::<2>();
+    let (state, agg_mcx) = agg_state_arg(fcinfo, a, || NumericAggState::new(true))?;
+    if !b.isnull {
+        // SAFETY: as fc_int8_avg_accum.
+        unsafe {
+            crate::aggregates::do_numeric_accum_int64(&mut *state, agg_mcx, b.value.as_i64())?
+        };
     }
     Ok(Datum::from_usize(state as usize))
 }
@@ -346,6 +420,149 @@ macro_rules! fc_poly_final {
 fc_poly_final! {
     fc_numeric_poly_sum: numeric_poly_sum;
     fc_numeric_poly_avg: numeric_poly_avg;
+}
+
+// numeric_sum/numeric_avg/stddev-family finals over NumericAggState (finalize
+// carries lazily; idempotent, so shared transstates re-finalize safely).
+macro_rules! fc_num_final {
+    ($($fc:ident: $core:expr;)*) => {$(
+        pub fn $fc(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+            let a = fcinfo.args_n::<1>()[0];
+            // SAFETY: a non-null arg0 is the aggcontext-lived NumericAggState
+            // (transfn contract); sole reference during the call.
+            let state = (!a.isnull).then(|| unsafe {
+                &mut *(a.value.as_usize() as *mut crate::aggregates::NumericAggState)
+            });
+            #[allow(clippy::redundant_closure_call)]
+            match ($core)(state)? {
+                Some(img) => img_result(fcinfo, &img),
+                None => {
+                    fcinfo.isnull = true;
+                    Ok(Datum::null())
+                }
+            }
+        }
+    )*};
+}
+
+fc_num_final! {
+    fc_numeric_sum: crate::aggregates::numeric_sum;
+    fc_numeric_avg: crate::aggregates::numeric_avg;
+    fc_numeric_var_samp: |s| crate::aggregates::numeric_stddev_internal(s, true, true);
+    fc_numeric_stddev_samp: |s| crate::aggregates::numeric_stddev_internal(s, false, true);
+    fc_numeric_var_pop: |s| crate::aggregates::numeric_stddev_internal(s, true, false);
+    fc_numeric_stddev_pop: |s| crate::aggregates::numeric_stddev_internal(s, false, false);
+}
+
+macro_rules! fc_poly_stddev_final {
+    ($($fc:ident: ($variance:expr, $sample:expr);)*) => {$(
+        pub fn $fc(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+            let a = fcinfo.args_n::<1>()[0];
+            // SAFETY: as fc_poly_final.
+            let state = (!a.isnull).then(|| unsafe {
+                &*(a.value.as_usize() as *const crate::aggregates::Int128AggState)
+            });
+            match crate::aggregates::numeric_poly_stddev_internal(state, $variance, $sample)? {
+                Some(img) => img_result(fcinfo, &img),
+                None => {
+                    fcinfo.isnull = true;
+                    Ok(Datum::null())
+                }
+            }
+        }
+    )*};
+}
+
+fc_poly_stddev_final! {
+    fc_numeric_poly_var_samp: (true, true);
+    fc_numeric_poly_stddev_samp: (false, true);
+    fc_numeric_poly_var_pop: (true, false);
+    fc_numeric_poly_stddev_pop: (false, false);
+}
+
+// avg(int2)/avg(int4) transition lane (numeric.c Int8TransTypeData): the
+// transtype is a 2-element int8 array mutated in place under an agg context
+// (the by-ref trans step sees the same pointer come back — no copy).
+const ARR_OVERHEAD_NONULLS_1: usize = 24;
+const INT8_TRANSARRAY_SIZE: usize = ARR_OVERHEAD_NONULLS_1 + 16;
+
+#[cold]
+#[inline(never)]
+fn bad_int8_transarray() -> Box<::types_error::PgError> {
+    Box::new(::types_error::PgError::error("expected 2-element int8 array"))
+}
+
+// PG_GETARG_ARRAYTYPE_P + the hasnull/size validation shared by the
+// avg-transition family; returns ARR_DATA_PTR as the count/sum pair.
+//
+// # Safety
+// Arg 0 is a non-null _int8 array datum (strict fn), 8-aligned and writable
+// when reached through the agg transvalue lane.
+unsafe fn int8_transarray(fcinfo: &Fcinfo, copy: bool) -> PgResult<*mut i64> {
+    // SAFETY: forwarded caller contract.
+    let arr = unsafe {
+        let p = fcinfo.arg_ptr(0);
+        if !::types_tuple::varatt::varatt_is_4b_u(p) {
+            panic!("int8 transarray: packed/toasted array datum (detoast unported)");
+        }
+        if copy {
+            let img = core::slice::from_raw_parts(p, ::types_tuple::varatt::varsize_4b(p));
+            byref_result(fcinfo.result_mcx(), img)?.as_usize() as *mut u8
+        } else {
+            p.cast_mut()
+        }
+    };
+    debug_assert!(arr as usize % 8 == 0, "transarray must be MAXALIGNed");
+    // SAFETY: 4B-U image at least header-readable; size validated before the
+    // data pointer is used.
+    unsafe {
+        let size = ::types_tuple::varatt::varsize_4b(arr);
+        let hasnull = arr.add(8).cast::<i32>().read() != 0;
+        if hasnull || size != INT8_TRANSARRAY_SIZE {
+            return Err(bad_int8_transarray());
+        }
+        Ok(arr.add(ARR_OVERHEAD_NONULLS_1).cast::<i64>())
+    }
+}
+
+macro_rules! fc_int_avg_accum {
+    ($($fc:ident: $get:ident;)*) => {$(
+        pub fn $fc(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+            let newval = fcinfo.args_n::<2>()[1].value.$get() as i64;
+            // C copies the array unless invoked as an aggregate (in-place cheat).
+            // SAFETY: strict fn — arg 0 is a non-null _int8 array; the agg
+            // lane hands the aggcontext-lived, MAXALIGNed transvalue.
+            let in_agg = unsafe { fcinfo.agg_context() }.is_some();
+            // SAFETY: as above.
+            let td = unsafe { int8_transarray(fcinfo, !in_agg)? };
+            // SAFETY: validated 2-slot int8 payload behind td; the array
+            // image starts ARR_OVERHEAD_NONULLS_1 bytes before it.
+            unsafe {
+                *td += 1;
+                *td.add(1) += newval;
+                Ok(Datum::from_usize(td.cast::<u8>().sub(ARR_OVERHEAD_NONULLS_1) as usize))
+            }
+        }
+    )*};
+}
+
+fc_int_avg_accum! {
+    fc_int2_avg_accum: as_i16;
+    fc_int4_avg_accum: as_i32;
+}
+
+pub fn fc_int8_avg(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: strict fn — arg 0 is a non-null _int8 array transvalue.
+    let td = unsafe { int8_transarray(fcinfo, false)? };
+    // SAFETY: validated 2-slot int8 payload.
+    let (count, sum) = unsafe { (*td, *td.add(1)) };
+    if count == 0 {
+        fcinfo.isnull = true;
+        return Ok(Datum::null());
+    }
+    let sum_img = crate::ops::int64_to_numeric(sum);
+    let img = crate::ops::numeric_avg_div(sum_img.num(), count)?;
+    img_result(fcinfo, &img)
 }
 
 const fn b(foid: ::types_core::Oid, name: &'static str, nargs: i16, strict: bool, func: PGFunction) -> FmgrBuiltin {
@@ -392,17 +609,35 @@ pub const NUMERIC_BUILTINS: &[FmgrBuiltin] = &[
     b(1771, "numeric_uminus", 1, true, fc_numeric_uminus),
     b(1781, "int8_numeric", 1, true, fc_int8_numeric),
     b(1782, "int2_numeric", 1, true, fc_int2_numeric),
+    b(1833, "numeric_accum", 2, false, fc_numeric_accum),
+    b(1834, "int2_accum", 2, false, fc_int2_accum),
+    b(1835, "int4_accum", 2, false, fc_int4_accum),
+    b(1836, "int8_accum", 2, false, fc_int8_accum),
+    b(1837, "numeric_avg", 1, false, fc_numeric_avg),
+    b(1838, "numeric_var_samp", 1, false, fc_numeric_var_samp),
+    b(1839, "numeric_stddev_samp", 1, false, fc_numeric_stddev_samp),
     b(1840, "int2_sum", 2, false, fc_int2_sum),
     b(1841, "int4_sum", 2, false, fc_int4_sum),
+    b(1962, "int2_avg_accum", 2, true, fc_int2_avg_accum),
+    b(1963, "int4_avg_accum", 2, true, fc_int4_avg_accum),
+    b(1964, "int8_avg", 1, true, fc_int8_avg),
     b(1915, "numeric_uplus", 1, true, fc_numeric_uplus),
     b(1980, "numeric_div_trunc", 2, true, fc_numeric_div_trunc),
     b(2169, "power", 2, true, fc_numeric_power),
     b(2170, "width_bucket", 4, true, fc_width_bucket_numeric),
     b(2460, "numeric_recv", 3, true, fc_numeric_recv),
     b(2461, "numeric_send", 1, true, fc_numeric_send),
+    b(2514, "numeric_var_pop", 1, false, fc_numeric_var_pop),
+    b(2596, "numeric_stddev_pop", 1, false, fc_numeric_stddev_pop),
     b(2746, "int8_avg_accum", 2, false, fc_int8_avg_accum),
+    b(2858, "numeric_avg_accum", 2, false, fc_numeric_avg_accum),
+    b(3178, "numeric_sum", 1, false, fc_numeric_sum),
     b(3388, "numeric_poly_sum", 1, false, fc_numeric_poly_sum),
     b(3389, "numeric_poly_avg", 1, false, fc_numeric_poly_avg),
+    b(3390, "numeric_poly_var_pop", 1, false, fc_numeric_poly_var_pop),
+    b(3391, "numeric_poly_var_samp", 1, false, fc_numeric_poly_var_samp),
+    b(3392, "numeric_poly_stddev_pop", 1, false, fc_numeric_poly_stddev_pop),
+    b(3393, "numeric_poly_stddev_samp", 1, false, fc_numeric_poly_stddev_samp),
     b(5048, "gcd", 2, true, fc_numeric_gcd),
     b(5049, "lcm", 2, true, fc_numeric_lcm),
 ];

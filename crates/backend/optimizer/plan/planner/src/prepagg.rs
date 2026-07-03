@@ -110,7 +110,7 @@ fn preprocess_aggref<'mcx>(run: &mut PlannerRun<'mcx>, node: Node<'mcx>) -> PgRe
         match syscache_seams::pg_aggregate_agginitval::call(mcx, aggref.aggfnoid)? {
             None => panic!("cache lookup failed for aggregate {}", aggref.aggfnoid),
             Some(None) => (datum::Datum::null(), true),
-            Some(Some(text)) => (get_agg_init_val(&text, aggtranstype)?, false),
+            Some(Some(text)) => (get_agg_init_val(mcx, &text, aggtranstype)?, false),
         };
 
     let (aggno, transno);
@@ -210,16 +210,18 @@ fn preprocess_aggref<'mcx>(run: &mut PlannerRun<'mcx>, node: Node<'mcx>) -> PgRe
     Ok(())
 }
 
-// GetAggInitVal (prepagg.c): the general form goes through the transtype's
-// typinput; only the int8 arm is live (count/sum lane), others are loud.
-fn get_agg_init_val(text: &str, transtype: u32) -> PgResult<datum::Datum> {
-    match transtype {
-        INT8OID => Ok(datum::Datum::from_i64(adt_int8::int8in(text, None)?)),
-        other => panic!(
-            "GetAggInitVal (prepagg.c): typinput for transtype {other}; \
-             M3 OidInputFunctionCall lane"
-        ),
-    }
+// GetAggInitVal (prepagg.c): initval text through the transtype's typinput;
+// by-ref values land in the planner context (C's CurrentMemoryContext).
+fn get_agg_init_val(
+    mcx: mcx::Mcx<'_>,
+    text: &str,
+    transtype: u32,
+) -> PgResult<datum::Datum> {
+    let (typinput, typioparam) = lsyscache::getTypeInputInfo(transtype)?;
+    let mut flinfo = fmgr_core::fmgr_info(typinput)?;
+    let cstr = std::ffi::CString::new(text)
+        .expect("agginitval text contains an interior NUL");
+    types_fmgr::input_function_call(&mut flinfo, Some(&cstr), typioparam, -1, mcx)
 }
 
 // Returns (aggno, agginfo NodeId) of an identical previous aggregate, and

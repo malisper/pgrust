@@ -222,6 +222,7 @@ pub fn exec_init_window_agg<'mcx>(
     let mut trans_init: PgVec<'mcx, NullableDatum> = PgVec::new_in(mcx);
     let mut trans_fnoid: PgVec<'mcx, Oid> = PgVec::new_in(mcx);
     let mut trans_collid: PgVec<'mcx, Oid> = PgVec::new_in(mcx);
+    let mut trans_typlen: PgVec<'mcx, i16> = PgVec::new_in(mcx);
     let mut peragg_wfuncno: PgVec<'mcx, u16> = PgVec::new_in(mcx);
 
     for (wfuncno, &(wnode, wfunc)) in wfuncs.iter().enumerate() {
@@ -257,6 +258,7 @@ pub fn exec_init_window_agg<'mcx>(
                 &mut trans_init,
                 &mut trans_fnoid,
                 &mut trans_collid,
+                &mut trans_typlen,
             )?;
             peragg_wfuncno.push(wfuncno as u16);
             WfKind::PlainAgg { aggno }
@@ -308,6 +310,8 @@ pub fn exec_init_window_agg<'mcx>(
                 init_value_is_null: trans_init[aggno].isnull,
                 args: &agg_specs_args[aggno],
                 pergroup: pg,
+                transtype_byval: true,
+                transtype_len: trans_typlen[aggno],
             });
         }
         // C arms fcinfo->context with the WindowAggState; None makes a
@@ -425,6 +429,7 @@ fn initialize_peragg<'mcx>(
     trans_init: &mut PgVec<'mcx, NullableDatum>,
     trans_fnoid: &mut PgVec<'mcx, Oid>,
     trans_collid: &mut PgVec<'mcx, Oid>,
+    trans_typlen: &mut PgVec<'mcx, i16>,
 ) -> PgResult<()> {
     let shape = syscache_seams::lookup_pg_aggregate_shape::call(wfunc.winfnoid)?
         .ok_or_else(|| wfunc_lookup_failed(wfunc.winfnoid))?;
@@ -442,7 +447,8 @@ fn initialize_peragg<'mcx>(
         );
     }
     let transtype = shape.aggtranstype;
-    let (_len, byval) = lsyscache::get_typlenbyval(transtype)?;
+    let (translen, byval) = lsyscache::get_typlenbyval(transtype)?;
+    trans_typlen.push(translen);
     if !byval {
         panic!(
             "advance_windowaggregate (nodeWindowAgg.c): by-ref transtype {transtype} \

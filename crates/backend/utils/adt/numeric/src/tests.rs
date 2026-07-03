@@ -326,9 +326,10 @@ fn float_conversions() {
 
 #[test]
 fn sum_accum_positive_negative_split() {
+    let ctx = ::mcx::MemoryContext::new_bump("agg-test");
     let mut state = NumericAggState::new(false);
     for v in ["1.5", "-2.5", "1000000", "-999999", "0.001"] {
-        do_numeric_accum(&mut state, n(v).num());
+        do_numeric_accum(&mut state, ctx.mcx(), n(v).num()).unwrap();
     }
     let sum = numeric_sum(Some(&mut state)).unwrap().unwrap();
     assert_eq!(out(&sum), "0.001");
@@ -339,7 +340,7 @@ fn sum_accum_positive_negative_split() {
     let mut state = NumericAggState::new(false);
     let v = n("9999.9999");
     for _ in 0..20000 {
-        do_numeric_accum(&mut state, v.num());
+        do_numeric_accum(&mut state, ctx.mcx(), v.num()).unwrap();
     }
     let sum = numeric_sum(Some(&mut state)).unwrap().unwrap();
     assert_eq!(out(&sum), "199999998.0000");
@@ -352,29 +353,31 @@ fn sum_accum_positive_negative_split() {
 
 #[test]
 fn sum_specials() {
+    let ctx = ::mcx::MemoryContext::new_bump("agg-test");
     let mut state = NumericAggState::new(false);
-    do_numeric_accum(&mut state, n("1").num());
-    do_numeric_accum(&mut state, NumericImage::pinf().num());
+    do_numeric_accum(&mut state, ctx.mcx(), n("1").num()).unwrap();
+    do_numeric_accum(&mut state, ctx.mcx(), NumericImage::pinf().num()).unwrap();
     assert_eq!(
         out(&numeric_sum(Some(&mut state)).unwrap().unwrap()),
         "Infinity"
     );
-    do_numeric_accum(&mut state, NumericImage::ninf().num());
+    do_numeric_accum(&mut state, ctx.mcx(), NumericImage::ninf().num()).unwrap();
     assert_eq!(out(&numeric_sum(Some(&mut state)).unwrap().unwrap()), "NaN");
     let mut state = NumericAggState::new(false);
-    do_numeric_accum(&mut state, NumericImage::nan().num());
+    do_numeric_accum(&mut state, ctx.mcx(), NumericImage::nan().num()).unwrap();
     assert_eq!(out(&numeric_sum(Some(&mut state)).unwrap().unwrap()), "NaN");
 }
 
 #[test]
 fn discard_inverse_transition() {
+    let ctx = ::mcx::MemoryContext::new_bump("agg-test");
     let mut state = NumericAggState::new(false);
-    do_numeric_accum(&mut state, n("1.01").num());
-    do_numeric_accum(&mut state, n("2").num());
+    do_numeric_accum(&mut state, ctx.mcx(), n("1.01").num()).unwrap();
+    do_numeric_accum(&mut state, ctx.mcx(), n("2").num()).unwrap();
     // Removing the only max-dscale input must fail (dscale unknowable).
-    assert!(!do_numeric_discard(&mut state, n("1.01").num()));
+    assert!(!do_numeric_discard(&mut state, ctx.mcx(), n("1.01").num()).unwrap());
     // Removing the dscale-0 input is fine.
-    assert!(do_numeric_discard(&mut state, n("2").num()));
+    assert!(do_numeric_discard(&mut state, ctx.mcx(), n("2").num()).unwrap());
     assert_eq!(out(&numeric_sum(Some(&mut state)).unwrap().unwrap()), "1.01");
 }
 
@@ -744,4 +747,49 @@ mod fc_results {
             .unwrap();
         assert_eq!(crate::cmp_numerics(result_num(d), int64_to_numeric(-9).num()), 0);
     }
+}
+
+// Live PG 18.3: stddev/variance over 1..5 (samp and pop, numeric + int128
+// poly lanes agree).
+#[test]
+fn stddev_variance_finals() {
+    let ctx = ::mcx::MemoryContext::new_bump("agg-test");
+    let mut state = NumericAggState::new(true);
+    for v in ["1", "2", "3", "4", "5"] {
+        do_numeric_accum(&mut state, ctx.mcx(), n(v).num()).unwrap();
+    }
+    let f = |s: &mut NumericAggState, variance, sample| {
+        out(&numeric_stddev_internal(Some(s), variance, sample).unwrap().unwrap())
+    };
+    assert_eq!(f(&mut state, false, true), "1.5811388300841897");
+    assert_eq!(f(&mut state, true, true), "2.5000000000000000");
+    assert_eq!(f(&mut state, false, false), "1.4142135623730950");
+    assert_eq!(f(&mut state, true, false), "2.0000000000000000");
+
+    let mut one = NumericAggState::new(true);
+    do_numeric_accum(&mut one, ctx.mcx(), n("7").num()).unwrap();
+    assert!(numeric_stddev_internal(Some(&mut one), false, true).unwrap().is_none());
+    assert_eq!(
+        out(&numeric_stddev_internal(Some(&mut one), true, false).unwrap().unwrap()),
+        "0"
+    );
+    do_numeric_accum(&mut one, ctx.mcx(), NumericImage::nan().num()).unwrap();
+    assert_eq!(
+        out(&numeric_stddev_internal(Some(&mut one), false, true).unwrap().unwrap()),
+        "NaN"
+    );
+    assert!(numeric_stddev_internal(None, false, true).unwrap().is_none());
+
+    let mut poly = Int128AggState::new(true);
+    for v in 1..=5i128 {
+        do_int128_accum(&mut poly, v);
+    }
+    assert_eq!(
+        out(&numeric_poly_stddev_internal(Some(&poly), false, true).unwrap().unwrap()),
+        "1.5811388300841897"
+    );
+    assert_eq!(
+        out(&numeric_poly_stddev_internal(Some(&poly), true, true).unwrap().unwrap()),
+        "2.5000000000000000"
+    );
 }

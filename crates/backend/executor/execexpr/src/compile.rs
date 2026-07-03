@@ -36,6 +36,8 @@ pub struct AggTransSpec<'a, 'mcx> {
     pub init_value_is_null: bool,
     pub args: &'a NodeList<'mcx>,
     pub pergroup: NonNull<AggPerGroup>,
+    pub transtype_byval: bool,
+    pub transtype_len: i16,
 }
 
 // WindowAgg projection binding: same result arrays, indexed by wfuncno,
@@ -281,6 +283,18 @@ pub fn exec_build_agg_trans_hashed<'mcx>(
     build_agg_trans(mcx, specs, Some(base), agg_node, params)
 }
 
+// The tag proves the FmNodePtr is an AggStateNode (WindowAgg passes None).
+fn agg_state_node(agg_node: FmNodePtr) -> NonNull<::types_fmgr::AggStateNode> {
+    let p = agg_node
+        .unwrap_or_else(|| unported("by-ref transtype without an AggState (nodeWindowAgg lane)"));
+    // SAFETY: build-time read of the caller's live node header.
+    assert!(
+        unsafe { p.as_ref().tag } == ::types_fmgr::T_AGG_STATE,
+        "build_agg_trans: by-ref trans context is not an AggStateNode"
+    );
+    p.cast()
+}
+
 fn build_agg_trans<'mcx>(
     mcx: Mcx<'mcx>,
     specs: &[AggTransSpec<'_, 'mcx>],
@@ -307,7 +321,7 @@ fn build_agg_trans<'mcx>(
         if flinfo.fn_retset {
             return Err(retset_error());
         }
-        if flinfo.fn_strict && spec.init_value_is_null {
+        if flinfo.fn_strict && spec.init_value_is_null && spec.transtype_byval {
             unported("EEOP_AGG_PLAIN_TRANS_INIT_STRICT_BYVAL (strict transfn, NULL initval)");
         }
         let fn_addr = flinfo.fn_addr;
@@ -351,14 +365,42 @@ fn build_agg_trans<'mcx>(
             bailout = Some(state.steps.len());
             push_step(&mut state, mcx, step)?;
         }
-        let step = match (indirect_base, fn_strict) {
-            (None, true) => Step::AggPlainTransStrictByVal { call, pergroup: spec.pergroup },
-            (None, false) => Step::AggPlainTransByVal { call, pergroup: spec.pergroup },
-            (Some(base), true) => {
-                Step::AggTransStrictByValIndirect { call, base, transno: transno as u16 }
+        let step = if spec.transtype_byval {
+            match (indirect_base, fn_strict) {
+                (None, true) => Step::AggPlainTransStrictByVal { call, pergroup: spec.pergroup },
+                (None, false) => Step::AggPlainTransByVal { call, pergroup: spec.pergroup },
+                (Some(base), true) => {
+                    Step::AggTransStrictByValIndirect { call, base, transno: transno as u16 }
+                }
+                (Some(base), false) => {
+                    Step::AggTransByValIndirect { call, base, transno: transno as u16 }
+                }
             }
-            (Some(base), false) => {
-                Step::AggTransByValIndirect { call, base, transno: transno as u16 }
+        } else {
+            let byref = crate::steps::AggByRef {
+                agg: agg_state_node(agg_node),
+                translen: spec.transtype_len,
+            };
+            let transno = transno as u16;
+            match (indirect_base, fn_strict, spec.init_value_is_null) {
+                (None, true, true) => {
+                    Step::AggPlainTransInitStrictByRef { call, pergroup: spec.pergroup, byref }
+                }
+                (None, true, false) => {
+                    Step::AggPlainTransStrictByRef { call, pergroup: spec.pergroup, byref }
+                }
+                (None, false, _) => {
+                    Step::AggPlainTransByRef { call, pergroup: spec.pergroup, byref }
+                }
+                (Some(base), true, true) => {
+                    Step::AggTransInitStrictByRefIndirect { call, base, transno, byref }
+                }
+                (Some(base), true, false) => {
+                    Step::AggTransStrictByRefIndirect { call, base, transno, byref }
+                }
+                (Some(base), false, _) => {
+                    Step::AggTransByRefIndirect { call, base, transno, byref }
+                }
             }
         };
         push_step(&mut state, mcx, step)?;
@@ -1101,8 +1143,14 @@ fn ready_expr(state: &mut ExprState<'_>) {
             | Step::FuncExprStrict { call, .. }
             | Step::AggPlainTransByVal { call, .. }
             | Step::AggPlainTransStrictByVal { call, .. }
+            | Step::AggPlainTransInitStrictByRef { call, .. }
+            | Step::AggPlainTransStrictByRef { call, .. }
+            | Step::AggPlainTransByRef { call, .. }
             | Step::AggTransByValIndirect { call, .. }
             | Step::AggTransStrictByValIndirect { call, .. }
+            | Step::AggTransInitStrictByRefIndirect { call, .. }
+            | Step::AggTransStrictByRefIndirect { call, .. }
+            | Step::AggTransByRefIndirect { call, .. }
             | Step::HashDatumFirst { call, .. }
             | Step::HashDatumNext32 { call, .. }
             | Step::NotDistinct { call, .. }

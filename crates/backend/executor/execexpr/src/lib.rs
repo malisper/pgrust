@@ -27,7 +27,7 @@ pub use compile::{
     exec_build_hash32_from_attrs, exec_build_projection_info, exec_init_expr, exec_init_qual,
     expr_type, AggBind, AggTransSpec, WinBind, INDEX_VAR, INNER_VAR, OUTER_VAR,
 };
-pub use interp::{exec_eval_expr, exec_project, exec_qual, EvalSlots};
+pub use interp::{agg_datum_copy, exec_eval_expr, exec_project, exec_qual, EvalSlots};
 pub use steps::{AggPerGroup, CmpOp, ExprState, Kernel, OutRef, SlotSrc, Step};
 pub use types_portal::params::ParamBind;
 

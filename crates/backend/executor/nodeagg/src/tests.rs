@@ -36,12 +36,24 @@ const INT8_AVG_COMBINE_OID: u32 = 2785;
 const INT8PL_OID: u32 = 463;
 const INTERNALOID: u32 = 2281;
 const NUMERICOID: u32 = 1700;
+const TEXTOID: u32 = 25;
+const INT8ARRAYOID: u32 = 1016;
+const MIN_TEXT_OID: u32 = 2145;
+const MAX_TEXT_OID: u32 = 2129;
+const TEXT_SMALLER_OID: u32 = 459;
+const TEXT_LARGER_OID: u32 = 458;
+const AVG_INT4_OID: u32 = 2101;
+const INT4_AVG_ACCUM_OID: u32 = 1963;
+const INT8_AVG_OID: u32 = 1964;
+const C_COLLATION: u32 = 950;
 
 static SEAMS: Once = Once::new();
 
 fn install_seams() {
     SEAMS.call_once(|| {
         miscinit_seams::get_user_id::set(|| 10);
+        miscinit_seams::is_bootstrap_processing_mode::set(|| false);
+        fmgr_core::init_seams();
         aclchk_seams::object_aclcheck::set(|_classid, _objid, _roleid, _mode| Ok(0));
         syscache_seams::lookup_pg_type_shape::set(|typid| {
             Ok(match typid {
@@ -72,6 +84,57 @@ fn install_seams() {
                     typalign: TYPALIGN_INT,
                     typstorage: b'm' as i8,
                     typcollation: 0,
+                }),
+                TEXTOID => Some(PgTypeShape {
+                    typlen: -1,
+                    typbyval: false,
+                    typalign: TYPALIGN_INT,
+                    typstorage: b'x' as i8,
+                    typcollation: 100,
+                }),
+                INT8ARRAYOID => Some(PgTypeShape {
+                    typlen: -1,
+                    typbyval: false,
+                    typalign: TYPALIGN_DOUBLE,
+                    typstorage: b'x' as i8,
+                    typcollation: 0,
+                }),
+                _ => None,
+            })
+        });
+        // GetAggInitVal resolves initval text through typinput (int8in /
+        // array_in for the _int8 avg transtype).
+        syscache_seams::pg_type_io_shape::set(|typid| {
+            Ok(match typid {
+                INT8OID => Some(syscache_seams::PgTypeIoShape {
+                    oid: INT8OID,
+                    typinput: 460,
+                    typoutput: 461,
+                    typreceive: 2408,
+                    typsend: 2409,
+                    typmodin: 0,
+                    typmodout: 0,
+                    typelem: 0,
+                    typlen: 8,
+                    typbyval: true,
+                    typalign: TYPALIGN_DOUBLE,
+                    typdelim: b',' as i8,
+                    typisdefined: true,
+                }),
+                INT8ARRAYOID => Some(syscache_seams::PgTypeIoShape {
+                    oid: INT8ARRAYOID,
+                    typinput: 750,
+                    typoutput: 751,
+                    typreceive: 2400,
+                    typsend: 2401,
+                    typmodin: 0,
+                    typmodout: 0,
+                    typelem: INT8OID,
+                    typlen: -1,
+                    typbyval: false,
+                    typalign: TYPALIGN_DOUBLE,
+                    typdelim: b',' as i8,
+                    typisdefined: true,
                 }),
                 _ => None,
             })
@@ -131,6 +194,36 @@ fn install_seams() {
                     aggtranstype: INT8OID,
                     aggtransspace: 0,
                 }),
+                MIN_TEXT_OID | MAX_TEXT_OID => Some(PgAggregateShape {
+                    aggkind: b'n' as i8,
+                    aggnumdirectargs: 0,
+                    aggtransfn: if aggfnoid == MIN_TEXT_OID {
+                        TEXT_SMALLER_OID
+                    } else {
+                        TEXT_LARGER_OID
+                    },
+                    aggfinalfn: 0,
+                    aggcombinefn: 0,
+                    aggserialfn: 0,
+                    aggdeserialfn: 0,
+                    aggfinalextra: false,
+                    aggfinalmodify: b'r' as i8,
+                    aggtranstype: TEXTOID,
+                    aggtransspace: 0,
+                }),
+                AVG_INT4_OID => Some(PgAggregateShape {
+                    aggkind: b'n' as i8,
+                    aggnumdirectargs: 0,
+                    aggtransfn: INT4_AVG_ACCUM_OID,
+                    aggfinalfn: INT8_AVG_OID,
+                    aggcombinefn: 0,
+                    aggserialfn: 0,
+                    aggdeserialfn: 0,
+                    aggfinalextra: false,
+                    aggfinalmodify: b'r' as i8,
+                    aggtranstype: INT8ARRAYOID,
+                    aggtransspace: 0,
+                }),
                 _ => None,
             })
         });
@@ -180,7 +273,10 @@ fn install_seams() {
                 COUNT_STAR_OID | COUNT_ANY_OID => {
                     Some(Some(::mcx::PgString::from_str_in("0", mcx).unwrap()))
                 }
-                SUM_INT4_OID | SUM_INT8_OID => Some(None),
+                AVG_INT4_OID => {
+                    Some(Some(::mcx::PgString::from_str_in("{0,0}", mcx).unwrap()))
+                }
+                SUM_INT4_OID | SUM_INT8_OID | MIN_TEXT_OID | MAX_TEXT_OID => Some(None),
                 _ => None,
             })
         });
@@ -1013,6 +1109,328 @@ fn hashed_group_by_sum_int8() {
                 (1, "30".to_string()),
                 (2, "10".to_string()),
                 (3, "7".to_string())
+            ]
+        );
+    });
+}
+
+fn text_datum(s: &str) -> Datum {
+    let mut v = Vec::with_capacity(4 + s.len());
+    v.extend_from_slice(&::datum::varlena::set_varsize_4b(4 + s.len()));
+    v.extend_from_slice(s.as_bytes());
+    Datum::from_usize(Box::leak(v.into_boxed_slice()).as_ptr() as usize)
+}
+
+fn text_datum_str(d: Datum) -> String {
+    // SAFETY: text transvalues stay 4B-header images (datumCopy preserves form).
+    let v = unsafe { ::datum::varlena::VarlenaRef::from_ptr(d.as_usize() as *const u8) };
+    String::from_utf8(v.data().to_vec()).unwrap()
+}
+
+fn mk_min_max_text_agg(mcx: Mcx<'_>, aggfnoid: u32) -> &Agg<'_> {
+    let var = Node::mk_var(mcx, OUTER_VAR, 1, TEXTOID, -1, C_COLLATION, 0).unwrap();
+    let arg_tle = Node::mk_target_entry(mcx, var, 1, None, false).unwrap();
+    let mut aggref = Node::build::<Aggref>(mcx).unwrap();
+    aggref.aggfnoid = aggfnoid;
+    aggref.aggtype = TEXTOID;
+    aggref.aggtranstype = TEXTOID;
+    aggref.inputcollid = C_COLLATION;
+    aggref.aggargtypes = types_nodes::list::OidList::make1(mcx, TEXTOID).unwrap();
+    aggref.args = NodeList::make1(mcx, arg_tle).unwrap();
+    aggref.aggno = 0;
+    aggref.aggtransno = 0;
+    let tle = Node::mk_target_entry(mcx, aggref.seal(), 1, Some("m"), false).unwrap();
+    let mut agg = Node::build::<Agg>(mcx).unwrap();
+    agg.plan.targetlist = NodeList::make1(mcx, tle).unwrap();
+    agg.numGroups = 1;
+    agg.seal_ref()
+}
+
+fn text_feeder<'mcx>(
+    outer_id: ExecSlotId,
+    rows: &'static [Option<&'static str>],
+) -> impl FnMut(&mut EStateData<'mcx>) -> ::types_error::PgResult<Option<ExecSlotId>> {
+    let mut i = 0usize;
+    move |estate| {
+        if i >= rows.len() {
+            return Ok(None);
+        }
+        let mcx = estate.es_query_cxt;
+        let slot = estate.slot_mut(outer_id);
+        exectuples::exec_clear_tuple(slot, mcx);
+        match rows[i] {
+            Some(s) => {
+                slot.base_mut().tts_values[0] = text_datum(s);
+                slot.base_mut().tts_isnull[0] = false;
+            }
+            None => {
+                slot.base_mut().tts_values[0] = Datum::null();
+                slot.base_mut().tts_isnull[0] = true;
+            }
+        }
+        exectuples::exec_store_virtual_tuple(slot);
+        i += 1;
+        Ok(Some(outer_id))
+    }
+}
+
+// EEOP_AGG_PLAIN_TRANS_INIT_STRICT_BYREF: first non-NULL input datumCopies
+// into the aggcontext, later winners re-home via ExecAggCopyTransValue.
+#[test]
+fn min_max_text_byref_transvalue() {
+    install_seams();
+    for (fnoid, expect) in [(MIN_TEXT_OID, "apple"), (MAX_TEXT_OID, "pear")] {
+        let agg = mk_min_max_text_agg(leaked_mcx(), fnoid);
+        let estate_owner = create_executor_state(Box::leak(Box::new(MemoryContext::new("q"))));
+        let mut estate_owner = estate_owner.unwrap();
+        estate_owner.with_mut(|estate| {
+            let mcx = estate.es_query_cxt;
+            let outer_desc = one_col_desc(mcx, TEXTOID, -1, TYPALIGN_INT);
+            let outer_id =
+                estate.exec_init_extra_tuple_slot(Some(outer_desc), TupleSlotKind::Virtual);
+            let result_desc = one_col_desc(leaked_mcx(), TEXTOID, -1, TYPALIGN_INT);
+            // SAFETY: agg is leaked ('static) and read-only.
+            let agg = unsafe { shorten(agg) };
+            let mut state = exec_init_agg(agg, estate, 0, result_desc).unwrap();
+
+            let rows: &'static [Option<&'static str>] =
+                &[None, Some("mango"), Some("apple"), None, Some("pear"), Some("banana")];
+            let slot_id = exec_agg(&mut state, estate, text_feeder(outer_id, rows))
+                .unwrap()
+                .expect("plain agg returns one row");
+            {
+                let base = estate.slot_mut(slot_id).base();
+                assert!(!base.tts_isnull[0]);
+                assert_eq!(text_datum_str(base.tts_values[0]), expect);
+            }
+
+            // All-NULL input leaves the transvalue NULL (INIT never fires).
+            exec_rescan_agg(&mut state, estate);
+            let rows2: &'static [Option<&'static str>] = &[None, None];
+            let again =
+                exec_agg(&mut state, estate, text_feeder(outer_id, rows2)).unwrap().unwrap();
+            let base = estate.slot_mut(again).base();
+            assert!(base.tts_isnull[0]);
+        });
+    }
+}
+
+fn mk_avg_int4_agg(mcx: Mcx<'_>) -> &Agg<'_> {
+    let var = Node::mk_var(mcx, OUTER_VAR, 1, INT4OID, -1, 0, 0).unwrap();
+    let arg_tle = Node::mk_target_entry(mcx, var, 1, None, false).unwrap();
+    let mut aggref = Node::build::<Aggref>(mcx).unwrap();
+    aggref.aggfnoid = AVG_INT4_OID;
+    aggref.aggtype = NUMERICOID;
+    aggref.aggtranstype = INT8ARRAYOID;
+    aggref.aggargtypes = types_nodes::list::OidList::make1(mcx, INT4OID).unwrap();
+    aggref.args = NodeList::make1(mcx, arg_tle).unwrap();
+    aggref.aggno = 0;
+    aggref.aggtransno = 0;
+    let tle = Node::mk_target_entry(mcx, aggref.seal(), 1, Some("avg"), false).unwrap();
+    let mut agg = Node::build::<Agg>(mcx).unwrap();
+    agg.plan.targetlist = NodeList::make1(mcx, tle).unwrap();
+    agg.numGroups = 1;
+    agg.seal_ref()
+}
+
+// EEOP_AGG_PLAIN_TRANS_STRICT_BYREF over the _int8 transarray: array_in
+// parses '{0,0}', int4_avg_accum mutates the aggcontext copy in place, and
+// int8_avg divides (live PG 18: avg(1..5) = 3.0000000000000000).
+#[test]
+fn avg_int4_array_transtype() {
+    install_seams();
+    let agg = mk_avg_int4_agg(leaked_mcx());
+    let estate_owner = create_executor_state(Box::leak(Box::new(MemoryContext::new("q"))));
+    let mut estate_owner = estate_owner.unwrap();
+    estate_owner.with_mut(|estate| {
+        let mcx = estate.es_query_cxt;
+        let outer_desc = one_col_desc(mcx, INT4OID, 4, TYPALIGN_INT);
+        let outer_id = estate.exec_init_extra_tuple_slot(Some(outer_desc), TupleSlotKind::Virtual);
+        let result_desc = one_col_desc(leaked_mcx(), NUMERICOID, -1, TYPALIGN_INT);
+        // SAFETY: agg is leaked ('static) and read-only.
+        let agg = unsafe { shorten(agg) };
+        let mut state = exec_init_agg(agg, estate, 0, result_desc).unwrap();
+
+        let rows: &'static [Option<i32>] = &[Some(1), Some(2), None, Some(3), Some(4), Some(5)];
+        let mut i = 0usize;
+        let mut feed = move |estate: &mut EStateData<'_>| {
+            if i >= rows.len() {
+                return Ok(None);
+            }
+            let mcx = estate.es_query_cxt;
+            let slot = estate.slot_mut(outer_id);
+            exectuples::exec_clear_tuple(slot, mcx);
+            match rows[i] {
+                Some(v) => {
+                    slot.base_mut().tts_values[0] = Datum::from_i32(v);
+                    slot.base_mut().tts_isnull[0] = false;
+                }
+                None => {
+                    slot.base_mut().tts_values[0] = Datum::null();
+                    slot.base_mut().tts_isnull[0] = true;
+                }
+            }
+            exectuples::exec_store_virtual_tuple(slot);
+            i += 1;
+            Ok(Some(outer_id))
+        };
+        let slot_id =
+            exec_agg(&mut state, estate, &mut feed).unwrap().expect("plain agg returns one row");
+        {
+            let base = estate.slot_mut(slot_id).base();
+            assert!(!base.tts_isnull[0]);
+            assert_eq!(numeric_datum_text(base.tts_values[0]), "3.0000000000000000");
+        }
+
+        // Empty input: count 0 in the initval copy -> int8_avg returns NULL.
+        exec_rescan_agg(&mut state, estate);
+        let again = exec_agg(&mut state, estate, feeder(outer_id, &[])).unwrap().unwrap();
+        let base = estate.slot_mut(again).base();
+        assert!(base.tts_isnull[0]);
+    });
+}
+
+fn mk_hashed_min_text_agg(mcx: Mcx<'_>) -> &Agg<'_> {
+    let g_var = Node::mk_var(mcx, 1, 1, INT4OID, -1, 0, 0).unwrap();
+    let g_tle = Node::mk_target_entry(mcx, g_var, 1, Some("g"), false).unwrap();
+    let t_var = Node::mk_var(mcx, 1, 2, TEXTOID, -1, C_COLLATION, 0).unwrap();
+    let t_tle = Node::mk_target_entry(mcx, t_var, 2, Some("t"), false).unwrap();
+    let outer_plan = {
+        let mut r = Node::build::<types_nodes::plannodes::Result>(mcx).unwrap();
+        let mut tl = NodeList::make1(mcx, g_tle).unwrap();
+        tl.lappend(mcx, t_tle).unwrap();
+        r.plan.targetlist = tl;
+        r.plan.plan_width = 20;
+        r.seal()
+    };
+
+    let group_var = Node::mk_var(mcx, OUTER_VAR, 1, INT4OID, -1, 0, 0).unwrap();
+    let group_tle = Node::mk_target_entry(mcx, group_var, 1, Some("g"), false).unwrap();
+    let arg_var = Node::mk_var(mcx, OUTER_VAR, 2, TEXTOID, -1, C_COLLATION, 0).unwrap();
+    let arg_tle = Node::mk_target_entry(mcx, arg_var, 1, None, false).unwrap();
+    let mut aggref = Node::build::<Aggref>(mcx).unwrap();
+    aggref.aggfnoid = MIN_TEXT_OID;
+    aggref.aggtype = TEXTOID;
+    aggref.aggtranstype = TEXTOID;
+    aggref.inputcollid = C_COLLATION;
+    aggref.aggargtypes = types_nodes::list::OidList::make1(mcx, TEXTOID).unwrap();
+    aggref.args = NodeList::make1(mcx, arg_tle).unwrap();
+    aggref.aggno = 0;
+    aggref.aggtransno = 0;
+    let min_tle = Node::mk_target_entry(mcx, aggref.seal(), 2, Some("m"), false).unwrap();
+
+    let mut agg = Node::build::<Agg>(mcx).unwrap();
+    let mut tlist = NodeList::make1(mcx, group_tle).unwrap();
+    tlist.lappend(mcx, min_tle).unwrap();
+    agg.plan.targetlist = tlist;
+    agg.plan.lefttree = Some(outer_plan);
+    agg.aggstrategy = 2;
+    agg.numCols = 1;
+    agg.grpColIdx = mcx::slice_borrow_in(mcx, &[1i16]).unwrap();
+    agg.grpOperators = mcx::slice_borrow_in(mcx, &[INT4_EQ]).unwrap();
+    agg.grpCollations = mcx::slice_borrow_in(mcx, &[0u32]).unwrap();
+    agg.numGroups = 4;
+    agg.seal_ref()
+}
+
+// Hashed lane: AggTransInitStrictByRefIndirect through the repointed
+// pergroup cell; transvalue copies land in the table context.
+#[test]
+fn hashed_group_by_min_text() {
+    install_seams();
+    let agg = mk_hashed_min_text_agg(leaked_mcx());
+    let estate_owner = create_executor_state(Box::leak(Box::new(MemoryContext::new("q"))));
+    let mut estate_owner = estate_owner.unwrap();
+    estate_owner.with_mut(|estate| {
+        let mcx = estate.es_query_cxt;
+        let outer_desc = {
+            let a1 = FormData_pg_attribute {
+                attnum: 1,
+                atttypid: INT4OID,
+                atttypmod: -1,
+                attlen: 4,
+                attbyval: true,
+                attalign: TYPALIGN_INT,
+                attstorage: TYPSTORAGE_PLAIN,
+                ..Default::default()
+            };
+            let a2 = FormData_pg_attribute {
+                attnum: 2,
+                atttypid: TEXTOID,
+                atttypmod: -1,
+                attlen: -1,
+                attbyval: false,
+                attalign: TYPALIGN_INT,
+                attstorage: b'x' as i8,
+                ..Default::default()
+            };
+            let mut attrs = PgVec::new_in(mcx);
+            let mut compact = PgVec::new_in(mcx);
+            compact.push(CompactAttribute::populate_from(&a1));
+            compact.push(CompactAttribute::populate_from(&a2));
+            attrs.push(a1);
+            attrs.push(a2);
+            Rc::new(TupleDescData {
+                natts: 2,
+                tdtypeid: 0,
+                tdtypmod: -1,
+                tdrefcount: -1,
+                constr: None,
+                compact_attrs: compact,
+                attrs,
+            })
+        };
+        let outer_id = estate.exec_init_extra_tuple_slot(Some(outer_desc), TupleSlotKind::Virtual);
+        // SAFETY: agg is leaked ('static) and read-only.
+        let agg = unsafe { shorten(agg) };
+        let mut state = exec_init_agg(agg, estate, 0, two_col_desc(leaked_mcx())).unwrap();
+
+        let rows: &'static [(i32, Option<&'static str>)] = &[
+            (1, Some("mango")),
+            (2, Some("kiwi")),
+            (1, Some("apple")),
+            (2, Some("plum")),
+            (3, None),
+            (1, Some("banana")),
+        ];
+        let mut i = 0usize;
+        let mut feed = move |estate: &mut EStateData<'_>| {
+            if i >= rows.len() {
+                return Ok(None);
+            }
+            let mcx = estate.es_query_cxt;
+            let slot = estate.slot_mut(outer_id);
+            exectuples::exec_clear_tuple(slot, mcx);
+            let (g, t) = rows[i];
+            slot.base_mut().tts_values[0] = Datum::from_i32(g);
+            slot.base_mut().tts_isnull[0] = false;
+            match t {
+                Some(s) => {
+                    slot.base_mut().tts_values[1] = text_datum(s);
+                    slot.base_mut().tts_isnull[1] = false;
+                }
+                None => {
+                    slot.base_mut().tts_values[1] = Datum::null();
+                    slot.base_mut().tts_isnull[1] = true;
+                }
+            }
+            exectuples::exec_store_virtual_tuple(slot);
+            i += 1;
+            Ok(Some(outer_id))
+        };
+        let mut got: Vec<(i32, Option<String>)> = Vec::new();
+        while let Some(slot_id) = exec_agg(&mut state, estate, &mut feed).unwrap() {
+            let base = estate.slot_mut(slot_id).base();
+            let m = (!base.tts_isnull[1]).then(|| text_datum_str(base.tts_values[1]));
+            got.push((base.tts_values[0].as_i32(), m));
+        }
+        got.sort_unstable();
+        assert_eq!(
+            got,
+            vec![
+                (1, Some("apple".to_string())),
+                (2, Some("kiwi".to_string())),
+                (3, None),
             ]
         );
     });

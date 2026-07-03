@@ -734,7 +734,7 @@ macro_rules! unported {
 }
 
 // Deferred loud (M3+ / other lanes): wire format, sortsupport/hash,
-// in_range/series, stddev finals.
+// in_range/series.
 unported! {
     numeric_recv_unported,
     numeric_send_unported,
@@ -742,7 +742,6 @@ unported! {
     hash_numeric_unported,
     in_range_numeric_unported,
     generate_series_numeric_unported,
-    numeric_stddev_unported,
 }
 
 pub fn numeric_is_nan(num: Num<'_>) -> bool {
