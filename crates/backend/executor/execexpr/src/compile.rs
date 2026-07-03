@@ -174,6 +174,10 @@ pub fn exec_init_qual_subplans<'mcx>(
     }
     push_step(&mut state, mcx, Step::DoneReturn)?;
     ready_expr(&mut state);
+    // Qual programs run outside exec_project's arming; by-ref-allocating
+    // callees get the init context (the exec_project_with_subplans
+    // convention; C uses the per-tuple context — leak-shaped divergence).
+    state.arm_result_mcx(mcx);
     Ok(Some(state))
 }
 
@@ -652,6 +656,7 @@ pub fn exec_build_hash32_from_attrs<'mcx>(
 
     push_step(&mut state, mcx, Step::DoneReturn)?;
     ready_expr(&mut state);
+    state.arm_result_mcx(mcx);
     Ok(state)
 }
 
