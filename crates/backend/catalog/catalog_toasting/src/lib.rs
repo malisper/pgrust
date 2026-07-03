@@ -101,8 +101,13 @@ fn create_toast_table<'mcx>(mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgResult<bo
     attnums[1] = 2;
     let mut indexInfo = IndexInfo {
         ii_NumIndexAttrs: 2,
+        ii_AmCache: None,
         ii_NumIndexKeyAttrs: 2,
         ii_IndexAttrNumbers: attnums,
+        ii_Expressions: types_nodes::NodeList::nil(),
+        ii_ExpressionsState: mcx::PgVec::new_in(mcx),
+        ii_Predicate: types_nodes::NodeList::nil(),
+        ii_PredicateState: None,
         ii_Unique: true,
         ii_NullsNotDistinct: false,
         ii_ReadyForInserts: true,

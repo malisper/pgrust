@@ -118,6 +118,7 @@ pub(crate) fn TypeCacheConstrCallback(_arg: Datum, _cacheid: i32, _hashvalue: u3
         while t != InvalidOid {
             let e = type_cache.get(&t).expect("domain chain entry present");
             e.clear_flags(TCFLAGS_CHECKED_DOMAIN_CONSTRAINTS);
+            e.set_ready(compute_ready(e));
             t = e.next_domain_get();
         }
     });

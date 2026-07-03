@@ -50,6 +50,13 @@ pub struct RelationData<'mcx> {
     pub rd_amcache: Cell<Option<RdAmCacheBtree>>,
     // C rd_amcache, hash arm (HashMetaPageData is 4.5KB - boxed, read via borrow).
     pub rd_amcache_hash: RefCell<Option<std::boxed::Box<types_hash::HashMetaPageData>>>,
+    // C rd_amcache, gin arm (resolved opclass dispatch; gin crate owns the
+    // tag mapping — 0 == jsonb_ops).
+    pub rd_amcache_gin: Cell<Option<RdAmCacheGin>>,
+    // C rd_amcache, spgist arm (SpGistCache POD: opclass config + lastUsedPages).
+    pub rd_amcache_spgist: Cell<Option<types_spgist::SpGistCache>>,
+    // C rd_support: nkey x amsupport support-proc OIDs, row-major.
+    pub rd_support: PgVec<'mcx, Oid>,
     // C rd_support/rd_supportinfo (rule-5 cache), resolved once per column;
     // std Vec justified: Rc-owned owner structure outside the arenas, FmgrInfo is droppy.
     pub rd_supportinfo: RefCell<Vec<Option<FmgrInfo>>>,
@@ -62,6 +69,8 @@ pub struct RelationData<'mcx> {
     // pg_class.relhastriggers, threaded beside the trimmed rd_rel form
     // (ScannedPgClass.relchecks precedent).
     pub rd_hastriggers: bool,
+    // pg_class.relhasrules, same threading (matchLocks/fireRIRrules gate).
+    pub rd_hasrules: bool,
 }
 
 #[derive(Debug)]
@@ -73,6 +82,16 @@ pub struct RdIndexList {
 }
 
 pub type RdAmCacheBtree = BTMetaPageData;
+
+/// GIN's resolved opclass state (gin's GinState mirror).
+#[derive(Clone, Copy, Debug)]
+pub struct RdAmCacheGin {
+    pub opclass: u8,
+    pub support_collation: Oid,
+    pub can_partial_match: bool,
+    pub key_byval: bool,
+    pub key_len: i16,
+}
 
 impl<'mcx> RelationData<'mcx> {
     #[inline]
@@ -320,10 +339,13 @@ mod tests {
             pgstat_enabled: Cell::new(false),
             rd_amcache: Default::default(),
             rd_amcache_hash: Default::default(),
+            rd_amcache_gin: Default::default(),
+            rd_amcache_spgist: Default::default(),
+            rd_support: PgVec::new_in(mcx),
             rd_supportinfo: Default::default(),
             rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
-            rd_hastriggers: false,
+            rd_hastriggers: false, rd_hasrules: false,
         }
     }
 

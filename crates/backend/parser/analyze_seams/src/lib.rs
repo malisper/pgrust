@@ -16,6 +16,20 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // C pg_analyze_and_rewrite_withcb with sql_fn_parser_setup: named/positional
+    // SQL-function parameter hooks (empty string = unnamed).
+    pub fn parse_analyze_sql_fn<'a, 'mcx>(
+        mcx: Mcx<'mcx>,
+        parse_tree: &'a RawStmt<'mcx>,
+        source_text: &'a str,
+        fname: &'a str,
+        argtypes: &'a [Oid],
+        argnames: &'a [&'a str],
+        query_env: QueryEnvHandle,
+    ) -> PgResult<Query<'mcx>>
+);
+
+seam_core::seam!(
     // C's Oid **paramTypes / int *numParams out-params come back as the
     // second tuple element (the resolved parameter types).
     pub fn parse_analyze_varparams<'a, 'mcx>(

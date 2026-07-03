@@ -20,6 +20,11 @@ const F_BOOLEQ: u32 = 60;
 const F_INT4EQ: u32 = 65;
 const F_FAKE_VOLATILE: u32 = 9990;
 const F_FAKE_RESTRICTED: u32 = 9991;
+const F_TEXTEQ_GATED: u32 = 67;
+const F_FAKE_NONSTRICT: u32 = 9994;
+const OP_FAKE_EQ: u32 = 9901;
+const OP_FAKE_NE: u32 = 9902;
+const F_TEXTREGEXEQ_SUPPORT: u32 = 1364;
 
 fn shape(provolatile: u8, proparallel: u8, strict: bool, rettype: u32) -> PgProcShape {
     PgProcShape {
@@ -48,6 +53,12 @@ fn install_fixtures() {
                 F_NEXTVAL => Some(shape(b'v', b'u', true, 20)),
                 F_FAKE_VOLATILE => Some(shape(b'v', b's', true, 23)),
                 F_FAKE_RESTRICTED => Some(shape(b'i', b'r', true, 23)),
+                F_TEXTEQ_GATED => {
+                    let mut sh = shape(b'i', b's', true, 16);
+                    sh.prosupport = F_TEXTREGEXEQ_SUPPORT;
+                    Some(sh)
+                }
+                F_FAKE_NONSTRICT => Some(shape(b'i', b's', false, 16)),
                 _ => None,
             })
         });
@@ -60,6 +71,25 @@ fn install_fixtures() {
                     typstorage: b'p' as i8,
                     typcollation: 0,
                 }),
+                _ => None,
+            })
+        });
+        syscache_seams::lookup_pg_operator_shape::set(|opno| {
+            let op = |negate: u32| syscache_seams::PgOperatorShape {
+                oprleft: 25,
+                oprright: 25,
+                oprresult: 16,
+                oprcom: opno,
+                oprnegate: negate,
+                oprcode: F_BOOLEQ,
+                oprrest: 0,
+                oprjoin: 0,
+                oprcanmerge: false,
+                oprcanhash: false,
+            };
+            Ok(match opno {
+                OP_FAKE_EQ => Some(op(OP_FAKE_NE)),
+                OP_FAKE_NE => Some(op(OP_FAKE_EQ)),
                 _ => None,
             })
         });
@@ -605,4 +635,123 @@ fn eval_const_minmax_all_const_defers_to_evaluate_expr_seam() {
     let mcx = ctx.mcx();
     let e = minmax(mcx, true, &[int4_const(mcx, Some(1)), int4_const(mcx, Some(2))]);
     let _ = eval_const_expressions(mcx, e);
+}
+
+fn saop<'mcx>(
+    mcx: Mcx<'mcx>,
+    opno: u32,
+    opfuncid: u32,
+    use_or: bool,
+    args: &[Node<'mcx>],
+) -> Node<'mcx> {
+    Node::mk(
+        mcx,
+        types_nodes::ScalarArrayOpExpr {
+            opno,
+            opfuncid,
+            useOr: use_or,
+            args: NodeList::from_slice(mcx, args).unwrap(),
+            location: -1,
+            ..Default::default()
+        },
+    )
+    .unwrap()
+}
+
+#[test]
+fn relabel_over_const_folds_to_retyped_const() {
+    let ctx = cx();
+    let mcx = ctx.mcx();
+    let con = int4_const(mcx, Some(5));
+    let relabel = Node::mk_relabel_type(
+        mcx,
+        con,
+        26,
+        -1,
+        0,
+        types_nodes::CoercionForm::COERCE_IMPLICIT_CAST,
+    )
+    .unwrap();
+    let out = eval_const_expressions(mcx, relabel).unwrap();
+    let c = out.as_const().unwrap();
+    assert_eq!((c.consttype, c.constvalue.as_i32(), c.constisnull), (26, 5, false));
+}
+
+#[test]
+fn negate_clause_flips_saop_through_negator() {
+    let ctx = cx();
+    let mcx = ctx.mcx();
+    let var = Node::mk_var(mcx, 1, 1, 25, -1, 100, 0).unwrap();
+    let param = Node::mk(
+        mcx,
+        types_nodes::Param {
+            paramkind: ParamKind::PARAM_EXTERN,
+            paramid: 1,
+            paramtype: 1009,
+            paramtypmod: -1,
+            paramcollid: 0,
+            location: -1,
+        },
+    )
+    .unwrap();
+    let inner = saop(mcx, OP_FAKE_EQ, F_BOOLEQ, true, &[var, param]);
+    let not = Node::mk(
+        mcx,
+        types_nodes::BoolExpr {
+            boolop: types_nodes::BoolExprType::NOT_EXPR,
+            args: NodeList::from_slice(mcx, &[inner]).unwrap(),
+            location: -1,
+        },
+    )
+    .unwrap();
+    let out = eval_const_expressions(mcx, not).unwrap();
+    let s = out.as_scalar_array_op_expr().unwrap();
+    // C negate_clause leaves opfuncid for set_sa_opfuncid (main shape).
+    assert_eq!((s.opno, s.opfuncid, s.useOr), (OP_FAKE_NE, 0, false));
+}
+
+#[test]
+fn prosupport_null_simplify_allowlist_stays_quiet() {
+    let ctx = cx();
+    let mcx = ctx.mcx();
+    let var = Node::mk_var(mcx, 1, 1, 25, -1, 100, 0).unwrap();
+    let var2 = Node::mk_var(mcx, 1, 2, 25, -1, 100, 0).unwrap();
+    let call = Node::mk(
+        mcx,
+        FuncExpr {
+            funcid: F_TEXTEQ_GATED,
+            funcresulttype: 16,
+            args: NodeList::from_slice(mcx, &[var, var2]).unwrap(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let out = eval_const_expressions(mcx, call).unwrap();
+    assert_eq!(out.as_func_expr().unwrap().funcid, F_TEXTEQ_GATED);
+}
+
+#[test]
+fn find_nonnullable_rels_uses_strict_saop() {
+    let ctx = cx();
+    let mcx = ctx.mcx();
+    let var = Node::mk_var(mcx, 3, 1, 25, -1, 100, 0).unwrap();
+    let param = Node::mk(
+        mcx,
+        types_nodes::Param {
+            paramkind: ParamKind::PARAM_EXTERN,
+            paramid: 1,
+            paramtype: 1009,
+            paramtypmod: -1,
+            paramcollid: 0,
+            location: -1,
+        },
+    )
+    .unwrap();
+    let strict = saop(mcx, OP_FAKE_EQ, F_BOOLEQ, true, &[var, param]);
+    let rels = find_nonnullable_rels(mcx, Some(strict)).unwrap();
+    assert!(rels.is_member(3));
+
+    let lax = saop(mcx, OP_FAKE_EQ, F_FAKE_NONSTRICT, true, &[var, param]);
+    let rels = find_nonnullable_rels(mcx, Some(lax)).unwrap();
+    assert!(rels.is_empty());
 }

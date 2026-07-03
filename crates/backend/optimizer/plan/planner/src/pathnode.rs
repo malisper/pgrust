@@ -5,7 +5,7 @@ use types_nodes::list::NodeList;
 use types_nodes::NodeTag;
 use types_pathnodes::{
     GroupResultPath, IndexClause, IndexOptInfo, IndexPath, Path, PathId, PathKey, PathNode,
-    PathTarget, ProjectionPath, PtId, RelId, ScanDirection,
+    PathTarget, ProjectionPath, PtId, RelId, Relids, ScanDirection,
 };
 
 use crate::costsize::{clamp_width_est, cost_qual_eval_node};
@@ -101,9 +101,13 @@ pub fn is_projection_capable_pathtype(pathtype: u16) -> bool {
         t if t == tag16(NodeTag::T_ValuesScan) => true,
         t if t == tag16(NodeTag::T_FunctionScan) => true,
         t if t == tag16(NodeTag::T_SetOp) => false,
+        t if t == tag16(NodeTag::T_Append) => false,
+        t if t == tag16(NodeTag::T_MergeAppend) => false,
+        t if t == tag16(NodeTag::T_ProjectSet) => false,
         t if t == tag16(NodeTag::T_NestLoop) => true,
         t if t == tag16(NodeTag::T_MergeJoin) => true,
         t if t == tag16(NodeTag::T_HashJoin) => true,
+        t if t == tag16(NodeTag::T_ValuesScan) => true,
         _ => panic!(
             "is_projection_capable_path (createplan.c): pathtype {pathtype}; \
              M2 plan lane"
@@ -178,6 +182,50 @@ pub fn create_projection_path<'mcx>(
             + (gucs::cpu_tuple_cost() + newt.cost.per_tuple) * sub.rows;
     }
     PathNode::ProjectionPath(ProjectionPath { path, subpath: Some(subpath_id), dummypp })
+}
+
+// create_set_projection_path (pathnode.c).
+pub fn create_set_projection_path<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel_id: RelId,
+    subpath_id: PathId,
+    target_id: PtId,
+) -> PgResult<PathNode<'mcx>> {
+    let mut tlist_rows = 1.0f64;
+    for i in 0..run.root.pathtarget(target_id).exprs.len() {
+        let id = run.root.pathtarget(target_id).exprs[i];
+        let itemrows = crate::costsize::expression_returns_set_rows(*run.root.expr_node(id))?;
+        if tlist_rows < itemrows {
+            tlist_rows = itemrows;
+        }
+    }
+    let target_parallel_safe = crate::is_parallel_safe_exprs(run, target_id)?;
+    let sub = run.root.path(subpath_id).base();
+    let target = run.root.pathtarget(target_id);
+    let rel = run.root.rel(rel_id);
+    let rows = sub.rows * tlist_rows;
+    let path = Path {
+        type_: tag16(NodeTag::T_ProjectSetPath),
+        pathtype: tag16(NodeTag::T_ProjectSet),
+        parent: rel_id,
+        pathtarget_id: Some(target_id),
+        param_info: None,
+        parallel_aware: false,
+        parallel_safe: rel.consider_parallel && sub.parallel_safe && target_parallel_safe,
+        parallel_workers: sub.parallel_workers,
+        rows,
+        disabled_nodes: sub.disabled_nodes,
+        startup_cost: sub.startup_cost + target.cost.startup,
+        total_cost: sub.total_cost
+            + target.cost.startup
+            + (gucs::cpu_tuple_cost() + target.cost.per_tuple) * sub.rows
+            + (rows - sub.rows) * gucs::cpu_tuple_cost() / 2.0,
+        pathkeys: crate::relnode::pgvec_clone_shallow(run.mcx, &sub.pathkeys),
+    };
+    Ok(PathNode::ProjectSetPath(types_pathnodes::ProjectSetPath {
+        path,
+        subpath: Some(subpath_id),
+    }))
 }
 
 // create_modifytable_path (pathnode.c), single-relation INSERT/UPDATE/DELETE
@@ -334,9 +382,17 @@ fn compare_path_costs_fuzzily(
     PathCostComparison::Equal
 }
 
-// add_path (pathnode.c); with no parameterized paths, PATH_REQ_OUTER
-// comparisons collapse to BMS_EQUAL.
+// PATH_REQ_OUTER (pathnodes.h).
+pub fn path_req_outer<'p, 'mcx>(path: &'p Path<'mcx>) -> &'p Relids<'mcx> {
+    match &path.param_info {
+        Some(ppi) => &ppi.ppi_req_outer,
+        None => &None,
+    }
+}
+
+// add_path (pathnode.c).
 pub fn add_path<'mcx>(run: &mut PlannerRun<'mcx>, rel_id: RelId, new_id: PathId) -> PathId {
+    use crate::relnode::{relids_subset_compare, SubsetCmp};
     let mut accept_new = true;
     let mut insert_at = 0usize;
 
@@ -345,8 +401,6 @@ pub fn add_path<'mcx>(run: &mut PlannerRun<'mcx>, rel_id: RelId, new_id: PathId)
 
     let empty: PgVec<'mcx, PathId> = PgVec::new_in(run.mcx);
     let mut working = core::mem::replace(&mut run.root.rel_mut(rel_id).pathlist, empty);
-
-    debug_assert!(run.root.path(new_id).base().param_info.is_none());
 
     let mut i = 0usize;
     while i < working.len() {
@@ -366,61 +420,90 @@ pub fn add_path<'mcx>(run: &mut PlannerRun<'mcx>, rel_id: RelId, new_id: PathId)
             use crate::pathkeys::{compare_pathkeys, PathKeysComparison};
             let keyscmp = compare_pathkeys(&new_path.pathkeys, &old_path.pathkeys);
             if keyscmp != PathKeysComparison::Different {
+                let outercmp = || {
+                    relids_subset_compare(path_req_outer(new_path), path_req_outer(old_path))
+                };
                 match costcmp {
                     PathCostComparison::Equal => match keyscmp {
-                        // Outer relids are BMS_EQUAL (no parameterized paths).
                         PathKeysComparison::Better1 => {
-                            if new_path.rows <= old_path.rows
+                            let oc = outercmp();
+                            if (oc == SubsetCmp::Equal || oc == SubsetCmp::Subset1)
+                                && new_path.rows <= old_path.rows
                                 && new_path.parallel_safe >= old_path.parallel_safe
                             {
                                 remove_old = true;
                             }
                         }
                         PathKeysComparison::Better2 => {
-                            if new_path.rows >= old_path.rows
+                            let oc = outercmp();
+                            if (oc == SubsetCmp::Equal || oc == SubsetCmp::Subset2)
+                                && new_path.rows >= old_path.rows
                                 && new_path.parallel_safe <= old_path.parallel_safe
                             {
                                 accept_new = false;
                             }
                         }
-                        PathKeysComparison::Equal => {
-                            if new_path.parallel_safe > old_path.parallel_safe {
-                                remove_old = true;
-                            } else if new_path.parallel_safe < old_path.parallel_safe {
-                                accept_new = false;
-                            } else if new_path.rows < old_path.rows {
-                                remove_old = true;
-                            } else if new_path.rows > old_path.rows {
-                                accept_new = false;
-                            } else if compare_path_costs_fuzzily(
-                                new_path,
-                                old_path,
-                                1.0000000001,
-                                consider_startup,
-                                consider_param_startup,
-                            ) == PathCostComparison::Better1
-                            {
-                                remove_old = true;
-                            } else {
-                                accept_new = false;
+                        PathKeysComparison::Equal => match outercmp() {
+                            SubsetCmp::Equal => {
+                                if new_path.parallel_safe > old_path.parallel_safe {
+                                    remove_old = true;
+                                } else if new_path.parallel_safe < old_path.parallel_safe {
+                                    accept_new = false;
+                                } else if new_path.rows < old_path.rows {
+                                    remove_old = true;
+                                } else if new_path.rows > old_path.rows {
+                                    accept_new = false;
+                                } else if compare_path_costs_fuzzily(
+                                    new_path,
+                                    old_path,
+                                    1.0000000001,
+                                    consider_startup,
+                                    consider_param_startup,
+                                ) == PathCostComparison::Better1
+                                {
+                                    remove_old = true;
+                                } else {
+                                    accept_new = false;
+                                }
                             }
-                        }
+                            SubsetCmp::Subset1 => {
+                                if new_path.rows <= old_path.rows
+                                    && new_path.parallel_safe >= old_path.parallel_safe
+                                {
+                                    remove_old = true;
+                                }
+                            }
+                            SubsetCmp::Subset2 => {
+                                if new_path.rows >= old_path.rows
+                                    && new_path.parallel_safe <= old_path.parallel_safe
+                                {
+                                    accept_new = false;
+                                }
+                            }
+                            SubsetCmp::Different => {}
+                        },
                         PathKeysComparison::Different => unreachable!(),
                     },
                     PathCostComparison::Better1 => {
-                        if keyscmp != PathKeysComparison::Better2
-                            && new_path.rows <= old_path.rows
-                            && new_path.parallel_safe >= old_path.parallel_safe
-                        {
-                            remove_old = true;
+                        if keyscmp != PathKeysComparison::Better2 {
+                            let oc = outercmp();
+                            if (oc == SubsetCmp::Equal || oc == SubsetCmp::Subset1)
+                                && new_path.rows <= old_path.rows
+                                && new_path.parallel_safe >= old_path.parallel_safe
+                            {
+                                remove_old = true;
+                            }
                         }
                     }
                     PathCostComparison::Better2 => {
-                        if keyscmp != PathKeysComparison::Better1
-                            && new_path.rows >= old_path.rows
-                            && new_path.parallel_safe <= old_path.parallel_safe
-                        {
-                            accept_new = false;
+                        if keyscmp != PathKeysComparison::Better1 {
+                            let oc = outercmp();
+                            if (oc == SubsetCmp::Equal || oc == SubsetCmp::Subset2)
+                                && new_path.rows >= old_path.rows
+                                && new_path.parallel_safe <= old_path.parallel_safe
+                            {
+                                accept_new = false;
+                            }
                         }
                     }
                     PathCostComparison::Different => unreachable!(),
@@ -465,19 +548,44 @@ fn no_plan_error() -> PgError {
     PgError::error("could not devise a query plan for the given query".to_string())
 }
 
-// set_cheapest (pathnode.c); parameterized paths can't be built on this lane.
+// set_cheapest (pathnode.c).
 pub fn set_cheapest(run: &mut PlannerRun<'_>, rel_id: RelId) -> PgResult<()> {
+    use crate::relnode::{relids_subset_compare, SubsetCmp};
     if run.root.rel(rel_id).pathlist.is_empty() {
         return Err(no_plan_error().into());
     }
     let mut cheapest_startup_path: Option<PathId> = None;
     let mut cheapest_total_path: Option<PathId> = None;
+    let mut best_param_path: Option<PathId> = None;
+    let mcx = run.mcx;
+    let mut parameterized_paths: PgVec<'_, PathId> = PgVec::new_in(mcx);
 
     let npaths = run.root.rel(rel_id).pathlist.len();
     for i in 0..npaths {
         let pid = run.root.rel(rel_id).pathlist[i];
         let path = run.root.path(pid).base();
-        assert!(path.param_info.is_none(), "set_cheapest (pathnode.c): parameterized path; M2 lane");
+        if path.param_info.is_some() {
+            parameterized_paths.push(pid);
+            if cheapest_total_path.is_some() {
+                continue;
+            }
+            match best_param_path {
+                None => best_param_path = Some(pid),
+                Some(bp) => {
+                    let best = run.root.path(bp).base();
+                    match relids_subset_compare(path_req_outer(path), path_req_outer(best)) {
+                        SubsetCmp::Equal => {
+                            if compare_path_costs(path, best, CostSelector::Total) < 0 {
+                                best_param_path = Some(pid);
+                            }
+                        }
+                        SubsetCmp::Subset1 => best_param_path = Some(pid),
+                        SubsetCmp::Subset2 | SubsetCmp::Different => {}
+                    }
+                }
+            }
+            continue;
+        }
         let (Some(s), Some(t)) = (cheapest_startup_path, cheapest_total_path) else {
             cheapest_startup_path = Some(pid);
             cheapest_total_path = Some(pid);
@@ -502,14 +610,18 @@ pub fn set_cheapest(run: &mut PlannerRun<'_>, rel_id: RelId) -> PgResult<()> {
         }
     }
 
-    let cheapest_total = cheapest_total_path.expect("nonempty pathlist");
-    let mcx = run.mcx;
+    if let Some(t) = cheapest_total_path {
+        parameterized_paths.insert(0, t);
+    }
+    let cheapest_total = match cheapest_total_path {
+        Some(t) => t,
+        None => best_param_path.expect("nonempty pathlist"),
+    };
     let rel = run.root.rel_mut(rel_id);
     rel.cheapest_startup_path = cheapest_startup_path;
     rel.cheapest_total_path = Some(cheapest_total);
     rel.cheapest_unique_path = None;
-    rel.cheapest_parameterized_paths = PgVec::new_in(mcx);
-    rel.cheapest_parameterized_paths.push(cheapest_total);
+    rel.cheapest_parameterized_paths = parameterized_paths;
     Ok(())
 }
 
@@ -536,6 +648,148 @@ fn base_path<'mcx>(
     }
 }
 
+
+// join_clause_is_movable_into (restrictinfo.c).
+pub fn join_clause_is_movable_into(
+    run: &PlannerRun<'_>,
+    rid: types_pathnodes::RinfoId,
+    currentrelids: &types_pathnodes::Relids<'_>,
+    current_and_outer: &types_pathnodes::Relids<'_>,
+) -> bool {
+    use crate::relnode::{relids_is_subset, relids_overlap};
+    let ri = run.root.rinfo(rid);
+    if !relids_is_subset(&ri.clause_relids, current_and_outer) {
+        return false;
+    }
+    if !relids_overlap(currentrelids, &ri.clause_relids) {
+        return false;
+    }
+    if relids_overlap(currentrelids, &ri.outer_relids) {
+        return false;
+    }
+    true
+}
+
+// get_baserel_parampathinfo (relnode.c). The path holds a copy of the cached
+// PPI (C shares the pointer; nothing compares PPIs by identity here).
+pub fn get_baserel_parampathinfo<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel_id: RelId,
+    required_outer: &types_pathnodes::Relids<'mcx>,
+) -> PgResult<Option<mcx::PgBox<'mcx, types_pathnodes::ParamPathInfo<'mcx>>>> {
+    use crate::relnode::{
+        relids_add_member, relids_copy, relids_equal, relids_is_empty, relids_is_subset,
+        relids_overlap, relids_union,
+    };
+    let mcx = run.mcx;
+    debug_assert!(relids_is_subset(&run.root.rel(rel_id).lateral_relids, required_outer));
+    if relids_is_empty(required_outer) {
+        return Ok(None);
+    }
+    debug_assert!(!relids_overlap(&run.root.rel(rel_id).relids, required_outer));
+    for i in 0..run.root.rel(rel_id).ppilist.len() {
+        if relids_equal(&run.root.rel(rel_id).ppilist[i].ppi_req_outer, required_outer) {
+            let ppi = run.root.rel(rel_id).ppilist[i].clone();
+            return Ok(Some(mcx::box_new_in(mcx, ppi)));
+        }
+    }
+    let joinrelids = relids_union(mcx, &run.root.rel(rel_id).relids, required_outer);
+    let joininfo = crate::relnode::pgvec_clone_shallow(mcx, &run.root.rel(rel_id).joininfo);
+    let mut pclauses: PgVec<'mcx, types_pathnodes::RinfoId> = PgVec::new_in(mcx);
+    let rel_relids = relids_copy(mcx, &run.root.rel(rel_id).relids);
+    for &rid in joininfo.iter() {
+        if join_clause_is_movable_into(run, rid, &rel_relids, &joinrelids) {
+            // generate_join_implied_equalities divergence: eclass-lite keeps
+            // join equalities in joininfo, but C's EC leg emits them at a
+            // parameterized scan as outer_em = inner_em; commute so the
+            // scanned rel sits on the right (EXPLAIN parity).
+            pclauses.push(commute_ec_clause_for_scan(run, rid, &rel_relids)?);
+        }
+    }
+    let mut pserials: types_pathnodes::Relids<'mcx> = None;
+    for &rid in pclauses.iter() {
+        pserials = relids_add_member(mcx, &pserials, run.root.rinfo(rid).rinfo_serial as u32);
+    }
+    let rows = crate::costsize::get_parameterized_baserel_size(run, rel_id, &pclauses)?;
+    let ppi = types_pathnodes::ParamPathInfo {
+        ppi_req_outer: relids_copy(mcx, required_outer),
+        ppi_rows: rows,
+        ppi_clauses: pclauses,
+        ppi_serials: pserials,
+    };
+    run.root.rel_mut(rel_id).ppilist.push(ppi.clone());
+    Ok(Some(mcx::box_new_in(mcx, ppi)))
+}
+
+// The EC-orientation shim for get_baserel_parampathinfo (see call site).
+fn commute_ec_clause_for_scan<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rid: types_pathnodes::RinfoId,
+    rel_relids: &types_pathnodes::Relids<'mcx>,
+) -> PgResult<types_pathnodes::RinfoId> {
+    use crate::relnode::{relids_is_empty, relids_is_subset};
+    let mcx = run.mcx;
+    let (clause_id, ok, left_in_rel) = {
+        let ri = run.root.rinfo(rid);
+        (
+            ri.clause,
+            ri.can_join
+                && ri.is_pushed_down
+                && !ri.pseudoconstant
+                && !ri.mergeopfamilies.is_empty(),
+            !relids_is_empty(&ri.left_relids) && relids_is_subset(&ri.left_relids, rel_relids),
+        )
+    };
+    if !ok || !left_in_rel {
+        return Ok(rid);
+    }
+    let clause = *run.root.expr_node(clause_id);
+    let Some(op) = clause.as_op_expr().filter(|o| o.args.len() == 2) else {
+        return Ok(rid);
+    };
+    let comm = lsyscache::get_commutator(op.opno)?;
+    if comm == 0 {
+        return Ok(rid);
+    }
+    let mut args = types_nodes::NodeList::nil();
+    args.lappend(mcx, op.args.nth(1))?;
+    args.lappend(mcx, op.args.nth(0))?;
+    let commuted = types_nodes::Node::mk(
+        mcx,
+        types_nodes::primnodes::OpExpr {
+            opno: comm,
+            opfuncid: lsyscache::get_opcode(comm)?,
+            opresulttype: op.opresulttype,
+            opretset: op.opretset,
+            opcollid: op.opcollid,
+            inputcollid: op.inputcollid,
+            args,
+            location: op.location,
+        },
+    )?;
+    crate::initsplan::make_restrictinfo(
+        run, commuted, true, false, false, false, 0, None, None, None,
+    )
+}
+
+// get_joinrel_parampathinfo (relnode.c): only the unparameterized-join arm is
+// live (parameterized join paths need the movable-clause split).
+pub fn get_joinrel_parampathinfo<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    _rel_id: RelId,
+    required_outer: &types_pathnodes::Relids<'mcx>,
+    restrict_clauses: &mut PgVec<'mcx, types_pathnodes::RinfoId>,
+) -> PgResult<Option<mcx::PgBox<'mcx, types_pathnodes::ParamPathInfo<'mcx>>>> {
+    let _ = restrict_clauses;
+    if crate::relnode::relids_is_empty(required_outer) {
+        return Ok(None);
+    }
+    panic!(
+        "get_joinrel_parampathinfo (relnode.c): parameterized join path; \
+         multi-level lateral/param lane unported"
+    );
+}
+
 // create_seqscan_path (pathnode.c); required_outer is empty on this lane.
 pub fn create_seqscan_path<'mcx>(
     run: &mut PlannerRun<'mcx>,
@@ -551,13 +805,16 @@ pub fn create_seqscan_path<'mcx>(
     Ok(id)
 }
 
-// create_functionscan_path (pathnode.c); pathkeys/required_outer are empty on
-// this lane (ORDINALITY and LATERAL are loud in the parser).
+// create_functionscan_path (pathnode.c); pathkeys empty (ORDINALITY is loud
+// in the parser).
 pub fn create_functionscan_path<'mcx>(
     run: &mut PlannerRun<'mcx>,
     rel_id: RelId,
+    required_outer: &types_pathnodes::Relids<'mcx>,
 ) -> PgResult<PathId> {
+    let param_info = get_baserel_parampathinfo(run, rel_id, required_outer)?;
     let mut path = base_path(run, NodeTag::T_Path, NodeTag::T_FunctionScan, rel_id);
+    path.param_info = param_info;
     path.parallel_aware = false;
     path.parallel_safe = run.root.rel(rel_id).consider_parallel;
     let id = run.root.alloc_path(PathNode::Path(path));
@@ -565,17 +822,35 @@ pub fn create_functionscan_path<'mcx>(
     Ok(id)
 }
 
-// create_valuesscan_path (pathnode.c); pathkeys/required_outer empty on this
-// lane (LATERAL is loud upstream); result is always unordered.
+// create_valuesscan_path (pathnode.c); result is always unordered.
 pub fn create_valuesscan_path<'mcx>(
     run: &mut PlannerRun<'mcx>,
     rel_id: RelId,
+    required_outer: &types_pathnodes::Relids<'mcx>,
 ) -> PgResult<PathId> {
+    let param_info = get_baserel_parampathinfo(run, rel_id, required_outer)?;
     let mut path = base_path(run, NodeTag::T_Path, NodeTag::T_ValuesScan, rel_id);
+    path.param_info = param_info;
     path.parallel_aware = false;
     path.parallel_safe = run.root.rel(rel_id).consider_parallel;
     let id = run.root.alloc_path(PathNode::Path(path));
     crate::costsize::cost_valuesscan(run, id, rel_id)?;
+    Ok(id)
+}
+
+// create_resultscan_path (pathnode.c).
+pub fn create_resultscan_path<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel_id: RelId,
+    required_outer: &types_pathnodes::Relids<'mcx>,
+) -> PgResult<PathId> {
+    let param_info = get_baserel_parampathinfo(run, rel_id, required_outer)?;
+    let mut path = base_path(run, NodeTag::T_Path, NodeTag::T_Result, rel_id);
+    path.param_info = param_info;
+    path.parallel_aware = false;
+    path.parallel_safe = run.root.rel(rel_id).consider_parallel;
+    let id = run.root.alloc_path(PathNode::Path(path));
+    crate::costsize::cost_resultscan(run, id, rel_id)?;
     Ok(id)
 }
 
@@ -589,55 +864,47 @@ pub fn create_ctescan_path<'mcx>(run: &mut PlannerRun<'mcx>, rel_id: RelId) -> P
     Ok(id)
 }
 
-// choose_bitmap_and (indxpath.c), single-candidate + all-clauseless arms.
-pub fn choose_bitmap_and(run: &PlannerRun<'_>, _rel_id: RelId, paths: &[PathId]) -> PathId {
-    debug_assert!(!paths.is_empty());
-    if paths.len() == 1 {
-        return paths[0];
+// create_bitmap_and_path (pathnode.c); required_outer empty on this lane
+// (children are unparameterized, asserted).
+pub fn create_bitmap_and_path<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel_id: RelId,
+    bitmapquals: PgVec<'mcx, PathId>,
+) -> PgResult<PathId> {
+    for &q in bitmapquals.iter() {
+        assert!(
+            run.root.path(q).base().param_info.is_none(),
+            "create_bitmap_and_path (pathnode.c): parameterized subpath; M2 join lane"
+        );
     }
-    // Bounded greedy arm: sort by path_usage_comparator (selectivity, then
-    // cost), take the first; every other candidate whose clause set is a
-    // subset of the winner's is subsumed exactly as in C's inner loop. A
-    // candidate with a clause the winner lacks is the genuine AND lane.
-    let clauseids = |p: types_pathnodes::PathId| -> mcx::PgVec<'_, u32> {
-        let mut ids: mcx::PgVec<'_, u32> = mcx::PgVec::new_in(run.mcx);
-        if let types_pathnodes::PathNode::IndexPath(ip) = run.root.path(p) {
-            for ic in ip.indexclauses.iter() {
-                ids.push(ic.rinfo.expect("IndexClause rinfo").0);
-            }
-        }
-        ids.sort_unstable();
-        ids
-    };
-    let mut best = paths[0];
-    for &p in &paths[1..] {
-        let (ps, pc) = {
-            let types_pathnodes::PathNode::IndexPath(ip) = run.root.path(p) else {
-                panic!("choose_bitmap_and: non-IndexPath candidate; M2 bitmap-combine lane")
-            };
-            (ip.indexselectivity, ip.path.total_cost)
-        };
-        let (bs, bc) = {
-            let types_pathnodes::PathNode::IndexPath(ip) = run.root.path(best) else {
-                unreachable!()
-            };
-            (ip.indexselectivity, ip.path.total_cost)
-        };
-        if ps < bs || (ps == bs && pc < bc) {
-            best = p;
-        }
+    let mut path = base_path(run, NodeTag::T_BitmapAndPath, NodeTag::T_BitmapAnd, rel_id);
+    path.parallel_aware = false;
+    path.parallel_safe = run.root.rel(rel_id).consider_parallel;
+    let node = types_pathnodes::BitmapAndPath { path, bitmapquals, bitmapselectivity: 0.0 };
+    let id = run.root.alloc_path(PathNode::BitmapAndPath(node));
+    crate::costsize::cost_bitmap_and_node(run, id);
+    Ok(id)
+}
+
+// create_bitmap_or_path (pathnode.c); required_outer empty on this lane.
+pub fn create_bitmap_or_path<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel_id: RelId,
+    bitmapquals: PgVec<'mcx, PathId>,
+) -> PgResult<PathId> {
+    for &q in bitmapquals.iter() {
+        assert!(
+            run.root.path(q).base().param_info.is_none(),
+            "create_bitmap_or_path (pathnode.c): parameterized subpath; M2 join lane"
+        );
     }
-    let best_ids = clauseids(best);
-    for &p in paths {
-        if p == best {
-            continue;
-        }
-        let ids = clauseids(p);
-        if !ids.iter().all(|id| best_ids.contains(id)) {
-            panic!("choose_bitmap_and (indxpath.c): AND/OR path reduction; M2 bitmap-combine lane");
-        }
-    }
-    best
+    let mut path = base_path(run, NodeTag::T_BitmapOrPath, NodeTag::T_BitmapOr, rel_id);
+    path.parallel_aware = false;
+    path.parallel_safe = run.root.rel(rel_id).consider_parallel;
+    let node = types_pathnodes::BitmapOrPath { path, bitmapquals, bitmapselectivity: 0.0 };
+    let id = run.root.alloc_path(PathNode::BitmapOrPath(node));
+    crate::costsize::cost_bitmap_or_node(run, id);
+    Ok(id)
 }
 
 // create_bitmap_heap_path (pathnode.c); required_outer/parallel loud upstream.
@@ -1530,7 +1797,6 @@ pub(crate) fn relation_has_unique_index_for<'mcx>(
     if run.root.rel(rel_id).indexlist.is_empty() {
         return Ok(false);
     }
-    let rel_relid = run.root.rel(rel_id).relid;
     let mut restrict_rids: PgVec<'_, types_pathnodes::RinfoId> = PgVec::new_in(run.mcx);
     restrict_rids.extend(restrictlist.iter().copied());
     for i in 0..run.root.rel(rel_id).baserestrictinfo.len() {
@@ -1569,11 +1835,6 @@ pub(crate) fn relation_has_unique_index_for<'mcx>(
         let mut all_matched = true;
         for c in 0..ind.nkeycolumns as usize {
             let mut matched = false;
-            if ind.indexkeys[c] == 0 {
-                // match_index_to_operand: expression columns never match.
-                all_matched = false;
-                break;
-            }
             for &rid in restrict_rids.iter() {
                 let ri = run.root.rinfo(rid);
                 if !ri.mergeopfamilies.iter().any(|&f| f == ind.opfamily[c]) {
@@ -1586,24 +1847,15 @@ pub(crate) fn relation_has_unique_index_for<'mcx>(
                 } else {
                     o.args.nth(0)
                 });
-                if let Some(var) = rexpr.as_var() {
-                    if var.varno as u32 == rel_relid
-                        && var.varattno != 0
-                        && ind.indexkeys[c] == var.varattno as i32
-                    {
-                        matched = true;
-                        break;
-                    }
+                if crate::indxpath::match_index_to_operand(run, rexpr, c, ind) {
+                    matched = true;
+                    break;
                 }
             }
             if !matched {
                 for (j, &expr_id) in exprlist.iter().enumerate() {
                     let expr = strip_relabel(*run.root.expr_node(expr_id));
-                    let Some(var) = expr.as_var() else { continue };
-                    if !(var.varno as u32 == rel_relid
-                        && var.varattno != 0
-                        && ind.indexkeys[c] == var.varattno as i32)
-                    {
+                    if !crate::indxpath::match_index_to_operand(run, expr, c, ind) {
                         continue;
                     }
                     if !lsyscache::amop::op_in_opfamily(oprlist[j], ind.opfamily[c])? {
@@ -1637,17 +1889,19 @@ pub struct SubqueryScanInfo {
     pub parallel_workers: i32,
 }
 
-// create_subqueryscan_path (pathnode.c); required_outer/lateral empty on this
-// lane, so param_info stays None.
+// create_subqueryscan_path (pathnode.c).
 pub fn create_subqueryscan_path<'mcx>(
     run: &mut PlannerRun<'mcx>,
     rel_id: RelId,
     subroot_subpath: PathId,
     trivial_pathtarget: bool,
     pathkeys: PgVec<'mcx, PathKey>,
+    required_outer: &types_pathnodes::Relids<'mcx>,
     sub: &SubqueryScanInfo,
 ) -> PgResult<PathId> {
+    let param_info = get_baserel_parampathinfo(run, rel_id, required_outer)?;
     let mut path = base_path(run, NodeTag::T_SubqueryScanPath, NodeTag::T_SubqueryScan, rel_id);
+    path.param_info = param_info;
     path.parallel_aware = false;
     path.parallel_safe = run.root.rel(rel_id).consider_parallel && sub.parallel_safe;
     path.parallel_workers = sub.parallel_workers;

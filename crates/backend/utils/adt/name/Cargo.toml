@@ -15,6 +15,7 @@ stringinfo = { path = "../../../../_support/types/stringinfo" }
 pqformat = { path = "../../../libpq/pqformat" }
 elog = { path = "../../error/elog" }
 varlena = { path = "../varlena" }
+arrayfuncs = { path = "../arrayfuncs" }
 lsyscache = { path = "../../cache/lsyscache" }
 miscinit = { path = "../../init/miscinit" }
 mbutils_seams = { path = "../../mb/mbutils_seams" }

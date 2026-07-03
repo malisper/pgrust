@@ -27,6 +27,15 @@ pub struct FixedParamState<'p> {
     pub param_types: &'p [Oid],
 }
 
+// C SQLFunctionParseInfo, reduced to the parser-visible fields; empty
+// string = unnamed parameter.
+#[derive(Clone, Copy)]
+pub struct SqlFnParamState<'p> {
+    pub fname: &'p str,
+    pub argtypes: &'p [Oid],
+    pub argnames: &'p [&'p str],
+}
+
 /// C `VarParamState` aliases the caller's mutable `Oid **paramTypes` /
 /// `int *numParams`; the shared `Rc<RefCell<Vec<Oid>>>` carrier reproduces
 /// that back-write (the caller reads resolved types after analysis; the Vec
@@ -56,6 +65,7 @@ pub enum ParseRefHookState<'p> {
     None,
     FixedParams(FixedParamState<'p>),
     VarParams(VarParamState),
+    SqlFnParams(SqlFnParamState<'p>),
 }
 
 impl<'p> ParseRefHookState<'p> {
@@ -72,6 +82,13 @@ impl<'p> ParseRefHookState<'p> {
             _ => None,
         }
     }
+
+    pub fn as_sql_fn_params(&self) -> Option<&SqlFnParamState<'p>> {
+        match self {
+            ParseRefHookState::SqlFnParams(s) => Some(s),
+            _ => None,
+        }
+    }
 }
 
 pub fn setup_parse_fixed_parameters<'p>(
@@ -83,6 +100,13 @@ pub fn setup_parse_fixed_parameters<'p>(
 
 pub fn setup_parse_variable_parameters(pstate: &mut ParseState<'_, '_>, parstate: VarParamState) {
     pstate.p_ref_hook_state = ParseRefHookState::VarParams(parstate);
+}
+
+pub fn setup_parse_sql_fn_parameters<'p>(
+    pstate: &mut ParseState<'p, '_>,
+    parstate: SqlFnParamState<'p>,
+) {
+    pstate.p_ref_hook_state = ParseRefHookState::SqlFnParams(parstate);
 }
 
 #[cold]
@@ -120,6 +144,44 @@ pub fn fixed_paramref_hook<'mcx>(
     }
     let paramtype = parstate.param_types[(paramno - 1) as usize];
     mk_param(mcx, paramno, paramtype, pref.location)
+}
+
+pub fn sql_fn_paramref_hook<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &ParseState<'_, 'mcx>,
+    pref: &ParamRef,
+    encoding: pg_enc,
+) -> PgResult<Node<'mcx>> {
+    let parstate = pstate
+        .p_ref_hook_state
+        .as_sql_fn_params()
+        .expect("sql_fn_paramref_hook: p_ref_hook_state is not SqlFnParams");
+    let paramno = pref.number;
+    if paramno <= 0 || paramno as usize > parstate.argtypes.len() {
+        return Err(no_parameter_err(
+            paramno,
+            parser_errposition(pstate, pref.location, encoding),
+            "sql_fn_paramref_hook",
+        ));
+    }
+    mk_param(mcx, paramno, parstate.argtypes[(paramno - 1) as usize], pref.location)
+}
+
+pub fn sql_fn_resolve_param_name(state: &SqlFnParamState<'_>, name: &str) -> Option<(i32, Oid)> {
+    state
+        .argnames
+        .iter()
+        .position(|n| !n.is_empty() && *n == name)
+        .map(|i| (i as i32 + 1, state.argtypes[i]))
+}
+
+pub fn sql_fn_make_param<'mcx>(
+    mcx: Mcx<'mcx>,
+    paramno: i32,
+    paramtype: Oid,
+    location: i32,
+) -> PgResult<Node<'mcx>> {
+    mk_param(mcx, paramno, paramtype, location)
 }
 
 pub fn variable_paramref_hook<'mcx>(

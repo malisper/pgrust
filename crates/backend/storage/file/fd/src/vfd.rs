@@ -144,6 +144,8 @@ scalar_global! {
         i32, ::types_storage::DATA_DIR_SYNC_METHOD_FSYNC;
     FILE_EXTEND_METHOD, file_extend_method, set_file_extend_method,
         i32, ::types_storage::DEFAULT_FILE_EXTEND_METHOD;
+    // copydir.c global (FILE_COPY_METHOD_COPY boot default).
+    FILE_COPY_METHOD, file_copy_method, set_file_copy_method, i32, 0;
     IO_DIRECT_FLAGS, io_direct_flags, set_io_direct_flags, i32, 0;
     NUM_EXTERNAL_FDS, num_external_fds, set_num_external_fds, i32, 0;
     // file_perm.c globals (unported common unit); fd.c is their only backend

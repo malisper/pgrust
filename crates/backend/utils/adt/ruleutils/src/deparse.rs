@@ -1,0 +1,1093 @@
+//! get_rule_expr slice: Const, Var, OpExpr, BoolExpr, RelabelType,
+//! CoerceViaIO, FuncExpr, NullTest, Aggref, CaseExpr, CoalesceExpr,
+//! MinMaxExpr, ScalarArrayOpExpr, ArrayExpr, SubLink, Param. Every other
+//! node tag is a loud named panic.
+
+use std::rc::Rc;
+
+use datum::Datum;
+use format_type::format_type_with_typemod;
+use mcx::Mcx;
+use types_core::{InvalidOid, Oid, BOOLOID, INT4OID, NUMERICOID, UNKNOWNOID};
+use types_error::PgResult;
+use types_nodes::primnodes::{
+    Aggref, ArrayExpr, BoolExpr, BoolExprType, CaseExpr, CoalesceExpr, CoercionForm, Const,
+    FuncExpr, MinMaxExpr, MinMaxOp, NullTest, NullTestType, OpExpr, Param, ParamKind,
+    ScalarArrayOpExpr, SubLink, SubLinkType, Var, VarReturningType,
+};
+use types_nodes::{Node, NodeList, NodeTag, RTEKind, RangeTblEntry};
+
+use crate::query::{self, DeparseNamespace};
+use crate::{gap, generate_function_name, generate_operator_name, quote_identifier};
+
+pub(crate) const PRETTYINDENT_STD: i32 = 8;
+pub(crate) const PRETTYINDENT_JOIN: i32 = 4;
+pub(crate) const PRETTYINDENT_VAR: i32 = 4;
+pub(crate) const PRETTYINDENT_LIMIT: i32 = 40;
+
+pub(crate) struct DeparseContext<'mcx> {
+    pub mcx: Mcx<'mcx>,
+    pub buf: String,
+    pub namespaces: Vec<Rc<DeparseNamespace<'mcx>>>,
+    pub result_desc: Option<Rc<Vec<String>>>,
+    pub target_list: Option<&'mcx NodeList<'mcx>>,
+    pub varprefix: bool,
+    pub pretty_flags: i32,
+    pub wrap_column: i32,
+    pub indent_level: i32,
+    pub colnames_visible: bool,
+    pub in_group_by: bool,
+    pub var_in_order_by: bool,
+}
+
+impl<'mcx> DeparseContext<'mcx> {
+    pub(crate) fn new(mcx: Mcx<'mcx>, pretty_flags: i32) -> Self {
+        DeparseContext {
+            mcx,
+            buf: String::new(),
+            namespaces: Vec::new(),
+            result_desc: None,
+            target_list: None,
+            varprefix: false,
+            pretty_flags,
+            wrap_column: -1,
+            indent_level: 0,
+            colnames_visible: true,
+            in_group_by: false,
+            var_in_order_by: false,
+        }
+    }
+
+    pub(crate) fn pretty_paren(&self) -> bool {
+        self.pretty_flags & crate::PRETTYFLAG_PAREN != 0
+    }
+
+    pub(crate) fn pretty_indent(&self) -> bool {
+        self.pretty_flags & crate::PRETTYFLAG_INDENT != 0
+    }
+}
+
+pub(crate) fn append_context_keyword(
+    ctx: &mut DeparseContext<'_>,
+    s: &str,
+    indent_before: i32,
+    indent_after: i32,
+    indent_plus: i32,
+) {
+    if ctx.pretty_indent() {
+        ctx.indent_level += indent_before;
+        remove_trailing_spaces(&mut ctx.buf);
+        ctx.buf.push('\n');
+        let amount = if ctx.indent_level < PRETTYINDENT_LIMIT {
+            ctx.indent_level.max(0) + indent_plus
+        } else {
+            let mut a =
+                PRETTYINDENT_LIMIT + (ctx.indent_level - PRETTYINDENT_LIMIT) / (PRETTYINDENT_STD / 2);
+            a %= PRETTYINDENT_LIMIT;
+            a + indent_plus
+        };
+        for _ in 0..amount {
+            ctx.buf.push(' ');
+        }
+        ctx.buf.push_str(s);
+        ctx.indent_level += indent_after;
+        if ctx.indent_level < 0 {
+            ctx.indent_level = 0;
+        }
+    } else {
+        ctx.buf.push_str(s);
+    }
+}
+
+pub(crate) fn remove_trailing_spaces(buf: &mut String) {
+    let trimmed = buf.trim_end_matches(' ').len();
+    buf.truncate(trimmed);
+}
+
+pub fn deparse_expression_pretty<'mcx>(
+    mcx: Mcx<'mcx>,
+    expr: Node<'mcx>,
+    relid: Oid,
+    showimplicit: bool,
+    pretty_flags: i32,
+) -> PgResult<String> {
+    let mut ctx = DeparseContext::new(mcx, pretty_flags);
+    if relid != InvalidOid {
+        let relname = lsyscache::get_rel_name(mcx, relid)?
+            .expect("deparse_context_for: relation exists")
+            .as_str()
+            .to_owned();
+        ctx.namespaces.push(Rc::new(query::deparse_context_for(mcx, &relname, relid)?));
+    }
+    get_rule_expr(expr, &mut ctx, showimplicit)?;
+    Ok(ctx.buf)
+}
+
+pub(crate) fn walk_varnos(node: Node<'_>, f: &mut impl FnMut(i32, u32)) {
+    match node.node_tag() {
+        NodeTag::T_Var => {
+            let v = node.as_var().unwrap();
+            f(v.varno, v.varlevelsup);
+        }
+        NodeTag::T_Const | NodeTag::T_Param | NodeTag::T_CaseTestExpr => {}
+        NodeTag::T_OpExpr => {
+            for a in node.as_op_expr().unwrap().args.iter() {
+                walk_varnos(a, f);
+            }
+        }
+        NodeTag::T_FuncExpr => {
+            for a in node.as_func_expr().unwrap().args.iter() {
+                walk_varnos(a, f);
+            }
+        }
+        NodeTag::T_BoolExpr => {
+            for a in node.as_bool_expr().unwrap().args.iter() {
+                walk_varnos(a, f);
+            }
+        }
+        NodeTag::T_ScalarArrayOpExpr => {
+            for a in node.as_scalar_array_op_expr().unwrap().args.iter() {
+                walk_varnos(a, f);
+            }
+        }
+        NodeTag::T_CoalesceExpr => {
+            for a in node.as_coalesce_expr().unwrap().args.iter() {
+                walk_varnos(a, f);
+            }
+        }
+        NodeTag::T_MinMaxExpr => {
+            for a in node.as_min_max_expr().unwrap().args.iter() {
+                walk_varnos(a, f);
+            }
+        }
+        NodeTag::T_ArrayExpr => {
+            for a in node.as_array_expr().unwrap().elements.iter() {
+                walk_varnos(a, f);
+            }
+        }
+        NodeTag::T_CaseExpr => {
+            let c = node.as_case_expr().unwrap();
+            if let Some(arg) = c.arg {
+                walk_varnos(arg, f);
+            }
+            for w in c.args.iter() {
+                let when = w.as_case_when().expect("CASE args are CaseWhen");
+                if let Some(e) = when.expr {
+                    walk_varnos(e, f);
+                }
+                if let Some(r) = when.result {
+                    walk_varnos(r, f);
+                }
+            }
+            if let Some(d) = c.defresult {
+                walk_varnos(d, f);
+            }
+        }
+        NodeTag::T_RelabelType => walk_varnos(node.as_relabel_type().unwrap().arg, f),
+        NodeTag::T_CoerceViaIO => walk_varnos(node.as_coerce_via_io().unwrap().arg, f),
+        NodeTag::T_NullTest => {
+            if let Some(arg) = node.as_null_test().unwrap().arg {
+                walk_varnos(arg, f);
+            }
+        }
+        NodeTag::T_List => {
+            for a in node.as_list().unwrap().iter() {
+                walk_varnos(a, f);
+            }
+        }
+        other => gap("pull_varnos", &format!("{other:?} walk arm")),
+    }
+}
+
+pub(crate) fn get_rule_expr<'mcx>(
+    node: Node<'mcx>,
+    ctx: &mut DeparseContext<'mcx>,
+    showimplicit: bool,
+) -> PgResult<()> {
+    match node.node_tag() {
+        NodeTag::T_Var => get_variable(node.as_var().unwrap(), 0, false, ctx).map(|_| ()),
+        NodeTag::T_Const => get_const_expr(node.as_const().unwrap(), ctx, 0),
+        NodeTag::T_Param => get_parameter(node.as_param().unwrap(), ctx),
+        NodeTag::T_Aggref => get_agg_expr(node.as_aggref().unwrap(), ctx),
+        NodeTag::T_OpExpr => get_oper_expr(node, node.as_op_expr().unwrap(), ctx),
+        NodeTag::T_FuncExpr => get_func_expr(node, node.as_func_expr().unwrap(), ctx, showimplicit),
+        NodeTag::T_ScalarArrayOpExpr => {
+            get_saop_expr(node, node.as_scalar_array_op_expr().unwrap(), ctx)
+        }
+        NodeTag::T_BoolExpr => get_bool_expr(node, node.as_bool_expr().unwrap(), ctx),
+        NodeTag::T_SubLink => get_sublink_expr(node.as_sub_link().unwrap(), ctx),
+        NodeTag::T_RelabelType => {
+            let relabel = node.as_relabel_type().unwrap();
+            if relabel.relabelformat == CoercionForm::COERCE_IMPLICIT_CAST && !showimplicit {
+                get_rule_expr_paren(relabel.arg, ctx, false, Some(node))
+            } else {
+                get_coercion_expr(relabel.arg, ctx, relabel.resulttype, relabel.resulttypmod, node)
+            }
+        }
+        NodeTag::T_CoerceViaIO => {
+            let ioc = node.as_coerce_via_io().unwrap();
+            if ioc.coerceformat == CoercionForm::COERCE_IMPLICIT_CAST && !showimplicit {
+                get_rule_expr_paren(ioc.arg, ctx, false, Some(node))
+            } else {
+                get_coercion_expr(ioc.arg, ctx, ioc.resulttype, -1, node)
+            }
+        }
+        NodeTag::T_CaseExpr => get_case_expr(node.as_case_expr().unwrap(), ctx),
+        NodeTag::T_CaseTestExpr => {
+            ctx.buf.push_str("CASE_TEST_EXPR");
+            Ok(())
+        }
+        NodeTag::T_ArrayExpr => get_array_expr(node.as_array_expr().unwrap(), ctx),
+        NodeTag::T_CoalesceExpr => get_coalesce_expr(node.as_coalesce_expr().unwrap(), ctx),
+        NodeTag::T_MinMaxExpr => get_minmax_expr(node.as_min_max_expr().unwrap(), ctx),
+        NodeTag::T_NullTest => get_null_test(node, node.as_null_test().unwrap(), ctx),
+        NodeTag::T_List => {
+            let mut first = true;
+            for item in node.as_list().unwrap().iter() {
+                if !first {
+                    ctx.buf.push_str(", ");
+                }
+                first = false;
+                get_rule_expr(item, ctx, showimplicit)?;
+            }
+            Ok(())
+        }
+        other => gap("get_rule_expr", &format!("{other:?} deparse arm")),
+    }
+}
+
+pub(crate) fn get_rule_expr_paren<'mcx>(
+    node: Node<'mcx>,
+    ctx: &mut DeparseContext<'mcx>,
+    showimplicit: bool,
+    parent: Option<Node<'mcx>>,
+) -> PgResult<()> {
+    let need_paren = ctx.pretty_paren() && !is_simple_node(node, parent, ctx.pretty_flags);
+    if need_paren {
+        ctx.buf.push('(');
+    }
+    get_rule_expr(node, ctx, showimplicit)?;
+    if need_paren {
+        ctx.buf.push(')');
+    }
+    Ok(())
+}
+
+fn get_simple_binary_op_name<'a>(mcx: Mcx<'a>, expr: &OpExpr<'_>) -> Option<mcx::PgString<'a>> {
+    if expr.args.len() != 2 {
+        return None;
+    }
+    lsyscache::get_opname(mcx, expr.opno).ok().flatten()
+}
+
+fn is_simple_node(node: Node<'_>, parent: Option<Node<'_>>, pretty_flags: i32) -> bool {
+    let Some(parent) = parent else {
+        return false;
+    };
+    match node.node_tag() {
+        NodeTag::T_Var
+        | NodeTag::T_Const
+        | NodeTag::T_Param
+        | NodeTag::T_CoerceToDomainValue
+        | NodeTag::T_SetToDefault
+        | NodeTag::T_CurrentOfExpr => true,
+
+        NodeTag::T_SubscriptingRef
+        | NodeTag::T_ArrayExpr
+        | NodeTag::T_RowExpr
+        | NodeTag::T_CoalesceExpr
+        | NodeTag::T_MinMaxExpr
+        | NodeTag::T_SQLValueFunction
+        | NodeTag::T_XmlExpr
+        | NodeTag::T_NextValueExpr
+        | NodeTag::T_NullIfExpr
+        | NodeTag::T_Aggref
+        | NodeTag::T_GroupingFunc
+        | NodeTag::T_WindowFunc
+        | NodeTag::T_MergeSupportFunc
+        | NodeTag::T_FuncExpr => true,
+
+        NodeTag::T_CaseExpr => true,
+
+        NodeTag::T_RelabelType => {
+            is_simple_node(node.as_relabel_type().unwrap().arg, Some(node), pretty_flags)
+        }
+        NodeTag::T_CoerceViaIO => {
+            is_simple_node(node.as_coerce_via_io().unwrap().arg, Some(node), pretty_flags)
+        }
+
+        NodeTag::T_OpExpr => {
+            if pretty_flags & crate::PRETTYFLAG_PAREN != 0
+                && parent.node_tag() == NodeTag::T_OpExpr
+            {
+                let this = node.as_op_expr().unwrap();
+                // Only the scratch names matter; a throwaway context is fine
+                // in this cold path.
+                let scratch = mcx::MemoryContext::new("isSimpleNode ops");
+                let mcx = scratch.mcx();
+                let Some(op) = get_simple_binary_op_name(mcx, this) else {
+                    return false;
+                };
+                let c = op.as_bytes()[0];
+                let is_lopriop = matches!(c, b'+' | b'-');
+                let is_hipriop = matches!(c, b'*' | b'/' | b'%');
+                if !(is_lopriop || is_hipriop) {
+                    return false;
+                }
+                let parent_op = parent.as_op_expr().unwrap();
+                let Some(pop) = get_simple_binary_op_name(mcx, parent_op) else {
+                    return false;
+                };
+                let pc = pop.as_bytes()[0];
+                let is_lopriparent = matches!(pc, b'+' | b'-');
+                let is_hipriparent = matches!(pc, b'*' | b'/' | b'%');
+                if !(is_lopriparent || is_hipriparent) {
+                    return false;
+                }
+                if is_hipriop && is_lopriparent {
+                    return true;
+                }
+                if is_lopriop && is_hipriparent {
+                    return false;
+                }
+                return core::ptr::eq(node.as_op_expr().unwrap(), {
+                    let first = parent_op.args.nth(0);
+                    match first.as_op_expr() {
+                        Some(f) => f,
+                        None => return false,
+                    }
+                });
+            }
+            simple_under_parent(parent)
+        }
+
+        NodeTag::T_SubLink
+        | NodeTag::T_NullTest
+        | NodeTag::T_BooleanTest
+        | NodeTag::T_DistinctExpr
+        | NodeTag::T_JsonIsPredicate => simple_under_parent(parent),
+
+        NodeTag::T_BoolExpr => match parent.node_tag() {
+            NodeTag::T_BoolExpr => {
+                if pretty_flags & crate::PRETTYFLAG_PAREN != 0 {
+                    let ty = node.as_bool_expr().unwrap().boolop;
+                    let pty = parent.as_bool_expr().unwrap().boolop;
+                    match ty {
+                        BoolExprType::NOT_EXPR | BoolExprType::AND_EXPR => {
+                            matches!(pty, BoolExprType::AND_EXPR | BoolExprType::OR_EXPR)
+                        }
+                        BoolExprType::OR_EXPR => pty == BoolExprType::OR_EXPR,
+                    }
+                } else {
+                    false
+                }
+            }
+            NodeTag::T_FuncExpr => {
+                let ff = parent.as_func_expr().unwrap().funcformat;
+                !matches!(
+                    ff,
+                    CoercionForm::COERCE_EXPLICIT_CAST
+                        | CoercionForm::COERCE_IMPLICIT_CAST
+                        | CoercionForm::COERCE_SQL_SYNTAX
+                )
+            }
+            NodeTag::T_SubscriptingRef
+            | NodeTag::T_ArrayExpr
+            | NodeTag::T_RowExpr
+            | NodeTag::T_CoalesceExpr
+            | NodeTag::T_MinMaxExpr
+            | NodeTag::T_XmlExpr
+            | NodeTag::T_NullIfExpr
+            | NodeTag::T_Aggref
+            | NodeTag::T_GroupingFunc
+            | NodeTag::T_WindowFunc
+            | NodeTag::T_CaseExpr
+            | NodeTag::T_JsonExpr => true,
+            _ => false,
+        },
+
+        _ => false,
+    }
+}
+
+// The shared parent switch for T_OpExpr-fallthrough / T_NullTest / T_SubLink.
+fn simple_under_parent(parent: Node<'_>) -> bool {
+    match parent.node_tag() {
+        NodeTag::T_FuncExpr => {
+            let ff = parent.as_func_expr().unwrap().funcformat;
+            !matches!(
+                ff,
+                CoercionForm::COERCE_EXPLICIT_CAST
+                    | CoercionForm::COERCE_IMPLICIT_CAST
+                    | CoercionForm::COERCE_SQL_SYNTAX
+            )
+        }
+        NodeTag::T_BoolExpr
+        | NodeTag::T_SubscriptingRef
+        | NodeTag::T_ArrayExpr
+        | NodeTag::T_RowExpr
+        | NodeTag::T_CoalesceExpr
+        | NodeTag::T_MinMaxExpr
+        | NodeTag::T_XmlExpr
+        | NodeTag::T_NullIfExpr
+        | NodeTag::T_Aggref
+        | NodeTag::T_GroupingFunc
+        | NodeTag::T_WindowFunc
+        | NodeTag::T_CaseExpr => true,
+        _ => false,
+    }
+}
+
+// get_variable (ruleutils.c): returns the attname, or None for a whole-row
+// Var (used by get_target_list for the implicit AS label).
+pub(crate) fn get_variable<'mcx>(
+    var: &Var<'mcx>,
+    levelsup: u32,
+    istoplevel: bool,
+    ctx: &mut DeparseContext<'mcx>,
+) -> PgResult<Option<String>> {
+    let netlevelsup = (var.varlevelsup + levelsup) as usize;
+    if netlevelsup >= ctx.namespaces.len() {
+        panic!("bogus varlevelsup: {} offset {levelsup}", var.varlevelsup);
+    }
+    let dpns = Rc::clone(&ctx.namespaces[netlevelsup]);
+
+    if var.varreturningtype != VarReturningType::VAR_RETURNING_DEFAULT {
+        gap("get_variable", "OLD/NEW RETURNING variable");
+    }
+
+    let (varno, varattno) = if var.varnosyn > 0 {
+        (var.varnosyn as usize, var.varattnosyn)
+    } else {
+        (var.varno as usize, var.varattno)
+    };
+
+    if varno < 1 || varno > dpns.rtable.len() {
+        gap("get_variable", "special varno (plan-tree deparse)");
+    }
+    let rte: &RangeTblEntry<'_> = dpns.rtable[varno - 1];
+    let mut refname = dpns.rtable_names[varno - 1].clone();
+    let colinfo = &dpns.rtable_columns[varno - 1];
+    let attnum = varattno;
+
+    if rte.rtekind == RTEKind::RTE_JOIN && rte.alias.is_none() {
+        if rte.joinaliasvars.is_nil() {
+            panic!("cannot decompile join alias var in plan tree");
+        }
+        if attnum > 0 {
+            let aliasvar = rte.joinaliasvars.nth(attnum as usize - 1);
+            if let Some(av) = aliasvar.as_var() {
+                return get_variable(av, var.varlevelsup + levelsup, istoplevel, ctx);
+            }
+        }
+        refname = None;
+    }
+
+    let attname: Option<String> = if attnum == 0 {
+        None
+    } else if attnum > 0 {
+        if attnum as usize > colinfo.colnames.len() {
+            panic!("invalid attnum {attnum} for deparse column set");
+        }
+        Some(
+            colinfo.colnames[attnum as usize - 1]
+                .clone()
+                .unwrap_or_else(|| "?dropped?column?".to_string()),
+        )
+    } else {
+        gap("get_variable", "system column deparse");
+    };
+
+    let mut need_prefix = ctx.varprefix || attname.is_none();
+
+    if ctx.var_in_order_by && !ctx.in_group_by && !need_prefix {
+        if let (Some(tlist), Some(att)) = (ctx.target_list, attname.as_deref()) {
+            let mut colno = 0usize;
+            for tle_node in tlist.iter() {
+                let tle = tle_node.as_target_entry().expect("tlist entry");
+                if tle.resjunk {
+                    continue;
+                }
+                colno += 1;
+                let colname: Option<&str> = match &ctx.result_desc {
+                    Some(rd) if colno <= rd.len() => Some(rd[colno - 1].as_str()),
+                    _ => tle.resname,
+                };
+                if let Some(cn) = colname {
+                    if cn == att && !same_var(tle.expr, var) {
+                        need_prefix = true;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    if let (Some(r), true) = (refname.as_deref(), need_prefix) {
+        ctx.buf.push_str(&quote_identifier(r));
+        ctx.buf.push('.');
+    }
+    match &attname {
+        Some(a) => ctx.buf.push_str(&quote_identifier(a)),
+        None => {
+            ctx.buf.push('*');
+            if istoplevel {
+                ctx.buf.push_str("::");
+                ctx.buf.push_str(&format_type_with_typemod(var.vartype, var.vartypmod)?);
+            }
+        }
+    }
+    Ok(attname)
+}
+
+// equal(var, tle->expr) reduced to the Var-vs-Var comparison this check needs.
+fn same_var(expr: Node<'_>, var: &Var<'_>) -> bool {
+    match expr.as_var() {
+        Some(v) => {
+            v.varno == var.varno
+                && v.varattno == var.varattno
+                && v.varlevelsup == var.varlevelsup
+                && v.vartype == var.vartype
+        }
+        None => false,
+    }
+}
+
+fn get_parameter(param: &Param, ctx: &mut DeparseContext<'_>) -> PgResult<()> {
+    match param.paramkind {
+        ParamKind::PARAM_EXTERN => {
+            ctx.buf.push_str(&format!("${}", param.paramid));
+            Ok(())
+        }
+        other => gap("get_parameter", &format!("{other:?} deparse")),
+    }
+}
+
+fn oid_output_function_call(mcx: Mcx<'_>, typoutput: Oid, value: Datum) -> PgResult<String> {
+    let mut finfo = fmgr_seams::fmgr_info::call(typoutput)?;
+    let d = types_fmgr::function_call1_coll_in(&mut finfo, InvalidOid, mcx, value)?;
+    // SAFETY: out functions return a NUL-terminated cstring datum; copied out
+    // before finfo (and its scratch) dies.
+    let s = unsafe { core::ffi::CStr::from_ptr(d.as_usize() as *const core::ffi::c_char) };
+    Ok(s.to_str().expect("non-UTF-8 output function result").to_owned())
+}
+
+pub(crate) fn get_const_expr(
+    c: &Const,
+    ctx: &mut DeparseContext<'_>,
+    showtype: i32,
+) -> PgResult<()> {
+    if c.constisnull {
+        ctx.buf.push_str("NULL");
+        if showtype >= 0 {
+            ctx.buf.push_str("::");
+            ctx.buf.push_str(&format_type_with_typemod(c.consttype, c.consttypmod)?);
+            get_const_collation(c, ctx)?;
+        }
+        return Ok(());
+    }
+
+    let (typoutput, _typisvarlena) = lsyscache::getTypeOutputInfo(c.consttype)?;
+    let extval = oid_output_function_call(ctx.mcx, typoutput, c.constvalue)?;
+
+    let mut needlabel = false;
+    match c.consttype {
+        INT4OID => {
+            if !extval.starts_with('-') {
+                ctx.buf.push_str(&extval);
+            } else {
+                ctx.buf.push_str(&format!("'{extval}'"));
+                needlabel = true;
+            }
+        }
+        NUMERICOID => {
+            if extval.as_bytes().first().is_some_and(u8::is_ascii_digit)
+                && extval.contains(['e', 'E', '.'])
+            {
+                ctx.buf.push_str(&extval);
+            } else {
+                ctx.buf.push_str(&format!("'{extval}'"));
+                needlabel = true;
+            }
+        }
+        BOOLOID => ctx.buf.push_str(if extval == "t" { "true" } else { "false" }),
+        _ => simple_quote_literal(&mut ctx.buf, &extval),
+    }
+
+    if showtype < 0 {
+        return Ok(());
+    }
+
+    match c.consttype {
+        BOOLOID | UNKNOWNOID => needlabel = false,
+        INT4OID => {}
+        NUMERICOID => needlabel |= c.consttypmod >= 0,
+        _ => needlabel = true,
+    }
+    if needlabel || showtype > 0 {
+        ctx.buf.push_str("::");
+        ctx.buf.push_str(&format_type_with_typemod(c.consttype, c.consttypmod)?);
+    }
+    get_const_collation(c, ctx)
+}
+
+fn get_const_collation(c: &Const, _ctx: &mut DeparseContext<'_>) -> PgResult<()> {
+    if c.constcollid != InvalidOid && c.constcollid != lsyscache::get_typcollation(c.consttype)? {
+        gap("get_const_collation", "generate_collation_name (COLLATE clause)");
+    }
+    Ok(())
+}
+
+pub(crate) fn simple_quote_literal(buf: &mut String, val: &str) {
+    // standard_conforming_strings=on shape: only ' doubles, never E''.
+    buf.push('\'');
+    for ch in val.chars() {
+        if ch == '\'' {
+            buf.push(ch);
+        }
+        buf.push(ch);
+    }
+    buf.push('\'');
+}
+
+fn get_oper_expr<'mcx>(node: Node<'mcx>, expr: &OpExpr<'mcx>, ctx: &mut DeparseContext<'mcx>) -> PgResult<()> {
+    if !ctx.pretty_paren() {
+        ctx.buf.push('(');
+    }
+    if expr.args.len() == 2 {
+        let arg1 = expr.args.nth(0);
+        let arg2 = expr.args.nth(1);
+        get_rule_expr_paren(arg1, ctx, true, Some(node))?;
+        let opname = generate_operator_name(
+            ctx.mcx,
+            expr.opno,
+            parse_expr::expr_type(arg1),
+            parse_expr::expr_type(arg2),
+        )?;
+        ctx.buf.push_str(&format!(" {opname} "));
+        get_rule_expr_paren(arg2, ctx, true, Some(node))?;
+    } else {
+        let arg = expr.args.nth(0);
+        let opname =
+            generate_operator_name(ctx.mcx, expr.opno, InvalidOid, parse_expr::expr_type(arg))?;
+        ctx.buf.push_str(&format!("{opname} "));
+        get_rule_expr_paren(arg, ctx, true, Some(node))?;
+    }
+    if !ctx.pretty_paren() {
+        ctx.buf.push(')');
+    }
+    Ok(())
+}
+
+// exprIsLengthCoercion (nodeFuncs.c) reduced to the FuncExpr shape.
+fn func_expr_length_coercion_typmod(expr: &FuncExpr<'_>) -> i32 {
+    if expr.args.len() != 2 && expr.args.len() != 3 {
+        return -1;
+    }
+    let second = expr.args.nth(1);
+    match second.as_const() {
+        Some(c) if c.consttype == INT4OID && !c.constisnull => c.constvalue.as_i32(),
+        _ => -1,
+    }
+}
+
+fn get_func_expr<'mcx>(
+    node: Node<'mcx>,
+    expr: &FuncExpr<'mcx>,
+    ctx: &mut DeparseContext<'mcx>,
+    showimplicit: bool,
+) -> PgResult<()> {
+    if expr.funcformat == CoercionForm::COERCE_IMPLICIT_CAST && !showimplicit {
+        return get_rule_expr_paren(expr.args.nth(0), ctx, false, Some(node));
+    }
+    if expr.funcformat == CoercionForm::COERCE_EXPLICIT_CAST
+        || expr.funcformat == CoercionForm::COERCE_IMPLICIT_CAST
+    {
+        let arg = expr.args.nth(0);
+        let coerced_typmod = func_expr_length_coercion_typmod(expr);
+        return get_coercion_expr(arg, ctx, expr.funcresulttype, coerced_typmod, node);
+    }
+    if expr.funcformat == CoercionForm::COERCE_SQL_SYNTAX {
+        gap("get_func_expr", "COERCE_SQL_SYNTAX (get_func_sql_syntax)");
+    }
+
+    let mut argtypes = Vec::with_capacity(expr.args.len());
+    for arg in expr.args.iter() {
+        if arg.node_tag() == NodeTag::T_NamedArgExpr {
+            gap("get_func_expr", "NamedArgExpr arguments");
+        }
+        argtypes.push(parse_expr::expr_type(arg));
+    }
+    let funcname = generate_function_name(ctx.mcx, expr.funcid, &argtypes, expr.funcvariadic)?;
+    ctx.buf.push_str(&funcname);
+    ctx.buf.push('(');
+    for (i, arg) in expr.args.iter().enumerate() {
+        if i > 0 {
+            ctx.buf.push_str(", ");
+        }
+        get_rule_expr(arg, ctx, true)?;
+    }
+    ctx.buf.push(')');
+    Ok(())
+}
+
+fn get_agg_expr<'mcx>(aggref: &'mcx Aggref<'mcx>, ctx: &mut DeparseContext<'mcx>) -> PgResult<()> {
+    if aggref.aggsplit != types_nodes::primnodes::AGGSPLIT_SIMPLE {
+        gap("get_agg_expr", "partial/combining aggregate deparse");
+    }
+    if aggref.aggkind != types_nodes::primnodes::AGGKIND_NORMAL {
+        gap("get_agg_expr", "ordered-set/hypothetical aggregate deparse");
+    }
+    let argtypes: Vec<Oid> = aggref.aggargtypes.iter().collect();
+    let funcname = generate_function_name(ctx.mcx, aggref.aggfnoid, &argtypes, aggref.aggvariadic)?;
+    ctx.buf.push_str(&funcname);
+    ctx.buf.push('(');
+    if !aggref.aggdistinct.is_nil() {
+        ctx.buf.push_str("DISTINCT ");
+    }
+    if aggref.aggstar {
+        ctx.buf.push('*');
+    } else {
+        let mut i = 0;
+        for tle_node in aggref.args.iter() {
+            let tle = tle_node.as_target_entry().expect("Aggref args are TargetEntries");
+            if tle.resjunk {
+                continue;
+            }
+            if i > 0 {
+                ctx.buf.push_str(", ");
+            }
+            i += 1;
+            get_rule_expr(tle.expr, ctx, true)?;
+        }
+    }
+    if !aggref.aggorder.is_nil() {
+        ctx.buf.push_str(" ORDER BY ");
+        query::get_rule_orderby(&aggref.aggorder, &aggref.args, false, ctx)?;
+    }
+    if let Some(filter) = aggref.aggfilter {
+        ctx.buf.push_str(") FILTER (WHERE ");
+        get_rule_expr(filter, ctx, false)?;
+    }
+    ctx.buf.push(')');
+    Ok(())
+}
+
+fn get_case_expr<'mcx>(caseexpr: &CaseExpr<'mcx>, ctx: &mut DeparseContext<'mcx>) -> PgResult<()> {
+    append_context_keyword(ctx, "CASE", 0, PRETTYINDENT_VAR, 0);
+    if let Some(arg) = caseexpr.arg {
+        ctx.buf.push(' ');
+        get_rule_expr(arg, ctx, true)?;
+    }
+    for when_node in caseexpr.args.iter() {
+        let when = when_node.as_case_when().expect("CASE args are CaseWhen");
+        let mut w = when.expr.expect("CaseWhen has a condition");
+        if caseexpr.arg.is_some() {
+            if let Some(op) = w.as_op_expr() {
+                if op.args.len() == 2
+                    && strip_implicit_coercions(op.args.nth(0)).node_tag()
+                        == NodeTag::T_CaseTestExpr
+                {
+                    w = op.args.nth(1);
+                }
+            }
+        }
+        if !ctx.pretty_indent() {
+            ctx.buf.push(' ');
+        }
+        append_context_keyword(ctx, "WHEN ", 0, 0, 0);
+        get_rule_expr(w, ctx, false)?;
+        ctx.buf.push_str(" THEN ");
+        get_rule_expr(when.result.expect("CaseWhen has a result"), ctx, true)?;
+    }
+    if !ctx.pretty_indent() {
+        ctx.buf.push(' ');
+    }
+    append_context_keyword(ctx, "ELSE ", 0, 0, 0);
+    get_rule_expr(caseexpr.defresult.expect("transformed CASE has a defresult"), ctx, true)?;
+    if !ctx.pretty_indent() {
+        ctx.buf.push(' ');
+    }
+    append_context_keyword(ctx, "END", -PRETTYINDENT_VAR, 0, 0);
+    Ok(())
+}
+
+fn strip_implicit_coercions(node: Node<'_>) -> Node<'_> {
+    match node.node_tag() {
+        NodeTag::T_FuncExpr => {
+            let f = node.as_func_expr().unwrap();
+            if f.funcformat == CoercionForm::COERCE_IMPLICIT_CAST {
+                return strip_implicit_coercions(f.args.nth(0));
+            }
+            node
+        }
+        NodeTag::T_RelabelType => {
+            let r = node.as_relabel_type().unwrap();
+            if r.relabelformat == CoercionForm::COERCE_IMPLICIT_CAST {
+                return strip_implicit_coercions(r.arg);
+            }
+            node
+        }
+        NodeTag::T_CoerceViaIO => {
+            let c = node.as_coerce_via_io().unwrap();
+            if c.coerceformat == CoercionForm::COERCE_IMPLICIT_CAST {
+                return strip_implicit_coercions(c.arg);
+            }
+            node
+        }
+        _ => node,
+    }
+}
+
+fn get_array_expr<'mcx>(arrayexpr: &ArrayExpr<'mcx>, ctx: &mut DeparseContext<'mcx>) -> PgResult<()> {
+    if arrayexpr.multidims {
+        gap("get_rule_expr", "multidimensional ARRAY[] deparse");
+    }
+    ctx.buf.push_str("ARRAY[");
+    let mut first = true;
+    for e in arrayexpr.elements.iter() {
+        if !first {
+            ctx.buf.push_str(", ");
+        }
+        first = false;
+        get_rule_expr(e, ctx, true)?;
+    }
+    ctx.buf.push(']');
+    if arrayexpr.elements.is_nil() {
+        ctx.buf.push_str("::");
+        ctx.buf.push_str(&format_type_with_typemod(arrayexpr.array_typeid, -1)?);
+    }
+    Ok(())
+}
+
+fn get_coalesce_expr<'mcx>(c: &CoalesceExpr<'mcx>, ctx: &mut DeparseContext<'mcx>) -> PgResult<()> {
+    ctx.buf.push_str("COALESCE(");
+    let mut first = true;
+    for a in c.args.iter() {
+        if !first {
+            ctx.buf.push_str(", ");
+        }
+        first = false;
+        get_rule_expr(a, ctx, true)?;
+    }
+    ctx.buf.push(')');
+    Ok(())
+}
+
+fn get_minmax_expr<'mcx>(m: &MinMaxExpr<'mcx>, ctx: &mut DeparseContext<'mcx>) -> PgResult<()> {
+    ctx.buf.push_str(match m.op {
+        MinMaxOp::IS_GREATEST => "GREATEST(",
+        MinMaxOp::IS_LEAST => "LEAST(",
+    });
+    let mut first = true;
+    for a in m.args.iter() {
+        if !first {
+            ctx.buf.push_str(", ");
+        }
+        first = false;
+        get_rule_expr(a, ctx, true)?;
+    }
+    ctx.buf.push(')');
+    Ok(())
+}
+
+fn get_saop_expr<'mcx>(
+    node: Node<'mcx>,
+    expr: &ScalarArrayOpExpr<'mcx>,
+    ctx: &mut DeparseContext<'mcx>,
+) -> PgResult<()> {
+    let arg1 = expr.args.nth(0);
+    let arg2 = expr.args.nth(1);
+    if !ctx.pretty_paren() {
+        ctx.buf.push('(');
+    }
+    get_rule_expr_paren(arg1, ctx, true, Some(node))?;
+    let opname = generate_operator_name(
+        ctx.mcx,
+        expr.opno,
+        parse_expr::expr_type(arg1),
+        lsyscache::get_base_element_type(parse_expr::expr_type(arg2))?,
+    )?;
+    ctx.buf.push_str(&format!(" {opname} {} (", if expr.useOr { "ANY" } else { "ALL" }));
+    get_rule_expr_paren(arg2, ctx, true, Some(node))?;
+    if arg2.node_tag() == NodeTag::T_SubLink
+        && arg2.as_sub_link().unwrap().subLinkType == SubLinkType::EXPR_SUBLINK
+    {
+        ctx.buf.push_str("::");
+        ctx.buf.push_str(&format_type_with_typemod(
+            parse_expr::expr_type(arg2),
+            parse_expr::expr_typmod(arg2),
+        )?);
+    }
+    ctx.buf.push(')');
+    if !ctx.pretty_paren() {
+        ctx.buf.push(')');
+    }
+    Ok(())
+}
+
+fn get_sublink_expr<'mcx>(sublink: &SubLink<'mcx>, ctx: &mut DeparseContext<'mcx>) -> PgResult<()> {
+    let query = sublink
+        .subselect
+        .as_query()
+        .unwrap_or_else(|| gap("get_sublink_expr", "untransformed subselect"));
+
+    if sublink.subLinkType == SubLinkType::ARRAY_SUBLINK {
+        ctx.buf.push_str("ARRAY(");
+    } else {
+        ctx.buf.push('(');
+    }
+
+    let mut opname: Option<String> = None;
+    if let Some(testexpr) = sublink.testexpr {
+        match testexpr.node_tag() {
+            NodeTag::T_OpExpr => {
+                let opexpr = testexpr.as_op_expr().unwrap();
+                get_rule_expr(opexpr.args.nth(0), ctx, true)?;
+                opname = Some(generate_operator_name(
+                    ctx.mcx,
+                    opexpr.opno,
+                    parse_expr::expr_type(opexpr.args.nth(0)),
+                    parse_expr::expr_type(opexpr.args.nth(1)),
+                )?);
+            }
+            NodeTag::T_BoolExpr => {
+                ctx.buf.push('(');
+                let mut first = true;
+                for l in testexpr.as_bool_expr().unwrap().args.iter() {
+                    let opexpr =
+                        l.as_op_expr().unwrap_or_else(|| gap("get_sublink_expr", "row testexpr"));
+                    if !first {
+                        ctx.buf.push_str(", ");
+                    }
+                    first = false;
+                    get_rule_expr(opexpr.args.nth(0), ctx, true)?;
+                    if opname.is_none() {
+                        opname = Some(generate_operator_name(
+                            ctx.mcx,
+                            opexpr.opno,
+                            parse_expr::expr_type(opexpr.args.nth(0)),
+                            parse_expr::expr_type(opexpr.args.nth(1)),
+                        )?);
+                    }
+                }
+                ctx.buf.push(')');
+            }
+            other => gap("get_sublink_expr", &format!("{other:?} testexpr")),
+        }
+    }
+
+    let mut need_paren = true;
+    match sublink.subLinkType {
+        SubLinkType::EXISTS_SUBLINK => ctx.buf.push_str("EXISTS "),
+        SubLinkType::ANY_SUBLINK => {
+            let op = opname.as_deref().expect("ANY sublink has a testexpr operator");
+            if op == "=" {
+                ctx.buf.push_str(" IN ");
+            } else {
+                ctx.buf.push_str(&format!(" {op} ANY "));
+            }
+        }
+        SubLinkType::ALL_SUBLINK => {
+            let op = opname.as_deref().expect("ALL sublink has a testexpr operator");
+            ctx.buf.push_str(&format!(" {op} ALL "));
+        }
+        SubLinkType::EXPR_SUBLINK | SubLinkType::ARRAY_SUBLINK => need_paren = false,
+        other => gap("get_sublink_expr", &format!("{other:?} deparse")),
+    }
+
+    if need_paren {
+        ctx.buf.push('(');
+    }
+    query::get_query_def(query, ctx, None, false)?;
+    if need_paren {
+        ctx.buf.push_str("))");
+    } else {
+        ctx.buf.push(')');
+    }
+    Ok(())
+}
+
+pub(crate) fn get_coercion_expr<'mcx>(
+    arg: Node<'mcx>,
+    ctx: &mut DeparseContext<'mcx>,
+    resulttype: Oid,
+    resulttypmod: i32,
+    parent: Node<'mcx>,
+) -> PgResult<()> {
+    match arg.as_const() {
+        Some(c) if c.consttype == resulttype && c.consttypmod == -1 => {
+            get_const_expr(c, ctx, -1)?;
+        }
+        _ => {
+            if !ctx.pretty_paren() {
+                ctx.buf.push('(');
+            }
+            get_rule_expr_paren(arg, ctx, false, Some(parent))?;
+            if !ctx.pretty_paren() {
+                ctx.buf.push(')');
+            }
+        }
+    }
+    ctx.buf.push_str("::");
+    ctx.buf.push_str(&format_type_with_typemod(resulttype, resulttypmod)?);
+    Ok(())
+}
+
+fn get_bool_expr<'mcx>(
+    node: Node<'mcx>,
+    expr: &BoolExpr<'mcx>,
+    ctx: &mut DeparseContext<'mcx>,
+) -> PgResult<()> {
+    match expr.boolop {
+        BoolExprType::AND_EXPR | BoolExprType::OR_EXPR => {
+            let sep = if expr.boolop == BoolExprType::AND_EXPR { " AND " } else { " OR " };
+            if !ctx.pretty_paren() {
+                ctx.buf.push('(');
+            }
+            for (i, arg) in expr.args.iter().enumerate() {
+                if i > 0 {
+                    ctx.buf.push_str(sep);
+                }
+                get_rule_expr_paren(arg, ctx, false, Some(node))?;
+            }
+            if !ctx.pretty_paren() {
+                ctx.buf.push(')');
+            }
+        }
+        BoolExprType::NOT_EXPR => {
+            if !ctx.pretty_paren() {
+                ctx.buf.push('(');
+            }
+            ctx.buf.push_str("NOT ");
+            get_rule_expr_paren(expr.args.nth(0), ctx, false, Some(node))?;
+            if !ctx.pretty_paren() {
+                ctx.buf.push(')');
+            }
+        }
+    }
+    Ok(())
+}
+
+fn get_null_test<'mcx>(
+    node: Node<'mcx>,
+    ntest: &NullTest<'mcx>,
+    ctx: &mut DeparseContext<'mcx>,
+) -> PgResult<()> {
+    let arg = ntest.arg.expect("NullTest has an arg");
+    if !ctx.pretty_paren() {
+        ctx.buf.push('(');
+    }
+    get_rule_expr_paren(arg, ctx, true, Some(node))?;
+    let scalar = ntest.argisrow || !lsyscache::type_is_rowtype(parse_expr::expr_type(arg))?;
+    ctx.buf.push_str(match (scalar, ntest.nulltesttype) {
+        (true, NullTestType::IS_NULL) => " IS NULL",
+        (true, NullTestType::IS_NOT_NULL) => " IS NOT NULL",
+        (false, NullTestType::IS_NULL) => " IS NOT DISTINCT FROM NULL",
+        (false, NullTestType::IS_NOT_NULL) => " IS DISTINCT FROM NULL",
+    });
+    if !ctx.pretty_paren() {
+        ctx.buf.push(')');
+    }
+    Ok(())
+}

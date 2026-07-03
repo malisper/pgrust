@@ -404,12 +404,36 @@ pub struct RelabelType<'mcx> {
     pub location: ParseLoc,
 }
 
+#[derive(Default)]
+pub struct NextValueExpr {
+    pub seqid: Oid,
+    pub typeId: Oid,
+}
+
 // C `Expr *arg` is never NULL in a live CoerceViaIO; modeled non-optional.
 pub struct CoerceViaIO<'mcx> {
     pub arg: Node<'mcx>,
     pub resulttype: Oid,
     pub resultcollid: Oid,
     pub coerceformat: CoercionForm,
+    pub location: ParseLoc,
+}
+
+// C `Expr *arg` is never NULL in a live CoerceToDomain; modeled non-optional.
+pub struct CoerceToDomain<'mcx> {
+    pub arg: Node<'mcx>,
+    pub resulttype: Oid,
+    pub resulttypmod: i32,
+    pub resultcollid: Oid,
+    pub coercionformat: CoercionForm,
+    pub location: ParseLoc,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CoerceToDomainValue {
+    pub typeId: Oid,
+    pub typeMod: i32,
+    pub collation: Oid,
     pub location: ParseLoc,
 }
 
@@ -442,6 +466,38 @@ pub struct NullTest<'mcx> {
     pub arg: Option<Node<'mcx>>,
     pub nulltesttype: NullTestType,
     pub argisrow: bool,
+    pub location: ParseLoc,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum BoolTestType {
+    #[default]
+    IS_TRUE = 0,
+    IS_NOT_TRUE = 1,
+    IS_FALSE = 2,
+    IS_NOT_FALSE = 3,
+    IS_UNKNOWN = 4,
+    IS_NOT_UNKNOWN = 5,
+}
+
+#[derive(Default)]
+pub struct BooleanTest<'mcx> {
+    pub arg: Option<Node<'mcx>>,
+    pub booltesttype: BoolTestType,
+    pub location: ParseLoc,
+}
+
+// C `typedef OpExpr DistinctExpr` (primnodes.h); the tag is the only difference.
+#[derive(Default)]
+pub struct DistinctExpr<'mcx> {
+    pub opno: Oid,
+    pub opfuncid: Oid,
+    pub opresulttype: Oid,
+    pub opretset: bool,
+    pub opcollid: Oid,
+    pub inputcollid: Oid,
+    pub args: NodeList<'mcx>,
     pub location: ParseLoc,
 }
 
@@ -495,6 +551,13 @@ pub struct MinMaxExpr<'mcx> {
     pub location: ParseLoc,
 }
 
+// C `Expr *arg` is never NULL in a live CollateExpr; modeled non-optional.
+pub struct CollateExpr<'mcx> {
+    pub arg: Node<'mcx>,
+    pub collOid: Oid,
+    pub location: ParseLoc,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[repr(u32)]
 pub enum SQLValueFunctionOp {
@@ -516,7 +579,7 @@ pub enum SQLValueFunctionOp {
     SVFOP_CURRENT_SCHEMA = 14,
 }
 
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 pub struct SQLValueFunction {
     pub op: SQLValueFunctionOp,
     pub r#type: Oid,
@@ -555,6 +618,13 @@ pub struct OnConflictExpr<'mcx> {
 }
 
 #[derive(Default)]
+pub struct CollateClause<'mcx> {
+    pub arg: Option<Node<'mcx>>,
+    pub collname: NodeList<'mcx>,
+    pub location: ParseLoc,
+}
+
+#[derive(Default)]
 pub struct FuncExpr<'mcx> {
     pub funcid: Oid,
     pub funcresulttype: Oid,
@@ -576,6 +646,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for RangeVar<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for Var<'mcx> {
     const TAG: NodeTag = NodeTag::T_Var;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for CollateClause<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CollateClause;
 }
 unsafe impl NodeVariant<'_> for Const {
     const TAG: NodeTag = NodeTag::T_Const;
@@ -628,11 +701,26 @@ unsafe impl<'mcx> NodeVariant<'mcx> for RelabelType<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for CoerceViaIO<'mcx> {
     const TAG: NodeTag = NodeTag::T_CoerceViaIO;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for CoerceToDomain<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CoerceToDomain;
+}
+unsafe impl NodeVariant<'_> for CoerceToDomainValue {
+    const TAG: NodeTag = NodeTag::T_CoerceToDomainValue;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for NextValueExpr {
+    const TAG: NodeTag = NodeTag::T_NextValueExpr;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for BoolExpr<'mcx> {
     const TAG: NodeTag = NodeTag::T_BoolExpr;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for NullTest<'mcx> {
     const TAG: NodeTag = NodeTag::T_NullTest;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for BooleanTest<'mcx> {
+    const TAG: NodeTag = NodeTag::T_BooleanTest;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for DistinctExpr<'mcx> {
+    const TAG: NodeTag = NodeTag::T_DistinctExpr;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for CaseExpr<'mcx> {
     const TAG: NodeTag = NodeTag::T_CaseExpr;
@@ -654,6 +742,9 @@ unsafe impl NodeVariant<'_> for SQLValueFunction {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for SubLink<'mcx> {
     const TAG: NodeTag = NodeTag::T_SubLink;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for CollateExpr<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CollateExpr;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for SubPlan<'mcx> {
     const TAG: NodeTag = NodeTag::T_SubPlan;
@@ -897,7 +988,27 @@ impl<'mcx> Node<'mcx> {
     }
 
     #[inline]
+    pub fn as_coerce_to_domain(self) -> Option<&'mcx CoerceToDomain<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_coerce_to_domain_value(self) -> Option<&'mcx CoerceToDomainValue> {
+        self.as_variant()
+    }
+
+    #[inline]
     pub fn as_null_test(self) -> Option<&'mcx NullTest<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_boolean_test(self) -> Option<&'mcx BooleanTest<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_distinct_expr(self) -> Option<&'mcx DistinctExpr<'mcx>> {
         self.as_variant()
     }
 
@@ -943,6 +1054,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_sub_plan(self) -> Option<&'mcx SubPlan<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_collate_expr(self) -> Option<&'mcx CollateExpr<'mcx>> {
         self.as_variant()
     }
 }

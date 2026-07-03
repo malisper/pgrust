@@ -163,6 +163,15 @@ pub fn exec_qual<'mcx>(
         let v = exectuples::slot_getattr(scan, attnum as i32 + 1, &mut isnull);
         return Ok(!isnull && cmp.eval(v, konst));
     }
+    if let Kernel::QualVarCmpVar { a_src, a_attnum, b_src, b_attnum, cmp } = state.kernel {
+        let mut isnull = false;
+        let a = exectuples::slot_getattr(slots.get(a_src), a_attnum as i32 + 1, &mut isnull);
+        if isnull {
+            return Ok(false);
+        }
+        let b = exectuples::slot_getattr(slots.get(b_src), b_attnum as i32 + 1, &mut isnull);
+        return Ok(!isnull && cmp.eval(a, b));
+    }
     let r = match eval(state, slots, None, None)? {
         EvalOutcome::Done(nd) => nd,
         EvalOutcome::Suspended(_) => subplan_without_driver(),
@@ -267,16 +276,60 @@ fn eval_kernel<'mcx>(
                 isnull: false,
             })
         }
+        Kernel::QualVarCmpVar { a_src, a_attnum, b_src, b_attnum, cmp } => {
+            let mut isnull = false;
+            let a = exectuples::slot_getattr(slots.get(a_src), a_attnum as i32 + 1, &mut isnull);
+            if isnull {
+                return Ok(NullableDatum { value: Datum::from_bool(false), isnull: false });
+            }
+            let b = exectuples::slot_getattr(slots.get(b_src), b_attnum as i32 + 1, &mut isnull);
+            Ok(NullableDatum {
+                value: Datum::from_bool(!isnull && cmp.eval(a, b)),
+                isnull: false,
+            })
+        }
+        Kernel::Hash32Var { src, attnum, frame } => {
+            let mut isnull = false;
+            let v = exectuples::slot_getattr(slots.get(src), attnum as i32 + 1, &mut isnull);
+            if isnull {
+                return Ok(NullableDatum { value: Datum::from_u32(0), isnull: false });
+            }
+            let f = &mut state.frames[frame as usize];
+            // SAFETY: 'mcx-live frame fcinfo image + boxed FmgrInfo, sole refs.
+            let fcinfo = unsafe { fcinfo_mut(f.fcinfo, 1) };
+            unsafe { f.arg_slot(0).write(NullableDatum { value: v, isnull: false }) };
+            fcinfo.isnull = false;
+            let flinfo = unsafe { &mut *f.flinfo.as_ptr() };
+            let value = (flinfo.fn_addr)(Some(flinfo), fcinfo)?;
+            Ok(NullableDatum { value, isnull: false })
+        }
+        Kernel::AggTransByVal { call, pergroup, strict } => {
+            // SAFETY: once-allocated stable pergroup, sole access here (the
+            // interp AggPlainTrans[Strict]ByVal arms' contract verbatim).
+            unsafe {
+                let pg = pergroup.as_ptr();
+                if !strict || !(*pg).trans_value_is_null {
+                    crate::steps::arg_slot_of(call.fcinfo, 0).write(NullableDatum {
+                        value: (*pg).trans_value,
+                        isnull: (*pg).trans_value_is_null,
+                    });
+                    let (value, isnull) = invoke(&call)?;
+                    (*pg).trans_value = value;
+                    (*pg).trans_value_is_null = isnull;
+                }
+            }
+            Ok(NullableDatum::null())
+        }
         Kernel::JustFunc { fn_addr, frame, nargs, strict } => {
             let f = &mut state.frames[frame as usize];
-            // SAFETY: the frame's fcinfo image is live for 'mcx; no other
-            // reference exists during this call.
+            // SAFETY: the frame's fcinfo image and mcx-boxed FmgrInfo are
+            // live for 'mcx; no other references exist during this call.
             let fcinfo = unsafe { fcinfo_mut(f.fcinfo, nargs) };
             if strict && fcinfo.has_null_args() {
                 return Ok(NullableDatum::null());
             }
             fcinfo.isnull = false;
-            let value = fn_addr(Some(&mut f.flinfo), fcinfo)?;
+            let value = fn_addr(Some(unsafe { &mut *f.flinfo.as_ptr() }), fcinfo)?;
             Ok(NullableDatum { value, isnull: fcinfo.isnull })
         }
     }
@@ -303,36 +356,18 @@ fn read_var(slot: &SlotData<'_>, attnum: u16) -> NullableDatum {
     }
 }
 
-struct ResultRegs {
-    value: Datum,
-    isnull: bool,
-}
-
-// C threads `Datum *resv/bool *resnull`; the flat program's OutRef keeps the
-// common target (the result registers) in locals instead of memory.
 #[inline(always)]
-fn write_out(out: OutRef, regs: &mut ResultRegs, value: Datum, isnull: bool) {
-    match out.0 {
-        None => {
-            regs.value = value;
-            regs.isnull = isnull;
-        }
-        Some(p) => {
-            // SAFETY: OutRef targets one arg slot of a frame-owned fcinfo
-            // image live for 'mcx (compile-time invariant).
-            unsafe { p.write(NullableDatum { value, isnull }) }
-        }
-    }
+fn write_out(out: OutRef, value: Datum, isnull: bool) {
+    // SAFETY: every OutRef is an 'mcx-live fcinfo arg slot or the state's
+    // result cell (compile-time invariant); branch-free by design.
+    unsafe { out.0.write(NullableDatum { value, isnull }) }
 }
 
 // Bool steps read-modify their own output (C's resv/resnull aliasing).
 #[inline(always)]
-fn read_out(out: OutRef, regs: &ResultRegs) -> NullableDatum {
-    match out.0 {
-        None => NullableDatum { value: regs.value, isnull: regs.isnull },
-        // SAFETY: as write_out.
-        Some(p) => unsafe { p.read() },
-    }
+fn read_out(out: OutRef) -> NullableDatum {
+    // SAFETY: as write_out.
+    unsafe { out.0.read() }
 }
 
 // The interpreter: flat step array walked by a pointer cursor, loop { match }
@@ -345,21 +380,22 @@ fn run_program<'mcx>(
     mut result_slot: Option<&mut SlotData<'mcx>>,
     resume: Option<Resume>,
 ) -> PgResult<EvalOutcome> {
-    let ExprState { steps, frames, .. } = state;
+    let ExprState { steps, frames, resnd, .. } = state;
+    let res = *resnd;
     let steps = steps.as_slice();
     let mut scan = slots.scan.as_deref_mut();
     let mut inner = slots.inner.as_deref_mut();
     let mut outer = slots.outer.as_deref_mut();
-    let mut regs = ResultRegs { value: Datum::null(), isnull: true };
+    // No entry reset: as in C, every DONE_RETURN path writes the cell first.
     let base = steps.as_ptr();
     let mut sp = base;
     if let Some(r) = resume {
-        regs.value = r.regs.value;
-        regs.isnull = r.regs.isnull;
+        // SAFETY: as above.
+        unsafe { res.write(r.regs) };
         let Step::SubPlan { out, .. } = steps[r.step as usize] else {
             panic!("resume target is not a SubPlan step")
         };
-        write_out(out, &mut regs, r.result.value, r.result.isnull);
+        write_out(out, r.result.value, r.result.isnull);
         // SAFETY: r.step is a validated in-bounds index; the program is
         // Done-terminated so step+1 is in bounds.
         sp = unsafe { base.add(r.step as usize + 1) };
@@ -370,14 +406,12 @@ fn run_program<'mcx>(
         let step = unsafe { &*sp };
         match step {
             Step::DoneReturn => {
-                return Ok(EvalOutcome::Done(NullableDatum {
-                    value: regs.value,
-                    isnull: regs.isnull,
-                }))
+                // SAFETY: res is the state's live result cell.
+                return Ok(EvalOutcome::Done(unsafe { res.read() }));
             }
             Step::DoneNoReturn => return Ok(EvalOutcome::Done(NullableDatum::null())),
             Step::ParamSet { prm, out } => {
-                let r = read_out(*out, &regs);
+                let r = read_out(*out);
                 // SAFETY: compile-resolved pointer into stable es_param_exec_vals.
                 unsafe {
                     let p = prm.as_ptr();
@@ -392,7 +426,8 @@ fn run_program<'mcx>(
                 return Ok(EvalOutcome::Suspended(Suspension {
                     sstate: *sstate,
                     step: step_ix,
-                    regs: NullableDatum { value: regs.value, isnull: regs.isnull },
+                    // SAFETY: res is the state's live result cell.
+                    regs: unsafe { res.read() },
                 }));
             }
             Step::ScanFetchSome { last_var } => {
@@ -406,32 +441,51 @@ fn run_program<'mcx>(
             }
             Step::ScanVar { attnum, out, .. } => {
                 let nd = read_var(need_slot(&mut scan), *attnum);
-                write_out(*out, &mut regs, nd.value, nd.isnull);
+                write_out(*out, nd.value, nd.isnull);
             }
             Step::InnerVar { attnum, out, .. } => {
                 let nd = read_var(need_slot(&mut inner), *attnum);
-                write_out(*out, &mut regs, nd.value, nd.isnull);
+                write_out(*out, nd.value, nd.isnull);
             }
             Step::OuterVar { attnum, out, .. } => {
                 let nd = read_var(need_slot(&mut outer), *attnum);
-                write_out(*out, &mut regs, nd.value, nd.isnull);
+                write_out(*out, nd.value, nd.isnull);
+            }
+            Step::NextValueExpr { seqid, seqtypid, out } => {
+                let newval = sequence_seams::nextval_internal::call(*seqid, false)?;
+                let d = match *seqtypid {
+                    types_core::INT2OID => Datum::from_i16(newval as i16),
+                    types_core::INT4OID => Datum::from_i32(newval as i32),
+                    types_core::INT8OID => Datum::from_i64(newval),
+                    other => panic!("unsupported sequence type {other}"),
+                };
+                write_out(*out, d, false);
+            }
+            Step::WholeRow { src, wr, frame, out } => {
+                let slot = match src {
+                    crate::steps::SlotSrc::Scan => need_slot(&mut scan),
+                    crate::steps::SlotSrc::Inner => need_slot(&mut inner),
+                    crate::steps::SlotSrc::Outer => need_slot(&mut outer),
+                };
+                let (value, isnull) = eval_whole_row(frames, slot, *wr, *frame)?;
+                write_out(*out, value, isnull);
             }
             Step::ScanSysVar { attnum, out } => {
                 let mut isnull = false;
                 let d = exectuples::slot_getsysattr(need_slot(&mut scan), *attnum as i32, &mut isnull)?;
-                write_out(*out, &mut regs, d, isnull);
+                write_out(*out, d, isnull);
             }
             Step::InnerSysVar { attnum, out } => {
                 let mut isnull = false;
                 let d =
                     exectuples::slot_getsysattr(need_slot(&mut inner), *attnum as i32, &mut isnull)?;
-                write_out(*out, &mut regs, d, isnull);
+                write_out(*out, d, isnull);
             }
             Step::OuterSysVar { attnum, out } => {
                 let mut isnull = false;
                 let d =
                     exectuples::slot_getsysattr(need_slot(&mut outer), *attnum as i32, &mut isnull)?;
-                write_out(*out, &mut regs, d, isnull);
+                write_out(*out, d, isnull);
             }
             Step::AssignScanVar { attnum, resultnum } => {
                 let nd = read_var(need_slot(&mut scan), *attnum);
@@ -450,26 +504,28 @@ fn run_program<'mcx>(
             }
             Step::AssignTmp { resultnum } => {
                 let rslot = result_slot.as_deref_mut().unwrap_or_else(|| no_result_slot());
-                assign_to_result(rslot, *resultnum, regs.value, regs.isnull);
+                // SAFETY: res is the state's live result cell.
+                let r = unsafe { res.read() };
+                assign_to_result(rslot, *resultnum, r.value, r.isnull);
             }
             Step::AssignTmpMakeRo { resultnum } => {
                 let rslot = result_slot.as_deref_mut().unwrap_or_else(|| no_result_slot());
-                // SAFETY: a non-null by-ref result datum points at a live
-                // varlena image (same read exectuples materialize performs).
-                let value = if !regs.isnull {
-                    unsafe { datum::expandeddatum::make_expanded_object_read_only_internal(regs.value) }
+                // SAFETY: live result cell; non-null by-ref datum = live varlena.
+                let r = unsafe { res.read() };
+                let value = if !r.isnull {
+                    unsafe { datum::expandeddatum::make_expanded_object_read_only_internal(r.value) }
                 } else {
-                    regs.value
+                    r.value
                 };
-                assign_to_result(rslot, *resultnum, value, regs.isnull);
+                assign_to_result(rslot, *resultnum, value, r.isnull);
             }
             Step::Const { value, isnull, out } => {
-                write_out(*out, &mut regs, *value, *isnull);
+                write_out(*out, *value, *isnull);
             }
             Step::ParamExtern { prm, out } => {
                 // SAFETY: compile-resolved pointer, portal-lived (steps.rs note).
                 let p = unsafe { prm.read() };
-                write_out(*out, &mut regs, p.value, p.isnull);
+                write_out(*out, p.value, p.isnull);
             }
             Step::ParamExec { prm, out } => {
                 // SAFETY: compile-resolved pointer into stable es_param_exec_vals.
@@ -477,16 +533,16 @@ fn run_program<'mcx>(
                 if p.exec_plan {
                     param_exec_plan_pending();
                 }
-                write_out(*out, &mut regs, p.value, p.isnull);
+                write_out(*out, p.value, p.isnull);
             }
             Step::FuncExpr { call, out } => {
-                let (value, isnull) = invoke(frames, call)?;
-                write_out(*out, &mut regs, value, isnull);
+                let (value, isnull) = invoke(call)?;
+                write_out(*out, value, isnull);
             }
             Step::IoCoerce { calls, out } => {
                 // SAFETY: 'mcx-owned pair written once at compile.
                 let c = unsafe { calls.as_ref() };
-                let nd = read_out(*out, &regs);
+                let nd = read_out(*out);
                 let strv = if nd.isnull {
                     NullableDatum { value: Datum::null(), isnull: true }
                 } else {
@@ -495,24 +551,24 @@ fn run_program<'mcx>(
                         crate::steps::arg_slot_of(c.outcall.fcinfo, 0)
                             .write(NullableDatum { value: nd.value, isnull: false })
                     };
-                    let (v, isnull) = invoke(frames, &c.outcall)?;
+                    let (v, isnull) = invoke(&c.outcall)?;
                     NullableDatum { value: v, isnull }
                 };
                 if strv.isnull && c.in_strict {
-                    write_out(*out, &mut regs, Datum::null(), true);
+                    write_out(*out, Datum::null(), true);
                 } else {
                     // SAFETY: arg 0 of the incall's live fcinfo image.
                     unsafe { crate::steps::arg_slot_of(c.incall.fcinfo, 0).write(strv) };
-                    let (v, isnull) = invoke(frames, &c.incall)?;
-                    write_out(*out, &mut regs, v, isnull);
+                    let (v, isnull) = invoke(&c.incall)?;
+                    write_out(*out, v, isnull);
                 }
             }
             Step::ScalarArrayOp { call, use_or, strict, typlen, typbyval, typalign, out } => {
-                let arr = read_out(*out, &regs);
+                let arr = read_out(*out);
                 let (value, isnull) = eval_scalar_array_op(
-                    frames, call, *use_or, *strict, *typlen, *typbyval, *typalign, arr,
+                    call, *use_or, *strict, *typlen, *typbyval, *typalign, arr,
                 )?;
-                write_out(*out, &mut regs, value, isnull);
+                write_out(*out, value, isnull);
             }
             Step::ArrayExprStep {
                 elems,
@@ -527,16 +583,20 @@ fn run_program<'mcx>(
                 let (value, isnull) = eval_array_expr(
                     frames, *elems, *nelems, *frame, *elmtype, *elmlen, *elmbyval, *elmalign,
                 )?;
-                write_out(*out, &mut regs, value, isnull);
+                write_out(*out, value, isnull);
+            }
+            Step::RowExprStep { elems, nelems, frame, desc, out } => {
+                let (value, isnull) = eval_row_expr(frames, *elems, *nelems, *frame, *desc)?;
+                write_out(*out, value, isnull);
             }
             Step::FuncExprStrict1 { call, out } => {
                 // SAFETY: arg 0 of the call's live fcinfo image.
                 let a0 = unsafe { crate::steps::arg_slot_of(call.fcinfo, 0).read() };
                 if a0.isnull {
-                    write_out(*out, &mut regs, Datum::null(), true);
+                    write_out(*out, Datum::null(), true);
                 } else {
-                    let (value, isnull) = invoke(frames, call)?;
-                    write_out(*out, &mut regs, value, isnull);
+                    let (value, isnull) = invoke(call)?;
+                    write_out(*out, value, isnull);
                 }
             }
             Step::FuncExprStrict2 { call, out } => {
@@ -548,10 +608,10 @@ fn run_program<'mcx>(
                     )
                 };
                 if a0.isnull || a1.isnull {
-                    write_out(*out, &mut regs, Datum::null(), true);
+                    write_out(*out, Datum::null(), true);
                 } else {
-                    let (value, isnull) = invoke(frames, call)?;
-                    write_out(*out, &mut regs, value, isnull);
+                    let (value, isnull) = invoke(call)?;
+                    write_out(*out, value, isnull);
                 }
             }
             Step::FuncExprStrict { call, out } => {
@@ -559,10 +619,10 @@ fn run_program<'mcx>(
                 let anynull = (0..call.nargs as usize)
                     .any(|i| unsafe { crate::steps::arg_slot_of(call.fcinfo, i).read().isnull });
                 if anynull {
-                    write_out(*out, &mut regs, Datum::null(), true);
+                    write_out(*out, Datum::null(), true);
                 } else {
-                    let (value, isnull) = invoke(frames, call)?;
-                    write_out(*out, &mut regs, value, isnull);
+                    let (value, isnull) = invoke(call)?;
+                    write_out(*out, value, isnull);
                 }
             }
             Step::MinMax { call, slots, nelems, least, out } => {
@@ -586,7 +646,7 @@ fn run_program<'mcx>(
                         crate::steps::arg_slot_of(call.fcinfo, 1)
                             .write(NullableDatum { value: nd.value, isnull: false });
                     }
-                    let (cmp, cmpnull) = invoke(frames, call)?;
+                    let (cmp, cmpnull) = invoke(call)?;
                     if cmpnull {
                         continue;
                     }
@@ -595,7 +655,7 @@ fn run_program<'mcx>(
                         value = nd.value;
                     }
                 }
-                write_out(*out, &mut regs, value, isnull);
+                write_out(*out, value, isnull);
             }
             Step::SqlValueFunction { op, typmod, timetz, out } => {
                 use ::types_nodes::primnodes::SQLValueFunctionOp as Op;
@@ -625,7 +685,7 @@ fn run_program<'mcx>(
                          (grammar arms 2149-2155 are louds)"
                     ),
                 };
-                write_out(*out, &mut regs, value, false);
+                write_out(*out, value, false);
             }
             Step::Jump { jumpdone } => {
                 // SAFETY: jump targets validated < steps.len() at ready.
@@ -633,7 +693,7 @@ fn run_program<'mcx>(
                 continue;
             }
             Step::JumpIfNotTrue { jumpdone, out } => {
-                let r = read_out(*out, &regs);
+                let r = read_out(*out);
                 if r.isnull || !r.value.as_bool() {
                     // SAFETY: jump targets validated < steps.len() at ready.
                     sp = unsafe { base.add(*jumpdone as usize) };
@@ -643,7 +703,7 @@ fn run_program<'mcx>(
             Step::CaseTestVal { slot, out } => {
                 // SAFETY: compile-allocated workspace, live for 'mcx.
                 let nd = unsafe { slot.read() };
-                write_out(*out, &mut regs, nd.value, nd.isnull);
+                write_out(*out, nd.value, nd.isnull);
             }
             Step::MakeReadonly { slot } => {
                 // SAFETY: compile-allocated workspace holding a live datum.
@@ -660,9 +720,13 @@ fn run_program<'mcx>(
                 }
             }
             Step::Qual { jumpdone } => {
-                if regs.isnull || !regs.value.as_bool() {
-                    regs.value = Datum::from_bool(false);
-                    regs.isnull = false;
+                // SAFETY: res is the state's live result cell.
+                let r = unsafe { res.read() };
+                if r.isnull || !r.value.as_bool() {
+                    // SAFETY: as above.
+                    unsafe {
+                        res.write(NullableDatum { value: Datum::from_bool(false), isnull: false })
+                    };
                     // SAFETY: jump targets validated < steps.len() at ready.
                     sp = unsafe { base.add(*jumpdone as usize) };
                     continue;
@@ -674,7 +738,7 @@ fn run_program<'mcx>(
                     // SAFETY: compile-allocated scratch, live for 'mcx.
                     unsafe { anynull.write(false) };
                 }
-                let r = read_out(*out, &regs);
+                let r = read_out(*out);
                 if r.isnull {
                     // SAFETY: as above.
                     unsafe { anynull.write(true) };
@@ -685,10 +749,10 @@ fn run_program<'mcx>(
                 }
             }
             Step::BoolAndStepLast { anynull, out } => {
-                let r = read_out(*out, &regs);
+                let r = read_out(*out);
                 // SAFETY: compile-allocated scratch, live for 'mcx.
                 if !r.isnull && r.value.as_bool() && unsafe { anynull.read() } {
-                    write_out(*out, &mut regs, Datum::null(), true);
+                    write_out(*out, Datum::null(), true);
                 }
             }
             Step::BoolOrStepFirst { anynull, jumpdone, out }
@@ -697,7 +761,7 @@ fn run_program<'mcx>(
                     // SAFETY: compile-allocated scratch, live for 'mcx.
                     unsafe { anynull.write(false) };
                 }
-                let r = read_out(*out, &regs);
+                let r = read_out(*out);
                 if r.isnull {
                     // SAFETY: as above.
                     unsafe { anynull.write(true) };
@@ -708,25 +772,53 @@ fn run_program<'mcx>(
                 }
             }
             Step::BoolOrStepLast { anynull, out } => {
-                let r = read_out(*out, &regs);
+                let r = read_out(*out);
                 // SAFETY: compile-allocated scratch, live for 'mcx.
                 if !r.isnull && !r.value.as_bool() && unsafe { anynull.read() } {
-                    write_out(*out, &mut regs, Datum::null(), true);
+                    write_out(*out, Datum::null(), true);
                 }
             }
             Step::BoolNotStep { out } => {
                 // NULL in gives NULL out: isnull rides through untouched (C
                 // flips the datum even when nominally null).
-                let r = read_out(*out, &regs);
-                write_out(*out, &mut regs, Datum::from_bool(!r.value.as_bool()), r.isnull);
+                let r = read_out(*out);
+                write_out(*out, Datum::from_bool(!r.value.as_bool()), r.isnull);
             }
             Step::NullTestIsNull { out } => {
-                let r = read_out(*out, &regs);
-                write_out(*out, &mut regs, Datum::from_bool(r.isnull), false);
+                let r = read_out(*out);
+                write_out(*out, Datum::from_bool(r.isnull), false);
             }
             Step::NullTestIsNotNull { out } => {
-                let r = read_out(*out, &regs);
-                write_out(*out, &mut regs, Datum::from_bool(!r.isnull), false);
+                let r = read_out(*out);
+                write_out(*out, Datum::from_bool(!r.isnull), false);
+            }
+            Step::MakeReadonlyOut { src, out } => {
+                let r = read_out(*src);
+                let v = if r.isnull {
+                    r.value
+                } else {
+                    // SAFETY: non-null by-ref datum of a varlena-typed domain
+                    // input (compile emits this step only for typlen -1).
+                    unsafe { ::datum::expandeddatum::make_expanded_object_read_only_internal(r.value) }
+                };
+                write_out(*out, v, r.isnull);
+            }
+            Step::DomainTestval { src, out } => {
+                let r = read_out(*src);
+                write_out(*out, r.value, r.isnull);
+            }
+            Step::DomainNotNull { resulttype, out } => {
+                if read_out(*out).isnull {
+                    return Err(domain_not_null_violation(*resulttype));
+                }
+            }
+            Step::DomainCheck { resulttype, name, check } => {
+                // SAFETY: compile-allocated scratch, live for 'mcx.
+                let r = unsafe { check.read() };
+                if !r.isnull && !r.value.as_bool() {
+                    // SAFETY: name is a compile-copied &'mcx str.
+                    return Err(domain_check_violation(*resulttype, unsafe { name.as_ref() }));
+                }
             }
             Step::AggStrictInputCheck { args, nargs, jumpnull } => {
                 // SAFETY: args[0..nargs] live fcinfo slots; jumps ready-checked.
@@ -744,10 +836,14 @@ fn run_program<'mcx>(
                     continue;
                 }
             }
+            Step::AggOrderedMark { flag } => {
+                // SAFETY: nodeagg-owned once-allocated flag slot.
+                unsafe { flag.write(true) };
+            }
             Step::AggrefEval { value, null, out } => {
                 // SAFETY: pointers into once-allocated AggState arrays (steps.rs note).
                 let (v, n) = unsafe { (value.read(), null.read()) };
-                write_out(*out, &mut regs, v, n);
+                write_out(*out, v, n);
             }
             Step::GroupingFuncEval { cols, ncols, current, out } => {
                 let mut result: i64 = 0;
@@ -768,7 +864,7 @@ fn run_program<'mcx>(
                         }
                     }
                 }
-                write_out(*out, &mut regs, Datum::from_i32(result as i32), false);
+                write_out(*out, Datum::from_i32(result as i32), false);
             }
             Step::AggPlainTransByVal { call, pergroup } => {
                 // SAFETY: once-allocated stable pergroup; sole access here.
@@ -778,7 +874,7 @@ fn run_program<'mcx>(
                         value: (*pg).trans_value,
                         isnull: (*pg).trans_value_is_null,
                     });
-                    let (value, isnull) = invoke(frames, call)?;
+                    let (value, isnull) = invoke(call)?;
                     (*pg).trans_value = value;
                     (*pg).trans_value_is_null = isnull;
                 }
@@ -792,7 +888,7 @@ fn run_program<'mcx>(
                             value: (*pg).trans_value,
                             isnull: false,
                         });
-                        let (value, isnull) = invoke(frames, call)?;
+                        let (value, isnull) = invoke(call)?;
                         (*pg).trans_value = value;
                         (*pg).trans_value_is_null = isnull;
                     }
@@ -811,7 +907,7 @@ fn run_program<'mcx>(
                             value: (*pg).trans_value,
                             isnull: false,
                         });
-                        let (value, isnull) = invoke(frames, call)?;
+                        let (value, isnull) = invoke(call)?;
                         (*pg).trans_value = value;
                         (*pg).trans_value_is_null = isnull;
                     }
@@ -831,7 +927,7 @@ fn run_program<'mcx>(
                             value: (*pg).trans_value,
                             isnull: false,
                         });
-                        let (value, isnull) = invoke(frames, call)?;
+                        let (value, isnull) = invoke(call)?;
                         (*pg).trans_value = value;
                         (*pg).trans_value_is_null = isnull;
                     }
@@ -847,7 +943,7 @@ fn run_program<'mcx>(
                         value: (*pg).trans_value,
                         isnull: (*pg).trans_value_is_null,
                     });
-                    let (value, isnull) = invoke(frames, call)?;
+                    let (value, isnull) = invoke(call)?;
                     (*pg).trans_value = value;
                     (*pg).trans_value_is_null = isnull;
                 }
@@ -861,7 +957,7 @@ fn run_program<'mcx>(
                             value: (*pg).trans_value,
                             isnull: false,
                         });
-                        let (value, isnull) = invoke(frames, call)?;
+                        let (value, isnull) = invoke(call)?;
                         (*pg).trans_value = value;
                         (*pg).trans_value_is_null = isnull;
                     }
@@ -874,7 +970,7 @@ fn run_program<'mcx>(
                     if (*pg).no_trans_value {
                         agg_init_group(call, pg, *byref)?;
                     } else if !(*pg).trans_value_is_null {
-                        agg_plain_trans_byref(frames, call, pg, *byref)?;
+                        agg_plain_trans_byref(call, pg, *byref)?;
                     }
                 }
             }
@@ -883,13 +979,13 @@ fn run_program<'mcx>(
                 unsafe {
                     let pg = pergroup.as_ptr();
                     if !(*pg).trans_value_is_null {
-                        agg_plain_trans_byref(frames, call, pg, *byref)?;
+                        agg_plain_trans_byref(call, pg, *byref)?;
                     }
                 }
             }
             Step::AggPlainTransByRef { call, pergroup, byref } => {
                 // SAFETY: as AggPlainTransInitStrictByRef.
-                unsafe { agg_plain_trans_byref(frames, call, pergroup.as_ptr(), *byref)? }
+                unsafe { agg_plain_trans_byref(call, pergroup.as_ptr(), *byref)? }
             }
             Step::AggTransInitStrictByRefIndirect { call, base, transno, byref } => {
                 // SAFETY: as AggTransByValIndirect + AggPlainTransByRef.
@@ -898,7 +994,7 @@ fn run_program<'mcx>(
                     if (*pg).no_trans_value {
                         agg_init_group(call, pg, *byref)?;
                     } else if !(*pg).trans_value_is_null {
-                        agg_plain_trans_byref(frames, call, pg, *byref)?;
+                        agg_plain_trans_byref(call, pg, *byref)?;
                     }
                 }
             }
@@ -907,7 +1003,7 @@ fn run_program<'mcx>(
                 unsafe {
                     let pg = base.read().as_ptr().add(*transno as usize);
                     if !(*pg).trans_value_is_null {
-                        agg_plain_trans_byref(frames, call, pg, *byref)?;
+                        agg_plain_trans_byref(call, pg, *byref)?;
                     }
                 }
             }
@@ -915,18 +1011,18 @@ fn run_program<'mcx>(
                 // SAFETY: as AggTransInitStrictByRefIndirect.
                 unsafe {
                     let pg = base.read().as_ptr().add(*transno as usize);
-                    agg_plain_trans_byref(frames, call, pg, *byref)?
+                    agg_plain_trans_byref(call, pg, *byref)?
                 }
             }
             Step::HashDatumSetInitVal { init_value, out } => {
-                write_out(*out, &mut regs, *init_value, false);
+                write_out(*out, *init_value, false);
             }
             Step::HashDatumFirst { call, out } => {
                 // SAFETY: arg 0 of the call's live fcinfo image; hash fns
                 // never return NULL (C reads fn_addr's Datum directly).
                 let a0 = unsafe { crate::steps::arg_slot_of(call.fcinfo, 0).read() };
-                let v = if a0.isnull { Datum::null() } else { invoke(frames, call)?.0 };
-                write_out(*out, &mut regs, v, false);
+                let v = if a0.isnull { Datum::null() } else { invoke(call)?.0 };
+                write_out(*out, v, false);
             }
             Step::HashDatumNext32 { call, iresult, out } => {
                 // SAFETY: iresult is a build-owned once-allocated slot; arg 0
@@ -936,9 +1032,46 @@ fn run_program<'mcx>(
                 let combined = if a0.isnull {
                     existing
                 } else {
-                    existing ^ invoke(frames, call)?.0.as_u32()
+                    existing ^ invoke(call)?.0.as_u32()
                 };
-                write_out(*out, &mut regs, Datum::from_u32(combined), false);
+                write_out(*out, Datum::from_u32(combined), false);
+            }
+            Step::BoolTestIsTrue { out } => {
+                let r = read_out(*out);
+                let v = if r.isnull { false } else { r.value.as_bool() };
+                write_out(*out, Datum::from_bool(v), false);
+            }
+            Step::BoolTestIsNotTrue { out } => {
+                let r = read_out(*out);
+                let v = if r.isnull { true } else { !r.value.as_bool() };
+                write_out(*out, Datum::from_bool(v), false);
+            }
+            Step::BoolTestIsFalse { out } => {
+                let r = read_out(*out);
+                let v = if r.isnull { false } else { !r.value.as_bool() };
+                write_out(*out, Datum::from_bool(v), false);
+            }
+            Step::BoolTestIsNotFalse { out } => {
+                let r = read_out(*out);
+                let v = if r.isnull { true } else { r.value.as_bool() };
+                write_out(*out, Datum::from_bool(v), false);
+            }
+            Step::Distinct { call, out } => {
+                // SAFETY: args 0/1 of the call's live fcinfo image.
+                let (a0, a1) = unsafe {
+                    (
+                        crate::steps::arg_slot_of(call.fcinfo, 0).read(),
+                        crate::steps::arg_slot_of(call.fcinfo, 1).read(),
+                    )
+                };
+                if a0.isnull && a1.isnull {
+                    write_out(*out, Datum::from_bool(false), false);
+                } else if a0.isnull || a1.isnull {
+                    write_out(*out, Datum::from_bool(true), false);
+                } else {
+                    let (value, isnull) = invoke(call)?;
+                    write_out(*out, Datum::from_bool(!value.as_bool()), isnull);
+                }
             }
             Step::NotDistinct { call, out } => {
                 // SAFETY: args 0/1 of the call's live fcinfo image.
@@ -949,12 +1082,12 @@ fn run_program<'mcx>(
                     )
                 };
                 if a0.isnull && a1.isnull {
-                    write_out(*out, &mut regs, Datum::from_bool(true), false);
+                    write_out(*out, Datum::from_bool(true), false);
                 } else if a0.isnull || a1.isnull {
-                    write_out(*out, &mut regs, Datum::from_bool(false), false);
+                    write_out(*out, Datum::from_bool(false), false);
                 } else {
-                    let (value, isnull) = invoke(frames, call)?;
-                    write_out(*out, &mut regs, value, isnull);
+                    let (value, isnull) = invoke(call)?;
+                    write_out(*out, value, isnull);
                 }
             }
         }
@@ -983,7 +1116,6 @@ fn missing_slot_hoisted() -> ! {
 // image; the scalar operand sits in args[0], each element lands in args[1].
 #[allow(clippy::too_many_arguments)]
 fn eval_scalar_array_op(
-    frames: &mut [crate::steps::FuncFrame<'_>],
     call: &FuncCall,
     use_or: bool,
     strict: bool,
@@ -1050,7 +1182,7 @@ fn eval_scalar_array_op(
                 crate::steps::arg_slot_of(call.fcinfo, 1)
                     .write(NullableDatum { value: elt, isnull: this_null })
             };
-            invoke(frames, call)?
+            invoke(call)?
         };
 
         if thisnull {
@@ -1076,6 +1208,35 @@ fn eval_scalar_array_op(
         return Ok((Datum::null(), true));
     }
     Ok((Datum::from_bool(result), false))
+}
+
+// C ExecEvalRow (execExprInterp.c): form the composite in the armed
+// per-eval result context; the header carries the blessed RECORD typmod.
+fn eval_row_expr(
+    frames: &mut [crate::steps::FuncFrame<'_>],
+    elems: core::ptr::NonNull<NullableDatum>,
+    nelems: u16,
+    frame: u32,
+    desc: core::ptr::NonNull<::types_tuple::TupleDescData<'static>>,
+) -> PgResult<(Datum, bool)> {
+    let f = &mut frames[frame as usize];
+    // SAFETY: the argless frame's fcinfo image is live; armed per eval.
+    let mcx = unsafe { fcinfo_mut(f.fcinfo, 0) }.result_mcx();
+    let n = nelems as usize;
+    // SAFETY: n scratch slots written by the element steps just executed.
+    let src = unsafe { core::slice::from_raw_parts(elems.as_ptr(), n) };
+    let mut values: ::mcx::PgVec<'_, Datum> = ::mcx::vec_with_capacity_in(mcx, n)?;
+    let mut nulls: ::mcx::PgVec<'_, bool> = ::mcx::vec_with_capacity_in(mcx, n)?;
+    for nd in src {
+        values.push(nd.value);
+        nulls.push(nd.isnull);
+    }
+    // SAFETY: the compile-time blessed tupdesc is plan-mcx-lived.
+    let desc = unsafe { desc.as_ref() };
+    let tuple = ::heaptuple::heap_form_tuple(mcx, desc, &values, &nulls)?;
+    let d = Datum::from_usize(tuple.image().as_ptr() as usize);
+    core::mem::forget(tuple);
+    Ok((d, false))
 }
 
 // ExecEvalArrayExpr (execExprInterp.c), 1-D leg; the result array lives in
@@ -1121,18 +1282,14 @@ fn eval_array_expr(
 }
 
 #[inline(always)]
-fn invoke(
-    frames: &mut [crate::steps::FuncFrame<'_>],
-    call: &FuncCall,
-) -> PgResult<(Datum, bool)> {
-    debug_assert!((call.frame as usize) < frames.len());
-    // SAFETY: frame index validated against frames.len() at ready time.
-    let f = unsafe { frames.get_unchecked_mut(call.frame as usize) };
-    // SAFETY: the call's fcinfo image is live for 'mcx; this is the only
-    // reference during the call (arg OutRef raw writes are not live borrows).
+fn invoke(call: &FuncCall) -> PgResult<(Datum, bool)> {
+    // SAFETY: 'mcx-live mcx-boxed FmgrInfo + fcinfo image; sole references
+    // during the call.
+    let flinfo = unsafe { &mut *call.flinfo.as_ptr() };
+    let fn_addr = flinfo.fn_addr;
     let fcinfo = unsafe { fcinfo_mut(call.fcinfo, call.nargs) };
     fcinfo.isnull = false;
-    let d = (call.fn_addr)(Some(&mut f.flinfo), fcinfo)?;
+    let d = fn_addr(Some(flinfo), fcinfo)?;
     Ok((d, fcinfo.isnull))
 }
 
@@ -1159,7 +1316,6 @@ unsafe fn agg_init_group(
 // transvalue, the bump aggcontext reclaims it at group reset instead.
 // SAFETY contract: as agg_init_group, with `frames` owning `call`'s frame.
 unsafe fn agg_plain_trans_byref(
-    frames: &mut [crate::steps::FuncFrame<'_>],
     call: &FuncCall,
     pg: *mut crate::steps::AggPerGroup,
     byref: crate::steps::AggByRef,
@@ -1170,7 +1326,7 @@ unsafe fn agg_plain_trans_byref(
             value: (*pg).trans_value,
             isnull: (*pg).trans_value_is_null,
         });
-        let (new_val, isnull) = invoke(frames, call)?;
+        let (new_val, isnull) = invoke(call)?;
         // NULL transvalues stay at word 0, so the raw compare is null-safe.
         let new_val = if new_val.as_usize() != (*pg).trans_value.as_usize() {
             if !isnull {
@@ -1279,4 +1435,164 @@ fn check_still_valid_slow<'mcx>(
     }
     state.flags |= EEO_FLAG_STILL_VALID_CHECKED;
     Ok(())
+}
+
+// errdatatype (domains.c): PG_DIAG schema/datatype names off one pg_type probe.
+#[cold]
+fn errdatatype(e: &mut PgError, typid: u32) {
+    if let Ok(Some(t)) = ::syscache_seams::pg_type_domain_shape::call(typid) {
+        e.datatype_name =
+            core::str::from_utf8(t.typname.name_str()).ok().map(|s| s.to_string());
+        let cx = ::mcx::MemoryContext::new("errdatatype");
+        let nsp = lsyscache::get_namespace_name(cx.mcx(), t.typnamespace);
+        if let Ok(Some(nsp)) = &nsp {
+            e.schema_name = Some(nsp.as_str().to_string());
+        }
+        drop(nsp);
+    }
+}
+
+// C ExecEvalWholeRowVar, named-composite leg. First eval checks the slot's
+// physical rowtype against the Var's declared rowtype (dropped-column
+// storage mismatches downgrade to the per-row slow path); every eval
+// flattens the slot into a composite datum in the armed per-eval mcx.
+fn eval_whole_row(
+    frames: &mut [crate::steps::FuncFrame<'_>],
+    slot: &mut SlotData<'_>,
+    wr: core::ptr::NonNull<crate::steps::WholeRowState>,
+    frame: u32,
+) -> PgResult<(Datum, bool)> {
+    // SAFETY: compile-allocated state, single-threaded interpreter.
+    let wr = unsafe { &mut *wr.as_ptr() };
+    // SAFETY: compile-allocated plan-mcx tupdesc, live for the plan.
+    let var_desc = unsafe { wr.tupdesc.as_ref() };
+    if wr.first {
+        wr.slow = false;
+        let slot_desc =
+            slot.base().tts_tupleDescriptor.as_ref().expect("slot has a descriptor").clone();
+        if var_desc.natts != slot_desc.natts {
+            return Err(row_type_mismatch_natts(slot_desc.natts, var_desc.natts));
+        }
+        for i in 0..var_desc.natts as usize {
+            let vattr = &var_desc.attrs[i];
+            let sattr = &slot_desc.attrs[i];
+            if vattr.atttypid == sattr.atttypid {
+                continue;
+            }
+            if !vattr.attisdropped {
+                return Err(row_type_mismatch_type(sattr.atttypid, i, vattr.atttypid));
+            }
+            if vattr.attlen != sattr.attlen || vattr.attalign != sattr.attalign {
+                wr.slow = true;
+            }
+        }
+        wr.first = false;
+    }
+    exectuples::slot_getallattrs(slot);
+    let base = slot.base();
+    let slot_desc = base.tts_tupleDescriptor.as_ref().expect("slot has a descriptor");
+    if wr.slow {
+        for i in 0..var_desc.natts as usize {
+            let vattr = &var_desc.compact_attrs[i];
+            let sattr = &slot_desc.compact_attrs[i];
+            if !var_desc.attrs[i].attisdropped {
+                continue;
+            }
+            if base.tts_isnull[i] {
+                continue;
+            }
+            if vattr.attlen != sattr.attlen || vattr.attalignby != sattr.attalignby {
+                return Err(row_type_mismatch_dropped(i));
+            }
+        }
+    }
+    let f = &mut frames[frame as usize];
+    // SAFETY: the argless frame's fcinfo image is live; armed per eval.
+    let mcx = unsafe { fcinfo_mut(f.fcinfo, 0) }.result_mcx();
+    let mut tuple = ::heaptoast::toast_build_flattened_tuple(
+        mcx,
+        slot_desc.as_ref(),
+        &base.tts_values,
+        &base.tts_isnull,
+    )?;
+    let img = tuple.image_mut();
+    // SAFETY: the header is at the image start (heap_form_tuple contract).
+    unsafe {
+        let td = &mut *(img.as_mut_ptr() as *mut ::types_tuple::HeapTupleHeaderData);
+        td.set_type_id(var_desc.tdtypeid);
+        td.set_typmod(var_desc.tdtypmod);
+    }
+    let d = Datum::from_usize(tuple.image().as_ptr() as usize);
+    core::mem::forget(tuple);
+    Ok((d, false))
+}
+
+#[cold]
+#[inline(never)]
+pub(crate) fn domain_not_null_violation(typid: u32) -> Box<PgError> {
+    let t = format_type::format_type_be(typid).unwrap_or_else(|_| typid.to_string());
+    let mut e = PgError::error(format!("domain {t} does not allow null values"))
+        .with_sqlstate(::types_error::ERRCODE_NOT_NULL_VIOLATION);
+    errdatatype(&mut e, typid);
+    Box::new(e)
+}
+
+#[cold]
+#[inline(never)]
+fn row_type_mismatch_natts(slot_natts: i32, var_natts: i32) -> alloc::boxed::Box<PgError> {
+    let att = if slot_natts == 1 { "attribute" } else { "attributes" };
+    alloc::boxed::Box::new(
+        PgError::error("table row type and query-specified row type do not match")
+            .with_sqlstate(::types_error::ERRCODE_DATATYPE_MISMATCH)
+            .with_detail(alloc::format!(
+                "Table row contains {slot_natts} {att}, but query expects {var_natts}."
+            )),
+    )
+}
+
+#[cold]
+#[inline(never)]
+pub(crate) fn domain_check_violation(typid: u32, name: &str) -> Box<PgError> {
+    let t = format_type::format_type_be(typid).unwrap_or_else(|_| typid.to_string());
+    let mut e = PgError::error(format!(
+        "value for domain {t} violates check constraint \"{name}\""
+    ))
+    .with_sqlstate(::types_error::ERRCODE_CHECK_VIOLATION);
+    errdatatype(&mut e, typid);
+    e.constraint_name = Some(name.to_string());
+    Box::new(e)
+}
+
+#[cold]
+#[inline(never)]
+fn row_type_mismatch_type(
+    slot_type: ::types_core::Oid,
+    i: usize,
+    var_type: ::types_core::Oid,
+) -> alloc::boxed::Box<PgError> {
+    let st = ::format_type::format_type_be(slot_type)
+        .unwrap_or_else(|_| alloc::format!("{slot_type}"));
+    let vt = ::format_type::format_type_be(var_type)
+        .unwrap_or_else(|_| alloc::format!("{var_type}"));
+    alloc::boxed::Box::new(
+        PgError::error("table row type and query-specified row type do not match")
+            .with_sqlstate(::types_error::ERRCODE_DATATYPE_MISMATCH)
+            .with_detail(alloc::format!(
+                "Table has type {st} at ordinal position {}, but query expects {vt}.",
+                i + 1
+            )),
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn row_type_mismatch_dropped(i: usize) -> alloc::boxed::Box<PgError> {
+    alloc::boxed::Box::new(
+        PgError::error("table row type and query-specified row type do not match")
+            .with_sqlstate(::types_error::ERRCODE_DATATYPE_MISMATCH)
+            .with_detail(alloc::format!(
+                "Physical storage mismatch on dropped attribute at ordinal position {}.",
+                i + 1
+            )),
+    )
 }

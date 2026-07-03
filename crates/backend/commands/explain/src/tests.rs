@@ -140,6 +140,7 @@ fn install_fixtures() {
         elog::init_seams();
         backend_status_seams::pgstat_report_plan_id::set(|_, _| {});
         backend_status_seams::pgstat_report_query_id::set(|_, _| {});
+        relcache_seams::relation_get_stat_ext_list::set(|mcx, _relid| Ok(mcx::PgVec::new_in(mcx)));
         resowner_seams::current_resource_owner::set(|| types_resowner::ResourceOwner::NULL);
         resowner_seams::set_current_resource_owner::set(|_| {});
         resowner_seams::top_transaction_resource_owner::set(|| types_resowner::ResourceOwner::NULL);
@@ -210,6 +211,9 @@ fn install_fixtures() {
                 _ => None,
             })
         });
+        namespace_seams::type_is_visible::set(|_| Ok(true));
+        namespace_seams::is_temp_namespace::set(|_| false);
+        syscache_seams::pg_type_typnamespace::set(|_| Ok(Some(11)));
         syscache_seams::lookup_pg_type_typcache_shape::set(|typid| {
             let mk = |name: &str| {
                 let mut typname = types_tuple::NameData::default();
@@ -352,6 +356,7 @@ fn make_portal(mcx: Mcx<'_>) -> Portal<'_> {
         name: mcx::PgString::new_in(mcx),
         prepStmtName: None,
         portalContext: None,
+        planContext: core::ptr::null_mut(),
         resowner: Default::default(),
         cleanup: PortalCleanupHook::None,
         createSubid: 0,
@@ -362,7 +367,6 @@ fn make_portal(mcx: Mcx<'_>) -> Portal<'_> {
         qc: QueryCompletion::default(),
         stmts: StmtListHandle::NULL,
         cplan: CachedPlanHandle::NULL,
-        planContext: core::ptr::null_mut(),
         portalParams: ParamListHandle::NULL,
         queryEnv: QueryEnvHandle::NULL,
         strategy: PortalStrategy::default(),
@@ -897,11 +901,12 @@ mod order_by_limit_e2e {
                 rd_options: None,
                 pgstat_enabled: Cell::new(false),
                 rd_amcache: Default::default(),
-                rd_amcache_hash: Default::default(),
+                rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(), rd_amcache_spgist: Default::default(),
+                rd_support: ::mcx::PgVec::new_in(mcx),
                 rd_supportinfo: Default::default(),
                 rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
-            rd_hastriggers: false,
+            rd_hastriggers: false, rd_hasrules: false,
             },
             None,
         )

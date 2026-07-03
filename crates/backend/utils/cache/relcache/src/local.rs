@@ -104,7 +104,7 @@ pub fn RelationBuildLocalRelation(
         relkind,
         relhassubclass: false,
         relrowsecurity: false,
-        relispopulated: true,
+        relispopulated: relkind != RELKIND_MATVIEW,
         // IsCatalogNamespace || IsToastNamespace (catalog.c): PG_CATALOG(11)/pg_toast(99).
         relreplident: if !(relnamespace == 11 || relnamespace == 99)
             && matches!(
@@ -143,11 +143,12 @@ pub fn RelationBuildLocalRelation(
         rd_options: None,
         pgstat_enabled: Cell::new(false),
         rd_amcache: Default::default(),
-        rd_amcache_hash: Default::default(),
+        rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(), rd_amcache_spgist: Default::default(),
+        rd_support: PgVec::new_in(mcx),
         rd_supportinfo: core::cell::RefCell::new(Vec::new()),
         rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
-            rd_hastriggers: false,
+            rd_hastriggers: false, rd_hasrules: false,
     };
     RelationInitPhysicalAddr(&data)?;
 

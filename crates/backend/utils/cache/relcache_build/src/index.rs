@@ -20,11 +20,21 @@ const OID_BTREE_OPS_OID: Oid = 1981;
 const INT2_BTREE_OPS_OID: Oid = 1979;
 const BTREE_AM_OID: Oid = 403;
 const HASH_AM_OID: Oid = 405;
+const BRIN_AM_OID: Oid = 3580;
+const SPGIST_AM_OID: Oid = 4000;
+const GIST_AM_OID: Oid = 783;
 const BTNProcs: usize = 6;
+const GISTNProcs: usize = 12;
+const SPGISTNProcs: usize = 7;
+// BRIN_LAST_OPTIONAL_PROCNUM (brin_internal.h).
+const BRINNProcs: usize = 15;
+const MAX_AM_PROCS: usize = BRINNProcs;
 // BTORDER_PROC == HASHSTANDARD_PROC == 1: slot 0 is the preloaded proc for
-// both committed AMs.
+// btree and hash.
 const BTORDER_PROC: usize = 1;
 const HASHNProcs: usize = 3;
+const GIN_AM_OID: Oid = 2742;
+const GINNProcs: usize = 7;
 
 const Anum_pg_amproc_amprocfamily: i32 = 2;
 const Anum_pg_amproc_amproclefttype: i32 = 3;
@@ -49,6 +59,7 @@ const Anum_pg_index_indkey: i32 = 16;
 const Anum_pg_index_indcollation: i32 = 17;
 const Anum_pg_index_indclass: i32 = 18;
 const Anum_pg_index_indoption: i32 = 19;
+const Anum_pg_index_indexprs: i32 = 20;
 const Anum_pg_index_indpred: i32 = 21;
 
 const Anum_pg_opclass_opcfamily: i32 = 6;
@@ -95,14 +106,20 @@ pub(crate) fn relation_init_index_access_info(
     let amsupport = match form.relam {
         BTREE_AM_OID => BTNProcs,
         HASH_AM_OID => HASHNProcs,
+        GIN_AM_OID => GINNProcs,
+        GIST_AM_OID => GISTNProcs,
+        SPGIST_AM_OID => SPGISTNProcs,
+        BRIN_AM_OID => BRINNProcs,
         other => panic!(
             "relcache_build: index AM {other} for index {relid} unported \
-             (amapi closed set is btree+hash)"
+             (amapi closed set is btree+hash+gin+gist+spgist+brin)"
         ),
     };
     let mut opfamily: PgVec<'static, Oid> = mcx::vec_with_capacity_in(mcx, nkey)?;
     let mut opcintype: PgVec<'static, Oid> = mcx::vec_with_capacity_in(mcx, nkey)?;
     let mut supportinfo: Vec<Option<types_fmgr::FmgrInfo>> = Vec::with_capacity(nkey);
+    // C rd_support: nkey x amsupport proc OIDs, row-major.
+    let mut support: PgVec<'static, Oid> = mcx::vec_with_capacity_in(mcx, nkey * amsupport)?;
     for &opc in &classvals[..nkey] {
         if opc == InvalidOid {
             return Err(bogus_pg_index(relid));
@@ -110,7 +127,19 @@ pub(crate) fn relation_init_index_access_info(
         let ent = lookup_opclass_info(opc, amsupport)?;
         opfamily.push(ent.opcfamily);
         opcintype.push(ent.opcintype);
-        let proc = ent.support[BTORDER_PROC - 1];
+        support.extend_from_slice(&ent.support[..amsupport]);
+        // slot-0 FmgrInfo preload: BTORDER_PROC == HASHSTANDARD_PROC == 1; gin
+        // dispatches its support procs by OID (rule-4 closed set); gist
+        // resolves its procs in initGISTstate; brin via lsyscache at use.
+        let proc = if form.relam == GIN_AM_OID
+            || form.relam == GIST_AM_OID
+            || form.relam == SPGIST_AM_OID
+            || form.relam == BRIN_AM_OID
+        {
+            0
+        } else {
+            ent.support[BTORDER_PROC - 1]
+        };
         supportinfo.push(if proc != 0 {
             Some(fmgr_seams::fmgr_info::call(proc)?)
         } else {
@@ -136,17 +165,25 @@ pub(crate) fn relation_init_index_access_info(
         indisready: get(Anum_pg_index_indisready)?.as_bool(),
         indkey,
         has_indpred: !SysCacheGetAttr(INDEXRELID, &tup, Anum_pg_index_indpred)?.1,
+        indexprs_src: {
+            let (d, isnull) = SysCacheGetAttr(INDEXRELID, &tup, Anum_pg_index_indexprs)?;
+            if isnull { None } else { Some(crate::attrs::text_str(mcx, mcx, d)?) }
+        },
+        indpred_src: {
+            let (d, isnull) = SysCacheGetAttr(INDEXRELID, &tup, Anum_pg_index_indpred)?;
+            if isnull { None } else { Some(crate::attrs::text_str(mcx, mcx, d)?) }
+        },
     };
     ReleaseSysCache(tup);
 
-    Ok(IndexAccessInfo { index, opcintype, opfamily, indoption, indcollation, supportinfo })
+    Ok(IndexAccessInfo { index, opcintype, opfamily, indoption, indcollation, supportinfo, support })
 }
 
 #[derive(Clone, Copy)]
 struct OpClassEnt {
     opcfamily: Oid,
     opcintype: Oid,
-    support: [types_core::primitive::RegProcedure; BTNProcs],
+    support: [types_core::primitive::RegProcedure; MAX_AM_PROCS],
 }
 
 thread_local! {
@@ -173,7 +210,7 @@ fn lookup_opclass_info(opc: Oid, amsupport: usize) -> PgResult<OpClassEnt> {
 }
 
 fn load_opclass(opc: Oid, amsupport: usize) -> PgResult<OpClassEnt> {
-    debug_assert!(amsupport <= BTNProcs);
+    debug_assert!(amsupport <= MAX_AM_PROCS);
     let cx = MemoryContext::new("LookupOpclassInfo");
     let mcx = cx.mcx();
     let rel = table::table_open(mcx, OPERATOR_CLASS_RELATION_ID, AccessShareLock)?;
@@ -188,7 +225,7 @@ fn load_opclass(opc: Oid, amsupport: usize) -> PgResult<OpClassEnt> {
         Some(tup) => OpClassEnt {
             opcfamily: req(rel.descr(), tup, Anum_pg_opclass_opcfamily)?.as_oid(),
             opcintype: req(rel.descr(), tup, Anum_pg_opclass_opcintype)?.as_oid(),
-            support: [0; BTNProcs],
+            support: [0; MAX_AM_PROCS],
         },
         None => return Err(opclass_not_found(opc)),
     };
@@ -249,6 +286,31 @@ pub(crate) fn scan_pg_index_shapes<'mcx>(
     }
     genam::systable_endscan(smcx, scan)?;
     rel.close(AccessShareLock)?;
+    Ok(out)
+}
+
+const STATISTIC_EXT_RELATION_ID: Oid = 3381;
+const STATISTIC_EXT_RELID_INDEX_ID: Oid = 3379;
+const Anum_pg_statistic_ext_oid: i32 = 1;
+const Anum_pg_statistic_ext_stxrelid: i32 = 2;
+
+pub(crate) fn scan_pg_statistic_ext_oids<'mcx>(
+    mcx: Mcx<'mcx>,
+    stxrelid: Oid,
+) -> PgResult<PgVec<'mcx, Oid>> {
+    let cx = MemoryContext::new("RelationGetStatExtList");
+    let smcx = cx.mcx();
+    let rel = table::table_open(smcx, STATISTIC_EXT_RELATION_ID, AccessShareLock)?;
+    let keys = [oid_key(Anum_pg_statistic_ext_stxrelid, stxrelid)];
+    let mut scan =
+        genam::systable_beginscan(smcx, &rel, STATISTIC_EXT_RELID_INDEX_ID, true, None, &keys)?;
+    let mut out: PgVec<'mcx, Oid> = PgVec::new_in(mcx);
+    while let Some(tup) = genam::systable_getnext(smcx, &mut scan)? {
+        out.push(req(rel.descr(), tup, Anum_pg_statistic_ext_oid)?.as_oid());
+    }
+    genam::systable_endscan(smcx, scan)?;
+    rel.close(AccessShareLock)?;
+    out.sort_unstable();
     Ok(out)
 }
 

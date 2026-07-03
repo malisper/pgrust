@@ -115,18 +115,33 @@ fn register(qd: QueryDescData) -> QueryDescHandle {
     encode(idx, generation)
 }
 
-// Borrow held across `f`: nothing under the executor re-enters this registry
-// today (SPI unported); re-entry is a loud RefCell panic, never corruption.
+// Entry is taken out for the duration of `f` so nested executor runs (SQL
+// functions) can register/free their own descs; re-entry on the SAME handle
+// panics loudly. The guard reinserts on unwind so error paths stay freeable.
 pub(crate) fn with_qd<R>(h: QueryDescHandle, f: impl FnOnce(&mut QueryDescData) -> R) -> R {
     assert!(!h.is_null(), "execmain: NULL QueryDescHandle dereferenced");
     let (idx, generation) = decode(h);
-    ENTRIES.with(|e| {
+    let entry = ENTRIES.with(|e| {
         let mut v = e.borrow_mut();
-        match v.get_mut(idx as usize).and_then(|s| s.as_mut()) {
-            Some(en) if en.generation == generation => f(&mut en.qd),
-            _ => panic!("execmain: stale QueryDescHandle {h:?} (already freed)"),
+        match v.get_mut(idx as usize) {
+            Some(slot) if slot.as_ref().map(|en| en.generation) == Some(generation) => {
+                slot.take().unwrap()
+            }
+            _ => panic!("execmain: stale or re-entered QueryDescHandle {h:?}"),
         }
-    })
+    });
+    struct PutBack {
+        idx: u32,
+        entry: Option<Entry>,
+    }
+    impl Drop for PutBack {
+        fn drop(&mut self) {
+            let en = self.entry.take().unwrap();
+            ENTRIES.with(|e| e.borrow_mut()[self.idx as usize] = Some(en));
+        }
+    }
+    let mut guard = PutBack { idx, entry: Some(entry) };
+    f(&mut guard.entry.as_mut().unwrap().qd)
 }
 
 pub fn registry_len() -> usize {

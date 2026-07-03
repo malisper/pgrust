@@ -11,6 +11,7 @@ path = "src/lib.rs"
 [dependencies]
 operatorcmds = { path = "../../backend/commands/operatorcmds" }
 opclasscmds = { path = "../../backend/commands/opclasscmds" }
+sequence = { path = "../../backend/commands/sequence" }
 detoast = { path = "../../backend/access/common/detoast" }
 heaptoast = { path = "../../backend/access/heap/heaptoast" }
 printtup = { path = "../../backend/access/common/printtup" }
@@ -22,6 +23,7 @@ table = { path = "../../backend/access/table/table" }
 tableam = { path = "../../backend/access/table/tableam" }
 vacuumlazy = { path = "../../backend/access/heap/vacuumlazy" }
 commands_vacuum = { path = "../../backend/commands/vacuum" }
+commands_analyze = { path = "../../backend/commands/analyze" }
 commands_tablespace = { path = "../../backend/commands/tablespace" }
 clog = { path = "../../backend/access/transam/clog" }
 multixact = { path = "../../backend/access/transam/multixact" }
@@ -38,12 +40,15 @@ xlogutils = { path = "../../backend/access/transam/xlogutils" }
 aclchk = { path = "../../backend/catalog/aclchk" }
 catalog_namespace = { path = "../../backend/catalog/catalog_namespace" }
 catalog_dependency = { path = "../../backend/catalog/catalog_dependency" }
+commands_cluster = { path = "../../backend/commands/cluster" }
 tablecmds = { path = "../../backend/commands/tablecmds" }
+clauses = { path = "../../backend/optimizer/util/clauses" }
 catalog_storage = { path = "../../backend/catalog/catalog_storage" }
 catalog = { path = "../../backend/catalog/catalog" }
 pg_database = { path = "../../backend/catalog/pg_database" }
 pg_db_role_setting = { path = "../../backend/catalog/pg_db_role_setting" }
 catalog_index = { path = "../../backend/catalog/catalog_index" }
+pg_class = { path = "../../backend/catalog/pg_class" }
 indexcmds = { path = "../../backend/commands/indexcmds" }
 dbcommands = { path = "../../backend/commands/dbcommands" }
 executils = { path = "../../backend/executor/executils" }
@@ -73,6 +78,7 @@ pqformat = { path = "../../backend/libpq/pqformat" }
 vars = { path = "../../backend/optimizer/util/vars" }
 parser_driver = { path = "../../backend/parser/parser_driver" }
 parse_collate = { path = "../../backend/parser/parse_collate" }
+parse_clause = { path = "../../backend/parser/parse_clause" }
 parse_expr = { path = "../../backend/parser/parse_expr" }
 parser_analyze = { path = "../../backend/parser/parser_analyze" }
 scan_fgram = { path = "../../backend/parser/scan_fgram" }
@@ -86,6 +92,7 @@ bgwriter = { path = "../../backend/postmaster/bgwriter" }
 walwriter = { path = "../../backend/postmaster/walwriter" }
 postmaster_startup = { path = "../../backend/postmaster/startup" }
 rewrite_handler = { path = "../../backend/rewrite/rewrite_handler" }
+rewrite_define = { path = "../../backend/rewrite/rewrite_define" }
 bufmgr = { path = "../../backend/storage/buffer/bufmgr" }
 fd = { path = "../../backend/storage/file/fd" }
 dsm_core = { path = "../../backend/storage/ipc/dsm_core" }
@@ -106,6 +113,7 @@ deadlock = { path = "../../backend/storage/lmgr/deadlock" }
 predicate = { path = "../../backend/storage/lmgr/predicate" }
 parallel = { path = "../../backend/access/transam/parallel" }
 spi = { path = "../../backend/executor/spi" }
+sql_functions = { path = "../../backend/executor/sql_functions" }
 trigger = { path = "../../backend/commands/trigger" }
 ri_triggers = { path = "../../backend/utils/adt/ri_triggers" }
 pruneheap = { path = "../../backend/access/heap/pruneheap" }
@@ -120,6 +128,8 @@ tcop_dest = { path = "../../backend/tcop/dest" }
 postgres = { path = "../../backend/tcop/postgres" }
 pquery = { path = "../../backend/tcop/pquery" }
 explain = { path = "../../backend/commands/explain" }
+commands_createas = { path = "../../backend/commands/createas" }
+commands_matview = { path = "../../backend/commands/matview" }
 prepare = { path = "../../backend/commands/prepare" }
 commands_async = { path = "../../backend/commands/commands_async" }
 portalcmds = { path = "../../backend/commands/portalcmds" }
@@ -127,7 +137,13 @@ utility = { path = "../../backend/tcop/utility" }
 backend_status = { path = "../../backend/utils/activity/backend_status" }
 waitevent = { path = "../../backend/utils/activity/waitevent" }
 pgstat = { path = "../../backend/utils/activity/pgstat" }
+adt_geo = { path = "../../backend/utils/adt/geo" }
+spgist_text = { path = "../../backend/access/spgist/spgist_text" }
+gistproc = { path = "../../backend/access/gist/gistproc" }
+brin_minmax_multi = { path = "../../backend/access/brin/brin_minmax_multi" }
 adt_acl = { path = "../../backend/utils/adt/acl" }
+adt_misc = { path = "../../backend/utils/adt/adt_misc" }
+adt_rowtypes = { path = "../../backend/utils/adt/rowtypes" }
 adt_timestamp = { path = "../../backend/utils/adt/adt_timestamp" }
 pgtz = { path = "../../backend/timezone/pgtz" }
 adt_bool = { path = "../../backend/utils/adt/bool" }
@@ -144,6 +160,7 @@ relcache = { path = "../../backend/utils/cache/relcache" }
 relcache_build = { path = "../../backend/utils/cache/relcache_build" }
 relmapper = { path = "../../backend/utils/cache/relmapper" }
 typcache = { path = "../../backend/utils/cache/typcache" }
+pg_enum = { path = "../../backend/catalog/pg_enum" }
 elog = { path = "../../backend/utils/error/elog" }
 fmgr_core = { path = "../../backend/utils/fmgr/fmgr_core" }
 funcapi = { path = "../../backend/utils/fmgr/funcapi" }
@@ -178,3 +195,8 @@ slot = { path = "../../backend/replication/slot" }
 session = { path = "../../backend/access/session" }
 relpath = { path = "../../common/relpath" }
 aio_config = { path = "../../backend/storage/aio/aio_config" }
+gin = { path = "../../backend/access/gin/gin" }
+types_fmgr = { path = "../types/fmgr" }
+format_type = { path = "../../backend/utils/adt/format_type" }
+ruleutils = { path = "../../backend/utils/adt/ruleutils" }
+adt_regproc = { path = "../../backend/utils/adt/regproc" }

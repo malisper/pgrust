@@ -427,6 +427,21 @@ pub struct IndexOptInfo<'mcx> {
     pub amhasgetbitmap: bool,
     pub amcanparallel: bool,
     pub amcanmarkpos: bool,
+    /// GIN metapage stats captured at plancat time (C's gincostestimate
+    /// reopens the index; rule 6 passes them down instead). None for
+    /// non-GIN indexes.
+    pub gin_stats: Option<GinIndexStats>,
+}
+
+/// GinStatsData mirror for the planner (avoids a pathnodes->gin dep).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct GinIndexStats {
+    pub pending_pages: BlockNumber,
+    pub total_pages: BlockNumber,
+    pub entry_pages: BlockNumber,
+    pub data_pages: BlockNumber,
+    pub entries: i64,
+    pub version: i32,
 }
 
 impl<'mcx> IndexOptInfo<'mcx> {
@@ -466,6 +481,7 @@ impl<'mcx> IndexOptInfo<'mcx> {
             amhasgetbitmap: false,
             amcanparallel: false,
             amcanmarkpos: false,
+            gin_stats: None,
         }
     }
 }
@@ -2148,7 +2164,8 @@ mcx::forget_safe_struct!(
     PartitionBoundInfoData<'_> { strategy, ndatums, nindexes, null_index, default_index, indexes, datums, kind, interleaved_parts },
     JoinDomain<'_> { jd_relids },
     AppendRelInfo<'_> { parent_relid, child_relid, parent_reltype, child_reltype, translated_vars, num_child_cols, parent_colnos, parent_reloid },
-    IndexOptInfo<'_> { indexoid, reltablespace, rel, pages, tuples, tree_height, ncolumns, nkeycolumns, indexkeys, indexcollations, opfamily, opcintype, sortopfamily, reverse_sort, nulls_first, canreturn, relam, indexprs, indpred, indextlist, indrestrictinfo, predOK, unique, nullsnotdistinct, immediate, hypothetical, amcanorderbyop, amoptionalkey, amsearcharray, amsearchnulls, amhasgettuple, amhasgetbitmap, amcanparallel, amcanmarkpos },
+    GinIndexStats { pending_pages, total_pages, entry_pages, data_pages, entries, version },
+    IndexOptInfo<'_> { indexoid, reltablespace, rel, pages, tuples, tree_height, ncolumns, nkeycolumns, indexkeys, indexcollations, opfamily, opcintype, sortopfamily, reverse_sort, nulls_first, canreturn, relam, indexprs, indpred, indextlist, indrestrictinfo, predOK, unique, nullsnotdistinct, immediate, hypothetical, amcanorderbyop, amoptionalkey, amsearcharray, amsearchnulls, amhasgettuple, amhasgetbitmap, amcanparallel, amcanmarkpos, gin_stats },
     GroupByOrdering<'_> { pathkeys, clauses },
     PathTarget<'_> { exprs, sortgrouprefs, cost, width, has_volatile_expr },
     ParamPathInfo<'_> { ppi_req_outer, ppi_rows, ppi_clauses, ppi_serials },

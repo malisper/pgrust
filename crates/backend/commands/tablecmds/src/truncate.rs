@@ -1,30 +1,17 @@
 #![allow(non_upper_case_globals)]
-// ExecuteTruncate/ExecuteTruncateGuts, single-lane: permanent plain tables,
-// RESTRICT, no RESTART IDENTITY. RelationSetNewRelfilenumber (relcache.c) is
-// hosted here: relcache cannot dep catalog_storage/tableam/catalog_indexing
-// without cycling, and this is its only caller.
+// ExecuteTruncate/ExecuteTruncateGuts: permanent plain tables, RESTRICT and
+// CASCADE, no RESTART IDENTITY (sequence lane).
 use datum::Datum;
 use mcx::Mcx;
 use types_core::{AttrNumber, InvalidBlockNumber, InvalidOid, Oid, RELATION_RELATION_ID};
-use types_error::{PgError, PgResult, ERRCODE_WRONG_OBJECT_TYPE, ERROR};
+use types_error::{PgError, PgResult, ERRCODE_WRONG_OBJECT_TYPE, ERROR, NOTICE};
 use types_nodes::parsenodes::{DropBehavior, ObjectType, TruncateStmt};
 use types_rel::{
-    AccessExclusiveLock, NoLock, Relation, RowExclusiveLock, RELKIND_PARTITIONED_TABLE,
-    RELKIND_RELATION,
+    AccessExclusiveLock, NoLock, Relation, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION,
 };
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 
 use crate::unported;
-
-const Natts_pg_class: usize = 34;
-const Anum_pg_class_relfilenode: usize = 8;
-const Anum_pg_class_relpages: usize = 10;
-const Anum_pg_class_reltuples: usize = 11;
-const Anum_pg_class_relallvisible: usize = 12;
-const Anum_pg_class_relallfrozen: usize = 13;
-const Anum_pg_class_relpersistence: usize = 17;
-const Anum_pg_class_relfrozenxid: usize = 30;
-const Anum_pg_class_relminmxid: usize = 31;
 
 fn oid_key(attno: AttrNumber, oid: Oid) -> ScanKeyData {
     let mut key = ScanKeyData::empty();
@@ -39,10 +26,7 @@ fn oid_key(attno: AttrNumber, oid: Oid) -> ScanKeyData {
 
 pub fn ExecuteTruncate<'mcx>(mcx: Mcx<'mcx>, stmt: &TruncateStmt<'mcx>) -> PgResult<()> {
     if stmt.restart_seqs {
-        unported("ExecuteTruncate: RESTART IDENTITY");
-    }
-    if stmt.behavior == DropBehavior::DROP_CASCADE {
-        unported("ExecuteTruncate: CASCADE");
+        unported("ExecuteTruncate: RESTART IDENTITY (sequence lane)");
     }
 
     let mut rels: Vec<Relation<'mcx>> = Vec::new();
@@ -75,69 +59,143 @@ pub fn ExecuteTruncate<'mcx>(mcx: Mcx<'mcx>, stmt: &TruncateStmt<'mcx>) -> PgRes
         let rel = table::table_open(mcx, myrelid, NoLock)?;
         truncate_check_activity(&rel)?;
 
-        if rv.inh && rel.rd_rel.relhassubclass {
-            unported("ExecuteTruncate: find_all_inheritors (inheritance/partition lane)");
-        }
-        if !rv.inh && rel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE {
-            return Err(Box::new(
-                PgError::new(ERROR, "cannot truncate only a partitioned table".to_string())
-                    .with_sqlstate(ERRCODE_WRONG_OBJECT_TYPE),
-            ));
-        }
         rels.push(rel);
         relids.push(myrelid);
+
+        if rv.inh {
+            let children = pg_inherits::find_all_inheritors(mcx, myrelid, AccessExclusiveLock)?;
+            for &childrelid in children.iter() {
+                if relids.contains(&childrelid) {
+                    continue;
+                }
+                let child = table::table_open(mcx, childrelid, NoLock)?;
+                debug_assert!(
+                    !(child.rd_rel.relpersistence == types_core::RELPERSISTENCE_TEMP
+                        && !child.rd_islocaltemp),
+                    "other-session temp children unreachable (temp lane is session-local)"
+                );
+                // Inherited TRUNCATE checks permissions on the parent only.
+                truncate_check_rel(
+                    childrelid,
+                    child.rd_rel.relkind,
+                    child.namespace(),
+                    child.name(),
+                )?;
+                truncate_check_activity(&child)?;
+                rels.push(child);
+                relids.push(childrelid);
+            }
+        } else if rels.last().expect("just pushed").rd_rel.relkind == RELKIND_PARTITIONED_TABLE {
+            return Err(Box::new(
+                PgError::new(ERROR, "cannot truncate only a partitioned table".to_string())
+                    .with_sqlstate(ERRCODE_WRONG_OBJECT_TYPE)
+                    .with_hint(
+                        "Do not specify the ONLY keyword, or use TRUNCATE ONLY on the partitions directly."
+                            .to_string(),
+                    ),
+            ));
+        }
     }
 
-    ExecuteTruncateGuts(mcx, &rels)?;
+    let n_explicit = rels.len();
+    ExecuteTruncateGuts(mcx, &mut rels, &mut relids, stmt.behavior)?;
 
+    debug_assert_eq!(rels.len(), n_explicit);
     for rel in rels {
         rel.close(NoLock)?;
     }
     Ok(())
 }
 
-fn ExecuteTruncateGuts<'mcx>(mcx: Mcx<'mcx>, rels: &[Relation<'mcx>]) -> PgResult<()> {
+fn ExecuteTruncateGuts<'mcx>(
+    mcx: Mcx<'mcx>,
+    rels: &mut Vec<Relation<'mcx>>,
+    relids: &mut Vec<Oid>,
+    behavior: DropBehavior,
+) -> PgResult<()> {
+    let n_explicit = rels.len();
+
+    if behavior == DropBehavior::DROP_CASCADE {
+        loop {
+            let newrelids = catalog_heap::heap_truncate_find_FKs(mcx, relids)?;
+            if newrelids.is_empty() {
+                break;
+            }
+            for &relid in newrelids.iter() {
+                let rel = table::table_open(mcx, relid, AccessExclusiveLock)?;
+                elog_seams::ereport::call(PgError::new(
+                    NOTICE,
+                    format!("truncate cascades to table \"{}\"", rel.name()),
+                ))?;
+                truncate_check_rel(relid, rel.rd_rel.relkind, rel.namespace(), rel.name())?;
+                truncate_check_perms(relid, rel.rd_rel.relkind, rel.name())?;
+                truncate_check_activity(&rel)?;
+                rels.push(rel);
+                relids.push(relid);
+            }
+        }
+    }
+
+    if behavior == DropBehavior::DROP_RESTRICT {
+        catalog_heap::heap_truncate_check_FKs(mcx, rels, false)?;
+    }
+
+    // ExecBS/ASTruncateTriggers fire only TRIGGER_TYPE_TRUNCATE triggers; FK RI
+    // triggers set relhastriggers but never that type, so they pass through.
+    for rel in rels.iter() {
+        if rel.rd_hastriggers {
+            let trigdesc = relcache::RelationGetTriggerDesc(rel.rd_id)?;
+            if trigdesc.is_some_and(|d| {
+                d.trig_truncate_before_statement || d.trig_truncate_after_statement
+            }) {
+                unported("ExecuteTruncateGuts: TRUNCATE triggers (trigger lane)");
+            }
+        }
+    }
+
     let my_subid = xact::GetCurrentSubTransactionId();
-    for rel in rels {
+    for rel in rels.iter() {
+        if rel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE {
+            continue;
+        }
         if rel.rd_createSubid.get() == my_subid
             || rel.rd_newRelfilelocatorSubid.get() == my_subid
         {
-            tableam::table_relation_nontransactional_truncate(rel)?;
+            catalog_heap::heap_truncate_one_rel(mcx, rel)?;
         } else {
             predicate_seams::check_for_serializable_conflict_in::call(
                 rel,
                 None,
                 InvalidBlockNumber,
             )?;
-            RelationSetNewRelfilenumber(mcx, rel, rel.rd_rel.relpersistence)?;
+            catalog_index::RelationSetNewRelfilenumber(mcx, rel, rel.rd_rel.relpersistence)?;
 
+            let heap_relid = rel.rd_id;
             let toast_relid = rel.rd_rel.reltoastrelid;
             if toast_relid != InvalidOid {
                 let toastrel = table::table_open(mcx, toast_relid, AccessExclusiveLock)?;
-                RelationSetNewRelfilenumber(mcx, &toastrel, toastrel.rd_rel.relpersistence)?;
+                catalog_index::RelationSetNewRelfilenumber(
+                    mcx,
+                    &toastrel,
+                    toastrel.rd_rel.relpersistence,
+                )?;
                 toastrel.close(NoLock)?;
             }
 
-            reindex_relation_guard(mcx, rel.rd_id, toast_relid)?;
+            catalog_index::reindex_relation(
+                mcx,
+                heap_relid,
+                catalog_index::REINDEX_REL_PROCESS_TOAST,
+                &catalog_index::ReindexParams::default(),
+            )?;
         }
         pgstat::relation::pgstat_count_truncate(rel.rd_id, rel.rd_rel.relisshared);
     }
     // XLOG_HEAP_TRUNCATE rides wal_level=logical, const-false here as in the
     // visibilitymap catalog-rel gate.
-    Ok(())
-}
 
-// reindex_relation (index.c) is the catalog-index lane; until it lands any
-// index on the truncated rel (incl. the toast index) must be loud, never a
-// silently stale index.
-fn reindex_relation_guard<'mcx>(mcx: Mcx<'mcx>, relid: Oid, toast_relid: Oid) -> PgResult<()> {
-    if !relcache_seams::relation_get_index_list::call(mcx, relid)?.is_empty() {
-        unported("ExecuteTruncateGuts: reindex_relation (catalog-index lane)");
-    }
-    if toast_relid != InvalidOid
-        && !relcache_seams::relation_get_index_list::call(mcx, toast_relid)?.is_empty()
-    {
-        unported("ExecuteTruncateGuts: reindex_relation over the toast index (catalog-index lane)");
+    for rel in rels.drain(n_explicit..) {
+        rel.close(NoLock)?;
     }
     Ok(())
 }
@@ -167,16 +225,8 @@ fn RangeVarCallbackForTruncate<'mcx>(mcx: Mcx<'mcx>, relOid: Oid) -> PgResult<()
     };
     let relnamespace = get(3).as_oid();
     let relkind = get(18).as_i8() as u8;
-    let relhastriggers = get(22).as_bool();
     genam::systable_endscan(mcx, scan)?;
     pg_class.close(types_rel::AccessShareLock)?;
-
-    // heap_truncate_check_FKs + TRUNCATE triggers (C checks these in the
-    // guts): FK constraints and triggers both flip relhastriggers, the only
-    // way either can exist today.
-    if relhastriggers {
-        unported("ExecuteTruncateGuts: FK checks / TRUNCATE triggers (trigger lane)");
-    }
 
     truncate_check_rel(relOid, relkind, relnamespace, &relname)?;
     truncate_check_perms(relOid, relkind, &relname)
@@ -218,68 +268,4 @@ fn truncate_check_activity(rel: &Relation<'_>) -> PgResult<()> {
         unported("truncate_check_activity: temp tables");
     }
     catalog_heap::CheckTableNotInUse(rel, "TRUNCATE")
-}
-
-// RelationSetNewRelfilenumber (relcache.c). The catalog write is the
-// unlocked-tuple shape every catalog updater here uses (no
-// InplaceUpdateTupleLock; that divergence rides repo-wide). The subid Cells
-// are set before CommandCounterIncrement so the inval rebuild's
-// copy_preserved carries them onto the rebuilt entry.
-pub(crate) fn RelationSetNewRelfilenumber<'mcx>(
-    mcx: Mcx<'mcx>,
-    rel: &Relation<'mcx>,
-    persistence: u8,
-) -> PgResult<()> {
-    if rel.is_mapped() {
-        unported("RelationSetNewRelfilenumber: mapped relations");
-    }
-    let newrelfilenumber =
-        catalog::GetNewRelFileNumber(mcx, rel.rd_rel.reltablespace, None, persistence)?;
-
-    let pg_class = table::table_open(mcx, RELATION_RELATION_ID, RowExclusiveLock)?;
-    let key = [oid_key(1, rel.rd_id)];
-    let mut scan =
-        genam::systable_beginscan(mcx, &pg_class, catalog::ClassOidIndexId, true, None, &key)?;
-    let reltup = genam::systable_getnext(mcx, &mut scan)?
-        .unwrap_or_else(|| panic!("could not find tuple for relation {}", rel.rd_id));
-
-    catalog_storage::RelationDropStorage(rel)?;
-
-    let mut newrlocator = rel.rd_locator.get();
-    newrlocator.relNumber = newrelfilenumber;
-    let (freeze_xid, minmulti) =
-        tableam::table_relation_set_new_filelocator(rel, &newrlocator, persistence as i8)?;
-
-    let mut values = [Datum::null(); Natts_pg_class];
-    let isnull = [false; Natts_pg_class];
-    let mut replace = [false; Natts_pg_class];
-    let mut set = |anum: usize, d: Datum| {
-        values[anum - 1] = d;
-        replace[anum - 1] = true;
-    };
-    set(Anum_pg_class_relfilenode, Datum::from_oid(newrelfilenumber));
-    set(Anum_pg_class_relpages, Datum::from_i32(0));
-    set(Anum_pg_class_reltuples, Datum::from_f32(-1.0));
-    set(Anum_pg_class_relallvisible, Datum::from_i32(0));
-    set(Anum_pg_class_relallfrozen, Datum::from_i32(0));
-    set(Anum_pg_class_relfrozenxid, Datum::from_transaction_id(freeze_xid));
-    set(Anum_pg_class_relminmxid, Datum::from_transaction_id(minmulti));
-    set(Anum_pg_class_relpersistence, Datum::from_char(persistence as i8));
-    let mut newtup =
-        heaptuple::heap_modify_tuple(mcx, reltup, pg_class.descr(), &values, &isnull, &replace)?;
-    let otid = reltup.t_self;
-    genam::systable_endscan(mcx, scan)?;
-    catalog_indexing::CatalogTupleUpdate(mcx, &pg_class, &otid, &mut newtup)?;
-    pg_class.close(RowExclusiveLock)?;
-
-    // RelationAssumeNewRelfilelocator + the physical-addr refresh the C
-    // in-place rebuild would perform on this same entry.
-    rel.rd_locator.set(newrlocator);
-    let subid = xact::GetCurrentSubTransactionId();
-    rel.rd_newRelfilelocatorSubid.set(subid);
-    if rel.rd_firstRelfilelocatorSubid.get() == types_core::InvalidSubTransactionId {
-        rel.rd_firstRelfilelocatorSubid.set(subid);
-    }
-
-    xact::CommandCounterIncrement()
 }

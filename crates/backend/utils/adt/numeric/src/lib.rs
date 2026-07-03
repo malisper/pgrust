@@ -7,6 +7,7 @@ pub mod builtins;
 pub mod io;
 pub mod math;
 pub mod ops;
+pub mod random;
 pub mod var;
 
 #[cfg(test)]
@@ -26,7 +27,7 @@ pub use arith::{
     add_var, cmp_var, cmp_var_common, div_var, div_var_int, div_var_int64, mul_var,
     select_div_scale, sub_var,
 };
-pub use io::{numeric_in, numeric_out_into, numeric_recv, numeric_send};
+pub use io::{get_str_from_var, numeric_in, numeric_out_into, numeric_recv, numeric_send};
 pub use math::{
     div_mod_var, exp_var, gcd_var, ln_var, log_var, mod_var, numeric_exp, numeric_exp_into,
     numeric_fac, numeric_gcd_common, numeric_lcm_common, numeric_ln, numeric_ln_into,
@@ -35,7 +36,8 @@ pub use math::{
 };
 pub use ops::*;
 pub use var::{
-    make_result, make_result_into, make_result_opt_error, NumericImage, NumericVar, VarView,
+    make_result, make_result_into, make_result_opt_error, var_to_uint64, NumericImage, NumericVar,
+    VarView,
 };
 
 pub type NumericDigit = i16;

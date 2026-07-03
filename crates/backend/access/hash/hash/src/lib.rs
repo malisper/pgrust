@@ -132,7 +132,14 @@ pub fn hashgettuple(scan: &mut IndexScanDescData<'_>, dir: ScanDirection) -> PgR
                 })?;
             }
             if (ctx.so.numKilled as usize) < MaxIndexTuplesPerPage {
-                ctx.so.killedItems.push(ctx.so.currPos.itemIndex);
+                // C's killedItems[numKilled++] overwrite (see nbtree twin):
+                // _hash_kill_items resets numKilled without truncating.
+                let n = ctx.so.numKilled as usize;
+                if n < ctx.so.killedItems.len() {
+                    ctx.so.killedItems[n] = ctx.so.currPos.itemIndex;
+                } else {
+                    ctx.so.killedItems.push(ctx.so.currPos.itemIndex);
+                }
                 ctx.so.numKilled += 1;
             }
         }

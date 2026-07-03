@@ -62,6 +62,23 @@ seam_core::seam!(
     pub fn lookup_pg_type_shape(typid: Oid) -> PgResult<Option<PgTypeShape>>
 );
 
+#[derive(Clone, Copy, Debug)]
+pub struct PgSequenceForm {
+    pub seqtypid: Oid,
+    pub seqstart: i64,
+    pub seqincrement: i64,
+    pub seqmax: i64,
+    pub seqmin: i64,
+    pub seqcache: i64,
+    pub seqcycle: bool,
+}
+
+seam_core::seam!(
+    // SearchSysCache1(SEQRELID, relid) decoded whole (nextval reads 5 of 8
+    // fields per miss); None mirrors !HeapTupleIsValid(tup).
+    pub fn lookup_pg_sequence_form(relid: Oid) -> PgResult<Option<PgSequenceForm>>
+);
+
 seam_core::seam!(
     // SearchSysCache1(AUTHOID, roleid) projected to pg_authid.rolname
     // (GetUserNameFromId's single-field read); None mirrors !HeapTupleIsValid.
@@ -194,6 +211,16 @@ pub struct PgProcShape {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PgProcFmgrShape {
+    pub prolang: Oid,
+    pub prorettype: Oid,
+    pub pronargs: i16,
+    pub proisstrict: bool,
+    pub proretset: bool,
+    pub prosecdef: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PgClassLsShape {
     pub relnamespace: Oid,
     pub reltype: Oid,
@@ -203,6 +230,7 @@ pub struct PgClassLsShape {
     pub relkind: i8,
     pub relpersistence: i8,
     pub relispartition: bool,
+    pub relhassubclass: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -252,8 +280,11 @@ pub struct PgTypeDefaultShape<'mcx> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PgRangeShape {
     pub rngsubtype: Oid,
-    pub rngcollation: Oid,
     pub rngmultitypid: Oid,
+    pub rngcollation: Oid,
+    pub rngsubopc: Oid,
+    pub rngcanonical: Oid,
+    pub rngsubdiff: Oid,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -417,6 +448,12 @@ seam_core::seam!(
     pub fn lookup_pg_opclass_shape(opclass: Oid) -> PgResult<Option<PgOpclassShape>>
 );
 
+// GetSysCacheOid3(CLAAMNAMENSP): pg_opclass by (opcmethod, opcname,
+// opcnamespace); InvalidOid when absent.
+seam_core::seam!(
+    pub fn lookup_pg_opclass_oid_by_name(amid: Oid, opcname: &str, opcnamespace: Oid) -> PgResult<Oid>
+);
+
 seam_core::seam!(
     pub fn lookup_pg_opfamily_shape(opfid: Oid) -> PgResult<Option<PgOpfamilyShape>>
 );
@@ -471,10 +508,6 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    pub fn lookup_pg_opclass_oid_exact(amoid: Oid, opcname: &str, nsp: Oid) -> PgResult<Oid>
-);
-
-seam_core::seam!(
     pub fn lookup_pg_opfamily_oid_exact(amoid: Oid, opfname: &str, nsp: Oid) -> PgResult<Oid>
 );
 
@@ -484,6 +517,18 @@ seam_core::seam!(
 
 seam_core::seam!(
     pub fn pg_operator_oprname(opno: Oid) -> PgResult<Option<NameData>>
+);
+
+seam_core::seam!(
+    // fmgr_info's non-builtin leg: the pg_proc fields FmgrInfo needs.
+    pub fn lookup_pg_proc_fmgr(funcid: Oid) -> PgResult<Option<PgProcFmgrShape>>
+);
+
+seam_core::seam!(
+    pub fn lookup_pg_proc_prosrc<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        funcid: Oid,
+    ) -> PgResult<Option<mcx::PgString<'mcx>>>
 );
 
 seam_core::seam!(
@@ -554,6 +599,10 @@ seam_core::seam!(
 
 seam_core::seam!(
     pub fn pg_type_typrelid(typid: Oid) -> PgResult<Option<Oid>>
+);
+
+seam_core::seam!(
+    pub fn pg_type_typnamespace(typid: Oid) -> PgResult<Option<Oid>>
 );
 
 seam_core::seam!(
@@ -788,6 +837,36 @@ seam_core::seam!(
     pub fn pg_type_typanalyze(typid: Oid) -> PgResult<Oid>
 );
 
+pub struct StatExtForm<'mcx> {
+    pub stxrelid: Oid,
+    pub keys: PgVec<'mcx, i16>,
+    pub kinds: PgVec<'mcx, u8>,
+    pub stattarget: i32,
+    pub has_exprs: bool,
+}
+
+seam_core::seam!(
+    // SearchSysCache1(STATEXTOID) projected to the planner's reads.
+    pub fn statext_form<'mcx>(mcx: Mcx<'mcx>, statoid: Oid) -> PgResult<Option<StatExtForm<'mcx>>>
+);
+
+seam_core::seam!(
+    // SearchSysCache2(STATEXTDATASTXOID) per-kind non-null flags
+    // (ndistinct, dependencies, mcv, expressions); None = no data row.
+    pub fn statext_data_kinds(statoid: Oid, inh: bool) -> PgResult<Option<(bool, bool, bool, bool)>>
+);
+
+seam_core::seam!(
+    // SysCacheGetAttr(STATEXTDATASTXOID, anum) detoasted varlena image
+    // (4-byte header included); None = NULL or no data row.
+    pub fn statext_data_blob<'mcx>(
+        mcx: Mcx<'mcx>,
+        statoid: Oid,
+        inh: bool,
+        anum: i32,
+    ) -> PgResult<Option<PgVec<'mcx, u8>>>
+);
+
 seam_core::seam!(
     pub fn pg_namespace_nspname(nspid: Oid) -> PgResult<Option<NameData>>
 );
@@ -817,6 +896,20 @@ pub struct PgTypeTypcacheShape {
 
 seam_core::seam!(
     pub fn lookup_pg_type_typcache_shape(typid: Oid) -> PgResult<Option<PgTypeTypcacheShape>>
+);
+
+// The pg_type columns typcache's domain-constraint crawl reads per stack level.
+#[derive(Clone, Copy, Debug)]
+pub struct PgTypeDomainShape {
+    pub typname: NameData,
+    pub typnamespace: Oid,
+    pub typtype: i8,
+    pub typnotnull: bool,
+    pub typbasetype: Oid,
+}
+
+seam_core::seam!(
+    pub fn pg_type_domain_shape(typid: Oid) -> PgResult<Option<PgTypeDomainShape>>
 );
 
 seam_core::seam!(
@@ -855,6 +948,24 @@ seam_core::seam!(
         mcx: Mcx<'mcx>,
         collid: Oid,
     ) -> PgResult<Option<PgCollationLocaleRow<'mcx>>>
+);
+
+// The pg_collation columns namespace.c's lookup_collation reads off one
+// COLLNAMEENCNSP probe.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PgCollationNameEncNspRow {
+    pub oid: Oid,
+    pub collprovider: u8,
+}
+
+seam_core::seam!(
+    // SearchSysCache3(COLLNAMEENCNSP, collname, encoding, collnamespace);
+    // None mirrors !HeapTupleIsValid.
+    pub fn lookup_pg_collation_by_name_enc_nsp(
+        collname: &str,
+        encoding: i32,
+        collnamespace: Oid,
+    ) -> PgResult<Option<PgCollationNameEncNspRow>>
 );
 
 // The pg_aggregate columns parse_func/prepagg/ExecInitAgg read off one
@@ -923,4 +1034,24 @@ seam_core::seam!(
         mcx: Mcx<'mcx>,
         proname: &str,
     ) -> PgResult<PgVec<'mcx, PgProcCandidate<'mcx>>>
+);
+
+// Form_pg_enum + the tuple-header xmin facts check_safe_enum_use reads.
+#[derive(Clone, Copy)]
+pub struct PgEnumShape {
+    pub oid: Oid,
+    pub enumtypid: Oid,
+    pub enumlabel: NameData,
+    pub xmin: types_core::TransactionId,
+    pub xmin_committed: bool,
+}
+
+seam_core::seam!(
+    // SearchSysCache1(ENUMOID, enum_oid); None mirrors !HeapTupleIsValid.
+    pub fn lookup_pg_enum_by_oid(enum_oid: Oid) -> PgResult<Option<PgEnumShape>>
+);
+
+seam_core::seam!(
+    // SearchSysCache2(ENUMTYPOIDNAME, typid, label).
+    pub fn lookup_pg_enum_by_typid_label(typid: Oid, label: &str) -> PgResult<Option<PgEnumShape>>
 );

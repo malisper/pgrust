@@ -217,9 +217,10 @@ pub fn FlushRelationBuffers(rlocator: RelFileLocatorBackend) -> PgResult<()> {
     panic!("unported callee reached from bufmgr.c: FlushRelationBuffers shared arm (phase 2)");
 }
 
+pub use drop_buffers::DropDatabaseBuffers;
+pub use write::FlushDatabaseBuffers;
+
 unported! {
-    fn FlushDatabaseBuffers(Oid) -> (), "FlushDatabaseBuffers";
-    fn DropDatabaseBuffers(Oid) -> (), "DropDatabaseBuffers";
     fn HoldingBufferPinThatDelaysRecovery() -> bool, "HoldingBufferPinThatDelaysRecovery";
     fn PrefetchBuffer(RelFileLocatorBackend, ForkNumber, BlockNumber) -> (), "PrefetchBuffer";
 }

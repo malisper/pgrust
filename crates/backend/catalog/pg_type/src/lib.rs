@@ -25,6 +25,7 @@ use catalog::CollationRelationId;
 const Natts_pg_type: usize = 32;
 
 pub const TYPTYPE_BASE: i8 = b'b' as i8;
+pub const TYPTYPE_DOMAIN: i8 = b'd' as i8;
 pub const TYPTYPE_COMPOSITE: i8 = b'c' as i8;
 pub const TYPTYPE_MULTIRANGE: i8 = b'm' as i8;
 pub const TYPCATEGORY_ARRAY: i8 = b'A' as i8;
@@ -129,10 +130,10 @@ pub fn TypeCreate<'mcx>(mcx: Mcx<'mcx>, p: &TypeCreateParams<'_>) -> PgResult<Ob
     let isDependentType = p.isImplicitArray
         || p.typeType == TYPTYPE_MULTIRANGE
         || (p.relationOid != InvalidOid && p.relationKind != RELKIND_COMPOSITE_TYPE);
-    if !isDependentType {
+    if !isDependentType && has_default_acl_for_type(mcx, p.ownerId, p.typeNamespace)? {
         panic!(
-            "TypeCreate (pg_type.c): non-dependent type \"{}\" unported \
-             (get_user_default_acl / pg_shdepend owner recording)",
+            "TypeCreate (pg_type.c): get_user_default_acl found a pg_default_acl entry \
+             for type \"{}\" — non-NULL typacl lane unported",
             p.typeName
         );
     }
@@ -223,10 +224,6 @@ fn GenerateTypeDependencies<'mcx>(
     }
     if !isDependentType {
         pg_depend::recordDependencyOnOwner(TYPE_RELATION_ID, typeObjectId, p.ownerId);
-        panic!(
-            "GenerateTypeDependencies (pg_type.c): recordDependencyOnNewAcl unported \
-             for non-dependent type {typeObjectId}"
-        );
     }
     // recordDependencyOnCurrentExtension: no-op — CREATE EXTENSION scripts
     // (extension.c creating_extension) are unported, so it can never fire.
@@ -281,8 +278,11 @@ fn GenerateTypeDependencies<'mcx>(
     Ok(())
 }
 
-// AssignTypeArrayOid (typecmds.c); IsBinaryUpgrade arm out of scope.
+// AssignTypeArrayOid (typecmds.c); IsBinaryUpgrade arm loud below.
 pub fn AssignTypeArrayOid<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Oid> {
+    if init_small::globals::IsBinaryUpgrade() {
+        panic!("pg_type: binary-upgrade array-OID override (typecmds.c AssignTypeArrayOid) unported");
+    }
     let pg_type = table::table_open(mcx, TYPE_RELATION_ID, AccessShareLock)?;
     let oid = catalog::GetNewOidWithIndex(mcx, &pg_type, TypeOidIndexId, Anum_pg_type_oid)?;
     pg_type.close(AccessShareLock)?;
@@ -328,6 +328,70 @@ pub fn makeArrayTypeName(typeName: &str, typeNamespace: Oid) -> PgResult<NameDat
         let suffix = pass.to_string();
         arr_name = make_array_object_name(typeName, Some(&suffix));
     }
+}
+
+// RenameTypeInternal (pg_type.c): rename the type row, then chase the array
+// type with a fresh makeArrayTypeName.
+pub fn RenameTypeInternal<'mcx>(
+    mcx: Mcx<'mcx>,
+    typeOid: Oid,
+    newTypeName: &str,
+    typeNamespace: Oid,
+) -> PgResult<()> {
+    const Anum_pg_type_typname: usize = 2;
+    const Anum_pg_type_typarray: i32 = 15;
+    if syscache_seams::lookup_pg_type_oid_by_name::call(newTypeName, typeNamespace)? != InvalidOid
+    {
+        return Err(Box::new(
+            PgError::new(ERROR, format!("type \"{newTypeName}\" already exists"))
+                .with_sqlstate(ERRCODE_DUPLICATE_OBJECT),
+        ));
+    }
+    let pg_type_rel = table::table_open(mcx, TYPE_RELATION_ID, RowExclusiveLock)?;
+    let mut key = types_scan::scankey::ScanKeyData::empty();
+    key.sk_attno = Anum_pg_type_oid;
+    key.sk_strategy = types_scan::scankey::BTEqualStrategyNumber;
+    key.sk_collation = 0;
+    key.sk_func = fmgr_seams::fmgr_info::call(types_core::fmgr::F_OIDEQ)
+        .unwrap_or_else(|e| panic!("fmgr_info(F_OIDEQ) failed: {e:?}"));
+    key.sk_argument = Datum::from_oid(typeOid);
+    let mut scan =
+        genam::systable_beginscan(mcx, &pg_type_rel, TypeOidIndexId, true, None, &[key])?;
+    let tup = genam::systable_getnext(mcx, &mut scan)?
+        .unwrap_or_else(|| panic!("cache lookup failed for type {typeOid}"));
+    let desc = pg_type_rel.descr();
+    let mut isnull = false;
+    // SAFETY: fixed NOT NULL pg_type column under its descriptor.
+    let arrayOid = unsafe {
+        types_tuple::heap_getattr(tup, Anum_pg_type_typarray, desc, &mut isnull)
+    }
+    .as_oid();
+
+    assert!(newTypeName.len() < NAMEDATALEN as usize, "type name truncation unported");
+    let mut namebuf: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, 64)?;
+    mcx::vec_append_bytes(&mut namebuf, newTypeName.as_bytes())?;
+    mcx::vec_append_bytes(&mut namebuf, &[0u8; 64][..64 - newTypeName.len()])?;
+    let n = desc.natts as usize;
+    let mut values: mcx::PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, n)?;
+    let mut nulls: mcx::PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, n)?;
+    let mut replace: mcx::PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, n)?;
+    values.resize(n, Datum::null());
+    nulls.resize(n, false);
+    replace.resize(n, false);
+    values[Anum_pg_type_typname - 1] = Datum::from_usize(namebuf.as_ptr() as usize);
+    replace[Anum_pg_type_typname - 1] = true;
+    let mut newtup = heaptuple::heap_modify_tuple(mcx, tup, desc, &values, &nulls, &replace)?;
+    let otid = tup.t_self;
+    genam::systable_endscan(mcx, scan)?;
+    catalog_indexing::CatalogTupleUpdate(mcx, &pg_type_rel, &otid, &mut newtup)?;
+    pg_type_rel.close(RowExclusiveLock)?;
+
+    if arrayOid != InvalidOid {
+        let arr = makeArrayTypeName(newTypeName, typeNamespace)?;
+        let arr_str = core::str::from_utf8(arr.name_str()).expect("array type name UTF-8");
+        RenameTypeInternal(mcx, arrayOid, arr_str, typeNamespace)?;
+    }
+    Ok(())
 }
 
 // RemoveTypeById (typecmds.c); enum/range cleanup arms are loud.
@@ -380,4 +444,54 @@ pub fn moveArrayTypeName(typeOid: Oid, typeName: &str, typeNamespace: Oid) -> Pg
         "moveArrayTypeName (pg_type.c): RenameTypeInternal lane unported \
          (autogenerated array type {typeOid} shadows \"{typeName}\")"
     );
+}
+
+// get_user_default_acl (aclchk.c) reduced to the fresh-initdb decision: any
+// matching pg_default_acl row (per-schema or global, DEFACLOBJ_TYPE) means a
+// non-NULL typacl, which is unported; no row means typacl NULL.
+fn has_default_acl_for_type<'mcx>(mcx: Mcx<'mcx>, ownerId: Oid, nsp: Oid) -> PgResult<bool> {
+    const DEFAULT_ACL_RELATION_ID: Oid = 826;
+    const DEFAULT_ACL_ROLE_NSP_OBJ_INDEX_ID: Oid = 827;
+    const Anum_pg_default_acl_defaclrole: AttrNumber = 2;
+    const Anum_pg_default_acl_defaclnamespace: AttrNumber = 3;
+    const Anum_pg_default_acl_defaclobjtype: AttrNumber = 4;
+    const DEFACLOBJ_TYPE: i8 = b'T' as i8;
+
+    let rel = table::table_open(mcx, DEFAULT_ACL_RELATION_ID, AccessShareLock)?;
+    let oideq = fmgr_seams::fmgr_info::call(types_core::fmgr::F_OIDEQ)
+        .unwrap_or_else(|e| panic!("fmgr_info(F_OIDEQ) failed: {e:?}"));
+    let chareq = fmgr_seams::fmgr_info::call(types_core::fmgr::F_CHAREQ)
+        .unwrap_or_else(|e| panic!("fmgr_info(F_CHAREQ) failed: {e:?}"));
+    let mut found = false;
+    for probe_nsp in [nsp, InvalidOid] {
+        let mut key = |attno: AttrNumber, func, arg: Datum| {
+            let mut k = types_scan::scankey::ScanKeyData::empty();
+            k.sk_attno = attno;
+            k.sk_strategy = types_scan::scankey::BTEqualStrategyNumber;
+            k.sk_collation = 0;
+            k.sk_func = func;
+            k.sk_argument = arg;
+            k
+        };
+        let keys = [
+            key(Anum_pg_default_acl_defaclrole, oideq.clone(), Datum::from_oid(ownerId)),
+            key(Anum_pg_default_acl_defaclnamespace, oideq.clone(), Datum::from_oid(probe_nsp)),
+            key(Anum_pg_default_acl_defaclobjtype, chareq.clone(), Datum::from_i8(DEFACLOBJ_TYPE)),
+        ];
+        let mut scan = genam::systable_beginscan(
+            mcx,
+            &rel,
+            DEFAULT_ACL_ROLE_NSP_OBJ_INDEX_ID,
+            true,
+            None,
+            &keys,
+        )?;
+        found |= genam::systable_getnext(mcx, &mut scan)?.is_some();
+        genam::systable_endscan(mcx, scan)?;
+        if found {
+            break;
+        }
+    }
+    rel.close(AccessShareLock)?;
+    Ok(found)
 }

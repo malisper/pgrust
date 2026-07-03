@@ -14,6 +14,7 @@ pub struct ScannedPgClass {
     // dropped from it).
     pub relchecks: i16,
     pub relhastriggers: bool,
+    pub relhasrules: bool,
     pub options: Option<RdOptions>,
 }
 
@@ -27,6 +28,8 @@ pub struct IndexAccessInfo {
     // BTORDER_PROC slot per key column (std Vec: rd_supportinfo's shape);
     // without it the first scan of pg_amproc's own index recurses.
     pub supportinfo: Vec<Option<types_fmgr::FmgrInfo>>,
+    // C rd_support: nkey x amsupport proc OIDs, row-major.
+    pub support: PgVec<'static, Oid>,
 }
 
 seam_core::seam!(
@@ -98,4 +101,11 @@ seam_core::seam!(
         mcx: Mcx<'static>,
         relid: Oid,
     ) -> PgResult<Option<types_trigger::TriggerDesc<'static>>>
+);
+
+seam_core::seam!(
+    pub fn scan_pg_statistic_ext_oids<'mcx>(
+        mcx: Mcx<'mcx>,
+        stxrelid: Oid,
+    ) -> PgResult<PgVec<'mcx, Oid>>
 );

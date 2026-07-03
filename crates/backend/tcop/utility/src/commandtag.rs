@@ -118,7 +118,18 @@ pub fn CreateCommandTag(parsetree: Node<'_>) -> CommandTag {
         T_CommentStmt => CMDTAG_COMMENT,
         T_SecLabelStmt => CMDTAG_SECURITY_LABEL,
         T_CopyStmt => CMDTAG_COPY,
-        T_RenameStmt => payload_gap("CreateCommandTag", "RenameStmt"),
+        // AlterObjectTypeCommandTag over stmt->renameType; ported grammar
+        // productions only emit OBJECT_TABLE / OBJECT_COLUMN-on-table.
+        T_RenameStmt => {
+            let stmt = parsetree
+                .as_variant::<types_nodes::parsenodes::RenameStmt>()
+                .expect("RenameStmt");
+            match stmt.renameType {
+                types_nodes::parsenodes::ObjectType::OBJECT_TABLE
+                | types_nodes::parsenodes::ObjectType::OBJECT_COLUMN => CMDTAG_ALTER_TABLE,
+                _ => payload_gap("CreateCommandTag", "RenameStmt non-table"),
+            }
+        }
         T_AlterObjectDependsStmt => payload_gap("CreateCommandTag", "AlterObjectDependsStmt"),
         T_AlterObjectSchemaStmt => payload_gap("CreateCommandTag", "AlterObjectSchemaStmt"),
         T_AlterOwnerStmt => payload_gap("CreateCommandTag", "AlterOwnerStmt"),
@@ -167,7 +178,13 @@ pub fn CreateCommandTag(parsetree: Node<'_>) -> CommandTag {
         T_CreateRangeStmt => CMDTAG_CREATE_TYPE,
         T_AlterEnumStmt => CMDTAG_ALTER_TYPE,
         T_ViewStmt => CMDTAG_CREATE_VIEW,
-        T_CreateFunctionStmt => payload_gap("CreateCommandTag", "CreateFunctionStmt"),
+        T_CreateFunctionStmt => {
+            if parsetree.as_create_function_stmt().unwrap().is_procedure {
+                CMDTAG_CREATE_PROCEDURE
+            } else {
+                CMDTAG_CREATE_FUNCTION
+            }
+        }
         T_IndexStmt => CMDTAG_CREATE_INDEX,
         T_RuleStmt => CMDTAG_CREATE_RULE,
         T_CreateSeqStmt => CMDTAG_CREATE_SEQUENCE,
@@ -192,7 +209,24 @@ pub fn CreateCommandTag(parsetree: Node<'_>) -> CommandTag {
             }
         }
         T_ExplainStmt => CMDTAG_EXPLAIN,
-        T_CreateTableAsStmt => payload_gap("CreateCommandTag", "CreateTableAsStmt"),
+        T_CreateTableAsStmt => {
+            let stmt = parsetree
+                .as_variant::<types_nodes::rawnodes::CreateTableAsStmt>()
+                .expect("CreateTableAsStmt");
+            match stmt.objtype {
+                types_nodes::parsenodes::ObjectType::OBJECT_TABLE => {
+                    if stmt.is_select_into {
+                        CMDTAG_SELECT_INTO
+                    } else {
+                        CMDTAG_CREATE_TABLE_AS
+                    }
+                }
+                types_nodes::parsenodes::ObjectType::OBJECT_MATVIEW => {
+                    CMDTAG_CREATE_MATERIALIZED_VIEW
+                }
+                other => panic!("unexpected CreateTableAsStmt.objtype {other:?}"),
+            }
+        }
         T_RefreshMatViewStmt => CMDTAG_REFRESH_MATERIALIZED_VIEW,
         T_AlterSystemStmt => CMDTAG_ALTER_SYSTEM,
         T_VariableSetStmt => {

@@ -32,19 +32,6 @@ pub fn transformAggregateCall<'mcx>(
              unported — backend-parser-agg ordered-set lane"
         );
     }
-    if !agg_order.is_nil() {
-        panic!(
-            "transformAggregateCall (parse_agg.c): agg ORDER BY needs transformSortClause \
-             (parse_clause.c) resjunk tlist handling — backend-parser-agg ordered lane"
-        );
-    }
-    if agg_distinct {
-        panic!(
-            "transformAggregateCall (parse_agg.c): DISTINCT needs transformDistinctClause \
-             (parse_clause.c) — backend-parser-agg distinct lane"
-        );
-    }
-
     let mut tlist = NodeList::nil();
     let mut attno: i16 = 1;
     for arg in args {
@@ -53,16 +40,38 @@ pub fn transformAggregateCall<'mcx>(
         attno += 1;
     }
     agg.aggdirectargs = NodeList::nil();
-    agg.args = tlist;
-    agg.aggorder = NodeList::nil();
-    agg.aggdistinct = NodeList::nil();
 
-    // Divergence: aggargtypes from caller-computed exprType values (nodeFuncs
-    // slice lives in parse_expr; parse_oper::make_op precedent).
     let mut argtypes = types_nodes::list::OidList::nil();
-    for &t in arg_types {
-        argtypes.lappend(mcx, t)?;
+    if !agg_order.is_nil() || agg_distinct {
+        // ORDER BY exprs not in the arg list join tlist as resjunk entries,
+        // numbered from attno via p_next_resno.
+        let save_next_resno = pstate.p_next_resno;
+        pstate.p_next_resno = attno as i32;
+        let (torder, tdistinct, tlist_argtypes) =
+            parse_clause_seams::transform_agg_order_distinct::call(
+                mcx,
+                pstate,
+                &mut tlist,
+                agg_order,
+                agg_distinct,
+            )?;
+        pstate.p_next_resno = save_next_resno;
+        agg.aggorder = torder;
+        agg.aggdistinct = tdistinct;
+        for &t in tlist_argtypes.iter() {
+            argtypes.lappend(mcx, t)?;
+        }
+    } else {
+        agg.aggorder = NodeList::nil();
+        agg.aggdistinct = NodeList::nil();
+        // Divergence: aggargtypes from caller-computed exprType values
+        // (nodeFuncs slice lives in parse_expr; parse_oper::make_op
+        // precedent).
+        for &t in arg_types {
+            argtypes.lappend(mcx, t)?;
+        }
     }
+    agg.args = tlist;
     agg.aggargtypes = argtypes;
 
     agg.agglevelsup =
@@ -221,10 +230,12 @@ fn check_agg_arguments<'mcx>(
     filter: Option<Node<'mcx>>,
     _agglocation: ParseLoc,
 ) -> PgResult<i32> {
-    debug_assert!(filter.is_none());
     let mut ctx = AggArgContext { min_varlevel: -1, min_agglevel: -1, agg_loc: -1 };
     for node in args {
         check_agg_arguments_walker(pstate, node, &mut ctx)?;
+    }
+    if let Some(f) = filter {
+        check_agg_arguments_walker(pstate, f, &mut ctx)?;
     }
 
     let agglevel = match (ctx.min_varlevel, ctx.min_agglevel) {
@@ -315,6 +326,9 @@ fn check_agg_arguments_walker<'mcx>(
         NodeTag::T_RelabelType => {
             check_agg_arguments_walker(pstate, node.as_relabel_type().unwrap().arg, ctx)
         }
+        NodeTag::T_CollateExpr => {
+            check_agg_arguments_walker(pstate, node.as_collate_expr().unwrap().arg, ctx)
+        }
         NodeTag::T_BoolExpr => {
             for arg in &node.as_bool_expr().unwrap().args {
                 check_agg_arguments_walker(pstate, arg, ctx)?;
@@ -325,6 +339,22 @@ fn check_agg_arguments_walker<'mcx>(
             Some(arg) => check_agg_arguments_walker(pstate, arg, ctx),
             None => Ok(()),
         },
+        NodeTag::T_BooleanTest => match node.as_boolean_test().unwrap().arg {
+            Some(arg) => check_agg_arguments_walker(pstate, arg, ctx),
+            None => Ok(()),
+        },
+        NodeTag::T_DistinctExpr => {
+            for arg in &node.as_distinct_expr().unwrap().args {
+                check_agg_arguments_walker(pstate, arg, ctx)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_RowExpr => {
+            for arg in &node.as_row_expr().unwrap().args {
+                check_agg_arguments_walker(pstate, arg, ctx)?;
+            }
+            Ok(())
+        }
         NodeTag::T_List => {
             for elem in node.as_list().unwrap() {
                 check_agg_arguments_walker(pstate, elem, ctx)?;
@@ -802,6 +832,9 @@ fn finalize_grouping_exprs<'mcx>(
         NodeTag::T_RelabelType => {
             finalize_grouping_exprs(mcx, pstate, qry, node.as_relabel_type().unwrap().arg)
         }
+        NodeTag::T_CollateExpr => {
+            finalize_grouping_exprs(mcx, pstate, qry, node.as_collate_expr().unwrap().arg)
+        }
         NodeTag::T_BoolExpr => {
             for arg in &node.as_bool_expr().unwrap().args {
                 finalize_grouping_exprs(mcx, pstate, qry, arg)?;
@@ -940,6 +973,9 @@ fn check_ungrouped_columns<'mcx>(
         NodeTag::T_RelabelType => {
             check_ungrouped_columns(pstate, qry, node.as_relabel_type().unwrap().arg)
         }
+        NodeTag::T_CollateExpr => {
+            check_ungrouped_columns(pstate, qry, node.as_collate_expr().unwrap().arg)
+        }
         NodeTag::T_BoolExpr => {
             for arg in &node.as_bool_expr().unwrap().args {
                 check_ungrouped_columns(pstate, qry, arg)?;
@@ -950,6 +986,22 @@ fn check_ungrouped_columns<'mcx>(
             Some(arg) => check_ungrouped_columns(pstate, qry, arg),
             None => Ok(()),
         },
+        NodeTag::T_BooleanTest => match node.as_boolean_test().unwrap().arg {
+            Some(arg) => check_ungrouped_columns(pstate, qry, arg),
+            None => Ok(()),
+        },
+        NodeTag::T_DistinctExpr => {
+            for arg in &node.as_distinct_expr().unwrap().args {
+                check_ungrouped_columns(pstate, qry, arg)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_RowExpr => {
+            for arg in &node.as_row_expr().unwrap().args {
+                check_ungrouped_columns(pstate, qry, arg)?;
+            }
+            Ok(())
+        }
         NodeTag::T_Const | NodeTag::T_Param | NodeTag::T_CaseTestExpr => Ok(()),
         other => panic!(
             "check_ungrouped_columns (parse_agg.c): arm for {other:?} unported — \

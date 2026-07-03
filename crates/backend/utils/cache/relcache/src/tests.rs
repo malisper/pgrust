@@ -119,7 +119,7 @@ fn fake_scan(target: Oid, _index_ok: bool, _fnh: bool) -> PgResult<Option<relcac
     }
     Ok(ROWS.with(|r| {
         r.borrow().get(&target).map(|f| relcache_build_seams::ScannedPgClass {
-            relchecks: 0, relhastriggers: false,
+            relchecks: 0, relhastriggers: false, relhasrules: false,
             form: f.form.clone(),
             options: None,
         })
@@ -175,12 +175,15 @@ fn fake_index_info(
             indisready: true,
             indkey,
             has_indpred: false,
+        indexprs_src: None,
+        indpred_src: None,
         },
         opcintype: PgVec::new_in(mcx),
         opfamily: PgVec::new_in(mcx),
         indoption: PgVec::new_in(mcx),
         indcollation: PgVec::new_in(mcx),
         supportinfo: Vec::new(),
+        support: PgVec::new_in(mcx),
     })
 }
 

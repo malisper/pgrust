@@ -1,14 +1,17 @@
 //! json.c, the TEXT-backed `json` type: json_in validates via the recursive
-//! descent parser (jsonapi) and stores the text verbatim; json_out is verbatim.
-//! json_recv/json_send mirror text over the wire with a validating recv.
-//!
-//! Separate lanes, loud via the unported-OID fmgr gap (not registered here):
-//! jsonb, jsonpath, the json_agg/build/object families, the ->/->> extraction
-//! operators, array_to_json/row_to_json/to_json/json_typeof (need typcache +
-//! composite/array deform), and the need_escapes de-escaping parser path.
+//! descent parser (jsonapi) and stores the text verbatim; json_out is
+//! verbatim. Rendering (to_json/row_to_json/array_to_json, builders,
+//! aggregates) and the jsonfuncs.c json-half workers are lex-based over the
+//! stored text. Loud via the unported-OID fmgr gap: json_populate_record
+//! family, json_object_agg_unique[_strict], jsonpath.
 
+pub mod aggs;
 pub mod builtins;
+pub mod funcs;
+pub mod getpath;
 pub mod jsonapi;
+pub mod srfs;
+pub mod tojson;
 #[cfg(test)]
 mod tests;
 
@@ -88,14 +91,20 @@ pub fn json_send<'mcx>(mcx: Mcx<'mcx>, t: &[u8]) -> PgResult<Bytea<'mcx>> {
     Ok(pqformat::pq_endtypsend(sbuf))
 }
 
-/// C: escape_json — produce a JSON string literal for a NUL-free cstring.
-/// Reusable helper for the (loud) datum_to_json/composite lane; validated by
-/// tests until that lane lands.
+/// C: escape_json/escape_json_with_len — produce a JSON string literal.
+/// Clean runs are appended in bulk (C's Vector8 scan + flush shape).
 pub fn escape_json(buf: &mut StringInfo<'_>, s: &[u8]) -> PgResult<()> {
+    buf.enlarge(s.len() + 2)?;
     buf.append_byte(b'"')?;
-    for &c in s {
-        escape_json_char(buf, c)?;
+    let mut copypos = 0;
+    for (i, &c) in s.iter().enumerate() {
+        if c < b' ' || c == b'"' || c == b'\\' {
+            buf.append_bytes(&s[copypos..i])?;
+            escape_json_char(buf, c)?;
+            copypos = i + 1;
+        }
     }
+    buf.append_bytes(&s[copypos..])?;
     buf.append_byte(b'"')
 }
 

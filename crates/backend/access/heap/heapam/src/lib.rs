@@ -41,9 +41,12 @@ use heapam_visibility_seams as hv_seam;
 pub mod bitmap;
 pub mod dml;
 pub mod fetch;
+pub mod freeze;
 pub mod hio;
+pub mod index_delete;
 pub mod inplace;
 pub use fetch::{heap_fetch, heap_fetch_dirty, heap_get_latest_tid, heap_hot_search_buffer};
+pub use index_delete::heap_index_delete_tuples;
 pub use dml::{heap_abort_speculative, heap_delete, heap_finish_speculative, heap_insert, heap_lock_tuple, heap_multi_insert, heap_update, simple_heap_delete, simple_heap_insert, simple_heap_update};
 pub use hio::{GetBulkInsertState, RelationGetBufferForTuple, RelationPutHeapTuple, ReleaseBulkInsertStatePin};
 pub use inplace::{heap_inplace_lock, heap_inplace_unlock, heap_inplace_update_and_unlock};
@@ -102,10 +105,18 @@ fn unexpected_during_logical_decoding() -> bool {
     TransactionIdIsValid(CHECK_XID_ALIVE)
 }
 
-fn check_for_interrupts() {
+#[cold]
+#[inline(never)]
+fn process_interrupts() -> PgResult<()> {
+    postgres_seams::check_for_interrupts::call()
+}
+
+#[inline(always)]
+fn check_for_interrupts() -> PgResult<()> {
     if init_small::globals::InterruptPending() {
-        unported("ProcessInterrupts (tcop/postgres.c)");
+        return process_interrupts();
     }
+    Ok(())
 }
 
 #[inline]
@@ -588,7 +599,7 @@ fn heap_fetch_next_buffer(scan: &mut HeapScanDescData<'_>, dir: ScanDirection) -
         pin.release();
     }
 
-    check_for_interrupts();
+    check_for_interrupts()?;
 
     // Direction change = read_stream_reset: prefetch restarts at the current block.
     if scan.rs_dir != dir {
@@ -1026,6 +1037,12 @@ pub fn heap_rescan(
 
 pub fn heap_endscan(mut scan: HeapScanDescData<'_>) -> PgResult<()> {
     scan.rs_ctup = None;
+    pgstat::relation::pgstat_count_heap_scan_batched(
+        scan.rs_base.rs_rd.rd_id,
+        scan.rs_base.rs_rd.rd_rel.relisshared,
+        scan.rs_pgstat_numscans,
+        scan.rs_pgstat_getnext,
+    );
     if let Some(pin) = scan.rs_cbuf.take() {
         pin.release();
     }

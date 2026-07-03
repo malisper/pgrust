@@ -43,6 +43,12 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // TypeIsVisible (namespace.c): syscache reads + path recompute, so it
+    // carries the cache-lookup-failed elog(ERROR) surface.
+    pub fn type_is_visible(typid: Oid) -> PgResult<bool>
+);
+
+seam_core::seam!(
     // GetTempNamespaceProcNumber(namespaceId) (namespace.c): reads the
     // pg_namespace syscache (get_namespace_name), so it carries that lookup's
     // elog(ERROR) surface.
@@ -71,3 +77,4 @@ seam_core::seam!(
     // No Mcx: the owner runs its catalog lookups in a scratch context.
     pub fn find_default_conversion_proc(for_encoding: i32, to_encoding: i32) -> PgResult<Oid>
 );
+

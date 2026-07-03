@@ -604,7 +604,7 @@ fn ExpandAllTables<'mcx>(
         if !nsitem.p_cols_visible {
             continue;
         }
-        debug_assert!(!nsitem.p_lateral_only);
+        debug_assert!(!nsitem.p_lateral_only.get());
         found_table = true;
         target.concat(
             mcx,
@@ -686,6 +686,13 @@ pub fn FigureColname<'mcx>(node: Node<'mcx>) -> &'mcx str {
     let mut name = None;
     FigureColnameInternal(node, &mut name);
     name.unwrap_or("?column?")
+}
+
+// FigureIndexColname (parse_utilcmd.c): None when nothing suggests a name.
+pub fn FigureIndexColname<'mcx>(node: Node<'mcx>) -> Option<&'mcx str> {
+    let mut name = None;
+    FigureColnameInternal(node, &mut name);
+    name
 }
 
 // C's strength contract: 0 = no name, 1 = weak (type-cast name), 2 = good.
@@ -813,8 +820,37 @@ fn FigureColnameInternal<'mcx>(node: Node<'mcx>, name: &mut Option<&'mcx str>) -
                 _ => 0,
             }
         }
-        // NullTest takes C's default arm: no name.
-        NodeTag::T_A_Const | NodeTag::T_ParamRef | NodeTag::T_BoolExpr | NodeTag::T_NullTest => 0,
+        NodeTag::T_CollateClause => match node.as_collate_clause().unwrap().arg {
+            Some(arg) => FigureColnameInternal(arg, name),
+            None => 0,
+        },
+        NodeTag::T_RowExpr => {
+            *name = Some("row");
+            2
+        }
+        NodeTag::T_SQLValueFunction => {
+            use types_nodes::SQLValueFunctionOp::*;
+            *name = Some(match node.as_sql_value_function().unwrap().op {
+                SVFOP_CURRENT_DATE => "current_date",
+                SVFOP_CURRENT_TIME | SVFOP_CURRENT_TIME_N => "current_time",
+                SVFOP_CURRENT_TIMESTAMP | SVFOP_CURRENT_TIMESTAMP_N => "current_timestamp",
+                SVFOP_LOCALTIME | SVFOP_LOCALTIME_N => "localtime",
+                SVFOP_LOCALTIMESTAMP | SVFOP_LOCALTIMESTAMP_N => "localtimestamp",
+                SVFOP_CURRENT_ROLE => "current_role",
+                SVFOP_CURRENT_USER => "current_user",
+                SVFOP_USER => "user",
+                SVFOP_SESSION_USER => "session_user",
+                SVFOP_CURRENT_CATALOG => "current_catalog",
+                SVFOP_CURRENT_SCHEMA => "current_schema",
+            });
+            2
+        }
+        // NullTest/BooleanTest take C's default arm: no name.
+        NodeTag::T_A_Const
+        | NodeTag::T_ParamRef
+        | NodeTag::T_BoolExpr
+        | NodeTag::T_NullTest
+        | NodeTag::T_BooleanTest => 0,
         other => panic!(
             "FigureColnameInternal (parse_target.c): arm for {other:?} unported — \
              unit backend-parser-parse-target"

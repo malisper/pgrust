@@ -162,6 +162,8 @@ pub fn PostmasterMain(argv: &[String]) -> PgResult<()> {
 
     getInstallationPaths(argv.first().map(|s| s.as_str()).unwrap_or(PROGNAME));
 
+    crate::crash_signals::install_crash_signal_reporter();
+
     libpq_pqsignal::pqinitmask();
     libpq_pqsignal::block_signals();
 

@@ -19,10 +19,16 @@ relmapper = { path = "../../../utils/cache/relmapper" }
 clog = { path = "../clog" }
 multixact = { path = "../multixact" }
 transam_xlog_seams = { path = "../transam_xlog_seams" }
+dbcommands_seams = { path = "../../../commands/dbcommands_seams" }
 storage_xlog = { path = "../../../catalog/storage_xlog" }
 standby = { path = "../../../storage/ipc/standby" }
 heapam_xlog = { path = "../../heap/heapam_xlog" }
 nbtree_xlog = { path = "../../nbtree/nbtree_xlog" }
 hash_xlog = { path = "../../hash/hash_xlog" }
+sequence_xlog = { path = "../../../commands/sequence_xlog" }
+brin_xlog = { path = "../../brin/brin_xlog" }
 xact = { path = "../xact" }
 rmgrdesc = { path = "../../rmgrdesc" }
+gin_xlog = { path = "../../gin/gin_xlog" }
+spgist_xlog = { path = "../../spgist/spgist_xlog" }
+gist_xlog = { path = "../../gist/gist_xlog" }

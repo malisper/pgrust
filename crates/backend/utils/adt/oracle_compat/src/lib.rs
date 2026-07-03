@@ -1,6 +1,8 @@
 //! oracle_compat.c: lower/upper/initcap/casefold (case kernels in
 //! [`casemap`]), lpad/rpad, dotrim + text/bytea trim family, translate,
-//! ascii, chr, repeat. Value cores over detoasted payload slices, full
+//! ascii, chr, repeat; plus varlena.c's text_left/text_right/text_reverse
+//! (the character-counting surface). Value cores over detoasted payload
+//! slices, full
 //! 4B-header [`Varlena`] images out built in one pass (single reserve +
 //! byte-copy appends). btrim1/ltrim1/rtrim1 are the fixed-' ' one-arg SQL
 //! forms.
@@ -527,6 +529,73 @@ fn chr_not_positive_err() -> PgError {
 #[inline(never)]
 fn chr_nul_err() -> PgError {
     PgError::error("null character not permitted").with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED)
+}
+
+// varlena.c text_left, n >= 0 arm inlined from text_substring(str, 1, n,
+// false) over an already-detoasted slice: S=1 kills the S1/E1 clamps and the
+// slice math; 1+n overflow means "run to end of string" (not an error).
+pub fn text_left<'mcx>(mcx: Mcx<'mcx>, t: &[u8], n: i32) -> PgResult<Varlena<'mcx>> {
+    if n < 0 {
+        let n = mbutils::pg_mbstrlen_with_len(t) + n;
+        let rlen = mbutils::pg_mbcharcliplen(t, t.len() as i32, n)?;
+        return text_result(mcx, &t[..rlen as usize]);
+    }
+    if n.checked_add(1).is_none() {
+        return text_result(mcx, t);
+    }
+    if mbutils::pg_database_encoding_max_length() == 1 {
+        return text_result(mcx, &t[..(n as usize).min(t.len())]);
+    }
+    if n == 0 || t.is_empty() {
+        return text_result(mcx, b"");
+    }
+    let rlen = mbutils::pg_mbcharcliplen(t, t.len() as i32, n)?;
+    text_result(mcx, &t[..rlen as usize])
+}
+
+pub fn text_right<'mcx>(mcx: Mcx<'mcx>, t: &[u8], n: i32) -> PgResult<Varlena<'mcx>> {
+    // C's `n = -n` wraps for INT32_MIN (stays negative, clips to offset 0).
+    let n = if n < 0 {
+        n.wrapping_neg()
+    } else {
+        mbutils::pg_mbstrlen_with_len(t) - n
+    };
+    let off = mbutils::pg_mbcharcliplen(t, t.len() as i32, n)? as usize;
+    text_result(mcx, &t[off..])
+}
+
+pub fn text_reverse<'mcx>(mcx: Mcx<'mcx>, t: &[u8]) -> PgResult<Varlena<'mcx>> {
+    let len = t.len();
+    let mut image = image_with_capacity(mcx, VARHDRSZ + len)?;
+    let base = image.as_mut_ptr();
+    if mbutils::pg_database_encoding_max_length() > 1 {
+        let mb = MbWalk::new();
+        let mut src = 0usize;
+        let mut dst = len;
+        while src < len {
+            let sz = mb.mblen_range(t, src)?;
+            dst -= sz;
+            // SAFETY: mblen_range bounds src+sz <= len, so dst stays in
+            // [0, len); char sizes sum to len, covering every payload byte
+            // exactly once before set_len below.
+            unsafe {
+                core::ptr::copy_nonoverlapping(t.as_ptr().add(src), base.add(VARHDRSZ + dst), sz);
+            }
+            src += sz;
+        }
+    } else {
+        for (i, &b) in t.iter().enumerate() {
+            // SAFETY: VARHDRSZ + len <= capacity; index < len.
+            unsafe {
+                *base.add(VARHDRSZ + len - 1 - i) = b;
+            }
+        }
+    }
+    // SAFETY: header + all len payload bytes written above.
+    unsafe {
+        image.set_len(VARHDRSZ + len);
+    }
+    Ok(Varlena::from_image(image))
 }
 
 pub fn repeat<'mcx>(mcx: Mcx<'mcx>, string: &[u8], count: i32) -> PgResult<Varlena<'mcx>> {

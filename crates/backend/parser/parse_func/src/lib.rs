@@ -72,6 +72,9 @@ pub fn ParseFuncOrColumn<'mcx>(
     fargs: NodeList<'mcx>,
     actual_arg_types: &[Oid],
     fn_call: &FuncCall<'mcx>,
+    // fn->agg_filter, already through transformWhereClause(EXPR_KIND_FILTER)
+    // by the caller (dependency direction; C transforms it here first).
+    agg_filter: Option<Node<'mcx>>,
     _last_srf: Option<Node<'mcx>>,
     location: ParseLoc,
 ) -> PgResult<Node<'mcx>> {
@@ -79,12 +82,6 @@ pub fn ParseFuncOrColumn<'mcx>(
     let mut buf = [""; 4];
     let parts = name_parts(funcname, &mut buf);
 
-    if fn_call.agg_filter.is_some() {
-        panic!(
-            "ParseFuncOrColumn (parse_func.c): FILTER needs transformWhereClause \
-             EXPR_KIND_FILTER lane — unit backend-parser-func"
-        );
-    }
     let over = fn_call.over;
 
     if fargs.len() > FUNC_MAX_ARGS {
@@ -163,6 +160,16 @@ pub fn ParseFuncOrColumn<'mcx>(
                     location,
                 ));
             }
+            if agg_filter.is_some() {
+                return Err(wrong_object_type(
+                    pstate,
+                    format!(
+                        "FILTER specified, but {} is not an aggregate function",
+                        name_list_to_string(parts)
+                    ),
+                    location,
+                ));
+            }
             if over.is_some() {
                 return Err(wrong_object_type(
                     pstate,
@@ -208,28 +215,75 @@ pub fn ParseFuncOrColumn<'mcx>(
 
             // C: forget VARIADIC decoration on a non-variadic function.
             let mut func_variadic = fn_call.func_variadic && OidIsValid(vatype);
-            if nvargs > 0 && vatype != types_core::catalog::ANYOID {
-                panic!(
-                    "ParseFuncOrColumn (parse_func.c): implicit variadic array \
-                     (ArrayExpr) unported — function {funcid}"
-                );
-            }
+            let fargs = if nvargs > 0 && vatype != types_core::catalog::ANYOID {
+                // C: pack the trailing nvargs coerced arguments into an
+                // ArrayExpr — the call becomes VARIADIC.
+                let non_var_args = fargs.len() - nvargs as usize;
+                let mut plain: PgVec<'mcx, Node<'mcx>> =
+                    mcx::vec_with_capacity_in(mcx, non_var_args + 1)?;
+                let mut vargs: PgVec<'mcx, Node<'mcx>> =
+                    mcx::vec_with_capacity_in(mcx, nvargs as usize)?;
+                for (i, n) in fargs.iter().enumerate() {
+                    if i < non_var_args {
+                        plain.push(n);
+                    } else {
+                        vargs.push(n);
+                    }
+                }
+                let element_typeid = post_coercion_type(
+                    actual_arg_types[non_var_args],
+                    declared_arg_types[non_var_args],
+                )?;
+                let array_typeid = lsyscache::get_array_type(element_typeid)?;
+                let vargs = NodeList::from_slice(mcx, vargs.as_slice())?;
+                if !OidIsValid(array_typeid) {
+                    let encoding = mbutils::GetDatabaseEncoding();
+                    let loc = vargs.first().map_or(-1, expr_location);
+                    return Err(Box::new(
+                        ereport(ERROR)
+                            .errcode(types_error::ERRCODE_UNDEFINED_OBJECT)
+                            .errmsg(format!(
+                                "could not find array type for data type {}",
+                                format_type::format_type_be(element_typeid)?
+                            ))
+                            .errposition(parser_errposition(pstate, loc, encoding))
+                            .into_error(),
+                    ));
+                }
+                let list_loc = {
+                    let mut loc = -1;
+                    for n in vargs.iter() {
+                        loc = if loc < 0 {
+                            expr_location(n)
+                        } else {
+                            let l = expr_location(n);
+                            if l < 0 { loc } else { loc.min(l) }
+                        };
+                    }
+                    loc
+                };
+                let newa = Node::mk(
+                    mcx,
+                    types_nodes::primnodes::ArrayExpr {
+                        elements: vargs,
+                        element_typeid,
+                        array_typeid,
+                        multidims: false,
+                        location: list_loc,
+                        ..Default::default()
+                    },
+                )?;
+                plain.push(newa);
+                debug_assert!(!func_variadic);
+                func_variadic = true;
+                NodeList::from_slice(mcx, plain.as_slice())?
+            } else {
+                fargs
+            };
             if !fargs.is_nil() && vatype == types_core::catalog::ANYOID && func_variadic {
                 let va_arr_typid = actual_arg_types[actual_arg_types.len() - 1];
                 if !OidIsValid(lsyscache::get_base_element_type(va_arr_typid)?) {
-                    let encoding = mbutils::GetDatabaseEncoding();
-                    return Err(Box::new(
-                        ereport(ERROR)
-                            .errcode(types_error::ERRCODE_DATATYPE_MISMATCH)
-                            .errmsg("VARIADIC argument must be an array".to_string())
-                            .errposition(parser_errposition(pstate, location, encoding))
-                            .into_error()
-                            .with_error_location(ErrorLocation::new(
-                                "parse_func.c",
-                                0,
-                                "ParseFuncOrColumn",
-                            )),
-                    ));
+                    return Err(variadic_not_array(pstate, &fargs));
                 }
             }
             if retset {
@@ -289,8 +343,8 @@ pub fn ParseFuncOrColumn<'mcx>(
                 make_fn_arguments(mcx, pstate, fargs, actual_arg_types, &declared_arg_types)?;
             if let Some(over_node) = over {
                 return build_window_func(
-                    mcx, pstate, funcid, rettype, retset, fargs, true, fn_call, parts,
-                    over_node, _last_srf, location,
+                    mcx, pstate, funcid, rettype, retset, fargs, true, fn_call, agg_filter,
+                    parts, over_node, _last_srf, location,
                 );
             }
             // C's aggargtypes = exprType per coerced arg (parse_agg.c);
@@ -331,6 +385,7 @@ pub fn ParseFuncOrColumn<'mcx>(
             aggref.aggfnoid = funcid;
             aggref.aggtype = rettype;
             aggref.aggkind = aggkind;
+            aggref.aggfilter = agg_filter;
             aggref.aggstar = fn_call.agg_star;
             aggref.location = location;
 
@@ -383,8 +438,8 @@ pub fn ParseFuncOrColumn<'mcx>(
             let fargs =
                 make_fn_arguments(mcx, pstate, fargs, actual_arg_types, &declared_arg_types)?;
             build_window_func(
-                mcx, pstate, funcid, rettype, retset, fargs, false, fn_call, parts, over_node,
-                _last_srf, location,
+                mcx, pstate, funcid, rettype, retset, fargs, false, fn_call, agg_filter, parts,
+                over_node, _last_srf, location,
             )
         }
         FuncDetail::NotFound => Err(undefined_function(
@@ -411,6 +466,7 @@ fn build_window_func<'mcx>(
     fargs: NodeList<'mcx>,
     winagg: bool,
     fn_call: &FuncCall<'mcx>,
+    agg_filter: Option<Node<'mcx>>,
     parts: &[&str],
     over_node: Node<'mcx>,
     last_srf: Option<Node<'mcx>>,
@@ -442,7 +498,14 @@ fn build_window_func<'mcx>(
             location,
         ));
     }
-    debug_assert!(fn_call.agg_filter.is_none(), "FILTER is a loud lane upstream");
+    if !winagg && agg_filter.is_some() {
+        return Err(feature_not_supported(
+            pstate,
+            "FILTER is not implemented for non-aggregate window functions".into(),
+            None,
+            location,
+        ));
+    }
     let srf_added = match (pstate.p_last_srf, last_srf) {
         (None, None) => false,
         (Some(a), Some(b)) => !a.ptr_eq(b),
@@ -476,7 +539,7 @@ fn build_window_func<'mcx>(
     wfunc.args = fargs;
     wfunc.winstar = fn_call.agg_star;
     wfunc.winagg = winagg;
-    wfunc.aggfilter = None;
+    wfunc.aggfilter = agg_filter;
     wfunc.location = location;
 
     parse_agg::transformWindowFuncCall(mcx, pstate, &mut wfunc, over_node)?;
@@ -806,6 +869,10 @@ fn func_get_detail<'mcx>(
     let Some(best) = best else {
         return Ok(FuncDetail::NotFound);
     };
+    // C: an InvalidOid "best candidate" is the ambiguous-set placeholder.
+    if !OidIsValid(best.oid) {
+        return Ok(FuncDetail::Multiple);
+    }
     let funcid = best.oid;
     let declared_arg_types = mcx::slice_in(mcx, best.args.as_slice())?;
 
@@ -870,18 +937,24 @@ fn func_get_detail<'mcx>(
     })
 }
 
-// check_srf_call_placement, FROM_FUNCTION arm only: every other expr kind's
-// SRF handling belongs to the ProjectSet/targetlist-SRF lane and stays loud.
-// DIVERGENCE: the nested-SRF errposition points at this call, not the inner
-// SRF (exprLocation walker unported).
+// check_srf_call_placement. DIVERGENCE: the nested-SRF errposition points at
+// this call, not the inner SRF (exprLocation walker unported).
 fn check_srf_call_placement(
-    pstate: &ParseState<'_, '_>,
+    pstate: &mut ParseState<'_, '_>,
     last_srf: Option<Node<'_>>,
     location: ParseLoc,
 ) -> PgResult<()> {
-    use parser_small1::ParseExprKind;
+    use parser_small1::ParseExprKind::*;
+    let mut err: Option<&'static str> = None;
+    let mut errkind = false;
     match pstate.p_expr_kind {
-        ParseExprKind::EXPR_KIND_FROM_FUNCTION => {
+        EXPR_KIND_NONE => debug_assert!(false),
+        EXPR_KIND_OTHER => {}
+        EXPR_KIND_JOIN_ON | EXPR_KIND_JOIN_USING => {
+            err = Some("set-returning functions are not allowed in JOIN conditions");
+        }
+        EXPR_KIND_FROM_SUBSELECT => errkind = true,
+        EXPR_KIND_FROM_FUNCTION => {
             let same = match (pstate.p_last_srf, last_srf) {
                 (None, None) => true,
                 (Some(a), Some(b)) => a.ptr_eq(b),
@@ -902,12 +975,117 @@ fn check_srf_call_placement(
                         )),
                 ));
             }
-            Ok(())
         }
-        other => panic!(
-            "check_srf_call_placement (parse_func.c): SRF in {other:?} — only the \
-             FROM_FUNCTION arm is ported (targetlist SRFs are the ProjectSet lane)"
-        ),
+        EXPR_KIND_WHERE => errkind = true,
+        EXPR_KIND_POLICY => {
+            err = Some("set-returning functions are not allowed in policy expressions");
+        }
+        EXPR_KIND_HAVING => errkind = true,
+        EXPR_KIND_FILTER => errkind = true,
+        EXPR_KIND_WINDOW_PARTITION | EXPR_KIND_WINDOW_ORDER => {
+            pstate.p_hasTargetSRFs = true;
+        }
+        EXPR_KIND_WINDOW_FRAME_RANGE
+        | EXPR_KIND_WINDOW_FRAME_ROWS
+        | EXPR_KIND_WINDOW_FRAME_GROUPS => {
+            err = Some("set-returning functions are not allowed in window definitions");
+        }
+        EXPR_KIND_SELECT_TARGET | EXPR_KIND_INSERT_TARGET => {
+            pstate.p_hasTargetSRFs = true;
+        }
+        EXPR_KIND_UPDATE_SOURCE | EXPR_KIND_UPDATE_TARGET => errkind = true,
+        EXPR_KIND_GROUP_BY | EXPR_KIND_ORDER_BY | EXPR_KIND_DISTINCT_ON => {
+            pstate.p_hasTargetSRFs = true;
+        }
+        EXPR_KIND_LIMIT | EXPR_KIND_OFFSET => errkind = true,
+        EXPR_KIND_RETURNING | EXPR_KIND_MERGE_RETURNING => errkind = true,
+        EXPR_KIND_VALUES => errkind = true,
+        EXPR_KIND_VALUES_SINGLE => pstate.p_hasTargetSRFs = true,
+        EXPR_KIND_MERGE_WHEN => {
+            err = Some("set-returning functions are not allowed in MERGE WHEN conditions");
+        }
+        EXPR_KIND_CHECK_CONSTRAINT | EXPR_KIND_DOMAIN_CHECK => {
+            err = Some("set-returning functions are not allowed in check constraints");
+        }
+        EXPR_KIND_COLUMN_DEFAULT | EXPR_KIND_FUNCTION_DEFAULT => {
+            err = Some("set-returning functions are not allowed in DEFAULT expressions");
+        }
+        EXPR_KIND_INDEX_EXPRESSION => {
+            err = Some("set-returning functions are not allowed in index expressions");
+        }
+        EXPR_KIND_INDEX_PREDICATE => {
+            err = Some("set-returning functions are not allowed in index predicates");
+        }
+        EXPR_KIND_STATS_EXPRESSION => {
+            err = Some("set-returning functions are not allowed in statistics expressions");
+        }
+        EXPR_KIND_ALTER_COL_TRANSFORM => {
+            err = Some("set-returning functions are not allowed in transform expressions");
+        }
+        EXPR_KIND_EXECUTE_PARAMETER => {
+            err = Some("set-returning functions are not allowed in EXECUTE parameters");
+        }
+        EXPR_KIND_TRIGGER_WHEN => {
+            err = Some("set-returning functions are not allowed in trigger WHEN conditions");
+        }
+        EXPR_KIND_PARTITION_BOUND => {
+            err = Some("set-returning functions are not allowed in partition bound");
+        }
+        EXPR_KIND_PARTITION_EXPRESSION => {
+            err = Some("set-returning functions are not allowed in partition key expressions");
+        }
+        EXPR_KIND_CALL_ARGUMENT => {
+            err = Some("set-returning functions are not allowed in CALL arguments");
+        }
+        EXPR_KIND_COPY_WHERE => {
+            err = Some("set-returning functions are not allowed in COPY FROM WHERE conditions");
+        }
+        EXPR_KIND_GENERATED_COLUMN => {
+            err = Some("set-returning functions are not allowed in column generation expressions");
+        }
+        EXPR_KIND_CYCLE_MARK => errkind = true,
+    }
+    if err.is_some() || errkind {
+        let msg = match err {
+            Some(err) => String::from(err),
+            None => format!(
+                "set-returning functions are not allowed in {}",
+                srf_expr_kind_name(pstate.p_expr_kind)
+            ),
+        };
+        let encoding = mbutils::GetDatabaseEncoding();
+        return Err(Box::new(
+            ereport(ERROR)
+                .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                .errmsg(msg)
+                .errposition(parser_errposition(pstate, location, encoding))
+                .into_error()
+                .with_error_location(ErrorLocation::new(
+                    "parse_func.c",
+                    0,
+                    "check_srf_call_placement",
+                )),
+        ));
+    }
+    Ok(())
+}
+
+// ParseExprKindName (parse_expr.c), errkind arms only — parse_expr depends on
+// this crate, so the full mapping cannot be imported (parse_agg precedent).
+fn srf_expr_kind_name(kind: parser_small1::ParseExprKind) -> &'static str {
+    use parser_small1::ParseExprKind::*;
+    match kind {
+        EXPR_KIND_FROM_SUBSELECT => "sub-SELECT in FROM",
+        EXPR_KIND_WHERE => "WHERE",
+        EXPR_KIND_HAVING => "HAVING",
+        EXPR_KIND_FILTER => "FILTER",
+        EXPR_KIND_UPDATE_SOURCE | EXPR_KIND_UPDATE_TARGET => "UPDATE",
+        EXPR_KIND_LIMIT => "LIMIT",
+        EXPR_KIND_OFFSET => "OFFSET",
+        EXPR_KIND_RETURNING | EXPR_KIND_MERGE_RETURNING => "RETURNING",
+        EXPR_KIND_VALUES => "VALUES",
+        EXPR_KIND_CYCLE_MARK => "CYCLE",
+        other => panic!("srf_expr_kind_name: non-errkind kind {other:?}"),
     }
 }
 
@@ -994,6 +1172,78 @@ fn func_signature_string(parts: &[&str], argtypes: &[Oid]) -> PgResult<String> {
     }
     sig.push(')');
     Ok(sig)
+}
+
+#[cold]
+#[inline(never)]
+fn variadic_not_array(pstate: &ParseState<'_, '_>, fargs: &NodeList<'_>) -> Box<PgError> {
+    let encoding = mbutils::GetDatabaseEncoding();
+    let loc = fargs.last().map_or(-1, expr_location);
+    Box::new(
+        ereport(ERROR)
+            .errcode(types_error::ERRCODE_DATATYPE_MISMATCH)
+            .errmsg("VARIADIC argument must be an array")
+            .errposition(parser_errposition(pstate, loc, encoding))
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_func.c", 0, "ParseFuncOrColumn")),
+    )
+}
+
+// C exprLocation (nodeFuncs.c) over transformed call arguments; closed-set
+// copy of parse_expr::node_funcs (dependency cycle forbids sharing).
+fn expr_location(node: Node<'_>) -> ParseLoc {
+    fn leftmost(a: ParseLoc, b: ParseLoc) -> ParseLoc {
+        if a < 0 { b } else if b < 0 { a } else { a.min(b) }
+    }
+    fn list_loc(l: &NodeList<'_>) -> ParseLoc {
+        let mut loc = -1;
+        for n in l.iter() {
+            loc = leftmost(loc, expr_location(n));
+            if loc == 0 {
+                break;
+            }
+        }
+        loc
+    }
+    match node.node_tag() {
+        NodeTag::T_Const => node.as_const().unwrap().location,
+        NodeTag::T_Var => node.as_var().unwrap().location,
+        NodeTag::T_Param => node.as_param().unwrap().location,
+        NodeTag::T_Aggref => node.as_aggref().unwrap().location,
+        NodeTag::T_WindowFunc => node.as_window_func().unwrap().location,
+        NodeTag::T_OpExpr => {
+            let op = node.as_op_expr().unwrap();
+            leftmost(op.location, list_loc(&op.args))
+        }
+        NodeTag::T_FuncExpr => {
+            let f = node.as_func_expr().unwrap();
+            leftmost(f.location, list_loc(&f.args))
+        }
+        NodeTag::T_RelabelType => {
+            let r = node.as_relabel_type().unwrap();
+            leftmost(r.location, expr_location(r.arg))
+        }
+        NodeTag::T_CoerceViaIO => {
+            let c = node.as_coerce_via_io().unwrap();
+            leftmost(c.location, expr_location(c.arg))
+        }
+        NodeTag::T_CaseExpr => node.as_case_expr().unwrap().location,
+        NodeTag::T_CaseTestExpr => -1,
+        NodeTag::T_CoalesceExpr => node.as_coalesce_expr().unwrap().location,
+        NodeTag::T_MinMaxExpr => node.as_min_max_expr().unwrap().location,
+        NodeTag::T_SQLValueFunction => node.as_sql_value_function().unwrap().location,
+        NodeTag::T_SubLink => node.as_sub_link().unwrap().location,
+        NodeTag::T_SetToDefault => node.as_set_to_default().unwrap().location,
+        NodeTag::T_BoolExpr => {
+            let b = node.as_bool_expr().unwrap();
+            leftmost(b.location, list_loc(&b.args))
+        }
+        NodeTag::T_NullTest => {
+            let n = node.as_null_test().unwrap();
+            leftmost(n.location, n.arg.map_or(-1, expr_location))
+        }
+        other => panic!("exprLocation (nodeFuncs.c): arm for {other:?} unported"),
+    }
 }
 
 #[cold]

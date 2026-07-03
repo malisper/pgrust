@@ -11,15 +11,17 @@ path = "src/lib.rs"
 [dependencies]
 analyze_seams = { path = "../analyze_seams" }
 coerce = { path = "../coerce" }
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+parse_collate_seams = { path = "../parse_collate_seams" }
 elog = { path = "../../utils/error/elog" }
 format_type = { path = "../../utils/adt/format_type" }
 guc_tables = { path = "../../utils/misc/guc_tables" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
 mbutils = { path = "../../utils/mb/mbutils" }
 mcx = { path = "../../../_support/mcx" }
+nodes_core = { path = "../../nodes/nodes_core" }
 parse_agg = { path = "../parse_agg" }
 parse_func = { path = "../parse_func" }
-parse_collate_seams = { path = "../parse_collate_seams" }
 parse_oper = { path = "../parse_oper" }
 parse_relation = { path = "../parse_relation" }
 parse_utilcmd = { path = "../parse_utilcmd" }
@@ -28,6 +30,7 @@ stack_depth = { path = "../../utils/misc/stack_depth" }
 types_core = { path = "../../../_support/types/types_core" }
 types_error = { path = "../../../_support/types/types_error" }
 types_nodes = { path = "../../../_support/types/nodes" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
 vars = { path = "../../optimizer/util/vars" }
 wchar = { path = "../../../common/wchar" }
 
@@ -35,4 +38,3 @@ wchar = { path = "../../../common/wchar" }
 aclchk_seams = { path = "../../catalog/aclchk_seams" }
 miscinit_seams = { path = "../../utils/init/miscinit_seams" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
-types_tuple = { path = "../../../_support/types/types_tuple" }

@@ -409,7 +409,6 @@ fn expand_insert_targetlist<'mcx>(
             Some(t) => t,
             None => {
                 let new_expr = if !att.attisdropped {
-                    debug_assert!(att.attgenerated == 0);
                     if lsyscache::typ::getBaseType(att.atttypid)? != att.atttypid {
                         panic!(
                             "expand_insert_targetlist (preptlist.c): \

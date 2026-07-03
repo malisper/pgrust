@@ -69,12 +69,25 @@ pub fn ExecVacuum<'mcx>(
 
     let mut verbose = false;
     let mut skip_locked = false;
+    let mut full = false;
     for opt_node in vacstmt.options.iter() {
         let opt = opt_node.as_def_elem().expect("VacuumStmt option is DefElem");
         match opt.defname.unwrap_or("") {
             "verbose" => verbose = explain::defGetBoolean(opt)?,
             "skip_locked" => skip_locked = explain::defGetBoolean(opt)?,
-            name @ ("analyze" | "freeze" | "full" | "disable_page_skipping" | "index_cleanup"
+            "index_cleanup" => {
+                params.index_cleanup = if opt.arg.is_none() {
+                    VacOptValue::Auto
+                } else if explain::defGetString(mcx, opt)?.eq_ignore_ascii_case("auto") {
+                    VacOptValue::Auto
+                } else if explain::defGetBoolean(opt)? {
+                    VacOptValue::Enabled
+                } else {
+                    VacOptValue::Disabled
+                };
+            }
+            "full" => full = explain::defGetBoolean(opt)?,
+            name @ ("analyze" | "freeze" | "disable_page_skipping"
             | "process_main" | "process_toast" | "truncate" | "parallel"
             | "buffer_usage_limit" | "skip_database_stats" | "only_database_stats") => {
                 if explain::defGetBoolean(opt).unwrap_or(true) {
@@ -99,7 +112,8 @@ pub fn ExecVacuum<'mcx>(
         | VACOPT_PROCESS_MAIN
         | VACOPT_PROCESS_TOAST
         | (if verbose { VACOPT_VERBOSE } else { 0 })
-        | (if skip_locked { VACOPT_SKIP_LOCKED } else { 0 });
+        | (if skip_locked { VACOPT_SKIP_LOCKED } else { 0 })
+        | (if full { VACOPT_FULL } else { 0 });
 
     let bstrategy = bufmgr_seams::get_access_strategy::call(BufferAccessStrategyType::BasVacuum);
 
@@ -199,8 +213,6 @@ fn vacuum_rel<'mcx>(
     params: &VacuumParams,
     bstrategy: BufferAccessStrategy,
 ) -> PgResult<bool> {
-    debug_assert!(params.options & VACOPT_FULL == 0);
-
     xact::StartTransactionCommand()?;
     // C divergence (recorded): PROC_IN_VACUUM/PROC_VACUUM_FOR_WRAPAROUND
     // statusFlags are not set (single-backend milestone; they only shape how
@@ -208,7 +220,11 @@ fn vacuum_rel<'mcx>(
     let snapshot = snapmgr::GetTransactionSnapshot()?;
     snapmgr::PushActiveSnapshot(&snapshot)?;
 
-    let lmode = ShareUpdateExclusiveLock;
+    let lmode = if params.options & VACOPT_FULL != 0 {
+        types_rel::lock::AccessExclusiveLock
+    } else {
+        ShareUpdateExclusiveLock
+    };
     let rel = match vacuum_open_relation(mcx, relid, params.options, lmode)? {
         Some(rel) => rel,
         None => {
@@ -250,19 +266,30 @@ fn vacuum_rel<'mcx>(
         };
     }
 
-    let toast_relid = if params.options & VACOPT_PROCESS_TOAST != 0 {
+    let toast_relid = if params.options & VACOPT_PROCESS_TOAST != 0
+        && (params.options & VACOPT_FULL == 0 || params.options & VACOPT_PROCESS_MAIN == 0)
+    {
         rel.rd_rel.reltoastrelid
     } else {
         InvalidOid
     };
 
     if params.options & VACOPT_PROCESS_MAIN != 0 {
-        // C divergence (recorded): SetUserIdAndSecContext/NewGUCNestLevel/
-        // RestrictSearchPath are skipped (single-user milestone).
-        tableam_seams::table_relation_vacuum::call(mcx, &rel, &params, bstrategy.clone())?;
+        if params.options & VACOPT_FULL != 0 {
+            // VACUUM FULL is a variant of CLUSTER (cluster.c); cluster_rel
+            // closes the relation but keeps the lock.
+            let cluster_options: u32 =
+                if params.options & VACOPT_VERBOSE != 0 { 0x01 } else { 0 };
+            cluster_seams::cluster_rel::call(mcx, rel, InvalidOid, cluster_options)?;
+        } else {
+            // C divergence (recorded): SetUserIdAndSecContext/NewGUCNestLevel/
+            // RestrictSearchPath are skipped (single-user milestone).
+            tableam_seams::table_relation_vacuum::call(mcx, &rel, &params, bstrategy.clone())?;
+            rel.close(NoLock)?;
+        }
+    } else {
+        rel.close(NoLock)?;
     }
-
-    rel.close(NoLock)?;
     snapmgr::PopActiveSnapshot()?;
     xact::CommitTransactionCommand()?;
 

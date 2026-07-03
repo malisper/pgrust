@@ -62,10 +62,11 @@ pub fn query_planner<'mcx>(
         add_base_rels_to_query(run, item)?;
     }
 
-    // remove_useless_groupby_columns / find_placeholders_in_jointree /
-    // find_lateral_references: no GROUP BY, PHVs or lateral refs exist.
+    // remove_useless_groupby_columns / find_placeholders_in_jointree: no
+    // GROUP BY, no PHVs exist.
     crate::initsplan::build_base_rel_tlists(run)?;
-    debug_assert!(!run.root.hasLateralRTEs);
+
+    crate::initsplan::find_lateral_references(run)?;
 
     let joinlist = crate::initsplan::deconstruct_jointree(run)?;
 
@@ -81,11 +82,15 @@ pub fn query_planner<'mcx>(
 
     crate::analyzejoins::reduce_unique_semijoins(run)?;
 
-    // fix_placeholder_input_needed_levels / self-join removal / lateral join
-    // info / match_foreign_keys_to_quals / extract_restriction_or_clauses /
-    // add_other_rels_to_query / row identity vars: all no-ops with no
-    // placeholders, no lateral refs, no fkeys and no OR clauses.
+    crate::initsplan::create_lateral_join_info(run)?;
+
+    // fix_placeholder_input_needed_levels / self-join removal /
+    // match_foreign_keys_to_quals / extract_restriction_or_clauses /
+    // row identity vars: all no-ops with no placeholders, no fkeys and
+    // no OR clauses.
     debug_assert!(run.root.placeholder_list.is_empty() && run.root.fkey_list.is_empty());
+
+    crate::inherit::add_other_rels_to_query(run)?;
 
     let final_rel = crate::allpaths::make_one_rel(run, &joinlist)?;
     if run.root.rel(final_rel).cheapest_total_path.is_none()

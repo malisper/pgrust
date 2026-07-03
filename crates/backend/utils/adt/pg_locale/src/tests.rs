@@ -38,15 +38,20 @@ fn install_db_stub() {
             Ok(Some(pg_database_seams::PgDatabaseForm {
                 oid: dboid,
                 datname: s("testdb")?,
+                datdba: 10,
+                datistemplate: false,
                 dattablespace: 1663,
                 datallowconn: true,
                 dathasloginevt: false,
                 datconnlimit: -1,
+                datfrozenxid: 0,
+                datminmxid: 0,
                 encoding: 6,
                 datlocprovider: row.provider,
                 datcollate: s(row.collate)?,
                 datctype: s(row.ctype)?,
                 datlocale: row.locale.map(s).transpose()?,
+                daticurules: None,
                 datcollversion: None,
             }))
         });

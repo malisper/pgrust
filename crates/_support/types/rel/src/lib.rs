@@ -5,6 +5,7 @@
 pub mod lock;
 pub mod pg_class;
 pub mod pg_index;
+pub mod reindex;
 pub mod rel;
 pub mod reloptions;
 

@@ -19,13 +19,22 @@ use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 
 const Anum_pg_class_relchecks: AttrNumber = 20;
 
+pub(crate) struct CookedCon<'mcx> {
+    pub contype: ConstrType,
+    pub conoid: Oid,
+    pub name: &'mcx str,
+    pub attnum: AttrNumber,
+    pub expr: Option<Node<'mcx>>,
+    pub skip_validation: bool,
+}
+
 pub(crate) fn add_relation_new_constraints<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
-    new_col_defaults: &[(AttrNumber, Node<'mcx>)],
+    new_col_defaults: &[(AttrNumber, Node<'mcx>, u8)],
     new_constraints: &NodeList<'mcx>,
     query_string: &str,
-) -> PgResult<()> {
+) -> PgResult<PgVec<'mcx, CookedCon<'mcx>>> {
     let numoldchecks = match rel.rd_att.constr.as_deref() {
         Some(c) => c.num_check as i16,
         None => 0,
@@ -43,8 +52,9 @@ pub(crate) fn add_relation_new_constraints<'mcx>(
         true,
     )?;
     parse_relation::addNSItemToQuery(mcx, &mut pstate, nsitem, true, true, true)?;
+    let mut cooked: PgVec<'mcx, CookedCon<'mcx>> = PgVec::new_in(mcx);
 
-    for &(attnum, raw_default) in new_col_defaults {
+    for &(attnum, raw_default, generated) in new_col_defaults {
         let att = rel.rd_att.attr(attnum as usize - 1);
         let attname = core::str::from_utf8(att.attname.name_str()).expect("attname UTF-8");
         let expr = cook_default(
@@ -54,14 +64,27 @@ pub(crate) fn add_relation_new_constraints<'mcx>(
             att.atttypid,
             att.atttypmod,
             attname,
+            generated,
+            rel,
         )?;
-        // C skips the pg_attrdef entry for a bare NULL Const default.
-        if let Some(c) = expr.as_variant::<types_nodes::primnodes::Const>() {
-            if c.constisnull {
-                continue;
+        // C skips the pg_attrdef entry for a bare NULL Const default (never
+        // for generated: cookDefault's coercion keeps the expression form).
+        if generated == 0 {
+            if let Some(c) = expr.as_variant::<types_nodes::primnodes::Const>() {
+                if c.constisnull {
+                    continue;
+                }
             }
         }
-        pg_attrdef::StoreAttrDefault(mcx, rel, attnum, expr)?;
+        let def_oid = pg_attrdef::StoreAttrDefault(mcx, rel, attnum, expr)?;
+        cooked.push(CookedCon {
+            contype: ConstrType::CONSTR_DEFAULT,
+            conoid: def_oid,
+            name: "",
+            attnum,
+            expr: Some(expr),
+            skip_validation: false,
+        });
     }
 
     let mut numchecks = numoldchecks;
@@ -74,18 +97,19 @@ pub(crate) fn add_relation_new_constraints<'mcx>(
                 cdef.contype
             );
         }
-        let raw_expr = match cdef.raw_expr {
+        let relname = core::str::from_utf8(rel.rd_rel.relname.name_str()).expect("relname");
+        let expr = match cdef.raw_expr {
             Some(e) => {
                 debug_assert!(cdef.cooked_expr.is_none());
-                e
+                cook_constraint(mcx, &mut pstate, e, relname)?
             }
-            None => panic!(
-                "AddRelationNewConstraints (heap.c): cooked_expr (inheritance/ALTER \
-                 lane) unported"
-            ),
+            None => {
+                let cooked = cdef
+                    .cooked_expr
+                    .expect("Constraint without raw_expr or cooked_expr");
+                readfuncs::stringToNode(mcx, cooked)?
+            }
         };
-        let relname = core::str::from_utf8(rel.rd_rel.relname.name_str()).expect("relname");
-        let expr = cook_constraint(mcx, &mut pstate, raw_expr, relname)?;
 
         let ccname = match cdef.conname {
             Some(name) => {
@@ -93,8 +117,21 @@ pub(crate) fn add_relation_new_constraints<'mcx>(
                     return Err(check_constraint_exists(name));
                 }
                 checknames.push(name);
-                // New relation: MergeWithExistingConstraint's probe cannot
-                // match (no pre-existing constraints); ALTER lane unported.
+                // MergeWithExistingConstraint probe: allow_merge is only true
+                // in unported recursing/re-add lanes, so a hit is an error.
+                if pg_constraint::ConstraintNameIsUsed(
+                    mcx,
+                    pg_constraint::ConstraintCategory::Relation,
+                    rel.rd_id,
+                    name,
+                )? {
+                    return Err(Box::new(
+                        PgError::error(format!(
+                            "constraint \"{name}\" for relation \"{relname}\" already exists"
+                        ))
+                        .with_sqlstate(ERRCODE_DUPLICATE_OBJECT),
+                    ));
+                }
                 mcx::PgString::from_str_in(name, mcx)?
             }
             None => {
@@ -130,7 +167,7 @@ pub(crate) fn add_relation_new_constraints<'mcx>(
             }
         };
 
-        store_rel_check(
+        let con_oid = store_rel_check(
             mcx,
             rel,
             ccname.as_str(),
@@ -139,24 +176,43 @@ pub(crate) fn add_relation_new_constraints<'mcx>(
             cdef.initially_valid,
         )?;
         numchecks += 1;
+        cooked.push(CookedCon {
+            contype: ConstrType::CONSTR_CHECK,
+            conoid: con_oid,
+            name: str_in(mcx, ccname.as_str())?,
+            attnum: 0,
+            expr: Some(expr),
+            skip_validation: cdef.skip_validation,
+        });
     }
 
-    if numchecks != numoldchecks || !new_col_defaults.is_empty() {
-        set_relation_num_checks(mcx, rel, numchecks)?;
-    }
+    // C updates pg_class.relchecks even when unchanged — the SI message forces
+    // peers to rebuild relcache entries.
+    set_relation_num_checks(mcx, rel, numchecks)?;
     parser_small1::free_parsestate(pstate)?;
-    Ok(())
+    Ok(cooked)
 }
 
-// AddRelationNotNullConstraints, CREATE TABLE column-constraint arm (no
-// inheritance sources; attnotnull was already set by BuildDescForRelation).
+// AddRelationNotNullConstraints (heap.c): local column constraints first
+// (inhcount = matching parents), then leftover inherited ones with
+// conislocal=false. Returns nncols; the caller must set_attnotnull each
+// (table-level NOT NULL on an inherited column is not covered by
+// BuildDescForRelation).
 pub(crate) fn add_relation_not_null_constraints<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     nnconstraints: &NodeList<'mcx>,
-) -> PgResult<()> {
+    old_notnulls: &[crate::inheritance::InheritedNotNull<'mcx>],
+    existing_constraints: &[&str],
+) -> PgResult<PgVec<'mcx, AttrNumber>> {
     let relname = core::str::from_utf8(rel.rd_rel.relname.name_str()).expect("relname");
+    let mut nncols: PgVec<'mcx, AttrNumber> = PgVec::new_in(mcx);
     let mut nnnames: PgVec<'mcx, &str> = PgVec::new_in(mcx);
+    for &n in existing_constraints {
+        nnnames.push(str_in(mcx, n)?);
+    }
+    let mut seen_attnums: PgVec<'mcx, AttrNumber> = PgVec::new_in(mcx);
+    let mut old_pending: PgVec<'mcx, bool> = mcx::vec_from_elem_in(mcx, true, old_notnulls.len());
     for cnode in nnconstraints.iter() {
         let cdef = cnode.as_variant::<Constraint>().expect("Constraint");
         debug_assert!(cdef.contype == ConstrType::CONSTR_NOTNULL);
@@ -172,20 +228,63 @@ pub(crate) fn add_relation_not_null_constraints<'mcx>(
             .unwrap_or_else(|| {
                 panic!("AddRelationNotNullConstraints (heap.c): column {colname:?} not found")
             });
-        if cdef.conname.is_some() {
+        if seen_attnums.iter().any(|&a| a == attnum) {
             panic!(
-                "AddRelationNotNullConstraints (heap.c): named not-null constraints \
-                 (ConstraintNameIsUsed) unported"
+                "AddRelationNotNullConstraints (heap.c): duplicate not-null merge lane \
+                 unported (column {colname:?})"
             );
         }
-        let name = pg_constraint::ChooseConstraintName(
-            mcx,
-            relname,
-            Some(colname),
-            "not_null",
-            rel.rd_rel.relnamespace,
-            &nnnames,
-        )?;
+        seen_attnums.push(attnum);
+        let mut inhcount: i16 = 0;
+        for (i, old) in old_notnulls.iter().enumerate() {
+            if old_pending[i] && old.attnum == attnum {
+                if cdef.is_no_inherit {
+                    return Err(Box::new(
+                        PgError::new(
+                            types_error::ERROR,
+                            format!(
+                                "cannot define not-null constraint with NO INHERIT on column \"{colname}\""
+                            ),
+                        )
+                        .with_detail("The column has an inherited not-null constraint.")
+                        .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH),
+                    ));
+                }
+                inhcount += 1;
+                old_pending[i] = false;
+            }
+        }
+        let name = match cdef.conname {
+            Some(given) => {
+                if pg_constraint::ConstraintNameIsUsed(
+                    mcx,
+                    pg_constraint::ConstraintCategory::Relation,
+                    rel.rd_id,
+                    given,
+                )?
+                    || nnnames.iter().any(|&n| n == given)
+                {
+                    return Err(Box::new(
+                        PgError::new(
+                            types_error::ERROR,
+                            format!(
+                                "constraint \"{given}\" for relation \"{relname}\" already exists"
+                            ),
+                        )
+                        .with_sqlstate(ERRCODE_DUPLICATE_OBJECT),
+                    ));
+                }
+                mcx::PgString::from_str_in(given, mcx)?
+            }
+            None => pg_constraint::ChooseConstraintName(
+                mcx,
+                relname,
+                Some(colname),
+                "not_null",
+                rel.rd_rel.relnamespace,
+                &nnnames,
+            )?,
+        };
         nnnames.push(str_in(mcx, name.as_str())?);
         let conkey = [attnum];
         let mut entry = pg_constraint::ConstraintEntry::base(
@@ -196,10 +295,66 @@ pub(crate) fn add_relation_not_null_constraints<'mcx>(
         );
         entry.conkey = &conkey;
         entry.n_keys = 1;
+        entry.inhcount = inhcount;
         entry.is_no_inherit = cdef.is_no_inherit;
         pg_constraint::CreateConstraintEntry(mcx, &entry)?;
+        nncols.push(attnum);
     }
-    Ok(())
+
+    for outer in 0..old_notnulls.len() {
+        if !old_pending[outer] {
+            continue;
+        }
+        let cooked = &old_notnulls[outer];
+        let mut conname: Option<&str> = Some(cooked.name);
+        let mut inhcount: i16 = 1;
+        for rest in outer + 1..old_notnulls.len() {
+            if old_pending[rest] && old_notnulls[rest].attnum == cooked.attnum {
+                inhcount += 1;
+                old_pending[rest] = false;
+            }
+        }
+        if let Some(n) = conname {
+            if nnnames.iter().any(|&t| t == n) {
+                conname = None;
+            }
+        }
+        let name = match conname {
+            Some(n) => mcx::PgString::from_str_in(n, mcx)?,
+            None => {
+                let colname = {
+                    let att = rel.rd_att.attr(cooked.attnum as usize - 1);
+                    str_in(
+                        mcx,
+                        core::str::from_utf8(att.attname.name_str()).expect("attname UTF-8"),
+                    )?
+                };
+                pg_constraint::ChooseConstraintName(
+                    mcx,
+                    relname,
+                    Some(colname),
+                    "not_null",
+                    rel.rd_rel.relnamespace,
+                    &nnnames,
+                )?
+            }
+        };
+        nnnames.push(str_in(mcx, name.as_str())?);
+        let conkey = [cooked.attnum];
+        let mut entry = pg_constraint::ConstraintEntry::base(
+            name.as_str(),
+            rel.rd_rel.relnamespace,
+            pg_constraint::CONSTRAINT_NOTNULL,
+            rel.rd_id,
+        );
+        entry.conkey = &conkey;
+        entry.n_keys = 1;
+        entry.is_local = false;
+        entry.inhcount = inhcount;
+        pg_constraint::CreateConstraintEntry(mcx, &entry)?;
+        nncols.push(cooked.attnum);
+    }
+    Ok(nncols)
 }
 
 fn cook_default<'mcx>(
@@ -209,14 +364,36 @@ fn cook_default<'mcx>(
     atttypid: Oid,
     atttypmod: i32,
     attname: &str,
+    attgenerated: u8,
+    rel: &Relation<'mcx>,
 ) -> PgResult<Node<'mcx>> {
     let expr = parse_expr::transformExpr(
         mcx,
         pstate,
         raw_default,
-        ParseExprKind::EXPR_KIND_COLUMN_DEFAULT,
+        if attgenerated != 0 {
+            ParseExprKind::EXPR_KIND_GENERATED_COLUMN
+        } else {
+            ParseExprKind::EXPR_KIND_COLUMN_DEFAULT
+        },
     )?;
-    debug_assert!(!vars::contain_var_clause(expr)?);
+    if attgenerated != 0 {
+        check_nested_generated(pstate, rel, expr)?;
+        // DIVERGENCE: C runs contain_mutable_functions_after_planning
+        // (expression_planner inlines SQL functions first); this checks the
+        // un-inlined tree.
+        if clauses::contain_mutable_functions(expr)? {
+            return Err(Box::new(
+                PgError::new(
+                    types_error::ERROR,
+                    "generation expression is not immutable".to_string(),
+                )
+                .with_sqlstate(types_error::ERRCODE_INVALID_OBJECT_DEFINITION),
+            ));
+        }
+    } else {
+        debug_assert!(!vars::contain_var_clause(expr)?);
+    }
     let type_id = parse_expr::expr_type(expr);
     let expr = match coerce::coerce_to_target_type(
         mcx,
@@ -234,6 +411,71 @@ fn cook_default<'mcx>(
     };
     parse_collate::assign_expr_collations(mcx, pstate, expr)?;
     Ok(expr)
+}
+
+// check_nested_generated (heap.c): generation expressions may not reference
+// generated columns or the whole row. DIVERGENCE: C names the first offender
+// in expression order with a cursor; this walk reports in Var-visit order
+// without a cursor.
+fn check_nested_generated<'mcx>(
+    pstate: &ParseState<'_, 'mcx>,
+    rel: &Relation<'mcx>,
+    expr: Node<'mcx>,
+) -> PgResult<()> {
+    struct W<'a, 'p, 'mcx> {
+        pstate: &'a ParseState<'p, 'mcx>,
+        rel: &'a Relation<'mcx>,
+    }
+    impl<'a, 'p, 'mcx> nodes_core::NodeWalker<'mcx> for W<'a, 'p, 'mcx> {
+        fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+            if let Some(v) = node.as_var() {
+                debug_assert!(v.varno == 1 && v.varlevelsup == 0);
+                let cursor = parser_small1::parser_errposition(
+                    self.pstate,
+                    v.location,
+                    mbutils::GetDatabaseEncoding(),
+                );
+                if v.varattno == 0 {
+                    return Err(Box::new(
+                        PgError::new(
+                            types_error::ERROR,
+                            "cannot use whole-row variable in column generation expression"
+                                .to_string(),
+                        )
+                        .with_sqlstate(types_error::ERRCODE_INVALID_OBJECT_DEFINITION)
+                        .with_detail(
+                            "This would cause the generated column to depend on its own value.",
+                        )
+                        .with_cursor_position(cursor),
+                    ));
+                }
+                if v.varattno > 0
+                    && self.rel.rd_att.attr(v.varattno as usize - 1).attgenerated != 0
+                {
+                    let att = self.rel.rd_att.attr(v.varattno as usize - 1);
+                    let name =
+                        core::str::from_utf8(att.attname.name_str()).expect("attname UTF-8");
+                    return Err(Box::new(
+                        PgError::new(
+                            types_error::ERROR,
+                            format!(
+                                "cannot use generated column \"{name}\" in column generation \
+                                 expression"
+                            ),
+                        )
+                        .with_sqlstate(types_error::ERRCODE_INVALID_OBJECT_DEFINITION)
+                        .with_detail(
+                            "A generated column cannot reference another generated column.",
+                        )
+                        .with_cursor_position(cursor),
+                    ));
+                }
+            }
+            nodes_core::expression_tree_walker(node, self)
+        }
+    }
+    nodes_core::NodeWalker::visit(&mut W { pstate, rel }, expr)?;
+    Ok(())
 }
 
 fn cook_constraint<'mcx>(
@@ -282,8 +524,6 @@ fn store_rel_check<'mcx>(
             att_nos.push(attno);
         }
     }
-    // Divergence: C also runs recordDependencyOnSingleRelExpr on the cooked
-    // expression (dependency.c walker unported).
     let mut entry = pg_constraint::ConstraintEntry::base(
         ccname,
         rel.rd_rel.relnamespace,
@@ -295,12 +535,13 @@ fn store_rel_check<'mcx>(
     entry.is_enforced = is_enforced;
     entry.is_validated = is_validated;
     entry.conbin = Some(ccbin.as_str());
+    entry.con_expr = Some(expr);
     pg_constraint::CreateConstraintEntry(mcx, &entry)
 }
 
 // SetRelationNumChecks (heap.c): update pg_class.relchecks (also fires the
 // SI message C relies on to rebuild peers' relcache entries).
-fn set_relation_num_checks<'mcx>(
+pub(crate) fn set_relation_num_checks<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     numchecks: i16,
@@ -350,8 +591,8 @@ fn set_relation_num_checks<'mcx>(
 pub(crate) fn collect_raw_defaults<'mcx>(
     mcx: Mcx<'mcx>,
     table_elts: &NodeList<'mcx>,
-) -> PgResult<PgVec<'mcx, (AttrNumber, Node<'mcx>)>> {
-    let mut out: PgVec<'mcx, (AttrNumber, Node<'mcx>)> = PgVec::new_in(mcx);
+) -> PgResult<PgVec<'mcx, (AttrNumber, Node<'mcx>, u8)>> {
+    let mut out: PgVec<'mcx, (AttrNumber, Node<'mcx>, u8)> = PgVec::new_in(mcx);
     for (i, elt) in table_elts.iter().enumerate() {
         if elt.node_tag() != NodeTag::T_ColumnDef {
             continue;
@@ -363,7 +604,7 @@ pub(crate) fn collect_raw_defaults<'mcx>(
             panic!("DefineRelation (tablecmds.c): cooked_default (inheritance) unported");
         }
         if let Some(raw) = cd.raw_default {
-            out.push(((i + 1) as AttrNumber, raw));
+            out.push(((i + 1) as AttrNumber, raw, cd.generated));
         }
     }
     Ok(out)

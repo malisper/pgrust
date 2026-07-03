@@ -1,0 +1,233 @@
+use datum::Datum;
+use mcx::MemoryContext;
+use types_core::Oid;
+use types_error::PgResult;
+use types_fmgr::{FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction};
+
+use crate::{get_pretty_flags, PRETTYFLAG_INDENT};
+
+#[cold]
+#[inline(never)]
+fn no_flinfo(name: &str) -> ! {
+    panic!("{name}: result needs a resolved FmgrInfo's scratch")
+}
+
+// C pallocs each result per call; the resolved FmgrInfo owns retained scratch
+// (varlena builtins precedent). The Datum aliases it until the next call
+// through the same FmgrInfo.
+struct OutBuf(Vec<u8>);
+
+fn out_scratch<'a>(flinfo: Option<&'a mut FmgrInfo>, name: &'static str) -> &'a mut Vec<u8> {
+    let Some(flinfo) = flinfo else { no_flinfo(name) };
+    if !flinfo.has_fn_extra() {
+        flinfo.set_fn_extra(OutBuf(Vec::new()));
+    }
+    &mut flinfo.fn_extra_mut::<OutBuf>().unwrap().0
+}
+
+fn text_result(flinfo: Option<&mut FmgrInfo>, name: &'static str, s: &str) -> Datum {
+    let buf = out_scratch(flinfo, name);
+    buf.clear();
+    buf.reserve(datum::varlena::VARHDRSZ + s.len());
+    buf.extend_from_slice(&datum::varlena::set_varsize_4b(datum::varlena::VARHDRSZ + s.len()));
+    buf.extend_from_slice(s.as_bytes());
+    Datum::from_usize(buf.as_ptr() as usize)
+}
+
+pub fn fc_pg_get_userbyid(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let name = crate::pg_get_userbyid_core(fcinfo.arg_oid(0))?;
+    let buf = out_scratch(flinfo, "pg_get_userbyid");
+    buf.clear();
+    buf.extend_from_slice(&name.data);
+    Ok(Datum::from_usize(buf.as_ptr() as usize))
+}
+
+fn indexdef(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+    colno: i32,
+    pretty_flags: i32,
+) -> PgResult<Datum> {
+    let ctx = MemoryContext::new("pg_get_indexdef");
+    let res = crate::pg_get_indexdef_worker(
+        ctx.mcx(),
+        fcinfo.arg_oid(0),
+        colno,
+        colno != 0,
+        pretty_flags,
+        true,
+    )?;
+    Ok(match res {
+        Some(s) => text_result(flinfo, "pg_get_indexdef", &s),
+        None => fcinfo.return_null(),
+    })
+}
+
+pub fn fc_pg_get_indexdef(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    indexdef(flinfo, fcinfo, 0, PRETTYFLAG_INDENT)
+}
+
+pub fn fc_pg_get_indexdef_ext(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let colno = fcinfo.arg_i32(1);
+    let pretty = fcinfo.arg_bool(2);
+    indexdef(flinfo, fcinfo, colno, get_pretty_flags(pretty))
+}
+
+fn constraintdef(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+    pretty_flags: i32,
+) -> PgResult<Datum> {
+    let ctx = MemoryContext::new("pg_get_constraintdef");
+    let res =
+        crate::pg_get_constraintdef_worker(ctx.mcx(), fcinfo.arg_oid(0), pretty_flags, true)?;
+    Ok(match res {
+        Some(s) => text_result(flinfo, "pg_get_constraintdef", &s),
+        None => fcinfo.return_null(),
+    })
+}
+
+pub fn fc_pg_get_constraintdef(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    constraintdef(flinfo, fcinfo, PRETTYFLAG_INDENT)
+}
+
+pub fn fc_pg_get_constraintdef_ext(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let pretty = fcinfo.arg_bool(1);
+    constraintdef(flinfo, fcinfo, get_pretty_flags(pretty))
+}
+
+fn expr(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo, pretty_flags: i32) -> PgResult<Datum> {
+    // SAFETY: arg 0 of strict pg_get_expr is a non-null pg_node_tree (text).
+    let raw = unsafe { fcinfo.arg_varlena_packed(0) }?;
+    let text = core::str::from_utf8(raw.data()).expect("non-UTF-8 pg_node_tree").to_owned();
+    let relid = fcinfo.arg_oid(1);
+    let ctx = MemoryContext::new("pg_get_expr");
+    let res = crate::pg_get_expr_worker(ctx.mcx(), &text, relid, pretty_flags)?;
+    Ok(match res {
+        Some(s) => text_result(flinfo, "pg_get_expr", &s),
+        None => fcinfo.return_null(),
+    })
+}
+
+pub fn fc_pg_get_expr(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    expr(flinfo, fcinfo, PRETTYFLAG_INDENT)
+}
+
+pub fn fc_pg_get_expr_ext(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let pretty = fcinfo.arg_bool(2);
+    expr(flinfo, fcinfo, get_pretty_flags(pretty))
+}
+
+pub fn fc_pg_get_statisticsobjdef_columns(
+    _flinfo: Option<&mut FmgrInfo>,
+    _fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    crate::gap("pg_get_statisticsobjdef_columns", "extended-statistics deparse")
+}
+
+fn viewdef(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+    viewoid: Oid,
+    pretty_flags: i32,
+    wrap_column: i32,
+) -> PgResult<Datum> {
+    let ctx = MemoryContext::new("pg_get_viewdef");
+    let res = crate::pg_get_viewdef_worker(ctx.mcx(), viewoid, pretty_flags, wrap_column)?;
+    Ok(match res {
+        Some(s) => text_result(flinfo, "pg_get_viewdef", &s),
+        None => fcinfo.return_null(),
+    })
+}
+
+fn viewdef_name_arg(fcinfo: &mut Fcinfo) -> PgResult<Oid> {
+    // SAFETY: arg 0 of the strict by-name pg_get_viewdef forms is text.
+    let raw = unsafe { fcinfo.arg_varlena_packed(0) }?;
+    let name = core::str::from_utf8(raw.data()).expect("non-UTF-8 view name").to_owned();
+    let ctx = MemoryContext::new("pg_get_viewdef_name");
+    crate::viewdef::view_name_to_oid(ctx.mcx(), &name)
+}
+
+pub fn fc_pg_get_viewdef(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let viewoid = fcinfo.arg_oid(0);
+    viewdef(flinfo, fcinfo, viewoid, PRETTYFLAG_INDENT, crate::viewdef::WRAP_COLUMN_DEFAULT)
+}
+
+pub fn fc_pg_get_viewdef_ext(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let viewoid = fcinfo.arg_oid(0);
+    let pretty = fcinfo.arg_bool(1);
+    viewdef(flinfo, fcinfo, viewoid, get_pretty_flags(pretty), crate::viewdef::WRAP_COLUMN_DEFAULT)
+}
+
+pub fn fc_pg_get_viewdef_wrap(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let viewoid = fcinfo.arg_oid(0);
+    let wrap = fcinfo.arg_i32(1);
+    viewdef(flinfo, fcinfo, viewoid, get_pretty_flags(true), wrap)
+}
+
+pub fn fc_pg_get_viewdef_name(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let viewoid = viewdef_name_arg(fcinfo)?;
+    viewdef(flinfo, fcinfo, viewoid, PRETTYFLAG_INDENT, crate::viewdef::WRAP_COLUMN_DEFAULT)
+}
+
+pub fn fc_pg_get_viewdef_name_ext(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let viewoid = viewdef_name_arg(fcinfo)?;
+    let pretty = fcinfo.arg_bool(1);
+    viewdef(flinfo, fcinfo, viewoid, get_pretty_flags(pretty), crate::viewdef::WRAP_COLUMN_DEFAULT)
+}
+
+pub fn fc_pg_get_ruledef(_flinfo: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    crate::gap("pg_get_ruledef", "make_ruledef (non-view rule deparse)")
+}
+
+pub fn fc_pg_get_functiondef(
+    _flinfo: Option<&mut FmgrInfo>,
+    _fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    crate::gap("pg_get_functiondef", "CREATE FUNCTION deparse (function lane in flight)")
+}
+
+const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
+    FmgrBuiltin { foid, name, nargs, strict: true, retset: false, func }
+}
+
+// pg_proc.dat rows (all proisstrict, none retset), OID-ascending.
+pub const RULEUTILS_BUILTINS: &[FmgrBuiltin] = &[
+    b(1387, "pg_get_constraintdef", 1, fc_pg_get_constraintdef),
+    b(1573, "pg_get_ruledef", 1, fc_pg_get_ruledef),
+    b(1640, "pg_get_viewdef_name", 1, fc_pg_get_viewdef_name),
+    b(1641, "pg_get_viewdef", 1, fc_pg_get_viewdef),
+    b(1642, "pg_get_userbyid", 1, fc_pg_get_userbyid),
+    b(1643, "pg_get_indexdef", 1, fc_pg_get_indexdef),
+    b(1716, "pg_get_expr", 2, fc_pg_get_expr),
+    b(2098, "pg_get_functiondef", 1, fc_pg_get_functiondef),
+    b(2504, "pg_get_ruledef_ext", 2, fc_pg_get_ruledef),
+    b(2505, "pg_get_viewdef_name_ext", 2, fc_pg_get_viewdef_name_ext),
+    b(2506, "pg_get_viewdef_ext", 2, fc_pg_get_viewdef_ext),
+    b(2507, "pg_get_indexdef_ext", 3, fc_pg_get_indexdef_ext),
+    b(2508, "pg_get_constraintdef_ext", 2, fc_pg_get_constraintdef_ext),
+    b(2509, "pg_get_expr_ext", 3, fc_pg_get_expr_ext),
+    b(3159, "pg_get_viewdef_wrap", 2, fc_pg_get_viewdef_wrap),
+    b(6174, "pg_get_statisticsobjdef_columns", 1, fc_pg_get_statisticsobjdef_columns),
+];

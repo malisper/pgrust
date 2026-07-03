@@ -1,11 +1,12 @@
 //! execIndexing.c, INSERT + ON CONFLICT arms: ExecOpenIndices/ExecCloseIndices/
 //! ExecInsertIndexTuples/ExecCheckIndexConstraints + FormIndexDatum
-//! (catalog/index.c) over the btree AM. Loud: index expressions/predicates,
-//! exclusion constraints, deferred unique rechecks, summarizing-only updates.
+//! (catalog/index.c) over the btree AM. Loud: exclusion constraints, deferred
+//! unique rechecks, summarizing-only updates.
 #![allow(non_snake_case)]
 
 use ::datum::Datum;
-use ::mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgBox, PgVec};
+use ::types_nodes::NodeList;
 use ::types_core::{AttrNumber, Oid, INDEX_MAX_KEYS};
 use ::types_error::{PgError, PgResult, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE};
 use ::types_nbtree::genam::IndexUniqueCheck;
@@ -26,12 +27,17 @@ pub(crate) fn unported(what: &str) -> ! {
     panic!("unported: execIndexing {what}")
 }
 
-// IndexInfo (nodes/execnodes.h) trimmed to the insert lane's fields; the
-// expression/predicate state slots land with the expression-index lane.
-pub struct IndexInfo {
+// IndexInfo (nodes/execnodes.h) trimmed to the insert/build lanes' fields.
+pub struct IndexInfo<'mcx> {
     pub ii_NumIndexAttrs: i32,
+    // C ii_AmCache (per-statement AM scratch; gist stores its GISTSTATE).
+    pub ii_AmCache: Option<Box<dyn core::any::Any>>,
     pub ii_NumIndexKeyAttrs: i32,
     pub ii_IndexAttrNumbers: [AttrNumber; INDEX_MAX_KEYS as usize],
+    pub ii_Expressions: NodeList<'mcx>,
+    pub ii_ExpressionsState: PgVec<'mcx, PgBox<'mcx, execexpr::ExprState<'mcx>>>,
+    pub ii_Predicate: NodeList<'mcx>,
+    pub ii_PredicateState: Option<PgBox<'mcx, execexpr::ExprState<'mcx>>>,
     pub ii_Unique: bool,
     pub ii_NullsNotDistinct: bool,
     pub ii_ReadyForInserts: bool,
@@ -45,40 +51,77 @@ pub struct IndexInfo {
     pub ii_UniqueStrats: [u16; INDEX_MAX_KEYS as usize],
 }
 
+// RelationGetIndexExpressions (relcache.c): the Form caches the nodeToString
+// source instead of a parsed tree (no copyObject port); eval_const_expressions
+// here is required for planner qual matching, exactly as C.
+pub fn RelationGetIndexExpressions<'mcx>(
+    mcx: Mcx<'mcx>,
+    index: &Relation<'_>,
+) -> PgResult<NodeList<'mcx>> {
+    let form = index.rd_index.as_ref().expect("index relation");
+    let Some(src) = form.indexprs_src.as_ref() else {
+        return Ok(NodeList::nil());
+    };
+    let node = readfuncs::stringToNode(mcx, src.as_str())?;
+    let list = node.as_list().expect("indexprs is a List");
+    let mut out = NodeList::nil();
+    for e in list.iter() {
+        out.lappend(mcx, clauses::eval_const_expressions(mcx, e)?)?;
+    }
+    Ok(out)
+}
+
+/// RelationGetIndexPredicate (relcache.c), implicit-AND result. DIVERGENCE:
+/// C canonicalize_quals here (relcache.c:5254-5257); this executor path skips
+/// it — ExecQual truth values are form-independent — and the planner copy
+/// (plancat.rs get_relation_info) canonicalizes independently.
+pub fn RelationGetIndexPredicate<'mcx>(
+    mcx: Mcx<'mcx>,
+    index: &Relation<'_>,
+) -> PgResult<NodeList<'mcx>> {
+    let form = index.rd_index.as_ref().expect("index relation");
+    let Some(src) = form.indpred_src.as_ref() else {
+        return Ok(NodeList::nil());
+    };
+    let node = readfuncs::stringToNode(mcx, src.as_str())?;
+    let folded = clauses::eval_const_expressions(mcx, node)?;
+    clauses::make_ands_implicit(mcx, Some(folded))
+}
+
 /// BuildIndexInfo (catalog/index.c), pg_index arm.
-pub fn BuildIndexInfo(index: &Relation<'_>) -> IndexInfo {
+pub fn BuildIndexInfo<'mcx>(mcx: Mcx<'mcx>, index: &Relation<'_>) -> PgResult<IndexInfo<'mcx>> {
     let indexstruct = index.rd_index.as_ref().expect("index relation");
 
     if indexstruct.indisexclusion {
         unported("exclusion constraints (BuildIndexInfo ii_ExclusionOps)");
-    }
-    if indexstruct.has_indpred {
-        unported("partial-index predicates (ii_Predicate)");
     }
 
     let numatts = indexstruct.indnatts as i32;
     let mut attrs = [0 as AttrNumber; INDEX_MAX_KEYS as usize];
     for i in 0..numatts as usize {
         attrs[i] = indexstruct.indkey[i];
-        if attrs[i] == 0 {
-            unported("expression index columns (ii_Expressions)");
-        }
     }
 
-    IndexInfo {
+    Ok(IndexInfo {
         ii_NumIndexAttrs: numatts,
+        ii_AmCache: None,
         ii_NumIndexKeyAttrs: indexstruct.indnkeyatts as i32,
         ii_IndexAttrNumbers: attrs,
+        ii_Expressions: RelationGetIndexExpressions(mcx, index)?,
+        ii_ExpressionsState: PgVec::new_in(mcx),
+        ii_Predicate: RelationGetIndexPredicate(mcx, index)?,
+        ii_PredicateState: None,
         ii_Unique: indexstruct.indisunique,
         ii_NullsNotDistinct: indexstruct.indnullsnotdistinct,
-        ii_ReadyForInserts: indexstruct.indisready && indexstruct.indisvalid,
+        // indisready only (index.c:2452): invalid-but-ready still gets inserts.
+        ii_ReadyForInserts: indexstruct.indisready,
         ii_Summarizing: false, // btree only (relam gates in indexam)
         ii_Concurrent: false,
         ii_BrokenHotChain: false,
         ii_UniqueOps: [0; INDEX_MAX_KEYS as usize],
         ii_UniqueProcs: [0; INDEX_MAX_KEYS as usize],
         ii_UniqueStrats: [0; INDEX_MAX_KEYS as usize],
-    }
+    })
 }
 
 /// BuildSpeculativeIndexInfo (catalog/index.c), btree arm: equality operator
@@ -116,7 +159,7 @@ pub fn BuildSpeculativeIndexInfo(index: &Relation<'_>, ii: &mut IndexInfo) -> Pg
 // the estate-resident stub, so the owning node carries this by value.
 pub struct ResultRelIndexState<'mcx> {
     pub descs: PgVec<'mcx, Relation<'mcx>>,
-    pub infos: PgVec<'mcx, IndexInfo>,
+    pub infos: PgVec<'mcx, IndexInfo<'mcx>>,
 }
 
 impl ResultRelIndexState<'_> {
@@ -149,7 +192,7 @@ pub fn ExecOpenIndices<'mcx>(
 
     for &indexOid in indexoidlist.iter() {
         let indexDesc = indexam::index_open(mcx, indexOid, RowExclusiveLock)?;
-        let mut ii = BuildIndexInfo(&indexDesc);
+        let mut ii = BuildIndexInfo(mcx, &indexDesc)?;
         if speculative && ii.ii_Unique {
             BuildSpeculativeIndexInfo(&indexDesc, &mut ii)?;
         }
@@ -161,33 +204,85 @@ pub fn ExecOpenIndices<'mcx>(
 }
 
 /// ExecCloseIndices.
-pub fn ExecCloseIndices(state: ResultRelIndexState<'_>) -> PgResult<()> {
-    for indexDesc in state.descs.iter() {
-        indexam::index_insert_cleanup(indexDesc)?;
+pub fn ExecCloseIndices(mut state: ResultRelIndexState<'_>) -> PgResult<()> {
+    for (i, indexDesc) in state.descs.iter().enumerate() {
+        indexam::index_insert_cleanup(indexDesc, &mut state.infos[i].ii_AmCache)?;
     }
     // index_close(RowExclusiveLock): the Relation close hook runs on drop.
     Ok(())
 }
 
-/// FormIndexDatum (catalog/index.c), plain-column arm; expression and system
-/// columns are loud in BuildIndexInfo / here.
+/// FormIndexDatum (catalog/index.c); system columns stay loud. The expression
+/// states resolve once onto the IndexInfo (C's lazy ExecPrepareExprList; the
+/// exprs already passed eval_const_expressions in RelationGetIndexExpressions,
+/// so ExecPrepareExpr's expression_planner rerun is skipped as a no-op).
+/// `eval_mcx` is C's per-tuple context: the caller resets it per row.
 pub fn FormIndexDatum<'mcx>(
-    indexInfo: &IndexInfo,
+    mcx: Mcx<'mcx>,
+    eval_mcx: Mcx<'_>,
+    indexInfo: &mut IndexInfo<'mcx>,
     slot: &mut SlotData<'mcx>,
     values: &mut [Datum],
     isnull: &mut [bool],
 ) -> PgResult<()> {
+    if !indexInfo.ii_Expressions.is_nil() && indexInfo.ii_ExpressionsState.is_empty() {
+        for expr in indexInfo.ii_Expressions.iter() {
+            let state = execexpr::exec_init_expr(mcx, Some(expr), execexpr::ParamBind::NONE)?
+                .expect("index expression");
+            indexInfo.ii_ExpressionsState.push(state);
+        }
+    }
+    for state in indexInfo.ii_ExpressionsState.iter_mut() {
+        // SAFETY: eval_mcx outlives this call; by-ref results are consumed
+        // (copied into the index tuple) before the caller resets it.
+        unsafe { state.arm_result_mcx_raw(eval_mcx) };
+    }
+    let mut indexpr_item = indexInfo.ii_ExpressionsState.iter_mut();
+
     for i in 0..indexInfo.ii_NumIndexAttrs as usize {
         let keycol = indexInfo.ii_IndexAttrNumbers[i];
         if keycol < 0 {
             unported("system-attribute index columns (slot_getsysattr)");
         }
-        debug_assert!(keycol != 0, "expression columns rejected in BuildIndexInfo");
-        let mut null = false;
-        values[i] = exectuples::slot_getattr(slot, keycol as i32, &mut null);
-        isnull[i] = null;
+        if keycol != 0 {
+            let mut null = false;
+            values[i] = exectuples::slot_getattr(slot, keycol as i32, &mut null);
+            isnull[i] = null;
+        } else {
+            let state = indexpr_item.next().expect("wrong number of index expressions");
+            let mut slots = execexpr::EvalSlots { scan: Some(slot), inner: None, outer: None };
+            let r = execexpr::exec_eval_expr(state, &mut slots)?;
+            values[i] = r.value;
+            isnull[i] = r.isnull;
+        }
+    }
+    if indexpr_item.next().is_some() {
+        panic!("wrong number of index expressions");
     }
     Ok(())
+}
+
+// The ii_PredicateState arm of C's ExecInsertIndexTuples /
+// ExecCheckIndexConstraints / heapam_index_build_range_scan: lazy
+// ExecPrepareQual + ExecQual over the scan slot.
+pub fn index_predicate_passes<'mcx>(
+    mcx: Mcx<'mcx>,
+    eval_mcx: Mcx<'_>,
+    indexInfo: &mut IndexInfo<'mcx>,
+    slot: &mut SlotData<'mcx>,
+) -> PgResult<bool> {
+    debug_assert!(!indexInfo.ii_Predicate.is_nil());
+    if indexInfo.ii_PredicateState.is_none() {
+        indexInfo.ii_PredicateState =
+            execexpr::exec_init_qual(mcx, &indexInfo.ii_Predicate, execexpr::ParamBind::NONE)?;
+    }
+    if let Some(state) = indexInfo.ii_PredicateState.as_deref_mut() {
+        // SAFETY: eval_mcx outlives this call; the qual result is consumed
+        // before the caller resets it.
+        unsafe { state.arm_result_mcx_raw(eval_mcx) };
+    }
+    let mut slots = execexpr::EvalSlots { scan: Some(slot), inner: None, outer: None };
+    execexpr::exec_qual(indexInfo.ii_PredicateState.as_deref_mut(), &mut slots)
 }
 
 /// ExecInsertIndexTuples, INSERT + ON CONFLICT arms (`update`/
@@ -198,6 +293,7 @@ pub fn FormIndexDatum<'mcx>(
 /// lane, loud below.
 pub fn ExecInsertIndexTuples<'mcx>(
     mcx: Mcx<'mcx>,
+    eval_mcx: Mcx<'_>,
     state: &mut ResultRelIndexState<'mcx>,
     heap_relation: &Relation<'mcx>,
     slot: &mut SlotData<'mcx>,
@@ -213,13 +309,21 @@ pub fn ExecInsertIndexTuples<'mcx>(
     let mut isnull = [false; INDEX_MAX_KEYS as usize];
 
     for i in 0..state.descs.len() {
-        let indexInfo = &state.infos[i];
+        let indexInfo = &mut state.infos[i];
         if !indexInfo.ii_ReadyForInserts {
             continue;
         }
 
-        FormIndexDatum(indexInfo, slot, &mut values, &mut isnull)?;
+        if !indexInfo.ii_Predicate.is_nil()
+            && !index_predicate_passes(mcx, eval_mcx, indexInfo, slot)?
+        {
+            continue;
+        }
 
+        FormIndexDatum(mcx, eval_mcx, indexInfo, slot, &mut values, &mut isnull)?;
+        let n_index_attrs = indexInfo.ii_NumIndexAttrs as usize;
+
+        let indexInfo = &state.infos[i];
         let indexRelation = &state.descs[i];
         let index_form = indexRelation.rd_index.as_ref().expect("index relation");
         let applyNoDupErr = noDupErr
@@ -238,12 +342,13 @@ pub fn ExecInsertIndexTuples<'mcx>(
         let satisfiesConstraint = indexam::index_insert(
             mcx,
             indexRelation,
-            &values[..indexInfo.ii_NumIndexAttrs as usize],
-            &isnull[..indexInfo.ii_NumIndexAttrs as usize],
+            &values[..n_index_attrs],
+            &isnull[..n_index_attrs],
             &tupleid,
             heap_relation,
             checkUnique,
             false,
+            &mut state.infos[i].ii_AmCache,
         )?;
 
         if checkUnique == IndexUniqueCheck::UNIQUE_CHECK_PARTIAL && !satisfiesConstraint {
@@ -266,7 +371,8 @@ pub fn ExecInsertIndexTuples<'mcx>(
 #[allow(clippy::too_many_arguments)]
 pub fn ExecCheckIndexConstraints<'mcx>(
     mcx: Mcx<'mcx>,
-    state: &ResultRelIndexState<'mcx>,
+    eval_mcx: Mcx<'_>,
+    state: &mut ResultRelIndexState<'mcx>,
     heap_relation: &Relation<'mcx>,
     slot: &mut SlotData<'mcx>,
     existing_slot: &mut SlotData<'mcx>,
@@ -281,7 +387,7 @@ pub fn ExecCheckIndexConstraints<'mcx>(
     let mut isnull = [false; INDEX_MAX_KEYS as usize];
 
     for i in 0..state.descs.len() {
-        let indexInfo = &state.infos[i];
+        let indexInfo = &mut state.infos[i];
         // ii_ExclusionOps is loud at BuildIndexInfo, so unique-only here.
         if !indexInfo.ii_Unique || !indexInfo.ii_ReadyForInserts {
             continue;
@@ -298,7 +404,14 @@ pub fn ExecCheckIndexConstraints<'mcx>(
         }
         checked_index = true;
 
-        FormIndexDatum(indexInfo, slot, &mut values, &mut isnull)?;
+        if !indexInfo.ii_Predicate.is_nil()
+            && !index_predicate_passes(mcx, eval_mcx, indexInfo, slot)?
+        {
+            continue;
+        }
+
+        FormIndexDatum(mcx, eval_mcx, indexInfo, slot, &mut values, &mut isnull)?;
+        let indexInfo = &state.infos[i];
 
         if !check_unique_constraint(
             mcx,
@@ -330,7 +443,7 @@ fn check_unique_constraint<'mcx>(
     mcx: Mcx<'mcx>,
     heap_relation: &Relation<'mcx>,
     index_relation: &Relation<'mcx>,
-    index_info: &IndexInfo,
+    index_info: &IndexInfo<'mcx>,
     tupleid: &ItemPointerData,
     values: &[Datum],
     isnull: &[bool],

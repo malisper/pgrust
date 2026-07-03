@@ -10,7 +10,7 @@ datum = { path = "../../../../_support/types/datum" }
 types_core = { path = "../../../../_support/types/types_core" }
 types_error = { path = "../../../../_support/types/types_error" }
 types_fmgr = { path = "../../../../_support/types/fmgr" }
-fmgr_core = { path = "../../fmgr/fmgr_core" }
+fmgr_seams = { path = "../../fmgr/fmgr_seams" }
 lsyscache = { path = "../lsyscache" }
 inval = { path = "../inval" }
 syscache_seams = { path = "../syscache_seams" }
@@ -20,6 +20,14 @@ relation_seams = { path = "../../../access/common/relation_seams" }
 tupdesc = { path = "../../../access/common/tupdesc" }
 types_rel = { path = "../../../../_support/types/rel" }
 types_tuple = { path = "../../../../_support/types/types_tuple" }
+readfuncs = { path = "../../../nodes/readfuncs" }
+nodes_core = { path = "../../../nodes/nodes_core" }
+clauses_seams = { path = "../../../optimizer/util/clauses_seams" }
+types_nodes = { path = "../../../../_support/types/nodes" }
+pg_enum_seams = { path = "../../../catalog/pg_enum_seams" }
+format_type = { path = "../../adt/format_type" }
 
 [dev-dependencies]
 types_tuple = { path = "../../../../_support/types/types_tuple" }
+fmgr_core = { path = "../../fmgr/fmgr_core" }
+clauses = { path = "../../../optimizer/util/clauses" }

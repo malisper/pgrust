@@ -149,7 +149,22 @@ fn node(out: &mut String, n: Node<'_>) {
         out.push('}');
     } else if let Some(e) = n.as_a_expr() {
         out.push_str("{A_EXPR");
-        assert!(matches!(e.kind, A_Expr_Kind::AEXPR_OP), "only AEXPR_OP rendered");
+        out.push_str(match e.kind {
+            A_Expr_Kind::AEXPR_OP => "",
+            A_Expr_Kind::AEXPR_OP_ANY => " ANY",
+            A_Expr_Kind::AEXPR_OP_ALL => " ALL",
+            A_Expr_Kind::AEXPR_DISTINCT => " DISTINCT",
+            A_Expr_Kind::AEXPR_NOT_DISTINCT => " NOT_DISTINCT",
+            A_Expr_Kind::AEXPR_NULLIF => " NULLIF",
+            A_Expr_Kind::AEXPR_IN => " IN",
+            A_Expr_Kind::AEXPR_LIKE => " LIKE",
+            A_Expr_Kind::AEXPR_ILIKE => " ILIKE",
+            A_Expr_Kind::AEXPR_SIMILAR => " SIMILAR",
+            A_Expr_Kind::AEXPR_BETWEEN => " BETWEEN",
+            A_Expr_Kind::AEXPR_NOT_BETWEEN => " NOT_BETWEEN",
+            A_Expr_Kind::AEXPR_BETWEEN_SYM => " BETWEEN_SYM",
+            A_Expr_Kind::AEXPR_NOT_BETWEEN_SYM => " NOT_BETWEEN_SYM",
+        });
         list_field(out, "name", &e.name);
         node_field(out, "lexpr", e.lexpr);
         node_field(out, "rexpr", e.rexpr);
@@ -171,6 +186,47 @@ fn node(out: &mut String, n: Node<'_>) {
         out.push_str("{A_STAR}");
     } else if let Some(rv) = n.as_range_var() {
         range_var(out, rv);
+    } else if let Some(v) = n.as_variant::<types_nodes::rawnodes::ViewStmt>() {
+        out.push_str("{VIEWSTMT :view ");
+        match v.view {
+            Some(rv) => range_var(out, rv),
+            None => out.push_str("<>"),
+        }
+        list_field(out, "aliases", &v.aliases);
+        node_field(out, "query", v.query);
+        bool_field(out, "replace", v.replace);
+        list_field(out, "options", &v.options);
+        int_field(out, "withCheckOption", v.withCheckOption as i32);
+        out.push('}');
+    } else if let Some(c) = n.as_variant::<types_nodes::rawnodes::CreateTableAsStmt>() {
+        out.push_str("{CREATETABLEASSTMT");
+        node_field(out, "query", c.query);
+        node_field(out, "into", c.into);
+        int_field(out, "objtype", c.objtype as i32);
+        bool_field(out, "is_select_into", c.is_select_into);
+        bool_field(out, "if_not_exists", c.if_not_exists);
+        out.push('}');
+    } else if let Some(ic) = n.as_variant::<types_nodes::rawnodes::IntoClause>() {
+        out.push_str("{INTOCLAUSE");
+        node_field(out, "rel", ic.rel);
+        list_field(out, "colNames", &ic.colNames);
+        string_field(out, "accessMethod", ic.accessMethod);
+        list_field(out, "options", &ic.options);
+        int_field(out, "onCommit", ic.onCommit as i32);
+        string_field(out, "tableSpaceName", ic.tableSpaceName);
+        node_field(out, "viewQuery", ic.viewQuery);
+        bool_field(out, "skipData", ic.skipData);
+        out.push('}');
+    } else if let Some(r) = n.as_variant::<types_nodes::rawnodes::RefreshMatViewStmt>() {
+        out.push_str("{REFRESHMATVIEWSTMT");
+        bool_field(out, "concurrent", r.concurrent);
+        bool_field(out, "skipData", r.skipData);
+        out.push_str(" :relation ");
+        match r.relation {
+            Some(rv) => range_var(out, rv),
+            None => out.push_str("<>"),
+        }
+        out.push('}');
     } else if let Some(sb) = n.as_sort_by() {
         out.push_str("{SORTBY");
         node_field(out, "node", sb.node);
@@ -259,6 +315,27 @@ fn node(out: &mut String, n: Node<'_>) {
         int_field(out, "nulltesttype", nt.nulltesttype as i32);
         bool_field(out, "argisrow", nt.argisrow);
         int_field(out, "location", nt.location);
+        out.push('}');
+    } else if let Some(sl) = n.as_sub_link() {
+        out.push_str("{SUBLINK");
+        int_field(out, "subLinkType", sl.subLinkType as i32);
+        int_field(out, "subLinkId", sl.subLinkId);
+        node_field(out, "testexpr", sl.testexpr);
+        list_field(out, "operName", &sl.operName);
+        node_field(out, "subselect", Some(sl.subselect));
+        int_field(out, "location", sl.location);
+        out.push('}');
+    } else if let Some(bt) = n.as_boolean_test() {
+        out.push_str("{BOOLEANTEST");
+        node_field(out, "arg", bt.arg);
+        int_field(out, "booltesttype", bt.booltesttype as i32);
+        int_field(out, "location", bt.location);
+        out.push('}');
+    } else if let Some(cc) = n.as_collate_clause() {
+        out.push_str("{COLLATECLAUSE");
+        node_field(out, "arg", cc.arg);
+        list_field(out, "collname", &cc.collname);
+        int_field(out, "location", cc.location);
         out.push('}');
     } else if let Some(g) = n.as_grant_stmt() {
         out.push_str("{GRANTSTMT");
@@ -419,6 +496,17 @@ fn node(out: &mut String, n: Node<'_>) {
         node_field(out, "arg", d.arg);
         int_field(out, "defaction", d.defaction as i32);
         int_field(out, "location", d.location);
+        out.push('}');
+    } else if let Some(cs) = n.as_create_seq_stmt() {
+        out.push_str("{CREATESEQSTMT :sequence ");
+        match cs.sequence {
+            Some(rv) => range_var(out, rv),
+            None => out.push_str("<>"),
+        }
+        list_field(out, "options", &cs.options);
+        out.push_str(&format!(" :ownerId {}", cs.ownerId));
+        bool_field(out, "for_identity", cs.for_identity);
+        bool_field(out, "if_not_exists", cs.if_not_exists);
         out.push('}');
     } else if let Some(j) = n.as_join_expr() {
         out.push_str("{JOINEXPR");
@@ -610,6 +698,27 @@ fn node(out: &mut String, n: Node<'_>) {
         list_field(out, "fdwoptions", &c.fdwoptions);
         int_field(out, "location", c.location);
         out.push('}');
+    } else if let Some(c) = n.as_create_domain_stmt() {
+        out.push_str("{CREATEDOMAINSTMT");
+        list_field(out, "domainname", &c.domainname);
+        node_field(out, "typeName", c.typeName);
+        node_field(out, "collClause", c.collClause);
+        list_field(out, "constraints", &c.constraints);
+        out.push('}');
+    } else if let Some(c) = n.as_create_enum_stmt() {
+        out.push_str("{CREATEENUMSTMT");
+        list_field(out, "typeName", &c.typeName);
+        list_field(out, "vals", &c.vals);
+        out.push('}');
+    } else if let Some(c) = n.as_alter_enum_stmt() {
+        out.push_str("{ALTERENUMSTMT");
+        list_field(out, "typeName", &c.typeName);
+        string_field(out, "oldVal", c.oldVal);
+        string_field(out, "newVal", c.newVal);
+        string_field(out, "newValNeighbor", c.newValNeighbor);
+        bool_field(out, "newValIsAfter", c.newValIsAfter);
+        bool_field(out, "skipIfNewValExists", c.skipIfNewValExists);
+        out.push('}');
     } else if let Some(c) = n.as_variant::<types_nodes::rawnodes::Constraint>() {
         // Fields absent from the ported Constraint render as palloc0 defaults.
         out.push_str("{CONSTRAINT");
@@ -623,8 +732,8 @@ fn node(out: &mut String, n: Node<'_>) {
         bool_field(out, "is_no_inherit", c.is_no_inherit);
         node_field(out, "raw_expr", c.raw_expr);
         string_field(out, "cooked_expr", c.cooked_expr);
-        char_field(out, "generated_when", 0);
-        char_field(out, "generated_kind", 0);
+        char_field(out, "generated_when", c.generated_when);
+        char_field(out, "generated_kind", c.generated_kind);
         bool_field(out, "nulls_not_distinct", c.nulls_not_distinct);
         list_field(out, "keys", &c.keys);
         bool_field(out, "without_overlaps", false);
@@ -712,6 +821,66 @@ fn node(out: &mut String, n: Node<'_>) {
         int_field(out, "typemod", tn.typemod);
         list_field(out, "arrayBounds", &tn.arrayBounds);
         int_field(out, "location", tn.location);
+        out.push('}');
+    } else if let Some(p) = n.as_variant::<types_nodes::rawnodes::PartitionSpec>() {
+        out.push_str("{PARTITIONSPEC");
+        int_field(out, "strategy", p.strategy as i32);
+        list_field(out, "partParams", &p.partParams);
+        int_field(out, "location", p.location);
+        out.push('}');
+    } else if let Some(e) = n.as_variant::<types_nodes::rawnodes::PartitionElem>() {
+        out.push_str("{PARTITIONELEM");
+        string_field(out, "name", e.name);
+        node_field(out, "expr", e.expr);
+        list_field(out, "collation", &e.collation);
+        list_field(out, "opclass", &e.opclass);
+        int_field(out, "location", e.location);
+        out.push('}');
+    } else if let Some(b) = n.as_variant::<types_nodes::rawnodes::PartitionBoundSpec>() {
+        out.push_str("{PARTITIONBOUNDSPEC");
+        char_field(out, "strategy", b.strategy);
+        bool_field(out, "is_default", b.is_default);
+        int_field(out, "modulus", b.modulus);
+        int_field(out, "remainder", b.remainder);
+        list_field(out, "listdatums", &b.listdatums);
+        list_field(out, "lowerdatums", &b.lowerdatums);
+        list_field(out, "upperdatums", &b.upperdatums);
+        int_field(out, "location", b.location);
+        out.push('}');
+    } else if let Some(d) = n.as_variant::<types_nodes::rawnodes::PartitionRangeDatum>() {
+        out.push_str("{PARTITIONRANGEDATUM");
+        int_field(out, "kind", d.kind as i32);
+        node_field(out, "value", d.value);
+        int_field(out, "location", d.location);
+        out.push('}');
+    } else if let Some(rf) = n.as_variant::<types_nodes::RangeFunction>() {
+        out.push_str("{RANGEFUNCTION");
+        bool_field(out, "lateral", rf.lateral);
+        bool_field(out, "ordinality", rf.ordinality);
+        bool_field(out, "is_rowsfrom", rf.is_rowsfrom);
+        // C: functions is a list of (funcexpr, coldeflist) 2-lists; the port
+        // holds bare funcexprs with NIL coldeflists (actions.rs rule 1884).
+        out.push_str(" :functions (");
+        for (i, f) in rf.functions.iter().enumerate() {
+            if i > 0 {
+                out.push(' ');
+            }
+            out.push('(');
+            node(out, f);
+            out.push_str(" <>)");
+        }
+        out.push(')');
+        out.push_str(" :alias ");
+        match rf.alias {
+            Some(a) => alias(out, a),
+            None => out.push_str("<>"),
+        }
+        list_field(out, "coldeflist", &rf.coldeflist);
+        out.push('}');
+    } else if let Some(r) = n.as_variant::<types_nodes::parsenodes::ReplicaIdentityStmt>() {
+        out.push_str("{REPLICAIDENTITYSTMT");
+        char_field(out, "identity_type", r.identity_type);
+        string_field(out, "name", r.name);
         out.push('}');
     } else if let Some(lc) = n.as_locking_clause() {
         out.push_str("{LOCKINGCLAUSE");

@@ -616,11 +616,9 @@ fn concurrent_abort_check(xid: TransactionId) -> PgResult<()> {
     Ok(())
 }
 
-// REINDEX is unimplemented repo-wide (C's pendingReindexedIndexes statically
-// empty); reroute via catalog/index.c when it lands. Mirrors indexam.
 #[inline]
-fn reindex_is_processing_index(_indexId: Oid) -> bool {
-    false
+fn reindex_is_processing_index(indexId: Oid) -> bool {
+    types_rel::reindex::ReindexIsProcessingIndex(indexId)
 }
 
 #[cold]

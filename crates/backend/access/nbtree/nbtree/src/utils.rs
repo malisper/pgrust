@@ -198,7 +198,6 @@ unsafe fn datum_image_eq(a: Datum, b: Datum, attbyval: bool, attlen: i16) -> boo
             && core::slice::from_raw_parts(pa, la) == core::slice::from_raw_parts(pb, lb);
     }
     debug_assert!(attlen == -2);
-    // cstring
     let mut i = 0;
     loop {
         let (ca, cb) = (*pa.add(i), *pb.add(i));

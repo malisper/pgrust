@@ -7,6 +7,7 @@ edition = "2021"
 path = "src/lib.rs"
 
 [dependencies]
+rewrite_define = { path = "../../rewrite/rewrite_define" }
 mcx = { path = "../../../_support/mcx" }
 types_core = { path = "../../../_support/types/types_core" }
 types_error = { path = "../../../_support/types/types_error" }
@@ -19,6 +20,7 @@ catalog_namespace = { path = "../../catalog/catalog_namespace" }
 catalog_heap = { path = "../../catalog/catalog_heap" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
 miscinit = { path = "../../utils/init/miscinit" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
 xact = { path = "../../access/transam/xact" }
 datum = { path = "../../../_support/types/datum" }
 types_scan = { path = "../../../_support/types/types_scan" }
@@ -41,7 +43,10 @@ catalog_index = { path = "../../catalog/catalog_index" }
 lmgr = { path = "../../storage/lmgr/lmgr" }
 pg_attrdef = { path = "../../catalog/pg_attrdef" }
 pg_constraint = { path = "../../catalog/pg_constraint" }
+readfuncs = { path = "../../nodes/readfuncs" }
 clauses = { path = "../../optimizer/util/clauses" }
+nodes_core = { path = "../../nodes/nodes_core" }
+mbutils = { path = "../../utils/mb/mbutils" }
 execexpr = { path = "../../executor/execexpr" }
 rewrite_handler = { path = "../../rewrite/rewrite_handler" }
 catalog_toasting = { path = "../../catalog/catalog_toasting" }
@@ -61,10 +66,24 @@ aclchk_seams = { path = "../../catalog/aclchk_seams" }
 pgstat = { path = "../../utils/activity/pgstat" }
 predicate_seams = { path = "../../storage/lmgr/predicate_seams" }
 relcache_seams = { path = "../../utils/cache/relcache_seams" }
-lsyscache = { path = "../../utils/cache/lsyscache" }
 cache_syscache = { path = "../../utils/cache/cache_syscache" }
 array = { package = "types_array", path = "../../../_support/types/array" }
 relcache = { path = "../../utils/cache/relcache" }
 types_trigger = { path = "../../../_support/types/types_trigger" }
 trigger = { path = "../trigger" }
+exectuples = { path = "../../executor/exectuples" }
+tableam_vocab = { path = "../../access/table/tableam_vocab" }
+heapam = { path = "../../access/heap/heapam" }
+types_slot = { path = "../../../_support/types/types_slot" }
+pg_type = { path = "../../catalog/pg_type" }
+commands_cluster = { path = "../cluster" }
+relation_seams = { path = "../../access/common/relation_seams" }
+procarray = { path = "../../storage/ipc/procarray" }
+multixact = { path = "../../access/transam/multixact" }
 
+indexcmds_seams = { path = "../indexcmds_seams" }
+partcache = { path = "../../utils/cache/partcache" }
+partbounds = { path = "../../partitioning/partbounds" }
+partdesc = { path = "../../partitioning/partdesc" }
+pg_inherits = { path = "../../catalog/pg_inherits" }
+rewrite_manip = { path = "../../rewrite/rewrite_manip" }

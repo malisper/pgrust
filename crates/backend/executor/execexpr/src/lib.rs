@@ -15,6 +15,7 @@
 extern crate alloc;
 
 mod compile;
+pub mod domain;
 mod interp;
 mod steps;
 #[cfg(test)]
@@ -26,7 +27,7 @@ pub use compile::{
     exec_build_agg_trans_gsets, exec_build_agg_trans_hashed, exec_build_grouping_equal,
     exec_build_hash32_from_attrs, exec_build_projection_info,
     exec_build_projection_info_subplans, exec_init_expr, exec_init_expr_subplans,
-    exec_init_qual, exec_init_qual_subplans, expr_type, AggBind, AggTransSpec,
+    exec_init_qual, exec_init_qual_subplans, expr_type, AggBind, AggOrderedSpec, AggTransSpec,
     SubplanCompileEnv, WinBind, INDEX_VAR, INNER_VAR, OUTER_VAR,
 };
 pub use interp::{
@@ -92,4 +93,5 @@ pub fn evaluate_expr<'mcx>(
 
 pub fn init_seams() {
     clauses_seams::evaluate_expr::set(evaluate_expr);
+    typcache_seams::domain_check_input::set(domain::domain_check_input);
 }

@@ -21,3 +21,23 @@ seam_core::seam!(
     // remove_on_commit_action(relid) (tablecmds.c): infallible list marking.
     pub fn remove_on_commit_action(relid: types_core::Oid)
 );
+
+seam_core::seam!(
+    // RenameRelationInternal (tablecmds.c) for cluster's toast renames.
+    pub fn rename_relation_internal<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        relid: types_core::Oid,
+        newname: &str,
+        is_index: bool,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    // RangeVarCallbackMaintainsTable (tablecmds.c); cluster consumes via seam
+    // (tablecmds depends on commands_cluster for the ALTER rewrite lane).
+    pub fn range_var_callback_maintains_table(
+        relation: &rel_vocab::RangeVar<'_>,
+        rel_id: types_core::Oid,
+        old_rel_id: types_core::Oid,
+    ) -> PgResult<()>
+);

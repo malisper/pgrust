@@ -22,6 +22,9 @@ use crate::consts::{
 };
 use crate::handler_gap;
 
+// pg_authid.dat oid 4544.
+const ROLE_PG_CHECKPOINT: ::types_core::Oid = 4544;
+
 #[inline]
 fn set_query_completion(qc: &mut Option<&mut QueryCompletion>, tag: types_core::CommandTag) {
     if let Some(qc) = qc.as_mut() {
@@ -312,7 +315,15 @@ fn dispatch_switch<'mcx>(
 
         T_CreatedbStmt => {
             xact::PreventInTransactionBlock(is_top_level, "CREATE DATABASE")?;
-            handler_gap("createdb (dbcommands lane)")
+            let stmt = parsetree.as_createdb_stmt().unwrap();
+            // Retention contract as unify_stmt_lifetime.
+            let stmt = unsafe {
+                core::mem::transmute::<
+                    &types_nodes::parsenodes::CreatedbStmt<'_>,
+                    &types_nodes::parsenodes::CreatedbStmt<'mcx>,
+                >(stmt)
+            };
+            dbcommands::createdb(mcx, stmt)?;
         }
         T_AlterDatabaseStmt => handler_gap("AlterDatabase (dbcommands lane)"),
         T_AlterDatabaseRefreshCollStmt => {
@@ -321,7 +332,23 @@ fn dispatch_switch<'mcx>(
         T_AlterDatabaseSetStmt => handler_gap("AlterDatabaseSet (dbcommands lane)"),
         T_DropdbStmt => {
             xact::PreventInTransactionBlock(is_top_level, "DROP DATABASE")?;
-            handler_gap("dropdb (dbcommands lane)")
+            let stmt = parsetree.as_dropdb_stmt().unwrap();
+            let mut force = false;
+            for opt in stmt.options.iter() {
+                let d = opt.as_def_elem().expect("dropdb options are DefElems");
+                match d.defname.unwrap_or("") {
+                    "force" => force = true,
+                    other => {
+                        return Err(elog::ereport(types_error::ERROR)
+                            .errcode(types_error::ERRCODE_SYNTAX_ERROR)
+                            .errmsg(format!("unrecognized DROP DATABASE option \"{other}\""))
+                            .errposition(d.location + 1)
+                            .into_error()
+                            .into())
+                    }
+                }
+            }
+            dbcommands::dropdb(mcx, stmt.dbname.unwrap_or(""), stmt.missing_ok, force)?;
         }
 
         T_NotifyStmt => {
@@ -351,9 +378,25 @@ fn dispatch_switch<'mcx>(
             }
         }
 
-        T_LoadStmt => handler_gap("load_file (dfmgr lane)"),
+        // load_file: no dynamic loader exists; every linked library is
+        // "already loaded", which C treats as silent success. A filename that
+        // C would dlopen diverges (notes/divergences).
+        T_LoadStmt => {
+            let _ = parsetree.as_load_stmt().expect("LoadStmt");
+        }
         T_CallStmt => handler_gap("ExecuteCallStmt (functioncmds lane)"),
-        T_ClusterStmt => handler_gap("cluster (cluster lane)"),
+        T_ClusterStmt => {
+            let stmt = parsetree
+                .as_variant::<types_nodes::parsenodes::ClusterStmt>()
+                .expect("ClusterStmt");
+            commands_cluster::cluster(mcx, stmt, is_top_level)?;
+        }
+        T_ReindexStmt => {
+            let stmt = parsetree
+                .as_variant::<types_nodes::parsenodes::ReindexStmt>()
+                .expect("ReindexStmt");
+            indexcmds::ExecReindex(mcx, stmt, is_top_level)?;
+        }
         T_VacuumStmt => {
             // ExecVacuum's VACUUM half lives in commands_vacuum, the ANALYZE
             // half in commands_analyze (each panics on the other's lane).
@@ -398,13 +441,35 @@ fn dispatch_switch<'mcx>(
 
         T_LockStmt => {
             xact::RequireTransactionBlock(is_top_level, "LOCK TABLE")?;
-            handler_gap("LockTableCommand (lockcmds lane)")
+            let stmt = parsetree.as_lock_stmt().unwrap();
+            lockcmds::LockTableCommand(mcx, stmt)?;
         }
         T_ConstraintsSetStmt => {
             xact::WarnNoTransactionBlock(is_top_level, "SET CONSTRAINTS")?;
             handler_gap("AfterTriggerSetState (trigger lane)")
         }
-        T_CheckPointStmt => handler_gap("RequestCheckpoint (checkpointer lane)"),
+        T_CheckPointStmt => {
+            if !acl_seams::has_privs_of_role::call(
+                miscinit::GetUserId(),
+                ROLE_PG_CHECKPOINT,
+            )? {
+                return Err(::elog::ereport(types_error::ERROR)
+                    .errcode(types_error::ERRCODE_INSUFFICIENT_PRIVILEGE)
+                    .errmsg("permission denied to execute CHECKPOINT command")
+                    .errdetail(
+                        "Only roles with privileges of the \"pg_checkpoint\" role may \
+                         execute this command."
+                            .to_string(),
+                    )
+                    .into_error()
+                    .into());
+            }
+            let force =
+                if transam_xlog::RecoveryInProgress() { 0 } else { transam_xlog::CHECKPOINT_FORCE };
+            checkpointer_seams::request_checkpoint::call(
+                transam_xlog::CHECKPOINT_IMMEDIATE | transam_xlog::CHECKPOINT_WAIT | force,
+            )?;
+        }
 
         T_DropStmt => {
             use types_nodes::parsenodes::ObjectType::*;
@@ -424,6 +489,7 @@ fn dispatch_switch<'mcx>(
                 }
                 OBJECT_INDEX | OBJECT_TABLE | OBJECT_SEQUENCE | OBJECT_VIEW | OBJECT_MATVIEW
                 | OBJECT_FOREIGN_TABLE => tablecmds::RemoveRelations(mcx, stmt)?,
+                OBJECT_RULE => dropcmds::RemoveObjects(mcx, stmt)?,
                 _ => handler_gap("RemoveObjects (dropcmds lane)"),
             }
         }
@@ -452,58 +518,63 @@ fn dispatch_switch<'mcx>(
             schemacmds::CreateSchemaCommand(mcx, stmt)?;
 }
 
-        T_IndexStmt => {
+        T_CreateFunctionStmt => {
+            let stmt = parsetree.as_create_function_stmt().unwrap();
+            // Retention contract as unify_stmt_lifetime.
+            let stmt = unsafe {
+                core::mem::transmute::<
+                    &types_nodes::parsenodes::CreateFunctionStmt<'_>,
+                    &types_nodes::parsenodes::CreateFunctionStmt<'mcx>,
+                >(stmt)
+            };
+            functioncmds::CreateFunction(mcx, stmt)?;
+        }
+
+        T_CreateStatsStmt => {
             // Retention contract as unify_stmt_lifetime: the statement arena
             // outlives the utility call; nothing derived escapes it.
             let stmt_node =
                 unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
             let stmt = stmt_node
-                .as_variant::<types_nodes::rawnodes::IndexStmt>()
-                .expect("IndexStmt");
-            if stmt.concurrent {
-                xact::PreventInTransactionBlock(is_top_level, "CREATE INDEX CONCURRENTLY")?;
+                .as_variant::<types_nodes::rawnodes::CreateStatsStmt>()
+                .expect("CreateStatsStmt");
+            if let Some(first) = stmt.relations.iter().next() {
+                let Some(rv_node) = first.as_range_var() else {
+                    return Err(Box::new(
+                        types_error::PgError::new(
+                            types_error::ERROR,
+                            "CREATE STATISTICS only supports relation names in the FROM clause"
+                                .to_string(),
+                        )
+                        .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+                    ));
+                };
+                let rv = rel_vocab::RangeVar {
+                    catalogname: rv_node.catalogname,
+                    schemaname: rv_node.schemaname,
+                    relname: rv_node.relname.expect("CreateStatsStmt relation without relname"),
+                    inh: rv_node.inh,
+                    relpersistence: rv_node.relpersistence,
+                    location: rv_node.location,
+                };
+                catalog_namespace::RangeVarGetRelidExtended(
+                    &rv,
+                    types_rel::ShareUpdateExclusiveLock,
+                    0,
+                    None,
+                )?;
             }
-            let lockmode = if stmt.concurrent {
-                types_rel::ShareUpdateExclusiveLock
-            } else {
-                types_rel::ShareLock
-            };
-            let rv_node = stmt.relation.expect("IndexStmt without relation");
-            let rv = rel_vocab::RangeVar {
-                catalogname: rv_node.catalogname,
-                schemaname: rv_node.schemaname,
-                relname: rv_node.relname.expect("IndexStmt relation without relname"),
-                inh: rv_node.inh,
-                relpersistence: rv_node.relpersistence,
-                location: rv_node.location,
-            };
-            let mut cb = |rv2: &rel_vocab::RangeVar<'_>,
-                          rel_id: types_core::Oid,
-                          old_rel_id: types_core::Oid|
-             -> PgResult<()> {
-                range_var_callback_owns_relation(mcx, rv2, rel_id, old_rel_id)
-            };
-            let relid =
-                catalog_namespace::RangeVarGetRelidExtended(&rv, lockmode, 0, Some(&mut cb))?;
-            if rv.inh
-                && lsyscache::get_rel_relkind(relid)? as u8
-                    == types_rel::RELKIND_PARTITIONED_TABLE
-            {
-                handler_gap("CREATE INDEX partitioned-table recursion");
-            }
-            let is_alter_table = stmt.transformed;
-            parse_utilcmd::transformIndexStmt(relid, stmt, source_text)?;
-            indexcmds::DefineIndex(
-                mcx,
-                relid,
-                stmt,
-                types_core::InvalidOid,
-                is_alter_table,
-                true,
-                true,
-                false,
-                false,
-            )?;
+            // transformStatsStmt is a no-op for plain column references; the
+            // expression lane panics inside CreateStatistics.
+            statscmds::CreateStatistics(mcx, stmt)?;
+        }
+
+        T_IndexStmt => {
+            // Retention contract as unify_stmt_lifetime: the statement arena
+            // outlives the utility call; nothing derived escapes it.
+            let stmt_node =
+                unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            exec_index_stmt(mcx, stmt_node, source_text, is_top_level)?;
         }
 
         T_AlterTableStmt => {
@@ -518,22 +589,21 @@ fn dispatch_switch<'mcx>(
                     &types_nodes::parsenodes::AlterTableStmt<'mcx>,
                 >(stmt)
             };
-            // DETACH CONCURRENTLY transaction-block fence: unported subtypes
-            // are loud inside AlterTableGetLockLevel.
-            let lockmode = tablecmds::AlterTableGetLockLevel(&stmt.cmds);
-            let relid = tablecmds::AlterTableLookupRelation(mcx, stmt, lockmode)?;
-            if relid != types_core::InvalidOid {
-                // Event triggers absent by design (EventTriggerAlterTable*).
-                tablecmds::AlterTable(mcx, relid, lockmode, stmt, source_text)?;
-            } else {
-                elog_seams::ereport_msg::call(
-                    types_error::NOTICE,
-                    format!(
-                        "relation \"{}\" does not exist, skipping",
-                        stmt.relation.and_then(|r| r.relname).unwrap_or("")
-                    ),
-                    None,
-                )?;
+            exec_alter_table_stmt(mcx, stmt, source_text)?;
+        }
+
+        T_RenameStmt => {
+            let stmt = parsetree
+                .as_variant::<types_nodes::parsenodes::RenameStmt>()
+                .expect("RenameStmt");
+            match stmt.renameType {
+                types_nodes::parsenodes::ObjectType::OBJECT_TABLE => {
+                    tablecmds::RenameRelation(mcx, stmt)?;
+                }
+                types_nodes::parsenodes::ObjectType::OBJECT_COLUMN => {
+                    tablecmds::renameatt(mcx, stmt)?;
+                }
+                other => panic!("unported: ExecRenameStmt {other:?}"),
             }
         }
 
@@ -544,16 +614,18 @@ fn dispatch_switch<'mcx>(
             // outlives the utility call; nothing derived escapes it.
             let stmt_node =
                 unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
-            let stmts = parse_utilcmd::transformCreateStmt(mcx, stmt_node, source_text)?;
-            for (i, stmt) in stmts.iter().enumerate() {
-                if i > 0 {
-                    xact::CommandCounterIncrement()?;
-                }
+            let mut stmts = parse_utilcmd::transformCreateStmt(mcx, stmt_node, source_text)?;
+            let mut table_rv: Option<&'mcx types_nodes::primnodes::RangeVar<'mcx>> = None;
+            let mut i = 0;
+            while i < stmts.len() {
+                let stmt = stmts.nth(i);
+                i += 1;
                 match stmt.node_tag() {
                     T_CreateStmt => {
                         let cstmt = stmt
                             .as_variant::<types_nodes::rawnodes::CreateStmt>()
                             .expect("CreateStmt");
+                        table_rv = cstmt.relation;
                         let relid = tablecmds::DefineRelation(
                             mcx,
                             cstmt,
@@ -566,59 +638,49 @@ fn dispatch_switch<'mcx>(
                         // DefineRelation), so transformRelOptions yields 0.
                         catalog_toasting::NewRelationCreateToastTable(mcx, relid)?;
                     }
-                    // Constraint-generated IndexStmt (transformIndexConstraints):
-                    // the relation is already locked by DefineRelation's
-                    // transaction; C recurses through ProcessUtility.
-                    T_IndexStmt => {
-                        let istmt = stmt
-                            .as_variant::<types_nodes::rawnodes::IndexStmt>()
-                            .expect("IndexStmt");
-                        let rv_node = istmt.relation.expect("IndexStmt without relation");
-                        let rv = rel_vocab::RangeVar {
-                            catalogname: rv_node.catalogname,
-                            schemaname: rv_node.schemaname,
-                            relname: rv_node.relname.expect("IndexStmt relation relname"),
-                            inh: rv_node.inh,
-                            relpersistence: rv_node.relpersistence,
-                            location: rv_node.location,
-                        };
-                        let mut cb = |rv2: &rel_vocab::RangeVar<'_>,
-                                      rel_id: types_core::Oid,
-                                      old_rel_id: types_core::Oid|
-                         -> PgResult<()> {
-                            range_var_callback_owns_relation(mcx, rv2, rel_id, old_rel_id)
-                        };
-                        let relid = catalog_namespace::RangeVarGetRelidExtended(
-                            &rv,
-                            types_rel::ShareLock,
-                            0,
-                            Some(&mut cb),
-                        )?;
-                        let is_alter_table = istmt.transformed;
-                        parse_utilcmd::transformIndexStmt(relid, istmt, source_text)?;
-                        indexcmds::DefineIndex(
-                            mcx,
-                            relid,
-                            istmt,
-                            types_core::InvalidOid,
-                            is_alter_table,
-                            true,
-                            true,
-                            false,
-                            false,
-                        )?;
+                    T_TableLikeClause => {
+                        // Delayed LIKE expansion: sub-statements run before
+                        // any remaining actions (C list_concat(morestmts, stmts)).
+                        let tlc = stmt
+                            .as_variant::<types_nodes::rawnodes::TableLikeClause>()
+                            .expect("TableLikeClause");
+                        let rv = table_rv.expect("LIKE expansion before CreateStmt");
+                        let morestmts = parse_utilcmd::expandTableLikeClause(mcx, rv, tlc)?;
+                        for (j, m) in morestmts.iter().enumerate() {
+                            stmts.insert_nth(mcx, i + j, m)?;
+                        }
                     }
                     T_AlterTableStmt => {
-                        let astmt = stmt
+                        let atstmt = stmt
                             .as_variant::<types_nodes::parsenodes::AlterTableStmt>()
                             .expect("AlterTableStmt");
-                        let lockmode = tablecmds::AlterTableGetLockLevel(&astmt.cmds);
-                        let relid =
-                            tablecmds::AlterTableLookupRelation(mcx, astmt, lockmode)?;
-                        debug_assert!(relid != types_core::InvalidOid);
-                        tablecmds::AlterTable(mcx, relid, lockmode, astmt, source_text)?;
+                        exec_alter_table_stmt(mcx, atstmt, source_text)?;
+                    }
+                    T_IndexStmt => exec_index_stmt(mcx, stmt, source_text, is_top_level)?,
+                    T_CommentStmt => {
+                        let cstmt = stmt
+                            .as_variant::<types_nodes::parsenodes::CommentStmt>()
+                            .expect("CommentStmt");
+                        commands_comment::CommentObject(mcx, cstmt)?;
+                    }
+                    // C recurses through ProcessUtility for the serial
+                    // blist/alist statements; the wrapper adds nothing here.
+                    T_CreateSeqStmt => {
+                        let seqstmt = stmt
+                            .as_variant::<types_nodes::rawnodes::CreateSeqStmt>()
+                            .expect("CreateSeqStmt");
+                        sequence::DefineSequence(mcx, seqstmt)?;
+                    }
+                    T_AlterSeqStmt => {
+                        let altstmt = stmt
+                            .as_variant::<types_nodes::AlterSeqStmt>()
+                            .expect("AlterSeqStmt");
+                        sequence::AlterSequence(mcx, altstmt)?;
                     }
                     _ => handler_gap("ProcessUtilitySlow side statements (blist/alist)"),
+                }
+                if i < stmts.len() {
+                    xact::CommandCounterIncrement()?;
                 }
             }
         }
@@ -668,7 +730,200 @@ fn dispatch_switch<'mcx>(
             operatorcmds::AlterOperator(mcx, stmt)?;
         }
 
+        T_CreateTableAsStmt => {
+            // Retention contract as unify_stmt_lifetime: the statement arena
+            // outlives the utility call; nothing derived escapes it.
+            let stmt_node =
+                unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::rawnodes::CreateTableAsStmt>()
+                .expect("CreateTableAsStmt");
+            commands_createas::ExecCreateTableAs(
+                mcx,
+                stmt,
+                source_text,
+                params,
+                query_env,
+                qc.as_deref_mut(),
+            )?;
+        }
+        T_RefreshMatViewStmt => {
+            // C wraps this in EventTriggerInhibitCommandCollection; no event
+            // trigger surface exists.
+            let stmt_node =
+                unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::rawnodes::RefreshMatViewStmt>()
+                .expect("RefreshMatViewStmt");
+            commands_matview::ExecRefreshMatView(mcx, stmt, source_text, qc.as_deref_mut())?;
+        }
+        T_CreateSeqStmt => {
+            let stmt_node =
+                unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let seqstmt = stmt_node
+                .as_variant::<types_nodes::rawnodes::CreateSeqStmt>()
+                .expect("CreateSeqStmt");
+            sequence::DefineSequence(mcx, seqstmt)?;
+        }
+        T_AlterSeqStmt => {
+            let stmt_node =
+                unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let altstmt =
+                stmt_node.as_variant::<types_nodes::AlterSeqStmt>().expect("AlterSeqStmt");
+            sequence::AlterSequence(mcx, altstmt)?;
+        }
+        T_CreateDomainStmt => {
+            // Retention contract as unify_stmt_lifetime: the statement arena
+            // outlives the utility call; nothing derived escapes it.
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_create_domain_stmt()
+                .expect("CreateDomainStmt");
+            let mut pstate = parser_small1::make_parsestate(mcx, None);
+            {
+                let mut v: mcx::PgVec<'mcx, u8> = mcx::PgVec::new_in(mcx);
+                mcx::vec_append_bytes(&mut v, source_text.as_bytes())?;
+                pstate.p_sourcetext = Some(v.leak());
+            }
+            typecmds::DefineDomain(mcx, &mut pstate, stmt)?;
+            parser_small1::free_parsestate(pstate)?;
+        }
+        T_CreateEnumStmt => {
+            // Retention contract as unify_stmt_lifetime: the statement arena
+            // outlives the utility call; nothing derived escapes it.
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node.as_create_enum_stmt().expect("CreateEnumStmt");
+            typecmds::DefineEnum(mcx, stmt)?;
+        }
+        T_AlterEnumStmt => {
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node.as_alter_enum_stmt().expect("AlterEnumStmt");
+            typecmds::AlterEnum(mcx, stmt)?;
+        }
+        T_RuleStmt => {
+            // Retention contract as unify_stmt_lifetime.
+            let stmt = parsetree
+                .as_variant::<types_nodes::rawnodes::RuleStmt>()
+                .expect("RuleStmt");
+            let stmt = unsafe {
+                core::mem::transmute::<
+                    &types_nodes::rawnodes::RuleStmt<'_>,
+                    &types_nodes::rawnodes::RuleStmt<'mcx>,
+                >(stmt)
+            };
+            rewrite_define::DefineRule(mcx, stmt, source_text)?;
+        }
+        T_ViewStmt => {
+            // Retention contract as unify_stmt_lifetime: the statement arena
+            // outlives the utility call; nothing derived escapes it.
+            let stmt = parsetree
+                .as_variant::<types_nodes::rawnodes::ViewStmt>()
+                .expect("ViewStmt");
+            let stmt = unsafe {
+                core::mem::transmute::<
+                    &types_nodes::rawnodes::ViewStmt<'_>,
+                    &types_nodes::rawnodes::ViewStmt<'mcx>,
+                >(stmt)
+            };
+            commands_view::DefineView(
+                mcx,
+                stmt,
+                source_text,
+                pstmt.stmt_location,
+                pstmt.stmt_len,
+            )?;
+        }
         _ => handler_gap("ProcessUtilitySlow DDL fan-out (utility slow lane)"),
+    }
+    Ok(())
+}
+
+fn exec_index_stmt<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt_node: Node<'mcx>,
+    source_text: &str,
+    is_top_level: bool,
+) -> PgResult<()> {
+    let stmt = stmt_node
+        .as_variant::<types_nodes::rawnodes::IndexStmt>()
+        .expect("IndexStmt");
+    if stmt.concurrent {
+        xact::PreventInTransactionBlock(is_top_level, "CREATE INDEX CONCURRENTLY")?;
+    }
+    let lockmode = if stmt.concurrent {
+        types_rel::ShareUpdateExclusiveLock
+    } else {
+        types_rel::ShareLock
+    };
+    let rv_node = stmt.relation.expect("IndexStmt without relation");
+    let rv = rel_vocab::RangeVar {
+        catalogname: rv_node.catalogname,
+        schemaname: rv_node.schemaname,
+        relname: rv_node.relname.expect("IndexStmt relation without relname"),
+        inh: rv_node.inh,
+        relpersistence: rv_node.relpersistence,
+        location: rv_node.location,
+    };
+    let mut cb = |rv2: &rel_vocab::RangeVar<'_>,
+                  rel_id: types_core::Oid,
+                  old_rel_id: types_core::Oid|
+     -> PgResult<()> { range_var_callback_owns_relation(mcx, rv2, rel_id, old_rel_id) };
+    let relid = catalog_namespace::RangeVarGetRelidExtended(&rv, lockmode, 0, Some(&mut cb))?;
+    if rv.inh
+        && lsyscache::get_rel_relkind(relid)? as u8 == types_rel::RELKIND_PARTITIONED_TABLE
+    {
+        handler_gap("CREATE INDEX partitioned-table recursion");
+    }
+    let is_alter_table = stmt.transformed;
+    parse_clause::transformIndexStmt(mcx, relid, stmt_node, source_text)?;
+    // Re-acquire: transformIndexStmt mutated the stmt node in place.
+    let stmt = stmt_node
+        .as_variant::<types_nodes::rawnodes::IndexStmt>()
+        .expect("IndexStmt");
+    let index_relid = indexcmds::DefineIndex(
+        mcx,
+        relid,
+        stmt,
+        types_core::InvalidOid,
+        is_alter_table,
+        true,
+        true,
+        false,
+        false,
+    )?;
+    if let Some(comment) = stmt.idxcomment {
+        commands_comment::CreateComments(
+            mcx,
+            index_relid,
+            types_core::RELATION_RELATION_ID,
+            0,
+            Some(comment),
+        )?;
+    }
+    Ok(())
+}
+
+fn exec_alter_table_stmt<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &types_nodes::parsenodes::AlterTableStmt<'mcx>,
+    source_text: &str,
+) -> PgResult<()> {
+    // DETACH CONCURRENTLY transaction-block fence: unported subtypes
+    // are loud inside AlterTableGetLockLevel.
+    let lockmode = tablecmds::AlterTableGetLockLevel(&stmt.cmds);
+    let relid = tablecmds::AlterTableLookupRelation(mcx, stmt, lockmode)?;
+    if relid != types_core::InvalidOid {
+        // Event triggers absent by design (EventTriggerAlterTable*).
+        tablecmds::AlterTable(mcx, relid, lockmode, stmt, source_text)?;
+    } else {
+        elog_seams::ereport_msg::call(
+            types_error::NOTICE,
+            format!(
+                "relation \"{}\" does not exist, skipping",
+                stmt.relation.and_then(|r| r.relname).unwrap_or("")
+            ),
+            None,
+        )?;
     }
     Ok(())
 }

@@ -166,6 +166,7 @@ fn install_proc_boot_seams() {
     g::set_transaction_buffers(64);
     g::set_subtransaction_buffers(64);
 
+    backend_status_seams::pgstat_clear_backend_status_snapshot::set(|| {});
     pg_sema_seams::pg_semaphore_create::set(|_| {});
     pg_sema_seams::pg_semaphore_reset::set(|_| {});
     pg_sema_seams::pg_semaphore_lock::set(|_| {});
@@ -355,11 +356,13 @@ fn test_relation<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> RelationData<'mcx> {
         rd_options: None,
         pgstat_enabled: Cell::new(false),
         rd_amcache: Default::default(),
-        rd_amcache_hash: Default::default(),
+        rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(), rd_amcache_spgist: Default::default(),
+        rd_support: PgVec::new_in(mcx),
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
             rd_hastriggers: false,
+            rd_hasrules: is_view,
     }
 }
 
@@ -378,6 +381,7 @@ fn install_relation_seams() {
             }
         },
     );
+    relcache_seams::relation_get_stat_ext_list::set(|mcx, _relid| Ok(mcx::PgVec::new_in(mcx)));
     relcache_build_seams::scan_pg_rewrite::set(|mcx, ev_class| {
         let mut rows = mcx::vec_with_capacity_in(mcx, 1)?;
         if ev_class == V_OID {

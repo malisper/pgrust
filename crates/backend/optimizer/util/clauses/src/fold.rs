@@ -146,6 +146,19 @@ fn datum_copy_in<'mcx>(mcx: Mcx<'mcx>, value: Datum, typlen: i16) -> PgResult<Da
 fn ece_mutator<'mcx>(node: Node<'mcx>, cx: &EceContext<'mcx>) -> PgResult<Option<Node<'mcx>>> {
     match node.node_tag() {
         NodeTag::T_Param => substitute_bound_param(node, cx),
+        NodeTag::T_RelabelType => {
+            let r = node.as_relabel_type().unwrap();
+            let arg = ece_mutator(r.arg, cx)?.unwrap_or(r.arg);
+            Ok(Some(nodes_core::node_funcs::apply_relabel_type(
+                cx.mcx,
+                arg,
+                r.resulttype,
+                r.resulttypmod,
+                r.resultcollid,
+                r.relabelformat,
+                r.location,
+            )?))
+        }
         NodeTag::T_FuncExpr => {
             let f = node.as_func_expr().unwrap();
             let (simple, new_args) = simplify_function(
@@ -271,6 +284,22 @@ fn ece_mutator<'mcx>(node: Node<'mcx>, cx: &EceContext<'mcx>) -> PgResult<Option
             }
             Ok(Some(new_node))
         }
+        NodeTag::T_RowExpr => {
+            let r = node.as_row_expr().unwrap();
+            match mutate_list(cx.mcx, &r.args, &mut |n| ece_mutator(n, cx))? {
+                None => Ok(None),
+                Some(args) => Ok(Some(Node::mk(
+                    cx.mcx,
+                    types_nodes::primnodes::RowExpr {
+                        args,
+                        row_typeid: r.row_typeid,
+                        row_format: r.row_format,
+                        colnames: r.colnames.clone_in(cx.mcx)?,
+                        location: r.location,
+                    },
+                )?)),
+            }
+        }
         NodeTag::T_ArrayExpr => {
             use types_nodes::primnodes::ArrayExpr;
             let a = node.as_array_expr().unwrap();
@@ -354,6 +383,21 @@ fn ece_mutator<'mcx>(node: Node<'mcx>, cx: &EceContext<'mcx>) -> PgResult<Option
                 r.resultcollid,
                 r.relabelformat,
                 r.location,
+            )
+            .map(Some)
+        }
+        // C: CollateExpr is replaced with an equivalent RelabelType.
+        NodeTag::T_CollateExpr => {
+            let c = node.as_collate_expr().unwrap();
+            let arg = ece_mutator(c.arg, cx)?.unwrap_or(c.arg);
+            nodes_core::node_funcs::apply_relabel_type(
+                cx.mcx,
+                arg,
+                nodes_core::node_funcs::expr_type(arg),
+                nodes_core::node_funcs::expr_typmod(arg),
+                c.collOid,
+                CoercionForm::COERCE_IMPLICIT_CAST,
+                c.location,
             )
             .map(Some)
         }
@@ -606,11 +650,151 @@ fn ece_mutator<'mcx>(node: Node<'mcx>, cx: &EceContext<'mcx>) -> PgResult<Option
                 )?)),
             }
         }
+        NodeTag::T_BooleanTest => {
+            use types_nodes::{BoolTestType, BooleanTest};
+            let bt = node.as_boolean_test().unwrap();
+            let old_arg = bt.arg.expect("BooleanTest.arg");
+            let arg = ece_mutator(old_arg, cx)?;
+            let eff = arg.unwrap_or(old_arg);
+            if let Some(carg) = eff.as_const() {
+                let v = carg.constvalue.as_bool();
+                let result = match bt.booltesttype {
+                    BoolTestType::IS_TRUE => !carg.constisnull && v,
+                    BoolTestType::IS_NOT_TRUE => carg.constisnull || !v,
+                    BoolTestType::IS_FALSE => !carg.constisnull && !v,
+                    BoolTestType::IS_NOT_FALSE => carg.constisnull || v,
+                    BoolTestType::IS_UNKNOWN => carg.constisnull,
+                    BoolTestType::IS_NOT_UNKNOWN => !carg.constisnull,
+                };
+                return Ok(Some(make_bool_const(cx.mcx, result, false)?));
+            }
+            match arg {
+                None => Ok(None),
+                Some(arg) => Ok(Some(Node::mk(
+                    cx.mcx,
+                    BooleanTest {
+                        arg: Some(arg),
+                        booltesttype: bt.booltesttype,
+                        location: bt.location,
+                    },
+                )?)),
+            }
+        }
+        NodeTag::T_CoerceToDomain => {
+            let cd = node.as_coerce_to_domain().unwrap();
+            let arg = ece_mutator(cd.arg, cx)?;
+            // C also substitutes when the domain has no constraints, after
+            // record_plan_type_dependency; invalItems recording is not
+            // modeled here (module doc), same gap as function dependencies.
+            if cx.estimate || !typcache_seams::domain_has_constraints::call(cd.resulttype)? {
+                let eff = arg.unwrap_or(cd.arg);
+                return Ok(Some(apply_relabel_type(
+                    cx.mcx,
+                    eff,
+                    cd.resulttype,
+                    cd.resulttypmod,
+                    cd.resultcollid,
+                    cd.coercionformat,
+                    cd.location,
+                )?));
+            }
+            match arg {
+                None => Ok(None),
+                Some(arg) => Ok(Some(Node::mk(
+                    cx.mcx,
+                    types_nodes::CoerceToDomain {
+                        arg,
+                        resulttype: cd.resulttype,
+                        resulttypmod: cd.resulttypmod,
+                        resultcollid: cd.resultcollid,
+                        coercionformat: cd.coercionformat,
+                        location: cd.location,
+                    },
+                )?)),
+            }
+        }
+        NodeTag::T_DistinctExpr => {
+            use types_nodes::DistinctExpr;
+            let d = node.as_distinct_expr().unwrap();
+            let new_args = mutate_list(cx.mcx, &d.args, &mut |n| ece_mutator(n, cx))?;
+            let eff_args = new_args.as_ref().unwrap_or(&d.args);
+
+            let mut has_null_input = false;
+            let mut all_null_input = true;
+            let mut has_nonconst_input = false;
+            for arg in eff_args.iter() {
+                match arg.as_const() {
+                    Some(c) => {
+                        has_null_input |= c.constisnull;
+                        all_null_input &= c.constisnull;
+                    }
+                    None => has_nonconst_input = true,
+                }
+            }
+            let opfuncid = if d.opfuncid == 0 {
+                lsyscache::get_opcode(d.opno)?
+            } else {
+                d.opfuncid
+            };
+            if !has_nonconst_input {
+                if all_null_input {
+                    return Ok(Some(make_bool_const(cx.mcx, false, false)?));
+                }
+                if has_null_input {
+                    return Ok(Some(make_bool_const(cx.mcx, true, false)?));
+                }
+                let (simple, _) = simplify_function(
+                    cx,
+                    opfuncid,
+                    d.opresulttype,
+                    -1,
+                    d.opcollid,
+                    d.inputcollid,
+                    eff_args,
+                    false,
+                    false,
+                    false,
+                )?;
+                if let Some(simple) = simple {
+                    let c = simple.as_const().expect("simplify_function returns a Const");
+                    // Underlying operator is "="; negate its result.
+                    return Ok(Some(make_bool_const(
+                        cx.mcx,
+                        !c.constvalue.as_bool(),
+                        c.constisnull,
+                    )?));
+                }
+            }
+            match new_args {
+                None if opfuncid == d.opfuncid => Ok(None),
+                new_args => {
+                    let args = match new_args {
+                        Some(a) => a,
+                        None => d.args.clone_in(cx.mcx)?,
+                    };
+                    Ok(Some(Node::mk(
+                        cx.mcx,
+                        DistinctExpr {
+                            opno: d.opno,
+                            opfuncid,
+                            opresulttype: d.opresulttype,
+                            opretset: d.opretset,
+                            opcollid: d.opcollid,
+                            inputcollid: d.inputcollid,
+                            args,
+                            location: d.location,
+                        },
+                    )?))
+                }
+            }
+        }
+        NodeTag::T_CoerceToDomainValue => Ok(None),
         NodeTag::T_Var
         | NodeTag::T_Const
         | NodeTag::T_RangeTblRef
         | NodeTag::T_CurrentOfExpr
         | NodeTag::T_SQLValueFunction
+        | NodeTag::T_NextValueExpr
         | NodeTag::T_SortGroupClause => Ok(None),
         // Aggref takes C's default ece_generic_processing arm: fold inside
         // the aggregate's arguments, never the Aggref itself. SubLink likewise
@@ -652,13 +836,13 @@ fn ece_mutator<'mcx>(node: Node<'mcx>, cx: &EceContext<'mcx>) -> PgResult<Option
     }
 }
 
-/// exprIsLengthCoercion shape: a two-arg cast whose second arg is a
+/// exprIsLengthCoercion shape: a 2- or 3-arg cast whose second arg is a
 /// non-null int4 Const carries that typmod.
 fn func_expr_typmod(f: &FuncExpr<'_>) -> i32 {
     if !matches!(
         f.funcformat,
         CoercionForm::COERCE_EXPLICIT_CAST | CoercionForm::COERCE_IMPLICIT_CAST
-    ) || f.args.len() != 2
+    ) || !(2..=3).contains(&f.args.len())
     {
         return -1;
     }
@@ -675,8 +859,8 @@ fn func_lookup_failed(funcid: Oid) -> Box<PgError> {
 
 /// Returns (simplified-expression,
 /// possibly-rewritten args); `None` args = unchanged. The executor-evaluation
-/// leg rides the clauses_seams::evaluate_expr seam; SupportRequestSimplify
-/// dispatch and SQL-function inlining defer loud.
+/// leg rides the clauses_seams::evaluate_expr seam; a prosupport
+/// SupportRequestSimplify rewrite and SQL-function inlining defer loud.
 #[allow(clippy::too_many_arguments)]
 fn simplify_function<'mcx>(
     cx: &EceContext<'mcx>,
@@ -713,21 +897,35 @@ fn simplify_function<'mcx>(
     )?;
 
     if newexpr.is_none() && allow_non_const && shape.prosupport != InvalidOid {
-        // like_regex_support (like_support.c) ignores SupportRequestSimplify:
-        // textlike/texticlike/texticregexeq/textregexeq/text_starts_with.
-        const LIKE_REGEX_SUPPORT: [Oid; 5] = [1023, 1024, 1025, 1364, 6242];
-        if !LIKE_REGEX_SUPPORT.contains(&shape.prosupport) {
+        let fcall = Node::mk(
+            cx.mcx,
+            FuncExpr {
+                funcid,
+                funcresulttype: result_type,
+                funcretset: shape.proretset,
+                funcvariadic,
+                funcformat: CoercionForm::COERCE_EXPLICIT_CALL,
+                funccollid: result_collid,
+                inputcollid: input_collid,
+                args: eff_args.clone_in(cx.mcx)?,
+                location: -1,
+            },
+        )?;
+        let mut req = types_nodes::supportnodes::SupportRequestSimplify::new(Some(fcall));
+        let addr = core::ptr::from_mut(&mut req) as usize;
+        let result =
+            fmgr_core::oid_function_call1_coll(shape.prosupport, 0, Datum::from_usize(addr))?;
+        if result.as_usize() != 0 {
             panic!(
-                "simplify_function deferred: SupportRequestSimplify dispatch for prosupport {} (funcid {funcid})",
+                "simplify_function deferred: prosupport {} produced a SupportRequestSimplify \
+                 rewrite for funcid {funcid}; result plumbing unported",
                 shape.prosupport
             );
         }
     }
-    if newexpr.is_none() && allow_non_const && fmgr_core::fmgr_isbuiltin(funcid).is_none() {
-        // A builtin is internal-language, which C's inline_function rejects
-        // up front; anything else needs the prolang gate + SQL inliner.
-        panic!("simplify_function deferred: inline_function for non-builtin funcid {funcid}");
-    }
+    // DIVERGENCE: C's inline_function inlines simple SQL-language bodies for
+    // non-builtin funcids here; unported, so SQL functions always execute via
+    // the fmgr call. Non-SQL languages match C (inline_function returns NULL).
     Ok((newexpr, new_args))
 }
 
@@ -967,10 +1165,25 @@ fn negate_clause<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>) -> PgResult<Node<'mcx>>
             }
             crate::classify::make_notclause(mcx, node)
         }
-        other @ NodeTag::T_BooleanTest => panic!(
-            "negate_clause (prepqual.c): {other:?} simplification unported — \
-             unit backend-optimizer-prep-prepqual"
-        ),
+        NodeTag::T_BooleanTest => {
+            use types_nodes::{BoolTestType, BooleanTest};
+            let bt = node.as_boolean_test().unwrap();
+            Node::mk(
+                mcx,
+                BooleanTest {
+                    arg: bt.arg,
+                    booltesttype: match bt.booltesttype {
+                        BoolTestType::IS_TRUE => BoolTestType::IS_NOT_TRUE,
+                        BoolTestType::IS_NOT_TRUE => BoolTestType::IS_TRUE,
+                        BoolTestType::IS_FALSE => BoolTestType::IS_NOT_FALSE,
+                        BoolTestType::IS_NOT_FALSE => BoolTestType::IS_FALSE,
+                        BoolTestType::IS_UNKNOWN => BoolTestType::IS_NOT_UNKNOWN,
+                        BoolTestType::IS_NOT_UNKNOWN => BoolTestType::IS_UNKNOWN,
+                    },
+                    location: bt.location,
+                },
+            )
+        }
         _ => crate::classify::make_notclause(mcx, node),
     }
 }
@@ -1001,29 +1214,9 @@ fn coerce_arg_type(node: Node<'_>) -> Oid {
         NodeTag::T_OpExpr => node.as_op_expr().unwrap().opresulttype,
         NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resulttype,
         NodeTag::T_CoerceViaIO => node.as_coerce_via_io().unwrap().resulttype,
+        NodeTag::T_CoerceToDomain => node.as_coerce_to_domain().unwrap().resulttype,
+        NodeTag::T_CoerceToDomainValue => node.as_coerce_to_domain_value().unwrap().typeId,
         other => deferred("coerce_arg_type (exprType)", other),
-    }
-}
-
-fn coerce_arg_typmod(node: Node<'_>) -> i32 {
-    match node.node_tag() {
-        NodeTag::T_Const => node.as_const().unwrap().consttypmod,
-        NodeTag::T_Var => node.as_var().unwrap().vartypmod,
-        NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resulttypmod,
-        _ => -1,
-    }
-}
-
-fn coerce_arg_collation(node: Node<'_>) -> Oid {
-    match node.node_tag() {
-        NodeTag::T_Const => node.as_const().unwrap().constcollid,
-        NodeTag::T_Var => node.as_var().unwrap().varcollid,
-        NodeTag::T_Param => node.as_param().unwrap().paramcollid,
-        NodeTag::T_FuncExpr => node.as_func_expr().unwrap().funccollid,
-        NodeTag::T_OpExpr => node.as_op_expr().unwrap().opcollid,
-        NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resultcollid,
-        NodeTag::T_CoerceViaIO => node.as_coerce_via_io().unwrap().resultcollid,
-        other => deferred("coerce_arg_collation (exprCollation)", other),
     }
 }
 
@@ -1049,45 +1242,7 @@ pub fn is_polymorphic_type(t: Oid) -> bool {
     )
 }
 
-/// C applyRelabelType (nodeFuncs.c), overwrite_ok=false (Consts rebuilt).
-pub fn apply_relabel_type<'mcx>(
-    mcx: Mcx<'mcx>,
-    arg: Node<'mcx>,
-    rtype: Oid,
-    rtypmod: i32,
-    rcollid: Oid,
-    rformat: CoercionForm,
-    rlocation: i32,
-) -> PgResult<Node<'mcx>> {
-    use types_nodes::primnodes::RelabelType;
-    let mut arg = arg;
-    while let Some(r) = arg.as_relabel_type() {
-        arg = r.arg;
-    }
-    if let Some(c) = arg.as_const() {
-        return Node::mk(
-            mcx,
-            Const { consttype: rtype, consttypmod: rtypmod, constcollid: rcollid, ..*c },
-        );
-    }
-    if coerce_arg_type(arg) == rtype
-        && coerce_arg_typmod(arg) == rtypmod
-        && coerce_arg_collation(arg) == rcollid
-    {
-        return Ok(arg);
-    }
-    Node::mk(
-        mcx,
-        RelabelType {
-            arg,
-            resulttype: rtype,
-            resulttypmod: rtypmod,
-            resultcollid: rcollid,
-            relabelformat: rformat,
-            location: rlocation,
-        },
-    )
-}
+pub use nodes_core::node_funcs::apply_relabel_type;
 
 /// Reduce "x = true" to "x", "x = false" to NOT x (ditto <>, inverted).
 fn simplify_boolean_equality<'mcx>(
@@ -1131,3 +1286,4 @@ pub fn all_arguments_const(node: Node<'_>) -> PgResult<bool> {
     }
     Ok(!crate::walker::expression_tree_walker(node, &mut NonConst)?)
 }
+

@@ -28,6 +28,10 @@ pub use fold::{
     all_arguments_const, estimate_expression_value, eval_const_expressions,
     eval_const_expressions_with_params, make_bool_const,
 };
+pub fn init_seams() {
+    clauses_seams::eval_const_expressions::set(fold::eval_const_expressions);
+}
+
 pub use walker::{
     check_functions_in_node, expression_tree_mutator, expression_tree_walker, mutate_list,
     query_or_expression_tree_walker, query_tree_walker, range_table_entry_walker,

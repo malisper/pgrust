@@ -5,6 +5,7 @@
 //! (planner support node), inet_client/server_* 2196-2199 (MyProcPort),
 //! GiST/SP-GiST/selfuncs rows (their own catalog units).
 
+pub mod abbrev;
 pub mod builtins;
 mod cidr_ntop;
 mod ntop;
@@ -456,6 +457,17 @@ pub fn network_network(ip: InetRef<'_>) -> InetValue {
         byte += 1;
     }
     dst
+}
+
+pub fn network_scan_first(ip: InetRef<'_>) -> InetValue {
+    network_network(ip)
+}
+
+// Broadcast address with masklen maxed out (192.168.0.255/24 sorts before
+// 192.168.0.255/32).
+pub fn network_scan_last(ip: InetRef<'_>) -> PgResult<InetValue> {
+    let b = network_broadcast(ip);
+    inet_set_masklen(b.iref(), -1)
 }
 
 pub fn network_netmask(ip: InetRef<'_>) -> InetValue {

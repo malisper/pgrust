@@ -106,7 +106,8 @@ pub fn heap_drop_with_catalog<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<()> 
         }
     }
 
-    let rel = table::table_open(mcx, relid, AccessExclusiveLock)?;
+    // C uses relation_open (sequences have no table AM).
+    let rel = relation::relation_open(mcx, relid, AccessExclusiveLock)?;
 
     CheckTableNotInUse(&rel, "DROP TABLE")?;
 
@@ -115,7 +116,8 @@ pub fn heap_drop_with_catalog<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<()> 
     }
 
     match rel.rd_rel.relkind {
-        types_rel::RELKIND_RELATION | types_rel::RELKIND_TOASTVALUE => {}
+        types_rel::RELKIND_RELATION | types_rel::RELKIND_TOASTVALUE
+        | types_rel::RELKIND_SEQUENCE | types_rel::RELKIND_MATVIEW => {}
         other => unported(&format!(
             "heap_drop_with_catalog: relkind {:?} arm",
             other as char

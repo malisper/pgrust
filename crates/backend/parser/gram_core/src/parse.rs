@@ -130,6 +130,24 @@ impl<'mcx> Parser<'mcx> {
         )
     }
 
+    #[cold]
+    pub(crate) fn errposition_error_code(
+        &self,
+        sqlstate: types_error::SqlState,
+        message: String,
+        location: i32,
+    ) -> Box<PgError> {
+        Box::new(
+            PgError::error(message)
+                .with_sqlstate(sqlstate)
+                .with_cursor_position(parser_small1::parser_errposition_source(
+                    Some(self.scanbuf),
+                    location,
+                    self.settings.encoding,
+                )),
+        )
+    }
+
     fn next_token(&mut self, lvalp: &mut YYSTYPE<'mcx>, llocp: &mut i32) -> PgResult<i32> {
         let mut v = CoreYYSTYPE::None;
         let tok = self.scanner.core_yylex(&mut v, llocp)?;

@@ -146,7 +146,7 @@ pub fn BeginCopyFrom<'mcx, 's>(
         // build_column_default/ExecInitExpr are the rewrite gap: a column the
         // input does not supply keeps NULL here, which silently diverges when
         // a default exists.
-        if att.atthasdef && !attnumlist.contains(&(i as i16 + 1)) {
+        if (att.atthasdef || att.attidentity != 0) && !attnumlist.contains(&(i as i16 + 1)) {
             unported("FROM with omitted defaulted column (build_column_default lane)");
         }
     }
@@ -390,9 +390,21 @@ fn flush_multi_insert<'mcx>(
     tableam::table_multi_insert(mcx, rel, &mut refs, mycid, ti_options, Some(bistate))?;
 
     if index_state.num_indices() > 0 {
+        // C resets the per-tuple econtext per buffered row (CopyMultiInsertBufferFlush).
+        let mut eval_cx = MemoryContext::new_bump("CopyIndexEvalPerTuple");
         for (i, slot) in refs.into_iter().enumerate() {
+            eval_cx.reset();
             cstate.cur_lineno = linenos[i];
-            execindexing::ExecInsertIndexTuples(mcx, index_state, rel, slot, false, None, &[])?;
+            execindexing::ExecInsertIndexTuples(
+                mcx,
+                eval_cx.mcx(),
+                index_state,
+                rel,
+                slot,
+                false,
+                None,
+                &[],
+            )?;
         }
     }
 

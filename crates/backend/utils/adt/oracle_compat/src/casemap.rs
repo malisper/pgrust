@@ -75,30 +75,31 @@ fn nul_pos(s: &[u8]) -> usize {
     i
 }
 
-// C's asc_* shape: one copy (pnstrdup), then an in-place *p walk that stops
-// at an embedded NUL.
-fn dup<'mcx>(mcx: Mcx<'mcx>, buff: &[u8]) -> PgResult<(PgVec<'mcx, u8>, usize)> {
-    let mut out = mcx::vec_with_capacity_in(mcx, buff.len())?;
-    mcx::vec_append_bytes(&mut out, buff)?;
-    Ok((out, nul_pos(buff)))
+// C's asc_* shape: pnstrdup (strnlen — the copy itself stops at an embedded
+// NUL and drops the tail), then an in-place *p walk over the copy.
+fn dup<'mcx>(mcx: Mcx<'mcx>, buff: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
+    let nul = nul_pos(buff);
+    let mut out = mcx::vec_with_capacity_in(mcx, nul)?;
+    mcx::vec_append_bytes(&mut out, &buff[..nul])?;
+    Ok(out)
 }
 
 pub fn asc_tolower<'mcx>(mcx: Mcx<'mcx>, buff: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
-    let (mut out, nul) = dup(mcx, buff)?;
-    out[..nul].make_ascii_lowercase();
+    let mut out = dup(mcx, buff)?;
+    out.make_ascii_lowercase();
     Ok(out)
 }
 
 pub fn asc_toupper<'mcx>(mcx: Mcx<'mcx>, buff: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
-    let (mut out, nul) = dup(mcx, buff)?;
-    out[..nul].make_ascii_uppercase();
+    let mut out = dup(mcx, buff)?;
+    out.make_ascii_uppercase();
     Ok(out)
 }
 
 pub fn asc_initcap<'mcx>(mcx: Mcx<'mcx>, buff: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
-    let (mut out, nul) = dup(mcx, buff)?;
+    let mut out = dup(mcx, buff)?;
     let mut wasalnum = false;
-    for b in &mut out[..nul] {
+    for b in &mut out[..] {
         let c = if wasalnum {
             b.to_ascii_lowercase()
         } else {

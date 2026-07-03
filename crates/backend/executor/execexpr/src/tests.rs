@@ -26,6 +26,14 @@ static SEAMS: Once = Once::new();
 fn install_seams() {
     SEAMS.call_once(|| {
         miscinit_seams::get_user_id::set(|| 10);
+        namespace_seams::is_temp_namespace::set(|_| false);
+        syscache_seams::pg_type_typnamespace::set(|_| Ok(Some(11)));
+        syscache_seams::pg_type_element_shape::set(|typid| {
+            Ok((typid == 1007).then(|| syscache_seams::PgTypeElementShape {
+                typelem: 23,
+                typsubscript: lsyscache::F_ARRAY_SUBSCRIPT_HANDLER,
+            }))
+        });
         aclchk_seams::object_aclcheck::set(|_classid, _objid, _roleid, _mode| Ok(0));
         syscache_seams::lookup_pg_type_shape::set(|typid| {
             Ok(match typid {
@@ -51,24 +59,27 @@ fn install_seams() {
         const INT_BTREE_FAM: u32 = 1976;
         const F_BTINT4CMP: u32 = 351;
         syscache_seams::lookup_pg_type_typcache_shape::set(|typid| {
-            Ok((typid == INT4OID).then(|| {
-                let mut name = ::types_tuple::NameData::default();
-                name.namestrcpy("int4");
-                syscache_seams::PgTypeTypcacheShape {
-                    typname: name,
-                    typlen: 4,
-                    typbyval: true,
-                    typalign: b'i' as i8,
-                    typstorage: b'p' as i8,
-                    typtype: b'b' as i8,
-                    typisdefined: true,
-                    typrelid: 0,
-                    typsubscript: 0,
-                    typelem: 0,
-                    typarray: 0,
-                    typcollation: 0,
+            Ok(match typid {
+                INT4OID | DOMAIN_OID => {
+                    let mut name = ::types_tuple::NameData::default();
+                    name.namestrcpy(if typid == INT4OID { "int4" } else { "posint" });
+                    Some(syscache_seams::PgTypeTypcacheShape {
+                        typname: name,
+                        typlen: 4,
+                        typbyval: true,
+                        typalign: b'i' as i8,
+                        typstorage: b'p' as i8,
+                        typtype: if typid == INT4OID { b'b' as i8 } else { b'd' as i8 },
+                        typisdefined: true,
+                        typrelid: 0,
+                        typsubscript: 0,
+                        typelem: 0,
+                        typarray: 0,
+                        typcollation: 0,
+                    })
                 }
-            }))
+                _ => None,
+            })
         });
         syscache_seams::syscache_hash_value_typeoid::set(|typid| Ok(typid.wrapping_mul(0x9e3779b1)));
         syscache_seams::lookup_pg_opclass_shape::set(|opclass| {
@@ -88,6 +99,66 @@ fn install_seams() {
                 0
             })
         });
+        install_domain_seams();
+    });
+}
+
+const DOMAIN_OID: u32 = 90001;
+const CONBIN_VALUE_GT_0: &str = "{OPEXPR :opno 521 :opfuncid 147 :opresulttype 16 \
+    :opretset false :opcollid 0 :inputcollid 0 :args ({COERCETODOMAINVALUE \
+    :typeId 23 :typeMod -1 :collation 0 :location 47} {CONST :consttype 23 \
+    :consttypmod -1 :constcollid 0 :constlen 4 :constbyval true :constisnull \
+    false :location 55 :constvalue 4 [ 0 0 0 0 0 0 0 0 ]}) :location 53}";
+
+fn install_domain_seams() {
+    clauses::init_seams();
+    syscache_seams::pg_type_domain_shape::set(|typid| {
+        let mk = |nm: &str, nsp, tt, nn, base| {
+            let mut n = ::types_tuple::NameData::default();
+            n.namestrcpy(nm);
+            syscache_seams::PgTypeDomainShape {
+                typname: n,
+                typnamespace: nsp,
+                typtype: tt,
+                typnotnull: nn,
+                typbasetype: base,
+            }
+        };
+        Ok(match typid {
+            DOMAIN_OID => Some(mk("posint", 2200, b'd' as i8, true, INT4OID)),
+            INT4OID => Some(mk("int4", 11, b'b' as i8, false, 0)),
+            _ => None,
+        })
+    });
+    typcache_seams::scan_domain_check_constraints::set(|mcx, contypid| {
+        let mut rows = ::mcx::vec_with_capacity_in(mcx, 1)?;
+        if contypid == DOMAIN_OID {
+            let mut cn = ::types_tuple::NameData::default();
+            cn.namestrcpy("posint_check");
+            rows.push(typcache_seams::DomainCheckRow { conname: cn, conbin: CONBIN_VALUE_GT_0 });
+        }
+        Ok(rows)
+    });
+    syscache_seams::lookup_pg_proc_shape::set(|funcid| {
+        Ok((funcid == 147).then_some(syscache_seams::PgProcShape {
+            pronamespace: 11,
+            prorettype: BOOLOID,
+            provariadic: 0,
+            prosupport: 0,
+            pronargs: 2,
+            prokind: b'f' as i8,
+            provolatile: b'i' as i8,
+            proparallel: b's' as i8,
+            proretset: false,
+            proisstrict: true,
+            proleakproof: false,
+        }))
+    });
+    namespace_seams::type_is_visible::set(|typid| Ok(typid == DOMAIN_OID));
+    syscache_seams::pg_namespace_nspname::set(|nspid| {
+        let mut n = ::types_tuple::NameData::default();
+        n.namestrcpy(if nspid == 2200 { "public" } else { "pg_catalog" });
+        Ok(Some(n))
     });
 }
 
@@ -491,7 +562,7 @@ fn still_valid_check_rejects_type_mismatch() {
 #[test]
 fn step_footprint_and_program_shapes() {
     assert!(core::mem::size_of::<Step>() <= 64);
-    assert!(core::mem::size_of::<Kernel>() <= 24);
+    assert!(core::mem::size_of::<Kernel>() <= 48);
     with_mcx(|mcx| {
         let args = NodeList::make2(mcx, mk_scan_var(mcx, 1, INT4OID), mk_int4_const(mcx, Some(7)))
             .unwrap();
@@ -566,7 +637,9 @@ fn agg_trans_and_aggref_eval_steps() {
                 inputcollid: 0,
                 init_value_is_null: false,
                 args: &empty_args,
+                aggfilter: None,
                 pergroup: base,
+                ordered: None,
             },
             // sum(int4): int4_sum (1841), non-strict, null init, 1 input.
             AggTransSpec {
@@ -577,8 +650,10 @@ fn agg_trans_and_aggref_eval_steps() {
                 inputcollid: 0,
                 init_value_is_null: true,
                 args: &sum_args,
+                aggfilter: None,
                 // SAFETY: index 1 of the 2-element local array.
                 pergroup: unsafe { NonNull::new_unchecked(base.as_ptr().add(1)) },
+                ordered: None,
             },
         ];
         let mut trans = exec_build_agg_trans(mcx, &specs, None, ParamBind::NONE).unwrap();
@@ -667,7 +742,9 @@ fn agg_trans_strict_input_check_skips_nulls() {
                 inputcollid: 0,
                 init_value_is_null: false,
                 args: &count_args,
+                aggfilter: None,
                 pergroup: base,
+                ordered: None,
             },
             // sum(int4): int4_sum (1841), non-strict, null init.
             AggTransSpec {
@@ -678,8 +755,10 @@ fn agg_trans_strict_input_check_skips_nulls() {
                 inputcollid: 0,
                 init_value_is_null: true,
                 args: &sum_args,
+                aggfilter: None,
                 // SAFETY: index 1 of the 2-element local array.
                 pergroup: unsafe { NonNull::new_unchecked(base.as_ptr().add(1)) },
+                ordered: None,
             },
         ];
         let mut trans = exec_build_agg_trans(mcx, &specs, None, ParamBind::NONE).unwrap();
@@ -1138,5 +1217,196 @@ fn case_expr_searched_form() {
         assert_eq!(eval(Some(1)).value.as_i32(), 10);
         assert!(eval(Some(2)).isnull);
         assert!(eval(None).isnull);
+    });
+}
+
+fn mk_domain_coercion(mcx: Mcx<'_>, value: Option<i32>) -> Node<'_> {
+    let konst = Node::mk_const(
+        mcx,
+        INT4OID,
+        -1,
+        0,
+        4,
+        value.map_or(Datum::null(), Datum::from_i32),
+        value.is_none(),
+        true,
+    )
+    .unwrap();
+    Node::mk(
+        mcx,
+        ::types_nodes::CoerceToDomain {
+            arg: konst,
+            resulttype: DOMAIN_OID,
+            resulttypmod: -1,
+            resultcollid: 0,
+            coercionformat: ::types_nodes::CoercionForm::COERCE_IMPLICIT_CAST,
+            location: -1,
+        },
+    )
+    .unwrap()
+}
+
+const INT4ARRAYOID: u32 = 1007;
+
+const F_INT4EQ: u32 = 65;
+
+fn mk_int4_array_const<'mcx>(mcx: Mcx<'mcx>, elems: &[Option<i32>]) -> Node<'mcx> {
+    let values: Vec<Datum> =
+        elems.iter().map(|v| v.map_or(Datum::null(), Datum::from_i32)).collect();
+    let nulls: Vec<bool> = elems.iter().map(|v| v.is_none()).collect();
+    let dims = [elems.len() as i32];
+    let img = arrayfuncs::construct_md_array(
+        mcx, &values, Some(&nulls), 1, &dims, &[1], INT4OID, 4, true, b'i',
+    )
+    .unwrap();
+    let d = Datum::from_usize(img.leak().as_ptr() as usize);
+    Node::mk_const(mcx, INT4ARRAYOID, -1, 0, -1, d, false, false).unwrap()
+}
+
+fn mk_saop<'mcx>(
+    mcx: Mcx<'mcx>,
+    use_or: bool,
+    scalar: Node<'mcx>,
+    array: Node<'mcx>,
+) -> Node<'mcx> {
+    let mut args = NodeList::make1(mcx, scalar).unwrap();
+    args.lappend(mcx, array).unwrap();
+    Node::mk(
+        mcx,
+        ::types_nodes::ScalarArrayOpExpr {
+            opno: 96,
+            opfuncid: F_INT4EQ,
+            hashfuncid: 0,
+            negfuncid: 0,
+            useOr: use_or,
+            inputcollid: 0,
+            args,
+            location: -1,
+        },
+    )
+    .unwrap()
+}
+
+fn eval_domain(value: Option<i32>) -> Result<::datum::NullableDatum, Box<::types_error::PgError>> {
+    install_seams();
+    with_mcx(|mcx| {
+        let expr = mk_domain_coercion(mcx, value);
+        let mut state = exec_init_expr(mcx, Some(expr), ParamBind::NONE).unwrap().unwrap();
+        state.arm_result_mcx(mcx);
+        exec_eval_expr(&mut state, &mut EvalSlots::default())
+    })
+}
+
+fn eval_saop(
+    use_or: bool,
+    scalar: Option<i32>,
+    elems: &[Option<i32>],
+) -> Option<bool> {
+    with_mcx(|mcx| {
+        let node = mk_saop(
+            mcx,
+            use_or,
+            mk_int4_const(mcx, scalar),
+            mk_int4_array_const(mcx, elems),
+        );
+        let mut state = exec_init_expr(mcx, Some(node), ParamBind::NONE).unwrap().unwrap();
+        state.arm_result_mcx(mcx);
+        let mut slots = EvalSlots::default();
+        let r = exec_eval_expr(&mut state, &mut slots).unwrap();
+        (!r.isnull).then(|| r.value.as_bool())
+    })
+}
+
+#[test]
+fn coerce_to_domain_valid_value_passes() {
+    let r = eval_domain(Some(5)).unwrap();
+    assert!(!r.isnull);
+    assert_eq!(r.value.as_i32(), 5);
+}
+
+#[test]
+fn coerce_to_domain_check_violation_is_23514() {
+    let e = eval_domain(Some(0)).unwrap_err();
+    assert_eq!(
+        e.message(),
+        "value for domain posint violates check constraint \"posint_check\""
+    );
+    assert_eq!(e.sqlstate(), ::types_error::ERRCODE_CHECK_VIOLATION);
+    assert_eq!(e.constraint_name(), Some("posint_check"));
+    assert_eq!(e.datatype_name(), Some("posint"));
+}
+
+#[test]
+fn coerce_to_domain_null_is_23502() {
+    let e = eval_domain(None).unwrap_err();
+    assert_eq!(e.message(), "domain posint does not allow null values");
+    assert_eq!(e.sqlstate(), ::types_error::ERRCODE_NOT_NULL_VIOLATION);
+}
+
+#[test]
+fn domain_check_input_engine_matches() {
+    install_seams();
+    assert!(crate::domain::domain_check_input(Datum::from_i32(7), false, DOMAIN_OID).is_ok());
+    let e = crate::domain::domain_check_input(Datum::from_i32(-1), false, DOMAIN_OID).unwrap_err();
+    assert_eq!(e.sqlstate(), ::types_error::ERRCODE_CHECK_VIOLATION);
+    let e = crate::domain::domain_check_input(Datum::null(), true, DOMAIN_OID).unwrap_err();
+    assert_eq!(e.sqlstate(), ::types_error::ERRCODE_NOT_NULL_VIOLATION);
+}
+#[test]
+fn scalar_array_op_any_and_all() {
+    assert_eq!(eval_saop(true, Some(2), &[Some(1), Some(2), Some(3)]), Some(true));
+    assert_eq!(eval_saop(true, Some(5), &[Some(1), Some(2), Some(3)]), Some(false));
+    assert_eq!(eval_saop(true, Some(5), &[]), Some(false));
+    assert_eq!(eval_saop(false, Some(5), &[]), Some(true));
+    assert_eq!(eval_saop(false, Some(2), &[Some(2), Some(2)]), Some(true));
+    assert_eq!(eval_saop(false, Some(2), &[Some(2), Some(3)]), Some(false));
+    // Strict fn + NULL scalar -> NULL; NULL element leaves NULL unless decided.
+    assert_eq!(eval_saop(true, None, &[Some(1)]), None);
+    assert_eq!(eval_saop(true, Some(2), &[Some(1), None]), None);
+    assert_eq!(eval_saop(true, Some(2), &[None, Some(2)]), Some(true));
+    assert_eq!(eval_saop(false, Some(2), &[Some(2), None]), None);
+    assert_eq!(eval_saop(false, Some(2), &[None, Some(3)]), Some(false));
+}
+
+#[test]
+fn scalar_array_op_null_array_is_null() {
+    with_mcx(|mcx| {
+        let arr = Node::mk_const(mcx, INT4ARRAYOID, -1, 0, -1, Datum::null(), true, false)
+            .unwrap();
+        let node = mk_saop(mcx, true, mk_int4_const(mcx, Some(2)), arr);
+        let mut state = exec_init_expr(mcx, Some(node), ParamBind::NONE).unwrap().unwrap();
+        state.arm_result_mcx(mcx);
+        let mut slots = EvalSlots::default();
+        assert!(exec_eval_expr(&mut state, &mut slots).unwrap().isnull);
+    });
+}
+
+#[test]
+fn array_expr_builds_array_consumable_by_saop() {
+    with_mcx(|mcx| {
+        let mut elems = NodeList::make1(mcx, mk_int4_const(mcx, Some(7))).unwrap();
+        elems.lappend(mcx, mk_int4_const(mcx, Some(8))).unwrap();
+        elems.lappend(mcx, mk_int4_const(mcx, None)).unwrap();
+        let ae = Node::mk(
+            mcx,
+            ::types_nodes::ArrayExpr {
+                array_typeid: INT4ARRAYOID,
+                array_collid: 0,
+                element_typeid: INT4OID,
+                elements: elems,
+                multidims: false,
+                list_start: -1,
+                list_end: -1,
+                location: -1,
+            },
+        )
+        .unwrap();
+        let node = mk_saop(mcx, true, mk_int4_const(mcx, Some(8)), ae);
+        let mut state = exec_init_expr(mcx, Some(node), ParamBind::NONE).unwrap().unwrap();
+        state.arm_result_mcx(mcx);
+        let mut slots = EvalSlots::default();
+        let r = exec_eval_expr(&mut state, &mut slots).unwrap();
+        assert!(!r.isnull);
+        assert!(r.value.as_bool());
     });
 }

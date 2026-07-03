@@ -11,7 +11,9 @@ pub fn init_all() {
     tableam::init_seams();
     vacuumlazy::init_seams();
     commands_vacuum::init_seams();
+    commands_analyze::init_seams();
     commands_tablespace::init_seams();
+    sequence::init_seams();
     clog::init_seams();
     multixact::init_seams();
     rmgr::init_seams();
@@ -29,12 +31,14 @@ pub fn init_all() {
     catalog_namespace::init_seams();
     catalog_dependency::init_seams();
     tablecmds::init_seams();
+    commands_cluster::init_seams();
     catalog::init_seams();
     catalog_storage::init_seams();
     pg_database::init_seams();
     pg_db_role_setting::init_seams();
     indexcmds::init_seams();
     catalog_index::init_seams();
+    pg_class::init_seams();
     dbcommands::init_seams();
     executils::init_seams();
     execexpr::init_seams();
@@ -65,6 +69,7 @@ pub fn init_all() {
     parser_driver::init_seams();
     parse_expr::init_seams();
     parse_collate::init_seams();
+    parse_clause::init_seams();
     parser_analyze::init_seams();
     scan_fgram::init_seams();
     pg_sema::init_seams();
@@ -85,6 +90,7 @@ pub fn init_all() {
     session::init_seams();
     relpath::init_seams();
     rewrite_handler::init_seams();
+    rewrite_define::init_seams();
     aio_config::init_seams();
     bufmgr::init_seams();
     fd::init_seams();
@@ -120,6 +126,8 @@ pub fn init_all() {
     postgres::init_seams();
     pquery::init_seams();
     explain::init_seams();
+    commands_createas::init_seams();
+    commands_matview::init_seams();
     prepare::init_seams();
     portalcmds::init_seams();
     commands_async::init_seams();
@@ -144,11 +152,21 @@ pub fn init_all() {
     relcache_build::init_seams();
     relmapper::init_seams();
     typcache::init_seams();
+    clauses::init_seams();
+    pg_enum::init_seams();
     elog::init_seams();
     fmgr_core::init_seams();
     fmgr_core::register_late_builtins(adt_acl::builtins::ACL_BUILTINS);
     fmgr_core::register_late_builtins(opclasscmds::builtins::OPCLASS_BUILTINS);
     operatorcmds::init_seams();
+    fmgr_core::register_late_builtins(adt_misc::MISC_BUILTINS);
+    fmgr_core::register_late_builtins(dbcommands::builtins::DBCOMMANDS_BUILTINS);
+    fmgr_core::register_late_builtins(adt_rowtypes::ROWTYPES_BUILTINS);
+    sql_functions::init_seams();
+    fmgr_core::register_late_builtins(adt_geo::builtins::GEO_BUILTINS);
+    fmgr_core::register_late_builtins(gistproc::GISTPROC_BUILTINS);
+    fmgr_core::register_late_builtins(spgist_text::SPGIST_TEXT_BUILTINS);
+    fmgr_core::register_late_builtins(brin_minmax_multi::MINMAX_MULTI_BUILTINS);
     funcapi::init_seams();
     init_small::init_seams();
     miscinit::init_seams();
@@ -159,6 +177,7 @@ pub fn init_all() {
     guc::init_seams();
     guc_funcs::init_seams();
     variable::init_seams();
+    gin::init_seams();
     ps_status::init_seams();
     queryenvironment::init_seams();
     stack_depth::init_seams();
@@ -171,4 +190,12 @@ pub fn init_all() {
     pg_prng::init_seams();
     regex_core::init_seams();
     adt_regexp::init_seams();
+
+    static EXTRA_BUILTINS: [&[types_fmgr::FmgrBuiltin]; 4] = [
+        adt_misc::builtins::MISC_BUILTINS,
+        catalog_namespace::builtins::NAMESPACE_BUILTINS,
+        format_type::builtins::FORMAT_TYPE_BUILTINS,
+        ruleutils::builtins::RULEUTILS_BUILTINS,
+    ];
+    fmgr_core::install_extra_builtins(&EXTRA_BUILTINS);
 }

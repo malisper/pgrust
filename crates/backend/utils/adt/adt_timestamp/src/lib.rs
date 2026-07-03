@@ -635,7 +635,7 @@ fn text_to_tzname(zone: &[u8]) -> &[u8] {
 // DIVERGENCE: C also tolower()s high-bit bytes under single-byte encodings
 // and clips multibyte-aware; unit/zone keywords are ASCII, so only error
 // text for non-ASCII garbage input can differ.
-fn downcase_ident<'a>(src: &[u8], out: &'a mut [u8; 64]) -> &'a [u8] {
+pub fn downcase_ident<'a>(src: &[u8], out: &'a mut [u8; 64]) -> &'a [u8] {
     let n = src.len().min(63);
     for (dst, b) in out.iter_mut().zip(&src[..n]) {
         *dst = b.to_ascii_lowercase();

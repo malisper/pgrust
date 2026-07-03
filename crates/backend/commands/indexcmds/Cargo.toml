@@ -33,7 +33,17 @@ miscinit = { path = "../../utils/init/miscinit" }
 miscinit_seams = { path = "../../utils/init/miscinit_seams" }
 aclchk_seams = { path = "../../catalog/aclchk_seams" }
 guc = { path = "../../utils/misc/guc" }
+xact = { path = "../../access/transam/xact" }
+explain = { path = "../explain" }
+tablecmds = { path = "../tablecmds" }
+rel_vocab = { path = "../../../_support/types/rel_vocab" }
+aclchk = { path = "../../catalog/aclchk" }
+adt_acl = { path = "../../utils/adt/acl" }
+lmgr = { path = "../../storage/lmgr/lmgr" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
 
-syscache_seams = { path = "../../utils/cache/syscache_seams" }
+clauses = { path = "../../optimizer/util/clauses" }
+vars = { path = "../../optimizer/util/vars" }
+nodes_core = { path = "../../nodes/nodes_core" }
+
 [dev-dependencies]
-syscache_seams = { path = "../../utils/cache/syscache_seams" }
