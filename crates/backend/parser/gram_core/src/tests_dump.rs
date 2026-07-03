@@ -317,6 +317,66 @@ fn node(out: &mut String, n: Node<'_>) {
         string_field(out, "portalname", f.portalname);
         bool_field(out, "ismove", f.ismove);
         out.push('}');
+    } else if let Some(d) = n.as_variant::<types_nodes::parsenodes::DefineStmt>() {
+        out.push_str("{DEFINESTMT");
+        int_field(out, "kind", d.kind as i32);
+        bool_field(out, "oldstyle", d.oldstyle);
+        list_field(out, "defnames", &d.defnames);
+        list_field(out, "args", &d.args);
+        list_field(out, "definition", &d.definition);
+        bool_field(out, "if_not_exists", d.if_not_exists);
+        bool_field(out, "replace", d.replace);
+        out.push('}');
+    } else if let Some(o) = n.as_variant::<types_nodes::parsenodes::ObjectWithArgs>() {
+        out.push_str("{OBJECTWITHARGS");
+        list_field(out, "objname", &o.objname);
+        list_field(out, "objargs", &o.objargs);
+        list_field(out, "objfuncargs", &o.objfuncargs);
+        bool_field(out, "args_unspecified", o.args_unspecified);
+        out.push('}');
+    } else if let Some(c) = n.as_variant::<types_nodes::parsenodes::CreateOpClassStmt>() {
+        out.push_str("{CREATEOPCLASSSTMT");
+        list_field(out, "opclassname", &c.opclassname);
+        list_field(out, "opfamilyname", &c.opfamilyname);
+        string_field(out, "amname", c.amname);
+        node_field(out, "datatype", c.datatype);
+        list_field(out, "items", &c.items);
+        bool_field(out, "isDefault", c.isDefault);
+        out.push('}');
+    } else if let Some(i) = n.as_variant::<types_nodes::parsenodes::CreateOpClassItem>() {
+        out.push_str("{CREATEOPCLASSITEM");
+        int_field(out, "itemtype", i.itemtype);
+        node_field(out, "name", i.name);
+        int_field(out, "number", i.number);
+        list_field(out, "order_family", &i.order_family);
+        list_field(out, "class_args", &i.class_args);
+        node_field(out, "storedtype", i.storedtype);
+        out.push('}');
+    } else if let Some(c) = n.as_variant::<types_nodes::parsenodes::CreateOpFamilyStmt>() {
+        out.push_str("{CREATEOPFAMILYSTMT");
+        list_field(out, "opfamilyname", &c.opfamilyname);
+        string_field(out, "amname", c.amname);
+        out.push('}');
+    } else if let Some(a) = n.as_variant::<types_nodes::parsenodes::AlterOpFamilyStmt>() {
+        out.push_str("{ALTEROPFAMILYSTMT");
+        list_field(out, "opfamilyname", &a.opfamilyname);
+        string_field(out, "amname", a.amname);
+        bool_field(out, "isDrop", a.isDrop);
+        list_field(out, "items", &a.items);
+        out.push('}');
+    } else if let Some(a) = n.as_variant::<types_nodes::parsenodes::AlterOperatorStmt>() {
+        out.push_str("{ALTEROPERATORSTMT");
+        node_field(out, "opername", a.opername);
+        list_field(out, "options", &a.options);
+        out.push('}');
+    } else if let Some(p) = n.as_variant::<types_nodes::parsenodes::FunctionParameter>() {
+        out.push_str("{FUNCTIONPARAMETER");
+        string_field(out, "name", p.name);
+        node_field(out, "argType", p.argType);
+        int_field(out, "mode", p.mode as i32);
+        node_field(out, "defexpr", p.defexpr);
+        int_field(out, "location", p.location);
+        out.push('}');
     } else if let Some(d) = n.as_drop_stmt() {
         out.push_str("{DROPSTMT");
         list_field(out, "objects", &d.objects);

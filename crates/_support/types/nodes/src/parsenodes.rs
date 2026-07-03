@@ -670,6 +670,100 @@ pub struct CommentStmt<'mcx> {
     pub comment: Option<&'mcx str>,
 }
 
+#[derive(Default)]
+pub struct ObjectWithArgs<'mcx> {
+    pub objname: NodeList<'mcx>,
+    pub objargs: NodeList<'mcx>,
+    pub objfuncargs: NodeList<'mcx>,
+    pub args_unspecified: bool,
+}
+
+#[derive(Default)]
+pub struct DefineStmt<'mcx> {
+    pub kind: ObjectType,
+    pub oldstyle: bool,
+    pub defnames: NodeList<'mcx>,
+    pub args: NodeList<'mcx>,
+    pub definition: NodeList<'mcx>,
+    pub if_not_exists: bool,
+    pub replace: bool,
+}
+
+pub const OPCLASS_ITEM_OPERATOR: i32 = 1;
+pub const OPCLASS_ITEM_FUNCTION: i32 = 2;
+pub const OPCLASS_ITEM_STORAGETYPE: i32 = 3;
+
+#[derive(Default)]
+pub struct CreateOpClassStmt<'mcx> {
+    pub opclassname: NodeList<'mcx>,
+    pub opfamilyname: NodeList<'mcx>,
+    pub amname: Option<&'mcx str>,
+    pub datatype: Option<Node<'mcx>>,
+    pub items: NodeList<'mcx>,
+    pub isDefault: bool,
+}
+
+// C: name is an ObjectWithArgs*, storedtype a TypeName*.
+#[derive(Default)]
+pub struct CreateOpClassItem<'mcx> {
+    pub itemtype: i32,
+    pub name: Option<Node<'mcx>>,
+    pub number: i32,
+    pub order_family: NodeList<'mcx>,
+    pub class_args: NodeList<'mcx>,
+    pub storedtype: Option<Node<'mcx>>,
+}
+
+#[derive(Default)]
+pub struct CreateOpFamilyStmt<'mcx> {
+    pub opfamilyname: NodeList<'mcx>,
+    pub amname: Option<&'mcx str>,
+}
+
+#[derive(Default)]
+pub struct AlterOpFamilyStmt<'mcx> {
+    pub opfamilyname: NodeList<'mcx>,
+    pub amname: Option<&'mcx str>,
+    pub isDrop: bool,
+    pub items: NodeList<'mcx>,
+}
+
+// C: opername is an ObjectWithArgs*.
+#[derive(Default)]
+pub struct AlterOperatorStmt<'mcx> {
+    pub opername: Option<Node<'mcx>>,
+    pub options: NodeList<'mcx>,
+}
+
+// C FunctionParameterMode char values; outfuncs prints the char.
+pub const FUNC_PARAM_IN: i8 = b'i' as i8;
+pub const FUNC_PARAM_OUT: i8 = b'o' as i8;
+pub const FUNC_PARAM_INOUT: i8 = b'b' as i8;
+pub const FUNC_PARAM_VARIADIC: i8 = b'v' as i8;
+pub const FUNC_PARAM_TABLE: i8 = b't' as i8;
+pub const FUNC_PARAM_DEFAULT: i8 = b'd' as i8;
+
+// C: argType is a TypeName*.
+pub struct FunctionParameter<'mcx> {
+    pub name: Option<&'mcx str>,
+    pub argType: Option<Node<'mcx>>,
+    pub mode: i8,
+    pub defexpr: Option<Node<'mcx>>,
+    pub location: ParseLoc,
+}
+
+impl Default for FunctionParameter<'_> {
+    fn default() -> Self {
+        FunctionParameter {
+            name: None,
+            argType: None,
+            mode: FUNC_PARAM_DEFAULT,
+            defexpr: None,
+            location: -1,
+        }
+    }
+}
+
 // C AlterTableType (parsenodes.h); discriminants are outfuncs-visible.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[repr(u32)]
@@ -930,6 +1024,30 @@ unsafe impl<'mcx> NodeVariant<'mcx> for CreateSchemaStmt<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for CommentStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_CommentStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for ObjectWithArgs<'mcx> {
+    const TAG: NodeTag = NodeTag::T_ObjectWithArgs;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for DefineStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_DefineStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for CreateOpClassStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CreateOpClassStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for CreateOpClassItem<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CreateOpClassItem;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for CreateOpFamilyStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CreateOpFamilyStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for AlterOpFamilyStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_AlterOpFamilyStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for AlterOperatorStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_AlterOperatorStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for FunctionParameter<'mcx> {
+    const TAG: NodeTag = NodeTag::T_FunctionParameter;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for AlterTableStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_AlterTableStmt;
