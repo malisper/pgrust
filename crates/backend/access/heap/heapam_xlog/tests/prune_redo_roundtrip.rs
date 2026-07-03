@@ -278,6 +278,7 @@ fn install_fake_bufmgr() {
     predicate_seams::check_for_serializable_conflict_in::set(|_rel, _tid, _blk| Ok(()));
     predicate_seams::register_predicate_locking_xid::set(|_| Ok(()));
     predicate_seams::pre_commit_check_for_serialization_failure::set(|| Ok(()));
+    predicate_seams::release_predicate_locks::set(|_, _| Ok(()));
     miscinit_seams::is_bootstrap_processing_mode::set(|| false);
     catalog_seams::is_catalog_relation::set(|_rel| false);
     origin_seams::replorigin_session_origin::set(|| 0);

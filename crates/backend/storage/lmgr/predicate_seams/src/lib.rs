@@ -90,3 +90,19 @@ seam_core::seam!(
         blkno: types_core::BlockNumber,
     ) -> PgResult<()>
 );
+
+seam_core::seam!(
+    // GetSerializableTransactionSnapshot (predicate.c): fills `snapshot` via
+    // GetSnapshotData under SerializableXactHashLock (snapmgr's static
+    // CurrentSnapshotData is the target, exactly C's in/out pointer).
+    pub fn get_serializable_transaction_snapshot<'a>(
+        snapshot: &'a mut SnapshotData<'static>,
+        mcx: mcx::Mcx<'static>,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    // ReleasePredicateLocks(isCommit, isReadOnlySafe) (predicate.c); caller is
+    // resowner's RESOURCE_RELEASE_LOCKS top-level phase, per C.
+    pub fn release_predicate_locks(is_commit: bool, is_read_only_safe: bool) -> PgResult<()>
+);
