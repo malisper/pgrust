@@ -1402,3 +1402,40 @@ fn equal_aggref_ignores_transtype_and_presorted() {
     // aggno/aggtransno ARE compared (not equal_ignore in C).
     assert!(!crate::equal(agg(20, false, 0), agg(20, false, 1)));
 }
+
+#[test]
+fn tsearch_lane_stmt_field_order_matches_c() {
+    let parse_h = include_str!("../vendor/parsenodes.h");
+    assert_eq!(
+        c_struct_fields(parse_h, "DefineStmt"),
+        ["kind", "oldstyle", "defnames", "args", "definition", "if_not_exists", "replace"]
+    );
+    let crate::rawnodes::DefineStmt {
+        kind: _, oldstyle: _, defnames: _, args: _, definition: _, if_not_exists: _, replace: _,
+    } = crate::rawnodes::DefineStmt::default();
+
+    assert_eq!(c_struct_fields(parse_h, "CompositeTypeStmt"), ["typevar", "coldeflist"]);
+    let crate::rawnodes::CompositeTypeStmt { typevar: _, coldeflist: _ } =
+        crate::rawnodes::CompositeTypeStmt::default();
+
+    assert_eq!(c_struct_fields(parse_h, "AlterTSDictionaryStmt"), ["dictname", "options"]);
+    let crate::rawnodes::AlterTSDictionaryStmt { dictname: _, options: _ } =
+        crate::rawnodes::AlterTSDictionaryStmt::default();
+
+    assert_eq!(
+        c_struct_fields(parse_h, "AlterTSConfigurationStmt"),
+        ["kind", "cfgname", "tokentype", "dicts", "override", "replace", "missing_ok"]
+    );
+    let crate::rawnodes::AlterTSConfigurationStmt {
+        kind: _, cfgname: _, tokentype: _, dicts: _, r#override: _, replace: _, missing_ok: _,
+    } = crate::rawnodes::AlterTSConfigurationStmt::default();
+
+    assert_eq!(
+        c_struct_fields(parse_h, "A_ArrayExpr"),
+        ["elements", "list_start", "list_end", "location"]
+    );
+    let crate::rawnodes::A_ArrayExpr { elements: _, list_start: _, list_end: _, location: _ } =
+        crate::rawnodes::A_ArrayExpr::default();
+
+    assert_eq!(crate::rawnodes::AlterTSConfigType::ALTER_TSCONFIG_DROP_MAPPING as u32, 4);
+}
