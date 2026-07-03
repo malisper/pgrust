@@ -23,6 +23,9 @@ EXPLAIN (VERBOSE, COSTS OFF) SELECT t FROM eg_t t;
 CREATE TABLE eg_q (s text, u text);
 INSERT INTO eg_q VALUES ('plain', 'with space'), ('a,b', 'q"uote'), ('back\slash', '(paren)'), ('', NULL);
 SELECT q FROM eg_q q;
+-- jsonb composite gate (jsonb tier2 documented gate: to_jsonb over whole-row)
+SELECT to_jsonb(t.*) FROM eg_t t ORDER BY t.a;
+SELECT to_jsonb(t) FROM eg_t t WHERE t.a = 2;
 -- row comparisons
 SELECT ROW(1,2) = ROW(1,2), ROW(1,2) = ROW(1,3), (1,2) <> (1,3);
 SELECT ROW(1,'a') = ROW(1,'a'), ROW(NULL,2) = ROW(1,2);
@@ -48,6 +51,10 @@ SELECT count(*) FROM (SELECT a FROM eg_t INTERSECT SELECT v FROM eg_u) ss;
 DROP TABLE eg_t;
 DROP TABLE eg_q;
 DROP TABLE eg_u;
--- nested subquery pull-up (recursive pull_up_subqueries)
-SELECT * FROM (SELECT x FROM (SELECT 1 AS x) y) z;
-SELECT * FROM (SELECT x + 1 AS w FROM (SELECT 1 AS x UNION SELECT 2) y) z ORDER BY w;
+-- nested subquery pull-up (recursive pull_up_subqueries; the empty-FROM
+-- inner leg stays out: replace_empty_jointree is a named loud)
+CREATE TABLE eg_n (v int);
+INSERT INTO eg_n VALUES (1), (2);
+SELECT * FROM (SELECT x FROM (SELECT v AS x FROM eg_n) y) z ORDER BY x;
+SELECT * FROM (SELECT x + 1 AS w FROM (SELECT v AS x FROM eg_n UNION SELECT 5) y) z ORDER BY w;
+DROP TABLE eg_n;
