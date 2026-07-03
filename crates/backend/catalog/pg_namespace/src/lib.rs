@@ -1,5 +1,4 @@
-//! pg_namespace.c. nspacl is always NULL: get_user_default_acl is unported and
-//! pg_default_acl rows cannot be created, so C would return NULL here too.
+//! pg_namespace.c. nspacl stays NULL (no pg_default_acl rows can exist);
 
 #![allow(non_snake_case, non_upper_case_globals)]
 
@@ -14,8 +13,7 @@ pub const NamespaceOidIndexId: Oid = 2685;
 pub const Anum_pg_namespace_oid: AttrNumber = 1;
 pub const Natts_pg_namespace: usize = 4;
 
-// isTemp skips only get_user_default_acl, the extension dependency, and the
-// post-create hook -- each unported/no-op here, so both arms share this body.
+// isTemp-only skips (default ACL, extension dep, hook) are unported no-ops.
 pub fn NamespaceCreate<'mcx>(
     mcx: Mcx<'mcx>,
     nspName: &str,

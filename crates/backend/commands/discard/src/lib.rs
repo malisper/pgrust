@@ -16,7 +16,7 @@ pub fn DiscardCommand(stmt: &DiscardStmt, is_top_level: bool) -> PgResult<()> {
             Ok(())
         }
         DiscardMode::DISCARD_TEMP => {
-            catalog_namespace::ResetTempTableNamespace();
+            catalog_namespace::ResetTempTableNamespace()?;
             Ok(())
         }
     }
@@ -35,7 +35,7 @@ fn DiscardAll(is_top_level: bool) -> PgResult<()> {
     Async_UnlistenAll();
     lock::LockReleaseAll(USER_LOCKMETHOD.into(), true)?;
     plancache::ResetPlanCache();
-    catalog_namespace::ResetTempTableNamespace();
+    catalog_namespace::ResetTempTableNamespace()?;
     ResetSequenceCaches();
     Ok(())
 }
