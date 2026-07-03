@@ -1916,6 +1916,14 @@ version = "0.1.0"
 [[package]]
 name = "heaptoast_seams"
 version = "0.0.0"
+dependencies = [
+ "heaptuple",
+ "mcx",
+ "seam_core",
+ "types_error",
+ "types_rel",
+ "types_tuple",
+]
 
 [[package]]
 name = "heaptuple"

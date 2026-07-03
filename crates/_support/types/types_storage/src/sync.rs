@@ -63,7 +63,7 @@ impl FileTag {
 
 // C returns int + a char path[MAXPGPATH] out-param + global errno; carried
 // together so the errno branches (FILE_POSSIBLY_DELETED, != ENOENT) port
-// faithfully.
+// faithfully. std String justified: checkpointer fsync path, no query context.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FileTagOpResult {
     pub result: i32,

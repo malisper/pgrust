@@ -6,8 +6,7 @@ pub struct PgClassShape {
     pub relisshared: bool,
 }
 
-// PrepareToInvalidateCacheTuple's per-catcache (cacheId, hashValue, dbId)
-// callback invocation, returned as a value across the seam.
+// PrepareToInvalidateCacheTuple's per-catcache (cacheId, hashValue, dbId) row, by value across the seam.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct PrepareToInvalidateCacheTuple {
     pub cache_id: i32,

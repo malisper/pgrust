@@ -520,9 +520,8 @@ pub struct RunningTransactionsData<'mcx> {
     pub xids: mcx::PgVec<'mcx, TransactionId>,
 }
 
-// GetRunningTransactionData's "returns with ProcArrayLock and XidGenLock held"
-// contract as a with-locks callback; the owner releases whatever is still held
-// on both success and error exits.
+// GetRunningTransactionData's returns-with-ProcArrayLock+XidGenLock-held contract
+// as a with-locks callback; the owner releases whatever is held on all exits.
 pub trait RunningTransactionLocksHeld {
     fn release_proc_array_lock(&mut self) -> types_error::PgResult<()>;
 }

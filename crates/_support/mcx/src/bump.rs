@@ -193,23 +193,37 @@ impl BumpArena {
         Ok(new)
     }
 
+    // Post-reset the window re-opens over the keeper (kept charged by the
+    // caller): the next alloc takes the plain bump path, as C's BumpReset
+    // leaves the keeper in mem_allocated with freeptr rewound.
     pub(crate) fn reset(&mut self) {
-        for (p, layout) in self.oversize.drain(..) {
-            self.mem_allocated -= layout.size();
-            // SAFETY: reset's &mut proves no oversize chunk is still in use.
-            unsafe { Global.deallocate(p, layout) };
+        if !self.oversize.is_empty() {
+            for (p, layout) in self.oversize.drain(..) {
+                self.mem_allocated -= layout.size();
+                // SAFETY: reset's &mut proves no oversize chunk is still in use.
+                unsafe { Global.deallocate(p, layout) };
+            }
         }
-        if !self.blocks.is_empty() {
+        if self.blocks.len() > 1 {
             for b in self.blocks.drain(1..) {
                 self.mem_allocated -= b.size;
                 // SAFETY: reset's &mut proves no chunk in these blocks is in use.
                 unsafe { b.free() };
             }
-            self.blocks[0].used = 0;
         }
-        // Null window: the first alloc after reset re-claims (and re-charges) the keeper.
-        self.cur_ptr = core::ptr::null_mut();
-        self.cur_end = core::ptr::null_mut();
+        match self.blocks.first_mut() {
+            Some(k) => {
+                k.used = 0;
+                let base = k.ptr.as_ptr();
+                self.cur_ptr = base;
+                // SAFETY: base + k.size is the keeper's one-past-the-end.
+                self.cur_end = unsafe { base.add(k.size) };
+            }
+            None => {
+                self.cur_ptr = core::ptr::null_mut();
+                self.cur_end = core::ptr::null_mut();
+            }
+        }
         self.next_block_size = INIT_BLOCK_SIZE;
         debug_assert_eq!(self.mem_allocated, self.blocks.first().map_or(0, |b| b.size));
     }
@@ -292,7 +306,7 @@ mod tests {
     }
 
     #[test]
-    fn reset_keeps_keeper_and_recharges_on_reuse() {
+    fn reset_keeps_keeper_with_window_open() {
         let mut a = BumpArena::new();
         let acct = acct();
         let l = Layout::from_size_align(4096, 8).unwrap();
@@ -301,13 +315,17 @@ mod tests {
         }
         assert!(a.blocks.len() > 1);
         a.reset();
-        acct.self_used.set(0);
+        // Post-reset accounting is the caller's (MemoryContext::reset keeps the
+        // keeper charged); the arena's window must already be open on it.
+        acct.self_used.set(a.blocks[0].size);
         assert_eq!(a.blocks.len(), 1);
         assert_eq!(a.footprint(), a.blocks[0].size);
         let keeper_base = a.blocks[0].ptr.as_ptr();
+        assert_eq!(a.cur_ptr, keeper_base, "window re-opens on the keeper at reset");
+        let charged = acct.self_used.get();
         let p = a.alloc(l, &acct).unwrap().cast::<u8>().as_ptr();
         assert_eq!(p, keeper_base, "first post-reset chunk starts the keeper");
-        assert_eq!(acct.self_used.get(), a.blocks[0].size, "keeper re-charged on claim");
+        assert_eq!(acct.self_used.get(), charged, "no re-charge on the fast path");
     }
 
     #[test]
