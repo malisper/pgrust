@@ -18,6 +18,7 @@ dbcommands = { path = "../../commands/dbcommands" }
 functioncmds = { path = "../../commands/functioncmds" }
 statscmds = { path = "../../commands/statscmds" }
 commands_comment = { path = "../../commands/comment" }
+user = { path = "../../commands/user" }
 elog_seams = { path = "../../utils/error/elog_seams" }
 sequence = { path = "../../commands/sequence" }
 parser_small1 = { path = "../../parser/parser_small1" }

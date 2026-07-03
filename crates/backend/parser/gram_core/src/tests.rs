@@ -586,6 +586,68 @@ fn cluster_reindex_rule_numbers_match_tables() {
 }
 
 #[test]
+fn role_stmt_rule_numbers_match_tables() {
+    use crate::tables::names::{YYRLINE, YYTNAME};
+    use crate::tables::YYR1;
+    for (rule, name, line) in [
+        (147, "CreateRoleStmt", 1166),
+        (151, "OptRoleList", 1189),
+        (153, "AlterOptRoleList", 1194),
+        (155, "AlterOptRoleElem", 1199),
+        (156, "AlterOptRoleElem", 1204),
+        (157, "AlterOptRoleElem", 1208),
+        (158, "AlterOptRoleElem", 1218),
+        (159, "AlterOptRoleElem", 1226),
+        (160, "AlterOptRoleElem", 1230),
+        (161, "AlterOptRoleElem", 1234),
+        (162, "AlterOptRoleElem", 1239),
+        (163, "AlterOptRoleElem", 1243),
+        (165, "CreateOptRoleElem", 1293),
+        (166, "CreateOptRoleElem", 1297),
+        (167, "CreateOptRoleElem", 1301),
+        (168, "CreateOptRoleElem", 1305),
+        (169, "CreateOptRoleElem", 1309),
+        (170, "CreateUserStmt", 1323),
+        (171, "AlterRoleStmt", 1342),
+        (172, "AlterRoleStmt", 1351),
+        (175, "AlterRoleSetStmt", 1368),
+        (176, "AlterRoleSetStmt", 1377),
+        (177, "AlterRoleSetStmt", 1386),
+        (178, "AlterRoleSetStmt", 1395),
+        (179, "DropRoleStmt", 1417),
+        (180, "DropRoleStmt", 1425),
+        (181, "DropRoleStmt", 1433),
+        (182, "DropRoleStmt", 1441),
+        (183, "DropRoleStmt", 1449),
+        (184, "DropRoleStmt", 1457),
+        (185, "CreateGroupStmt", 1475),
+        (186, "AlterGroupStmt", 1494),
+        (187, "add_drop", 1506),
+        (188, "add_drop", 1507),
+        (217, "set_rest_more", 1754),
+        (256, "SetResetClause", 1956),
+        (916, "DropOwnedStmt", 6886),
+        (917, "ReassignOwnedStmt", 6897),
+        (1073, "GrantRoleStmt", 8012),
+        (1074, "GrantRoleStmt", 8023),
+        (1075, "RevokeRoleStmt", 8037),
+        (1076, "RevokeRoleStmt", 8049),
+        (1077, "grant_role_opt_list", 8067),
+        (1078, "grant_role_opt_list", 8068),
+        (1079, "grant_role_opt", 8072),
+        (1080, "grant_role_opt_value", 8079),
+        (1081, "grant_role_opt_value", 8080),
+        (1082, "grant_role_opt_value", 8081),
+        (2457, "RoleId", 17461),
+        (2462, "role_list", 17544),
+        (2463, "role_list", 17546),
+    ] {
+        assert_eq!(YYTNAME[YYR1[rule] as usize], name, "rule {rule}");
+        assert_eq!(YYRLINE[rule], line, "rule {rule}");
+    }
+}
+
+#[test]
 fn cluster_statement_forms() {
     use types_nodes::parsenodes::{ClusterStmt, ReindexObjectType, ReindexStmt};
     let list = parse("CLUSTER t USING idx");

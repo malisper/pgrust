@@ -24,4 +24,5 @@ catalog = { path = "../catalog" }
 types_nodes = { path = "../../../_support/types/nodes" }
 nodes_core = { path = "../../nodes/nodes_core" }
 catalog_indexing = { path = "../catalog_indexing" }
+pg_shdepend = { path = "../pg_shdepend" }
 miscinit_seams = { path = "../../utils/init/miscinit_seams" }

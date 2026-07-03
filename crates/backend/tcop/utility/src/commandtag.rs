@@ -153,7 +153,12 @@ pub fn CreateCommandTag(parsetree: Node<'_>) -> CommandTag {
                 .expect("GrantStmt");
             if stmt.is_grant { CMDTAG_GRANT } else { CMDTAG_REVOKE }
         }
-        T_GrantRoleStmt => payload_gap("CreateCommandTag", "GrantRoleStmt"),
+        T_GrantRoleStmt => {
+            let stmt = parsetree
+                .as_variant::<types_nodes::parsenodes::GrantRoleStmt>()
+                .expect("GrantRoleStmt");
+            if stmt.is_grant { CMDTAG_GRANT_ROLE } else { CMDTAG_REVOKE_ROLE }
+        }
         T_AlterDefaultPrivilegesStmt => CMDTAG_ALTER_DEFAULT_PRIVILEGES,
         T_DefineStmt => payload_gap("CreateCommandTag", "DefineStmt"),
         T_CompositeTypeStmt => CMDTAG_CREATE_TYPE,

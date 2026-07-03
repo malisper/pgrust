@@ -25,6 +25,7 @@ pg_attrdef = { path = "../pg_attrdef" }
 statscmds = { path = "../../commands/statscmds" }
 pg_constraint = { path = "../pg_constraint" }
 pg_depend = { path = "../pg_depend" }
+pg_shdepend = { path = "../pg_shdepend" }
 pg_type = { path = "../pg_type" }
 table = { path = "../../access/table/table" }
 types_core = { path = "../../../_support/types/types_core" }

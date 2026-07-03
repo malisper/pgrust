@@ -14,6 +14,7 @@ use types_tuple::HeapTupleData;
 const ANUM_PG_AUTHID_OID: i32 = 1;
 const ANUM_PG_DATABASE_DATDBA: i32 = 3;
 const ANUM_PG_AUTH_MEMBERS_ROLEID: i32 = 2;
+const ANUM_PG_AUTH_MEMBERS_ADMIN_OPTION: i32 = 5;
 const ANUM_PG_AUTH_MEMBERS_INHERIT_OPTION: i32 = 6;
 const ANUM_PG_AUTH_MEMBERS_SET_OPTION: i32 = 7;
 
@@ -105,18 +106,33 @@ pub(crate) fn roles_is_member_of_contains(
     rtype: RoleRecurseType,
     target: Oid,
 ) -> PgResult<bool> {
-    let t = rtype as usize;
+    Ok(roles_is_member_of_walk(roleid, rtype, target, InvalidOid)?.0)
+}
 
-    let hit = CACHE.with(|c| {
-        let cache = c.borrow();
-        if cache.role[t] == roleid && cache.role[t] != InvalidOid {
-            Some(cache.roles[t].contains(&target))
-        } else {
-            None
+// The admin_of out-param form of C's roles_is_member_of: the second result is
+// the first BFS role holding ADMIN OPTION on admin_of (InvalidOid when none or
+// not sought). The cache fastpath only applies when admin_of is not sought.
+fn roles_is_member_of_walk(
+    roleid: Oid,
+    rtype: RoleRecurseType,
+    target: Oid,
+    admin_of: Oid,
+) -> PgResult<(bool, Oid)> {
+    let t = rtype as usize;
+    let mut admin_role = InvalidOid;
+
+    if admin_of == InvalidOid {
+        let hit = CACHE.with(|c| {
+            let cache = c.borrow();
+            if cache.role[t] == roleid && cache.role[t] != InvalidOid {
+                Some(cache.roles[t].contains(&target))
+            } else {
+                None
+            }
+        });
+        if let Some(found) = hit {
+            return Ok((found, InvalidOid));
         }
-    });
-    if let Some(found) = hit {
-        return Ok(found);
     }
 
     // A non-database backend (walsender SHOW) expands roles with no
@@ -146,6 +162,13 @@ pub(crate) fn roles_is_member_of_contains(
             let member = memlist.member(m);
             let tuple = member.tuple();
             let otherid = getattr(&tuple, ANUM_PG_AUTH_MEMBERS_ROLEID).as_oid();
+            if otherid == admin_of
+                && admin_of != InvalidOid
+                && admin_role == InvalidOid
+                && getattr(&tuple, ANUM_PG_AUTH_MEMBERS_ADMIN_OPTION).as_bool()
+            {
+                admin_role = memberid;
+            }
             if rtype == RoleRecurseType::Privs
                 && !getattr(&tuple, ANUM_PG_AUTH_MEMBERS_INHERIT_OPTION).as_bool()
             {
@@ -173,7 +196,29 @@ pub(crate) fn roles_is_member_of_contains(
         cache.roles[t] = roles_list;
         cache.role[t] = roleid;
     });
-    Ok(found)
+    Ok((found, admin_role))
+}
+
+pub fn is_admin_of_role(member: Oid, role: Oid) -> PgResult<bool> {
+    if superuser::superuser_arg(member)? {
+        return Ok(true);
+    }
+    // By policy, a role cannot have WITH ADMIN OPTION on itself.
+    if member == role {
+        return Ok(false);
+    }
+    let (_, admin_role) =
+        roles_is_member_of_walk(member, RoleRecurseType::Members, InvalidOid, role)?;
+    Ok(admin_role != InvalidOid)
+}
+
+pub fn select_best_admin(member: Oid, role: Oid) -> PgResult<Oid> {
+    if member == role {
+        return Ok(InvalidOid);
+    }
+    let (_, admin_role) =
+        roles_is_member_of_walk(member, RoleRecurseType::Privs, InvalidOid, role)?;
+    Ok(admin_role)
 }
 
 /// Recurses only through inheritable grants; use for privilege checks.

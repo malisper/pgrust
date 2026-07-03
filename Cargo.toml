@@ -514,6 +514,7 @@ members = [
     "crates/backend/commands/dbcommands",
     "crates/backend/commands/schemacmds",
     "crates/backend/commands/functioncmds",
+    "crates/backend/commands/user",
     "crates/backend/commands/comment",
     "crates/backend/commands/explain",
     "crates/backend/commands/prepare",
