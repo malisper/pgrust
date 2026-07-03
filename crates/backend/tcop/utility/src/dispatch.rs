@@ -489,6 +489,7 @@ fn dispatch_switch<'mcx>(
                 }
                 OBJECT_INDEX | OBJECT_TABLE | OBJECT_SEQUENCE | OBJECT_VIEW | OBJECT_MATVIEW
                 | OBJECT_FOREIGN_TABLE => tablecmds::RemoveRelations(mcx, stmt)?,
+                OBJECT_TYPE => typecmds::RemoveTypes(mcx, stmt)?,
                 _ => handler_gap("RemoveObjects (dropcmds lane)"),
             }
         }
@@ -713,6 +714,13 @@ fn dispatch_switch<'mcx>(
             }
             typecmds::DefineDomain(mcx, &mut pstate, stmt)?;
             parser_small1::free_parsestate(pstate)?;
+        }
+        T_CompositeTypeStmt => {
+            // Retention contract as unify_stmt_lifetime: the statement arena
+            // outlives the utility call; nothing derived escapes it.
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node.as_composite_type_stmt().expect("CompositeTypeStmt");
+            typecmds::DefineCompositeType(mcx, stmt, source_text)?;
         }
         T_CreateEnumStmt => {
             // Retention contract as unify_stmt_lifetime: the statement arena
