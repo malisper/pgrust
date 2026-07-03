@@ -1,0 +1,11 @@
+[package]
+name = "instrument"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../_support/types/types_core" }
+bufmgr = { path = "../../storage/buffer/bufmgr" }
