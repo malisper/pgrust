@@ -1001,7 +1001,8 @@ pub fn AcquireRewriteLocks<'mcx>(
     forExecute: bool,
     forUpdatePushedDown: bool,
 ) -> PgResult<()> {
-    for node in parsetree.rtable.iter() {
+    for (rt_i, node) in parsetree.rtable.iter().enumerate() {
+        let rt_index = rt_i as i32 + 1;
         let rtekind = rte_of(node).rtekind;
         match rtekind {
             RTEKind::RTE_RELATION => {
@@ -1028,12 +1029,35 @@ pub fn AcquireRewriteLocks<'mcx>(
                 unsafe { node.with_mut::<RangeTblEntry, _>(|r| r.relkind = relkind) };
             }
             RTEKind::RTE_JOIN => {
-                panic!(
-                    "AcquireRewriteLocks (rewriteHandler.c): dropped-column fixup of \
-                     joinaliasvars needs strip_implicit_coercions (nodeFuncs.c) + \
-                     get_rte_attribute_is_dropped — both still missing from the landed \
-                     nodes_core/parse_relation crates"
-                );
+                // C nulls dropped-column joinaliasvars entries in place; a
+                // null list element is unrepresentable here, so an actually
+                // dropped column stays a loud panic.
+                let rte = rte_of(node);
+                let mut curinputvarno: i32 = 0;
+                for item in rte.joinaliasvars.iter() {
+                    let aliasvar = parse_expr::strip_implicit_coercions(item);
+                    let Some(v) = aliasvar.as_var() else { continue };
+                    debug_assert!(v.varlevelsup == 0);
+                    if v.varno != curinputvarno {
+                        curinputvarno = v.varno;
+                        if curinputvarno >= rt_index {
+                            return Err(internal_error("unexpected varno in JOIN RTE"));
+                        }
+                    }
+                    let curinputrte =
+                        rte_of(parsetree.rtable.nth(curinputvarno as usize - 1));
+                    if parse_relation::get_rte_attribute_is_dropped(
+                        mcx,
+                        curinputrte,
+                        v.varattno,
+                    )? {
+                        panic!(
+                            "AcquireRewriteLocks (rewriteHandler.c): dropped-column \
+                             joinaliasvars nulling unrepresentable (NodeList has no null \
+                             elements)"
+                        );
+                    }
+                }
             }
             RTEKind::RTE_SUBQUERY => {
                 let pushed_down = forUpdatePushedDown || {

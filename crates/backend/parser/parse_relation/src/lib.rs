@@ -2104,3 +2104,39 @@ fn perminfo_relid_mismatch(rte: &RangeTblEntry<'_>, perminfo_relid: Oid) -> Box<
         .with_error_location(loc("getRTEPermissionInfo")),
     )
 }
+
+// get_rte_attribute_is_dropped (parse_relation.c). RELATION reads the
+// relcache tupdesc (same pg_attribute row the C ATTNUM syscache serves);
+// join alias items are never null here (dropped-column nulling is loud in
+// AcquireRewriteLocks), so JOIN inputs answer false as in C's non-null arm.
+pub fn get_rte_attribute_is_dropped<'mcx>(
+    mcx: Mcx<'mcx>,
+    rte: &RangeTblEntry<'_>,
+    attnum: AttrNumber,
+) -> PgResult<bool> {
+    match rte.rtekind {
+        RTEKind::RTE_RELATION => {
+            let rel = table::table_open(mcx, rte.relid, NoLock)?;
+            let dropped = attnum >= 1
+                && (attnum as i32) <= rel.descr().natts
+                && rel.descr().attr(attnum as usize - 1).attisdropped;
+            table::table_close(rel, NoLock)?;
+            Ok(dropped)
+        }
+        RTEKind::RTE_SUBQUERY
+        | RTEKind::RTE_TABLEFUNC
+        | RTEKind::RTE_VALUES
+        | RTEKind::RTE_CTE
+        | RTEKind::RTE_GROUP => Ok(false),
+        RTEKind::RTE_JOIN => {
+            assert!(
+                attnum >= 1 && (attnum as usize) <= rte.joinaliasvars.len(),
+                "invalid attnum {attnum} for rangetable entry"
+            );
+            Ok(false)
+        }
+        other => panic!(
+            "get_rte_attribute_is_dropped (parse_relation.c): {other:?} arm unported"
+        ),
+    }
+}
