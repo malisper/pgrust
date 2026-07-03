@@ -60,8 +60,9 @@ fn compile_check(
     let slot = crate::compile::alloc_nullable_datum(mcx)?;
     let mut state = ExprState::new_boxed_in(mcx)?;
     crate::compile::create_expr_setup_steps(&mut state, mcx, &[expr])?;
-    state.innermost_domain = Some(OutRef(Some(slot)));
-    crate::compile::init_expr_rec(expr, &mut state, mcx, OutRef::RESULT, None, ParamBind::NONE, None)?;
+    state.innermost_domain = Some(OutRef(slot));
+    let rout = state.result_out();
+    crate::compile::init_expr_rec(expr, &mut state, mcx, rout, None, ParamBind::NONE, None)?;
     crate::compile::push_step(&mut state, mcx, Step::DoneReturn)?;
     crate::compile::ready_expr(&mut state);
     Ok(CompiledCheck { name, slot, state })
