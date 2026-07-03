@@ -6,7 +6,9 @@ publish.workspace = true
 
 [dependencies]
 dependency_seams = { path = "../dependency_seams" }
+event_trigger_seams = { path = "../../commands/event_trigger_seams" }
 sequence_seams = { path = "../../commands/sequence_seams" }
+cache_syscache = { path = "../../utils/cache/cache_syscache" }
 catalog = { path = "../catalog" }
 catalog_heap = { path = "../catalog_heap" }
 catalog_namespace = { path = "../catalog_namespace" }

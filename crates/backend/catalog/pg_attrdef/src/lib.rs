@@ -214,6 +214,37 @@ pub fn GetAttrDefaultOid<'mcx>(mcx: Mcx<'mcx>, relid: Oid, attnum: AttrNumber) -
     Ok(result)
 }
 
+// GetAttrDefaultColumnAddress (pg_attrdef.c); InvalidOid objectId = no entry.
+pub fn GetAttrDefaultColumnAddress<'mcx>(
+    mcx: Mcx<'mcx>,
+    attrdefoid: Oid,
+) -> PgResult<pg_depend::ObjectAddress> {
+    let adrel = table::table_open(mcx, ATTR_DEFAULT_RELATION_ID, types_rel::AccessShareLock)?;
+    let keys = [eq_key(Anum_pg_attrdef_oid, F_OIDEQ, Datum::from_oid(attrdefoid))];
+    let mut scan =
+        genam::systable_beginscan(mcx, &adrel, ATTR_DEFAULT_OID_INDEX_ID, true, None, &keys)?;
+    let mut result =
+        pg_depend::ObjectAddress::set(types_core::InvalidOid, types_core::InvalidOid);
+    if let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+        let desc = adrel.descr();
+        let get = |anum: i32| {
+            let mut isnull = false;
+            // SAFETY: fixed NOT NULL pg_attrdef columns under its descriptor.
+            let d = unsafe { types_tuple::heap_getattr(tup, anum, desc, &mut isnull) };
+            debug_assert!(!isnull);
+            d
+        };
+        result = pg_depend::ObjectAddress::sub_set(
+            types_core::RELATION_RELATION_ID,
+            get(Anum_pg_attrdef_adrelid as i32).as_oid(),
+            get(Anum_pg_attrdef_adnum as i32).as_i16() as i32,
+        );
+    }
+    genam::systable_endscan(mcx, scan)?;
+    adrel.close(types_rel::AccessShareLock)?;
+    Ok(result)
+}
+
 pub fn RemoveAttrDefaultById<'mcx>(mcx: Mcx<'mcx>, attrdef_id: Oid) -> PgResult<()> {
     let adrel = table::table_open(mcx, ATTR_DEFAULT_RELATION_ID, RowExclusiveLock)?;
     let keys = [eq_key(Anum_pg_attrdef_oid, F_OIDEQ, Datum::from_oid(attrdef_id))];
@@ -282,3 +313,4 @@ fn attr_lookup_failed(attnum: AttrNumber, relid: Oid) -> Box<PgError> {
         "cache lookup failed for attribute {attnum} of relation {relid}"
     )))
 }
+

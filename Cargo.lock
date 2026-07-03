@@ -1349,6 +1349,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "cache_evtcache"
+version = "0.1.0"
+dependencies = [
+ "arrayfuncs",
+ "cache_syscache",
+ "cmdtag",
+ "datum",
+ "detoast",
+ "genam",
+ "indexam",
+ "inval",
+ "mcx",
+ "table",
+ "types_core",
+ "types_error",
+ "types_rel",
+ "types_scan",
+ "types_tuple",
+]
+
+[[package]]
 name = "cache_syscache"
 version = "0.1.0"
 dependencies = [
@@ -1396,6 +1417,7 @@ dependencies = [
 name = "catalog_dependency"
 version = "0.1.0"
 dependencies = [
+ "cache_syscache",
  "catalog",
  "catalog_heap",
  "catalog_index",
@@ -1403,6 +1425,7 @@ dependencies = [
  "catalog_namespace",
  "datum",
  "dependency_seams",
+ "event_trigger_seams",
  "fmgr_seams",
  "format_type",
  "genam",
@@ -2789,11 +2812,14 @@ dependencies = [
  "catalog_dependency",
  "catalog_namespace",
  "elog_seams",
+ "event_trigger",
  "mcx",
+ "miscinit",
  "pg_depend",
  "rel_vocab",
  "relcache",
  "rewrite_define",
+ "superuser",
  "table",
  "types_core",
  "types_error",
@@ -2865,6 +2891,57 @@ dependencies = [
 name = "error_small_seams"
 version = "0.0.0"
 dependencies = [
+ "seam_core",
+ "types_error",
+]
+
+[[package]]
+name = "event_trigger"
+version = "0.1.0"
+dependencies = [
+ "arrayfuncs",
+ "cache_evtcache",
+ "cache_syscache",
+ "catalog",
+ "catalog_dependency",
+ "catalog_indexing",
+ "catalog_namespace",
+ "cmdtag",
+ "datum",
+ "elog",
+ "event_trigger_seams",
+ "fmgr_core",
+ "fmgr_seams",
+ "funcapi",
+ "genam",
+ "guc_tables",
+ "heaptuple",
+ "init_small",
+ "lsyscache",
+ "mcx",
+ "miscinit",
+ "pg_attrdef",
+ "pg_depend",
+ "plancache",
+ "superuser",
+ "table",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_nodes",
+ "types_rel",
+ "types_scan",
+ "types_tuple",
+ "varlena",
+ "xact",
+]
+
+[[package]]
+name = "event_trigger_seams"
+version = "0.1.0"
+dependencies = [
+ "mcx",
+ "pg_depend",
  "seam_core",
  "types_error",
 ]
@@ -8750,6 +8827,7 @@ dependencies = [
  "detoast",
  "dsm_core",
  "elog",
+ "event_trigger",
  "execexpr",
  "execjunk",
  "execmain",
@@ -9860,6 +9938,7 @@ dependencies = [
  "commands_cluster",
  "datum",
  "elog_seams",
+ "event_trigger",
  "execexpr",
  "exectuples",
  "fmgr_seams",
@@ -10661,6 +10740,7 @@ dependencies = [
  "dropcmds",
  "elog",
  "elog_seams",
+ "event_trigger",
  "explain",
  "functioncmds",
  "guc_funcs",
@@ -10675,6 +10755,7 @@ dependencies = [
  "parse_clause",
  "parse_utilcmd",
  "parser_small1",
+ "pg_depend",
  "portalcmds",
  "portalmem",
  "prepare",

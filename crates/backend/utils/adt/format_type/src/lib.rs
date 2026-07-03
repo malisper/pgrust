@@ -31,29 +31,46 @@ fn type_lookup_failed(typid: Oid) -> Box<PgError> {
     Box::new(PgError::error(format!("cache lookup failed for type {typid}")))
 }
 
+pub const FORMAT_TYPE_TYPEMOD_GIVEN: u16 = 0x01;
+pub const FORMAT_TYPE_ALLOW_INVALID: u16 = 0x02;
+pub const FORMAT_TYPE_FORCE_QUALIFY: u16 = 0x04;
+pub const FORMAT_TYPE_INVALID_AS_NULL: u16 = 0x08;
+
 /// C `format_type_be` = `format_type_extended(type_oid, -1, 0)`.
 pub fn format_type_be(type_oid: Oid) -> PgResult<String> {
-    format_type_extended(type_oid, -1, false, false)
+    Ok(format_type_extended(type_oid, -1, 0)?.expect("no FORMAT_TYPE_INVALID_AS_NULL"))
 }
 
-/// C `format_type_with_typemod` = `format_type_extended(type_oid, typemod,
-/// FORMAT_TYPE_TYPEMOD_GIVEN)`.
+pub fn format_type_be_qualified(type_oid: Oid) -> PgResult<String> {
+    Ok(format_type_extended(type_oid, -1, FORMAT_TYPE_FORCE_QUALIFY)?
+        .expect("no FORMAT_TYPE_INVALID_AS_NULL"))
+}
+
 pub fn format_type_with_typemod(type_oid: Oid, typemod: i32) -> PgResult<String> {
-    format_type_extended(type_oid, typemod, true, false)
+    Ok(format_type_extended(type_oid, typemod, FORMAT_TYPE_TYPEMOD_GIVEN)?
+        .expect("no FORMAT_TYPE_INVALID_AS_NULL"))
 }
 
-pub(crate) fn format_type_extended(
+pub fn format_type_extended(
     type_oid: Oid,
     typemod: i32,
-    typemod_given: bool,
-    allow_invalid: bool,
-) -> PgResult<String> {
-    if type_oid == InvalidOid && allow_invalid {
-        return Ok("-".to_string());
+    flags: u16,
+) -> PgResult<Option<String>> {
+    let typemod_given = flags & FORMAT_TYPE_TYPEMOD_GIVEN != 0;
+    if type_oid == InvalidOid {
+        if flags & FORMAT_TYPE_INVALID_AS_NULL != 0 {
+            return Ok(None);
+        }
+        if flags & FORMAT_TYPE_ALLOW_INVALID != 0 {
+            return Ok(Some("-".to_string()));
+        }
     }
     let Some(mut shape) = syscache_seams::lookup_pg_type_typcache_shape::call(type_oid)? else {
-        if allow_invalid {
-            return Ok("???".to_string());
+        if flags & FORMAT_TYPE_INVALID_AS_NULL != 0 {
+            return Ok(None);
+        }
+        if flags & FORMAT_TYPE_ALLOW_INVALID != 0 {
+            return Ok(Some("???".to_string()));
         }
         return Err(type_lookup_failed(type_oid));
     };
@@ -65,7 +82,10 @@ pub(crate) fn format_type_extended(
         named_oid = shape.typelem;
         shape = match syscache_seams::lookup_pg_type_typcache_shape::call(named_oid)? {
             Some(s) => s,
-            None if allow_invalid => return Ok("???[]".to_string()),
+            None if flags & FORMAT_TYPE_INVALID_AS_NULL != 0 => return Ok(None),
+            None if flags & FORMAT_TYPE_ALLOW_INVALID != 0 => {
+                return Ok(Some("???[]".to_string()))
+            }
             None => return Err(type_lookup_failed(type_oid)),
         };
         is_array = true;
@@ -115,8 +135,9 @@ pub(crate) fn format_type_extended(
                 .unwrap_or_else(|_| panic!("non-UTF-8 pg_type.typname"));
             // C: quote_qualified_identifier(NULL-if-visible nspname, typname).
             let mut quoted = String::new();
-            if named_oid >= FirstNormalObjectId
-                && !namespace_seams::type_is_visible::call(named_oid)?
+            if flags & FORMAT_TYPE_FORCE_QUALIFY != 0
+                || (named_oid >= FirstNormalObjectId
+                    && !namespace_seams::type_is_visible::call(named_oid)?)
             {
                 let t = syscache_seams::pg_type_domain_shape::call(named_oid)?
                     .ok_or_else(|| type_lookup_failed(named_oid))?;
@@ -144,7 +165,7 @@ pub(crate) fn format_type_extended(
     if is_array {
         buf.push_str("[]");
     }
-    Ok(buf)
+    Ok(Some(buf))
 }
 
 /// C `printTypmod`; takes the type oid instead of a pre-fetched typmodout.
