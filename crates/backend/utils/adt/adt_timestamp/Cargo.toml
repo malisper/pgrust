@@ -24,10 +24,6 @@ strftime = { path = "../../../timezone/strftime" }
 timestamp_seams = { path = "../timestamp_seams" }
 xact = { path = "../../../access/transam/xact" }
 libc = "0.2"
-datum = { path = "../../../../_support/types/datum" }
-mcx = { path = "../../../../_support/mcx" }
-pqformat = { path = "../../../libpq/pqformat" }
-stringinfo = { path = "../../../../_support/types/stringinfo" }
 
 [dev-dependencies]
 pgtz = { path = "../../../timezone/pgtz" }

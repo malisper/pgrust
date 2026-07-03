@@ -16,8 +16,9 @@ use ::types_fmgr::{
 use crate::{InetRef, InetValue, INET_OUT_BUFLEN};
 
 fn arg_inet<'a>(fcinfo: &'a Fcinfo, i: usize) -> InetRef<'a> {
-    // SAFETY: catalog args of these fns are non-null inet/cidr varlenas.
-    let pv = unsafe { fcinfo.arg_varlena_packed(i) };
+    // SAFETY: catalog args of these fns are non-null inet/cidr varlenas;
+    // inet never TOASTs external (22 bytes max), so the detoast arm is Ok.
+    let pv = unsafe { fcinfo.arg_varlena_packed(i) }.expect("inet arg detoast");
     InetRef::from_payload(pv.data())
 }
 

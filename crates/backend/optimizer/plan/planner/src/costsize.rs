@@ -97,6 +97,15 @@ fn cost_qual_eval_walker(node: Node<'_>, cost: &mut QualCost) -> PgResult<()> {
         NodeTag::T_RelabelType => {
             cost_qual_eval_walker(node.as_relabel_type().unwrap().arg, cost)
         }
+        // C charges both I/O functions of the coercion.
+        NodeTag::T_CoerceViaIO => {
+            let c = node.as_coerce_via_io().unwrap();
+            let (infunc, _) = lsyscache::getTypeInputInfo(c.resulttype)?;
+            crate::plancat::add_function_cost(infunc, cost)?;
+            let (outfunc, _) = lsyscache::getTypeOutputInfo(expr_type_typmod(c.arg).0)?;
+            crate::plancat::add_function_cost(outfunc, cost)?;
+            cost_qual_eval_walker(c.arg, cost)
+        }
         // Boolean connectives are free in C; NullTest is "cheap" (no charge).
         NodeTag::T_BoolExpr => {
             for arg in &node.as_bool_expr().unwrap().args {
@@ -848,6 +857,11 @@ pub fn expr_type_typmod(node: Node<'_>) -> (u32, i32) {
             let c = node.as_case_expr().unwrap();
             (c.casetype, case_expr_typmod(c))
         }
+        NodeTag::T_RelabelType => {
+            let r = node.as_relabel_type().unwrap();
+            (r.resulttype, r.resulttypmod)
+        }
+        NodeTag::T_CoerceViaIO => (node.as_coerce_via_io().unwrap().resulttype, -1),
         other => panic!("exprType (nodeFuncs.c): {other:?}; M2 expression lane"),
     }
 }

@@ -16,7 +16,6 @@ const F_TIMESTAMP_SORTSUPPORT: Oid = 3137;
 const F_BTTEXTSORTSUPPORT: Oid = 3255;
 const F_UUID_SORTSUPPORT: Oid = 3300;
 const F_NETWORK_SORTSUPPORT: Oid = 5033;
-const F_BTOIDSORTSUPPORT: Oid = 3134;
 
 /// C's `ssup->comparator` fn pointer as a closed enum: identity is switchable
 /// (tuplesort_sort_memtuples specialization dispatch) and calls monomorphize.

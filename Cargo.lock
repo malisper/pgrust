@@ -338,6 +338,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "adt_network"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "hashfn",
+ "mcx",
+ "pqformat",
+ "stringinfo",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+]
+
+[[package]]
 name = "adt_numeric"
 version = "0.1.0"
 dependencies = [
@@ -387,10 +401,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "adt_regproc"
+version = "0.1.0"
+dependencies = [
+ "aclchk_seams",
+ "datum",
+ "format_type",
+ "inval_seams",
+ "lmgr_seams",
+ "lsyscache",
+ "mbutils",
+ "mcx",
+ "miscinit_seams",
+ "namespace_seams",
+ "pqformat",
+ "rel_vocab",
+ "syscache_seams",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_rel",
+ "types_tuple",
+ "varlena",
+]
+
+[[package]]
 name = "adt_scalar"
 version = "0.1.0"
 dependencies = [
  "datum",
+ "mcx",
+ "numutils",
+ "pqformat",
+ "stringinfo",
  "types_core",
  "types_error",
  "types_fmgr",
@@ -420,6 +463,21 @@ dependencies = [
  "types_fmgr",
  "xact",
  "xact_seams",
+]
+
+[[package]]
+name = "adt_uuid"
+version = "0.1.0"
+dependencies = [
+ "adt_datetime",
+ "datum",
+ "hashfn",
+ "mcx",
+ "pqformat",
+ "stringinfo",
+ "types_core",
+ "types_error",
+ "types_fmgr",
 ]
 
 [[package]]
@@ -2469,11 +2527,14 @@ dependencies = [
  "adt_like",
  "adt_mac",
  "adt_mac8",
+ "adt_network",
  "adt_numeric",
  "adt_oracle_compat",
  "adt_pseudotypes",
+ "adt_regproc",
  "adt_scalar",
  "adt_timestamp",
+ "adt_uuid",
  "adt_windowfuncs",
  "arrayfuncs",
  "commands_async",

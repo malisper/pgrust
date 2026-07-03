@@ -25,6 +25,10 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    pub fn get_current_transaction_start_timestamp() -> types_core::TimestampTz
+);
+
+seam_core::seam!(
     pub fn get_top_transaction_id_if_any() -> types_core::TransactionId
 );
 
