@@ -399,7 +399,7 @@ name = "adt_numeric"
 version = "0.1.0"
 dependencies = [
  "adt_float",
- "arrayfuncs_seams",
+ "arrayfuncs",
  "datum",
  "init_small",
  "mcx",
@@ -686,7 +686,6 @@ name = "arrayfuncs"
 version = "0.1.0"
 dependencies = [
  "adt_int",
- "arrayfuncs_seams",
  "arrayutils",
  "datum",
  "detoast_seams",
@@ -699,15 +698,6 @@ dependencies = [
  "types_core",
  "types_error",
  "types_fmgr",
-]
-
-[[package]]
-name = "arrayfuncs_seams"
-version = "0.0.0"
-dependencies = [
- "mcx",
- "seam_core",
- "types_error",
 ]
 
 [[package]]
@@ -7523,7 +7513,6 @@ dependencies = [
  "adt_regexp",
  "adt_timestamp",
  "aio_config",
- "arrayfuncs",
  "auth",
  "autovacuum",
  "auxprocess",

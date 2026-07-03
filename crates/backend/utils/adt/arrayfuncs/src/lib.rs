@@ -21,7 +21,3 @@ pub use foundation::{
     read_dims_lbounds, MAXDIM,
 };
 pub use io::{array_in, array_out, array_recv, array_send, ArrayIoMeta};
-
-pub fn init_seams() {
-    arrayfuncs_seams::array_get_integer_typmods::set(construct::array_get_integer_typmods);
-}

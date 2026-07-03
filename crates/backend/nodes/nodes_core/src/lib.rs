@@ -714,22 +714,6 @@ where
                 )?)),
             }
         }
-        NodeTag::T_RowExpr => {
-            let r = node.as_row_expr().unwrap();
-            match mutate_list(mcx, &r.args, m)? {
-                None => Ok(None),
-                Some(args) => Ok(Some(Node::mk(
-                    mcx,
-                    types_nodes::primnodes::RowExpr {
-                        args,
-                        row_typeid: r.row_typeid,
-                        row_format: r.row_format,
-                        colnames: r.colnames.clone_in(mcx)?,
-                        location: r.location,
-                    },
-                )?)),
-            }
-        }
         NodeTag::T_BoolExpr => {
             let b = node.as_bool_expr().unwrap();
             match mutate_list(mcx, &b.args, m)? {
@@ -812,6 +796,22 @@ where
                         arg: Some(arg),
                         booltesttype: bt.booltesttype,
                         location: bt.location,
+                    },
+                )?)),
+            }
+        }
+        NodeTag::T_RowExpr => {
+            let r = node.as_row_expr().unwrap();
+            match mutate_list(mcx, &r.args, m)? {
+                None => Ok(None),
+                Some(args) => Ok(Some(Node::mk(
+                    mcx,
+                    types_nodes::RowExpr {
+                        args,
+                        row_typeid: r.row_typeid,
+                        row_format: r.row_format,
+                        colnames: r.colnames.clone_in(mcx)?,
+                        location: r.location,
                     },
                 )?)),
             }

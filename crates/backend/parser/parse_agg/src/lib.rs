@@ -324,12 +324,6 @@ fn check_agg_arguments_walker<'mcx>(
         NodeTag::T_RelabelType => {
             check_agg_arguments_walker(pstate, node.as_relabel_type().unwrap().arg, ctx)
         }
-        NodeTag::T_RowExpr => {
-            for arg in &node.as_row_expr().unwrap().args {
-                check_agg_arguments_walker(pstate, arg, ctx)?;
-            }
-            Ok(())
-        }
         NodeTag::T_BoolExpr => {
             for arg in &node.as_bool_expr().unwrap().args {
                 check_agg_arguments_walker(pstate, arg, ctx)?;
@@ -346,6 +340,12 @@ fn check_agg_arguments_walker<'mcx>(
         },
         NodeTag::T_DistinctExpr => {
             for arg in &node.as_distinct_expr().unwrap().args {
+                check_agg_arguments_walker(pstate, arg, ctx)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_RowExpr => {
+            for arg in &node.as_row_expr().unwrap().args {
                 check_agg_arguments_walker(pstate, arg, ctx)?;
             }
             Ok(())

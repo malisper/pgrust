@@ -11,7 +11,6 @@ types_core = { path = "../../../../_support/types/types_core" }
 types_error = { path = "../../../../_support/types/types_error" }
 types_fmgr = { path = "../../../../_support/types/fmgr" }
 fmgr_seams = { path = "../../fmgr/fmgr_seams" }
-arrayfuncs_seams = { path = "../arrayfuncs_seams" }
 lsyscache = { path = "../../cache/lsyscache" }
 stringinfo = { path = "../../../../_support/types/stringinfo" }
 pqformat = { path = "../../../libpq/pqformat" }

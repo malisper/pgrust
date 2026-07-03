@@ -151,12 +151,6 @@ fn cost_qual_eval_walker(node: Node<'_>, cost: &mut QualCost) -> PgResult<()> {
             }
             Ok(())
         }
-        NodeTag::T_RowExpr => {
-            for e in node.as_row_expr().unwrap().args.iter() {
-                cost_qual_eval_walker(e, cost)?;
-            }
-            Ok(())
-        }
         NodeTag::T_NullTest => match node.as_null_test().unwrap().arg {
             Some(arg) => cost_qual_eval_walker(arg, cost),
             None => Ok(()),
@@ -175,6 +169,12 @@ fn cost_qual_eval_walker(node: Node<'_>, cost: &mut QualCost) -> PgResult<()> {
             Some(arg) => cost_qual_eval_walker(arg, cost),
             None => Ok(()),
         },
+        NodeTag::T_RowExpr => {
+            for arg in &node.as_row_expr().unwrap().args {
+                cost_qual_eval_walker(arg, cost)?;
+            }
+            Ok(())
+        }
         // C arbitrarily uses the first alternative's cost.
         NodeTag::T_AlternativeSubPlan => {
             let asp = node.as_alternative_sub_plan().unwrap();
