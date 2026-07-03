@@ -554,6 +554,12 @@ pub(crate) fn run_one_iteration(mcx: Mcx<'_>, state: &mut LoopState) -> PgResult
 }
 
 fn pg_error_from_panic(payload: Box<dyn std::any::Any + Send>) -> PgError {
+    // proc_exit unwinds ProcExitThread; converting it to an ERROR turns
+    // backend exit into an infinite recovery loop (client EOF -> proc_exit(0)
+    // -> "recovered" -> ReadCommand panic, ~850/s). Re-raise it.
+    if payload.is::<ipc::ProcExitThread>() {
+        std::panic::resume_unwind(payload);
+    }
     match payload.downcast::<PgError>() {
         Ok(e) => *e,
         Err(payload) => {

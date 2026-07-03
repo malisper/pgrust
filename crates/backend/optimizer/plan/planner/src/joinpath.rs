@@ -51,7 +51,7 @@ pub fn add_paths_to_joinrel<'mcx>(
         jointype == JOIN_INNER,
         "add_paths_to_joinrel (joinpath.c): jointype {jointype}; M2 outer/semi-join lane"
     );
-    let inner_unique = innerrel_is_unique(run, innerrel, restrictlist);
+    let inner_unique = innerrel_is_unique(run, outerrel, innerrel, restrictlist);
     debug_assert!(run.root.join_info_list.is_empty());
     // mergejoin_allowed is always true for inner joins.
     let mergeclause_list = select_mergejoin_clauses(run, outerrel, innerrel, restrictlist)?;
@@ -345,21 +345,87 @@ fn generate_mergejoin_paths<'mcx>(
     Ok(())
 }
 
-// innerrel_is_unique (analyzejoins.c): the no-unique-index quick exit is the
-// only live leg; a provable-uniqueness candidate routes to the loud lane.
-fn innerrel_is_unique(run: &PlannerRun<'_>, innerrel: RelId, restrictlist: &[RinfoId]) -> bool {
+// innerrel_is_unique -> rel_is_distinct_for -> relation_has_unique_index_for
+// (analyzejoins.c/indxpath.c): a PROVEN unique inner routes to the loud lane
+// (inner_unique costing/exec semantics are the M2 join-uniqueness lane); a
+// non-matching unique index correctly proves nothing. The unique_for_rels
+// cache is skipped (per-join-level, cold).
+fn innerrel_is_unique(
+    run: &mut PlannerRun<'_>,
+    outerrel: RelId,
+    innerrel: RelId,
+    restrictlist: &[RinfoId],
+) -> bool {
     if restrictlist.is_empty() {
         return false;
     }
     // rel_supports_distinctness over the innerrel's indexlist.
-    let rel = run.root.rel(innerrel);
-    if rel.reloptkind != types_pathnodes::RELOPT_BASEREL
-        || rel.rtekind != types_pathnodes::RTE_RELATION
     {
-        return false;
+        let rel = run.root.rel(innerrel);
+        if rel.reloptkind != types_pathnodes::RELOPT_BASEREL
+            || rel.rtekind != types_pathnodes::RTE_RELATION
+        {
+            return false;
+        }
+        if !rel
+            .indexlist
+            .iter()
+            .any(|ind| ind.unique && ind.immediate && ind.indpred.is_empty())
+        {
+            return false;
+        }
     }
-    for ind in rel.indexlist.iter() {
-        if ind.unique && ind.immediate && ind.indpred.is_empty() {
+
+    // Clauses usable for the proof: sides must line up with this join.
+    let mut clause_list: Vec<RinfoId> = Vec::new();
+    for &rid in restrictlist {
+        if !clause_sides_match_join(run, rid, outerrel, innerrel) {
+            continue;
+        }
+        clause_list.push(rid);
+    }
+
+    // relation_has_unique_index_for: every key column of some unique index
+    // must be equated (via an index-opfamily equality) to the outer side.
+    let inner_relid = run.root.rel(innerrel).relid;
+    let n_indexes = run.root.rel(innerrel).indexlist.len();
+    for i in 0..n_indexes {
+        let ind = std::rc::Rc::clone(&run.root.rel(innerrel).indexlist[i]);
+        if !ind.unique || !ind.immediate || !ind.indpred.is_empty() {
+            continue;
+        }
+        let mut all_matched = true;
+        for c in 0..ind.nkeycolumns as usize {
+            let mut matched = false;
+            for &rid in clause_list.iter() {
+                let ri = run.root.rinfo(rid);
+                if !ri.mergeopfamilies.iter().any(|&f| f == ind.opfamily[c]) {
+                    continue;
+                }
+                let clause = *run.root.expr_node(ri.clause);
+                let o = clause.as_op_expr().expect("mergeclause is an OpExpr");
+                let mut rexpr = if ri.outer_is_left { o.args.nth(1) } else { o.args.nth(0) };
+                while let Some(r) = rexpr.as_relabel_type() {
+                    rexpr = r.arg;
+                }
+                // match_index_to_operand, simple-column arm (expression
+                // columns never match a Var).
+                if let Some(var) = rexpr.as_var() {
+                    if var.varno as u32 == inner_relid
+                        && var.varattno != 0
+                        && ind.indexkeys[c] == var.varattno as i32
+                    {
+                        matched = true;
+                        break;
+                    }
+                }
+            }
+            if !matched {
+                all_matched = false;
+                break;
+            }
+        }
+        if all_matched {
             panic!(
                 "innerrel_is_unique (analyzejoins.c): unique-index proof; M2 join-uniqueness lane"
             );
