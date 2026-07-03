@@ -571,9 +571,8 @@ fn run_program<'mcx>(
                 write_out(*out, value, isnull);
             }
             Step::HashedScalarArrayOp { call, inclause, typlen, typbyval, typalign, table, out } => {
-                let arr = read_out(*out, &regs);
+                let arr = read_out(*out);
                 let (value, isnull) = eval_hashed_scalar_array_op(
-                    frames,
                     &mut saop_tables[*table as usize],
                     call,
                     *inclause,
@@ -582,7 +581,7 @@ fn run_program<'mcx>(
                     *typalign,
                     arr,
                 )?;
-                write_out(*out, &mut regs, value, isnull);
+                write_out(*out, value, isnull);
             }
             Step::ArrayExprStep {
                 elems,
@@ -1289,7 +1288,6 @@ fn eval_scalar_array_op(
 // a table of the const array's elements, built on first evaluation.
 #[allow(clippy::too_many_arguments)]
 fn eval_hashed_scalar_array_op(
-    frames: &mut [crate::steps::FuncFrame<'_>],
     tab: &mut crate::steps::SaopTable<'_>,
     call: &FuncCall,
     inclause: bool,
@@ -1300,7 +1298,8 @@ fn eval_hashed_scalar_array_op(
 ) -> PgResult<(Datum, bool)> {
     // The planner only converts a non-null Const array.
     debug_assert!(!arr.isnull);
-    let strictfunc = frames[call.frame as usize].flinfo.fn_strict;
+    // SAFETY: 'mcx-live mcx-boxed FmgrInfo the step's carrier points at.
+    let strictfunc = unsafe { call.flinfo.as_ref() }.fn_strict;
     // SAFETY: arg slot 0 of the call's live fcinfo image.
     let scalar = unsafe { crate::steps::arg_slot_of(call.fcinfo, 0).read() };
 
@@ -1308,23 +1307,16 @@ fn eval_hashed_scalar_array_op(
         return Ok((Datum::null(), true));
     }
 
-    let hash_of = |frames: &mut [crate::steps::FuncFrame<'_>],
-                   hashcall: &FuncCall,
-                   v: Datum|
-     -> PgResult<u32> {
+    let hash_of = |hashcall: &FuncCall, v: Datum| -> PgResult<u32> {
         // SAFETY: arg slot 0 of the hashcall's live fcinfo image.
         unsafe {
             crate::steps::arg_slot_of(hashcall.fcinfo, 0)
                 .write(NullableDatum { value: v, isnull: false })
         };
-        let (h, _) = invoke(frames, hashcall)?;
+        let (h, _) = invoke(hashcall)?;
         Ok(h.as_i32() as u32)
     };
-    let eq_of = |frames: &mut [crate::steps::FuncFrame<'_>],
-                 call: &FuncCall,
-                 a: Datum,
-                 b: Datum|
-     -> PgResult<bool> {
+    let eq_of = |call: &FuncCall, a: Datum, b: Datum| -> PgResult<bool> {
         // SAFETY: arg slots 0/1 of the call's live fcinfo image.
         unsafe {
             crate::steps::arg_slot_of(call.fcinfo, 0)
@@ -1332,7 +1324,7 @@ fn eval_hashed_scalar_array_op(
             crate::steps::arg_slot_of(call.fcinfo, 1)
                 .write(NullableDatum { value: b, isnull: false });
         }
-        let (r, _) = invoke(frames, call)?;
+        let (r, _) = invoke(call)?;
         Ok(r.as_bool())
     };
 
@@ -1376,14 +1368,14 @@ fn eval_hashed_scalar_array_op(
                 let elt = ::arrayfuncs::foundation::fetch_att(ep, typbyval, typlen as i32);
                 off = ::arrayfuncs::foundation::att_addlength_pointer(off, typlen as i32, ep);
 
-                let h = hash_of(frames, &hashcall, elt)?;
+                let h = hash_of(&hashcall, elt)?;
                 let bucket = tab
                     .map
                     .entry(h)
                     .or_insert_with(|| ::mcx::PgVec::new_in(mcx));
                 let mut found = false;
                 for i in 0..bucket.len() {
-                    if eq_of(frames, call, elt, bucket[i])? {
+                    if eq_of(call, elt, bucket[i])? {
                         found = true;
                         break;
                     }
@@ -1406,10 +1398,10 @@ fn eval_hashed_scalar_array_op(
     // Probe (C probes even a null non-strict scalar, value word 0).
     let mut hashfound = false;
     {
-        let h = hash_of(frames, &tab.hashcall, scalar.value)?;
+        let h = hash_of(&tab.hashcall, scalar.value)?;
         if let Some(bucket) = tab.map.get(&h) {
             for i in 0..bucket.len() {
-                if eq_of(frames, call, scalar.value, bucket[i])? {
+                if eq_of(call, scalar.value, bucket[i])? {
                     hashfound = true;
                     break;
                 }
@@ -1431,7 +1423,7 @@ fn eval_hashed_scalar_array_op(
             crate::steps::arg_slot_of(call.fcinfo, 0).write(scalar);
             crate::steps::arg_slot_of(call.fcinfo, 1).write(NullableDatum::null());
         }
-        let (r, isnull) = invoke(frames, call)?;
+        let (r, isnull) = invoke(call)?;
         result = r.as_bool();
         resultnull = isnull;
         if !inclause {
