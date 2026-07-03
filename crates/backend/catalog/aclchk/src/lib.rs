@@ -6,7 +6,7 @@ use adt_acl::{
     acldefault, aclmask, has_privs_of_role, AclItem, AclMaskHow, AclObjectType, ACL_DELETE,
     ACL_INSERT, ACL_MAINTAIN, ACL_SELECT, ACL_SET, ACL_TRUNCATE, ACL_UPDATE, ACL_USAGE,
 };
-use cache_syscache::cacheinfo::{ATTNUM, DATABASEOID, PARAMETERACLNAME, PROCOID, RELOID};
+use cache_syscache::cacheinfo::{ATTNUM, DATABASEOID, PARAMETERACLNAME, PROCOID, RELOID, TYPEOID};
 use cache_syscache::{
     ReleaseSysCache, SearchSysCache1, SearchSysCache2, SysCacheGetAttr, SysCacheGetAttrNotNull,
     SysCacheKey,
@@ -35,6 +35,8 @@ const ANUM_PG_DATABASE_DATDBA: i32 = 3;
 const ANUM_PG_DATABASE_DATACL: i32 = 18;
 const ANUM_PG_PROC_PROOWNER: i32 = 4;
 const ANUM_PG_PROC_PROACL: i32 = 30;
+const ANUM_PG_TYPE_TYPOWNER: i32 = 4;
+const ANUM_PG_TYPE_TYPACL: i32 = 32;
 const ANUM_PG_PARAMETER_ACL_PARACL: i32 = 3;
 const ANUM_PG_CLASS_RELNAMESPACE: i32 = 3;
 const ANUM_PG_CLASS_RELOWNER: i32 = 6;
@@ -110,7 +112,6 @@ fn object_aclmask(
 ) -> PgResult<u64> {
     match classid {
         NAMESPACE_RELATION_ID => return pg_namespace_aclmask(objectid, roleid, mask, how),
-        TYPE_RELATION_ID => panic!("object_aclmask: pg_type_aclmask unported"),
         // C divergence: C asserts callers use pg_class_aclmask directly; the
         // executor consumes it through the object_aclcheck seam, so route it.
         RELATION_RELATION_ID => return pg_class_aclmask(objectid, roleid, mask, how),
@@ -137,6 +138,15 @@ fn object_aclmask(
             ANUM_PG_PROC_PROACL,
             AclObjectType::Function,
             "function",
+        ),
+        // C divergence: pg_type_aclmask's array-element indirection is not
+        // applied; element and array types share default ACLs at initdb.
+        TYPE_RELATION_ID => (
+            TYPEOID,
+            ANUM_PG_TYPE_TYPOWNER,
+            ANUM_PG_TYPE_TYPACL,
+            AclObjectType::Type,
+            "type",
         ),
         _ => panic!("object_aclmask: classid {classid} unported (ObjectProperty table)"),
     };
