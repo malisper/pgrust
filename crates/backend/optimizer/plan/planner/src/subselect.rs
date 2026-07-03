@@ -1710,6 +1710,12 @@ fn finalize_plan<'mcx>(
                 &mut paramids,
             )?;
         }
+        NodeTag::T_Append => {
+            for sub in &plan.as_append().unwrap().appendplans {
+                let child = finalize_plan(run, sub, &valid)?;
+                paramids.add_members(mcx, &child)?;
+            }
+        }
         NodeTag::T_BitmapAnd => {
             for sub in &plan.as_bitmap_and().unwrap().bitmapplans {
                 let child = finalize_plan(run, sub, &valid)?;
