@@ -190,28 +190,71 @@ pub fn statext_ndistinct_deserialize<'mcx>(
     data: &[u8],
 ) -> PgResult<MVNDistinct<'mcx>> {
     // `data` is the varlena body (header already stripped by the caller).
-    if data.len() < 12 {
-        return Err(PgError::error(format!("invalid MVNDistinct size {}", data.len())).into());
+    const SIZE_OF_HEADER: usize = 3 * 4;
+    const MIN_SIZE_OF_ITEM: usize = 8 + 4 + 2 * 2;
+    if data.len() < SIZE_OF_HEADER {
+        return Err(PgError::error(format!(
+            "invalid MVNDistinct size {} (expected at least {SIZE_OF_HEADER})",
+            data.len()
+        ))
+        .into());
     }
     let magic = u32::from_ne_bytes(data[0..4].try_into().unwrap());
     let typ = u32::from_ne_bytes(data[4..8].try_into().unwrap());
     let nitems = u32::from_ne_bytes(data[8..12].try_into().unwrap()) as usize;
     if magic != STATS_NDISTINCT_MAGIC {
-        return Err(PgError::error(format!("invalid ndistinct magic {magic:08x}")).into());
+        return Err(PgError::error(format!(
+            "invalid ndistinct magic {magic:08x} (expected {STATS_NDISTINCT_MAGIC:08x})"
+        ))
+        .into());
     }
     if typ != STATS_NDISTINCT_TYPE_BASIC {
-        return Err(PgError::error(format!("invalid ndistinct type {typ}")).into());
+        return Err(PgError::error(format!(
+            "invalid ndistinct type {typ} (expected {STATS_NDISTINCT_TYPE_BASIC})"
+        ))
+        .into());
     }
     if nitems == 0 {
         return Err(PgError::error("invalid zero-length item array in MVNDistinct").into());
     }
+    let minimum_size = SIZE_OF_HEADER + nitems * MIN_SIZE_OF_ITEM;
+    if data.len() < minimum_size {
+        return Err(PgError::error(format!(
+            "invalid MVNDistinct size {} (expected at least {minimum_size})",
+            data.len()
+        ))
+        .into());
+    }
     let mut items: PgVec<'mcx, MVNDistinctItem<'mcx>> = PgVec::new_in(mcx);
     let mut off = 12usize;
     for _ in 0..nitems {
+        if data.len() - off < 12 {
+            return Err(PgError::error(format!(
+                "invalid MVNDistinct size {} (expected at least {})",
+                data.len(),
+                off + 12
+            ))
+            .into());
+        }
         let ndistinct = f64::from_ne_bytes(data[off..off + 8].try_into().unwrap());
         off += 8;
-        let natts = i32::from_ne_bytes(data[off..off + 4].try_into().unwrap()) as usize;
+        let natts = i32::from_ne_bytes(data[off..off + 4].try_into().unwrap());
         off += 4;
+        if natts < 2 || natts > crate::STATS_MAX_DIMENSIONS as i32 {
+            return Err(PgError::error(format!(
+                "invalid number of attributes ({natts}) in MVNDistinct"
+            ))
+            .into());
+        }
+        let natts = natts as usize;
+        if data.len() - off < natts * 2 {
+            return Err(PgError::error(format!(
+                "invalid MVNDistinct size {} (expected at least {})",
+                data.len(),
+                off + natts * 2
+            ))
+            .into());
+        }
         let mut attributes: PgVec<'mcx, AttrNumber> = mcx::vec_with_capacity_in(mcx, natts)?;
         for _ in 0..natts {
             attributes.push(i16::from_ne_bytes(data[off..off + 2].try_into().unwrap()));
@@ -221,4 +264,70 @@ pub fn statext_ndistinct_deserialize<'mcx>(
     }
     debug_assert_eq!(off, data.len());
     Ok(MVNDistinct { items })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn blob(nitems: u32, items: &[(f64, &[i16])]) -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend_from_slice(&STATS_NDISTINCT_MAGIC.to_ne_bytes());
+        b.extend_from_slice(&STATS_NDISTINCT_TYPE_BASIC.to_ne_bytes());
+        b.extend_from_slice(&nitems.to_ne_bytes());
+        for (nd, atts) in items {
+            b.extend_from_slice(&nd.to_ne_bytes());
+            b.extend_from_slice(&(atts.len() as i32).to_ne_bytes());
+            for a in *atts {
+                b.extend_from_slice(&a.to_ne_bytes());
+            }
+        }
+        b
+    }
+
+    #[test]
+    fn deserialize_truncated_returns_err() {
+        let cx = mcx::MemoryContext::new("test");
+        let full = blob(1, &[(3.0, &[1, 2, 3])]);
+        for cut in [0, 4, 11, 12, 15, 20, full.len() - 1] {
+            assert!(statext_ndistinct_deserialize(cx.mcx(), &full[..cut]).is_err());
+        }
+    }
+
+    #[test]
+    fn deserialize_nitems_too_large_returns_err() {
+        let cx = mcx::MemoryContext::new("test");
+        let b = blob(1000, &[(3.0, &[1, 2])]);
+        assert!(statext_ndistinct_deserialize(cx.mcx(), &b).is_err());
+    }
+
+    #[test]
+    fn deserialize_bad_nattributes_returns_err() {
+        let cx = mcx::MemoryContext::new("test");
+        for atts in [&[1i16][..], &[1; 9][..]] {
+            let b = blob(1, &[(3.0, atts)]);
+            assert!(statext_ndistinct_deserialize(cx.mcx(), &b).is_err());
+        }
+    }
+
+    #[test]
+    fn deserialize_bad_magic_and_type_return_err() {
+        let cx = mcx::MemoryContext::new("test");
+        let mut b = blob(1, &[(3.0, &[1, 2])]);
+        b[0] ^= 0xFF;
+        assert!(statext_ndistinct_deserialize(cx.mcx(), &b).is_err());
+        let mut b = blob(1, &[(3.0, &[1, 2])]);
+        b[4] ^= 0xFF;
+        assert!(statext_ndistinct_deserialize(cx.mcx(), &b).is_err());
+    }
+
+    #[test]
+    fn deserialize_valid_roundtrip() {
+        let cx = mcx::MemoryContext::new("test");
+        let b = blob(2, &[(3.0, &[1, 2]), (7.0, &[1, 2, 4])]);
+        let nd = statext_ndistinct_deserialize(cx.mcx(), &b).unwrap();
+        assert_eq!(nd.items.len(), 2);
+        assert_eq!(nd.items[0].ndistinct, 3.0);
+        assert_eq!(&nd.items[1].attributes[..], &[1, 2, 4]);
+    }
 }

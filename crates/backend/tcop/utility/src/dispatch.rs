@@ -507,6 +507,18 @@ fn dispatch_switch<'mcx>(
             let stmt = stmt_node
                 .as_variant::<types_nodes::rawnodes::CreateStatsStmt>()
                 .expect("CreateStatsStmt");
+            if let Some(first) = stmt.relations.iter().next() {
+                if first.as_range_var().is_none() {
+                    return Err(Box::new(
+                        types_error::PgError::new(
+                            types_error::ERROR,
+                            "CREATE STATISTICS only supports relation names in the FROM clause"
+                                .to_string(),
+                        )
+                        .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+                    ));
+                }
+            }
             // transformStatsStmt is a no-op for plain column references; the
             // expression lane panics inside CreateStatistics.
             statscmds::CreateStatistics(mcx, stmt)?;

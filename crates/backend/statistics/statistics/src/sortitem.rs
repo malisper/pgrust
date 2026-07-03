@@ -137,7 +137,7 @@ fn qsort_rec<T: Copy, C: FnMut(&T, &T) -> i32>(a: &mut [T], mut lo: usize, mut n
             return;
         }
         let mut pm = lo + n / 2;
-        {
+        if n > 7 {
             let mut pl = lo;
             let mut pn = lo + n - 1;
             if n > 40 {
