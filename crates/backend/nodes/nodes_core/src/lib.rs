@@ -430,6 +430,21 @@ pub fn raw_expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
             let rt = node.as_res_target().unwrap();
             Ok(walk_list(&rt.indirection, w)? || walk_opt(rt.val, w)?)
         }
+        NodeTag::T_TypeCast => {
+            let tc = node.as_type_cast().unwrap();
+            Ok(walk_opt(tc.arg, w)? || walk_opt(tc.typeName, w)?)
+        }
+        NodeTag::T_TypeName => {
+            let tn = node.as_type_name().unwrap();
+            Ok(walk_list(&tn.typmods, w)? || walk_list(&tn.arrayBounds, w)?)
+        }
+        NodeTag::T_FuncCall => {
+            let fc = node.as_func_call().unwrap();
+            Ok(walk_list(&fc.args, w)?
+                || walk_list(&fc.agg_order, w)?
+                || walk_opt(fc.agg_filter, w)?
+                || walk_opt(fc.over, w)?)
+        }
         NodeTag::T_SelectStmt => walk_select_stmt(node.as_select_stmt().unwrap(), w),
         NodeTag::T_WindowDef => {
             let wd = node.as_window_def().unwrap();
@@ -457,7 +472,7 @@ fn coerce_io_arg_type(node: Node<'_>) -> Oid {
         NodeTag::T_OpExpr => node.as_op_expr().unwrap().opresulttype,
         NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resulttype,
         NodeTag::T_CoerceViaIO => node.as_coerce_via_io().unwrap().resulttype,
-        other => deferred("coerce_io_arg_type (exprType)", other),
+        _ => expr_type(node),
     }
 }
 

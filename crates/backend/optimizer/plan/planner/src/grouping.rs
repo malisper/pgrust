@@ -507,6 +507,16 @@ fn pull_agg_input_vars<'mcx>(
                 pull_agg_input_vars(f, out);
             }
         }
+        // PVC_RECURSE_WINDOWFUNCS: window args feed the grouped input target.
+        NodeTag::T_WindowFunc => {
+            let wf = node.as_window_func().unwrap();
+            for arg in &wf.args {
+                pull_agg_input_vars(arg, out);
+            }
+            if let Some(f) = wf.aggfilter {
+                pull_agg_input_vars(f, out);
+            }
+        }
         // PVC_RECURSE_AGGREGATES treats GroupingFunc like Aggref.
         NodeTag::T_GroupingFunc => {
             let g = node.as_grouping_func().unwrap();
