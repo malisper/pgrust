@@ -4163,6 +4163,7 @@ dependencies = [
  "transam_xlog_seams",
  "trigger_seams",
  "tuplestore",
+ "twophase_seams",
  "typcache_seams",
  "types_core",
  "types_dest",
