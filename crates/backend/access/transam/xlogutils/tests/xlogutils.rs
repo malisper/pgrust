@@ -86,6 +86,7 @@ fn record_with_block(end_rec_ptr: u64, flags: u8, apply_image: bool) -> XLogRead
         flags,
         has_image: apply_image,
         apply_image,
+        ..DecodedBkpBlock::EMPTY
     };
     XLogReaderState {
         EndRecPtr: end_rec_ptr,

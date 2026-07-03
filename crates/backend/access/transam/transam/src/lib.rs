@@ -157,6 +157,7 @@ pub fn init_seams() {
     transam_seams::transaction_id_async_commit_tree::set(TransactionIdAsyncCommitTree);
     transam_seams::transaction_id_abort_tree::set(TransactionIdAbortTree);
     transam_seams::transaction_id_latest::set(TransactionIdLatest);
+    transam_seams::transaction_id_get_commit_lsn::set(TransactionIdGetCommitLSN);
 }
 
 #[cfg(test)]

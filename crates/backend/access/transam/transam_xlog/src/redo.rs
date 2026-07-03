@@ -152,7 +152,25 @@ pub fn xlog_redo(record: &mut XLogReaderState) -> PgResult<()> {
         }
         XLOG_NOOP | XLOG_SWITCH | XLOG_CHECKPOINT_REDO => {}
         XLOG_FPI | XLOG_FPI_FOR_HINT => {
-            panic!("xlog_redo FPI restore: XLogReadBufferForRedo leg not ported");
+            let max_block_id = record.record.as_ref().map_or(-1, |r| r.max_block_id);
+            for block_id in 0..(max_block_id + 1) as u8 {
+                if !record.has_block_image(block_id) {
+                    if info == XLOG_FPI {
+                        return Err(Box::new(PgError::error(
+                            "XLOG_FPI record did not contain a full-page image",
+                        )));
+                    }
+                    continue;
+                }
+                let (action, buffer) = xlogutils::XLogReadBufferForRedo(record, block_id)?;
+                if action != xlogutils::BLK_RESTORED {
+                    return Err(Box::new(PgError::error(
+                        "unexpected XLogReadBufferForRedo result when restoring backup block",
+                    )));
+                }
+                bufmgr_seams::lock_buffer::call(buffer, bufmgr_seams::BUFFER_LOCK_UNLOCK)?;
+                bufmgr_seams::release_buffer::call(buffer)?;
+            }
         }
         XLOG_PARAMETER_CHANGE => {
             let data = main_data(record);
