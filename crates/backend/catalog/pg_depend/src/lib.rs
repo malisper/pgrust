@@ -154,7 +154,6 @@ pub fn deleteDependencyRecordsFor<'mcx>(
     const Anum_pg_depend_objid: usize = 2;
     const Anum_pg_depend_deptype: i32 = 7;
     const DEPENDENCY_EXTENSION: i8 = b'e' as i8;
-    const DEPENDENCY_AUTO_EXTENSION: i8 = b'x' as i8;
 
     let mut count = 0i64;
     let rel = table::table_open(mcx, DependRelationId, RowExclusiveLock)?;
@@ -178,7 +177,7 @@ pub fn deleteDependencyRecordsFor<'mcx>(
                 types_tuple::heap_getattr(tup, Anum_pg_depend_deptype, rel.descr(), &mut isnull)
             }
             .as_i8();
-            if deptype == DEPENDENCY_EXTENSION || deptype == DEPENDENCY_AUTO_EXTENSION {
+            if deptype == DEPENDENCY_EXTENSION {
                 continue;
             }
         }
@@ -191,8 +190,7 @@ pub fn deleteDependencyRecordsFor<'mcx>(
     Ok(count)
 }
 
-// recordDependencyOnOwner (pg_shdepend.c): a pinned owner records nothing;
-// pg_shdepend writes are unported, so any unpinned owner is loud.
+// A pinned owner records nothing; pg_shdepend writes unported → loud.
 pub fn recordDependencyOnOwner(classId: Oid, objectId: Oid, owner: Oid) {
     if !catalog::IsPinnedObject(types_core::AUTH_ID_RELATION_ID, owner) {
         panic!(
@@ -202,10 +200,8 @@ pub fn recordDependencyOnOwner(classId: Oid, objectId: Oid, owner: Oid) {
     }
 }
 
-// updateAclDependencies (pg_shdepend.c). SHARED_DEPENDENCY_ACL rows never
-// cover PUBLIC (never listed by aclmembers), the owner, or pinned roles, so
-// grants limited to those need no pg_shdepend writes; any other role is loud
-// until shdep writes land.
+// SHARED_DEPENDENCY_ACL rows never cover PUBLIC, the owner, or pinned roles,
+// so those grants need no pg_shdepend writes; any other role is loud.
 pub fn updateAclDependencies(
     classId: Oid,
     objectId: Oid,

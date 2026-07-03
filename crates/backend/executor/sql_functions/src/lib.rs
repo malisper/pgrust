@@ -2,8 +2,11 @@
 // Scope: scalar non-SETOF functions; SETOF, composite/RECORD results,
 // polymorphic signatures, prosqlbody and named-parameter references are loud.
 // DIVERGENCE: the per-backend funccache.c hash (C 18.3) is replaced by a
-// per-FmgrInfo fn_extra cache; plans are plancache-backed so invalidation
-// replans, but the compiled body is rebuilt per FmgrInfo, as in pre-18 C.
+// per-FmgrInfo fn_extra cache. Staleness discipline: plansources are SAVED
+// so plancache invalidation reaches them (an invalidated source is a loud
+// panic in RevalidateCachedQuery, never a stale plan), and every call
+// re-probes prosrc against the cached body (C's per-call funccache
+// revalidation), rebuilding the fcache on mismatch.
 #![allow(non_snake_case)]
 
 mod retval;
@@ -23,7 +26,10 @@ use types_nodes::nodes_enums::CmdType;
 use types_nodes::parsenodes::Query;
 use types_nodes::NodeTag;
 use types_portal::params::{ParamExternData, PARAM_FLAG_CONST};
-use types_portal::{ParamListHandle, QueryEnvHandle, TuplestoreHandle, CURSOR_OPT_PARALLEL_OK};
+use types_portal::{
+    ParamListHandle, QueryEnvHandle, TuplestoreHandle, CURSOR_OPT_NO_SCROLL,
+    CURSOR_OPT_PARALLEL_OK,
+};
 use types_scan::sdir::ForwardScanDirection;
 use types_slot::{SlotData, TupleSlotKind, EXEC_FLAG_SKIP_TRIGGERS};
 
@@ -58,6 +64,7 @@ static FUNCTIONS_BUILTINS: &[FmgrBuiltin] = &[
 ];
 
 struct SqlFcacheState<'mcx> {
+    prosrc: PgString<'mcx>,
     sources: PgVec<'mcx, plancache::CachedPlanSourceHandle>,
     argtypes: PgVec<'mcx, Oid>,
     params_buf: PgVec<'mcx, ParamExternData>,
@@ -330,7 +337,14 @@ fn build_sources<'mcx>(
             if i == n - 1 {
                 retval::check_sql_stmt_retval(qmcx, &mut query_list, rettype)?;
             }
-            plancache::CompleteCachedPlan(psrc, query_list, argtypes, CURSOR_OPT_PARALLEL_OK, false)?;
+            plancache::CompleteCachedPlan(
+                psrc,
+                query_list,
+                argtypes,
+                CURSOR_OPT_PARALLEL_OK | CURSOR_OPT_NO_SCROLL,
+                false,
+            )?;
+            plancache::SaveCachedPlan(psrc)?;
         }
         Ok(())
     })();
@@ -442,6 +456,7 @@ fn build_fcache(fn_oid: Oid, fn_retset: bool) -> PgResult<SqlFcacheGuard> {
             });
         }
         Ok(SqlFcacheState {
+            prosrc: row.prosrc,
             sources,
             argtypes: row.argtypes,
             params_buf,
@@ -497,6 +512,31 @@ fn datum_copy_out<'mcx>(mcx: Mcx<'mcx>, value: Datum, typlen: i16) -> PgResult<D
     Ok(Datum::from_usize(slice.as_ptr() as usize))
 }
 
+fn prosrc_matches(cached: &str, fn_oid: Oid) -> PgResult<bool> {
+    let Some(tup) = SearchSysCache1(PROCOID, SysCacheKey::Value(Datum::from_oid(fn_oid)))? else {
+        return Err(lookup_failed(fn_oid));
+    };
+    let (d, _) = SysCacheGetAttr(PROCOID, &tup, ANUM_PG_PROC_PROSRC)?;
+    let p = d.as_usize() as *const u8;
+    // SAFETY: non-null varlena attr from a live syscache tuple; the image
+    // spans its header-declared size.
+    let matches = unsafe {
+        let b0 = *p;
+        if b0 == 0x01 {
+            // External image: rebuilding beats detoasting into per-call scratch.
+            false
+        } else if b0 & 0x01 != 0 {
+            let len = ((b0 as usize >> 1) & 0x7F) - 1;
+            core::slice::from_raw_parts(p.add(1), len) == cached.as_bytes()
+        } else {
+            let len = ((u32::from_ne_bytes(*(p as *const [u8; 4])) >> 2) as usize) - 4;
+            core::slice::from_raw_parts(p.add(4), len) == cached.as_bytes()
+        }
+    };
+    ReleaseSysCache(tup);
+    Ok(matches)
+}
+
 const MAX_SQL_FN_ARGS: usize = 16;
 
 pub fn fmgr_sql(
@@ -510,7 +550,17 @@ pub fn fmgr_sql(
     if flinfo.fn_retset {
         panic!("fmgr_sql: SETOF SQL functions unported (function {})", flinfo.fn_oid);
     }
-    if !flinfo.has_fn_extra() {
+    // C funccache revalidation: every call re-checks the pg_proc row against
+    // the compiled body so CREATE OR REPLACE within this FmgrInfo's lifetime
+    // never executes a stale body.
+    let rebuild = match flinfo.fn_extra_ref::<SqlFcacheGuard>() {
+        None => true,
+        Some(guard) => {
+            let fn_oid = flinfo.fn_oid;
+            !guard.0.with(|s| prosrc_matches(s.prosrc.as_str(), fn_oid))?
+        }
+    };
+    if rebuild {
         let guard = build_fcache(flinfo.fn_oid, flinfo.fn_retset)?;
         flinfo.set_fn_extra(guard);
     }
@@ -600,13 +650,11 @@ fn execute_body<'mcx>(
     }
     let tstore = state.tstore;
     let slot = state.slot.as_mut().expect("just set");
+    // C's DR_sqlfunction keeps only the FIRST tuple (sqlfunction_receive
+    // ignores the rest); later rows are discarded by the clear() below.
     let mut got: Option<(Datum, bool)> = None;
-    loop {
-        let more =
-            tuplestore::hold::with_store(tstore, |st| st.gettupleslot(true, false, slot, mcx))?;
-        if !more {
-            break;
-        }
+    let more = tuplestore::hold::with_store(tstore, |st| st.gettupleslot(true, false, slot, mcx))?;
+    if more {
         let mut isnull = false;
         let v = exectuples::slot_getattr(slot, 1, &mut isnull);
         got = Some((v, isnull));
@@ -747,9 +795,7 @@ fn fc_fmgr_internal_validator(
     fcinfo: &mut FunctionCallInfoBaseData,
 ) -> PgResult<Datum> {
     let funcoid = fcinfo.arg(0).as_oid();
-    if !guc_tables::vars::check_function_bodies.read() {
-        return Ok(Datum::null());
-    }
+    // C ignores check_function_bodies here: the name won't appear later.
     let cx = MemoryContext::new("fmgr_internal_validator");
     let prosrc = read_prosrc_any(cx.mcx(), funcoid)?;
     if fmgr_core::fmgr_internal_function(&prosrc) == types_core::InvalidOid {

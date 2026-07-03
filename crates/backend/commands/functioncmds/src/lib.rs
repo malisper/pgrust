@@ -186,7 +186,12 @@ fn compute_function_attributes<'mcx>(
         language: language_item.map(defel_str),
         volatility: volatility_item.map_or(PROVOLATILE_VOLATILE, interpret_func_volatility),
         strict: strict_item.map(defel_bool).unwrap_or(false),
-        security: security_item.map(defel_bool).unwrap_or(false),
+        security: match security_item.map(defel_bool) {
+            // Accepting DEFINER here would silently run as the caller —
+            // fmgr_security_definer is unported.
+            Some(true) => unported("SECURITY DEFINER (fmgr_security_definer)"),
+            v => v.unwrap_or(false),
+        },
         leakproof: leakproof_item.map(defel_bool).unwrap_or(false),
         procost,
         prorows,
@@ -200,6 +205,18 @@ fn compute_function_attributes<'mcx>(
 // LookupTypeName/typenameTypeId (parse_type.c) for function signatures:
 // setof rides on the TypeName; shell types and decorated names are loud.
 fn resolve_type_name<'mcx>(mcx: Mcx<'mcx>, tn: &TypeName<'_>) -> PgResult<Oid> {
+    let (typoid, typname) = resolve_type_oid(mcx, tn)?;
+    if typoid == InvalidOid {
+        return Err(err(
+            format!("type \"{typname}\" does not exist"),
+            ERRCODE_UNDEFINED_OBJECT,
+        ));
+    }
+    check_defined_and_acl(typoid)?;
+    Ok(typoid)
+}
+
+fn resolve_type_oid<'mcx, 'a>(mcx: Mcx<'mcx>, tn: &TypeName<'a>) -> PgResult<(Oid, &'a str)> {
     if tn.pct_type {
         unported("%TYPE references");
     }
@@ -239,12 +256,10 @@ fn resolve_type_name<'mcx>(mcx: Mcx<'mcx>, tn: &TypeName<'_>) -> PgResult<Oid> {
             found
         }
     };
-    if typoid == InvalidOid {
-        return Err(err(
-            format!("type \"{typname}\" does not exist"),
-            ERRCODE_UNDEFINED_OBJECT,
-        ));
-    }
+    Ok((typoid, typname))
+}
+
+fn check_defined_and_acl(typoid: Oid) -> PgResult<()> {
     match syscache_seams::pg_type_isdefined::call(typoid)? {
         Some(true) => {}
         _ => unported("shell types in function signatures"),
@@ -258,15 +273,27 @@ fn resolve_type_name<'mcx>(mcx: Mcx<'mcx>, tn: &TypeName<'_>) -> PgResult<Oid> {
     if aclresult != aclchk::ACLCHECK_OK {
         unported("aclcheck_error_type (type USAGE denied)");
     }
-    Ok(typoid)
+    Ok(())
 }
 
 // compute_return_type (functioncmds.c); shell-type creation is loud.
 fn compute_return_type<'mcx>(
     mcx: Mcx<'mcx>,
     returnType: &TypeName<'_>,
+    languageOid: Oid,
 ) -> PgResult<(Oid, bool)> {
-    let rettype = resolve_type_name(mcx, returnType)?;
+    let (rettype, typname) = resolve_type_oid(mcx, returnType)?;
+    if rettype == InvalidOid {
+        // C makes a shell type here for internal/C-language I/O functions.
+        if languageOid == INTERNALlanguageId || languageOid == ClanguageId {
+            unported("shell type creation for I/O function return types (TypeShellMake)");
+        }
+        return Err(err(
+            format!("type \"{typname}\" does not exist"),
+            ERRCODE_UNDEFINED_OBJECT,
+        ));
+    }
+    check_defined_and_acl(rettype)?;
     Ok((rettype, returnType.setof))
 }
 
@@ -293,13 +320,13 @@ fn interpret_function_parameter_list<'mcx>(
         }
         let tn_node: Node<'mcx> = fp.argType.expect("FunctionParameter.argType");
         let tn = tn_node.as_variant::<TypeName>().expect("argType is a TypeName");
+        let toid = resolve_type_name(mcx, tn)?;
         if tn.setof {
             return Err(err(
                 "functions cannot accept set arguments".to_string(),
                 ERRCODE_INVALID_FUNCTION_DEFINITION,
             ));
         }
-        let toid = resolve_type_name(mcx, tn)?;
         in_types.push(toid);
 
         let name = fp.name.unwrap_or("");
@@ -495,7 +522,7 @@ pub fn CreateFunction<'mcx>(
     let (prorettype, returnsSet) = match stmt.returnType {
         Some(rt) => {
             let tn = rt.as_variant::<TypeName>().expect("returnType is a TypeName");
-            compute_return_type(mcx, tn)?
+            compute_return_type(mcx, tn, languageOid)?
         }
         None => {
             return Err(err(
