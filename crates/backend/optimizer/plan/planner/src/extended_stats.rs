@@ -162,6 +162,7 @@ fn compatible_internal<'mcx>(
     clause: Node<'mcx>,
     relid: i32,
     attnums: &mut Relids<'mcx>,
+    leakproof: &mut bool,
 ) -> PgResult<bool> {
     let clause = strip_relabel(clause);
 
@@ -187,11 +188,11 @@ fn compatible_internal<'mcx>(
             | F_SCALARGESEL => {}
             _ => return Ok(false),
         }
-        // Non-leakproof operators demand per-column read permission; the
-        // superuser context makes all_rows_selectable() vacuously true.
-        // Sound only while subquery.rs:142 panics on RLS securityQuals.
+        if *leakproof {
+            *leakproof = lsyscache::get_func_leakproof(lsyscache::get_opcode(op.opno)?)?;
+        }
         if expr.as_var().is_some() {
-            return compatible_internal(run, expr, relid, attnums);
+            return compatible_internal(run, expr, relid, attnums, leakproof);
         }
         return Ok(false);
     }
@@ -212,15 +213,18 @@ fn compatible_internal<'mcx>(
             | F_SCALARGESEL => {}
             _ => return Ok(false),
         }
+        if *leakproof {
+            *leakproof = lsyscache::get_func_leakproof(lsyscache::get_opcode(saop.opno)?)?;
+        }
         if expr.as_var().is_some() {
-            return compatible_internal(run, expr, relid, attnums);
+            return compatible_internal(run, expr, relid, attnums, leakproof);
         }
         return Ok(false);
     }
 
     if let Some(b) = clause.as_bool_expr() {
         for arg in &b.args {
-            if !compatible_internal(run, arg, relid, attnums)? {
+            if !compatible_internal(run, arg, relid, attnums, leakproof)? {
                 return Ok(false);
             }
         }
@@ -230,7 +234,7 @@ fn compatible_internal<'mcx>(
     if let Some(nt) = clause.as_null_test() {
         let arg = nt.arg.expect("NullTest arg");
         if arg.as_var().is_some() {
-            return compatible_internal(run, arg, relid, attnums);
+            return compatible_internal(run, arg, relid, attnums, leakproof);
         }
         return Ok(false);
     }
@@ -276,7 +280,13 @@ fn statext_is_compatible_clause<'mcx>(
     }
     let clause = *run.root.expr_node(run.root.rinfo(rid).clause);
     let mut attnums: Relids<'mcx> = None;
-    if !compatible_internal(run, clause, relid, &mut attnums)? {
+    let mut leakproof = true;
+    if !compatible_internal(run, clause, relid, &mut attnums, &mut leakproof)? {
+        return Ok(None);
+    }
+    // Non-leakproof operators may reveal MCV values; require every row to be
+    // readable (aclcheck legs vacuous here; securityQuals is the live test).
+    if !leakproof && !crate::selfuncs::all_rows_selectable(run, relid) {
         return Ok(None);
     }
     Ok(Some(attnums))

@@ -29,15 +29,38 @@ pub(crate) fn clamp_probability(p: f64) -> f64 {
     p.clamp(0.0, 1.0)
 }
 
-// VariableStatData (selfuncs.h); `stats` is the decoded statsTuple.
-// statistic_proc_security_check (pg_class_aclcheck) reduces to true on this
-// single-role substrate, so acl_ok is not modeled.
+// VariableStatData (selfuncs.h); `stats` is the decoded statsTuple. The
+// aclcheck half of acl_ok is vacuously OK on this single-role substrate;
+// securityQuals presence (RLS / security-barrier views) is the live half.
 pub struct VariableStatData<'mcx> {
     pub var: Option<NodeId>,
     pub rel: Option<RelId>,
     pub vartype: u32,
     pub isunique: bool,
     pub stats: Option<PgStatisticBundle<'mcx>>,
+    pub acl_ok: bool,
+}
+
+// all_rows_selectable (selfuncs.c): aclcheck legs are vacuously OK here; the
+// inheritance-parent walk is unreachable (expand_inherited_rtentry panics
+// upstream), leaving securityQuals presence as the only live condition.
+pub(crate) fn all_rows_selectable(run: &PlannerRun<'_>, varno: i32) -> bool {
+    run.rte(varno as usize).securityQuals.is_nil()
+}
+
+// statistic_proc_security_check (selfuncs.c): stats values may be passed only
+// to leakproof functions unless all underlying rows are readable anyway.
+pub(crate) fn statistic_proc_security_check(
+    vardata: &VariableStatData<'_>,
+    func_oid: Oid,
+) -> PgResult<bool> {
+    if vardata.acl_ok {
+        return Ok(true);
+    }
+    if func_oid == 0 {
+        return Ok(false);
+    }
+    lsyscache::get_func_leakproof(func_oid)
 }
 
 impl<'mcx> VariableStatData<'mcx> {
@@ -274,12 +297,14 @@ pub(crate) fn mcv_selectivity<'mcx>(
 ) -> PgResult<(f64, f64)> {
     let mut mcv_selec = 0.0;
     let mut sumcommon = 0.0;
-    if let Some(sslot) = vardata.slot(STATISTIC_KIND_MCV, 0) {
-        for (i, &v) in sslot.values()?.iter().enumerate() {
-            if op_test(opproc, collation, v, constval, varonleft)? {
-                mcv_selec += sslot.numbers()?[i] as f64;
+    if statistic_proc_security_check(vardata, opproc.fn_oid)? {
+        if let Some(sslot) = vardata.slot(STATISTIC_KIND_MCV, 0) {
+            for (i, &v) in sslot.values()?.iter().enumerate() {
+                if op_test(opproc, collation, v, constval, varonleft)? {
+                    mcv_selec += sslot.numbers()?[i] as f64;
+                }
+                sumcommon += sslot.numbers()?[i] as f64;
             }
-            sumcommon += sslot.numbers()?[i] as f64;
         }
     }
     Ok((mcv_selec, sumcommon))
@@ -485,6 +510,9 @@ pub(crate) fn histogram_selectivity<'mcx>(
     n_skip: usize,
 ) -> PgResult<(f64, usize)> {
     debug_assert!(min_hist_size > 2 * n_skip);
+    if !statistic_proc_security_check(vardata, opproc.fn_oid)? {
+        return Ok((-1.0, 0));
+    }
     let Some(sslot) = vardata.slot(STATISTIC_KIND_HISTOGRAM, 0) else {
         return Ok((-1.0, 0));
     };
@@ -516,6 +544,9 @@ pub(crate) fn ineq_histogram_selectivity<'mcx>(
     consttype: Oid,
 ) -> PgResult<f64> {
     let mut hist_selec = -1.0f64;
+    if !statistic_proc_security_check(vardata, opproc.fn_oid)? {
+        return Ok(hist_selec);
+    }
     let Some(sslot) = vardata.slot(STATISTIC_KIND_HISTOGRAM, 0) else {
         return Ok(hist_selec);
     };
@@ -959,7 +990,7 @@ pub fn examine_variable<'mcx>(
 ) -> PgResult<VariableStatData<'mcx>> {
     let (vartype, _) = crate::costsize::expr_type_typmod(node);
     let mut vardata =
-        VariableStatData { var: None, rel: None, vartype, isunique: false, stats: None };
+        VariableStatData { var: None, rel: None, vartype, isunique: false, stats: None, acl_ok: true };
 
     // C: look inside any binary-compatible relabeling (vartype stays the
     // exposed type; the Var is returned without relabeling).
@@ -976,6 +1007,10 @@ pub fn examine_variable<'mcx>(
             vardata.rel = Some(rel);
             vardata.isunique = crate::plancat::has_unique_index(run, rel, var.varattno);
             vardata.stats = examine_simple_variable(run, var.varno, var.varattno)?;
+            // C: acl_ok = all_rows_selectable when a stats tuple was found,
+            // true otherwise (suppress leakproofness checks).
+            vardata.acl_ok =
+                vardata.stats.is_none() || all_rows_selectable(run, var.varno);
             return Ok(vardata);
         }
         // A Var of some other rel (varRelid restricts to one rel) falls to
@@ -1084,7 +1119,9 @@ pub(crate) fn var_eq_const<'mcx>(
         && vardata.rel.is_some_and(|r| run.root.rel(r).tuples >= 1.0)
     {
         1.0 / run.root.rel(vardata.rel.unwrap()).tuples
-    } else if vardata.stats.is_some() {
+    } else if vardata.stats.is_some()
+        && statistic_proc_security_check(vardata, lsyscache::get_opcode(oproid)?)?
+    {
         match vardata.slot(STATISTIC_KIND_MCV, 0) {
             Some(sslot) => {
                 let mut eqproc = opproc_for(oproid)?;
@@ -1620,6 +1657,7 @@ fn btcostestimate(
                     vartype: index_opcintype[indexcol as usize],
                     isunique: false,
                     stats,
+                    acl_ok: true,
                 };
                 let (mut ndistinct, isdefault) = get_variable_numdistinct(run, &vardata);
                 // btcost_correlation-in-passing arm folds into the shared
@@ -1943,7 +1981,7 @@ pub fn estimate_num_groups_pgset<'mcx>(
 // (1-nullfrac1)*(1-nullfrac2) / max(nd1, nd2).
 pub fn eqjoinsel<'mcx>(
     run: &mut PlannerRun<'mcx>,
-    _operator: u32,
+    operator: u32,
     args: &[NodeId],
     jointype: types_pathnodes::JoinType,
     sjinfo: Option<&types_pathnodes::SpecialJoinInfo<'mcx>>,
@@ -1957,10 +1995,15 @@ pub fn eqjoinsel<'mcx>(
     let (nd1, isdefault1) = get_variable_numdistinct(run, &vardata1);
     let (nd2, isdefault2) = get_variable_numdistinct(run, &vardata2);
 
-    if vardata1.slot(STATISTIC_KIND_MCV, 0).is_some()
-        && vardata2.slot(STATISTIC_KIND_MCV, 0).is_some()
-    {
-        panic!("eqjoinsel_inner (selfuncs.c): MCV-join lane");
+    let get_mcv_stats = vardata1.slot(STATISTIC_KIND_MCV, 0).is_some()
+        && vardata2.slot(STATISTIC_KIND_MCV, 0).is_some();
+    if get_mcv_stats {
+        let opfuncoid = lsyscache::get_opcode(operator)?;
+        if statistic_proc_security_check(&vardata1, opfuncoid)?
+            && statistic_proc_security_check(&vardata2, opfuncoid)?
+        {
+            panic!("eqjoinsel_inner (selfuncs.c): MCV-join lane");
+        }
     }
     let selec_inner =
         (1.0 - vardata1.nullfrac()) * (1.0 - vardata2.nullfrac()) / nd1.max(nd2);
@@ -2307,6 +2350,9 @@ fn get_variable_range<'mcx>(
     };
     let _ = run;
     let opfuncoid = lsyscache::get_opcode(sortop)?;
+    if !statistic_proc_security_check(vardata, opfuncoid)? {
+        return Ok(None);
+    }
     let mut opproc: Option<FmgrInfo> = None;
     let mut range: Option<(Datum, Datum)> = None;
 
@@ -2698,20 +2744,27 @@ fn generic_restriction_selectivity<'mcx>(
             Ok(types_fmgr::function_call2_coll_in(opproc, collation, smcx, a0, a1)?.as_bool())
         };
 
+        // C guards these probes inside mcv_selectivity/histogram_selectivity.
+        let stats_ok = statistic_proc_security_check(&vardata, opproc.fn_oid)?;
+
         let (mut mcvsel, mut mcvsum) = (0.0f64, 0.0f64);
-        if let Some(sslot) = vardata.slot(STATISTIC_KIND_MCV, 0) {
-            for (i, &v) in sslot.values()?.iter().enumerate() {
-                if armed_test(&mut opproc, v)? {
-                    mcvsel += sslot.numbers()?[i] as f64;
+        if stats_ok {
+            if let Some(sslot) = vardata.slot(STATISTIC_KIND_MCV, 0) {
+                for (i, &v) in sslot.values()?.iter().enumerate() {
+                    if armed_test(&mut opproc, v)? {
+                        mcvsel += sslot.numbers()?[i] as f64;
+                    }
+                    mcvsum += sslot.numbers()?[i] as f64;
                 }
-                mcvsum += sslot.numbers()?[i] as f64;
             }
         }
 
         let (hist_selec, hist_size) = {
             let mut hs = -1.0f64;
             let mut n = 0usize;
-            if let Some(sslot) = vardata.slot(STATISTIC_KIND_HISTOGRAM, 0) {
+            let hist_slot =
+                if stats_ok { vardata.slot(STATISTIC_KIND_HISTOGRAM, 0) } else { None };
+            if let Some(sslot) = hist_slot {
                 let values = sslot.values()?;
                 n = values.len();
                 if n >= 10 {

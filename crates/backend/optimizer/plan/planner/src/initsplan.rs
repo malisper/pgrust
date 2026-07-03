@@ -241,6 +241,11 @@ enum JtItem<'mcx> {
         qualscope: types_pathnodes::Relids<'mcx>,
         jdomain: usize,
     },
+    SecQuals {
+        varno: i32,
+        qualscope: types_pathnodes::Relids<'mcx>,
+        jdomain: usize,
+    },
     Sj {
         jointype: types_pathnodes::JoinType,
         quals: Option<Node<'mcx>>,
@@ -475,11 +480,13 @@ pub fn deconstruct_jointree<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResult<PgVec<
     for _ in 0..items.len() {
         lateral_pending.push(PgVec::new_in(mcx));
     }
+    let plain_security_level = run.root.qual_security_level;
     for idx in 0..items.len() {
         let pending = core::mem::replace(&mut lateral_pending[idx], PgVec::new_in(mcx));
         if !pending.is_empty() {
             let (qualscope, jdomain) = match &items[idx] {
                 JtItem::Plain { qualscope, jdomain, .. }
+                | JtItem::SecQuals { qualscope, jdomain, .. }
                 | JtItem::Sj { qualscope, jdomain, .. } => {
                     (relids_copy(mcx, qualscope), *jdomain)
                 }
@@ -493,6 +500,7 @@ pub fn deconstruct_jointree<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResult<PgVec<
                     &None,
                     None,
                     jdomain,
+                    plain_security_level,
                     None,
                     Some((&items, idx)),
                     &mut lateral_pending,
@@ -510,10 +518,35 @@ pub fn deconstruct_jointree<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResult<PgVec<
                     &None,
                     None,
                     *jdomain,
+                    plain_security_level,
                     None,
                     Some((&items, idx)),
                     &mut lateral_pending,
                 )?;
+            }
+            // process_security_barrier_quals (initsplan.c): each securityQuals
+            // sublist gets an ascending level; ojscope = qualscope forces
+            // Var-free quals to the rel instead of the top of the tree.
+            JtItem::SecQuals { varno, qualscope, jdomain } => {
+                let rte = run.rte(*varno as usize);
+                let mut level: u32 = 0;
+                for qualset in &rte.securityQuals {
+                    distribute_quals_to_rels(
+                        run,
+                        Some(qualset),
+                        qualscope,
+                        &relids_copy(mcx, qualscope),
+                        &None,
+                        None,
+                        *jdomain,
+                        level,
+                        None,
+                        Some((&items, idx)),
+                        &mut lateral_pending,
+                    )?;
+                    level += 1;
+                }
+                debug_assert!(level <= plain_security_level);
             }
             JtItem::Sj {
                 jointype,
@@ -564,6 +597,7 @@ pub fn deconstruct_jointree<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResult<PgVec<
                     nonnullable,
                     Some(&sjinfo),
                     *jdomain,
+                    plain_security_level,
                     if postpone { Some(&mut postponed) } else { None },
                     Some((&items, idx)),
                     &mut lateral_pending,
@@ -587,6 +621,7 @@ pub fn deconstruct_jointree<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResult<PgVec<
             sjinfo.ojrelid,
         );
         let ojscope = relids_union(mcx, &sjinfo.min_lefthand, &sjinfo.min_righthand);
+        let seclevel = run.root.qual_security_level;
         for clause in postponed {
             distribute_qual_to_rels(
                 run,
@@ -596,6 +631,7 @@ pub fn deconstruct_jointree<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResult<PgVec<
                 &sjinfo.syn_lefthand,
                 Some(&sjinfo),
                 0,
+                seclevel,
                 None,
                 None,
                 &mut lateral_pending,
@@ -615,6 +651,7 @@ fn distribute_quals_to_rels<'mcx>(
     outerjoin_nonnullable: &types_pathnodes::Relids<'mcx>,
     sjinfo: Option<&SpecialJoinInfo<'mcx>>,
     jdomain: usize,
+    security_level: u32,
     mut postponed: Option<&mut PgVec<'mcx, Node<'mcx>>>,
     jt: Option<(&PgVec<'mcx, JtItem<'mcx>>, usize)>,
     lateral_pending: &mut PgVec<'mcx, PgVec<'mcx, Node<'mcx>>>,
@@ -630,6 +667,7 @@ fn distribute_quals_to_rels<'mcx>(
             outerjoin_nonnullable,
             sjinfo,
             jdomain,
+            security_level,
             postponed.as_deref_mut(),
             jt,
             lateral_pending,
@@ -658,6 +696,13 @@ fn deconstruct_recurse<'mcx>(
                 &run.root.join_domains[parent_domain].jd_relids,
                 &scope,
             );
+            if run.root.qual_security_level > 0 {
+                items.push(JtItem::SecQuals {
+                    varno,
+                    qualscope: relids_copy(mcx, &scope),
+                    jdomain: parent_domain,
+                });
+            }
             let mut joinlist = PgVec::new_in(mcx);
             joinlist.push(JoinlistNode::Rel(varno));
             Ok((scope, None, joinlist))
@@ -1212,6 +1257,7 @@ fn distribute_qual_to_rels<'mcx>(
     outerjoin_nonnullable: &types_pathnodes::Relids<'mcx>,
     sjinfo: Option<&SpecialJoinInfo<'mcx>>,
     jdomain: usize,
+    security_level: u32,
     postponed: Option<&mut PgVec<'mcx, Node<'mcx>>>,
     jt: Option<(&PgVec<'mcx, JtItem<'mcx>>, usize)>,
     lateral_pending: &mut PgVec<'mcx, PgVec<'mcx, Node<'mcx>>>,
@@ -1290,7 +1336,7 @@ fn distribute_qual_to_rels<'mcx>(
         false,
         false,
         pseudoconstant,
-        0,
+        security_level,
         relids,
         None,
         relids_copy(run.mcx, outerjoin_nonnullable),
@@ -1376,9 +1422,13 @@ pub fn make_restrictinfo<'mcx>(
     // memo); the OR index path is a loud panel in indxpath.
     debug_assert!(clause.node_tag() != NodeTag::T_List);
 
-    // security_level 0 skips the leakproof probe.
-    debug_assert!(security_level == 0);
-    let leakproof = false;
+    // C skips the contain_leaked_vars probe for level-zero quals ("really,
+    // don't know") — they can never be delayed on security grounds.
+    let leakproof = if security_level > 0 {
+        !clauses::contain_leaked_vars(clause)?
+    } else {
+        false
+    };
 
     let mut left_relids: types_pathnodes::Relids<'mcx> = None;
     let mut right_relids: types_pathnodes::Relids<'mcx> = None;
