@@ -10,6 +10,7 @@ fd = { path = "../../storage/file/fd" }
 exectuples = { path = "../exectuples" }
 executils = { path = "../executils" }
 init_small = { path = "../../utils/init/init_small" }
+instrument = { path = "../instrument" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
 mcx = { path = "../../../_support/mcx" }
 nodehash = { path = "../nodehash" }

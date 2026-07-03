@@ -63,6 +63,7 @@ pub struct HashJoinState<'mcx> {
     hj_OuterNotEmpty: bool,
     outer_saved_scratch: PgVec<'mcx, u64>,
     inner_saved_scratch: PgVec<'mcx, u64>,
+    hash_instr: Option<u32>,
 }
 
 /// `ExecInitHashJoin` minus child linkage.
@@ -163,6 +164,27 @@ pub fn exec_init_hash_join<'mcx>(
     let inner_attnums = hashkey_attnums(mcx, &hash_node.hashkeys);
     let hash_state = init_hash(estate, inner_desc, &inner_attnums, &inner_hashfns, &collations)?;
 
+    // The Hash sub-node has no Instrumented wrapper; MultiExecHash provides
+    // its own instrumentation over this slot.
+    let hash_instr = if estate.es_instrument != 0 {
+        let idx = usize::try_from(hash_node.plan.plan_node_id)
+            .expect("plan_node_id is non-negative");
+        if estate.es_instrumentation.len() <= idx {
+            let grow = idx + 1 - estate.es_instrumentation.len();
+            estate
+                .es_instrumentation
+                .try_reserve(grow)
+                .map_err(|_| estate.es_query_cxt.oom(grow))?;
+            estate
+                .es_instrumentation
+                .resize(idx + 1, ::types_core::instrument::Instrumentation::default());
+        }
+        ::instrument::instr_init(&mut estate.es_instrumentation[idx], estate.es_instrument);
+        Some(idx as u32)
+    } else {
+        None
+    };
+
     let hjstate = HashJoinState {
         plan: node,
         ps_ExprContext,
@@ -188,6 +210,7 @@ pub fn exec_init_hash_join<'mcx>(
         hj_OuterNotEmpty: false,
         outer_saved_scratch: PgVec::new_in(mcx),
         inner_saved_scratch: PgVec::new_in(mcx),
+        hash_instr,
     };
     Ok((hjstate, hash_state))
 }
@@ -226,7 +249,18 @@ where
             HJ_BUILD_HASHTABLE => {
                 debug_assert!(hash_state.table.is_none());
                 hash_state.table = Some(::nodehash::exec_hash_table_create(hash_state, estate)?);
+                // MultiExecHash provides its own instrumentation (the Hash
+                // node has no ExecProcNode wrapper).
+                let instr = node.hash_instr.map(|ix| ix as usize);
+                if let Some(ix) = instr {
+                    ::instrument::instr_start_node(&mut estate.es_instrumentation[ix]);
+                }
                 ::nodehash::multi_exec_hash(hash_state, hash_child, estate)?;
+                if let Some(ix) = instr {
+                    let ntuples =
+                        hash_state.table.as_ref().expect("hash table built").total_tuples();
+                    ::instrument::instr_stop_node(&mut estate.es_instrumentation[ix], ntuples);
+                }
                 let table = hash_state.table.as_mut().expect("hash table built");
                 if table.total_tuples() == 0.0 && !node.hj_fill_outer {
                     return Ok(None);
