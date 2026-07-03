@@ -352,6 +352,7 @@ pub fn ExplainNode<'mcx>(
 
     let pname = match node.node_tag() {
         NodeTag::T_Result => "Result",
+        NodeTag::T_ProjectSet => "ProjectSet",
         NodeTag::T_Append => "Append",
         NodeTag::T_MergeAppend => {
             node_gap("ExplainNode", "MergeAppend display; MergeAppend lane unported (set-ops lane)")
@@ -696,9 +697,11 @@ pub fn ExplainNode<'mcx>(
             show_scan_qual(&plan.qual, "Filter", node, ancestors, es)?;
             filtered_count_gap(&plan.qual, es);
         }
-        // Unique, Limit, Append, SetOp, LockRows show nothing extra without ANALYZE.
+        // Unique, Limit, Append, SetOp, LockRows, ProjectSet show nothing
+        // extra without ANALYZE.
         NodeTag::T_Unique | NodeTag::T_Limit | NodeTag::T_Append | NodeTag::T_SetOp
-        | NodeTag::T_LockRows | NodeTag::T_BitmapAnd | NodeTag::T_BitmapOr => {}
+        | NodeTag::T_LockRows | NodeTag::T_BitmapAnd | NodeTag::T_BitmapOr
+        | NodeTag::T_ProjectSet => {}
         _ => unreachable!(),
     }
 

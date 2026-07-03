@@ -13,6 +13,7 @@ mod epq;
 mod execami;
 mod execmain;
 mod noderesult;
+mod nodeprojectset;
 mod nodesubplan;
 mod procnode;
 mod querydesc;
@@ -27,6 +28,7 @@ pub use execmain::{
     standard_executor_start,
 };
 pub use noderesult::ResultState;
+pub use nodeprojectset::ProjectSetState;
 pub use procnode::{
     exec_end_node, exec_init_node, exec_proc_node, exec_shutdown_node, PlanStateBase,
     PlanStateNode,

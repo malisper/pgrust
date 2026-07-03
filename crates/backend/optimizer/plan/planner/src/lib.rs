@@ -28,6 +28,7 @@ pub mod prepagg;
 pub mod relnode;
 pub mod run;
 pub mod setrefs;
+pub mod srf;
 pub mod cte;
 pub mod subquery;
 pub mod window;

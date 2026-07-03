@@ -11,6 +11,9 @@ use ::types_slot::{SlotData, TupleSlotKind};
 use ::types_tuple::TupleDescData;
 
 use crate::noderesult::{exec_end_result, exec_init_result, exec_result, ResultState};
+use crate::nodeprojectset::{
+    exec_end_project_set, exec_init_project_set, exec_project_set, ProjectSetState,
+};
 
 pub struct PlanStateBase<'mcx> {
     pub plan: &'mcx Plan<'mcx>,
@@ -32,6 +35,7 @@ pub struct InstrumentedNode<'mcx> {
 
 pub enum PlanStateNode<'mcx> {
     Result(ResultState<'mcx>),
+    ProjectSet(PgBox<'mcx, ProjectSetState<'mcx>>),
     SeqScan(::nodeseqscan::SeqScanState<'mcx>),
     FunctionScan(PgBox<'mcx, ::nodefunctionscan::FunctionScanState<'mcx>>),
     ValuesScan(PgBox<'mcx, ::nodevaluesscan::ValuesScanState<'mcx>>),
@@ -199,6 +203,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             // None: the wrapper defers to inner's rescan/reset (execami arm).
             PlanStateNode::Instrumented(_) => None,
             PlanStateNode::Result(rs) => rs.ps.ps_ExprContext,
+            PlanStateNode::ProjectSet(ps) => ps.ps.ps_ExprContext,
             PlanStateNode::SeqScan(ss) => Some(ss.ss.ps_ExprContext),
             PlanStateNode::FunctionScan(fs) => Some(fs.ss.ps_ExprContext),
             PlanStateNode::ValuesScan(vs) => Some(vs.ss.ps_ExprContext),
@@ -245,6 +250,11 @@ impl<'mcx> PlanStateNode<'mcx> {
                 .ps_ResultTupleDesc
                 .clone()
                 .expect("ResultState without a result type")),
+            PlanStateNode::ProjectSet(ps) => Ok(ps
+                .ps
+                .ps_ResultTupleDesc
+                .clone()
+                .expect("ProjectSetState without a result type")),
             PlanStateNode::SeqScan(_)
             | PlanStateNode::FunctionScan(_)
             | PlanStateNode::ValuesScan(_)
@@ -306,6 +316,11 @@ pub fn exec_init_node<'mcx>(
             estate,
             eflags,
         )?),
+        NodeTag::T_ProjectSet => {
+            let state =
+                exec_init_project_set(node.as_project_set().unwrap(), estate, eflags)?;
+            PlanStateNode::ProjectSet(::mcx::alloc_in(estate.es_query_cxt, state)?)
+        }
         NodeTag::T_SeqScan => {
             let mcx = estate.es_query_cxt;
             PlanStateNode::SeqScan(::nodeseqscan::exec_init_seq_scan(
@@ -793,7 +808,6 @@ pub fn exec_init_node<'mcx>(
             )?)
         }
         tag => unported_nodes!(tag, {
-            T_ProjectSet => "nodeProjectSet.c",
             T_MergeAppend => "nodeMergeAppend.c",
             T_RecursiveUnion => "nodeRecursiveunion.c",
             T_SampleScan => "nodeSamplescan.c",
@@ -880,6 +894,7 @@ pub fn exec_proc_node<'mcx>(
     match node {
         PlanStateNode::Instrumented(w) => exec_proc_node_instr(w, estate),
         PlanStateNode::Result(rs) => result_arm(rs, estate),
+        PlanStateNode::ProjectSet(ps) => project_set_arm(ps, estate),
         PlanStateNode::SeqScan(ss) => seq_scan_arm(ss, estate),
         PlanStateNode::FunctionScan(fs) => function_scan_arm(fs, estate),
         PlanStateNode::ValuesScan(vs) => values_scan_arm(vs, estate),
@@ -915,6 +930,14 @@ type ProcResult = PgResult<Option<ExecSlotId>>;
 #[inline(never)]
 fn result_arm<'mcx>(rs: &mut ResultState<'mcx>, estate: &mut EStateData<'mcx>) -> ProcResult {
     exec_result(rs, estate)
+}
+
+#[inline(never)]
+fn project_set_arm<'mcx>(
+    ps: &mut PgBox<'mcx, ProjectSetState<'mcx>>,
+    estate: &mut EStateData<'mcx>,
+) -> ProcResult {
+    exec_project_set(ps, estate)
 }
 
 #[inline(never)]
@@ -1435,6 +1458,7 @@ fn exec_end_node_inner<'mcx>(
     match node {
         PlanStateNode::Instrumented(w) => exec_end_node(&mut w.inner, estate),
         PlanStateNode::Result(rs) => exec_end_result(rs, estate),
+        PlanStateNode::ProjectSet(ps) => exec_end_project_set(ps, estate),
         PlanStateNode::SeqScan(ss) => ::nodeseqscan::exec_end_seq_scan(ss),
         PlanStateNode::FunctionScan(fs) => {
             ::nodefunctionscan::exec_end_function_scan(fs);
@@ -1550,6 +1574,7 @@ pub fn exec_shutdown_node<'mcx>(node: &mut PlanStateNode<'mcx>, estate: &mut ESt
                 exec_shutdown_node(outer, estate);
             }
         }
+        PlanStateNode::ProjectSet(ps) => exec_shutdown_node(&mut ps.outer, estate),
         PlanStateNode::SeqScan(_)
         | PlanStateNode::FunctionScan(_)
         | PlanStateNode::ValuesScan(_)

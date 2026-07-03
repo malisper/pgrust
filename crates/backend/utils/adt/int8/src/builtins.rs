@@ -1,8 +1,7 @@
 //! fmgr-shaped wrappers (`fc_<cname>`) and the registry table (`INT8_BUILTINS`)
-//! the fmgr-core unit consumes. Not here: generate_series[_step]_int8
-//! (1068/1069, funcapi SRF frame) and the prosupport bodies int8inc_support
-//! (6236) / generate_series_int8_support (3995, planner nodes). recv/send
-//! (2408/2409) ride the binary-wire fmgr frame (types_fmgr::wire).
+//! the fmgr-core unit consumes. Not here: the prosupport body int8inc_support
+//! (6236). recv/send (2408/2409) ride the binary-wire fmgr frame
+//! (types_fmgr::wire).
 
 use alloc::string::String;
 
@@ -218,6 +217,76 @@ pub fn fc_in_range_int8_int8(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo
     )?))
 }
 
+// generate_series_step_int8 (OIDs 1068 3-arg / 1069 2-arg share the C body;
+// PG_NARGS demuxes) over the funcapi ValuePerCall frame.
+pub fn fc_generate_series_step_int8(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let flinfo = flinfo.expect("generate_series_int8: NULL flinfo");
+    if !flinfo.has_fn_extra() {
+        let start = fcinfo.arg(0).as_i64();
+        let finish = fcinfo.arg(1).as_i64();
+        let step = if fcinfo.nargs() == 3 { fcinfo.arg(2).as_i64() } else { 1 };
+        let state = crate::GenerateSeriesInt8::new(start, finish, step)?;
+        let fctx = ::funcapi::init_MultiFuncCall(flinfo, fcinfo)?;
+        fctx.user_fctx = Some(alloc::boxed::Box::new(state));
+    }
+    let next = ::funcapi::per_MultiFuncCall(flinfo)
+        .user_fctx
+        .as_mut()
+        .expect("generate_series_int8: user_fctx set at first call")
+        .downcast_mut::<crate::GenerateSeriesInt8>()
+        .expect("generate_series_int8: user_fctx is GenerateSeriesInt8")
+        .next();
+    match next {
+        Some(v) => Ok(::funcapi::srf_return_next(flinfo, fcinfo, Datum::from_i64(v))),
+        None => Ok(::funcapi::srf_return_done(flinfo, fcinfo)),
+    }
+}
+
+// generate_series_int8_support (OID 3995): SupportRequestRows over all-Const
+// args; anything else returns NULL so callers fall back (Param estimation
+// unported, matching the int4 support body).
+pub fn fc_generate_series_int8_support(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let [a] = fcinfo.args_n::<1>();
+    let p = a.value.as_usize() as *mut ();
+    // SAFETY: prosupport contract — the internal arg points at a live
+    // tag-first support-request node exclusively owned by this call.
+    let Some(req) = (unsafe { ::types_nodes::supportnodes::support_request_rows_mut(p) }) else {
+        return Ok(Datum::from_usize(0));
+    };
+    let args = match req.node.and_then(|n| n.as_func_expr()) {
+        Some(fe) => &fe.args,
+        None => return Ok(Datum::from_usize(0)),
+    };
+    let mut vals = [1i64; 3];
+    for (i, arg) in args.iter().enumerate() {
+        match arg.as_const() {
+            Some(c) if c.constisnull => {
+                req.rows = 0.0;
+                return Ok(Datum::from_usize(p as usize));
+            }
+            Some(c) => vals[i] = c.constvalue.as_i64(),
+            None => return Ok(Datum::from_usize(0)),
+        }
+    }
+    match crate::generate_series_int8_rows(vals[0] as f64, vals[1] as f64, vals[2] as f64) {
+        Some(rows) => {
+            req.rows = rows;
+            Ok(Datum::from_usize(p as usize))
+        }
+        None => Ok(Datum::from_usize(0)),
+    }
+}
+
+const fn srf(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
+    FmgrBuiltin { foid, name, nargs, strict: true, retset: true, func }
+}
+
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin {
         foid,
@@ -229,8 +298,11 @@ const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrB
     }
 }
 
-// pg_proc.dat rows for int8.c (all proisstrict, none retset).
+// pg_proc.dat rows for int8.c.
 pub const INT8_BUILTINS: &[FmgrBuiltin] = &[
+    srf(1068, "generate_series_step_int8", 3, fc_generate_series_step_int8),
+    srf(1069, "generate_series_int8", 2, fc_generate_series_step_int8),
+    b(3995, "generate_series_int8_support", 1, fc_generate_series_int8_support),
     b(460, "int8in", 1, fc_int8in),
     b(461, "int8out", 1, fc_int8out),
     b(2408, "int8recv", 1, fc_int8recv),

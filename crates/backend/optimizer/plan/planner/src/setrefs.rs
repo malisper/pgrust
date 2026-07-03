@@ -299,6 +299,9 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
                 .expect("CteScan node");
             }
         }
+        NodeTag::T_ProjectSet => {
+            set_upper_references(run, plan, rtoffset)?;
+        }
         NodeTag::T_Agg => {
             // C's set_plan_refs never walks agg->chain: the chain Aggs
             // carry NIL tlists/quals and stripped Sorts; nothing to fix.

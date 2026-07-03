@@ -54,6 +54,12 @@ pub fn exec_re_scan<'mcx>(
             exec_re_scan(&mut w.inner, estate)
         }
         PlanStateNode::Result(rs) => exec_re_scan_result(rs, estate),
+        // ExecReScanProjectSet: outer child rescanned when chgParam is NULL
+        // (always, until the Param lanes land).
+        PlanStateNode::ProjectSet(ps) => {
+            crate::nodeprojectset::exec_re_scan_project_set_local(ps);
+            exec_re_scan(&mut ps.outer, estate)
+        }
         PlanStateNode::SeqScan(ss) => ::nodeseqscan::exec_rescan_seq_scan(ss, estate),
         PlanStateNode::FunctionScan(fs) => {
             ::nodefunctionscan::exec_rescan_function_scan(fs, estate)
@@ -260,6 +266,15 @@ pub fn exec_re_scan_with_chg<'mcx>(
             if let Some(outer) = rs.outer.as_deref_mut() {
                 exec_re_scan_with_chg(outer, base.lefttree.expect("Result outer plan"), estate, chg)?;
             }
+        }
+        PlanStateNode::ProjectSet(ps) => {
+            crate::nodeprojectset::exec_re_scan_project_set_local(ps);
+            exec_re_scan_with_chg(
+                &mut ps.outer,
+                base.lefttree.expect("ProjectSet outer plan"),
+                estate,
+                chg,
+            )?;
         }
         PlanStateNode::SeqScan(ss) => ::nodeseqscan::exec_rescan_seq_scan(ss, estate)?,
         PlanStateNode::FunctionScan(fs) => {

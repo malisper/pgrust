@@ -54,6 +54,7 @@ fn create_plan_recurse<'mcx>(
         PathNode::AppendPath(_) => create_append_plan(run, path_id, flags),
         PathNode::SetOpPath(_) => create_setop_plan(run, path_id, flags),
         PathNode::ProjectionPath(_) => create_projection_plan(run, path_id, flags),
+        PathNode::ProjectSetPath(_) => create_project_set_plan(run, path_id),
         PathNode::GroupResultPath(_) => create_group_result_plan(run, path_id),
         PathNode::AggPath(_) => create_agg_plan(run, path_id),
         PathNode::MinMaxAggPath(_) => create_minmaxagg_plan(run, path_id),
@@ -1092,7 +1093,8 @@ fn create_projection_plan<'mcx>(
     path_id: PathId,
     flags: i32,
 ) -> PgResult<Node<'mcx>> {
-    debug_assert!(flags & (CP_EXACT_TLIST | CP_SMALL_TLIST | CP_LABEL_TLIST) != 0);
+    // flags == 0 arrives from create_project_set_plan (C passes 0 there too).
+    debug_assert!(flags == 0 || flags & (CP_EXACT_TLIST | CP_SMALL_TLIST | CP_LABEL_TLIST) != 0);
     let (subpath_id, target_id, path_costs) = match run.root.path(path_id) {
         PathNode::ProjectionPath(pp) => (
             pp.subpath.expect("projection has a subpath"),
@@ -1128,6 +1130,27 @@ fn create_projection_plan<'mcx>(
     }
     .expect("subplan embeds a Plan base");
     Ok(subplan)
+}
+
+// create_project_set_plan (createplan.c).
+fn create_project_set_plan<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    path_id: PathId,
+) -> PgResult<Node<'mcx>> {
+    let (subpath_id, target_id) = match run.root.path(path_id) {
+        PathNode::ProjectSetPath(p) => (
+            p.subpath.expect("ProjectSetPath has a subpath"),
+            p.path.pathtarget_id.unwrap(),
+        ),
+        _ => unreachable!(),
+    };
+    let subplan = create_plan_recurse(run, subpath_id, 0)?;
+    let tlist = build_path_tlist(run, target_id)?;
+    let mut plan = Node::build::<types_nodes::plannodes::ProjectSet>(run.mcx)?;
+    plan.plan.targetlist = tlist;
+    plan.plan.lefttree = Some(subplan);
+    copy_generic_path_info(run, &mut plan.plan, path_id);
+    Ok(plan.seal())
 }
 
 // create_modifytable_plan + make_modifytable (createplan.c), single-relation

@@ -101,6 +101,7 @@ pub fn is_projection_capable_pathtype(pathtype: u16) -> bool {
         t if t == tag16(NodeTag::T_ValuesScan) => true,
         t if t == tag16(NodeTag::T_FunctionScan) => true,
         t if t == tag16(NodeTag::T_SetOp) => false,
+        t if t == tag16(NodeTag::T_ProjectSet) => false,
         t if t == tag16(NodeTag::T_NestLoop) => true,
         t if t == tag16(NodeTag::T_MergeJoin) => true,
         t if t == tag16(NodeTag::T_HashJoin) => true,
@@ -179,6 +180,50 @@ pub fn create_projection_path<'mcx>(
             + (gucs::cpu_tuple_cost() + newt.cost.per_tuple) * sub.rows;
     }
     PathNode::ProjectionPath(ProjectionPath { path, subpath: Some(subpath_id), dummypp })
+}
+
+// create_set_projection_path (pathnode.c).
+pub fn create_set_projection_path<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel_id: RelId,
+    subpath_id: PathId,
+    target_id: PtId,
+) -> PgResult<PathNode<'mcx>> {
+    let mut tlist_rows = 1.0f64;
+    for i in 0..run.root.pathtarget(target_id).exprs.len() {
+        let id = run.root.pathtarget(target_id).exprs[i];
+        let itemrows = crate::costsize::expression_returns_set_rows(*run.root.expr_node(id))?;
+        if tlist_rows < itemrows {
+            tlist_rows = itemrows;
+        }
+    }
+    let target_parallel_safe = crate::is_parallel_safe_exprs(run, target_id)?;
+    let sub = run.root.path(subpath_id).base();
+    let target = run.root.pathtarget(target_id);
+    let rel = run.root.rel(rel_id);
+    let rows = sub.rows * tlist_rows;
+    let path = Path {
+        type_: tag16(NodeTag::T_ProjectSetPath),
+        pathtype: tag16(NodeTag::T_ProjectSet),
+        parent: rel_id,
+        pathtarget_id: Some(target_id),
+        param_info: None,
+        parallel_aware: false,
+        parallel_safe: rel.consider_parallel && sub.parallel_safe && target_parallel_safe,
+        parallel_workers: sub.parallel_workers,
+        rows,
+        disabled_nodes: sub.disabled_nodes,
+        startup_cost: sub.startup_cost + target.cost.startup,
+        total_cost: sub.total_cost
+            + target.cost.startup
+            + (gucs::cpu_tuple_cost() + target.cost.per_tuple) * sub.rows
+            + (rows - sub.rows) * gucs::cpu_tuple_cost() / 2.0,
+        pathkeys: crate::relnode::pgvec_clone_shallow(run.mcx, &sub.pathkeys),
+    };
+    Ok(PathNode::ProjectSetPath(types_pathnodes::ProjectSetPath {
+        path,
+        subpath: Some(subpath_id),
+    }))
 }
 
 // create_modifytable_path (pathnode.c), single-relation INSERT/UPDATE/DELETE

@@ -216,7 +216,15 @@ pub fn subquery_planner<'mcx>(
         panic!("flatten_group_exprs (var.c): M2 grouping lane");
     }
     if parse.hasTargetSRFs {
-        panic!("expression_returns_set (nodeFuncs.c): M2 SRF lane");
+        let mut still_has = false;
+        for tle_node in &parse.targetList {
+            let tle = tle_node.as_target_entry().expect("targetList cell");
+            if coerce::expression_returns_set(tle.expr) {
+                still_has = true;
+                break;
+            }
+        }
+        parse.hasTargetSRFs = still_has;
     }
     if !parse.groupingSets.is_nil() {
         // Expand before optimizing HAVING (empty-set detection needs it);
