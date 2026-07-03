@@ -2614,11 +2614,13 @@ impl<'mcx> Parser<'mcx> {
                 n.location = -1;
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
-            1462 | 1463 | 1465 => {
+            1462 | 1463 | 1464 | 1465 | 1466 => {
                 let (kind, i) = match rule {
                     1462 => (TransactionStmtKind::TRANS_STMT_SAVEPOINT, 2),
                     1463 => (TransactionStmtKind::TRANS_STMT_RELEASE, 3),
-                    _ => (TransactionStmtKind::TRANS_STMT_ROLLBACK_TO, 5),
+                    1464 => (TransactionStmtKind::TRANS_STMT_RELEASE, 2),
+                    1465 => (TransactionStmtKind::TRANS_STMT_ROLLBACK_TO, 5),
+                    _ => (TransactionStmtKind::TRANS_STMT_ROLLBACK_TO, 4),
                 };
                 let mut n = Node::build::<TransactionStmt>(mcx)?;
                 n.kind = kind;
