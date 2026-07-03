@@ -9,8 +9,8 @@ use std::sync::{Mutex, Once};
 use ::datum::Datum;
 use ::mcx::MemoryContext;
 use ::types_core::{
-    BlockNumber, Buffer, InvalidBuffer, Oid, BLCKSZ, BTREE_AM_OID, INVALID_PROC_NUMBER,
-    RELPERSISTENCE_PERMANENT,
+    BlockNumber, Buffer, ForkNumber, GlobalVisStateHandle, InvalidBlockNumber, InvalidBuffer,
+    Oid, BLCKSZ, BTREE_AM_OID, INVALID_PROC_NUMBER, RELPERSISTENCE_PERMANENT,
 };
 use ::types_nbtree::{
     BTMetaPageData, BTPageOpaqueData, BTP_LEAF, BTP_META, BTP_ROOT, BTREE_MAGIC, BTREE_VERSION,
@@ -26,11 +26,12 @@ use ::types_rel::{
 };
 use ::types_scan::scankey::BTEqualStrategyNumber;
 use ::types_snapshot::{SnapshotData, SnapshotType};
-use ::types_storage::bufpage::{ItemIdData, SizeOfPageHeaderData};
+use ::types_storage::bufpage::{ItemIdData, SizeOfPageHeaderData, LP_NORMAL};
+use ::types_storage::{ReadBufferMode, RelFileLocator, RelFileLocatorBackend};
 use ::types_tuple::itemptr::ItemPointerData;
 use ::types_tuple::{
-    CompactAttribute, FormData_pg_attribute, NameData, PgTypeShape, TupleDescData, TYPALIGN_INT,
-    TYPSTORAGE_PLAIN,
+    CompactAttribute, FormData_pg_attribute, NameData, PgTypeShape, TupleDescData,
+    HEAP_XMAX_INVALID, TYPALIGN_INT, TYPSTORAGE_PLAIN,
 };
 use executils::EStateData;
 use syscache_seams::PgAmopShape;
@@ -44,6 +45,9 @@ const F_BTINT4CMP: Oid = 351;
 
 struct Fake {
     tables: HashMap<Oid, Vec<Buffer>>,
+    vm_forks: HashMap<Oid, Vec<Buffer>>,
+    vm_cached: HashMap<Oid, BlockNumber>,
+    reads: HashMap<Oid, u32>,
     pages: Vec<usize>,
     pins: Vec<i32>,
 }
@@ -60,6 +64,9 @@ fn with_fake<R>(f: impl FnOnce(&mut Fake) -> R) -> R {
     let mut g = FAKE.lock().unwrap_or_else(|e| e.into_inner());
     f(g.get_or_insert_with(|| Fake {
         tables: HashMap::new(),
+        vm_forks: HashMap::new(),
+        vm_cached: HashMap::new(),
+        reads: HashMap::new(),
         pages: Vec::new(),
         pins: Vec::new(),
     }))
@@ -71,7 +78,44 @@ fn install_seams() {
             with_fake(|f| {
                 let buf = f.tables[&rel.rd_id][block as usize];
                 f.pins[(buf - 1) as usize] += 1;
+                *f.reads.entry(rel.rd_id).or_insert(0) += 1;
                 Ok(buf)
+            })
+        });
+        bufmgr_seams::relation_smgr_locator::set(|rel| RelFileLocatorBackend {
+            locator: RelFileLocator { spcOid: 1663, dbOid: 5, relNumber: rel.rd_id },
+            backend: INVALID_PROC_NUMBER,
+        });
+        bufmgr_seams::read_buffer_extended::set(|rel, fork, blkno, mode, _strategy| {
+            assert_eq!(fork, ForkNumber::VISIBILITYMAP_FORKNUM);
+            assert_eq!(mode, ReadBufferMode::ZeroOnError);
+            with_fake(|f| {
+                let buf = f.vm_forks[&rel.rd_id][blkno as usize];
+                f.pins[(buf - 1) as usize] += 1;
+                Ok(buf)
+            })
+        });
+        smgr_seams::smgr_exists::set(|rloc, fork| {
+            assert_eq!(fork, ForkNumber::VISIBILITYMAP_FORKNUM);
+            with_fake(|f| Ok(f.vm_forks.contains_key(&rloc.locator.relNumber)))
+        });
+        smgr_seams::smgr_cached_nblocks::set(|rloc, _fork| {
+            with_fake(|f| {
+                f.vm_cached
+                    .get(&rloc.locator.relNumber)
+                    .copied()
+                    .unwrap_or(InvalidBlockNumber)
+            })
+        });
+        smgr_seams::smgr_set_cached_nblocks::set(|rloc, _fork, v| {
+            with_fake(|f| f.vm_cached.insert(rloc.locator.relNumber, v));
+            Ok(())
+        });
+        smgr_seams::smgr_nblocks::set(|rloc, _fork| {
+            with_fake(|f| {
+                let n = f.vm_forks[&rloc.locator.relNumber].len() as BlockNumber;
+                f.vm_cached.insert(rloc.locator.relNumber, n);
+                Ok(n)
             })
         });
         bufmgr_seams::release_buffer::set(|buf| {
@@ -118,6 +162,17 @@ fn install_seams() {
         transam_xlog_seams::xlog_standby_info_active::set(|| false);
 
         predicate_seams::predicate_lock_page::set(|_rel, _blkno, _snap| Ok(()));
+        predicate_seams::predicate_lock_relation::set(|_rel, _snap| Ok(()));
+        predicate_seams::predicate_lock_tid::set(|_rel, _tid, _snap, _xid| Ok(()));
+        predicate_seams::check_for_serializable_conflict_out_needed::set(|_rel, _snap| false);
+
+        heapam_visibility_seams::heap_tuple_satisfies_visibility::set(
+            |_htup, _snap, _buf| Ok(true),
+        );
+        heapam_visibility_seams::heap_tuple_is_surely_dead::set(|_htup, _vt| Ok(false));
+        heapam_visibility_seams::heap_tuple_header_is_only_locked::set(|_hdr| Ok(false));
+        pruneheap_seams::heap_page_prune_opt::set(|_rel, _buf| Ok(()));
+        procarray_seams::global_vis_test_for::set(|_rel| GlobalVisStateHandle::new(0));
 
         miscinit_seams::get_user_id::set(|| 10);
         aclchk_seams::object_aclcheck::set(|_classid, _objid, _roleid, _mode| Ok(0));
@@ -249,7 +304,52 @@ fn add_index_tuple(p: &mut TestPage, tid: ItemPointerData, value: i32) {
     put_u16(p, 14, off as u16);
 }
 
-fn register_pages(relid: Oid, pages: Vec<Box<TestPage>>) {
+fn tuple_image(val: i32) -> Vec<u8> {
+    let mut img = vec![0u8; 28];
+    img[0..4].copy_from_slice(&10u32.to_ne_bytes()); // xmin
+    img[18..20].copy_from_slice(&1u16.to_ne_bytes()); // natts = 1
+    img[20..22].copy_from_slice(&HEAP_XMAX_INVALID.to_ne_bytes());
+    img[22] = 24; // t_hoff
+    img[24..28].copy_from_slice(&val.to_ne_bytes());
+    img
+}
+
+fn build_heap_page(vals: &[i32]) -> Box<TestPage> {
+    let mut page = Box::new(TestPage([0u8; BLCKSZ]));
+    let n = vals.len();
+    let lower = SizeOfPageHeaderData + n * 4;
+    let mut upper = BLCKSZ;
+    for (i, val) in vals.iter().enumerate() {
+        let img = tuple_image(*val);
+        upper = (upper - img.len()) & !7;
+        page.0[upper..upper + img.len()].copy_from_slice(&img);
+        let id = ItemIdData::new(upper as u16, LP_NORMAL, img.len() as u16);
+        let off = SizeOfPageHeaderData + i * 4;
+        // SAFETY: repr(transparent) over u32.
+        let raw: u32 = unsafe { core::mem::transmute(id) };
+        page.0[off..off + 4].copy_from_slice(&raw.to_ne_bytes());
+    }
+    page.0[12..14].copy_from_slice(&(lower as u16).to_ne_bytes());
+    page.0[14..16].copy_from_slice(&(upper as u16).to_ne_bytes());
+    page.0[16..18].copy_from_slice(&(BLCKSZ as u16).to_ne_bytes());
+    page.0[18..20].copy_from_slice(&((BLCKSZ as u16) | 4).to_ne_bytes());
+    page
+}
+
+// One initialized VM-fork page; 2 status bits per heap block, low-to-high.
+fn vm_page(all_visible_blocks: &[BlockNumber]) -> Box<TestPage> {
+    let contents_off = (SizeOfPageHeaderData + 7) & !7;
+    let mut p = Box::new(TestPage([0u8; BLCKSZ]));
+    put_u16(&mut p, 12, contents_off as u16); // pd_lower
+    put_u16(&mut p, 14, BLCKSZ as u16); // pd_upper (non-zero: not PageIsNew)
+    put_u16(&mut p, 16, BLCKSZ as u16); // pd_special
+    for &blk in all_visible_blocks {
+        p.0[contents_off + (blk / 4) as usize] |= 0x01 << ((blk % 4) * 2);
+    }
+    p
+}
+
+fn register_pages_in(relid: Oid, pages: Vec<Box<TestPage>>, vm: bool) {
     with_fake(|f| {
         let mut bufs = Vec::new();
         for p in pages {
@@ -258,16 +358,50 @@ fn register_pages(relid: Oid, pages: Vec<Box<TestPage>>) {
             f.pins.push(0);
             bufs.push(f.pages.len() as Buffer);
         }
-        f.tables.insert(relid, bufs);
+        if vm {
+            f.vm_forks.insert(relid, bufs);
+        } else {
+            f.tables.insert(relid, bufs);
+        }
     });
 }
 
-fn register_index(index_oid: Oid, vals: &[i32]) {
+fn register_pages(relid: Oid, pages: Vec<Box<TestPage>>) {
+    register_pages_in(relid, pages, false);
+}
+
+// Heap page 0 holds `vals` at offsets 1..=n; a root leaf indexes them in
+// ascending key order; the VM fork marks `all_visible_blocks`.
+fn register_indexed_table(
+    heap_oid: Oid,
+    index_oid: Oid,
+    vals: &[i32],
+    all_visible_blocks: &[BlockNumber],
+) {
+    register_pages(heap_oid, vec![build_heap_page(vals)]);
+    register_pages_in(heap_oid, vec![vm_page(all_visible_blocks)], true);
+
+    let mut keyed: Vec<(i32, u16)> = vals
+        .iter()
+        .enumerate()
+        .map(|(i, v)| (*v, (i + 1) as u16))
+        .collect();
+    keyed.sort();
     let mut leaf = new_bt_page(BTP_LEAF | BTP_ROOT, 0);
-    for (i, v) in vals.iter().enumerate() {
-        add_index_tuple(&mut leaf, ItemPointerData::new(0, (i + 1) as u16), *v);
+    for (v, off) in keyed {
+        add_index_tuple(&mut leaf, ItemPointerData::new(0, off), v);
     }
     register_pages(index_oid, vec![meta_page(1, 0), leaf]);
+}
+
+fn heap_reads(heap_oid: Oid) -> u32 {
+    with_fake(|f| f.reads.get(&heap_oid).copied().unwrap_or(0))
+}
+
+fn quiesced() {
+    with_fake(|f| {
+        assert!(f.pins.iter().all(|p| *p == 0), "leaked pins: {:?}", f.pins);
+    });
 }
 
 fn int4_tupdesc<'mcx>(mcx: Mcx<'mcx>) -> Rc<TupleDescData<'mcx>> {
@@ -492,16 +626,34 @@ fn setup<'mcx>(
     mcx: Mcx<'mcx>,
     vals: &[i32],
     node: &IndexOnlyScan<'mcx>,
-) -> (EStateData<'mcx>, IndexOnlyScanState<'mcx>) {
+    all_visible_blocks: &[BlockNumber],
+) -> (Oid, EStateData<'mcx>, IndexOnlyScanState<'mcx>) {
     let heap_oid = fresh_oid();
     let index_oid = fresh_oid();
-    register_index(index_oid, vals);
+    register_indexed_table(heap_oid, index_oid, vals, all_visible_blocks);
     let rel = heap_relation(mcx, heap_oid);
     let index_rel = index_relation(mcx, index_oid, heap_oid);
     let mut estate = EStateData::new_in(mcx);
     estate.es_snapshot = Some(static_mvcc_snapshot());
     let state = exec_init_index_only_scan_rel(mcx, node, &mut estate, rel, index_rel).unwrap();
-    (estate, state)
+    (heap_oid, estate, state)
+}
+
+fn drain<'mcx>(node: &mut IndexOnlyScanState<'mcx>, estate: &mut EStateData<'mcx>) -> Vec<i32> {
+    let mut out = Vec::new();
+    while let Some(id) = exec_index_only_scan(node, estate).unwrap() {
+        let mut isnull = false;
+        let v = exectuples::slot_getattr(estate.slot_mut(id), 1, &mut isnull);
+        assert!(!isnull);
+        out.push(v.as_i32());
+    }
+    out
+}
+
+fn teardown<'mcx>(mut node: IndexOnlyScanState<'mcx>, estate: &mut EStateData<'mcx>) {
+    exec_end_index_only_scan(&mut node).unwrap();
+    estate.exec_reset_tuple_table(false);
+    quiesced();
 }
 
 #[test]
@@ -509,7 +661,7 @@ fn init_builds_scan_keys_and_slots() {
     let _g = serial();
     with_mcx(|mcx| {
         let node = mk_index_only_scan(mcx, 42);
-        let (estate, mut state) = setup(mcx, &[1, 2, 3], &node);
+        let (_heap_oid, estate, mut state) = setup(mcx, &[1, 2, 3], &node, &[]);
         assert_eq!(state.ioss_ScanKeys.len(), 1);
         let key = &state.ioss_ScanKeys[0];
         assert_eq!(key.sk_attno, 1);
@@ -531,23 +683,31 @@ fn init_builds_scan_keys_and_slots() {
 }
 
 #[test]
-fn first_tid_stops_at_unported_vm_probe() {
+fn all_visible_scan_never_touches_the_heap() {
     let _g = serial();
     with_mcx(|mcx| {
-        let node = mk_index_only_scan(mcx, 2);
-        let (mut estate, mut state) = setup(mcx, &[1, 2, 3], &node);
-        let err = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = exec_index_only_scan(&mut state, &mut estate);
-        }))
-        .unwrap_err();
-        let msg = err
-            .downcast_ref::<String>()
-            .cloned()
-            .or_else(|| err.downcast_ref::<&str>().map(|s| s.to_string()))
-            .unwrap_or_default();
-        assert!(msg.contains("visibilitymap"), "unexpected panic: {msg}");
-        // xs_want_itup was armed before the walk.
-        assert!(state.ioss_ScanDesc.as_ref().unwrap().xs_want_itup);
+        let node = mk_index_only_scan(mcx, 20);
+        let (heap_oid, mut estate, mut state) = setup(mcx, &[30, 20, 10], &node, &[0]);
+        assert_eq!(drain(&mut state, &mut estate), vec![20]);
+        assert_eq!(heap_reads(heap_oid), 0, "heap page fetched on the VM fast path");
+        let scandesc = state.ioss_ScanDesc.as_ref().unwrap();
+        assert!(scandesc.xs_want_itup);
+        assert!(scandesc.xs_itup.is_some());
+        // ExecEnd releases the retained VM pin.
+        assert!(state.ioss_VMBuffer.is_valid());
+        teardown(state, &mut estate);
+    });
+}
+
+#[test]
+fn vm_clear_falls_back_to_heap_fetch() {
+    let _g = serial();
+    with_mcx(|mcx| {
+        let node = mk_index_only_scan(mcx, 20);
+        let (heap_oid, mut estate, mut state) = setup(mcx, &[30, 20, 10], &node, &[]);
+        assert_eq!(drain(&mut state, &mut estate), vec![20]);
+        assert!(heap_reads(heap_oid) >= 1, "VM clear must fall through to the heap");
+        teardown(state, &mut estate);
     });
 }
 

@@ -12,6 +12,7 @@ use ::types_rel::Relation;
 use ::types_scan::scankey::ScanKeyData;
 use ::types_snapshot::SnapshotData;
 use ::types_tuple::itemptr::ItemPointerData;
+use ::types_tuple::TupleDescData;
 
 #[cfg(feature = "mock")]
 pub const MOCK_AM_OID: Oid = 9999;
@@ -141,6 +142,10 @@ pub struct IndexScanDescData<'mcx> {
     pub orderByData: PgVec<'mcx, ScanKeyData>,
 
     pub xs_want_itup: bool,
+    // Points into the AM's page-copy buffer (nbtree currTuples); valid until
+    // the next amgettuple/amrescan/amendscan on this descriptor.
+    pub xs_itup: Option<core::ptr::NonNull<u8>>,
+    pub xs_itupdesc: Option<Rc<TupleDescData<'mcx>>>,
     pub xs_temp_snap: bool,
     pub kill_prior_tuple: bool,
     pub ignore_killed_tuples: bool,
@@ -185,6 +190,8 @@ pub fn relation_get_index_scan<'mcx>(
         keyData: skey_vec(mcx, nkeys.max(0) as usize)?,
         orderByData: skey_vec(mcx, norderbys.max(0) as usize)?,
         xs_want_itup: false,
+        xs_itup: None,
+        xs_itupdesc: None,
         xs_temp_snap: false,
         kill_prior_tuple: false,
         // In recovery killed-tuple hints are ignored (standby xmin skew).

@@ -618,6 +618,8 @@ mod mock {
             keyData: PgVec::new_in(mcx),
             orderByData: PgVec::new_in(mcx),
             xs_want_itup: false,
+            xs_itup: None,
+            xs_itupdesc: None,
             xs_temp_snap: false,
             kill_prior_tuple: false,
             ignore_killed_tuples: true,
