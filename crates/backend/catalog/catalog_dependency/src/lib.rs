@@ -57,6 +57,7 @@ const AttrDefaultRelationId: Oid = 2604;
 const RewriteRelationId: Oid = 2618;
 const ConstraintRelationId: Oid = 2606;
 const AuthMemRelationId: Oid = 1261;
+const TriggerRelationId: Oid = 2620;
 
 #[cold]
 #[inline(never)]
@@ -748,6 +749,10 @@ fn doDeletion<'mcx>(mcx: Mcx<'mcx>, object: &ObjectAddress, flags: i32) -> PgRes
         AttrDefaultRelationId => pg_attrdef::RemoveAttrDefaultById(mcx, object.objectId)?,
         ConstraintRelationId => pg_constraint::RemoveConstraintById(mcx, object.objectId)?,
         statscmds::StatisticExtRelationId => statscmds::RemoveStatisticsById(mcx, object.objectId)?,
+        TriggerRelationId => commands_trigger::RemoveTriggerById(mcx, object.objectId)?,
+        RewriteRelationId => {
+            unported("doDeletion: RemoveRewriteRuleById (rewriteRemove.c)");
+        }
         other => panic!("unported: doDeletion object class {other}"),
     }
     Ok(())
