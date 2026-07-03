@@ -1867,9 +1867,14 @@ dependencies = [
 name = "deadlock"
 version = "0.0.0"
 dependencies = [
+ "backend_status",
  "deadlock_seams",
  "init_small",
+ "lmgr_proc",
+ "lmgr_seams",
+ "lock",
  "mcx",
+ "pgstat",
  "types_core",
  "types_error",
  "types_storage",

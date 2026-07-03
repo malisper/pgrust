@@ -192,8 +192,8 @@ pub(crate) unsafe fn proclock_from_proc_link(node: *mut dlist_node) -> *mut PROC
     node.byte_sub(offset_of!(PROCLOCK, procLink)) as *mut PROCLOCK
 }
 
-// Iterates lock->procLocks; deletion-safe (next captured before yield).
-pub(crate) unsafe fn foreach_proclock_on_lock(
+// Iterates lock->procLocks, deletion-safe; SAFETY contract: partition LWLock held.
+pub unsafe fn foreach_proclock_on_lock(
     lock: *mut LOCK,
     mut body: impl FnMut(*mut PROCLOCK) -> bool,
 ) {

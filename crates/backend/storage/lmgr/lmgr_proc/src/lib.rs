@@ -93,6 +93,20 @@ fn plist_is_empty(list: &SyncCell<proclist_head>) -> bool {
     list.get().head == INVALID_PROC_NUMBER
 }
 
+/// Iterate `leader.lockGroupMembers` (linked via lockGroupLink), [LEAD] rule:
+/// caller holds the leader's lock partition LWLock.
+pub fn foreach_lock_group_member(leader: &PGPROC, mut body: impl FnMut(ProcNumber) -> bool) {
+    let hdr = ProcGlobal();
+    let mut cur = leader.lockGroupMembers.get().head;
+    while cur != INVALID_PROC_NUMBER {
+        let next = group_link_of(&hdr.allProcs[cur as usize]).get().next;
+        if !body(cur) {
+            break;
+        }
+        cur = next;
+    }
+}
+
 fn plist_push_head(
     hdr: &PROC_HDR,
     list: &SyncCell<proclist_head>,

@@ -24,12 +24,12 @@ pub use locallock::{
     LockHeldByMe, MarkLockClear, ResetAwaitedLock,
 };
 pub use shared::{
-    GetRunningTransactionLocks, GrantLock, LockCheckConflicts, LockManagerShmemInit,
-    LockManagerShmemResetAfterCrash, LockManagerShmemSize, LockTagHashCode,
+    foreach_proclock_on_lock, GetRunningTransactionLocks, GrantLock, LockCheckConflicts,
+    LockManagerShmemInit, LockManagerShmemResetAfterCrash, LockManagerShmemSize, LockTagHashCode,
 };
 pub use waitqueue::{
-    CheckDeadLock, GetLockHoldersAndWaiters, ProcLockWakeup, ProcSleep, ProcWakeup,
-    RemoveFromWaitQueue,
+    wq_foreach, CheckDeadLock, GetLockHoldersAndWaiters, ProcLockWakeup, ProcSleep, ProcWakeup,
+    RemoveFromWaitQueue, SetWaitQueueOrder,
 };
 
 use std::cell::Cell;

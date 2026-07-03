@@ -20,6 +20,38 @@ pub fn init_seams() {
     lmgr_seams::lock_relation_oid::set(LockRelationOid);
     lmgr_seams::unlock_relation_oid::set(UnlockRelationOid);
     lmgr_seams::check_relation_locked_by_me::set(CheckRelationOidLockedByMe);
+    lmgr_seams::describe_lock_tag::set(DescribeLockTag);
+}
+
+pub fn DescribeLockTag(tag: LOCKTAG) -> String {
+    use types_storage::lock::{
+        LOCKTAG_ADVISORY, LOCKTAG_APPLY_TRANSACTION, LOCKTAG_DATABASE_FROZEN_IDS, LOCKTAG_OBJECT,
+        LOCKTAG_PAGE, LOCKTAG_RELATION, LOCKTAG_RELATION_EXTEND, LOCKTAG_SPECULATIVE_TOKEN,
+        LOCKTAG_TRANSACTION, LOCKTAG_TUPLE, LOCKTAG_USERLOCK, LOCKTAG_VIRTUALTRANSACTION,
+    };
+    let (f1, f2, f3, f4) = (
+        tag.locktag_field1,
+        tag.locktag_field2,
+        tag.locktag_field3,
+        tag.locktag_field4,
+    );
+    match tag.locktag_type {
+        LOCKTAG_RELATION => format!("relation {f2} of database {f1}"),
+        LOCKTAG_RELATION_EXTEND => format!("extension of relation {f2} of database {f1}"),
+        LOCKTAG_DATABASE_FROZEN_IDS => format!("pg_database.datfrozenxid of database {f1}"),
+        LOCKTAG_PAGE => format!("page {f3} of relation {f2} of database {f1}"),
+        LOCKTAG_TUPLE => format!("tuple ({f3},{f4}) of relation {f2} of database {f1}"),
+        LOCKTAG_TRANSACTION => format!("transaction {f1}"),
+        LOCKTAG_VIRTUALTRANSACTION => format!("virtual transaction {}/{f2}", f1 as i32),
+        LOCKTAG_SPECULATIVE_TOKEN => format!("speculative token {f2} of transaction {f1}"),
+        LOCKTAG_OBJECT => format!("object {f3} of class {f2} of database {f1}"),
+        LOCKTAG_USERLOCK => format!("user lock [{f1},{f2},{f3}]"),
+        LOCKTAG_ADVISORY => format!("advisory lock [{f1},{f2},{f3},{f4}]"),
+        LOCKTAG_APPLY_TRANSACTION => {
+            format!("remote transaction {f3} of subscription {f2} of database {f1}")
+        }
+        other => format!("unrecognized locktag type {other}"),
+    }
 }
 
 pub fn RelationInitLockInfo(relid: Oid, relisshared: bool) -> LockInfoData {
