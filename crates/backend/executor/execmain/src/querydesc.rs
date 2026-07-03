@@ -71,6 +71,9 @@ pub(crate) unsafe fn shorten_pstmt<'a>(p: &PlannedStmt<'_>) -> &'a PlannedStmt<'
 
 struct Entry {
     generation: u32,
+    // Excludes aliasing: with_qd sets it around `f`; remove() refuses an
+    // in-use entry, so the &mut handed to `f` cannot dangle.
+    in_use: Cell<bool>,
     qd: QueryDescData,
 }
 
@@ -78,8 +81,11 @@ struct Entry {
 // call seams, and a panic in a TLS destructor is a process abort (rust
 // runtime aborts the whole postmaster). Entries surviving a FATAL exit leak,
 // exactly as C's backend-process death leaves them.
+// Boxed for address stability: with_qd hands out a pointer into the entry
+// while nested executors register/free (Vec realloc). The box is C's
+// palloc'd QueryDesc.
 thread_local! {
-    static ENTRIES: RefCell<core::mem::ManuallyDrop<Vec<Option<Entry>>>> =
+    static ENTRIES: RefCell<core::mem::ManuallyDrop<Vec<Option<Box<Entry>>>>> =
         const { RefCell::new(core::mem::ManuallyDrop::new(Vec::new())) };
     static FREE: RefCell<core::mem::ManuallyDrop<Vec<u32>>> =
         const { RefCell::new(core::mem::ManuallyDrop::new(Vec::new())) };
@@ -100,7 +106,7 @@ fn register(qd: QueryDescData) -> QueryDescHandle {
         g.set(v);
         v
     });
-    let entry = Entry { generation, qd };
+    let entry = Box::new(Entry { generation, in_use: Cell::new(false), qd });
     let idx = match FREE.with(|f| f.borrow_mut().pop()) {
         Some(i) => {
             ENTRIES.with(|e| e.borrow_mut()[i as usize] = Some(entry));
@@ -115,33 +121,35 @@ fn register(qd: QueryDescData) -> QueryDescHandle {
     encode(idx, generation)
 }
 
-// Entry is taken out for the duration of `f` so nested executor runs (SQL
-// functions) can register/free their own descs; re-entry on the SAME handle
-// panics loudly. The guard reinserts on unwind so error paths stay freeable.
+// The entry stays in place; nested executor runs (SQL functions) register and
+// free their own boxed entries freely. Re-entry on the SAME handle panics.
 pub(crate) fn with_qd<R>(h: QueryDescHandle, f: impl FnOnce(&mut QueryDescData) -> R) -> R {
     assert!(!h.is_null(), "execmain: NULL QueryDescHandle dereferenced");
     let (idx, generation) = decode(h);
-    let entry = ENTRIES.with(|e| {
+    let ptr: *mut Entry = ENTRIES.with(|e| {
         let mut v = e.borrow_mut();
         match v.get_mut(idx as usize) {
-            Some(slot) if slot.as_ref().map(|en| en.generation) == Some(generation) => {
-                slot.take().unwrap()
+            Some(Some(en)) if en.generation == generation => {
+                assert!(
+                    !en.in_use.replace(true),
+                    "execmain: re-entered QueryDescHandle {h:?}"
+                );
+                &mut **en as *mut Entry
             }
-            _ => panic!("execmain: stale or re-entered QueryDescHandle {h:?}"),
+            _ => panic!("execmain: stale QueryDescHandle {h:?}"),
         }
     });
-    struct PutBack {
-        idx: u32,
-        entry: Option<Entry>,
-    }
-    impl Drop for PutBack {
+    struct Unuse(*mut Entry);
+    impl Drop for Unuse {
         fn drop(&mut self) {
-            let en = self.entry.take().unwrap();
-            ENTRIES.with(|e| e.borrow_mut()[self.idx as usize] = Some(en));
+            // SAFETY: entry stays boxed and un-removable (in_use) until here.
+            unsafe { (*self.0).in_use.set(false) }
         }
     }
-    let mut guard = PutBack { idx, entry: Some(entry) };
-    f(&mut guard.entry.as_mut().unwrap().qd)
+    let _guard = Unuse(ptr);
+    // SAFETY: boxed entry is address-stable across nested register/free; the
+    // in_use flag excludes re-entry and remove(), so this is the only &mut.
+    f(unsafe { &mut (*ptr).qd })
 }
 
 pub fn registry_len() -> usize {
@@ -155,7 +163,9 @@ fn remove(h: QueryDescHandle) -> QueryDescData {
         let mut v = e.borrow_mut();
         match v.get_mut(idx as usize) {
             Some(slot) if slot.as_ref().map(|en| en.generation) == Some(generation) => {
-                slot.take().unwrap()
+                let en = slot.take().unwrap();
+                assert!(!en.in_use.get(), "execmain: remove of in-use QueryDescHandle {h:?}");
+                en
             }
             _ => panic!("execmain: stale QueryDescHandle {h:?} (already freed)"),
         }
