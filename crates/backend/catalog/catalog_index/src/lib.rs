@@ -463,6 +463,10 @@ pub fn index_create<'mcx>(
     if skip_build && !partitioned {
         unported("index_create: skip-build outside the partitioned lane");
     }
+    assert!(
+        extra.constr_flags == 0 || extra.flags & INDEX_CREATE_ADD_CONSTRAINT != 0,
+        "constr_flags without INDEX_CREATE_ADD_CONSTRAINT"
+    );
     let relkind = if partitioned { types_rel::RELKIND_PARTITIONED_INDEX } else { RELKIND_INDEX };
     if extra.constr_flags
         & (INDEX_CONSTR_CREATE_DEFERRABLE
@@ -514,6 +518,23 @@ pub fn index_create<'mcx>(
         return Err(err(
             format!("relation \"{indexRelationName}\" already exists"),
             ERRCODE_DUPLICATE_TABLE,
+        ));
+    }
+
+    if extra.flags & INDEX_CREATE_ADD_CONSTRAINT != 0
+        && pg_constraint::ConstraintNameIsUsed(
+            mcx,
+            pg_constraint::ConstraintCategory::Relation,
+            heapRelationId,
+            indexRelationName,
+        )?
+    {
+        return Err(err(
+            format!(
+                "constraint \"{indexRelationName}\" for relation \"{}\" already exists",
+                heapRelation.name()
+            ),
+            types_error::ERRCODE_DUPLICATE_OBJECT,
         ));
     }
 
@@ -723,6 +744,8 @@ pub fn index_create<'mcx>(
         unported("index_create: bootstrap-mode index_register");
     }
 
+    xact::CommandCounterIncrement()?;
+
     if skip_build {
         // The heap must still be marked as indexed; the caller fills the
         // index later (partitioned indexes never are).
@@ -731,8 +754,6 @@ pub fn index_create<'mcx>(
         drop(indexRelation);
         return Ok((indexRelationId, constraintId));
     }
-
-    xact::CommandCounterIncrement()?;
 
     // The relcache entry was rebuilt from the catalogs at CCI; reopen to get
     // the index-access fields (C keeps the same pointer, rebuilt in place).
@@ -1074,6 +1095,9 @@ pub fn CompareIndexInfo<'mcx>(
     if !map_list_equal(&info1.ii_Predicate, &info2.ii_Predicate)? {
         return Ok(false);
     }
+    // C ends with `ii_ExclusionOps != NULL -> false`; the trimmed IndexInfo
+    // has no exclusion fields and BuildIndexInfo panics on indisexclusion,
+    // so both inputs are exclusion-free here. Revisit with the EXCLUDE lane.
     Ok(true)
 }
 

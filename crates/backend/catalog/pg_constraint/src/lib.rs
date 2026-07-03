@@ -996,7 +996,10 @@ pub fn ConstraintSetParentConstraint<'mcx>(
     parent_constr_id: Oid,
     child_table_id: Oid,
 ) -> PgResult<()> {
-    debug_assert!(parent_constr_id != InvalidOid);
+    assert!(
+        parent_constr_id != InvalidOid,
+        "unported: pg_constraint ConstraintSetParentConstraint detach direction"
+    );
     let con_rel = table::table_open(mcx, CONSTRAINT_RELATION_ID, RowExclusiveLock)?;
     let keys = [eq_key(Anum_pg_constraint_oid, F_OIDEQ, Datum::from_oid(child_constr_id))];
     let mut scan =
@@ -1013,6 +1016,12 @@ pub fn ConstraintSetParentConstraint<'mcx>(
     if conparentid != InvalidOid {
         panic!("constraint {child_constr_id} already has a parent constraint");
     }
+    // SAFETY: coninhcount is a fixed NOT NULL pg_constraint column.
+    let prior_inhcount = unsafe {
+        types_tuple::heap_getattr(tup, Anum_pg_constraint_coninhcount as i32, desc, &mut isnull)
+    }
+    .as_i16();
+    assert!(prior_inhcount == 0, "attach of constraint {child_constr_id} with coninhcount {prior_inhcount}");
     let natts = desc.natts as usize;
     let mut values: PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
     let mut nulls: PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;

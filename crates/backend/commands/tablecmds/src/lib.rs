@@ -556,6 +556,43 @@ fn rel_has_fk_constraints(mcx: Mcx<'_>, relid: Oid) -> PgResult<bool> {
         }
     }
     genam::systable_endscan(mcx, scan)?;
+    if !found {
+        // CloneFkReferenced side: FKs pointing AT the parent (confrelid);
+        // seqscan, no index on confrelid exists (C shape).
+        let mut scan =
+            genam::systable_beginscan(mcx, &con_rel, types_core::InvalidOid, false, None, &[])?;
+        while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+            let mut isnull = false;
+            // SAFETY (each): fixed NOT NULL pg_constraint columns.
+            let contype = unsafe {
+                types_tuple::heap_getattr(
+                    tup,
+                    pg_constraint::Anum_pg_constraint_contype as i32,
+                    desc,
+                    &mut isnull,
+                )
+            }
+            .as_i8() as u8;
+            if contype != pg_constraint::CONSTRAINT_FOREIGN {
+                continue;
+            }
+            // SAFETY: as above.
+            let confrelid = unsafe {
+                types_tuple::heap_getattr(
+                    tup,
+                    pg_constraint::Anum_pg_constraint_confrelid as i32,
+                    desc,
+                    &mut isnull,
+                )
+            }
+            .as_oid();
+            if confrelid == relid {
+                found = true;
+                break;
+            }
+        }
+        genam::systable_endscan(mcx, scan)?;
+    }
     con_rel.close(types_rel::AccessShareLock)?;
     Ok(found)
 }

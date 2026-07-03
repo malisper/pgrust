@@ -498,6 +498,11 @@ pub fn generateClonedIndexStmt<'mcx>(
     if idxrec.indnatts != idxrec.indnkeyatts {
         unported("generateClonedIndexStmt: INCLUDE columns");
     }
+    // C copies per-column opclass options (untransformRelOptions of
+    // attoptions); dropping them would silently build a different index.
+    if index_has_attoptions(mcx, source_idx.rd_id, idxrec.indnkeyatts as usize)? {
+        unported("generateClonedIndexStmt: per-column opclass options (attoptions)");
+    }
 
     let mut stmt = IndexStmt {
         relation: heap_rel,
@@ -610,6 +615,49 @@ pub fn generateClonedIndexStmt<'mcx>(
         stmt.whereClause = Some(mapped);
     }
     Ok((stmt, constraint_oid))
+}
+
+fn index_has_attoptions<'mcx>(mcx: Mcx<'mcx>, index_id: Oid, nkeys: usize) -> PgResult<bool> {
+    use datum::Datum;
+    use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+    const AttributeRelidNumIndexId: Oid = 2659;
+    const Anum_pg_attribute_attoptions: i32 = 23;
+    let mut key = ScanKeyData::empty();
+    key.sk_attno = 1;
+    key.sk_strategy = BTEqualStrategyNumber;
+    key.sk_collation = 0;
+    key.sk_func = fmgr_seams::fmgr_info::call(types_core::fmgr::F_OIDEQ)
+        .unwrap_or_else(|e| panic!("fmgr_info(F_OIDEQ) failed: {e:?}"));
+    key.sk_argument = Datum::from_oid(index_id);
+    let rel = table::table_open(mcx, types_core::ATTRIBUTE_RELATION_ID, AccessShareLock)?;
+    let mut scan = genam::systable_beginscan(
+        mcx,
+        &rel,
+        AttributeRelidNumIndexId,
+        true,
+        None,
+        core::slice::from_ref(&key),
+    )?;
+    let mut found = false;
+    let mut seen = 0usize;
+    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+        if seen >= nkeys {
+            break;
+        }
+        seen += 1;
+        let mut isnull = false;
+        // SAFETY: nullable attoptions probed for null-ness only.
+        unsafe {
+            types_tuple::heap_getattr(tup, Anum_pg_attribute_attoptions, rel.descr(), &mut isnull)
+        };
+        if !isnull {
+            found = true;
+            break;
+        }
+    }
+    genam::systable_endscan(mcx, scan)?;
+    rel.close(AccessShareLock)?;
+    Ok(found)
 }
 
 fn read_indclass<'mcx>(mcx: Mcx<'mcx>, index_id: Oid, nkeys: usize) -> PgResult<PgVec<'mcx, Oid>> {
