@@ -102,6 +102,8 @@ pub struct PlannerRun<'mcx> {
     /// root->rowMarks and plan nodes; levels' root.rowMarks hold ids here
     /// (all-scalar payload, materialized as nodes at createplan/setrefs).
     pub rowmarks: PgVec<'mcx, PlanRowMark>,
+    /// C qp_extra.gset_data / grouping_planner's gset_data local.
+    pub gset_data: Option<crate::groupingsets::GroupingSetsData<'mcx>>,
 }
 
 // A run is forgotten at the planner boundary (mcx reset reclaims), never
@@ -116,7 +118,7 @@ mcx::forget_safe_struct!(
     SubrootState<'_> { root, processed_tlist },
     PlannerRun<'_> { mcx, root, glob, queries, processed_tlist,
         assess_parallel, suspended_roots, subroots, rel_subroots,
-        minmax_subroots, active_windows, qp_setop, rowmarks },
+        minmax_subroots, active_windows, qp_setop, rowmarks, gset_data },
 );
 
 impl<'mcx> PlannerRun<'mcx> {
@@ -135,6 +137,7 @@ impl<'mcx> PlannerRun<'mcx> {
             active_windows: PgVec::new_in(mcx),
             qp_setop: None,
             rowmarks: PgVec::new_in(mcx),
+            gset_data: None,
         }
     }
 

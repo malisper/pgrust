@@ -64,10 +64,12 @@ pub fn grouping_planner<'mcx>(
         );
     }
     if !parse.groupingSets.is_nil() {
-        panic!("preprocess_grouping_sets (planner.c): M3 grouping-sets lane");
-    }
-    if !parse.groupClause.is_nil() {
-        run.root.processed_groupClause = preprocess_groupclause(run)?;
+        run.gset_data = Some(crate::groupingsets::preprocess_grouping_sets(run)?);
+    } else {
+        run.gset_data = None;
+        if !parse.groupClause.is_nil() {
+            run.root.processed_groupClause = preprocess_groupclause(run, None)?;
+        }
     }
 
     preprocess_targetlist(run)?;
@@ -142,8 +144,10 @@ pub fn grouping_planner<'mcx>(
         } else {
             (sort_input_target, sort_input_target_parallel_safe)
         };
-    let have_grouping =
-        parse.hasAggs || !parse.groupClause.is_nil() || run.root.hasHavingQual;
+    let have_grouping = parse.hasAggs
+        || !parse.groupClause.is_nil()
+        || !parse.groupingSets.is_nil()
+        || run.root.hasHavingQual;
     let scanjoin_target = if have_grouping {
         make_group_input_target(run, final_target)?
     } else {
@@ -306,14 +310,34 @@ fn grouping_planner_tail<'mcx>(
 }
 
 // preprocess_groupclause (planner.c); interned ids share the parse nodes,
-// as C.
-fn preprocess_groupclause<'mcx>(
+// as C. `force` (grouping sets): sortgrouprefs whose order the result must
+// follow.
+pub(crate) fn preprocess_groupclause<'mcx>(
     run: &mut PlannerRun<'mcx>,
+    force: Option<&[i32]>,
 ) -> PgResult<mcx::PgVec<'mcx, types_pathnodes::NodeId>> {
     let mcx = run.mcx;
     let parse = run.parse();
     let mut new_groupclause: mcx::PgVec<'mcx, types_nodes::Node<'mcx>> =
         mcx::PgVec::new_in(mcx);
+    if let Some(refs) = force {
+        for &r in refs {
+            let cl = parse
+                .groupClause
+                .iter()
+                .find(|n| {
+                    n.as_sort_group_clause().expect("groupClause cell").tleSortGroupRef
+                        == r as u32
+                })
+                .unwrap_or_else(|| panic!("ORDER/GROUP BY expression not found in list"));
+            new_groupclause.push(cl);
+        }
+        let mut ids: mcx::PgVec<'mcx, types_pathnodes::NodeId> = mcx::PgVec::new_in(mcx);
+        for &n in new_groupclause.iter() {
+            ids.push(run.intern_expr(n));
+        }
+        return Ok(ids);
+    }
     if !parse.sortClause.is_nil() {
         for sc_node in &parse.sortClause {
             let sc = sc_node.as_sort_group_clause().expect("sortClause cell");
@@ -458,6 +482,14 @@ fn pull_agg_input_vars<'mcx>(
                 pull_agg_input_vars(arg, out);
             }
         }
+        // PVC_RECURSE_AGGREGATES treats GroupingFunc like Aggref.
+        NodeTag::T_GroupingFunc => {
+            let g = node.as_grouping_func().unwrap();
+            debug_assert!(g.agglevelsup == 0);
+            for arg in &g.args {
+                pull_agg_input_vars(arg, out);
+            }
+        }
         NodeTag::T_TargetEntry => {
             pull_agg_input_vars(node.as_target_entry().unwrap().expr, out)
         }
@@ -559,7 +591,6 @@ fn create_grouping_paths<'mcx>(
     grouping_target: types_pathnodes::PtId,
 ) -> PgResult<RelId> {
     let parse = run.parse();
-    debug_assert!(parse.groupingSets.is_nil());
 
     let grouped_rel =
         crate::relnode::fetch_upper_rel(&mut run.root, UPPERREL_GROUP_AGG);
@@ -604,10 +635,14 @@ fn create_grouping_paths<'mcx>(
         );
     }
 
-    let can_sort = grouping_is_sortable(run, &run.root.processed_groupClause);
+    let can_sort = run.gset_data.as_ref().is_some_and(|gd| !gd.rollups.is_empty())
+        || grouping_is_sortable(run, &run.root.processed_groupClause);
     let can_hash = !parse.groupClause.is_nil()
         && run.root.numOrderedAggs == 0
-        && grouping_is_hashable(run, &run.root.processed_groupClause);
+        && match &run.gset_data {
+            Some(gd) => gd.any_hashable,
+            None => grouping_is_hashable(run, &run.root.processed_groupClause),
+        };
 
     let num_groups = get_number_of_groups(run, input_rel)?;
     let cheapest = run
@@ -638,6 +673,19 @@ fn create_grouping_paths<'mcx>(
                 else {
                     continue;
                 };
+                if !parse.groupingSets.is_nil() {
+                    crate::groupingsets::consider_groupingsets_paths(
+                        run,
+                        grouped_rel,
+                        sorted,
+                        true,
+                        can_hash,
+                        &agg_costs,
+                        &having_qual,
+                        num_groups,
+                    )?;
+                    continue;
+                }
                 if !parse.hasAggs {
                     panic!(
                         "create_group_path (pathnode.c): GROUP BY without aggregates \
@@ -667,21 +715,31 @@ fn create_grouping_paths<'mcx>(
     }
 
     if can_hash {
-        let group_clause =
-            crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.processed_groupClause);
-        let agg_path = crate::pathnode::create_agg_path(
-            run,
-            grouped_rel,
-            cheapest,
-            grouping_target,
-            types_pathnodes::AGG_HASHED,
-            types_pathnodes::AGGSPLIT_SIMPLE,
-            group_clause,
-            crate::relnode::pgvec_clone_shallow(run.mcx, &having_qual),
-            &agg_costs,
-            num_groups,
-        )?;
-        crate::pathnode::add_path(run, grouped_rel, agg_path);
+        if !parse.groupingSets.is_nil() {
+            // C's hash-only consider_groupingsets_paths(is_sorted=false) arm.
+            if crate::gucs::enable_hashagg() {
+                panic!(
+                    "consider_groupingsets_paths (planner.c): hashed/AGG_MIXED grouping-sets \
+                     strategy unported — set enable_hashagg=off; grouping-sets lane"
+                );
+            }
+        } else {
+            let group_clause =
+                crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.processed_groupClause);
+            let agg_path = crate::pathnode::create_agg_path(
+                run,
+                grouped_rel,
+                cheapest,
+                grouping_target,
+                types_pathnodes::AGG_HASHED,
+                types_pathnodes::AGGSPLIT_SIMPLE,
+                group_clause,
+                crate::relnode::pgvec_clone_shallow(run.mcx, &having_qual),
+                &agg_costs,
+                num_groups,
+            )?;
+            crate::pathnode::add_path(run, grouped_rel, agg_path);
+        }
     }
 
     if run.root.rel(grouped_rel).pathlist.is_empty() {
@@ -728,20 +786,55 @@ pub(crate) fn sortgrouplist_exprs<'mcx>(
     exprs
 }
 
-// get_number_of_groups (planner.c), no-grouping-sets legs.
+// get_number_of_groups (planner.c); the hash_sets leg needs the unported
+// hashed strategy and stays loud.
 fn get_number_of_groups<'mcx>(run: &mut PlannerRun<'mcx>, input_rel: RelId) -> PgResult<f64> {
-    if run.parse().groupClause.is_nil() {
-        return Ok(1.0);
-    }
+    let parse = run.parse();
     let path_rows = {
         let cheapest = run.root.rel(input_rel).cheapest_total_path.unwrap();
         run.root.path(cheapest).base().rows
     };
-    let clauses =
-        crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.processed_groupClause);
-    let tlist = run.processed_tlist();
-    let group_exprs = sortgrouplist_exprs(run, &clauses, tlist);
-    crate::selfuncs::estimate_num_groups(run, &group_exprs, path_rows)
+    if !parse.groupClause.is_nil() {
+        if !parse.groupingSets.is_nil() {
+            let mut gd = run.gset_data.take().expect("grouping sets preprocessed");
+            if !gd.unsortable_sets.is_empty() {
+                panic!(
+                    "get_number_of_groups (planner.c): unsortable grouping sets need the \
+                     hashed strategy (unported); grouping-sets lane"
+                );
+            }
+            let tlist = run.processed_tlist();
+            let mut dnum_groups = 0.0;
+            for rollup in gd.rollups.iter_mut() {
+                let clauses =
+                    crate::relnode::pgvec_clone_shallow(run.mcx, &rollup.groupClause);
+                let group_exprs = sortgrouplist_exprs(run, &clauses, tlist);
+                rollup.numGroups = 0.0;
+                for (gset, gs) in rollup.gsets.iter().zip(rollup.gsets_data.iter_mut()) {
+                    let num_groups = crate::selfuncs::estimate_num_groups_pgset(
+                        run,
+                        &group_exprs,
+                        path_rows,
+                        Some(gset),
+                    )?;
+                    gs.numGroups = num_groups;
+                    rollup.numGroups += num_groups;
+                }
+                dnum_groups += rollup.numGroups;
+            }
+            run.gset_data = Some(gd);
+            return Ok(dnum_groups);
+        }
+        let clauses =
+            crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.processed_groupClause);
+        let tlist = run.processed_tlist();
+        let group_exprs = sortgrouplist_exprs(run, &clauses, tlist);
+        return crate::selfuncs::estimate_num_groups(run, &group_exprs, path_rows);
+    }
+    if !parse.groupingSets.is_nil() {
+        return Ok(parse.groupingSets.len() as f64);
+    }
+    Ok(1.0)
 }
 
 // create_distinct_paths + create_final_distinct_paths (planner.c); partial
@@ -1158,7 +1251,26 @@ fn standard_qp_callback<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResult<()> {
         panic!("adjust_group_pathkeys_for_groupagg (planner.c): M3 ordered-agg lane");
     }
 
-    if !parse.groupClause.is_nil() {
+    if run.gset_data.is_some() {
+        // Grouping sets: the first RollupData's groupClause, with C's
+        // remove_redundant=false, set_ec_sortref=false (hasGroupRTE is always
+        // false on this port, so remove_group_rtindex is dead).
+        let mut clauses = match run.gset_data.as_ref().unwrap().rollups.first() {
+            Some(r) => crate::relnode::pgvec_clone_shallow(run.mcx, &r.groupClause),
+            None => mcx::PgVec::new_in(run.mcx),
+        };
+        if grouping_is_sortable(run, &clauses) {
+            let (pathkeys, sortable) = crate::pathkeys::make_pathkeys_for_sortclauses_extended(
+                run, &mut clauses, tlist, false, false,
+            )?;
+            assert!(sortable);
+            run.root.num_groupby_pathkeys = pathkeys.len() as i32;
+            run.root.group_pathkeys = pathkeys;
+        } else {
+            run.root.group_pathkeys = mcx::PgVec::new_in(run.mcx);
+            run.root.num_groupby_pathkeys = 0;
+        }
+    } else if !parse.groupClause.is_nil() {
         let mut clauses = core::mem::replace(
             &mut run.root.processed_groupClause,
             mcx::PgVec::new_in(run.mcx),

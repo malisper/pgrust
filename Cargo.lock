@@ -5483,6 +5483,7 @@ dependencies = [
  "nodeagg",
  "nodehash",
  "nodes_core",
+ "parse_agg",
  "parse_relation",
  "parser_analyze",
  "parser_small1",

@@ -188,10 +188,26 @@ pub fn subquery_planner<'mcx>(
         panic!("expression_returns_set (nodeFuncs.c): M2 SRF lane");
     }
     if !parse.groupingSets.is_nil() {
-        panic!("expand_grouping_sets (parse_agg.c): M2 grouping lane");
+        // Expand before optimizing HAVING (empty-set detection needs it);
+        // C stores the int-lists back into parse->groupingSets.
+        let expanded =
+            parse_agg::expand_grouping_sets(mcx, &parse.groupingSets, parse.groupDistinct, -1)?
+                .expect("limit -1 never trips");
+        let mut list = NodeList::nil();
+        for set in expanded.iter() {
+            let mut il = types_nodes::list::IntList::nil();
+            for &x in set.iter() {
+                il.lappend(mcx, x)?;
+            }
+            list.lappend(mcx, Node::mk_int_list(mcx, il)?)?;
+        }
+        parse.groupingSets = list;
     }
     if let Some(hq) = parse.havingQual {
-        debug_assert!(parse.groupingSets.is_nil());
+        // The groupClause-and-groupingSets pull_varnos leg tests
+        // root->group_rtindex; dead here (hasGroupRTE always false).
+        let first_gset_nonempty = parse.groupingSets.is_nil()
+            || crate::groupingsets::grouping_set_nonempty(parse.groupingSets.nth(0));
         let havinglist = hq.as_list().expect("preprocessed havingQual is a list");
         let mut new_having = NodeList::nil();
         for hc in havinglist {
@@ -200,7 +216,7 @@ pub fn subquery_planner<'mcx>(
                 || clauses::contain_subplans(hc)?
             {
                 new_having.lappend(mcx, hc)?;
-            } else if !parse.groupClause.is_nil() {
+            } else if !parse.groupClause.is_nil() && first_gset_nonempty {
                 move_qual_to_where(run, &mut parse, hc)?;
             } else {
                 // Degenerate grouping: a copy goes to WHERE, the clause stays

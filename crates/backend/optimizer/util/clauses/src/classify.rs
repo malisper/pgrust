@@ -47,12 +47,27 @@ pub fn contain_window_function(clause: Node<'_>) -> PgResult<bool> {
     ContainWindowFunc.visit(clause)
 }
 
+// expression_tree_walker's T_GroupingFunc arm (nodeFuncs.c) hosted per-crate:
+// walk args only; refs/cols carry no expressions.
+fn walk_grouping_func_args<'mcx, W: NodeWalker<'mcx> + ?Sized>(
+    node: Node<'mcx>,
+    w: &mut W,
+) -> PgResult<bool> {
+    for a in &node.as_grouping_func().unwrap().args {
+        if w.visit(a)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 struct ContainSubplans;
 
 impl<'mcx> NodeWalker<'mcx> for ContainSubplans {
     fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
         match node.node_tag() {
             NodeTag::T_SubPlan | NodeTag::T_AlternativeSubPlan | NodeTag::T_SubLink => Ok(true),
+            NodeTag::T_GroupingFunc => walk_grouping_func_args(node, self),
             _ => expression_tree_walker(node, self),
         }
     }
@@ -77,6 +92,7 @@ impl<'mcx> NodeWalker<'mcx> for ContainMutable {
             }
             // All SQLValueFunction variants are stable; NextValueExpr volatile.
             NodeTag::T_SQLValueFunction | NodeTag::T_NextValueExpr => Ok(true),
+            NodeTag::T_GroupingFunc => walk_grouping_func_args(node, self),
             NodeTag::T_Query => query_tree_walker(node.as_query().unwrap(), self, 0),
             _ => expression_tree_walker(node, self),
         }
@@ -117,6 +133,7 @@ impl<'mcx> NodeWalker<'mcx> for ContainVolatile {
             t @ (NodeTag::T_RestrictInfo | NodeTag::T_PathTarget) => {
                 deferred("contain_volatile_functions: volatility cache", t)
             }
+            NodeTag::T_GroupingFunc => walk_grouping_func_args(node, self),
             NodeTag::T_Query => query_tree_walker(node.as_query().unwrap(), self, 0),
             _ => expression_tree_walker(node, self),
         }
@@ -209,6 +226,7 @@ impl<'a, 'mcx> NodeWalker<'mcx> for MaxParallelHazard<'a> {
                 }
                 Ok(false)
             }
+            NodeTag::T_GroupingFunc => walk_grouping_func_args(node, self),
             NodeTag::T_Query => self.visit_query_ref(node.as_query().unwrap()),
             _ => expression_tree_walker(node, self),
         }
@@ -450,6 +468,9 @@ struct ConvertSaop;
 impl<'mcx> NodeWalker<'mcx> for ConvertSaop {
     fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
         // The SAOP arm itself is the walker's deferred T_ScalarArrayOpExpr.
+        if node.node_tag() == NodeTag::T_GroupingFunc {
+            return walk_grouping_func_args(node, self);
+        }
         expression_tree_walker(node, self)
     }
 }
@@ -492,6 +513,9 @@ impl<'mcx> NodeWalker<'mcx> for FindWindowFuncs<'_, 'mcx> {
             return Ok(false);
         }
         debug_assert!(node.node_tag() != NodeTag::T_SubLink);
+        if node.node_tag() == NodeTag::T_GroupingFunc {
+            return walk_grouping_func_args(node, self);
+        }
         expression_tree_walker(node, self)
     }
 }

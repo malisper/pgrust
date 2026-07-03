@@ -7,6 +7,7 @@ pub mod clausesel;
 pub mod costsize;
 pub mod createplan;
 pub mod grouping;
+pub mod groupingsets;
 pub mod indxpath;
 pub mod initsplan;
 pub mod joinpath;

@@ -57,6 +57,7 @@ fn create_plan_recurse<'mcx>(
         PathNode::GroupResultPath(_) => create_group_result_plan(run, path_id),
         PathNode::AggPath(_) => create_agg_plan(run, path_id),
         PathNode::MinMaxAggPath(_) => create_minmaxagg_plan(run, path_id),
+        PathNode::GroupingSetsPath(_) => create_groupingsets_plan(run, path_id),
         PathNode::WindowAggPath(_) => create_windowagg_plan(run, path_id),
         PathNode::UpperUniquePath(_) => create_upper_unique_plan(run, path_id, flags),
         PathNode::SortPath(_) => create_sort_plan(run, path_id, flags),
@@ -1118,8 +1119,7 @@ fn create_agg_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> PgResul
                 .expect("AggPath.groupClause cell");
             (scl.tleSortGroupRef, scl.eqop)
         };
-        // get_sortgroupclause_tle (tlist.c); a miss is C's elog(ERROR).
-        let tle_node = subplan_tlist
+                let tle_node = subplan_tlist
             .iter()
             .find(|n| n.as_target_entry().expect("tlist cell").ressortgroupref == sgref)
             .unwrap_or_else(|| panic!("ORDER/GROUP BY expression not found in targetlist"));
@@ -1225,11 +1225,215 @@ fn create_minmaxagg_plan<'mcx>(
     }
     Ok(plan.seal())
 }
+fn sortgroupref_tle<'mcx>(sgref: u32, tlist: &NodeList<'mcx>) -> &'mcx TargetEntry<'mcx> {
+    tlist
+        .iter()
+        .find(|n| n.as_target_entry().expect("tlist cell").ressortgroupref == sgref)
+        .unwrap_or_else(|| panic!("ORDER/GROUP BY expression not found in targetlist"))
+        .as_target_entry()
+        .unwrap()
+}
+
+// remap_groupColIdx (createplan.c).
+fn remap_group_col_idx<'mcx>(
+    run: &PlannerRun<'mcx>,
+    group_clause: &[types_pathnodes::NodeId],
+) -> mcx::PgVec<'mcx, i16> {
+    debug_assert!(!run.root.grouping_map.is_empty());
+    let mut idx: mcx::PgVec<'mcx, i16> = mcx::PgVec::new_in(run.mcx);
+    for &gc_id in group_clause {
+        let gc = run.root.expr_node(gc_id).as_sort_group_clause().expect("group clause cell");
+        idx.push(run.root.grouping_map[gc.tleSortGroupRef as usize]);
+    }
+    idx
+}
+
+// make_sort_from_groupcols (createplan.c): keys located by grpColIdx resno,
+// not ressortgroupref; only ordering info comes from the clauses.
+fn make_sort_from_groupcols<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    group_clause: &[types_pathnodes::NodeId],
+    grp_col_idx: &[i16],
+    lefttree: Node<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    let mcx = run.mcx;
+    let sub_tlist = &lefttree.as_plan().expect("plan node").targetlist;
+    let mut sort_col_idx: mcx::PgVec<'mcx, i16> = mcx::PgVec::new_in(mcx);
+    let mut sort_operators: mcx::PgVec<'mcx, u32> = mcx::PgVec::new_in(mcx);
+    let mut collations: mcx::PgVec<'mcx, u32> = mcx::PgVec::new_in(mcx);
+    let mut nulls_first: mcx::PgVec<'mcx, bool> = mcx::PgVec::new_in(mcx);
+    for (i, &gc_id) in group_clause.iter().enumerate() {
+        let gc = run.root.expr_node(gc_id).as_sort_group_clause().expect("group clause cell");
+        let tle = sub_tlist
+            .iter()
+            .find(|n| n.as_target_entry().expect("tlist cell").resno == grp_col_idx[i])
+            .unwrap_or_else(|| panic!("could not retrieve tle for sort-from-groupcols"))
+            .as_target_entry()
+            .unwrap();
+        sort_col_idx.push(tle.resno);
+        sort_operators.push(gc.sortop);
+        collations.push(expr_collation(tle.expr));
+        nulls_first.push(gc.nulls_first);
+    }
+    let mut plan = Node::build::<types_nodes::plannodes::Sort>(mcx)?;
+    plan.plan.targetlist =
+        NodeList::from_slice(mcx, lefttree.as_plan().unwrap().targetlist.as_slice())?;
+    plan.plan.disabled_nodes = lefttree.as_plan().unwrap().disabled_nodes
+        + if crate::gucs::enable_sort() { 0 } else { 1 };
+    plan.plan.qual = NodeList::nil();
+    plan.plan.lefttree = Some(lefttree);
+    plan.numCols = sort_col_idx.len() as i32;
+    plan.sortColIdx = mcx::slice_borrow_in(mcx, &sort_col_idx)?;
+    plan.sortOperators = mcx::slice_borrow_in(mcx, &sort_operators)?;
+    plan.collations = mcx::slice_borrow_in(mcx, &collations)?;
+    plan.nullsFirst = mcx::slice_borrow_in(mcx, &nulls_first)?;
+    Ok(plan.seal())
+}
+
+// create_groupingsets_plan (createplan.c): a top Agg for the first rollup
+// plus vestigial chain Aggs (each with a stripped Sort) for the rest;
+// grouping_map is stashed on the root for setrefs' GroupingFunc fixing.
+fn create_groupingsets_plan<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    path_id: PathId,
+) -> PgResult<Node<'mcx>> {
+    let mcx = run.mcx;
+    debug_assert!(!run.parse().groupingSets.is_nil());
+    let (subpath_id, target_id, aggstrategy, transition_space, qual_ids, rollups) =
+        match run.root.path(path_id) {
+            PathNode::GroupingSetsPath(p) => (
+                p.subpath.expect("GroupingSetsPath has a subpath"),
+                p.path.pathtarget_id.unwrap(),
+                p.aggstrategy,
+                p.transitionSpace,
+                crate::relnode::pgvec_clone_shallow(mcx, &p.qual),
+                p.rollups.clone(),
+            ),
+            _ => unreachable!(),
+        };
+    debug_assert!(!rollups.is_empty());
+
+    let subplan = create_plan_recurse(run, subpath_id, CP_LABEL_TLIST)?;
+    let subplan_tlist =
+        NodeList::from_slice(mcx, subplan.as_plan().expect("plan node").targetlist.as_slice())?;
+
+    let mut maxref: u32 = 0;
+    for &gc_id in run.root.processed_groupClause.iter() {
+        let gc = run.root.expr_node(gc_id).as_sort_group_clause().expect("group clause cell");
+        maxref = maxref.max(gc.tleSortGroupRef);
+    }
+    let mut grouping_map: mcx::PgVec<'mcx, i16> = mcx::PgVec::new_in(mcx);
+    grouping_map.resize(maxref as usize + 1, 0);
+    for i in 0..run.root.processed_groupClause.len() {
+        let gc_id = run.root.processed_groupClause[i];
+        let sgref = run
+            .root
+            .expr_node(gc_id)
+            .as_sort_group_clause()
+            .expect("group clause cell")
+            .tleSortGroupRef;
+        grouping_map[sgref as usize] = sortgroupref_tle(sgref, &subplan_tlist).resno;
+    }
+    debug_assert!(run.root.grouping_map.is_empty());
+    run.root.grouping_map = grouping_map;
+
+    let gsets_node_list = |gsets: &[mcx::PgVec<'mcx, i32>]| -> PgResult<NodeList<'mcx>> {
+        let mut out = NodeList::nil();
+        for set in gsets {
+            let mut il = types_nodes::list::IntList::nil();
+            for &x in set.iter() {
+                il.lappend(mcx, x)?;
+            }
+            out.lappend(mcx, Node::mk_int_list(mcx, il)?)?;
+        }
+        Ok(out)
+    };
+    let grouping_arrays = |run: &PlannerRun<'mcx>,
+                           group_clause: &[types_pathnodes::NodeId]|
+     -> PgResult<(&'mcx [u32], &'mcx [u32])> {
+        let mut ops: mcx::PgVec<'mcx, u32> = mcx::PgVec::new_in(mcx);
+        let mut colls: mcx::PgVec<'mcx, u32> = mcx::PgVec::new_in(mcx);
+        for &gc_id in group_clause {
+            let gc =
+                run.root.expr_node(gc_id).as_sort_group_clause().expect("group clause cell");
+            ops.push(gc.eqop);
+            colls.push(expr_collation(sortgroupref_tle(gc.tleSortGroupRef, &subplan_tlist).expr));
+        }
+        Ok((mcx::slice_borrow_in(mcx, &ops)?, mcx::slice_borrow_in(mcx, &colls)?))
+    };
+
+    let mut chain = NodeList::nil();
+    if rollups.len() > 1 {
+        debug_assert!(!rollups[0].is_hashed);
+        for rollup in rollups[1..].iter() {
+            assert!(
+                !rollup.is_hashed,
+                "create_groupingsets_plan (createplan.c): hashed rollup; grouping-sets lane"
+            );
+            let new_grp_col_idx = remap_group_col_idx(run, &rollup.groupClause);
+            let sort_plan =
+                make_sort_from_groupcols(run, &rollup.groupClause, &new_grp_col_idx, subplan)?;
+            let strat = if rollup.gsets[0].is_empty() {
+                types_pathnodes::AGG_PLAIN
+            } else {
+                types_pathnodes::AGG_SORTED
+            };
+            let (ops, colls) = grouping_arrays(run, &rollup.groupClause)?;
+            let mut agg = Node::build::<Agg>(mcx)?;
+            agg.plan.targetlist = NodeList::nil();
+            agg.plan.qual = NodeList::nil();
+            agg.plan.lefttree = Some(sort_plan);
+            agg.aggstrategy = strat;
+            agg.aggsplit = types_pathnodes::AGGSPLIT_SIMPLE;
+            agg.numCols = rollup.gsets[0].len() as i32;
+            agg.grpColIdx = mcx::vec_borrow_in(mcx, new_grp_col_idx)?;
+            agg.grpOperators = ops;
+            agg.grpCollations = colls;
+            agg.groupingSets = gsets_node_list(&rollup.gsets)?;
+            agg.numGroups = clamp_cardinality_to_long(rollup.numGroups);
+            agg.transitionSpace = transition_space;
+            // C strips the vestigial Sort after make_agg.
+            // SAFETY: sort_plan was freshly built above; no other handle.
+            unsafe {
+                sort_plan.with_plan_mut(|p| {
+                    p.targetlist = NodeList::nil();
+                    p.lefttree = None;
+                })
+            }
+            .expect("Sort embeds a Plan base");
+            chain.lappend(mcx, agg.seal())?;
+        }
+    }
+
+    let rollup = &rollups[0];
+    let top_grp_col_idx = remap_group_col_idx(run, &rollup.groupClause);
+    let (ops, colls) = grouping_arrays(run, &rollup.groupClause)?;
+    let tlist = build_path_tlist(run, target_id)?;
+    let mut qual = NodeList::nil();
+    for &q in qual_ids.iter() {
+        qual.lappend(mcx, *run.root.expr_node(q))?;
+    }
+    let mut plan = Node::build::<Agg>(mcx)?;
+    plan.plan.targetlist = tlist;
+    plan.plan.qual = qual;
+    plan.plan.lefttree = Some(subplan);
+    plan.aggstrategy = aggstrategy;
+    plan.aggsplit = types_pathnodes::AGGSPLIT_SIMPLE;
+    plan.numCols = rollup.gsets[0].len() as i32;
+    plan.grpColIdx = mcx::vec_borrow_in(mcx, top_grp_col_idx)?;
+    plan.grpOperators = ops;
+    plan.grpCollations = colls;
+    plan.groupingSets = gsets_node_list(&rollup.gsets)?;
+    plan.chain = chain;
+    plan.numGroups = clamp_cardinality_to_long(rollup.numGroups);
+    plan.transitionSpace = transition_space;
+    copy_generic_path_info(run, &mut plan.plan, path_id);
+    Ok(plan.seal())
+}
+
 
 // create_windowagg_plan (createplan.c); runCondition/qual/frame-offset legs
 // dead (loud upstream), startOffset/endOffset always None (default frame).
-// create_windowagg_plan (createplan.c); runCondition/qual legs dead (loud
-// upstream).
 fn create_windowagg_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> PgResult<Node<'mcx>> {
     let (subpath_id, target_id, winclause_id, topwindow) = match run.root.path(path_id) {
         PathNode::WindowAggPath(wp) => {

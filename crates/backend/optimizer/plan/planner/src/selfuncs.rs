@@ -1254,8 +1254,19 @@ pub fn estimate_num_groups<'mcx>(
     group_exprs: &[(NodeId, Node<'mcx>)],
     input_rows: f64,
 ) -> PgResult<f64> {
+    estimate_num_groups_pgset(run, group_exprs, input_rows, None)
+}
+
+/// C's `pgset` form: a grouping set given as 0-based indexes into
+/// `group_exprs`; exprs outside the set are skipped.
+pub fn estimate_num_groups_pgset<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    group_exprs: &[(NodeId, Node<'mcx>)],
+    input_rows: f64,
+    pgset: Option<&[i32]>,
+) -> PgResult<f64> {
     let input_rows = crate::costsize::clamp_row_est(input_rows);
-    if group_exprs.is_empty() {
+    if group_exprs.is_empty() || pgset.is_some_and(|s| s.is_empty()) {
         return Ok(1.0);
     }
 
@@ -1267,7 +1278,10 @@ pub fn estimate_num_groups<'mcx>(
     let mcx = run.mcx;
     let mut varinfos: mcx::PgVec<'_, GroupVarInfo> = mcx::PgVec::new_in(mcx);
     let mut work: mcx::PgVec<'_, (NodeId, Node<'mcx>)> = mcx::PgVec::new_in(mcx);
-    for &(id, node) in group_exprs {
+    for (listidx, &(id, node)) in group_exprs.iter().enumerate() {
+        if pgset.is_some_and(|s| !s.contains(&(listidx as i32))) {
+            continue;
+        }
         if node.node_tag() == NodeTag::T_Const {
             continue;
         }

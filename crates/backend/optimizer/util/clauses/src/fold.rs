@@ -546,6 +546,31 @@ fn ece_mutator<'mcx>(node: Node<'mcx>, cx: &EceContext<'mcx>) -> PgResult<Option
         | NodeTag::T_List => {
             expression_tree_mutator(cx.mcx, node, &mut |n| ece_mutator(n, cx))
         }
+        // C's generic arm again (GroupingFunc lives outside the nodes_core
+        // mutator vocabulary): fold inside args; refs/cols never change.
+        NodeTag::T_GroupingFunc => {
+            let g = node.as_grouping_func().unwrap();
+            let mut changed = false;
+            let mut args = NodeList::nil();
+            for a in &g.args {
+                let e = ece_mutator(a, cx)?;
+                changed |= e.is_some();
+                args.lappend(cx.mcx, e.unwrap_or(a))?;
+            }
+            if !changed {
+                return Ok(None);
+            }
+            Ok(Some(Node::mk(
+                cx.mcx,
+                types_nodes::primnodes::GroupingFunc {
+                    args,
+                    refs: g.refs.clone_in(cx.mcx)?,
+                    cols: g.cols.clone_in(cx.mcx)?,
+                    agglevelsup: g.agglevelsup,
+                    location: g.location,
+                },
+            )?))
+        }
         other => deferred("eval_const_expressions_mutator", other),
     }
 }
