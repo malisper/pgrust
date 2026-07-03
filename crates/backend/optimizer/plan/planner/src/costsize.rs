@@ -243,7 +243,7 @@ pub fn get_parameterized_baserel_size<'mcx>(
     for i in 0..run.root.rel(rel).baserestrictinfo.len() {
         allclauses.push(run.root.rel(rel).baserestrictinfo[i]);
     }
-    let relid = run.root.rel(rel).relid;
+    let relid = run.root.rel(rel).relid as i32;
     let selec = crate::clausesel::clauselist_selectivity(
         run,
         &allclauses,

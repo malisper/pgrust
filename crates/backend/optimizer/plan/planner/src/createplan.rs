@@ -252,7 +252,7 @@ fn replace_nestloop_params_list<'mcx>(
         replace_nestloop_params_mutator(run, n)
     })? {
         Some(l) => Ok(l),
-        None => Ok(*list),
+        None => Ok(list.clone_in(run.mcx)?),
     }
 }
 

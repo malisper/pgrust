@@ -421,7 +421,7 @@ fn pull_up_simple_subquery<'mcx>(
                     offset_expr(mcx, n, rtoffset)
                 })? {
                     Some(l) => l,
-                    None => crte.functions,
+                    None => crte.functions.clone_in(mcx)?,
                 };
                 // SAFETY: pre-seal copy owned by this planner invocation.
                 unsafe {
@@ -438,7 +438,7 @@ fn pull_up_simple_subquery<'mcx>(
                     offset_expr(mcx, n, rtoffset)
                 })? {
                     Some(l) => l,
-                    None => crte.values_lists,
+                    None => crte.values_lists.clone_in(mcx)?,
                 };
                 // SAFETY: as above.
                 unsafe {
@@ -724,7 +724,7 @@ fn replace_vars_in_lateral_subquery<'mcx>(
     let mut changed = false;
     let mut newq = crate::subselect::query_cells_copy(mcx, q)?;
 
-    let mut rep_list = |l: &NodeList<'mcx>, changed: &mut bool| -> PgResult<NodeList<'mcx>> {
+    let rep_list = |l: &NodeList<'mcx>, changed: &mut bool| -> PgResult<NodeList<'mcx>> {
         match clauses::walker::mutate_list(mcx, l, &mut |n| {
             replace_var_expr_su(mcx, n, varno, tlist, 1)
         })? {
@@ -732,7 +732,7 @@ fn replace_vars_in_lateral_subquery<'mcx>(
                 *changed = true;
                 Ok(nl)
             }
-            None => Ok(*l),
+            None => Ok(l.clone_in(mcx)?),
         }
     };
     newq.targetList = rep_list(&newq.targetList, &mut changed)?;
