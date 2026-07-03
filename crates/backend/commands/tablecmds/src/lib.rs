@@ -149,7 +149,11 @@ pub fn DefineRelation<'mcx>(
     owner_id: Oid,
     query_string: &str,
 ) -> PgResult<Oid> {
-    debug_assert!(relkind == RELKIND_RELATION || relkind == RELKIND_SEQUENCE);
+    debug_assert!(
+        relkind == RELKIND_RELATION
+            || relkind == RELKIND_SEQUENCE
+            || relkind == types_rel::RELKIND_VIEW
+    );
     let partitioned = stmt.partspec.is_some();
     let relkind = if partitioned { types_rel::RELKIND_PARTITIONED_TABLE } else { relkind };
     let rv = stmt.relation.expect("CreateStmt.relation");

@@ -1376,9 +1376,11 @@ dependencies = [
  "catalog_heap",
  "catalog_index",
  "catalog_indexing",
+ "catalog_namespace",
  "datum",
  "dependency_seams",
  "fmgr_seams",
+ "format_type",
  "genam",
  "init_small",
  "lmgr",
@@ -2273,6 +2275,25 @@ dependencies = [
  "xlogreader",
  "xlogreader_seams",
  "xlogutils",
+]
+
+[[package]]
+name = "commands_view"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "lsyscache",
+ "mcx",
+ "parse_expr",
+ "parser_analyze",
+ "rewrite_define",
+ "tablecmds",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_portal",
+ "types_rel",
+ "xact",
 ]
 
 [[package]]
@@ -7954,6 +7975,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "rewrite_define"
+version = "0.1.0"
+dependencies = [
+ "catalog",
+ "catalog_dependency",
+ "catalog_indexing",
+ "datum",
+ "fmgr_seams",
+ "genam",
+ "heaptuple",
+ "lsyscache",
+ "mcx",
+ "outfuncs",
+ "parse_expr",
+ "pg_depend",
+ "relcache",
+ "table",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_rel",
+ "types_scan",
+ "types_tuple",
+ "varlena",
+]
+
+[[package]]
 name = "rewrite_handler"
 version = "0.1.0"
 dependencies = [
@@ -8014,6 +8062,7 @@ dependencies = [
  "origin_seams",
  "parallel_seams",
  "parse_expr",
+ "parse_relation",
  "parser_analyze",
  "parser_driver",
  "parser_seams",
@@ -10152,6 +10201,7 @@ dependencies = [
  "commands_cluster",
  "commands_comment",
  "commands_vacuum",
+ "commands_view",
  "copy_cmd",
  "dbcommands",
  "discard",

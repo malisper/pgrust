@@ -726,6 +726,26 @@ fn dispatch_switch<'mcx>(
             let stmt = stmt_node.as_alter_enum_stmt().expect("AlterEnumStmt");
             typecmds::AlterEnum(mcx, stmt)?;
         }
+        T_ViewStmt => {
+            // Retention contract as unify_stmt_lifetime: the statement arena
+            // outlives the utility call; nothing derived escapes it.
+            let stmt = parsetree
+                .as_variant::<types_nodes::rawnodes::ViewStmt>()
+                .expect("ViewStmt");
+            let stmt = unsafe {
+                core::mem::transmute::<
+                    &types_nodes::rawnodes::ViewStmt<'_>,
+                    &types_nodes::rawnodes::ViewStmt<'mcx>,
+                >(stmt)
+            };
+            commands_view::DefineView(
+                mcx,
+                stmt,
+                source_text,
+                pstmt.stmt_location,
+                pstmt.stmt_len,
+            )?;
+        }
         _ => handler_gap("ProcessUtilitySlow DDL fan-out (utility slow lane)"),
     }
     Ok(())

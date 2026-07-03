@@ -151,6 +151,22 @@ fn install() {
                 attgenerated: 0,
             }))
         });
+        s::pg_class_relname::set(|relid| {
+            Ok((relid == REL_OID).then(|| name("orders")))
+        });
+        s::lookup_pg_class_ls_shape::set(|relid| {
+            Ok((relid == REL_OID).then(|| syscache_seams::PgClassLsShape {
+                relnamespace: 2200,
+                reltype: 0,
+                relam: 0,
+                reltablespace: 0,
+                relnatts: 2,
+                relkind: b'r' as i8,
+                relpersistence: b'p' as i8,
+                relispartition: false,
+                relhassubclass: false,
+            }))
+        });
         namespace_seams::type_is_visible::set(|_| Ok(true));
         fmgr_seams::fmgr_info::set(|foid| {
             let f = match foid {
@@ -252,4 +268,47 @@ fn simple_quote_literal_doubles_quotes() {
     let mut buf = String::new();
     deparse::simple_quote_literal(&mut buf, "it's");
     assert_eq!(buf, "'it''s'");
+}
+
+// ev_action fixtures + expected strings captured from live C PG 18.3
+// (Homebrew, 2026-07-03): CREATE VIEW then pg_rewrite.ev_action /
+// pg_get_viewdef.
+fn deparse_view_action(action: &str, attnames: &[&str]) -> String {
+    install();
+    let ctx = MemoryContext::new("ruleutils viewdef test");
+    let mcx = ctx.mcx();
+    let node = readfuncs::stringToNode(mcx, action.trim_end()).unwrap();
+    let q = node.as_list().unwrap().nth(0).as_query().unwrap();
+    let mut dctx = deparse::DeparseContext::new(mcx, PRETTYFLAG_INDENT);
+    dctx.wrap_column = 0;
+    let rd = std::rc::Rc::new(attnames.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+    query::get_query_def(q, &mut dctx, Some(rd), true).unwrap();
+    dctx.buf.push(';');
+    dctx.buf
+}
+
+#[test]
+fn viewdef_select_1_matches_c() {
+    let action = include_str!("fixtures/v1_action.txt");
+    assert_eq!(deparse_view_action(action, &["?column?"]), " SELECT 1 AS \"?column?\";");
+}
+
+#[test]
+fn viewdef_union_all_limit_matches_c() {
+    let action = include_str!("fixtures/v11_action.txt");
+    assert_eq!(
+        deparse_view_action(action, &["two"]),
+        " SELECT 2 AS two\nUNION ALL\n SELECT 3 AS two\n OFFSET 1\n LIMIT 1;"
+    );
+}
+
+#[test]
+fn rtable_name_dedup_appends_digits() {
+    install();
+    let ctx = MemoryContext::new("ruleutils dedup test");
+    let mcx = ctx.mcx();
+    let dpns = query::deparse_context_for(mcx, "orders", REL_OID).unwrap();
+    assert_eq!(dpns.rtable_names, vec![Some("orders".to_string())]);
+    assert_eq!(dpns.rtable_columns[0].colnames.len(), 2);
+    assert_eq!(dpns.rtable_columns[0].colnames[0].as_deref(), Some("id"));
 }

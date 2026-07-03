@@ -161,10 +161,17 @@ pub fn get_typavgwidth(typid: Oid, typmod: i32) -> PgResult<i32> {
     }
     let maxwidth = format_type::type_maximum_size(typid, typmod);
     if maxwidth > 0 {
+        const BPCHAROID: Oid = 1042;
+        if typid == BPCHAROID {
+            return Ok(maxwidth);
+        }
         if maxwidth <= 32 {
             return Ok(maxwidth);
         }
-        return Ok(32 + (maxwidth - 32) / 2);
+        if maxwidth < 1000 {
+            return Ok(32 + (maxwidth - 32) / 2);
+        }
+        return Ok(32 + (1000 - 32) / 2);
     }
     Ok(32)
 }

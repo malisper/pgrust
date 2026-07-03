@@ -6,11 +6,14 @@
 
 pub mod builtins;
 mod deparse;
+mod query;
+mod viewdef;
 #[cfg(test)]
 mod tests;
 
 pub use builtins::RULEUTILS_BUILTINS;
 pub use deparse::deparse_expression_pretty;
+pub use viewdef::pg_get_viewdef_worker;
 pub use format_type::quote_identifier;
 
 use cache_syscache::{
@@ -44,7 +47,7 @@ pub(crate) fn gap(func: &str, what: &str) -> ! {
 
 #[cold]
 #[inline(never)]
-fn cache_lookup_failed(what: &str, oid: Oid) -> Box<PgError> {
+pub(crate) fn cache_lookup_failed(what: &str, oid: Oid) -> Box<PgError> {
     PgError::error(format!("cache lookup failed for {what} {oid}")).into()
 }
 
@@ -60,7 +63,7 @@ fn tupdesc_for(cache_id: i32) -> &'static TupleDescData<'static> {
 }
 
 /// GETSTRUCT-shape read: fixed-width NOT NULL leading column.
-fn getattr(tuple: &HeapTupleData<'_>, cache_id: i32, attnum: i32) -> Datum {
+pub(crate) fn getattr(tuple: &HeapTupleData<'_>, cache_id: i32, attnum: i32) -> Datum {
     // SAFETY: callers pass a tuple of this catalog's row type and a fixed
     // NOT NULL leading attnum (GETSTRUCT invariant).
     unsafe { types_tuple::fastgetattr_fixed(tuple, attnum, tupdesc_for(cache_id)) }
@@ -73,7 +76,7 @@ fn getattr_null(tuple: &HeapTupleData<'_>, cache_id: i32, attnum: i32) -> Option
     if isnull { None } else { Some(d) }
 }
 
-fn name_at(d: Datum) -> String {
+pub(crate) fn name_at(d: Datum) -> String {
     // SAFETY: NameData column datums point at the 64-byte in-tuple buffer.
     let n = unsafe { *(d.as_usize() as *const NameData) };
     String::from_utf8_lossy(n.name_str()).into_owned()
