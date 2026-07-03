@@ -96,6 +96,22 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
                 panic!("fix_scan_expr (setrefs.c): resconstantqual; M2 qual lane");
             }
         }
+        NodeTag::T_SeqScan => {
+            let s = plan.as_seq_scan().unwrap();
+            debug_assert!(s.scan.scanrelid as i32 + rtoffset > 0);
+            fix_scan_list(run, &s.scan.plan.targetlist, rtoffset)?;
+            fix_scan_list(run, &s.scan.plan.qual, rtoffset)?;
+        }
+        NodeTag::T_IndexScan => {
+            let s = plan.as_index_scan().unwrap();
+            debug_assert!(s.scan.scanrelid as i32 + rtoffset > 0);
+            fix_scan_list(run, &s.scan.plan.targetlist, rtoffset)?;
+            fix_scan_list(run, &s.scan.plan.qual, rtoffset)?;
+            fix_scan_list(run, &s.indexqual, rtoffset)?;
+            fix_scan_list(run, &s.indexqualorig, rtoffset)?;
+            fix_scan_list(run, &s.indexorderby, rtoffset)?;
+            fix_scan_list(run, &s.indexorderbyorig, rtoffset)?;
+        }
         other => panic!("set_plan_refs (setrefs.c): {other:?}; M2 plan lane"),
     }
     Ok(plan)
@@ -116,6 +132,11 @@ fn fix_scan_list<'mcx>(run: &mut PlannerRun<'mcx>, list: &NodeList<'mcx>, rtoffs
 
 fn fix_scan_expr_walker<'mcx>(run: &mut PlannerRun<'mcx>, node: Node<'mcx>) -> PgResult<()> {
     match node.node_tag() {
+        // fix_expr_common touches no Var fields; INDEX_VAR Vars pass through.
+        NodeTag::T_Var => Ok(()),
+        NodeTag::T_RelabelType => {
+            fix_scan_expr_walker(run, node.as_relabel_type().unwrap().arg)
+        }
         NodeTag::T_Const => {
             let c = node.as_const().unwrap();
             // fix_expr_common: a regclass Const is a plan dependency.

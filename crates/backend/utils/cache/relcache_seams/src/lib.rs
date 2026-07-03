@@ -10,6 +10,15 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // RelationGetIndexList (relcache.c), OID list form; the caller holds the
+    // relation open. The rd_indexlist cache lives with the implementation.
+    pub fn relation_get_index_list<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        relid: Oid,
+    ) -> PgResult<mcx::PgVec<'mcx, Oid>>
+);
+
+seam_core::seam!(
     pub fn relation_cache_invalidate(debug_discard: bool) -> PgResult<()>
 );
 

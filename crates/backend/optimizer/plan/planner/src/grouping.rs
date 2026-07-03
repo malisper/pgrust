@@ -54,18 +54,11 @@ pub fn grouping_planner<'mcx>(run: &mut PlannerRun<'mcx>, tuple_fraction: f64) -
     let scanjoin_target = final_target;
 
     let reltarget = run.rel_reltarget_id(current_rel);
-    // C uses structural equal(); loud when only a deep walk could decide.
-    let same_exprs = {
-        let a = &run.root.pathtarget(scanjoin_target).exprs;
-        let b = &run.root.pathtarget(reltarget).exprs;
-        if a.len() != b.len() {
-            false
-        } else if a.as_slice() == b.as_slice() {
-            true
-        } else {
-            panic!("equal() over expression trees (equalfuncs.c): M2 lane");
-        }
-    };
+    let same_exprs = crate::pathnode::exprs_same(
+        run,
+        &run.root.pathtarget(scanjoin_target).exprs,
+        &run.root.pathtarget(reltarget).exprs,
+    );
     apply_scanjoin_target_to_paths(
         run,
         current_rel,
@@ -175,5 +168,7 @@ fn apply_scanjoin_target_to_paths<'mcx>(
     }
     debug_assert!(run.root.rel(rel_id).partial_pathlist.is_empty());
     run.root.rel_mut(rel_id).pathtarget_id = Some(scanjoin_target);
+    // Reassess the cheapest paths now that costs may have changed.
+    crate::pathnode::set_cheapest(run, rel_id)?;
     Ok(())
 }

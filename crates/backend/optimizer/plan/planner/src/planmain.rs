@@ -1,3 +1,6 @@
+//! query_planner (planmain.c): the trivial RTE_RESULT shortcut plus the
+//! single-baserel spine; everything multi-rel is a named panic.
+
 use mcx::PgVec;
 use types_error::PgResult;
 use types_nodes::parsenodes::RTEKind;
@@ -9,8 +12,6 @@ use crate::relnode::{build_simple_rel, setup_simple_rel_arrays};
 use crate::run::PlannerRun;
 use crate::{gucs, is_parallel_safe_opt};
 
-// query_planner (planmain.c): only the single-RTE_RESULT shortcut is live;
-// the deconstruct_jointree/make_one_rel spine is the M2 join lane.
 pub fn query_planner<'mcx>(
     run: &mut PlannerRun<'mcx>,
     qp_callback: fn(&mut PlannerRun<'mcx>) -> PgResult<()>,
@@ -26,7 +27,7 @@ pub fn query_planner<'mcx>(
             let varno = jtnode.as_range_tbl_ref().unwrap().rtindex as u32;
             let rte = run.rte(varno as usize);
             if rte.rtekind == RTEKind::RTE_RESULT {
-                let final_rel = build_simple_rel(&mut run.root, varno, rte.rtekind);
+                let final_rel = build_simple_rel(run, varno, rte.rtekind)?;
 
                 if run.glob.parallel_mode_ok
                     && (run.root.query_level > 1
@@ -40,7 +41,8 @@ pub fn query_planner<'mcx>(
                 let quals: PgVec<'mcx, types_pathnodes::NodeId> = PgVec::new_in(run.mcx);
                 debug_assert!(jointree.quals.is_none());
                 let path = create_group_result_path(run, final_rel, target_id, quals);
-                add_path(run, final_rel, path);
+                let pid = run.root.alloc_path(path);
+                add_path(run, final_rel, pid);
 
                 set_cheapest(run, final_rel)?;
                 run.root.ec_merging_done = true;
@@ -50,10 +52,45 @@ pub fn query_planner<'mcx>(
         }
     }
 
-    panic!(
-        "query_planner (planmain.c): non-trivial jointree \
-         (deconstruct_jointree/make_one_rel); M2 scan/join lane"
-    );
+    // General spine, single-baserel arm.
+    for item in &jointree.fromlist {
+        match item.node_tag() {
+            NodeTag::T_RangeTblRef => {
+                let varno = item.as_range_tbl_ref().unwrap().rtindex as u32;
+                let rte = run.rte(varno as usize);
+                build_simple_rel(run, varno, rte.rtekind)?;
+            }
+            other => panic!("add_base_rels_to_query (initsplan.c): {other:?}; M2 join lane"),
+        }
+    }
+
+    // remove_useless_groupby_columns / find_placeholders_in_jointree /
+    // find_lateral_references: no GROUP BY, PHVs or lateral refs exist.
+    crate::initsplan::build_base_rel_tlists(run)?;
+    debug_assert!(!run.root.hasLateralRTEs);
+
+    let joinlist = crate::initsplan::deconstruct_jointree(run)?;
+
+    // No ECs exist (initsplan.rs documents the EC-const divergence).
+    debug_assert!(run.root.eq_classes.is_empty());
+    run.root.ec_merging_done = true;
+
+    qp_callback(run)?;
+
+    // fix_placeholder_input_needed_levels / join removal /
+    // reduce_unique_semijoins / self-join removal / lateral join info /
+    // match_foreign_keys_to_quals / extract_restriction_or_clauses /
+    // add_other_rels_to_query / row identity vars: all no-ops with one
+    // baserel, no placeholders, no fkeys and no OR clauses.
+    debug_assert!(run.root.placeholder_list.is_empty() && run.root.fkey_list.is_empty());
+
+    let final_rel = crate::allpaths::make_one_rel(run, &joinlist)?;
+    if run.root.rel(final_rel).cheapest_total_path.is_none()
+        || run.root.rel(final_rel).pathlist.is_empty()
+    {
+        panic!("failed to construct the join relation");
+    }
+    Ok(final_rel)
 }
 
 // The UPPERREL_FINAL rel accessor both planner.c call sites use.

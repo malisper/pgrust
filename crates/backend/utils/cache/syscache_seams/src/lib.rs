@@ -66,6 +66,28 @@ seam_core::seam!(
     pub fn lookup_authid_by_rolname(rolname: &str) -> PgResult<Option<(Oid, bool)>>
 );
 
+#[derive(Clone, Copy, Debug)]
+pub struct AuthIdSessionShape {
+    pub roleid: Oid,
+    pub rolname: types_tuple::NameData,
+    pub rolsuper: bool,
+    pub rolcanlogin: bool,
+    pub rolconnlimit: i32,
+}
+
+seam_core::seam!(
+    // SearchSysCache1(AUTHNAME, rolename) projected to the five fields
+    // InitializeSessionUserId reads; None mirrors !HeapTupleIsValid.
+    pub fn lookup_authid_session_by_rolname(
+        rolname: &str,
+    ) -> PgResult<Option<AuthIdSessionShape>>
+);
+
+seam_core::seam!(
+    // SearchSysCache1(AUTHOID, roleid), same projection.
+    pub fn lookup_authid_session_by_oid(roleid: Oid) -> PgResult<Option<AuthIdSessionShape>>
+);
+
 use datum::Datum;
 use mcx::{Mcx, PgString, PgVec};
 use types_core::AttrNumber;
@@ -489,6 +511,32 @@ seam_core::seam!(
 
 seam_core::seam!(
     pub fn pg_statistic_stawidth(relid: Oid, attnum: AttrNumber, inh: bool) -> PgResult<Option<i32>>
+);
+
+pub struct PgProcCostShape {
+    pub procost: f32,
+    pub prosupport: Oid,
+}
+
+seam_core::seam!(
+    // SearchSysCache1(PROCOID) projection for add_function_cost/get_function_rows.
+    pub fn pg_proc_cost_shape(funcid: Oid) -> PgResult<Option<PgProcCostShape>>
+);
+
+pub struct PgStatisticShape {
+    pub stanullfrac: f32,
+    pub stawidth: i32,
+    pub stadistinct: f32,
+}
+
+seam_core::seam!(
+    // SearchSysCache3(STATRELATTINH) scalar projection; None mirrors
+    // !HeapTupleIsValid. Slot arrays stay behind pg_statistic_slot_shape.
+    pub fn lookup_pg_statistic_shape(
+        relid: Oid,
+        attnum: AttrNumber,
+        inh: bool,
+    ) -> PgResult<Option<PgStatisticShape>>
 );
 
 seam_core::seam!(

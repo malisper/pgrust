@@ -4,12 +4,12 @@
 
 use core::mem::offset_of;
 
-use types_core::{Cardinality, Cost, Index, ParseLoc};
+use types_core::{Cardinality, Cost, Index, Oid, ParseLoc};
 
 use crate::bitmapset::Bitmapset;
 use crate::list::{IntList, NodeList, OidList};
 use crate::node_tree::{Node, NodeRep, NodeVariant};
-use crate::nodes_enums::CmdType;
+use crate::nodes_enums::{CmdType, LimitOption};
 use crate::tags::NodeTag;
 
 pub struct PlannedStmt<'mcx> {
@@ -170,6 +170,31 @@ pub struct IndexOnlyScan<'mcx> {
     pub indexorderdir: i32,
 }
 
+/// Per-key arrays are C's `pg_node_attr(array_size(numCols))` parallel arrays.
+#[derive(Default)]
+#[repr(C)]
+pub struct Sort<'mcx> {
+    pub plan: Plan<'mcx>,
+    pub numCols: i32,
+    pub sortColIdx: &'mcx [i16],
+    pub sortOperators: &'mcx [Oid],
+    pub collations: &'mcx [Oid],
+    pub nullsFirst: &'mcx [bool],
+}
+
+#[derive(Default)]
+#[repr(C)]
+pub struct Limit<'mcx> {
+    pub plan: Plan<'mcx>,
+    pub limitOffset: Option<Node<'mcx>>,
+    pub limitCount: Option<Node<'mcx>>,
+    pub limitOption: LimitOption,
+    pub uniqNumCols: i32,
+    pub uniqColIdx: &'mcx [i16],
+    pub uniqOperators: &'mcx [Oid],
+    pub uniqCollations: &'mcx [Oid],
+}
+
 /// # Safety: implementors must be `repr(C)` with a [`Plan`] first field, so a
 /// `NodeRep<Self>` reads as a `NodeRep<Plan>` prefix, and their tag must be
 /// listed in [`is_plan_tag`].
@@ -191,6 +216,12 @@ unsafe impl<'mcx> NodeVariant<'mcx> for IndexScan<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for IndexOnlyScan<'mcx> {
     const TAG: NodeTag = NodeTag::T_IndexOnlyScan;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for Sort<'mcx> {
+    const TAG: NodeTag = NodeTag::T_Sort;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for Limit<'mcx> {
+    const TAG: NodeTag = NodeTag::T_Limit;
+}
 // SAFETY: repr(C), Plan first (offset asserted below), tag in is_plan_tag.
 unsafe impl<'mcx> PlanVariant<'mcx> for Result<'mcx> {}
 // SAFETY: repr(C), Plan first via the Scan base (offsets asserted below).
@@ -199,6 +230,10 @@ unsafe impl<'mcx> PlanVariant<'mcx> for SeqScan<'mcx> {}
 unsafe impl<'mcx> PlanVariant<'mcx> for IndexScan<'mcx> {}
 // SAFETY: repr(C), Plan first via the Scan base (offsets asserted below).
 unsafe impl<'mcx> PlanVariant<'mcx> for IndexOnlyScan<'mcx> {}
+// SAFETY: repr(C), Plan first (offsets asserted below), tag in is_plan_tag.
+unsafe impl<'mcx> PlanVariant<'mcx> for Sort<'mcx> {}
+// SAFETY: repr(C), Plan first (offsets asserted below), tag in is_plan_tag.
+unsafe impl<'mcx> PlanVariant<'mcx> for Limit<'mcx> {}
 
 const _: () = {
     assert!(offset_of!(Result, plan) == 0);
@@ -218,12 +253,21 @@ const _: () = {
     assert!(
         offset_of!(NodeRep<IndexOnlyScan>, payload) == offset_of!(NodeRep<Plan>, payload)
     );
+    assert!(offset_of!(Sort, plan) == 0);
+    assert!(offset_of!(NodeRep<Sort>, payload) == offset_of!(NodeRep<Plan>, payload));
+    assert!(offset_of!(Limit, plan) == 0);
+    assert!(offset_of!(NodeRep<Limit>, payload) == offset_of!(NodeRep<Plan>, payload));
 };
 
 fn is_plan_tag(tag: NodeTag) -> bool {
     matches!(
         tag,
-        NodeTag::T_Result | NodeTag::T_SeqScan | NodeTag::T_IndexScan | NodeTag::T_IndexOnlyScan
+        NodeTag::T_Result
+            | NodeTag::T_SeqScan
+            | NodeTag::T_IndexScan
+            | NodeTag::T_IndexOnlyScan
+            | NodeTag::T_Sort
+            | NodeTag::T_Limit
     )
 }
 
@@ -250,6 +294,16 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_index_only_scan(self) -> Option<&'mcx IndexOnlyScan<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_sort(self) -> Option<&'mcx Sort<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_limit(self) -> Option<&'mcx Limit<'mcx>> {
         self.as_variant()
     }
 

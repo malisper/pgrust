@@ -21,8 +21,19 @@ clauses = { path = "../../util/clauses" }
 lsyscache = { path = "../../../utils/cache/lsyscache" }
 guc_tables = { path = "../../../utils/misc/guc_tables" }
 init_small = { path = "../../../utils/init/init_small" }
+types_rel = { path = "../../../../_support/types/rel" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+types_relscan = { path = "../../../access/index/relscan" }
+syscache_seams = { path = "../../../utils/cache/syscache_seams" }
+relcache_seams = { path = "../../../utils/cache/relcache_seams" }
+bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
+table = { path = "../../../access/table/table" }
+tableam = { path = "../../../access/table/tableam" }
+indexam = { path = "../../../access/index/indexam" }
+nbtree = { path = "../../../access/nbtree/nbtree" }
+vars = { path = "../../util/vars" }
 
 [dev-dependencies]
-syscache_seams = { path = "../../../utils/cache/syscache_seams" }
 clauses_seams = { path = "../../util/clauses_seams" }
-types_tuple = { path = "../../../../_support/types/types_tuple" }
+relation_seams = { path = "../../../access/common/relation_seams" }
+types_nbtree = { path = "../../../../_support/types/types_nbtree" }
