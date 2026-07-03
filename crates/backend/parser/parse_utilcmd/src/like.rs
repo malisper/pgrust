@@ -588,7 +588,9 @@ fn read_indclass<'mcx>(mcx: Mcx<'mcx>, index_id: Oid, nkeys: usize) -> PgResult<
         core::slice::from_raw_parts(p.add(1) as *const Oid, (*p).dim1 as usize)
     };
     let mut out: PgVec<'mcx, Oid> = mcx::vec_with_capacity_in(mcx, nkeys)?;
-    out.extend(vals[..nkeys].iter().copied());
+    for &v in &vals[..nkeys] {
+        out.push(v);
+    }
     genam::systable_endscan(mcx, scan)?;
     rel.close(AccessShareLock)?;
     Ok(out)
