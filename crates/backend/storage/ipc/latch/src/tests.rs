@@ -421,3 +421,56 @@ fn recovery_wakeup_handle_panics_loudly() {
     let result = catch_unwind(|| latch_ref(LatchHandle::recovery_wakeup()));
     assert!(result.is_err());
 }
+
+static DRAINS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static DRAIN_FAIL_NEXT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[test]
+fn wait_latch_runs_thread_signal_drain() {
+    let _g = TEST_LOCK.lock().unwrap();
+    install_mock();
+    SetMyProcPid(43);
+    SetIsUnderPostmaster(false);
+
+    static INSTALL: Once = Once::new();
+    INSTALL.call_once(|| {
+        procsignal_seams::drain_thread_signals::set(|| {
+            DRAINS.fetch_add(1, SeqCst);
+            if DRAIN_FAIL_NEXT.swap(false, SeqCst) {
+                return Err(Box::new(types_error::PgError::new(
+                    types_error::FATAL,
+                    "terminating connection due to administrator command",
+                )));
+            }
+            Ok(())
+        });
+    });
+
+    let h = fresh_latch();
+    InitLatch(h);
+    SetMyLatch(Some(h));
+    InitializeLatchWaitSet().unwrap();
+
+    with_mock(|m| {
+        m.wait_result = Ok(Some(WaitEvent {
+            pos: 0,
+            events: WL_LATCH_SET,
+            fd: PGINVALID_SOCKET,
+            user_data: None,
+        }));
+    });
+    let before = DRAINS.load(SeqCst);
+    assert_eq!(WaitLatch(Some(h), WL_LATCH_SET, 0, 0).unwrap(), WL_LATCH_SET);
+    assert_eq!(DRAINS.load(SeqCst), before + 1);
+
+    DRAIN_FAIL_NEXT.store(true, SeqCst);
+    let err = WaitLatch(Some(h), WL_LATCH_SET, 0, 0).unwrap_err();
+    assert_eq!(err.level(), types_error::FATAL);
+
+    with_mock(|m| m.wait_result = Ok(None));
+    let rc = WaitLatchOrSocket(Some(h), WL_LATCH_SET | WL_TIMEOUT, PGINVALID_SOCKET, 1, 0).unwrap();
+    assert_eq!(rc, WL_TIMEOUT);
+    assert_eq!(DRAINS.load(SeqCst), before + 3);
+
+    SetMyLatch(None);
+}

@@ -72,6 +72,14 @@ fn cleanup_current() {
     f(0, arg);
 }
 
+// EmitProcSignalBarrier dirties every slot's check mask (unused slots never
+// absorb); scrub so shape tests see the init state.
+fn scrub_barrier_masks() {
+    for s in proc_signal().psh_slot {
+        s.pss_barrierCheckMask.store(0, Relaxed);
+    }
+}
+
 fn slot(procno: ProcNumber) -> &'static ProcSignalSlot {
     &proc_signal().psh_slot[procno as usize]
 }
@@ -202,6 +210,7 @@ fn barrier_roundtrip_emit_handle_process_wait() {
     assert_eq!(*BROADCASTS.lock().unwrap(), vec![6]);
 
     WaitForProcSignalBarrier(generation).unwrap();
+    scrub_barrier_masks();
     cleanup_current();
 }
 
@@ -233,6 +242,7 @@ fn barrier_failure_and_error_rearm_the_bits() {
     ProcessProcSignalBarrier().unwrap();
     assert_eq!(s.pss_barrierCheckMask.load(Relaxed), 0);
     assert_eq!(s.pss_barrierGeneration.load(Relaxed), generation);
+    scrub_barrier_masks();
     cleanup_current();
 }
 
@@ -247,10 +257,126 @@ fn cancel_request_key_checks() {
     SendCancelRequest(1008, &[1, 2, 3, 9]);
     SendCancelRequest(1008, &[1, 2, 3]);
     assert_eq!(slot(8).pss_pid.load(Relaxed), 1008);
+    assert_eq!(slot(8).pss_pendingThreadSignals.load(Relaxed), 0);
 
-    let delivery = std::panic::catch_unwind(|| SendCancelRequest(1008, &[1, 2, 3, 4]));
-    assert!(delivery.is_err(), "matching key must reach the unported delivery panic");
+    pqsignal_thread(libc::SIGINT, ThreadSignalHandler::Simple(observe_sigint));
+    OBSERVED_SIGINT.store(false, SeqCst);
+    SendCancelRequest(1008, &[1, 2, 3, 4]);
+    assert_eq!(
+        slot(8).pss_pendingThreadSignals.load(Relaxed),
+        1 << libc::SIGINT as u32
+    );
+    DrainThreadSignals().unwrap();
+    assert!(OBSERVED_SIGINT.load(SeqCst));
+    assert_eq!(slot(8).pss_pendingThreadSignals.load(Relaxed), 0);
     cleanup_current();
+}
+
+static OBSERVED_SIGINT: AtomicBool = AtomicBool::new(false);
+static OBSERVED_SIGTERM: AtomicBool = AtomicBool::new(false);
+
+fn observe_sigint() {
+    OBSERVED_SIGINT.store(true, SeqCst);
+}
+
+fn observe_sigterm() {
+    OBSERVED_SIGTERM.store(true, SeqCst);
+}
+
+#[test]
+fn thread_signal_cross_thread_send_wakes_target_drain_runs_handler() {
+    setup();
+    let _guard = serial();
+    register(10, 1010, &[]);
+    pqsignal_thread(libc::SIGTERM, ThreadSignalHandler::Simple(observe_sigterm));
+    OBSERVED_SIGTERM.store(false, SeqCst);
+
+    let target_latch = &lmgr_proc::GetPGProcByNumber(10).procLatch;
+    target_latch.is_set.store(0, SeqCst);
+
+    let sender = std::thread::spawn(|| {
+        assert_eq!(SendThreadSignal(4242, libc::SIGTERM), -1);
+        SendThreadSignal(1010, libc::SIGTERM)
+    });
+    assert_eq!(sender.join().unwrap(), 0);
+    assert_eq!(target_latch.is_set.load(SeqCst), 1);
+
+    DrainThreadSignals().unwrap();
+    assert!(OBSERVED_SIGTERM.load(SeqCst));
+    DrainThreadSignals().unwrap(); /* empty mailbox is a no-op */
+    cleanup_current();
+}
+
+#[test]
+fn send_proc_signal_pends_sigusr1_and_drain_reaches_cfi_flags() {
+    setup();
+    let _guard = serial();
+    register(11, 1011, &[]);
+    own_local_my_latch();
+    g::SetInterruptPending(false);
+    g::SetProcSignalBarrierPending(false);
+
+    assert_eq!(SendProcSignal(1011, ProcSignalReason::PROCSIG_BARRIER, 11), 0);
+    assert_eq!(
+        slot(11).pss_pendingThreadSignals.load(Relaxed),
+        1 << libc::SIGUSR1 as u32
+    );
+
+    // ProcSignalInit's default SIGUSR1 disposition runs the C handler.
+    DrainThreadSignals().unwrap();
+    assert!(g::InterruptPending());
+    assert!(g::ProcSignalBarrierPending());
+    g::SetInterruptPending(false);
+    g::SetProcSignalBarrierPending(false);
+    cleanup_current();
+}
+
+#[test]
+fn drain_without_disposition_is_loud() {
+    setup();
+    let _guard = serial();
+    register(12, 1012, &[]);
+
+    assert_eq!(SendThreadSignal(1012, libc::SIGHUP), 0);
+    let outcome = std::panic::catch_unwind(DrainThreadSignals);
+    let msg = *outcome.unwrap_err().downcast::<String>().unwrap();
+    assert!(msg.contains("pqsignal_thread"), "got: {msg}");
+    cleanup_current();
+}
+
+#[test]
+fn drain_error_keeps_undelivered_signals_pending() {
+    setup();
+    let _guard = serial();
+    register(13, 1013, &[]);
+    pqsignal_thread(
+        libc::SIGINT,
+        ThreadSignalHandler::Fallible(|| Err(Box::new(types_error::PgError::new(ERROR, "boom")))),
+    );
+    pqsignal_thread(libc::SIGTERM, ThreadSignalHandler::Simple(observe_sigterm));
+    OBSERVED_SIGTERM.store(false, SeqCst);
+
+    assert_eq!(SendThreadSignal(1013, libc::SIGINT), 0);
+    assert_eq!(SendThreadSignal(1013, libc::SIGTERM), 0);
+    assert!(DrainThreadSignals().is_err()); /* SIGINT (2) drains first */
+    assert!(!OBSERVED_SIGTERM.load(SeqCst));
+    assert_eq!(
+        slot(13).pss_pendingThreadSignals.load(Relaxed),
+        1 << libc::SIGTERM as u32
+    );
+
+    DrainThreadSignals().unwrap();
+    assert!(OBSERVED_SIGTERM.load(SeqCst));
+    cleanup_current();
+}
+
+#[test]
+fn thread_signal_rejects_unrenderable_signals() {
+    setup();
+    let _guard = serial();
+    assert_eq!(SendThreadSignal(-1010, libc::SIGTERM), -1);
+    let kill = std::panic::catch_unwind(|| SendThreadSignal(1010, libc::SIGKILL));
+    assert!(kill.is_err());
 }
 
 #[test]

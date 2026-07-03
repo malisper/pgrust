@@ -362,6 +362,8 @@ pub fn PostgresMain(dbname: &str, username: &str) -> ! {
 fn postgres_main_inner(dbname: &str, username: &str) -> PgResult<()> {
     assert!(!dbname.is_empty() || !username.is_empty());
 
+    crate::install_thread_signal_handlers();
+
     timeout_seams::initialize_timeouts::call(); /* establishes SIGALRM handler */
 
     if elog::config::where_to_send_output() == CommandDest::Remote {

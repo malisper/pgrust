@@ -2164,7 +2164,6 @@ dependencies = [
  "pmsignal_seams",
  "ps_status_seams",
  "resowner",
- "resowner_seams",
  "s_lock_seams",
  "shmem_seams",
  "standby_seams",
@@ -2468,6 +2467,7 @@ dependencies = [
  "execscan",
  "exectuples",
  "executils",
+ "heapam_visibility_seams",
  "indexam",
  "init_small",
  "mcx",
@@ -2475,6 +2475,9 @@ dependencies = [
  "nbtree",
  "nodeindexscan",
  "predicate_seams",
+ "procarray_seams",
+ "pruneheap_seams",
+ "smgr_seams",
  "syscache_seams",
  "tableam",
  "transam_xlog_seams",
@@ -2489,6 +2492,7 @@ dependencies = [
  "types_snapshot",
  "types_storage",
  "types_tuple",
+ "visibilitymap",
 ]
 
 [[package]]
@@ -2575,6 +2579,19 @@ dependencies = [
 [[package]]
 name = "nodesort"
 version = "0.1.0"
+dependencies = [
+ "datum",
+ "exectuples",
+ "executils",
+ "init_small",
+ "mcx",
+ "tuplesort",
+ "types_error",
+ "types_nodes",
+ "types_scan",
+ "types_slot",
+ "types_tuple",
+]
 
 [[package]]
 name = "numutils"
@@ -2962,12 +2979,26 @@ name = "plancache"
 version = "0.1.0"
 dependencies = [
  "cache_syscache",
+ "catalog_namespace",
  "datum",
+ "elog",
+ "execscan",
+ "guc_tables",
  "inval",
+ "lmgr",
+ "mcx",
+ "miscinit",
+ "parser_analyze",
  "plancache_portal_seams",
+ "planner_seams",
+ "snapmgr",
  "types_core",
  "types_error",
+ "types_nodes",
  "types_portal",
+ "types_resowner",
+ "types_tuple",
+ "utility_seams",
 ]
 
 [[package]]

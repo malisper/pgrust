@@ -158,6 +158,7 @@ pub fn WaitLatch(
         Some(event) => Ok(event.events),
     };
     drain_timeout_interrupt();
+    drain_thread_signals()?;
     res
 }
 
@@ -168,6 +169,16 @@ fn drain_timeout_interrupt() {
     if timeout_seams::process_timeout_interrupt::is_installed() {
         timeout_seams::process_timeout_interrupt::call();
     }
+}
+
+// The thread model's kill(2) delivery point: senders pend a signo on this
+// thread's ProcSignal slot + SetLatch; the woken waiter runs its registered
+// dispositions here, as C's unblocked handler would during the sleep.
+fn drain_thread_signals() -> PgResult<()> {
+    if procsignal_seams::drain_thread_signals::is_installed() {
+        procsignal_seams::drain_thread_signals::call()?;
+    }
+    Ok(())
 }
 
 pub fn WaitLatchOrSocket(
@@ -227,6 +238,7 @@ fn wait_latch_or_socket(
         }
     }
     drain_timeout_interrupt();
+    drain_thread_signals()?;
     Ok(ret)
 }
 
@@ -280,6 +292,33 @@ fn set_latch_my_latch() {
 
 pub fn init_seams() {
     latch_seams::set_latch_my_latch::set(set_latch_my_latch);
+    latch_seams::set_latch::set(set_latch);
+    latch_seams::own_latch::set(own_latch_ref);
+    latch_seams::disown_latch::set(disown_latch_ref);
+    latch_seams::reset_latch_my_latch::set(|| {
+        ResetLatch(MyLatch().expect("ResetLatch(MyLatch): MyLatch is not set"));
+    });
+    latch_seams::wait_latch_my_latch::set(|wake_events, timeout, wait_event_info| {
+        WaitLatch(MyLatch(), wake_events, timeout, wait_event_info)
+            .unwrap_or_else(|e| panic!("WaitLatch(MyLatch): {e:?}"))
+    });
+}
+
+// OwnLatch/DisownLatch over the caller's &Latch (lmgr_proc holds PGPROC refs,
+// not handles).
+fn own_latch_ref(l: &Latch) {
+    debug_assert!(l.is_shared.load(Acquire));
+    let owner_pid = l.owner_pid.load(Acquire);
+    if owner_pid != 0 {
+        panic!("latch already owned by PID {owner_pid}");
+    }
+    l.owner_pid.store(MyProcPid(), Release);
+}
+
+fn disown_latch_ref(l: &Latch) {
+    debug_assert!(l.is_shared.load(Acquire));
+    debug_assert_eq!(l.owner_pid.load(Acquire), MyProcPid());
+    l.owner_pid.store(0, Release);
 }
 
 #[cfg(test)]

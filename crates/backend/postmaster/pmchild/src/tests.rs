@@ -27,6 +27,21 @@ fn bringup() -> MutexGuard<'static, ()> {
         init_small::globals::SetMaxConnections(100);
         init_small::globals::set_max_worker_processes(8);
         pmchild_seams::init_postmaster_child_slots::call();
+
+        s_lock_seams::perform_spin_delay::set(|_| std::thread::yield_now());
+        s_lock_seams::finish_spin_delay::set(|_| {});
+        ipc_seams::on_shmem_exit::set(|_, _| {});
+        pg_sema_seams::pg_semaphore_create::set(|_| {});
+        init_small::globals::SetMaxBackends(
+            100 + 3 + 8 + 2 + types_storage::storage::NUM_SPECIAL_WORKER_PROCS,
+        );
+        lmgr_proc::InitProcGlobal(&lmgr_proc::ProcGlobalConfig {
+            autovacuum_worker_slots: 3,
+            max_wal_senders: 2,
+            max_prepared_xacts: 2,
+            fastpath_lock_groups_per_backend: 1,
+        });
+        procsignal::ProcSignalShmemInit();
     });
     // Idempotent; refreshes pmsignal's thread-local num_child_flags copy.
     pmsignal::PMSignalShmemInit(pmchild_seams::max_live_postmaster_children::call());
@@ -88,21 +103,67 @@ fn dead_end_children_get_unique_negative_ids() {
 }
 
 #[test]
-fn signal_children_quiet_when_no_match_loud_on_match() {
+fn signal_children_quiet_when_no_match() {
     let _g = bringup();
     assert!(!pmchild_seams::signal_children::call(
         libc_sigterm(),
         btmask(BackendType::WalWriter)
     ));
+}
 
-    let slot = pmchild_seams::assign_postmaster_child_slot::call(BackendType::WalWriter).unwrap();
-    let err = std::panic::catch_unwind(|| {
-        pmchild_seams::signal_children::call(libc_sigterm(), btmask(BackendType::WalWriter))
-    })
-    .expect_err("delivery to a live child thread must fail loud");
-    let msg = err.downcast_ref::<String>().cloned().unwrap_or_default();
-    assert!(msg.contains("per-thread signal delivery"), "got: {msg}");
+static SIGTERM_OBSERVED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn observe_sigterm() {
+    SIGTERM_OBSERVED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[test]
+fn signal_children_delivers_to_registered_child_thread() {
+    let _g = bringup();
+    let slot = pmchild_seams::assign_postmaster_child_slot::call(BackendType::BgWriter).unwrap();
+    pmchild_seams::set_child_pid::call(slot, 5511);
+
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let child = std::thread::spawn(move || {
+        init_small::globals::SetMyProcNumber(1);
+        init_small::globals::SetMyProcPid(5511);
+        procsignal::ProcSignalInit(&[]).unwrap();
+        procsignal::pqsignal_thread(
+            libc_sigterm(),
+            procsignal::ThreadSignalHandler::Simple(observe_sigterm),
+        );
+        ready_tx.send(()).unwrap();
+        let latch = &lmgr_proc::GetPGProcByNumber(1).procLatch;
+        while !latch.is_set() {
+            std::thread::yield_now();
+        }
+        procsignal::DrainThreadSignals().unwrap();
+        done_tx.send(SIGTERM_OBSERVED.load(std::sync::atomic::Ordering::SeqCst)).unwrap();
+    });
+
+    ready_rx.recv().unwrap();
+    assert!(pmchild_seams::signal_children::call(
+        libc_sigterm(),
+        btmask(BackendType::BgWriter)
+    ));
+    assert!(done_rx.recv().unwrap(), "child thread must observe the drained SIGTERM");
+    child.join().unwrap();
     assert!(pmchild_seams::release_postmaster_child_slot::call(slot));
+}
+
+#[test]
+fn signal_children_dead_end_delivery_is_loud() {
+    let _g = bringup();
+    let id = pmchild_seams::alloc_dead_end_child::call().unwrap();
+    pmchild_seams::set_child_pid::call(id, 5512);
+    let err = std::panic::catch_unwind(|| {
+        pmchild_seams::signal_children::call(3, btmask(BackendType::DeadEndBackend))
+    })
+    .expect_err("dead-end delivery has no ProcSignal slot and must fail loud");
+    let msg = err.downcast_ref::<String>().cloned().unwrap_or_default();
+    assert!(msg.contains("dead-end"), "got: {msg}");
+    assert!(pmchild_seams::release_postmaster_child_slot::call(id));
 }
 
 fn libc_sigterm() -> i32 {

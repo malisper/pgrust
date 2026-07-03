@@ -26,6 +26,9 @@ pub struct ProcSignalSlot {
     pss_cancel_key_len: SyncCell<i32>,
     pss_cancel_key: SyncCell<[u8; MAX_CANCEL_KEY_LENGTH]>,
     pss_signalFlags: [AtomicBool; NUM_PROCSIGNALS],
+    // kill(pid,sig)'s thread rendering: bit = signo, drained by the owner
+    // thread (no C counterpart; the kernel's pending-signal set).
+    pss_pendingThreadSignals: AtomicU32,
     pss_mutex: Spinlock,
 
     pss_barrierGeneration: AtomicU64,
@@ -43,6 +46,7 @@ impl ProcSignalSlot {
             pss_cancel_key_len: SyncCell::new(0),
             pss_cancel_key: SyncCell::new([0; MAX_CANCEL_KEY_LENGTH]),
             pss_signalFlags: std::array::from_fn(|_| AtomicBool::new(false)),
+            pss_pendingThreadSignals: AtomicU32::new(0),
             pss_mutex: Spinlock::new(),
             pss_barrierGeneration: AtomicU64::new(u64::MAX),
             pss_barrierCheckMask: AtomicU32::new(0),
@@ -129,6 +133,7 @@ pub fn ProcSignalInit(cancel_key: &[u8]) -> PgResult<()> {
         flag.store(false, Relaxed);
     }
     // Brand-new process: adopt the latest generation, discard stale bits.
+    slot.pss_pendingThreadSignals.store(0, Relaxed);
     slot.pss_barrierCheckMask.store(0, Relaxed);
     let barrier_generation = header.psh_barrierGeneration.load(Relaxed);
     slot.pss_barrierGeneration.store(barrier_generation, Relaxed);
@@ -153,7 +158,126 @@ pub fn ProcSignalInit(cancel_key: &[u8]) -> PgResult<()> {
     }
 
     MY_PROC_SIGNAL_SLOT.set(Some(my_proc_number as usize));
+    // Every C ProcSignalInit caller pqsignals SIGUSR1 to this handler; the
+    // default here covers mains that predate pqsignal_thread registration.
+    THREAD_SIGNAL_HANDLERS.with(|t| {
+        let mut handlers = t.get();
+        if matches!(handlers[libc::SIGUSR1 as usize], ThreadSignalHandler::Unset) {
+            handlers[libc::SIGUSR1 as usize] =
+                ThreadSignalHandler::Simple(procsignal_sigusr1_handler);
+            t.set(handlers);
+        }
+    });
     ipc_seams::on_shmem_exit::call(CleanupProcSignalState, 0);
+    Ok(())
+}
+
+pub const NUM_THREAD_SIGNALS: usize = 32;
+
+#[derive(Clone, Copy)]
+pub enum ThreadSignalHandler {
+    Unset,
+    Ignore,
+    Simple(fn()),
+    Fallible(fn() -> PgResult<()>),
+}
+
+thread_local! {
+    static THREAD_SIGNAL_HANDLERS: Cell<[ThreadSignalHandler; NUM_THREAD_SIGNALS]> = const {
+        assert!(!core::mem::needs_drop::<[ThreadSignalHandler; NUM_THREAD_SIGNALS]>());
+        Cell::new([ThreadSignalHandler::Unset; NUM_THREAD_SIGNALS])
+    };
+}
+
+fn thread_signal_bit(signo: i32) -> u32 {
+    assert!(
+        signo > 0 && (signo as usize) < NUM_THREAD_SIGNALS,
+        "thread signal {signo} out of range"
+    );
+    1u32 << signo as u32
+}
+
+// pqsignal (port/pqsignal.c) for the thread model: dispositions are the
+// registering thread's, run by DrainThreadSignals on that thread.
+pub fn pqsignal_thread(signo: i32, handler: ThreadSignalHandler) {
+    let bit = thread_signal_bit(signo);
+    debug_assert!(bit != 0);
+    THREAD_SIGNAL_HANDLERS.with(|t| {
+        let mut handlers = t.get();
+        handlers[signo as usize] = handler;
+        t.set(handlers);
+    });
+}
+
+// kill(pid, signo)'s thread rendering: pend signo on the target's slot and
+// wake its procLatch; the target's next drain point runs its registered
+// disposition. Contract kept: 0 on match, -1 + errno=ESRCH otherwise.
+pub fn SendThreadSignal(pid: i32, signo: i32) -> i32 {
+    if signo == libc::SIGKILL || signo == libc::SIGSTOP {
+        panic!(
+            "SendThreadSignal: signal {signo} has no thread rendering \
+             (postmaster SIGKILL-escalation redesign)"
+        );
+    }
+    let bit = thread_signal_bit(signo);
+    if pid <= 0 {
+        // kill(-pid) process-group fanout: callers signal each member.
+        set_errno(libc::ESRCH);
+        return -1;
+    }
+    let header = proc_signal();
+    for i in (0..header.psh_slot.len()).rev() {
+        let slot = &header.psh_slot[i];
+        if slot.pss_pid.load(Relaxed) == pid {
+            spin_acquire(&slot.pss_mutex);
+            if slot.pss_pid.load(Relaxed) == pid {
+                slot.pss_pendingThreadSignals.fetch_or(bit, SeqCst);
+                slot.pss_mutex.unlock();
+                latch::set_latch(&lmgr_proc::GetPGProcByNumber(i as ProcNumber).procLatch);
+                return 0;
+            }
+            slot.pss_mutex.unlock();
+        }
+    }
+    set_errno(libc::ESRCH);
+    -1
+}
+
+pub fn DrainThreadSignals() -> PgResult<()> {
+    let Some(index) = MY_PROC_SIGNAL_SLOT.get() else {
+        return Ok(());
+    };
+    let slot = &proc_signal().psh_slot[index];
+    if slot.pss_pendingThreadSignals.load(Acquire) == 0 {
+        return Ok(());
+    }
+    let mut bits = slot.pss_pendingThreadSignals.swap(0, SeqCst);
+    let handlers = THREAD_SIGNAL_HANDLERS.with(Cell::get);
+    while bits != 0 {
+        let signo = bits.trailing_zeros() as usize;
+        bits &= bits - 1;
+        let result = match handlers[signo] {
+            ThreadSignalHandler::Ignore => Ok(()),
+            ThreadSignalHandler::Simple(f) => {
+                f();
+                Ok(())
+            }
+            ThreadSignalHandler::Fallible(f) => f(),
+            ThreadSignalHandler::Unset => panic!(
+                "thread signal {signo} delivered to pid {} with no pqsignal_thread \
+                 disposition — its main must install its C pqsignal set at entry \
+                 (aux-mains handoff)",
+                g::MyProcPid()
+            ),
+        };
+        if let Err(e) = result {
+            // Undelivered signos stay pending, as blocked signals do in C.
+            if bits != 0 {
+                slot.pss_pendingThreadSignals.fetch_or(bits, SeqCst);
+            }
+            return Err(e);
+        }
+    }
     Ok(())
 }
 
@@ -188,10 +312,13 @@ fn CleanupProcSignalState(_code: i32, _arg: usize) {
 }
 
 // C's kill(pid, SIGUSR1). One backend = one thread: the sender cannot run the
-// drain (target thread-locals), so delivery is the handler's latch half only —
-// set the target's procLatch (slot index == ProcNumber); the target's dispatch
-// loop runs procsignal_sigusr1_handler when it wakes.
+// drain (target thread-locals), so pend SIGUSR1 and set the target's procLatch
+// (slot index == ProcNumber); the target's drain point runs
+// procsignal_sigusr1_handler when it wakes.
 fn deliver_sigusr1(slot_index: usize) {
+    proc_signal().psh_slot[slot_index]
+        .pss_pendingThreadSignals
+        .fetch_or(thread_signal_bit(libc::SIGUSR1), SeqCst);
     latch::set_latch(&lmgr_proc::GetPGProcByNumber(slot_index as ProcNumber).procLatch);
 }
 
@@ -479,9 +606,17 @@ pub fn SendCancelRequest(backend_pid: i32, cancel_key: &[u8]) {
                     ))
                     .finish(loc("SendCancelRequest")),
             );
-            // C: kill(-backendPID, SIGINT); no cross-thread cancel-dispatch
-            // owner (tcop's StatementCancelHandler) is ported yet.
-            panic!("cancel-request delivery (SIGINT to backend {backend_pid}) is not ported");
+            // C: kill(-backendPID, SIGINT); one thread per backend and no
+            // parallel workers yet, so the leader is the whole group.
+            if SendThreadSignal(backend_pid, libc::SIGINT) < 0 {
+                log_never_raises(
+                    ereport(LOG)
+                        .errmsg(format!(
+                            "could not send signal to process {backend_pid}: No such process"
+                        ))
+                        .finish(loc("SendCancelRequest")),
+                );
+            }
         } else {
             log_never_raises(
                 ereport(LOG)
@@ -531,6 +666,7 @@ fn log_never_raises(result: PgResult<()>) {
 pub fn init_seams() {
     procsignal_seams::proc_signal_barrier_pending::set(g::ProcSignalBarrierPending);
     procsignal_seams::process_proc_signal_barrier::set(ProcessProcSignalBarrier);
+    procsignal_seams::drain_thread_signals::set(DrainThreadSignals);
 }
 
 #[cfg(test)]

@@ -30,6 +30,7 @@ lmgr_proc = { path = "../../storage/lmgr/lmgr_proc" }
 latch = { path = "../../storage/ipc/latch" }
 pmsignal = { path = "../../storage/ipc/pmsignal" }
 sinval = { path = "../../storage/ipc/sinval" }
+procsignal = { path = "../../storage/ipc/procsignal" }
 procsignal_seams = { path = "../../storage/ipc/procsignal_seams" }
 mcxt_seams = { path = "../../utils/mmgr/mcxt_seams" }
 interrupt = { path = "../../../backend/postmaster/interrupt" }
@@ -53,3 +54,9 @@ types_guc = { path = "../../../_support/types/types_guc" }
 
 [dev-dependencies]
 lock_seams = { path = "../../storage/lmgr/lock_seams" }
+s_lock_seams = { path = "../../storage/lmgr/s_lock_seams" }
+shmem_seams = { path = "../../storage/ipc/shmem_seams" }
+pg_sema_seams = { path = "../../port/pg_sema_seams" }
+types_storage = { path = "../../../_support/types/types_storage" }
+pgstat_seams = { path = "../../utils/activity/pgstat_seams" }
+init_small_seams = { path = "../../utils/init/init_small_seams" }
