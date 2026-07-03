@@ -61,6 +61,7 @@ pub enum PlanStateNode<'mcx> {
     Append(PgBox<'mcx, AppendNode<'mcx>>),
     SubqueryScan(PgBox<'mcx, SubqueryScanNode<'mcx>>),
     SetOp(PgBox<'mcx, SetOpNode<'mcx>>),
+    Memoize(PgBox<'mcx, MemoizeNode<'mcx>>),
     // Last variant: existing discriminants keep their values, so the
     // uninstrumented jump-table dispatch compiles unchanged.
     Instrumented(PgBox<'mcx, InstrumentedNode<'mcx>>),
@@ -134,6 +135,11 @@ pub struct WindowAggNode<'mcx> {
 
 pub struct MaterialNode<'mcx> {
     pub state: ::nodematerial::MaterialState<'mcx>,
+    pub outer: PgBox<'mcx, PlanStateNode<'mcx>>,
+}
+
+pub struct MemoizeNode<'mcx> {
+    pub state: ::nodememoize::MemoizeState<'mcx>,
     pub outer: PgBox<'mcx, PlanStateNode<'mcx>>,
 }
 
@@ -217,6 +223,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             // ExprState, which needs a resettable per-tuple context.
             PlanStateNode::IncrementalSort(s) => Some(s.state.ps_ExprContext),
             PlanStateNode::Material(_) => None,
+            PlanStateNode::Memoize(m) => Some(m.state.ps_ExprContext),
             PlanStateNode::Unique(u) => Some(u.state.ps_ExprContext),
             PlanStateNode::Limit(l) => Some(l.state.ps_ExprContext),
             PlanStateNode::LockRows(_) => None,
@@ -281,6 +288,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::MergeJoin(mj) => Ok(mj.state.ps_ResultTupleDesc.clone().expect("merge join already ended")),
             PlanStateNode::WindowAgg(w) => Ok(w.state.ps_ResultTupleDesc.clone().expect("window agg already ended")),
             PlanStateNode::SetOp(s) => Ok(s.state.ps_ResultTupleDesc.clone().expect("set op already ended")),
+            PlanStateNode::Memoize(m) => Ok(m.state.ps_ResultTupleDesc.clone().expect("memoize already ended")),
             PlanStateNode::BitmapIndexScan(_)
             | PlanStateNode::BitmapAnd(_)
             | PlanStateNode::BitmapOr(_) => {
@@ -457,6 +465,31 @@ pub fn exec_init_node<'mcx>(
             PlanStateNode::Material(::mcx::alloc_in(
                 mcx,
                 MaterialNode { state, outer: ::mcx::alloc_in(mcx, outer)? },
+            )?)
+        }
+        NodeTag::T_Memoize => {
+            let mcx = estate.es_query_cxt;
+            let memo_plan = node.as_memoize().unwrap();
+            let outer = exec_init_node(
+                memo_plan.plan.lefttree,
+                estate,
+                ::nodememoize::child_eflags(eflags),
+            )?
+            .unwrap_or_else(|| {
+                panic!("ExecInitMemoize (nodeMemoize.c): Memoize without an outer plan")
+            });
+            let result_desc = crate::exec_type_from_tl(&memo_plan.plan.targetlist)?;
+            let hashkeydesc = crate::typefromtl::exec_type_from_expr_list(&memo_plan.param_exprs)?;
+            let state = ::nodememoize::exec_init_memoize(
+                memo_plan,
+                estate,
+                eflags,
+                result_desc,
+                hashkeydesc,
+            )?;
+            PlanStateNode::Memoize(::mcx::alloc_in(
+                mcx,
+                MemoizeNode { state, outer: ::mcx::alloc_in(mcx, outer)? },
             )?)
         }
         NodeTag::T_Sort => {
@@ -825,7 +858,6 @@ pub fn exec_init_node<'mcx>(
             T_ForeignScan => "nodeForeignscan.c",
             T_CustomScan => "nodeCustom.c",
             T_Material => "nodeMaterial.c",
-            T_Memoize => "nodeMemoize.c",
             T_Group => "nodeGroup.c",
             T_WindowAgg => "nodeWindowAgg.c",
             T_Gather => "nodeGather.c",
@@ -911,6 +943,7 @@ pub fn exec_proc_node<'mcx>(
         PlanStateNode::Sort(s) => sort_arm(s, estate),
         PlanStateNode::IncrementalSort(s) => incremental_sort_arm(s, estate),
         PlanStateNode::Material(m) => material_arm(m, estate),
+        PlanStateNode::Memoize(m) => memoize_arm(m, estate),
         PlanStateNode::Unique(u) => unique_arm(u, estate),
         PlanStateNode::Limit(l) => limit_arm(l, estate),
         PlanStateNode::LockRows(l) => lockrows_arm(l, estate),
@@ -1039,6 +1072,15 @@ fn material_arm<'mcx>(
 ) -> ProcResult {
     let m = &mut **m;
     ::nodematerial::exec_material(&mut m.state, &mut *m.outer, estate)
+}
+
+#[inline(never)]
+fn memoize_arm<'mcx>(
+    m: &mut PgBox<'mcx, MemoizeNode<'mcx>>,
+    estate: &mut EStateData<'mcx>,
+) -> ProcResult {
+    let m = &mut **m;
+    ::nodememoize::exec_memoize(&mut m.state, &mut *m.outer, estate)
 }
 
 #[inline(never)]
@@ -1337,6 +1379,7 @@ fn release_owned(node: &mut PlanStateNode<'_>) {
         | PlanStateNode::MergeJoin(_)
         | PlanStateNode::WindowAgg(_)
         | PlanStateNode::Material(_)
+        | PlanStateNode::Memoize(_)
         | PlanStateNode::Unique(_)
         | PlanStateNode::Limit(_) => {}
     }
@@ -1346,6 +1389,7 @@ fn release_owned(node: &mut PlanStateNode<'_>) {
 pub enum InstrExtra {
     Storage(::types_core::instrument::TuplestoreInstrumentation),
     Bitmap(::types_core::instrument::BitmapHeapScanInstrumentation),
+    Memoize(::types_core::instrument::MemoizeInstrumentation),
     IndexSearches(u64),
 }
 
@@ -1378,6 +1422,7 @@ pub fn planstate_instr_extra<'mcx>(
         PlanStateNode::Sort(s) => walk!(&mut *s.outer),
         PlanStateNode::IncrementalSort(s) => walk!(&mut s.outer),
         PlanStateNode::Material(m) => walk!(&mut *m.outer),
+        PlanStateNode::Memoize(m) => walk!(&mut *m.outer),
         PlanStateNode::Unique(u) => walk!(&mut u.outer),
         PlanStateNode::Limit(l) => walk!(&mut *l.outer),
         PlanStateNode::NestLoop(nl) => walk!(&mut *nl.outer, &mut *nl.inner),
@@ -1431,6 +1476,9 @@ fn instr_extra_of<'mcx>(
         }
         PlanStateNode::CteScan(cs) => {
             ::nodectescan::storage_stats(cs, estate).map(InstrExtra::Storage)
+        }
+        PlanStateNode::Memoize(m) => {
+            Some(InstrExtra::Memoize(::nodememoize::memoize_stats(&m.state)))
         }
         PlanStateNode::BitmapHeapScan(b) => Some(InstrExtra::Bitmap(
             ::types_core::instrument::BitmapHeapScanInstrumentation {
@@ -1504,6 +1552,10 @@ fn exec_end_node_inner<'mcx>(
         }
         PlanStateNode::Material(m) => {
             ::nodematerial::exec_end_material(&mut m.state);
+            exec_end_node(&mut m.outer, estate)
+        }
+        PlanStateNode::Memoize(m) => {
+            ::nodememoize::exec_end_memoize(&mut m.state);
             exec_end_node(&mut m.outer, estate)
         }
         PlanStateNode::Unique(u) => {
@@ -1597,6 +1649,7 @@ pub fn exec_shutdown_node<'mcx>(node: &mut PlanStateNode<'mcx>, estate: &mut ESt
         PlanStateNode::Sort(s) => exec_shutdown_node(&mut s.outer, estate),
         PlanStateNode::IncrementalSort(s) => exec_shutdown_node(&mut s.outer, estate),
         PlanStateNode::Material(m) => exec_shutdown_node(&mut m.outer, estate),
+        PlanStateNode::Memoize(m) => exec_shutdown_node(&mut m.outer, estate),
         PlanStateNode::Unique(u) => exec_shutdown_node(&mut u.outer, estate),
         PlanStateNode::Limit(l) => exec_shutdown_node(&mut l.outer, estate),
         PlanStateNode::LockRows(l) => exec_shutdown_node(&mut l.outer, estate),
@@ -1712,6 +1765,12 @@ impl<'mcx> ::nodenestloop::NestLoopChild<'mcx> for PlanStateNode<'mcx> {
     }
 }
 
+impl<'mcx> ::nodememoize::MemoizeChild<'mcx> for PlanStateNode<'mcx> {
+    fn exec_proc(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<Option<ExecSlotId>> {
+        exec_proc_node(self, estate)
+    }
+}
+
 impl<'mcx> ::nodehashjoin::HashJoinOuter<'mcx> for PlanStateNode<'mcx> {
     fn exec_proc(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<Option<ExecSlotId>> {
         exec_proc_node(self, estate)
@@ -1802,6 +1861,7 @@ pub(crate) fn with_eval_slots<'mcx, R>(
     AggPlanState<'_> { agg, outer },
     WindowAggNode<'_> { state, outer },
     MaterialNode<'_> { state, outer },
+    MemoizeNode<'_> { state, outer },
     SortNode<'_> { state, outer; outer_desc },
     IncrementalSortNode<'_> { state, outer },
     AppendNode<'_> { state, substates },

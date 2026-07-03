@@ -1675,6 +1675,9 @@ fn finalize_plan<'mcx>(
         | NodeTag::T_IncrementalSort
         | NodeTag::T_Agg
         | NodeTag::T_Material => {}
+        NodeTag::T_Memoize => {
+            finalize_primnode_list(run, &plan.as_memoize().unwrap().param_exprs, &mut paramids)?;
+        }
         // cteParam is linkage only; the CTE plan's extParam matters (C bug #4902).
         NodeTag::T_CteScan => {
             let plan_id = plan.as_cte_scan().unwrap().ctePlanId;
