@@ -18,3 +18,24 @@ seam_core::seam!(
         enum_type_id: Oid,
     ) -> PgResult<mcx::PgVec<'mcx, (Oid, f32)>>
 );
+
+// One pg_enum row in enumsortorder order plus the tuple-header xmin facts
+// check_safe_enum_use reads — enum.c enum_endpoint/enum_range consumer.
+pub struct EnumSortedRow {
+    pub oid: Oid,
+    pub enumtypid: Oid,
+    pub enumlabel: types_tuple::NameData,
+    pub xmin: types_core::TransactionId,
+    pub xmin_committed: bool,
+}
+
+seam_core::seam!(
+    // Ordered EnumTypIdSortOrderIndexId scan; backward flips the direction,
+    // limit_one stops after the first row (enum_first/enum_last).
+    pub fn scan_enum_typid_sorted<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        enumtypoid: Oid,
+        backward: bool,
+        limit_one: bool,
+    ) -> PgResult<mcx::PgVec<'mcx, EnumSortedRow>>
+);

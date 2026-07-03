@@ -958,3 +958,23 @@ seam_core::seam!(
         proname: &str,
     ) -> PgResult<PgVec<'mcx, PgProcCandidate<'mcx>>>
 );
+
+// Form_pg_enum + the tuple-header xmin facts check_safe_enum_use reads.
+#[derive(Clone, Copy)]
+pub struct PgEnumShape {
+    pub oid: Oid,
+    pub enumtypid: Oid,
+    pub enumlabel: NameData,
+    pub xmin: types_core::TransactionId,
+    pub xmin_committed: bool,
+}
+
+seam_core::seam!(
+    // SearchSysCache1(ENUMOID, enum_oid); None mirrors !HeapTupleIsValid.
+    pub fn lookup_pg_enum_by_oid(enum_oid: Oid) -> PgResult<Option<PgEnumShape>>
+);
+
+seam_core::seam!(
+    // SearchSysCache2(ENUMTYPOIDNAME, typid, label).
+    pub fn lookup_pg_enum_by_typid_label(typid: Oid, label: &str) -> PgResult<Option<PgEnumShape>>
+);

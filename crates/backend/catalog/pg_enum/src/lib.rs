@@ -6,7 +6,7 @@ use core::cell::RefCell;
 
 use datum::Datum;
 use mcx::{Mcx, PgVec};
-use types_core::{AttrNumber, Oid, TransactionId, NAMEDATALEN, TYPE_RELATION_ID};
+use types_core::{AttrNumber, Oid, NAMEDATALEN, TYPE_RELATION_ID};
 use types_error::{
     PgError, PgResult, ERRCODE_DUPLICATE_OBJECT, ERRCODE_INVALID_NAME,
     ERRCODE_INVALID_PARAMETER_VALUE, ERROR, NOTICE,
@@ -424,30 +424,23 @@ fn RenumberEnumType<'mcx>(
     xact::CommandCounterIncrement()
 }
 
-pub struct EnumMemberRow {
-    pub oid: Oid,
-    pub enumtypid: Oid,
-    pub enumsortorder: f32,
-    pub enumlabel: NameData,
-    pub xmin: TransactionId,
-    pub xmin_committed: bool,
-}
-
 // enum.c's ordered EnumTypIdSortOrderIndexId scan (enum_endpoint /
 // enum_range_internal); syscache is off-limits there, see RenumberEnumType.
 // Header xmin facts ride along for check_safe_enum_use.
 pub fn scan_enum_typid_sorted<'mcx>(
     mcx: Mcx<'mcx>,
     enumtypoid: Oid,
-    direction: ScanDirection,
+    backward: bool,
     limit_one: bool,
-) -> PgResult<PgVec<'mcx, EnumMemberRow>> {
+) -> PgResult<PgVec<'mcx, pg_enum_seams::EnumSortedRow>> {
+    let direction =
+        if backward { ScanDirection::BackwardScanDirection } else { ScanDirection::ForwardScanDirection };
     let key = [oid_key(Anum_pg_enum_enumtypid, enumtypoid)];
     let enum_rel = table::table_open(mcx, EnumRelationId, AccessShareLock)?;
     let enum_idx = indexam::index_open(mcx, EnumTypIdSortOrderIndexId, AccessShareLock)?;
     let mut scan = genam::systable_beginscan_ordered(mcx, &enum_rel, &enum_idx, None, &key)?;
 
-    let mut out: PgVec<'mcx, EnumMemberRow> = PgVec::new_in(mcx);
+    let mut out: PgVec<'mcx, pg_enum_seams::EnumSortedRow> = PgVec::new_in(mcx);
     loop {
         let Some(tup) = genam::systable_getnext_ordered(mcx, &mut scan, direction)? else {
             break;
@@ -460,10 +453,9 @@ pub fn scan_enum_typid_sorted<'mcx>(
             hdr_committed = hdr.xmin_committed();
         }
         let m = decode_member(tup, enum_rel.descr());
-        out.push(EnumMemberRow {
+        out.push(pg_enum_seams::EnumSortedRow {
             oid: m.oid,
             enumtypid: m.enumtypid,
-            enumsortorder: m.enumsortorder,
             enumlabel: m.enumlabel,
             xmin: hdr_xmin,
             xmin_committed: hdr_committed,
@@ -519,4 +511,5 @@ pub fn init_seams() {
     pg_enum_seams::at_eoxact_enum::set(AtEOXact_Enum);
     pg_enum_seams::enum_uncommitted::set(EnumUncommitted);
     pg_enum_seams::scan_enum_members::set(scan_enum_members);
+    pg_enum_seams::scan_enum_typid_sorted::set(scan_enum_typid_sorted);
 }
