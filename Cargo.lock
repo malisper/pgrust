@@ -7661,12 +7661,16 @@ dependencies = [
  "init_small",
  "lsyscache",
  "mcx",
+ "nbtree",
+ "pg_locale",
  "postgres_seams",
  "types_core",
  "types_error",
  "types_nbtree",
+ "types_rel",
  "types_slot",
  "types_tuple",
+ "varlena",
 ]
 
 [[package]]

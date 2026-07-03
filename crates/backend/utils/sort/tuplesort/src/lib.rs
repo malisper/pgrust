@@ -2,14 +2,16 @@
 // parallel sort, abbreviated keys, byref datum sorts = loud panics naming C.
 #![allow(non_snake_case)]
 
+use core::cell::Cell;
 use core::mem;
 
 use ::datum::{Datum, NullableDatum};
 use ::mcx::{McxOwned, Mcx, MemoryContext, PgVec};
 use ::types_core::instrument::{TuplesortInstrumentation, TuplesortMethod, TuplesortSpaceType};
 use ::types_core::Oid;
-use ::types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult, ERRCODE_UNIQUE_VIOLATION};
 use ::types_slot::SlotData;
+use ::types_tuple::itemptr::ItemPointerData;
 use ::types_tuple::{MinimalTupleData, TupleDescData};
 
 mod mgetattr;
@@ -20,8 +22,8 @@ mod ssup;
 mod tests;
 
 pub use ssup::{
-    apply_sort_comparator, comparator_for_opfamily, prepare_sort_support_from_ordering_op,
-    SortComparator, SortSupport, SortSupportInit,
+    apply_sort_comparator, comparator_for_index_col, comparator_for_opfamily,
+    prepare_sort_support_from_ordering_op, SortComparator, SortSupport, SortSupportInit,
 };
 
 use mgetattr::minimal_getattr;
@@ -72,8 +74,17 @@ enum TupSortStatus {
 }
 
 enum SortVariant {
-    Heap { tup_desc: std::rc::Rc<TupleDescData<'static>> },
+    Heap {
+        tup_desc: std::rc::Rc<TupleDescData<'static>>,
+    },
     Datum,
+    Index {
+        tup_desc: std::rc::Rc<TupleDescData<'static>>,
+        nkeys: u16,
+        enforce_unique: bool,
+        unique_nulls_not_distinct: bool,
+        index_name: std::rc::Rc<str>,
+    },
 }
 
 pub struct TuplesortData<'m> {
@@ -103,6 +114,8 @@ pub struct TuplesortData<'m> {
     only_key: bool,
     have_datum1: bool,
     variant: SortVariant,
+    // Unique violation recorded mid-sort, surfaced by performsort.
+    unique_violation: Cell<Option<Box<PgError>>>,
 }
 
 ::mcx::bind!(pub TuplesortTy => TuplesortData<'mcx>);
@@ -114,6 +127,7 @@ struct CmpCtx<'a> {
     keys: &'a [SortSupport],
     only_key: bool,
     variant: &'a SortVariant,
+    unique_violation: &'a Cell<Option<Box<PgError>>>,
 }
 
 impl CmpCtx<'_> {
@@ -144,27 +158,92 @@ impl CmpCtx<'_> {
 
     /// `comparetup_heap_tiebreak`, no abbrev arm; datum tiebreak reduces to 0.
     fn comparetup_tiebreak(&self, a: &SortTuple, b: &SortTuple) -> i32 {
-        let SortVariant::Heap { tup_desc } = self.variant else {
-            return 0;
+        match self.variant {
+            SortVariant::Heap { tup_desc } => {
+                for key in &self.keys[1..] {
+                    let attno = key.ssup_attno as i32;
+                    let (mut isnull1, mut isnull2) = (false, false);
+                    // SAFETY: heap-variant SortTuples always carry a live minimal
+                    // tuple copied under this descriptor.
+                    let (datum1, datum2) = unsafe {
+                        (
+                            minimal_getattr(a.tuple, attno, tup_desc, &mut isnull1),
+                            minimal_getattr(b.tuple, attno, tup_desc, &mut isnull2),
+                        )
+                    };
+                    let compare = apply_sort_comparator(datum1, isnull1, datum2, isnull2, key);
+                    if compare != 0 {
+                        return compare;
+                    }
+                }
+                0
+            }
+            SortVariant::Datum => 0,
+            SortVariant::Index { .. } => self.comparetup_index_btree_tiebreak(a, b),
+        }
+    }
+
+    /// `comparetup_index_btree_tiebreak`, no abbrev arm. C divergence: the
+    /// unique violation is deferred to performsort (no mid-qsort ereport).
+    fn comparetup_index_btree_tiebreak(&self, a: &SortTuple, b: &SortTuple) -> i32 {
+        let SortVariant::Index {
+            tup_desc,
+            nkeys,
+            enforce_unique,
+            unique_nulls_not_distinct,
+            index_name,
+        } = self.variant
+        else {
+            unreachable!()
         };
-        for key in &self.keys[1..] {
-            let attno = key.ssup_attno as i32;
+        let tuple1: nbtree::itup::ITup = a.tuple.cast_const().cast();
+        let tuple2: nbtree::itup::ITup = b.tuple.cast_const().cast();
+        let mut equal_hasnull = a.isnull1;
+
+        for nkey in 2..=(*nkeys as i16) {
+            let key = &self.keys[nkey as usize - 1];
             let (mut isnull1, mut isnull2) = (false, false);
-            // SAFETY: heap-variant SortTuples always carry a live minimal
-            // tuple copied under this descriptor.
+            // SAFETY: live tuplecontext images formed under this descriptor.
             let (datum1, datum2) = unsafe {
                 (
-                    minimal_getattr(a.tuple, attno, tup_desc, &mut isnull1),
-                    minimal_getattr(b.tuple, attno, tup_desc, &mut isnull2),
+                    nbtree::itup::index_getattr(tuple1, nkey, tup_desc, &mut isnull1),
+                    nbtree::itup::index_getattr(tuple2, nkey, tup_desc, &mut isnull2),
                 )
             };
             let compare = apply_sort_comparator(datum1, isnull1, datum2, isnull2, key);
             if compare != 0 {
                 return compare;
             }
+            if isnull1 {
+                equal_hasnull = true;
+            }
         }
-        0
+
+        if *enforce_unique && !(!unique_nulls_not_distinct && equal_hasnull) {
+            debug_assert!(!core::ptr::eq(tuple1, tuple2));
+            let prev = self.unique_violation.take();
+            self.unique_violation
+                .set(Some(prev.unwrap_or_else(|| unique_violation_error(index_name))));
+        }
+
+        // SAFETY: t_tid header read of live images (contract above).
+        let (tid1, tid2) = unsafe { (nbtree::itup::t_tid(tuple1), nbtree::itup::t_tid(tuple2)) };
+        let compare = ::types_tuple::itemptr::ItemPointerCompare(&tid1, &tid2);
+        debug_assert!(compare != 0, "ItemPointer values should never be equal");
+        compare
     }
+}
+
+// BuildIndexValueDescription/errtableconstraint unported: C's key_desc==NULL
+// arm ("Duplicate keys exist.") is emitted instead.
+#[cold]
+#[inline(never)]
+fn unique_violation_error(index_name: &str) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!("could not create unique index \"{index_name}\""))
+            .with_sqlstate(ERRCODE_UNIQUE_VIOLATION)
+            .with_detail("Duplicate keys exist.".to_string()),
+    )
 }
 
 macro_rules! ctx {
@@ -173,6 +252,7 @@ macro_rules! ctx {
             keys: &$st.sort_keys,
             only_key: $st.only_key,
             variant: &$st.variant,
+            unique_violation: &$st.unique_violation,
         }
     };
 }
@@ -216,6 +296,82 @@ impl Tuplesort {
         assert!(!keys.is_empty());
         let only_key = keys.len() == 1;
         Self::begin_common(work_mem, sortopt, keys, only_key, SortVariant::Heap { tup_desc })
+    }
+
+    /// `tuplesort_begin_index_btree`, serial arm; keys read straight off the
+    /// index relation — the same values C pulls via `_bt_mkscankey`.
+    pub fn begin_index_btree(
+        _heap_rel: &types_rel::Relation<'_>,
+        index_rel: &types_rel::Relation<'_>,
+        enforce_unique: bool,
+        unique_nulls_not_distinct: bool,
+        work_mem: i32,
+        sortopt: i32,
+    ) -> PgResult<Tuplesort> {
+        const INDOPTION_DESC: i16 = 1 << 0;
+        const INDOPTION_NULLS_FIRST: i16 = 1 << 1;
+        let nkeys = index_rel.indnkeyatts() as usize;
+        assert!(nkeys > 0);
+        let mut keys = Vec::with_capacity(nkeys);
+        for i in 0..nkeys {
+            let indoption = index_rel.rd_indoption[i];
+            let collation = index_rel.rd_indcollation[i];
+            let comparator = comparator_for_index_col(
+                index_rel.rd_opfamily[i],
+                index_rel.rd_opcintype[i],
+                collation,
+            )?;
+            keys.push(SortSupport {
+                ssup_collation: collation,
+                ssup_reverse: indoption & INDOPTION_DESC != 0,
+                ssup_nulls_first: indoption & INDOPTION_NULLS_FIRST != 0,
+                ssup_attno: (i + 1) as i16,
+                comparator,
+            });
+        }
+        // SAFETY: lifetime erasure on the relcache tupdesc; the caller keeps
+        // the index relation open for the life of the sort (C's implicit
+        // contract — nbtsort holds it open across the whole build).
+        let tup_desc: std::rc::Rc<TupleDescData<'static>> =
+            unsafe { mem::transmute(index_rel.rd_att.clone()) };
+        Ok(Self::begin_index_with_keys(
+            tup_desc,
+            &keys,
+            nkeys as u16,
+            enforce_unique,
+            unique_nulls_not_distinct,
+            index_rel.name(),
+            work_mem,
+            sortopt,
+        ))
+    }
+
+    /// C divergence: as [`Tuplesort::begin_heap_with_keys`], index variant.
+    #[allow(clippy::too_many_arguments)]
+    pub fn begin_index_with_keys(
+        tup_desc: std::rc::Rc<TupleDescData<'static>>,
+        keys: &[SortSupport],
+        nkeys: u16,
+        enforce_unique: bool,
+        unique_nulls_not_distinct: bool,
+        index_name: &str,
+        work_mem: i32,
+        sortopt: i32,
+    ) -> Tuplesort {
+        assert!(!keys.is_empty() && keys.len() == nkeys as usize);
+        Self::begin_common(
+            work_mem,
+            sortopt,
+            keys,
+            false,
+            SortVariant::Index {
+                tup_desc,
+                nkeys,
+                enforce_unique,
+                unique_nulls_not_distinct,
+                index_name: std::rc::Rc::from(index_name),
+            },
+        )
     }
 
     /// `tuplesort_begin_datum`; by-reference types are a loud panic.
@@ -285,6 +441,7 @@ impl Tuplesort {
                 only_key,
                 have_datum1: true,
                 variant,
+                unique_violation: Cell::new(None),
             })
         })
         .expect("TupleSort main context construction is infallible");
@@ -293,6 +450,10 @@ impl Tuplesort {
 
     pub fn set_bound(&mut self, bound: i64) {
         self.0.with_mut(|st| {
+            debug_assert!(
+                !matches!(st.variant, SortVariant::Index { .. }),
+                "bounded index sorts do not exist (tuplesortvariants.c)"
+            );
             debug_assert!(st.status == TupSortStatus::Initial && st.memtuples.is_empty());
             debug_assert!(st.sortopt & TUPLESORT_ALLOWBOUNDED != 0);
             debug_assert!(!st.bounded);
@@ -376,6 +537,51 @@ impl Tuplesort {
                 minimal_getattr(tuple, st.sort_keys[0].ssup_attno as i32, tup_desc, &mut isnull1)
             };
             st.puttuple_common(tuple, datum1, isnull1, maxalign(t_len) as i64)
+        })
+    }
+
+    /// `tuplesort_putindextuplevalues`.
+    #[inline]
+    pub fn putindextuplevalues(
+        &mut self,
+        self_tid: ItemPointerData,
+        values: &[Datum],
+        isnull: &[bool],
+    ) -> PgResult<()> {
+        self.0.with_mut(|st| {
+            let SortVariant::Index { tup_desc, .. } = &st.variant else {
+                panic!("tuplesort_putindextuplevalues on a non-index tuplesort")
+            };
+            let mut buf =
+                nbtree::itup::index_form_tuple(st.tuplecontext.mcx(), tup_desc, values, isnull)?;
+            let tuplen = buf.size() as i64;
+            // SAFETY: t_tid = first 6 bytes of the owned image (itup.h).
+            unsafe {
+                buf.as_mut_ptr()
+                    .cast::<ItemPointerData>()
+                    .write_unaligned(self_tid);
+            }
+            let tuple = buf.as_mut_ptr();
+            // Ownership moves to tuplecontext (bulk-freed at end).
+            mem::forget(buf);
+
+            let mut isnull1 = false;
+            // SAFETY: freshly formed live image under tup_desc.
+            let datum1 =
+                unsafe { nbtree::itup::index_getattr(tuple, 1, tup_desc, &mut isnull1) };
+            st.puttuple_common(tuple.cast::<MinimalTupleData>(), datum1, isnull1, tuplen)
+        })
+    }
+
+    /// `tuplesort_getindextuple`; image owned by the sort, valid until the
+    /// next tuplesort call.
+    #[inline]
+    pub fn getindextuple(&mut self, forward: bool) -> PgResult<Option<nbtree::itup::ITup>> {
+        self.0.with_mut(|st| {
+            debug_assert!(matches!(st.variant, SortVariant::Index { .. }));
+            Ok(st
+                .gettuple_common(forward)?
+                .map(|stup| stup.tuple.cast_const().cast::<u8>()))
         })
     }
 
@@ -787,6 +993,12 @@ impl<'m> TuplesortData<'m> {
                     SortComparator::Int32 => qsort_tuple(&mut tuples, |a, b| {
                         ctx.comparetup_spec(SortComparator::Int32, a, b)
                     }),
+                    SortComparator::Int16 => qsort_tuple(&mut tuples, |a, b| {
+                        ctx.comparetup_spec(SortComparator::Int16, a, b)
+                    }),
+                    SortComparator::TextC => qsort_tuple(&mut tuples, |a, b| {
+                        ctx.comparetup_spec(SortComparator::TextC, a, b)
+                    }),
                 }
             } else if self.only_key {
                 let key = &self.sort_keys[0];
@@ -798,7 +1010,11 @@ impl<'m> TuplesortData<'m> {
             }
         };
         self.memtuples = tuples;
-        result
+        result?;
+        if let Some(err) = self.unique_violation.take() {
+            return Err(err);
+        }
+        Ok(())
     }
 
     #[inline(never)]

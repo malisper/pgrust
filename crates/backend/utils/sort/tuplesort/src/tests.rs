@@ -476,3 +476,192 @@ fn reset_recycles_batch_keeps_keys_and_max_stats() {
     ts.reset();
     assert!(!ts.used_bound());
 }
+
+fn tid(blk: u32, pos: u16) -> ::types_tuple::itemptr::ItemPointerData {
+    ::types_tuple::itemptr::ItemPointerData {
+        ip_blkid: ::types_tuple::itemptr::BlockIdData {
+            bi_hi: (blk >> 16) as u16,
+            bi_lo: (blk & 0xffff) as u16,
+        },
+        ip_posid: pos,
+    }
+}
+
+fn drain_index(ts: &mut Tuplesort, desc: &TupleDescData<'_>, nkeys: usize) -> Vec<(Vec<Option<i64>>, (u32, u16))> {
+    let mut out = Vec::new();
+    while let Some(itup) = ts.getindextuple(true).unwrap() {
+        let mut keys = Vec::new();
+        for k in 1..=nkeys {
+            let mut isnull = false;
+            // SAFETY: live sorted image under desc.
+            let d = unsafe { nbtree::itup::index_getattr(itup, k as i16, desc, &mut isnull) };
+            keys.push(if isnull { None } else { Some(d.as_i32() as i64) });
+        }
+        // SAFETY: live image.
+        let t = unsafe { nbtree::itup::t_tid(itup) };
+        out.push((keys, (((t.ip_blkid.bi_hi as u32) << 16) | t.ip_blkid.bi_lo as u32, t.ip_posid)));
+    }
+    out
+}
+
+#[test]
+fn index_sort_int4_key_then_tid_with_nulls() {
+    let mcx = leaked_mcx();
+    let desc = int4_desc(mcx, 1);
+    let mut ts = Tuplesort::begin_index_with_keys(
+        desc.clone(), &[int32_key(1, false, false)], 1, false, false, "t_a_idx", 1024,
+        TUPLESORT_NONE,
+    );
+    let mut seed = 3u64;
+    let mut oracle: Vec<(Option<i64>, (u32, u16))> = Vec::new();
+    for i in 0..400u32 {
+        let r = lcg(&mut seed);
+        let key = if r % 19 == 0 { None } else { Some((r % 40) as i32) };
+        let t = tid(i / 100, (i % 100 + 1) as u16);
+        ts.putindextuplevalues(
+            t,
+            &[key.map_or(Datum::null(), Datum::from_i32)],
+            &[key.is_none()],
+        )
+        .unwrap();
+        oracle.push((key.map(|k| k as i64), (i / 100, (i % 100 + 1) as u16)));
+    }
+    // ASC NULLS LAST, then heap TID.
+    oracle.sort_by_key(|(k, t)| (k.map_or(i64::MAX, |v| v), *t));
+    ts.performsort().unwrap();
+    let got = drain_index(&mut ts, &desc, 1);
+    let got: Vec<(Option<i64>, (u32, u16))> = got.into_iter().map(|(k, t)| (k[0], t)).collect();
+    assert_eq!(got, oracle);
+    ts.end();
+}
+
+#[test]
+fn index_sort_two_keys_then_tid() {
+    let mcx = leaked_mcx();
+    let desc = int4_desc(mcx, 2);
+    let keys = [int32_key(1, false, false), int32_key(2, false, false)];
+    let mut ts = Tuplesort::begin_index_with_keys(
+        desc.clone(), &keys, 2, false, false, "t_ab_idx", 1024, TUPLESORT_NONE,
+    );
+    let mut seed = 9u64;
+    let mut oracle = Vec::new();
+    for i in 0..300u32 {
+        let (a, b) = ((lcg(&mut seed) % 5) as i32, (lcg(&mut seed) % 7) as i32);
+        let t = tid(i, 1);
+        ts.putindextuplevalues(t, &[Datum::from_i32(a), Datum::from_i32(b)], &[false, false])
+            .unwrap();
+        oracle.push((vec![Some(a as i64), Some(b as i64)], (i, 1u16)));
+    }
+    oracle.sort_by(|x, y| x.0.cmp(&y.0).then(x.1.cmp(&y.1)));
+    ts.performsort().unwrap();
+    assert_eq!(drain_index(&mut ts, &desc, 2), oracle);
+    ts.end();
+}
+
+#[test]
+fn index_sort_unique_violation_is_23505() {
+    let mcx = leaked_mcx();
+    let desc = int4_desc(mcx, 1);
+    let mut ts = Tuplesort::begin_index_with_keys(
+        desc, &[int32_key(1, false, false)], 1, true, false, "t_a_key", 1024, TUPLESORT_NONE,
+    );
+    for i in 0..10u16 {
+        ts.putindextuplevalues(tid(0, i + 1), &[Datum::from_i32((i % 9) as i32)], &[false])
+            .unwrap();
+    }
+    let err = ts.performsort().unwrap_err();
+    assert_eq!(err.sqlstate(), ERRCODE_UNIQUE_VIOLATION);
+    assert!(err.message().contains("could not create unique index \"t_a_key\""),
+        "message: {}", err.message());
+}
+
+#[test]
+fn index_sort_unique_null_keys_do_not_collide() {
+    let mcx = leaked_mcx();
+    let desc = int4_desc(mcx, 1);
+    let mut ts = Tuplesort::begin_index_with_keys(
+        desc.clone(), &[int32_key(1, false, false)], 1, true, false, "t_a_key", 1024,
+        TUPLESORT_NONE,
+    );
+    for i in 0..8u16 {
+        ts.putindextuplevalues(tid(0, i + 1), &[Datum::null()], &[true]).unwrap();
+    }
+    ts.performsort().unwrap();
+    assert_eq!(drain_index(&mut ts, &desc, 1).len(), 8);
+    ts.end();
+}
+
+fn text_desc(mcx: Mcx<'static>) -> Rc<TupleDescData<'static>> {
+    use ::types_tuple::TYPSTORAGE_EXTENDED;
+    let att = FormData_pg_attribute {
+        attnum: 1,
+        atttypid: 25,
+        attlen: -1,
+        attbyval: false,
+        attalign: TYPALIGN_INT,
+        attstorage: TYPSTORAGE_EXTENDED,
+        ..Default::default()
+    };
+    let mut attrs = PgVec::new_in(mcx);
+    let mut compact = PgVec::new_in(mcx);
+    compact.push(CompactAttribute::populate_from(&att));
+    attrs.push(att);
+    Rc::new(TupleDescData {
+        natts: 1,
+        tdtypeid: 2249,
+        tdtypmod: -1,
+        constr: None,
+        tdrefcount: -1,
+        compact_attrs: compact,
+        attrs,
+    })
+}
+
+#[test]
+fn index_sort_text_c_collation_memcmp_order() {
+    let mcx = leaked_mcx();
+    let desc = text_desc(mcx);
+    let key = SortSupport {
+        ssup_collation: 950,
+        ssup_reverse: false,
+        ssup_nulls_first: false,
+        ssup_attno: 1,
+        comparator: SortComparator::TextC,
+    };
+    let mut ts = Tuplesort::begin_index_with_keys(
+        desc.clone(), &[key], 1, false, false, "t_txt_idx", 1024, TUPLESORT_NONE,
+    );
+    let words: Vec<&[u8]> = vec![
+        b"pear", b"apple", b"Banana", b"apples", b"app", b"zebra", b"", b"apple", b"\xc3\xa9clair",
+    ];
+    let mut images = Vec::new();
+    for w in &words {
+        images.push(varlena::cstring_to_text(mcx, w).unwrap());
+    }
+    for (i, img) in images.iter().enumerate() {
+        let d = Datum::from_usize(img.as_bytes().as_ptr() as usize);
+        ts.putindextuplevalues(tid(0, (i + 1) as u16), &[d], &[false]).unwrap();
+    }
+    ts.performsort().unwrap();
+    let mut got = Vec::new();
+    while let Some(itup) = ts.getindextuple(true).unwrap() {
+        let mut isnull = false;
+        // SAFETY: live sorted image under desc.
+        let d = unsafe { nbtree::itup::index_getattr(itup, 1, &desc, &mut isnull) };
+        let p = d.as_usize() as *const u8;
+        // SAFETY: datum points into the live image; short or 4B varlena.
+        let payload = unsafe {
+            use ::types_tuple::varatt::{varatt_is_1b, varsize_1b, varsize_4b};
+            if varatt_is_1b(p) {
+                std::slice::from_raw_parts(p.add(1), varsize_1b(p) - 1)
+            } else {
+                std::slice::from_raw_parts(p.add(4), varsize_4b(p) - 4)
+            }
+        };
+        got.push(payload.to_vec());
+    }
+    let mut oracle: Vec<Vec<u8>> = words.iter().map(|w| w.to_vec()).collect();
+    oracle.sort();
+    assert_eq!(got, oracle);
+    ts.end();
+}
