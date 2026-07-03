@@ -19,7 +19,8 @@ use types_nodes::primnodes::{
 use types_nodes::JoinType;
 use types_nodes::rawnodes::A_Expr_Kind::{self, AEXPR_OP};
 use types_nodes::rawnodes::{
-    ColumnDef, Constraint, ConstrType, CreateStmt, IndexElem, IndexStmt, OnCommitAction,
+    ColumnDef, Constraint, ConstrType, CreateSeqStmt, CreateStmt, IndexElem, IndexStmt,
+    OnCommitAction,
     FKCONSTR_ACTION_CASCADE, FKCONSTR_ACTION_NOACTION, FKCONSTR_ACTION_RESTRICT,
     FKCONSTR_ACTION_SETDEFAULT, FKCONSTR_ACTION_SETNULL, FKCONSTR_MATCH_FULL,
     FKCONSTR_MATCH_SIMPLE,
@@ -871,6 +872,59 @@ impl<'mcx> Parser<'mcx> {
             603 => *yyval = YYSTYPE::Ival(OnCommitAction::ONCOMMIT_DELETE_ROWS as i32),
             604 => *yyval = YYSTYPE::Ival(OnCommitAction::ONCOMMIT_PRESERVE_ROWS as i32),
             605 => *yyval = YYSTYPE::Ival(OnCommitAction::ONCOMMIT_NOOP as i32),
+            // CreateSeqStmt: CREATE OptTemp SEQUENCE [IF_P NOT EXISTS]
+            // qualified_name OptSeqOptList
+            632 | 633 => {
+                let (rv, opts) =
+                    if rule == 632 { (view.v(4), view.v(5)) } else { (view.v(7), view.v(8)) };
+                let persistence = view.v(2).ival() as u8;
+                let relation = rv.node().expect("qualified_name");
+                // SAFETY: tree is parser-owned; no derived refs live.
+                unsafe {
+                    relation
+                        .with_mut::<RangeVar, _>(|r| r.relpersistence = persistence)
+                        .expect("qualified_name is RangeVar");
+                }
+                let mut n = Node::build::<CreateSeqStmt>(mcx)?;
+                n.sequence = relation.as_variant::<RangeVar>();
+                n.options = opts.list();
+                n.if_not_exists = rule == 633;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // SeqOptList: SeqOptElem | SeqOptList SeqOptElem
+            640 => {
+                let el = view.v(1).node().expect("SeqOptElem");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, el)?);
+            }
+            641 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(2).node().expect("SeqOptElem"))?;
+                *yyval = YYSTYPE::List(list);
+            }
+            // SeqOptElem: AS SimpleTypename | CACHE NumericOnly
+            642 => *yyval = def_elem(mcx, "as", view.v(2).node(), view.l(1))?,
+            643 => *yyval = def_elem(mcx, "cache", view.v(2).node(), view.l(1))?,
+            // CYCLE | NO CYCLE
+            644 | 645 => {
+                let arg = Node::mk(mcx, Boolean { boolval: rule == 644 })?;
+                *yyval = def_elem(mcx, "cycle", Some(arg), view.l(1))?;
+            }
+            646 => *yyval = def_elem(mcx, "increment", view.v(3).node(), view.l(1))?,
+            647 => *yyval = def_elem(mcx, "logged", None, view.l(1))?,
+            648 => *yyval = def_elem(mcx, "maxvalue", view.v(2).node(), view.l(1))?,
+            649 => *yyval = def_elem(mcx, "minvalue", view.v(2).node(), view.l(1))?,
+            650 => *yyval = def_elem(mcx, "maxvalue", None, view.l(1))?,
+            651 => *yyval = def_elem(mcx, "minvalue", None, view.l(1))?,
+            // OWNED BY any_name | SEQUENCE NAME_P any_name
+            652 | 653 => {
+                let name = if rule == 652 { "owned_by" } else { "sequence_name" };
+                let arg = Node::mk_list(mcx, view.v(3).list())?;
+                *yyval = def_elem(mcx, name, Some(arg), view.l(1))?;
+            }
+            654 => *yyval = def_elem(mcx, "start", view.v(3).node(), view.l(1))?,
+            655 => *yyval = def_elem(mcx, "restart", None, view.l(1))?,
+            656 => *yyval = def_elem(mcx, "restart", view.v(3).node(), view.l(1))?,
+            657 => *yyval = def_elem(mcx, "unlogged", None, view.l(1))?,
             1710 => {
                 let stmt = view.v(1).node().expect("select_clause");
                 let sort = view.v(2).list();

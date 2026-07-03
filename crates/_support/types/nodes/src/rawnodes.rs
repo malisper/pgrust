@@ -458,6 +458,23 @@ pub struct IndexStmt<'mcx> {
     pub reset_default_tblspc: bool,
 }
 
+#[derive(Default)]
+pub struct CreateSeqStmt<'mcx> {
+    pub sequence: Option<&'mcx crate::primnodes::RangeVar<'mcx>>,
+    pub options: NodeList<'mcx>,
+    pub ownerId: Oid,
+    pub for_identity: bool,
+    pub if_not_exists: bool,
+}
+
+#[derive(Default)]
+pub struct AlterSeqStmt<'mcx> {
+    pub sequence: Option<&'mcx crate::primnodes::RangeVar<'mcx>>,
+    pub options: NodeList<'mcx>,
+    pub for_identity: bool,
+    pub missing_ok: bool,
+}
+
 // DEFAULT/CHECK slice of C's Constraint; index/FK fields arrive with their DDL.
 pub const FKCONSTR_ACTION_NOACTION: u8 = b'a';
 pub const FKCONSTR_ACTION_RESTRICT: u8 = b'r';
@@ -585,6 +602,12 @@ unsafe impl<'mcx> NodeVariant<'mcx> for IndexStmt<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for LockingClause<'mcx> {
     const TAG: NodeTag = NodeTag::T_LockingClause;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for CreateSeqStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CreateSeqStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for AlterSeqStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_AlterSeqStmt;
 }
 
 impl<'mcx> Node<'mcx> {
@@ -758,6 +781,16 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_locking_clause(self) -> Option<&'mcx LockingClause<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_create_seq_stmt(self) -> Option<&'mcx CreateSeqStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_alter_seq_stmt(self) -> Option<&'mcx AlterSeqStmt<'mcx>> {
         self.as_variant()
     }
 }

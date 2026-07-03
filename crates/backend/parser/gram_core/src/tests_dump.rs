@@ -396,6 +396,17 @@ fn node(out: &mut String, n: Node<'_>) {
         int_field(out, "defaction", d.defaction as i32);
         int_field(out, "location", d.location);
         out.push('}');
+    } else if let Some(cs) = n.as_create_seq_stmt() {
+        out.push_str("{CREATESEQSTMT :sequence ");
+        match cs.sequence {
+            Some(rv) => range_var(out, rv),
+            None => out.push_str("<>"),
+        }
+        list_field(out, "options", &cs.options);
+        out.push_str(&format!(" :ownerId {}", cs.ownerId));
+        bool_field(out, "for_identity", cs.for_identity);
+        bool_field(out, "if_not_exists", cs.if_not_exists);
+        out.push('}');
     } else if let Some(j) = n.as_join_expr() {
         out.push_str("{JOINEXPR");
         int_field(out, "jointype", j.jointype as i32);
