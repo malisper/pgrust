@@ -370,12 +370,115 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
             b"ARRAYEXPR" => self.read_array_expr(),
             b"SETTODEFAULT" => self.read_set_to_default(),
             b"BOOLEANTEST" => self.read_boolean_test(),
+            b"JSONFORMAT" => self.read_json_format(),
+            b"JSONRETURNING" => self.read_json_returning(),
+            b"JSONVALUEEXPR" => self.read_json_value_expr(),
+            b"JSONCONSTRUCTOREXPR" => self.read_json_constructor_expr(),
+            b"JSONISPREDICATE" => self.read_json_is_predicate(),
+            b"JSONBEHAVIOR" => self.read_json_behavior(),
+            b"JSONEXPR" => self.read_json_expr(),
             other => panic!(
                 "parseNodeString (readfuncs.c): {} read arm unported (view SELECT-rule + \
                  DEFAULT/CHECK expr sets only)",
                 String::from_utf8_lossy(other)
             ),
         }
+    }
+
+    fn read_json_format(&mut self) -> PgResult<Node<'mcx>> {
+        let f = types_nodes::JsonFormat {
+            format_type: json_format_type(self.read_u32("format_type")),
+            encoding: json_encoding(self.read_u32("encoding")),
+            location: self.read_location("location"),
+        };
+        Node::mk(self.mcx, f)
+    }
+
+    fn json_format_ref(&mut self, name: &str) -> PgResult<Option<&'mcx types_nodes::JsonFormat>> {
+        Ok(self.read_node(name)?.map(|n| n.as_json_format().expect("JsonFormat")))
+    }
+
+    fn read_json_returning(&mut self) -> PgResult<Node<'mcx>> {
+        let format = self.json_format_ref("format")?;
+        let r = types_nodes::JsonReturning {
+            format,
+            typid: self.read_u32("typid"),
+            typmod: self.read_i32("typmod"),
+        };
+        Node::mk(self.mcx, r)
+    }
+
+    fn json_returning_ref(
+        &mut self,
+        name: &str,
+    ) -> PgResult<Option<&'mcx types_nodes::JsonReturning<'mcx>>> {
+        Ok(self.read_node(name)?.map(|n| n.as_json_returning().expect("JsonReturning")))
+    }
+
+    fn read_json_value_expr(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let mut j = Node::build::<types_nodes::JsonValueExpr>(mcx)?;
+        j.raw_expr = self.read_node("raw_expr")?;
+        j.formatted_expr = self.read_node("formatted_expr")?;
+        j.format = self.json_format_ref("format")?;
+        Ok(j.seal())
+    }
+
+    fn read_json_constructor_expr(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let mut c = Node::build::<types_nodes::JsonConstructorExpr>(mcx)?;
+        c.r#type = json_ctor_type(self.read_u32("type"));
+        c.args = self.read_node_list("args")?;
+        c.func = self.read_node("func")?;
+        c.coercion = self.read_node("coercion")?;
+        c.returning = self.json_returning_ref("returning")?;
+        c.absent_on_null = self.read_bool("absent_on_null");
+        c.unique = self.read_bool("unique");
+        c.location = self.read_location("location");
+        Ok(c.seal())
+    }
+
+    fn read_json_is_predicate(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let mut p = Node::build::<types_nodes::JsonIsPredicate>(mcx)?;
+        p.expr = self.read_node("expr")?;
+        p.format = self.json_format_ref("format")?;
+        p.item_type = json_value_type(self.read_u32("item_type"));
+        p.unique_keys = self.read_bool("unique_keys");
+        p.location = self.read_location("location");
+        Ok(p.seal())
+    }
+
+    fn read_json_behavior(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let mut b = Node::build::<types_nodes::JsonBehavior>(mcx)?;
+        b.btype = json_behavior_type(self.read_u32("btype"));
+        b.expr = self.read_node("expr")?;
+        b.coerce = self.read_bool("coerce");
+        b.location = self.read_location("location");
+        Ok(b.seal())
+    }
+
+    fn read_json_expr(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let mut j = Node::build::<types_nodes::JsonExpr>(mcx)?;
+        j.op = json_expr_op(self.read_u32("op"));
+        j.column_name = self.read_str("column_name")?;
+        j.formatted_expr = self.read_node("formatted_expr")?;
+        j.format = self.json_format_ref("format")?;
+        j.path_spec = self.read_node("path_spec")?;
+        j.returning = self.json_returning_ref("returning")?;
+        j.passing_names = self.read_node_list("passing_names")?;
+        j.passing_values = self.read_node_list("passing_values")?;
+        j.on_empty = self.read_node("on_empty")?;
+        j.on_error = self.read_node("on_error")?;
+        j.use_io_coercion = self.read_bool("use_io_coercion");
+        j.use_json_coercion = self.read_bool("use_json_coercion");
+        j.wrapper = json_wrapper(self.read_u32("wrapper"));
+        j.omit_quotes = self.read_bool("omit_quotes");
+        j.collation = self.read_u32("collation");
+        j.location = self.read_location("location");
+        Ok(j.seal())
     }
 
     fn read_boolean_test(&mut self) -> PgResult<Node<'mcx>> {
@@ -990,6 +1093,84 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
         }
         self.expect("]");
         Ok(Datum::from_usize(v.leak().as_ptr() as usize))
+    }
+}
+
+fn json_format_type(v: u32) -> types_nodes::primnodes::JsonFormatType {
+    use types_nodes::primnodes::JsonFormatType::*;
+    match v {
+        1 => JS_FORMAT_JSON,
+        2 => JS_FORMAT_JSONB,
+        _ => JS_FORMAT_DEFAULT,
+    }
+}
+
+fn json_encoding(v: u32) -> types_nodes::primnodes::JsonEncoding {
+    use types_nodes::primnodes::JsonEncoding::*;
+    match v {
+        1 => JS_ENC_UTF8,
+        2 => JS_ENC_UTF16,
+        3 => JS_ENC_UTF32,
+        _ => JS_ENC_DEFAULT,
+    }
+}
+
+fn json_ctor_type(v: u32) -> types_nodes::JsonConstructorType {
+    use types_nodes::JsonConstructorType::*;
+    match v {
+        1 => JSCTOR_JSON_OBJECT,
+        2 => JSCTOR_JSON_ARRAY,
+        3 => JSCTOR_JSON_OBJECTAGG,
+        4 => JSCTOR_JSON_ARRAYAGG,
+        5 => JSCTOR_JSON_PARSE,
+        6 => JSCTOR_JSON_SCALAR,
+        7 => JSCTOR_JSON_SERIALIZE,
+        other => panic!("readfuncs.c: bad JsonConstructorType {other}"),
+    }
+}
+
+fn json_value_type(v: u32) -> types_nodes::JsonValueType {
+    use types_nodes::JsonValueType::*;
+    match v {
+        1 => JS_TYPE_OBJECT,
+        2 => JS_TYPE_ARRAY,
+        3 => JS_TYPE_SCALAR,
+        _ => JS_TYPE_ANY,
+    }
+}
+
+fn json_behavior_type(v: u32) -> types_nodes::JsonBehaviorType {
+    use types_nodes::JsonBehaviorType::*;
+    match v {
+        1 => JSON_BEHAVIOR_ERROR,
+        2 => JSON_BEHAVIOR_EMPTY,
+        3 => JSON_BEHAVIOR_TRUE,
+        4 => JSON_BEHAVIOR_FALSE,
+        5 => JSON_BEHAVIOR_UNKNOWN,
+        6 => JSON_BEHAVIOR_EMPTY_ARRAY,
+        7 => JSON_BEHAVIOR_EMPTY_OBJECT,
+        8 => JSON_BEHAVIOR_DEFAULT,
+        _ => JSON_BEHAVIOR_NULL,
+    }
+}
+
+fn json_expr_op(v: u32) -> types_nodes::JsonExprOp {
+    use types_nodes::JsonExprOp::*;
+    match v {
+        1 => JSON_QUERY_OP,
+        2 => JSON_VALUE_OP,
+        3 => JSON_TABLE_OP,
+        _ => JSON_EXISTS_OP,
+    }
+}
+
+fn json_wrapper(v: u32) -> types_nodes::JsonWrapper {
+    use types_nodes::JsonWrapper::*;
+    match v {
+        1 => JSW_NONE,
+        2 => JSW_CONDITIONAL,
+        3 => JSW_UNCONDITIONAL,
+        _ => JSW_UNSPEC,
     }
 }
 

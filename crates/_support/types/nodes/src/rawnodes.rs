@@ -1032,3 +1032,300 @@ impl<'mcx> Node<'mcx> {
         self.as_variant()
     }
 }
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum JsonQuotes {
+    #[default]
+    JS_QUOTES_UNSPEC = 0,
+    JS_QUOTES_KEEP = 1,
+    JS_QUOTES_OMIT = 2,
+}
+
+#[derive(Default)]
+pub struct JsonOutput<'mcx> {
+    pub typeName: Option<Node<'mcx>>,
+    pub returning: Option<&'mcx crate::primnodes::JsonReturning<'mcx>>,
+}
+
+#[derive(Default)]
+pub struct JsonArgument<'mcx> {
+    pub val: Option<Node<'mcx>>,
+    pub name: Option<&'mcx str>,
+}
+
+pub struct JsonFuncExpr<'mcx> {
+    pub op: crate::primnodes::JsonExprOp,
+    pub column_name: Option<&'mcx str>,
+    pub context_item: Option<Node<'mcx>>,
+    pub pathspec: Option<Node<'mcx>>,
+    pub passing: NodeList<'mcx>,
+    pub output: Option<Node<'mcx>>,
+    pub on_empty: Option<Node<'mcx>>,
+    pub on_error: Option<Node<'mcx>>,
+    pub wrapper: crate::primnodes::JsonWrapper,
+    pub quotes: JsonQuotes,
+    pub location: ParseLoc,
+}
+
+impl Default for JsonFuncExpr<'_> {
+    fn default() -> Self {
+        JsonFuncExpr {
+            op: crate::primnodes::JsonExprOp::JSON_EXISTS_OP,
+            column_name: None,
+            context_item: None,
+            pathspec: None,
+            passing: NodeList::nil(),
+            output: None,
+            on_empty: None,
+            on_error: None,
+            wrapper: crate::primnodes::JsonWrapper::JSW_UNSPEC,
+            quotes: JsonQuotes::JS_QUOTES_UNSPEC,
+            location: -1,
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct JsonKeyValue<'mcx> {
+    pub key: Option<Node<'mcx>>,
+    pub value: Option<Node<'mcx>>,
+}
+
+pub struct JsonParseExpr<'mcx> {
+    pub expr: Option<Node<'mcx>>,
+    pub output: Option<Node<'mcx>>,
+    pub unique_keys: bool,
+    pub location: ParseLoc,
+}
+
+impl Default for JsonParseExpr<'_> {
+    fn default() -> Self {
+        JsonParseExpr { expr: None, output: None, unique_keys: false, location: -1 }
+    }
+}
+
+pub struct JsonScalarExpr<'mcx> {
+    pub expr: Option<Node<'mcx>>,
+    pub output: Option<Node<'mcx>>,
+    pub location: ParseLoc,
+}
+
+impl Default for JsonScalarExpr<'_> {
+    fn default() -> Self {
+        JsonScalarExpr { expr: None, output: None, location: -1 }
+    }
+}
+
+pub struct JsonSerializeExpr<'mcx> {
+    pub expr: Option<Node<'mcx>>,
+    pub output: Option<Node<'mcx>>,
+    pub location: ParseLoc,
+}
+
+impl Default for JsonSerializeExpr<'_> {
+    fn default() -> Self {
+        JsonSerializeExpr { expr: None, output: None, location: -1 }
+    }
+}
+
+pub struct JsonObjectConstructor<'mcx> {
+    pub exprs: NodeList<'mcx>,
+    pub output: Option<Node<'mcx>>,
+    pub absent_on_null: bool,
+    pub unique: bool,
+    pub location: ParseLoc,
+}
+
+impl Default for JsonObjectConstructor<'_> {
+    fn default() -> Self {
+        JsonObjectConstructor {
+            exprs: NodeList::nil(),
+            output: None,
+            absent_on_null: false,
+            unique: false,
+            location: -1,
+        }
+    }
+}
+
+pub struct JsonArrayConstructor<'mcx> {
+    pub exprs: NodeList<'mcx>,
+    pub output: Option<Node<'mcx>>,
+    pub absent_on_null: bool,
+    pub location: ParseLoc,
+}
+
+impl Default for JsonArrayConstructor<'_> {
+    fn default() -> Self {
+        JsonArrayConstructor {
+            exprs: NodeList::nil(),
+            output: None,
+            absent_on_null: false,
+            location: -1,
+        }
+    }
+}
+
+pub struct JsonArrayQueryConstructor<'mcx> {
+    pub query: Option<Node<'mcx>>,
+    pub output: Option<Node<'mcx>>,
+    pub format: Option<&'mcx crate::primnodes::JsonFormat>,
+    pub absent_on_null: bool,
+    pub location: ParseLoc,
+}
+
+impl Default for JsonArrayQueryConstructor<'_> {
+    fn default() -> Self {
+        JsonArrayQueryConstructor {
+            query: None,
+            output: None,
+            format: None,
+            absent_on_null: false,
+            location: -1,
+        }
+    }
+}
+
+pub struct JsonAggConstructor<'mcx> {
+    pub output: Option<Node<'mcx>>,
+    pub agg_filter: Option<Node<'mcx>>,
+    pub agg_order: NodeList<'mcx>,
+    pub over: Option<Node<'mcx>>,
+    pub location: ParseLoc,
+}
+
+impl Default for JsonAggConstructor<'_> {
+    fn default() -> Self {
+        JsonAggConstructor {
+            output: None,
+            agg_filter: None,
+            agg_order: NodeList::nil(),
+            over: None,
+            location: -1,
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct JsonObjectAgg<'mcx> {
+    pub constructor: Option<Node<'mcx>>,
+    pub arg: Option<Node<'mcx>>,
+    pub absent_on_null: bool,
+    pub unique: bool,
+}
+
+#[derive(Default)]
+pub struct JsonArrayAgg<'mcx> {
+    pub constructor: Option<Node<'mcx>>,
+    pub arg: Option<Node<'mcx>>,
+    pub absent_on_null: bool,
+}
+
+// SAFETY (each): tag/type pairing mirrors parsenodes.h.
+unsafe impl<'mcx> NodeVariant<'mcx> for JsonOutput<'mcx> {
+    const TAG: NodeTag = NodeTag::T_JsonOutput;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for JsonArgument<'mcx> {
+    const TAG: NodeTag = NodeTag::T_JsonArgument;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for JsonFuncExpr<'mcx> {
+    const TAG: NodeTag = NodeTag::T_JsonFuncExpr;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for JsonKeyValue<'mcx> {
+    const TAG: NodeTag = NodeTag::T_JsonKeyValue;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for JsonParseExpr<'mcx> {
+    const TAG: NodeTag = NodeTag::T_JsonParseExpr;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for JsonScalarExpr<'mcx> {
+    const TAG: NodeTag = NodeTag::T_JsonScalarExpr;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for JsonSerializeExpr<'mcx> {
+    const TAG: NodeTag = NodeTag::T_JsonSerializeExpr;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for JsonObjectConstructor<'mcx> {
+    const TAG: NodeTag = NodeTag::T_JsonObjectConstructor;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for JsonArrayConstructor<'mcx> {
+    const TAG: NodeTag = NodeTag::T_JsonArrayConstructor;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for JsonArrayQueryConstructor<'mcx> {
+    const TAG: NodeTag = NodeTag::T_JsonArrayQueryConstructor;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for JsonAggConstructor<'mcx> {
+    const TAG: NodeTag = NodeTag::T_JsonAggConstructor;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for JsonObjectAgg<'mcx> {
+    const TAG: NodeTag = NodeTag::T_JsonObjectAgg;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for JsonArrayAgg<'mcx> {
+    const TAG: NodeTag = NodeTag::T_JsonArrayAgg;
+}
+
+impl<'mcx> Node<'mcx> {
+    #[inline]
+    pub fn as_json_output(self) -> Option<&'mcx JsonOutput<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_json_argument(self) -> Option<&'mcx JsonArgument<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_json_func_expr(self) -> Option<&'mcx JsonFuncExpr<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_json_key_value(self) -> Option<&'mcx JsonKeyValue<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_json_parse_expr(self) -> Option<&'mcx JsonParseExpr<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_json_scalar_expr(self) -> Option<&'mcx JsonScalarExpr<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_json_serialize_expr(self) -> Option<&'mcx JsonSerializeExpr<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_json_object_constructor(self) -> Option<&'mcx JsonObjectConstructor<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_json_array_constructor(self) -> Option<&'mcx JsonArrayConstructor<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_json_array_query_constructor(self) -> Option<&'mcx JsonArrayQueryConstructor<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_json_agg_constructor(self) -> Option<&'mcx JsonAggConstructor<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_json_object_agg(self) -> Option<&'mcx JsonObjectAgg<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_json_array_agg(self) -> Option<&'mcx JsonArrayAgg<'mcx>> {
+        self.as_variant()
+    }
+}

@@ -1289,6 +1289,52 @@ pub(crate) fn init_expr_rec<'mcx>(
             let step = init_row_expr(r, state, mcx, out, agg, params, sub)?;
             push_step(state, mcx, step)
         }
+        NodeTag::T_JsonValueExpr => {
+            let j = node.as_json_value_expr().unwrap();
+            init_expr_rec(j.raw_expr.expect("raw_expr"), state, mcx, out, agg, params, sub)?;
+            init_expr_rec(
+                j.formatted_expr.expect("formatted_expr"),
+                state,
+                mcx,
+                out,
+                agg,
+                params,
+                sub,
+            )
+        }
+        NodeTag::T_JsonConstructorExpr => {
+            init_json_constructor(node, state, mcx, out, agg, params, sub)
+        }
+        NodeTag::T_JsonIsPredicate => {
+            let p = node.as_json_is_predicate().unwrap();
+            let arg = p.expr.expect("expr");
+            init_expr_rec(arg, state, mcx, out, agg, params, sub)?;
+            let frame_ix = state.frames.len() as u32;
+            let frame = FuncFrame::new_in(mcx, FmgrInfo::unresolved(), 0, 0)?;
+            state
+                .frames
+                .try_reserve(1)
+                .map_err(|_| mcx.oom(core::mem::size_of::<FuncFrame<'_>>()))?;
+            state.frames.push(frame);
+            push_step(
+                state,
+                mcx,
+                Step::IsJson {
+                    exprtype: expr_type(arg),
+                    item_type: p.item_type,
+                    unique_keys: p.unique_keys,
+                    frame: frame_ix,
+                    out,
+                },
+            )
+        }
+        NodeTag::T_JsonExpr => panic!(
+            "execexpr ExecInitJsonExpr: JSON_EXISTS/JSON_QUERY/JSON_VALUE execution \
+             blocked on the jsonpath lane — interlock: adt_jsonpath jsonpath_exec \
+             (JsonPathExists/JsonPathQuery/JsonPathValue + GetJsonPathVar) and \
+             json_populate_type (jsonfuncs.c) must land, then ExecInitJsonExpr \
+             (execExpr.c:4750) lands here"
+        ),
         NodeTag::T_CoerceToDomain => init_coerce_to_domain(node, state, mcx, out, agg, params, sub),
         NodeTag::T_CoerceToDomainValue => match state.innermost_domain {
             Some(src) => push_step(state, mcx, Step::DomainTestval { src, out }),
@@ -1493,6 +1539,115 @@ fn init_row_expr<'mcx>(
     }
 
     Ok(Step::RowExprStep { elems, nelems: nelems as u16, frame: frame_ix, desc: desc_ptr, out })
+}
+
+// C ExecInitExprRec T_JsonConstructorExpr (execExpr.c:2379): args evaluate
+// into compile-allocated slots (Consts pre-written); scalar categorize
+// carriers resolved once.
+#[allow(clippy::too_many_arguments)]
+fn init_json_constructor<'mcx>(
+    node: Node<'mcx>,
+    state: &mut ExprState<'mcx>,
+    mcx: Mcx<'mcx>,
+    out: OutRef,
+    agg: Option<Bind<'_, 'mcx>>,
+    params: ParamBind<'mcx>,
+    sub: Option<SubplanCompileEnv>,
+) -> PgResult<()> {
+    use ::types_nodes::JsonConstructorType as JC;
+    let ctor = node.as_json_constructor_expr().unwrap();
+
+    if let Some(func) = ctor.func {
+        init_expr_rec(func, state, mcx, out, agg, params, sub)?;
+    } else if (ctor.r#type == JC::JSCTOR_JSON_PARSE && !ctor.unique)
+        || ctor.r#type == JC::JSCTOR_JSON_SERIALIZE
+    {
+        init_expr_rec(ctor.args.first().expect("args"), state, mcx, out, agg, params, sub)?;
+    } else {
+        let nargs = ctor.args.len();
+        let n = nargs.max(1);
+        let slots: NonNull<::datum::NullableDatum> = alloc_array(mcx, n)?;
+        let values: NonNull<Datum> = alloc_array(mcx, n)?;
+        let nulls: NonNull<bool> = alloc_array(mcx, n)?;
+        let types: NonNull<::types_core::Oid> = alloc_array(mcx, n)?;
+
+        for (i, arg) in ctor.args.iter().enumerate() {
+            // SAFETY: i < n slots of the fresh allocations.
+            unsafe {
+                types.as_ptr().add(i).write(expr_type(arg));
+                if let Some(c) = arg.as_const() {
+                    slots.as_ptr().add(i).write(::datum::NullableDatum {
+                        value: c.constvalue,
+                        isnull: c.constisnull,
+                    });
+                    continue;
+                }
+                let slot = NonNull::new_unchecked(slots.as_ptr().add(i));
+                init_expr_rec(arg, state, mcx, OutRef(slot), agg, params, sub)?;
+            }
+        }
+
+        let is_jsonb = ctor.returning.expect("returning").format.expect("format").format_type
+            == ::types_nodes::primnodes::JsonFormatType::JS_FORMAT_JSONB;
+
+        let (scalar_json, scalar_jsonb) = if ctor.r#type == JC::JSCTOR_JSON_SCALAR {
+            // SAFETY: nargs == 1 for JSCTOR_JSON_SCALAR; types[0] just written.
+            let typid = unsafe { types.as_ptr().read() };
+            if is_jsonb {
+                let cat = ::adt_jsonb::tojsonb::json_categorize_type(typid)?;
+                (None, Some(NonNull::from(::mcx::leak_in(::mcx::alloc_in(mcx, cat)?))))
+            } else {
+                let cat = ::adt_json::tojson::json_categorize_type(typid)?;
+                (Some(NonNull::from(::mcx::leak_in(::mcx::alloc_in(mcx, cat)?))), None)
+            }
+        } else {
+            (None, None)
+        };
+
+        let jcstate = ::mcx::leak_in(::mcx::alloc_in(
+            mcx,
+            crate::steps::JsonConstructorState {
+                ctor_type: ctor.r#type,
+                is_jsonb,
+                absent_on_null: ctor.absent_on_null,
+                unique: ctor.unique,
+                nargs: nargs as u16,
+                slots,
+                values,
+                nulls,
+                types,
+                scalar_json,
+                scalar_jsonb,
+            },
+        )?);
+
+        let frame_ix = state.frames.len() as u32;
+        let frame = FuncFrame::new_in(mcx, FmgrInfo::unresolved(), 0, 0)?;
+        state
+            .frames
+            .try_reserve(1)
+            .map_err(|_| mcx.oom(core::mem::size_of::<FuncFrame<'_>>()))?;
+        state.frames.push(frame);
+
+        push_step(
+            state,
+            mcx,
+            Step::JsonConstructor { jcstate: NonNull::from(jcstate), frame: frame_ix, out },
+        )?;
+    }
+
+    if let Some(coercion) = ctor.coercion {
+        let saved = state.innermost_case;
+        state.innermost_case = Some(out.0);
+        init_expr_rec(coercion, state, mcx, out, agg, params, sub)?;
+        state.innermost_case = saved;
+    }
+    Ok(())
+}
+
+fn alloc_array<'mcx, T>(mcx: Mcx<'mcx>, n: usize) -> PgResult<NonNull<T>> {
+    let layout = core::alloc::Layout::array::<T>(n).expect("scratch layout");
+    Ok(mcx.allocate(layout).map_err(|_| mcx.oom(layout.size()))?.cast())
 }
 
 // C ExecInitCoerceToDomain (execExpr.c:3524): constraints baked at compile

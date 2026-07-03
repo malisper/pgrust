@@ -39,6 +39,13 @@ pub struct KeyActions<'mcx> {
     pub delete_action: KeyAction<'mcx>,
 }
 
+// gram.y json_behavior_clause_opt's list_make2(on_empty, on_error) carrier.
+#[derive(Default)]
+pub struct JsonBehaviors<'mcx> {
+    pub on_empty: Option<Node<'mcx>>,
+    pub on_error: Option<Node<'mcx>>,
+}
+
 pub struct YYSTYPE<'mcx> {
     p: *mut u8,
     meta: u64,
@@ -63,6 +70,7 @@ const T_LIMIT: u32 = 11;
 const T_DISTINCT_ALL: u32 = 12;
 const T_KEY_ACTION: u32 = 13;
 const T_KEY_ACTIONS: u32 = 14;
+const T_JSON_BEHAVIORS: u32 = 15;
 
 #[cold]
 #[inline(never)]
@@ -185,6 +193,19 @@ impl<'mcx> YYSTYPE<'mcx> {
         }
         // SAFETY: built by KeyActionV from &'mcx mut; moved, never duplicated.
         unsafe { &mut *(self.p as *mut KeyAction<'mcx>) }
+    }
+
+    #[inline(always)]
+    pub fn JsonBehaviorsV(a: &'mcx mut JsonBehaviors<'mcx>) -> Self {
+        Self::mk(a as *mut JsonBehaviors<'mcx> as *mut u8, T_JSON_BEHAVIORS, 0)
+    }
+
+    pub fn json_behaviors(self) -> &'mcx mut JsonBehaviors<'mcx> {
+        if self.tag() != T_JSON_BEHAVIORS {
+            confusion("JsonBehaviors");
+        }
+        // SAFETY: built by JsonBehaviorsV from &'mcx mut; moved, never duplicated.
+        unsafe { &mut *(self.p as *mut JsonBehaviors<'mcx>) }
     }
 
     pub fn key_actions(self) -> &'mcx mut KeyActions<'mcx> {

@@ -660,6 +660,14 @@ fn exprs_collation(node: Node<'_>) -> u32 {
         NodeTag::T_WindowFunc => node.as_window_func().unwrap().wincollid,
         NodeTag::T_CaseExpr => node.as_case_expr().unwrap().casecollid,
         NodeTag::T_RowExpr => 0,
+        NodeTag::T_JsonIsPredicate => 0,
+        NodeTag::T_JsonExpr => node.as_json_expr().unwrap().collation,
+        NodeTag::T_JsonConstructorExpr => {
+            match node.as_json_constructor_expr().unwrap().coercion {
+                Some(c) => exprs_collation(c),
+                None => 0,
+            }
+        }
         tag => panic!("exprCollation (nodeFuncs.c): {tag:?} not ported here"),
     }
 }
@@ -1038,6 +1046,116 @@ fn fix_upper_expr<'mcx>(
                 },
             )
         }
+
+        NodeTag::T_JsonValueExpr => {
+            let j = node.as_json_value_expr().unwrap();
+            let raw = fix_upper_expr(run, j.raw_expr.expect("raw_expr"), subplan_tlist, rtoffset, newvarno, num_exec)?;
+            let formatted = fix_upper_expr(run, j.formatted_expr.expect("formatted_expr"), subplan_tlist, rtoffset, newvarno, num_exec)?;
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::JsonValueExpr {
+                    raw_expr: Some(raw),
+                    formatted_expr: Some(formatted),
+                    format: j.format,
+                },
+            )
+        }
+        NodeTag::T_JsonConstructorExpr => {
+            let c = node.as_json_constructor_expr().unwrap();
+            let mut args = NodeList::nil();
+            for a in &c.args {
+                args.lappend(mcx, fix_upper_expr(run, a, subplan_tlist, rtoffset, newvarno, num_exec)?)?;
+            }
+            let func = match c.func {
+                Some(f) => Some(fix_upper_expr(run, f, subplan_tlist, rtoffset, newvarno, num_exec)?),
+                None => None,
+            };
+            let coercion = match c.coercion {
+                Some(co) => Some(fix_upper_expr(run, co, subplan_tlist, rtoffset, newvarno, num_exec)?),
+                None => None,
+            };
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::JsonConstructorExpr {
+                    r#type: c.r#type,
+                    args,
+                    func,
+                    coercion,
+                    returning: c.returning,
+                    absent_on_null: c.absent_on_null,
+                    unique: c.unique,
+                    location: c.location,
+                },
+            )
+        }
+        NodeTag::T_JsonIsPredicate => {
+            let p = node.as_json_is_predicate().unwrap();
+            let expr = fix_upper_expr(run, p.expr.expect("expr"), subplan_tlist, rtoffset, newvarno, num_exec)?;
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::JsonIsPredicate {
+                    expr: Some(expr),
+                    format: p.format,
+                    item_type: p.item_type,
+                    unique_keys: p.unique_keys,
+                    location: p.location,
+                },
+            )
+        }
+        NodeTag::T_JsonBehavior => {
+            let b = node.as_json_behavior().unwrap();
+            let expr = match b.expr {
+                Some(e) => Some(fix_upper_expr(run, e, subplan_tlist, rtoffset, newvarno, num_exec)?),
+                None => None,
+            };
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::JsonBehavior {
+                    btype: b.btype,
+                    expr,
+                    coerce: b.coerce,
+                    location: b.location,
+                },
+            )
+        }
+        NodeTag::T_JsonExpr => {
+            let j = node.as_json_expr().unwrap();
+            let formatted = fix_upper_expr(run, j.formatted_expr.expect("formatted_expr"), subplan_tlist, rtoffset, newvarno, num_exec)?;
+            let path_spec = fix_upper_expr(run, j.path_spec.expect("path_spec"), subplan_tlist, rtoffset, newvarno, num_exec)?;
+            let mut passing_values = NodeList::nil();
+            for v in &j.passing_values {
+                passing_values.lappend(mcx, fix_upper_expr(run, v, subplan_tlist, rtoffset, newvarno, num_exec)?)?;
+            }
+            let on_empty = match j.on_empty {
+                Some(e) => Some(fix_upper_expr(run, e, subplan_tlist, rtoffset, newvarno, num_exec)?),
+                None => None,
+            };
+            let on_error = match j.on_error {
+                Some(e) => Some(fix_upper_expr(run, e, subplan_tlist, rtoffset, newvarno, num_exec)?),
+                None => None,
+            };
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::JsonExpr {
+                    op: j.op,
+                    column_name: j.column_name,
+                    formatted_expr: Some(formatted),
+                    format: j.format,
+                    path_spec: Some(path_spec),
+                    returning: j.returning,
+                    passing_names: j.passing_names.clone_in(mcx)?,
+                    passing_values,
+                    on_empty,
+                    on_error,
+                    use_io_coercion: j.use_io_coercion,
+                    use_json_coercion: j.use_json_coercion,
+                    wrapper: j.wrapper,
+                    omit_quotes: j.omit_quotes,
+                    collation: j.collation,
+                    location: j.location,
+                },
+            )
+        }
         other => panic!("fix_upper_expr_mutator (setrefs.c): {other:?}; M3 expression lane"),
     }
 }
@@ -1401,6 +1519,116 @@ fn fix_scan_expr_mutator<'mcx>(
                 },
             )
         }
+
+        NodeTag::T_JsonValueExpr => {
+            let j = node.as_json_value_expr().unwrap();
+            let raw = fix_scan_expr_mutator(run, j.raw_expr.expect("raw_expr"), rtoffset, num_exec)?;
+            let formatted = fix_scan_expr_mutator(run, j.formatted_expr.expect("formatted_expr"), rtoffset, num_exec)?;
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::JsonValueExpr {
+                    raw_expr: Some(raw),
+                    formatted_expr: Some(formatted),
+                    format: j.format,
+                },
+            )
+        }
+        NodeTag::T_JsonConstructorExpr => {
+            let c = node.as_json_constructor_expr().unwrap();
+            let mut args = NodeList::nil();
+            for a in &c.args {
+                args.lappend(mcx, fix_scan_expr_mutator(run, a, rtoffset, num_exec)?)?;
+            }
+            let func = match c.func {
+                Some(f) => Some(fix_scan_expr_mutator(run, f, rtoffset, num_exec)?),
+                None => None,
+            };
+            let coercion = match c.coercion {
+                Some(co) => Some(fix_scan_expr_mutator(run, co, rtoffset, num_exec)?),
+                None => None,
+            };
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::JsonConstructorExpr {
+                    r#type: c.r#type,
+                    args,
+                    func,
+                    coercion,
+                    returning: c.returning,
+                    absent_on_null: c.absent_on_null,
+                    unique: c.unique,
+                    location: c.location,
+                },
+            )
+        }
+        NodeTag::T_JsonIsPredicate => {
+            let p = node.as_json_is_predicate().unwrap();
+            let expr = fix_scan_expr_mutator(run, p.expr.expect("expr"), rtoffset, num_exec)?;
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::JsonIsPredicate {
+                    expr: Some(expr),
+                    format: p.format,
+                    item_type: p.item_type,
+                    unique_keys: p.unique_keys,
+                    location: p.location,
+                },
+            )
+        }
+        NodeTag::T_JsonBehavior => {
+            let b = node.as_json_behavior().unwrap();
+            let expr = match b.expr {
+                Some(e) => Some(fix_scan_expr_mutator(run, e, rtoffset, num_exec)?),
+                None => None,
+            };
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::JsonBehavior {
+                    btype: b.btype,
+                    expr,
+                    coerce: b.coerce,
+                    location: b.location,
+                },
+            )
+        }
+        NodeTag::T_JsonExpr => {
+            let j = node.as_json_expr().unwrap();
+            let formatted = fix_scan_expr_mutator(run, j.formatted_expr.expect("formatted_expr"), rtoffset, num_exec)?;
+            let path_spec = fix_scan_expr_mutator(run, j.path_spec.expect("path_spec"), rtoffset, num_exec)?;
+            let mut passing_values = NodeList::nil();
+            for v in &j.passing_values {
+                passing_values.lappend(mcx, fix_scan_expr_mutator(run, v, rtoffset, num_exec)?)?;
+            }
+            let on_empty = match j.on_empty {
+                Some(e) => Some(fix_scan_expr_mutator(run, e, rtoffset, num_exec)?),
+                None => None,
+            };
+            let on_error = match j.on_error {
+                Some(e) => Some(fix_scan_expr_mutator(run, e, rtoffset, num_exec)?),
+                None => None,
+            };
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::JsonExpr {
+                    op: j.op,
+                    column_name: j.column_name,
+                    formatted_expr: Some(formatted),
+                    format: j.format,
+                    path_spec: Some(path_spec),
+                    returning: j.returning,
+                    passing_names: j.passing_names.clone_in(mcx)?,
+                    passing_values,
+                    on_empty,
+                    on_error,
+                    use_io_coercion: j.use_io_coercion,
+                    use_json_coercion: j.use_json_coercion,
+                    wrapper: j.wrapper,
+                    omit_quotes: j.omit_quotes,
+                    collation: j.collation,
+                    location: j.location,
+                },
+            )
+        }
         other => panic!("fix_scan_expr_mutator (setrefs.c): {other:?}; M2 expression lane"),
     }
 }
@@ -1535,6 +1763,42 @@ fn fix_scan_expr_walker<'mcx>(run: &mut PlannerRun<'mcx>, node: Node<'mcx>) -> P
         NodeTag::T_RowExpr => {
             for e in &node.as_row_expr().unwrap().args {
                 fix_scan_expr_walker(run, e)?;
+            }
+            Ok(())
+        }
+
+        NodeTag::T_JsonValueExpr => {
+            let j = node.as_json_value_expr().unwrap();
+            fix_scan_expr_walker(run, j.raw_expr.expect("raw_expr"))?;
+            fix_scan_expr_walker(run, j.formatted_expr.expect("formatted_expr"))
+        }
+        NodeTag::T_JsonConstructorExpr => {
+            let c = node.as_json_constructor_expr().unwrap();
+            for a in &c.args {
+                fix_scan_expr_walker(run, a)?;
+            }
+            for e in [c.func, c.coercion].into_iter().flatten() {
+                fix_scan_expr_walker(run, e)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_JsonIsPredicate => {
+            fix_scan_expr_walker(run, node.as_json_is_predicate().unwrap().expr.expect("expr"))
+        }
+        NodeTag::T_JsonBehavior => match node.as_json_behavior().unwrap().expr {
+            Some(e) => fix_scan_expr_walker(run, e),
+            None => Ok(()),
+        },
+        NodeTag::T_JsonExpr => {
+            let j = node.as_json_expr().unwrap();
+            for e in [j.formatted_expr, j.path_spec, j.on_empty, j.on_error]
+                .into_iter()
+                .flatten()
+            {
+                fix_scan_expr_walker(run, e)?;
+            }
+            for v in &j.passing_values {
+                fix_scan_expr_walker(run, v)?;
             }
             Ok(())
         }
@@ -2122,6 +2386,116 @@ fn fix_join_expr_mutator<'mcx>(
                     row_format: r.row_format,
                     colnames: r.colnames.clone_in(mcx)?,
                     location: r.location,
+                },
+            )
+        }
+
+        NodeTag::T_JsonValueExpr => {
+            let j = node.as_json_value_expr().unwrap();
+            let raw = fix_join_expr_mutator(run, j.raw_expr.expect("raw_expr"), outer_tlist, inner_tlist, rtoffset, nrm_match, acceptable_rel, num_exec)?;
+            let formatted = fix_join_expr_mutator(run, j.formatted_expr.expect("formatted_expr"), outer_tlist, inner_tlist, rtoffset, nrm_match, acceptable_rel, num_exec)?;
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::JsonValueExpr {
+                    raw_expr: Some(raw),
+                    formatted_expr: Some(formatted),
+                    format: j.format,
+                },
+            )
+        }
+        NodeTag::T_JsonConstructorExpr => {
+            let c = node.as_json_constructor_expr().unwrap();
+            let mut args = NodeList::nil();
+            for a in &c.args {
+                args.lappend(mcx, fix_join_expr_mutator(run, a, outer_tlist, inner_tlist, rtoffset, nrm_match, acceptable_rel, num_exec)?)?;
+            }
+            let func = match c.func {
+                Some(f) => Some(fix_join_expr_mutator(run, f, outer_tlist, inner_tlist, rtoffset, nrm_match, acceptable_rel, num_exec)?),
+                None => None,
+            };
+            let coercion = match c.coercion {
+                Some(co) => Some(fix_join_expr_mutator(run, co, outer_tlist, inner_tlist, rtoffset, nrm_match, acceptable_rel, num_exec)?),
+                None => None,
+            };
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::JsonConstructorExpr {
+                    r#type: c.r#type,
+                    args,
+                    func,
+                    coercion,
+                    returning: c.returning,
+                    absent_on_null: c.absent_on_null,
+                    unique: c.unique,
+                    location: c.location,
+                },
+            )
+        }
+        NodeTag::T_JsonIsPredicate => {
+            let p = node.as_json_is_predicate().unwrap();
+            let expr = fix_join_expr_mutator(run, p.expr.expect("expr"), outer_tlist, inner_tlist, rtoffset, nrm_match, acceptable_rel, num_exec)?;
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::JsonIsPredicate {
+                    expr: Some(expr),
+                    format: p.format,
+                    item_type: p.item_type,
+                    unique_keys: p.unique_keys,
+                    location: p.location,
+                },
+            )
+        }
+        NodeTag::T_JsonBehavior => {
+            let b = node.as_json_behavior().unwrap();
+            let expr = match b.expr {
+                Some(e) => Some(fix_join_expr_mutator(run, e, outer_tlist, inner_tlist, rtoffset, nrm_match, acceptable_rel, num_exec)?),
+                None => None,
+            };
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::JsonBehavior {
+                    btype: b.btype,
+                    expr,
+                    coerce: b.coerce,
+                    location: b.location,
+                },
+            )
+        }
+        NodeTag::T_JsonExpr => {
+            let j = node.as_json_expr().unwrap();
+            let formatted = fix_join_expr_mutator(run, j.formatted_expr.expect("formatted_expr"), outer_tlist, inner_tlist, rtoffset, nrm_match, acceptable_rel, num_exec)?;
+            let path_spec = fix_join_expr_mutator(run, j.path_spec.expect("path_spec"), outer_tlist, inner_tlist, rtoffset, nrm_match, acceptable_rel, num_exec)?;
+            let mut passing_values = NodeList::nil();
+            for v in &j.passing_values {
+                passing_values.lappend(mcx, fix_join_expr_mutator(run, v, outer_tlist, inner_tlist, rtoffset, nrm_match, acceptable_rel, num_exec)?)?;
+            }
+            let on_empty = match j.on_empty {
+                Some(e) => Some(fix_join_expr_mutator(run, e, outer_tlist, inner_tlist, rtoffset, nrm_match, acceptable_rel, num_exec)?),
+                None => None,
+            };
+            let on_error = match j.on_error {
+                Some(e) => Some(fix_join_expr_mutator(run, e, outer_tlist, inner_tlist, rtoffset, nrm_match, acceptable_rel, num_exec)?),
+                None => None,
+            };
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::JsonExpr {
+                    op: j.op,
+                    column_name: j.column_name,
+                    formatted_expr: Some(formatted),
+                    format: j.format,
+                    path_spec: Some(path_spec),
+                    returning: j.returning,
+                    passing_names: j.passing_names.clone_in(mcx)?,
+                    passing_values,
+                    on_empty,
+                    on_error,
+                    use_io_coercion: j.use_io_coercion,
+                    use_json_coercion: j.use_json_coercion,
+                    wrapper: j.wrapper,
+                    omit_quotes: j.omit_quotes,
+                    collation: j.collation,
+                    location: j.location,
                 },
             )
         }

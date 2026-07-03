@@ -345,6 +345,11 @@ fn assign_collations_walker<'mcx>(
         | NodeTag::T_ScalarArrayOpExpr
         | NodeTag::T_ArrayExpr
         | NodeTag::T_SQLValueFunction
+        | NodeTag::T_JsonValueExpr
+        | NodeTag::T_JsonConstructorExpr
+        | NodeTag::T_JsonIsPredicate
+        | NodeTag::T_JsonExpr
+        | NodeTag::T_JsonBehavior
         | NodeTag::T_SubLink) => {
             match tag {
                 // C: never recurse into the CASE test expression — it was
@@ -483,6 +488,49 @@ fn assign_collations_walker<'mcx>(
                     }
                 }
                 NodeTag::T_SQLValueFunction => {}
+                NodeTag::T_JsonValueExpr => {
+                    let j = node.as_json_value_expr().unwrap();
+                    if let Some(e) = j.raw_expr {
+                        assign_collations_walker(e, &mut loccontext)?;
+                    }
+                    if let Some(e) = j.formatted_expr {
+                        assign_collations_walker(e, &mut loccontext)?;
+                    }
+                }
+                NodeTag::T_JsonConstructorExpr => {
+                    let c = node.as_json_constructor_expr().unwrap();
+                    for arg in &c.args {
+                        assign_collations_walker(arg, &mut loccontext)?;
+                    }
+                    if let Some(f) = c.func {
+                        assign_collations_walker(f, &mut loccontext)?;
+                    }
+                    if let Some(co) = c.coercion {
+                        assign_collations_walker(co, &mut loccontext)?;
+                    }
+                }
+                NodeTag::T_JsonIsPredicate => {
+                    if let Some(e) = node.as_json_is_predicate().unwrap().expr {
+                        assign_collations_walker(e, &mut loccontext)?;
+                    }
+                }
+                NodeTag::T_JsonExpr => {
+                    let j = node.as_json_expr().unwrap();
+                    for e in [j.formatted_expr, j.path_spec, j.on_empty, j.on_error]
+                        .into_iter()
+                        .flatten()
+                    {
+                        assign_collations_walker(e, &mut loccontext)?;
+                    }
+                    for v in &j.passing_values {
+                        assign_collations_walker(v, &mut loccontext)?;
+                    }
+                }
+                NodeTag::T_JsonBehavior => {
+                    if let Some(e) = node.as_json_behavior().unwrap().expr {
+                        assign_collations_walker(e, &mut loccontext)?;
+                    }
+                }
                 _ => unreachable!(),
             }
 
@@ -610,6 +658,27 @@ fn assign_collations_walker<'mcx>(
                             }
                         );
                     }
+                    // exprSetCollation Json arms (nodeFuncs.c:1251).
+                    NodeTag::T_JsonValueExpr => expr_set_collation(
+                        node.as_json_value_expr().unwrap().formatted_expr.expect("formatted"),
+                        set_coll,
+                    ),
+                    NodeTag::T_JsonConstructorExpr => {
+                        let c = node.as_json_constructor_expr().unwrap();
+                        match c.coercion {
+                            Some(co) => expr_set_collation(co, set_coll),
+                            None => debug_assert!(!OidIsValid(set_coll)),
+                        }
+                    }
+                    NodeTag::T_JsonIsPredicate => debug_assert!(!OidIsValid(set_coll)),
+                    NodeTag::T_JsonExpr => node
+                        .with_mut::<types_nodes::JsonExpr, _>(|j| j.collation = set_coll)
+                        .unwrap(),
+                    NodeTag::T_JsonBehavior => {
+                        if let Some(e) = node.as_json_behavior().unwrap().expr {
+                            expr_set_collation(e, set_coll)
+                        }
+                    }
                     _ => unreachable!(),
                 }
             }
@@ -629,6 +698,36 @@ fn assign_collations_walker<'mcx>(
         loccontext.location2,
         context,
     )
+}
+
+// exprSetCollation over the coercion shapes coerceJsonFuncExpr can emit.
+// # Safety contract mirrors the surrounding with_mut uses: parse analysis
+// exclusively owns the tree.
+unsafe fn expr_set_collation(node: Node<'_>, coll: Oid) {
+    // SAFETY: caller contract.
+    unsafe {
+        match node.node_tag() {
+            NodeTag::T_FuncExpr => {
+                node.with_mut::<types_nodes::FuncExpr, _>(|f| f.funccollid = coll).unwrap()
+            }
+            NodeTag::T_RelabelType => node
+                .with_mut::<types_nodes::RelabelType, _>(|r| r.resultcollid = coll)
+                .unwrap(),
+            NodeTag::T_CoerceViaIO => node
+                .with_mut::<types_nodes::CoerceViaIO, _>(|c| c.resultcollid = coll)
+                .unwrap(),
+            NodeTag::T_CoerceToDomain => node
+                .with_mut::<types_nodes::CoerceToDomain, _>(|c| c.resultcollid = coll)
+                .unwrap(),
+            NodeTag::T_Const => {
+                node.with_mut::<types_nodes::Const, _>(|c| c.constcollid = coll).unwrap()
+            }
+            other => panic!(
+                "expr_set_collation (exprSetCollation, nodeFuncs.c): arm for {other:?} \
+                 unported — sqljson-lane"
+            ),
+        }
+    }
 }
 
 fn merge_collation_state(

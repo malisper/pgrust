@@ -3,6 +3,8 @@
 #[cfg(test)]
 mod tests;
 
+mod json;
+
 use std::cell::Cell;
 
 use guc_tables::GucVarAccessors;
@@ -109,6 +111,18 @@ pub fn transformExprRecurse<'mcx>(
                 transformExpr(mcx, pstate, arg, kind)
             },
         ),
+        NodeTag::T_JsonObjectConstructor => json::transformJsonObjectConstructor(mcx, pstate, expr),
+        NodeTag::T_JsonArrayConstructor => json::transformJsonArrayConstructor(mcx, pstate, expr),
+        NodeTag::T_JsonArrayQueryConstructor => {
+            json::transformJsonArrayQueryConstructor(mcx, pstate, expr)
+        }
+        NodeTag::T_JsonObjectAgg => json::transformJsonObjectAgg(mcx, pstate, expr),
+        NodeTag::T_JsonArrayAgg => json::transformJsonArrayAgg(mcx, pstate, expr),
+        NodeTag::T_JsonIsPredicate => json::transformJsonIsPredicate(mcx, pstate, expr),
+        NodeTag::T_JsonParseExpr => json::transformJsonParseExpr(mcx, pstate, expr),
+        NodeTag::T_JsonScalarExpr => json::transformJsonScalarExpr(mcx, pstate, expr),
+        NodeTag::T_JsonSerializeExpr => json::transformJsonSerializeExpr(mcx, pstate, expr),
+        NodeTag::T_JsonFuncExpr => json::transformJsonFuncExpr(mcx, pstate, expr),
         NodeTag::T_CaseTestExpr | NodeTag::T_Var => Ok(expr),
         // Everywhere DEFAULT is legal the caller strips it before transformExpr.
         NodeTag::T_SetToDefault => Err(default_not_allowed(

@@ -193,6 +193,17 @@ pub enum Step {
     // d.minmax.values/nulls); call is the type's btree cmp proc.
     MinMax { call: FuncCall, slots: NonNull<NullableDatum>, nelems: u16, least: bool, out: OutRef },
     NextValueExpr { seqid: Oid, seqtypid: Oid, out: OutRef },
+    // C EEOP_JSON_CONSTRUCTOR: arg subexprs write jcstate's slots; constant
+    // metadata + split scratch behind one plan-mcx pointer.
+    JsonConstructor { jcstate: NonNull<JsonConstructorState>, frame: u32, out: OutRef },
+    // C EEOP_IS_JSON: reads the arg value already in `out`, rewrites it.
+    IsJson {
+        exprtype: Oid,
+        item_type: ::types_nodes::primnodes::JsonValueType,
+        unique_keys: bool,
+        frame: u32,
+        out: OutRef,
+    },
     // timetz: compile-allocated 12-byte TimeTz image, rewritten per eval —
     // valid until the next eval, the window C's per-tuple context reset gives.
     SqlValueFunction {
@@ -201,6 +212,23 @@ pub enum Step {
         timetz: NonNull<u8>,
         out: OutRef,
     },
+}
+
+// C JsonConstructorExprState: resolved-once metadata for the
+// EEOP_JSON_CONSTRUCTOR step; scalar categorize carriers are compile-resolved
+// (C caches them in arg_type_cache).
+pub struct JsonConstructorState {
+    pub ctor_type: ::types_nodes::JsonConstructorType,
+    pub is_jsonb: bool,
+    pub absent_on_null: bool,
+    pub unique: bool,
+    pub nargs: u16,
+    pub slots: NonNull<NullableDatum>,
+    pub values: NonNull<Datum>,
+    pub nulls: NonNull<bool>,
+    pub types: NonNull<Oid>,
+    pub scalar_json: Option<NonNull<::adt_json::tojson::TypeCat>>,
+    pub scalar_jsonb: Option<NonNull<::adt_jsonb::tojsonb::ValCategory>>,
 }
 
 // C ExprEvalStep d.wholerow minus var/junkFilter: first-eval compat state.

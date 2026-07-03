@@ -61,6 +61,17 @@ pub fn expr_type(node: Node<'_>) -> Oid {
                 _ => types_core::catalog::BOOLOID,
             }
         }
+        NodeTag::T_JsonValueExpr => {
+            expr_type(node.as_json_value_expr().unwrap().formatted_expr.expect("formatted_expr"))
+        }
+        NodeTag::T_JsonConstructorExpr => {
+            node.as_json_constructor_expr().unwrap().returning.expect("returning").typid
+        }
+        NodeTag::T_JsonIsPredicate => types_core::catalog::BOOLOID,
+        NodeTag::T_JsonExpr => node.as_json_expr().unwrap().returning.expect("returning").typid,
+        NodeTag::T_JsonBehavior => {
+            expr_type(node.as_json_behavior().unwrap().expr.expect("expr"))
+        }
         other => deferred("exprType", other),
     }
 }
@@ -166,6 +177,17 @@ pub fn expr_typmod(node: Node<'_>) -> i32 {
                 _ => -1,
             }
         }
+        NodeTag::T_JsonValueExpr => {
+            expr_typmod(node.as_json_value_expr().unwrap().formatted_expr.expect("formatted_expr"))
+        }
+        NodeTag::T_JsonConstructorExpr => {
+            node.as_json_constructor_expr().unwrap().returning.expect("returning").typmod
+        }
+        NodeTag::T_JsonIsPredicate => -1,
+        NodeTag::T_JsonExpr => node.as_json_expr().unwrap().returning.expect("returning").typmod,
+        NodeTag::T_JsonBehavior => {
+            expr_typmod(node.as_json_behavior().unwrap().expr.expect("expr"))
+        }
         other => deferred("exprTypmod", other),
     }
 }
@@ -224,6 +246,23 @@ pub fn expr_collation(node: Node<'_>) -> Oid {
                 _ => 0,
             }
         }
+        NodeTag::T_JsonValueExpr => {
+            expr_collation(
+                node.as_json_value_expr().unwrap().formatted_expr.expect("formatted_expr"),
+            )
+        }
+        NodeTag::T_JsonConstructorExpr => {
+            match node.as_json_constructor_expr().unwrap().coercion {
+                Some(c) => expr_collation(c),
+                None => types_core::InvalidOid,
+            }
+        }
+        NodeTag::T_JsonIsPredicate => types_core::InvalidOid,
+        NodeTag::T_JsonExpr => node.as_json_expr().unwrap().collation,
+        NodeTag::T_JsonBehavior => match node.as_json_behavior().unwrap().expr {
+            Some(e) => expr_collation(e),
+            None => types_core::InvalidOid,
+        },
         other => deferred("exprCollation", other),
     }
 }
@@ -339,6 +378,34 @@ pub fn expr_location(node: Node<'_>) -> ParseLoc {
                 .map_or(-1, |tn| tn.location);
             let loc = leftmost_loc(tc.arg.map_or(-1, expr_location), tn_loc);
             leftmost_loc(loc, tc.location)
+        }
+        NodeTag::T_JsonFormat => node.as_json_format().unwrap().location,
+        NodeTag::T_JsonValueExpr => {
+            node.as_json_value_expr().unwrap().raw_expr.map_or(-1, expr_location)
+        }
+        NodeTag::T_JsonConstructorExpr => node.as_json_constructor_expr().unwrap().location,
+        NodeTag::T_JsonIsPredicate => node.as_json_is_predicate().unwrap().location,
+        NodeTag::T_JsonExpr => {
+            let j = node.as_json_expr().unwrap();
+            leftmost_loc(j.location, j.formatted_expr.map_or(-1, expr_location))
+        }
+        NodeTag::T_JsonBehavior => {
+            node.as_json_behavior().unwrap().expr.map_or(-1, expr_location)
+        }
+        NodeTag::T_JsonKeyValue => {
+            node.as_json_key_value().unwrap().key.map_or(-1, expr_location)
+        }
+        NodeTag::T_JsonObjectConstructor => node.as_json_object_constructor().unwrap().location,
+        NodeTag::T_JsonArrayConstructor => node.as_json_array_constructor().unwrap().location,
+        NodeTag::T_JsonArrayQueryConstructor => {
+            node.as_json_array_query_constructor().unwrap().location
+        }
+        NodeTag::T_JsonAggConstructor => node.as_json_agg_constructor().unwrap().location,
+        NodeTag::T_JsonObjectAgg => {
+            node.as_json_object_agg().unwrap().constructor.map_or(-1, expr_location)
+        }
+        NodeTag::T_JsonArrayAgg => {
+            node.as_json_array_agg().unwrap().constructor.map_or(-1, expr_location)
         }
         other => deferred("exprLocation", other),
     }
