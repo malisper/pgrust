@@ -350,12 +350,6 @@ fn check_agg_arguments_walker<'mcx>(
             }
             Ok(())
         }
-        NodeTag::T_RowExpr => {
-            for arg in &node.as_row_expr().unwrap().args {
-                check_agg_arguments_walker(pstate, arg, ctx)?;
-            }
-            Ok(())
-        }
         NodeTag::T_List => {
             for elem in node.as_list().unwrap() {
                 check_agg_arguments_walker(pstate, elem, ctx)?;
