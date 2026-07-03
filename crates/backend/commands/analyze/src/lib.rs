@@ -14,6 +14,8 @@ use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use types_slot::SlotData;
 use types_tuple::{FormData_pg_attribute, HeapTupleData, TupleDescData};
 
+const VACOPT_VACUUM: i32 = 0x01;
+const VACOPT_ANALYZE: i32 = 0x02;
 const VACOPT_VERBOSE: i32 = 0x04;
 
 const STATISTIC_RELATION_ID: Oid = 2619;
@@ -105,9 +107,25 @@ pub fn ExecVacuum(mcx: Mcx<'_>, stmt: &VacuumStmt<'_>, is_top_level: bool) -> Pg
         }
     }
     let params = VacuumParams {
-        options: 0x02 | if verbose { VACOPT_VERBOSE } else { 0 },
+        options: VACOPT_ANALYZE | if verbose { VACOPT_VERBOSE } else { 0 },
     };
     vacuum(mcx, &stmt.rels, &params, is_top_level)
+}
+
+fn analyze_rel_seam<'a, 'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+    va_cols: &'a types_nodes::NodeList<'mcx>,
+    options: u32,
+    in_outer_xact: bool,
+) -> PgResult<()> {
+    analyze_rel(
+        mcx,
+        relid,
+        va_cols,
+        &VacuumParams { options: options as i32 },
+        in_outer_xact,
+    )
 }
 
 fn vacuum(
@@ -119,10 +137,34 @@ fn vacuum(
     if rels.is_nil() {
         panic!("vacuum (vacuum.c): get_all_vacuum_rels (database-wide ANALYZE lane)");
     }
+    if commands_vacuum::in_vacuum() {
+        return Err(PgError::error("ANALYZE cannot be executed from VACUUM or ANALYZE")
+            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+            .into());
+    }
     let in_outer_xact = xact::IsInTransactionBlock(is_top_level);
     if rels.iter().count() > 1 && !in_outer_xact {
         panic!("vacuum (vacuum.c): use_own_xacts multi-relation ANALYZE lane");
     }
+    commands_vacuum::set_in_vacuum(true);
+    // catch_unwind = C's PG_FINALLY (panics become ERRORs at tcop and the
+    // session survives, so in_vacuum must reset on every exit path).
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        vacuum_all_rels(mcx, rels, params, in_outer_xact)
+    }));
+    commands_vacuum::set_in_vacuum(false);
+    match result {
+        Ok(r) => r,
+        Err(p) => std::panic::resume_unwind(p),
+    }
+}
+
+fn vacuum_all_rels(
+    mcx: Mcx<'_>,
+    rels: &types_nodes::NodeList<'_>,
+    params: &VacuumParams,
+    in_outer_xact: bool,
+) -> PgResult<()> {
     for reln in rels.iter() {
         let vrel: &VacuumRelation<'_> = reln.as_vacuum_relation().expect("VacuumRelation");
         let rv = vrel.relation.expect("ANALYZE relation name");
@@ -174,20 +216,36 @@ pub fn analyze_rel(
     Ok(())
 }
 
-fn do_analyze_rel(
-    _mcx: Mcx<'_>,
-    onerel: &Relation<'_>,
+fn do_analyze_rel<'mcx>(
+    mcx: Mcx<'mcx>,
+    onerel: &Relation<'mcx>,
     va_cols: &types_nodes::NodeList<'_>,
-    _params: &VacuumParams,
+    params: &VacuumParams,
     relpages: BlockNumber,
     in_outer_xact: bool,
 ) -> PgResult<()> {
     let anl = MemoryContext::new("Analyze");
     let anl_mcx = anl.mcx();
 
-    let indexes = relcache_seams::relation_get_index_list::call(anl_mcx, onerel.rd_id)?;
-    if !indexes.is_empty() {
-        panic!("do_analyze_rel (analyze.c): vac_open_indexes/compute_index_stats index lane");
+    let irel = commands_vacuum::vac_open_indexes(mcx, onerel, ROW_EXCLUSIVE_LOCK)?;
+    let hasindex = !irel.is_empty();
+    // compute_index_stats matters only for expression columns (per-index
+    // pg_statistic rows) and partial indexes (tupleFract); both stay loud.
+    for ind in irel.iter() {
+        let form = ind.rd_index.as_ref().expect("index has rd_index");
+        if form.indkey.iter().any(|&k| k == 0) {
+            panic!(
+                "do_analyze_rel (analyze.c): expression-index stats \
+                 (examine_attribute/compute_index_stats over indexprs) — \
+                 expression-index stats lane"
+            );
+        }
+        if form.has_indpred {
+            panic!(
+                "do_analyze_rel (analyze.c): partial-index tupleFract \
+                 (compute_index_stats ExecQual) — partial-index stats lane"
+            );
+        }
     }
 
     let tupdesc = onerel.descr();
@@ -296,11 +354,46 @@ fn do_analyze_rel(
         totalrows,
         relallvisible,
         relallfrozen,
-        false,
+        hasindex,
         in_outer_xact,
     )?;
 
+    for ind in irel.iter() {
+        let ind_pages = bufmgr_seams::relation_get_number_of_blocks_in_fork::call(
+            ind,
+            ForkNumber::MAIN_FORKNUM,
+        )?;
+        // tupleFract stays 1.0 (partial indexes are loud above).
+        let totalindexrows = totalrows.ceil();
+        vacuum_seams::vac_update_relstats::call(
+            ind,
+            ind_pages,
+            totalindexrows,
+            0,
+            0,
+            false,
+            in_outer_xact,
+        )?;
+    }
+
     // pgstat_report_analyze: cumulative-stats lane (autovacuum feeds off it).
+
+    if params.options & VACOPT_VACUUM == 0 {
+        for ind in irel.iter() {
+            let ivinfo = nbtree::IndexVacuumInfo {
+                index: ind,
+                heaprel: &**onerel,
+                analyze_only: true,
+                estimated_count: true,
+                num_heap_tuples: onerel.rd_rel.reltuples as f64,
+                strategy: bufmgr_seams::get_access_strategy::call(
+                    types_storage::buf::BufferAccessStrategyType::BasVacuum,
+                ),
+            };
+            commands_vacuum::vac_cleanup_one_index(mcx, &ivinfo, None)?;
+        }
+    }
+    commands_vacuum::vac_close_indexes(irel, NO_LOCK)?;
     Ok(())
 }
 
@@ -1117,4 +1210,5 @@ pub fn init_seams() {
         get: || DEFAULT_STATISTICS_TARGET.load(Relaxed),
         set: |v| DEFAULT_STATISTICS_TARGET.store(v, Relaxed),
     });
+    commands_analyze_seams::analyze_rel::set(analyze_rel_seam);
 }

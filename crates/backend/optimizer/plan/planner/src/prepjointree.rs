@@ -1016,6 +1016,20 @@ fn get_tle_by_resno<'a, 'mcx>(
 // levels_delta is C's IncrementVarSublevelsUp(newnode, sublevels_up, 0) after
 // substitution into a deeper query level.
 fn copy_expr<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>, levels_delta: u32) -> PgResult<Node<'mcx>> {
+    use types_nodes::primnodes as pn;
+    let copy_list = |mcx: Mcx<'mcx>, l: &NodeList<'mcx>| -> PgResult<NodeList<'mcx>> {
+        let mut out = NodeList::nil();
+        for n in l {
+            out.lappend(mcx, copy_expr(mcx, n, levels_delta)?)?;
+        }
+        Ok(out)
+    };
+    let copy_opt = |mcx: Mcx<'mcx>, n: Option<Node<'mcx>>| -> PgResult<Option<Node<'mcx>>> {
+        match n {
+            Some(n) => Ok(Some(copy_expr(mcx, n, levels_delta)?)),
+            None => Ok(None),
+        }
+    };
     match node.node_tag() {
         NodeTag::T_Var => {
             let v = node.as_var().expect("Var");
@@ -1024,35 +1038,60 @@ fn copy_expr<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>, levels_delta: u32) -> PgRes
             Node::mk(mcx, nv)
         }
         NodeTag::T_Const => Node::mk(mcx, *node.as_const().expect("Const")),
-        NodeTag::T_OpExpr => {
-            let o = node.as_op_expr().expect("OpExpr");
-            let mut args = NodeList::nil();
-            for a in &o.args {
-                args.lappend(mcx, copy_expr(mcx, a, levels_delta)?)?;
-            }
+        NodeTag::T_Param => Node::mk(mcx, *node.as_param().expect("Param")),
+        NodeTag::T_CaseTestExpr => {
+            Node::mk(mcx, *node.as_case_test_expr().expect("CaseTestExpr"))
+        }
+        NodeTag::T_SetToDefault => Node::mk(mcx, *node.as_set_to_default().expect("SetToDefault")),
+        NodeTag::T_SQLValueFunction => {
+            let s = node.as_sql_value_function().expect("SQLValueFunction");
             Node::mk(
                 mcx,
-                types_nodes::primnodes::OpExpr {
+                pn::SQLValueFunction {
+                    op: s.op,
+                    r#type: s.r#type,
+                    typmod: s.typmod,
+                    location: s.location,
+                },
+            )
+        }
+        NodeTag::T_OpExpr => {
+            let o = node.as_op_expr().expect("OpExpr");
+            Node::mk(
+                mcx,
+                pn::OpExpr {
                     opno: o.opno,
                     opfuncid: o.opfuncid,
                     opresulttype: o.opresulttype,
                     opretset: o.opretset,
                     opcollid: o.opcollid,
                     inputcollid: o.inputcollid,
-                    args,
+                    args: copy_list(mcx, &o.args)?,
                     location: o.location,
+                },
+            )
+        }
+        NodeTag::T_DistinctExpr => {
+            let d = node.as_distinct_expr().expect("DistinctExpr");
+            Node::mk(
+                mcx,
+                pn::DistinctExpr {
+                    opno: d.opno,
+                    opfuncid: d.opfuncid,
+                    opresulttype: d.opresulttype,
+                    opretset: d.opretset,
+                    opcollid: d.opcollid,
+                    inputcollid: d.inputcollid,
+                    args: copy_list(mcx, &d.args)?,
+                    location: d.location,
                 },
             )
         }
         NodeTag::T_FuncExpr => {
             let f = node.as_func_expr().expect("FuncExpr");
-            let mut args = NodeList::nil();
-            for a in &f.args {
-                args.lappend(mcx, copy_expr(mcx, a, levels_delta)?)?;
-            }
             Node::mk(
                 mcx,
-                types_nodes::primnodes::FuncExpr {
+                pn::FuncExpr {
                     funcid: f.funcid,
                     funcresulttype: f.funcresulttype,
                     funcretset: f.funcretset,
@@ -1060,28 +1099,49 @@ fn copy_expr<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>, levels_delta: u32) -> PgRes
                     funcformat: f.funcformat,
                     funccollid: f.funccollid,
                     inputcollid: f.inputcollid,
-                    args,
+                    args: copy_list(mcx, &f.args)?,
                     location: f.location,
                 },
             )
         }
-        NodeTag::T_ArrayExpr => {
-            let a = node.as_array_expr().expect("ArrayExpr");
-            let mut elements = NodeList::nil();
-            for e in &a.elements {
-                elements.lappend(mcx, copy_expr(mcx, e, levels_delta)?)?;
-            }
+        NodeTag::T_ScalarArrayOpExpr => {
+            let sa = node.as_scalar_array_op_expr().expect("ScalarArrayOpExpr");
             Node::mk(
                 mcx,
-                types_nodes::primnodes::ArrayExpr {
-                    array_typeid: a.array_typeid,
-                    array_collid: a.array_collid,
-                    element_typeid: a.element_typeid,
-                    elements,
-                    multidims: a.multidims,
-                    list_start: a.list_start,
-                    list_end: a.list_end,
-                    location: a.location,
+                pn::ScalarArrayOpExpr {
+                    opno: sa.opno,
+                    opfuncid: sa.opfuncid,
+                    hashfuncid: sa.hashfuncid,
+                    negfuncid: sa.negfuncid,
+                    useOr: sa.useOr,
+                    inputcollid: sa.inputcollid,
+                    args: copy_list(mcx, &sa.args)?,
+                    location: sa.location,
+                },
+            )
+        }
+        NodeTag::T_BoolExpr => {
+            let b = node.as_bool_expr().expect("BoolExpr");
+            Node::mk(
+                mcx,
+                pn::BoolExpr {
+                    boolop: b.boolop,
+                    args: copy_list(mcx, &b.args)?,
+                    location: b.location,
+                },
+            )
+        }
+        NodeTag::T_RelabelType => {
+            let r = node.as_relabel_type().expect("RelabelType");
+            Node::mk(
+                mcx,
+                pn::RelabelType {
+                    arg: copy_expr(mcx, r.arg, levels_delta)?,
+                    resulttype: r.resulttype,
+                    resulttypmod: r.resulttypmod,
+                    resultcollid: r.resultcollid,
+                    relabelformat: r.relabelformat,
+                    location: r.location,
                 },
             )
         }
@@ -1089,7 +1149,7 @@ fn copy_expr<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>, levels_delta: u32) -> PgRes
             let c = node.as_coerce_via_io().expect("CoerceViaIO");
             Node::mk(
                 mcx,
-                types_nodes::primnodes::CoerceViaIO {
+                pn::CoerceViaIO {
                     arg: copy_expr(mcx, c.arg, levels_delta)?,
                     resulttype: c.resulttype,
                     resultcollid: c.resultcollid,
@@ -1098,16 +1158,105 @@ fn copy_expr<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>, levels_delta: u32) -> PgRes
                 },
             )
         }
-        NodeTag::T_RelabelType => {
-            let r = node.as_relabel_type().expect("RelabelType");
+        NodeTag::T_NullTest => {
+            let nt = node.as_null_test().expect("NullTest");
             Node::mk(
                 mcx,
-                types_nodes::primnodes::RelabelType {
-                    arg: copy_expr(mcx, r.arg, levels_delta)?,
-                    resulttype: r.resulttype,
-                    resulttypmod: r.resulttypmod,
-                    resultcollid: r.resultcollid,
-                    relabelformat: r.relabelformat,
+                pn::NullTest {
+                    arg: copy_opt(mcx, nt.arg)?,
+                    nulltesttype: nt.nulltesttype,
+                    argisrow: nt.argisrow,
+                    location: nt.location,
+                },
+            )
+        }
+        NodeTag::T_BooleanTest => {
+            let bt = node.as_boolean_test().expect("BooleanTest");
+            Node::mk(
+                mcx,
+                pn::BooleanTest {
+                    arg: copy_opt(mcx, bt.arg)?,
+                    booltesttype: bt.booltesttype,
+                    location: bt.location,
+                },
+            )
+        }
+        NodeTag::T_CaseExpr => {
+            let ce = node.as_case_expr().expect("CaseExpr");
+            Node::mk(
+                mcx,
+                pn::CaseExpr {
+                    casetype: ce.casetype,
+                    casecollid: ce.casecollid,
+                    arg: copy_opt(mcx, ce.arg)?,
+                    args: copy_list(mcx, &ce.args)?,
+                    defresult: copy_opt(mcx, ce.defresult)?,
+                    location: ce.location,
+                },
+            )
+        }
+        NodeTag::T_CaseWhen => {
+            let cw = node.as_case_when().expect("CaseWhen");
+            Node::mk(
+                mcx,
+                pn::CaseWhen {
+                    expr: copy_opt(mcx, cw.expr)?,
+                    result: copy_opt(mcx, cw.result)?,
+                    location: cw.location,
+                },
+            )
+        }
+        NodeTag::T_CoalesceExpr => {
+            let co = node.as_coalesce_expr().expect("CoalesceExpr");
+            Node::mk(
+                mcx,
+                pn::CoalesceExpr {
+                    coalescetype: co.coalescetype,
+                    coalescecollid: co.coalescecollid,
+                    args: copy_list(mcx, &co.args)?,
+                    location: co.location,
+                },
+            )
+        }
+        NodeTag::T_MinMaxExpr => {
+            let mm = node.as_min_max_expr().expect("MinMaxExpr");
+            Node::mk(
+                mcx,
+                pn::MinMaxExpr {
+                    minmaxtype: mm.minmaxtype,
+                    minmaxcollid: mm.minmaxcollid,
+                    inputcollid: mm.inputcollid,
+                    op: mm.op,
+                    args: copy_list(mcx, &mm.args)?,
+                    location: mm.location,
+                },
+            )
+        }
+        NodeTag::T_ArrayExpr => {
+            let a = node.as_array_expr().expect("ArrayExpr");
+            Node::mk(
+                mcx,
+                pn::ArrayExpr {
+                    array_typeid: a.array_typeid,
+                    array_collid: a.array_collid,
+                    element_typeid: a.element_typeid,
+                    elements: copy_list(mcx, &a.elements)?,
+                    multidims: a.multidims,
+                    list_start: a.list_start,
+                    list_end: a.list_end,
+                    location: a.location,
+                },
+            )
+        }
+        NodeTag::T_RowExpr => {
+            let r = node.as_row_expr().expect("RowExpr");
+            Node::mk(
+                mcx,
+                pn::RowExpr {
+                    args: copy_list(mcx, &r.args)?,
+                    row_typeid: r.row_typeid,
+                    row_format: r.row_format,
+                    colnames: r.colnames.clone_in(mcx)?,
                     location: r.location,
                 },
             )

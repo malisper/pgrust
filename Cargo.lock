@@ -1946,6 +1946,8 @@ dependencies = [
  "catcache",
  "clog",
  "combocid_seams",
+ "commands_analyze_seams",
+ "commands_vacuum",
  "commit_ts_seams",
  "condition_variable_seams",
  "controldata_utils",
@@ -1982,6 +1984,7 @@ dependencies = [
  "miscinit_seams",
  "multixact_seams",
  "namespace_seams",
+ "nbtree",
  "origin_seams",
  "parallel_seams",
  "pg_enum_seams",
@@ -2041,6 +2044,17 @@ dependencies = [
  "xloginsert",
  "xloginsert_seams",
  "xlogutils",
+]
+
+[[package]]
+name = "commands_analyze_seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam_core",
+ "types_core",
+ "types_error",
+ "types_nodes",
 ]
 
 [[package]]
@@ -2282,6 +2296,7 @@ dependencies = [
  "clog",
  "cluster_seams",
  "combocid_seams",
+ "commands_analyze_seams",
  "commit_ts_seams",
  "condition_variable_seams",
  "controldata_utils",
@@ -5919,6 +5934,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_nodes",
+ "vars",
 ]
 
 [[package]]

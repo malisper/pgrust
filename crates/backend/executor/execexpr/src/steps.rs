@@ -58,6 +58,7 @@ pub enum Step {
     Qual { jumpdone: u32 },
     Jump { jumpdone: u32 },
     JumpIfNotTrue { jumpdone: u32, out: OutRef },
+    JumpIfNotNull { jumpdone: u32, out: OutRef },
     // slot: the owning CASE's compile-allocated testval workspace
     // (C d.casetest.value/isnull; the EXT econtext form is unported).
     CaseTestVal { slot: NonNull<NullableDatum>, out: OutRef },

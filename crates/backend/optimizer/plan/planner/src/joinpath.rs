@@ -901,7 +901,8 @@ pub fn create_material_path(run: &mut PlannerRun<'_>, rel: RelId, subpath: PathI
         (sub.disabled_nodes, sub.startup_cost, sub.total_cost, sub.rows);
     let sub_parallel_safe = sub.parallel_safe;
     let sub_parallel_workers = sub.parallel_workers;
-    debug_assert!(sub.pathkeys.is_empty() && sub.param_info.is_none());
+    debug_assert!(sub.param_info.is_none());
+    let sub_pathkeys = crate::relnode::pgvec_clone_shallow(run.mcx, &sub.pathkeys);
     let width = run.root.path_pathtarget(subpath).width;
 
     let startup_cost = sub_startup;
@@ -927,7 +928,7 @@ pub fn create_material_path(run: &mut PlannerRun<'_>, rel: RelId, subpath: PathI
         disabled_nodes: sub_disabled + if gucs::enable_material() { 0 } else { 1 },
         startup_cost,
         total_cost: startup_cost + run_cost,
-        pathkeys: PgVec::new_in(run.mcx),
+        pathkeys: sub_pathkeys,
     };
     run.root
         .alloc_path(types_pathnodes::PathNode::MaterialPath(MaterialPath {
@@ -966,7 +967,18 @@ fn cost_rescan(run: &PlannerRun<'_>, path: PathId) -> (f64, f64) {
         // nodeFunctionscan materializes into a tuplestore: function eval is
         // all startup cost, rescans pay only the per-row freight.
         (0.0, p.total_cost - p.startup_cost)
-    } else if pathtype == tag16(NodeTag::T_HashJoin) || pathtype == tag16(NodeTag::T_Memoize) {
+    } else if pathtype == tag16(NodeTag::T_HashJoin) {
+        // Rescan of a single-batch hashjoin repays only the run cost.
+        let num_batches = match run.root.path(path) {
+            types_pathnodes::PathNode::HashPath(hp) => hp.num_batches,
+            _ => panic!("cost_rescan: T_HashJoin pathtype on non-HashPath"),
+        };
+        if num_batches == 1 {
+            (0.0, p.total_cost - p.startup_cost)
+        } else {
+            (p.startup_cost, p.total_cost)
+        }
+    } else if pathtype == tag16(NodeTag::T_Memoize) {
         panic!("cost_rescan (costsize.c): pathtype {pathtype}; M2 lane");
     } else {
         (p.startup_cost, p.total_cost)

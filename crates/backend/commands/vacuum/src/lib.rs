@@ -11,9 +11,9 @@ use std::cell::Cell;
 use ::elog::ereport;
 use ::mcx::Mcx;
 use ::tableam_vocab::{
-    VacOptValue, VacuumCutoffs, VacuumParams, VACOPT_FULL, VACOPT_ONLY_DATABASE_STATS,
-    VACOPT_PROCESS_MAIN, VACOPT_PROCESS_TOAST, VACOPT_SKIP_DATABASE_STATS, VACOPT_SKIP_LOCKED,
-    VACOPT_VACUUM, VACOPT_VERBOSE,
+    VacOptValue, VacuumCutoffs, VacuumParams, VACOPT_ANALYZE, VACOPT_FULL,
+    VACOPT_ONLY_DATABASE_STATS, VACOPT_PROCESS_MAIN, VACOPT_PROCESS_TOAST,
+    VACOPT_SKIP_DATABASE_STATS, VACOPT_SKIP_LOCKED, VACOPT_VACUUM, VACOPT_VERBOSE,
 };
 use ::types_core::xact::{
     FirstNormalTransactionId, InvalidTransactionId, MultiXactIdPrecedes,
@@ -47,6 +47,15 @@ pub fn SetVacuumFailsafeActive(v: bool) {
     VACUUM_FAILSAFE_ACTIVE.set(v);
 }
 
+// C's static in_vacuum (vacuum.c); commands_analyze's ANALYZE entry shares it.
+pub fn in_vacuum() -> bool {
+    IN_VACUUM.get()
+}
+
+pub fn set_in_vacuum(v: bool) {
+    IN_VACUUM.set(v);
+}
+
 pub fn ExecVacuum<'mcx>(
     mcx: Mcx<'mcx>,
     vacstmt: &VacuumStmt<'mcx>,
@@ -70,11 +79,13 @@ pub fn ExecVacuum<'mcx>(
     let mut verbose = false;
     let mut skip_locked = false;
     let mut full = false;
+    let mut analyze = false;
     for opt_node in vacstmt.options.iter() {
         let opt = opt_node.as_def_elem().expect("VacuumStmt option is DefElem");
         match opt.defname.unwrap_or("") {
             "verbose" => verbose = explain::defGetBoolean(opt)?,
             "skip_locked" => skip_locked = explain::defGetBoolean(opt)?,
+            "analyze" => analyze = explain::defGetBoolean(opt)?,
             "index_cleanup" => {
                 params.index_cleanup = if opt.arg.is_none() {
                     VacOptValue::Auto
@@ -87,7 +98,7 @@ pub fn ExecVacuum<'mcx>(
                 };
             }
             "full" => full = explain::defGetBoolean(opt)?,
-            name @ ("analyze" | "freeze" | "disable_page_skipping"
+            name @ ("freeze" | "disable_page_skipping"
             | "process_main" | "process_toast" | "truncate" | "parallel"
             | "buffer_usage_limit" | "skip_database_stats" | "only_database_stats") => {
                 if explain::defGetBoolean(opt).unwrap_or(true) {
@@ -113,7 +124,8 @@ pub fn ExecVacuum<'mcx>(
         | VACOPT_PROCESS_TOAST
         | (if verbose { VACOPT_VERBOSE } else { 0 })
         | (if skip_locked { VACOPT_SKIP_LOCKED } else { 0 })
-        | (if full { VACOPT_FULL } else { 0 });
+        | (if full { VACOPT_FULL } else { 0 })
+        | (if analyze { VACOPT_ANALYZE } else { 0 });
 
     let bstrategy = bufmgr_seams::get_access_strategy::call(BufferAccessStrategyType::BasVacuum);
 
@@ -148,16 +160,21 @@ pub fn vacuum<'mcx>(
     // expand_vacuum_rel minimal: named-table lookup under AccessShareLock,
     // held until the pre-pass transaction commits below (C shape). The
     // partitioned-table expansion and permission pre-filter are unported.
-    let mut relids: ::mcx::PgVec<'_, Oid> = ::mcx::PgVec::with_capacity_in(relations.len(), mcx);
+    let mut relids: ::mcx::PgVec<'_, (Oid, &'mcx NodeList<'mcx>)> =
+        ::mcx::PgVec::with_capacity_in(relations.len(), mcx);
     for vrel_node in relations.iter() {
         let vrel = vrel_node
             .as_vacuum_relation()
             .expect("vacuum relation list holds VacuumRelation");
-        if !vrel.va_cols.is_nil() {
-            unported("vacuum: column list (ANALYZE lane)");
+        if !vrel.va_cols.is_nil() && params.options & VACOPT_ANALYZE == 0 {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_SYNTAX_ERROR)
+                .errmsg("ANALYZE option must be specified when column lists are provided")
+                .into_error()
+                .into());
         }
         if vrel.oid != InvalidOid {
-            relids.push(vrel.oid);
+            relids.push((vrel.oid, &vrel.va_cols));
             continue;
         }
         let rv = vrel
@@ -172,12 +189,10 @@ pub fn vacuum<'mcx>(
             relpersistence: rv.relpersistence,
             location: rv.location,
         };
-        relids.push(namespace_seams::range_var_get_relid::call(
-            mcx,
-            &rv,
-            AccessShareLock,
-            false,
-        )?);
+        relids.push((
+            namespace_seams::range_var_get_relid::call(mcx, &rv, AccessShareLock, false)?,
+            &vrel.va_cols,
+        ));
     }
 
     if snapmgr::ActiveSnapshotSet() {
@@ -187,17 +202,39 @@ pub fn vacuum<'mcx>(
 
     IN_VACUUM.set(true);
     VACUUM_FAILSAFE_ACTIVE.set(false);
-    let result = (|| -> PgResult<()> {
-        for relid in relids {
+    // catch_unwind = C's PG_FINALLY: panics become ERRORs at the tcop
+    // boundary and the session survives, so in_vacuum must reset here too.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> PgResult<()> {
+        for &(relid, va_cols) in relids.iter() {
             let params_copy = *params;
-            vacuum_rel(mcx, relid, &params_copy, bstrategy.clone())?;
+            if !vacuum_rel(mcx, relid, &params_copy, bstrategy.clone())? {
+                VACUUM_FAILSAFE_ACTIVE.set(false);
+                continue;
+            }
             VACUUM_FAILSAFE_ACTIVE.set(false);
+            if params.options & VACOPT_ANALYZE != 0 {
+                xact::StartTransactionCommand()?;
+                let snapshot = snapmgr::GetTransactionSnapshot()?;
+                snapmgr::PushActiveSnapshot(&snapshot)?;
+                commands_analyze_seams::analyze_rel::call(
+                    mcx,
+                    relid,
+                    va_cols,
+                    params.options,
+                    false,
+                )?;
+                snapmgr::PopActiveSnapshot()?;
+                xact::CommitTransactionCommand()?;
+            }
         }
         Ok(())
-    })();
+    }));
     IN_VACUUM.set(false);
     VACUUM_FAILSAFE_ACTIVE.set(false);
-    result?;
+    match result {
+        Ok(r) => r?,
+        Err(p) => std::panic::resume_unwind(p),
+    }
 
     // Matches the CommitTransaction waiting in PostgresMain.
     xact::StartTransactionCommand()?;
