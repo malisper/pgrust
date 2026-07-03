@@ -39,7 +39,9 @@ pub struct XLogRegBuf<'a> {
 // REGBUF_* (xloginsert.h).
 pub const REGBUF_FORCE_IMAGE: u8 = 0x01;
 pub const REGBUF_NO_IMAGE: u8 = 0x02;
-pub const REGBUF_WILL_INIT: u8 = 0x04;
+// C: (0x04 | REGBUF_NO_IMAGE) — WILL_INIT implies no full-page image; redo
+// rebuilds the page from block data (heap_xlog_insert INIT_PAGE contract).
+pub const REGBUF_WILL_INIT: u8 = 0x04 | 0x02;
 pub const REGBUF_STANDARD: u8 = 0x08;
 pub const REGBUF_KEEP_DATA: u8 = 0x10;
 pub const REGBUF_NO_CHANGE: u8 = 0x20;
