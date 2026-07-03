@@ -33,7 +33,7 @@ pub fn scram_salted_password(
     let mut i = 1;
     while i < iterations {
         // Interruptible: scram_iterations may be set very large.
-        postgres_seams::check_for_interrupts()?;
+        postgres_seams::check_for_interrupts::call()?;
 
         let ui = hmac_sha256(password, &ui_prev);
         for j in 0..SCRAM_SHA_256_KEY_LEN {
