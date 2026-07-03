@@ -8,7 +8,6 @@ use crate::build::convert_to_jsonb;
 use crate::container::*;
 use crate::iter::{JsonbIterator, WjbToken};
 use crate::mutate::JsonbPush;
-use adt_datetime::consts::{pg_tm, MAXDATELEN, POSTGRES_EPOCH_JDATE, USE_XSD_DATES};
 use datum::Datum;
 use mcx::{Mcx, PgVec};
 use stack_depth::check_stack_depth;
@@ -125,92 +124,7 @@ fn varlena_payload(image: &[u8]) -> &[u8] {
     }
 }
 
-/// C: JsonEncodeDateTime (json.c), DATE/TIMESTAMP/TIMESTAMPTZ arms
-/// (TIME/TIMETZ belong to jsonpath .datetime(), unported loud).
-pub fn json_encode_datetime<'mcx>(
-    mcx: Mcx<'mcx>,
-    val: Datum,
-    typid: Oid,
-) -> PgResult<&'mcx [u8]> {
-    let mut buf = [0u8; MAXDATELEN + 1];
-    let len = match typid {
-        DATEOID => {
-            let date = val.as_i32();
-            if adt_date::DATE_NOT_FINITE(date) {
-                adt_date::EncodeSpecialDate(date, &mut buf)
-            } else {
-                let mut tm = pg_tm::default();
-                adt_datetime::calendar::j2date(
-                    date + POSTGRES_EPOCH_JDATE,
-                    &mut tm.tm_year,
-                    &mut tm.tm_mon,
-                    &mut tm.tm_mday,
-                );
-                adt_datetime::encode::EncodeDateOnly(&tm, USE_XSD_DATES, &mut buf)
-            }
-        }
-        TIMESTAMPOID => {
-            let timestamp = val.as_i64();
-            if adt_timestamp::TIMESTAMP_NOT_FINITE(timestamp) {
-                adt_timestamp::EncodeSpecialTimestamp(timestamp, &mut buf)
-            } else {
-                let mut tm = pg_tm::default();
-                let mut fsec = 0;
-                adt_timestamp::timestamp2tm(timestamp, None, &mut tm, &mut fsec, None, None)
-                    .map_err(|_| timestamp_out_of_range())?;
-                adt_datetime::encode::EncodeDateTime(
-                    &mut tm,
-                    fsec,
-                    false,
-                    0,
-                    None,
-                    USE_XSD_DATES,
-                    &mut buf,
-                )
-            }
-        }
-        TIMESTAMPTZOID => {
-            let timestamp = val.as_i64();
-            if adt_timestamp::TIMESTAMP_NOT_FINITE(timestamp) {
-                adt_timestamp::EncodeSpecialTimestamp(timestamp, &mut buf)
-            } else {
-                let mut tm = pg_tm::default();
-                let mut fsec = 0;
-                let mut tz = 0;
-                let mut tzn: Option<&'static str> = None;
-                adt_timestamp::timestamp2tm(
-                    timestamp,
-                    Some(&mut tz),
-                    &mut tm,
-                    &mut fsec,
-                    Some(&mut tzn),
-                    None,
-                )
-                .map_err(|_| timestamp_out_of_range())?;
-                adt_datetime::encode::EncodeDateTime(
-                    &mut tm,
-                    fsec,
-                    true,
-                    tz,
-                    tzn.map(|s| s.as_bytes()),
-                    USE_XSD_DATES,
-                    &mut buf,
-                )
-            }
-        }
-        other => panic!("unknown jsonb value datetime type oid {other}"),
-    };
-    Ok(mcx::slice_in(mcx, &buf[..len])?.leak())
-}
-
-#[cold]
-#[inline(never)]
-fn timestamp_out_of_range() -> Box<PgError> {
-    Box::new(
-        PgError::error("timestamp out of range")
-            .with_sqlstate(types_error::ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
-    )
-}
+pub use adt_json::tojson::json_encode_datetime_in as json_encode_datetime;
 
 // C: the "Now insert jb into result" tail of datum_to_jsonb_internal.
 fn insert_item<'mcx>(
