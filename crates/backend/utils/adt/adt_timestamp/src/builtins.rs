@@ -1,10 +1,10 @@
 //! fmgr wrappers (`fc_*`) + `TIMESTAMP_BUILTINS` for fmgr-core. The bulk of
 //! the interval-typed rows (I/O, cmp/hash, arithmetic, justify, scale,
-//! finite, timestamp[tz] +/- interval, timestamp_mi) live in adt_date's
-//! table; this file adds only the rows adt_date lacks (typmod I/O, part/
-//! trunc, age, izone, make_interval, overlaps_timestamp 1304/2041, date_add/
-//! date_subtract 6221/6223). Not registrable (established precedents):
-//! interval aggregates (agg frame), timestamp[tz]_bin 6177/6178,
+//! finite, timestamp[tz] +/- interval, timestamp_mi, timestamp[tz]_bin
+//! 6177/6178) live in adt_date's table; this file adds only the rows
+//! adt_date lacks (typmod I/O, part/trunc, age, izone, make_interval,
+//! overlaps_timestamp 1304/2041, date_add/date_subtract 6221/6223). Not
+//! registrable (established precedents): interval aggregates (agg frame),
 //! generate_series_timestamp[tz] 938/939/6274 (SRF frame),
 //! float8_timestamptz 1158 / timestamptz_float8 (float lane), timestamp
 //! typmodin/typmodout 2905-2908, timestamp_support / interval_support /

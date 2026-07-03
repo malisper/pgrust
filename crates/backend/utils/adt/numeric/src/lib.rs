@@ -35,7 +35,8 @@ pub use math::{
 };
 pub use ops::*;
 pub use var::{
-    make_result, make_result_into, make_result_opt_error, NumericImage, NumericVar, VarView,
+    make_result, make_result_into, make_result_opt_error, var_to_uint64, NumericImage, NumericVar,
+    VarView,
 };
 
 pub type NumericDigit = i16;
