@@ -1899,6 +1899,104 @@ pub fn eqjoinsel<'mcx>(
     Ok(clamp_probability(selec))
 }
 
+// neqjoinsel (selfuncs.c).
+pub fn neqjoinsel<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    operator: u32,
+    args: &[NodeId],
+    jointype: JoinType,
+    sjinfo: Option<&SpecialJoinInfo<'mcx>>,
+) -> PgResult<f64> {
+    if jointype == types_pathnodes::JOIN_SEMI || jointype == types_pathnodes::JOIN_ANTI {
+        let sjinfo = sjinfo.expect("SEMI/ANTI neqjoinsel has an sjinfo");
+        let (vardata1, vardata2, reversed) = get_join_variables(run, args, sjinfo)?;
+        let nullfrac =
+            if reversed { vardata2.nullfrac() } else { vardata1.nullfrac() };
+        return Ok(1.0 - nullfrac);
+    }
+    let eqop = lsyscache::get_negator(operator)?;
+    let result = if eqop != 0 {
+        eqjoinsel(run, eqop, args, jointype, sjinfo)?
+    } else {
+        DEFAULT_EQ_SEL
+    };
+    Ok(1.0 - result)
+}
+
+// get_join_variables (selfuncs.c); returns (vardata1, vardata2, reversed).
+pub(crate) fn get_join_variables<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    args: &[NodeId],
+    sjinfo: &SpecialJoinInfo<'mcx>,
+) -> PgResult<(VariableStatData<'mcx>, VariableStatData<'mcx>, bool)> {
+    assert!(args.len() == 2, "get_join_variables (selfuncs.c): non-binary clause");
+    let left = *run.root.expr_node(args[0]);
+    let right = *run.root.expr_node(args[1]);
+    let vardata1 = examine_variable(run, args[0], left, 0)?;
+    let vardata2 = examine_variable(run, args[1], right, 0)?;
+    let rel_subset = |rel: Option<RelId>, side: &types_pathnodes::Relids<'mcx>| {
+        rel.is_some_and(|r| crate::relnode::relids_is_subset(&run.root.rel(r).relids, side))
+    };
+    let join_is_reversed = rel_subset(vardata1.rel, &sjinfo.syn_righthand)
+        || rel_subset(vardata2.rel, &sjinfo.syn_lefthand);
+    Ok((vardata1, vardata2, join_is_reversed))
+}
+
+pub const DEFAULT_MATCHING_SEL: f64 = 0.010;
+
+// matchingsel (selfuncs.c).
+pub fn matchingsel<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    operator: Oid,
+    args: &[NodeId],
+    varrelid: i32,
+    collation: Oid,
+) -> PgResult<f64> {
+    generic_restriction_selectivity(run, operator, collation, args, varrelid, DEFAULT_MATCHING_SEL)
+}
+
+// generic_restriction_selectivity (selfuncs.c).
+pub(crate) fn generic_restriction_selectivity<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    oproid: Oid,
+    collation: Oid,
+    args: &[NodeId],
+    varrelid: i32,
+    default_selectivity: f64,
+) -> PgResult<f64> {
+    let Some((vardata, other, varonleft)) = get_restriction_variable(run, args, varrelid)?
+    else {
+        return Ok(default_selectivity);
+    };
+    let selec = match other.as_const() {
+        Some(c) if c.constisnull => return Ok(0.0),
+        Some(c) => {
+            let constval = c.constvalue;
+            let mut opproc = opproc_for(oproid)?;
+            let (mcvsel, mcvsum) =
+                mcv_selectivity(run, &vardata, &mut opproc, collation, constval, varonleft)?;
+            let (hist_selec, hist_size) = histogram_selectivity(
+                &vardata, &mut opproc, collation, constval, varonleft, 10, 1,
+            )?;
+            let mut selec = if hist_selec < 0.0 {
+                default_selectivity
+            } else if hist_size < 100 {
+                let hist_weight = hist_size as f64 / 100.0;
+                hist_selec * hist_weight + default_selectivity * (1.0 - hist_weight)
+            } else {
+                hist_selec
+            };
+            selec = selec.clamp(0.0001, 0.9999);
+            let nullfrac = vardata.nullfrac();
+            selec *= 1.0 - nullfrac - mcvsum;
+            selec += mcvsel;
+            selec
+        }
+        None => default_selectivity,
+    };
+    Ok(clamp_probability(selec))
+}
+
 // eqjoinsel_semi (selfuncs.c), non-MCV arm (the MCV-x-MCV arm panics above).
 #[allow(clippy::too_many_arguments)]
 fn eqjoinsel_semi(
