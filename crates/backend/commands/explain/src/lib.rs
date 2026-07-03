@@ -288,6 +288,26 @@ fn ExplainOneUtility<'mcx>(
     Ok(())
 }
 
+// C's abort path frees an EXPLAIN QueryDesc with the portal context and its
+// executor refs via CurrentResourceOwner; the registry entry is owning here,
+// so an error or loud panic between create and free must release it or the
+// EState's relcache refs leak past AtEOXact (a later DROP TABLE fails 55006).
+struct QueryDescOwner(types_portal::QueryDescHandle);
+
+impl QueryDescOwner {
+    fn disarm(&mut self) {
+        self.0 = types_portal::QueryDescHandle::NULL;
+    }
+}
+
+impl Drop for QueryDescOwner {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            execmain_seams::release_query_desc::call(self.0);
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn ExplainOnePlan<'mcx>(
     mcx: Mcx<'mcx>,
@@ -352,6 +372,7 @@ fn ExplainOnePlanRef<'mcx>(
         query_env,
         instrument_option,
     )?;
+    let mut qd_owner = QueryDescOwner(qd);
     let mut eflags = if es.analyze { 0 } else { EXEC_FLAG_EXPLAIN_ONLY };
     if es.generic {
         eflags |= EXEC_FLAG_EXPLAIN_GENERIC;
@@ -402,6 +423,7 @@ fn ExplainOnePlanRef<'mcx>(
 
     starttime = instrument::instr_time_current();
     execmain_seams::executor_end::call(qd)?;
+    qd_owner.disarm();
     execmain_seams::free_query_desc::call(qd);
     snapmgr::PopActiveSnapshot()?;
     if es.analyze {
