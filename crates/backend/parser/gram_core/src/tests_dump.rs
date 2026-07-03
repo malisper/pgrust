@@ -252,6 +252,23 @@ fn node(out: &mut String, n: Node<'_>) {
         bool_field(out, "argisrow", nt.argisrow);
         int_field(out, "location", nt.location);
         out.push('}');
+    } else if let Some(p) = n.as_prepare_stmt() {
+        out.push_str("{PREPARESTMT");
+        string_field(out, "name", p.name);
+        list_field(out, "argtypes", &p.argtypes);
+        node_field(out, "query", p.query);
+        out.push('}');
+    } else if let Some(e) = n.as_execute_stmt() {
+        out.push_str("{EXECUTESTMT");
+        string_field(out, "name", e.name);
+        list_field(out, "params", &e.params);
+        out.push('}');
+    } else if let Some(d) = n.as_deallocate_stmt() {
+        out.push_str("{DEALLOCATESTMT");
+        string_field(out, "name", d.name);
+        bool_field(out, "isall", d.isall);
+        int_field(out, "location", d.location);
+        out.push('}');
     } else if let Some(s) = n.as_string() {
         out.push('"');
         if !s.sval.is_empty() {

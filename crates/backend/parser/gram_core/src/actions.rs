@@ -1,8 +1,11 @@
 use types_core::catalog::RELPERSISTENCE_PERMANENT;
 use types_error::PgResult;
-use types_nodes::parsenodes::{CopyStmt, DefElem, DefElemAction, VacuumRelation, VacuumStmt};
+use types_nodes::parsenodes::{
+    CopyStmt, DeallocateStmt, DefElem, DefElemAction, ExecuteStmt, PrepareStmt, VacuumRelation,
+    VacuumStmt,
+};
 use types_nodes::rawnodes::A_Expr_Kind::AEXPR_OP;
-use types_nodes::rawnodes::{ColumnDef, CreateStmt, OnCommitAction};
+use types_nodes::rawnodes::{ColumnDef, Constraint, ConstrType, CreateStmt, OnCommitAction};
 use types_nodes::{
     Alias, DeleteStmt, InsertStmt, Node, NodeList, RangeFunction, RangeVar, RawStmt, SelectStmt,
     UpdateStmt,
@@ -336,10 +339,16 @@ impl<'mcx> Parser<'mcx> {
                 let compression = opt_str(view.v(4));
                 let fdwoptions = view.v(5).list();
                 let quals = view.v(6).list();
-                if !quals.is_nil() {
-                    panic!(
-                        "gram_core: SplitColQualList unported (column constraints/COLLATE)"
-                    );
+                // SplitColQualList: COLLATE splits out; Constraints stay.
+                let mut constraints = NodeList::nil();
+                for q in quals.iter() {
+                    match q.node_tag() {
+                        NodeTag::T_Constraint => constraints.lappend(mcx, q)?,
+                        NodeTag::T_CollateClause => panic!(
+                            "gram_core: SplitColQualList COLLATE arm unported"
+                        ),
+                        other => panic!("unexpected node type {other:?} in ColQualList"),
+                    }
                 }
                 let mut n = Node::build::<ColumnDef>(mcx)?;
                 n.colname = Some(colname);
@@ -347,10 +356,54 @@ impl<'mcx> Parser<'mcx> {
                 n.storage_name = storage_name;
                 n.compression = compression;
                 n.is_local = true;
+                n.constraints = constraints;
                 n.fdwoptions = fdwoptions;
                 n.location = view.l(1);
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
+            // ColQualList: ColQualList ColConstraint
+            493 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(2).node().expect("ColConstraint"))?;
+                *yyval = YYSTYPE::List(list);
+            }
+            // ColConstraint: CONSTRAINT name ColConstraintElem
+            495 => {
+                let name = view.v(2).str_val();
+                let node = view.v(3).node().expect("ColConstraintElem");
+                let loc = view.l(1);
+                // SAFETY: tree is parser-owned; no derived refs live.
+                unsafe {
+                    node.with_mut::<Constraint, _>(|c| {
+                        c.conname = Some(name);
+                        c.location = loc;
+                    })
+                    .expect("ColConstraintElem is Constraint");
+                }
+                *yyval = YYSTYPE::Node(Some(node));
+            }
+            // ColConstraintElem: CHECK '(' a_expr ')' opt_no_inherit
+            503 => {
+                let mut n = Node::build::<Constraint>(mcx)?;
+                n.contype = ConstrType::CONSTR_CHECK;
+                n.location = view.l(1);
+                n.is_no_inherit = view.v(5).boolean();
+                n.raw_expr = view.v(3).node();
+                n.is_enforced = true;
+                n.initially_valid = true;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // ColConstraintElem: DEFAULT b_expr
+            504 => {
+                let mut n = Node::build::<Constraint>(mcx)?;
+                n.contype = ConstrType::CONSTR_DEFAULT;
+                n.location = view.l(1);
+                n.raw_expr = view.v(2).node();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // opt_no_inherit: NO INHERIT | /*EMPTY*/
+            550 => *yyval = YYSTYPE::Boolean(true),
+            551 => *yyval = YYSTYPE::Boolean(false),
             // OnCommitOption: /*EMPTY*/
             605 => *yyval = YYSTYPE::Ival(OnCommitAction::ONCOMMIT_NOOP as i32),
             1710 => {
@@ -1461,6 +1514,50 @@ impl<'mcx> Parser<'mcx> {
             }
             1571 | 1573 | 1575 | 1577 => *yyval = YYSTYPE::Boolean(true),
             1572 | 1574 | 1576 | 1578 => *yyval = YYSTYPE::Boolean(false),
+            // PREPARE/EXECUTE/DEALLOCATE; CREATE TABLE AS EXECUTE stays loud.
+            1600 => {
+                let n = Node::mk(
+                    mcx,
+                    PrepareStmt {
+                        name: Some(view.v(2).str_val()),
+                        argtypes: view.v(3).list(),
+                        query: view.v(5).node(),
+                    },
+                )?;
+                *yyval = YYSTYPE::Node(Some(n));
+            }
+            1608 => {
+                let n = Node::mk(
+                    mcx,
+                    ExecuteStmt { name: Some(view.v(2).str_val()), params: view.v(3).list() },
+                )?;
+                *yyval = YYSTYPE::Node(Some(n));
+            }
+            1613 | 1614 => {
+                let i = if rule == 1614 { 3 } else { 2 };
+                let n = Node::mk(
+                    mcx,
+                    DeallocateStmt {
+                        name: Some(view.v(i).str_val()),
+                        isall: false,
+                        location: view.l(i),
+                    },
+                )?;
+                *yyval = YYSTYPE::Node(Some(n));
+            }
+            1615 | 1616 => {
+                let n = Node::mk(mcx, DeallocateStmt { name: None, isall: true, location: -1 })?;
+                *yyval = YYSTYPE::Node(Some(n));
+            }
+            2299 => {
+                let t = view.v(1).node().expect("Typename");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, t)?);
+            }
+            2300 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(3).node().expect("Typename"))?;
+                *yyval = YYSTYPE::List(list);
+            }
             // ExplainStmt: EXPLAIN ExplainableStmt (options arms 1587-1589
             // stay unimplemented-rule louds).
             1586 => {
