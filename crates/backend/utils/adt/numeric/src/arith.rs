@@ -146,7 +146,7 @@ pub fn cmp_abs_common(
     0
 }
 
-fn add_abs(var1: VarView<'_>, var2: VarView<'_>) -> NumericVar {
+fn add_abs(var1: VarView<'_>, var2: VarView<'_>, result: &mut NumericVar) {
     let res_weight = var1.weight.max(var2.weight) + 1;
     let res_dscale = var1.dscale.max(var2.dscale);
 
@@ -159,7 +159,6 @@ fn add_abs(var1: VarView<'_>, var2: VarView<'_>) -> NumericVar {
         res_ndigits = 1;
     }
 
-    let mut result = NumericVar::new();
     result.alloc(res_ndigits);
 
     let mut i1 = res_rscale + var1.weight + 1;
@@ -197,11 +196,10 @@ fn add_abs(var1: VarView<'_>, var2: VarView<'_>) -> NumericVar {
     result.weight = res_weight;
     result.dscale = res_dscale;
     result.strip();
-    result
 }
 
 // Requires ABS(var1) >= ABS(var2).
-fn sub_abs(var1: VarView<'_>, var2: VarView<'_>) -> NumericVar {
+fn sub_abs(var1: VarView<'_>, var2: VarView<'_>, result: &mut NumericVar) {
     let res_weight = var1.weight;
     let res_dscale = var1.dscale.max(var2.dscale);
 
@@ -214,7 +212,6 @@ fn sub_abs(var1: VarView<'_>, var2: VarView<'_>) -> NumericVar {
         res_ndigits = 1;
     }
 
-    let mut result = NumericVar::new();
     result.alloc(res_ndigits);
 
     let mut i1 = res_rscale + var1.weight + 1;
@@ -252,101 +249,86 @@ fn sub_abs(var1: VarView<'_>, var2: VarView<'_>) -> NumericVar {
     result.weight = res_weight;
     result.dscale = res_dscale;
     result.strip();
-    result
 }
 
-fn zero_with_dscale(dscale: i32) -> NumericVar {
-    let mut result = NumericVar::new();
+fn zero_with_dscale(result: &mut NumericVar, dscale: i32) {
     result.set_zero();
     result.dscale = dscale;
-    result
 }
 
-pub fn add_var(var1: VarView<'_>, var2: VarView<'_>) -> NumericVar {
+pub fn add_var(var1: VarView<'_>, var2: VarView<'_>, result: &mut NumericVar) {
     if var1.sign == NUMERIC_POS {
         if var2.sign == NUMERIC_POS {
-            let mut result = add_abs(var1, var2);
+            add_abs(var1, var2, result);
             result.sign = NUMERIC_POS;
-            result
         } else {
             match cmp_abs(var1, var2) {
-                0 => zero_with_dscale(var1.dscale.max(var2.dscale)),
+                0 => zero_with_dscale(result, var1.dscale.max(var2.dscale)),
                 1 => {
-                    let mut result = sub_abs(var1, var2);
+                    sub_abs(var1, var2, result);
                     result.sign = NUMERIC_POS;
-                    result
                 }
                 _ => {
-                    let mut result = sub_abs(var2, var1);
+                    sub_abs(var2, var1, result);
                     result.sign = NUMERIC_NEG;
-                    result
                 }
             }
         }
     } else if var2.sign == NUMERIC_POS {
         match cmp_abs(var1, var2) {
-            0 => zero_with_dscale(var1.dscale.max(var2.dscale)),
+            0 => zero_with_dscale(result, var1.dscale.max(var2.dscale)),
             1 => {
-                let mut result = sub_abs(var1, var2);
+                sub_abs(var1, var2, result);
                 result.sign = NUMERIC_NEG;
-                result
             }
             _ => {
-                let mut result = sub_abs(var2, var1);
+                sub_abs(var2, var1, result);
                 result.sign = NUMERIC_POS;
-                result
             }
         }
     } else {
-        let mut result = add_abs(var1, var2);
+        add_abs(var1, var2, result);
         result.sign = NUMERIC_NEG;
-        result
     }
 }
 
-pub fn sub_var(var1: VarView<'_>, var2: VarView<'_>) -> NumericVar {
+pub fn sub_var(var1: VarView<'_>, var2: VarView<'_>, result: &mut NumericVar) {
     if var1.sign == NUMERIC_POS {
         if var2.sign == NUMERIC_NEG {
-            let mut result = add_abs(var1, var2);
+            add_abs(var1, var2, result);
             result.sign = NUMERIC_POS;
-            result
         } else {
             match cmp_abs(var1, var2) {
-                0 => zero_with_dscale(var1.dscale.max(var2.dscale)),
+                0 => zero_with_dscale(result, var1.dscale.max(var2.dscale)),
                 1 => {
-                    let mut result = sub_abs(var1, var2);
+                    sub_abs(var1, var2, result);
                     result.sign = NUMERIC_POS;
-                    result
                 }
                 _ => {
-                    let mut result = sub_abs(var2, var1);
+                    sub_abs(var2, var1, result);
                     result.sign = NUMERIC_NEG;
-                    result
                 }
             }
         }
     } else if var2.sign == NUMERIC_NEG {
         match cmp_abs(var1, var2) {
-            0 => zero_with_dscale(var1.dscale.max(var2.dscale)),
+            0 => zero_with_dscale(result, var1.dscale.max(var2.dscale)),
             1 => {
-                let mut result = sub_abs(var1, var2);
+                sub_abs(var1, var2, result);
                 result.sign = NUMERIC_NEG;
-                result
             }
             _ => {
-                let mut result = sub_abs(var2, var1);
+                sub_abs(var2, var1, result);
                 result.sign = NUMERIC_POS;
-                result
             }
         }
     } else {
-        let mut result = add_abs(var1, var2);
+        add_abs(var1, var2, result);
         result.sign = NUMERIC_NEG;
-        result
     }
 }
 
-pub fn mul_var(var1: VarView<'_>, var2: VarView<'_>, rscale: i32) -> NumericVar {
+pub fn mul_var(var1: VarView<'_>, var2: VarView<'_>, result: &mut NumericVar, rscale: i32) {
     // var1 must be the shorter input (fewer outer-loop iterations).
     let (var1, var2) = if var1.ndigits > var2.ndigits {
         (var2, var1)
@@ -360,11 +342,11 @@ pub fn mul_var(var1: VarView<'_>, var2: VarView<'_>, rscale: i32) -> NumericVar 
     let var2digits = var2.digits;
 
     if var1ndigits == 0 {
-        return zero_with_dscale(rscale);
+        return zero_with_dscale(result, rscale);
     }
 
     if var1ndigits <= 6 && rscale == var1.dscale + var2.dscale {
-        return mul_var_short(var1, var2);
+        return mul_var_short(var1, var2, result);
     }
 
     let res_sign = if var1.sign == var2.sign {
@@ -391,7 +373,7 @@ pub fn mul_var(var1: VarView<'_>, var2: VarView<'_>, rscale: i32) -> NumericVar 
     res_ndigits = 2 * res_ndigitpairs;
 
     if res_ndigitpairs <= pair_offset {
-        return zero_with_dscale(rscale);
+        return zero_with_dscale(result, rscale);
     }
     let var1ndigitpairs = var1ndigitpairs.min(res_ndigitpairs - pair_offset);
     let var2ndigitpairs = var2ndigitpairs.min(res_ndigitpairs - pair_offset);
@@ -471,7 +453,6 @@ pub fn mul_var(var1: VarView<'_>, var2: VarView<'_>, rscale: i32) -> NumericVar 
             }
         }
 
-        let mut result = NumericVar::new();
         result.alloc(res_ndigits);
         {
             let res_digits = result.digits_mut();
@@ -494,12 +475,11 @@ pub fn mul_var(var1: VarView<'_>, var2: VarView<'_>, rscale: i32) -> NumericVar 
         result.sign = res_sign;
         result.round(rscale);
         result.strip();
-        result
     })
 }
 
 // var1 has 1-6 digits, var2 at least as many; exact product.
-fn mul_var_short(var1: VarView<'_>, var2: VarView<'_>) -> NumericVar {
+fn mul_var_short(var1: VarView<'_>, var2: VarView<'_>, result: &mut NumericVar) {
     let var1ndigits = var1.ndigits as usize;
     let var2ndigits = var2.ndigits as usize;
     // SAFETY throughout: every d1 index is < var1ndigits and every d2 index
@@ -519,7 +499,6 @@ fn mul_var_short(var1: VarView<'_>, var2: VarView<'_>) -> NumericVar {
     let res_weight = var1.weight + var2.weight + 1;
     let res_ndigits = var1ndigits + var2ndigits;
 
-    let mut result = NumericVar::new();
     result.alloc(res_ndigits as i32);
     let mut carry: u32 = 0;
 
@@ -661,16 +640,16 @@ fn mul_var_short(var1: VarView<'_>, var2: VarView<'_>) -> NumericVar {
     result.sign = res_sign;
     result.dscale = var1.dscale + var2.dscale;
     result.strip();
-    result
 }
 
 pub fn div_var(
     var1: VarView<'_>,
     var2: VarView<'_>,
+    result: &mut NumericVar,
     rscale: i32,
     round: bool,
     mut exact: bool,
-) -> PgResult<NumericVar> {
+) -> PgResult<()> {
     let var1ndigits = var1.ndigits;
     let var2ndigits = var2.ndigits;
 
@@ -688,7 +667,7 @@ pub fn div_var(
         if var2.sign == NUMERIC_NEG {
             idivisor = -idivisor;
         }
-        return div_var_int(var1, idivisor, idivisor_weight, rscale, round);
+        return div_var_int(var1, idivisor, idivisor_weight, result, rscale, round);
     }
     if var2ndigits <= 4 {
         let mut idivisor = var2.digits[0] as i64;
@@ -700,11 +679,12 @@ pub fn div_var(
         if var2.sign == NUMERIC_NEG {
             idivisor = -idivisor;
         }
-        return div_var_int64(var1, idivisor, idivisor_weight, rscale, round);
+        return div_var_int64(var1, idivisor, idivisor_weight, result, rscale, round);
     }
 
     if var1ndigits == 0 {
-        return Ok(zero_with_dscale(rscale));
+        zero_with_dscale(result, rscale);
+        return Ok(());
     }
 
     if var2ndigits <= 2 * (DIV_GUARD_DIGITS + 2) {
@@ -924,7 +904,6 @@ pub fn div_var(
             }
         }
 
-        let mut result = NumericVar::new();
         result.alloc(res_ndigits);
         {
             let res_digits = result.digits_mut();
@@ -955,7 +934,7 @@ pub fn div_var(
             result.trunc(rscale);
         }
         result.strip();
-        Ok(result)
+        Ok(())
     })
 }
 
@@ -963,15 +942,17 @@ pub fn div_var_int(
     var: VarView<'_>,
     ival: i32,
     ival_weight: i32,
+    result: &mut NumericVar,
     rscale: i32,
     round: bool,
-) -> PgResult<NumericVar> {
+) -> PgResult<()> {
     if ival == 0 {
         return Err(division_by_zero_error().into());
     }
 
     if var.ndigits == 0 {
-        return Ok(zero_with_dscale(rscale));
+        zero_with_dscale(result, rscale);
+        return Ok(());
     }
 
     let res_sign = if var.sign == NUMERIC_POS {
@@ -992,7 +973,6 @@ pub fn div_var_int(
         res_ndigits += 1;
     }
 
-    let mut result = NumericVar::new();
     result.alloc(res_ndigits);
 
     let divisor = ival.unsigned_abs();
@@ -1037,22 +1017,24 @@ pub fn div_var_int(
         result.trunc(rscale);
     }
     result.strip();
-    Ok(result)
+    Ok(())
 }
 
 pub fn div_var_int64(
     var: VarView<'_>,
     ival: i64,
     ival_weight: i32,
+    result: &mut NumericVar,
     rscale: i32,
     round: bool,
-) -> PgResult<NumericVar> {
+) -> PgResult<()> {
     if ival == 0 {
         return Err(division_by_zero_error().into());
     }
 
     if var.ndigits == 0 {
-        return Ok(zero_with_dscale(rscale));
+        zero_with_dscale(result, rscale);
+        return Ok(());
     }
 
     let res_sign = if var.sign == NUMERIC_POS {
@@ -1073,7 +1055,6 @@ pub fn div_var_int64(
         res_ndigits += 1;
     }
 
-    let mut result = NumericVar::new();
     result.alloc(res_ndigits);
 
     let divisor = ival.unsigned_abs();
@@ -1118,7 +1099,7 @@ pub fn div_var_int64(
         result.trunc(rscale);
     }
     result.strip();
-    Ok(result)
+    Ok(())
 }
 
 pub fn select_div_scale(var1: VarView<'_>, var2: VarView<'_>) -> i32 {
