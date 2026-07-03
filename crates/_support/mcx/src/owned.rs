@@ -96,7 +96,19 @@ impl<B: Bind> McxOwned<B> {
             &mut core::mem::MaybeUninit<B::Out<'mcx>>,
         ) -> PgResult<()>,
     ) -> PgResult<Self> {
-        let raw: *mut MemoryContext = alloc::boxed::Box::into_raw(alloc::boxed::Box::new(ctx));
+        Self::try_new_in_place_boxed(alloc::boxed::Box::new(ctx), build)
+    }
+
+    /// Recycled-context variant (C's context_freelists shape): the caller owns
+    /// a reset heap context (from [`Self::free_recycle`]) and hands it back.
+    pub fn try_new_in_place_boxed(
+        ctx: alloc::boxed::Box<MemoryContext>,
+        build: impl for<'mcx> FnOnce(
+            Mcx<'mcx>,
+            &mut core::mem::MaybeUninit<B::Out<'mcx>>,
+        ) -> PgResult<()>,
+    ) -> PgResult<Self> {
+        let raw: *mut MemoryContext = alloc::boxed::Box::into_raw(ctx);
         // SAFETY: live heap context; the 'static is re-shortened by every access path.
         let ctx_ref: &'static MemoryContext = unsafe { ctx_from_exposed(raw) };
         let mcx = ctx_ref.mcx();
@@ -167,6 +179,21 @@ impl<B: Bind> McxOwned<B> {
         core::mem::forget(self);
         // SAFETY: unique heap context from try_new; the arena state dies with it.
         drop(unsafe { alloc::boxed::Box::from_raw(ctx.as_ptr()) });
+    }
+
+    /// free_forget, but the reset heap context survives for reuse via
+    /// [`Self::try_new_in_place_boxed`] (C's context_freelists: the create +
+    /// destroy pair was ~4x C's freelist hit per query).
+    pub fn free_recycle(self) -> alloc::boxed::Box<MemoryContext>
+    where
+        B::Out<'static>: crate::ForgetSafe,
+    {
+        let ctx = self.ctx;
+        core::mem::forget(self);
+        // SAFETY: unique heap context from try_new; the arena state dies with the reset.
+        let mut ctx = unsafe { alloc::boxed::Box::from_raw(ctx.as_ptr()) };
+        ctx.reset();
+        ctx
     }
 }
 
