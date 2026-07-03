@@ -9,6 +9,7 @@ name = "indexcmds"
 path = "src/lib.rs"
 
 [dependencies]
+reloptions = { path = "../../access/common/reloptions" }
 coerce = { path = "../../parser/coerce" }
 datum = { path = "../../../_support/types/datum" }
 elog = { path = "../../utils/error/elog" }

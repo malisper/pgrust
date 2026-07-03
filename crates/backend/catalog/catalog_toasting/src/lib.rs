@@ -31,18 +31,29 @@ fn unported(what: &str) -> ! {
     panic!("unported: toasting.c {what}")
 }
 
-pub fn NewRelationCreateToastTable<'mcx>(mcx: Mcx<'mcx>, relOid: Oid) -> PgResult<()> {
-    // reloptions: transformRelOptions over a nil list is (Datum) 0.
-    CheckAndCreateToastTable(mcx, relOid)
+pub fn NewRelationCreateToastTable<'mcx>(
+    mcx: Mcx<'mcx>,
+    relOid: Oid,
+    reloptions: Option<&[u8]>,
+) -> PgResult<()> {
+    CheckAndCreateToastTable(mcx, relOid, reloptions)
 }
 
-fn CheckAndCreateToastTable<'mcx>(mcx: Mcx<'mcx>, relOid: Oid) -> PgResult<()> {
+fn CheckAndCreateToastTable<'mcx>(
+    mcx: Mcx<'mcx>,
+    relOid: Oid,
+    reloptions: Option<&[u8]>,
+) -> PgResult<()> {
     let rel = table::table_open(mcx, relOid, AccessExclusiveLock)?;
-    create_toast_table(mcx, &rel)?;
+    create_toast_table(mcx, &rel, reloptions)?;
     rel.close(NoLock)
 }
 
-fn create_toast_table<'mcx>(mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgResult<bool> {
+fn create_toast_table<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    reloptions: Option<&[u8]>,
+) -> PgResult<bool> {
     let relOid = rel.rd_id;
 
     if rel.rd_rel.reltoastrelid != InvalidOid {
@@ -87,6 +98,7 @@ fn create_toast_table<'mcx>(mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgResult<bo
             relkind: RELKIND_TOASTVALUE,
             relpersistence: rel.rd_rel.relpersistence,
             allow_system_table_mods: true,
+            reloptions,
         },
         &tupdesc,
     )?;
@@ -139,6 +151,7 @@ fn create_toast_table<'mcx>(mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgResult<bo
             constr_flags: 0,
             allow_system_table_mods: true,
             is_internal: true,
+            reloptions: None,
         },
     )?;
 
