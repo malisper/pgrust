@@ -3497,6 +3497,20 @@ impl<'mcx> Parser<'mcx> {
                 n.location = view.l(i);
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
+            // TransactionStmt: PREPARE TRANSACTION / COMMIT PREPARED /
+            // ROLLBACK PREPARED, all over Sconst gids.
+            1467 | 1468 | 1469 => {
+                let kind = match rule {
+                    1467 => TransactionStmtKind::TRANS_STMT_PREPARE,
+                    1468 => TransactionStmtKind::TRANS_STMT_COMMIT_PREPARED,
+                    _ => TransactionStmtKind::TRANS_STMT_ROLLBACK_PREPARED,
+                };
+                let mut n = Node::build::<TransactionStmt>(mcx)?;
+                n.kind = kind;
+                n.gid = Some(view.v(3).str_val());
+                n.location = view.l(3);
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
             1470 => {
                 let mut n = Node::build::<TransactionStmt>(mcx)?;
                 n.kind = TransactionStmtKind::TRANS_STMT_BEGIN;
