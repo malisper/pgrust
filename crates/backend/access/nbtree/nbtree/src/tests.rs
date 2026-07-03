@@ -313,7 +313,9 @@ fn index_rel_opts(mcx: Mcx<'_>, unique: bool) -> Relation<'_> {
     };
     let mut indoption = PgVec::new_in(mcx);
     indoption.push(0i16);
-    let data = RelationData { rd_locator: Default::default(), rd_smgr: Default::default(),
+    let data = RelationData {
+        rd_locator: Cell::new(::types_storage::RelFileLocator::new(1663, 5, 5000)),
+        rd_smgr: Default::default(),
         rd_id: 5000,
         rd_backend: INVALID_PROC_NUMBER,
         rd_islocaltemp: false,
