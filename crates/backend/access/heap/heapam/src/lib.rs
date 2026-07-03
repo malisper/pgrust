@@ -26,7 +26,7 @@ use ::types_rel::{Relation, RelationData};
 use ::types_scan::scankey::{ScanKeyData, SK_ISNULL};
 use ::types_scan::sdir::{ScanDirection, ScanDirectionIsBackward, ScanDirectionIsForward};
 use ::types_slot::SlotData;
-use ::types_snapshot::{HTSV_Result, IsMVCCSnapshot, SnapshotData};
+use ::types_snapshot::{HTSV_Result, IsMVCCSnapshot, SnapshotData, SnapshotType, XidVisMemo};
 use ::types_storage::bufpage::{MaxHeapTuplesPerPage, MaxOffsetNumber, PageRef};
 use ::types_storage::buf::{BufferAccessStrategy, BufferAccessStrategyType};
 use ::types_storage::multixact::ISUPDATE_from_mxstatus;
@@ -385,6 +385,9 @@ unsafe fn page_collect_tuples<const ALL_VISIBLE: bool, const CHECK_SERIALIZABLE:
     lines: OffsetNumber,
 ) -> PgResult<u32> {
     let mut ntup: u32 = 0;
+    // Page-batch visibility: resolve each distinct xid's status once per page.
+    let mvcc = snapshot.snapshot_type == SnapshotType::SNAPSHOT_MVCC;
+    let mut memo = XidVisMemo::new();
 
     // C's `for (lineoff = FirstOffsetNumber; lineoff <= lines; lineoff++)`:
     // a manual while — RangeInclusive drags an exhausted-flag (cset/cinc)
@@ -416,6 +419,10 @@ unsafe fn page_collect_tuples<const ALL_VISIBLE: bool, const CHECK_SERIALIZABLE:
             };
             let valid = if ALL_VISIBLE {
                 true
+            } else if mvcc {
+                hv_seam::heap_tuple_satisfies_mvcc_page::call(
+                    &mut loctup, snapshot, buffer, &mut memo,
+                )?
             } else {
                 hv_seam::heap_tuple_satisfies_visibility::call(&mut loctup, snapshot, buffer)?
             };
