@@ -626,7 +626,7 @@ fn const_node<'mcx>(mcx: Mcx<'mcx>, pc: PrefixConst) -> PgResult<types_nodes::No
 
 // make_opclause (makefuncs.c) with the opfuncid resolved in place (C's
 // set_opfuncid runs before execution anyway).
-fn make_opclause<'mcx>(
+pub(crate) fn make_opclause<'mcx>(
     mcx: Mcx<'mcx>,
     opno: Oid,
     leftop: types_nodes::Node<'mcx>,

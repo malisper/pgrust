@@ -292,6 +292,7 @@ fn install_xact_periphery_seams() {
     backend_status_seams::pgstat_report_xact_timestamp::set(|_| {});
     backend_status_seams::pgstat_report_query_id::set(|_, _| {});
     backend_status_seams::pgstat_report_plan_id::set(|_, _| {});
+    backend_status_seams::pgstat_clear_backend_status_snapshot::set(|| {});
     backend_progress_seams::pgstat_progress_end_command::set(|| {});
     predicate_seams::pre_commit_check_for_serialization_failure::set(|| Ok(()));
     predicate_seams::register_predicate_locking_xid::set(|_| Ok(()));
@@ -488,6 +489,7 @@ fn install_relation_seams() {
         Ok(Relation::open(make_relation(mcx, relid), None))
     });
     relcache_seams::relation_get_index_list::set(|mcx, _relid| Ok(PgVec::new_in(mcx)));
+    relcache_seams::relation_get_stat_ext_list::set(|mcx, _relid| Ok(PgVec::new_in(mcx)));
 }
 
 fn install_syscache_fixture_overrides() {
@@ -684,6 +686,7 @@ fn boot() {
     fd::init_seams();
     guc_tables::init_seams();
     guc::init_seams();
+    commands_analyze::init_seams();
     adt_bool::init_seams();
     adt_float::init_seams();
     fmgr_core::init_seams();
