@@ -2,9 +2,9 @@
 // and by-ref transtypes (INTERNAL is a byval pointer datum; its state lives in
 // the AggStateNode aggcontext the transfn reaches via fcinfo->context; by-ref
 // transvalues copy into that aggcontext at C's datumCopy points), finalfn
-// via resolve-once peragg carriers, no FILTER/DISTINCT/ORDER BY; transitions
-// compile into one execexpr program (C's evaltrans). AGG_MIXED, aggsplit
-// variants, grouping sets and spill are loud panics.
+// via resolve-once peragg carriers; transitions compile into one execexpr
+// program (C's evaltrans). Grouping sets (all strategies) live in gsets.rs.
+// aggsplit variants and hashagg spill are loud panics.
 #![allow(non_snake_case)]
 
 use core::alloc::Layout;
@@ -29,7 +29,7 @@ use ::types_nodes::node_tree::Node;
 use ::types_nodes::plannodes::Agg;
 use ::types_nodes::primnodes::{Aggref, AGGKIND_NORMAL};
 use ::types_nodes::NodeTag;
-use ::types_pathnodes::{AGGSPLIT_SIMPLE, AGG_HASHED, AGG_PLAIN, AGG_SORTED};
+use ::types_pathnodes::{AGGSPLIT_SIMPLE, AGG_HASHED, AGG_MIXED, AGG_PLAIN, AGG_SORTED};
 use ::types_slot::{SlotData, TupleSlotKind};
 use ::types_tuple::TupleDescData;
 
@@ -451,21 +451,20 @@ pub fn exec_init_agg<'mcx>(
     outer_desc: Option<Rc<TupleDescData<'static>>>,
 ) -> PgResult<AggStateData<'mcx>> {
     let mcx = estate.es_query_cxt;
+    let has_grouping_sets = !node.groupingSets.is_nil() || !node.chain.is_nil();
     if node.aggstrategy != AGG_PLAIN
         && node.aggstrategy != AGG_HASHED
         && node.aggstrategy != AGG_SORTED
+        && node.aggstrategy != AGG_MIXED
     {
-        panic!(
-            "ExecInitAgg (nodeAgg.c): aggstrategy {} (AGG_MIXED) not ported",
-            node.aggstrategy
-        );
+        panic!("ExecInitAgg (nodeAgg.c): aggstrategy {} cannot happen", node.aggstrategy);
     }
+    assert!(
+        node.aggstrategy != AGG_MIXED || has_grouping_sets,
+        "ExecInitAgg (nodeAgg.c): AGG_MIXED outside grouping sets cannot happen"
+    );
     if node.aggsplit != AGGSPLIT_SIMPLE {
         panic!("ExecInitAgg (nodeAgg.c): aggsplit {} not ported", node.aggsplit);
-    }
-    let has_grouping_sets = !node.groupingSets.is_nil() || !node.chain.is_nil();
-    if has_grouping_sets && node.aggstrategy == AGG_HASHED {
-        panic!("ExecInitAgg (nodeAgg.c): hashed grouping sets not ported — grouping-sets lane");
     }
     if node.aggstrategy == AGG_PLAIN && node.numCols != 0 {
         panic!("ExecInitAgg (nodeAgg.c): AGG_PLAIN with grouping columns cannot happen");
@@ -1381,7 +1380,7 @@ where
         return Ok(None);
     }
     if node.gsets.is_some() {
-        return gsets::agg_retrieve_grouping_sets(node, estate, &mut fetch_outer);
+        return gsets::exec_agg_gsets(node, estate, &mut fetch_outer);
     }
     if node.plan.aggstrategy == AGG_HASHED {
         if !node.perhash.as_ref().expect("hashed Agg has perhash").table_filled {
@@ -1918,6 +1917,10 @@ pub fn exec_rescan_agg_chg<'mcx>(node: &mut AggStateData<'mcx>, _estate: &mut ES
             sort.end();
         }
     }
+    if let Some(gs) = node.gsets.as_mut() {
+        gsets::rescan_grouping_sets(gs).expect("grouping-sets rescan");
+        return;
+    }
     if let Some(ph) = node.perhash.as_mut() {
         ph.table_filled = false;
         ph.hashiter = 0;
@@ -1940,7 +1943,11 @@ pub fn exec_rescan_agg<'mcx>(node: &mut AggStateData<'mcx>, _estate: &mut EState
         }
     }
     if let Some(gs) = node.gsets.as_mut() {
-        gsets::rescan_grouping_sets(gs).expect("grouping-sets rescan");
+        // C's no-chgParam AGG_HASHED arm: filled tables are reused, only the
+        // iterators reset.
+        if !gsets::rescan_hash_reuse(gs) {
+            gsets::rescan_grouping_sets(gs).expect("grouping-sets rescan");
+        }
         return;
     }
     if let Some(ph) = node.perhash.as_mut() {

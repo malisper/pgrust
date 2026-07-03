@@ -352,6 +352,19 @@ enum PergroupMode<'a> {
     Fixed,
     Indirect(NonNull<NonNull<AggPerGroup>>),
     Sets(&'a [NonNull<AggPerGroup>]),
+    // C's dosort+dohash program: Sets bases plus one Indirect cell per hash set.
+    Mixed(&'a [NonNull<AggPerGroup>], &'a [NonNull<NonNull<AggPerGroup>>]),
+}
+
+pub fn exec_build_agg_trans_mixed<'mcx>(
+    mcx: Mcx<'mcx>,
+    specs: &[AggTransSpec<'_, 'mcx>],
+    set_bases: &[NonNull<AggPerGroup>],
+    cells: &[NonNull<NonNull<AggPerGroup>>],
+    agg_node: FmNodePtr,
+    params: ParamBind<'mcx>,
+) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
+    build_agg_trans(mcx, specs, PergroupMode::Mixed(set_bases, cells), agg_node, params)
 }
 
 /// AGG_HASHED variant: pergroup resolves per tuple through `base`, the cell
@@ -497,6 +510,40 @@ fn build_agg_trans<'mcx>(
                 }
             }
         };
+        let indirect_step = |base: NonNull<NonNull<AggPerGroup>>| -> Step {
+            if spec.transtype_byval {
+                match (fn_strict, init_strict) {
+                    (_, true) => Step::AggTransInitStrictByValIndirect {
+                        call,
+                        base,
+                        transno: transno as u16,
+                    },
+                    (true, false) => Step::AggTransStrictByValIndirect {
+                        call,
+                        base,
+                        transno: transno as u16,
+                    },
+                    (false, false) => {
+                        Step::AggTransByValIndirect { call, base, transno: transno as u16 }
+                    }
+                }
+            } else {
+                let byref = crate::steps::AggByRef {
+                    agg: agg_state_node(agg_node),
+                    translen: spec.transtype_len,
+                };
+                let transno = transno as u16;
+                match (fn_strict, spec.init_value_is_null) {
+                    (true, true) => {
+                        Step::AggTransInitStrictByRefIndirect { call, base, transno, byref }
+                    }
+                    (true, false) => {
+                        Step::AggTransStrictByRefIndirect { call, base, transno, byref }
+                    }
+                    (false, _) => Step::AggTransByRefIndirect { call, base, transno, byref },
+                }
+            }
+        };
         match &mode {
             PergroupMode::Fixed => push_step(&mut state, mcx, fixed_step(spec.pergroup))?,
             PergroupMode::Sets(bases) => {
@@ -509,40 +556,18 @@ fn build_agg_trans<'mcx>(
                 }
             }
             PergroupMode::Indirect(base) => {
-                let base = *base;
-                let step = if spec.transtype_byval {
-                    match (fn_strict, init_strict) {
-                        (_, true) => Step::AggTransInitStrictByValIndirect {
-                            call,
-                            base,
-                            transno: transno as u16,
-                        },
-                        (true, false) => Step::AggTransStrictByValIndirect {
-                            call,
-                            base,
-                            transno: transno as u16,
-                        },
-                        (false, false) => {
-                            Step::AggTransByValIndirect { call, base, transno: transno as u16 }
-                        }
-                    }
-                } else {
-                    let byref = crate::steps::AggByRef {
-                        agg: agg_state_node(agg_node),
-                        translen: spec.transtype_len,
-                    };
-                    let transno = transno as u16;
-                    match (fn_strict, spec.init_value_is_null) {
-                        (true, true) => {
-                            Step::AggTransInitStrictByRefIndirect { call, base, transno, byref }
-                        }
-                        (true, false) => {
-                            Step::AggTransStrictByRefIndirect { call, base, transno, byref }
-                        }
-                        (false, _) => Step::AggTransByRefIndirect { call, base, transno, byref },
-                    }
-                };
-                push_step(&mut state, mcx, step)?;
+                push_step(&mut state, mcx, indirect_step(*base))?;
+            }
+            PergroupMode::Mixed(bases, cells) => {
+                for &base in bases.iter() {
+                    // SAFETY: as PergroupMode::Sets.
+                    let pergroup =
+                        unsafe { NonNull::new_unchecked(base.as_ptr().add(transno)) };
+                    push_step(&mut state, mcx, fixed_step(pergroup))?;
+                }
+                for &cell in cells.iter() {
+                    push_step(&mut state, mcx, indirect_step(cell))?;
+                }
             }
         }
         let target = state.steps.len() as u32;
