@@ -353,7 +353,10 @@ fn set_append_rel_size(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgRe
         "set_append_rel_size (allpaths.c): joininfo translation \
          (adjust_appendrel_attrs over RestrictInfo); inherited-join lane"
     );
-    debug_assert!(run.root.eq_classes.is_empty());
+    // add_child_rel_equivalences: only feeds child index-path pathkeys and
+    // MergeAppend candidates; the indexlist gate in add_paths_to_append_rel
+    // stays loud where those could change the chosen plan.
+    debug_assert!(!run.root.rel(rel).has_eclass_joins);
 
     let mut has_live_children = false;
     let mut parent_tuples = 0.0f64;
@@ -534,18 +537,16 @@ fn add_paths_to_append_rel(
                 None => startup_valid = false,
             }
         }
-        // all_child_pathkeys / all_child_outers: MergeAppend and parameterized
-        // appends. A losing sorted child path can't change the chosen plan
-        // here — C only builds *extra* candidates from them — but a winning
-        // one could; stay loud only when the parent has useful pathkeys.
+        // generate_orderedappend_paths / parameterized appends: without
+        // add_child_rel_equivalences child index paths never carry pathkeys,
+        // so a MergeAppend C might pick is invisible here — stay loud when
+        // ordering is requested and a child has indexes to order by.
         if !run.root.query_pathkeys.is_empty() {
-            for &cp in run.root.rel(childrel).pathlist.iter() {
-                assert!(
-                    run.root.path(cp).base().pathkeys.is_empty(),
-                    "generate_orderedappend_paths (allpaths.c): sorted child paths \
-                     with query_pathkeys; MergeAppend lane"
-                );
-            }
+            assert!(
+                run.root.rel(childrel).indexlist.is_empty(),
+                "generate_orderedappend_paths (allpaths.c): indexed child under \
+                 query_pathkeys; MergeAppend/child-EC lane"
+            );
         }
     }
 
