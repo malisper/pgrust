@@ -21,6 +21,24 @@ pub struct SelectLimit<'mcx> {
 // wide-reloaded, graviton.md §4.5). `p` is the payload pointer (typed, so
 // provenance survives); meta = tag (low 32) | aux (high 32: str/list length,
 // ival, bool). Moves replace C's copies (stack slots are read exactly once).
+// gram.y's KeyAction/KeyActions carriers (private gram structs, live only
+// between key_action and the FK Constraint build).
+pub struct KeyAction<'mcx> {
+    pub action: u8,
+    pub cols: NodeList<'mcx>,
+}
+
+impl Default for KeyAction<'_> {
+    fn default() -> Self {
+        KeyAction { action: 0, cols: NodeList::nil() }
+    }
+}
+
+pub struct KeyActions<'mcx> {
+    pub update_action: KeyAction<'mcx>,
+    pub delete_action: KeyAction<'mcx>,
+}
+
 pub struct YYSTYPE<'mcx> {
     p: *mut u8,
     meta: u64,
@@ -43,6 +61,8 @@ const T_GROUP: u32 = 9;
 const T_GROUP_DISTINCT: u32 = 10;
 const T_LIMIT: u32 = 11;
 const T_DISTINCT_ALL: u32 = 12;
+const T_KEY_ACTION: u32 = 13;
+const T_KEY_ACTIONS: u32 = 14;
 
 #[cold]
 #[inline(never)]
@@ -147,6 +167,32 @@ impl<'mcx> YYSTYPE<'mcx> {
     pub fn Group(distinct: bool, list: NodeList<'mcx>) -> Self {
         let (p, len) = list.into_raw_parts();
         Self::mk(p as *mut u8, if distinct { T_GROUP_DISTINCT } else { T_GROUP }, len)
+    }
+
+    #[inline(always)]
+    pub fn KeyActionV(a: &'mcx mut KeyAction<'mcx>) -> Self {
+        Self::mk(a as *mut KeyAction<'mcx> as *mut u8, T_KEY_ACTION, 0)
+    }
+
+    #[inline(always)]
+    pub fn KeyActionsV(a: &'mcx mut KeyActions<'mcx>) -> Self {
+        Self::mk(a as *mut KeyActions<'mcx> as *mut u8, T_KEY_ACTIONS, 0)
+    }
+
+    pub fn key_action(self) -> &'mcx mut KeyAction<'mcx> {
+        if self.tag() != T_KEY_ACTION {
+            confusion("KeyAction");
+        }
+        // SAFETY: built by KeyActionV from &'mcx mut; moved, never duplicated.
+        unsafe { &mut *(self.p as *mut KeyAction<'mcx>) }
+    }
+
+    pub fn key_actions(self) -> &'mcx mut KeyActions<'mcx> {
+        if self.tag() != T_KEY_ACTIONS {
+            confusion("KeyActions");
+        }
+        // SAFETY: built by KeyActionsV from &'mcx mut; moved, never duplicated.
+        unsafe { &mut *(self.p as *mut KeyActions<'mcx>) }
     }
 
     pub fn ival(self) -> i32 {
