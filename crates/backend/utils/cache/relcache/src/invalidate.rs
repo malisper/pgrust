@@ -373,6 +373,17 @@ fn eoxact_targets() -> Vec<Oid> {
     })
 }
 
+// RelationAssumeNewRelfilelocator (relcache.c): stamp the subid Cells and
+// flag the entry for eoxact cleanup.
+pub fn RelationAssumeNewRelfilelocator(rel: &RelationData<'_>) {
+    let subid = xact_seams::get_current_sub_transaction_id::call();
+    rel.rd_newRelfilelocatorSubid.set(subid);
+    if rel.rd_firstRelfilelocatorSubid.get() == InvalidSubTransactionId {
+        rel.rd_firstRelfilelocatorSubid.set(subid);
+    }
+    store::eoxact_list_add(rel.rd_id);
+}
+
 pub fn AtEOXact_RelationCache(isCommit: bool) -> PgResult<()> {
     with_state(|st| {
         debug_assert!(st.in_progress.is_empty() || !isCommit);
