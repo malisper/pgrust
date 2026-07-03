@@ -1,5 +1,6 @@
 //! fmgr wrappers (`fc_*`) + the `VARLENA_BUILTINS` table for fmgr-core.
-//! Still deferred: bttextsortsupport (SortSupport substrate); value cores live
+//! bttextsortsupport and the string_agg combine/serialize/deserialize rows are
+//! registered loud panics (sort lane / parallel agg); value cores live
 //! in the crate root. text/bytea recv/send ride the binary-wire fmgr frame
 //! (types_fmgr::wire). unknownrecv/unknownsend stay value-core-only (unknown is
 //! a pseudo-type; no binary wire registration in pg_proc.dat).
@@ -384,6 +385,107 @@ pub fn fc_btvarstrequalimage(
     )?))
 }
 
+pub fn fc_textpos(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog args are non-null text varlenas (strict fn).
+    let (a, b) = unsafe { (fcinfo.arg_varlena_packed(0), fcinfo.arg_varlena_packed(1)) };
+    Ok(Datum::from_i32(crate::text_position(
+        a.data(),
+        b.data(),
+        fcinfo.get_collation(),
+    )?))
+}
+
+pub fn fc_text_substr(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog arg 0 is a non-null text varlena (strict fn).
+    let t = unsafe { fcinfo.arg_varlena_packed(0) };
+    let s = fcinfo.arg_i32(1);
+    let l = fcinfo.arg_i32(2);
+    let mcx = fcinfo.result_mcx();
+    Ok(varlena_result(crate::text_substring(mcx, t.data(), s, l, false)?))
+}
+
+pub fn fc_text_substr_no_len(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    // SAFETY: catalog arg 0 is a non-null text varlena (strict fn).
+    let t = unsafe { fcinfo.arg_varlena_packed(0) };
+    let s = fcinfo.arg_i32(1);
+    let mcx = fcinfo.result_mcx();
+    Ok(varlena_result(crate::text_substring(mcx, t.data(), s, -1, true)?))
+}
+
+pub fn fc_split_part(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog args 0/1 are non-null text varlenas (strict fn).
+    let (a, b) = unsafe { (fcinfo.arg_varlena_packed(0), fcinfo.arg_varlena_packed(1)) };
+    let fldnum = fcinfo.arg_i32(2);
+    let mcx = fcinfo.result_mcx();
+    Ok(varlena_result(crate::split_part(
+        mcx,
+        a.data(),
+        b.data(),
+        fldnum,
+        fcinfo.get_collation(),
+    )?))
+}
+
+// string_agg_transfn / bytea_string_agg_transfn share one body in spirit; C
+// keeps two symbols, so both fmgr rows point at the same appender.
+fn string_agg_transfn_common(fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let state = crate::string_agg::string_agg_transfn(fcinfo)?;
+    if state.is_null() {
+        return Ok(fcinfo.return_null());
+    }
+    Ok(Datum::from_usize(state as usize))
+}
+
+pub fn fc_string_agg_transfn(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    string_agg_transfn_common(fcinfo)
+}
+
+pub fn fc_bytea_string_agg_transfn(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    string_agg_transfn_common(fcinfo)
+}
+
+fn string_agg_finalfn_common(fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    match crate::string_agg::string_agg_finalfn(fcinfo) {
+        None => Ok(fcinfo.return_null()),
+        Some(stripped) => Ok(varlena_result(crate::cstring_to_text(
+            fcinfo.result_mcx(),
+            stripped,
+        )?)),
+    }
+}
+
+pub fn fc_string_agg_finalfn(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    string_agg_finalfn_common(fcinfo)
+}
+
+pub fn fc_bytea_string_agg_finalfn(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    string_agg_finalfn_common(fcinfo)
+}
+
+macro_rules! fc_unported {
+    ($($fname:ident: $cname:literal, $why:literal;)*) => {$(
+        pub fn $fname(_flinfo: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+            panic!(concat!($cname, " (varlena.c): ", $why))
+        }
+    )*};
+}
+
+fc_unported! {
+    fc_string_agg_combine: "string_agg_combine", "parallel (partial) aggregation unported";
+    fc_string_agg_serialize: "string_agg_serialize", "parallel (partial) aggregation unported";
+    fc_string_agg_deserialize: "string_agg_deserialize", "parallel (partial) aggregation unported";
+    fc_bttextsortsupport: "bttextsortsupport", "abbreviated-key SortSupport unported (sort lane)";
+}
+
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin {
         foid,
@@ -395,7 +497,19 @@ const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrB
     }
 }
 
-// pg_proc.dat rows (all proisstrict, none retset); 1317/1369/1381 = textlen aliases.
+const fn n(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
+    FmgrBuiltin {
+        foid,
+        name,
+        nargs,
+        strict: false,
+        retset: false,
+        func,
+    }
+}
+
+// pg_proc.dat rows (none retset; the string_agg trans/final/combine rows are
+// proisstrict 'f'); 1317/1369/1381 = textlen aliases, 936/937 = substr aliases.
 pub const VARLENA_BUILTINS: &[FmgrBuiltin] = &[
     b(31, "byteaout", 1, fc_byteaout),
     b(46, "textin", 1, fc_textin),
@@ -419,6 +533,11 @@ pub const VARLENA_BUILTINS: &[FmgrBuiltin] = &[
     b(723, "byteaGetBit", 2, fc_bytea_get_bit),
     b(724, "byteaSetBit", 3, fc_bytea_set_bit),
     b(740, "text_lt", 2, fc_text_lt),
+    b(849, "textpos", 2, fc_textpos),
+    b(877, "text_substr", 3, fc_text_substr),
+    b(883, "text_substr_no_len", 2, fc_text_substr_no_len),
+    b(936, "text_substr", 3, fc_text_substr),
+    b(937, "text_substr_no_len", 2, fc_text_substr_no_len),
     b(741, "text_le", 2, fc_text_le),
     b(742, "text_gt", 2, fc_text_gt),
     b(743, "text_ge", 2, fc_text_ge),
@@ -451,7 +570,16 @@ pub const VARLENA_BUILTINS: &[FmgrBuiltin] = &[
     b(3059, "text_concat_ws", 2, crate::concat_format::fc_text_concat_ws),
     b(3539, "text_format", 2, crate::concat_format::fc_text_format),
     b(3540, "text_format_nv", 1, crate::concat_format::fc_text_format),
+    b(2088, "split_part", 3, fc_split_part),
+    b(3255, "bttextsortsupport", 1, fc_bttextsortsupport),
+    n(3535, "string_agg_transfn", 3, fc_string_agg_transfn),
+    n(3536, "string_agg_finalfn", 1, fc_string_agg_finalfn),
+    n(3543, "bytea_string_agg_transfn", 3, fc_bytea_string_agg_transfn),
+    n(3544, "bytea_string_agg_finalfn", 1, fc_bytea_string_agg_finalfn),
     b(5050, "btvarstrequalimage", 1, fc_btvarstrequalimage),
+    n(6299, "string_agg_combine", 2, fc_string_agg_combine),
+    b(6300, "string_agg_serialize", 1, fc_string_agg_serialize),
+    b(6301, "string_agg_deserialize", 2, fc_string_agg_deserialize),
     b(6393, "bytea_larger", 2, fc_bytea_larger),
     b(6394, "bytea_smaller", 2, fc_bytea_smaller),
 ];
