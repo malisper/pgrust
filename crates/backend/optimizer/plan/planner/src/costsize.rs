@@ -377,8 +377,7 @@ pub fn cost_bitmap_heap_scan(
     p.total_cost = startup_cost + run_cost;
 }
 
-// cost_agg (costsize.c), AGG_PLAIN + AGG_HASHED no-quals arms; AGG_SORTED/
-// AGG_MIXED and HAVING quals are the M3 grouping lanes.
+// cost_agg (costsize.c), AGG_PLAIN/AGG_HASHED no-quals arms.
 #[allow(clippy::too_many_arguments)]
 pub fn cost_agg(
     run: &mut PlannerRun<'_>,
@@ -461,7 +460,7 @@ const BLCKSZ: usize = 8192;
 const SIZEOF_HEAP_TUPLE_HEADER: usize = 23;
 
 // relation_byte_size (costsize.c).
-fn relation_byte_size(tuples: f64, width: i32) -> f64 {
+pub(crate) fn relation_byte_size(tuples: f64, width: i32) -> f64 {
     tuples * ((maxalign(width.max(0) as usize) + maxalign(SIZEOF_HEAP_TUPLE_HEADER)) as f64)
 }
 
@@ -646,7 +645,6 @@ fn tuplesort_merge_order(allowed_mem: i64) -> f64 {
     (allowed_mem / (2 * TAPE_BUFFER_OVERHEAD + MERGE_BUFFER_SIZE)).clamp(MINORDER, MAXORDER) as f64
 }
 
-// cost_tuplesort (costsize.c).
 fn cost_tuplesort(
     tuples: f64,
     width: i32,
@@ -682,7 +680,6 @@ fn cost_tuplesort(
     (startup_cost, gucs::cpu_operator_cost() * tuples)
 }
 
-// cost_sort (costsize.c).
 #[allow(clippy::too_many_arguments)]
 pub fn cost_sort(
     run: &mut PlannerRun<'_>,

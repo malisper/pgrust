@@ -29,11 +29,7 @@ pub fn make_one_rel<'mcx>(
 
     set_base_rel_pathlists(run)?;
 
-    // make_rel_from_joinlist: a single-element joinlist is its base rel.
-    match joinlist {
-        [JoinlistNode::Rel(varno)] => Ok(crate::relnode::find_base_rel(&run.root, *varno)),
-        _ => panic!("make_rel_from_joinlist (allpaths.c): M2 join lane"),
-    }
+    crate::joinrels::make_rel_from_joinlist(run, joinlist)
 }
 
 fn set_base_rel_sizes(run: &mut PlannerRun<'_>) -> PgResult<()> {

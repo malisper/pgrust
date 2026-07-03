@@ -222,6 +222,7 @@ fn trivial_arms_are_noops() {
 
     let mut gsets = NodeList::nil();
     let group = transformGroupClause(
+        mcx,
         &mut pstate,
         &NodeList::nil(),
         &mut gsets,
@@ -515,4 +516,205 @@ fn limit_with_variable_is_42p10() {
     .unwrap_err();
     assert_eq!(err.sqlstate(), types_error::ERRCODE_INVALID_COLUMN_REFERENCE);
     assert_eq!(err.message(), "argument of LIMIT must not contain variables");
+}
+
+#[test]
+fn group_by_name_and_position_with_dedup() {
+    install_fixture();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+    let mut tlist = NodeList::make2(
+        mcx,
+        int4_tle(mcx, 1, 1, Some("foo")),
+        int4_tle(mcx, 2, 2, Some("bar")),
+    )
+    .unwrap();
+
+    let name_ref = |name: &'static str, loc| {
+        let f = NodeList::make1(mcx, Node::mk(mcx, PgStr { sval: name }).unwrap()).unwrap();
+        Node::mk(mcx, ColumnRef { fields: f, location: loc }).unwrap()
+    };
+    let mut grouplist = NodeList::make2(mcx, name_ref("foo", 20), int_a_const(mcx, 2, 28)).unwrap();
+    grouplist.lappend(mcx, name_ref("foo", 35)).unwrap();
+
+    let mut gsets = NodeList::nil();
+    let group = transformGroupClause(
+        mcx,
+        &mut pstate,
+        &grouplist,
+        &mut gsets,
+        &mut tlist,
+        &NodeList::nil(),
+        ParseExprKind::EXPR_KIND_GROUP_BY,
+        false,
+    )
+    .unwrap();
+
+    assert!(gsets.is_nil());
+    assert_eq!(group.len(), 2, "duplicate GROUP BY item must be suppressed");
+    let g1 = group.nth(0).as_sort_group_clause().unwrap();
+    assert_eq!(
+        (g1.tleSortGroupRef, g1.eqop, g1.sortop, g1.reverse_sort, g1.nulls_first, g1.hashable),
+        (1, INT4_EQ, INT4_LT, false, false, true)
+    );
+    let g2 = group.nth(1).as_sort_group_clause().unwrap();
+    assert_eq!((g2.tleSortGroupRef, g2.eqop, g2.sortop), (2, INT4_EQ, INT4_LT));
+    assert_eq!(tlist.nth(0).as_target_entry().unwrap().ressortgroupref, 1);
+    assert_eq!(tlist.nth(1).as_target_entry().unwrap().ressortgroupref, 2);
+}
+
+#[test]
+fn group_by_copies_matching_order_by_operators() {
+    install_fixture();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+    let mut tlist = NodeList::make1(mcx, int4_tle(mcx, 1, 1, Some("foo"))).unwrap();
+
+    let orderby = NodeList::make1(
+        mcx,
+        sort_by(
+            mcx,
+            int_a_const(mcx, 1, 20),
+            SortByDir::SORTBY_DESC,
+            SortByNulls::SORTBY_NULLS_DEFAULT,
+        ),
+    )
+    .unwrap();
+    let sortlist = transformSortClause(
+        mcx,
+        &mut pstate,
+        &orderby,
+        &mut tlist,
+        ParseExprKind::EXPR_KIND_ORDER_BY,
+        false,
+    )
+    .unwrap();
+
+    let mut gsets = NodeList::nil();
+    let group = transformGroupClause(
+        mcx,
+        &mut pstate,
+        &NodeList::make1(mcx, int_a_const(mcx, 1, 40)).unwrap(),
+        &mut gsets,
+        &mut tlist,
+        &sortlist,
+        ParseExprKind::EXPR_KIND_GROUP_BY,
+        false,
+    )
+    .unwrap();
+
+    // The GROUP BY item takes the (copied) DESC ORDER BY semantics.
+    assert_eq!(group.len(), 1);
+    let g = group.nth(0).as_sort_group_clause().unwrap();
+    let s = sortlist.nth(0).as_sort_group_clause().unwrap();
+    assert!(!group.nth(0).ptr_eq(sortlist.nth(0)), "C copyObject, not a shared node");
+    assert_eq!(
+        (g.tleSortGroupRef, g.eqop, g.sortop, g.reverse_sort, g.nulls_first),
+        (s.tleSortGroupRef, s.eqop, s.sortop, s.reverse_sort, s.nulls_first)
+    );
+}
+
+#[test]
+fn group_by_aggregate_rejected_42803() {
+    install_fixture();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+    pstate.p_hasAggs = true;
+    let aggref = Node::mk(
+        mcx,
+        types_nodes::primnodes::Aggref {
+            aggfnoid: 2803,
+            aggtype: 20,
+            aggstar: true,
+            location: 7,
+            ..types_nodes::primnodes::Aggref::default()
+        },
+    )
+    .unwrap();
+    let tle = Node::mk_target_entry(mcx, aggref, 1, Some("count"), false).unwrap();
+    let mut tlist = NodeList::make1(mcx, tle).unwrap();
+
+    let mut gsets = NodeList::nil();
+    let err = transformGroupClause(
+        mcx,
+        &mut pstate,
+        &NodeList::make1(mcx, int_a_const(mcx, 1, 40)).unwrap(),
+        &mut gsets,
+        &mut tlist,
+        &NodeList::nil(),
+        ParseExprKind::EXPR_KIND_GROUP_BY,
+        false,
+    )
+    .unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_GROUPING_ERROR);
+    assert_eq!(err.message(), "aggregate functions are not allowed in GROUP BY");
+}
+
+#[test]
+fn order_by_duplicate_name_same_value_resolves() {
+    install_fixture();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+    // C: duplicate output names naming equal() values are not ambiguous.
+    let mut tlist =
+        NodeList::make2(mcx, int4_tle(mcx, 7, 1, Some("foo")), int4_tle(mcx, 7, 2, Some("foo")))
+            .unwrap();
+
+    let f = NodeList::make1(mcx, Node::mk(mcx, PgStr { sval: "foo" }).unwrap()).unwrap();
+    let cref = Node::mk(mcx, ColumnRef { fields: f, location: 20 }).unwrap();
+    let orderby = NodeList::make1(
+        mcx,
+        sort_by(mcx, cref, SortByDir::SORTBY_ASC, SortByNulls::SORTBY_NULLS_DEFAULT),
+    )
+    .unwrap();
+
+    let sortlist = transformSortClause(
+        mcx,
+        &mut pstate,
+        &orderby,
+        &mut tlist,
+        ParseExprKind::EXPR_KIND_ORDER_BY,
+        false,
+    )
+    .unwrap();
+    assert_eq!(sortlist.len(), 1);
+    assert_eq!(sortlist.nth(0).as_sort_group_clause().unwrap().tleSortGroupRef, 1);
+    // The first matching entry wins the sortgroupref.
+    assert_eq!(tlist.nth(0).as_target_entry().unwrap().ressortgroupref, 1);
+    assert_eq!(tlist.nth(1).as_target_entry().unwrap().ressortgroupref, 0);
+}
+
+#[test]
+fn order_by_duplicate_name_distinct_values_is_42702() {
+    install_fixture();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+    let mut tlist =
+        NodeList::make2(mcx, int4_tle(mcx, 7, 1, Some("foo")), int4_tle(mcx, 8, 2, Some("foo")))
+            .unwrap();
+
+    let f = NodeList::make1(mcx, Node::mk(mcx, PgStr { sval: "foo" }).unwrap()).unwrap();
+    let cref = Node::mk(mcx, ColumnRef { fields: f, location: 20 }).unwrap();
+    let orderby = NodeList::make1(
+        mcx,
+        sort_by(mcx, cref, SortByDir::SORTBY_ASC, SortByNulls::SORTBY_NULLS_DEFAULT),
+    )
+    .unwrap();
+
+    let err = transformSortClause(
+        mcx,
+        &mut pstate,
+        &orderby,
+        &mut tlist,
+        ParseExprKind::EXPR_KIND_ORDER_BY,
+        false,
+    )
+    .unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_AMBIGUOUS_COLUMN);
+    assert_eq!(err.message(), "ORDER BY \"foo\" is ambiguous");
 }

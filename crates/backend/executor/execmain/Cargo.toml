@@ -22,6 +22,7 @@ tcop_dest = { path = "../../tcop/dest" }
 execjunk = { path = "../execjunk" }
 execmain_seams = { path = "../execmain_seams" }
 executils = { path = "../executils" }
+instrument = { path = "../instrument" }
 execexpr = { path = "../execexpr" }
 execscan = { path = "../execscan" }
 nodeseqscan = { path = "../nodeseqscan" }
@@ -33,6 +34,7 @@ tidbitmap = { path = "../../nodes/tidbitmap" }
 nodeagg = { path = "../nodeagg" }
 nodesort = { path = "../nodesort" }
 nodelimit = { path = "../nodelimit" }
+nodenestloop = { path = "../nodenestloop" }
 exectuples = { path = "../exectuples" }
 tupdesc = { path = "../../access/common/tupdesc" }
 snapmgr = { path = "../../utils/time/snapmgr" }

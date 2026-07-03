@@ -75,9 +75,10 @@ pub fn clause_selectivity<'mcx>(
                 (o.opno, o.inputcollid, ids)
             };
             if treat_as_join_clause(run, rinfo, varrelid, sjinfo) {
-                panic!("join_selectivity (plancat.c): M2 join lane");
+                crate::plancat::join_selectivity(run, opno, &args, inputcollid, jointype, sjinfo)?
+            } else {
+                crate::plancat::restriction_selectivity(run, opno, &args, inputcollid, varrelid)?
             }
-            crate::plancat::restriction_selectivity(run, opno, &args, inputcollid, varrelid)?
         }
         other => panic!("clause_selectivity_ext (clausesel.c): {other:?}; M2 qual lane"),
     };

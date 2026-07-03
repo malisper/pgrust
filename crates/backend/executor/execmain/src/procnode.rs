@@ -31,7 +31,6 @@ pub struct InstrumentedNode<'mcx> {
 }
 
 pub enum PlanStateNode<'mcx> {
-    Instrumented(PgBox<'mcx, InstrumentedNode<'mcx>>),
     Result(ResultState<'mcx>),
     SeqScan(::nodeseqscan::SeqScanState<'mcx>),
     IndexScan(::nodeindexscan::IndexScanState<'mcx>),
@@ -44,6 +43,10 @@ pub enum PlanStateNode<'mcx> {
     BitmapAnd(PgBox<'mcx, BitmapCombineState<'mcx>>),
     BitmapOr(PgBox<'mcx, BitmapCombineState<'mcx>>),
     ModifyTable(PgBox<'mcx, ModifyTablePlanState<'mcx>>),
+    NestLoop(NestLoopNode<'mcx>),
+    // Last variant: existing discriminants keep their values, so the
+    // uninstrumented jump-table dispatch compiles unchanged.
+    Instrumented(PgBox<'mcx, InstrumentedNode<'mcx>>),
 }
 
 // ModifyTable's subplan lives here too (nodesort/nodeagg precedent) —
@@ -85,6 +88,14 @@ pub struct LimitNode<'mcx> {
     pub outer: PgBox<'mcx, PlanStateNode<'mcx>>,
 }
 
+// Both children live here (nodesort/nodeagg precedent); nodenestloop drives
+// them through the NestLoopChild trait.
+pub struct NestLoopNode<'mcx> {
+    pub state: ::nodenestloop::NestLoopState<'mcx>,
+    pub outer: PgBox<'mcx, PlanStateNode<'mcx>>,
+    pub inner: PgBox<'mcx, PlanStateNode<'mcx>>,
+}
+
 // Init-time tree node touched by &mut per tuple; rule-9 budget covers the per-row carriers inside.
 const _: () = assert!(core::mem::size_of::<PlanStateNode<'static>>() <= 1024);
 
@@ -101,6 +112,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             // C sorts have no ExprContext.
             PlanStateNode::Sort(_) => None,
             PlanStateNode::Limit(l) => Some(l.state.ps_ExprContext),
+            PlanStateNode::NestLoop(nl) => Some(nl.state.ps_ExprContext),
             PlanStateNode::BitmapHeapScan(b) => Some(b.scan.ss.ps_ExprContext),
             PlanStateNode::BitmapIndexScan(_)
             | PlanStateNode::BitmapAnd(_)
@@ -132,6 +144,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::ModifyTable(_) => crate::exec_type_from_tl(&plan.targetlist),
             PlanStateNode::Agg(aps) => Ok(aps.agg.ps_ResultTupleDesc.clone()),
             PlanStateNode::Sort(s) => Ok(::nodesort::sort_result_type(&s.state)),
+            PlanStateNode::NestLoop(nl) => Ok(nl.state.ps_ResultTupleDesc.clone()),
             PlanStateNode::BitmapIndexScan(_)
             | PlanStateNode::BitmapAnd(_)
             | PlanStateNode::BitmapOr(_) => {
@@ -277,6 +290,31 @@ pub fn exec_init_node<'mcx>(
             let agg = ::nodeagg::exec_init_agg(agg_plan, estate, eflags, desc)?;
             PlanStateNode::Agg(::mcx::alloc_in(mcx, AggPlanState { agg, outer })?)
         }
+        NodeTag::T_NestLoop => {
+            let mcx = estate.es_query_cxt;
+            let nl_plan = node.as_nest_loop().unwrap();
+            let outer = exec_init_node(nl_plan.join.plan.lefttree, estate, eflags)?
+                .unwrap_or_else(|| {
+                    panic!("ExecInitNestLoop (nodeNestloop.c): NestLoop without an outer plan")
+                });
+            // nestParams are loud in exec_init_nest_loop, so the inner child
+            // always gets EXEC_FLAG_REWIND (cheap rescans wanted).
+            let inner = exec_init_node(
+                nl_plan.join.plan.righttree,
+                estate,
+                eflags | ::types_slot::EXEC_FLAG_REWIND,
+            )?
+            .unwrap_or_else(|| {
+                panic!("ExecInitNestLoop (nodeNestloop.c): NestLoop without an inner plan")
+            });
+            let desc = crate::exec_type_from_tl(&nl_plan.join.plan.targetlist)?;
+            let state = ::nodenestloop::exec_init_nest_loop(nl_plan, estate, eflags, desc)?;
+            PlanStateNode::NestLoop(NestLoopNode {
+                state,
+                outer: ::mcx::alloc_in(mcx, outer)?,
+                inner: ::mcx::alloc_in(mcx, inner)?,
+            })
+        }
         NodeTag::T_ModifyTable => {
             let mcx = estate.es_query_cxt;
             let mt_plan = node.as_modify_table().unwrap();
@@ -305,7 +343,6 @@ pub fn exec_init_node<'mcx>(
             T_WorkTableScan => "nodeWorktablescan.c",
             T_ForeignScan => "nodeForeignscan.c",
             T_CustomScan => "nodeCustom.c",
-            T_NestLoop => "nodeNestloop.c",
             T_MergeJoin => "nodeMergejoin.c",
             T_HashJoin => "nodeHashjoin.c",
             T_Material => "nodeMaterial.c",
@@ -373,16 +410,7 @@ pub fn exec_proc_node<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<ExecSlotId>> {
     match node {
-        // ExecProcNodeInstr (execProcnode.c).
-        PlanStateNode::Instrumented(w) => {
-            let w = &mut **w;
-            let idx = w.instr_idx as usize;
-            ::instrument::instr_start_node(&mut estate.es_instrumentation[idx]);
-            let result = exec_proc_node(&mut w.inner, estate)?;
-            let n_tuples = if result.is_some() { 1.0 } else { 0.0 };
-            ::instrument::instr_stop_node(&mut estate.es_instrumentation[idx], n_tuples);
-            Ok(result)
-        }
+        PlanStateNode::Instrumented(w) => exec_proc_node_instr(w, estate),
         PlanStateNode::Result(rs) => exec_result(rs, estate),
         PlanStateNode::SeqScan(ss) => ::nodeseqscan::exec_seq_scan(ss, estate),
         PlanStateNode::IndexScan(is) => ::nodeindexscan::exec_index_scan(is, estate),
@@ -424,7 +452,27 @@ pub fn exec_proc_node<'mcx>(
                 exec_proc_node(subplan, e)
             })
         }
+        PlanStateNode::NestLoop(nl) => {
+            let NestLoopNode { state, outer, inner } = nl;
+            ::nodenestloop::exec_nest_loop(state, &mut **outer, &mut **inner, estate)
+        }
     }
+}
+
+/// `ExecProcNodeInstr` (execProcnode.c). Outlined so the uninstrumented
+/// dispatch keeps its codegen (compare the exec_proc_node asm before adding).
+#[inline(never)]
+fn exec_proc_node_instr<'mcx>(
+    w: &mut PgBox<'mcx, InstrumentedNode<'mcx>>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<ExecSlotId>> {
+    let w = &mut **w;
+    let idx = w.instr_idx as usize;
+    ::instrument::instr_start_node(&mut estate.es_instrumentation[idx]);
+    let result = exec_proc_node(&mut w.inner, estate)?;
+    let n_tuples = if result.is_some() { 1.0 } else { 0.0 };
+    ::instrument::instr_stop_node(&mut estate.es_instrumentation[idx], n_tuples);
+    Ok(result)
 }
 
 fn init_bitmap_combine<'mcx>(
@@ -541,6 +589,11 @@ pub fn exec_end_node<'mcx>(
             ::nodemodifytable::exec_end_modify_table(&mut mps.mt);
             exec_end_node(&mut mps.subplan, estate)
         }
+        PlanStateNode::NestLoop(nl) => {
+            ::nodenestloop::exec_end_nest_loop(&mut nl.state);
+            exec_end_node(&mut nl.outer, estate)?;
+            exec_end_node(&mut nl.inner, estate)
+        }
     }
 }
 
@@ -568,6 +621,10 @@ pub fn exec_shutdown_node<'mcx>(node: &mut PlanStateNode<'mcx>) {
             }
         }
         PlanStateNode::ModifyTable(mps) => exec_shutdown_node(&mut mps.subplan),
+        PlanStateNode::NestLoop(nl) => {
+            exec_shutdown_node(&mut nl.outer);
+            exec_shutdown_node(&mut nl.inner);
+        }
     }
 }
 
@@ -595,6 +652,16 @@ impl<'mcx> ::nodelimit::LimitChild<'mcx> for PlanStateNode<'mcx> {
 
     fn set_tuple_bound(&mut self, tuples_needed: i64) {
         exec_set_tuple_bound(tuples_needed, self);
+    }
+}
+
+impl<'mcx> ::nodenestloop::NestLoopChild<'mcx> for PlanStateNode<'mcx> {
+    fn exec_proc(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<Option<ExecSlotId>> {
+        exec_proc_node(self, estate)
+    }
+
+    fn rescan(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
+        crate::execami::exec_re_scan(self, estate)
     }
 }
 

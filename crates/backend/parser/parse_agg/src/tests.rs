@@ -170,15 +170,85 @@ fn var_inside_aggregate_passes_check() {
     parseCheckAggregates(&pstate, &qry).unwrap();
 }
 
+fn group_clause_ref1<'mcx>(mcx: Mcx<'mcx>) -> NodeList<'mcx> {
+    NodeList::make1(
+        mcx,
+        Node::mk(
+            mcx,
+            types_nodes::parsenodes::SortGroupClause {
+                tleSortGroupRef: 1,
+                eqop: 96,
+                sortop: 97,
+                reverse_sort: false,
+                nulls_first: false,
+                hashable: true,
+            },
+        )
+        .unwrap(),
+    )
+    .unwrap()
+}
+
 #[test]
-#[should_panic(expected = "grouping lane")]
-fn group_by_panics_loudly() {
+fn grouped_column_passes_check() {
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
     let mut pstate = make_parsestate(mcx, None);
     pstate.p_hasAggs = true;
 
-    let mut qry = query_with_rtable(mcx, NodeList::nil());
-    qry.groupClause = NodeList::make1(mcx, Node::mk_integer(mcx, 1).unwrap()).unwrap();
-    let _ = parseCheckAggregates(&pstate, &qry);
+    let var = Node::mk_var(mcx, 1, 1, INT4OID, -1, InvalidOid, 0).unwrap();
+    let tle = Node::mk_target_entry(mcx, var, 1, Some("x"), false).unwrap();
+    // SAFETY: freshly built tlist; no other reference is live.
+    unsafe {
+        tle.with_mut::<types_nodes::primnodes::TargetEntry, _>(|t| t.ressortgroupref = 1)
+    }
+    .unwrap();
+    let mut qry = query_with_rtable(mcx, NodeList::make1(mcx, tle).unwrap());
+    qry.groupClause = group_clause_ref1(mcx);
+    parseCheckAggregates(&pstate, &qry).unwrap();
+}
+
+#[test]
+fn ungrouped_column_next_to_group_by_is_42803() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+    pstate.p_hasAggs = true;
+
+    let colnames = NodeList::make2(
+        mcx,
+        Node::mk(mcx, PgStr { sval: "x" }).unwrap(),
+        Node::mk(mcx, PgStr { sval: "y" }).unwrap(),
+    )
+    .unwrap();
+    let eref = Node::mk_mut(mcx, Alias { aliasname: Some("t"), colnames }).unwrap().seal_ref();
+    let mut rte = Node::build::<RangeTblEntry>(mcx).unwrap();
+    rte.eref = Some(eref);
+
+    let gvar = Node::mk_var(mcx, 1, 1, INT4OID, -1, InvalidOid, 0).unwrap();
+    let gtle = Node::mk_target_entry(mcx, gvar, 1, Some("x"), false).unwrap();
+    // SAFETY: freshly built tlist; no other reference is live.
+    unsafe {
+        gtle.with_mut::<types_nodes::primnodes::TargetEntry, _>(|t| t.ressortgroupref = 1)
+    }
+    .unwrap();
+    let uvar = Node::mk_var(mcx, 1, 2, INT4OID, -1, InvalidOid, 0).unwrap();
+    let utle = Node::mk_target_entry(mcx, uvar, 2, Some("y"), false).unwrap();
+    let mut tlist = NodeList::make1(mcx, gtle).unwrap();
+    tlist.lappend(mcx, utle).unwrap();
+
+    let mut qry = Query::default();
+    qry.rtable = NodeList::make1(mcx, rte.seal()).unwrap();
+    qry.targetList = tlist;
+    qry.groupClause = group_clause_ref1(mcx);
+
+    let err = parseCheckAggregates(&pstate, &qry).map(|_| ()).unwrap_err();
+    assert_eq!(err.sqlstate(), ERRCODE_GROUPING_ERROR);
+    assert!(
+        err.message().contains(
+            "column \"t.y\" must appear in the GROUP BY clause or be used in an aggregate function"
+        ),
+        "{}",
+        err.message()
+    );
 }

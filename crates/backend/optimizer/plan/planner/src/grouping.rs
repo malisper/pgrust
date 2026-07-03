@@ -159,13 +159,14 @@ pub fn grouping_planner<'mcx>(run: &mut PlannerRun<'mcx>, tuple_fraction: f64) -
             );
         }
         if parse.commandType != CmdType::CMD_SELECT {
-            if parse.commandType != CmdType::CMD_INSERT {
-                panic!(
-                    "create_modifytable_path (pathnode.c): UPDATE/DELETE/MERGE; M4 DML lane"
-                );
+            if parse.commandType == CmdType::CMD_MERGE {
+                panic!("create_modifytable_path (pathnode.c): MERGE; M4 MERGE lane");
             }
             debug_assert!(parse.withCheckOptions.is_nil() && parse.returningList.is_nil());
             debug_assert!(parse.onConflict.is_none() && run.root.rowMarks.is_empty());
+            let update_colnos = (parse.commandType == CmdType::CMD_UPDATE).then(|| {
+                crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.update_colnos)
+            });
             let mtpath = crate::pathnode::create_modifytable_path(
                 run,
                 final_rel,
@@ -173,6 +174,7 @@ pub fn grouping_planner<'mcx>(run: &mut PlannerRun<'mcx>, tuple_fraction: f64) -
                 parse.commandType,
                 parse.canSetTag,
                 parse.resultRelation as u32,
+                update_colnos,
             );
             path_id = run.root.alloc_path(mtpath);
         }
@@ -182,10 +184,8 @@ pub fn grouping_planner<'mcx>(run: &mut PlannerRun<'mcx>, tuple_fraction: f64) -
     Ok(())
 }
 
-// preprocess_groupclause (planner.c): with no ORDER BY (the live shape) this
-// is list_copy; the ORDER BY-prefix reordering arm is ported for when the
-// sort lane composes. Returns interned SortGroupClause node ids sharing the
-// parse nodes, as C.
+// preprocess_groupclause (planner.c); interned ids share the parse nodes,
+// as C.
 fn preprocess_groupclause<'mcx>(
     run: &mut PlannerRun<'mcx>,
 ) -> PgResult<mcx::PgVec<'mcx, types_pathnodes::NodeId>> {
@@ -264,8 +264,7 @@ fn target_sgref_in_group_clause(run: &PlannerRun<'_>, sgref: u32) -> bool {
             .any(|n| n.as_sort_group_clause().expect("groupClause cell").tleSortGroupRef == sgref)
 }
 
-// make_group_input_target (planner.c): grouping expressions keep their
-// sortgroupref slots; other columns flatten to their input Vars.
+// make_group_input_target (planner.c).
 fn make_group_input_target<'mcx>(
     run: &mut PlannerRun<'mcx>,
     final_target: types_pathnodes::PtId,
@@ -301,8 +300,7 @@ fn make_group_input_target<'mcx>(
         }
     }
 
-    // add_new_columns_to_pathtarget: dedupe by equal(), also against the
-    // grouping expressions already present.
+    // add_new_columns_to_pathtarget: dedupe by equal().
     let mut uniq: mcx::PgVec<'mcx, types_nodes::Node<'mcx>> = mcx::PgVec::new_in(mcx);
     for &v in vars.iter() {
         if group_exprs.iter().chain(uniq.iter()).any(|&u| types_nodes::equal(u, v)) {
@@ -355,11 +353,9 @@ fn pull_agg_input_vars<'mcx>(
 }
 
 // create_grouping_paths + create_ordinary_grouping_paths +
-// add_paths_to_grouping_rel (planner.c). Plain aggregation: every input path
-// gets an AGG_PLAIN AggPath. GROUP BY: one AGG_HASHED path over the cheapest
-// input. DIVERGENCE: sorted-grouping candidates (the can_sort arm) are not
-// generated — group pathkeys are the sorted-grouping lane — so plan choice
-// (not results) can differ from C when a sorted plan would win.
+// add_paths_to_grouping_rel (planner.c). DIVERGENCE: sorted-grouping
+// candidates (can_sort arm) are not generated, so plan choice (not results)
+// can differ from C where a sorted plan would win.
 fn create_grouping_paths<'mcx>(
     run: &mut PlannerRun<'mcx>,
     input_rel: RelId,
@@ -463,14 +459,12 @@ fn create_grouping_paths<'mcx>(
     Ok(grouped_rel)
 }
 
-// get_number_of_groups (planner.c), plain-GROUP-BY leg ->
-// estimate_num_groups over the processed groupClause exprs.
+// get_number_of_groups (planner.c), plain-GROUP-BY leg.
 fn get_number_of_groups<'mcx>(run: &mut PlannerRun<'mcx>, input_rel: RelId) -> PgResult<f64> {
     let path_rows = {
         let cheapest = run.root.rel(input_rel).cheapest_total_path.unwrap();
         run.root.path(cheapest).base().rows
     };
-    // get_sortgrouplist_exprs (tlist.c) over processed_tlist.
     let mut group_exprs: mcx::PgVec<'mcx, (types_pathnodes::NodeId, types_nodes::Node<'mcx>)> =
         mcx::PgVec::new_in(run.mcx);
     for i in 0..run.root.processed_groupClause.len() {
@@ -495,7 +489,6 @@ fn get_number_of_groups<'mcx>(run: &mut PlannerRun<'mcx>, input_rel: RelId) -> P
     crate::selfuncs::estimate_num_groups(run, &group_exprs, path_rows)
 }
 
-// limit_needed (planner.c).
 pub fn limit_needed(parse: &types_nodes::parsenodes::Query<'_>) -> bool {
     if let Some(node) = parse.limitCount {
         match node.as_const() {
@@ -521,7 +514,6 @@ pub fn limit_needed(parse: &types_nodes::parsenodes::Query<'_>) -> bool {
     false
 }
 
-// preprocess_limit (planner.c).
 fn preprocess_limit<'mcx>(
     run: &mut PlannerRun<'mcx>,
     tuple_fraction: f64,
@@ -612,9 +604,8 @@ fn preprocess_limit<'mcx>(
     Ok(tuple_fraction)
 }
 
-// make_sort_input_target (planner.c): the no-postponable-columns arm returns
-// final_target; the projection-building arm is loud (volatile/expensive
-// columns cannot arise while those expression lanes are loud upstream).
+// The no-postponable-columns arm returns final_target; the projection-
+// building arm is loud.
 fn make_sort_input_target<'mcx>(
     run: &mut PlannerRun<'mcx>,
     final_target: types_pathnodes::PtId,
@@ -648,8 +639,7 @@ fn make_sort_input_target<'mcx>(
     panic!("make_sort_input_target (planner.c): postponed-column projection; M2 sort lane");
 }
 
-// create_ordered_paths (planner.c); incremental sort and partial paths are
-// loud/absent.
+// Incremental sort and partial paths are loud/absent.
 fn create_ordered_paths<'mcx>(
     run: &mut PlannerRun<'mcx>,
     input_rel: RelId,
@@ -728,10 +718,8 @@ fn create_ordered_paths<'mcx>(
     Ok(ordered_rel)
 }
 
-// With no window/distinct/sort/setop clauses every pathkey list is NIL.
-// DIVERGENCE: group_pathkeys are not built (make_pathkeys_for_sortclauses_
-// extended is the sorted-grouping lane); only hashed grouping paths are
-// generated, so input ordering is never consumed.
+// DIVERGENCE: group_pathkeys are not built (sorted-grouping lane); only
+// hashed grouping paths are generated, so input order is never consumed.
 fn standard_qp_callback<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResult<()> {
     let parse = run.parse();
     if run.root.numOrderedAggs > 0 {

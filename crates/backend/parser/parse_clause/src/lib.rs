@@ -89,12 +89,6 @@ pub fn setTargetTable<'mcx>(
              unit backend-parser-clause"
         );
     }
-    if alsoSource {
-        panic!(
-            "setTargetTable (parse_clause.c): UPDATE/DELETE alsoSource lane \
-             (addNSItemToQuery of the target) unported — unit backend-parser-clause"
-        );
-    }
     if let Some(old) = pstate.p_target_relation.take() {
         table::table_close(old, types_rel::NoLock)?;
     }
@@ -123,7 +117,12 @@ pub fn setTargetTable<'mcx>(
     .expect("p_perminfo is RTEPermissionInfo");
 
     let rtindex = nsitem.p_rtindex;
-    pstate.p_target_nsitem = Some(nsitem);
+    if alsoSource {
+        parse_relation::addNSItemToQuery(mcx, pstate, nsitem, true, true, true)?;
+        pstate.p_target_nsitem = pstate.p_namespace.last().copied();
+    } else {
+        pstate.p_target_nsitem = Some(nsitem);
+    }
     Ok(rtindex)
 }
 
@@ -217,7 +216,7 @@ pub fn transformSortClause<'mcx>(
 }
 
 fn findTargetlistEntrySQL92<'mcx>(
-    _mcx: Mcx<'mcx>,
+    mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'_, 'mcx>,
     node: Node<'mcx>,
     tlist: &mut NodeList<'mcx>,
@@ -226,32 +225,44 @@ fn findTargetlistEntrySQL92<'mcx>(
     if let Some(cref) = node.as_column_ref() {
         if let [field1] = cref.fields.as_slice() {
             if let Some(name) = field1.as_string().map(|s| s.sval) {
-                if expr_kind == ParseExprKind::EXPR_KIND_GROUP_BY {
-                    panic!(
-                        "findTargetlistEntrySQL92 (parse_clause.c): GROUP BY colNameToVar \
-                         precedence arm unported — unit backend-parser-clause"
-                    );
+                // GROUP BY prefers a FROM-clause column over a targetlist
+                // alias; a FROM match falls through to the SQL99 leg.
+                let mut name = Some(name);
+                if expr_kind == ParseExprKind::EXPR_KIND_GROUP_BY
+                    && parse_relation::colNameToVar(mcx, pstate, name.unwrap(), true, cref.location)?
+                        .is_some()
+                {
+                    name = None;
                 }
                 let mut target_result: Option<Node<'mcx>> = None;
                 for tle_node in &*tlist {
                     let tle = tle_node.as_target_entry().expect("tlist holds TargetEntry");
-                    if !tle.resjunk && tle.resname == Some(name) {
-                        if target_result.is_some() {
-                            // C compares equal(target_result->expr, tle->expr)
-                            // and errors only on distinct values.
-                            panic!(
-                                "findTargetlistEntrySQL92 (parse_clause.c): duplicate-name \
-                                 disambiguation needs equal() (equalfuncs.c) — 42702 \
-                                 \"{} \\\"{name}\\\" is ambiguous\" when values differ — \
-                                 unit backend-nodes-equalfuncs",
-                                ParseExprKindName(expr_kind)
-                            );
+                    if !tle.resjunk && name.is_some() && tle.resname == name {
+                        // Duplicate names naming the same value are allowed.
+                        match target_result {
+                            Some(prev) => {
+                                if !types_nodes::equal(
+                                    prev.as_target_entry().unwrap().expr,
+                                    tle.expr,
+                                ) {
+                                    return Err(ambiguous_column(
+                                        pstate,
+                                        expr_kind,
+                                        name.unwrap(),
+                                        cref.location,
+                                    ));
+                                }
+                            }
+                            None => target_result = Some(tle_node),
                         }
-                        target_result = Some(tle_node);
                     }
                 }
                 if let Some(tle_node) = target_result {
-                    checkTargetlistEntrySQL92(pstate, expr_kind)?;
+                    checkTargetlistEntrySQL92(
+                        pstate,
+                        tle_node.as_target_entry().unwrap().expr,
+                        expr_kind,
+                    )?;
                     return Ok(tle_node);
                 }
             }
@@ -268,33 +279,112 @@ fn findTargetlistEntrySQL92<'mcx>(
             if !tle.resjunk {
                 targetlist_pos += 1;
                 if targetlist_pos == target_pos {
-                    checkTargetlistEntrySQL92(pstate, expr_kind)?;
+                    checkTargetlistEntrySQL92(pstate, tle.expr, expr_kind)?;
                     return Ok(tle_node);
                 }
             }
         }
         return Err(position_not_in_select_list(pstate, expr_kind, target_pos, aconst.location));
     }
-    panic!(
-        "findTargetlistEntrySQL92 (parse_clause.c): SQL99 expression fallthrough \
-         (findTargetlistEntrySQL99: equal()/strip_implicit_coercions + resjunk \
-         transformTargetEntry) unported — unit backend-parser-clause"
-    );
+    findTargetlistEntrySQL99(mcx, pstate, node, tlist, expr_kind)
+}
+
+// C findTargetlistEntrySQL99, Var-equality leg: the transformed expression
+// matches an existing tlist Var or lands as a resjunk entry; non-Var equal()
+// matching (equalfuncs.c) is loud.
+fn findTargetlistEntrySQL99<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    node: Node<'mcx>,
+    tlist: &mut NodeList<'mcx>,
+    expr_kind: ParseExprKind,
+) -> PgResult<Node<'mcx>> {
+    let expr = transformExpr(mcx, pstate, node, expr_kind)?;
+    let Some(evar) = expr.as_var() else {
+        panic!(
+            "findTargetlistEntrySQL99 (parse_clause.c): non-Var expression needs equal() \
+             (equalfuncs.c) — unit backend-parser-clause"
+        );
+    };
+    for tle_node in &*tlist {
+        let tle = tle_node.as_target_entry().expect("tlist holds TargetEntry");
+        if let Some(tvar) = tle.expr.as_var() {
+            if tvar.varno == evar.varno
+                && tvar.varattno == evar.varattno
+                && tvar.varlevelsup == evar.varlevelsup
+                && tvar.vartype == evar.vartype
+            {
+                return Ok(tle_node);
+            }
+        }
+    }
+    // transformTargetEntry (parse_target.c) resjunk arm.
+    let resno = (tlist.len() + 1) as i16;
+    let tle = Node::mk_target_entry(mcx, expr, resno, None, true)?;
+    tlist.lappend(mcx, tle)?;
+    Ok(tle)
 }
 
 fn checkTargetlistEntrySQL92(
-    _pstate: &ParseState<'_, '_>,
+    pstate: &ParseState<'_, '_>,
+    tle_expr: Node<'_>,
     expr_kind: ParseExprKind,
 ) -> PgResult<()> {
     match expr_kind {
-        ParseExprKind::EXPR_KIND_GROUP_BY => panic!(
-            "checkTargetlistEntrySQL92 (parse_clause.c): GROUP BY aggregate/window rejection \
-             needs contain_aggs_of_level/contain_windowfuncs — unit backend-parser-agg"
-        ),
+        ParseExprKind::EXPR_KIND_GROUP_BY => {
+            if pstate.p_hasAggs && contains_aggref(tle_expr) {
+                return Err(aggregate_in_group_by(pstate, expr_kind, tle_expr));
+            }
+            debug_assert!(!pstate.p_hasWindowFuncs, "window functions are a loud lane upstream");
+            Ok(())
+        }
         ParseExprKind::EXPR_KIND_ORDER_BY | ParseExprKind::EXPR_KIND_DISTINCT_ON => Ok(()),
         _ => Err(Box::new(PgError::error(
             "unexpected exprKind in checkTargetlistEntrySQL92".to_string(),
         ))),
+    }
+}
+
+// contain_aggs_of_level(expr, 0) over the ported families (rewriteManip.c);
+// outer-level aggs are a loud lane upstream so any Aggref counts.
+fn contains_aggref(node: Node<'_>) -> bool {
+    match node.node_tag() {
+        NodeTag::T_Aggref => true,
+        NodeTag::T_Var | NodeTag::T_Const | NodeTag::T_Param => false,
+        NodeTag::T_FuncExpr => node.as_func_expr().unwrap().args.iter().any(contains_aggref),
+        NodeTag::T_OpExpr => node.as_op_expr().unwrap().args.iter().any(contains_aggref),
+        NodeTag::T_RelabelType => contains_aggref(node.as_relabel_type().unwrap().arg),
+        NodeTag::T_BoolExpr => node.as_bool_expr().unwrap().args.iter().any(contains_aggref),
+        NodeTag::T_NullTest => {
+            node.as_null_test().unwrap().arg.is_some_and(contains_aggref)
+        }
+        tag => panic!(
+            "contain_aggs_of_level (rewriteManip.c): node family {tag:?} unported — \
+             unit backend-parser-clause"
+        ),
+    }
+}
+
+// locate_agg_of_level's job is the errposition; the first Aggref's location.
+fn locate_aggref(node: Node<'_>) -> ParseLoc {
+    match node.node_tag() {
+        NodeTag::T_Aggref => node.as_aggref().unwrap().location,
+        NodeTag::T_FuncExpr => node
+            .as_func_expr()
+            .unwrap()
+            .args
+            .iter()
+            .find(|&a| contains_aggref(a))
+            .map_or(-1, locate_aggref),
+        NodeTag::T_OpExpr => node
+            .as_op_expr()
+            .unwrap()
+            .args
+            .iter()
+            .find(|&a| contains_aggref(a))
+            .map_or(-1, locate_aggref),
+        NodeTag::T_RelabelType => locate_aggref(node.as_relabel_type().unwrap().arg),
+        _ => -1,
     }
 }
 
@@ -454,23 +544,160 @@ pub fn targetIsInSortList(
     Ok(false)
 }
 
+/// C `transformGroupClause`, simple-expression arm: GROUPING SETS/CUBE/
+/// ROLLUP (and the implicit-RowExpr flattening they ride on) are loud.
 pub fn transformGroupClause<'mcx>(
-    _pstate: &mut ParseState<'_, 'mcx>,
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
     grouplist: &NodeList<'mcx>,
     grouping_sets: &mut NodeList<'mcx>,
-    _targetlist: &mut NodeList<'mcx>,
-    _sort_clause: &NodeList<'mcx>,
-    _expr_kind: ParseExprKind,
-    _use_sql99: bool,
+    targetlist: &mut NodeList<'mcx>,
+    sort_clause: &NodeList<'mcx>,
+    expr_kind: ParseExprKind,
+    use_sql99: bool,
 ) -> PgResult<NodeList<'mcx>> {
-    if !grouplist.is_nil() {
+    *grouping_sets = NodeList::nil();
+    let mut result = NodeList::nil();
+    let mut seen_local: mcx::PgVec<'_, Index> = mcx::PgVec::new_in(mcx);
+    for gexpr in grouplist {
+        match gexpr.node_tag() {
+            NodeTag::T_GroupingSet => panic!(
+                "transformGroupClause (parse_clause.c): GROUPING SETS/CUBE/ROLLUP \
+                 (transformGroupingSet) unported — unit backend-parser-clause"
+            ),
+            NodeTag::T_RowExpr => panic!(
+                "flatten_grouping_sets (parse_clause.c): implicit RowExpr arm unported — \
+                 unit backend-parser-clause"
+            ),
+            _ => {}
+        }
+        let r#ref = transformGroupClauseExpr(
+            &mut result,
+            &seen_local,
+            mcx,
+            pstate,
+            gexpr,
+            targetlist,
+            sort_clause,
+            expr_kind,
+            use_sql99,
+        )?;
+        if r#ref > 0 {
+            seen_local.push(r#ref);
+        }
+    }
+    Ok(result)
+}
+
+// C transformGroupClauseExpr, toplevel arm (grouping sets are loud upstream).
+#[allow(clippy::too_many_arguments)]
+fn transformGroupClauseExpr<'mcx>(
+    flatresult: &mut NodeList<'mcx>,
+    seen_local: &[Index],
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    gexpr: Node<'mcx>,
+    targetlist: &mut NodeList<'mcx>,
+    sort_clause: &NodeList<'mcx>,
+    expr_kind: ParseExprKind,
+    use_sql99: bool,
+) -> PgResult<Index> {
+    if use_sql99 {
         panic!(
-            "transformGroupClause (parse_clause.c): GROUP BY transformation unported — \
-             unit backend-parser-clause"
+            "transformGroupClauseExpr (parse_clause.c): findTargetlistEntrySQL99 \
+             unported — unit backend-parser-clause"
         );
     }
-    *grouping_sets = NodeList::nil();
-    Ok(NodeList::nil())
+    let tle_node = findTargetlistEntrySQL92(mcx, pstate, gexpr, targetlist, expr_kind)?;
+    let tle = tle_node.as_target_entry().unwrap();
+
+    let mut found = false;
+    if tle.ressortgroupref > 0 {
+        // GROUP BY x, x: local duplicates drop out.
+        if seen_local.contains(&tle.ressortgroupref) {
+            return Ok(0);
+        }
+        found = targetIsInSortList(tle, InvalidOid, flatresult)?;
+        if !found {
+            // A matching ORDER BY item donates its operator info (C copies
+            // the SortGroupClause node).
+            for sc_node in sort_clause {
+                let sc = sc_node.as_sort_group_clause().expect("sortClause cell");
+                if sc.tleSortGroupRef == tle.ressortgroupref {
+                    flatresult.lappend(mcx, Node::mk(mcx, *sc)?)?;
+                    found = true;
+                    break;
+                }
+            }
+        }
+    }
+    if !found {
+        addTargetToGroupList(mcx, pstate, tle_node, flatresult, targetlist, expr_location(gexpr))?;
+    }
+    Ok(tle_node.as_target_entry().unwrap().ressortgroupref)
+}
+
+// C addTargetToGroupList: default grouping semantics via
+// get_sort_group_operators (sortop optional, eqop required).
+fn addTargetToGroupList<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    tle_node: Node<'mcx>,
+    grouplist: &mut NodeList<'mcx>,
+    targetlist: &NodeList<'mcx>,
+    location: ParseLoc,
+) -> PgResult<()> {
+    let tle = tle_node.as_target_entry().unwrap();
+    let mut restype = expr_type(tle.expr);
+
+    if restype == UNKNOWNOID {
+        let new_expr = coerce::coerce_type(
+            mcx,
+            pstate,
+            tle.expr,
+            restype,
+            TEXTOID,
+            -1,
+            coerce::COERCION_IMPLICIT,
+            CoercionForm::COERCE_IMPLICIT_CAST,
+            -1,
+        )?;
+        // SAFETY: parse analysis holds exclusive access to the targetlist it
+        // is transforming; the `tle` borrow above is dead before this write.
+        unsafe {
+            tle_node.with_mut::<TargetEntry, _>(|t| t.expr = new_expr).unwrap();
+        }
+        restype = TEXTOID;
+    }
+    let tle = tle_node.as_target_entry().unwrap();
+
+    if !targetIsInSortList(tle, InvalidOid, grouplist)? {
+        let attach_pos = |e: Box<PgError>| -> Box<PgError> {
+            if e.sqlstate() == ERRCODE_QUERY_CANCELED || e.cursor_position().is_some() {
+                return e;
+            }
+            let pos = parser_errposition(pstate, location, mbutils::GetDatabaseEncoding());
+            Box::new((*e).with_cursor_position(pos))
+        };
+        let ops = parse_oper::get_sort_group_operators(restype, false, true, false, true)
+            .map_err(attach_pos)?;
+        let tleSortGroupRef = assignSortGroupRef(tle_node, targetlist);
+        grouplist.lappend(
+            mcx,
+            Node::mk(
+                mcx,
+                SortGroupClause {
+                    tleSortGroupRef,
+                    eqop: ops.eq_opr,
+                    sortop: ops.lt_opr,
+                    reverse_sort: false,
+                    nulls_first: false,
+                    hashable: ops.hashable,
+                },
+            )?,
+        )?;
+    }
+    Ok(())
 }
 
 pub fn transformDistinctClause<'mcx>(
@@ -509,6 +736,56 @@ pub fn transformWindowDefinitions<'mcx>(
         );
     }
     Ok(NodeList::nil())
+}
+
+#[cold]
+#[inline(never)]
+fn aggregate_in_group_by(
+    pstate: &ParseState<'_, '_>,
+    expr_kind: ParseExprKind,
+    tle_expr: Node<'_>,
+) -> Box<PgError> {
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(types_error::ERRCODE_GROUPING_ERROR)
+            .errmsg(format!(
+                "aggregate functions are not allowed in {}",
+                ParseExprKindName(expr_kind)
+            ))
+            .errposition(parser_errposition(
+                pstate,
+                locate_aggref(tle_expr),
+                mbutils::GetDatabaseEncoding(),
+            ))
+            .into_error()
+            .with_error_location(ErrorLocation::new(
+                "parse_clause.c",
+                0,
+                "checkTargetlistEntrySQL92",
+            )),
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn ambiguous_column(
+    pstate: &ParseState<'_, '_>,
+    expr_kind: ParseExprKind,
+    name: &str,
+    location: ParseLoc,
+) -> Box<PgError> {
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(types_error::ERRCODE_AMBIGUOUS_COLUMN)
+            .errmsg(format!("{} \"{name}\" is ambiguous", ParseExprKindName(expr_kind)))
+            .errposition(parser_errposition(pstate, location, mbutils::GetDatabaseEncoding()))
+            .into_error()
+            .with_error_location(ErrorLocation::new(
+                "parse_clause.c",
+                0,
+                "findTargetlistEntrySQL92",
+            )),
+    )
 }
 
 #[cold]

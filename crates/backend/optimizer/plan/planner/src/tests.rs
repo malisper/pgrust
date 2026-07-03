@@ -42,7 +42,10 @@ fn install_fixtures() {
 
 const TBL: u32 = 16384;
 const IDX: u32 = 16385;
+const JT1: u32 = 16400;
+const JT2: u32 = 16401;
 const INT4EQ_OP: u32 = 96;
+const INT4_LT_OP: u32 = 97;
 const INT4EQ_PROC: u32 = 65;
 const INT4_BTREE_FAM: u32 = 1976;
 
@@ -106,16 +109,29 @@ fn install_scan_fixtures() {
     });
     syscache_seams::lookup_pg_amop_members_by_operator::set(|mcx, opno| {
         let mut v = mcx::PgVec::new_in(mcx);
-        if opno == INT4EQ_OP {
+        if opno == INT4EQ_OP || opno == INT4_LT_OP {
             v.push(syscache_seams::PgAmopMemberShape {
                 amopfamily: INT4_BTREE_FAM,
                 amoplefttype: 23,
                 amoprighttype: 23,
-                amopstrategy: 3,
+                amopstrategy: if opno == INT4EQ_OP { 3 } else { 1 },
                 amopmethod: 403,
             });
         }
         Ok(v)
+    });
+    syscache_seams::lookup_pg_opfamily_shape::set(|opfid| {
+        Ok((opfid == INT4_BTREE_FAM).then(|| syscache_seams::PgOpfamilyShape {
+            opfmethod: 403,
+            opfname: types_tuple::NameData::default(),
+        }))
+    });
+    syscache_seams::lookup_pg_amop_by_strategy::set(|opfamily, left, right, strategy| {
+        Ok(match (opfamily, left, right, strategy) {
+            (INT4_BTREE_FAM, 23, 23, 3) => INT4EQ_OP,
+            (INT4_BTREE_FAM, 23, 23, 1) => INT4_LT_OP,
+            _ => 0,
+        })
     });
     syscache_seams::pg_proc_cost_shape::set(|funcid| {
         Ok(match funcid {
@@ -159,6 +175,8 @@ fn install_scan_fixtures() {
         Ok(match relid {
             TBL => make_heap_rel(mcx),
             IDX => make_index_rel(mcx),
+            JT1 => make_join_rel_fixture(mcx, JT1, "jt1", 1, 1.0),
+            JT2 => make_join_rel_fixture(mcx, JT2, "jt2", 1, 2.0),
             other => panic!("fixture relation_open: unknown oid {other}"),
         })
     });
@@ -202,6 +220,7 @@ fn install_scan_fixtures() {
         Ok(match rel.rd_id {
             TBL => 100,
             IDX => 30,
+            JT1 | JT2 => 1,
             other => panic!("fixture nblocks: unknown oid {other}"),
         })
     });
@@ -301,6 +320,41 @@ fn int4_attr(attnum: i16, name: &str, notnull: bool) -> types_tuple::FormData_pg
         attinhcount: 0,
         attcollation: 0,
     }
+}
+
+// Index-less two-int-column relation for the nestloop lane; pages/tuples
+// pinned so costs match a live-PG fixture (1 page, reltuples rows, VACUUMed,
+// never ANALYZEd).
+fn make_join_rel_fixture<'mcx>(
+    mcx: Mcx<'mcx>,
+    oid: u32,
+    name: &str,
+    pages: i32,
+    tuples: f32,
+) -> types_rel::Relation<'mcx> {
+    use types_tuple::tupdesc::ATTNULLABLE_UNRESTRICTED;
+    let mut attrs = mcx::PgVec::new_in(mcx);
+    attrs.push(int4_attr(1, "a", false));
+    attrs.push(int4_attr(2, "pad", false));
+    let mut compact_attrs = mcx::PgVec::new_in(mcx);
+    for a in attrs.iter() {
+        let mut c = types_tuple::CompactAttribute::populate_from(a);
+        c.attnullability = ATTNULLABLE_UNRESTRICTED;
+        compact_attrs.push(c);
+    }
+    let rd_att = std::rc::Rc::new(types_tuple::TupleDescData {
+        natts: 2,
+        tdtypeid: 0,
+        tdtypmod: -1,
+        tdrefcount: 1,
+        constr: None,
+        compact_attrs,
+        attrs,
+    });
+    let mut form = make_pg_class(oid, name, b'r', 2, false);
+    form.relpages = pages;
+    form.reltuples = tuples;
+    types_rel::Relation::open(make_rel_data(mcx, oid, form, rd_att), None)
 }
 
 fn make_heap_rel<'mcx>(mcx: Mcx<'mcx>) -> types_rel::Relation<'mcx> {
@@ -1252,5 +1306,294 @@ mod shared_aggrefs {
             (0, 0),
             "location-only differences must not defeat agg sharing"
         );
+    }
+}
+
+mod sort_limit {
+    use super::*;
+    use types_nodes::parsenodes::SortGroupClause;
+
+    // The analyzer's output for `SELECT pk FROM t ORDER BY val LIMIT 2`:
+    // val is a resjunk tlist entry carrying the sortgroupref.
+    fn order_by_limit_query(mcx: Mcx<'_>) -> Query<'_> {
+        let mut parse = table_query(mcx, None);
+        let mut tl = NodeList::nil();
+        let pk = Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap();
+        tl.lappend(mcx, Node::mk_target_entry(mcx, pk, 1, Some("pk"), false).unwrap()).unwrap();
+        let val = Node::mk_var(mcx, 1, 2, 23, -1, 0, 0).unwrap();
+        let junk = Node::mk(
+            mcx,
+            types_nodes::primnodes::TargetEntry {
+                expr: val,
+                resno: 2,
+                resname: Some("val"),
+                ressortgroupref: 1,
+                resorigtbl: 0,
+                resorigcol: 0,
+                resjunk: true,
+            },
+        )
+        .unwrap();
+        tl.lappend(mcx, junk).unwrap();
+        parse.targetList = tl;
+        parse.sortClause = NodeList::make1(
+            mcx,
+            Node::mk(
+                mcx,
+                SortGroupClause {
+                    tleSortGroupRef: 1,
+                    eqop: INT4EQ_OP,
+                    sortop: INT4_LT_OP,
+                    reverse_sort: false,
+                    nulls_first: false,
+                    hashable: true,
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        parse.limitCount =
+            Some(Node::mk_const(mcx, 20, -1, 0, 8, Datum::from_i64(2), false, true).unwrap());
+        parse.limitOption = types_nodes::nodes_enums::LimitOption::LIMIT_OPTION_COUNT;
+        parse
+    }
+
+    // EXPLAIN SELECT pk FROM t ORDER BY val LIMIT 2 (C formulas over the
+    // 100-page/10000-tuple fixture):
+    //   Limit    (cost=300.00..300.01 rows=2 width=8)
+    //   -> Sort  (cost=300.00..325.00 rows=10000 width=8) [bounded heap]
+    //      -> Seq Scan on t (cost=0.00..200.00 rows=10000 width=8)
+    #[test]
+    fn order_by_limit_plans_to_limit_sort_seqscan() {
+        install_fixtures();
+        let cx = cx();
+        let mcx = cx.mcx();
+        let parse = order_by_limit_query(mcx);
+        let stmt = planner(
+            mcx,
+            parse,
+            "SELECT pk FROM t ORDER BY val LIMIT 2",
+            CURSOR_OPT_PARALLEL_OK,
+            ParamListHandle::NULL,
+        )
+        .unwrap();
+
+        let plan = stmt.planTree.unwrap();
+        assert_eq!(plan.node_tag(), NodeTag::T_Limit);
+        let limit = plan.as_limit().unwrap();
+        assert!((limit.plan.startup_cost - 300.0).abs() < 1e-9);
+        assert!((limit.plan.total_cost - 300.005).abs() < 1e-9);
+        assert_eq!(limit.plan.plan_rows, 2.0);
+        assert_eq!(limit.plan.plan_width, 8);
+        assert!(limit.limitOffset.is_none());
+        let c = limit.limitCount.unwrap().as_const().unwrap();
+        assert_eq!(c.constvalue.as_i64(), 2);
+
+        let sort_node = limit.plan.lefttree.unwrap();
+        assert_eq!(sort_node.node_tag(), NodeTag::T_Sort);
+        let sort = sort_node.as_sort().unwrap();
+        assert!((sort.plan.startup_cost - 300.0).abs() < 1e-9);
+        assert!((sort.plan.total_cost - 325.0).abs() < 1e-9);
+        assert_eq!(sort.plan.plan_rows, 10000.0);
+        assert_eq!(sort.numCols, 1);
+        assert_eq!(sort.sortColIdx, &[2i16]);
+        assert_eq!(sort.sortOperators, &[INT4_LT_OP]);
+        assert_eq!(sort.collations, &[0u32]);
+        assert_eq!(sort.nullsFirst, &[false]);
+
+        let scan_node = sort.plan.lefttree.unwrap();
+        assert_eq!(scan_node.node_tag(), NodeTag::T_SeqScan);
+        let scan = scan_node.as_seq_scan().unwrap();
+        assert_eq!(scan.scan.plan.startup_cost, 0.0);
+        assert!((scan.scan.plan.total_cost - 200.0).abs() < 1e-9);
+        assert_eq!(scan.scan.plan.plan_width, 8);
+
+        // The junk sort column survives every tlist; the top tlist is labeled.
+        for node in [plan, sort_node, scan_node] {
+            let tl = &node.as_plan().unwrap().targetlist;
+            assert_eq!(tl.len(), 2);
+            assert!(!tl.nth(0).as_target_entry().unwrap().resjunk);
+            let junk = tl.nth(1).as_target_entry().unwrap();
+            assert!(junk.resjunk);
+            assert_eq!(junk.ressortgroupref, 1);
+        }
+        // Sort/Limit tlists were retargeted at OUTER_VAR by setrefs.
+        let top_tle = plan.as_plan().unwrap().targetlist.nth(0).as_target_entry().unwrap();
+        assert_eq!(top_tle.expr.as_var().unwrap().varno, types_nodes::primnodes::OUTER_VAR);
+        assert_eq!(top_tle.resname, Some("pk"));
+    }
+
+    // ORDER BY covered by the already-chosen output ordering can't arise yet
+    // (no index-provided ordering); the sort is always explicit, so the
+    // pathkeys_contained_in skip is exercised by the Limit-over-Sort path
+    // keeping the Sort's pathkeys (no second Sort above the Limit input).
+    #[test]
+    fn order_by_without_limit_costs_full_sort() {
+        install_fixtures();
+        let cx = cx();
+        let mcx = cx.mcx();
+        let mut parse = order_by_limit_query(mcx);
+        parse.limitCount = None;
+        let stmt = planner(
+            mcx,
+            parse,
+            "SELECT pk FROM t ORDER BY val",
+            CURSOR_OPT_PARALLEL_OK,
+            ParamListHandle::NULL,
+        )
+        .unwrap();
+        let plan = stmt.planTree.unwrap();
+        assert_eq!(plan.node_tag(), NodeTag::T_Sort);
+        let sort = plan.as_sort().unwrap();
+        // Full quicksort: 0.005 * 10000 * log2(10000) + 200 input.
+        let expected = 0.005 * 10000.0 * (10000.0f64.ln() / 0.693147180559945) + 200.0;
+        assert!((sort.plan.startup_cost - expected).abs() < 1e-6, "{}", sort.plan.startup_cost);
+        assert!((sort.plan.total_cost - (expected + 25.0)).abs() < 1e-6);
+    }
+}
+
+// Nestloop join lane: SELECT * FROM jt1, jt2 WHERE jt1.a = jt2.a over the
+// index-less fixtures (jt1: 1 page/1 row, jt2: 1 page/2 rows).
+mod join {
+    use super::*;
+    use types_nodes::primnodes::{INNER_VAR, OUTER_VAR};
+
+    fn join_query<'mcx>(mcx: Mcx<'mcx>) -> Query<'mcx> {
+        let mk_rte = |relid: u32| {
+            let mut rte =
+                Node::build::<types_nodes::parsenodes::RangeTblEntry>(mcx).unwrap();
+            rte.rtekind = RTEKind::RTE_RELATION;
+            rte.relid = relid;
+            rte.relkind = b'r';
+            rte.rellockmode = 1;
+            rte.inh = false;
+            rte.seal()
+        };
+        let mut rtable = NodeList::make1(mcx, mk_rte(JT1)).unwrap();
+        rtable.lappend(mcx, mk_rte(JT2)).unwrap();
+
+        let qual = {
+            let l = Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap();
+            let r = Node::mk_var(mcx, 2, 1, 23, -1, 0, 0).unwrap();
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::OpExpr {
+                    opno: INT4EQ_OP,
+                    opfuncid: INT4EQ_PROC,
+                    opresulttype: 16,
+                    opretset: false,
+                    opcollid: 0,
+                    inputcollid: 0,
+                    args: NodeList::make2(mcx, l, r).unwrap(),
+                    location: -1,
+                },
+            )
+            .unwrap()
+        };
+        let rtr1 = Node::mk_range_tbl_ref(mcx, 1).unwrap();
+        let rtr2 = Node::mk_range_tbl_ref(mcx, 2).unwrap();
+        let jointree = alloc_leak_in(
+            mcx,
+            FromExpr {
+                fromlist: NodeList::make2(mcx, rtr1, rtr2).unwrap(),
+                quals: Some(qual),
+            },
+        )
+        .unwrap();
+
+        let mut target_list = NodeList::nil();
+        for (varno, attno, name) in
+            [(1, 1, "a"), (1, 2, "pad"), (2, 1, "a"), (2, 2, "pad")]
+        {
+            let v = Node::mk_var(mcx, varno, attno, 23, -1, 0, 0).unwrap();
+            let tle = Node::mk_target_entry(
+                mcx,
+                v,
+                target_list.len() as i16 + 1,
+                Some(name),
+                false,
+            )
+            .unwrap();
+            target_list.lappend(mcx, tle).unwrap();
+        }
+        Query {
+            commandType: CmdType::CMD_SELECT,
+            canSetTag: true,
+            jointree: Some(jointree),
+            rtable,
+            targetList: target_list,
+            stmt_location: 0,
+            stmt_len: 42,
+            ..Query::default()
+        }
+    }
+
+    fn assert_outer_inner_var(node: Node<'_>, varno: i32, attno: i16) {
+        let v = node.as_var().expect("Var");
+        assert_eq!((v.varno, v.varattno), (varno, attno));
+    }
+
+    #[test]
+    fn comma_join_plans_to_inner_nestloop_with_join_filter() {
+        let cx = cx();
+        let mcx = cx.mcx();
+        let stmt = planner(
+            mcx,
+            join_query(mcx),
+            "SELECT * FROM jt1, jt2 WHERE jt1.a = jt2.a",
+            CURSOR_OPT_PARALLEL_OK,
+            ParamListHandle::NULL,
+        )
+        .unwrap();
+
+        assert_eq!(stmt.rtable.len(), 2);
+        assert_eq!(stmt.relationOids.len(), 2);
+        let nl = stmt.planTree.unwrap().as_nest_loop().expect("NestLoop root");
+
+        // Live PG 18.3, same stats (1-page tables, reltuples 1 and 2, no
+        // pg_statistic rows):
+        //   Nested Loop  (cost=0.00..2.06 rows=1 width=16)
+        //     Join Filter: (jt1.a = jt2.a)
+        //     ->  Seq Scan on jt1  (cost=0.00..1.01 rows=1 width=8)
+        //     ->  Seq Scan on jt2  (cost=0.00..1.02 rows=2 width=8)
+        assert_eq!(nl.join.plan.startup_cost, 0.0);
+        assert!((nl.join.plan.total_cost - 2.055).abs() < 1e-9, "{}", nl.join.plan.total_cost);
+        assert_eq!(nl.join.plan.plan_rows, 1.0);
+        assert_eq!(nl.join.plan.plan_width, 16);
+        assert_eq!(nl.join.jointype, types_nodes::JoinType::JOIN_INNER);
+        assert!(!nl.join.inner_unique);
+        assert!(nl.nestParams.is_nil());
+
+        let outer = nl.join.plan.lefttree.unwrap().as_seq_scan().expect("outer SeqScan");
+        assert_eq!(outer.scan.scanrelid, 1);
+        assert!((outer.scan.plan.total_cost - 1.01).abs() < 1e-9);
+        assert_eq!(outer.scan.plan.plan_rows, 1.0);
+        assert_eq!(outer.scan.plan.plan_width, 8);
+        let inner = nl.join.plan.righttree.unwrap().as_seq_scan().expect("inner SeqScan");
+        assert_eq!(inner.scan.scanrelid, 2);
+        assert!((inner.scan.plan.total_cost - 1.02).abs() < 1e-9);
+        assert_eq!(inner.scan.plan.plan_rows, 2.0);
+
+        // Join filter fixed up to OUTER_VAR/INNER_VAR over the child tlists.
+        assert_eq!(nl.join.joinqual.len(), 1);
+        let op = nl.join.joinqual.nth(0).as_op_expr().expect("join filter OpExpr");
+        assert_eq!(op.opno, INT4EQ_OP);
+        assert_outer_inner_var(op.args.nth(0), OUTER_VAR, 1);
+        assert_outer_inner_var(op.args.nth(1), INNER_VAR, 1);
+        assert!(nl.join.plan.qual.is_nil());
+
+        // Join tlist: outer cols then inner cols, all retargeted.
+        let tles: Vec<_> = nl.join.plan.targetlist.iter().collect();
+        assert_eq!(tles.len(), 4);
+        for (tle, (varno, attno)) in tles
+            .iter()
+            .zip([(OUTER_VAR, 1i16), (OUTER_VAR, 2), (INNER_VAR, 1), (INNER_VAR, 2)])
+        {
+            assert_outer_inner_var(tle.as_target_entry().unwrap().expr, varno, attno);
+        }
+
+        // Children carry physical tlists (NestLoop projects).
+        assert_eq!(outer.scan.plan.targetlist.len(), 2);
+        assert_eq!(inner.scan.plan.targetlist.len(), 2);
     }
 }

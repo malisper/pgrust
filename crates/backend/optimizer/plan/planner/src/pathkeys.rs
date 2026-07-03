@@ -1,7 +1,6 @@
-//! pathkeys.c + the get_eclass_for_sort_expr slice of equivclass.c (the full
-//! EC merging machinery is the M2 join lane; equivclass' CATALOG row stays
-//! todo and points here). Canonical PathKeys are values here: canonicalization
-//! makes value equality C's pointer equality.
+//! pathkeys.c + equivclass.c's get_eclass_for_sort_expr slice (EC merging is
+//! the M2 join lane). Canonicalization makes PathKey value equality C's
+//! pointer equality.
 
 use mcx::PgVec;
 use types_error::PgResult;
@@ -35,7 +34,7 @@ pub fn compare_pathkeys(keys1: &[PathKey], keys2: &[PathKey]) -> PathKeysCompari
     }
 }
 
-// pathkeys_count_contained_in (pathkeys.c): (contained, n leading matches).
+// Returns (contained, n leading matches).
 pub fn pathkeys_count_contained_in(keys1: &[PathKey], keys2: &[PathKey]) -> (bool, usize) {
     let mut n = 0;
     for (k1, k2) in keys1.iter().zip(keys2.iter()) {
@@ -54,7 +53,6 @@ pub fn pathkeys_contained_in(keys1: &[PathKey], keys2: &[PathKey]) -> bool {
     )
 }
 
-// get_sortgroupclause_expr via get_sortgroupref_tle (tlist.c).
 pub fn get_sortgroupclause_expr<'mcx>(
     sortcl: &SortGroupClause,
     tlist: &NodeList<'mcx>,
@@ -68,9 +66,8 @@ pub fn get_sortgroupclause_expr<'mcx>(
     panic!("ORDER/GROUP BY expression not found in targetlist");
 }
 
-// make_pathkeys_for_sortclauses (pathkeys.c): the _extended form with
-// remove_redundant/remove_group_rtindex/set_ec_sortref all false; unsortable
-// clauses can't reach here (parse_clause resolved a real sortop).
+// The _extended form with remove_redundant/remove_group_rtindex/
+// set_ec_sortref all false.
 pub fn make_pathkeys_for_sortclauses<'mcx>(
     run: &mut PlannerRun<'mcx>,
     sortclauses: &NodeList<'mcx>,
@@ -112,7 +109,6 @@ fn make_pathkey_from_sortop<'mcx>(
     )
 }
 
-// make_pathkey_from_sortinfo (pathkeys.c); rel=NULL, create_it=true.
 #[allow(clippy::too_many_arguments)]
 fn make_pathkey_from_sortinfo<'mcx>(
     run: &mut PlannerRun<'mcx>,
@@ -172,8 +168,7 @@ fn pathkey_is_redundant(run: &PlannerRun<'_>, new_pathkey: PathKey, pathkeys: &[
     pathkeys.iter().any(|old| old.pk_eclass == new_pathkey.pk_eclass)
 }
 
-// get_eclass_for_sort_expr (equivclass.c), create_it=true, rel=NULL. The
-// jdomain const matching leg is vacuous: no EC member here is a const.
+// create_it=true, rel=NULL; the jdomain const leg is vacuous (no const EMs).
 fn get_eclass_for_sort_expr<'mcx>(
     run: &mut PlannerRun<'mcx>,
     expr: Node<'mcx>,

@@ -455,9 +455,8 @@ fn btcostestimate(
     })
 }
 
-// estimate_num_groups (selfuncs.c), no-stats Var-only leg: pull_var_clause is
-// the caller's job (exprs must be plain level-0 Vars); Consts skipped, other
-// families and multivariate/extended stats are M3 lanes.
+// estimate_num_groups (selfuncs.c), no-stats Var-only leg; other families
+// and multivariate/extended stats are M3 lanes.
 pub fn estimate_num_groups<'mcx>(
     run: &mut PlannerRun<'mcx>,
     group_exprs: &[(NodeId, Node<'mcx>)],
@@ -483,7 +482,6 @@ pub fn estimate_num_groups<'mcx>(
                 "estimate_num_groups (selfuncs.c): grouping expr {other:?}; M3 expression lane"
             ),
         }
-        // add_unique_group_var: dedupe on the underlying (varno, varattno).
         let v = node.as_var().unwrap();
         let dup = varinfos.iter().any(|vi| {
             let u = run.root.expr_node(vi.var).as_var().unwrap();
@@ -550,4 +548,31 @@ pub fn estimate_num_groups<'mcx>(
 
     let numdistinct = numdistinct.ceil();
     Ok(numdistinct.clamp(1.0, input_rows))
+}
+
+// eqjoinsel (selfuncs.c), no-pg_statistic arms (a live stats tuple panics in
+// examine_simple_variable): nullfracs are 0 and no MCV lists exist, so
+// eqjoinsel_inner reduces to 1/max(nd1, nd2).
+pub fn eqjoinsel<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    _operator: u32,
+    args: &[NodeId],
+    jointype: types_pathnodes::JoinType,
+    sjinfo: Option<&types_pathnodes::SpecialJoinInfo<'mcx>>,
+) -> PgResult<f64> {
+    assert!(args.len() == 2, "eqjoinsel (selfuncs.c): non-binary clause");
+    let sj_jointype = sjinfo.map_or(jointype, |sj| sj.jointype);
+    let left = *run.root.expr_node(args[0]);
+    let right = *run.root.expr_node(args[1]);
+    let vardata1 = examine_variable(run, args[0], left, 0)?;
+    let vardata2 = examine_variable(run, args[1], right, 0)?;
+    let (nd1, _isdefault1) = get_variable_numdistinct(run, &vardata1);
+    let (nd2, _isdefault2) = get_variable_numdistinct(run, &vardata2);
+
+    let selec_inner = 1.0 / nd1.max(nd2);
+    let selec = match sj_jointype {
+        JOIN_INNER | types_pathnodes::JOIN_LEFT | types_pathnodes::JOIN_FULL => selec_inner,
+        other => panic!("eqjoinsel (selfuncs.c): jointype {other} (eqjoinsel_semi); M2 semi-join lane"),
+    };
+    Ok(clamp_probability(selec))
 }

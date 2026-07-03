@@ -7,8 +7,8 @@ use types_nodes::{Node, NodeTag};
 use types_pathnodes::{JoinlistNode, QualCost, RestrictInfo, RinfoId, VOLATILITY_UNKNOWN};
 
 use crate::relnode::{
-    find_base_rel, relids_copy, relids_is_empty, relids_num_members, relids_singleton,
-    relids_singleton_member, relids_union,
+    find_base_rel, relids_copy, relids_is_empty, relids_num_members, relids_overlap,
+    relids_singleton, relids_singleton_member, relids_union,
 };
 use crate::run::PlannerRun;
 pub fn build_base_rel_tlists<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResult<()> {
@@ -86,17 +86,27 @@ pub fn add_vars_to_targetlist<'mcx>(
     Ok(())
 }
 
-// deconstruct_jointree (initsplan.c), single-RangeTblRef FromExpr arm.
+// deconstruct_jointree (initsplan.c): FromExpr over plain RangeTblRefs
+// (explicit JOIN syntax is loud at parse time). Vars: qualscope = the union of
+// member relids; a multi-item FROM is an inner join subsuming all below it.
 pub fn deconstruct_jointree<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResult<PgVec<'mcx, JoinlistNode<'mcx>>> {
     let mcx = run.mcx;
     debug_assert!(!run.root.join_domains.is_empty());
+    run.root.placeholdersFrozen = true;
     let f = run.parse().jointree.expect("jointree is a FromExpr");
-    assert!(
-        f.fromlist.len() == 1 && f.fromlist.nth(0).node_tag() == NodeTag::T_RangeTblRef,
-        "deconstruct_recurse (initsplan.c): non-trivial jointree; M2 join lane"
-    );
-    let varno = f.fromlist.nth(0).as_range_tbl_ref().unwrap().rtindex;
-    let qualscope = relids_singleton(mcx, varno as u32);
+    let mut qualscope: types_pathnodes::Relids<'mcx> = None;
+    let mut joinlist = PgVec::new_in(mcx);
+    for item in &f.fromlist {
+        assert!(
+            item.node_tag() == NodeTag::T_RangeTblRef,
+            "deconstruct_recurse (initsplan.c): {:?} jointree item; M2 join lane",
+            item.node_tag()
+        );
+        let varno = item.as_range_tbl_ref().unwrap().rtindex;
+        qualscope = relids_union(mcx, &qualscope, &relids_singleton(mcx, varno as u32));
+        joinlist.push(JoinlistNode::Rel(varno));
+    }
+    debug_assert!(!joinlist.is_empty());
 
     run.root.all_baserels = relids_copy(mcx, &qualscope);
     run.root.all_query_rels = relids_copy(mcx, &qualscope);
@@ -106,8 +116,6 @@ pub fn deconstruct_jointree<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResult<PgVec<
         distribute_qual_to_rels(run, quals, &qualscope)?;
     }
 
-    let mut joinlist = PgVec::new_in(mcx);
-    joinlist.push(JoinlistNode::Rel(varno));
     Ok(joinlist)
 }
 
@@ -132,18 +140,23 @@ fn distribute_qual_to_rels<'mcx>(
     let is_pushed_down = true;
     let rinfo = make_restrictinfo(run, clause, is_pushed_down, false, false, false, 0, relids, None, None)?;
 
-    check_mergejoinable(run, rinfo)?;
-    // C divergence: C routes a mergejoinable qual through the EC machinery
-    // (process_equivalence -> generate_base_implied_equalities_const), which
-    // rebuilds this identical clause and distributes it; the detour is an
-    // identity transform here. The equivclass unit owns the real path; every
-    // consumer of EC state (pathkeys, joins) is a loud arm.
-    if !run.root.rinfo(rinfo).mergeopfamilies.is_empty()
-        && relids_num_members(&run.root.rinfo(rinfo).clause_relids) > 1
-    {
-        panic!("process_equivalence (equivclass.c): join equivalence; M2 join lane");
+    // Join clauses: mark their Vars needed at the join level so the scans
+    // below emit them.
+    if relids_num_members(&run.root.rinfo(rinfo).required_relids) > 1 {
+        let mut vars: PgVec<'mcx, Node<'mcx>> = PgVec::new_in(run.mcx);
+        pull_var_nodes(clause, &mut vars);
+        let where_needed = relids_copy(run.mcx, &run.root.rinfo(rinfo).required_relids);
+        add_vars_to_targetlist(run, &vars, &where_needed)?;
     }
 
+    check_mergejoinable(run, rinfo)?;
+    // C divergence: C routes a mergejoinable qual through the EC machinery
+    // (process_equivalence); for a single-rel qual the detour rebuilds this
+    // identical clause, and for a join qual the EC would regenerate the same
+    // RestrictInfo at the join via generate_join_implied_equalities. Both
+    // collapse to distributing the clause directly. The equivclass unit owns
+    // the real path; every consumer of EC state (pathkeys, mergejoin,
+    // EC-derived clauses at higher join levels) is a loud arm.
     distribute_restrictinfo_to_rels(run, rinfo)
 }
 
@@ -258,11 +271,6 @@ pub fn make_restrictinfo<'mcx>(
     Ok(run.root.alloc_rinfo(ri))
 }
 
-fn relids_overlap(a: &types_pathnodes::Relids<'_>, b: &types_pathnodes::Relids<'_>) -> bool {
-    let (Some(a), Some(b)) = (a, b) else { return false };
-    a.words.iter().zip(b.words.iter()).any(|(x, y)| x & y != 0)
-}
-
 // check_mergejoinable (initsplan.c).
 fn check_mergejoinable(run: &mut PlannerRun<'_>, rinfo: RinfoId) -> PgResult<()> {
     let clause = *run.root.expr_node(run.root.rinfo(rinfo).clause);
@@ -278,13 +286,27 @@ fn check_mergejoinable(run: &mut PlannerRun<'_>, rinfo: RinfoId) -> PgResult<()>
     Ok(())
 }
 
-// distribute_restrictinfo_to_rels (initsplan.c), singleton arm.
+// distribute_restrictinfo_to_rels (initsplan.c).
 pub fn distribute_restrictinfo_to_rels(run: &mut PlannerRun<'_>, rinfo: RinfoId) -> PgResult<()> {
     let relids = relids_copy(run.mcx, &run.root.rinfo(rinfo).required_relids);
-    let Some(relid) = relids_singleton_member(&relids) else {
-        panic!("add_join_clause_to_rels (joininfo.c): M2 join lane");
-    };
-    add_base_clause_to_rel(run, relid, rinfo)
+    if let Some(relid) = relids_singleton_member(&relids) {
+        return add_base_clause_to_rel(run, relid, rinfo);
+    }
+    // add_join_clause_to_rels (joininfo.c): one shared RestrictInfo handle
+    // linked into every participating rel's joininfo list.
+    debug_assert!(relids_num_members(&relids) > 1);
+    let members = relids.as_ref().expect("multi-member relids");
+    for (i, w) in members.words.iter().enumerate() {
+        let mut w = *w;
+        while w != 0 {
+            let relid = (i * 64) as i32 + w.trailing_zeros() as i32;
+            w &= w - 1;
+            debug_assert!(crate::relnode::relids_is_member(relid, &run.root.all_baserels));
+            let rel = find_base_rel(&run.root, relid);
+            run.root.rel_mut(rel).joininfo.push(rinfo);
+        }
+    }
+    Ok(())
 }
 
 // add_base_clause_to_rel (initsplan.c), non-inherited arm; the constant-

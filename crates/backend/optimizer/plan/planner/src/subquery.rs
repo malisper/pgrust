@@ -43,6 +43,13 @@ pub fn subquery_planner<'mcx>(
     if parse.hasSubLinks {
         panic!("pull_up_sublinks (prepjointree.c): M2 sublink lane");
     }
+    if parse
+        .rtable
+        .iter()
+        .any(|n| n.as_range_tbl_entry().expect("rtable cell").rtekind == RTEKind::RTE_SUBQUERY)
+    {
+        crate::prepjointree::pull_up_subqueries(mcx, &mut parse)?;
+    }
 
     let mut has_outer_joins = false;
     let mut has_result_rtes = false;
@@ -79,7 +86,9 @@ pub fn subquery_planner<'mcx>(
                 }
             }
             RTEKind::RTE_SUBQUERY => {
-                panic!("pull_up_subqueries (prepjointree.c): M2 subquery lane")
+                // Simple subqueries were pulled up above (non-pullable ones
+                // panicked there); only the dangling flattened RTE remains.
+                debug_assert!(rte.subquery.is_none());
             }
             RTEKind::RTE_FUNCTION | RTEKind::RTE_TABLEFUNC | RTEKind::RTE_VALUES => {
                 panic!("preprocess_function_rtes (prepjointree.c): {:?}; M2 lane", rte.rtekind)
@@ -97,10 +106,8 @@ pub fn subquery_planner<'mcx>(
         if !rte.securityQuals.is_nil() {
             panic!("subquery_planner (planner.c): securityQuals; M2 RLS lane");
         }
-        // View-RTE ExecCheckOneRelPerms guard: needs relkind, executor lane.
-        if rte.perminfoindex != 0 && rte.relkind == b'v' {
-            panic!("ExecCheckOneRelPerms (execMain.c): view perms; M2 lane");
-        }
+        // View perminfos flow through unchanged: ExecCheckOneRelPerms'
+        // relation-level object_aclcheck arm covers relkind 'v'.
     }
 
     preprocess_rowmarks(&parse);
@@ -178,7 +185,11 @@ pub fn preprocess_expression<'mcx>(
         panic!("flatten_join_alias_vars (var.c): M2 join lane");
     }
     if kind != EXPRKIND_RTFUNC {
-        expr = clauses::eval_const_expressions(run.mcx, expr)?;
+        expr = clauses::eval_const_expressions_with_params(
+            run.mcx,
+            expr,
+            run.glob.bound_params,
+        )?;
     }
     if kind == EXPRKIND_QUAL {
         expr = canonicalize_qual(expr);

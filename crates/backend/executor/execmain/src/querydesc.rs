@@ -210,3 +210,21 @@ pub(crate) fn query_desc_result_tupdesc_seam(
 pub(crate) fn query_desc_operation_seam(h: QueryDescHandle) -> CmdType {
     with_qd(h, |qd| qd.operation)
 }
+
+pub(crate) fn query_desc_instrument_seam(
+    h: QueryDescHandle,
+    plan_node_id: i32,
+) -> Option<types_core::instrument::Instrumentation> {
+    with_qd(h, |qd| {
+        let exec = qd.exec.as_mut()?;
+        exec.with_mut(|d| {
+            let i = d
+                .estate
+                .es_instrumentation
+                .get_mut(usize::try_from(plan_node_id).ok()?)?;
+            // C's ExplainNode forcibly InstrEndLoops before reading.
+            ::instrument::instr_end_loop(i);
+            Some(*i)
+        })
+    })
+}

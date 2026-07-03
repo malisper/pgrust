@@ -270,3 +270,100 @@ fn select_options_errors() {
     let e = parse_err("SELECT a FROM t FETCH FIRST 2 ROWS WITH TIES;");
     assert_eq!(e.message(), "WITH TIES cannot be specified without ORDER BY clause");
 }
+
+#[test]
+fn insert_values_shapes() {
+    let list = parse("INSERT INTO t VALUES (1, 2);");
+    let ins = only_stmt(&list).stmt.unwrap().as_insert_stmt().expect("InsertStmt");
+    let rv = ins.relation.unwrap().as_range_var().expect("RangeVar");
+    assert_eq!(rv.relname, Some("t"));
+    assert!(rv.alias.is_none() && ins.cols.is_nil());
+    assert!(ins.onConflictClause.is_none() && ins.returningClause.is_none());
+    assert!(ins.withClause.is_none());
+    let sel = ins.selectStmt.unwrap().as_select_stmt().expect("SelectStmt");
+    assert_eq!(sel.valuesLists.len(), 1);
+    assert_eq!(sel.valuesLists.nth(0).as_list().unwrap().len(), 2);
+
+    let list = parse("INSERT INTO t AS x (a, b) VALUES (1, 2), (3, 4);");
+    let ins = only_stmt(&list).stmt.unwrap().as_insert_stmt().unwrap();
+    let rv = ins.relation.unwrap().as_range_var().unwrap();
+    assert_eq!(rv.alias.unwrap().aliasname, Some("x"));
+    assert_eq!(ins.cols.len(), 2);
+    let col = ins.cols.nth(1).as_res_target().unwrap();
+    assert_eq!(col.name, Some("b"));
+    assert!(col.indirection.is_nil() && col.val.is_none());
+    let sel = ins.selectStmt.unwrap().as_select_stmt().unwrap();
+    assert_eq!(sel.valuesLists.len(), 2);
+
+    let list = parse("INSERT INTO t DEFAULT VALUES;");
+    let ins = only_stmt(&list).stmt.unwrap().as_insert_stmt().unwrap();
+    assert!(ins.selectStmt.is_none() && ins.cols.is_nil());
+
+    let list = parse("INSERT INTO t SELECT a FROM s;");
+    let ins = only_stmt(&list).stmt.unwrap().as_insert_stmt().unwrap();
+    assert!(ins.selectStmt.unwrap().as_select_stmt().unwrap().valuesLists.is_nil());
+}
+
+#[test]
+fn copy_stmt_to_file() {
+    let list = parse("COPY foo TO '/tmp/x.dat'");
+    let cs = only_stmt(&list).stmt.unwrap().as_copy_stmt().expect("CopyStmt");
+    let rv = cs.relation.expect("relation").as_range_var().expect("RangeVar");
+    assert_eq!(rv.relname, Some("foo"));
+    assert!(!cs.is_from && !cs.is_program);
+    assert_eq!(cs.filename, Some("/tmp/x.dat"));
+    assert!(cs.attlist.is_nil() && cs.options.is_nil() && cs.whereClause.is_none());
+    assert!(cs.query.is_none());
+}
+
+#[test]
+fn copy_stmt_from_with_options() {
+    let list = parse(
+        "COPY s.foo (a, b) FROM '/tmp/x.dat' WITH (FORMAT text, DELIMITER '|', NULL 'NIL')",
+    );
+    let cs = only_stmt(&list).stmt.unwrap().as_copy_stmt().expect("CopyStmt");
+    let rv = cs.relation.unwrap().as_range_var().unwrap();
+    assert_eq!((rv.schemaname, rv.relname), (Some("s"), Some("foo")));
+    assert!(cs.is_from);
+    assert_eq!(cs.attlist.len(), 2);
+    assert_eq!(cs.attlist.nth(0).as_string().unwrap().sval, "a");
+    assert_eq!(cs.options.len(), 3);
+    let d0 = cs.options.nth(0).as_def_elem().unwrap();
+    assert_eq!(d0.defname, Some("format"));
+    assert_eq!(d0.arg.unwrap().as_string().unwrap().sval, "text");
+    let d1 = cs.options.nth(1).as_def_elem().unwrap();
+    assert_eq!(d1.defname, Some("delimiter"));
+    assert_eq!(d1.arg.unwrap().as_string().unwrap().sval, "|");
+    let d2 = cs.options.nth(2).as_def_elem().unwrap();
+    assert_eq!(d2.defname, Some("null"));
+    assert_eq!(d2.arg.unwrap().as_string().unwrap().sval, "NIL");
+}
+
+#[test]
+fn copy_stmt_legacy_options_and_stdin() {
+    let list = parse("COPY foo FROM stdin DELIMITER '|' NULL ''");
+    let cs = only_stmt(&list).stmt.unwrap().as_copy_stmt().expect("CopyStmt");
+    assert!(cs.is_from && cs.filename.is_none());
+    assert_eq!(cs.options.len(), 2);
+    assert_eq!(cs.options.nth(0).as_def_elem().unwrap().defname, Some("delimiter"));
+    assert_eq!(cs.options.nth(1).as_def_elem().unwrap().defname, Some("null"));
+
+    let list = parse("COPY binary foo TO '/tmp/x'");
+    let cs = only_stmt(&list).stmt.unwrap().as_copy_stmt().expect("CopyStmt");
+    let d = cs.options.nth(0).as_def_elem().unwrap();
+    assert_eq!(d.defname, Some("format"));
+    assert_eq!(d.arg.unwrap().as_string().unwrap().sval, "binary");
+}
+
+#[test]
+fn copy_stmt_query_form_and_errors() {
+    let list = parse("COPY (SELECT 1) TO '/tmp/x'");
+    let cs = only_stmt(&list).stmt.unwrap().as_copy_stmt().expect("CopyStmt");
+    assert!(cs.relation.is_none());
+    assert!(cs.query.unwrap().as_select_stmt().is_some());
+
+    let e = parse_err("COPY foo TO PROGRAM STDOUT");
+    assert!(format!("{e:?}").contains("STDIN/STDOUT not allowed with PROGRAM"), "{e:?}");
+    let e = parse_err("COPY foo TO '/tmp/x' WHERE a > 1");
+    assert!(format!("{e:?}").contains("WHERE clause not allowed with COPY TO"), "{e:?}");
+}

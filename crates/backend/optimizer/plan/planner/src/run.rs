@@ -8,8 +8,9 @@ use types_pathnodes::{
 
 // PlannerGlobal, types_nodes-payload form. C shares one glob by pointer across
 // an invocation's sub-Query levels; PlannerRun is that invocation, so
-// root.glob stays None. boundParams unthreaded (fold.rs top note).
+// root.glob stays None.
 pub struct Glob<'mcx> {
+    pub bound_params: types_portal::ParamListHandle,
     pub parallel_mode_ok: bool,
     pub parallel_mode_needed: bool,
     pub max_parallel_hazard: i8,
@@ -36,6 +37,7 @@ pub struct Glob<'mcx> {
 impl Glob<'_> {
     pub fn new() -> Self {
         Glob {
+            bound_params: types_portal::ParamListHandle::NULL,
             parallel_mode_ok: false,
             parallel_mode_needed: false,
             max_parallel_hazard: 0,

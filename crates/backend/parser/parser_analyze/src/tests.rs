@@ -692,6 +692,52 @@ mod from_where {
         parse_analyze_fixedparams(mcx, raw, sql, &[], Default::default())
     }
 
+    // SQL-text GROUP BY through gram + analyze: the flat groupClause carries
+    // int4's default grouping operators and the tlist entry its sortgroupref.
+    #[test]
+    fn select_group_by_end_to_end() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let q = analyze_sql(mcx, "SELECT x, count(*) FROM t GROUP BY x").unwrap();
+
+        assert!(q.hasAggs);
+        assert!(q.groupingSets.is_nil());
+        assert!(!q.hasGroupRTE, "RTE_GROUP substitution is a recorded divergence");
+        assert_eq!(q.groupClause.len(), 1);
+        let gc = q.groupClause.nth(0).as_sort_group_clause().unwrap();
+        let t0 = q.targetList.nth(0).as_target_entry().unwrap();
+        assert_eq!(t0.resname, Some("x"));
+        assert_eq!(gc.tleSortGroupRef, t0.ressortgroupref);
+        assert!(t0.ressortgroupref > 0);
+        // int4: = 96, < 97, hashable.
+        assert_eq!((gc.eqop, gc.sortop, gc.hashable), (96, 97, true));
+        assert!(!gc.reverse_sort && !gc.nulls_first);
+        let t1 = q.targetList.nth(1).as_target_entry().unwrap();
+        assert_eq!(t1.expr.as_aggref().unwrap().aggfnoid, 2803);
+    }
+
+    #[test]
+    fn select_ungrouped_column_via_sql_is_42803() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let err = analyze_sql(mcx, "SELECT x, y, count(*) FROM t GROUP BY x")
+            .map(|_| ())
+            .unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_GROUPING_ERROR);
+        assert!(
+            err.message().contains(
+                "column \"t.y\" must appear in the GROUP BY clause or be used in an \
+                 aggregate function"
+            ),
+            "{}",
+            err.message()
+        );
+    }
+
     // Query shape asserted against C 18.3: field-by-field vs the Query that
     // `SELECT x FROM t WHERE x > 5` produces for t(x int4, y text).
     #[test]
@@ -883,6 +929,103 @@ mod from_where {
         let err =
             analyze_sql(mcx, "INSERT INTO t (x) VALUES (1), (2, 3)").map(|_| ()).unwrap_err();
         assert_eq!(err.message, "VALUES lists must all be the same length");
+    }
+
+    #[test]
+    fn update_set_where_end_to_end() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let q = analyze_sql(mcx, "UPDATE t SET y = 'bar' WHERE x > 1").unwrap();
+        assert_eq!(q.commandType, CmdType::CMD_UPDATE);
+        assert_eq!(q.resultRelation, 1);
+        assert_eq!(q.rtable.len(), 1);
+        let rte = q.rtable.nth(0).as_range_tbl_entry().unwrap();
+        assert_eq!(rte.relid, T_OID);
+        assert_eq!(rte.rellockmode, types_rel::RowExclusiveLock);
+        assert!(!rte.inFromCl);
+        // alsoSource: the target rel is scanned, so it sits in the jointree.
+        let jt = q.jointree.unwrap();
+        assert_eq!(jt.fromlist.len(), 1);
+        assert_eq!(jt.fromlist.nth(0).as_range_tbl_ref().unwrap().rtindex, 1);
+        assert!(jt.quals.is_some());
+
+        // SET resnos are target attribute numbers, not tlist positions.
+        assert_eq!(q.targetList.len(), 1);
+        let te = q.targetList.nth(0).as_target_entry().unwrap();
+        assert_eq!((te.resno, te.resname, te.resjunk), (2, Some("y"), false));
+        assert_eq!(parse_expr::expr_type(te.expr), TEXTOID);
+
+        let perminfo = q.rteperminfos.nth(0).as_rte_permission_info().unwrap();
+        assert_eq!(perminfo.requiredPerms, types_nodes::parsenodes::ACL_UPDATE | ACL_SELECT);
+        assert!(perminfo.updatedCols.is_member(2 - FirstLowInvalidHeapAttributeNumber));
+        assert!(!perminfo.updatedCols.is_member(1 - FirstLowInvalidHeapAttributeNumber));
+    }
+
+    #[test]
+    fn update_set_can_reference_target_columns() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let q = analyze_sql(mcx, "UPDATE t SET x = x + 1").unwrap();
+        let te = q.targetList.nth(0).as_target_entry().unwrap();
+        assert_eq!((te.resno, te.resname), (1, Some("x")));
+        let op = te.expr.as_op_expr().unwrap();
+        let var = op.args.nth(0).as_var().unwrap();
+        assert_eq!((var.varno, var.varattno, var.vartype), (1, 1, INT4OID));
+    }
+
+    #[test]
+    fn update_undefined_set_column_is_42703() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let err = analyze_sql(mcx, "UPDATE t SET nope = 1").map(|_| ()).unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_UNDEFINED_COLUMN);
+        assert_eq!(err.message, "column \"nope\" of relation \"t\" does not exist");
+    }
+
+    #[test]
+    fn delete_where_end_to_end() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let q = analyze_sql(mcx, "DELETE FROM t WHERE x > 2").unwrap();
+        assert_eq!(q.commandType, CmdType::CMD_DELETE);
+        assert_eq!(q.resultRelation, 1);
+        assert!(q.targetList.is_nil());
+        let jt = q.jointree.unwrap();
+        assert_eq!(jt.fromlist.len(), 1);
+        assert!(jt.quals.is_some());
+        let perminfo = q.rteperminfos.nth(0).as_rte_permission_info().unwrap();
+        assert_eq!(perminfo.requiredPerms, types_nodes::parsenodes::ACL_DELETE | ACL_SELECT);
+    }
+
+    #[test]
+    fn delete_without_where_has_no_qual() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let q = analyze_sql(mcx, "DELETE FROM t").unwrap();
+        assert_eq!(q.commandType, CmdType::CMD_DELETE);
+        assert!(q.jointree.unwrap().quals.is_none());
+    }
+
+    #[test]
+    fn update_with_alias_scopes_target() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let q = analyze_sql(mcx, "UPDATE t AS c SET x = c.x + 1 WHERE c.x > 5").unwrap();
+        assert_eq!(q.commandType, CmdType::CMD_UPDATE);
+        let rte = q.rtable.nth(0).as_range_tbl_entry().unwrap();
+        assert_eq!(rte.eref.unwrap().aliasname, Some("c"));
     }
 
     #[test]
