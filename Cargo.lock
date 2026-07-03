@@ -3001,6 +3001,7 @@ dependencies = [
  "printtup",
  "procarray",
  "relation_seams",
+ "relcache_seams",
  "resowner_seams",
  "rewrite_handler",
  "rewrite_handler_seams",

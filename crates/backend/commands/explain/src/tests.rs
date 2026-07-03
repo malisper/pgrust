@@ -140,6 +140,7 @@ fn install_fixtures() {
         elog::init_seams();
         backend_status_seams::pgstat_report_plan_id::set(|_, _| {});
         backend_status_seams::pgstat_report_query_id::set(|_, _| {});
+        relcache_seams::relation_get_stat_ext_list::set(|mcx, _relid| Ok(mcx::PgVec::new_in(mcx)));
         resowner_seams::current_resource_owner::set(|| types_resowner::ResourceOwner::NULL);
         resowner_seams::set_current_resource_owner::set(|_| {});
         resowner_seams::top_transaction_resource_owner::set(|| types_resowner::ResourceOwner::NULL);
