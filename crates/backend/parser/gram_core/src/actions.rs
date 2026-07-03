@@ -33,7 +33,8 @@ use types_nodes::rawnodes::{
     FKCONSTR_ACTION_SETDEFAULT, FKCONSTR_ACTION_SETNULL, FKCONSTR_MATCH_FULL,
     FKCONSTR_MATCH_SIMPLE,
     PartitionBoundSpec, PartitionElem, PartitionSpec, PartitionStrategy,
-    RangeSubselect, TableLikeClause, ViewCheckOption, ViewStmt, WindowDef, CREATE_TABLE_LIKE_ALL,
+    RangeSubselect, RefreshMatViewStmt, TableLikeClause, ViewCheckOption, ViewStmt, WindowDef,
+    CREATE_TABLE_LIKE_ALL,
     CREATE_TABLE_LIKE_COMMENTS, CREATE_TABLE_LIKE_COMPRESSION, CREATE_TABLE_LIKE_CONSTRAINTS,
     CREATE_TABLE_LIKE_DEFAULTS, CREATE_TABLE_LIKE_GENERATED, CREATE_TABLE_LIKE_IDENTITY,
     CREATE_TABLE_LIKE_INDEXES, CREATE_TABLE_LIKE_STATISTICS, CREATE_TABLE_LIKE_STORAGE,
@@ -484,6 +485,55 @@ impl<'mcx> Parser<'mcx> {
                 n.objtype = ObjectType::OBJECT_TABLE;
                 n.is_select_into = false;
                 n.if_not_exists = ine;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // CreateMatViewStmt (626 | IF_P NOT EXISTS 627)
+            626 | 627 => {
+                let ine = rule == 627;
+                let (t, q, w) = if ine { (8, 10, 11) } else { (5, 7, 8) };
+                let persistence = view.v(2).ival() as u8;
+                let into_node = view.v(t).node().expect("create_mv_target");
+                let with_data = view.v(w).boolean();
+                // SAFETY: tree is parser-owned; no derived refs live.
+                unsafe {
+                    let rel = into_node
+                        .with_mut::<IntoClause, _>(|ic| {
+                            ic.skipData = !with_data;
+                            ic.rel
+                        })
+                        .expect("create_mv_target is IntoClause")
+                        .expect("IntoClause.rel");
+                    rel.with_mut::<RangeVar, _>(|r| r.relpersistence = persistence)
+                        .expect("IntoClause.rel is RangeVar");
+                }
+                let mut n = Node::build::<CreateTableAsStmt>(mcx)?;
+                n.query = view.v(q).node();
+                n.into = Some(into_node);
+                n.objtype = ObjectType::OBJECT_MATVIEW;
+                n.is_select_into = false;
+                n.if_not_exists = ine;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // create_mv_target
+            628 => {
+                let mut n = Node::build::<IntoClause>(mcx)?;
+                n.rel = view.v(1).node();
+                n.colNames = view.v(2).list();
+                n.accessMethod = opt_str(view.v(3));
+                n.options = view.v(4).list();
+                n.onCommit = on_commit_action(0);
+                n.tableSpaceName = opt_str(view.v(5));
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // OptNoLog: UNLOGGED | /*EMPTY*/
+            629 => *yyval = YYSTYPE::Ival(RELPERSISTENCE_UNLOGGED as i32),
+            630 => *yyval = YYSTYPE::Ival(RELPERSISTENCE_PERMANENT as i32),
+            // RefreshMatViewStmt
+            631 => {
+                let mut n = Node::build::<RefreshMatViewStmt>(mcx)?;
+                n.concurrent = view.v(4).boolean();
+                n.relation = view.v(5).node().expect("qualified_name").as_range_var();
+                n.skipData = !view.v(6).boolean();
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
             // create_as_target: qualified_name opt_column_list

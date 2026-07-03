@@ -198,6 +198,35 @@ fn node(out: &mut String, n: Node<'_>) {
         list_field(out, "options", &v.options);
         int_field(out, "withCheckOption", v.withCheckOption as i32);
         out.push('}');
+    } else if let Some(c) = n.as_variant::<types_nodes::rawnodes::CreateTableAsStmt>() {
+        out.push_str("{CREATETABLEASSTMT");
+        node_field(out, "query", c.query);
+        node_field(out, "into", c.into);
+        int_field(out, "objtype", c.objtype as i32);
+        bool_field(out, "is_select_into", c.is_select_into);
+        bool_field(out, "if_not_exists", c.if_not_exists);
+        out.push('}');
+    } else if let Some(ic) = n.as_variant::<types_nodes::rawnodes::IntoClause>() {
+        out.push_str("{INTOCLAUSE");
+        node_field(out, "rel", ic.rel);
+        list_field(out, "colNames", &ic.colNames);
+        string_field(out, "accessMethod", ic.accessMethod);
+        list_field(out, "options", &ic.options);
+        int_field(out, "onCommit", ic.onCommit as i32);
+        string_field(out, "tableSpaceName", ic.tableSpaceName);
+        node_field(out, "viewQuery", ic.viewQuery);
+        bool_field(out, "skipData", ic.skipData);
+        out.push('}');
+    } else if let Some(r) = n.as_variant::<types_nodes::rawnodes::RefreshMatViewStmt>() {
+        out.push_str("{REFRESHMATVIEWSTMT");
+        bool_field(out, "concurrent", r.concurrent);
+        bool_field(out, "skipData", r.skipData);
+        out.push_str(" :relation ");
+        match r.relation {
+            Some(rv) => range_var(out, rv),
+            None => out.push_str("<>"),
+        }
+        out.push('}');
     } else if let Some(sb) = n.as_sort_by() {
         out.push_str("{SORTBY");
         node_field(out, "node", sb.node);

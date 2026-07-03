@@ -700,6 +700,16 @@ fn dispatch_switch<'mcx>(
                 qc.as_deref_mut(),
             )?;
         }
+        T_RefreshMatViewStmt => {
+            // C wraps this in EventTriggerInhibitCommandCollection; no event
+            // trigger surface exists.
+            let stmt_node =
+                unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::rawnodes::RefreshMatViewStmt>()
+                .expect("RefreshMatViewStmt");
+            commands_matview::ExecRefreshMatView(mcx, stmt, source_text, qc.as_deref_mut())?;
+        }
         T_CreateSeqStmt => {
             let stmt_node =
                 unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
