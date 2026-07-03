@@ -9,6 +9,8 @@ use types_rel::{Relation, RowExclusiveLock, RELKIND_PARTITIONED_TABLE};
 use pg_depend::ObjectAddress;
 
 const PartitionedRelationId: Oid = 3350;
+const PartitionedRelidIndexId: Oid = 3351;
+const Anum_pg_partitioned_table_partdefid: usize = 4;
 const Natts_pg_partitioned_table: usize = 8;
 const INT2OID: Oid = 21;
 const OIDOID: Oid = 26;
@@ -135,4 +137,44 @@ pub fn StorePartitionBound<'mcx>(
     xact::CommandCounterIncrement()?;
     inval::invalidate::CacheInvalidateRelcache(parent)?;
     Ok(())
+}
+
+// RemovePartitionKeyByRelId (heap.c).
+pub fn RemovePartitionKeyByRelId<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<()> {
+    let rel = table::table_open(mcx, PartitionedRelationId, RowExclusiveLock)?;
+    let keys = [crate::drop::oid_scankey(1, relid)];
+    let mut scan =
+        genam::systable_beginscan(mcx, &rel, PartitionedRelidIndexId, true, None, &keys)?;
+    let tup = genam::systable_getnext(mcx, &mut scan)?
+        .unwrap_or_else(|| panic!("cache lookup failed for partition key of relation {relid}"));
+    let tid = tup.t_self;
+    catalog_indexing::CatalogTupleDelete(&rel, &tid)?;
+    genam::systable_endscan(mcx, scan)?;
+    rel.close(RowExclusiveLock)
+}
+
+// get_default_partition_oid (C: partitioning/partbounds.c; hosted here for
+// the pg_partitioned_table access machinery).
+pub fn get_default_partition_oid<'mcx>(mcx: Mcx<'mcx>, parent_id: Oid) -> PgResult<Oid> {
+    let rel = table::table_open(mcx, PartitionedRelationId, types_rel::AccessShareLock)?;
+    let keys = [crate::drop::oid_scankey(1, parent_id)];
+    let mut scan =
+        genam::systable_beginscan(mcx, &rel, PartitionedRelidIndexId, true, None, &keys)?;
+    let mut result = InvalidOid;
+    if let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+        let mut isnull = false;
+        // SAFETY: partdefid is a fixed NOT NULL pg_partitioned_table column.
+        result = unsafe {
+            types_tuple::heap_getattr(
+                tup,
+                Anum_pg_partitioned_table_partdefid as i32,
+                rel.descr(),
+                &mut isnull,
+            )
+        }
+        .as_oid();
+    }
+    genam::systable_endscan(mcx, scan)?;
+    rel.close(types_rel::AccessShareLock)?;
+    Ok(result)
 }

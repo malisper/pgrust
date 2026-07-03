@@ -28,6 +28,7 @@ relcache = { path = "../../utils/cache/relcache" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
 lmgr = { path = "../../storage/lmgr/lmgr" }
+pg_inherits = { path = "../pg_inherits" }
 genam = { path = "../../access/index/genam" }
 arrayfuncs = { path = "../../utils/adt/arrayfuncs" }
 fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
