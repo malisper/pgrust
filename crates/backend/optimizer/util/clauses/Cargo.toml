@@ -17,6 +17,7 @@ types_error = { path = "../../../../_support/types/types_error" }
 types_nodes = { path = "../../../../_support/types/nodes" }
 nodes_core = { path = "../../../nodes/nodes_core" }
 lsyscache = { path = "../../../utils/cache/lsyscache" }
+arrayutils = { path = "../../../utils/adt/arrayutils" }
 syscache_seams = { path = "../../../utils/cache/syscache_seams" }
 fmgr_core = { path = "../../../utils/fmgr/fmgr_core" }
 clauses_seams = { path = "../clauses_seams" }

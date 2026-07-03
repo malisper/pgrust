@@ -1303,3 +1303,168 @@ fn create_procedure() {
     assert_eq!(n.parameters.len(), 1);
     assert_eq!(n.options.len(), 2);
 }
+
+#[test]
+fn parses_sql_value_functions() {
+    use types_nodes::SQLValueFunctionOp::*;
+    for (sql, op) in [
+        ("select current_user", SVFOP_CURRENT_USER),
+        ("select session_user", SVFOP_SESSION_USER),
+        ("select user", SVFOP_USER),
+        ("select current_role", SVFOP_CURRENT_ROLE),
+        ("select current_catalog", SVFOP_CURRENT_CATALOG),
+        ("select current_schema", SVFOP_CURRENT_SCHEMA),
+    ] {
+        let list = parse(sql);
+        let sel = select_of(only_stmt(&list));
+        let rt = sel.targetList.nth(0).as_res_target().expect("ResTarget");
+        let svf = rt.val.expect("val").as_sql_value_function().expect("SQLValueFunction");
+        assert_eq!(svf.op, op, "{sql}");
+        assert_eq!(svf.r#type, 0);
+        assert_eq!(svf.typmod, -1);
+        assert_eq!(svf.location, 7);
+    }
+}
+
+#[test]
+fn parses_qualified_operator() {
+    let list = parse("select 'a' operator(pg_catalog.~) 'b'");
+    let sel = select_of(only_stmt(&list));
+    let rt = sel.targetList.nth(0).as_res_target().expect("ResTarget");
+    let e = rt.val.expect("val").as_a_expr().expect("A_Expr");
+    assert_eq!(e.kind, A_Expr_Kind::AEXPR_OP);
+    assert_eq!(e.name.len(), 2);
+    assert_eq!(e.name.nth(0).as_string().unwrap().sval, "pg_catalog");
+    assert_eq!(e.name.nth(1).as_string().unwrap().sval, "~");
+}
+
+#[test]
+fn parses_scalar_in_list() {
+    let list = parse("select 1 where 'r' in ('r','p','')");
+    let sel = select_of(only_stmt(&list));
+    let e = sel.whereClause.expect("where").as_a_expr().expect("A_Expr");
+    assert_eq!(e.kind, A_Expr_Kind::AEXPR_IN);
+    assert_eq!(e.name.nth(0).as_string().unwrap().sval, "=");
+    assert_eq!(e.rexpr.expect("rexpr").as_list().expect("List").len(), 3);
+    assert!(e.rexpr_list_start > 0 && e.rexpr_list_end > e.rexpr_list_start);
+
+    let list = parse("select 1 where 'r' not in ('r','p')");
+    let sel = select_of(only_stmt(&list));
+    let e = sel.whereClause.expect("where").as_a_expr().expect("A_Expr");
+    assert_eq!(e.kind, A_Expr_Kind::AEXPR_IN);
+    assert_eq!(e.name.nth(0).as_string().unwrap().sval, "<>");
+}
+
+#[test]
+fn parses_op_any_array() {
+    let list = parse("select 1 where 'x' = any(col)");
+    let sel = select_of(only_stmt(&list));
+    let e = sel.whereClause.expect("where").as_a_expr().expect("A_Expr");
+    assert_eq!(e.kind, A_Expr_Kind::AEXPR_OP_ANY);
+    assert_eq!(e.name.nth(0).as_string().unwrap().sval, "=");
+    assert!(e.rexpr.expect("rexpr").as_column_ref().is_some());
+
+    let list = parse("select 1 where 'x' <> all(col)");
+    let sel = select_of(only_stmt(&list));
+    let e = sel.whereClause.expect("where").as_a_expr().expect("A_Expr");
+    assert_eq!(e.kind, A_Expr_Kind::AEXPR_OP_ALL);
+}
+
+#[test]
+fn parses_subquery_op_sub_type_select() {
+    let list = parse("select 1 where 'x' = any(select 'x')");
+    let sel = select_of(only_stmt(&list));
+    let sl = sel.whereClause.expect("where").as_sub_link().expect("SubLink");
+    assert_eq!(sl.subLinkType, types_nodes::SubLinkType::ANY_SUBLINK);
+    assert_eq!(sl.operName.nth(0).as_string().unwrap().sval, "=");
+}
+
+#[test]
+fn parses_array_bounds() {
+    let list = parse("select '1'::pg_catalog.int2[]");
+    let sel = select_of(only_stmt(&list));
+    let rt = sel.targetList.nth(0).as_res_target().expect("ResTarget");
+    let tc = rt.val.expect("val").as_type_cast().expect("TypeCast");
+    let tn = tc.typeName.expect("typeName").as_type_name().expect("TypeName");
+    assert_eq!(tn.arrayBounds.len(), 1);
+    assert_eq!(tn.arrayBounds.nth(0).as_integer().expect("Integer").ival, -1);
+    let list = parse("select '1'::int2[3]");
+    let sel = select_of(only_stmt(&list));
+    let rt = sel.targetList.nth(0).as_res_target().expect("ResTarget");
+    let tc = rt.val.expect("val").as_type_cast().expect("TypeCast");
+    let tn = tc.typeName.expect("typeName").as_type_name().expect("TypeName");
+    assert_eq!(tn.arrayBounds.nth(0).as_integer().expect("Integer").ival, 3);
+}
+
+#[test]
+fn parses_union_all_values() {
+    let list = parse("select 1 union all values ('16384'::pg_catalog.regclass)");
+    let sel = select_of(only_stmt(&list));
+    assert_eq!(sel.op, types_nodes::SetOperation::SETOP_UNION);
+    assert!(sel.all);
+    let larg = sel.larg.expect("larg");
+    assert_eq!(larg.targetList.len(), 1);
+    let rarg = sel.rarg.expect("rarg");
+    assert_eq!(rarg.valuesLists.len(), 1);
+}
+
+#[test]
+fn parses_collate_clause() {
+    let list = parse("select '^(t)$' collate pg_catalog.default");
+    let sel = select_of(only_stmt(&list));
+    let rt = sel.targetList.nth(0).as_res_target().expect("ResTarget");
+    let cc = rt.val.expect("val").as_collate_clause().expect("CollateClause");
+    assert_eq!(cc.collname.len(), 2);
+    assert_eq!(cc.collname.nth(0).as_string().unwrap().sval, "pg_catalog");
+    assert_eq!(cc.collname.nth(1).as_string().unwrap().sval, "default");
+    assert!(cc.arg.expect("arg").as_a_const().is_some());
+}
+
+#[test]
+fn parses_regex_operators() {
+    for (sql, op) in [
+        ("select 1 where nspname !~ '^pg_toast'", "!~"),
+        ("select 1 where relname ~ 'x'", "~"),
+    ] {
+        let list = parse(sql);
+        let sel = select_of(only_stmt(&list));
+        let e = sel.whereClause.expect("where").as_a_expr().expect("A_Expr");
+        assert_eq!(e.kind, A_Expr_Kind::AEXPR_OP);
+        assert_eq!(e.name.nth(0).as_string().unwrap().sval, op);
+    }
+}
+
+#[test]
+fn constraint_statements_parse() {
+    use types_nodes::rawnodes::{Constraint, ConstrType};
+    for s in [
+        "create table t (id int primary key, name text default 'x', qty int, check (qty > 0))",
+        "create table u2 (a int unique)",
+        "create table v (a int, b int, constraint foo primary key (a, b))",
+        "create table w (a int, unique (a))",
+        "create table x (a int primary key using index tablespace ts)",
+        "create table y (a int unique nulls not distinct)",
+        "alter table t add check (qty > 0)",
+        "alter table t add constraint c1 unique (a)",
+        "alter table t add primary key (a)",
+    ] {
+        let l = parse(s);
+        assert_eq!(l.len(), 1, "{s}");
+    }
+
+    let l = parse("create table v (a int, b int, constraint foo primary key (a, b))");
+    let cs = only_stmt(&l).stmt.unwrap().as_variant::<types_nodes::rawnodes::CreateStmt>().unwrap();
+    let con = cs.tableElts.nth(2).as_variant::<Constraint>().expect("Constraint");
+    assert_eq!(con.contype, ConstrType::CONSTR_PRIMARY);
+    assert_eq!(con.conname, Some("foo"));
+    assert_eq!(con.keys.len(), 2);
+    assert_eq!(con.keys.nth(0).as_string().unwrap().sval, "a");
+    assert!(!con.deferrable && !con.initdeferred);
+
+    let l = parse("create table y (a int unique nulls not distinct)");
+    let cs = only_stmt(&l).stmt.unwrap().as_variant::<types_nodes::rawnodes::CreateStmt>().unwrap();
+    let cd = cs.tableElts.nth(0).as_variant::<types_nodes::rawnodes::ColumnDef>().unwrap();
+    let con = cd.constraints.nth(0).as_variant::<Constraint>().unwrap();
+    assert_eq!(con.contype, ConstrType::CONSTR_UNIQUE);
+    assert!(con.nulls_not_distinct);
+}

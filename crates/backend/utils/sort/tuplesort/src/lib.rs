@@ -408,6 +408,12 @@ macro_rules! dispatch_cmp {
                     };
                     $body
                 }
+                SortComparator::NameC => {
+                    let $cmp = |a: &SortTuple, b: &SortTuple| {
+                        __c.comparetup_spec(SortComparator::NameC, a, b)
+                    };
+                    $body
+                }
                 SortComparator::BpcharC => {
                     let $cmp = |a: &SortTuple, b: &SortTuple| {
                         __c.comparetup_spec(SortComparator::BpcharC, a, b)

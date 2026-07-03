@@ -21,11 +21,13 @@ use types_core::{
 };
 use types_error::PgResult;
 
+pub mod builtins;
 mod lookup;
 mod path;
 mod temp;
 #[cfg(test)]
 mod tests;
+mod visibility;
 
 pub use temp::{
     AccessTempTableNamespace, GetTempTableNamespace, RangeVarAdjustRelationPersistence,
@@ -42,6 +44,10 @@ pub use path::{
     assign_search_path, check_search_path, fetch_search_path, fetch_search_path_array,
     CopySearchPathMatcher, GetSearchPathMatcher, InitializeSearchPath, SearchPathMatcher,
     SearchPathMatchesCurrentEnvironment,
+};
+pub use visibility::{
+    FunctionIsVisible, FunctionIsVisibleExt, RelationIsVisible, RelationIsVisibleExt,
+    TypeIsVisible, TypeIsVisibleExt,
 };
 
 pub(crate) fn OidIsValid(oid: Oid) -> bool {

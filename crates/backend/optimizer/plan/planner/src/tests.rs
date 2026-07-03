@@ -36,6 +36,13 @@ fn install_fixtures() {
                     typstorage: b'p' as i8,
                     typcollation: 0,
                 }),
+                25 => Some(PgTypeShape {
+                    typlen: -1,
+                    typbyval: false,
+                    typalign: b'i' as i8,
+                    typstorage: b'x' as i8,
+                    typcollation: 100,
+                }),
                 _ => None,
             })
         });
@@ -76,14 +83,33 @@ const JT2: u32 = 16401;
 const JT3: u32 = 16402;
 const JT4: u32 = 16403;
 const STT: u32 = 16410;
+const PTT: u32 = 16411;
 const INT4EQ_OP: u32 = 96;
 const INT4_LT_OP: u32 = 97;
 const INT4_GT_OP: u32 = 521;
 const INT8GT_OP: u32 = 413;
 const INT4EQ_PROC: u32 = 65;
 const INT4_BTREE_FAM: u32 = 1976;
+const TEXTEQ_OP: u32 = 98;
+const TEXT_LT_OP: u32 = 664;
+const TEXT_GE_OP: u32 = 667;
+const TEXT_REGEXEQ_OP: u32 = 641;
+const TEXT_BTREE_FAM: u32 = 1994;
+
+fn text_datum(mcx: Mcx<'_>, s: &str) -> Datum {
+    let image = varlena::cstring_to_text(mcx, s.as_bytes()).unwrap().into_image();
+    Datum::from_usize(image.leak().as_ptr() as usize)
+}
 
 fn install_scan_fixtures() {
+    adt_regexp::init_seams();
+    syscache_seams::pg_type_typnamespace::set(|_| Ok(Some(11)));
+    syscache_seams::pg_type_element_shape::set(|typid| {
+        Ok(matches!(typid, 1007 | 1009).then(|| syscache_seams::PgTypeElementShape {
+            typelem: if typid == 1007 { 23 } else { 25 },
+            typsubscript: lsyscache::F_ARRAY_SUBSCRIPT_HANDLER,
+        }))
+    });
     syscache_seams::lookup_pg_proc_shape::set(|funcid| {
         let shape = |rettype, nargs, kind: u8, strict| syscache_seams::PgProcShape {
             pronamespace: 11,
@@ -103,6 +129,8 @@ fn install_scan_fixtures() {
             65 => Some(shape(16, 2, b'f', true)),
             66 => Some(shape(16, 2, b'f', true)),
             470 => Some(shape(16, 2, b'f', true)),
+            // texteq / text_lt / text_ge / textregexeq.
+            67 | 740 | 743 | 1254 => Some(shape(16, 2, b'f', true)),
             // pg_proc.dat rows for the plain-agg lane (agg::* tests).
             2803 => Some(shape(20, 0, b'a', false)),
             3100 | 3101 => Some(shape(20, 0, b'w', false)),
@@ -154,6 +182,54 @@ fn install_scan_fixtures() {
                 oprcanmerge: false,
                 oprcanhash: false,
             }),
+            TEXTEQ_OP => Some(syscache_seams::PgOperatorShape {
+                oprleft: 25,
+                oprright: 25,
+                oprresult: 16,
+                oprcom: TEXTEQ_OP,
+                oprnegate: 531,
+                oprcode: 67,
+                oprrest: 101,
+                oprjoin: 105,
+                oprcanmerge: true,
+                oprcanhash: true,
+            }),
+            TEXT_LT_OP => Some(syscache_seams::PgOperatorShape {
+                oprleft: 25,
+                oprright: 25,
+                oprresult: 16,
+                oprcom: 666,
+                oprnegate: 667,
+                oprcode: 740,
+                oprrest: 103,
+                oprjoin: 107,
+                oprcanmerge: false,
+                oprcanhash: false,
+            }),
+            TEXT_GE_OP => Some(syscache_seams::PgOperatorShape {
+                oprleft: 25,
+                oprright: 25,
+                oprresult: 16,
+                oprcom: 665,
+                oprnegate: 664,
+                oprcode: 743,
+                oprrest: 337,
+                oprjoin: 398,
+                oprcanmerge: false,
+                oprcanhash: false,
+            }),
+            TEXT_REGEXEQ_OP => Some(syscache_seams::PgOperatorShape {
+                oprleft: 25,
+                oprright: 25,
+                oprresult: 16,
+                oprcom: 0,
+                oprnegate: 642,
+                oprcode: 1254,
+                oprrest: 1818,
+                oprjoin: 1824,
+                oprcanmerge: false,
+                oprcanhash: false,
+            }),
             // int8 > int8 (HAVING-lane tests).
             INT8GT_OP => Some(syscache_seams::PgOperatorShape {
                 oprleft: 20,
@@ -193,6 +269,20 @@ fn install_scan_fixtures() {
                 }),
                 _ => None,
             }
+        } else if matches!(opno, TEXTEQ_OP | TEXT_LT_OP | TEXT_GE_OP)
+            && purpose == b's'
+            && opfamily == TEXT_BTREE_FAM
+        {
+            Some(syscache_seams::PgAmopShape {
+                amopstrategy: match opno {
+                    TEXTEQ_OP => 3,
+                    TEXT_LT_OP => 1,
+                    _ => 4,
+                },
+                amopsortfamily: 0,
+                amoplefttype: 25,
+                amoprighttype: 25,
+            })
         } else {
             None
         })
@@ -208,6 +298,19 @@ fn install_scan_fixtures() {
                     INT4EQ_OP => 3,
                     INT4_LT_OP => 1,
                     _ => 5,
+                },
+                amopmethod: 403,
+            });
+        }
+        if matches!(opno, TEXTEQ_OP | TEXT_LT_OP | TEXT_GE_OP) {
+            v.push(syscache_seams::PgAmopMemberShape {
+                amopfamily: TEXT_BTREE_FAM,
+                amoplefttype: 25,
+                amoprighttype: 25,
+                amopstrategy: match opno {
+                    TEXTEQ_OP => 3,
+                    TEXT_LT_OP => 1,
+                    _ => 4,
                 },
                 amopmethod: 403,
             });
@@ -229,7 +332,8 @@ fn install_scan_fixtures() {
     });
     syscache_seams::pg_proc_cost_shape::set(|funcid| {
         Ok(match funcid {
-            INT4EQ_PROC | 66 | 1219 | 1841 | 470 | 2108 | 768 | 769 | 147 => {
+            INT4EQ_PROC | 66 | 1219 | 1841 | 470 | 2108 | 768 | 769 | 147 | 67 | 740 | 742
+            | 743 | 1254 => {
                 Some(syscache_seams::PgProcCostShape { procost: 1.0, prorows: 0.0, prosupport: 0 })
             }
             // row_number/rank/dense_rank carry live prosupport rows; the
@@ -297,9 +401,83 @@ fn install_scan_fixtures() {
         })
     });
     syscache_seams::lookup_pg_statistic_shape::set(|_, _, _| Ok(None));
+    // Typcache fixtures for scalararraysel: int4 pg_type row, no default
+    // opclass (eq_opr resolution stays invalid, containment skipped).
+    syscache_seams::lookup_pg_type_typcache_shape::set(|typid| {
+        Ok((typid == 23).then(|| syscache_seams::PgTypeTypcacheShape {
+            typname: types_tuple::NameData::default(),
+            typlen: 4,
+            typbyval: true,
+            typalign: b'i' as i8,
+            typstorage: b'p' as i8,
+            typtype: b'b' as i8,
+            typisdefined: true,
+            typrelid: 0,
+            typsubscript: 0,
+            typelem: 0,
+            typarray: 1007,
+            typcollation: 0,
+        }))
+    });
+    syscache_seams::syscache_hash_value_typeoid::set(|typid| Ok(typid));
+    indexcmds_seams::get_default_opclass::set(|_, _| Ok(0));
+    syscache_seams::pg_type_base_shape::set(|typid| {
+        Ok(match typid {
+            1007 => Some(syscache_seams::PgTypeBaseShape {
+                typtype: b'b' as i8,
+                typbasetype: 0,
+                typtypmod: -1,
+                typelem: 23,
+                typsubscript: 0,
+            }),
+            _ => Some(syscache_seams::PgTypeBaseShape {
+                typtype: b'b' as i8,
+                typbasetype: 0,
+                typtypmod: -1,
+                typelem: 0,
+                typsubscript: 0,
+            }),
+        })
+    });
     // STT carries a pinned stats fixture (MCV [1->0.30, 2->0.20], histogram
-    // [0,10,20,30,40], stadistinct 10); everything else has no stats row.
+    // [0,10,20,30,40], stadistinct 10); PTT the text twin (MCV ["bar"->0.20,
+    // "foo"->0.10], 5-entry histogram); everything else has no stats row.
     syscache_seams::lookup_pg_statistic_bundle::set(|mcx, relid, attnum, inh| {
+        if relid == PTT && attnum == 1 && !inh {
+            let mut slots = mcx::PgVec::new_in(mcx);
+            let mut mcv_values = mcx::PgVec::new_in(mcx);
+            mcv_values.extend([text_datum(mcx, "bar"), text_datum(mcx, "foo")]);
+            let mut mcv_numbers = mcx::PgVec::new_in(mcx);
+            mcv_numbers.extend([0.20f32, 0.10f32]);
+            slots.push(syscache_seams::PgStatisticSlotData::from_decoded(
+                1,
+                TEXTEQ_OP,
+                950,
+                25,
+                mcv_values,
+                mcv_numbers,
+                mcx::PgVec::new_in(mcx),
+            ));
+            let mut hist_values = mcx::PgVec::new_in(mcx);
+            hist_values.extend(
+                ["apple", "dog", "foo", "milk", "zebra"].map(|s| text_datum(mcx, s)),
+            );
+            slots.push(syscache_seams::PgStatisticSlotData::from_decoded(
+                2,
+                TEXT_LT_OP,
+                950,
+                25,
+                hist_values,
+                mcx::PgVec::new_in(mcx),
+                mcx::PgVec::new_in(mcx),
+            ));
+            return Ok(Some(syscache_seams::PgStatisticBundle {
+                stanullfrac: 0.0,
+                stawidth: 8,
+                stadistinct: 10.0,
+                slots,
+            }));
+        }
         if relid != STT || attnum != 1 || inh {
             return Ok(None);
         }
@@ -345,6 +523,7 @@ fn install_scan_fixtures() {
             JT3 => make_join_rel_fixture(mcx, JT3, "jt3", 100, 10000.0),
             JT4 => make_join_rel_fixture(mcx, JT4, "jt4", 100, 10000.0),
             STT => make_join_rel_fixture(mcx, STT, "stt", 10, 1000.0),
+            PTT => make_text_rel_fixture(mcx, PTT, "ptt", 10, 1000.0),
             other => panic!("fixture relation_open: unknown oid {other}"),
         })
     });
@@ -392,7 +571,7 @@ fn install_scan_fixtures() {
             IDX => 30,
             JT1 | JT2 => 1,
             JT3 | JT4 => 100,
-            STT => 10,
+            STT | PTT => 10,
             other => panic!("fixture nblocks: unknown oid {other}"),
         })
     });
@@ -520,6 +699,44 @@ fn make_join_rel_fixture<'mcx>(
     }
     let rd_att = std::rc::Rc::new(types_tuple::TupleDescData {
         natts: 2,
+        tdtypeid: 0,
+        tdtypmod: -1,
+        tdrefcount: 1,
+        constr: None,
+        compact_attrs,
+        attrs,
+    });
+    let mut form = make_pg_class(oid, name, b'r', 2, false);
+    form.relpages = pages;
+    form.reltuples = tuples;
+    types_rel::Relation::open(make_rel_data(mcx, oid, form, rd_att), None)
+}
+
+fn make_text_rel_fixture<'mcx>(
+    mcx: Mcx<'mcx>,
+    oid: u32,
+    name: &str,
+    pages: i32,
+    tuples: f32,
+) -> types_rel::Relation<'mcx> {
+    use types_tuple::tupdesc::ATTNULLABLE_UNRESTRICTED;
+    let mut attr = int4_attr(1, "t", false);
+    attr.atttypid = 25;
+    attr.attlen = -1;
+    attr.attbyval = false;
+    attr.attalign = b'i' as i8;
+    attr.attstorage = b'x' as i8;
+    attr.attcollation = 950;
+    let mut attrs = mcx::PgVec::new_in(mcx);
+    attrs.push(attr);
+    let mut compact_attrs = mcx::PgVec::new_in(mcx);
+    for a in attrs.iter() {
+        let mut c = types_tuple::CompactAttribute::populate_from(a);
+        c.attnullability = ATTNULLABLE_UNRESTRICTED;
+        compact_attrs.push(c);
+    }
+    let rd_att = std::rc::Rc::new(types_tuple::TupleDescData {
+        natts: 1,
         tdtypeid: 0,
         tdtypmod: -1,
         tdrefcount: 1,
@@ -1344,15 +1561,6 @@ fn insert_query<'mcx>(mcx: Mcx<'mcx>) -> Query<'mcx> {
 fn insert_values_plans_to_modifytable_over_result() {
     let cx = cx();
     let mcx = cx.mcx();
-    syscache_seams::pg_type_base_shape::set(|_| {
-        Ok(Some(syscache_seams::PgTypeBaseShape {
-            typtype: b'b' as i8,
-            typbasetype: 0,
-            typtypmod: -1,
-            typelem: 0,
-            typsubscript: 0,
-        }))
-    });
     let parse = insert_query(mcx);
     let stmt = planner(
         mcx,
@@ -2853,6 +3061,144 @@ mod stats_arms {
         // histfrac = (1 + (15-10)/(20-10))/4 - eq_selec 1/8 = 0.25;
         // selec = (1 - 0.50)*0.25 + mcv(1,2 both < 15 -> 0.50) = 0.625.
         assert_eq!(plan_rows(mcx, INT4_LT_OP, 66, 15, "SELECT a FROM stt WHERE a < 15"), 625.0);
+    }
+}
+
+mod pattern_saop_arms {
+    use super::*;
+    use types_nodes::primnodes::{OpExpr, ScalarArrayOpExpr};
+
+    fn setup() {
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            regex_core::init_seams();
+        });
+        mbutils::SetDatabaseEncoding(wchar::PG_UTF8).unwrap();
+    }
+
+    fn one_rel_query<'mcx>(
+        mcx: Mcx<'mcx>,
+        relid: u32,
+        vartype: u32,
+        varcollid: u32,
+        qual: Node<'mcx>,
+    ) -> Query<'mcx> {
+        let mut rte = Node::build::<types_nodes::parsenodes::RangeTblEntry>(mcx).unwrap();
+        rte.rtekind = RTEKind::RTE_RELATION;
+        rte.relid = relid;
+        rte.relkind = b'r';
+        rte.rellockmode = 1;
+        rte.inh = false;
+        let rtable = NodeList::make1(mcx, rte.seal()).unwrap();
+        let rtr = Node::mk_range_tbl_ref(mcx, 1).unwrap();
+        let jointree = alloc_leak_in(
+            mcx,
+            FromExpr { fromlist: NodeList::make1(mcx, rtr).unwrap(), quals: Some(qual) },
+        )
+        .unwrap();
+        let v = Node::mk_var(mcx, 1, 1, vartype, -1, varcollid, 0).unwrap();
+        let tle = Node::mk_target_entry(mcx, v, 1, Some("t"), false).unwrap();
+        Query {
+            commandType: CmdType::CMD_SELECT,
+            canSetTag: true,
+            jointree: Some(jointree),
+            rtable,
+            targetList: NodeList::make1(mcx, tle).unwrap(),
+            stmt_location: 0,
+            stmt_len: 30,
+            ..Query::default()
+        }
+    }
+
+    fn plan_rows<'a>(mcx: Mcx<'a>, q: Query<'a>, sql: &'static str) -> f64 {
+        let stmt =
+            planner(mcx, q, sql, CURSOR_OPT_PARALLEL_OK, ParamListHandle::NULL).unwrap();
+        let scan = stmt.planTree.unwrap().as_seq_scan().expect("SeqScan");
+        scan.scan.plan.plan_rows
+    }
+
+    fn text_op_qual<'mcx>(mcx: Mcx<'mcx>, opno: u32, opfuncid: u32, rhs: &str) -> Node<'mcx> {
+        let var = Node::mk_var(mcx, 1, 1, 25, -1, 950, 0).unwrap();
+        let konst =
+            Node::mk_const(mcx, 25, -1, 100, -1, text_datum(mcx, rhs), false, false).unwrap();
+        Node::mk(
+            mcx,
+            OpExpr {
+                opno,
+                opfuncid,
+                opresulttype: 16,
+                opretset: false,
+                opcollid: 0,
+                inputcollid: 950,
+                args: NodeList::make2(mcx, var, konst).unwrap(),
+                location: -1,
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn regex_exact_prefix_matches_eqsel() {
+        setup();
+        let cx = cx();
+        let mcx = cx.mcx();
+        // '^(foo)$' -> Pattern_Prefix_Exact -> var_eq_const, MCV "foo" 0.10.
+        let q = one_rel_query(mcx, PTT, 25, 950, text_op_qual(mcx, TEXT_REGEXEQ_OP, 1254, "^(foo)$"));
+        let regex_rows = plan_rows(mcx, q, "SELECT t FROM ptt WHERE t ~ '^(foo)$'");
+        let q = one_rel_query(mcx, PTT, 25, 950, text_op_qual(mcx, TEXTEQ_OP, 67, "foo"));
+        let eq_rows = plan_rows(mcx, q, "SELECT t FROM ptt WHERE t = 'foo'");
+        assert_eq!(regex_rows, 100.0);
+        assert_eq!(regex_rows, eq_rows);
+    }
+
+
+    fn int4_array_const<'a>(mcx: Mcx<'a>, elems: &[i32]) -> Node<'a> {
+        let total = 24 + 4 * elems.len();
+        let mut image: mcx::PgVec<'_, u8> = mcx::vec_with_capacity_in(mcx, total).unwrap();
+        image.extend_from_slice(&datum::varlena::set_varsize_4b(total));
+        image.extend_from_slice(&1i32.to_ne_bytes());
+        image.extend_from_slice(&0i32.to_ne_bytes());
+        image.extend_from_slice(&23i32.to_ne_bytes());
+        image.extend_from_slice(&(elems.len() as i32).to_ne_bytes());
+        image.extend_from_slice(&1i32.to_ne_bytes());
+        for e in elems {
+            image.extend_from_slice(&e.to_ne_bytes());
+        }
+        let value = Datum::from_usize(image.leak().as_ptr() as usize);
+        Node::mk_const(mcx, 1007, -1, 0, -1, value, false, false).unwrap()
+    }
+
+    #[test]
+    fn in_list_sums_disjoint_probabilities() {
+        setup();
+        let cx = cx();
+        let mcx = cx.mcx();
+        // a IN (1, 7): 0.30 (MCV) + (1-0.50)/(10-2) = 0.3625.
+        let var = Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap();
+        let qual = Node::mk(
+            mcx,
+            ScalarArrayOpExpr {
+                opno: INT4EQ_OP,
+                opfuncid: INT4EQ_PROC,
+                hashfuncid: 0,
+                negfuncid: 0,
+                useOr: true,
+                inputcollid: 0,
+                args: NodeList::make2(mcx, var, int4_array_const(mcx, &[1, 7])).unwrap(),
+                location: -1,
+            },
+        )
+        .unwrap();
+        let q = one_rel_query(mcx, STT, 23, 0, qual);
+        // f32 catalog fractions: 0.30+0.20 sums above 0.5, so 362.50001
+        // rounds up (C sums the same float4 slots into a double).
+        assert_eq!(plan_rows(mcx, q, "SELECT a FROM stt WHERE a IN (1, 7)"), 363.0);
+    }
+
+    #[test]
+    fn function_selectivity_defaults_to_one_third() {
+        install_fixtures();
+        assert_eq!(crate::plancat::function_selectivity(65).unwrap(), 0.3333333);
     }
 }
 

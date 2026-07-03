@@ -536,6 +536,8 @@ fn expr_type(node: Node<'_>) -> u32 {
             node.as_variant::<types_nodes::primnodes::NextValueExpr>().unwrap().typeId
         }
         NodeTag::T_CoerceToDomain => node.as_coerce_to_domain().unwrap().resulttype,
+        NodeTag::T_CoerceViaIO => node.as_coerce_via_io().unwrap().resulttype,
+        NodeTag::T_ArrayExpr => node.as_array_expr().unwrap().array_typeid,
         other => panic!("ExecCheckPlanOutput exprType arm for {other:?} not ported"),
     }
 }

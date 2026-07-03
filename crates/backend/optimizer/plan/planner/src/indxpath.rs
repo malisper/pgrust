@@ -294,32 +294,46 @@ fn get_index_clause_from_support<'mcx>(
     if shape.prosupport == 0 {
         return Ok(None);
     }
-    let ptype = match shape.prosupport {
-        1023 => PatternType::Like,
-        1025 => PatternType::LikeIc,
-        1364 => PatternType::Regex,
-        1024 => PatternType::RegexIc,
-        6242 => PatternType::Prefix,
+    let clause = *run.root.expr_node(run.root.rinfo(rinfo).clause);
+    let op = clause.as_op_expr().expect("support request over an OpExpr");
+    let exprs = match shape.prosupport {
+        1023 | 1025 | 1364 | 1024 | 6242 => {
+            let ptype = match shape.prosupport {
+                1023 => PatternType::Like,
+                1025 => PatternType::LikeIc,
+                1364 => PatternType::Regex,
+                1024 => PatternType::RegexIc,
+                _ => PatternType::Prefix,
+            };
+            // like_regex_support: no reverse-match operators, indexkey-on-left
+            // only.
+            if indexarg != 0 {
+                return Ok(None);
+            }
+            crate::like_support::match_pattern_prefix(
+                run,
+                op.args.nth(0),
+                op.args.nth(1),
+                ptype,
+                op.inputcollid,
+                index.opfamily[indexcol],
+                index.indexcollations[indexcol],
+            )?
+        }
+        // network_subset_support (network.c): SupportRequestIndexCondition.
+        1173 => match_network_function(
+            run,
+            op.args.nth(0),
+            op.args.nth(1),
+            indexarg,
+            funcid,
+            index.opfamily[indexcol],
+        )?,
         other => panic!(
             "get_index_clause_from_support (indxpath.c): prosupport {other}; M2 lane"
         ),
     };
-    // like_regex_support: no reverse-match operators, indexkey-on-left only.
-    if indexarg != 0 {
-        return Ok(None);
-    }
-    let clause = *run.root.expr_node(run.root.rinfo(rinfo).clause);
-    let op = clause.as_op_expr().expect("support request over an OpExpr");
-    let Some(exprs) = crate::like_support::match_pattern_prefix(
-        run,
-        op.args.nth(0),
-        op.args.nth(1),
-        ptype,
-        op.inputcollid,
-        index.opfamily[indexcol],
-        index.indexcollations[indexcol],
-    )?
-    else {
+    let Some(exprs) = exprs else {
         return Ok(None);
     };
     let mut indexquals = PgVec::new_in(run.mcx);
@@ -336,6 +350,99 @@ fn get_index_clause_from_support<'mcx>(
         indexcol: indexcol as i16,
         indexcols: PgVec::new_in(run.mcx),
     }))
+}
+
+
+// match_network_function (network.c).
+fn match_network_function<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    leftop: Node<'mcx>,
+    rightop: Node<'mcx>,
+    indexarg: i32,
+    funcid: u32,
+    opfamily: u32,
+) -> PgResult<Option<PgVec<'mcx, Node<'mcx>>>> {
+    const F_NETWORK_SUB: u32 = 927;
+    const F_NETWORK_SUBEQ: u32 = 928;
+    const F_NETWORK_SUP: u32 = 929;
+    const F_NETWORK_SUPEQ: u32 = 930;
+    match funcid {
+        F_NETWORK_SUB if indexarg == 0 => {
+            match_network_subset(run, leftop, rightop, false, opfamily)
+        }
+        F_NETWORK_SUBEQ if indexarg == 0 => {
+            match_network_subset(run, leftop, rightop, true, opfamily)
+        }
+        F_NETWORK_SUP if indexarg == 1 => {
+            match_network_subset(run, rightop, leftop, false, opfamily)
+        }
+        F_NETWORK_SUPEQ if indexarg == 1 => {
+            match_network_subset(run, rightop, leftop, true, opfamily)
+        }
+        _ => Ok(None),
+    }
+}
+
+// match_network_subset (network.c): key >= scan_first AND key <= scan_last.
+fn match_network_subset<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    leftop: Node<'mcx>,
+    rightop: Node<'mcx>,
+    is_eq: bool,
+    opfamily: u32,
+) -> PgResult<Option<PgVec<'mcx, Node<'mcx>>>> {
+    const INETOID: u32 = 869;
+    let Some(c) = rightop.as_const() else { return Ok(None) };
+    if c.constisnull {
+        return Ok(None);
+    }
+    let rightopval = c.constvalue;
+
+    let inet_const = |run: &mut PlannerRun<'mcx>,
+                      v: adt_network::InetValue|
+     -> PgResult<Node<'mcx>> {
+        let (img, len) = v.image();
+        let copy = mcx::slice_borrow_in(run.mcx, &img[..len])?;
+        types_nodes::Node::mk(
+            run.mcx,
+            types_nodes::primnodes::Const {
+                consttype: INETOID,
+                consttypmod: -1,
+                constcollid: 0,
+                constlen: -1,
+                constvalue: datum::Datum::from_usize(copy.as_ptr() as usize),
+                constisnull: false,
+                constbyval: false,
+                location: -1,
+            },
+        )
+    };
+
+    let cmp1 = if is_eq { types_pathnodes::COMPARE_GE } else { types_pathnodes::COMPARE_GT };
+    let opr1oid = lsyscache::get_opfamily_member_for_cmptype(opfamily, INETOID, INETOID, cmp1)?;
+    if opr1oid == 0 {
+        return Ok(None);
+    }
+    let opr1right = adt_network::network_scan_first(crate::network_selfuncs::inet_ref(rightopval));
+
+    let opr2oid = lsyscache::get_opfamily_member_for_cmptype(
+        opfamily,
+        INETOID,
+        INETOID,
+        types_pathnodes::COMPARE_LE,
+    )?;
+    if opr2oid == 0 {
+        return Ok(None);
+    }
+    let opr2right =
+        adt_network::network_scan_last(crate::network_selfuncs::inet_ref(rightopval))?;
+
+    let mut result: PgVec<'mcx, Node<'mcx>> = mcx::vec_with_capacity_in(run.mcx, 2)?;
+    let c1 = inet_const(run, opr1right)?;
+    result.push(crate::like_support::make_opclause(run.mcx, opr1oid, leftop, c1, 0)?);
+    let c2 = inet_const(run, opr2right)?;
+    result.push(crate::like_support::make_opclause(run.mcx, opr2oid, leftop, c2, 0)?);
+    Ok(Some(result))
 }
 
 // IndexCollMatchesExprColl (indxpath.c).
@@ -590,6 +697,9 @@ fn collect_varattnos(run: &PlannerRun<'_>, node: Node<'_>, relid: i32, out: &mut
             for a in &node.as_func_expr().unwrap().args {
                 collect_varattnos(run, a, relid, out);
             }
+        }
+        NodeTag::T_CoerceViaIO => {
+            collect_varattnos(run, node.as_coerce_via_io().unwrap().arg, relid, out)
         }
         other => panic!("pull_varattnos (var.c) via check_index_only: {other:?}; M2 lane"),
     }

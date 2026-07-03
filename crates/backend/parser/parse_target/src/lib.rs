@@ -821,6 +821,23 @@ fn FigureColnameInternal<'mcx>(node: Node<'mcx>, name: &mut Option<&'mcx str>) -
             *name = Some("row");
             2
         }
+        NodeTag::T_SQLValueFunction => {
+            use types_nodes::SQLValueFunctionOp::*;
+            *name = Some(match node.as_sql_value_function().unwrap().op {
+                SVFOP_CURRENT_DATE => "current_date",
+                SVFOP_CURRENT_TIME | SVFOP_CURRENT_TIME_N => "current_time",
+                SVFOP_CURRENT_TIMESTAMP | SVFOP_CURRENT_TIMESTAMP_N => "current_timestamp",
+                SVFOP_LOCALTIME | SVFOP_LOCALTIME_N => "localtime",
+                SVFOP_LOCALTIMESTAMP | SVFOP_LOCALTIMESTAMP_N => "localtimestamp",
+                SVFOP_CURRENT_ROLE => "current_role",
+                SVFOP_CURRENT_USER => "current_user",
+                SVFOP_USER => "user",
+                SVFOP_SESSION_USER => "session_user",
+                SVFOP_CURRENT_CATALOG => "current_catalog",
+                SVFOP_CURRENT_SCHEMA => "current_schema",
+            });
+            2
+        }
         // NullTest/BooleanTest take C's default arm: no name.
         NodeTag::T_A_Const
         | NodeTag::T_ParamRef

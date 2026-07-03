@@ -38,7 +38,7 @@ const Anum_pg_attribute_attbyval: usize = 8;
 const Anum_pg_attribute_attalign: usize = 9;
 const Anum_pg_attribute_attstorage: usize = 10;
 const Anum_pg_attribute_attcompression: usize = 11;
-const Anum_pg_attribute_attnotnull: usize = 12;
+pub(crate) const Anum_pg_attribute_attnotnull: usize = 12;
 const Anum_pg_attribute_atthasmissing: usize = 14;
 const Anum_pg_attribute_attcollation: usize = 20;
 
@@ -1196,7 +1196,10 @@ fn ATPrepAlterColumnType<'mcx>(
         ));
     }
     let (targettype, targettypmod) = parse_utilcmd::typenameTypeIdAndMod(mcx, None, tn)?;
-    // GetColumnDefCollation: no COLLATE clause (loud at parse) -> type default.
+    if def.collClause.is_some() {
+        unported("ATPrepAlterColumnType COLLATE clause (GetColumnDefCollation)");
+    }
+    // GetColumnDefCollation: no COLLATE clause -> type default.
     let att = *rel.rd_att.attr(attnum as usize - 1);
 
     let mut pstate = parser_small1::make_parsestate(mcx, None);

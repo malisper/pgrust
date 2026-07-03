@@ -18,6 +18,7 @@ tableam = { path = "../../access/table/tableam" }
 exectuples = { path = "../exectuples" }
 execexpr = { path = "../execexpr" }
 executils = { path = "../executils" }
+nodes_core = { path = "../../nodes/nodes_core" }
 
 [dev-dependencies]
 datum = { path = "../../../_support/types/datum" }

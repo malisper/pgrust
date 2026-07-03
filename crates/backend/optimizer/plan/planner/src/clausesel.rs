@@ -304,6 +304,13 @@ pub(crate) fn clause_selectivity_node<'mcx>(
             let c = clause.as_const().unwrap();
             Ok(if c.constisnull || !c.constvalue.as_bool() { 0.0 } else { 1.0 })
         }
+        NodeTag::T_RelabelType => clause_selectivity_node(
+            run,
+            clause.as_relabel_type().unwrap().arg,
+            varrelid,
+            jointype,
+            sjinfo,
+        ),
         NodeTag::T_BoolExpr => {
             use types_nodes::primnodes::BoolExprType;
             let b = clause.as_bool_expr().unwrap();
