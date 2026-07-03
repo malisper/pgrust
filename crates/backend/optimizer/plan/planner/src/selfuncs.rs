@@ -15,6 +15,7 @@ use crate::run::PlannerRun;
 
 pub const DEFAULT_EQ_SEL: f64 = 0.005;
 pub const DEFAULT_INEQ_SEL: f64 = 0.3333333333333333;
+pub const DEFAULT_MATCH_SEL: f64 = 0.005;
 pub const DEFAULT_NUM_DISTINCT: f64 = 200.0;
 const DEFAULT_PAGE_CPU_MULTIPLIER: f64 = 50.0;
 const BOOLOID: u32 = 16;
@@ -25,7 +26,7 @@ pub const STATISTIC_KIND_MCV: i16 = 1;
 pub const STATISTIC_KIND_HISTOGRAM: i16 = 2;
 pub const STATISTIC_KIND_CORRELATION: i16 = 3;
 
-fn clamp_probability(p: f64) -> f64 {
+pub(crate) fn clamp_probability(p: f64) -> f64 {
     p.clamp(0.0, 1.0)
 }
 
@@ -41,11 +42,11 @@ pub struct VariableStatData<'mcx> {
 }
 
 impl<'mcx> VariableStatData<'mcx> {
-    fn nullfrac(&self) -> f64 {
+    pub(crate) fn nullfrac(&self) -> f64 {
         self.stats.as_ref().map_or(0.0, |s| s.stanullfrac as f64)
     }
 
-    fn slot(&self, kind: i16, reqop: Oid) -> Option<&PgStatisticSlotData<'mcx>> {
+    pub(crate) fn slot(&self, kind: i16, reqop: Oid) -> Option<&PgStatisticSlotData<'mcx>> {
         self.stats.as_ref().and_then(|s| {
             s.slots
                 .iter()
@@ -54,12 +55,12 @@ impl<'mcx> VariableStatData<'mcx> {
     }
 }
 
-fn opproc_for(operator: Oid) -> PgResult<FmgrInfo> {
+pub(crate) fn opproc_for(operator: Oid) -> PgResult<FmgrInfo> {
     let opcode = lsyscache::get_opcode(operator)?;
     fmgr_core::fmgr_info(opcode)
 }
 
-fn op_test(
+pub(crate) fn op_test(
     opproc: &mut FmgrInfo,
     collation: Oid,
     slot_value: Datum,
@@ -181,8 +182,8 @@ fn scalarineqsel<'mcx>(
 }
 
 // mcv_selectivity (selfuncs.c); returns (mcv_selec, sumcommon).
-fn mcv_selectivity<'mcx>(
-    _run: &PlannerRun<'mcx>,
+pub(crate) fn mcv_selectivity<'mcx>(
+    run: &PlannerRun<'mcx>,
     vardata: &VariableStatData<'mcx>,
     opproc: &mut FmgrInfo,
     collation: Oid,
@@ -392,9 +393,36 @@ fn endpoint_datum_copy<'mcx>(
     Ok(Datum::from_usize(out.leak().as_ptr() as usize))
 }
 
+pub(crate) fn histogram_selectivity<'mcx>(
+    vardata: &VariableStatData<'mcx>,
+    opproc: &mut FmgrInfo,
+    collation: Oid,
+    constval: Datum,
+    varonleft: bool,
+    min_hist_size: usize,
+    n_skip: usize,
+) -> PgResult<(f64, usize)> {
+    debug_assert!(min_hist_size > 2 * n_skip);
+    let Some(sslot) = vardata.slot(STATISTIC_KIND_HISTOGRAM, 0) else {
+        return Ok((-1.0, 0));
+    };
+    let values = sslot.values()?;
+    let hist_size = values.len();
+    if hist_size < min_hist_size {
+        return Ok((-1.0, hist_size));
+    }
+    let mut nmatch = 0usize;
+    for &v in &values[n_skip..hist_size - n_skip] {
+        if op_test(opproc, collation, v, constval, varonleft)? {
+            nmatch += 1;
+        }
+    }
+    Ok((nmatch as f64 / (hist_size - 2 * n_skip) as f64, hist_size))
+}
+
 // ineq_histogram_selectivity (selfuncs.c); -1 means no usable histogram.
 #[allow(clippy::too_many_arguments)]
-fn ineq_histogram_selectivity<'mcx>(
+pub(crate) fn ineq_histogram_selectivity<'mcx>(
     run: &PlannerRun<'mcx>,
     vardata: &VariableStatData<'mcx>,
     opoid: Oid,
@@ -480,21 +508,25 @@ fn ineq_histogram_selectivity<'mcx>(
                 }
             }
 
-            let hist_val = |idx: i32| -> PgResult<Datum> {
+            let bin_val = |idx: i32| -> PgResult<Datum> {
                 if idx == 0 && min_override.is_some() {
-                    Ok(min_override.unwrap())
-                } else if idx == nvalues - 1 && max_override.is_some() {
-                    Ok(max_override.unwrap())
-                } else {
-                    Ok(sslot.values()?[idx as usize])
+                    return Ok(min_override.unwrap());
                 }
+                if idx == nvalues - 1 && max_override.is_some() {
+                    return Ok(max_override.unwrap());
+                }
+                Ok(sslot.values()?[idx as usize])
             };
-            let binfrac = match (
-                convert_numeric_to_scalar(constval, consttype),
-                convert_numeric_to_scalar(hist_val(i - 1)?, vardata.vartype),
-                convert_numeric_to_scalar(hist_val(i)?, vardata.vartype),
+            let binfrac = match convert_to_scalar(
+                run.mcx,
+                constval,
+                consttype,
+                collation,
+                bin_val(i - 1)?,
+                bin_val(i)?,
+                vardata.vartype,
             ) {
-                (Some(val), Some(low), Some(high)) => {
+                Some((val, low, high)) => {
                     if high <= low {
                         0.5
                     } else if val <= low {
@@ -506,7 +538,7 @@ fn ineq_histogram_selectivity<'mcx>(
                         if b.is_nan() || !(0.0..=1.0).contains(&b) { 0.5 } else { b }
                     }
                 }
-                _ => 0.5,
+                None => 0.5,
             };
 
             let mut frac = (i - 1) as f64 + binfrac;
@@ -542,9 +574,144 @@ fn ineq_histogram_selectivity<'mcx>(
     Ok(hist_selec)
 }
 
-// convert_to_scalar (selfuncs.c), numeric-category arm only. Strings/bytea/
-// time categories (convert_string_to_scalar etc.) fall back to None, which
-// lands on C's binfrac=0.5 failure path — a divergence for those types.
+// convert_to_scalar (selfuncs.c), numeric + string categories. bytea/time/
+// network categories fall back to None, which lands on C's binfrac=0.5
+// failure path — a divergence for those types.
+fn convert_to_scalar(
+    mcx: mcx::Mcx<'_>,
+    value: Datum,
+    valuetypid: Oid,
+    collid: Oid,
+    lobound: Datum,
+    hibound: Datum,
+    boundstypid: Oid,
+) -> Option<(f64, f64, f64)> {
+    const CHAROID: Oid = 18;
+    const NAMEOID: Oid = 19;
+    const TEXTOID: Oid = 25;
+    const BPCHAROID: Oid = 1042;
+    const VARCHAROID: Oid = 1043;
+    match valuetypid {
+        CHAROID | BPCHAROID | VARCHAROID | TEXTOID | NAMEOID => {
+            let val = convert_string_datum(mcx, value, valuetypid, collid)?;
+            let lostr = convert_string_datum(mcx, lobound, boundstypid, collid)?;
+            let histr = convert_string_datum(mcx, hibound, boundstypid, collid)?;
+            Some(convert_string_to_scalar(val, lostr, histr))
+        }
+        _ => {
+            let v = convert_numeric_to_scalar(value, valuetypid)?;
+            let lo = convert_numeric_to_scalar(lobound, boundstypid)?;
+            let hi = convert_numeric_to_scalar(hibound, boundstypid)?;
+            Some((v, lo, hi))
+        }
+    }
+}
+
+// convert_string_datum (selfuncs.c); the non-C-collation pg_strxfrm leg is
+// the locale-aware lane and stays loud.
+fn convert_string_datum<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    value: Datum,
+    typid: Oid,
+    collid: Oid,
+) -> Option<&'mcx [u8]> {
+    const CHAROID: Oid = 18;
+    const NAMEOID: Oid = 19;
+    const TEXTOID: Oid = 25;
+    const BPCHAROID: Oid = 1042;
+    const VARCHAROID: Oid = 1043;
+    let bytes: &[u8] = match typid {
+        CHAROID => {
+            // C builds a 2-byte cstring from the char datum; a single-byte
+            // arena slice carries the same information.
+            let b = [value.as_u8()];
+            mcx::slice_in(mcx, &b).ok()?.leak()
+        }
+        BPCHAROID | VARCHAROID | TEXTOID => {
+            // SAFETY: by-ref text datum living in the planner arena.
+            unsafe { datum::VarlenaRef::from_ptr(value.as_usize() as *const u8).data() }
+        }
+        NAMEOID => {
+            let p = value.as_usize() as *const u8;
+            let mut n = 0usize;
+            // SAFETY: name datum is a NUL-terminated NAMEDATALEN block.
+            while n < 63 && unsafe { *p.add(n) } != 0 {
+                n += 1;
+            }
+            // SAFETY: `n` bytes readable per the loop above.
+            unsafe { core::slice::from_raw_parts(p, n) }
+        }
+        _ => return None,
+    };
+    let locale = pg_locale::pg_newlocale_from_collation(collid)
+        .expect("convert_string_datum: collation lookup");
+    if !locale.collate_is_c {
+        panic!("convert_string_datum (selfuncs.c): pg_strxfrm leg; C-collation lane only");
+    }
+    Some(bytes)
+}
+
+fn convert_string_to_scalar(value: &[u8], lobound: &[u8], hibound: &[u8]) -> (f64, f64, f64) {
+    // C reads hibound[0] unconditionally; an empty C string yields NUL.
+    let mut rangelo = *hibound.first().unwrap_or(&0) as i32;
+    let mut rangehi = rangelo;
+    for &c in lobound.iter().chain(hibound.iter()) {
+        rangelo = rangelo.min(c as i32);
+        rangehi = rangehi.max(c as i32);
+    }
+    if rangelo <= b'Z' as i32 && rangehi >= b'A' as i32 {
+        rangelo = rangelo.min(b'A' as i32);
+        rangehi = rangehi.max(b'Z' as i32);
+    }
+    if rangelo <= b'z' as i32 && rangehi >= b'a' as i32 {
+        rangelo = rangelo.min(b'a' as i32);
+        rangehi = rangehi.max(b'z' as i32);
+    }
+    if rangelo <= b'9' as i32 && rangehi >= b'0' as i32 {
+        rangelo = rangelo.min(b'0' as i32);
+        rangehi = rangehi.max(b'9' as i32);
+    }
+    if rangehi - rangelo < 9 {
+        rangelo = b' ' as i32;
+        rangehi = 127;
+    }
+
+    let mut p = 0usize;
+    while p < lobound.len() {
+        if hibound.get(p) != Some(&lobound[p]) || value.get(p) != Some(&lobound[p]) {
+            break;
+        }
+        p += 1;
+    }
+
+    (
+        convert_one_string_to_scalar(&value[p.min(value.len())..], rangelo, rangehi),
+        convert_one_string_to_scalar(&lobound[p..], rangelo, rangehi),
+        convert_one_string_to_scalar(&hibound[p.min(hibound.len())..], rangelo, rangehi),
+    )
+}
+
+fn convert_one_string_to_scalar(value: &[u8], rangelo: i32, rangehi: i32) -> f64 {
+    let slen = value.len().min(12);
+    if slen == 0 {
+        return 0.0;
+    }
+    let base = (rangehi - rangelo + 1) as f64;
+    let mut num = 0.0f64;
+    let mut denom = base;
+    for &b in &value[..slen] {
+        let mut ch = b as i32;
+        if ch < rangelo {
+            ch = rangelo - 1;
+        } else if ch > rangehi {
+            ch = rangehi + 1;
+        }
+        num += (ch - rangelo) as f64 / denom;
+        denom *= base;
+    }
+    num
+}
+
 fn convert_numeric_to_scalar(value: Datum, typid: Oid) -> Option<f64> {
     const INT2OID: Oid = 21;
     const INT4OID: Oid = 23;
@@ -652,7 +819,7 @@ fn var_eq_non_const(run: &PlannerRun<'_>, vardata: &VariableStatData<'_>, negate
     let selec = if negate { 1.0 - selec - nullfrac } else { selec };
     clamp_probability(selec)
 }
-fn get_restriction_variable<'mcx>(
+pub(crate) fn get_restriction_variable<'mcx>(
     run: &mut PlannerRun<'mcx>,
     args: &[NodeId],
     varrelid: i32,
@@ -781,8 +948,8 @@ pub fn get_variable_numdistinct(
     (DEFAULT_NUM_DISTINCT, true)
 }
 
-// var_eq_const (selfuncs.c), negate=false (neqsel is unported).
-fn var_eq_const<'mcx>(
+// var_eq_const (selfuncs.c).
+pub(crate) fn var_eq_const<'mcx>(
     run: &PlannerRun<'mcx>,
     vardata: &VariableStatData<'mcx>,
     oproid: Oid,
@@ -1777,4 +1944,240 @@ fn get_stats_slot_range(
         }
     }
     Ok(())
+}
+
+fn strip_array_coercion<'mcx>(mut node: Node<'mcx>) -> Node<'mcx> {
+    while let Some(r) = node.as_relabel_type() {
+        node = r.arg;
+    }
+    node
+}
+
+fn expr_collation(node: Node<'_>) -> Oid {
+    match node.node_tag() {
+        NodeTag::T_Const => node.as_const().unwrap().constcollid,
+        NodeTag::T_ArrayExpr => node.as_array_expr().unwrap().array_collid,
+        NodeTag::T_Var => node.as_var().unwrap().varcollid,
+        _ => 0,
+    }
+}
+
+// scalararraysel (selfuncs.c). The typcache eq_opr probe only gates
+// scalararraysel_containment, whose live precondition (an array-typed
+// variable operand) is the loud arm below; the isEquality/isInequality
+// flags key off the estimator oid exactly as C's second-chance test does.
+pub fn scalararraysel<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    node: Node<'mcx>,
+    is_join_clause: bool,
+    varrelid: i32,
+    jointype: types_pathnodes::JoinType,
+    sjinfo: Option<&types_pathnodes::SpecialJoinInfo<'mcx>>,
+) -> PgResult<f64> {
+    const F_EQSEL: Oid = 101;
+    const F_NEQSEL: Oid = 102;
+    const F_EQJOINSEL: Oid = 105;
+    const F_NEQJOINSEL: Oid = 106;
+
+    let clause = node.as_scalar_array_op_expr().expect("ScalarArrayOpExpr");
+    let operator = clause.opno;
+    let use_or = clause.useOr;
+    debug_assert!(clause.args.len() == 2);
+    let leftop = clause.args.nth(0);
+    let rightop = clause.args.nth(1);
+
+    let (rightop_type, _) = crate::costsize::expr_type_typmod(rightop);
+    let nominal_element_type = lsyscache::get_element_type(rightop_type)?;
+    if nominal_element_type == 0 {
+        return Ok(0.5);
+    }
+    let nominal_element_collation = expr_collation(rightop);
+    let rightop = strip_array_coercion(rightop);
+
+    if rightop.node_tag() == NodeTag::T_Var {
+        panic!("scalararraysel_containment (array_selfuncs.c): array-column operand; M2 lane");
+    }
+
+    let oprsel = if is_join_clause {
+        lsyscache::get_oprjoin(operator)?
+    } else {
+        lsyscache::get_oprrest(operator)?
+    };
+    if oprsel == 0 {
+        return Ok(0.5);
+    }
+    let is_equality = oprsel == F_EQSEL || oprsel == F_EQJOINSEL;
+    let is_inequality = oprsel == F_NEQSEL || oprsel == F_NEQJOINSEL;
+
+    let left_id = run.intern_expr(leftop);
+    let mut elem_sel = |run: &mut PlannerRun<'mcx>,
+                        value: Datum,
+                        isnull: bool,
+                        elmlen: i16,
+                        elmbyval: bool|
+     -> PgResult<f64> {
+        let elem = Node::mk(
+            run.mcx,
+            types_nodes::primnodes::Const {
+                consttype: nominal_element_type,
+                consttypmod: -1,
+                constcollid: nominal_element_collation,
+                constlen: elmlen as i32,
+                constvalue: value,
+                constisnull: isnull,
+                constbyval: elmbyval,
+                location: -1,
+            },
+        )?;
+        let elem_id = run.intern_expr(elem);
+        let args = [left_id, elem_id];
+        if is_join_clause {
+            crate::plancat::join_selectivity(
+                run,
+                operator,
+                &args,
+                clause.inputcollid,
+                jointype,
+                sjinfo,
+            )
+        } else {
+            crate::plancat::restriction_selectivity(
+                run,
+                operator,
+                &args,
+                clause.inputcollid,
+                varrelid,
+            )
+        }
+    };
+
+    let mut s1;
+    let mut s1disjoint;
+    if let Some(c) = rightop.as_const() {
+        if c.constisnull {
+            return Ok(0.0);
+        }
+        let p = c.constvalue.as_usize() as *const u8;
+        // SAFETY: non-null array datum; planner consts carry inline 4-byte
+        // headers.
+        let b0 = unsafe { *p };
+        assert!(b0 != 0x01 && b0 & 0x03 == 0, "scalararraysel: toasted/packed array const");
+        // SAFETY: 4-byte varlena header verified; image is VARSIZE bytes.
+        let img = unsafe {
+            core::slice::from_raw_parts(
+                p,
+                arrayfuncs::arr_size(core::slice::from_raw_parts(p, 4)),
+            )
+        };
+        let elemtype = arrayfuncs::arr_elemtype(img);
+        let (elmlen, elmbyval, elmalign) = lsyscache::get_typlenbyvalalign(elemtype)?;
+        let (values, nulls) = arrayfuncs::deconstruct_array(
+            run.mcx, img, elmlen as i32, elmbyval, elmalign as u8, true,
+        )?;
+
+        s1 = if use_or { 0.0 } else { 1.0 };
+        s1disjoint = s1;
+        for (i, &v) in values.iter().enumerate() {
+            let s2 = elem_sel(run, v, nulls[i], elmlen, elmbyval)?;
+            if use_or {
+                s1 = s1 + s2 - s1 * s2;
+                if is_equality {
+                    s1disjoint += s2;
+                }
+            } else {
+                s1 *= s2;
+                if is_inequality {
+                    s1disjoint += s2 - 1.0;
+                }
+            }
+        }
+        if (if use_or { is_equality } else { is_inequality })
+            && (0.0..=1.0).contains(&s1disjoint)
+        {
+            s1 = s1disjoint;
+        }
+    } else if let Some(arrayexpr) =
+        rightop.as_array_expr().filter(|a| !a.multidims)
+    {
+        s1 = if use_or { 0.0 } else { 1.0 };
+        s1disjoint = s1;
+        for elem in arrayexpr.elements.iter() {
+            let elem_id = run.intern_expr(elem);
+            let args = [left_id, elem_id];
+            let s2 = if is_join_clause {
+                crate::plancat::join_selectivity(
+                    run,
+                    operator,
+                    &args,
+                    clause.inputcollid,
+                    jointype,
+                    sjinfo,
+                )?
+            } else {
+                crate::plancat::restriction_selectivity(
+                    run,
+                    operator,
+                    &args,
+                    clause.inputcollid,
+                    varrelid,
+                )?
+            };
+            if use_or {
+                s1 = s1 + s2 - s1 * s2;
+                if is_equality {
+                    s1disjoint += s2;
+                }
+            } else {
+                s1 *= s2;
+                if is_inequality {
+                    s1disjoint += s2 - 1.0;
+                }
+            }
+        }
+        if (if use_or { is_equality } else { is_inequality })
+            && (0.0..=1.0).contains(&s1disjoint)
+        {
+            s1 = s1disjoint;
+        }
+    } else {
+        // C estimates a dummy CaseTestExpr comparison over 10 elements.
+        panic!("scalararraysel (selfuncs.c): non-constant array operand; M2 lane");
+    }
+
+    Ok(clamp_probability(s1))
+}
+
+// estimate_array_length (selfuncs.c); the pg_statistic DECHIST leg (array
+// variables) is unreachable while scalararraysel's array-column arm is loud.
+pub fn estimate_array_length(node: Node<'_>) -> f64 {
+    let node = strip_array_coercion(node);
+    if let Some(c) = node.as_const() {
+        if c.constisnull {
+            return 0.0;
+        }
+        let p = c.constvalue.as_usize() as *const u8;
+        // SAFETY: non-null inline-header array datum (as scalararraysel).
+        let b0 = unsafe { *p };
+        assert!(b0 != 0x01 && b0 & 0x03 == 0, "estimate_array_length: toasted array const");
+        // SAFETY: 4-byte varlena header verified.
+        let img = unsafe {
+            core::slice::from_raw_parts(
+                p,
+                arrayfuncs::arr_size(core::slice::from_raw_parts(p, 4)),
+            )
+        };
+        let ndim = arrayfuncs::arr_ndim(img);
+        let mut n = 1f64;
+        for i in 0..ndim as usize {
+            n *= arrayfuncs::arr_dim(img, i) as f64;
+        }
+        if ndim == 0 {
+            n = 0.0;
+        }
+        return n;
+    }
+    if let Some(a) = node.as_array_expr().filter(|a| !a.multidims) {
+        return a.elements.len() as f64;
+    }
+    10.0
 }

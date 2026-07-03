@@ -305,6 +305,14 @@ fn clause_selectivity_node<'mcx>(
             };
             Ok(s)
         }
+        NodeTag::T_FuncExpr => {
+            let f = clause.as_func_expr().unwrap();
+            crate::plancat::function_selectivity(f.funcid)
+        }
+        NodeTag::T_ScalarArrayOpExpr => {
+            let is_join = treat_as_join_clause(run, None, clause, varrelid, sjinfo)?;
+            crate::selfuncs::scalararraysel(run, clause, is_join, varrelid, jointype, sjinfo)
+        }
         NodeTag::T_NullTest => {
             use types_nodes::primnodes::NullTestType;
             let nt = clause.as_null_test().unwrap();

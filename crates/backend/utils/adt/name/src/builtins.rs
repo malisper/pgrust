@@ -26,6 +26,48 @@ macro_rules! fc_namecmp {
     )*};
 }
 
+macro_rules! fc_nametext {
+    ($($fname:ident: $core:ident -> $conv:ident;)*) => {$(
+        pub fn $fname(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+            let a = arg_name(fcinfo, 0);
+            // SAFETY: catalog arg of these strict fns is a non-null text varlena.
+            let b = unsafe { fcinfo.arg_varlena_packed(1)? };
+            Ok(Datum::$conv(crate::$core(&a, b.data(), fcinfo.get_collation())?))
+        }
+    )*};
+}
+
+fc_nametext! {
+    fc_nameeqtext: nameeqtext -> from_bool;
+    fc_namelttext: namelttext -> from_bool;
+    fc_nameletext: nameletext -> from_bool;
+    fc_namegetext: namegetext -> from_bool;
+    fc_namegttext: namegttext -> from_bool;
+    fc_namenetext: namenetext -> from_bool;
+    fc_btnametextcmp: btnametextcmp -> from_i32;
+}
+
+macro_rules! fc_textname {
+    ($($fname:ident: $core:ident -> $conv:ident;)*) => {$(
+        pub fn $fname(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+            // SAFETY: catalog arg of these strict fns is a non-null text varlena.
+            let a = unsafe { fcinfo.arg_varlena_packed(0)? };
+            let b = arg_name(fcinfo, 1);
+            Ok(Datum::$conv(crate::$core(a.data(), &b, fcinfo.get_collation())?))
+        }
+    )*};
+}
+
+fc_textname! {
+    fc_texteqname: texteqname -> from_bool;
+    fc_textltname: textltname -> from_bool;
+    fc_textlename: textlename -> from_bool;
+    fc_textgename: textgename -> from_bool;
+    fc_textgtname: textgtname -> from_bool;
+    fc_textnename: textnename -> from_bool;
+    fc_bttextnamecmp: bttextnamecmp -> from_i32;
+}
+
 fc_namecmp! {
     fc_nameeq: nameeq -> from_bool;
     fc_namene: namene -> from_bool;
@@ -93,6 +135,20 @@ pub const NAME_BUILTINS: &[FmgrBuiltin] = &[
     b(34, "namein", 1, fc_namein),
     b(35, "nameout", 1, fc_nameout),
     b(62, "nameeq", 2, fc_nameeq),
+    b(240, "nameeqtext", 2, fc_nameeqtext),
+    b(241, "namelttext", 2, fc_namelttext),
+    b(242, "nameletext", 2, fc_nameletext),
+    b(243, "namegetext", 2, fc_namegetext),
+    b(244, "namegttext", 2, fc_namegttext),
+    b(245, "namenetext", 2, fc_namenetext),
+    b(246, "btnametextcmp", 2, fc_btnametextcmp),
+    b(247, "texteqname", 2, fc_texteqname),
+    b(248, "textltname", 2, fc_textltname),
+    b(249, "textlename", 2, fc_textlename),
+    b(250, "textgename", 2, fc_textgename),
+    b(251, "textgtname", 2, fc_textgtname),
+    b(252, "textnename", 2, fc_textnename),
+    b(253, "bttextnamecmp", 2, fc_bttextnamecmp),
     b(359, "btnamecmp", 2, fc_btnamecmp),
     b(655, "namelt", 2, fc_namelt),
     b(656, "namele", 2, fc_namele),

@@ -15,6 +15,7 @@ const TABLES: &[&[FmgrBuiltin]] = &[
     ::adt_json::builtins::JSON_BUILTINS,
     ::adt_jsonb::builtins::JSONB_BUILTINS,
     ::adt_like::builtins::LIKE_BUILTINS,
+    ::adt_regexp::builtins::REGEXP_BUILTINS,
     ::adt_mac::builtins::MAC_BUILTINS,
     ::adt_mac8::builtins::MAC8_BUILTINS,
     ::adt_uuid::builtins::UUID_BUILTINS,

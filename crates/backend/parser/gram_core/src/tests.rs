@@ -689,6 +689,33 @@ fn subquery_op_sub_type_shapes() {
     assert!(sl.subselect.as_select_stmt().is_some());
 }
 
+#[test]
+fn in_list_shapes() {
+    use types_nodes::rawnodes::A_Expr_Kind;
+
+    let list = parse("SELECT 1 WHERE 'r' IN ('r', 'p');");
+    let sel = select_of(only_stmt(&list));
+    let e = sel.whereClause.expect("WHERE").as_a_expr().expect("A_Expr");
+    assert!(matches!(e.kind, A_Expr_Kind::AEXPR_IN));
+    assert_eq!(e.name.nth(0).as_string().unwrap().sval, "=");
+    assert!(e.lexpr.expect("lexpr").as_a_const().is_some());
+    let items = e.rexpr.expect("rexpr").as_list().expect("List");
+    assert_eq!(items.len(), 2);
+    assert_eq!(e.location, 19);
+    assert_eq!(e.rexpr_list_start, 22);
+    assert_eq!(e.rexpr_list_end, 31);
+
+    let list = parse("SELECT 1 WHERE 'r' NOT IN ('r', 'p');");
+    let sel = select_of(only_stmt(&list));
+    let e = sel.whereClause.expect("WHERE").as_a_expr().expect("A_Expr");
+    assert!(matches!(e.kind, A_Expr_Kind::AEXPR_IN));
+    assert_eq!(e.name.nth(0).as_string().unwrap().sval, "<>");
+    assert_eq!(e.rexpr.expect("rexpr").as_list().expect("List").len(), 2);
+    assert_eq!(e.location, 19);
+    assert_eq!(e.rexpr_list_start, 26);
+    assert_eq!(e.rexpr_list_end, 35);
+}
+
 fn set_of<'a>(rs: &RawStmt<'a>) -> &'a types_nodes::parsenodes::VariableSetStmt<'a> {
     rs.stmt.expect("stmt").as_variable_set_stmt().expect("VariableSetStmt")
 }

@@ -326,6 +326,7 @@ members = [
     "crates/backend/regex/regex_core_seams",
     "crates/backend/regex/regex_core",
     "crates/backend/utils/adt/regexp_seams",
+    "crates/backend/utils/adt/regexp",
     "crates/backend/utils/adt/name",
     "crates/backend/utils/adt/format_type",
     "crates/backend/utils/resowner/resowner",

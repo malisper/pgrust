@@ -183,6 +183,21 @@ pub fn get_ordering_op_for_equality_op(opno: Oid, use_lhs_type: bool) -> PgResul
     })
 }
 
+// pg_amop rows for an operator, visitor form (get_op_btree_interpretation's
+// membership probe rides this).
+pub fn with_amop_members(
+    opno: Oid,
+    mut f: impl FnMut(&syscache_seams::PgAmopMemberShape),
+) -> PgResult<()> {
+    with_scratch(|scratch| {
+        let members = syscache_seams::lookup_pg_amop_members_by_operator::call(scratch, opno)?;
+        for aform in &members {
+            f(aform);
+        }
+        Ok(())
+    })
+}
+
 pub fn get_mergejoin_opfamilies<'mcx>(mcx: Mcx<'mcx>, opno: Oid) -> PgResult<PgVec<'mcx, Oid>> {
     let mut result = PgVec::new_in(mcx);
     with_scratch(|scratch| {

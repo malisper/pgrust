@@ -25,8 +25,9 @@ executils = { path = "../executils" }
 exectuples = { path = "../exectuples" }
 init_small = { path = "../../utils/init/init_small" }
 
-[dev-dependencies]
 datum = { path = "../../../_support/types/datum" }
+
+[dev-dependencies]
 types_fmgr = { path = "../../../_support/types/fmgr" }
 types_nbtree = { path = "../../../_support/types/types_nbtree" }
 types_snapshot = { path = "../../../_support/types/snapshot" }

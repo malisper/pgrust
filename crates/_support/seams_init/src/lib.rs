@@ -167,4 +167,5 @@ pub fn init_all() {
     snapmgr::init_seams();
     pg_prng::init_seams();
     regex_core::init_seams();
+    adt_regexp::init_seams();
 }

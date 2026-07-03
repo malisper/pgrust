@@ -221,13 +221,17 @@ fn install_type_fixture() {
             }))
         });
         syscache_seams::pg_type_base_shape::set(|typid| {
+            // 1007 = _int4; 6179 = array_subscript_handler (pg_type/pg_proc.dat).
             Ok(Some(syscache_seams::PgTypeBaseShape {
                 typtype: if typid == UNKNOWNOID { b'p' as i8 } else { b'b' as i8 },
                 typbasetype: InvalidOid,
                 typtypmod: -1,
-                typelem: InvalidOid,
-                typsubscript: InvalidOid,
+                typelem: if typid == 1007 { INT4OID } else { InvalidOid },
+                typsubscript: if typid == 1007 { 6179 } else { InvalidOid },
             }))
+        });
+        syscache_seams::pg_type_typarray::set(|typid| {
+            Ok((typid == INT4OID).then_some(1007))
         });
         syscache_seams::pg_type_io_shape::set(|typid| {
             Ok((typid == TEXTOID).then_some(syscache_seams::PgTypeIoShape {
@@ -257,6 +261,9 @@ fn install_type_fixture() {
             }
             if name == "=" && l == INT4OID && r == INT4OID {
                 v.push((96, 11));
+            }
+            if name == "<>" && l == INT4OID && r == INT4OID {
+                v.push((518, 11));
             }
             Ok(v)
         });
@@ -301,19 +308,33 @@ fn install_type_fixture() {
                     oprcanmerge: true,
                     oprcanhash: true,
                 }),
+                // 518 = int4ne (proc 144 -> bool).
+                518 => Some(syscache_seams::PgOperatorShape {
+                    oprleft: INT4OID,
+                    oprright: INT4OID,
+                    oprresult: BOOLOID,
+                    oprcom: 518,
+                    oprnegate: 96,
+                    oprcode: 144,
+                    oprrest: 102,
+                    oprjoin: 106,
+                    oprcanmerge: false,
+                    oprcanhash: false,
+                }),
                 _ => None,
             })
         });
         syscache_seams::pg_operator_name_candidates_exist::set(|name, _| {
-            Ok(name == "+" || name == ">" || name == "=")
+            Ok(name == "+" || name == ">" || name == "=" || name == "<>")
         });
         syscache_seams::lookup_pg_proc_shape::set(|funcid| {
             Ok(match funcid {
-                // 481 = int8(int4), the pg_cast int4->int8 coercion function.
-                177 | 147 | 481 | 65 => Some(syscache_seams::PgProcShape {
+                // 481 = int8(int4), the pg_cast int4->int8 coercion function;
+                // 144 = int4ne.
+                177 | 147 | 481 | 65 | 144 => Some(syscache_seams::PgProcShape {
                     pronamespace: 11,
                     prorettype: match funcid {
-                        147 | 65 => BOOLOID,
+                        147 | 65 | 144 => BOOLOID,
                         481 => INT8OID,
                         _ => INT4OID,
                     },
@@ -1957,6 +1978,64 @@ mod from_where {
         assert_eq!(sub.commandType, CmdType::CMD_SELECT);
         assert!(!sub.hasSubLinks);
         assert_eq!(sub.rtable.len(), 1);
+    }
+
+    // Query shape asserted against C 18.3: x IN (1, 2) becomes
+    // ScalarArrayOpExpr(= ANY) over an int4[] ArrayExpr; NOT IN becomes
+    // ScalarArrayOpExpr(<> ALL).
+    #[test]
+    fn in_list_end_to_end() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let q = analyze_sql(mcx, "SELECT x FROM t WHERE x IN (1, 2)").unwrap();
+        let saop = q.jointree.unwrap().quals.unwrap().as_scalar_array_op_expr().unwrap();
+        assert!(saop.useOr);
+        // 96 = int4eq operator, 65 = int4eq proc.
+        assert_eq!((saop.opno, saop.opfuncid), (96, 65));
+        assert_eq!((saop.hashfuncid, saop.negfuncid), (types_core::InvalidOid, types_core::InvalidOid));
+        assert_eq!(saop.inputcollid, types_core::InvalidOid);
+        assert_eq!(saop.location, 24);
+        assert_eq!(saop.args.len(), 2);
+        let v = saop.args.nth(0).as_var().unwrap();
+        assert_eq!((v.varno, v.varattno), (1, 1));
+        let arr = saop.args.nth(1).as_array_expr().unwrap();
+        // 1007 = _int4.
+        assert_eq!((arr.array_typeid, arr.element_typeid), (1007, 23));
+        assert_eq!(arr.array_collid, types_core::InvalidOid);
+        assert!(!arr.multidims);
+        assert_eq!((arr.list_start, arr.list_end), (27, 32));
+        assert_eq!(arr.location, -1);
+        assert_eq!(arr.elements.len(), 2);
+        assert_eq!(arr.elements.nth(0).as_const().unwrap().constvalue.as_i32(), 1);
+        assert_eq!(arr.elements.nth(1).as_const().unwrap().constvalue.as_i32(), 2);
+
+        let q = analyze_sql(mcx, "SELECT x FROM t WHERE x NOT IN (1, 2)").unwrap();
+        let saop = q.jointree.unwrap().quals.unwrap().as_scalar_array_op_expr().unwrap();
+        assert!(!saop.useOr);
+        // 518 = int4ne operator, 144 = int4ne proc.
+        assert_eq!((saop.opno, saop.opfuncid), (518, 144));
+        assert_eq!(saop.args.nth(1).as_array_expr().unwrap().elements.len(), 2);
+    }
+
+    // C: a single-item IN list never builds a ScalarArrayOpExpr — it falls
+    // back to the plain operator tree.
+    #[test]
+    fn in_single_item_end_to_end() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let q = analyze_sql(mcx, "SELECT x FROM t WHERE x IN (1)").unwrap();
+        let op = q.jointree.unwrap().quals.unwrap().as_op_expr().unwrap();
+        assert_eq!(op.opno, 96);
+        assert!(op.args.nth(0).as_var().is_some());
+        assert_eq!(op.args.nth(1).as_const().unwrap().constvalue.as_i32(), 1);
+
+        let q = analyze_sql(mcx, "SELECT x FROM t WHERE x NOT IN (1)").unwrap();
+        let op = q.jointree.unwrap().quals.unwrap().as_op_expr().unwrap();
+        assert_eq!(op.opno, 518);
     }
 
     #[test]

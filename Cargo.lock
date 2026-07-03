@@ -313,6 +313,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_fmgr",
+ "types_nodes",
  "types_tuple",
  "wchar",
 ]
@@ -407,6 +408,22 @@ dependencies = [
  "types_error",
  "types_fmgr",
  "varlena",
+]
+
+[[package]]
+name = "adt_regexp"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "mbutils",
+ "mcx",
+ "regex",
+ "regex_core",
+ "regexp_seams",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "wchar",
 ]
 
 [[package]]
@@ -954,6 +971,7 @@ dependencies = [
  "catcache",
  "datum",
  "detoast",
+ "detoast_seams",
  "heaptuple",
  "init_small",
  "inval",
@@ -1347,6 +1365,7 @@ dependencies = [
 name = "clauses"
 version = "0.1.0"
 dependencies = [
+ "arrayfuncs",
  "clauses_seams",
  "datum",
  "fmgr_core",
@@ -2111,6 +2130,7 @@ dependencies = [
  "adt_datetime",
  "adt_int",
  "adt_timestamp",
+ "arrayfuncs",
  "clauses_seams",
  "datum",
  "elog",
@@ -2544,6 +2564,7 @@ dependencies = [
  "adt_numeric",
  "adt_oracle_compat",
  "adt_pseudotypes",
+ "adt_regexp",
  "adt_regproc",
  "adt_scalar",
  "adt_timestamp",
@@ -4967,6 +4988,7 @@ dependencies = [
  "types_error",
  "types_nodes",
  "types_tuple",
+ "vars",
  "wchar",
 ]
 
@@ -5562,6 +5584,7 @@ name = "planner"
 version = "0.1.0"
 dependencies = [
  "adt_int8",
+ "arrayfuncs",
  "backend_status_seams",
  "bufmgr_seams",
  "clauses",
@@ -5575,6 +5598,7 @@ dependencies = [
  "indexam",
  "init_small",
  "lsyscache",
+ "mbutils",
  "mcx",
  "nbtree",
  "nodeagg",
@@ -5584,8 +5608,10 @@ dependencies = [
  "parse_relation",
  "parser_analyze",
  "parser_small1",
+ "pg_locale",
  "planner_seams",
  "procarray_seams",
+ "regexp_seams",
  "relation_seams",
  "relcache",
  "relcache_build_seams",
@@ -7092,6 +7118,7 @@ dependencies = [
  "adt_acl",
  "adt_bool",
  "adt_float",
+ "adt_regexp",
  "adt_timestamp",
  "aio_config",
  "auth",

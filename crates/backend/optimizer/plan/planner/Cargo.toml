@@ -27,6 +27,10 @@ clauses = { path = "../../util/clauses" }
 fmgr_core = { path = "../../../utils/fmgr/fmgr_core" }
 types_fmgr = { path = "../../../../_support/types/fmgr" }
 lsyscache = { path = "../../../utils/cache/lsyscache" }
+arrayfuncs = { path = "../../../utils/adt/arrayfuncs" }
+mbutils = { path = "../../../utils/mb/mbutils" }
+pg_locale = { path = "../../../utils/adt/pg_locale" }
+regexp_seams = { path = "../../../utils/adt/regexp_seams" }
 guc_tables = { path = "../../../utils/misc/guc_tables" }
 init_small = { path = "../../../utils/init/init_small" }
 tidbitmap = { path = "../../../nodes/tidbitmap" }

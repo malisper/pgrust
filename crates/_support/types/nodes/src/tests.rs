@@ -1147,6 +1147,30 @@ fn join_expr_field_order_matches_c() {
 }
 
 #[test]
+fn scalar_array_op_expr_field_order_matches_c() {
+    let prim_h = include_str!("../vendor/primnodes.h");
+    let mut c_fields = c_struct_fields(prim_h, "ScalarArrayOpExpr");
+    assert_eq!(c_fields.remove(0), "xpr");
+    assert_eq!(
+        c_fields,
+        ["opno", "opfuncid", "hashfuncid", "negfuncid", "useOr", "inputcollid", "args",
+         "location"]
+    );
+}
+
+#[test]
+fn array_expr_field_order_matches_c() {
+    let prim_h = include_str!("../vendor/primnodes.h");
+    let mut c_fields = c_struct_fields(prim_h, "ArrayExpr");
+    assert_eq!(c_fields.remove(0), "xpr");
+    assert_eq!(
+        c_fields,
+        ["array_typeid", "array_collid", "element_typeid", "elements", "multidims",
+         "list_start", "list_end", "location"]
+    );
+}
+
+#[test]
 fn sublink_field_order_matches_c() {
     let prim_h = include_str!("../vendor/primnodes.h");
     let rust_order =

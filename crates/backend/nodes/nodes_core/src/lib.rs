@@ -130,6 +130,14 @@ pub fn expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
             let o = node.as_variant::<OpExpr>().unwrap();
             walk_list(&o.args, w)
         }
+        NodeTag::T_ScalarArrayOpExpr => {
+            let sa = node.as_scalar_array_op_expr().unwrap();
+            walk_list(&sa.args, w)
+        }
+        NodeTag::T_ArrayExpr => {
+            let a = node.as_array_expr().unwrap();
+            walk_list(&a.elements, w)
+        }
         NodeTag::T_BoolExpr => {
             let b = node.as_bool_expr().unwrap();
             walk_list(&b.args, w)
@@ -454,9 +462,18 @@ where
             let (outfunc, _) = lsyscache::getTypeOutputInfo(coerce_io_arg_type(c.arg))?;
             checker(outfunc)
         }
+        NodeTag::T_ScalarArrayOpExpr => {
+            let sa = node.as_scalar_array_op_expr().unwrap();
+            // set_sa_opfuncid, re-derived per visit as the OpExpr arm above.
+            let opfuncid = if sa.opfuncid == 0 {
+                lsyscache::operator::get_opcode(sa.opno)?
+            } else {
+                sa.opfuncid
+            };
+            checker(opfuncid)
+        }
         t @ (NodeTag::T_DistinctExpr
         | NodeTag::T_NullIfExpr
-        | NodeTag::T_ScalarArrayOpExpr
         | NodeTag::T_RowCompareExpr) => deferred("check_functions_in_node", t),
         _ => Ok(false),
     }
@@ -628,6 +645,44 @@ where
                         inputcollid: o.inputcollid,
                         args,
                         location: o.location,
+                    },
+                )?)),
+            }
+        }
+        NodeTag::T_ScalarArrayOpExpr => {
+            let sa = node.as_scalar_array_op_expr().unwrap();
+            match mutate_list(mcx, &sa.args, m)? {
+                None => Ok(None),
+                Some(args) => Ok(Some(Node::mk(
+                    mcx,
+                    types_nodes::primnodes::ScalarArrayOpExpr {
+                        opno: sa.opno,
+                        opfuncid: sa.opfuncid,
+                        hashfuncid: sa.hashfuncid,
+                        negfuncid: sa.negfuncid,
+                        useOr: sa.useOr,
+                        inputcollid: sa.inputcollid,
+                        args,
+                        location: sa.location,
+                    },
+                )?)),
+            }
+        }
+        NodeTag::T_ArrayExpr => {
+            let a = node.as_array_expr().unwrap();
+            match mutate_list(mcx, &a.elements, m)? {
+                None => Ok(None),
+                Some(elements) => Ok(Some(Node::mk(
+                    mcx,
+                    types_nodes::primnodes::ArrayExpr {
+                        array_typeid: a.array_typeid,
+                        array_collid: a.array_collid,
+                        element_typeid: a.element_typeid,
+                        elements,
+                        multidims: a.multidims,
+                        list_start: a.list_start,
+                        list_end: a.list_end,
+                        location: a.location,
                     },
                 )?)),
             }

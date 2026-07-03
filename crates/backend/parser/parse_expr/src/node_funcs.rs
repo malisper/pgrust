@@ -16,6 +16,8 @@ pub fn expr_type(node: Node<'_>) -> Oid {
         NodeTag::T_Var => node.as_var().unwrap().vartype,
         NodeTag::T_Param => node.as_param().unwrap().paramtype,
         NodeTag::T_OpExpr => node.as_op_expr().unwrap().opresulttype,
+        NodeTag::T_ScalarArrayOpExpr => types_core::catalog::BOOLOID,
+        NodeTag::T_ArrayExpr => node.as_array_expr().unwrap().array_typeid,
         NodeTag::T_FuncExpr => node.as_func_expr().unwrap().funcresulttype,
         NodeTag::T_Aggref => node.as_aggref().unwrap().aggtype,
         NodeTag::T_WindowFunc => node.as_window_func().unwrap().wintype,
@@ -77,6 +79,8 @@ pub fn expr_typmod(node: Node<'_>) -> i32 {
         NodeTag::T_SetToDefault => node.as_set_to_default().unwrap().typeMod,
         NodeTag::T_CaseTestExpr => node.as_case_test_expr().unwrap().typeMod,
         NodeTag::T_OpExpr
+        | NodeTag::T_ScalarArrayOpExpr
+        | NodeTag::T_ArrayExpr
         | NodeTag::T_FuncExpr
         | NodeTag::T_Aggref
         | NodeTag::T_GroupingFunc
@@ -135,6 +139,8 @@ pub fn expr_collation(node: Node<'_>) -> Oid {
         NodeTag::T_Var => node.as_var().unwrap().varcollid,
         NodeTag::T_Param => node.as_param().unwrap().paramcollid,
         NodeTag::T_OpExpr => node.as_op_expr().unwrap().opcollid,
+        NodeTag::T_ScalarArrayOpExpr => types_core::InvalidOid,
+        NodeTag::T_ArrayExpr => node.as_array_expr().unwrap().array_collid,
         NodeTag::T_FuncExpr => node.as_func_expr().unwrap().funccollid,
         NodeTag::T_Aggref => node.as_aggref().unwrap().aggcollid,
         NodeTag::T_WindowFunc => node.as_window_func().unwrap().wincollid,
@@ -208,6 +214,12 @@ pub fn expr_location(node: Node<'_>) -> ParseLoc {
             let op = node.as_op_expr().unwrap();
             leftmost_loc(op.location, expr_location_list(&op.args))
         }
+        NodeTag::T_ScalarArrayOpExpr => {
+            let s = node.as_scalar_array_op_expr().unwrap();
+            leftmost_loc(s.location, expr_location_list(&s.args))
+        }
+        // C: the ARRAY or [ keyword is always leftmost.
+        NodeTag::T_ArrayExpr => node.as_array_expr().unwrap().location,
         NodeTag::T_FuncExpr => {
             let f = node.as_func_expr().unwrap();
             leftmost_loc(f.location, expr_location_list(&f.args))

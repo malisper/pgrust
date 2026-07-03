@@ -68,30 +68,66 @@ fn install_oper_fixture() {
         miscinit_seams::get_user_id::set(|| 10);
         syscache_seams::lookup_pg_operator_candidates::set(|mcx, name, l, r| {
             let mut v = mcx::vec_with_capacity_in(mcx, 1)?;
-            if name == "+" && l == INT4OID && r == INT4OID {
-                v.push((551, 11));
+            if l == INT4OID && r == INT4OID {
+                match name {
+                    "+" => v.push((551, 11)),
+                    "=" => v.push((96, 11)),
+                    "<>" => v.push((518, 11)),
+                    _ => {}
+                }
             }
             Ok(v)
         });
         syscache_seams::lookup_pg_operator_shape::set(|opno| {
-            Ok((opno == 551).then_some(syscache_seams::PgOperatorShape {
-                oprleft: INT4OID,
-                oprright: INT4OID,
-                oprresult: INT4OID,
-                oprcom: 551,
-                oprnegate: InvalidOid,
-                oprcode: 177,
-                oprrest: InvalidOid,
-                oprjoin: InvalidOid,
-                oprcanmerge: false,
-                oprcanhash: false,
-            }))
+            // 551 = int4pl (proc 177 -> int4); 96 = int4eq (proc 65 -> bool);
+            // 518 = int4ne (proc 144 -> bool); pg_operator.dat/pg_proc.dat.
+            Ok(match opno {
+                551 => Some(syscache_seams::PgOperatorShape {
+                    oprleft: INT4OID,
+                    oprright: INT4OID,
+                    oprresult: INT4OID,
+                    oprcom: 551,
+                    oprnegate: InvalidOid,
+                    oprcode: 177,
+                    oprrest: InvalidOid,
+                    oprjoin: InvalidOid,
+                    oprcanmerge: false,
+                    oprcanhash: false,
+                }),
+                96 => Some(syscache_seams::PgOperatorShape {
+                    oprleft: INT4OID,
+                    oprright: INT4OID,
+                    oprresult: types_core::catalog::BOOLOID,
+                    oprcom: 96,
+                    oprnegate: 518,
+                    oprcode: 65,
+                    oprrest: 101,
+                    oprjoin: 105,
+                    oprcanmerge: true,
+                    oprcanhash: true,
+                }),
+                518 => Some(syscache_seams::PgOperatorShape {
+                    oprleft: INT4OID,
+                    oprright: INT4OID,
+                    oprresult: types_core::catalog::BOOLOID,
+                    oprcom: 518,
+                    oprnegate: 96,
+                    oprcode: 144,
+                    oprrest: 102,
+                    oprjoin: 106,
+                    oprcanmerge: false,
+                    oprcanhash: false,
+                }),
+                _ => None,
+            })
         });
-        syscache_seams::pg_operator_name_candidates_exist::set(|name, _| Ok(name == "+"));
+        syscache_seams::pg_operator_name_candidates_exist::set(|name, _| {
+            Ok(name == "+" || name == "=" || name == "<>")
+        });
         syscache_seams::lookup_pg_proc_shape::set(|funcid| {
-            Ok((funcid == 177).then_some(syscache_seams::PgProcShape {
+            Ok(matches!(funcid, 177 | 65 | 144).then_some(syscache_seams::PgProcShape {
                 pronamespace: 11,
-                prorettype: INT4OID,
+                prorettype: if funcid == 177 { INT4OID } else { types_core::catalog::BOOLOID },
                 provariadic: InvalidOid,
                 prosupport: InvalidOid,
                 pronargs: 2,
@@ -103,7 +139,60 @@ fn install_oper_fixture() {
                 proleakproof: false,
             }))
         });
+        // 1007 = _int4.
+        syscache_seams::pg_type_typarray::set(|typid| Ok((typid == INT4OID).then_some(1007)));
     });
+}
+
+#[test]
+fn a_expr_in_transforms_to_scalar_array_op_expr() {
+    install_typecast_fixture();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+
+    let in_aexpr = |op: &'static str| {
+        let name = NodeList::make1(mcx, Node::mk(mcx, PgStr { sval: op }).unwrap()).unwrap();
+        let mut items = NodeList::nil();
+        items.lappend(mcx, int_const(mcx, 1, 28)).unwrap();
+        items.lappend(mcx, int_const(mcx, 2, 31)).unwrap();
+        Node::mk(
+            mcx,
+            types_nodes::rawnodes::A_Expr {
+                kind: A_Expr_Kind::AEXPR_IN,
+                name,
+                lexpr: Some(int_const(mcx, 7, 20)),
+                rexpr: Some(Node::mk_list(mcx, items).unwrap()),
+                rexpr_list_start: 27,
+                rexpr_list_end: 33,
+                location: 22,
+            },
+        )
+        .unwrap()
+    };
+
+    let out = transformExpr(mcx, &mut pstate, in_aexpr("="), ParseExprKind::EXPR_KIND_SELECT_TARGET)
+        .unwrap();
+    let saop = out.as_scalar_array_op_expr().unwrap();
+    assert!(saop.useOr);
+    assert_eq!((saop.opno, saop.opfuncid), (96, 65));
+    assert_eq!((saop.hashfuncid, saop.negfuncid), (InvalidOid, InvalidOid));
+    assert_eq!(saop.location, 22);
+    assert_eq!(saop.args.len(), 2);
+    assert_eq!(saop.args.nth(0).as_const().unwrap().constvalue.as_i32(), 7);
+    let arr = saop.args.nth(1).as_array_expr().unwrap();
+    assert_eq!((arr.array_typeid, arr.element_typeid), (1007, INT4OID));
+    assert!(!arr.multidims);
+    assert_eq!((arr.list_start, arr.list_end, arr.location), (27, 33, -1));
+    assert_eq!(arr.elements.len(), 2);
+    assert_eq!(expr_type(out), types_core::catalog::BOOLOID);
+
+    let out =
+        transformExpr(mcx, &mut pstate, in_aexpr("<>"), ParseExprKind::EXPR_KIND_SELECT_TARGET)
+            .unwrap();
+    let saop = out.as_scalar_array_op_expr().unwrap();
+    assert!(!saop.useOr);
+    assert_eq!((saop.opno, saop.opfuncid), (518, 144));
 }
 
 #[test]
@@ -223,13 +312,14 @@ fn install_typecast_fixture() {
         });
         syscache_seams::pg_type_isdefined::set(|_| Ok(Some(true)));
         syscache_seams::pg_type_typtype::set(|_| Ok(Some(b'b' as i8)));
-        syscache_seams::pg_type_base_shape::set(|_| {
+        syscache_seams::pg_type_base_shape::set(|typid| {
+            // 1007 = _int4; 6179 = array_subscript_handler.
             Ok(Some(syscache_seams::PgTypeBaseShape {
                 typtype: b'b' as i8,
                 typbasetype: InvalidOid,
                 typtypmod: -1,
-                typelem: InvalidOid,
-                typsubscript: InvalidOid,
+                typelem: if typid == 1007 { INT4OID } else { InvalidOid },
+                typsubscript: if typid == 1007 { 6179 } else { InvalidOid },
             }))
         });
         syscache_seams::pg_type_io_shape::set(|typid| {

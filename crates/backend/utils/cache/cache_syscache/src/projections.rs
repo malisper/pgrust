@@ -17,7 +17,7 @@ use crate::{
     SearchSysCache3, SearchSysCache4, SearchSysCacheExists, SearchSysCacheList, SearchSysCacheList1,
     SysCacheKey,
 };
-use crate::cacheinfo::{AGGFNOID, AMOPOPID, AMOPSTRATEGY, AMPROCNUM, ATTNUM, CLAOID, OPFAMILYOID, PROCNAMEARGSNSP, AUTHNAME, AUTHOID, CASTSOURCETARGET, CONSTROID, INDEXRELID, NAMESPACENAME, NAMESPACEOID, OPERNAMENSP, TYPENAMENSP, OPEROID, PROCOID, RELNAMENSP, RELOID, STATRELATTINH, TYPEOID};
+use crate::cacheinfo::{COLLOID, AGGFNOID, AMOPOPID, AMOPSTRATEGY, AMPROCNUM, ATTNUM, CLAOID, OPFAMILYOID, PROCNAMEARGSNSP, AUTHNAME, AUTHOID, CASTSOURCETARGET, CONSTROID, INDEXRELID, NAMESPACENAME, NAMESPACEOID, OPERNAMENSP, TYPENAMENSP, OPEROID, PROCOID, RELNAMENSP, RELOID, STATRELATTINH, TYPEOID};
 
 const ANUM_PG_CLASS_OID: i32 = 1;
 const ANUM_PG_CLASS_RELISSHARED: i32 = 16;
@@ -953,6 +953,31 @@ fn getattr_nullable(tuple: &HeapTupleData<'_>, cache_id: i32, attnum: i32) -> Op
     if isnull { None } else { Some(d) }
 }
 
+const ANUM_PG_COLLATION_COLLNAME: i32 = 2;
+const ANUM_PG_COLLATION_COLLISDETERMINISTIC: i32 = 6;
+
+fn lookup_pg_collation_shape(
+    colloid: Oid,
+) -> PgResult<Option<syscache_seams::PgCollationShape>> {
+    let Some(tuple) = SearchSysCache1(COLLOID, SysCacheKey::Value(Datum::from_oid(colloid)))?
+    else {
+        return Ok(None);
+    };
+    let t = tuple.tuple();
+    let shape = syscache_seams::PgCollationShape {
+        // SAFETY: collname is a NameData column; the datum points at its
+        // 64-byte in-tuple block.
+        collname: unsafe {
+            *(getattr(&t, COLLOID, ANUM_PG_COLLATION_COLLNAME).as_usize() as *const NameData)
+        },
+        collisdeterministic: getattr(&t, COLLOID, ANUM_PG_COLLATION_COLLISDETERMINISTIC)
+            .as_bool(),
+    };
+    drop(t);
+    ReleaseSysCache(tuple);
+    Ok(Some(shape))
+}
+
 fn lookup_pg_attribute_stattarget(
     relid: Oid,
     attnum: types_core::AttrNumber,
@@ -1437,6 +1462,7 @@ pub(crate) fn install() {
     syscache_seams::lookup_pg_cast_shape::set(lookup_pg_cast_shape);
     syscache_seams::pg_proc_cost_shape::set(pg_proc_cost_shape);
     syscache_seams::lookup_pg_attribute_stattarget::set(lookup_pg_attribute_stattarget);
+    syscache_seams::lookup_pg_collation_shape::set(lookup_pg_collation_shape);
     syscache_seams::pg_type_typanalyze::set(pg_type_typanalyze);
     syscache_seams::lookup_pg_aggregate_shape::set(lookup_pg_aggregate_shape);
     syscache_seams::pg_aggregate_agginitval::set(pg_aggregate_agginitval);

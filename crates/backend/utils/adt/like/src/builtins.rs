@@ -142,10 +142,25 @@ pub fn fc_like_escape_bytea(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) 
     escape_out(flinfo, fcinfo, "like_escape_bytea", true)
 }
 
+// like_regex_support (like_support.c) handles only Selectivity and
+// IndexCondition; every other request returns NULL so callers fall back.
+// The two handled arms are the index-opt lane and stay loud.
 macro_rules! fc_like_support_unported {
     ($($fname:ident: $cname:literal;)*) => {$(
-        pub fn $fname(_flinfo: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-            panic!(concat!($cname, ": like_support.c planner support unported (selfuncs/index-opt lane)"))
+        pub fn $fname(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+            let [a] = fcinfo.args_n::<1>();
+            let p = a.value.as_usize() as *const types_nodes::NodeTag;
+            // SAFETY: prosupport contract — the internal arg points at a live
+            // tag-first support-request node.
+            let tag = unsafe { *p };
+            match tag {
+                types_nodes::NodeTag::T_SupportRequestSelectivity
+                | types_nodes::NodeTag::T_SupportRequestIndexCondition => panic!(concat!(
+                    $cname,
+                    ": like_support.c planner support unported (selfuncs/index-opt lane)"
+                )),
+                _ => Ok(Datum::from_usize(0)),
+            }
         }
     )*};
 }

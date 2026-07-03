@@ -7,7 +7,7 @@ use ::types_core::{Oid, FUNC_MAX_ARGS};
 use ::types_error::{
     PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_TOO_MANY_ARGUMENTS,
 };
-use ::types_fmgr::{FmNodePtr, TRACK_FUNC_ALL, TRACK_FUNC_OFF};
+use ::types_fmgr::{FmNodePtr, FmgrInfo, TRACK_FUNC_ALL, TRACK_FUNC_OFF};
 use ::types_nodes::list::NodeList;
 use ::types_nodes::node_tree::Node;
 use ::types_nodes::primnodes::{Param, ParamKind, Var, VarReturningType};
@@ -680,7 +680,8 @@ pub fn expr_type(node: Node<'_>) -> Oid {
         NodeTag::T_GroupingFunc => 23,
         NodeTag::T_MinMaxExpr => node.as_min_max_expr().unwrap().minmaxtype,
         NodeTag::T_SQLValueFunction => node.as_sql_value_function().unwrap().r#type,
-        NodeTag::T_BoolExpr | NodeTag::T_NullTest => 16,
+        NodeTag::T_BoolExpr | NodeTag::T_NullTest | NodeTag::T_ScalarArrayOpExpr => 16,
+        NodeTag::T_ArrayExpr => node.as_array_expr().unwrap().array_typeid,
         NodeTag::T_SubPlan => {
             use ::types_nodes::primnodes::SubLinkType;
             let sp = node.as_sub_plan().unwrap();
@@ -816,6 +817,16 @@ fn setup_walker(node: Node<'_>, info: &mut SetupInfo) {
         }
         NodeTag::T_RelabelType => setup_walker(node.as_relabel_type().unwrap().arg, info),
         NodeTag::T_CoerceViaIO => setup_walker(node.as_coerce_via_io().unwrap().arg, info),
+        NodeTag::T_ScalarArrayOpExpr => {
+            for a in node.as_scalar_array_op_expr().unwrap().args.iter() {
+                setup_walker(a, info);
+            }
+        }
+        NodeTag::T_ArrayExpr => {
+            for e in node.as_array_expr().unwrap().elements.iter() {
+                setup_walker(e, info);
+            }
+        }
         tag => panic!("execexpr setup walker: node family {tag:?} not ported"),
     }
 }
@@ -1042,8 +1053,132 @@ fn init_expr_rec<'mcx>(
             init_expr_rec(node.as_relabel_type().unwrap().arg, state, mcx, out, agg, params, sub)
         }
         NodeTag::T_CoerceViaIO => init_coerce_via_io(node, state, mcx, out, agg, params, sub),
+        NodeTag::T_ScalarArrayOpExpr => {
+            let saop = node.as_scalar_array_op_expr().unwrap();
+            let step = init_scalar_array_op(node, saop, state, mcx, out, agg, params, sub)?;
+            push_step(state, mcx, step)
+        }
+        NodeTag::T_ArrayExpr => {
+            let arr = node.as_array_expr().unwrap();
+            let step = init_array_expr(arr, state, mcx, out, agg, params, sub)?;
+            push_step(state, mcx, step)
+        }
         tag => panic!("execexpr ExecInitExprRec: node family {tag:?} not ported"),
     }
+}
+
+// C ExecInitExprRec T_ScalarArrayOpExpr, non-hashed leg; the scalar operand
+// evaluates into args[0], the array operand into the step's own output.
+#[allow(clippy::too_many_arguments)]
+fn init_scalar_array_op<'mcx>(
+    node: Node<'mcx>,
+    saop: &::types_nodes::primnodes::ScalarArrayOpExpr<'mcx>,
+    state: &mut ExprState<'mcx>,
+    mcx: Mcx<'mcx>,
+    out: OutRef,
+    agg: Option<Bind<'_, 'mcx>>,
+    params: ParamBind<'mcx>,
+    sub: Option<SubplanCompileEnv>,
+) -> PgResult<Step> {
+    if saop.hashfuncid != 0 {
+        unported("EEOP_HASHED_SCALARARRAYOP (convert_saop_to_hashed_saop lane)");
+    }
+    debug_assert!(saop.args.len() == 2);
+    let scalararg = saop.args.nth(0);
+    let arrayarg = saop.args.nth(1);
+    let opfuncid = if saop.opfuncid != 0 {
+        saop.opfuncid
+    } else {
+        // set_sa_opfuncid (nodeFuncs.c).
+        lsyscache::get_opcode(saop.opno)?
+    };
+
+    let element_type = lsyscache::get_element_type(expr_type(arrayarg))?;
+    assert!(element_type != 0, "init_scalar_array_op: operand is not an array");
+    let (typlen, typbyval, typalign) = lsyscache::get_typlenbyvalalign(element_type)?;
+
+    let mut flinfo = fmgr_core::fmgr_info(opfuncid)?;
+    flinfo.fn_expr = Some(erase_fn_expr(mcx, node)?);
+    let fn_addr = flinfo.fn_addr;
+    let strict = flinfo.fn_strict;
+    let mut frame = FuncFrame::new_in(mcx, flinfo, 2, saop.inputcollid)?;
+
+    let frame_ix = state.frames.len() as u32;
+    if let Some(con) = scalararg.as_const() {
+        // SAFETY: slot 0 of the frame's freshly allocated fcinfo image.
+        unsafe {
+            frame.arg_slot(0).write(::datum::NullableDatum {
+                value: con.constvalue,
+                isnull: con.constisnull,
+            })
+        };
+    }
+    let call = FuncCall { fn_addr, fcinfo: frame.fcinfo, frame: frame_ix, nargs: 2 };
+    state.frames.try_reserve(1).map_err(|_| mcx.oom(core::mem::size_of::<FuncFrame<'_>>()))?;
+    state.frames.push(frame);
+
+    if scalararg.as_const().is_none() {
+        // SAFETY: arg 0 of the image `call.fcinfo` points at.
+        let arg_out = OutRef(Some(unsafe { crate::steps::arg_slot_of(call.fcinfo, 0) }));
+        init_expr_rec(scalararg, state, mcx, arg_out, agg, params, sub)?;
+    }
+    init_expr_rec(arrayarg, state, mcx, out, agg, params, sub)?;
+
+    Ok(Step::ScalarArrayOp {
+        call,
+        use_or: saop.useOr,
+        strict,
+        typlen,
+        typbyval,
+        typalign: typalign as u8,
+        out,
+    })
+}
+
+// C ExecInitExprRec T_ArrayExpr, 1-D non-multidims leg.
+#[allow(clippy::too_many_arguments)]
+fn init_array_expr<'mcx>(
+    arr: &::types_nodes::primnodes::ArrayExpr<'mcx>,
+    state: &mut ExprState<'mcx>,
+    mcx: Mcx<'mcx>,
+    out: OutRef,
+    agg: Option<Bind<'_, 'mcx>>,
+    params: ParamBind<'mcx>,
+    sub: Option<SubplanCompileEnv>,
+) -> PgResult<Step> {
+    if arr.multidims {
+        unported("EEOP_ARRAYEXPR multidimensional leg");
+    }
+    let nelems = arr.elements.len();
+    let (elmlen, elmbyval, elmalign) = lsyscache::get_typlenbyvalalign(arr.element_typeid)?;
+
+    let layout = core::alloc::Layout::array::<::datum::NullableDatum>(nelems.max(1))
+        .expect("elem scratch layout");
+    let elems: NonNull<::datum::NullableDatum> =
+        mcx.allocate(layout).map_err(|_| mcx.oom(layout.size()))?.cast();
+
+    // An argless frame whose armed fcinfo supplies the per-eval result mcx.
+    let frame_ix = state.frames.len() as u32;
+    let frame = FuncFrame::new_in(mcx, FmgrInfo::unresolved(), 0, 0)?;
+    state.frames.try_reserve(1).map_err(|_| mcx.oom(core::mem::size_of::<FuncFrame<'_>>()))?;
+    state.frames.push(frame);
+
+    for (i, e) in arr.elements.iter().enumerate() {
+        // SAFETY: i < nelems slots of the fresh scratch allocation.
+        let slot = unsafe { NonNull::new_unchecked(elems.as_ptr().add(i)) };
+        init_expr_rec(e, state, mcx, OutRef(Some(slot)), agg, params, sub)?;
+    }
+
+    Ok(Step::ArrayExprStep {
+        elems,
+        nelems: nelems as u16,
+        frame: frame_ix,
+        elmtype: arr.element_typeid,
+        elmlen,
+        elmbyval,
+        elmalign: elmalign as u8,
+        out,
+    })
 }
 
 // C ExecInitExprRec T_BoolExpr: args evaluate into the BoolExpr's own output,

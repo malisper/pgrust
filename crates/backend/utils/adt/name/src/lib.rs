@@ -91,6 +91,70 @@ fn namecmp(arg1: &NameData, arg2: &NameData, collid: Oid) -> PgResult<i32> {
     varlena::varstr_cmp(arg1.name_str(), arg2.name_str(), collid)
 }
 
+// name-vs-text comparisons (varlena.c). The eq/ne pair short-circuits on
+// length under C collation exactly as C does.
+pub fn btnametextcmp(arg1: &NameData, arg2: &[u8], collid: Oid) -> PgResult<i32> {
+    varlena::varstr_cmp(arg1.name_str(), arg2, collid)
+}
+
+pub fn bttextnamecmp(arg1: &[u8], arg2: &NameData, collid: Oid) -> PgResult<i32> {
+    varlena::varstr_cmp(arg1, arg2.name_str(), collid)
+}
+
+pub fn nameeqtext(arg1: &NameData, arg2: &[u8], collid: Oid) -> PgResult<bool> {
+    if collid == C_COLLATION_OID {
+        return Ok(arg1.name_str() == arg2);
+    }
+    Ok(btnametextcmp(arg1, arg2, collid)? == 0)
+}
+
+pub fn namenetext(arg1: &NameData, arg2: &[u8], collid: Oid) -> PgResult<bool> {
+    Ok(!nameeqtext(arg1, arg2, collid)?)
+}
+
+pub fn namelttext(arg1: &NameData, arg2: &[u8], collid: Oid) -> PgResult<bool> {
+    Ok(btnametextcmp(arg1, arg2, collid)? < 0)
+}
+
+pub fn nameletext(arg1: &NameData, arg2: &[u8], collid: Oid) -> PgResult<bool> {
+    Ok(btnametextcmp(arg1, arg2, collid)? <= 0)
+}
+
+pub fn namegttext(arg1: &NameData, arg2: &[u8], collid: Oid) -> PgResult<bool> {
+    Ok(btnametextcmp(arg1, arg2, collid)? > 0)
+}
+
+pub fn namegetext(arg1: &NameData, arg2: &[u8], collid: Oid) -> PgResult<bool> {
+    Ok(btnametextcmp(arg1, arg2, collid)? >= 0)
+}
+
+pub fn texteqname(arg1: &[u8], arg2: &NameData, collid: Oid) -> PgResult<bool> {
+    if collid == C_COLLATION_OID {
+        return Ok(arg1 == arg2.name_str());
+    }
+    Ok(bttextnamecmp(arg1, arg2, collid)? == 0)
+}
+
+pub fn textnename(arg1: &[u8], arg2: &NameData, collid: Oid) -> PgResult<bool> {
+    Ok(!texteqname(arg1, arg2, collid)?)
+}
+
+pub fn textltname(arg1: &[u8], arg2: &NameData, collid: Oid) -> PgResult<bool> {
+    Ok(bttextnamecmp(arg1, arg2, collid)? < 0)
+}
+
+pub fn textlename(arg1: &[u8], arg2: &NameData, collid: Oid) -> PgResult<bool> {
+    Ok(bttextnamecmp(arg1, arg2, collid)? <= 0)
+}
+
+pub fn textgtname(arg1: &[u8], arg2: &NameData, collid: Oid) -> PgResult<bool> {
+    Ok(bttextnamecmp(arg1, arg2, collid)? > 0)
+}
+
+pub fn textgename(arg1: &[u8], arg2: &NameData, collid: Oid) -> PgResult<bool> {
+    Ok(bttextnamecmp(arg1, arg2, collid)? >= 0)
+}
+
 pub fn nameeq(arg1: &NameData, arg2: &NameData, collid: Oid) -> PgResult<bool> {
     Ok(namecmp(arg1, arg2, collid)? == 0)
 }

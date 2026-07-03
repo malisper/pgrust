@@ -94,6 +94,29 @@ pub enum Step {
         current: Option<NonNull<GroupedColsCell>>,
         out: OutRef,
     },
+    // EEOP_SCALARARRAYOP: the array operand evaluates into `out` first;
+    // element typ* resolved at compile (C caches them on first eval).
+    ScalarArrayOp {
+        call: FuncCall,
+        use_or: bool,
+        strict: bool,
+        typlen: i16,
+        typbyval: bool,
+        typalign: u8,
+        out: OutRef,
+    },
+    // EEOP_ARRAYEXPR, 1-D: elements evaluate into the `elems` scratch;
+    // `frame` is an argless FuncFrame carried only for its armed result mcx.
+    ArrayExprStep {
+        elems: NonNull<NullableDatum>,
+        nelems: u16,
+        frame: u32,
+        elmtype: Oid,
+        elmlen: i16,
+        elmbyval: bool,
+        elmalign: u8,
+        out: OutRef,
+    },
     // C EEOP_AGG_STRICT_INPUT_CHECK_ARGS(_1): args = fcinfo args[1..].
     AggStrictInputCheck { args: NonNull<NullableDatum>, nargs: u16, jumpnull: u32 },
     AggStrictInputCheck1 { arg: NonNull<NullableDatum>, jumpnull: u32 },

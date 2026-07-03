@@ -17,6 +17,7 @@ pub mod pathkeys;
 pub mod planagg;
 pub mod pathnode;
 pub mod plancat;
+pub mod like_support;
 pub mod selfuncs;
 pub mod planmain;
 pub mod prep;

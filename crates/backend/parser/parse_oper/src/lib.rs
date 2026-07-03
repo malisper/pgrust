@@ -16,9 +16,9 @@ use types_core::catalog::UNKNOWNOID;
 use types_core::{InvalidOid, Oid, OidIsValid, ParseLoc};
 use types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_AMBIGUOUS_FUNCTION, ERRCODE_SYNTAX_ERROR,
-    ERRCODE_UNDEFINED_FUNCTION, ERROR,
+    ERRCODE_UNDEFINED_FUNCTION, ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE, ERROR,
 };
-use types_nodes::{CoercionForm, Node, NodeList, OpExpr};
+use types_nodes::{CoercionForm, Node, NodeList, OpExpr, ScalarArrayOpExpr};
 
 pub struct Operator {
     pub oid: Oid,
@@ -368,6 +368,130 @@ fn coerce_arg<'mcx>(
         COERCION_IMPLICIT,
         CoercionForm::COERCE_IMPLICIT_CAST,
         -1,
+    )
+}
+
+/// C `make_scalar_array_op`, operand types precomputed by the caller as in
+/// [`make_op`].
+#[allow(clippy::too_many_arguments)]
+pub fn make_scalar_array_op<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    opname: &NodeList<'mcx>,
+    useOr: bool,
+    ltree: Node<'mcx>,
+    rtree: Node<'mcx>,
+    ltypeId: Oid,
+    atypeId: Oid,
+    location: ParseLoc,
+) -> PgResult<Node<'mcx>> {
+    let rtypeId = if atypeId == UNKNOWNOID {
+        UNKNOWNOID
+    } else {
+        let elem = lsyscache::get_base_element_type(atypeId)?;
+        if !OidIsValid(elem) {
+            return Err(saop_error(
+                pstate,
+                "op ANY/ALL (array) requires array on right side",
+                location,
+            ));
+        }
+        elem
+    };
+
+    let op = oper(pstate, opname, ltypeId, rtypeId, false, location)?
+        .expect("oper(noError=false) always returns an operator");
+
+    if !OidIsValid(op.shape.oprcode) {
+        let mut buf = [""; 4];
+        let parts = name_parts(opname, &mut buf);
+        return Err(shell_error(pstate, parts, &op, location));
+    }
+
+    let actual_arg_types = [ltypeId, rtypeId];
+    let mut declared_arg_types = [op.shape.oprleft, op.shape.oprright];
+
+    let rettype = coerce::enforce_generic_type_consistency(
+        &actual_arg_types,
+        &mut declared_arg_types,
+        op.shape.oprresult,
+        false,
+    )?;
+
+    if rettype != types_core::catalog::BOOLOID {
+        return Err(saop_error(
+            pstate,
+            "op ANY/ALL (array) requires operator to yield boolean",
+            location,
+        ));
+    }
+    if lsyscache::get_func_retset(op.shape.oprcode)? {
+        return Err(saop_error(
+            pstate,
+            "op ANY/ALL (array) requires operator not to return a set",
+            location,
+        ));
+    }
+
+    let res_atypeId = if coerce::IsPolymorphicType(declared_arg_types[1]) {
+        atypeId
+    } else {
+        let arr = lsyscache::get_array_type(declared_arg_types[1])?;
+        if !OidIsValid(arr) {
+            return Err(no_array_type_error(pstate, declared_arg_types[1], location));
+        }
+        arr
+    };
+
+    let ltree = coerce_arg(mcx, pstate, ltree, ltypeId, declared_arg_types[0])?;
+    let rtree = coerce_arg(mcx, pstate, rtree, atypeId, res_atypeId)?;
+
+    Node::mk(
+        mcx,
+        ScalarArrayOpExpr {
+            opno: op.oid,
+            opfuncid: op.shape.oprcode,
+            hashfuncid: InvalidOid,
+            negfuncid: InvalidOid,
+            useOr,
+            inputcollid: InvalidOid,
+            args: NodeList::make2(mcx, ltree, rtree)?,
+            location,
+        },
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn saop_error(pstate: &ParseState<'_, '_>, msg: &str, location: ParseLoc) -> Box<PgError> {
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_WRONG_OBJECT_TYPE)
+            .errmsg(msg.to_string())
+            .errposition(parser_errposition(pstate, location, mbutils::GetDatabaseEncoding()))
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_oper.c", 0, "make_scalar_array_op")),
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn no_array_type_error(
+    pstate: &ParseState<'_, '_>,
+    elemtype: Oid,
+    location: ParseLoc,
+) -> Box<PgError> {
+    let tname = match format_type::format_type_be(elemtype) {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_UNDEFINED_OBJECT)
+            .errmsg(format!("could not find array type for data type {tname}"))
+            .errposition(parser_errposition(pstate, location, mbutils::GetDatabaseEncoding()))
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_oper.c", 0, "make_scalar_array_op")),
     )
 }
 

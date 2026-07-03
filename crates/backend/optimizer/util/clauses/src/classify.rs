@@ -467,9 +467,26 @@ struct ConvertSaop;
 
 impl<'mcx> NodeWalker<'mcx> for ConvertSaop {
     fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
-        // The SAOP arm itself is the walker's deferred T_ScalarArrayOpExpr.
         if node.node_tag() == NodeTag::T_GroupingFunc {
             return walk_grouping_func_args(node, self);
+        }
+        if let Some(sa) = node.as_scalar_array_op_expr() {
+            // convert_saop_to_hashed_saop_walker: C hashes ANY over a Const
+            // array of >= 9 elements when the operator is hashable.
+            const MIN_ARRAY_SIZE_FOR_HASHED_SAOP: i64 = 9;
+            if sa.useOr {
+                if let Some(c) = sa.args.nth(1).as_const() {
+                    if !c.constisnull
+                        && saop_const_array_nitems(c.constvalue)
+                            >= MIN_ARRAY_SIZE_FOR_HASHED_SAOP
+                    {
+                        panic!(
+                            "convert_saop_to_hashed_saop (clauses.c): hashed-SAOP \
+                             conversion unported"
+                        );
+                    }
+                }
+            }
         }
         expression_tree_walker(node, self)
     }
@@ -540,6 +557,55 @@ const FIRST_LOW_INVALID_HEAP_ATTR: i32 = -7;
 fn strict_opfuncid(o: &types_nodes::primnodes::OpExpr<'_>) -> PgResult<bool> {
     let funcid = if o.opfuncid != 0 { o.opfuncid } else { lsyscache::get_opcode(o.opno)? };
     func_strict(funcid)
+}
+
+// is_strict_saop (clauses.c).
+fn is_strict_saop(
+    sa: &types_nodes::primnodes::ScalarArrayOpExpr<'_>,
+    false_ok: bool,
+) -> PgResult<bool> {
+    let opfuncid = if sa.opfuncid == 0 {
+        lsyscache::get_opcode(sa.opno)?
+    } else {
+        sa.opfuncid
+    };
+    if !func_strict(opfuncid)? {
+        return Ok(false);
+    }
+    if sa.useOr && false_ok {
+        return Ok(true);
+    }
+    let rightop = sa.args.nth(1);
+    if let Some(c) = rightop.as_const() {
+        if c.constisnull {
+            return Ok(false);
+        }
+        return Ok(saop_const_array_nitems(c.constvalue) > 0);
+    }
+    if let Some(a) = rightop.as_array_expr() {
+        return Ok(!a.elements.is_nil() && !a.multidims);
+    }
+    Ok(false)
+}
+
+fn saop_const_array_nitems(value: datum::Datum) -> i64 {
+    let p = value.as_usize() as *const u8;
+    // SAFETY: non-null inline-header array const (planner-built).
+    let b0 = unsafe { *p };
+    assert!(b0 != 0x01 && b0 & 0x03 == 0, "is_strict_saop: toasted array const");
+    // SAFETY: 4-byte varlena header verified.
+    let img = unsafe {
+        core::slice::from_raw_parts(p, arrayfuncs::arr_size(core::slice::from_raw_parts(p, 4)))
+    };
+    let ndim = arrayfuncs::arr_ndim(img);
+    if ndim == 0 {
+        return 0;
+    }
+    let mut n = 1i64;
+    for i in 0..ndim as usize {
+        n *= arrayfuncs::arr_dim(img, i) as i64;
+    }
+    n
 }
 
 pub fn find_nonnullable_rels<'mcx>(
@@ -631,10 +697,15 @@ fn find_nonnullable_rels_walker<'mcx>(
                 result = find_nonnullable_rels_walker(mcx, nt.arg, false)?;
             }
         }
+        NodeTag::T_ScalarArrayOpExpr => {
+            let sa = node.as_scalar_array_op_expr().unwrap();
+            if is_strict_saop(sa, true)? {
+                result = nonnullable_rels_args(mcx, &sa.args, false)?;
+            }
+        }
         // C has strictness arms for these; skipping silently would
         // under-reduce vs C (silent plan-shape divergence).
-        NodeTag::T_ScalarArrayOpExpr
-        | NodeTag::T_BooleanTest
+        NodeTag::T_BooleanTest
         | NodeTag::T_SubPlan
         | NodeTag::T_PlaceHolderVar
         | NodeTag::T_ArrayCoerceExpr
@@ -805,8 +876,13 @@ fn find_nonnullable_vars_walker<'mcx>(
                 result = find_nonnullable_vars_walker(mcx, nt.arg, false)?;
             }
         }
-        NodeTag::T_ScalarArrayOpExpr
-        | NodeTag::T_BooleanTest
+        NodeTag::T_ScalarArrayOpExpr => {
+            let sa = node.as_scalar_array_op_expr().unwrap();
+            if is_strict_saop(sa, true)? {
+                result = nonnullable_vars_args(mcx, &sa.args, false)?;
+            }
+        }
+        NodeTag::T_BooleanTest
         | NodeTag::T_SubPlan
         | NodeTag::T_PlaceHolderVar
         | NodeTag::T_ArrayCoerceExpr
