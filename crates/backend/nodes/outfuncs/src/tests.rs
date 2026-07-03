@@ -89,7 +89,7 @@ fn round_trips_through_readfuncs_scanner_shape() {
     let mcx = ctx.mcx();
     let node = Node::mk(mcx, int4_const(-7)).unwrap();
     let s = nodeToString(mcx, node).unwrap();
-    assert!(s.as_str().contains(":constvalue 4 [ -7 -1 -1 -1 -1 -1 -1 -1 ]"));
+    assert!(s.as_str().contains(":constvalue 4 [ 249 255 255 255 255 255 255 255 ]"));
 }
 
 // Captured from live PostgreSQL 18.3: CREATE TABLE (e bigint DEFAULT 42).
