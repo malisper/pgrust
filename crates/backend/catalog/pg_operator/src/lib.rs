@@ -280,8 +280,7 @@ pub fn OperatorCreate(
             rightTypeId,
         )?;
         if OidIsValid(commutatorId) {
-            let scratch = mcx::MemoryContext::new("OperatorCreate name");
-            let name = commands_define::NameListToString(scratch.mcx(), commutatorName)?;
+            let name = commands_define::NameListToString(mcx, commutatorName)?;
             object_ownercheck(name.as_str())?;
         }
         // Self-linkage to the new operator is fixed below.
@@ -304,8 +303,7 @@ pub fn OperatorCreate(
             rightTypeId,
         )?;
         if OidIsValid(negatorId) {
-            let scratch = mcx::MemoryContext::new("OperatorCreate name");
-            let name = commands_define::NameListToString(scratch.mcx(), negatorName)?;
+            let name = commands_define::NameListToString(mcx, negatorName)?;
             object_ownercheck(name.as_str())?;
         }
         if !OidIsValid(negatorId) || negatorId == operatorObjectId {
