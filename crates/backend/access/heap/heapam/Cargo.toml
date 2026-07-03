@@ -20,7 +20,6 @@ types_tuple = { path = "../../../../_support/types/types_tuple" }
 tableam_vocab = { path = "../../table/tableam_vocab" }
 exectuples = { path = "../../../executor/exectuples" }
 init_small = { path = "../../../utils/init/init_small" }
-postgres_seams = { path = "../../../tcop/postgres_seams" }
 bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
 predicate_seams = { path = "../../../storage/lmgr/predicate_seams" }
 pruneheap_seams = { path = "../pruneheap_seams" }
