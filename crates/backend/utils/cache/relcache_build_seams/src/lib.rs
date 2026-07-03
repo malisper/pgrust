@@ -82,7 +82,7 @@ pub struct PgPolicyShape<'mcx> {
     pub polname: &'mcx str,
     pub polcmd: u8,
     pub polpermissive: bool,
-    pub polroles: PgVec<'mcx, Oid>,
+    pub polroles: &'mcx [Oid],
     pub polqual: Option<&'mcx str>,
     pub polwithcheck: Option<&'mcx str>,
 }
