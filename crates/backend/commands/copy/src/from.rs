@@ -94,8 +94,8 @@ pub fn BeginCopyFrom<'mcx, 's>(
     if opts.binary {
         unported("FORMAT binary (text-only lane)");
     }
-    if opts.freeze {
-        unported("FREEZE (multi-insert/frozen lane)");
+    if opts.convert_selectively {
+        unported("convert_selectively (file_fdw-only option)");
     }
     let tup_desc = &rel.rd_att;
     let attnumlist = CopyGetAttnums(mcx, tup_desc, rel, attnamelist)?;
@@ -312,10 +312,41 @@ pub fn CopyFrom<'mcx>(
     if rel.rd_rel.relkind != RELKIND_RELATION {
         return Err(cannot_copy_to_relkind(rel));
     }
+    // New-in-transaction storage: probing the FSM is a waste of time
+    // (relkind has storage: CopyFrom rejects everything but RELKIND_RELATION).
+    let mut ti_options = if rel.rd_createSubid.get() != types_core::xact::InvalidSubTransactionId
+        || rel.rd_firstRelfilelocatorSubid.get() != types_core::xact::InvalidSubTransactionId
+    {
+        tableam_vocab::TABLE_INSERT_SKIP_FSM
+    } else {
+        0
+    };
+    if cstate.opts.freeze {
+        snapmgr::InvalidateCatalogSnapshot();
+        if !snapmgr::ThereAreNoPriorRegisteredSnapshots() || !portalmem::ThereAreNoReadyPortals()
+        {
+            return Err(Box::new(
+                PgError::error("cannot perform COPY FREEZE because of prior transaction activity")
+                    .with_sqlstate(types_error::ERRCODE_INVALID_TRANSACTION_STATE),
+            ));
+        }
+        let cur = xact::GetCurrentSubTransactionId();
+        if rel.rd_createSubid.get() != cur && rel.rd_newRelfilelocatorSubid.get() != cur {
+            return Err(Box::new(
+                PgError::error(
+                    "cannot perform COPY FREEZE because the table was not created or truncated \
+                     in the current subtransaction",
+                )
+                .with_sqlstate(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+            ));
+        }
+        ti_options |= tableam_vocab::TABLE_INSERT_FROZEN;
+    }
     // CopyFromErrorCallback scope: C installs error_context_stack here, after
-    // the relkind checks; buffered-but-unflushed slots on the Err path are
-    // simply dropped, as C's are (the aborted xact kills flushed ones).
-    match copy_from_body(mcx, cstate, rel) {
+    // the relkind + FREEZE checks; buffered-but-unflushed slots on the Err
+    // path are simply dropped, as C's are (the aborted xact kills flushed
+    // ones).
+    match copy_from_body(mcx, cstate, rel, ti_options) {
         Ok(n) => Ok(n),
         Err(e) => Err(copy_from_error_context(cstate, rel, e)),
     }
@@ -325,17 +356,9 @@ fn copy_from_body<'mcx>(
     mcx: Mcx<'mcx>,
     cstate: &mut CopyFromState<'mcx, '_>,
     rel: &Relation<'mcx>,
+    ti_options: i32,
 ) -> PgResult<u64> {
     let mycid = xact::GetCurrentCommandId(true)?;
-    // New-in-transaction storage: probing the FSM is a waste of time
-    // (relkind has storage: CopyFrom rejects everything but RELKIND_RELATION).
-    let ti_options = if rel.rd_createSubid.get() != types_core::xact::InvalidSubTransactionId
-        || rel.rd_firstRelfilelocatorSubid.get() != types_core::xact::InvalidSubTransactionId
-    {
-        tableam_vocab::TABLE_INSERT_SKIP_FSM
-    } else {
-        0
-    };
 
     let mut index_state = execindexing::ExecOpenIndices(mcx, rel, false)?;
 

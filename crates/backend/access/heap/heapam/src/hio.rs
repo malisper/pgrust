@@ -251,9 +251,9 @@ pub fn RelationGetBufferForTuple<'mcx>(
     if len > MaxHeapTupleSize {
         return Err(row_too_big(len));
     }
-    if (options & HEAP_INSERT_FROZEN) != 0 {
-        unported("visibilitymap_pin (HEAP_INSERT_FROZEN lane, visibilitymap.c)");
-    }
+    // C divergence: HEAP_INSERT_FROZEN's visibilitymap pin + all-visible page
+    // marking are elided (VM writes unported repo-wide; conservative — pages
+    // stay unmarked, tuples still get frozen xmin in heap_prepare_insert).
 
     let save_free_space = relation.get_target_page_free_space(HEAP_DEFAULT_FILLFACTOR) as usize;
     let nearly_empty_free_space =

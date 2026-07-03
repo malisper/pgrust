@@ -2581,6 +2581,7 @@ dependencies = [
  "parse_relation",
  "parser_small1",
  "planner",
+ "portalmem",
  "postgres_seams",
  "pqcomm",
  "pqformat",
