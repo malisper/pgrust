@@ -440,7 +440,8 @@ impl Tuplesort {
         )
     }
 
-    /// `tuplesort_begin_datum`; by-reference types are a loud panic.
+    /// `tuplesort_begin_datum`; by-ref datums datumCopy into tuplecontext
+    /// (cstring typlen -2 is a loud panic).
     pub fn begin_datum(
         datum_type: Oid,
         sort_operator: Oid,
