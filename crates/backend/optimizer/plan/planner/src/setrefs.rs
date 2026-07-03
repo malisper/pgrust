@@ -624,6 +624,19 @@ fn fix_upper_expr<'mcx>(
                 types_nodes::primnodes::BoolExpr { boolop: b.boolop, args, location: b.location },
             )
         }
+        NodeTag::T_NullTest => {
+            let nt = node.as_null_test().unwrap();
+            let arg = fix_upper_expr(run, nt.arg.expect("NullTest.arg"), subplan_tlist, rtoffset)?;
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::NullTest {
+                    arg: Some(arg),
+                    nulltesttype: nt.nulltesttype,
+                    argisrow: nt.argisrow,
+                    location: nt.location,
+                },
+            )
+        }
         other => panic!("fix_upper_expr_mutator (setrefs.c): {other:?}; M3 expression lane"),
     }
 }
@@ -807,6 +820,19 @@ fn fix_scan_expr_mutator<'mcx>(
                 types_nodes::primnodes::BoolExpr { boolop: b.boolop, args, location: b.location },
             )
         }
+        NodeTag::T_NullTest => {
+            let nt = node.as_null_test().unwrap();
+            let arg = fix_scan_expr_mutator(run, nt.arg.expect("NullTest.arg"), rtoffset)?;
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::NullTest {
+                    arg: Some(arg),
+                    nulltesttype: nt.nulltesttype,
+                    argisrow: nt.argisrow,
+                    location: nt.location,
+                },
+            )
+        }
         other => panic!("fix_scan_expr_mutator (setrefs.c): {other:?}; M2 expression lane"),
     }
 }
@@ -866,6 +892,10 @@ fn fix_scan_expr_walker<'mcx>(run: &mut PlannerRun<'mcx>, node: Node<'mcx>) -> P
             }
             Ok(())
         }
+        NodeTag::T_NullTest => match node.as_null_test().unwrap().arg {
+            Some(arg) => fix_scan_expr_walker(run, arg),
+            None => Ok(()),
+        },
         other => panic!("fix_scan_expr_walker (setrefs.c): {other:?}; M2 expression lane"),
     }
 }

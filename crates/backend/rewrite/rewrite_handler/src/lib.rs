@@ -431,11 +431,73 @@ fn fireRIRrules<'mcx>(
         table::table_close(rel, NoLock)?;
     }
 
+    // fireRIRonSubLink (rewriteHandler.c): recurse into sublink sub-selects.
+    // query_tree_walker needs &'mcx Query, so the expression-bearing fields
+    // are walked directly (rtable/CTE subqueries were handled above, as C's
+    // QTW_IGNORE_RC_SUBQUERIES arranges).
     if parsetree.hasSubLinks {
-        panic!(
-            "fireRIRrules (rewriteHandler.c): sublink descent needs the walker's \
-             T_SubLink arm (SubLink vocabulary unported)"
-        );
+        struct W<'a, 'mcx> {
+            mcx: Mcx<'mcx>,
+            active_rirs: &'a mut PgVec<'mcx, Oid>,
+        }
+        impl<'mcx> nodes_core::NodeWalker<'mcx> for W<'_, 'mcx> {
+            fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+                if let Some(sl) = node.as_sub_link() {
+                    let sub = sl.subselect.as_query().expect("analyzed sublink sub-select");
+                    fireRIRrules(self.mcx, sub, self.active_rirs)?;
+                }
+                nodes_core::expression_tree_walker(node, self)
+            }
+        }
+        fn walk_jt<'mcx>(node: Node<'mcx>, w: &mut W<'_, 'mcx>) -> PgResult<()> {
+            match node.node_tag() {
+                NodeTag::T_RangeTblRef => {}
+                NodeTag::T_FromExpr => {
+                    let f = node.as_from_expr().expect("FromExpr");
+                    for child in &f.fromlist {
+                        walk_jt(child, w)?;
+                    }
+                    if let Some(q) = f.quals {
+                        w.visit(q)?;
+                    }
+                }
+                NodeTag::T_JoinExpr => {
+                    let j = node.as_join_expr().expect("JoinExpr");
+                    walk_jt(j.larg, w)?;
+                    walk_jt(j.rarg, w)?;
+                    if let Some(q) = j.quals {
+                        w.visit(q)?;
+                    }
+                }
+                other => panic!("fireRIRonSubLink (rewriteHandler.c): {other:?} jointree arm"),
+            }
+            Ok(())
+        }
+        use nodes_core::NodeWalker as _;
+        let mut w = W { mcx, active_rirs };
+        for te in &parsetree.targetList {
+            w.visit(te)?;
+        }
+        for te in &parsetree.returningList {
+            w.visit(te)?;
+        }
+        if let Some(jt) = parsetree.jointree {
+            for item in &jt.fromlist {
+                walk_jt(item, &mut w)?;
+            }
+            if let Some(q) = jt.quals {
+                w.visit(q)?;
+            }
+        }
+        if let Some(h) = parsetree.havingQual {
+            w.visit(h)?;
+        }
+        if let Some(n) = parsetree.limitOffset {
+            w.visit(n)?;
+        }
+        if let Some(n) = parsetree.limitCount {
+            w.visit(n)?;
+        }
     }
 
     for node in parsetree.rtable.iter() {

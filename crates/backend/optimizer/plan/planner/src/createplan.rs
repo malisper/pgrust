@@ -60,6 +60,10 @@ fn create_plan_recurse<'mcx>(
         PathNode::MergePath(_) => create_mergejoin_plan(run, path_id),
         PathNode::HashPath(_) => create_hashjoin_plan(run, path_id),
         PathNode::LimitPath(_) => create_limit_plan(run, path_id, flags),
+        PathNode::UniquePath(_) => panic!(
+            "create_unique_plan (createplan.c): unique-ified semijoin won the cost \
+             competition; unique-plan lane unported"
+        ),
         PathNode::ModifyTablePath(_) => create_modifytable_plan(run, path_id),
         other => panic!(
             "create_plan_recurse (createplan.c): pathtype {}; M2 plan lane",
@@ -322,6 +326,10 @@ fn jointype_enum(jointype: u32) -> types_nodes::JoinType {
         types_pathnodes::JOIN_INNER => types_nodes::JoinType::JOIN_INNER,
         types_pathnodes::JOIN_LEFT => types_nodes::JoinType::JOIN_LEFT,
         types_pathnodes::JOIN_RIGHT => types_nodes::JoinType::JOIN_RIGHT,
+        types_pathnodes::JOIN_SEMI => types_nodes::JoinType::JOIN_SEMI,
+        types_pathnodes::JOIN_ANTI => types_nodes::JoinType::JOIN_ANTI,
+        types_pathnodes::JOIN_RIGHT_SEMI => types_nodes::JoinType::JOIN_RIGHT_SEMI,
+        types_pathnodes::JOIN_RIGHT_ANTI => types_nodes::JoinType::JOIN_RIGHT_ANTI,
         other => panic!("create_join_plan (createplan.c): jointype {other} unported"),
     }
 }
@@ -879,29 +887,44 @@ fn create_group_result_plan<'mcx>(
     run: &mut PlannerRun<'mcx>,
     path_id: PathId,
 ) -> PgResult<Node<'mcx>> {
-    let (target_id, costs) = match run.root.path(path_id) {
-        PathNode::GroupResultPath(grp) => {
-            if !grp.quals.is_empty() {
-                panic!("order_qual_clauses (createplan.c): M2 qual lane");
-            }
+    let (target_id, quals, costs) = match run.root.path(path_id) {
+        PathNode::GroupResultPath(grp) => (
+            grp.path.pathtarget_id.unwrap(),
+            crate::relnode::pgvec_clone_shallow(run.mcx, &grp.quals),
             (
-                grp.path.pathtarget_id.unwrap(),
-                (
-                    grp.path.startup_cost,
-                    grp.path.total_cost,
-                    grp.path.rows,
-                    grp.path.parallel_safe,
-                ),
-            )
-        }
+                grp.path.startup_cost,
+                grp.path.total_cost,
+                grp.path.rows,
+                grp.path.parallel_safe,
+            ),
+        ),
         _ => unreachable!(),
     };
     let tlist = build_path_tlist(run, target_id)?;
     let width = run.root.pathtarget(target_id).width;
 
+    // order_qual_clauses over bare clauses: stable sort by per-tuple cost
+    // (security_level is 0 for bare quals).
+    let mut items: mcx::PgVec<'_, (types_pathnodes::NodeId, f64)> = mcx::PgVec::new_in(run.mcx);
+    items.reserve(quals.len());
+    for &id in quals.iter() {
+        let cost = crate::costsize::cost_qual_eval_node(*run.root.expr_node(id))?;
+        items.push((id, cost.per_tuple));
+    }
+    if items.len() > 1 {
+        items.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+    }
+    let mut qual_list = NodeList::nil();
+    for &(id, _) in items.iter() {
+        qual_list.lappend(run.mcx, *run.root.expr_node(id))?;
+    }
+
     // make_result + copy_generic_path_info.
     let mut plan = Node::build::<ResultPlan>(run.mcx)?;
     plan.plan.targetlist = tlist;
+    if !qual_list.is_nil() {
+        plan.resconstantqual = Some(Node::mk_list(run.mcx, qual_list)?);
+    }
     plan.plan.startup_cost = costs.0;
     plan.plan.total_cost = costs.1;
     plan.plan.plan_rows = costs.2;
@@ -1461,7 +1484,7 @@ fn create_join_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> PgResu
     let inner_plan = create_plan_recurse(run, inner_path, 0)?;
 
     let ordered = order_qual_clauses(run, &restrict)?;
-    let (joinclauses, otherclauses) = if jointype != types_pathnodes::JOIN_INNER {
+    let (joinclauses, otherclauses) = if crate::joinpath::is_outer_join(jointype) {
         let joinrelids = crate::relnode::relids_copy(
             mcx,
             &run.root.rel(run.root.path(path_id).base().parent).relids,
@@ -1515,7 +1538,7 @@ fn create_hashjoin_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> Pg
     let inner_plan = create_plan_recurse(run, inner_path, CP_SMALL_TLIST)?;
 
     let ordered = order_qual_clauses(run, &restrict)?;
-    let (joinclauses, otherclauses) = if jointype != types_pathnodes::JOIN_INNER {
+    let (joinclauses, otherclauses) = if crate::joinpath::is_outer_join(jointype) {
         let joinrelids = crate::relnode::relids_copy(
             mcx,
             &run.root.rel(run.root.path(path_id).base().parent).relids,
@@ -1744,7 +1767,7 @@ fn create_mergejoin_plan<'mcx>(
     let mut inner_plan = create_plan_recurse(run, inner_path, inner_flags)?;
 
     let ordered = order_qual_clauses(run, &restrict)?;
-    let (joinclauses, otherclauses) = if jointype != types_pathnodes::JOIN_INNER {
+    let (joinclauses, otherclauses) = if crate::joinpath::is_outer_join(jointype) {
         let joinrelids = crate::relnode::relids_copy(
             mcx,
             &run.root.rel(run.root.path(path_id).base().parent).relids,

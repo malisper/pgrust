@@ -478,6 +478,14 @@ fn run_program<'mcx>(
                 let r = read_out(*out, &regs);
                 write_out(*out, &mut regs, Datum::from_bool(!r.value.as_bool()), r.isnull);
             }
+            Step::NullTestIsNull { out } => {
+                let r = read_out(*out, &regs);
+                write_out(*out, &mut regs, Datum::from_bool(r.isnull), false);
+            }
+            Step::NullTestIsNotNull { out } => {
+                let r = read_out(*out, &regs);
+                write_out(*out, &mut regs, Datum::from_bool(!r.isnull), false);
+            }
             Step::AggStrictInputCheck { args, nargs, jumpnull } => {
                 // SAFETY: args[0..nargs] live fcinfo slots; jumps ready-checked.
                 let anynull = (0..*nargs as usize)

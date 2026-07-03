@@ -1,5 +1,5 @@
-// nodeNestloop.c, INNER/LEFT arms; children stay with the ExecProcNode
-// dispatcher via NestLoopChild. SEMI/ANTI and nestParams are loud at init.
+// nodeNestloop.c, INNER/LEFT/SEMI/ANTI arms; children stay with the
+// ExecProcNode dispatcher via NestLoopChild. nestParams are loud at init.
 #![allow(non_snake_case)]
 
 use std::rc::Rc;
@@ -56,11 +56,18 @@ pub fn exec_init_nest_loop<'mcx>(
 ) -> PgResult<NestLoopState<'mcx>> {
     debug_assert!(eflags & (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK) == 0);
     assert!(
-        matches!(node.join.jointype, JoinType::JOIN_INNER | JoinType::JOIN_LEFT),
-        "ExecInitNestLoop (nodeNestloop.c): jointype {:?}; SEMI/ANTI lane unported",
+        matches!(
+            node.join.jointype,
+            JoinType::JOIN_INNER
+                | JoinType::JOIN_LEFT
+                | JoinType::JOIN_SEMI
+                | JoinType::JOIN_ANTI
+        ),
+        "ExecInitNestLoop (nodeNestloop.c): jointype {:?}; RIGHT/FULL lane unported",
         node.join.jointype
     );
-    let nl_fill_outer = node.join.jointype == JoinType::JOIN_LEFT;
+    let nl_fill_outer =
+        matches!(node.join.jointype, JoinType::JOIN_LEFT | JoinType::JOIN_ANTI);
     let nl_NullInnerTupleSlot = if nl_fill_outer {
         let slot_id = estate
             .exec_init_extra_tuple_slot(Some(inner_desc.clone()), TupleSlotKind::Virtual);
@@ -94,7 +101,8 @@ pub fn exec_init_nest_loop<'mcx>(
         proj,
         joinqual,
         otherqual,
-        js_single_match: node.join.inner_unique,
+        js_single_match: node.join.inner_unique
+            || node.join.jointype == JoinType::JOIN_SEMI,
         nl_fill_outer,
         nl_NullInnerTupleSlot,
         nl_NeedNewOuter: true,
@@ -152,6 +160,11 @@ where
         let matched = with_qual_slots(estate, ecxt, |slots| exec_qual(joinqual, slots))?;
         if matched {
             node.nl_MatchedOuter = true;
+            // An antijoin never returns a matched tuple.
+            if node.plan.join.jointype == JoinType::JOIN_ANTI {
+                node.nl_NeedNewOuter = true;
+                continue;
+            }
             if node.js_single_match {
                 node.nl_NeedNewOuter = true;
             }

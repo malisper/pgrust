@@ -937,7 +937,7 @@ pub fn coerce_to_specific_type<'mcx>(
 
 // Closed-set slice of nodeFuncs.c expression_returns_set over the tags this
 // parser lane can produce.
-fn expression_returns_set(node: Node<'_>) -> bool {
+pub fn expression_returns_set(node: Node<'_>) -> bool {
     match node.node_tag() {
         NodeTag::T_FuncExpr => {
             let f = node.as_func_expr().unwrap();
@@ -955,6 +955,8 @@ fn expression_returns_set(node: Node<'_>) -> bool {
             node.as_null_test().unwrap().arg.is_some_and(expression_returns_set)
         }
         NodeTag::T_Const | NodeTag::T_Param | NodeTag::T_Var | NodeTag::T_CaseTestExpr => false,
+        // C short-circuits these before recursing (parser guarantees no SRF).
+        NodeTag::T_Aggref | NodeTag::T_GroupingFunc | NodeTag::T_WindowFunc => false,
         // SubLink is not set-returning; C's walker does not enter subselects.
         NodeTag::T_SubLink => {
             node.as_sub_link().unwrap().testexpr.is_some_and(expression_returns_set)

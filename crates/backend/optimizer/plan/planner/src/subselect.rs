@@ -1,14 +1,14 @@
-//! subselect.c uncorrelated-initplan slice (EXISTS/EXPR sublinks) plus the
-//! pull_up_sublinks decision walk (prepjointree.c); every other sublink shape
-//! is a named panic.
+//! subselect.c slice: uncorrelated EXISTS/EXPR initplans plus the real
+//! pull_up_sublinks transform (prepjointree.c) — top-level ANY/EXISTS
+//! sublinks become SEMI/ANTI joins; testexpr-bearing SubPlans stay loud.
 
 use clauses::NodeWalker;
 use mcx::Mcx;
 use types_core::catalog::{BOOLOID, VOIDOID};
 use types_error::PgResult;
 use types_nodes::list::{IntList, NodeList};
-use types_nodes::parsenodes::Query;
-use types_nodes::primnodes::{Param, ParamKind, SubLink, SubLinkType, SubPlan};
+use types_nodes::parsenodes::{Query, RTEKind, RangeTblEntry};
+use types_nodes::primnodes::{FromExpr, Param, ParamKind, SubLink, SubLinkType, SubPlan};
 use types_nodes::{Node, NodeTag};
 use types_pathnodes::RelId;
 
@@ -17,74 +17,655 @@ use crate::pathnode::get_cheapest_fractional_path;
 use crate::planmain::fetch_final_rel;
 use crate::run::PlannerRun;
 
-// pull_up_sublinks (prepjointree.c), decision-only: nothing uncorrelated
-// converts to a join, so the walk proves that and panics where C would build one.
-pub fn pull_up_sublinks<'mcx>(run: &mut PlannerRun<'mcx>, parse: &Query<'mcx>) -> PgResult<()> {
+// pull_up_sublinks (prepjointree.c): convert top-level ANY/EXISTS sublinks
+// into SEMI/ANTI JoinExprs stacked into the jointree. New JoinExpr and
+// FromExpr nodes are freshly built here, so the post-hoc quals/child fixups
+// mirror C's in-place writes on exclusively-owned nodes.
+pub fn pull_up_sublinks<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    parse: &mut Query<'mcx>,
+) -> PgResult<()> {
+    let mcx = run.mcx;
     let f = parse.jointree.expect("jointree is a FromExpr");
-    for child in &f.fromlist {
-        assert!(
-            child.node_tag() == NodeTag::T_RangeTblRef,
-            "pull_up_sublinks_jointree_recurse (prepjointree.c): {:?}; M2 join lane",
-            child.node_tag()
-        );
+    let jt_node = Node::mk(mcx, FromExpr { fromlist: f.fromlist.clone_in(mcx)?, quals: f.quals })?;
+    let (jtnode, _relids) = pull_up_sublinks_jointree_recurse(run, parse, jt_node)?;
+    if let Some(newf) = jtnode.as_from_expr() {
+        parse.jointree = Some(newf);
+    } else {
+        parse.jointree = Some(mcx::alloc_leak_in(
+            mcx,
+            FromExpr { fromlist: NodeList::make1(mcx, jtnode)?, quals: None },
+        )?);
     }
-    match f.quals {
-        Some(quals) => pull_up_sublinks_qual_recurse(run, quals),
-        None => Ok(()),
+    Ok(())
+}
+
+fn pull_up_sublinks_jointree_recurse<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    parse: &mut Query<'mcx>,
+    node: Node<'mcx>,
+) -> PgResult<(Node<'mcx>, types_nodes::Bitmapset<'mcx>)> {
+    let mcx = run.mcx;
+    match node.node_tag() {
+        NodeTag::T_RangeTblRef => {
+            let mut relids = types_nodes::Bitmapset::empty();
+            relids.add_member(mcx, node.as_range_tbl_ref().unwrap().rtindex)?;
+            Ok((node, relids))
+        }
+        NodeTag::T_FromExpr => {
+            let f = node.as_from_expr().unwrap();
+            let mut newfromlist = NodeList::nil();
+            let mut frelids = types_nodes::Bitmapset::empty();
+            for child in &f.fromlist {
+                let (newchild, childrelids) =
+                    pull_up_sublinks_jointree_recurse(run, parse, child)?;
+                newfromlist.lappend(mcx, newchild)?;
+                frelids.add_members(mcx, &childrelids)?;
+            }
+            let newf =
+                Node::mk(mcx, FromExpr { fromlist: newfromlist, quals: None })?;
+            let mut jtlink = newf;
+            let quals =
+                pull_up_sublinks_qual_recurse(run, parse, f.quals, &mut jtlink, &frelids, None)?;
+            // SAFETY: newf was built above and is exclusively owned here.
+            unsafe { newf.with_mut::<FromExpr, _>(|nf| nf.quals = quals) };
+            Ok((jtlink, frelids))
+        }
+        NodeTag::T_JoinExpr => {
+            let j = node.as_join_expr().unwrap();
+            let (larg, leftrelids) = pull_up_sublinks_jointree_recurse(run, parse, j.larg)?;
+            let (rarg, rightrelids) = pull_up_sublinks_jointree_recurse(run, parse, j.rarg)?;
+            let newj = Node::mk(
+                mcx,
+                types_nodes::JoinExpr {
+                    jointype: j.jointype,
+                    isNatural: j.isNatural,
+                    larg,
+                    rarg,
+                    usingClause: j.usingClause.clone_in(mcx)?,
+                    join_using_alias: j.join_using_alias,
+                    quals: None,
+                    alias: j.alias,
+                    rtindex: j.rtindex,
+                },
+            )?;
+            let mut result = newj;
+            match j.jointype {
+                types_nodes::JoinType::JOIN_INNER => {
+                    let mut both = types_nodes::Bitmapset::empty();
+                    both.add_members(mcx, &leftrelids)?;
+                    both.add_members(mcx, &rightrelids)?;
+                    let mut jtlink = newj;
+                    let quals = pull_up_sublinks_qual_recurse(
+                        run, parse, j.quals, &mut jtlink, &both, None,
+                    )?;
+                    // SAFETY: newj is exclusively owned (built above).
+                    unsafe { newj.with_mut::<types_nodes::JoinExpr, _>(|nj| nj.quals = quals) };
+                    result = jtlink;
+                }
+                types_nodes::JoinType::JOIN_LEFT => {
+                    let mut rarg_link = rarg;
+                    let quals = pull_up_sublinks_qual_recurse(
+                        run, parse, j.quals, &mut rarg_link, &rightrelids, None,
+                    )?;
+                    // SAFETY: as above.
+                    unsafe {
+                        newj.with_mut::<types_nodes::JoinExpr, _>(|nj| {
+                            nj.quals = quals;
+                            nj.rarg = rarg_link;
+                        })
+                    };
+                }
+                types_nodes::JoinType::JOIN_RIGHT => {
+                    let mut larg_link = larg;
+                    let quals = pull_up_sublinks_qual_recurse(
+                        run, parse, j.quals, &mut larg_link, &leftrelids, None,
+                    )?;
+                    // SAFETY: as above.
+                    unsafe {
+                        newj.with_mut::<types_nodes::JoinExpr, _>(|nj| {
+                            nj.quals = quals;
+                            nj.larg = larg_link;
+                        })
+                    };
+                }
+                other => panic!(
+                    "pull_up_sublinks_jointree_recurse (prepjointree.c): {other:?} arm"
+                ),
+            }
+            let mut relids = types_nodes::Bitmapset::empty();
+            relids.add_members(mcx, &leftrelids)?;
+            relids.add_members(mcx, &rightrelids)?;
+            if j.rtindex != 0 {
+                relids.add_member(mcx, j.rtindex)?;
+            }
+            Ok((result, relids))
+        }
+        other => panic!(
+            "pull_up_sublinks_jointree_recurse (prepjointree.c): {other:?} jointree node"
+        ),
     }
 }
 
+// pull_up_sublinks_qual_recurse (prepjointree.c). jtlink2/available_rels2 is
+// the second insertion slot for quals of an already-pulled-up ANY sublink.
 fn pull_up_sublinks_qual_recurse<'mcx>(
     run: &mut PlannerRun<'mcx>,
-    node: Node<'mcx>,
-) -> PgResult<()> {
-    match node.node_tag() {
-        NodeTag::T_SubLink => {
-            let sl = node.as_sub_link().unwrap();
-            match sl.subLinkType {
-                SubLinkType::ANY_SUBLINK => panic!(
-                    "convert_ANY_sublink_to_join (subselect.c): M2 join lane"
-                ),
-                SubLinkType::EXISTS_SUBLINK => {
-                    if vars::contain_vars_of_level(sl.subselect, 1)? {
-                        panic!(
-                            "convert_EXISTS_sublink_to_join (subselect.c): correlated \
-                             EXISTS; M2 join lane"
-                        );
-                    }
-                    Ok(())
+    parse: &mut Query<'mcx>,
+    node: Option<Node<'mcx>>,
+    jtlink1: &mut Node<'mcx>,
+    available_rels1: &types_nodes::Bitmapset<'mcx>,
+    mut jtlink2_rels2: Option<(&mut Node<'mcx>, &types_nodes::Bitmapset<'mcx>)>,
+) -> PgResult<Option<Node<'mcx>>> {
+    let mcx = run.mcx;
+    let Some(node) = node else { return Ok(None) };
+    if let Some(sl) = node.as_sub_link() {
+        match sl.subLinkType {
+            SubLinkType::ANY_SUBLINK => {
+                assert_no_values_to_any(sl)?;
+                if let Some((rarg, quals)) =
+                    convert_any_sublink_to_join(run, parse, sl, available_rels1)?
+                {
+                    attach_pulled_up_join(
+                        run,
+                        parse,
+                        jtlink1,
+                        available_rels1,
+                        types_nodes::JoinType::JOIN_SEMI,
+                        rarg,
+                        quals,
+                    )?;
+                    return Ok(None);
                 }
-                _ => Ok(()),
+                if let Some((jtlink2, rels2)) = jtlink2_rels2 {
+                    if let Some((rarg, quals)) =
+                        convert_any_sublink_to_join(run, parse, sl, rels2)?
+                    {
+                        attach_pulled_up_join(
+                            run,
+                            parse,
+                            jtlink2,
+                            rels2,
+                            types_nodes::JoinType::JOIN_SEMI,
+                            rarg,
+                            quals,
+                        )?;
+                        return Ok(None);
+                    }
+                }
             }
-        }
-        NodeTag::T_BoolExpr => {
-            let b = node.as_bool_expr().unwrap();
-            match b.boolop {
-                types_nodes::BoolExprType::AND_EXPR => {
-                    for arg in &b.args {
-                        pull_up_sublinks_qual_recurse(run, arg)?;
-                    }
-                    Ok(())
+            SubLinkType::EXISTS_SUBLINK => {
+                if let Some((rarg, quals)) =
+                    convert_exists_sublink_to_join(run, parse, sl, false, available_rels1)?
+                {
+                    attach_pulled_up_join(
+                        run,
+                        parse,
+                        jtlink1,
+                        available_rels1,
+                        types_nodes::JoinType::JOIN_SEMI,
+                        rarg,
+                        quals,
+                    )?;
+                    return Ok(None);
                 }
-                types_nodes::BoolExprType::NOT_EXPR => {
-                    let arg = b.args.first().expect("NOT has one arg");
-                    if let Some(sl) = arg.as_sub_link() {
-                        if sl.subLinkType == SubLinkType::EXISTS_SUBLINK
-                            && vars::contain_vars_of_level(sl.subselect, 1)?
-                        {
-                            panic!(
-                                "convert_EXISTS_sublink_to_join (subselect.c): correlated \
-                                 NOT EXISTS; M2 join lane"
-                            );
+                if let Some((jtlink2, rels2)) = jtlink2_rels2 {
+                    if let Some((rarg, quals)) =
+                        convert_exists_sublink_to_join(run, parse, sl, false, rels2)?
+                    {
+                        attach_pulled_up_join(
+                            run,
+                            parse,
+                            jtlink2,
+                            rels2,
+                            types_nodes::JoinType::JOIN_SEMI,
+                            rarg,
+                            quals,
+                        )?;
+                        return Ok(None);
+                    }
+                }
+            }
+            _ => {}
+        }
+        return Ok(Some(node));
+    }
+    if let Some(b) = node.as_bool_expr() {
+        match b.boolop {
+            types_nodes::BoolExprType::NOT_EXPR => {
+                let arg = b.args.first().expect("NOT has one arg");
+                if let Some(sl) = arg.as_sub_link() {
+                    if sl.subLinkType == SubLinkType::EXISTS_SUBLINK {
+                        if let Some((rarg, quals)) = convert_exists_sublink_to_join(
+                            run,
+                            parse,
+                            sl,
+                            true,
+                            available_rels1,
+                        )? {
+                            attach_anti_join(run, parse, jtlink1, rarg, quals)?;
+                            return Ok(None);
+                        }
+                        if let Some((jtlink2, rels2)) = jtlink2_rels2 {
+                            if let Some((rarg, quals)) = convert_exists_sublink_to_join(
+                                run, parse, sl, true, rels2,
+                            )? {
+                                attach_anti_join(run, parse, jtlink2, rarg, quals)?;
+                                return Ok(None);
+                            }
                         }
                     }
-                    Ok(())
                 }
-                types_nodes::BoolExprType::OR_EXPR => Ok(()),
+                return Ok(Some(node));
             }
+            types_nodes::BoolExprType::AND_EXPR => {
+                let mut newclauses = NodeList::nil();
+                for arg in &b.args {
+                    let newclause = pull_up_sublinks_qual_recurse(
+                        run,
+                        parse,
+                        Some(arg),
+                        jtlink1,
+                        available_rels1,
+                        match jtlink2_rels2 {
+                            Some((ref mut l, r)) => Some((*l, r)),
+                            None => None,
+                        },
+                    )?;
+                    if let Some(c) = newclause {
+                        newclauses.lappend(mcx, c)?;
+                    }
+                }
+                return Ok(match newclauses.len() {
+                    0 => None,
+                    1 => Some(newclauses.nth(0)),
+                    _ => Some(Node::mk(
+                        mcx,
+                        types_nodes::primnodes::BoolExpr {
+                            boolop: types_nodes::BoolExprType::AND_EXPR,
+                            args: newclauses,
+                            location: -1,
+                        },
+                    )?),
+                });
+            }
+            types_nodes::BoolExprType::OR_EXPR => return Ok(Some(node)),
         }
-        _ => Ok(()),
     }
+    Ok(Some(node))
+}
+
+// The shared "insert new JoinExpr above *jtlink, then recursively process the
+// pulled-up rarg and quals" tail of C's ANY/EXISTS success arms.
+fn attach_pulled_up_join<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    parse: &mut Query<'mcx>,
+    jtlink: &mut Node<'mcx>,
+    available_rels: &types_nodes::Bitmapset<'mcx>,
+    jointype: types_nodes::JoinType,
+    rarg: Node<'mcx>,
+    quals: Option<Node<'mcx>>,
+) -> PgResult<()> {
+    let mcx = run.mcx;
+    debug_assert!(jointype == types_nodes::JoinType::JOIN_SEMI);
+    let (new_rarg, child_rels) = pull_up_sublinks_jointree_recurse(run, parse, rarg)?;
+    let j = Node::mk(
+        mcx,
+        types_nodes::JoinExpr {
+            jointype,
+            isNatural: false,
+            larg: *jtlink,
+            rarg: new_rarg,
+            usingClause: NodeList::nil(),
+            join_using_alias: None,
+            quals: None,
+            alias: None,
+            rtindex: 0,
+        },
+    )?;
+    let mut larg_link = *jtlink;
+    let mut rarg_link = new_rarg;
+    let newquals = pull_up_sublinks_qual_recurse(
+        run,
+        parse,
+        quals,
+        &mut larg_link,
+        available_rels,
+        Some((&mut rarg_link, &child_rels)),
+    )?;
+    // SAFETY: j was built above and is exclusively owned here.
+    unsafe {
+        j.with_mut::<types_nodes::JoinExpr, _>(|nj| {
+            nj.larg = larg_link;
+            nj.rarg = rarg_link;
+            nj.quals = newquals;
+        })
+    };
+    *jtlink = j;
+    Ok(())
+}
+
+// NOT EXISTS success arm: under a NOT, pulled-up quals may only reference
+// the new join's rarg.
+fn attach_anti_join<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    parse: &mut Query<'mcx>,
+    jtlink: &mut Node<'mcx>,
+    rarg: Node<'mcx>,
+    quals: Option<Node<'mcx>>,
+) -> PgResult<()> {
+    let mcx = run.mcx;
+    let (new_rarg, child_rels) = pull_up_sublinks_jointree_recurse(run, parse, rarg)?;
+    let j = Node::mk(
+        mcx,
+        types_nodes::JoinExpr {
+            jointype: types_nodes::JoinType::JOIN_ANTI,
+            isNatural: false,
+            larg: *jtlink,
+            rarg: new_rarg,
+            usingClause: NodeList::nil(),
+            join_using_alias: None,
+            quals: None,
+            alias: None,
+            rtindex: 0,
+        },
+    )?;
+    let mut rarg_link = new_rarg;
+    let newquals =
+        pull_up_sublinks_qual_recurse(run, parse, quals, &mut rarg_link, &child_rels, None)?;
+    // SAFETY: j was built above and is exclusively owned here.
+    unsafe {
+        j.with_mut::<types_nodes::JoinExpr, _>(|nj| {
+            nj.rarg = rarg_link;
+            nj.quals = newquals;
+        })
+    };
+    *jtlink = j;
+    Ok(())
+}
+
+// convert_VALUES_to_ANY (subselect.c) is unported; keep the shape loud rather
+// than planning a different (subquery-scan) tree than C's ScalarArrayOpExpr.
+fn assert_no_values_to_any(sl: &SubLink<'_>) -> PgResult<()> {
+    let sub = sl.subselect.as_query().expect("transformed sublink holds a Query");
+    let only_values = sub.rtable.len() == 1
+        && sub
+            .rtable
+            .first()
+            .and_then(|n| n.as_range_tbl_entry())
+            .is_some_and(|r| r.rtekind == RTEKind::RTE_VALUES);
+    assert!(
+        !only_values,
+        "convert_VALUES_to_ANY (subselect.c): IN (VALUES ...) simplification unported"
+    );
+    Ok(())
+}
+
+// convert_ANY_sublink_to_join (subselect.c): returns (rarg, quals) for the
+// JOIN_SEMI JoinExpr the caller assembles, after appending the subselect to
+// the rangetable. None = not convertible (falls back to SubPlan, loud there).
+fn convert_any_sublink_to_join<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    parse: &mut Query<'mcx>,
+    sublink: &SubLink<'mcx>,
+    available_rels: &types_nodes::Bitmapset<'mcx>,
+) -> PgResult<Option<(Node<'mcx>, Option<Node<'mcx>>)>> {
+    let mcx = run.mcx;
+    debug_assert!(sublink.subLinkType == SubLinkType::ANY_SUBLINK);
+    let subselect = sublink.subselect.as_query().expect("sublink holds a Query");
+    let testexpr = sublink.testexpr.expect("ANY sublink has a testexpr");
+
+    let sub_ref_outer = vars::pull_varnos_of_level(mcx, sublink.subselect, 1)?;
+    let use_lateral = !sub_ref_outer.is_empty();
+    if !sub_ref_outer.is_subset(available_rels) {
+        return Ok(None);
+    }
+    assert!(
+        !use_lateral,
+        "convert_ANY_sublink_to_join (subselect.c): LATERAL semijoin; lateral lane unported"
+    );
+    let upper_varnos = vars::pull_varnos(mcx, testexpr)?;
+    if upper_varnos.is_empty() || !upper_varnos.is_subset(available_rels) {
+        return Ok(None);
+    }
+    if clauses::contain_volatile_functions(testexpr)? {
+        return Ok(None);
+    }
+
+    // addRangeTableEntryForSubquery (parse_relation.c) essentials: eref from
+    // the subquery tlist resnames under the "ANY_subquery" alias.
+    let mut colnames = NodeList::nil();
+    for te_node in &subselect.targetList {
+        let te = te_node.as_target_entry().expect("tlist entry");
+        if te.resjunk {
+            continue;
+        }
+        colnames.lappend(
+            mcx,
+            Node::mk_string(mcx, te.resname.unwrap_or("?column?"))?,
+        )?;
+    }
+    let alias = mcx::leak_in(mcx::alloc_in(
+        mcx,
+        types_nodes::primnodes::Alias { aliasname: Some("ANY_subquery"), colnames: NodeList::nil() },
+    )?);
+    let eref = mcx::leak_in(mcx::alloc_in(
+        mcx,
+        types_nodes::primnodes::Alias { aliasname: Some("ANY_subquery"), colnames },
+    )?);
+    let rte = Node::mk(
+        mcx,
+        RangeTblEntry {
+            rtekind: RTEKind::RTE_SUBQUERY,
+            subquery: Some(subselect),
+            alias: Some(alias),
+            eref: Some(eref),
+            lateral: false,
+            inFromCl: false,
+            ..Default::default()
+        },
+    )?;
+    parse.rtable.lappend(mcx, rte)?;
+    let rtindex = parse.rtable.len() as i32;
+    let rtr = Node::mk_range_tbl_ref(mcx, rtindex)?;
+
+    let mut subquery_vars: mcx::PgVec<'mcx, Node<'mcx>> = mcx::PgVec::new_in(mcx);
+    for te_node in &subselect.targetList {
+        let te = te_node.as_target_entry().expect("tlist entry");
+        if te.resjunk {
+            continue;
+        }
+        let (ty, tm) = crate::costsize::expr_type_typmod(te.expr);
+        subquery_vars.push(Node::mk(
+            mcx,
+            types_nodes::primnodes::Var {
+                varno: rtindex,
+                varattno: te.resno,
+                vartype: ty,
+                vartypmod: tm,
+                varcollid: crate::pathkeys::expr_collation(te.expr),
+                ..Default::default()
+            },
+        )?);
+    }
+
+    let quals = convert_testexpr(mcx, testexpr, &subquery_vars)?;
+    Ok(Some((rtr, Some(quals))))
+}
+
+// convert_testexpr (subselect.c): PARAM_SUBLINK Params -> the given nodes.
+fn convert_testexpr<'mcx>(
+    mcx: Mcx<'mcx>,
+    node: Node<'mcx>,
+    subst: &[Node<'mcx>],
+) -> PgResult<Node<'mcx>> {
+    Ok(convert_testexpr_mutator(mcx, node, subst)?.unwrap_or(node))
+}
+
+fn convert_testexpr_mutator<'mcx>(
+    mcx: Mcx<'mcx>,
+    node: Node<'mcx>,
+    subst: &[Node<'mcx>],
+) -> PgResult<Option<Node<'mcx>>> {
+    if let Some(p) = node.as_param() {
+        if p.paramkind == ParamKind::PARAM_SUBLINK {
+            let id = p.paramid;
+            assert!(
+                id >= 1 && (id as usize) <= subst.len(),
+                "unexpected PARAM_SUBLINK ID: {id}"
+            );
+            // C copyObject; substitutions are Vars built per-conversion, so
+            // the handle is exclusively ours already.
+            return Ok(Some(subst[(id - 1) as usize]));
+        }
+        return Ok(None);
+    }
+    if node.node_tag() == NodeTag::T_SubLink {
+        return Ok(None);
+    }
+    clauses::expression_tree_mutator(mcx, node, &mut |n| {
+        convert_testexpr_mutator(mcx, n, subst)
+    })
+}
+
+// convert_EXISTS_sublink_to_join (subselect.c): returns (rarg, whereClause)
+// with the simplified sub-select's rtable already merged into the parent.
+fn convert_exists_sublink_to_join<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    parse: &mut Query<'mcx>,
+    sublink: &SubLink<'mcx>,
+    _under_not: bool,
+    available_rels: &types_nodes::Bitmapset<'mcx>,
+) -> PgResult<Option<(Node<'mcx>, Option<Node<'mcx>>)>> {
+    let mcx = run.mcx;
+    debug_assert!(sublink.subLinkType == SubLinkType::EXISTS_SUBLINK);
+    let orig = sublink.subselect.as_query().expect("sublink holds a Query");
+    if !orig.cteList.is_nil() {
+        return Ok(None);
+    }
+    let mut subselect = query_cells_copy(mcx, orig)?;
+    if !simplify_exists_query(run, &mut subselect)? {
+        return Ok(None);
+    }
+    let jt = subselect.jointree.expect("jointree is a FromExpr");
+    let where_clause = jt.quals;
+    subselect.jointree = Some(mcx::alloc_leak_in(
+        mcx,
+        types_nodes::primnodes::FromExpr { fromlist: jt.fromlist.clone_in(mcx)?, quals: None },
+    )?);
+
+    let sub_node = Node::mk(mcx, query_cells_copy(mcx, &subselect)?)?;
+    if vars::contain_vars_of_level(sub_node, 1)? {
+        return Ok(None);
+    }
+    let Some(where_clause) = where_clause else { return Ok(None) };
+    if !vars::contain_vars_of_level(where_clause, 1)? {
+        return Ok(None);
+    }
+    if clauses::contain_volatile_functions(where_clause)? {
+        return Ok(None);
+    }
+    crate::prep::replace_empty_jointree(mcx, &mut subselect)?;
+
+    let rtoffset = parse.rtable.len() as i32;
+    // OffsetVarNodes + IncrementVarSublevelsUp(-1, 1): after simplify, the
+    // sub-select body is rtable + a quals-free jointree of RangeTblRefs.
+    let jt = subselect.jointree.expect("jointree is a FromExpr");
+    let mut off_fromlist = NodeList::nil();
+    for jnode in &jt.fromlist {
+        match jnode.node_tag() {
+            NodeTag::T_RangeTblRef => {
+                let r = jnode.as_range_tbl_ref().expect("RangeTblRef");
+                off_fromlist.lappend(mcx, Node::mk_range_tbl_ref(mcx, r.rtindex + rtoffset)?)?;
+            }
+            other => panic!(
+                "OffsetVarNodes (rewriteManip.c): {other:?} EXISTS jointree arm; join lane"
+            ),
+        }
+    }
+    let where_clause = offset_and_pull_down(mcx, where_clause, rtoffset)?;
+
+    let clause_varnos = vars::pull_varnos(mcx, where_clause)?;
+    let mut upper_varnos = types_nodes::Bitmapset::empty();
+    for v in clause_varnos.iter() {
+        if v <= rtoffset {
+            upper_varnos.add_member(mcx, v)?;
+        }
+    }
+    debug_assert!(!upper_varnos.is_empty());
+    if !upper_varnos.is_subset(available_rels) {
+        return Ok(None);
+    }
+
+    // CombineRangeTables (rewriteManip.c). RTEs are copied, not scribbled:
+    // the sub-Query is shared with the plancache'd parse tree.
+    let perm_offset = parse.rteperminfos.len() as u32;
+    for srte_node in &subselect.rtable {
+        let srte = srte_node.as_range_tbl_entry().expect("rtable cell");
+        assert!(
+            srte.rtekind == RTEKind::RTE_RELATION,
+            "convert_EXISTS_sublink_to_join (subselect.c): {:?} RTE in EXISTS body",
+            srte.rtekind
+        );
+        let new_index = if srte.perminfoindex > 0 {
+            srte.perminfoindex + perm_offset
+        } else {
+            srte.perminfoindex
+        };
+        parse.rtable.lappend(
+            mcx,
+            crate::prepjointree::rte_copy_with_perminfoindex(mcx, srte, new_index)?,
+        )?;
+    }
+    for p in &subselect.rteperminfos {
+        parse.rteperminfos.lappend(mcx, p)?;
+    }
+
+    let rarg = if off_fromlist.len() == 1 {
+        off_fromlist.nth(0)
+    } else {
+        Node::mk(mcx, FromExpr { fromlist: off_fromlist, quals: None })?
+    };
+    Ok(Some((rarg, Some(where_clause))))
+}
+
+// One walk doing C's OffsetVarNodes(level 0) then IncrementVarSublevelsUp(-1)
+// over the EXISTS WHERE clause: level-0 varnos shift by rtoffset; level-1
+// (parent) vars drop to level 0 without shifting.
+fn offset_and_pull_down<'mcx>(
+    mcx: Mcx<'mcx>,
+    node: Node<'mcx>,
+    rtoffset: i32,
+) -> PgResult<Node<'mcx>> {
+    fn mutate<'mcx>(
+        mcx: Mcx<'mcx>,
+        node: Node<'mcx>,
+        rtoffset: i32,
+    ) -> PgResult<Option<Node<'mcx>>> {
+        if let Some(v) = node.as_var() {
+            let mut nv = types_nodes::primnodes::Var {
+                varnullingrels: v.varnullingrels.clone_in(mcx)?,
+                ..*v
+            };
+            if v.varlevelsup == 0 {
+                nv.varno += rtoffset;
+                if nv.varnosyn > 0 {
+                    nv.varnosyn += rtoffset as u32;
+                }
+            } else {
+                nv.varlevelsup -= 1;
+            }
+            return Ok(Some(Node::mk(mcx, nv)?));
+        }
+        if node.node_tag() == NodeTag::T_SubLink {
+            panic!(
+                "IncrementVarSublevelsUp (rewriteManip.c): nested SubLink in pulled-up \
+                 EXISTS qual; sublink lane"
+            );
+        }
+        clauses::expression_tree_mutator(mcx, node, &mut |n| mutate(mcx, n, rtoffset))
+    }
+    Ok(mutate(mcx, node, rtoffset)?.unwrap_or(node))
 }
 
 /// SS_process_sublinks (subselect.c).
@@ -105,7 +686,12 @@ fn process_sublinks_mutator<'mcx>(
 ) -> PgResult<Option<Node<'mcx>>> {
     if node.node_tag() == NodeTag::T_SubLink {
         let sl = node.as_sub_link().unwrap();
-        debug_assert!(sl.testexpr.is_none(), "testexpr-bearing sublinks are loud upstream");
+        assert!(
+            sl.testexpr.is_none(),
+            "make_subplan (subselect.c): testexpr-bearing {:?} SubPlan (hashed/linear \
+             subplan execution) unported — NOT IN and un-pulled-up ANY stay loud",
+            sl.subLinkType
+        );
         return Ok(Some(make_subplan(run, sl, is_top_qual)?));
     }
     debug_assert!(!matches!(

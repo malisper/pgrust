@@ -187,6 +187,21 @@ pub fn ExplainNode<'mcx>(
         NodeTag::T_MergeJoin => "Merge",
         NodeTag::T_Hash => "Hash",
         NodeTag::T_Material => "Materialize",
+        NodeTag::T_Agg => {
+            let agg = node.as_agg().expect("Agg plan node");
+            assert!(
+                agg.aggsplit == types_nodes::primnodes::AGGSPLIT_SIMPLE,
+                "ExplainNode (explain.c): partial/finalize Agg display; parallel-agg lane"
+            );
+            match agg.aggstrategy {
+                0 => "Aggregate",
+                1 => "GroupAggregate",
+                2 => "HashAggregate",
+                3 => "MixedAggregate",
+                other => node_gap("ExplainNode", &format!("Agg strategy {other} unrecognized")),
+            }
+        }
+        NodeTag::T_Unique => "Unique",
         NodeTag::T_Sort => "Sort",
         NodeTag::T_WindowAgg => "WindowAgg",
         NodeTag::T_Limit => "Limit",
@@ -349,11 +364,25 @@ pub fn ExplainNode<'mcx>(
             show_window_def(node, es)?;
             let w = node.as_window_agg().unwrap();
             debug_assert!(w.runCondition.is_nil());
-            show_scan_qual(&plan.qual, "Filter", node, es)?;
+            show_upper_qual(&plan.qual, "Filter", node, es)?;
             filtered_count_gap(&plan.qual, es);
         }
-        // Limit shows nothing extra without ANALYZE.
-        NodeTag::T_Limit => {}
+        NodeTag::T_Agg => {
+            show_agg_keys(node, es)?;
+            show_upper_qual(&plan.qual, "Filter", node, es)?;
+            show_hashagg_info(node, es)?;
+            filtered_count_gap(&plan.qual, es);
+        }
+        NodeTag::T_Material => {
+            if es.analyze {
+                node_gap(
+                    "show_material_info",
+                    "storage display needs tuplestore_get_stats (tuplestore instrumentation lane)",
+                );
+            }
+        }
+        // Unique and Limit show nothing extra without ANALYZE.
+        NodeTag::T_Unique | NodeTag::T_Limit => {}
         _ => unreachable!(),
     }
 
@@ -438,6 +467,77 @@ fn show_sort_keys<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) -> PgResu
         result.push(buf);
     }
     ExplainPropertyList("Sort Key", &result, es);
+    Ok(())
+}
+
+// show_agg_keys -> show_sort_group_keys (explain.c): key columns resolve in
+// the child plan's tlist. Divergence: C deparses with showimplicit=true; a
+// top-level implicit cast on a group key prints without its ::type here.
+fn show_agg_keys<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) -> PgResult<()> {
+    let agg = node.as_agg().expect("Agg plan node");
+    if agg.numCols <= 0 && agg.groupingSets.is_nil() {
+        return Ok(());
+    }
+    if !agg.groupingSets.is_nil() {
+        node_gap("show_grouping_sets", "grouping-sets key display (grouping sets lane)");
+    }
+    let child = agg.plan.lefttree.expect("Agg has an outer plan");
+    let child_tlist = &plan_of(child).targetlist;
+    let mcx = es.str.allocator();
+    let useprefix = es.rtable_size > 1 || es.verbose;
+    let mut result: PgVec<'mcx, PgString<'mcx>> = PgVec::new_in(mcx);
+    for &resno in agg.grpColIdx {
+        let tle = get_tle_by_resno(child_tlist, resno)
+            .unwrap_or_else(|| node_gap("show_sort_group_keys", "no tlist entry for key column"));
+        let mut buf = PgString::new_in(mcx);
+        deparse_expr(es, child, tle.expr, useprefix, &mut buf)?;
+        result.push(buf);
+    }
+    ExplainPropertyList("Group Key", &result, es);
+    Ok(())
+}
+
+// show_hashagg_info (explain.c), text arm; the parallel-worker display has no
+// parallel lane. AGG_HASHED/AGG_MIXED only.
+fn show_hashagg_info<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) -> PgResult<()> {
+    let agg = node.as_agg().expect("Agg plan node");
+    if agg.aggstrategy != 2 && agg.aggstrategy != 3 {
+        return Ok(());
+    }
+    let ai = if es.qd.is_null() {
+        return Ok(());
+    } else {
+        match execmain_seams::query_desc_agg_instrument::call(es.qd, agg.plan.plan_node_id) {
+            Some(ai) => ai,
+            None => return Ok(()),
+        }
+    };
+    let mut gotone = false;
+    if es.costs && ai.hash_planned_partitions > 0 {
+        crate::format::ExplainIndentText(es);
+        append!(es, "Planned Partitions: {}", ai.hash_planned_partitions);
+        gotone = true;
+    }
+    if es.analyze && ai.hash_mem_peak > 0 {
+        if !gotone {
+            crate::format::ExplainIndentText(es);
+        } else {
+            append!(es, "  ");
+        }
+        append!(
+            es,
+            "Batches: {}  Memory Usage: {}kB",
+            ai.hash_batches_used,
+            ai.hash_mem_peak.div_ceil(1024)
+        );
+        gotone = true;
+        if ai.hash_batches_used > 1 {
+            append!(es, "  Disk Usage: {}kB", ai.hash_disk_used);
+        }
+    }
+    if gotone {
+        append!(es, "\n");
+    }
     Ok(())
 }
 
@@ -589,17 +689,32 @@ fn execscan_expr_type(node: Node<'_>) -> types_core::primitive::Oid {
     }
 }
 
-// show_upper_qual on Result.resconstantqual: C stores it as a bare expression
-// (not an implicit-AND list).
+// show_upper_qual on Result.resconstantqual: an implicit-AND List, deparsed
+// via make_ands_explicit (single member prints bare, several as AND).
 fn show_one_time_filter<'mcx>(
     qual: Node<'mcx>,
     node: Node<'mcx>,
     es: &mut ExplainState<'mcx>,
 ) -> PgResult<()> {
+    let list = qual.as_list().expect("resconstantqual is a List");
+    if list.is_nil() {
+        return Ok(());
+    }
     let mcx = es.str.allocator();
     let useprefix = es.rtable_size > 1 || es.verbose;
     let mut buf = PgString::new_in(mcx);
-    deparse_expr(es, node, qual, useprefix, &mut buf)?;
+    if list.len() == 1 {
+        deparse_expr(es, node, list.nth(0), useprefix, &mut buf)?;
+    } else {
+        buf.try_push('(')?;
+        for (i, item) in list.iter().enumerate() {
+            if i > 0 {
+                buf.try_push_str(" AND ")?;
+            }
+            deparse_expr(es, node, item, useprefix, &mut buf)?;
+        }
+        buf.try_push(')')?;
+    }
     crate::format::ExplainPropertyText("One-Time Filter", buf.as_str(), es);
     Ok(())
 }
@@ -726,10 +841,83 @@ fn deparse_expr<'mcx>(
                 }
             }
         }
+        // get_rule_expr T_NullTest, non-pretty form: outer parens always;
+        // scalar tests only (a row-type arg deparses as IS [NOT] DISTINCT
+        // FROM NULL in C and is loud here).
+        NodeTag::T_NullTest => {
+            use types_nodes::primnodes::NullTestType;
+            let nt = expr.as_null_test().unwrap();
+            let arg = nt.arg.expect("NullTest.arg");
+            if !nt.argisrow && lsyscache::type_is_rowtype(deparse_expr_type(arg))? {
+                node_gap("get_rule_expr", "row-type NullTest deparse (ruleutils lane)");
+            }
+            buf.try_push('(')?;
+            deparse_expr(es, plan_node, arg, useprefix, buf)?;
+            buf.try_push_str(match nt.nulltesttype {
+                NullTestType::IS_NULL => " IS NULL",
+                NullTestType::IS_NOT_NULL => " IS NOT NULL",
+            })?;
+            buf.try_push(')')?;
+            Ok(())
+        }
+        // get_agg_expr (ruleutils.c) plain-agg slice; the name prints
+        // unqualified (generate_function_name's visibility probe unported —
+        // a shadowed aggregate would deparse without C's schema prefix).
+        NodeTag::T_Aggref => {
+            let a = expr.as_aggref().unwrap();
+            if !a.aggdistinct.is_nil()
+                || !a.aggorder.is_nil()
+                || a.aggfilter.is_some()
+                || a.aggvariadic
+                || !a.aggdirectargs.is_nil()
+                || a.aggsplit != types_nodes::primnodes::AGGSPLIT_SIMPLE
+            {
+                node_gap(
+                    "get_agg_expr",
+                    "DISTINCT/ORDER BY/FILTER/variadic/ordered-set/partial \
+                     aggregate deparse (ruleutils lane)",
+                );
+            }
+            let name = lsyscache::get_func_name(es.str.allocator(), a.aggfnoid)?
+                .expect("aggregate of a planned expression exists");
+            write!(buf, "{}(", name.as_str()).expect("PgString write");
+            if a.aggstar {
+                buf.try_push('*')?;
+            } else {
+                let mut nargs = 0;
+                for tle_node in a.args.iter() {
+                    let tle =
+                        tle_node.as_target_entry().expect("Aggref args hold TargetEntries");
+                    if tle.resjunk {
+                        continue;
+                    }
+                    if nargs > 0 {
+                        buf.try_push_str(", ")?;
+                    }
+                    nargs += 1;
+                    deparse_expr(es, plan_node, tle.expr, useprefix, buf)?;
+                }
+            }
+            buf.try_push(')')?;
+            Ok(())
+        }
         other => node_gap(
             "deparse_expression",
             &format!("{other:?} deparse unported (ruleutils lane)"),
         ),
+    }
+}
+
+// exprType (nodeFuncs.c) over the tags deparse_expr accepts.
+fn deparse_expr_type(node: Node<'_>) -> types_core::Oid {
+    match node.node_tag() {
+        NodeTag::T_Const => node.as_const().unwrap().consttype,
+        NodeTag::T_Var => node.as_var().unwrap().vartype,
+        NodeTag::T_OpExpr => node.as_op_expr().unwrap().opresulttype,
+        NodeTag::T_Aggref => node.as_aggref().unwrap().aggtype,
+        NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resulttype,
+        NodeTag::T_BoolExpr | NodeTag::T_NullTest => types_core::catalog::BOOLOID,
+        other => node_gap("exprType", &format!("{other:?} (ruleutils deparse lane)")),
     }
 }
 

@@ -54,20 +54,23 @@ pub fn create_pathtarget<'mcx>(
     Ok(id)
 }
 
-// create_group_result_path (pathnode.c); quals arm needs cost_qual_eval.
+// create_group_result_path (pathnode.c). The qual cost lands on startup:
+// C evaluates havingqual once, not per tuple.
 pub fn create_group_result_path<'mcx>(
     run: &mut PlannerRun<'mcx>,
     rel_id: RelId,
     target_id: PtId,
     havingqual: PgVec<'mcx, types_pathnodes::NodeId>,
-) -> PathNode<'mcx> {
-    if !havingqual.is_empty() {
-        panic!("create_group_result_path (pathnode.c): quals cost; M2 qual lane");
+) -> PgResult<PathNode<'mcx>> {
+    let mut qual_cost = 0.0f64;
+    for &id in havingqual.iter() {
+        let qc = crate::costsize::cost_qual_eval_node(*run.root.expr_node(id))?;
+        qual_cost += qc.startup + qc.per_tuple;
     }
     let target = run.root.pathtarget(target_id);
     let (t_startup, t_per_tuple) = (target.cost.startup, target.cost.per_tuple);
     let rel = run.root.rel(rel_id);
-    PathNode::GroupResultPath(GroupResultPath {
+    Ok(PathNode::GroupResultPath(GroupResultPath {
         path: Path {
             type_: tag16(NodeTag::T_GroupResultPath),
             pathtype: tag16(NodeTag::T_Result),
@@ -79,12 +82,12 @@ pub fn create_group_result_path<'mcx>(
             parallel_workers: 0,
             rows: 1.0,
             disabled_nodes: 0,
-            startup_cost: t_startup,
-            total_cost: t_startup + gucs::cpu_tuple_cost() + t_per_tuple,
+            startup_cost: t_startup + qual_cost,
+            total_cost: t_startup + gucs::cpu_tuple_cost() + t_per_tuple + qual_cost,
             pathkeys: PgVec::new_in(run.mcx),
         },
         quals: havingqual,
-    })
+    }))
 }
 
 // is_projection_capable_path (createplan.c), keyed on pathtype like C.
@@ -1007,4 +1010,327 @@ pub fn create_windowagg_path<'mcx>(
     p.startup_cost += t_startup;
     p.total_cost += t_startup + t_per_tuple * rows;
     Ok(id)
+}
+
+// create_unique_path (pathnode.c). The make_pathkeys_for_sortclauses
+// redundancy probe reduces under eclass-lite to dropping duplicate exprs
+// (no EC ever carries a const). C's semi_can_hash write-back on oversized
+// hash entries is skipped: recomputation reaches the same verdict.
+pub fn create_unique_path<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel_id: RelId,
+    subpath_id: PathId,
+    sjinfo: &types_pathnodes::SpecialJoinInfo<'mcx>,
+) -> PgResult<Option<PathId>> {
+    debug_assert!(Some(subpath_id) == run.root.rel(rel_id).cheapest_total_path);
+    debug_assert!(sjinfo.jointype == types_pathnodes::JOIN_SEMI);
+    debug_assert!(crate::relnode::relids_equal(
+        &run.root.rel(rel_id).relids,
+        &sjinfo.syn_righthand
+    ));
+
+    if let Some(cached) = run.root.rel(rel_id).cheapest_unique_path {
+        return Ok(Some(cached));
+    }
+    if !(sjinfo.semi_can_btree || sjinfo.semi_can_hash) {
+        return Ok(None);
+    }
+
+    let mcx = run.mcx;
+    let mut uniq_exprs: PgVec<'mcx, types_pathnodes::NodeId> = PgVec::new_in(mcx);
+    let mut in_operators: PgVec<'mcx, types_pathnodes::Oid> = PgVec::new_in(mcx);
+    for (i, &expr_id) in sjinfo.semi_rhs_exprs.iter().enumerate() {
+        let in_oper = sjinfo.semi_operators[i];
+        let sortop = lsyscache::amop::get_ordering_op_for_equality_op(in_oper, false)?;
+        if sortop != 0 {
+            let eqop = lsyscache::amop::get_equality_op_for_ordering_op(sortop)?
+                .map(|(op, _)| op)
+                .unwrap_or(0);
+            assert!(
+                eqop != 0,
+                "could not find equality operator for ordering operator {sortop}"
+            );
+            let expr = *run.root.expr_node(expr_id);
+            let dup = uniq_exprs.iter().any(|&kept| {
+                types_nodes::equal(*run.root.expr_node(kept), expr)
+            });
+            if dup {
+                continue;
+            }
+        } else {
+            assert!(
+                !sjinfo.semi_can_btree,
+                "could not find ordering operator for equality operator {in_oper}"
+            );
+        }
+        uniq_exprs.push(expr_id);
+        in_operators.push(in_oper);
+    }
+    if uniq_exprs.is_empty() {
+        return Ok(None);
+    }
+
+    let sub = run.root.path(subpath_id).base();
+    let (sub_disabled, sub_startup, sub_total, sub_parallel_safe, sub_parallel_workers) = (
+        sub.disabled_nodes,
+        sub.startup_cost,
+        sub.total_cost,
+        sub.parallel_safe,
+        sub.parallel_workers,
+    );
+    let sub_pathkeys = crate::relnode::pgvec_clone_shallow(mcx, &sub.pathkeys);
+    let sub_width = run.root.path_pathtarget(subpath_id).width;
+    let rel_rows = run.root.rel(rel_id).rows;
+    let rel_rtekind = run.root.rel(rel_id).rtekind;
+
+    let mut path = Path {
+        type_: tag16(NodeTag::T_UniquePath),
+        pathtype: tag16(NodeTag::T_Unique),
+        parent: rel_id,
+        pathtarget_id: run.root.rel(rel_id).pathtarget_id,
+        param_info: None,
+        parallel_aware: false,
+        parallel_safe: run.root.rel(rel_id).consider_parallel && sub_parallel_safe,
+        parallel_workers: sub_parallel_workers,
+        rows: 0.0,
+        disabled_nodes: 0,
+        startup_cost: 0.0,
+        total_cost: 0.0,
+        pathkeys: PgVec::new_in(mcx),
+    };
+
+    if rel_rtekind == types_pathnodes::RTE_RELATION
+        && sjinfo.semi_can_btree
+        && relation_has_unique_index_for(run, rel_id, &uniq_exprs, &in_operators)?
+    {
+        path.rows = rel_rows;
+        path.disabled_nodes = sub_disabled;
+        path.startup_cost = sub_startup;
+        path.total_cost = sub_total;
+        path.pathkeys = sub_pathkeys;
+        let id = run.root.alloc_path(PathNode::UniquePath(types_pathnodes::UniquePath {
+            path,
+            subpath: Some(subpath_id),
+            umethod: types_pathnodes::UNIQUE_PATH_NOOP,
+            in_operators,
+            uniq_exprs,
+        }));
+        run.root.rel_mut(rel_id).cheapest_unique_path = Some(id);
+        return Ok(Some(id));
+    }
+    assert!(
+        rel_rtekind != types_nodes::parsenodes::RTEKind::RTE_SUBQUERY as u32,
+        "create_unique_path (pathnode.c): un-flattened subquery RHS; subquery-scan lane"
+    );
+
+    let group_exprs: PgVec<'mcx, (types_pathnodes::NodeId, types_nodes::Node<'mcx>)> = {
+        let mut v = PgVec::new_in(mcx);
+        for &id in uniq_exprs.iter() {
+            v.push((id, *run.root.expr_node(id)));
+        }
+        v
+    };
+    path.rows = crate::selfuncs::estimate_num_groups(run, &group_exprs, rel_rows)?;
+    let num_cols = uniq_exprs.len();
+
+    let sort_cost = if sjinfo.semi_can_btree {
+        let (d, s, mut t) = crate::costsize::cost_sort_shape(
+            sub_disabled,
+            sub_total,
+            rel_rows,
+            sub_width,
+            0.0,
+            init_small::globals::work_mem(),
+            -1.0,
+        );
+        t += gucs::cpu_operator_cost() * rel_rows * num_cols as f64;
+        Some((d, s, t))
+    } else {
+        None
+    };
+
+    let mut semi_can_hash = sjinfo.semi_can_hash;
+    let mut agg_cost: Option<(i32, f64, f64)> = None;
+    if semi_can_hash {
+        let hashentrysize = (sub_width + 64) as f64;
+        if hashentrysize * path.rows > ::nodehash::get_hash_memory_limit() as f64 {
+            semi_can_hash = false;
+        } else {
+            let scratch = Path {
+                type_: path.type_,
+                pathtype: path.pathtype,
+                parent: path.parent,
+                pathtarget_id: path.pathtarget_id,
+                param_info: None,
+                parallel_aware: path.parallel_aware,
+                parallel_safe: path.parallel_safe,
+                parallel_workers: path.parallel_workers,
+                rows: path.rows,
+                disabled_nodes: path.disabled_nodes,
+                startup_cost: path.startup_cost,
+                total_cost: path.total_cost,
+                pathkeys: PgVec::new_in(mcx),
+            };
+            let id = run.root.alloc_path(PathNode::UniquePath(types_pathnodes::UniquePath {
+                path: scratch,
+                subpath: Some(subpath_id),
+                umethod: types_pathnodes::UNIQUE_PATH_HASH,
+                in_operators: crate::relnode::pgvec_clone_shallow(mcx, &in_operators),
+                uniq_exprs: crate::relnode::pgvec_clone_shallow(mcx, &uniq_exprs),
+            }));
+            crate::costsize::cost_agg(
+                run,
+                id,
+                types_pathnodes::AGG_HASHED,
+                &types_pathnodes::AggClauseCosts::default(),
+                num_cols as i32,
+                path.rows,
+                &[],
+                sub_disabled,
+                sub_startup,
+                sub_total,
+                rel_rows,
+                sub_width,
+            )?;
+            let p = run.root.path(id).base();
+            agg_cost = Some((p.disabled_nodes, p.startup_cost, p.total_cost));
+        }
+    }
+
+    let umethod = match (sort_cost, agg_cost) {
+        (Some(sc), Some(ac)) => {
+            if ac.0 < sc.0 || (ac.0 == sc.0 && ac.2 < sc.2) {
+                types_pathnodes::UNIQUE_PATH_HASH
+            } else {
+                types_pathnodes::UNIQUE_PATH_SORT
+            }
+        }
+        (Some(_), None) => types_pathnodes::UNIQUE_PATH_SORT,
+        (None, Some(_)) => types_pathnodes::UNIQUE_PATH_HASH,
+        (None, None) => {
+            debug_assert!(!semi_can_hash);
+            return Ok(None);
+        }
+    };
+    let (d, s, t) = if umethod == types_pathnodes::UNIQUE_PATH_HASH {
+        agg_cost.unwrap()
+    } else {
+        sort_cost.unwrap()
+    };
+    path.disabled_nodes = d;
+    path.startup_cost = s;
+    path.total_cost = t;
+    let id = run.root.alloc_path(PathNode::UniquePath(types_pathnodes::UniquePath {
+        path,
+        subpath: Some(subpath_id),
+        umethod,
+        in_operators,
+        uniq_exprs,
+    }));
+    run.root.rel_mut(rel_id).cheapest_unique_path = Some(id);
+    Ok(Some(id))
+}
+
+// relation_has_unique_index_for (indxpath.c), restrictlist from the rel's
+// mergejoinable var-op-pseudoconstant baserestrictinfo clauses plus the
+// caller's expr/operator pairs.
+fn relation_has_unique_index_for<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel_id: RelId,
+    exprlist: &[types_pathnodes::NodeId],
+    oprlist: &[types_pathnodes::Oid],
+) -> PgResult<bool> {
+    debug_assert!(exprlist.len() == oprlist.len());
+    let rel_relid = run.root.rel(rel_id).relid;
+    let mut restrict_rids: PgVec<'_, types_pathnodes::RinfoId> = PgVec::new_in(run.mcx);
+    for i in 0..run.root.rel(rel_id).baserestrictinfo.len() {
+        let rid = run.root.rel(rel_id).baserestrictinfo[i];
+        let ri = run.root.rinfo(rid);
+        if ri.mergeopfamilies.is_empty() {
+            continue;
+        }
+        let left_empty = crate::relnode::relids_is_empty(&ri.left_relids);
+        let right_empty = crate::relnode::relids_is_empty(&ri.right_relids);
+        if left_empty {
+            run.root.rinfo_mut(rid).outer_is_left = true;
+        } else if right_empty {
+            run.root.rinfo_mut(rid).outer_is_left = false;
+        } else {
+            continue;
+        }
+        restrict_rids.push(rid);
+    }
+    if restrict_rids.is_empty() && exprlist.is_empty() {
+        return Ok(false);
+    }
+
+    let strip_relabel = |mut n: types_nodes::Node<'mcx>| {
+        while let Some(r) = n.as_relabel_type() {
+            n = r.arg;
+        }
+        n
+    };
+    let n_indexes = run.root.rel(rel_id).indexlist.len();
+    for i in 0..n_indexes {
+        let ind = std::rc::Rc::clone(&run.root.rel(rel_id).indexlist[i]);
+        if !ind.unique || !ind.immediate || !ind.indpred.is_empty() {
+            continue;
+        }
+        let mut all_matched = true;
+        for c in 0..ind.nkeycolumns as usize {
+            let mut matched = false;
+            if ind.indexkeys[c] == 0 {
+                // match_index_to_operand: expression columns never match.
+                all_matched = false;
+                break;
+            }
+            for &rid in restrict_rids.iter() {
+                let ri = run.root.rinfo(rid);
+                if !ri.mergeopfamilies.iter().any(|&f| f == ind.opfamily[c]) {
+                    continue;
+                }
+                let clause = *run.root.expr_node(ri.clause);
+                let o = clause.as_op_expr().expect("mergejoinable clause is an OpExpr");
+                let rexpr = strip_relabel(if ri.outer_is_left {
+                    o.args.nth(1)
+                } else {
+                    o.args.nth(0)
+                });
+                if let Some(var) = rexpr.as_var() {
+                    if var.varno as u32 == rel_relid
+                        && var.varattno != 0
+                        && ind.indexkeys[c] == var.varattno as i32
+                    {
+                        matched = true;
+                        break;
+                    }
+                }
+            }
+            if !matched {
+                for (j, &expr_id) in exprlist.iter().enumerate() {
+                    let expr = strip_relabel(*run.root.expr_node(expr_id));
+                    let Some(var) = expr.as_var() else { continue };
+                    if !(var.varno as u32 == rel_relid
+                        && var.varattno != 0
+                        && ind.indexkeys[c] == var.varattno as i32)
+                    {
+                        continue;
+                    }
+                    if !lsyscache::amop::op_in_opfamily(oprlist[j], ind.opfamily[c])? {
+                        continue;
+                    }
+                    matched = true;
+                    break;
+                }
+            }
+            if !matched {
+                all_matched = false;
+                break;
+            }
+        }
+        if all_matched {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }

@@ -11,14 +11,21 @@ pub fn make_one_rel<'mcx>(
     run: &mut PlannerRun<'mcx>,
     joinlist: &[JoinlistNode<'mcx>],
 ) -> PgResult<RelId> {
-    // set_base_rel_consider_startup: consider_param_startup only flips for
-    // SEMI/ANTI RHS singletons, which cannot exist here.
-    debug_assert!(run
-        .root
-        .join_info_list
-        .iter()
-        .all(|sj| sj.jointype != types_pathnodes::JOIN_SEMI
-            && sj.jointype != types_pathnodes::JOIN_ANTI));
+    // set_base_rel_consider_startup (allpaths.c): a singleton SEMI/ANTI RHS
+    // may benefit from fast-start parameterized plans.
+    for i in 0..run.root.join_info_list.len() {
+        let sj = &run.root.join_info_list[i];
+        if !matches!(
+            sj.jointype,
+            types_pathnodes::JOIN_SEMI | types_pathnodes::JOIN_ANTI
+        ) {
+            continue;
+        }
+        if let Some(relid) = crate::relnode::relids_singleton_member(&sj.min_righthand) {
+            let rel = crate::relnode::find_base_rel(&run.root, relid);
+            run.root.rel_mut(rel).consider_param_startup = true;
+        }
+    }
 
     set_base_rel_sizes(run)?;
 
@@ -26,8 +33,9 @@ pub fn make_one_rel<'mcx>(
     for rti in 1..run.root.simple_rel_array_size as usize {
         let Some(brel) = run.root.simple_rel_array[rti] else { continue };
         debug_assert_eq!(run.root.rel(brel).relid as usize, rti);
-        // IS_SIMPLE_REL && not dummy (dummies can't be built on this lane).
-        if run.root.rel(brel).reloptkind == RELOPT_BASEREL {
+        if run.root.rel(brel).reloptkind == RELOPT_BASEREL
+            && !crate::joinrels::is_dummy_rel(&run.root, brel)
+        {
             total_pages += run.root.rel(brel).pages as f64;
         }
     }
@@ -65,8 +73,10 @@ fn set_base_rel_pathlists(run: &mut PlannerRun<'_>) -> PgResult<()> {
 }
 
 fn set_rel_size(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResult<()> {
-    // relation_excluded_by_constraints: its inputs (constraint_exclusion on,
-    // partition quals, constant-FALSE quals) are all loud upstream.
+    if relation_excluded_by_constraints(run, rel) {
+        set_dummy_rel_pathlist(run, rel)?;
+        return Ok(());
+    }
     let rte = run.rte(rti);
     assert!(!rte.inh, "set_append_rel_size (allpaths.c): M2 partition lane");
     match rte.rtekind {
@@ -93,7 +103,74 @@ fn set_rel_size(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResult<()
     Ok(())
 }
 
+// relation_excluded_by_constraints (plancat.c): the unconditional
+// constant-FALSE-or-NULL restriction scan; predicate proofs beyond it only
+// run under constraint_exclusion=on (loud) or for otherrels (inh is loud).
+fn relation_excluded_by_constraints(run: &mut PlannerRun<'_>, rel: RelId) -> bool {
+    if run.root.rel(rel).baserestrictinfo.is_empty() {
+        return false;
+    }
+    for i in 0..run.root.rel(rel).baserestrictinfo.len() {
+        let rid = run.root.rel(rel).baserestrictinfo[i];
+        let clause = *run.root.expr_node(run.root.rinfo(rid).clause);
+        if let Some(c) = clause.as_const() {
+            if c.constisnull || !c.constvalue.as_bool() {
+                return true;
+            }
+        }
+    }
+    if crate::gucs::constraint_exclusion() == guc_tables::consts::CONSTRAINT_EXCLUSION_ON {
+        panic!(
+            "relation_excluded_by_constraints (plancat.c): constraint_exclusion=on \
+             needs predicate_refuted_by; constraint-exclusion lane unported"
+        );
+    }
+    false
+}
+
+// set_dummy_rel_pathlist (allpaths.c). C marks a dummy with a childless
+// Append that create_append_plan turns into a gated Result; Append is
+// unported, so the marker is a zero-cost GroupResultPath whose single
+// constant-FALSE qual creates the identical Result plan.
+pub fn set_dummy_rel_pathlist(run: &mut PlannerRun<'_>, rel: RelId) -> PgResult<()> {
+    run.root.rel_mut(rel).rows = 0.0;
+    run.root.rel_reltarget_mut(rel).width = 0;
+    run.root.rel_mut(rel).pathlist.clear();
+    run.root.rel_mut(rel).partial_pathlist.clear();
+
+    let konst = clauses::make_bool_const(run.mcx, false, false)?;
+    let mut quals: mcx::PgVec<'_, types_pathnodes::NodeId> = mcx::PgVec::new_in(run.mcx);
+    quals.push(run.intern_expr(konst));
+    let target_id = run.rel_reltarget_id(rel);
+    let parallel_safe = run.root.rel(rel).consider_parallel;
+    let path = types_pathnodes::PathNode::GroupResultPath(types_pathnodes::GroupResultPath {
+        path: types_pathnodes::Path {
+            type_: crate::pathnode::tag16(types_nodes::NodeTag::T_GroupResultPath),
+            pathtype: crate::pathnode::tag16(types_nodes::NodeTag::T_Result),
+            parent: rel,
+            pathtarget_id: Some(target_id),
+            param_info: None,
+            parallel_aware: false,
+            parallel_safe,
+            parallel_workers: 0,
+            rows: 0.0,
+            disabled_nodes: 0,
+            startup_cost: 0.0,
+            total_cost: 0.0,
+            pathkeys: mcx::PgVec::new_in(run.mcx),
+        },
+        quals,
+    });
+    let pid = run.root.alloc_path(path);
+    add_path(run, rel, pid);
+    set_cheapest(run, rel)?;
+    Ok(())
+}
+
 fn set_rel_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResult<()> {
+    if crate::joinrels::is_dummy_rel(&run.root, rel) {
+        return set_cheapest(run, rel);
+    }
     let rte = run.rte(rti);
     debug_assert!(!rte.inh);
     match rte.rtekind {

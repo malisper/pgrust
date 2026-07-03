@@ -558,6 +558,25 @@ where
                 )?)),
             }
         }
+        NodeTag::T_NullTest => {
+            let nt = node.as_null_test().unwrap();
+            let arg = match nt.arg {
+                Some(a) => m(a)?,
+                None => None,
+            };
+            match arg {
+                None => Ok(None),
+                Some(arg) => Ok(Some(Node::mk(
+                    mcx,
+                    types_nodes::primnodes::NullTest {
+                        arg: Some(arg),
+                        nulltesttype: nt.nulltesttype,
+                        argisrow: nt.argisrow,
+                        location: nt.location,
+                    },
+                )?)),
+            }
+        }
         NodeTag::T_MinMaxExpr => {
             let mm = node.as_min_max_expr().unwrap();
             match mutate_list(mcx, &mm.args, m)? {

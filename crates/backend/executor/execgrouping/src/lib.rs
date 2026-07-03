@@ -173,6 +173,14 @@ pub fn get_hash_memory_limit() -> usize {
 }
 
 impl<'mcx> TupleHashTable<'mcx> {
+    // C MemoryContextMemAllocated(hash_metacxt): the entry array + open
+    // hashing live here instead of a dedicated metacxt.
+    pub fn meta_mem(&self) -> usize {
+        // 5 = 4-byte slot + 1 control byte (hashbrown swiss-table shape).
+        self.entries.capacity() * core::mem::size_of::<TupleHashEntryData>()
+            + self.hashtab.capacity() * 5
+    }
+
     /// C `TupleHashTableHash`; the caller resets its per-tuple context.
     pub fn hash_slot(&mut self, input_slot: &mut SlotData<'mcx>) -> PgResult<u32> {
         // NULL hashes as 0, as EEOP_HASHDATUM_FIRST does.

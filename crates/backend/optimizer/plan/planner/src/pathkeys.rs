@@ -709,11 +709,12 @@ pub fn build_join_pathkeys<'mcx>(
     jointype: u32,
     outer_pathkeys: &[PathKey],
 ) -> PgResult<PgVec<'mcx, PathKey>> {
-    debug_assert!(matches!(
+    if matches!(
         jointype,
-        types_pathnodes::JOIN_INNER | types_pathnodes::JOIN_LEFT | types_pathnodes::JOIN_RIGHT
-    ));
-    if jointype == types_pathnodes::JOIN_RIGHT {
+        types_pathnodes::JOIN_FULL
+            | types_pathnodes::JOIN_RIGHT
+            | types_pathnodes::JOIN_RIGHT_ANTI
+    ) {
         return Ok(PgVec::new_in(run.mcx));
     }
     truncate_useless_pathkeys(run, joinrel, outer_pathkeys)

@@ -21,7 +21,7 @@ pub fn expr_type(node: Node<'_>) -> Oid {
         NodeTag::T_WindowFunc => node.as_window_func().unwrap().wintype,
         NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resulttype,
         NodeTag::T_CoerceViaIO => node.as_coerce_via_io().unwrap().resulttype,
-        NodeTag::T_BoolExpr => types_core::catalog::BOOLOID,
+        NodeTag::T_BoolExpr | NodeTag::T_NullTest => types_core::catalog::BOOLOID,
         NodeTag::T_CaseExpr => node.as_case_expr().unwrap().casetype,
         NodeTag::T_CoalesceExpr => node.as_coalesce_expr().unwrap().coalescetype,
         NodeTag::T_MinMaxExpr => node.as_min_max_expr().unwrap().minmaxtype,
@@ -75,7 +75,8 @@ pub fn expr_typmod(node: Node<'_>) -> i32 {
         | NodeTag::T_Aggref
         | NodeTag::T_WindowFunc
         | NodeTag::T_CoerceViaIO
-        | NodeTag::T_BoolExpr => -1,
+        | NodeTag::T_BoolExpr
+        | NodeTag::T_NullTest => -1,
         NodeTag::T_CaseExpr => {
             let c = node.as_case_expr().unwrap();
             let Some(defresult) = c.defresult else { return -1 };
@@ -131,7 +132,7 @@ pub fn expr_collation(node: Node<'_>) -> Oid {
         NodeTag::T_WindowFunc => node.as_window_func().unwrap().wincollid,
         NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resultcollid,
         NodeTag::T_CoerceViaIO => node.as_coerce_via_io().unwrap().resultcollid,
-        NodeTag::T_BoolExpr => types_core::InvalidOid,
+        NodeTag::T_BoolExpr | NodeTag::T_NullTest => types_core::InvalidOid,
         NodeTag::T_CaseExpr => node.as_case_expr().unwrap().casecollid,
         NodeTag::T_CoalesceExpr => node.as_coalesce_expr().unwrap().coalescecollid,
         NodeTag::T_MinMaxExpr => node.as_min_max_expr().unwrap().minmaxcollid,
@@ -218,6 +219,10 @@ pub fn expr_location(node: Node<'_>) -> ParseLoc {
         NodeTag::T_BoolExpr => {
             let b = node.as_bool_expr().unwrap();
             leftmost_loc(b.location, list_location(&b.args))
+        }
+        NodeTag::T_NullTest => {
+            let n = node.as_null_test().unwrap();
+            leftmost_loc(n.location, n.arg.map_or(-1, expr_location))
         }
         NodeTag::T_TypeCast => {
             let tc = node.as_type_cast().unwrap();

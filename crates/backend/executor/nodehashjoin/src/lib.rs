@@ -1,5 +1,5 @@
-// nodeHashjoin.c INNER/LEFT/RIGHT single-batch machine; the Hash sub-node
-// build runs through nodehash. SEMI/ANTI/FULL, multi-batch, parallel are
+// nodeHashjoin.c single-batch machine, every jointype but FULL; the Hash
+// sub-node build runs through nodehash. FULL, multi-batch, parallel are
 // loud. Per-probe bucket scan is allocation-free.
 #![allow(non_snake_case)]
 
@@ -50,7 +50,6 @@ pub struct HashJoinState<'mcx> {
     otherqual: Option<PgBox<'mcx, ExprState<'mcx>>>,
     outer_hash_expr: PgBox<'mcx, ExprState<'mcx>>,
     js_single_match: bool,
-    // HJ_FILL_OUTER / HJ_FILL_INNER (LEFT and RIGHT joins respectively).
     hj_fill_outer: bool,
     hj_fill_inner: bool,
     hj_NullInnerTupleSlot: Option<ExecSlotId>,
@@ -85,14 +84,22 @@ pub fn exec_init_hash_join<'mcx>(
     assert!(
         matches!(
             node.join.jointype,
-            JoinType::JOIN_INNER | JoinType::JOIN_LEFT | JoinType::JOIN_RIGHT
+            JoinType::JOIN_INNER
+                | JoinType::JOIN_LEFT
+                | JoinType::JOIN_RIGHT
+                | JoinType::JOIN_SEMI
+                | JoinType::JOIN_ANTI
+                | JoinType::JOIN_RIGHT_SEMI
+                | JoinType::JOIN_RIGHT_ANTI
         ),
-        "ExecInitHashJoin (nodeHashjoin.c): jointype {:?}; SEMI/ANTI/FULL lane unported",
+        "ExecInitHashJoin (nodeHashjoin.c): jointype {:?}; FULL lane unported",
         node.join.jointype
     );
     let mcx = estate.es_query_cxt;
-    let hj_fill_outer = node.join.jointype == JoinType::JOIN_LEFT;
-    let hj_fill_inner = node.join.jointype == JoinType::JOIN_RIGHT;
+    let hj_fill_outer =
+        matches!(node.join.jointype, JoinType::JOIN_LEFT | JoinType::JOIN_ANTI);
+    let hj_fill_inner =
+        matches!(node.join.jointype, JoinType::JOIN_RIGHT | JoinType::JOIN_RIGHT_ANTI);
     let hj_NullInnerTupleSlot = if hj_fill_outer {
         Some(exec_init_null_tuple_slot(estate, inner_desc.clone()))
     } else {
@@ -157,7 +164,8 @@ pub fn exec_init_hash_join<'mcx>(
         joinqual,
         otherqual,
         outer_hash_expr,
-        js_single_match: node.join.inner_unique,
+        js_single_match: node.join.inner_unique
+            || node.join.jointype == JoinType::JOIN_SEMI,
         hj_fill_outer,
         hj_fill_inner,
         hj_NullInnerTupleSlot,
@@ -236,6 +244,17 @@ where
                     node.hj_JoinState = HJ_FILL_OUTER_TUPLE;
                     continue;
                 }
+                // A right-semijoin needs only the first match per inner tuple.
+                if node.plan.join.jointype == JoinType::JOIN_RIGHT_SEMI
+                    && hash_state
+                        .table
+                        .as_ref()
+                        .expect("hash table built")
+                        .entry(node.hj_CurTuple)
+                        .matched
+                {
+                    continue;
+                }
                 let ecxt = node.ps_ExprContext;
                 let inner_id = hash_state.hash_tuple_slot;
                 let joinqual = node.joinqual.as_deref_mut();
@@ -248,8 +267,17 @@ where
                         .as_mut()
                         .expect("hash table built")
                         .set_matched(node.hj_CurTuple);
+                    if node.plan.join.jointype == JoinType::JOIN_ANTI {
+                        node.hj_JoinState = HJ_NEED_NEW_OUTER;
+                        continue;
+                    }
                     if node.js_single_match {
                         node.hj_JoinState = HJ_NEED_NEW_OUTER;
+                    }
+                    // RIGHT_ANTI emits nothing here but stays on this outer
+                    // to keep marking inner matches.
+                    if node.plan.join.jointype == JoinType::JOIN_RIGHT_ANTI {
+                        continue;
                     }
                     let otherqual = node.otherqual.as_deref_mut();
                     let pass = with_probe_slots(ecxt, inner_id, estate, |slots| {
@@ -423,7 +451,7 @@ pub fn exec_end_hash_join(_node: &mut HashJoinState<'_>, hash_state: &mut HashSt
 /// `ExecReScanHashJoin` single-batch reuse: keep the table, restart the probe.
 pub fn exec_rescan_hash_join(node: &mut HashJoinState<'_>, hash_state: &mut HashState<'_>) {
     if let Some(table) = hash_state.table.as_mut() {
-        if node.hj_fill_inner {
+        if node.hj_fill_inner || node.plan.join.jointype == JoinType::JOIN_RIGHT_SEMI {
             table.reset_match_flags();
         }
         node.hj_OuterNotEmpty = false;

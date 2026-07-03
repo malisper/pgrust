@@ -1,6 +1,7 @@
-// nodeMergejoin.c INNER/LEFT/RIGHT MJ_* state machine; the MergeJoinInner
-// trait carries ExecMarkPos/ExecRestrPos. FULL, SEMI/ANTI, mj_ConstFalseJoin
-// and clauseless/parallel merge are loud.
+// nodeMergejoin.c INNER/LEFT/RIGHT/SEMI/ANTI MJ_* state machine; the
+// MergeJoinInner trait carries ExecMarkPos/ExecRestrPos. FULL,
+// RIGHT_SEMI/RIGHT_ANTI, mj_ConstFalseJoin and clauseless/parallel merge are
+// loud.
 #![allow(non_snake_case)]
 
 use std::rc::Rc;
@@ -117,9 +118,13 @@ pub fn exec_init_merge_join<'mcx>(
     assert!(
         matches!(
             node.join.jointype,
-            JoinType::JOIN_INNER | JoinType::JOIN_LEFT | JoinType::JOIN_RIGHT
+            JoinType::JOIN_INNER
+                | JoinType::JOIN_LEFT
+                | JoinType::JOIN_RIGHT
+                | JoinType::JOIN_SEMI
+                | JoinType::JOIN_ANTI
         ),
-        "ExecInitMergeJoin (nodeMergejoin.c): jointype {:?}; FULL fill + SEMI/ANTI lane unported",
+        "ExecInitMergeJoin (nodeMergejoin.c): jointype {:?}; RIGHT_SEMI/RIGHT_ANTI/FULL lane unported",
         node.join.jointype
     );
     assert!(
@@ -135,7 +140,8 @@ pub fn exec_init_merge_join<'mcx>(
         estate.exec_init_extra_tuple_slot(Some(result_desc.clone()), TupleSlotKind::Virtual);
     let mj_MarkedTupleSlot =
         estate.exec_init_extra_tuple_slot(Some(inner_desc.clone()), TupleSlotKind::MinimalTuple);
-    let mj_FillOuter = node.join.jointype == JoinType::JOIN_LEFT;
+    let mj_FillOuter =
+        matches!(node.join.jointype, JoinType::JOIN_LEFT | JoinType::JOIN_ANTI);
     let mj_FillInner = node.join.jointype == JoinType::JOIN_RIGHT;
     let mut null_slot = |desc: &Rc<TupleDescData<'static>>, estate: &mut EStateData<'mcx>| {
         let slot_id =
@@ -176,7 +182,8 @@ pub fn exec_init_merge_join<'mcx>(
         mj_JoinState: EXEC_MJ_INITIALIZE_OUTER,
         mj_SkipMarkRestore: node.skip_mark_restore,
         mj_ExtraMarks,
-        js_single_match: node.join.inner_unique,
+        js_single_match: node.join.inner_unique
+            || node.join.jointype == JoinType::JOIN_SEMI,
         mj_FillOuter,
         mj_FillInner,
         mj_NullInnerTupleSlot,
@@ -557,6 +564,12 @@ where
                 if matched {
                     node.mj_MatchedOuter = true;
                     node.mj_MatchedInner = true;
+                    // An antijoin never returns a matched tuple.
+                    if node.plan.join.jointype == JoinType::JOIN_ANTI {
+                        node.mj_JoinState = EXEC_MJ_NEXTOUTER;
+                        estate.reset_expr_context(node.ps_ExprContext);
+                        continue;
+                    }
                     if node.js_single_match {
                         node.mj_JoinState = EXEC_MJ_NEXTOUTER;
                     }

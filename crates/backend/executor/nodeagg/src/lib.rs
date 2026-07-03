@@ -529,8 +529,16 @@ fn init_perhash<'mcx>(
         outer_plan.plan_width.max(0) as usize,
         node.transitionSpace as usize,
     );
-    let (mem_limit, hash_ngroups_limit, _) =
+    let (mem_limit, hash_ngroups_limit, planned_partitions) =
         hash_agg_set_limits(hashentrysize, node.numGroups as f64, 0);
+    estate.es_agg_instrumentation.push((
+        node.plan.plan_node_id,
+        ::types_core::instrument::AggregateInstrumentation {
+            hash_batches_used: 1,
+            hash_planned_partitions: planned_partitions as i32,
+            ..Default::default()
+        },
+    ));
     let nbuckets = hash_choose_num_buckets(hashentrysize, node.numGroups, mem_limit);
 
     let mut key_col_idx: PgVec<'mcx, i16> = vec_with_capacity_in(mcx, num_cols)?;
@@ -899,7 +907,25 @@ where
     let ph = node.perhash.as_mut().unwrap();
     ph.table_filled = true;
     ph.hashiter = 0;
+    hash_agg_update_metrics(node, estate);
     Ok(())
+}
+
+// hash_agg_update_metrics (nodeAgg.c), no-spill form: meta = the table's
+// entry-array analogue, entry/key mem = the agg context subtree (C's
+// hash_tablecxt + hashcontext split lives in one context here).
+fn hash_agg_update_metrics(node: &AggStateData<'_>, estate: &mut EStateData<'_>) {
+    let ph = node.perhash.as_ref().expect("hashed Agg has perhash");
+    // SAFETY: read of the once-allocated node; no &mut is live to it.
+    let aggctx = unsafe { node.agg_node.as_ref() }.aggcontext();
+    let total = (ph.hashtable.meta_mem() + aggctx.context().subtree_used()) as u64;
+    let id = node.plan.plan.plan_node_id;
+    let ai = estate
+        .es_agg_instrumentation
+        .iter_mut()
+        .find_map(|(i, ai)| (*i == id).then_some(ai))
+        .expect("init_perhash published this node's metrics");
+    ai.hash_mem_peak = ai.hash_mem_peak.max(total);
 }
 
 // prepare_hash_slot + lookup_hash_entries + initialize_hash_entry

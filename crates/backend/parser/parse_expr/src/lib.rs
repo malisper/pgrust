@@ -83,6 +83,7 @@ pub fn transformExprRecurse<'mcx>(
         NodeTag::T_ColumnRef => transformColumnRef(mcx, pstate, expr),
         NodeTag::T_FuncCall => transformFuncCall(mcx, pstate, expr),
         NodeTag::T_SubLink => transformSubLink(mcx, pstate, expr),
+        NodeTag::T_NullTest => transformNullTest(mcx, pstate, expr),
         NodeTag::T_CaseTestExpr | NodeTag::T_Var => Ok(expr),
         other => panic!(
             "transformExprRecurse (parse_expr.c): arm for {other:?} unported — \
@@ -109,10 +110,17 @@ fn transformAExprOp<'mcx>(
         && !is_case_test(lexpr)
         && !is_case_test(rexpr)
     {
-        panic!(
-            "transformAExprOp (parse_expr.c): transform_null_equals rewrite needs the \
-             NullTest vocabulary — unit backend-parser-expr"
-        );
+        let arg = if lexpr.is_some_and(expr_is_null_constant) { rexpr } else { lexpr };
+        let n = Node::mk(
+            mcx,
+            types_nodes::primnodes::NullTest {
+                arg,
+                nulltesttype: types_nodes::primnodes::NullTestType::IS_NULL,
+                argisrow: false,
+                location: a.location,
+            },
+        )?;
+        return transformExprRecurse(mcx, pstate, n);
     }
 
     if lexpr.is_some_and(|n| n.node_tag() == NodeTag::T_RowExpr) {
@@ -135,6 +143,32 @@ fn transformAExprOp<'mcx>(
     let ltypeId = lexpr.map_or(types_core::InvalidOid, expr_type);
     let rtypeId = rexpr.map_or(types_core::InvalidOid, expr_type);
     parse_oper::make_op(mcx, pstate, &a.name, lexpr, rexpr, ltypeId, rtypeId, last_srf, a.location)
+}
+
+fn transformNullTest<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    expr: Node<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    let n = expr.as_null_test().unwrap();
+    let arg = transformExprRecurse(mcx, pstate, n.arg.expect("NullTest.arg"))?;
+    // The argument can be any type, so don't coerce it.
+    let argisrow = lsyscache::type_is_rowtype(expr_type(arg))?;
+    if argisrow {
+        panic!(
+            "transformExprRecurse (parse_expr.c): row-type NullTest (argisrow) unported — \
+             unit backend-parser-expr"
+        );
+    }
+    Node::mk(
+        mcx,
+        types_nodes::primnodes::NullTest {
+            arg: Some(arg),
+            nulltesttype: n.nulltesttype,
+            argisrow,
+            location: n.location,
+        },
+    )
 }
 
 fn transformTypeCast<'mcx>(
@@ -793,8 +827,8 @@ fn transformSubLink<'mcx>(
         )));
     }
 
-    match sublink.subLinkType {
-        SubLinkType::EXISTS_SUBLINK => {}
+    let (testexpr, oper_name) = match sublink.subLinkType {
+        SubLinkType::EXISTS_SUBLINK => (None, types_nodes::NodeList::nil()),
         SubLinkType::EXPR_SUBLINK => {
             let nonjunk = qtree
                 .targetList
@@ -804,23 +838,180 @@ fn transformSubLink<'mcx>(
             if nonjunk != 1 {
                 return Err(one_column_required(pstate, sublink.location));
             }
+            (None, types_nodes::NodeList::nil())
+        }
+        SubLinkType::ANY_SUBLINK | SubLinkType::ALL_SUBLINK => {
+            let oper_name = if sublink.operName.is_nil() {
+                types_nodes::NodeList::make1(mcx, Node::mk_string(mcx, "=")?)?
+            } else {
+                sublink.operName.clone_in(mcx)?
+            };
+            let lefthand = transformExprRecurse(
+                mcx,
+                pstate,
+                sublink.testexpr.expect("ANY/ALL sublink carries a testexpr"),
+            )?;
+            if lefthand.node_tag() == NodeTag::T_RowExpr {
+                panic!(
+                    "transformSubLink (parse_expr.c): RowExpr lefthand (multi-column \
+                     row comparison) unported — unit backend-parser-expr"
+                );
+            }
+            let mut right_param = None;
+            let mut right_count = 0usize;
+            for te_node in &qtree.targetList {
+                let tent = te_node.as_target_entry().expect("tlist entry");
+                if tent.resjunk {
+                    continue;
+                }
+                right_count += 1;
+                if right_param.is_none() {
+                    right_param = Some(Node::mk(
+                        mcx,
+                        types_nodes::Param {
+                            paramkind: types_nodes::ParamKind::PARAM_SUBLINK,
+                            paramid: tent.resno as i32,
+                            paramtype: expr_type(tent.expr),
+                            paramtypmod: expr_typmod(tent.expr),
+                            paramcollid: expr_collation(tent.expr),
+                            location: -1,
+                        },
+                    )?);
+                }
+            }
+            if right_count > 1 {
+                return Err(column_count_mismatch(
+                    pstate,
+                    "subquery has too many columns",
+                    sublink.location,
+                ));
+            }
+            let Some(rarg) = right_param else {
+                return Err(column_count_mismatch(
+                    pstate,
+                    "subquery has too few columns",
+                    sublink.location,
+                ));
+            };
+            let test =
+                make_row_comparison_op(mcx, pstate, &oper_name, lefthand, rarg, sublink.location)?;
+            (Some(test), oper_name)
         }
         other => panic!(
-            "transformSubLink (parse_expr.c): {other:?} arm (ANY/ALL/ROWCOMPARE/MULTIEXPR/\
+            "transformSubLink (parse_expr.c): {other:?} arm (ROWCOMPARE/MULTIEXPR/\
              ARRAY) unported — unit backend-parser-expr"
         ),
-    }
+    };
 
     Node::mk(
         mcx,
         types_nodes::SubLink {
             subLinkType: sublink.subLinkType,
             subLinkId: sublink.subLinkId,
-            testexpr: None,
-            operName: types_nodes::NodeList::nil(),
+            testexpr,
+            operName: oper_name,
             subselect: Node::mk(mcx, qtree)?,
             location: sublink.location,
         },
+    )
+}
+
+// make_row_comparison_op (parse_expr.c), single-column reduction; the RowExpr
+// (nopers > 1) legs are loud at the caller.
+fn make_row_comparison_op<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    opname: &types_nodes::NodeList<'mcx>,
+    larg: Node<'mcx>,
+    rarg: Node<'mcx>,
+    location: types_core::ParseLoc,
+) -> PgResult<Node<'mcx>> {
+    let last_srf = pstate.p_last_srf;
+    let ltype = expr_type(larg);
+    let rtype = expr_type(rarg);
+    let cmp = parse_oper::make_op(
+        mcx,
+        pstate,
+        opname,
+        Some(larg),
+        Some(rarg),
+        ltype,
+        rtype,
+        last_srf,
+        location,
+    )?;
+    let op = cmp.as_op_expr().expect("make_op returns an OpExpr");
+    if op.opresulttype != types_core::catalog::BOOLOID {
+        return Err(row_comparison_not_boolean(pstate, op.opresulttype, location));
+    }
+    if coerce::expression_returns_set(cmp) {
+        return Err(row_comparison_returns_set(pstate, location));
+    }
+    Ok(cmp)
+}
+
+#[cold]
+fn column_count_mismatch(
+    pstate: &ParseState<'_, '_>,
+    msg: &str,
+    location: types_core::ParseLoc,
+) -> Box<types_error::PgError> {
+    use types_error::{ErrorLocation, ERRCODE_SYNTAX_ERROR, ERROR};
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_SYNTAX_ERROR)
+            .errmsg(msg.to_string())
+            .errposition(parser_small1::parser_errposition(
+                pstate,
+                location,
+                mbutils::GetDatabaseEncoding(),
+            ))
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_expr.c", 0, "transformSubLink")),
+    )
+}
+
+#[cold]
+fn row_comparison_not_boolean(
+    pstate: &ParseState<'_, '_>,
+    resulttype: types_core::Oid,
+    location: types_core::ParseLoc,
+) -> Box<types_error::PgError> {
+    use types_error::{ErrorLocation, ERRCODE_DATATYPE_MISMATCH, ERROR};
+    let tyname = format_type::format_type_be(resulttype).unwrap_or_else(|_| resulttype.to_string());
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_DATATYPE_MISMATCH)
+            .errmsg(format!(
+                "row comparison operator must yield type boolean, not type {tyname}"
+            ))
+            .errposition(parser_small1::parser_errposition(
+                pstate,
+                location,
+                mbutils::GetDatabaseEncoding(),
+            ))
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_expr.c", 0, "make_row_comparison_op")),
+    )
+}
+
+#[cold]
+fn row_comparison_returns_set(
+    pstate: &ParseState<'_, '_>,
+    location: types_core::ParseLoc,
+) -> Box<types_error::PgError> {
+    use types_error::{ErrorLocation, ERRCODE_DATATYPE_MISMATCH, ERROR};
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_DATATYPE_MISMATCH)
+            .errmsg("row comparison operator must not return a set".to_string())
+            .errposition(parser_small1::parser_errposition(
+                pstate,
+                location,
+                mbutils::GetDatabaseEncoding(),
+            ))
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_expr.c", 0, "make_row_comparison_op")),
     )
 }
 

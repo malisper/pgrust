@@ -45,7 +45,7 @@ pub fn subquery_planner<'mcx>(
     }
     replace_empty_jointree(mcx, &mut parse)?;
     if parse.hasSubLinks {
-        crate::subselect::pull_up_sublinks(run, &parse)?;
+        crate::subselect::pull_up_sublinks(run, &mut parse)?;
     }
     if parse
         .rtable
@@ -353,6 +353,18 @@ fn preprocess_jointree_quals<'mcx>(
 ) -> PgResult<Node<'mcx>> {
     match node.node_tag() {
         NodeTag::T_RangeTblRef => Ok(node),
+        NodeTag::T_FromExpr => {
+            let f = node.as_from_expr().expect("FromExpr");
+            let mut fromlist = types_nodes::list::NodeList::nil();
+            for child in &f.fromlist {
+                fromlist.lappend(run.mcx, preprocess_jointree_quals(run, child, has_sublinks)?)?;
+            }
+            let quals = preprocess_expression(run, f.quals, EXPRKIND_QUAL, has_sublinks)?;
+            Node::mk(
+                run.mcx,
+                types_nodes::primnodes::FromExpr { fromlist, quals },
+            )
+        }
         NodeTag::T_JoinExpr => {
             let j = node.as_join_expr().expect("JoinExpr");
             let larg = preprocess_jointree_quals(run, j.larg, has_sublinks)?;

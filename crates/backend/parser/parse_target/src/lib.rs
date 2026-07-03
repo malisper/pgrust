@@ -744,7 +744,8 @@ fn FigureColnameInternal<'mcx>(node: Node<'mcx>, name: &mut Option<&'mcx str>) -
                 None => 0,
             }
         }
-        NodeTag::T_A_Const | NodeTag::T_ParamRef | NodeTag::T_BoolExpr => 0,
+        // NullTest takes C's default arm: no name.
+        NodeTag::T_A_Const | NodeTag::T_ParamRef | NodeTag::T_BoolExpr | NodeTag::T_NullTest => 0,
         other => panic!(
             "FigureColnameInternal (parse_target.c): arm for {other:?} unported — \
              unit backend-parser-parse-target"

@@ -3358,3 +3358,99 @@ mod window {
             .varattno
     }
 }
+
+mod dummy_rel {
+    use super::*;
+
+    fn assert_dummy_result(plan: Node<'_>) {
+        assert_eq!(plan.node_tag(), NodeTag::T_Result);
+        let result = plan.as_result().unwrap();
+        assert!(result.plan.lefttree.is_none());
+        // Live PG 18.3: Result (cost=0.00..0.00 rows=0 width=0),
+        // One-Time Filter: false.
+        assert_eq!(result.plan.startup_cost, 0.0);
+        assert_eq!(result.plan.total_cost, 0.0);
+        assert_eq!(result.plan.plan_rows, 0.0);
+        assert_eq!(result.plan.plan_width, 0);
+        let rcq = result.resconstantqual.expect("one-time filter").as_list().unwrap();
+        assert_eq!(rcq.len(), 1);
+        let c = rcq.nth(0).as_const().unwrap();
+        assert_eq!(c.consttype, 16);
+        assert!(!c.constisnull);
+        assert!(!c.constvalue.as_bool());
+    }
+
+    #[test]
+    fn is_null_on_not_null_column_plans_dummy_result() {
+        let cx = cx();
+        let mcx = cx.mcx();
+        let var = Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap();
+        let qual = Node::mk(
+            mcx,
+            types_nodes::primnodes::NullTest {
+                arg: Some(var),
+                nulltesttype: types_nodes::primnodes::NullTestType::IS_NULL,
+                argisrow: false,
+                location: -1,
+            },
+        )
+        .unwrap();
+        let stmt = planner(
+            mcx,
+            table_query(mcx, Some(qual)),
+            "SELECT * FROM t WHERE pk IS NULL",
+            CURSOR_OPT_PARALLEL_OK,
+            ParamListHandle::NULL,
+        )
+        .unwrap();
+        assert_dummy_result(stmt.planTree.unwrap());
+    }
+
+    #[test]
+    fn constant_false_qual_plans_dummy_result() {
+        let cx = cx();
+        let mcx = cx.mcx();
+        let qual = clauses::make_bool_const(mcx, false, false).unwrap();
+        let stmt = planner(
+            mcx,
+            table_query(mcx, Some(qual)),
+            "SELECT * FROM t WHERE 1 = 2",
+            CURSOR_OPT_PARALLEL_OK,
+            ParamListHandle::NULL,
+        )
+        .unwrap();
+        assert_dummy_result(stmt.planTree.unwrap());
+    }
+
+    #[test]
+    fn select_1_where_false_plans_gated_result() {
+        let cx = cx();
+        let mcx = cx.mcx();
+        let mut parse = select_1_query(mcx);
+        let qual = clauses::make_bool_const(mcx, false, false).unwrap();
+        parse.jointree = Some(
+            alloc_leak_in(mcx, FromExpr { fromlist: NodeList::nil(), quals: Some(qual) })
+                .unwrap(),
+        );
+        let stmt = planner(
+            mcx,
+            parse,
+            "SELECT 1 WHERE 1 = 2",
+            CURSOR_OPT_PARALLEL_OK,
+            ParamListHandle::NULL,
+        )
+        .unwrap();
+        let plan = stmt.planTree.unwrap();
+        assert_eq!(plan.node_tag(), NodeTag::T_Result);
+        let result = plan.as_result().unwrap();
+        assert!(result.plan.lefttree.is_none());
+        // Live PG 18.3: Result (cost=0.00..0.01 rows=1 width=4).
+        assert_eq!(result.plan.startup_cost, 0.0);
+        assert_eq!(result.plan.total_cost, 0.01);
+        assert_eq!(result.plan.plan_rows, 1.0);
+        assert_eq!(result.plan.plan_width, 4);
+        let rcq = result.resconstantqual.expect("one-time filter").as_list().unwrap();
+        assert_eq!(rcq.len(), 1);
+        assert!(!rcq.nth(0).as_const().unwrap().constvalue.as_bool());
+    }
+}

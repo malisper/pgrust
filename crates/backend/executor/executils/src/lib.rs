@@ -13,7 +13,7 @@ use ::datum::Datum;
 use ::mcx::{Mcx, McxOwned, MemoryContext, PgVec};
 use ::queryenvironment::QueryEnvironment;
 use ::snapmgr::Snapshot;
-use ::types_core::instrument::Instrumentation;
+use ::types_core::instrument::{AggregateInstrumentation, Instrumentation};
 use ::types_core::CommandId;
 use ::types_error::{PgError, PgResult};
 use ::types_nodes::bitmapset::Bitmapset;
@@ -236,6 +236,9 @@ pub struct EStateData<'mcx> {
     pub es_instrument: i32,
     // Keyed by plan_node_id (C: per-PlanState); empty when es_instrument == 0.
     pub es_instrumentation: PgVec<'mcx, Instrumentation>,
+    // (plan_node_id, metrics); C keeps these on AggState — the Plan-tree
+    // EXPLAIN walk reads them here instead.
+    pub es_agg_instrumentation: PgVec<'mcx, (i32, AggregateInstrumentation)>,
     pub es_finished: bool,
     es_exprcontexts: PgVec<'mcx, Option<ExprContextData<'mcx>>>,
     pub es_subplanstates: PgVec<'mcx, SubplanStateCell>,
@@ -286,6 +289,7 @@ impl<'mcx> EStateData<'mcx> {
             es_top_eflags: 0,
             es_instrument: 0,
             es_instrumentation: PgVec::new_in(mcx),
+            es_agg_instrumentation: PgVec::new_in(mcx),
             es_finished: false,
             es_exprcontexts: PgVec::new_in(mcx),
             es_subplanstates: PgVec::new_in(mcx),

@@ -1,4 +1,5 @@
-//! joinrels.c + allpaths.c join-search slice: two-baserel inner joins only.
+//! joinrels.c + allpaths.c join-search slice: two-baserel INNER/LEFT/SEMI/
+//! ANTI joins.
 
 use mcx::PgVec;
 use types_error::PgResult;
@@ -139,6 +140,26 @@ fn have_relevant_joinclause(run: &PlannerRun<'_>, rel1: RelId, rel2: RelId) -> b
     })
 }
 
+// is_dummy_rel (joinrels.c). C's dummy marker is a childless Append; ours is
+// a GroupResultPath (allpaths.rs set_dummy_rel_pathlist), which also fronts
+// the trivial RTE_RESULT rel — no current caller can see that rel.
+pub fn is_dummy_rel(root: &types_pathnodes::PlannerInfo<'_>, rel: RelId) -> bool {
+    let Some(&first) = root.rel(rel).pathlist.first() else { return false };
+    let mut path = root.path(first);
+    loop {
+        match path {
+            types_pathnodes::PathNode::ProjectionPath(p) => {
+                path = root.path(p.subpath.expect("ProjectionPath has a subpath"))
+            }
+            types_pathnodes::PathNode::ProjectSetPath(p) => {
+                path = root.path(p.subpath.expect("ProjectSetPath has a subpath"))
+            }
+            _ => break,
+        }
+    }
+    matches!(path, types_pathnodes::PathNode::GroupResultPath(_))
+}
+
 pub fn init_dummy_sjinfo<'mcx>(
     run: &PlannerRun<'mcx>,
     left_relids: Relids<'mcx>,
@@ -165,12 +186,18 @@ pub fn init_dummy_sjinfo<'mcx>(
 
 pub fn make_join_rel(run: &mut PlannerRun<'_>, rel1: RelId, rel2: RelId) -> PgResult<RelId> {
     debug_assert!(!relids_overlap(&run.root.rel(rel1).relids, &run.root.rel(rel2).relids));
+    if is_dummy_rel(&run.root, rel1) || is_dummy_rel(&run.root, rel2) {
+        panic!(
+            "populate_joinrel_with_paths (joinrels.c): dummy input rel; \
+             mark_dummy_rel join lane unported"
+        );
+    }
     let mut joinrelids = relids_union(
         run.mcx,
         &run.root.rel(rel1).relids,
         &run.root.rel(rel2).relids,
     );
-    let (match_sjinfo, reversed) = join_is_legal(run, rel1, rel2, &joinrelids)
+    let (match_sjinfo, reversed) = join_is_legal(run, rel1, rel2, &joinrelids)?
         .unwrap_or_else(|| panic!("make_join_rel (joinrels.c): invalid join path attempted"));
 
     if let Some(sj) = &match_sjinfo {
@@ -207,66 +234,127 @@ pub fn make_join_rel(run: &mut PlannerRun<'_>, rel1: RelId, rel2: RelId) -> PgRe
             crate::joinpath::add_paths_to_joinrel(run, joinrel, rel1, rel2, JOIN_LEFT, &sjinfo, &restrictlist)?;
             crate::joinpath::add_paths_to_joinrel(run, joinrel, rel2, rel1, JOIN_RIGHT, &sjinfo, &restrictlist)?;
         }
+        types_pathnodes::JOIN_SEMI => {
+            if relids_is_subset(&sjinfo.min_lefthand, &run.root.rel(rel1).relids)
+                && relids_is_subset(&sjinfo.min_righthand, &run.root.rel(rel2).relids)
+            {
+                crate::joinpath::add_paths_to_joinrel(run, joinrel, rel1, rel2, types_pathnodes::JOIN_SEMI, &sjinfo, &restrictlist)?;
+                crate::joinpath::add_paths_to_joinrel(run, joinrel, rel2, rel1, types_pathnodes::JOIN_RIGHT_SEMI, &sjinfo, &restrictlist)?;
+            }
+            let unique_ok = relids_equal(&sjinfo.syn_righthand, &run.root.rel(rel2).relids) && {
+                let cheapest = run.root.rel(rel2).cheapest_total_path.expect("cheapest path");
+                crate::pathnode::create_unique_path(run, rel2, cheapest, &sjinfo)?.is_some()
+            };
+            if unique_ok {
+                crate::joinpath::add_paths_to_joinrel(run, joinrel, rel1, rel2, types_pathnodes::JOIN_UNIQUE_INNER, &sjinfo, &restrictlist)?;
+                crate::joinpath::add_paths_to_joinrel(run, joinrel, rel2, rel1, types_pathnodes::JOIN_UNIQUE_OUTER, &sjinfo, &restrictlist)?;
+            }
+        }
+        types_pathnodes::JOIN_ANTI => {
+            crate::joinpath::add_paths_to_joinrel(run, joinrel, rel1, rel2, types_pathnodes::JOIN_ANTI, &sjinfo, &restrictlist)?;
+            crate::joinpath::add_paths_to_joinrel(run, joinrel, rel2, rel1, types_pathnodes::JOIN_RIGHT_ANTI, &sjinfo, &restrictlist)?;
+        }
         other => panic!(
             "populate_joinrel_with_paths (joinrels.c): jointype {other}; join-outer lane \
-             covers INNER/LEFT"
+             covers INNER/LEFT/SEMI/ANTI"
         ),
     }
     Ok(joinrel)
 }
 
-// join_is_legal (joinrels.c): None = illegal. The SEMI unique-ify and
-// LATERAL legs are dead (semijoins/lateral loud upstream); must_be_leftjoin
-// commutation cannot arise while make_outerjoininfo panics on identity-3.
+// join_is_legal (joinrels.c): None = illegal. The LATERAL legs are dead;
+// must_be_leftjoin commutation cannot arise while make_outerjoininfo panics
+// on identity-3.
 fn join_is_legal<'mcx>(
-    run: &PlannerRun<'mcx>,
+    run: &mut PlannerRun<'mcx>,
     rel1: RelId,
     rel2: RelId,
     joinrelids: &Relids<'mcx>,
-) -> Option<(Option<SpecialJoinInfo<'mcx>>, bool)> {
-    let r1 = &run.root.rel(rel1).relids;
-    let r2 = &run.root.rel(rel2).relids;
+) -> PgResult<Option<(Option<SpecialJoinInfo<'mcx>>, bool)>> {
+    let r1 = relids_copy(run.mcx, &run.root.rel(rel1).relids);
+    let r2 = relids_copy(run.mcx, &run.root.rel(rel2).relids);
     let mut match_sjinfo: Option<SpecialJoinInfo<'mcx>> = None;
     let mut reversed = false;
 
-    for sj in run.root.join_info_list.iter() {
+    for i in 0..run.root.join_info_list.len() {
+        let sj = run.root.join_info_list[i].clone();
         if !relids_overlap(&sj.min_righthand, joinrelids) {
             continue;
         }
         if relids_is_subset(joinrelids, &sj.min_righthand) {
             continue;
         }
-        if relids_is_subset(&sj.min_lefthand, r1) && relids_is_subset(&sj.min_righthand, r1) {
+        if relids_is_subset(&sj.min_lefthand, &r1) && relids_is_subset(&sj.min_righthand, &r1) {
             continue;
         }
-        if relids_is_subset(&sj.min_lefthand, r2) && relids_is_subset(&sj.min_righthand, r2) {
+        if relids_is_subset(&sj.min_lefthand, &r2) && relids_is_subset(&sj.min_righthand, &r2) {
             continue;
         }
-        debug_assert!(sj.jointype == JOIN_LEFT);
-        if relids_is_subset(&sj.min_lefthand, r1) && relids_is_subset(&sj.min_righthand, r2) {
+        debug_assert!(matches!(
+            sj.jointype,
+            JOIN_LEFT | types_pathnodes::JOIN_SEMI | types_pathnodes::JOIN_ANTI
+        ));
+        // A semijoin whose RHS was already joined to other rels inside an
+        // input must have been unique-ified there; it's no longer relevant.
+        if sj.jointype == types_pathnodes::JOIN_SEMI {
+            if relids_is_subset(&sj.syn_righthand, &r1) && !relids_equal(&sj.syn_righthand, &r1)
+            {
+                continue;
+            }
+            if relids_is_subset(&sj.syn_righthand, &r2) && !relids_equal(&sj.syn_righthand, &r2)
+            {
+                continue;
+            }
+        }
+        if relids_is_subset(&sj.min_lefthand, &r1) && relids_is_subset(&sj.min_righthand, &r2) {
             if match_sjinfo.is_some() {
-                return None;
+                return Ok(None);
             }
             match_sjinfo = Some(sj.clone());
             reversed = false;
-        } else if relids_is_subset(&sj.min_lefthand, r2) && relids_is_subset(&sj.min_righthand, r1)
+        } else if relids_is_subset(&sj.min_lefthand, &r2)
+            && relids_is_subset(&sj.min_righthand, &r1)
         {
             if match_sjinfo.is_some() {
-                return None;
+                return Ok(None);
+            }
+            match_sjinfo = Some(sj.clone());
+            reversed = true;
+        } else if sj.jointype == types_pathnodes::JOIN_SEMI
+            && relids_equal(&sj.syn_righthand, &r2)
+            && {
+                let cheapest = run.root.rel(rel2).cheapest_total_path.expect("cheapest path");
+                crate::pathnode::create_unique_path(run, rel2, cheapest, &sj)?.is_some()
+            }
+        {
+            if match_sjinfo.is_some() {
+                return Ok(None);
+            }
+            match_sjinfo = Some(sj.clone());
+            reversed = false;
+        } else if sj.jointype == types_pathnodes::JOIN_SEMI
+            && relids_equal(&sj.syn_righthand, &r1)
+            && {
+                let cheapest = run.root.rel(rel1).cheapest_total_path.expect("cheapest path");
+                crate::pathnode::create_unique_path(run, rel1, cheapest, &sj)?.is_some()
+            }
+        {
+            if match_sjinfo.is_some() {
+                return Ok(None);
             }
             match_sjinfo = Some(sj.clone());
             reversed = true;
         } else {
-            if relids_overlap(r1, &sj.min_righthand) && relids_overlap(r2, &sj.min_righthand) {
+            if relids_overlap(&r1, &sj.min_righthand) && relids_overlap(&r2, &sj.min_righthand) {
                 continue;
             }
             // Associating into an SJ's RHS needs identity 3, which is loud
             // in make_outerjoininfo — nothing can legalize this join.
-            return None;
+            return Ok(None);
         }
     }
     debug_assert!(!run.root.hasLateralRTEs);
-    Some((match_sjinfo, reversed))
+    Ok(Some((match_sjinfo, reversed)))
 }
 
 fn build_join_rel<'mcx>(
@@ -441,7 +529,9 @@ pub fn rinfo_is_pushed_down(
 }
 
 // set_joinrel_size_estimates + calc_joinrel_size_estimate (costsize.c),
-// INNER/LEFT arms; FK selectivity is 1.0 while fkey_list stays empty.
+// INNER/LEFT/SEMI/ANTI arms; FK selectivity is 1.0 while fkey_list stays
+// empty. Outer joins (incl. ANTI) split joinquals from pushed-down quals;
+// INNER and SEMI use the whole restrictlist.
 fn set_joinrel_size_estimates<'mcx>(
     run: &mut PlannerRun<'mcx>,
     joinrel: RelId,
@@ -453,48 +543,55 @@ fn set_joinrel_size_estimates<'mcx>(
     debug_assert!(run.root.fkey_list.is_empty());
     let outer_rows = run.root.rel(outer_rel).rows;
     let inner_rows = run.root.rel(inner_rel).rows;
-    let nrows = match sjinfo.jointype {
-        JOIN_INNER => {
-            let jselec = crate::clausesel::clauselist_selectivity(
-                run,
-                restrictlist,
-                0,
-                sjinfo.jointype,
-                Some(sjinfo),
-            )?;
-            outer_rows * inner_rows * jselec
-        }
-        JOIN_LEFT => {
-            let joinrelids = relids_copy(run.mcx, &run.root.rel(joinrel).relids);
-            let mut joinquals: PgVec<'mcx, types_pathnodes::RinfoId> = PgVec::new_in(run.mcx);
-            let mut pushedquals: PgVec<'mcx, types_pathnodes::RinfoId> = PgVec::new_in(run.mcx);
-            for &rid in restrictlist {
-                if rinfo_is_pushed_down(run, rid, &joinrelids) {
-                    pushedquals.push(rid);
-                } else {
-                    joinquals.push(rid);
-                }
+    let jointype = sjinfo.jointype;
+    let is_outer = crate::joinpath::is_outer_join(jointype);
+    let (jselec, pselec) = if is_outer {
+        let joinrelids = relids_copy(run.mcx, &run.root.rel(joinrel).relids);
+        let mut joinquals: PgVec<'mcx, types_pathnodes::RinfoId> = PgVec::new_in(run.mcx);
+        let mut pushedquals: PgVec<'mcx, types_pathnodes::RinfoId> = PgVec::new_in(run.mcx);
+        for &rid in restrictlist {
+            if rinfo_is_pushed_down(run, rid, &joinrelids) {
+                pushedquals.push(rid);
+            } else {
+                joinquals.push(rid);
             }
-            let jselec = crate::clausesel::clauselist_selectivity(
-                run,
-                &joinquals,
-                0,
-                sjinfo.jointype,
-                Some(sjinfo),
-            )?;
-            let pselec = crate::clausesel::clauselist_selectivity(
-                run,
-                &pushedquals,
-                0,
-                sjinfo.jointype,
-                Some(sjinfo),
-            )?;
+        }
+        let jselec = crate::clausesel::clauselist_selectivity(
+            run,
+            &joinquals,
+            0,
+            jointype,
+            Some(sjinfo),
+        )?;
+        let pselec = crate::clausesel::clauselist_selectivity(
+            run,
+            &pushedquals,
+            0,
+            jointype,
+            Some(sjinfo),
+        )?;
+        (jselec, pselec)
+    } else {
+        let jselec = crate::clausesel::clauselist_selectivity(
+            run,
+            restrictlist,
+            0,
+            jointype,
+            Some(sjinfo),
+        )?;
+        (jselec, 0.0)
+    };
+    let nrows = match jointype {
+        JOIN_INNER => outer_rows * inner_rows * jselec,
+        JOIN_LEFT => {
             let mut nrows = outer_rows * inner_rows * jselec;
             if nrows < outer_rows {
                 nrows = outer_rows;
             }
             nrows * pselec
         }
+        types_pathnodes::JOIN_SEMI => outer_rows * jselec,
+        types_pathnodes::JOIN_ANTI => outer_rows * (1.0 - jselec) * pselec,
         other => panic!("calc_joinrel_size_estimate (costsize.c): jointype {other}"),
     };
     run.root.rel_mut(joinrel).rows = crate::costsize::clamp_row_est(nrows);

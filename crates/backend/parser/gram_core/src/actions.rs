@@ -1103,6 +1103,33 @@ impl<'mcx> Parser<'mcx> {
                 let r = view.v(2).node();
                 *yyval = self.simple_a_expr("+", None, r, view.l(1))?;
             }
+            // a_expr [NOT] IN_P select_with_parens
+            2074 | 2076 => {
+                let subselect_i = if rule == 2074 { 3 } else { 4 };
+                let sublink = Node::mk(
+                    mcx,
+                    types_nodes::SubLink {
+                        subLinkType: types_nodes::SubLinkType::ANY_SUBLINK,
+                        subLinkId: 0,
+                        testexpr: view.v(1).node(),
+                        operName: NodeList::nil(),
+                        subselect: view.v(subselect_i).node().expect("select_with_parens"),
+                        location: view.l(2),
+                    },
+                )?;
+                *yyval = YYSTYPE::Node(Some(if rule == 2074 {
+                    sublink
+                } else {
+                    Node::mk(
+                        mcx,
+                        BoolExpr {
+                            boolop: BoolExprType::NOT_EXPR,
+                            args: NodeList::make1(mcx, sublink)?,
+                            location: view.l(2),
+                        },
+                    )?
+                }));
+            }
             2039 => {
                 let name = view.v(2).list();
                 let l = view.v(1).node();
