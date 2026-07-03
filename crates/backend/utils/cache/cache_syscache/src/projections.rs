@@ -108,12 +108,9 @@ fn tupdesc_for(cache_id: i32) -> &'static TupleDescData<'static> {
 /// GETSTRUCT-style fixed-column read off a raw catalog tuple.
 fn getattr(tuple: &HeapTupleData<'_>, cache_id: i32, attnum: i32) -> Datum {
     let td = tupdesc_for(cache_id);
-    let mut isnull = false;
     // SAFETY: caller passes a tuple of this catalog's row type; the read
-    // columns are fixed-width NOT NULL leading columns.
-    let d = unsafe { types_tuple::heap_getattr(tuple, attnum, td, &mut isnull) };
-    debug_assert!(!isnull);
-    d
+    // columns are fixed-width NOT NULL leading columns (GETSTRUCT invariant).
+    unsafe { types_tuple::fastgetattr_fixed(tuple, attnum, td) }
 }
 
 fn pg_class_shape(tuple: &HeapTupleData<'_>) -> PgClassShape {
@@ -955,9 +952,9 @@ fn varlena_image<'mcx>(
         let raw = (b0 as usize >> 1) & 0x7F;
         let total = raw - 1 + 4;
         let mut out: PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, total)?;
-        out.extend_from_slice(&((total as u32) << 2).to_ne_bytes());
+        mcx::vec_append_bytes(&mut out, &((total as u32) << 2).to_ne_bytes())?;
         // SAFETY: short varlena addresses `raw` in-tuple bytes.
-        out.extend_from_slice(unsafe { core::slice::from_raw_parts(p.add(1), raw - 1) });
+        mcx::vec_append_bytes(&mut out, unsafe { core::slice::from_raw_parts(p.add(1), raw - 1) })?;
         return Ok(Some(out));
     }
     let len = {
@@ -968,7 +965,7 @@ fn varlena_image<'mcx>(
     // SAFETY: the datum addresses `len` in-tuple bytes.
     let src = unsafe { core::slice::from_raw_parts(p, len) };
     let mut out: PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, len)?;
-    out.extend_from_slice(src);
+    mcx::vec_append_bytes(&mut out, src)?;
     Ok(Some(out))
 }
 
@@ -1015,37 +1012,24 @@ fn lookup_pg_statistic_bundle<'mcx>(
         if kind == 0 {
             continue;
         }
-        let numbers = match varlena_image(mcx, &t, STATRELATTINH, ANUM_PG_STATISTIC_STANUMBERS1 + i)? {
-            Some(img) => {
-                let elems = datum::array_build::deconstruct_array_image(mcx, &img, 4, true, b'i')?;
-                let mut nums: PgVec<'mcx, f32> = mcx::vec_with_capacity_in(mcx, elems.len())?;
-                nums.extend(elems.iter().map(|d| d.as_f32()));
-                nums
-            }
-            None => PgVec::new_in(mcx),
-        };
-        let (values, values_image, valuetype) =
+        let numbers_image = varlena_image(mcx, &t, STATRELATTINH, ANUM_PG_STATISTIC_STANUMBERS1 + i)?
+            .unwrap_or(PgVec::new_in(mcx));
+        let (values_image, valuetype) =
             match varlena_image(mcx, &t, STATRELATTINH, ANUM_PG_STATISTIC_STAVALUES1 + i)? {
                 Some(img) => {
                     let elemtype = datum::array_build::array_image_elemtype(&img);
-                    let ty = syscache_seams::lookup_pg_type_shape::call(elemtype)?
-                        .expect("stavalues element type");
-                    let values = datum::array_build::deconstruct_array_image(
-                        mcx, &img, ty.typlen, ty.typbyval, ty.typalign as u8,
-                    )?;
-                    (values, img, elemtype)
+                    (img, elemtype)
                 }
-                None => (PgVec::new_in(mcx), PgVec::new_in(mcx), InvalidOid),
+                None => (PgVec::new_in(mcx), InvalidOid),
             };
-        slots.push(syscache_seams::PgStatisticSlotData {
+        slots.push(syscache_seams::PgStatisticSlotData::from_images(
             kind,
-            staop: getattr(&t, STATRELATTINH, ANUM_PG_STATISTIC_STAOP1 + i).as_oid(),
-            stacoll: getattr(&t, STATRELATTINH, ANUM_PG_STATISTIC_STACOLL1 + i).as_oid(),
+            getattr(&t, STATRELATTINH, ANUM_PG_STATISTIC_STAOP1 + i).as_oid(),
+            getattr(&t, STATRELATTINH, ANUM_PG_STATISTIC_STACOLL1 + i).as_oid(),
             valuetype,
-            values,
-            numbers,
             values_image,
-        });
+            numbers_image,
+        ));
     }
     let bundle = syscache_seams::PgStatisticBundle {
         stanullfrac: getattr(&t, STATRELATTINH, ANUM_PG_STATISTIC_STANULLFRAC).as_f32(),
@@ -1170,8 +1154,8 @@ pub(crate) fn install() {
     syscache_seams::pg_type_base_shape::set(pg_type_base_shape);
     syscache_seams::pg_type_io_shape::set(pg_type_io_shape);
     syscache_seams::pg_type_typarray::set(pg_type_typarray);
-    syscache_seams::lookup_pg_proc_shape::set(lookup_pg_proc_shape);
     syscache_seams::pg_proc_proname::set(pg_proc_proname);
+    syscache_seams::lookup_pg_proc_shape::set(lookup_pg_proc_shape);
     syscache_seams::lookup_pg_proc_name_candidates::set(lookup_pg_proc_name_candidates);
     syscache_seams::lookup_pg_operator_candidates::set(lookup_pg_operator_candidates);
     syscache_seams::pg_operator_name_candidates_exist::set(pg_operator_name_candidates_exist);
