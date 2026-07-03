@@ -2560,6 +2560,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "costsize"
+version = "0.1.0"
+
+[[package]]
 name = "crc32c"
 version = "0.1.0"
 
@@ -6330,6 +6334,10 @@ dependencies = [
  "types_nodes",
  "types_rel",
 ]
+
+[[package]]
+name = "pathnode"
+version = "0.1.0"
 
 [[package]]
 name = "pg_attrdef"
