@@ -22,6 +22,7 @@ const TABLES: &[&[FmgrBuiltin]] = &[
     ::adt_pg_lsn::builtins::PG_LSN_BUILTINS,
     ::dbsize::builtins::DBSIZE_BUILTINS,
     ::adt_uuid::builtins::UUID_BUILTINS,
+    ::adt_varbit::VARBIT_BUILTINS,
     ::adt_network::builtins::NETWORK_BUILTINS,
     ::adt_rangetypes::builtins::RANGETYPES_BUILTINS,
     ::adt_multirangetypes::builtins::MULTIRANGETYPES_BUILTINS,
