@@ -1,10 +1,10 @@
-// copy.c/copyto.c/copyfrom.c/copyfromparse.c — text format, file variant.
-// Loud (named): CSV/binary formats, COPY (query), WHERE, PROGRAM, the wire
-// STDIN/STDOUT subprotocol (extended-query lane), ON_ERROR ignore, FREEZE,
-// HEADER match, defaults/generated columns, RLS rewrite.
+// copy.c/copyto.c/copyfrom.c/copyfromparse.c — text + CSV formats, file and
+// wire STDIN/STDOUT variants. Loud (named): binary format, COPY (query),
+// WHERE, PROGRAM, ON_ERROR ignore, FREEZE, HEADER match, defaults/generated
+// columns, RLS rewrite.
 #![allow(non_snake_case)]
 
-use mcx::{Mcx, PgVec};
+use mcx::{vec_from_elem_in, Mcx, PgVec};
 use types_core::Oid;
 use types_error::{
     PgError, PgResult, ERRCODE_DUPLICATE_COLUMN, ERRCODE_FEATURE_NOT_SUPPORTED,
@@ -46,9 +46,18 @@ fn unported(what: &str) -> ! {
 
 pub struct CopyFormatOptions<'s> {
     pub file_encoding: i32,
+    pub csv_mode: bool,
     pub delim: u8,
+    pub quote: u8,
+    pub escape: u8,
     pub null_print: &'s str,
     pub header_line: bool,
+    pub force_quote: Option<&'s NodeList<'s>>,
+    pub force_quote_all: bool,
+    pub force_notnull: Option<&'s NodeList<'s>>,
+    pub force_notnull_all: bool,
+    pub force_null: Option<&'s NodeList<'s>>,
+    pub force_null_all: bool,
 }
 
 /// `DoCopy` (copy.c). Returns rows processed.
@@ -57,18 +66,17 @@ pub fn DoCopy<'mcx>(mcx: Mcx<'mcx>, stmt: &CopyStmt<'_>) -> PgResult<u64> {
     if stmt.is_program {
         unported("TO/FROM PROGRAM (OpenPipeStream lane)");
     }
-    let Some(filename) = stmt.filename else {
-        unported("STDIN/STDOUT wire subprotocol (extended-query lane)");
-    };
 
     let userid = miscinit_seams::get_user_id::call();
-    let (role, denied) = if is_from {
-        (ROLE_PG_READ_SERVER_FILES, from_file_denied as fn() -> Box<PgError>)
-    } else {
-        (ROLE_PG_WRITE_SERVER_FILES, to_file_denied as fn() -> Box<PgError>)
-    };
-    if !acl_seams::has_privs_of_role::call(userid, role)? {
-        return Err(denied());
+    if stmt.filename.is_some() {
+        let (role, denied) = if is_from {
+            (ROLE_PG_READ_SERVER_FILES, from_file_denied as fn() -> Box<PgError>)
+        } else {
+            (ROLE_PG_WRITE_SERVER_FILES, to_file_denied as fn() -> Box<PgError>)
+        };
+        if !acl_seams::has_privs_of_role::call(userid, role)? {
+            return Err(denied());
+        }
     }
 
     let Some(rv_node) = stmt.relation else {
@@ -118,12 +126,12 @@ pub fn DoCopy<'mcx>(mcx: Mcx<'mcx>, stmt: &CopyStmt<'_>) -> PgResult<u64> {
         if xact::XactReadOnly() && !rel.rd_islocaltemp {
             xact::PreventCommandIfReadOnly("COPY FROM")?;
         }
-        let mut cstate = BeginCopyFrom(mcx, &rel, filename, &stmt.attlist, &stmt.options)?;
+        let mut cstate = BeginCopyFrom(mcx, &rel, stmt.filename, &stmt.attlist, &stmt.options)?;
         let processed = CopyFrom(mcx, &mut cstate, &rel)?;
         EndCopyFrom(cstate)?;
         processed
     } else {
-        let mut cstate = BeginCopyTo(mcx, &rel, filename, &stmt.attlist, &stmt.options)?;
+        let mut cstate = BeginCopyTo(mcx, &rel, stmt.filename, &stmt.attlist, &stmt.options)?;
         let processed = DoCopyTo(mcx, &mut cstate, &rel)?;
         EndCopyTo(cstate)?;
         processed
@@ -149,42 +157,98 @@ fn def_string<'a>(d: &types_nodes::parsenodes::DefElem<'a>) -> PgResult<&'a str>
     }
 }
 
-fn def_bool(d: &types_nodes::parsenodes::DefElem<'_>) -> PgResult<bool> {
+fn def_list_or_star<'s>(
+    d: &types_nodes::parsenodes::DefElem<'s>,
+) -> PgResult<(Option<&'s NodeList<'s>>, bool)> {
+    if let Some(arg) = d.arg {
+        if arg.as_a_star().is_some() {
+            return Ok((None, true));
+        }
+        if let Some(l) = arg.as_list() {
+            return Ok((Some(l), false));
+        }
+    }
+    Err(Box::new(
+        PgError::error(format!(
+            "argument to option \"{}\" must be a list of column names",
+            d.defname.unwrap_or("")
+        ))
+        .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE),
+    ))
+}
+
+// defGetCopyHeaderChoice (copy.c); COPY_HEADER_MATCH is loud.
+fn def_header_choice(d: &types_nodes::parsenodes::DefElem<'_>, is_from: bool) -> PgResult<bool> {
     let Some(arg) = d.arg else { return Ok(true) };
+    if let Some(i) = arg.as_integer() {
+        return Ok(i.ival != 0);
+    }
     if let Some(b) = arg.as_boolean() {
         return Ok(b.boolval);
     }
     if let Some(s) = arg.as_string() {
         match s.sval {
-            "true" | "on" => return Ok(true),
-            "false" | "off" => return Ok(false),
+            "true" | "on" | "1" => return Ok(true),
+            "false" | "off" | "0" => return Ok(false),
+            "match" => {
+                if !is_from {
+                    return Err(Box::new(
+                        PgError::error("cannot use \"match\" with HEADER in COPY TO")
+                            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+                    ));
+                }
+                unported("HEADER match");
+            }
             _ => {}
         }
     }
     Err(Box::new(
         PgError::error(format!(
-            "{} requires a Boolean value",
+            "{} requires a Boolean value or \"match\"",
             d.defname.unwrap_or("")
         ))
         .with_sqlstate(ERRCODE_SYNTAX_ERROR),
     ))
 }
 
-/// `ProcessCopyOptions` (copy.c), text-format subset; CSV/binary loud.
+#[cold]
+#[inline(never)]
+fn requires_csv(name: &str) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!("COPY {name} requires CSV mode"))
+            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+    )
+}
+
+/// `ProcessCopyOptions` (copy.c), text + CSV; binary loud.
 pub fn ProcessCopyOptions<'s>(
     is_from: bool,
     options: &NodeList<'s>,
 ) -> PgResult<CopyFormatOptions<'s>> {
     let mut opts = CopyFormatOptions {
         file_encoding: -1,
+        csv_mode: false,
         delim: 0,
+        quote: 0,
+        escape: 0,
         null_print: "",
         header_line: false,
+        force_quote: None,
+        force_quote_all: false,
+        force_notnull: None,
+        force_notnull_all: false,
+        force_null: None,
+        force_null_all: false,
     };
     let mut format_specified = false;
     let mut header_specified = false;
     let mut delim: Option<&str> = None;
     let mut null_print: Option<&str> = None;
+    let mut quote: Option<&str> = None;
+    let mut escape: Option<&str> = None;
+    let mut force_quote_specified = false;
+    let mut force_notnull_specified = false;
+    let mut force_null_specified = false;
 
     for option in options.iter() {
         let d = option.as_def_elem().expect("COPY options: DefElem list");
@@ -197,7 +261,8 @@ pub fn ProcessCopyOptions<'s>(
                 format_specified = true;
                 match def_string(d)? {
                     "text" => {}
-                    fmt @ ("csv" | "binary") => unported_fmt(fmt),
+                    "csv" => opts.csv_mode = true,
+                    fmt @ "binary" => unported_fmt(fmt),
                     fmt => {
                         return Err(Box::new(
                             PgError::error(format!("COPY format \"{fmt}\" not recognized"))
@@ -223,18 +288,40 @@ pub fn ProcessCopyOptions<'s>(
                     return Err(conflicting_option(name));
                 }
                 header_specified = true;
-                if d.arg
-                    .is_some_and(|a| a.as_string().is_some_and(|s| s.sval == "match"))
-                {
-                    if !is_from {
-                        return Err(Box::new(
-                            PgError::error("cannot use \"match\" with HEADER in COPY TO")
-                                .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
-                        ));
-                    }
-                    unported("HEADER match");
+                opts.header_line = def_header_choice(d, is_from)?;
+            }
+            "quote" => {
+                if quote.is_some() {
+                    return Err(conflicting_option(name));
                 }
-                opts.header_line = def_bool(d)?;
+                quote = Some(def_string(d)?);
+            }
+            "escape" => {
+                if escape.is_some() {
+                    return Err(conflicting_option(name));
+                }
+                escape = Some(def_string(d)?);
+            }
+            "force_quote" => {
+                if force_quote_specified {
+                    return Err(conflicting_option(name));
+                }
+                force_quote_specified = true;
+                (opts.force_quote, opts.force_quote_all) = def_list_or_star(d)?;
+            }
+            "force_not_null" => {
+                if force_notnull_specified {
+                    return Err(conflicting_option(name));
+                }
+                force_notnull_specified = true;
+                (opts.force_notnull, opts.force_notnull_all) = def_list_or_star(d)?;
+            }
+            "force_null" => {
+                if force_null_specified {
+                    return Err(conflicting_option(name));
+                }
+                force_null_specified = true;
+                (opts.force_null, opts.force_null_all) = def_list_or_star(d)?;
             }
             "encoding" => {
                 if opts.file_encoding >= 0 {
@@ -264,12 +351,6 @@ pub fn ProcessCopyOptions<'s>(
                 unported("ON_ERROR ignore (soft-error skip lane)");
             }
             "default" => unported("DEFAULT marker (defaults rewrite gap)"),
-            "quote" | "escape" | "force_quote" | "force_not_null" | "force_null" => {
-                return Err(Box::new(
-                    PgError::error(format!("COPY {} requires CSV mode", name.to_uppercase()))
-                        .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
-                ))
-            }
             "log_verbosity" | "reject_limit" => unported("ON_ERROR companions"),
             "convert_selectively" => unported("convert_selectively"),
             other => {
@@ -281,8 +362,33 @@ pub fn ProcessCopyOptions<'s>(
         }
     }
 
-    let delim = delim.unwrap_or("\t");
-    opts.null_print = null_print.unwrap_or("\\N");
+    let delim = delim.unwrap_or(if opts.csv_mode { "," } else { "\t" });
+    opts.null_print = null_print.unwrap_or(if opts.csv_mode { "" } else { "\\N" });
+    if opts.csv_mode {
+        let quote = quote.unwrap_or("\"");
+        let escape = escape.unwrap_or(quote);
+        if quote.len() != 1 {
+            return Err(Box::new(
+                PgError::error("COPY quote must be a single one-byte character")
+                    .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+            ));
+        }
+        if escape.len() != 1 {
+            return Err(Box::new(
+                PgError::error("COPY escape must be a single one-byte character")
+                    .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+            ));
+        }
+        opts.quote = quote.as_bytes()[0];
+        opts.escape = escape.as_bytes()[0];
+    } else {
+        if quote.is_some() {
+            return Err(requires_csv("QUOTE"));
+        }
+        if escape.is_some() {
+            return Err(requires_csv("ESCAPE"));
+        }
+    }
 
     if delim.len() != 1 {
         return Err(Box::new(
@@ -303,9 +409,42 @@ pub fn ProcessCopyOptions<'s>(
                 .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE),
         ));
     }
-    if b"\\.abcdefghijklmnopqrstuvwxyz0123456789".contains(&opts.delim) {
+    if !opts.csv_mode && b"\\.abcdefghijklmnopqrstuvwxyz0123456789".contains(&opts.delim) {
         return Err(Box::new(
             PgError::error(format!("COPY delimiter cannot be \"{}\"", opts.delim as char))
+                .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE),
+        ));
+    }
+    if opts.csv_mode && opts.delim == opts.quote {
+        return Err(Box::new(
+            PgError::error("COPY delimiter and quote must be different")
+                .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE),
+        ));
+    }
+    if !opts.csv_mode && (opts.force_quote.is_some() || opts.force_quote_all) {
+        return Err(requires_csv("FORCE_QUOTE"));
+    }
+    if (opts.force_quote.is_some() || opts.force_quote_all) && is_from {
+        return Err(Box::new(
+            PgError::error("COPY FORCE_QUOTE cannot be used with COPY FROM")
+                .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+        ));
+    }
+    if !opts.csv_mode && (opts.force_notnull.is_some() || opts.force_notnull_all) {
+        return Err(requires_csv("FORCE_NOT_NULL"));
+    }
+    if (opts.force_notnull.is_some() || opts.force_notnull_all) && !is_from {
+        return Err(Box::new(
+            PgError::error("COPY FORCE_NOT_NULL cannot be used with COPY TO")
+                .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE),
+        ));
+    }
+    if !opts.csv_mode && (opts.force_null.is_some() || opts.force_null_all) {
+        return Err(requires_csv("FORCE_NULL"));
+    }
+    if (opts.force_null.is_some() || opts.force_null_all) && !is_from {
+        return Err(Box::new(
+            PgError::error("COPY FORCE_NULL cannot be used with COPY TO")
                 .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE),
         ));
     }
@@ -315,7 +454,50 @@ pub fn ProcessCopyOptions<'s>(
                 .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE),
         ));
     }
+    if opts.csv_mode && opts.null_print.as_bytes().contains(&opts.quote) {
+        return Err(Box::new(
+            PgError::error("CSV quote character must not appear in the NULL specification")
+                .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE),
+        ));
+    }
     Ok(opts)
+}
+
+// force_quote/force_notnull/force_null -> per-physical-attr flags, with C's
+// "not referenced by COPY" checks (BeginCopyTo/BeginCopyFrom).
+fn force_flags<'mcx>(
+    mcx: Mcx<'mcx>,
+    tup_desc: &TupleDescData<'_>,
+    rel: &Relation<'_>,
+    attnumlist: &[i16],
+    list: Option<&NodeList<'_>>,
+    all: bool,
+    optname: &str,
+) -> PgResult<PgVec<'mcx, bool>> {
+    let natts = tup_desc.natts as usize;
+    let mut flags = vec_from_elem_in(mcx, false, natts);
+    if all {
+        for &attnum in attnumlist {
+            flags[attnum as usize - 1] = true;
+        }
+        return Ok(flags);
+    }
+    let Some(list) = list else { return Ok(flags) };
+    let attnums = CopyGetAttnums(mcx, tup_desc, rel, list)?;
+    for &attnum in attnums.iter() {
+        if !attnumlist.contains(&attnum) {
+            let att = tup_desc.attr(attnum as usize - 1);
+            return Err(Box::new(
+                PgError::error(format!(
+                    "{optname} column \"{}\" not referenced by COPY",
+                    String::from_utf8_lossy(att.attname.name_str())
+                ))
+                .with_sqlstate(ERRCODE_INVALID_COLUMN_REFERENCE),
+            ));
+        }
+        flags[attnum as usize - 1] = true;
+    }
+    Ok(flags)
 }
 
 #[cold]

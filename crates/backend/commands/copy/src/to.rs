@@ -1,4 +1,4 @@
-// copyto.c, text format to file. Frontend/callback destinations and the CSV/
+// copyto.c, text/CSV format to file or frontend. The callback destination and
 // binary routines are loud in lib.rs before this module is reached.
 
 use core::ffi::CStr;
@@ -8,6 +8,7 @@ use elog::ereport;
 use mcx::{Mcx, MemoryContext, PgVec};
 use stringinfo::StringInfo;
 use types_core::primitive::InvalidOid;
+use types_dest::CommandDest;
 use types_error::{ErrorLocation, PgError, PgResult, ERRCODE_INVALID_NAME, ERRCODE_WRONG_OBJECT_TYPE, ERROR};
 use types_fmgr::{function_call1_coll_in, FmgrInfo};
 use types_nodes::NodeList;
@@ -15,18 +16,25 @@ use types_rel::Relation;
 use types_scan::ForwardScanDirection;
 use types_slot::SlotData;
 
-use crate::{unported, CopyFormatOptions, CopyGetAttnums, ProcessCopyOptions, RELKIND_RELATION};
+use crate::{
+    force_flags, unported, CopyFormatOptions, CopyGetAttnums, ProcessCopyOptions, RELKIND_RELATION,
+};
 
 // C buffers per-row fwrite in libc's FILE; here fe_msgbuf retains rows until
 // this watermark, so the write cadence (not per-row syscalls) matches C.
 const FILE_FLUSH_THRESHOLD: usize = 65536;
 
+enum CopyDest<'s> {
+    File { fd: i32, filename: &'s str },
+    Frontend,
+}
+
 pub struct CopyToState<'mcx, 's> {
     fe_msgbuf: StringInfo<'mcx>,
-    copy_file: i32,
-    filename: &'s str,
+    dest: CopyDest<'s>,
     pub opts: CopyFormatOptions<'s>,
     attnumlist: PgVec<'mcx, i16>,
+    force_quote_flags: PgVec<'mcx, bool>,
     file_encoding: i32,
     need_transcoding: bool,
     bytes_processed: u64,
@@ -37,11 +45,11 @@ fn loc(funcname: &'static str) -> ErrorLocation {
     ErrorLocation::new("copyto.c", 0, funcname)
 }
 
-/// `BeginCopyTo` (copyto.c), relation-to-file arm.
+/// `BeginCopyTo` (copyto.c), relation-to-file/frontend arms.
 pub fn BeginCopyTo<'mcx, 's>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
-    filename: &'s str,
+    filename: Option<&'s str>,
     attnamelist: &NodeList<'_>,
     options: &NodeList<'s>,
 ) -> PgResult<CopyToState<'mcx, 's>> {
@@ -53,6 +61,15 @@ pub fn BeginCopyTo<'mcx, 's>(
 
     let opts = ProcessCopyOptions(false, options)?;
     let attnumlist = CopyGetAttnums(mcx, &rel.rd_att, rel, attnamelist)?;
+    let force_quote_flags = force_flags(
+        mcx,
+        &rel.rd_att,
+        rel,
+        &attnumlist,
+        opts.force_quote,
+        opts.force_quote_all,
+        "FORCE_QUOTE",
+    )?;
 
     let file_encoding = if opts.file_encoding < 0 {
         mbutils::pg_get_client_encoding()
@@ -65,46 +82,57 @@ pub fn BeginCopyTo<'mcx, 's>(
         unported("TO with a client-only encoding (pg_encoding_mblen escape walk)");
     }
 
-    if !filename.starts_with('/') {
-        return Err(Box::new(
-            PgError::error("relative path not allowed for COPY to file")
-                .with_sqlstate(ERRCODE_INVALID_NAME),
-        ));
-    }
-    // SAFETY: process-global umask swap around open, as C's BeginCopyTo.
-    let oumask = unsafe { libc::umask(0o022) };
-    let copy_file = fd::AllocateFile(filename, "wb");
-    // SAFETY: restore saved umask.
-    unsafe { libc::umask(oumask) };
-    let copy_file = copy_file?;
-    if copy_file < 0 {
-        ereport(ERROR)
-            .with_saved_errno(std::io::Error::last_os_error().raw_os_error().unwrap_or(0))
-            .errcode_for_file_access()
-            .errmsg(format!("could not open file \"{filename}\" for writing: %m"))
-            .errhint(
-                "COPY TO instructs the PostgreSQL server process to write a file. You may \
-                 want a client-side facility such as psql's \\copy.",
-            )
-            .finish(loc("BeginCopyTo"))?;
-    }
-    let is_dir = fd::with_allocated_stdio(copy_file, |f| {
-        f.metadata().map(|m| m.is_dir()).unwrap_or(false)
-    })
-    .unwrap_or(false);
-    if is_dir {
-        return Err(Box::new(
-            PgError::error(format!("\"{filename}\" is a directory"))
-                .with_sqlstate(ERRCODE_WRONG_OBJECT_TYPE),
-        ));
-    }
+    let dest = match filename {
+        Some(filename) => {
+            if !filename.starts_with('/') {
+                return Err(Box::new(
+                    PgError::error("relative path not allowed for COPY to file")
+                        .with_sqlstate(ERRCODE_INVALID_NAME),
+                ));
+            }
+            // SAFETY: process-global umask swap around open, as C's BeginCopyTo.
+            let oumask = unsafe { libc::umask(0o022) };
+            let copy_file = fd::AllocateFile(filename, "wb");
+            // SAFETY: restore saved umask.
+            unsafe { libc::umask(oumask) };
+            let copy_file = copy_file?;
+            if copy_file < 0 {
+                ereport(ERROR)
+                    .with_saved_errno(std::io::Error::last_os_error().raw_os_error().unwrap_or(0))
+                    .errcode_for_file_access()
+                    .errmsg(format!("could not open file \"{filename}\" for writing: %m"))
+                    .errhint(
+                        "COPY TO instructs the PostgreSQL server process to write a file. You \
+                         may want a client-side facility such as psql's \\copy.",
+                    )
+                    .finish(loc("BeginCopyTo"))?;
+            }
+            let is_dir = fd::with_allocated_stdio(copy_file, |f| {
+                f.metadata().map(|m| m.is_dir()).unwrap_or(false)
+            })
+            .unwrap_or(false);
+            if is_dir {
+                return Err(Box::new(
+                    PgError::error(format!("\"{filename}\" is a directory"))
+                        .with_sqlstate(ERRCODE_WRONG_OBJECT_TYPE),
+                ));
+            }
+            CopyDest::File { fd: copy_file, filename }
+        }
+        None => {
+            if elog::config::where_to_send_output() != CommandDest::Remote {
+                unported("TO STDOUT outside a remote session (stdout file arm)");
+            }
+            CopyDest::Frontend
+        }
+    };
 
     Ok(CopyToState {
         fe_msgbuf: StringInfo::new_in(mcx)?,
-        copy_file,
-        filename,
+        dest,
         opts,
         attnumlist,
+        force_quote_flags,
         file_encoding,
         need_transcoding,
         bytes_processed: 0,
@@ -132,19 +160,34 @@ pub fn DoCopyTo<'mcx>(
         out_functions.push(fmgr_core::fmgr_info(func_oid)?);
     }
 
+    if matches!(cstate.dest, CopyDest::Frontend) {
+        send_copy_begin(mcx, cstate.attnumlist.len())?;
+    }
+
     if cstate.opts.header_line {
         let mut hdr_delim = false;
+        let single_attr = cstate.attnumlist.len() == 1;
         for &attnum in cstate.attnumlist.iter() {
             if hdr_delim {
                 cstate.fe_msgbuf.append_byte(cstate.opts.delim)?;
             }
             hdr_delim = true;
             let colname = tup_desc.attr(attnum as usize - 1).attname;
-            copy_attribute_out_text(
-                &mut cstate.fe_msgbuf,
-                colname.name_str(),
-                cstate.opts.delim,
-            )?;
+            if cstate.opts.csv_mode {
+                copy_attribute_out_csv(
+                    &mut cstate.fe_msgbuf,
+                    colname.name_str(),
+                    &cstate.opts,
+                    false,
+                    single_attr,
+                )?;
+            } else {
+                copy_attribute_out_text(
+                    &mut cstate.fe_msgbuf,
+                    colname.name_str(),
+                    cstate.opts.delim,
+                )?;
+            }
         }
         end_of_row(cstate)?;
     }
@@ -161,8 +204,26 @@ pub fn DoCopyTo<'mcx>(
     }
 
     tableam::table_endscan(scandesc)?;
-    flush_to_file(cstate)?;
+    match cstate.dest {
+        CopyDest::File { .. } => flush_to_file(cstate)?,
+        CopyDest::Frontend => {
+            // SendCopyEnd: no unsent data, then CopyDone.
+            debug_assert!(cstate.fe_msgbuf.is_empty());
+            pqformat::pq_putemptymessage(b'c')?;
+        }
+    }
     Ok(processed)
+}
+
+// SendCopyBegin (copyto.c): CopyOutResponse, text format.
+fn send_copy_begin(mcx: Mcx<'_>, natts: usize) -> PgResult<()> {
+    let mut buf = pqformat::pq_beginmessage(mcx, b'H')?;
+    pqformat::pq_sendbyte(&mut buf, 0)?;
+    pqformat::pq_sendint16(&mut buf, natts as u16)?;
+    for _ in 0..natts {
+        pqformat::pq_sendint16(&mut buf, 0)?;
+    }
+    pqformat::pq_endmessage(buf)
 }
 
 /// `CopyOneRowTo` + `CopyToTextLikeOneRow` (copyto.c).
@@ -171,11 +232,20 @@ fn CopyOneRowTo<'mcx>(
     slot: &mut SlotData<'mcx>,
     out_functions: &mut [FmgrInfo],
 ) -> PgResult<()> {
-    let CopyToState { rowcx, fe_msgbuf, opts, attnumlist, need_transcoding, file_encoding, .. } =
-        cstate;
+    let CopyToState {
+        rowcx,
+        fe_msgbuf,
+        opts,
+        attnumlist,
+        force_quote_flags,
+        need_transcoding,
+        file_encoding,
+        ..
+    } = cstate;
     rowcx.reset();
     let rmcx = rowcx.mcx();
 
+    let single_attr = attnumlist.len() == 1;
     let base = slot.base();
     let mut need_delim = false;
     for (i, &attnum) in attnumlist.iter().enumerate() {
@@ -208,26 +278,86 @@ fn CopyOneRowTo<'mcx>(
         } else {
             s
         };
-        copy_attribute_out_text(fe_msgbuf, s, opts.delim)?;
+        if opts.csv_mode {
+            copy_attribute_out_csv(fe_msgbuf, s, opts, force_quote_flags[m], single_attr)?;
+        } else {
+            copy_attribute_out_text(fe_msgbuf, s, opts.delim)?;
+        }
     }
     end_of_row(cstate)
 }
 
-// CopySendTextLikeEndOfRow + CopySendEndOfRow, COPY_FILE arm.
+/// `CopyAttributeOutCSV` (copyto.c). The null_print comparison happens before
+/// transcoding in C; the transcoded-vs-raw distinction is inert under the
+/// supported (non-ASCII-embedding) encodings, so `s` here is post-conversion.
+pub(crate) fn copy_attribute_out_csv(
+    buf: &mut StringInfo<'_>,
+    s: &[u8],
+    opts: &CopyFormatOptions<'_>,
+    use_quote: bool,
+    single_attr: bool,
+) -> PgResult<()> {
+    let delimc = opts.delim;
+    let quotec = opts.quote;
+    let escapec = opts.escape;
+
+    let mut use_quote = use_quote || s == opts.null_print.as_bytes();
+    if !use_quote {
+        // Quote a lone \. so older versions and PQgetline keep loading it.
+        if single_attr && s == b"\\." {
+            use_quote = true;
+        } else {
+            use_quote = s
+                .iter()
+                .any(|&c| c == delimc || c == quotec || c == b'\n' || c == b'\r');
+        }
+    }
+
+    if use_quote {
+        buf.append_byte(quotec)?;
+        let mut start = 0usize;
+        for (i, &c) in s.iter().enumerate() {
+            if c == quotec || c == escapec {
+                buf.append_bytes(&s[start..i])?;
+                buf.append_byte(escapec)?;
+                start = i;
+            }
+        }
+        buf.append_bytes(&s[start..])?;
+        buf.append_byte(quotec)?;
+    } else {
+        buf.append_bytes(s)?;
+    }
+    Ok(())
+}
+
+// CopySendTextLikeEndOfRow + CopySendEndOfRow.
 fn end_of_row(cstate: &mut CopyToState<'_, '_>) -> PgResult<()> {
     cstate.fe_msgbuf.append_byte(b'\n')?;
-    if cstate.fe_msgbuf.len() >= FILE_FLUSH_THRESHOLD {
-        flush_to_file(cstate)?;
+    match cstate.dest {
+        CopyDest::File { .. } => {
+            if cstate.fe_msgbuf.len() >= FILE_FLUSH_THRESHOLD {
+                flush_to_file(cstate)?;
+            }
+        }
+        CopyDest::Frontend => {
+            pqcomm::pq_putmessage(b'd', cstate.fe_msgbuf.as_bytes())?;
+            cstate.bytes_processed += cstate.fe_msgbuf.len() as u64;
+            cstate.fe_msgbuf.reset();
+        }
     }
     Ok(())
 }
 
 fn flush_to_file(cstate: &mut CopyToState<'_, '_>) -> PgResult<()> {
+    let CopyDest::File { fd, .. } = cstate.dest else {
+        panic!("COPY TO: flush_to_file on non-file destination")
+    };
     if cstate.fe_msgbuf.is_empty() {
         return Ok(());
     }
     let bytes = cstate.fe_msgbuf.as_bytes();
-    let wrote = fd::with_allocated_stdio(cstate.copy_file, |f| {
+    let wrote = fd::with_allocated_stdio(fd, |f| {
         use std::io::Write;
         f.write_all(bytes)
     });
@@ -240,7 +370,7 @@ fn flush_to_file(cstate: &mut CopyToState<'_, '_>) -> PgResult<()> {
                 .errmsg("could not write to COPY file: %m")
                 .finish(loc("CopySendEndOfRow"))?;
         }
-        None => panic!("COPY TO: AllocateFile index {} vanished", cstate.copy_file),
+        None => panic!("COPY TO: AllocateFile index {fd} vanished"),
     }
     cstate.bytes_processed += cstate.fe_msgbuf.len() as u64;
     cstate.fe_msgbuf.reset();
@@ -249,13 +379,15 @@ fn flush_to_file(cstate: &mut CopyToState<'_, '_>) -> PgResult<()> {
 
 /// `EndCopyTo` + `EndCopy` (copyto.c).
 pub fn EndCopyTo(mut cstate: CopyToState<'_, '_>) -> PgResult<()> {
-    flush_to_file(&mut cstate)?;
-    if fd::FreeFile(cstate.copy_file)? != 0 {
-        ereport(ERROR)
-            .with_saved_errno(std::io::Error::last_os_error().raw_os_error().unwrap_or(0))
-            .errcode_for_file_access()
-            .errmsg(format!("could not close file \"{}\": %m", cstate.filename))
-            .finish(loc("EndCopy"))?;
+    if let CopyDest::File { fd, filename } = cstate.dest {
+        flush_to_file(&mut cstate)?;
+        if fd::FreeFile(fd)? != 0 {
+            ereport(ERROR)
+                .with_saved_errno(std::io::Error::last_os_error().raw_os_error().unwrap_or(0))
+                .errcode_for_file_access()
+                .errmsg(format!("could not close file \"{filename}\": %m"))
+                .finish(loc("EndCopy"))?;
+        }
     }
     Ok(())
 }
