@@ -16,6 +16,7 @@ use types_storage::lock::LOCKMODE;
 use types_storage::storage::ProcSignalBarrierType;
 use xlogreader_seams::XLogReaderState;
 
+pub mod builtins;
 mod createdb;
 mod dropdb;
 

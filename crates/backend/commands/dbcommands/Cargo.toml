@@ -32,6 +32,7 @@ heaptuple = { path = "../../access/common/heaptuple" }
 table = { path = "../../access/table/table" }
 genam = { path = "../../access/index/genam" }
 fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+types_fmgr = { path = "../../../_support/types/fmgr" }
 lmgr = { path = "../../storage/lmgr/lmgr" }
 procarray = { path = "../../storage/ipc/procarray" }
 procsignal = { path = "../../storage/ipc/procsignal" }
