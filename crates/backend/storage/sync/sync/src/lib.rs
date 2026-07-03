@@ -254,13 +254,16 @@ pub fn ProcessSyncRequests() -> PgResult<()> {
                 }
 
                 if r.errno != libc::ENOENT || failures > 0 {
-                    return Err(Box::new(
-                        ereport(fd::data_sync_elevel(ERROR))
-                            .with_saved_errno(r.errno)
-                            .errcode_for_file_access()
-                            .errmsg(format!("could not fsync file \"{}\": %m", r.path))
-                            .into_error(),
-                    ));
+                    // data_sync_retry=off promotes to PANIC; finish() aborts
+                    // the process there — a caught Err would let the next
+                    // cycle's fsync succeed after the kernel dropped the
+                    // dirty pages (fsyncgate).
+                    ereport(fd::data_sync_elevel(ERROR))
+                        .with_saved_errno(r.errno)
+                        .errcode_for_file_access()
+                        .errmsg(format!("could not fsync file \"{}\": %m", r.path))
+                        .finish(loc("ProcessSyncRequests"))?;
+                    unreachable!("fsync-failure ereport returned");
                 }
                 absorb()?;
                 absorb_counter = FSYNCS_PER_ABSORB;

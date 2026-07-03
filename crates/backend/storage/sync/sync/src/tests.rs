@@ -116,6 +116,9 @@ fn duplicate_requests_merge() {
 #[test]
 fn missing_file_fails_after_retry() {
     setup();
+    // data_sync_retry=on keeps fsync failure at ERROR; default promotes to
+    // PANIC (process abort, covered by fsync_failure_aborts_process).
+    fd::vfd::set_data_sync_retry(true);
     let tag = md_tag(20003);
     RegisterSyncRequest(tag, SyncRequestType::SYNC_REQUEST, false).unwrap();
     let err = ProcessSyncRequests().unwrap_err();
@@ -139,6 +142,7 @@ fn filter_cancels_matching_database() {
 #[test]
 fn filter_leaves_other_database() {
     setup();
+    fd::vfd::set_data_sync_retry(true);
     RegisterSyncRequest(md_tag(20006), SyncRequestType::SYNC_REQUEST, false).unwrap();
     smgr::ForgetDatabaseSyncRequests(999).unwrap();
     assert!(ProcessSyncRequests().is_err(), "uncanceled missing file still fsyncs");
@@ -162,4 +166,24 @@ fn unlink_waits_for_next_checkpoint_cycle() {
     SyncPostCheckpoint().unwrap();
     assert!(!std::path::Path::new(&path).exists());
     assert_eq!(pending_counts().1, 0);
+}
+
+#[test]
+#[ignore = "abort child of fsync_failure_aborts_process"]
+fn fsync_failure_abort_child() {
+    setup();
+    RegisterSyncRequest(md_tag(20009), SyncRequestType::SYNC_REQUEST, false).unwrap();
+    let _ = ProcessSyncRequests();
+    // data_sync_retry=off: the fsync-failure ereport must abort, not return.
+    std::process::exit(0);
+}
+
+#[test]
+fn fsync_failure_aborts_process() {
+    use std::os::unix::process::ExitStatusExt;
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["tests::fsync_failure_abort_child", "--exact", "--ignored", "--test-threads=1"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.signal(), Some(libc::SIGABRT), "child must SIGABRT: {out:?}");
 }
