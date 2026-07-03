@@ -365,10 +365,12 @@ fn set_append_rel_size(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgRe
         "set_append_rel_size (allpaths.c): joininfo translation \
          (adjust_appendrel_attrs over RestrictInfo); inherited-join lane"
     );
-    // add_child_rel_equivalences: only feeds child index-path pathkeys and
-    // MergeAppend candidates; the indexlist gate in add_paths_to_append_rel
-    // stays loud where those could change the chosen plan.
-    debug_assert!(!run.root.rel(rel).has_eclass_joins);
+    // C divergence: add_child_rel_equivalences is unported (appendrel EC
+    // lane) — child EC members only feed child parameterized index paths and
+    // MergeAppend orderings; the indexlist gate in add_paths_to_append_rel
+    // stays loud where those could change the chosen plan. Join enforcement
+    // is unaffected: the parent appendrel's members drive
+    // generate_join_implied_equalities at the join level.
 
     let mut has_live_children = false;
     let mut parent_tuples = 0.0f64;

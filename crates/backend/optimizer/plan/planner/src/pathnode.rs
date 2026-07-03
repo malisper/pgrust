@@ -820,20 +820,25 @@ pub fn create_ctescan_path<'mcx>(run: &mut PlannerRun<'mcx>, rel_id: RelId) -> P
     Ok(id)
 }
 
-// create_bitmap_and_path (pathnode.c); required_outer empty on this lane
-// (children are unparameterized, asserted).
+// create_bitmap_and_path (pathnode.c): required_outer is the union of the
+// children's requirements.
 pub fn create_bitmap_and_path<'mcx>(
     run: &mut PlannerRun<'mcx>,
     rel_id: RelId,
     bitmapquals: PgVec<'mcx, PathId>,
 ) -> PgResult<PathId> {
+    let mcx = run.mcx;
+    let mut required_outer: types_pathnodes::Relids<'mcx> = None;
     for &q in bitmapquals.iter() {
-        assert!(
-            run.root.path(q).base().param_info.is_none(),
-            "create_bitmap_and_path (pathnode.c): parameterized subpath; M2 join lane"
+        required_outer = crate::relnode::relids_union(
+            mcx,
+            &required_outer,
+            path_req_outer(run.root.path(q).base()),
         );
     }
+    let param_info = get_baserel_parampathinfo(run, rel_id, &required_outer)?;
     let mut path = base_path(run, NodeTag::T_BitmapAndPath, NodeTag::T_BitmapAnd, rel_id);
+    path.param_info = param_info;
     path.parallel_aware = false;
     path.parallel_safe = run.root.rel(rel_id).consider_parallel;
     let node = types_pathnodes::BitmapAndPath { path, bitmapquals, bitmapselectivity: 0.0 };
@@ -842,19 +847,25 @@ pub fn create_bitmap_and_path<'mcx>(
     Ok(id)
 }
 
-// create_bitmap_or_path (pathnode.c); required_outer empty on this lane.
+// create_bitmap_or_path (pathnode.c): required_outer is the union of the
+// children's requirements.
 pub fn create_bitmap_or_path<'mcx>(
     run: &mut PlannerRun<'mcx>,
     rel_id: RelId,
     bitmapquals: PgVec<'mcx, PathId>,
 ) -> PgResult<PathId> {
+    let mcx = run.mcx;
+    let mut required_outer: types_pathnodes::Relids<'mcx> = None;
     for &q in bitmapquals.iter() {
-        assert!(
-            run.root.path(q).base().param_info.is_none(),
-            "create_bitmap_or_path (pathnode.c): parameterized subpath; M2 join lane"
+        required_outer = crate::relnode::relids_union(
+            mcx,
+            &required_outer,
+            path_req_outer(run.root.path(q).base()),
         );
     }
+    let param_info = get_baserel_parampathinfo(run, rel_id, &required_outer)?;
     let mut path = base_path(run, NodeTag::T_BitmapOrPath, NodeTag::T_BitmapOr, rel_id);
+    path.param_info = param_info;
     path.parallel_aware = false;
     path.parallel_safe = run.root.rel(rel_id).consider_parallel;
     let node = types_pathnodes::BitmapOrPath { path, bitmapquals, bitmapselectivity: 0.0 };
@@ -863,14 +874,17 @@ pub fn create_bitmap_or_path<'mcx>(
     Ok(id)
 }
 
-// create_bitmap_heap_path (pathnode.c); required_outer/parallel loud upstream.
+// create_bitmap_heap_path (pathnode.c); parallel loud upstream.
 pub fn create_bitmap_heap_path<'mcx>(
     run: &mut PlannerRun<'mcx>,
     rel_id: RelId,
     bitmapqual: PathId,
+    required_outer: &types_pathnodes::Relids<'mcx>,
     loop_count: f64,
 ) -> PgResult<PathId> {
+    let param_info = get_baserel_parampathinfo(run, rel_id, required_outer)?;
     let mut path = base_path(run, NodeTag::T_BitmapHeapPath, NodeTag::T_BitmapHeapScan, rel_id);
+    path.param_info = param_info;
     path.parallel_aware = false;
     path.parallel_safe = run.root.rel(rel_id).consider_parallel;
     let node = types_pathnodes::BitmapHeapPath { path, bitmapqual: Some(bitmapqual) };
@@ -880,6 +894,7 @@ pub fn create_bitmap_heap_path<'mcx>(
 }
 
 // create_index_path (pathnode.c); indexorderbys/partial paths loud upstream.
+#[allow(clippy::too_many_arguments)]
 pub fn create_index_path<'mcx>(
     run: &mut PlannerRun<'mcx>,
     index: &'mcx IndexOptInfo<'mcx>,
@@ -887,11 +902,14 @@ pub fn create_index_path<'mcx>(
     pathkeys: PgVec<'mcx, PathKey>,
     indexscandir: ScanDirection,
     indexonly: bool,
+    required_outer: &types_pathnodes::Relids<'mcx>,
     loop_count: f64,
 ) -> PgResult<PathId> {
     let rel_id = index.rel.expect("IndexOptInfo rel set");
+    let param_info = get_baserel_parampathinfo(run, rel_id, required_outer)?;
     let pathtype = if indexonly { NodeTag::T_IndexOnlyScan } else { NodeTag::T_IndexScan };
     let mut path = base_path(run, NodeTag::T_IndexPath, pathtype, rel_id);
+    path.param_info = param_info;
     path.parallel_safe = run.root.rel(rel_id).consider_parallel;
     path.pathkeys = pathkeys;
     let mcx = run.mcx;
@@ -1520,9 +1538,7 @@ pub fn create_windowagg_path<'mcx>(
     Ok(id)
 }
 
-// create_unique_path (pathnode.c). The make_pathkeys_for_sortclauses
-// redundancy probe reduces under eclass-lite to dropping duplicate exprs
-// (no EC ever carries a const). C's semi_can_hash write-back on oversized
+// create_unique_path (pathnode.c). C's semi_can_hash write-back on oversized
 // hash entries is skipped: recomputation reaches the same verdict.
 pub fn create_unique_path<'mcx>(
     run: &mut PlannerRun<'mcx>,
