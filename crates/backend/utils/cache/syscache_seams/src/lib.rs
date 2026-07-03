@@ -650,19 +650,7 @@ impl<'mcx> PgStatisticSlotData<'mcx> {
             return Ok(v);
         }
         let mcx = *self.values_image.allocator();
-        let v = if self.values_image.is_empty() {
-            PgVec::new_in(mcx)
-        } else {
-            let ty = lookup_pg_type_shape::call(self.valuetype)?
-                .expect("stavalues element type has a pg_type row");
-            datum::array_build::deconstruct_array_image(
-                mcx,
-                &self.values_image,
-                ty.typlen,
-                ty.typbyval,
-                ty.typalign as u8,
-            )?
-        };
+        let v = decode_pg_statistic_values::call(mcx, self.valuetype, &self.values_image)?;
         Ok(self.values.get_or_init(|| v))
     }
 
@@ -671,15 +659,7 @@ impl<'mcx> PgStatisticSlotData<'mcx> {
             return Ok(n);
         }
         let mcx = *self.numbers_image.allocator();
-        let n = if self.numbers_image.is_empty() {
-            PgVec::new_in(mcx)
-        } else {
-            let elems =
-                datum::array_build::deconstruct_array_image(mcx, &self.numbers_image, 4, true, b'i')?;
-            let mut out: PgVec<'mcx, f32> = mcx::vec_with_capacity_in(mcx, elems.len())?;
-            out.extend(elems.iter().map(|d| d.as_f32()));
-            out
-        };
+        let n = decode_pg_statistic_numbers::call(mcx, &self.numbers_image)?;
         Ok(self.numbers.get_or_init(|| n))
     }
 
@@ -687,6 +667,24 @@ impl<'mcx> PgStatisticSlotData<'mcx> {
         &self.values_image
     }
 }
+
+seam_core::seam!(
+    // stavalues image decode (get_attstatsslot's deconstruct_array arm);
+    // empty image mirrors SQL NULL. Byref datums point into `image`.
+    pub fn decode_pg_statistic_values<'mcx>(
+        mcx: Mcx<'mcx>,
+        valuetype: Oid,
+        image: &[u8],
+    ) -> PgResult<PgVec<'mcx, Datum>>
+);
+
+seam_core::seam!(
+    // stanumbers (float4[]) image decode; empty image mirrors SQL NULL.
+    pub fn decode_pg_statistic_numbers<'mcx>(
+        mcx: Mcx<'mcx>,
+        image: &[u8],
+    ) -> PgResult<PgVec<'mcx, f32>>
+);
 
 pub struct PgStatisticBundle<'mcx> {
     pub stanullfrac: f32,
