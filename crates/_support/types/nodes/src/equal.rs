@@ -18,7 +18,7 @@ use crate::primnodes::{
     Aggref, Alias, ArrayExpr, BoolExpr, BooleanTest, CoerceViaIO, CollateExpr, Const,
     DistinctExpr, FromExpr, FuncExpr, GroupingFunc, NullTest, OpExpr, Param, RangeTblRef,
     RangeVar, RelabelType, RowExpr,
-    ScalarArrayOpExpr, TargetEntry, Var, WindowFunc,
+    SQLValueFunction, ScalarArrayOpExpr, TargetEntry, Var, WindowFunc,
 };
 use crate::rawnodes::{
     A_Const, A_Expr, A_Star, CollateClause, ColumnRef, DeleteStmt, DistinctClause, FuncCall,
@@ -56,6 +56,7 @@ pub fn equal(a: Node<'_>, b: Node<'_>) -> bool {
         NodeTag::T_WindowFunc => cmp!(as_window_func),
         NodeTag::T_GroupingSet => cmp!(as_grouping_set),
         NodeTag::T_RowExpr => cmp!(as_row_expr),
+        NodeTag::T_SQLValueFunction => cmp!(as_sql_value_function),
         NodeTag::T_FuncExpr => cmp!(as_func_expr),
         NodeTag::T_OpExpr => cmp!(as_op_expr),
         NodeTag::T_ScalarArrayOpExpr => cmp!(as_scalar_array_op_expr),
@@ -428,6 +429,12 @@ impl NodeEqual for CoerceViaIO<'_> {
         equal(self.arg, b.arg)
             && self.resulttype == b.resulttype
             && self.resultcollid == b.resultcollid
+    }
+}
+
+impl NodeEqual for SQLValueFunction {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.op == b.op && self.r#type == b.r#type && self.typmod == b.typmod
     }
 }
 
