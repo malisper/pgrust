@@ -129,9 +129,10 @@ pub(crate) fn RemoveTempRelationsCallback(_code: i32, _arg: datum::Datum) -> PgR
     Ok(())
 }
 
-pub fn ResetTempTableNamespace(mcx: Mcx<'_>) -> PgResult<()> {
+pub fn ResetTempTableNamespace() -> PgResult<()> {
     if OidIsValid(my_temp_namespace()) {
-        RemoveTempRelations(mcx, my_temp_namespace())?;
+        let scratch = MemoryContext::new("ResetTempTableNamespace");
+        RemoveTempRelations(scratch.mcx(), my_temp_namespace())?;
     }
     Ok(())
 }

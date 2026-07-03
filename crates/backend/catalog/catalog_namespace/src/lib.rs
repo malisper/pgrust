@@ -190,14 +190,6 @@ pub fn SetTempNamespaceState(tempNamespaceId: Oid, tempToastNamespaceId: Oid) {
     path::invalidate_search_path_cache();
 }
 
-pub fn ResetTempTableNamespace() {
-    // myTempNamespace can only become valid via the unported temp-creation
-    // half (deferred loud) or SetTempNamespaceState (parallel worker).
-    if OidIsValid(my_temp_namespace()) {
-        deferred("ResetTempTableNamespace: RemoveTempRelations");
-    }
-}
-
 pub fn AtEOXact_Namespace(isCommit: bool, parallel: bool) {
     if MY_TEMP_NAMESPACE_SUB_ID.with(Cell::get) != InvalidSubTransactionId && !parallel {
         if isCommit {
