@@ -218,7 +218,15 @@ pub fn PortalCleanup(portal: &Portal<'static>) -> PgResult<()> {
     if failed {
         // C leaves the QueryDesc to die with the abort cleanup; the registry
         // entry is owning, so release it here (execmain audit E-4 precedent).
+        // Dropping executor state releases scan pins remembered under the
+        // portal's owner at FETCH — that owner must be current for the drop.
+        let save_owner = resowner_seams::current_resource_owner::call();
+        let portal_owner = portal.borrow().resowner;
+        if !portal_owner.is_null() {
+            resowner_seams::set_current_resource_owner::call(portal_owner);
+        }
         execmain_seams::release_query_desc::call(query_desc);
+        resowner_seams::set_current_resource_owner::call(save_owner);
         return Ok(());
     }
     // ExecutorEnd unregisters es_snapshot from CurrentResourceOwner, so the
