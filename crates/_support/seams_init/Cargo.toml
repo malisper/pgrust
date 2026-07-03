@@ -12,6 +12,7 @@ path = "src/lib.rs"
 operatorcmds = { path = "../../backend/commands/operatorcmds" }
 opclasscmds = { path = "../../backend/commands/opclasscmds" }
 sequence = { path = "../../backend/commands/sequence" }
+extension = { path = "../../backend/commands/extension" }
 detoast = { path = "../../backend/access/common/detoast" }
 heaptoast = { path = "../../backend/access/heap/heaptoast" }
 printtup = { path = "../../backend/access/common/printtup" }

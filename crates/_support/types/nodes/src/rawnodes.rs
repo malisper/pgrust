@@ -903,6 +903,26 @@ unsafe impl<'mcx> NodeVariant<'mcx> for StatsElem<'mcx> {
     const TAG: NodeTag = NodeTag::T_StatsElem;
 }
 
+#[derive(Default)]
+pub struct CreateExtensionStmt<'mcx> {
+    pub extname: Option<&'mcx str>,
+    pub if_not_exists: bool,
+    pub options: NodeList<'mcx>,
+}
+
+#[derive(Default)]
+pub struct AlterExtensionStmt<'mcx> {
+    pub extname: Option<&'mcx str>,
+    pub options: NodeList<'mcx>,
+}
+
+unsafe impl<'mcx> NodeVariant<'mcx> for CreateExtensionStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CreateExtensionStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for AlterExtensionStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_AlterExtensionStmt;
+}
+
 impl<'mcx> Node<'mcx> {
     pub fn mk_raw_stmt(
         mcx: Mcx<'mcx>,

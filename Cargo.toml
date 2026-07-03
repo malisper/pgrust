@@ -531,6 +531,8 @@ members = [
     "crates/backend/commands/dbcommands",
     "crates/backend/commands/schemacmds",
     "crates/backend/commands/functioncmds",
+    "crates/backend/commands/extension",
+    "crates/backend/commands/extension_seams",
     "crates/backend/commands/comment",
     "crates/backend/commands/explain",
     "crates/backend/commands/prepare",

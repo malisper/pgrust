@@ -508,6 +508,17 @@ fn node(out: &mut String, n: Node<'_>) {
         bool_field(out, "for_identity", cs.for_identity);
         bool_field(out, "if_not_exists", cs.if_not_exists);
         out.push('}');
+    } else if let Some(ce) = n.as_variant::<types_nodes::rawnodes::CreateExtensionStmt>() {
+        out.push_str("{CREATEEXTENSIONSTMT");
+        string_field(out, "extname", ce.extname);
+        bool_field(out, "if_not_exists", ce.if_not_exists);
+        list_field(out, "options", &ce.options);
+        out.push('}');
+    } else if let Some(ae) = n.as_variant::<types_nodes::rawnodes::AlterExtensionStmt>() {
+        out.push_str("{ALTEREXTENSIONSTMT");
+        string_field(out, "extname", ae.extname);
+        list_field(out, "options", &ae.options);
+        out.push('}');
     } else if let Some(j) = n.as_join_expr() {
         out.push_str("{JOINEXPR");
         int_field(out, "jointype", j.jointype as i32);

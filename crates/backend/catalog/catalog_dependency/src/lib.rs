@@ -342,7 +342,15 @@ fn findDependentObjects<'mcx>(
                     if deptype == b'e' && flags & PERFORM_DELETION_SKIP_EXTENSIONS != 0 {
                         continue;
                     }
-                    // creating_extension is always false (no extension lane).
+                    // Scripts of the extension being created/altered may drop
+                    // its own member objects.
+                    if deptype == b'e'
+                        && pg_depend::creating_extension()
+                        && otherObject.classId == types_core::EXTENSION_RELATION_ID
+                        && otherObject.objectId == pg_depend::CurrentExtensionObject()
+                    {
+                        continue;
+                    }
                     if stack.is_empty() {
                         if let Some(pending) = pendingObjects {
                             if object_address_present(&otherObject, pending) {
@@ -706,6 +714,12 @@ fn doDeletion<'mcx>(mcx: Mcx<'mcx>, object: &ObjectAddress, flags: i32) -> PgRes
         TYPE_RELATION_ID => pg_type::RemoveTypeById(mcx, object.objectId)?,
         pg_largeobject::LargeObjectRelationId => {
             pg_largeobject::LargeObjectDrop(mcx, object.objectId)?
+        }
+        types_core::PROCEDURE_RELATION_ID => {
+            functioncmds::RemoveFunctionById(mcx, object.objectId)?
+        }
+        types_core::EXTENSION_RELATION_ID => {
+            extension::RemoveExtensionById(mcx, object.objectId)?
         }
         AttrDefaultRelationId => pg_attrdef::RemoveAttrDefaultById(mcx, object.objectId)?,
         ConstraintRelationId => pg_constraint::RemoveConstraintById(mcx, object.objectId)?,

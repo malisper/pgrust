@@ -68,6 +68,9 @@ rel_vocab = { path = "../../../_support/types/rel_vocab" }
 
 operatorcmds = { path = "../../commands/operatorcmds" }
 opclasscmds = { path = "../../commands/opclasscmds" }
+extension = { path = "../../commands/extension" }
+catalog_dependency = { path = "../../catalog/catalog_dependency" }
+pg_depend = { path = "../../catalog/pg_depend" }
 
 [dev-dependencies]
 syscache_seams = { path = "../../utils/cache/syscache_seams" }

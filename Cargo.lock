@@ -1452,8 +1452,10 @@ dependencies = [
  "catalog_namespace",
  "datum",
  "dependency_seams",
+ "extension",
  "fmgr_seams",
  "format_type",
+ "functioncmds",
  "genam",
  "init_small",
  "lmgr",
@@ -3369,6 +3371,75 @@ dependencies = [
 ]
 
 [[package]]
+name = "extension"
+version = "0.1.0"
+dependencies = [
+ "aclchk",
+ "adt_acl",
+ "adt_bool",
+ "adt_quote",
+ "analyze_seams",
+ "arrayfuncs",
+ "cache_syscache",
+ "catalog",
+ "catalog_indexing",
+ "catalog_namespace",
+ "commands_comment",
+ "datum",
+ "detoast",
+ "elog",
+ "execmain_seams",
+ "explain",
+ "extension_seams",
+ "fmgr_seams",
+ "funcapi",
+ "genam",
+ "guc",
+ "guc_file",
+ "guc_tables",
+ "heaptuple",
+ "init_small",
+ "lsyscache",
+ "mbutils",
+ "mcx",
+ "miscinit",
+ "parser_seams",
+ "pg_depend",
+ "pg_path",
+ "planner_seams",
+ "rewrite_handler_seams",
+ "schemacmds",
+ "snapmgr",
+ "superuser",
+ "table",
+ "tcop_dest",
+ "types_core",
+ "types_dest",
+ "types_error",
+ "types_fmgr",
+ "types_guc",
+ "types_nodes",
+ "types_portal",
+ "types_rel",
+ "types_scan",
+ "types_tuple",
+ "utility_seams",
+ "varlena",
+ "xact",
+]
+
+[[package]]
+name = "extension_seams"
+version = "0.0.0"
+dependencies = [
+ "datum",
+ "seam_core",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+]
+
+[[package]]
 name = "fastpath"
 version = "0.0.0"
 dependencies = [
@@ -3477,6 +3548,7 @@ dependencies = [
  "cryptohashfuncs",
  "datum",
  "dbsize",
+ "extension_seams",
  "fmgr_seams",
  "mcx",
  "name",
@@ -3608,7 +3680,11 @@ dependencies = [
  "aclchk",
  "aclchk_seams",
  "cache_syscache",
+ "catalog_indexing",
  "catalog_namespace",
+ "datum",
+ "fmgr_seams",
+ "genam",
  "lsyscache",
  "mcx",
  "miscinit",
@@ -3616,9 +3692,13 @@ dependencies = [
  "rel_vocab",
  "superuser",
  "syscache_seams",
+ "table",
  "types_core",
  "types_error",
  "types_nodes",
+ "types_rel",
+ "types_scan",
+ "types_tuple",
 ]
 
 [[package]]
@@ -9113,6 +9193,7 @@ dependencies = [
  "execscan",
  "executils",
  "explain",
+ "extension",
  "fd",
  "fmgr_core",
  "format_type",
@@ -11090,6 +11171,7 @@ dependencies = [
  "acl_seams",
  "aclchk",
  "catalog",
+ "catalog_dependency",
  "catalog_namespace",
  "catalog_toasting",
  "checkpointer_seams",
@@ -11109,6 +11191,7 @@ dependencies = [
  "elog",
  "elog_seams",
  "explain",
+ "extension",
  "functioncmds",
  "guc_funcs",
  "guc_tables",
@@ -11124,6 +11207,7 @@ dependencies = [
  "parse_clause",
  "parse_utilcmd",
  "parser_small1",
+ "pg_depend",
  "portalcmds",
  "portalmem",
  "prepare",

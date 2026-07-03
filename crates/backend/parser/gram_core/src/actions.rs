@@ -25,6 +25,7 @@ use types_nodes::primnodes::{
 };
 
 use types_nodes::rawnodes::CreateDomainStmt;
+use types_nodes::rawnodes::{AlterExtensionStmt, CreateExtensionStmt};
 use types_nodes::JoinType;
 use types_nodes::rawnodes::A_Expr_Kind::{self, AEXPR_OP};
 use types_nodes::rawnodes::{
@@ -1434,6 +1435,50 @@ impl<'mcx> Parser<'mcx> {
             655 => *yyval = def_elem(mcx, "restart", None, view.l(1))?,
             656 => *yyval = def_elem(mcx, "restart", view.v(3).node(), view.l(1))?,
             657 => *yyval = def_elem(mcx, "unlogged", None, view.l(1))?,
+            // CreateExtensionStmt: CREATE EXTENSION [IF NOT EXISTS] name
+            // opt_with create_extension_opt_list
+            685 | 686 => {
+                let (name_i, opts_i) = if rule == 685 { (3, 5) } else { (6, 8) };
+                let mut n = Node::build::<CreateExtensionStmt>(mcx)?;
+                n.extname = Some(view.v(name_i).str_val());
+                n.if_not_exists = rule == 686;
+                n.options = view.v(opts_i).list();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            687 | 694 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(2).node().expect("extension opt item"))?;
+                *yyval = YYSTYPE::List(list);
+            }
+            688 | 695 => *yyval = YYSTYPE::List(NodeList::nil()),
+            689 => {
+                let arg = Node::mk_string(mcx, view.v(2).str_val())?;
+                *yyval = def_elem(mcx, "schema", Some(arg), view.l(1))?;
+            }
+            690 | 696 => {
+                let arg = Node::mk_string(mcx, view.v(2).str_val())?;
+                *yyval = def_elem(mcx, "new_version", Some(arg), view.l(1))?;
+            }
+            691 => {
+                return Err(Box::new(
+                    (*self.errposition_error(
+                        "CREATE EXTENSION ... FROM is no longer supported".into(),
+                        view.l(1),
+                    ))
+                    .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+                ));
+            }
+            692 => {
+                let arg = Node::mk(mcx, Boolean { boolval: true })?;
+                *yyval = def_elem(mcx, "cascade", Some(arg), view.l(1))?;
+            }
+            // AlterExtensionStmt: ALTER EXTENSION name UPDATE alter_extension_opt_list
+            693 => {
+                let mut n = Node::build::<AlterExtensionStmt>(mcx)?;
+                n.extname = Some(view.v(3).str_val());
+                n.options = view.v(5).list();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
             1710 => {
                 let stmt = view.v(1).node().expect("select_clause");
                 let sort = view.v(2).list();
