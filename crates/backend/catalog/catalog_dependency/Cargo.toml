@@ -5,6 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+rewrite_define_seams = { path = "../../rewrite/rewrite_define_seams" }
 dependency_seams = { path = "../dependency_seams" }
 sequence_seams = { path = "../../commands/sequence_seams" }
 catalog = { path = "../catalog" }

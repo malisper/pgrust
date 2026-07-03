@@ -18,6 +18,8 @@ use pg_depend::{object_address_comparator, ObjectAddress};
 use types_core::{AttrNumber, InvalidOid, Oid, RELATION_RELATION_ID, TYPE_RELATION_ID};
 use types_error::{PgError, PgResult, ERRCODE_DEPENDENT_OBJECTS_STILL_EXIST};
 use types_rel::{AccessExclusiveLock, Relation, RowExclusiveLock, RELKIND_INDEX, RELKIND_RELATION, RELKIND_SEQUENCE, RELKIND_TOASTVALUE};
+
+const REWRITE_RELATION_ID_2618: Oid = 2618;
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use types_tuple::{HeapTupleData, TupleDescData};
 
@@ -689,7 +691,10 @@ fn doDeletion<'mcx>(mcx: Mcx<'mcx>, object: &ObjectAddress, flags: i32) -> PgRes
                     object.objectId,
                     object.objectSubId as types_core::AttrNumber,
                 )?;
-            } else if matches!(relKind, RELKIND_RELATION | RELKIND_TOASTVALUE | RELKIND_SEQUENCE) {
+            } else if matches!(
+                relKind,
+                RELKIND_RELATION | RELKIND_TOASTVALUE | RELKIND_SEQUENCE | types_rel::RELKIND_MATVIEW
+            ) {
                 catalog_heap::heap_drop_with_catalog(mcx, object.objectId)?;
                 if relKind == RELKIND_SEQUENCE {
                     sequence_seams::delete_sequence_tuple::call(object.objectId)?;
@@ -702,6 +707,9 @@ fn doDeletion<'mcx>(mcx: Mcx<'mcx>, object: &ObjectAddress, flags: i32) -> PgRes
         AttrDefaultRelationId => pg_attrdef::RemoveAttrDefaultById(mcx, object.objectId)?,
         ConstraintRelationId => pg_constraint::RemoveConstraintById(mcx, object.objectId)?,
         statscmds::StatisticExtRelationId => statscmds::RemoveStatisticsById(mcx, object.objectId)?,
+        REWRITE_RELATION_ID_2618 => {
+            rewrite_define_seams::remove_rewrite_rule_by_id::call(mcx, object.objectId)?
+        }
         other => panic!("unported: doDeletion object class {other}"),
     }
     Ok(())

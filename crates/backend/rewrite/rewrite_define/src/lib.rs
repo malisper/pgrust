@@ -58,6 +58,55 @@ fn name_image<'mcx>(mcx: Mcx<'mcx>, name: &str) -> PgResult<mcx::PgVec<'mcx, u8>
     Ok(buf)
 }
 
+pub fn init_seams() {
+    rewrite_define_seams::remove_rewrite_rule_by_id::set(RemoveRewriteRuleById);
+}
+
+// RemoveRewriteRuleById (rewriteRemove.c).
+pub fn RemoveRewriteRuleById<'mcx>(mcx: Mcx<'mcx>, rule_oid: Oid) -> PgResult<()> {
+    let rew = table::table_open(mcx, REWRITE_RELATION_ID, RowExclusiveLock)?;
+    let keys = [eq_key(Anum_pg_rewrite_oid, F_OIDEQ, Datum::from_oid(rule_oid))];
+    let mut scan = genam::systable_beginscan(mcx, &rew, REWRITE_OID_INDEX_ID, true, None, &keys)?;
+    let tup = match genam::systable_getnext(mcx, &mut scan)? {
+        Some(t) => t,
+        None => {
+            return Err(Box::new(PgError::error(format!(
+                "could not find tuple for rule {rule_oid}"
+            ))))
+        }
+    };
+    let mut isnull = false;
+    // SAFETY: pg_rewrite row under pg_rewrite's descriptor; ev_class is a
+    // declared NOT NULL column.
+    let ev_class = unsafe {
+        types_tuple::heap_getattr(tup, Anum_pg_rewrite_ev_class as i32, rew.descr(), &mut isnull)
+    }
+    .as_oid();
+    let event_relation = table::table_open(mcx, ev_class, AccessExclusiveLock)?;
+    if !init_small::globals::allowSystemTableMods()
+        && (catalog::IsCatalogRelationOid(ev_class)
+            || catalog::IsToastNamespace(event_relation.rd_rel.relnamespace))
+    {
+        return Err(Box::new(
+            PgError::new(
+                types_error::ERROR,
+                format!(
+                    "permission denied: \"{}\" is a system catalog",
+                    event_relation.name()
+                ),
+            )
+            .with_sqlstate(types_error::ERRCODE_INSUFFICIENT_PRIVILEGE),
+        ));
+    }
+    let tid = tup.t_self;
+    catalog_indexing::CatalogTupleDelete(&rew, &tid)?;
+    genam::systable_endscan(mcx, scan)?;
+    rew.close(RowExclusiveLock)?;
+    inval::invalidate::CacheInvalidateRelcache(&event_relation)?;
+    event_relation.close(types_rel::NoLock)?;
+    Ok(())
+}
+
 // InsertRule (rewriteDefine.c), insert lane; replacing an existing rule is
 // loud (CREATE OR REPLACE VIEW unported).
 fn InsertRule<'mcx>(
