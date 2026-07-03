@@ -2314,8 +2314,12 @@ fn deparse_var<'mcx>(
         ResolvedVar::Base(v, a) => (v, a),
         // C get_variable: a non-Var referent prints parenthesized.
         ResolvedVar::Expr(expr, ctx) => {
+            // push_child_plan: the current node stays on the ancestor stack
+            // while deparsing in the child's context (initplan Params on this
+            // node must stay resolvable).
+            let stacked = Ancestors { entry: AncestorEntry::Plan(plan_node), parent: ancestors };
             buf.try_push('(')?;
-            deparse_expr(es, ctx, ancestors, expr, useprefix, true, buf)?;
+            deparse_expr(es, ctx, Some(&stacked), expr, useprefix, true, buf)?;
             buf.try_push(')')?;
             return Ok(());
         }
