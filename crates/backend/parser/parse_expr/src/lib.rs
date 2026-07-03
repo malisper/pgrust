@@ -692,8 +692,10 @@ fn transformRowExpr<'mcx>(
     }
     let mut colnames = types_nodes::NodeList::nil();
     for fnum in 1..=args.len() {
-        let s = mcx::arena_string_in(mcx, mcx::PgString::from_str_in(&format!("f{fnum}"), mcx)?)?;
-        colnames.lappend(mcx, Node::mk_string(mcx, s.as_str())?)?;
+        let fname: &'mcx [u8] = mcx::slice_in(mcx, format!("f{fnum}").as_bytes())?.leak();
+        // SAFETY: "f{N}" is ASCII.
+        let fname = unsafe { core::str::from_utf8_unchecked(fname) };
+        colnames.lappend(mcx, Node::mk_string(mcx, fname)?)?;
     }
     Node::mk(
         mcx,
