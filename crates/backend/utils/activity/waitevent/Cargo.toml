@@ -1,0 +1,12 @@
+[package]
+name = "waitevent"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "waitevent"
+path = "src/lib.rs"
+
+[dependencies]
+waitevent_seams = { path = "../waitevent_seams" }

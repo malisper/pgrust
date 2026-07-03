@@ -1,9 +1,12 @@
 #![allow(non_snake_case)]
 
+use datum::Datum;
 use elog::ereport;
 use guc::registry::GucVariable;
 use guc::{GUC_ACTION_LOCAL, GUC_ACTION_SET};
 use mcx::Mcx;
+use std::rc::Rc;
+
 use tcop_dest::DestReceiver;
 use tupdesc::{CreateTemplateTupleDesc, TupleDescInitEntry};
 use types_core::{Oid, TEXTOID};
@@ -204,11 +207,15 @@ pub fn SetPGVariable(name: &str, arg: Option<Node<'_>>, is_local: bool) -> PgRes
     set_config_option_session(name, argstring.as_deref(), is_local)
 }
 
-pub fn GetPGVariable(name: &str, dest: &mut DestReceiver<'_>) -> PgResult<()> {
+pub fn GetPGVariable<'mcx>(
+    mcx: Mcx<'mcx>,
+    name: &str,
+    dest: &mut DestReceiver<'mcx>,
+) -> PgResult<()> {
     if guc::guc_name_compare(name, "all") == std::cmp::Ordering::Equal {
-        ShowAllGUCConfig(dest)
+        ShowAllGUCConfig(mcx, dest)
     } else {
-        ShowGUCConfigOption(name, dest)
+        ShowGUCConfigOption(mcx, name, dest)
     }
 }
 
@@ -238,14 +245,50 @@ pub fn config_option_named_value(name: &str) -> PgResult<(String, String)> {
     .expect("GUC store not initialized")
 }
 
-fn ShowGUCConfigOption(name: &str, _dest: &mut DestReceiver<'_>) -> PgResult<()> {
-    let (_varname, _value) = config_option_named_value(name)?;
-    unported("ShowGUCConfigOption tuple emission: begin_tup_output_tupdesc (exectuples lane)");
+fn ShowGUCConfigOption<'mcx>(
+    mcx: Mcx<'mcx>,
+    name: &str,
+    dest: &mut DestReceiver<'mcx>,
+) -> PgResult<()> {
+    let (varname, value) = config_option_named_value(name)?;
+    let mut tupdesc = CreateTemplateTupleDesc(mcx, 1)?;
+    TupleDescInitEntry(&mut tupdesc, 1, Some(&varname), TEXTOID, -1, 0)?;
+    let mut tstate = exectuples_output::begin_tup_output_tupdesc(mcx, dest, Rc::new(tupdesc))?;
+    exectuples_output::do_text_output_oneline(&mut tstate, mcx, &value)?;
+    exectuples_output::end_tup_output(tstate)
 }
 
-fn ShowAllGUCConfig(_dest: &mut DestReceiver<'_>) -> PgResult<()> {
-    let _rows = show_all_guc_config_rows()?;
-    unported("ShowAllGUCConfig tuple emission: begin_tup_output_tupdesc (exectuples lane)");
+fn ShowAllGUCConfig<'mcx>(mcx: Mcx<'mcx>, dest: &mut DestReceiver<'mcx>) -> PgResult<()> {
+    let rows = show_all_guc_config_rows()?;
+    let mut tupdesc = CreateTemplateTupleDesc(mcx, 3)?;
+    TupleDescInitEntry(&mut tupdesc, 1, Some("name"), TEXTOID, -1, 0)?;
+    TupleDescInitEntry(&mut tupdesc, 2, Some("setting"), TEXTOID, -1, 0)?;
+    TupleDescInitEntry(&mut tupdesc, 3, Some("description"), TEXTOID, -1, 0)?;
+    let mut tstate = exectuples_output::begin_tup_output_tupdesc(mcx, dest, Rc::new(tupdesc))?;
+    for (name, setting, short_desc) in &rows {
+        let mut values = [Datum::null(); 3];
+        let mut isnull = [false; 3];
+        let name_v = varlena::cstring_to_text(mcx, name.as_bytes())?;
+        values[0] = Datum::from_usize(name_v.as_bytes().as_ptr() as usize);
+        let setting_v = match setting {
+            Some(s) => Some(varlena::cstring_to_text(mcx, s.as_bytes())?),
+            None => None,
+        };
+        match &setting_v {
+            Some(v) => values[1] = Datum::from_usize(v.as_bytes().as_ptr() as usize),
+            None => isnull[1] = true,
+        }
+        let desc_v = match short_desc {
+            Some(s) => Some(varlena::cstring_to_text(mcx, s.as_bytes())?),
+            None => None,
+        };
+        match &desc_v {
+            Some(v) => values[2] = Datum::from_usize(v.as_bytes().as_ptr() as usize),
+            None => isnull[2] = true,
+        }
+        exectuples_output::do_tup_output(&mut tstate, mcx, &values, &isnull)?;
+    }
+    exectuples_output::end_tup_output(tstate)
 }
 
 // The (name, setting, short_desc) projection of SHOW ALL, C row order.

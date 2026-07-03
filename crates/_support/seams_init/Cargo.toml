@@ -73,6 +73,7 @@ shmem = { path = "../../backend/storage/ipc/shmem" }
 sinval = { path = "../../backend/storage/ipc/sinval" }
 waiteventset = { path = "../../backend/storage/ipc/waiteventset" }
 lmgr_proc = { path = "../../backend/storage/lmgr/lmgr_proc" }
+s_lock = { path = "../../backend/storage/lmgr/s_lock" }
 lmgr = { path = "../../backend/storage/lmgr/lmgr" }
 lock = { path = "../../backend/storage/lmgr/lock" }
 smgr = { path = "../../backend/storage/smgr/smgr" }
@@ -81,8 +82,10 @@ backend_startup = { path = "../../backend/tcop/backend_startup" }
 tcop_dest = { path = "../../backend/tcop/dest" }
 postgres = { path = "../../backend/tcop/postgres" }
 pquery = { path = "../../backend/tcop/pquery" }
+explain = { path = "../../backend/commands/explain" }
 utility = { path = "../../backend/tcop/utility" }
 backend_status = { path = "../../backend/utils/activity/backend_status" }
+waitevent = { path = "../../backend/utils/activity/waitevent" }
 pgstat = { path = "../../backend/utils/activity/pgstat" }
 adt_acl = { path = "../../backend/utils/adt/acl" }
 adt_timestamp = { path = "../../backend/utils/adt/adt_timestamp" }
@@ -126,4 +129,7 @@ autovacuum = { path = "../../backend/postmaster/autovacuum" }
 syslogger = { path = "../../backend/postmaster/syslogger" }
 launcher = { path = "../../backend/replication/launcher" }
 walsender_config = { path = "../../backend/replication/walsender_config" }
+slot = { path = "../../backend/replication/slot" }
+session = { path = "../../backend/access/session" }
+relpath = { path = "../../common/relpath" }
 aio_config = { path = "../../backend/storage/aio/aio_config" }

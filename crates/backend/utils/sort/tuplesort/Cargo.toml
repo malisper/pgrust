@@ -1,0 +1,19 @@
+[package]
+name = "tuplesort"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+datum = { path = "../../../../_support/types/datum" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_slot = { path = "../../../../_support/types/types_slot" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+types_nbtree = { path = "../../../../_support/types/types_nbtree" }
+exectuples = { path = "../../../executor/exectuples" }
+heaptuple = { path = "../../../access/common/heaptuple" }
+lsyscache = { path = "../../cache/lsyscache" }
+init_small = { path = "../../init/init_small" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }

@@ -18,6 +18,9 @@ miscinit = { path = "../../init/miscinit" }
 snapmgr_seams = { path = "../../time/snapmgr_seams" }
 superuser = { path = "../superuser" }
 tcop_dest = { path = "../../../tcop/dest" }
+datum = { path = "../../../../_support/types/datum" }
+exectuples_output = { path = "../../../executor/exectuples_output" }
+varlena = { path = "../../adt/varlena" }
 tupdesc = { path = "../../../access/common/tupdesc" }
 types_core = { path = "../../../../_support/types/types_core" }
 types_error = { path = "../../../../_support/types/types_error" }

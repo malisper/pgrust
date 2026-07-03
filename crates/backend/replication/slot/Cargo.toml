@@ -1,0 +1,15 @@
+[package]
+name = "slot"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "slot"
+path = "src/lib.rs"
+
+[dependencies]
+datum = { path = "../../../_support/types/datum" }
+types_error = { path = "../../../_support/types/types_error" }
+slot_seams = { path = "../slot_seams" }
+ipc_seams = { path = "../../storage/ipc/ipc_seams" }

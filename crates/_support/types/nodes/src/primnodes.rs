@@ -166,6 +166,38 @@ pub struct RelabelType<'mcx> {
     pub location: ParseLoc,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum BoolExprType {
+    #[default]
+    AND_EXPR = 0,
+    OR_EXPR = 1,
+    NOT_EXPR = 2,
+}
+
+#[derive(Default)]
+pub struct BoolExpr<'mcx> {
+    pub boolop: BoolExprType,
+    pub args: NodeList<'mcx>,
+    pub location: ParseLoc,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum NullTestType {
+    #[default]
+    IS_NULL = 0,
+    IS_NOT_NULL = 1,
+}
+
+#[derive(Default)]
+pub struct NullTest<'mcx> {
+    pub arg: Option<Node<'mcx>>,
+    pub nulltesttype: NullTestType,
+    pub argisrow: bool,
+    pub location: ParseLoc,
+}
+
 #[derive(Default)]
 pub struct FuncExpr<'mcx> {
     pub funcid: Oid,
@@ -212,6 +244,12 @@ unsafe impl<'mcx> NodeVariant<'mcx> for FuncExpr<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for RelabelType<'mcx> {
     const TAG: NodeTag = NodeTag::T_RelabelType;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for BoolExpr<'mcx> {
+    const TAG: NodeTag = NodeTag::T_BoolExpr;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for NullTest<'mcx> {
+    const TAG: NodeTag = NodeTag::T_NullTest;
 }
 
 impl<'mcx> Node<'mcx> {
@@ -379,6 +417,16 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_func_expr(self) -> Option<&'mcx FuncExpr<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_bool_expr(self) -> Option<&'mcx BoolExpr<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_null_test(self) -> Option<&'mcx NullTest<'mcx>> {
         self.as_variant()
     }
 }

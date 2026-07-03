@@ -59,6 +59,7 @@ members = [
     "crates/_support/types/nodes",
     "crates/backend/storage/lmgr/lmgr_proc_seams",
     "crates/backend/storage/lmgr/s_lock_seams",
+    "crates/backend/storage/lmgr/s_lock",
     "crates/backend/utils/activity/waitevent_seams",
     "crates/backend/utils/activity/waitevent",
     "crates/backend/storage/ipc/shmem_seams",

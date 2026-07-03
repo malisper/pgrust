@@ -207,9 +207,10 @@ fn show_all_rows_are_sorted_and_visible() {
 }
 
 #[test]
-#[should_panic(expected = "begin_tup_output_tupdesc")]
-fn show_emission_is_loud_until_exectuples_output_lands() {
+fn show_emits_through_tup_output() {
     setup();
+    let ctx = MemoryContext::new("t");
     let mut dest = tcop_dest::CreateDestReceiver(types_dest::CommandDest::None);
-    let _ = GetPGVariable("DateStyle", &mut dest);
+    GetPGVariable(ctx.mcx(), "DateStyle", &mut dest).unwrap();
+    GetPGVariable(ctx.mcx(), "all", &mut dest).unwrap();
 }

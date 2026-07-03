@@ -1,7 +1,9 @@
+use mcx::Mcx;
 use tcop_dest::DestReceiver;
 use types_error::PgResult;
 use types_nodes::node_tree::Node;
 use types_nodes::nodes_enums::CmdType;
+use types_nodes::parsenodes::ExplainStmt;
 use types_nodes::parsenodes::TransactionStmtKind::*;
 use types_nodes::plannodes::PlannedStmt;
 use types_nodes::NodeTag;
@@ -31,6 +33,7 @@ fn set_query_completion(qc: &mut Option<&mut QueryCompletion>, tag: types_core::
 // C's hookable entry; no plugin surface exists, so this IS standard_ProcessUtility.
 #[allow(clippy::too_many_arguments)]
 pub fn ProcessUtility<'p, 'a, 's, 'd, 'q, 'mcx>(
+    mcx: Mcx<'mcx>,
     pstmt: &'p PlannedStmt<'a>,
     source_text: &'s str,
     read_only_tree: bool,
@@ -45,6 +48,7 @@ pub fn ProcessUtility<'p, 'a, 's, 'd, 'q, 'mcx>(
         .as_ref()
         .is_none_or(|qc| qc.commandTag == types_portal::CMDTAG_UNKNOWN));
     standard_ProcessUtility(
+        mcx,
         pstmt,
         source_text,
         read_only_tree,
@@ -58,12 +62,13 @@ pub fn ProcessUtility<'p, 'a, 's, 'd, 'q, 'mcx>(
 
 #[allow(clippy::too_many_arguments)]
 pub fn standard_ProcessUtility<'p, 'a, 's, 'd, 'q, 'mcx>(
+    mcx: Mcx<'mcx>,
     pstmt: &'p PlannedStmt<'a>,
-    _source_text: &'s str,
+    source_text: &'s str,
     read_only_tree: bool,
     context: ProcessUtilityContext,
-    _params: ParamListHandle,
-    _query_env: QueryEnvHandle,
+    params: ParamListHandle,
+    query_env: QueryEnvHandle,
     dest: &'d mut DestReceiver<'mcx>,
     qc: Option<&'q mut QueryCompletion>,
 ) -> PgResult<()> {
@@ -105,20 +110,32 @@ pub fn standard_ProcessUtility<'p, 'a, 's, 'd, 'q, 'mcx>(
         }
     }
 
-    // C: pstate = make_parsestate(NULL) here. Every arm that consumes it is
-    // still loud, so its construction rides the parser/analyze lane.
+    // C: pstate = make_parsestate(NULL); the two consumers a live arm needs
+    // (p_sourcetext, p_queryEnv) are threaded as parameters instead.
 
     let mut qc = qc;
-    dispatch_switch(parsetree, is_top_level, dest, &mut qc)?;
+    dispatch_switch(mcx, parsetree, source_text, is_top_level, params, query_env, dest, &mut qc)?;
 
     xact::CommandCounterIncrement()?;
     Ok(())
 }
 
-fn dispatch_switch(
+// Retention contract (execmain::shorten_pstmt precedent): the statement arena
+// and the portal context both outlive the utility call, and nothing derived
+// from the unified handles escapes it — dest receives copied bytes only.
+unsafe fn unify_stmt_lifetime<'u>(s: &ExplainStmt<'_>) -> &'u ExplainStmt<'u> {
+    unsafe { core::mem::transmute::<&ExplainStmt<'_>, &'u ExplainStmt<'u>>(s) }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn dispatch_switch<'mcx>(
+    mcx: Mcx<'mcx>,
     parsetree: Node<'_>,
+    source_text: &str,
     is_top_level: bool,
-    dest: &mut DestReceiver<'_>,
+    params: ParamListHandle,
+    query_env: QueryEnvHandle,
+    dest: &mut DestReceiver<'mcx>,
     qc: &mut Option<&mut QueryCompletion>,
 ) -> PgResult<()> {
     use NodeTag::*;
@@ -254,7 +271,12 @@ fn dispatch_switch(
         T_CallStmt => handler_gap("ExecuteCallStmt (functioncmds lane)"),
         T_ClusterStmt => handler_gap("cluster (cluster lane)"),
         T_VacuumStmt => handler_gap("ExecVacuum (vacuum lane)"),
-        T_ExplainStmt => handler_gap("ExplainQuery (explain lane)"),
+        T_ExplainStmt => {
+            let stmt = parsetree.as_explain_stmt().unwrap();
+            // SAFETY: see unify_stmt_lifetime.
+            let stmt = unsafe { unify_stmt_lifetime(stmt) };
+            explain::ExplainQuery(mcx, stmt, source_text, params, query_env, dest)?;
+        }
         T_AlterSystemStmt => {
             xact::PreventInTransactionBlock(is_top_level, "ALTER SYSTEM")?;
             handler_gap("AlterSystemSetConfigFile (guc lane)")
@@ -265,7 +287,7 @@ fn dispatch_switch(
         }
         T_VariableShowStmt => {
             let n = parsetree.as_variable_show_stmt().unwrap();
-            guc_funcs::GetPGVariable(n.name.unwrap_or(""), dest)?;
+            guc_funcs::GetPGVariable(mcx, n.name.unwrap_or(""), dest)?;
         }
         T_DiscardStmt => {
             CheckRestrictedOperation("DISCARD")?;
