@@ -380,104 +380,112 @@ impl<'mcx, 's> CopyFromState<'mcx, 's> {
         out.try_reserve(cap)
             .map_err(|_| PgError::error("out of memory"))?;
         let dst = out.as_mut_ptr();
-        let mut outlen = 0usize;
 
-        let mut cur = 0usize;
-        let line_end = line.len();
-        let mut fieldno = 0usize;
-        loop {
-            let mut found_delim = false;
-            let mut saw_non_ascii = false;
-            let start_ptr = cur;
-            let field_start_out = outlen;
-            let mut end_ptr;
+        // SAFETY: raw cursors mirror C's pointer loop (post-increment
+        // addressing; index forms cost 2 insns/byte on V2). `cur` advances
+        // only behind `cur < line_end` guards; `op` writes ≤ cap bytes
+        // (de-escaping shrinks, one NUL per field).
+        unsafe {
+            let line_end = line.as_ptr().add(line.len());
+            let mut cur = line.as_ptr();
+            let mut op = dst;
+            let mut fieldno = 0usize;
             loop {
-                end_ptr = cur;
-                if cur >= line_end {
-                    break;
-                }
-                let mut c = line[cur];
-                cur += 1;
-                if c == delimc {
-                    found_delim = true;
-                    break;
-                }
-                if c == b'\\' {
+                let mut found_delim = false;
+                let mut saw_non_ascii = false;
+                let start_ptr = cur;
+                let field_start = op;
+                // end_ptr is set per exit (not carried per byte: the carried
+                // copy cost 2 movs/byte).
+                let end_ptr;
+                loop {
                     if cur >= line_end {
+                        end_ptr = cur;
                         break;
                     }
-                    c = line[cur];
-                    cur += 1;
-                    match c {
-                        b'0'..=b'7' => {
-                            let mut val = (c - b'0') as u32;
-                            for _ in 0..2 {
-                                if cur < line_end && (b'0'..=b'7').contains(&line[cur]) {
-                                    val = (val << 3) + (line[cur] - b'0') as u32;
-                                    cur += 1;
-                                } else {
-                                    break;
-                                }
-                            }
-                            c = (val & 0o377) as u8;
-                            if c == 0 || c >= 0x80 {
-                                saw_non_ascii = true;
-                            }
+                    let mut c = *cur;
+                    cur = cur.add(1);
+                    if c == delimc {
+                        end_ptr = cur.sub(1);
+                        found_delim = true;
+                        break;
+                    }
+                    if c == b'\\' {
+                        if cur >= line_end {
+                            end_ptr = cur.sub(1);
+                            break;
                         }
-                        b'x' => {
-                            if cur < line_end && line[cur].is_ascii_hexdigit() {
-                                let mut val = hex_val(line[cur]);
-                                cur += 1;
-                                if cur < line_end && line[cur].is_ascii_hexdigit() {
-                                    val = (val << 4) + hex_val(line[cur]);
-                                    cur += 1;
+                        c = *cur;
+                        cur = cur.add(1);
+                        match c {
+                            b'0'..=b'7' => {
+                                let mut val = (c - b'0') as u32;
+                                for _ in 0..2 {
+                                    if cur < line_end && (b'0'..=b'7').contains(&*cur) {
+                                        val = (val << 3) + (*cur - b'0') as u32;
+                                        cur = cur.add(1);
+                                    } else {
+                                        break;
+                                    }
                                 }
-                                c = (val & 0xff) as u8;
+                                c = (val & 0o377) as u8;
                                 if c == 0 || c >= 0x80 {
                                     saw_non_ascii = true;
                                 }
                             }
+                            b'x' => {
+                                if cur < line_end && (*cur).is_ascii_hexdigit() {
+                                    let mut val = hex_val(*cur);
+                                    cur = cur.add(1);
+                                    if cur < line_end && (*cur).is_ascii_hexdigit() {
+                                        val = (val << 4) + hex_val(*cur);
+                                        cur = cur.add(1);
+                                    }
+                                    c = (val & 0xff) as u8;
+                                    if c == 0 || c >= 0x80 {
+                                        saw_non_ascii = true;
+                                    }
+                                }
+                            }
+                            b'b' => c = 0x08,
+                            b'f' => c = 0x0c,
+                            b'n' => c = b'\n',
+                            b'r' => c = b'\r',
+                            b't' => c = b'\t',
+                            b'v' => c = 0x0b,
+                            _ => {}
                         }
-                        b'b' => c = 0x08,
-                        b'f' => c = 0x0c,
-                        b'n' => c = b'\n',
-                        b'r' => c = b'\r',
-                        b't' => c = b'\t',
-                        b'v' => c = 0x0b,
-                        _ => {}
                     }
+                    op.write(c);
+                    op = op.add(1);
                 }
-                // SAFETY: outlen < cap (bounded above); dst has cap reserved.
-                unsafe { *dst.add(outlen) = c };
-                outlen += 1;
-            }
 
-            let raw_field = &line[start_ptr..end_ptr];
-            if raw_field == null_print {
-                outlen = field_start_out;
-                self.raw_fields.push(-1);
-            } else {
-                if saw_non_ascii {
-                    // SAFETY: bytes written above; field_start_out..outlen live.
-                    let fld = unsafe {
-                        core::slice::from_raw_parts(dst.add(field_start_out), outlen - field_start_out)
-                    };
-                    mbutils::pg_verify_mbstr(mbutils::GetDatabaseEncoding(), fld, false)?;
+                let raw_field =
+                    core::slice::from_raw_parts(start_ptr, end_ptr.offset_from(start_ptr) as usize);
+                if raw_field == null_print {
+                    op = field_start;
+                    self.raw_fields.push(-1);
+                } else {
+                    if saw_non_ascii {
+                        let fld = core::slice::from_raw_parts(
+                            field_start,
+                            op.offset_from(field_start) as usize,
+                        );
+                        mbutils::pg_verify_mbstr(mbutils::GetDatabaseEncoding(), fld, false)?;
+                    }
+                    self.raw_fields.push(field_start.offset_from(dst) as i32);
+                    op.write(0);
+                    op = op.add(1);
                 }
-                self.raw_fields.push(field_start_out as i32);
-                // SAFETY: as above; one NUL per field fits the cap bound.
-                unsafe { *dst.add(outlen) = 0 };
-                outlen += 1;
-            }
 
-            fieldno += 1;
-            if !found_delim {
-                break;
+                fieldno += 1;
+                if !found_delim {
+                    break;
+                }
             }
+            out.set_len(op.offset_from(dst) as usize);
+            Ok(fieldno)
         }
-        // SAFETY: outlen <= cap bytes initialized above.
-        unsafe { out.set_len(outlen) };
-        Ok(fieldno)
     }
 
     /// `NextCopyFromRawFields` + `NextCopyFrom` text arm: fill values/nulls
