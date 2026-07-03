@@ -30,6 +30,7 @@ pub fn init_all() {
     catalog_namespace::init_seams();
     catalog_dependency::init_seams();
     tablecmds::init_seams();
+    commands_cluster::init_seams();
     catalog::init_seams();
     catalog_storage::init_seams();
     pg_database::init_seams();

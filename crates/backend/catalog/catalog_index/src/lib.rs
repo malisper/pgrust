@@ -778,9 +778,9 @@ fn index_update_stats<'mcx>(
     pg_class.close(RowExclusiveLock)
 }
 
-// ResetReindexState (index.c): no REINDEX state exists to reset yet — the
-// pending/currently-reindexed globals land with the REINDEX lane.
-fn ResetReindexState(_nest_level: i32) {}
+fn ResetReindexState(nest_level: i32) {
+    types_rel::reindex::reset_reindex_state(nest_level)
+}
 
 // BuildDummyIndexInfo reduces to BuildIndexInfo here: expression/predicate/
 // exclusion arms (the fields the dummy form skips) are loud inside it.
@@ -802,7 +802,10 @@ pub fn init_seams() {
 pub use drop::{index_drop, IndexGetRelation};
 mod drop;
 pub use reindex::{
-    reindex_index, reindex_relation, RelationSetNewRelfilenumber,
-    REINDEX_REL_CHECK_CONSTRAINTS, REINDEX_REL_PROCESS_TOAST,
+    reindex_index, reindex_relation, RelationSetNewRelfilenumber, ReindexParams,
+    REINDEXOPT_CONCURRENTLY, REINDEXOPT_MISSING_OK, REINDEXOPT_REPORT_PROGRESS,
+    REINDEXOPT_VERBOSE, REINDEX_REL_CHECK_CONSTRAINTS,
+    REINDEX_REL_FORCE_INDEXES_PERMANENT, REINDEX_REL_FORCE_INDEXES_UNLOGGED,
+    REINDEX_REL_PROCESS_TOAST, REINDEX_REL_SUPPRESS_INDEX_USE,
 };
 mod reindex;

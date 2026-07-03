@@ -381,7 +381,7 @@ fn dispatch_switch<'mcx>(
             let stmt = parsetree
                 .as_variant::<types_nodes::parsenodes::ClusterStmt>()
                 .expect("ClusterStmt");
-            cluster::cluster(mcx, stmt, is_top_level)?;
+            commands_cluster::cluster(mcx, stmt, is_top_level)?;
         }
         T_ReindexStmt => {
             let stmt = parsetree

@@ -363,6 +363,8 @@ fn index_rel(mcx: Mcx<'_>) -> Relation<'_> {
         rd_id: REL_OID,
         rd_backend: INVALID_PROC_NUMBER,
         rd_islocaltemp: false,
+        rd_hastriggers: false,
+        rd_trigdesc: Default::default(),
         rd_isvalid: Cell::new(true),
         rd_createSubid: Cell::new(0),
         rd_newRelfilelocatorSubid: Cell::new(0),

@@ -4,6 +4,13 @@
 // index rebuilds (reindex_relation), swap-by-content, reloptions.
 #![allow(non_snake_case, non_upper_case_globals)]
 
+mod command;
+mod copy;
+pub use command::{
+    check_index_is_clusterable, cluster, cluster_rel, init_seams, mark_index_clustered,
+    ClusterParams, CLUOPT_RECHECK, CLUOPT_RECHECK_ISCLUSTERED, CLUOPT_VERBOSE,
+};
+
 use datum::Datum;
 use mcx::{Mcx, PgVec};
 use types_core::{AttrNumber, InvalidOid, Oid, RELATION_RELATION_ID};
@@ -82,30 +89,57 @@ pub fn make_new_heap<'mcx>(
     Ok(oid_new_heap)
 }
 
-// finish_heap_swap; frozenXid/cutoffMulti follow ATRewriteTables' choice
-// (RecentXmin / ReadNextMultiXactId).
+// finish_heap_swap. ALTER TABLE rewrites pass frozen_xid = RecentXmin and
+// cutoff_multi = ReadNextMultiXactId (ATRewriteTables' choice); CLUSTER
+// passes copy_table_data's cutoffs.
+#[allow(clippy::too_many_arguments)]
 pub fn finish_heap_swap<'mcx>(
     mcx: Mcx<'mcx>,
     old_heap_oid: Oid,
     new_heap_oid: Oid,
-    _persistence: u8,
+    is_system_catalog: bool,
+    swap_toast_by_content: bool,
+    check_constraints: bool,
+    _is_internal: bool,
+    frozen_xid: types_core::primitive::TransactionId,
+    cutoff_multi: types_core::primitive::MultiXactId,
+    newrelpersistence: u8,
 ) -> PgResult<()> {
-    let frozen_xid = procarray::RecentXmin();
-    let cutoff_multi = multixact::ReadNextMultiXactId()?;
+    if swap_toast_by_content {
+        unported("finish_heap_swap: swap_toast_by_content (system-catalog rewrite lane)");
+    }
     let (toast1, toast2) =
         swap_relation_files(mcx, old_heap_oid, new_heap_oid, frozen_xid, cutoff_multi)?;
 
-    {
-        let old_heap = table::table_open(mcx, old_heap_oid, NoLock)?;
-        let has_indexes = !relcache::RelationGetIndexList(mcx, old_heap_oid)?.is_empty();
-        old_heap.close(NoLock)?;
-        if has_indexes {
-            unported("finish_heap_swap reindex_relation (index rebuild lane)");
-        }
-        // reindex_relation's trailing CCI: the swap's pg_class/pg_depend
-        // writes must be visible to the deletion traversal below.
-        xact::CommandCounterIncrement()?;
+    if is_system_catalog {
+        inval::invalidate::CacheInvalidateCatalog(old_heap_oid)?;
     }
+
+    {
+        let mut reindex_flags = catalog_index::REINDEX_REL_SUPPRESS_INDEX_USE;
+        if check_constraints {
+            reindex_flags |= catalog_index::REINDEX_REL_CHECK_CONSTRAINTS;
+        }
+        if newrelpersistence == types_core::RELPERSISTENCE_UNLOGGED {
+            reindex_flags |= catalog_index::REINDEX_REL_FORCE_INDEXES_UNLOGGED;
+        } else if newrelpersistence == types_core::catalog::RELPERSISTENCE_PERMANENT {
+            reindex_flags |= catalog_index::REINDEX_REL_FORCE_INDEXES_PERMANENT;
+        }
+        let rebuilt = catalog_index::reindex_relation(
+            mcx,
+            old_heap_oid,
+            reindex_flags,
+            &catalog_index::ReindexParams::default(),
+        )?;
+        if !rebuilt {
+            // reindex_relation's trailing CCI (it ran none without indexes):
+            // the swap's pg_class/pg_depend writes must be visible to the
+            // deletion traversal below.
+            xact::CommandCounterIncrement()?;
+        }
+    }
+
+    debug_assert!(old_heap_oid != RELATION_RELATION_ID);
 
     let object = pg_depend::ObjectAddress::set(RELATION_RELATION_ID, new_heap_oid);
     catalog_dependency::performDeletion(

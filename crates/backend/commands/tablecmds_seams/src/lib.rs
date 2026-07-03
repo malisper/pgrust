@@ -31,3 +31,13 @@ seam_core::seam!(
         is_index: bool,
     ) -> PgResult<()>
 );
+
+seam_core::seam!(
+    // RangeVarCallbackMaintainsTable (tablecmds.c); cluster consumes via seam
+    // (tablecmds depends on commands_cluster for the ALTER rewrite lane).
+    pub fn range_var_callback_maintains_table(
+        relation: &rel_vocab::RangeVar<'_>,
+        rel_id: types_core::Oid,
+        old_rel_id: types_core::Oid,
+    ) -> PgResult<()>
+);

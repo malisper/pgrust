@@ -100,6 +100,17 @@ pub fn RelationSetNewRelfilenumber<'mcx>(
     xact::CommandCounterIncrement()
 }
 
+pub const REINDEXOPT_VERBOSE: u32 = 0x01;
+pub const REINDEXOPT_REPORT_PROGRESS: u32 = 0x02;
+pub const REINDEXOPT_MISSING_OK: u32 = 0x04;
+pub const REINDEXOPT_CONCURRENTLY: u32 = 0x08;
+
+#[derive(Clone, Copy, Default)]
+pub struct ReindexParams {
+    pub options: u32,
+    pub tablespace_oid: Oid,
+}
+
 pub const REINDEX_REL_PROCESS_TOAST: i32 = 0x01;
 pub const REINDEX_REL_SUPPRESS_INDEX_USE: i32 = 0x02;
 pub const REINDEX_REL_CHECK_CONSTRAINTS: i32 = 0x04;
@@ -117,9 +128,27 @@ pub fn reindex_index<'mcx>(
     indexId: Oid,
     skip_constraint_checks: bool,
     persistence: u8,
+    params: &ReindexParams,
 ) -> PgResult<()> {
-    let heapId = IndexGetRelation(mcx, indexId, false)?;
-    let heapRelation = table::table_open(mcx, heapId, ShareLock)?;
+    if params.options & REINDEXOPT_VERBOSE != 0 {
+        unported("reindex_index: VERBOSE (pg_rusage lane)");
+    }
+    if params.tablespace_oid != InvalidOid {
+        unported("reindex_index: SetRelationTableSpace (TABLESPACE option)");
+    }
+    let missing_ok = params.options & REINDEXOPT_MISSING_OK != 0;
+    let heapId = IndexGetRelation(mcx, indexId, missing_ok)?;
+    if heapId == InvalidOid {
+        return Ok(());
+    }
+    let heapRelation = if missing_ok {
+        match table::try_table_open(mcx, heapId, ShareLock)? {
+            Some(rel) => rel,
+            None => return Ok(()),
+        }
+    } else {
+        table::table_open(mcx, heapId, ShareLock)?
+    };
 
     let guard = miscinit::SecContextGuard::security_restricted(heapRelation.rd_rel.relowner);
     let save_nestlevel = guc::NewGUCNestLevel();
@@ -165,17 +194,25 @@ pub fn reindex_index<'mcx>(
         indexInfo.ii_Unique = false;
     }
 
-    // SetReindexProcessing elided: genam's reindex_is_processing_index is
-    // const-false in this tree; systable scans never touch user indexes.
-    RelationSetNewRelfilenumber(mcx, &iRel, persistence)?;
+    types_rel::reindex::set_reindex_processing(
+        heapId,
+        indexId,
+        xact::GetCurrentTransactionNestLevel(),
+    );
+    let build = (|| -> PgResult<types_rel::Relation<'mcx>> {
+        RelationSetNewRelfilenumber(mcx, &iRel, persistence)?;
 
-    // C's CCI inval refreshes the same Relation struct in place; our handles
-    // are snapshots, so reopen to see the reset rd_rel (index_update_stats
-    // reads reltuples for its -1 hack). Lock already held.
-    indexam::index_close(iRel, NoLock)?;
-    let iRel = indexam::index_open(mcx, indexId, NoLock)?;
+        // C's CCI inval refreshes the same Relation struct in place; our
+        // handles are snapshots, so reopen to see the reset rd_rel
+        // (index_update_stats reads reltuples for its -1 hack). Lock held.
+        indexam::index_close(iRel, NoLock)?;
+        let iRel = indexam::index_open(mcx, indexId, NoLock)?;
 
-    crate::index_build(mcx, &heapRelation, &iRel, &mut indexInfo, true)?;
+        crate::index_build(mcx, &heapRelation, &iRel, &mut indexInfo, true)?;
+        Ok(iRel)
+    })();
+    types_rel::reindex::reset_reindex_processing();
+    let iRel = build?;
 
     if !skipped_constraint {
         reindex_index_flags_fixup(mcx, &heapRelation, indexId, indexInfo.ii_BrokenHotChain)?;
@@ -245,12 +282,20 @@ fn reindex_index_flags_fixup<'mcx>(
     pg_index.close(RowExclusiveLock)
 }
 
-pub fn reindex_relation<'mcx>(mcx: Mcx<'mcx>, relid: Oid, flags: i32) -> PgResult<bool> {
-    if flags & REINDEX_REL_SUPPRESS_INDEX_USE != 0 {
-        unported("reindex_relation: REINDEX_REL_SUPPRESS_INDEX_USE (SetReindexPending)");
-    }
-
-    let rel = table::table_open(mcx, relid, ShareLock)?;
+pub fn reindex_relation<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+    flags: i32,
+    params: &ReindexParams,
+) -> PgResult<bool> {
+    let rel = if params.options & REINDEXOPT_MISSING_OK != 0 {
+        match table::try_table_open(mcx, relid, ShareLock)? {
+            Some(rel) => rel,
+            None => return Ok(false),
+        }
+    } else {
+        table::table_open(mcx, relid, ShareLock)?
+    };
     if rel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE {
         return Err(Box::new(PgError::new(
             ERROR,
@@ -266,9 +311,20 @@ pub fn reindex_relation<'mcx>(mcx: Mcx<'mcx>, relid: Oid, flags: i32) -> PgResul
     let toast_relid = rel.rd_rel.reltoastrelid;
     let indexIds = relcache::indexlist::RelationGetIndexList(mcx, relid)?;
 
+    if flags & REINDEX_REL_SUPPRESS_INDEX_USE != 0 {
+        types_rel::reindex::set_reindex_pending(
+            &indexIds,
+            xact::GetCurrentTransactionNestLevel(),
+        );
+        xact::CommandCounterIncrement()?;
+    }
+
     let mut result = false;
     if flags & REINDEX_REL_PROCESS_TOAST != 0 && toast_relid != InvalidOid {
-        result |= reindex_relation(mcx, toast_relid, flags)?;
+        let mut newparams = *params;
+        newparams.options &= !REINDEXOPT_MISSING_OK;
+        newparams.tablespace_oid = InvalidOid;
+        result |= reindex_relation(mcx, toast_relid, flags, &newparams)?;
     }
 
     let persistence = if flags & REINDEX_REL_FORCE_INDEXES_UNLOGGED != 0 {
@@ -299,6 +355,9 @@ pub fn reindex_relation<'mcx>(mcx: Mcx<'mcx>, relid: Oid, flags: i32) -> PgResul
                 )
                 .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
             )?;
+            if flags & REINDEX_REL_SUPPRESS_INDEX_USE != 0 {
+                types_rel::reindex::remove_reindex_pending(indexOid);
+            }
             continue;
         }
         reindex_index(
@@ -306,8 +365,10 @@ pub fn reindex_relation<'mcx>(mcx: Mcx<'mcx>, relid: Oid, flags: i32) -> PgResul
             indexOid,
             flags & REINDEX_REL_CHECK_CONSTRAINTS == 0,
             persistence,
+            params,
         )?;
         xact::CommandCounterIncrement()?;
+        debug_assert!(!types_rel::reindex::ReindexIsProcessingIndex(indexOid));
     }
 
     rel.close(NoLock)?;
