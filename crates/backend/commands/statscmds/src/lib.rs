@@ -160,9 +160,11 @@ pub fn CreateStatistics<'mcx>(mcx: Mcx<'mcx>, stmt: &CreateStatsStmt<'_>) -> PgR
         relkind,
         RELKIND_RELATION | RELKIND_MATVIEW | RELKIND_FOREIGN_TABLE | RELKIND_PARTITIONED_TABLE
     ) {
-        return Err(err(
-            types_error::ERRCODE_WRONG_OBJECT_TYPE,
-            format!("cannot define statistics for relation \"{}\"", rel.name()),
+        let detail = pg_class_seams::errdetail_relkind_not_supported::call(relkind)?;
+        return Err(Box::new(
+            PgError::new(ERROR, format!("cannot define statistics for relation \"{}\"", rel.name()))
+                .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE)
+                .with_detail(detail),
         ));
     }
 
@@ -238,8 +240,10 @@ pub fn CreateStatistics<'mcx>(mcx: Mcx<'mcx>, stmt: &CreateStatsStmt<'_>) -> PgR
         let Some(attname) = selem.name else {
             unported("CreateStatistics: expression statistics lane");
         };
-        let i = (1..=tupdesc.natts)
-            .find(|&i| tupdesc.attr(i as usize - 1).attname.name_str() == attname.as_bytes());
+        let i = (1..=tupdesc.natts).find(|&i| {
+            let a = tupdesc.attr(i as usize - 1);
+            !a.attisdropped && a.attname.name_str() == attname.as_bytes()
+        });
         let Some(i) = i else {
             if catalog_heap::SystemAttributeByName(attname).is_some() {
                 return Err(err(
@@ -413,12 +417,12 @@ fn make_object_name(name1: &str, name2: &str, label: &str) -> String {
             name2chars -= 1;
         }
     }
-    let clip = |s: &str, mut n: usize| {
+    fn clip(s: &str, mut n: usize) -> &str {
         while !s.is_char_boundary(n) {
             n -= 1;
         }
         &s[..n]
-    };
+    }
     let mut s = String::with_capacity(NAMEDATALEN);
     s.push_str(clip(name1, name1chars));
     if !name2.is_empty() {

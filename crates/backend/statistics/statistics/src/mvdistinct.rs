@@ -210,7 +210,7 @@ pub fn statext_ndistinct_deserialize<'mcx>(
     }
     if typ != STATS_NDISTINCT_TYPE_BASIC {
         return Err(PgError::error(format!(
-            "invalid ndistinct type {typ} (expected {STATS_NDISTINCT_TYPE_BASIC})"
+            "invalid ndistinct type {} (expected {STATS_NDISTINCT_TYPE_BASIC})", typ as i32
         ))
         .into());
     }

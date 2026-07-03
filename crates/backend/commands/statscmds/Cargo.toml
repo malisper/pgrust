@@ -24,6 +24,7 @@ init_small = { path = "../../utils/init/init_small" }
 superuser = { path = "../../utils/misc/superuser" }
 table = { path = "../../access/table/table" }
 relation_seams = { path = "../../access/common/relation_seams" }
+pg_class_seams = { path = "../../catalog/pg_class_seams" }
 genam = { path = "../../access/index/genam" }
 heaptuple = { path = "../../access/common/heaptuple" }
 catalog = { path = "../../catalog/catalog" }

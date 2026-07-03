@@ -508,7 +508,7 @@ fn dispatch_switch<'mcx>(
                 .as_variant::<types_nodes::rawnodes::CreateStatsStmt>()
                 .expect("CreateStatsStmt");
             if let Some(first) = stmt.relations.iter().next() {
-                if first.as_range_var().is_none() {
+                let Some(rv_node) = first.as_range_var() else {
                     return Err(Box::new(
                         types_error::PgError::new(
                             types_error::ERROR,
@@ -517,7 +517,21 @@ fn dispatch_switch<'mcx>(
                         )
                         .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
                     ));
-                }
+                };
+                let rv = rel_vocab::RangeVar {
+                    catalogname: rv_node.catalogname,
+                    schemaname: rv_node.schemaname,
+                    relname: rv_node.relname.expect("CreateStatsStmt relation without relname"),
+                    inh: rv_node.inh,
+                    relpersistence: rv_node.relpersistence,
+                    location: rv_node.location,
+                };
+                catalog_namespace::RangeVarGetRelidExtended(
+                    &rv,
+                    types_rel::ShareUpdateExclusiveLock,
+                    0,
+                    None,
+                )?;
             }
             // transformStatsStmt is a no-op for plain column references; the
             // expression lane panics inside CreateStatistics.
