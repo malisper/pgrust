@@ -111,9 +111,15 @@ pub fn gistrescan(
             debug_assert!(keys.len() == scan.numberOfKeys as usize);
             so.qual_ok = true;
 
+            // C preserves sk_func.fn_extra across rescans (consistentFn memos).
+            let mut fn_extras: Vec<Option<Box<dyn core::any::Any>>> = scan
+                .keyData
+                .iter_mut()
+                .map(|k| k.sk_func.fn_extra.take())
+                .collect();
+
             scan.keyData.clear();
             for (i, k) in keys.iter().enumerate() {
-                let _ = i;
                 let skey = ScanKeyData {
                     sk_flags: k.sk_flags,
                     sk_attno: k.sk_attno,
@@ -125,6 +131,10 @@ pub fn gistrescan(
                     ),
                     sk_argument: k.sk_argument,
                 };
+                let mut skey = skey;
+                if let Some(extra) = fn_extras.get_mut(i).and_then(|e| e.take()) {
+                    skey.sk_func.fn_extra = Some(extra);
+                }
                 if skey.sk_flags & SK_ISNULL != 0
                     && skey.sk_flags & (SK_SEARCHNULL | SK_SEARCHNOTNULL) == 0
                 {
