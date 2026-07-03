@@ -113,10 +113,17 @@ fn format_type_extended(type_oid: Oid, typemod: i32, typemod_given: bool) -> PgR
             {
                 let t = syscache_seams::pg_type_domain_shape::call(named_oid)?
                     .ok_or_else(|| type_lookup_failed(named_oid))?;
-                let cx = mcx::MemoryContext::new("format_type");
-                let nsp = lsyscache::get_namespace_name_or_temp(cx.mcx(), t.typnamespace)?
-                    .ok_or_else(|| type_lookup_failed(named_oid))?;
-                quoted.push_str(&quote_identifier(nsp.as_str()));
+                // get_namespace_name_or_temp (lsyscache.c) over the two
+                // seams; lsyscache deps this crate so a direct dep cycles.
+                if namespace_seams::is_temp_namespace::call(t.typnamespace) {
+                    quoted.push_str("pg_temp");
+                } else {
+                    let nsp = syscache_seams::pg_namespace_nspname::call(t.typnamespace)?
+                        .ok_or_else(|| type_lookup_failed(named_oid))?;
+                    let nsp = core::str::from_utf8(nsp.name_str())
+                        .unwrap_or_else(|_| panic!("non-UTF-8 pg_namespace.nspname"));
+                    quoted.push_str(&quote_identifier(nsp));
+                }
                 quoted.push('.');
             }
             quoted.push_str(&quote_identifier(name));
