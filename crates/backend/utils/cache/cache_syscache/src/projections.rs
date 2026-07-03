@@ -1682,8 +1682,6 @@ fn lookup_pg_statistic_shape(
     Ok(Some(shape))
 }
 
-const ANUM_PG_TYPE_TYPNAMESPACE: i32 = 3;
-
 // SysCacheGetAttr(ATTNUM, attoptions) + datumCopy: the tuple is released,
 // so the varlena image is copied into the caller's mcx.
 fn pg_attribute_attoptions<'mcx>(
