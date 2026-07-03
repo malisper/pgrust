@@ -173,3 +173,56 @@ fn seams_delegate_to_owned_storage() {
     assert_eq!(wakeup_len_locked(&CHECKPOINTER_CVS[0]), 0);
     condition_variable_seams::proc_signal_barrier_cv_broadcast::call(1);
 }
+
+// A backend killed while parked leaves its procno in wakeup and (post
+// ProcGlobalReset) a zeroed cvWaitLink; the reset arm must clear both sides
+// so a fresh backend's park/broadcast cycle works.
+fn crash_reset_cycle(cv: &'static ConditionVariable, reset: fn(), pid_base: i32) {
+    std::thread::spawn(move || {
+        become_backend(1, pid_base);
+        ConditionVariablePrepareToSleep(cv);
+        // Crash mid-critical-section: die holding the CV spinlock, sleeper
+        // still enqueued (no CancelSleep).
+        spin_acquire(&cv.mutex);
+    })
+    .join()
+    .unwrap();
+    assert_eq!(wakeup_len(cv), 1);
+
+    // ProcGlobalResetAfterCrash zeroes the dead backend's cvWaitLink while
+    // its procno still heads the wakeup list; the CV arm must clear the list
+    // side too or the next walk is corrupt.
+    set_cv_wait_link(1, proclist_node { next: 0, prev: 0 });
+    reset();
+    assert_eq!(wakeup_len_locked(cv), 0);
+
+    become_backend(2, pid_base + 1);
+    ConditionVariablePrepareToSleep(cv);
+    assert_eq!(wakeup_len_locked(cv), 1);
+    std::thread::spawn(move || {
+        become_backend(3, pid_base + 2);
+        ConditionVariableBroadcast(cv);
+    })
+    .join()
+    .unwrap();
+    assert_eq!(wakeup_len_locked(cv), 0);
+    assert!(ConditionVariableCancelSleep());
+}
+
+#[test]
+fn crash_reset_barrier_cv_survives_killed_sleeper() {
+    let _s = serial();
+    setup();
+    crash_reset_cycle(barrier_cv(0), ProcSignalBarrierCvsResetAfterCrash, 7200);
+}
+
+#[test]
+fn crash_reset_checkpointer_cv_survives_killed_sleeper() {
+    let _s = serial();
+    setup();
+    crash_reset_cycle(
+        checkpointer_cv(condition_variable_seams::CheckpointerCv::Start),
+        CheckpointerCvsResetAfterCrash,
+        7300,
+    );
+}

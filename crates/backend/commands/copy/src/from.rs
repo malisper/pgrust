@@ -274,7 +274,15 @@ fn copy_from_body<'mcx>(
     rel: &Relation<'mcx>,
 ) -> PgResult<u64> {
     let mycid = xact::GetCurrentCommandId(true)?;
-    let ti_options = 0;
+    // New-in-transaction storage: probing the FSM is a waste of time
+    // (relkind has storage: CopyFrom rejects everything but RELKIND_RELATION).
+    let ti_options = if rel.rd_createSubid.get() != types_core::xact::InvalidSubTransactionId
+        || rel.rd_firstRelfilelocatorSubid.get() != types_core::xact::InvalidSubTransactionId
+    {
+        tableam_vocab::TABLE_INSERT_SKIP_FSM
+    } else {
+        0
+    };
 
     let mut index_state = execindexing::ExecOpenIndices(mcx, rel, false)?;
 
@@ -288,6 +296,8 @@ fn copy_from_body<'mcx>(
 
     let mut processed: u64 = 0;
     loop {
+        postgres_seams::check_for_interrupts::call()?;
+
         if nused == slots.len() {
             slots.push(tableam::table_slot_create(mcx, rel)?);
             linenos.push(0);

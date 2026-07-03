@@ -233,7 +233,11 @@ mod heap {
         options: i32,
         bistate: Option<&mut BulkInsertStateData>,
     ) -> PgResult<()> {
-        debug_assert!(bistate.is_none(), "GetBulkInsertState lane (COPY) not ported");
+        assert!(
+            bistate.is_none(),
+            "heapam_tuple_insert (heapam_handler.c): heap_insert bistate arm not \
+             wired for single-tuple inserts (bulk callers go through multi_insert)"
+        );
         exectuples::exec_materialize_slot(slot, mcx)?;
         slot.base_mut().tts_tableOid = rel.rd_id;
         let tuple = match slot {

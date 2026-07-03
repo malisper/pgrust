@@ -43,6 +43,7 @@ acl_seams = { path = "../../utils/adt/acl_seams" }
 aclchk_seams = { path = "../../catalog/aclchk_seams" }
 miscinit_seams = { path = "../../utils/init/miscinit_seams" }
 namespace_seams = { path = "../../catalog/namespace_seams" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
 libc = "0.2"
 
 [dev-dependencies]

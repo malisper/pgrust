@@ -16,9 +16,10 @@ use ::types_tuple::{HeapTupleData, InvalidOffsetNumber, ItemPointerSet};
 
 use crate::unported;
 
-pub const HEAP_INSERT_SKIP_FSM: i32 = 0x0001;
-pub const HEAP_INSERT_FROZEN: i32 = 0x0002;
-pub const HEAP_INSERT_NO_LOGICAL: i32 = 0x0004;
+// Aliases of TABLE_INSERT_* (heapam.h): options pass through tableam unmapped.
+pub const HEAP_INSERT_SKIP_FSM: i32 = 0x0002;
+pub const HEAP_INSERT_FROZEN: i32 = 0x0004;
+pub const HEAP_INSERT_NO_LOGICAL: i32 = 0x0008;
 pub const HEAP_INSERT_SPECULATIVE: i32 = 0x0010;
 
 pub const HEAP_DEFAULT_FILLFACTOR: i32 = 100;

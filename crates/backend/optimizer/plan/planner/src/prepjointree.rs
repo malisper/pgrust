@@ -180,8 +180,14 @@ fn pull_up_simple_subquery<'mcx>(
     if sub.hasSubLinks {
         panic!("pull_up_sublinks (prepjointree.c): sublinks in pulled-up subquery; M2 lane");
     }
-    debug_assert!(!sub.hasRowSecurity);
-    debug_assert!(sub.rowMarks.is_nil());
+    assert!(
+        !sub.hasRowSecurity,
+        "pull_up_simple_subquery (prepjointree.c): hasRowSecurity propagation unported"
+    );
+    assert!(
+        sub.rowMarks.is_nil(),
+        "pull_up_simple_subquery (prepjointree.c): rowMarks concat unported"
+    );
     for srte_node in &sub.rtable {
         let srte = srte_node.as_range_tbl_entry().expect("rtable cell");
         if srte.rtekind == RTEKind::RTE_SUBQUERY {
@@ -228,7 +234,11 @@ fn pull_up_simple_subquery<'mcx>(
         parse.targetList = l;
     }
     parse.havingQual = replace_opt(mcx, parse.havingQual, varno, &off_tlist)?;
-    debug_assert!(parse.returningList.is_nil());
+    assert!(
+        parse.returningList.is_nil(),
+        "pull_up_simple_subquery (prepjointree.c): pullup_replace_vars over \
+         returningList unported"
+    );
 
     // pullup_replace_vars over the jointree: substitute Vars in every qual
     // and splice the offset sub-jointree in place of the RangeTblRef.

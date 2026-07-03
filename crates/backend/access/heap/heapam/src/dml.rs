@@ -1686,6 +1686,23 @@ pub fn heap_update(
             hdr.set_cmax(cid, iscombo);
             hdr.t_ctid = self_tid;
         }
+
+        // ALL_VISIBLE stays (WAL cost identical either way, per C); only the
+        // frozen bit lies once the locker's xmax lands. Pin-at-clear
+        // (clear_page_all_visible shape).
+        let mut cleared_all_frozen = false;
+        if pin.page().is_all_visible() {
+            let mut vmb = visibilitymap::VmBuffer::new();
+            visibilitymap::visibilitymap_pin(relation, pin.block_number(), &mut vmb)?;
+            cleared_all_frozen = visibilitymap::visibilitymap_clear(
+                relation,
+                pin.block_number(),
+                &vmb,
+                visibilitymap::VISIBILITYMAP_ALL_FROZEN,
+            )?;
+            vmb.release();
+        }
+
         bufmgr_seams::mark_buffer_dirty::call(pin.buffer())?;
 
         if relation_needs_wal(relation) {
@@ -1693,7 +1710,11 @@ pub fn heap_update(
             xlrec[0..4].copy_from_slice(&xmax_lock_old_tuple.to_ne_bytes());
             xlrec[4..6].copy_from_slice(&ItemPointerGetOffsetNumber(&oldtup.t_self).to_ne_bytes());
             xlrec[6] = compute_infobits(oldtup.t_data().t_infomask, oldtup.t_data().t_infomask2);
-            xlrec[7] = 0;
+            xlrec[7] = if cleared_all_frozen {
+                XLH_LOCK_ALL_FROZEN_CLEARED
+            } else {
+                0
+            };
             let recptr = xloginsert_seams::xlog_insert_record::call(
                 RM_HEAP_ID,
                 XLOG_HEAP_LOCK,
@@ -1894,6 +1915,11 @@ pub fn heap_update(
     let heaptup_self = heaptup.t_self;
     if toasted.is_some() {
         newtup.t_self = heaptup_self;
+        if use_hot_update {
+            newtup.t_data_mut().set_heap_only();
+        } else {
+            newtup.t_data_mut().clear_heap_only();
+        }
     }
     Ok(TM_Result::TM_Ok)
 }

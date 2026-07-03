@@ -39,3 +39,12 @@ seam_core::seam!(
     // ConditionVariableSleep; Err is CHECK_FOR_INTERRUPTS's ereport surface.
     pub fn checkpointer_cv_sleep(cv: CheckpointerCv, wait_event_info: u32) -> types_error::PgResult<()>
 );
+
+// Crash-cycle re-init; uninstalled skip is safe (no sleeper ever parked).
+seam_core::seam!(
+    pub fn proc_signal_barrier_cvs_reset_after_crash()
+);
+
+seam_core::seam!(
+    pub fn checkpointer_cvs_reset_after_crash()
+);
