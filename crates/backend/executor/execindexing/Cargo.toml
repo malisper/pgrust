@@ -31,6 +31,10 @@ pruneheap = { path = "../../access/heap/pruneheap" }
 procarray = { path = "../../storage/ipc/procarray" }
 catalog = { path = "../../catalog/catalog" }
 xact = { path = "../../access/transam/xact" }
+types_nodes = { path = "../../../_support/types/nodes" }
+readfuncs = { path = "../../nodes/readfuncs" }
+clauses = { path = "../../optimizer/util/clauses" }
+execexpr = { path = "../execexpr" }
 
 [dev-dependencies]
 nbtree = { path = "../../access/nbtree/nbtree" }

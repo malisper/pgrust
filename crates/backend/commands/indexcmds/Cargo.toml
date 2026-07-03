@@ -40,6 +40,10 @@ rel_vocab = { path = "../../../_support/types/rel_vocab" }
 aclchk = { path = "../../catalog/aclchk" }
 adt_acl = { path = "../../utils/adt/acl" }
 lmgr = { path = "../../storage/lmgr/lmgr" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+
+clauses = { path = "../../optimizer/util/clauses" }
+vars = { path = "../../optimizer/util/vars" }
+nodes_core = { path = "../../nodes/nodes_core" }
 
 [dev-dependencies]
-syscache_seams = { path = "../../utils/cache/syscache_seams" }

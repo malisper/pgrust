@@ -53,6 +53,11 @@ pub struct ModifyTableState<'mcx> {
     ri_RowIdAttNo: i16,
     update_cols: mcx::PgVec<'mcx, NewColSrc>,
     indexes: Option<execindexing::ResultRelIndexState<'mcx>>,
+    // C's per-tuple econtext for index expression/predicate eval, reset per
+    // outer row; node-owned because estate can't lend its per-tuple mcx while
+    // relation/slot field borrows are live. Option: dropped in
+    // exec_end_modify_table (the node struct is forgotten, never dropped).
+    index_eval_cx: Option<mcx::MemoryContext>,
     snapshot_any: Option<Rc<SnapshotData<'mcx>>>,
     returning_slot: Option<ExecSlotId>,
     project_returning: Option<PgBox<'mcx, ExprState<'mcx>>>,
@@ -295,6 +300,7 @@ pub fn exec_init_modify_table<'mcx>(
         ri_RowIdAttNo: rowid_attno,
         update_cols: mcx::PgVec::new_in(estate.es_query_cxt),
         indexes: None,
+        index_eval_cx: Some(mcx::MemoryContext::new_bump("IndexEvalPerTuple")),
         snapshot_any: Some(Rc::new(SnapshotData::sentinel(estate.es_query_cxt, SNAPSHOT_ANY))),
         returning_slot,
         project_returning,
@@ -360,6 +366,7 @@ pub fn exec_modify_table<'mcx>(
 
     loop {
         estate.reset_per_tuple_expr_context();
+        mt.index_eval_cx.as_mut().expect("index_eval_cx live until ExecEndNode").reset();
 
         let Some(plan_slot) = fetch_outer(estate)? else {
             break;
@@ -445,6 +452,7 @@ pub fn exec_end_modify_table(mt: &mut ModifyTableState<'_>) {
     mt.leaf_indexes.clear();
     mt.leaf_checks.clear();
     mt.router = None;
+    mt.index_eval_cx = None;
 }
 
 // ExecInitInsertProjection (nodeModifyTable.c). INSERT subplans carry no junk
@@ -896,7 +904,16 @@ fn exec_update<'mcx>(
                      index maintenance (BRIN lane) not ported"
                 );
             }
-            execindexing::ExecInsertIndexTuples(mcx, indexes, rel, slot, false, None, &[])?;
+            execindexing::ExecInsertIndexTuples(
+                mcx,
+                mt.index_eval_cx.as_ref().expect("index_eval_cx live until ExecEndNode").mcx(),
+                indexes,
+                rel,
+                slot,
+                false,
+                None,
+                &[],
+            )?;
         }
     }
 
@@ -1216,7 +1233,7 @@ fn exec_insert<'mcx>(
 
             let pre_ok = {
                 let oc = mt.on_conflict.as_ref().expect("on_conflict state");
-                let indexes = mt.indexes.as_ref().expect("indexes opened");
+                let indexes = mt.indexes.as_mut().expect("indexes opened");
                 let EStateData { es_relations, es_tupleTable, .. } = &mut *estate;
                 let rel = es_relations[(mt.result_rti - 1) as usize]
                     .as_ref()
@@ -1228,6 +1245,7 @@ fn exec_insert<'mcx>(
                 let (slot, existing) = unsafe { (&mut *base.add(s), &mut *base.add(e)) };
                 execindexing::ExecCheckIndexConstraints(
                     mcx,
+                    mt.index_eval_cx.as_ref().expect("index_eval_cx live until ExecEndNode").mcx(),
                     indexes,
                     rel,
                     slot,
@@ -1266,6 +1284,7 @@ fn exec_insert<'mcx>(
                 )?;
                 execindexing::ExecInsertIndexTuples(
                     mcx,
+                    mt.index_eval_cx.as_ref().expect("index_eval_cx live until ExecEndNode").mcx(),
                     indexes,
                     rel,
                     slot,
@@ -1309,7 +1328,16 @@ fn exec_insert<'mcx>(
 
         if let Some(indexes) = indexes.as_mut() {
             if indexes.num_indices() > 0 {
-                execindexing::ExecInsertIndexTuples(mcx, indexes, rel, slot, false, None, &[])?;
+                execindexing::ExecInsertIndexTuples(
+                    mcx,
+                    mt.index_eval_cx.as_ref().expect("index_eval_cx live until ExecEndNode").mcx(),
+                    indexes,
+                    rel,
+                    slot,
+                    false,
+                    None,
+                    &[],
+                )?;
             }
         }
     }
@@ -1900,8 +1928,8 @@ fn plan_output_mismatch(detail: &'static str) -> Box<PgError> {
 mcx::forget_safe_nodrop!(NewColSrc);
 
 // Exempt: indexes/snapshot_any/project_returning/on_conflict/check_exprs/
-// trigdesc/generated_exprs/router/leaf_indexes/leaf_checks (and each
-// CheckExpr's/GeneratedExpr's state) are
+// trigdesc/generated_exprs/router/leaf_indexes/leaf_checks/index_eval_cx (and
+// each CheckExpr's/GeneratedExpr's state) are
 // released in exec_end_modify_table; CmdType is no-drop, const-proven below.
 const _: () = assert!(!core::mem::needs_drop::<CmdType>());
 mcx::forget_safe_struct!(
@@ -1911,5 +1939,6 @@ mcx::forget_safe_struct!(
         ri_newTupleSlot, ri_oldTupleSlot, ri_ReturningSlot,
         ri_projectNewInfoValid, ri_RowIdAttNo, update_cols, returning_slot;
         operation, indexes, snapshot_any, project_returning, on_conflict,
-        check_exprs, trigdesc, generated_exprs, router, leaf_indexes, leaf_checks },
+        check_exprs, trigdesc, generated_exprs, router, leaf_indexes, leaf_checks,
+        index_eval_cx },
 );

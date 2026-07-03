@@ -25,10 +25,17 @@ lsyscache = { path = "../../utils/cache/lsyscache" }
 miscinit = { path = "../../utils/init/miscinit" }
 mcx = { path = "../../../_support/mcx" }
 miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+spgist_build = { path = "../../access/spgist/spgist_build" }
 brin_build = { path = "../../access/brin/brin_build" }
 gistbuild = { path = "../../access/gist/gistbuild" }
 nbtsort = { path = "../../access/nbtree/nbtsort" }
 hashsort = { path = "../../access/hash/hashsort" }
+types_nodes = { path = "../../../_support/types/nodes" }
+nodes_core = { path = "../../nodes/nodes_core" }
+outfuncs = { path = "../../nodes/outfuncs" }
+varlena = { path = "../../utils/adt/varlena" }
+clauses = { path = "../../optimizer/util/clauses" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
 pg_depend = { path = "../pg_depend" }
 pg_constraint = { path = "../pg_constraint" }
 pgstat = { path = "../../utils/activity/pgstat" }

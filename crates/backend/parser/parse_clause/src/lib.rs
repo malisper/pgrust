@@ -106,16 +106,27 @@ pub fn transformFromClause<'mcx>(
 
         checkNameSpaceConflicts(pstate.p_namespace.as_slice(), namespace.as_slice())?;
 
-        // C toggles the new items lateral_only=true here and resets every
-        // item to lateral_only=false after the loop; with LATERAL loud on
-        // every arm no expression observes the interim flag state, so items
-        // keep their construction-time flags.
+        setNamespaceLateralState(namespace.as_slice(), true, true);
+
         pstate.p_joinlist.lappend(mcx, n)?;
         for nsitem in namespace {
             pstate.p_namespace.push(nsitem);
         }
     }
+
+    setNamespaceLateralState(pstate.p_namespace.as_slice(), false, true);
     Ok(())
+}
+
+fn setNamespaceLateralState(
+    namespace: &[&ParseNamespaceItem<'_>],
+    lateral_only: bool,
+    lateral_ok: bool,
+) {
+    for nsitem in namespace {
+        nsitem.p_lateral_only.set(lateral_only);
+        nsitem.p_lateral_ok.set(lateral_ok);
+    }
 }
 
 // C transformFromClauseItem's (node, *top_nsitem, *namespace) contract with
@@ -168,7 +179,22 @@ fn transformJoinExpr<'mcx>(
 
     let (larg, l_namespace) = transformFromClauseItemNs(mcx, pstate, j.larg)?;
     let l_nsitem = *l_namespace.last().expect("child namespace is never empty");
+
+    // Left-side names are LATERAL-visible to the RHS; per SQL:2008 they are
+    // exposed but not referenceable unless the join type is INNER or LEFT.
+    let lateral_ok = matches!(
+        j.jointype,
+        types_nodes::JoinType::JOIN_INNER | types_nodes::JoinType::JOIN_LEFT
+    );
+    setNamespaceLateralState(l_namespace.as_slice(), true, lateral_ok);
+    let sv_namespace_length = pstate.p_namespace.len();
+    for it in &l_namespace {
+        pstate.p_namespace.push(*it);
+    }
+
     let (rarg, r_namespace) = transformFromClauseItemNs(mcx, pstate, j.rarg)?;
+
+    pstate.p_namespace.truncate(sv_namespace_length);
     let r_nsitem = *r_namespace.last().expect("child namespace is never empty");
 
     checkNameSpaceConflicts(l_namespace.as_slice(), r_namespace.as_slice())?;
@@ -288,8 +314,8 @@ fn transformJoinExpr<'mcx>(
                     p_nscolumns: item.p_nscolumns,
                     p_rel_visible: item.p_rel_visible,
                     p_cols_visible: false,
-                    p_lateral_only: false,
-                    p_lateral_ok: true,
+                    p_lateral_only: core::cell::Cell::new(false),
+                    p_lateral_ok: core::cell::Cell::new(true),
                     p_returning_type: item.p_returning_type,
                 },
             )?));
@@ -297,8 +323,8 @@ fn transformJoinExpr<'mcx>(
     }
     nsitem.p_rel_visible = j.alias.is_some();
     nsitem.p_cols_visible = true;
-    nsitem.p_lateral_only = false;
-    nsitem.p_lateral_ok = true;
+    nsitem.p_lateral_only.set(false);
+    nsitem.p_lateral_ok.set(true);
     namespace.push(nsitem);
 
     Ok((jnode, namespace))
@@ -328,14 +354,14 @@ fn markRelsAsNulledBy<'mcx>(
 }
 
 // transformJoinOnClause (parse_clause.c): the ON expression sees exactly the
-// join's two subtrees plus upper levels. C's setNamespaceLateralState(false,
-// true) is the construction-time state of every item on this lane.
+// join's two subtrees plus upper levels.
 fn transformJoinOnClause<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'_, 'mcx>,
     quals: Node<'mcx>,
     my_namespace: &mcx::PgVec<'mcx, &'mcx ParseNamespaceItem<'mcx>>,
 ) -> PgResult<Node<'mcx>> {
+    setNamespaceLateralState(my_namespace.as_slice(), false, true);
     let mut ns: mcx::PgVec<'mcx, &'mcx ParseNamespaceItem<'mcx>> = mcx::PgVec::new_in(mcx);
     for it in my_namespace {
         ns.push(it);
@@ -438,12 +464,7 @@ fn transformRangeSubselect<'mcx>(
     pstate.p_expr_kind = ParseExprKind::EXPR_KIND_FROM_SUBSELECT;
 
     debug_assert!(!pstate.p_lateral_active);
-    if r.lateral {
-        panic!(
-            "transformRangeSubselect (parse_clause.c): LATERAL subquery unported \
-             (lateral namespace) — unit backend-parser-clause"
-        );
-    }
+    pstate.p_lateral_active = r.lateral;
 
     let locked = parse_relation::isLockedRefname(pstate, r.alias.and_then(|a| a.aliasname));
     let query = analyze_seams::parse_sub_analyze::call(
@@ -505,12 +526,6 @@ fn transformRangeFunction<'mcx>(
              unit backend-parser-clause"
         );
     }
-    if r.lateral {
-        panic!(
-            "transformRangeFunction (parse_clause.c): LATERAL functions unported \
-             (contain_vars_of_level / lateral namespace) — unit backend-parser-clause"
-        );
-    }
     if !r.coldeflist.is_nil() {
         panic!(
             "transformRangeFunction (parse_clause.c): column definition lists \
@@ -542,6 +557,8 @@ fn transformRangeFunction<'mcx>(
 
     parse_collate::assign_expr_collations(mcx, pstate, newfexpr)?;
 
+    let is_lateral = r.lateral || vars::contain_vars_of_level(newfexpr, 0)?;
+
     parse_relation::addRangeTableEntryForFunction(
         mcx,
         pstate,
@@ -549,7 +566,7 @@ fn transformRangeFunction<'mcx>(
         newfexpr,
         r.alias,
         r.ordinality,
-        false,
+        is_lateral,
         true,
     )
     .map(|nsitem| &*nsitem)
@@ -641,6 +658,98 @@ pub fn transformWhereClause<'mcx>(
         construct_name,
     )?;
     Ok(Some(qual))
+}
+
+// transformIndexStmt (parse_utilcmd.c), hosted here because parse_utilcmd ->
+// parse_expr would cycle (parse_expr uses parse_utilcmd::typenameTypeIdAndMod).
+pub fn transformIndexStmt<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+    stmt_node: Node<'mcx>,
+    query_string: &str,
+) -> PgResult<()> {
+    use types_nodes::rawnodes::{IndexElem, IndexStmt};
+    let (transformed, where_clause, params) = {
+        let stmt = stmt_node.as_variant::<IndexStmt>().expect("IndexStmt");
+        let mut params: mcx::PgVec<'mcx, Node<'mcx>> = mcx::PgVec::new_in(mcx);
+        params.extend(stmt.indexParams.iter());
+        (stmt.transformed, stmt.whereClause, params)
+    };
+    if transformed {
+        return Ok(());
+    }
+
+    let mut pstate = parser_small1::make_parsestate(mcx, None);
+    pstate.p_sourcetext = Some(bytes_in(mcx, query_string.as_bytes())?);
+
+    let rel = table::table_open(mcx, relid, types_rel::NoLock)?;
+    let nsitem = parse_relation::addRangeTableEntryForRelation(
+        mcx,
+        &mut pstate,
+        &rel,
+        types_rel::AccessShareLock,
+        None,
+        false,
+        true,
+    )?;
+    parse_relation::addNSItemToQuery(mcx, &mut pstate, nsitem, false, true, true)?;
+
+    if let Some(wc) = where_clause {
+        let qual = transformWhereClause(
+            mcx,
+            &mut pstate,
+            Some(wc),
+            ParseExprKind::EXPR_KIND_INDEX_PREDICATE,
+            "WHERE",
+        )?
+        .expect("WHERE clause present");
+        parse_collate::assign_expr_collations(mcx, &mut pstate, qual)?;
+        // SAFETY: analyze-owned parse tree; no derived refs live.
+        unsafe { stmt_node.with_mut::<IndexStmt, _>(|s| s.whereClause = Some(qual)) }
+            .expect("IndexStmt");
+    }
+
+    for node in params.iter() {
+        let raw = node.as_variant::<IndexElem>().expect("IndexElem").expr;
+        let Some(raw) = raw else { continue };
+        let figured = parse_target::FigureIndexColname(raw);
+        let expr = transformExpr(mcx, &mut pstate, raw, ParseExprKind::EXPR_KIND_INDEX_EXPRESSION)?;
+        parse_collate::assign_expr_collations(mcx, &mut pstate, expr)?;
+        // SAFETY: analyze-owned parse tree; no derived refs live.
+        unsafe {
+            node.with_mut::<IndexElem, _>(|e| {
+                if e.indexcolname.is_none() {
+                    e.indexcolname = figured;
+                }
+                e.expr = Some(expr);
+            })
+        }
+        .expect("IndexElem");
+    }
+
+    if pstate.p_rtable.len() != 1 {
+        return Err(index_expr_other_table());
+    }
+    parser_small1::free_parsestate(pstate)?;
+    rel.close(types_rel::NoLock)?;
+    // SAFETY: analyze-owned parse tree; no derived refs live.
+    unsafe { stmt_node.with_mut::<IndexStmt, _>(|s| s.transformed = true) }.expect("IndexStmt");
+    Ok(())
+}
+
+#[cold]
+#[inline(never)]
+fn index_expr_other_table() -> Box<PgError> {
+    Box::new(
+        PgError::error("index expressions and predicates can refer only to the table being indexed")
+            .with_sqlstate(ERRCODE_INVALID_COLUMN_REFERENCE),
+    )
+}
+
+fn bytes_in<'mcx>(mcx: Mcx<'mcx>, b: &[u8]) -> PgResult<&'mcx [u8]> {
+    let mut v: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, b.len())?;
+    mcx::vec_append_bytes(&mut v, b)?;
+    Ok(v.leak())
 }
 
 /// C `transformOnConflictArbiter` (parse_clause.c); returns
@@ -779,8 +888,8 @@ fn arbiter_target_nsitem<'mcx>(
         p_nscolumns: t.p_nscolumns,
         p_rel_visible: false,
         p_cols_visible: true,
-        p_lateral_only: false,
-        p_lateral_ok: true,
+        p_lateral_only: core::cell::Cell::new(false),
+        p_lateral_ok: core::cell::Cell::new(true),
         p_returning_type: t.p_returning_type,
     };
     Ok(mcx::leak_in(mcx::alloc_in(mcx, nsitem)?))

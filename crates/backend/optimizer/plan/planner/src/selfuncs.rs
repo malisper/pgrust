@@ -939,16 +939,13 @@ pub(crate) fn get_restriction_variable<'mcx>(
     let vardata = examine_variable(run, args[0], left, varrelid)?;
     let rdata = examine_variable(run, args[1], right, varrelid)?;
 
-    // estimate_expression_value: Consts pass through and a PARAM_EXEC stays a
-    // Param (no bound value at plan time); other shapes keep the loud arm.
-    // C runs estimate_expression_value over the non-var side (stable-fn
-    // folding); unfolded expressions land on the var_eq_non_const leg, which
-    // matches C exactly whenever the var side has no MCV stats.
     if vardata.rel.is_some() && rdata.rel.is_none() {
-        return Ok(Some((vardata, right, true)));
+        let other = clauses::estimate_expression_value(run.mcx, right)?;
+        return Ok(Some((vardata, other, true)));
     }
     if vardata.rel.is_none() && rdata.rel.is_some() {
-        return Ok(Some((rdata, left, false)));
+        let other = clauses::estimate_expression_value(run.mcx, left)?;
+        return Ok(Some((rdata, other, false)));
     }
     Ok(None)
 }
@@ -981,7 +978,9 @@ pub fn examine_variable<'mcx>(
             vardata.stats = examine_simple_variable(run, var.varno, var.varattno)?;
             return Ok(vardata);
         }
-        panic!("examine_variable (selfuncs.c): foreign-rel Var; M2 join lane");
+        // A Var of some other rel (varRelid restricts to one rel) falls to
+        // the generic expression leg: no rel, no stats.
+        return Ok(vardata);
     }
     match node.node_tag() {
         NodeTag::T_Const => Ok(vardata),
@@ -1159,6 +1158,7 @@ pub fn amcostestimate(
         types_relscan::IndexAmKind::Hash => hashcostestimate(run, path_id, loop_count),
         types_relscan::IndexAmKind::Gin => gincostestimate(run, path_id, loop_count),
         types_relscan::IndexAmKind::Gist => gistcostestimate(run, path_id, loop_count),
+        types_relscan::IndexAmKind::Spgist => spgcostestimate(run, path_id, loop_count),
         types_relscan::IndexAmKind::Brin => brincostestimate(run, path_id, loop_count),
         #[allow(unreachable_patterns)]
         other => panic!("amcostestimate (selfuncs.c): {other:?}; M2 index-AM lane"),
@@ -1174,6 +1174,60 @@ fn gistcostestimate(
     let (index_tuples, tree_height) = {
         let PathNode::IndexPath(ip) = run.root.path(path_id) else {
             panic!("gistcostestimate: not an IndexPath")
+        };
+        let index = ip.indexinfo.as_ref().expect("indexinfo set");
+        let mut tree_height = index.tree_height.get();
+        if tree_height < 0 {
+            tree_height = if index.pages > 1 {
+                ((index.pages as f64).ln() / 100.0f64.ln()) as i32
+            } else {
+                0
+            };
+            index.tree_height.set(tree_height);
+        }
+        (index.tuples, tree_height)
+    };
+
+    let mut costs = GenericCosts {
+        num_index_tuples: 0.0,
+        num_sa_scans: 1.0,
+        index_startup_cost: 0.0,
+        index_total_cost: 0.0,
+        index_selectivity: 0.0,
+        index_correlation: 0.0,
+        num_index_pages: 0.0,
+    };
+    genericcostestimate(run, path_id, loop_count, &mut costs)?;
+
+    let cpu_operator_cost = gucs::cpu_operator_cost();
+    if index_tuples > 1.0 {
+        let descent_cost = index_tuples.ln().ceil() * cpu_operator_cost;
+        costs.index_startup_cost += descent_cost;
+        costs.index_total_cost += costs.num_sa_scans * descent_cost;
+    }
+    let descent_cost =
+        (tree_height as f64 + 1.0) * DEFAULT_PAGE_CPU_MULTIPLIER * cpu_operator_cost;
+    costs.index_startup_cost += descent_cost;
+    costs.index_total_cost += costs.num_sa_scans * descent_cost;
+
+    Ok(AmCostEstimate {
+        index_startup_cost: costs.index_startup_cost,
+        index_total_cost: costs.index_total_cost,
+        index_selectivity: costs.index_selectivity,
+        index_correlation: costs.index_correlation,
+        index_pages: costs.num_index_pages,
+    })
+}
+
+// spgcostestimate (selfuncs.c): identical structure to gistcostestimate.
+fn spgcostestimate(
+    run: &mut PlannerRun<'_>,
+    path_id: types_pathnodes::PathId,
+    loop_count: f64,
+) -> PgResult<AmCostEstimate> {
+    let (index_tuples, tree_height) = {
+        let PathNode::IndexPath(ip) = run.root.path(path_id) else {
+            panic!("spgcostestimate: not an IndexPath")
         };
         let index = ip.indexinfo.as_ref().expect("indexinfo set");
         let mut tree_height = index.tree_height.get();
@@ -1675,26 +1729,30 @@ fn btcostestimate(
     costs.index_startup_cost += descent_cost;
     costs.index_total_cost += costs.num_sa_scans * descent_cost;
 
-    // btcost_correlation over the leading simple column.
+    // btcost_correlation over the leading column; expression columns read the
+    // index's own pg_statistic row (colnum 1, inh false), as C.
     {
-        let (attno, opfamily0, opcintype0, reverse0, nkeycols) = {
+        let (attno, indexoid, opfamily0, opcintype0, reverse0, nkeycols) = {
             let PathNode::IndexPath(ip) = run.root.path(path_id) else { unreachable!() };
             let index = ip.indexinfo.as_ref().unwrap();
             (
                 index.indexkeys[0] as i16,
+                index.indexoid,
                 index.opfamily[0],
                 index.opcintype[0],
                 index.reverse_sort[0],
                 index.nkeycolumns,
             )
         };
-        if attno == 0 {
-            panic!("btcost_correlation (selfuncs.c): expression index column; M2 lane");
-        }
-        let rte = run.rte(index_rel_relid as usize);
-        if let Some(bundle) =
-            syscache_seams::lookup_pg_statistic_bundle::call(run.mcx, rte.relid, attno, rte.inh)?
-        {
+        let (stat_relid, stat_attno, stat_inh) = if attno != 0 {
+            let rte = run.rte(index_rel_relid as usize);
+            (rte.relid, attno, rte.inh)
+        } else {
+            (indexoid, 1, false)
+        };
+        if let Some(bundle) = syscache_seams::lookup_pg_statistic_bundle::call(
+            run.mcx, stat_relid, stat_attno, stat_inh,
+        )? {
             let sortop = lsyscache::get_opfamily_member(
                 opfamily0,
                 opcintype0,

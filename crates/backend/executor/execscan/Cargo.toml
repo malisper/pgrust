@@ -5,6 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+postgres_seams = { path = "../../tcop/postgres_seams" }
 mcx = { path = "../../../_support/mcx" }
 types_core = { path = "../../../_support/types/types_core" }
 types_error = { path = "../../../_support/types/types_error" }
@@ -14,7 +15,6 @@ types_tuple = { path = "../../../_support/types/types_tuple" }
 types_rel = { path = "../../../_support/types/rel" }
 tupdesc = { path = "../../access/common/tupdesc" }
 init_small = { path = "../../utils/init/init_small" }
-postgres_seams = { path = "../../tcop/postgres_seams" }
 tableam = { path = "../../access/table/tableam" }
 exectuples = { path = "../exectuples" }
 execexpr = { path = "../execexpr" }

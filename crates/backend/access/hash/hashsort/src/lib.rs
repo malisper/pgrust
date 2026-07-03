@@ -29,7 +29,7 @@ pub fn hashbuild<'mcx>(
     mcx: Mcx<'mcx>,
     heap: &Relation<'mcx>,
     index: &Relation<'mcx>,
-    indexInfo: &mut IndexInfo,
+    indexInfo: &mut IndexInfo<'mcx>,
 ) -> PgResult<IndexBuildResult> {
     if bufmgr::RelationGetNumberOfBlocksInFork(index, ForkNumber::MAIN_FORKNUM)? != 0 {
         panic!("index \"{}\" already contains data", index.name());

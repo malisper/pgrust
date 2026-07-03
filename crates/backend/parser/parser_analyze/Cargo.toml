@@ -9,6 +9,9 @@ name = "parser_analyze"
 path = "src/lib.rs"
 
 [dependencies]
+rewrite_manip = { path = "../../rewrite/rewrite_manip" }
+rel_vocab = { path = "../../../_support/types/rel_vocab" }
+table = { path = "../../access/table/table" }
 datum = { path = "../../../_support/types/datum" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
 catalog_namespace = { path = "../../catalog/catalog_namespace" }

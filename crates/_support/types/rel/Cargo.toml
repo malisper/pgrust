@@ -14,3 +14,4 @@ types_tuple = { path = "../types_tuple" }
 types_fmgr = { path = "../fmgr" }
 types_nbtree = { path = "../types_nbtree" }
 types_hash = { path = "../hash" }
+types_spgist = { path = "../types_spgist" }

@@ -14,7 +14,7 @@ use types_nodes::{Node, NodeTag};
 
 pub use nodes_core::node_funcs::{
     expr_collation, expr_is_null_constant, expr_location, expr_location_list, expr_type,
-    expr_typmod, strip_implicit_coercions,
+    expr_typmod,
 };
 
 std::thread_local! {
@@ -1390,10 +1390,24 @@ fn transformColumnRef<'mcx>(
                         cref.location,
                     )? {
                         Some(node) => Some(node),
-                        None => panic!(
-                            "transformColumnRef (parse_expr.c): ParseFuncOrColumn \
-                             whole-row fallback unported — unit backend-parser-func"
-                        ),
+                        None => {
+                            // C tries a function call on the whole row
+                            // (attribute notation). Resolvable only when a
+                            // function of that name exists; otherwise C falls
+                            // through to errorMissingColumn.
+                            if !catalog_namespace::FuncnameGetCandidates(
+                                mcx, &[name], 1, false, false,
+                            )?
+                            .is_empty()
+                            {
+                                panic!(
+                                    "transformColumnRef (parse_expr.c): ParseFuncOrColumn \
+                                     whole-row attribute notation unported — \
+                                     unit backend-parser-func"
+                                );
+                            }
+                            None
+                        }
                     }
                 }
             }

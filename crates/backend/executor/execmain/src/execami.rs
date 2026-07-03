@@ -278,7 +278,7 @@ pub fn exec_re_scan_with_chg<'mcx>(
         }
         PlanStateNode::SeqScan(ss) => ::nodeseqscan::exec_rescan_seq_scan(ss, estate)?,
         PlanStateNode::FunctionScan(fs) => {
-            ::nodefunctionscan::exec_rescan_function_scan(fs, estate)?
+            ::nodefunctionscan::exec_rescan_function_scan_chg(fs, estate, chg)?
         }
         PlanStateNode::ValuesScan(vs) => ::nodevaluesscan::exec_rescan_values_scan(vs, estate)?,
         PlanStateNode::CteScan(_) => {

@@ -220,9 +220,25 @@ impl<'mcx> PlannerRun<'mcx> {
 
     /// Restore the parent level, detaching the finished child into
     /// rel_subroots (C: rel->subroot). Returns the rel_subroots index.
+    /// outer_params is recomputed as in pop_root_to_subroot: a LATERAL
+    /// subquery adds ancestor plan_params entries after the push-time
+    /// snapshot.
     pub fn pop_root_to_rel_subroot(&mut self) -> usize {
+        let outer = {
+            let mut outer: types_pathnodes::Relids<'mcx> = None;
+            if !self.glob.param_exec_types.is_nil() {
+                for i in 0..self.suspended_roots.len() {
+                    let root = &self.suspended_roots[i].root;
+                    Self::scan_outer_params(self.mcx, &mut outer, root);
+                }
+            }
+            outer
+        };
         let parent = self.suspended_roots.pop().expect("pop_root_to_rel_subroot without push");
-        let sub = core::mem::replace(&mut self.root, parent.root);
+        let mut sub = core::mem::replace(&mut self.root, parent.root);
+        if !self.glob.param_exec_types.is_nil() {
+            sub.outer_params = outer;
+        }
         let sub_tlist = core::mem::replace(&mut self.processed_tlist, parent.processed_tlist);
         self.rel_subroots.push(SubrootState { root: sub, processed_tlist: sub_tlist });
         self.rel_subroots.len() - 1

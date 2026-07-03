@@ -13,12 +13,14 @@ use ::types_scan::scankey::{
     BTLessEqualStrategyNumber, BTLessStrategyNumber, BTMaxStrategyNumber,
 };
 
-pub fn brin_minmax_opcinfo(_typoid: Oid) -> BrinColInfo {
+pub fn brin_minmax_opcinfo(typoid: Oid) -> BrinColInfo {
     BrinColInfo {
         oi_nstored: 2,
         oi_regular_nulls: true,
         kind: BrinOpcKind::MinMax,
+        oi_typids: [typoid, typoid],
         minmax: MinmaxOpaque::default(),
+        distance_procinfo: core::cell::RefCell::new(None),
     }
 }
 
