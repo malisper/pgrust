@@ -16,3 +16,8 @@ seam_core::seam!(
         parent_subid: SubTransactionId,
     )
 );
+
+seam_core::seam!(
+    // remove_on_commit_action(relid) (tablecmds.c): infallible list marking.
+    pub fn remove_on_commit_action(relid: types_core::Oid)
+);

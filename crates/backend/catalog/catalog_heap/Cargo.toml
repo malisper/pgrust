@@ -33,5 +33,6 @@ fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
 pgstat = { path = "../../utils/activity/pgstat" }
 types_scan = { path = "../../../_support/types/types_scan" }
 xact = { path = "../../access/transam/xact" }
+tablecmds_seams = { path = "../../commands/tablecmds_seams" }
 init_small = { path = "../../utils/init/init_small" }
 miscinit_seams = { path = "../../utils/init/miscinit_seams" }

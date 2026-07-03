@@ -6,14 +6,14 @@ use std::rc::Rc;
 use mcx::PgVec;
 use types_core::{
     InvalidOid, Oid, RelFileNumber, INVALID_PROC_NUMBER, RELPERSISTENCE_PERMANENT,
-    RELPERSISTENCE_UNLOGGED,
+    RELPERSISTENCE_TEMP, RELPERSISTENCE_UNLOGGED,
 };
 use types_error::PgResult;
 use types_rel::{FormData_pg_class, RelationData, RELKIND_MATVIEW, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION, REPLICA_IDENTITY_DEFAULT, REPLICA_IDENTITY_NOTHING};
 use types_tuple::{NameData, TupleConstr, TupleDescData};
 
 use crate::build::RelationInitPhysicalAddr;
-use crate::{cache_mcx, store, with_state};
+use crate::{cache_mcx, store};
 
 // reltype is a build-time parameter (C's AddNewRelationTuple pokes it into
 // rd_rel/rd_att after the fact; rd_rel is not interior-mutable here).
@@ -69,10 +69,15 @@ pub fn RelationBuildLocalRelation(
         ));
     }
 
-    let rd_islocaltemp = match relpersistence {
-        RELPERSISTENCE_UNLOGGED | RELPERSISTENCE_PERMANENT => false,
+    let (rd_backend, rd_islocaltemp) = match relpersistence {
+        RELPERSISTENCE_UNLOGGED | RELPERSISTENCE_PERMANENT => (INVALID_PROC_NUMBER, false),
+        RELPERSISTENCE_TEMP => {
+            debug_assert!(namespace_seams::is_temp_or_temp_toast_namespace::call(relnamespace));
+            // ProcNumberForTempRelations()
+            (init_small::globals::MyProcNumber(), true)
+        }
         _ => panic!(
-            "RelationBuildLocalRelation (relcache.c): relpersistence {:?} unported",
+            "RelationBuildLocalRelation (relcache.c): relpersistence {:?} invalid",
             relpersistence as char
         ),
     };
@@ -120,7 +125,7 @@ pub fn RelationBuildLocalRelation(
         rd_locator: Default::default(),
         rd_smgr: Default::default(),
         rd_id: relid,
-        rd_backend: INVALID_PROC_NUMBER,
+        rd_backend,
         rd_islocaltemp,
         rd_isvalid: Cell::new(false),
         rd_createSubid: Cell::new(subid),

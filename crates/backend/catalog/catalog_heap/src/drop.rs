@@ -130,8 +130,10 @@ pub fn heap_drop_with_catalog<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<()> 
 
     rel.close(NoLock)?;
 
-    // RemoveSubscriptionRel / remove_on_commit_action: no subscription or ON
-    // COMMIT DDL lanes exist, so neither catalog can hold a row for relid.
+    // RemoveSubscriptionRel: no subscription lane exists.
+    if tablecmds_seams::remove_on_commit_action::is_installed() {
+        tablecmds_seams::remove_on_commit_action::call(relid);
+    }
 
     relcache::invalidate::RelationForgetRelation(relid)?;
 

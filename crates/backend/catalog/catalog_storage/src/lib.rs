@@ -60,10 +60,7 @@ pub fn RelationCreateStorage(
     register_delete: bool,
 ) -> PgResult<RelFileLocatorBackend> {
     let (proc_number, needs_wal) = match relpersistence {
-        RELPERSISTENCE_TEMP => panic!(
-            "RelationCreateStorage (storage.c): RELPERSISTENCE_TEMP unported \
-             (ProcNumberForTempRelations)"
-        ),
+        RELPERSISTENCE_TEMP => (init_small::globals::MyProcNumber(), false),
         RELPERSISTENCE_UNLOGGED => (INVALID_PROC_NUMBER, false),
         RELPERSISTENCE_PERMANENT => (INVALID_PROC_NUMBER, true),
         _ => panic!("invalid relpersistence: {relpersistence}"),

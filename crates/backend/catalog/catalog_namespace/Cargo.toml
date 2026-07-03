@@ -36,3 +36,9 @@ varlena = { path = "../../utils/adt/varlena" }
 mbutils_seams = { path = "../../utils/mb/mbutils_seams" }
 wchar = { path = "../../../common/wchar" }
 dbcommands_seams = { path = "../../commands/dbcommands_seams" }
+xact = { path = "../../access/transam/xact" }
+snapmgr = { path = "../../utils/time/snapmgr" }
+ipc = { path = "../../storage/ipc/ipc" }
+pg_namespace = { path = "../pg_namespace" }
+dependency_seams = { path = "../dependency_seams" }
+types_nodes = { path = "../../../_support/types/nodes" }

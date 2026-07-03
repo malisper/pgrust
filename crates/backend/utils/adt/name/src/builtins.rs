@@ -1,7 +1,6 @@
 //! fmgr wrappers (`fc_*`) + `NAME_BUILTINS` for fmgr-core. Registrable rows
-//! are the by-val comparisons and the scratch-backed out-function; namein /
-//! recv / send / current_* / nameconcatoid need the frame allocation/wire
-//! convention (the varlena textin precedent) and stay value-core-only.
+//! are the by-val comparisons and the scratch-backed in/out functions;
+//! recv / send / current_* / nameconcatoid stay value-core-only.
 
 use datum::Datum;
 use types_core::Oid;
@@ -45,6 +44,27 @@ std::thread_local! {
         const { core::cell::UnsafeCell::new([0; NAMELEN + 1]) };
 }
 
+// C pallocs a NAMEDATALEN block per call; the resolved FmgrInfo owns one
+// retained block instead (the varlena textin precedent). The Datum aliases it
+// until the next call through the same FmgrInfo.
+struct InScratch(NameData);
+
+pub fn fc_namein(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: arg 0 of strict namein is a non-null cstring.
+    let s = unsafe { fcinfo.arg_cstring(0) }.to_bytes();
+    let Some(flinfo) = flinfo else {
+        panic!("namein: name result needs a resolved FmgrInfo's scratch");
+    };
+    let name = crate::namein(s);
+    if !flinfo.has_fn_extra() {
+        flinfo.set_fn_extra(InScratch(name));
+    } else {
+        flinfo.fn_extra_mut::<InScratch>().unwrap().0 = name;
+    }
+    let nd = &flinfo.fn_extra_mut::<InScratch>().unwrap().0;
+    Ok(Datum::from_usize(nd.data.as_ptr() as usize))
+}
+
 pub fn fc_nameout(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let s = arg_name(fcinfo, 0);
     OUT_SCRATCH.with(|c| {
@@ -70,6 +90,7 @@ const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrB
 
 // pg_proc.dat rows (all proisstrict, none retset), OID-ascending.
 pub const NAME_BUILTINS: &[FmgrBuiltin] = &[
+    b(34, "namein", 1, fc_namein),
     b(35, "nameout", 1, fc_nameout),
     b(62, "nameeq", 2, fc_nameeq),
     b(359, "btnamecmp", 2, fc_btnamecmp),

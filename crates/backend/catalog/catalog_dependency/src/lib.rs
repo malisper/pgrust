@@ -499,7 +499,6 @@ fn reportDependentObjects(
     behavior: DropBehavior,
     flags: i32,
 ) -> PgResult<()> {
-    let _ = flags;
     for i in (0..targetObjects.refs.len()).rev() {
         let extra = &targetObjects.extras[i];
         if extra.flags & DEPFLAG_IS_PART != 0 && extra.flags & DEPFLAG_PARTITION == 0 {
@@ -520,6 +519,8 @@ fn reportDependentObjects(
             // drop auto-cascades: DEBUG2, not client-visible.
         } else if behavior == DropBehavior::DROP_RESTRICT {
             unported("reportDependentObjects: DROP RESTRICT dependency report (2BP01)");
+        } else if flags & PERFORM_DELETION_QUIETLY != 0 {
+            // QUIETLY drops msglevel to DEBUG2: nothing client-visible.
         } else {
             unported("reportDependentObjects: DROP CASCADE NOTICE report");
         }
@@ -719,4 +720,20 @@ fn DeleteInitPrivs<'mcx>(mcx: Mcx<'mcx>, object: &ObjectAddress) -> PgResult<()>
     }
     genam::systable_endscan(mcx, scan)?;
     rel.close(RowExclusiveLock)
+}
+
+fn seam_perform_deletion(
+    mcx: Mcx<'_>,
+    class_id: Oid,
+    object_id: Oid,
+    object_sub_id: i32,
+    behavior: DropBehavior,
+    flags: i32,
+) -> PgResult<()> {
+    let object = ObjectAddress::sub_set(class_id, object_id, object_sub_id);
+    performDeletion(mcx, &object, behavior, flags)
+}
+
+pub fn init_seams() {
+    dependency_seams::perform_deletion::set(seam_perform_deletion);
 }

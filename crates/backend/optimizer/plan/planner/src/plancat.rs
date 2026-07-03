@@ -40,10 +40,9 @@ pub fn get_relation_info<'mcx>(
     if !(relkind_has_table_am(relkind) || relkind == RELKIND_SEQUENCE) {
         panic!("get_relation_info (plancat.c): relkind {relkind}; M2 foreign/partitioned lane");
     }
-    // The recovery guard needs RecoveryInProgress; permanent rels skip it.
-    if relation.rd_rel.relpersistence != b'p' {
-        panic!("get_relation_info (plancat.c): non-permanent relation; M2 recovery-guard lane");
-    }
+    // C's !RelationIsPermanent && RecoveryInProgress guard: no hot-standby
+    // sessions exist, so the recovery arm is compile-time false.
+
 
     let natts = relation.rd_att.natts;
     {

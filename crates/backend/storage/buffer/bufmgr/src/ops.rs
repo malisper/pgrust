@@ -104,7 +104,9 @@ pub fn ConditionalLockBufferForCleanup(buffer: Buffer) -> PgResult<bool> {
     debug_assert!(BufferIsValid(buffer));
     debug_assert!(pin_count_wait_buf() == -1);
     if buffer < 0 {
-        panic!("unported callee reached from bufmgr.c ConditionalLockBufferForCleanup: LocalRefCount (localbuf.c)");
+        let refcount = crate::localbuf::local_ref_count(buffer);
+        debug_assert!(refcount > 0);
+        return Ok(refcount == 1);
     }
     if crate::privref::GetPrivateRefCount(buffer) != 1 {
         return Ok(false);
@@ -134,7 +136,8 @@ pub fn MarkBufferDirty(buffer: Buffer) -> PgResult<()> {
         return Err(bad_buffer_id(buffer, "MarkBufferDirty"));
     }
     if buffer < 0 {
-        panic!("unported callee reached from bufmgr.c MarkBufferDirty: MarkLocalBufferDirty (localbuf.c)");
+        crate::localbuf::MarkLocalBufferDirty(buffer);
+        return Ok(());
     }
     let desc = shared_desc(buffer);
     debug_assert!(BufferIsPinned(buffer));
@@ -172,17 +175,29 @@ pub fn MarkBufferDirty(buffer: Buffer) -> PgResult<()> {
 
 pub fn BufferGetBlockNumber(buffer: Buffer) -> BlockNumber {
     debug_assert!(BufferIsPinned(buffer));
+    if buffer < 0 {
+        return crate::localbuf::local_desc(buffer).tag().blockNum;
+    }
     shared_desc(buffer).tag().blockNum
 }
 
 pub fn BufferGetTag(buffer: Buffer) -> buftag {
     debug_assert!(BufferIsPinned(buffer));
+    if buffer < 0 {
+        return crate::localbuf::local_desc(buffer).tag();
+    }
     shared_desc(buffer).tag()
 }
 
 /// BufferGetPage: raw page pointer, valid while the caller's pin is held.
 pub fn BufferGetPagePtr(buffer: Buffer) -> core::ptr::NonNull<u8> {
     debug_assert!(BufferIsPinned(buffer));
+    if buffer < 0 {
+        let p = crate::localbuf::local_block_ptr(buffer);
+        debug_assert!(!p.is_null());
+        // SAFETY: pinned local buffers have their block storage allocated.
+        return unsafe { core::ptr::NonNull::new_unchecked(p) };
+    }
     // SAFETY: pool pointer is non-null for a valid buffer id.
     unsafe { core::ptr::NonNull::new_unchecked(BufferGetBlockPtr(buffer)) }
 }

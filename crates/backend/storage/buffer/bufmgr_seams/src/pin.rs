@@ -38,8 +38,9 @@ impl BufferPin {
         let base = crate::buffer_blocks();
         // SAFETY: the pin held for the borrow keeps the page live and the id
         // in 1..=NBuffers; published pool = C's inline BufferGetPage,
-        // unpublished (test fakes) = the seam. Locking is the caller's part.
-        if !base.is_null() {
+        // unpublished (test fakes) or local (negative id) = the seam.
+        // Locking is the caller's part.
+        if !base.is_null() && self.buffer > 0 {
             unsafe {
                 PageRef::from_raw(core::ptr::NonNull::new_unchecked(
                     base.add((self.buffer as usize - 1) * types_core::BLCKSZ),

@@ -68,7 +68,11 @@ pub fn ExtendBufferedRelBy(
     // (hio.c RelationAddBlocks) uses buffers[1..] solely to ReleaseBuffer
     // them, so the pins drop here and only the first crosses the seam.
     for buf in buffers.iter().take(extended_by as usize).skip(1) {
-        UnpinBuffer(GetBufferDescriptor(*buf - 1));
+        if *buf < 0 {
+            crate::localbuf::UnpinLocalBuffer(*buf);
+        } else {
+            UnpinBuffer(GetBufferDescriptor(*buf - 1));
+        }
     }
     Ok((buffers[0], extended_by))
 }
@@ -189,7 +193,7 @@ fn ExtendBufferedRelCommon(
     buffers: &mut [Buffer],
 ) -> PgResult<(BlockNumber, u32)> {
     if relpersistence == RELPERSISTENCE_TEMP {
-        panic!("unported callee reached from bufmgr.c ExtendBufferedRelCommon: ExtendBufferedRelLocal (localbuf.c)");
+        return crate::localbuf::ExtendBufferedRelLocal(smgr, fork, extend_by, extend_upto, buffers);
     }
     ExtendBufferedRelShared(rel, smgr, relpersistence, fork, strategy, flags, extend_by, extend_upto, buffers)
 }

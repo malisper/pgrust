@@ -14,15 +14,14 @@ pub const NamespaceOidIndexId: Oid = 2685;
 pub const Anum_pg_namespace_oid: AttrNumber = 1;
 pub const Natts_pg_namespace: usize = 4;
 
+// isTemp skips only get_user_default_acl, the extension dependency, and the
+// post-create hook -- each unported/no-op here, so both arms share this body.
 pub fn NamespaceCreate<'mcx>(
     mcx: Mcx<'mcx>,
     nspName: &str,
     ownerId: Oid,
-    isTemp: bool,
+    _isTemp: bool,
 ) -> PgResult<Oid> {
-    if isTemp {
-        panic!("NamespaceCreate (pg_namespace.c): temp namespace lane unported");
-    }
     if syscache_seams::lookup_pg_namespace_oid_by_name::call(nspName)? != InvalidOid {
         return Err(Box::new(
             PgError::new(ERROR, format!("schema \"{nspName}\" already exists"))

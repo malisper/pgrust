@@ -442,7 +442,8 @@ pub fn fetch_search_path<'mcx>(
     recomputeNamespacePath()?;
 
     if BASE_TEMP_CREATION_PENDING.with(Cell::get) {
-        crate::deferred("fetch_search_path with pending temp namespace (AccessTempTableNamespace)");
+        crate::AccessTempTableNamespace(mcx, true)?;
+        recomputeNamespacePath()?;
     }
 
     let mut result = with_path_state(|ps| slice_in(mcx, &ps.base_search_path))?;

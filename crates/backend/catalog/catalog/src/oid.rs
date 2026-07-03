@@ -61,10 +61,7 @@ pub fn GetNewRelFileNumber<'mcx>(
     relpersistence: u8,
 ) -> PgResult<RelFileNumber> {
     let proc_number: ProcNumber = match relpersistence {
-        RELPERSISTENCE_TEMP => panic!(
-            "GetNewRelFileNumber (catalog.c): RELPERSISTENCE_TEMP unported \
-             (ProcNumberForTempRelations)"
-        ),
+        RELPERSISTENCE_TEMP => init_small::globals::MyProcNumber(),
         RELPERSISTENCE_UNLOGGED | RELPERSISTENCE_PERMANENT => INVALID_PROC_NUMBER,
         _ => panic!("invalid relpersistence: {relpersistence}"),
     };

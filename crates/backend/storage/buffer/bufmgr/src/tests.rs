@@ -18,7 +18,7 @@ static REL_READS: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new())
 const SLOW_READ_REL: u32 = 9400;
 
 const TEST_NBUFFERS: i32 = 64;
-const TEST_MAX_CONNECTIONS: i32 = 16;
+const TEST_MAX_CONNECTIONS: i32 = 32;
 
 fn test_max_backends() -> i32 {
     TEST_MAX_CONNECTIONS + 3 + 2 + 2 + NUM_SPECIAL_WORKER_PROCS
@@ -723,4 +723,181 @@ fn abort_resowner_release_aborts_leaked_io_and_wakes_waiter() {
     resowner::SetCurrentResourceOwner(ResourceOwner::NULL);
     resowner::ResourceOwnerDelete(owner);
     resowner::SetCurrentResourceOwner(save);
+}
+
+// ---- local (temp) buffers ----
+
+fn temp_smgr(rel: u32) -> types_storage::RelFileLocatorBackend {
+    types_storage::RelFileLocatorBackend {
+        locator: rloc(rel),
+        backend: globals::MyProcNumber(),
+    }
+}
+
+fn read_local_blk(rel: u32, blkno: u32) -> Buffer {
+    ReadBuffer_common(
+        temp_smgr(rel),
+        types_core::RELPERSISTENCE_TEMP,
+        ForkNumber::MAIN_FORKNUM,
+        blkno,
+        ReadBufferMode::Normal,
+        None,
+    )
+    .unwrap()
+}
+
+fn setup_extend_seams() {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        smgr_seams::smgr_nblocks::set(|rlb, _| {
+            Ok(*NBLOCKS.lock().unwrap().entry(rlb.locator.relNumber).or_insert(0))
+        });
+        smgr_seams::smgr_zeroextend::set(|rlb, _, blocknum, nblocks, _| {
+            let mut map = NBLOCKS.lock().unwrap();
+            let n = map.entry(rlb.locator.relNumber).or_insert(0);
+            assert_eq!(*n, blocknum);
+            *n += nblocks as u32;
+            Ok(())
+        });
+    });
+}
+
+static NBLOCKS: std::sync::Mutex<std::collections::BTreeMap<u32, u32>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+#[test]
+fn local_negative_encoding_and_roundtrip() {
+    let _g = setup();
+    let rel = 9500;
+    let before = rel_reads(rel);
+    let b = read_local_blk(rel, 3);
+    assert!(b < 0, "temp relations get negative buffer ids");
+    assert_eq!(rel_reads(rel), before + 1);
+    assert_eq!(crate::localbuf::local_ref_count(b), 1);
+    assert!(BufferIsPinned(b));
+    assert_eq!(BufferGetBlockNumber(b), 3);
+    let page = buffer_page_ref(b);
+    assert!(!page.is_new());
+
+    let b2 = read_local_blk(rel, 3);
+    assert_eq!(b2, b, "warm hit returns the same local buffer");
+    assert_eq!(rel_reads(rel), before + 1, "hit does not re-read");
+    assert_eq!(crate::localbuf::local_ref_count(b), 2);
+
+    IncrBufferRefCount(b);
+    assert_eq!(crate::localbuf::local_ref_count(b), 3);
+    ReleaseBuffer(b).unwrap();
+    ReleaseBuffer(b).unwrap();
+    ReleaseBuffer(b).unwrap();
+    assert_eq!(crate::localbuf::local_ref_count(b), 0);
+    AtEOXact_Buffers(true);
+}
+
+#[test]
+fn local_mark_dirty_and_flush_on_drop_path() {
+    let _g = setup();
+    let rel = 9501;
+    let b = read_local_blk(rel, 0);
+    LockBuffer(b, BUFFER_LOCK_EXCLUSIVE).unwrap();
+    MarkBufferDirty(b).unwrap();
+    LockBuffer(b, BUFFER_LOCK_UNLOCK).unwrap();
+    let desc = crate::localbuf::local_desc(b);
+    assert!(desc.state.load(Ordering::Relaxed) & BM_DIRTY != 0);
+    MarkBufferDirtyHint(b, true).unwrap();
+    ReleaseBuffer(b).unwrap();
+
+    crate::localbuf::FlushRelationLocalBuffers(rloc(rel)).unwrap();
+    assert!(
+        WRITES
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|w| w.2 == rel && w.4 == 0),
+        "dirty local page reaches smgrwrite"
+    );
+    assert!(desc.state.load(Ordering::Relaxed) & BM_DIRTY == 0);
+
+    DropRelationAllLocalBuffers(rloc(rel)).unwrap();
+    let before = rel_reads(rel);
+    let b2 = read_local_blk(rel, 0);
+    assert_eq!(rel_reads(rel), before + 1, "dropped block re-reads from smgr");
+    ReleaseBuffer(b2).unwrap();
+}
+
+#[test]
+fn local_eviction_writes_dirty_page() {
+    let _g = setup();
+    let rel = 9502;
+    let b = read_local_blk(rel, 0);
+    LockBuffer(b, BUFFER_LOCK_EXCLUSIVE).unwrap();
+    MarkBufferDirty(b).unwrap();
+    LockBuffer(b, BUFFER_LOCK_UNLOCK).unwrap();
+    ReleaseBuffer(b).unwrap();
+
+    let n = crate::localbuf::n_loc_buffer();
+    for blkno in 1..(n as u32 + 1) {
+        let b = read_local_blk(rel, blkno);
+        ReleaseBuffer(b).unwrap();
+    }
+    assert!(
+        WRITES.lock().unwrap().iter().any(|w| w.2 == rel && w.4 == 0),
+        "clock sweep flushed the dirty victim"
+    );
+    DropRelationAllLocalBuffers(rloc(rel)).unwrap();
+    AtEOXact_Buffers(true);
+}
+
+#[test]
+fn local_extend_returns_pinned_zeroed_pages() {
+    let _g = setup();
+    setup_extend_seams();
+    let rel = 9503;
+    let mut buffers = [types_core::InvalidBuffer; 8];
+    let (first_block, extended_by) = crate::localbuf::ExtendBufferedRelLocal(
+        temp_smgr(rel),
+        ForkNumber::MAIN_FORKNUM,
+        4,
+        types_core::InvalidBlockNumber,
+        &mut buffers,
+    )
+    .unwrap();
+    assert_eq!(first_block, 0);
+    assert_eq!(extended_by, 4);
+    assert_eq!(*NBLOCKS.lock().unwrap().get(&rel).unwrap(), 4);
+    for (i, b) in buffers.iter().take(4).enumerate() {
+        assert!(*b < 0);
+        assert_eq!(crate::localbuf::local_ref_count(*b), 1);
+        assert_eq!(BufferGetBlockNumber(*b), i as u32);
+        assert!(buffer_page_is_new(*b), "extended pages are zero-filled");
+        ReleaseBuffer(*b).unwrap();
+    }
+    let (first_block, extended_by) = crate::localbuf::ExtendBufferedRelLocal(
+        temp_smgr(rel),
+        ForkNumber::MAIN_FORKNUM,
+        2,
+        types_core::InvalidBlockNumber,
+        &mut buffers,
+    )
+    .unwrap();
+    assert_eq!(first_block, 4);
+    assert_eq!(extended_by, 2);
+    for b in buffers.iter().take(2) {
+        ReleaseBuffer(*b).unwrap();
+    }
+    DropRelationAllLocalBuffers(rloc(rel)).unwrap();
+}
+
+#[test]
+fn local_release_and_read_buffer_fastpath() {
+    let _g = setup();
+    let rel = 9504;
+    let b = read_local_blk(rel, 7);
+    assert!(crate::localbuf::StartLocalBufferIO(b, false) == false, "clean page: no write IO");
+    assert_eq!(crate::localbuf::local_ref_count(b), 1);
+    assert!(ConditionalLockBuffer(b).unwrap());
+    assert!(crate::ops::ConditionalLockBufferForCleanup(b).unwrap());
+    CheckBufferIsPinnedOnce(b).unwrap();
+    LockBufferForCleanup(b).unwrap();
+    UnlockReleaseBuffer(b).unwrap();
+    assert_eq!(crate::localbuf::local_ref_count(b), 0);
 }
