@@ -124,6 +124,53 @@ const ANUM_PG_CAST_CASTFUNC: i32 = 4;
 const ANUM_PG_CAST_CASTCONTEXT: i32 = 5;
 const ANUM_PG_CAST_CASTMETHOD: i32 = 6;
 
+// Decode-once carriers for the hottest fixed-column projections: warm hit is
+// one FxHash probe, no catcache pin / per-column fetch. Coarse invalidation:
+// ANY catcache invalidation (catcache::inval_epoch) clears all memos — the
+// only channel through which a syscache answer can change.
+struct ShapeMemos {
+    #[allow(dead_code)]
+    mcx: Mcx<'static>,
+    epoch: u64,
+    type_shape: mcx::PgHashMap<'static, Oid, Option<PgTypeShape>>,
+    type_base: mcx::PgHashMap<'static, Oid, Option<syscache_seams::PgTypeBaseShape>>,
+    proc: mcx::PgHashMap<'static, Oid, Option<syscache_seams::PgProcShape>>,
+    cast: mcx::PgHashMap<'static, u64, Option<PgCastShape>>,
+}
+
+thread_local! {
+    static MEMOS: core::cell::RefCell<Option<ShapeMemos>> =
+        const { core::cell::RefCell::new(None) };
+}
+
+// INVARIANT: `f` must not re-enter syscache/catcache (probe or insert only;
+// the decode itself runs outside the borrow).
+fn with_memos<R>(f: impl FnOnce(&mut ShapeMemos) -> R) -> R {
+    MEMOS.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        let m = slot.get_or_insert_with(|| {
+            let mcx = Box::leak(Box::new(mcx::MemoryContext::new("SysCacheShapeMemos"))).mcx();
+            ShapeMemos {
+                mcx,
+                epoch: catcache::inval_epoch(),
+                type_shape: mcx::PgHashMap::with_capacity_in(64, mcx),
+                type_base: mcx::PgHashMap::with_capacity_in(64, mcx),
+                proc: mcx::PgHashMap::with_capacity_in(64, mcx),
+                cast: mcx::PgHashMap::with_capacity_in(64, mcx),
+            }
+        });
+        let e = catcache::inval_epoch();
+        if m.epoch != e {
+            m.epoch = e;
+            m.type_shape.clear();
+            m.type_base.clear();
+            m.proc.clear();
+            m.cast.clear();
+        }
+        f(m)
+    })
+}
+
 fn tupdesc_for(cache_id: i32) -> &'static TupleDescData<'static> {
     use core::cell::Cell;
     use crate::cacheinfo::SYS_CACHE_SIZE;
@@ -235,6 +282,15 @@ fn pg_class_relname(relid: Oid) -> PgResult<Option<types_tuple::NameData>> {
 }
 
 fn lookup_pg_type_shape(typid: Oid) -> PgResult<Option<PgTypeShape>> {
+    if let Some(hit) = with_memos(|m| m.type_shape.get(&typid).copied()) {
+        return Ok(hit);
+    }
+    let shape = lookup_pg_type_shape_uncached(typid)?;
+    with_memos(|m| m.type_shape.insert(typid, shape));
+    Ok(shape)
+}
+
+fn lookup_pg_type_shape_uncached(typid: Oid) -> PgResult<Option<PgTypeShape>> {
     let Some(tuple) = SearchSysCache1(TYPEOID, SysCacheKey::Value(Datum::from_oid(typid)))? else {
         return Ok(None);
     };
@@ -968,6 +1024,15 @@ fn lookup_pg_amproc(opfamily: Oid, lefttype: Oid, righttype: Oid, procnum: i16) 
 }
 
 fn pg_type_base_shape(typid: Oid) -> PgResult<Option<syscache_seams::PgTypeBaseShape>> {
+    if let Some(hit) = with_memos(|m| m.type_base.get(&typid).copied()) {
+        return Ok(hit);
+    }
+    let shape = pg_type_base_shape_uncached(typid)?;
+    with_memos(|m| m.type_base.insert(typid, shape));
+    Ok(shape)
+}
+
+fn pg_type_base_shape_uncached(typid: Oid) -> PgResult<Option<syscache_seams::PgTypeBaseShape>> {
     let Some(tuple) = SearchSysCache1(TYPEOID, SysCacheKey::Value(Datum::from_oid(typid)))? else {
         return Ok(None);
     };
@@ -1097,6 +1162,15 @@ fn pg_proc_proname(funcid: Oid) -> PgResult<Option<types_tuple::NameData>> {
 }
 
 fn lookup_pg_proc_shape(funcid: Oid) -> PgResult<Option<syscache_seams::PgProcShape>> {
+    if let Some(hit) = with_memos(|m| m.proc.get(&funcid).copied()) {
+        return Ok(hit);
+    }
+    let shape = lookup_pg_proc_shape_uncached(funcid)?;
+    with_memos(|m| m.proc.insert(funcid, shape));
+    Ok(shape)
+}
+
+fn lookup_pg_proc_shape_uncached(funcid: Oid) -> PgResult<Option<syscache_seams::PgProcShape>> {
     let Some(tuple) = SearchSysCache1(PROCOID, SysCacheKey::Value(Datum::from_oid(funcid)))? else {
         return Ok(None);
     };
@@ -1330,6 +1404,16 @@ fn pg_operator_name_candidates_exist(opername: &str, oprkind: i8) -> PgResult<bo
 }
 
 fn lookup_pg_cast_shape(sourcetypeid: Oid, targettypeid: Oid) -> PgResult<Option<PgCastShape>> {
+    let key = ((sourcetypeid as u64) << 32) | targettypeid as u64;
+    if let Some(hit) = with_memos(|m| m.cast.get(&key).copied()) {
+        return Ok(hit);
+    }
+    let shape = lookup_pg_cast_shape_uncached(sourcetypeid, targettypeid)?;
+    with_memos(|m| m.cast.insert(key, shape));
+    Ok(shape)
+}
+
+fn lookup_pg_cast_shape_uncached(sourcetypeid: Oid, targettypeid: Oid) -> PgResult<Option<PgCastShape>> {
     let Some(tuple) = SearchSysCache2(
         CASTSOURCETARGET,
         SysCacheKey::Value(Datum::from_oid(sourcetypeid)),
