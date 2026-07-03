@@ -148,6 +148,7 @@ pub fn init_all() {
     lsyscache::init_seams();
     plancache::init_seams();
     planner::init_seams();
+    costsize::init_seams();
     relcache::init_seams();
     relcache_build::init_seams();
     relmapper::init_seams();

@@ -14,8 +14,8 @@ use crate::gucs;
 use crate::run::PlannerRun;
 
 pub const DEFAULT_EQ_SEL: f64 = 0.005;
-pub const DEFAULT_INEQ_SEL: f64 = 0.3333333333333333;
-pub const DEFAULT_NUM_DISTINCT: f64 = 200.0;
+pub use types_pathnodes::DEFAULT_INEQ_SEL;
+pub use types_pathnodes::DEFAULT_NUM_DISTINCT;
 const DEFAULT_PAGE_CPU_MULTIPLIER: f64 = 50.0;
 const BOOLOID: u32 = 16;
 const SELF_ITEM_POINTER_ATTRIBUTE_NUMBER: i16 = -1;
@@ -1133,13 +1133,7 @@ pub(crate) fn var_eq_const<'mcx>(
     Ok(clamp_probability(selec))
 }
 
-pub struct AmCostEstimate {
-    pub index_startup_cost: f64,
-    pub index_total_cost: f64,
-    pub index_selectivity: f64,
-    pub index_correlation: f64,
-    pub index_pages: f64,
-}
+pub use planner_seams::AmCostEstimate;
 
 // amcostestimate dispatch: closed set over the committed index AMs (rule 4).
 pub fn amcostestimate(

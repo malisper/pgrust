@@ -10,22 +10,7 @@ use types_pathnodes::{GroupingSetData, NodeId, RelId, RollupData};
 
 use crate::run::PlannerRun;
 
-// grouping_sets_data (planner.c); hash_sets_idx omitted (its consumers are
-// the hashed-strategy legs, which panic before reading it).
-pub struct GroupingSetsData<'mcx> {
-    pub rollups: PgVec<'mcx, RollupData<'mcx>>,
-    pub any_hashable: bool,
-    pub unsortable_refs: PgVec<'mcx, u32>,
-    pub unhashable_refs: PgVec<'mcx, u32>,
-    pub unsortable_sets: PgVec<'mcx, GroupingSetData<'mcx>>,
-    pub tleref_to_colnum_map: PgVec<'mcx, i32>,
-    pub dNumHashGroups: f64,
-}
-
-mcx::forget_safe_struct!(GroupingSetsData<'_> {
-    rollups, any_hashable, unsortable_refs, unhashable_refs, unsortable_sets,
-    tleref_to_colnum_map, dNumHashGroups,
-});
+pub use types_pathnodes::run::GroupingSetsData;
 
 /// C's `linitial(parse->groupingSets) != NIL` over an expanded set cell.
 pub fn grouping_set_nonempty(node: Node<'_>) -> bool {
