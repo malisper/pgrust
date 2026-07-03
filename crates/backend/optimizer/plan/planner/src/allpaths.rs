@@ -75,7 +75,7 @@ fn set_base_rel_pathlists(run: &mut PlannerRun<'_>) -> PgResult<()> {
 
 fn set_rel_size(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResult<()> {
     if run.root.rel(rel).reloptkind == RELOPT_BASEREL
-        && relation_excluded_by_constraints(run, rel, rti)
+        && relation_excluded_by_constraints(run, rel, rti)?
     {
         set_dummy_rel_pathlist(run, rel)?;
         return Ok(());
@@ -98,7 +98,8 @@ fn set_rel_size(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResult<()
             assert!(
                 rte.relkind == types_rel::RELKIND_RELATION
                     || rte.relkind == types_rel::RELKIND_TOASTVALUE
-                    || rte.relkind == types_rel::RELKIND_SEQUENCE,
+                    || rte.relkind == types_rel::RELKIND_SEQUENCE
+                    || rte.relkind == types_rel::RELKIND_MATVIEW,
                 "set_rel_size relkind {}",
                 rte.relkind
             );
@@ -238,55 +239,100 @@ fn set_subquery_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> Pg
     Ok(())
 }
 
-// relation_excluded_by_constraints (plancat.c): the unconditional
-// constant-FALSE-or-NULL restriction scan; predicate proofs beyond it are
-// loud where C would attempt them (constraint_exclusion=on, or otherrels with
-// CHECK constraints under the default 'partition' setting).
-fn relation_excluded_by_constraints(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> bool {
+// relation_excluded_by_constraints (plancat.c); hosted here with its only
+// callers. Fallible: the refutation legs probe catalogs and may evaluate
+// cross-type comparison operators.
+fn relation_excluded_by_constraints(
+    run: &mut PlannerRun<'_>,
+    rel: RelId,
+    rti: usize,
+) -> PgResult<bool> {
+    let mcx = run.mcx;
     if run.root.rel(rel).baserestrictinfo.is_empty() {
-        return false;
+        return Ok(false);
     }
+    // Regardless of constraint_exclusion, detect constant-FALSE-or-NULL
+    // restrictions (qual pushdown can leave other members beside the FALSE).
     for i in 0..run.root.rel(rel).baserestrictinfo.len() {
         let rid = run.root.rel(rel).baserestrictinfo[i];
         let clause = *run.root.expr_node(run.root.rinfo(rid).clause);
         if let Some(c) = clause.as_const() {
             if c.constisnull || !c.constvalue.as_bool() {
-                return true;
+                return Ok(true);
             }
         }
     }
+
+    let mut include_partition = false;
     match crate::gucs::constraint_exclusion() {
-        guc_tables::consts::CONSTRAINT_EXCLUSION_ON => panic!(
-            "relation_excluded_by_constraints (plancat.c): constraint_exclusion=on \
-             needs predicate_refuted_by; constraint-exclusion lane unported"
-        ),
-        guc_tables::consts::CONSTRAINT_EXCLUSION_OFF => return false,
-        _ => {}
+        guc_tables::consts::CONSTRAINT_EXCLUSION_OFF => return Ok(false),
+        guc_tables::consts::CONSTRAINT_EXCLUSION_PARTITION => {
+            // Only appendrel members; partition pruning already ran.
+            if run.root.rel(rel).reloptkind != types_pathnodes::RELOPT_OTHER_MEMBER_REL {
+                return Ok(false);
+            }
+        }
+        _ => {
+            // 'on': a directly named partition's constraint is not yet applied.
+            if run.root.rel(rel).reloptkind == types_pathnodes::RELOPT_BASEREL {
+                include_partition = true;
+            }
+        }
     }
-    if run.root.rel(rel).reloptkind == types_pathnodes::RELOPT_OTHER_MEMBER_REL {
-        // DIVERGENCE (predtest unported): C also refutes self-contradictory
-        // child quals here (plancat.c:1695 predicate_refuted_by(safe, safe))
-        // -- e.g. WHERE x > 10 AND x < 5 leaves children un-pruned; rows
-        // identical, plan/EXPLAIN differ. Cannot be loud without evaluating
-        // the refutation itself.
-        // C proves exclusion from the child's CHECK constraints
-        // (get_relation_constraints + predicate_refuted_by).
-        let rte = run.rte(rti);
-        let has_checks = table::table_open(run.mcx, rte.relid, types_rel::NoLock)
-            .and_then(|r| {
-                let n = r.rd_att.constr.as_deref().map(|c| c.num_check).unwrap_or(0);
-                r.close(types_rel::NoLock)?;
-                Ok(n)
-            })
-            .unwrap_or(0)
-            > 0;
-        assert!(
-            !has_checks,
-            "relation_excluded_by_constraints (plancat.c): child CHECK constraints \
-             under constraint_exclusion=partition; constraint-exclusion lane unported"
-        );
+
+    // Self-contradictory immutable restrictions exclude the scan; weak
+    // refutation suffices (restrictions vs restrictions).
+    let mut safe_restrictions: mcx::PgVec<'_, types_nodes::Node<'_>> = mcx::PgVec::new_in(mcx);
+    let mut baserestrict_clauses: mcx::PgVec<'_, types_nodes::Node<'_>> = mcx::PgVec::new_in(mcx);
+    for i in 0..run.root.rel(rel).baserestrictinfo.len() {
+        let rid = run.root.rel(rel).baserestrictinfo[i];
+        let clause = *run.root.expr_node(run.root.rinfo(rid).clause);
+        baserestrict_clauses.push(clause);
+        if !clauses::contain_mutable_functions(clause)? {
+            safe_restrictions.push(clause);
+        }
     }
-    false
+    if crate::predtest::predicate_refuted_by(mcx, &safe_restrictions, &safe_restrictions, true)? {
+        return Ok(true);
+    }
+
+    let rte = run.rte(rti);
+    if rte.rtekind != RTEKind::RTE_RELATION {
+        return Ok(false);
+    }
+
+    // NO INHERIT constraints apply only when not scanning children too;
+    // attnotnull is NO INHERIT unless the table is partitioned.
+    let include_noinherit = !rte.inh;
+    let include_notnull = !rte.inh || rte.relkind == types_rel::RELKIND_PARTITIONED_TABLE;
+    let rte_relid = rte.relid;
+
+    let constraint_pred = crate::plancat::get_relation_constraints(
+        run,
+        rte_relid,
+        rel,
+        include_noinherit,
+        include_notnull,
+        include_partition,
+    )?;
+
+    // CHECK constraints may contain mutable functions; ignore those members.
+    let mut safe_constraints: mcx::PgVec<'_, types_nodes::Node<'_>> = mcx::PgVec::new_in(mcx);
+    for &pred in constraint_pred.iter() {
+        if !clauses::contain_mutable_functions(pred)? {
+            safe_constraints.push(pred);
+        }
+    }
+
+    // Strong refutation of the ANDed constraints by the full restriction list
+    // (volatile OR subclauses are still usable for deduction, hence not
+    // safe_restrictions here).
+    if crate::predtest::predicate_refuted_by(mcx, &safe_constraints, &baserestrict_clauses, false)?
+    {
+        return Ok(true);
+    }
+
+    Ok(false)
 }
 
 // set_dummy_rel_pathlist (allpaths.c). C marks a dummy with a childless
@@ -398,7 +444,7 @@ fn set_append_rel_size(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgRe
         if crate::joinrels::is_dummy_rel(&run.root, childrel) {
             continue;
         }
-        if relation_excluded_by_constraints(run, childrel, child_rti as usize) {
+        if relation_excluded_by_constraints(run, childrel, child_rti as usize)? {
             set_dummy_rel_pathlist(run, childrel)?;
             continue;
         }
@@ -619,7 +665,7 @@ fn set_values_pathlist(run: &mut PlannerRun<'_>, rel: RelId) -> PgResult<()> {
 }
 
 fn set_plain_rel_size(run: &mut PlannerRun<'_>, rel: RelId) -> PgResult<()> {
-    crate::indxpath::check_index_predicates(run, rel);
+    crate::indxpath::check_index_predicates(run, rel)?;
     crate::costsize::set_baserel_size_estimates(run, rel)?;
     Ok(())
 }

@@ -28,6 +28,8 @@
 extern crate alloc;
 
 pub mod optimizer_plan;
+pub mod relids;
+pub mod run;
 
 use core::cell::{Cell, RefCell};
 
@@ -636,7 +638,7 @@ pub struct BitmapOrPath<'mcx> {
 #[derive(Clone, Debug)]
 pub struct TidPath<'mcx> {
     pub path: Path<'mcx>,
-    pub tidquals: PgVec<'mcx, NodeId>,
+    pub tidquals: PgVec<'mcx, RinfoId>,
 }
 
 #[derive(Clone, Debug)]
@@ -2284,3 +2286,72 @@ mcx::forget_safe_enum!(
         LimitPath(x),
     },
 );
+
+// selfuncs.h defaults (shared with the cost model).
+pub const DEFAULT_INEQ_SEL: f64 = 0.3333333333333333;
+pub const DEFAULT_NUM_DISTINCT: f64 = 200.0;
+
+pub fn tag16(tag: ::types_nodes::NodeTag) -> u16 {
+    tag as u16
+}
+
+// IS_OUTER_JOIN (nodes.h) over pathnodes' u32 JoinType.
+pub fn is_outer_join(jointype: u32) -> bool {
+    matches!(
+        jointype,
+        JOIN_LEFT
+            | JOIN_FULL
+            | JOIN_RIGHT
+            | JOIN_ANTI
+            | JOIN_RIGHT_ANTI
+    )
+}
+
+// SemiAntiJoinFactors (pathnodes.h).
+#[derive(Clone, Copy, Default)]
+pub struct SemiAntiJoinFactors {
+    pub outer_match_frac: f64,
+    pub match_count: f64,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum PathKeysComparison {
+    Equal,
+    Better1,
+    Better2,
+    Different,
+}
+
+pub fn compare_pathkeys(keys1: &[PathKey], keys2: &[PathKey]) -> PathKeysComparison {
+    for (k1, k2) in keys1.iter().zip(keys2.iter()) {
+        if k1 != k2 {
+            return PathKeysComparison::Different;
+        }
+    }
+    match keys1.len().cmp(&keys2.len()) {
+        core::cmp::Ordering::Greater => PathKeysComparison::Better1,
+        core::cmp::Ordering::Less => PathKeysComparison::Better2,
+        core::cmp::Ordering::Equal => PathKeysComparison::Equal,
+    }
+}
+
+// Returns (contained, n leading matches).
+pub fn pathkeys_count_contained_in(keys1: &[PathKey], keys2: &[PathKey]) -> (bool, usize) {
+    let mut n = 0;
+    for (k1, k2) in keys1.iter().zip(keys2.iter()) {
+        if k1 != k2 {
+            return (false, n);
+        }
+        n += 1;
+    }
+    (n == keys1.len(), n)
+}
+
+pub fn pathkeys_contained_in(keys1: &[PathKey], keys2: &[PathKey]) -> bool {
+    matches!(
+        compare_pathkeys(keys1, keys2),
+        PathKeysComparison::Equal | PathKeysComparison::Better2
+    )
+}
+
+mcx::forget_safe_struct!(SemiAntiJoinFactors { outer_match_frac, match_count });

@@ -346,8 +346,61 @@ pub fn pull_var_clause<'mcx>(
     Ok(cx.varlist)
 }
 
-pub fn flatten_join_alias_vars<'mcx>(_query: &Query<'mcx>, _node: Node<'mcx>) -> ! {
-    panic!("flatten_join_alias_vars deferred: RowExpr/PlaceHolderVar vocabulary unported");
+/// C mutator, detection form: join-alias Vars only arise from merged
+/// USING/NATURAL columns or join whole-row refs, both unported (loud in the
+/// parser), so C's rewrite is the identity on every tree that parses today.
+pub fn flatten_join_alias_vars<'mcx>(
+    query: &Query<'mcx>,
+    node: Node<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    struct W<'a, 'mcx> {
+        query: &'a Query<'mcx>,
+        sublevels_up: i64,
+    }
+    impl<'mcx> NodeWalker<'mcx> for W<'_, 'mcx> {
+        fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+            match node.node_tag() {
+                NodeTag::T_Var => {
+                    let v = node.as_var().unwrap();
+                    if v.varlevelsup as i64 == self.sublevels_up {
+                        let rte = self
+                            .query
+                            .rtable
+                            .nth(v.varno as usize - 1)
+                            .as_range_tbl_entry()
+                            .expect("rtable cell");
+                        if rte.rtekind == types_nodes::parsenodes::RTEKind::RTE_JOIN {
+                            panic!(
+                                "flatten_join_alias_vars (var.c): join alias Var \
+                                 (varno {}); join-using lane",
+                                v.varno
+                            );
+                        }
+                    }
+                    Ok(false)
+                }
+                t @ NodeTag::T_PlaceHolderVar => deferred("flatten_join_alias_vars", t),
+                NodeTag::T_Query => {
+                    let q = node.as_query().unwrap();
+                    self.sublevels_up += 1;
+                    let r = query_tree_walker(q, self, nodes_core::QTW_IGNORE_JOINALIASES);
+                    self.sublevels_up -= 1;
+                    r
+                }
+                _ => expression_tree_walker(node, self),
+            }
+        }
+
+        fn visit_query_ref(&mut self, q: &'mcx Query<'mcx>) -> PgResult<bool> {
+            self.sublevels_up += 1;
+            let r = query_tree_walker(q, self, nodes_core::QTW_IGNORE_JOINALIASES);
+            self.sublevels_up -= 1;
+            r
+        }
+    }
+    let mut w = W { query, sublevels_up: 0 };
+    w.visit(node)?;
+    Ok(node)
 }
 
 // flatten_group_exprs (var.c), root == NULL arm: GROUP-RTE Vars replaced by

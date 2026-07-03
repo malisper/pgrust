@@ -192,7 +192,24 @@ pub fn CreateCommandTag(parsetree: Node<'_>) -> CommandTag {
             }
         }
         T_ExplainStmt => CMDTAG_EXPLAIN,
-        T_CreateTableAsStmt => payload_gap("CreateCommandTag", "CreateTableAsStmt"),
+        T_CreateTableAsStmt => {
+            let stmt = parsetree
+                .as_variant::<types_nodes::rawnodes::CreateTableAsStmt>()
+                .expect("CreateTableAsStmt");
+            match stmt.objtype {
+                types_nodes::parsenodes::ObjectType::OBJECT_TABLE => {
+                    if stmt.is_select_into {
+                        CMDTAG_SELECT_INTO
+                    } else {
+                        CMDTAG_CREATE_TABLE_AS
+                    }
+                }
+                types_nodes::parsenodes::ObjectType::OBJECT_MATVIEW => {
+                    CMDTAG_CREATE_MATERIALIZED_VIEW
+                }
+                other => panic!("unexpected CreateTableAsStmt.objtype {other:?}"),
+            }
+        }
         T_RefreshMatViewStmt => CMDTAG_REFRESH_MATERIALIZED_VIEW,
         T_AlterSystemStmt => CMDTAG_ALTER_SYSTEM,
         T_VariableSetStmt => {

@@ -90,6 +90,7 @@ bgwriter = { path = "../../backend/postmaster/bgwriter" }
 walwriter = { path = "../../backend/postmaster/walwriter" }
 postmaster_startup = { path = "../../backend/postmaster/startup" }
 rewrite_handler = { path = "../../backend/rewrite/rewrite_handler" }
+rewrite_define = { path = "../../backend/rewrite/rewrite_define" }
 bufmgr = { path = "../../backend/storage/buffer/bufmgr" }
 fd = { path = "../../backend/storage/file/fd" }
 dsm_core = { path = "../../backend/storage/ipc/dsm_core" }
@@ -111,6 +112,7 @@ predicate = { path = "../../backend/storage/lmgr/predicate" }
 parallel = { path = "../../backend/access/transam/parallel" }
 spi = { path = "../../backend/executor/spi" }
 sql_functions = { path = "../../backend/executor/sql_functions" }
+plpgsql = { path = "../../pl/plpgsql" }
 trigger = { path = "../../backend/commands/trigger" }
 ri_triggers = { path = "../../backend/utils/adt/ri_triggers" }
 pruneheap = { path = "../../backend/access/heap/pruneheap" }
@@ -125,6 +127,8 @@ tcop_dest = { path = "../../backend/tcop/dest" }
 postgres = { path = "../../backend/tcop/postgres" }
 pquery = { path = "../../backend/tcop/pquery" }
 explain = { path = "../../backend/commands/explain" }
+commands_createas = { path = "../../backend/commands/createas" }
+commands_matview = { path = "../../backend/commands/matview" }
 prepare = { path = "../../backend/commands/prepare" }
 commands_async = { path = "../../backend/commands/commands_async" }
 portalcmds = { path = "../../backend/commands/portalcmds" }
@@ -150,6 +154,7 @@ catcache = { path = "../../backend/utils/cache/catcache" }
 inval = { path = "../../backend/utils/cache/inval" }
 lsyscache = { path = "../../backend/utils/cache/lsyscache" }
 plancache = { path = "../../backend/utils/cache/plancache" }
+costsize = { path = "../../backend/optimizer/path/costsize" }
 planner = { path = "../../backend/optimizer/plan/planner" }
 relcache = { path = "../../backend/utils/cache/relcache" }
 relcache_build = { path = "../../backend/utils/cache/relcache_build" }

@@ -810,6 +810,7 @@ pub fn expr_type(node: Node<'_>) -> Oid {
             }
         }
         NodeTag::T_CaseExpr => node.as_case_expr().unwrap().casetype,
+        NodeTag::T_CoalesceExpr => node.as_coalesce_expr().unwrap().coalescetype,
         NodeTag::T_CaseTestExpr => node.as_case_test_expr().unwrap().typeId,
         NodeTag::T_CoerceViaIO => node.as_coerce_via_io().unwrap().resulttype,
         NodeTag::T_CoerceToDomain => node.as_coerce_to_domain().unwrap().resulttype,
@@ -962,6 +963,11 @@ fn setup_walker(node: Node<'_>, info: &mut SetupInfo) {
         }
         NodeTag::T_CoerceToDomain => setup_walker(node.as_coerce_to_domain().unwrap().arg, info),
         NodeTag::T_CoerceToDomainValue => {}
+        NodeTag::T_CoalesceExpr => {
+            for e in node.as_coalesce_expr().unwrap().args.iter() {
+                setup_walker(e, info);
+            }
+        }
         tag => panic!("execexpr setup walker: node family {tag:?} not ported"),
     }
 }
@@ -1296,6 +1302,28 @@ pub(crate) fn init_expr_rec<'mcx>(
                 "EEOP_DOMAIN_TESTVAL_EXT (CoerceToDomainValue outside a domain-check compile)",
             ),
         },
+        // Each arg evaluates into the result slot; a non-null short-circuits.
+        NodeTag::T_CoalesceExpr => {
+            let co = node.as_coalesce_expr().unwrap();
+            debug_assert!(!co.args.is_nil());
+            let mut adjust_jumps: PgVec<'_, usize> = PgVec::new_in(mcx);
+            for e in co.args.iter() {
+                init_expr_rec(e, state, mcx, out, agg, params, sub)?;
+                adjust_jumps.push(state.steps.len());
+                push_step(state, mcx, Step::JumpIfNotNull { jumpdone: u32::MAX, out })?;
+            }
+            let done = state.steps.len() as u32;
+            for ix in adjust_jumps.iter() {
+                match &mut state.steps[*ix] {
+                    Step::JumpIfNotNull { jumpdone, .. } => {
+                        debug_assert_eq!(*jumpdone, u32::MAX);
+                        *jumpdone = done;
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            Ok(())
+        }
         tag => panic!("execexpr ExecInitExprRec: node family {tag:?} not ported"),
     }
 }
@@ -2039,7 +2067,9 @@ pub(crate) fn ready_expr(state: &mut ExprState<'_>) {
             | Step::AggStrictInputCheck1 { jumpnull, .. } => {
                 assert!((*jumpnull as usize) < len, "strict-input jump target out of range");
             }
-            Step::Jump { jumpdone } | Step::JumpIfNotTrue { jumpdone, .. } => {
+            Step::Jump { jumpdone }
+            | Step::JumpIfNotTrue { jumpdone, .. }
+            | Step::JumpIfNotNull { jumpdone, .. } => {
                 assert!((*jumpdone as usize) < len, "case jump target out of range");
             }
             Step::FuncExpr { call, .. }

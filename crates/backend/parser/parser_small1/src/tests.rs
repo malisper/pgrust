@@ -291,15 +291,17 @@ fn make_const_numeric_literal_uses_numeric_in() {
 }
 
 #[test]
-#[should_panic(expected = "bit_in")]
-fn make_const_bitstring_literal_is_deferred() {
+fn make_const_bitstring_literal() {
     let ctx = MemoryContext::new("t");
     let pstate = make_parsestate(ctx.mcx(), None);
     let b = A_Const {
         val: Some(ValUnion::BitString(types_nodes::node_tree::BitString { bsval: "b101" })),
         location: 0,
     };
-    let _ = make_const(ctx.mcx(), &pstate, &b);
+    let con = make_const(ctx.mcx(), &pstate, &b).unwrap();
+    let con = con.as_const().unwrap();
+    assert_eq!((con.consttype, con.constlen, con.constbyval), (1560, -1, false));
+    assert!(!con.constisnull);
 }
 
 #[test]

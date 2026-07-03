@@ -1810,6 +1810,12 @@ pub fn expression_returns_set(node: Node<'_>) -> bool {
         NodeTag::T_RelabelType => expression_returns_set(node.as_relabel_type().unwrap().arg),
         NodeTag::T_CoerceViaIO => expression_returns_set(node.as_coerce_via_io().unwrap().arg),
         NodeTag::T_CollateExpr => expression_returns_set(node.as_collate_expr().unwrap().arg),
+        NodeTag::T_CoalesceExpr => {
+            node.as_coalesce_expr().unwrap().args.iter().any(expression_returns_set)
+        }
+        NodeTag::T_MinMaxExpr => {
+            node.as_min_max_expr().unwrap().args.iter().any(expression_returns_set)
+        }
         NodeTag::T_SQLValueFunction => false,
         NodeTag::T_NullTest => {
             node.as_null_test().unwrap().arg.is_some_and(expression_returns_set)

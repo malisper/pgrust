@@ -212,13 +212,21 @@ fn unknown_node_label_is_loud() {
 }
 
 #[test]
-#[should_panic(expected = "arm unported (view SELECT-rule set)")]
-fn rte_values_arm_is_loud() {
+fn rte_values_roundtrips() {
     let ctx = MemoryContext::new("t");
-    let _ = stringToNode(
+    let n = stringToNode(
         ctx.mcx(),
-        "{RANGETBLENTRY :alias <> :eref <> :rtekind 5 :values_lists <>}",
-    );
+        "{RANGETBLENTRY :alias <> :eref {ALIAS :aliasname *VALUES* :colnames (\"column1\")} \
+         :rtekind 5 :values_lists (({CONST :consttype 23 :consttypmod -1 :constcollid 0 \
+         :constlen 4 :constbyval true :constisnull false :location -1 \
+         :constvalue 4 [ 7 0 0 0 0 0 0 0 ]})) :coltypes (o 23) :coltypmods (i -1) \
+         :colcollations (o 0) :lateral false :inFromCl true :securityQuals <>}",
+    )
+    .expect("VALUES RTE reads");
+    let rte = n.as_range_tbl_entry().expect("RangeTblEntry");
+    assert_eq!(rte.values_lists.len(), 1);
+    assert_eq!(rte.coltypes.nth(0), 23);
+    assert_eq!(rte.coltypmods.nth(0), -1);
 }
 
 #[test]

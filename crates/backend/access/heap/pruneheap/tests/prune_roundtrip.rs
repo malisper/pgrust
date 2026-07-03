@@ -380,7 +380,7 @@ fn test_relation<'mcx>(mcx: Mcx<'mcx>) -> RelationData<'mcx> {
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
-            rd_hastriggers: false,
+            rd_hastriggers: false, rd_hasrules: false,
     }
 }
 
@@ -553,7 +553,7 @@ fn prune_dead_hot_chain_wal_and_page_parity() {
         CURRENT_XID.store(if i == 3 { ABORTED_XID } else { COMMITTED_XID }, Relaxed);
         let mut tup =
             heap_form_tuple(mcx, &tupdesc, &[::datum::Datum::from_i32(*val)], &[false]).unwrap();
-        heap_insert(&rel, tup.as_tuple_mut(), 7, 0).unwrap();
+        heap_insert(&rel, tup.as_tuple_mut(), 7, 0, None).unwrap();
         assert_eq!(tup.as_tuple().t_self, ItemPointerData::new(0, (i + 1) as u16));
     }
 
