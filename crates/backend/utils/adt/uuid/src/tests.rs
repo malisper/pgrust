@@ -454,3 +454,80 @@ fn binary_wire_round_trip() {
         assert_eq!(si.cursor, si.len());
     }
 }
+
+fn gmt_session() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        // SAFETY: single-threaded test init, before any getenv (adt_timestamp
+        // tests' precedent).
+        unsafe { std::env::set_var("PGRUST_TZDIR", "/usr/share/zoneinfo") };
+        pgtz::init_seams();
+        adt_timestamp::init_seams();
+        guc_tables::init_seams();
+        elog::init_seams();
+        fd::init_seams();
+        xact_seams::get_current_sub_transaction_id::set(|| 1);
+    });
+    adt_datetime::tz::pg_timezone_initialize();
+    adt_datetime::tz::set_session_timezone(adt_datetime::tz::pg_tzset(b"GMT"));
+}
+
+fn wall_clock_us() -> i64 {
+    let d = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap();
+    d.as_micros() as i64 - PG_EPOCH_UNIX_USECS
+}
+
+#[test]
+fn gen_random_uuid_is_valid_v4() {
+    let mut seen = std::collections::HashSet::new();
+    for _ in 0..64 {
+        let u = gen_random_uuid().unwrap();
+        assert_eq!(u[6] >> 4, 4);
+        assert_eq!(u[8] & 0xc0, 0x80);
+        assert_eq!(uuid_extract_version(&u), Some(4));
+        assert_eq!(uuid_extract_timestamp(&u), None);
+        assert!(seen.insert(u));
+    }
+}
+
+#[test]
+fn uuidv7_monotonic_and_valid() {
+    let mut prev = uuidv7().unwrap();
+    assert_eq!(uuid_extract_version(&prev), Some(7));
+    for _ in 0..4096 {
+        let u = uuidv7().unwrap();
+        assert_eq!(u[6] >> 4, 7);
+        assert_eq!(u[8] & 0xc0, 0x80);
+        assert!(uuid_internal_cmp(&u, &prev) > 0);
+        prev = u;
+    }
+}
+
+#[test]
+fn uuidv7_timestamp_tracks_wall_clock() {
+    let before = wall_clock_us();
+    let u = uuidv7().unwrap();
+    let after = wall_clock_us();
+    let ts = uuid_extract_timestamp(&u).unwrap();
+    // ms-truncated extraction; the burst guard can also push it slightly ahead.
+    assert!(ts >= before - US_PER_MS && ts <= after + US_PER_MS, "{ts} not in [{before}, {after}]");
+}
+
+#[test]
+fn uuidv7_interval_shifts_timestamp() {
+    gmt_session();
+    let hour = adt_datetime::Interval { time: 3_600_000_000, day: 0, month: 0 };
+    let now = wall_clock_us();
+    let u = uuidv7_interval(&hour).unwrap();
+    let ts = uuid_extract_timestamp(&u).unwrap();
+    assert!((ts - now - 3_600_000_000).abs() < 60_000_000, "{ts} vs {now}");
+    assert_eq!(uuid_extract_version(&u), Some(7));
+
+    let back = adt_datetime::Interval { time: -3_600_000_000, day: 0, month: 0 };
+    let u = uuidv7_interval(&back).unwrap();
+    let ts = uuid_extract_timestamp(&u).unwrap();
+    let now = wall_clock_us();
+    assert!((now - ts - 3_600_000_000).abs() < 60_000_000, "{ts} vs {now}");
+}

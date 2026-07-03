@@ -7,6 +7,7 @@ pub mod builtins;
 pub mod io;
 pub mod math;
 pub mod ops;
+pub mod random;
 pub mod var;
 
 #[cfg(test)]

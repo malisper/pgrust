@@ -6,7 +6,10 @@ publish.workspace = true
 
 [dependencies]
 adt_datetime = { path = "../adt_datetime" }
+adt_timestamp = { path = "../adt_timestamp" }
 datum = { path = "../../../../_support/types/datum" }
+libc = "0.2"
+pg_strong_random = { path = "../../../../port/pg_strong_random" }
 hashfn = { path = "../../../../common/hashfn" }
 mcx = { path = "../../../../_support/mcx" }
 pqformat = { path = "../../../libpq/pqformat" }
@@ -14,3 +17,10 @@ stringinfo = { path = "../../../../_support/types/stringinfo" }
 types_core = { path = "../../../../_support/types/types_core" }
 types_error = { path = "../../../../_support/types/types_error" }
 types_fmgr = { path = "../../../../_support/types/fmgr" }
+
+[dev-dependencies]
+elog = { path = "../../error/elog" }
+fd = { path = "../../../storage/file/fd" }
+guc_tables = { path = "../../misc/guc_tables" }
+pgtz = { path = "../../../timezone/pgtz" }
+xact_seams = { path = "../../../access/transam/xact_seams" }
