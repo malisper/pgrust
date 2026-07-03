@@ -1781,6 +1781,7 @@ dependencies = [
  "types_nodes",
  "types_rel",
  "types_scan",
+ "types_tuple",
  "varlena",
 ]
 
@@ -5309,22 +5310,43 @@ dependencies = [
 name = "parse_utilcmd"
 version = "0.1.0"
 dependencies = [
+ "aclchk",
  "catalog_namespace",
+ "commands_comment",
  "datum",
  "elog",
  "fmgr_core",
+ "fmgr_seams",
+ "genam",
  "gram_core",
+ "indexam",
+ "indexcmds_seams",
  "keywords",
  "lsyscache",
  "mbutils",
  "mcx",
+ "miscinit",
+ "outfuncs",
  "parser_seams",
  "parser_small1",
+ "pg_constraint",
+ "pg_depend",
+ "readfuncs",
+ "rel_vocab",
+ "relation",
+ "relcache",
+ "rewrite_manip",
  "syscache_seams",
+ "table",
+ "tupdesc",
+ "types_array",
  "types_core",
  "types_error",
  "types_fmgr",
  "types_nodes",
+ "types_rel",
+ "types_scan",
+ "types_tuple",
 ]
 
 [[package]]
@@ -7245,6 +7267,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rewrite_manip"
+version = "0.1.0"
+dependencies = [
+ "mcx",
+ "nodes_core",
+ "types_core",
+ "types_error",
+ "types_nodes",
+]
+
+[[package]]
 name = "ri_triggers"
 version = "0.1.0"
 dependencies = [
@@ -8383,6 +8416,7 @@ dependencies = [
  "pg_type",
  "pgstat",
  "predicate_seams",
+ "readfuncs",
  "rel_vocab",
  "relation_seams",
  "relcache",
