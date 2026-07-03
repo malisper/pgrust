@@ -25,7 +25,7 @@ use types_tuple::varatt;
 
 pub const VARHDRSZ: usize = datum::varlena::VARHDRSZ;
 
-pub(crate) fn image_with_header<'mcx>(mcx: Mcx<'mcx>, payload_len: usize) -> PgResult<PgVec<'mcx, u8>> {
+pub fn image_with_header<'mcx>(mcx: Mcx<'mcx>, payload_len: usize) -> PgResult<PgVec<'mcx, u8>> {
     mcx::check_alloc_size(payload_len + VARHDRSZ)?;
     let mut image = mcx::vec_with_capacity_in(mcx, VARHDRSZ + payload_len)?;
     mcx::vec_append_bytes(&mut image, &[0u8; VARHDRSZ])?;
