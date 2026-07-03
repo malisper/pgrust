@@ -155,12 +155,21 @@ pub fn transformAssignedExpr<'mcx>(
     };
     let (attrtype, attrtypmod) = (att.atttypid, att.atttypmod);
 
-    if expr.node_tag() == NodeTag::T_SetToDefault {
-        panic!(
-            "transformAssignedExpr (parse_target.c): SetToDefault type-stamping \
-             arm unported — unit backend-parser-parse-target"
-        );
-    }
+    // Stamp the placeholder with the column's type so exprType is usable;
+    // the rewriter substitutes the real default (rewriteTargetListIU).
+    let expr = if let Some(d) = expr.as_set_to_default() {
+        Node::mk(
+            mcx,
+            types_nodes::primnodes::SetToDefault {
+                typeId: attrtype,
+                typeMod: attrtypmod,
+                collation: att.attcollation,
+                location: d.location,
+            },
+        )?
+    } else {
+        expr
+    };
     if !indirection.is_nil() {
         panic!(
             "transformAssignedExpr (parse_target.c): transformAssignmentIndirection \
