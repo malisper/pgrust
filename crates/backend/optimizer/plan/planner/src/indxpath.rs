@@ -599,7 +599,7 @@ fn get_index_paths<'mcx>(
     clauses: &IndexClauseSet<'mcx>,
     bitindexpaths: &mut PgVec<'mcx, PathId>,
 ) -> PgResult<()> {
-    let indexpaths = build_index_paths(run, rel, index, clauses, false)?;
+    let indexpaths = build_index_paths(run, rel, index, clauses, index.predOK.get(), false)?;
     for &ipath in indexpaths.iter() {
         if index.amhasgettuple {
             add_path(run, rel, ipath);
@@ -628,6 +628,7 @@ fn build_index_paths<'mcx>(
     rel: RelId,
     index: &'mcx IndexOptInfo<'mcx>,
     clauses: &IndexClauseSet<'mcx>,
+    useful_predicate: bool,
     bitmap: bool,
 ) -> PgResult<PgVec<'mcx, PathId>> {
     let mcx = run.mcx;
@@ -673,7 +674,11 @@ fn build_index_paths<'mcx>(
 
     let index_only_scan = !bitmap && check_index_only(run, rel, index);
 
-    if !index_clauses.is_empty() || !useful_pathkeys.is_empty() || index_only_scan {
+    if !index_clauses.is_empty()
+        || !useful_pathkeys.is_empty()
+        || useful_predicate
+        || index_only_scan
+    {
         let forward_clauses = {
             let mut v: PgVec<'mcx, IndexClause<'mcx>> = PgVec::new_in(mcx);
             v.extend(index_clauses.iter().cloned());
@@ -943,23 +948,54 @@ fn assert_no_similar_or_groups<'mcx>(
     Ok(())
 }
 
-// build_paths_for_OR (indxpath.c); partial indexes loud upstream, so the
-// useful_predicate leg is dead.
+// build_paths_for_OR (indxpath.c).
 fn build_paths_for_or<'mcx>(
     run: &mut PlannerRun<'mcx>,
     rel: RelId,
     clauses: &[RinfoId],
     other_clauses: &[RinfoId],
 ) -> PgResult<PgVec<'mcx, PathId>> {
-    let mut result: PgVec<'mcx, PathId> = PgVec::new_in(run.mcx);
+    let mcx = run.mcx;
+    let mut result: PgVec<'mcx, PathId> = PgVec::new_in(mcx);
+    let mut all_clause_nodes: Option<PgVec<'mcx, Node<'mcx>>> = None;
     let nindexes = run.root.rel(rel).indexlist.len();
     for i in 0..nindexes {
         let index = run.root.rel(rel).indexlist[i];
         if !index.amhasgetbitmap {
             continue;
         }
-        debug_assert!(index.indpred.is_empty());
-        let mut clauseset = IndexClauseSet::new(run.mcx, index.nkeycolumns as usize);
+        let mut useful_predicate = false;
+        if !index.indpred.is_empty() {
+            if !index.predOK.get() {
+                if all_clause_nodes.is_none() {
+                    let mut v: PgVec<'mcx, Node<'mcx>> = PgVec::new_in(mcx);
+                    for &r in clauses.iter().chain(other_clauses.iter()) {
+                        v.push(*run.root.expr_node(run.root.rinfo(r).clause));
+                    }
+                    all_clause_nodes = Some(v);
+                }
+                let mut indpred: PgVec<'mcx, Node<'mcx>> = PgVec::new_in(mcx);
+                for &pid in index.indpred.iter() {
+                    indpred.push(*run.root.expr_node(pid));
+                }
+                if !crate::predtest::predicate_implied_by(
+                    mcx,
+                    &indpred,
+                    all_clause_nodes.as_ref().unwrap(),
+                    false,
+                )? {
+                    continue;
+                }
+                let mut other_nodes: PgVec<'mcx, Node<'mcx>> = PgVec::new_in(mcx);
+                for &r in other_clauses.iter() {
+                    other_nodes.push(*run.root.expr_node(run.root.rinfo(r).clause));
+                }
+                if !crate::predtest::predicate_implied_by(mcx, &indpred, &other_nodes, false)? {
+                    useful_predicate = true;
+                }
+            }
+        }
+        let mut clauseset = IndexClauseSet::new(mcx, index.nkeycolumns as usize);
         for &r in clauses {
             match_clause_to_index(run, r, index, &mut clauseset)?;
         }
@@ -969,7 +1005,7 @@ fn build_paths_for_or<'mcx>(
         for &r in other_clauses {
             match_clause_to_index(run, r, index, &mut clauseset)?;
         }
-        let paths = build_index_paths(run, rel, index, &clauseset, true)?;
+        let paths = build_index_paths(run, rel, index, &clauseset, useful_predicate, true)?;
         result.extend(paths.iter().copied());
     }
     Ok(result)

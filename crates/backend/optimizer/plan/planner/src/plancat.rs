@@ -255,11 +255,17 @@ pub fn get_relation_info<'mcx>(
             info.immediate = ind.indimmediate;
             info.hypothetical = false;
 
-            info.pages = bufmgr_seams::relation_get_number_of_blocks_in_fork::call(
-                &index_rel,
-                types_core::ForkNumber::MAIN_FORKNUM,
-            )?;
-            info.tuples = run.root.rel(rel).tuples;
+            if info.indpred.is_empty() {
+                info.pages = bufmgr_seams::relation_get_number_of_blocks_in_fork::call(
+                    &index_rel,
+                    types_core::ForkNumber::MAIN_FORKNUM,
+                )?;
+                info.tuples = run.root.rel(rel).tuples;
+            } else {
+                let (pages, tuples, _) = estimate_rel_size(&index_rel, None, 1)?;
+                info.pages = pages;
+                info.tuples = tuples.min(run.root.rel(rel).tuples);
+            }
             info.tree_height = Cell::new(if am_is_btree {
                 nbtree::bt_getrootheight(&index_rel)?
             } else {
@@ -364,6 +370,40 @@ pub fn estimate_rel_size(
 ) -> PgResult<(BlockNumber, f64, f64)> {
     let relkind = rel.rd_rel.relkind;
     if !relkind_has_table_am(relkind) {
+        if relkind == types_rel::RELKIND_INDEX {
+            let reported_pages = bufmgr_seams::relation_get_number_of_blocks_in_fork::call(
+                rel,
+                types_core::ForkNumber::MAIN_FORKNUM,
+            )?;
+            if reported_pages == 0 {
+                return Ok((0, 0.0, 0.0));
+            }
+            let mut curpages = reported_pages;
+            let mut relpages = rel.rd_rel.relpages as BlockNumber;
+            let reltuples = rel.rd_rel.reltuples as f64;
+            let relallvisible = rel.rd_rel.relallvisible as BlockNumber;
+            // Discount the metapage (OK for btree/hash/GIN, suspect for GiST).
+            if relpages > 0 {
+                curpages -= 1;
+                relpages -= 1;
+            }
+            let density = if reltuples >= 0.0 && relpages > 0 {
+                reltuples / relpages as f64
+            } else {
+                let tuple_width = get_rel_data_width(rel, None, 1)? as usize
+                    + HEAP_OVERHEAD_BYTES_PER_TUPLE;
+                (HEAP_USABLE_BYTES_PER_PAGE / tuple_width) as f64
+            };
+            let tuples = (density * curpages as f64).round_ties_even();
+            let allvisfrac = if relallvisible == 0 || curpages == 0 {
+                0.0
+            } else if relallvisible as f64 >= curpages as f64 {
+                1.0
+            } else {
+                relallvisible as f64 / curpages as f64
+            };
+            return Ok((reported_pages, tuples, allvisfrac));
+        }
         if relkind == RELKIND_SEQUENCE || relkind == types_rel::RELKIND_PARTITIONED_TABLE {
             // C final else arm: just use whatever's in pg_class (partitioned
             // tables are storageless; reached with ONLY / zero partitions).
