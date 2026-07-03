@@ -1079,6 +1079,36 @@ fn lookup_pg_statistic_bundle<'mcx>(
     Ok(Some(bundle))
 }
 
+fn decode_pg_statistic_values<'mcx>(
+    mcx: Mcx<'mcx>,
+    valuetype: Oid,
+    image: &[u8],
+) -> PgResult<PgVec<'mcx, Datum>> {
+    if image.is_empty() {
+        return Ok(PgVec::new_in(mcx));
+    }
+    // Via the seam, not the local impl: pg_statistic-only rigs mock TYPEOID.
+    let ty = syscache_seams::lookup_pg_type_shape::call(valuetype)?
+        .expect("stavalues element type has a pg_type row");
+    datum::array_build::deconstruct_array_image(
+        mcx,
+        image,
+        ty.typlen,
+        ty.typbyval,
+        ty.typalign as u8,
+    )
+}
+
+fn decode_pg_statistic_numbers<'mcx>(mcx: Mcx<'mcx>, image: &[u8]) -> PgResult<PgVec<'mcx, f32>> {
+    if image.is_empty() {
+        return Ok(PgVec::new_in(mcx));
+    }
+    let elems = datum::array_build::deconstruct_array_image(mcx, image, 4, true, b'i')?;
+    let mut out: PgVec<'mcx, f32> = mcx::vec_with_capacity_in(mcx, elems.len())?;
+    out.extend(elems.iter().map(|d| d.as_f32()));
+    Ok(out)
+}
+
 fn lookup_pg_aggregate_shape(
     aggfnoid: Oid,
 ) -> PgResult<Option<syscache_seams::PgAggregateShape>> {
@@ -1235,5 +1265,7 @@ pub(crate) fn install() {
 pub(crate) fn install_pg_statistic() {
     syscache_seams::lookup_pg_statistic_shape::set(lookup_pg_statistic_shape);
     syscache_seams::lookup_pg_statistic_bundle::set(lookup_pg_statistic_bundle);
+    syscache_seams::decode_pg_statistic_values::set(decode_pg_statistic_values);
+    syscache_seams::decode_pg_statistic_numbers::set(decode_pg_statistic_numbers);
     syscache_seams::pg_statistic_stawidth::set(pg_statistic_stawidth);
 }
