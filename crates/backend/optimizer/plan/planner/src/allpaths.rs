@@ -642,6 +642,9 @@ fn set_rel_consider_parallel(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -
         RTEKind::RTE_CTE => {
             return Ok(()); // tuplestores aren't shared among workers
         }
+        RTEKind::RTE_RESULT => {
+            // RESULT RTEs, in themselves, are no problem.
+        }
         other => panic!("set_rel_consider_parallel (allpaths.c): {other:?}; M2 lane"),
     }
 
