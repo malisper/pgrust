@@ -25,12 +25,6 @@ pub fn fc_int8send(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRes
     Ok(varlena_result(crate::int8send(mcx, a.value.as_i64())?))
 }
 
-#[cold]
-#[inline(never)]
-fn soft_context_unported(name: &str) -> ! {
-    panic!("{name}: fcinfo.context soft-error demux is fmgr-core's unit (not ported)")
-}
-
 // C pallocs the cstring result into the per-row context; here the backend
 // thread owns retained scratch (rules 7/10; fn_extra was measured out: its
 // dyn-Any downcast is a per-row virtual type_id call). The returned Datum
@@ -41,13 +35,12 @@ std::thread_local! {
 }
 
 pub fn fc_int8in(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    if fcinfo.context.is_some() {
-        soft_context_unported("int8in");
-    }
     // SAFETY: catalog arg 0 of int8in is cstring (typlen -2).
     let s = unsafe { fcinfo.arg_cstring(0) };
     let num = String::from_utf8_lossy(s.to_bytes());
-    Ok(Datum::from_i64(crate::int8in(&num, None)?))
+    // SAFETY: context, if set, rides per the ErrorSaveNode contract for this call.
+    let esc = unsafe { fcinfo.soft_error_context() };
+    Ok(Datum::from_i64(crate::int8in(&num, esc)?))
 }
 
 pub fn fc_int8out(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
