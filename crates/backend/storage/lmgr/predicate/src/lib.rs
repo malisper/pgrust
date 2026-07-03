@@ -149,6 +149,12 @@ pub fn PostPrepare_PredicateLocks(_xid: TransactionId) -> PgResult<()> {
     Ok(())
 }
 
+// No SERIALIZABLE xact can have prepared under the stub SSI, so there is
+// never per-xact predicate state to reassign or clean up here.
+pub fn PredicateLockTwoPhaseFinish(_xid: TransactionId, _is_commit: bool) -> PgResult<()> {
+    Ok(())
+}
+
 pub fn init_seams() {
     predicate_seams::predicate_lock_relation::set(PredicateLockRelation);
     predicate_seams::predicate_lock_page::set(PredicateLockPage);
