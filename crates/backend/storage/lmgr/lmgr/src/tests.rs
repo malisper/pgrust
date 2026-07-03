@@ -152,6 +152,8 @@ fn make_rel(mcx: mcx::Mcx<'_>, oid: Oid) -> RelationData<'_> {
         rd_amcache_hash: Default::default(),
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
+            rd_trigdesc: Default::default(),
+            rd_hastriggers: false,
     }
 }
 

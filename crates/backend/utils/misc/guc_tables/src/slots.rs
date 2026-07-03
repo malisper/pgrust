@@ -55,6 +55,12 @@ impl<T: Copy> GucSlot<T> {
         self.slot.get().is_some()
     }
 
+    // Idempotent variant for owners whose init can race between test threads
+    // (the checked install's check-then-set is not atomic).
+    pub fn install_if_absent(&self, value: T) {
+        let _ = self.slot.set(value);
+    }
+
     pub fn get(&self) -> T {
         *self.slot.get().unwrap_or_else(|| {
             panic!(

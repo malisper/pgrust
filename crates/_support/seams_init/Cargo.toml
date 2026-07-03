@@ -105,6 +105,7 @@ predicate = { path = "../../backend/storage/lmgr/predicate" }
 parallel = { path = "../../backend/access/transam/parallel" }
 spi = { path = "../../backend/executor/spi" }
 trigger = { path = "../../backend/commands/trigger" }
+ri_triggers = { path = "../../backend/utils/adt/ri_triggers" }
 pruneheap = { path = "../../backend/access/heap/pruneheap" }
 pg_string = { path = "../../common/string" }
 lmgr = { path = "../../backend/storage/lmgr/lmgr" }

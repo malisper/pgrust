@@ -1,9 +1,10 @@
 // nodeModifyTable.c, single-relation INSERT/UPDATE/DELETE arms. The subplan
 // stays with the ExecProcNode dispatcher (execmain owns the node enum;
 // nodesort precedent) — exec_modify_table takes fetch and EvalPlanQual
-// closures. MERGE, ON CONFLICT, triggers and FDW batching are loud named
-// panics; RETURNING projects OLD/NEW-free lists (those are loud at
-// projection build).
+// closures. AFTER ROW triggers queue via the trigger crate (RI lane);
+// BEFORE/INSTEAD/statement triggers, MERGE, ON CONFLICT and FDW batching are
+// loud named panics; RETURNING projects OLD/NEW-free lists (those are loud
+// at projection build).
 #![allow(non_snake_case)]
 
 use std::rc::Rc;
@@ -59,6 +60,8 @@ pub struct ModifyTableState<'mcx> {
     // ri_CheckConstraintExprs (built on first ExecRelCheck, per C); each
     // compiled qual rides with its constraint name for the 23514 report.
     check_exprs: Option<mcx::PgVec<'mcx, CheckExpr<'mcx>>>,
+    // C ri_TrigDesc; Rc clone of the relcache entry's desc (CopyTriggerDesc).
+    trigdesc: Option<Rc<types_trigger::TriggerDesc<'static>>>,
 }
 
 // ri_onConflict (OnConflictSetState) + ri_onConflictArbiterIndexes. The DO
@@ -115,12 +118,37 @@ pub fn exec_init_modify_table<'mcx>(
     debug_assert!(estate.es_unpruned_relids.is_member(rti as i32));
 
     estate.exec_init_result_relation(rti)?;
-    {
+    let trigdesc = {
         let rel = estate.es_relations[(rti - 1) as usize]
             .as_ref()
             .expect("result relation opened");
         check_valid_result_rel(rel);
-    }
+        if rel.rd_hastriggers {
+            let td = relcache::RelationGetTriggerDesc(rel.rd_id)?;
+            if let Some(td) = &td {
+                let unported = td.trig_insert_before_row
+                    || td.trig_insert_instead_row
+                    || td.trig_update_before_row
+                    || td.trig_update_instead_row
+                    || td.trig_delete_before_row
+                    || td.trig_delete_instead_row
+                    || td.trig_insert_before_statement
+                    || td.trig_insert_after_statement
+                    || td.trig_update_before_statement
+                    || td.trig_update_after_statement
+                    || td.trig_delete_before_statement
+                    || td.trig_delete_after_statement;
+                if unported {
+                    panic!(
+                        "ExecInitModifyTable (nodeModifyTable.c): BEFORE/INSTEAD/                         statement triggers unported (AFTER ROW RI lane only)"
+                    );
+                }
+            }
+            td
+        } else {
+            None
+        }
+    };
 
     // The UPDATE/DELETE row identity: the plain-relation leg carries a junk
     // ctid attribute in the subplan targetlist (wholerow legs are the
@@ -259,6 +287,7 @@ pub fn exec_init_modify_table<'mcx>(
         project_returning,
         on_conflict,
         check_exprs: None,
+        trigdesc,
     })
 }
 
@@ -375,6 +404,7 @@ pub fn exec_end_modify_table(mt: &mut ModifyTableState<'_>) {
     mt.project_returning = None;
     mt.on_conflict = None;
     mt.check_exprs = None;
+    mt.trigdesc = None;
 }
 
 // ExecInitInsertProjection (nodeModifyTable.c). INSERT subplans carry no junk
@@ -820,6 +850,10 @@ fn exec_update<'mcx>(
         }
     }
 
+    if let Some(td) = &mt.trigdesc {
+        ::trigger::ExecARUpdateTriggers(mcx, rel, td, *tupleid, slot.base().tts_tid)?;
+    }
+
     if mt.canSetTag {
         estate.es_processed += 1;
     }
@@ -924,6 +958,14 @@ fn exec_delete<'mcx>(
             }
             other => panic!("ExecDelete (nodeModifyTable.c): unexpected {other:?}"),
         }
+    }
+
+    if let Some(td) = &mt.trigdesc {
+        let EStateData { es_relations, es_query_cxt, .. } = &*estate;
+        let rel = es_relations[(mt.result_rti - 1) as usize]
+            .as_ref()
+            .expect("result relation opened");
+        ::trigger::ExecARDeleteTriggers(*es_query_cxt, rel, td, *tupleid)?;
     }
 
     if mt.canSetTag {
@@ -1162,6 +1204,15 @@ fn exec_insert<'mcx>(
                 execindexing::ExecInsertIndexTuples(mcx, indexes, rel, slot, false, None, &[])?;
             }
         }
+    }
+
+    if let Some(td) = &mt.trigdesc {
+        let EStateData { es_relations, es_tupleTable, .. } = &mut *estate;
+        let rel = es_relations[(mt.result_rti - 1) as usize]
+            .as_ref()
+            .expect("result relation opened");
+        let slot = &es_tupleTable[slot_id.0 as usize];
+        ::trigger::ExecARInsertTriggers(mcx, rel, td, slot.base().tts_tid)?;
     }
 
     if mt.canSetTag {
@@ -1633,7 +1684,7 @@ fn plan_output_mismatch(detail: &'static str) -> Box<PgError> {
 
 mcx::forget_safe_nodrop!(NewColSrc);
 
-// Exempt: indexes/snapshot_any/project_returning/on_conflict/check_exprs (and
+// Exempt: indexes/snapshot_any/project_returning/on_conflict/check_exprs/trigdesc (and
 // each CheckExpr's state) are released in exec_end_modify_table; CmdType is
 // no-drop, const-proven below.
 const _: () = assert!(!core::mem::needs_drop::<CmdType>());
@@ -1643,5 +1694,5 @@ mcx::forget_safe_struct!(
         ri_newTupleSlot, ri_oldTupleSlot, ri_ReturningSlot,
         ri_projectNewInfoValid, ri_RowIdAttNo, update_cols, returning_slot;
         operation, indexes, snapshot_any, project_returning, on_conflict,
-        check_exprs },
+        check_exprs, trigdesc },
 );

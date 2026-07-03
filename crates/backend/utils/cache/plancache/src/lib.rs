@@ -171,8 +171,8 @@ pub fn init_seams() {
             const { core::cell::Cell::new(guc_tables::consts::PLAN_CACHE_MODE_AUTO) };
     }
     // installed() guard: test fixtures shim this slot before init_seams.
-    if !guc_tables::vars::plan_cache_mode.installed() {
-        guc_tables::vars::plan_cache_mode.install(guc_tables::GucVarAccessors {
+    {
+        guc_tables::vars::plan_cache_mode.install_if_absent(guc_tables::GucVarAccessors {
             get: || PLAN_CACHE_MODE.with(core::cell::Cell::get),
             set: |v| PLAN_CACHE_MODE.with(|c| c.set(v)),
         });

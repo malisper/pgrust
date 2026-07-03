@@ -545,7 +545,10 @@ fn dispatch_switch<'mcx>(
             let stmt_node =
                 unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
             let stmts = parse_utilcmd::transformCreateStmt(mcx, stmt_node, source_text)?;
-            for stmt in stmts.iter() {
+            for (i, stmt) in stmts.iter().enumerate() {
+                if i > 0 {
+                    xact::CommandCounterIncrement()?;
+                }
                 match stmt.node_tag() {
                     T_CreateStmt => {
                         let cstmt = stmt
@@ -562,6 +565,58 @@ fn dispatch_switch<'mcx>(
                         // toast_options: stmt.options is nil (gated in
                         // DefineRelation), so transformRelOptions yields 0.
                         catalog_toasting::NewRelationCreateToastTable(mcx, relid)?;
+                    }
+                    // Constraint-generated IndexStmt (transformIndexConstraints):
+                    // the relation is already locked by DefineRelation's
+                    // transaction; C recurses through ProcessUtility.
+                    T_IndexStmt => {
+                        let istmt = stmt
+                            .as_variant::<types_nodes::rawnodes::IndexStmt>()
+                            .expect("IndexStmt");
+                        let rv_node = istmt.relation.expect("IndexStmt without relation");
+                        let rv = rel_vocab::RangeVar {
+                            catalogname: rv_node.catalogname,
+                            schemaname: rv_node.schemaname,
+                            relname: rv_node.relname.expect("IndexStmt relation relname"),
+                            inh: rv_node.inh,
+                            relpersistence: rv_node.relpersistence,
+                            location: rv_node.location,
+                        };
+                        let mut cb = |rv2: &rel_vocab::RangeVar<'_>,
+                                      rel_id: types_core::Oid,
+                                      old_rel_id: types_core::Oid|
+                         -> PgResult<()> {
+                            range_var_callback_owns_relation(mcx, rv2, rel_id, old_rel_id)
+                        };
+                        let relid = catalog_namespace::RangeVarGetRelidExtended(
+                            &rv,
+                            types_rel::ShareLock,
+                            0,
+                            Some(&mut cb),
+                        )?;
+                        let is_alter_table = istmt.transformed;
+                        parse_utilcmd::transformIndexStmt(relid, istmt, source_text)?;
+                        indexcmds::DefineIndex(
+                            mcx,
+                            relid,
+                            istmt,
+                            types_core::InvalidOid,
+                            is_alter_table,
+                            true,
+                            true,
+                            false,
+                            false,
+                        )?;
+                    }
+                    T_AlterTableStmt => {
+                        let astmt = stmt
+                            .as_variant::<types_nodes::parsenodes::AlterTableStmt>()
+                            .expect("AlterTableStmt");
+                        let lockmode = tablecmds::AlterTableGetLockLevel(&astmt.cmds);
+                        let relid =
+                            tablecmds::AlterTableLookupRelation(mcx, astmt, lockmode)?;
+                        debug_assert!(relid != types_core::InvalidOid);
+                        tablecmds::AlterTable(mcx, relid, lockmode, astmt, source_text)?;
                     }
                     _ => handler_gap("ProcessUtilitySlow side statements (blist/alist)"),
                 }

@@ -2146,6 +2146,20 @@ impl<'mcx> Parser<'mcx> {
             }
             2265 => *yyval = YYSTYPE::Ival(types_nodes::SubLinkType::ALL_SUBLINK as i32),
             2268..=2279 => *yyval = YYSTYPE::Keyword(MATH_OPS[rule - 2268]),
+            // any_operator: all_Op | ColId '.' any_operator
+            1238 => {
+                let op = view.v(1).str_val();
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, Node::mk_string(mcx, op)?)?);
+            }
+            1239 => {
+                let name = view.v(1).str_val();
+                let rest = view.v(3).list();
+                let mut list = NodeList::make1(mcx, Node::mk_string(mcx, name)?)?;
+                for n in rest.iter() {
+                    list.lappend(mcx, n)?;
+                }
+                *yyval = YYSTYPE::List(list);
+            }
             2280 | 2282 | 2284 => {
                 let op = view.v(1).str_val();
                 *yyval = YYSTYPE::List(NodeList::make1(mcx, Node::mk_string(mcx, op)?)?);

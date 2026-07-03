@@ -302,6 +302,8 @@ fn test_relation<'mcx>(mcx: Mcx<'mcx>, oid: Oid) -> Relation<'mcx> {
         rd_amcache_hash: Default::default(),
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
+            rd_trigdesc: Default::default(),
+            rd_hastriggers: false,
         pgstat_enabled: std::cell::Cell::new(false),
     };
     Relation::open(data, None)

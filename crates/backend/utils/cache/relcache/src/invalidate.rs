@@ -18,6 +18,7 @@ pub(crate) fn RelationInvalidateRelation(rel: &RelationData<'static>) {
     let _ = smgr::RelationCloseSmgr(rel);
     rel.rd_isvalid.set(false);
     *rel.rd_indexlist.borrow_mut() = None;
+    *rel.rd_trigdesc.borrow_mut() = None;
     crate::rules::forget(rel.rd_id);
     crate::indexattr::forget(rel.rd_id);
 }
@@ -151,6 +152,8 @@ fn RelationReloadIndexInfo(
         rd_amcache_hash: Default::default(),
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
+            rd_trigdesc: Default::default(),
+            rd_hastriggers: false,
     });
     build::RelationInitPhysicalAddr(&newrel)?;
     copy_preserved(held, &newrel);
@@ -204,6 +207,8 @@ fn RelationReloadNailed(
         rd_amcache_hash: Default::default(),
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
+            rd_trigdesc: Default::default(),
+            rd_hastriggers: false,
     });
     build::RelationInitPhysicalAddr(&newrel)?;
     copy_preserved(held, &newrel);

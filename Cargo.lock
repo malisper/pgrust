@@ -1101,6 +1101,7 @@ dependencies = [
  "miscinit",
  "miscinit_seams",
  "nbtsort",
+ "pg_constraint",
  "pg_depend",
  "pgstat",
  "relcache",
@@ -2320,6 +2321,7 @@ dependencies = [
  "tableam",
  "tcop_dest",
  "tidbitmap",
+ "trigger",
  "tstore_receiver",
  "tupdesc",
  "tuplestore",
@@ -4634,6 +4636,7 @@ dependencies = [
  "readfuncs",
  "rel_vocab",
  "relation_seams",
+ "relcache",
  "relcache_seams",
  "resowner",
  "rewrite_handler",
@@ -4660,6 +4663,7 @@ dependencies = [
  "transam_seams",
  "transam_xlog",
  "transam_xlog_seams",
+ "trigger",
  "trigger_seams",
  "tuplestore",
  "tuplestore_hold_seams",
@@ -4674,6 +4678,7 @@ dependencies = [
  "types_slot",
  "types_snapshot",
  "types_storage",
+ "types_trigger",
  "types_tuple",
  "varsup",
  "waitevent_seams",
@@ -6727,6 +6732,7 @@ dependencies = [
  "types_error",
  "types_rel",
  "types_storage",
+ "types_trigger",
  "types_tuple",
  "xact_seams",
 ]
@@ -6753,6 +6759,7 @@ dependencies = [
  "types_fmgr",
  "types_rel",
  "types_scan",
+ "types_trigger",
  "types_tuple",
  "varlena",
 ]
@@ -6767,6 +6774,7 @@ dependencies = [
  "types_error",
  "types_fmgr",
  "types_rel",
+ "types_trigger",
  "types_tuple",
 ]
 
@@ -7016,6 +7024,33 @@ dependencies = [
  "seam_core",
  "types_error",
  "types_nodes",
+]
+
+[[package]]
+name = "ri_triggers"
+version = "0.1.0"
+dependencies = [
+ "cache_syscache",
+ "datum",
+ "fmgr_seams",
+ "heapam",
+ "lsyscache",
+ "mcx",
+ "miscinit",
+ "ri_triggers_seams",
+ "spi",
+ "superuser",
+ "table",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_rel",
+ "types_snapshot",
+ "types_trigger",
+ "types_tuple",
+ "varlena",
+ "xact",
+ "xact_seams",
 ]
 
 [[package]]
@@ -7280,6 +7315,7 @@ dependencies = [
  "relpath",
  "resowner",
  "rewrite_handler",
+ "ri_triggers",
  "rmgr",
  "s_lock",
  "scan_fgram",
@@ -8019,6 +8055,7 @@ dependencies = [
  "aclchk",
  "aclchk_seams",
  "adt_acl",
+ "cache_syscache",
  "catalog",
  "catalog_dependency",
  "catalog_heap",
@@ -8039,6 +8076,7 @@ dependencies = [
  "init_small",
  "inval",
  "lmgr",
+ "lsyscache",
  "mcx",
  "miscinit",
  "outfuncs",
@@ -8053,6 +8091,7 @@ dependencies = [
  "pgstat",
  "predicate_seams",
  "rel_vocab",
+ "relcache",
  "relcache_seams",
  "rewrite_handler",
  "snapmgr",
@@ -8061,12 +8100,15 @@ dependencies = [
  "table",
  "tableam",
  "tablecmds_seams",
+ "trigger",
  "tupdesc",
+ "types_array",
  "types_core",
  "types_error",
  "types_nodes",
  "types_rel",
  "types_scan",
+ "types_trigger",
  "types_tuple",
  "vars",
  "xact",
@@ -8286,9 +8328,28 @@ dependencies = [
 name = "trigger"
 version = "0.0.0"
 dependencies = [
+ "catalog",
+ "catalog_indexing",
+ "datum",
+ "fmgr_seams",
+ "genam",
+ "heapam",
+ "heaptuple",
+ "inval",
+ "mcx",
+ "miscinit",
+ "pg_depend",
+ "relcache",
+ "ri_triggers_seams",
+ "table",
  "trigger_seams",
  "types_core",
  "types_error",
+ "types_rel",
+ "types_scan",
+ "types_snapshot",
+ "types_trigger",
+ "types_tuple",
  "xact",
 ]
 
@@ -8537,6 +8598,7 @@ dependencies = [
  "types_hash",
  "types_nbtree",
  "types_storage",
+ "types_trigger",
  "types_tuple",
 ]
 

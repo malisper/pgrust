@@ -392,6 +392,8 @@ fn heap_relation_data(mcx: Mcx<'_>) -> RelationData<'_> {
         rd_amcache_hash: Default::default(),
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
+            rd_trigdesc: Default::default(),
+            rd_hastriggers: false,
     }
 }
 
@@ -446,6 +448,8 @@ fn index_relation_data(mcx: Mcx<'_>, unique: bool) -> RelationData<'_> {
         rd_amcache_hash: Default::default(),
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
+            rd_trigdesc: Default::default(),
+            rd_hastriggers: false,
     }
 }
 

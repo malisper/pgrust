@@ -35,7 +35,13 @@ pub(crate) fn executor_run_seam(
 }
 
 pub(crate) fn executor_finish_seam(h: QueryDescHandle) -> PgResult<()> {
-    querydesc::with_qd(h, standard_executor_finish)
+    // The registry borrow must drop before the after-trigger firing loop:
+    // RI checks re-enter the executor through SPI (fresh QueryDesc entries).
+    let fire_triggers = querydesc::with_qd(h, standard_executor_finish)?;
+    if fire_triggers {
+        ::trigger::AfterTriggerEndQuery()?;
+    }
+    Ok(())
 }
 
 /// `ExecutorRewind` (execMain.c).
@@ -274,10 +280,9 @@ pub fn standard_executor_start(qd: &mut QueryDescData, mut eflags: i32) -> PgRes
     let es_snapshot = snapmgr::RegisterSnapshot(qd.snapshot.as_ref())?;
     let es_crosscheck = snapmgr::RegisterSnapshot(qd.crosscheck_snapshot.as_ref())?;
 
-    // AfterTriggerBeginQuery (trigger.c): a bare query-depth bump. No CREATE
-    // TRIGGER path exists, so the after-trigger queue is provably empty and
-    // the begin/end pair is a no-op; revisit when trigger.c lands.
-    let _after_trigger_begin_query = eflags & (EXEC_FLAG_SKIP_TRIGGERS | EXEC_FLAG_EXPLAIN_ONLY);
+    if eflags & (EXEC_FLAG_SKIP_TRIGGERS | EXEC_FLAG_EXPLAIN_ONLY) == 0 {
+        ::trigger::AfterTriggerBeginQuery();
+    }
 
     let source_text = qd.source_text();
     let instrument = qd.instrument_options;
@@ -557,7 +562,10 @@ pub(crate) fn execute_plan<'m, 'mcx>(
 }
 
 /// `standard_ExecutorFinish` (execMain.c).
-pub fn standard_executor_finish(qd: &mut QueryDescData) -> PgResult<()> {
+// C fires AfterTriggerEndQuery before setting es_finished; the caller fires
+// it after this returns (registry-borrow discipline) — es_finished has no
+// reader during the firing loop.
+pub fn standard_executor_finish(qd: &mut QueryDescData) -> PgResult<bool> {
     let exec = qd.exec.as_mut().expect("ExecutorFinish before ExecutorStart");
     exec.with_mut(|data| {
         let es = &mut data.estate;
@@ -565,11 +573,9 @@ pub fn standard_executor_finish(qd: &mut QueryDescData) -> PgResult<()> {
         assert!(!es.es_finished, "ExecutorFinish called twice");
         // ExecPostprocessPlan: only ModifyTable registers aux nodes, unported.
         debug_assert!(es.es_auxmodifytables.is_empty());
-        // AfterTriggerEndQuery: no-op while the after-trigger queue is
-        // provably empty (see AfterTriggerBeginQuery in standard_executor_start).
         es.es_finished = true;
-    });
-    Ok(())
+        Ok::<bool, Box<types_error::PgError>>(es.es_top_eflags & EXEC_FLAG_SKIP_TRIGGERS == 0)
+    })
 }
 
 /// `standard_ExecutorEnd` (execMain.c); dropping the bundle is

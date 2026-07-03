@@ -163,6 +163,8 @@ pub(crate) fn build_desc_data(target_rel_id: Oid) -> PgResult<Option<RelationDat
             rd_amcache_hash: Default::default(),
             rd_supportinfo: core::cell::RefCell::new(supportinfo),
             rd_indexlist: Default::default(),
+            rd_trigdesc: Default::default(),
+            rd_hastriggers: scanned.relhastriggers,
         };
         RelationInitPhysicalAddr(&data)?;
 
@@ -279,6 +281,8 @@ pub fn formrdesc(cat: &BootstrapCatalog) -> PgResult<()> {
         rd_amcache_hash: Default::default(),
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
+            rd_trigdesc: Default::default(),
+            rd_hastriggers: false,
     };
     RelationInitPhysicalAddr(&data)?;
 

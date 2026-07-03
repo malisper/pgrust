@@ -13,3 +13,22 @@ trigger_seams = { path = "../trigger_seams" }
 types_core = { path = "../../../_support/types/types_core" }
 xact = { path = "../../access/transam/xact" }
 types_error = { path = "../../../_support/types/types_error" }
+mcx = { path = "../../../_support/mcx" }
+datum = { path = "../../../_support/types/datum" }
+types_rel = { path = "../../../_support/types/rel" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+types_scan = { path = "../../../_support/types/types_scan" }
+types_snapshot = { path = "../../../_support/types/snapshot", package = "types_snapshot" }
+types_trigger = { path = "../../../_support/types/types_trigger" }
+ri_triggers_seams = { path = "../../utils/adt/ri_triggers_seams" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+heaptuple = { path = "../../access/common/heaptuple" }
+table = { path = "../../access/table/table" }
+genam = { path = "../../access/index/genam" }
+heapam = { path = "../../access/heap/heapam" }
+catalog = { path = "../../catalog/catalog" }
+catalog_indexing = { path = "../../catalog/catalog_indexing" }
+pg_depend = { path = "../../catalog/pg_depend" }
+relcache = { path = "../../utils/cache/relcache" }
+inval = { path = "../../utils/cache/inval" }
+miscinit = { path = "../../utils/init/miscinit" }

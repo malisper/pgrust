@@ -61,3 +61,10 @@ aclchk_seams = { path = "../../catalog/aclchk_seams" }
 pgstat = { path = "../../utils/activity/pgstat" }
 predicate_seams = { path = "../../storage/lmgr/predicate_seams" }
 relcache_seams = { path = "../../utils/cache/relcache_seams" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+cache_syscache = { path = "../../utils/cache/cache_syscache" }
+array = { package = "types_array", path = "../../../_support/types/array" }
+relcache = { path = "../../utils/cache/relcache" }
+types_trigger = { path = "../../../_support/types/types_trigger" }
+trigger = { path = "../trigger" }
+
