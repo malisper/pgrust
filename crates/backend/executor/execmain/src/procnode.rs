@@ -44,6 +44,7 @@ pub enum PlanStateNode<'mcx> {
     Material(PgBox<'mcx, MaterialNode<'mcx>>),
     Unique(PgBox<'mcx, UniqueNode<'mcx>>),
     Limit(LimitNode<'mcx>),
+    LockRows(LockRowsNode<'mcx>),
     BitmapHeapScan(PgBox<'mcx, BitmapHeapPlanState<'mcx>>),
     BitmapIndexScan(::nodebitmapindexscan::BitmapIndexScanState<'mcx>),
     BitmapAnd(PgBox<'mcx, BitmapCombineState<'mcx>>),
@@ -149,6 +150,11 @@ pub struct LimitNode<'mcx> {
     pub outer: PgBox<'mcx, PlanStateNode<'mcx>>,
 }
 
+pub struct LockRowsNode<'mcx> {
+    pub state: ::nodelockrows::LockRowsState<'mcx>,
+    pub outer: PgBox<'mcx, PlanStateNode<'mcx>>,
+}
+
 // The Unique node's outer child lives here (nodesort/nodeagg precedent).
 pub struct UniqueNode<'mcx> {
     pub state: ::nodeunique::UniqueState<'mcx>,
@@ -206,6 +212,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::Material(_) => None,
             PlanStateNode::Unique(u) => Some(u.state.ps_ExprContext),
             PlanStateNode::Limit(l) => Some(l.state.ps_ExprContext),
+            PlanStateNode::LockRows(_) => None,
             PlanStateNode::NestLoop(nl) => Some(nl.state.ps_ExprContext),
             PlanStateNode::HashJoin(hj) => Some(hj.state.ps_ExprContext),
             PlanStateNode::MergeJoin(mj) => Some(mj.state.ps_ExprContext),
@@ -243,6 +250,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             | PlanStateNode::IndexScan(_)
             | PlanStateNode::IndexOnlyScan(_)
             | PlanStateNode::Limit(_)
+            | PlanStateNode::LockRows(_)
             | PlanStateNode::BitmapHeapScan(_)
             | PlanStateNode::Append(_)
             | PlanStateNode::SubqueryScan(_) => crate::exec_type_from_tl(&plan.targetlist),
@@ -499,6 +507,20 @@ pub fn exec_init_node<'mcx>(
                 });
             let state = ::nodelimit::exec_init_limit(limit_plan, estate, eflags)?;
             PlanStateNode::Limit(LimitNode {
+                state,
+                outer: ::mcx::alloc_in(estate.es_query_cxt, outer)?,
+            })
+        }
+        NodeTag::T_LockRows => {
+            let lr_plan = node.as_lock_rows().unwrap();
+            let outer_plan_node = lr_plan.plan.lefttree.unwrap_or_else(|| {
+                panic!("ExecInitLockRows (nodeLockRows.c): LockRows without an outer plan")
+            });
+            let outer = exec_init_node(Some(outer_plan_node), estate, eflags)?
+                .expect("ExecInitNode of a non-NULL outer plan");
+            let outer_tlist = &outer_plan_node.as_plan().expect("plan node").targetlist;
+            let state = ::nodelockrows::exec_init_lock_rows(lr_plan, estate, eflags, outer_tlist)?;
+            PlanStateNode::LockRows(LockRowsNode {
                 state,
                 outer: ::mcx::alloc_in(estate.es_query_cxt, outer)?,
             })
@@ -845,6 +867,7 @@ pub fn exec_proc_node<'mcx>(
         PlanStateNode::Material(m) => material_arm(m, estate),
         PlanStateNode::Unique(u) => unique_arm(u, estate),
         PlanStateNode::Limit(l) => limit_arm(l, estate),
+        PlanStateNode::LockRows(l) => lockrows_arm(l, estate),
         PlanStateNode::BitmapHeapScan(b) => bitmap_heap_scan_arm(b, estate),
         PlanStateNode::BitmapIndexScan(_)
         | PlanStateNode::BitmapAnd(_)
@@ -977,6 +1000,12 @@ fn unique_arm<'mcx>(
 fn limit_arm<'mcx>(l: &mut LimitNode<'mcx>, estate: &mut EStateData<'mcx>) -> ProcResult {
     let LimitNode { state, outer } = l;
     ::nodelimit::exec_limit(state, &mut **outer, estate)
+}
+
+#[inline(never)]
+fn lockrows_arm<'mcx>(l: &mut LockRowsNode<'mcx>, estate: &mut EStateData<'mcx>) -> ProcResult {
+    let LockRowsNode { state, outer } = l;
+    ::nodelockrows::exec_lock_rows(state, &mut **outer, estate)
 }
 
 #[inline(never)]
@@ -1205,6 +1234,8 @@ pub fn exec_end_node<'mcx>(
         }
         // C ExecEndLimit only ends the child.
         PlanStateNode::Limit(l) => exec_end_node(&mut l.outer, estate),
+        // C ExecEndLockRows: EvalPlanQualEnd (a no-op on the non-EPQ core) + child.
+        PlanStateNode::LockRows(l) => exec_end_node(&mut l.outer, estate),
         PlanStateNode::BitmapHeapScan(b) => {
             let b = &mut **b;
             exec_end_node(&mut b.bitmapqual, estate)?;
@@ -1284,6 +1315,7 @@ pub fn exec_shutdown_node<'mcx>(node: &mut PlanStateNode<'mcx>, estate: &mut ESt
         PlanStateNode::Material(m) => exec_shutdown_node(&mut m.outer, estate),
         PlanStateNode::Unique(u) => exec_shutdown_node(&mut u.outer, estate),
         PlanStateNode::Limit(l) => exec_shutdown_node(&mut l.outer, estate),
+        PlanStateNode::LockRows(l) => exec_shutdown_node(&mut l.outer, estate),
         PlanStateNode::BitmapHeapScan(b) => exec_shutdown_node(&mut b.bitmapqual, estate),
         PlanStateNode::BitmapAnd(bc) | PlanStateNode::BitmapOr(bc) => {
             for sub in bc.substates.iter_mut() {
@@ -1358,6 +1390,12 @@ impl<'mcx> ::nodelimit::LimitChild<'mcx> for PlanStateNode<'mcx> {
 
     fn set_tuple_bound(&mut self, tuples_needed: i64) {
         exec_set_tuple_bound(tuples_needed, self);
+    }
+}
+
+impl<'mcx> ::nodelockrows::LockRowsChild<'mcx> for PlanStateNode<'mcx> {
+    fn exec_proc(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<Option<ExecSlotId>> {
+        exec_proc_node(self, estate)
     }
 }
 

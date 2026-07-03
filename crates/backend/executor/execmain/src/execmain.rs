@@ -238,7 +238,48 @@ pub(crate) fn init_plan<'mcx>(
         panic!("ExecDoInitialPruning (execPartition.c) not ported");
     }
     if !pstmt.rowMarks.is_nil() {
-        panic!("InitPlan (execMain.c): ExecRowMark lane not ported");
+        let estate = &mut data.estate;
+        let n = estate.es_range_table_size as usize;
+        estate.es_rowmarks.reserve(n);
+        estate.es_rowmarks.extend(core::iter::repeat_n(None, n));
+        for rc_node in &pstmt.rowMarks {
+            let rc = rc_node.as_plan_row_mark().expect("rowMarks cell is a PlanRowMark");
+            if rc.isParent {
+                continue;
+            }
+            let rte = estate.exec_rt_fetch(rc.rti);
+            if rte.rtekind == types_nodes::parsenodes::RTEKind::RTE_RELATION
+                && !estate.es_unpruned_relids.is_member(rc.rti as i32)
+            {
+                continue;
+            }
+            use types_nodes::plannodes::RowMarkType::*;
+            match rc.markType {
+                ROW_MARK_EXCLUSIVE | ROW_MARK_NOKEYEXCLUSIVE | ROW_MARK_SHARE
+                | ROW_MARK_KEYSHARE | ROW_MARK_REFERENCE => {
+                    let rel = estate.exec_get_range_table_relation(rc.rti, false)?;
+                    check_valid_row_mark_rel(rel, rc.markType)?;
+                }
+                ROW_MARK_COPY => panic!(
+                    "InitPlan (execMain.c): ROW_MARK_COPY rowmark (non-relation RTE) \
+                     lane not ported"
+                ),
+            }
+            let erm = ::executils::ExecRowMark {
+                relid: rte.relid,
+                rti: rc.rti,
+                prti: rc.prti,
+                rowmarkId: rc.rowmarkId,
+                markType: rc.markType,
+                strength: rc.strength,
+                waitPolicy: rc.waitPolicy,
+                ermActive: false,
+                curCtid: ::types_tuple::ItemPointerData::default(),
+            };
+            let cell = &mut estate.es_rowmarks[(rc.rti - 1) as usize];
+            debug_assert!(cell.is_none());
+            *cell = Some(erm);
+        }
     }
     if !pstmt.subplans.is_nil() {
         for (i, subplan) in pstmt.subplans.iter().enumerate() {
@@ -466,3 +507,45 @@ const _: () = {
     let _: execmain_seams::executor_run::Signature = executor_run_seam;
     let _: execmain_seams::executor_start::Signature = executor_start_seam;
 };
+
+// CheckValidRowMarkRel (execMain.c); the FDW arm is loud.
+fn check_valid_row_mark_rel(
+    rel: &::types_rel::Relation<'_>,
+    mark_type: ::types_nodes::plannodes::RowMarkType,
+) -> PgResult<()> {
+    use ::types_nodes::plannodes::RowMarkType;
+    use ::types_rel::{
+        RELKIND_FOREIGN_TABLE, RELKIND_MATVIEW, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION,
+        RELKIND_SEQUENCE, RELKIND_TOASTVALUE, RELKIND_VIEW,
+    };
+    let what = match rel.rd_rel.relkind {
+        RELKIND_RELATION | RELKIND_PARTITIONED_TABLE => return Ok(()),
+        RELKIND_SEQUENCE => "sequence",
+        RELKIND_TOASTVALUE => "TOAST relation",
+        RELKIND_VIEW => "view",
+        RELKIND_MATVIEW => {
+            if mark_type == RowMarkType::ROW_MARK_REFERENCE {
+                return Ok(());
+            }
+            "materialized view"
+        }
+        RELKIND_FOREIGN_TABLE => panic!(
+            "CheckValidRowMarkRel (execMain.c): foreign-table RefetchForeignRow \
+             probe; FDW lane"
+        ),
+        _ => "relation",
+    };
+    Err(cannot_lock_rows_in(what, rel))
+}
+
+#[cold]
+#[inline(never)]
+fn cannot_lock_rows_in(what: &str, rel: &::types_rel::Relation<'_>) -> Box<PgError> {
+    use ::types_error::{ErrorLocation, ERRCODE_WRONG_OBJECT_TYPE};
+    let relname = String::from_utf8_lossy(rel.rd_rel.relname.name_str()).into_owned();
+    Box::new(
+        PgError::error(format!("cannot lock rows in {what} \"{relname}\""))
+            .with_sqlstate(ERRCODE_WRONG_OBJECT_TYPE)
+            .with_error_location(ErrorLocation::new("execMain.c", 0, "CheckValidRowMarkRel")),
+    )
+}

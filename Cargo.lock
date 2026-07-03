@@ -2141,6 +2141,7 @@ dependencies = [
  "nodeindexonlyscan",
  "nodeindexscan",
  "nodelimit",
+ "nodelockrows",
  "nodematerial",
  "nodemergejoin",
  "nodemodifytable",
@@ -4235,6 +4236,26 @@ dependencies = [
  "types_scan",
  "types_slot",
  "types_tuple",
+]
+
+[[package]]
+name = "nodelockrows"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "exectuples",
+ "executils",
+ "init_small",
+ "mcx",
+ "postgres_seams",
+ "tableam",
+ "tableam_vocab",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_slot",
+ "types_tuple",
+ "xact_seams",
 ]
 
 [[package]]
@@ -6858,6 +6879,7 @@ dependencies = [
  "nodeindexonlyscan",
  "nodeindexscan",
  "nodelimit",
+ "nodelockrows",
  "nodematerial",
  "nodemergejoin",
  "nodenestloop",
