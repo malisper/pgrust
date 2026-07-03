@@ -342,10 +342,11 @@ fn negative_substring() -> PgError {
     PgError::error("negative substring length not allowed").with_sqlstate(ERRCODE_SUBSTRING_ERROR)
 }
 
-// C: bytea_substring — SQL substring math, then DatumGetByteaPSlice(str, S1-1, L1).
+// C: bytea_substring — SQL substring math, then DatumGetByteaPSlice(str, S1-1, L1);
+// `image` is the raw argument image (the slice fetch is the toast read path).
 pub fn bytea_substring<'mcx>(
     mcx: Mcx<'mcx>,
-    payload: &[u8],
+    image: &[u8],
     s: i32,
     l: i32,
     length_not_specified: bool,
@@ -366,17 +367,9 @@ pub fn bytea_substring<'mcx>(
             }
         }
     };
-
-    let total = payload.len();
-    let begin = ((s1 - 1) as usize).min(total);
-    let take = if l1 < 0 {
-        total - begin
-    } else {
-        (l1 as usize).min(total - begin)
-    };
-    let mut image = image_with_header(mcx, take)?;
-    mcx::vec_append_bytes(&mut image, &payload[begin..begin + take])?;
-    Ok(Varlena::from_image(image))
+    Ok(Varlena::from_image(
+        detoast_seams::detoast_attr_slice::call(mcx, image, s1 - 1, l1)?,
+    ))
 }
 
 // C: byteapos — POSITION(); 1-based, 0 if absent, 1 for the empty pattern.

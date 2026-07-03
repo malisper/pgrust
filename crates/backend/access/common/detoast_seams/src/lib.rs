@@ -9,3 +9,13 @@ use types_error::PgResult;
 seam_core::seam!(
     pub fn detoast_attr<'mcx>(mcx: Mcx<'mcx>, image: &[u8]) -> PgResult<PgVec<'mcx, u8>>
 );
+
+seam_core::seam!(
+    // C detoast_attr_slice: sliceoffset >= 0; slicelength < 0 = to the end.
+    pub fn detoast_attr_slice<'mcx>(
+        mcx: Mcx<'mcx>,
+        image: &[u8],
+        sliceoffset: i32,
+        slicelength: i32,
+    ) -> PgResult<PgVec<'mcx, u8>>
+);

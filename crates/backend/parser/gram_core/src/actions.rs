@@ -1411,6 +1411,60 @@ impl<'mcx> Parser<'mcx> {
                 f.agg_order = agg_order;
                 *yyval = YYSTYPE::Node(Some(f.seal()));
             }
+            // SUBSTRING '(' substr_list ')' — substring(A FROM B FOR C)
+            // becomes substring(A, B, C), SQL-syntax form.
+            2163 => {
+                let f = make_func_call(
+                    mcx,
+                    system_func_name(mcx, "substring")?,
+                    view.v(3).list(),
+                    CoercionForm::COERCE_SQL_SYNTAX,
+                    view.l(1),
+                )?;
+                *yyval = YYSTYPE::Node(Some(f.seal()));
+            }
+            // SUBSTRING '(' func_arg_list_opt ')' — plain call form.
+            2164 => {
+                let f = make_func_call(
+                    mcx,
+                    NodeList::make1(mcx, Node::mk_string(mcx, "substring")?)?,
+                    view.v(3).list(),
+                    CoercionForm::COERCE_EXPLICIT_CALL,
+                    view.l(1),
+                )?;
+                *yyval = YYSTYPE::Node(Some(f.seal()));
+            }
+            // substr_list: FROM..FOR / FOR..FROM / FROM / FOR / SIMILAR..ESCAPE.
+            2322 | 2326 => {
+                let a = view.v(1).node().expect("a_expr");
+                let b = view.v(3).node().expect("a_expr");
+                let c = view.v(5).node().expect("a_expr");
+                *yyval = YYSTYPE::List(NodeList::make3(mcx, a, b, c)?);
+            }
+            2323 => {
+                let a = view.v(1).node().expect("a_expr");
+                let b = view.v(5).node().expect("a_expr");
+                let c = view.v(3).node().expect("a_expr");
+                *yyval = YYSTYPE::List(NodeList::make3(mcx, a, b, c)?);
+            }
+            2324 => {
+                let a = view.v(1).node().expect("a_expr");
+                let b = view.v(3).node().expect("a_expr");
+                *yyval = YYSTYPE::List(NodeList::make2(mcx, a, b)?);
+            }
+            // FOR-only: forcibly cast the length to int4 so resolution picks
+            // substring(text,int4,int4) over substring(text,text).
+            2325 => {
+                let a = view.v(1).node().expect("a_expr");
+                let one = make_int_const(mcx, 1, -1)?;
+                let cast = make_type_cast(
+                    mcx,
+                    view.v(3).node(),
+                    system_type_name(mcx, "int4", NodeList::nil(), -1)?,
+                    -1,
+                )?;
+                *yyval = YYSTYPE::List(NodeList::make3(mcx, a, one, cast)?);
+            }
             // AGGREGATE(*): parameterless, agg_star marks the original form.
             2132 => {
                 let funcname = view.v(1).list();
@@ -3270,6 +3324,14 @@ fn make_string_const_cast<'mcx>(
 
 fn make_int_const<'mcx>(mcx: mcx::Mcx<'mcx>, ival: i32, location: i32) -> PgResult<Node<'mcx>> {
     Node::mk_a_const(mcx, Some(ValUnion::Integer(Integer { ival })), location)
+}
+
+fn system_func_name<'mcx>(mcx: mcx::Mcx<'mcx>, name: &'mcx str) -> PgResult<NodeList<'mcx>> {
+    NodeList::make2(
+        mcx,
+        Node::mk_string(mcx, "pg_catalog")?,
+        Node::mk_string(mcx, name)?,
+    )
 }
 
 fn make_func_call<'mcx>(

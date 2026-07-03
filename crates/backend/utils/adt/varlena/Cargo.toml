@@ -19,3 +19,6 @@ pg_locale_seams = { path = "../pg_locale_seams" }
 detoast_seams = { path = "../../../access/common/detoast_seams" }
 parser_small1 = { path = "../../../parser/parser_small1" }
 wchar = { path = "../../../../common/wchar" }
+
+[dev-dependencies]
+detoast = { path = "../../../access/common/detoast" }

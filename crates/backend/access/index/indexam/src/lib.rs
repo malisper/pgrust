@@ -160,6 +160,19 @@ pub fn index_insert<'mcx>(
     )
 }
 
+/// index_vacuum_cleanup, the amvacuumcleanup dispatch; only the
+/// bulkdelete-free arm is live (nbtree keeps the scan lane loud).
+pub fn index_vacuum_cleanup(indexRelation: &Relation<'_>, analyze_only: bool) -> PgResult<()> {
+    relation_checks(indexRelation)?;
+    match IndexAmKind::from_relam(indexRelation.rd_rel.relam) {
+        IndexAmKind::Btree => nbtree::btvacuumcleanup(indexRelation, analyze_only),
+        #[cfg(test)]
+        IndexAmKind::Mock => Ok(()),
+        #[allow(unreachable_patterns)]
+        _ => mock_outside_tests(),
+    }
+}
+
 pub fn index_insert_cleanup(indexRelation: &Relation<'_>) -> PgResult<()> {
     relation_checks(indexRelation)?;
     let kind = IndexAmKind::from_relam(indexRelation.rd_rel.relam);

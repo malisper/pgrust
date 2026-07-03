@@ -11,3 +11,4 @@ datum = { path = "../datum" }
 types_tuple = { path = "../types_tuple" }
 stringinfo = { path = "../stringinfo" }
 mcx = { path = "../../mcx" }
+detoast_seams = { path = "../../../backend/access/common/detoast_seams" }

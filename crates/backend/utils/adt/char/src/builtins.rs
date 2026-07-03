@@ -75,7 +75,7 @@ pub fn fc_i4tochar(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRes
 
 pub fn fc_text_char(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: arg 0 is a non-null text varlena, live for the call.
-    let t = unsafe { fcinfo.arg_varlena_packed(0) };
+    let t = unsafe { fcinfo.arg_varlena_packed(0)? };
     Ok(Datum::from_char(crate::text_char(t.data())))
 }
 

@@ -62,7 +62,7 @@ fc_sum! {
 #[inline]
 unsafe fn num_arg(fcinfo: &Fcinfo, i: usize) -> PgResult<Num<'_>> {
     // SAFETY: forwarded caller contract.
-    let v = unsafe { fcinfo.arg_varlena_packed(i) };
+    let v = unsafe { fcinfo.arg_varlena_packed(i)? };
     let payload = if v.is_short() {
         v.data_expanded(fcinfo.result_mcx())?
     } else {

@@ -340,6 +340,23 @@ pub fn bt_getrootheight(rel: &Relation<'_>) -> PgResult<i32> {
     Ok(metad.btm_fastlevel as i32)
 }
 
+/// _bt_vacuum_needs_cleanup (nbtree.c): does btvacuumcleanup need a
+/// cleanup-only scan of a bulkdelete-free index?
+pub fn bt_vacuum_needs_cleanup(rel: &Relation<'_>) -> PgResult<bool> {
+    let metapin = bt_getbuf(rel, BTREE_METAPAGE, BT_READ)?;
+    let metad = page_meta(&metapin.page());
+    if metad.btm_version < BTREE_NOVAC_VERSION {
+        bt_relbuf(rel, metapin)?;
+        return Ok(true);
+    }
+    let prev_num_delpages = metad.btm_last_cleanup_num_delpages;
+    bt_relbuf(rel, metapin)?;
+
+    let rel_blocks =
+        bufmgr::relation_get_number_of_blocks_in_fork::call(rel, ForkNumber::MAIN_FORKNUM)?;
+    Ok(prev_num_delpages > 0 && prev_num_delpages > rel_blocks / 20)
+}
+
 /// _bt_metaversion -> (heapkeyspace, allequalimage).
 pub fn bt_metaversion(rel: &Relation<'_>) -> PgResult<(bool, bool)> {
     if let Some(uncached) = prime_amcache(rel)? {

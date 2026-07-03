@@ -23,6 +23,7 @@ pruneheap = { path = "../pruneheap" }
 visibilitymap = { path = "../visibilitymap" }
 freespace = { path = "../../../storage/freespace/freespace" }
 heapam = { path = "../heapam" }
+indexam = { path = "../../index/indexam" }
 heapam_visibility_seams = { path = "../heapam_visibility_seams" }
 bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
 procarray_seams = { path = "../../../storage/ipc/procarray_seams" }

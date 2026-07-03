@@ -26,14 +26,14 @@ pub struct PackedVarlena<'a> {
 
 impl<'a> PackedVarlena<'a> {
     /// Safety: `p` is a live varlena image readable for its full VARSIZE_ANY, unwritten for `'a`.
+    /// Caller guarantees the image is inline (1B-short or 4B-uncompressed).
     #[inline]
     pub unsafe fn from_ptr(p: *const u8) -> PackedVarlena<'a> {
-        // SAFETY: caller contract — header readable. PG_GETARG_*_PP would
-        // detoast external/compressed: loud panic until the detoast unit lands.
+        // SAFETY: caller contract — header readable.
         unsafe {
             if varatt::varatt_is_1b_e(p) || (!varatt::varatt_is_1b(p) && !varatt::varatt_is_4b_u(p))
             {
-                panic!("fmgr: external/compressed varlena argument requires the detoast unit (not ported)");
+                panic!("fmgr: external/compressed varlena where the caller guaranteed an inline image");
             }
         }
         PackedVarlena {
@@ -42,9 +42,16 @@ impl<'a> PackedVarlena<'a> {
         }
     }
 
+
     #[inline]
     pub fn as_ptr(self) -> *const u8 {
         self.ptr
+    }
+
+    #[inline]
+    pub fn image(self) -> &'a [u8] {
+        // SAFETY: from_ptr contract — image readable for its full size.
+        unsafe { core::slice::from_raw_parts(self.ptr, self.size()) }
     }
 
     #[inline]
@@ -100,6 +107,20 @@ impl<'a> PackedVarlena<'a> {
     }
 }
 
+// Detoast copies leak into the arena — C pallocs them in CurrentMemoryContext
+// and the context reset reclaims both.
+#[cold]
+#[inline(never)]
+unsafe fn detoast_arg<'m>(p: *const u8, mcx: Mcx<'m>) -> PgResult<PackedVarlena<'m>> {
+    // SAFETY: caller contract — image readable for its full VARSIZE_ANY.
+    let image = unsafe { core::slice::from_raw_parts(p, varatt::varsize_any(p)) };
+    let flat = detoast_seams::detoast_attr::call(mcx, image)?;
+    Ok(PackedVarlena {
+        ptr: flat.leak().as_ptr(),
+        _image: PhantomData,
+    })
+}
+
 // PG_GETARG_* analogs; like C, by-value reads carry no null check. By-ref
 // reads are `unsafe`: the callee's catalog arg type is the proof.
 impl FunctionCallInfoBaseData {
@@ -149,11 +170,35 @@ impl FunctionCallInfoBaseData {
         self.arg(i).as_usize() as *const u8
     }
 
+    /// C `PG_GETARG_*_PP` (`pg_detoast_datum_packed`): external/compressed
+    /// args detoast into the armed result mcx; inline images borrow.
     /// Safety: arg `i` is a non-null varlena (`typlen == -1`), live for the call.
     #[inline]
-    pub unsafe fn arg_varlena_packed(&self, i: usize) -> PackedVarlena<'_> {
+    pub unsafe fn arg_varlena_packed(&self, i: usize) -> PgResult<PackedVarlena<'_>> {
+        // SAFETY: forwarded caller contract — header readable.
+        unsafe {
+            let p = self.arg_ptr(i);
+            if varatt::varatt_is_1b_e(p) || (!varatt::varatt_is_1b(p) && !varatt::varatt_is_4b_u(p))
+            {
+                return detoast_arg(p, self.result_mcx());
+            }
+            Ok(PackedVarlena {
+                ptr: p,
+                _image: PhantomData,
+            })
+        }
+    }
+
+    /// Raw varlena image of any header form (C passes the raw datum to
+    /// slice-fetching paths like text_substring).
+    /// Safety: arg `i` is a non-null varlena, readable for its full VARSIZE_ANY.
+    #[inline]
+    pub unsafe fn arg_varlena_raw(&self, i: usize) -> &[u8] {
         // SAFETY: forwarded caller contract.
-        unsafe { PackedVarlena::from_ptr(self.arg_ptr(i)) }
+        unsafe {
+            let p = self.arg_ptr(i);
+            core::slice::from_raw_parts(p, varatt::varsize_any(p))
+        }
     }
 
     /// Safety: arg `i` is a non-null `cstring` (`typlen == -2`): live, NUL-terminated.

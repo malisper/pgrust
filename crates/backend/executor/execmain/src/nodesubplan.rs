@@ -217,8 +217,8 @@ fn too_many_rows() -> Box<PgError> {
     )
 }
 
-// datumCopy (datum.c) into es_query_cxt (fold.rs precedent); heap-sourced
-// varlenas can carry short/toast headers — loud until the detoast lane.
+// datumCopy (datum.c) into es_query_cxt (fold.rs precedent); short and toast
+// headers copy verbatim per C, only expanded flattens (no producers: loud).
 fn datum_copy_in<'mcx>(mcx: Mcx<'mcx>, value: Datum_crate::Datum, attlen: i16) -> PgResult<Datum_crate::Datum> {
     let p = value.as_usize() as *const u8;
     if p.is_null() {
@@ -226,15 +226,15 @@ fn datum_copy_in<'mcx>(mcx: Mcx<'mcx>, value: Datum_crate::Datum, attlen: i16) -
     }
     let size = match attlen {
         -1 => {
-            // SAFETY: non-null by-ref varlena datum; header byte readable.
-            let tag = unsafe { *p };
-            assert!(
-                tag & 0x03 == 0,
-                "ExecSetParamPlan (nodeSubplan.c): short/toasted varlena initplan \
-                 result — detoast lane not ported"
-            );
-            // SAFETY: 4B-header form asserted above.
-            unsafe { Datum_crate::VarlenaRef::from_ptr(p).varsize() }
+            // SAFETY: non-null by-ref varlena datum, readable through its header.
+            unsafe {
+                assert!(
+                    !::types_tuple::varatt::varatt_is_external_expanded(p),
+                    "ExecSetParamPlan (nodeSubplan.c): expanded varlena initplan \
+                     result — expanded-object flatten arm has no producers"
+                );
+                ::types_tuple::varatt::varsize_any(p)
+            }
         }
         -2 => {
             let mut n = 0usize;

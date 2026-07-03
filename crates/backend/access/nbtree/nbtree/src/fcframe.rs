@@ -40,8 +40,11 @@ impl OrderProcFrame {
             351 => Ok(::nbt_compare::btint4cmp(left.as_i32(), right.as_i32())),
             842 => Ok(::nbt_compare::btint8cmp(left.as_i64(), right.as_i64())),
             356 => Ok(::nbt_compare::btoidcmp(left.as_oid(), right.as_oid())),
-            360 if key.sk_collation == C_COLLATION_OID
-                || key.sk_collation == POSIX_COLLATION_OID =>
+            // Inline images only: external/compressed keys take the generic
+            // proc call, which detoasts (C's bttextcmp PG_GETARG_TEXT_PP).
+            360 if (key.sk_collation == C_COLLATION_OID
+                || key.sk_collation == POSIX_COLLATION_OID)
+                && unsafe { inline_image(left) && inline_image(right) } =>
             {
                 // SAFETY: text BTORDER args are live non-null (possibly
                 // packed) varlenas for the duration of the compare.
@@ -61,6 +64,17 @@ impl OrderProcFrame {
     #[inline]
     pub fn test(&mut self, key: &mut ScanKeyData, left: Datum, right: Datum) -> PgResult<bool> {
         Ok(self.call(key, left, right)?.as_bool())
+    }
+}
+
+/// # Safety: `d` is a non-null varlena datum with a readable header byte.
+#[inline]
+unsafe fn inline_image(d: Datum) -> bool {
+    let p = d.as_usize() as *const u8;
+    // SAFETY: forwarded caller contract.
+    unsafe {
+        ::types_tuple::varatt::varatt_is_1b(p) && !::types_tuple::varatt::varatt_is_1b_e(p)
+            || ::types_tuple::varatt::varatt_is_4b_u(p)
     }
 }
 

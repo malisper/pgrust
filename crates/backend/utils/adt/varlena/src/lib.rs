@@ -227,6 +227,125 @@ pub fn textoctetlen(t: &[u8]) -> i32 {
     t.len() as i32
 }
 
+// VARDATA_ANY over a guaranteed-inline (short or plain 4B) image.
+fn inline_payload(img: &[u8]) -> &[u8] {
+    debug_assert!(img[0] != 0x01 && (img[0] & 0x03) != 0x02);
+    if img[0] & 0x01 == 0x01 {
+        &img[1..((img[0] >> 1) & 0x7F) as usize]
+    } else {
+        let word = u32::from_ne_bytes([img[0], img[1], img[2], img[3]]);
+        &img[VARHDRSZ..varatt::varsize_4b_word(word) as usize]
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn negative_substring_len() -> PgError {
+    PgError::error("negative substring length not allowed")
+        .with_sqlstate(types_error::ERRCODE_SUBSTRING_ERROR)
+}
+
+// C: text_substring — `image` is the RAW argument image; toasted sources go
+// through the detoast_attr_slice fetch, C-exact in both encoding arms.
+pub fn text_substring<'mcx>(
+    mcx: Mcx<'mcx>,
+    image: &[u8],
+    start: i32,
+    length: i32,
+    length_not_specified: bool,
+) -> PgResult<Varlena<'mcx>> {
+    let eml = mbutils_seams::pg_database_encoding_max_length::call();
+    let s1 = start.max(1);
+
+    if eml == 1 {
+        let l1 = if length_not_specified {
+            -1
+        } else if length < 0 {
+            return Err(negative_substring_len().into());
+        } else {
+            match start.checked_add(length) {
+                None => -1,
+                Some(e) => {
+                    if e < 1 {
+                        return cstring_to_text(mcx, b"");
+                    }
+                    e - s1
+                }
+            }
+        };
+        return Ok(Varlena::from_image(
+            detoast_seams::detoast_attr_slice::call(mcx, image, s1 - 1, l1)?,
+        ));
+    }
+    assert!(eml > 1, "invalid backend encoding: encoding max length < 1");
+
+    let slice_start = 0i32;
+    let (slice_size, mut l1);
+    if length_not_specified {
+        slice_size = -1;
+        l1 = -1;
+    } else if length < 0 {
+        return Err(negative_substring_len().into());
+    } else {
+        match start.checked_add(length) {
+            None => {
+                slice_size = -1;
+                l1 = -1;
+            }
+            Some(e) => {
+                if e < 1 {
+                    return cstring_to_text(mcx, b"");
+                }
+                l1 = e - s1;
+                match e.checked_mul(eml) {
+                    Some(sz) => slice_size = sz,
+                    None => {
+                        slice_size = -1;
+                        l1 = -1;
+                    }
+                }
+            }
+        }
+    }
+
+    let sliced: Option<PgVec<'mcx, u8>> = if image[0] == 0x01 || (image[0] & 0x03) == 0x02 {
+        Some(detoast_seams::detoast_attr_slice::call(
+            mcx,
+            image,
+            slice_start,
+            slice_size,
+        )?)
+    } else {
+        None
+    };
+    let data = inline_payload(sliced.as_deref().unwrap_or(image));
+
+    if data.is_empty() {
+        return cstring_to_text(mcx, b"");
+    }
+    let slice_strlen = mbutils_seams::pg_mbstrlen_with_len::call(data);
+    if s1 > slice_strlen {
+        return cstring_to_text(mcx, b"");
+    }
+
+    let e1 = if l1 > -1 {
+        (s1 + l1).min(slice_start + 1 + slice_strlen)
+    } else {
+        slice_start + 1 + slice_strlen
+    };
+
+    let mut p = 0usize;
+    for _ in 0..(s1 - 1) {
+        p += mbutils_seams::pg_mblen_range::call(&data[p..])? as usize;
+    }
+    let sstart = p;
+    for _ in s1..e1 {
+        p += mbutils_seams::pg_mblen_range::call(&data[p..])? as usize;
+    }
+
+    cstring_to_text(mcx, &data[sstart..p])
+}
+
 pub fn text_catenate<'mcx>(mcx: Mcx<'mcx>, t1: &[u8], t2: &[u8]) -> PgResult<Varlena<'mcx>> {
     let mut image = image_with_header(mcx, t1.len() + t2.len())?;
     mcx::vec_append_bytes(&mut image, t1)?;

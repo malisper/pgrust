@@ -1,6 +1,6 @@
-//! vacuum.c lazy lane: ExecVacuum -> vacuum -> vacuum_rel for named tables.
-//! FULL/ANALYZE/FREEZE/parallel/database-wide/toast-recursion arms are loud
-//! named panics; pg_class relstats + datfrozenxid updates are recorded gaps
+//! vacuum.c lazy lane: ExecVacuum -> vacuum -> vacuum_rel for named tables
+//! plus the TOAST recursion. FULL/ANALYZE/FREEZE/parallel/database-wide arms
+//! are loud named panics; pg_class relstats + datfrozenxid updates are recorded gaps
 //! (heap inplace-update lane unported).
 
 #![allow(non_snake_case)]
@@ -250,19 +250,29 @@ fn vacuum_rel<'mcx>(
         };
     }
 
-    if params.options & VACOPT_PROCESS_TOAST != 0 && rel.rd_rel.reltoastrelid != InvalidOid {
-        unported("vacuum_rel: TOAST table recursion");
-    }
+    let toast_relid = if params.options & VACOPT_PROCESS_TOAST != 0 {
+        rel.rd_rel.reltoastrelid
+    } else {
+        InvalidOid
+    };
 
     if params.options & VACOPT_PROCESS_MAIN != 0 {
         // C divergence (recorded): SetUserIdAndSecContext/NewGUCNestLevel/
         // RestrictSearchPath are skipped (single-user milestone).
-        tableam_seams::table_relation_vacuum::call(mcx, &rel, &params, bstrategy)?;
+        tableam_seams::table_relation_vacuum::call(mcx, &rel, &params, bstrategy.clone())?;
     }
 
     rel.close(NoLock)?;
     snapmgr::PopActiveSnapshot()?;
     xact::CommitTransactionCommand()?;
+
+    if toast_relid != InvalidOid {
+        let mut toast_params = params;
+        toast_params.options |= VACOPT_PROCESS_MAIN;
+        toast_params.toast_parent = relid;
+        vacuum_rel(mcx, toast_relid, &toast_params, bstrategy)?;
+    }
+
     Ok(true)
 }
 
