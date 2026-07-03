@@ -44,3 +44,8 @@ ipc_seams = { path = "../../ipc/ipc_seams" }
 pmsignal_seams = { path = "../../ipc/pmsignal_seams" }
 procarray_seams = { path = "../../ipc/procarray_seams" }
 shmem_seams = { path = "../../ipc/shmem_seams" }
+deadlock_seams = { path = "../deadlock_seams" }
+timeout_seams = { path = "../../../utils/misc/timeout_seams" }
+timestamp_seams = { path = "../../../utils/adt/timestamp_seams" }
+elog_seams = { path = "../../../utils/error/elog_seams" }
+ps_status_seams = { path = "../../../utils/misc/ps_status_seams" }

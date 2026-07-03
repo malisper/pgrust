@@ -73,6 +73,18 @@ fn setup() {
         xact_seams::get_top_transaction_id_if_any::set(|| 0);
         xact_seams::transaction_id_is_current_transaction_id::set(|_| false);
 
+        deadlock_seams::init_dead_lock_checking::set(|| Ok(()));
+        deadlock_seams::dead_lock_check::set(|_| types_storage::lock::DeadLockState::NoDeadLock);
+        timeout_seams::enable_timeout_after::set(|_, _| Ok(()));
+        timeout_seams::enable_timeouts::set(|_| Ok(()));
+        timeout_seams::disable_timeout::set(|_, _| Ok(()));
+        timeout_seams::disable_timeouts::set(|_| {});
+        timeout_seams::get_timeout_start_time::set(|_| 0);
+        timestamp_seams::get_current_timestamp::set(|| 0);
+        ps_status_seams::set_ps_display_suffix::set(|_| {});
+        ps_status_seams::set_ps_display_remove_suffix::set(|| {});
+        elog_seams::ereport_msg::set(|_, _, _| Ok(()));
+
         shmem_seams::add_size::set(|a, b| Ok(a.checked_add(b).expect("size overflow")));
         shmem_seams::mul_size::set(|a, b| Ok(a.checked_mul(b).expect("size overflow")));
         shmem_seams::shmem_alloc::set(|size| {
