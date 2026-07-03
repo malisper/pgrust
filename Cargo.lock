@@ -1178,7 +1178,6 @@ dependencies = [
  "freespace",
  "lmgr",
  "mcx",
- "smgr",
  "transam_xlog_seams",
  "types_brin",
  "types_core",
