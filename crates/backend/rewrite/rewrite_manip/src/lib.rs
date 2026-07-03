@@ -1,5 +1,4 @@
-// map_variable_attnos expression lane; to_rowtype conversion and the
-// query/sublevels walk are loud (no Query callers yet).
+// map_variable_attnos expression lane; to_rowtype and SubLink/Query walks loud.
 #![allow(non_snake_case)]
 
 use mcx::Mcx;
@@ -47,14 +46,20 @@ fn mutate<'mcx>(
                 }
                 return Ok(Some(Node::mk(mcx, newvar)?));
             }
-            debug_assert!(attno == 0);
-            *found_whole_row = true;
+            if attno == 0 {
+                *found_whole_row = true;
+            }
+            // attno < 0 (system column): C copies the Var unchanged.
             return Ok(None);
         }
         return Ok(None);
     }
     if node.node_tag() == NodeTag::T_ConvertRowtypeExpr {
         panic!("unported: map_variable_attnos over ConvertRowtypeExpr");
+    }
+    if node.node_tag() == NodeTag::T_SubLink {
+        // nodes_core's SubLink arm skips the subselect C recurses into.
+        panic!("unported: map_variable_attnos over SubLink (Query walk)");
     }
     let mut m = |n: Node<'mcx>| mutate(mcx, n, target_varno, sublevels_up, attnums, found_whole_row);
     nodes_core::expression_tree_mutator(mcx, node, &mut m)

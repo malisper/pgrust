@@ -109,7 +109,7 @@ pub(crate) fn transformTableLikeClause<'mcx>(
     let rv = rel_vocab_rv(src_rv);
     let relid = catalog_namespace::RangeVarGetRelid(&rv, AccessShareLock, false)
         .map_err(attach_errpos)?;
-    let relation = table::table_open(mcx, relid, NoLock)?;
+    let relation = relation::relation_open(mcx, relid, NoLock)?;
 
     let relkind = relation.rd_rel.relkind;
     match relkind {
@@ -131,7 +131,13 @@ pub(crate) fn transformTableLikeClause<'mcx>(
 
     let aclresult = aclchk::pg_class_aclcheck(relid, miscinit::GetUserId(), ACL_SELECT)?;
     if aclresult != 0 {
-        aclchk::aclcheck_error(aclresult, ObjectType::OBJECT_TABLE, relation.name())?;
+        // get_relkind_objtype (objectaddress.c) for the reachable kinds.
+        let objtype = match relkind {
+            RELKIND_VIEW => ObjectType::OBJECT_VIEW,
+            RELKIND_MATVIEW => ObjectType::OBJECT_MATVIEW,
+            _ => ObjectType::OBJECT_TABLE,
+        };
+        aclchk::aclcheck_error(aclresult, objtype, relation.name())?;
     }
 
     let tuple_desc = &relation.rd_att;
@@ -266,11 +272,11 @@ pub fn expandTableLikeClause<'mcx>(
         "expandTableLikeClause called on untransformed LIKE clause"
     );
     let options = tlc.options;
-    let relation = table::table_open(mcx, tlc.relationOid, NoLock)?;
+    let relation = relation::relation_open(mcx, tlc.relationOid, NoLock)?;
     let tuple_desc = &relation.rd_att;
 
     let child_relid = catalog_namespace::RangeVarGetRelid(&rel_vocab_rv(heap_rel), NoLock, false)?;
-    let childrel = table::table_open(mcx, child_relid, NoLock)?;
+    let childrel = relation::relation_open(mcx, child_relid, NoLock)?;
 
     // build_attrmap_by_name(child, parent): attmap[parent_attno-1] = child attno.
     let mut attmap: PgVec<'mcx, AttrNumber> =
@@ -419,7 +425,10 @@ pub fn expandTableLikeClause<'mcx>(
         result.lcons(mcx, Node::mk(mcx, atcmd)?)?;
     }
 
-    if (options & CREATE_TABLE_LIKE_INDEXES) != 0 && relation.rd_rel.relhasindex {
+    if (options & CREATE_TABLE_LIKE_INDEXES) != 0
+        && relation.rd_rel.relhasindex
+        && childrel.rd_rel.relkind != RELKIND_FOREIGN_TABLE
+    {
         let parent_indexes = relcache::RelationGetIndexList(mcx, relation.rd_id)?;
         for &parent_index_oid in parent_indexes.iter() {
             let parent_index = indexam::index_open(mcx, parent_index_oid, AccessShareLock)?;
@@ -498,7 +507,10 @@ fn generateClonedIndexStmt<'mcx>(
         let constraint_id = pg_depend::get_index_constraint(mcx, source_idx.rd_id)?;
         if constraint_id != InvalidOid {
             stmt.isconstraint = true;
-            stmt.deferrable = !idxrec.indimmediate;
+            let (condeferrable, condeferred) =
+                pg_constraint::get_constraint_deferrability(mcx, constraint_id)?;
+            stmt.deferrable = condeferrable;
+            stmt.initdeferred = condeferred;
         }
     }
 

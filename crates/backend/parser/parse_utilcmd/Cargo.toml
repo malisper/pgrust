@@ -29,6 +29,7 @@ parser_seams = { path = "../parser_seams" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
 keywords = { path = "../../../common/keywords" }
 table = { path = "../../access/table/table" }
+relation = { path = "../../access/common/relation" }
 genam = { path = "../../access/index/genam" }
 indexam = { path = "../../access/index/indexam" }
 tupdesc = { path = "../../access/common/tupdesc" }
