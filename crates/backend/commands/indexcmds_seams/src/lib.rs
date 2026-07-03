@@ -13,5 +13,18 @@ seam_core::seam!(
         table_id: Oid,
         stmt: types_nodes::Node<'mcx>,
         skip_build: bool,
+    // DefineIndex; seam because indexcmds depends on tablecmds.
+    pub fn define_index<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        table_id: Oid,
+        stmt: &types_nodes::rawnodes::IndexStmt<'mcx>,
+        index_relation_id: Oid,
+        parent_index_id: Oid,
+        parent_constraint_id: Oid,
+        is_alter_table: bool,
+        check_rights: bool,
+        check_not_in_use: bool,
+        skip_build: bool,
+        quiet: bool,
     ) -> PgResult<Oid>
 );
