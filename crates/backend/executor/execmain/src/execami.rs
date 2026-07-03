@@ -309,6 +309,16 @@ pub fn exec_re_scan_with_chg<'mcx>(
             ::nodelimit::exec_rescan_limit(state, &mut **outer, estate)?;
             exec_re_scan_with_chg(outer, base.lefttree.expect("Limit outer plan"), estate, chg)?;
         }
+        // ExecReScanLockRows: child rescanned when its chgParam is NULL.
+        PlanStateNode::LockRows(l) => {
+            let l = &mut **l;
+            exec_re_scan_with_chg(
+                &mut l.outer,
+                base.lefttree.expect("LockRows outer plan"),
+                estate,
+                chg,
+            )?;
+        }
         PlanStateNode::BitmapHeapScan(b) => {
             let b = &mut **b;
             ::nodebitmapheapscan::exec_rescan_bitmap_heap_scan(&mut b.scan, estate)?;
