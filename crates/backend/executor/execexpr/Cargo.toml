@@ -19,6 +19,7 @@ adt_date = { path = "../../utils/adt/adt_date" }
 adt_timestamp = { path = "../../utils/adt/adt_timestamp" }
 tupdesc = { path = "../../access/common/tupdesc" }
 typcache = { path = "../../utils/cache/typcache" }
+heaptuple = { path = "../../access/common/heaptuple" }
 format_type = { path = "../../utils/adt/format_type" }
 exectuples = { path = "../exectuples" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
@@ -39,5 +40,4 @@ elog = { path = "../../utils/error/elog" }
 fd = { path = "../../storage/file/fd" }
 xact_seams = { path = "../../access/transam/xact_seams" }
 indexcmds_seams = { path = "../../commands/indexcmds_seams" }
-heaptuple = { path = "../../access/common/heaptuple" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
