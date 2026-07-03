@@ -7,6 +7,7 @@
 #![allow(clippy::too_many_arguments)]
 #![allow(irrefutable_let_patterns)]
 
+mod dedup;
 mod fcframe;
 mod insert;
 pub mod itup;

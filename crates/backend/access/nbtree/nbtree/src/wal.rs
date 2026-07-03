@@ -41,3 +41,7 @@ pub(crate) fn xl_btree_metadata(metad: &BTMetaPageData) -> [u8; 28] {
     b[24] = metad.btm_allequalimage as u8;
     b
 }
+
+pub(crate) fn xl_btree_dedup(nintervals: u16) -> [u8; 2] {
+    nintervals.to_ne_bytes()
+}

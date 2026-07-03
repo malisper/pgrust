@@ -1,6 +1,7 @@
 //! nbtxlog.c — btree rmgr redo. Live arms cover exactly what the write side
 //! (nbtree insert lane) emits: INSERT_LEAF/UPPER/META/POST, SPLIT_L/R,
-//! NEWROOT. Every other op is a loud panic naming its C function and unit.
+//! NEWROOT, DEDUP. Every other op is a loud panic naming its C function and
+//! unit.
 
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
@@ -452,6 +453,115 @@ fn btree_xlog_split(newitemonleft: bool, record: &mut XLogReaderState) -> PgResu
     Ok(())
 }
 
+fn btree_xlog_dedup(record: &mut XLogReaderState) -> PgResult<()> {
+    let lsn = record.EndRecPtr;
+    let nintervals = u16::from_ne_bytes(main_data(record)[0..2].try_into().unwrap()) as usize;
+
+    let (action, buf) = XLogReadBufferForRedo(record, 0)?;
+    if action == BLK_NEEDS_REDO {
+        let intervals = block_data(record, 0);
+        let interval_at = |i: usize| {
+            (
+                u16::from_ne_bytes(intervals[i * 4..i * 4 + 2].try_into().unwrap()),
+                u16::from_ne_bytes(intervals[i * 4 + 2..i * 4 + 4].try_into().unwrap()),
+            )
+        };
+
+        // SAFETY: pin + exclusive lock per the redo protocol (module contract).
+        let pm = unsafe { page_mut(buf) };
+        let page = pm.as_ref();
+        let opaque = page_opaque(&page);
+
+        // conservatively larger maxpostingsize than the primary
+        let mut state = types_nbtree::dedup::BTDedupState::new(types_nbtree::BTMaxItemSize);
+
+        let minoff = P_FIRSTDATAKEY(&opaque);
+        let maxoff = page.max_offset_number();
+
+        // PageGetTempPageCopySpecial
+        #[repr(align(8))]
+        struct TempPage([u8; BLCKSZ]);
+        let mut temp = TempPage([0u8; BLCKSZ]);
+        // SAFETY: owned, aligned BLCKSZ scratch.
+        let mut newpage = unsafe {
+            PageMut::from_raw(core::ptr::NonNull::new(temp.0.as_mut_ptr()).unwrap())
+        };
+        bt_pageinit(&mut newpage);
+        write_opaque(&mut newpage, &opaque);
+
+        if !types_nbtree::P_RIGHTMOST(&opaque) {
+            let hitemid = page.item_id(P_HIKEY);
+            let (ptr, len) = page.item_raw(hitemid);
+            // SAFETY: in-page tuple image under the pin + lock.
+            let hitem = unsafe { core::slice::from_raw_parts(ptr, len as usize) };
+            if newpage.add_item(hitem, P_HIKEY, 0).is_none() {
+                return Err(error_err("deduplication failed to add highkey".into()));
+            }
+        }
+
+        for offnum in minoff..=maxoff {
+            let itemid = page.item_id(offnum);
+            let (itup, _) = page.item_raw(itemid);
+
+            // SAFETY: itup is a live on-page tuple; the temp page is separate
+            // storage so base pointers stay valid across finish_pending.
+            unsafe {
+                if offnum == minoff {
+                    state.start_pending(itup, offnum);
+                } else if state.nintervals < nintervals
+                    && state.baseoff == interval_at(state.nintervals).0
+                    && state.nitems < interval_at(state.nintervals).1 as usize
+                {
+                    if !state.save_htid(itup) {
+                        return Err(error_err(
+                            "deduplication failed to add heap tid to pending posting list"
+                                .into(),
+                        ));
+                    }
+                } else {
+                    if state.finish_pending(&mut newpage).is_err() {
+                        return Err(error_err(
+                            "deduplication failed to add tuple to page".into(),
+                        ));
+                    }
+                    state.start_pending(itup, offnum);
+                }
+            }
+        }
+        // SAFETY: as above.
+        if unsafe { state.finish_pending(&mut newpage) }.is_err() {
+            return Err(error_err("deduplication failed to add tuple to page".into()));
+        }
+        debug_assert!(state.nintervals == nintervals);
+        debug_assert!(state.intervals_bytes() == intervals);
+
+        if types_nbtree::P_HAS_GARBAGE(&opaque) {
+            let mut nopaque = page_opaque(&newpage.as_ref());
+            nopaque.btpo_flags &= !types_nbtree::BTP_HAS_GARBAGE;
+            write_opaque(&mut newpage, &nopaque);
+        }
+
+        // PageRestoreTempPage
+        // SAFETY: whole-page overwrite under the exclusive redo lock.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                temp.0.as_ptr(),
+                page.as_ptr().cast_mut(),
+                BLCKSZ,
+            )
+        };
+        // SAFETY: pin + exclusive lock per the redo protocol (module contract).
+        let mut pm = unsafe { page_mut(buf) };
+        pm.set_lsn(lsn);
+        bufmgr_seams::mark_buffer_dirty::call(buf)?;
+    }
+
+    if buf != InvalidBuffer {
+        unlock_release(buf)?;
+    }
+    Ok(())
+}
+
 fn btree_xlog_newroot(record: &mut XLogReaderState) -> PgResult<()> {
     let lsn = record.EndRecPtr;
     let xlrec = main_data(record);
@@ -501,9 +611,7 @@ pub fn btree_redo(record: &mut XLogReaderState) -> PgResult<()> {
         XLOG_BTREE_SPLIT_R => btree_xlog_split(false, record),
         XLOG_BTREE_NEWROOT => btree_xlog_newroot(record),
         XLOG_BTREE_INSERT_POST => btree_xlog_insert(true, false, true, record),
-        XLOG_BTREE_DEDUP => {
-            panic!("btree_redo arm not ported: btree_xlog_dedup — land backend-access-nbt-dedup")
-        }
+        XLOG_BTREE_DEDUP => btree_xlog_dedup(record),
         XLOG_BTREE_VACUUM => {
             panic!("btree_redo arm not ported: btree_xlog_vacuum — land backend-access-nbtree-vacuum")
         }
