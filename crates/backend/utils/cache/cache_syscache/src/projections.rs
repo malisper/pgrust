@@ -963,7 +963,59 @@ fn pg_type_base_shape(typid: Oid) -> PgResult<Option<syscache_seams::PgTypeBaseS
     Ok(Some(shape))
 }
 
+// Decode-once Form cache (AGENTS rule 6): C hands back the cached FormData
+// pointer for free; the 13-field decode below must not run per probe. TYPEOID
+// invalidation (targeted or full-reset hash 0) flushes the whole memo.
+mod io_shape_memo {
+    use core::cell::RefCell;
+
+    use datum::Datum;
+    use mcx::{MemoryContext, PgHashMap};
+    use types_core::{InvalidOid, Oid};
+
+    use crate::cacheinfo::TYPEOID;
+
+    thread_local! {
+        static MEMO: RefCell<Option<PgHashMap<'static, Oid, syscache_seams::PgTypeIoShape>>> =
+            const { RefCell::new(None) };
+    }
+
+    fn flush(_arg: Datum, _cacheid: i32, _hashvalue: u32) {
+        MEMO.with(|m| {
+            if let Some(map) = m.borrow_mut().as_mut() {
+                map.clear();
+            }
+        });
+    }
+
+    pub(super) fn get(typid: Oid) -> Option<syscache_seams::PgTypeIoShape> {
+        MEMO.with(|m| m.borrow().as_ref().and_then(|map| map.get(&typid).copied()))
+    }
+
+    pub(super) fn insert(typid: Oid, shape: syscache_seams::PgTypeIoShape) {
+        MEMO.with(|m| {
+            let mut slot = m.borrow_mut();
+            if slot.is_none() {
+                let registered = inval::invalidate::CacheRegisterSyscacheCallback(
+                    TYPEOID,
+                    flush,
+                    Datum::from_oid(InvalidOid),
+                );
+                if registered.is_err() {
+                    return; // out of callback slots: run unmemoized
+                }
+                let mcx = Box::leak(Box::new(MemoryContext::new("TypeIoShapeMemo"))).mcx();
+                *slot = Some(PgHashMap::with_capacity_in(16, mcx));
+            }
+            slot.as_mut().unwrap().insert(typid, shape);
+        });
+    }
+}
+
 fn pg_type_io_shape(typid: Oid) -> PgResult<Option<syscache_seams::PgTypeIoShape>> {
+    if let Some(shape) = io_shape_memo::get(typid) {
+        return Ok(Some(shape));
+    }
     let Some(tuple) = SearchSysCache1(TYPEOID, SysCacheKey::Value(Datum::from_oid(typid)))? else {
         return Ok(None);
     };
@@ -985,6 +1037,7 @@ fn pg_type_io_shape(typid: Oid) -> PgResult<Option<syscache_seams::PgTypeIoShape
     };
     drop(t);
     ReleaseSysCache(tuple);
+    io_shape_memo::insert(typid, shape);
     Ok(Some(shape))
 }
 
