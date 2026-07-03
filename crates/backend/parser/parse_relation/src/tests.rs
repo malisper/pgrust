@@ -36,21 +36,19 @@ const fn col(name: &'static str, typid: Oid, collation: Oid) -> Col {
     Col { name, typid, typmod: -1, collation, dropped: false }
 }
 
+static T_COLS: [Col; 2] = [col("x", INT4OID, InvalidOid), col("y", TEXTOID, 100)];
+static U_COLS: [Col; 1] = [col("x", INT4OID, InvalidOid)];
+static D_COLS: [Col; 3] = [
+    col("a", INT4OID, InvalidOid),
+    Col { name: "", typid: InvalidOid, typmod: -1, collation: InvalidOid, dropped: true },
+    col("b", TEXTOID, 100),
+];
+
 fn entry(oid: Oid) -> Option<(&'static str, &'static [Col])> {
     match oid {
-        T_OID => Some((
-            "t",
-            &[col("x", INT4OID, InvalidOid), col("y", TEXTOID, 100)],
-        )),
-        U_OID => Some(("u", &[col("x", INT4OID, InvalidOid)])),
-        D_OID => Some((
-            "d",
-            &[
-                col("a", INT4OID, InvalidOid),
-                Col { name: "", typid: InvalidOid, typmod: -1, collation: InvalidOid, dropped: true },
-                col("b", TEXTOID, 100),
-            ],
-        )),
+        T_OID => Some(("t", &T_COLS)),
+        U_OID => Some(("u", &U_COLS)),
+        D_OID => Some(("d", &D_COLS)),
         _ => None,
     }
 }
@@ -274,7 +272,8 @@ fn too_many_column_aliases_is_42p10() {
         Node::mk_mut(mcx, Alias { aliasname: Some("c"), colnames }).unwrap().seal_ref();
 
     let r = rv(mcx, "u", Some(alias));
-    let err = addRangeTableEntry(mcx, &mut pstate, r, Some(alias), true, true).unwrap_err();
+    let err =
+        addRangeTableEntry(mcx, &mut pstate, r, Some(alias), true, true).map(|_| ()).unwrap_err();
     assert_eq!(err.sqlstate(), ERRCODE_INVALID_COLUMN_REFERENCE);
     assert_eq!(err.message, "table \"c\" has 1 columns available but 2 columns specified");
 }
@@ -288,7 +287,8 @@ fn missing_relation_is_42p01() {
     pstate.p_sourcetext = Some(b"SELECT x FROM nope");
 
     let r = rv(mcx, "nope", None);
-    let err = addRangeTableEntry(mcx, &mut pstate, r, None, true, true).unwrap_err();
+    let err =
+        addRangeTableEntry(mcx, &mut pstate, r, None, true, true).map(|_| ()).unwrap_err();
     assert_eq!(err.sqlstate(), ERRCODE_UNDEFINED_TABLE);
     assert_eq!(err.message, "relation \"nope\" does not exist");
     assert_eq!(err.cursor_position(), Some(15));

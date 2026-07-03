@@ -10,7 +10,7 @@ use types_core::fmgr::FLOAT8PASSBYVAL;
 use types_core::{AttrNumber, Index, InvalidOid, Oid, ParseLoc};
 use types_error::{ErrorLocation, PgResult, SoftErrorContext, ERRCODE_TOO_MANY_COLUMNS, ERROR};
 use types_nodes::{
-    A_Const, Alias, Const, Node, RTEPermissionInfo, RangeTblEntry, ValUnion, VarReturningType,
+    A_Const, Alias, Const, Node, RangeTblEntry, ValUnion, VarReturningType,
 };
 use types_rel::{NoLock, Relation};
 use types_tuple::htup::MaxTupleAttributeNumber;
@@ -89,12 +89,15 @@ pub struct ParseNamespaceColumn {
     pub p_dontexpand: bool,
 }
 
+// p_perminfo is a Node handle, not a borrow: markRTEForSelectPriv mutates the
+// perminfo through the rteperminfos list (C mutates the aliased pointer) and a
+// standing `&` would alias those writes.
 #[allow(non_snake_case)]
 pub struct ParseNamespaceItem<'mcx> {
     pub p_names: &'mcx Alias<'mcx>,
     pub p_rte: &'mcx RangeTblEntry<'mcx>,
     pub p_rtindex: i32,
-    pub p_perminfo: Option<&'mcx RTEPermissionInfo<'mcx>>,
+    pub p_perminfo: Option<Node<'mcx>>,
     pub p_nscolumns: &'mcx [ParseNamespaceColumn],
     pub p_rel_visible: bool,
     pub p_cols_visible: bool,

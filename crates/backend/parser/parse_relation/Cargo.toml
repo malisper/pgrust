@@ -9,6 +9,7 @@ name = "parse_relation"
 path = "src/lib.rs"
 
 [dependencies]
+datum = { path = "../../../_support/types/datum" }
 catalog_namespace = { path = "../../catalog/catalog_namespace" }
 elog = { path = "../../utils/error/elog" }
 lsyscache = { path = "../../utils/cache/lsyscache" }

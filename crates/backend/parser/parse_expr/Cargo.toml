@@ -13,7 +13,9 @@ elog = { path = "../../utils/error/elog" }
 guc_tables = { path = "../../utils/misc/guc_tables" }
 mbutils = { path = "../../utils/mb/mbutils" }
 mcx = { path = "../../../_support/mcx" }
+parse_func = { path = "../parse_func" }
 parse_oper = { path = "../parse_oper" }
+parse_relation = { path = "../parse_relation" }
 parser_small1 = { path = "../parser_small1" }
 stack_depth = { path = "../../utils/misc/stack_depth" }
 types_core = { path = "../../../_support/types/types_core" }

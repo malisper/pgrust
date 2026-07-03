@@ -1145,6 +1145,7 @@ dependencies = [
  "init_small",
  "mcx",
  "miscinit_seams",
+ "nodeagg",
  "nodeindexonlyscan",
  "nodeindexscan",
  "nodeseqscan",
@@ -1418,6 +1419,23 @@ dependencies = [
 [[package]]
 name = "freespace"
 version = "0.1.0"
+dependencies = [
+ "bufmgr_seams",
+ "catalog_seams",
+ "freespace_seams",
+ "heapam",
+ "mcx",
+ "miscinit_seams",
+ "predicate_seams",
+ "smgr_seams",
+ "types_core",
+ "types_error",
+ "types_rel",
+ "types_storage",
+ "types_tuple",
+ "xact_seams",
+ "xloginsert_seams",
+]
 
 [[package]]
 name = "freespace_seams"
@@ -1694,6 +1712,7 @@ dependencies = [
  "syncrep_seams",
  "syncscan_seams",
  "tableam_vocab",
+ "tidbitmap",
  "timeout_seams",
  "transam_seams",
  "transam_xlog",
@@ -2731,7 +2750,9 @@ name = "parse_clause"
 version = "0.0.0"
 dependencies = [
  "coerce",
+ "datum",
  "elog",
+ "indexcmds_seams",
  "lsyscache",
  "mbutils",
  "mcx",
@@ -2740,9 +2761,11 @@ dependencies = [
  "parse_relation",
  "parser_small1",
  "stack_depth",
+ "syscache_seams",
  "types_core",
  "types_error",
  "types_nodes",
+ "types_tuple",
  "vars",
 ]
 
@@ -2771,6 +2794,7 @@ dependencies = [
  "mbutils",
  "mcx",
  "miscinit_seams",
+ "parse_func",
  "parse_oper",
  "parse_relation",
  "parser_small1",
@@ -2881,6 +2905,7 @@ dependencies = [
  "guc_tables",
  "mcx",
  "miscinit_seams",
+ "parse_agg",
  "parse_clause",
  "parse_collate",
  "parse_target",
@@ -3109,16 +3134,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pgstat_xact_seams"
-version = "0.0.0"
-dependencies = [
- "mcx",
- "seam_core",
- "types_core",
- "types_error",
-]
-
-[[package]]
 name = "pgtz"
 version = "0.1.0"
 dependencies = [
@@ -3298,11 +3313,11 @@ name = "portalmem"
 version = "0.1.0"
 dependencies = [
  "elog",
+ "execmain_seams",
  "ipc_portal_seams",
  "mcx",
  "plancache_portal_seams",
  "portalcmds_seams",
- "portalmem_seams",
  "resowner_portal_seams",
  "snapmgr_portal_seams",
  "tuplestore_hold_seams",
@@ -3313,15 +3328,6 @@ dependencies = [
  "types_snapshot",
  "xact_portal_seams",
  "xact_seams",
-]
-
-[[package]]
-name = "portalmem_seams"
-version = "0.0.0"
-dependencies = [
- "seam_core",
- "types_core",
- "types_error",
 ]
 
 [[package]]
@@ -3582,73 +3588,26 @@ dependencies = [
 name = "pquery"
 version = "0.1.0"
 dependencies = [
- "aclchk_seams",
- "autovacuum_seams",
- "backend_status_seams",
  "cmdtag",
- "condition_variable_seams",
- "datum",
- "deadlock_seams",
  "elog",
- "execmain",
  "execmain_seams",
  "exectuples",
- "explain",
- "fmgr_seams",
- "guc",
  "guc_tables",
- "init_small",
- "ipc_seams",
- "latch_seams",
- "lmgr_proc",
- "lock_seams",
- "lsyscache_seams",
- "lwlock",
- "mbutils_seams",
  "mcx",
- "miscinit",
- "miscinit_seams",
- "pg_sema_seams",
- "pgtz",
- "planner",
- "pmsignal_seams",
  "portalmem",
  "postgres_seams",
- "pqcomm_seams",
  "pquery_seams",
- "printtup",
- "procarray",
- "resowner_portal_seams",
- "resowner_seams",
- "rewrite_handler",
- "s_lock_seams",
- "scalar_seams",
- "shmem_seams",
  "snapmgr",
- "subtrans_seams",
- "syncrep_seams",
- "syscache_seams",
  "tcop_dest",
- "timeout_seams",
- "timestamp_seams",
- "transam_xlog_seams",
- "tuplestore",
  "tuplestore_hold_seams",
  "types_core",
  "types_dest",
  "types_error",
- "types_fmgr",
  "types_nodes",
  "types_portal",
- "types_resowner",
  "types_scan",
  "types_slot",
- "types_tuple",
- "utility",
  "utility_seams",
- "variable",
- "varsup",
- "waitevent_seams",
  "xact",
 ]
 
@@ -4241,7 +4200,6 @@ dependencies = [
  "plancache",
  "pmchild",
  "pmsignal",
- "portalmem",
  "postgres",
  "postmaster",
  "postmaster_startup",
@@ -4764,6 +4722,7 @@ dependencies = [
  "heapam_handler",
  "mcx",
  "tableam_vocab",
+ "tidbitmap",
  "types_core",
  "types_error",
  "types_guc",
