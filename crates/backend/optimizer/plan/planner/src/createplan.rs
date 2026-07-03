@@ -786,8 +786,7 @@ fn ios_indextlist_copy<'mcx>(
     Ok(tlist)
 }
 
-// create_bitmap_scan_plan (createplan.c). indexECs bookkeeping is dead while
-// eq_classes are empty; nestloop-param replacement loud upstream (param_info).
+// create_bitmap_scan_plan (createplan.c).
 fn create_bitmap_scan_plan<'mcx>(
     run: &mut PlannerRun<'mcx>,
     best_path: PathId,
@@ -805,7 +804,7 @@ fn create_bitmap_scan_plan<'mcx>(
     let scan_relid = run.root.rel(baserelid).relid;
     debug_assert!(scan_relid > 0);
 
-    let (bitmapqualplan, indexquals, mut bitmapqualorig) =
+    let (bitmapqualplan, indexquals, mut bitmapqualorig, _indexecs) =
         create_bitmap_subplan(run, bitmapqual)?;
 
     // scan_clauses minus indexquals (C list_member -> equal()).
@@ -849,12 +848,17 @@ fn create_bitmap_scan_plan<'mcx>(
     Ok(plan.seal())
 }
 
-// create_bitmap_subplan (createplan.c) -> (plan, indexquals, bitmapqualorig).
-// indexECs output is dropped (eq_classes empty on this lane).
+// create_bitmap_subplan (createplan.c)
+// -> (plan, indexquals, bitmapqualorig, indexECs).
 fn create_bitmap_subplan<'mcx>(
     run: &mut PlannerRun<'mcx>,
     bitmapqual: PathId,
-) -> PgResult<(Node<'mcx>, NodeList<'mcx>, NodeList<'mcx>)> {
+) -> PgResult<(
+    Node<'mcx>,
+    NodeList<'mcx>,
+    NodeList<'mcx>,
+    mcx::PgVec<'mcx, types_pathnodes::EcId>,
+)> {
     let mcx = run.mcx;
     match run.root.path(bitmapqual) {
         PathNode::BitmapAndPath(ap) => {
@@ -869,11 +873,14 @@ fn create_bitmap_subplan<'mcx>(
             let mut subplans = NodeList::nil();
             let mut subquals = NodeList::nil();
             let mut subindexquals = NodeList::nil();
+            let mut indexecs: mcx::PgVec<'mcx, types_pathnodes::EcId> = mcx::PgVec::new_in(mcx);
             for &sub in subs.iter() {
-                let (subplan, subindexqual, subqual) = create_bitmap_subplan(run, sub)?;
+                let (subplan, subindexqual, subqual, subindexec) =
+                    create_bitmap_subplan(run, sub)?;
                 subplans.lappend(mcx, subplan)?;
                 list_concat_unique(mcx, &mut subquals, &subqual)?;
                 list_concat_unique(mcx, &mut subindexquals, &subindexqual)?;
+                indexecs.extend(subindexec.iter().copied());
             }
             let mut plan = Node::build::<types_nodes::plannodes::BitmapAnd<'mcx>>(mcx)?;
             plan.bitmapplans = subplans;
@@ -885,7 +892,7 @@ fn create_bitmap_subplan<'mcx>(
             plan.plan.plan_width = 0;
             plan.plan.parallel_aware = false;
             plan.plan.parallel_safe = parallel_safe;
-            return Ok((plan.seal(), subindexquals, subquals));
+            return Ok((plan.seal(), subindexquals, subquals, indexecs));
         }
         PathNode::BitmapOrPath(op) => {
             let subs = op.bitmapquals.clone();
@@ -902,7 +909,9 @@ fn create_bitmap_subplan<'mcx>(
             let mut const_true_subqual = false;
             let mut const_true_subindexqual = false;
             for &sub in subs.iter() {
-                let (subplan, subindexqual, subqual) = create_bitmap_subplan(run, sub)?;
+                // Per-arm indexECs are dropped: EC-derived quals can't be
+                // redundant across OR arms.
+                let (subplan, subindexqual, subqual, _) = create_bitmap_subplan(run, sub)?;
                 subplans.lappend(mcx, subplan)?;
                 if subqual.is_nil() {
                     const_true_subqual = true;
@@ -951,7 +960,7 @@ fn create_bitmap_subplan<'mcx>(
                 l.lappend(mcx, clauses::make_orclause(mcx, subindexquals)?)?;
                 l
             };
-            return Ok((plan, indexqual, qual));
+            return Ok((plan, indexqual, qual, mcx::PgVec::new_in(mcx)));
         }
         _ => {}
     }
@@ -1004,15 +1013,25 @@ fn create_bitmap_subplan<'mcx>(
 
     let mut subquals = NodeList::nil();
     let mut subindexquals = NodeList::nil();
+    let mut indexecs: mcx::PgVec<'mcx, types_pathnodes::EcId> = mcx::PgVec::new_in(mcx);
     for ic in indexclauses.iter() {
         let rid = ic.rinfo.expect("IndexClause rinfo");
         debug_assert!(!run.root.rinfo(rid).pseudoconstant);
+        if let Some(pec) = run.root.rinfo(rid).parent_ec {
+            // Derived from the same EC as an already-included clause.
+            if indexecs.contains(&pec) {
+                continue;
+            }
+        }
         subquals.lappend(mcx, *run.root.expr_node(run.root.rinfo(rid).clause))?;
         for &qid in ic.indexquals.iter() {
             subindexquals.lappend(mcx, *run.root.expr_node(run.root.rinfo(qid).clause))?;
         }
+        if let Some(pec) = run.root.rinfo(rid).parent_ec {
+            indexecs.push(pec);
+        }
     }
-    Ok((plan.seal(), subindexquals, subquals))
+    Ok((plan.seal(), subindexquals, subquals, indexecs))
 }
 
 // predicate_implied_by (predtest.c), strong form, single restriction clause

@@ -276,9 +276,14 @@ fn select_mergejoin_clauses<'mcx>(
             }
         }
         update_mergeclause_eclasses(run, rid)?;
-        // EC_MUST_BE_REDUNDANT: eclass-lite ECs never carry consts.
-        debug_assert!(!run.root.ec(run.root.rinfo(rid).left_ec.unwrap()).ec_has_const);
-        debug_assert!(!run.root.ec(run.root.rinfo(rid).right_ec.unwrap()).ec_has_const);
+        // EC_MUST_BE_REDUNDANT: a const EC can't appear in canonical sort
+        // orderings, so the clause is unusable for merging.
+        if run.root.ec(run.root.rinfo(rid).left_ec.unwrap()).ec_has_const
+            || run.root.ec(run.root.rinfo(rid).right_ec.unwrap()).ec_has_const
+        {
+            have_nonmergeable_joinclause = true;
+            continue;
+        }
         result.push(rid);
     }
     let mergejoin_allowed = match jointype {

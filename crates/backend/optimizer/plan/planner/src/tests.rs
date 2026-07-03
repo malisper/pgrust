@@ -948,7 +948,7 @@ fn bitmap_heap_path_plans_to_bitmap_scan_nodes() {
     };
     let baserel = run.root.path(ipath).base().parent;
     let bpath =
-        crate::pathnode::create_bitmap_heap_path(&mut run, baserel, ipath, 1.0).unwrap();
+        crate::pathnode::create_bitmap_heap_path(&mut run, baserel, ipath, &None, 1.0).unwrap();
 
     // Exact C arithmetic over the fixture (100 pages / 10000 tuples, one
     // matching row): tree cost = indextotalcost + 0.1*cpu_operator_cost*1;
