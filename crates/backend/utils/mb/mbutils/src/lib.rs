@@ -490,12 +490,19 @@ pub fn pg_do_encoding_conversion_buf<'mcx>(
     )
 }
 
+// C returns the source pointer in a register; the Option<PgVec> analog is
+// >16B (sret through memory) unless the identity arm inlines into the caller.
+#[inline]
 pub fn pg_client_to_server<'mcx>(mcx: Mcx<'mcx>, s: &[u8]) -> PgResult<Option<PgVec<'mcx, u8>>> {
     pg_any_to_server(mcx, s, client_encoding())
 }
 
 /// Always validates, even when no conversion is needed: the input comes from
 /// outside the database.
+// inline(always): the identity arm must fold into the caller or the
+// >16B return is materialized through memory (sret), the per-call constant
+// behind the mb_client_to_server_8 FAIL (docs/benchmarks/mbutils.md).
+#[inline(always)]
 pub fn pg_any_to_server<'mcx>(
     mcx: Mcx<'mcx>,
     s: &[u8],
@@ -1213,7 +1220,6 @@ fn invalid_codepoint_error() -> Box<PgError> {
 pub fn init_seams() {
     use mbutils_seams as seams;
     seams::pg_server_to_client::set(pg_server_to_client);
-    seams::pg_client_to_server::set(pg_client_to_server);
     seams::server_to_client_conversion_needed::set(server_to_client_conversion_needed);
     seams::pg_database_encoding_max_length::set(pg_database_encoding_max_length);
     seams::pg_mbstrlen_with_len::set(pg_mbstrlen_with_len);

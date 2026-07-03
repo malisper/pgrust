@@ -1,7 +1,7 @@
 #![allow(non_snake_case)]
 
 use std::cell::Cell;
-use std::sync::atomic::{fence, AtomicI32, Ordering::Acquire, Ordering::Relaxed, Ordering::Release};
+use std::sync::atomic::{fence, AtomicI32, Ordering::Acquire, Ordering::Relaxed};
 use std::sync::OnceLock;
 
 use init_small::globals as g;
@@ -88,16 +88,32 @@ fn query_size() -> usize {
     guc_tables::vars::pgstat_track_activity_query_size.read() as usize
 }
 
-// PGSTAT_BEGIN/END_WRITE_ACTIVITY: odd changecount = write in progress;
-// fences replace pg_write_barrier.
+// pg_write_barrier is store-store only (dmb ishst on aarch64); fence(Release)
+// is dmb ish (full barrier) and cost this lane 1.19x ns at 0.96x instr — see
+// docs/benchmarks/backend_status.md. Non-aarch64/Miri fall back to the
+// strictly stronger fence(Release) (compiler-only on x86, matching C).
+#[inline(always)]
+fn write_barrier() {
+    #[cfg(all(target_arch = "aarch64", not(miri)))]
+    // SAFETY: no operands or stack use; omitting `nomem` keeps the implicit
+    // memory clobber, so this is a compiler barrier too, exactly C's
+    // __asm__ __volatile__("dmb ishst" ::: "memory").
+    unsafe {
+        core::arch::asm!("dmb ishst", options(nostack, preserves_flags));
+    }
+    #[cfg(not(all(target_arch = "aarch64", not(miri))))]
+    fence(std::sync::atomic::Ordering::Release);
+}
+
+// PGSTAT_BEGIN/END_WRITE_ACTIVITY: odd changecount = write in progress.
 fn begin_write_activity(e: &PgBackendStatus) {
     g::StartCriticalSection();
     e.st_changecount.store(e.st_changecount.load(Relaxed).wrapping_add(1), Relaxed);
-    fence(Release);
+    write_barrier();
 }
 
 fn end_write_activity(e: &PgBackendStatus) {
-    fence(Release);
+    write_barrier();
     let c = e.st_changecount.load(Relaxed).wrapping_add(1);
     e.st_changecount.store(c, Relaxed);
     debug_assert_eq!(c & 1, 0);

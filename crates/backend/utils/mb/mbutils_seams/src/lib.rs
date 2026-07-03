@@ -13,13 +13,6 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    pub fn pg_client_to_server<'mcx>(
-        mcx: Mcx<'mcx>,
-        s: &[u8],
-    ) -> PgResult<Option<PgVec<'mcx, u8>>>
-);
-
-seam_core::seam!(
     // pg_server_to_client's encoding test (ClientEncoding == ServerEncoding
     // or PG_SQL_ASCII => identity), hoistable to resolve-once carriers so
     // per-row output skips the conversion seam entirely (strategy lever 2).
