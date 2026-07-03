@@ -813,3 +813,25 @@ fn scale_min_trim_int2() {
     assert_eq!(out(&numeric_round_common(n("nan").num(), 1).unwrap()), "NaN");
     assert_eq!(out(&numeric_trunc_common(n("-inf").num(), 1).unwrap()), "-Infinity");
 }
+
+// hash_numeric invariants (numeric.c): scale-insensitive, zero -> 0xFFFFFFFF
+// sentinel, specials -> 0, weight mixed via XOR.
+#[test]
+fn hash_numeric_parts_semantics() {
+    use crate::builtins::numeric_hash_parts_for_tests as parts;
+    let zero = n("0");
+    assert_eq!(parts(zero.num()), Some((Vec::new(), 0)));
+    let nan = n("NaN");
+    assert_eq!(parts(nan.num()), None);
+    // 10.00 and 10 must hash identically: same digits after trim, same weight.
+    let a = n("10.00");
+    let b = n("10");
+    assert_eq!(parts(a.num()), parts(b.num()));
+    // 1200 vs 12: same digit payload, different weight.
+    let c = n("1200");
+    let d = n("12");
+    let (cd, cw) = parts(c.num()).unwrap();
+    let (dd, dw) = parts(d.num()).unwrap();
+    assert_eq!(cd, dd);
+    assert_ne!(cw, dw);
+}

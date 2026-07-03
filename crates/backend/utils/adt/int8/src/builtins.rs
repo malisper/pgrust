@@ -134,6 +134,18 @@ pub fn fc_hashint8(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRes
     Ok(Datum::from_u32(::hashfn::hash_bytes_uint32(lohalf)))
 }
 
+pub fn fc_hashint8extended(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let [a, seed] = fcinfo.args_n::<2>();
+    let val = a.value.as_i64();
+    let lohalf = val as u32;
+    let hihalf = (val >> 32) as u32;
+    let lohalf = lohalf ^ if val >= 0 { hihalf } else { !hihalf };
+    Ok(Datum::from_u64(::hashfn::hash_bytes_uint32_extended(
+        lohalf,
+        seed.value.as_i64() as u64,
+    )))
+}
+
 fc2! {
     fc_int8eq: int8eq(as_i64, as_i64) -> from_bool;
     fc_int8ne: int8ne(as_i64, as_i64) -> from_bool;
@@ -308,6 +320,7 @@ pub const INT8_BUILTINS: &[FmgrBuiltin] = &[
     b(2408, "int8recv", 1, fc_int8recv),
     b(2409, "int8send", 1, fc_int8send),
     b(949, "hashint8", 1, fc_hashint8),
+    b(442, "hashint8extended", 2, fc_hashint8extended),
     b(467, "int8eq", 2, fc_int8eq),
     b(468, "int8ne", 2, fc_int8ne),
     b(469, "int8lt", 2, fc_int8lt),

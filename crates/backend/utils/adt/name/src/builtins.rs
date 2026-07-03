@@ -159,6 +159,17 @@ pub fn fc_current_schemas(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -
     Ok(d)
 }
 
+pub fn fc_hashname(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let a = arg_name(fcinfo, 0);
+    Ok(Datum::from_u32(::hashfn::hash_bytes(a.name_str())))
+}
+
+pub fn fc_hashnameextended(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let a = arg_name(fcinfo, 0);
+    let seed = fcinfo.arg_i64(1) as u64;
+    Ok(Datum::from_u64(::hashfn::hash_bytes_extended(a.name_str(), seed)))
+}
+
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin {
         foid,
@@ -175,6 +186,8 @@ pub const NAME_BUILTINS: &[FmgrBuiltin] = &[
     b(34, "namein", 1, fc_namein),
     b(35, "nameout", 1, fc_nameout),
     b(62, "nameeq", 2, fc_nameeq),
+    b(455, "hashname", 1, fc_hashname),
+    b(447, "hashnameextended", 2, fc_hashnameextended),
     b(240, "nameeqtext", 2, fc_nameeqtext),
     b(241, "namelttext", 2, fc_namelttext),
     b(242, "nameletext", 2, fc_nameletext),
