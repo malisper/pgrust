@@ -36,6 +36,10 @@ fn per_tuple_reset_is_wholesale() {
     let mut estate = create_executor_state(&parent).unwrap();
     estate.with_mut(|es| {
         let id = es.create_expr_context();
+        // Reset is wholesale: per-tuple usage is reclaimed and the context
+        // returns to the same baseline every iteration (keeper stays charged
+        // across bump reset, per mcx's C mem_allocated contract).
+        let mut baseline = None;
         for _ in 0..3 {
             {
                 let mcx = es.ecxt(id).per_tuple_mcx();
@@ -47,7 +51,11 @@ fn per_tuple_reset_is_wholesale() {
             assert!(used_before >= 4096);
             es.reset_expr_context(id);
             let used_after = es.ecxt(id).per_tuple_mcx().context().used();
-            assert!(used_after < used_before);
+            assert!(used_after <= used_before);
+            match baseline {
+                None => baseline = Some(used_after),
+                Some(b) => assert_eq!(used_after, b),
+            }
         }
     });
     free_executor_state(estate);
