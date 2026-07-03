@@ -25,6 +25,14 @@ pub struct Node<'mcx> {
 
 const _: () = assert!(core::mem::size_of::<Node<'static>>() == 8);
 
+impl Node<'_> {
+    /// Arena identity (C pointer equality).
+    #[inline]
+    pub fn ptr_eq(self, other: Node<'_>) -> bool {
+        self.p == other.p
+    }
+}
+
 /// # Safety: `TAG` must uniquely identify `Self` among all `NodeVariant` impls
 /// (the `as_*` cast trusts the tag alone).
 pub unsafe trait NodeVariant<'mcx>: Sized + 'mcx {

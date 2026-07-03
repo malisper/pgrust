@@ -1217,6 +1217,7 @@ pub fn init_seams() {
     seams::server_to_client_conversion_needed::set(server_to_client_conversion_needed);
     seams::pg_database_encoding_max_length::set(pg_database_encoding_max_length);
     seams::pg_mbstrlen_with_len::set(pg_mbstrlen_with_len);
+    seams::pg_mblen_range::set(pg_mblen_range);
     seams::get_database_encoding::set(GetDatabaseEncoding);
     seams::get_database_encoding_name::set(GetDatabaseEncodingName);
     seams::set_database_encoding::set(SetDatabaseEncoding);

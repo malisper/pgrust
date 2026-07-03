@@ -33,7 +33,16 @@ pub fn UtilityReturnsTuples(parsetree: Node<'_>) -> bool {
         // C probes funcexpr->funcresulttype / the named portal / the prepared
         // statement; those land with functioncmds/portalcmds/prepare.c.
         T_CallStmt => payload_gap("UtilityReturnsTuples", "CallStmt"),
-        T_FetchStmt => payload_gap("UtilityReturnsTuples", "FetchStmt"),
+        T_FetchStmt => {
+            let stmt = parsetree.as_fetch_stmt().unwrap();
+            if stmt.ismove {
+                return false;
+            }
+            match portalmem::GetPortalByName(stmt.portalname) {
+                Some(portal) => portal.borrow().tupDesc.is_some(),
+                None => false,
+            }
+        }
         T_ExecuteStmt => {
             let stmt = parsetree.as_execute_stmt().unwrap();
             let entry = prepare::FetchPreparedStatement(
@@ -58,7 +67,15 @@ pub fn UtilityTupleDescriptor(
     use NodeTag::*;
     match parsetree.node_tag() {
         T_CallStmt => payload_gap("UtilityTupleDescriptor", "CallStmt"),
-        T_FetchStmt => payload_gap("UtilityTupleDescriptor", "FetchStmt"),
+        T_FetchStmt => {
+            let stmt = parsetree.as_fetch_stmt().unwrap();
+            if stmt.ismove {
+                return Ok(None);
+            }
+            // C CreateTupleDescCopy; the Rc clone is the caller-owned copy.
+            Ok(portalmem::GetPortalByName(stmt.portalname)
+                .and_then(|portal| portal.borrow().tupDesc.clone()))
+        }
         T_ExecuteStmt => {
             let stmt = parsetree.as_execute_stmt().unwrap();
             let entry = prepare::FetchPreparedStatement(

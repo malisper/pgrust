@@ -27,6 +27,9 @@ pub const FirstUnpinnedObjectId: Oid = 12000;
 pub const FirstNormalObjectId: Oid = 16384;
 
 pub const OIDOID: Oid = 26;
+pub const TIDOID: Oid = 27;
+pub const XIDOID: Oid = 28;
+pub const CIDOID: Oid = 29;
 pub const BOOLOID: Oid = 16;
 pub const BOOL_BTREE_FAM_OID: Oid = 424;
 pub const BOOL_HASH_FAM_OID: Oid = 2222;

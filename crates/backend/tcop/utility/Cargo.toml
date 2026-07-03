@@ -24,6 +24,7 @@ transam_xlog = { path = "../../access/transam/transam_xlog" }
 twophase_seams = { path = "../../access/transam/twophase_seams" }
 xact = { path = "../../access/transam/xact" }
 cmdtag = { path = "../cmdtag" }
+portalmem = { path = "../../utils/mmgr/portalmem" }
 tcop_dest = { path = "../dest" }
 utility_seams = { path = "../utility_seams" }
 

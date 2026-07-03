@@ -165,14 +165,66 @@ fn grow_memtuples_past_initial_size() {
 }
 
 #[test]
-#[should_panic(expected = "backward fetch")]
-fn backward_fetch_is_loud() {
+fn backward_walks_to_start_then_none() {
     let mcx = leaked_mcx();
     let desc = int4_desc(mcx, 1);
     let mut ts = Tuplestore::begin_heap(true, true, 64);
-    put_i32(&mut ts, &desc, 1);
+    for v in [1, 2, 3] {
+        put_i32(&mut ts, &desc, v);
+    }
     let mut slot = exectuples::make_tuple_table_slot(mcx, TupleSlotKind::MinimalTuple, Some(desc));
-    let _ = ts.gettupleslot(false, false, &mut slot, mcx);
+    for v in [1, 2, 3] {
+        assert!(ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
+        assert_eq!(read_i32(&mut slot), v);
+    }
+    assert!(!ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
+    assert!(ts.ateof());
+
+    // C: backward after EOF re-returns the last tuple, then walks back.
+    for v in [3, 2, 1] {
+        assert!(ts.gettupleslot(false, false, &mut slot, mcx).unwrap());
+        assert_eq!(read_i32(&mut slot), v);
+    }
+    assert!(!ts.gettupleslot(false, false, &mut slot, mcx).unwrap());
+    assert!(!ts.ateof());
+
+    // Forward again from the start.
+    assert!(ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
+    assert_eq!(read_i32(&mut slot), 1);
+}
+
+#[test]
+fn backward_before_eof_returns_tuple_before_last() {
+    let mcx = leaked_mcx();
+    let desc = int4_desc(mcx, 1);
+    let mut ts = Tuplestore::begin_heap(true, true, 64);
+    for v in [1, 2, 3] {
+        put_i32(&mut ts, &desc, v);
+    }
+    let mut slot = exectuples::make_tuple_table_slot(mcx, TupleSlotKind::MinimalTuple, Some(desc));
+    assert!(ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
+    assert!(ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
+    assert_eq!(read_i32(&mut slot), 2);
+    // Last returned was 2; backward yields the tuple before it.
+    assert!(ts.gettupleslot(false, false, &mut slot, mcx).unwrap());
+    assert_eq!(read_i32(&mut slot), 1);
+}
+
+#[test]
+fn backward_at_start_is_none_and_rescan_resets() {
+    let mcx = leaked_mcx();
+    let desc = int4_desc(mcx, 1);
+    let mut ts = Tuplestore::begin_heap(true, true, 64);
+    put_i32(&mut ts, &desc, 7);
+    let mut slot = exectuples::make_tuple_table_slot(mcx, TupleSlotKind::MinimalTuple, Some(desc));
+    assert!(!ts.gettupleslot(false, false, &mut slot, mcx).unwrap());
+
+    assert!(ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
+    assert!(!ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
+    ts.rescan();
+    assert!(!ts.gettupleslot(false, false, &mut slot, mcx).unwrap());
+    assert!(ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
+    assert_eq!(read_i32(&mut slot), 7);
 }
 
 #[test]

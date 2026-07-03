@@ -5,7 +5,7 @@ mod tests;
 
 use mcx::{Mcx, PgVec};
 use parser_small1::{
-    parser_errposition, ParseNamespaceColumn, ParseNamespaceItem, ParseState,
+    parser_errposition, ParseExprKind, ParseNamespaceColumn, ParseNamespaceItem, ParseState,
 };
 use types_core::{AttrNumber, Index, InvalidOid, Oid, OidIsValid, ParseLoc};
 use types_error::{
@@ -18,11 +18,13 @@ use types_nodes::{
     Alias, Node, NodeList, RTEKind, RTEPermissionInfo, RangeTblEntry, Var, VarReturningType,
 };
 use types_rel::{AccessShareLock, NoLock, Relation, RowShareLock, LOCKMODE};
-use types_tuple::htup::FirstLowInvalidHeapAttributeNumber;
+use types_tuple::htup::{FirstLowInvalidHeapAttributeNumber, TableOidAttributeNumber};
 use types_tuple::tupdesc::TupleDescData;
 
 #[allow(non_upper_case_globals)]
 const InvalidAttrNumber: AttrNumber = 0;
+
+const MAX_FUZZY_DISTANCE: i32 = 3;
 
 fn loc(funcname: &'static str) -> ErrorLocation {
     ErrorLocation::new("parse_relation.c", 0, funcname)
@@ -177,43 +179,73 @@ pub fn scanNSItemForColumn<'mcx>(
     location: ParseLoc,
 ) -> PgResult<Option<Node<'mcx>>> {
     let rte = nsitem.p_rte;
-    let attnum = scanRTEForColumn(pstate, rte, nsitem.p_names, colname, location)?;
+    let attnum = scanRTEForColumn(pstate, rte, nsitem.p_names, colname, location, 0, None)?;
 
     if attnum == InvalidAttrNumber {
         return Ok(None);
     }
-    // C's CHECK_CONSTRAINT/GENERATED_COLUMN/MERGE_WHEN system-column ereports
-    // guard attnum < 0 only; unreachable while specialAttNum panics on match.
-    debug_assert!(attnum > InvalidAttrNumber);
 
-    let nscol = &nsitem.p_nscolumns[attnum as usize - 1];
-    if nscol.p_varno == 0 {
-        return Err(dropped_column(nsitem, colname));
+    for (kind, what) in [
+        (ParseExprKind::EXPR_KIND_CHECK_CONSTRAINT, SysColContext::CheckConstraint),
+        (ParseExprKind::EXPR_KIND_GENERATED_COLUMN, SysColContext::GeneratedColumn),
+        (ParseExprKind::EXPR_KIND_MERGE_WHEN, SysColContext::MergeWhen),
+    ] {
+        if pstate.p_expr_kind == kind
+            && (attnum as i32) < InvalidAttrNumber as i32
+            && attnum as i32 != TableOidAttributeNumber
+        {
+            return Err(bad_system_column_context(pstate, colname, location, what));
+        }
     }
-    let mut var = Var {
-        varno: nscol.p_varno as i32,
-        varattno: nscol.p_varattno,
-        vartype: nscol.p_vartype,
-        vartypmod: nscol.p_vartypmod,
-        varcollid: nscol.p_varcollid,
-        varnullingrels: types_nodes::Bitmapset::empty(),
-        varlevelsup: sublevels_up as Index,
-        varreturningtype: nsitem.p_returning_type,
-        varnosyn: nscol.p_varnosyn,
-        varattnosyn: nscol.p_varattnosyn,
-        location,
+
+    let mut var = if attnum > InvalidAttrNumber {
+        let nscol = &nsitem.p_nscolumns[attnum as usize - 1];
+        if nscol.p_varno == 0 {
+            return Err(dropped_column(nsitem, colname));
+        }
+        Var {
+            varno: nscol.p_varno as i32,
+            varattno: nscol.p_varattno,
+            vartype: nscol.p_vartype,
+            vartypmod: nscol.p_vartypmod,
+            varcollid: nscol.p_varcollid,
+            varnullingrels: types_nodes::Bitmapset::empty(),
+            varlevelsup: sublevels_up as Index,
+            varreturningtype: nsitem.p_returning_type,
+            varnosyn: nscol.p_varnosyn,
+            varattnosyn: nscol.p_varattnosyn,
+            location,
+        }
+    } else {
+        let sysatt = catalog_heap::SystemAttributeDefinition(attnum);
+        Var {
+            varno: nsitem.p_rtindex,
+            varattno: attnum,
+            vartype: sysatt.atttypid,
+            vartypmod: sysatt.atttypmod,
+            varcollid: sysatt.attcollation,
+            varnullingrels: types_nodes::Bitmapset::empty(),
+            varlevelsup: sublevels_up as Index,
+            varreturningtype: nsitem.p_returning_type,
+            varnosyn: nsitem.p_rtindex as Index,
+            varattnosyn: attnum,
+            location,
+        }
     };
     markNullableIfNeeded(mcx, pstate, &mut var)?;
     markVarForSelectPriv(mcx, pstate, &var)?;
     Node::mk(mcx, var).map(Some)
 }
 
-fn scanRTEForColumn(
+#[allow(clippy::too_many_arguments)]
+fn scanRTEForColumn<'mcx>(
     pstate: &ParseState<'_, '_>,
-    rte: &RangeTblEntry<'_>,
+    rte: &'mcx RangeTblEntry<'mcx>,
     eref: &Alias<'_>,
     colname: &str,
     location: ParseLoc,
+    fuzzy_rte_penalty: i32,
+    mut fuzzystate: Option<(Mcx<'_>, &mut FuzzyAttrMatchState<'mcx>)>,
 ) -> PgResult<AttrNumber> {
     let mut result = InvalidAttrNumber;
     let mut attnum: AttrNumber = 0;
@@ -227,6 +259,17 @@ fn scanRTEForColumn(
             }
             result = attnum;
         }
+        if let Some((mcx, ref mut state)) = fuzzystate {
+            updateFuzzyAttrMatchState(
+                mcx,
+                fuzzy_rte_penalty,
+                state,
+                rte,
+                attcolname,
+                colname,
+                attnum,
+            )?;
+        }
     }
 
     if result != InvalidAttrNumber {
@@ -234,24 +277,22 @@ fn scanRTEForColumn(
     }
 
     if rte.rtekind == RTEKind::RTE_RELATION && rte.relkind != types_rel::RELKIND_COMPOSITE_TYPE {
-        specialAttNum(colname);
+        let attnum = specialAttNum(colname);
+        if attnum != InvalidAttrNumber
+            && syscache_seams::search_syscache_exists_attnum::call(rte.relid, attnum)?
+        {
+            result = attnum;
+        }
     }
 
-    Ok(InvalidAttrNumber)
+    Ok(result)
 }
 
-// C SystemAttributeByName over heap.c's SysAtt rows; names verified vs
-// sysattr.h. A match panics: the negative-attnum Var lane (typed via
-// SystemAttributeDefinition + ATTNUM syscache probe) is unported.
 fn specialAttNum(attname: &str) -> AttrNumber {
-    if matches!(attname, "ctid" | "xmin" | "cmin" | "xmax" | "cmax" | "tableoid") {
-        panic!(
-            "specialAttNum (parse_relation.c): system column \"{attname}\" needs \
-             SystemAttributeDefinition (heap.c) — unit backend-parser-relation \
-             system-column lane"
-        );
+    match catalog_heap::SystemAttributeByName(attname) {
+        Some(sysatt) => sysatt.attnum as AttrNumber,
+        None => InvalidAttrNumber,
     }
-    InvalidAttrNumber
 }
 
 pub fn colNameToVar<'mcx>(
@@ -293,20 +334,87 @@ pub fn colNameToVar<'mcx>(
     Ok(result)
 }
 
-struct ExactAttrMatchState<'mcx> {
+struct FuzzyAttrMatchState<'mcx> {
+    distance: i32,
+    rfirst: Option<&'mcx RangeTblEntry<'mcx>>,
+    first: AttrNumber,
+    rsecond: Option<&'mcx RangeTblEntry<'mcx>>,
+    second: AttrNumber,
     rexact1: Option<&'mcx RangeTblEntry<'mcx>>,
     rexact2: Option<&'mcx RangeTblEntry<'mcx>>,
 }
 
-// C's searchRangeTableForCol also tracks Levenshtein near-matches; only the
-// exact-match half is live here (see errorMissingColumn).
+fn updateFuzzyAttrMatchState<'mcx>(
+    mcx: Mcx<'_>,
+    fuzzy_rte_penalty: i32,
+    fuzzystate: &mut FuzzyAttrMatchState<'mcx>,
+    rte: &'mcx RangeTblEntry<'mcx>,
+    actual: &str,
+    matched: &str,
+    attnum: AttrNumber,
+) -> PgResult<()> {
+    if fuzzy_rte_penalty > fuzzystate.distance {
+        return Ok(());
+    }
+    // Dropped columns appear as empty eref names; reject them outright.
+    if actual.is_empty() {
+        return Ok(());
+    }
+
+    let matchlen = matched.len() as i32;
+    let mut columndistance = varlena::levenshtein::varstr_levenshtein_less_equal(
+        mcx,
+        actual.as_bytes(),
+        matched.as_bytes(),
+        1,
+        1,
+        1,
+        fuzzystate.distance + 1 - fuzzy_rte_penalty,
+        true,
+    )?;
+
+    // More than half the characters different is not a useful suggestion.
+    if columndistance > matchlen / 2 {
+        return Ok(());
+    }
+
+    columndistance += fuzzy_rte_penalty;
+
+    if columndistance < fuzzystate.distance {
+        fuzzystate.distance = columndistance;
+        fuzzystate.rfirst = Some(rte);
+        fuzzystate.first = attnum;
+        fuzzystate.rsecond = None;
+    } else if columndistance == fuzzystate.distance {
+        if fuzzystate.rsecond.is_some() {
+            // Three at the same distance: too loose a bar to hint from.
+            fuzzystate.rfirst = None;
+            fuzzystate.rsecond = None;
+        } else if fuzzystate.rfirst.is_some() {
+            fuzzystate.rsecond = Some(rte);
+            fuzzystate.second = attnum;
+        }
+    }
+    Ok(())
+}
+
 fn searchRangeTableForCol<'p, 'mcx>(
+    mcx: Mcx<'_>,
     pstate: &'p ParseState<'p, 'mcx>,
+    alias: Option<&str>,
     colname: &str,
     location: ParseLoc,
-) -> PgResult<ExactAttrMatchState<'mcx>> {
+) -> PgResult<FuzzyAttrMatchState<'mcx>> {
     let orig_pstate = pstate;
-    let mut state = ExactAttrMatchState { rexact1: None, rexact2: None };
+    let mut state = FuzzyAttrMatchState {
+        distance: MAX_FUZZY_DISTANCE + 1,
+        rfirst: None,
+        first: InvalidAttrNumber,
+        rsecond: None,
+        second: InvalidAttrNumber,
+        rexact1: None,
+        rexact2: None,
+    };
 
     let mut ps = Some(pstate);
     while let Some(p) = ps {
@@ -316,8 +424,29 @@ fn searchRangeTableForCol<'p, 'mcx>(
                 continue;
             }
             let eref = rte.eref.expect("analyzed RTE always has eref");
-            let attnum = scanRTEForColumn(orig_pstate, rte, eref, colname, location)?;
-            if attnum != InvalidAttrNumber {
+            let fuzzy_rte_penalty = match alias {
+                Some(alias) => varlena::levenshtein::varstr_levenshtein_less_equal(
+                    mcx,
+                    alias.as_bytes(),
+                    eref.aliasname.unwrap_or("").as_bytes(),
+                    1,
+                    1,
+                    1,
+                    MAX_FUZZY_DISTANCE + 1,
+                    true,
+                )?,
+                None => 0,
+            };
+            let attnum = scanRTEForColumn(
+                orig_pstate,
+                rte,
+                eref,
+                colname,
+                location,
+                fuzzy_rte_penalty,
+                Some((mcx, &mut state)),
+            )?;
+            if attnum != InvalidAttrNumber && fuzzy_rte_penalty == 0 {
                 if state.rexact1.is_none() {
                     state.rexact1 = Some(rte);
                 } else {
@@ -583,6 +712,146 @@ pub fn addRangeTableEntry<'mcx>(
     table::table_close(rel, NoLock)?;
 
     Ok(mcx::leak_in(mcx::alloc_in(mcx, nsitem)?))
+}
+
+pub fn addRangeTableEntryForRelation<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    rel: &Relation<'mcx>,
+    lockmode: LOCKMODE,
+    alias: Option<&'mcx Alias<'mcx>>,
+    inh: bool,
+    inFromCl: bool,
+) -> PgResult<&'mcx mut ParseNamespaceItem<'mcx>> {
+    let refname = match alias.and_then(|a| a.aliasname) {
+        Some(name) => name,
+        // Names are single-byte-safe UTF-8 identifiers copied from the query.
+        None => str_in(
+            mcx,
+            core::str::from_utf8(rel.rd_rel.relname.name_str()).expect("relname is UTF-8"),
+        )?,
+    };
+
+    let (eref, rebuilt_alias) = buildRelationAliases(mcx, &rel.rd_att, alias, refname)?;
+
+    let mut rte = RangeTblEntry {
+        rtekind: RTEKind::RTE_RELATION,
+        alias: rebuilt_alias,
+        relid: rel.rd_id,
+        inh,
+        relkind: rel.rd_rel.relkind,
+        rellockmode: lockmode,
+        eref: Some(eref),
+        lateral: false,
+        inFromCl,
+        ..Default::default()
+    };
+    let perminfo = addRTEPermissionInfo(mcx, &mut pstate.p_rteperminfos, &mut rte)?;
+
+    let rte_node = Node::mk(mcx, rte)?;
+    pstate.p_rtable.lappend(mcx, rte_node)?;
+    let rtindex = pstate.p_rtable.len() as i32;
+
+    let nsitem = buildNSItemFromTupleDesc(
+        mcx,
+        rte_node.as_range_tbl_entry().expect("just built"),
+        rtindex,
+        Some(perminfo),
+        &rel.rd_att,
+    )?;
+    Ok(mcx::leak_in(mcx::alloc_in(mcx, nsitem)?))
+}
+
+pub fn addRangeTableEntryForValues<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    exprs: NodeList<'mcx>,
+    coltypes: types_nodes::list::OidList<'mcx>,
+    coltypmods: types_nodes::list::IntList<'mcx>,
+    colcollations: types_nodes::list::OidList<'mcx>,
+    alias: Option<&'mcx Alias<'mcx>>,
+    lateral: bool,
+    inFromCl: bool,
+) -> PgResult<&'mcx mut ParseNamespaceItem<'mcx>> {
+    let refname = alias.and_then(|a| a.aliasname).unwrap_or("*VALUES*");
+    let numcolumns = exprs.nth(0).as_list().expect("VALUES row is a List").len();
+    let numaliases = alias.map(|a| a.colnames.len()).unwrap_or(0);
+    if numaliases > numcolumns {
+        return Err(too_many_aliases(refname, numcolumns, numaliases));
+    }
+
+    let mut eref_colnames = NodeList::nil();
+    for i in 0..numcolumns {
+        let name = match alias {
+            Some(a) if i < numaliases => a.colnames.nth(i),
+            _ => Node::mk_string(mcx, str_in(mcx, &format!("column{}", i + 1))?)?,
+        };
+        eref_colnames.lappend(mcx, name)?;
+    }
+    let eref = Node::mk_mut(mcx, Alias { aliasname: Some(refname), colnames: eref_colnames })?
+        .seal_ref();
+
+    let rte = RangeTblEntry {
+        rtekind: RTEKind::RTE_VALUES,
+        alias,
+        values_lists: exprs,
+        coltypes,
+        coltypmods,
+        colcollations,
+        eref: Some(eref),
+        lateral,
+        inFromCl,
+        ..Default::default()
+    };
+    let rte_node = Node::mk(mcx, rte)?;
+    pstate.p_rtable.lappend(mcx, rte_node)?;
+    let rtindex = pstate.p_rtable.len() as i32;
+
+    let rte = rte_node.as_range_tbl_entry().expect("just built");
+    let mut nscolumns: PgVec<'mcx, ParseNamespaceColumn> =
+        mcx::vec_with_capacity_in(mcx, numcolumns)?;
+    for varattno in 0..numcolumns {
+        nscolumns.push(ParseNamespaceColumn {
+            p_varno: rtindex as Index,
+            p_varattno: varattno as AttrNumber + 1,
+            p_vartype: rte.coltypes.nth(varattno),
+            p_vartypmod: rte.coltypmods.nth(varattno),
+            p_varcollid: rte.colcollations.nth(varattno),
+            p_varreturningtype: VarReturningType::VAR_RETURNING_DEFAULT,
+            p_varnosyn: rtindex as Index,
+            p_varattnosyn: varattno as AttrNumber + 1,
+            p_dontexpand: false,
+        });
+    }
+    let nsitem = ParseNamespaceItem {
+        p_names: rte.eref.expect("rte has eref"),
+        p_rte: rte,
+        p_rtindex: rtindex,
+        p_perminfo: None,
+        p_nscolumns: nscolumns.leak(),
+        p_rel_visible: true,
+        p_cols_visible: true,
+        p_lateral_only: false,
+        p_lateral_ok: true,
+        p_returning_type: VarReturningType::VAR_RETURNING_DEFAULT,
+    };
+    Ok(mcx::leak_in(mcx::alloc_in(mcx, nsitem)?))
+}
+
+pub fn attnameAttNum(rel: &Relation<'_>, attname: &str, sys_col_ok: bool) -> AttrNumber {
+    for i in 0..rel.rd_att.natts as usize {
+        let att = rel.rd_att.attr(i);
+        if att.attname.name_str() == attname.as_bytes() && !att.attisdropped {
+            return (i + 1) as AttrNumber;
+        }
+    }
+    if sys_col_ok {
+        let i = specialAttNum(attname);
+        if i != InvalidAttrNumber {
+            return i;
+        }
+    }
+    InvalidAttrNumber
 }
 
 pub fn addRTEPermissionInfo<'mcx>(
@@ -976,12 +1245,13 @@ fn searchRangeTableForRel<'p, 'mcx>(
 }
 
 pub fn errorMissingColumn(
+    mcx: Mcx<'_>,
     pstate: &ParseState<'_, '_>,
     relname: Option<&str>,
     colname: &str,
     location: ParseLoc,
 ) -> Box<PgError> {
-    let state = match searchRangeTableForCol(pstate, colname, location) {
+    let state = match searchRangeTableForCol(mcx, pstate, relname, colname, location) {
         Ok(state) => state,
         Err(e) => return e,
     };
@@ -1024,13 +1294,40 @@ pub fn errorMissingColumn(
         );
     }
 
-    // C decides between the bald 42703 and a "Perhaps you meant" hint via
-    // Levenshtein over every candidate column.
-    panic!(
-        "errorMissingColumn (parse_relation.c): fuzzy-hint lane needs \
-         varstr_levenshtein_less_equal (levenshtein.c) — exact-match arms are live; \
-         no exact match anywhere for column \"{colname}\""
-    );
+    fn colname_of<'a>(rte: &'a RangeTblEntry<'a>, attnum: AttrNumber) -> &'a str {
+        rte.eref
+            .expect("analyzed RTE always has eref")
+            .colnames
+            .nth(attnum as usize - 1)
+            .as_string()
+            .expect("eref colnames are String nodes")
+            .sval
+    }
+    fn alias_of<'a>(rte: &'a RangeTblEntry<'a>) -> &'a str {
+        rte.eref.and_then(|e| e.aliasname).unwrap_or("")
+    }
+
+    let b = elog::ereport(ERROR).errcode(ERRCODE_UNDEFINED_COLUMN).errmsg(msg);
+    let b = match (state.rfirst, state.rsecond) {
+        (Some(rfirst), None) => b.errhint(format!(
+            "Perhaps you meant to reference the column \"{}.{}\".",
+            alias_of(rfirst),
+            colname_of(rfirst, state.first)
+        )),
+        (Some(rfirst), Some(rsecond)) => b.errhint(format!(
+            "Perhaps you meant to reference the column \"{}.{}\" or the column \"{}.{}\".",
+            alias_of(rfirst),
+            colname_of(rfirst, state.first),
+            alias_of(rsecond),
+            colname_of(rsecond, state.second)
+        )),
+        _ => b,
+    };
+    Box::new(
+        b.errposition(errpos(pstate, location))
+            .into_error()
+            .with_error_location(loc("errorMissingColumn")),
+    )
 }
 
 fn findNSItemForRTE<'p, 'mcx>(
@@ -1165,6 +1462,41 @@ fn bad_lateral_ref<'p, 'mcx>(
         b.errposition(errpos(pstate, location))
             .into_error()
             .with_error_location(loc("check_lateral_ref_ok")),
+    )
+}
+
+enum SysColContext {
+    CheckConstraint,
+    GeneratedColumn,
+    MergeWhen,
+}
+
+#[cold]
+#[inline(never)]
+fn bad_system_column_context(
+    pstate: &ParseState<'_, '_>,
+    colname: &str,
+    location: ParseLoc,
+    what: SysColContext,
+) -> Box<PgError> {
+    let msg = match what {
+        SysColContext::CheckConstraint => {
+            format!("system column \"{colname}\" reference in check constraint is invalid")
+        }
+        SysColContext::GeneratedColumn => {
+            format!("cannot use system column \"{colname}\" in column generation expression")
+        }
+        SysColContext::MergeWhen => {
+            format!("cannot use system column \"{colname}\" in MERGE WHEN condition")
+        }
+    };
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_INVALID_COLUMN_REFERENCE)
+            .errmsg(msg)
+            .errposition(errpos(pstate, location))
+            .into_error()
+            .with_error_location(loc("scanNSItemForColumn")),
     )
 }
 

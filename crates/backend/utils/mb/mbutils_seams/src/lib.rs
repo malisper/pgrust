@@ -37,6 +37,11 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // C: pg_mblen_range(mbstr, end) — the slice carries the end bound.
+    pub fn pg_mblen_range(s: &[u8]) -> PgResult<i32>
+);
+
+seam_core::seam!(
     // C: GetDatabaseEncoding() (mbutils.c); the i32 is a pg_enc.
     pub fn get_database_encoding() -> i32
 );

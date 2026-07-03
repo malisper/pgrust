@@ -424,6 +424,160 @@ mod e2e {
         assert_eq!(qc.nprocessed, 1);
     }
 
+    fn start_scroll_show_portal(name: &'static str) -> types_portal::Portal<'static> {
+        install_fixtures();
+        SENT.with(|s| s.borrow_mut().clear());
+        let mcx = leaked_mcx();
+        let show = Node::mk(mcx, VariableShowStmt { name: Some("work_mem") }).unwrap();
+        let stmts = utility_pstmt(show);
+        // SAFETY: stmts is leaked 'static.
+        let h = unsafe { stmt_list::register(stmts) };
+        let tag = utility::CreateCommandTag(stmts[0].utilityStmt.unwrap());
+        let portal = portalmem::CreatePortal(name, false, false).unwrap();
+        portalmem::PortalDefineQuery(&portal, None, "SHOW work_mem", tag, h, CachedPlanHandle::NULL)
+            .unwrap();
+        // DECLARE SCROLL's option set; CreatePortal defaults to NO_SCROLL.
+        portal.borrow_mut().cursorOptions = types_portal::CURSOR_OPT_SCROLL;
+        crate::PortalStart(&portal, ParamListHandle::NULL, 0, None).unwrap();
+        PortalSetResultFormat(&portal, &[]).unwrap();
+        portal
+    }
+
+    fn remote_dest(portal: &types_portal::Portal<'static>) -> tcop_dest::DestReceiver<'static> {
+        let mut dest = tcop_dest::CreateDestReceiver(CommandDest::RemoteExecute);
+        tcop_dest::SetRemoteDestReceiverParams(&mut dest, portal.clone());
+        dest
+    }
+
+    fn pos(portal: &types_portal::Portal<'static>) -> (bool, bool, u64) {
+        let p = portal.borrow();
+        (p.atStart, p.atEnd, p.portalPos)
+    }
+
+    #[test]
+    fn fetch_forward_backward_through_held_store() {
+        use types_nodes::parsenodes::{FetchDirection, FetchStmt};
+
+        let portal = start_scroll_show_portal("fetch-e2e");
+        let mut dest = remote_dest(&portal);
+
+        assert_eq!(
+            crate::PortalRunFetch(&portal, FetchDirection::FETCH_FORWARD, 1, &mut dest).unwrap(),
+            1
+        );
+        assert_eq!(pos(&portal), (false, false, 1));
+
+        assert_eq!(
+            crate::PortalRunFetch(&portal, FetchDirection::FETCH_FORWARD, 1, &mut dest).unwrap(),
+            0
+        );
+        assert_eq!(pos(&portal), (false, true, 1));
+
+        // Backward from EOF re-returns the last row (C endpoint adjustment).
+        assert_eq!(
+            crate::PortalRunFetch(&portal, FetchDirection::FETCH_BACKWARD, 1, &mut dest).unwrap(),
+            1
+        );
+        assert_eq!(pos(&portal), (false, false, 1));
+
+        assert_eq!(
+            crate::PortalRunFetch(&portal, FetchDirection::FETCH_BACKWARD, 1, &mut dest).unwrap(),
+            0
+        );
+        assert_eq!(pos(&portal), (true, false, 0));
+
+        assert_eq!(data_rows(&SENT.with(|s| s.borrow().clone())), ["4MB", "4MB"]);
+
+        // The live-portal arms of utility's FetchStmt surfaces.
+        let mcx = leaked_mcx();
+        let f = Node::mk(
+            mcx,
+            FetchStmt { portalname: Some("fetch-e2e"), ..FetchStmt::default() },
+        )
+        .unwrap();
+        assert!(utility::UtilityReturnsTuples(f));
+        assert!(utility::UtilityTupleDescriptor(f).unwrap().is_some());
+    }
+
+    #[test]
+    fn move_arms_and_backward_all_rewind() {
+        use types_nodes::parsenodes::FetchDirection;
+
+        let portal = start_scroll_show_portal("move-e2e");
+        let mut none = tcop_dest::DestReceiver::DoNothing;
+
+        // MOVE 0 off-row reports 0.
+        assert_eq!(
+            crate::PortalRunFetch(&portal, FetchDirection::FETCH_FORWARD, 0, &mut none).unwrap(),
+            0
+        );
+
+        assert_eq!(
+            crate::PortalRunFetch(&portal, FetchDirection::FETCH_FORWARD, FETCH_ALL, &mut none)
+                .unwrap(),
+            1
+        );
+        assert_eq!(pos(&portal), (false, true, 1));
+
+        assert_eq!(
+            crate::PortalRunFetch(&portal, FetchDirection::FETCH_BACKWARD, FETCH_ALL, &mut none)
+                .unwrap(),
+            1
+        );
+        assert_eq!(pos(&portal), (true, false, 0));
+
+        // The rewound store replays from the start.
+        let mut dest = remote_dest(&portal);
+        assert_eq!(
+            crate::PortalRunFetch(&portal, FetchDirection::FETCH_FORWARD, 2, &mut dest).unwrap(),
+            1
+        );
+        assert_eq!(pos(&portal), (false, true, 1));
+        assert_eq!(data_rows(&SENT.with(|s| s.borrow().clone())), ["4MB"]);
+    }
+
+    #[test]
+    fn fetch_zero_refetches_current_row() {
+        use types_nodes::parsenodes::FetchDirection;
+
+        let portal = start_scroll_show_portal("refetch-e2e");
+        let mut dest = remote_dest(&portal);
+
+        assert_eq!(
+            crate::PortalRunFetch(&portal, FetchDirection::FETCH_FORWARD, 1, &mut dest).unwrap(),
+            1
+        );
+
+        // MOVE 0 on-row reports 1 and does not move.
+        let mut none = tcop_dest::DestReceiver::DoNothing;
+        assert_eq!(
+            crate::PortalRunFetch(&portal, FetchDirection::FETCH_FORWARD, 0, &mut none).unwrap(),
+            1
+        );
+        assert_eq!(pos(&portal), (false, false, 1));
+
+        // FETCH 0 backs up and re-fetches the current row.
+        assert_eq!(
+            crate::PortalRunFetch(&portal, FetchDirection::FETCH_FORWARD, 0, &mut dest).unwrap(),
+            1
+        );
+        assert_eq!(pos(&portal), (false, false, 1));
+        assert_eq!(data_rows(&SENT.with(|s| s.borrow().clone())), ["4MB", "4MB"]);
+    }
+
+    #[test]
+    #[should_panic(expected = "FETCH_ABSOLUTE")]
+    fn fetch_absolute_is_loud() {
+        use types_nodes::parsenodes::FetchDirection;
+
+        let portal = start_scroll_show_portal("absolute-e2e");
+        // Keep MarkPortalFailed from reaching the uninstalled cleanup seam so
+        // the loud FETCH_ABSOLUTE payload is the one that surfaces.
+        portal.borrow_mut().cleanup = types_portal::PortalCleanupHook::None;
+        let mut none = tcop_dest::DestReceiver::DoNothing;
+        let _ = crate::PortalRunFetch(&portal, FetchDirection::FETCH_ABSOLUTE, 1, &mut none);
+    }
+
     // Expected line pinned against real PostgreSQL 18.3 (the explain crate's
     // differential fixture).
     #[test]

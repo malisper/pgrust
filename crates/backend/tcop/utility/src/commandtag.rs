@@ -42,7 +42,13 @@ pub fn CreateCommandTag(parsetree: Node<'_>) -> CommandTag {
 
         T_DeclareCursorStmt => CMDTAG_DECLARE_CURSOR,
         T_ClosePortalStmt => payload_gap("CreateCommandTag", "ClosePortalStmt"),
-        T_FetchStmt => payload_gap("CreateCommandTag", "FetchStmt"),
+        T_FetchStmt => {
+            if parsetree.as_fetch_stmt().unwrap().ismove {
+                CMDTAG_MOVE
+            } else {
+                CMDTAG_FETCH
+            }
+        }
         T_CreateDomainStmt => CMDTAG_CREATE_DOMAIN,
         T_CreateSchemaStmt => CMDTAG_CREATE_SCHEMA,
         T_CreateStmt => CMDTAG_CREATE_TABLE,

@@ -7,7 +7,7 @@ use ::mcx::{Mcx, MemoryContext, PgVec};
 use ::types_slot::{SlotData, TupleSlotKind};
 use ::types_tuple::varatt::varsize_any;
 use ::types_tuple::{
-    CompactAttribute, FormData_pg_attribute, TableOidAttributeNumber, TupleDescData,
+    CompactAttribute, FormData_pg_attribute, HeapTupleData, TableOidAttributeNumber, TupleDescData,
     TYPALIGN_DOUBLE, TYPALIGN_INT, TYPSTORAGE_EXTENDED, TYPSTORAGE_PLAIN,
 };
 
@@ -476,4 +476,48 @@ fn set_slot_descriptor_on_unfixed_slot() {
     assert!(slot.base().tts_tupleDescriptor.is_none());
     exec_set_slot_descriptor(&mut slot, mcx, desc3(mcx));
     assert_eq!(slot.base().tts_values.len(), 3);
+}
+
+#[test]
+fn copy_slot_buffer_to_buffer_shares_pin() {
+    use core::sync::atomic::{AtomicU32, Ordering};
+    static INCRS: AtomicU32 = AtomicU32::new(0);
+    static RELEASES: AtomicU32 = AtomicU32::new(0);
+    bufmgr_seams::incr_buffer_ref_count::set(|_| {
+        INCRS.fetch_add(1, Ordering::Relaxed);
+    });
+    bufmgr_seams::release_buffer::set(|_| {
+        RELEASES.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    });
+
+    let ctx = MemoryContext::new("test");
+    let mcx = ctx.mcx();
+    let desc = desc3(mcx);
+    let txt = text_varlena("pinned");
+    let values = [Datum::from_i32(9), text_datum(&txt), Datum::from_i64(11)];
+    let tuple = heap_form_tuple(mcx, &desc, &values, &[false; 3]).unwrap();
+    let tuple = {
+        // Simulate a buffer-resident tuple: the image is not slot-owned.
+        let t = &tuple;
+        unsafe { HeapTupleData::from_raw_parts(t.header_ptr(), t.t_len, t.t_self, t.t_tableOid) }
+    };
+
+    let mut src = make_tuple_table_slot(mcx, TupleSlotKind::BufferHeapTuple, Some(desc.clone()));
+    exec_store_buffer_heap_tuple(&mut src, mcx, tuple, 5);
+    assert_eq!(INCRS.load(Ordering::Relaxed), 1);
+    assert!(!src.base().should_free());
+
+    let mut dst = make_tuple_table_slot(mcx, TupleSlotKind::BufferHeapTuple, Some(desc));
+    exec_copy_slot(&mut dst, &mut src, mcx, mcx).unwrap();
+    assert_eq!(INCRS.load(Ordering::Relaxed), 2);
+    assert_eq!(RELEASES.load(Ordering::Relaxed), 0);
+    assert!(!dst.base().should_free());
+    let SlotData::BufferHeap(b) = &dst else { unreachable!() };
+    assert_eq!(b.buffer, 5);
+    let mut n = false;
+    assert_eq!(slot_getattr(&mut dst, 1, &mut n).as_i32(), 9);
+
+    exec_clear_tuple(&mut dst, mcx);
+    exec_clear_tuple(&mut src, mcx);
 }

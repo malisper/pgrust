@@ -224,6 +224,16 @@ fn search_syscache_exists_reloid(reloid: Oid) -> PgResult<bool> {
     )
 }
 
+fn search_syscache_exists_attnum(relid: Oid, attnum: i16) -> PgResult<bool> {
+    SearchSysCacheExists(
+        ATTNUM,
+        SysCacheKey::Value(Datum::from_oid(relid)),
+        SysCacheKey::Value(Datum::from_i16(attnum)),
+        SysCacheKey::UNUSED,
+        SysCacheKey::UNUSED,
+    )
+}
+
 fn sys_cache_invalidate(cache_id: i32, hash_value: u32) -> PgResult<()> {
     crate::SysCacheInvalidate(cache_id, hash_value);
     Ok(())
@@ -456,6 +466,7 @@ fn lookup_pg_statistic_shape(
 
 pub(crate) fn install() {
     syscache_seams::search_syscache_exists_reloid::set(search_syscache_exists_reloid);
+    syscache_seams::search_syscache_exists_attnum::set(search_syscache_exists_attnum);
     syscache_seams::sys_cache_invalidate::set(sys_cache_invalidate);
     syscache_seams::relation_invalidates_snapshots_only::set(crate::RelationInvalidatesSnapshotsOnly);
     syscache_seams::lookup_pg_class_by_relid::set(lookup_pg_class_by_relid);

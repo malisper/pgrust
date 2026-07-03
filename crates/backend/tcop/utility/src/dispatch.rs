@@ -225,7 +225,10 @@ fn dispatch_switch<'mcx>(
             CheckRestrictedOperation("CLOSE")?;
             handler_gap("PerformPortalClose (portalcmds lane)")
         }
-        T_FetchStmt => handler_gap("PerformPortalFetch (portalcmds lane)"),
+        T_FetchStmt => handler_gap(
+            "PerformPortalFetch (portalcmds lane; FetchStmt vocabulary and \
+             pquery PortalRunFetch are live)",
+        ),
 
         T_DoStmt => handler_gap("ExecuteDoStmt (functioncmds lane)"),
 
