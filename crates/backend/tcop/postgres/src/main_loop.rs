@@ -197,8 +197,9 @@ fn ready_state(mcx: Mcx<'_>, state: &mut LoopState) -> PgResult<()> {
             None,
         );
     } else {
-        /* notify processing (ProcessNotifyInterrupt): async.c lane; its
-         * pending flag cannot be raised yet. */
+        if commands_async::notifyInterruptPending() {
+            commands_async::ProcessNotifyInterrupt(false)?;
+        }
 
         let stats_timeout = pgstat::pending::pgstat_report_stat(false);
         if stats_timeout > 0 {

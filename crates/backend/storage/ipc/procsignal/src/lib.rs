@@ -562,7 +562,7 @@ pub fn procsignal_sigusr1_handler() {
         sinval_seams::handle_catchup_interrupt::call();
     }
     if CheckProcSignal(PROCSIG_NOTIFY_INTERRUPT) {
-        unported_handler("HandleNotifyInterrupt (commands/async.c)");
+        async_seams::handle_notify_interrupt::call();
     }
     if CheckProcSignal(PROCSIG_PARALLEL_MESSAGE) {
         unported_handler("HandleParallelMessageInterrupt (access/transam/parallel.c)");

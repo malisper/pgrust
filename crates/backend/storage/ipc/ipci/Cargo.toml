@@ -24,6 +24,7 @@ lock = { path = "../../lmgr/lock" }
 bufmgr = { path = "../../buffer/bufmgr" }
 varsup = { path = "../../../access/transam/varsup" }
 transam_xlog = { path = "../../../access/transam/transam_xlog" }
+commands_async = { path = "../../../commands/commands_async" }
 clog = { path = "../../../access/transam/clog" }
 subtrans = { path = "../../../access/transam/subtrans" }
 multixact = { path = "../../../access/transam/multixact" }
@@ -38,6 +39,7 @@ backend_status_seams = { path = "../../../utils/activity/backend_status_seams" }
 types_guc = { path = "../../../../_support/types/types_guc" }
 
 [dev-dependencies]
+file_seams = { path = "../../file/file_seams" }
 shmem_seams = { path = "../shmem_seams" }
 ipc_seams = { path = "../ipc_seams" }
 pg_sema_seams = { path = "../../../port/pg_sema_seams" }

@@ -68,6 +68,18 @@ fn bringup() {
         backend_status_seams::backend_status_shmem_reset_after_crash::set(|| {
             BE_STATUS_RESETS.fetch_add(1, Ordering::Relaxed);
         });
+        // AsyncShmemInit scans pg_notify/ at boot; no datadir in this test.
+        file_seams::with_allocated_dir::set(|dirname, cb| {
+            let mut ret = false;
+            let Ok(entries) = std::fs::read_dir(dirname) else { return Ok(false) };
+            for entry in entries {
+                ret = cb(entry.unwrap().file_name().to_str().unwrap())?;
+                if ret {
+                    break;
+                }
+            }
+            Ok(ret)
+        });
         transam_xlog::init_seams();
         install_test_gucs();
         init_seams();

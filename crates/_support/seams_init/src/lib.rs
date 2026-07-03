@@ -117,6 +117,7 @@ pub fn init_all() {
     explain::init_seams();
     prepare::init_seams();
     portalcmds::init_seams();
+    commands_async::init_seams();
     utility::init_seams();
     backend_status::init_seams();
     waitevent::init_seams();
