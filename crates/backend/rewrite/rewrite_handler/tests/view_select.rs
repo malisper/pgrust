@@ -459,7 +459,7 @@ fn install_parser_fixture_seams() {
     });
     syscache_seams::pg_proc_cost_shape::set(|funcid| {
         Ok(match funcid {
-            INT4GT_PROC => Some(syscache_seams::PgProcCostShape { procost: 1.0, prosupport: 0 }),
+            INT4GT_PROC => Some(syscache_seams::PgProcCostShape { procost: 1.0, prorows: 0.0, prosupport: 0 }),
             _ => None,
         })
     });

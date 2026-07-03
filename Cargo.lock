@@ -771,6 +771,7 @@ dependencies = [
  "lock_seams",
  "mcx",
  "syscache_seams",
+ "types_array",
  "types_core",
  "types_error",
  "types_storage",

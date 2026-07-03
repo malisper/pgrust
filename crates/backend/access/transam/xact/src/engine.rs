@@ -851,7 +851,10 @@ fn AbortTransaction(xp: XsPtr) -> PgResult<()> {
         async_seams::at_abort_notify::call();
     }
     relmapper::AtEOXact_RelationMap(false, is_parallel_worker)?;
-    twophase_seams::at_abort_twophase::call();
+    // No prepared-xact gxact can be locked while twophase is unported; guarded.
+    if twophase_seams::at_abort_twophase::is_installed() {
+        twophase_seams::at_abort_twophase::call();
+    }
 
     let latest_xid = if !is_parallel_worker {
         RecordTransactionAbort(false)?

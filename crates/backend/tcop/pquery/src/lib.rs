@@ -727,24 +727,32 @@ fn PortalRunUtility(
     };
     let mcx = ctx.mcx();
 
+    // No portal Ref may be held across ProcessUtility: VACUUM commits its
+    // transaction mid-command and PreCommit_Portals re-enters this portal.
+    // SAFETY: sourceText is set at portal define time, address-stable in the
+    // portal's memory, and never mutated while the portal runs (C contract).
+    let source_text: &str = unsafe {
+        let p = portal.borrow();
+        core::mem::transmute::<&str, &str>(
+            p.sourceText.as_ref().map(|s| s.as_str()).unwrap_or(""),
+        )
+    };
     stmt_list::with(stmts, |s| {
         let (params, query_env) = {
             let p = portal.borrow();
             (p.portalParams, p.queryEnv)
         };
-        with_source_text(portal, |source_text| {
-            utility_seams::process_utility::call(
-                mcx,
-                &s[idx],
-                source_text,
-                read_only_tree,
-                context,
-                params,
-                query_env,
-                dest,
-                qc,
-            )
-        })
+        utility_seams::process_utility::call(
+            mcx,
+            &s[idx],
+            source_text,
+            read_only_tree,
+            context,
+            params,
+            query_env,
+            dest,
+            qc,
+        )
     })?;
 
     let portal_snapshot = portal.borrow_mut().portalSnapshot.take();

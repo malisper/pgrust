@@ -1619,6 +1619,7 @@ mod join {
 
     #[test]
     fn comma_join_plans_to_inner_nestloop_with_join_filter() {
+        let _guc = crate::tests::GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let cx = cx();
         let mcx = cx.mcx();
         let stmt = planner(
@@ -1686,6 +1687,7 @@ mod join {
     // HashJoin and that its cost is far below the nestloop it beat.
     #[test]
     fn large_comma_join_plans_to_hash_join() {
+        let _guc = crate::tests::GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let cx = cx();
         let mcx = cx.mcx();
         // final_cost_hashjoin's get_hash_memory_limit reads work_mem/hash_mem_multiplier.
@@ -1737,6 +1739,7 @@ mod join {
     //     ->  Sort (cost=1.03..1.03 rows=2)  ->  Seq Scan on jt2 (..1.02)
     #[test]
     fn merge_join_wins_with_nestloop_and_hash_disabled() {
+        let _guc = crate::tests::GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let cx = cx();
         let mcx = cx.mcx();
         if !guc_tables::vars::work_mem.installed() {
