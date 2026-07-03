@@ -394,6 +394,7 @@ dependencies = [
  "datum",
  "init_small",
  "mcx",
+ "pg_prng",
  "pqformat",
  "stringinfo",
  "types_core",
@@ -552,14 +553,22 @@ name = "adt_uuid"
 version = "0.1.0"
 dependencies = [
  "adt_datetime",
+ "adt_timestamp",
  "datum",
+ "elog",
+ "fd",
+ "guc_tables",
  "hashfn",
+ "libc",
  "mcx",
+ "pg_strong_random",
+ "pgtz",
  "pqformat",
  "stringinfo",
  "types_core",
  "types_error",
  "types_fmgr",
+ "xact_seams",
 ]
 
 [[package]]
@@ -2069,6 +2078,18 @@ name = "crypt"
 version = "0.0.0"
 
 [[package]]
+name = "cryptohashfuncs"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "pg_md5",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "varlena",
+]
+
+[[package]]
 name = "datum"
 version = "0.0.0"
 dependencies = [
@@ -2759,12 +2780,14 @@ dependencies = [
  "arrayfuncs",
  "commands_async",
  "conv",
+ "cryptohashfuncs",
  "datum",
  "dbsize",
  "fmgr_seams",
  "mcx",
  "name",
  "nbt_compare",
+ "pseudorandomfuncs",
  "sequence_seams",
  "stringinfo",
  "types_core",
@@ -5642,6 +5665,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "pg_md5"
+version = "0.1.0"
+
+[[package]]
 name = "pg_namespace"
 version = "0.1.0"
 dependencies = [
@@ -5721,6 +5748,13 @@ name = "pg_string"
 version = "0.0.0"
 dependencies = [
  "string_seams",
+]
+
+[[package]]
+name = "pg_strong_random"
+version = "0.1.0"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
@@ -6149,6 +6183,7 @@ dependencies = [
  "parser_seams",
  "pg_enum_seams",
  "pg_sema_seams",
+ "pg_strong_random",
  "pgstat",
  "pgstat_seams",
  "pgtz",
@@ -6829,6 +6864,21 @@ name = "ps_status_seams"
 version = "0.0.0"
 dependencies = [
  "seam_core",
+]
+
+[[package]]
+name = "pseudorandomfuncs"
+version = "0.1.0"
+dependencies = [
+ "adt_numeric",
+ "adt_timestamp",
+ "datum",
+ "init_small",
+ "pg_prng",
+ "pg_strong_random",
+ "types_core",
+ "types_error",
+ "types_fmgr",
 ]
 
 [[package]]
@@ -9196,6 +9246,7 @@ dependencies = [
  "pg_string",
  "pgtz",
  "pqcomm_seams",
+ "pseudorandomfuncs",
  "scalar_seams",
  "snapmgr",
  "superuser",
