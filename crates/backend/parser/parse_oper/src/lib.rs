@@ -127,8 +127,7 @@ pub fn LookupOperWithArgs(
         let t = n
             .as_variant::<types_nodes::rawnodes::TypeName>()
             .expect("oper_argtypes holds TypeName nodes");
-        let (oid, _typmod) = parse_utilcmd::typenameTypeIdAndMod(scratch.mcx(), None, t)?;
-        oids[i] = oid;
+        oids[i] = parse_utilcmd::LookupTypeNameOid(scratch.mcx(), t)?;
     }
     LookupOperName(oper_name, oids[0], oids[1], noError)
 }

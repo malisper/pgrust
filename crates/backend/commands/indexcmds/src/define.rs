@@ -281,8 +281,8 @@ fn ComputeIndexAttrs<'mcx>(
         let Some(name) = attribute.name else {
             unported("ComputeIndexAttrs: expression index columns");
         };
-        if !attribute.opclass.is_nil() || !attribute.opclassopts.is_nil() {
-            unported("ComputeIndexAttrs: named operator classes (ResolveOpClass)");
+        if !attribute.opclassopts.is_nil() {
+            unported("ComputeIndexAttrs: operator class options (opclassopts)");
         }
         if !attribute.collation.is_nil() {
             unported("ComputeIndexAttrs: COLLATE overrides (get_collation_oid)");
@@ -327,15 +327,19 @@ fn ComputeIndexAttrs<'mcx>(
         }
         collationIds[attn] = attcollation;
 
-        opclassIds[attn] = GetDefaultOpClass(atttype, accessMethodId)?;
-        if opclassIds[attn] == InvalidOid {
-            return Err(err(
-                format!(
-                    "data type {} has no default operator class for access method \"{amname}\"",
-                    format_type::format_type_be(atttype)?
-                ),
-                ERRCODE_UNDEFINED_OBJECT,
-            ));
+        if !attribute.opclass.is_nil() {
+            opclassIds[attn] = resolve_op_class(&attribute.opclass, atttype, amname, accessMethodId)?;
+        } else {
+            opclassIds[attn] = GetDefaultOpClass(atttype, accessMethodId)?;
+            if opclassIds[attn] == InvalidOid {
+                return Err(err(
+                    format!(
+                        "data type {} has no default operator class for access method \"{amname}\"",
+                        format_type::format_type_be(atttype)?
+                    ),
+                    ERRCODE_UNDEFINED_OBJECT,
+                ));
+            }
         }
 
         coloptions[attn] = 0;
@@ -533,4 +537,52 @@ fn eq_key(attno: AttrNumber, func: RegProcedure, arg: Datum) -> ScanKeyData {
         .unwrap_or_else(|e| panic!("fmgr_info({func}) failed: {e:?}"));
     key.sk_argument = arg;
     key
+}
+
+// ResolveOpClass (indexcmds.c): specific-opclass arm; the NIL arm rides
+// GetDefaultOpClass above.
+fn resolve_op_class(
+    opclass: &types_nodes::NodeList<'_>,
+    attrType: Oid,
+    accessMethodName: &str,
+    accessMethodId: Oid,
+) -> PgResult<Oid> {
+    let mut buf: [&str; 4] = [""; 4];
+    let n = opclass.len().min(4);
+    for (i, node) in opclass.iter().enumerate().take(n) {
+        buf[i] = node.as_string().expect("opclass name list").sval;
+    }
+    let (schemaname, opcname) = catalog_namespace::DeconstructQualifiedName(&buf[..n])?;
+    let opClassId = match schemaname {
+        Some(schemaname) => {
+            let namespace_id = catalog_namespace::LookupExplicitNamespace(schemaname, false)?;
+            syscache_seams::lookup_pg_opclass_oid_exact::call(
+                accessMethodId,
+                opcname,
+                namespace_id,
+            )?
+        }
+        None => catalog_namespace::OpclassnameGetOpcid(accessMethodId, opcname)?,
+    };
+    if opClassId == InvalidOid {
+        return Err(err(
+            format!(
+                "operator class \"{}\" does not exist for access method \"{accessMethodName}\"",
+                buf[..n].join(".")
+            ),
+            ERRCODE_UNDEFINED_OBJECT,
+        ));
+    }
+    let opInputType = lsyscache::get_opclass_input_type(opClassId)?;
+    if attrType != opInputType && !coerce::IsBinaryCoercible(attrType, opInputType)? {
+        return Err(err(
+            format!(
+                "operator class \"{}\" does not accept data type {}",
+                buf[..n].join("."),
+                format_type::format_type_be(attrType)?
+            ),
+            ERRCODE_DATATYPE_MISMATCH,
+        ));
+    }
+    Ok(opClassId)
 }

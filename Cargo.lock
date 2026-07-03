@@ -3371,6 +3371,7 @@ dependencies = [
  "aclchk_seams",
  "catalog_heap",
  "catalog_index",
+ "catalog_namespace",
  "coerce",
  "datum",
  "elog",

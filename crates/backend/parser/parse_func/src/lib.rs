@@ -1206,8 +1206,7 @@ pub fn LookupFuncWithArgs(
         let t = n
             .as_variant::<types_nodes::rawnodes::TypeName>()
             .expect("objargs holds TypeName nodes");
-        let (oid, _typmod) = parse_utilcmd::typenameTypeIdAndMod(scratch.mcx(), None, t)?;
-        argoids[i] = oid;
+        argoids[i] = parse_utilcmd::LookupTypeNameOid(scratch.mcx(), t)?;
     }
     let nargs: i16 = if args_unspecified { -1 } else { argcount as i16 };
 
