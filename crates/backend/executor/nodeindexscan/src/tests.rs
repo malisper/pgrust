@@ -482,6 +482,8 @@ fn index_relation<'mcx>(mcx: Mcx<'mcx>, oid: Oid, heap_oid: Oid) -> Relation<'mc
             indisready: true,
             indkey,
             has_indpred: false,
+        indexprs_src: None,
+        indpred_src: None,
         }),
         rd_opcintype: one(INT4OID),
         rd_opfamily: one(INT4_BTREE_OPFAMILY),

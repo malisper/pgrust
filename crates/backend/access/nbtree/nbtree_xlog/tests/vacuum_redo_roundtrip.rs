@@ -412,6 +412,8 @@ fn index_rel(mcx: Mcx<'_>) -> Relation<'_> {
             indisready: true,
             indkey,
             has_indpred: false,
+        indexprs_src: None,
+        indpred_src: None,
         }),
         rd_opcintype: one(23),
         rd_opfamily: one(1976),

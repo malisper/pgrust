@@ -80,6 +80,8 @@ fn make<'mcx>(mcx: Mcx<'mcx>, oid: Oid, name: &str, relkind: u8, relam: Oid) -> 
             indisready: true,
             indkey,
             has_indpred: false,
+        indexprs_src: None,
+        indpred_src: None,
         }
     });
     let data = RelationData { rd_locator: Default::default(), rd_smgr: Default::default(),
