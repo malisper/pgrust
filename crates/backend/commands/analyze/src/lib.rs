@@ -270,8 +270,7 @@ fn do_analyze_rel(
                 }
                 ComputeStats::Range { is_multirange } => {
                     range_typanalyze::compute_range_stats(
-                        anl_mcx, col_cx.mcx(), s, is_multirange, tupdesc, &rows, numrows,
-                        totalrows,
+                        anl_mcx, s, is_multirange, tupdesc, &rows, numrows, totalrows,
                     )?
                 }
             }

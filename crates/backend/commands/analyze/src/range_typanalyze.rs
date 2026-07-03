@@ -3,7 +3,7 @@
 
 use adt_rangetypes::{range_cmp_bounds, RangeBound, RangeInfo};
 use datum::Datum;
-use mcx::{Mcx, PgVec};
+use mcx::{Mcx, MemoryContext, PgVec};
 use types_core::Oid;
 use types_error::PgResult;
 use types_fmgr::FmgrInfo;
@@ -64,7 +64,6 @@ fn detoasted_image<'m>(mcx: Mcx<'m>, value: Datum) -> PgResult<&'m [u8]> {
 
 pub(crate) fn compute_range_stats<'mcx>(
     anl_mcx: Mcx<'mcx>,
-    col_mcx: Mcx<'_>,
     stats: &mut VacAttrStats<'mcx>,
     is_multirange: bool,
     tupdesc: &TupleDescData<'_>,
@@ -74,6 +73,10 @@ pub(crate) fn compute_range_stats<'mcx>(
 ) -> PgResult<()> {
     let base_typid = lsyscache::getBaseType(stats.attrtypid)?;
     let mut ctx = range_ctx(base_typid, is_multirange)?;
+    // Bump scratch: detoasted images and subdiff results leak by design and
+    // an exact-accounting context would assert at reset.
+    let scratch = MemoryContext::new_bump("compute_range_stats scratch");
+    let col_mcx = scratch.mcx();
     let has_subdiff = ctx.subdiff.is_some();
 
     let mut null_cnt = 0i32;
