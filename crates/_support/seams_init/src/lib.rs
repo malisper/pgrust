@@ -160,6 +160,7 @@ pub fn init_all() {
     fmgr_core::register_late_builtins(adt_misc::MISC_BUILTINS);
     fmgr_core::register_late_builtins(dbcommands::builtins::DBCOMMANDS_BUILTINS);
     fmgr_core::register_late_builtins(adt_rowtypes::ROWTYPES_BUILTINS);
+    fmgr_core::register_late_builtins(partbounds::PARTBOUNDS_BUILTINS);
     sql_functions::init_seams();
     fmgr_core::register_late_builtins(adt_geo::builtins::GEO_BUILTINS);
     fmgr_core::register_late_builtins(gistproc::GISTPROC_BUILTINS);

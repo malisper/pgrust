@@ -1448,6 +1448,7 @@ dependencies = [
  "mcx",
  "miscinit_seams",
  "outfuncs",
+ "partcache",
  "pg_constraint",
  "pg_depend",
  "pg_type",
@@ -3074,7 +3075,9 @@ dependencies = [
 name = "execpartition"
 version = "0.1.0"
 dependencies = [
+ "clauses_seams",
  "datum",
+ "execexpr",
  "exectuples",
  "fmgr_core",
  "lsyscache",
@@ -3086,6 +3089,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_fmgr",
+ "types_nodes",
  "types_rel",
  "types_slot",
 ]
@@ -6270,13 +6274,24 @@ dependencies = [
 name = "partbounds"
 version = "0.1.0"
 dependencies = [
+ "cache_syscache",
+ "clauses_seams",
  "datum",
+ "execexpr",
  "lsyscache",
  "mcx",
  "partcache",
+ "pg_inherits",
+ "readfuncs",
+ "snapmgr",
+ "table",
+ "tableam",
  "types_core",
  "types_error",
+ "types_fmgr",
  "types_nodes",
+ "types_rel",
+ "types_scan",
 ]
 
 [[package]]
@@ -6286,6 +6301,7 @@ dependencies = [
  "cache_syscache",
  "datum",
  "fmgr_seams",
+ "format_type",
  "inval",
  "lsyscache",
  "mcx",
@@ -6308,10 +6324,24 @@ dependencies = [
  "partcache",
  "pg_inherits",
  "readfuncs",
+ "table",
  "types_core",
  "types_error",
  "types_nodes",
  "types_rel",
+]
+
+[[package]]
+name = "partprune"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "mcx",
+ "partbounds",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_pathnodes",
 ]
 
 [[package]]
@@ -6886,7 +6916,10 @@ dependencies = [
  "parse_relation",
  "parser_analyze",
  "parser_small1",
+ "partbounds",
+ "partcache",
  "partdesc",
+ "partprune",
  "pg_inherits",
  "pg_locale",
  "planner_seams",
@@ -8697,6 +8730,7 @@ dependencies = [
  "parse_expr",
  "parser_analyze",
  "parser_driver",
+ "partbounds",
  "pg_class",
  "pg_database",
  "pg_db_role_setting",

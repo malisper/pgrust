@@ -1,5 +1,5 @@
-// heap.c partition DDL slice: StorePartitionKey / StorePartitionBound.
-// DEFAULT partitions (update_default_partition_oid) are loud upstream.
+// heap.c partition DDL slice: StorePartitionKey / StorePartitionBound;
+// update_default_partition_oid (catalog/partition.c) rides here.
 use datum::Datum;
 use mcx::Mcx;
 use types_core::{AttrNumber, InvalidOid, Oid, DEFAULT_COLLATION_OID, RELATION_RELATION_ID};
@@ -9,7 +9,9 @@ use types_rel::{Relation, RowExclusiveLock, RELKIND_PARTITIONED_TABLE};
 use pg_depend::ObjectAddress;
 
 const PartitionedRelationId: Oid = 3350;
+const PartitionedRelidIndexId: Oid = 3351;
 const Natts_pg_partitioned_table: usize = 8;
+const Anum_pg_partitioned_table_partdefid: usize = 4;
 const INT2OID: Oid = 21;
 const OIDOID: Oid = 26;
 const Anum_pg_class_relpartbound: usize = 34;
@@ -132,7 +134,55 @@ pub fn StorePartitionBound<'mcx>(
     catalog_indexing::CatalogTupleUpdate(mcx, &class_rel, &otid, &mut newtup)?;
     class_rel.close(RowExclusiveLock)?;
 
+    let spec = bound
+        .as_variant::<types_nodes::rawnodes::PartitionBoundSpec>()
+        .expect("PartitionBoundSpec");
+    if spec.is_default {
+        update_default_partition_oid(mcx, parent.rd_id, rel.rd_id)?;
+    }
+
     xact::CommandCounterIncrement()?;
+
+    // The default partition's constraint depends on every sibling's bound;
+    // invalidate it whenever a partition is added.
+    let default_part_oid = partcache::get_default_partition_oid(parent.rd_id)?;
+    if default_part_oid != InvalidOid {
+        inval::invalidate::CacheInvalidateRelcacheByRelid(default_part_oid)?;
+    }
     inval::invalidate::CacheInvalidateRelcache(parent)?;
     Ok(())
+}
+
+pub fn update_default_partition_oid<'mcx>(
+    mcx: Mcx<'mcx>,
+    parent_id: Oid,
+    default_part_id: Oid,
+) -> PgResult<()> {
+    let part_table = table::table_open(mcx, PartitionedRelationId, RowExclusiveLock)?;
+    let keys = [crate::drop::oid_scankey(1, parent_id)];
+    let mut scan = genam::systable_beginscan(
+        mcx,
+        &part_table,
+        PartitionedRelidIndexId,
+        true,
+        None,
+        &keys,
+    )?;
+    let tup = genam::systable_getnext(mcx, &mut scan)?
+        .unwrap_or_else(|| panic!("cache lookup failed for partition key of relation {parent_id}"));
+    let desc = part_table.descr();
+    let natts = desc.natts as usize;
+    let mut values: mcx::PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
+    let mut isnull: mcx::PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+    let mut replace: mcx::PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+    values.resize(natts, Datum::null());
+    isnull.resize(natts, false);
+    replace.resize(natts, false);
+    values[Anum_pg_partitioned_table_partdefid - 1] = Datum::from_oid(default_part_id);
+    replace[Anum_pg_partitioned_table_partdefid - 1] = true;
+    let mut newtup = heaptuple::heap_modify_tuple(mcx, tup, desc, &values, &isnull, &replace)?;
+    let otid = tup.t_self;
+    genam::systable_endscan(mcx, scan)?;
+    catalog_indexing::CatalogTupleUpdate(mcx, &part_table, &otid, &mut newtup)?;
+    part_table.close(RowExclusiveLock)
 }
