@@ -551,6 +551,13 @@ pub struct MinMaxExpr<'mcx> {
     pub location: ParseLoc,
 }
 
+// C `Expr *arg` is never NULL in a live CollateExpr; modeled non-optional.
+pub struct CollateExpr<'mcx> {
+    pub arg: Node<'mcx>,
+    pub collOid: Oid,
+    pub location: ParseLoc,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[repr(u32)]
 pub enum SQLValueFunctionOp {
@@ -572,7 +579,7 @@ pub enum SQLValueFunctionOp {
     SVFOP_CURRENT_SCHEMA = 14,
 }
 
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 pub struct SQLValueFunction {
     pub op: SQLValueFunctionOp,
     pub r#type: Oid,
@@ -735,6 +742,9 @@ unsafe impl NodeVariant<'_> for SQLValueFunction {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for SubLink<'mcx> {
     const TAG: NodeTag = NodeTag::T_SubLink;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for CollateExpr<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CollateExpr;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for SubPlan<'mcx> {
     const TAG: NodeTag = NodeTag::T_SubPlan;
@@ -1044,6 +1054,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_sub_plan(self) -> Option<&'mcx SubPlan<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_collate_expr(self) -> Option<&'mcx CollateExpr<'mcx>> {
         self.as_variant()
     }
 }

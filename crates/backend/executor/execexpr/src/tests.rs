@@ -26,6 +26,15 @@ static SEAMS: Once = Once::new();
 fn install_seams() {
     SEAMS.call_once(|| {
         miscinit_seams::get_user_id::set(|| 10);
+        namespace_seams::type_is_visible::set(|_| Ok(true));
+        namespace_seams::is_temp_namespace::set(|_| false);
+        syscache_seams::pg_type_typnamespace::set(|_| Ok(Some(11)));
+        syscache_seams::pg_type_element_shape::set(|typid| {
+            Ok((typid == 1007).then(|| syscache_seams::PgTypeElementShape {
+                typelem: 23,
+                typsubscript: lsyscache::F_ARRAY_SUBSCRIPT_HANDLER,
+            }))
+        });
         aclchk_seams::object_aclcheck::set(|_classid, _objid, _roleid, _mode| Ok(0));
         syscache_seams::lookup_pg_type_shape::set(|typid| {
             Ok(match typid {
@@ -1238,6 +1247,47 @@ fn mk_domain_coercion(mcx: Mcx<'_>, value: Option<i32>) -> Node<'_> {
     .unwrap()
 }
 
+const INT4ARRAYOID: u32 = 1007;
+
+const F_INT4EQ: u32 = 65;
+
+fn mk_int4_array_const<'mcx>(mcx: Mcx<'mcx>, elems: &[Option<i32>]) -> Node<'mcx> {
+    let values: Vec<Datum> =
+        elems.iter().map(|v| v.map_or(Datum::null(), Datum::from_i32)).collect();
+    let nulls: Vec<bool> = elems.iter().map(|v| v.is_none()).collect();
+    let dims = [elems.len() as i32];
+    let img = arrayfuncs::construct_md_array(
+        mcx, &values, Some(&nulls), 1, &dims, &[1], INT4OID, 4, true, b'i',
+    )
+    .unwrap();
+    let d = Datum::from_usize(img.leak().as_ptr() as usize);
+    Node::mk_const(mcx, INT4ARRAYOID, -1, 0, -1, d, false, false).unwrap()
+}
+
+fn mk_saop<'mcx>(
+    mcx: Mcx<'mcx>,
+    use_or: bool,
+    scalar: Node<'mcx>,
+    array: Node<'mcx>,
+) -> Node<'mcx> {
+    let mut args = NodeList::make1(mcx, scalar).unwrap();
+    args.lappend(mcx, array).unwrap();
+    Node::mk(
+        mcx,
+        ::types_nodes::ScalarArrayOpExpr {
+            opno: 96,
+            opfuncid: F_INT4EQ,
+            hashfuncid: 0,
+            negfuncid: 0,
+            useOr: use_or,
+            inputcollid: 0,
+            args,
+            location: -1,
+        },
+    )
+    .unwrap()
+}
+
 fn eval_domain(value: Option<i32>) -> Result<::datum::NullableDatum, Box<::types_error::PgError>> {
     install_seams();
     with_mcx(|mcx| {
@@ -1245,6 +1295,26 @@ fn eval_domain(value: Option<i32>) -> Result<::datum::NullableDatum, Box<::types
         let mut state = exec_init_expr(mcx, Some(expr), ParamBind::NONE).unwrap().unwrap();
         state.arm_result_mcx(mcx);
         exec_eval_expr(&mut state, &mut EvalSlots::default())
+    })
+}
+
+fn eval_saop(
+    use_or: bool,
+    scalar: Option<i32>,
+    elems: &[Option<i32>],
+) -> Option<bool> {
+    with_mcx(|mcx| {
+        let node = mk_saop(
+            mcx,
+            use_or,
+            mk_int4_const(mcx, scalar),
+            mk_int4_array_const(mcx, elems),
+        );
+        let mut state = exec_init_expr(mcx, Some(node), ParamBind::NONE).unwrap().unwrap();
+        state.arm_result_mcx(mcx);
+        let mut slots = EvalSlots::default();
+        let r = exec_eval_expr(&mut state, &mut slots).unwrap();
+        (!r.isnull).then(|| r.value.as_bool())
     })
 }
 
@@ -1282,4 +1352,62 @@ fn domain_check_input_engine_matches() {
     assert_eq!(e.sqlstate(), ::types_error::ERRCODE_CHECK_VIOLATION);
     let e = crate::domain::domain_check_input(Datum::null(), true, DOMAIN_OID).unwrap_err();
     assert_eq!(e.sqlstate(), ::types_error::ERRCODE_NOT_NULL_VIOLATION);
+}
+#[test]
+fn scalar_array_op_any_and_all() {
+    assert_eq!(eval_saop(true, Some(2), &[Some(1), Some(2), Some(3)]), Some(true));
+    assert_eq!(eval_saop(true, Some(5), &[Some(1), Some(2), Some(3)]), Some(false));
+    assert_eq!(eval_saop(true, Some(5), &[]), Some(false));
+    assert_eq!(eval_saop(false, Some(5), &[]), Some(true));
+    assert_eq!(eval_saop(false, Some(2), &[Some(2), Some(2)]), Some(true));
+    assert_eq!(eval_saop(false, Some(2), &[Some(2), Some(3)]), Some(false));
+    // Strict fn + NULL scalar -> NULL; NULL element leaves NULL unless decided.
+    assert_eq!(eval_saop(true, None, &[Some(1)]), None);
+    assert_eq!(eval_saop(true, Some(2), &[Some(1), None]), None);
+    assert_eq!(eval_saop(true, Some(2), &[None, Some(2)]), Some(true));
+    assert_eq!(eval_saop(false, Some(2), &[Some(2), None]), None);
+    assert_eq!(eval_saop(false, Some(2), &[None, Some(3)]), Some(false));
+}
+
+#[test]
+fn scalar_array_op_null_array_is_null() {
+    with_mcx(|mcx| {
+        let arr = Node::mk_const(mcx, INT4ARRAYOID, -1, 0, -1, Datum::null(), true, false)
+            .unwrap();
+        let node = mk_saop(mcx, true, mk_int4_const(mcx, Some(2)), arr);
+        let mut state = exec_init_expr(mcx, Some(node), ParamBind::NONE).unwrap().unwrap();
+        state.arm_result_mcx(mcx);
+        let mut slots = EvalSlots::default();
+        assert!(exec_eval_expr(&mut state, &mut slots).unwrap().isnull);
+    });
+}
+
+#[test]
+fn array_expr_builds_array_consumable_by_saop() {
+    with_mcx(|mcx| {
+        let mut elems = NodeList::make1(mcx, mk_int4_const(mcx, Some(7))).unwrap();
+        elems.lappend(mcx, mk_int4_const(mcx, Some(8))).unwrap();
+        elems.lappend(mcx, mk_int4_const(mcx, None)).unwrap();
+        let ae = Node::mk(
+            mcx,
+            ::types_nodes::ArrayExpr {
+                array_typeid: INT4ARRAYOID,
+                array_collid: 0,
+                element_typeid: INT4OID,
+                elements: elems,
+                multidims: false,
+                list_start: -1,
+                list_end: -1,
+                location: -1,
+            },
+        )
+        .unwrap();
+        let node = mk_saop(mcx, true, mk_int4_const(mcx, Some(8)), ae);
+        let mut state = exec_init_expr(mcx, Some(node), ParamBind::NONE).unwrap().unwrap();
+        state.arm_result_mcx(mcx);
+        let mut slots = EvalSlots::default();
+        let r = exec_eval_expr(&mut state, &mut slots).unwrap();
+        assert!(!r.isnull);
+        assert!(r.value.as_bool());
+    });
 }

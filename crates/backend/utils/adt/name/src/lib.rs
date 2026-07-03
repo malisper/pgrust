@@ -226,8 +226,8 @@ pub fn current_schema(mcx: Mcx<'_>) -> PgResult<Option<NameData>> {
     }
 }
 
-// C's current_schemas up to construct_array_builtin; building the array image
-// is the registering fc wrapper's job (arrayfuncs unported).
+// C's current_schemas up to construct_array_builtin; the fc wrapper builds
+// the array image.
 pub fn current_schemas<'mcx>(
     mcx: Mcx<'mcx>,
     include_implicit: bool,

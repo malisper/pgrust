@@ -15,7 +15,6 @@ use crate::run::PlannerRun;
 
 pub const DEFAULT_EQ_SEL: f64 = 0.005;
 pub const DEFAULT_INEQ_SEL: f64 = 0.3333333333333333;
-pub const DEFAULT_MATCH_SEL: f64 = 0.005;
 pub const DEFAULT_NUM_DISTINCT: f64 = 200.0;
 const DEFAULT_PAGE_CPU_MULTIPLIER: f64 = 50.0;
 const BOOLOID: u32 = 16;
@@ -986,9 +985,10 @@ pub fn examine_variable<'mcx>(
     }
     match node.node_tag() {
         NodeTag::T_Const => Ok(vardata),
-        // Var-free expressions (HAVING Aggrefs, PARAM_EXEC initplan outputs):
-        // C's expression leg finds no relids and returns "don't know".
-        NodeTag::T_Aggref | NodeTag::T_Param => Ok(vardata),
+        // Var-free expressions (HAVING Aggrefs, PARAM_EXEC initplan outputs,
+        // scalararraysel dummies): C's expression leg finds no relids and
+        // returns "don't know".
+        NodeTag::T_Aggref | NodeTag::T_Param | NodeTag::T_CaseTestExpr => Ok(vardata),
         // C's general expression leg: a single-rel expression keeps its rel
         // (tuple-count clamps) but has no stats (extended statistics absent).
         _ => {
@@ -2276,52 +2276,52 @@ fn get_variable_range<'mcx>(
     Ok(range)
 }
 
-fn get_stats_slot_range(
-    values: &[Datum],
-    opfuncoid: Oid,
-    opproc: &mut Option<FmgrInfo>,
-    collation: Oid,
-    range: &mut Option<(Datum, Datum)>,
-) -> PgResult<()> {
-    if values.is_empty() {
-        return Ok(());
-    }
-    if opproc.is_none() {
-        *opproc = Some(fmgr_core::fmgr_info(opfuncoid)?);
-    }
-    let opproc = opproc.as_mut().unwrap();
-    for &v in values {
-        match range {
-            None => *range = Some((v, v)),
-            Some((tmin, tmax)) => {
-                if types_fmgr::function_call2_coll(opproc, collation, v, *tmin)?.as_bool() {
-                    *tmin = v;
-                }
-                if types_fmgr::function_call2_coll(opproc, collation, *tmax, v)?.as_bool() {
-                    *tmax = v;
-                }
-            }
+const TEXTOID: u32 = 25;
+const NAMEOID: u32 = 19;
+const BPCHAROID: u32 = 1042;
+const BYTEAOID: u32 = 17;
+const BOOLEAN_EQ_OP: Oid = 91;
+pub const DEFAULT_MATCH_SEL: f64 = 0.005;
+
+const PARTIAL_WILDCARD_SEL: f64 = 2.0;
+
+
+struct PrefixConst {
+    consttype: Oid,
+    constvalue: Datum,
+}
+
+fn text_datum_payload<'a>(value: Datum) -> &'a [u8] {
+    let p = value.as_usize() as *const u8;
+    debug_assert!(!p.is_null());
+    // SAFETY: by-ref varlena datum; planner consts and detoasted stats carry
+    // in-line 1B/4B images only (the asserts keep toast forms loud).
+    unsafe {
+        let b0 = *p;
+        if b0 & 0x01 == 0x01 {
+            assert!(b0 != 0x01, "text_datum_payload: external toast datum");
+            let total = ((b0 >> 1) & 0x7F) as usize;
+            core::slice::from_raw_parts(p.add(1), total - 1)
+        } else {
+            assert!(b0 & 0x03 == 0, "text_datum_payload: compressed datum");
+            datum::VarlenaRef::from_ptr(p).data()
         }
     }
-    Ok(())
 }
 
-fn strip_array_coercion<'mcx>(mut node: Node<'mcx>) -> Node<'mcx> {
-    while let Some(r) = node.as_relabel_type() {
-        node = r.arg;
-    }
-    node
-}
-
-fn expr_collation(node: Node<'_>) -> Oid {
-    match node.node_tag() {
-        NodeTag::T_Const => node.as_const().unwrap().constcollid,
-        NodeTag::T_ArrayExpr => node.as_array_expr().unwrap().array_collid,
-        NodeTag::T_Var => node.as_var().unwrap().varcollid,
-        _ => 0,
+fn varlena_image<'a>(value: Datum) -> &'a [u8] {
+    let p = value.as_usize() as *const u8;
+    debug_assert!(!p.is_null());
+    // SAFETY: as text_datum_payload; array consts are 4B uncompressed images.
+    unsafe {
+        assert!(*p & 0x03 == 0, "varlena_image: non-4B varlena");
+        datum::VarlenaRef::from_ptr(p).as_bytes()
     }
 }
 
+
+// scalararraysel_containment (array_selfuncs.c): only the early-exit legs;
+// where C would proceed to the MCELEM estimate this is loud.
 // scalararraysel (selfuncs.c). The typcache eq_opr probe only gates
 // scalararraysel_containment, whose live precondition (an array-typed
 // variable operand) is the loud arm below; the isEquality/isInequality
@@ -2506,6 +2506,74 @@ pub fn scalararraysel<'mcx>(
 
     Ok(clamp_probability(s1))
 }
+
+fn scalararraysel_containment<'mcx>(
+    leftop: Node<'mcx>,
+    rightop: Node<'mcx>,
+    varrelid: i32,
+) -> f64 {
+    let rightop_is_rel_var = rightop
+        .as_var()
+        .is_some_and(|v| v.varlevelsup == 0 && (varrelid == 0 || varrelid == v.varno));
+    if !rightop_is_rel_var {
+        return -1.0;
+    }
+    let Some(lc) = leftop.as_const() else {
+        return -1.0;
+    };
+    if lc.constisnull {
+        return 0.0;
+    }
+    panic!("scalararraysel_containment (array_selfuncs.c): MCELEM containment lane");
+}
+
+fn strip_array_coercion<'mcx>(mut node: Node<'mcx>) -> Node<'mcx> {
+    while let Some(r) = node.as_relabel_type() {
+        node = r.arg;
+    }
+    node
+}
+
+fn get_stats_slot_range(
+    values: &[Datum],
+    opfuncoid: Oid,
+    opproc: &mut Option<FmgrInfo>,
+    collation: Oid,
+    range: &mut Option<(Datum, Datum)>,
+) -> PgResult<()> {
+    if values.is_empty() {
+        return Ok(());
+    }
+    if opproc.is_none() {
+        *opproc = Some(fmgr_core::fmgr_info(opfuncoid)?);
+    }
+    let opproc = opproc.as_mut().unwrap();
+    for &v in values {
+        match range {
+            None => *range = Some((v, v)),
+            Some((tmin, tmax)) => {
+                if types_fmgr::function_call2_coll(opproc, collation, v, *tmin)?.as_bool() {
+                    *tmin = v;
+                }
+                if types_fmgr::function_call2_coll(opproc, collation, *tmax, v)?.as_bool() {
+                    *tmax = v;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+
+fn expr_collation(node: Node<'_>) -> Oid {
+    match node.node_tag() {
+        NodeTag::T_Const => node.as_const().unwrap().constcollid,
+        NodeTag::T_ArrayExpr => node.as_array_expr().unwrap().array_collid,
+        NodeTag::T_Var => node.as_var().unwrap().varcollid,
+        _ => 0,
+    }
+}
+
 
 // estimate_array_length (selfuncs.c); the pg_statistic DECHIST leg (array
 // variables) is unreachable while scalararraysel's array-column arm is loud.

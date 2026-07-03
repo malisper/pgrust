@@ -218,3 +218,149 @@ fn raw_walker_unported_vocab_is_loud() {
     let mut w = CountParams { analyzed: 0, raw: 0 };
     let _ = raw_expression_tree_walker(rt, &mut w);
 }
+
+fn text_const(mcx: Mcx<'_>) -> Node<'_> {
+    Node::mk_const(mcx, 25, -1, 100, -1, datum::Datum::null(), true, false).unwrap()
+}
+
+#[test]
+fn apply_relabel_type_retypes_const_in_place() {
+    let ctx = cx();
+    let mcx = ctx.mcx();
+    let con = text_const(mcx);
+    let out = node_funcs::apply_relabel_type(
+        mcx,
+        con,
+        19,
+        -1,
+        950,
+        types_nodes::CoercionForm::COERCE_IMPLICIT_CAST,
+        7,
+    )
+    .unwrap();
+    let out = out.as_const().unwrap();
+    assert_eq!((out.consttype, out.consttypmod, out.constcollid), (19, -1, 950));
+    assert_eq!(out.location, -1);
+}
+
+#[test]
+fn apply_relabel_type_strips_nested_relabels_and_nets_out() {
+    let ctx = cx();
+    let mcx = ctx.mcx();
+    let var = Node::mk_var(mcx, 1, 1, 25, -1, 100, 0).unwrap();
+    let inner = Node::mk_relabel_type(
+        mcx,
+        var,
+        19,
+        -1,
+        950,
+        types_nodes::CoercionForm::COERCE_IMPLICIT_CAST,
+    )
+    .unwrap();
+    let out = node_funcs::apply_relabel_type(
+        mcx,
+        inner,
+        25,
+        -1,
+        100,
+        types_nodes::CoercionForm::COERCE_IMPLICIT_CAST,
+        -1,
+    )
+    .unwrap();
+    assert!(out.ptr_eq(var));
+}
+
+#[test]
+fn apply_relabel_type_wraps_when_types_differ() {
+    let ctx = cx();
+    let mcx = ctx.mcx();
+    let var = Node::mk_var(mcx, 1, 1, 25, -1, 100, 0).unwrap();
+    let out = node_funcs::apply_relabel_type(
+        mcx,
+        var,
+        19,
+        -1,
+        950,
+        types_nodes::CoercionForm::COERCE_EXPLICIT_CAST,
+        3,
+    )
+    .unwrap();
+    let r = out.as_relabel_type().unwrap();
+    assert!(r.arg.ptr_eq(var));
+    assert_eq!((r.resulttype, r.resultcollid, r.location), (19, 950, 3));
+}
+
+#[test]
+fn walker_and_mutator_cover_saop_array_relabel_case() {
+    let ctx = cx();
+    let mcx = ctx.mcx();
+    let p1 = extern_param(mcx, 1);
+    let p2 = extern_param(mcx, 2);
+    let arr = Node::mk(
+        mcx,
+        types_nodes::ArrayExpr {
+            array_typeid: 1009,
+            element_typeid: 25,
+            elements: NodeList::from_slice(mcx, &[p2]).unwrap(),
+            list_start: -1,
+            list_end: -1,
+            location: -1,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let saop = Node::mk(
+        mcx,
+        types_nodes::ScalarArrayOpExpr {
+            opno: 98,
+            opfuncid: 67,
+            useOr: true,
+            args: NodeList::from_slice(mcx, &[p1, arr]).unwrap(),
+            location: -1,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let relabel = Node::mk_relabel_type(
+        mcx,
+        saop,
+        16,
+        -1,
+        0,
+        types_nodes::CoercionForm::COERCE_IMPLICIT_CAST,
+    )
+    .unwrap();
+
+    struct Count(usize);
+    impl<'mcx> NodeWalker<'mcx> for Count {
+        fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+            if node.node_tag() == NodeTag::T_Param {
+                self.0 += 1;
+                return Ok(false);
+            }
+            expression_tree_walker(node, self)
+        }
+    }
+    let mut w = Count(0);
+    assert!(!expression_tree_walker(relabel, &mut w).unwrap());
+    assert_eq!(w.0, 2);
+
+    assert!(expression_tree_mutator(mcx, relabel, &mut |_| Ok(None)).unwrap().is_none());
+    let replacement = extern_param(mcx, 9);
+    let out = expression_tree_mutator(mcx, relabel, &mut |n| {
+        if n.node_tag() == NodeTag::T_Param && n.as_param().unwrap().paramid == 1 {
+            Ok(Some(replacement))
+        } else {
+            expression_tree_mutator(mcx, n, &mut |n2| {
+                Ok((n2.node_tag() == NodeTag::T_Param
+                    && n2.as_param().unwrap().paramid == 1)
+                    .then_some(replacement))
+            })
+        }
+    })
+    .unwrap()
+    .expect("substituted param rebuilds the tree");
+    let new_saop = out.as_relabel_type().unwrap().arg.as_scalar_array_op_expr().unwrap();
+    assert_eq!(new_saop.args.nth(0).as_param().unwrap().paramid, 9);
+    assert!(new_saop.args.nth(1).ptr_eq(arr));
+}

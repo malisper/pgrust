@@ -63,11 +63,16 @@ types_slot = { path = "../../../../_support/types/types_slot" }
 visibilitymap = { path = "../../../access/heap/visibilitymap" }
 procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
 exectuples = { path = "../../../executor/exectuples" }
+adt_regexp = { path = "../../../utils/adt/regexp" }
+varlena = { path = "../../../utils/adt/varlena" }
 
 gin = { path = "../../../access/gin/gin" }
 
 [dev-dependencies]
 clauses_seams = { path = "../../util/clauses_seams" }
+indexcmds_seams = { path = "../../../commands/indexcmds_seams" }
+regex_core = { path = "../../../regex/regex_core" }
+wchar = { path = "../../../../common/wchar" }
 relcache = { path = "../../../utils/cache/relcache" }
 relcache_build_seams = { path = "../../../utils/cache/relcache_build_seams" }
 relation_seams = { path = "../../../access/common/relation_seams" }

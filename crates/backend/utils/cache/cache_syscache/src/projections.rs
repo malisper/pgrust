@@ -1682,7 +1682,53 @@ fn lookup_pg_statistic_shape(
     Ok(Some(shape))
 }
 
+const ANUM_PG_TYPE_TYPNAMESPACE: i32 = 3;
+
+// SysCacheGetAttr(ATTNUM, attoptions) + datumCopy: the tuple is released,
+// so the varlena image is copied into the caller's mcx.
+fn pg_attribute_attoptions<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+    attnum: i16,
+) -> PgResult<Option<Option<Datum>>> {
+    const ANUM_PG_ATTRIBUTE_ATTOPTIONS: i32 = 23;
+    let Some(tuple) = SearchSysCache2(
+        ATTNUM,
+        SysCacheKey::Value(Datum::from_oid(relid)),
+        SysCacheKey::Value(Datum::from_i16(attnum)),
+    )?
+    else {
+        return Ok(None);
+    };
+    let out = match getattr_nullable(&tuple.tuple(), ATTNUM, ANUM_PG_ATTRIBUTE_ATTOPTIONS) {
+        None => None,
+        Some(d) => {
+            let src = d.as_usize() as *const u8;
+            // SAFETY: non-null by-ref varlena datum inside the live tuple.
+            let bytes = unsafe {
+                core::slice::from_raw_parts(src, types_tuple::varatt::varsize_any(src))
+            };
+            Some(Datum::from_usize(mcx::slice_in(mcx, bytes)?.leak().as_ptr() as usize))
+        }
+    };
+    ReleaseSysCache(tuple);
+    Ok(Some(out))
+}
+
+fn pg_type_typnamespace(typid: Oid) -> PgResult<Option<Oid>> {
+    let Some(tuple) = SearchSysCache1(TYPEOID, SysCacheKey::Value(Datum::from_oid(typid)))? else {
+        return Ok(None);
+    };
+    let t = tuple.tuple();
+    let nsp = getattr(&t, TYPEOID, ANUM_PG_TYPE_TYPNAMESPACE).as_oid();
+    drop(t);
+    ReleaseSysCache(tuple);
+    Ok(Some(nsp))
+}
+
 pub(crate) fn install() {
+    syscache_seams::pg_attribute_attoptions::set(pg_attribute_attoptions);
+    syscache_seams::pg_type_typnamespace::set(pg_type_typnamespace);
     syscache_seams::search_syscache_exists_reloid::set(search_syscache_exists_reloid);
     syscache_seams::search_syscache_exists_attnum::set(search_syscache_exists_attnum);
     syscache_seams::sys_cache_invalidate::set(sys_cache_invalidate);

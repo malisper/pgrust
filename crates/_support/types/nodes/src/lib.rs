@@ -36,12 +36,12 @@ pub use parsenodes::{
 pub use plannodes::{Plan, PlanVariant, PlannedStmt, Result};
 pub use plannodes::{BitmapAnd, BitmapHeapScan, BitmapIndexScan, BitmapOr};
 pub use primnodes::{
-    Alias, ArrayExpr, BoolExpr, BoolExprType, BoolTestType, BooleanTest, CoerceToDomain,
-    CoerceToDomainValue, CoerceViaIO,
-    CoercionForm, Const, DistinctExpr, FromExpr, FuncExpr, InferenceElem, JoinExpr, NullTest,
-    NullTestType, OnConflictAction, OnConflictExpr, OpExpr, OverridingKind, Param, ParamKind,
-    RangeTblRef, RangeVar, RelabelType, RowExpr, ScalarArrayOpExpr, SetToDefault, SubLink,
-    SubLinkType, SubPlan, TargetEntry, Var, VarReturningType,
+    Alias, ArrayExpr, BoolExpr, BoolExprType, BoolTestType, BooleanTest, CaseTestExpr,
+    CoerceToDomain, CoerceToDomainValue, CoerceViaIO, CoercionForm, CollateExpr, Const,
+    DistinctExpr, FromExpr, FuncExpr, InferenceElem, JoinExpr, NullTest, NullTestType,
+    OnConflictAction, OnConflictExpr, OpExpr, OverridingKind, Param, ParamKind, RangeTblRef,
+    RangeVar, RelabelType, RowExpr, SQLValueFunction, SQLValueFunctionOp, ScalarArrayOpExpr,
+    SetToDefault, SubLink, SubLinkType, SubPlan, TargetEntry, Var, VarReturningType,
 };
 pub use plannodes::ModifyTable;
 pub use rawnodes::{

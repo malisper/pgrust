@@ -19,6 +19,7 @@ const F_NETWORK_SORTSUPPORT: Oid = 5033;
 const F_RANGE_SORTSUPPORT: Oid = 6391;
 const F_INTERVAL_CMP: Oid = 1315;
 const F_BPCHAR_SORTSUPPORT: Oid = 3328;
+const F_BTNAMESORTSUPPORT: Oid = 3135;
 
 /// C's `ssup->comparator` fn pointer as a closed enum: identity is switchable
 /// (tuplesort_sort_memtuples specialization dispatch) and calls monomorphize.
@@ -41,6 +42,8 @@ pub enum SortComparator {
     Interval,
     /// `bpcharfastcmp_c` (varstr_sortsupport bpchar arm, collate-is-C only).
     BpcharC,
+    /// `namefastcmp_c` (btnamesortsupport); no abbreviation (sort-perf lane).
+    NameC,
     /// `PrepareSortSupportComparisonShim`: the opfamily's BTORDER_PROC,
     /// resolved once, invoked per comparison (C builds an fcinfo per call
     /// too). Needs an mcx-threaded apply; the mcx-less lane panics.
@@ -100,12 +103,37 @@ pub fn apply_cmp(cmp: SortComparator, x: Datum, y: Datum) -> i32 {
         SortComparator::BpcharC => unsafe {
             varlena::bpcharfastcmp_c(varlena_payload(x), varlena_payload(y))
         },
+        SortComparator::NameC => {
+            // SAFETY: name datums point at live 64-byte NameData blocks.
+            let (a, b) = unsafe {
+                (
+                    &*(x.as_usize() as *const [u8; 64]),
+                    &*(y.as_usize() as *const [u8; 64]),
+                )
+            };
+            namefastcmp_c(a, b)
+        }
         SortComparator::Shim(shim) => panic!(
             "comparison shim (proc {}) reached an mcx-less comparator lane \
              (merge join over shim-compared types not ported)",
             shim.fn_oid
         ),
     }
+}
+
+// C namefastcmp_c: strncmp(NameStr, NameStr, NAMEDATALEN).
+#[inline]
+fn namefastcmp_c(a: &[u8; 64], b: &[u8; 64]) -> i32 {
+    for i in 0..64 {
+        let (x, y) = (a[i], b[i]);
+        if x != y {
+            return if x < y { -1 } else { 1 };
+        }
+        if x == 0 {
+            return 0;
+        }
+    }
+    0
 }
 
 #[inline(always)]
@@ -305,6 +333,7 @@ pub fn comparator_for_opfamily(
                 SortComparator::TextC
             }
         }
+        F_BTNAMESORTSUPPORT => SortComparator::NameC,
         // C DIVERGENCE: uuid 3300 / network 5033 abbrev routines and
         // range_sortsupport 6391 (range_fast_cmp) are unported; the shim on
         // their BTORDER_PROC is order-identical (CATALOG perf watch).
@@ -357,6 +386,7 @@ pub fn comparator_for_index_col(
         F_BTINT8SORTSUPPORT | F_TIMESTAMP_SORTSUPPORT => SortComparator::SignedI64,
         F_BTINT2SORTSUPPORT => SortComparator::Int16,
         F_BTOIDSORTSUPPORT => SortComparator::Uint32,
+        F_BTNAMESORTSUPPORT => SortComparator::NameC,
         F_BTTEXTSORTSUPPORT | F_BPCHAR_SORTSUPPORT => {
             let locale = pg_locale::pg_newlocale_from_collation(collation)?;
             if !locale.collate_is_c {
