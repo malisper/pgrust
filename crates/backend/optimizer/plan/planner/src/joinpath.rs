@@ -1196,7 +1196,7 @@ fn cost_memoize_rescan(run: &mut PlannerRun<'_>, path: PathId) -> PgResult<(f64,
     };
     let width = run.root.path_pathtarget(subpath).width;
 
-    let hash_mem_bytes = execgrouping::get_hash_memory_limit() as f64;
+    let hash_mem_bytes = nodehash::get_hash_memory_limit() as f64;
     let mut est_entry_bytes = crate::costsize::relation_byte_size(tuples, width)
         + nodememoize::exec_estimate_cache_entry_overhead_bytes(tuples);
     for &e in param_exprs.iter() {

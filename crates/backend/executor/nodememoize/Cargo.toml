@@ -19,6 +19,7 @@ heaptuple = { path = "../../access/common/heaptuple" }
 init_small = { path = "../../utils/init/init_small" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
 mcx = { path = "../../../_support/mcx" }
+nodehash = { path = "../nodehash" }
 postgres_seams = { path = "../../tcop/postgres_seams" }
 types_core = { path = "../../../_support/types/types_core" }
 types_error = { path = "../../../_support/types/types_error" }
