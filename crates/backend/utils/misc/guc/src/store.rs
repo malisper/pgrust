@@ -134,6 +134,19 @@ fn build_variable(setting: GucSetting) -> Option<GucVariable> {
 
 // InitializeGUCOptions (guc.c:1530).
 pub fn initialize_guc_options() -> PgResult<()> {
+    initialize_guc_options_impl(|_| true)
+}
+
+// Child-thread bring-up (SubPostmasterMain shape). C's re-init writes only the
+// child's own address space; our backing vars are process-shared, so boot
+// values must not be published for variables the snapshot restore is about to
+// overwrite — other threads (the postmaster's maybe_adjust_io_workers) read
+// them concurrently.
+pub fn initialize_guc_options_for_child(snapshot: &[NondefaultGuc]) -> PgResult<()> {
+    initialize_guc_options_impl(|name| !snapshot.iter().any(|v| v.name == name))
+}
+
+fn initialize_guc_options_impl(publish: impl Fn(&str) -> bool) -> PgResult<()> {
     // Before log_line_prefix-style GUCs can demand elog timestamps.
     pgtz::pg_timezone_initialize();
 
@@ -142,7 +155,8 @@ pub fn initialize_guc_options() -> PgResult<()> {
         let Some(mut var) = build_variable(setting) else { continue };
         // A check-hook failure on a boot value is C's elog(FATAL, "failed to
         // initialize %s to ...").
-        crate::registry::initialize_one_guc_option_hooks(&mut var).map_err(|e| {
+        crate::registry::initialize_one_guc_option_hooks(&mut var, publish(setting.name()))
+            .map_err(|e| {
             Box::new(
                 elog::ereport(FATAL)
                     .errmsg(format!(
