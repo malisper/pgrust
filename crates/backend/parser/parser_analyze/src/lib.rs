@@ -720,13 +720,6 @@ fn transformInsertStmt<'mcx>(
             || !s.lockingClause.is_nil()
             || s.withClause.is_some()
     });
-    if is_general_select {
-        panic!(
-            "transformInsertStmt (analyze.c): INSERT ... SELECT arm \
-             (sub-pstate + addRangeTableEntryForSubquery) unported — \
-             unit backend-parser-analyze"
-        );
-    }
     // The CREATE RULE rtable pass-down only matters for isGeneralSelect.
     debug_assert!(pstate.p_rtable.is_nil());
 
@@ -743,6 +736,96 @@ fn transformInsertStmt<'mcx>(
 
     let expr_list: types_nodes::NodeList<'mcx> = match select_stmt {
         None => types_nodes::NodeList::nil(),
+        Some(_) if is_general_select => {
+            // C hands the sub-SELECT an unknowns-unresolved pstate so target
+            // columns drive the coercion below.
+            let select_query = parse_sub_analyze(
+                mcx,
+                stmt.selectStmt.expect("isGeneralSelect implies selectStmt"),
+                pstate,
+                None,
+                false,
+                false,
+            )?;
+            if select_query.commandType != CmdType::CMD_SELECT {
+                return Err(Box::new(types_error::PgError::error(
+                    "unexpected non-SELECT command in INSERT ... SELECT".to_string(),
+                )));
+            }
+
+            let query_node = Node::mk(mcx, select_query)?;
+            let select_query = query_node.as_query().expect("just built");
+
+            let mut columns: mcx::PgVec<'mcx, (Option<&'mcx str>, Oid, i32, Oid)> =
+                mcx::vec_with_capacity_in(mcx, select_query.targetList.len())?;
+            for tle_node in &select_query.targetList {
+                let te = tle_node.as_target_entry().expect("tlist cell");
+                if te.resjunk {
+                    continue;
+                }
+                columns.push((
+                    te.resname,
+                    parse_expr::expr_type(te.expr),
+                    parse_expr::expr_typmod(te.expr),
+                    parse_expr::expr_collation(te.expr),
+                ));
+            }
+
+            let alias = Node::mk_mut(
+                mcx,
+                types_nodes::primnodes::Alias {
+                    aliasname: Some("*SELECT*"),
+                    colnames: types_nodes::NodeList::nil(),
+                },
+            )?
+            .seal_ref();
+            let nsitem = parse_relation::addRangeTableEntryForSubquery(
+                mcx,
+                pstate,
+                select_query,
+                &columns,
+                Some(alias),
+                false,
+                false,
+            )?;
+            let rtindex = nsitem.p_rtindex;
+            parse_relation::addNSItemToQuery(mcx, pstate, nsitem, true, false, false)?;
+
+            // Unknown-type Consts/Params are copied up as-is so coerce_type
+            // can resolve them to the target column's type (C's HACK note).
+            let mut sub_exprs = types_nodes::NodeList::nil();
+            for tle_node in &select_query.targetList {
+                let te = tle_node.as_target_entry().expect("tlist cell");
+                if te.resjunk {
+                    continue;
+                }
+                let expr = if matches!(te.expr.node_tag(), NodeTag::T_Const | NodeTag::T_Param)
+                    && parse_expr::expr_type(te.expr) == types_core::catalog::UNKNOWNOID
+                {
+                    te.expr
+                } else {
+                    Node::mk(
+                        mcx,
+                        types_nodes::primnodes::Var {
+                            varno: rtindex,
+                            varattno: te.resno,
+                            vartype: parse_expr::expr_type(te.expr),
+                            vartypmod: parse_expr::expr_typmod(te.expr),
+                            varcollid: parse_expr::expr_collation(te.expr),
+                            varnullingrels: types_nodes::bitmapset::Bitmapset::empty(),
+                            varlevelsup: 0,
+                            varreturningtype:
+                                types_nodes::primnodes::VarReturningType::VAR_RETURNING_DEFAULT,
+                            varnosyn: rtindex as types_core::Index,
+                            varattnosyn: te.resno,
+                            location: parse_expr::expr_location(te.expr),
+                        },
+                    )?
+                };
+                sub_exprs.lappend(mcx, expr)?;
+            }
+            transformInsertRow(mcx, pstate, sub_exprs, &stmt.cols, &icolumns, &attrnos, false)?
+        }
         Some(sel) if sel.valuesLists.len() > 1 => {
             let mut exprs_lists = types_nodes::NodeList::nil();
             let mut coltypes = types_nodes::list::OidList::nil();
