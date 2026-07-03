@@ -1,5 +1,31 @@
 use mcx::{Mcx, PgVec};
+use types_core::PgWChar;
 use types_error::PgResult;
+
+seam_core::seam!(
+    // pg_mb2wchar_with_len(from,to,len) (mbutils.c): database-encoding bytes ->
+    // pg_wchar code points, allocated in mcx (no trailing NUL). Used by the
+    // regex ADT layer before pg_regcomp/pg_regexec.
+    pub fn pg_mb2wchar_with_len<'mcx>(
+        mcx: Mcx<'mcx>,
+        from: &[u8],
+    ) -> PgResult<PgVec<'mcx, PgWChar>>
+);
+
+seam_core::seam!(
+    // pg_wchar2mb_with_len(from,to,len) (mbutils.c): pg_wchar code points ->
+    // database-encoding bytes in mcx (no trailing NUL).
+    pub fn pg_wchar2mb_with_len<'mcx>(
+        mcx: Mcx<'mcx>,
+        from: &[PgWChar],
+    ) -> PgResult<PgVec<'mcx, u8>>
+);
+
+seam_core::seam!(
+    // pg_encoding_mblen(encoding, mbstr) (wchar.c): byte length of the first
+    // char of mbstr in the given encoding. Result >= 1. Infallible.
+    pub fn pg_encoding_mblen(encoding: i32, mbstr: &[u8]) -> i32
+);
 
 // C signals "no conversion required" by returning the caller's pointer;
 // identity does not cross a seam: Ok(None) = caller's bytes stand,

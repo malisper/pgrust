@@ -1229,6 +1229,9 @@ pub fn init_seams() {
     seams::set_database_encoding::set(SetDatabaseEncoding);
     seams::initialize_client_encoding::set(InitializeClientEncoding);
     seams::pg_mbcliplen::set(pg_mbcliplen);
+    seams::pg_mb2wchar_with_len::set(pg_mb2wchar_with_len);
+    seams::pg_wchar2mb_with_len::set(pg_wchar2mb_with_len);
+    seams::pg_encoding_mblen::set(wchar::pg_encoding_mblen);
 }
 
 #[cfg(test)]
