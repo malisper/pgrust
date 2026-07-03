@@ -712,7 +712,7 @@ fn create_indexscan_plan<'mcx>(
         }
         let clause = *run.root.expr_node(run.root.rinfo(rid).clause);
         if !clauses::contain_mutable_functions(clause)?
-            && predicate_implied_by_indexquals(clause, &stripped_indexquals)?
+            && predicate_implied_by_indexquals(mcx, clause, &stripped_indexquals)?
         {
             continue;
         }
@@ -812,7 +812,7 @@ fn create_bitmap_scan_plan<'mcx>(
             continue;
         }
         if !clauses::contain_mutable_functions(clause)?
-            && predicate_implied_by_indexquals(clause, &indexquals)?
+            && predicate_implied_by_indexquals(mcx, clause, &indexquals)?
         {
             continue;
         }
@@ -1013,94 +1013,16 @@ fn create_bitmap_subplan<'mcx>(
     Ok((plan.seal(), subindexquals, subquals))
 }
 
-// predicate_implied_by (predtest.c), strong form, single restriction clause
-// vs the AND of Var-op-Const indexquals -- the only shape reachable from
-// create_indexscan_plan/create_bitmap_scan_plan on this lane. Arms: a clause
-// implies itself (equal); a strict indexqual over the arg implies IS NOT
-// NULL; operator_predicate_proof with NO matching operand pair is provably
-// false; a matching operand pair (btree strategy proof) is loud.
+// predicate_implied_by (predtest.c), strong form: one restriction clause vs
+// the implicit-AND indexqual list.
 fn predicate_implied_by_indexquals<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
     pred: Node<'mcx>,
     indexquals: &NodeList<'mcx>,
 ) -> PgResult<bool> {
-    for iq in indexquals {
-        if types_nodes::equal(pred, iq) {
-            return Ok(true);
-        }
-        let Some(iq_op) = iq.as_op_expr() else {
-            panic!("predicate_implied_by (predtest.c): non-OpExpr indexqual; M2 lane")
-        };
-        debug_assert_eq!(iq_op.args.len(), 2);
-        if let Some(nt) = pred.as_null_test() {
-            if nt.nulltesttype == types_nodes::primnodes::NullTestType::IS_NOT_NULL
-                && !nt.argisrow
-                && lsyscache::op_strict(iq_op.opno)?
-            {
-                let arg = nt.arg.expect("NullTest.arg");
-                if types_nodes::equal(arg, iq_op.args.nth(0))
-                    || types_nodes::equal(arg, iq_op.args.nth(1))
-                {
-                    return Ok(true);
-                }
-            }
-            continue;
-        }
-        let Some(p_op) = pred.as_op_expr() else {
-            // operator_predicate_proof: non-opclause predicate proves nothing.
-            continue;
-        };
-        if p_op.args.len() != 2 || p_op.inputcollid != iq_op.inputcollid {
-            continue;
-        }
-        let (pl, pr) = (p_op.args.nth(0), p_op.args.nth(1));
-        let (cl, cr) = (iq_op.args.nth(0), iq_op.args.nth(1));
-        if types_nodes::equal(pl, cl)
-            || types_nodes::equal(pr, cr)
-            || types_nodes::equal(pl, cr)
-            || types_nodes::equal(pr, cl)
-        {
-            // get_btree_test_op: a predicate operator with no btree
-            // interpretation (pattern/regex ops) proves nothing.
-            if !op_has_btree_interpretation(p_op.opno)? {
-                continue;
-            }
-            panic!(
-                "operator_predicate_proof (predtest.c): matching operand pair needs the \
-                 btree strategy proof; M2 predicate lane"
-            );
-        }
-        // No matching operand pair: C's operator_predicate_proof returns false.
-    }
-    Ok(false)
+    crate::predtest::predicate_implied_by(mcx, &[pred], indexquals.as_slice(), false)
 }
 
-// get_op_btree_interpretation (lsyscache.c) reduced to its existence probe.
-fn op_has_btree_interpretation(opno: u32) -> PgResult<bool> {
-    const BTREE_AM_OID: u32 = 403;
-    const COMPARISON_NE: u32 = 1201;
-    let mut found = false;
-    lsyscache::amop::with_amop_members(opno, |aform| {
-        if aform.amopmethod == BTREE_AM_OID {
-            found = true;
-        }
-    })?;
-    if found {
-        return Ok(true);
-    }
-    // C's <>-via-negator leg.
-    let negator = lsyscache::get_negator(opno)?;
-    if negator != 0 {
-        lsyscache::amop::with_amop_members(negator, |aform| {
-            if aform.amopmethod == BTREE_AM_OID {
-                found = true;
-            }
-        })?;
-    }
-    let _ = COMPARISON_NE;
-    Ok(found)
-}
-
-// fix_indexqual_references (createplan.c) -> (stripped, fixed) qual lists.
 fn fix_indexqual_references<'mcx>(
     run: &mut PlannerRun<'mcx>,
     best_path: PathId,
