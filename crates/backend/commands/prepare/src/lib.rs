@@ -373,8 +373,64 @@ pub fn DropAllPreparedStatements() {
     });
 }
 
-pub fn ExplainExecuteQuery() -> ! {
-    panic!("ExplainExecuteQuery (prepare.c): EXPLAIN EXECUTE is the explain lane");
+// The plan renderer is injected by the explain crate (a direct dep here would
+// cycle: explain deps prepare for this entry point). Called once per cached
+// PlannedStmt with (pstmt, prepared query string, evaluated params,
+// planduration, is_last).
+pub fn ExplainExecuteQuery<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &ExecuteStmt<'mcx>,
+    source_text: &str,
+    _params: ParamListHandle,
+    query_env: QueryEnvHandle,
+    explain_one_plan: &mut dyn FnMut(
+        &'static types_nodes::plannodes::PlannedStmt<'static>,
+        &'static str,
+        ParamListHandle,
+        core::time::Duration,
+        bool,
+    ) -> PgResult<()>,
+) -> PgResult<()> {
+    let planstart = std::time::Instant::now();
+
+    let name = stmt.name.expect("EXECUTE has a name");
+    let entry = FetchPreparedStatement(name, true)?.expect("throwError returned entry");
+
+    if !plancache::CachedPlanFixedResult(entry.plansource) {
+        return Err(ereport(ERROR)
+            .errmsg("EXPLAIN EXECUTE does not support variable-result cached plans")
+            .into_error()
+            .into());
+    }
+    let query_string = plancache::CachedPlanQueryString(entry.plansource);
+
+    let param_li = if plancache::CachedPlanNumParams(entry.plansource) > 0 {
+        EvaluateParams(mcx, &entry, name, &stmt.params, source_text)?
+    } else {
+        ParamListHandle::NULL
+    };
+
+    let cplan = plancache::GetCachedPlan(entry.plansource, param_li, None, query_env)?;
+    let planduration = planstart.elapsed();
+
+    let stmts = plancache::CachedPlanStmtList(cplan);
+    let last = stmts.len().saturating_sub(1);
+    let mut result = Ok(());
+    for (i, pstmt) in stmts.iter().enumerate() {
+        if pstmt.commandType == types_nodes::nodes_enums::CmdType::CMD_UTILITY {
+            panic!(
+                "ExplainExecuteQuery (prepare.c): utility statement in cached plan \
+                 list (rules lane)"
+            );
+        }
+        result = explain_one_plan(pstmt, query_string, param_li, planduration, i == last);
+        if result.is_err() {
+            break;
+        }
+    }
+    plancache::ReleaseCachedPlan(cplan);
+    types_portal::params::free(param_li);
+    result
 }
 
 pub fn pg_prepared_statement() -> ! {
