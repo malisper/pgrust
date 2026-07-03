@@ -62,8 +62,13 @@ where
     let mut root_offsets = [InvalidOffsetNumber; MaxHeapTuplesPerPage];
     let mut values = [Datum::null(); INDEX_MAX_KEYS as usize];
     let mut isnull = [false; INDEX_MAX_KEYS as usize];
+    // C's per-tuple econtext reset (heapam_handler.c:1611): expression and
+    // predicate results land here, consumed by `callback` within the
+    // iteration, freed before the next tuple.
+    let mut per_tuple = mcx::MemoryContext::new("IndexBuildPerTuple");
 
     loop {
+        per_tuple.reset();
         let Some((mut tuple, buffer)) = next_tuple(&mut scan)? else {
             break;
         };
@@ -152,12 +157,19 @@ where
         exectuples::exec_store_buffer_heap_tuple(&mut slot, mcx, tuple, buffer);
 
         if !index_info.ii_Predicate.is_nil()
-            && !index_predicate_passes(mcx, index_info, &mut slot)?
+            && !index_predicate_passes(mcx, per_tuple.mcx(), index_info, &mut slot)?
         {
             continue;
         }
 
-        FormIndexDatum(mcx, index_info, &mut slot, &mut values[..], &mut isnull[..])?;
+        FormIndexDatum(
+            mcx,
+            per_tuple.mcx(),
+            index_info,
+            &mut slot,
+            &mut values[..],
+            &mut isnull[..],
+        )?;
 
         let self_tid = slot_tid(&slot);
         if slot_is_heap_only(&slot) {
