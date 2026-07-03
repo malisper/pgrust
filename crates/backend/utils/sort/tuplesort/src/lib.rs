@@ -14,6 +14,7 @@ use ::types_slot::SlotData;
 use ::types_tuple::itemptr::ItemPointerData;
 use ::types_tuple::{MinimalTupleData, TupleDescData};
 
+mod abbrev;
 mod mgetattr;
 mod qsort;
 mod ssup;
@@ -21,9 +22,11 @@ mod ssup;
 #[cfg(test)]
 mod tests;
 
+pub use abbrev::AbbrevState;
 pub use ssup::{
     apply_sort_comparator, comparator_for_index_col, comparator_for_opfamily,
-    prepare_sort_support_from_ordering_op, SortComparator, SortSupport, SortSupportInit,
+    prepare_sort_support_abbrev, prepare_sort_support_from_ordering_op, AbbrevArm, AbbrevKind,
+    SortComparator, SortSupport, SortSupportInit,
 };
 
 use mgetattr::minimal_getattr;
