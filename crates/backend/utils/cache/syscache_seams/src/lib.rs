@@ -221,6 +221,13 @@ pub struct PgProcFmgrShape {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PgLanguageFmgrShape {
+    pub lanplcallfoid: Oid,
+    pub laninline: Oid,
+    pub lanvalidator: Oid,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PgClassLsShape {
     pub relnamespace: Oid,
     pub reltype: Oid,
@@ -469,6 +476,11 @@ seam_core::seam!(
 seam_core::seam!(
     // fmgr_info's non-builtin leg: the pg_proc fields FmgrInfo needs.
     pub fn lookup_pg_proc_fmgr(funcid: Oid) -> PgResult<Option<PgProcFmgrShape>>
+);
+
+seam_core::seam!(
+    // fmgr_info_other_lang's pg_language read (fmgr.c).
+    pub fn lookup_pg_language_fmgr(langoid: Oid) -> PgResult<Option<PgLanguageFmgrShape>>
 );
 
 seam_core::seam!(

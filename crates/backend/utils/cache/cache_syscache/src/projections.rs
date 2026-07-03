@@ -935,6 +935,29 @@ fn lookup_pg_proc_shape(funcid: Oid) -> PgResult<Option<syscache_seams::PgProcSh
     Ok(Some(shape))
 }
 
+const ANUM_PG_LANGUAGE_LANPLCALLFOID: i32 = 6;
+const ANUM_PG_LANGUAGE_LANINLINE: i32 = 7;
+const ANUM_PG_LANGUAGE_LANVALIDATOR: i32 = 8;
+
+fn lookup_pg_language_fmgr(
+    langoid: Oid,
+) -> PgResult<Option<syscache_seams::PgLanguageFmgrShape>> {
+    use crate::cacheinfo::LANGOID;
+    let Some(tuple) = SearchSysCache1(LANGOID, SysCacheKey::Value(Datum::from_oid(langoid)))?
+    else {
+        return Ok(None);
+    };
+    let t = tuple.tuple();
+    let shape = syscache_seams::PgLanguageFmgrShape {
+        lanplcallfoid: getattr(&t, LANGOID, ANUM_PG_LANGUAGE_LANPLCALLFOID).as_oid(),
+        laninline: getattr(&t, LANGOID, ANUM_PG_LANGUAGE_LANINLINE).as_oid(),
+        lanvalidator: getattr(&t, LANGOID, ANUM_PG_LANGUAGE_LANVALIDATOR).as_oid(),
+    };
+    drop(t);
+    ReleaseSysCache(tuple);
+    Ok(Some(shape))
+}
+
 fn lookup_pg_proc_fmgr(funcid: Oid) -> PgResult<Option<syscache_seams::PgProcFmgrShape>> {
     let Some(tuple) = SearchSysCache1(PROCOID, SysCacheKey::Value(Datum::from_oid(funcid)))? else {
         return Ok(None);
@@ -1914,6 +1937,7 @@ pub(crate) fn install() {
     syscache_seams::pg_proc_proname::set(pg_proc_proname);
     syscache_seams::lookup_pg_proc_shape::set(lookup_pg_proc_shape);
     syscache_seams::lookup_pg_proc_fmgr::set(lookup_pg_proc_fmgr);
+    syscache_seams::lookup_pg_language_fmgr::set(lookup_pg_language_fmgr);
     syscache_seams::lookup_pg_proc_prosrc::set(lookup_pg_proc_prosrc);
     syscache_seams::lookup_pg_proc_name_candidates::set(lookup_pg_proc_name_candidates);
     syscache_seams::lookup_pg_operator_candidates::set(lookup_pg_operator_candidates);

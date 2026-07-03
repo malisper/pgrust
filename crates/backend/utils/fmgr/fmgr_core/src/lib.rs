@@ -313,6 +313,40 @@ pub fn register_sql_language_handler(handler: ::fmgr::PGFunction) {
     SQL_HANDLER.store(handler as usize, core::sync::atomic::Ordering::Release);
 }
 
+// PL handler entry points are C-language extension functions; the dlopen leg
+// is replaced by name-keyed registration (closed set).
+static PLPGSQL_CALL_HANDLER: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+static PLPGSQL_INLINE_HANDLER: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+static PLPGSQL_VALIDATOR: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
+pub fn register_plpgsql_handlers(
+    call_handler: ::fmgr::PGFunction,
+    inline_handler: ::fmgr::PGFunction,
+    validator: ::fmgr::PGFunction,
+) {
+    PLPGSQL_CALL_HANDLER.store(call_handler as usize, core::sync::atomic::Ordering::Release);
+    PLPGSQL_INLINE_HANDLER.store(inline_handler as usize, core::sync::atomic::Ordering::Release);
+    PLPGSQL_VALIDATOR.store(validator as usize, core::sync::atomic::Ordering::Release);
+}
+
+fn registered_c_lang_fn(prosrc: &str) -> Option<::fmgr::PGFunction> {
+    let slot = match prosrc {
+        "plpgsql_call_handler" => &PLPGSQL_CALL_HANDLER,
+        "plpgsql_inline_handler" => &PLPGSQL_INLINE_HANDLER,
+        "plpgsql_validator" => &PLPGSQL_VALIDATOR,
+        _ => return None,
+    };
+    let h = slot.load(core::sync::atomic::Ordering::Acquire);
+    if h == 0 {
+        return None;
+    }
+    // SAFETY: written only by register_plpgsql_handlers from valid PGFunctions.
+    Some(unsafe { core::mem::transmute::<usize, ::fmgr::PGFunction>(h) })
+}
+
 #[cold]
 #[inline(never)]
 fn fmgr_info_pg_proc(function_id: Oid, finfo: &mut FmgrInfo) -> PgResult<()> {
@@ -352,9 +386,44 @@ fn fmgr_info_pg_proc(function_id: Oid, finfo: &mut FmgrInfo) -> PgResult<()> {
             // valid PGFunction.
             unsafe { core::mem::transmute::<usize, ::fmgr::PGFunction>(h) }
         }
-        lang => panic!(
-            "fmgr: language {lang} handler not ported (function {function_id})"
-        ),
+        C_LANGUAGE_ID => {
+            // fmgr_info_C_lang: the dlopen'd symbol is the prosrc name;
+            // resolve against the registered PL entry points.
+            let cx = ::mcx::MemoryContext::new("fmgr_info prosrc");
+            let prosrc = syscache_seams::lookup_pg_proc_prosrc::call(cx.mcx(), function_id)?
+                .unwrap_or_else(|| panic!("fmgr: null prosrc for function {function_id}"));
+            match registered_c_lang_fn(&prosrc) {
+                Some(f) => f,
+                None => panic!(
+                    "fmgr: C-language function \"{}\" not registered (function {function_id})",
+                    prosrc.as_str()
+                ),
+            }
+        }
+        lang => {
+            // fmgr_info_other_lang: adopt the language call handler's entry
+            // point (the handler is a C-language function; dispatch by its
+            // prosrc name).
+            let Some(langrow) = syscache_seams::lookup_pg_language_fmgr::call(lang)? else {
+                panic!("fmgr: cache lookup failed for language {lang} (function {function_id})");
+            };
+            let cx = ::mcx::MemoryContext::new("fmgr_info prosrc");
+            let hsrc =
+                syscache_seams::lookup_pg_proc_prosrc::call(cx.mcx(), langrow.lanplcallfoid)?
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "fmgr: null prosrc for call handler {}",
+                            langrow.lanplcallfoid
+                        )
+                    });
+            match registered_c_lang_fn(&hsrc) {
+                Some(f) => f,
+                None => panic!(
+                    "fmgr: language handler \"{}\" not ported (function {function_id})",
+                    hsrc.as_str()
+                ),
+            }
+        }
     };
     finfo.fn_addr = fn_addr;
     finfo.fn_nargs = row.pronargs;
