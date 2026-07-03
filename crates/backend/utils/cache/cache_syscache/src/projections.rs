@@ -62,6 +62,9 @@ const ANUM_PG_OPERATOR_OPRNEGATE: i32 = 12;
 const ANUM_PG_OPERATOR_OPRCODE: i32 = 13;
 const ANUM_PG_OPERATOR_OPRREST: i32 = 14;
 const ANUM_PG_OPERATOR_OPRJOIN: i32 = 15;
+const ANUM_PG_PROC_PROALLARGTYPES: i32 = 21;
+const ANUM_PG_PROC_PROARGMODES: i32 = 22;
+const ANUM_PG_PROC_PROARGNAMES: i32 = 23;
 const ANUM_PG_PROC_PROCOST: i32 = 6;
 const ANUM_PG_PROC_PROROWS: i32 = 7;
 const ANUM_PG_PROC_PROSUPPORT: i32 = 9;
@@ -762,6 +765,87 @@ fn pg_proc_proname(funcid: Oid) -> PgResult<Option<types_tuple::NameData>> {
     let name = unsafe { *(d.as_usize() as *const types_tuple::NameData) };
     ReleaseSysCache(tuple);
     Ok(Some(name))
+}
+
+// Array-element payload of a text[] datum inside a deconstructed image.
+fn text_elem_str(d: Datum) -> &'static [u8] {
+    let p = d.as_usize() as *const u8;
+    // SAFETY: the datum points at a varlena inside a live detoasted array
+    // image (deconstruct_array_image contract); header-declared length only.
+    unsafe {
+        let b0 = *p;
+        if b0 & 0x01 != 0 {
+            let len = ((b0 as usize) >> 1) & 0x7F;
+            core::slice::from_raw_parts(p.add(1), len - 1)
+        } else {
+            let len = (u32::from_ne_bytes(*(p as *const [u8; 4])) >> 2) as usize;
+            core::slice::from_raw_parts(p.add(4), len - 4)
+        }
+    }
+}
+
+fn proc_array_elemtype_check(img: &[u8], want: Oid, what: &str) -> PgResult<()> {
+    let got = datum::array_build::array_image_elemtype(img);
+    if got != want {
+        return Err(Box::new(types_error::PgError::error(format!(
+            "{what} is not a 1-D array of element type {want} (got {got})"
+        ))));
+    }
+    Ok(())
+}
+
+fn pg_proc_result_arrays<'mcx>(
+    mcx: Mcx<'mcx>,
+    funcid: Oid,
+) -> PgResult<Option<syscache_seams::PgProcResultArraysShape<'mcx>>> {
+    const OIDOID: Oid = 26;
+    const CHAROID: Oid = 18;
+    const TEXTOID: Oid = 25;
+    let Some(tuple) = SearchSysCache1(PROCOID, SysCacheKey::Value(Datum::from_oid(funcid)))? else {
+        return Ok(None);
+    };
+    let t = tuple.tuple();
+    let proallargtypes = match varlena_image(mcx, &t, PROCOID, ANUM_PG_PROC_PROALLARGTYPES)? {
+        Some(img) => {
+            proc_array_elemtype_check(&img, OIDOID, "proallargtypes")?;
+            let elems = datum::array_build::deconstruct_array_image(mcx, &img, 4, true, b'i')?;
+            let mut v: PgVec<'mcx, Oid> = mcx::vec_with_capacity_in(mcx, elems.len())?;
+            v.extend(elems.iter().map(|d| d.as_oid()));
+            Some(v)
+        }
+        None => None,
+    };
+    let proargmodes = match varlena_image(mcx, &t, PROCOID, ANUM_PG_PROC_PROARGMODES)? {
+        Some(img) => {
+            proc_array_elemtype_check(&img, CHAROID, "proargmodes")?;
+            let elems = datum::array_build::deconstruct_array_image(mcx, &img, 1, true, b'c')?;
+            let mut v: PgVec<'mcx, i8> = mcx::vec_with_capacity_in(mcx, elems.len())?;
+            v.extend(elems.iter().map(|d| d.as_i8()));
+            Some(v)
+        }
+        None => None,
+    };
+    let proargnames = match varlena_image(mcx, &t, PROCOID, ANUM_PG_PROC_PROARGNAMES)? {
+        Some(img) => {
+            proc_array_elemtype_check(&img, TEXTOID, "proargnames")?;
+            let elems = datum::array_build::deconstruct_array_image(mcx, &img, -1, false, b'i')?;
+            let mut v: PgVec<'mcx, PgString<'mcx>> = mcx::vec_with_capacity_in(mcx, elems.len())?;
+            for d in elems.iter() {
+                let s = core::str::from_utf8(text_elem_str(*d))
+                    .expect("proargnames holds server-encoding text");
+                v.push(PgString::from_str_in(s, mcx)?);
+            }
+            Some(v)
+        }
+        None => None,
+    };
+    drop(t);
+    ReleaseSysCache(tuple);
+    Ok(Some(syscache_seams::PgProcResultArraysShape {
+        proallargtypes,
+        proargmodes,
+        proargnames,
+    }))
 }
 
 fn lookup_pg_proc_shape(funcid: Oid) -> PgResult<Option<syscache_seams::PgProcShape>> {
@@ -1476,6 +1560,7 @@ pub(crate) fn install_pg_statistic() {
     syscache_seams::lookup_pg_statistic_shape::set(lookup_pg_statistic_shape);
     syscache_seams::lookup_pg_statistic_bundle::set(lookup_pg_statistic_bundle);
     syscache_seams::decode_pg_statistic_values::set(decode_pg_statistic_values);
+    syscache_seams::pg_proc_result_arrays::set(pg_proc_result_arrays);
     syscache_seams::decode_pg_statistic_numbers::set(decode_pg_statistic_numbers);
     syscache_seams::pg_statistic_stawidth::set(pg_statistic_stawidth);
 }

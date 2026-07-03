@@ -527,7 +527,28 @@ pub fn ExplainNode<'mcx>(
     }
 
     match node.node_tag() {
-        NodeTag::T_SeqScan | NodeTag::T_FunctionScan | NodeTag::T_CteScan => {
+        NodeTag::T_SeqScan | NodeTag::T_CteScan => {
+            show_scan_qual(&plan.qual, "Filter", node, ancestors, es)?;
+            filtered_count_gap(&plan.qual, es);
+        }
+        NodeTag::T_FunctionScan => {
+            if es.verbose {
+                let fs = node.as_function_scan().unwrap();
+                let mcx = es.str.allocator();
+                let mut buf = PgString::new_in(mcx);
+                for (i, f) in fs.functions.iter().enumerate() {
+                    if i > 0 {
+                        buf.try_push_str(", ")?;
+                    }
+                    let fexpr = f
+                        .as_range_tbl_function()
+                        .expect("functions cell")
+                        .funcexpr
+                        .expect("RangeTblFunction has a funcexpr");
+                    deparse_expr(es, node, ancestors, fexpr, true, &mut buf)?;
+                }
+                crate::format::ExplainPropertyText("Function Call", buf.as_str(), es);
+            }
             show_scan_qual(&plan.qual, "Filter", node, ancestors, es)?;
             if !plan.qual.is_nil() {
                 show_instrumentation_count("Rows Removed by Filter", 1, &instrument, es);
@@ -1709,6 +1730,37 @@ fn deparse_expr<'mcx>(
         NodeTag::T_Param => {
             deparse_param(es, plan_node, ancestors, expr.as_param().unwrap(), buf)
         }
+        // get_func_expr (ruleutils.c) plain-call slice; the name prints
+        // unqualified (generate_function_name visibility divergence, as the
+        // Aggref arm). Cast-form and variadic calls are loud.
+        NodeTag::T_FuncExpr => {
+            use types_nodes::CoercionForm;
+            let f = expr.as_func_expr().unwrap();
+            match f.funcformat {
+                CoercionForm::COERCE_IMPLICIT_CAST => {
+                    // showimplicit=false context: print the bare argument.
+                    return deparse_expr(es, plan_node, ancestors, f.args.nth(0), useprefix, buf);
+                }
+                CoercionForm::COERCE_EXPLICIT_CAST => {
+                    node_gap("get_func_expr", "explicit-cast FuncExpr deparse (ruleutils lane)")
+                }
+                _ => {}
+            }
+            if f.funcvariadic {
+                node_gap("get_func_expr", "VARIADIC deparse (ruleutils lane)");
+            }
+            let name = lsyscache::get_func_name(es.str.allocator(), f.funcid)?
+                .expect("function of a planned expression exists");
+            write!(buf, "{}(", name.as_str()).expect("PgString write");
+            for (i, arg) in f.args.iter().enumerate() {
+                if i > 0 {
+                    buf.try_push_str(", ")?;
+                }
+                deparse_expr(es, plan_node, ancestors, arg, useprefix, buf)?;
+            }
+            buf.try_push(')')?;
+            Ok(())
+        }
         // get_windowfunc_expr (ruleutils.c), EXPLAIN leg: OVER prints the
         // owning WindowAgg's winname. The name prints unqualified (same
         // generate_function_name visibility divergence as the Aggref arm).
@@ -1936,6 +1988,7 @@ fn deparse_expr_type(node: Node<'_>) -> types_core::Oid {
         NodeTag::T_OpExpr => node.as_op_expr().unwrap().opresulttype,
         NodeTag::T_Aggref => node.as_aggref().unwrap().aggtype,
         NodeTag::T_WindowFunc => node.as_window_func().unwrap().wintype,
+        NodeTag::T_FuncExpr => node.as_func_expr().unwrap().funcresulttype,
         NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resulttype,
         NodeTag::T_BoolExpr | NodeTag::T_NullTest | NodeTag::T_ScalarArrayOpExpr => {
             types_core::catalog::BOOLOID
