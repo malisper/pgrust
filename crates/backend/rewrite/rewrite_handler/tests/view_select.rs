@@ -166,6 +166,7 @@ fn install_proc_boot_seams() {
     g::set_transaction_buffers(64);
     g::set_subtransaction_buffers(64);
 
+    backend_status_seams::pgstat_clear_backend_status_snapshot::set(|| {});
     pg_sema_seams::pg_semaphore_create::set(|_| {});
     pg_sema_seams::pg_semaphore_reset::set(|_| {});
     pg_sema_seams::pg_semaphore_lock::set(|_| {});
@@ -356,6 +357,7 @@ fn test_relation<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> RelationData<'mcx> {
         pgstat_enabled: Cell::new(false),
         rd_amcache: Default::default(),
         rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(),
+        rd_support: PgVec::new_in(mcx),
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),

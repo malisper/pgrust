@@ -68,3 +68,8 @@ seam_core::seam!(
     // pgstat_report_plan_id(plan_id, force) (backend_status.c).
     pub fn pgstat_report_plan_id(plan_id: i64, force: bool)
 );
+
+seam_core::seam!(
+    // pgstat_clear_backend_activity_snapshot (backend_status.c).
+    pub fn pgstat_clear_backend_status_snapshot()
+);

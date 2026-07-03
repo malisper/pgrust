@@ -75,6 +75,103 @@ fn reads_live_captured_view_rule() {
     assert_eq!((v1.varno, v1.varattno, v1.vartype, v1.varcollid), (1, 2, 25, 100));
 }
 
+// Captured from live PostgreSQL 18.3 initdb:
+// SELECT ev_action FROM pg_rewrite WHERE ev_class = 'pg_stat_activity'::regclass.
+pub const EV_ACTION_PG_STAT_ACTIVITY: &str = include_str!("fixtures/pg_stat_activity.ev_action");
+
+#[test]
+fn reads_pg_stat_activity_view_rule() {
+    use types_nodes::jointype::JoinType;
+
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let node = stringToNode(mcx, EV_ACTION_PG_STAT_ACTIVITY).unwrap();
+    let actions = node.as_list().expect("ev_action is a List");
+    assert_eq!(actions.len(), 1);
+    let q = actions.nth(0).as_query().expect("rule action is a Query");
+
+    assert_eq!(q.commandType, CmdType::CMD_SELECT);
+    assert_eq!(q.rtable.len(), 5);
+    let kinds: Vec<RTEKind> = q
+        .rtable
+        .iter()
+        .map(|n| n.as_range_tbl_entry().unwrap().rtekind)
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            RTEKind::RTE_FUNCTION,
+            RTEKind::RTE_RELATION,
+            RTEKind::RTE_JOIN,
+            RTEKind::RTE_RELATION,
+            RTEKind::RTE_JOIN
+        ]
+    );
+
+    let func_rte = q.rtable.nth(0).as_range_tbl_entry().unwrap();
+    assert!(!func_rte.funcordinality);
+    assert_eq!(func_rte.functions.len(), 1);
+    let rtf = func_rte.functions.nth(0).as_range_tbl_function().unwrap();
+    assert_eq!(rtf.funccolcount, 31);
+    assert!(rtf.funccolnames.is_nil() && rtf.funccoltypes.is_nil());
+    assert!(rtf.funccoltypmods.is_nil() && rtf.funccolcollations.is_nil());
+    assert!(rtf.funcparams.is_empty());
+    let fe = rtf.funcexpr.expect("funcexpr").as_func_expr().unwrap();
+    assert_eq!(fe.funcid, 2022);
+    assert!(fe.funcretset);
+    assert_eq!(fe.args.len(), 1);
+    assert!(fe.args.nth(0).as_const().unwrap().constisnull);
+
+    assert_eq!(q.rtable.nth(1).as_range_tbl_entry().unwrap().relid, 1262);
+    assert_eq!(q.rtable.nth(3).as_range_tbl_entry().unwrap().relid, 1260);
+
+    let j3 = q.rtable.nth(2).as_range_tbl_entry().unwrap();
+    assert_eq!(j3.jointype, JoinType::JOIN_LEFT);
+    assert_eq!(j3.joinmergedcols, 0);
+    assert_eq!(j3.joinaliasvars.len(), 49);
+    assert_eq!(j3.joinleftcols.len(), 31);
+    assert_eq!(j3.joinrightcols.len(), 18);
+    assert!(j3.join_using_alias.is_none());
+    let av = j3.joinaliasvars.nth(0).as_var().unwrap();
+    assert_eq!((av.varno, av.varattno), (1, 1));
+
+    let j5 = q.rtable.nth(4).as_range_tbl_entry().unwrap();
+    assert_eq!(j5.jointype, JoinType::JOIN_LEFT);
+    assert_eq!(j5.joinaliasvars.len(), 61);
+    assert_eq!(j5.joinleftcols.len(), 49);
+    assert_eq!(j5.joinrightcols.len(), 12);
+
+    assert_eq!(q.rteperminfos.len(), 2);
+
+    let jt = q.jointree.expect("jointree");
+    assert_eq!(jt.fromlist.len(), 1);
+    let outer = jt.fromlist.nth(0).as_join_expr().expect("outer JoinExpr");
+    assert_eq!(outer.jointype, JoinType::JOIN_LEFT);
+    assert!(!outer.isNatural);
+    assert_eq!(outer.rtindex, 5);
+    assert!(outer.usingClause.is_nil() && outer.join_using_alias.is_none());
+    assert!(outer.alias.is_none());
+    assert!(outer.quals.expect("outer join quals").as_op_expr().is_some());
+    let inner = outer.larg.as_join_expr().expect("inner JoinExpr");
+    assert_eq!(inner.jointype, JoinType::JOIN_LEFT);
+    assert_eq!(inner.rtindex, 3);
+    assert_eq!(inner.larg.as_range_tbl_ref().unwrap().rtindex, 1);
+    assert_eq!(inner.rarg.as_range_tbl_ref().unwrap().rtindex, 2);
+    assert_eq!(inner.quals.expect("inner join quals").as_op_expr().unwrap().opno, 607);
+    assert_eq!(outer.rarg.as_range_tbl_ref().unwrap().rtindex, 4);
+
+    assert_eq!(q.targetList.len(), 22);
+    let te = q.targetList.nth(21).as_target_entry().unwrap();
+    assert_eq!(te.resname, Some("backend_type"));
+    let v = te.expr.as_var().unwrap();
+    assert_eq!((v.varno, v.varattno, v.vartype), (1, 18, 25));
+    assert!(q
+        .targetList
+        .iter()
+        .flat_map(|te| te.as_target_entry().unwrap().expr.as_var())
+        .any(|v| !v.varnullingrels.is_empty()));
+}
+
 #[test]
 fn reads_const_with_byval_datum() {
     let ctx = MemoryContext::new("t");
@@ -116,11 +213,11 @@ fn unknown_node_label_is_loud() {
 
 #[test]
 #[should_panic(expected = "arm unported (view SELECT-rule set)")]
-fn rte_join_arm_is_loud() {
+fn rte_values_arm_is_loud() {
     let ctx = MemoryContext::new("t");
     let _ = stringToNode(
         ctx.mcx(),
-        "{RANGETBLENTRY :alias <> :eref <> :rtekind 2 :jointype 0}",
+        "{RANGETBLENTRY :alias <> :eref <> :rtekind 5 :values_lists <>}",
     );
 }
 

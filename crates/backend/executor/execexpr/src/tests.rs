@@ -629,6 +629,7 @@ fn agg_trans_and_aggref_eval_steps() {
                 inputcollid: 0,
                 init_value_is_null: false,
                 args: &empty_args,
+                aggfilter: None,
                 pergroup: base,
                 ordered: None,
             },
@@ -641,6 +642,7 @@ fn agg_trans_and_aggref_eval_steps() {
                 inputcollid: 0,
                 init_value_is_null: true,
                 args: &sum_args,
+                aggfilter: None,
                 // SAFETY: index 1 of the 2-element local array.
                 pergroup: unsafe { NonNull::new_unchecked(base.as_ptr().add(1)) },
                 ordered: None,
@@ -732,6 +734,7 @@ fn agg_trans_strict_input_check_skips_nulls() {
                 inputcollid: 0,
                 init_value_is_null: false,
                 args: &count_args,
+                aggfilter: None,
                 pergroup: base,
                 ordered: None,
             },
@@ -744,6 +747,7 @@ fn agg_trans_strict_input_check_skips_nulls() {
                 inputcollid: 0,
                 init_value_is_null: true,
                 args: &sum_args,
+                aggfilter: None,
                 // SAFETY: index 1 of the 2-element local array.
                 pergroup: unsafe { NonNull::new_unchecked(base.as_ptr().add(1)) },
                 ordered: None,

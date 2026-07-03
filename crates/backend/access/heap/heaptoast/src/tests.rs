@@ -325,6 +325,7 @@ fn rel_from<'mcx>(
         pgstat_enabled: Cell::new(false),
         rd_amcache: Default::default(),
         rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(),
+        rd_support: vec_of(&vec![0; opcintype.len()]),
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),

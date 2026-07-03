@@ -32,12 +32,42 @@ pub fn clauselist_selectivity<'mcx>(
     jointype: JoinType,
     sjinfo: Option<&SpecialJoinInfo<'mcx>>,
 ) -> PgResult<f64> {
+    clauselist_selectivity_ext(run, clauses, varrelid, jointype, sjinfo, true)
+}
+
+// clauselist_selectivity_ext (clausesel.c): use_extended_stats=false is the
+// re-entry form used by the extended-statistics estimators themselves.
+pub(crate) fn clauselist_selectivity_ext<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    clauses: &[RinfoId],
+    varrelid: i32,
+    jointype: JoinType,
+    sjinfo: Option<&SpecialJoinInfo<'mcx>>,
+    use_extended_stats: bool,
+) -> PgResult<f64> {
     if clauses.len() == 1 {
         return clause_selectivity(run, clauses[0], varrelid, jointype, sjinfo);
     }
     let mut s1 = 1.0;
+    let mut estimated: PgVec<'_, bool> = mcx::vec_from_elem_in(run.mcx, false, clauses.len());
+    if use_extended_stats {
+        if let Some(rel) =
+            crate::extended_stats::find_single_rel_for_clauses(run, clauses)
+        {
+            if run.root.rel(rel).rtekind == types_pathnodes::RTE_RELATION
+                && !run.root.rel(rel).statlist.is_empty()
+            {
+                s1 *= crate::extended_stats::statext_clauselist_selectivity(
+                    run, clauses, varrelid, jointype, sjinfo, rel, &mut estimated,
+                )?;
+            }
+        }
+    }
     let mut rqlist: PgVec<'mcx, RangeQueryClause<'mcx>> = PgVec::new_in(run.mcx);
-    for &rid in clauses {
+    for (i, &rid) in clauses.iter().enumerate() {
+        if estimated[i] {
+            continue;
+        }
         let s2 = clause_selectivity(run, rid, varrelid, jointype, sjinfo)?;
         if run.root.rinfo(rid).pseudoconstant {
             s1 *= s2;

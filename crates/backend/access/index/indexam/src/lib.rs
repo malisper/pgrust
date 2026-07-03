@@ -128,7 +128,7 @@ fn unported(what: &str) -> ! {
     panic!("unported: {what}")
 }
 
-// C divergence: IndexInfo not threaded (execnodes unported; btree ignores it).
+// C divergence: IndexInfo is not threaded; only its ii_AmCache slot is passed.
 pub fn index_insert<'mcx>(
     mcx: Mcx<'mcx>,
     indexRelation: &Relation<'mcx>,
@@ -138,12 +138,19 @@ pub fn index_insert<'mcx>(
     heapRelation: &Relation<'mcx>,
     checkUnique: IndexUniqueCheck,
     indexUnchanged: bool,
+    // C indexInfo->ii_AmCache (per-statement; gist stores its GISTSTATE,
+    // brin its BrinInsertState)
+    am_cache: &mut Option<Box<dyn core::any::Any>>,
 ) -> PgResult<bool> {
     relation_checks(indexRelation)?;
     let kind = IndexAmKind::from_relam(indexRelation.rd_rel.relam);
 
     if !kind.ampredlocks() {
-        unported("predicate CheckForSerializableConflictIn (backend/storage/lmgr/predicate)");
+        predicate::CheckForSerializableConflictIn(
+            heapRelation,
+            None,
+            types_core::InvalidBlockNumber,
+        )?;
     }
 
     am_insert(
@@ -156,6 +163,7 @@ pub fn index_insert<'mcx>(
         heapRelation,
         checkUnique,
         indexUnchanged,
+        am_cache,
     )
 }
 
@@ -171,6 +179,11 @@ pub fn index_bulk_delete<'mcx>(
     match IndexAmKind::from_relam(info.index.rd_rel.relam) {
         IndexAmKind::Btree => nbtree::btbulkdelete(mcx, info, istat, dead_items),
         IndexAmKind::Gin => gin::ginbulkdelete(),
+        IndexAmKind::Gist => {
+            gist::gistbulkdelete(info.index)?;
+            Ok(istat.unwrap_or_default())
+        }
+        IndexAmKind::Brin => brin::brinbulkdelete(),
         #[cfg(test)]
         IndexAmKind::Mock => Ok(istat.unwrap_or_default()),
         #[allow(unreachable_patterns)]
@@ -188,12 +201,23 @@ pub fn index_vacuum_cleanup<'mcx>(
     match IndexAmKind::from_relam(info.index.rd_rel.relam) {
         IndexAmKind::Btree => nbtree::btvacuumcleanup(mcx, info, istat),
         // ginvacuumcleanup's analyze_only arm is a C no-op; the rest is the
-        // loud vacuum lane.
+        // loud vacuum lane. brinvacuumcleanup: same analyze_only early return.
         IndexAmKind::Gin => {
             if info.analyze_only {
                 Ok(istat)
             } else {
                 gin::ginvacuumcleanup()
+            }
+        }
+        IndexAmKind::Gist => {
+            gist::gistvacuumcleanup(info.index, info.analyze_only)?;
+            Ok(istat)
+        }
+        IndexAmKind::Brin => {
+            if info.analyze_only {
+                Ok(istat)
+            } else {
+                brin::brinvacuumcleanup()
             }
         }
         #[cfg(test)]
@@ -203,12 +227,15 @@ pub fn index_vacuum_cleanup<'mcx>(
     }
 }
 
-pub fn index_insert_cleanup(indexRelation: &Relation<'_>) -> PgResult<()> {
+pub fn index_insert_cleanup(
+    indexRelation: &Relation<'_>,
+    am_cache: &mut Option<Box<dyn core::any::Any>>,
+) -> PgResult<()> {
     relation_checks(indexRelation)?;
     let kind = IndexAmKind::from_relam(indexRelation.rd_rel.relam);
 
     if kind.has_aminsertcleanup() {
-        am_insert_cleanup(kind, indexRelation)?;
+        am_insert_cleanup(kind, indexRelation, am_cache)?;
     }
     Ok(())
 }
@@ -222,7 +249,8 @@ pub fn index_beginscan<'mcx>(
     nkeys: i32,
     norderbys: i32,
 ) -> PgResult<IndexScanDescData<'mcx>> {
-    let mut scan = index_beginscan_internal(mcx, indexRelation, nkeys, norderbys, false)?;
+    let mut scan =
+        index_beginscan_internal(mcx, indexRelation, nkeys, norderbys, false, Some(&snapshot))?;
 
     // Everything else was set up by ambeginscan (C RelationGetIndexScan).
     scan.heapRelation = Some(heapRelation.alias());
@@ -241,7 +269,8 @@ pub fn index_beginscan_bitmap<'mcx>(
     snapshot: Rc<SnapshotData<'mcx>>,
     nkeys: i32,
 ) -> PgResult<IndexScanDescData<'mcx>> {
-    let mut scan = index_beginscan_internal(mcx, indexRelation, nkeys, 0, false)?;
+    let mut scan =
+        index_beginscan_internal(mcx, indexRelation, nkeys, 0, false, Some(&snapshot))?;
     scan.xs_snapshot = Some(snapshot);
     Ok(scan)
 }
@@ -266,6 +295,8 @@ fn am_getbitmap(
         IndexScanOpaque::Btree(_) => nbtree::btgetbitmap(scan, bitmap),
         IndexScanOpaque::Hash(_) => hash::hashgetbitmap(scan, bitmap),
         IndexScanOpaque::Gin(_) => gin::gingetbitmap(scan, bitmap),
+        IndexScanOpaque::Gist(_) => gist::gistgetbitmap(scan, bitmap),
+        IndexScanOpaque::Brin(_) => brin::bringetbitmap(scan, bitmap),
         #[cfg(test)]
         IndexScanOpaque::Mock(_) => unreachable!("Mock lacks amgetbitmap"),
         #[allow(unreachable_patterns)]
@@ -279,12 +310,16 @@ fn index_beginscan_internal<'mcx>(
     nkeys: i32,
     norderbys: i32,
     temp_snap: bool,
+    snapshot: Option<&SnapshotData<'mcx>>,
 ) -> PgResult<IndexScanDescData<'mcx>> {
     relation_checks(indexRelation)?;
     let kind = IndexAmKind::from_relam(indexRelation.rd_rel.relam);
 
     if !kind.ampredlocks() {
-        unported("predicate PredicateLockRelation (backend/storage/lmgr/predicate)");
+        predicate::PredicateLockRelation(
+            indexRelation,
+            snapshot.expect("index_beginscan_internal without snapshot"),
+        )?;
     }
 
     // RelationIncrementReferenceCount: the scan's alias Rc is rd_refcnt, held throughout.
@@ -481,6 +516,8 @@ fn am_beginscan<'mcx>(
         IndexAmKind::Btree => nbtree::btbeginscan(mcx, indexRelation, nkeys, norderbys),
         IndexAmKind::Hash => hash::hashbeginscan(mcx, indexRelation, nkeys, norderbys),
         IndexAmKind::Gin => gin::ginbeginscan(mcx, indexRelation, nkeys, norderbys),
+        IndexAmKind::Gist => gist::gistbeginscan(mcx, indexRelation, nkeys, norderbys),
+        IndexAmKind::Brin => brin::brinbeginscan(mcx, indexRelation, nkeys, norderbys),
         #[cfg(test)]
         IndexAmKind::Mock => Ok(mock::beginscan(mcx, indexRelation, nkeys, norderbys)),
         #[allow(unreachable_patterns)]
@@ -498,6 +535,8 @@ fn am_rescan(
         IndexScanOpaque::Btree(_) => nbtree::btrescan(scan, keys),
         IndexScanOpaque::Hash(_) => hash::hashrescan(scan, keys),
         IndexScanOpaque::Gin(_) => gin::ginrescan(scan, keys),
+        IndexScanOpaque::Gist(_) => gist::gistrescan(scan, keys, orderbys),
+        IndexScanOpaque::Brin(_) => brin::brinrescan(scan, keys),
         #[cfg(test)]
         IndexScanOpaque::Mock(_) => Ok(mock::rescan(scan)),
         #[allow(unreachable_patterns)]
@@ -510,6 +549,8 @@ fn am_endscan(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
         IndexScanOpaque::Btree(_) => nbtree::btendscan(scan),
         IndexScanOpaque::Hash(_) => hash::hashendscan(scan),
         IndexScanOpaque::Gin(_) => gin::ginendscan(scan),
+        IndexScanOpaque::Gist(_) => gist::gistendscan(scan),
+        IndexScanOpaque::Brin(_) => brin::brinendscan(scan),
         #[cfg(test)]
         IndexScanOpaque::Mock(_) => Ok(()),
         #[allow(unreachable_patterns)]
@@ -522,6 +563,8 @@ fn am_markpos(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
         IndexScanOpaque::Btree(_) => nbtree::btmarkpos(scan),
         IndexScanOpaque::Hash(_) => unreachable!("hash lacks ammarkpos (guarded by has_ammarkpos)"),
         IndexScanOpaque::Gin(_) => unreachable!("gin lacks ammarkpos (guarded by has_ammarkpos)"),
+        IndexScanOpaque::Gist(_) => Err(missing_procedure("ammarkpos", &scan.indexRelation)),
+        IndexScanOpaque::Brin(_) => unreachable!("has_ammarkpos gate"),
         #[cfg(test)]
         IndexScanOpaque::Mock(_) => Ok(mock::markpos(scan)),
         #[allow(unreachable_patterns)]
@@ -534,6 +577,8 @@ fn am_restrpos(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
         IndexScanOpaque::Btree(_) => nbtree::btrestrpos(scan),
         IndexScanOpaque::Hash(_) => unreachable!("hash lacks amrestrpos (guarded by has_amrestrpos)"),
         IndexScanOpaque::Gin(_) => unreachable!("gin lacks amrestrpos (guarded by has_amrestrpos)"),
+        IndexScanOpaque::Gist(_) => Err(missing_procedure("amrestrpos", &scan.indexRelation)),
+        IndexScanOpaque::Brin(_) => unreachable!("has_amrestrpos gate"),
         #[cfg(test)]
         IndexScanOpaque::Mock(_) => unreachable!("Mock lacks amrestrpos"),
         #[allow(unreachable_patterns)]
@@ -551,6 +596,9 @@ fn am_gettuple(scan: &mut IndexScanDescData<'_>, direction: ScanDirection) -> Pg
             "index \"{}\" does not support amgettuple (bitmap-only AM)",
             scan.indexRelation.name()
         ),
+        IndexScanOpaque::Gist(_) => gist::gistgettuple(scan, direction),
+        // CHECK_SCAN_PROCEDURE(amgettuple): BRIN is bitmap-only.
+        IndexScanOpaque::Brin(_) => Err(missing_procedure("amgettuple", &scan.indexRelation)),
         #[cfg(test)]
         IndexScanOpaque::Mock(_) => Ok(mock::gettuple(scan)),
         #[allow(unreachable_patterns)]
@@ -569,6 +617,7 @@ fn am_insert<'mcx>(
     heapRelation: &Relation<'mcx>,
     checkUnique: IndexUniqueCheck,
     indexUnchanged: bool,
+    am_cache: &mut Option<Box<dyn core::any::Any>>,
 ) -> PgResult<bool> {
     match kind {
         IndexAmKind::Btree => nbtree::btinsert(
@@ -597,6 +646,43 @@ fn am_insert<'mcx>(
             heap_t_ctid,
             heapRelation,
         ),
+        IndexAmKind::Gist => {
+            debug_assert!(checkUnique == IndexUniqueCheck::UNIQUE_CHECK_NO);
+            // downcast once per row on a cache slot C derefs as void*; the
+            // resolve-once state lives inside (rule-5 ii_AmCache mirror).
+            if am_cache.is_none() {
+                *am_cache = Some(Box::new(
+                    None::<gist::GistInsertAmCache<'static>>,
+                ));
+            }
+            let slot = am_cache
+                .as_mut()
+                .expect("just filled")
+                .downcast_mut::<Option<gist::GistInsertAmCache<'static>>>()
+                .expect("gist ii_AmCache slot type");
+            // SAFETY: the cache's tupdesc Rcs alias the open index relation's
+            // relcache entry, which outlives the per-statement cache slot
+            // (ResultRelIndexState holds the relation open).
+            let slot: &mut Option<gist::GistInsertAmCache<'mcx>> =
+                unsafe { core::mem::transmute(slot) };
+            gist::gistinsert(indexRelation, values, isnull, heap_t_ctid, heapRelation, slot)
+        }
+        IndexAmKind::Brin => {
+            if am_cache.is_none() {
+                *am_cache = Some(Box::new(
+                    None::<types_brin::BrinInsertState<'static>>,
+                ));
+            }
+            let slot = am_cache
+                .as_mut()
+                .expect("just filled")
+                .downcast_mut::<Option<types_brin::BrinInsertState<'static>>>()
+                .expect("brin ii_AmCache slot type");
+            // SAFETY: same relcache-outlives-slot argument as the gist arm.
+            let slot: &mut Option<types_brin::BrinInsertState<'mcx>> =
+                unsafe { core::mem::transmute(slot) };
+            brin::brininsert(mcx, indexRelation, values, isnull, heap_t_ctid, slot)
+        }
         #[cfg(test)]
         IndexAmKind::Mock => Ok(true),
         #[allow(unreachable_patterns)]
@@ -605,11 +691,23 @@ fn am_insert<'mcx>(
 }
 
 #[allow(unused_variables)]
-fn am_insert_cleanup(kind: IndexAmKind, indexRelation: &Relation<'_>) -> PgResult<()> {
+fn am_insert_cleanup(
+    kind: IndexAmKind,
+    indexRelation: &Relation<'_>,
+    am_cache: &mut Option<Box<dyn core::any::Any>>,
+) -> PgResult<()> {
     match kind {
         IndexAmKind::Btree => unported("nbtree aminsertcleanup (insert lane is phase 2)"),
         IndexAmKind::Hash => unreachable!("hash lacks aminsertcleanup (guarded)"),
         IndexAmKind::Gin => unreachable!("gin lacks aminsertcleanup (guarded)"),
+        IndexAmKind::Gist => Ok(()),
+        IndexAmKind::Brin => {
+            let Some(boxed) = am_cache else { return Ok(()) };
+            let slot = boxed
+                .downcast_mut::<Option<types_brin::BrinInsertState<'static>>>()
+                .expect("brin ii_AmCache slot type");
+            brin::brininsertcleanup(slot)
+        }
         #[cfg(test)]
         IndexAmKind::Mock => Ok(()),
         #[allow(unreachable_patterns)]

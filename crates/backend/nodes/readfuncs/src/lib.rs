@@ -10,10 +10,13 @@ use types_core::Oid;
 use types_error::PgResult;
 use types_nodes::bitmapset::Bitmapset;
 use types_nodes::list::{IntList, NodeList, OidList};
+use types_nodes::jointype::JoinType;
 use types_nodes::nodes_enums::{CmdType, LimitOption};
-use types_nodes::parsenodes::{Query, QuerySource, RTEKind, RTEPermissionInfo, RangeTblEntry};
+use types_nodes::parsenodes::{
+    Query, QuerySource, RTEKind, RTEPermissionInfo, RangeTblEntry, RangeTblFunction,
+};
 use types_nodes::primnodes::{
-    Alias, BoolExpr, BoolExprType, CoercionForm, Const, FromExpr, FuncExpr, OpExpr,
+    Alias, BoolExpr, BoolExprType, CoercionForm, Const, FromExpr, FuncExpr, JoinExpr, OpExpr,
     OverridingKind, RangeTblRef, RelabelType, TargetEntry, Var, VarReturningType,
 };
 use types_nodes::Node;
@@ -221,6 +224,24 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
         }
     }
 
+    fn read_int_list(&mut self, name: &str) -> PgResult<IntList<'mcx>> {
+        self.label(name);
+        let t = self.token(name);
+        if t.is_empty() {
+            return Ok(IntList::nil());
+        }
+        assert!(t == b"(", "readfuncs.c: field :{name} is not an int list");
+        self.expect("i");
+        let mut l = IntList::nil();
+        loop {
+            let tok = self.token("int list");
+            if tok == b")" {
+                return Ok(l);
+            }
+            l.lappend(self.mcx, Self::parse_int(tok) as i32)?;
+        }
+    }
+
     fn read_bitmapset(&mut self, name: &str) -> PgResult<Bitmapset<'mcx>> {
         self.label(name);
         self.expect("(");
@@ -316,6 +337,8 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
             b"RTEPERMISSIONINFO" => self.read_rte_permission_info(),
             b"ALIAS" => self.read_alias(),
             b"FROMEXPR" => self.read_from_expr(),
+            b"JOINEXPR" => self.read_join_expr(),
+            b"RANGETBLFUNCTION" => self.read_range_tbl_function(),
             b"RANGETBLREF" => self.read_range_tbl_ref(),
             b"TARGETENTRY" => self.read_target_entry(),
             b"VAR" => self.read_var(),
@@ -327,6 +350,8 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
             b"COERCEVIAIO" => self.read_coerce_via_io(),
             b"COERCETODOMAIN" => self.read_coerce_to_domain(),
             b"COERCETODOMAINVALUE" => self.read_coerce_to_domain_value(),
+            b"PARTITIONBOUNDSPEC" => self.read_partition_bound_spec(),
+            b"PARTITIONRANGEDATUM" => self.read_partition_range_datum(),
             other => panic!(
                 "parseNodeString (readfuncs.c): {} read arm unported (view SELECT-rule + \
                  DEFAULT/CHECK expr sets only)",
@@ -421,6 +446,18 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
                 rte.rellockmode = self.read_i32("rellockmode");
                 rte.perminfoindex = self.read_u32("perminfoindex");
             }
+            RTEKind::RTE_JOIN => {
+                rte.jointype = join_type(self.read_u32("jointype"));
+                rte.joinmergedcols = self.read_i32("joinmergedcols");
+                rte.joinaliasvars = self.read_node_list("joinaliasvars")?;
+                rte.joinleftcols = self.read_int_list("joinleftcols")?;
+                rte.joinrightcols = self.read_int_list("joinrightcols")?;
+                rte.join_using_alias = self.read_alias_ref("join_using_alias")?;
+            }
+            RTEKind::RTE_FUNCTION => {
+                rte.functions = self.read_node_list("functions")?;
+                rte.funcordinality = self.read_bool("funcordinality");
+            }
             other => panic!(
                 "_readRangeTblEntry (readfuncs.c): {other:?} arm unported (view SELECT-rule set)"
             ),
@@ -464,6 +501,45 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
         let mut f = Node::build::<FromExpr>(mcx)?;
         f.fromlist = self.read_node_list("fromlist")?;
         f.quals = self.read_node("quals")?;
+        Ok(f.seal())
+    }
+
+    fn read_join_expr(&mut self) -> PgResult<Node<'mcx>> {
+        let jointype = join_type(self.read_u32("jointype"));
+        let isNatural = self.read_bool("isNatural");
+        let larg = self.read_node("larg")?.expect("JoinExpr has a larg");
+        let rarg = self.read_node("rarg")?.expect("JoinExpr has a rarg");
+        let usingClause = self.read_node_list("usingClause")?;
+        let join_using_alias = self.read_alias_ref("join_using_alias")?;
+        let quals = self.read_node("quals")?;
+        let alias = self.read_alias_ref("alias")?;
+        let rtindex = self.read_i32("rtindex");
+        Node::mk(
+            self.mcx,
+            JoinExpr {
+                jointype,
+                isNatural,
+                larg,
+                rarg,
+                usingClause,
+                join_using_alias,
+                quals,
+                alias,
+                rtindex,
+            },
+        )
+    }
+
+    fn read_range_tbl_function(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let mut f = Node::build::<RangeTblFunction>(mcx)?;
+        f.funcexpr = self.read_node("funcexpr")?;
+        f.funccolcount = self.read_i32("funccolcount");
+        f.funccolnames = self.read_node_list("funccolnames")?;
+        f.funccoltypes = self.read_oid_list("funccoltypes")?;
+        f.funccoltypmods = self.read_int_list("funccoltypmods")?;
+        f.funccolcollations = self.read_oid_list("funccolcollations")?;
+        f.funcparams = self.read_bitmapset("funcparams")?;
         Ok(f.seal())
     }
 
@@ -536,6 +612,34 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
                 location,
             },
         )
+    }
+
+    fn read_partition_bound_spec(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let mut b = Node::build::<types_nodes::rawnodes::PartitionBoundSpec>(mcx)?;
+        b.strategy = self.read_char("strategy");
+        b.is_default = self.read_bool("is_default");
+        b.modulus = self.read_i32("modulus");
+        b.remainder = self.read_i32("remainder");
+        b.listdatums = self.read_node_list("listdatums")?;
+        b.lowerdatums = self.read_node_list("lowerdatums")?;
+        b.upperdatums = self.read_node_list("upperdatums")?;
+        b.location = self.read_location("location");
+        Ok(b.seal())
+    }
+
+    fn read_partition_range_datum(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let mut d = Node::build::<types_nodes::rawnodes::PartitionRangeDatum>(mcx)?;
+        d.kind = match self.read_i32("kind") {
+            -1 => types_nodes::rawnodes::PartitionRangeDatumKind::Minvalue,
+            0 => types_nodes::rawnodes::PartitionRangeDatumKind::Value,
+            1 => types_nodes::rawnodes::PartitionRangeDatumKind::Maxvalue,
+            k => panic!("_readPartitionRangeDatum: bad kind {k}"),
+        };
+        d.value = self.read_node("value")?;
+        d.location = self.read_location("location");
+        Ok(d.seal())
     }
 
     fn read_op_expr(&mut self) -> PgResult<Node<'mcx>> {
@@ -699,6 +803,22 @@ fn rte_kind(v: u32) -> RTEKind {
         8 => RTEKind::RTE_RESULT,
         9 => RTEKind::RTE_GROUP,
         other => panic!("readfuncs.c: bad RTEKind {other}"),
+    }
+}
+
+fn join_type(v: u32) -> JoinType {
+    match v {
+        0 => JoinType::JOIN_INNER,
+        1 => JoinType::JOIN_LEFT,
+        2 => JoinType::JOIN_FULL,
+        3 => JoinType::JOIN_RIGHT,
+        4 => JoinType::JOIN_SEMI,
+        5 => JoinType::JOIN_ANTI,
+        6 => JoinType::JOIN_RIGHT_SEMI,
+        7 => JoinType::JOIN_RIGHT_ANTI,
+        8 => JoinType::JOIN_UNIQUE_OUTER,
+        9 => JoinType::JOIN_UNIQUE_INNER,
+        other => panic!("readfuncs.c: bad JoinType {other}"),
     }
 }
 

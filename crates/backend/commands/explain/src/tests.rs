@@ -898,6 +898,7 @@ mod order_by_limit_e2e {
                 pgstat_enabled: Cell::new(false),
                 rd_amcache: Default::default(),
                 rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(),
+                rd_support: ::mcx::PgVec::new_in(mcx),
                 rd_supportinfo: Default::default(),
                 rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),

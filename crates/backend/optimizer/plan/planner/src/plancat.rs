@@ -111,7 +111,14 @@ pub fn get_relation_info<'mcx>(
             let relam = index_rel.rd_rel.relam;
             let am_is_btree = relam == BTREE_AM_OID;
             let am_is_gin = relam == types_core::GIN_AM_OID;
-            if !am_is_btree && !am_is_gin && relam != types_core::HASH_AM_OID {
+            let am_is_gist = relam == types_core::GIST_AM_OID;
+            let am_is_brin = relam == types_core::BRIN_AM_OID;
+            if !am_is_btree
+                && !am_is_gin
+                && !am_is_gist
+                && !am_is_brin
+                && relam != types_core::HASH_AM_OID
+            {
                 panic!("get_relation_info (plancat.c): index AM {relam}; M2 index-AM lane");
             }
             if ind.has_indpred {
@@ -139,16 +146,20 @@ pub fn get_relation_info<'mcx>(
             for i in 0..nkeycolumns as usize {
                 info.opfamily.push(index_rel.rd_opfamily[i]);
                 info.opcintype.push(index_rel.rd_opcintype[i]);
-                info.canreturn.push(if am_is_btree { btcanreturn() } else { false });
+                info.canreturn.push(match index_rel.rd_rel.relam {
+                    BTREE_AM_OID => btcanreturn(),
+                    types_core::GIST_AM_OID => gist::gistcanreturn(&index_rel, i as i32 + 1),
+                    _ => false,
+                });
             }
             info.relam = relam;
-            info.amcanorderbyop = false;
-            // Per-AM IndexAmRoutine flags (bthandler/hashhandler/ginhandler).
-            info.amoptionalkey = am_is_btree || am_is_gin;
+            // Per-AM IndexAmRoutine flags (bt/hash/gin/gist/brin handlers).
+            info.amcanorderbyop = am_is_gist;
+            info.amoptionalkey = am_is_btree || am_is_gin || am_is_gist || am_is_brin;
             info.amsearcharray = am_is_btree;
-            info.amsearchnulls = am_is_btree;
+            info.amsearchnulls = am_is_btree || am_is_gist || am_is_brin;
             info.amcanparallel = am_is_btree;
-            info.amhasgettuple = !am_is_gin;
+            info.amhasgettuple = !am_is_gin && !am_is_brin;
             info.amhasgetbitmap = true;
             info.amcanmarkpos = am_is_btree;
 
@@ -219,9 +230,7 @@ pub fn get_relation_info<'mcx>(
     }
     run.root.rel_mut(rel).indexlist = indexinfos;
 
-    // Divergence: RelationGetStatExtList unported; extended stats absent
-    // (multi-clause selectivity panics upstream).
-    debug_assert!(run.root.rel(rel).statlist.is_empty());
+    crate::extended_stats::get_relation_statistics(run, rel, relation.rd_id)?;
 
     {
         let r = run.root.rel_mut(rel);
@@ -352,7 +361,14 @@ pub fn restriction_selectivity<'mcx>(
     const F_PREFIXSEL: Oid = 3437;
     use crate::like_support::PatternType;
     const F_MATCHINGSEL: Oid = 5040;
+    // geo_selfuncs.c constants
+    const F_AREASEL: Oid = 139;
+    const F_POSITIONSEL: Oid = 1300;
+    const F_CONTSEL: Oid = 1302;
     let result = match oprrest {
+        F_AREASEL => 0.005,
+        F_POSITIONSEL => 0.1,
+        F_CONTSEL => 0.001,
         F_EQSEL => crate::selfuncs::eqsel(run, operatorid, args, varrelid, inputcollid)?,
         F_MATCHINGSEL => {
             crate::selfuncs::matchingsel(run, operatorid, args, varrelid, inputcollid)?
@@ -407,6 +423,9 @@ pub fn join_selectivity<'mcx>(
     const F_SCALARGTJOINSEL: Oid = 108;
     const F_SCALARLEJOINSEL: Oid = 386;
     const F_SCALARGEJOINSEL: Oid = 398;
+    const F_AREAJOINSEL: Oid = 140;
+    const F_POSITIONJOINSEL: Oid = 1301;
+    const F_CONTJOINSEL: Oid = 1303;
     const DEFAULT_INEQ_SEL: f64 = 0.3333333333333333;
     let _ = inputcollid;
     let oprjoin = lsyscache::get_oprjoin(operatorid)?;
@@ -421,6 +440,9 @@ pub fn join_selectivity<'mcx>(
         // patternjoinsel (like_support.c) punts for all pattern types.
         1816 | 1824 | 1825 | 1826 | 3438 => crate::selfuncs::DEFAULT_MATCH_SEL,
         1817 | 1827 | 1828 | 1829 => 1.0 - crate::selfuncs::DEFAULT_MATCH_SEL,
+        F_AREAJOINSEL => 0.005,
+        F_POSITIONJOINSEL => 0.1,
+        F_CONTJOINSEL => 0.001,
         other => panic!("join_selectivity (plancat.c): oprjoin {other}; M2 selfuncs lane"),
     };
     if !(0.0..=1.0).contains(&result) {

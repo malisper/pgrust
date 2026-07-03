@@ -20,6 +20,7 @@ mcx = { path = "../../../_support/mcx" }
 init_small = { path = "../../utils/init/init_small" }
 types_nodes = { path = "../../../_support/types/nodes" }
 pg_attrdef = { path = "../pg_attrdef" }
+statscmds = { path = "../../commands/statscmds" }
 pg_constraint = { path = "../pg_constraint" }
 pg_depend = { path = "../pg_depend" }
 pg_type = { path = "../pg_type" }

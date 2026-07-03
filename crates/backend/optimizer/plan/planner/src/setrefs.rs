@@ -730,7 +730,13 @@ fn fix_upper_expr<'mcx>(
             }
             let a = node.as_aggref().expect("Aggref");
             record_plan_function_dependency(run, a.aggfnoid)?;
-            debug_assert!(a.aggdirectargs.is_nil() && a.aggfilter.is_none());
+            debug_assert!(a.aggdirectargs.is_nil());
+            let aggfilter = match a.aggfilter {
+                None => None,
+                Some(f) => {
+                    Some(fix_upper_expr(run, f, subplan_tlist, rtoffset, newvarno, num_exec)?)
+                }
+            };
             let mut args = NodeList::nil();
             for arg_node in &a.args {
                 let arg = arg_node.as_target_entry().expect("agg arg is a TLE");
@@ -764,7 +770,7 @@ fn fix_upper_expr<'mcx>(
                     // expression_tree_mutator leaves non-expression nodes).
                     aggorder: a.aggorder.clone_in(mcx)?,
                     aggdistinct: a.aggdistinct.clone_in(mcx)?,
-                    aggfilter: None,
+                    aggfilter,
                     aggstar: a.aggstar,
                     aggvariadic: a.aggvariadic,
                     aggkind: a.aggkind,
@@ -814,11 +820,17 @@ fn fix_upper_expr<'mcx>(
         NodeTag::T_WindowFunc => {
             let wf = node.as_window_func().expect("WindowFunc");
             record_plan_function_dependency(run, wf.winfnoid)?;
-            debug_assert!(wf.aggfilter.is_none() && wf.runCondition.is_nil());
+            debug_assert!(wf.runCondition.is_nil());
             let mut args = NodeList::nil();
             for arg in &wf.args {
                 args.lappend(mcx, fix_upper_expr(run, arg, subplan_tlist, rtoffset, newvarno, num_exec)?)?;
             }
+            let aggfilter = match wf.aggfilter {
+                None => None,
+                Some(f) => {
+                    Some(fix_upper_expr(run, f, subplan_tlist, rtoffset, newvarno, num_exec)?)
+                }
+            };
             Node::mk(
                 mcx,
                 types_nodes::primnodes::WindowFunc {
@@ -827,7 +839,7 @@ fn fix_upper_expr<'mcx>(
                     wincollid: wf.wincollid,
                     inputcollid: wf.inputcollid,
                     args,
-                    aggfilter: None,
+                    aggfilter,
                     runCondition: NodeList::nil(),
                     winref: wf.winref,
                     winstar: wf.winstar,

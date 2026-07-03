@@ -385,6 +385,7 @@ fn install_scan_fixtures() {
         Ok(v)
     });
     relcache_seams::relation_get_index_list::set(relcache::RelationGetIndexList);
+    relcache_seams::relation_get_stat_ext_list::set(|mcx, _relid| Ok(mcx::PgVec::new_in(mcx)));
     bufmgr_seams::relation_get_number_of_blocks_in_fork::set(|rel, _fork| {
         Ok(match rel.rd_id {
             TBL => 100,
@@ -462,6 +463,7 @@ fn make_rel_data<'mcx>(
         pgstat_enabled: Cell::new(false),
         rd_amcache: Default::default(),
         rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(),
+        rd_support: mcx::PgVec::new_in(mcx),
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),

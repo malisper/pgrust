@@ -529,6 +529,45 @@ fn dispatch_switch<'mcx>(
             functioncmds::CreateFunction(mcx, stmt)?;
         }
 
+        T_CreateStatsStmt => {
+            // Retention contract as unify_stmt_lifetime: the statement arena
+            // outlives the utility call; nothing derived escapes it.
+            let stmt_node =
+                unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::rawnodes::CreateStatsStmt>()
+                .expect("CreateStatsStmt");
+            if let Some(first) = stmt.relations.iter().next() {
+                let Some(rv_node) = first.as_range_var() else {
+                    return Err(Box::new(
+                        types_error::PgError::new(
+                            types_error::ERROR,
+                            "CREATE STATISTICS only supports relation names in the FROM clause"
+                                .to_string(),
+                        )
+                        .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+                    ));
+                };
+                let rv = rel_vocab::RangeVar {
+                    catalogname: rv_node.catalogname,
+                    schemaname: rv_node.schemaname,
+                    relname: rv_node.relname.expect("CreateStatsStmt relation without relname"),
+                    inh: rv_node.inh,
+                    relpersistence: rv_node.relpersistence,
+                    location: rv_node.location,
+                };
+                catalog_namespace::RangeVarGetRelidExtended(
+                    &rv,
+                    types_rel::ShareUpdateExclusiveLock,
+                    0,
+                    None,
+                )?;
+            }
+            // transformStatsStmt is a no-op for plain column references; the
+            // expression lane panics inside CreateStatistics.
+            statscmds::CreateStatistics(mcx, stmt)?;
+        }
+
         T_IndexStmt => {
             // Retention contract as unify_stmt_lifetime: the statement arena
             // outlives the utility call; nothing derived escapes it.
