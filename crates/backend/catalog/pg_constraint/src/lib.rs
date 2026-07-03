@@ -17,7 +17,7 @@ use types_core::{
 };
 
 pub const OPERATOR_RELATION_ID: Oid = 2617;
-use types_error::PgResult;
+use types_error::{PgError, PgResult, ERRCODE_DUPLICATE_OBJECT, ERROR};
 use types_rel::{AccessShareLock, RowExclusiveLock};
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 
@@ -552,6 +552,34 @@ pub fn RenameConstraintById<'mcx>(mcx: Mcx<'mcx>, con_id: Oid, newname: &str) ->
     let tup = genam::systable_getnext(mcx, &mut scan)?
         .unwrap_or_else(|| panic!("cache lookup failed for constraint {con_id}"));
     let desc = con_rel.descr();
+    let mut isnull = false;
+    // SAFETY (each): fixed NOT NULL pg_constraint columns under its descriptor.
+    let conrelid = unsafe {
+        types_tuple::heap_getattr(tup, Anum_pg_constraint_conrelid as i32, desc, &mut isnull)
+    }
+    .as_oid();
+    // SAFETY: as above.
+    let contypid = unsafe {
+        types_tuple::heap_getattr(tup, Anum_pg_constraint_contypid as i32, desc, &mut isnull)
+    }
+    .as_oid();
+    if conrelid != InvalidOid
+        && ConstraintNameIsUsed(mcx, ConstraintCategory::Relation, conrelid, newname)?
+    {
+        let relname = rel_name_for_error(mcx, conrelid)?;
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                format!("constraint \"{newname}\" for relation \"{relname}\" already exists"),
+            )
+            .with_sqlstate(ERRCODE_DUPLICATE_OBJECT),
+        ));
+    }
+    if contypid != InvalidOid
+        && ConstraintNameIsUsed(mcx, ConstraintCategory::Domain, contypid, newname)?
+    {
+        panic!("unported: RenameConstraintById domain constraints");
+    }
     let natts = desc.natts as usize;
     let newbuf = name_arg(mcx, newname)?;
     let mut repl_values: PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
@@ -643,6 +671,29 @@ pub fn RemoveConstraintById<'mcx>(mcx: Mcx<'mcx>, con_id: Oid) -> PgResult<()> {
 }
 
 const Anum_pg_class_relchecks: AttrNumber = 20;
+const Anum_pg_class_relname: AttrNumber = 2;
+
+fn rel_name_for_error<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<String> {
+    let pgrel = table::table_open(mcx, types_core::RELATION_RELATION_ID, AccessShareLock)?;
+    let keys = [eq_key(1, F_OIDEQ, Datum::from_oid(relid))];
+    let mut scan =
+        genam::systable_beginscan(mcx, &pgrel, catalog::ClassOidIndexId, true, None, &keys)?;
+    let reltup = genam::systable_getnext(mcx, &mut scan)?
+        .unwrap_or_else(|| panic!("cache lookup failed for relation {relid}"));
+    let mut isnull = false;
+    // SAFETY: relname is a fixed NOT NULL NameData column under pg_class's descriptor.
+    let d = unsafe {
+        types_tuple::heap_getattr(reltup, Anum_pg_class_relname as i32, pgrel.descr(), &mut isnull)
+    };
+    // SAFETY: NameData column is a 64-byte NUL-terminated in-tuple buffer.
+    let bytes =
+        unsafe { core::slice::from_raw_parts(d.as_usize() as *const u8, NAMEDATALEN as usize) };
+    let end = bytes.iter().position(|&b| b == 0).unwrap_or(NAMEDATALEN as usize);
+    let name = core::str::from_utf8(&bytes[..end]).expect("relname UTF-8").to_string();
+    genam::systable_endscan(mcx, scan)?;
+    pgrel.close(AccessShareLock)?;
+    Ok(name)
+}
 
 fn decrement_relchecks<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<()> {
     let pgrel = table::table_open(mcx, types_core::RELATION_RELATION_ID, RowExclusiveLock)?;
