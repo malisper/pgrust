@@ -1990,6 +1990,31 @@ fn deparse_expr<'mcx>(
             buf.try_push_str("))")?;
             Ok(())
         }
+        NodeTag::T_JsonValueExpr => {
+            let j = expr.as_json_value_expr().unwrap();
+            deparse_expr(es, plan_node, ancestors, j.raw_expr.expect("raw_expr"), useprefix, false, buf)?;
+            deparse_json_format(j.format, buf)
+        }
+        NodeTag::T_JsonConstructorExpr => {
+            deparse_json_constructor(es, plan_node, ancestors, expr, useprefix, buf)
+        }
+        NodeTag::T_JsonIsPredicate => {
+            let p = expr.as_json_is_predicate().unwrap();
+            buf.try_push('(')?;
+            deparse_expr(es, plan_node, ancestors, p.expr.expect("expr"), useprefix, true, buf)?;
+            buf.try_push_str(" IS JSON")?;
+            match p.item_type {
+                types_nodes::JsonValueType::JS_TYPE_SCALAR => buf.try_push_str(" SCALAR")?,
+                types_nodes::JsonValueType::JS_TYPE_ARRAY => buf.try_push_str(" ARRAY")?,
+                types_nodes::JsonValueType::JS_TYPE_OBJECT => buf.try_push_str(" OBJECT")?,
+                types_nodes::JsonValueType::JS_TYPE_ANY => {}
+            }
+            if p.unique_keys {
+                buf.try_push_str(" WITH UNIQUE KEYS")?;
+            }
+            buf.try_push(')')?;
+            Ok(())
+        }
         other => node_gap(
             "deparse_expression",
             &format!("{other:?} deparse unported (ruleutils lane)"),
@@ -2165,6 +2190,140 @@ fn find_param_generator<'mcx>(
 }
 
 // exprType (nodeFuncs.c) over the tags deparse_expr accepts.
+fn deparse_json_format(
+    format: Option<&types_nodes::JsonFormat>,
+    buf: &mut PgString<'_>,
+) -> PgResult<()> {
+    use types_nodes::primnodes::{JsonEncoding, JsonFormatType};
+    let Some(format) = format else { return Ok(()) };
+    if format.format_type == JsonFormatType::JS_FORMAT_DEFAULT {
+        return Ok(());
+    }
+    buf.try_push_str(if format.format_type == JsonFormatType::JS_FORMAT_JSONB {
+        " FORMAT JSONB"
+    } else {
+        " FORMAT JSON"
+    })?;
+    if format.encoding != JsonEncoding::JS_ENC_DEFAULT {
+        buf.try_push_str(" ENCODING ")?;
+        buf.try_push_str(match format.encoding {
+            JsonEncoding::JS_ENC_UTF16 => "UTF16",
+            JsonEncoding::JS_ENC_UTF32 => "UTF32",
+            _ => "UTF8",
+        })?;
+    }
+    Ok(())
+}
+
+fn deparse_json_returning(
+    returning: &types_nodes::JsonReturning<'_>,
+    buf: &mut PgString<'_>,
+    json_format_by_default: bool,
+) -> PgResult<()> {
+    use types_nodes::primnodes::JsonFormatType;
+    if returning.typid == 0 {
+        return Ok(());
+    }
+    buf.try_push_str(" RETURNING ")?;
+    buf.try_push_str(&format_type::format_type_with_typemod(
+        returning.typid,
+        returning.typmod,
+    )?)?;
+    let expected = if returning.typid == types_core::catalog::JSONBOID {
+        JsonFormatType::JS_FORMAT_JSONB
+    } else {
+        JsonFormatType::JS_FORMAT_JSON
+    };
+    if !json_format_by_default || returning.format.expect("format").format_type != expected {
+        deparse_json_format(returning.format, buf)?;
+    }
+    Ok(())
+}
+
+fn deparse_json_constructor_options(
+    c: &types_nodes::JsonConstructorExpr<'_>,
+    buf: &mut PgString<'_>,
+) -> PgResult<()> {
+    use types_nodes::JsonConstructorType as JC;
+    if c.absent_on_null {
+        if matches!(c.r#type, JC::JSCTOR_JSON_OBJECT | JC::JSCTOR_JSON_OBJECTAGG) {
+            buf.try_push_str(" ABSENT ON NULL")?;
+        }
+    } else if matches!(c.r#type, JC::JSCTOR_JSON_ARRAY | JC::JSCTOR_JSON_ARRAYAGG) {
+        buf.try_push_str(" NULL ON NULL")?;
+    }
+    if c.unique {
+        buf.try_push_str(" WITH UNIQUE KEYS")?;
+    }
+    if !matches!(c.r#type, JC::JSCTOR_JSON_PARSE | JC::JSCTOR_JSON_SCALAR) {
+        deparse_json_returning(c.returning.expect("returning"), buf, true)?;
+    }
+    Ok(())
+}
+
+// get_json_constructor / get_json_agg_constructor (ruleutils.c) on the plan
+// walk; the agg form reuses the Aggref deparse with funcname/options override.
+fn deparse_json_constructor<'mcx>(
+    es: &ExplainState<'mcx>,
+    plan_node: Node<'mcx>,
+    ancestors: Option<&Ancestors<'_, 'mcx>>,
+    expr: Node<'mcx>,
+    useprefix: bool,
+    buf: &mut PgString<'mcx>,
+) -> PgResult<()> {
+    use types_nodes::JsonConstructorType as JC;
+    let c = expr.as_json_constructor_expr().unwrap();
+    let (funcname, is_json_objectagg) = match c.r#type {
+        JC::JSCTOR_JSON_OBJECT => ("JSON_OBJECT", false),
+        JC::JSCTOR_JSON_ARRAY => ("JSON_ARRAY", false),
+        JC::JSCTOR_JSON_PARSE => ("JSON", false),
+        JC::JSCTOR_JSON_SCALAR => ("JSON_SCALAR", false),
+        JC::JSCTOR_JSON_SERIALIZE => ("JSON_SERIALIZE", false),
+        JC::JSCTOR_JSON_OBJECTAGG => ("JSON_OBJECTAGG", true),
+        JC::JSCTOR_JSON_ARRAYAGG => ("JSON_ARRAYAGG", false),
+    };
+    if matches!(c.r#type, JC::JSCTOR_JSON_OBJECTAGG | JC::JSCTOR_JSON_ARRAYAGG) {
+        let func = c.func.expect("func");
+        let Some(a) = func.as_aggref() else {
+            node_gap("get_json_agg_constructor", "WindowFunc (OVER) deparse");
+        };
+        write!(buf, "{funcname}(").expect("PgString write");
+        let mut nargs = 0;
+        for tle_node in a.args.iter() {
+            let tle = tle_node.as_target_entry().expect("Aggref args hold TargetEntries");
+            if tle.resjunk {
+                continue;
+            }
+            if nargs > 0 {
+                buf.try_push_str(if is_json_objectagg { " : " } else { ", " })?;
+            }
+            nargs += 1;
+            deparse_expr(es, plan_node, ancestors, tle.expr, useprefix, true, buf)?;
+        }
+        if !a.aggorder.is_nil() {
+            node_gap("get_json_agg_constructor", "agg ORDER BY deparse (ruleutils lane)");
+        }
+        deparse_json_constructor_options(c, buf)?;
+        if let Some(f) = a.aggfilter {
+            buf.try_push_str(") FILTER (WHERE ")?;
+            deparse_expr(es, plan_node, ancestors, f, useprefix, false, buf)?;
+        }
+        buf.try_push(')')?;
+        return Ok(());
+    }
+    write!(buf, "{funcname}(").expect("PgString write");
+    let is_json_object = c.r#type == JC::JSCTOR_JSON_OBJECT;
+    for (i, arg) in c.args.iter().enumerate() {
+        if i > 0 {
+            buf.try_push_str(if is_json_object && i % 2 != 0 { " : " } else { ", " })?;
+        }
+        deparse_expr(es, plan_node, ancestors, arg, useprefix, true, buf)?;
+    }
+    deparse_json_constructor_options(c, buf)?;
+    buf.try_push(')')?;
+    Ok(())
+}
+
 fn deparse_expr_type(node: Node<'_>) -> types_core::Oid {
     match node.node_tag() {
         NodeTag::T_Const => node.as_const().unwrap().consttype,
@@ -2179,6 +2338,14 @@ fn deparse_expr_type(node: Node<'_>) -> types_core::Oid {
         }
         NodeTag::T_CaseExpr => node.as_case_expr().unwrap().casetype,
         NodeTag::T_CaseTestExpr => node.as_case_test_expr().unwrap().typeId,
+        NodeTag::T_JsonValueExpr => {
+            deparse_expr_type(node.as_json_value_expr().unwrap().formatted_expr.expect("formatted_expr"))
+        }
+        NodeTag::T_JsonConstructorExpr => {
+            node.as_json_constructor_expr().unwrap().returning.expect("returning").typid
+        }
+        NodeTag::T_JsonIsPredicate => types_core::catalog::BOOLOID,
+        NodeTag::T_JsonExpr => node.as_json_expr().unwrap().returning.expect("returning").typid,
         other => node_gap("exprType", &format!("{other:?} (ruleutils deparse lane)")),
     }
 }

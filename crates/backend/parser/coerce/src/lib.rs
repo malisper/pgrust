@@ -1849,6 +1849,31 @@ pub fn expression_returns_set(node: Node<'_>) -> bool {
         NodeTag::T_SubLink => {
             node.as_sub_link().unwrap().testexpr.is_some_and(expression_returns_set)
         }
+        NodeTag::T_JsonValueExpr => {
+            let j = node.as_json_value_expr().unwrap();
+            j.raw_expr.is_some_and(expression_returns_set)
+                || j.formatted_expr.is_some_and(expression_returns_set)
+        }
+        NodeTag::T_JsonConstructorExpr => {
+            let c = node.as_json_constructor_expr().unwrap();
+            c.args.iter().any(expression_returns_set)
+                || c.func.is_some_and(expression_returns_set)
+                || c.coercion.is_some_and(expression_returns_set)
+        }
+        NodeTag::T_JsonIsPredicate => {
+            node.as_json_is_predicate().unwrap().expr.is_some_and(expression_returns_set)
+        }
+        NodeTag::T_JsonBehavior => {
+            node.as_json_behavior().unwrap().expr.is_some_and(expression_returns_set)
+        }
+        NodeTag::T_JsonExpr => {
+            let j = node.as_json_expr().unwrap();
+            [j.formatted_expr, j.path_spec, j.on_empty, j.on_error]
+                .into_iter()
+                .flatten()
+                .any(expression_returns_set)
+                || j.passing_values.iter().any(expression_returns_set)
+        }
         other => panic!(
             "expression_returns_set (nodeFuncs.c): arm for {other:?} unported — \
              backend-nodes-core lane"

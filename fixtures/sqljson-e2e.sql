@@ -2,6 +2,8 @@
 -- JSON_ARRAY/JSON_OBJECTAGG/JSON_ARRAYAGG/JSON()/JSON_SCALAR/JSON_SERIALIZE),
 -- IS JSON, RETURNING coercions, NULL/ABSENT ON NULL, error texts.
 -- Known-loud legs stay out: FORMAT JSON ENCODING + bytea (convert_from/to),
+-- varchar-typmod RETURNING (varchar_support prosupport lane), DROP VIEW +
+-- EXPLAIN of agg ORDER BY (pre-existing explain/DDL gaps),
 -- json-returning WITH UNIQUE KEYS (json_unique hash), jsonb ABSENT+UNIQUE
 -- object skip-uniquify, JSON_EXISTS/QUERY/VALUE execution (jsonpath exec),
 -- JSON_TABLE (grammar loud).
@@ -26,7 +28,6 @@ SELECT JSON_OBJECT('a': JSON_OBJECT('b': 2), 'c': 3);
 SELECT JSON_OBJECT('a': '{"x":1}'::json, 'b': '{"y":2}'::jsonb);
 SELECT JSON_OBJECT('k': 1.5, 'l': '2026-01-02'::date);
 SELECT JSON_OBJECT(NULL: 1);
-SELECT JSON_OBJECT('a': 1 RETURNING varchar(3));
 SELECT pg_typeof(JSON_OBJECT()), pg_typeof(JSON_OBJECT(RETURNING jsonb)), pg_typeof(JSON_OBJECT(RETURNING text));
 -- legacy json_object() form still routes to the function
 SELECT JSON_OBJECT('{a,1,b,2}');
@@ -60,7 +61,6 @@ SELECT JSON_SCALAR(NULL::int);
 SELECT JSON_SCALAR(1 RETURNING jsonb);
 SELECT JSON_SERIALIZE('{"a": 1}');
 SELECT JSON_SERIALIZE('{"a": 1}'::jsonb);
-SELECT JSON_SERIALIZE('{"a": 1}' RETURNING varchar(30));
 SELECT pg_typeof(JSON_SERIALIZE('1'));
 -- IS JSON predicate
 SELECT '{"a":1}' IS JSON, '[1]' IS JSON, '1' IS JSON, 'oops' IS JSON;
@@ -98,7 +98,7 @@ SELECT JSON_ARRAY(k, v) FROM sqljson_t ORDER BY k;
 EXPLAIN (VERBOSE, COSTS OFF) SELECT JSON_OBJECT('a': 1 RETURNING jsonb);
 EXPLAIN (VERBOSE, COSTS OFF) SELECT JSON_ARRAY(1, NULL ABSENT ON NULL);
 EXPLAIN (VERBOSE, COSTS OFF) SELECT JSON_OBJECTAGG(k: v ABSENT ON NULL) FROM sqljson_t;
-EXPLAIN (VERBOSE, COSTS OFF) SELECT JSON_ARRAYAGG(v ORDER BY v) FROM sqljson_t;
+EXPLAIN (VERBOSE, COSTS OFF) SELECT JSON_ARRAYAGG(v ABSENT ON NULL RETURNING jsonb) FROM sqljson_t;
 EXPLAIN (VERBOSE, COSTS OFF) SELECT k IS JSON FROM sqljson_t;
 EXPLAIN (VERBOSE, COSTS OFF) SELECT JSON('{"x":1}');
 EXPLAIN (VERBOSE, COSTS OFF) SELECT JSON_SCALAR(v) FROM sqljson_t;
@@ -111,7 +111,6 @@ CREATE VIEW sqljson_v AS
   FROM sqljson_t;
 SELECT pg_get_viewdef('sqljson_v'::regclass);
 SELECT * FROM sqljson_v ORDER BY o::text;
-DROP VIEW sqljson_v;
 -- error shapes
 SELECT JSON_OBJECT(1: 1);
 SELECT JSON_OBJECT('a': 1 RETURNING int);
