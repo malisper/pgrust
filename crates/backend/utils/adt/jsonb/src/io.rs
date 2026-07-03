@@ -3,7 +3,7 @@ extern crate alloc;
 use crate::build::*;
 use crate::container::*;
 use crate::iter::{JsonbIterator, WjbToken};
-use adt_json::jsonapi::{parse_sem, JsonError, JsonLexDe, JsonSem, JsonSemToken};
+use adt_json::jsonapi::{parse_sem, JsonError, JsonLex, JsonLexDe, JsonSem, JsonSemToken};
 use adt_numeric::Num;
 use mcx::{Mcx, PgVec};
 use stringinfo::StringInfo;
@@ -60,31 +60,36 @@ impl<'mcx> JsonbInSink<'_, 'mcx, '_> {
 }
 
 impl<'mcx> JsonSem<'mcx> for JsonbInSink<'_, 'mcx, '_> {
-    fn object_start(&mut self) -> PgResult<bool> {
+    fn object_start(&mut self, _lex: &JsonLex<'_>) -> PgResult<bool> {
         self.state.begin_object(self.unique_keys)?;
         Ok(true)
     }
 
-    fn object_end(&mut self) -> PgResult<bool> {
+    fn object_end(&mut self, _lex: &JsonLex<'_>) -> PgResult<bool> {
         if let Some(done) = self.state.end_object()? {
             *self.res = Some(done);
         }
         Ok(true)
     }
 
-    fn array_start(&mut self) -> PgResult<bool> {
+    fn array_start(&mut self, _lex: &JsonLex<'_>) -> PgResult<bool> {
         self.state.begin_array(false)?;
         Ok(true)
     }
 
-    fn array_end(&mut self) -> PgResult<bool> {
+    fn array_end(&mut self, _lex: &JsonLex<'_>) -> PgResult<bool> {
         if let Some(done) = self.state.end_array()? {
             *self.res = Some(done);
         }
         Ok(true)
     }
 
-    fn object_field_start(&mut self, fname: &'mcx [u8], _isnull: bool) -> PgResult<bool> {
+    fn object_field_start(
+        &mut self,
+        _lex: &JsonLex<'_>,
+        fname: &'mcx [u8],
+        _isnull: bool,
+    ) -> PgResult<bool> {
         if !check_string_len(fname.len(), self.escontext.as_deref_mut())? {
             return Ok(false);
         }
@@ -92,7 +97,7 @@ impl<'mcx> JsonSem<'mcx> for JsonbInSink<'_, 'mcx, '_> {
         Ok(true)
     }
 
-    fn scalar(&mut self, token: JsonSemToken<'mcx>) -> PgResult<bool> {
+    fn scalar(&mut self, _lex: &JsonLex<'_>, token: JsonSemToken<'mcx>) -> PgResult<bool> {
         let v = match token {
             JsonSemToken::String(s) => {
                 if !check_string_len(s.len(), self.escontext.as_deref_mut())? {

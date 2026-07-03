@@ -258,15 +258,27 @@ dependencies = [
 name = "adt_json"
 version = "0.1.0"
 dependencies = [
+ "adt_date",
+ "adt_datetime",
+ "adt_timestamp",
+ "arrayfuncs",
  "datum",
+ "detoast_seams",
+ "fmgr_seams",
+ "funcapi",
+ "heaptuple",
+ "lsyscache",
  "mbutils",
  "mcx",
  "pqformat",
  "stack_depth",
  "stringinfo",
+ "tupdesc",
+ "typcache_seams",
  "types_core",
  "types_error",
  "types_fmgr",
+ "types_tuple",
  "varlena",
  "wchar",
 ]
@@ -275,11 +287,8 @@ dependencies = [
 name = "adt_jsonb"
 version = "0.1.0"
 dependencies = [
- "adt_date",
- "adt_datetime",
  "adt_json",
  "adt_numeric",
- "adt_timestamp",
  "arrayfuncs",
  "datum",
  "detoast_seams",

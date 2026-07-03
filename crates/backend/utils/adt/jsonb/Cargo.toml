@@ -9,10 +9,7 @@ name = "adt_jsonb"
 path = "src/lib.rs"
 
 [dependencies]
-adt_date = { path = "../adt_date" }
-adt_datetime = { path = "../adt_datetime" }
 adt_json = { path = "../json" }
-adt_timestamp = { path = "../adt_timestamp" }
 fmgr_seams = { path = "../../fmgr/fmgr_seams" }
 funcapi = { path = "../../fmgr/funcapi" }
 heaptuple = { path = "../../../access/common/heaptuple" }
