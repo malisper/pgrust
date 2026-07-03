@@ -110,6 +110,26 @@ pub fn run_protected<R>(
     }
 }
 
+// The registry entry is owning; both Err returns and loud panics between
+// create and free must release it, or the EState's relcache refs survive past
+// AtEOXact_RelationCache and the abort path trips C's refcount assert
+// (relcache.c AtEOXact_cleanup) after ProcArrayEndTransaction already ran.
+pub struct QueryDescOwner(pub QueryDescHandle);
+
+impl QueryDescOwner {
+    pub fn disarm(&mut self) {
+        self.0 = QueryDescHandle::NULL;
+    }
+}
+
+impl Drop for QueryDescOwner {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            execmain_seams::release_query_desc::call(self.0);
+        }
+    }
+}
+
 fn with_source_text<R>(portal: &Portal<'static>, f: impl FnOnce(&str) -> R) -> R {
     let p = portal.borrow();
     f(p.sourceText.as_ref().map(|s| s.as_str()).unwrap_or(""))
@@ -160,10 +180,9 @@ fn ProcessQuery(
         0,
     )?;
 
-    // C leaves an aborted QueryDesc for the portal-context reset; the
-    // registry entry is owning, so an error here must release it explicitly.
-    run_process_query(query_desc, dest, qc)
-        .inspect_err(|_| execmain_seams::release_query_desc::call(query_desc))?;
+    let mut owner = QueryDescOwner(query_desc);
+    run_process_query(query_desc, dest, qc)?;
+    owner.disarm();
 
     FreeQueryDesc(query_desc);
 
@@ -362,14 +381,14 @@ pub fn PortalStart(
                         eflags
                     };
 
-                // Not yet reachable from the portal: release on error or
-                // the registry entry strands.
-                execmain_seams::executor_start::call(query_desc, myeflags)
-                    .inspect_err(|_| execmain_seams::release_query_desc::call(query_desc))?;
+                // Not yet reachable from the portal: owned until it is.
+                let mut qd_owner = QueryDescOwner(query_desc);
+                execmain_seams::executor_start::call(query_desc, myeflags)?;
 
                 let tup_desc = execmain_seams::query_desc_result_tupdesc::call(query_desc);
                 let mut p = portal.borrow_mut();
                 p.queryDesc = query_desc;
+                qd_owner.disarm();
                 p.tupDesc = tup_desc;
                 p.atStart = true;
                 p.atEnd = false; /* allow fetches */
