@@ -7,6 +7,7 @@ fn reset() {
             crate::teardown_connection(conn);
         }
     });
+    crate::sync_connected();
     set_spi_processed(0);
     set_spi_result(0);
     set_spi_tuptable(None);
