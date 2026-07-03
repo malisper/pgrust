@@ -1666,6 +1666,7 @@ fn mk_nestloop_pstmt<'mcx>(
     mcx: ::mcx::Mcx<'mcx>,
     outer_relid: u32,
     inner_relid: u32,
+    jointype: ::types_nodes::JoinType,
 ) -> &'mcx PlannedStmt<'mcx> {
     use ::types_nodes::bitmapset::Bitmapset;
     use ::types_nodes::parsenodes::{RTEKind, RTEPermissionInfo, RangeTblEntry};
@@ -1695,12 +1696,17 @@ fn mk_nestloop_pstmt<'mcx>(
         .unwrap()
     };
 
+    // SEMI/ANTI project only the outer side, as the planner emits.
+    let tl_cols: &[(i32, i16)] = if matches!(
+        jointype,
+        ::types_nodes::JoinType::JOIN_SEMI | ::types_nodes::JoinType::JOIN_ANTI
+    ) {
+        &[(OUTER_VAR, 1), (OUTER_VAR, 2)]
+    } else {
+        &[(OUTER_VAR, 1), (OUTER_VAR, 2), (INNER_VAR, 1), (INNER_VAR, 2)]
+    };
     let mut join_tlist = NodeList::nil();
-    for (i, (varno, attno)) in
-        [(OUTER_VAR, 1i16), (OUTER_VAR, 2), (INNER_VAR, 1), (INNER_VAR, 2)]
-            .into_iter()
-            .enumerate()
-    {
+    for (i, &(varno, attno)) in tl_cols.iter().enumerate() {
         let v = Node::mk_var(mcx, varno, attno, INT4OID, -1, 0, 0).unwrap();
         join_tlist
             .lappend(mcx, Node::mk_target_entry(mcx, v, i as i16 + 1, Some("x"), false).unwrap())
@@ -1733,7 +1739,7 @@ fn mk_nestloop_pstmt<'mcx>(
             righttree: Some(mk_scan(2, 2)),
             ..Default::default()
         },
-        jointype: ::types_nodes::JoinType::JOIN_INNER,
+        jointype,
         inner_unique: false,
         joinqual: NodeList::make1(mcx, joinqual).unwrap(),
     };
@@ -1841,7 +1847,11 @@ fn nestloop_inner_join_over_fake_heaps_end_to_end() {
         vec![3, 30, 3, 300],
         vec![3, 30, 3, 301],
     ];
-    let runs = drain_wide_rows(mk_nestloop_pstmt(mcx, outer, inner), 4, 2);
+    let runs = drain_wide_rows(
+        mk_nestloop_pstmt(mcx, outer, inner, ::types_nodes::JoinType::JOIN_INNER),
+        4,
+        2,
+    );
     assert_eq!(runs, vec![expected.clone(), expected]);
     scanfix::quiesced();
 }
@@ -1856,8 +1866,43 @@ fn nestloop_with_empty_inner_returns_nothing() {
     let inner: u32 = 70023;
     scanfix::register_table_2col(outer, &[&[(1, 10), (2, 20)]]);
     scanfix::register_table_2col(inner, &[]);
-    let runs = drain_wide_rows(mk_nestloop_pstmt(mcx, outer, inner), 4, 1);
+    let runs = drain_wide_rows(
+        mk_nestloop_pstmt(mcx, outer, inner, ::types_nodes::JoinType::JOIN_INNER),
+        4,
+        1,
+    );
     assert_eq!(runs, vec![Vec::<Vec<i32>>::new()]);
+    scanfix::quiesced();
+}
+
+// SEMI: outer 3 matches two inners but is emitted once (single_match advance);
+// ANTI: only the never-matched outer 1 is emitted. Second pass covers rescan.
+#[test]
+fn nestloop_semi_and_anti_join_over_fake_heaps() {
+    install_seams();
+    scanfix::install();
+    let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mcx = leaked_mcx();
+    let outer: u32 = 70024;
+    let inner: u32 = 70025;
+    scanfix::register_table_2col(outer, &[&[(1, 10), (2, 20), (3, 30)]]);
+    scanfix::register_table_2col(inner, &[&[(2, 200), (3, 300), (3, 301), (4, 400)]]);
+
+    let semi = vec![vec![2, 20], vec![3, 30]];
+    let runs = drain_wide_rows(
+        mk_nestloop_pstmt(mcx, outer, inner, ::types_nodes::JoinType::JOIN_SEMI),
+        2,
+        2,
+    );
+    assert_eq!(runs, vec![semi.clone(), semi]);
+
+    let anti = vec![vec![1, 10]];
+    let runs = drain_wide_rows(
+        mk_nestloop_pstmt(mcx, outer, inner, ::types_nodes::JoinType::JOIN_ANTI),
+        2,
+        2,
+    );
+    assert_eq!(runs, vec![anti.clone(), anti]);
     scanfix::quiesced();
 }
 
@@ -1870,6 +1915,7 @@ fn mk_hashjoin_pstmt<'mcx>(
     mcx: ::mcx::Mcx<'mcx>,
     outer_relid: u32,
     inner_relid: u32,
+    jointype: ::types_nodes::JoinType,
 ) -> &'mcx PlannedStmt<'mcx> {
     use ::types_nodes::bitmapset::Bitmapset;
     use ::types_nodes::parsenodes::{RTEKind, RTEPermissionInfo, RangeTblEntry};
@@ -1899,12 +1945,18 @@ fn mk_hashjoin_pstmt<'mcx>(
         .unwrap()
     };
 
+    // SEMI/ANTI project only the outer side, RIGHT_SEMI/RIGHT_ANTI only the
+    // inner side, as the planner emits.
+    let tl_cols: &[(i32, i16)] = match jointype {
+        ::types_nodes::JoinType::JOIN_SEMI | ::types_nodes::JoinType::JOIN_ANTI => {
+            &[(OUTER_VAR, 1), (OUTER_VAR, 2)]
+        }
+        ::types_nodes::JoinType::JOIN_RIGHT_SEMI
+        | ::types_nodes::JoinType::JOIN_RIGHT_ANTI => &[(INNER_VAR, 1), (INNER_VAR, 2)],
+        _ => &[(OUTER_VAR, 1), (OUTER_VAR, 2), (INNER_VAR, 1), (INNER_VAR, 2)],
+    };
     let mut join_tlist = NodeList::nil();
-    for (i, (varno, attno)) in
-        [(OUTER_VAR, 1i16), (OUTER_VAR, 2), (INNER_VAR, 1), (INNER_VAR, 2)]
-            .into_iter()
-            .enumerate()
-    {
+    for (i, &(varno, attno)) in tl_cols.iter().enumerate() {
         let v = Node::mk_var(mcx, varno, attno, INT4OID, -1, 0, 0).unwrap();
         join_tlist
             .lappend(mcx, Node::mk_target_entry(mcx, v, i as i16 + 1, Some("x"), false).unwrap())
@@ -1948,7 +2000,7 @@ fn mk_hashjoin_pstmt<'mcx>(
             righttree: Some(hash_node.seal()),
             ..Default::default()
         },
-        jointype: ::types_nodes::JoinType::JOIN_INNER,
+        jointype,
         inner_unique: false,
         joinqual: NodeList::nil(),
     };
@@ -2014,7 +2066,11 @@ fn hashjoin_inner_join_matches_nestloop_result() {
     let mut expected = vec![vec![2, 20, 2, 200], vec![3, 30, 3, 300], vec![3, 30, 3, 301]];
     expected.sort();
 
-    let runs = drain_wide_rows(mk_hashjoin_pstmt(mcx, outer, inner), 4, 2);
+    let runs = drain_wide_rows(
+        mk_hashjoin_pstmt(mcx, outer, inner, ::types_nodes::JoinType::JOIN_INNER),
+        4,
+        2,
+    );
     for run in &runs {
         let mut got = run.clone();
         got.sort();
@@ -2034,8 +2090,118 @@ fn hashjoin_with_empty_inner_returns_nothing() {
     let inner: u32 = 70033;
     scanfix::register_table_2col(outer, &[&[(1, 10), (2, 20)]]);
     scanfix::register_table_2col(inner, &[]);
-    let runs = drain_wide_rows(mk_hashjoin_pstmt(mcx, outer, inner), 4, 1);
+    let runs = drain_wide_rows(
+        mk_hashjoin_pstmt(mcx, outer, inner, ::types_nodes::JoinType::JOIN_INNER),
+        4,
+        1,
+    );
     assert_eq!(runs, vec![Vec::<Vec<i32>>::new()]);
+    scanfix::quiesced();
+}
+
+// SEMI dedups the doubly-matched outer 3; ANTI emits only the never-matched
+// outer 1. The empty-inner ANTI case must NOT take the empty-hashtable early
+// exit (HJ_FILL_OUTER): every outer row comes back. Outer scan order is
+// preserved by the probe loop, so no sort. Second pass covers rescan.
+#[test]
+fn hashjoin_semi_and_anti_join_over_fake_heaps() {
+    install_seams();
+    scanfix::install();
+    let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mcx = leaked_mcx();
+    let outer: u32 = 70034;
+    let inner: u32 = 70035;
+    scanfix::register_table_2col(outer, &[&[(1, 10), (2, 20), (3, 30)]]);
+    scanfix::register_table_2col(inner, &[&[(2, 200), (3, 300), (3, 301), (4, 400)]]);
+
+    let semi = vec![vec![2, 20], vec![3, 30]];
+    let runs = drain_wide_rows(
+        mk_hashjoin_pstmt(mcx, outer, inner, ::types_nodes::JoinType::JOIN_SEMI),
+        2,
+        2,
+    );
+    assert_eq!(runs, vec![semi.clone(), semi]);
+
+    let anti = vec![vec![1, 10]];
+    let runs = drain_wide_rows(
+        mk_hashjoin_pstmt(mcx, outer, inner, ::types_nodes::JoinType::JOIN_ANTI),
+        2,
+        2,
+    );
+    assert_eq!(runs, vec![anti.clone(), anti]);
+
+    let empty_inner: u32 = 70036;
+    scanfix::register_table_2col(empty_inner, &[]);
+    let all_outer = vec![vec![1, 10], vec![2, 20], vec![3, 30]];
+    let runs = drain_wide_rows(
+        mk_hashjoin_pstmt(mcx, outer, empty_inner, ::types_nodes::JoinType::JOIN_ANTI),
+        2,
+        1,
+    );
+    assert_eq!(runs, vec![all_outer]);
+    let runs = drain_wide_rows(
+        mk_hashjoin_pstmt(mcx, outer, empty_inner, ::types_nodes::JoinType::JOIN_SEMI),
+        2,
+        1,
+    );
+    assert_eq!(runs, vec![Vec::<Vec<i32>>::new()]);
+    scanfix::quiesced();
+}
+
+// RIGHT_SEMI emits each matched inner once even with duplicate-key outers
+// (the already-matched skip); RIGHT_ANTI emits only never-matched inners via
+// the unmatched-inner fill. Empty-outer RIGHT_ANTI emits every inner row.
+// Second pass covers the rescan match-flag reset (RIGHT_SEMI would emit
+// nothing on pass 2 without it).
+#[test]
+fn hashjoin_right_semi_and_right_anti_join_over_fake_heaps() {
+    install_seams();
+    scanfix::install();
+    let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mcx = leaked_mcx();
+    let outer: u32 = 70037;
+    let inner: u32 = 70038;
+    scanfix::register_table_2col(outer, &[&[(2, 20), (3, 30), (3, 31)]]);
+    scanfix::register_table_2col(inner, &[&[(2, 200), (3, 300), (3, 301), (4, 400)]]);
+
+    let sorted = |mut rows: Vec<Vec<i32>>| {
+        rows.sort();
+        rows
+    };
+    let right_semi = vec![vec![2, 200], vec![3, 300], vec![3, 301]];
+    let runs = drain_wide_rows(
+        mk_hashjoin_pstmt(mcx, outer, inner, ::types_nodes::JoinType::JOIN_RIGHT_SEMI),
+        2,
+        2,
+    );
+    assert_eq!(runs.len(), 2);
+    for run in runs {
+        assert_eq!(sorted(run), right_semi);
+    }
+
+    let right_anti = vec![vec![4, 400]];
+    let runs = drain_wide_rows(
+        mk_hashjoin_pstmt(mcx, outer, inner, ::types_nodes::JoinType::JOIN_RIGHT_ANTI),
+        2,
+        2,
+    );
+    assert_eq!(runs.len(), 2);
+    for run in runs {
+        assert_eq!(sorted(run), right_anti);
+    }
+
+    let empty_outer: u32 = 70039;
+    scanfix::register_table_2col(empty_outer, &[]);
+    let all_inner = vec![vec![2, 200], vec![3, 300], vec![3, 301], vec![4, 400]];
+    let runs = drain_wide_rows(
+        mk_hashjoin_pstmt(mcx, empty_outer, inner, ::types_nodes::JoinType::JOIN_RIGHT_ANTI),
+        2,
+        1,
+    );
+    assert_eq!(runs.len(), 1);
+    for run in runs {
+        assert_eq!(sorted(run), all_inner);
+    }
     scanfix::quiesced();
 }
 

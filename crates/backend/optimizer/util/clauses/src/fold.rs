@@ -486,6 +486,35 @@ fn ece_mutator<'mcx>(node: Node<'mcx>, cx: &EceContext<'mcx>) -> PgResult<Option
             }
             Ok(new)
         }
+        NodeTag::T_NullTest => {
+            use types_nodes::primnodes::{NullTest, NullTestType};
+            let nt = node.as_null_test().unwrap();
+            if nt.argisrow {
+                deferred("eval_const_expressions_mutator: row-type NullTest", node.node_tag());
+            }
+            let old_arg = nt.arg.expect("NullTest.arg");
+            let arg = ece_mutator(old_arg, cx)?;
+            let eff = arg.unwrap_or(old_arg);
+            if let Some(carg) = eff.as_const() {
+                let result = match nt.nulltesttype {
+                    NullTestType::IS_NULL => carg.constisnull,
+                    NullTestType::IS_NOT_NULL => !carg.constisnull,
+                };
+                return Ok(Some(make_bool_const(cx.mcx, result, false)?));
+            }
+            match arg {
+                None => Ok(None),
+                Some(arg) => Ok(Some(Node::mk(
+                    cx.mcx,
+                    NullTest {
+                        arg: Some(arg),
+                        nulltesttype: nt.nulltesttype,
+                        argisrow: nt.argisrow,
+                        location: nt.location,
+                    },
+                )?)),
+            }
+        }
         NodeTag::T_Var
         | NodeTag::T_Const
         | NodeTag::T_RangeTblRef

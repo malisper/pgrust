@@ -1035,9 +1035,9 @@ pub fn estimate_num_groups<'mcx>(
     Ok(numdistinct.clamp(1.0, input_rows))
 }
 
-// eqjoinsel (selfuncs.c). C's MCV-x-MCV arm fires only when BOTH sides carry
-// MCV lists; that lane is unported and panics. Otherwise eqjoinsel_inner's
-// else arm: (1-nullfrac1)*(1-nullfrac2) / max(nd1, nd2).
+// eqjoinsel (selfuncs.c). C's MCV-x-MCV arms fire only when BOTH sides carry
+// MCV lists; that lane is unported and panics. eqjoinsel_inner's else arm:
+// (1-nullfrac1)*(1-nullfrac2) / max(nd1, nd2).
 pub fn eqjoinsel<'mcx>(
     run: &mut PlannerRun<'mcx>,
     _operator: u32,
@@ -1051,8 +1051,8 @@ pub fn eqjoinsel<'mcx>(
     let right = *run.root.expr_node(args[1]);
     let vardata1 = examine_variable(run, args[0], left, 0)?;
     let vardata2 = examine_variable(run, args[1], right, 0)?;
-    let (nd1, _isdefault1) = get_variable_numdistinct(run, &vardata1);
-    let (nd2, _isdefault2) = get_variable_numdistinct(run, &vardata2);
+    let (nd1, isdefault1) = get_variable_numdistinct(run, &vardata1);
+    let (nd2, isdefault2) = get_variable_numdistinct(run, &vardata2);
 
     if vardata1.slot(STATISTIC_KIND_MCV, 0).is_some()
         && vardata2.slot(STATISTIC_KIND_MCV, 0).is_some()
@@ -1063,9 +1063,83 @@ pub fn eqjoinsel<'mcx>(
         (1.0 - vardata1.nullfrac()) * (1.0 - vardata2.nullfrac()) / nd1.max(nd2);
     let selec = match sj_jointype {
         JOIN_INNER | types_pathnodes::JOIN_LEFT | types_pathnodes::JOIN_FULL => selec_inner,
-        other => panic!("eqjoinsel (selfuncs.c): jointype {other} (eqjoinsel_semi); M2 semi-join lane"),
+        types_pathnodes::JOIN_SEMI | types_pathnodes::JOIN_ANTI => {
+            let sjinfo = sjinfo.expect("SEMI/ANTI eqjoinsel has an sjinfo");
+            let inner_rel = find_join_input_rel(run, &sjinfo.min_righthand);
+            let inner_rows = run.root.rel(inner_rel).rows;
+            // get_join_variables (selfuncs.c) reversal test.
+            let rel_subset = |rel: Option<RelId>, side: &types_pathnodes::Relids<'mcx>| {
+                rel.is_some_and(|r| {
+                    crate::relnode::relids_is_subset(&run.root.rel(r).relids, side)
+                })
+            };
+            let join_is_reversed = rel_subset(vardata1.rel, &sjinfo.syn_righthand)
+                || rel_subset(vardata2.rel, &sjinfo.syn_lefthand);
+            let semi = if !join_is_reversed {
+                eqjoinsel_semi(run, &vardata1, &vardata2, nd1, nd2, isdefault1, isdefault2, inner_rel)
+            } else {
+                eqjoinsel_semi(run, &vardata2, &vardata1, nd2, nd1, isdefault2, isdefault1, inner_rel)
+            };
+            semi.min(inner_rows * selec_inner)
+        }
+        other => panic!("eqjoinsel (selfuncs.c): jointype {other}"),
     };
     Ok(clamp_probability(selec))
+}
+
+// eqjoinsel_semi (selfuncs.c), non-MCV arm (the MCV-x-MCV arm panics above).
+#[allow(clippy::too_many_arguments)]
+fn eqjoinsel_semi(
+    run: &PlannerRun<'_>,
+    vardata1: &VariableStatData<'_>,
+    vardata2: &VariableStatData<'_>,
+    _nd1: f64,
+    _nd2: f64,
+    isdefault1: bool,
+    isdefault2: bool,
+    inner_rel: RelId,
+) -> f64 {
+    let nd1 = _nd1;
+    let mut nd2 = _nd2;
+    let mut isdefault2 = isdefault2;
+    if let Some(rel2) = vardata2.rel {
+        let rows2 = run.root.rel(rel2).rows;
+        if nd2 >= rows2 {
+            nd2 = rows2;
+            isdefault2 = false;
+        }
+    }
+    let inner_rows = run.root.rel(inner_rel).rows;
+    if nd2 >= inner_rows {
+        nd2 = inner_rows;
+        isdefault2 = false;
+    }
+    let nullfrac1 = vardata1.nullfrac();
+    if !isdefault1 && !isdefault2 {
+        if nd1 <= nd2 || nd2 < 0.0 {
+            1.0 - nullfrac1
+        } else {
+            (nd2 / nd1) * (1.0 - nullfrac1)
+        }
+    } else {
+        0.5 * (1.0 - nullfrac1)
+    }
+}
+
+// find_join_input_rel (selfuncs.c).
+fn find_join_input_rel<'mcx>(
+    run: &PlannerRun<'mcx>,
+    relids: &types_pathnodes::Relids<'mcx>,
+) -> RelId {
+    if let Some(relid) = crate::relnode::relids_singleton_member(relids) {
+        return crate::relnode::find_base_rel(&run.root, relid);
+    }
+    for &jr in run.root.join_rel_list.iter() {
+        if crate::relnode::relids_equal(&run.root.rel(jr).relids, relids) {
+            return jr;
+        }
+    }
+    panic!("could not find join input relation");
 }
 
 // estimate_hash_bucket_stats (selfuncs.c), no-stats/no-MCV lane. The MCV bucket

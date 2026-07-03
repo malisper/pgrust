@@ -118,6 +118,7 @@ pub mod gucs {
     real_guc!(JIT_OPTIMIZE_ABOVE_COST, jit_optimize_above_cost, set_jit_optimize_above_cost, 500000.0);
     real_guc!(JIT_INLINE_ABOVE_COST, jit_inline_above_cost, set_jit_inline_above_cost, 500000.0);
     int_guc!(JOIN_COLLAPSE_LIMIT, join_collapse_limit, set_join_collapse_limit, 8);
+    int_guc!(CONSTRAINT_EXCLUSION, constraint_exclusion, set_constraint_exclusion, guc_tables::consts::CONSTRAINT_EXCLUSION_PARTITION);
     int_guc!(DEBUG_PARALLEL_QUERY, debug_parallel_query, set_debug_parallel_query, guc_tables::consts::DEBUG_PARALLEL_OFF);
     int_guc!(MAX_PARALLEL_WORKERS_PER_GATHER, max_parallel_workers_per_gather, set_max_parallel_workers_per_gather, 2);
     bool_guc!(JIT_ENABLED, jit_enabled, set_jit_enabled, true);
@@ -213,6 +214,10 @@ pub fn init_seams() {
     guc_tables::vars::join_collapse_limit.install(GucVarAccessors {
         get: gucs::join_collapse_limit,
         set: gucs::set_join_collapse_limit,
+    });
+    guc_tables::vars::constraint_exclusion.install(GucVarAccessors {
+        get: gucs::constraint_exclusion,
+        set: gucs::set_constraint_exclusion,
     });
     guc_tables::vars::jit_tuple_deforming.install(GucVarAccessors {
         get: gucs::jit_tuple_deforming,

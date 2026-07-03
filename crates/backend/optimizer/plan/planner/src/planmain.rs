@@ -38,9 +38,14 @@ pub fn query_planner<'mcx>(
                 }
 
                 let target_id = run.rel_reltarget_id(final_rel);
-                let quals: PgVec<'mcx, types_pathnodes::NodeId> = PgVec::new_in(run.mcx);
-                debug_assert!(jointree.quals.is_none());
-                let path = create_group_result_path(run, final_rel, target_id, quals);
+                let mut quals: PgVec<'mcx, types_pathnodes::NodeId> = PgVec::new_in(run.mcx);
+                if let Some(q) = jointree.quals {
+                    let list = q.as_list().expect("preprocessed quals are an implicit-AND list");
+                    for clause in list {
+                        quals.push(run.intern_expr(clause));
+                    }
+                }
+                let path = create_group_result_path(run, final_rel, target_id, quals)?;
                 let pid = run.root.alloc_path(path);
                 add_path(run, final_rel, pid);
 
@@ -78,11 +83,17 @@ pub fn query_planner<'mcx>(
         check_useless_joins(run)?;
     }
 
-    // fix_placeholder_input_needed_levels / reduce_unique_semijoins /
-    // self-join removal / lateral join info / match_foreign_keys_to_quals /
-    // extract_restriction_or_clauses / add_other_rels_to_query / row
-    // identity vars: all no-ops with no placeholders, no semijoins, no
-    // lateral refs, no fkeys and no OR clauses.
+    // reduce_unique_semijoins (analyzejoins.c): decision slice only — a
+    // provably-reducible semijoin is loud (the inner_unique costing lane it
+    // reduces into is also loud).
+    if !run.root.join_info_list.is_empty() {
+        check_unique_semijoins(run)?;
+    }
+
+    // fix_placeholder_input_needed_levels / self-join removal / lateral join
+    // info / match_foreign_keys_to_quals / extract_restriction_or_clauses /
+    // add_other_rels_to_query / row identity vars: all no-ops with no
+    // placeholders, no lateral refs, no fkeys and no OR clauses.
     debug_assert!(run.root.placeholder_list.is_empty() && run.root.fkey_list.is_empty());
 
     let final_rel = crate::allpaths::make_one_rel(run, &joinlist)?;
@@ -148,6 +159,112 @@ fn check_useless_joins(run: &mut PlannerRun<'_>) -> PgResult<()> {
     Ok(())
 }
 
+// reduce_unique_semijoins -> rel_is_distinct_for (analyzejoins.c) as a
+// detection pass: proving the RHS distinct for the semijoin clauses would
+// reduce it to a plain inner join in C.
+fn check_unique_semijoins(run: &mut PlannerRun<'_>) -> PgResult<()> {
+    for i in 0..run.root.join_info_list.len() {
+        let sjinfo = run.root.join_info_list[i].clone();
+        if sjinfo.jointype != types_pathnodes::JOIN_SEMI {
+            continue;
+        }
+        let Some(innerrelid) =
+            crate::relnode::relids_singleton_member(&sjinfo.min_righthand)
+        else {
+            continue;
+        };
+        let innerrel = crate::relnode::find_base_rel(&run.root, innerrelid);
+        {
+            let rel = run.root.rel(innerrel);
+            if rel.reloptkind != types_pathnodes::RELOPT_BASEREL
+                || rel.rtekind != types_pathnodes::RTE_RELATION
+                || !rel
+                    .indexlist
+                    .iter()
+                    .any(|ind| ind.unique && ind.immediate && ind.indpred.is_empty())
+            {
+                continue;
+            }
+        }
+        let mcx = run.mcx;
+        let joinrelids = crate::relnode::relids_union(
+            mcx,
+            &sjinfo.min_lefthand,
+            &sjinfo.min_righthand,
+        );
+        // Eclass-lite keeps join equalities in joininfo, so
+        // generate_join_implied_equalities contributes nothing extra.
+        let mut clause_rids: mcx::PgVec<'_, types_pathnodes::RinfoId> = mcx::PgVec::new_in(mcx);
+        for j in 0..run.root.rel(innerrel).joininfo.len() {
+            let rid = run.root.rel(innerrel).joininfo[j];
+            if crate::relnode::relids_is_subset(
+                &run.root.rinfo(rid).required_relids,
+                &joinrelids,
+            ) {
+                clause_rids.push(rid);
+            }
+        }
+        // rel_is_distinct_for: keep clauses of the form outer op inner with a
+        // mergejoinable operator, then look for a matching unique index.
+        let inner_relids = crate::relnode::relids_copy(mcx, &run.root.rel(innerrel).relids);
+        let inner_relid_u32 = run.root.rel(innerrel).relid;
+        let mut matched_cols: mcx::PgVec<'_, (types_pathnodes::RinfoId, bool)> =
+            mcx::PgVec::new_in(mcx);
+        for &rid in clause_rids.iter() {
+            let ri = run.root.rinfo(rid);
+            if !ri.can_join || ri.mergeopfamilies.is_empty() {
+                continue;
+            }
+            let inner_is_right =
+                crate::relnode::relids_is_subset(&ri.right_relids, &inner_relids);
+            matched_cols.push((rid, inner_is_right));
+        }
+        let n_indexes = run.root.rel(innerrel).indexlist.len();
+        for k in 0..n_indexes {
+            let ind = std::rc::Rc::clone(&run.root.rel(innerrel).indexlist[k]);
+            if !ind.unique || !ind.immediate || !ind.indpred.is_empty() {
+                continue;
+            }
+            let mut all = true;
+            for c in 0..ind.nkeycolumns as usize {
+                let mut m = false;
+                for &(rid, inner_is_right) in matched_cols.iter() {
+                    let ri = run.root.rinfo(rid);
+                    if !ri.mergeopfamilies.iter().any(|&f| f == ind.opfamily[c]) {
+                        continue;
+                    }
+                    let clause = *run.root.expr_node(ri.clause);
+                    let o = clause.as_op_expr().expect("mergeclause is an OpExpr");
+                    let mut iexpr = if inner_is_right { o.args.nth(1) } else { o.args.nth(0) };
+                    while let Some(r) = iexpr.as_relabel_type() {
+                        iexpr = r.arg;
+                    }
+                    if let Some(var) = iexpr.as_var() {
+                        if var.varno as u32 == inner_relid_u32
+                            && var.varattno != 0
+                            && ind.indexkeys[c] == var.varattno as i32
+                        {
+                            m = true;
+                            break;
+                        }
+                    }
+                }
+                if !m {
+                    all = false;
+                    break;
+                }
+            }
+            if all {
+                panic!(
+                    "reduce_unique_semijoins (analyzejoins.c): semijoin RHS provably \
+                     unique; unique-semijoin reduction lane unported"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 // add_base_rels_to_query (initsplan.c): FromExpr items handled by the caller.
 fn add_base_rels_to_query<'mcx>(
     run: &mut PlannerRun<'mcx>,
@@ -163,6 +280,12 @@ fn add_base_rels_to_query<'mcx>(
             let j = item.as_join_expr().unwrap();
             add_base_rels_to_query(run, j.larg)?;
             add_base_rels_to_query(run, j.rarg)?;
+        }
+        NodeTag::T_FromExpr => {
+            let f = item.as_from_expr().unwrap();
+            for child in &f.fromlist {
+                add_base_rels_to_query(run, child)?;
+            }
         }
         other => panic!("add_base_rels_to_query (initsplan.c): {other:?}; M2 join lane"),
     }

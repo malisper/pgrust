@@ -890,10 +890,84 @@ fn ScanQueryForLocks(query: &Query<'static>, acquire: bool) -> PgResult<()> {
         ScanQueryForLocks(ctequery, acquire)?;
     }
     if query.hasSubLinks {
-        panic!(
-            "ScanQueryForLocks (plancache.c): sublink recursion needs the \
-             query_tree_walker lane"
-        );
+        walk_sublink_queries(query, &mut |sub| ScanQueryForLocks(sub, acquire))?;
+    }
+    Ok(())
+}
+
+// The sublink leg C reaches via query_tree_walker: visit every SubLink's
+// sub-Query in the query's expression-bearing fields (rtable/CTE subqueries
+// are handled by the callers' own loops).
+fn walk_sublink_queries<F>(query: &Query<'static>, f: &mut F) -> PgResult<()>
+where
+    F: FnMut(&Query<'static>) -> PgResult<()>,
+{
+    struct W<'a, F> {
+        f: &'a mut F,
+    }
+    impl<F> nodes_core::NodeWalker<'static> for W<'_, F>
+    where
+        F: FnMut(&Query<'static>) -> PgResult<()>,
+    {
+        fn visit(&mut self, node: types_nodes::Node<'static>) -> PgResult<bool> {
+            if let Some(sl) = node.as_sub_link() {
+                (self.f)(sl.subselect.as_query().expect("analyzed sublink sub-select"))?;
+            }
+            nodes_core::expression_tree_walker(node, self)
+        }
+    }
+    fn walk_jt<F>(node: types_nodes::Node<'static>, w: &mut W<'_, F>) -> PgResult<()>
+    where
+        F: FnMut(&Query<'static>) -> PgResult<()>,
+    {
+        use nodes_core::NodeWalker as _;
+        match node.node_tag() {
+            types_nodes::NodeTag::T_RangeTblRef => {}
+            types_nodes::NodeTag::T_FromExpr => {
+                let fe = node.as_from_expr().expect("FromExpr");
+                for child in &fe.fromlist {
+                    walk_jt(child, w)?;
+                }
+                if let Some(q) = fe.quals {
+                    w.visit(q)?;
+                }
+            }
+            types_nodes::NodeTag::T_JoinExpr => {
+                let j = node.as_join_expr().expect("JoinExpr");
+                walk_jt(j.larg, w)?;
+                walk_jt(j.rarg, w)?;
+                if let Some(q) = j.quals {
+                    w.visit(q)?;
+                }
+            }
+            other => panic!("walk_sublink_queries (plancache.c): {other:?} jointree arm"),
+        }
+        Ok(())
+    }
+    use nodes_core::NodeWalker as _;
+    let mut w = W { f };
+    for te in &query.targetList {
+        w.visit(te)?;
+    }
+    for te in &query.returningList {
+        w.visit(te)?;
+    }
+    if let Some(jt) = query.jointree {
+        for item in &jt.fromlist {
+            walk_jt(item, &mut w)?;
+        }
+        if let Some(q) = jt.quals {
+            w.visit(q)?;
+        }
+    }
+    if let Some(h) = query.havingQual {
+        w.visit(h)?;
+    }
+    if let Some(n) = query.limitOffset {
+        w.visit(n)?;
+    }
+    if let Some(n) = query.limitCount {
+        w.visit(n)?;
     }
     Ok(())
 }
@@ -910,10 +984,7 @@ fn extract_query_relation_deps(
         extract_query_relation_deps(ctequery, out)?;
     }
     if query.hasSubLinks {
-        panic!(
-            "extract_query_dependencies (setrefs.c): sublink walk needs the \
-             query_tree_walker lane"
-        );
+        walk_sublink_queries(query, &mut |sub| extract_query_relation_deps(sub, out))?;
     }
     for rte_node in query.rtable.iter() {
         let rte = rte_node.as_range_tbl_entry().expect("rtable holds RangeTblEntry");

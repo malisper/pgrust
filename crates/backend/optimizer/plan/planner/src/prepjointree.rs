@@ -1,7 +1,7 @@
-//! prepjointree.c, simple-view slice: pull_up_subqueries over a one-level
-//! FromExpr of RangeTblRefs. Every non-pullable subquery is a named panic —
-//! the SubqueryScan fallback lane is unported, so a silent keep would plan
-//! nothing.
+//! prepjointree.c, simple-subquery slice: pull_up_subqueries over the full
+//! jointree (FromExpr/JoinExpr) plus reduce_outer_joins with the LEFT->ANTI
+//! reduction. Every non-pullable subquery is a named panic — the SubqueryScan
+//! fallback lane is unported, so a silent keep would plan nothing.
 
 use mcx::Mcx;
 use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
@@ -10,38 +10,108 @@ use types_nodes::parsenodes::{Query, RTEKind, RangeTblEntry};
 use types_nodes::primnodes::{FromExpr, TargetEntry, Var};
 use types_nodes::{Node, NodeTag};
 
+// C recurses and mutates in place; here each pull-up rebuilds the jointree
+// functionally (replace the RangeTblRef, substitute Vars in every qual), so
+// the loop re-scans until no pullable subquery reference remains.
 pub fn pull_up_subqueries<'mcx>(mcx: Mcx<'mcx>, parse: &mut Query<'mcx>) -> PgResult<()> {
-    let jt = parse.jointree.expect("jointree is a FromExpr");
-    let mut fromlist = NodeList::nil();
-    let mut quals = jt.quals;
-    let mut changed = false;
-    for child in &jt.fromlist {
-        match child.node_tag() {
-            NodeTag::T_RangeTblRef => {
-                let rti = child.as_range_tbl_ref().expect("RangeTblRef").rtindex;
-                let rte_node = parse.rtable.nth(rti as usize - 1);
-                let rte = rte_node.as_range_tbl_entry().expect("rtable cell");
-                if rte.rtekind == RTEKind::RTE_SUBQUERY {
-                    assert_simple_subquery(rte)?;
-                    let (replacement, new_quals) =
-                        pull_up_simple_subquery(mcx, parse, rti, rte_node, quals)?;
-                    quals = new_quals;
-                    fromlist.lappend(mcx, replacement)?;
-                    changed = true;
-                    continue;
-                }
-                fromlist.lappend(mcx, child)?;
+    loop {
+        let jt = parse.jointree.expect("jointree is a FromExpr");
+        let mut target: Option<i32> = None;
+        for child in &jt.fromlist {
+            find_pullable_subquery(parse, child, &mut target);
+            if target.is_some() {
+                break;
             }
-            other => panic!(
-                "pull_up_subqueries_recurse (prepjointree.c): {other:?} jointree arm; \
-                 M2 join lane"
-            ),
         }
+        let Some(rti) = target else { return Ok(()) };
+        let rte_node = parse.rtable.nth(rti as usize - 1);
+        let rte = rte_node.as_range_tbl_entry().expect("rtable cell");
+        assert_simple_subquery(rte)?;
+        pull_up_simple_subquery(mcx, parse, rti, rte_node)?;
     }
-    if changed {
-        parse.jointree = Some(mcx::alloc_leak_in(mcx, FromExpr { fromlist, quals })?);
+}
+
+fn find_pullable_subquery<'mcx>(
+    parse: &Query<'mcx>,
+    node: Node<'mcx>,
+    target: &mut Option<i32>,
+) {
+    if target.is_some() {
+        return;
     }
-    Ok(())
+    match node.node_tag() {
+        NodeTag::T_RangeTblRef => {
+            let rti = node.as_range_tbl_ref().expect("RangeTblRef").rtindex;
+            let rte = parse.rtable.nth(rti as usize - 1).as_range_tbl_entry().expect("rtable cell");
+            if rte.rtekind == RTEKind::RTE_SUBQUERY {
+                *target = Some(rti);
+            }
+        }
+        NodeTag::T_FromExpr => {
+            let f = node.as_from_expr().unwrap();
+            for child in &f.fromlist {
+                find_pullable_subquery(parse, child, target);
+            }
+        }
+        NodeTag::T_JoinExpr => {
+            let j = node.as_join_expr().unwrap();
+            find_pullable_subquery(parse, j.larg, target);
+            find_pullable_subquery(parse, j.rarg, target);
+        }
+        other => panic!(
+            "pull_up_subqueries_recurse (prepjointree.c): {other:?} jointree arm; \
+             M2 join lane"
+        ),
+    }
+}
+
+// The CombineRangeTables perminfoindex fixup target: a struct-level copy of
+// the RTE (C's copyObject; sub-nodes stay shared) so the sublink's stored
+// sub-Query — shared with the plancache — is never scribbled on. A replan of
+// a cached query would otherwise re-offset the same RTE.
+pub(crate) fn rte_copy_with_perminfoindex<'mcx>(
+    mcx: Mcx<'mcx>,
+    rte: &RangeTblEntry<'mcx>,
+    perminfoindex: u32,
+) -> PgResult<Node<'mcx>> {
+    Node::mk(
+        mcx,
+        RangeTblEntry {
+            alias: rte.alias,
+            eref: rte.eref,
+            rtekind: rte.rtekind,
+            relid: rte.relid,
+            inh: rte.inh,
+            relkind: rte.relkind,
+            rellockmode: rte.rellockmode,
+            perminfoindex,
+            tablesample: rte.tablesample,
+            subquery: rte.subquery,
+            security_barrier: rte.security_barrier,
+            jointype: rte.jointype,
+            joinmergedcols: rte.joinmergedcols,
+            joinaliasvars: rte.joinaliasvars.clone_in(mcx)?,
+            joinleftcols: rte.joinleftcols.clone_in(mcx)?,
+            joinrightcols: rte.joinrightcols.clone_in(mcx)?,
+            join_using_alias: rte.join_using_alias,
+            functions: rte.functions.clone_in(mcx)?,
+            funcordinality: rte.funcordinality,
+            tablefunc: rte.tablefunc,
+            values_lists: rte.values_lists.clone_in(mcx)?,
+            ctename: rte.ctename,
+            ctelevelsup: rte.ctelevelsup,
+            self_reference: rte.self_reference,
+            coltypes: rte.coltypes.clone_in(mcx)?,
+            coltypmods: rte.coltypmods.clone_in(mcx)?,
+            colcollations: rte.colcollations.clone_in(mcx)?,
+            enrname: rte.enrname,
+            enrtuples: rte.enrtuples,
+            groupexprs: rte.groupexprs.clone_in(mcx)?,
+            lateral: rte.lateral,
+            inFromCl: rte.inFromCl,
+            securityQuals: rte.securityQuals.clone_in(mcx)?,
+        },
+    )
 }
 
 // is_simple_subquery (prepjointree.c) with every false-return a named panic:
@@ -103,8 +173,7 @@ fn pull_up_simple_subquery<'mcx>(
     parse: &mut Query<'mcx>,
     varno: i32,
     rte_node: Node<'mcx>,
-    outer_quals: Option<Node<'mcx>>,
-) -> PgResult<(Node<'mcx>, Option<Node<'mcx>>)> {
+) -> PgResult<()> {
     let rte = rte_node.as_range_tbl_entry().expect("rtable cell");
     let sub = rte.subquery.expect("RTE_SUBQUERY has a subquery");
 
@@ -158,23 +227,46 @@ fn pull_up_simple_subquery<'mcx>(
     })? {
         parse.targetList = l;
     }
-    let new_outer_quals = replace_opt(mcx, outer_quals, varno, &off_tlist)?;
     parse.havingQual = replace_opt(mcx, parse.havingQual, varno, &off_tlist)?;
     debug_assert!(parse.returningList.is_nil());
+
+    // pullup_replace_vars over the jointree: substitute Vars in every qual
+    // and splice the offset sub-jointree in place of the RangeTblRef.
+    let replacement = if off_quals.is_none() && off_fromlist.len() == 1 {
+        off_fromlist.nth(0)
+    } else {
+        Node::mk(mcx, FromExpr { fromlist: off_fromlist, quals: off_quals })?
+    };
+    let jt = parse.jointree.expect("jointree is a FromExpr");
+    let mut new_fromlist = NodeList::nil();
+    for child in &jt.fromlist {
+        new_fromlist.lappend(
+            mcx,
+            splice_and_replace(mcx, child, varno, &off_tlist, replacement)?,
+        )?;
+    }
+    let new_quals = replace_opt(mcx, jt.quals, varno, &off_tlist)?;
+    parse.jointree = Some(mcx::alloc_leak_in(
+        mcx,
+        FromExpr { fromlist: new_fromlist, quals: new_quals },
+    )?);
 
     // CombineRangeTables (rewriteManip.c): append rtable + rteperminfos,
     // renumbering the appended RTEs' perminfoindex.
     let perm_offset = parse.rteperminfos.len() as u32;
     for srte_node in &sub.rtable {
         let srte = srte_node.as_range_tbl_entry().expect("rtable cell");
-        if srte.perminfoindex > 0 && perm_offset > 0 {
-            // SAFETY: pre-seal tree owned by this planner invocation; the
-            // shared `srte` borrow is not read past this write.
-            unsafe {
-                srte_node.with_mut::<RangeTblEntry, _>(|r| r.perminfoindex += perm_offset)
-            };
-        }
-        parse.rtable.lappend(mcx, srte_node)?;
+        let new_index = if srte.perminfoindex > 0 {
+            srte.perminfoindex + perm_offset
+        } else {
+            srte.perminfoindex
+        };
+        // Copy, don't scribble: the subquery may be shared with a cached
+        // parse tree (sublink pull-up) and a replan re-runs this offset.
+        parse.rtable.lappend(
+            mcx,
+            rte_copy_with_perminfoindex(mcx, srte, new_index)?,
+        )?;
     }
     for p in &sub.rteperminfos {
         parse.rteperminfos.lappend(mcx, p)?;
@@ -182,13 +274,61 @@ fn pull_up_simple_subquery<'mcx>(
 
     // SAFETY: as above — exclusive pre-seal tree fixup.
     unsafe { rte_node.with_mut::<RangeTblEntry, _>(|r| r.subquery = None) };
+    Ok(())
+}
 
-    let replacement = if off_quals.is_none() && off_fromlist.len() == 1 {
-        off_fromlist.nth(0)
-    } else {
-        Node::mk(mcx, FromExpr { fromlist: off_fromlist, quals: off_quals })?
-    };
-    Ok((replacement, new_outer_quals))
+// The jointree leg of pullup_replace_vars: swap the pulled-up RangeTblRef
+// for its replacement and rewrite the quals of every JoinExpr/FromExpr.
+fn splice_and_replace<'mcx>(
+    mcx: Mcx<'mcx>,
+    node: Node<'mcx>,
+    varno: i32,
+    tlist: &NodeList<'mcx>,
+    replacement: Node<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    match node.node_tag() {
+        NodeTag::T_RangeTblRef => {
+            if node.as_range_tbl_ref().expect("RangeTblRef").rtindex == varno {
+                Ok(replacement)
+            } else {
+                Ok(node)
+            }
+        }
+        NodeTag::T_FromExpr => {
+            let f = node.as_from_expr().unwrap();
+            let mut fromlist = NodeList::nil();
+            for child in &f.fromlist {
+                fromlist.lappend(
+                    mcx,
+                    splice_and_replace(mcx, child, varno, tlist, replacement)?,
+                )?;
+            }
+            Node::mk(
+                mcx,
+                FromExpr { fromlist, quals: replace_opt(mcx, f.quals, varno, tlist)? },
+            )
+        }
+        NodeTag::T_JoinExpr => {
+            let j = node.as_join_expr().unwrap();
+            let larg = splice_and_replace(mcx, j.larg, varno, tlist, replacement)?;
+            let rarg = splice_and_replace(mcx, j.rarg, varno, tlist, replacement)?;
+            Node::mk(
+                mcx,
+                types_nodes::JoinExpr {
+                    jointype: j.jointype,
+                    isNatural: j.isNatural,
+                    larg,
+                    rarg,
+                    usingClause: j.usingClause.clone_in(mcx)?,
+                    join_using_alias: j.join_using_alias,
+                    quals: replace_opt(mcx, j.quals, varno, tlist)?,
+                    alias: j.alias,
+                    rtindex: j.rtindex,
+                },
+            )
+        }
+        other => panic!("pullup_replace_vars (prepjointree.c): {other:?} jointree arm"),
+    }
 }
 
 // OffsetVarNodes (rewriteManip.c), functional: changed nodes are rebuilt.
@@ -264,6 +404,12 @@ fn replace_var_expr<'mcx>(
             }
             if v.varno != varno {
                 return Ok(None);
+            }
+            if !v.varnullingrels.is_empty() {
+                panic!(
+                    "ReplaceVarFromTargetList (rewriteManip.c): nulled Var over a \
+                     pulled-up subquery; outer-join pullup lane unported"
+                );
             }
             if v.varattno == 0 {
                 panic!(
@@ -341,9 +487,8 @@ fn copy_expr<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>) -> PgResult<Node<'mcx>> {
     }
 }
 
-// reduce_outer_joins (prepjointree.c), LEFT/RIGHT slice. FULL never parses;
-// SEMI/ANTI never arise (pull_up_sublinks leaves sublinks as initplans); the
-// LEFT->ANTI reduction target is loud (semi/anti executor lane unported).
+// reduce_outer_joins (prepjointree.c), INNER/LEFT/RIGHT/SEMI/ANTI slice
+// (FULL never parses), including the LEFT -> ANTI reduction.
 struct RojPass1<'mcx> {
     relids: types_nodes::Bitmapset<'mcx>,
     contains_outer: bool,
@@ -457,9 +602,10 @@ fn reduce_outer_joins_pass2<'mcx>(
                 jointype = types_nodes::JoinType::JOIN_INNER;
             }
         }
+        types_nodes::JoinType::JOIN_SEMI | types_nodes::JoinType::JOIN_ANTI => {}
         other => panic!(
             "reduce_outer_joins_pass2 (prepjointree.c): {other:?}; join-outer lane covers \
-             LEFT/RIGHT only"
+             INNER/LEFT/RIGHT/SEMI/ANTI"
         ),
     }
 
@@ -475,10 +621,7 @@ fn reduce_outer_joins_pass2<'mcx>(
         let nonnullable_vars = clauses::find_nonnullable_vars(mcx, j.quals)?;
         let overlap = clauses::mbms_overlap_sets(mcx, &nonnullable_vars, forced_null_vars)?;
         if overlap.overlap(&state1.sub_states[right_ix].relids) {
-            panic!(
-                "reduce_outer_joins_pass2 (prepjointree.c): LEFT -> ANTI reduction; \
-                 semi/anti-join lane unported"
-            );
+            jointype = types_nodes::JoinType::JOIN_ANTI;
         }
     }
 
@@ -502,13 +645,17 @@ fn reduce_outer_joins_pass2<'mcx>(
         // outer side and local to the nullable side (C's comment block).
         let mut local_nonnullable = clauses::find_nonnullable_rels(mcx, j.quals)?;
         let mut local_forced = clauses::find_forced_null_vars(mcx, j.quals)?;
-        if jointype == types_nodes::JoinType::JOIN_INNER {
+        let inner_or_semi = matches!(
+            jointype,
+            types_nodes::JoinType::JOIN_INNER | types_nodes::JoinType::JOIN_SEMI
+        );
+        if inner_or_semi {
             local_nonnullable.add_members(mcx, nonnullable_rels)?;
             clauses::mbms_add_members(mcx, &mut local_forced, forced_null_vars)?;
         }
 
         if left_state.contains_outer {
-            let (nn, fv) = if jointype == types_nodes::JoinType::JOIN_INNER {
+            let (nn, fv) = if inner_or_semi {
                 (&local_nonnullable, &local_forced)
             } else {
                 (nonnullable_rels, forced_null_vars)

@@ -67,6 +67,8 @@ pub enum Step {
     BoolOrStep { anynull: NonNull<bool>, jumpdone: u32, out: OutRef },
     BoolOrStepLast { anynull: NonNull<bool>, out: OutRef },
     BoolNotStep { out: OutRef },
+    NullTestIsNull { out: OutRef },
+    NullTestIsNotNull { out: OutRef },
     // Agg pointers resolve at build into once-allocated never-moved AggState arrays.
     AggrefEval { value: NonNull<Datum>, null: NonNull<bool>, out: OutRef },
     // C EEOP_AGG_STRICT_INPUT_CHECK_ARGS(_1): args = fcinfo args[1..].

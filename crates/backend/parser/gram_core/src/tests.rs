@@ -638,3 +638,26 @@ fn join_using_is_loud() {
 fn natural_join_is_loud() {
     let _ = parse("SELECT * FROM a NATURAL JOIN b;");
 }
+
+#[test]
+fn in_subquery_shapes() {
+    use types_nodes::{BoolExprType, SubLinkType};
+
+    let list = parse("SELECT * FROM t1 WHERE pk IN (SELECT fk FROM t2);");
+    let sel = select_of(only_stmt(&list));
+    let sl = sel.whereClause.expect("WHERE").as_sub_link().expect("SubLink");
+    assert_eq!(sl.subLinkType, SubLinkType::ANY_SUBLINK);
+    assert_eq!(sl.subLinkId, 0);
+    assert!(sl.operName.is_nil());
+    assert!(sl.testexpr.expect("testexpr").as_column_ref().is_some());
+    assert!(sl.subselect.as_select_stmt().is_some());
+
+    let list = parse("SELECT * FROM t1 WHERE pk NOT IN (SELECT fk FROM t2);");
+    let sel = select_of(only_stmt(&list));
+    let b = sel.whereClause.expect("WHERE").as_bool_expr().expect("NOT");
+    assert_eq!(b.boolop, BoolExprType::NOT_EXPR);
+    let sl = b.args.nth(0).as_sub_link().expect("SubLink");
+    assert_eq!(sl.subLinkType, SubLinkType::ANY_SUBLINK);
+    assert!(sl.operName.is_nil());
+    assert_eq!(b.location, sl.location);
+}

@@ -399,14 +399,24 @@ fn select_cte_passes_rewrite_unchanged() {
 }
 
 #[test]
-#[should_panic(expected = "sublink descent needs the walker's T_SubLink arm")]
-fn sublinks_defer_loud() {
+fn sublink_subselect_gets_rir_descent() {
     install();
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
     let mut query = select1(mcx);
+    let sublink = types_nodes::primnodes::SubLink {
+        subLinkType: types_nodes::primnodes::SubLinkType::EXPR_SUBLINK,
+        subLinkId: 0,
+        testexpr: None,
+        operName: NodeList::nil(),
+        subselect: Node::mk(mcx, select1(mcx)).unwrap(),
+        location: -1,
+    };
+    let te = Node::mk_target_entry(mcx, Node::mk(mcx, sublink).unwrap(), 1, None, false).unwrap();
+    query.targetList = NodeList::make1(mcx, te).unwrap();
     query.hasSubLinks = true;
-    let _ = QueryRewrite(mcx, query);
+    let out = QueryRewrite(mcx, query).unwrap();
+    assert_eq!(out.len(), 1);
 }
 
 fn view_query<'mcx>(mcx: Mcx<'mcx>, view_oid: Oid) -> Query<'mcx> {

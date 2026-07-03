@@ -251,6 +251,7 @@ fn assign_collations_walker<'mcx>(
         | NodeTag::T_MinMaxExpr
         | NodeTag::T_Aggref
         | NodeTag::T_WindowFunc
+        | NodeTag::T_NullTest
         | NodeTag::T_SubLink) => {
             match tag {
                 // C: never recurse into the CASE test expression — it was
@@ -336,6 +337,11 @@ fn assign_collations_walker<'mcx>(
                     }
                     assign_collations_walker(sl.subselect, &mut loccontext)?;
                 }
+                NodeTag::T_NullTest => {
+                    if let Some(arg) = node.as_null_test().unwrap().arg {
+                        assign_collations_walker(arg, &mut loccontext)?;
+                    }
+                }
                 _ => unreachable!(),
             }
 
@@ -384,8 +390,10 @@ fn assign_collations_walker<'mcx>(
                     NodeTag::T_CoerceViaIO => node
                         .with_mut::<types_nodes::CoerceViaIO, _>(|c| c.resultcollid = set_coll)
                         .unwrap(),
-                    // exprSetCollation(BoolExpr) is assert-only in C.
-                    NodeTag::T_BoolExpr => debug_assert!(!OidIsValid(set_coll)),
+                    // exprSetCollation(BoolExpr/NullTest) is assert-only in C.
+                    NodeTag::T_BoolExpr | NodeTag::T_NullTest => {
+                        debug_assert!(!OidIsValid(set_coll))
+                    }
                     NodeTag::T_CaseExpr => node
                         .with_mut::<types_nodes::primnodes::CaseExpr, _>(|c| {
                             c.casecollid = set_coll

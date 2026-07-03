@@ -1,5 +1,6 @@
-//! initsplan.c + restrictinfo.c slice: single-baserel deconstruct_jointree,
-//! pushed-down distribute_qual_to_rels, make_restrictinfo for non-OR clauses.
+//! initsplan.c + restrictinfo.c slice: deconstruct_jointree over INNER/LEFT/
+//! SEMI/ANTI joins, distribute_qual_to_rels, make_restrictinfo for non-OR
+//! clauses.
 
 use mcx::PgVec;
 use types_error::PgResult;
@@ -10,7 +11,7 @@ use types_pathnodes::{
 };
 
 use crate::relnode::{
-    find_base_rel, relids_add_member, relids_copy, relids_del_member, relids_difference,
+    find_base_rel, relids_add_member, relids_copy, relids_difference,
     relids_intersect, relids_is_empty, relids_is_member, relids_is_subset, relids_members,
     relids_num_members, relids_overlap, relids_singleton, relids_singleton_member, relids_union,
 };
@@ -132,7 +133,8 @@ enum JtItem<'mcx> {
         qualscope: types_pathnodes::Relids<'mcx>,
         jdomain: usize,
     },
-    Left {
+    Sj {
+        jointype: types_pathnodes::JoinType,
         quals: Option<Node<'mcx>>,
         qualscope: types_pathnodes::Relids<'mcx>,
         jdomain: usize,
@@ -143,8 +145,8 @@ enum JtItem<'mcx> {
     },
 }
 
-// deconstruct_jointree (initsplan.c) over RangeTblRefs, INNER and LEFT
-// JoinExprs (RIGHT was flipped by reduce_outer_joins; FULL/SEMI/ANTI are loud
+// deconstruct_jointree (initsplan.c) over RangeTblRefs and INNER/LEFT/SEMI/
+// ANTI JoinExprs (RIGHT was flipped by reduce_outer_joins; FULL is loud
 // upstream). C's three phases map to: recurse (relids/joinlist/JtItems in
 // post-order), distribute each item's quals, then distribute the postponed
 // non-degenerate LEFT-join quals (deconstruct_distribute_oj_quals).
@@ -182,7 +184,8 @@ pub fn deconstruct_jointree<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResult<PgVec<
                     run, *quals, qualscope, &None, &None, None, *jdomain, None,
                 )?;
             }
-            JtItem::Left {
+            JtItem::Sj {
+                jointype,
                 quals,
                 qualscope,
                 jdomain,
@@ -196,21 +199,33 @@ pub fn deconstruct_jointree<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResult<PgVec<
                     left_rels,
                     right_rels,
                     inner_join_rels,
+                    *jointype,
                     *rtindex,
                     *quals,
                 )?;
-                let ojscope = relids_union(mcx, &sjinfo.min_lefthand, &sjinfo.min_righthand);
+                // Semijoins build an sjinfo but distribute their quals with
+                // ojscope = NULL and no nonnullable side (C's hybrid case).
+                let ojscope = if *jointype == types_pathnodes::JOIN_SEMI {
+                    None
+                } else {
+                    relids_union(mcx, &sjinfo.min_lefthand, &sjinfo.min_righthand)
+                };
+                let nonnullable = if *jointype == types_pathnodes::JOIN_SEMI {
+                    &None
+                } else {
+                    left_rels
+                };
                 let mut postponed: PgVec<'mcx, Node<'mcx>> = PgVec::new_in(mcx);
                 // Non-degenerate quals of a strict-LHS LEFT join are
                 // postponed (commute_below_l/r additions are dead: multi-OJ
                 // commute is loud in make_outerjoininfo).
-                let postpone = sjinfo.lhs_strict;
+                let postpone = *jointype == JOIN_LEFT && sjinfo.lhs_strict;
                 distribute_quals_to_rels(
                     run,
                     *quals,
                     qualscope,
                     &ojscope,
-                    left_rels,
+                    nonnullable,
                     Some(&sjinfo),
                     *jdomain,
                     if postpone { Some(&mut postponed) } else { None },
@@ -303,6 +318,30 @@ fn deconstruct_recurse<'mcx>(
             joinlist.push(JoinlistNode::Rel(varno));
             Ok((scope, None, joinlist))
         }
+        NodeTag::T_FromExpr => {
+            let f = item.as_from_expr().unwrap();
+            let mut qualscope: types_pathnodes::Relids<'mcx> = None;
+            let mut inner_join_rels: types_pathnodes::Relids<'mcx> = None;
+            let mut joinlist = PgVec::new_in(mcx);
+            for child in &f.fromlist {
+                let (c_relids, c_inner, c_list) =
+                    deconstruct_recurse(run, child, parent_domain, items)?;
+                qualscope = relids_union(mcx, &qualscope, &c_relids);
+                inner_join_rels = c_inner;
+                for jl in c_list {
+                    joinlist.push(jl);
+                }
+            }
+            if f.fromlist.len() > 1 {
+                inner_join_rels = relids_copy(mcx, &qualscope);
+            }
+            items.push(JtItem::Plain {
+                quals: f.quals,
+                qualscope: relids_copy(mcx, &qualscope),
+                jdomain: parent_domain,
+            });
+            Ok((qualscope, inner_join_rels, joinlist))
+        }
         NodeTag::T_JoinExpr => {
             let j = item.as_join_expr().unwrap();
             match j.jointype {
@@ -324,7 +363,7 @@ fn deconstruct_recurse<'mcx>(
                     }
                     Ok((relids_copy(mcx, &scope), scope, joinlist))
                 }
-                types_nodes::JoinType::JOIN_LEFT => {
+                types_nodes::JoinType::JOIN_LEFT | types_nodes::JoinType::JOIN_ANTI => {
                     let child_domain = run.root.join_domains.len();
                     run.root
                         .join_domains
@@ -341,18 +380,29 @@ fn deconstruct_recurse<'mcx>(
                         &child_relids,
                     );
                     let mut qualscope = relids_union(mcx, &l_relids, &r_relids);
-                    assert!(j.rtindex != 0, "LEFT JoinExpr lacks an rtindex");
-                    run.root.join_domains[parent_domain].jd_relids = relids_add_member(
-                        mcx,
-                        &run.root.join_domains[parent_domain].jd_relids,
-                        j.rtindex as u32,
-                    );
-                    qualscope = relids_add_member(mcx, &qualscope, j.rtindex as u32);
-                    run.root.outer_join_rels =
-                        relids_add_member(mcx, &run.root.outer_join_rels, j.rtindex as u32);
-                    mark_rels_nulled_by_join(run, j.rtindex, &r_relids);
+                    // An ANTI join derived from a SEMI (pull_up_sublinks)
+                    // lacks an rtindex; a LEFT or reduced-LEFT ANTI has one.
+                    if j.jointype == types_nodes::JoinType::JOIN_LEFT {
+                        assert!(j.rtindex != 0, "LEFT JoinExpr lacks an rtindex");
+                    }
+                    if j.rtindex != 0 {
+                        run.root.join_domains[parent_domain].jd_relids = relids_add_member(
+                            mcx,
+                            &run.root.join_domains[parent_domain].jd_relids,
+                            j.rtindex as u32,
+                        );
+                        qualscope = relids_add_member(mcx, &qualscope, j.rtindex as u32);
+                        run.root.outer_join_rels =
+                            relids_add_member(mcx, &run.root.outer_join_rels, j.rtindex as u32);
+                        mark_rels_nulled_by_join(run, j.rtindex, &r_relids);
+                    }
                     let inner_join_rels = relids_union(mcx, &l_inner, &r_inner);
-                    items.push(JtItem::Left {
+                    items.push(JtItem::Sj {
+                        jointype: if j.jointype == types_nodes::JoinType::JOIN_LEFT {
+                            JOIN_LEFT
+                        } else {
+                            JOIN_ANTI
+                        },
                         quals: j.quals,
                         qualscope: relids_copy(mcx, &qualscope),
                         jdomain: parent_domain,
@@ -367,9 +417,33 @@ fn deconstruct_recurse<'mcx>(
                     }
                     Ok((qualscope, inner_join_rels, joinlist))
                 }
+                types_nodes::JoinType::JOIN_SEMI => {
+                    let (l_relids, l_inner, l_list) =
+                        deconstruct_recurse(run, j.larg, parent_domain, items)?;
+                    let (r_relids, r_inner, r_list) =
+                        deconstruct_recurse(run, j.rarg, parent_domain, items)?;
+                    let qualscope = relids_union(mcx, &l_relids, &r_relids);
+                    debug_assert!(j.rtindex == 0);
+                    let inner_join_rels = relids_union(mcx, &l_inner, &r_inner);
+                    items.push(JtItem::Sj {
+                        jointype: types_pathnodes::JOIN_SEMI,
+                        quals: j.quals,
+                        qualscope: relids_copy(mcx, &qualscope),
+                        jdomain: parent_domain,
+                        left_rels: relids_copy(mcx, &l_relids),
+                        right_rels: relids_copy(mcx, &r_relids),
+                        inner_join_rels: relids_copy(mcx, &inner_join_rels),
+                        rtindex: 0,
+                    });
+                    let mut joinlist = l_list;
+                    for jl in r_list {
+                        joinlist.push(jl);
+                    }
+                    Ok((qualscope, inner_join_rels, joinlist))
+                }
                 other => panic!(
                     "deconstruct_recurse (initsplan.c): {other:?} arm; join-outer lane covers \
-                     INNER/LEFT (RIGHT flips in reduce_outer_joins)"
+                     INNER/LEFT/SEMI/ANTI (RIGHT flips in reduce_outer_joins)"
                 ),
             }
         }
@@ -397,14 +471,15 @@ fn mark_rels_nulled_by_join<'mcx>(
     }
 }
 
-// make_outerjoininfo (initsplan.c), LEFT arm. compute_semijoin_info is the
-// identity for non-SEMI joins; the identity-3 commute legs are loud (multi-OJ
-// clone machinery is the join-outer follow-on).
+// make_outerjoininfo (initsplan.c), LEFT/SEMI/ANTI arms (FULL is loud
+// upstream); the identity-3 commute legs are loud (multi-OJ clone machinery
+// is the join-outer follow-on).
 fn make_outerjoininfo<'mcx>(
     run: &mut PlannerRun<'mcx>,
     left_rels: &types_pathnodes::Relids<'mcx>,
     right_rels: &types_pathnodes::Relids<'mcx>,
     inner_join_rels: &types_pathnodes::Relids<'mcx>,
+    jointype: types_pathnodes::JoinType,
     ojrelid: i32,
     clause: Option<Node<'mcx>>,
 ) -> PgResult<SpecialJoinInfo<'mcx>> {
@@ -413,6 +488,25 @@ fn make_outerjoininfo<'mcx>(
         run.parse().rowMarks.is_nil(),
         "make_outerjoininfo (initsplan.c): FOR UPDATE/SHARE vs nullable side check unported"
     );
+
+    let mut sjinfo = SpecialJoinInfo {
+        min_lefthand: None,
+        min_righthand: None,
+        syn_lefthand: relids_copy(mcx, left_rels),
+        syn_righthand: relids_copy(mcx, right_rels),
+        jointype,
+        ojrelid: ojrelid as u32,
+        commute_above_l: None,
+        commute_above_r: None,
+        commute_below_l: None,
+        commute_below_r: None,
+        lhs_strict: false,
+        semi_can_btree: false,
+        semi_can_hash: false,
+        semi_operators: PgVec::new_in(mcx),
+        semi_rhs_exprs: PgVec::new_in(mcx),
+    };
+    compute_semijoin_info(run, &mut sjinfo, clause)?;
 
     let clause_relids = match clause {
         Some(c) => pull_varnos_relids(run, c)?,
@@ -432,24 +526,28 @@ fn make_outerjoininfo<'mcx>(
         right_rels,
     );
 
+    let is_semi_or_anti =
+        matches!(jointype, types_pathnodes::JOIN_SEMI | JOIN_ANTI);
     for i in 0..run.root.join_info_list.len() {
         let other = run.root.join_info_list[i].clone();
         assert!(
-            other.jointype == JOIN_LEFT,
+            matches!(other.jointype, JOIN_LEFT | types_pathnodes::JOIN_SEMI | JOIN_ANTI),
             "make_outerjoininfo (initsplan.c): lower {} join ordering arm; join-outer lane",
             other.jointype
         );
         debug_assert!(run.root.placeholder_list.is_empty());
         if relids_overlap(left_rels, &other.syn_righthand) {
             if relids_overlap(&clause_relids, &other.syn_righthand)
-                && !relids_overlap(&strict_relids, &other.min_righthand)
+                && (is_semi_or_anti
+                    || !relids_overlap(&strict_relids, &other.min_righthand))
             {
                 min_lefthand = relids_union(mcx, &min_lefthand, &other.syn_lefthand);
                 min_lefthand = relids_union(mcx, &min_lefthand, &other.syn_righthand);
                 if other.ojrelid != 0 {
                     min_lefthand = relids_add_member(mcx, &min_lefthand, other.ojrelid);
                 }
-            } else if other.jointype == JOIN_LEFT
+            } else if jointype == JOIN_LEFT
+                && other.jointype == JOIN_LEFT
                 && relids_overlap(&strict_relids, &other.min_righthand)
                 && !relids_overlap(&clause_relids, &other.syn_lefthand)
             {
@@ -460,8 +558,12 @@ fn make_outerjoininfo<'mcx>(
             }
         }
         if relids_overlap(right_rels, &other.syn_righthand) {
+            let other_semi_or_anti =
+                matches!(other.jointype, types_pathnodes::JOIN_SEMI | JOIN_ANTI);
             if relids_overlap(&clause_relids, &other.syn_righthand)
                 || !relids_overlap(&clause_relids, &other.min_lefthand)
+                || is_semi_or_anti
+                || other_semi_or_anti
                 || !other.lhs_strict
             {
                 min_righthand = relids_union(mcx, &min_righthand, &other.syn_lefthand);
@@ -488,33 +590,133 @@ fn make_outerjoininfo<'mcx>(
     debug_assert!(!relids_is_empty(&min_righthand));
     debug_assert!(!relids_overlap(&min_lefthand, &min_righthand));
 
-    Ok(SpecialJoinInfo {
-        min_lefthand,
-        min_righthand,
-        syn_lefthand: relids_copy(mcx, left_rels),
-        syn_righthand: relids_copy(mcx, right_rels),
-        jointype: JOIN_LEFT,
-        ojrelid: ojrelid as u32,
-        commute_above_l: None,
-        commute_above_r: None,
-        commute_below_l: None,
-        commute_below_r: None,
-        lhs_strict,
-        semi_can_btree: false,
-        semi_can_hash: false,
-        semi_operators: PgVec::new_in(mcx),
-        semi_rhs_exprs: PgVec::new_in(mcx),
-    })
+    sjinfo.min_lefthand = min_lefthand;
+    sjinfo.min_righthand = min_righthand;
+    sjinfo.lhs_strict = lhs_strict;
+    Ok(sjinfo)
 }
 
-// check_redundant_nullability_qual (initsplan.c): an IS NULL redundant with a
-// lower antijoin; antijoins never form on this lane.
+// compute_semijoin_info (initsplan.c).
+fn compute_semijoin_info<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    sjinfo: &mut SpecialJoinInfo<'mcx>,
+    clause: Option<Node<'mcx>>,
+) -> PgResult<()> {
+    let mcx = run.mcx;
+    if sjinfo.jointype != types_pathnodes::JOIN_SEMI {
+        return Ok(());
+    }
+    let mut semi_operators: PgVec<'mcx, types_core::Oid> = PgVec::new_in(mcx);
+    let mut semi_rhs_exprs: PgVec<'mcx, types_pathnodes::NodeId> = PgVec::new_in(mcx);
+    let mut all_btree = true;
+    let mut all_hash = crate::gucs::enable_hashagg();
+    let clause_list: PgVec<'mcx, Node<'mcx>> = {
+        let mut v = PgVec::new_in(mcx);
+        match clause {
+            None => {}
+            Some(c) => match c.as_list() {
+                Some(l) => v.extend(l.iter()),
+                None => v.push(c),
+            },
+        }
+        v
+    };
+    for op_node in clause_list {
+        let opexpr = op_node.as_op_expr().filter(|o| o.args.len() == 2);
+        let Some(o) = opexpr else {
+            let all_varnos = pull_varnos_relids(run, op_node)?;
+            if !relids_overlap(&all_varnos, &sjinfo.syn_righthand)
+                || relids_is_subset(&all_varnos, &sjinfo.syn_righthand)
+            {
+                if clauses::contain_volatile_functions(op_node)? {
+                    return Ok(());
+                }
+                continue;
+            }
+            return Ok(());
+        };
+        let mut opno = o.opno;
+        let left_expr = o.args.nth(0);
+        let mut right_expr = o.args.nth(1);
+        let left_varnos = pull_varnos_relids(run, left_expr)?;
+        let right_varnos = pull_varnos_relids(run, right_expr)?;
+        let all_varnos = relids_union(mcx, &left_varnos, &right_varnos);
+        let opinputtype = crate::costsize::expr_type_typmod(left_expr).0;
+
+        if !relids_overlap(&all_varnos, &sjinfo.syn_righthand)
+            || relids_is_subset(&all_varnos, &sjinfo.syn_righthand)
+        {
+            if clauses::contain_volatile_functions(op_node)? {
+                return Ok(());
+            }
+            continue;
+        }
+
+        if !relids_is_empty(&right_varnos)
+            && relids_is_subset(&right_varnos, &sjinfo.syn_righthand)
+            && !relids_overlap(&left_varnos, &sjinfo.syn_righthand)
+        {
+            // typical case, right_expr is the RHS variable
+        } else if !relids_is_empty(&left_varnos)
+            && relids_is_subset(&left_varnos, &sjinfo.syn_righthand)
+            && !relids_overlap(&right_varnos, &sjinfo.syn_righthand)
+        {
+            opno = lsyscache::get_commutator(opno)?;
+            if opno == 0 {
+                return Ok(());
+            }
+            right_expr = left_expr;
+        } else {
+            return Ok(());
+        }
+
+        if all_btree
+            && (!lsyscache::op_mergejoinable(opno, opinputtype)?
+                || lsyscache::get_mergejoin_opfamilies(mcx, opno)?.is_empty())
+        {
+            all_btree = false;
+        }
+        if all_hash && !lsyscache::op_hashjoinable(opno, opinputtype)? {
+            all_hash = false;
+        }
+        if !(all_btree || all_hash) {
+            return Ok(());
+        }
+
+        semi_operators.push(opno);
+        // C copyObject; the arena share is our copy model.
+        semi_rhs_exprs.push(run.intern_expr(right_expr));
+    }
+
+    if semi_rhs_exprs.is_empty() {
+        return Ok(());
+    }
+    for &id in semi_rhs_exprs.iter() {
+        if clauses::contain_volatile_functions(*run.root.expr_node(id))? {
+            return Ok(());
+        }
+    }
+    sjinfo.semi_can_btree = all_btree;
+    sjinfo.semi_can_hash = all_hash;
+    sjinfo.semi_operators = semi_operators;
+    sjinfo.semi_rhs_exprs = semi_rhs_exprs;
+    Ok(())
+}
+
+// check_redundant_nullability_qual (initsplan.c): an IS NULL forced-null Var
+// nulled by a lower antijoin is necessarily true.
 fn check_redundant_nullability_qual(run: &PlannerRun<'_>, clause: Node<'_>) -> bool {
-    if clauses::find_forced_null_var(clause).is_none() {
+    let Some(var) = clauses::find_forced_null_var(clause) else {
+        return false;
+    };
+    if var.varnullingrels.is_empty() {
         return false;
     }
-    debug_assert!(run.root.join_info_list.iter().all(|sj| sj.jointype != JOIN_ANTI));
-    false
+    run.root.join_info_list.iter().any(|sj| {
+        sj.jointype == JOIN_ANTI
+            && sj.ojrelid != 0
+            && var.varnullingrels.is_member(sj.ojrelid as i32)
+    })
 }
 
 // reconsider_outer_join_clauses (equivclass.c): the const-EC substitution leg
@@ -803,6 +1005,10 @@ pub fn distribute_restrictinfo_to_rels(run: &mut PlannerRun<'_>, rinfo: RinfoId)
     // add_join_clause_to_rels (joininfo.c): one shared RestrictInfo handle
     // linked into every participating baserel's joininfo list (outer-join
     // relids have no RelOptInfo — C's find_base_rel_ignore_join skip).
+    if restriction_is_always_true(run, rinfo) {
+        return Ok(());
+    }
+    let rinfo = substitute_false_if_always_false(run, rinfo)?;
     debug_assert!(relids_num_members(&relids) > 1);
     let members = relids.as_ref().expect("multi-member relids");
     for (i, w) in members.words.iter().enumerate() {
@@ -821,14 +1027,101 @@ pub fn distribute_restrictinfo_to_rels(run: &mut PlannerRun<'_>, rinfo: RinfoId)
     Ok(())
 }
 
-// add_base_clause_to_rel (initsplan.c), non-inherited arm; the constant-
-// TRUE/FALSE reductions only fire for shapes that panicked upstream.
+// add_base_clause_to_rel (initsplan.c), non-inherited arm.
 fn add_base_clause_to_rel(run: &mut PlannerRun<'_>, relid: i32, rinfo: RinfoId) -> PgResult<()> {
-    let rel_id = find_base_rel(&run.root, relid);
     debug_assert!(!run.rte(relid as usize).inh);
+    if restriction_is_always_true(run, rinfo) {
+        return Ok(());
+    }
+    let rinfo = substitute_false_if_always_false(run, rinfo)?;
+    let rel_id = find_base_rel(&run.root, relid);
     let security_level = run.root.rinfo(rinfo).security_level;
     let rel = run.root.rel_mut(rel_id);
     rel.baserestrictinfo.push(rinfo);
     rel.baserestrict_min_security = rel.baserestrict_min_security.min(security_level);
     Ok(())
+}
+
+// restriction_is_always_true / _false (initsplan.c), NullTest leg only: the
+// OR leg reads orclause sub-RestrictInfos, which stay None here (documented
+// make_restrictinfo divergence).
+fn restriction_is_always_true(run: &PlannerRun<'_>, rinfo: RinfoId) -> bool {
+    restriction_nulltest_verdict(run, rinfo, types_nodes::primnodes::NullTestType::IS_NOT_NULL)
+}
+
+fn restriction_is_always_false(run: &PlannerRun<'_>, rinfo: RinfoId) -> bool {
+    restriction_nulltest_verdict(run, rinfo, types_nodes::primnodes::NullTestType::IS_NULL)
+}
+
+fn restriction_nulltest_verdict(
+    run: &PlannerRun<'_>,
+    rinfo: RinfoId,
+    testtype: types_nodes::primnodes::NullTestType,
+) -> bool {
+    let ri = run.root.rinfo(rinfo);
+    // Clone clauses' nullingrel bits may not reflect reality (C's guard).
+    if ri.has_clone || ri.is_clone {
+        return false;
+    }
+    let clause = *run.root.expr_node(ri.clause);
+    let Some(nt) = clause.as_null_test() else { return false };
+    if nt.nulltesttype != testtype || nt.argisrow {
+        return false;
+    }
+    expr_is_nonnullable(run, nt.arg.expect("NullTest.arg"))
+}
+
+// expr_is_nonnullable (initsplan.c): simple Vars only.
+fn expr_is_nonnullable(run: &PlannerRun<'_>, expr: Node<'_>) -> bool {
+    let Some(var) = expr.as_var() else { return false };
+    if !var.varnullingrels.is_empty() {
+        return false;
+    }
+    if var.varattno < 0 {
+        return true;
+    }
+    let rel = find_base_rel(&run.root, var.varno);
+    var.varattno > 0
+        && relids_is_member(var.varattno as i32, &run.root.rel(rel).notnullattnums)
+}
+
+// The always-false substitution shared by add_base_clause_to_rel and
+// add_join_clause_to_rels: constant-FALSE under the original rinfo_serial.
+fn substitute_false_if_always_false<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rinfo: RinfoId,
+) -> PgResult<RinfoId> {
+    if !restriction_is_always_false(run, rinfo) {
+        return Ok(rinfo);
+    }
+    let save_rinfo_serial = run.root.rinfo(rinfo).rinfo_serial;
+    let save_last_rinfo_serial = run.root.last_rinfo_serial;
+    let (is_pushed_down, has_clone, is_clone, pseudoconstant, required, incompatible, outer) = {
+        let ri = run.root.rinfo(rinfo);
+        (
+            ri.is_pushed_down,
+            ri.has_clone,
+            ri.is_clone,
+            ri.pseudoconstant,
+            relids_copy(run.mcx, &ri.required_relids),
+            relids_copy(run.mcx, &ri.incompatible_relids),
+            relids_copy(run.mcx, &ri.outer_relids),
+        )
+    };
+    let clause = clauses::make_bool_const(run.mcx, false, false)?;
+    let new_rinfo = make_restrictinfo(
+        run,
+        clause,
+        is_pushed_down,
+        has_clone,
+        is_clone,
+        pseudoconstant,
+        0,
+        required,
+        incompatible,
+        outer,
+    )?;
+    run.root.rinfo_mut(new_rinfo).rinfo_serial = save_rinfo_serial;
+    run.root.last_rinfo_serial = save_last_rinfo_serial;
+    Ok(new_rinfo)
 }

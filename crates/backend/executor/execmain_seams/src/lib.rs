@@ -7,7 +7,7 @@ use types_nodes::nodes_enums::CmdType;
 use types_nodes::plannodes::PlannedStmt;
 use types_portal::{ParamListHandle, QueryDescHandle, QueryEnvHandle};
 use types_scan::sdir::ScanDirection;
-use types_core::instrument::Instrumentation;
+use types_core::instrument::{AggregateInstrumentation, Instrumentation};
 use types_snapshot::SnapshotData;
 use types_tuple::TupleDescData;
 
@@ -89,6 +89,14 @@ seam_core::seam!(
         query_desc: QueryDescHandle,
         plan_node_id: i32,
     ) -> Option<Instrumentation>
+);
+
+seam_core::seam!(
+    // show_hashagg_info's AggState reads (hash_mem_peak/batches/partitions).
+    pub fn query_desc_agg_instrument(
+        query_desc: QueryDescHandle,
+        plan_node_id: i32,
+    ) -> Option<AggregateInstrumentation>
 );
 
 seam_core::seam!(

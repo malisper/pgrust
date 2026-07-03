@@ -111,3 +111,13 @@ pub struct Instrumentation {
     pub bufusage: BufferUsage,
     pub walusage: WalUsage,
 }
+
+// C AggregateInstrumentation (nodeAgg.h) + hash_planned_partitions (an
+// AggState field in C; rides this carrier so EXPLAIN reads one struct).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct AggregateInstrumentation {
+    pub hash_mem_peak: u64,
+    pub hash_disk_used: u64,
+    pub hash_batches_used: i32,
+    pub hash_planned_partitions: i32,
+}

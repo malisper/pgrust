@@ -539,7 +539,7 @@ pub fn expr_type(node: Node<'_>) -> Oid {
         NodeTag::T_Aggref => node.as_aggref().unwrap().aggtype,
         NodeTag::T_WindowFunc => node.as_window_func().unwrap().wintype,
         NodeTag::T_MinMaxExpr => node.as_min_max_expr().unwrap().minmaxtype,
-        NodeTag::T_BoolExpr => 16,
+        NodeTag::T_BoolExpr | NodeTag::T_NullTest => 16,
         tag => panic!("execexpr exprType: node family {tag:?} not ported"),
     }
 }
@@ -622,6 +622,11 @@ fn setup_walker(node: Node<'_>, info: &mut SetupInfo) {
         }
         NodeTag::T_MinMaxExpr => {
             for a in node.as_min_max_expr().unwrap().args.iter() {
+                setup_walker(a, info);
+            }
+        }
+        NodeTag::T_NullTest => {
+            if let Some(a) = node.as_null_test().unwrap().arg {
                 setup_walker(a, info);
             }
         }
@@ -752,6 +757,19 @@ fn init_expr_rec<'mcx>(
             push_step(state, mcx, step)
         }
         NodeTag::T_BoolExpr => init_bool_expr(node, state, mcx, out, agg, params),
+        NodeTag::T_NullTest => {
+            use ::types_nodes::primnodes::NullTestType;
+            let nt = node.as_null_test().unwrap();
+            if nt.argisrow {
+                unported("EEOP_NULLTEST_ROWISNULL/ROWISNOTNULL");
+            }
+            init_expr_rec(nt.arg.expect("NullTest.arg"), state, mcx, out, agg, params)?;
+            let step = match nt.nulltesttype {
+                NullTestType::IS_NULL => Step::NullTestIsNull { out },
+                NullTestType::IS_NOT_NULL => Step::NullTestIsNotNull { out },
+            };
+            push_step(state, mcx, step)
+        }
         tag => panic!("execexpr ExecInitExprRec: node family {tag:?} not ported"),
     }
 }
