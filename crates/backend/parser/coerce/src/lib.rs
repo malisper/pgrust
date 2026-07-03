@@ -1611,6 +1611,12 @@ pub fn expression_returns_set(node: Node<'_>) -> bool {
         NodeTag::T_BoolExpr => {
             node.as_bool_expr().unwrap().args.iter().any(expression_returns_set)
         }
+        NodeTag::T_ScalarArrayOpExpr => {
+            node.as_scalar_array_op_expr().unwrap().args.iter().any(expression_returns_set)
+        }
+        NodeTag::T_ArrayExpr => {
+            node.as_array_expr().unwrap().elements.iter().any(expression_returns_set)
+        }
         NodeTag::T_RelabelType => expression_returns_set(node.as_relabel_type().unwrap().arg),
         NodeTag::T_NullTest => {
             node.as_null_test().unwrap().arg.is_some_and(expression_returns_set)
@@ -1704,6 +1710,16 @@ pub fn select_common_type_pick(
         ptype = types_core::catalog::TEXTOID;
     }
     Ok((ptype, pick))
+}
+
+/// C `verify_common_type`; one precomputed exprType per expr.
+pub fn verify_common_type(common_type: Oid, expr_types: &[Oid]) -> PgResult<bool> {
+    for &t in expr_types {
+        if !can_coerce_type(&[t], &[common_type], COERCION_IMPLICIT)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// C `coerce_to_common_type`; precomputed exprType/exprLocation divergence as

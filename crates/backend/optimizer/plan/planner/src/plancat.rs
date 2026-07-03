@@ -327,6 +327,16 @@ pub fn restriction_selectivity<'mcx>(
     const F_SCALARGTSEL: Oid = 104;
     const F_SCALARLESEL: Oid = 336;
     const F_SCALARGESEL: Oid = 337;
+    const F_ICLIKESEL: Oid = 1814;
+    const F_ICNLIKESEL: Oid = 1815;
+    const F_REGEXEQSEL: Oid = 1818;
+    const F_LIKESEL: Oid = 1819;
+    const F_ICREGEXEQSEL: Oid = 1820;
+    const F_REGEXNESEL: Oid = 1821;
+    const F_NLIKESEL: Oid = 1822;
+    const F_ICREGEXNESEL: Oid = 1823;
+    const F_PREFIXSEL: Oid = 3437;
+    use crate::like_support::PatternType;
     let result = match oprrest {
         F_EQSEL => crate::selfuncs::eqsel(run, operatorid, args, varrelid, inputcollid)?,
         F_NEQSEL => crate::selfuncs::neqsel(run, operatorid, args, varrelid, inputcollid)?,
@@ -335,6 +345,23 @@ pub fn restriction_selectivity<'mcx>(
             let iseq = oprrest == F_SCALARLESEL || oprrest == F_SCALARGESEL;
             crate::selfuncs::scalarineqsel_wrapper(
                 run, operatorid, args, varrelid, inputcollid, isgt, iseq,
+            )?
+        }
+        F_REGEXEQSEL | F_ICREGEXEQSEL | F_LIKESEL | F_ICLIKESEL | F_PREFIXSEL | F_REGEXNESEL
+        | F_ICREGEXNESEL | F_NLIKESEL | F_ICNLIKESEL => {
+            let (ptype, negate) = match oprrest {
+                F_REGEXEQSEL => (PatternType::Regex, false),
+                F_ICREGEXEQSEL => (PatternType::RegexIc, false),
+                F_LIKESEL => (PatternType::Like, false),
+                F_ICLIKESEL => (PatternType::LikeIc, false),
+                F_PREFIXSEL => (PatternType::Prefix, false),
+                F_REGEXNESEL => (PatternType::Regex, true),
+                F_ICREGEXNESEL => (PatternType::RegexIc, true),
+                F_NLIKESEL => (PatternType::Like, true),
+                _ => (PatternType::LikeIc, true),
+            };
+            crate::like_support::patternsel(
+                run, operatorid, args, varrelid, inputcollid, ptype, negate,
             )?
         }
         other => panic!(
@@ -373,12 +400,31 @@ pub fn join_selectivity<'mcx>(
         F_SCALARLTJOINSEL | F_SCALARGTJOINSEL | F_SCALARLEJOINSEL | F_SCALARGEJOINSEL => {
             DEFAULT_INEQ_SEL
         }
+        // patternjoinsel (like_support.c) punts for all pattern types.
+        1816 | 1824 | 1825 | 1826 | 3438 => crate::selfuncs::DEFAULT_MATCH_SEL,
+        1817 | 1827 | 1828 | 1829 => 1.0 - crate::selfuncs::DEFAULT_MATCH_SEL,
         other => panic!("join_selectivity (plancat.c): oprjoin {other}; M2 selfuncs lane"),
     };
     if !(0.0..=1.0).contains(&result) {
         panic!("invalid join selectivity: {result}");
     }
     Ok(result)
+}
+
+// function_selectivity (plancat.c). The in-core SupportRequestSelectivity
+// providers (like_regex_support, ts match) are unwired; loud until a query
+// reaches one.
+pub fn function_selectivity(funcid: Oid) -> PgResult<f64> {
+    let shape = syscache_seams::pg_proc_cost_shape::call(funcid)?
+        .unwrap_or_else(|| panic!("cache lookup failed for function {funcid}"));
+    if shape.prosupport != 0 {
+        panic!(
+            "function_selectivity (plancat.c): SupportRequestSelectivity for prosupport {}; \
+             M2 lane",
+            shape.prosupport
+        );
+    }
+    Ok(0.3333333)
 }
 
 // add_function_cost (plancat.c). DIVERGENCE: callers don't thread the calling

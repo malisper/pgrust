@@ -76,9 +76,10 @@ pub fn transformExprRecurse<'mcx>(
                 | A_Expr_Kind::AEXPR_NOT_BETWEEN_SYM => {
                     transformAExprBetween(mcx, pstate, a)
                 }
+                A_Expr_Kind::AEXPR_IN => transformAExprIn(mcx, pstate, a),
                 other => panic!(
                     "transformExprRecurse (parse_expr.c): A_Expr kind {other:?} arm \
-                     (DISTINCT/NULLIF/IN/ANY/ALL) unported — unit backend-parser-expr"
+                     (DISTINCT/NULLIF/ANY/ALL) unported — unit backend-parser-expr"
                 ),
             }
         }
@@ -160,6 +161,144 @@ fn transformAExprOp<'mcx>(
     let ltypeId = lexpr.map_or(types_core::InvalidOid, expr_type);
     let rtypeId = rexpr.map_or(types_core::InvalidOid, expr_type);
     parse_oper::make_op(mcx, pstate, &a.name, lexpr, rexpr, ltypeId, rtypeId, last_srf, a.location)
+}
+
+fn transformAExprIn<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    a: &A_Expr<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    use types_core::{InvalidOid, OidIsValid};
+
+    let useOr = a.name.first().and_then(|n| n.as_string()).map(|s| s.sval) != Some("<>");
+
+    let lexpr = transformExprRecurse(mcx, pstate, a.lexpr.expect("IN lexpr"))?;
+    let in_list = a.rexpr.expect("IN rexpr").as_list().expect("IN rexpr is a List");
+    let mut rexprs = types_nodes::NodeList::nil();
+    let mut rvars = types_nodes::NodeList::nil();
+    let mut rnonvars = types_nodes::NodeList::nil();
+    let mut has_rvars = false;
+    for r in in_list {
+        let r = transformExprRecurse(mcx, pstate, r)?;
+        rexprs.lappend(mcx, r)?;
+        if vars::contain_vars_of_level(r, 0)? {
+            rvars.lappend(mcx, r)?;
+            has_rvars = true;
+        } else {
+            rnonvars.lappend(mcx, r)?;
+        }
+    }
+
+    let mut result: Option<Node<'mcx>> = None;
+    if rnonvars.len() > 1 {
+        let mut typelocs: mcx::PgVec<'mcx, (types_core::Oid, types_core::ParseLoc)> =
+            mcx::vec_with_capacity_in(mcx, rnonvars.len() + 1)?;
+        typelocs.push((expr_type(lexpr), expr_location(lexpr)));
+        for r in &rnonvars {
+            typelocs.push((expr_type(r), expr_location(r)));
+        }
+        let mut scalar_type = coerce::select_common_type(pstate, typelocs.as_slice(), None)?;
+
+        if OidIsValid(scalar_type) {
+            let mut alltypes: mcx::PgVec<'mcx, types_core::Oid> =
+                mcx::vec_with_capacity_in(mcx, typelocs.len())?;
+            for &(t, _) in typelocs.iter() {
+                alltypes.push(t);
+            }
+            if !coerce::verify_common_type(scalar_type, alltypes.as_slice())? {
+                scalar_type = InvalidOid;
+            }
+        }
+
+        let array_type = if OidIsValid(scalar_type) && scalar_type != types_core::catalog::RECORDOID
+        {
+            lsyscache::get_array_type(scalar_type)?
+        } else {
+            InvalidOid
+        };
+        if array_type != InvalidOid {
+            let mut aexprs = types_nodes::NodeList::nil();
+            for r in &rnonvars {
+                let r = coerce::coerce_to_common_type(
+                    mcx,
+                    pstate,
+                    r,
+                    expr_type(r),
+                    expr_location(r),
+                    scalar_type,
+                    "IN",
+                )?;
+                aexprs.lappend(mcx, r)?;
+            }
+            let newa = Node::mk(
+                mcx,
+                types_nodes::ArrayExpr {
+                    array_typeid: array_type,
+                    array_collid: InvalidOid,
+                    element_typeid: scalar_type,
+                    elements: aexprs,
+                    multidims: false,
+                    // Vars cannot be safely query-jumbled; disable squashing.
+                    list_start: if has_rvars { -1 } else { a.rexpr_list_start },
+                    list_end: if has_rvars { -1 } else { a.rexpr_list_end },
+                    location: -1,
+                },
+            )?;
+            result = Some(parse_oper::make_scalar_array_op(
+                mcx,
+                pstate,
+                &a.name,
+                useOr,
+                lexpr,
+                newa,
+                expr_type(lexpr),
+                array_type,
+                a.location,
+            )?);
+            rexprs = rvars;
+        }
+    }
+
+    for r in &rexprs {
+        if lexpr.node_tag() == NodeTag::T_RowExpr && r.node_tag() == NodeTag::T_RowExpr {
+            panic!(
+                "transformAExprIn (parse_expr.c): ROW() IN (ROW(), ...) arm \
+                 (make_row_comparison_op) unported — unit backend-parser-expr"
+            );
+        }
+        // C copyObject's lexpr per comparison; the sealed lexpr subtree is
+        // shared instead (parse-phase walks only re-write identical values).
+        let cmp = parse_oper::make_op(
+            mcx,
+            pstate,
+            &a.name,
+            Some(lexpr),
+            Some(r),
+            expr_type(lexpr),
+            expr_type(r),
+            pstate.p_last_srf,
+            a.location,
+        )?;
+        let cmp =
+            coerce::coerce_to_boolean(mcx, pstate, cmp, expr_type(cmp), expr_location(cmp), "IN")?;
+        result = Some(match result {
+            None => cmp,
+            Some(prev) => Node::mk(
+                mcx,
+                types_nodes::BoolExpr {
+                    boolop: if useOr {
+                        types_nodes::BoolExprType::OR_EXPR
+                    } else {
+                        types_nodes::BoolExprType::AND_EXPR
+                    },
+                    args: types_nodes::NodeList::make2(mcx, prev, cmp)?,
+                    location: a.location,
+                },
+            )?,
+        });
+    }
+
+    Ok(result.expect("IN list is never empty"))
 }
 
 fn transformNullTest<'mcx>(

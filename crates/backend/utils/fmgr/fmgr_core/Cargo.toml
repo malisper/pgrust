@@ -35,6 +35,7 @@ adt_network = { path = "../../adt/network" }
 adt_regproc = { path = "../../adt/regproc" }
 adt_numeric = { path = "../../adt/numeric" }
 adt_like = { path = "../../adt/like" }
+adt_regexp = { path = "../../adt/regexp" }
 adt_oracle_compat = { path = "../../adt/oracle_compat" }
 adt_pseudotypes = { path = "../../adt/pseudotypes" }
 name = { path = "../../adt/name" }

@@ -21,6 +21,7 @@ typcache = { path = "../../utils/cache/typcache" }
 format_type = { path = "../../utils/adt/format_type" }
 exectuples = { path = "../exectuples" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
+arrayfuncs = { path = "../../utils/adt/arrayfuncs" }
 clauses_seams = { path = "../../optimizer/util/clauses_seams" }
 guc_tables = { path = "../../utils/misc/guc_tables" }
 aclchk_seams = { path = "../../catalog/aclchk_seams" }

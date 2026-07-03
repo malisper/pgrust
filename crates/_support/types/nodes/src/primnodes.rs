@@ -370,6 +370,30 @@ pub struct OpExpr<'mcx> {
     pub location: ParseLoc,
 }
 
+#[derive(Default)]
+pub struct ScalarArrayOpExpr<'mcx> {
+    pub opno: Oid,
+    pub opfuncid: Oid,
+    pub hashfuncid: Oid,
+    pub negfuncid: Oid,
+    pub useOr: bool,
+    pub inputcollid: Oid,
+    pub args: NodeList<'mcx>,
+    pub location: ParseLoc,
+}
+
+#[derive(Default)]
+pub struct ArrayExpr<'mcx> {
+    pub array_typeid: Oid,
+    pub array_collid: Oid,
+    pub element_typeid: Oid,
+    pub elements: NodeList<'mcx>,
+    pub multidims: bool,
+    pub list_start: ParseLoc,
+    pub list_end: ParseLoc,
+    pub location: ParseLoc,
+}
+
 // C `Expr *arg` is never NULL in a live RelabelType; modeled non-optional.
 pub struct RelabelType<'mcx> {
     pub arg: Node<'mcx>,
@@ -558,6 +582,12 @@ unsafe impl<'mcx> NodeVariant<'mcx> for JoinExpr<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for OpExpr<'mcx> {
     const TAG: NodeTag = NodeTag::T_OpExpr;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for ScalarArrayOpExpr<'mcx> {
+    const TAG: NodeTag = NodeTag::T_ScalarArrayOpExpr;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for ArrayExpr<'mcx> {
+    const TAG: NodeTag = NodeTag::T_ArrayExpr;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for FuncExpr<'mcx> {
     const TAG: NodeTag = NodeTag::T_FuncExpr;
@@ -765,6 +795,16 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_op_expr(self) -> Option<&'mcx OpExpr<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_scalar_array_op_expr(self) -> Option<&'mcx ScalarArrayOpExpr<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_array_expr(self) -> Option<&'mcx ArrayExpr<'mcx>> {
         self.as_variant()
     }
 

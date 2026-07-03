@@ -123,6 +123,34 @@ fn cost_qual_eval_walker(node: Node<'_>, cost: &mut QualCost) -> PgResult<()> {
             }
             Ok(())
         }
+        NodeTag::T_ScalarArrayOpExpr => {
+            let sa = node.as_scalar_array_op_expr().unwrap();
+            let opfuncid = if sa.opfuncid == 0 {
+                lsyscache::get_opcode(sa.opno)?
+            } else {
+                sa.opfuncid
+            };
+            if sa.hashfuncid != 0 {
+                panic!("cost_qual_eval_walker (costsize.c): hashed SAOP; M2 lane");
+            }
+            let arraynode = sa.args.nth(1);
+            let mut sacosts = QualCost { startup: 0.0, per_tuple: 0.0 };
+            crate::plancat::add_function_cost(opfuncid, &mut sacosts)?;
+            // C: the operator runs against about half the array elements.
+            cost.startup += sacosts.startup;
+            cost.per_tuple +=
+                sacosts.per_tuple * crate::selfuncs::estimate_array_length(arraynode) * 0.5;
+            for arg in sa.args.iter() {
+                cost_qual_eval_walker(arg, cost)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_ArrayExpr => {
+            for e in node.as_array_expr().unwrap().elements.iter() {
+                cost_qual_eval_walker(e, cost)?;
+            }
+            Ok(())
+        }
         NodeTag::T_NullTest => match node.as_null_test().unwrap().arg {
             Some(arg) => cost_qual_eval_walker(arg, cost),
             None => Ok(()),
@@ -398,11 +426,11 @@ pub fn cost_index(run: &mut PlannerRun<'_>, path_id: types_pathnodes::PathId, lo
     let mut cpu_run_cost = 0.0;
 
     // qpquals: restrictions not redundant with the index clauses.
-    let indexclause_rinfos: mcx::PgVec<'_, RinfoId> = {
+    let indexclause_rinfos: mcx::PgVec<'_, (RinfoId, bool)> = {
         let PathNode::IndexPath(ip) = run.root.path(path_id) else { unreachable!() };
         let mut v = mcx::PgVec::new_in(run.mcx);
         for ic in ip.indexclauses.iter() {
-            v.push(ic.rinfo.expect("IndexClause rinfo"));
+            v.push((ic.rinfo.expect("IndexClause rinfo"), ic.lossy));
         }
         v
     };
@@ -411,8 +439,9 @@ pub fn cost_index(run: &mut PlannerRun<'_>, path_id: types_pathnodes::PathId, lo
         if run.root.rinfo(rid).pseudoconstant {
             continue;
         }
-        // is_redundant_with_indexclauses: no EC parents, so rinfo identity.
-        if indexclause_rinfos.iter().any(|&c| c == rid) {
+        // is_redundant_with_indexclauses: no EC parents, so rinfo identity;
+        // a lossy indexclause does not enforce the condition exactly.
+        if indexclause_rinfos.iter().any(|&(c, lossy)| c == rid && !lossy) {
             continue;
         }
         qpquals.push(rid);

@@ -11,7 +11,7 @@ use ::indexam::{
     index_beginscan, index_close, index_endscan, index_fetch_heap, index_getnext_tid,
     index_markpos, index_rescan, index_restrpos, IndexScanDescData,
 };
-use ::mcx::{Mcx, PgBox, PgVec};
+use ::mcx::{Allocator, Mcx, PgBox, PgVec};
 use ::nbtree::itup::{index_getattr, ITup};
 use ::nodeindexscan::exec_index_build_scan_keys;
 use ::tableam::table_slot_callbacks;
@@ -244,19 +244,35 @@ pub unsafe fn store_index_tuple<'mcx>(
         base.tts_values[i] = value;
         base.tts_isnull[i] = isnull;
     }
-    if !name_cstring_attnums.is_empty() {
-        name_cstring_unported();
+    // C's cstring-to-NAME realloc: btree name_ops stores names as cstrings
+    // in index tuples; pad back to a NAMEDATALEN block for the slot.
+    for &attnum in name_cstring_attnums {
+        // name_cstring_attnums stores 0-based column indexes.
+        let i = attnum as usize;
+        if base.tts_isnull[i] {
+            continue;
+        }
+        const NAMEDATALEN: usize = 64;
+        let layout = core::alloc::Layout::from_size_align(NAMEDATALEN, 4).expect("name layout");
+        let Ok(block) = mcx.allocate(layout) else {
+            mcx.oom(NAMEDATALEN);
+            unreachable!()
+        };
+        let dst = block.cast::<u8>().as_ptr();
+        let src = base.tts_values[i].as_usize() as *const u8;
+        // SAFETY: src is a NUL-terminated cstring from the index tuple; dst
+        // is a fresh NAMEDATALEN block. namestrcpy truncation semantics.
+        unsafe {
+            core::ptr::write_bytes(dst, 0, NAMEDATALEN);
+            let mut n = 0usize;
+            while n < NAMEDATALEN - 1 && *src.add(n) != 0 {
+                *dst.add(n) = *src.add(n);
+                n += 1;
+            }
+        }
+        base.tts_values[i] = ::datum::Datum::from_usize(dst as usize);
     }
     exectuples::exec_store_virtual_tuple(slot);
-}
-
-#[cold]
-#[inline(never)]
-fn name_cstring_unported() -> ! {
-    panic!(
-        "nodeindexonlyscan: name-column cstring-to-Name copy (StoreIndexTuple \
-         NAMEDATALEN realloc arm) not ported"
-    )
 }
 
 /// `ExecIndexOnlyScan`; the runtime-key ExecReScan arm is unreachable (init

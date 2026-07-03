@@ -156,8 +156,26 @@ fn match_clause_to_indexcol<'mcx>(
     let clause = *run.root.expr_node(run.root.rinfo(rinfo).clause);
     match clause.node_tag() {
         NodeTag::T_OpExpr => match_opclause_to_indexcol(run, rinfo, indexcol, index),
-        NodeTag::T_FuncExpr | NodeTag::T_RelabelType => panic!(
-            "match_funcclause_to_indexcol (indxpath.c): M2 support-function lane"
+        // match_funcclause_to_indexcol (indxpath.c).
+        NodeTag::T_FuncExpr => {
+            let f = clause.as_func_expr().unwrap();
+            let funcid = f.funcid;
+            for (indexarg, op) in f.args.iter().enumerate() {
+                if match_index_to_operand(run, op, indexcol, index) {
+                    return get_index_clause_from_support(
+                        run,
+                        rinfo,
+                        funcid,
+                        indexarg as i32,
+                        indexcol,
+                        index,
+                    );
+                }
+            }
+            Ok(None)
+        }
+        NodeTag::T_RelabelType => panic!(
+            "match_clause_to_indexcol (indxpath.c): RelabelType clause; M2 lane"
         ),
         NodeTag::T_NullTest if index.amsearchnulls => {
             let nt = clause.as_null_test().unwrap();
@@ -178,7 +196,24 @@ fn match_clause_to_indexcol<'mcx>(
             }
             Ok(None)
         }
-        // SAOP/RowCompare/OR can't be built by the live qual lane.
+        NodeTag::T_ScalarArrayOpExpr => {
+            // match_saopclause_to_indexcol (indxpath.c): loud where C would
+            // build an amsearcharray index clause, None where C also fails.
+            let sa = clause.as_scalar_array_op_expr().unwrap();
+            if sa.useOr
+                && index.amsearcharray
+                && match_index_to_operand(run, sa.args.nth(0), indexcol, index)
+                && index_coll_matches_expr_coll(
+                    index.indexcollations[indexcol],
+                    sa.inputcollid,
+                )
+                && lsyscache::op_in_opfamily(sa.opno, index.opfamily[indexcol])?
+            {
+                panic!("match_saopclause_to_indexcol (indxpath.c): M2 SAOP-indexqual lane");
+            }
+            Ok(None)
+        }
+        // RowCompare/NullTest/OR can't be built by the live qual lane.
         _ => Ok(None),
     }
 }
@@ -223,7 +258,12 @@ fn match_opclause_to_indexcol<'mcx>(
                 indexcols: PgVec::new_in(run.mcx),
             }));
         }
-        panic!("get_index_clause_from_support (indxpath.c): M2 support-function lane");
+        let opfuncid = lsyscache::get_opcode(op.opno)?;
+        if let Some(ic) =
+            get_index_clause_from_support(run, rinfo, opfuncid, 0, indexcol, index)?
+        {
+            return Ok(Some(ic));
+        }
     }
 
     if right_matches
@@ -234,6 +274,68 @@ fn match_opclause_to_indexcol<'mcx>(
     }
 
     Ok(None)
+}
+
+// get_index_clause_from_support (indxpath.c): closed-set dispatch on the
+// prosupport oid instead of C's fmgr detour (rule 4); like_regex_support
+// (like_support.c) is the only in-core SupportRequestIndexCondition provider
+// besides tsmatchsel's, which stays loud.
+fn get_index_clause_from_support<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rinfo: RinfoId,
+    funcid: u32,
+    indexarg: i32,
+    indexcol: usize,
+    index: &IndexOptInfo<'mcx>,
+) -> PgResult<Option<IndexClause<'mcx>>> {
+    use crate::like_support::PatternType;
+    let shape = syscache_seams::pg_proc_cost_shape::call(funcid)?
+        .unwrap_or_else(|| panic!("cache lookup failed for function {funcid}"));
+    if shape.prosupport == 0 {
+        return Ok(None);
+    }
+    let ptype = match shape.prosupport {
+        1023 => PatternType::Like,
+        1025 => PatternType::LikeIc,
+        1364 => PatternType::Regex,
+        1024 => PatternType::RegexIc,
+        6242 => PatternType::Prefix,
+        other => panic!(
+            "get_index_clause_from_support (indxpath.c): prosupport {other}; M2 lane"
+        ),
+    };
+    // like_regex_support: no reverse-match operators, indexkey-on-left only.
+    if indexarg != 0 {
+        return Ok(None);
+    }
+    let clause = *run.root.expr_node(run.root.rinfo(rinfo).clause);
+    let op = clause.as_op_expr().expect("support request over an OpExpr");
+    let Some(exprs) = crate::like_support::match_pattern_prefix(
+        run,
+        op.args.nth(0),
+        op.args.nth(1),
+        ptype,
+        op.inputcollid,
+        index.opfamily[indexcol],
+        index.indexcollations[indexcol],
+    )?
+    else {
+        return Ok(None);
+    };
+    let mut indexquals = PgVec::new_in(run.mcx);
+    for expr in exprs.iter() {
+        // make_simple_restrictinfo (restrictinfo.h).
+        indexquals.push(crate::initsplan::make_restrictinfo(
+            run, *expr, true, false, false, false, 0, None, None, None,
+        )?);
+    }
+    Ok(Some(IndexClause {
+        rinfo: Some(rinfo),
+        indexquals,
+        lossy: true,
+        indexcol: indexcol as i16,
+        indexcols: PgVec::new_in(run.mcx),
+    }))
 }
 
 // IndexCollMatchesExprColl (indxpath.c).
@@ -447,11 +549,26 @@ fn collect_varattnos(run: &PlannerRun<'_>, node: Node<'_>, relid: i32, out: &mut
         NodeTag::T_RelabelType => {
             collect_varattnos(run, node.as_relabel_type().unwrap().arg, relid, out)
         }
+        NodeTag::T_ScalarArrayOpExpr => {
+            for a in &node.as_scalar_array_op_expr().unwrap().args {
+                collect_varattnos(run, a, relid, out);
+            }
+        }
+        NodeTag::T_ArrayExpr => {
+            for e in &node.as_array_expr().unwrap().elements {
+                collect_varattnos(run, e, relid, out);
+            }
+        }
         NodeTag::T_NullTest => {
             collect_varattnos(run, node.as_null_test().unwrap().arg.expect("NullTest.arg"), relid, out)
         }
         NodeTag::T_BoolExpr => {
             for a in &node.as_bool_expr().unwrap().args {
+                collect_varattnos(run, a, relid, out);
+            }
+        }
+        NodeTag::T_FuncExpr => {
+            for a in &node.as_func_expr().unwrap().args {
                 collect_varattnos(run, a, relid, out);
             }
         }

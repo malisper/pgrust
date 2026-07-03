@@ -15,9 +15,9 @@ use crate::parsenodes::{
     WithClause,
 };
 use crate::primnodes::{
-    GroupingFunc, RowExpr,
-    Aggref, Alias, BoolExpr, CoerceViaIO, Const, FromExpr, FuncExpr, NullTest, OpExpr, Param,
-    RangeTblRef, RangeVar, RelabelType, TargetEntry, Var, WindowFunc,
+    Aggref, Alias, ArrayExpr, BoolExpr, CoerceViaIO, Const, FromExpr, FuncExpr, GroupingFunc,
+    NullTest, OpExpr, Param, RangeTblRef, RangeVar, RelabelType, RowExpr, ScalarArrayOpExpr,
+    TargetEntry, Var, WindowFunc,
 };
 use crate::rawnodes::{
     A_Const, A_Expr, A_Star, ColumnRef, DeleteStmt, DistinctClause, FuncCall, InsertStmt,
@@ -56,6 +56,8 @@ pub fn equal(a: Node<'_>, b: Node<'_>) -> bool {
         NodeTag::T_RowExpr => cmp!(as_row_expr),
         NodeTag::T_FuncExpr => cmp!(as_func_expr),
         NodeTag::T_OpExpr => cmp!(as_op_expr),
+        NodeTag::T_ScalarArrayOpExpr => cmp!(as_scalar_array_op_expr),
+        NodeTag::T_ArrayExpr => cmp!(as_array_expr),
         NodeTag::T_BoolExpr => cmp!(as_bool_expr),
         NodeTag::T_RelabelType => cmp!(as_relabel_type),
         NodeTag::T_CoerceViaIO => cmp!(as_coerce_via_io),
@@ -367,6 +369,29 @@ impl NodeEqual for OpExpr<'_> {
             && self.opcollid == b.opcollid
             && self.inputcollid == b.inputcollid
             && self.args.node_equal(&b.args)
+    }
+}
+
+impl NodeEqual for ScalarArrayOpExpr<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        // C: zero opfuncid/hashfuncid/negfuncid (not yet looked up) match any.
+        self.opno == b.opno
+            && (self.opfuncid == b.opfuncid || self.opfuncid == 0 || b.opfuncid == 0)
+            && (self.hashfuncid == b.hashfuncid || self.hashfuncid == 0 || b.hashfuncid == 0)
+            && (self.negfuncid == b.negfuncid || self.negfuncid == 0 || b.negfuncid == 0)
+            && self.useOr == b.useOr
+            && self.inputcollid == b.inputcollid
+            && self.args.node_equal(&b.args)
+    }
+}
+
+impl NodeEqual for ArrayExpr<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.array_typeid == b.array_typeid
+            && self.array_collid == b.array_collid
+            && self.element_typeid == b.element_typeid
+            && self.elements.node_equal(&b.elements)
+            && self.multidims == b.multidims
     }
 }
 

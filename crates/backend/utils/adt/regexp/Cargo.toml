@@ -1,22 +1,23 @@
 [package]
-name = "adt_like"
+name = "adt_regexp"
 version = "0.1.0"
 edition.workspace = true
 publish.workspace = true
 
+[lib]
+name = "adt_regexp"
+path = "src/lib.rs"
+
 [dependencies]
-types_nodes = { path = "../../../../_support/types/nodes" }
-adt_oracle_compat = { path = "../oracle_compat" }
 datum = { path = "../../../../_support/types/datum" }
 mcx = { path = "../../../../_support/mcx" }
 mbutils = { path = "../../mb/mbutils" }
-pg_locale = { path = "../pg_locale" }
-stack_depth = { path = "../../misc/stack_depth" }
+regex = { path = "../../../../_support/types/regex" }
+regex_core = { path = "../../../regex/regex_core" }
+regexp_seams = { path = "../regexp_seams" }
 types_core = { path = "../../../../_support/types/types_core" }
 types_error = { path = "../../../../_support/types/types_error" }
 types_fmgr = { path = "../../../../_support/types/fmgr" }
-wchar = { path = "../../../../common/wchar" }
 
 [dev-dependencies]
-syscache_seams = { path = "../../cache/syscache_seams" }
-types_tuple = { path = "../../../../_support/types/types_tuple" }
+wchar = { path = "../../../../common/wchar" }

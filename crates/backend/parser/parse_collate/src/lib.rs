@@ -247,6 +247,8 @@ fn assign_collations_walker<'mcx>(
         // SubLink: children walked (T_Query arm supplies the EXPR sublink's
         // first-column collation); exprSetCollation on SubLink is a C no-op.
         tag @ (NodeTag::T_OpExpr
+        | NodeTag::T_ScalarArrayOpExpr
+        | NodeTag::T_ArrayExpr
         | NodeTag::T_FuncExpr
         | NodeTag::T_RelabelType
         | NodeTag::T_CoerceViaIO
@@ -291,6 +293,16 @@ fn assign_collations_walker<'mcx>(
                 NodeTag::T_OpExpr => {
                     for arg in &node.as_op_expr().unwrap().args {
                         assign_collations_walker(arg, &mut loccontext)?;
+                    }
+                }
+                NodeTag::T_ScalarArrayOpExpr => {
+                    for arg in &node.as_scalar_array_op_expr().unwrap().args {
+                        assign_collations_walker(arg, &mut loccontext)?;
+                    }
+                }
+                NodeTag::T_ArrayExpr => {
+                    for e in &node.as_array_expr().unwrap().elements {
+                        assign_collations_walker(e, &mut loccontext)?;
                     }
                 }
                 NodeTag::T_CoerceViaIO => {
@@ -388,6 +400,18 @@ fn assign_collations_walker<'mcx>(
                             o.opcollid = set_coll;
                             o.inputcollid = input_coll;
                         })
+                        .unwrap(),
+                    // exprSetCollation(ScalarArrayOpExpr) is assert-only in C
+                    // (boolean result); only the input collation is stored.
+                    NodeTag::T_ScalarArrayOpExpr => {
+                        debug_assert!(!OidIsValid(set_coll));
+                        node.with_mut::<types_nodes::ScalarArrayOpExpr, _>(|s| {
+                            s.inputcollid = input_coll;
+                        })
+                        .unwrap()
+                    }
+                    NodeTag::T_ArrayExpr => node
+                        .with_mut::<types_nodes::ArrayExpr, _>(|a| a.array_collid = set_coll)
                         .unwrap(),
                     NodeTag::T_FuncExpr => node
                         .with_mut::<types_nodes::FuncExpr, _>(|f| {

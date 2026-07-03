@@ -16,7 +16,7 @@ use types_nodes::primnodes::{
 };
 
 use types_nodes::JoinType;
-use types_nodes::rawnodes::A_Expr_Kind::AEXPR_OP;
+use types_nodes::rawnodes::A_Expr_Kind::{self, AEXPR_OP};
 use types_nodes::rawnodes::{
     ColumnDef, Constraint, ConstrType, CreateStmt, IndexElem, IndexStmt, OnCommitAction,
     RangeSubselect, WindowDef, FRAMEOPTION_BETWEEN, FRAMEOPTION_DEFAULTS,
@@ -1400,6 +1400,78 @@ impl<'mcx> Parser<'mcx> {
                     },
                 )?));
             }
+            // a_expr [NOT] LIKE/ILIKE a_expr [ESCAPE a_expr] and
+            // a_expr [NOT] SIMILAR TO a_expr [ESCAPE a_expr]
+            2045..=2056 => {
+                use types_nodes::rawnodes::A_Expr_Kind;
+                let (kind, op) = match rule {
+                    2045 | 2046 => (A_Expr_Kind::AEXPR_LIKE, "~~"),
+                    2047 | 2048 => (A_Expr_Kind::AEXPR_LIKE, "!~~"),
+                    2049 | 2050 => (A_Expr_Kind::AEXPR_ILIKE, "~~*"),
+                    2051 | 2052 => (A_Expr_Kind::AEXPR_ILIKE, "!~~*"),
+                    2053 | 2054 => (A_Expr_Kind::AEXPR_SIMILAR, "~"),
+                    _ => (A_Expr_Kind::AEXPR_SIMILAR, "!~"),
+                };
+                let similar = rule >= 2053;
+                let not = matches!(rule, 2047 | 2048 | 2051 | 2052 | 2055 | 2056);
+                let escape = matches!(rule, 2046 | 2048 | 2050 | 2052 | 2054 | 2056);
+                let pat_i = match (similar, not) {
+                    (false, false) => 3,
+                    (false, true) => 4,
+                    (true, false) => 4,
+                    (true, true) => 5,
+                };
+                let lexpr = view.v(1).node();
+                let pat = view.v(pat_i).node().expect("a_expr");
+                let rexpr = if similar {
+                    let args = if escape {
+                        NodeList::make2(
+                            mcx,
+                            pat,
+                            view.v(pat_i + 2).node().expect("a_expr"),
+                        )?
+                    } else {
+                        NodeList::make1(mcx, pat)?
+                    };
+                    make_func_call(
+                        mcx,
+                        system_func_name(mcx, "similar_to_escape")?,
+                        args,
+                        CoercionForm::COERCE_EXPLICIT_CALL,
+                        view.l(2),
+                    )?
+                    .seal()
+                } else if escape {
+                    let args = NodeList::make2(
+                        mcx,
+                        pat,
+                        view.v(pat_i + 2).node().expect("a_expr"),
+                    )?;
+                    make_func_call(
+                        mcx,
+                        system_func_name(mcx, "like_escape")?,
+                        args,
+                        CoercionForm::COERCE_EXPLICIT_CALL,
+                        view.l(2),
+                    )?
+                    .seal()
+                } else {
+                    pat
+                };
+                let name = NodeList::make1(mcx, Node::mk_string(mcx, op)?)?;
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    types_nodes::A_Expr {
+                        kind,
+                        name,
+                        lexpr,
+                        rexpr: Some(rexpr),
+                        rexpr_list_start: 0,
+                        rexpr_list_end: 0,
+                        location: view.l(2),
+                    },
+                )?));
+            }
             // a_expr [NOT] IN_P select_with_parens
             2074 | 2076 => {
                 let subselect_i = if rule == 2074 { 3 } else { 4 };
@@ -1426,6 +1498,23 @@ impl<'mcx> Parser<'mcx> {
                         },
                     )?
                 }));
+            }
+            // a_expr [NOT] IN_P '(' expr_list ')'
+            2075 | 2077 => {
+                let (op, lparen_i) = if rule == 2075 { ("=", 3) } else { ("<>", 4) };
+                let list = Node::mk_list(mcx, view.v(lparen_i + 1).list())?;
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    types_nodes::A_Expr {
+                        kind: A_Expr_Kind::AEXPR_IN,
+                        name: NodeList::make1(mcx, Node::mk_string(mcx, op)?)?,
+                        lexpr: view.v(1).node(),
+                        rexpr: Some(list),
+                        rexpr_list_start: view.l(lparen_i),
+                        rexpr_list_end: view.l(lparen_i + 2),
+                        location: view.l(2),
+                    },
+                )?));
             }
             // b_expr: the a_expr forms without boolean/IS tails (DISTINCT and
             // IS DOCUMENT arms 2108-2111 stay unimplemented-rule loud).

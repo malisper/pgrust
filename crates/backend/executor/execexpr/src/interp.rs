@@ -507,6 +507,28 @@ fn run_program<'mcx>(
                     write_out(*out, &mut regs, v, isnull);
                 }
             }
+            Step::ScalarArrayOp { call, use_or, strict, typlen, typbyval, typalign, out } => {
+                let arr = read_out(*out, &regs);
+                let (value, isnull) = eval_scalar_array_op(
+                    frames, call, *use_or, *strict, *typlen, *typbyval, *typalign, arr,
+                )?;
+                write_out(*out, &mut regs, value, isnull);
+            }
+            Step::ArrayExprStep {
+                elems,
+                nelems,
+                frame,
+                elmtype,
+                elmlen,
+                elmbyval,
+                elmalign,
+                out,
+            } => {
+                let (value, isnull) = eval_array_expr(
+                    frames, *elems, *nelems, *frame, *elmtype, *elmlen, *elmbyval, *elmalign,
+                )?;
+                write_out(*out, &mut regs, value, isnull);
+            }
             Step::FuncExprStrict1 { call, out } => {
                 // SAFETY: arg 0 of the call's live fcinfo image.
                 let a0 = unsafe { crate::steps::arg_slot_of(call.fcinfo, 0).read() };
@@ -955,6 +977,147 @@ fn need_slot<'a, 'b, 'mcx>(
 #[inline(never)]
 fn missing_slot_hoisted() -> ! {
     panic!("execexpr: expression references a slot that was not supplied")
+}
+
+// ExecEvalScalarArrayOp (execExprInterp.c): in-place walk of the array
+// image; the scalar operand sits in args[0], each element lands in args[1].
+#[allow(clippy::too_many_arguments)]
+fn eval_scalar_array_op(
+    frames: &mut [crate::steps::FuncFrame<'_>],
+    call: &FuncCall,
+    use_or: bool,
+    strict: bool,
+    typlen: i16,
+    typbyval: bool,
+    typalign: u8,
+    arr: NullableDatum,
+) -> PgResult<(Datum, bool)> {
+    if arr.isnull {
+        return Ok((Datum::null(), true));
+    }
+    let p = arr.value.as_usize() as *const u8;
+    // SAFETY: non-null array datum; folded/deserialized arrays here always
+    // carry an inline 4-byte header.
+    let b0 = unsafe { *p };
+    assert!(b0 != 0x01 && b0 & 0x03 == 0, "scalararrayop: toasted/packed array image");
+    // SAFETY: 4-byte varlena header verified; the image is VARSIZE bytes.
+    let img = unsafe {
+        core::slice::from_raw_parts(p, ::arrayfuncs::foundation::arr_size(core::slice::from_raw_parts(p, 4)))
+    };
+    let (ndim, dims, _lbs) = ::arrayfuncs::foundation::read_dims_lbounds(img);
+    let mut nitems = 1i64;
+    for d in &dims[..ndim as usize] {
+        nitems *= *d as i64;
+    }
+    if ndim == 0 {
+        nitems = 0;
+    }
+
+    // SAFETY: arg slot 0 of the call's live fcinfo image.
+    let scalar = unsafe { crate::steps::arg_slot_of(call.fcinfo, 0).read() };
+    if scalar.isnull && strict {
+        return Ok((Datum::null(), true));
+    }
+
+    let mut result = !use_or;
+    let mut resultnull = false;
+    let bitmap_off = ::arrayfuncs::foundation::arr_nullbitmap_off(img);
+    let mut off = ::arrayfuncs::foundation::arr_data_offset(img);
+    let mut bitmask: u32 = 1;
+    let mut bitmap_byte = 0usize;
+
+    for _ in 0..nitems {
+        let elt_null = match bitmap_off {
+            Some(bo) => (img[bo + bitmap_byte] as u32 & bitmask) == 0,
+            None => false,
+        };
+        let (elt, this_null) = if elt_null {
+            (Datum::null(), true)
+        } else {
+            off = ::arrayfuncs::foundation::att_align_nominal(off, typalign);
+            // SAFETY: off stays within the VARSIZE image per the array layout.
+            let ep = unsafe { img.as_ptr().add(off) };
+            let elt = ::arrayfuncs::foundation::fetch_att(ep, typbyval, typlen as i32);
+            off = ::arrayfuncs::foundation::att_addlength_pointer(off, typlen as i32, ep);
+            (elt, false)
+        };
+
+        let (thisresult, thisnull) = if strict && (this_null || scalar.isnull) {
+            (Datum::null(), true)
+        } else {
+            // SAFETY: arg slot 1 of the call's live fcinfo image.
+            unsafe {
+                crate::steps::arg_slot_of(call.fcinfo, 1)
+                    .write(NullableDatum { value: elt, isnull: this_null })
+            };
+            invoke(frames, call)?
+        };
+
+        if thisnull {
+            resultnull = true;
+        } else if use_or {
+            if thisresult.as_bool() {
+                return Ok((Datum::from_bool(true), false));
+            }
+        } else if !thisresult.as_bool() {
+            return Ok((Datum::from_bool(false), false));
+        }
+
+        if bitmap_off.is_some() {
+            bitmask <<= 1;
+            if bitmask == 0x100 {
+                bitmask = 1;
+                bitmap_byte += 1;
+            }
+        }
+    }
+
+    if resultnull {
+        return Ok((Datum::null(), true));
+    }
+    Ok((Datum::from_bool(result), false))
+}
+
+// ExecEvalArrayExpr (execExprInterp.c), 1-D leg; the result array lives in
+// the armed per-eval result context.
+#[allow(clippy::too_many_arguments)]
+fn eval_array_expr(
+    frames: &mut [crate::steps::FuncFrame<'_>],
+    elems: core::ptr::NonNull<NullableDatum>,
+    nelems: u16,
+    frame: u32,
+    elmtype: ::types_core::Oid,
+    elmlen: i16,
+    elmbyval: bool,
+    elmalign: u8,
+) -> PgResult<(Datum, bool)> {
+    let f = &mut frames[frame as usize];
+    // SAFETY: the argless frame's fcinfo image is live; armed per eval.
+    let mcx = unsafe { fcinfo_mut(f.fcinfo, 0) }.result_mcx();
+    let n = nelems as usize;
+    // SAFETY: n scratch slots written by the element steps just executed.
+    let src = unsafe { core::slice::from_raw_parts(elems.as_ptr(), n) };
+    let mut values: ::mcx::PgVec<'_, Datum> = ::mcx::vec_with_capacity_in(mcx, n)?;
+    let mut nulls: ::mcx::PgVec<'_, bool> = ::mcx::vec_with_capacity_in(mcx, n)?;
+    for nd in src {
+        values.push(nd.value);
+        nulls.push(nd.isnull);
+    }
+    let dims = [n as i32];
+    let lbs = [1i32];
+    let img = ::arrayfuncs::construct_md_array(
+        mcx,
+        &values,
+        Some(&nulls),
+        1,
+        &dims,
+        &lbs,
+        elmtype,
+        elmlen as i32,
+        elmbyval,
+        elmalign,
+    )?;
+    Ok((Datum::from_usize(img.leak().as_ptr() as usize), false))
 }
 
 #[inline(always)]

@@ -1761,6 +1761,19 @@ fn deparse_expr<'mcx>(
             buf.try_push_str("CASE_TEST_EXPR")?;
             Ok(())
         }
+        // get_rule_expr T_ScalarArrayOpExpr, non-pretty form.
+        NodeTag::T_ScalarArrayOpExpr => {
+            let sa = expr.as_scalar_array_op_expr().unwrap();
+            let opname = lsyscache::get_opname(es.str.allocator(), sa.opno)?
+                .expect("operator of a planned expression exists");
+            buf.try_push('(')?;
+            deparse_expr(es, plan_node, ancestors, sa.args.nth(0), useprefix, buf)?;
+            write!(buf, " {} {} (", opname.as_str(), if sa.useOr { "ANY" } else { "ALL" })
+                .expect("PgString write");
+            deparse_expr(es, plan_node, ancestors, sa.args.nth(1), useprefix, buf)?;
+            buf.try_push_str("))")?;
+            Ok(())
+        }
         other => node_gap(
             "deparse_expression",
             &format!("{other:?} deparse unported (ruleutils lane)"),
@@ -1875,7 +1888,9 @@ fn deparse_expr_type(node: Node<'_>) -> types_core::Oid {
         NodeTag::T_OpExpr => node.as_op_expr().unwrap().opresulttype,
         NodeTag::T_Aggref => node.as_aggref().unwrap().aggtype,
         NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resulttype,
-        NodeTag::T_BoolExpr | NodeTag::T_NullTest => types_core::catalog::BOOLOID,
+        NodeTag::T_BoolExpr | NodeTag::T_NullTest | NodeTag::T_ScalarArrayOpExpr => {
+            types_core::catalog::BOOLOID
+        }
         NodeTag::T_CaseExpr => node.as_case_expr().unwrap().casetype,
         NodeTag::T_CaseTestExpr => node.as_case_test_expr().unwrap().typeId,
         other => node_gap("exprType", &format!("{other:?} (ruleutils deparse lane)")),
@@ -2003,6 +2018,8 @@ pub(crate) fn get_const_expr(c: &Const, buf: &mut PgString<'_>, showtype: i32) -
     let (typoutput, _typisvarlena) = lsyscache::typ::getTypeOutputInfo(c.consttype)?;
     let mut finfo = fmgr_seams::fmgr_info::call(typoutput)?;
     let mut fcinfo = types_fmgr::LocalFcinfo::<1>::fresh(types_core::primitive::InvalidOid);
+    // SAFETY: buf's arena outlives this single output-function call.
+    unsafe { fcinfo.set_result_mcx(buf.allocator()) };
     fcinfo.set_arg(0, c.constvalue);
     let out = finfo.invoke(&mut fcinfo)?;
     // SAFETY: text output fns return a NUL-terminated cstring datum (the

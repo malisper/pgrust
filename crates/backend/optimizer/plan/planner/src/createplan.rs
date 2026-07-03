@@ -507,7 +507,7 @@ fn create_indexscan_plan<'mcx>(
         debug_assert!(p.indexorderbys.is_empty());
         let mut rids = mcx::PgVec::new_in(mcx);
         for ic in p.indexclauses.iter() {
-            rids.push(ic.rinfo.expect("IndexClause rinfo"));
+            rids.push((ic.rinfo.expect("IndexClause rinfo"), ic.lossy));
         }
         (
             p.indexinfo.as_ref().expect("indexinfo set").indexoid,
@@ -527,8 +527,9 @@ fn create_indexscan_plan<'mcx>(
         if run.root.rinfo(rid).pseudoconstant {
             continue;
         }
-        // is_redundant_with_indexclauses: no EC parents, so rinfo identity.
-        if indexclause_rinfos.iter().any(|&c| c == rid) {
+        // is_redundant_with_indexclauses: no EC parents, so rinfo identity;
+        // a lossy indexclause does not enforce the condition exactly.
+        if indexclause_rinfos.iter().any(|&(c, lossy)| c == rid && !lossy) {
             continue;
         }
         let clause = *run.root.expr_node(run.root.rinfo(rid).clause);
@@ -780,6 +781,11 @@ fn predicate_implied_by_indexquals<'mcx>(
             || types_nodes::equal(pl, cr)
             || types_nodes::equal(pr, cl)
         {
+            // get_btree_test_op: a predicate operator with no btree
+            // interpretation (pattern/regex ops) proves nothing.
+            if !op_has_btree_interpretation(p_op.opno)? {
+                continue;
+            }
             panic!(
                 "operator_predicate_proof (predtest.c): matching operand pair needs the \
                  btree strategy proof; M2 predicate lane"
@@ -788,6 +794,32 @@ fn predicate_implied_by_indexquals<'mcx>(
         // No matching operand pair: C's operator_predicate_proof returns false.
     }
     Ok(false)
+}
+
+// get_op_btree_interpretation (lsyscache.c) reduced to its existence probe.
+fn op_has_btree_interpretation(opno: u32) -> PgResult<bool> {
+    const BTREE_AM_OID: u32 = 403;
+    const COMPARISON_NE: u32 = 1201;
+    let mut found = false;
+    lsyscache::amop::with_amop_members(opno, |aform| {
+        if aform.amopmethod == BTREE_AM_OID {
+            found = true;
+        }
+    })?;
+    if found {
+        return Ok(true);
+    }
+    // C's <>-via-negator leg.
+    let negator = lsyscache::get_negator(opno)?;
+    if negator != 0 {
+        lsyscache::amop::with_amop_members(negator, |aform| {
+            if aform.amopmethod == BTREE_AM_OID {
+                found = true;
+            }
+        })?;
+    }
+    let _ = COMPARISON_NE;
+    Ok(found)
 }
 
 // fix_indexqual_references (createplan.c) -> (stripped, fixed) qual lists.

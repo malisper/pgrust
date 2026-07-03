@@ -285,12 +285,22 @@ fn fc_wrappers_and_oids() {
 #[test]
 fn like_support_rows_are_loud() {
     use types_fmgr::LocalFcinfo;
+    // Selectivity/IndexCondition requests stay loud.
+    let tag = types_nodes::NodeTag::T_SupportRequestSelectivity;
     let mut fcinfo = LocalFcinfo::<1>::new(0);
+    fcinfo.set_arg(0, datum::Datum::from_usize(&tag as *const _ as usize));
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         builtins::fc_textlike_support(None, &mut fcinfo)
     }));
     let msg = *r.unwrap_err().downcast::<&'static str>().unwrap();
     assert!(msg.contains("textlike_support"));
+
+    // Requests C's like_regex_support ignores return NULL (Datum 0).
+    let tag = types_nodes::NodeTag::T_SupportRequestSimplify;
+    let mut fcinfo = LocalFcinfo::<1>::new(0);
+    fcinfo.set_arg(0, datum::Datum::from_usize(&tag as *const _ as usize));
+    let r = builtins::fc_textlike_support(None, &mut fcinfo).unwrap();
+    assert_eq!(r.as_usize(), 0);
 }
 
 const COLL_LIBC_LATIN1: Oid = 40001;

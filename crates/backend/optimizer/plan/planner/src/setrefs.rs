@@ -1245,6 +1245,23 @@ fn fix_scan_expr_walker<'mcx>(run: &mut PlannerRun<'mcx>, node: Node<'mcx>) -> P
             }
             Ok(())
         }
+        NodeTag::T_ScalarArrayOpExpr => {
+            let sa = node.as_scalar_array_op_expr().unwrap();
+            // fix_expr_common: set_sa_opfuncid + dependency; eval_const_
+            // expressions resolved opfuncid on every live path here.
+            debug_assert!(sa.opfuncid != 0, "fix_scan_expr_walker: unresolved sa opfuncid");
+            record_plan_function_dependency(run, sa.opfuncid)?;
+            if sa.hashfuncid != 0 {
+                record_plan_function_dependency(run, sa.hashfuncid)?;
+            }
+            if sa.negfuncid != 0 {
+                record_plan_function_dependency(run, sa.negfuncid)?;
+            }
+            for arg in &sa.args {
+                fix_scan_expr_walker(run, arg)?;
+            }
+            Ok(())
+        }
         NodeTag::T_CaseTestExpr => Ok(()),
         NodeTag::T_CaseExpr => {
             let c = node.as_case_expr().unwrap();
@@ -1262,6 +1279,12 @@ fn fix_scan_expr_walker<'mcx>(run: &mut PlannerRun<'mcx>, node: Node<'mcx>) -> P
             }
         }
         NodeTag::T_CoerceViaIO => fix_scan_expr_walker(run, node.as_coerce_via_io().unwrap().arg),
+        NodeTag::T_ArrayExpr => {
+            for e in &node.as_array_expr().unwrap().elements {
+                fix_scan_expr_walker(run, e)?;
+            }
+            Ok(())
+        }
         other => panic!("fix_scan_expr_walker (setrefs.c): {other:?}; M2 expression lane"),
     }
 }

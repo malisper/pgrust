@@ -233,6 +233,83 @@ fn ece_mutator<'mcx>(node: Node<'mcx>, cx: &EceContext<'mcx>) -> PgResult<Option
                 }
             }
         }
+        NodeTag::T_ScalarArrayOpExpr => {
+            use types_nodes::primnodes::ScalarArrayOpExpr;
+            let sa = node.as_scalar_array_op_expr().unwrap();
+            let new_args = mutate_list(cx.mcx, &sa.args, &mut |n| ece_mutator(n, cx))?;
+            // set_sa_opfuncid (nodeFuncs.c).
+            let opfuncid =
+                if sa.opfuncid == 0 { lsyscache::get_opcode(sa.opno)? } else { sa.opfuncid };
+            let all_const =
+                new_args.as_ref().unwrap_or(&sa.args).iter().all(|a| a.as_const().is_some());
+            let changed = new_args.is_some() || opfuncid != sa.opfuncid;
+            if !all_const || !ece_function_is_safe(cx, opfuncid)? {
+                if !changed {
+                    return Ok(None);
+                }
+            }
+            let args = match new_args {
+                Some(a) => a,
+                None => sa.args.clone_in(cx.mcx)?,
+            };
+            let new_node = Node::mk(
+                cx.mcx,
+                ScalarArrayOpExpr {
+                    opno: sa.opno,
+                    opfuncid,
+                    hashfuncid: sa.hashfuncid,
+                    negfuncid: sa.negfuncid,
+                    useOr: sa.useOr,
+                    inputcollid: sa.inputcollid,
+                    args,
+                    location: sa.location,
+                },
+            )?;
+            if all_const && ece_function_is_safe(cx, opfuncid)? {
+                return clauses_seams::evaluate_expr::call(cx.mcx, new_node, BOOLOID, -1, 0)
+                    .map(Some);
+            }
+            Ok(Some(new_node))
+        }
+        NodeTag::T_ArrayExpr => {
+            use types_nodes::primnodes::ArrayExpr;
+            let a = node.as_array_expr().unwrap();
+            let new_elements =
+                mutate_list(cx.mcx, &a.elements, &mut |n| ece_mutator(n, cx))?;
+            let all_const =
+                new_elements.as_ref().unwrap_or(&a.elements).iter().all(|e| e.as_const().is_some());
+            if !all_const && new_elements.is_none() {
+                return Ok(None);
+            }
+            let elements = match new_elements {
+                Some(e) => e,
+                None => a.elements.clone_in(cx.mcx)?,
+            };
+            let new_node = Node::mk(
+                cx.mcx,
+                ArrayExpr {
+                    array_typeid: a.array_typeid,
+                    array_collid: a.array_collid,
+                    element_typeid: a.element_typeid,
+                    elements,
+                    multidims: a.multidims,
+                    list_start: a.list_start,
+                    list_end: a.list_end,
+                    location: a.location,
+                },
+            )?;
+            if all_const {
+                return clauses_seams::evaluate_expr::call(
+                    cx.mcx,
+                    new_node,
+                    a.array_typeid,
+                    -1,
+                    a.array_collid,
+                )
+                .map(Some);
+            }
+            Ok(Some(new_node))
+        }
         NodeTag::T_BoolExpr => {
             let b = node.as_bool_expr().unwrap();
             match b.boolop {
@@ -636,10 +713,15 @@ fn simplify_function<'mcx>(
     )?;
 
     if newexpr.is_none() && allow_non_const && shape.prosupport != InvalidOid {
-        panic!(
-            "simplify_function deferred: SupportRequestSimplify dispatch for prosupport {} (funcid {funcid})",
-            shape.prosupport
-        );
+        // like_regex_support (like_support.c) ignores SupportRequestSimplify:
+        // textlike/texticlike/texticregexeq/textregexeq/text_starts_with.
+        const LIKE_REGEX_SUPPORT: [Oid; 5] = [1023, 1024, 1025, 1364, 6242];
+        if !LIKE_REGEX_SUPPORT.contains(&shape.prosupport) {
+            panic!(
+                "simplify_function deferred: SupportRequestSimplify dispatch for prosupport {} (funcid {funcid})",
+                shape.prosupport
+            );
+        }
     }
     if newexpr.is_none() && allow_non_const && fmgr_core::fmgr_isbuiltin(funcid).is_none() {
         // A builtin is internal-language, which C's inline_function rejects
@@ -660,6 +742,14 @@ fn expand_function_arguments_gate(args: &NodeList<'_>, shape: &PgProcShape) {
     if args.len() < shape.pronargs as usize {
         panic!("expand_function_arguments deferred: default-argument insertion");
     }
+}
+
+// ece_function_is_safe (clauses.c).
+fn ece_function_is_safe(cx: &EceContext<'_>, funcid: Oid) -> PgResult<bool> {
+    let shape = syscache_seams::lookup_pg_proc_shape::call(funcid)?
+        .ok_or_else(|| func_lookup_failed(funcid))?;
+    Ok(shape.provolatile == PROVOLATILE_IMMUTABLE
+        || (cx.estimate && shape.provolatile == PROVOLATILE_STABLE))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -856,7 +946,28 @@ fn negate_clause<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>) -> PgResult<Node<'mcx>>
             }
             crate::classify::make_notclause(mcx, node)
         }
-        other @ (NodeTag::T_ScalarArrayOpExpr | NodeTag::T_BooleanTest) => panic!(
+        NodeTag::T_ScalarArrayOpExpr => {
+            use types_nodes::primnodes::ScalarArrayOpExpr;
+            let sa = node.as_scalar_array_op_expr().unwrap();
+            let negator = lsyscache::get_negator(sa.opno)?;
+            if negator != 0 {
+                return Node::mk(
+                    mcx,
+                    ScalarArrayOpExpr {
+                        opno: negator,
+                        opfuncid: 0,
+                        hashfuncid: 0,
+                        negfuncid: 0,
+                        useOr: !sa.useOr,
+                        inputcollid: sa.inputcollid,
+                        args: sa.args.clone_in(mcx)?,
+                        location: sa.location,
+                    },
+                );
+            }
+            crate::classify::make_notclause(mcx, node)
+        }
+        other @ NodeTag::T_BooleanTest => panic!(
             "negate_clause (prepqual.c): {other:?} simplification unported — \
              unit backend-optimizer-prep-prepqual"
         ),
