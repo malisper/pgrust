@@ -1,5 +1,4 @@
-//! nbtdedup.c write side: _bt_dedup_pass + single value strategy. The
-//! interval state machine is shared with redo (types_nbtree::dedup). Loud:
+//! nbtdedup.c write side: _bt_dedup_pass + single value strategy. Loud:
 //! _bt_bottomupdel_pass (deletion lane), _bt_update_posting (vacuum lane).
 
 use ::bufmgr_seams::{self as bufmgr, BufferPin};
@@ -33,10 +32,9 @@ fn dedup_add_failed(what: &str) -> Box<PgError> {
 }
 
 /// _bt_dedup_pass.
-///
 /// # Safety
-/// `buf` pinned + write-locked leaf page with no LP_DEAD items; `newitem` a
-/// live tuple image; `newitemsz` its MAXALIGNed size sans line pointer.
+/// `buf`: pinned + write-locked leaf, no LP_DEAD items; `newitem` live;
+/// `newitemsz` MAXALIGNed, sans line pointer.
 pub(crate) unsafe fn bt_dedup_pass(
     rel: &Relation<'_>,
     buf: &BufferPin,
@@ -61,8 +59,7 @@ pub(crate) unsafe fn bt_dedup_pass(
         singlevalstrat = bt_do_singleval(rel, &page, &state, minoff, newitem);
     }
 
-    // PageGetTempPageCopySpecial + LSN carry-over (XLogInsert may dump the
-    // image, so the copy must claim the original's LSN).
+    // PageGetTempPageCopySpecial; the copy claims the original's LSN (FPI).
     let mut temp = TempPage([0u8; BLCKSZ]);
     let mut newpage =
         PageMut::from_raw(core::ptr::NonNull::new(temp.0.as_mut_ptr()).expect("stack page"));
@@ -94,15 +91,13 @@ pub(crate) unsafe fn bt_dedup_pass(
             && bt_keep_natts_fast(rel, state.base, itup) > nkeyatts
             && state.save_htid(itup)
         {
-            // merged into the pending posting list
         } else {
             pagesaving += state
                 .finish_pending(&mut newpage)
                 .map_err(|()| dedup_add_failed("tuple to page"))?;
 
             if singlevalstrat {
-                // cap the sixth and final large posting list tuple, then stop
-                // merging altogether: remaining tuples wait for the page split
+                // sixth capped posting ends merging: the tail waits for the split
                 if state.nmaxitems == 5 {
                     bt_singleval_fillfactor(&mut state, newitemsz);
                 } else if state.nmaxitems == 6 {
@@ -119,7 +114,6 @@ pub(crate) unsafe fn bt_dedup_pass(
         .finish_pending(&mut newpage)
         .map_err(|()| dedup_add_failed("tuple to page"))?;
 
-    // newpage identical to page: nothing merged, leave the page alone
     if state.nintervals == 0 {
         return Ok(());
     }
@@ -169,9 +163,7 @@ pub(crate) unsafe fn bt_dedup_pass(
     Ok(())
 }
 
-/// _bt_do_singleval: whole page is one value (first and last data items both
-/// equal newitem) — prepare for nbtsplitloc.c's own single value strategy.
-///
+/// _bt_do_singleval.
 /// # Safety
 /// As [`bt_dedup_pass`].
 unsafe fn bt_do_singleval(
@@ -194,8 +186,7 @@ unsafe fn bt_do_singleval(
     false
 }
 
-// _bt_singleval_fillfactor: leave BTREE_SINGLEVAL_FILLFACTOR% headroom so the
-// anticipated split lands like a dedup-disabled one (matches nbtsplitloc.c).
+// _bt_singleval_fillfactor: calculation must match nbtsplitloc.c.
 fn bt_singleval_fillfactor(state: &mut BTDedupState, newitemsz: usize) {
     let mut leftfree =
         BLCKSZ - SizeOfPageHeaderData - maxalign(core::mem::size_of::<BTPageOpaqueData>());

@@ -1,7 +1,6 @@
-//! BTDedupStateData (nbtree.h) + the interval state machine shared by the
-//! write-side _bt_dedup_pass (crate nbtree) and btree_xlog_dedup redo (crate
-//! nbtree_xlog, which cannot depend on nbtree). Operates on raw on-page index
-//! tuple images; callers hold the buffer pin + lock.
+//! BTDedupStateData (nbtree.h): the interval state machine shared by
+//! _bt_dedup_pass (crate nbtree) and btree_xlog_dedup redo (crate
+//! nbtree_xlog). Raw tuple images; callers hold the buffer pin + lock.
 
 use crate::page::BTMaxItemSize;
 use crate::vacuum::BTDedupInterval;
@@ -17,9 +16,7 @@ const _: () = assert!(MaxIndexTuplesPerPage == 408);
 const IPD_SIZE: usize = core::mem::size_of::<ItemPointerData>();
 const _: () = assert!(IPD_SIZE == 6);
 
-// htids capacity covers maxpostingsize <= BTMaxItemSize (write side caps at
-// BTMaxItemSize/2, redo at BTMaxItemSize); the bottom-up arm's BLCKSZ
-// maxpostingsize is the deletion lane.
+// bound: maxpostingsize <= BTMaxItemSize (bottom-up's BLCKSZ arm = deletion lane)
 const MAX_HTIDS: usize = BTMaxItemSize / IPD_SIZE + 2;
 
 const fn maxalign(l: usize) -> usize {
@@ -83,8 +80,7 @@ pub struct BTDedupState {
 impl BTDedupState {
     pub fn new(maxpostingsize: Size) -> BTDedupState {
         debug_assert!(maxpostingsize <= BTMaxItemSize);
-        // SAFETY: POD struct; caller owns it on the stack (C pallocs state +
-        // htids per pass; one zeroed frame-local is the cheaper same shape).
+        // SAFETY: POD; one zeroed frame-local per pass (C pallocs state + htids).
         let mut state: BTDedupState = unsafe { core::mem::zeroed() };
         state.deduplicate = true;
         state.maxpostingsize = maxpostingsize;
@@ -93,10 +89,8 @@ impl BTDedupState {
     }
 
     /// _bt_dedup_start_pending.
-    ///
     /// # Safety
-    /// `base` points at a live non-pivot index tuple; valid until the next
-    /// `finish_pending`.
+    /// `base`: live non-pivot tuple, valid until the next `finish_pending`.
     pub unsafe fn start_pending(&mut self, base: *const u8, baseoff: OffsetNumber) {
         debug_assert!(self.nhtids == 0);
         debug_assert!(self.nitems == 0);
@@ -126,9 +120,8 @@ impl BTDedupState {
     }
 
     /// _bt_dedup_save_htid.
-    ///
     /// # Safety
-    /// `itup` points at a live non-pivot index tuple.
+    /// `itup`: live non-pivot tuple.
     pub unsafe fn save_htid(&mut self, itup: *const u8) -> bool {
         debug_assert!(!itup_is_pivot(itup));
 
@@ -138,13 +131,12 @@ impl BTDedupState {
             (itup_nposting(itup), itup.add(itup_posting_offset(itup)))
         };
 
-        // must match the size formed below for new posting list tuples
+        // must match the size formed in finish_pending
         let mergedtupsz =
             maxalign(self.basetupsize + (self.nhtids + nhtids) * IPD_SIZE);
 
         if mergedtupsz > self.maxpostingsize {
-            // only count as maxpostingsize-capped for single value strategy
-            // when the final posting list carries over 50 TIDs
+            // counts for single value strategy only past 50 TIDs
             if self.nhtids > 50 {
                 self.nmaxitems += 1;
             }
@@ -164,11 +156,9 @@ impl BTDedupState {
         true
     }
 
-    /// _bt_dedup_finish_pending; `Err` is C's elog(ERROR, "deduplication
-    /// failed to add tuple to page").
-    ///
+    /// _bt_dedup_finish_pending; `Err` = C's failed-to-add-tuple elog(ERROR).
     /// # Safety
-    /// `self.base` still points at its live tuple; `newpage` is the temp page.
+    /// `self.base` still live; `newpage` is the temp page.
     pub unsafe fn finish_pending(&mut self, newpage: &mut PageMut<'_>) -> Result<Size, ()> {
         debug_assert!(self.nitems > 0);
         debug_assert!(self.nitems <= self.nhtids);

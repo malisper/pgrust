@@ -862,8 +862,8 @@ unsafe fn bt_delete_or_dedup_one_page(
 
     insertstate.bounds_valid = false;
 
-    // indexUnchanged is folded into uniquedup by our caller (C keeps both;
-    // the bottomup trigger and dedup's bottomupdedup arg are their OR).
+    // C divergence: indexUnchanged folded into uniquedup (their OR feeds both
+    // the bottomup trigger and dedup's bottomupdedup arg).
     if uniquedup {
         unported_phase2("_bt_bottomupdel_pass (bottom-up deletion lane)");
     }
