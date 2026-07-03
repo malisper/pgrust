@@ -901,3 +901,77 @@ fn local_release_and_read_buffer_fastpath() {
     UnlockReleaseBuffer(b).unwrap();
     assert_eq!(crate::localbuf::local_ref_count(b), 0);
 }
+
+fn synth_tag(rel: u32, blkno: u32) -> types_storage::buf::buftag {
+    types_storage::buf::buftag {
+        spcOid: 1663,
+        dbOid: 5,
+        relNumber: rel,
+        forkNum: ForkNumber::MAIN_FORKNUM,
+        blockNum: blkno,
+    }
+}
+
+fn bt_insert(tag: &types_storage::buf::buftag, id: i32) -> i32 {
+    let hash = BufTableHashCode(tag);
+    let lock = BufMappingPartitionLock(hash);
+    lwlock::LWLockAcquire(lock, lwlock::LW_EXCLUSIVE, globals::MyProcNumber()).unwrap();
+    let r = BufTableInsert(tag, hash, id).unwrap();
+    lwlock::LWLockRelease(lock).unwrap();
+    r
+}
+
+fn bt_lookup(tag: &types_storage::buf::buftag) -> i32 {
+    let hash = BufTableHashCode(tag);
+    let lock = BufMappingPartitionLock(hash);
+    lwlock::LWLockAcquire(lock, lwlock::LW_SHARED, globals::MyProcNumber()).unwrap();
+    let r = BufTableLookup(tag, hash).unwrap();
+    lwlock::LWLockRelease(lock).unwrap();
+    r
+}
+
+fn bt_delete(tag: &types_storage::buf::buftag) -> types_error::PgResult<()> {
+    let hash = BufTableHashCode(tag);
+    let lock = BufMappingPartitionLock(hash);
+    lwlock::LWLockAcquire(lock, lwlock::LW_EXCLUSIVE, globals::MyProcNumber()).unwrap();
+    let r = BufTableDelete(tag, hash);
+    lwlock::LWLockRelease(lock).unwrap();
+    r
+}
+
+// Dense-table torture: grow under load, backward-shift deletion keeping every
+// probe chain intact, and the relfilenode-swap/truncate invalidation class
+// (same tag re-mapped to a new buffer id after delete — the targblock
+// incident shape).
+#[test]
+fn buf_table_dense_grow_delete_reinsert() {
+    let _g = setup();
+    let rel = 9700;
+    let n: u32 = 600;
+    for i in 0..n {
+        assert_eq!(bt_insert(&synth_tag(rel, i), 1000 + i as i32), -1, "insert {i}");
+    }
+    for i in 0..n {
+        assert_eq!(bt_lookup(&synth_tag(rel, i)), 1000 + i as i32, "lookup {i}");
+    }
+    assert_eq!(bt_insert(&synth_tag(rel, 7), 4242), 1007, "duplicate insert returns existing id");
+    for i in (0..n).step_by(3) {
+        bt_delete(&synth_tag(rel, i)).unwrap();
+    }
+    for i in 0..n {
+        let expect = if i % 3 == 0 { -1 } else { 1000 + i as i32 };
+        assert_eq!(bt_lookup(&synth_tag(rel, i)), expect, "post-delete lookup {i}");
+    }
+    for i in (0..n).step_by(3) {
+        assert_eq!(bt_insert(&synth_tag(rel, i), 2000 + i as i32), -1, "reinsert {i}");
+        assert_eq!(bt_lookup(&synth_tag(rel, i)), 2000 + i as i32, "swap remap {i}");
+    }
+    for i in 0..n {
+        bt_delete(&synth_tag(rel, i)).unwrap();
+    }
+    for i in 0..n {
+        assert_eq!(bt_lookup(&synth_tag(rel, i)), -1, "post-drop lookup {i}");
+    }
+    let err = bt_delete(&synth_tag(rel, 0)).unwrap_err();
+    assert!(format!("{err:?}").contains("shared buffer hash table corrupted"));
+}
