@@ -8,6 +8,7 @@ publish.workspace = true
 mcx = { path = "../../../_support/mcx" }
 datum = { path = "../../../_support/types/datum" }
 types_core = { path = "../../../_support/types/types_core" }
+sequence_seams = { path = "../../commands/sequence_seams" }
 types_error = { path = "../../../_support/types/types_error" }
 types_fmgr = { path = "../../../_support/types/fmgr" }
 types_nodes = { path = "../../../_support/types/nodes" }
@@ -17,20 +18,27 @@ types_tuple = { path = "../../../_support/types/types_tuple" }
 fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
 adt_date = { path = "../../utils/adt/adt_date" }
 adt_timestamp = { path = "../../utils/adt/adt_timestamp" }
+tupdesc = { path = "../../access/common/tupdesc" }
 typcache = { path = "../../utils/cache/typcache" }
+heaptuple = { path = "../../access/common/heaptuple" }
 format_type = { path = "../../utils/adt/format_type" }
 exectuples = { path = "../exectuples" }
+heaptoast = { path = "../../access/heap/heaptoast" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
 arrayfuncs = { path = "../../utils/adt/arrayfuncs" }
 clauses_seams = { path = "../../optimizer/util/clauses_seams" }
 guc_tables = { path = "../../utils/misc/guc_tables" }
 aclchk_seams = { path = "../../catalog/aclchk_seams" }
 miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+typcache_seams = { path = "../../utils/cache/typcache_seams" }
 
 [features]
 bench-internals = []
 
 [dev-dependencies]
+clauses = { path = "../../optimizer/util/clauses" }
+namespace_seams = { path = "../../catalog/namespace_seams" }
 adt_int = { path = "../../utils/adt/int" }
 adt_datetime = { path = "../../utils/adt/adt_datetime" }
 pgtz = { path = "../../timezone/pgtz" }
@@ -38,5 +46,4 @@ elog = { path = "../../utils/error/elog" }
 fd = { path = "../../storage/file/fd" }
 xact_seams = { path = "../../access/transam/xact_seams" }
 indexcmds_seams = { path = "../../commands/indexcmds_seams" }
-heaptuple = { path = "../../access/common/heaptuple" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }

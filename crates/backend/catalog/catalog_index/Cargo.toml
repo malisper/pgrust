@@ -13,6 +13,7 @@ catalog_index_seams = { path = "../catalog_index_seams" }
 catalog_indexing = { path = "../catalog_indexing" }
 datum = { path = "../../../_support/types/datum" }
 execindexing = { path = "../../executor/execindexing" }
+elog = { path = "../../utils/error/elog" }
 fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
 genam = { path = "../../access/index/genam" }
 heaptuple = { path = "../../access/common/heaptuple" }
@@ -24,8 +25,17 @@ lsyscache = { path = "../../utils/cache/lsyscache" }
 miscinit = { path = "../../utils/init/miscinit" }
 mcx = { path = "../../../_support/mcx" }
 miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+spgist_build = { path = "../../access/spgist/spgist_build" }
+brin_build = { path = "../../access/brin/brin_build" }
+gistbuild = { path = "../../access/gist/gistbuild" }
 nbtsort = { path = "../../access/nbtree/nbtsort" }
 hashsort = { path = "../../access/hash/hashsort" }
+types_nodes = { path = "../../../_support/types/nodes" }
+nodes_core = { path = "../../nodes/nodes_core" }
+outfuncs = { path = "../../nodes/outfuncs" }
+varlena = { path = "../../utils/adt/varlena" }
+clauses = { path = "../../optimizer/util/clauses" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
 pg_depend = { path = "../pg_depend" }
 pg_constraint = { path = "../pg_constraint" }
 pgstat = { path = "../../utils/activity/pgstat" }
@@ -41,3 +51,7 @@ types_scan = { path = "../../../_support/types/types_scan" }
 types_tuple = { path = "../../../_support/types/types_tuple" }
 visibilitymap = { path = "../../access/heap/visibilitymap" }
 xact = { path = "../../access/transam/xact" }
+tableam = { path = "../../access/table/tableam" }
+elog_seams = { path = "../../utils/error/elog_seams" }
+smgr = { path = "../../storage/smgr/smgr" }
+ginbuild = { path = "../../access/gin/ginbuild" }

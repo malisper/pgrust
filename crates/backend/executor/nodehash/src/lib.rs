@@ -1,7 +1,6 @@
-// nodeHash.c serial build side; skew and parallel are absent (sizing still
-// reserves skew memory like C). Batch tuples live in an estate-owned aux
-// context reset per batch; chunk ids replicate C's dense_alloc list so
-// rebuild walks keep C's chain order (unmatched-scan output depends on it).
+// nodeHash.c serial build side; skew and parallel absent (sizing still
+// reserves skew memory like C). Tuples are C's HashJoinTupleData: 16-byte
+// header before the image in the per-batch aux arena, pointer bucket chains.
 #![allow(non_snake_case)]
 
 use core::ptr::NonNull;
@@ -25,20 +24,35 @@ pub trait HashBuildInput<'mcx> {
     fn exec_proc(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<Option<ExecSlotId>>;
 }
 
-// C HashJoinTupleData; u32::MAX ends chains.
-#[derive(Clone, Copy)]
-pub struct HashJoinTupleEntry {
-    pub next: u32,
-    pub hashvalue: u32,
-    pub matched: bool,
-    chunk: u32,
-    t_len: u32,
-    pub tuple: NonNull<MinimalTupleData>,
+/// C `HashJoinTupleData` (16 = HJTUPLE_OVERHEAD; image at +16).
+#[repr(C)]
+pub struct HashJoinTupleHdr {
+    next: *mut HashJoinTupleHdr,
+    hashvalue: u32,
+    _pad: u32,
 }
 
-const END: u32 = u32::MAX;
+impl HashJoinTupleHdr {
+    #[inline(always)]
+    pub fn next(&self) -> *mut HashJoinTupleHdr {
+        self.next
+    }
 
-// dense_alloc chunk list, metadata only (bytes live in the aux arena).
+    #[inline(always)]
+    pub fn hashvalue(&self) -> u32 {
+        self.hashvalue
+    }
+
+    /// C `HJTUPLE_MINTUPLE`.
+    /// # Safety
+    /// `this` is a live header from `insert`.
+    #[inline(always)]
+    pub unsafe fn mintuple(this: *mut HashJoinTupleHdr) -> NonNull<MinimalTupleData> {
+        // SAFETY: caller contract; the image starts HJTUPLE_OVERHEAD past the header.
+        unsafe { NonNull::new_unchecked(this.cast::<u8>().add(HJTUPLE_OVERHEAD)).cast() }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct ChunkMeta {
     next: u32,
@@ -46,16 +60,16 @@ struct ChunkMeta {
     maxlen: u32,
 }
 
+const END: u32 = u32::MAX;
+
 pub struct HashJoinTable<'mcx> {
     nbuckets: u32,
     log2_nbuckets: u32,
     nbuckets_original: u32,
     nbuckets_optimal: u32,
     log2_nbuckets_optimal: u32,
-    buckets: PgVec<'mcx, u32>,
-    entries: PgVec<'mcx, HashJoinTupleEntry>,
-    chunks: PgVec<'mcx, ChunkMeta>,
-    chunk_head: u32,
+    buckets: PgVec<'mcx, *mut HashJoinTupleHdr>,
+    tuples: PgVec<'mcx, NonNull<HashJoinTupleHdr>>,
     pub nbatch: i32,
     pub curbatch: i32,
     pub nbatch_original: i32,
@@ -71,7 +85,6 @@ pub struct HashJoinTable<'mcx> {
 }
 
 impl<'mcx> HashJoinTable<'mcx> {
-    /// `ExecHashTableCreate` serial arm.
     fn create(
         mcx: Mcx<'mcx>,
         estate: &mut EStateData<'mcx>,
@@ -81,7 +94,7 @@ impl<'mcx> HashJoinTable<'mcx> {
     ) -> PgResult<HashJoinTable<'mcx>> {
         debug_assert!(nbuckets.is_power_of_two());
         let mut buckets = vec_with_capacity_in(mcx, nbuckets as usize)?;
-        buckets.resize(nbuckets as usize, END);
+        buckets.resize(nbuckets as usize, core::ptr::null_mut());
         let mut table = HashJoinTable {
             nbuckets,
             log2_nbuckets: nbuckets.trailing_zeros(),
@@ -89,9 +102,7 @@ impl<'mcx> HashJoinTable<'mcx> {
             nbuckets_optimal: nbuckets,
             log2_nbuckets_optimal: nbuckets.trailing_zeros(),
             buckets,
-            entries: PgVec::new_in(mcx),
-            chunks: PgVec::new_in(mcx),
-            chunk_head: END,
+            tuples: PgVec::new_in(mcx),
             nbatch,
             curbatch: 0,
             nbatch_original: nbatch,
@@ -113,71 +124,79 @@ impl<'mcx> HashJoinTable<'mcx> {
         Ok(table)
     }
 
-    fn dense_alloc_chunk(&mut self, size: usize) -> u32 {
-        let size = maxalign(size) as u32;
-        if size as usize > HASH_CHUNK_THRESHOLD {
-            let id = self.chunks.len() as u32;
-            if self.chunk_head != END {
-                let head_next = self.chunks[self.chunk_head as usize].next;
-                self.chunks.push(ChunkMeta { next: head_next, used: size, maxlen: size });
-                self.chunks[self.chunk_head as usize].next = id;
-            } else {
-                self.chunks.push(ChunkMeta { next: END, used: size, maxlen: size });
-                self.chunk_head = id;
-            }
-            return id;
-        }
-        if self.chunk_head == END
-            || self.chunks[self.chunk_head as usize].maxlen
-                - self.chunks[self.chunk_head as usize].used
-                < size
-        {
-            let id = self.chunks.len() as u32;
-            self.chunks.push(ChunkMeta {
-                next: self.chunk_head,
-                used: size,
-                maxlen: HASH_CHUNK_SIZE as u32,
-            });
-            self.chunk_head = id;
-            return id;
-        }
-        self.chunks[self.chunk_head as usize].used += size;
-        self.chunk_head
+    #[inline]
+    fn tuple_size(hdr: NonNull<HashJoinTupleHdr>) -> usize {
+        let t_len = unsafe { (*HashJoinTupleHdr::mintuple(hdr.as_ptr()).as_ptr()).t_len };
+        HJTUPLE_OVERHEAD + t_len as usize
     }
 
-    // C's chunk walk as an entry permutation: stable sort by chunk position.
+    // Cold. C's dense_alloc chunk list replayed from insertion-order sizes;
+    // unmatched-scan and spill order depend on the walk permutation.
     fn chunk_walk_order(&self, mcx: Mcx<'mcx>) -> PgResult<PgVec<'mcx, u32>> {
-        let nchunks = self.chunks.len();
+        let mut chunks: PgVec<'mcx, ChunkMeta> = PgVec::new_in(mcx);
+        let mut chunk_head = END;
+        let mut chunk_of: PgVec<'mcx, u32> = vec_with_capacity_in(mcx, self.tuples.len())?;
+        for &hdr in self.tuples.iter() {
+            let size = maxalign(Self::tuple_size(hdr)) as u32;
+            let id = if size as usize > HASH_CHUNK_THRESHOLD {
+                let id = chunks.len() as u32;
+                if chunk_head != END {
+                    let head_next = chunks[chunk_head as usize].next;
+                    chunks.push(ChunkMeta { next: head_next, used: size, maxlen: size });
+                    chunks[chunk_head as usize].next = id;
+                } else {
+                    chunks.push(ChunkMeta { next: END, used: size, maxlen: size });
+                    chunk_head = id;
+                }
+                id
+            } else if chunk_head == END
+                || chunks[chunk_head as usize].maxlen - chunks[chunk_head as usize].used < size
+            {
+                let id = chunks.len() as u32;
+                chunks.push(ChunkMeta {
+                    next: chunk_head,
+                    used: size,
+                    maxlen: HASH_CHUNK_SIZE as u32,
+                });
+                chunk_head = id;
+                id
+            } else {
+                chunks[chunk_head as usize].used += size;
+                chunk_head
+            };
+            chunk_of.push(id);
+        }
+
+        let nchunks = chunks.len();
         let mut pos: PgVec<'mcx, u32> = vec_with_capacity_in(mcx, nchunks)?;
         pos.resize(nchunks, 0);
         let mut npos = 0u32;
-        let mut c = self.chunk_head;
+        let mut c = chunk_head;
         while c != END {
             pos[c as usize] = npos;
             npos += 1;
-            c = self.chunks[c as usize].next;
+            c = chunks[c as usize].next;
         }
         let mut counts: PgVec<'mcx, u32> = vec_with_capacity_in(mcx, npos as usize + 1)?;
         counts.resize(npos as usize + 1, 0);
-        for e in self.entries.iter() {
-            counts[pos[e.chunk as usize] as usize + 1] += 1;
+        for &cid in chunk_of.iter() {
+            counts[pos[cid as usize] as usize + 1] += 1;
         }
         for i in 1..counts.len() {
             let prev = counts[i - 1];
             counts[i] += prev;
         }
-        let mut order: PgVec<'mcx, u32> = vec_with_capacity_in(mcx, self.entries.len())?;
-        order.resize(self.entries.len(), 0);
-        for (ix, e) in self.entries.iter().enumerate() {
-            let p = pos[e.chunk as usize] as usize;
+        let mut order: PgVec<'mcx, u32> = vec_with_capacity_in(mcx, self.tuples.len())?;
+        order.resize(self.tuples.len(), 0);
+        for (ix, &cid) in chunk_of.iter().enumerate() {
+            let p = pos[cid as usize] as usize;
             order[counts[p] as usize] = ix as u32;
             counts[p] += 1;
         }
         Ok(order)
     }
 
-    /// `ExecHashTableInsert`: current batch goes into memory, later batches
-    /// into their inner batch file.
+    /// `ExecHashTableInsert`.
     pub fn insert(
         &mut self,
         estate: &mut EStateData<'mcx>,
@@ -189,34 +208,34 @@ impl<'mcx> HashJoinTable<'mcx> {
         let (bucketno, batchno) = self.get_bucket_and_batch(hashvalue);
         if batchno == self.curbatch {
             let (slot, batch_mcx) = estate.slot_and_aux_mcx(slot_id, self.batch_cxt);
-            let mut tup =
-                exectuples::exec_copy_slot_minimal_tuple(slot, query_mcx, batch_mcx, 0)?;
+            let mut tup = exectuples::exec_copy_slot_minimal_tuple(
+                slot,
+                query_mcx,
+                batch_mcx,
+                HJTUPLE_OVERHEAD,
+            )?;
             tup.data_mut().clear_match();
             let t_len = tup.t_len();
-            let tuple = NonNull::new(tup.as_ptr().cast_mut().cast::<MinimalTupleData>())
-                .expect("minimal tuple image is non-null");
+            let hdr = tup.extra_mut().as_mut_ptr().cast::<HashJoinTupleHdr>();
             // Bulk-freed at batch reset: forget, never drop (docs/no-drop.md).
             core::mem::forget(tup);
 
             let hash_tuple_size = HJTUPLE_OVERHEAD + t_len as usize;
             let ntuples = self.total_tuples;
-            let chunk = self.dense_alloc_chunk(hash_tuple_size);
-            let ix = self.entries.len() as u32;
-            if self.entries.len() == self.entries.capacity() {
-                let add = self.entries.capacity().max(16);
-                self.entries
+            if self.tuples.len() == self.tuples.capacity() {
+                let add = self.tuples.capacity().max(256);
+                self.tuples
                     .try_reserve(add)
-                    .map_err(|_| oom_entries(*self.entries.allocator(), add))?;
+                    .map_err(|_| oom_tuples(*self.tuples.allocator(), add))?;
             }
-            self.entries.push(HashJoinTupleEntry {
-                next: self.buckets[bucketno as usize],
-                hashvalue,
-                matched: false,
-                chunk,
-                t_len,
-                tuple,
-            });
-            self.buckets[bucketno as usize] = ix;
+            // SAFETY: hdr = the forgotten allocation's prefix; bucketno masked.
+            unsafe {
+                let head = self.buckets.get_unchecked_mut(bucketno as usize);
+                (*hdr).next = *head;
+                (*hdr).hashvalue = hashvalue;
+                *head = hdr;
+                self.tuples.push(NonNull::new_unchecked(hdr));
+            }
 
             if self.nbatch == 1 && ntuples > (self.nbuckets_optimal as f64) * NTUP_PER_BUCKET {
                 if self.nbuckets_optimal <= i32::MAX as u32 / 2
@@ -291,40 +310,39 @@ impl<'mcx> HashJoinTable<'mcx> {
             self.log2_nbuckets = self.log2_nbuckets_optimal;
         }
         self.buckets.clear();
-        self.buckets.resize(self.nbuckets as usize, END);
+        self.buckets.resize(self.nbuckets as usize, core::ptr::null_mut());
 
         let order = self.chunk_walk_order(mcx)?;
-        let mut kept: PgVec<'mcx, HashJoinTupleEntry> =
-            vec_with_capacity_in(mcx, self.entries.len())?;
-        self.chunks.clear();
-        self.chunk_head = END;
+        // Relisting kept tuples in walk order reproduces C's re-dense_alloc order.
+        let mut kept: PgVec<'mcx, NonNull<HashJoinTupleHdr>> =
+            vec_with_capacity_in(mcx, self.tuples.len())?;
         let ninmemory = order.len();
         let mut nfreed = 0usize;
         for &ix in order.iter() {
-            let e = self.entries[ix as usize];
-            let hash_tuple_size = HJTUPLE_OVERHEAD + e.t_len as usize;
-            let (bucketno, batchno) = self.get_bucket_and_batch(e.hashvalue);
+            let hdr = self.tuples[ix as usize];
+            // SAFETY: headers/images live in the batch arena until reset.
+            let hashvalue = unsafe { hdr.as_ref().hashvalue };
+            let hash_tuple_size = Self::tuple_size(hdr);
+            let (bucketno, batchno) = self.get_bucket_and_batch(hashvalue);
             if batchno == self.curbatch {
-                let chunk = self.dense_alloc_chunk(hash_tuple_size);
-                let new_ix = kept.len() as u32;
-                kept.push(HashJoinTupleEntry {
-                    next: self.buckets[bucketno as usize],
-                    chunk,
-                    ..e
-                });
-                self.buckets[bucketno as usize] = new_ix;
+                // SAFETY: as above; bucketno < buckets.len() by mask.
+                unsafe {
+                    let head = &mut self.buckets[bucketno as usize];
+                    (*hdr.as_ptr()).next = *head;
+                    *head = hdr.as_ptr();
+                }
+                kept.push(hdr);
             } else {
                 debug_assert!(batchno > self.curbatch);
+                let tuple = unsafe { HashJoinTupleHdr::mintuple(hdr.as_ptr()) };
+                let t_len = unsafe { (*tuple.as_ptr()).t_len };
                 // SAFETY: entry images live in the batch arena until reset.
                 let bytes = unsafe {
-                    core::slice::from_raw_parts(
-                        e.tuple.as_ptr().cast_const().cast::<u8>(),
-                        e.t_len as usize,
-                    )
+                    core::slice::from_raw_parts(tuple.as_ptr().cast::<u8>(), t_len as usize)
                 };
                 save_tuple(
                     &mut self.inner_batch_file[batchno as usize],
-                    e.hashvalue,
+                    hashvalue,
                     bytes,
                     mcx,
                 )?;
@@ -332,7 +350,7 @@ impl<'mcx> HashJoinTable<'mcx> {
                 nfreed += 1;
             }
         }
-        self.entries = kept;
+        self.tuples = kept;
 
         // All or none moved: more batches can't subdivide this key set.
         if nfreed == 0 || nfreed == ninmemory {
@@ -349,13 +367,18 @@ impl<'mcx> HashJoinTable<'mcx> {
         self.nbuckets = self.nbuckets_optimal;
         self.log2_nbuckets = self.log2_nbuckets_optimal;
         self.buckets.clear();
-        self.buckets.resize(self.nbuckets as usize, END);
+        self.buckets.resize(self.nbuckets as usize, core::ptr::null_mut());
         let order = self.chunk_walk_order(mcx)?;
         for &ix in order.iter() {
-            let hashvalue = self.entries[ix as usize].hashvalue;
-            let (bucketno, _batchno) = self.get_bucket_and_batch(hashvalue);
-            self.entries[ix as usize].next = self.buckets[bucketno as usize];
-            self.buckets[bucketno as usize] = ix;
+            let hdr = self.tuples[ix as usize];
+            // SAFETY: headers live in the batch arena until reset.
+            unsafe {
+                let hashvalue = hdr.as_ref().hashvalue;
+                let (bucketno, _batchno) = self.get_bucket_and_batch(hashvalue);
+                let head = &mut self.buckets[bucketno as usize];
+                (*hdr.as_ptr()).next = *head;
+                *head = hdr.as_ptr();
+            }
         }
         Ok(())
     }
@@ -374,11 +397,9 @@ impl<'mcx> HashJoinTable<'mcx> {
     /// `ExecHashTableReset`.
     pub fn reset(&mut self, estate: &mut EStateData<'mcx>) {
         estate.reset_aux_context(self.batch_cxt);
-        self.entries.clear();
-        self.chunks.clear();
-        self.chunk_head = END;
+        self.tuples.clear();
         self.buckets.clear();
-        self.buckets.resize(self.nbuckets as usize, END);
+        self.buckets.resize(self.nbuckets as usize, core::ptr::null_mut());
         self.space_used = 0;
     }
 
@@ -416,28 +437,8 @@ impl<'mcx> HashJoinTable<'mcx> {
     }
 
     #[inline]
-    pub fn bucket_head(&self, bucketno: u32) -> u32 {
+    pub fn bucket_head(&self, bucketno: u32) -> *mut HashJoinTupleHdr {
         self.buckets[bucketno as usize]
-    }
-
-    #[inline]
-    pub fn bucket_of(&self, hashvalue: u32) -> u32 {
-        hashvalue & (self.nbuckets - 1)
-    }
-
-    #[inline]
-    pub fn entry(&self, ix: u32) -> HashJoinTupleEntry {
-        self.entries[ix as usize]
-    }
-
-    #[inline]
-    pub const fn chain_end() -> u32 {
-        END
-    }
-
-    #[inline]
-    pub fn set_matched(&mut self, ix: u32) {
-        self.entries[ix as usize].matched = true;
     }
 
     #[inline]
@@ -455,10 +456,17 @@ impl<'mcx> HashJoinTable<'mcx> {
         }
     }
 
-    /// ExecHashTableResetMatchFlags.
+    /// `ExecHashTableResetMatchFlags`.
     pub fn reset_match_flags(&mut self) {
-        for e in self.entries.iter_mut() {
-            e.matched = false;
+        for &head in self.buckets.iter() {
+            let mut cur = head;
+            while !cur.is_null() {
+                // SAFETY: chain headers/images live in the batch arena.
+                unsafe {
+                    (*HashJoinTupleHdr::mintuple(cur).as_ptr()).clear_match();
+                    cur = (*cur).next;
+                }
+            }
         }
     }
 }
@@ -613,7 +621,7 @@ pub fn exec_end_hash(hs: &mut HashState<'_>) {
 }
 
 // C constants (hashjoin.h / htup_details.h), 64-bit build.
-const HJTUPLE_OVERHEAD: usize = 16; // MAXALIGN(sizeof(HashJoinTupleData))
+pub const HJTUPLE_OVERHEAD: usize = 16; // MAXALIGN(sizeof(HashJoinTupleData))
 const SIZEOF_HASHJOINTUPLE: usize = 8; // pointer
 const NTUP_PER_BUCKET: f64 = 1.0;
 const MAX_ALLOC_SIZE: usize = 0x3fff_ffff;
@@ -751,11 +759,9 @@ fn prevpower2(n: usize) -> usize {
 
 #[cold]
 #[inline(never)]
-fn oom_entries(mcx: Mcx<'_>, add: usize) -> Box<PgError> {
-    Box::new(mcx.oom(add * core::mem::size_of::<HashJoinTupleEntry>()))
+fn oom_tuples(mcx: Mcx<'_>, add: usize) -> Box<PgError> {
+    Box::new(mcx.oom(add * core::mem::size_of::<NonNull<HashJoinTupleHdr>>()))
 }
-
-mcx::forget_safe_nodrop!(HashJoinTupleEntry);
 
 // Exempt: released in exec_end_hash_join/exec_end_hash — table (BufFile fds)
 // is destroyed and taken there, hash_expr via release_frames, inner_desc taken.

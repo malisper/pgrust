@@ -114,26 +114,36 @@ pub(crate) fn build_desc_data(target_rel_id: Oid) -> PgResult<Option<RelationDat
                 scanned.relchecks,
             )?;
 
-        let (rd_index, opcintype, opfamily, indoption, indcollation, supportinfo) = if matches!(
-            scanned.form.relkind,
-            RELKIND_INDEX | RELKIND_PARTITIONED_INDEX
-        ) {
-            let ii = relcache_build_seams::relation_init_index_access_info::call(
-                mcx,
-                target_rel_id,
-                &scanned.form,
-            )?;
-            (Some(ii.index), ii.opcintype, ii.opfamily, ii.indoption, ii.indcollation, ii.supportinfo)
-        } else {
-            (
-                None,
-                PgVec::new_in(mcx),
-                PgVec::new_in(mcx),
-                PgVec::new_in(mcx),
-                PgVec::new_in(mcx),
-                Vec::new(),
-            )
-        };
+        let (rd_index, opcintype, opfamily, indoption, indcollation, supportinfo, support) =
+            if matches!(
+                scanned.form.relkind,
+                RELKIND_INDEX | RELKIND_PARTITIONED_INDEX
+            ) {
+                let ii = relcache_build_seams::relation_init_index_access_info::call(
+                    mcx,
+                    target_rel_id,
+                    &scanned.form,
+                )?;
+                (
+                    Some(ii.index),
+                    ii.opcintype,
+                    ii.opfamily,
+                    ii.indoption,
+                    ii.indcollation,
+                    ii.supportinfo,
+                    ii.support,
+                )
+            } else {
+                (
+                    None,
+                    PgVec::new_in(mcx),
+                    PgVec::new_in(mcx),
+                    PgVec::new_in(mcx),
+                    PgVec::new_in(mcx),
+                    Vec::new(),
+                    PgVec::new_in(mcx),
+                )
+            };
 
         // rules/triggers/RLS live with the nodexform unit (no rd_rules/
         // trigdesc/rd_rsdesc fields in the trimmed entry); rd_locator/rd_smgr
@@ -160,11 +170,12 @@ pub(crate) fn build_desc_data(target_rel_id: Oid) -> PgResult<Option<RelationDat
             rd_options: scanned.options,
             pgstat_enabled: Cell::new(false),
             rd_amcache: Default::default(),
-            rd_amcache_hash: Default::default(),
+            rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(), rd_amcache_spgist: Default::default(),
+            rd_support: support,
             rd_supportinfo: core::cell::RefCell::new(supportinfo),
             rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
-            rd_hastriggers: scanned.relhastriggers,
+            rd_hastriggers: scanned.relhastriggers, rd_hasrules: scanned.relhasrules,
         };
         RelationInitPhysicalAddr(&data)?;
 
@@ -278,11 +289,12 @@ pub fn formrdesc(cat: &BootstrapCatalog) -> PgResult<()> {
         rd_options: None,
         pgstat_enabled: Cell::new(false),
         rd_amcache: Default::default(),
-        rd_amcache_hash: Default::default(),
+        rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(), rd_amcache_spgist: Default::default(),
+        rd_support: PgVec::new_in(mcx),
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
-            rd_hastriggers: false,
+            rd_hastriggers: false, rd_hasrules: false,
     };
     RelationInitPhysicalAddr(&data)?;
 

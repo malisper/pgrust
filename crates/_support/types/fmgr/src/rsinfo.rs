@@ -26,15 +26,32 @@ pub enum SetFunctionReturnMode {
     Materialize = SFRM_Materialize,
 }
 
-// C ReturnSetInfo minus econtext/expectedDesc/setResult/setDesc: those legs
-// arrive with Materialize-mode SRFs, which are loud everywhere today.
+// C ReturnSetInfo minus econtext (contexts thread explicitly) and setDesc
+// (collapsed: both sides derive the tupdesc from pg_proc).
 #[repr(C)]
-#[derive(Debug)]
 pub struct ReturnSetInfo {
     tag: u32,
     pub allowedModes: u32,
     pub returnMode: SetFunctionReturnMode,
     pub isDone: ExprDoneCond,
+    // SAFETY: type-erased `*const TupleDescData` (this crate sits below the
+    // tuple crates); the executor arms it with the scan tupdesc, live for
+    // the duration of the call.
+    pub expectedDesc: Option<NonNull<core::ffi::c_void>>,
+    // C's `Tuplestorestate *setResult`, taken by the executor post-call.
+    pub setResult: Option<alloc::boxed::Box<dyn core::any::Any>>,
+}
+
+impl core::fmt::Debug for ReturnSetInfo {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ReturnSetInfo")
+            .field("allowedModes", &self.allowedModes)
+            .field("returnMode", &self.returnMode)
+            .field("isDone", &self.isDone)
+            .field("expectedDesc", &self.expectedDesc)
+            .field("has_setResult", &self.setResult.is_some())
+            .finish()
+    }
 }
 
 impl ReturnSetInfo {
@@ -44,6 +61,8 @@ impl ReturnSetInfo {
             allowedModes: allowed_modes,
             returnMode: SetFunctionReturnMode::ValuePerCall,
             isDone: ExprDoneCond::ExprSingleResult,
+            expectedDesc: None,
+            setResult: None,
         }
     }
 

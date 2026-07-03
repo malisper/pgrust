@@ -31,6 +31,7 @@ const SEG: i32 = 16 * 1024 * 1024;
 const SYS_ID: u64 = 0x5544_3322_1100_AB01;
 const T_OID: Oid = 61010;
 const STAT_OID: Oid = 2619;
+const STATEXT_OID: Oid = 3381;
 const INT4OID: Oid = 23;
 const INT4_EQ_OP: Oid = 96;
 const INT4_LT_OP: Oid = 97;
@@ -292,6 +293,7 @@ fn install_xact_periphery_seams() {
     backend_status_seams::pgstat_report_xact_timestamp::set(|_| {});
     backend_status_seams::pgstat_report_query_id::set(|_, _| {});
     backend_status_seams::pgstat_report_plan_id::set(|_, _| {});
+    backend_status_seams::pgstat_clear_backend_status_snapshot::set(|| {});
     backend_progress_seams::pgstat_progress_end_command::set(|| {});
     predicate_seams::pre_commit_check_for_serialization_failure::set(|| Ok(()));
     predicate_seams::register_predicate_locking_xid::set(|_| Ok(()));
@@ -417,6 +419,9 @@ static T_RELPAGES: Mutex<(i32, f32)> = Mutex::new((0, -1.0));
 fn make_relation<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> RelationData<'mcx> {
     let (name, att, isstat): (&str, Rc<TupleDescData<'mcx>>, bool) = if relid == T_OID {
         ("t", user_tupdesc(mcx), false)
+    } else if relid == STATEXT_OID {
+        // Empty catalog: scans see 0 blocks; the tupdesc is never deformed.
+        ("pg_statistic_ext", pg_statistic_tupdesc(mcx), true)
     } else {
         ("pg_statistic", pg_statistic_tupdesc(mcx), true)
     };
@@ -473,20 +478,25 @@ fn make_relation<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> RelationData<'mcx> {
         rd_options: None,
         pgstat_enabled: Cell::new(false),
         rd_amcache: Default::default(),
-        rd_amcache_hash: Default::default(),
+        rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(), rd_amcache_spgist: Default::default(),
+        rd_support: PgVec::new_in(mcx),
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
-            rd_hastriggers: false,
+            rd_hastriggers: false, rd_hasrules: false,
     }
 }
 
 fn install_relation_seams() {
     relation_seams::relation_open::set(|mcx, relid, _lockmode| {
-        assert!(relid == T_OID || relid == STAT_OID, "unknown relation oid {relid}");
+        assert!(
+            relid == T_OID || relid == STAT_OID || relid == STATEXT_OID,
+            "unknown relation oid {relid}"
+        );
         Ok(Relation::open(make_relation(mcx, relid), None))
     });
     relcache_seams::relation_get_index_list::set(|mcx, _relid| Ok(PgVec::new_in(mcx)));
+    relcache_seams::relation_get_stat_ext_list::set(|mcx, _relid| Ok(PgVec::new_in(mcx)));
 }
 
 fn install_syscache_fixture_overrides() {
@@ -683,6 +693,7 @@ fn boot() {
     fd::init_seams();
     guc_tables::init_seams();
     guc::init_seams();
+    commands_analyze::init_seams();
     adt_bool::init_seams();
     adt_float::init_seams();
     fmgr_core::init_seams();
@@ -778,7 +789,7 @@ fn insert_rows() {
         let values = [Datum::from_i32(v), Datum::from_i32(g)];
         let nulls = [false, false];
         let mut tup = heaptuple::heap_form_tuple(mcx, rel.descr(), &values, &nulls).unwrap();
-        heapam::simple_heap_insert(&rel, tup.as_tuple_mut()).unwrap();
+        heapam::simple_heap_insert(&rel, tup.as_tuple_mut(), None).unwrap();
     }
     table::table_close(rel, 3).unwrap();
     xact::CommitTransactionCommand().unwrap();

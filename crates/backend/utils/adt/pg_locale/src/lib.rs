@@ -273,6 +273,13 @@ fn create_pg_locale(collid: Oid, cache_mcx: Mcx<'static>) -> PgResult<PgLocale> 
         return Err(support_error("create_pg_locale", row.collprovider));
     };
     result.is_default = false;
+    result.deterministic = row.collisdeterministic;
+    if !row.collisdeterministic {
+        panic!(
+            "pg_locale: nondeterministic collation {collid} not ported \
+             (hashtext/pattern-op arms, varstr equality via pg_strncoll)"
+        );
+    }
 
     if let Some(collversionstr) = row.collversion.as_ref() {
         let source = if row.collprovider == COLLPROVIDER_LIBC {
@@ -458,7 +465,7 @@ fn get_collation_actual_version_builtin(collcollate: &str) -> PgResult<&'static 
 // version; this platform set has no LC_VERSION_MASK/WIN32 arm.
 fn get_collation_actual_version_libc(collcollate: &str) -> Option<String> {
     if collcollate.eq_ignore_ascii_case("C")
-        || collcollate.len() >= 2 && collcollate[..2].eq_ignore_ascii_case("C.")
+        || collcollate.len() >= 2 && collcollate.as_bytes()[..2].eq_ignore_ascii_case(b"C.")
         || collcollate.eq_ignore_ascii_case("POSIX")
     {
         return None;

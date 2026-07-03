@@ -338,7 +338,7 @@ fn index_out_of_range_i64(n: i64, hi: i64) -> PgError {
 
 #[cold]
 #[inline(never)]
-fn negative_substring() -> PgError {
+pub(crate) fn negative_substring() -> PgError {
     PgError::error("negative substring length not allowed").with_sqlstate(ERRCODE_SUBSTRING_ERROR)
 }
 

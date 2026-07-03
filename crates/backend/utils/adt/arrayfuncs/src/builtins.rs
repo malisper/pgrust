@@ -10,6 +10,7 @@ use ::types_fmgr::{
 };
 
 use crate::foundation::varsize_any;
+use ::mcx::vec_with_capacity_in;
 use crate::io::{array_in, array_out, array_recv, array_send, ArrayIoMeta};
 
 // Cached in FmgrInfo.fn_extra: resolved element I/O metadata + proc carrier,
@@ -131,6 +132,134 @@ pub fn fc_array_send(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRe
     Ok(varlena_result(out))
 }
 
+// array_agg_transfn (array_userfuncs.c): transvalue is a pointer datum to an
+// aggcontext-owned ArrayBuildState (INTERNAL transtype); the element type
+// rides fn_expr (C get_fn_expr_argtype).
+pub fn fc_array_agg_transfn(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    use ::datum::array_build::ArrayBuildState;
+
+    let flinfo = flinfo.expect("array_agg_transfn: NULL flinfo");
+    let arg1_typeid = fmgr_seams::get_fn_expr_argtype::call(flinfo, 1);
+    if arg1_typeid == ::types_core::InvalidOid {
+        return Err(Box::new(
+            PgError::error("could not determine input data type")
+                .with_sqlstate(::types_error::ERRCODE_INVALID_PARAMETER_VALUE),
+        ));
+    }
+    // SAFETY: fcinfo.context is the executor's live AggStateNode.
+    let Some(aggmcx) = (unsafe { fcinfo.agg_context() }) else {
+        panic!("array_agg_transfn called in non-aggregate context");
+    };
+
+    let stp: *mut ArrayBuildState<'_> = if fcinfo.args[0].isnull {
+        let st = crate::build::init_array_result(aggmcx, arg1_typeid, false)?;
+        let layout = core::alloc::Layout::new::<ArrayBuildState<'_>>();
+        let raw = ::mcx::Allocator::allocate(&aggmcx, layout)
+            .map_err(|_| aggmcx.oom(layout.size()))?;
+        let p: *mut ArrayBuildState<'_> = raw.cast().as_ptr();
+        // SAFETY: fresh aggcontext allocation of the exact layout; no drop
+        // glue runs (PgVec fields are arena-plain — ForgetSafe).
+        unsafe { p.write(st) };
+        p
+    } else {
+        fcinfo.arg(0).as_usize() as *mut ArrayBuildState<'_>
+    };
+
+    let (elem, elem_null) = (fcinfo.args[1].value, fcinfo.args[1].isnull);
+    let elem = if elem_null { Datum::null() } else { elem };
+    // SAFETY: stp is the aggcontext-owned state; plain-data move in/out.
+    unsafe {
+        let st = stp.read();
+        let st = crate::build::accum_array_result(aggmcx, Some(st), elem, elem_null, arg1_typeid)?;
+        stp.write(st);
+    }
+    Ok(Datum::from_usize(stp as usize))
+}
+
+pub fn fc_array_agg_finalfn(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    use ::datum::array_build::ArrayBuildState;
+    // SAFETY: fcinfo.context is the executor's live AggStateNode.
+    debug_assert!(unsafe { fcinfo.agg_context() }.is_some());
+    if fcinfo.args[0].isnull {
+        return Ok(fcinfo.return_null());
+    }
+    let stp = fcinfo.arg(0).as_usize() as *const ArrayBuildState<'_>;
+    // SAFETY: transvalue points at the aggcontext-owned build state.
+    let st = unsafe { &*stp };
+    let mcx = fcinfo.result_mcx();
+    let dims = [st.nelems];
+    let lbs = [1i32];
+    let img = crate::build::make_md_array_result(mcx, st, 1, &dims, &lbs)?;
+    byref_result(mcx, &img)
+}
+
+// C array_length (arrayfuncs.c).
+pub fn fc_array_length(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let (ndim, dims) = {
+        let mcx = fcinfo.result_mcx();
+        let array = arg_array_bytes(fcinfo, 0, mcx)?;
+        let (ndim, dims, _lb) = crate::foundation::read_dims_lbounds(&array);
+        (ndim, dims)
+    };
+    let reqdim = fcinfo.arg(1).as_i32();
+    if ndim <= 0 || ndim > crate::foundation::MAXDIM as i32 || reqdim <= 0 || reqdim > ndim {
+        return Ok(fcinfo.return_null());
+    }
+    Ok(Datum::from_i32(dims[(reqdim - 1) as usize]))
+}
+
+// C array_to_text (varlena.c array_to_text_internal, null_string=NULL arm),
+// hosted with the array machinery it consumes.
+pub fn fc_array_to_text(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let mcx = fcinfo.result_mcx();
+    let array = arg_array_bytes(fcinfo, 0, mcx)?;
+    let sep: alloc::vec::Vec<u8> = {
+        // SAFETY: strict fn; arg 1 is a live text varlena.
+        let v = unsafe { fcinfo.arg_varlena_packed(1) }?;
+        v.data().to_vec()
+    };
+    let element_type = crate::foundation::arr_elemtype(&array);
+    let (ndim, dims, _lb) = crate::foundation::read_dims_lbounds(&array);
+    let nitems = ::arrayutils::array_get_n_items(ndim, &dims)?;
+    let mut out: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    if nitems > 0 {
+        let flinfo = flinfo.expect("array_to_text: NULL flinfo");
+        let ams = cached_meta(flinfo, element_type, IOFuncSelector::IOFunc_output, false)?;
+        let (elems, nulls) = crate::construct::deconstruct_array(
+            mcx,
+            &array,
+            ams.meta.typlen,
+            ams.meta.typbyval,
+            ams.meta.typalign,
+            true,
+        )?;
+        let mut printed = false;
+        for (i, &d) in elems.iter().enumerate() {
+            if nulls[i] {
+                continue;
+            }
+            let v = ::types_fmgr::function_call1_coll(&mut ams.proc, 0, d)?;
+            // SAFETY: out fns return NUL-terminated cstrings.
+            let cs = unsafe {
+                core::ffi::CStr::from_ptr(v.as_usize() as *const core::ffi::c_char)
+            };
+            if printed {
+                out.extend_from_slice(&sep);
+            }
+            out.extend_from_slice(cs.to_bytes());
+            printed = true;
+        }
+    }
+    let total = 4 + out.len();
+    let mut img: ::mcx::PgVec<'_, u8> = vec_with_capacity_in(mcx, total)?;
+    ::mcx::vec_append_bytes(&mut img, &(((total as u32) << 2)).to_ne_bytes())?;
+    ::mcx::vec_append_bytes(&mut img, &out)?;
+    byref_result(mcx, &img)
+}
+
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin {
         foid,
@@ -142,10 +271,18 @@ const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrB
     }
 }
 
+const fn agg(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
+    FmgrBuiltin { foid, name, nargs, strict: false, retset: false, func }
+}
+
 // pg_proc.dat rows for the generic array I/O functions.
 pub const ARRAYFUNCS_BUILTINS: &[FmgrBuiltin] = &[
     b(750, "array_in", 3, fc_array_in),
     b(751, "array_out", 1, fc_array_out),
+    b(395, "array_to_text", 2, fc_array_to_text),
+    b(2176, "array_length", 2, fc_array_length),
     b(2400, "array_recv", 3, fc_array_recv),
     b(2401, "array_send", 1, fc_array_send),
+    agg(2333, "array_agg_transfn", 2, fc_array_agg_transfn),
+    agg(2334, "array_agg_finalfn", 2, fc_array_agg_finalfn),
 ];

@@ -256,15 +256,13 @@ pub struct IcScratch {
     p: Vec<u8>,
 }
 
-// C's lower() -> str_tolower(ctype_is_c) -> asc_tolower: fold stops at an
-// embedded NUL (adt_oracle_compat's casemap shape).
+// C's lower() -> str_tolower(ctype_is_c) -> asc_tolower: pnstrdup truncates at
+// an embedded NUL (adt_oracle_compat's casemap shape); text can't contain NUL.
 fn lower_into(dst: &mut Vec<u8>, src: &[u8]) {
     dst.clear();
-    dst.extend_from_slice(src);
+    let n = src.iter().position(|&b| b == 0).unwrap_or(src.len());
+    dst.extend_from_slice(&src[..n]);
     for b in dst.iter_mut() {
-        if *b == 0 {
-            break;
-        }
         b.make_ascii_lowercase();
     }
 }

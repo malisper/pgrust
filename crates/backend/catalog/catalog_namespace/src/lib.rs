@@ -21,11 +21,13 @@ use types_core::{
 };
 use types_error::PgResult;
 
+pub mod builtins;
 mod lookup;
 mod path;
 mod temp;
 #[cfg(test)]
 mod tests;
+mod visibility;
 
 pub use temp::{
     AccessTempTableNamespace, GetTempTableNamespace, RangeVarAdjustRelationPersistence,
@@ -33,7 +35,8 @@ pub use temp::{
 };
 
 pub use lookup::{
-    get_namespace_oid, DeconstructQualifiedName, FuncCandidate, FuncnameGetCandidates,
+    get_collation_oid, get_collation_oid_list, get_namespace_oid, DeconstructQualifiedName,
+    FuncCandidate, FuncnameGetCandidates,
     LookupExplicitNamespace, LookupNamespaceNoError, OperCandidate, OpernameGetCandidates,
     OpclassnameGetOpcid, OpernameGetOprid, OpfamilynameGetOpfid, RangeVarGetRelid, RangeVarGetRelidExtended, RelnameGetRelid,
     TypenameGetTypidExtended, RVR_MISSING_OK, RVR_NOWAIT, RVR_SKIP_LOCKED,
@@ -42,6 +45,10 @@ pub use path::{
     assign_search_path, check_search_path, fetch_search_path, fetch_search_path_array,
     CopySearchPathMatcher, GetSearchPathMatcher, InitializeSearchPath, SearchPathMatcher,
     SearchPathMatchesCurrentEnvironment,
+};
+pub use visibility::{
+    FunctionIsVisible, FunctionIsVisibleExt, RelationIsVisible, RelationIsVisibleExt,
+    TypeIsVisible, TypeIsVisibleExt,
 };
 
 pub(crate) fn OidIsValid(oid: Oid) -> bool {
@@ -89,18 +96,12 @@ pub(crate) fn base_path_nth(i: usize) -> Oid {
     with_path_state(|st| st.base_search_path[i])
 }
 
-pub(crate) fn my_temp_namespace() -> Oid {
+pub fn my_temp_namespace() -> Oid {
     MY_TEMP_NAMESPACE.with(Cell::get)
 }
 
 fn my_temp_toast_namespace() -> Oid {
     MY_TEMP_TOAST_NAMESPACE.with(Cell::get)
-}
-
-#[cold]
-#[inline(never)]
-pub(crate) fn deferred(what: &str) -> ! {
-    panic!("catalog_namespace: {what} is not ported (namespace.c temp-namespace-creation/DDL half)")
 }
 
 pub fn isTempNamespace(namespaceId: Oid) -> bool {
@@ -252,6 +253,7 @@ pub fn init_seams() {
     namespace_seams::initialize_search_path::set(InitializeSearchPath);
     namespace_seams::fetch_search_path::set(fetch_search_path);
     namespace_seams::find_default_conversion_proc::set(lookup::FindDefaultConversionProc);
+    namespace_seams::type_is_visible::set(lookup::TypeIsVisible);
 
     guc_tables::vars::namespace_search_path.install(guc_tables::GucVarAccessors {
         get: namespace_search_path_get,

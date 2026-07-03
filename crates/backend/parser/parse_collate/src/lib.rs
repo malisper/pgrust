@@ -18,8 +18,6 @@ enum CollateStrength {
     None = 0,
     Implicit = 1,
     Conflict = 2,
-    // Constructed only by the CollateExpr arm (loud until it lands).
-    #[allow(dead_code)]
     Explicit = 3,
 }
 
@@ -112,6 +110,7 @@ pub fn assign_list_collations<'mcx>(
 ) -> PgResult<()> {
     walk_top_list(mcx, pstate, exprs)
 }
+
 
 pub fn assign_expr_collations<'mcx>(
     mcx: Mcx<'mcx>,
@@ -232,7 +231,51 @@ fn assign_collations_walker<'mcx>(
             }
             return Ok(());
         }
+        NodeTag::T_CollateExpr => {
+            let c = node.as_collate_expr().unwrap();
+            assign_collations_walker(c.arg, &mut loccontext)?;
+            collation = c.collOid;
+            debug_assert!(OidIsValid(collation));
+            strength = CollateStrength::Explicit;
+            location = c.location;
+        }
         NodeTag::T_RangeTblRef | NodeTag::T_SortGroupClause => return Ok(()),
+        // RowExpr subexpressions are independent (C assign_list_collations);
+        // the RECORD result is never collatable, so no impact on the parent.
+        NodeTag::T_RowExpr => {
+            walk_top_list(context.mcx, context.pstate, &node.as_row_expr().unwrap().args)?;
+            return Ok(());
+        }
+        // Non-default domain COLLATE overrides the child; DEFAULT bubbles the
+        // child state up; the node ignores input collation.
+        NodeTag::T_CoerceToDomain => {
+            let c = node.as_coerce_to_domain().unwrap();
+            assign_collations_walker(c.arg, &mut loccontext)?;
+            let typcollation = lsyscache::get_typcollation(c.resulttype)?;
+            if OidIsValid(typcollation) {
+                if typcollation == DEFAULT_COLLATION_OID {
+                    collation = loccontext.collation;
+                    strength = loccontext.strength;
+                    location = loccontext.location;
+                } else {
+                    collation = typcollation;
+                    strength = CollateStrength::Implicit;
+                    location = expr_location(node);
+                }
+            } else {
+                collation = InvalidOid;
+                strength = CollateStrength::None;
+                location = -1;
+            }
+            let set_coll =
+                if strength == CollateStrength::Conflict { InvalidOid } else { collation };
+            // SAFETY: parse analysis exclusively owns the just-built tree; the
+            // child borrows above have ended.
+            unsafe {
+                node.with_mut::<types_nodes::CoerceToDomain, _>(|cd| cd.resultcollid = set_coll)
+                    .unwrap();
+            }
+        }
         NodeTag::T_Query => {
             let qtree = node.as_query().unwrap();
             let Some(first) = qtree.targetList.first() else {
@@ -270,6 +313,16 @@ fn assign_collations_walker<'mcx>(
             };
             location = expr_location(node);
         }
+        // COLLATE sets an explicitly derived collation regardless of the
+        // child state; still recurse to set up collation info below.
+        NodeTag::T_CollateExpr => {
+            let ce = node.as_collate_expr().unwrap();
+            assign_collations_walker(ce.arg, &mut loccontext)?;
+            collation = ce.collOid;
+            debug_assert!(OidIsValid(collation));
+            strength = CollateStrength::Explicit;
+            location = ce.location;
+        }
         // C's default arm over the closed set this lane can produce.
         // SubLink: children walked (T_Query arm supplies the EXPR sublink's
         // first-column collation); exprSetCollation on SubLink is a C no-op.
@@ -287,6 +340,11 @@ fn assign_collations_walker<'mcx>(
         | NodeTag::T_GroupingFunc
         | NodeTag::T_WindowFunc
         | NodeTag::T_NullTest
+        | NodeTag::T_BooleanTest
+        | NodeTag::T_DistinctExpr
+        | NodeTag::T_ScalarArrayOpExpr
+        | NodeTag::T_ArrayExpr
+        | NodeTag::T_SQLValueFunction
         | NodeTag::T_SubLink) => {
             match tag {
                 // C: never recurse into the CASE test expression — it was
@@ -354,16 +412,28 @@ fn assign_collations_walker<'mcx>(
                         &mut loccontext,
                     )?;
                 }
+                // Resjunk ORDER BY args and FILTER are held at arm's length
+                // (independent walks): they must not conflict with regular
+                // args or affect the aggregate's collation.
                 NodeTag::T_Aggref => {
                     let agg = node.as_aggref().unwrap();
-                    for arg in &agg.aggdirectargs {
-                        assign_collations_walker(arg, &mut loccontext)?;
+                    if agg.aggkind != types_nodes::primnodes::AGGKIND_NORMAL {
+                        panic!(
+                            "assign_ordered_set_collations/assign_hypothetical_collations \
+                             (parse_collate.c) unported — unit backend-parser-parse-collate"
+                        );
                     }
-                    for tle in &agg.args {
-                        assign_collations_walker(tle, &mut loccontext)?;
+                    debug_assert!(agg.aggdirectargs.is_nil());
+                    for tle_node in &agg.args {
+                        let tle = tle_node.as_target_entry().expect("Aggref arg TargetEntry");
+                        if tle.resjunk {
+                            assign_expr_collations(context.mcx, context.pstate, tle_node)?;
+                        } else {
+                            assign_collations_walker(tle_node, &mut loccontext)?;
+                        }
                     }
                     if let Some(filter) = agg.aggfilter {
-                        assign_collations_walker(filter, &mut loccontext)?;
+                        assign_expr_collations(context.mcx, context.pstate, filter)?;
                     }
                 }
                 NodeTag::T_GroupingFunc => {
@@ -377,7 +447,7 @@ fn assign_collations_walker<'mcx>(
                         assign_collations_walker(arg, &mut loccontext)?;
                     }
                     if let Some(filter) = wf.aggfilter {
-                        assign_collations_walker(filter, &mut loccontext)?;
+                        assign_expr_collations(context.mcx, context.pstate, filter)?;
                     }
                 }
                 NodeTag::T_SubLink => {
@@ -392,6 +462,27 @@ fn assign_collations_walker<'mcx>(
                         assign_collations_walker(arg, &mut loccontext)?;
                     }
                 }
+                NodeTag::T_BooleanTest => {
+                    if let Some(arg) = node.as_boolean_test().unwrap().arg {
+                        assign_collations_walker(arg, &mut loccontext)?;
+                    }
+                }
+                NodeTag::T_DistinctExpr => {
+                    for arg in &node.as_distinct_expr().unwrap().args {
+                        assign_collations_walker(arg, &mut loccontext)?;
+                    }
+                }
+                NodeTag::T_ScalarArrayOpExpr => {
+                    for arg in &node.as_scalar_array_op_expr().unwrap().args {
+                        assign_collations_walker(arg, &mut loccontext)?;
+                    }
+                }
+                NodeTag::T_ArrayExpr => {
+                    for el in &node.as_array_expr().unwrap().elements {
+                        assign_collations_walker(el, &mut loccontext)?;
+                    }
+                }
+                NodeTag::T_SQLValueFunction => {}
                 _ => unreachable!(),
             }
 
@@ -452,11 +543,20 @@ fn assign_collations_walker<'mcx>(
                     NodeTag::T_CoerceViaIO => node
                         .with_mut::<types_nodes::CoerceViaIO, _>(|c| c.resultcollid = set_coll)
                         .unwrap(),
-                    // exprSetCollation(BoolExpr/NullTest/GroupingFunc) is
-                    // assert-only in C.
-                    NodeTag::T_BoolExpr | NodeTag::T_NullTest | NodeTag::T_GroupingFunc => {
+                    // exprSetCollation(BoolExpr/NullTest/GroupingFunc/BooleanTest)
+                    // is assert-only in C.
+                    NodeTag::T_BoolExpr
+                    | NodeTag::T_NullTest
+                    | NodeTag::T_GroupingFunc
+                    | NodeTag::T_BooleanTest => {
                         debug_assert!(!OidIsValid(set_coll))
                     }
+                    NodeTag::T_DistinctExpr => node
+                        .with_mut::<types_nodes::DistinctExpr, _>(|d| {
+                            d.opcollid = set_coll;
+                            d.inputcollid = input_coll;
+                        })
+                        .unwrap(),
                     NodeTag::T_CaseExpr => node
                         .with_mut::<types_nodes::primnodes::CaseExpr, _>(|c| {
                             c.casecollid = set_coll
@@ -487,6 +587,29 @@ fn assign_collations_walker<'mcx>(
                         .unwrap(),
                     // exprSetCollation(SubLink) is assert-only in C.
                     NodeTag::T_SubLink => {}
+                    // exprSetCollation(ScalarArrayOpExpr) is assert-only
+                    // (boolean result); only inputcollid is written.
+                    NodeTag::T_ScalarArrayOpExpr => {
+                        debug_assert!(!OidIsValid(set_coll));
+                        node.with_mut::<types_nodes::ScalarArrayOpExpr, _>(|s| {
+                            s.inputcollid = input_coll;
+                        })
+                        .unwrap()
+                    }
+                    NodeTag::T_ArrayExpr => node
+                        .with_mut::<types_nodes::ArrayExpr, _>(|a| a.array_collid = set_coll)
+                        .unwrap(),
+                    NodeTag::T_SQLValueFunction => {
+                        debug_assert!(
+                            if node.as_sql_value_function().unwrap().r#type
+                                == types_core::catalog::NAMEOID
+                            {
+                                set_coll == types_core::catalog::C_COLLATION_OID
+                            } else {
+                                !OidIsValid(set_coll)
+                            }
+                        );
+                    }
                     _ => unreachable!(),
                 }
             }
@@ -574,19 +697,21 @@ fn collation_mismatch_error(
             .unwrap_or_else(|| format!("{c}"))
     };
     let encoding = mbutils::GetDatabaseEncoding();
+    let mut report = elog::ereport(ERROR).errcode(ERRCODE_COLLATION_MISMATCH).errmsg(format!(
+        "collation mismatch between {kind} collations \"{}\" and \"{}\"",
+        name(coll1),
+        name(coll2)
+    ));
+    // C attaches the hint only on the implicit variant.
+    if kind == "implicit" {
+        report = report.errhint(
+            "You can choose the collation by applying the COLLATE clause to one or both \
+             expressions."
+                .to_owned(),
+        );
+    }
     Box::new(
-        elog::ereport(ERROR)
-            .errcode(ERRCODE_COLLATION_MISMATCH)
-            .errmsg(format!(
-                "collation mismatch between {kind} collations \"{}\" and \"{}\"",
-                name(coll1),
-                name(coll2)
-            ))
-            .errhint(
-                "You can choose the collation by applying the COLLATE clause to one or both \
-                 expressions."
-                    .to_owned(),
-            )
+        report
             .errposition(parser_errposition(ctx.pstate, errloc, encoding))
             .into_error()
             .with_error_location(ErrorLocation::new("parse_collate.c", 0, funcname)),

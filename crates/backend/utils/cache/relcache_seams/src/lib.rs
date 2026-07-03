@@ -19,6 +19,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    pub fn relation_get_stat_ext_list<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        relid: Oid,
+    ) -> PgResult<mcx::PgVec<'mcx, Oid>>
+);
+
+seam_core::seam!(
     pub fn relation_cache_invalidate(debug_discard: bool) -> PgResult<()>
 );
 

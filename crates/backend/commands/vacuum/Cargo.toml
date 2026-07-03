@@ -9,6 +9,7 @@ name = "commands_vacuum"
 path = "src/lib.rs"
 
 [dependencies]
+cluster_seams = { path = "../cluster_seams" }
 indexam = { path = "../../access/index/indexam" }
 nbtree = { path = "../../access/nbtree/nbtree" }
 types_nbtree = { path = "../../../_support/types/types_nbtree" }

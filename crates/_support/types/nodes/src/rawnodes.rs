@@ -184,6 +184,13 @@ pub struct A_Expr<'mcx> {
     pub location: ParseLoc,
 }
 
+#[derive(Default)]
+pub struct CollateClause<'mcx> {
+    pub arg: Option<Node<'mcx>>,
+    pub collname: NodeList<'mcx>,
+    pub location: ParseLoc,
+}
+
 /// C `union ValUnion` — the embedded value-node union of `A_Const`.
 #[derive(Clone, Copy)]
 pub enum ValUnion<'mcx> {
@@ -348,6 +355,38 @@ pub enum OnCommitAction {
     ONCOMMIT_DROP,
 }
 
+/// `rel` is a RangeVar node handle (the grammar scribbles its
+/// relpersistence); `viewQuery` is a Query node handle (matview lane).
+#[derive(Default)]
+pub struct IntoClause<'mcx> {
+    pub rel: Option<Node<'mcx>>,
+    pub colNames: NodeList<'mcx>,
+    pub accessMethod: Option<&'mcx str>,
+    pub options: NodeList<'mcx>,
+    pub onCommit: OnCommitAction,
+    pub tableSpaceName: Option<&'mcx str>,
+    pub viewQuery: Option<Node<'mcx>>,
+    pub skipData: bool,
+}
+
+/// `query` is a raw statement node until parse analysis rewrites it into a
+/// Query node in place; `into` is an IntoClause node handle.
+#[derive(Default)]
+pub struct CreateTableAsStmt<'mcx> {
+    pub query: Option<Node<'mcx>>,
+    pub into: Option<Node<'mcx>>,
+    pub objtype: crate::parsenodes::ObjectType,
+    pub is_select_into: bool,
+    pub if_not_exists: bool,
+}
+
+#[derive(Default)]
+pub struct RefreshMatViewStmt<'mcx> {
+    pub concurrent: bool,
+    pub skipData: bool,
+    pub relation: Option<&'mcx crate::primnodes::RangeVar<'mcx>>,
+}
+
 #[derive(Default)]
 pub struct CreateStmt<'mcx> {
     pub relation: Option<&'mcx crate::primnodes::RangeVar<'mcx>>,
@@ -363,6 +402,34 @@ pub struct CreateStmt<'mcx> {
     pub tablespacename: Option<&'mcx str>,
     pub accessMethod: Option<&'mcx str>,
     pub if_not_exists: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ViewCheckOption {
+    #[default]
+    NO_CHECK_OPTION = 0,
+    LOCAL_CHECK_OPTION,
+    CASCADED_CHECK_OPTION,
+}
+
+#[derive(Default)]
+pub struct ViewStmt<'mcx> {
+    pub view: Option<&'mcx crate::primnodes::RangeVar<'mcx>>,
+    pub aliases: NodeList<'mcx>,
+    pub query: Option<Node<'mcx>>,
+    pub replace: bool,
+    pub options: NodeList<'mcx>,
+    pub withCheckOption: ViewCheckOption,
+}
+
+pub struct RuleStmt<'mcx> {
+    pub relation: Option<&'mcx crate::primnodes::RangeVar<'mcx>>,
+    pub rulename: &'mcx str,
+    pub whereClause: Option<Node<'mcx>>,
+    pub event: crate::nodes_enums::CmdType,
+    pub instead: bool,
+    pub actions: NodeList<'mcx>,
+    pub replace: bool,
 }
 
 #[derive(Default)]
@@ -385,6 +452,61 @@ pub struct ColumnDef<'mcx> {
     pub collOid: Oid,
     pub constraints: NodeList<'mcx>,
     pub fdwoptions: NodeList<'mcx>,
+    pub location: ParseLoc,
+}
+
+#[derive(Default)]
+pub struct PartitionElem<'mcx> {
+    pub name: Option<&'mcx str>,
+    pub expr: Option<Node<'mcx>>,
+    pub collation: NodeList<'mcx>,
+    pub opclass: NodeList<'mcx>,
+    pub location: ParseLoc,
+}
+
+// C PartitionStrategy (parsenodes.h): char-valued.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum PartitionStrategy {
+    #[default]
+    List = b'l',
+    Range = b'r',
+    Hash = b'h',
+}
+
+#[derive(Default)]
+pub struct PartitionSpec<'mcx> {
+    pub strategy: PartitionStrategy,
+    pub partParams: NodeList<'mcx>,
+    pub location: ParseLoc,
+}
+
+#[derive(Default)]
+pub struct PartitionBoundSpec<'mcx> {
+    pub strategy: u8,
+    pub is_default: bool,
+    pub modulus: i32,
+    pub remainder: i32,
+    pub listdatums: NodeList<'mcx>,
+    pub lowerdatums: NodeList<'mcx>,
+    pub upperdatums: NodeList<'mcx>,
+    pub location: ParseLoc,
+}
+
+// C PartitionRangeDatumKind (parsenodes.h).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(i8)]
+pub enum PartitionRangeDatumKind {
+    Minvalue = -1,
+    #[default]
+    Value = 0,
+    Maxvalue = 1,
+}
+
+#[derive(Default)]
+pub struct PartitionRangeDatum<'mcx> {
+    pub kind: PartitionRangeDatumKind,
+    pub value: Option<Node<'mcx>>,
     pub location: ParseLoc,
 }
 
@@ -451,6 +573,41 @@ pub struct IndexStmt<'mcx> {
     pub reset_default_tblspc: bool,
 }
 
+#[derive(Default)]
+pub struct CreateSeqStmt<'mcx> {
+    pub sequence: Option<&'mcx crate::primnodes::RangeVar<'mcx>>,
+    pub options: NodeList<'mcx>,
+    pub ownerId: Oid,
+    pub for_identity: bool,
+    pub if_not_exists: bool,
+}
+
+#[derive(Default)]
+pub struct AlterSeqStmt<'mcx> {
+    pub sequence: Option<&'mcx crate::primnodes::RangeVar<'mcx>>,
+    pub options: NodeList<'mcx>,
+    pub for_identity: bool,
+    pub missing_ok: bool,
+}
+
+#[derive(Default)]
+pub struct TableLikeClause<'mcx> {
+    pub relation: Option<&'mcx crate::primnodes::RangeVar<'mcx>>,
+    pub options: u32,
+    pub relationOid: Oid,
+}
+
+pub const CREATE_TABLE_LIKE_COMMENTS: u32 = 1 << 0;
+pub const CREATE_TABLE_LIKE_COMPRESSION: u32 = 1 << 1;
+pub const CREATE_TABLE_LIKE_CONSTRAINTS: u32 = 1 << 2;
+pub const CREATE_TABLE_LIKE_DEFAULTS: u32 = 1 << 3;
+pub const CREATE_TABLE_LIKE_GENERATED: u32 = 1 << 4;
+pub const CREATE_TABLE_LIKE_IDENTITY: u32 = 1 << 5;
+pub const CREATE_TABLE_LIKE_INDEXES: u32 = 1 << 6;
+pub const CREATE_TABLE_LIKE_STATISTICS: u32 = 1 << 7;
+pub const CREATE_TABLE_LIKE_STORAGE: u32 = 1 << 8;
+pub const CREATE_TABLE_LIKE_ALL: u32 = i32::MAX as u32;
+
 // DEFAULT/CHECK slice of C's Constraint; index/FK fields arrive with their DDL.
 pub const FKCONSTR_ACTION_NOACTION: u8 = b'a';
 pub const FKCONSTR_ACTION_RESTRICT: u8 = b'r';
@@ -474,6 +631,8 @@ pub struct Constraint<'mcx> {
     pub is_no_inherit: bool,
     pub raw_expr: Option<Node<'mcx>>,
     pub cooked_expr: Option<&'mcx str>,
+    pub generated_when: u8,
+    pub generated_kind: u8,
     pub nulls_not_distinct: bool,
     pub keys: NodeList<'mcx>,
     pub including: NodeList<'mcx>,
@@ -494,12 +653,54 @@ pub struct Constraint<'mcx> {
     pub location: ParseLoc,
 }
 
+#[derive(Default)]
+pub struct CreateDomainStmt<'mcx> {
+    pub domainname: NodeList<'mcx>,
+    pub typeName: Option<Node<'mcx>>,
+    pub collClause: Option<Node<'mcx>>,
+    pub constraints: NodeList<'mcx>,
+}
+
+#[derive(Default)]
+pub struct CreateEnumStmt<'mcx> {
+    pub typeName: NodeList<'mcx>,
+    pub vals: NodeList<'mcx>,
+}
+
+#[derive(Default)]
+pub struct AlterEnumStmt<'mcx> {
+    pub typeName: NodeList<'mcx>,
+    pub oldVal: Option<&'mcx str>,
+    pub newVal: Option<&'mcx str>,
+    pub newValNeighbor: Option<&'mcx str>,
+    pub newValIsAfter: bool,
+    pub skipIfNewValExists: bool,
+}
+
 // SAFETY (each): tag/type pairing mirrors parsenodes.h.
 unsafe impl<'mcx> NodeVariant<'mcx> for RawStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_RawStmt;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for CreateDomainStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CreateDomainStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for CreateEnumStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CreateEnumStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for AlterEnumStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_AlterEnumStmt;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for SelectStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_SelectStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for IntoClause<'mcx> {
+    const TAG: NodeTag = NodeTag::T_IntoClause;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for CreateTableAsStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CreateTableAsStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for RefreshMatViewStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_RefreshMatViewStmt;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for InsertStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_InsertStmt;
@@ -527,6 +728,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for A_Expr<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for A_Const<'mcx> {
     const TAG: NodeTag = NodeTag::T_A_Const;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for CollateClause<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CollateClause;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for ColumnRef<'mcx> {
     const TAG: NodeTag = NodeTag::T_ColumnRef;
@@ -561,6 +765,12 @@ unsafe impl<'mcx> NodeVariant<'mcx> for TypeCast<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for CreateStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_CreateStmt;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for ViewStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_ViewStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for RuleStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_RuleStmt;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for ColumnDef<'mcx> {
     const TAG: NodeTag = NodeTag::T_ColumnDef;
 }
@@ -573,8 +783,53 @@ unsafe impl<'mcx> NodeVariant<'mcx> for IndexElem<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for IndexStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_IndexStmt;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for TableLikeClause<'mcx> {
+    const TAG: NodeTag = NodeTag::T_TableLikeClause;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for LockingClause<'mcx> {
     const TAG: NodeTag = NodeTag::T_LockingClause;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for CreateSeqStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CreateSeqStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for AlterSeqStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_AlterSeqStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for PartitionElem<'mcx> {
+    const TAG: NodeTag = NodeTag::T_PartitionElem;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for PartitionSpec<'mcx> {
+    const TAG: NodeTag = NodeTag::T_PartitionSpec;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for PartitionBoundSpec<'mcx> {
+    const TAG: NodeTag = NodeTag::T_PartitionBoundSpec;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for PartitionRangeDatum<'mcx> {
+    const TAG: NodeTag = NodeTag::T_PartitionRangeDatum;
+}
+
+#[derive(Default)]
+pub struct CreateStatsStmt<'mcx> {
+    pub defnames: NodeList<'mcx>,
+    pub stat_types: NodeList<'mcx>,
+    pub exprs: NodeList<'mcx>,
+    pub relations: NodeList<'mcx>,
+    pub stxcomment: Option<&'mcx str>,
+    pub transformed: bool,
+    pub if_not_exists: bool,
+}
+
+#[derive(Default)]
+pub struct StatsElem<'mcx> {
+    pub name: Option<&'mcx str>,
+    pub expr: Option<Node<'mcx>>,
+}
+
+unsafe impl<'mcx> NodeVariant<'mcx> for CreateStatsStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CreateStatsStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for StatsElem<'mcx> {
+    const TAG: NodeTag = NodeTag::T_StatsElem;
 }
 
 impl<'mcx> Node<'mcx> {
@@ -692,6 +947,11 @@ impl<'mcx> Node<'mcx> {
     }
 
     #[inline]
+    pub fn as_collate_clause(self) -> Option<&'mcx CollateClause<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
     pub fn as_column_ref(self) -> Option<&'mcx ColumnRef<'mcx>> {
         self.as_variant()
     }
@@ -741,8 +1001,34 @@ impl<'mcx> Node<'mcx> {
         self.as_variant()
     }
 
+
     #[inline]
     pub fn as_locking_clause(self) -> Option<&'mcx LockingClause<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_create_seq_stmt(self) -> Option<&'mcx CreateSeqStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_create_enum_stmt(self) -> Option<&'mcx CreateEnumStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_alter_seq_stmt(self) -> Option<&'mcx AlterSeqStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_alter_enum_stmt(self) -> Option<&'mcx AlterEnumStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_create_domain_stmt(self) -> Option<&'mcx CreateDomainStmt<'mcx>> {
         self.as_variant()
     }
 }

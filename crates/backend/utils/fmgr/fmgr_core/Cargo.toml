@@ -15,13 +15,17 @@ datum = { path = "../../../../_support/types/datum" }
 fmgr = { package = "types_fmgr", path = "../../../../_support/types/fmgr" }
 fmgr_seams = { path = "../fmgr_seams" }
 adt_bool = { path = "../../adt/bool" }
+adt_domains = { path = "../../adt/domains" }
 arrayfuncs = { path = "../../adt/arrayfuncs" }
 adt_scalar = { path = "../../adt/scalar" }
+sequence_seams = { path = "../../../commands/sequence_seams" }
+adt_regproc = { path = "../../adt/regproc" }
 adt_cash = { path = "../../adt/cash" }
 adt_char = { path = "../../adt/char" }
 adt_date = { path = "../../adt/adt_date" }
 adt_timestamp = { path = "../../adt/adt_timestamp" }
 adt_encode = { path = "../../adt/encode" }
+adt_enum = { path = "../../adt/adt_enum" }
 adt_float = { path = "../../adt/float" }
 adt_formatting = { path = "../../adt/formatting" }
 adt_int = { path = "../../adt/int" }
@@ -30,22 +34,32 @@ adt_json = { path = "../../adt/json" }
 adt_jsonb = { path = "../../adt/jsonb" }
 adt_mac = { path = "../../adt/mac" }
 adt_mac8 = { path = "../../adt/mac8" }
+adt_pg_lsn = { path = "../../adt/pg_lsn" }
+dbsize = { path = "../../adt/dbsize" }
 adt_uuid = { path = "../../adt/uuid" }
+adt_varbit = { path = "../../adt/varbit" }
 adt_network = { path = "../../adt/network" }
-adt_regproc = { path = "../../adt/regproc" }
+adt_rangetypes = { path = "../../adt/rangetypes" }
+adt_multirangetypes = { path = "../../adt/multirangetypes" }
 adt_numeric = { path = "../../adt/numeric" }
 adt_like = { path = "../../adt/like" }
 adt_regexp = { path = "../../adt/regexp" }
 adt_oracle_compat = { path = "../../adt/oracle_compat" }
 adt_pseudotypes = { path = "../../adt/pseudotypes" }
+adt_quote = { path = "../../adt/quote" }
+adt_varchar = { path = "../../adt/varchar" }
+pgstatfuncs = { path = "../../adt/pgstatfuncs" }
 name = { path = "../../adt/name" }
 nbt_compare = { path = "../../../access/nbtree/compare" }
 varlena = { path = "../../adt/varlena" }
 commands_async = { path = "../../../commands/commands_async" }
 adt_windowfuncs = { path = "../../adt/windowfuncs" }
+cryptohashfuncs = { path = "../../adt/cryptohashfuncs" }
+pseudorandomfuncs = { path = "../../adt/pseudorandomfuncs" }
 conv = { path = "../../mb/conv" }
+mcx = { path = "../../../../_support/mcx" }
+syscache_seams = { path = "../../cache/syscache_seams" }
 
 [dev-dependencies]
-mcx = { path = "../../../../_support/mcx" }
 stringinfo = { path = "../../../../_support/types/stringinfo" }
 nodes = { package = "types_nodes", path = "../../../../_support/types/nodes" }

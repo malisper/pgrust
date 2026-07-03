@@ -62,7 +62,7 @@ impl<'mcx> ScanNode<'mcx> for BitmapHeapScanState<'mcx> {
                 return Ok(false);
             }
 
-            check_for_interrupts();
+            check_for_interrupts()?;
 
             // Lossy page or candidate match: recheck the original quals
             // against the heap tuple (ExecQualAndReset shape).
@@ -70,6 +70,13 @@ impl<'mcx> ScanNode<'mcx> for BitmapHeapScanState<'mcx> {
                 let ecxt = self.ss.ps_ExprContext;
                 estate.ecxt_mut(ecxt).ecxt_scantuple = Some(slot_id);
                 let passes = {
+                    // Per-tuple result mcx for arg-detoasting rechecks
+                    // (jsonb @> ...); the ecxt reset below frees it.
+                    let per_tuple = estate.ecxt(ecxt).per_tuple_mcx();
+                    if let Some(q) = self.bitmapqualorig.as_deref_mut() {
+                        // SAFETY: reset-only context, outlives the plan.
+                        unsafe { q.arm_result_mcx_raw(per_tuple) };
+                    }
                     let mut slots = EvalSlots {
                         scan: Some(estate.slot_mut(slot_id)),
                         inner: None,
@@ -208,17 +215,12 @@ pub fn exec_rescan_bitmap_heap_scan<'mcx>(
     Ok(())
 }
 
-#[cold]
-#[inline(never)]
-fn interrupt_unported() -> ! {
-    panic!("nodebitmapheapscan: ProcessInterrupts (tcop/postgres.c) unported")
-}
-
 #[inline(always)]
-fn check_for_interrupts() {
+fn check_for_interrupts() -> types_error::PgResult<()> {
     if init_small::globals::InterruptPending() {
-        interrupt_unported();
+        postgres_seams::check_for_interrupts::call()?;
     }
+    Ok(())
 }
 
 // Exempt: bitmapqualorig is released in exec_end_bitmap_heap_scan.

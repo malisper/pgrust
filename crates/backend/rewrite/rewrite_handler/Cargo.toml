@@ -18,11 +18,17 @@ table = { path = "../../access/table/table" }
 rewrite_handler_seams = { path = "../rewrite_handler_seams" }
 nodes_core = { path = "../../nodes/nodes_core" }
 readfuncs = { path = "../../nodes/readfuncs" }
+rewrite_manip = { path = "../rewrite_manip" }
 relcache = { path = "../../utils/cache/relcache" }
 coerce = { path = "../../parser/coerce" }
 parse_expr = { path = "../../parser/parse_expr" }
 parser_small1 = { path = "../../parser/parser_small1" }
 format_type = { path = "../../utils/adt/format_type" }
+pg_depend = { path = "../../catalog/pg_depend" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+cache_syscache = { path = "../../utils/cache/cache_syscache" }
+funcapi = { path = "../../utils/fmgr/funcapi" }
 
 [dev-dependencies]
 transam_seams = { path = "../../access/transam/transam_seams" }

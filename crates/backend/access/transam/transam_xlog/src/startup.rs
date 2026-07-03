@@ -548,9 +548,8 @@ fn CheckPointGuts(check_point_redo: XLogRecPtr, flags: i32) -> PgResult<()> {
 }
 
 fn wait_for_delay_chkpt(delay_type: i32) -> PgResult<()> {
-    if !procarray_seams::have_virtual_xids_delaying_chkpt::is_installed() {
-        return Ok(());
-    }
+    // A checkpoint that skips the delay-chkpt wait can capture a torn
+    // multi-record update; uninstalled probe must be loud, never a skip.
     while procarray_seams::have_virtual_xids_delaying_chkpt::call(delay_type) {
         if sync_seams::absorb_sync_requests::is_installed() {
             sync_seams::absorb_sync_requests::call()?;
@@ -682,7 +681,7 @@ pub fn CreateCheckPoint(flags: i32) -> PgResult<bool> {
     wait_for_delay_chkpt(DELAY_CHKPT_COMPLETE)?;
 
     if !shutdown && XLogStandbyInfoActive() {
-        panic!("LogStandbySnapshot not ported (standby.c)");
+        standby_seams::log_standby_snapshot::call()?;
     }
 
     init_small::globals::StartCriticalSection();
@@ -737,6 +736,9 @@ pub fn CreateCheckPoint(flags: i32) -> PgResult<bool> {
         PreallocXlogFiles(recptr, check_point.ThisTimeLineID)?;
     }
 
+    // DEBT(savepoint lane): truncate_subtrans is installed by the subtrans
+    // unit; until it lands, skipping only bloats pg_subtrans (no correctness
+    // arm) — the one is_installed skip this crate tolerates.
     if !RecoveryInProgress() && subtrans_seams::truncate_subtrans::is_installed() {
         subtrans_seams::truncate_subtrans::call(
             procarray_seams::get_oldest_transaction_id_considered_running::call(),

@@ -13,8 +13,8 @@ mod tests;
 
 pub use build::{accum_array_result, init_array_result, make_array_result, make_md_array_result};
 pub use construct::{
-    array_contains_nulls, construct_array, construct_empty_array, construct_md_array,
-    deconstruct_array, deconstruct_array_builtin,
+    array_contains_nulls, array_get_integer_typmods, construct_array, construct_empty_array,
+    construct_md_array, deconstruct_array, deconstruct_array_builtin,
 };
 pub use foundation::{
     arr_data_offset, arr_dim, arr_elemtype, arr_hasnull, arr_lbound, arr_ndim, arr_size,

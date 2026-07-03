@@ -112,9 +112,6 @@ fn object_aclmask(
 ) -> PgResult<u64> {
     match classid {
         NAMESPACE_RELATION_ID => return pg_namespace_aclmask(objectid, roleid, mask, how),
-        // pg_type_aclmask's array-element / domain-basetype recursion is not
-        // taken for the plain type oids DDL passes here.
-        TYPE_RELATION_ID => {}
         // C divergence: C asserts callers use pg_class_aclmask directly; the
         // executor consumes it through the object_aclcheck seam, so route it.
         RELATION_RELATION_ID => return pg_class_aclmask(objectid, roleid, mask, how),
@@ -142,6 +139,8 @@ fn object_aclmask(
             AclObjectType::Function,
             "function",
         ),
+        // C divergence: pg_type_aclmask's array-element indirection is not
+        // applied; element and array types share default ACLs at initdb.
         TYPE_RELATION_ID => (
             TYPEOID,
             ANUM_PG_TYPE_TYPOWNER,

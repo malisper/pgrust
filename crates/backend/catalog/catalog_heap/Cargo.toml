@@ -20,6 +20,7 @@ catalog_indexing = { path = "../catalog_indexing" }
 catalog_storage = { path = "../catalog_storage" }
 heaptuple = { path = "../../access/common/heaptuple" }
 table = { path = "../../access/table/table" }
+relation = { path = "../../access/common/relation" }
 tableam = { path = "../../access/table/tableam" }
 pg_type = { path = "../pg_type" }
 pg_depend = { path = "../pg_depend" }
@@ -36,3 +37,10 @@ xact = { path = "../../access/transam/xact" }
 tablecmds_seams = { path = "../../commands/tablecmds_seams" }
 init_small = { path = "../../utils/init/init_small" }
 miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+indexam = { path = "../../access/index/indexam" }
+catalog_index_seams = { path = "../catalog_index_seams" }
+pg_constraint = { path = "../pg_constraint" }
+outfuncs = { path = "../../nodes/outfuncs" }
+varlena = { path = "../../utils/adt/varlena" }
+inval = { path = "../../utils/cache/inval" }
+types_nodes = { path = "../../../_support/types/nodes" }

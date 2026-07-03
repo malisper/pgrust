@@ -197,7 +197,6 @@ fn make_portal<'mcx>(mcx: Mcx<'mcx>, formats: &[i16]) -> Portal<'mcx> {
         qc: QueryCompletion::default(),
         stmts: StmtListHandle::NULL,
         cplan: CachedPlanHandle::NULL,
-        planContext: core::ptr::null_mut(),
         portalParams: ParamListHandle::NULL,
         queryEnv: QueryEnvHandle::NULL,
         strategy: PortalStrategy::default(),

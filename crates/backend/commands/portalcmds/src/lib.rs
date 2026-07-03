@@ -200,8 +200,7 @@ pub fn PerformPortalClose(name: Option<&str>) -> PgResult<()> {
         return Err(undefined_cursor(name));
     };
 
-    // PortalCleanup runs as a side-effect, if not already done; PortalDrop
-    // also releases the stmts registry handle (C frees it with portalContext).
+    // PortalDrop runs PortalCleanup and releases the stmts registry handle.
     portalmem::PortalDrop(&portal, false)
 }
 
@@ -217,33 +216,27 @@ pub fn PortalCleanup(portal: &Portal<'static>) -> PgResult<()> {
     if query_desc.is_null() {
         return Ok(());
     }
-    if failed {
-        // C leaves the QueryDesc to die with the abort cleanup; the registry
-        // entry is owning, so release it here (execmain audit E-4 precedent).
-        // Dropping executor state releases scan pins remembered under the
-        // portal's owner at FETCH — that owner must be current for the drop.
-        let save_owner = resowner_seams::current_resource_owner::call();
-        let portal_owner = portal.borrow().resowner;
-        if !portal_owner.is_null() {
-            resowner_seams::set_current_resource_owner::call(portal_owner);
-        }
-        execmain_seams::release_query_desc::call(query_desc);
-        resowner_seams::set_current_resource_owner::call(save_owner);
-        return Ok(());
-    }
-    // ExecutorEnd unregisters es_snapshot from CurrentResourceOwner, so the
-    // portal's owner must be current for the shutdown (portalcmds.c:279).
+    // Both arms need CurrentResourceOwner = portal->resowner (portalcmds.c:279):
+    // ExecutorEnd unregisters es_snapshot from it; the failed arm's guard drops
+    // (pins, relation closers) forget from it, not the abort-time owner.
     let save_owner = resowner_seams::current_resource_owner::call();
     let portal_owner = portal.borrow().resowner;
     if !portal_owner.is_null() {
         resowner_seams::set_current_resource_owner::call(portal_owner);
     }
-    let result = (|| -> PgResult<()> {
-        execmain_seams::executor_finish::call(query_desc)?;
-        execmain_seams::executor_end::call(query_desc)?;
-        execmain_seams::free_query_desc::call(query_desc);
+    let result = if failed {
+        // C leaves the QueryDesc to die with the abort cleanup; the registry
+        // entry is owning, so release it here (execmain audit E-4 precedent).
+        execmain_seams::release_query_desc::call(query_desc);
         Ok(())
-    })();
+    } else {
+        (|| -> PgResult<()> {
+            execmain_seams::executor_finish::call(query_desc)?;
+            execmain_seams::executor_end::call(query_desc)?;
+            execmain_seams::free_query_desc::call(query_desc);
+            Ok(())
+        })()
+    };
     resowner_seams::set_current_resource_owner::call(save_owner);
     result
 }
@@ -284,11 +277,10 @@ pub fn PersistHoldablePortal(portal: &Portal<'static>) -> PgResult<()> {
         treceiver.destroy();
 
         portal.borrow_mut().queryDesc = QueryDescHandle::NULL;
-        (|| -> PgResult<()> {
-            execmain_seams::executor_finish::call(query_desc)?;
-            execmain_seams::executor_end::call(query_desc)
-        })()
-        .inspect_err(|_| execmain_seams::release_query_desc::call(query_desc))?;
+        let mut qd_owner = pquery::QueryDescOwner(query_desc);
+        execmain_seams::executor_finish::call(query_desc)?;
+        execmain_seams::executor_end::call(query_desc)?;
+        qd_owner.disarm();
         execmain_seams::free_query_desc::call(query_desc);
 
         let (at_end, portal_pos) = {

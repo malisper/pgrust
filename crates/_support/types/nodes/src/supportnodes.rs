@@ -16,6 +16,18 @@ pub struct SupportRequestRows<'mcx> {
 }
 
 #[repr(C)]
+pub struct SupportRequestSimplify<'mcx> {
+    tag: NodeTag,
+    pub fcall: Option<Node<'mcx>>,
+}
+
+impl<'mcx> SupportRequestSimplify<'mcx> {
+    pub fn new(fcall: Option<Node<'mcx>>) -> Self {
+        SupportRequestSimplify { tag: NodeTag::T_SupportRequestSimplify, fcall }
+    }
+}
+
+#[repr(C)]
 pub struct SupportRequestCost<'mcx> {
     tag: NodeTag,
     pub funcid: Oid,
@@ -24,10 +36,48 @@ pub struct SupportRequestCost<'mcx> {
     pub per_tuple: f64,
 }
 
+// C's root/index pointers are omitted (planner types don't cross fmgr);
+// consumers that need them land with match_pattern_prefix.
+#[repr(C)]
+pub struct SupportRequestIndexCondition<'mcx> {
+    tag: NodeTag,
+    pub funcid: Oid,
+    pub node: Option<Node<'mcx>>,
+    pub indexarg: i32,
+    pub indexcol: i32,
+    pub opfamily: Oid,
+    pub indexcollation: Oid,
+    pub lossy: bool,
+}
+
 const _: () = {
     assert!(core::mem::offset_of!(SupportRequestRows, tag) == 0);
     assert!(core::mem::offset_of!(SupportRequestCost, tag) == 0);
+    assert!(core::mem::offset_of!(SupportRequestSimplify, tag) == 0);
+    assert!(core::mem::offset_of!(SupportRequestIndexCondition, tag) == 0);
 };
+
+impl<'mcx> SupportRequestIndexCondition<'mcx> {
+    pub fn new(
+        funcid: Oid,
+        node: Option<Node<'mcx>>,
+        indexarg: i32,
+        indexcol: i32,
+        opfamily: Oid,
+        indexcollation: Oid,
+    ) -> Self {
+        SupportRequestIndexCondition {
+            tag: NodeTag::T_SupportRequestIndexCondition,
+            funcid,
+            node,
+            indexarg,
+            indexcol,
+            opfamily,
+            indexcollation,
+            lossy: true,
+        }
+    }
+}
 
 impl<'mcx> SupportRequestRows<'mcx> {
     pub fn new(funcid: Oid, node: Option<Node<'mcx>>) -> Self {

@@ -6,6 +6,7 @@ publish.workspace = true
 
 [dependencies]
 hashfn = { path = "../../../../common/hashfn" }
+hyperloglog = { path = "../../../lib/hyperloglog" }
 mcx = { path = "../../../../_support/mcx" }
 datum = { path = "../../../../_support/types/datum" }
 types_core = { path = "../../../../_support/types/types_core" }
@@ -15,11 +16,17 @@ types_fmgr = { path = "../../../../_support/types/fmgr" }
 stringinfo = { path = "../../../../_support/types/stringinfo" }
 pqformat = { path = "../../../libpq/pqformat" }
 guc_tables = { path = "../../misc/guc_tables" }
+mbutils = { path = "../../mb/mbutils" }
 mbutils_seams = { path = "../../mb/mbutils_seams" }
 pg_locale_seams = { path = "../pg_locale_seams" }
 detoast_seams = { path = "../../../access/common/detoast_seams" }
 parser_small1 = { path = "../../../parser/parser_small1" }
 wchar = { path = "../../../../common/wchar" }
+lsyscache = { path = "../../cache/lsyscache" }
+arrayfuncs = { path = "../arrayfuncs" }
+fmgr_seams = { path = "../../fmgr/fmgr_seams" }
+format_type = { path = "../format_type" }
+numutils = { path = "../numutils" }
 
 [dev-dependencies]
 detoast = { path = "../../../access/common/detoast" }

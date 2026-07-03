@@ -36,7 +36,11 @@ pub const INDEX_CONSTR_CREATE_WITHOUT_OVERLAPS: u16 = 1 << 5;
 
 pub const BTREE_AM_OID: Oid = 403;
 pub const HASH_AM_OID: Oid = 405;
+pub const GIN_AM_OID: Oid = 2742;
+const TEXTOID: Oid = 25;
+pub const GIST_AM_OID: Oid = 783;
 const INT4OID: Oid = 23;
+const BOXOID: Oid = 603;
 const OpclassOidIndexId: Oid = 2687;
 const IndexRelidIndexId: Oid = 2679;
 const Anum_pg_opclass_opcintype: usize = 7;
@@ -87,19 +91,20 @@ fn getattr(
     d
 }
 
-// ConstructTupleDescriptor, plain-column arm (expression columns loud).
+// ConstructTupleDescriptor (index.c).
 fn ConstructTupleDescriptor<'mcx>(
     mcx: Mcx<'mcx>,
     heapRelation: &Relation<'mcx>,
-    indexInfo: &IndexInfo,
+    indexInfo: &IndexInfo<'mcx>,
     indexColNames: &[&str],
     accessMethodId: Oid,
     collationIds: &[Oid],
     opclassIds: &[Oid],
 ) -> PgResult<TupleDescData<'mcx>> {
-    // amroutine->amkeytype: InvalidOid for btree, INT4OID for hash.
+    // amroutine->amkeytype: InvalidOid for btree/gin/gist/brin, INT4OID for hash.
     let amkeytype = match accessMethodId {
-        BTREE_AM_OID => InvalidOid,
+        BTREE_AM_OID | GIN_AM_OID | GIST_AM_OID | types_core::SPGIST_AM_OID
+        | types_core::BRIN_AM_OID => InvalidOid,
         HASH_AM_OID => INT4OID,
         other => unported(&format!("ConstructTupleDescriptor: index AM {other}")),
     };
@@ -110,20 +115,18 @@ fn ConstructTupleDescriptor<'mcx>(
 
     let mut indexTupDesc = tupdesc::CreateTemplateTupleDesc(mcx, numatts as i32)?;
 
+    let mut indexpr_item = indexInfo.ii_Expressions.iter();
     for i in 0..numatts {
         let atnum = indexInfo.ii_IndexAttrNumbers[i];
         let colname = indexColNames[i];
         if colname.len() >= NAMEDATALEN as usize {
             unported("ConstructTupleDescriptor: overlength index column name");
         }
-        if atnum == 0 {
-            unported("ConstructTupleDescriptor: expression index columns");
-        }
-        if atnum < 0 || atnum as i32 > natts {
-            panic!("invalid column number {atnum}");
-        }
-        let from = *heapTupDesc.attr(atnum as usize - 1);
-        {
+        if atnum != 0 {
+            if atnum < 0 || atnum as i32 > natts {
+                panic!("invalid column number {atnum}");
+            }
+            let from = *heapTupDesc.attr(atnum as usize - 1);
             let to = indexTupDesc.attr_mut(i);
             *to = from;
             to.attnum = (i + 1) as i16;
@@ -139,6 +142,28 @@ fn ConstructTupleDescriptor<'mcx>(
             to.attisdropped = false;
             to.attinhcount = 0;
             to.attndims = from.attndims;
+            to.attrelid = InvalidOid;
+        } else {
+            let indexkey = indexpr_item.next().expect("too few entries in indexprs list");
+            let keyType = nodes_core::expr_type(indexkey);
+            // C's CheckAttributeType defense: anonymous records can't be stored.
+            const RECORDOID: Oid = 2249;
+            assert!(keyType != RECORDOID, "column \"{colname}\" has pseudo-type record");
+            let shape = syscache_seams::lookup_pg_type_shape::call(keyType)?
+                .unwrap_or_else(|| panic!("cache lookup failed for type {keyType}"));
+            let to = indexTupDesc.attr_mut(i);
+            to.attnum = (i + 1) as i16;
+            to.attislocal = true;
+            to.attcollation = if i < numkeyatts { collationIds[i] } else { InvalidOid };
+            to.attname = NameData::default();
+            to.attname.namestrcpy(colname);
+            to.atttypid = keyType;
+            to.attlen = shape.typlen;
+            to.atttypmod = nodes_core::expr_typmod(indexkey);
+            to.attbyval = shape.typbyval;
+            to.attalign = shape.typalign;
+            to.attstorage = shape.typstorage;
+            to.attcompression = 0;
             to.attrelid = InvalidOid;
         }
 
@@ -156,18 +181,36 @@ fn ConstructTupleDescriptor<'mcx>(
             }
         }
         if keyType != InvalidOid && keyType != indexTupDesc.attr(i).atttypid {
-            // C reads the pg_type row for keyType; the only keytype reachable
-            // through the closed AM set is INT4 (hash amkeytype).
-            if keyType != INT4OID {
-                unported("ConstructTupleDescriptor: non-int4 opclass keytype override");
-            }
+            // C reads the pg_type row for keyType; closed-set arms: INT4
+            // (hash amkeytype), text (jsonb_ops opckeytype), BOX (gist
+            // point_ops opckeytype).
             let to = indexTupDesc.attr_mut(i);
+            match keyType {
+                INT4OID => {
+                    to.attlen = 4;
+                    to.attbyval = true;
+                    to.attalign = b'i' as i8;
+                    to.attstorage = b'p' as i8;
+                }
+                TEXTOID => {
+                    to.attlen = -1;
+                    to.attbyval = false;
+                    to.attalign = b'i' as i8;
+                    to.attstorage = b'x' as i8;
+                }
+                BOXOID => {
+                    to.attlen = 32;
+                    to.attbyval = false;
+                    to.attalign = b'd' as i8;
+                    to.attstorage = b'p' as i8;
+                }
+                other => unported(&format!(
+                    "ConstructTupleDescriptor: opclass keytype override to {other}"
+                )),
+            }
             to.atttypid = keyType;
             to.atttypmod = -1;
-            to.attlen = 4;
-            to.attbyval = true;
-            to.attalign = b'i' as i8;
-            to.attstorage = b'p' as i8;
+
             to.attcompression = 0;
         }
         tupdesc::populate_compact_attribute(&mut indexTupDesc, i);
@@ -225,7 +268,7 @@ fn UpdateIndexRelation<'mcx>(
     mcx: Mcx<'mcx>,
     indexoid: Oid,
     heapoid: Oid,
-    indexInfo: &IndexInfo,
+    indexInfo: &IndexInfo<'mcx>,
     collationOids: &[Oid],
     opclassOids: &[Oid],
     coloptions: &[i16],
@@ -256,6 +299,25 @@ fn UpdateIndexRelation<'mcx>(
     let indclass = build_vector_datum(mcx, OIDOID, 4, &class_data[..nkeyatts * 4], nkeyatts)?;
     let indoption = build_vector_datum(mcx, INT2OID, 2, &opt_data[..nkeyatts * 2], nkeyatts)?;
 
+    let exprs_text = if indexInfo.ii_Expressions.is_nil() {
+        None
+    } else {
+        let list = types_nodes::Node::mk_list(mcx, indexInfo.ii_Expressions.clone_in(mcx)?)?;
+        Some(varlena::cstring_to_text(
+            mcx,
+            outfuncs::nodeToString(mcx, list)?.as_bytes(),
+        )?)
+    };
+    let pred_text = if indexInfo.ii_Predicate.is_nil() {
+        None
+    } else {
+        let pred = clauses::make_ands_explicit(mcx, &indexInfo.ii_Predicate)?;
+        Some(varlena::cstring_to_text(
+            mcx,
+            outfuncs::nodeToString(mcx, pred)?.as_bytes(),
+        )?)
+    };
+
     let pg_index = table::table_open(mcx, INDEX_RELATION_ID, RowExclusiveLock)?;
 
     let mut values = [Datum::null(); Natts_pg_index];
@@ -279,8 +341,14 @@ fn UpdateIndexRelation<'mcx>(
     values[16] = Datum::from_usize(indcollation.as_ptr() as usize);
     values[17] = Datum::from_usize(indclass.as_ptr() as usize);
     values[18] = Datum::from_usize(indoption.as_ptr() as usize);
-    nulls[19] = true; // indexprs
-    nulls[20] = true; // indpred
+    match &exprs_text {
+        Some(t) => values[19] = Datum::from_usize(t.as_bytes().as_ptr() as usize),
+        None => nulls[19] = true,
+    }
+    match &pred_text {
+        Some(t) => values[20] = Datum::from_usize(t.as_bytes().as_ptr() as usize),
+        None => nulls[20] = true,
+    }
 
     let mut tup = heaptuple::heap_form_tuple(mcx, pg_index.descr(), &values, &nulls)?;
     catalog_indexing::CatalogTupleInsert(mcx, &pg_index, &mut tup)?;
@@ -302,7 +370,7 @@ pub fn index_create<'mcx>(
     heapRelation: &Relation<'mcx>,
     indexRelationName: &str,
     indexRelationId: Oid,
-    indexInfo: &mut IndexInfo,
+    indexInfo: &mut IndexInfo<'mcx>,
     indexColNames: &[&str],
     accessMethodId: Oid,
     tableSpaceId: Oid,
@@ -335,8 +403,14 @@ pub fn index_create<'mcx>(
     {
         unported("index_create: deferrable/existing-index/temporal constraint flags");
     }
-    if accessMethodId != BTREE_AM_OID && accessMethodId != HASH_AM_OID {
-        unported("index_create: index AMs beyond btree/hash");
+    if accessMethodId != BTREE_AM_OID
+        && accessMethodId != HASH_AM_OID
+        && accessMethodId != GIN_AM_OID
+        && accessMethodId != GIST_AM_OID
+        && accessMethodId != types_core::SPGIST_AM_OID
+        && accessMethodId != types_core::BRIN_AM_OID
+    {
+        unported("index_create: index AMs beyond btree/hash/gin/gist/spgist/brin");
     }
 
     let pg_class = table::table_open(mcx, RELATION_RELATION_ID, RowExclusiveLock)?;
@@ -526,6 +600,29 @@ pub fn index_create<'mcx>(
             &mut normals,
             pg_depend::DependencyType::Normal,
         )?;
+
+        if !indexInfo.ii_Expressions.is_nil() {
+            let exprs = types_nodes::Node::mk_list(mcx, indexInfo.ii_Expressions.clone_in(mcx)?)?;
+            pg_depend::recordDependencyOnSingleRelExpr(
+                mcx,
+                &myself,
+                exprs,
+                heapRelationId,
+                pg_depend::DependencyType::Normal,
+                pg_depend::DependencyType::Auto,
+            )?;
+        }
+        if !indexInfo.ii_Predicate.is_nil() {
+            let pred = types_nodes::Node::mk_list(mcx, indexInfo.ii_Predicate.clone_in(mcx)?)?;
+            pg_depend::recordDependencyOnSingleRelExpr(
+                mcx,
+                &myself,
+                pred,
+                heapRelationId,
+                pg_depend::DependencyType::Normal,
+                pg_depend::DependencyType::Auto,
+            )?;
+        }
     } else {
         unported("index_create: bootstrap-mode index_register");
     }
@@ -549,7 +646,7 @@ fn index_constraint_create<'mcx>(
     mcx: Mcx<'mcx>,
     heapRelation: &Relation<'mcx>,
     indexRelationId: Oid,
-    indexInfo: &IndexInfo,
+    indexInfo: &IndexInfo<'mcx>,
     constraintName: &str,
     constraintType: u8,
     constr_flags: u16,
@@ -599,13 +696,17 @@ pub fn index_build<'mcx>(
     mcx: Mcx<'mcx>,
     heapRelation: &Relation<'mcx>,
     indexRelation: &Relation<'mcx>,
-    indexInfo: &mut IndexInfo,
+    indexInfo: &mut IndexInfo<'mcx>,
     isreindex: bool,
 ) -> PgResult<()> {
     if indexRelation.rd_rel.relam != BTREE_AM_OID
         && indexRelation.rd_rel.relam != HASH_AM_OID
+        && indexRelation.rd_rel.relam != GIN_AM_OID
+        && indexRelation.rd_rel.relam != GIST_AM_OID
+        && indexRelation.rd_rel.relam != types_core::SPGIST_AM_OID
+        && indexRelation.rd_rel.relam != types_core::BRIN_AM_OID
     {
-        unported("index_build: index AMs beyond btree/hash");
+        unported("index_build: index AMs beyond btree/hash/gin/gist/spgist/brin");
     }
 
     let guard = miscinit::SecContextGuard::security_restricted(heapRelation.rd_rel.relowner);
@@ -615,8 +716,20 @@ pub fn index_build<'mcx>(
     let stats = if indexRelation.rd_rel.relam == BTREE_AM_OID {
         let r = nbtsort::btbuild(mcx, heapRelation, indexRelation, indexInfo)?;
         (r.heap_tuples, r.index_tuples)
-    } else {
+    } else if indexRelation.rd_rel.relam == HASH_AM_OID {
         let r = hashsort::hashbuild(mcx, heapRelation, indexRelation, indexInfo)?;
+        (r.heap_tuples, r.index_tuples)
+    } else if indexRelation.rd_rel.relam == types_core::BRIN_AM_OID {
+        let r = brin_build::brinbuild(mcx, heapRelation, indexRelation, indexInfo)?;
+        (r.heap_tuples, r.index_tuples)
+    } else if indexRelation.rd_rel.relam == types_core::SPGIST_AM_OID {
+        let r = spgist_build::spgbuild(mcx, heapRelation, indexRelation, indexInfo)?;
+        (r.heap_tuples, r.index_tuples)
+    } else if indexRelation.rd_rel.relam == GIN_AM_OID {
+        let r = ginbuild::ginbuild(mcx, heapRelation, indexRelation, indexInfo)?;
+        (r.heap_tuples, r.index_tuples)
+    } else {
+        let r = gistbuild::gistbuild(mcx, heapRelation, indexRelation, indexInfo)?;
         (r.heap_tuples, r.index_tuples)
     };
 
@@ -759,13 +872,34 @@ fn index_update_stats<'mcx>(
     pg_class.close(RowExclusiveLock)
 }
 
-// ResetReindexState (index.c): no REINDEX state exists to reset yet — the
-// pending/currently-reindexed globals land with the REINDEX lane.
-fn ResetReindexState(_nest_level: i32) {}
+fn ResetReindexState(nest_level: i32) {
+    types_rel::reindex::reset_reindex_state(nest_level)
+}
+
+// BuildDummyIndexInfo reduces to BuildIndexInfo here: expression/predicate/
+// exclusion arms (the fields the dummy form skips) are loud inside it.
+fn index_build_dummy<'mcx>(
+    mcx: Mcx<'mcx>,
+    heap_relation: &Relation<'mcx>,
+    index_relation: &Relation<'mcx>,
+    isreindex: bool,
+) -> types_error::PgResult<()> {
+    let mut indexInfo = execindexing::BuildIndexInfo(mcx, index_relation)?;
+    index_build(mcx, heap_relation, index_relation, &mut indexInfo, isreindex)
+}
 
 pub fn init_seams() {
     catalog_index_seams::reset_reindex_state::set(ResetReindexState);
+    catalog_index_seams::index_build_dummy::set(index_build_dummy);
 }
 
 pub use drop::{index_drop, IndexGetRelation};
 mod drop;
+pub use reindex::{
+    reindex_index, reindex_relation, RelationSetNewRelfilenumber, ReindexParams,
+    REINDEXOPT_CONCURRENTLY, REINDEXOPT_MISSING_OK, REINDEXOPT_REPORT_PROGRESS,
+    REINDEXOPT_VERBOSE, REINDEX_REL_CHECK_CONSTRAINTS,
+    REINDEX_REL_FORCE_INDEXES_PERMANENT, REINDEX_REL_FORCE_INDEXES_UNLOGGED,
+    REINDEX_REL_PROCESS_TOAST, REINDEX_REL_SUPPRESS_INDEX_USE,
+};
+mod reindex;

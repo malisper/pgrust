@@ -347,6 +347,41 @@ pub struct DefElem<'mcx> {
     pub location: ParseLoc,
 }
 
+// C FunctionParameterMode (parsenodes.h); values are the proargmodes chars.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(u8)]
+pub enum FunctionParameterMode {
+    #[default]
+    FUNC_PARAM_DEFAULT = b'd',
+    FUNC_PARAM_IN = b'i',
+    FUNC_PARAM_OUT = b'o',
+    FUNC_PARAM_INOUT = b'b',
+    FUNC_PARAM_VARIADIC = b'v',
+    FUNC_PARAM_TABLE = b't',
+}
+
+// C: argType is a TypeName; defexpr stays raw until transform.
+#[derive(Default)]
+pub struct FunctionParameter<'mcx> {
+    pub name: Option<&'mcx str>,
+    pub argType: Option<Node<'mcx>>,
+    pub mode: FunctionParameterMode,
+    pub defexpr: Option<Node<'mcx>>,
+    pub location: ParseLoc,
+}
+
+// C: returnType is a TypeName; sql_body is a ReturnStmt or List of stmts.
+#[derive(Default)]
+pub struct CreateFunctionStmt<'mcx> {
+    pub is_procedure: bool,
+    pub replace: bool,
+    pub funcname: NodeList<'mcx>,
+    pub parameters: NodeList<'mcx>,
+    pub returnType: Option<Node<'mcx>>,
+    pub options: NodeList<'mcx>,
+    pub sql_body: Option<Node<'mcx>>,
+}
+
 #[derive(Default)]
 pub struct CopyStmt<'mcx> {
     pub relation: Option<Node<'mcx>>,
@@ -498,6 +533,19 @@ pub struct DiscardStmt {
     pub target: DiscardMode,
 }
 
+pub struct LoadStmt<'mcx> {
+    pub filename: &'mcx str,
+}
+
+pub struct LockStmt<'mcx> {
+    pub relations: NodeList<'mcx>,
+    pub mode: i32,
+    pub nowait: bool,
+}
+
+#[derive(Default)]
+pub struct CheckPointStmt {}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[repr(u32)]
 pub enum CTEMaterialize {
@@ -561,6 +609,32 @@ pub struct VacuumStmt<'mcx> {
     pub options: NodeList<'mcx>,
     pub rels: NodeList<'mcx>,
     pub is_vacuumcmd: bool,
+}
+
+#[derive(Default)]
+pub struct ClusterStmt<'mcx> {
+    pub relation: Option<Node<'mcx>>,
+    pub indexname: Option<&'mcx str>,
+    pub params: NodeList<'mcx>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(u32)]
+pub enum ReindexObjectType {
+    #[default]
+    REINDEX_OBJECT_INDEX = 0,
+    REINDEX_OBJECT_TABLE,
+    REINDEX_OBJECT_SCHEMA,
+    REINDEX_OBJECT_SYSTEM,
+    REINDEX_OBJECT_DATABASE,
+}
+
+#[derive(Default)]
+pub struct ReindexStmt<'mcx> {
+    pub kind: ReindexObjectType,
+    pub relation: Option<Node<'mcx>>,
+    pub name: Option<&'mcx str>,
+    pub params: NodeList<'mcx>,
 }
 
 // C: relation is a RangeVar; oid InvalidOid until vacuum looks it up.
@@ -662,6 +736,37 @@ pub struct CreateSchemaStmt<'mcx> {
     pub if_not_exists: bool,
 }
 
+#[derive(Default)]
+pub struct CreatedbStmt<'mcx> {
+    pub dbname: Option<&'mcx str>,
+    pub options: NodeList<'mcx>,
+}
+
+#[derive(Default)]
+pub struct DropdbStmt<'mcx> {
+    pub dbname: Option<&'mcx str>,
+    pub missing_ok: bool,
+    pub options: NodeList<'mcx>,
+}
+
+#[derive(Default)]
+pub struct AlterDatabaseStmt<'mcx> {
+    pub dbname: Option<&'mcx str>,
+    pub options: NodeList<'mcx>,
+}
+
+#[derive(Default)]
+pub struct AlterDatabaseRefreshCollStmt<'mcx> {
+    pub dbname: Option<&'mcx str>,
+}
+
+// C: setstmt is a VariableSetStmt node.
+#[derive(Default)]
+pub struct AlterDatabaseSetStmt<'mcx> {
+    pub dbname: Option<&'mcx str>,
+    pub setstmt: Option<Node<'mcx>>,
+}
+
 // C: object is a List for TABLE/COLUMN forms; comment NULL removes it.
 #[derive(Default)]
 pub struct CommentStmt<'mcx> {
@@ -733,35 +838,6 @@ pub struct AlterOpFamilyStmt<'mcx> {
 pub struct AlterOperatorStmt<'mcx> {
     pub opername: Option<Node<'mcx>>,
     pub options: NodeList<'mcx>,
-}
-
-// C FunctionParameterMode char values; outfuncs prints the char.
-pub const FUNC_PARAM_IN: i8 = b'i' as i8;
-pub const FUNC_PARAM_OUT: i8 = b'o' as i8;
-pub const FUNC_PARAM_INOUT: i8 = b'b' as i8;
-pub const FUNC_PARAM_VARIADIC: i8 = b'v' as i8;
-pub const FUNC_PARAM_TABLE: i8 = b't' as i8;
-pub const FUNC_PARAM_DEFAULT: i8 = b'd' as i8;
-
-// C: argType is a TypeName*.
-pub struct FunctionParameter<'mcx> {
-    pub name: Option<&'mcx str>,
-    pub argType: Option<Node<'mcx>>,
-    pub mode: i8,
-    pub defexpr: Option<Node<'mcx>>,
-    pub location: ParseLoc,
-}
-
-impl Default for FunctionParameter<'_> {
-    fn default() -> Self {
-        FunctionParameter {
-            name: None,
-            argType: None,
-            mode: FUNC_PARAM_DEFAULT,
-            defexpr: None,
-            location: -1,
-        }
-    }
 }
 
 // C AlterTableType (parsenodes.h); discriminants are outfuncs-visible.
@@ -849,11 +925,35 @@ pub struct AlterTableCmd<'mcx> {
     pub recurse: bool,
 }
 
+// pg_class.h REPLICA_IDENTITY_* chars.
+pub const REPLICA_IDENTITY_DEFAULT: u8 = b'd';
+pub const REPLICA_IDENTITY_NOTHING: u8 = b'n';
+pub const REPLICA_IDENTITY_FULL: u8 = b'f';
+pub const REPLICA_IDENTITY_INDEX: u8 = b'i';
+
+#[derive(Default)]
+pub struct ReplicaIdentityStmt<'mcx> {
+    pub identity_type: u8,
+    pub name: Option<&'mcx str>,
+}
+
 #[derive(Default)]
 pub struct AlterTableStmt<'mcx> {
     pub relation: Option<&'mcx crate::primnodes::RangeVar<'mcx>>,
     pub cmds: NodeList<'mcx>,
     pub objtype: ObjectType,
+    pub missing_ok: bool,
+}
+
+#[derive(Default)]
+pub struct RenameStmt<'mcx> {
+    pub renameType: ObjectType,
+    pub relationType: ObjectType,
+    pub relation: Option<&'mcx crate::primnodes::RangeVar<'mcx>>,
+    pub object: Option<Node<'mcx>>,
+    pub subname: Option<&'mcx str>,
+    pub newname: Option<&'mcx str>,
+    pub behavior: DropBehavior,
     pub missing_ok: bool,
 }
 
@@ -965,6 +1065,12 @@ unsafe impl<'mcx> NodeVariant<'mcx> for DefElem<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for CopyStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_CopyStmt;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for FunctionParameter<'mcx> {
+    const TAG: NodeTag = NodeTag::T_FunctionParameter;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for CreateFunctionStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CreateFunctionStmt;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for VariableSetStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_VariableSetStmt;
 }
@@ -1010,6 +1116,15 @@ unsafe impl<'mcx> NodeVariant<'mcx> for UnlistenStmt<'mcx> {
 unsafe impl NodeVariant<'_> for DiscardStmt {
     const TAG: NodeTag = NodeTag::T_DiscardStmt;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for LoadStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_LoadStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for LockStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_LockStmt;
+}
+unsafe impl NodeVariant<'_> for CheckPointStmt {
+    const TAG: NodeTag = NodeTag::T_CheckPointStmt;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for DeallocateStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_DeallocateStmt;
 }
@@ -1046,14 +1161,32 @@ unsafe impl<'mcx> NodeVariant<'mcx> for AlterOpFamilyStmt<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for AlterOperatorStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_AlterOperatorStmt;
 }
-unsafe impl<'mcx> NodeVariant<'mcx> for FunctionParameter<'mcx> {
-    const TAG: NodeTag = NodeTag::T_FunctionParameter;
+unsafe impl<'mcx> NodeVariant<'mcx> for CreatedbStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CreatedbStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for DropdbStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_DropdbStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for AlterDatabaseStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_AlterDatabaseStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for AlterDatabaseRefreshCollStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_AlterDatabaseRefreshCollStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for AlterDatabaseSetStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_AlterDatabaseSetStmt;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for AlterTableStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_AlterTableStmt;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for AlterTableCmd<'mcx> {
     const TAG: NodeTag = NodeTag::T_AlterTableCmd;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for RenameStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_RenameStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for ReplicaIdentityStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_ReplicaIdentityStmt;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for WithClause<'mcx> {
     const TAG: NodeTag = NodeTag::T_WithClause;
@@ -1063,6 +1196,12 @@ unsafe impl<'mcx> NodeVariant<'mcx> for CommonTableExpr<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for VacuumStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_VacuumStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for ClusterStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_ClusterStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for ReindexStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_ReindexStmt;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for VacuumRelation<'mcx> {
     const TAG: NodeTag = NodeTag::T_VacuumRelation;
@@ -1152,6 +1291,16 @@ impl<'mcx> Node<'mcx> {
     }
 
     #[inline]
+    pub fn as_function_parameter(self) -> Option<&'mcx FunctionParameter<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_create_function_stmt(self) -> Option<&'mcx CreateFunctionStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
     pub fn as_vacuum_stmt(self) -> Option<&'mcx VacuumStmt<'mcx>> {
         self.as_variant()
     }
@@ -1237,6 +1386,16 @@ impl<'mcx> Node<'mcx> {
     }
 
     #[inline]
+    pub fn as_load_stmt(self) -> Option<&'mcx LoadStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_lock_stmt(self) -> Option<&'mcx LockStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
     pub fn as_deallocate_stmt(self) -> Option<&'mcx DeallocateStmt<'mcx>> {
         self.as_variant()
     }
@@ -1258,6 +1417,16 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_comment_stmt(self) -> Option<&'mcx CommentStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_createdb_stmt(self) -> Option<&'mcx CreatedbStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_dropdb_stmt(self) -> Option<&'mcx DropdbStmt<'mcx>> {
         self.as_variant()
     }
 }

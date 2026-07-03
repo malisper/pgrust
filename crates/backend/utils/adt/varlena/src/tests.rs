@@ -197,7 +197,7 @@ fn byteain_hex_digit_message_is_c_exact() {
 
 #[test]
 fn bytea_substring_and_pos() {
-    detoast::init_seams();
+    install_detoast_seams();
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
     let mut img = vec![0u8; 4];
@@ -303,8 +303,10 @@ fn fc_wrappers_dispatch() {
 
 #[test]
 fn builtin_table_matches_declared_arity() {
+    let non_strict = [3535u32, 3536, 3543, 3544, 6299];
     for row in crate::builtins::VARLENA_BUILTINS {
-        assert!(row.strict && !row.retset);
+        assert_eq!(row.strict, !non_strict.contains(&row.foid), "{}", row.name);
+        assert!(!row.retset);
         assert!((1..=3).contains(&row.nargs), "{}", row.name);
     }
 }
@@ -312,19 +314,24 @@ fn builtin_table_matches_declared_arity() {
 fn install_mb_for_levenshtein() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
-        // UTF-8 test encoding.
-        mbutils_seams::pg_mbstrlen_with_len::set(|s| {
-            std::str::from_utf8(s).unwrap().chars().count() as i32
-        });
-        mbutils_seams::pg_mblen_range::set(|s| {
-            Ok(std::str::from_utf8(s).unwrap().chars().next().unwrap().len_utf8() as i32)
-        });
+        // Real mbutils fns: tests flip encodings via SetDatabaseEncoding.
+        mbutils_seams::pg_database_encoding_max_length::set(
+            mbutils::pg_database_encoding_max_length,
+        );
+        mbutils_seams::pg_mbstrlen_with_len::set(mbutils::pg_mbstrlen_with_len);
+        mbutils_seams::pg_mblen_range::set(mbutils::pg_mblen_range);
     });
+}
+
+fn install_detoast_seams() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(detoast::init_seams);
 }
 
 #[test]
 fn levenshtein_matches_c_values() {
     install_mb_for_levenshtein();
+    mbutils::SetDatabaseEncoding(wchar::PG_UTF8).unwrap();
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
     let ln = |s: &str, t: &str| {
@@ -346,6 +353,7 @@ fn levenshtein_matches_c_values() {
 #[test]
 fn levenshtein_less_equal_bound_and_multibyte() {
     install_mb_for_levenshtein();
+    mbutils::SetDatabaseEncoding(wchar::PG_UTF8).unwrap();
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
     let lle = |s: &str, t: &str, max_d: i32| {
@@ -476,4 +484,292 @@ mod fc_results {
             Datum::from_usize(a.as_ptr() as usize),
         );
     }
+}
+
+mod text_surface {
+    use mcx::MemoryContext;
+    use types_core::C_COLLATION_OID;
+    use wchar::{PG_SQL_ASCII, PG_UTF8};
+
+    use crate::*;
+
+    const C: u32 = C_COLLATION_OID;
+
+    fn text_image(t: &str) -> Vec<u8> {
+        let mut img = vec![0u8; 4];
+        img.extend_from_slice(t.as_bytes());
+        let hdr = datum::varlena::set_varsize_4b(img.len());
+        img[..4].copy_from_slice(&hdr);
+        img
+    }
+
+    fn substr(mcx: Mcx<'_>, t: &str, s: i32, l: i32) -> String {
+        crate::tests::install_mb_for_levenshtein();
+        crate::tests::install_detoast_seams();
+        let img = text_image(t);
+        String::from_utf8(text_substring(mcx, &img, s, l, false).unwrap().data().to_vec())
+            .unwrap()
+    }
+
+    fn substr_no_len(mcx: Mcx<'_>, t: &str, s: i32) -> String {
+        crate::tests::install_mb_for_levenshtein();
+        crate::tests::install_detoast_seams();
+        let img = text_image(t);
+        String::from_utf8(text_substring(mcx, &img, s, -1, true).unwrap().data().to_vec())
+            .unwrap()
+    }
+
+    #[test]
+    fn text_substring_single_byte_arms() {
+        mbutils::SetDatabaseEncoding(PG_SQL_ASCII).unwrap();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+        assert_eq!(substr(mcx, "hello", 2, 3), "ell");
+        assert_eq!(substr(mcx, "hello", -2, 5), "he");
+        assert_eq!(substr(mcx, "hello", -5, 3), "");
+        assert_eq!(substr(mcx, "hello", 2, i32::MAX), "ello");
+        assert_eq!(substr(mcx, "hello", i32::MIN, i32::MAX), "");
+        assert_eq!(substr(mcx, "hello", 99, 1), "");
+        assert_eq!(substr(mcx, "hello", 1, 0), "");
+        assert_eq!(substr(mcx, "", 1, 3), "");
+        assert_eq!(substr_no_len(mcx, "hello", 3), "llo");
+        assert_eq!(substr_no_len(mcx, "hello", -7), "hello");
+        assert_eq!(substr_no_len(mcx, "hello", i32::MIN), "hello");
+        let err = text_substring(mcx, b"hello", 1, -2, false).unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_SUBSTRING_ERROR);
+        assert_eq!(err.message, "negative substring length not allowed");
+    }
+
+    #[test]
+    fn text_substring_multibyte_arms() {
+        mbutils::SetDatabaseEncoding(PG_UTF8).unwrap();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+        assert_eq!(substr(mcx, "日本語abc", 2, 2), "本語");
+        assert_eq!(substr(mcx, "日本語", 1, 1), "日");
+        assert_eq!(substr(mcx, "héllo", 2, 3), "éll");
+        assert_eq!(substr(mcx, "a😀b", 2, 1), "😀");
+        assert_eq!(substr(mcx, "abc", -3, 4), "");
+        assert_eq!(substr(mcx, "日本語", 2, i32::MAX), "本語");
+        assert_eq!(substr(mcx, "日本語", 99, 1), "");
+        assert_eq!(substr(mcx, "日本語", -1, 3), "日");
+        assert_eq!(substr_no_len(mcx, "日本語", 2), "本語");
+        assert_eq!(substr_no_len(mcx, "日本語", -5), "日本語");
+        let err = text_substring(mcx, "日本語".as_bytes(), 1, -1, false).unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_SUBSTRING_ERROR);
+        assert_eq!(err.message, "negative substring length not allowed");
+    }
+
+    #[test]
+    fn textpos_arms() {
+        mbutils::SetDatabaseEncoding(PG_UTF8).unwrap();
+        let p = |h: &str, n: &str| textpos(h.as_bytes(), n.as_bytes(), C).unwrap();
+        assert_eq!(p("abcabc", "bc"), 2);
+        assert_eq!(p("abcabc", ""), 1);
+        assert_eq!(p("ab", "abc"), 0);
+        assert_eq!(p("abc", "xy"), 0);
+        assert_eq!(p("abc", "c"), 3);
+        assert_eq!(p("日本語", "語"), 3);
+        assert_eq!(p("日本語abc日本語", "本"), 2);
+        assert_eq!(p("xxx", "xx"), 1);
+        assert_eq!(p("", "a"), 0);
+        let long = "z".repeat(5000) + "needle" + &"z".repeat(100);
+        assert_eq!(p(&long, "needle"), 5001);
+        assert_eq!(p(&long, "absent-needle"), 0);
+    }
+
+    #[test]
+    fn text_position_next_skips_matched_portion() {
+        mbutils::SetDatabaseEncoding(PG_UTF8).unwrap();
+        let mut state = text_position_setup(b"xxx", b"xx", C).unwrap();
+        assert!(text_position_next(&mut state).unwrap());
+        assert_eq!(text_position_get_match_off(&state), 0);
+        assert!(!text_position_next(&mut state).unwrap());
+        text_position_reset(&mut state);
+        assert!(text_position_next(&mut state).unwrap());
+        assert_eq!(text_position_get_match_pos(&mut state), 1);
+    }
+
+    #[test]
+    fn split_part_arms() {
+        mbutils::SetDatabaseEncoding(PG_UTF8).unwrap();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+        let sp = |s: &str, sep: &str, n: i32| {
+            String::from_utf8(
+                split_part(mcx, s.as_bytes(), sep.as_bytes(), n, C).unwrap().data().to_vec(),
+            )
+            .unwrap()
+        };
+        assert_eq!(sp("abc~@~def~@~ghi", "~@~", 1), "abc");
+        assert_eq!(sp("abc~@~def~@~ghi", "~@~", 2), "def");
+        assert_eq!(sp("abc~@~def~@~ghi", "~@~", 3), "ghi");
+        assert_eq!(sp("abc~@~def~@~ghi", "~@~", 4), "");
+        assert_eq!(sp("abc~@~def~@~ghi", "~@~", -1), "ghi");
+        assert_eq!(sp("abc~@~def~@~ghi", "~@~", -3), "abc");
+        assert_eq!(sp("abc~@~def~@~ghi", "~@~", -4), "");
+        assert_eq!(sp("abc,def", ",", -2), "abc");
+        assert_eq!(sp("abc", ",", 1), "abc");
+        assert_eq!(sp("abc", ",", -1), "abc");
+        assert_eq!(sp("abc", ",", 2), "");
+        assert_eq!(sp("abc", "", 1), "abc");
+        assert_eq!(sp("abc", "", -1), "abc");
+        assert_eq!(sp("abc", "", 2), "");
+        assert_eq!(sp("", ",", 1), "");
+        assert_eq!(sp("a,,b", ",", 2), "");
+        assert_eq!(sp("日、本、語", "、", 2), "本");
+        let err = split_part(mcx, b"abc", b",", 0, C).unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_INVALID_PARAMETER_VALUE);
+        assert_eq!(err.message, "field position must not be zero");
+    }
+}
+
+mod string_agg_fns {
+    use datum::{Datum, VarlenaRef};
+    use mcx::MemoryContext;
+    use types_fmgr::{AggStateNode, LocalFcinfo};
+
+    use crate::builtins::*;
+
+    fn text_image(s: &[u8]) -> Vec<u8> {
+        let mut v = Vec::with_capacity(4 + s.len());
+        v.extend_from_slice(&datum::varlena::set_varsize_4b(4 + s.len()));
+        v.extend_from_slice(s);
+        v
+    }
+
+    fn run_string_agg(rows: &[Option<&str>], delim: Option<&str>) -> Option<String> {
+        let agg_ctx = MemoryContext::new_bump("aggcontext");
+        let mut node = AggStateNode::new(agg_ctx);
+        let result_ctx = MemoryContext::new_bump("per-tuple");
+
+        let delim_img = delim.map(|d| text_image(d.as_bytes()));
+        let mut state = Datum::null();
+        let mut state_null = true;
+        for row in rows {
+            let mut fcinfo = LocalFcinfo::<3>::new(0);
+            fcinfo.context = node.fm_node_ptr();
+            if !state_null {
+                fcinfo.set_arg(0, state);
+            }
+            let img = row.map(|v| text_image(v.as_bytes()));
+            if let Some(img) = &img {
+                fcinfo.set_arg(1, Datum::from_usize(img.as_ptr() as usize));
+            }
+            if let Some(d) = &delim_img {
+                fcinfo.set_arg(2, Datum::from_usize(d.as_ptr() as usize));
+            }
+            state = fc_string_agg_transfn(None, &mut fcinfo).unwrap();
+            state_null = fcinfo.isnull;
+        }
+
+        let mut fcinfo = LocalFcinfo::<1>::new(0);
+        fcinfo.context = node.fm_node_ptr();
+        // SAFETY: result_ctx outlives the call below.
+        unsafe { fcinfo.set_result_mcx(result_ctx.mcx()) };
+        if !state_null {
+            fcinfo.set_arg(0, state);
+        }
+        let d = fc_string_agg_finalfn(None, &mut fcinfo).unwrap();
+        if fcinfo.isnull {
+            return None;
+        }
+        // SAFETY: the finalfn result is a live 4B-header varlena in result_ctx.
+        let bytes = unsafe { VarlenaRef::from_ptr(d.as_usize() as *const u8) }.data().to_vec();
+        Some(String::from_utf8(bytes).unwrap())
+    }
+
+    #[test]
+    fn string_agg_basic_and_null_handling() {
+        assert_eq!(run_string_agg(&[Some("a"), Some("b"), Some("c")], Some(",")).unwrap(), "a,b,c");
+        assert_eq!(run_string_agg(&[Some("a"), None, Some("c")], Some("+")).unwrap(), "a+c");
+        assert_eq!(run_string_agg(&[Some("solo")], Some(",")).unwrap(), "solo");
+        assert_eq!(run_string_agg(&[Some("a"), Some("b")], None).unwrap(), "ab");
+        assert_eq!(run_string_agg(&[None, None], Some(",")), None);
+        assert_eq!(run_string_agg(&[], Some(",")), None);
+        assert_eq!(run_string_agg(&[Some(""), Some("")], Some(",")).unwrap(), ",");
+        assert_eq!(
+            run_string_agg(&[Some("日本"), Some("語")], Some("、")).unwrap(),
+            "日本、語"
+        );
+        let big: Vec<Option<&str>> = vec![Some("0123456789abcdef"); 200];
+        assert_eq!(run_string_agg(&big, Some("|")).unwrap().len(), 200 * 16 + 199);
+    }
+
+    #[test]
+    fn string_agg_transfn_outside_agg_context_errors() {
+        let img = text_image(b"x");
+        let mut fcinfo = LocalFcinfo::<3>::new(0);
+        fcinfo.set_arg(1, Datum::from_usize(img.as_ptr() as usize));
+        fcinfo.set_arg_null(0);
+        fcinfo.set_arg_null(2);
+        let err = fc_string_agg_transfn(None, &mut fcinfo).unwrap_err();
+        assert_eq!(err.message, "string_agg_transfn called in non-aggregate context");
+    }
+
+    #[test]
+    fn bytea_string_agg_matches_text_shape() {
+        let agg_ctx = MemoryContext::new_bump("aggcontext");
+        let mut node = AggStateNode::new(agg_ctx);
+        let result_ctx = MemoryContext::new_bump("per-tuple");
+        let vals = [text_image(&[0xde, 0xad]), text_image(&[0xbe, 0xef])];
+        let delim = text_image(&[0x00]);
+        let mut state = Datum::null();
+        let mut state_null = true;
+        for v in &vals {
+            let mut fcinfo = LocalFcinfo::<3>::new(0);
+            fcinfo.context = node.fm_node_ptr();
+            if !state_null {
+                fcinfo.set_arg(0, state);
+            }
+            fcinfo.set_arg(1, Datum::from_usize(v.as_ptr() as usize));
+            fcinfo.set_arg(2, Datum::from_usize(delim.as_ptr() as usize));
+            state = fc_bytea_string_agg_transfn(None, &mut fcinfo).unwrap();
+            state_null = fcinfo.isnull;
+        }
+        let mut fcinfo = LocalFcinfo::<1>::new(0);
+        fcinfo.context = node.fm_node_ptr();
+        // SAFETY: result_ctx outlives the call below.
+        unsafe { fcinfo.set_result_mcx(result_ctx.mcx()) };
+        fcinfo.set_arg(0, state);
+        let d = fc_bytea_string_agg_finalfn(None, &mut fcinfo).unwrap();
+        // SAFETY: live 4B-header varlena in result_ctx.
+        let out = unsafe { VarlenaRef::from_ptr(d.as_usize() as *const u8) }.data().to_vec();
+        assert_eq!(out, vec![0xde, 0xad, 0x00, 0xbe, 0xef]);
+    }
+
+    #[test]
+    #[should_panic(expected = "abbreviated-key SortSupport unported")]
+    fn bttextsortsupport_is_loud() {
+        let mut fcinfo = LocalFcinfo::<1>::new(0);
+        let _ = fc_bttextsortsupport(None, &mut fcinfo);
+    }
+
+    #[test]
+    #[should_panic(expected = "parallel (partial) aggregation unported")]
+    fn string_agg_combine_is_loud() {
+        let mut fcinfo = LocalFcinfo::<2>::new(0);
+        let _ = fc_string_agg_combine(None, &mut fcinfo);
+    }
+}
+
+// unistr rows diffed vs live C 18.3 (psql, 2026-07-03); server encoding UTF8.
+#[test]
+fn unistr_rows() {
+    mbutils::SetDatabaseEncoding(wchar::PG_UTF8).unwrap();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let u = |s: &str| {
+        crate::unistr(mcx, s.as_bytes()).map(|v| String::from_utf8_lossy(v.data()).into_owned())
+    };
+    assert_eq!(u(r"d\0061t\+000061 \\ A \U0001F603").unwrap(), "data \\ A \u{1F603}");
+    assert_eq!(u(r"perl \0441\043B\043E\043D").unwrap(), "perl слон");
+    assert_eq!(u(r"\D83D\DE03").unwrap(), "\u{1F603}");
+    assert_eq!(u("plain").unwrap(), "plain");
+    assert_eq!(u(r"\D83D").unwrap_err().to_string(), "invalid Unicode surrogate pair");
+    assert_eq!(u(r"\DE03\D83D").unwrap_err().to_string(), "invalid Unicode surrogate pair");
+    assert_eq!(u(r"\D83Dx").unwrap_err().to_string(), "invalid Unicode surrogate pair");
+    assert_eq!(u(r"\xyz").unwrap_err().to_string(), "invalid Unicode escape");
+    assert_eq!(u(r"\+00D800").unwrap_err().to_string(), "invalid Unicode surrogate pair");
+    assert_eq!(u(r"\0000").unwrap_err().to_string(), "invalid Unicode code point: 0000");
 }

@@ -11,6 +11,7 @@ types_core = { path = "../../../../_support/types/types_core" }
 types_error = { path = "../../../../_support/types/types_error" }
 types_tuple = { path = "../../../../_support/types/types_tuple" }
 fmgr = { package = "types_fmgr", path = "../../../../_support/types/fmgr" }
+fmgr_seams = { path = "../fmgr_seams" }
 nodes = { package = "types_nodes", path = "../../../../_support/types/nodes" }
 tupdesc = { path = "../../../access/common/tupdesc" }
 format_type = { path = "../../adt/format_type" }
@@ -20,6 +21,10 @@ typcache_seams = { path = "../../cache/typcache_seams" }
 arrayfuncs = { path = "../../adt/arrayfuncs" }
 detoast_seams = { path = "../../../access/common/detoast_seams" }
 varlena = { path = "../../adt/varlena" }
+init_small = { path = "../../init/init_small" }
+tuplestore = { path = "../../sort/tuplestore" }
 
 [dev-dependencies]
 catalog_seams = { path = "../../../catalog/catalog_seams" }
+exectuples = { path = "../../../executor/exectuples" }
+types_slot = { path = "../../../../_support/types/types_slot" }

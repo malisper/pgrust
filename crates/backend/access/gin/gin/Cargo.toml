@@ -1,0 +1,34 @@
+[package]
+name = "gin"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+mcx = { path = "../../../../_support/mcx" }
+datum = { path = "../../../../_support/types/datum" }
+gin_vocab = { path = "../gin_vocab" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_rel = { path = "../../../../_support/types/rel" }
+types_scan = { path = "../../../../_support/types/types_scan" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+types_relscan = { path = "../../index/relscan" }
+tidbitmap = { path = "../../../nodes/tidbitmap" }
+bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
+xloginsert_seams = { path = "../../transam/xloginsert_seams" }
+xloginsert = { path = "../../transam/xloginsert" }
+transam_xlog_seams = { path = "../../transam/transam_xlog_seams" }
+predicate_seams = { path = "../../../storage/lmgr/predicate_seams" }
+freespace_seams = { path = "../../../storage/freespace/freespace_seams" }
+freespace = { path = "../../../storage/freespace/freespace" }
+init_small = { path = "../../../utils/init/init_small" }
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+lsyscache = { path = "../../../utils/cache/lsyscache" }
+nbtree = { path = "../../nbtree/nbtree" }
+detoast = { path = "../../common/detoast" }
+adt_jsonb = { path = "../../../utils/adt/jsonb" }
+xact = { path = "../../transam/xact" }
+pg_prng = { path = "../../../../common/pg_prng" }
+types_snapshot = { path = "../../../../_support/types/snapshot" }

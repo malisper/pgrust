@@ -44,14 +44,12 @@ pub fn standard_join_search<'mcx>(
     levels_needed: usize,
     initial_rels: PgVec<'mcx, RelId>,
 ) -> PgResult<RelId> {
-    assert!(
-        levels_needed == 2,
-        "standard_join_search (allpaths.c): {levels_needed}-way join; M2 multi-join lane"
-    );
     debug_assert!(run.root.join_rel_level.is_empty());
     run.root.join_rel_level.push(PgVec::new_in(run.mcx));
     run.root.join_rel_level.push(initial_rels);
-    run.root.join_rel_level.push(PgVec::new_in(run.mcx));
+    for _ in 2..=levels_needed {
+        run.root.join_rel_level.push(PgVec::new_in(run.mcx));
+    }
 
     for lev in 2..=levels_needed {
         join_search_one_level(run, lev)?;
@@ -76,32 +74,80 @@ pub fn standard_join_search<'mcx>(
 }
 
 fn join_search_one_level(run: &mut PlannerRun<'_>, level: usize) -> PgResult<()> {
-    debug_assert!(level == 2);
+    debug_assert!(run.root.join_rel_level[level].is_empty());
     run.root.join_cur_level = level as i32;
-    let prev = crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.join_rel_level[1]);
+    let prev = crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.join_rel_level[level - 1]);
+    let ones = crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.join_rel_level[1]);
+
     for (i, &old_rel) in prev.iter().enumerate() {
-        let restricted = !run.root.rel(old_rel).joininfo.is_empty()
+        let has_clauses = !run.root.rel(old_rel).joininfo.is_empty()
             || run.root.rel(old_rel).has_eclass_joins
             || has_join_restriction(run, old_rel);
-        for &other_rel in prev[i + 1..].iter() {
-            let overlap = relids_overlap(
-                &run.root.rel(old_rel).relids,
-                &run.root.rel(other_rel).relids,
-            );
-            if !overlap
-                && (!restricted
-                    || have_relevant_joinclause(run, old_rel, other_rel)
-                    || have_join_order_restriction(run, old_rel, other_rel))
+        let others: &[RelId] = if level == 2 { &ones[i + 1..] } else { &ones[..] };
+        for &other_rel in others {
+            if relids_overlap(&run.root.rel(old_rel).relids, &run.root.rel(other_rel).relids) {
+                continue;
+            }
+            if !has_clauses
+                || have_relevant_joinclause(run, old_rel, other_rel)
+                || have_join_order_restriction(run, old_rel, other_rel)
             {
                 make_join_rel(run, old_rel, other_rel)?;
+            }
+        }
+    }
+
+    // Bushy plans: join k-level rels to (level-k)-level rels.
+    for k in 2.. {
+        let other_level = level - k;
+        if k > other_level {
+            break;
+        }
+        let krels = crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.join_rel_level[k]);
+        let orels =
+            crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.join_rel_level[other_level]);
+        for (i, &old_rel) in krels.iter().enumerate() {
+            if run.root.rel(old_rel).joininfo.is_empty()
+                && !run.root.rel(old_rel).has_eclass_joins
+                && !has_join_restriction(run, old_rel)
+            {
+                continue;
+            }
+            let others: &[RelId] = if k == other_level { &orels[i + 1..] } else { &orels[..] };
+            for &new_rel in others {
+                if relids_overlap(&run.root.rel(old_rel).relids, &run.root.rel(new_rel).relids) {
+                    continue;
+                }
+                if have_relevant_joinclause(run, old_rel, new_rel)
+                    || have_join_order_restriction(run, old_rel, new_rel)
+                {
+                    make_join_rel(run, old_rel, new_rel)?;
+                }
+            }
+        }
+    }
+
+    // Last-ditch: Cartesian products against the initial rels.
+    if run.root.join_rel_level[level].is_empty() {
+        for &old_rel in prev.iter() {
+            for &other_rel in ones.iter() {
+                if !relids_overlap(&run.root.rel(old_rel).relids, &run.root.rel(other_rel).relids)
+                {
+                    make_join_rel(run, old_rel, other_rel)?;
+                }
             }
         }
     }
     Ok(())
 }
 
-// has_join_restriction (joinrels.c); lateral legs dead.
+// has_join_restriction (joinrels.c).
 fn has_join_restriction(run: &PlannerRun<'_>, rel: RelId) -> bool {
+    if !crate::relnode::relids_is_empty(&run.root.rel(rel).lateral_relids)
+        || !crate::relnode::relids_is_empty(&run.root.rel(rel).lateral_referencers)
+    {
+        return true;
+    }
     let relids = &run.root.rel(rel).relids;
     run.root.join_info_list.iter().any(|sj| {
         if relids_is_subset(&sj.min_lefthand, relids) && relids_is_subset(&sj.min_righthand, relids)
@@ -116,7 +162,12 @@ fn has_join_restriction(run: &PlannerRun<'_>, rel: RelId) -> bool {
 // dead at exactly two baserels (the only partner is the pair itself, and a
 // relevant joinclause short-circuits before this check).
 fn have_join_order_restriction(run: &PlannerRun<'_>, rel1: RelId, rel2: RelId) -> bool {
-    debug_assert!(!run.root.hasLateralRTEs);
+    // A direct lateral reference either way makes the pair worth attempting.
+    if relids_overlap(&run.root.rel(rel1).relids, &run.root.rel(rel2).direct_lateral_relids)
+        || relids_overlap(&run.root.rel(rel2).relids, &run.root.rel(rel1).direct_lateral_relids)
+    {
+        return true;
+    }
     let r1 = &run.root.rel(rel1).relids;
     let r2 = &run.root.rel(rel2).relids;
     run.root.join_info_list.iter().any(|sj| {
@@ -184,7 +235,11 @@ pub fn init_dummy_sjinfo<'mcx>(
     }
 }
 
-pub fn make_join_rel(run: &mut PlannerRun<'_>, rel1: RelId, rel2: RelId) -> PgResult<RelId> {
+pub fn make_join_rel(
+    run: &mut PlannerRun<'_>,
+    rel1: RelId,
+    rel2: RelId,
+) -> PgResult<Option<RelId>> {
     debug_assert!(!relids_overlap(&run.root.rel(rel1).relids, &run.root.rel(rel2).relids));
     if is_dummy_rel(&run.root, rel1) || is_dummy_rel(&run.root, rel2) {
         panic!(
@@ -197,8 +252,10 @@ pub fn make_join_rel(run: &mut PlannerRun<'_>, rel1: RelId, rel2: RelId) -> PgRe
         &run.root.rel(rel1).relids,
         &run.root.rel(rel2).relids,
     );
-    let (match_sjinfo, reversed) = join_is_legal(run, rel1, rel2, &joinrelids)?
-        .unwrap_or_else(|| panic!("make_join_rel (joinrels.c): invalid join path attempted"));
+    // C returns NULL for an illegal pair; the search loops just skip it.
+    let Some((match_sjinfo, reversed)) = join_is_legal(run, rel1, rel2, &joinrelids)? else {
+        return Ok(None);
+    };
 
     if let Some(sj) = &match_sjinfo {
         if sj.ojrelid != 0 {
@@ -266,12 +323,11 @@ pub fn make_join_rel(run: &mut PlannerRun<'_>, rel1: RelId, rel2: RelId) -> PgRe
              covers INNER/LEFT/SEMI/ANTI"
         ),
     }
-    Ok(joinrel)
+    Ok(Some(joinrel))
 }
 
-// join_is_legal (joinrels.c): None = illegal. The LATERAL legs are dead;
-// must_be_leftjoin commutation cannot arise while make_outerjoininfo panics
-// on identity-3.
+// join_is_legal (joinrels.c): None = illegal. must_be_leftjoin commutation
+// cannot arise while make_outerjoininfo panics on identity-3.
 fn join_is_legal<'mcx>(
     run: &mut PlannerRun<'mcx>,
     rel1: RelId,
@@ -282,6 +338,7 @@ fn join_is_legal<'mcx>(
     let r2 = relids_copy(run.mcx, &run.root.rel(rel2).relids);
     let mut match_sjinfo: Option<SpecialJoinInfo<'mcx>> = None;
     let mut reversed = false;
+    let mut unique_ified = false;
 
     for i in 0..run.root.join_info_list.len() {
         let sj = run.root.join_info_list[i].clone();
@@ -342,6 +399,7 @@ fn join_is_legal<'mcx>(
             }
             match_sjinfo = Some(sj.clone());
             reversed = false;
+            unique_ified = true;
         } else if sj.jointype == types_pathnodes::JOIN_SEMI
             && relids_equal(&sj.syn_righthand, &r1)
             && {
@@ -354,6 +412,7 @@ fn join_is_legal<'mcx>(
             }
             match_sjinfo = Some(sj.clone());
             reversed = true;
+            unique_ified = true;
         } else {
             if relids_overlap(&r1, &sj.min_righthand) && relids_overlap(&r2, &sj.min_righthand) {
                 continue;
@@ -363,8 +422,92 @@ fn join_is_legal<'mcx>(
             return Ok(None);
         }
     }
-    debug_assert!(!run.root.hasLateralRTEs);
+
+    if run.root.hasLateralRTEs {
+        let mcx = run.mcx;
+        // Lateral refs in both directions are unjoinable; one direction
+        // forces a nestloop with the referencer inside, and only direct
+        // references qualify at this join level.
+        let lateral_fwd = relids_overlap(&r1, &run.root.rel(rel2).lateral_relids);
+        let lateral_rev = relids_overlap(&r2, &run.root.rel(rel1).lateral_relids);
+        if lateral_fwd && lateral_rev {
+            return Ok(None);
+        }
+        if lateral_fwd {
+            if let Some(sj) = &match_sjinfo {
+                if reversed || unique_ified || sj.jointype == types_pathnodes::JOIN_FULL {
+                    return Ok(None);
+                }
+            }
+            if !relids_overlap(&r1, &run.root.rel(rel2).direct_lateral_relids) {
+                return Ok(None);
+            }
+        } else if lateral_rev {
+            if let Some(sj) = &match_sjinfo {
+                if !reversed || unique_ified || sj.jointype == types_pathnodes::JOIN_FULL {
+                    return Ok(None);
+                }
+            }
+            if !relids_overlap(&r2, &run.root.rel(rel1).direct_lateral_relids) {
+                return Ok(None);
+            }
+        }
+
+        // Reject if the join's minimum parameterization overlaps rels forced
+        // to the inner side of an outer join with this joinrel.
+        let join_lateral_rels = min_join_parameterization(run, joinrelids, rel1, rel2);
+        if !crate::relnode::relids_is_empty(&join_lateral_rels) {
+            let mut join_plus_rhs = relids_copy(mcx, joinrelids);
+            let mut more = true;
+            while more {
+                more = false;
+                for i in 0..run.root.join_info_list.len() {
+                    let (min_l, min_r, jt) = {
+                        let sj = &run.root.join_info_list[i];
+                        (
+                            relids_copy(mcx, &sj.min_lefthand),
+                            relids_copy(mcx, &sj.min_righthand),
+                            sj.jointype,
+                        )
+                    };
+                    if jt == types_pathnodes::JOIN_FULL {
+                        continue;
+                    }
+                    if relids_overlap(&min_l, &join_plus_rhs)
+                        && !relids_is_subset(&min_r, &join_plus_rhs)
+                    {
+                        join_plus_rhs = relids_union(mcx, &join_plus_rhs, &min_r);
+                        more = true;
+                    }
+                }
+            }
+            if relids_overlap(&join_plus_rhs, &join_lateral_rels) {
+                return Ok(None);
+            }
+        }
+    }
     Ok(Some((match_sjinfo, reversed)))
+}
+
+// min_join_parameterization (relnode.c).
+pub fn min_join_parameterization<'mcx>(
+    run: &PlannerRun<'mcx>,
+    joinrelids: &Relids<'mcx>,
+    outer_rel: RelId,
+    inner_rel: RelId,
+) -> Relids<'mcx> {
+    let mcx = run.mcx;
+    let u = relids_union(
+        mcx,
+        &run.root.rel(outer_rel).lateral_relids,
+        &run.root.rel(inner_rel).lateral_relids,
+    );
+    let r = crate::relnode::relids_difference(mcx, &u, joinrelids);
+    if crate::relnode::relids_is_empty(&r) {
+        None
+    } else {
+        r
+    }
 }
 
 fn build_join_rel<'mcx>(
@@ -392,6 +535,12 @@ fn build_join_rel<'mcx>(
     joinrel.rel_parallel_workers = -1;
     joinrel.nparts = -1;
     joinrel.baserestrict_min_security = u32::MAX;
+    joinrel.direct_lateral_relids = relids_union(
+        mcx,
+        &run.root.rel(outer_rel).direct_lateral_relids,
+        &run.root.rel(inner_rel).direct_lateral_relids,
+    );
+    joinrel.lateral_relids = min_join_parameterization(run, &joinrelids, outer_rel, inner_rel);
     joinrel.pathtarget_id =
         Some(run.root.alloc_pathtarget(types_pathnodes::PathTarget::new(mcx)));
     let joinrel = run.root.alloc_rel(joinrel);
@@ -399,6 +548,16 @@ fn build_join_rel<'mcx>(
     debug_assert!(run.root.placeholder_list.is_empty());
     build_joinrel_tlist(run, joinrel, outer_rel, sjinfo, sjinfo.jointype == types_pathnodes::JOIN_FULL)?;
     build_joinrel_tlist(run, joinrel, inner_rel, sjinfo, sjinfo.jointype != JOIN_INNER)?;
+
+    {
+        let d = crate::relnode::relids_difference(
+            mcx,
+            &run.root.rel(joinrel).direct_lateral_relids,
+            &run.root.rel(joinrel).relids,
+        );
+        run.root.rel_mut(joinrel).direct_lateral_relids =
+            if crate::relnode::relids_is_empty(&d) { None } else { d };
+    }
 
     let restrictlist = build_joinrel_restrictlist(run, &joinrelids, outer_rel, inner_rel);
     build_joinrel_joinlist(run, joinrel, outer_rel, inner_rel);

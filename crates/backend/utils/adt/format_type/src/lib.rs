@@ -3,9 +3,10 @@
 #[cfg(test)]
 mod tests;
 
+
+pub mod builtins;
 use datum::Datum;
 use keywords::{KeywordCategory, ScanKeywordCategories, ScanKeywordLookup, ScanKeywords};
-use syscache_seams::PgTypeTypcacheShape;
 use types_core::primitive::InvalidOid;
 use types_core::catalog::{
     FirstNormalObjectId, BITOID, BOOLOID, BPCHAROID, FLOAT4OID, FLOAT8OID, INT2OID, INT4OID,
@@ -16,11 +17,12 @@ use types_core::Oid;
 use types_error::{PgError, PgResult};
 
 const TYPSTORAGE_PLAIN: i8 = b'p' as i8;
+const F_ARRAY_SUBSCRIPT_HANDLER: Oid = 6179;
 
-#[cold]
-#[inline(never)]
-fn unported(what: &str) -> ! {
-    panic!("{what} unported — unit backend-utils-adt-format-type")
+// IsTrueArrayType (pg_type.h); local copy — lsyscache deps this crate
+// (type_maximum_size), so the edge must point downward.
+fn is_true_array_type(typelem: Oid, typsubscript: Oid) -> bool {
+    typelem != InvalidOid && typsubscript == F_ARRAY_SUBSCRIPT_HANDLER
 }
 
 #[cold]
@@ -29,31 +31,43 @@ fn type_lookup_failed(typid: Oid) -> Box<PgError> {
     Box::new(PgError::error(format!("cache lookup failed for type {typid}")))
 }
 
-fn lookup(type_oid: Oid) -> PgResult<PgTypeTypcacheShape> {
-    syscache_seams::lookup_pg_type_typcache_shape::call(type_oid)?
-        .ok_or_else(|| type_lookup_failed(type_oid))
-}
-
 /// C `format_type_be` = `format_type_extended(type_oid, -1, 0)`.
 pub fn format_type_be(type_oid: Oid) -> PgResult<String> {
-    format_type_extended(type_oid, -1, false)
+    format_type_extended(type_oid, -1, false, false)
 }
 
 /// C `format_type_with_typemod` = `format_type_extended(type_oid, typemod,
 /// FORMAT_TYPE_TYPEMOD_GIVEN)`.
 pub fn format_type_with_typemod(type_oid: Oid, typemod: i32) -> PgResult<String> {
-    format_type_extended(type_oid, typemod, true)
+    format_type_extended(type_oid, typemod, true, false)
 }
 
-fn format_type_extended(type_oid: Oid, typemod: i32, typemod_given: bool) -> PgResult<String> {
-    let mut shape = lookup(type_oid)?;
+pub(crate) fn format_type_extended(
+    type_oid: Oid,
+    typemod: i32,
+    typemod_given: bool,
+    allow_invalid: bool,
+) -> PgResult<String> {
+    if type_oid == InvalidOid && allow_invalid {
+        return Ok("-".to_string());
+    }
+    let Some(mut shape) = syscache_seams::lookup_pg_type_typcache_shape::call(type_oid)? else {
+        if allow_invalid {
+            return Ok("???".to_string());
+        }
+        return Err(type_lookup_failed(type_oid));
+    };
     let mut named_oid = type_oid;
     let mut is_array = false;
-    if lsyscache::typ::is_true_array_type(shape.typelem, shape.typsubscript)
+    if is_true_array_type(shape.typelem, shape.typsubscript)
         && shape.typstorage != TYPSTORAGE_PLAIN
     {
         named_oid = shape.typelem;
-        shape = lookup(named_oid)?;
+        shape = match syscache_seams::lookup_pg_type_typcache_shape::call(named_oid)? {
+            Some(s) => s,
+            None if allow_invalid => return Ok("???[]".to_string()),
+            None => return Err(type_lookup_failed(type_oid)),
+        };
         is_array = true;
     }
 
@@ -97,14 +111,29 @@ fn format_type_extended(type_oid: Oid, typemod: i32, typemod_given: bool) -> PgR
     let mut buf = match special {
         Some(name) => name,
         None => {
-            // C schema-qualifies when !TypeIsVisible; unported, so only
-            // builtin (pg_catalog, visible barring shadowing) types render.
-            if named_oid >= FirstNormalObjectId {
-                unported("format_type_extended (format_type.c): TypeIsVisible/schema qualification for user types");
-            }
             let name = core::str::from_utf8(shape.typname.name_str())
-                .expect("pg_type.typname is ASCII for builtin types");
-            let quoted = quote_identifier(name).into_owned();
+                .unwrap_or_else(|_| panic!("non-UTF-8 pg_type.typname"));
+            // C: quote_qualified_identifier(NULL-if-visible nspname, typname).
+            let mut quoted = String::new();
+            if named_oid >= FirstNormalObjectId
+                && !namespace_seams::type_is_visible::call(named_oid)?
+            {
+                let t = syscache_seams::pg_type_domain_shape::call(named_oid)?
+                    .ok_or_else(|| type_lookup_failed(named_oid))?;
+                // get_namespace_name_or_temp (lsyscache.c) over the two
+                // seams; lsyscache deps this crate so a direct dep cycles.
+                if namespace_seams::is_temp_namespace::call(t.typnamespace) {
+                    quoted.push_str("pg_temp");
+                } else {
+                    let nsp = syscache_seams::pg_namespace_nspname::call(t.typnamespace)?
+                        .ok_or_else(|| type_lookup_failed(named_oid))?;
+                    let nsp = core::str::from_utf8(nsp.name_str())
+                        .unwrap_or_else(|_| panic!("non-UTF-8 pg_namespace.nspname"));
+                    quoted.push_str(&quote_identifier(nsp));
+                }
+                quoted.push('.');
+            }
+            quoted.push_str(&quote_identifier(name));
             if with_typemod {
                 print_typmod(&quoted, typemod, named_oid)?
             } else {
@@ -121,7 +150,10 @@ fn format_type_extended(type_oid: Oid, typemod: i32, typemod_given: bool) -> PgR
 /// C `printTypmod`; takes the type oid instead of a pre-fetched typmodout.
 fn print_typmod(typname: &str, typmod: i32, type_oid: Oid) -> PgResult<String> {
     debug_assert!(typmod >= 0);
-    let typmodout = lsyscache::typ::get_typmodout(type_oid)?;
+    let typmodout = match syscache_seams::pg_type_io_shape::call(type_oid)? {
+        Some(t) => t.typmodout,
+        None => InvalidOid,
+    };
     if typmodout == InvalidOid {
         return Ok(format!("{typname}({typmod})"));
     }
@@ -145,7 +177,16 @@ pub fn type_maximum_size(type_oid: Oid, typemod: i32) -> i32 {
                 wchar::pg_encoding_max_length(mbutils_seams::get_database_encoding::call());
             (typemod - VARHDRSZ) * max_len + VARHDRSZ
         }
-        NUMERICOID => adt_numeric::numeric_maximum_size(typemod),
+        NUMERICOID => {
+            // numeric_maximum_size (numeric.c) inlined: a direct adt_numeric dep
+            // closes the cycle arrayfuncs->lsyscache->format_type->adt_numeric->arrayfuncs.
+            if typemod < 4 {
+                return -1;
+            }
+            let precision = ((typemod - 4) >> 16) & 0xffff;
+            let numeric_digits = (precision + 2 * (4 - 1)) / 4;
+            8 + numeric_digits * 2
+        }
         VARBITOID | BITOID => (typemod + 7) / 8 + 2 * 4,
         _ => -1,
     }

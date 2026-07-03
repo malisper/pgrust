@@ -8,6 +8,7 @@ mod tests;
 use datum::Datum;
 use fmgr::FmgrInfo;
 use mcx::Mcx;
+use nodes_core::node_funcs::expr_typmod;
 use parser_small1::{
     parser_errposition, variable_coerce_param_hook, ParseRefHookState, ParseState,
 };
@@ -23,7 +24,8 @@ use types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_QUERY_CANCELED, ERROR,
 };
 use types_nodes::{
-    CoerceViaIO, CoercionForm, Const, FuncExpr, Node, NodeList, NodeTag, Param, RelabelType,
+    CoerceToDomain, CoerceViaIO, CoercionForm, CollateExpr, Const, FuncExpr, Node, NodeList, NodeTag, Param,
+    RelabelType,
 };
 
 // primnodes.h CoercionContext; ordering is load-bearing (ccontext >= castcontext).
@@ -152,6 +154,7 @@ pub fn coerce_type<'mcx>(
             targetTypeId,
             targetTypeMod,
             ccontext,
+            cformat,
             location,
         );
     }
@@ -171,32 +174,61 @@ pub fn coerce_type<'mcx>(
             return Ok(node);
         }
     }
-    if node.node_tag() == NodeTag::T_CollateExpr {
-        unported("coerce_type (parse_coerce.c): CollateExpr push-down arm");
+    // Push the coercion underneath the COLLATE so it acts before collation —
+    // unless the target type is not collatable, where COLLATE is dropped.
+    if let Some(coll) = node.as_collate_expr() {
+        let arg = coerce_type(
+            mcx,
+            pstate,
+            coll.arg,
+            inputTypeId,
+            targetTypeId,
+            targetTypeMod,
+            ccontext,
+            cformat,
+            location,
+        )?;
+        if !lsyscache::type_is_collatable(targetTypeId)? {
+            return Ok(arg);
+        }
+        return Node::mk(
+            mcx,
+            types_nodes::CollateExpr { arg, collOid: coll.collOid, location: coll.location },
+        );
     }
     let (pathtype, funcId) = find_coercion_pathway(targetTypeId, inputTypeId, ccontext)?;
     if pathtype != COERCION_PATH_NONE {
         let mut baseTypeMod = targetTypeMod;
         let baseTypeId = lsyscache::getBaseTypeAndTypmod(targetTypeId, &mut baseTypeMod)?;
-        if targetTypeId != baseTypeId {
-            unported("coerce_type (parse_coerce.c): coerce_to_domain");
-        }
         if pathtype != COERCION_PATH_RELABELTYPE {
-            return build_coercion_expression(
+            let result = build_coercion_expression(
                 mcx, node, pathtype, funcId, baseTypeId, baseTypeMod, ccontext, cformat, location,
+            )?;
+            if targetTypeId != baseTypeId {
+                return coerce_to_domain(
+                    mcx, result, baseTypeId, baseTypeMod, targetTypeId, ccontext, cformat,
+                    location, true,
+                );
+            }
+            return Ok(result);
+        }
+        let result = coerce_to_domain(
+            mcx, node, baseTypeId, baseTypeMod, targetTypeId, ccontext, cformat, location, false,
+        )?;
+        if result.ptr_eq(node) {
+            return Node::mk(
+                mcx,
+                RelabelType {
+                    arg: node,
+                    resulttype: targetTypeId,
+                    resulttypmod: -1,
+                    resultcollid: InvalidOid,
+                    relabelformat: cformat,
+                    location,
+                },
             );
         }
-        return Node::mk(
-            mcx,
-            RelabelType {
-                arg: node,
-                resulttype: targetTypeId,
-                resulttypmod: -1,
-                resultcollid: InvalidOid,
-                relabelformat: cformat,
-                location,
-            },
-        );
+        return Ok(result);
     }
     if (inputTypeId == RECORDOID && is_complex(targetTypeId)?)
         || (targetTypeId == RECORDOID && is_complex(inputTypeId)?)
@@ -211,14 +243,16 @@ pub fn coerce_type<'mcx>(
 }
 
 // C's coerce_type CONSTANT arm: typinput through fmgr (stringTypeDatum).
+#[allow(clippy::too_many_arguments)]
 fn coerce_unknown_const<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &ParseState<'_, 'mcx>,
     node: Node<'mcx>,
     targetTypeId: Oid,
     targetTypeMod: i32,
-    _ccontext: CoercionContext,
-    _location: ParseLoc,
+    ccontext: CoercionContext,
+    cformat: CoercionForm,
+    location: ParseLoc,
 ) -> PgResult<Node<'mcx>> {
     let con = node.as_const().unwrap();
 
@@ -257,7 +291,17 @@ fn coerce_unknown_const<'mcx>(
     )?;
 
     if baseTypeId != targetTypeId {
-        unported("coerce_type (parse_coerce.c): coerce_to_domain over the CONSTANT arm");
+        return coerce_to_domain(
+            mcx,
+            result,
+            baseTypeId,
+            baseTypeMod,
+            targetTypeId,
+            ccontext,
+            cformat,
+            location,
+            false,
+        );
     }
     Ok(result)
 }
@@ -380,9 +424,9 @@ fn check_generic_type_consistency(
     let mut have_anynonarray = false;
     let mut have_anyenum = false;
     let mut have_anycompatible_nonarray = false;
-    let mut n_anycompatible_args = 0usize;
     // C: Oid anycompatible_actual_types[FUNC_MAX_ARGS].
     let mut anycompatible_actual_types = [InvalidOid; FUNC_MAX_ARGS];
+    let mut n_anycompatible_args = 0usize;
 
     for (&actual, &decl_type) in actual_arg_types.iter().zip(declared_arg_types) {
         let mut actual_type = actual;
@@ -438,6 +482,7 @@ fn check_generic_type_consistency(
                 if actual_type == UNKNOWNOID {
                     continue;
                 }
+                actual_type = lsyscache::getBaseType(actual_type)?;
                 anycompatible_actual_types[n_anycompatible_args] = actual_type;
                 n_anycompatible_args += 1;
             }
@@ -571,7 +616,7 @@ fn check_generic_type_consistency(
         {
             return Ok(false);
         }
-        if OidIsValid(anycompatible_range_typeid)
+        if OidIsValid(anycompatible_range_typelem)
             && anycompatible_range_typelem != anycompatible_typeid
         {
             return Ok(false);
@@ -579,6 +624,80 @@ fn check_generic_type_consistency(
     }
 
     Ok(true)
+}
+
+fn select_common_type_from_oids(typeids: &[Oid], noerror: bool) -> PgResult<Oid> {
+    debug_assert!(!typeids.is_empty());
+    let mut ptype = typeids[0];
+    let mut rest = &typeids[1..];
+
+    if ptype != UNKNOWNOID {
+        let mut i = 0;
+        while i < rest.len() && rest[i] == ptype {
+            i += 1;
+        }
+        if i == rest.len() {
+            return Ok(ptype);
+        }
+        rest = &rest[i..];
+    }
+
+    ptype = lsyscache::getBaseType(ptype)?;
+    let (mut pcategory, mut pispreferred) = lsyscache::get_type_category_preferred(ptype)?;
+
+    for &rawtype in rest {
+        let ntype = lsyscache::getBaseType(rawtype)?;
+        if ntype != UNKNOWNOID && ntype != ptype {
+            let (ncategory, nispreferred) = lsyscache::get_type_category_preferred(ntype)?;
+            if ptype == UNKNOWNOID {
+                ptype = ntype;
+                pcategory = ncategory;
+                pispreferred = nispreferred;
+            } else if ncategory != pcategory {
+                if noerror {
+                    return Ok(InvalidOid);
+                }
+                return Err(argument_types_mismatch(ptype, ntype));
+            } else if !pispreferred
+                && can_coerce_type(&[ptype], &[ntype], COERCION_IMPLICIT)?
+                && !can_coerce_type(&[ntype], &[ptype], COERCION_IMPLICIT)?
+            {
+                ptype = ntype;
+                pcategory = ncategory;
+                pispreferred = nispreferred;
+            }
+        }
+    }
+
+    if ptype == UNKNOWNOID {
+        ptype = types_core::catalog::TEXTOID;
+    }
+    Ok(ptype)
+}
+
+fn verify_common_type_from_oids(common_type: Oid, typeids: &[Oid]) -> PgResult<bool> {
+    for &t in typeids {
+        if t != common_type
+            && t != UNKNOWNOID
+            && !can_coerce_type(&[t], &[common_type], COERCION_IMPLICIT)?
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+#[cold]
+#[inline(never)]
+fn argument_types_mismatch(ptype: Oid, ntype: Oid) -> Box<PgError> {
+    let (p, n) = match (format_type::format_type_be(ptype), format_type::format_type_be(ntype)) {
+        (Ok(p), Ok(n)) => (p, n),
+        (Err(e), _) | (_, Err(e)) => return e,
+    };
+    Box::new(
+        PgError::error(format!("argument types {p} and {n} cannot be matched"))
+            .with_sqlstate(ERRCODE_DATATYPE_MISMATCH),
+    )
 }
 
 pub fn TypeCategory(typid: Oid) -> PgResult<i8> {
@@ -717,66 +836,6 @@ pub fn IsBinaryCoercible(srctype: Oid, targettype: Oid) -> PgResult<bool> {
             && cast.castcontext == COERCION_CODE_IMPLICIT),
         None => Ok(false),
     }
-}
-
-// select_common_type_from_oids (parse_coerce.c); noerror returns InvalidOid
-// on category mismatch.
-fn select_common_type_from_oids(typeids: &[Oid], noerror: bool) -> PgResult<Oid> {
-    debug_assert!(!typeids.is_empty());
-    let mut ptype = typeids[0];
-    let mut rest = &typeids[1..];
-    if ptype != UNKNOWNOID {
-        let mut i = 0;
-        while i < rest.len() && rest[i] == ptype {
-            i += 1;
-        }
-        if i == rest.len() {
-            return Ok(ptype);
-        }
-        rest = &rest[i..];
-    }
-    ptype = lsyscache::getBaseType(ptype)?;
-    let (mut pcategory, mut pispreferred) = lsyscache::get_type_category_preferred(ptype)?;
-    for &rawtype in rest {
-        let ntype = lsyscache::getBaseType(rawtype)?;
-        if ntype != UNKNOWNOID && ntype != ptype {
-            let (ncategory, nispreferred) = lsyscache::get_type_category_preferred(ntype)?;
-            if ptype == UNKNOWNOID {
-                ptype = ntype;
-                pcategory = ncategory;
-                pispreferred = nispreferred;
-            } else if ncategory != pcategory {
-                if noerror {
-                    return Ok(InvalidOid);
-                }
-                return Err(poly_mismatch(format!(
-                    "argument types {} and {} cannot be matched",
-                    format_type::format_type_be(ptype)?,
-                    format_type::format_type_be(ntype)?
-                )));
-            } else if !pispreferred
-                && can_coerce_type(&[ptype], &[ntype], COERCION_IMPLICIT)?
-                && !can_coerce_type(&[ntype], &[ptype], COERCION_IMPLICIT)?
-            {
-                ptype = ntype;
-                pcategory = ncategory;
-                pispreferred = nispreferred;
-            }
-        }
-    }
-    if ptype == UNKNOWNOID {
-        ptype = types_core::catalog::TEXTOID;
-    }
-    Ok(ptype)
-}
-
-fn verify_common_type_from_oids(common_type: Oid, typeids: &[Oid]) -> PgResult<bool> {
-    for &t in typeids {
-        if !can_coerce_type(&[t], &[common_type], COERCION_IMPLICIT)? {
-            return Ok(false);
-        }
-    }
-    Ok(true)
 }
 
 #[cold]
@@ -1477,6 +1536,56 @@ fn function_lookup_failed(funcid: Oid) -> Box<PgError> {
     Box::new(PgError::error(format!("cache lookup failed for function {funcid}")))
 }
 
+/// C coerce_to_domain (parse_coerce.c:675). resultcollid starts InvalidOid;
+/// parse_collate assigns it.
+#[allow(clippy::too_many_arguments)]
+pub fn coerce_to_domain<'mcx>(
+    mcx: Mcx<'mcx>,
+    arg: Node<'mcx>,
+    baseTypeId: Oid,
+    baseTypeMod: i32,
+    typeId: Oid,
+    ccontext: CoercionContext,
+    cformat: CoercionForm,
+    location: ParseLoc,
+    hideInputCoercion: bool,
+) -> PgResult<Node<'mcx>> {
+    debug_assert!(OidIsValid(baseTypeId));
+    if baseTypeId == typeId {
+        return Ok(arg);
+    }
+    if hideInputCoercion {
+        hide_coercion_node(arg);
+    }
+    let arg = coerce_type_typmod(
+        mcx,
+        arg,
+        baseTypeId,
+        baseTypeMod,
+        ccontext,
+        CoercionForm::COERCE_IMPLICIT_CAST,
+        location,
+        false,
+    )?;
+    Node::mk(
+        mcx,
+        CoerceToDomain {
+            arg,
+            resulttype: typeId,
+            resulttypmod: -1,
+            resultcollid: InvalidOid,
+            coercionformat: cformat,
+            location,
+        },
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn unported_node(what: &str, tag: NodeTag) -> ! {
+    panic!("{what}: arm for {tag:?} unported — unit backend-parser-coerce")
+}
+
 /// Divergences from C: caller passes exprType(expr) (the nodeFuncs slice
 /// lives in parse_expr — parse_oper precedent); Ok(None) is C's NULL return.
 #[allow(clippy::too_many_arguments)]
@@ -1494,31 +1603,27 @@ pub fn coerce_to_target_type<'mcx>(
     if !can_coerce_type(&[exprtype], &[targettype], ccontext)? {
         return Ok(None);
     }
-    if expr.node_tag() == NodeTag::T_CollateExpr {
-        unported("coerce_to_target_type (parse_coerce.c): CollateExpr strip/reinstall arm");
+    // C: strip ALL stacked CollateExprs, coerce, and reinstall only the
+    // topmost — and only when the target type is collatable.
+    let mut inner = expr;
+    while inner.node_tag() == NodeTag::T_CollateExpr {
+        inner = inner.as_collate_expr().unwrap().arg;
     }
     let result = coerce_type(
-        mcx, pstate, expr, exprtype, targettype, targettypmod, ccontext, cformat, location,
+        mcx, pstate, inner, exprtype, targettype, targettypmod, ccontext, cformat, location,
     )?;
     let hide = exprtype != targettype && result.as_variant::<Const>().is_none();
     let result = coerce_type_typmod(
         mcx, result, targettype, targettypmod, ccontext, cformat, location, hide,
     )?;
-    Ok(Some(result))
-}
-
-// Minimal exprTypmod slice: the node shapes coerce_type can hand back. A
-// wrong -1 only inserts a redundant (idempotent) length coercion.
-fn expr_typmod(node: Node<'_>) -> i32 {
-    if let Some(c) = node.as_variant::<Const>() {
-        c.consttypmod
-    } else if let Some(v) = node.as_variant::<types_nodes::Var>() {
-        v.vartypmod
-    } else if let Some(r) = node.as_variant::<RelabelType>() {
-        r.resulttypmod
-    } else {
-        -1
+    if expr.node_tag() == NodeTag::T_CollateExpr && lsyscache::type_is_collatable(targettype)? {
+        let coll = expr.as_collate_expr().unwrap();
+        return Ok(Some(Node::mk(
+            mcx,
+            CollateExpr { arg: result, collOid: coll.collOid, location: coll.location },
+        )?));
     }
+    Ok(Some(result))
 }
 
 fn hide_coercion_node(node: Node<'_>) {
@@ -1535,6 +1640,11 @@ fn hide_coercion_node(node: Node<'_>) {
             || node
                 .with_mut::<CoerceViaIO, _>(|c| {
                     c.coerceformat = CoercionForm::COERCE_IMPLICIT_CAST
+                })
+                .is_some()
+            || node
+                .with_mut::<CoerceToDomain, _>(|c| {
+                    c.coercionformat = CoercionForm::COERCE_IMPLICIT_CAST
                 })
                 .is_some()
         {
@@ -1698,10 +1808,30 @@ pub fn expression_returns_set(node: Node<'_>) -> bool {
             node.as_array_expr().unwrap().elements.iter().any(expression_returns_set)
         }
         NodeTag::T_RelabelType => expression_returns_set(node.as_relabel_type().unwrap().arg),
+        NodeTag::T_CoerceViaIO => expression_returns_set(node.as_coerce_via_io().unwrap().arg),
+        NodeTag::T_CollateExpr => expression_returns_set(node.as_collate_expr().unwrap().arg),
+        NodeTag::T_SQLValueFunction => false,
         NodeTag::T_NullTest => {
             node.as_null_test().unwrap().arg.is_some_and(expression_returns_set)
         }
-        NodeTag::T_Const | NodeTag::T_Param | NodeTag::T_Var | NodeTag::T_CaseTestExpr => false,
+        NodeTag::T_BooleanTest => {
+            node.as_boolean_test().unwrap().arg.is_some_and(expression_returns_set)
+        }
+        // C's walker recurses DistinctExpr generically (no opretset probe).
+        NodeTag::T_DistinctExpr => {
+            node.as_distinct_expr().unwrap().args.iter().any(expression_returns_set)
+        }
+        NodeTag::T_RowExpr => {
+            node.as_row_expr().unwrap().args.iter().any(expression_returns_set)
+        }
+        NodeTag::T_Const
+        | NodeTag::T_Param
+        | NodeTag::T_Var
+        | NodeTag::T_CaseTestExpr
+        | NodeTag::T_CoerceToDomainValue => false,
+        NodeTag::T_CoerceToDomain => {
+            expression_returns_set(node.as_coerce_to_domain().unwrap().arg)
+        }
         NodeTag::T_CaseExpr => {
             let c = node.as_case_expr().unwrap();
             c.arg.is_some_and(expression_returns_set)

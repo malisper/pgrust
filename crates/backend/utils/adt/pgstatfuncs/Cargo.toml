@@ -1,0 +1,29 @@
+[package]
+name = "pgstatfuncs"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+datum = { path = "../../../../_support/types/datum" }
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_fmgr = { path = "../../../../_support/types/fmgr" }
+funcapi = { path = "../../fmgr/funcapi" }
+varlena = { path = "../varlena" }
+acl_seams = { path = "../acl_seams" }
+
+init_small = { path = "../../init/init_small" }
+miscinit = { path = "../../init/miscinit" }
+backend_status = { path = "../../activity/backend_status" }
+pgstat = { path = "../../activity/pgstat" }
+waitevent = { path = "../../activity/waitevent" }
+procarray = { path = "../../../storage/ipc/procarray" }
+lmgr_proc = { path = "../../../storage/lmgr/lmgr_proc" }
+transam_xlog_seams = { path = "../../../access/transam/transam_xlog_seams" }
+backend_status_seams = { path = "../../activity/backend_status_seams" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+libc = "0.2"

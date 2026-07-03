@@ -13,6 +13,8 @@ use types_rel::{
     RELKIND_PARTITIONED_TABLE, RELKIND_RELATION, RELKIND_VIEW,
 };
 
+mod fire;
+
 #[cfg(test)]
 mod tests;
 
@@ -30,7 +32,8 @@ pub fn QueryRewrite<'mcx>(
     let input_query_id = parsetree.queryId;
     let orig_cmd_type = parsetree.commandType;
 
-    let mut results = RewriteQuery(mcx, parsetree)?;
+    let mut rewrite_events: PgVec<'mcx, (Oid, CmdType)> = PgVec::new_in(mcx);
+    let mut results = RewriteQuery(mcx, parsetree, &mut rewrite_events, 0, 0)?;
 
     for query in results.iter_mut() {
         let mut active_rirs: PgVec<'mcx, Oid> = PgVec::new_in(mcx);
@@ -69,11 +72,23 @@ pub fn QueryRewrite<'mcx>(
 fn RewriteQuery<'mcx>(
     mcx: Mcx<'mcx>,
     mut parsetree: Query<'mcx>,
+    rewrite_events: &mut PgVec<'mcx, (Oid, CmdType)>,
+    orig_rt_length: usize,
+    num_ctes_processed: usize,
 ) -> PgResult<PgVec<'mcx, Query<'mcx>>> {
     let event = parsetree.commandType;
+    let mut instead = false;
+    let mut returning = false;
+    let mut qual_product: Option<Node<'mcx>> = None;
+    let mut rewritten: PgVec<'mcx, Query<'mcx>> = PgVec::new_in(mcx);
 
-    // C's CTE loop only acts on data-modifying CTEs; SELECT CTEs `continue`.
-    for cte_node in &parsetree.cteList {
+    // C's CTE loop only acts on data-modifying CTEs; SELECT CTEs `continue`,
+    // and already-processed CTEs at the list tail are skipped on recursion.
+    let cte_len = parsetree.cteList.len();
+    for (i, cte_node) in parsetree.cteList.iter().enumerate() {
+        if i >= cte_len - num_ctes_processed {
+            break;
+        }
         let cte = cte_node.as_common_table_expr().expect("cteList cell");
         let ctequery = cte.ctequery.and_then(|n| n.as_query()).expect("analyzed CTE query");
         if ctequery.commandType != CmdType::CMD_SELECT {
@@ -83,135 +98,242 @@ fn RewriteQuery<'mcx>(
             );
         }
     }
+    let num_ctes_processed = cte_len;
 
-    match event {
-        CmdType::CMD_SELECT | CmdType::CMD_UTILITY => {}
-        CmdType::CMD_INSERT => rewrite_insert_query(mcx, &mut parsetree)?,
-        CmdType::CMD_UPDATE | CmdType::CMD_DELETE => {
-            rewrite_update_delete_query(mcx, &mut parsetree)?
+    let mut product_count = 0usize;
+    let mut has_update = false;
+    if event != CmdType::CMD_SELECT && event != CmdType::CMD_UTILITY {
+        if !matches!(event, CmdType::CMD_INSERT | CmdType::CMD_UPDATE | CmdType::CMD_DELETE) {
+            panic!(
+                "RewriteQuery (rewriteHandler.c): {event:?} rewrite needs the \
+                 mergeActionList arm (MERGE vocab unported)"
+            );
         }
-        other => panic!(
-            "RewriteQuery (rewriteHandler.c): {other:?} rewrite needs the \
-             mergeActionList arm (MERGE vocab unported)"
-        ),
+        let result_relation = parsetree.resultRelation;
+        debug_assert!(result_relation != 0);
+        let rt_entry = rte_of(parsetree.rtable.nth(result_relation as usize - 1));
+        debug_assert!(rt_entry.rtekind == RTEKind::RTE_RELATION);
+
+        let rel = table::table_open(mcx, rt_entry.relid, NoLock)?;
+        if rel.rd_rel.relkind == RELKIND_VIEW {
+            panic!(
+                "RewriteQuery (rewriteHandler.c): DML on view needs \
+                 rewriteTargetView (auto-updatable view lane)"
+            );
+        }
+
+        match event {
+            CmdType::CMD_INSERT => {
+                let mut values_rte = None;
+                let jointree = parsetree.jointree.expect("INSERT jointree is a FromExpr");
+                for rtr_node in &jointree.fromlist {
+                    if let Some(rtr) = rtr_node.as_range_tbl_ref() {
+                        if rtr.rtindex as usize <= orig_rt_length {
+                            // Product queries re-encounter the original query's
+                            // already-processed VALUES RTEs; skip them (C).
+                            continue;
+                        }
+                        let rte_node = parsetree.rtable.nth(rtr.rtindex as usize - 1);
+                        let rte = rte_of(rte_node);
+                        if rte.rtekind == RTEKind::RTE_VALUES {
+                            debug_assert!(
+                                values_rte.is_none(),
+                                "more than one VALUES RTE found"
+                            );
+                            values_rte = Some((rte, rtr.rtindex, rte_node));
+                        }
+                    }
+                }
+
+                let mut unused_values_attrnos: PgVec<'_, i16> = PgVec::new_in(mcx);
+                parsetree.targetList = rewriteTargetListIU(
+                    mcx,
+                    &parsetree.targetList,
+                    CmdType::CMD_INSERT,
+                    parsetree.r#override,
+                    &rel,
+                    values_rte.map(|(rte, rti, _)| (rte, rti)),
+                    Some(&mut unused_values_attrnos),
+                )?;
+
+                if let Some((rte, rti, rte_node)) = values_rte {
+                    rewriteValuesRTE(
+                        mcx,
+                        &parsetree,
+                        rte,
+                        rti,
+                        rte_node,
+                        &rel,
+                        &unused_values_attrnos,
+                    )?;
+                }
+
+                if let Some(oc_node) = parsetree.onConflict {
+                    let oc =
+                        oc_node.as_on_conflict_expr().expect("onConflict is an OnConflictExpr");
+                    if oc.action == types_nodes::primnodes::OnConflictAction::ONCONFLICT_UPDATE {
+                        let new_set = rewriteTargetListIU(
+                            mcx,
+                            &oc.onConflictSet,
+                            CmdType::CMD_UPDATE,
+                            parsetree.r#override,
+                            &rel,
+                            None,
+                            None,
+                        )?;
+                        // SAFETY: exclusive Query-tree ownership during rewrite.
+                        unsafe {
+                            oc_node.with_mut::<types_nodes::primnodes::OnConflictExpr, _>(|o| {
+                                o.onConflictSet = new_set;
+                            })
+                        }
+                        .expect("OnConflictExpr node");
+                    }
+                }
+            }
+            CmdType::CMD_UPDATE => {
+                debug_assert!(
+                    parsetree.r#override == types_nodes::OverridingKind::OVERRIDING_NOT_SET
+                );
+                parsetree.targetList = rewriteTargetListIU(
+                    mcx,
+                    &parsetree.targetList,
+                    CmdType::CMD_UPDATE,
+                    parsetree.r#override,
+                    &rel,
+                    None,
+                    None,
+                )?;
+            }
+            CmdType::CMD_DELETE => {}
+            _ => unreachable!(),
+        }
+
+        let rules_rc = if rel.rd_hasrules {
+            relcache::RelationGetRules(mcx, rt_entry.relid)?
+        } else {
+            None
+        };
+        let empty: [RewriteRuleMeta; 0] = [];
+        let rules: &[RewriteRuleMeta] = match &rules_rc {
+            Some(r) => &r.rules,
+            None => &empty,
+        };
+        let locks =
+            fire::matchLocks(event, rules, result_relation, &parsetree, &mut has_update)?;
+
+        let product_orig_rt_length = parsetree.rtable.len();
+        let product_queries = fire::fireRules(
+            mcx,
+            &parsetree,
+            result_relation,
+            event,
+            rules,
+            &locks,
+            &mut instead,
+            &mut returning,
+            &mut qual_product,
+        )?;
+        product_count = product_queries.len();
+
+        if !product_queries.is_empty() {
+            for ev in rewrite_events.iter() {
+                if ev.0 == rt_entry.relid && ev.1 == event {
+                    let err = infinite_recursion(rel.name());
+                    table::table_close(rel, NoLock)?;
+                    return Err(err);
+                }
+            }
+            rewrite_events.push((rt_entry.relid, event));
+            for pt_node in product_queries.iter() {
+                let ptq = rewrite_manip::flat_copy_query(mcx, pt_node.as_query().expect("Query"))?;
+                let newstuff = RewriteQuery(
+                    mcx,
+                    ptq,
+                    rewrite_events,
+                    product_orig_rt_length,
+                    num_ctes_processed,
+                )?;
+                rewritten.extend(newstuff);
+            }
+            rewrite_events.pop();
+        }
+
+        if (instead || qual_product.is_some())
+            && !parsetree.returningList.is_nil()
+            && !returning
+        {
+            let err = returning_needs_instead_rule(event, rel.name());
+            table::table_close(rel, NoLock)?;
+            return Err(err);
+        }
+
+        if parsetree.onConflict.is_some() && (product_count > 0 || has_update) {
+            table::table_close(rel, NoLock)?;
+            return Err(Box::new(
+                PgError::error(
+                    "INSERT with ON CONFLICT clause cannot be used with table that has INSERT or UPDATE rules",
+                )
+                .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+            ));
+        }
+
+        table::table_close(rel, NoLock)?;
     }
 
-    let mut rewritten = mcx::vec_with_capacity_in(mcx, 1)?;
-    rewritten.push(parsetree);
+    // INSERT products run after the original; UPDATE/DELETE products before.
+    if !instead {
+        let final_q = match qual_product {
+            Some(n) => rewrite_manip::flat_copy_query(mcx, n.as_query().expect("Query"))?,
+            None => parsetree,
+        };
+        if event == CmdType::CMD_INSERT {
+            rewritten.insert(0, final_q);
+        } else {
+            rewritten.push(final_q);
+        }
+    }
+
+    if cte_len > 0 {
+        let qcount =
+            rewritten.iter().filter(|q| q.commandType != CmdType::CMD_UTILITY).count();
+        if qcount > 1 {
+            return Err(Box::new(
+                PgError::error(
+                    "WITH cannot be used in a query that is rewritten by rules into multiple queries",
+                )
+                .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+            ));
+        }
+    }
+
     Ok(rewritten)
 }
 
-// The CMD_INSERT arm of RewriteQuery's DML block: adjust the targetlist, then
-// fire INSERT rules. The trimmed relcache entry has no rd_rules, so a table
-// carrying user CREATE RULE rules is undetectable until pg_rewrite lands
-// (matchLocks = NIL in a stock initdb; same divergence as fireRIRrules).
-fn rewrite_insert_query<'mcx>(mcx: Mcx<'mcx>, parsetree: &mut Query<'mcx>) -> PgResult<()> {
-    let result_relation = parsetree.resultRelation;
-    debug_assert!(result_relation != 0);
-    let rt_entry = rte_of(parsetree.rtable.nth(result_relation as usize - 1));
-    debug_assert!(rt_entry.rtekind == RTEKind::RTE_RELATION);
-
-    let rel = table::table_open(mcx, rt_entry.relid, NoLock)?;
-    if rel.rd_rel.relkind == RELKIND_VIEW {
-        panic!(
-            "RewriteQuery (rewriteHandler.c): auto-updatable view INSERT needs \
-             rewriteTargetView (pg_rewrite vocab unported)"
-        );
-    }
-
-    let mut values_rte = None;
-    let jointree = parsetree.jointree.expect("INSERT jointree is a FromExpr");
-    for rtr_node in &jointree.fromlist {
-        if let Some(rtr) = rtr_node.as_range_tbl_ref() {
-            let rte_node = parsetree.rtable.nth(rtr.rtindex as usize - 1);
-            let rte = rte_of(rte_node);
-            if rte.rtekind == RTEKind::RTE_VALUES {
-                debug_assert!(values_rte.is_none(), "more than one VALUES RTE found");
-                values_rte = Some((rte, rtr.rtindex, rte_node));
-            }
-        }
-    }
-
-    parsetree.targetList = rewriteTargetListIU(
-        mcx,
-        &parsetree.targetList,
-        CmdType::CMD_INSERT,
-        parsetree.r#override,
-        &rel,
-        values_rte.map(|(rte, rti, _)| (rte, rti)),
-    )?;
-
-    if let Some((rte, rti, rte_node)) = values_rte {
-        rewriteValuesRTE(mcx, parsetree, rte, rti, rte_node, &rel)?;
-    }
-
-    if let Some(oc_node) = parsetree.onConflict {
-        let oc = oc_node.as_on_conflict_expr().expect("onConflict is an OnConflictExpr");
-        if oc.action == types_nodes::primnodes::OnConflictAction::ONCONFLICT_UPDATE {
-            let new_set = rewriteTargetListIU(
-                mcx,
-                &oc.onConflictSet,
-                CmdType::CMD_UPDATE,
-                parsetree.r#override,
-                &rel,
-                None,
-            )?;
-            // SAFETY: exclusive Query-tree ownership during rewrite.
-            unsafe {
-                oc_node.with_mut::<types_nodes::primnodes::OnConflictExpr, _>(|o| {
-                    o.onConflictSet = new_set;
-                })
-            }
-            .expect("OnConflictExpr node");
-        }
-    }
-    table::table_close(rel, NoLock)?;
-    Ok(())
-}
-
-// The CMD_UPDATE/CMD_DELETE arm of RewriteQuery's DML block: same relation
-// prologue as INSERT; UPDATE additionally reorders its targetlist. Same
-// rd_rules divergence as rewrite_insert_query.
-fn rewrite_update_delete_query<'mcx>(
-    mcx: Mcx<'mcx>,
-    parsetree: &mut Query<'mcx>,
-) -> PgResult<()> {
-    let result_relation = parsetree.resultRelation;
-    debug_assert!(result_relation != 0);
-    let rt_entry = rte_of(parsetree.rtable.nth(result_relation as usize - 1));
-    debug_assert!(rt_entry.rtekind == RTEKind::RTE_RELATION);
-
-    let rel = table::table_open(mcx, rt_entry.relid, NoLock)?;
-    if rel.rd_rel.relkind == RELKIND_VIEW {
-        panic!(
-            "RewriteQuery (rewriteHandler.c): auto-updatable view UPDATE/DELETE \
-             needs rewriteTargetView (pg_rewrite vocab unported)"
-        );
-    }
-
-    if parsetree.commandType == CmdType::CMD_UPDATE {
-        debug_assert!(
-            parsetree.r#override == types_nodes::OverridingKind::OVERRIDING_NOT_SET
-        );
-        parsetree.targetList = rewriteTargetListIU(
-            mcx,
-            &parsetree.targetList,
-            CmdType::CMD_UPDATE,
-            parsetree.r#override,
-            &rel,
-            None,
-        )?;
-    }
-
-    table::table_close(rel, NoLock)?;
-    Ok(())
+#[cold]
+#[inline(never)]
+fn returning_needs_instead_rule(event: CmdType, relname: &str) -> Box<PgError> {
+    let (verb, hint_evt) = match event {
+        CmdType::CMD_INSERT => ("INSERT", "INSERT"),
+        CmdType::CMD_UPDATE => ("UPDATE", "UPDATE"),
+        _ => ("DELETE", "DELETE"),
+    };
+    Box::new(
+        PgError::error(format!(
+            "cannot perform {verb} RETURNING on relation \"{relname}\""
+        ))
+        .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+        .with_hint(format!(
+            "You need an unconditional ON {hint_evt} DO INSTEAD rule with a RETURNING clause."
+        )),
+    )
 }
 
 // rewriteTargetListIU, INSERT/UPDATE arms: reorder non-junk TLEs into
 // attribute order (junk entries keep their post-column resnos and trail the
 // list) and apply stored pg_attrdef defaults for unassigned INSERT columns
-// (no stored default => the planner NULL-fills). Identity/generated columns
-// and multiple assignment merges (process_matched_tle) are loud.
+// (no stored default => the planner NULL-fills). Multiple assignment merges
+// (process_matched_tle) are loud.
 fn rewriteTargetListIU<'mcx>(
     mcx: Mcx<'mcx>,
     target_list: &types_nodes::NodeList<'mcx>,
@@ -219,8 +341,8 @@ fn rewriteTargetListIU<'mcx>(
     r#override: types_nodes::OverridingKind,
     target_relation: &types_rel::Relation<'mcx>,
     values_rte: Option<(&'mcx types_nodes::RangeTblEntry<'mcx>, i32)>,
+    mut unused_values_attrnos: Option<&mut PgVec<'mcx, i16>>,
 ) -> PgResult<types_nodes::NodeList<'mcx>> {
-    let _ = values_rte;
     let numattrs = target_relation.rd_att.natts as usize;
     let mut new_tles: PgVec<'mcx, Option<types_nodes::Node<'mcx>>> =
         mcx::vec_with_capacity_in(mcx, numattrs)?;
@@ -256,6 +378,13 @@ fn rewriteTargetListIU<'mcx>(
         new_tles[attrno - 1] = Some(tle_node);
     }
 
+    use types_core::catalog::{ATTRIBUTE_IDENTITY_ALWAYS, ATTRIBUTE_IDENTITY_BY_DEFAULT};
+    use types_nodes::OverridingKind;
+
+    // findDefaultOnlyColumns (rewriteHandler.c), computed once on demand:
+    // true per VALUES column iff every row's cell is SetToDefault.
+    let mut default_only_cols: Option<PgVec<'mcx, bool>> = None;
+
     let mut new_tlist = types_nodes::NodeList::nil();
     for attrno in 1..=numattrs {
         let att = target_relation.rd_att.attr(attrno - 1);
@@ -263,22 +392,99 @@ fn rewriteTargetListIU<'mcx>(
             continue;
         }
         let new_tle = new_tles[attrno - 1];
-        let apply_default = (new_tle.is_none() && command_type == CmdType::CMD_INSERT)
+        let mut apply_default = (new_tle.is_none() && command_type == CmdType::CMD_INSERT)
             || new_tle.is_some_and(|t| {
                 t.as_target_entry().expect("targetlist cell").expr.node_tag()
                     == types_nodes::NodeTag::T_SetToDefault
             });
-        if att.attidentity != 0 || att.attgenerated != 0 {
-            panic!(
-                "rewriteTargetListIU (rewriteHandler.c): identity/generated \
-                 column arms not ported"
-            );
+        let values_attrno: i16 = match (values_rte, new_tle) {
+            (Some((_, rti)), Some(t)) => t
+                .as_target_entry()
+                .expect("targetlist cell")
+                .expr
+                .as_var()
+                .filter(|v| v.varno == rti)
+                .map_or(0, |v| v.varattno),
+            _ => 0,
+        };
+        let mut values_col_is_default_only =
+            |default_only_cols: &mut Option<PgVec<'mcx, bool>>| -> PgResult<bool> {
+                if values_attrno == 0 {
+                    return Ok(false);
+                }
+                if default_only_cols.is_none() {
+                    let rte = values_rte.expect("values_attrno nonzero").0;
+                    let width = rte
+                        .values_lists
+                        .nth(0)
+                        .as_list()
+                        .expect("VALUES row is a List")
+                        .len();
+                    let mut cols: PgVec<'mcx, bool> = mcx::vec_with_capacity_in(mcx, width)?;
+                    cols.extend((0..width).map(|_| true));
+                    for row in &rte.values_lists {
+                        for (i, cell) in
+                            row.as_list().expect("VALUES row is a List").iter().enumerate()
+                        {
+                            if cell.node_tag() != types_nodes::NodeTag::T_SetToDefault {
+                                cols[i] = false;
+                            }
+                        }
+                    }
+                    *default_only_cols = Some(cols);
+                }
+                Ok(default_only_cols.as_ref().expect("just built")[values_attrno as usize - 1])
+            };
+        if command_type == CmdType::CMD_INSERT {
+            if att.attidentity as u8 == ATTRIBUTE_IDENTITY_ALWAYS && !apply_default {
+                if r#override == OverridingKind::OVERRIDING_USER_VALUE {
+                    apply_default = true;
+                } else if r#override != OverridingKind::OVERRIDING_SYSTEM_VALUE {
+                    if values_col_is_default_only(&mut default_only_cols)? {
+                        apply_default = true;
+                    } else {
+                        return Err(generated_always_insert_error(att, true));
+                    }
+                }
+            }
+            if att.attidentity as u8 == ATTRIBUTE_IDENTITY_BY_DEFAULT
+                && r#override == OverridingKind::OVERRIDING_USER_VALUE
+            {
+                apply_default = true;
+            }
+            if att.attgenerated != 0 && !apply_default {
+                if values_col_is_default_only(&mut default_only_cols)? {
+                    apply_default = true;
+                } else {
+                    return Err(generated_always_insert_error(att, false));
+                }
+            }
+            if values_attrno != 0 && apply_default {
+                if let Some(unused) = unused_values_attrnos.as_deref_mut() {
+                    unused.push(values_attrno);
+                }
+            }
         }
-        debug_assert!(r#override == types_nodes::OverridingKind::OVERRIDING_NOT_SET);
-        let new_tle = if apply_default {
-            let expr = if att.atthasdef {
+        if command_type == CmdType::CMD_UPDATE {
+            if att.attidentity as u8 == ATTRIBUTE_IDENTITY_ALWAYS
+                && new_tle.is_some()
+                && !apply_default
+            {
+                return Err(generated_always_update_error(att, true));
+            }
+            if att.attgenerated != 0 && new_tle.is_some() && !apply_default {
+                return Err(generated_always_update_error(att, false));
+            }
+        }
+        let new_tle = if att.attgenerated != 0 {
+            // Stored generated columns are computed in the executor.
+            None
+        } else if apply_default {
+            let expr = if att.attidentity != 0 || att.atthasdef {
                 Some(build_column_default(mcx, target_relation, attrno)?)
             } else if command_type == CmdType::CMD_INSERT {
+                // No stored default: C omits the entry; the planner inserts
+                // the NULL (expand_insert_targetlist).
                 None
             } else {
                 // UPDATE SET col = DEFAULT with no stored default: explicit
@@ -320,8 +526,6 @@ fn rewriteTargetListIU<'mcx>(
         } else {
             new_tle
         };
-        // No stored default: C omits the entry; the planner inserts the NULL
-        // (expand_insert_targetlist).
         if let Some(tle) = new_tle {
             new_tlist.lappend(mcx, tle)?;
         }
@@ -331,10 +535,11 @@ fn rewriteTargetListIU<'mcx>(
 }
 
 // rewriteValuesRTE (rewriteHandler.c): replace SetToDefault cells with the
-// column's stored default or an explicit NULL. The unused_cols and
-// auto-updatable-view legs are dead (identity/OVERRIDING and views are loud
-// upstream), so allReplaced is always true; C's coerce_to_domain wrapper is
-// dead too (CREATE DOMAIN unreachable on this base).
+// column's stored default or an explicit NULL; unused_cols (targetlist entry
+// replaced by a default expression) NULL-fill. The auto-updatable-view leg is
+// dead (views are loud upstream), so allReplaced is always true; C's
+// coerce_to_domain wrapper is dead too (CREATE DOMAIN unreachable on this
+// base).
 fn rewriteValuesRTE<'mcx>(
     mcx: Mcx<'mcx>,
     parsetree: &Query<'mcx>,
@@ -342,6 +547,7 @@ fn rewriteValuesRTE<'mcx>(
     rti: i32,
     rte_node: Node<'mcx>,
     target_relation: &types_rel::Relation<'mcx>,
+    unused_cols: &[i16],
 ) -> PgResult<()> {
     let mut has_default = false;
     'outer: for row in &rte.values_lists {
@@ -378,6 +584,28 @@ fn rewriteValuesRTE<'mcx>(
                 new_list.lappend(mcx, col)?;
                 continue;
             }
+            if unused_cols.contains(&((i + 1) as i16)) {
+                // The targetlist entry was replaced by a default expression;
+                // C NULL-fills the now-unused cell (makeNullConst).
+                let def = col
+                    .as_variant::<types_nodes::primnodes::SetToDefault>()
+                    .expect("SetToDefault");
+                let (typlen, typbyval) = lsyscache::get_typlenbyval(def.typeId)?;
+                new_list.lappend(
+                    mcx,
+                    types_nodes::Node::mk_const(
+                        mcx,
+                        def.typeId,
+                        def.typeMod,
+                        def.collation,
+                        typlen as i32,
+                        datum::Datum::null(),
+                        true,
+                        typbyval,
+                    )?,
+                )?;
+                continue;
+            }
             let attrno = attrnos[i] as usize;
             if attrno == 0 {
                 return Err(Box::new(PgError::error(format!(
@@ -387,7 +615,12 @@ fn rewriteValuesRTE<'mcx>(
             }
             debug_assert!(attrno <= target_relation.rd_att.natts as usize);
             let att = target_relation.rd_att.attr(attrno - 1);
-            let new_expr = if !att.attisdropped && att.atthasdef {
+            // Stored generated columns get the NULL placeholder (C leaves
+            // new_expr NULL); the executor recomputes them.
+            let new_expr = if !att.attisdropped
+                && att.attgenerated == 0
+                && (att.atthasdef || att.attidentity != 0)
+            {
                 build_column_default(mcx, target_relation, attrno)?
             } else {
                 types_nodes::Node::mk_const(
@@ -423,7 +656,14 @@ pub fn build_column_default<'mcx>(
     attrno: usize,
 ) -> PgResult<types_nodes::Node<'mcx>> {
     let att = rel.rd_att.attr(attrno - 1);
-    debug_assert!(att.attidentity == 0 && att.atthasdef);
+    if att.attidentity != 0 {
+        let seqid = pg_depend::getIdentitySequence(mcx, rel.rd_id, attrno as i32)?;
+        return types_nodes::Node::mk(
+            mcx,
+            types_nodes::primnodes::NextValueExpr { seqid, typeId: att.atttypid },
+        );
+    }
+    debug_assert!(att.atthasdef);
     let constr = rel.rd_att.constr.as_deref();
     let adbin = constr
         .and_then(|c| c.defval.iter().find(|d| d.adnum == attrno as i16))
@@ -450,6 +690,50 @@ pub fn build_column_default<'mcx>(
         Some(e) => Ok(e),
         None => Err(default_type_mismatch(att.attname.name_str(), att.atttypid, exprtype)),
     }
+}
+
+#[cold]
+#[inline(never)]
+fn generated_always_insert_error(
+    att: &types_tuple::FormData_pg_attribute,
+    identity: bool,
+) -> Box<PgError> {
+    let name = String::from_utf8_lossy(att.attname.name_str()).into_owned();
+    let mut e = PgError::error(format!(
+        "cannot insert a non-DEFAULT value into column \"{name}\""
+    ))
+    .with_sqlstate(types_error::ERRCODE_GENERATED_ALWAYS);
+    if identity {
+        e = e
+            .with_detail(format!(
+                "Column \"{name}\" is an identity column defined as GENERATED ALWAYS."
+            ))
+            .with_hint("Use OVERRIDING SYSTEM VALUE to override.");
+    } else {
+        e = e.with_detail(format!("Column \"{name}\" is a generated column."));
+    }
+    Box::new(e)
+}
+
+#[cold]
+#[inline(never)]
+fn generated_always_update_error(
+    att: &types_tuple::FormData_pg_attribute,
+    identity: bool,
+) -> Box<PgError> {
+    let name = String::from_utf8_lossy(att.attname.name_str()).into_owned();
+    let mut e = PgError::error(format!(
+        "column \"{name}\" can only be updated to DEFAULT"
+    ))
+    .with_sqlstate(types_error::ERRCODE_GENERATED_ALWAYS);
+    if identity {
+        e = e.with_detail(format!(
+            "Column \"{name}\" is an identity column defined as GENERATED ALWAYS."
+        ));
+    } else {
+        e = e.with_detail(format!("Column \"{name}\" is a generated column."));
+    }
+    Box::new(e)
 }
 
 #[cold]
@@ -531,11 +815,7 @@ fn fireRIRrules<'mcx>(
             continue;
         }
         let rel = table::table_open(mcx, rte.relid, NoLock)?;
-        // C divergence: the trimmed pg_class Form has no relhasrules, so the
-        // rd_rules probe is keyed on relkind — a non-view relation carrying
-        // user CREATE RULE rules is undetectable (none exist in a stock
-        // initdb; CREATE RULE is unported).
-        if rel.rd_rel.relkind == RELKIND_VIEW {
+        if rel.rd_hasrules {
             if let Some(rules) = relcache::RelationGetRules(mcx, rte.relid)? {
                 let is_select = |r: &&RewriteRuleMeta| r.event == CmdType::CMD_SELECT as i32;
                 if rules.rules.iter().any(|r| is_select(&r)) {
@@ -835,7 +1115,8 @@ pub fn AcquireRewriteLocks<'mcx>(
     forExecute: bool,
     forUpdatePushedDown: bool,
 ) -> PgResult<()> {
-    for node in parsetree.rtable.iter() {
+    for (i, node) in parsetree.rtable.iter().enumerate() {
+        let rt_index = i as i32 + 1;
         let rtekind = rte_of(node).rtekind;
         match rtekind {
             RTEKind::RTE_RELATION => {
@@ -862,12 +1143,39 @@ pub fn AcquireRewriteLocks<'mcx>(
                 unsafe { node.with_mut::<RangeTblEntry, _>(|r| r.relkind = relkind) };
             }
             RTEKind::RTE_JOIN => {
-                panic!(
-                    "AcquireRewriteLocks (rewriteHandler.c): dropped-column fixup of \
-                     joinaliasvars needs strip_implicit_coercions (nodeFuncs.c) + \
-                     get_rte_attribute_is_dropped — both still missing from the landed \
-                     nodes_core/parse_relation crates"
-                );
+                // C rebuilds joinaliasvars with dropped-column Vars replaced
+                // by NULL cells; NodeList has no NULL cell, so the (initdb-
+                // impossible for system views) dropped hit is a loud panic
+                // and the no-drop path leaves the list shared, unrebuilt.
+                let rte = rte_of(node);
+                let mut curinputvarno: i32 = 0;
+                let mut curinputrte: Option<&RangeTblEntry<'mcx>> = None;
+                for aliasitem in &rte.joinaliasvars {
+                    let aliasvar = nodes_core::strip_implicit_coercions(aliasitem);
+                    let Some(v) = aliasvar.as_var() else { continue };
+                    debug_assert_eq!(v.varlevelsup, 0);
+                    if v.varno != curinputvarno {
+                        curinputvarno = v.varno;
+                        if curinputvarno >= rt_index {
+                            return Err(internal_error(&format!(
+                                "unexpected varno {curinputvarno} in JOIN RTE {rt_index}"
+                            )));
+                        }
+                        curinputrte =
+                            Some(rte_of(parsetree.rtable.nth(curinputvarno as usize - 1)));
+                    }
+                    if get_rte_attribute_is_dropped(
+                        mcx,
+                        curinputrte.expect("input RTE resolved"),
+                        v.varattno,
+                    )? {
+                        panic!(
+                            "AcquireRewriteLocks (rewriteHandler.c): joinaliasvars entry \
+                             references a dropped column; the NULL-cell replacement has \
+                             no NodeList representation"
+                        );
+                    }
+                }
             }
             RTEKind::RTE_SUBQUERY => {
                 let pushed_down = forUpdatePushedDown || {
@@ -906,4 +1214,93 @@ pub fn AcquireRewriteLocks<'mcx>(
 
 fn rte_of<'mcx>(node: Node<'mcx>) -> &'mcx RangeTblEntry<'mcx> {
     node.as_range_tbl_entry().expect("rtable holds RangeTblEntry nodes")
+}
+
+// get_rte_attribute_is_dropped (parse_relation.c); lives here until the
+// parse_relation crate grows the expression-vocabulary deps it needs.
+fn get_rte_attribute_is_dropped<'mcx>(
+    mcx: Mcx<'mcx>,
+    rte: &RangeTblEntry<'mcx>,
+    attnum: i16,
+) -> PgResult<bool> {
+    const ANUM_PG_ATTRIBUTE_ATTISDROPPED: i32 = 17;
+    match rte.rtekind {
+        RTEKind::RTE_RELATION => {
+            let Some(tp) = cache_syscache::SearchSysCache2(
+                cache_syscache::ATTNUM,
+                cache_syscache::SysCacheKey::Value(datum::Datum::from_oid(rte.relid)),
+                cache_syscache::SysCacheKey::Value(datum::Datum::from_i16(attnum)),
+            )?
+            else {
+                return Err(internal_error(&format!(
+                    "cache lookup failed for attribute {attnum} of relation {}",
+                    rte.relid
+                )));
+            };
+            let (d, _) = cache_syscache::SysCacheGetAttr(
+                cache_syscache::ATTNUM,
+                &tp,
+                ANUM_PG_ATTRIBUTE_ATTISDROPPED,
+            )?;
+            let dropped = d.as_bool();
+            cache_syscache::ReleaseSysCache(tp);
+            Ok(dropped)
+        }
+        RTEKind::RTE_SUBQUERY
+        | RTEKind::RTE_TABLEFUNC
+        | RTEKind::RTE_VALUES
+        | RTEKind::RTE_CTE
+        | RTEKind::RTE_GROUP => Ok(false),
+        RTEKind::RTE_NAMEDTUPLESTORE => {
+            if attnum <= 0 || attnum as usize > rte.coltypes.len() {
+                return Err(internal_error(&format!("invalid varattno {attnum}")));
+            }
+            Ok(rte.coltypes.nth(attnum as usize - 1) == InvalidOid)
+        }
+        RTEKind::RTE_JOIN => {
+            if attnum <= 0 || attnum as usize > rte.joinaliasvars.len() {
+                return Err(internal_error(&format!("invalid varattno {attnum}")));
+            }
+            // C signals dropped via a NULL joinaliasvars cell; NodeList cells
+            // are non-null, so nothing here can be dropped.
+            Ok(false)
+        }
+        RTEKind::RTE_FUNCTION => {
+            let mut atts_done: i16 = 0;
+            for f in &rte.functions {
+                let rtfunc = f.as_range_tbl_function().expect("functions holds RangeTblFunction");
+                let colcount = rtfunc.funccolcount as i16;
+                if attnum > atts_done && attnum <= atts_done + colcount {
+                    if !rtfunc.funccolnames.is_nil() {
+                        return Ok(false);
+                    }
+                    if let Some(tupdesc) =
+                        funcapi::get_expr_result_tupdesc(mcx, rtfunc.funcexpr, true)?
+                    {
+                        debug_assert!((attnum - atts_done) as i32 <= tupdesc.natts);
+                        return Ok(tupdesc.attr((attnum - atts_done - 1) as usize).attisdropped);
+                    }
+                    return Ok(false);
+                }
+                atts_done += colcount;
+            }
+            if rte.funcordinality && attnum == atts_done + 1 {
+                return Ok(false);
+            }
+            Err(Box::new(
+                PgError::error(format!(
+                    "column {attnum} of relation \"{}\" does not exist",
+                    rte.eref.and_then(|e| e.aliasname).unwrap_or("")
+                ))
+                .with_sqlstate(types_error::ERRCODE_UNDEFINED_COLUMN),
+            ))
+        }
+        RTEKind::RTE_RESULT => Err(Box::new(
+            PgError::error(format!(
+                "column {attnum} of relation \"{}\" does not exist",
+                rte.eref.and_then(|e| e.aliasname).unwrap_or("")
+            ))
+            .with_sqlstate(types_error::ERRCODE_UNDEFINED_COLUMN),
+        )),
+    }
 }

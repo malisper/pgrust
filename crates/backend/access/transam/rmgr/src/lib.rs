@@ -124,14 +124,13 @@ macro_rules! unported_mask {
     )+};
 }
 
+fn dbase_redo(record: &mut XLogReaderState) -> PgResult<()> {
+    dbcommands_seams::dbase_redo::call(record)
+}
+
 unported_redo! {
-    dbase_redo => "backend-commands-dbcommands";
     tblspc_redo => "backend-commands-tablespace";
     gin_redo => "backend-access-gin-xlog";
-    gist_redo => "backend-access-gist-xlog";
-    seq_redo => "backend-commands-sequence";
-    spg_redo => "backend-access-spgist-xlog";
-    brin_redo => "backend-access-brin-xlog";
     commit_ts_redo => "backend-access-transam-commit-ts";
     replorigin_redo => "backend-replication-origin";
     generic_redo => "backend-access-transam-generic-xlog";
@@ -142,8 +141,6 @@ unported_desc! {
     hash_desc => "backend-rmgrdesc-next";
     gin_desc => "backend-rmgrdesc-next";
     gist_desc => "backend-rmgrdesc-next";
-    spg_desc => "backend-rmgrdesc-next";
-    brin_desc => "backend-rmgrdesc-next";
     commit_ts_desc => "backend-access-rmgrdesc-small";
     replorigin_desc => "backend-rmgrdesc-extra-small";
     logicalmsg_desc => "backend-access-rmgrdesc-small";
@@ -153,8 +150,6 @@ unported_identify! {
     hash_identify => "backend-rmgrdesc-next";
     gin_identify => "backend-rmgrdesc-next";
     gist_identify => "backend-rmgrdesc-next";
-    spg_identify => "backend-rmgrdesc-next";
-    brin_identify => "backend-rmgrdesc-next";
     commit_ts_identify => "backend-access-rmgrdesc-small";
     replorigin_identify => "backend-rmgrdesc-extra-small";
     logicalmsg_identify => "backend-access-rmgrdesc-small";
@@ -167,9 +162,7 @@ unported_mask! {
     heap_mask => "backend-access-heap-heapam-xlog";
     btree_mask => "backend-access-nbtree-nbtxlog";
     gin_mask => "backend-access-gin-xlog";
-    gist_mask => "backend-access-gist-xlog";
     seq_mask => "backend-commands-sequence";
-    spg_mask => "backend-access-spgist-xlog";
     brin_mask => "backend-access-brin-xlog";
     generic_mask => "backend-access-transam-generic-xlog";
 }
@@ -296,25 +289,25 @@ pub static RmgrTable: [RmgrData; RM_N_BUILTIN_IDS] = [
     },
     RmgrData {
         rm_name: "Gin",
-        rm_redo: gin_redo,
+        rm_redo: gin_xlog::gin_redo,
         rm_desc: gin_desc,
         rm_identify: gin_identify,
         rm_startup: None,
         rm_cleanup: None,
-        rm_mask: Some(gin_mask),
+        rm_mask: Some(gin_xlog::gin_mask),
     },
     RmgrData {
         rm_name: "Gist",
-        rm_redo: gist_redo,
+        rm_redo: gist_xlog::gist_redo,
         rm_desc: gist_desc,
         rm_identify: gist_identify,
         rm_startup: None,
         rm_cleanup: None,
-        rm_mask: Some(gist_mask),
+        rm_mask: Some(gist_xlog::gist_mask),
     },
     RmgrData {
         rm_name: "Sequence",
-        rm_redo: seq_redo,
+        rm_redo: sequence_xlog::seq_redo,
         rm_desc: rmgrdesc::seqdesc::seq_desc,
         rm_identify: rmgrdesc::seqdesc::seq_identify,
         rm_startup: None,
@@ -323,18 +316,18 @@ pub static RmgrTable: [RmgrData; RM_N_BUILTIN_IDS] = [
     },
     RmgrData {
         rm_name: "SPGist",
-        rm_redo: spg_redo,
-        rm_desc: spg_desc,
-        rm_identify: spg_identify,
+        rm_redo: spgist_xlog::spg_redo,
+        rm_desc: rmgrdesc::spgdesc::spg_desc,
+        rm_identify: rmgrdesc::spgdesc::spg_identify,
         rm_startup: None,
         rm_cleanup: None,
-        rm_mask: Some(spg_mask),
+        rm_mask: Some(spgist_xlog::spg_mask),
     },
     RmgrData {
         rm_name: "BRIN",
-        rm_redo: brin_redo,
-        rm_desc: brin_desc,
-        rm_identify: brin_identify,
+        rm_redo: brin_xlog::brin_redo,
+        rm_desc: rmgrdesc::brindesc::brin_desc,
+        rm_identify: rmgrdesc::brindesc::brin_identify,
         rm_startup: None,
         rm_cleanup: None,
         rm_mask: Some(brin_mask),

@@ -55,7 +55,7 @@ pub fn CheckAttributeNamesTypes(tupdesc: &TupleDescData<'_>, relkind: u8) -> PgR
                 ));
             }
         }
-        if att.atttypid == InvalidOid {
+        if !att.attisdropped && att.atttypid == InvalidOid {
             panic!("CheckAttributeType (heap.c): full type validation unported; got InvalidOid for \"{name}\"");
         }
     }
@@ -203,11 +203,14 @@ fn AddNewRelationTuple<'mcx>(
     relfrozenxid: TransactionId,
     relminmxid: MultiXactId,
 ) -> PgResult<()> {
-    debug_assert!(relkind != types_rel::RELKIND_SEQUENCE);
     let mut form = new_rel_desc.rd_rel.clone();
     form.relpages = 0;
     form.reltuples = -1.0;
     form.relallvisible = 0;
+    if relkind == types_rel::RELKIND_SEQUENCE {
+        form.relpages = 1;
+        form.reltuples = 1.0;
+    }
     form.relfrozenxid = relfrozenxid;
     form.relminmxid = relminmxid;
     form.relowner = relowner;
@@ -313,10 +316,18 @@ pub fn heap_create_with_catalog<'mcx>(
     tupdesc: &TupleDescData<'_>,
 ) -> PgResult<Oid> {
     debug_assert!(
-        p.relkind == RELKIND_RELATION || p.relkind == types_rel::RELKIND_TOASTVALUE,
-        "only plain tables and toast tables ported"
+        p.relkind == RELKIND_RELATION
+            || p.relkind == types_rel::RELKIND_TOASTVALUE
+            || p.relkind == types_rel::RELKIND_SEQUENCE
+            || p.relkind == types_rel::RELKIND_PARTITIONED_TABLE
+            || p.relkind == RELKIND_VIEW
+            || p.relkind == types_rel::RELKIND_MATVIEW,
+        "only plain/partitioned tables, toast, sequences, views and matviews ported"
     );
-    let make_rowtype = p.relkind != types_rel::RELKIND_TOASTVALUE;
+    // C: no rowtype/array pg_type entry where the relation is an
+    // implementation detail (toast, sequences, indexes).
+    let make_rowtype = p.relkind != types_rel::RELKIND_TOASTVALUE
+        && p.relkind != types_rel::RELKIND_SEQUENCE;
     let pg_class_desc = table::table_open(mcx, RELATION_RELATION_ID, RowExclusiveLock)?;
 
     CheckAttributeNamesTypes(tupdesc, p.relkind)?;
@@ -459,14 +470,15 @@ pub fn heap_create_with_catalog<'mcx>(
         // above) and the owner needs no entry, so C records nothing.
         // recordDependencyOnCurrentExtension: extension.c unported; C no-ops
         // outside CREATE EXTENSION scripts.
-        let mut addrs = [
+        let mut addrs: [ObjectAddress; 2] = [
             ObjectAddress::set(catalog::NamespaceRelationId, p.relnamespace),
             ObjectAddress::set(AccessMethodRelationId, p.accessmtd),
         ];
+        let live = if p.accessmtd != InvalidOid { 2 } else { 1 };
         pg_depend::record_object_address_dependencies(
             mcx,
             &myself,
-            &mut addrs,
+            &mut addrs[..live],
             pg_depend::DependencyType::Normal,
         )?;
     }
@@ -520,6 +532,51 @@ fn AddNewRelationType<'mcx>(
             typeCollation: InvalidOid,
         },
     )
+}
+
+// RelationClearMissing (heap.c): reset atthasmissing/attmissingval on every
+// user column ahead of a table rewrite.
+pub fn RelationClearMissing<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<()> {
+    let rel = table::table_open(mcx, relid, types_rel::NoLock)?;
+    let natts = rel.rd_att.natts;
+    let has_any = (0..natts as usize).any(|i| rel.rd_att.attr(i).atthasmissing);
+    if !has_any {
+        rel.close(types_rel::NoLock)?;
+        return Ok(());
+    }
+    let attrrel = table::table_open(mcx, ATTRIBUTE_RELATION_ID, RowExclusiveLock)?;
+    for attnum in 1..=natts {
+        if !rel.rd_att.attr(attnum as usize - 1).atthasmissing {
+            continue;
+        }
+        let keys = [
+            crate::drop::oid_scankey(1, relid),
+            crate::drop::int2_scankey(5, attnum as AttrNumber),
+        ];
+        let mut scan =
+            genam::systable_beginscan(mcx, &attrrel, 2659, true, None, &keys)?;
+        let tup = genam::systable_getnext(mcx, &mut scan)?.unwrap_or_else(|| {
+            panic!("cache lookup failed for attribute {attnum} of relation {relid}")
+        });
+        let desc = attrrel.descr();
+        let n = desc.natts as usize;
+        let mut values: mcx::PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, n)?;
+        let mut isnull: mcx::PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, n)?;
+        let mut replace: mcx::PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, n)?;
+        values.resize(n, Datum::null());
+        isnull.resize(n, false);
+        replace.resize(n, false);
+        values[14 - 1] = Datum::from_bool(false); // atthasmissing
+        replace[14 - 1] = true;
+        isnull[25 - 1] = true; // attmissingval
+        replace[25 - 1] = true;
+        let mut newtup = heaptuple::heap_modify_tuple(mcx, tup, desc, &values, &isnull, &replace)?;
+        let otid = tup.t_self;
+        genam::systable_endscan(mcx, scan)?;
+        catalog_indexing::CatalogTupleUpdate(mcx, &attrrel, &otid, &mut newtup)?;
+    }
+    attrrel.close(RowExclusiveLock)?;
+    rel.close(types_rel::NoLock)
 }
 
 // StoreAttrMissingVal (heap.c): wrap the evaluated default in a 1-element

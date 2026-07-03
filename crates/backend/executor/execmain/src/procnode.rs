@@ -11,6 +11,9 @@ use ::types_slot::{SlotData, TupleSlotKind};
 use ::types_tuple::TupleDescData;
 
 use crate::noderesult::{exec_end_result, exec_init_result, exec_result, ResultState};
+use crate::nodeprojectset::{
+    exec_end_project_set, exec_init_project_set, exec_project_set, ProjectSetState,
+};
 
 pub struct PlanStateBase<'mcx> {
     pub plan: &'mcx Plan<'mcx>,
@@ -32,6 +35,7 @@ pub struct InstrumentedNode<'mcx> {
 
 pub enum PlanStateNode<'mcx> {
     Result(ResultState<'mcx>),
+    ProjectSet(PgBox<'mcx, ProjectSetState<'mcx>>),
     SeqScan(::nodeseqscan::SeqScanState<'mcx>),
     FunctionScan(PgBox<'mcx, ::nodefunctionscan::FunctionScanState<'mcx>>),
     ValuesScan(PgBox<'mcx, ::nodevaluesscan::ValuesScanState<'mcx>>),
@@ -199,6 +203,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             // None: the wrapper defers to inner's rescan/reset (execami arm).
             PlanStateNode::Instrumented(_) => None,
             PlanStateNode::Result(rs) => rs.ps.ps_ExprContext,
+            PlanStateNode::ProjectSet(ps) => ps.ps.ps_ExprContext,
             PlanStateNode::SeqScan(ss) => Some(ss.ss.ps_ExprContext),
             PlanStateNode::FunctionScan(fs) => Some(fs.ss.ps_ExprContext),
             PlanStateNode::ValuesScan(vs) => Some(vs.ss.ps_ExprContext),
@@ -245,6 +250,11 @@ impl<'mcx> PlanStateNode<'mcx> {
                 .ps_ResultTupleDesc
                 .clone()
                 .expect("ResultState without a result type")),
+            PlanStateNode::ProjectSet(ps) => Ok(ps
+                .ps
+                .ps_ResultTupleDesc
+                .clone()
+                .expect("ProjectSetState without a result type")),
             PlanStateNode::SeqScan(_)
             | PlanStateNode::FunctionScan(_)
             | PlanStateNode::ValuesScan(_)
@@ -306,6 +316,11 @@ pub fn exec_init_node<'mcx>(
             estate,
             eflags,
         )?),
+        NodeTag::T_ProjectSet => {
+            let state =
+                exec_init_project_set(node.as_project_set().unwrap(), estate, eflags)?;
+            PlanStateNode::ProjectSet(::mcx::alloc_in(estate.es_query_cxt, state)?)
+        }
         NodeTag::T_SeqScan => {
             let mcx = estate.es_query_cxt;
             PlanStateNode::SeqScan(::nodeseqscan::exec_init_seq_scan(
@@ -577,12 +592,17 @@ pub fn exec_init_node<'mcx>(
                 .unwrap_or_else(|| {
                     panic!("ExecInitNestLoop (nodeNestloop.c): NestLoop without an outer plan")
                 });
-            // nestParams are loud in exec_init_nest_loop, so the inner child
-            // always gets EXEC_FLAG_REWIND (cheap rescans wanted).
+            // With no nestParams the inner rescans with unchanged params, so
+            // request cheap rescans (C's EXEC_FLAG_REWIND arm).
+            let inner_eflags = if nl_plan.nestParams.is_nil() {
+                eflags | ::types_slot::EXEC_FLAG_REWIND
+            } else {
+                eflags
+            };
             let inner = exec_init_node(
                 nl_plan.join.plan.righttree,
                 estate,
-                eflags | ::types_slot::EXEC_FLAG_REWIND,
+                inner_eflags,
             )?
             .unwrap_or_else(|| {
                 panic!("ExecInitNestLoop (nodeNestloop.c): NestLoop without an inner plan")
@@ -793,7 +813,6 @@ pub fn exec_init_node<'mcx>(
             )?)
         }
         tag => unported_nodes!(tag, {
-            T_ProjectSet => "nodeProjectSet.c",
             T_MergeAppend => "nodeMergeAppend.c",
             T_RecursiveUnion => "nodeRecursiveunion.c",
             T_SampleScan => "nodeSamplescan.c",
@@ -880,6 +899,7 @@ pub fn exec_proc_node<'mcx>(
     match node {
         PlanStateNode::Instrumented(w) => exec_proc_node_instr(w, estate),
         PlanStateNode::Result(rs) => result_arm(rs, estate),
+        PlanStateNode::ProjectSet(ps) => project_set_arm(ps, estate),
         PlanStateNode::SeqScan(ss) => seq_scan_arm(ss, estate),
         PlanStateNode::FunctionScan(fs) => function_scan_arm(fs, estate),
         PlanStateNode::ValuesScan(vs) => values_scan_arm(vs, estate),
@@ -915,6 +935,14 @@ type ProcResult = PgResult<Option<ExecSlotId>>;
 #[inline(never)]
 fn result_arm<'mcx>(rs: &mut ResultState<'mcx>, estate: &mut EStateData<'mcx>) -> ProcResult {
     exec_result(rs, estate)
+}
+
+#[inline(never)]
+fn project_set_arm<'mcx>(
+    ps: &mut PgBox<'mcx, ProjectSetState<'mcx>>,
+    estate: &mut EStateData<'mcx>,
+) -> ProcResult {
+    exec_project_set(ps, estate)
 }
 
 #[inline(never)]
@@ -1282,6 +1310,10 @@ fn release_owned(node: &mut PlanStateNode<'_>) {
             end_base(&mut rs.ps);
             rs.resconstantqual = None;
         }
+        PlanStateNode::ProjectSet(ps) => {
+            end_base(&mut ps.ps);
+            crate::nodeprojectset::release_project_set(ps);
+        }
         PlanStateNode::SeqScan(ss) => end_scan(&mut ss.ss),
         PlanStateNode::FunctionScan(fs) => end_scan(&mut fs.ss),
         PlanStateNode::ValuesScan(vs) => end_scan(&mut vs.ss),
@@ -1341,6 +1373,7 @@ pub fn planstate_instr_extra<'mcx>(
             }
         }
         PlanStateNode::Agg(aps) => walk!(&mut aps.outer),
+        PlanStateNode::ProjectSet(ps) => walk!(&mut ps.outer),
         PlanStateNode::WindowAgg(w) => walk!(&mut w.outer),
         PlanStateNode::Sort(s) => walk!(&mut *s.outer),
         PlanStateNode::IncrementalSort(s) => walk!(&mut s.outer),
@@ -1435,6 +1468,7 @@ fn exec_end_node_inner<'mcx>(
     match node {
         PlanStateNode::Instrumented(w) => exec_end_node(&mut w.inner, estate),
         PlanStateNode::Result(rs) => exec_end_result(rs, estate),
+        PlanStateNode::ProjectSet(ps) => exec_end_project_set(ps, estate),
         PlanStateNode::SeqScan(ss) => ::nodeseqscan::exec_end_seq_scan(ss),
         PlanStateNode::FunctionScan(fs) => {
             ::nodefunctionscan::exec_end_function_scan(fs);
@@ -1550,6 +1584,7 @@ pub fn exec_shutdown_node<'mcx>(node: &mut PlanStateNode<'mcx>, estate: &mut ESt
                 exec_shutdown_node(outer, estate);
             }
         }
+        PlanStateNode::ProjectSet(ps) => exec_shutdown_node(&mut ps.outer, estate),
         PlanStateNode::SeqScan(_)
         | PlanStateNode::FunctionScan(_)
         | PlanStateNode::ValuesScan(_)
@@ -1666,6 +1701,15 @@ impl<'mcx> ::nodenestloop::NestLoopChild<'mcx> for PlanStateNode<'mcx> {
     fn rescan(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
         crate::execami::exec_re_scan(self, estate)
     }
+
+    fn rescan_with_chg(
+        &mut self,
+        plan: ::types_nodes::Node<'mcx>,
+        estate: &mut EStateData<'mcx>,
+        chg: &::types_nodes::bitmapset::Bitmapset<'mcx>,
+    ) -> PgResult<()> {
+        crate::execami::exec_re_scan_with_chg(self, plan, estate, chg)
+    }
 }
 
 impl<'mcx> ::nodehashjoin::HashJoinOuter<'mcx> for PlanStateNode<'mcx> {
@@ -1778,6 +1822,6 @@ pub(crate) fn with_eval_slots<'mcx, R>(
         IncrementalSort(x), Unique(x), Limit(x), BitmapHeapScan(x),
         BitmapIndexScan(x), Append(x), SubqueryScan(x), SetOp(x), LockRows(x),
         BitmapAnd(x), BitmapOr(x), ModifyTable(x), NestLoop(x), HashJoin(x),
-        MergeJoin(x), WindowAgg(x), Instrumented(x),
+        MergeJoin(x), WindowAgg(x), ProjectSet(x), Instrumented(x),
     },
 );

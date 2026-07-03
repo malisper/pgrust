@@ -793,3 +793,23 @@ fn stddev_variance_finals() {
         "2.5000000000000000"
     );
 }
+
+// Alias-row cores diffed vs live C 18.3 (psql, 2026-07-03).
+#[test]
+fn scale_min_trim_int2() {
+    assert_eq!(numeric_int2(n("1.5").num()).unwrap(), 2);
+    assert_eq!(numeric_int2(n("-32768.4").num()).unwrap(), -32768);
+    assert!(numeric_int2(n("32768").num()).is_err());
+    assert_eq!(n("1.230").num().dscale(), 3);
+    assert_eq!(numeric_min_scale(n("1.2300").num()), 2);
+    assert_eq!(numeric_min_scale(n("1.5").num()), 1);
+    assert_eq!(numeric_min_scale(n("100").num()), 0);
+    assert_eq!(numeric_min_scale(n("0.000").num()), 0);
+    assert_eq!(out(&numeric_trim_scale(n("1.2300").num()).unwrap()), "1.23");
+    assert_eq!(out(&numeric_trim_scale(n("100.00").num()).unwrap()), "100");
+    assert_eq!(out(&numeric_trim_scale(n("nan").num()).unwrap()), "NaN");
+    assert_eq!(out(&numeric_div_trunc_common(n("10.5").num(), n("0.3").num()).unwrap()), "35");
+    assert_eq!(out(&numeric_div_trunc_common(n("-10").num(), n("3").num()).unwrap()), "-3");
+    assert_eq!(out(&numeric_round_common(n("nan").num(), 1).unwrap()), "NaN");
+    assert_eq!(out(&numeric_trunc_common(n("-inf").num(), 1).unwrap()), "-Infinity");
+}

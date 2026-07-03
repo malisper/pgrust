@@ -277,7 +277,9 @@ fn test_relation<'mcx>(mcx: Mcx<'mcx>, oid: Oid) -> Relation<'mcx> {
         relfrozenxid: 3,
         relminmxid: 1,
     };
-    let data = ::types_rel::RelationData { rd_locator: Default::default(), rd_smgr: Default::default(),
+    let data = ::types_rel::RelationData {
+        rd_locator: std::cell::Cell::new(::types_storage::RelFileLocator::new(1663, 5, oid)),
+        rd_smgr: Default::default(),
         rd_id: oid,
         rd_backend: INVALID_PROC_NUMBER,
         rd_islocaltemp: false,
@@ -299,11 +301,12 @@ fn test_relation<'mcx>(mcx: Mcx<'mcx>, oid: Oid) -> Relation<'mcx> {
         rd_options: None,
         pgstat_enabled: std::cell::Cell::new(true),
         rd_amcache: Default::default(),
-        rd_amcache_hash: Default::default(),
+        rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(), rd_amcache_spgist: Default::default(),
+        rd_support: PgVec::new_in(mcx),
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
-            rd_hastriggers: false,
+            rd_hastriggers: false, rd_hasrules: false,
     };
     Relation::open(data, None)
 }
@@ -888,7 +891,7 @@ fn dml_insert_extends_stamps_and_logs() {
     let _ = take_xlog();
 
     let mut tup = make_writable_tuple(&tuple_image(0, 0, 41));
-    dml::heap_insert(&rel, &mut tup, 7, 0).unwrap();
+    dml::heap_insert(&rel, &mut tup, 7, 0, None).unwrap();
     assert_eq!(tup.t_self, ItemPointerData::new(0, 1));
 
     let stored = page_tuple_at(oid, 0, 1);
@@ -898,7 +901,7 @@ fn dml_insert_extends_stamps_and_logs() {
     assert_eq!(stored.t_data().t_ctid, tup.t_self);
 
     let mut tup2 = make_writable_tuple(&tuple_image(0, 0, 42));
-    dml::heap_insert(&rel, &mut tup2, 7, 0).unwrap();
+    dml::heap_insert(&rel, &mut tup2, 7, 0, None).unwrap();
     assert_eq!(tup2.t_self, ItemPointerData::new(0, 2));
 
     let recs = take_xlog();
@@ -1182,7 +1185,7 @@ fn dml_speculative_insert_finish() {
 
     let mut tup = make_writable_tuple(&tuple_image(0, 0, 41));
     tup.t_data_mut().set_speculative_token(7);
-    dml::heap_insert(&rel, &mut tup, 7, hio::HEAP_INSERT_SPECULATIVE).unwrap();
+    dml::heap_insert(&rel, &mut tup, 7, hio::HEAP_INSERT_SPECULATIVE, None).unwrap();
     let tid = tup.t_self;
 
     let stored = page_tuple_at(oid, 0, 1);
@@ -1219,7 +1222,7 @@ fn dml_speculative_insert_abort_super_deletes() {
 
     let mut tup = make_writable_tuple(&tuple_image(0, 0, 41));
     tup.t_data_mut().set_speculative_token(9);
-    dml::heap_insert(&rel, &mut tup, 7, hio::HEAP_INSERT_SPECULATIVE).unwrap();
+    dml::heap_insert(&rel, &mut tup, 7, hio::HEAP_INSERT_SPECULATIVE, None).unwrap();
     let tid = tup.t_self;
     let _ = take_xlog();
 
@@ -1244,4 +1247,30 @@ fn dml_speculative_insert_abort_super_deletes() {
     assert_eq!(u16::from_ne_bytes([recs[0].1[4], recs[0].1[5]]), 1);
     assert_eq!(recs[0].1[7], dml::XLH_DELETE_IS_SUPER);
     quiesced();
+}
+
+#[test]
+fn index_delete_sort_orders_by_block_then_offset() {
+    use ::tableam_vocab::TM_IndexDelete;
+    let tid = |b: u32, p: u16| ::types_tuple::ItemPointerData::new(b, p);
+    let mut deltids: Vec<TM_IndexDelete> = [
+        (7, 3), (1, 2), (7, 1), (0, 5), (1, 1), (2048, 9), (0, 4),
+    ]
+    .iter()
+    .enumerate()
+    .map(|(i, &(b, p))| TM_IndexDelete { tid: tid(b, p), id: i as i16 })
+    .collect();
+
+    index_delete::index_delete_sort(&mut deltids);
+
+    let got: Vec<(u32, u16)> = deltids
+        .iter()
+        .map(|d| {
+            (
+                ::types_tuple::ItemPointerGetBlockNumber(&d.tid),
+                ::types_tuple::ItemPointerGetOffsetNumber(&d.tid),
+            )
+        })
+        .collect();
+    assert_eq!(got, vec![(0, 4), (0, 5), (1, 1), (1, 2), (7, 1), (7, 3), (2048, 9)]);
 }

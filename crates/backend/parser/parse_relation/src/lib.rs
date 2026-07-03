@@ -87,7 +87,7 @@ fn scanNameSpaceForRefname<'p, 'mcx>(
         if !nsitem.p_rel_visible {
             continue;
         }
-        if nsitem.p_lateral_only && !pstate.p_lateral_active {
+        if nsitem.p_lateral_only.get() && !pstate.p_lateral_active {
             continue;
         }
         if nsitem.p_names.aliasname == Some(refname) {
@@ -112,7 +112,7 @@ fn scanNameSpaceForRelid<'p, 'mcx>(
         if !nsitem.p_rel_visible {
             continue;
         }
-        if nsitem.p_lateral_only && !pstate.p_lateral_active {
+        if nsitem.p_lateral_only.get() && !pstate.p_lateral_active {
             continue;
         }
         if nsitem.p_returning_type != VarReturningType::VAR_RETURNING_DEFAULT {
@@ -134,7 +134,7 @@ fn check_lateral_ref_ok<'p, 'mcx>(
     nsitem: &ParseNamespaceItem<'mcx>,
     location: ParseLoc,
 ) -> PgResult<()> {
-    if nsitem.p_lateral_only && !nsitem.p_lateral_ok {
+    if nsitem.p_lateral_only.get() && !nsitem.p_lateral_ok.get() {
         return Err(bad_lateral_ref(pstate, nsitem, location));
     }
     Ok(())
@@ -312,7 +312,7 @@ pub fn colNameToVar<'mcx>(
             if !nsitem.p_cols_visible {
                 continue;
             }
-            if nsitem.p_lateral_only && !p.p_lateral_active {
+            if nsitem.p_lateral_only.get() && !p.p_lateral_active {
                 continue;
             }
             let newresult =
@@ -618,8 +618,8 @@ fn buildNSItemFromTupleDesc<'mcx>(
         p_nscolumns: nscolumns.leak(),
         p_rel_visible: true,
         p_cols_visible: true,
-        p_lateral_only: false,
-        p_lateral_ok: true,
+        p_lateral_only: core::cell::Cell::new(false),
+        p_lateral_ok: core::cell::Cell::new(true),
         p_returning_type: VarReturningType::VAR_RETURNING_DEFAULT,
     })
 }
@@ -988,8 +988,8 @@ pub fn addRangeTableEntryForValues<'mcx>(
         p_nscolumns: nscolumns.leak(),
         p_rel_visible: true,
         p_cols_visible: true,
-        p_lateral_only: false,
-        p_lateral_ok: true,
+        p_lateral_only: core::cell::Cell::new(false),
+        p_lateral_ok: core::cell::Cell::new(true),
         p_returning_type: VarReturningType::VAR_RETURNING_DEFAULT,
     };
     Ok(mcx::leak_in(mcx::alloc_in(mcx, nsitem)?))
@@ -1064,8 +1064,8 @@ pub fn addRangeTableEntryForSubquery<'mcx>(
         p_nscolumns: nscolumns.leak(),
         p_rel_visible: alias.is_some(),
         p_cols_visible: true,
-        p_lateral_only: false,
-        p_lateral_ok: true,
+        p_lateral_only: core::cell::Cell::new(false),
+        p_lateral_ok: core::cell::Cell::new(true),
         p_returning_type: VarReturningType::VAR_RETURNING_DEFAULT,
     };
     Ok(mcx::leak_in(mcx::alloc_in(mcx, nsitem)?))
@@ -1208,8 +1208,8 @@ pub fn addRangeTableEntryForCTE<'mcx>(
         p_nscolumns: nscolumns.leak(),
         p_rel_visible: true,
         p_cols_visible: true,
-        p_lateral_only: false,
-        p_lateral_ok: true,
+        p_lateral_only: core::cell::Cell::new(false),
+        p_lateral_ok: core::cell::Cell::new(true),
         p_returning_type: VarReturningType::VAR_RETURNING_DEFAULT,
     };
     Ok(mcx::leak_in(mcx::alloc_in(mcx, nsitem)?))
@@ -1300,8 +1300,8 @@ pub fn addRangeTableEntryForJoin<'mcx>(
         p_nscolumns: nscolumns.leak(),
         p_rel_visible: true,
         p_cols_visible: true,
-        p_lateral_only: false,
-        p_lateral_ok: true,
+        p_lateral_only: core::cell::Cell::new(false),
+        p_lateral_ok: core::cell::Cell::new(true),
         p_returning_type: VarReturningType::VAR_RETURNING_DEFAULT,
     };
     Ok(mcx::leak_in(mcx::alloc_in(mcx, nsitem)?))
@@ -1402,8 +1402,8 @@ pub fn addNSItemToQuery<'mcx>(
     if addToRelNameSpace || addToVarNameSpace {
         nsitem.p_rel_visible = addToRelNameSpace;
         nsitem.p_cols_visible = addToVarNameSpace;
-        nsitem.p_lateral_only = false;
-        nsitem.p_lateral_ok = true;
+        nsitem.p_lateral_only.set(false);
+        nsitem.p_lateral_ok.set(true);
         pstate.p_namespace.push(nsitem);
     }
     Ok(())
@@ -1429,10 +1429,103 @@ pub fn expandRTE<'mcx>(
             location,
             include_dropped,
         ),
+        RTEKind::RTE_FUNCTION => expandFunction(
+            mcx,
+            rte,
+            rtindex,
+            sublevels_up,
+            returning_type,
+            location,
+            include_dropped,
+        ),
         other => panic!(
             "expandRTE (parse_relation.c): arm for {other:?} unported — \
              unit backend-parser-relation"
         ),
+    }
+}
+
+fn expandFunction<'mcx>(
+    mcx: Mcx<'mcx>,
+    rte: &RangeTblEntry<'mcx>,
+    rtindex: i32,
+    sublevels_up: i32,
+    returning_type: VarReturningType,
+    location: ParseLoc,
+    include_dropped: bool,
+) -> PgResult<(NodeList<'mcx>, NodeList<'mcx>)> {
+    if rte.funcordinality || rte.functions.len() != 1 {
+        panic!(
+            "expandRTE (parse_relation.c): ORDINALITY / multiple functions \
+             unported — unit backend-parser-relation"
+        );
+    }
+    let rtfunc = rte
+        .functions
+        .nth(0)
+        .as_range_tbl_function()
+        .expect("functions cell is RangeTblFunction");
+    if !rtfunc.funccolnames.is_nil() {
+        panic!(
+            "expandRTE (parse_relation.c): coldeflist (RECORD-returning) arm \
+             unported — coldeflist lane"
+        );
+    }
+    let eref = rte.eref.expect("function RTE has eref");
+    let funcexpr = rtfunc.funcexpr.expect("RangeTblFunction has funcexpr");
+    let resolved = funcapi::get_expr_result_type(mcx, Some(funcexpr))?;
+    match resolved.class {
+        funcapi::TypeFuncClass::Composite | funcapi::TypeFuncClass::CompositeDomain => {
+            let tupdesc = resolved.result_tuple_desc.expect("composite result carries a tupdesc");
+            debug_assert_eq!(rtfunc.funccolcount, tupdesc.natts);
+            expandTupleDesc(
+                mcx,
+                &tupdesc,
+                eref,
+                rtfunc.funccolcount as usize,
+                0,
+                rtindex,
+                sublevels_up,
+                returning_type,
+                location,
+                include_dropped,
+            )
+        }
+        funcapi::TypeFuncClass::Scalar => {
+            // exprTypmod/exprCollation of the grammar-guaranteed FuncExpr:
+            // no FuncExpr arm in exprTypmod (-1); collation is funccollid.
+            let (typmod, collation) = match funcexpr.as_func_expr() {
+                Some(fe) => (-1, fe.funccollid),
+                None => panic!(
+                    "expandRTE (parse_relation.c): non-FuncExpr scalar function \
+                     item (planner-folded expr) unported"
+                ),
+            };
+            let mut colnames = NodeList::nil();
+            let mut colvars = NodeList::nil();
+            colnames.lappend(mcx, eref.colnames.nth(0))?;
+            colvars.lappend(
+                mcx,
+                Node::mk(
+                    mcx,
+                    Var {
+                        varno: rtindex,
+                        varattno: 1,
+                        vartype: resolved.result_type_id,
+                        vartypmod: typmod,
+                        varcollid: collation,
+                        varnullingrels: types_nodes::Bitmapset::empty(),
+                        varlevelsup: sublevels_up as Index,
+                        varreturningtype: returning_type,
+                        varnosyn: rtindex as Index,
+                        varattnosyn: 1,
+                        location,
+                    },
+                )?,
+            )?;
+            Ok((colnames, colvars))
+        }
+        other => panic!("expandRTE: function in FROM has unsupported return type ({other:?})"),
     }
 }
 
@@ -1823,7 +1916,7 @@ fn rte_visible_if_lateral<'p, 'mcx>(
         return false;
     }
     match findNSItemForRTE(pstate, rte) {
-        Some(nsitem) => nsitem.p_lateral_only && nsitem.p_lateral_ok,
+        Some(nsitem) => nsitem.p_lateral_only.get() && nsitem.p_lateral_ok.get(),
         None => false,
     }
 }

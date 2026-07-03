@@ -16,6 +16,7 @@ fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
 genam = { path = "../../access/index/genam" }
 heaptuple = { path = "../../access/common/heaptuple" }
 mcx = { path = "../../../_support/mcx" }
+types_nodes = { path = "../../../_support/types/nodes" }
 miscinit_seams = { path = "../../utils/init/miscinit_seams" }
 pg_depend = { path = "../pg_depend" }
 table = { path = "../../access/table/table" }

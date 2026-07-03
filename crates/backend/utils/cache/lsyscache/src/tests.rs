@@ -330,6 +330,7 @@ fn install() {
                 relkind: b'r' as i8,
                 relpersistence: b'p' as i8,
                 relispartition: false,
+                relhassubclass: false,
             }))
         });
         s::pg_class_relname::set(|relid| Ok((relid == REL_OID).then(|| name("t1"))));
@@ -403,8 +404,11 @@ fn install() {
         s::lookup_pg_range_shape::set(|range_oid| {
             Ok((range_oid == 3904).then_some(PgRangeShape {
                 rngsubtype: INT4OID,
-                rngcollation: InvalidOid,
                 rngmultitypid: 4451,
+                rngcollation: InvalidOid,
+                rngsubopc: 1978,
+                rngcanonical: 3914,
+                rngsubdiff: 3922,
             }))
         });
         s::lookup_pg_range_by_multirange::set(|mr| Ok((mr == 4451).then_some(3904)));

@@ -9,6 +9,7 @@ pub mod build;
 pub mod builtins;
 pub mod container;
 pub mod getfield;
+pub mod gin;
 pub mod io;
 pub mod iter;
 pub mod mutate;

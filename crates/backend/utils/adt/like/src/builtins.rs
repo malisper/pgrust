@@ -1,5 +1,5 @@
 //! fmgr wrappers (`fc_*`) + `LIKE_BUILTINS` for fmgr-core. like_support.c's
-//! prosupport/planner rows are registered as loud named panics (selfuncs lane).
+//! prosupport rows answer NULL except the index-condition leg (loud).
 
 use datum::varlena::{set_varsize_4b, VARHDRSZ};
 use datum::Datum;

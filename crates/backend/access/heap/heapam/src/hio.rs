@@ -1,11 +1,8 @@
 // hio.c write lane. Deferred: HEAP_INSERT_FROZEN vm pinning and all-visible
-// vm lanes (visibilitymap.c). The target-block cache (C rd_smgr->smgr_targblock)
-// lives in a backend-local table until smgr wiring lands.
-use std::cell::RefCell;
-
+// vm lanes (visibilitymap.c).
 use ::bufmgr_seams::{BufferPin, BUFFER_LOCK_EXCLUSIVE, BUFFER_LOCK_UNLOCK, EB_LOCK_FIRST};
 use ::tableam_vocab::BulkInsertStateData;
-use ::types_core::{BlockNumber, ForkNumber, InvalidBlockNumber, Oid, BLCKSZ};
+use ::types_core::{BlockNumber, ForkNumber, InvalidBlockNumber, BLCKSZ};
 use ::types_error::{PgError, PgResult};
 use ::types_rel::RelationData;
 use ::types_storage::buf::BufferAccessStrategyType;
@@ -27,27 +24,28 @@ pub const HEAP_DEFAULT_FILLFACTOR: i32 = 100;
 const MAXALIGN: usize = 8;
 const MAX_BUFFERS_TO_EXTEND_BY: u32 = 64;
 
-std::thread_local! {
-    static TARGET_BLOCKS: RefCell<Vec<(Oid, BlockNumber)>> = const { RefCell::new(Vec::new()) };
-}
-
+// RelationGetTargetBlock/RelationSetTargetBlock: the cache is C's
+// rd_smgr->smgr_targblock, so RelationTruncate's smgr reset invalidates it.
 pub fn relation_get_target_block(rel: &RelationData<'_>) -> BlockNumber {
-    TARGET_BLOCKS.with(|t| {
-        t.borrow()
-            .iter()
-            .find(|(oid, _)| *oid == rel.rd_id)
-            .map_or(InvalidBlockNumber, |(_, b)| *b)
+    let locator = rel.rd_locator.get();
+    if locator.relNumber == 0 {
+        return InvalidBlockNumber;
+    }
+    smgr::smgrgettargblock(::types_storage::RelFileLocatorBackend {
+        locator,
+        backend: rel.rd_backend,
     })
 }
 
 pub fn relation_set_target_block(rel: &RelationData<'_>, blk: BlockNumber) {
-    TARGET_BLOCKS.with(|t| {
-        let mut v = t.borrow_mut();
-        match v.iter_mut().find(|(oid, _)| *oid == rel.rd_id) {
-            Some(slot) => slot.1 = blk,
-            None => v.push((rel.rd_id, blk)),
-        }
-    })
+    let locator = rel.rd_locator.get();
+    if locator.relNumber == 0 {
+        return;
+    }
+    let key = ::types_storage::RelFileLocatorBackend { locator, backend: rel.rd_backend };
+    if smgr::smgropen(key.locator, key.backend).is_ok() {
+        smgr::smgrsettargblock(key, blk);
+    }
 }
 
 /// `GetBulkInsertState` (heapam.c); drop is `FreeBulkInsertState` (the pin and

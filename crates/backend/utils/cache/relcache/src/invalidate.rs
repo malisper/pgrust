@@ -17,10 +17,14 @@ pub(crate) fn RelationInvalidateRelation(rel: &RelationData<'static>) {
     // C RelationCloseSmgr is void; mdclose cannot fail.
     let _ = smgr::RelationCloseSmgr(rel);
     rel.rd_isvalid.set(false);
+    rel.rd_amcache.set(None);
+    *rel.rd_amcache_hash.borrow_mut() = None;
+    rel.rd_amcache_gin.set(None);
     *rel.rd_indexlist.borrow_mut() = None;
     *rel.rd_trigdesc.borrow_mut() = None;
     crate::rules::forget(rel.rd_id);
     crate::indexattr::forget(rel.rd_id);
+    crate::statextlist::forget(rel.rd_id);
 }
 
 // RelationClearRelation: caller has verified refcount-zero, not nailed, and
@@ -149,11 +153,12 @@ fn RelationReloadIndexInfo(
         rd_options: scanned.options,
         pgstat_enabled: Cell::new(false),
         rd_amcache: Default::default(),
-        rd_amcache_hash: Default::default(),
+        rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(), rd_amcache_spgist: Default::default(),
+        rd_support: ii.support,
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
-            rd_hastriggers: false,
+            rd_hastriggers: false, rd_hasrules: false,
     });
     build::RelationInitPhysicalAddr(&newrel)?;
     copy_preserved(held, &newrel);
@@ -204,11 +209,12 @@ fn RelationReloadNailed(
         rd_options: scanned.options,
         pgstat_enabled: Cell::new(false),
         rd_amcache: Default::default(),
-        rd_amcache_hash: Default::default(),
+        rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(), rd_amcache_spgist: Default::default(),
+        rd_support: mcx::PgVec::new_in(cache_mcx()),
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
-            rd_hastriggers: false,
+            rd_hastriggers: false, rd_hasrules: false,
     });
     build::RelationInitPhysicalAddr(&newrel)?;
     copy_preserved(held, &newrel);
@@ -280,6 +286,7 @@ pub fn RelationCacheInvalidateEntry(relationId: Oid) -> PgResult<()> {
     // The rules side-cache can hold relids that never entered id_cache.
     crate::rules::forget(relationId);
     crate::indexattr::forget(relationId);
+    crate::statextlist::forget(relationId);
     let cached = with_state(|st| st.id_cache.contains_key(&relationId));
     if cached {
         with_state(|st| st.invals_received += 1);
@@ -304,6 +311,7 @@ pub fn RelationCacheInvalidate(debug_discard: bool) -> PgResult<()> {
     with_state(|st| {
         st.rules_cache.clear();
         st.indexattr_cache.clear();
+        st.statext_cache.clear();
     });
 
     let snapshot: Vec<(Oid, Rc<RelationData<'static>>, bool)> = with_state(|st| {
@@ -371,6 +379,17 @@ fn eoxact_targets() -> Vec<Oid> {
             st.eoxact_list[..st.eoxact_list_len].to_vec()
         }
     })
+}
+
+// RelationAssumeNewRelfilelocator (relcache.c): stamp the subid Cells and
+// flag the entry for eoxact cleanup.
+pub fn RelationAssumeNewRelfilelocator(rel: &RelationData<'_>) {
+    let subid = xact_seams::get_current_sub_transaction_id::call();
+    rel.rd_newRelfilelocatorSubid.set(subid);
+    if rel.rd_firstRelfilelocatorSubid.get() == InvalidSubTransactionId {
+        rel.rd_firstRelfilelocatorSubid.set(subid);
+    }
+    store::eoxact_list_add(rel.rd_id);
 }
 
 pub fn AtEOXact_RelationCache(isCommit: bool) -> PgResult<()> {

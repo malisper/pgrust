@@ -1,8 +1,8 @@
-//! uuid.c value cores. gen_random_uuid/uuidv7/uuidv7_interval are registered
-//! loud (pg_strong_random unexported from tcop; timestamptz_pl_interval in a
-//! concurrent lane); uuid_sortsupport/uuid_skipsupport stay unregistered until
-//! the SortSupport/SkipSupport node frame lands (macaddr_sortsupport precedent).
+//! uuid.c value cores. uuid_sortsupport/uuid_skipsupport stay unregistered
+//! until the SortSupport/SkipSupport node frame lands (macaddr_sortsupport
+//! precedent).
 
+pub mod abbrev;
 pub mod builtins;
 #[cfg(test)]
 mod tests;
@@ -23,7 +23,108 @@ pub type PgUuid = [u8; UUID_LEN];
 pub const UUID_OUT_LEN: usize = 2 * UUID_LEN + 4;
 
 const US_PER_MS: i64 = 1_000;
+const NS_PER_S: i64 = 1_000_000_000;
+const NS_PER_MS: i64 = 1_000_000;
+const NS_PER_US: i64 = 1_000;
 const GREGORIAN_EPOCH_JDATE: i64 = 2_299_161;
+
+// C: 10 sub-ms precision bits on __darwin__/_MSC_VER (µs clocks), 12 elsewhere.
+#[cfg(target_os = "macos")]
+const SUBMS_MINIMAL_STEP_BITS: i64 = 10;
+#[cfg(not(target_os = "macos"))]
+const SUBMS_MINIMAL_STEP_BITS: i64 = 12;
+const SUBMS_BITS: u32 = 12;
+const SUBMS_MINIMAL_STEP_NS: i64 = (NS_PER_MS / (1 << SUBMS_MINIMAL_STEP_BITS)) + 1;
+
+#[inline]
+fn uuid_set_version(uuid: &mut PgUuid, version: u8) {
+    uuid[6] = (uuid[6] & 0x0f) | (version << 4);
+    uuid[8] = (uuid[8] & 0x3f) | 0x80;
+}
+
+#[cold]
+#[inline(never)]
+fn no_random_err() -> PgError {
+    PgError::error("could not generate random values")
+}
+
+pub fn gen_random_uuid() -> PgResult<PgUuid> {
+    let mut uuid = [0u8; UUID_LEN];
+    if !pg_strong_random::pg_strong_random(&mut uuid) {
+        return Err(no_random_err().into());
+    }
+    uuid_set_version(&mut uuid, 4);
+    Ok(uuid)
+}
+
+std::thread_local! {
+    // C's static previous_ns in get_real_time_ns_ascending (backend-private).
+    static PREVIOUS_NS: core::cell::Cell<i64> = const { core::cell::Cell::new(0) };
+}
+
+fn get_real_time_ns_ascending() -> i64 {
+    let mut tmp = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    // SAFETY: clock_gettime fills the timespec out-param.
+    unsafe { libc::clock_gettime(libc::CLOCK_REALTIME, &mut tmp) };
+    let mut ns = tmp.tv_sec as i64 * NS_PER_S + tmp.tv_nsec as i64;
+    let previous_ns = PREVIOUS_NS.get();
+    if previous_ns + SUBMS_MINIMAL_STEP_NS >= ns {
+        ns = previous_ns + SUBMS_MINIMAL_STEP_NS;
+    }
+    PREVIOUS_NS.set(ns);
+    ns
+}
+
+pub fn generate_uuidv7(unix_ts_ms: u64, sub_ms: u32) -> PgResult<PgUuid> {
+    let mut uuid = [0u8; UUID_LEN];
+    uuid[0] = (unix_ts_ms >> 40) as u8;
+    uuid[1] = (unix_ts_ms >> 32) as u8;
+    uuid[2] = (unix_ts_ms >> 24) as u8;
+    uuid[3] = (unix_ts_ms >> 16) as u8;
+    uuid[4] = (unix_ts_ms >> 8) as u8;
+    uuid[5] = unix_ts_ms as u8;
+
+    let increased_clock_precision = sub_ms.wrapping_mul(1 << SUBMS_BITS) / NS_PER_MS as u32;
+    uuid[6] = (increased_clock_precision >> 8) as u8;
+    uuid[7] = increased_clock_precision as u8;
+
+    if !pg_strong_random::pg_strong_random(&mut uuid[8..]) {
+        return Err(no_random_err().into());
+    }
+
+    if SUBMS_MINIMAL_STEP_BITS == 10 {
+        // Lowest 2 sub-ms bits carry no entropy on µs clocks; randomize them
+        // (SUBMS_MINIMAL_STEP still guarantees monotonicity).
+        uuid[7] ^= uuid[8] >> 6;
+    }
+
+    uuid_set_version(&mut uuid, 7);
+    Ok(uuid)
+}
+
+pub fn uuidv7() -> PgResult<PgUuid> {
+    let ns = get_real_time_ns_ascending();
+    generate_uuidv7((ns / NS_PER_MS) as u64, (ns % NS_PER_MS) as u32)
+}
+
+pub fn uuidv7_interval(shift: &adt_datetime::Interval) -> PgResult<PgUuid> {
+    let ns = get_real_time_ns_ascending();
+
+    let ts: TimestampTz = ns / NS_PER_US
+        - (POSTGRES_EPOCH_JDATE as i64 - UNIX_EPOCH_JDATE as i64)
+            * SECS_PER_DAY as i64
+            * USECS_PER_SEC;
+    let ts = adt_timestamp::interval::timestamptz_pl_interval_internal(ts, shift, None)?;
+    let us = ts
+        + (POSTGRES_EPOCH_JDATE as i64 - UNIX_EPOCH_JDATE as i64)
+            * SECS_PER_DAY as i64
+            * USECS_PER_SEC;
+
+    generate_uuidv7(
+        (us / US_PER_MS) as u64,
+        ((us % US_PER_MS) * NS_PER_US + ns % NS_PER_US) as u32,
+    )
+}
 
 #[cold]
 #[inline(never)]

@@ -324,11 +324,12 @@ fn rel_from<'mcx>(
         rd_options: None,
         pgstat_enabled: Cell::new(false),
         rd_amcache: Default::default(),
-        rd_amcache_hash: Default::default(),
+        rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(), rd_amcache_spgist: Default::default(),
+        rd_support: vec_of(&vec![0; opcintype.len()]),
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
-            rd_hastriggers: false,
+            rd_hastriggers: false, rd_hasrules: false,
     };
     Relation::open(data, Some(noop_close))
 }
@@ -401,6 +402,8 @@ fn fixture_rel<'mcx>(mcx: Mcx<'mcx>, oid: Oid) -> Relation<'mcx> {
                     indisready: false,
                     indkey,
                     has_indpred: false,
+        indexprs_src: None,
+        indpred_src: None,
                 }),
                 &[26, 23],
             );
@@ -572,7 +575,7 @@ fn insert_row(mcx: Mcx<'_>, rel: &Relation<'_>, payloads: &[&[u8]]) -> ItemPoint
         .collect();
     let isnull = vec![false; payloads.len()];
     let mut tup = heaptuple::heap_form_tuple(mcx, &rel.rd_att, &values, &isnull).unwrap();
-    heapam::dml::heap_insert(rel, tup.as_tuple_mut(), CID, 0).unwrap();
+    heapam::dml::heap_insert(rel, tup.as_tuple_mut(), CID, 0, None).unwrap();
     tup.as_tuple().t_self
 }
 

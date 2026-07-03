@@ -42,20 +42,25 @@ pub fn build_base_rel_tlists<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResult<()> {
 pub(crate) fn pull_var_nodes<'mcx>(node: Node<'mcx>, out: &mut PgVec<'mcx, Node<'mcx>>) {
     match node.node_tag() {
         NodeTag::T_Var => out.push(node),
-        NodeTag::T_Const => {}
+        NodeTag::T_Const | NodeTag::T_NextValueExpr => {}
         NodeTag::T_Aggref => {
             let a = node.as_aggref().unwrap();
             debug_assert!(a.agglevelsup == 0);
-            debug_assert!(a.aggdirectargs.is_nil() && a.aggfilter.is_none());
+            debug_assert!(a.aggdirectargs.is_nil());
             for arg in &a.args {
                 pull_var_nodes(arg, out);
+            }
+            if let Some(f) = a.aggfilter {
+                pull_var_nodes(f, out);
             }
         }
         NodeTag::T_WindowFunc => {
             let wf = node.as_window_func().unwrap();
-            debug_assert!(wf.aggfilter.is_none());
             for arg in &wf.args {
                 pull_var_nodes(arg, out);
+            }
+            if let Some(f) = wf.aggfilter {
+                pull_var_nodes(f, out);
             }
         }
         NodeTag::T_GroupingFunc => {
@@ -83,11 +88,30 @@ pub(crate) fn pull_var_nodes<'mcx>(node: Node<'mcx>, out: &mut PgVec<'mcx, Node<
                 pull_var_nodes(arg, out);
             }
         }
+        NodeTag::T_BooleanTest => {
+            if let Some(arg) = node.as_boolean_test().unwrap().arg {
+                pull_var_nodes(arg, out);
+            }
+        }
+        NodeTag::T_DistinctExpr => {
+            for a in &node.as_distinct_expr().unwrap().args {
+                pull_var_nodes(a, out);
+            }
+        }
+        NodeTag::T_RowExpr => {
+            for a in &node.as_row_expr().unwrap().args {
+                pull_var_nodes(a, out);
+            }
+        }
         NodeTag::T_BoolExpr => {
             for a in &node.as_bool_expr().unwrap().args {
                 pull_var_nodes(a, out);
             }
         }
+        NodeTag::T_CoerceToDomain => {
+            pull_var_nodes(node.as_coerce_to_domain().unwrap().arg, out)
+        }
+        NodeTag::T_CoerceToDomainValue => {}
         NodeTag::T_List => {
             for a in node.as_list().unwrap() {
                 pull_var_nodes(a, out);
@@ -130,6 +154,16 @@ pub(crate) fn pull_var_nodes<'mcx>(node: Node<'mcx>, out: &mut PgVec<'mcx, Node<
         }
         NodeTag::T_MinMaxExpr => {
             for a in &node.as_min_max_expr().unwrap().args {
+                pull_var_nodes(a, out);
+            }
+        }
+        NodeTag::T_ArrayExpr => {
+            for a in &node.as_array_expr().unwrap().elements {
+                pull_var_nodes(a, out);
+            }
+        }
+        NodeTag::T_ScalarArrayOpExpr => {
+            for a in &node.as_scalar_array_op_expr().unwrap().args {
                 pull_var_nodes(a, out);
             }
         }
@@ -219,6 +253,190 @@ enum JtItem<'mcx> {
     },
 }
 
+// find_lateral_references (initsplan.c); appendrel otherrels are loud
+// upstream (inh), so only plain baserels are examined.
+pub fn find_lateral_references(run: &mut PlannerRun<'_>) -> PgResult<()> {
+    if !run.root.hasLateralRTEs {
+        return Ok(());
+    }
+    for rti in 1..run.root.simple_rel_array_size as usize {
+        let Some(rel) = run.root.simple_rel_array[rti] else { continue };
+        debug_assert_eq!(run.root.rel(rel).relid as usize, rti);
+        if run.root.rel(rel).reloptkind != types_pathnodes::RELOPT_BASEREL {
+            continue;
+        }
+        extract_lateral_references(run, rel, rti)?;
+    }
+    Ok(())
+}
+
+fn extract_lateral_references<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel: types_pathnodes::RelId,
+    rtindex: usize,
+) -> PgResult<()> {
+    use types_nodes::parsenodes::RTEKind;
+    let mcx = run.mcx;
+    let rte = run.rte(rtindex);
+    if !rte.lateral {
+        return Ok(());
+    }
+    let mut vars: types_nodes::NodeList<'mcx> = types_nodes::NodeList::nil();
+    let mut levelsup = 0;
+    match rte.rtekind {
+        RTEKind::RTE_SUBQUERY => {
+            levelsup = 1;
+            let q = rte.subquery.expect("RTE_SUBQUERY has a subquery");
+            let qnode = Node::mk(mcx, crate::subselect::query_cells_copy(mcx, q)?)?;
+            vars = vars::pull_vars_of_level(mcx, qnode, 1)?;
+        }
+        RTEKind::RTE_FUNCTION => {
+            for f in &rte.functions {
+                vars.concat(mcx, &vars::pull_vars_of_level(mcx, f, 0)?)?;
+            }
+        }
+        RTEKind::RTE_VALUES => {
+            for l in &rte.values_lists {
+                vars.concat(mcx, &vars::pull_vars_of_level(mcx, l, 0)?)?;
+            }
+        }
+        other => panic!("extract_lateral_references (initsplan.c): {other:?} lateral RTE"),
+    }
+    if vars.is_nil() {
+        return Ok(());
+    }
+    let mut newvars: PgVec<'mcx, Node<'mcx>> = PgVec::new_in(mcx);
+    for node in &vars {
+        let v = node.as_var().expect("pull_vars_of_level returns Vars (PHVs are loud)");
+        if levelsup != 0 {
+            let nv = types_nodes::primnodes::Var {
+                varlevelsup: 0,
+                varnullingrels: v.varnullingrels.clone_in(mcx)?,
+                ..*v
+            };
+            newvars.push(Node::mk(mcx, nv)?);
+        } else {
+            newvars.push(node);
+        }
+    }
+    let where_needed = relids_singleton(mcx, rtindex as u32);
+    add_vars_to_targetlist(run, &newvars, &where_needed)?;
+    let mut ids: PgVec<'mcx, types_pathnodes::NodeId> = PgVec::new_in(mcx);
+    for &n in newvars.iter() {
+        ids.push(run.intern_expr(n));
+    }
+    run.root.rel_mut(rel).lateral_vars = ids;
+    Ok(())
+}
+
+// rebuild_lateral_attr_needed (initsplan.c): attr_needed bits only, after
+// join removal.
+pub fn rebuild_lateral_attr_needed(run: &mut PlannerRun<'_>) -> PgResult<()> {
+    if !run.root.hasLateralRTEs {
+        return Ok(());
+    }
+    let mcx = run.mcx;
+    for rti in 1..run.root.simple_rel_array_size as usize {
+        let Some(rel) = run.root.simple_rel_array[rti] else { continue };
+        if run.root.rel(rel).reloptkind != types_pathnodes::RELOPT_BASEREL {
+            continue;
+        }
+        if run.root.rel(rel).lateral_vars.is_empty() {
+            continue;
+        }
+        let mut nodes: PgVec<'_, Node<'_>> = PgVec::new_in(mcx);
+        for i in 0..run.root.rel(rel).lateral_vars.len() {
+            let id = run.root.rel(rel).lateral_vars[i];
+            nodes.push(*run.root.expr_node(id));
+        }
+        let where_needed = relids_singleton(mcx, rti as u32);
+        add_vars_to_attr_needed(run, &nodes, &where_needed);
+    }
+    Ok(())
+}
+
+// create_lateral_join_info (initsplan.c); the PlaceHolderVar legs are dead
+// (no PHVs are ever created on this lane, asserted by the caller).
+pub fn create_lateral_join_info(run: &mut PlannerRun<'_>) -> PgResult<()> {
+    if !run.root.hasLateralRTEs {
+        return Ok(());
+    }
+    debug_assert!(run.root.placeholdersFrozen);
+    debug_assert!(run.root.placeholder_list.is_empty());
+    let mcx = run.mcx;
+    let mut found_laterals = false;
+    let size = run.root.simple_rel_array_size as usize;
+    for rti in 1..size {
+        let Some(rel) = run.root.simple_rel_array[rti] else { continue };
+        debug_assert_eq!(run.root.rel(rel).relid as usize, rti);
+        if run.root.rel(rel).reloptkind != types_pathnodes::RELOPT_BASEREL {
+            continue;
+        }
+        let mut lateral_relids: types_pathnodes::Relids<'_> = None;
+        for i in 0..run.root.rel(rel).lateral_vars.len() {
+            let id = run.root.rel(rel).lateral_vars[i];
+            let v = run.root.expr_node(id).as_var().expect("lateral_vars hold Vars");
+            found_laterals = true;
+            lateral_relids = relids_add_member(mcx, &lateral_relids, v.varno as u32);
+        }
+        run.root.rel_mut(rel).direct_lateral_relids = relids_copy(mcx, &lateral_relids);
+        run.root.rel_mut(rel).lateral_relids = lateral_relids;
+    }
+
+    if !found_laterals {
+        run.root.hasLateralRTEs = false;
+        return Ok(());
+    }
+
+    // Warshall transitive closure over lateral_relids.
+    for rti in 1..size {
+        let Some(rel) = run.root.simple_rel_array[rti] else { continue };
+        if run.root.rel(rel).reloptkind != types_pathnodes::RELOPT_BASEREL {
+            continue;
+        }
+        let outer = relids_copy(mcx, &run.root.rel(rel).lateral_relids);
+        if relids_is_empty(&outer) {
+            continue;
+        }
+        for rti2 in 1..size {
+            let Some(rel2) = run.root.simple_rel_array[rti2] else { continue };
+            if run.root.rel(rel2).reloptkind != types_pathnodes::RELOPT_BASEREL {
+                continue;
+            }
+            if relids_is_member(rti as i32, &run.root.rel(rel2).lateral_relids) {
+                let cur = run.root.rel_mut(rel2).lateral_relids.take();
+                run.root.rel_mut(rel2).lateral_relids = relids_union(mcx, &cur, &outer);
+            }
+        }
+    }
+
+    // Inverse mapping: lateral_referencers.
+    for rti in 1..size {
+        let Some(rel) = run.root.simple_rel_array[rti] else { continue };
+        if run.root.rel(rel).reloptkind != types_pathnodes::RELOPT_BASEREL {
+            continue;
+        }
+        let lateral_relids = relids_copy(mcx, &run.root.rel(rel).lateral_relids);
+        if relids_is_empty(&lateral_relids) {
+            continue;
+        }
+        debug_assert!(!relids_is_member(rti as i32, &lateral_relids));
+        for rti2 in relids_members(&lateral_relids) {
+            let Some(rel2) = run.root.simple_rel_array[rti2 as usize] else {
+                continue; // an outer join in the set
+            };
+            debug_assert_eq!(
+                run.root.rel(rel2).reloptkind,
+                types_pathnodes::RELOPT_BASEREL
+            );
+            let cur = run.root.rel_mut(rel2).lateral_referencers.take();
+            run.root.rel_mut(rel2).lateral_referencers =
+                relids_add_member(mcx, &cur, rti as u32);
+        }
+    }
+    Ok(())
+}
+
 // deconstruct_jointree (initsplan.c) over RangeTblRefs and INNER/LEFT/SEMI/
 // ANTI JoinExprs (RIGHT was flipped by reduce_outer_joins; FULL is loud
 // upstream). C's three phases map to: recurse (relids/joinlist/JtItems in
@@ -251,11 +469,50 @@ pub fn deconstruct_jointree<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResult<PgVec<
     items.push(JtItem::Plain { quals: f.quals, qualscope, jdomain: 0 });
 
     let mut oj_postponed: PgVec<'mcx, (usize, PgVec<'mcx, Node<'mcx>>)> = PgVec::new_in(mcx);
-    for item in &items {
+    // Per-JtItem quals postponed by children for carrying lateral references
+    // (C: jtitem->lateral_clauses); ancestors sit later in the post-order.
+    let mut lateral_pending: PgVec<'mcx, PgVec<'mcx, Node<'mcx>>> = PgVec::new_in(mcx);
+    for _ in 0..items.len() {
+        lateral_pending.push(PgVec::new_in(mcx));
+    }
+    for idx in 0..items.len() {
+        let pending = core::mem::replace(&mut lateral_pending[idx], PgVec::new_in(mcx));
+        if !pending.is_empty() {
+            let (qualscope, jdomain) = match &items[idx] {
+                JtItem::Plain { qualscope, jdomain, .. }
+                | JtItem::Sj { qualscope, jdomain, .. } => {
+                    (relids_copy(mcx, qualscope), *jdomain)
+                }
+            };
+            for clause in pending {
+                distribute_qual_to_rels(
+                    run,
+                    clause,
+                    &qualscope,
+                    &None,
+                    &None,
+                    None,
+                    jdomain,
+                    None,
+                    Some((&items, idx)),
+                    &mut lateral_pending,
+                )?;
+            }
+        }
+        let item = &items[idx];
         match item {
             JtItem::Plain { quals, qualscope, jdomain } => {
                 distribute_quals_to_rels(
-                    run, *quals, qualscope, &None, &None, None, *jdomain, None,
+                    run,
+                    *quals,
+                    qualscope,
+                    &None,
+                    &None,
+                    None,
+                    *jdomain,
+                    None,
+                    Some((&items, idx)),
+                    &mut lateral_pending,
                 )?;
             }
             JtItem::Sj {
@@ -308,6 +565,8 @@ pub fn deconstruct_jointree<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResult<PgVec<
                     Some(&sjinfo),
                     *jdomain,
                     if postpone { Some(&mut postponed) } else { None },
+                    Some((&items, idx)),
+                    &mut lateral_pending,
                 )?;
                 let sj_index = run.root.join_info_list.len();
                 run.root.join_info_list.push(sjinfo);
@@ -338,6 +597,8 @@ pub fn deconstruct_jointree<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResult<PgVec<
                 Some(&sjinfo),
                 0,
                 None,
+                None,
+                &mut lateral_pending,
             )?;
         }
     }
@@ -355,6 +616,8 @@ fn distribute_quals_to_rels<'mcx>(
     sjinfo: Option<&SpecialJoinInfo<'mcx>>,
     jdomain: usize,
     mut postponed: Option<&mut PgVec<'mcx, Node<'mcx>>>,
+    jt: Option<(&PgVec<'mcx, JtItem<'mcx>>, usize)>,
+    lateral_pending: &mut PgVec<'mcx, PgVec<'mcx, Node<'mcx>>>,
 ) -> PgResult<()> {
     let Some(quals) = quals else { return Ok(()) };
     let list = quals.as_list().expect("preprocessed quals are an implicit-AND list");
@@ -368,6 +631,8 @@ fn distribute_quals_to_rels<'mcx>(
             sjinfo,
             jdomain,
             postponed.as_deref_mut(),
+            jt,
+            lateral_pending,
         )?;
     }
     Ok(())
@@ -936,8 +1201,8 @@ pub fn reconsider_outer_join_clauses(run: &mut PlannerRun<'_>) -> PgResult<()> {
     Ok(())
 }
 
-// distribute_qual_to_rels (initsplan.c); lateral postponement is loud, the
-// EC detour is the documented divergence (see reconsider_outer_join_clauses).
+// distribute_qual_to_rels (initsplan.c); the EC detour is the documented
+// divergence (see reconsider_outer_join_clauses).
 #[allow(clippy::too_many_arguments)]
 fn distribute_qual_to_rels<'mcx>(
     run: &mut PlannerRun<'mcx>,
@@ -948,13 +1213,34 @@ fn distribute_qual_to_rels<'mcx>(
     sjinfo: Option<&SpecialJoinInfo<'mcx>>,
     jdomain: usize,
     postponed: Option<&mut PgVec<'mcx, Node<'mcx>>>,
+    jt: Option<(&PgVec<'mcx, JtItem<'mcx>>, usize)>,
+    lateral_pending: &mut PgVec<'mcx, PgVec<'mcx, Node<'mcx>>>,
 ) -> PgResult<()> {
     debug_assert!(clause.node_tag() != NodeTag::T_List);
     let mut relids = pull_varnos_relids(run, clause)?;
-    assert!(
-        crate::relnode::relids_is_subset(&relids, qualscope),
-        "distribute_qual_to_rels (initsplan.c): lateral reference; M2 lane"
-    );
+    if !crate::relnode::relids_is_subset(&relids, qualscope) {
+        // A qual pulled up from a LATERAL subquery can reference rels outside
+        // its syntactic scope; attach it to the nearest enclosing jointree
+        // level whose scope covers every referenced rel.
+        assert!(
+            run.root.hasLateralRTEs,
+            "distribute_qual_to_rels (initsplan.c): qual outside qualscope without \
+             lateral RTEs"
+        );
+        assert!(sjinfo.is_none(), "mustn't postpone lateral qual past outer join");
+        let (items, idx) =
+            jt.expect("lateral qual postponement outside deconstruct_jointree");
+        for pidx in idx + 1..items.len() {
+            let pscope = match &items[pidx] {
+                JtItem::Plain { qualscope, .. } | JtItem::Sj { qualscope, .. } => qualscope,
+            };
+            if crate::relnode::relids_is_subset(&relids, pscope) {
+                lateral_pending[pidx].push(clause);
+                return Ok(());
+            }
+        }
+        panic!("failed to postpone qual containing lateral reference");
+    }
     assert!(
         ojscope.is_none() || relids_is_subset(&relids, ojscope),
         "JOIN qualification cannot refer to other relations"
@@ -1233,13 +1519,18 @@ pub fn distribute_restrictinfo_to_rels(run: &mut PlannerRun<'_>, rinfo: RinfoId)
     Ok(())
 }
 
-// add_base_clause_to_rel (initsplan.c), non-inherited arm.
+// add_base_clause_to_rel (initsplan.c:3003); the NullTest shortcuts are only
+// valid for non-inheritance parents, except partitioned tables where a
+// constant qual must hold for every partition too.
 fn add_base_clause_to_rel(run: &mut PlannerRun<'_>, relid: i32, rinfo: RinfoId) -> PgResult<()> {
-    debug_assert!(!run.rte(relid as usize).inh);
-    if restriction_is_always_true(run, rinfo) {
+    let rte = run.rte(relid as usize);
+    let apply_shortcuts =
+        !rte.inh || rte.relkind == ::types_rel::RELKIND_PARTITIONED_TABLE;
+    if apply_shortcuts && restriction_is_always_true(run, rinfo) {
         return Ok(());
     }
-    let rinfo = substitute_false_if_always_false(run, rinfo)?;
+    let rinfo =
+        if apply_shortcuts { substitute_false_if_always_false(run, rinfo)? } else { rinfo };
     let rel_id = find_base_rel(&run.root, relid);
     let security_level = run.root.rinfo(rinfo).security_level;
     let rel = run.root.rel_mut(rel_id);
@@ -1251,11 +1542,11 @@ fn add_base_clause_to_rel(run: &mut PlannerRun<'_>, relid: i32, rinfo: RinfoId) 
 // restriction_is_always_true / _false (initsplan.c), NullTest leg only: the
 // OR leg reads orclause sub-RestrictInfos, which stay None here (documented
 // make_restrictinfo divergence).
-fn restriction_is_always_true(run: &PlannerRun<'_>, rinfo: RinfoId) -> bool {
+pub(crate) fn restriction_is_always_true(run: &PlannerRun<'_>, rinfo: RinfoId) -> bool {
     restriction_nulltest_verdict(run, rinfo, types_nodes::primnodes::NullTestType::IS_NOT_NULL)
 }
 
-fn restriction_is_always_false(run: &PlannerRun<'_>, rinfo: RinfoId) -> bool {
+pub(crate) fn restriction_is_always_false(run: &PlannerRun<'_>, rinfo: RinfoId) -> bool {
     restriction_nulltest_verdict(run, rinfo, types_nodes::primnodes::NullTestType::IS_NULL)
 }
 

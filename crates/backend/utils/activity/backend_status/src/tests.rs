@@ -4,19 +4,75 @@ use super::*;
 
 static TEST_LOCK: Mutex<()> = Mutex::new(());
 
+const MAX_CONNECTIONS: i32 = 16;
+const MAX_WORKER_PROCESSES: i32 = 2;
+const NUM_SPECIAL: i32 = types_storage::storage::NUM_SPECIAL_WORKER_PROCS;
+const MAX_BACKENDS: i32 = MAX_CONNECTIONS + 3 + MAX_WORKER_PROCESSES + 2 + NUM_SPECIAL;
+
+fn set_globals() {
+    g::SetMaxConnections(MAX_CONNECTIONS);
+    g::set_max_worker_processes(MAX_WORKER_PROCESSES);
+    g::SetMaxBackends(MAX_BACKENDS);
+}
+
 fn bringup() -> MutexGuard<'static, ()> {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         init_seams();
+        shmem::init_seams();
         ipc_seams::on_shmem_exit::set(|_cb, _arg| {});
         guc_seams::set_config_option_internal_dynamic_default::set(|_, _| Ok(()));
         superuser_seams::superuser::set(|| Ok(true));
-        g::SetMaxBackends(8);
+        pg_sema_seams::pg_semaphore_create::set(|_| {});
+        pg_sema_seams::pg_semaphore_reset::set(|_| {});
+        pg_sema_seams::pg_semaphore_lock::set(|_| {});
+        pg_sema_seams::pg_semaphore_unlock::set(|_| {});
+        s_lock_seams::perform_spin_delay::set(|_| std::thread::yield_now());
+        s_lock_seams::finish_spin_delay::set(|_| {});
+        s_lock_seams::set_spins_per_delay::set(|_| {});
+        s_lock_seams::update_spins_per_delay::set(|v| v);
+        latch_seams::own_latch::set(|_| {});
+        latch_seams::disown_latch::set(|_| {});
+        latch_seams::set_latch::set(|_| {});
+        miscinit_seams::switch_to_shared_latch::set(|| {});
+        miscinit_seams::switch_back_to_local_latch::set(|| {});
+        waitevent_seams::pgstat_set_wait_event_storage::set(|_| {});
+        waitevent_seams::pgstat_report_wait_start::set(|_| {});
+        waitevent_seams::pgstat_report_wait_end::set(|| {});
+        waitevent_seams::pgstat_reset_wait_event_storage::set(|| {});
+        deadlock_seams::init_dead_lock_checking::set(|| Ok(()));
+        pmsignal_seams::register_postmaster_child_active::set(|| {});
+        syncrep_seams::sync_rep_cleanup_at_proc_exit::set(|| {});
+        condition_variable_seams::condition_variable_cancel_sleep::set(|| false);
+        autovacuum_seams::wake_autovacuum_launcher::set(|| {});
+        lock_seams::abort_strong_lock_acquire::set(|| {});
+        lock_seams::get_awaited_lock_hashcode::set(|| None);
+        lock_seams::lock_release_all::set(|_, _| Ok(()));
+        timeout_seams::disable_timeouts::set(|_| {});
+        set_globals();
+        g::SetMyProcPid(4242);
+        lwlock::CreateLWLocks(false).unwrap();
+        lmgr_proc::init_seams();
+        lmgr_proc::InitProcGlobal(&lmgr_proc::ProcGlobalConfig {
+            autovacuum_worker_slots: 3,
+            max_wal_senders: 2,
+            max_prepared_xacts: 2,
+            fastpath_lock_groups_per_backend: 1,
+        });
+        procarray::ProcArrayShmemInit();
         guc_tables::vars::pgstat_track_activities.write(true);
         backend_status_seams::backend_status_shmem_init::call().unwrap();
     });
-    g::SetMaxBackends(8);
+    set_globals();
     TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn my_pgproc(pid: i32) -> ProcNumber {
+    g::SetMyProcPid(pid);
+    if lmgr_proc::MyProc().is_none() {
+        lmgr_proc::InitProcess(BackendType::Backend).unwrap();
+    }
+    lmgr_proc::MyProc().unwrap()
 }
 
 fn start_backend(procno: ProcNumber, pid: i32) {
@@ -160,7 +216,7 @@ fn reset_after_crash_restores_boot_image() {
 fn cross_thread_entry_is_readable() {
     let _g = bringup();
     let handle = std::thread::spawn(|| {
-        g::SetMaxBackends(8);
+        set_globals();
         start_backend(4, 900005);
         backend_status_seams::pgstat_report_activity::call(
             BackendState::STATE_RUNNING,
@@ -174,4 +230,61 @@ fn cross_thread_entry_is_readable() {
         pgstat_get_backend_current_activity(900005, false).unwrap(),
         "CROSS THREAD QUERY"
     );
+}
+
+#[test]
+fn local_snapshot_reads_entries_with_transaction_ids() {
+    let _g = bringup();
+    let me = my_pgproc(910001);
+    start_backend(me, 910001);
+    backend_status_seams::pgstat_report_activity::call(
+        BackendState::STATE_RUNNING,
+        Some("SELECT 42"),
+    );
+    pgstat_report_appname("snaptest");
+    let proc = lmgr_proc::GetPGProcByNumber(me);
+    proc.xid.value.store(555, Relaxed);
+    proc.xmin.value.store(550, Relaxed);
+
+    pgstat_clear_backend_status_snapshot();
+    let n = pgstat_fetch_stat_numbackends();
+    assert!(n >= 1);
+
+    let mut mine = None;
+    let mut prev = INVALID_PROC_NUMBER;
+    for i in 1..=n {
+        let e = pgstat_get_local_beentry_by_index(i).unwrap();
+        assert!(e.proc_number > prev);
+        prev = e.proc_number;
+        assert!(e.st_procpid > 0);
+        if e.st_procpid == 910001 {
+            mine = Some(e);
+        }
+    }
+    let e = mine.expect("own entry in snapshot");
+    assert_eq!(e.proc_number, me);
+    assert_eq!(e.st_backendType, BackendType::Backend);
+    assert_eq!(e.st_state, BackendState::STATE_RUNNING);
+    assert_eq!(e.st_activity_raw, "SELECT 42");
+    assert_eq!(e.st_appname, "snaptest");
+    assert_eq!(e.st_proc_start_timestamp, 777);
+    assert_eq!(e.backend_xid, 555);
+    assert_eq!(e.backend_xmin, 550);
+    assert_eq!(e.backend_subxact_count, 0);
+    assert!(!e.backend_subxact_overflowed);
+
+    assert!(pgstat_get_local_beentry_by_index(0).is_none());
+    assert!(pgstat_get_local_beentry_by_index(n + 1).is_none());
+    let by_procno = pgstat_get_beentry_by_proc_number(me).unwrap();
+    assert_eq!(by_procno.st_procpid, 910001);
+    assert!(pgstat_get_beentry_by_proc_number(INVALID_PROC_NUMBER).is_none());
+
+    proc.xid.value.store(0, Relaxed);
+    proc.xmin.value.store(0, Relaxed);
+    pgstat_beshutdown_hook(0, 0);
+    // The snapshot is stable until explicitly cleared.
+    assert!(pgstat_get_beentry_by_proc_number(me).is_some());
+    pgstat_clear_backend_status_snapshot();
+    assert!(pgstat_get_beentry_by_proc_number(me).is_none());
+    pgstat_clear_backend_status_snapshot();
 }

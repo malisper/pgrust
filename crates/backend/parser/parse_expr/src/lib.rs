@@ -1,6 +1,5 @@
 #![allow(non_snake_case)]
 
-mod node_funcs;
 #[cfg(test)]
 mod tests;
 
@@ -13,7 +12,7 @@ use types_error::PgResult;
 use types_nodes::rawnodes::{A_Expr, A_Expr_Kind};
 use types_nodes::{Node, NodeTag};
 
-pub use node_funcs::{
+pub use nodes_core::node_funcs::{
     expr_collation, expr_is_null_constant, expr_location, expr_location_list, expr_type,
     expr_typmod,
 };
@@ -76,14 +75,22 @@ pub fn transformExprRecurse<'mcx>(
                 | A_Expr_Kind::AEXPR_NOT_BETWEEN_SYM => {
                     transformAExprBetween(mcx, pstate, a)
                 }
+                A_Expr_Kind::AEXPR_DISTINCT | A_Expr_Kind::AEXPR_NOT_DISTINCT => {
+                    transformAExprDistinct(mcx, pstate, a)
+                }
+                A_Expr_Kind::AEXPR_OP_ANY => transformAExprOpAny(mcx, pstate, a),
+                A_Expr_Kind::AEXPR_OP_ALL => transformAExprOpAll(mcx, pstate, a),
                 A_Expr_Kind::AEXPR_IN => transformAExprIn(mcx, pstate, a),
                 other => panic!(
                     "transformExprRecurse (parse_expr.c): A_Expr kind {other:?} arm \
-                     (DISTINCT/NULLIF/ANY/ALL) unported — unit backend-parser-expr"
+                     (NULLIF) unported — unit backend-parser-expr"
                 ),
             }
         }
+        NodeTag::T_BooleanTest => transformBooleanTest(mcx, pstate, expr),
+        NodeTag::T_RowExpr => transformRowExpr(mcx, pstate, expr),
         NodeTag::T_TypeCast => transformTypeCast(mcx, pstate, expr),
+        NodeTag::T_CollateClause => transformCollateClause(mcx, pstate, expr),
         NodeTag::T_BoolExpr => transformBoolExpr(mcx, pstate, expr),
         NodeTag::T_CaseExpr => transformCaseExpr(mcx, pstate, expr),
         NodeTag::T_CoalesceExpr => transformCoalesceExpr(mcx, pstate, expr),
@@ -146,11 +153,22 @@ fn transformAExprOp<'mcx>(
         return transformExprRecurse(mcx, pstate, n);
     }
 
-    if lexpr.is_some_and(|n| n.node_tag() == NodeTag::T_RowExpr) {
+    if lexpr.is_some_and(|n| n.node_tag() == NodeTag::T_RowExpr)
+        && rexpr.is_some_and(|n| n.node_tag() == NodeTag::T_SubLink)
+    {
         panic!(
-            "transformAExprOp (parse_expr.c): RowExpr operand arms \
-             (make_row_comparison_op / ROWCOMPARE sublink) unported — unit backend-parser-expr"
+            "transformAExprOp (parse_expr.c): ROW() op (SELECT...) ROWCOMPARE sublink \
+             unported — unit backend-parser-expr"
         );
+    }
+    if lexpr.is_some_and(|n| n.node_tag() == NodeTag::T_RowExpr)
+        && rexpr.is_some_and(|n| n.node_tag() == NodeTag::T_RowExpr)
+    {
+        let lrow = transformExprRecurse(mcx, pstate, lexpr.expect("checked above"))?;
+        let rrow = transformExprRecurse(mcx, pstate, rexpr.expect("checked above"))?;
+        let largs = &lrow.as_row_expr().expect("transformed RowExpr").args;
+        let rargs = &rrow.as_row_expr().expect("transformed RowExpr").args;
+        return make_row_comparison_op_lists(mcx, pstate, &a.name, largs, rargs, a.location);
     }
 
     let last_srf = pstate.p_last_srf;
@@ -166,6 +184,46 @@ fn transformAExprOp<'mcx>(
     let ltypeId = lexpr.map_or(types_core::InvalidOid, expr_type);
     let rtypeId = rexpr.map_or(types_core::InvalidOid, expr_type);
     parse_oper::make_op(mcx, pstate, &a.name, lexpr, rexpr, ltypeId, rtypeId, last_srf, a.location)
+}
+
+fn transformAExprOpAny<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    a: &A_Expr<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    let lexpr = transformExprRecurse(mcx, pstate, a.lexpr.expect("AEXPR_OP_ANY lexpr"))?;
+    let rexpr = transformExprRecurse(mcx, pstate, a.rexpr.expect("AEXPR_OP_ANY rexpr"))?;
+    parse_oper::make_scalar_array_op(
+        mcx,
+        pstate,
+        &a.name,
+        true,
+        lexpr,
+        rexpr,
+        expr_type(lexpr),
+        expr_type(rexpr),
+        a.location,
+    )
+}
+
+fn transformAExprOpAll<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    a: &A_Expr<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    let lexpr = transformExprRecurse(mcx, pstate, a.lexpr.expect("AEXPR_OP_ALL lexpr"))?;
+    let rexpr = transformExprRecurse(mcx, pstate, a.rexpr.expect("AEXPR_OP_ALL rexpr"))?;
+    parse_oper::make_scalar_array_op(
+        mcx,
+        pstate,
+        &a.name,
+        false,
+        lexpr,
+        rexpr,
+        expr_type(lexpr),
+        expr_type(rexpr),
+        a.location,
+    )
 }
 
 fn transformAExprIn<'mcx>(
@@ -265,25 +323,25 @@ fn transformAExprIn<'mcx>(
     }
 
     for r in &rexprs {
-        if lexpr.node_tag() == NodeTag::T_RowExpr && r.node_tag() == NodeTag::T_RowExpr {
-            panic!(
-                "transformAExprIn (parse_expr.c): ROW() IN (ROW(), ...) arm \
-                 (make_row_comparison_op) unported — unit backend-parser-expr"
-            );
-        }
         // C copyObject's lexpr per comparison; the sealed lexpr subtree is
         // shared instead (parse-phase walks only re-write identical values).
-        let cmp = parse_oper::make_op(
-            mcx,
-            pstate,
-            &a.name,
-            Some(lexpr),
-            Some(r),
-            expr_type(lexpr),
-            expr_type(r),
-            pstate.p_last_srf,
-            a.location,
-        )?;
+        let cmp = if lexpr.node_tag() == NodeTag::T_RowExpr && r.node_tag() == NodeTag::T_RowExpr {
+            let largs = &lexpr.as_row_expr().expect("transformed RowExpr").args;
+            let rargs = &r.as_row_expr().expect("transformed RowExpr").args;
+            make_row_comparison_op_lists(mcx, pstate, &a.name, largs, rargs, a.location)?
+        } else {
+            parse_oper::make_op(
+                mcx,
+                pstate,
+                &a.name,
+                Some(lexpr),
+                Some(r),
+                expr_type(lexpr),
+                expr_type(r),
+                pstate.p_last_srf,
+                a.location,
+            )?
+        };
         let cmp =
             coerce::coerce_to_boolean(mcx, pstate, cmp, expr_type(cmp), expr_location(cmp), "IN")?;
         result = Some(match result {
@@ -381,6 +439,48 @@ fn transformTypeCast<'mcx>(
 }
 
 #[cold]
+// transformCollateClause (parse_expr.c) + LookupCollation (parse_type.c);
+// the errposition callback collapses into direct positions on the errors.
+fn transformCollateClause<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    expr: Node<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    use types_core::catalog::UNKNOWNOID;
+    use types_nodes::primnodes::CollateExpr;
+
+    let c = expr.as_collate_clause().unwrap();
+    let arg = transformExprRecurse(mcx, pstate, c.arg.expect("CollateClause arg"))?;
+
+    let argtype = expr_type(arg);
+    if !lsyscache::type_is_collatable(argtype)? && argtype != UNKNOWNOID {
+        return Err(collations_not_supported(pstate, argtype, c.location));
+    }
+
+    let coll_oid = catalog_namespace::get_collation_oid_list(&c.collname, false)
+        .map_err(|e| collation_lookup_position(pstate, e, c.location))?;
+
+    Node::mk(mcx, CollateExpr { arg, collOid: coll_oid, location: c.location })
+}
+
+// C: setup_parser_errposition_callback around get_collation_oid.
+#[cold]
+#[inline(never)]
+fn collation_lookup_position(
+    pstate: &ParseState<'_, '_>,
+    e: Box<types_error::PgError>,
+    location: types_core::ParseLoc,
+) -> Box<types_error::PgError> {
+    if e.cursor_position().is_some() {
+        return e;
+    }
+    Box::new((*e).with_cursor_position(parser_small1::parser_errposition(
+        pstate,
+        location,
+        mbutils::GetDatabaseEncoding(),
+    )))
+}
+
 fn cannot_cast_error(
     pstate: &ParseState<'_, '_>,
     input_type: types_core::Oid,
@@ -516,6 +616,240 @@ fn transformAExprBetween<'mcx>(
         other => panic!("unrecognized A_Expr kind: {other:?}"),
     };
     transformExprRecurse(mcx, pstate, result)
+}
+
+fn transformAExprDistinct<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    a: &A_Expr<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    if a.rexpr.is_some_and(expr_is_null_constant) {
+        return make_nulltest_from_distinct(mcx, pstate, a, a.lexpr);
+    }
+    if a.lexpr.is_some_and(expr_is_null_constant) {
+        return make_nulltest_from_distinct(mcx, pstate, a, a.rexpr);
+    }
+
+    let lexpr = match a.lexpr {
+        Some(l) => Some(transformExprRecurse(mcx, pstate, l)?),
+        None => None,
+    };
+    let rexpr = match a.rexpr {
+        Some(r) => Some(transformExprRecurse(mcx, pstate, r)?),
+        None => None,
+    };
+
+    if lexpr.is_some_and(|n| n.node_tag() == NodeTag::T_RowExpr)
+        && rexpr.is_some_and(|n| n.node_tag() == NodeTag::T_RowExpr)
+    {
+        panic!(
+            "transformAExprDistinct (parse_expr.c): make_row_distinct_op (ROW IS \
+             DISTINCT FROM ROW) unported — unit backend-parser-expr"
+        );
+    }
+
+    let result = make_distinct_op(mcx, pstate, &a.name, lexpr, rexpr, a.location)?;
+
+    if a.kind == A_Expr_Kind::AEXPR_NOT_DISTINCT {
+        return Node::mk(
+            mcx,
+            types_nodes::BoolExpr {
+                boolop: types_nodes::BoolExprType::NOT_EXPR,
+                args: types_nodes::NodeList::make1(mcx, result)?,
+                location: a.location,
+            },
+        );
+    }
+    Ok(result)
+}
+
+fn make_distinct_op<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    opname: &types_nodes::NodeList<'mcx>,
+    ltree: Option<Node<'mcx>>,
+    rtree: Option<Node<'mcx>>,
+    location: types_core::ParseLoc,
+) -> PgResult<Node<'mcx>> {
+    let last_srf = pstate.p_last_srf;
+    let ltype = ltree.map_or(types_core::InvalidOid, expr_type);
+    let rtype = rtree.map_or(types_core::InvalidOid, expr_type);
+    let result =
+        parse_oper::make_op(mcx, pstate, opname, ltree, rtree, ltype, rtype, last_srf, location)?;
+    let op = result.as_op_expr().expect("make_op returns an OpExpr");
+    if op.opresulttype != types_core::catalog::BOOLOID {
+        return Err(distinct_requires_boolean_eq(pstate, location));
+    }
+    // C NodeSetTag(result, T_DistinctExpr): same struct, new tag. make_op's
+    // retset panic covers C's opretset ereport leg.
+    Node::mk(
+        mcx,
+        types_nodes::DistinctExpr {
+            opno: op.opno,
+            opfuncid: op.opfuncid,
+            opresulttype: op.opresulttype,
+            opretset: op.opretset,
+            opcollid: op.opcollid,
+            inputcollid: op.inputcollid,
+            // Shallow list copy; C retags the same node in place.
+            args: op.args.clone_in(mcx)?,
+            location: op.location,
+        },
+    )
+}
+
+fn make_nulltest_from_distinct<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    distincta: &A_Expr<'mcx>,
+    arg: Option<Node<'mcx>>,
+) -> PgResult<Node<'mcx>> {
+    let arg = match arg {
+        Some(a) => Some(transformExprRecurse(mcx, pstate, a)?),
+        None => None,
+    };
+    let t = if distincta.kind == A_Expr_Kind::AEXPR_NOT_DISTINCT {
+        types_nodes::primnodes::NullTestType::IS_NULL
+    } else {
+        types_nodes::primnodes::NullTestType::IS_NOT_NULL
+    };
+    Node::mk(
+        mcx,
+        types_nodes::primnodes::NullTest {
+            arg,
+            nulltesttype: t,
+            argisrow: false,
+            location: distincta.location,
+        },
+    )
+}
+
+fn transformBooleanTest<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    expr: Node<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    use types_nodes::BoolTestType;
+    let b = expr.as_boolean_test().unwrap();
+    let clausename = match b.booltesttype {
+        BoolTestType::IS_TRUE => "IS TRUE",
+        BoolTestType::IS_NOT_TRUE => "IS NOT TRUE",
+        BoolTestType::IS_FALSE => "IS FALSE",
+        BoolTestType::IS_NOT_FALSE => "IS NOT FALSE",
+        BoolTestType::IS_UNKNOWN => "IS UNKNOWN",
+        BoolTestType::IS_NOT_UNKNOWN => "IS NOT UNKNOWN",
+    };
+    let arg = transformExprRecurse(mcx, pstate, b.arg.expect("BooleanTest.arg"))?;
+    let arg =
+        coerce::coerce_to_boolean(mcx, pstate, arg, expr_type(arg), expr_location(arg), clausename)?;
+    Node::mk(
+        mcx,
+        types_nodes::BooleanTest {
+            arg: Some(arg),
+            booltesttype: b.booltesttype,
+            location: b.location,
+        },
+    )
+}
+
+fn transformRowExpr<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    expr: Node<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    let r = expr.as_row_expr().unwrap();
+    // C transformExpressionList(allowDefault=false): per-item transformExpr at
+    // the current p_expr_kind; the multiassign/DEFAULT legs are unreachable
+    // from the ported grammar arms.
+    let mut args = types_nodes::NodeList::nil();
+    for e in r.args.iter() {
+        args.lappend(mcx, transformExprRecurse(mcx, pstate, e)?)?;
+    }
+    if args.len() > types_tuple::htup::MaxTupleAttributeNumber as usize {
+        return Err(too_many_row_entries(pstate, r.location));
+    }
+    let mut colnames = types_nodes::NodeList::nil();
+    for fnum in 1..=args.len() {
+        let fname: &'mcx [u8] = mcx::slice_in(mcx, format!("f{fnum}").as_bytes())?.leak();
+        // SAFETY: "f{N}" is ASCII.
+        let fname = unsafe { core::str::from_utf8_unchecked(fname) };
+        colnames.lappend(mcx, Node::mk_string(mcx, fname)?)?;
+    }
+    Node::mk(
+        mcx,
+        types_nodes::RowExpr {
+            args,
+            row_typeid: types_core::catalog::RECORDOID,
+            row_format: types_nodes::CoercionForm::COERCE_IMPLICIT_CAST,
+            colnames,
+            location: r.location,
+        },
+    )
+}
+
+#[cold]
+fn distinct_requires_boolean_eq(
+    pstate: &ParseState<'_, '_>,
+    location: types_core::ParseLoc,
+) -> Box<types_error::PgError> {
+    use types_error::{ErrorLocation, ERRCODE_DATATYPE_MISMATCH, ERROR};
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_DATATYPE_MISMATCH)
+            .errmsg("IS DISTINCT FROM requires = operator to yield boolean".to_string())
+            .errposition(parser_small1::parser_errposition(
+                pstate,
+                location,
+                mbutils::GetDatabaseEncoding(),
+            ))
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_expr.c", 0, "make_distinct_op")),
+    )
+}
+
+#[cold]
+fn collations_not_supported(
+    pstate: &ParseState<'_, '_>,
+    argtype: types_core::Oid,
+    location: types_core::ParseLoc,
+) -> Box<types_error::PgError> {
+    use types_error::{ErrorLocation, ERRCODE_DATATYPE_MISMATCH, ERROR};
+    let tyname = format_type::format_type_be(argtype).unwrap_or_else(|_| argtype.to_string());
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_DATATYPE_MISMATCH)
+            .errmsg(format!("collations are not supported by type {tyname}"))
+            .errposition(parser_small1::parser_errposition(
+                pstate,
+                location,
+                mbutils::GetDatabaseEncoding(),
+            ))
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_expr.c", 0, "transformCollateClause")),
+    )
+}
+
+#[cold]
+fn too_many_row_entries(
+    pstate: &ParseState<'_, '_>,
+    location: types_core::ParseLoc,
+) -> Box<types_error::PgError> {
+    use types_error::{ErrorLocation, ERRCODE_TOO_MANY_COLUMNS, ERROR};
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_TOO_MANY_COLUMNS)
+            .errmsg(format!(
+                "ROW expressions can have at most {} entries",
+                types_tuple::htup::MaxTupleAttributeNumber
+            ))
+            .errposition(parser_small1::parser_errposition(
+                pstate,
+                location,
+                mbutils::GetDatabaseEncoding(),
+            ))
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_expr.c", 0, "transformRowExpr")),
+    )
 }
 
 fn transformBoolExpr<'mcx>(
@@ -877,6 +1211,89 @@ fn srf_not_allowed_in(
     )
 }
 
+// C transformWholeRowRef + makeWholeRowVar (parse_expr.c, makefuncs.c):
+// whole-row Var leg over RELATION/SUBQUERY RTEs; the JOIN USING alias
+// RowExpr expansion and FUNCTION/VALUES/CTE rowtypes are loud.
+fn transformWholeRowRef<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    nsitem: &parser_small1::ParseNamespaceItem<'mcx>,
+    sublevels_up: i32,
+    location: types_core::ParseLoc,
+) -> PgResult<Node<'mcx>> {
+    use types_core::{InvalidOid, OidIsValid};
+    use types_nodes::parsenodes::RTEKind;
+    use types_nodes::primnodes::VarReturningType;
+
+    let rte = nsitem.p_rte;
+    let is_eref = match rte.eref {
+        Some(eref) => core::ptr::eq(nsitem.p_names, eref),
+        None => false,
+    };
+    if !(is_eref || nsitem.p_returning_type != VarReturningType::VAR_RETURNING_DEFAULT) {
+        panic!(
+            "transformWholeRowRef (parse_expr.c): JOIN USING alias RowExpr expansion \
+             unported — unit backend-parser-expr"
+        );
+    }
+    let toid = match rte.rtekind {
+        RTEKind::RTE_RELATION => {
+            let toid = lsyscache::get_rel_type_id(rte.relid)?;
+            if !OidIsValid(toid) {
+                return Err(no_composite_type(mcx, rte.relid));
+            }
+            toid
+        }
+        RTEKind::RTE_SUBQUERY => {
+            if OidIsValid(rte.relid) {
+                let toid = lsyscache::get_rel_type_id(rte.relid)?;
+                if !OidIsValid(toid) {
+                    return Err(no_composite_type(mcx, rte.relid));
+                }
+                toid
+            } else {
+                debug_assert!(rte.functions.is_nil());
+                types_core::catalog::RECORDOID
+            }
+        }
+        other => panic!(
+            "makeWholeRowVar (makefuncs.c): {other:?} whole-row rowtype unported — \
+             unit backend-parser-expr"
+        ),
+    };
+    let mut var = types_nodes::Var {
+        varno: nsitem.p_rtindex,
+        varattno: 0,
+        vartype: toid,
+        vartypmod: -1,
+        varcollid: InvalidOid,
+        varnullingrels: types_nodes::Bitmapset::empty(),
+        varlevelsup: sublevels_up as types_core::Index,
+        varreturningtype: nsitem.p_returning_type,
+        varnosyn: nsitem.p_rtindex as types_core::Index,
+        varattnosyn: 0,
+        location,
+    };
+    parse_relation::markNullableIfNeeded(mcx, pstate, &mut var)?;
+    parse_relation::markVarForSelectPriv(mcx, pstate, &var)?;
+    Node::mk(mcx, var)
+}
+
+// C makeWholeRowVar's ereport carries no error position.
+#[cold]
+fn no_composite_type(mcx: Mcx<'_>, relid: types_core::Oid) -> Box<types_error::PgError> {
+    use types_error::{ErrorLocation, ERRCODE_WRONG_OBJECT_TYPE, ERROR};
+    let name = lsyscache::get_rel_name(mcx, relid).ok().flatten();
+    let name = name.as_ref().map(|s| s.as_str()).unwrap_or("");
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_WRONG_OBJECT_TYPE)
+            .errmsg(format!("relation \"{name}\" does not have a composite type"))
+            .into_error()
+            .with_error_location(ErrorLocation::new("makefuncs.c", 0, "makeWholeRowVar")),
+    )
+}
+
 // C's PreParseColumnRefHook/PostParseColumnRefHook slots are absent: the
 // closed ParseRefHookState set carries no columnref hooks yet (they arrive
 // with their installer units).
@@ -891,6 +1308,16 @@ fn transformColumnRef<'mcx>(
     debug_assert!(pstate.p_expr_kind != EXPR_KIND_NONE);
     if matches!(pstate.p_expr_kind, EXPR_KIND_COLUMN_DEFAULT | EXPR_KIND_PARTITION_BOUND) {
         return Err(column_ref_not_allowed(pstate, cref));
+    }
+
+    if let parser_small1::PreColumnRefHook::DomainValue(dv) = pstate.p_pre_columnref_hook {
+        if let [field1] = cref.fields.as_slice() {
+            if field1.as_string().map(|s| s.sval) == Some("value") {
+                let mut copy = dv;
+                copy.location = cref.location;
+                return Node::mk(mcx, copy);
+            }
+        }
     }
 
     let field_str = |n: Node<'mcx>| n.as_string().map(|s| s.sval);
@@ -916,11 +1343,13 @@ fn transformColumnRef<'mcx>(
                         Some(&mut levels_up),
                     )?;
                     match nsitem {
-                        Some(_) => panic!(
-                            "transformColumnRef (parse_expr.c): transformWholeRowRef \
-                             (PostQUEL bare-relation reference) unported — \
-                             unit backend-parser-expr"
-                        ),
+                        Some(nsitem) => Some(transformWholeRowRef(
+                            mcx,
+                            pstate,
+                            nsitem,
+                            levels_up,
+                            cref.location,
+                        )?),
                         None => None,
                     }
                 }
@@ -948,10 +1377,7 @@ fn transformColumnRef<'mcx>(
                 None => None,
                 Some(nsitem) => {
                     if field2.node_tag() == NodeTag::T_A_Star {
-                        panic!(
-                            "transformColumnRef (parse_expr.c): transformWholeRowRef \
-                             (rel.* outside a SELECT list) unported — unit backend-parser-expr"
-                        );
+                        return transformWholeRowRef(mcx, pstate, nsitem, levels_up, cref.location);
                     }
                     let name = field_str(*field2).expect("column field is a String");
                     colname = Some(name);
@@ -964,10 +1390,24 @@ fn transformColumnRef<'mcx>(
                         cref.location,
                     )? {
                         Some(node) => Some(node),
-                        None => panic!(
-                            "transformColumnRef (parse_expr.c): ParseFuncOrColumn \
-                             whole-row fallback unported — unit backend-parser-func"
-                        ),
+                        None => {
+                            // C tries a function call on the whole row
+                            // (attribute notation). Resolvable only when a
+                            // function of that name exists; otherwise C falls
+                            // through to errorMissingColumn.
+                            if !catalog_namespace::FuncnameGetCandidates(
+                                mcx, &[name], 1, false, false,
+                            )?
+                            .is_empty()
+                            {
+                                panic!(
+                                    "transformColumnRef (parse_expr.c): ParseFuncOrColumn \
+                                     whole-row attribute notation unported — \
+                                     unit backend-parser-func"
+                                );
+                            }
+                            None
+                        }
                     }
                 }
             }
@@ -981,6 +1421,9 @@ fn transformColumnRef<'mcx>(
     match node {
         Some(node) => Ok(node),
         None => {
+            if let Some(p) = sql_fn_post_column_ref(mcx, pstate, fields, cref.location)? {
+                return Ok(p);
+            }
             if relname.is_some() && colname.is_none() {
                 let rv = Node::mk_mut(
                     mcx,
@@ -1004,6 +1447,69 @@ fn transformColumnRef<'mcx>(
             }
         }
     }
+}
+
+
+// C sql_fn_post_column_ref (executor/functions.c): resolve unmatched column
+// references against SQL-function parameter names. Runs only after normal
+// column resolution missed, matching C's hook precedence.
+fn sql_fn_post_column_ref<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &ParseState<'_, 'mcx>,
+    fields: &[Node<'mcx>],
+    location: types_core::ParseLoc,
+) -> PgResult<Option<Node<'mcx>>> {
+    let Some(state) = pstate.p_ref_hook_state.as_sql_fn_params() else {
+        return Ok(None);
+    };
+    let mut nnames = fields.len();
+    if nnames == 0 || nnames > 3 {
+        return Ok(None);
+    }
+    let star = fields[nnames - 1].node_tag() == NodeTag::T_A_Star;
+    if star {
+        nnames -= 1;
+        if nnames == 0 {
+            return Ok(None);
+        }
+    }
+    let name = |i: usize| fields[i].as_string().map(|s| s.sval);
+    let resolve = |i: usize| {
+        name(i).and_then(|n| parser_small1::sql_fn_resolve_param_name(state, n))
+    };
+    let (param, has_subfield) = match nnames {
+        1 => (resolve(0), false),
+        2 => {
+            if name(0) == Some(state.fname) {
+                match resolve(1) {
+                    Some(p) => (Some(p), false),
+                    None => (resolve(0), true),
+                }
+            } else {
+                (resolve(0), true)
+            }
+        }
+        _ => {
+            if name(0) != Some(state.fname) {
+                return Ok(None);
+            }
+            (resolve(1), true)
+        }
+    };
+    let Some((paramno, ptype)) = param else { return Ok(None) };
+    if star {
+        panic!(
+            "sql_fn_post_column_ref (functions.c): whole-row reference to a SQL \
+             function parameter unported"
+        );
+    }
+    if has_subfield {
+        panic!(
+            "sql_fn_post_column_ref (functions.c): composite-parameter field \
+             selection (ParseFuncOrColumn on a Param) unported"
+        );
+    }
+    Ok(Some(parser_small1::sql_fn_make_param(mcx, paramno, ptype, location)?))
 }
 
 fn str_in<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<&'mcx str> {
@@ -1051,6 +1557,9 @@ fn transformParamRef<'mcx>(
         }
         ParseRefHookState::VarParams(_) => {
             parser_small1::variable_paramref_hook(mcx, pstate, pref, encoding)
+        }
+        ParseRefHookState::SqlFnParams(_) => {
+            parser_small1::sql_fn_paramref_hook(mcx, pstate, pref, encoding)
         }
         ParseRefHookState::None => Err(no_parameter_error(pstate, pref, encoding)),
     }
@@ -1324,6 +1833,135 @@ fn make_row_comparison_op<'mcx>(
     Ok(cmp)
 }
 
+// make_row_comparison_op (parse_expr.c), list form: = composes to AND, <>
+// to OR; ordered row comparisons (< <= > >=) need RowCompareExpr — loud.
+fn make_row_comparison_op_lists<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    opname: &types_nodes::NodeList<'mcx>,
+    largs: &types_nodes::NodeList<'mcx>,
+    rargs: &types_nodes::NodeList<'mcx>,
+    location: types_core::ParseLoc,
+) -> PgResult<Node<'mcx>> {
+    use lsyscache::{COMPARE_EQ, COMPARE_NE};
+    let nopers = largs.len();
+    if nopers != rargs.len() {
+        return Err(row_length_error(
+            pstate,
+            types_error::ERRCODE_SYNTAX_ERROR,
+            "unequal number of entries in row expressions",
+            location,
+        ));
+    }
+    if nopers == 0 {
+        return Err(row_length_error(
+            pstate,
+            types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+            "cannot compare rows of zero length",
+            location,
+        ));
+    }
+    let mut opexprs = types_nodes::NodeList::nil();
+    for (larg, rarg) in largs.iter().zip(rargs.iter()) {
+        let cmp = make_row_comparison_op(mcx, pstate, opname, larg, rarg, location)?;
+        opexprs.lappend(mcx, cmp)?;
+    }
+    if nopers == 1 {
+        return Ok(opexprs.nth(0));
+    }
+    // Intersect each operator's index interpretations; C picks the lowest
+    // common CompareType.
+    let mut common: Option<u64> = None;
+    for cmp in &opexprs {
+        let opno = cmp.as_op_expr().expect("make_op returns an OpExpr").opno;
+        let interps = lsyscache::get_op_index_interpretation(mcx, opno)?;
+        let mut mask: u64 = 0;
+        for it in interps.iter() {
+            mask |= 1u64 << (it.cmptype as u32);
+        }
+        common = Some(match common {
+            None => mask,
+            Some(c) => c & mask,
+        });
+    }
+    let common = common.unwrap_or(0);
+    if common == 0 {
+        return Err(row_comparison_no_interpretation(pstate, opname, location));
+    }
+    let cmptype = common.trailing_zeros() as lsyscache::CompareType;
+    if cmptype == COMPARE_EQ {
+        return Node::mk(
+            mcx,
+            types_nodes::BoolExpr {
+                boolop: types_nodes::BoolExprType::AND_EXPR,
+                args: opexprs,
+                location,
+            },
+        );
+    }
+    if cmptype == COMPARE_NE {
+        return Node::mk(
+            mcx,
+            types_nodes::BoolExpr {
+                boolop: types_nodes::BoolExprType::OR_EXPR,
+                args: opexprs,
+                location,
+            },
+        );
+    }
+    panic!(
+        "make_row_comparison_op (parse_expr.c): ordered row comparison \
+         (RowCompareExpr end-to-end) unported — unit backend-parser-expr"
+    );
+}
+
+#[cold]
+fn row_length_error(
+    pstate: &ParseState<'_, '_>,
+    code: types_error::SqlState,
+    msg: &str,
+    location: types_core::ParseLoc,
+) -> Box<types_error::PgError> {
+    use types_error::{ErrorLocation, ERROR};
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(code)
+            .errmsg(msg.to_string())
+            .errposition(parser_small1::parser_errposition(
+                pstate,
+                location,
+                mbutils::GetDatabaseEncoding(),
+            ))
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_expr.c", 0, "make_row_comparison_op")),
+    )
+}
+
+#[cold]
+fn row_comparison_no_interpretation(
+    pstate: &ParseState<'_, '_>,
+    opname: &types_nodes::NodeList<'_>,
+    location: types_core::ParseLoc,
+) -> Box<types_error::PgError> {
+    use types_error::{ErrorLocation, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
+    let op = opname.last().and_then(|n| n.as_string()).map(|s| s.sval).unwrap_or("");
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg(format!(
+                "could not determine interpretation of row comparison operator {op}"
+            ))
+            .errhint("Row comparison operators must be associated with btree operator families.")
+            .errposition(parser_small1::parser_errposition(
+                pstate,
+                location,
+                mbutils::GetDatabaseEncoding(),
+            ))
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_expr.c", 0, "make_row_comparison_op")),
+    )
+}
+
 #[cold]
 fn default_not_allowed(
     pstate: &ParseState<'_, '_>,
@@ -1468,6 +2106,24 @@ fn transformFuncCall<'mcx>(
         arg_types.push(expr_type(arg));
     }
 
+    // C transforms fn->agg_filter first thing inside ParseFuncOrColumn
+    // (transformWhereClause, parse_clause.c); hoisted here to keep the
+    // parse_func -> parse_expr edge acyclic. Same evaluation order.
+    let agg_filter = match fc.agg_filter {
+        None => None,
+        Some(f) => {
+            let qual = transformExpr(mcx, pstate, f, ParseExprKind::EXPR_KIND_FILTER)?;
+            Some(coerce::coerce_to_boolean(
+                mcx,
+                pstate,
+                qual,
+                expr_type(qual),
+                expr_location(qual),
+                "FILTER",
+            )?)
+        }
+    };
+
     parse_func::ParseFuncOrColumn(
         mcx,
         pstate,
@@ -1475,6 +2131,7 @@ fn transformFuncCall<'mcx>(
         fargs,
         arg_types.as_slice(),
         fc,
+        agg_filter,
         last_srf,
         fc.location,
     )

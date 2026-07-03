@@ -507,7 +507,10 @@ pub fn expr_collation(node: Node<'_>) -> u32 {
     match node.node_tag() {
         NodeTag::T_Var => node.as_var().unwrap().varcollid,
         NodeTag::T_Const => node.as_const().unwrap().constcollid,
+        NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resultcollid,
         NodeTag::T_OpExpr => node.as_op_expr().unwrap().opcollid,
+        NodeTag::T_DistinctExpr => node.as_distinct_expr().unwrap().opcollid,
+        NodeTag::T_BooleanTest | NodeTag::T_RowExpr | NodeTag::T_BoolExpr | NodeTag::T_NullTest => 0,
         NodeTag::T_FuncExpr => node.as_func_expr().unwrap().funccollid,
         NodeTag::T_Param => node.as_param().unwrap().paramcollid,
         NodeTag::T_Aggref => node.as_aggref().unwrap().aggcollid,
@@ -528,8 +531,9 @@ pub fn expr_collation(node: Node<'_>) -> u32 {
         ),
         NodeTag::T_CaseExpr => node.as_case_expr().unwrap().casecollid,
         NodeTag::T_CaseTestExpr => node.as_case_test_expr().unwrap().collation,
-        NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resultcollid,
         NodeTag::T_CoerceViaIO => node.as_coerce_via_io().unwrap().resultcollid,
+        NodeTag::T_CoerceToDomain => node.as_coerce_to_domain().unwrap().resultcollid,
+        NodeTag::T_CoerceToDomainValue => node.as_coerce_to_domain_value().unwrap().collation,
         other => panic!("exprCollation (nodeFuncs.c): {other:?}; M2 expression lane"),
     }
 }

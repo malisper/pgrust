@@ -1,0 +1,18 @@
+[package]
+name = "adt_domains"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+datum = { path = "../../../../_support/types/datum" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_fmgr = { path = "../../../../_support/types/fmgr" }
+fmgr_seams = { path = "../../fmgr/fmgr_seams" }
+format_type = { path = "../format_type" }
+lsyscache = { path = "../../cache/lsyscache" }
+syscache_seams = { path = "../../cache/syscache_seams" }
+typcache_seams = { path = "../../cache/typcache_seams" }

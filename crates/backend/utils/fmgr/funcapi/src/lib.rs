@@ -17,10 +17,27 @@ mod tests;
 pub use srf::{
     end_MultiFuncCall, init_MultiFuncCall, per_MultiFuncCall, srf_return_done, srf_return_next,
     srf_return_next_null,
-    FuncCallContext, InitMaterializedSRF, MAT_SRF_BLESS, MAT_SRF_USE_EXPECTED_DESC,
+    FuncCallContext, InitMaterializedSRF, MaterializedSRF, MAT_SRF_BLESS,
+    MAT_SRF_USE_EXPECTED_DESC,
 };
 
-pub fn init_seams() {}
+pub fn init_seams() {
+    fmgr_seams::get_fn_expr_variadic::set(seam_get_fn_expr_variadic);
+    fmgr_seams::get_fn_expr_argtype::set(seam_get_fn_expr_argtype);
+}
+
+// Seam shims for callers below funcapi in the crate graph (varlena's
+// concat/format; a direct dep would cycle through funcapi -> varlena).
+fn seam_get_fn_expr_variadic(flinfo: &FmgrInfo) -> bool {
+    get_fn_expr_variadic(Some(flinfo))
+}
+
+fn seam_get_fn_expr_argtype(flinfo: &FmgrInfo, argnum: i16) -> Oid {
+    if argnum < 0 {
+        return InvalidOid;
+    }
+    get_fn_expr_argtype(Some(flinfo), argnum as usize)
+}
 
 // pg_type.dat
 const CSTRINGOID: Oid = 2275;
@@ -96,6 +113,7 @@ fn expr_type(expr: Option<Node<'_>>) -> Oid {
         NodeTag::T_CoerceViaIO => node.as_coerce_via_io().unwrap().resulttype,
         NodeTag::T_CaseExpr => node.as_case_expr().unwrap().casetype,
         NodeTag::T_CoalesceExpr => node.as_coalesce_expr().unwrap().coalescetype,
+        NodeTag::T_RowExpr => node.as_row_expr().unwrap().row_typeid,
         tag => panic!("funcapi exprType: node family {tag:?} not ported"),
     }
 }
@@ -105,6 +123,14 @@ fn call_expr_node(flinfo: &FmgrInfo) -> Option<Node<'static>> {
         *e.downcast_ref::<Node<'static>>()
             .expect("funcapi: fn_expr does not carry a Node")
     })
+}
+
+/// C: get_fn_expr_rettype (fmgr.c); InvalidOid mirrors the NULL-fn_expr case.
+pub fn get_fn_expr_rettype(flinfo: &FmgrInfo) -> Oid {
+    match call_expr_node(flinfo) {
+        None => InvalidOid,
+        Some(n) => expr_type(Some(n)),
+    }
 }
 
 /// C: get_fn_expr_argtype (fmgr.c). Aggregate transfns carry an

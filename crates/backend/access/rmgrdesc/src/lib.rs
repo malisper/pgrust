@@ -12,6 +12,8 @@ use types_core::TimestampTz;
 use types_error::{PgError, PgResult};
 use xlogreader_seams::XLogReaderState;
 
+pub mod brindesc;
+pub mod spgdesc;
 pub mod clogdesc;
 pub mod dbasedesc;
 pub mod genericdesc;

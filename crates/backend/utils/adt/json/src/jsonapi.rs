@@ -68,12 +68,17 @@ fn is_hex(c: u8) -> bool {
     c.is_ascii_digit() || (b'a'..=b'f').contains(&c) || (b'A'..=b'F').contains(&c)
 }
 
+#[derive(Clone)]
 pub struct JsonLex<'a> {
     input: &'a [u8],
     encoding: i32,
     // C's token_start is NULL only at EOF; None mirrors that.
     pub token_start: Option<usize>,
     pub token_terminator: usize,
+    pub prev_token_terminator: usize,
+    // Maintained only by the sem-action drivers (parse_sem), as consumers
+    // (jsonfuncs.c workers) read it; the validation lane leaves it 0.
+    pub lex_level: i32,
     pub line_number: i32,
     line_start: usize,
     pub token_type: JsonToken,
@@ -86,10 +91,16 @@ impl<'a> JsonLex<'a> {
             encoding,
             token_start: Some(0),
             token_terminator: 0,
+            prev_token_terminator: 0,
+            lex_level: 0,
             line_number: 1,
             line_start: 0,
             token_type: JsonToken::Invalid,
         }
+    }
+
+    pub fn input(&self) -> &'a [u8] {
+        self.input
     }
 
     #[inline]
@@ -112,6 +123,7 @@ impl<'a> JsonLex<'a> {
     pub fn lex(&mut self) -> JsonError {
         let end = self.end();
         let mut s = self.token_terminator;
+        self.prev_token_terminator = self.token_terminator;
 
         while s < end
             && matches!(self.input[s], b' ' | b'\t' | b'\n' | b'\r')
@@ -190,6 +202,7 @@ impl<'a> JsonLex<'a> {
     fn lex_dispatch_no_string(&mut self) -> Option<JsonError> {
         let end = self.end();
         let mut s = self.token_terminator;
+        self.prev_token_terminator = self.token_terminator;
 
         while s < end && matches!(self.input[s], b' ' | b'\t' | b'\n' | b'\r') {
             let c = self.input[s];
@@ -639,15 +652,76 @@ pub enum JsonSemToken<'mcx> {
     Null,
 }
 
-/// C: JsonSemAction, the hook subset live consumers use (jsonb_in). Hooks
-/// return Ok(false) for JSON_SEM_ACTION_FAILED after recording a soft error.
+/// C: JsonSemAction. Hooks return Ok(false) for JSON_SEM_ACTION_FAILED after
+/// recording a soft error; `lex` carries lex_level/token positions exactly as
+/// C hooks read them through state->lex.
 pub trait JsonSem<'mcx> {
-    fn object_start(&mut self) -> PgResult<bool>;
-    fn object_end(&mut self) -> PgResult<bool>;
-    fn array_start(&mut self) -> PgResult<bool>;
-    fn array_end(&mut self) -> PgResult<bool>;
-    fn object_field_start(&mut self, fname: &'mcx [u8], isnull: bool) -> PgResult<bool>;
-    fn scalar(&mut self, token: JsonSemToken<'mcx>) -> PgResult<bool>;
+    fn object_start(&mut self, _lex: &JsonLex<'_>) -> PgResult<bool> {
+        Ok(true)
+    }
+    fn object_end(&mut self, _lex: &JsonLex<'_>) -> PgResult<bool> {
+        Ok(true)
+    }
+    fn array_start(&mut self, _lex: &JsonLex<'_>) -> PgResult<bool> {
+        Ok(true)
+    }
+    fn array_end(&mut self, _lex: &JsonLex<'_>) -> PgResult<bool> {
+        Ok(true)
+    }
+    fn object_field_start(
+        &mut self,
+        _lex: &JsonLex<'_>,
+        _fname: &'mcx [u8],
+        _isnull: bool,
+    ) -> PgResult<bool> {
+        Ok(true)
+    }
+    fn object_field_end(
+        &mut self,
+        _lex: &JsonLex<'_>,
+        _fname: &'mcx [u8],
+        _isnull: bool,
+    ) -> PgResult<bool> {
+        Ok(true)
+    }
+    fn array_element_start(&mut self, _lex: &JsonLex<'_>, _isnull: bool) -> PgResult<bool> {
+        Ok(true)
+    }
+    fn array_element_end(&mut self, _lex: &JsonLex<'_>, _isnull: bool) -> PgResult<bool> {
+        Ok(true)
+    }
+    fn scalar(&mut self, _lex: &JsonLex<'_>, _token: JsonSemToken<'mcx>) -> PgResult<bool> {
+        Ok(true)
+    }
+}
+
+/// C: json_count_array_elements — counts the elements of the array whose '['
+/// is the current token, over a throwaway need_escapes=false lexer copy.
+pub fn json_count_array_elements(lex: &JsonLex<'_>) -> PgResult<Result<i32, JsonError>> {
+    let mut copy = lex.clone();
+    let mut count = 0i32;
+    let mut r = copy.lex_expect(ParseCtx::ArrayStart, JsonToken::ArrayStart);
+    if r == JsonError::Success && copy.token_type != JsonToken::ArrayEnd {
+        loop {
+            count += 1;
+            r = parse_array_element(&mut copy)?;
+            if r != JsonError::Success || copy.token_type != JsonToken::Comma {
+                break;
+            }
+            r = copy.lex();
+            if r != JsonError::Success {
+                break;
+            }
+        }
+    }
+    if r != JsonError::Success {
+        return Ok(Err(r));
+    }
+    r = copy.lex_expect(ParseCtx::ArrayNext, JsonToken::ArrayEnd);
+    if r != JsonError::Success {
+        return Ok(Err(r));
+    }
+    Ok(Ok(count))
 }
 
 /// C: JsonLexContext with need_escapes=true — `strval` carries the de-escaped
@@ -657,18 +731,34 @@ pub struct JsonLexDe<'src, 'mcx> {
     pub lex: JsonLex<'src>,
     mcx: mcx::Mcx<'mcx>,
     strval: mcx::PgVec<'mcx, u8>,
+    need_escapes: bool,
 }
 
 impl<'src, 'mcx> JsonLexDe<'src, 'mcx> {
     pub fn new(mcx: mcx::Mcx<'mcx>, input: &'src [u8], encoding: i32) -> Self {
+        Self::with_escapes(mcx, input, encoding, true)
+    }
+
+    /// C: makeJsonLexContext with an explicit need_escapes (false skips strval
+    /// population; string-typed hook payloads are empty, mirroring C's NULL).
+    pub fn with_escapes(
+        mcx: mcx::Mcx<'mcx>,
+        input: &'src [u8],
+        encoding: i32,
+        need_escapes: bool,
+    ) -> Self {
         JsonLexDe {
             lex: JsonLex::new(input, encoding),
             mcx,
             strval: mcx::PgVec::new_in(mcx),
+            need_escapes,
         }
     }
 
     fn lex(&mut self) -> PgResult<JsonError> {
+        if !self.need_escapes {
+            return Ok(self.lex.lex());
+        }
         let r = self.lex.lex_dispatch_no_string();
         match r {
             Some(err) => Ok(err),
@@ -818,6 +908,9 @@ impl<'src, 'mcx> JsonLexDe<'src, 'mcx> {
     }
 
     fn strval_in_arena(&mut self) -> PgResult<&'mcx [u8]> {
+        if !self.need_escapes {
+            return Ok(&[]);
+        }
         Ok(mcx::slice_in(self.mcx, &self.strval)?.leak())
     }
 
@@ -873,7 +966,7 @@ fn parse_scalar_sem<'mcx>(
     if r != JsonError::Success {
         return Ok(r);
     }
-    if !sem.scalar(tok)? {
+    if !sem.scalar(&lex.lex, tok)? {
         return Ok(JsonError::SemActionFailed);
     }
     Ok(JsonError::Success)
@@ -896,14 +989,21 @@ fn parse_object_field_sem<'mcx>(
         return Ok(r);
     }
     let isnull = lex.lex.token_type == JsonToken::Null;
-    if !sem.object_field_start(fname, isnull)? {
+    if !sem.object_field_start(&lex.lex, fname, isnull)? {
         return Ok(JsonError::SemActionFailed);
     }
-    match lex.lex.token_type {
-        JsonToken::ObjectStart => parse_object_sem(lex, sem),
-        JsonToken::ArrayStart => parse_array_sem(lex, sem),
-        _ => parse_scalar_sem(lex, sem),
+    let r = match lex.lex.token_type {
+        JsonToken::ObjectStart => parse_object_sem(lex, sem)?,
+        JsonToken::ArrayStart => parse_array_sem(lex, sem)?,
+        _ => parse_scalar_sem(lex, sem)?,
+    };
+    if r != JsonError::Success {
+        return Ok(r);
     }
+    if !sem.object_field_end(&lex.lex, fname, isnull)? {
+        return Ok(JsonError::SemActionFailed);
+    }
+    Ok(JsonError::Success)
 }
 
 fn parse_object_sem<'mcx>(
@@ -912,9 +1012,10 @@ fn parse_object_sem<'mcx>(
 ) -> PgResult<JsonError> {
     check_stack_depth()?;
 
-    if !sem.object_start()? {
+    if !sem.object_start(&lex.lex)? {
         return Ok(JsonError::SemActionFailed);
     }
+    lex.lex.lex_level += 1;
 
     let r = lex.lex()?;
     if r != JsonError::Success {
@@ -945,7 +1046,8 @@ fn parse_object_sem<'mcx>(
         return Ok(result);
     }
 
-    if !sem.object_end()? {
+    lex.lex.lex_level -= 1;
+    if !sem.object_end(&lex.lex)? {
         return Ok(JsonError::SemActionFailed);
     }
     Ok(JsonError::Success)
@@ -955,11 +1057,22 @@ fn parse_array_element_sem<'mcx>(
     lex: &mut JsonLexDe<'_, 'mcx>,
     sem: &mut impl JsonSem<'mcx>,
 ) -> PgResult<JsonError> {
-    match lex.lex.token_type {
-        JsonToken::ObjectStart => parse_object_sem(lex, sem),
-        JsonToken::ArrayStart => parse_array_sem(lex, sem),
-        _ => parse_scalar_sem(lex, sem),
+    let isnull = lex.lex.token_type == JsonToken::Null;
+    if !sem.array_element_start(&lex.lex, isnull)? {
+        return Ok(JsonError::SemActionFailed);
     }
+    let r = match lex.lex.token_type {
+        JsonToken::ObjectStart => parse_object_sem(lex, sem)?,
+        JsonToken::ArrayStart => parse_array_sem(lex, sem)?,
+        _ => parse_scalar_sem(lex, sem)?,
+    };
+    if r != JsonError::Success {
+        return Ok(r);
+    }
+    if !sem.array_element_end(&lex.lex, isnull)? {
+        return Ok(JsonError::SemActionFailed);
+    }
+    Ok(JsonError::Success)
 }
 
 fn parse_array_sem<'mcx>(
@@ -968,9 +1081,10 @@ fn parse_array_sem<'mcx>(
 ) -> PgResult<JsonError> {
     check_stack_depth()?;
 
-    if !sem.array_start()? {
+    if !sem.array_start(&lex.lex)? {
         return Ok(JsonError::SemActionFailed);
     }
+    lex.lex.lex_level += 1;
 
     let mut result = lex.lex_expect(ParseCtx::ArrayStart, JsonToken::ArrayStart)?;
     if result == JsonError::Success && lex.lex.token_type != JsonToken::ArrayEnd {
@@ -992,7 +1106,8 @@ fn parse_array_sem<'mcx>(
         return Ok(result);
     }
 
-    if !sem.array_end()? {
+    lex.lex.lex_level -= 1;
+    if !sem.array_end(&lex.lex)? {
         return Ok(JsonError::SemActionFailed);
     }
     Ok(JsonError::Success)

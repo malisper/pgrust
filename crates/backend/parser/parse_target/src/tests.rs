@@ -149,4 +149,49 @@ fn figure_colname_arms() {
 
     assert_eq!(FigureColname(int_const(mcx, 1, 0)), "?column?");
     assert_eq!(FigureColname(Node::mk_param_ref(mcx, 1, 0).unwrap()), "?column?");
+
+    let collate = Node::mk(
+        mcx,
+        types_nodes::CollateClause {
+            arg: Some(cref),
+            collname: NodeList::make1(mcx, s("C")).unwrap(),
+            location: 0,
+        },
+    )
+    .unwrap();
+    assert_eq!(FigureColname(collate), "col");
+
+    let svf = Node::mk(
+        mcx,
+        types_nodes::SQLValueFunction {
+            op: types_nodes::SQLValueFunctionOp::SVFOP_CURRENT_USER,
+            r#type: 0,
+            typmod: -1,
+            location: 0,
+        },
+    )
+    .unwrap();
+    assert_eq!(FigureColname(svf), "current_user");
+
+    let mut sub = Node::build::<types_nodes::SelectStmt>(mcx).unwrap();
+    sub.targetList = NodeList::make1(mcx, res_target(mcx, None, cref)).unwrap();
+    let sub = sub.seal();
+    let sublink = |ty| {
+        Node::mk(
+            mcx,
+            types_nodes::SubLink {
+                subLinkType: ty,
+                subLinkId: 0,
+                testexpr: None,
+                operName: NodeList::nil(),
+                subselect: sub,
+                location: 0,
+            },
+        )
+        .unwrap()
+    };
+    // Main resolves EXPR_SUBLINK names from transformed Queries only.
+    assert_eq!(FigureColname(sublink(types_nodes::SubLinkType::EXPR_SUBLINK)), "?column?");
+    assert_eq!(FigureColname(sublink(types_nodes::SubLinkType::EXISTS_SUBLINK)), "exists");
+    assert_eq!(FigureColname(sublink(types_nodes::SubLinkType::ANY_SUBLINK)), "?column?");
 }

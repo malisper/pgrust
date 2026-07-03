@@ -108,6 +108,30 @@ pub fn fc_translate(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRe
     )?))
 }
 
+macro_rules! fc_text_n {
+    ($($fname:ident: $core:ident;)*) => {$(
+        pub fn $fname(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+            // SAFETY: catalog arg 0 is a non-null text varlena (strict fn).
+            let s = unsafe { fcinfo.arg_varlena_packed(0)? }.data();
+            let n = fcinfo.arg_i32(1);
+            let mcx = fcinfo.result_mcx();
+            Ok(varlena_result(crate::$core(mcx, s, n)?))
+        }
+    )*};
+}
+
+fc_text_n! {
+    fc_text_left: text_left;
+    fc_text_right: text_right;
+}
+
+pub fn fc_text_reverse(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog arg 0 is a non-null text varlena (strict fn).
+    let s = unsafe { fcinfo.arg_varlena_packed(0)? }.data();
+    let mcx = fcinfo.result_mcx();
+    Ok(varlena_result(crate::text_reverse(mcx, s)?))
+}
+
 pub fn fc_chr(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let mcx = fcinfo.result_mcx();
     Ok(varlena_result(crate::chr(mcx, fcinfo.arg_i32(0))?))
@@ -150,6 +174,9 @@ pub const ORACLE_COMPAT_BUILTINS: &[FmgrBuiltin] = &[
     b(1621, "chr", 1, fc_chr),
     b(1622, "repeat", 2, fc_repeat),
     b(2015, "byteatrim", 2, fc_byteatrim),
+    b(3060, "text_left", 2, fc_text_left),
+    b(3061, "text_right", 2, fc_text_right),
+    b(3062, "text_reverse", 1, fc_text_reverse),
     b(6195, "bytealtrim", 2, fc_bytealtrim),
     b(6196, "byteartrim", 2, fc_byteartrim),
     b(6412, "casefold", 1, fc_casefold),

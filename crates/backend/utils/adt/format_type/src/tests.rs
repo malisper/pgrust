@@ -105,10 +105,10 @@ fn unknown_oid_is_cache_lookup_error() {
 }
 
 #[test]
-#[should_panic(expected = "TypeIsVisible")]
-fn user_type_default_arm_is_loud() {
+fn user_type_renders_via_type_is_visible() {
     install_fixture();
-    let _ = format_type_be(20000);
+    namespace_seams::type_is_visible::set(|typid| Ok(typid == 20000));
+    assert_eq!(format_type_be(20000).unwrap(), "mytype");
 }
 
 #[test]

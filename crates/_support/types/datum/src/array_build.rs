@@ -100,6 +100,32 @@ unsafe fn cstring_len(p: *const u8) -> usize {
     n
 }
 
+// buildint2vector/buildoidvector (int.c/oid.c): fixed-len by-val elements,
+// lbound 0 (the int2vector/oidvector on-disk shape; arrays use lbound 1).
+pub fn construct_vector_image<'mcx>(
+    mcx: Mcx<'mcx>,
+    values: &[Datum],
+    elmtype: Oid,
+    elmlen: i16,
+    elmalign: u8,
+) -> PgResult<PgVec<'mcx, u8>> {
+    let mut out = construct_array_image(mcx, values, elmtype, elmlen, true, elmalign)?;
+    out[20..24].copy_from_slice(&0i32.to_ne_bytes());
+    Ok(out)
+}
+
+// construct_empty_array (arrayfuncs.c): 16-byte zero-dimensional image.
+pub fn construct_empty_array_image<'mcx>(
+    mcx: Mcx<'mcx>,
+    elmtype: Oid,
+) -> PgResult<PgVec<'mcx, u8>> {
+    let mut out: PgVec<'mcx, u8> = vec_with_capacity_in(mcx, 16)?;
+    out.resize(16, 0);
+    out[0..4].copy_from_slice(&((16i32) << 2).to_ne_bytes());
+    out[12..16].copy_from_slice(&(elmtype as i32).to_ne_bytes());
+    Ok(out)
+}
+
 // construct_array (arrayfuncs.c) restricted to 1-D no-nulls; short varlena
 // inputs are canonicalized to 4-byte headers so element alignment holds.
 pub fn construct_array_image<'mcx>(
@@ -196,6 +222,10 @@ pub fn deconstruct_array_image<'mcx>(
 ) -> PgResult<PgVec<'mcx, Datum>> {
     let align = align_of_typalign(elmalign);
     let rd = |off: usize| i32::from_ne_bytes(image[off..off + 4].try_into().unwrap());
+    if image.len() >= 16 && rd(4) == 0 {
+        // construct_empty_array's zero-dimensional image: no elements.
+        return Ok(PgVec::new_in(mcx));
+    }
     assert!(
         image.len() >= ARR_1D_HDRSZ && rd(4) == 1,
         "deconstruct_array_image: not a 1-D array"

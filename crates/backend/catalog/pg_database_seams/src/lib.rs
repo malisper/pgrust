@@ -14,15 +14,20 @@ pub const COLLPROVIDER_LIBC: u8 = b'c';
 pub struct PgDatabaseForm<'mcx> {
     pub oid: Oid,
     pub datname: PgString<'mcx>,
+    pub datdba: Oid,
+    pub datistemplate: bool,
     pub dattablespace: Oid,
     pub datallowconn: bool,
     pub dathasloginevt: bool,
     pub datconnlimit: i32,
+    pub datfrozenxid: u32,
+    pub datminmxid: u32,
     pub encoding: i32,
     pub datlocprovider: u8,
     pub datcollate: PgString<'mcx>,
     pub datctype: PgString<'mcx>,
     pub datlocale: Option<PgString<'mcx>>,
+    pub daticurules: Option<PgString<'mcx>>,
     pub datcollversion: Option<PgString<'mcx>>,
 }
 

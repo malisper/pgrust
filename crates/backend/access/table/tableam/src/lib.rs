@@ -215,16 +215,16 @@ mod heap {
     }
 
     pub(super) fn index_delete_tuples<'mcx>(
-        _mcx: Mcx<'mcx>,
-        _rel: &Relation<'mcx>,
-        _delstate: &mut TM_IndexDeleteOp<'mcx>,
+        mcx: Mcx<'mcx>,
+        rel: &Relation<'mcx>,
+        delstate: &mut TM_IndexDeleteOp<'mcx>,
     ) -> PgResult<TransactionId> {
-        unported("backend-access-heap-heapam (heap_index_delete_tuples)")
+        ::heapam::heap_index_delete_tuples(mcx, rel, delstate)
     }
 
     // heapam_tuple_insert (heapam_handler.c): fetch the slot's heap tuple in
-    // place, heap_insert it, copy t_self back. Callers pass table-format
-    // slots (ri_newTupleSlot / table_slot_create), so no copy arm exists.
+    // place (virtual/minimal sources take the ExecFetchSlotHeapTuple copy
+    // arm), heap_insert it, copy t_self back.
     pub(super) fn tuple_insert<'mcx>(
         mcx: Mcx<'mcx>,
         rel: &Relation<'mcx>,
@@ -233,25 +233,30 @@ mod heap {
         options: i32,
         bistate: Option<&mut BulkInsertStateData>,
     ) -> PgResult<()> {
-        assert!(
-            bistate.is_none(),
-            "heapam_tuple_insert (heapam_handler.c): heap_insert bistate arm not \
-             wired for single-tuple inserts (bulk callers go through multi_insert)"
-        );
         exectuples::exec_materialize_slot(slot, mcx)?;
         slot.base_mut().tts_tableOid = rel.rd_id;
-        let tuple = match slot {
-            SlotData::Heap(h) => h.tuple.as_mut(),
-            SlotData::BufferHeap(b) => b.base.tuple.as_mut(),
-            _ => panic!(
-                "heapam_tuple_insert (heapam_handler.c): non-heap slot copy arm \
-                 not ported"
-            ),
-        }
-        .expect("materialized heap slot holds a tuple");
-        tuple.t_tableOid = rel.rd_id;
-        ::heapam::heap_insert(rel, tuple, cid, options)?;
-        let t_self = tuple.t_self;
+        let t_self = match slot {
+            SlotData::Heap(h) => {
+                let tuple = h.tuple.as_mut().expect("materialized heap slot holds a tuple");
+                tuple.t_tableOid = rel.rd_id;
+                ::heapam::heap_insert(rel, tuple, cid, options, bistate)?;
+                tuple.t_self
+            }
+            SlotData::BufferHeap(b) => {
+                let tuple = b.base.tuple.as_mut().expect("materialized heap slot holds a tuple");
+                tuple.t_tableOid = rel.rd_id;
+                ::heapam::heap_insert(rel, tuple, cid, options, bistate)?;
+                tuple.t_self
+            }
+            // ExecFetchSlotHeapTuple copy arm (virtual/minimal source slots,
+            // e.g. multi-row VALUES routed into partitions).
+            _ => {
+                let mut tuple = exectuples::exec_copy_slot_heap_tuple(slot, mcx, mcx)?;
+                tuple.t_tableOid = rel.rd_id;
+                ::heapam::heap_insert(rel, &mut tuple, cid, options, bistate)?;
+                tuple.t_self
+            }
+        };
         slot.base_mut().tts_tid = t_self;
         Ok(())
     }
@@ -282,7 +287,7 @@ mod heap {
         .expect("materialized heap slot holds a tuple");
         tuple.t_tableOid = rel.rd_id;
         tuple.t_data_mut().set_speculative_token(spec_token);
-        ::heapam::heap_insert(rel, tuple, cid, options | ::heapam::hio::HEAP_INSERT_SPECULATIVE)?;
+        ::heapam::heap_insert(rel, tuple, cid, options | ::heapam::hio::HEAP_INSERT_SPECULATIVE, bistate)?;
         let t_self = tuple.t_self;
         slot.base_mut().tts_tid = t_self;
         Ok(())
@@ -407,8 +412,8 @@ mod heap {
         Ok((freeze_xid, min_multi))
     }
 
-    pub(super) fn relation_nontransactional_truncate(_rel: &Relation<'_>) -> PgResult<()> {
-        unported("backend-catalog-storage (RelationTruncate)")
+    pub(super) fn relation_nontransactional_truncate(rel: &Relation<'_>) -> PgResult<()> {
+        catalog_storage::RelationTruncate(rel, 0)
     }
 
     pub(super) fn relation_needs_toast_table(rel: &Relation<'_>) -> bool {

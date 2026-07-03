@@ -90,7 +90,8 @@ thread_local! {
 
 pub(crate) struct InvalState<'mcx> {
     pub(crate) mcx: Mcx<'mcx>,
-    // Dense; `nextmsg == len` at the live group's end.
+    // Cursor-written: an aborted subxact can leave dead slots past the live
+    // group's `nextmsg`; later adds overwrite them in place.
     pub(crate) msg_arrays: [PgVec<'mcx, SharedInvalidationMessage>; 2],
     pub(crate) trans_stack: PgVec<'mcx, registration::TransInvalidationInfo>,
     pub(crate) inplace_info: Option<registration::InvalidationInfo>,

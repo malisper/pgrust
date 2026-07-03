@@ -67,15 +67,16 @@ pub trait ScanNode<'mcx> {
 
 #[cold]
 #[inline(never)]
-fn interrupt_unported() -> ! {
-    panic!("execscan: ProcessInterrupts (tcop/postgres.c) unported")
+fn process_interrupts() -> PgResult<()> {
+    postgres_seams::check_for_interrupts::call()
 }
 
 #[inline(always)]
-fn check_for_interrupts() {
+fn check_for_interrupts() -> PgResult<()> {
     if init_small::globals::InterruptPending() {
-        interrupt_unported();
+        return process_interrupts();
     }
+    Ok(())
 }
 
 enum EpqFetch {
@@ -123,7 +124,7 @@ fn exec_scan_fetch<'mcx, N: ScanNode<'mcx>, const EPQ: bool>(
     node: &mut N,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<ExecSlotId>> {
-    check_for_interrupts();
+    check_for_interrupts()?;
     if EPQ {
         match epq_fetch(node, estate)? {
             EpqFetch::Tuple(id) => return Ok(Some(id)),
@@ -207,6 +208,13 @@ fn exec_scan_impl<'mcx, N: ScanNode<'mcx>, const QUAL: bool, const PROJ: bool, c
                 let ecxt = ss.ps_ExprContext;
                 executils::exec_qual_with_subplans(ss.qual.as_deref_mut(), estate, ecxt)?
             } else {
+                // Per-tuple result mcx for arg-detoasting quals (C's
+                // ecxt_per_tuple_memory; ExprContext reset frees it).
+                let per_tuple = estate.ecxt(ss.ps_ExprContext).per_tuple_mcx();
+                // SAFETY: reset-only context, outlives the plan.
+                unsafe {
+                    ss.qual.as_deref_mut().unwrap().arm_result_mcx_raw(per_tuple);
+                }
                 let mut slots = EvalSlots {
                     scan: Some(estate.slot_mut(scan_id)),
                     inner: None,
@@ -415,11 +423,16 @@ pub fn expr_typmod(node: Node<'_>) -> i32 {
             let f = node.as_func_expr().unwrap();
             length_coercion_typmod(f).unwrap_or(-1)
         }
-        NodeTag::T_OpExpr => -1,
-        NodeTag::T_Aggref => -1,
-        NodeTag::T_GroupingFunc => -1,
-        NodeTag::T_WindowFunc => -1,
-        NodeTag::T_SubLink => -1,
+        NodeTag::T_OpExpr
+        | NodeTag::T_Aggref
+        | NodeTag::T_GroupingFunc
+        | NodeTag::T_WindowFunc
+        | NodeTag::T_SubLink
+        | NodeTag::T_BoolExpr
+        | NodeTag::T_NullTest
+        | NodeTag::T_BooleanTest
+        | NodeTag::T_DistinctExpr
+        | NodeTag::T_RowExpr => -1,
         NodeTag::T_SubPlan => {
             use types_nodes::primnodes::SubLinkType;
             let sp = node.as_sub_plan().unwrap();
@@ -451,7 +464,10 @@ pub fn expr_typmod(node: Node<'_>) -> i32 {
         }
         NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resulttypmod,
         NodeTag::T_CoerceViaIO => -1,
-        tag => panic!("exprTypmod (nodeFuncs.c): node family {tag:?} not ported"),
+        NodeTag::T_NextValueExpr => -1,
+        NodeTag::T_CoerceToDomain => node.as_coerce_to_domain().unwrap().resulttypmod,
+        NodeTag::T_CoerceToDomainValue => node.as_coerce_to_domain_value().unwrap().typeMod,
+        _ => nodes_core::expr_typmod(node),
     }
 }
 
@@ -502,6 +518,14 @@ pub fn expr_collation(node: Node<'_>) -> Oid {
         NodeTag::T_CaseTestExpr => node.as_case_test_expr().unwrap().collation,
         NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resultcollid,
         NodeTag::T_CoerceViaIO => node.as_coerce_via_io().unwrap().resultcollid,
-        tag => panic!("exprCollation (nodeFuncs.c): node family {tag:?} not ported"),
+        NodeTag::T_BoolExpr
+        | NodeTag::T_NullTest
+        | NodeTag::T_BooleanTest
+        | NodeTag::T_RowExpr
+        | NodeTag::T_NextValueExpr => ::types_core::InvalidOid,
+        NodeTag::T_DistinctExpr => node.as_distinct_expr().unwrap().opcollid,
+        NodeTag::T_CoerceToDomain => node.as_coerce_to_domain().unwrap().resultcollid,
+        NodeTag::T_CoerceToDomainValue => node.as_coerce_to_domain_value().unwrap().collation,
+        _ => nodes_core::expr_collation(node),
     }
 }

@@ -157,7 +157,6 @@ fn remove_leftjoinrel_from_query<'mcx>(
             run.root.rel_mut(other).attr_needed[ndx] =
                 if keep { relids_singleton(mcx, 0) } else { None };
         }
-        debug_assert!(run.root.rel(other).lateral_vars.is_empty());
     }
 
     // Clones of deletable quals carry commutable OJs' relids; test
@@ -178,9 +177,9 @@ fn remove_leftjoinrel_from_query<'mcx>(
     run.root.simple_rel_array[relid as usize] = None;
     run.root.simple_rte_array[relid as usize] = types_pathnodes::RangeTblEntryId::Invalid;
 
-    // rebuild_placeholder/eclass/lateral_attr_needed: no PHVs, no ECs, no
-    // lateral refs exist on this lane (asserted above).
+    // rebuild_placeholder/eclass_attr_needed: no PHVs, no ECs on this lane.
     rebuild_joinclause_attr_needed(run);
+    crate::initsplan::rebuild_lateral_attr_needed(run)?;
     Ok(())
 }
 

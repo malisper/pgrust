@@ -13,19 +13,10 @@ pub const EEO_FLAG_HAS_SUBPLAN: u8 = 1 << 1;
 pub const EEO_FLAG_INTERPRETER_INITIALIZED: u8 = 1 << 5;
 pub const EEO_FLAG_STILL_VALID_CHECKED: u8 = 1 << 7;
 
-// C's `Datum *resv, bool *resnull` pair: None = the interpreter's result
-// registers, Some = one NullableDatum arg slot inside a frame's fcinfo image.
+// C's `Datum *resv, bool *resnull` pair, always resolved (a frame's fcinfo
+// arg slot or ExprState.resnd) — branch-free writes, phi-free loop head.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct OutRef(pub(crate) Option<NonNull<NullableDatum>>);
-
-impl OutRef {
-    pub const RESULT: OutRef = OutRef(None);
-
-    #[inline(always)]
-    pub(crate) fn is_result(self) -> bool {
-        self.0.is_none()
-    }
-}
+pub struct OutRef(pub(crate) NonNull<NullableDatum>);
 
 // EEOP program step: C ExprEvalStep's (opcode, union d) collapsed into one
 // dense #[repr(u8)] enum; only the SELECT-1/point-select families are ported
@@ -84,6 +75,13 @@ pub enum Step {
     BoolNotStep { out: OutRef },
     NullTestIsNull { out: OutRef },
     NullTestIsNotNull { out: OutRef },
+    // C EEOP_BOOLTEST_IS_*; IS [NOT] UNKNOWN reuses the NullTest steps.
+    BoolTestIsTrue { out: OutRef },
+    BoolTestIsNotTrue { out: OutRef },
+    BoolTestIsFalse { out: OutRef },
+    BoolTestIsNotFalse { out: OutRef },
+    // C EEOP_DISTINCT: the resolved "=" call with DISTINCT null semantics.
+    Distinct { call: FuncCall, out: OutRef },
     // Agg pointers resolve at build into once-allocated never-moved AggState arrays.
     AggrefEval { value: NonNull<Datum>, null: NonNull<bool>, out: OutRef },
     // C EEOP_GROUPING_FUNC: bit per clause col, 1 = ungrouped in the
@@ -105,6 +103,11 @@ pub enum Step {
         typalign: u8,
         out: OutRef,
     },
+    // C EEOP_WHOLEROW, named-composite leg over a scan/inner/outer slot
+    // (RECORD/subquery whole-row and OLD/NEW are compile louds). The var's
+    // typcache tupdesc resolves at compile; the slot-compat check runs once
+    // at first eval, per C.
+    WholeRow { src: SlotSrc, wr: NonNull<WholeRowState>, frame: u32, out: OutRef },
     // EEOP_ARRAYEXPR, 1-D: elements evaluate into the `elems` scratch;
     // `frame` is an argless FuncFrame carried only for its armed result mcx.
     ArrayExprStep {
@@ -117,8 +120,20 @@ pub enum Step {
         elmalign: u8,
         out: OutRef,
     },
+    // C EEOP_ROWEXPR: elements evaluate into `elems`; `desc` is the blessed
+    // anonymous-RECORD tupdesc, arena-lived for the plan.
+    RowExprStep {
+        elems: NonNull<NullableDatum>,
+        nelems: u16,
+        frame: u32,
+        desc: NonNull<::types_tuple::TupleDescData<'static>>,
+        out: OutRef,
+    },
     // C EEOP_AGG_STRICT_INPUT_CHECK_ARGS(_1): args = fcinfo args[1..].
     AggStrictInputCheck { args: NonNull<NullableDatum>, nargs: u16, jumpnull: u32 },
+    // Ordered/DISTINCT agg row survived filter+strict checks: flag it for
+    // nodeagg's tuplesort feed (scratch already holds the evaluated args).
+    AggOrderedMark { flag: NonNull<bool> },
     AggStrictInputCheck1 { arg: NonNull<NullableDatum>, jumpnull: u32 },
     AggPlainTransByVal { call: FuncCall, pergroup: NonNull<AggPerGroup> },
     AggPlainTransStrictByVal { call: FuncCall, pergroup: NonNull<AggPerGroup> },
@@ -168,9 +183,16 @@ pub enum Step {
     // ExecSubPlan (nodeSubplan.c in execmain) with the full estate and
     // resumes with the result (see interp::EvalOutcome).
     SubPlan { sstate: NonNull<()>, out: OutRef },
+    // EEOP_MAKE_READONLY: emitted only for typlen -1 domain-check inputs.
+    MakeReadonlyOut { src: OutRef, out: OutRef },
+    DomainTestval { src: OutRef, out: OutRef },
+    DomainNotNull { resulttype: Oid, out: OutRef },
+    // name/check: compile-allocated in 'mcx (BoolAndStep anynull precedent).
+    DomainCheck { resulttype: Oid, name: NonNull<str>, check: NonNull<NullableDatum> },
     // slots: nelems compile-allocated NullableDatum arg targets (C's
     // d.minmax.values/nulls); call is the type's btree cmp proc.
     MinMax { call: FuncCall, slots: NonNull<NullableDatum>, nelems: u16, least: bool, out: OutRef },
+    NextValueExpr { seqid: Oid, seqtypid: Oid, out: OutRef },
     // timetz: compile-allocated 12-byte TimeTz image, rewritten per eval —
     // valid until the next eval, the window C's per-tuple context reset gives.
     SqlValueFunction {
@@ -179,6 +201,13 @@ pub enum Step {
         timetz: NonNull<u8>,
         out: OutRef,
     },
+}
+
+// C ExprEvalStep d.wholerow minus var/junkFilter: first-eval compat state.
+pub struct WholeRowState {
+    pub tupdesc: NonNull<::types_tuple::TupleDescData<'static>>,
+    pub first: bool,
+    pub slow: bool,
 }
 
 // By-ref copy target: C d.agg_trans.aggcontext + the transtype's typlen.
@@ -218,18 +247,29 @@ pub struct IoCoerceCalls {
     pub in_strict: bool,
 }
 
+// Resolved once at compile; fn_addr rides in the FmgrInfo header line —
+// a copy here would push ScalarArrayOp/MinMax steps past the 64B budget.
 #[derive(Clone, Copy, Debug)]
 pub struct FuncCall {
-    pub fn_addr: PGFunction,
     pub(crate) fcinfo: NonNull<u8>,
+    pub(crate) flinfo: NonNull<FmgrInfo>,
     pub frame: u32,
     pub nargs: u16,
+}
+
+impl FuncCall {
+    #[inline(always)]
+    pub(crate) fn fn_addr(&self) -> PGFunction {
+        // SAFETY: frame-owned mcx-boxed FmgrInfo, live for 'mcx.
+        unsafe { self.flinfo.as_ref() }.fn_addr
+    }
 }
 
 // Step-owned call state: the FmgrInfo carrier plus its heap fcinfo image
 // (header + nargs NullableDatum tail) bump-allocated in 'mcx.
 pub struct FuncFrame<'mcx> {
-    pub flinfo: FmgrInfo,
+    // mcx-boxed so FuncCall's copy stays valid across frames-vec growth.
+    pub flinfo: NonNull<FmgrInfo>,
     pub(crate) fcinfo: NonNull<u8>,
     pub nargs: u16,
     pub(crate) const_args: u16,
@@ -249,6 +289,13 @@ fn fcinfo_layout(nargs: usize) -> Layout {
 
 impl<'mcx> FuncFrame<'mcx> {
     pub(crate) fn new_in(mcx: Mcx<'mcx>, flinfo: FmgrInfo, nargs: u16, collation: Oid) -> PgResult<Self> {
+        let fl_layout = Layout::new::<FmgrInfo>();
+        let fl: NonNull<FmgrInfo> =
+            mcx.allocate(fl_layout).map_err(|_| mcx.oom(fl_layout.size()))?.cast();
+        // SAFETY: fresh exclusive allocation; fn_extra released via
+        // release_frames, never by arena drop (C fn_mcxt shape).
+        unsafe { fl.write(flinfo) };
+        let flinfo = fl;
         let layout = fcinfo_layout(nargs as usize);
         let raw = mcx.allocate(layout).map_err(|_| mcx.oom(layout.size()))?;
         let base: NonNull<u8> = raw.cast();
@@ -467,10 +514,15 @@ pub enum Kernel {
     JustAssignVar { src: SlotSrc, attnum: u16, resultnum: u16 },
     JustAssignVarVirt { src: SlotSrc, attnum: u16, resultnum: u16 },
     QualScanVarCmpConst { attnum: u16, konst: Datum, cmp: CmpOp },
+    QualVarCmpVar { a_src: SlotSrc, a_attnum: u16, b_src: SlotSrc, b_attnum: u16, cmp: CmpOp },
+    Hash32Var { src: SlotSrc, attnum: u16, frame: u32 },
     JustFunc { fn_addr: PGFunction, frame: u32, nargs: u16, strict: bool },
+    // Argless byval transition (count(*)-class 2-step programs): the whole
+    // per-row program without the interpreter loop (ExecJust* precedent).
+    AggTransByVal { call: FuncCall, pergroup: NonNull<AggPerGroup>, strict: bool },
 }
 
-const _: () = assert!(core::mem::size_of::<Kernel>() <= 24);
+const _: () = assert!(core::mem::size_of::<Kernel>() <= 48);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -485,11 +537,16 @@ pub struct ExprState<'mcx> {
     pub(crate) frames: PgVec<'mcx, FuncFrame<'mcx>>,
     pub(crate) kernel: Kernel,
     pub(crate) flags: u8,
+    // C ExprState.resvalue/resnull: mcx-allocated result cell — OutRef raw
+    // access carries no Rust borrow provenance.
+    pub(crate) resnd: NonNull<NullableDatum>,
     // C ExprState.innermost_caseval/casenull: compile-time only.
     pub(crate) innermost_case: Option<NonNull<NullableDatum>>,
     // PARAM_EXEC ids this expression reads; the owning node resolves pending
     // initplans against these before evaluation (nodeSubplan.c lane).
     pub(crate) param_exec_deps: PgVec<'mcx, u32>,
+    // C ExprState.innermost_domainval/innermost_domainnull: compile-time only.
+    pub(crate) innermost_domain: Option<OutRef>,
 }
 
 impl<'mcx> ExprState<'mcx> {
@@ -499,6 +556,11 @@ impl<'mcx> ExprState<'mcx> {
         let layout = Layout::new::<ExprState<'mcx>>();
         let raw = mcx.allocate(layout).map_err(|_| mcx.oom(layout.size()))?;
         let p = raw.cast::<ExprState<'mcx>>();
+        let rl = Layout::new::<NullableDatum>();
+        let resnd: NonNull<NullableDatum> =
+            mcx.allocate(rl).map_err(|_| mcx.oom(rl.size()))?.cast();
+        // SAFETY: fresh exclusive allocation.
+        unsafe { resnd.write(NullableDatum::null()) };
         // On steps-alloc failure the header chunk stays until reset (C's palloc-then-throw shape).
         let steps = ::mcx::vec_with_capacity_in(mcx, 16)?;
         // SAFETY: fresh exclusive layout-sized allocation from `mcx`; written once, then box-owned.
@@ -508,8 +570,10 @@ impl<'mcx> ExprState<'mcx> {
                 frames: PgVec::new_in(mcx),
                 kernel: Kernel::Program,
                 flags: 0,
+                resnd,
                 innermost_case: None,
                 param_exec_deps: PgVec::new_in(mcx),
+                innermost_domain: None,
             });
             Ok(::mcx::PgBox::from_raw_in(p.as_ptr(), mcx))
         }
@@ -525,6 +589,16 @@ impl<'mcx> ExprState<'mcx> {
 
     pub fn kernel(&self) -> Kernel {
         self.kernel
+    }
+
+    #[inline(always)]
+    pub(crate) fn result_out(&self) -> OutRef {
+        OutRef(self.resnd)
+    }
+
+    #[inline(always)]
+    pub(crate) fn is_result(&self, out: OutRef) -> bool {
+        out.0 == self.resnd
     }
 
     pub fn is_qual(&self) -> bool {
@@ -560,7 +634,8 @@ impl<'mcx> ExprState<'mcx> {
     /// Drops each frame's fn_extra; the program is then safe to forget.
     pub fn release_frames(&mut self) {
         for f in self.frames.iter_mut() {
-            f.flinfo.fn_extra = None;
+            // SAFETY: frame-owned mcx-boxed FmgrInfo, sole reference here.
+            unsafe { f.flinfo.as_mut() }.fn_extra = None;
         }
     }
 

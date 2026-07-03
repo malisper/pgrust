@@ -9,6 +9,7 @@
 #![allow(irrefutable_let_patterns)]
 
 mod dedup;
+mod delete;
 mod fcframe;
 mod insert;
 pub mod itup;

@@ -5,14 +5,13 @@
 //! (dedup.rs). Loud: posting split during a page split, deletion, deferred
 //! unique rechecks (UNIQUE_CHECK_EXISTING), !heapkeyspace.
 
-use std::cell::Cell;
 
 use ::bufmgr_seams::{self as bufmgr, BufferPin};
 use ::datum::Datum;
 use ::mcx::Mcx;
 use ::types_core::xact::{InvalidTransactionId, TransactionIdIsValid};
 use ::types_core::{
-    AttrNumber, BlockNumber, InvalidBlockNumber, OffsetNumber, Oid, TransactionId, INDEX_MAX_KEYS,
+    AttrNumber, BlockNumber, InvalidBlockNumber, OffsetNumber, TransactionId, INDEX_MAX_KEYS,
 };
 use ::types_error::{PgError, PgResult, ERRCODE_UNIQUE_VIOLATION};
 use ::types_nbtree::{
@@ -56,23 +55,28 @@ pub(crate) struct StackEntry {
     pub(crate) offset: OffsetNumber,
 }
 
-// RelationGetTargetBlock/RelationSetTargetBlock over the index relation
-// (rd_smgr targblock cache); keyed thread-local since rd_smgr is unported.
-thread_local! {
-    static TARGET_BLOCK: Cell<(Oid, BlockNumber)> = const { Cell::new((0, InvalidBlockNumber)) };
-}
-
+// RelationGetTargetBlock/RelationSetTargetBlock: the cache is C's
+// rd_smgr->smgr_targblock, so RelationTruncate's smgr reset invalidates it.
 fn target_block(rel: &Relation<'_>) -> BlockNumber {
-    let (oid, blk) = TARGET_BLOCK.get();
-    if oid == rel.rd_id {
-        blk
-    } else {
-        InvalidBlockNumber
+    let locator = rel.rd_locator.get();
+    if locator.relNumber == 0 {
+        return InvalidBlockNumber;
     }
+    smgr::smgrgettargblock(::types_storage::RelFileLocatorBackend {
+        locator,
+        backend: rel.rd_backend,
+    })
 }
 
 fn set_target_block(rel: &Relation<'_>, blk: BlockNumber) {
-    TARGET_BLOCK.set((rel.rd_id, blk));
+    let locator = rel.rd_locator.get();
+    if locator.relNumber == 0 {
+        return;
+    }
+    let key = ::types_storage::RelFileLocatorBackend { locator, backend: rel.rd_backend };
+    if smgr::smgropen(key.locator, key.backend).is_ok() {
+        smgr::smgrsettargblock(key, blk);
+    }
 }
 
 struct InsertState<'k> {
@@ -196,6 +200,7 @@ fn bt_doinsert<'mcx>(
     // SAFETY: insertstate.buf pinned + write-locked.
     unsafe {
         let newitemoff = bt_findinsertloc(
+            mcx,
             rel,
             &mut insertstate,
             checkingunique,
@@ -810,12 +815,13 @@ unsafe fn set_page_has_garbage(page: &PageRef<'_>) {
 ///
 /// # Safety
 /// `insertstate.buf` pinned + write-locked.
-unsafe fn bt_findinsertloc(
-    rel: &Relation<'_>,
+unsafe fn bt_findinsertloc<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
     insertstate: &mut InsertState<'_>,
     checkingunique: bool,
     index_unchanged: bool,
-    heap_rel: &Relation<'_>,
+    heap_rel: &Relation<'mcx>,
     frame: &mut OrderProcFrame,
 ) -> PgResult<OffsetNumber> {
     if insertstate.itemsz > ::types_nbtree::BTMaxItemSize {
@@ -871,7 +877,9 @@ unsafe fn bt_findinsertloc(
     {
         let pin = insertstate.buf.as_ref().expect("pinned");
         if pin.page().free_space() < insertstate.itemsz {
-            bt_delete_or_dedup_one_page(rel, insertstate, false, checkingunique, uniquedup)?;
+            bt_delete_or_dedup_one_page(
+                mcx, rel, heap_rel, insertstate, false, checkingunique, uniquedup,
+            )?;
         }
     }
 
@@ -885,8 +893,7 @@ unsafe fn bt_findinsertloc(
     let mut newitemoff = bt_binsrch_insert(rel, insertstate, frame)?;
 
     if insertstate.postingoff == -1 {
-        // overlapping posting tuple is LP_DEAD: simple deletion, re-search
-        bt_delete_or_dedup_one_page(rel, insertstate, true, false, false)?;
+        bt_delete_or_dedup_one_page(mcx, rel, heap_rel, insertstate, true, false, false)?;
         debug_assert!(!insertstate.bounds_valid);
         insertstate.postingoff = 0;
         newitemoff = bt_binsrch_insert(rel, insertstate, frame)?;
@@ -937,30 +944,62 @@ unsafe fn bt_stepright<'mcx>(
     Ok(())
 }
 
-/// _bt_delete_or_dedup_one_page: LP_DEAD scan live; deletion/dedup own units.
+/// _bt_delete_or_dedup_one_page: simple deletion live; bottom-up loud.
 ///
 /// # Safety
 /// As [`bt_findinsertloc`].
-unsafe fn bt_delete_or_dedup_one_page(
-    rel: &Relation<'_>,
+unsafe fn bt_delete_or_dedup_one_page<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    heap_rel: &Relation<'mcx>,
     insertstate: &mut InsertState<'_>,
     simpleonly: bool,
     checkingunique: bool,
     uniquedup: bool,
 ) -> PgResult<()> {
+    let mut uniquedup = uniquedup;
+    let mut deletable = [0 as OffsetNumber; ::types_storage::bufpage::MaxIndexTuplesPerPage];
+    let mut ndeletable = 0usize;
+    let (minoff, maxoff);
     {
         let pin = insertstate.buf.as_ref().expect("pinned");
         let page = pin.page();
         let opaque = page_opaque(&page);
         debug_assert!(P_ISLEAF(&opaque));
+        debug_assert!(!simpleonly || (!checkingunique && !uniquedup));
 
-        let minoff = P_FIRSTDATAKEY(&opaque);
-        let maxoff = page.max_offset_number();
+        minoff = P_FIRSTDATAKEY(&opaque);
+        maxoff = page.max_offset_number();
         for offnum in minoff..=maxoff {
             if page.item_id(offnum).is_dead() {
-                unported_phase2("_bt_simpledel_pass (simple index deletion lane)");
+                deletable[ndeletable] = offnum;
+                ndeletable += 1;
             }
         }
+    }
+
+    if ndeletable > 0 {
+        {
+            let pin = insertstate.buf.as_ref().expect("pinned");
+            crate::delete::bt_simpledel_pass(
+                mcx,
+                rel,
+                pin,
+                heap_rel,
+                &deletable[..ndeletable],
+                insertstate.itup,
+                minoff,
+                maxoff,
+            )?;
+        }
+        insertstate.bounds_valid = false;
+
+        let pin = insertstate.buf.as_ref().expect("pinned");
+        if pin.page().free_space() >= insertstate.itemsz {
+            return Ok(());
+        }
+
+        uniquedup = true;
     }
 
     if simpleonly || (checkingunique && !uniquedup) {
@@ -969,8 +1008,7 @@ unsafe fn bt_delete_or_dedup_one_page(
 
     insertstate.bounds_valid = false;
 
-    // C divergence: indexUnchanged folded into uniquedup (their OR feeds both
-    // the bottomup trigger and dedup's bottomupdedup arg).
+    // C divergence: indexUnchanged folded into uniquedup (C only ORs them).
     if uniquedup {
         unported_phase2("_bt_bottomupdel_pass (bottom-up deletion lane)");
     }
@@ -1462,7 +1500,6 @@ unsafe fn bt_split<'mcx>(
         sbuf = Some(pin);
     }
 
-    // critical section: restore left image over origpage, then WAL.
     {
         let orig = page_of_mut(buf);
         // SAFETY: PageRestoreTempPage — whole-page overwrite under the
@@ -1810,7 +1847,6 @@ unsafe fn bt_newlevel<'mcx>(
     bt_tuple_set_downlink(left_ptr, lbkno);
     bt_tuple_set_natts(left_ptr, 0, false);
 
-    // right downlink: the left page's high key.
     let lpage = lbuf.page();
     let hk_id = lpage.item_id(P_HIKEY);
     let hk = page_item(&lpage, hk_id);
@@ -1819,7 +1855,6 @@ unsafe fn bt_newlevel<'mcx>(
     core::ptr::copy_nonoverlapping(hk, right_item.as_mut_ptr(), right_item_sz);
     bt_tuple_set_downlink(right_item.as_mut_ptr(), rbkno);
 
-    // critical section.
     if crate::page::page_meta(&metabuf.page()).btm_version < BTREE_NOVAC_VERSION {
         unported_phase2("_bt_upgrademetapage (v2/v3 pg_upgrade metapages)");
     }

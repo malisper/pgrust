@@ -1595,3 +1595,52 @@ const _: () = {
     assert!(TS_WORKBUF <= 256);
     assert!(MAXDATELEN + 1 >= 64);
 };
+
+pub fn timestamp_bin(stride: &Interval, timestamp: Timestamp, origin: Timestamp) -> PgResult<Timestamp> {
+    if TIMESTAMP_NOT_FINITE(timestamp) {
+        return Ok(timestamp);
+    }
+    if TIMESTAMP_NOT_FINITE(origin) {
+        return Err(Box::new(
+            PgError::error("origin out of range")
+                .with_sqlstate(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
+        ));
+    }
+    if stride.not_finite() {
+        return Err(Box::new(
+            PgError::error("timestamps cannot be binned into infinite intervals")
+                .with_sqlstate(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
+        ));
+    }
+    if stride.month != 0 {
+        return Err(Box::new(
+            PgError::error(
+                "timestamps cannot be binned into intervals containing months or years",
+            )
+            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+        ));
+    }
+    let stride_usecs = (stride.day as i64)
+        .checked_mul(USECS_PER_DAY)
+        .and_then(|v| v.checked_add(stride.time))
+        .ok_or_else(interval_out_of_range)?;
+    if stride_usecs <= 0 {
+        return Err(Box::new(
+            PgError::error("stride must be greater than zero")
+                .with_sqlstate(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
+        ));
+    }
+    let tm_diff = timestamp.checked_sub(origin).ok_or_else(interval_out_of_range)?;
+    let tm_modulo = tm_diff % stride_usecs;
+    let tm_delta = tm_diff - tm_modulo;
+    let mut result = origin + tm_delta;
+    // Rounds toward -infinity for negative non-multiple diffs; can overflow
+    // past the origin..timestamp range.
+    if tm_modulo < 0 {
+        result = match result.checked_sub(stride_usecs) {
+            Some(r) if IS_VALID_TIMESTAMP(r) => r,
+            _ => return Err(crate::timestamp_out_of_range()),
+        };
+    }
+    Ok(result)
+}

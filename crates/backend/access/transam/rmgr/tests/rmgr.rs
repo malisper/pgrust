@@ -117,22 +117,23 @@ fn get_rmgr_unregistered_errors_like_rmgr_not_found() {
 }
 
 #[test]
-#[should_panic(expected = "rmgr callback not ported: gin_redo — land backend-access-gin-xlog")]
+#[should_panic(expected = "rmgr callback not ported: tblspc_redo — land backend-commands-tablespace")]
 fn unported_redo_panics_loudly() {
     let mut record = xlogreader_seams::XLogReaderState::default();
-    let _ = (GetRmgr(RM_GIN_ID as u8).unwrap().rm_redo)(&mut record);
+    let _ = (GetRmgr(RM_TBLSPC_ID as u8).unwrap().rm_redo)(&mut record);
 }
 
 #[test]
-#[should_panic(expected = "btree_redo arm not ported: btree_xlog_vacuum")]
-fn btree_redo_vacuum_arm_panics_loudly() {
+fn btree_redo_unknown_opcode_errors_loudly() {
     let mut rec = xlogreader_seams::DecodedXLogRecord::default();
-    rec.xl_info = 0xC0;
+    rec.xl_info = 0xF0;
     let mut record = xlogreader_seams::XLogReaderState {
         record: Some(rec),
         ..Default::default()
     };
-    let _ = (GetRmgr(RM_BTREE_ID as u8).unwrap().rm_redo)(&mut record);
+    let err = (GetRmgr(RM_BTREE_ID as u8).unwrap().rm_redo)(&mut record)
+        .expect_err("unknown btree opcode must not redo silently");
+    assert!(err.message.contains("btree_redo: unknown op code"));
 }
 
 #[test]

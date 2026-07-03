@@ -129,6 +129,12 @@ pub struct Result<'mcx> {
     pub resconstantqual: Option<Node<'mcx>>,
 }
 
+#[derive(Default)]
+#[repr(C)]
+pub struct ProjectSet<'mcx> {
+    pub plan: Plan<'mcx>,
+}
+
 /// Abstract second-level base for all scan nodes (C never instantiates it).
 #[derive(Default)]
 #[repr(C)]
@@ -482,6 +488,14 @@ pub struct NestLoop<'mcx> {
     pub nestParams: NodeList<'mcx>,
 }
 
+/// nestParams cell: outer-Var source for one PARAM_EXEC slot the nestloop
+/// sets before each inner rescan.
+#[repr(C)]
+pub struct NestLoopParam<'mcx> {
+    pub paramno: i32,
+    pub paramval: Node<'mcx>,
+}
+
 /// Per-clause arrays parallel `mergeclauses` (C's `array_size(mergeclauses)`).
 #[derive(Default)]
 #[repr(C)]
@@ -603,6 +617,9 @@ unsafe impl NodeVariant<'_> for PlanInvalItem {
 unsafe impl<'mcx> NodeVariant<'mcx> for Result<'mcx> {
     const TAG: NodeTag = NodeTag::T_Result;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for ProjectSet<'mcx> {
+    const TAG: NodeTag = NodeTag::T_ProjectSet;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for SeqScan<'mcx> {
     const TAG: NodeTag = NodeTag::T_SeqScan;
 }
@@ -666,6 +683,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for Limit<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for NestLoop<'mcx> {
     const TAG: NodeTag = NodeTag::T_NestLoop;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for NestLoopParam<'mcx> {
+    const TAG: NodeTag = NodeTag::T_NestLoopParam;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for MergeJoin<'mcx> {
     const TAG: NodeTag = NodeTag::T_MergeJoin;
 }
@@ -686,6 +706,8 @@ unsafe impl NodeVariant<'_> for PlanRowMark {
 }
 // SAFETY: repr(C), Plan first (offset asserted below), tag in is_plan_tag.
 unsafe impl<'mcx> PlanVariant<'mcx> for Result<'mcx> {}
+// SAFETY: repr(C), Plan first (offset asserted below), tag in is_plan_tag.
+unsafe impl<'mcx> PlanVariant<'mcx> for ProjectSet<'mcx> {}
 // SAFETY: repr(C), Plan first via the Scan base (offsets asserted below).
 unsafe impl<'mcx> PlanVariant<'mcx> for SeqScan<'mcx> {}
 // SAFETY: repr(C), Plan first via the Scan base (offsets asserted below).
@@ -741,6 +763,10 @@ const _: () = {
     assert!(offset_of!(Result, plan) == 0);
     assert!(
         offset_of!(NodeRep<Result>, payload) == offset_of!(NodeRep<Plan>, payload)
+    );
+    assert!(offset_of!(ProjectSet, plan) == 0);
+    assert!(
+        offset_of!(NodeRep<ProjectSet>, payload) == offset_of!(NodeRep<Plan>, payload)
     );
     assert!(offset_of!(Scan, plan) == 0);
     assert!(offset_of!(SeqScan, scan) == 0);
@@ -830,6 +856,7 @@ fn is_plan_tag(tag: NodeTag) -> bool {
     matches!(
         tag,
         NodeTag::T_Result
+            | NodeTag::T_ProjectSet
             | NodeTag::T_SeqScan
             | NodeTag::T_IndexScan
             | NodeTag::T_IndexOnlyScan
@@ -867,6 +894,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_result(self) -> Option<&'mcx Result<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_project_set(self) -> Option<&'mcx ProjectSet<'mcx>> {
         self.as_variant()
     }
 
@@ -972,6 +1004,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_limit(self) -> Option<&'mcx Limit<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_nest_loop_param(self) -> Option<&'mcx NestLoopParam<'mcx>> {
         self.as_variant()
     }
 

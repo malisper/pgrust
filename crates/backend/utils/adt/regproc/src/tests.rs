@@ -40,6 +40,9 @@ fn install_fakes() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         miscinit_seams::get_user_id::set(|| ROLE_M);
+        namespace_seams::type_is_visible::set(|_| Ok(true));
+        namespace_seams::is_temp_namespace::set(|_| false);
+        syscache_seams::pg_type_typnamespace::set(|_| Ok(Some(11)));
         aclchk_seams::object_aclcheck::set(|_, _, _, _| Ok(0));
         aclchk_seams::aclcheck_error::set(|_, _, name| {
             Err(Box::new(PgError::error(format!("permission denied for schema {name}"))))
@@ -75,6 +78,7 @@ fn install_fakes() {
                         relkind: b'r' as i8,
                         relpersistence: b'p' as i8,
                         relispartition: false,
+                        relhassubclass: false,
                     }
                 })
             }))

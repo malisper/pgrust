@@ -6,6 +6,8 @@ publish.workspace = true
 
 [dependencies]
 datum = { path = "../../../../_support/types/datum" }
+funcapi = { path = "../../fmgr/funcapi" }
+types_nodes = { path = "../../../../_support/types/nodes" }
 hashfn = { path = "../../../../common/hashfn" }
 mcx = { path = "../../../../_support/mcx" }
 numutils = { path = "../numutils" }

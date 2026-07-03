@@ -1,0 +1,15 @@
+[package]
+name = "sequence_xlog"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_storage = { path = "../../../_support/types/types_storage" }
+xlogutils = { path = "../../access/transam/xlogutils" }
+xlogreader_seams = { path = "../../access/transam/xlogreader_seams" }
+bufmgr_seams = { path = "../../storage/buffer/bufmgr_seams" }

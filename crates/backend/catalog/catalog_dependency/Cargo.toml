@@ -6,8 +6,11 @@ publish.workspace = true
 
 [dependencies]
 dependency_seams = { path = "../dependency_seams" }
+sequence_seams = { path = "../../commands/sequence_seams" }
 catalog = { path = "../catalog" }
 catalog_heap = { path = "../catalog_heap" }
+catalog_namespace = { path = "../catalog_namespace" }
+format_type = { path = "../../utils/adt/format_type" }
 catalog_index = { path = "../catalog_index" }
 catalog_indexing = { path = "../catalog_indexing" }
 datum = { path = "../../../_support/types/datum" }
@@ -19,7 +22,9 @@ mcx = { path = "../../../_support/mcx" }
 init_small = { path = "../../utils/init/init_small" }
 types_nodes = { path = "../../../_support/types/nodes" }
 pg_attrdef = { path = "../pg_attrdef" }
+statscmds = { path = "../../commands/statscmds" }
 pg_constraint = { path = "../pg_constraint" }
+rewrite_define_seams = { path = "../../rewrite/rewrite_define_seams" }
 pg_depend = { path = "../pg_depend" }
 pg_type = { path = "../pg_type" }
 table = { path = "../../access/table/table" }

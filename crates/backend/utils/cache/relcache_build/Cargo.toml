@@ -21,10 +21,12 @@ types_tuple = { path = "../../../../_support/types/types_tuple" }
 tupdesc = { path = "../../../access/common/tupdesc" }
 table = { path = "../../../access/table/table" }
 genam = { path = "../../../access/index/genam" }
+detoast = { path = "../../../access/common/detoast" }
 varlena = { path = "../../../utils/adt/varlena" }
 cache_syscache = { path = "../cache_syscache" }
 relcache = { path = "../relcache" }
 relcache_build_seams = { path = "../relcache_build_seams" }
+typcache_seams = { path = "../typcache_seams" }
 fmgr_seams = { path = "../../fmgr/fmgr_seams" }
 types_fmgr = { path = "../../../../_support/types/fmgr" }
 catalog_seams = { path = "../../../catalog/catalog_seams" }

@@ -112,16 +112,29 @@ pub fn fc_uuid_extract_version(
     }
 }
 
-pub fn fc_gen_random_uuid(_flinfo: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    panic!("uuid: gen_random_uuid not ported (pg_strong_random unexported from tcop)");
+pub fn fc_gen_random_uuid(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let uuid = crate::gen_random_uuid()?;
+    byref_result(fcinfo.result_mcx(), &uuid)
 }
 
-pub fn fc_uuidv7(_flinfo: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    panic!("uuid: uuidv7 not ported (pg_strong_random unexported from tcop)");
+pub fn fc_uuidv7(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let uuid = crate::uuidv7()?;
+    byref_result(fcinfo.result_mcx(), &uuid)
 }
 
-pub fn fc_uuidv7_interval(_flinfo: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    panic!("uuid: uuidv7_interval not ported (pg_strong_random + timestamptz_pl_interval)");
+pub fn fc_uuidv7_interval(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog arg 0 of uuidv7_interval is a non-null interval
+    // (typlen 16, typalign d), live for the call.
+    let shift = unsafe {
+        let p = fcinfo.arg_ptr(0);
+        ::adt_datetime::Interval {
+            time: (p as *const i64).read_unaligned(),
+            day: (p.add(8) as *const i32).read_unaligned(),
+            month: (p.add(12) as *const i32).read_unaligned(),
+        }
+    };
+    let uuid = crate::uuidv7_interval(&shift)?;
+    byref_result(fcinfo.result_mcx(), &uuid)
 }
 
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {

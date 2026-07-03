@@ -20,6 +20,11 @@ use types_nodes::{Node, NodeList, NodeTag};
 #[cfg(test)]
 mod tests;
 
+pub mod node_funcs;
+pub use node_funcs::{
+    expr_collation, expr_is_null_constant, expr_location, expr_type, expr_typmod,
+};
+
 pub const QTW_IGNORE_RT_SUBQUERIES: u32 = 0x01;
 pub const QTW_IGNORE_CTE_SUBQUERIES: u32 = 0x02;
 pub const QTW_IGNORE_RC_SUBQUERIES: u32 = 0x03;
@@ -144,7 +149,19 @@ pub fn expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
         }
         NodeTag::T_NullTest => walk_opt(node.as_null_test().unwrap().arg, w),
         NodeTag::T_RelabelType => w.visit(node.as_relabel_type().unwrap().arg),
+        NodeTag::T_CollateExpr => w.visit(node.as_collate_expr().unwrap().arg),
         NodeTag::T_CoerceViaIO => w.visit(node.as_coerce_via_io().unwrap().arg),
+        NodeTag::T_BooleanTest => walk_opt(node.as_boolean_test().unwrap().arg, w),
+        NodeTag::T_DistinctExpr => {
+            let d = node.as_distinct_expr().unwrap();
+            walk_list(&d.args, w)
+        }
+        NodeTag::T_RowExpr => {
+            // C notes: don't examine row_typeid/colnames.
+            let r = node.as_row_expr().unwrap();
+            walk_list(&r.args, w)
+        }
+        NodeTag::T_CoerceToDomain => w.visit(node.as_coerce_to_domain().unwrap().arg),
         NodeTag::T_MinMaxExpr => {
             let mm = node.as_min_max_expr().unwrap();
             walk_list(&mm.args, w)
@@ -413,6 +430,10 @@ pub fn raw_expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
                 || walk_opt(wd.startOffset, w)?
                 || walk_opt(wd.endOffset, w)?)
         }
+        NodeTag::T_BooleanTest => walk_opt(node.as_boolean_test().unwrap().arg, w),
+        // C: "we assume the collname is uninteresting".
+        NodeTag::T_CollateClause => walk_opt(node.as_collate_clause().unwrap().arg, w),
+        NodeTag::T_RowExpr => walk_list(&node.as_row_expr().unwrap().args, w),
         NodeTag::T_List => walk_list(node.as_list().unwrap(), w),
         other => deferred("raw_expression_tree_walker", other),
     }
@@ -472,8 +493,16 @@ where
             };
             checker(opfuncid)
         }
-        t @ (NodeTag::T_DistinctExpr
-        | NodeTag::T_NullIfExpr
+        NodeTag::T_DistinctExpr => {
+            let d = node.as_distinct_expr().unwrap();
+            let opfuncid = if d.opfuncid == 0 {
+                lsyscache::operator::get_opcode(d.opno)?
+            } else {
+                d.opfuncid
+            };
+            checker(opfuncid)
+        }
+        t @ (NodeTag::T_NullIfExpr
         | NodeTag::T_RowCompareExpr) => deferred("check_functions_in_node", t),
         _ => Ok(false),
     }
@@ -530,6 +559,23 @@ where
         | NodeTag::T_NextValueExpr
         | NodeTag::T_RangeTblRef
         | NodeTag::T_SortGroupClause => Ok(None),
+        NodeTag::T_CoerceToDomain => {
+            let cd = node.as_coerce_to_domain().unwrap();
+            match m(cd.arg)? {
+                None => Ok(None),
+                Some(arg) => Ok(Some(Node::mk(
+                    mcx,
+                    types_nodes::CoerceToDomain {
+                        arg,
+                        resulttype: cd.resulttype,
+                        resulttypmod: cd.resulttypmod,
+                        resultcollid: cd.resultcollid,
+                        coercionformat: cd.coercionformat,
+                        location: cd.location,
+                    },
+                )?)),
+            }
+        }
         NodeTag::T_Aggref => {
             let a = node.as_variant::<Aggref>().unwrap();
             let args = mutate_list(mcx, &a.args, m)?;
@@ -707,6 +753,38 @@ where
                 )?)),
             }
         }
+        NodeTag::T_RangeTblFunction => {
+            let rtf = node.as_range_tbl_function().unwrap();
+            let funcexpr = match rtf.funcexpr {
+                Some(f) => m(f)?.map(Some),
+                None => None,
+            };
+            match funcexpr {
+                None => Ok(None),
+                Some(funcexpr) => Ok(Some(Node::mk(
+                    mcx,
+                    types_nodes::RangeTblFunction {
+                        funcexpr,
+                        funccolcount: rtf.funccolcount,
+                        funccolnames: rtf.funccolnames.clone_in(mcx)?,
+                        funccoltypes: rtf.funccoltypes.clone_in(mcx)?,
+                        funccoltypmods: rtf.funccoltypmods.clone_in(mcx)?,
+                        funccolcollations: rtf.funccolcollations.clone_in(mcx)?,
+                        funcparams: rtf.funcparams.clone_in(mcx)?,
+                    },
+                )?)),
+            }
+        }
+        NodeTag::T_CollateExpr => {
+            let c = node.as_collate_expr().unwrap();
+            match m(c.arg)? {
+                None => Ok(None),
+                Some(arg) => Ok(Some(Node::mk(
+                    mcx,
+                    types_nodes::primnodes::CollateExpr { arg, ..*c },
+                )?)),
+            }
+        }
         NodeTag::T_CoerceViaIO => {
             let c = node.as_coerce_via_io().unwrap();
             match m(c.arg)? {
@@ -732,6 +810,59 @@ where
                         nulltesttype: nt.nulltesttype,
                         argisrow: nt.argisrow,
                         location: nt.location,
+                    },
+                )?)),
+            }
+        }
+        NodeTag::T_DistinctExpr => {
+            let d = node.as_distinct_expr().unwrap();
+            match mutate_list(mcx, &d.args, m)? {
+                None => Ok(None),
+                Some(args) => Ok(Some(Node::mk(
+                    mcx,
+                    types_nodes::DistinctExpr {
+                        opno: d.opno,
+                        opfuncid: d.opfuncid,
+                        opresulttype: d.opresulttype,
+                        opretset: d.opretset,
+                        opcollid: d.opcollid,
+                        inputcollid: d.inputcollid,
+                        args,
+                        location: d.location,
+                    },
+                )?)),
+            }
+        }
+        NodeTag::T_BooleanTest => {
+            let bt = node.as_boolean_test().unwrap();
+            let arg = match bt.arg {
+                Some(a) => m(a)?,
+                None => None,
+            };
+            match arg {
+                None => Ok(None),
+                Some(arg) => Ok(Some(Node::mk(
+                    mcx,
+                    types_nodes::BooleanTest {
+                        arg: Some(arg),
+                        booltesttype: bt.booltesttype,
+                        location: bt.location,
+                    },
+                )?)),
+            }
+        }
+        NodeTag::T_RowExpr => {
+            let r = node.as_row_expr().unwrap();
+            match mutate_list(mcx, &r.args, m)? {
+                None => Ok(None),
+                Some(args) => Ok(Some(Node::mk(
+                    mcx,
+                    types_nodes::RowExpr {
+                        args,
+                        row_typeid: r.row_typeid,
+                        row_format: r.row_format,
+                        colnames: r.colnames.clone_in(mcx)?,
+                        location: r.location,
                     },
                 )?)),
             }
@@ -954,4 +1085,28 @@ where
         }
     }
     Ok(out)
+}
+
+/// C fix_opfuncids (nodeFuncs.c): planned-expression invariant that every
+/// OpExpr carries its opfuncid (readfuncs trees arrive filled; a zero memo
+/// is re-derived in place).
+pub fn fix_opfuncids(node: Node<'_>) -> PgResult<()> {
+    struct W;
+    impl<'mcx> NodeWalker<'mcx> for W {
+        fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+            if node.node_tag() == NodeTag::T_OpExpr {
+                let o = node.as_variant::<OpExpr>().unwrap();
+                if o.opfuncid == 0 {
+                    let opfuncid = lsyscache::operator::get_opcode(o.opno)?;
+                    // SAFETY: fix_opfuncids callers hold the just-read tree
+                    // exclusively; the shared borrow above has ended.
+                    unsafe {
+                        node.with_mut::<OpExpr, _>(|o| o.opfuncid = opfuncid).unwrap();
+                    }
+                }
+            }
+            expression_tree_walker(node, self)
+        }
+    }
+    W.visit(node).map(|_| ())
 }

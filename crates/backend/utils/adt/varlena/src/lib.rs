@@ -6,11 +6,14 @@
 //! catalog rows: position/substring/overlay/replace, split/format/concat/
 //! string_agg, name<->text + pattern ops, sortsupport abbreviation, regex
 //! tails, misc encoding. External/compressed images and non-C collations go
-//! through detoast_seams / pg_locale_seams (loud until those units land).
+//! through detoast_seams / pg_locale_seams.
 
 pub mod builtins;
+pub mod abbrev;
 pub mod bytea;
+pub mod concat_format;
 pub mod levenshtein;
+pub mod string_agg;
 #[cfg(test)]
 mod tests;
 
@@ -409,6 +412,266 @@ pub fn unknownsend<'mcx>(mcx: Mcx<'mcx>, s: &[u8]) -> PgResult<Bytea<'mcx>> {
     Ok(pqformat::pq_endtypsend(buf))
 }
 
+#[cold]
+#[inline(never)]
+fn field_position_zero() -> PgError {
+    PgError::error("field position must not be zero")
+        .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE)
+}
+
+pub struct TextPositionState<'a> {
+    str1: &'a [u8],
+    str2: &'a [u8],
+    is_multibyte_char_in_char: bool,
+    last_match: Option<usize>,
+    last_match_len: usize,
+    refpoint: usize,
+    refpos: i32,
+    skiptablemask: usize,
+    // Only 0..=skiptablemask is written; reads mask into that range (C leaves
+    // the tail uninitialized too).
+    skiptable: [core::mem::MaybeUninit<i32>; 256],
+}
+
+pub fn text_position_setup<'a>(
+    t1: &'a [u8],
+    t2: &'a [u8],
+    collid: Oid,
+) -> PgResult<TextPositionState<'a>> {
+    check_collation_set(collid)?;
+    if !collation_is_deterministic(collid)? {
+        panic!(
+            "text_position_setup (varlena.c): nondeterministic-collation search unported (pg_strncoll)"
+        );
+    }
+    let (len1, len2) = (t1.len(), t2.len());
+    debug_assert!(len2 > 0);
+    let is_multibyte_char_in_char = mbutils::pg_database_encoding_max_length() != 1
+        && mbutils::GetDatabaseEncoding() != wchar::PG_UTF8;
+
+    let mut state = TextPositionState {
+        str1: t1,
+        str2: t2,
+        is_multibyte_char_in_char,
+        last_match: None,
+        last_match_len: 0,
+        refpoint: 0,
+        refpos: 0,
+        skiptablemask: 0,
+        skiptable: [core::mem::MaybeUninit::uninit(); 256],
+    };
+
+    if len1 >= len2 && len2 > 1 {
+        let searchlength = len1 - len2;
+        let skiptablemask: usize = if searchlength < 16 {
+            3
+        } else if searchlength < 64 {
+            7
+        } else if searchlength < 128 {
+            15
+        } else if searchlength < 512 {
+            31
+        } else if searchlength < 2048 {
+            63
+        } else if searchlength < 4096 {
+            127
+        } else {
+            255
+        };
+        state.skiptablemask = skiptablemask;
+        for i in 0..=skiptablemask {
+            state.skiptable[i] = core::mem::MaybeUninit::new(len2 as i32);
+        }
+        let last = len2 - 1;
+        for i in 0..last {
+            state.skiptable[t2[i] as usize & skiptablemask] =
+                core::mem::MaybeUninit::new((last - i) as i32);
+        }
+    }
+    Ok(state)
+}
+
+fn text_position_next_internal(state: &TextPositionState<'_>, start: usize) -> Option<usize> {
+    let haystack = state.str1;
+    let needle = state.str2;
+    let needle_len = needle.len();
+    debug_assert!(needle_len > 0);
+
+    if needle_len == 1 {
+        let nchar = needle[0];
+        return haystack[start..].iter().position(|&b| b == nchar).map(|i| start + i);
+    }
+
+    let mask = state.skiptablemask;
+    let last = needle_len - 1;
+    let mut hptr = start + last;
+    while hptr < haystack.len() {
+        let mut nptr = last;
+        let mut p = hptr;
+        while haystack[p] == needle[nptr] {
+            if nptr == 0 {
+                return Some(p);
+            }
+            nptr -= 1;
+            p -= 1;
+        }
+        // SAFETY: the masked index is <= skiptablemask; setup initialized
+        // 0..=skiptablemask whenever this arm runs (len1 >= len2 && len2 > 1).
+        hptr +=
+            unsafe { state.skiptable[haystack[hptr] as usize & mask].assume_init() } as usize;
+    }
+    None
+}
+
+pub fn text_position_next(state: &mut TextPositionState<'_>) -> PgResult<bool> {
+    let needle_len = state.str2.len();
+    if needle_len == 0 {
+        return Ok(false);
+    }
+    let mut start_ptr = match state.last_match {
+        Some(m) => m + state.last_match_len,
+        None => 0,
+    };
+
+    'retry: loop {
+        let Some(matchptr) = text_position_next_internal(state, start_ptr) else {
+            return Ok(false);
+        };
+        if state.is_multibyte_char_in_char {
+            debug_assert!(state.refpoint <= matchptr);
+            while state.refpoint < matchptr {
+                state.refpoint += mbutils::pg_mblen_range(&state.str1[state.refpoint..])? as usize;
+                state.refpos += 1;
+                if state.refpoint > matchptr {
+                    start_ptr = state.refpoint;
+                    continue 'retry;
+                }
+            }
+        }
+        state.last_match = Some(matchptr);
+        state.last_match_len = needle_len;
+        return Ok(true);
+    }
+}
+
+pub fn text_position_get_match_off(state: &TextPositionState<'_>) -> usize {
+    state.last_match.expect("no match recorded")
+}
+
+pub fn text_position_get_match_len(state: &TextPositionState<'_>) -> usize {
+    state.last_match_len
+}
+
+pub fn text_position_get_match_pos(state: &mut TextPositionState<'_>) -> i32 {
+    let m = state.last_match.expect("no match recorded");
+    state.refpos += mbutils::pg_mbstrlen_with_len(&state.str1[state.refpoint..m]);
+    state.refpoint = m;
+    state.refpos + 1
+}
+
+pub fn text_position_reset(state: &mut TextPositionState<'_>) {
+    state.last_match = None;
+    state.refpoint = 0;
+    state.refpos = 0;
+}
+
+pub fn text_position(t1: &[u8], t2: &[u8], collid: Oid) -> PgResult<i32> {
+    check_collation_set(collid)?;
+    if t2.is_empty() {
+        return Ok(1);
+    }
+    if t1.len() < t2.len() && collation_is_deterministic(collid)? {
+        return Ok(0);
+    }
+    let mut state = text_position_setup(t1, t2, collid)?;
+    if !text_position_next(&mut state)? {
+        return Ok(0);
+    }
+    Ok(text_position_get_match_pos(&mut state))
+}
+
+pub fn textpos(t1: &[u8], t2: &[u8], collid: Oid) -> PgResult<i32> {
+    text_position(t1, t2, collid)
+}
+
+pub fn split_part<'mcx>(
+    mcx: Mcx<'mcx>,
+    inputstring: &[u8],
+    fldsep: &[u8],
+    fldnum: i32,
+    collid: Oid,
+) -> PgResult<Varlena<'mcx>> {
+    let mut fldnum = fldnum;
+    if fldnum == 0 {
+        return Err(field_position_zero().into());
+    }
+    if inputstring.is_empty() {
+        return cstring_to_text(mcx, b"");
+    }
+    if fldsep.is_empty() {
+        return if fldnum == 1 || fldnum == -1 {
+            cstring_to_text(mcx, inputstring)
+        } else {
+            cstring_to_text(mcx, b"")
+        };
+    }
+
+    let mut state = text_position_setup(inputstring, fldsep, collid)?;
+    let mut found = text_position_next(&mut state)?;
+    if !found {
+        return if fldnum == 1 || fldnum == -1 {
+            cstring_to_text(mcx, inputstring)
+        } else {
+            cstring_to_text(mcx, b"")
+        };
+    }
+
+    if fldnum < 0 {
+        let mut numfields = 2i32;
+        while text_position_next(&mut state)? {
+            numfields += 1;
+        }
+        if fldnum == -1 {
+            let start = text_position_get_match_off(&state) + state.last_match_len;
+            return cstring_to_text(mcx, &inputstring[start..]);
+        }
+        fldnum += numfields + 1;
+        if fldnum <= 0 {
+            return cstring_to_text(mcx, b"");
+        }
+        text_position_reset(&mut state);
+        found = text_position_next(&mut state)?;
+        debug_assert!(found);
+    }
+
+    let mut start_ptr = 0usize;
+    let mut end_ptr = text_position_get_match_off(&state);
+    loop {
+        if !found {
+            break;
+        }
+        fldnum -= 1;
+        if fldnum <= 0 {
+            break;
+        }
+        start_ptr = end_ptr + state.last_match_len;
+        found = text_position_next(&mut state)?;
+        if found {
+            end_ptr = text_position_get_match_off(&state);
+        }
+    }
+
+    if fldnum > 0 {
+        if fldnum == 1 {
+            cstring_to_text(mcx, &inputstring[start_ptr..])
+        } else {
+            cstring_to_text(mcx, b"")
+        }
+    } else {
+        cstring_to_text(mcx, &inputstring[start_ptr..end_ptr])
+    }
+}
+
 // C: int bytea_output = BYTEA_OUTPUT_HEX (guc_tables binds its variable here).
 use std::cell::Cell;
 
@@ -505,4 +768,104 @@ pub fn split_identifier_string(
             return Ok(Some(namelist));
         }
     }
+}
+
+#[cold]
+fn invalid_surrogate_pair() -> Box<PgError> {
+    Box::new(
+        PgError::error("invalid Unicode surrogate pair")
+            .with_sqlstate(types_error::ERRCODE_SYNTAX_ERROR),
+    )
+}
+
+#[cold]
+fn invalid_codepoint(unicode: u32) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!("invalid Unicode code point: {unicode:04X}"))
+            .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE),
+    )
+}
+
+#[cold]
+fn invalid_unicode_escape() -> Box<PgError> {
+    Box::new(
+        PgError::error("invalid Unicode escape")
+            .with_sqlstate(types_error::ERRCODE_SYNTAX_ERROR)
+            .with_hint("Unicode escapes must be \\XXXX, \\+XXXXXX, \\uXXXX, or \\UXXXXXXXX."),
+    )
+}
+
+fn hexval_n(s: &[u8], n: usize) -> Option<u32> {
+    let mut v = 0u32;
+    for &c in s.get(..n)? {
+        v = (v << 4) | (c as char).to_digit(16)?;
+    }
+    Some(v)
+}
+
+pub fn unistr<'mcx>(mcx: Mcx<'mcx>, input: &[u8]) -> PgResult<Varlena<'mcx>> {
+    use wchar::{
+        is_utf16_surrogate_first, is_utf16_surrogate_second, is_valid_unicode_codepoint,
+        surrogate_pair_to_codepoint,
+    };
+    let mut out: PgVec<'mcx, u8> = image_with_header(mcx, 0)?;
+    let mut s = input;
+    let mut pair_first: u32 = 0;
+
+    while let Some(&c0) = s.first() {
+        if c0 == b'\\' {
+            let (unicode, adv) = if s.get(1) == Some(&b'\\') {
+                if pair_first != 0 {
+                    return Err(invalid_surrogate_pair());
+                }
+                mcx::vec_append_bytes(&mut out, b"\\")?;
+                s = &s[2..];
+                continue;
+            } else if let Some(u) = hexval_n(&s[1..], 4) {
+                (u, 5)
+            } else if s.get(1) == Some(&b'u') && hexval_n(&s[2..], 4).is_some() {
+                (hexval_n(&s[2..], 4).expect("checked"), 6)
+            } else if s.get(1) == Some(&b'+') && hexval_n(&s[2..], 6).is_some() {
+                (hexval_n(&s[2..], 6).expect("checked"), 8)
+            } else if s.get(1) == Some(&b'U') && hexval_n(&s[2..], 8).is_some() {
+                (hexval_n(&s[2..], 8).expect("checked"), 10)
+            } else {
+                return Err(invalid_unicode_escape());
+            };
+
+            if !is_valid_unicode_codepoint(unicode) {
+                return Err(invalid_codepoint(unicode));
+            }
+            let mut unicode = unicode;
+            if pair_first != 0 {
+                if is_utf16_surrogate_second(unicode) {
+                    unicode = surrogate_pair_to_codepoint(pair_first, unicode);
+                    pair_first = 0;
+                } else {
+                    return Err(invalid_surrogate_pair());
+                }
+            } else if is_utf16_surrogate_second(unicode) {
+                return Err(invalid_surrogate_pair());
+            }
+
+            if is_utf16_surrogate_first(unicode) {
+                pair_first = unicode;
+            } else {
+                let cbuf = mbutils::pg_unicode_to_server(mcx, unicode)?;
+                mcx::vec_append_bytes(&mut out, &cbuf)?;
+            }
+            s = &s[adv..];
+        } else {
+            if pair_first != 0 {
+                return Err(invalid_surrogate_pair());
+            }
+            mcx::vec_append_bytes(&mut out, &[c0])?;
+            s = &s[1..];
+        }
+    }
+
+    if pair_first != 0 {
+        return Err(invalid_surrogate_pair());
+    }
+    Ok(Varlena::from_image(out))
 }

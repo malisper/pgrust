@@ -22,5 +22,8 @@ storage_xlog = { path = "../storage_xlog" }
 xloginsert = { path = "../../access/transam/xloginsert" }
 xlogutils = { path = "../../access/transam/xlogutils" }
 guc_tables = { path = "../../utils/misc/guc_tables" }
+visibilitymap = { path = "../../access/heap/visibilitymap" }
+freespace = { path = "../../storage/freespace/freespace" }
+lmgr_proc = { path = "../../storage/lmgr/lmgr_proc" }
 
 [dev-dependencies]

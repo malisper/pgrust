@@ -1,5 +1,6 @@
 #![allow(non_snake_case)]
 
+mod range_typanalyze;
 pub mod sampling;
 
 use datum::Datum;
@@ -36,8 +37,6 @@ const ANUM_PG_STATISTIC_STAVALUES1: usize = 27;
 
 const FLOAT4OID: Oid = 700;
 const WIDTH_THRESHOLD: usize = 1024;
-// default_statistics_target GUC; unregistered in guc_tables, boot default.
-const DEFAULT_STATISTICS_TARGET: i32 = 100;
 
 const SHARE_UPDATE_EXCLUSIVE_LOCK: types_rel::LOCKMODE = 4;
 const ROW_EXCLUSIVE_LOCK: types_rel::LOCKMODE = 3;
@@ -50,6 +49,7 @@ pub struct VacuumParams {
 enum ComputeStats {
     Scalar,
     Trivial,
+    Range { is_multirange: bool },
 }
 
 struct StdAnalyzeData {
@@ -57,7 +57,7 @@ struct StdAnalyzeData {
     ltopr: Oid,
 }
 
-struct VacAttrStats<'mcx> {
+pub(crate) struct VacAttrStats<'mcx> {
     tupattnum: i32,
     attstattarget: i32,
     attrtypid: Oid,
@@ -78,6 +78,9 @@ struct VacAttrStats<'mcx> {
     stacoll: [Oid; STATISTIC_NUM_SLOTS],
     stanumbers: [PgVec<'mcx, f32>; STATISTIC_NUM_SLOTS],
     stavalues: [PgVec<'mcx, Datum>; STATISTIC_NUM_SLOTS],
+    // C's stavalues-vs-NULL distinction: an empty stored array (range length
+    // histogram) is not a NULL column.
+    stavalues_set: [bool; STATISTIC_NUM_SLOTS],
     statypid: [Oid; STATISTIC_NUM_SLOTS],
     statyplen: [i16; STATISTIC_NUM_SLOTS],
     statypbyval: [bool; STATISTIC_NUM_SLOTS],
@@ -221,12 +224,27 @@ fn do_analyze_rel(
         }
     }
 
-    // ComputeExtStatisticsRows: no CREATE STATISTICS lane, so no extended
-    // statistics objects can exist; contributes 0.
+    let mut colstats: PgVec<'_, statistics::ColStats> = PgVec::new_in(anl_mcx);
+    for s in vacattrstats.iter() {
+        colstats.push(statistics::ColStats {
+            tupattnum: s.tupattnum,
+            attstattarget: s.attstattarget,
+            attrtypid: s.attrtypid,
+            attrcollid: s.attrcollid,
+            typlen: s.typlen,
+            typbyval: s.typbyval,
+        });
+    }
+
     let mut targrows: i32 = 100;
     for s in vacattrstats.iter() {
         targrows = targrows.max(s.minrows);
     }
+    targrows = targrows.max(statistics::ComputeExtStatisticsRows(
+        anl_mcx,
+        onerel.rd_id,
+        &colstats,
+    )?);
 
     let mut totalrows = 0.0f64;
     let mut totaldeadrows = 0.0f64;
@@ -250,10 +268,24 @@ fn do_analyze_rel(
                 ComputeStats::Trivial => {
                     compute_trivial_stats(s, tupdesc, &rows, numrows)?
                 }
+                ComputeStats::Range { is_multirange } => {
+                    range_typanalyze::compute_range_stats(
+                        anl_mcx, s, is_multirange, tupdesc, &rows, numrows, totalrows,
+                    )?
+                }
             }
             col_cx.reset();
         }
         update_attstats(onerel.rd_id, false, &vacattrstats)?;
+
+        statistics::BuildRelationExtStatistics(
+            anl_mcx,
+            onerel,
+            false,
+            totalrows,
+            &rows[..numrows as usize],
+            &colstats,
+        )?;
     }
 
     let (relallvisible, relallfrozen) = visibilitymap::visibilitymap_count(onerel)?;
@@ -293,9 +325,6 @@ fn examine_attribute<'mcx>(
         return Ok(None);
     }
     let typanalyze = syscache_seams::pg_type_typanalyze::call(attr.atttypid)?;
-    if typanalyze != InvalidOid {
-        panic!("examine_attribute (analyze.c): custom typanalyze {typanalyze}; typanalyze lane");
-    }
     let ty = syscache_seams::lookup_pg_type_shape::call(attr.atttypid)?
         .expect("attribute type row");
 
@@ -331,13 +360,30 @@ fn examine_attribute<'mcx>(
             PgVec::new_in(mcx),
             PgVec::new_in(mcx),
         ],
+        stavalues_set: [false; STATISTIC_NUM_SLOTS],
         statypid: [attr.atttypid; STATISTIC_NUM_SLOTS],
         statyplen: [ty.typlen; STATISTIC_NUM_SLOTS],
         statypbyval: [ty.typbyval; STATISTIC_NUM_SLOTS],
         statypalign: [ty.typalign as u8; STATISTIC_NUM_SLOTS],
     };
 
-    if !std_typanalyze(&mut stats)? {
+    // Closed-set typanalyze dispatch (rule 4): std, range 3916, multirange
+    // 4242; anything else is an unported analyze lane.
+    let ok = match typanalyze {
+        InvalidOid => std_typanalyze(&mut stats)?,
+        3916 => {
+            stats.compute = ComputeStats::Range { is_multirange: false };
+            range_typanalyze::setup(&mut stats)?
+        }
+        4242 => {
+            stats.compute = ComputeStats::Range { is_multirange: true };
+            range_typanalyze::setup(&mut stats)?
+        }
+        other => {
+            panic!("examine_attribute (analyze.c): custom typanalyze {other}; typanalyze lane")
+        }
+    };
+    if !ok {
         return Ok(None);
     }
     Ok(Some(stats))
@@ -345,7 +391,7 @@ fn examine_attribute<'mcx>(
 
 fn std_typanalyze(stats: &mut VacAttrStats<'_>) -> PgResult<bool> {
     if stats.attstattarget < 0 {
-        stats.attstattarget = DEFAULT_STATISTICS_TARGET;
+        stats.attstattarget = guc_tables::vars::default_statistics_target.read();
     }
     let entry = typcache::lookup_type_cache(
         stats.attrtypid,
@@ -470,7 +516,7 @@ fn copy_slot_tuple<'mcx>(mcx: Mcx<'mcx>, slot: &SlotData<'mcx>) -> PgResult<Heap
     Ok(unsafe { HeapTupleData::from_raw_parts(ptr, len, tid, oid) })
 }
 
-fn fetch_attr(
+pub(crate) fn fetch_attr(
     row: &HeapTupleData<'_>,
     attnum: i32,
     tupdesc: &TupleDescData<'_>,
@@ -481,7 +527,7 @@ fn fetch_attr(
     (d, isnull)
 }
 
-fn varlena_stored_size(d: Datum) -> usize {
+pub(crate) fn varlena_stored_size(d: Datum) -> usize {
     let p = d.as_usize() as *const u8;
     // SAFETY: non-null varlena datum.
     let b0 = unsafe { *p };
@@ -731,6 +777,7 @@ fn compute_scalar_stats<'mcx>(
             stats.stacoll[slot_idx] = stats.attrcollid;
             stats.stanumbers[slot_idx] = mcv_freqs;
             stats.stavalues[slot_idx] = mcv_values;
+            stats.stavalues_set[slot_idx] = true;
             slot_idx += 1;
         }
 
@@ -793,6 +840,7 @@ fn compute_scalar_stats<'mcx>(
             stats.staop[slot_idx] = stats.extra.ltopr;
             stats.stacoll[slot_idx] = stats.attrcollid;
             stats.stavalues[slot_idx] = hist_values;
+            stats.stavalues_set[slot_idx] = true;
             slot_idx += 1;
         }
 
@@ -925,6 +973,11 @@ fn update_attstats(relid: Oid, inh: bool, vacattrstats: &[VacAttrStats<'_>]) -> 
                 )?;
                 values[i] = Datum::from_usize(img.as_ptr() as usize);
                 images.push(img);
+            } else if stats.stavalues_set[k] {
+                let img =
+                    datum::array_build::construct_empty_array_image(mcx, stats.statypid[k])?;
+                values[i] = Datum::from_usize(img.as_ptr() as usize);
+                images.push(img);
             } else {
                 nulls[i] = true;
             }
@@ -1053,4 +1106,15 @@ mod tests {
         let counts = [15000, 9000, 6000];
         assert_eq!(analyze_mcv_list(&counts, 3, 103.0, 0.0, 30000, 1_000_000.0), 3);
     }
+}
+
+static DEFAULT_STATISTICS_TARGET: std::sync::atomic::AtomicI32 =
+    std::sync::atomic::AtomicI32::new(100);
+
+pub fn init_seams() {
+    use std::sync::atomic::Ordering::Relaxed;
+    guc_tables::vars::default_statistics_target.install(guc_tables::GucVarAccessors {
+        get: || DEFAULT_STATISTICS_TARGET.load(Relaxed),
+        set: |v| DEFAULT_STATISTICS_TARGET.store(v, Relaxed),
+    });
 }

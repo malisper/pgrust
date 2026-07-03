@@ -233,6 +233,7 @@ fn install_xact_periphery_seams() {
     multixact_seams::multi_xact_id_is_running::set(|_, _| Ok(false));
     pg_enum_seams::at_eoxact_enum::set(|| {});
     relcache_seams::at_eoxact_relation_cache::set(|_| Ok(()));
+    relcache_seams::relation_get_stat_ext_list::set(|mcx, _relid| Ok(mcx::PgVec::new_in(mcx)));
     typcache_seams::at_eoxact_type_cache::set(|| {});
     logical_seams::reset_logical_streaming_state::set(|| {});
     snapbuild_seams::snap_build_reset_exported_snapshot_state::set(|| {});
@@ -248,6 +249,7 @@ fn install_xact_periphery_seams() {
     backend_status_seams::pgstat_report_xact_timestamp::set(|_| {});
     backend_status_seams::pgstat_report_query_id::set(|_, _| {});
     backend_status_seams::pgstat_report_plan_id::set(|_, _| {});
+    backend_status_seams::pgstat_clear_backend_status_snapshot::set(|| {});
     backend_progress_seams::pgstat_progress_end_command::set(|| {});
     predicate_seams::pre_commit_check_for_serialization_failure::set(|| Ok(()));
     predicate_seams::register_predicate_locking_xid::set(|_| Ok(()));
@@ -348,11 +350,12 @@ fn test_relation<'mcx>(mcx: Mcx<'mcx>) -> RelationData<'mcx> {
         rd_options: None,
         pgstat_enabled: Cell::new(false),
         rd_amcache: Default::default(),
-        rd_amcache_hash: Default::default(),
+        rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(), rd_amcache_spgist: Default::default(),
+        rd_support: PgVec::new_in(mcx),
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
-            rd_hastriggers: false,
+            rd_hastriggers: false, rd_hasrules: false,
     }
 }
 

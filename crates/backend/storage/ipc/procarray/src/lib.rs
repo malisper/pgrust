@@ -18,7 +18,8 @@ use types_error::{PgError, PgResult, ERRCODE_TOO_MANY_CONNECTIONS, FATAL};
 use types_snapshot::SnapshotData;
 use types_storage::storage::{
     SyncCell, NUM_AUXILIARY_PROCS, PGPROC, PGPROC_MAX_CACHED_SUBXIDS,
-    PROC_AFFECTS_ALL_HORIZONS, PROC_IN_LOGICAL_DECODING, PROC_IN_VACUUM, PROC_VACUUM_STATE_MASK,
+    PROC_AFFECTS_ALL_HORIZONS, PROC_IN_LOGICAL_DECODING, PROC_IN_VACUUM, PROC_IS_AUTOVACUUM,
+    PROC_VACUUM_STATE_MASK,
 };
 
 mod running;
@@ -311,6 +312,53 @@ pub fn ProcArrayRemove(procno: ProcNumber, latestXid: TransactionId) -> PgResult
 
     LWLockRelease(XidGenLock())?;
     LWLockRelease(ProcArrayLock())
+}
+
+/// (xid, xmin, nsubxid, overflowed); may be out of date arbitrarily quickly.
+pub fn ProcNumberGetTransactionIds(
+    procNumber: ProcNumber,
+) -> (TransactionId, TransactionId, i32, bool) {
+    if procNumber < 0 || procNumber as usize >= ProcGlobal().allProcs.len() {
+        return (InvalidTransactionId, InvalidTransactionId, 0, false);
+    }
+    let proc = GetPGProcByNumber(procNumber);
+    let myprocno = MyProc().expect("ProcNumberGetTransactionIds requires MyProc");
+
+    LWLockAcquire(ProcArrayLock(), LW_SHARED, myprocno).expect("ProcArrayLock");
+    let result = if proc.pid.load(Relaxed) != 0 {
+        let substate = proc.subxidStatus.get();
+        (
+            proc.xid.read(),
+            proc.xmin.read(),
+            substate.count as i32,
+            substate.overflowed,
+        )
+    } else {
+        (InvalidTransactionId, InvalidTransactionId, 0, false)
+    };
+    LWLockRelease(ProcArrayLock()).expect("ProcArrayLock release");
+    result
+}
+
+pub fn BackendPidGetProc(pid: i32) -> Option<&'static PGPROC> {
+    if pid == 0 {
+        return None; // never match dummy PGPROCs
+    }
+    let arrayP = procArray();
+    let hdr = ProcGlobal();
+    let myprocno = MyProc().expect("BackendPidGetProc requires MyProc");
+
+    LWLockAcquire(ProcArrayLock(), LW_SHARED, myprocno).expect("ProcArrayLock");
+    let mut result = None;
+    for index in 0..arrayP.numProcs.get() as usize {
+        let proc = &hdr.allProcs[arrayP.pgprocnos[index].get() as usize];
+        if proc.pid.load(Relaxed) == pid {
+            result = Some(proc);
+            break;
+        }
+    }
+    LWLockRelease(ProcArrayLock()).expect("ProcArrayLock release");
+    result
 }
 
 pub fn ProcArrayEndTransaction(procno: ProcNumber, latestXid: TransactionId) -> PgResult<()> {
@@ -887,6 +935,7 @@ fn transaction_id_is_in_progress_scan(xid: TransactionId) -> PgResult<bool> {
 
 struct ComputeXidHorizonsResult {
     latest_completed: FullTransactionId,
+    oldest_considered_running: TransactionId,
     shared_oldest_nonremovable: TransactionId,
     catalog_oldest_nonremovable: TransactionId,
     data_oldest_nonremovable: TransactionId,
@@ -919,6 +968,7 @@ fn ComputeXidHorizons() -> PgResult<ComputeXidHorizonsResult> {
 
     let mut h = ComputeXidHorizonsResult {
         latest_completed,
+        oldest_considered_running: initial,
         shared_oldest_nonremovable: initial,
         catalog_oldest_nonremovable: InvalidTransactionId,
         data_oldest_nonremovable: initial,
@@ -942,6 +992,9 @@ fn ComputeXidHorizons() -> PgResult<ComputeXidHorizonsResult> {
         if !TransactionIdIsValid(xmin) {
             continue;
         }
+        // Never skip a proc for running-ness (C: vacuum/decoding still run).
+        h.oldest_considered_running =
+            TransactionIdOlder(h.oldest_considered_running, xmin);
         if status_flags & (PROC_IN_VACUUM | PROC_IN_LOGICAL_DECODING) != 0 {
             continue;
         }
@@ -965,6 +1018,12 @@ fn ComputeXidHorizons() -> PgResult<ComputeXidHorizonsResult> {
         TransactionIdOlder(h.shared_oldest_nonremovable, slot_catalog_xmin);
     h.catalog_oldest_nonremovable =
         TransactionIdOlder(h.data_oldest_nonremovable, slot_catalog_xmin);
+    h.oldest_considered_running =
+        TransactionIdOlder(h.oldest_considered_running, h.shared_oldest_nonremovable);
+    h.oldest_considered_running =
+        TransactionIdOlder(h.oldest_considered_running, h.catalog_oldest_nonremovable);
+    h.oldest_considered_running =
+        TransactionIdOlder(h.oldest_considered_running, h.data_oldest_nonremovable);
 
     GlobalVisUpdateApply(&h);
     Ok(h)
@@ -1102,12 +1161,149 @@ pub fn GlobalVisCheckRemovableFullXid(
     GlobalVisTestIsRemovableFullXid(GlobalVisTestFor(rel), fxid)
 }
 
+pub fn GetOldestActiveTransactionId() -> PgResult<TransactionId> {
+    debug_assert!(!transam_xlog_seams::recovery_in_progress::call());
+    let arrayP = procArray();
+    let hdr = ProcGlobal();
+    let my_procno = MyProc().expect("no MyProc");
+
+    LWLockAcquire(XidGenLock(), LW_SHARED, my_procno)?;
+    let mut oldest_running =
+        FullTransactionId::from_u64(TransamVariables().nextXid.load(Relaxed)).xid();
+    LWLockRelease(XidGenLock())?;
+
+    LWLockAcquire(ProcArrayLock(), LW_SHARED, my_procno)?;
+    for index in 0..arrayP.numProcs.get() as usize {
+        let xid = hdr.xids[index].read();
+        if !TransactionIdIsNormal(xid) {
+            continue;
+        }
+        if TransactionIdPrecedes(xid, oldest_running) {
+            oldest_running = xid;
+        }
+        // Subtransaction xids never precede their top xid; no subxid walk (C).
+    }
+    LWLockRelease(ProcArrayLock())?;
+    Ok(oldest_running)
+}
+
+pub fn GetOldestTransactionIdConsideredRunning() -> PgResult<TransactionId> {
+    Ok(ComputeXidHorizons()?.oldest_considered_running)
+}
+
+// Seam shape folds C's GetVirtualXIDsDelayingChkpt snapshot + the
+// HaveVirtualXIDsDelayingChkpt recheck into one "any current holder" probe.
+pub fn HaveVirtualXIDsDelayingChkpt(delay_type: i32) -> bool {
+    debug_assert!(delay_type != 0);
+    let arrayP = procArray();
+    let hdr = ProcGlobal();
+    let my_procno = MyProc().expect("no MyProc");
+
+    LWLockAcquire(ProcArrayLock(), LW_SHARED, my_procno)
+        .expect("ProcArrayLock for HaveVirtualXIDsDelayingChkpt");
+    let mut result = false;
+    for index in 0..arrayP.numProcs.get() as usize {
+        let pgprocno = arrayP.pgprocnos[index].get();
+        let proc = &hdr.allProcs[pgprocno as usize];
+        if proc.delayChkptFlags.load(Relaxed) & delay_type != 0
+            && proc.vxid.lxid.load(Relaxed) != InvalidLocalTransactionId
+        {
+            result = true;
+            break;
+        }
+    }
+    let _ = LWLockRelease(ProcArrayLock());
+    result
+}
+
+pub fn CountDBConnections(databaseid: types_core::Oid) -> PgResult<i32> {
+    let arrayP = procArray();
+    let hdr = ProcGlobal();
+    let mut count = 0;
+
+    LWLockAcquire(ProcArrayLock(), LW_SHARED, MyProc().expect("no MyProc"))?;
+    for index in 0..arrayP.numProcs.get() as usize {
+        let pgprocno = arrayP.pgprocnos[index].get();
+        let proc = &hdr.allProcs[pgprocno as usize];
+        if proc.pid.load(Relaxed) == 0 {
+            continue;
+        }
+        if !proc.isRegularBackend.load(Relaxed) {
+            continue;
+        }
+        if databaseid == types_core::InvalidOid || proc.databaseId.load(Relaxed) == databaseid {
+            count += 1;
+        }
+    }
+    LWLockRelease(ProcArrayLock())?;
+    Ok(count)
+}
+
+// C sends SIGTERM to conflicting autovacuum workers each try; no autovacuum
+// exists here, so the walk-and-retry loop is kept without the kill step.
+pub fn CountOtherDBBackends(databaseid: types_core::Oid) -> PgResult<Option<(i32, i32)>> {
+    let arrayP = procArray();
+    let hdr = ProcGlobal();
+    let my_procno = MyProc().expect("no MyProc");
+
+    let mut nbackends = 0;
+    let mut nprepared = 0;
+    for _ in 0..50 {
+        postgres_seams::check_for_interrupts::call()?;
+
+        nbackends = 0;
+        nprepared = 0;
+        let mut found = false;
+
+        LWLockAcquire(ProcArrayLock(), LW_SHARED, my_procno)?;
+        for index in 0..arrayP.numProcs.get() as usize {
+            let pgprocno = arrayP.pgprocnos[index].get();
+            let proc = &hdr.allProcs[pgprocno as usize];
+            if proc.databaseId.load(Relaxed) != databaseid {
+                continue;
+            }
+            if pgprocno == my_procno {
+                continue;
+            }
+            found = true;
+            if proc.pid.load(Relaxed) == 0 {
+                nprepared += 1;
+            } else {
+                // C SIGTERMs conflicting autovacuum workers here; none exist
+                // yet — trip if one ever does rather than wait out the 5s.
+                debug_assert!(
+                    hdr.statusFlags[index].load(Relaxed) & PROC_IS_AUTOVACUUM == 0,
+                    "CountOtherDBBackends: autovacuum SIGTERM step unported"
+                );
+                nbackends += 1;
+            }
+        }
+        LWLockRelease(ProcArrayLock())?;
+
+        if !found {
+            return Ok(None);
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    // Timed out: C returns the counts from the final try, no recount.
+    Ok(Some((nbackends, nprepared)))
+}
+
 pub fn init_seams() {
     procarray_seams::proc_array_add::set(ProcArrayAdd);
     procarray_seams::proc_array_remove::set(ProcArrayRemove);
     procarray_seams::proc_array_end_transaction::set(ProcArrayEndTransaction);
     procarray_seams::transaction_id_is_in_progress::set(TransactionIdIsInProgress);
     procarray_seams::xid_cache_remove_running_xids::set(XidCacheRemoveRunningXids);
+    procarray_seams::count_db_connections::set(CountDBConnections);
+    procarray_seams::get_oldest_active_transaction_id::set(|| {
+        GetOldestActiveTransactionId().expect("GetOldestActiveTransactionId")
+    });
+    procarray_seams::get_oldest_transaction_id_considered_running::set(|| {
+        GetOldestTransactionIdConsideredRunning().expect("GetOldestTransactionIdConsideredRunning")
+    });
+    procarray_seams::have_virtual_xids_delaying_chkpt::set(HaveVirtualXIDsDelayingChkpt);
     // Tests pre-install controllable global-vis fakes; keep them.
     if !procarray_seams::global_vis_test_for::is_installed() {
         procarray_seams::global_vis_test_for::set(GlobalVisTestFor);
