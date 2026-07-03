@@ -113,6 +113,17 @@ impl<'mcx> CteScanState<'mcx> {
     }
 }
 
+/// show_ctescan_info's leader->cte_table read (the shared estate slot here).
+pub fn storage_stats(
+    node: &CteScanState<'_>,
+    estate: &mut EStateData<'_>,
+) -> Option<types_core::instrument::TuplestoreInstrumentation> {
+    estate
+        .cte_shared_slot(node.cte_param as usize)
+        .as_mut()
+        .map(|shared| shared.tuplestore.get_stats())
+}
+
 pub fn exec_cte_scan<'mcx>(
     node: &mut CteScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -167,6 +178,7 @@ pub fn exec_init_cte_scan<'mcx>(
         ss_currentRelation: None,
         ss_currentScanDesc: None,
         ss_ScanTupleSlot,
+        instr_idx: None,
     };
     execscan::exec_assign_scan_projection_info(mcx, estate, &mut ss, &node.scan.plan.targetlist)?;
     ss.qual = exec_init_qual(mcx, &node.scan.plan.qual, estate.param_bind())?;

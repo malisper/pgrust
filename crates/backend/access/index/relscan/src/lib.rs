@@ -161,6 +161,8 @@ pub struct IndexScanDescData<'mcx> {
     pub xs_pgstat_index_tuples: u64,
     pub xs_pgstat_heap_fetches: u64,
     pub xs_pgstat_index_scans: u64,
+    // C IndexScanInstrumentation.nsearches (pgstat-independent; EXPLAIN reads it).
+    pub xs_nsearches: u64,
 }
 
 // ScanKeyData is droppy (sk_func.fn_extra): plain reserve, not arena helpers.
@@ -205,5 +207,6 @@ pub fn relation_get_index_scan<'mcx>(
         xs_pgstat_index_tuples: 0,
         xs_pgstat_heap_fetches: 0,
         xs_pgstat_index_scans: 0,
+        xs_nsearches: 0,
     })
 }

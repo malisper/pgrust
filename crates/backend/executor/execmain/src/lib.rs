@@ -55,6 +55,13 @@ pub fn init_seams() {
     );
     execmain_seams::query_desc_hash_instrument::set(querydesc::query_desc_hash_instrument_seam);
     execmain_seams::query_desc_index_instrument::set(querydesc::query_desc_index_instrument_seam);
+    execmain_seams::query_desc_tuplestore_instrument::set(
+        querydesc::query_desc_tuplestore_instrument_seam,
+    );
+    execmain_seams::query_desc_bitmap_instrument::set(
+        querydesc::query_desc_bitmap_instrument_seam,
+    );
+    execmain_seams::query_desc_index_searches::set(querydesc::query_desc_index_searches_seam);
     execmain_seams::exec_clean_type_from_tl::set(typefromtl::exec_clean_type_from_tl_seam);
 }
 

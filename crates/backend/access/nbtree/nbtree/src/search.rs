@@ -71,6 +71,7 @@ pub(crate) struct ScanCtx<'a, 'mcx> {
     pub xs_heaptid: &'a mut ItemPointerData,
     pub xs_itup: &'a mut Option<core::ptr::NonNull<u8>>,
     pub xs_pgstat_index_scans: &'a mut u64,
+    pub xs_nsearches: &'a mut u64,
     pub frame: OrderProcFrame,
 }
 
@@ -408,6 +409,7 @@ pub(crate) fn bt_first(ctx: &mut ScanCtx<'_, '_>, dir: ScanDirection) -> PgResul
     if rel.pgstat_enabled.get() {
         *ctx.xs_pgstat_index_scans += 1;
     }
+    *ctx.xs_nsearches += 1;
 
     let mut start_keys: [Option<StartKey>; INDEX_MAX_KEYS as usize] =
         [const { None }; INDEX_MAX_KEYS as usize];

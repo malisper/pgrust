@@ -295,6 +295,68 @@ pub(crate) fn query_desc_incsort_instrument_seam(
     })
 }
 
+// Main planstate + initplan/CTE subplan trees (C reads PlanState directly).
+fn query_desc_instr_extra(
+    h: QueryDescHandle,
+    plan_node_id: i32,
+) -> Option<crate::procnode::InstrExtra> {
+    let id = u32::try_from(plan_node_id).ok()?;
+    with_qd(h, |qd| {
+        let exec = qd.exec.as_mut()?;
+        exec.with_mut(|d| {
+            let estate = &mut d.estate;
+            if let Some(ps) = d.planstate.as_mut() {
+                if let Some(x) = crate::procnode::planstate_instr_extra(ps, estate, id) {
+                    return Some(x);
+                }
+            }
+            for i in 0..estate.es_subplanstates.len() {
+                let cell = estate.es_subplanstates[i];
+                // SAFETY: cells are arena-live *mut Option<PlanStateNode>
+                // installed by InitPlan; disjoint from everything the walk
+                // reaches through estate.
+                let sub = unsafe { &mut *cell.0.cast::<Option<PlanStateNode>>().as_ptr() };
+                if let Some(ps) = sub.as_mut() {
+                    if let Some(x) = crate::procnode::planstate_instr_extra(ps, estate, id) {
+                        return Some(x);
+                    }
+                }
+            }
+            None
+        })
+    })
+}
+
+pub(crate) fn query_desc_tuplestore_instrument_seam(
+    h: QueryDescHandle,
+    plan_node_id: i32,
+) -> Option<types_core::instrument::TuplestoreInstrumentation> {
+    match query_desc_instr_extra(h, plan_node_id)? {
+        crate::procnode::InstrExtra::Storage(s) => Some(s),
+        _ => None,
+    }
+}
+
+pub(crate) fn query_desc_bitmap_instrument_seam(
+    h: QueryDescHandle,
+    plan_node_id: i32,
+) -> Option<types_core::instrument::BitmapHeapScanInstrumentation> {
+    match query_desc_instr_extra(h, plan_node_id)? {
+        crate::procnode::InstrExtra::Bitmap(b) => Some(b),
+        _ => None,
+    }
+}
+
+pub(crate) fn query_desc_index_searches_seam(
+    h: QueryDescHandle,
+    plan_node_id: i32,
+) -> Option<u64> {
+    match query_desc_instr_extra(h, plan_node_id)? {
+        crate::procnode::InstrExtra::IndexSearches(n) => Some(n),
+        _ => None,
+    }
+}
+
 pub(crate) fn query_desc_hash_instrument_seam(
     h: QueryDescHandle,
     plan_node_id: i32,

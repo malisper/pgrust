@@ -6,6 +6,7 @@ publish.workspace = true
 
 [dependencies]
 mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
 types_error = { path = "../../../_support/types/types_error" }
 types_nodes = { path = "../../../_support/types/nodes" }
 types_scan = { path = "../../../_support/types/types_scan" }

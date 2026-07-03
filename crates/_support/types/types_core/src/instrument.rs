@@ -215,6 +215,21 @@ pub struct AggregateInstrumentation {
     pub hash_planned_partitions: i32,
 }
 
+// tuplestore_get_stats output (tuplestore.c); space_type reuses the
+// Memory/Disk vocabulary tuplesort displays share.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TuplestoreInstrumentation {
+    pub space_type: TuplesortSpaceType,
+    pub max_space: i64,
+}
+
+// C BitmapHeapScanInstrumentation (execnodes.h).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct BitmapHeapScanInstrumentation {
+    pub exact_pages: u64,
+    pub lossy_pages: u64,
+}
+
 // C HashInstrumentation (execnodes.h).
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct HashInstrumentation {

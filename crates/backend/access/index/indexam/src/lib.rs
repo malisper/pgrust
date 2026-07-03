@@ -692,6 +692,7 @@ mod mock {
             xs_pgstat_index_tuples: 0,
             xs_pgstat_heap_fetches: 0,
             xs_pgstat_index_scans: 0,
+            xs_nsearches: 0,
         }
     }
 

@@ -8,8 +8,8 @@ use types_nodes::plannodes::PlannedStmt;
 use types_portal::{ParamListHandle, QueryDescHandle, QueryEnvHandle};
 use types_scan::sdir::ScanDirection;
 use types_core::instrument::{
-    AggregateInstrumentation, HashInstrumentation, IncrementalSortInfo, Instrumentation,
-    TuplesortInstrumentation,
+    AggregateInstrumentation, BitmapHeapScanInstrumentation, HashInstrumentation,
+    IncrementalSortInfo, Instrumentation, TuplesortInstrumentation, TuplestoreInstrumentation,
 };
 use types_snapshot::SnapshotData;
 use types_tuple::TupleDescData;
@@ -127,6 +127,27 @@ seam_core::seam!(
         query_desc: QueryDescHandle,
         plan_node_id: i32,
     ) -> Option<HashInstrumentation>
+);
+
+seam_core::seam!(
+    pub fn query_desc_tuplestore_instrument(
+        query_desc: QueryDescHandle,
+        plan_node_id: i32,
+    ) -> Option<TuplestoreInstrumentation>
+);
+
+seam_core::seam!(
+    pub fn query_desc_bitmap_instrument(
+        query_desc: QueryDescHandle,
+        plan_node_id: i32,
+    ) -> Option<BitmapHeapScanInstrumentation>
+);
+
+seam_core::seam!(
+    pub fn query_desc_index_searches(
+        query_desc: QueryDescHandle,
+        plan_node_id: i32,
+    ) -> Option<u64>
 );
 
 seam_core::seam!(

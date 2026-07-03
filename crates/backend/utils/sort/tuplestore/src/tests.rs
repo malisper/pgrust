@@ -425,3 +425,24 @@ fn skiptuples_and_advance_window_navigation() {
     assert_eq!(read_i32(&mut slot), 9);
     ts.end();
 }
+
+#[test]
+fn get_stats_tracks_chunk_space_maximum_across_clear() {
+    let mcx = leaked_mcx();
+    let desc = int4_desc(mcx, 1);
+    let mut ts = Tuplestore::begin_heap(true, false, 64);
+    // Empty store: memtuples array only (2048 ptrs -> aset external chunk).
+    let s0 = ts.get_stats();
+    assert_eq!(s0.space_type.name(), "Memory");
+    assert_eq!(s0.max_space, 2048 * 8 + 8);
+    for i in 0..10 {
+        ts.putvalues(&desc, &[Datum::from_i32(i)], &[false]).unwrap();
+    }
+    let s1 = ts.get_stats();
+    // int4 minimal tuple: MAXALIGN(t_len) + 8-byte generation chunk header.
+    assert!(s1.max_space > s0.max_space);
+    ts.clear();
+    // maxSpace survives clear (C tuplestore_updatemax in tuplestore_clear).
+    assert_eq!(ts.get_stats().max_space, s1.max_space);
+    ts.end();
+}

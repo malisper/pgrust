@@ -43,10 +43,11 @@ pub struct ScanState<'mcx> {
     pub ss_currentRelation: Option<Relation<'mcx>>,
     pub ss_currentScanDesc: Option<TableScanDesc<'mcx>>,
     pub ss_ScanTupleSlot: ExecSlotId,
+    // es_instrumentation slot (C ps.instrument); InstrCountFiltered's target.
+    pub instr_idx: Option<u32>,
 }
 
-/// C's `ExecScanAccessMtd` cast: the concrete node supplies the fetch; the
-/// driver reaches the shared head through `ss`/`ss_mut`.
+/// C's `ExecScanAccessMtd` cast: the concrete node supplies the fetch.
 pub trait ScanNode<'mcx> {
     fn ss_mut(&mut self) -> &mut ScanState<'mcx>;
     /// Access method; stores into `ss_ScanTupleSlot`, false = end of scan.
@@ -113,8 +114,7 @@ fn epq_fetch<'mcx, N: ScanNode<'mcx>>(
         }
         return Ok(EpqFetch::Tuple(test));
     }
-    // relsubs_rowmark arm unreachable (rowmarks loud at plan init); a rel
-    // without a test tuple falls through to the access method, per C.
+    // relsubs_rowmark unreachable (rowmarks loud); no test tuple falls through.
     Ok(EpqFetch::FallThrough)
 }
 
@@ -137,8 +137,7 @@ fn exec_scan_fetch<'mcx, N: ScanNode<'mcx>, const EPQ: bool>(
     Ok(None)
 }
 
-/// `ExecScanExtended`: QUAL/PROJ mirror C's const-NULL argument elimination;
-/// callers pass the combination resolved once at init (nodeSeqscan variants).
+/// `ExecScanExtended`: QUAL/PROJ mirror C's const-NULL argument elimination.
 #[inline(always)]
 pub fn exec_scan_extended<'mcx, N: ScanNode<'mcx>, const QUAL: bool, const PROJ: bool>(
     node: &mut N,
@@ -188,8 +187,7 @@ fn exec_scan_impl<'mcx, N: ScanNode<'mcx>, const QUAL: bool, const PROJ: bool, c
         let ss = node.ss_mut();
         estate.ecxt_mut(ss.ps_ExprContext).ecxt_scantuple = Some(scan_id);
 
-        // ExecEvalParamExec's pending-initplan arm, hoisted out of the
-        // interpreter: C runs the initplan at first param use, tuple in hand.
+        // ExecEvalParamExec pending-initplan arm, hoisted out of the interpreter.
         if QUAL {
             let deps = ss.qual.as_deref().unwrap().param_exec_deps();
             if !deps.is_empty() {
@@ -241,6 +239,9 @@ fn exec_scan_impl<'mcx, N: ScanNode<'mcx>, const QUAL: bool, const PROJ: bool, c
                 return Ok(Some(result_id));
             }
             return Ok(Some(scan_id));
+        }
+        if let Some(idx) = ss.instr_idx {
+            estate.es_instrumentation[idx as usize].nfiltered1 += 1.0;
         }
         estate.ecxt_mut(ss.ps_ExprContext).reset();
     }
@@ -474,7 +475,7 @@ fn length_coercion_typmod(f: &types_nodes::primnodes::FuncExpr<'_>) -> Option<i3
 // Exempt: droppy owners, released by execmain's exec_end_node/end_scan.
 mcx::forget_safe_struct!(
     ProjectionInfo<'_> { pi_result_slot; pi_state },
-    ScanState<'_> { ps_ExprContext, scanrelid, ss_ScanTupleSlot;
+    ScanState<'_> { ps_ExprContext, scanrelid, ss_ScanTupleSlot, instr_idx;
         qual, ps_ProjInfo, ss_currentRelation, ss_currentScanDesc },
 );
 

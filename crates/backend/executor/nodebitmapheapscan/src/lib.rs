@@ -79,6 +79,9 @@ impl<'mcx> ScanNode<'mcx> for BitmapHeapScanState<'mcx> {
                 };
                 estate.ecxt_mut(ecxt).reset();
                 if !passes {
+                    if let Some(idx) = self.ss.instr_idx {
+                        estate.es_instrumentation[idx as usize].nfiltered2 += 1.0;
+                    }
                     exectuples::exec_clear_tuple(estate.slot_mut(slot_id), mcx);
                     continue;
                 }
@@ -157,6 +160,7 @@ pub fn exec_init_bitmap_heap_scan_rel<'mcx>(
         ss_currentRelation: Some(rel),
         ss_currentScanDesc: None,
         ss_ScanTupleSlot,
+        instr_idx: None,
     };
     execscan::exec_assign_scan_projection_info(mcx, estate, &mut ss, &node.scan.plan.targetlist)?;
     let params = estate.param_bind();

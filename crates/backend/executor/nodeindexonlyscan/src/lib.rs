@@ -315,6 +315,7 @@ pub fn exec_init_index_only_scan_rel<'mcx>(
         ss_currentRelation: Some(rel),
         ss_currentScanDesc: None,
         ss_ScanTupleSlot,
+        instr_idx: None,
     };
     // ExecAssignScanProjectionInfoWithVarno(INDEX_VAR).
     ss.ps_ProjInfo = execscan::exec_conditional_assign_projection_info(
