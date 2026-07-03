@@ -273,6 +273,7 @@ pub fn comparator_for_opfamily(
         lsyscache::get_opfamily_proc(opfamily, lefttype, righttype, BTSORTSUPPORT_PROC as i16)?;
     Ok(match sort_support_function {
         F_BTINT4SORTSUPPORT | F_DATE_SORTSUPPORT => SortComparator::Int32,
+        F_BTINT2SORTSUPPORT => SortComparator::Int16,
         // btoidfastcmp: unsigned; the zero-extended datum word compares exact.
         F_BTOIDSORTSUPPORT => SortComparator::Unsigned,
         F_BTINT8SORTSUPPORT | F_TIMESTAMP_SORTSUPPORT => SortComparator::SignedI64,

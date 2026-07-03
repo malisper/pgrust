@@ -74,7 +74,18 @@ pub fn ExecVacuum<'mcx>(
         match opt.defname.unwrap_or("") {
             "verbose" => verbose = explain::defGetBoolean(opt)?,
             "skip_locked" => skip_locked = explain::defGetBoolean(opt)?,
-            name @ ("analyze" | "freeze" | "full" | "disable_page_skipping" | "index_cleanup"
+            "index_cleanup" => {
+                params.index_cleanup = if opt.arg.is_none() {
+                    VacOptValue::Auto
+                } else if explain::defGetString(mcx, opt)?.eq_ignore_ascii_case("auto") {
+                    VacOptValue::Auto
+                } else if explain::defGetBoolean(opt)? {
+                    VacOptValue::Enabled
+                } else {
+                    VacOptValue::Disabled
+                };
+            }
+            name @ ("analyze" | "freeze" | "full" | "disable_page_skipping"
             | "process_main" | "process_toast" | "truncate" | "parallel"
             | "buffer_usage_limit" | "skip_database_stats" | "only_database_stats") => {
                 if explain::defGetBoolean(opt).unwrap_or(true) {
