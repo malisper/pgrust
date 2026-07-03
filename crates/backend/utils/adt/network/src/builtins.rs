@@ -285,6 +285,25 @@ pub fn fc_inetmi(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResul
     )?))
 }
 
+// C handles only SupportRequestIndexCondition here; the planner's closed-set
+// dispatch (indxpath.rs) owns that leg, so an fmgr arrival of it is a bug.
+// Every other request tag is C's NULL return.
+pub fn fc_network_subset_support(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    use ::types_nodes::NodeTag;
+    let p = fcinfo.arg(0).as_usize() as *const NodeTag;
+    // SAFETY: prosupport contract — arg points at a live tag-first node.
+    let tag = unsafe { *p };
+    assert_ne!(
+        tag,
+        NodeTag::T_SupportRequestIndexCondition,
+        "network_subset_support: IndexCondition must ride the indxpath closed set"
+    );
+    Ok(Datum::from_usize(0))
+}
+
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin {
         foid,
@@ -324,6 +343,7 @@ pub const NETWORK_BUILTINS: &[FmgrBuiltin] = &[
     b(928, "network_subeq", 2, fc_network_subeq),
     b(929, "network_sup", 2, fc_network_sup),
     b(930, "network_supeq", 2, fc_network_supeq),
+    b(1173, "network_subset_support", 1, fc_network_subset_support),
     b(1267, "cidr_in", 1, fc_cidr_in),
     b(1362, "network_hostmask", 1, fc_network_hostmask),
     b(1427, "cidr_out", 1, fc_cidr_out),

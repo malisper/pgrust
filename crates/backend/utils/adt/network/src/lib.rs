@@ -458,6 +458,17 @@ pub fn network_network(ip: InetRef<'_>) -> InetValue {
     dst
 }
 
+pub fn network_scan_first(ip: InetRef<'_>) -> InetValue {
+    network_network(ip)
+}
+
+// Broadcast address with masklen maxed out (192.168.0.255/24 sorts before
+// 192.168.0.255/32).
+pub fn network_scan_last(ip: InetRef<'_>) -> PgResult<InetValue> {
+    let b = network_broadcast(ip);
+    inet_set_masklen(b.iref(), -1)
+}
+
 pub fn network_netmask(ip: InetRef<'_>) -> InetValue {
     let mut dst = InetValue {
         family: ip.family,

@@ -446,6 +446,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_fmgr",
+ "types_nodes",
 ]
 
 [[package]]
@@ -1858,6 +1859,8 @@ dependencies = [
  "aclchk_seams",
  "adt_bool",
  "adt_float",
+ "adt_multirangetypes",
+ "adt_rangetypes",
  "aio_seams",
  "async_seams",
  "autovacuum_seams",
@@ -1879,6 +1882,7 @@ dependencies = [
  "datum",
  "dbcommands_seams",
  "deadlock_seams",
+ "detoast_seams",
  "exectuples",
  "fd",
  "fmgr_core",
@@ -1901,6 +1905,7 @@ dependencies = [
  "lock_seams",
  "logical_seams",
  "logical_worker_seams",
+ "lsyscache",
  "lwlock",
  "mcx",
  "miscinit",
@@ -6564,6 +6569,9 @@ name = "planner"
 version = "0.1.0"
 dependencies = [
  "adt_int8",
+ "adt_multirangetypes",
+ "adt_network",
+ "adt_rangetypes",
  "arrayfuncs",
  "backend_status_seams",
  "brin",
@@ -6605,6 +6613,7 @@ dependencies = [
  "table",
  "tableam",
  "tidbitmap",
+ "typcache",
  "types_core",
  "types_error",
  "types_fmgr",

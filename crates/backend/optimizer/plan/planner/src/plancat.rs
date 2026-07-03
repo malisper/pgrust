@@ -398,6 +398,10 @@ pub fn restriction_selectivity<'mcx>(
                 run, operatorid, args, varrelid, inputcollid, ptype, negate,
             )?
         }
+        3169 => crate::rangetypes_selfuncs::rangesel(run, operatorid, args, varrelid)?,
+        4243 => crate::multirangetypes_selfuncs::multirangesel(run, operatorid, args, varrelid)?,
+        3560 => crate::network_selfuncs::networksel(run, operatorid, args, varrelid)?,
+        5040 => crate::selfuncs::matchingsel(run, operatorid, args, varrelid, inputcollid)?,
         other => panic!(
             "restriction_selectivity (plancat.c): oprrest {other}; M2 selfuncs lane"
         ),
@@ -443,6 +447,10 @@ pub fn join_selectivity<'mcx>(
         F_AREAJOINSEL => 0.005,
         F_POSITIONJOINSEL => 0.1,
         F_CONTJOINSEL => 0.001,
+        106 => crate::selfuncs::neqjoinsel(run, operatorid, args, jointype, sjinfo)?,
+        3561 => crate::network_selfuncs::networkjoinsel(run, operatorid, args, sjinfo)?,
+        // matchingjoinsel (selfuncs.c) punts.
+        5041 => crate::selfuncs::DEFAULT_MATCHING_SEL,
         other => panic!("join_selectivity (plancat.c): oprjoin {other}; M2 selfuncs lane"),
     };
     if !(0.0..=1.0).contains(&result) {

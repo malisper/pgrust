@@ -23,6 +23,10 @@ types_portal = { path = "../../../../_support/types/portal" }
 planner_seams = { path = "../planner_seams" }
 backend_status_seams = { path = "../../../utils/activity/backend_status_seams" }
 adt_int8 = { path = "../../../utils/adt/int8" }
+adt_multirangetypes = { path = "../../../utils/adt/multirangetypes" }
+adt_network = { path = "../../../utils/adt/network" }
+adt_rangetypes = { path = "../../../utils/adt/rangetypes" }
+typcache = { path = "../../../utils/cache/typcache" }
 clauses = { path = "../../util/clauses" }
 fmgr_core = { path = "../../../utils/fmgr/fmgr_core" }
 types_fmgr = { path = "../../../../_support/types/fmgr" }
