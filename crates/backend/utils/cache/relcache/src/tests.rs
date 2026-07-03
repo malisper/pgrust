@@ -675,3 +675,182 @@ fn index_list_invalidation_forces_rescan() {
     assert_eq!(INDEX_SCANS.with(|c| c.get()), scans + 1);
     drop(held);
 }
+
+fn codec_rel(
+    mcx: Mcx<'static>,
+    oid: Oid,
+    relkind: u8,
+    relam: Oid,
+    natts: i16,
+) -> RelationData<'static> {
+    let mut f = form(oid, &format!("codec_{oid}"), relkind);
+    f.relam = relam;
+    f.reltablespace = 1663;
+    f.reltuples = 42.5;
+    f.relfrozenxid = 3;
+    f.relminmxid = 1;
+    let mut attrs = Vec::new();
+    for i in 0..natts {
+        let mut a = FormData_pg_attribute {
+            attrelid: oid,
+            atttypid: 23,
+            attlen: 4,
+            attnum: i + 1,
+            attbyval: true,
+            attalign: b'i' as i8,
+            attstorage: b'p' as i8,
+            attnotnull: i == 0,
+            attislocal: true,
+            ..Default::default()
+        };
+        a.attname.namestrcpy(&format!("a{i}"));
+        attrs.push(a);
+    }
+    let mut td = tupdesc::CreateTupleDesc(mcx, &attrs).unwrap();
+    td.tdtypeid = 0;
+    td.tdtypmod = -1;
+    td.tdrefcount = 1;
+    let rd_index = (relkind == RELKIND_INDEX).then(|| {
+        let mut indkey = PgVec::new_in(mcx);
+        indkey.push(1i16);
+        FormData_pg_index {
+            indexrelid: oid,
+            indrelid: 1259,
+            indnatts: 1,
+            indnkeyatts: 1,
+            indisunique: true,
+            indnullsnotdistinct: false,
+            indisprimary: true,
+            indisexclusion: false,
+            indimmediate: true,
+            indisvalid: true,
+            indisready: true,
+            indkey,
+            has_indpred: false,
+            indexprs_src: None,
+            indpred_src: None,
+        }
+    });
+    let one = |v: Oid| {
+        let mut p = PgVec::new_in(mcx);
+        p.push(v);
+        p
+    };
+    let (opcintype, opfamily, indcollation, support, indoption) = if relkind == RELKIND_INDEX {
+        let mut sup = PgVec::new_in(mcx);
+        sup.extend_from_slice(&[0, 0, 2743, 0, 0, 0, 0]);
+        let mut opt = PgVec::new_in(mcx);
+        opt.push(0i16);
+        (one(3659), one(3659), one(0), sup, opt)
+    } else {
+        (PgVec::new_in(mcx), PgVec::new_in(mcx), PgVec::new_in(mcx), PgVec::new_in(mcx), PgVec::new_in(mcx))
+    };
+    RelationData {
+        rd_locator: Default::default(),
+        rd_smgr: Default::default(),
+        rd_id: oid,
+        rd_backend: types_core::INVALID_PROC_NUMBER,
+        rd_islocaltemp: false,
+        rd_isvalid: Cell::new(true),
+        rd_createSubid: Cell::new(InvalidSubTransactionId),
+        rd_newRelfilelocatorSubid: Cell::new(InvalidSubTransactionId),
+        rd_firstRelfilelocatorSubid: Cell::new(InvalidSubTransactionId),
+        rd_droppedSubid: Cell::new(InvalidSubTransactionId),
+        rd_lockInfo: lmgr::RelationInitLockInfo(oid, false),
+        rd_rel: f,
+        rd_att: Rc::new(td),
+        rd_index,
+        rd_opcintype: opcintype,
+        rd_opfamily: opfamily,
+        rd_indoption: indoption,
+        rd_indcollation: indcollation,
+        rd_options: None,
+        pgstat_enabled: Cell::new(false),
+        rd_amcache: Default::default(),
+        rd_amcache_hash: Default::default(),
+        rd_amcache_gin: Default::default(),
+        rd_amcache_spgist: Default::default(),
+        rd_support: support,
+        rd_supportinfo: Default::default(),
+        rd_indexlist: Default::default(),
+        rd_trigdesc: Default::default(),
+        rd_hastriggers: false,
+        rd_hasrules: true,
+    }
+}
+
+fn codec_file(mcx: Mcx<'static>, rels: &[(&RelationData<'static>, bool)]) -> Vec<u8> {
+    let mut buf: initfile::Buf<'_> = PgVec::new_in(mcx);
+    buf.extend_from_slice(&initfile::RELCACHE_INIT_FILEMAGIC.to_ne_bytes());
+    buf.extend_from_slice(&initfile::RELCACHE_INIT_FORMAT.to_ne_bytes());
+    for (rel, nailed) in rels {
+        initfile::encode_entry(&mut buf, rel, *nailed);
+    }
+    buf.to_vec()
+}
+
+#[test]
+fn init_file_codec_roundtrip() {
+    install();
+    let mcx = crate::cache_mcx();
+    let heap = codec_rel(mcx, 1259, RELKIND_RELATION, 2, 3);
+    // GIN relam: supportinfo preload resolves lazily (no fmgr seam in tests).
+    let idx = codec_rel(mcx, 2662, RELKIND_INDEX, 2742, 1);
+    let bytes = codec_file(mcx, &[(&heap, true), (&idx, true)]);
+
+    let (rels, nailed_rels, nailed_indexes) = initfile::parse_init_file(&bytes, mcx).unwrap();
+    assert_eq!((nailed_rels, nailed_indexes), (1, 1));
+    assert_eq!(rels.len(), 2);
+
+    let (h, h_nailed) = &rels[0];
+    assert!(*h_nailed);
+    assert_eq!(h.rd_id, 1259);
+    assert_eq!(h.name(), "codec_1259");
+    assert_eq!(h.rd_rel.reltuples, 42.5);
+    assert!(h.rd_hasrules);
+    assert!(!h.rd_hastriggers);
+    assert_eq!(h.rd_att.natts, 3);
+    assert_eq!(h.rd_att.tdtypeid, types_core::RECORDOID);
+    assert_eq!(h.rd_att.tdtypmod, -1);
+    assert!(h.rd_att.constr.as_ref().unwrap().has_not_null);
+    assert_eq!(h.rd_att.attr(0).attname.name_str(), b"a0");
+    assert_eq!(h.rd_att.compact_attr(1).attlen, 4);
+    assert!(h.rd_index.is_none());
+    assert!(h.rd_isvalid.get());
+    assert_eq!(h.rd_locator.get().relNumber, 1259);
+
+    let (i, _) = &rels[1];
+    assert_eq!(i.rd_id, 2662);
+    let ind = i.rd_index.as_ref().unwrap();
+    assert_eq!(ind.indnkeyatts, 1);
+    assert!(ind.indisprimary);
+    assert_eq!(ind.indkey.as_slice(), &[1i16]);
+    assert_eq!(i.rd_opcintype.as_slice(), &[3659]);
+    assert_eq!(i.rd_support.as_slice(), &[0, 0, 2743, 0, 0, 0, 0]);
+    assert_eq!(i.rd_indoption.as_slice(), &[0i16]);
+    assert_eq!(i.rd_supportinfo.borrow().len(), 1);
+    assert!(i.rd_supportinfo.borrow()[0].is_none());
+}
+
+#[test]
+fn init_file_rejects_bad_header_and_corruption() {
+    install();
+    let mcx = crate::cache_mcx();
+    let heap = codec_rel(mcx, 1247, RELKIND_RELATION, 2, 2);
+    let good = codec_file(mcx, &[(&heap, true)]);
+    assert!(initfile::parse_init_file(&good, mcx).is_some());
+
+    let mut bad_magic = good.clone();
+    bad_magic[0] ^= 0xff;
+    assert!(initfile::parse_init_file(&bad_magic, mcx).is_none());
+
+    let mut bad_format = good.clone();
+    bad_format[4] ^= 0xff;
+    assert!(initfile::parse_init_file(&bad_format, mcx).is_none());
+
+    // Truncation anywhere inside the entry stream must reject the file.
+    for cut in 9..good.len() {
+        assert!(initfile::parse_init_file(&good[..cut], mcx).is_none(), "cut={cut}");
+    }
+    assert!(initfile::parse_init_file(&[], mcx).is_none());
+}

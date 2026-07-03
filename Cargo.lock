@@ -8328,7 +8328,9 @@ version = "0.1.0"
 dependencies = [
  "catalog_seams",
  "elog",
+ "fmgr_seams",
  "init_small",
+ "inval_seams",
  "lmgr",
  "lwlock",
  "mcx",
@@ -8345,6 +8347,7 @@ dependencies = [
  "tupdesc",
  "types_core",
  "types_error",
+ "types_fmgr",
  "types_nodes",
  "types_rel",
  "types_storage",
