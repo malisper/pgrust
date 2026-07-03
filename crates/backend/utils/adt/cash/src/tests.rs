@@ -183,3 +183,145 @@ fn wire_roundtrip() {
     si.append_bytes(image.data()).unwrap();
     assert_eq!(cash_recv(&mut si).unwrap(), -424242);
 }
+
+// Differential corpus captured from live PostgreSQL 18.3 (Homebrew, aarch64),
+// lc_monetary=C, 2026-07-03: every (input, output) below is the live server's
+// byte-exact answer.
+#[test]
+fn live_pg_in_out_corpus() {
+    let pairs: &[(&str, &str)] = &[
+        ("123.45", "$123.45"),
+        ("$123.45", "$123.45"),
+        ("$123,456.78", "$123,456.78"),
+        ("  $  123", "$123.00"),
+        ("(1.23)", "-$1.23"),
+        ("-1.23", "-$1.23"),
+        ("+1.23", "$1.23"),
+        ("123.45-", "-$123.45"),
+        ("123.45 $", "$123.45"),
+        ("1", "$1.00"),
+        ("1.", "$1.00"),
+        (".5", "$0.50"),
+        ("0.056", "$0.06"),
+        ("0.054", "$0.05"),
+        ("", "$0.00"),
+        ("92233720368547758.07", "$92,233,720,368,547,758.07"),
+        ("-92233720368547758.08", "-$92,233,720,368,547,758.08"),
+        ("(92233720368547758.07)", "-$92,233,720,368,547,758.07"),
+        ("$0.00", "$0.00"),
+        ("0", "$0.00"),
+        ("-0", "$0.00"),
+        ("(0)", "$0.00"),
+        ("- 1.23", "-$1.23"),
+        ("$ -1.23", "-$1.23"),
+        ("-$1.23", "-$1.23"),
+        ("($1.23)", "-$1.23"),
+        ("1,2,3.45", "$123.45"),
+        ("1,,2", "$12.00"),
+        (",1", "$1.00"),
+        (".", "$0.00"),
+        ("-.", "$0.00"),
+        ("$", "$0.00"),
+        ("()", "$0.00"),
+        ("(1.23", "-$1.23"),
+        ("1.23)", "$1.23"),
+        ("1.23--", "-$1.23"),
+        ("123.456", "$123.46"),
+        ("123.454", "$123.45"),
+        ("123.4549", "$123.45"),
+        ("123.455", "$123.46"),
+        ("-123.456", "-$123.46"),
+        ("-123.454", "-$123.45"),
+        (".005", "$0.01"),
+        (".004", "$0.00"),
+        ("1234567890.12", "$1,234,567,890.12"),
+        ("(  1.23  )", "-$1.23"),
+        ("( 1.23 ) -", "-$1.23"),
+    ];
+    for (input, expected) in pairs {
+        assert_eq!(&out(parse(input)), expected, "input {input:?}");
+    }
+
+    let syntax_errs = ["--1.23", "1.2.3", "1e5", "0x10", "abc", "12abc", "$abc", "12$34", "1 2"];
+    for input in syntax_errs {
+        let err = cash_in(input, None).unwrap_err();
+        assert_eq!(err.sqlstate(), ERRCODE_INVALID_TEXT_REPRESENTATION, "input {input:?}");
+        assert_eq!(
+            err.message(),
+            format!("invalid input syntax for type money: \"{input}\""),
+            "input {input:?}"
+        );
+    }
+    let range_errs = [
+        "9223372036854775807",
+        "92233720368547758.08",
+        "-92233720368547758.09",
+        "999999999999999999999",
+    ];
+    for input in range_errs {
+        let err = cash_in(input, None).unwrap_err();
+        assert_eq!(err.sqlstate(), ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE, "input {input:?}");
+        assert_eq!(
+            err.message(),
+            format!("value \"{input}\" is out of range for type money"),
+            "input {input:?}"
+        );
+    }
+}
+
+#[test]
+fn live_pg_arithmetic_corpus() {
+    assert_eq!(out(cash_pl(parse("1.23"), parse("2.77")).unwrap()), "$4.00");
+    assert_eq!(out(cash_mi(parse("5.00"), parse("7.25")).unwrap()), "-$2.25");
+    assert_eq!(out(cash_mul_int64(parse("3.00"), 2).unwrap()), "$6.00");
+    assert_eq!(out(cash_mul_float8(parse("3.00"), 2.5).unwrap()), "$7.50");
+    assert_eq!(out(cash_mul_float8(parse("3.00"), 2.5f32 as f64).unwrap()), "$7.50");
+    assert_eq!(out(cash_div_int64(parse("7.00"), 2).unwrap()), "$3.50");
+    assert_eq!(out(cash_div_float8(parse("7.00"), 2.0).unwrap()), "$3.50");
+    assert_eq!(cash_div_cash(parse("7.00"), parse("2.00")).unwrap(), 3.5);
+
+    for err in [
+        cash_div_int64(parse("7.00"), 0).unwrap_err(),
+        cash_div_float8(parse("7.00"), 0.0).unwrap_err(),
+        cash_div_cash(parse("7.00"), 0).unwrap_err(),
+    ] {
+        assert_eq!(err.sqlstate(), ERRCODE_DIVISION_BY_ZERO);
+        assert_eq!(err.message(), "division by zero");
+    }
+    for err in [
+        cash_pl(i64::MAX, 1).unwrap_err(),
+        cash_mi(i64::MIN, 1).unwrap_err(),
+        cash_mul_int64(i64::MAX, 2).unwrap_err(),
+    ] {
+        assert_eq!(err.sqlstate(), ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE);
+        assert_eq!(err.message(), "money out of range");
+    }
+
+    assert_eq!(out(int4_cash(123).unwrap()), "$123.00");
+    assert_eq!(out(int4_cash(-123).unwrap()), "-$123.00");
+    assert_eq!(out(int8_cash(123).unwrap()), "$123.00");
+    assert_eq!(out(int4_cash(2147483647).unwrap()), "$2,147,483,647.00");
+
+    let ctx = MemoryContext::new("t");
+    let words = |v: Cash| {
+        String::from_utf8(cash_words(ctx.mcx(), v).unwrap().data().to_vec()).unwrap()
+    };
+    assert_eq!(words(parse("0.05")), "Zero dollars and five cents");
+    assert_eq!(
+        words(parse("-12345678.90")),
+        "Minus twelve million three hundred forty five thousand six hundred \
+         seventy eight dollars and ninety cents"
+    );
+    assert_eq!(
+        words(parse("92233720368547758.07")),
+        "Ninety two quadrillion two hundred thirty three trillion seven hundred \
+         twenty billion three hundred sixty eight million five hundred forty \
+         seven thousand seven hundred fifty eight dollars and seven cents"
+    );
+}
+
+#[test]
+#[should_panic(expected = "adt_numeric")]
+fn cash_numeric_stays_loud() {
+    cash_numeric(12345);
+}
