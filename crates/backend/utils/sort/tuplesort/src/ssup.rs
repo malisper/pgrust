@@ -16,6 +16,7 @@ const F_TIMESTAMP_SORTSUPPORT: Oid = 3137;
 const F_BTTEXTSORTSUPPORT: Oid = 3255;
 const F_UUID_SORTSUPPORT: Oid = 3300;
 const F_NETWORK_SORTSUPPORT: Oid = 5033;
+const F_INTERVAL_CMP: Oid = 1315;
 
 /// C's `ssup->comparator` fn pointer as a closed enum: identity is switchable
 /// (tuplesort_sort_memtuples specialization dispatch) and calls monomorphize.
@@ -34,6 +35,8 @@ pub enum SortComparator {
     /// `varstrfastcmp_c`, no abbreviation (bttextsortsupport, collate-is-C
     /// only); datums must point at live untoasted varlenas.
     TextC,
+    /// interval_cmp direct (C shims BTORDER_PROC 1315); live 16-byte images.
+    Interval,
     /// `PrepareSortSupportComparisonShim`: the opfamily's BTORDER_PROC,
     /// resolved once, invoked per comparison (C builds an fcinfo per call
     /// too). Needs an mcx-threaded apply; the mcx-less lane panics.
@@ -82,6 +85,12 @@ pub fn apply_cmp(cmp: SortComparator, x: Datum, y: Datum) -> i32 {
         // varlena pointers owned by the sort's tuplecontext.
         SortComparator::TextC => unsafe {
             varlena::varstrfastcmp_c(varlena_payload(x), varlena_payload(y))
+        },
+        // SAFETY: Interval contract (enum doc) — live 16-byte images.
+        SortComparator::Interval => unsafe {
+            let a = &*(x.as_usize() as *const adt_datetime::consts::Interval);
+            let b = &*(y.as_usize() as *const adt_datetime::consts::Interval);
+            adt_timestamp::interval::interval_cmp_internal(a, b)
         },
         SortComparator::Shim(shim) => panic!(
             "comparison shim (proc {}) reached an mcx-less comparator lane \
@@ -272,11 +281,15 @@ pub fn comparator_for_opfamily(
                     BTORDER_PROC
                 );
             }
-            let flinfo = ::fmgr_seams::fmgr_info::call(sort_function)?;
-            SortComparator::Shim(ShimCmp {
-                fn_addr: flinfo.fn_addr,
-                fn_oid: sort_function,
-            })
+            if sort_function == F_INTERVAL_CMP {
+                SortComparator::Interval
+            } else {
+                let flinfo = ::fmgr_seams::fmgr_info::call(sort_function)?;
+                SortComparator::Shim(ShimCmp {
+                    fn_addr: flinfo.fn_addr,
+                    fn_oid: sort_function,
+                })
+            }
         }
         other => panic!(
             "sortsupport routine {other} (opfamily {opfamily}) has no comparator arm; \

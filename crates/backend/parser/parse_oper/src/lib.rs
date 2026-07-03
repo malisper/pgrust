@@ -213,6 +213,79 @@ pub fn oper(
     }
 }
 
+pub fn left_oper(
+    pstate: &ParseState<'_, '_>,
+    opname: &NodeList<'_>,
+    arg: Oid,
+    noError: bool,
+    location: ParseLoc,
+) -> PgResult<Option<Operator>> {
+    let mut buf = [""; 4];
+    let parts = name_parts(opname, &mut buf);
+
+    let mut key = OprCacheKey {
+        oprname: [0; NAMEDATALEN],
+        left_arg: InvalidOid,
+        right_arg: InvalidOid,
+        search_path: [InvalidOid; MAX_CACHED_PATH_LEN],
+    };
+    let key_ok = make_oper_cache_key(&mut key, parts, InvalidOid, arg)?;
+
+    if key_ok {
+        let cached = with_opr_cache(|map| map.get(&key).copied().unwrap_or(InvalidOid))?;
+        if OidIsValid(cached) {
+            if let Some(shape) = syscache_seams::lookup_pg_operator_shape::call(cached)? {
+                return Ok(Some(Operator { oid: cached, shape }));
+            }
+        }
+    }
+
+    let mut fd_multiple = false;
+    let mut operOid = catalog_namespace::OpernameGetOprid(parts, InvalidOid, arg)?;
+    if !OidIsValid(operOid) {
+        let scratch = MemoryContext::new("oper candidates");
+        let mut clist =
+            catalog_namespace::OpernameGetCandidates(scratch.mcx(), parts, b'l' as i8, false)?;
+        if !clist.is_empty() {
+            // candidates carry (0, oprright); move the data into args[0] so
+            // the 1-arg selection walk stays simple (C does the same shift)
+            for c in clist.iter_mut() {
+                c.args[0] = c.args[1];
+            }
+            let input_typeids = [arg];
+            let matched =
+                parse_func::func_match_argtypes(scratch.mcx(), &input_typeids, clist.as_slice())?;
+            operOid = match matched.len() {
+                0 => InvalidOid,
+                1 => matched[0].oid,
+                _ => match parse_func::func_select_candidate(&input_typeids, matched)? {
+                    Some(c) => c.oid,
+                    None => {
+                        fd_multiple = true;
+                        InvalidOid
+                    }
+                },
+            };
+        }
+    }
+
+    let shape = if OidIsValid(operOid) {
+        syscache_seams::lookup_pg_operator_shape::call(operOid)?
+    } else {
+        None
+    };
+    match shape {
+        Some(shape) => {
+            if key_ok {
+                with_opr_cache(|map| map.insert(key, operOid))?;
+            }
+            Ok(Some(Operator { oid: operOid, shape }))
+        }
+        None if noError => Ok(None),
+        None => Err(op_error(pstate, parts, InvalidOid, arg, fd_multiple, location)),
+    }
+}
+
 fn compatible_oper(
     pstate: &ParseState<'_, '_>,
     opname: &NodeList<'_>,
@@ -293,15 +366,12 @@ pub fn make_op<'mcx>(
     let Some(rtree) = rtree else {
         return Err(postfix_error());
     };
-    let Some(ltree) = ltree else {
-        panic!(
-            "make_op (parse_oper.c): prefix operator arm (left_oper) unported — unit \
-             backend-parser-parse-oper"
-        );
-    };
 
-    let op = oper(pstate, opname, ltypeId, rtypeId, false, location)?
-        .expect("oper(noError=false) always returns an operator");
+    let op = match ltree {
+        Some(_) => oper(pstate, opname, ltypeId, rtypeId, false, location)?,
+        None => left_oper(pstate, opname, rtypeId, false, location)?,
+    }
+    .expect("oper(noError=false) always returns an operator");
 
     if !OidIsValid(op.shape.oprcode) {
         let mut buf = [""; 4];
@@ -309,19 +379,33 @@ pub fn make_op<'mcx>(
         return Err(shell_error(pstate, parts, &op, location));
     }
 
-    let actual_arg_types = [ltypeId, rtypeId];
-    let mut declared_arg_types = [op.shape.oprleft, op.shape.oprright];
+    let nargs = if ltree.is_some() { 2 } else { 1 };
+    let actual_arg_types =
+        if ltree.is_some() { [ltypeId, rtypeId] } else { [rtypeId, InvalidOid] };
+    let mut declared_arg_types = if ltree.is_some() {
+        [op.shape.oprleft, op.shape.oprright]
+    } else {
+        [op.shape.oprright, InvalidOid]
+    };
 
     let rettype = coerce::enforce_generic_type_consistency(
-        &actual_arg_types,
-        &mut declared_arg_types,
+        &actual_arg_types[..nargs],
+        &mut declared_arg_types[..nargs],
         op.shape.oprresult,
         false,
     )?;
 
     // make_fn_arguments (parse_func.c) hosted here until backend-parser-func.
-    let ltree = coerce_arg(mcx, pstate, ltree, actual_arg_types[0], declared_arg_types[0])?;
-    let rtree = coerce_arg(mcx, pstate, rtree, actual_arg_types[1], declared_arg_types[1])?;
+    let ltree = match ltree {
+        Some(l) => Some(coerce_arg(mcx, pstate, l, actual_arg_types[0], declared_arg_types[0])?),
+        None => None,
+    };
+    let (r_actual, r_declared) = if ltree.is_some() {
+        (actual_arg_types[1], declared_arg_types[1])
+    } else {
+        (actual_arg_types[0], declared_arg_types[0])
+    };
+    let rtree = coerce_arg(mcx, pstate, rtree, r_actual, r_declared)?;
 
     let opretset = lsyscache::get_func_retset(op.shape.oprcode)?;
     if opretset {
@@ -332,7 +416,10 @@ pub fn make_op<'mcx>(
         );
     }
 
-    let args = NodeList::make2(mcx, ltree, rtree)?;
+    let args = match ltree {
+        Some(l) => NodeList::make2(mcx, l, rtree)?,
+        None => NodeList::make1(mcx, rtree)?,
+    };
     Node::mk(
         mcx,
         OpExpr {

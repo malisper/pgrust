@@ -22,13 +22,15 @@ fn type_does_not_exist(name: &str) -> Box<PgError> {
     )
 }
 
-// typenameTypeIdAndMod (parse_type.c): plain unparameterized types only.
-pub fn typenameTypeIdAndMod<'mcx>(mcx: Mcx<'mcx>, tn: &TypeName<'_>) -> PgResult<(Oid, i32)> {
+// typenameTypeIdAndMod (parse_type.c); pstate feeds errposition around the
+// typmodin call (C's setup_parser_errposition_callback).
+pub fn typenameTypeIdAndMod<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: Option<&parser_small1::ParseState<'_, '_>>,
+    tn: &TypeName<'_>,
+) -> PgResult<(Oid, i32)> {
     if tn.pct_type || tn.setof {
         unported("LookupTypeName %TYPE / SETOF");
-    }
-    if !tn.typmods.is_nil() || tn.typemod != -1 {
-        unported("typenameTypeMod (type modifiers)");
     }
     if tn.typeOid != InvalidOid {
         unported("pre-resolved TypeName.typeOid lane");
@@ -89,7 +91,137 @@ pub fn typenameTypeIdAndMod<'mcx>(mcx: Mcx<'mcx>, tn: &TypeName<'_>) -> PgResult
         }),
         None => return Err(type_does_not_exist(typname)),
     }
-    Ok((typoid, -1))
+    let typmod = typenameTypeMod(mcx, pstate, tn, typoid)?;
+    Ok((typoid, typmod))
+}
+
+fn typename_to_string(tn: &TypeName<'_>) -> String {
+    let mut s = String::new();
+    for n in tn.names.iter() {
+        if !s.is_empty() {
+            s.push('.');
+        }
+        s.push_str(n.as_string().map(|v| v.sval).unwrap_or("?"));
+    }
+    s
+}
+
+// typenameTypeMod (parse_type.c): raw typmods -> cstring[] -> typmodin.
+fn typenameTypeMod<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: Option<&parser_small1::ParseState<'_, '_>>,
+    tn: &TypeName<'_>,
+    typoid: Oid,
+) -> PgResult<i32> {
+    use types_nodes::rawnodes::{ColumnRef, ValUnion};
+
+    if tn.typmods.is_nil() {
+        return Ok(tn.typemod);
+    }
+
+    let io = syscache_seams::pg_type_io_shape::call(typoid)?
+        .unwrap_or_else(|| unported("typmod on a type without an io shape row"));
+    if !io.typisdefined {
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                format!(
+                    "type modifier cannot be specified for shell type \"{}\"",
+                    typename_to_string(tn)
+                ),
+            )
+            .with_sqlstate(ERRCODE_SYNTAX_ERROR),
+        ));
+    }
+    if io.typmodin == InvalidOid {
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                format!("type modifier is not allowed for type \"{}\"", typename_to_string(tn)),
+            )
+            .with_sqlstate(ERRCODE_SYNTAX_ERROR),
+        ));
+    }
+
+    #[cold]
+    fn bad_typmod_expr() -> Box<PgError> {
+        Box::new(
+            PgError::new(ERROR, "type modifiers must be simple constants or identifiers")
+                .with_sqlstate(ERRCODE_SYNTAX_ERROR),
+        )
+    }
+
+    let mut cstrings: Vec<mcx::PgVec<'mcx, u8>> = Vec::with_capacity(tn.typmods.len());
+    for tm in tn.typmods.iter() {
+        let cstr: Option<String> = if let Some(ac) = tm.as_a_const() {
+            match ac.val {
+                Some(ValUnion::Integer(i)) => Some(i.ival.to_string()),
+                Some(ValUnion::Float(f)) => Some(f.fval.to_string()),
+                Some(ValUnion::String(s)) => Some(s.sval.to_string()),
+                _ => None,
+            }
+        } else if let Some(cr) = tm.as_variant::<ColumnRef>() {
+            match (cr.fields.len(), cr.fields.first().and_then(|f| f.as_string())) {
+                (1, Some(s)) => Some(s.sval.to_string()),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let Some(cstr) = cstr else {
+            return Err(bad_typmod_expr());
+        };
+        let mut v = mcx::vec_with_capacity_in(mcx, cstr.len() + 1)?;
+        mcx::vec_append_bytes(&mut v, cstr.as_bytes())?;
+        mcx::vec_append_bytes(&mut v, &[0u8])?;
+        cstrings.push(v);
+    }
+    let datums: Vec<datum::Datum> = cstrings
+        .iter()
+        .map(|v| datum::Datum::from_usize(v.as_ptr() as usize))
+        .collect();
+    let img = datum::array_build::construct_array_image(mcx, &datums, types_core::CSTRINGOID, -2, false, b'c')?;
+
+    let mut flinfo = types_fmgr::FmgrInfo::unresolved();
+    fmgr_core::fmgr_info_into(io.typmodin, &mut flinfo)?;
+
+    // setup_parser_errposition_callback: reports emitted inside the typmodin
+    // call (e.g. intervaltypmodin's precision WARNING) carry the cursor.
+    let cb = pstate.map(|ps| {
+        let pos = parser_small1::parser_errposition(ps, tn.location, mbutils::GetDatabaseEncoding());
+        elog::push_emit_context_callback(Box::new(move |err| {
+            if err.cursor_position.is_none() && pos > 0 {
+                err.cursor_position = Some(pos);
+            }
+        }))
+    });
+    let d = fmgr_core::function_call1_coll_in(
+        &mut flinfo,
+        InvalidOid,
+        mcx,
+        datum::Datum::from_usize(img.as_ptr() as usize),
+    );
+    if let Some(id) = cb {
+        elog::pop_emit_context_callback(id);
+    }
+    match d {
+        Ok(v) => Ok(v.as_i32()),
+        Err(mut e) => {
+            if let Some(ps) = pstate {
+                if e.cursor_position.is_none() {
+                    let pos = parser_small1::parser_errposition(
+                        ps,
+                        tn.location,
+                        mbutils::GetDatabaseEncoding(),
+                    );
+                    if pos > 0 {
+                        e.cursor_position = Some(pos);
+                    }
+                }
+            }
+            Err(e)
+        }
+    }
 }
 
 fn transformColumnDefinition<'mcx>(
@@ -170,7 +302,7 @@ fn transformColumnDefinition<'mcx>(
         .as_variant::<TypeName>()
         .expect("TypeName");
     // transformColumnType: validate the type reference.
-    typenameTypeIdAndMod(mcx, tn)?;
+    typenameTypeIdAndMod(mcx, None, tn)?;
     Ok(())
 }
 

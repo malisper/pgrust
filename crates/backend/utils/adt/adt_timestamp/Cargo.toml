@@ -18,16 +18,17 @@ stringinfo = { path = "../../../../_support/types/stringinfo" }
 pqformat = { path = "../../../libpq/pqformat" }
 hashfn = { path = "../../../../common/hashfn" }
 numeric = { package = "adt_numeric", path = "../numeric" }
+numutils = { path = "../numutils" }
 adt_datetime = { path = "../adt_datetime" }
 localtime = { path = "../../../timezone/localtime" }
 strftime = { path = "../../../timezone/strftime" }
 timestamp_seams = { path = "../timestamp_seams" }
 xact = { path = "../../../access/transam/xact" }
+elog = { path = "../../error/elog" }
 libc = "0.2"
 
 [dev-dependencies]
 pgtz = { path = "../../../timezone/pgtz" }
 guc_tables = { path = "../../misc/guc_tables" }
-elog = { path = "../../error/elog" }
 fd = { path = "../../../storage/file/fd" }
 xact_seams = { path = "../../../access/transam/xact_seams" }

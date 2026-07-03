@@ -49,6 +49,16 @@ use crate::yystype::{SelectLimit, YYSTYPE};
 static MATH_OPS: [&str; 12] =
     ["+", "-", "*", "/", "%", "^", "<", ">", "=", "<=", ">=", "<>"];
 
+// INTERVAL_MASK(MONTH/YEAR/DAY/HOUR/MINUTE/SECOND) and INTERVAL_FULL_RANGE,
+// values verified against datetime.h / timestamp.h.
+const IM_MONTH: i32 = 1 << 1;
+const IM_YEAR: i32 = 1 << 2;
+const IM_DAY: i32 = 1 << 3;
+const IM_HOUR: i32 = 1 << 10;
+const IM_MINUTE: i32 = 1 << 11;
+const IM_SECOND: i32 = 1 << 12;
+const INTERVAL_FULL_RANGE: i32 = 0x7FFF;
+
 #[cold]
 #[inline(never)]
 fn unimplemented_rule(rule: usize) -> ! {
@@ -1181,7 +1191,7 @@ impl<'mcx> Parser<'mcx> {
                 list.lappend(mcx, Node::mk_integer(mcx, view.v(3).ival())?)?;
                 *yyval = YYSTYPE::List(list);
             }
-            // ConstInterval opt_interval (non-empty opt_interval is loud).
+            // ConstInterval opt_interval
             1950 => {
                 let t = view.v(1).node().expect("ConstInterval");
                 let typmods = view.v(2).list();
@@ -2510,7 +2520,7 @@ impl<'mcx> Parser<'mcx> {
             229 => *yyval = YYSTYPE::Str("read committed"),
             230 => *yyval = YYSTYPE::Str("repeatable read"),
             231 => *yyval = YYSTYPE::Str("serializable"),
-            // zone_value: Sconst | IDENT | NumericOnly (interval arms stay unported).
+            // zone_value: Sconst | IDENT | NumericOnly (interval arms in reduce_cold).
             236 | 237 => {
                 let s = view.v(1).str_val();
                 *yyval = self.a_const(
@@ -3264,6 +3274,161 @@ impl<'mcx> Parser<'mcx> {
                 let mut list = view.v(1).list();
                 list.lappend(mcx, view.v(3).node().expect("relation_expr"))?;
                 *yyval = YYSTYPE::List(list);
+            }
+            // opt_interval single-field / X TO Y masks (values vs datetime.h).
+            2003..=2007 | 2009..=2011 | 2013 => {
+                let mask = match rule {
+                    2003 => IM_YEAR,
+                    2004 => IM_MONTH,
+                    2005 => IM_DAY,
+                    2006 => IM_HOUR,
+                    2007 => IM_MINUTE,
+                    2009 => IM_YEAR | IM_MONTH,
+                    2010 => IM_DAY | IM_HOUR,
+                    2011 => IM_DAY | IM_HOUR | IM_MINUTE,
+                    _ => IM_HOUR | IM_MINUTE,
+                };
+                *yyval = YYSTYPE::List(NodeList::make1(
+                    mcx,
+                    make_int_const(mcx, mask, view.l(1))?,
+                )?);
+            }
+            // X TO interval_second: keep interval_second's precision cell,
+            // replace its mask cell (C mutates linitial in place).
+            2012 | 2014 | 2015 => {
+                let mask = match rule {
+                    2012 => IM_DAY | IM_HOUR | IM_MINUTE | IM_SECOND,
+                    2014 => IM_HOUR | IM_MINUTE | IM_SECOND,
+                    _ => IM_MINUTE | IM_SECOND,
+                };
+                let sec = view.v(3).list();
+                let mut list = NodeList::make1(mcx, make_int_const(mcx, mask, view.l(1))?)?;
+                for extra in sec.iter().skip(1) {
+                    list.lappend(mcx, extra)?;
+                }
+                *yyval = YYSTYPE::List(list);
+            }
+            2017 => {
+                *yyval = YYSTYPE::List(NodeList::make1(
+                    mcx,
+                    make_int_const(mcx, IM_SECOND, view.l(1))?,
+                )?);
+            }
+            2018 => {
+                *yyval = YYSTYPE::List(NodeList::make2(
+                    mcx,
+                    make_int_const(mcx, IM_SECOND, view.l(1))?,
+                    make_int_const(mcx, view.v(3).ival(), view.l(3))?,
+                )?);
+            }
+            // SimpleTypename ConstInterval '(' Iconst ')'
+            1951 => {
+                let t = view.v(1).node().expect("ConstInterval");
+                let typmods = NodeList::make2(
+                    mcx,
+                    make_int_const(mcx, INTERVAL_FULL_RANGE, -1)?,
+                    make_int_const(mcx, view.v(3).ival(), view.l(3))?,
+                )?;
+                // SAFETY: as rule 8 — parser-owned tree, no live derived refs.
+                unsafe {
+                    t.with_mut::<TypeName, _>(|tn| tn.typmods = typmods).expect("TypeName");
+                }
+                *yyval = YYSTYPE::Node(Some(t));
+            }
+            // AexprConst: ConstInterval Sconst opt_interval
+            //           | ConstInterval '(' Iconst ')' Sconst
+            2447 | 2448 => {
+                let t = view.v(1).node().expect("ConstInterval");
+                let (typmods, s, sloc) = if rule == 2447 {
+                    (view.v(3).list(), view.v(2).str_val(), view.l(2))
+                } else {
+                    (
+                        NodeList::make2(
+                            mcx,
+                            make_int_const(mcx, INTERVAL_FULL_RANGE, -1)?,
+                            make_int_const(mcx, view.v(3).ival(), view.l(3))?,
+                        )?,
+                        view.v(5).str_val(),
+                        view.l(5),
+                    )
+                };
+                // SAFETY: as rule 8.
+                unsafe {
+                    t.with_mut::<TypeName, _>(|tn| tn.typmods = typmods).expect("TypeName");
+                }
+                *yyval = YYSTYPE::Node(Some(make_string_const_cast(mcx, s, sloc, t)?));
+            }
+            // a_expr: row OVERLAPS row
+            2061 => {
+                let left = view.v(1).list();
+                let right = view.v(3).list();
+                if left.len() != 2 {
+                    return Err(self.errposition_error(
+                        "wrong number of parameters on left side of OVERLAPS expression".into(),
+                        view.l(1),
+                    ));
+                }
+                if right.len() != 2 {
+                    return Err(self.errposition_error(
+                        "wrong number of parameters on right side of OVERLAPS expression".into(),
+                        view.l(3),
+                    ));
+                }
+                let mut args = left;
+                args.concat(mcx, &right)?;
+                let f = make_func_call(
+                    mcx,
+                    system_func_name(mcx, "overlaps")?,
+                    args,
+                    CoercionForm::COERCE_SQL_SYNTAX,
+                    view.l(2),
+                )?;
+                *yyval = YYSTYPE::Node(Some(f.seal()));
+            }
+            // row: '(' expr_list ',' a_expr ')'
+            2259 => {
+                let mut list = view.v(2).list();
+                list.lappend(mcx, view.v(4).node().expect("a_expr"))?;
+                *yyval = YYSTYPE::List(list);
+            }
+            // zone_value: ConstInterval Sconst opt_interval
+            //           | ConstInterval '(' Iconst ')' Sconst
+            238 | 239 => {
+                let t = view.v(1).node().expect("ConstInterval");
+                let (typmods, s, sloc) = if rule == 238 {
+                    let tl = view.v(3).list();
+                    if let Some(first) = tl.first() {
+                        let ival = first
+                            .as_a_const()
+                            .and_then(|c| match c.val {
+                                Some(ValUnion::Integer(Integer { ival })) => Some(ival),
+                                _ => None,
+                            })
+                            .expect("opt_interval mask A_Const");
+                        if ival & !(IM_HOUR | IM_MINUTE) != 0 {
+                            return Err(self.errposition_error(
+                                "time zone interval must be HOUR or HOUR TO MINUTE".into(),
+                                view.l(3),
+                            ));
+                        }
+                    }
+                    (tl, view.v(2).str_val(), view.l(2))
+                } else {
+                    (
+                        NodeList::make2(
+                            mcx,
+                            make_int_const(mcx, INTERVAL_FULL_RANGE, -1)?,
+                            make_int_const(mcx, view.v(3).ival(), view.l(3))?,
+                        )?,
+                        view.v(5).str_val(),
+                        view.l(5),
+                    )
+                };
+                // SAFETY: as rule 8.
+                unsafe {
+                    t.with_mut::<TypeName, _>(|tn| tn.typmods = typmods).expect("TypeName");
+                }
+                *yyval = YYSTYPE::Node(Some(make_string_const_cast(mcx, s, sloc, t)?));
             }
             _ => unimplemented_rule(rule),
         }

@@ -56,7 +56,7 @@ pub fn BuildDescForRelation<'mcx>(
             .expect("ColumnDef.typeName")
             .as_variant::<TypeName>()
             .expect("TypeName");
-        let (atttypid, atttypmod) = parse_utilcmd::typenameTypeIdAndMod(mcx, tn)?;
+        let (atttypid, atttypmod) = parse_utilcmd::typenameTypeIdAndMod(mcx, None, tn)?;
         let attcollation = syscache_seams::lookup_pg_type_shape::call(atttypid)?
             .expect("pg_type row vanished")
             .typcollation;

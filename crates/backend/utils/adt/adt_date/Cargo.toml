@@ -11,6 +11,8 @@ path = "src/lib.rs"
 [dependencies]
 adt_datetime = { path = "../adt_datetime" }
 adt_timestamp = { path = "../adt_timestamp" }
+numeric = { package = "adt_numeric", path = "../numeric" }
+xact = { path = "../../../access/transam/xact" }
 datum = { path = "../../../../_support/types/datum" }
 hashfn = { path = "../../../../common/hashfn" }
 mcx = { path = "../../../../_support/mcx" }

@@ -1,24 +1,28 @@
-//! fmgr wrappers (`fc_*`) + `TIMESTAMP_BUILTINS` for fmgr-core. Not
-//! registrable (established precedents): the interval-typed rows (interval
-//! unit unported: timestamp[tz]_izone 1026/2070, timestamp_mi 1188/2031, age
-//! 1199/2058, timestamp[tz]_pl/mi_interval, interval_part/extract_interval,
-//! interval_trunc, timestamp[tz]_bin 6177/6178), overlaps_timestamp
-//! 1304/2041 (non-strict 4-arg frame stays with the interval lane),
+//! fmgr wrappers (`fc_*`) + `TIMESTAMP_BUILTINS` for fmgr-core. The bulk of
+//! the interval-typed rows (I/O, cmp/hash, arithmetic, justify, scale,
+//! finite, timestamp[tz] +/- interval, timestamp_mi) live in adt_date's
+//! table; this file adds only the rows adt_date lacks (typmod I/O, part/
+//! trunc, age, izone, make_interval, overlaps_timestamp 1304/2041, date_add/
+//! date_subtract 6221/6223). Not registrable (established precedents):
+//! interval aggregates (agg frame), timestamp[tz]_bin 6177/6178,
 //! generate_series_timestamp[tz] 938/939/6274 (SRF frame),
-//! float8_timestamptz 1158 / timestamptz_float8 (float lane),
-//! typmodin/typmodout 2905-2908 (ArrayType), timestamp_support /
+//! float8_timestamptz 1158 / timestamptz_float8 (float lane), timestamp
+//! typmodin/typmodout 2905-2908, timestamp_support / interval_support /
 //! timestamp_sortsupport 3137 / skipsupport (planner nodes), to_timestamp
-//! 1778, pg_postmaster_start_time/pg_conf_load_time (backend globals).
+//! 1778, pg_postmaster_start_time/pg_conf_load_time (backend globals),
+//! timestamptz_pl/mi_interval_at_zone 6449-6452.
 
-use ::datum::{Datum, Varlena};
-use ::types_core::Oid;
-use ::types_error::PgResult;
+use ::datum::{Datum, Varlena, VarlenaRef};
+use ::types_core::{Oid, CSTRINGOID};
+use ::types_error::{
+    PgError, PgResult, ERRCODE_ARRAY_SUBSCRIPT_ERROR, ERRCODE_DATATYPE_MISMATCH,
+};
 use ::types_fmgr::{
-    byref_result, varlena_result, FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo,
-    PGFunction,
+    byref_result, overlaps_common, varlena_result, FmgrBuiltin, FmgrInfo,
+    FunctionCallInfoBaseData as Fcinfo, PGFunction,
 };
 
-use adt_datetime::MAXDATELEN;
+use adt_datetime::{Interval, MAXDATELEN};
 
 use crate::PartValue;
 
@@ -365,8 +369,186 @@ ts_part! {
     fc_extract_timestamptz: timestamptz_part_common(true);
 }
 
+#[inline]
+fn arg_interval(fcinfo: &Fcinfo, i: usize) -> Interval {
+    // SAFETY: catalog arg i is a non-null interval (typlen 16, typalign d),
+    // live for the call; read field-wise like adt_date's arg_timetz.
+    unsafe {
+        let p = fcinfo.arg_ptr(i);
+        Interval {
+            time: (p as *const i64).read_unaligned(),
+            day: (p.add(8) as *const i32).read_unaligned(),
+            month: (p.add(12) as *const i32).read_unaligned(),
+        }
+    }
+}
+
+fn interval_result(fcinfo: &mut Fcinfo, iv: Interval) -> PgResult<Datum> {
+    let mut img = [0u8; 16];
+    img[..8].copy_from_slice(&iv.time.to_ne_bytes());
+    img[8..12].copy_from_slice(&iv.day.to_ne_bytes());
+    img[12..].copy_from_slice(&iv.month.to_ne_bytes());
+    byref_result(fcinfo.result_mcx(), &img)
+}
+
+// ArrayGetIntegerTypmods (arrayutils.c) over the _cstring argument.
+fn array_get_integer_typmods(fcinfo: &Fcinfo, out: &mut [i32; 8]) -> PgResult<usize> {
+    // SAFETY: strict fn — arg 0 is a non-null, detoasted cstring[] datum.
+    let image = unsafe { VarlenaRef::from_ptr(fcinfo.arg_ptr(0)) }.as_bytes();
+    let rd = |off: usize| i32::from_ne_bytes(image[off..off + 4].try_into().unwrap());
+    if rd(12) as Oid != CSTRINGOID {
+        return Err(Box::new(
+            PgError::error("typmod array must be type cstring[]")
+                .with_sqlstate(ERRCODE_DATATYPE_MISMATCH),
+        ));
+    }
+    if rd(4) != 1 {
+        return Err(Box::new(
+            PgError::error("typmod array must be one-dimensional")
+                .with_sqlstate(ERRCODE_ARRAY_SUBSCRIPT_ERROR),
+        ));
+    }
+    if rd(8) != 0 {
+        return Err(Box::new(
+            PgError::error("typmod array must not contain nulls")
+                .with_sqlstate(::types_error::ERRCODE_NULL_VALUE_NOT_ALLOWED),
+        ));
+    }
+    let n = rd(16) as usize;
+    if n > out.len() {
+        return Err(Box::new(
+            PgError::error("invalid INTERVAL type modifier")
+                .with_sqlstate(::types_error::ERRCODE_INVALID_PARAMETER_VALUE),
+        ));
+    }
+    let mut off = 24usize;
+    for slot in out.iter_mut().take(n) {
+        let end = off + image[off..].iter().position(|&b| b == 0).expect("NUL-terminated");
+        let s = core::str::from_utf8(&image[off..end]).map_err(|_| {
+            Box::new(
+                PgError::error("invalid input syntax for type integer")
+                    .with_sqlstate(::types_error::ERRCODE_INVALID_TEXT_REPRESENTATION),
+            )
+        })?;
+        *slot = numutils::pg_strtoint32(s)?;
+        off = end + 1;
+    }
+    Ok(n)
+}
+
+pub fn fc_intervaltypmodin(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let mut tl = [0i32; 8];
+    let n = array_get_integer_typmods(fcinfo, &mut tl)?;
+    Ok(Datum::from_i32(crate::interval::intervaltypmodin(&tl[..n])?))
+}
+
+pub fn fc_intervaltypmodout(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let typmod = fcinfo.arg_i32(0);
+    OUT_SCRATCH.with(|c| {
+        // SAFETY: single-threaded backend; the sole live access is this call.
+        let buf = unsafe { &mut *c.get() };
+        let mut tmp = [0u8; 64];
+        let len = crate::interval::intervaltypmodout(typmod, &mut tmp);
+        buf[..len].copy_from_slice(&tmp[..len]);
+        buf[len] = 0;
+        Ok(Datum::from_usize(buf.as_ptr() as usize))
+    })
+}
+
+pub fn fc_make_interval(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let [y, mo, w, d, h, mi, s] = fcinfo.args_n::<7>();
+    let r = crate::interval::make_interval(
+        y.value.as_i32(),
+        mo.value.as_i32(),
+        w.value.as_i32(),
+        d.value.as_i32(),
+        h.value.as_i32(),
+        mi.value.as_i32(),
+        s.value.as_f64(),
+    )?;
+    interval_result(fcinfo, r)
+}
+
+pub fn fc_interval_trunc(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: strict fn — arg 0 is a non-null text varlena.
+    let units = unsafe { fcinfo.arg_varlena_packed(0)? };
+    let iv = arg_interval(fcinfo, 1);
+    let r = crate::interval::interval_trunc(units.data(), &iv)?;
+    interval_result(fcinfo, r)
+}
+
+macro_rules! interval_part {
+    ($($fc:ident: $retnumeric:literal;)*) => {$(
+        pub fn $fc(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+            // SAFETY: strict fn — arg 0 is a non-null text varlena.
+            let units = unsafe { fcinfo.arg_varlena_packed(0)? };
+            let iv = arg_interval(fcinfo, 1);
+            let v = crate::interval::interval_part_common(units.data(), &iv, $retnumeric)?;
+            part_result(fcinfo, v)
+        }
+    )*};
+}
+
+interval_part! {
+    fc_interval_part: false;
+    fc_extract_interval: true;
+}
+
+pub fn fc_timestamptz_pl_interval(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let iv = arg_interval(fcinfo, 1);
+    Ok(Datum::from_i64(crate::interval::timestamptz_pl_interval(fcinfo.arg_i64(0), &iv)?))
+}
+
+pub fn fc_timestamptz_mi_interval(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let iv = arg_interval(fcinfo, 1);
+    Ok(Datum::from_i64(crate::interval::timestamptz_mi_interval(fcinfo.arg_i64(0), &iv)?))
+}
+
+pub fn fc_timestamp_age(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let r = crate::interval::timestamp_age(fcinfo.arg_i64(0), fcinfo.arg_i64(1))?;
+    interval_result(fcinfo, r)
+}
+
+pub fn fc_timestamptz_age(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let r = crate::interval::timestamptz_age(fcinfo.arg_i64(0), fcinfo.arg_i64(1))?;
+    interval_result(fcinfo, r)
+}
+
+pub fn fc_timestamp_izone(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let zone = arg_interval(fcinfo, 0);
+    Ok(Datum::from_i64(crate::interval::timestamp_izone(&zone, fcinfo.arg_i64(1))?))
+}
+
+pub fn fc_timestamptz_izone(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let zone = arg_interval(fcinfo, 0);
+    Ok(Datum::from_i64(crate::interval::timestamptz_izone(&zone, fcinfo.arg_i64(1))?))
+}
+
+pub fn fc_overlaps_timestamp(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    overlaps_common(fcinfo, |fc, i, j| fc.arg_i64(i) > fc.arg_i64(j))
+}
+
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin { foid, name, nargs, strict: true, retset: false, func }
+}
+
+const fn bn(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
+    FmgrBuiltin { foid, name, nargs, strict: false, retset: false, func }
 }
 
 // pg_proc.dat rows for timestamp.c; alias OIDs over the same prosrc each get
@@ -442,4 +624,18 @@ pub const TIMESTAMP_BUILTINS: &[FmgrBuiltin] = &[
     b(6335, "timestamp_at_local", 1, fc_timestamp_timestamptz),
     b(6425, "timestamptz_hash", 1, fc_timestamp_hash),
     b(6426, "timestamptz_hash_extended", 2, fc_timestamp_hash_extended),
+    b(1026, "timestamptz_izone", 2, fc_timestamptz_izone),
+    b(1172, "interval_part", 2, fc_interval_part),
+    b(1199, "timestamptz_age", 2, fc_timestamptz_age),
+    b(1218, "interval_trunc", 2, fc_interval_trunc),
+    bn(1304, "overlaps_timestamp", 4, fc_overlaps_timestamp),
+    bn(2041, "overlaps_timestamp", 4, fc_overlaps_timestamp),
+    b(2058, "timestamp_age", 2, fc_timestamp_age),
+    b(2070, "timestamp_izone", 2, fc_timestamp_izone),
+    b(2903, "intervaltypmodin", 1, fc_intervaltypmodin),
+    b(2904, "intervaltypmodout", 1, fc_intervaltypmodout),
+    b(3464, "make_interval", 7, fc_make_interval),
+    b(6204, "extract_interval", 2, fc_extract_interval),
+    b(6221, "timestamptz_pl_interval", 2, fc_timestamptz_pl_interval),
+    b(6223, "timestamptz_mi_interval", 2, fc_timestamptz_mi_interval),
 ];

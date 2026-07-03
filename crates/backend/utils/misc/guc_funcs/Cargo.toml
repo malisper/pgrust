@@ -29,6 +29,9 @@ types_guc = { path = "../../../../_support/types/types_guc" }
 types_nodes = { path = "../../../../_support/types/nodes" }
 types_tuple = { path = "../../../../_support/types/types_tuple" }
 xact = { path = "../../../access/transam/xact" }
+parse_utilcmd = { path = "../../../parser/parse_utilcmd" }
+adt_timestamp = { path = "../../adt/adt_timestamp" }
+adt_datetime = { path = "../../adt/adt_datetime" }
 
 [dev-dependencies]
 aclchk_seams = { path = "../../../catalog/aclchk_seams" }

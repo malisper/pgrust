@@ -343,7 +343,7 @@ fn transformTypeCast<'mcx>(
         .expect("TypeCast.typeName")
         .as_variant::<types_nodes::TypeName>()
         .expect("TypeName");
-    let (target_type, target_typmod) = parse_utilcmd::typenameTypeIdAndMod(mcx, tn)?;
+    let (target_type, target_typmod) = parse_utilcmd::typenameTypeIdAndMod(mcx, Some(pstate), tn)?;
 
     let arg = tc.arg.expect("TypeCast.arg");
     if arg.node_tag() == NodeTag::T_A_ArrayExpr {

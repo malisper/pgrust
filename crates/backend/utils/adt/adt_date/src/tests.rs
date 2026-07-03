@@ -366,3 +366,150 @@ fn binary_wire_round_trip() {
         assert_eq!(si.cursor, si.len());
     }
 }
+
+fn iv(s: &str) -> Interval {
+    adt_timestamp::interval::interval_in(s, -1, None).unwrap()
+}
+
+fn pv_num(v: PartValue) -> String {
+    match v {
+        PartValue::Numeric(img) => {
+            let mut buf = Vec::new();
+            numeric::numeric_out_into(img.num(), &mut buf);
+            String::from_utf8(buf).unwrap()
+        }
+        other => panic!("expected numeric, got {other:?}"),
+    }
+}
+
+fn pv_f64(v: PartValue) -> f64 {
+    match v {
+        PartValue::Float(f) => f,
+        other => panic!("expected float, got {other:?}"),
+    }
+}
+
+#[test]
+fn time_timetz_interval_arithmetic() {
+    gmt_session();
+    let t = t_in("23:00:00", -1);
+    assert_eq!(t_out(time_pl_interval(t, &iv("2 hours")).unwrap()), "01:00:00");
+    assert_eq!(t_out(time_mi_interval(t_in("01:00:00", -1), &iv("2 hours")).unwrap()), "23:00:00");
+    assert_eq!(t_out(time_pl_interval(t, &iv("-25 hours")).unwrap()), "22:00:00");
+    assert_eq!(
+        t_out(time_pl_interval(t, &iv("1 mon 1 day 1 hour")).unwrap()),
+        "00:00:00",
+        "months/days ignored for time"
+    );
+
+    let ttz = tz_in("23:00:00+05", -1);
+    let r = timetz_pl_interval(&ttz, &iv("90 minutes")).unwrap();
+    assert_eq!(tz_out(&r), "00:30:00+05");
+    let r = timetz_mi_interval(&r, &iv("90 minutes")).unwrap();
+    assert_eq!(tz_out(&r), "23:00:00+05");
+
+    let arms: [(fn(TimeADT, &Interval) -> PgResult<TimeADT>, &str); 2] = [
+        (time_pl_interval, "cannot add infinite interval to time"),
+        (time_mi_interval, "cannot subtract infinite interval from time"),
+    ];
+    for (f, msg) in arms {
+        let e = f(t, &Interval::NOEND).unwrap_err();
+        assert_eq!(e.sqlstate(), ERRCODE_DATETIME_VALUE_OUT_OF_RANGE);
+        assert_eq!(e.message(), msg);
+    }
+    let e = timetz_pl_interval(&ttz, &Interval::NOBEGIN).unwrap_err();
+    assert_eq!(e.message(), "cannot add infinite interval to time");
+    let e = timetz_mi_interval(&ttz, &Interval::NOEND).unwrap_err();
+    assert_eq!(e.message(), "cannot subtract infinite interval from time");
+}
+
+#[test]
+fn date_interval_arithmetic() {
+    gmt_session();
+    let d = d_in("2024-01-31");
+    let ts = date_pl_interval(d, &iv("1 month")).unwrap();
+    assert_eq!(ts, date2timestamp(d_in("2024-02-29")).unwrap());
+    let ts = date_mi_interval(d_in("2024-03-01"), &iv("1 day 12:00:00")).unwrap();
+    let mut buf = [0u8; MAXDATELEN + 1];
+    let n = adt_timestamp::timestamp_out(ts, &mut buf).unwrap();
+    assert_eq!(std::str::from_utf8(&buf[..n]).unwrap(), "2024-02-28 12:00:00");
+    assert_eq!(date_pl_interval(DATEVAL_NOEND, &iv("1 day")).unwrap(), DT_NOEND);
+}
+
+#[test]
+fn time_interval_conversions() {
+    gmt_session();
+    let t = t_in("12:34:56.789", -1);
+    let ivl = time_interval(t);
+    assert_eq!((ivl.time, ivl.day, ivl.month), (t, 0, 0));
+    assert_eq!(interval_time(&iv("1 day 01:00:00")).unwrap(), t_in("01:00:00", -1));
+    assert_eq!(interval_time(&iv("-1 hour")).unwrap(), t_in("23:00:00", -1));
+    let e = interval_time(&Interval::NOEND).unwrap_err();
+    assert_eq!(e.message(), "cannot convert infinite interval to time");
+    assert_eq!(e.sqlstate(), ERRCODE_DATETIME_VALUE_OUT_OF_RANGE);
+}
+
+#[test]
+fn timetz_zone_izone_rotation() {
+    gmt_session();
+    // xact start timestamp is 0 in tests = 2000-01-01 00:00 UTC (EST for NY)
+    let ttz = tz_in("10:00:00+00", -1);
+    let r = timetz_zone(b"America/New_York", &ttz).unwrap();
+    assert_eq!(tz_out(&r), "05:00:00-05");
+    let r = timetz_zone(b"utc", &ttz).unwrap();
+    assert_eq!(tz_out(&r), "10:00:00+00");
+
+    let r = timetz_izone(&iv("-05:00:00"), &ttz).unwrap();
+    assert_eq!(tz_out(&r), "05:00:00-05");
+
+    let e = timetz_izone(&Interval::NOEND, &ttz).unwrap_err();
+    assert_eq!(e.message(), "interval time zone \"infinity\" must be finite");
+    assert_eq!(e.sqlstate(), types_error::ERRCODE_INVALID_PARAMETER_VALUE);
+    let e = timetz_izone(&iv("1 day"), &ttz).unwrap_err();
+    assert_eq!(
+        e.message(),
+        "interval time zone \"1 day\" must not include months or days"
+    );
+
+    let r = timetz_at_local(&ttz).unwrap();
+    assert_eq!(tz_out(&r), "10:00:00+00", "session tz GMT");
+}
+
+#[test]
+fn extract_arms() {
+    gmt_session();
+    let d = d_in("2024-02-29");
+    assert_eq!(pv_num(extract_date(b"year", d).unwrap()), "2024");
+    assert_eq!(pv_num(extract_date(b"quarter", d).unwrap()), "1");
+    assert_eq!(pv_num(extract_date(b"dow", d).unwrap()), "4");
+    assert_eq!(pv_num(extract_date(b"doy", d).unwrap()), "60");
+    assert_eq!(pv_num(extract_date(b"epoch", d).unwrap()), "1709164800");
+    assert_eq!(pv_num(extract_date(b"julian", d).unwrap()), "2460370");
+    assert_eq!(pv_num(extract_date(b"epoch", DATEVAL_NOEND).unwrap()), "Infinity");
+    assert!(matches!(extract_date(b"day", DATEVAL_NOEND).unwrap(), PartValue::Null));
+    let e = extract_date(b"hour", d).unwrap_err();
+    assert_eq!(e.message(), "unit \"hour\" not supported for type date");
+    assert_eq!(e.sqlstate(), ERRCODE_FEATURE_NOT_SUPPORTED);
+    let e = extract_date(b"bogus", d).unwrap_err();
+    assert_eq!(e.message(), "unit \"bogus\" not recognized for type date");
+
+    let t = t_in("13:30:25.123456", -1);
+    assert_eq!(pv_num(time_part_common(b"second", t, true).unwrap()), "25.123456");
+    assert_eq!(pv_f64(time_part_common(b"second", t, false).unwrap()), 25.123456);
+    assert_eq!(pv_num(time_part_common(b"minute", t, true).unwrap()), "30");
+    assert_eq!(pv_f64(time_part_common(b"hour", t, false).unwrap()), 13.0);
+    assert_eq!(pv_num(time_part_common(b"epoch", t, true).unwrap()), "48625.123456");
+    let e = time_part_common(b"day", t, false).unwrap_err();
+    assert_eq!(e.message(), "unit \"day\" not supported for type time without time zone");
+    let e = time_part_common(b"bogus", t, true).unwrap_err();
+    assert_eq!(e.message(), "unit \"bogus\" not recognized for type time without time zone");
+
+    let ttz = tz_in("13:30:25.123456-04:30", -1);
+    assert_eq!(pv_f64(timetz_part_common(b"timezone", &ttz, false).unwrap()), -16200.0);
+    assert_eq!(pv_f64(timetz_part_common(b"timezone_hour", &ttz, false).unwrap()), -4.0);
+    assert_eq!(pv_f64(timetz_part_common(b"timezone_minute", &ttz, false).unwrap()), -30.0);
+    assert_eq!(pv_num(timetz_part_common(b"second", &ttz, true).unwrap()), "25.123456");
+    assert_eq!(pv_num(timetz_part_common(b"epoch", &ttz, true).unwrap()), "64825.123456");
+    let e = timetz_part_common(b"month", &ttz, true).unwrap_err();
+    assert_eq!(e.message(), "unit \"month\" not supported for type time with time zone");
+}

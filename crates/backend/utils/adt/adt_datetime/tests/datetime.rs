@@ -513,3 +513,138 @@ fn parse_error_mapping_carries_c_sqlstates() {
     assert!(DateTimeParseError(DTERR_FIELD_OVERFLOW, None, "x", "date", Some(&mut soft)).is_ok());
     assert!(soft.error_occurred());
 }
+
+fn decode_interval(input: &str, range: i32) -> Result<(i32, pg_itm_in), i32> {
+    let mut workbuf = [0u8; TS_BUFLEN];
+    let p = parse(input, &mut workbuf)?;
+    let mut dtype = 0;
+    let mut itm_in = pg_itm_in::default();
+    let rc = DecodeInterval(&p.field[..p.nf], &p.ftype[..p.nf], p.nf, range, &mut dtype, &mut itm_in);
+    if rc != 0 {
+        return Err(rc);
+    }
+    Ok((dtype, itm_in))
+}
+
+fn decode_iso_interval(input: &str) -> Result<(i32, pg_itm_in), i32> {
+    let mut dtype = 0;
+    let mut itm_in = pg_itm_in::default();
+    let rc = DecodeISO8601Interval(input.as_bytes(), &mut dtype, &mut itm_in);
+    if rc != 0 {
+        return Err(rc);
+    }
+    Ok((dtype, itm_in))
+}
+
+fn itm(usec: i64, mday: i32, mon: i32, year: i32) -> pg_itm_in {
+    pg_itm_in { tm_usec: usec, tm_mday: mday, tm_mon: mon, tm_year: year }
+}
+
+#[test]
+fn decode_interval_postgres_format() {
+    let (dtype, v) = decode_interval("1 year 2 mons 3 days 04:05:06.789", INTERVAL_FULL_RANGE).unwrap();
+    assert_eq!(dtype, DTK_DELTA);
+    assert_eq!(v, itm(14_706_789_000, 3, 2, 1));
+
+    let (_, v) = decode_interval("-1 day +5 hours", INTERVAL_FULL_RANGE).unwrap();
+    assert_eq!(v, itm(5 * USECS_PER_HOUR, -1, 0, 0));
+
+    let (_, v) = decode_interval("1-2", INTERVAL_FULL_RANGE).unwrap();
+    assert_eq!(v, itm(0, 0, 14, 0));
+
+    let (_, v) = decode_interval("-1-2", INTERVAL_FULL_RANGE).unwrap();
+    assert_eq!(v, itm(0, 0, -14, 0));
+
+    let (_, v) = decode_interval("1 day ago", INTERVAL_FULL_RANGE).unwrap();
+    assert_eq!(v, itm(0, -1, 0, 0));
+
+    let (_, v) = decode_interval("@ 1 minute", INTERVAL_FULL_RANGE).unwrap();
+    assert_eq!(v, itm(USECS_PER_MINUTE, 0, 0, 0));
+
+    let (_, v) = decode_interval("1.5 mons", INTERVAL_FULL_RANGE).unwrap();
+    assert_eq!(v, itm(0, 15, 1, 0));
+
+    let (_, v) = decode_interval("2.5 weeks", INTERVAL_FULL_RANGE).unwrap();
+    assert_eq!(v, itm(12 * USECS_PER_HOUR, 17, 0, 0));
+
+    let (_, v) = decode_interval("-00:01:30", INTERVAL_FULL_RANGE).unwrap();
+    assert_eq!(v, itm(-90 * USECS_PER_SEC, 0, 0, 0));
+
+    let (_, v) = decode_interval("1 +02:03", INTERVAL_FULL_RANGE).unwrap();
+    assert_eq!(v, itm(2 * USECS_PER_HOUR + 3 * USECS_PER_MINUTE, 1, 0, 0));
+}
+
+#[test]
+fn decode_interval_range_and_specials() {
+    let (_, v) = decode_interval("12:34", INTERVAL_MASK(MINUTE) | INTERVAL_MASK(SECOND)).unwrap();
+    assert_eq!(v, itm(12 * USECS_PER_MINUTE + 34 * USECS_PER_SEC, 0, 0, 0));
+
+    let (_, v) = decode_interval("12:34", INTERVAL_FULL_RANGE).unwrap();
+    assert_eq!(v, itm(12 * USECS_PER_HOUR + 34 * USECS_PER_MINUTE, 0, 0, 0));
+
+    let (_, v) = decode_interval("7", INTERVAL_MASK(DAY)).unwrap();
+    assert_eq!(v, itm(0, 7, 0, 0));
+
+    let (dtype, _) = decode_interval("infinity", INTERVAL_FULL_RANGE).unwrap();
+    assert_eq!(dtype, DTK_LATE);
+    let (dtype, _) = decode_interval("-infinity", INTERVAL_FULL_RANGE).unwrap();
+    assert_eq!(dtype, DTK_EARLY);
+
+    assert_eq!(decode_interval("infinity ago", INTERVAL_FULL_RANGE), Err(DTERR_BAD_FORMAT));
+    assert_eq!(decode_interval("day", INTERVAL_FULL_RANGE), Err(DTERR_BAD_FORMAT));
+    // trailing bare number picks up the range-default unit (seconds)
+    let (_, v) = decode_interval("1 day 2", INTERVAL_FULL_RANGE).unwrap();
+    assert_eq!(v, itm(2 * USECS_PER_SEC, 1, 0, 0));
+    assert_eq!(decode_interval("1 day day", INTERVAL_FULL_RANGE), Err(DTERR_BAD_FORMAT));
+    assert_eq!(
+        decode_interval("9999999999999999999 days", INTERVAL_FULL_RANGE),
+        Err(DTERR_FIELD_OVERFLOW)
+    );
+    assert_eq!(
+        decode_interval("2147483648 days", INTERVAL_FULL_RANGE),
+        Err(DTERR_FIELD_OVERFLOW)
+    );
+}
+
+#[test]
+fn decode_interval_sql_standard_leading_sign() {
+    set_interval_style(INTSTYLE_SQL_STANDARD);
+    let (_, v) = decode_interval("-1 1:00:00", INTERVAL_FULL_RANGE).unwrap();
+    assert_eq!(v, itm(-USECS_PER_HOUR, -1, 0, 0));
+    // an additional explicit sign disables force_negative
+    let (_, v) = decode_interval("-1 +1:00:00", INTERVAL_FULL_RANGE).unwrap();
+    assert_eq!(v, itm(USECS_PER_HOUR, -1, 0, 0));
+    set_interval_style(INTSTYLE_POSTGRES);
+    let (_, v) = decode_interval("-1 1:00:00", INTERVAL_FULL_RANGE).unwrap();
+    assert_eq!(v, itm(USECS_PER_HOUR, -1, 0, 0));
+}
+
+#[test]
+fn decode_iso8601_interval() {
+    let (dtype, v) = decode_iso_interval("P1Y2M3DT4H5M6.7S").unwrap();
+    assert_eq!(dtype, DTK_DELTA);
+    assert_eq!(v, itm(14_706_700_000, 3, 2, 1));
+
+    let (_, v) = decode_iso_interval("P0001-02-03T04:05:06").unwrap();
+    assert_eq!(v, itm(14_706_000_000, 3, 2, 1));
+
+    let (_, v) = decode_iso_interval("P00010203T040506").unwrap();
+    assert_eq!(v, itm(14_706_000_000, 3, 2, 1));
+
+    let (_, v) = decode_iso_interval("PT0S").unwrap();
+    assert_eq!(v, itm(0, 0, 0, 0));
+
+    let (_, v) = decode_iso_interval("P1W").unwrap();
+    assert_eq!(v, itm(0, 7, 0, 0));
+
+    let (_, v) = decode_iso_interval("P-1M").unwrap();
+    assert_eq!(v, itm(0, 0, -1, 0));
+
+    let (_, v) = decode_iso_interval("PT1.5H").unwrap();
+    assert_eq!(v, itm(90 * USECS_PER_MINUTE, 0, 0, 0));
+
+    assert_eq!(decode_iso_interval("P"), Err(DTERR_BAD_FORMAT));
+    assert_eq!(decode_iso_interval("1Y"), Err(DTERR_BAD_FORMAT));
+    assert_eq!(decode_iso_interval("P1X"), Err(DTERR_BAD_FORMAT));
+    assert_eq!(decode_iso_interval("P9999999999999999Y"), Err(DTERR_FIELD_OVERFLOW));
+}

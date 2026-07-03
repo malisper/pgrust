@@ -126,7 +126,7 @@ fn fill_plansource(
         mcx::vec_with_capacity_in(qmcx, reparsed.argtypes.len())?;
     for tn_node in reparsed.argtypes.iter() {
         let tn = tn_node.as_type_name().expect("PREPARE argtypes are TypeNames");
-        argtypes.push(parse_utilcmd::typenameTypeIdAndMod(qmcx, tn)?.0);
+        argtypes.push(parse_utilcmd::typenameTypeIdAndMod(qmcx, None, tn)?.0);
     }
 
     let (query_list, resolved) = postgres::pg_analyze_and_rewrite_varparams(

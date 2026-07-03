@@ -1500,13 +1500,93 @@ pub fn coerce_to_target_type<'mcx>(
     let result = coerce_type(
         mcx, pstate, expr, exprtype, targettype, targettypmod, ccontext, cformat, location,
     )?;
-    if targettypmod >= 0 {
-        unported(
-            "coerce_to_target_type (parse_coerce.c): coerce_type_typmod \
-             (find_typmod_coercion_function length-coercion lane)",
-        );
-    }
+    let hide = exprtype != targettype && result.as_variant::<Const>().is_none();
+    let result = coerce_type_typmod(
+        mcx, result, targettype, targettypmod, ccontext, cformat, location, hide,
+    )?;
     Ok(Some(result))
+}
+
+// Minimal exprTypmod slice: the node shapes coerce_type can hand back. A
+// wrong -1 only inserts a redundant (idempotent) length coercion.
+fn expr_typmod(node: Node<'_>) -> i32 {
+    if let Some(c) = node.as_variant::<Const>() {
+        c.consttypmod
+    } else if let Some(v) = node.as_variant::<types_nodes::Var>() {
+        v.vartypmod
+    } else if let Some(r) = node.as_variant::<RelabelType>() {
+        r.resulttypmod
+    } else {
+        -1
+    }
+}
+
+fn hide_coercion_node(node: Node<'_>) {
+    // SAFETY: parse tree is analyze-owned; no derived refs live.
+    unsafe {
+        if node
+            .with_mut::<FuncExpr, _>(|f| f.funcformat = CoercionForm::COERCE_IMPLICIT_CAST)
+            .is_some()
+            || node
+                .with_mut::<RelabelType, _>(|r| {
+                    r.relabelformat = CoercionForm::COERCE_IMPLICIT_CAST
+                })
+                .is_some()
+            || node
+                .with_mut::<CoerceViaIO, _>(|c| {
+                    c.coerceformat = CoercionForm::COERCE_IMPLICIT_CAST
+                })
+                .is_some()
+        {
+            return;
+        }
+    }
+    panic!("unsupported node type in hide_coercion_node: {:?}", node.node_tag());
+}
+
+// find_typmod_coercion_function (parse_coerce.c); array-element lane loud.
+fn find_typmod_coercion_function(typeId: Oid) -> PgResult<(CoercionPathType, Oid)> {
+    let shape = syscache_seams::lookup_pg_type_shape::call(typeId)?
+        .unwrap_or_else(|| unported("find_typmod_coercion_function: missing pg_type row"));
+    if shape.typlen == -1 {
+        if let Some(el) = syscache_seams::pg_type_element_shape::call(typeId)? {
+            if OidIsValid(el.typelem) {
+                unported("find_typmod_coercion_function: array length coercion (ARRAYCOERCE)");
+            }
+        }
+    }
+    match syscache_seams::lookup_pg_cast_shape::call(typeId, typeId)? {
+        Some(cast) => Ok((COERCION_PATH_FUNC, cast.castfunc)),
+        None => Ok((COERCION_PATH_NONE, InvalidOid)),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn coerce_type_typmod<'mcx>(
+    mcx: Mcx<'mcx>,
+    node: Node<'mcx>,
+    targetTypeId: Oid,
+    targetTypMod: i32,
+    ccontext: CoercionContext,
+    cformat: CoercionForm,
+    location: ParseLoc,
+    hideInputCoercion: bool,
+) -> PgResult<Node<'mcx>> {
+    if targetTypMod < 0 || targetTypMod == expr_typmod(node) {
+        return Ok(node);
+    }
+
+    let (pathtype, funcId) = find_typmod_coercion_function(targetTypeId)?;
+    if pathtype == COERCION_PATH_NONE {
+        return Ok(node);
+    }
+
+    if hideInputCoercion {
+        hide_coercion_node(node);
+    }
+    build_coercion_expression(
+        mcx, node, pathtype, funcId, targetTypeId, targetTypMod, ccontext, cformat, location,
+    )
 }
 
 /// Divergence from C: caller passes exprType/exprLocation of `node` (the

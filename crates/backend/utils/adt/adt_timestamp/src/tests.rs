@@ -564,3 +564,167 @@ fn timeofday_formats_like_c() {
     assert!(s.as_bytes()[dot + 1..dot + 7].iter().all(u8::is_ascii_digit), "{s}");
     assert_eq!(&s[3..4], " ");
 }
+
+use adt_datetime::Interval;
+use crate::interval::{
+    interval_cmp_internal, interval_in, interval_justify_days, interval_justify_hours,
+    interval_justify_interval, interval_mi, interval_out, interval_part_common, interval_pl,
+    interval_trunc, interval_um, intervaltypmodin, intervaltypmodout, make_interval,
+    timestamp_age, timestamp_izone, timestamp_mi, timestamp_mi_interval, timestamp_pl_interval,
+    timestamptz_pl_interval,
+};
+
+fn iv_in(s: &str) -> Interval {
+    interval_in(s, -1, None).unwrap()
+}
+
+fn iv_out(iv: &Interval) -> String {
+    let mut buf = [0u8; MAXDATELEN + 1];
+    let n = interval_out(iv, &mut buf);
+    String::from_utf8(buf[..n].to_vec()).unwrap()
+}
+
+#[test]
+fn interval_io_round_trips() {
+    gmt_session();
+    for (input, expect) in [
+        ("1 year 2 mons 3 days 04:05:06.789", "1 year 2 mons 3 days 04:05:06.789"),
+        ("-1 day +5 hours", "-1 days +05:00:00"),
+        ("1-2", "1 year 2 mons"),
+        ("@ 1 day ago", "-1 days"),
+        ("P1Y2M3DT4H5M6.7S", "1 year 2 mons 3 days 04:05:06.7"),
+        ("PT0S", "00:00:00"),
+        ("infinity", "infinity"),
+        ("-infinity", "-infinity"),
+        ("00:00", "00:00:00"),
+    ] {
+        assert_eq!(iv_out(&iv_in(input)), expect, "input {input}");
+    }
+
+    let err = interval_in("bogus", -1, None).unwrap_err();
+    assert_eq!(err.sqlstate, types_error::ERRCODE_INVALID_DATETIME_FORMAT);
+    let err = interval_in("100000000000000 years", -1, None).unwrap_err();
+    assert_eq!(err.sqlstate, types_error::ERRCODE_INTERVAL_FIELD_OVERFLOW);
+}
+
+#[test]
+fn interval_typmod_rounds_and_truncates_like_c() {
+    gmt_session();
+    use adt_datetime::{INTERVAL_MASK, MINUTE};
+    use crate::interval::INTERVAL_TYPMOD;
+    // INTERVAL MINUTE truncation
+    let tmod = intervaltypmodin(&[INTERVAL_MASK(MINUTE)]).unwrap();
+    let iv = interval_in("1 day 02:03:04.5", tmod, None).unwrap();
+    assert_eq!(iv_out(&iv), "1 day 02:03:00");
+    // precision rounding: interval(2)
+    let tmod = intervaltypmodin(&[adt_datetime::INTERVAL_FULL_RANGE, 2]).unwrap();
+    assert_eq!(tmod, INTERVAL_TYPMOD(2, adt_datetime::INTERVAL_FULL_RANGE));
+    let iv = interval_in("00:00:00.789", tmod, None).unwrap();
+    assert_eq!(iv_out(&iv), "00:00:00.79");
+    // typmodout round trip
+    let mut buf = [0u8; 64];
+    let n = intervaltypmodout(tmod, &mut buf);
+    assert_eq!(core::str::from_utf8(&buf[..n]).unwrap(), "(2)");
+    let tmod = intervaltypmodin(&[INTERVAL_MASK(MINUTE)]).unwrap();
+    let n = intervaltypmodout(tmod, &mut buf);
+    assert_eq!(core::str::from_utf8(&buf[..n]).unwrap(), " minute");
+    // negative precision
+    let err = intervaltypmodin(&[adt_datetime::INTERVAL_FULL_RANGE, -3]).unwrap_err();
+    assert!(err.message.contains("INTERVAL(-3) precision must not be negative"));
+    // bogus mask
+    let err = intervaltypmodin(&[1000]).unwrap_err();
+    assert!(err.message.contains("invalid INTERVAL type modifier"));
+}
+
+#[test]
+fn interval_arithmetic_matches_c() {
+    gmt_session();
+    let a = iv_in("1 mon 5 days 03:00:00");
+    let b = iv_in("2 mons -1 day 01:30:00");
+    assert_eq!(iv_out(&interval_pl(&a, &b).unwrap()), "3 mons 4 days 04:30:00");
+    assert_eq!(iv_out(&interval_mi(&a, &b).unwrap()), "-1 mons +6 days 01:30:00");
+    assert_eq!(iv_out(&interval_um(&a).unwrap()), "-1 mons -5 days -03:00:00");
+
+    assert!(interval_pl(&Interval::NOBEGIN, &Interval::NOEND).is_err());
+    assert_eq!(interval_mi(&a, &Interval::NOBEGIN).unwrap(), Interval::NOEND);
+
+    assert_eq!(interval_cmp_internal(&iv_in("30 days"), &iv_in("1 mon")), 0);
+    assert_eq!(interval_cmp_internal(&iv_in("24 hours"), &iv_in("1 day")), 0);
+    assert_eq!(interval_cmp_internal(&iv_in("25 hours"), &iv_in("1 day")), 1);
+    assert!(interval_cmp_internal(&Interval::NOBEGIN, &iv_in("0")) < 0);
+
+    let j = interval_justify_hours(&iv_in("27 hours")).unwrap();
+    assert_eq!(iv_out(&j), "1 day 03:00:00");
+    let j = interval_justify_days(&iv_in("35 days")).unwrap();
+    assert_eq!(iv_out(&j), "1 mon 5 days");
+    let j = interval_justify_interval(&iv_in("29 days 25 hours")).unwrap();
+    assert_eq!(iv_out(&j), "1 mon 1:00:00".replace("1:", "01:"));
+
+    let mk = make_interval(1, 2, 1, 2, 3, 4, 5.5).unwrap();
+    assert_eq!(iv_out(&mk), "1 year 2 mons 9 days 03:04:05.5");
+    assert!(make_interval(0, 0, 0, 0, 0, 0, f64::INFINITY).is_err());
+}
+
+#[test]
+fn timestamp_interval_arithmetic_and_dst() {
+    zone_session(b"America/New_York");
+    // DST spring forward 2025-03-09: +1 day keeps wall clock, +24 hours shifts
+    let tstz = tstz_in("2025-03-08 12:00:00");
+    let one_day = iv_in("1 day");
+    let day_24h = iv_in("24 hours");
+    assert_eq!(tstz_out(timestamptz_pl_interval(tstz, &one_day).unwrap()), "2025-03-09 12:00:00-04");
+    assert_eq!(tstz_out(timestamptz_pl_interval(tstz, &day_24h).unwrap()), "2025-03-09 13:00:00-04");
+
+    let ts = ts_in("2025-01-31 10:00:00");
+    assert_eq!(ts_out(timestamp_pl_interval(ts, &iv_in("1 mon")).unwrap()), "2025-02-28 10:00:00");
+    assert_eq!(
+        ts_out(timestamp_mi_interval(ts, &iv_in("1 mon")).unwrap()),
+        "2024-12-31 10:00:00"
+    );
+
+    let d = timestamp_mi(ts_in("2025-01-02 03:00:00"), ts_in("2025-01-01 00:00:00")).unwrap();
+    assert_eq!(iv_out(&d), "1 day 03:00:00");
+
+    let age = timestamp_age(ts_in("2025-03-15 10:30:00"), ts_in("2024-01-20 08:00:00")).unwrap();
+    assert_eq!(iv_out(&age), "1 year 1 mon 26 days 02:30:00");
+
+    let z = timestamp_izone(&iv_in("-5 hours"), ts_in("2025-06-01 12:00:00")).unwrap();
+    assert_eq!(tstz_out(z), "2025-06-01 13:00:00-04");
+    assert!(timestamp_izone(&iv_in("1 mon"), ts_in("2025-06-01 12:00:00")).is_err());
+}
+
+#[test]
+fn interval_part_and_trunc_match_c() {
+    gmt_session();
+    let iv = iv_in("2 years 5 mons 10 days 12:30:45.678");
+    let f = |unit: &str| match interval_part_common(unit.as_bytes(), &iv, false).unwrap() {
+        PartValue::Float(v) => v,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(f("year"), 2.0);
+    assert_eq!(f("month"), 5.0);
+    assert_eq!(f("day"), 10.0);
+    assert_eq!(f("hour"), 12.0);
+    assert_eq!(f("minute"), 30.0);
+    assert_eq!(f("second"), 45.678);
+    assert_eq!(f("quarter"), 2.0);
+    assert_eq!(f("epoch"), 76984245.678);
+
+    let neg = iv_in("-4 mons");
+    let q = match interval_part_common(b"quarter", &neg, false).unwrap() {
+        PartValue::Float(v) => v,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(q, -2.0);
+
+    let err = interval_part_common(b"timezone", &iv, false).unwrap_err();
+    assert_eq!(err.sqlstate, ERRCODE_FEATURE_NOT_SUPPORTED);
+    let err = interval_part_common(b"bogus", &iv, false).unwrap_err();
+    assert_eq!(err.sqlstate, ERRCODE_INVALID_PARAMETER_VALUE);
+
+    assert_eq!(iv_out(&interval_trunc(b"hour", &iv).unwrap()), "2 years 5 mons 10 days 12:00:00");
+    assert_eq!(iv_out(&interval_trunc(b"month", &iv).unwrap()), "2 years 5 mons");
+    let err = interval_trunc(b"week", &iv).unwrap_err();
+    assert!(err.detail.as_deref() == Some("Months usually have fractional weeks."), "{err:?}");
+    assert_eq!(interval_trunc(b"day", &Interval::NOEND).unwrap(), Interval::NOEND);
+}

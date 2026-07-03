@@ -89,6 +89,17 @@ fn varsize_any(p: *const u8) -> usize {
     }
 }
 
+/// # Safety
+/// `p` must address a NUL-terminated byte string.
+#[inline]
+unsafe fn cstring_len(p: *const u8) -> usize {
+    let mut n = 0;
+    while *p.add(n) != 0 {
+        n += 1;
+    }
+    n
+}
+
 // construct_array (arrayfuncs.c) restricted to 1-D no-nulls; short varlena
 // inputs are canonicalized to 4-byte headers so element alignment holds.
 pub fn construct_array_image<'mcx>(
@@ -110,8 +121,11 @@ pub fn construct_array_image<'mcx>(
             let raw = varsize_any(p);
             // SAFETY: v is a live varlena datum.
             if unsafe { *p } & 0x01 != 0 { raw - 1 + crate::VARHDRSZ } else { raw }
+        } else if elmlen == -2 {
+            // SAFETY: v is a live NUL-terminated cstring datum.
+            unsafe { cstring_len(v.as_usize() as *const u8) + 1 }
         } else {
-            panic!("construct_array_image: cstring elements (typlen {elmlen}) unsupported")
+            panic!("construct_array_image: unsupported typlen {elmlen}")
         };
     }
     let mut out: PgVec<'mcx, u8> = vec_with_capacity_in(mcx, nbytes)?;
@@ -138,6 +152,15 @@ pub fn construct_array_image<'mcx>(
             let src = unsafe { core::slice::from_raw_parts(p, elmlen as usize) };
             out[off..off + elmlen as usize].copy_from_slice(src);
             off += elmlen as usize;
+        } else if elmlen == -2 {
+            let p = v.as_usize() as *const u8;
+            // SAFETY: v is a live NUL-terminated cstring datum.
+            unsafe {
+                let n = cstring_len(p) + 1;
+                let src = core::slice::from_raw_parts(p, n);
+                out[off..off + n].copy_from_slice(src);
+                off += n;
+            }
         } else {
             let p = v.as_usize() as *const u8;
             // SAFETY: v is a live varlena datum.
@@ -197,8 +220,12 @@ pub fn deconstruct_array_image<'mcx>(
         } else if elmlen == -1 {
             out.push(Datum::from_usize(image[off..].as_ptr() as usize));
             off += varsize_any(image[off..].as_ptr());
+        } else if elmlen == -2 {
+            out.push(Datum::from_usize(image[off..].as_ptr() as usize));
+            // SAFETY: cstring element is NUL-terminated within the image.
+            off += unsafe { cstring_len(image[off..].as_ptr()) } + 1;
         } else {
-            panic!("deconstruct_array_image: cstring elements (typlen {elmlen}) unsupported");
+            panic!("deconstruct_array_image: unsupported typlen {elmlen}");
         }
         assert!(off <= image.len());
     }

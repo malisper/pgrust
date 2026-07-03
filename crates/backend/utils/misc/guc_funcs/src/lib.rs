@@ -21,7 +21,6 @@ use types_guc::{
 use types_nodes::node_tree::Node;
 use types_nodes::parsenodes::{VariableSetKind, VariableSetStmt};
 use types_nodes::rawnodes::ValUnion;
-use types_nodes::NodeTag;
 use types_tuple::TupleDescData;
 
 pub use guc::registry::show_guc_option as ShowGUCOption;
@@ -174,17 +173,31 @@ pub fn flatten_set_variable_args(name: &str, args: &[Node<'_>]) -> PgResult<Opti
         if idx != 0 {
             buf.push_str(", ");
         }
-        if arg.node_tag() == NodeTag::T_TypeCast {
-            // C coerces ConstInterval args (SET TIME ZONE INTERVAL 'x')
-            // through interval_in/interval_out.
-            unported("flatten_set_variable_args TypeCast (interval lane)");
-        }
+        let (arg, type_name) = match arg.as_variant::<types_nodes::rawnodes::TypeCast>() {
+            Some(tc) => (tc.arg.expect("TypeCast arg"), tc.typeName),
+            None => (*arg, None),
+        };
         let con = arg
             .as_a_const()
             .unwrap_or_else(|| panic!("unrecognized node type: {:?}", arg.node_tag()));
         match con.val {
             Some(ValUnion::Integer(i)) => buf.push_str(&i.ival.to_string()),
             Some(ValUnion::Float(f)) => buf.push_str(f.fval),
+            Some(ValUnion::String(s)) if type_name.is_some() => {
+                // ConstInterval argument for TIME ZONE: coerce to interval
+                // and back to normalize the value and apply the typmod.
+                let tn = type_name.unwrap();
+                let tn = tn.as_variant::<types_nodes::rawnodes::TypeName>().expect("TypeName");
+                let ctx = mcx::MemoryContext::new("flatten SET interval");
+                let (typoid, typmod) = parse_utilcmd::typenameTypeIdAndMod(ctx.mcx(), None, tn)?;
+                debug_assert_eq!(typoid, types_core::INTERVALOID);
+                let iv = adt_timestamp::interval::interval_in(s.sval, typmod, None)?;
+                let mut out = [0u8; adt_datetime::MAXDATELEN + 1];
+                let n = adt_timestamp::interval::interval_out(&iv, &mut out);
+                buf.push_str("INTERVAL '");
+                buf.push_str(core::str::from_utf8(&out[..n]).expect("interval_out is ascii"));
+                buf.push('\'');
+            }
             Some(ValUnion::String(s)) => {
                 if (flags & GUC_LIST_QUOTE) != 0 {
                     buf.push_str(&format_type::quote_identifier(s.sval));
