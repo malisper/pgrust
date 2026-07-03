@@ -20,7 +20,23 @@ pub use srf::{
     FuncCallContext, InitMaterializedSRF, MAT_SRF_BLESS, MAT_SRF_USE_EXPECTED_DESC,
 };
 
-pub fn init_seams() {}
+pub fn init_seams() {
+    fmgr_seams::get_fn_expr_variadic::set(seam_get_fn_expr_variadic);
+    fmgr_seams::get_fn_expr_argtype::set(seam_get_fn_expr_argtype);
+}
+
+// Seam shims for callers below funcapi in the crate graph (varlena's
+// concat/format; a direct dep would cycle through funcapi -> varlena).
+fn seam_get_fn_expr_variadic(flinfo: &FmgrInfo) -> bool {
+    get_fn_expr_variadic(Some(flinfo))
+}
+
+fn seam_get_fn_expr_argtype(flinfo: &FmgrInfo, argnum: i16) -> Oid {
+    if argnum < 0 {
+        return InvalidOid;
+    }
+    get_fn_expr_argtype(Some(flinfo), argnum as usize)
+}
 
 // pg_type.dat
 const CSTRINGOID: Oid = 2275;
