@@ -97,9 +97,14 @@ pub fn brin_build_desc<'mcx>(mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgResult<B
                 att.attbyval = false;
                 att.attalign = types_tuple::TYPALIGN_INT;
                 att.attstorage = types_tuple::TYPSTORAGE_EXTENDED;
-                att.attcompression = 0;
                 att.attcollation = types_core::DEFAULT_COLLATION_OID;
+            } else {
+                // TupleDescInitEntry reads pg_type.typstorage, not the heap
+                // column's attstorage (ALTER ... SET STORAGE must not change
+                // the index's packing/compress eligibility).
+                att.attstorage = lsyscache::get_typstorage(stored_typid)?;
             }
+            att.attcompression = 0;
             compact.push(CompactAttribute::populate_from(&att));
             attrs.push(att);
         }
