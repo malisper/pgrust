@@ -349,7 +349,6 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
             b"OPEXPR" => self.read_op_expr(),
             b"FUNCEXPR" => self.read_func_expr(),
             b"BOOLEXPR" => self.read_bool_expr(),
-            b"SUBLINK" => self.read_sub_link(),
             b"SQLVALUEFUNCTION" => self.read_sql_value_function(),
             b"RELABELTYPE" => self.read_relabel_type(),
             b"COERCEVIAIO" => self.read_coerce_via_io(),
@@ -765,33 +764,6 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
             location: self.read_location("location"),
         };
         Node::mk(self.mcx, svf)
-    }
-
-    fn read_sub_link(&mut self) -> PgResult<Node<'mcx>> {
-        let sub_link_type = match self.read_u32("subLinkType") {
-            0 => types_nodes::primnodes::SubLinkType::EXISTS_SUBLINK,
-            1 => types_nodes::primnodes::SubLinkType::ALL_SUBLINK,
-            2 => types_nodes::primnodes::SubLinkType::ANY_SUBLINK,
-            3 => types_nodes::primnodes::SubLinkType::ROWCOMPARE_SUBLINK,
-            4 => types_nodes::primnodes::SubLinkType::EXPR_SUBLINK,
-            5 => types_nodes::primnodes::SubLinkType::MULTIEXPR_SUBLINK,
-            6 => types_nodes::primnodes::SubLinkType::ARRAY_SUBLINK,
-            7 => types_nodes::primnodes::SubLinkType::CTE_SUBLINK,
-            other => panic!("_readSubLink (readfuncs.c): bad subLinkType {other}"),
-        };
-        let sub_link_id = self.read_i32("subLinkId");
-        let testexpr = self.read_node("testexpr")?;
-        let oper_name = self.read_node_list("operName")?;
-        let subselect = self.read_node("subselect")?.expect("SubLink has a subselect");
-        let sl = types_nodes::primnodes::SubLink {
-            subLinkType: sub_link_type,
-            subLinkId: sub_link_id,
-            testexpr,
-            operName: oper_name,
-            subselect,
-            location: self.read_location("location"),
-        };
-        Node::mk(self.mcx, sl)
     }
 
     fn read_coerce_via_io(&mut self) -> PgResult<Node<'mcx>> {
