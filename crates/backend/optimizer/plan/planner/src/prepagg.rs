@@ -76,6 +76,99 @@ fn preprocess_aggrefs_walker<'mcx>(
             }
             Ok(())
         }
+        NodeTag::T_WindowFunc => {
+            let wf = node.as_window_func().unwrap();
+            for a in &wf.args {
+                preprocess_aggrefs_walker(run, a)?;
+            }
+            match wf.aggfilter {
+                Some(f) => preprocess_aggrefs_walker(run, f),
+                None => Ok(()),
+            }
+        }
+        NodeTag::T_Param
+        | NodeTag::T_CaseTestExpr
+        | NodeTag::T_SQLValueFunction
+        | NodeTag::T_NextValueExpr
+        | NodeTag::T_CoerceToDomainValue => Ok(()),
+        NodeTag::T_RelabelType => {
+            preprocess_aggrefs_walker(run, node.as_relabel_type().unwrap().arg)
+        }
+        NodeTag::T_CoerceViaIO => {
+            preprocess_aggrefs_walker(run, node.as_coerce_via_io().unwrap().arg)
+        }
+        NodeTag::T_CoerceToDomain => {
+            preprocess_aggrefs_walker(run, node.as_coerce_to_domain().unwrap().arg)
+        }
+        NodeTag::T_NullTest => match node.as_null_test().unwrap().arg {
+            Some(a) => preprocess_aggrefs_walker(run, a),
+            None => Ok(()),
+        },
+        NodeTag::T_BooleanTest => match node.as_boolean_test().unwrap().arg {
+            Some(a) => preprocess_aggrefs_walker(run, a),
+            None => Ok(()),
+        },
+        NodeTag::T_DistinctExpr => {
+            for a in &node.as_distinct_expr().unwrap().args {
+                preprocess_aggrefs_walker(run, a)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_ScalarArrayOpExpr => {
+            for a in &node.as_scalar_array_op_expr().unwrap().args {
+                preprocess_aggrefs_walker(run, a)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_ArrayExpr => {
+            for e in &node.as_array_expr().unwrap().elements {
+                preprocess_aggrefs_walker(run, e)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_RowExpr => {
+            for a in &node.as_row_expr().unwrap().args {
+                preprocess_aggrefs_walker(run, a)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_CaseExpr => {
+            let c = node.as_case_expr().unwrap();
+            if let Some(a) = c.arg {
+                preprocess_aggrefs_walker(run, a)?;
+            }
+            for w in &c.args {
+                let cw = w.as_case_when().expect("CaseWhen");
+                preprocess_aggrefs_walker(run, cw.expr.expect("CaseWhen.expr"))?;
+                preprocess_aggrefs_walker(run, cw.result.expect("CaseWhen.result"))?;
+            }
+            match c.defresult {
+                Some(d) => preprocess_aggrefs_walker(run, d),
+                None => Ok(()),
+            }
+        }
+        NodeTag::T_CoalesceExpr => {
+            for a in &node.as_coalesce_expr().unwrap().args {
+                preprocess_aggrefs_walker(run, a)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_MinMaxExpr => {
+            for a in &node.as_min_max_expr().unwrap().args {
+                preprocess_aggrefs_walker(run, a)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_SubPlan => {
+            let sp = node.as_sub_plan().unwrap();
+            if let Some(te) = sp.testexpr {
+                preprocess_aggrefs_walker(run, te)?;
+            }
+            for a in &sp.args {
+                preprocess_aggrefs_walker(run, a)?;
+            }
+            Ok(())
+        }
         other => panic!(
             "preprocess_aggrefs_walker (prepagg.c): {other:?}; M3 expression lane"
         ),

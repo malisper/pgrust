@@ -1216,7 +1216,7 @@ fn coerce_arg_type(node: Node<'_>) -> Oid {
         NodeTag::T_CoerceViaIO => node.as_coerce_via_io().unwrap().resulttype,
         NodeTag::T_CoerceToDomain => node.as_coerce_to_domain().unwrap().resulttype,
         NodeTag::T_CoerceToDomainValue => node.as_coerce_to_domain_value().unwrap().typeId,
-        other => deferred("coerce_arg_type (exprType)", other),
+        _ => nodes_core::expr_type(node),
     }
 }
 
