@@ -1,5 +1,5 @@
 // tuplesort.c + tuplesortvariants.c in-memory serial core; external merge,
-// parallel sort, abbreviated keys, byref datum sorts = loud panics naming C.
+// parallel sort, cstring datum sorts = loud panics naming C.
 #![allow(non_snake_case)]
 
 use core::cell::Cell;
@@ -14,6 +14,7 @@ use ::types_slot::SlotData;
 use ::types_tuple::itemptr::ItemPointerData;
 use ::types_tuple::{MinimalTupleData, TupleDescData};
 
+mod abbrev;
 mod mgetattr;
 mod qsort;
 mod ssup;
@@ -21,9 +22,11 @@ mod ssup;
 #[cfg(test)]
 mod tests;
 
+pub use abbrev::AbbrevState;
 pub use ssup::{
     apply_sort_comparator, comparator_for_index_col, comparator_for_opfamily,
-    prepare_sort_support_from_ordering_op, SortComparator, SortSupport, SortSupportInit,
+    prepare_sort_support_abbrev, prepare_sort_support_from_ordering_op, AbbrevArm, AbbrevKind,
+    SortComparator, SortSupport, SortSupportInit,
 };
 
 use mgetattr::minimal_getattr;
@@ -141,6 +144,12 @@ pub struct TuplesortData<'m> {
     sort_keys: PgVec<'m, SortSupport>,
     only_key: bool,
     have_datum1: bool,
+    // Some = abbreviation armed: memtuple datum1 holds CONVERTED words (nulls
+    // excepted); originals live only in `tuple`. None after abort/no-arm.
+    // Boxed: ~2KB of HLL registers would push the hot tail fields off the
+    // front cache lines (C pallocs ssup_extra separately too).
+    abbrev: Option<Box<AbbrevState>>,
+    abbrev_next: i64,
     // Freed-space size mode, resolved once (bounded-path discards are per-put).
     free_typlen: i16,
     variant: SortVariant,
@@ -157,6 +166,10 @@ struct CmpCtx<'a> {
     mcx: ::mcx::Mcx<'a>,
     keys: &'a [SortSupport],
     only_key: bool,
+    // Armed abbreviation (tiebreaks re-compare leading-key ORIGINALS with its
+    // full_comparator). Borrow, not a resolved Option: ctx! runs per bounded
+    // put and the resolve cost 7 instr/put there (micro tsort_bound100_100k).
+    abbrev: &'a Option<Box<AbbrevState>>,
     variant: &'a SortVariant,
     unique_violation: &'a Cell<Option<Box<PgError>>>,
 }
@@ -221,10 +234,33 @@ impl CmpCtx<'_> {
         self.comparetup_tiebreak(a, b)
     }
 
-    /// `comparetup_heap_tiebreak`, no abbrev arm; datum tiebreak reduces to 0.
+    /// `comparetup_heap_tiebreak` / `comparetup_datum_tiebreak`: when abbrev
+    /// is armed the leading key re-compares the ORIGINALS (datum1 words are
+    /// abbreviations) via `ApplySortAbbrevFullComparator`; no-abbrev datum
+    /// tiebreak reduces to 0.
     fn comparetup_tiebreak(&self, a: &SortTuple, b: &SortTuple) -> i32 {
         match self.variant {
             SortVariant::Heap { tup_desc } => {
+                if let Some(abbrev) = self.abbrev {
+                    let full = abbrev.full_comparator;
+                    let key0 = &self.keys[0];
+                    let attno = key0.ssup_attno as i32;
+                    let (mut isnull1, mut isnull2) = (false, false);
+                    // SAFETY: as the loop below — live minimal tuples under
+                    // this descriptor.
+                    let (datum1, datum2) = unsafe {
+                        (
+                            minimal_getattr(a.tuple, attno, tup_desc, &mut isnull1),
+                            minimal_getattr(b.tuple, attno, tup_desc, &mut isnull2),
+                        )
+                    };
+                    let compare = ssup::apply_sort_comparator_as_in(
+                        full, self.mcx, datum1, isnull1, datum2, isnull2, key0,
+                    );
+                    if compare != 0 {
+                        return compare;
+                    }
+                }
                 for key in &self.keys[1..] {
                     let attno = key.ssup_attno as i32;
                     let (mut isnull1, mut isnull2) = (false, false);
@@ -243,10 +279,24 @@ impl CmpCtx<'_> {
                 }
                 0
             }
-            SortVariant::Datum { .. } => 0,
+            SortVariant::Datum { .. } => match self.abbrev {
+                // datumCopy images parked in `tuple` are the originals.
+                Some(abbrev) => ssup::apply_sort_comparator_as_in(
+                    abbrev.full_comparator,
+                    self.mcx,
+                    Datum::from_usize(a.tuple as usize),
+                    a.isnull1,
+                    Datum::from_usize(b.tuple as usize),
+                    b.isnull1,
+                    &self.keys[0],
+                ),
+                None => 0,
+            },
             SortVariant::Index { .. } => self.comparetup_index_btree_tiebreak(a, b),
             SortVariant::IndexHash { .. } => unreachable!("comparetup dispatches IndexHash whole"),
+            // Index/cluster sorts never arm abbrev (index-build abbrev lane).
             SortVariant::Cluster { tup_desc, attnums, nkeys } => {
+                debug_assert!(self.abbrev.is_none());
                 // comparetup_cluster_tiebreak, simple-column haveDatum1 lane;
                 // no TID tiebreak (C leaves equal keys in qsort order).
                 let (ta, tb) = unsafe {
@@ -277,6 +327,7 @@ impl CmpCtx<'_> {
     /// `comparetup_index_btree_tiebreak`, no abbrev arm. C divergence: the
     /// unique violation is deferred to performsort (no mid-qsort ereport).
     fn comparetup_index_btree_tiebreak(&self, a: &SortTuple, b: &SortTuple) -> i32 {
+        debug_assert!(self.abbrev.is_none());
         let SortVariant::Index {
             tup_desc,
             nkeys,
@@ -344,6 +395,7 @@ macro_rules! ctx {
             mcx: $st.mcx,
             keys: &$st.sort_keys,
             only_key: $st.only_key,
+            abbrev: &$st.abbrev,
             variant: &$st.variant,
             unique_violation: &$st.unique_violation,
         }
@@ -425,6 +477,18 @@ macro_rules! dispatch_cmp {
                     let $cmp = |a: &SortTuple, b: &SortTuple| __c.comparetup(a, b);
                     $body
                 }
+                SortComparator::Uuid => {
+                    let $cmp = |a: &SortTuple, b: &SortTuple| {
+                        __c.comparetup_spec(SortComparator::Uuid, a, b)
+                    };
+                    $body
+                }
+                SortComparator::Network => {
+                    let $cmp = |a: &SortTuple, b: &SortTuple| {
+                        __c.comparetup_spec(SortComparator::Network, a, b)
+                    };
+                    $body
+                }
                 // Shim'd comparisons are fmgr calls; nothing to fold.
                 SortComparator::Shim(_) => {
                     let $cmp = |a: &SortTuple, b: &SortTuple| __c.comparetup(a, b);
@@ -451,6 +515,7 @@ impl Tuplesort {
         assert!(nkeys > 0 && sort_operators.len() == nkeys && sort_collations.len() == nkeys
             && nulls_first_flags.len() == nkeys);
         let mut keys = Vec::with_capacity(nkeys);
+        let mut abbrev_arm = None;
         for i in 0..nkeys {
             debug_assert!(att_nums[i] != 0 && sort_operators[i] != 0);
             let init = SortSupportInit {
@@ -458,9 +523,24 @@ impl Tuplesort {
                 ssup_nulls_first: nulls_first_flags[i],
                 ssup_attno: att_nums[i],
             };
-            keys.push(prepare_sort_support_from_ordering_op(sort_operators[i], &init)?);
+            // C: sortKey->abbreviate = (i == 0 && base->haveDatum1).
+            let (key, arm) =
+                ssup::prepare_sort_support_abbrev(sort_operators[i], &init, i == 0)?;
+            keys.push(key);
+            if i == 0 {
+                abbrev_arm = arm;
+            }
         }
-        Ok(Self::begin_heap_with_keys(tup_desc, &keys, work_mem, sortopt))
+        // onlyKey cannot be used with abbreviation (ties need the tiebreak).
+        let only_key = nkeys == 1 && abbrev_arm.is_none();
+        Ok(Self::begin_common(
+            work_mem,
+            sortopt,
+            &keys,
+            only_key,
+            abbrev_arm.map(|arm| Box::new(AbbrevState::new(arm))),
+            SortVariant::Heap { tup_desc },
+        ))
     }
 
     /// C divergence: begin over pre-resolved sort keys (test/bench surface;
@@ -473,7 +553,7 @@ impl Tuplesort {
     ) -> Tuplesort {
         assert!(!keys.is_empty());
         let only_key = keys.len() == 1;
-        Self::begin_common(work_mem, sortopt, keys, only_key, SortVariant::Heap { tup_desc })
+        Self::begin_common(work_mem, sortopt, keys, only_key, None, SortVariant::Heap { tup_desc })
     }
 
     /// `tuplesort_begin_index_btree`, serial arm; keys read straight off the
@@ -544,6 +624,7 @@ impl Tuplesort {
             sortopt,
             &[],
             false,
+            None,
             SortVariant::IndexHash { tup_desc, high_mask, low_mask, max_buckets },
         )
     }
@@ -587,6 +668,7 @@ impl Tuplesort {
             sortopt,
             &keys,
             false,
+            None,
             SortVariant::Cluster { tup_desc: heap_tup_desc, attnums, nkeys: nkeys as u16 },
         ))
     }
@@ -609,6 +691,7 @@ impl Tuplesort {
             sortopt,
             keys,
             false,
+            None,
             SortVariant::Index {
                 tup_desc,
                 nkeys,
@@ -641,20 +724,22 @@ impl Tuplesort {
             ssup_nulls_first: nulls_first_flag,
             ssup_attno: 1,
         };
-        let key = prepare_sort_support_from_ordering_op(sort_operator, &init)?;
+        let (key, abbrev_arm) =
+            ssup::prepare_sort_support_abbrev(sort_operator, &init, !typbyval)?;
         let byref_typlen = if typbyval { 0 } else { typlen };
         Ok(Self::begin_common(
             work_mem,
             sortopt,
             &[key],
-            true,
+            abbrev_arm.is_none(),
+            abbrev_arm.map(|arm| Box::new(AbbrevState::new(arm))),
             SortVariant::Datum { byref_typlen },
         ))
     }
 
     /// C divergence: as [`Tuplesort::begin_heap_with_keys`], datum variant.
     pub fn begin_datum_with_key(key: SortSupport, work_mem: i32, sortopt: i32) -> Tuplesort {
-        Self::begin_common(work_mem, sortopt, &[key], true, SortVariant::Datum { byref_typlen: 0 })
+        Self::begin_common(work_mem, sortopt, &[key], true, None, SortVariant::Datum { byref_typlen: 0 })
     }
 
     fn begin_common(
@@ -662,6 +747,7 @@ impl Tuplesort {
         sortopt: i32,
         keys: &[SortSupport],
         only_key: bool,
+        abbrev: Option<Box<AbbrevState>>,
         variant: SortVariant,
     ) -> Tuplesort {
         let free_typlen = match variant {
@@ -697,6 +783,8 @@ impl Tuplesort {
                 sort_keys,
                 only_key,
                 have_datum1: true,
+                abbrev,
+                abbrev_next: 10,
                 free_typlen,
                 variant,
                 unique_violation: Cell::new(None),
@@ -720,6 +808,13 @@ impl Tuplesort {
             }
             st.bounded = true;
             st.bound = bound as i32;
+            // C: bounded sorts are not an effective target for abbreviation —
+            // disarm and restore the authoritative comparator (measured here
+            // too: top-100/200k text paid ~142 instr/put of conversion for
+            // discard-after-one-compare work; docs/optimizations/abbrev-keys.md).
+            if let Some(abbrev) = st.abbrev.take() {
+                st.sort_keys[0].comparator = abbrev.full_comparator;
+            }
             st.recompute_put_watermark();
         })
     }
@@ -762,6 +857,7 @@ impl Tuplesort {
             st.markpos_eof = false;
             // C's reset leaves availMem = allowedMem (memtuples not re-charged).
             st.avail_mem = st.allowed_mem;
+            st.abbrev_next = 10;
             st.recompute_put_watermark();
         })
     }
@@ -1009,7 +1105,8 @@ impl Tuplesort {
         })
     }
 
-    /// `tuplesort_gettupleslot`; `abbrev` out-param elided (never armed).
+    /// `tuplesort_gettupleslot`; `abbrev` out-param elided (no caller uses
+    /// the cheap-inequality hint yet).
     #[inline]
     pub fn gettupleslot<'q>(
         &mut self,
@@ -1054,8 +1151,15 @@ impl Tuplesort {
     pub fn getdatum(&mut self, forward: bool) -> PgResult<Option<NullableDatum>> {
         self.0.with_mut(|st| {
             debug_assert!(matches!(st.variant, SortVariant::Datum { .. }));
+            let abbrev_armed = st.abbrev.is_some();
             Ok(st.gettuple_common(forward)?.map(|stup| NullableDatum {
-                value: stup.datum1,
+                // Armed abbrev: datum1 is the converted word; the datumCopy
+                // image in `tuple` is the original.
+                value: if abbrev_armed && !stup.isnull1 {
+                    Datum::from_usize(stup.tuple as usize)
+                } else {
+                    stup.datum1
+                },
                 isnull: stup.isnull1,
             }))
         })
@@ -1168,7 +1272,8 @@ fn datum_put_slow<'m>(
 }
 
 impl<'m> TuplesortData<'m> {
-    /// `tuplesort_puttuple_common`; `useAbbrev` is structurally false here.
+    /// `tuplesort_puttuple_common`; the useAbbrev arm lives in puttuple_full
+    /// (tuplen==0 puts are by-value datums, never abbreviated).
     /// SortTuple fields arrive as scalars (registers), not by-ref like C's
     /// `SortTuple *tuple`: the 24-byte struct would bounce through the stack
     /// into a wide reload that defeats store-to-load forwarding.
@@ -1206,10 +1311,14 @@ impl<'m> TuplesortData<'m> {
     fn puttuple_full(
         &mut self,
         tuple: *mut MinimalTupleData,
-        datum1: Datum,
+        mut datum1: Datum,
         isnull1: bool,
         tuplen: i64,
     ) -> PgResult<()> {
+        if self.abbrev.is_some() && !isnull1 {
+            // C: converter never sees NULLs (datum1 keeps the zeroed word).
+            datum1 = self.abbrev_datum1(datum1);
+        }
         self.avail_mem -= tuplen;
 
         match self.status {
@@ -1248,6 +1357,62 @@ impl<'m> TuplesortData<'m> {
                 self.puttuple_bounded(SortTuple { tuple, datum1, isnull1 })
             }
             TupSortStatus::SortedInMem => Err(invalid_state("tuplesort_puttuple_common")),
+        }
+    }
+
+    /// `tuplesort_puttuple_common` useAbbrev arm: convert unless
+    /// `consider_abort_common` fires, in which case datum1 representation is
+    /// restored across every already-stored memtuple (REMOVEABBREV).
+    fn abbrev_datum1(&mut self, original: Datum) -> Datum {
+        if !self.consider_abort_common() {
+            // SAFETY: variant putters pass live non-null datums of the armed
+            // type (heap getattr / putdatum's tuplecontext copy).
+            unsafe { self.abbrev.as_mut().unwrap_unchecked().convert(original) }
+        } else {
+            self.remove_abbrev();
+            original
+        }
+    }
+
+    /// `consider_abort_common`.
+    fn consider_abort_common(&mut self) -> bool {
+        let memtupcount = self.memtuples.len();
+        if self.status == TupSortStatus::Initial && memtupcount as i64 >= self.abbrev_next {
+            self.abbrev_next *= 2;
+            let abbrev = self.abbrev.as_mut().expect("armed caller");
+            if !abbrev.abort(memtupcount as i32) {
+                return false;
+            }
+            let full = abbrev.full_comparator;
+            self.sort_keys[0].comparator = full;
+            self.abbrev = None;
+            return true;
+        }
+        false
+    }
+
+    /// `removeabbrev_heap`/`removeabbrev_datum`: refetch original datum1 for
+    /// every stored tuple (index/cluster variants never arm).
+    #[cold]
+    #[inline(never)]
+    fn remove_abbrev(&mut self) {
+        let TuplesortData { variant, memtuples, sort_keys, .. } = self;
+        match variant {
+            SortVariant::Heap { tup_desc } => {
+                let attno = sort_keys[0].ssup_attno as i32;
+                for stup in memtuples.iter_mut() {
+                    // SAFETY: live minimal tuples under this descriptor.
+                    stup.datum1 = unsafe {
+                        minimal_getattr(stup.tuple, attno, tup_desc, &mut stup.isnull1)
+                    };
+                }
+            }
+            SortVariant::Datum { .. } => {
+                for stup in memtuples.iter_mut() {
+                    stup.datum1 = Datum::from_usize(stup.tuple as usize);
+                }
+            }
+            _ => unreachable!("abbreviation armed on a non-heap/datum sort"),
         }
     }
 

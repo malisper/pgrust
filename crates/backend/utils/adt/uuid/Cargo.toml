@@ -11,6 +11,7 @@ datum = { path = "../../../../_support/types/datum" }
 libc = "0.2"
 pg_strong_random = { path = "../../../../port/pg_strong_random" }
 hashfn = { path = "../../../../common/hashfn" }
+hyperloglog = { path = "../../../lib/hyperloglog" }
 mcx = { path = "../../../../_support/mcx" }
 pqformat = { path = "../../../libpq/pqformat" }
 stringinfo = { path = "../../../../_support/types/stringinfo" }

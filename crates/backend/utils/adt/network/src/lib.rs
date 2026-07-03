@@ -5,6 +5,7 @@
 //! (planner support node), inet_client/server_* 2196-2199 (MyProcPort),
 //! GiST/SP-GiST/selfuncs rows (their own catalog units).
 
+pub mod abbrev;
 pub mod builtins;
 mod cidr_ntop;
 mod ntop;
