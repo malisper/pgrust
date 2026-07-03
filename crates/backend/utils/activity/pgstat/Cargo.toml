@@ -16,6 +16,9 @@ types_error = { path = "../../../../_support/types/types_error" }
 types_rel = { path = "../../../../_support/types/rel" }
 guc_tables = { path = "../../misc/guc_tables" }
 init_small = { path = "../../init/init_small" }
+miscinit = { path = "../../init/miscinit" }
+datum = { path = "../../../../_support/types/datum" }
+ipc_seams = { path = "../../../storage/ipc/ipc_seams" }
 pgstat_seams = { path = "../pgstat_seams" }
 pgstat_xact_seams = { path = "../pgstat_xact_seams" }
 timestamp_seams = { path = "../../adt/timestamp_seams" }

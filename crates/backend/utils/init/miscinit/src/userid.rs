@@ -130,6 +130,78 @@ pub fn SetUserIdAndContext(userid: Oid, sec_def_context: bool) -> PgResult<()> {
     Ok(())
 }
 
+// InitializeSessionUserId (miscinit.c). C's InitializingParallelWorker
+// early-return is absent: parallel workers cannot start in this tree.
+pub fn InitializeSessionUserId(
+    rolename: Option<&str>,
+    roleid: Oid,
+    bypass_login_check: bool,
+) -> PgResult<()> {
+    debug_assert!(!crate::IsBootstrapProcessingMode());
+
+    inval_seams::accept_invalidation_messages::call()?;
+
+    let form = match rolename {
+        Some(rname) => {
+            match syscache_seams::lookup_authid_session_by_rolname::call(rname)? {
+                Some(f) => f,
+                None => {
+                    return elog::ereport(types_error::FATAL)
+                        .errcode(types_error::ERRCODE_INVALID_AUTHORIZATION_SPECIFICATION)
+                        .errmsg(format!("role \"{rname}\" does not exist"))
+                        .finish(crate::process::loc(802, "InitializeSessionUserId"));
+                }
+            }
+        }
+        None => match syscache_seams::lookup_authid_session_by_oid::call(roleid)? {
+            Some(f) => f,
+            None => {
+                return elog::ereport(types_error::FATAL)
+                    .errcode(types_error::ERRCODE_INVALID_AUTHORIZATION_SPECIFICATION)
+                    .errmsg(format!("role with OID {roleid} does not exist"))
+                    .finish(crate::process::loc(810, "InitializeSessionUserId"));
+            }
+        },
+    };
+
+    let roleid = form.roleid;
+    let rname = String::from_utf8_lossy(form.rolname.name_str()).into_owned();
+    let is_superuser = form.rolsuper;
+
+    SetAuthenticatedUserId(roleid);
+
+    // SetSessionUserId/SetOuterUserId run via the session_authorization GUC
+    // hooks, exactly C's SetConfigOption(..., PGC_BACKEND, PGC_S_OVERRIDE).
+    guc_seams::set_config_option::call(
+        "session_authorization",
+        Some(&rname),
+        types_guc::GucContext::PGC_BACKEND,
+        types_guc::GucSource::PGC_S_OVERRIDE,
+    )?;
+
+    if init_small::globals::IsUnderPostmaster() {
+        if !bypass_login_check && !form.rolcanlogin {
+            return elog::ereport(types_error::FATAL)
+                .errcode(types_error::ERRCODE_INVALID_AUTHORIZATION_SPECIFICATION)
+                .errmsg(format!("role \"{rname}\" is not permitted to log in"))
+                .finish(crate::process::loc(856, "InitializeSessionUserId"));
+        }
+
+        if form.rolconnlimit >= 0
+            && GetMyBackendType() == BackendType::Backend
+            && !is_superuser
+            && procarray_seams::count_user_backends::call(roleid)? > form.rolconnlimit
+        {
+            return elog::ereport(types_error::FATAL)
+                .errcode(types_error::ERRCODE_TOO_MANY_CONNECTIONS)
+                .errmsg(format!("too many connections for role \"{rname}\""))
+                .finish(crate::process::loc(877, "InitializeSessionUserId"));
+        }
+    }
+
+    Ok(())
+}
+
 pub fn InitializeSessionUserIdStandalone() -> PgResult<()> {
     debug_assert!(
         !init_small::globals::IsUnderPostmaster()

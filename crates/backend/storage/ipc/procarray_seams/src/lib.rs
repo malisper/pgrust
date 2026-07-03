@@ -70,6 +70,11 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // CountUserBackends(roleid) (procarray.c); rolconnlimit enforcement.
+    pub fn count_user_backends(roleid: types_core::Oid) -> PgResult<i32>
+);
+
+seam_core::seam!(
     // GetVirtualXIDsDelayingChkpt + HaveVirtualXIDsDelayingChkpt wait loop
     // inputs (procarray.c): snapshot the vxids holding `type` delay flags.
     // Empty result = nothing to wait for.

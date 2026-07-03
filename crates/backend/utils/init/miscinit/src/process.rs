@@ -44,6 +44,7 @@ pub fn InitPostmasterChild(my_proc_pid: i32) -> PgResult<()> {
 
     libpq_pqsignal::pqinitmask();
 
+    waiteventset::InitializeWaitEventSupport()?;
     InitProcessLocalLatch();
     latch::InitializeLatchWaitSet()?;
 

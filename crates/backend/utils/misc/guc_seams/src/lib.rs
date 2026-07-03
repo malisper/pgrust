@@ -20,6 +20,18 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // SetConfigOption(name, value, context, source) (guc.c); miscinit's
+    // InitializeSessionUserId sets session_authorization at PGC_S_OVERRIDE
+    // through it (guc depends on miscinit, so no direct edge back).
+    pub fn set_config_option(
+        name: &str,
+        value: Option<&str>,
+        context: types_guc::GucContext,
+        source: types_guc::GucSource,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
     // GUC_check_errdetail (guc.c).
     pub fn guc_check_errdetail(detail: String)
 );

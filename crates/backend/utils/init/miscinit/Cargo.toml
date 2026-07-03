@@ -15,12 +15,16 @@ types_storage = { path = "../../../../_support/types/types_storage" }
 mcx = { path = "../../../../_support/mcx" }
 init_small = { path = "../init_small" }
 latch = { path = "../../../storage/ipc/latch" }
+waiteventset = { path = "../../../storage/ipc/waiteventset" }
 fd = { path = "../../../storage/file/fd" }
 lmgr_proc = { path = "../../../storage/lmgr/lmgr_proc" }
 elog = { path = "../../error/elog" }
 guc_tables = { path = "../../misc/guc_tables" }
 guc_seams = { path = "../../misc/guc_seams" }
 syscache_seams = { path = "../../cache/syscache_seams" }
+inval_seams = { path = "../../cache/inval_seams" }
+procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
+types_guc = { path = "../../../../_support/types/types_guc" }
 ipc_seams = { path = "../../../storage/ipc/ipc_seams" }
 shmem_seams = { path = "../../../storage/ipc/shmem_seams" }
 miscinit_seams = { path = "../miscinit_seams" }

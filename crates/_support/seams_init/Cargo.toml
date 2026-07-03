@@ -120,6 +120,7 @@ stack_depth = { path = "../../backend/utils/misc/stack_depth" }
 superuser = { path = "../../backend/utils/misc/superuser" }
 timeout = { path = "../../backend/utils/misc/timeout" }
 portalmem = { path = "../../backend/utils/mmgr/portalmem" }
+tuplestore = { path = "../../backend/utils/sort/tuplestore" }
 resowner = { path = "../../backend/utils/resowner/resowner" }
 snapmgr = { path = "../../backend/utils/time/snapmgr" }
 pg_prng = { path = "../../common/pg_prng" }
