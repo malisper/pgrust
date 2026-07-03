@@ -94,6 +94,7 @@ pub fn finish_heap_swap<'mcx>(
     let cutoff_multi = multixact::ReadNextMultiXactId()?;
     let (toast1, toast2) =
         swap_relation_files(mcx, old_heap_oid, new_heap_oid, frozen_xid, cutoff_multi)?;
+    eprintln!("finish_heap_swap: old={old_heap_oid} new={new_heap_oid} toast1={toast1} toast2={toast2}");
 
     {
         let old_heap = table::table_open(mcx, old_heap_oid, NoLock)?;
@@ -104,6 +105,7 @@ pub fn finish_heap_swap<'mcx>(
         }
     }
 
+    eprintln!("finish_heap_swap: performDeletion transient {new_heap_oid}");
     let object = pg_depend::ObjectAddress::set(RELATION_RELATION_ID, new_heap_oid);
     catalog_dependency::performDeletion(
         mcx,
@@ -119,6 +121,7 @@ pub fn finish_heap_swap<'mcx>(
         let newrel = table::table_open(mcx, old_heap_oid, NoLock)?;
         let cur_toast = newrel.rd_rel.reltoastrelid;
         newrel.close(NoLock)?;
+        eprintln!("finish_heap_swap: rename toast cur_toast={cur_toast}");
         if cur_toast != InvalidOid {
             let toastidx = {
                 let toastrel = table::table_open(mcx, cur_toast, NoLock)?;
