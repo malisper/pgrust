@@ -25,5 +25,6 @@ standby = { path = "../../../storage/ipc/standby" }
 heapam_xlog = { path = "../../heap/heapam_xlog" }
 nbtree_xlog = { path = "../../nbtree/nbtree_xlog" }
 hash_xlog = { path = "../../hash/hash_xlog" }
+sequence_xlog = { path = "../../../commands/sequence_xlog" }
 xact = { path = "../xact" }
 rmgrdesc = { path = "../../rmgrdesc" }

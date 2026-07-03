@@ -20,6 +20,7 @@ catalog_indexing = { path = "../catalog_indexing" }
 catalog_storage = { path = "../catalog_storage" }
 heaptuple = { path = "../../access/common/heaptuple" }
 table = { path = "../../access/table/table" }
+relation = { path = "../../access/common/relation" }
 tableam = { path = "../../access/table/tableam" }
 pg_type = { path = "../pg_type" }
 pg_depend = { path = "../pg_depend" }

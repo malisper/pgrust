@@ -657,9 +657,38 @@ fn dispatch_switch<'mcx>(
                         debug_assert!(relid != types_core::InvalidOid);
                         tablecmds::AlterTable(mcx, relid, lockmode, astmt, source_text)?;
                     }
+                    // C recurses through ProcessUtility for the serial
+                    // blist/alist statements; the wrapper adds nothing here.
+                    T_CreateSeqStmt => {
+                        let seqstmt = stmt
+                            .as_variant::<types_nodes::rawnodes::CreateSeqStmt>()
+                            .expect("CreateSeqStmt");
+                        sequence::DefineSequence(mcx, seqstmt)?;
+                    }
+                    T_AlterSeqStmt => {
+                        let altstmt = stmt
+                            .as_variant::<types_nodes::AlterSeqStmt>()
+                            .expect("AlterSeqStmt");
+                        sequence::AlterSequence(mcx, altstmt)?;
+                    }
                     _ => handler_gap("ProcessUtilitySlow side statements (blist/alist)"),
                 }
             }
+        }
+        T_CreateSeqStmt => {
+            let stmt_node =
+                unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let seqstmt = stmt_node
+                .as_variant::<types_nodes::rawnodes::CreateSeqStmt>()
+                .expect("CreateSeqStmt");
+            sequence::DefineSequence(mcx, seqstmt)?;
+        }
+        T_AlterSeqStmt => {
+            let stmt_node =
+                unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let altstmt =
+                stmt_node.as_variant::<types_nodes::AlterSeqStmt>().expect("AlterSeqStmt");
+            sequence::AlterSequence(mcx, altstmt)?;
         }
         _ => handler_gap("ProcessUtilitySlow DDL fan-out (utility slow lane)"),
     }

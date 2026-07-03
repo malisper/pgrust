@@ -29,7 +29,7 @@ use mcx::Mcx;
 use types_core::{AttrNumber, InvalidOid, Oid, NAMEDATALEN};
 use types_error::{PgError, PgResult, ERROR};
 use types_nodes::rawnodes::{ColumnDef, CreateStmt, OnCommitAction, TypeName};
-use types_rel::RELKIND_RELATION;
+use types_rel::{RELKIND_RELATION, RELKIND_SEQUENCE};
 use types_tuple::TupleDescData;
 
 const HEAP_TABLE_AM_OID: Oid = 2;
@@ -92,7 +92,7 @@ pub fn DefineRelation<'mcx>(
     owner_id: Oid,
     query_string: &str,
 ) -> PgResult<Oid> {
-    debug_assert!(relkind == RELKIND_RELATION);
+    debug_assert!(relkind == RELKIND_RELATION || relkind == RELKIND_SEQUENCE);
     let rv = stmt.relation.expect("CreateStmt.relation");
     let relname = rv.relname.expect("RangeVar.relname");
     if relname.len() >= NAMEDATALEN as usize {
@@ -107,10 +107,15 @@ pub fn DefineRelation<'mcx>(
     if !stmt.inhRelations.is_nil() {
         unported("MergeAttributes inheritance");
     }
-    let access_method_id = match stmt.accessMethod {
-        None => HEAP_TABLE_AM_OID, // default_table_access_method = "heap"
-        Some("heap") => HEAP_TABLE_AM_OID,
-        Some(_) => unported("get_table_am_oid (non-heap USING)"),
+    // C: accessMethodId is InvalidOid unless RELKIND_HAS_TABLE_AM.
+    let access_method_id = if !types_rel::RELKIND_HAS_TABLE_AM(relkind) {
+        InvalidOid
+    } else {
+        match stmt.accessMethod {
+            None => HEAP_TABLE_AM_OID, // default_table_access_method = "heap"
+            Some("heap") => HEAP_TABLE_AM_OID,
+            Some(_) => unported("get_table_am_oid (non-heap USING)"),
+        }
     };
 
     // RangeVarGetAndCheckCreationNamespace resolve-only: CREATE ACL check and

@@ -10,7 +10,7 @@ use mcx::Mcx;
 use pg_depend::{object_address_comparator, ObjectAddress};
 use types_core::{AttrNumber, InvalidOid, Oid, RELATION_RELATION_ID, TYPE_RELATION_ID};
 use types_error::PgResult;
-use types_rel::{AccessExclusiveLock, Relation, RowExclusiveLock, RELKIND_INDEX, RELKIND_RELATION, RELKIND_TOASTVALUE};
+use types_rel::{AccessExclusiveLock, Relation, RowExclusiveLock, RELKIND_INDEX, RELKIND_RELATION, RELKIND_SEQUENCE, RELKIND_TOASTVALUE};
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use types_tuple::{HeapTupleData, TupleDescData};
 
@@ -604,10 +604,13 @@ fn doDeletion<'mcx>(mcx: Mcx<'mcx>, object: &ObjectAddress, flags: i32) -> PgRes
                     object.objectId,
                     object.objectSubId as types_core::AttrNumber,
                 )?;
-            } else if matches!(relKind, RELKIND_RELATION | RELKIND_TOASTVALUE) {
+            } else if matches!(relKind, RELKIND_RELATION | RELKIND_TOASTVALUE | RELKIND_SEQUENCE) {
                 catalog_heap::heap_drop_with_catalog(mcx, object.objectId)?;
+                if relKind == RELKIND_SEQUENCE {
+                    sequence_seams::delete_sequence_tuple::call(object.objectId)?;
+                }
             } else {
-                unported("doDeletion: non-table relkind (sequence/view/matview lanes)");
+                unported("doDeletion: non-table relkind (view/matview lanes)");
             }
         }
         TYPE_RELATION_ID => pg_type::RemoveTypeById(mcx, object.objectId)?,

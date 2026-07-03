@@ -1,14 +1,22 @@
-// CREATE TABLE plain-column lane + the parse_type.c slice it needs.
+// CREATE TABLE plain-column lane + the parse_type.c slice it needs, plus the
+// SERIAL expansion (generateSerialExtraStmts) and its ruleutils/indexcmds
+// helpers (quote_identifier, makeObjectName, ChooseRelationName).
 #![allow(non_snake_case)]
 
-use mcx::Mcx;
-use types_core::{InvalidOid, Oid};
-use types_error::{PgError, PgResult, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_OBJECT, ERROR};
-use types_nodes::rawnodes::{
-    ColumnDef, Constraint, ConstrType, CreateStmt, IndexElem, IndexStmt, SortByDir, SortByNulls,
-    TypeName,
+use mcx::{Mcx, PgString};
+use types_core::{InvalidOid, Oid, INT2OID, INT4OID, INT8OID, NAMEDATALEN};
+use types_error::{
+    PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_SYNTAX_ERROR,
+    ERRCODE_UNDEFINED_OBJECT, ERRCODE_UNDEFINED_SCHEMA, ERROR,
 };
-use types_nodes::{Node, NodeList, NodeTag};
+use types_nodes::rawnodes::{
+    ColumnDef, Constraint, ConstrType, CreateSeqStmt, CreateStmt, IndexElem, IndexStmt, SortByDir,
+    SortByNulls, TypeName,
+};
+use types_nodes::parsenodes::{DefElem, DefElemAction};
+use types_nodes::{
+    AlterSeqStmt, CoercionForm, FuncCall, Node, NodeList, NodeTag, RangeVar, TypeCast, ValUnion,
+};
 
 #[cold]
 #[inline(never)]
@@ -36,7 +44,8 @@ pub fn typenameTypeIdAndMod<'mcx>(
         unported("LookupTypeName %TYPE / SETOF");
     }
     if tn.typeOid != InvalidOid {
-        unported("pre-resolved TypeName.typeOid lane");
+        debug_assert!(tn.names.is_nil());
+        return Ok((tn.typeOid, -1));
     }
 
     let (typoid, typname) = resolveTypeNames(mcx, tn)?;
@@ -312,19 +321,102 @@ fn typenameTypeMod<'mcx>(
     }
 }
 
+struct CreateStmtCxt<'mcx> {
+    blist: NodeList<'mcx>,
+    alist: NodeList<'mcx>,
+}
+
 fn transformColumnDefinition<'mcx>(
     mcx: Mcx<'mcx>,
     column_node: Node<'mcx>,
     column: &ColumnDef<'mcx>,
-    relname: &str,
+    relation: &RangeVar<'mcx>,
+    cxt: &mut CreateStmtCxt<'mcx>,
     ckconstraints: &mut NodeList<'mcx>,
     nnconstraints: &mut NodeList<'mcx>,
     ixconstraints: &mut NodeList<'mcx>,
     fkconstraints: &mut NodeList<'mcx>,
 ) -> PgResult<()> {
+    let relname = relation.relname.unwrap_or("");
     if column.raw_default.is_some() || column.cooked_default.is_some() {
         unported("pre-split column defaults");
     }
+
+    // SERIAL pseudo-types (transformColumnDefinition's is_serial arm).
+    let mut is_serial_oid = InvalidOid;
+    if let Some(tn_node) = column.typeName {
+        let tn = tn_node.as_variant::<TypeName>().expect("TypeName");
+        if tn.names.len() == 1 && !tn.pct_type {
+            let typname = tn.names.nth(0).as_string().expect("TypeName name").sval;
+            is_serial_oid = match typname {
+                "smallserial" | "serial2" => INT2OID,
+                "serial" | "serial4" => INT4OID,
+                "bigserial" | "serial8" => INT8OID,
+                _ => InvalidOid,
+            };
+            if is_serial_oid != InvalidOid {
+                if !tn.arrayBounds.is_nil() {
+                    return Err(Box::new(
+                        PgError::new(ERROR, "array of serial is not implemented".to_string())
+                            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+                    ));
+                }
+                // SAFETY: parse tree is analyze-owned; no derived refs live.
+                unsafe {
+                    tn_node
+                        .with_mut::<TypeName, _>(|t| {
+                            t.names = NodeList::nil();
+                            t.typeOid = is_serial_oid;
+                        })
+                        .expect("TypeName");
+                }
+            }
+        }
+    }
+
+    let mut need_notnull = false;
+    if is_serial_oid != InvalidOid {
+        let (snamespace, sname) =
+            generateSerialExtraStmts(mcx, relation, column_node, column, is_serial_oid, cxt)?;
+
+        // DEFAULT nextval('snamespace.sname'::regclass), raw form.
+        let qstring = leak_str(quote_qualified_identifier(mcx, Some(snamespace), sname)?);
+        let snamenode = Node::mk_a_const(
+            mcx,
+            Some(ValUnion::String(types_nodes::String { sval: qstring })),
+            -1,
+        )?;
+        let mut regclass_tn = Node::build::<TypeName>(mcx)?;
+        let mut names = NodeList::make1(mcx, Node::mk_string(mcx, "pg_catalog")?)?;
+        names.lappend(mcx, Node::mk_string(mcx, "regclass")?)?;
+        regclass_tn.names = names;
+        regclass_tn.typemod = -1;
+        regclass_tn.location = -1;
+        let castnode = Node::mk(
+            mcx,
+            TypeCast { arg: Some(snamenode), typeName: Some(regclass_tn.seal()), location: -1 },
+        )?;
+        let mut funcname = NodeList::make1(mcx, Node::mk_string(mcx, "pg_catalog")?)?;
+        funcname.lappend(mcx, Node::mk_string(mcx, "nextval")?)?;
+        let mut fc = Node::build::<FuncCall>(mcx)?;
+        fc.funcname = funcname;
+        fc.args = NodeList::make1(mcx, castnode)?;
+        fc.funcformat = CoercionForm::COERCE_EXPLICIT_CALL;
+        fc.location = -1;
+        let mut cons = Node::build::<Constraint>(mcx)?;
+        cons.contype = ConstrType::CONSTR_DEFAULT;
+        cons.location = -1;
+        cons.raw_expr = Some(fc.seal());
+        let cons = cons.seal();
+        // SAFETY: parse tree is analyze-owned; no derived refs live.
+        unsafe {
+            column_node
+                .with_mut::<ColumnDef, _>(|c| c.constraints.lappend(mcx, cons))
+                .expect("ColumnDef")?;
+        }
+        need_notnull = true;
+    }
+
     let mut saw_default = false;
     let mut saw_nullable = false;
     let mut need_notnull = false;
@@ -464,6 +556,7 @@ pub fn transformCreateStmt<'mcx>(
     let relation = stmt.relation.expect("CreateStmt.relation");
     let relname = relation.relname.unwrap_or("");
     let mut columns = NodeList::nil();
+    let mut cxt = CreateStmtCxt { blist: NodeList::nil(), alist: NodeList::nil() };
     let mut ckconstraints = NodeList::nil();
     let mut nnconstraints = NodeList::nil();
     let mut ixconstraints = NodeList::nil();
@@ -477,7 +570,8 @@ pub fn transformCreateStmt<'mcx>(
                     mcx,
                     elt,
                     cd,
-                    relname,
+                    relation,
+                    &mut cxt,
                     &mut ckconstraints,
                     &mut nnconstraints,
                     &mut ixconstraints,
@@ -582,7 +676,12 @@ pub fn transformCreateStmt<'mcx>(
             .expect("CreateStmt");
     }
 
-    let mut result = NodeList::make1(mcx, stmt_node)?;
+    // C: result = blist ++ [stmt] ++ alist (serial's OWNED BY precedes index stmts).
+    let mut result = cxt.blist;
+    result.lappend(mcx, stmt_node)?;
+    for n in cxt.alist.iter() {
+        result.lappend(mcx, n)?;
+    }
     for a in alist.iter() {
         result.lappend(mcx, a)?;
     }
@@ -768,6 +867,233 @@ fn index_params_equal(a: &NodeList<'_>, b: &NodeList<'_>) -> bool {
         }
     }
     true
+}
+
+// Serial names live as long as the parse arena (C pallocs likewise).
+fn leak_str(s: PgString<'_>) -> &str {
+    // SAFETY: PgString invariant — bytes are valid UTF-8.
+    unsafe { core::str::from_utf8_unchecked(s.into_bytes().leak()) }
+}
+
+// generateSerialExtraStmts, CREATE TABLE serial arm (identity/ALTER lanes and
+// SEQUENCE NAME/LOGGED/UNLOGGED options are unreachable from it).
+fn generateSerialExtraStmts<'mcx>(
+    mcx: Mcx<'mcx>,
+    relation: &RangeVar<'mcx>,
+    column_node: Node<'mcx>,
+    column: &ColumnDef<'mcx>,
+    seqtypid: Oid,
+    cxt: &mut CreateStmtCxt<'mcx>,
+) -> PgResult<(&'mcx str, &'mcx str)> {
+    let snamespaceid = RangeVarGetCreationNamespace(mcx, relation)?;
+    let snamespace = leak_str(
+        lsyscache::get_namespace_name(mcx, snamespaceid)?
+            .unwrap_or_else(|| panic!("cache lookup failed for namespace {snamespaceid}")),
+    );
+    let relname = relation.relname.expect("RangeVar.relname");
+    let colname = column.colname.expect("ColumnDef.colname");
+    let sname = leak_str(ChooseRelationName(mcx, relname, Some(colname), "seq", snamespaceid)?);
+
+    let seq_rv = Node::mk_mut(
+        mcx,
+        RangeVar {
+            catalogname: None,
+            schemaname: Some(snamespace),
+            relname: Some(sname),
+            inh: true,
+            relpersistence: relation.relpersistence,
+            alias: None,
+            location: -1,
+        },
+    )?
+    .seal_ref();
+
+    // AS seqtypid, prepended so a user AS lands the redundant-option error.
+    let mut as_tn = Node::build::<TypeName>(mcx)?;
+    as_tn.typeOid = seqtypid;
+    as_tn.typemod = -1;
+    as_tn.location = -1;
+    let as_defel = Node::mk(
+        mcx,
+        DefElem {
+            defnamespace: None,
+            defname: Some("as"),
+            arg: Some(as_tn.seal()),
+            defaction: DefElemAction::DEFELEM_UNSPEC,
+            location: -1,
+        },
+    )?;
+
+    let mut seqstmt = Node::build::<CreateSeqStmt>(mcx)?;
+    seqstmt.for_identity = false;
+    seqstmt.sequence = Some(seq_rv);
+    seqstmt.options = NodeList::make1(mcx, as_defel)?;
+    seqstmt.ownerId = InvalidOid;
+    cxt.blist.lappend(mcx, seqstmt.seal())?;
+
+    // SAFETY: parse tree is analyze-owned; no derived refs live.
+    unsafe {
+        column_node
+            .with_mut::<ColumnDef, _>(|c| c.identitySequence = Some(seq_rv))
+            .expect("ColumnDef");
+    }
+
+    let mut attnamelist = NodeList::make1(mcx, Node::mk_string(mcx, snamespace)?)?;
+    attnamelist.lappend(mcx, Node::mk_string(mcx, relname)?)?;
+    attnamelist.lappend(mcx, Node::mk_string(mcx, colname)?)?;
+    let owned_defel = Node::mk(
+        mcx,
+        DefElem {
+            defnamespace: None,
+            defname: Some("owned_by"),
+            arg: Some(Node::mk_list(mcx, attnamelist)?),
+            defaction: DefElemAction::DEFELEM_UNSPEC,
+            location: -1,
+        },
+    )?;
+    let mut altseqstmt = Node::build::<AlterSeqStmt>(mcx)?;
+    altseqstmt.sequence = Some(seq_rv);
+    altseqstmt.options = NodeList::make1(mcx, owned_defel)?;
+    altseqstmt.for_identity = false;
+    cxt.alist.lappend(mcx, altseqstmt.seal())?;
+
+    Ok((snamespace, sname))
+}
+
+// RangeVarGetCreationNamespace (namespace.c), permanent-relation slice.
+fn RangeVarGetCreationNamespace<'mcx>(
+    mcx: Mcx<'mcx>,
+    relation: &RangeVar<'_>,
+) -> PgResult<Oid> {
+    if relation.catalogname.is_some() {
+        unported("cross-database qualified names");
+    }
+    match relation.schemaname {
+        Some(schemaname) => catalog_namespace::get_namespace_oid(schemaname, false),
+        None => {
+            let path = catalog_namespace::fetch_search_path(mcx, false)?;
+            match path.first() {
+                Some(&ns) => Ok(ns),
+                None => Err(Box::new(
+                    PgError::new(ERROR, "no schema has been selected to create in".to_string())
+                        .with_sqlstate(ERRCODE_UNDEFINED_SCHEMA),
+                )),
+            }
+        }
+    }
+}
+
+// makeObjectName (indexcmds.c); names here are valid UTF-8, so pg_mbcliplen
+// is a char-boundary clip.
+fn makeObjectName<'mcx>(
+    mcx: Mcx<'mcx>,
+    name1: &str,
+    name2: Option<&str>,
+    label: &str,
+) -> PgResult<PgString<'mcx>> {
+    let mut overhead = label.len() + 1;
+    if name2.is_some() {
+        overhead += 1;
+    }
+    let availchars = NAMEDATALEN as usize - 1 - overhead;
+    let mut name1chars = name1.len();
+    let mut name2chars = name2.map_or(0, str::len);
+    while name1chars + name2chars > availchars {
+        if name1chars > name2chars {
+            name1chars -= 1;
+        } else {
+            name2chars -= 1;
+        }
+    }
+    let clip = |s: &str, mut n: usize| {
+        while !s.is_char_boundary(n) {
+            n -= 1;
+        }
+        n
+    };
+    let mut out = mcx::PgString::new_in(mcx);
+    out.try_push_str(&name1[..clip(name1, name1chars)])?;
+    if let Some(name2) = name2 {
+        out.try_push_str("_")?;
+        out.try_push_str(&name2[..clip(name2, name2chars)])?;
+    }
+    out.try_push_str("_")?;
+    out.try_push_str(label)?;
+    Ok(out)
+}
+
+// ChooseRelationName (indexcmds.c). DIVERGENCE: C probes pg_class under a
+// dirty snapshot; this uses the MVCC get_relname_relid probe (single-backend,
+// and DDL CCIs before the next probe can matter).
+pub fn ChooseRelationName<'mcx>(
+    mcx: Mcx<'mcx>,
+    name1: &str,
+    name2: Option<&str>,
+    label: &str,
+    namespaceid: Oid,
+) -> PgResult<PgString<'mcx>> {
+    let mut pass = 0u32;
+    let mut modlabel = std::string::String::from(label);
+    loop {
+        let relname = makeObjectName(mcx, name1, name2, &modlabel)?;
+        if lsyscache::get_relname_relid(&relname, namespaceid)? == InvalidOid {
+            return Ok(relname);
+        }
+        pass += 1;
+        modlabel = format!("{label}{pass}");
+    }
+}
+
+// quote_identifier + quote_qualified_identifier (ruleutils.c).
+// quote_all_identifiers GUC is unported (default off).
+fn ident_needs_quotes(ident: &str) -> bool {
+    let b = ident.as_bytes();
+    if b.is_empty() {
+        return true;
+    }
+    let safe_first = b[0].is_ascii_lowercase() || b[0] == b'_';
+    let safe = safe_first
+        && b.iter().all(|&c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_');
+    if !safe {
+        return true;
+    }
+    let kwnum = keywords::ScanKeywordLookup(b, &keywords::ScanKeywords);
+    if kwnum >= 0 {
+        return keywords::ScanKeywordCategories[kwnum as usize]
+            != keywords::KeywordCategory::Unreserved;
+    }
+    false
+}
+
+pub fn quote_identifier<'mcx>(mcx: Mcx<'mcx>, ident: &str) -> PgResult<PgString<'mcx>> {
+    let mut out = mcx::PgString::new_in(mcx);
+    if !ident_needs_quotes(ident) {
+        out.try_push_str(ident)?;
+        return Ok(out);
+    }
+    out.try_push_str("\"")?;
+    for c in ident.chars() {
+        if c == '"' {
+            out.try_push_str("\"")?;
+        }
+        out.try_push(c)?;
+    }
+    out.try_push_str("\"")?;
+    Ok(out)
+}
+
+pub fn quote_qualified_identifier<'mcx>(
+    mcx: Mcx<'mcx>,
+    qualifier: Option<&str>,
+    ident: &str,
+) -> PgResult<PgString<'mcx>> {
+    let mut out = mcx::PgString::new_in(mcx);
+    if let Some(q) = qualifier {
+        out.try_push_str(&quote_identifier(mcx, q)?)?;
+        out.try_push_str(".")?;
+    }
+    out.try_push_str(&quote_identifier(mcx, ident)?)?;
+    Ok(out)
 }
 
 // transformAlterTableStmt's per-subcommand slice (ATParseTransformCmd's
