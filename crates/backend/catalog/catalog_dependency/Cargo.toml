@@ -9,6 +9,8 @@ dependency_seams = { path = "../dependency_seams" }
 sequence_seams = { path = "../../commands/sequence_seams" }
 catalog = { path = "../catalog" }
 catalog_heap = { path = "../catalog_heap" }
+catalog_namespace = { path = "../catalog_namespace" }
+format_type = { path = "../../utils/adt/format_type" }
 catalog_index = { path = "../catalog_index" }
 catalog_indexing = { path = "../catalog_indexing" }
 datum = { path = "../../../_support/types/datum" }
