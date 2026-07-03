@@ -51,7 +51,8 @@ pub fn StoreSingleInheritance<'mcx>(
 }
 
 // Children sorted by OID, then locked in that order (C's deadlock-avoidance
-// contract; a locked child cannot vanish, so no concurrent-DROP recheck).
+// contract), rechecking existence after each lock: a child seen by the scan
+// can be dropped while we wait for its lock (pg_inherits.c:206).
 pub fn find_inheritance_children<'mcx>(
     mcx: Mcx<'mcx>,
     parent_rel_id: Oid,
@@ -92,9 +93,16 @@ pub fn find_inheritance_children<'mcx>(
     rel.close(AccessShareLock)?;
     result.sort_unstable();
     if lockmode != NoLock {
+        let mut live: PgVec<'mcx, Oid> = PgVec::new_in(mcx);
         for &child in result.iter() {
             lmgr::LockRelationOid(child, lockmode)?;
+            if syscache_seams::search_syscache_exists_reloid::call(child)? {
+                live.push(child);
+            } else {
+                lmgr::UnlockRelationOid(child, lockmode)?;
+            }
         }
+        return Ok(live);
     }
     Ok(result)
 }

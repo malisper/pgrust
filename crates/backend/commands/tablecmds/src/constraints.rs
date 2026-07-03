@@ -195,15 +195,22 @@ pub(crate) fn add_relation_new_constraints<'mcx>(
 
 // AddRelationNotNullConstraints (heap.c): local column constraints first
 // (inhcount = matching parents), then leftover inherited ones with
-// conislocal=false. attnotnull was already set by BuildDescForRelation.
+// conislocal=false. Returns nncols; the caller must set_attnotnull each
+// (table-level NOT NULL on an inherited column is not covered by
+// BuildDescForRelation).
 pub(crate) fn add_relation_not_null_constraints<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     nnconstraints: &NodeList<'mcx>,
     old_notnulls: &[crate::inheritance::InheritedNotNull<'mcx>],
-) -> PgResult<()> {
+    existing_constraints: &[&str],
+) -> PgResult<PgVec<'mcx, AttrNumber>> {
     let relname = core::str::from_utf8(rel.rd_rel.relname.name_str()).expect("relname");
+    let mut nncols: PgVec<'mcx, AttrNumber> = PgVec::new_in(mcx);
     let mut nnnames: PgVec<'mcx, &str> = PgVec::new_in(mcx);
+    for &n in existing_constraints {
+        nnnames.push(str_in(mcx, n)?);
+    }
     let mut seen_attnums: PgVec<'mcx, AttrNumber> = PgVec::new_in(mcx);
     let mut old_pending: PgVec<'mcx, bool> = mcx::vec_from_elem_in(mcx, true, old_notnulls.len());
     for cnode in nnconstraints.iter() {
@@ -291,6 +298,7 @@ pub(crate) fn add_relation_not_null_constraints<'mcx>(
         entry.inhcount = inhcount;
         entry.is_no_inherit = cdef.is_no_inherit;
         pg_constraint::CreateConstraintEntry(mcx, &entry)?;
+        nncols.push(attnum);
     }
 
     for outer in 0..old_notnulls.len() {
@@ -344,8 +352,9 @@ pub(crate) fn add_relation_not_null_constraints<'mcx>(
         entry.is_local = false;
         entry.inhcount = inhcount;
         pg_constraint::CreateConstraintEntry(mcx, &entry)?;
+        nncols.push(cooked.attnum);
     }
-    Ok(())
+    Ok(nncols)
 }
 
 fn cook_default<'mcx>(

@@ -6252,6 +6252,7 @@ dependencies = [
  "lmgr",
  "lsyscache",
  "mcx",
+ "syscache_seams",
  "table",
  "types_core",
  "types_error",

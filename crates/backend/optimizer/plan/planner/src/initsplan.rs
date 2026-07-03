@@ -1267,14 +1267,18 @@ pub fn distribute_restrictinfo_to_rels(run: &mut PlannerRun<'_>, rinfo: RinfoId)
     Ok(())
 }
 
-// add_base_clause_to_rel (initsplan.c); the NullTest shortcuts are only
-// valid for non-inheritance parents (C matches: children may differ).
+// add_base_clause_to_rel (initsplan.c:3003); the NullTest shortcuts are only
+// valid for non-inheritance parents, except partitioned tables where a
+// constant qual must hold for every partition too.
 fn add_base_clause_to_rel(run: &mut PlannerRun<'_>, relid: i32, rinfo: RinfoId) -> PgResult<()> {
-    let inh = run.rte(relid as usize).inh;
-    if !inh && restriction_is_always_true(run, rinfo) {
+    let rte = run.rte(relid as usize);
+    let apply_shortcuts =
+        !rte.inh || rte.relkind == ::types_rel::RELKIND_PARTITIONED_TABLE;
+    if apply_shortcuts && restriction_is_always_true(run, rinfo) {
         return Ok(());
     }
-    let rinfo = if inh { rinfo } else { substitute_false_if_always_false(run, rinfo)? };
+    let rinfo =
+        if apply_shortcuts { substitute_false_if_always_false(run, rinfo)? } else { rinfo };
     let rel_id = find_base_rel(&run.root, relid);
     let security_level = run.root.rinfo(rinfo).security_level;
     let rel = run.root.rel_mut(rel_id);

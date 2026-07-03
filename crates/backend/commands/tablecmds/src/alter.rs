@@ -38,7 +38,7 @@ const Anum_pg_attribute_attbyval: usize = 8;
 const Anum_pg_attribute_attalign: usize = 9;
 const Anum_pg_attribute_attstorage: usize = 10;
 const Anum_pg_attribute_attcompression: usize = 11;
-const Anum_pg_attribute_attnotnull: usize = 12;
+pub(crate) const Anum_pg_attribute_attnotnull: usize = 12;
 const Anum_pg_attribute_atthasmissing: usize = 14;
 const Anum_pg_attribute_attcollation: usize = 20;
 

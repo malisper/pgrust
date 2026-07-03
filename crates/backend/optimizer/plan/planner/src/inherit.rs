@@ -379,8 +379,10 @@ pub fn adjust_appendrel_attrs<'mcx>(
                     let mut newvar = copy_var(mcx, v)?;
                     newvar.varno = child_relid as i32;
                     newvar.varattno = child_attno;
-                    newvar.varnosyn = child_relid;
-                    newvar.varattnosyn = child_attno;
+                    // C drops syntactic labeling on generated Vars
+                    // (appendinfo.c:278).
+                    newvar.varnosyn = 0;
+                    newvar.varattnosyn = 0;
                     newvar.location = -1;
                     Ok(Some(Node::mk(mcx, newvar)?))
                 } else if v.varattno == 0 {
@@ -391,6 +393,8 @@ pub fn adjust_appendrel_attrs<'mcx>(
                 } else {
                     let mut newvar = copy_var(mcx, v)?;
                     newvar.varno = child_relid as i32;
+                    newvar.varnosyn = 0;
+                    newvar.varattnosyn = 0;
                     Ok(Some(Node::mk(mcx, newvar)?))
                 }
             }
