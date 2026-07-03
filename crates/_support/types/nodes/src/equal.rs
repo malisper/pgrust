@@ -14,10 +14,11 @@ use crate::parsenodes::{
     GroupingSet, Query, RTEPermissionInfo, RangeTblEntry, TransactionStmt, VariableSetStmt, VariableShowStmt,
     WithClause,
 };
+use crate::list::OptNodeList;
 use crate::primnodes::{
     Aggref, Alias, ArrayExpr, BoolExpr, BooleanTest, CoerceViaIO, Const, DistinctExpr, FromExpr,
     FuncExpr, GroupingFunc, NullTest, OpExpr, Param, RangeTblRef, RangeVar, RelabelType, RowExpr,
-    ScalarArrayOpExpr, TargetEntry, Var, WindowFunc,
+    ScalarArrayOpExpr, SubscriptingRef, TargetEntry, Var, WindowFunc,
 };
 use crate::rawnodes::{
     A_Const, A_Expr, A_Star, CollateClause, ColumnRef, DeleteStmt, DistinctClause, FuncCall,
@@ -59,6 +60,7 @@ pub fn equal(a: Node<'_>, b: Node<'_>) -> bool {
         NodeTag::T_OpExpr => cmp!(as_op_expr),
         NodeTag::T_ScalarArrayOpExpr => cmp!(as_scalar_array_op_expr),
         NodeTag::T_ArrayExpr => cmp!(as_array_expr),
+        NodeTag::T_SubscriptingRef => cmp!(as_subscripting_ref),
         NodeTag::T_BoolExpr => cmp!(as_bool_expr),
         NodeTag::T_RelabelType => cmp!(as_relabel_type),
         NodeTag::T_CoerceViaIO => cmp!(as_coerce_via_io),
@@ -376,6 +378,17 @@ impl NodeEqual for OpExpr<'_> {
     }
 }
 
+impl NodeEqual for OptNodeList<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.len() == b.len()
+            && self.iter().zip(b.iter()).all(|(x, y)| match (x, y) {
+                (None, None) => true,
+                (Some(x), Some(y)) => equal(x, y),
+                _ => false,
+            })
+    }
+}
+
 impl NodeEqual for ScalarArrayOpExpr<'_> {
     fn node_equal(&self, b: &Self) -> bool {
         // C: zero opfuncid/hashfuncid/negfuncid (not yet looked up) match any.
@@ -396,6 +409,28 @@ impl NodeEqual for ArrayExpr<'_> {
             && self.element_typeid == b.element_typeid
             && self.elements.node_equal(&b.elements)
             && self.multidims == b.multidims
+    }
+}
+
+impl NodeEqual for SubscriptingRef<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.refcontainertype == b.refcontainertype
+            && self.refelemtype == b.refelemtype
+            && self.refrestype == b.refrestype
+            && self.reftypmod == b.reftypmod
+            && self.refcollid == b.refcollid
+            && self.refupperindexpr.node_equal(&b.refupperindexpr)
+            && self.reflowerindexpr.node_equal(&b.reflowerindexpr)
+            && equal_opt_pair(self.refexpr, b.refexpr)
+            && equal_opt_pair(self.refassgnexpr, b.refassgnexpr)
+    }
+}
+
+fn equal_opt_pair(a: Option<Node<'_>>, b: Option<Node<'_>>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => equal(a, b),
+        _ => false,
     }
 }
 

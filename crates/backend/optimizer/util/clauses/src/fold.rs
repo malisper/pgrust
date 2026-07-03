@@ -606,6 +606,93 @@ fn ece_mutator<'mcx>(node: Node<'mcx>, cx: &EceContext<'mcx>) -> PgResult<Option
             }
             Ok(new)
         }
+        NodeTag::T_ArrayExpr => {
+            let new = expression_tree_mutator(cx.mcx, node, &mut |n| ece_mutator(n, cx))?;
+            let eff = new.unwrap_or(node);
+            if all_arguments_const(eff)? {
+                let a = eff.as_array_expr().unwrap();
+                return clauses_seams::evaluate_expr::call(
+                    cx.mcx,
+                    eff,
+                    a.array_typeid,
+                    -1,
+                    a.array_collid,
+                )
+                .map(Some);
+            }
+            Ok(new)
+        }
+        NodeTag::T_ScalarArrayOpExpr => {
+            let new = expression_tree_mutator(cx.mcx, node, &mut |n| ece_mutator(n, cx))?;
+            let eff = new.unwrap_or(node);
+            let sa = eff.as_scalar_array_op_expr().unwrap();
+            // set_sa_opfuncid, without C's memo write-back (walker.rs).
+            let opfuncid =
+                if sa.opfuncid == 0 { lsyscache::get_opcode(sa.opno)? } else { sa.opfuncid };
+            // ece_function_is_safe: non-volatile folds (estimation lane off).
+            const PROVOLATILE_VOLATILE: i8 = b'v' as i8;
+            if lsyscache::func_volatile(opfuncid)? != PROVOLATILE_VOLATILE
+                && all_arguments_const(eff)?
+            {
+                let refolded = if opfuncid != sa.opfuncid || new.is_none() {
+                    Node::mk(
+                        cx.mcx,
+                        types_nodes::ScalarArrayOpExpr {
+                            opno: sa.opno,
+                            opfuncid,
+                            hashfuncid: sa.hashfuncid,
+                            negfuncid: sa.negfuncid,
+                            useOr: sa.useOr,
+                            inputcollid: sa.inputcollid,
+                            args: sa.args.clone_in(cx.mcx)?,
+                            location: sa.location,
+                        },
+                    )?
+                } else {
+                    eff
+                };
+                return clauses_seams::evaluate_expr::call(
+                    cx.mcx,
+                    refolded,
+                    types_core::catalog::BOOLOID,
+                    -1,
+                    InvalidOid,
+                )
+                .map(Some);
+            }
+            if opfuncid != sa.opfuncid {
+                return Ok(Some(Node::mk(
+                    cx.mcx,
+                    types_nodes::ScalarArrayOpExpr {
+                        opno: sa.opno,
+                        opfuncid,
+                        hashfuncid: sa.hashfuncid,
+                        negfuncid: sa.negfuncid,
+                        useOr: sa.useOr,
+                        inputcollid: sa.inputcollid,
+                        args: sa.args.clone_in(cx.mcx)?,
+                        location: sa.location,
+                    },
+                )?));
+            }
+            Ok(new)
+        }
+        NodeTag::T_SubscriptingRef => {
+            let new = expression_tree_mutator(cx.mcx, node, &mut |n| ece_mutator(n, cx))?;
+            let eff = new.unwrap_or(node);
+            let sr = eff.as_subscripting_ref().unwrap();
+            if sr.refassgnexpr.is_none() && all_arguments_const(eff)? {
+                return clauses_seams::evaluate_expr::call(
+                    cx.mcx,
+                    eff,
+                    sr.refrestype,
+                    sr.reftypmod,
+                    sr.refcollid,
+                )
+                .map(Some);
+            }
+            Ok(new)
+        }
         NodeTag::T_NullTest => {
             use types_nodes::primnodes::{NullTest, NullTestType};
             let nt = node.as_null_test().unwrap();

@@ -1860,6 +1860,9 @@ fn expr_collation(node: Node<'_>) -> types_core::Oid {
         NodeTag::T_OpExpr => node.as_op_expr().unwrap().opcollid,
         NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resultcollid,
         NodeTag::T_CaseExpr => node.as_case_expr().unwrap().casecollid,
+        NodeTag::T_SubscriptingRef => node.as_subscripting_ref().unwrap().refcollid,
+        NodeTag::T_ArrayExpr => node.as_array_expr().unwrap().array_collid,
+        NodeTag::T_ScalarArrayOpExpr => 0,
         tag => panic!("exprCollation (nodeFuncs.c): node family {tag:?} not ported here"),
     }
 }

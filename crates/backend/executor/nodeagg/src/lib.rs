@@ -1395,6 +1395,7 @@ where
         }
         initialize_aggregates(node)?;
         {
+            let tmpcontext = node.tmpcontext;
             let AggStateData { persort, evaltrans, .. } = node;
             let ps = persort.as_mut().expect("sorted Agg has persort");
             let mut slots =
@@ -1410,6 +1411,7 @@ where
                 node.agg_done = true;
                 break;
             };
+            let tmpcontext = node.tmpcontext;
             let AggStateData { persort, evaltrans, .. } = node;
             let ps = persort.as_mut().expect("sorted Agg has persort");
             let outer_slot = estate.slot_mut(outer_id);

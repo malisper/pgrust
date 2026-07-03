@@ -291,7 +291,10 @@ fn assign_collations_walker<'mcx>(
         | NodeTag::T_NullTest
         | NodeTag::T_BooleanTest
         | NodeTag::T_DistinctExpr
-        | NodeTag::T_SubLink) => {
+        | NodeTag::T_SubLink
+        | NodeTag::T_SubscriptingRef
+        | NodeTag::T_ScalarArrayOpExpr
+        | NodeTag::T_ArrayExpr) => {
             match tag {
                 // C: never recurse into the CASE test expression — it was
                 // collation-marked in transformCaseExpr and doesn't affect
@@ -417,6 +420,35 @@ fn assign_collations_walker<'mcx>(
                         assign_collations_walker(arg, &mut loccontext)?;
                     }
                 }
+                NodeTag::T_SubscriptingRef => {
+                    let s = node.as_subscripting_ref().unwrap();
+                    for e in &s.refupperindexpr {
+                        if let Some(e) = e {
+                            assign_collations_walker(e, &mut loccontext)?;
+                        }
+                    }
+                    for e in &s.reflowerindexpr {
+                        if let Some(e) = e {
+                            assign_collations_walker(e, &mut loccontext)?;
+                        }
+                    }
+                    if let Some(e) = s.refexpr {
+                        assign_collations_walker(e, &mut loccontext)?;
+                    }
+                    if let Some(e) = s.refassgnexpr {
+                        assign_collations_walker(e, &mut loccontext)?;
+                    }
+                }
+                NodeTag::T_ScalarArrayOpExpr => {
+                    for arg in &node.as_scalar_array_op_expr().unwrap().args {
+                        assign_collations_walker(arg, &mut loccontext)?;
+                    }
+                }
+                NodeTag::T_ArrayExpr => {
+                    for e in &node.as_array_expr().unwrap().elements {
+                        assign_collations_walker(e, &mut loccontext)?;
+                    }
+                }
                 _ => unreachable!(),
             }
 
@@ -527,6 +559,21 @@ fn assign_collations_walker<'mcx>(
                         .unwrap(),
                     // exprSetCollation(SubLink) is assert-only in C.
                     NodeTag::T_SubLink => {}
+                    NodeTag::T_SubscriptingRef => node
+                        .with_mut::<types_nodes::SubscriptingRef, _>(|s| s.refcollid = set_coll)
+                        .unwrap(),
+                    // exprSetCollation(ScalarArrayOpExpr) asserts boolean; it
+                    // stores inputcollid via exprSetInputCollation.
+                    NodeTag::T_ScalarArrayOpExpr => {
+                        debug_assert!(!OidIsValid(set_coll));
+                        node.with_mut::<types_nodes::ScalarArrayOpExpr, _>(|s| {
+                            s.inputcollid = input_coll;
+                        })
+                        .unwrap()
+                    }
+                    NodeTag::T_ArrayExpr => node
+                        .with_mut::<types_nodes::ArrayExpr, _>(|a| a.array_collid = set_coll)
+                        .unwrap(),
                     _ => unreachable!(),
                 }
             }

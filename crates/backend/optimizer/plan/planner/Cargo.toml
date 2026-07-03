@@ -36,6 +36,8 @@ init_small = { path = "../../../utils/init/init_small" }
 tidbitmap = { path = "../../../nodes/tidbitmap" }
 types_rel = { path = "../../../../_support/types/rel" }
 types_tuple = { path = "../../../../_support/types/types_tuple" }
+arrayutils = { path = "../../../utils/adt/arrayutils" }
+typcache = { path = "../../../utils/cache/typcache" }
 types_relscan = { path = "../../../access/index/relscan" }
 syscache_seams = { path = "../../../utils/cache/syscache_seams" }
 relcache_seams = { path = "../../../utils/cache/relcache_seams" }

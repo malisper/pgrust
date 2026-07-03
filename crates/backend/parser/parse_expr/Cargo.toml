@@ -11,6 +11,7 @@ path = "src/lib.rs"
 [dependencies]
 analyze_seams = { path = "../analyze_seams" }
 coerce = { path = "../coerce" }
+datum = { path = "../../../_support/types/datum" }
 elog = { path = "../../utils/error/elog" }
 format_type = { path = "../../utils/adt/format_type" }
 guc_tables = { path = "../../utils/misc/guc_tables" }
