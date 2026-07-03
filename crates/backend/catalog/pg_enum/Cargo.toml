@@ -22,6 +22,7 @@ genam = { path = "../../access/index/genam" }
 indexam = { path = "../../access/index/indexam" }
 xact = { path = "../../access/transam/xact" }
 lmgr = { path = "../../storage/lmgr/lmgr" }
+init_small = { path = "../../utils/init/init_small" }
 catalog = { path = "../catalog" }
 catalog_indexing = { path = "../catalog_indexing" }
 pg_enum_seams = { path = "../pg_enum_seams" }
