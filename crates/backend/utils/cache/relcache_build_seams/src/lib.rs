@@ -10,8 +10,10 @@ use types_tuple::TupleDescData;
 // options: RelationParseRelOptions folds into the installer (parsed form only).
 pub struct ScannedPgClass {
     pub form: FormData_pg_class,
-    // Threaded beside the trimmed form (relchecks was dropped from it).
+    // Threaded beside the trimmed form (relchecks/relhastriggers were
+    // dropped from it).
     pub relchecks: i16,
+    pub relhastriggers: bool,
     pub options: Option<RdOptions>,
 }
 
@@ -87,4 +89,13 @@ seam_core::seam!(
         mcx: Mcx<'mcx>,
         indrelid: Oid,
     ) -> PgResult<PgVec<'mcx, PgIndexListShape>>
+);
+
+seam_core::seam!(
+    // RelationBuildTriggers (trigger.c); None when the rel has no pg_trigger
+    // rows (relhastriggers can lag drops).
+    pub fn build_trigger_desc(
+        mcx: Mcx<'static>,
+        relid: Oid,
+    ) -> PgResult<Option<types_trigger::TriggerDesc<'static>>>
 );

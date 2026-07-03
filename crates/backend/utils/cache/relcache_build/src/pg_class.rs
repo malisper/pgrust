@@ -89,5 +89,6 @@ pub(crate) fn decode(
         );
     }
     let relchecks = req(td, tup, 20)?.as_i16();
-    Ok(ScannedPgClass { form, relchecks, options: None })
+    let relhastriggers = req(td, tup, 22)?.as_bool();
+    Ok(ScannedPgClass { form, relchecks, relhastriggers, options: None })
 }

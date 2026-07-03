@@ -3,6 +3,7 @@
 
 mod alter;
 mod constraints;
+mod fk;
 mod drop;
 mod oncommit;
 mod truncate;

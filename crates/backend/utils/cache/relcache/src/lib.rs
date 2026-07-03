@@ -2,6 +2,7 @@
 
 pub mod build;
 pub mod indexlist;
+mod trigdesc;
 pub mod initfile;
 pub mod invalidate;
 pub mod local;
@@ -22,6 +23,7 @@ use types_rel::RelationData;
 
 pub use build::{formrdesc, RelationBuildDesc};
 pub use indexlist::RelationGetIndexList;
+pub use trigdesc::RelationGetTriggerDesc;
 pub use initfile::{
     RelationCacheInitFilePostInvalidate, RelationCacheInitFilePreInvalidate,
     RelationCacheInitFileRemove, RelationCacheInitialize, RelationCacheInitializePhase2,

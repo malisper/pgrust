@@ -9,6 +9,7 @@ name = "relcache_build"
 path = "src/lib.rs"
 
 [dependencies]
+types_trigger = { path = "../../../../_support/types/types_trigger" }
 mcx = { path = "../../../../_support/mcx" }
 datum = { path = "../../../../_support/types/datum" }
 array = { package = "types_array", path = "../../../../_support/types/array" }

@@ -27,6 +27,13 @@ pub const INDEX_CREATE_IF_NOT_EXISTS: u16 = 1 << 4;
 pub const INDEX_CREATE_PARTITIONED: u16 = 1 << 5;
 pub const INDEX_CREATE_INVALID: u16 = 1 << 6;
 
+pub const INDEX_CONSTR_CREATE_MARK_AS_PRIMARY: u16 = 1 << 0;
+pub const INDEX_CONSTR_CREATE_DEFERRABLE: u16 = 1 << 1;
+pub const INDEX_CONSTR_CREATE_INIT_DEFERRED: u16 = 1 << 2;
+pub const INDEX_CONSTR_CREATE_UPDATE_INDEX: u16 = 1 << 3;
+pub const INDEX_CONSTR_CREATE_REMOVE_OLD_DEPS: u16 = 1 << 4;
+pub const INDEX_CONSTR_CREATE_WITHOUT_OVERLAPS: u16 = 1 << 5;
+
 pub const BTREE_AM_OID: Oid = 403;
 pub const HASH_AM_OID: Oid = 405;
 const INT4OID: Oid = 23;
@@ -310,17 +317,24 @@ pub fn index_create<'mcx>(
     let isprimary = extra.flags & INDEX_CREATE_IS_PRIMARY != 0;
 
     if extra.flags
-        & (INDEX_CREATE_ADD_CONSTRAINT
-            | INDEX_CREATE_SKIP_BUILD
+        & (INDEX_CREATE_SKIP_BUILD
             | INDEX_CREATE_CONCURRENT
             | INDEX_CREATE_IF_NOT_EXISTS
             | INDEX_CREATE_PARTITIONED
             | INDEX_CREATE_INVALID)
         != 0
     {
-        unported("index_create: constraint/concurrent/partitioned/skip-build flags");
+        unported("index_create: concurrent/partitioned/skip-build flags");
     }
-    debug_assert!(extra.constr_flags == 0);
+    if extra.constr_flags
+        & (INDEX_CONSTR_CREATE_DEFERRABLE
+            | INDEX_CONSTR_CREATE_INIT_DEFERRED
+            | INDEX_CONSTR_CREATE_REMOVE_OLD_DEPS
+            | INDEX_CONSTR_CREATE_WITHOUT_OVERLAPS)
+        != 0
+    {
+        unported("index_create: deferrable/existing-index/temporal constraint flags");
+    }
     if accessMethodId != BTREE_AM_OID && accessMethodId != HASH_AM_OID {
         unported("index_create: index AMs beyond btree/hash");
     }
@@ -449,27 +463,47 @@ pub fn index_create<'mcx>(
 
     if !miscinit_seams::is_bootstrap_processing_mode::call() {
         let myself = pg_depend::ObjectAddress::set(RELATION_RELATION_ID, indexRelationId);
-        let mut addrs: mcx::PgVec<'_, pg_depend::ObjectAddress> = mcx::PgVec::new_in(mcx);
-        let mut have_simple_col = false;
-        for i in 0..indexInfo.ii_NumIndexAttrs as usize {
-            if indexInfo.ii_IndexAttrNumbers[i] != 0 {
-                addrs.push(pg_depend::ObjectAddress::sub_set(
-                    RELATION_RELATION_ID,
-                    heapRelationId,
-                    indexInfo.ii_IndexAttrNumbers[i] as i32,
-                ));
-                have_simple_col = true;
+        if extra.flags & INDEX_CREATE_ADD_CONSTRAINT != 0 {
+            let constraint_type = if isprimary {
+                pg_constraint::CONSTRAINT_PRIMARY
+            } else if indexInfo.ii_Unique {
+                pg_constraint::CONSTRAINT_UNIQUE
+            } else {
+                unported("index_create: EXCLUDE constraint type");
+            };
+            index_constraint_create(
+                mcx,
+                heapRelation,
+                indexRelationId,
+                indexInfo,
+                indexRelationName,
+                constraint_type,
+                extra.constr_flags,
+                extra.allow_system_table_mods,
+            )?;
+        } else {
+            let mut addrs: mcx::PgVec<'_, pg_depend::ObjectAddress> = mcx::PgVec::new_in(mcx);
+            let mut have_simple_col = false;
+            for i in 0..indexInfo.ii_NumIndexAttrs as usize {
+                if indexInfo.ii_IndexAttrNumbers[i] != 0 {
+                    addrs.push(pg_depend::ObjectAddress::sub_set(
+                        RELATION_RELATION_ID,
+                        heapRelationId,
+                        indexInfo.ii_IndexAttrNumbers[i] as i32,
+                    ));
+                    have_simple_col = true;
+                }
             }
+            if !have_simple_col {
+                addrs.push(pg_depend::ObjectAddress::set(RELATION_RELATION_ID, heapRelationId));
+            }
+            pg_depend::record_object_address_dependencies(
+                mcx,
+                &myself,
+                &mut addrs,
+                pg_depend::DependencyType::Auto,
+            )?;
         }
-        if !have_simple_col {
-            addrs.push(pg_depend::ObjectAddress::set(RELATION_RELATION_ID, heapRelationId));
-        }
-        pg_depend::record_object_address_dependencies(
-            mcx,
-            &myself,
-            &mut addrs,
-            pg_depend::DependencyType::Auto,
-        )?;
 
         let mut normals: mcx::PgVec<'_, pg_depend::ObjectAddress> = mcx::PgVec::new_in(mcx);
         for i in 0..indexInfo.ii_NumIndexKeyAttrs as usize {
@@ -507,6 +541,55 @@ pub fn index_create<'mcx>(
 
     indexam::index_close(indexRelation, NoLock)?;
     Ok(indexRelationId)
+}
+
+// index_constraint_create (index.c), non-deferrable non-partition lane; the
+// pg_index update arm is unreachable (mark-as-primary was set at insert).
+fn index_constraint_create<'mcx>(
+    mcx: Mcx<'mcx>,
+    heapRelation: &Relation<'mcx>,
+    indexRelationId: Oid,
+    indexInfo: &IndexInfo,
+    constraintName: &str,
+    constraintType: u8,
+    constr_flags: u16,
+    allow_system_table_mods: bool,
+) -> PgResult<Oid> {
+    let namespaceId = heapRelation.rd_rel.relnamespace;
+    debug_assert!(
+        constr_flags
+            & (INDEX_CONSTR_CREATE_DEFERRABLE
+                | INDEX_CONSTR_CREATE_INIT_DEFERRED
+                | INDEX_CONSTR_CREATE_REMOVE_OLD_DEPS
+                | INDEX_CONSTR_CREATE_WITHOUT_OVERLAPS)
+            == 0
+    );
+    if !allow_system_table_mods
+        && catalog::IsSystemRelation(heapRelation)
+        && !miscinit_seams::is_bootstrap_processing_mode::call()
+    {
+        return Err(err(
+            "user-defined indexes on system catalog tables are not supported".to_string(),
+            ERRCODE_FEATURE_NOT_SUPPORTED,
+        ));
+    }
+
+    let mut entry = pg_constraint::ConstraintEntry::base(
+        constraintName,
+        namespaceId,
+        constraintType,
+        heapRelation.rd_id,
+    );
+    entry.conkey = &indexInfo.ii_IndexAttrNumbers[..indexInfo.ii_NumIndexAttrs as usize];
+    entry.n_keys = indexInfo.ii_NumIndexKeyAttrs as usize;
+    entry.index_relid = indexRelationId;
+    entry.is_no_inherit = true;
+    let con_oid = pg_constraint::CreateConstraintEntry(mcx, &entry)?;
+
+    let myself = pg_depend::ObjectAddress::set(types_core::CONSTRAINT_RELATION_ID, con_oid);
+    let idxaddr = pg_depend::ObjectAddress::set(RELATION_RELATION_ID, indexRelationId);
+    pg_depend::recordDependencyOn(mcx, &idxaddr, &myself, pg_depend::DependencyType::Internal)?;
+    Ok(con_oid)
 }
 
 // index_build: btree only, serial only (C divergence: plan_create_index_workers

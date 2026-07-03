@@ -90,6 +90,7 @@ pub fn TRIGGER_FIRED_AFTER(e: u32) -> bool {
     e & TRIGGER_EVENT_TIMINGMASK == TRIGGER_EVENT_AFTER
 }
 
+#[derive(Debug)]
 pub struct Trigger<'mcx> {
     pub tgoid: Oid,
     pub tgname: PgString<'mcx>,
@@ -112,6 +113,7 @@ pub struct Trigger<'mcx> {
     pub tgnewtable: Option<PgString<'mcx>>,
 }
 
+#[derive(Debug)]
 pub struct TriggerDesc<'mcx> {
     pub triggers: PgVec<'mcx, Trigger<'mcx>>,
     pub trig_insert_before_row: bool,

@@ -4,7 +4,10 @@
 use mcx::Mcx;
 use types_core::{InvalidOid, Oid};
 use types_error::{PgError, PgResult, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_OBJECT, ERROR};
-use types_nodes::rawnodes::{ColumnDef, Constraint, ConstrType, CreateStmt, TypeName};
+use types_nodes::rawnodes::{
+    ColumnDef, Constraint, ConstrType, CreateStmt, IndexElem, IndexStmt, SortByDir, SortByNulls,
+    TypeName,
+};
 use types_nodes::{Node, NodeList, NodeTag};
 
 #[cold]
@@ -231,11 +234,16 @@ fn transformColumnDefinition<'mcx>(
     relname: &str,
     ckconstraints: &mut NodeList<'mcx>,
     nnconstraints: &mut NodeList<'mcx>,
+    ixconstraints: &mut NodeList<'mcx>,
+    fkconstraints: &mut NodeList<'mcx>,
 ) -> PgResult<()> {
     if column.raw_default.is_some() || column.cooked_default.is_some() {
         unported("pre-split column defaults");
     }
     let mut saw_default = false;
+    let mut saw_nullable = false;
+    let mut need_notnull = false;
+    let mut col_not_null = column.is_not_null;
     for cnode in column.constraints.iter() {
         let constraint = cnode.as_variant::<Constraint>().expect("column constraint");
         match constraint.contype {
@@ -258,9 +266,11 @@ fn transformColumnDefinition<'mcx>(
             }
             ConstrType::CONSTR_CHECK => ckconstraints.lappend(mcx, cnode)?,
             ConstrType::CONSTR_NOTNULL => {
-                if column.is_not_null {
+                if col_not_null {
                     unported("redundant NOT NULL merge (notnull_constraint conname)");
                 }
+                saw_nullable = true;
+                col_not_null = true;
                 let colname = column.colname.expect("ColumnDef.colname");
                 let keys = NodeList::make1(mcx, Node::mk_string(mcx, colname)?)?;
                 // SAFETY (both): parse tree is analyze-owned; no derived refs.
@@ -274,18 +284,55 @@ fn transformColumnDefinition<'mcx>(
                 }
                 nnconstraints.lappend(mcx, cnode)?;
             }
+            ConstrType::CONSTR_PRIMARY | ConstrType::CONSTR_UNIQUE => {
+                if constraint.contype == ConstrType::CONSTR_PRIMARY {
+                    if saw_nullable && !col_not_null {
+                        return Err(conflicting_null_decls(
+                            column.colname.unwrap_or(""),
+                            relname,
+                        ));
+                    }
+                    need_notnull = true;
+                }
+                if constraint.keys.is_nil() {
+                    let colname = column.colname.expect("ColumnDef.colname");
+                    let keys = NodeList::make1(mcx, Node::mk_string(mcx, colname)?)?;
+                    // SAFETY: parse tree is analyze-owned; no derived refs.
+                    unsafe {
+                        cnode.with_mut::<Constraint, _>(|c| c.keys = keys).expect("Constraint");
+                    }
+                }
+                ixconstraints.lappend(mcx, cnode)?;
+            }
+            ConstrType::CONSTR_FOREIGN => {
+                let colname = column.colname.expect("ColumnDef.colname");
+                let fk_attrs = NodeList::make1(mcx, Node::mk_string(mcx, colname)?)?;
+                // SAFETY: parse tree is analyze-owned; no derived refs.
+                unsafe {
+                    cnode
+                        .with_mut::<Constraint, _>(|c| c.fk_attrs = fk_attrs)
+                        .expect("Constraint");
+                }
+                fkconstraints.lappend(mcx, cnode)?;
+            }
             other => unported(match other {
                 ConstrType::CONSTR_NULL => "NULL column constraints",
                 ConstrType::CONSTR_IDENTITY | ConstrType::CONSTR_GENERATED => {
                     "identity/generated column constraints"
                 }
-                ConstrType::CONSTR_PRIMARY | ConstrType::CONSTR_UNIQUE => {
-                    "PRIMARY KEY/UNIQUE column constraints"
-                }
-                ConstrType::CONSTR_FOREIGN => "REFERENCES column constraints",
                 _ => "constraint attributes (transformConstraintAttrs)",
             }),
         }
+    }
+    if need_notnull && !(saw_nullable && col_not_null) {
+        // SAFETY: parse tree is analyze-owned; no derived refs.
+        unsafe {
+            column_node
+                .with_mut::<ColumnDef, _>(|c| c.is_not_null = true)
+                .expect("ColumnDef");
+        }
+        let colname = column.colname.expect("ColumnDef.colname");
+        nnconstraints.lappend(mcx, make_not_null_constraint(mcx, colname)?)?;
     }
     if column.collClause.is_some() || column.collOid != InvalidOid {
         unported("COLLATE clauses");
@@ -327,13 +374,16 @@ pub fn transformCreateStmt<'mcx>(
     if stmt.ofTypename.is_some() {
         unported("typed tables (OF type)");
     }
-    if !stmt.constraints.is_nil() || !stmt.nnconstraints.is_nil() {
-        unported("table constraints");
-    }
+    debug_assert!(stmt.constraints.is_nil() && stmt.nnconstraints.is_nil());
 
-    let relname = stmt.relation.expect("CreateStmt.relation").relname.unwrap_or("");
+    let relation = stmt.relation.expect("CreateStmt.relation");
+    let relname = relation.relname.unwrap_or("");
+    let mut columns = NodeList::nil();
     let mut ckconstraints = NodeList::nil();
     let mut nnconstraints = NodeList::nil();
+    let mut ixconstraints = NodeList::nil();
+    let mut fkconstraints = NodeList::nil();
+    let mut alist = NodeList::nil();
     for elt in stmt.tableElts.iter() {
         match elt.node_tag() {
             NodeTag::T_ColumnDef => {
@@ -345,12 +395,83 @@ pub fn transformCreateStmt<'mcx>(
                     relname,
                     &mut ckconstraints,
                     &mut nnconstraints,
+                    &mut ixconstraints,
+                    &mut fkconstraints,
                 )?;
+                columns.lappend(mcx, elt)?;
             }
             NodeTag::T_TableLikeClause => unported("LIKE clauses"),
-            NodeTag::T_Constraint => unported("table constraints"),
+            NodeTag::T_Constraint => {
+                let c = elt.as_variant::<Constraint>().expect("Constraint");
+                match c.contype {
+                    ConstrType::CONSTR_PRIMARY | ConstrType::CONSTR_UNIQUE => {
+                        ixconstraints.lappend(mcx, elt)?
+                    }
+                    ConstrType::CONSTR_CHECK => ckconstraints.lappend(mcx, elt)?,
+                    ConstrType::CONSTR_NOTNULL => nnconstraints.lappend(mcx, elt)?,
+                    ConstrType::CONSTR_FOREIGN => fkconstraints.lappend(mcx, elt)?,
+                    other => unported(&format!("transformTableConstraint {other:?} arm")),
+                }
+            }
             other => panic!("unrecognized node type in tableElts: {other:?}"),
         }
+    }
+
+    // Table-level NOT NULL propagation (C parse_utilcmd.c:310-333).
+    for nn in nnconstraints.iter() {
+        let nnc = nn.as_variant::<Constraint>().expect("Constraint");
+        let colname = nnc.keys.nth(0).as_string().expect("not-null keys").sval;
+        for cn in columns.iter() {
+            let cd = cn.as_variant::<ColumnDef>().expect("ColumnDef");
+            if cd.colname != Some(colname) {
+                continue;
+            }
+            if !cd.is_not_null {
+                // SAFETY: parse tree is analyze-owned; no derived refs.
+                unsafe {
+                    cn.with_mut::<ColumnDef, _>(|c| c.is_not_null = true).expect("ColumnDef");
+                }
+            }
+            break;
+        }
+    }
+
+    transform_index_constraints(
+        mcx,
+        relname,
+        relation,
+        &columns,
+        &mut nnconstraints,
+        &ixconstraints,
+        &mut alist,
+    )?;
+
+    // transformFKConstraints(skipValidation=true, isAddConstraint=false).
+    if !fkconstraints.is_nil() {
+        for cnode in fkconstraints.iter() {
+            // SAFETY: parse tree is analyze-owned; no derived refs live.
+            unsafe {
+                cnode
+                    .with_mut::<Constraint, _>(|c| {
+                        c.skip_validation = true;
+                        c.initially_valid = c.is_enforced;
+                    })
+                    .expect("Constraint");
+            }
+        }
+        use types_nodes::parsenodes::{AlterTableCmd, AlterTableStmt, AlterTableType, ObjectType};
+        let mut cmds = NodeList::nil();
+        for cnode in fkconstraints.iter() {
+            let mut cmd = Node::build::<AlterTableCmd>(mcx)?;
+            cmd.subtype = AlterTableType::AT_AddConstraint;
+            cmd.def = Some(cnode);
+            cmds.lappend(mcx, cmd.seal())?;
+        }
+        let mut alterstmt = Node::build::<AlterTableStmt>(mcx)?;
+        alterstmt.relation = Some(relation);
+        alterstmt.cmds = cmds;
+        alterstmt.objtype = ObjectType::OBJECT_TABLE;
+        alist.lappend(mcx, alterstmt.seal())?;
     }
 
     // transformCheckConstraints(skipValidation=true): new plain table.
@@ -369,13 +490,199 @@ pub fn transformCreateStmt<'mcx>(
     unsafe {
         stmt_node
             .with_mut::<CreateStmt, _>(|s| {
+                s.tableElts = columns;
                 s.constraints = ckconstraints;
                 s.nnconstraints = nnconstraints;
             })
             .expect("CreateStmt");
     }
 
-    NodeList::make1(mcx, stmt_node)
+    let mut result = NodeList::make1(mcx, stmt_node)?;
+    for a in alist.iter() {
+        result.lappend(mcx, a)?;
+    }
+    Ok(result)
+}
+
+fn make_not_null_constraint<'mcx>(mcx: Mcx<'mcx>, colname: &'mcx str) -> PgResult<Node<'mcx>> {
+    let mut n = Node::build::<Constraint>(mcx)?;
+    n.contype = ConstrType::CONSTR_NOTNULL;
+    n.keys = NodeList::make1(mcx, Node::mk_string(mcx, colname)?)?;
+    n.is_enforced = true;
+    n.skip_validation = false;
+    n.initially_valid = true;
+    n.location = -1;
+    Ok(n.seal())
+}
+
+// transformIndexConstraints + transformIndexConstraint (CREATE TABLE lane;
+// isalter/EXCLUSION/USING INDEX are loud).
+fn transform_index_constraints<'mcx>(
+    mcx: Mcx<'mcx>,
+    relname: &str,
+    relation: &'mcx types_nodes::RangeVar<'mcx>,
+    columns: &NodeList<'mcx>,
+    nnconstraints: &mut NodeList<'mcx>,
+    ixconstraints: &NodeList<'mcx>,
+    alist: &mut NodeList<'mcx>,
+) -> PgResult<()> {
+    let mut indexlist = NodeList::nil();
+    let mut pkey: Option<Node<'mcx>> = None;
+    for cnode in ixconstraints.iter() {
+        let constraint = cnode.as_variant::<Constraint>().expect("Constraint");
+        debug_assert!(matches!(
+            constraint.contype,
+            ConstrType::CONSTR_PRIMARY | ConstrType::CONSTR_UNIQUE
+        ));
+        if constraint.indexname.is_some() {
+            unported("transformIndexConstraint: USING INDEX (ExistingIndex)");
+        }
+        if constraint.deferrable || constraint.initdeferred {
+            unported("transformIndexConstraint: DEFERRABLE constraint indexes");
+        }
+
+        let mut index = Node::build::<IndexStmt>(mcx)?;
+        index.unique = true;
+        index.primary = constraint.contype == ConstrType::CONSTR_PRIMARY;
+        if index.primary {
+            if pkey.is_some() {
+                return Err(multiple_pkeys(relname, constraint.location));
+            }
+        }
+        index.nulls_not_distinct = constraint.nulls_not_distinct;
+        index.isconstraint = true;
+        index.idxname = constraint.conname;
+        index.relation = Some(relation);
+        index.accessMethod = Some("btree");
+        // SAFETY: parse tree is analyze-owned; the constraint node's options
+        // list moves onto the IndexStmt (C shares the pointer).
+        index.options =
+            unsafe { cnode.with_mut::<Constraint, _>(|c| core::mem::take(&mut c.options)) }
+                .expect("Constraint");
+        index.tableSpace = constraint.indexspace;
+        if !constraint.including.is_nil() {
+            unported("transformIndexConstraint: INCLUDE columns");
+        }
+
+        let is_primary = index.primary;
+        let mut index_params = NodeList::nil();
+        for keynode in constraint.keys.iter() {
+            let key = keynode.as_string().expect("constraint keys").sval;
+            let mut found = false;
+            for cn in columns.iter() {
+                let cd = cn.as_variant::<ColumnDef>().expect("ColumnDef");
+                if cd.colname != Some(key) {
+                    continue;
+                }
+                found = true;
+                if is_primary {
+                    if cd.is_not_null {
+                        for nn in nnconstraints.iter() {
+                            let nnc = nn.as_variant::<Constraint>().expect("Constraint");
+                            if nnc.keys.nth(0).as_string().expect("nn keys").sval == key {
+                                if nnc.is_no_inherit {
+                                    return Err(conflicting_no_inherit(key));
+                                }
+                                break;
+                            }
+                        }
+                    } else {
+                        // SAFETY: parse tree is analyze-owned; no derived refs.
+                        unsafe {
+                            cn.with_mut::<ColumnDef, _>(|c| c.is_not_null = true)
+                                .expect("ColumnDef");
+                        }
+                        nnconstraints.lappend(mcx, make_not_null_constraint(mcx, key)?)?;
+                    }
+                }
+                break;
+            }
+            if !found {
+                return Err(key_column_missing(key, constraint.location));
+            }
+            for ip in index_params.iter() {
+                let iparam = ip.as_variant::<IndexElem>().expect("IndexElem");
+                if iparam.name == Some(key) {
+                    return Err(duplicate_key_column(key, is_primary, constraint.location));
+                }
+            }
+            let mut iparam = Node::build::<IndexElem>(mcx)?;
+            iparam.name = Some(key);
+            iparam.ordering = SortByDir::SORTBY_DEFAULT;
+            iparam.nulls_ordering = SortByNulls::SORTBY_NULLS_DEFAULT;
+            index_params.lappend(mcx, iparam.seal())?;
+        }
+        let index_node = {
+            index.indexParams = index_params;
+            index.seal()
+        };
+        if is_primary {
+            pkey = Some(index_node);
+        }
+        indexlist.lappend(mcx, index_node)?;
+    }
+
+    // Redundant-specification dedup (e.g. UNIQUE + PRIMARY KEY on one column).
+    let mut finalindexlist = NodeList::nil();
+    if let Some(pk) = pkey {
+        finalindexlist.lappend(mcx, pk)?;
+    }
+    for inode in indexlist.iter() {
+        if let Some(pk) = pkey {
+            if inode.as_raw() == pk.as_raw() {
+                continue;
+            }
+        }
+        let index = inode.as_variant::<IndexStmt>().expect("IndexStmt");
+        let mut keep = true;
+        for pnode in finalindexlist.iter() {
+            let prior = pnode.as_variant::<IndexStmt>().expect("IndexStmt");
+            if index_params_equal(&index.indexParams, &prior.indexParams)
+                && index.nulls_not_distinct == prior.nulls_not_distinct
+                && index.deferrable == prior.deferrable
+                && index.initdeferred == prior.initdeferred
+            {
+                let idxname = index.idxname;
+                // SAFETY: parse tree is analyze-owned; no derived refs.
+                unsafe {
+                    pnode
+                        .with_mut::<IndexStmt, _>(|p| {
+                            p.unique |= index.unique;
+                            if p.idxname.is_none() {
+                                p.idxname = idxname;
+                            }
+                        })
+                        .expect("IndexStmt");
+                }
+                keep = false;
+                break;
+            }
+        }
+        if keep {
+            finalindexlist.lappend(mcx, inode)?;
+        }
+    }
+    for inode in finalindexlist.iter() {
+        alist.lappend(mcx, inode)?;
+    }
+    Ok(())
+}
+
+fn index_params_equal(a: &NodeList<'_>, b: &NodeList<'_>) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    for (x, y) in a.iter().zip(b.iter()) {
+        let xe = x.as_variant::<IndexElem>().expect("IndexElem");
+        let ye = y.as_variant::<IndexElem>().expect("IndexElem");
+        if xe.name != ye.name
+            || xe.ordering != ye.ordering
+            || xe.nulls_ordering != ye.nulls_ordering
+        {
+            return false;
+        }
+    }
+    true
 }
 
 // transformAlterTableStmt's per-subcommand slice (ATParseTransformCmd's
@@ -396,6 +703,8 @@ pub fn transformAlterTableCmd<'mcx>(
         AlterTableType::AT_AddColumn => {
             let defnode = cmd.def.expect("AT_AddColumn ColumnDef");
             let cd = defnode.as_variant::<ColumnDef>().expect("ColumnDef");
+            let mut ixconstraints = NodeList::nil();
+            let mut fkconstraints = NodeList::nil();
             transformColumnDefinition(
                 mcx,
                 defnode,
@@ -403,7 +712,12 @@ pub fn transformAlterTableCmd<'mcx>(
                 relname,
                 &mut ckconstraints,
                 &mut nnconstraints,
+                &mut ixconstraints,
+                &mut fkconstraints,
             )?;
+            if !ixconstraints.is_nil() || !fkconstraints.is_nil() {
+                unported("ALTER TABLE ADD COLUMN with PRIMARY KEY/UNIQUE/REFERENCES");
+            }
             // SAFETY: parse tree is analyze-owned; no derived refs live.
             unsafe {
                 defnode
@@ -418,6 +732,73 @@ pub fn transformAlterTableCmd<'mcx>(
         unported("ALTER TABLE ADD COLUMN with CHECK/NOT NULL (AT_AddConstraint lane)");
     }
     Ok(())
+}
+
+#[cold]
+#[inline(never)]
+fn conflicting_null_decls(colname: &str, relname: &str) -> Box<PgError> {
+    Box::new(
+        PgError::new(
+            ERROR,
+            format!(
+                "conflicting NULL/NOT NULL declarations for column \"{colname}\" of \
+                 table \"{relname}\""
+            ),
+        )
+        .with_sqlstate(ERRCODE_SYNTAX_ERROR),
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn multiple_pkeys(relname: &str, _location: i32) -> Box<PgError> {
+    Box::new(
+        PgError::new(
+            ERROR,
+            format!("multiple primary keys for table \"{relname}\" are not allowed"),
+        )
+        .with_sqlstate(types_error::ERRCODE_INVALID_TABLE_DEFINITION),
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn conflicting_no_inherit(colname: &str) -> Box<PgError> {
+    Box::new(
+        PgError::new(
+            ERROR,
+            format!(
+                "conflicting NO INHERIT declaration for not-null constraint on column \
+                 \"{colname}\""
+            ),
+        )
+        .with_sqlstate(ERRCODE_SYNTAX_ERROR),
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn key_column_missing(colname: &str, _location: i32) -> Box<PgError> {
+    Box::new(
+        PgError::new(
+            ERROR,
+            format!("column \"{colname}\" named in key does not exist"),
+        )
+        .with_sqlstate(types_error::ERRCODE_UNDEFINED_COLUMN),
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn duplicate_key_column(colname: &str, primary: bool, _location: i32) -> Box<PgError> {
+    let what = if primary { "primary key" } else { "unique" };
+    Box::new(
+        PgError::new(
+            ERROR,
+            format!("column \"{colname}\" appears twice in {what} constraint"),
+        )
+        .with_sqlstate(types_error::ERRCODE_DUPLICATE_COLUMN),
+    )
 }
 
 #[cold]

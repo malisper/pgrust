@@ -56,6 +56,12 @@ pub struct RelationData<'mcx> {
     // C rd_indexlist family (rule-5 cache): None == !rd_indexvalid, inval clears it;
     // 'static (CacheMemoryContext copy, as C's) keeps RelationData covariant in 'mcx.
     pub rd_indexlist: RefCell<Option<RdIndexList>>,
+    // C rd_trigdesc (rule-5 cache): Rc replaces C's CopyTriggerDesc per-query
+    // deep copy; inval drops the entry's Rc, executors keep theirs.
+    pub rd_trigdesc: RefCell<Option<Rc<types_trigger::TriggerDesc<'static>>>>,
+    // pg_class.relhastriggers, threaded beside the trimmed rd_rel form
+    // (ScannedPgClass.relchecks precedent).
+    pub rd_hastriggers: bool,
 }
 
 #[derive(Debug)]
@@ -316,6 +322,8 @@ mod tests {
             rd_amcache_hash: Default::default(),
             rd_supportinfo: Default::default(),
             rd_indexlist: Default::default(),
+            rd_trigdesc: Default::default(),
+            rd_hastriggers: false,
         }
     }
 

@@ -1,0 +1,854 @@
+// ri_triggers.c, MATCH SIMPLE NO ACTION/RESTRICT lane: RI_FKey_check
+// (check_ins/check_upd), ri_restrict (noaction/restrict del/upd),
+// ri_Check_Pk_Match, the constraint-info and prepared-plan caches, and the
+// upd_check_required skip tests. LOUD: cascade/setnull/setdefault, MATCH
+// FULL/PARTIAL, PERIOD, serializable crosscheck snapshots, cross-type
+// comparison casts. Divergences: constraint-info cache has no syscache
+// invalidation callback (constraint rows are immutable in the ported DDL
+// surface; DROP removes the triggers that key into it), and the violation
+// DETAIL permission check is the superuser fast path.
+#![allow(non_snake_case, non_upper_case_globals)]
+
+use core::cell::RefCell;
+use datum::Datum;
+use mcx::{Mcx, MemoryContext, PgHashMap, PgString, PgVec};
+use ri_triggers_seams::RiTriggerData;
+use types_core::{InvalidOid, Oid, INDEX_MAX_KEYS};
+use types_tuple::NameData;
+use types_error::{
+    PgError, PgResult, ERRCODE_FOREIGN_KEY_VIOLATION, ERRCODE_RESTRICT_VIOLATION, ERROR,
+};
+use types_rel::{Relation, RowShareLock, RELKIND_PARTITIONED_TABLE};
+use types_trigger::{Trigger, TRIGGER_FIRED_BY_UPDATE};
+use types_tuple::HeapTupleData;
+
+const RI_MAX_NUMKEYS: usize = INDEX_MAX_KEYS as usize;
+const RI_PLAN_CHECK_LOOKUPPK: i32 = 1;
+const RI_PLAN_CHECK_LOOKUPPK_FROM_PK: i32 = 2;
+const RI_PLAN_LAST_ON_PK: i32 = RI_PLAN_CHECK_LOOKUPPK_FROM_PK;
+const RI_PLAN_NO_ACTION: i32 = 3;
+const RI_PLAN_RESTRICT: i32 = 4;
+
+const RI_KEYS_ALL_NULL: i32 = 0;
+const RI_KEYS_SOME_NULL: i32 = 1;
+const RI_KEYS_NONE_NULL: i32 = 2;
+
+const F_RI_FKEY_CHECK_INS: Oid = 1644;
+const F_RI_FKEY_CHECK_UPD: Oid = 1645;
+const F_RI_FKEY_RESTRICT_DEL: Oid = 1648;
+const F_RI_FKEY_RESTRICT_UPD: Oid = 1649;
+const F_RI_FKEY_NOACTION_DEL: Oid = 1654;
+const F_RI_FKEY_NOACTION_UPD: Oid = 1655;
+
+const FKCONSTR_MATCH_FULL: i8 = b'f' as i8;
+const FKCONSTR_MATCH_PARTIAL: i8 = b'p' as i8;
+const FKCONSTR_MATCH_SIMPLE: i8 = b's' as i8;
+
+const CONSTRAINT_FOREIGN: i8 = b'f' as i8;
+
+#[derive(Clone)]
+struct RiConstraintInfo {
+    constraint_id: Oid,
+    conname: NameData,
+    pk_relid: Oid,
+    fk_relid: Oid,
+    confmatchtype: i8,
+    nkeys: usize,
+    fk_attnums: [i16; RI_MAX_NUMKEYS],
+    pk_attnums: [i16; RI_MAX_NUMKEYS],
+    pf_eq_oprs: [Oid; RI_MAX_NUMKEYS],
+    pp_eq_oprs: [Oid; RI_MAX_NUMKEYS],
+    ff_eq_oprs: [Oid; RI_MAX_NUMKEYS],
+}
+
+fn cache_mcx() -> &'static MemoryContext {
+    thread_local! {
+        static CTX: &'static MemoryContext =
+            Box::leak(Box::new(MemoryContext::new("RI cache context")));
+    }
+    CTX.with(|c| *c)
+}
+
+thread_local! {
+    static RI_CONSTRAINT_CACHE: RefCell<Option<PgHashMap<'static, Oid, RiConstraintInfo>>> =
+        const { RefCell::new(None) };
+    static RI_QUERY_CACHE: RefCell<Option<PgHashMap<'static, (Oid, i32), spi::SpiPlanPtr>>> =
+        const { RefCell::new(None) };
+}
+
+#[cold]
+#[inline(never)]
+fn unported(what: &str) -> ! {
+    panic!("unported: ri_triggers {what}")
+}
+
+pub fn init_seams() {
+    ri_triggers_seams::ri_fkey_trigger::set(ri_fkey_trigger);
+    ri_triggers_seams::ri_fkey_fk_upd_check_required::set(RI_FKey_fk_upd_check_required);
+    ri_triggers_seams::ri_fkey_pk_upd_check_required::set(RI_FKey_pk_upd_check_required);
+}
+
+fn ri_fkey_trigger<'mcx>(
+    mcx: Mcx<'mcx>,
+    tgfoid: Oid,
+    tgdata: &RiTriggerData<'_, 'mcx>,
+) -> PgResult<()> {
+    match tgfoid {
+        F_RI_FKEY_CHECK_INS | F_RI_FKEY_CHECK_UPD => RI_FKey_check(mcx, tgdata),
+        F_RI_FKEY_NOACTION_DEL | F_RI_FKEY_NOACTION_UPD => ri_restrict(mcx, tgdata, true),
+        F_RI_FKEY_RESTRICT_DEL | F_RI_FKEY_RESTRICT_UPD => ri_restrict(mcx, tgdata, false),
+        other => unported(&format!("RI trigger function {other} (cascade/setnull/setdefault)")),
+    }
+}
+
+// RI_FKey_check (ri_triggers.c).
+fn RI_FKey_check<'mcx>(mcx: Mcx<'mcx>, tgdata: &RiTriggerData<'_, 'mcx>) -> PgResult<()> {
+    let riinfo = ri_FetchConstraintInfo(tgdata.tg_trigger, tgdata.tg_relation, false)?;
+
+    let newtup = if TRIGGER_FIRED_BY_UPDATE(tgdata.tg_event) {
+        tgdata.tg_newtuple.expect("UPDATE check without new tuple")
+    } else {
+        tgdata.tg_trigtuple
+    };
+
+    // C re-tests liveness under SnapshotSelf before checking (the row may
+    // have been updated/deleted later in the same statement or transaction).
+    if !tuple_satisfies_self(tgdata.tg_relation, newtup)? {
+        return Ok(());
+    }
+
+    let fk_rel = tgdata.tg_relation;
+    let pk_rel = table::table_open(mcx, riinfo.pk_relid, RowShareLock)?;
+
+    match ri_NullCheck(fk_rel, newtup, &riinfo, false) {
+        RI_KEYS_ALL_NULL => {
+            return pk_rel.close(RowShareLock);
+        }
+        RI_KEYS_SOME_NULL => match riinfo.confmatchtype {
+            FKCONSTR_MATCH_FULL => unported("MATCH FULL null-mixing violation"),
+            _ => {
+                debug_assert_eq!(riinfo.confmatchtype, FKCONSTR_MATCH_SIMPLE);
+                return pk_rel.close(RowShareLock);
+            }
+        },
+        _ => {}
+    }
+
+    spi::SPI_connect()?;
+
+    let qkey = (riinfo.constraint_id, RI_PLAN_CHECK_LOOKUPPK);
+    let qplan = match ri_FetchPreparedPlan(&qkey) {
+        Some(p) => p,
+        None => {
+            let mut querybuf = PgString::new_in(mcx);
+            let mut queryoids = [InvalidOid; RI_MAX_NUMKEYS];
+            debug_assert!(pk_rel.rd_rel.relkind != RELKIND_PARTITIONED_TABLE);
+            use core::fmt::Write;
+            write!(querybuf, "SELECT 1 FROM ONLY {} x", quote_relation_name(mcx, &pk_rel)?)
+                .expect("PgString write");
+            let mut querysep = "WHERE";
+            for i in 0..riinfo.nkeys {
+                let pk_type = att_type(&pk_rel, riinfo.pk_attnums[i]);
+                let fk_type = att_type(fk_rel, riinfo.fk_attnums[i]);
+                let attname = quote_one_name(att_name(&pk_rel, riinfo.pk_attnums[i]));
+                let paramname = format!("${}", i + 1);
+                ri_GenerateQual(
+                    &mut querybuf,
+                    querysep,
+                    &attname,
+                    pk_type,
+                    riinfo.pf_eq_oprs[i],
+                    &paramname,
+                    fk_type,
+                )?;
+                querysep = "AND";
+                queryoids[i] = fk_type;
+            }
+            querybuf.try_push_str(" FOR KEY SHARE OF x")?;
+            ri_PlanCheck(querybuf.as_str(), &queryoids[..riinfo.nkeys], &qkey)?
+        }
+    };
+
+    ri_PerformCheck(mcx, &riinfo, &qkey, qplan, fk_rel, &pk_rel, None, Some(newtup))?;
+
+    spi::SPI_finish()?;
+    pk_rel.close(RowShareLock)?;
+    Ok(())
+}
+
+// ri_restrict (ri_triggers.c): shared by NO ACTION and RESTRICT del/upd.
+fn ri_restrict<'mcx>(
+    mcx: Mcx<'mcx>,
+    tgdata: &RiTriggerData<'_, 'mcx>,
+    is_no_action: bool,
+) -> PgResult<()> {
+    let riinfo = ri_FetchConstraintInfo(tgdata.tg_trigger, tgdata.tg_relation, true)?;
+
+    let fk_rel = table::table_open(mcx, riinfo.fk_relid, RowShareLock)?;
+    let pk_rel = tgdata.tg_relation;
+    let oldtup = tgdata.tg_trigtuple;
+
+    if is_no_action && ri_Check_Pk_Match(mcx, pk_rel, &fk_rel, oldtup, &riinfo)? {
+        return fk_rel.close(RowShareLock);
+    }
+
+    spi::SPI_connect()?;
+
+    let queryno = if is_no_action { RI_PLAN_NO_ACTION } else { RI_PLAN_RESTRICT };
+    let qkey = (riinfo.constraint_id, queryno);
+    let qplan = match ri_FetchPreparedPlan(&qkey) {
+        Some(p) => p,
+        None => {
+            let mut querybuf = PgString::new_in(mcx);
+            let mut queryoids = [InvalidOid; RI_MAX_NUMKEYS];
+            debug_assert!(fk_rel.rd_rel.relkind != RELKIND_PARTITIONED_TABLE);
+            use core::fmt::Write;
+            write!(querybuf, "SELECT 1 FROM ONLY {} x", quote_relation_name(mcx, &fk_rel)?)
+                .expect("PgString write");
+            let mut querysep = "WHERE";
+            for i in 0..riinfo.nkeys {
+                let pk_type = att_type(pk_rel, riinfo.pk_attnums[i]);
+                let fk_type = att_type(&fk_rel, riinfo.fk_attnums[i]);
+                let attname = quote_one_name(att_name(&fk_rel, riinfo.fk_attnums[i]));
+                let paramname = format!("${}", i + 1);
+                ri_GenerateQual(
+                    &mut querybuf,
+                    querysep,
+                    &paramname,
+                    pk_type,
+                    riinfo.pf_eq_oprs[i],
+                    &attname,
+                    fk_type,
+                )?;
+                querysep = "AND";
+                queryoids[i] = pk_type;
+            }
+            querybuf.try_push_str(" FOR KEY SHARE OF x")?;
+            ri_PlanCheck(querybuf.as_str(), &queryoids[..riinfo.nkeys], &qkey)?
+        }
+    };
+
+    ri_PerformCheck(mcx, &riinfo, &qkey, qplan, &fk_rel, pk_rel, Some(oldtup), None)?;
+
+    spi::SPI_finish()?;
+    fk_rel.close(RowShareLock)?;
+    Ok(())
+}
+
+// ri_Check_Pk_Match (ri_triggers.c): true if a replacement PK row exists.
+fn ri_Check_Pk_Match<'mcx>(
+    mcx: Mcx<'mcx>,
+    pk_rel: &Relation<'mcx>,
+    fk_rel: &Relation<'mcx>,
+    oldtup: &HeapTupleData<'_>,
+    riinfo: &RiConstraintInfo,
+) -> PgResult<bool> {
+    debug_assert_eq!(ri_NullCheck(pk_rel, oldtup, riinfo, true), RI_KEYS_NONE_NULL);
+
+    spi::SPI_connect()?;
+
+    let qkey = (riinfo.constraint_id, RI_PLAN_CHECK_LOOKUPPK_FROM_PK);
+    let qplan = match ri_FetchPreparedPlan(&qkey) {
+        Some(p) => p,
+        None => {
+            let mut querybuf = PgString::new_in(mcx);
+            let mut queryoids = [InvalidOid; RI_MAX_NUMKEYS];
+            use core::fmt::Write;
+            write!(querybuf, "SELECT 1 FROM ONLY {} x", quote_relation_name(mcx, pk_rel)?)
+                .expect("PgString write");
+            let mut querysep = "WHERE";
+            for i in 0..riinfo.nkeys {
+                let pk_type = att_type(pk_rel, riinfo.pk_attnums[i]);
+                let attname = quote_one_name(att_name(pk_rel, riinfo.pk_attnums[i]));
+                let paramname = format!("${}", i + 1);
+                ri_GenerateQual(
+                    &mut querybuf,
+                    querysep,
+                    &attname,
+                    pk_type,
+                    riinfo.pp_eq_oprs[i],
+                    &paramname,
+                    pk_type,
+                )?;
+                querysep = "AND";
+                queryoids[i] = pk_type;
+            }
+            querybuf.try_push_str(" FOR KEY SHARE OF x")?;
+            ri_PlanCheck(querybuf.as_str(), &queryoids[..riinfo.nkeys], &qkey)?
+        }
+    };
+
+    let found =
+        ri_PerformCheck(mcx, riinfo, &qkey, qplan, fk_rel, pk_rel, Some(oldtup), None)?;
+
+    spi::SPI_finish()?;
+    let _ = fk_rel;
+    Ok(found)
+}
+
+// RI_FKey_pk_upd_check_required (ri_triggers.c).
+fn RI_FKey_pk_upd_check_required<'mcx>(
+    _mcx: Mcx<'mcx>,
+    trigger: &Trigger<'mcx>,
+    pk_rel: &Relation<'mcx>,
+    old_tup: &HeapTupleData<'_>,
+    new_tup: &HeapTupleData<'_>,
+) -> PgResult<bool> {
+    let riinfo = ri_FetchConstraintInfo(trigger, pk_rel, true)?;
+    if ri_NullCheck(pk_rel, old_tup, &riinfo, true) != RI_KEYS_NONE_NULL {
+        return Ok(false);
+    }
+    if ri_KeysEqual(pk_rel, old_tup, new_tup, &riinfo, true)? {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+// RI_FKey_fk_upd_check_required (ri_triggers.c).
+fn RI_FKey_fk_upd_check_required<'mcx>(
+    _mcx: Mcx<'mcx>,
+    trigger: &Trigger<'mcx>,
+    fk_rel: &Relation<'mcx>,
+    old_tup: &HeapTupleData<'_>,
+    new_tup: &HeapTupleData<'_>,
+) -> PgResult<bool> {
+    let riinfo = ri_FetchConstraintInfo(trigger, fk_rel, false)?;
+    match ri_NullCheck(fk_rel, new_tup, &riinfo, false) {
+        RI_KEYS_ALL_NULL => return Ok(false),
+        RI_KEYS_SOME_NULL => match riinfo.confmatchtype {
+            FKCONSTR_MATCH_SIMPLE => return Ok(false),
+            FKCONSTR_MATCH_FULL => return Ok(true),
+            _ => {}
+        },
+        _ => {}
+    }
+    // C: if the old row was inserted by our own transaction, fire anyway
+    // (the UPDATE invalidates the INSERT's pending check).
+    if xact_seams::transaction_id_is_current_transaction_id::call(old_tup.t_data().xmin()) {
+        return Ok(true);
+    }
+    if ri_KeysEqual(fk_rel, old_tup, new_tup, &riinfo, false)? {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+fn ri_FetchConstraintInfo<'mcx>(
+    trigger: &Trigger<'mcx>,
+    trig_rel: &Relation<'mcx>,
+    rel_is_pk: bool,
+) -> PgResult<RiConstraintInfo> {
+    let constraint_oid = trigger.tgconstraint;
+    assert!(
+        constraint_oid != InvalidOid,
+        "no pg_constraint entry for trigger \"{}\" on table \"{}\"",
+        trigger.tgname.as_str(),
+        trig_rel.name()
+    );
+    let riinfo = ri_LoadConstraintInfo(constraint_oid)?;
+    if rel_is_pk {
+        assert!(
+            riinfo.fk_relid == trigger.tgconstrrelid && riinfo.pk_relid == trig_rel.rd_id,
+            "wrong pg_constraint entry for trigger \"{}\"",
+            trigger.tgname.as_str()
+        );
+    } else {
+        assert!(
+            riinfo.fk_relid == trig_rel.rd_id && riinfo.pk_relid == trigger.tgconstrrelid,
+            "wrong pg_constraint entry for trigger \"{}\"",
+            trigger.tgname.as_str()
+        );
+    }
+    if riinfo.confmatchtype == FKCONSTR_MATCH_PARTIAL {
+        unported("MATCH PARTIAL");
+    }
+    if riinfo.confmatchtype == FKCONSTR_MATCH_FULL {
+        unported("MATCH FULL");
+    }
+    Ok(riinfo)
+}
+
+fn ri_LoadConstraintInfo(constraint_oid: Oid) -> PgResult<RiConstraintInfo> {
+    if let Some(hit) = RI_CONSTRAINT_CACHE.with(|c| {
+        c.borrow().as_ref().and_then(|m| m.get(&constraint_oid).cloned())
+    }) {
+        return Ok(hit);
+    }
+
+    use cache_syscache::{SysCacheGetAttr, SearchSysCache1, SysCacheKey, CONSTROID};
+    const Anum_conname: i32 = 2;
+    const Anum_contype: i32 = 4;
+    const Anum_conrelid: i32 = 9;
+    const Anum_conparentid: i32 = 12;
+    const Anum_confrelid: i32 = 13;
+    const Anum_confmatchtype: i32 = 16;
+    const Anum_conkey: i32 = 21;
+    const Anum_confkey: i32 = 22;
+    const Anum_conpfeqop: i32 = 23;
+    const Anum_conppeqop: i32 = 24;
+    const Anum_conffeqop: i32 = 25;
+
+    let tup = SearchSysCache1(CONSTROID, SysCacheKey::Value(Datum::from_oid(constraint_oid)))?
+        .unwrap_or_else(|| panic!("cache lookup failed for constraint {constraint_oid}"));
+    let req = |attno: i32| -> PgResult<Datum> {
+        let (d, isnull) = SysCacheGetAttr(CONSTROID, &tup, attno)?;
+        assert!(!isnull, "unexpected null pg_constraint attr {attno}");
+        Ok(d)
+    };
+    assert!(
+        req(Anum_contype)?.as_i8() == CONSTRAINT_FOREIGN,
+        "constraint {constraint_oid} is not a foreign key constraint"
+    );
+    if req(Anum_conparentid)?.as_oid() != InvalidOid {
+        unported("partitioned FK constraint root walk");
+    }
+
+    let mut info = RiConstraintInfo {
+        constraint_id: constraint_oid,
+        // SAFETY: conname is a by-ref NAME column of the held syscache tuple.
+        conname: unsafe { *(req(Anum_conname)?.as_usize() as *const NameData) },
+        pk_relid: req(Anum_confrelid)?.as_oid(),
+        fk_relid: req(Anum_conrelid)?.as_oid(),
+        confmatchtype: req(Anum_confmatchtype)?.as_i8(),
+        nkeys: 0,
+        fk_attnums: [0; RI_MAX_NUMKEYS],
+        pk_attnums: [0; RI_MAX_NUMKEYS],
+        pf_eq_oprs: [InvalidOid; RI_MAX_NUMKEYS],
+        pp_eq_oprs: [InvalidOid; RI_MAX_NUMKEYS],
+        ff_eq_oprs: [InvalidOid; RI_MAX_NUMKEYS],
+    };
+
+    // DeconstructFkConstraintRow (pg_constraint.c): 1-D no-null int2[]/oid[].
+    let scratch = mcx::MemoryContext::new("ri-load-scratch");
+    {
+        let smcx = scratch.mcx();
+        let unpack = |d: Datum| -> PgResult<PgVec<'_, u8>> {
+            // DatumGetArrayTypeP: the on-disk image may carry a 1-byte
+            // header; rebuild the 4-byte form (relcache_build precedent).
+            // SAFETY: not-null array datum of the held syscache tuple.
+            let img = unsafe { array_image_bytes(d) };
+            let payload = varlena::open_image(smcx, img)?;
+            let body = payload.as_bytes();
+            let total = body.len() + 4;
+            let mut full: PgVec<'_, u8> = mcx::vec_with_capacity_in(smcx, total)?;
+            mcx::vec_append_bytes(&mut full, &((total as u32) << 2).to_ne_bytes())?;
+            mcx::vec_append_bytes(&mut full, body)?;
+            Ok(full)
+        };
+        let i16_arr = |d: Datum, out: &mut [i16; RI_MAX_NUMKEYS]| -> PgResult<usize> {
+            let full = unpack(d)?;
+            let vals = datum::array_build::deconstruct_array_image(smcx, &full, 2, true, b's')?;
+            for (i, v) in vals.iter().enumerate() {
+                out[i] = v.as_i16();
+            }
+            Ok(vals.len())
+        };
+        let oid_arr = |d: Datum, out: &mut [Oid; RI_MAX_NUMKEYS]| -> PgResult<usize> {
+            let full = unpack(d)?;
+            let vals = datum::array_build::deconstruct_array_image(smcx, &full, 4, true, b'i')?;
+            for (i, v) in vals.iter().enumerate() {
+                out[i] = v.as_oid();
+            }
+            Ok(vals.len())
+        };
+        let n = i16_arr(req(Anum_conkey)?, &mut info.fk_attnums)?;
+        let n2 = i16_arr(req(Anum_confkey)?, &mut info.pk_attnums)?;
+        let n3 = oid_arr(req(Anum_conpfeqop)?, &mut info.pf_eq_oprs)?;
+        let n4 = oid_arr(req(Anum_conppeqop)?, &mut info.pp_eq_oprs)?;
+        let n5 = oid_arr(req(Anum_conffeqop)?, &mut info.ff_eq_oprs)?;
+        assert!(n == n2 && n == n3 && n == n4 && n == n5, "foreign key array length mismatch");
+        info.nkeys = n;
+    }
+
+    RI_CONSTRAINT_CACHE.with(|c| {
+        let mut b = c.borrow_mut();
+        let m = b.get_or_insert_with(|| PgHashMap::new_in(cache_mcx().mcx()));
+        m.insert(constraint_oid, info.clone());
+    });
+    Ok(info)
+}
+
+// SAFETY contract: d is a not-null, untoasted array datum; returns its full
+// varlena image.
+unsafe fn array_image_bytes<'a>(d: Datum) -> &'a [u8] {
+    let p = d.as_usize() as *const u8;
+    // SAFETY: caller contract.
+    let len = unsafe { types_tuple::varatt::varsize_any(p) };
+    core::slice::from_raw_parts(p, len)
+}
+
+fn ri_FetchPreparedPlan(key: &(Oid, i32)) -> Option<spi::SpiPlanPtr> {
+    RI_QUERY_CACHE.with(|c| c.borrow().as_ref().and_then(|m| m.get(key).copied()))
+}
+
+// ri_PlanCheck (ri_triggers.c). The C owner-uid switch is the superuser fast
+// path repo-wide; plan validity re-checks ride the plancache.
+fn ri_PlanCheck(querystr: &str, argtypes: &[Oid], key: &(Oid, i32)) -> PgResult<spi::SpiPlanPtr> {
+    let qplan = spi::SPI_prepare(querystr, argtypes)?;
+    spi::SPI_keepplan(qplan);
+    RI_QUERY_CACHE.with(|c| {
+        let mut b = c.borrow_mut();
+        let m = b.get_or_insert_with(|| PgHashMap::new_in(cache_mcx().mcx()));
+        m.insert(*key, qplan);
+    });
+    Ok(qplan)
+}
+
+// ri_PerformCheck (ri_triggers.c). expect_OK is always SPI_OK_SELECT in the
+// ported lane (limit 1).
+#[allow(clippy::too_many_arguments)]
+fn ri_PerformCheck<'mcx>(
+    mcx: Mcx<'mcx>,
+    riinfo: &RiConstraintInfo,
+    qkey: &(Oid, i32),
+    qplan: spi::SpiPlanPtr,
+    fk_rel: &Relation<'mcx>,
+    pk_rel: &Relation<'mcx>,
+    oldtup: Option<&HeapTupleData<'_>>,
+    newtup: Option<&HeapTupleData<'_>>,
+) -> PgResult<bool> {
+    let (source_rel, source_is_pk) = if qkey.1 == RI_PLAN_CHECK_LOOKUPPK {
+        (fk_rel, false)
+    } else {
+        (pk_rel, true)
+    };
+
+    let mut vals = [Datum::null(); RI_MAX_NUMKEYS];
+    let mut nulls = [false; RI_MAX_NUMKEYS];
+    let src = newtup.or(oldtup).expect("RI check without a source tuple");
+    ri_ExtractValues(source_rel, src, riinfo, source_is_pk, &mut vals, &mut nulls);
+
+    if xact::IsolationUsesXactSnapshot() {
+        unported("crosscheck snapshots (REPEATABLE READ / SERIALIZABLE RI checks)");
+    }
+
+    let spi_result = spi::SPI_execute_snapshot(
+        qplan,
+        &vals[..riinfo.nkeys],
+        &nulls[..riinfo.nkeys],
+        None,
+        None,
+        false,
+        false,
+        1,
+    )?;
+
+    if spi_result != spi::SPI_OK_SELECT {
+        panic!(
+            "referential integrity query on \"{}\" from constraint \"{}\" on \"{}\" gave \
+             unexpected result",
+            pk_rel.name(),
+            conname_str(riinfo),
+            fk_rel.name()
+        );
+    }
+
+    let processed = spi::SPI_processed();
+    if qkey.1 != RI_PLAN_CHECK_LOOKUPPK_FROM_PK
+        && (processed == 0) == (qkey.1 == RI_PLAN_CHECK_LOOKUPPK)
+    {
+        return Err(ri_ReportViolation(
+            mcx,
+            riinfo,
+            pk_rel,
+            fk_rel,
+            src,
+            qkey.1,
+            qkey.1 == RI_PLAN_RESTRICT,
+        ));
+    }
+    Ok(processed != 0)
+}
+
+fn ri_ExtractValues(
+    rel: &Relation<'_>,
+    tup: &HeapTupleData<'_>,
+    riinfo: &RiConstraintInfo,
+    rel_is_pk: bool,
+    vals: &mut [Datum],
+    nulls: &mut [bool],
+) {
+    let attnums = if rel_is_pk { &riinfo.pk_attnums } else { &riinfo.fk_attnums };
+    for i in 0..riinfo.nkeys {
+        let mut isnull = false;
+        // SAFETY: attnums are live user columns of rel's descriptor.
+        vals[i] = unsafe { types_tuple::heap_getattr(tup, attnums[i] as i32, &rel.rd_att, &mut isnull) };
+        nulls[i] = isnull;
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn ri_ReportViolation<'mcx>(
+    mcx: Mcx<'mcx>,
+    riinfo: &RiConstraintInfo,
+    pk_rel: &Relation<'mcx>,
+    fk_rel: &Relation<'mcx>,
+    violator: &HeapTupleData<'_>,
+    queryno: i32,
+    is_restrict: bool,
+) -> Box<PgError> {
+    let onfk = queryno == RI_PLAN_CHECK_LOOKUPPK;
+    let (attnums, rel) = if onfk {
+        (&riinfo.fk_attnums, fk_rel)
+    } else {
+        (&riinfo.pk_attnums, pk_rel)
+    };
+
+    // has_perm: superuser fast path (RLS + ACL walks unported).
+    let mut key_names = String::new();
+    let mut key_values = String::new();
+    for idx in 0..riinfo.nkeys {
+        let fnum = attnums[idx];
+        let att = rel.rd_att.attr(fnum as usize - 1);
+        let name = core::str::from_utf8(att.attname.name_str()).expect("attname UTF-8");
+        let mut isnull = false;
+        // SAFETY: live user column of rel's descriptor.
+        let d = unsafe { types_tuple::heap_getattr(violator, fnum as i32, &rel.rd_att, &mut isnull) };
+        let val = if isnull {
+            "null".to_string()
+        } else {
+            datum_output_text(mcx, att.atttypid, d).unwrap_or_else(|_| "???".to_string())
+        };
+        if idx > 0 {
+            key_names.push_str(", ");
+            key_values.push_str(", ");
+        }
+        key_names.push_str(name);
+        key_values.push_str(&val);
+    }
+
+    let conname = conname_str(riinfo);
+    if onfk {
+        Box::new(
+            PgError::new(
+                ERROR,
+                format!(
+                    "insert or update on table \"{}\" violates foreign key constraint \"{conname}\"",
+                    fk_rel.name()
+                ),
+            )
+            .with_sqlstate(ERRCODE_FOREIGN_KEY_VIOLATION)
+            .with_detail(format!(
+                "Key ({key_names})=({key_values}) is not present in table \"{}\".",
+                pk_rel.name()
+            )),
+        )
+    } else if is_restrict {
+        Box::new(
+            PgError::new(
+                ERROR,
+                format!(
+                    "update or delete on table \"{}\" violates RESTRICT setting of foreign key \
+                     constraint \"{conname}\" on table \"{}\"",
+                    pk_rel.name(),
+                    fk_rel.name()
+                ),
+            )
+            .with_sqlstate(ERRCODE_RESTRICT_VIOLATION)
+            .with_detail(format!(
+                "Key ({key_names})=({key_values}) is referenced from table \"{}\".",
+                fk_rel.name()
+            )),
+        )
+    } else {
+        Box::new(
+            PgError::new(
+                ERROR,
+                format!(
+                    "update or delete on table \"{}\" violates foreign key constraint \
+                     \"{conname}\" on table \"{}\"",
+                    pk_rel.name(),
+                    fk_rel.name()
+                ),
+            )
+            .with_sqlstate(ERRCODE_FOREIGN_KEY_VIOLATION)
+            .with_detail(format!(
+                "Key ({key_names})=({key_values}) is still referenced from table \"{}\".",
+                fk_rel.name()
+            )),
+        )
+    }
+}
+
+fn datum_output_text<'mcx>(_mcx: Mcx<'mcx>, typid: Oid, d: Datum) -> PgResult<String> {
+    let (typoutput, _typisvarlena) = lsyscache::typ::getTypeOutputInfo(typid)?;
+    let mut finfo = fmgr_seams::fmgr_info::call(typoutput)?;
+    let mut fcinfo = types_fmgr::LocalFcinfo::<1>::fresh(InvalidOid);
+    fcinfo.set_arg(0, d);
+    let out = finfo.invoke(&mut fcinfo)?;
+    // SAFETY: type output functions return a NUL-terminated cstring datum.
+    let cs = unsafe { core::ffi::CStr::from_ptr(out.as_usize() as *const core::ffi::c_char) };
+    Ok(core::str::from_utf8(cs.to_bytes()).expect("server encoding").to_string())
+}
+
+fn ri_NullCheck(
+    rel: &Relation<'_>,
+    tup: &HeapTupleData<'_>,
+    riinfo: &RiConstraintInfo,
+    rel_is_pk: bool,
+) -> i32 {
+    let attnums = if rel_is_pk { &riinfo.pk_attnums } else { &riinfo.fk_attnums };
+    let mut allnull = true;
+    let mut nonenull = true;
+    for i in 0..riinfo.nkeys {
+        let mut isnull = false;
+        // SAFETY: live user column of rel's descriptor.
+        unsafe { types_tuple::heap_getattr(tup, attnums[i] as i32, &rel.rd_att, &mut isnull) };
+        if isnull {
+            nonenull = false;
+        } else {
+            allnull = false;
+        }
+    }
+    if allnull {
+        RI_KEYS_ALL_NULL
+    } else if nonenull {
+        RI_KEYS_NONE_NULL
+    } else {
+        RI_KEYS_SOME_NULL
+    }
+}
+
+// ri_KeysEqual (ri_triggers.c). PK side: datum_image_eq; FK side: the ff
+// equality operator (ri_CompareWithCast without the cast lane — cross-type
+// FKs whose comparison needs a cast are loud).
+fn ri_KeysEqual(
+    rel: &Relation<'_>,
+    oldtup: &HeapTupleData<'_>,
+    newtup: &HeapTupleData<'_>,
+    riinfo: &RiConstraintInfo,
+    rel_is_pk: bool,
+) -> PgResult<bool> {
+    let attnums = if rel_is_pk { &riinfo.pk_attnums } else { &riinfo.fk_attnums };
+    for i in 0..riinfo.nkeys {
+        let mut oldnull = false;
+        let mut newnull = false;
+        // SAFETY (both): live user columns of rel's descriptor.
+        let oldvalue =
+            unsafe { types_tuple::heap_getattr(oldtup, attnums[i] as i32, &rel.rd_att, &mut oldnull) };
+        let newvalue =
+            unsafe { types_tuple::heap_getattr(newtup, attnums[i] as i32, &rel.rd_att, &mut newnull) };
+        if oldnull || newnull {
+            return Ok(false);
+        }
+        let att = rel.rd_att.attr(attnums[i] as usize - 1);
+        if rel_is_pk {
+            if !datum_image_eq(oldvalue, newvalue, att.attbyval, att.attlen) {
+                return Ok(false);
+            }
+        } else {
+            let eq_opr = riinfo.ff_eq_oprs[i];
+            let opcode = lsyscache::operator::get_opcode(eq_opr)?;
+            let (oprleft, _) = lsyscache::operator::op_input_types(eq_opr)?;
+            if oprleft != att.atttypid && lsyscache::typ::getBaseType(att.atttypid)? != oprleft {
+                unported("ri_CompareWithCast cast lane (cross-type FK comparison)");
+            }
+            let mut finfo = fmgr_seams::fmgr_info::call(opcode)?;
+            let mut fcinfo = types_fmgr::LocalFcinfo::<2>::fresh(att.attcollation);
+            fcinfo.set_arg(0, newvalue);
+            fcinfo.set_arg(1, oldvalue);
+            if !finfo.invoke(&mut fcinfo)?.as_bool() {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
+}
+
+// generate_operator_clause (ruleutils.c) reduced: RI operators come from the
+// support index's opfamily; the pg_catalog qualification is C-exact for the
+// in-core families this port creates.
+fn ri_GenerateQual(
+    buf: &mut PgString<'_>,
+    sep: &str,
+    leftop: &str,
+    leftoptype: Oid,
+    opoid: Oid,
+    rightop: &str,
+    rightoptype: Oid,
+) -> PgResult<()> {
+    let shape = syscache_shape_for_operator(opoid)?;
+    use core::fmt::Write;
+    write!(buf, " {sep} {leftop}").expect("PgString write");
+    if leftoptype != shape.0 {
+        unported("ri_GenerateQual add_cast_to (cross-type FK query cast)");
+    }
+    write!(buf, " OPERATOR(pg_catalog.{}) {rightop}", shape.2.as_str()).expect("PgString write");
+    if rightoptype != shape.1 {
+        unported("ri_GenerateQual add_cast_to (cross-type FK query cast)");
+    }
+    Ok(())
+}
+
+fn syscache_shape_for_operator(opoid: Oid) -> PgResult<(Oid, Oid, String)> {
+    let (left, right) = lsyscache::operator::op_input_types(opoid)?;
+    let scratch = mcx::MemoryContext::new("ri-opname");
+    let name = lsyscache::operator::get_opname(scratch.mcx(), opoid)?
+        .unwrap_or_else(|| panic!("cache lookup failed for operator {opoid}"));
+    Ok((left, right, name.as_str().to_string()))
+}
+
+fn quote_one_name(name: &str) -> String {
+    let mut out = String::with_capacity(name.len() + 2);
+    out.push('"');
+    for c in name.chars() {
+        if c == '"' {
+            out.push('"');
+        }
+        out.push(c);
+    }
+    out.push('"');
+    out
+}
+
+fn quote_relation_name<'mcx>(mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgResult<String> {
+    let nsp = lsyscache::get_namespace_name(mcx, rel.rd_rel.relnamespace)?
+        .unwrap_or_else(|| panic!("cache lookup failed for namespace {}", rel.rd_rel.relnamespace));
+    Ok(format!("{}.{}", quote_one_name(nsp.as_str()), quote_one_name(rel.name())))
+}
+
+// datumIsEqual (datum.c) image comparison; typlen -2 (cstring) unreachable
+// for FK key columns backed by a btree unique index.
+fn datum_image_eq(a: Datum, b: Datum, typbyval: bool, typlen: i16) -> bool {
+    if typbyval {
+        return a.as_usize() == b.as_usize();
+    }
+    // SAFETY: by-ref datums point at live untoasted images (heap_getattr of
+    // pinned-page tuples re-fetched by the trigger machinery).
+    unsafe {
+        let (pa, pb) = (a.as_usize() as *const u8, b.as_usize() as *const u8);
+        let (la, lb) = if typlen > 0 {
+            (typlen as usize, typlen as usize)
+        } else {
+            assert!(typlen == -1, "datum_image_eq: cstring keys unreachable");
+            (types_tuple::varatt::varsize_any(pa), types_tuple::varatt::varsize_any(pb))
+        };
+        la == lb && core::slice::from_raw_parts(pa, la) == core::slice::from_raw_parts(pb, lb)
+    }
+}
+
+fn att_type(rel: &Relation<'_>, attnum: i16) -> Oid {
+    rel.rd_att.attr(attnum as usize - 1).atttypid
+}
+
+fn att_name<'a>(rel: &'a Relation<'_>, attnum: i16) -> &'a str {
+    core::str::from_utf8(rel.rd_att.attr(attnum as usize - 1).attname.name_str())
+        .expect("attname UTF-8")
+}
+
+fn conname_str(riinfo: &RiConstraintInfo) -> &str {
+    core::str::from_utf8(riinfo.conname.name_str()).expect("conname UTF-8")
+}
+
+// table_tuple_satisfies_snapshot(SnapshotSelf) over a fresh TID fetch.
+fn tuple_satisfies_self(rel: &Relation<'_>, tup: &HeapTupleData<'_>) -> PgResult<bool> {
+    let scratch = MemoryContext::new("ri-snapshot-self");
+    let snap = types_snapshot::SnapshotData::sentinel(scratch.mcx(), types_snapshot::SNAPSHOT_SELF);
+    let mut res = heapam::heap_fetch(rel, &snap, tup.t_self, false)?;
+    let found = res.found;
+    if let Some(pin) = res.pin.take() {
+        pin.release();
+    }
+    Ok(found)
+}

@@ -93,6 +93,8 @@ fn make_entry(mcx: Mcx<'static>, oid: Oid, name: &str, relpersistence: u8) -> Re
         rd_amcache_hash: Default::default(),
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
+            rd_trigdesc: Default::default(),
+            rd_hastriggers: false,
     }
 }
 

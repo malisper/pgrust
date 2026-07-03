@@ -3,6 +3,7 @@
 
 mod attrs;
 mod index;
+mod triggers;
 mod pg_class;
 #[cfg(test)]
 mod tests;
@@ -25,9 +26,10 @@ pub fn init_seams() {
         index::relation_init_index_access_info,
     );
     relcache_build_seams::scan_pg_index_shapes::set(index::scan_pg_index_shapes);
+    relcache_build_seams::build_trigger_desc::set(triggers::build_trigger_desc);
 }
 
-fn scan_key(attno: i32, strategy: StrategyNumber, func: RegProcedure, arg: Datum) -> ScanKeyData {
+pub(crate) fn scan_key(attno: i32, strategy: StrategyNumber, func: RegProcedure, arg: Datum) -> ScanKeyData {
     let mut key = ScanKeyData::empty();
     key.sk_attno = attno as AttrNumber;
     key.sk_strategy = strategy;
@@ -42,7 +44,7 @@ fn oid_key(attno: i32, oid: Oid) -> ScanKeyData {
     scan_key(attno, BTEqualStrategyNumber, F_OIDEQ, Datum::from_oid(oid))
 }
 
-fn getattr(td: &TupleDescData<'_>, tup: &HeapTupleData<'_>, attno: i32) -> (Datum, bool) {
+pub(crate) fn getattr(td: &TupleDescData<'_>, tup: &HeapTupleData<'_>, attno: i32) -> (Datum, bool) {
     let mut isnull = false;
     // SAFETY: tup is a catalog row read under its relation's descriptor;
     // attno is a declared column of that catalog.
@@ -50,7 +52,7 @@ fn getattr(td: &TupleDescData<'_>, tup: &HeapTupleData<'_>, attno: i32) -> (Datu
     (d, isnull)
 }
 
-fn req(td: &TupleDescData<'_>, tup: &HeapTupleData<'_>, attno: i32) -> PgResult<Datum> {
+pub(crate) fn req(td: &TupleDescData<'_>, tup: &HeapTupleData<'_>, attno: i32) -> PgResult<Datum> {
     let (d, isnull) = getattr(td, tup, attno);
     if isnull {
         return Err(unexpected_null(attno));

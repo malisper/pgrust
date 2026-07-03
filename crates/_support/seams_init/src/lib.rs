@@ -107,6 +107,7 @@ pub fn init_all() {
     parallel::init_seams();
     spi::init_seams();
     trigger::init_seams();
+    ri_triggers::init_seams();
     pruneheap::init_seams();
     pg_string::init_seams();
     lmgr::init_seams();

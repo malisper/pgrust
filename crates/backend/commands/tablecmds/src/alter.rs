@@ -13,13 +13,14 @@ use types_error::{
 use types_nodes::parsenodes::{AlterTableCmd, AlterTableStmt, AlterTableType};
 use types_nodes::rawnodes::ColumnDef;
 use types_nodes::{Node, NodeList};
-use types_rel::{AccessExclusiveLock, NoLock, Relation, RowExclusiveLock, LOCKMODE, RELKIND_RELATION};
+use types_rel::{AccessExclusiveLock, NoLock, Relation, RowExclusiveLock, ShareRowExclusiveLock, LOCKMODE, RELKIND_RELATION};
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use types_tuple::MaxHeapAttributeNumber;
 
 const AT_NUM_PASSES: usize = 12;
 const AT_PASS_DROP: usize = 0;
 const AT_PASS_ADD_COL: usize = 2;
+const AT_PASS_ADD_CONSTR: usize = 6;
 const AT_REWRITE_DEFAULT_VAL: i32 = 1 << 1;
 
 const AttributeRelidNumIndexId: Oid = 2659;
@@ -50,11 +51,16 @@ pub fn AlterTableGetLockLevel(cmds: &NodeList<'_>) -> LOCKMODE {
     for cnode in cmds.iter() {
         let cmd = cnode.as_variant::<AlterTableCmd>().expect("AlterTableCmd");
         match cmd.subtype {
-            AlterTableType::AT_AddColumn | AlterTableType::AT_DropColumn => {}
+            AlterTableType::AT_AddColumn | AlterTableType::AT_DropColumn => {
+                return AccessExclusiveLock;
+            }
+            AlterTableType::AT_AddConstraint => {}
             other => unported(&format!("AlterTableGetLockLevel {other:?}")),
         }
     }
-    AccessExclusiveLock
+    // C computes the max across subcommands; AT_AddConstraint alone is
+    // ShareRowExclusiveLock, any column change escalates above.
+    ShareRowExclusiveLock
 }
 
 pub fn AlterTableLookupRelation<'mcx>(
@@ -210,6 +216,15 @@ fn ATPrepCmd<'mcx>(
             }
             AT_PASS_DROP
         }
+        AlterTableType::AT_AddConstraint => {
+            if recurse {
+                // SAFETY: as above.
+                unsafe {
+                    cnode.with_mut::<AlterTableCmd, _>(|c| c.recurse = true).expect("AlterTableCmd");
+                }
+            }
+            AT_PASS_ADD_CONSTR
+        }
         other => unported(&format!("ATPrepCmd {other:?}")),
     };
     tab.subcmds[pass].lappend(mcx, cnode)?;
@@ -239,6 +254,14 @@ fn ATRewriteCatalogs<'mcx>(
                 }
                 AlterTableType::AT_DropColumn => {
                     ATExecDropColumn(mcx, &rel, cmd)?;
+                }
+                AlterTableType::AT_AddConstraint => {
+                    let cons = cmd
+                        .def
+                        .expect("AT_AddConstraint def")
+                        .as_variant::<types_nodes::rawnodes::Constraint>()
+                        .expect("Constraint");
+                    crate::fk::ATExecAddConstraint(mcx, &rel, cons)?;
                 }
                 other => unported(&format!("ATExecCmd {other:?}")),
             }

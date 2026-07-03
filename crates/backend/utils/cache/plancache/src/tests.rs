@@ -89,8 +89,8 @@ fn install() {
         lock_seams::mark_lock_clear::set(|_, _| {});
         xact_seams::get_current_transaction_nest_level::set(|| 1);
         catalog_seams::is_shared_relation::set(|_| false);
-        if !guc_tables::vars::plan_cache_mode.installed() {
-            guc_tables::vars::plan_cache_mode.install(guc_tables::GucVarAccessors {
+        {
+            guc_tables::vars::plan_cache_mode.install_if_absent(guc_tables::GucVarAccessors {
                 get: || PLAN_CACHE_MODE_VAR.with(Cell::get),
                 set: |v| PLAN_CACHE_MODE_VAR.with(|c| c.set(v)),
             });

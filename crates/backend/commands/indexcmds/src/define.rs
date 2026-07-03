@@ -3,7 +3,10 @@
 // opclasses/collations, WITH options, TABLESPACE, exclusion/WITHOUT OVERLAPS,
 // partitioned tables, constraint-backed (PRIMARY KEY/UNIQUE ... ADD
 // CONSTRAINT) indexes, non-btree AMs.
-use catalog_index::{IndexCreateExtra, BTREE_AM_OID, INDEX_CREATE_IS_PRIMARY};
+use catalog_index::{
+    IndexCreateExtra, BTREE_AM_OID, INDEX_CONSTR_CREATE_MARK_AS_PRIMARY,
+    INDEX_CREATE_ADD_CONSTRAINT, INDEX_CREATE_IS_PRIMARY,
+};
 use datum::Datum;
 use execindexing::IndexInfo;
 use mcx::{Mcx, PgString, PgVec};
@@ -77,8 +80,11 @@ pub fn DefineIndex<'mcx>(
     if stmt.tableSpace.is_some() {
         unported("DefineIndex: TABLESPACE");
     }
-    if stmt.isconstraint || stmt.primary || stmt.deferrable || stmt.initdeferred {
-        unported("DefineIndex: constraint-backed indexes (index_constraint_create)");
+    if stmt.deferrable || stmt.initdeferred {
+        unported("DefineIndex: DEFERRABLE constraint indexes");
+    }
+    if is_alter_table && stmt.primary {
+        unported("DefineIndex: index_check_primary_key (ALTER TABLE ADD PRIMARY KEY)");
     }
     if stmt.oldNumber != 0 || skip_build {
         unported("DefineIndex: skip_build / oldNumber reuse");
@@ -167,7 +173,14 @@ pub fn DefineIndex<'mcx>(
     let indexRelationName: &str = match stmt.idxname {
         Some(n) => n,
         None => {
-            name_storage = ChooseIndexName(mcx, rel.name(), namespaceId, &indexColNames)?;
+            name_storage = if stmt.primary {
+                ChooseRelationName(mcx, rel.name(), None, "pkey", namespaceId, true)?
+            } else if stmt.isconstraint {
+                let addition = ChooseIndexNameAddition(mcx, &indexColNames)?;
+                ChooseRelationName(mcx, rel.name(), Some(addition.as_str()), "key", namespaceId, true)?
+            } else {
+                ChooseIndexName(mcx, rel.name(), namespaceId, &indexColNames)?
+            };
             name_storage.as_str()
         }
     };
@@ -231,8 +244,9 @@ pub fn DefineIndex<'mcx>(
         &opclassIds[..numberOfAttributes],
         &coloptions[..numberOfAttributes],
         &IndexCreateExtra {
-            flags: if stmt.primary { INDEX_CREATE_IS_PRIMARY } else { 0 },
-            constr_flags: 0,
+            flags: (if stmt.primary { INDEX_CREATE_IS_PRIMARY } else { 0 })
+                | (if stmt.isconstraint { INDEX_CREATE_ADD_CONSTRAINT } else { 0 }),
+            constr_flags: if stmt.primary { INDEX_CONSTR_CREATE_MARK_AS_PRIMARY } else { 0 },
             allow_system_table_mods: false,
             is_internal: !check_rights,
         },
@@ -367,7 +381,7 @@ fn ChooseIndexName<'mcx>(
     colnames: &[PgString<'mcx>],
 ) -> PgResult<PgString<'mcx>> {
     let addition = ChooseIndexNameAddition(mcx, colnames)?;
-    ChooseRelationName(mcx, tabname, Some(addition.as_str()), "idx", namespaceId)
+    ChooseRelationName(mcx, tabname, Some(addition.as_str()), "idx", namespaceId, false)
 }
 
 fn ChooseIndexNameAddition<'mcx>(
@@ -414,14 +428,15 @@ fn ChooseIndexColumnNames<'mcx>(
     Ok(result)
 }
 
-// ChooseRelationName, isconstraint=false arm. C divergence: probes pg_class
-// under the transaction snapshot, not a dirty snapshot (single-backend lane).
+// ChooseRelationName. C divergence: probes pg_class under the transaction
+// snapshot, not a dirty snapshot (single-backend lane).
 fn ChooseRelationName<'mcx>(
     mcx: Mcx<'mcx>,
     name1: &str,
     name2: Option<&str>,
     label: &str,
     namespaceid: Oid,
+    isconstraint: bool,
 ) -> PgResult<PgString<'mcx>> {
     let pgclassrel = table::table_open(mcx, RELATION_RELATION_ID, types_rel::AccessShareLock)?;
     let mut pass = 0;
@@ -435,8 +450,11 @@ fn ChooseRelationName<'mcx>(
         ];
         let mut scan =
             genam::systable_beginscan(mcx, &pgclassrel, ClassNameNspIndexId, true, None, &keys)?;
-        let collides = genam::systable_getnext(mcx, &mut scan)?.is_some();
+        let mut collides = genam::systable_getnext(mcx, &mut scan)?.is_some();
         genam::systable_endscan(mcx, scan)?;
+        if !collides && isconstraint {
+            collides = constraint_name_exists(mcx, relname.as_str(), namespaceid)?;
+        }
         if !collides {
             break relname;
         }
@@ -447,6 +465,32 @@ fn ChooseRelationName<'mcx>(
     };
     pgclassrel.close(types_rel::AccessShareLock)?;
     Ok(relname)
+}
+
+// ConstraintNameExists (pg_constraint.c).
+fn constraint_name_exists(mcx: Mcx<'_>, name: &str, namespaceid: Oid) -> PgResult<bool> {
+    let conrel = table::table_open(
+        mcx,
+        types_core::CONSTRAINT_RELATION_ID,
+        types_rel::AccessShareLock,
+    )?;
+    let cname = name_arg(mcx, name)?;
+    let keys = [
+        eq_key(2, F_NAMEEQ, Datum::from_usize(cname.as_ptr() as usize)),
+        eq_key(3, F_OIDEQ, Datum::from_oid(namespaceid)),
+    ];
+    let mut scan = genam::systable_beginscan(
+        mcx,
+        &conrel,
+        types_core::CONSTRAINT_NAME_NSP_INDEX_ID,
+        true,
+        None,
+        &keys,
+    )?;
+    let found = genam::systable_getnext(mcx, &mut scan)?.is_some();
+    genam::systable_endscan(mcx, scan)?;
+    conrel.close(types_rel::AccessShareLock)?;
+    Ok(found)
 }
 
 // makeObjectName without the truncation lane (loud on overflow).

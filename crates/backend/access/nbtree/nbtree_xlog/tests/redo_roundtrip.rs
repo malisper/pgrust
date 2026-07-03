@@ -352,6 +352,8 @@ fn index_rel(mcx: Mcx<'_>) -> Relation<'_> {
         rd_amcache_hash: Default::default(),
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
+            rd_trigdesc: Default::default(),
+            rd_hastriggers: false,
     };
     Relation::open(data, Some(noop_close))
 }

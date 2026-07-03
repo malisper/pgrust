@@ -846,6 +846,8 @@ mod scanfix {
             rd_amcache_hash: Default::default(),
             rd_supportinfo: Default::default(),
             rd_indexlist: Default::default(),
+            rd_trigdesc: Default::default(),
+            rd_hastriggers: false,
         };
         Ok(Relation::open(data, Some(record_close)))
     }

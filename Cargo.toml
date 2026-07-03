@@ -47,6 +47,7 @@ members = [
     "crates/_support/pgrust/trace",
     "crates/backend/utils/init/init_small",
     "crates/backend/utils/init/miscinit_seams",
+    "crates/backend/utils/adt/ri_triggers",
     "crates/backend/utils/adt/ri_triggers_seams",
     "crates/backend/utils/adt/acl_seams",
     "crates/backend/utils/misc/guc_seams",

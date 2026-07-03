@@ -146,6 +146,8 @@ pub fn RelationBuildLocalRelation(
         rd_amcache_hash: Default::default(),
         rd_supportinfo: core::cell::RefCell::new(Vec::new()),
         rd_indexlist: Default::default(),
+            rd_trigdesc: Default::default(),
+            rd_hastriggers: false,
     };
     RelationInitPhysicalAddr(&data)?;
 

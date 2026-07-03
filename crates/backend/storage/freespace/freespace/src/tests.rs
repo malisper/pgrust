@@ -332,6 +332,8 @@ fn vacuum_lanes_panic_named() {
         rd_amcache_hash: Default::default(),
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
+            rd_trigdesc: Default::default(),
+            rd_hastriggers: false,
     };
     let err =
         catch_unwind(AssertUnwindSafe(|| FreeSpaceMapPrepareTruncateRel(&rel, 0))).unwrap_err();

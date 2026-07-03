@@ -1,15 +1,24 @@
 #![allow(non_snake_case)]
 
+mod catalog;
+mod queue;
+
+pub use catalog::{CreateTriggerInternal, InternalTriggerArgs};
+pub use queue::{
+    AfterTriggerBeginQuery, AfterTriggerEndQuery, ExecARDeleteTriggers, ExecARInsertTriggers,
+    ExecARUpdateTriggers,
+};
+
 use std::cell::Cell;
 
 use types_core::CommandId;
 use types_error::PgResult;
 
 thread_local! {
-    // afterTriggers reduced to the fields with live writers; events stay
-    // empty while queueing (AfterTriggerSaveEvent) is unported.
-    static FIRING_COUNTER: Cell<CommandId> = const { Cell::new(0) };
-    static QUERY_DEPTH: Cell<i32> = const { Cell::new(-1) };
+    // afterTriggers reduced to the fields with live writers; the immediate
+    // event queue lives in queue.rs, deferred events are a loud lane.
+    pub(crate) static FIRING_COUNTER: Cell<CommandId> = const { Cell::new(0) };
+    pub(crate) static QUERY_DEPTH: Cell<i32> = const { Cell::new(-1) };
     static EVENTS_NONEMPTY: Cell<bool> = const { Cell::new(false) };
 }
 
@@ -27,7 +36,7 @@ pub fn AfterTriggerBeginXact() -> PgResult<()> {
 
 pub fn AfterTriggerFireDeferred() -> PgResult<()> {
     debug_assert_eq!(QUERY_DEPTH.with(|c| c.get()), -1);
-    if EVENTS_NONEMPTY.with(|c| c.get()) {
+    if EVENTS_NONEMPTY.with(|c| c.get()) || queue::query_stack_nonempty() {
         unported_events();
     }
     Ok(())
@@ -35,6 +44,7 @@ pub fn AfterTriggerFireDeferred() -> PgResult<()> {
 
 pub fn AfterTriggerEndXact(_is_commit: bool) -> PgResult<()> {
     EVENTS_NONEMPTY.with(|c| c.set(false));
+    queue::query_stack_clear();
     QUERY_DEPTH.with(|c| c.set(-1));
     Ok(())
 }
@@ -113,7 +123,10 @@ pub fn AfterTriggerEndSubXact(is_commit: bool) -> PgResult<()> {
         }
         // SAFETY: as AfterTriggerBeginSubXact.
         let saved = unsafe { *trans_stack_slot(my_level) };
-        if EVENTS_NONEMPTY.with(|c| c.get()) || saved.events_nonempty {
+        if EVENTS_NONEMPTY.with(|c| c.get())
+            || saved.events_nonempty
+            || queue::query_stack_nonempty()
+        {
             unported_events();
         }
         QUERY_DEPTH.with(|c| c.set(saved.query_depth));
@@ -136,6 +149,21 @@ mod tests {
     fn init_once() {
         static ONCE: std::sync::Once = std::sync::Once::new();
         ONCE.call_once(init_seams);
+    }
+
+    #[test]
+    fn begin_end_query_depth_bookkeeping() {
+        init_once();
+        trigger_seams::after_trigger_begin_xact::call().unwrap();
+        assert_eq!(QUERY_DEPTH.with(|c| c.get()), -1);
+        AfterTriggerBeginQuery();
+        assert_eq!(QUERY_DEPTH.with(|c| c.get()), 0);
+        AfterTriggerBeginQuery();
+        assert_eq!(QUERY_DEPTH.with(|c| c.get()), 1);
+        AfterTriggerEndQuery().unwrap();
+        AfterTriggerEndQuery().unwrap();
+        assert_eq!(QUERY_DEPTH.with(|c| c.get()), -1);
+        trigger_seams::after_trigger_end_xact::call(true).unwrap();
     }
 
     #[test]

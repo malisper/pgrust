@@ -147,6 +147,8 @@ fn finish_relcache_entries() -> PgResult<()> {
             rd_amcache_hash: Default::default(),
             rd_supportinfo: Default::default(),
             rd_indexlist: Default::default(),
+            rd_trigdesc: Default::default(),
+            rd_hastriggers: false,
         });
         crate::build::RelationInitPhysicalAddr(&newrel)?;
         with_state(|st| {

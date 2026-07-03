@@ -496,6 +496,8 @@ pub fn CreateFakeRelcacheEntry(rlocator: RelFileLocator) -> FakeRelcacheEntry {
             rd_amcache_hash: Default::default(),
             rd_supportinfo: Default::default(),
             rd_indexlist: Default::default(),
+            rd_trigdesc: Default::default(),
+            rd_hastriggers: false,
         },
     }
 }
