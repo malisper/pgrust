@@ -9,6 +9,7 @@ name = "adt_numeric"
 path = "src/lib.rs"
 
 [dependencies]
+arrayfuncs = { path = "../arrayfuncs" }
 types_tuple = { path = "../../../../_support/types/types_tuple" }
 adt_float = { path = "../float" }
 datum = { path = "../../../../_support/types/datum" }

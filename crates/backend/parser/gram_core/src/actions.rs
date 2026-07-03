@@ -111,6 +111,11 @@ impl<'mcx> Parser<'mcx> {
         let _ = yyloc;
         match rule {
             2 => self.parsetree = view.v(1).list(),
+            // parse_toplevel: MODE_TYPE_NAME Typename
+            3 => {
+                self.parsetree =
+                    NodeList::make1(mcx, view.v(2).node().expect("Typename node"))?;
+            }
             // stmtmulti: stmtmulti ';' toplevel_stmt
             8 => {
                 let mut list = view.v(1).list();
@@ -1479,6 +1484,20 @@ impl<'mcx> Parser<'mcx> {
                 // SAFETY: as rule 8 — parser-owned tree, no live derived refs.
                 unsafe {
                     t.with_mut::<TypeName, _>(|tn| tn.arrayBounds = bounds).expect("TypeName");
+                }
+                *yyval = YYSTYPE::Node(Some(t));
+            }
+            // Typename: SETOF SimpleTypename opt_array_bounds
+            1937 => {
+                let t = view.v(2).node().expect("SimpleTypename");
+                let bounds = view.v(3).list();
+                // SAFETY: as rule 8 — parser-owned tree, no live derived refs.
+                unsafe {
+                    t.with_mut::<TypeName, _>(|tn| {
+                        tn.arrayBounds = bounds;
+                        tn.setof = true;
+                    })
+                    .expect("TypeName");
                 }
                 *yyval = YYSTYPE::Node(Some(t));
             }

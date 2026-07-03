@@ -351,6 +351,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "adt_misc"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "fmgr_seams",
+ "funcapi",
+ "heaptuple",
+ "lsyscache",
+ "mcx",
+ "parse_utilcmd",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+]
+
+[[package]]
 name = "adt_network"
 version = "0.1.0"
 dependencies = [
@@ -369,6 +385,7 @@ name = "adt_numeric"
 version = "0.1.0"
 dependencies = [
  "adt_float",
+ "arrayfuncs",
  "datum",
  "init_small",
  "mcx",
@@ -636,6 +653,7 @@ dependencies = [
  "fmgr_seams",
  "lsyscache",
  "mcx",
+ "numutils",
  "pqformat",
  "stringinfo",
  "types_core",
@@ -5162,8 +5180,10 @@ dependencies = [
  "datum",
  "elog",
  "fmgr_core",
+ "gram_core",
  "mbutils",
  "mcx",
+ "parser_seams",
  "parser_small1",
  "syscache_seams",
  "types_core",
@@ -7235,6 +7255,7 @@ dependencies = [
  "adt_acl",
  "adt_bool",
  "adt_float",
+ "adt_misc",
  "adt_regexp",
  "adt_timestamp",
  "aio_config",

@@ -39,33 +39,7 @@ pub fn typenameTypeIdAndMod<'mcx>(
         unported("pre-resolved TypeName.typeOid lane");
     }
 
-    let mut names: [&str; 4] = [""; 4];
-    let nnames = tn.names.len();
-    if nnames == 0 || nnames > 3 {
-        unported("improper TypeName names length");
-    }
-    for (i, n) in tn.names.iter().enumerate() {
-        names[i] = n.as_string().expect("TypeName names").sval;
-    }
-    let (schemaname, typname) = catalog_namespace::DeconstructQualifiedName(&names[..nnames])?;
-
-    let typoid = match schemaname {
-        Some(schemaname) => {
-            let namespace_id = catalog_namespace::LookupExplicitNamespace(schemaname, false)?;
-            syscache_seams::lookup_pg_type_oid_by_name::call(typname, namespace_id)?
-        }
-        None => {
-            // TypenameGetTypidExtended walk; temp_ok arm unreachable (no temp rels).
-            let mut found = InvalidOid;
-            for &namespace_id in catalog_namespace::fetch_search_path(mcx, true)?.iter() {
-                found = syscache_seams::lookup_pg_type_oid_by_name::call(typname, namespace_id)?;
-                if found != InvalidOid {
-                    break;
-                }
-            }
-            found
-        }
-    };
+    let (typoid, typname) = resolveTypeNames(mcx, tn)?;
     if typoid == InvalidOid {
         return Err(type_does_not_exist(typname));
     }
@@ -95,6 +69,117 @@ pub fn typenameTypeIdAndMod<'mcx>(
         None => return Err(type_does_not_exist(typname)),
     }
     let typmod = typenameTypeMod(mcx, pstate, tn, typoid)?;
+    Ok((typoid, typmod))
+}
+
+// The names→Oid walk shared by typenameTypeIdAndMod and parseTypeString
+// (LookupTypeNameExtended's "normal reference" arm, pre array-bounds).
+fn resolveTypeNames<'mcx, 'tn>(
+    mcx: Mcx<'mcx>,
+    tn: &TypeName<'tn>,
+) -> PgResult<(Oid, &'tn str)> {
+    let mut names: [&str; 4] = [""; 4];
+    let nnames = tn.names.len();
+    if nnames == 0 || nnames > 3 {
+        unported("improper TypeName names length");
+    }
+    for (i, n) in tn.names.iter().enumerate() {
+        names[i] = n.as_string().expect("TypeName names").sval;
+    }
+    let (schemaname, typname) = catalog_namespace::DeconstructQualifiedName(&names[..nnames])?;
+
+    let typoid = match schemaname {
+        Some(schemaname) => {
+            let namespace_id = catalog_namespace::LookupExplicitNamespace(schemaname, false)?;
+            syscache_seams::lookup_pg_type_oid_by_name::call(typname, namespace_id)?
+        }
+        None => {
+            // TypenameGetTypidExtended walk; temp_ok arm unreachable (no temp rels).
+            let mut found = InvalidOid;
+            for &namespace_id in catalog_namespace::fetch_search_path(mcx, true)?.iter() {
+                found = syscache_seams::lookup_pg_type_oid_by_name::call(typname, namespace_id)?;
+                if found != InvalidOid {
+                    break;
+                }
+            }
+            found
+        }
+    };
+    Ok((typoid, typname))
+}
+
+// TypeNameToString (parse_type.c), error-message shape only ("[]" appended
+// for array bounds, per appendTypeNameToBuffer).
+fn typeNameToString(tn: &TypeName<'_>) -> String {
+    let mut s = typename_to_string(tn);
+    if !tn.arrayBounds.is_nil() {
+        s.push_str("[]");
+    }
+    s
+}
+
+#[cold]
+#[inline(never)]
+fn invalid_type_name(s: &str) -> Box<PgError> {
+    Box::new(
+        PgError::new(ERROR, format!("invalid type name \"{s}\""))
+            .with_sqlstate(ERRCODE_SYNTAX_ERROR),
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn shell_type(name: &str) -> Box<PgError> {
+    Box::new(
+        PgError::new(ERROR, format!("type \"{name}\" is only a shell"))
+            .with_sqlstate(ERRCODE_UNDEFINED_OBJECT),
+    )
+}
+
+// typeStringToTypeName (parse_type.c); escontext=NULL shape (hard errors) —
+// misc.c's pg_input_* callers pass NULL there too. pts_error_callback's
+// CONTEXT line is not attached (divergence).
+fn typeStringToTypeName<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<&'mcx TypeName<'mcx>> {
+    if s.bytes().all(|c| matches!(c, b' ' | b'\t' | b'\n' | b'\r' | 0x0c | 0x0b)) {
+        return Err(invalid_type_name(s));
+    }
+    let list = gram_core::raw_parser(mcx, s, parser_seams::RawParseMode::RAW_PARSE_TYPE_NAME)?;
+    debug_assert_eq!(list.len(), 1);
+    let node = list.first().expect("TYPE_NAME parse yields one node");
+    let tn = node.as_type_name().expect("TYPE_NAME parse yields TypeName");
+    if tn.setof {
+        return Err(invalid_type_name(s));
+    }
+    Ok(tn)
+}
+
+/// C `parseTypeString` with a NULL escontext: (type Oid, typmod) for a
+/// standalone type-name string. No typtype restriction (unlike the CREATE
+/// TABLE lane above): any resolvable non-shell type passes, per C.
+pub fn parseTypeString<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<(Oid, i32)> {
+    let tn = typeStringToTypeName(mcx, s)?;
+    if tn.pct_type {
+        unported("LookupTypeName %TYPE");
+    }
+    if tn.typeOid != InvalidOid {
+        unported("pre-resolved TypeName.typeOid lane");
+    }
+
+    let (mut typoid, _typname) = resolveTypeNames(mcx, tn)?;
+    if typoid != InvalidOid && !tn.arrayBounds.is_nil() {
+        typoid = syscache_seams::pg_type_typarray::call(typoid)?.unwrap_or(InvalidOid);
+    }
+    if typoid == InvalidOid {
+        return Err(type_does_not_exist(&typeNameToString(tn)));
+    }
+
+    match syscache_seams::pg_type_isdefined::call(typoid)? {
+        Some(true) => {}
+        Some(false) => return Err(shell_type(&typeNameToString(tn))),
+        None => return Err(type_does_not_exist(&typeNameToString(tn))),
+    }
+
+    let typmod = typenameTypeMod(mcx, None, tn, typoid)?;
     Ok((typoid, typmod))
 }
 

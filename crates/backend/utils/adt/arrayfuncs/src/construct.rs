@@ -317,3 +317,41 @@ fn copy_array_els(
         }
     }
 }
+
+// C `ArrayGetIntegerTypmods` (arrayutils.c); lives here because it needs
+// deconstruct_array and arrayutils sits below this crate.
+pub fn array_get_integer_typmods<'mcx>(
+    mcx: Mcx<'mcx>,
+    arr: &[u8],
+) -> PgResult<PgVec<'mcx, i32>> {
+    if arr_elemtype(arr) != CSTRINGOID {
+        return Err(Box::new(
+            PgError::error("typmod array must be type cstring[]")
+                .with_sqlstate(::types_error::ERRCODE_ARRAY_ELEMENT_ERROR),
+        ));
+    }
+    if arr_ndim(arr) != 1 {
+        return Err(Box::new(
+            PgError::error("typmod array must be one-dimensional")
+                .with_sqlstate(::types_error::ERRCODE_ARRAY_SUBSCRIPT_ERROR),
+        ));
+    }
+    if array_contains_nulls(arr) {
+        return Err(Box::new(
+            PgError::error("typmod array must not contain nulls")
+                .with_sqlstate(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+        ));
+    }
+
+    let (elems, _nulls) = deconstruct_array_builtin(mcx, arr, CSTRINGOID, false)?;
+    let mut out: PgVec<'mcx, i32> = vec_with_capacity_in(mcx, elems.len())?;
+    for d in elems.iter() {
+        // SAFETY: each element datum is a live NUL-terminated cstring from
+        // the deconstructed image.
+        let s = unsafe { core::ffi::CStr::from_ptr(d.as_usize() as *const core::ffi::c_char) };
+        out.push(::numutils::pg_strtoint32(&alloc::string::String::from_utf8_lossy(
+            s.to_bytes(),
+        ))?);
+    }
+    Ok(out)
+}
