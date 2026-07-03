@@ -59,7 +59,7 @@ pub fn heap_truncate_check_FKs<'mcx>(
 ) -> PgResult<()> {
     let mut oids: PgVec<'mcx, Oid> = mcx::vec_with_capacity_in(mcx, relations.len())?;
     for rel in relations {
-        if rel.rd_rel.relhastriggers || rel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE {
+        if rel.rd_hastriggers || rel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE {
             oids.push(rel.rd_id);
         }
     }

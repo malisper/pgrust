@@ -304,7 +304,6 @@ fn vacuum_lanes_panic_named() {
             relisshared: false,
             relpersistence: ::types_core::RELPERSISTENCE_PERMANENT,
             relkind: 0,
-            relhastriggers: false,
             relhassubclass: false,
             relrowsecurity: false,
             relispopulated: true,

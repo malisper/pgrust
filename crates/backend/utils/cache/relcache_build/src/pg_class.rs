@@ -73,7 +73,6 @@ pub(crate) fn decode(
         relisshared: req(td, tup, 16)?.as_bool(),
         relpersistence: req(td, tup, 17)?.as_u8(),
         relkind: req(td, tup, 18)?.as_u8(),
-        relhastriggers: req(td, tup, 22)?.as_bool(),
         relhassubclass: req(td, tup, 23)?.as_bool(),
         relrowsecurity: req(td, tup, 24)?.as_bool(),
         relispopulated: req(td, tup, 26)?.as_bool(),

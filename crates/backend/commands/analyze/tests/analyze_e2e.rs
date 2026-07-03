@@ -443,7 +443,6 @@ fn make_relation<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> RelationData<'mcx> {
         relisshared: false,
         relpersistence: RELPERSISTENCE_PERMANENT,
         relkind: RELKIND_RELATION,
-        relhastriggers: false,
         relhassubclass: false,
         relrowsecurity: false,
         relispopulated: true,

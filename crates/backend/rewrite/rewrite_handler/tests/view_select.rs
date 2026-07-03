@@ -325,7 +325,6 @@ fn test_relation<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> RelationData<'mcx> {
         relisshared: false,
         relpersistence: RELPERSISTENCE_PERMANENT,
         relkind: if is_view { RELKIND_VIEW } else { RELKIND_RELATION },
-        relhastriggers: false,
         relhassubclass: false,
         relrowsecurity: false,
         relispopulated: true,

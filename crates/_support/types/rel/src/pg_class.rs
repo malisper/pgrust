@@ -60,7 +60,6 @@ pub struct FormData_pg_class {
     pub relisshared: bool,
     pub relpersistence: u8,
     pub relkind: u8,
-    pub relhastriggers: bool,
     pub relhassubclass: bool,
     pub relrowsecurity: bool,
     pub relispopulated: bool,
