@@ -40,6 +40,7 @@ pub enum PlanStateNode<'mcx> {
     IndexOnlyScan(::nodeindexonlyscan::IndexOnlyScanState<'mcx>),
     Agg(PgBox<'mcx, AggPlanState<'mcx>>),
     Sort(SortNode<'mcx>),
+    IncrementalSort(PgBox<'mcx, IncrementalSortNode<'mcx>>),
     Material(PgBox<'mcx, MaterialNode<'mcx>>),
     Unique(PgBox<'mcx, UniqueNode<'mcx>>),
     Limit(LimitNode<'mcx>),
@@ -102,6 +103,12 @@ pub struct SortNode<'mcx> {
     pub outer_desc: Rc<TupleDescData<'static>>,
 }
 
+// The IncrementalSort node's outer child lives here (nodesort precedent).
+pub struct IncrementalSortNode<'mcx> {
+    pub state: ::nodeincrementalsort::IncrementalSortState<'mcx>,
+    pub outer: PlanStateNode<'mcx>,
+}
+
 pub struct LimitNode<'mcx> {
     pub state: ::nodelimit::LimitState<'mcx>,
     pub outer: PgBox<'mcx, PlanStateNode<'mcx>>,
@@ -161,6 +168,9 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::Agg(aps) => Some(aps.agg.ps_ExprContext),
             // C sorts have no ExprContext.
             PlanStateNode::Sort(_) => None,
+            // Divergence: this port's presorted-key equality runs in an
+            // ExprState, which needs a resettable per-tuple context.
+            PlanStateNode::IncrementalSort(s) => Some(s.state.ps_ExprContext),
             PlanStateNode::Material(_) => None,
             PlanStateNode::Unique(u) => Some(u.state.ps_ExprContext),
             PlanStateNode::Limit(l) => Some(l.state.ps_ExprContext),
@@ -203,6 +213,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::ModifyTable(_) => crate::exec_type_from_tl(&plan.targetlist),
             PlanStateNode::Agg(aps) => Ok(aps.agg.ps_ResultTupleDesc.clone()),
             PlanStateNode::Sort(s) => Ok(::nodesort::sort_result_type(&s.state)),
+            PlanStateNode::IncrementalSort(s) => Ok(s.state.ps_ResultTupleDesc.clone()),
             PlanStateNode::Material(m) => Ok(m.state.ps_ResultTupleDesc.clone()),
             PlanStateNode::Unique(u) => Ok(u.state.ps_ResultTupleDesc.clone()),
             PlanStateNode::NestLoop(nl) => Ok(nl.state.ps_ResultTupleDesc.clone()),
@@ -400,6 +411,32 @@ pub fn exec_init_node<'mcx>(
                 outer: ::mcx::alloc_in(estate.es_query_cxt, outer)?,
                 outer_desc,
             })
+        }
+        NodeTag::T_IncrementalSort => {
+            let mcx = estate.es_query_cxt;
+            let is_plan = node.as_incremental_sort().unwrap();
+            // C keeps REWIND for the child; BACKWARD/MARK never reach here.
+            let outer = exec_init_node(is_plan.sort.plan.lefttree, estate, eflags)?
+                .unwrap_or_else(|| {
+                    panic!(
+                        "ExecInitIncrementalSort (nodeIncrementalSort.c): \
+                         IncrementalSort without an outer plan"
+                    )
+                });
+            let outer_desc = outer
+                .exec_get_result_type(is_plan.sort.plan.lefttree.unwrap().as_plan().unwrap())?;
+            let result_desc = crate::exec_type_from_tl(&is_plan.sort.plan.targetlist)?;
+            let state = ::nodeincrementalsort::exec_init_incremental_sort(
+                is_plan,
+                estate,
+                eflags,
+                &outer_desc,
+                result_desc,
+            );
+            PlanStateNode::IncrementalSort(::mcx::alloc_in(
+                mcx,
+                IncrementalSortNode { state, outer },
+            )?)
         }
         NodeTag::T_Unique => {
             let mcx = estate.es_query_cxt;
@@ -611,7 +648,6 @@ pub fn exec_init_node<'mcx>(
             T_ForeignScan => "nodeForeignscan.c",
             T_CustomScan => "nodeCustom.c",
             T_Material => "nodeMaterial.c",
-            T_IncrementalSort => "nodeIncrementalSort.c",
             T_Memoize => "nodeMemoize.c",
             T_Group => "nodeGroup.c",
             T_WindowAgg => "nodeWindowAgg.c",
@@ -688,6 +724,7 @@ pub fn exec_proc_node<'mcx>(
         PlanStateNode::Agg(aps) => agg_arm(aps, estate),
         PlanStateNode::WindowAgg(w) => window_agg_arm(w, estate),
         PlanStateNode::Sort(s) => sort_arm(s, estate),
+        PlanStateNode::IncrementalSort(s) => incremental_sort_arm(s, estate),
         PlanStateNode::Material(m) => material_arm(m, estate),
         PlanStateNode::Unique(u) => unique_arm(u, estate),
         PlanStateNode::Limit(l) => limit_arm(l, estate),
@@ -783,6 +820,18 @@ fn window_agg_arm<'mcx>(
 fn sort_arm<'mcx>(s: &mut SortNode<'mcx>, estate: &mut EStateData<'mcx>) -> ProcResult {
     let SortNode { state, outer, outer_desc } = s;
     ::nodesort::exec_sort(state, estate, outer_desc.clone(), |es| exec_proc_node(outer, es))
+}
+
+#[inline(never)]
+fn incremental_sort_arm<'mcx>(
+    s: &mut PgBox<'mcx, IncrementalSortNode<'mcx>>,
+    estate: &mut EStateData<'mcx>,
+) -> ProcResult {
+    let s = &mut **s;
+    let outer = &mut s.outer;
+    ::nodeincrementalsort::exec_incremental_sort(&mut s.state, estate, |es| {
+        exec_proc_node(outer, es)
+    })
 }
 
 #[inline(never)]
@@ -985,6 +1034,10 @@ pub fn exec_end_node<'mcx>(
             ::nodesort::exec_end_sort(&mut s.state);
             exec_end_node(&mut s.outer, estate)
         }
+        PlanStateNode::IncrementalSort(s) => {
+            ::nodeincrementalsort::exec_end_incremental_sort(&mut s.state);
+            exec_end_node(&mut s.outer, estate)
+        }
         PlanStateNode::Material(m) => {
             ::nodematerial::exec_end_material(&mut m.state);
             exec_end_node(&mut m.outer, estate)
@@ -1054,6 +1107,7 @@ pub fn exec_shutdown_node<'mcx>(node: &mut PlanStateNode<'mcx>) {
         PlanStateNode::Agg(aps) => exec_shutdown_node(&mut aps.outer),
         PlanStateNode::WindowAgg(w) => exec_shutdown_node(&mut w.outer),
         PlanStateNode::Sort(s) => exec_shutdown_node(&mut s.outer),
+        PlanStateNode::IncrementalSort(s) => exec_shutdown_node(&mut s.outer),
         PlanStateNode::Material(m) => exec_shutdown_node(&mut m.outer),
         PlanStateNode::Unique(u) => exec_shutdown_node(&mut u.outer),
         PlanStateNode::Limit(l) => exec_shutdown_node(&mut l.outer),
@@ -1087,6 +1141,9 @@ pub fn exec_set_tuple_bound<'mcx>(tuples_needed: i64, node: &mut PlanStateNode<'
     match node {
         PlanStateNode::Instrumented(w) => exec_set_tuple_bound(tuples_needed, &mut w.inner),
         PlanStateNode::Sort(s) => ::nodesort::sort_set_tuple_bound(&mut s.state, tuples_needed),
+        PlanStateNode::IncrementalSort(s) => {
+            ::nodeincrementalsort::incremental_sort_set_tuple_bound(&mut s.state, tuples_needed)
+        }
         PlanStateNode::Result(rs) => {
             if let Some(outer) = rs.outer.as_deref_mut() {
                 exec_set_tuple_bound(tuples_needed, outer);

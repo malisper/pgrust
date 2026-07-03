@@ -148,6 +148,7 @@ members = [
     "crates/backend/executor/nodebitmapheapscan",
     "crates/backend/executor/nodeindexonlyscan",
     "crates/backend/executor/nodesort",
+    "crates/backend/executor/nodeincrementalsort",
     "crates/backend/executor/nodeunique",
     "crates/backend/executor/nodelimit",
     "crates/backend/executor/nodehash",

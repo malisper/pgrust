@@ -97,6 +97,8 @@ pub struct TuplesortData<'m> {
     eof_reached: bool,
     markpos_offset: usize,
     markpos_eof: bool,
+    max_space: i64,
+    max_space_status: TupSortStatus,
     sort_keys: PgVec<'m, SortSupport>,
     only_key: bool,
     have_datum1: bool,
@@ -277,6 +279,8 @@ impl Tuplesort {
                 eof_reached: false,
                 markpos_offset: 0,
                 markpos_eof: false,
+                max_space: 0,
+                max_space_status: TupSortStatus::Initial,
                 sort_keys,
                 only_key,
                 have_datum1: true,
@@ -305,17 +309,43 @@ impl Tuplesort {
         self.0.with(|st| st.bound_used)
     }
 
-    pub fn get_stats(&self) -> TuplesortInstrumentation {
-        self.0.with(|st| TuplesortInstrumentation {
-            sortMethod: match st.status {
-                TupSortStatus::SortedInMem if st.bound_used => TuplesortMethod::TopNHeapsort,
-                TupSortStatus::SortedInMem => TuplesortMethod::Quicksort,
-                TupSortStatus::Initial | TupSortStatus::Bounded => {
-                    TuplesortMethod::StillInProgress
-                }
-            },
-            spaceType: TuplesortSpaceType::Memory,
-            spaceUsed: (st.allowed_mem - st.avail_mem + 1023) / 1024,
+    pub fn get_stats(&mut self) -> TuplesortInstrumentation {
+        self.0.with_mut(|st| {
+            st.updatemax();
+            TuplesortInstrumentation {
+                sortMethod: match st.max_space_status {
+                    TupSortStatus::SortedInMem if st.bound_used => TuplesortMethod::TopNHeapsort,
+                    TupSortStatus::SortedInMem => TuplesortMethod::Quicksort,
+                    TupSortStatus::Initial | TupSortStatus::Bounded => {
+                        TuplesortMethod::StillInProgress
+                    }
+                },
+                spaceType: TuplesortSpaceType::Memory,
+                spaceUsed: (st.max_space + 1023) / 1024,
+            }
+        })
+    }
+
+    /// `tuplesort_reset`: recycle per-batch memory, keep the resolved sort
+    /// keys and the memtuples array capacity.
+    pub fn reset(&mut self) {
+        self.0.with_mut(|st| {
+            st.updatemax();
+            st.tuplecontext.reset();
+            st.memtuples.clear();
+            st.status = TupSortStatus::Initial;
+            st.bounded = false;
+            st.bound_used = false;
+            st.bound = 0;
+            st.grow_memtuples = true;
+            st.current = 0;
+            st.eof_reached = false;
+            st.markpos_offset = 0;
+            st.markpos_eof = false;
+            // C leaves availMem = allowedMem after reset (memtuples chunk not
+            // re-charged); mirrored for stat parity.
+            st.avail_mem = st.allowed_mem;
+            st.recompute_put_watermark();
         })
     }
 
@@ -637,6 +667,15 @@ impl<'m> TuplesortData<'m> {
                 self.puttuple_bounded(SortTuple { tuple, datum1, isnull1 })
             }
             TupSortStatus::SortedInMem => Err(invalid_state("tuplesort_puttuple_common")),
+        }
+    }
+
+    /// `tuplesort_updatemax`, memory arm only (no tapeset).
+    fn updatemax(&mut self) {
+        let space_used = self.allowed_mem - self.avail_mem;
+        if space_used > self.max_space {
+            self.max_space = space_used;
+            self.max_space_status = self.status;
         }
     }
 

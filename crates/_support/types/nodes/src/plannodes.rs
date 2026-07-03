@@ -240,6 +240,15 @@ pub struct Sort<'mcx> {
     pub nullsFirst: &'mcx [bool],
 }
 
+/// Per-key arrays as in [`Sort`]; the first `nPresortedCols` keys arrive
+/// already ordered from the child.
+#[derive(Default)]
+#[repr(C)]
+pub struct IncrementalSort<'mcx> {
+    pub sort: Sort<'mcx>,
+    pub nPresortedCols: i32,
+}
+
 /// Per-key arrays as in [`Sort`].
 #[derive(Default)]
 #[repr(C)]
@@ -536,6 +545,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for ValuesScan<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for Sort<'mcx> {
     const TAG: NodeTag = NodeTag::T_Sort;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for IncrementalSort<'mcx> {
+    const TAG: NodeTag = NodeTag::T_IncrementalSort;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for Unique<'mcx> {
     const TAG: NodeTag = NodeTag::T_Unique;
 }
@@ -590,6 +602,8 @@ unsafe impl<'mcx> PlanVariant<'mcx> for CteScan<'mcx> {}
 unsafe impl<'mcx> PlanVariant<'mcx> for ValuesScan<'mcx> {}
 // SAFETY: repr(C), Plan first (offsets asserted below), tag in is_plan_tag.
 unsafe impl<'mcx> PlanVariant<'mcx> for Sort<'mcx> {}
+// SAFETY: repr(C), Plan first via the Sort base (offsets asserted below).
+unsafe impl<'mcx> PlanVariant<'mcx> for IncrementalSort<'mcx> {}
 // SAFETY: repr(C), Plan first (offsets asserted below), tag in is_plan_tag.
 unsafe impl<'mcx> PlanVariant<'mcx> for Unique<'mcx> {}
 // SAFETY: repr(C), Plan first (offsets asserted below), tag in is_plan_tag.
@@ -657,6 +671,10 @@ const _: () = {
     );
     assert!(offset_of!(Sort, plan) == 0);
     assert!(offset_of!(NodeRep<Sort>, payload) == offset_of!(NodeRep<Plan>, payload));
+    assert!(offset_of!(IncrementalSort, sort) == 0);
+    assert!(
+        offset_of!(NodeRep<IncrementalSort>, payload) == offset_of!(NodeRep<Plan>, payload)
+    );
     assert!(offset_of!(Unique, plan) == 0);
     assert!(offset_of!(NodeRep<Unique>, payload) == offset_of!(NodeRep<Plan>, payload));
     assert!(offset_of!(Agg, plan) == 0);
@@ -699,6 +717,7 @@ fn is_plan_tag(tag: NodeTag) -> bool {
             | NodeTag::T_CteScan
             | NodeTag::T_ValuesScan
             | NodeTag::T_Sort
+            | NodeTag::T_IncrementalSort
             | NodeTag::T_Unique
             | NodeTag::T_Agg
             | NodeTag::T_WindowAgg
@@ -775,6 +794,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_sort(self) -> Option<&'mcx Sort<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_incremental_sort(self) -> Option<&'mcx IncrementalSort<'mcx>> {
         self.as_variant()
     }
 

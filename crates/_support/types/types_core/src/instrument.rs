@@ -123,6 +123,17 @@ pub enum TuplesortMethod {
 }
 
 impl TuplesortMethod {
+    /// C TuplesortMethod bit value (tuplesort.h); StillInProgress is 0.
+    pub fn bit(self) -> u32 {
+        match self {
+            TuplesortMethod::StillInProgress => 0,
+            TuplesortMethod::TopNHeapsort => 1 << 0,
+            TuplesortMethod::Quicksort => 1 << 1,
+            TuplesortMethod::ExternalSort => 1 << 2,
+            TuplesortMethod::ExternalMerge => 1 << 3,
+        }
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             TuplesortMethod::StillInProgress => "still in progress",
@@ -155,6 +166,43 @@ pub struct TuplesortInstrumentation {
     pub sortMethod: TuplesortMethod,
     pub spaceType: TuplesortSpaceType,
     pub spaceUsed: i64,
+}
+
+/// C IncrementalSortGroupInfo (execnodes.h); sortMethods is the C bitmask of
+/// TuplesortMethod bits.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct IncrementalSortGroupInfo {
+    pub groupCount: i64,
+    pub maxDiskSpaceUsed: i64,
+    pub totalDiskSpaceUsed: i64,
+    pub maxMemorySpaceUsed: i64,
+    pub totalMemorySpaceUsed: i64,
+    pub sortMethods: u32,
+}
+
+impl IncrementalSortGroupInfo {
+    /// C instrumentSortedGroup (nodeIncrementalSort.c).
+    pub fn record(&mut self, stats: &TuplesortInstrumentation) {
+        self.groupCount += 1;
+        match stats.spaceType {
+            TuplesortSpaceType::Disk => {
+                self.totalDiskSpaceUsed += stats.spaceUsed;
+                self.maxDiskSpaceUsed = self.maxDiskSpaceUsed.max(stats.spaceUsed);
+            }
+            TuplesortSpaceType::Memory => {
+                self.totalMemorySpaceUsed += stats.spaceUsed;
+                self.maxMemorySpaceUsed = self.maxMemorySpaceUsed.max(stats.spaceUsed);
+            }
+        }
+        self.sortMethods |= stats.sortMethod.bit();
+    }
+}
+
+/// C IncrementalSortInfo (execnodes.h).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct IncrementalSortInfo {
+    pub fullsortGroupInfo: IncrementalSortGroupInfo,
+    pub prefixsortGroupInfo: IncrementalSortGroupInfo,
 }
 
 // C AggregateInstrumentation (nodeAgg.h) + hash_planned_partitions (an

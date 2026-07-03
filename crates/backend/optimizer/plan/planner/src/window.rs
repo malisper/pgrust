@@ -341,13 +341,14 @@ fn create_one_window_path<'mcx>(
             &run.root.path(path_id).base().pathkeys,
         );
         if !is_sorted {
-            if presorted == 0 || !crate::gucs::enable_incremental_sort() {
-                let keys = crate::relnode::pgvec_clone_shallow(mcx, &window_pathkeys);
-                path_id =
-                    crate::pathnode::create_sort_path(run, window_rel, path_id, keys, -1.0);
+            let keys = crate::relnode::pgvec_clone_shallow(mcx, &window_pathkeys);
+            path_id = if presorted == 0 || !crate::gucs::enable_incremental_sort() {
+                crate::pathnode::create_sort_path(run, window_rel, path_id, keys, -1.0)
             } else {
-                panic!("create_incremental_sort_path (pathnode.c): M2 incremental-sort lane");
-            }
+                crate::pathnode::create_incremental_sort_path(
+                    run, window_rel, path_id, keys, presorted, -1.0,
+                )?
+            };
         }
 
         let winref = wc_node.as_window_clause().expect("WindowClause").winref;

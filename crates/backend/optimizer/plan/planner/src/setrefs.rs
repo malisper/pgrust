@@ -238,7 +238,8 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
             );
             set_upper_references(run, plan, rtoffset)?;
         }
-        NodeTag::T_Sort | NodeTag::T_Unique | NodeTag::T_Material => {
+        NodeTag::T_Sort | NodeTag::T_IncrementalSort | NodeTag::T_Unique
+        | NodeTag::T_Material => {
             // Neither evaluates its tlist; fixed up for EXPLAIN only.
             set_dummy_tlist_references(run, plan, rtoffset)?;
             debug_assert!(plan.as_plan().unwrap().qual.is_nil());

@@ -1110,7 +1110,11 @@ fn finalize_plan<'mcx>(
                 finalize_primnode(run, rcq, &mut paramids)?;
             }
         }
-        NodeTag::T_SeqScan | NodeTag::T_Sort | NodeTag::T_Agg | NodeTag::T_Material => {}
+        NodeTag::T_SeqScan
+        | NodeTag::T_Sort
+        | NodeTag::T_IncrementalSort
+        | NodeTag::T_Agg
+        | NodeTag::T_Material => {}
         // cteParam is linkage only; the CTE plan's extParam matters (C bug #4902).
         NodeTag::T_CteScan => {
             let plan_id = plan.as_cte_scan().unwrap().ctePlanId;

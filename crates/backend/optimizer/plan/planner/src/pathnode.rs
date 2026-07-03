@@ -853,6 +853,59 @@ pub fn create_sort_path<'mcx>(
     id
 }
 
+pub fn create_incremental_sort_path<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel_id: RelId,
+    subpath_id: PathId,
+    pathkeys: PgVec<'mcx, PathKey>,
+    presorted_keys: usize,
+    limit_tuples: f64,
+) -> PgResult<PathId> {
+    let sub = run.root.path(subpath_id).base();
+    let rel = run.root.rel(rel_id);
+    let path = Path {
+        type_: tag16(NodeTag::T_IncrementalSortPath),
+        pathtype: tag16(NodeTag::T_IncrementalSort),
+        parent: rel_id,
+        // Sort doesn't project, so use the source path's pathtarget.
+        pathtarget_id: sub.pathtarget_id,
+        param_info: None,
+        parallel_aware: false,
+        parallel_safe: rel.consider_parallel && sub.parallel_safe,
+        parallel_workers: sub.parallel_workers,
+        rows: 0.0,
+        disabled_nodes: 0,
+        startup_cost: 0.0,
+        total_cost: 0.0,
+        pathkeys,
+    };
+    let (sub_disabled, sub_startup, sub_total, sub_rows) =
+        (sub.disabled_nodes, sub.startup_cost, sub.total_cost, sub.rows);
+    let width = sub.pathtarget_id.map_or(0, |pt| run.root.pathtarget(pt).width);
+    let keys = crate::relnode::pgvec_clone_shallow(run.mcx, &path.pathkeys);
+    let id = run.root.alloc_path(PathNode::IncrementalSortPath(
+        types_pathnodes::IncrementalSortPath {
+            spath: types_pathnodes::SortPath { path, subpath: Some(subpath_id) },
+            nPresortedCols: presorted_keys as i32,
+        },
+    ));
+    crate::costsize::cost_incremental_sort(
+        run,
+        id,
+        &keys,
+        presorted_keys,
+        sub_disabled,
+        sub_startup,
+        sub_total,
+        sub_rows,
+        width,
+        0.0,
+        init_small::globals::work_mem(),
+        limit_tuples,
+    )?;
+    Ok(id)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn create_limit_path<'mcx>(
     run: &mut PlannerRun<'mcx>,
