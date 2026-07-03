@@ -465,8 +465,7 @@ fn just_func_kernel_strict_null_const() {
     });
 }
 
-// Miri repro for the Hash32Var arm: the raw arg-slot write must precede the
-// fcinfo &mut reborrow or the call retag hits an invalidated tag.
+// Miri repro: the Hash32Var arg write must not invalidate the fcinfo reborrow.
 #[test]
 fn hash32_var_kernel_arg_write_then_call() {
     with_mcx(|mcx| {

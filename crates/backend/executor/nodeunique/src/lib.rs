@@ -128,7 +128,7 @@ impl<'mcx> UniqueState<'mcx> {
         self.have_prev = true;
         let tup = exectuples::exec_fetch_slot_minimal_tuple(&mut self.prev_slot, mcx, mcx)?;
         let ptr = match tup {
-            exectuples::FetchedMinimalTuple::Slot(t) => core::ptr::NonNull::from(t),
+            exectuples::FetchedMinimalTuple::Slot(t, _) => t,
             exectuples::FetchedMinimalTuple::Copied(_) => {
                 unreachable!("prev slot was just materialized by exec_copy_slot")
             }
