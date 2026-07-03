@@ -80,7 +80,11 @@ pub fn AlterTableGetLockLevel(cmds: &NodeList<'_>) -> LOCKMODE {
             | AlterTableType::AT_CookedColumnDefault => {
                 return AccessExclusiveLock;
             }
-            AlterTableType::AT_AddConstraint => {}
+            AlterTableType::AT_AddConstraint
+            | AlterTableType::AT_EnableRule
+            | AlterTableType::AT_EnableAlwaysRule
+            | AlterTableType::AT_EnableReplicaRule
+            | AlterTableType::AT_DisableRule => {}
             other => unported(&format!("AlterTableGetLockLevel {other:?}")),
         }
     }
