@@ -58,8 +58,8 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
         Ok(tok)
     }
 
-    fn lineno(&self, loc: i32) -> i32 {
-        location_to_lineno(self.sc.scanbuf(), loc)
+    fn lineno(&mut self, loc: i32) -> i32 {
+        self.sc.lineno_for(loc)
     }
 
     fn source_span(&self, start: i32, end: i32) -> String {
