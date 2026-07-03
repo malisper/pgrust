@@ -30,8 +30,7 @@ impl<'mcx> IndexClauseSet<'mcx> {
 // baserestrictinfo with each index. LOUD BOUNDARY: proving a partial index
 // usable (predOK) and filtering implied quals out of indrestrictinfo both
 // require predicate_implied_by — predtest.c is unported — so ANY planning
-// over a rel that has a partial index panics here. Partial index creation,
-// pg_index parity, and INSERT maintenance land regardless (executor lane).
+// over a rel that has a partial index panics here.
 pub fn check_index_predicates<'mcx>(run: &mut PlannerRun<'mcx>, rel: RelId) {
     let mcx = run.mcx;
     let nindexes = run.root.rel(rel).indexlist.len();

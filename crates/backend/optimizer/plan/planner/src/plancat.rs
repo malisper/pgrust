@@ -237,6 +237,10 @@ pub fn get_relation_info<'mcx>(
                     types_nodes::Node::mk_target_entry(mcx, expr, (i + 1) as i16, None, false)?;
                 info.indextlist.push(run.intern_expr(tle));
             }
+            assert!(
+                indexpr_next == info.indexprs.len(),
+                "wrong number of index expressions"
+            );
 
             info.indrestrictinfo = RefCell::new(PgVec::new_in(mcx));
             info.predOK = Cell::new(false);
