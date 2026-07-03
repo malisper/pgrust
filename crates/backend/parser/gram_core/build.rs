@@ -87,7 +87,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         // NULL / NIL constants: the consumer accessor decides the variant —
         // lists are NIL, aliases the Alias variant, every other pointer Node.
         match (lhs_field, rhs) {
-            ("list", "NIL") => return Some(empty_list),
+            ("list", "NIL") | ("list", "NULL") => return Some(empty_list),
             ("alias", "NULL") => return Some(null_alias),
             ("selectlimit", "NULL") => return Some(null_limit),
             (_, "NULL") => return Some(null_node),
