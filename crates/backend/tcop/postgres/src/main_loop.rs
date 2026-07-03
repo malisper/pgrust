@@ -643,9 +643,7 @@ fn types_guc_context_sighup() -> types_guc::GucContext {
 }
 
 fn pg_strong_random(buf: &mut [u8]) -> PgResult<()> {
-    // SAFETY: getentropy fills exactly buf.len() (<= 256) bytes or fails.
-    let rc = unsafe { libc::getentropy(buf.as_mut_ptr().cast(), buf.len()) };
-    if rc != 0 {
+    if !pg_strong_random::pg_strong_random(buf) {
         return Err(ereport(ERROR)
             .errmsg("could not generate random cancel key")
             .into_error()

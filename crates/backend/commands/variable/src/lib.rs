@@ -420,12 +420,13 @@ pub fn check_random_seed(
     Ok(true)
 }
 
-pub fn assign_random_seed(_newval: f64, extra: Option<&GucHookExtra>) {
+pub fn assign_random_seed(newval: f64, extra: Option<&GucHookExtra>) {
     let armed = extra
         .and_then(|e| e.downcast_ref::<AtomicBool>())
         .expect("assign_random_seed extra");
     if armed.swap(false, Ordering::Relaxed) {
-        unported("assign_random_seed: setseed (float lane)");
+        // GUC bounds pin newval to [-1,1]; setseed cannot fail on it.
+        pseudorandomfuncs::setseed(newval).expect("assign_random_seed: setseed");
     }
 }
 

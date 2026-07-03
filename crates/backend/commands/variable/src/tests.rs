@@ -171,12 +171,16 @@ fn random_seed_arms_only_for_interactive_sources() {
 }
 
 #[test]
-#[should_panic(expected = "setseed")]
-fn random_seed_interactive_assign_panics_until_float_setseed() {
+fn random_seed_interactive_assign_reseeds_via_setseed() {
     setup();
     let mut extra = None;
     check_random_seed(&mut 0.5, &mut extra, PGC_S_SESSION).unwrap();
     assign_random_seed(0.5, extra.as_ref());
+    // setseed(0.5) tape (Homebrew C 18.3): drandom() must resume it.
+    assert_eq!(pseudorandomfuncs::drandom(), 0.9851677175347999);
+    // Armed flag is one-shot: a second assign with the same extra is a no-op.
+    assign_random_seed(0.25, extra.as_ref());
+    assert_eq!(pseudorandomfuncs::drandom(), 0.825301858027981);
 }
 
 #[test]

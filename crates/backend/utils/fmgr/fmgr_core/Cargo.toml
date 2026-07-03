@@ -48,6 +48,8 @@ nbt_compare = { path = "../../../access/nbtree/compare" }
 varlena = { path = "../../adt/varlena" }
 commands_async = { path = "../../../commands/commands_async" }
 adt_windowfuncs = { path = "../../adt/windowfuncs" }
+cryptohashfuncs = { path = "../../adt/cryptohashfuncs" }
+pseudorandomfuncs = { path = "../../adt/pseudorandomfuncs" }
 conv = { path = "../../mb/conv" }
 
 [dev-dependencies]

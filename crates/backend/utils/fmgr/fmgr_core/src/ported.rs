@@ -36,6 +36,8 @@ const TABLES: &[&[FmgrBuiltin]] = &[
     ::varlena::builtins::VARLENA_BUILTINS,
     ::adt_windowfuncs::WINDOWFUNCS_BUILTINS,
     ::commands_async::builtins::ASYNC_BUILTINS,
+    ::cryptohashfuncs::CRYPTOHASH_BUILTINS,
+    ::pseudorandomfuncs::builtins::PSEUDORANDOM_BUILTINS,
 ];
 
 const fn total() -> usize {

@@ -60,7 +60,7 @@ fc_sum! {
 /// # Safety
 /// Arg `i` is a non-null numeric varlena (strict fn).
 #[inline]
-unsafe fn num_arg(fcinfo: &Fcinfo, i: usize) -> PgResult<Num<'_>> {
+pub unsafe fn num_arg(fcinfo: &Fcinfo, i: usize) -> PgResult<Num<'_>> {
     // SAFETY: forwarded caller contract.
     let v = unsafe { fcinfo.arg_varlena_packed(i)? };
     let payload = if v.is_short() {
