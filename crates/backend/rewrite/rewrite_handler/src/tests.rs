@@ -197,7 +197,7 @@ fn fake_scan_pg_policy<'mcx>(
             polname: "p1",
             polcmd: b'*',
             polpermissive: true,
-            polroles: roles,
+            polroles: roles.leak(),
             polqual: Some(q),
             polwithcheck: None,
         });

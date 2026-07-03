@@ -47,7 +47,7 @@ fn oid_array_attr<'mcx>(
     td: &TupleDescData<'_>,
     tup: &HeapTupleData<'_>,
     attno: i32,
-) -> PgResult<PgVec<'mcx, Oid>> {
+) -> PgResult<&'mcx [Oid]> {
     let d = req(td, tup, attno)?;
     let p = d.as_usize() as *const u8;
     // SAFETY: non-null varlena attr datum addresses in-tuple bytes; length is
@@ -79,7 +79,7 @@ fn oid_array_attr<'mcx>(
     for i in 0..nelems {
         out.push(word(20 + 4 * i));
     }
-    Ok(out)
+    Ok(out.leak())
 }
 
 // RelationBuildRowSecurity's pg_policy scan half (policy.c): polrelid equality
