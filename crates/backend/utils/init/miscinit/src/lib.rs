@@ -172,6 +172,7 @@ pub fn init_seams() {
     use miscinit_seams as s;
 
     s::get_user_id::set(GetUserId);
+    s::get_session_user_id::set(GetSessionUserId);
     s::get_user_id_and_sec_context::set(GetUserIdAndSecContext);
     s::set_user_id_and_sec_context::set(SetUserIdAndSecContext);
     s::get_user_name_from_id::set(GetUserNameFromId);

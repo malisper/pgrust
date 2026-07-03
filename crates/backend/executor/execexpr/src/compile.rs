@@ -1197,13 +1197,19 @@ pub(crate) fn init_expr_rec<'mcx>(
             push_step(state, mcx, step)
         }
         NodeTag::T_SQLValueFunction => {
+            use ::types_nodes::primnodes::SQLValueFunctionOp;
             let svf = node.as_sql_value_function().unwrap();
-            let layout = core::alloc::Layout::from_size_align(12, 8).expect("timetz layout");
-            let timetz = mcx.allocate(layout).map_err(|_| mcx.oom(layout.size()))?.cast();
+            let size = if (svf.op as u32) >= SQLValueFunctionOp::SVFOP_CURRENT_ROLE as u32 {
+                core::mem::size_of::<types_tuple::NameData>()
+            } else {
+                12
+            };
+            let layout = core::alloc::Layout::from_size_align(size, 8).expect("svf layout");
+            let scratch = mcx.allocate(layout).map_err(|_| mcx.oom(layout.size()))?.cast();
             push_step(
                 state,
                 mcx,
-                Step::SqlValueFunction { op: svf.op, typmod: svf.typmod, timetz, out },
+                Step::SqlValueFunction { op: svf.op, typmod: svf.typmod, scratch, out },
             )
         }
         NodeTag::T_BoolExpr => init_bool_expr(node, state, mcx, out, agg, params, sub),

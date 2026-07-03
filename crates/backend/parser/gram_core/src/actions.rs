@@ -3232,8 +3232,9 @@ impl<'mcx> Parser<'mcx> {
                 )?;
                 *yyval = YYSTYPE::Node(Some(f.seal()));
             }
-            // CURRENT_DATE .. LOCALTIMESTAMP[(n)] (makeSQLValueFunction).
-            2140..=2148 => {
+            // CURRENT_DATE .. CURRENT_SCHEMA (makeSQLValueFunction; 2152
+            // SYSTEM_USER is a makeFuncCall, not an SVFOP — stays a loud).
+            2140..=2151 | 2153..=2155 => {
                 use SQLValueFunctionOp as Op;
                 let (op, typmod) = match rule {
                     2140 => (Op::SVFOP_CURRENT_DATE, -1),
@@ -3244,7 +3245,13 @@ impl<'mcx> Parser<'mcx> {
                     2145 => (Op::SVFOP_LOCALTIME, -1),
                     2146 => (Op::SVFOP_LOCALTIME_N, view.v(3).ival()),
                     2147 => (Op::SVFOP_LOCALTIMESTAMP, -1),
-                    _ => (Op::SVFOP_LOCALTIMESTAMP_N, view.v(3).ival()),
+                    2148 => (Op::SVFOP_LOCALTIMESTAMP_N, view.v(3).ival()),
+                    2149 => (Op::SVFOP_CURRENT_ROLE, -1),
+                    2150 => (Op::SVFOP_CURRENT_USER, -1),
+                    2151 => (Op::SVFOP_SESSION_USER, -1),
+                    2153 => (Op::SVFOP_USER, -1),
+                    2154 => (Op::SVFOP_CURRENT_CATALOG, -1),
+                    _ => (Op::SVFOP_CURRENT_SCHEMA, -1),
                 };
                 let n = Node::mk(
                     mcx,
