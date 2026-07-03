@@ -821,6 +821,89 @@ pub fn cost_bitmap_heap_scan(
     p.total_cost = startup_cost + run_cost;
 }
 
+
+pub fn cost_material(
+    input_disabled_nodes: i32,
+    input_startup_cost: f64,
+    input_total_cost: f64,
+    tuples: f64,
+    width: i32,
+) -> (f64, i32, f64, f64) {
+    let startup_cost = input_startup_cost;
+    let mut run_cost = input_total_cost - input_startup_cost;
+    let nbytes = relation_byte_size(tuples, width);
+    let work_mem_bytes = init_small::globals::work_mem() as f64 * 1024.0;
+    // 2x cpu_operator_cost per tuple: must exceed cost_rescan's charge or
+    // A-outer/B-inner vs B-outer/A-inner materialized nestloops tie.
+    run_cost += 2.0 * gucs::cpu_operator_cost() * tuples;
+    if nbytes > work_mem_bytes {
+        let npages = (nbytes / BLCKSZ as f64).ceil();
+        run_cost += gucs::seq_page_cost() * npages;
+    }
+    (
+        tuples,
+        input_disabled_nodes + if gucs::enable_material() { 0 } else { 1 },
+        startup_cost,
+        startup_cost + run_cost,
+    )
+}
+
+// cost_tidscan (costsize.c); param_info and CurrentOfExpr are loud upstream.
+pub fn cost_tidscan(
+    run: &mut PlannerRun<'_>,
+    path_id: PathId,
+    rel: RelId,
+    tidquals: &[RinfoId],
+) -> PgResult<()> {
+    let (relid, rtekind, reltablespace, base_rows) = {
+        let baserel = run.root.rel(rel);
+        (baserel.relid, baserel.rtekind, baserel.reltablespace, baserel.rows)
+    };
+    debug_assert!(relid > 0 && rtekind == RTE_RELATION);
+    debug_assert!(!tidquals.is_empty());
+    assert!(
+        run.root.path(path_id).base().param_info.is_none(),
+        "cost_tidscan (costsize.c): parameterized path; M2 lateral lane"
+    );
+    run.root.path_mut(path_id).base_mut().rows = base_rows;
+
+    let mut ntuples = 0.0f64;
+    for &rid in tidquals {
+        let qual = *run.root.expr_node(run.root.rinfo(rid).clause);
+        debug_assert!(gucs::enable_tidscan() || qual.node_tag() == NodeTag::T_CurrentOfExpr);
+        if let Some(saop) = qual.as_scalar_array_op_expr() {
+            ntuples += planner_seams::estimate_array_length::call(saop.args.nth(1));
+        } else if qual.node_tag() == NodeTag::T_CurrentOfExpr {
+            ntuples += 1.0;
+        } else {
+            ntuples += 1.0;
+        }
+    }
+
+    let mut quals: PgVec<'_, RinfoId> = PgVec::new_in(run.mcx);
+    quals.extend(tidquals.iter().copied());
+    let tid_qual_cost = cost_qual_eval(run, &quals)?;
+    let (spc_random_page_cost, _) = get_tablespace_page_costs(reltablespace);
+    let mut run_cost = spc_random_page_cost * ntuples;
+
+    let qpqual_cost = get_restriction_qual_cost(run, rel);
+    // TID quals are assumed a subset of the qpquals (C's XXX note).
+    let mut startup_cost = qpqual_cost.startup + tid_qual_cost.per_tuple;
+    let cpu_per_tuple = gucs::cpu_tuple_cost() + qpqual_cost.per_tuple - tid_qual_cost.per_tuple;
+    run_cost += cpu_per_tuple * ntuples;
+
+    let path_rows = run.root.path(path_id).base().rows;
+    let target = run.root.path_pathtarget(path_id);
+    startup_cost += target.cost.startup;
+    run_cost += target.cost.per_tuple * path_rows;
+
+    let p = run.root.path_mut(path_id).base_mut();
+    p.disabled_nodes = 0;
+    p.startup_cost = startup_cost;
+    p.total_cost = startup_cost + run_cost;
+    Ok(())
+}
+
 // cost_agg (costsize.c), AGG_PLAIN/AGG_SORTED/AGG_HASHED arms.
 #[allow(clippy::too_many_arguments)]
 pub fn cost_agg(

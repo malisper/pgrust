@@ -867,6 +867,24 @@ pub fn create_ctescan_path<'mcx>(run: &mut PlannerRun<'mcx>, rel_id: RelId) -> P
     Ok(id)
 }
 
+
+// create_tidscan_path (pathnode.c); required_outer is empty on this lane.
+pub fn create_tidscan_path<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel_id: RelId,
+    tidquals: PgVec<'mcx, RinfoId>,
+) -> PgResult<PathId> {
+    let mut path = base_path(run, NodeTag::T_TidPath, NodeTag::T_TidScan, rel_id);
+    path.parallel_aware = false;
+    path.parallel_safe = run.root.rel(rel_id).consider_parallel;
+    let quals = types_pathnodes::relids::pgvec_clone_shallow(run.mcx, &tidquals);
+    let id = run
+        .root
+        .alloc_path(PathNode::TidPath(types_pathnodes::TidPath { path, tidquals }));
+    costsize::cost_tidscan(run, id, rel_id, &quals)?;
+    Ok(id)
+}
+
 // create_bitmap_and_path (pathnode.c); required_outer empty on this lane
 // (children are unparameterized, asserted).
 pub fn create_bitmap_and_path<'mcx>(
@@ -2190,15 +2208,9 @@ pub fn create_material_path(run: &mut PlannerRun<'_>, rel: RelId, subpath: PathI
     let sub_pathkeys = types_pathnodes::relids::pgvec_clone_shallow(run.mcx, &sub.pathkeys);
     let width = run.root.path_pathtarget(subpath).width;
 
-    let startup_cost = sub_startup;
-    let mut run_cost = sub_total - sub_startup;
-    run_cost += 2.0 * gucs::cpu_operator_cost() * sub_rows;
-    let nbytes = costsize::relation_byte_size(sub_rows, width);
-    let work_mem_bytes = init_small::globals::work_mem() as f64 * 1024.0;
-    if nbytes > work_mem_bytes {
-        let npages = (nbytes / 8192.0).ceil();
-        run_cost += gucs::seq_page_cost() * npages;
-    }
+    let (rows, disabled_nodes, startup_cost, total_cost) =
+        costsize::cost_material(sub_disabled, sub_startup, sub_total, sub_rows, width);
+    debug_assert!(rows == sub_rows);
 
     let path = Path {
         type_: tag16(NodeTag::T_MaterialPath),
@@ -2209,10 +2221,10 @@ pub fn create_material_path(run: &mut PlannerRun<'_>, rel: RelId, subpath: PathI
         parallel_aware: false,
         parallel_safe: run.root.rel(rel).consider_parallel && sub_parallel_safe,
         parallel_workers: sub_parallel_workers,
-        rows: sub_rows,
-        disabled_nodes: sub_disabled + if gucs::enable_material() { 0 } else { 1 },
+        rows,
+        disabled_nodes,
         startup_cost,
-        total_cost: startup_cost + run_cost,
+        total_cost,
         pathkeys: sub_pathkeys,
     };
     run.root

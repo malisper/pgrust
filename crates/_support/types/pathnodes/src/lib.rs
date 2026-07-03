@@ -638,7 +638,7 @@ pub struct BitmapOrPath<'mcx> {
 #[derive(Clone, Debug)]
 pub struct TidPath<'mcx> {
     pub path: Path<'mcx>,
-    pub tidquals: PgVec<'mcx, NodeId>,
+    pub tidquals: PgVec<'mcx, RinfoId>,
 }
 
 #[derive(Clone, Debug)]

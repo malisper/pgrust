@@ -43,6 +43,7 @@ real_guc!(CPU_INDEX_TUPLE_COST, cpu_index_tuple_cost, set_cpu_index_tuple_cost, 
 real_guc!(CPU_OPERATOR_COST, cpu_operator_cost, set_cpu_operator_cost, guc_tables::consts::DEFAULT_CPU_OPERATOR_COST);
 int_guc!(EFFECTIVE_CACHE_SIZE, effective_cache_size, set_effective_cache_size, guc_tables::consts::DEFAULT_EFFECTIVE_CACHE_SIZE);
 bool_guc!(ENABLE_SEQSCAN, enable_seqscan, set_enable_seqscan, true);
+bool_guc!(ENABLE_TIDSCAN, enable_tidscan, set_enable_tidscan, true);
 bool_guc!(ENABLE_INDEXSCAN, enable_indexscan, set_enable_indexscan, true);
 bool_guc!(ENABLE_INDEXONLYSCAN, enable_indexonlyscan, set_enable_indexonlyscan, true);
 bool_guc!(ENABLE_BITMAPSCAN, enable_bitmapscan, set_enable_bitmapscan, true);
@@ -72,6 +73,8 @@ pub fn install() {
         .install(GucVarAccessors { get: effective_cache_size, set: set_effective_cache_size });
     guc_tables::vars::enable_seqscan
         .install(GucVarAccessors { get: enable_seqscan, set: set_enable_seqscan });
+    guc_tables::vars::enable_tidscan
+        .install(GucVarAccessors { get: enable_tidscan, set: set_enable_tidscan });
     guc_tables::vars::enable_indexscan
         .install(GucVarAccessors { get: enable_indexscan, set: set_enable_indexscan });
     guc_tables::vars::enable_indexonlyscan
