@@ -59,6 +59,14 @@ pub enum Step {
     FuncExprStrict2 { call: FuncCall, out: OutRef },
     FuncExprStrict { call: FuncCall, out: OutRef },
     Qual { jumpdone: u32 },
+    Jump { jumpdone: u32 },
+    JumpIfNotTrue { jumpdone: u32, out: OutRef },
+    // slot: the owning CASE's compile-allocated testval workspace
+    // (C d.casetest.value/isnull; the EXT econtext form is unported).
+    CaseTestVal { slot: NonNull<NullableDatum>, out: OutRef },
+    // C EEOP_MAKE_READONLY, in place on the CASE testval workspace
+    // (source and target alias there in C too).
+    MakeReadonly { slot: NonNull<NullableDatum> },
     // anynull: per-BoolExpr compile-allocated scratch (C d.boolexpr.anynull);
     // FIRST/STEP short-circuit to jumpdone, LAST resolves the NULL outcome.
     BoolAndStepFirst { anynull: NonNull<bool>, jumpdone: u32, out: OutRef },
@@ -424,6 +432,8 @@ pub struct ExprState<'mcx> {
     pub(crate) frames: PgVec<'mcx, FuncFrame<'mcx>>,
     pub(crate) kernel: Kernel,
     pub(crate) flags: u8,
+    // C ExprState.innermost_caseval/casenull: compile-time only.
+    pub(crate) innermost_case: Option<NonNull<NullableDatum>>,
     // PARAM_EXEC ids this expression reads; the owning node resolves pending
     // initplans against these before evaluation (nodeSubplan.c lane).
     pub(crate) param_exec_deps: PgVec<'mcx, u32>,
@@ -445,6 +455,7 @@ impl<'mcx> ExprState<'mcx> {
                 frames: PgVec::new_in(mcx),
                 kernel: Kernel::Program,
                 flags: 0,
+                innermost_case: None,
                 param_exec_deps: PgVec::new_in(mcx),
             });
             Ok(::mcx::PgBox::from_raw_in(p.as_ptr(), mcx))

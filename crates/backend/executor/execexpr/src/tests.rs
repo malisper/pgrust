@@ -1030,3 +1030,108 @@ fn sql_value_function_datetime_ops() {
         assert_eq!(zone, 0);
     });
 }
+
+#[test]
+fn case_expr_arg_form() {
+    with_mcx(|mcx| {
+        // CASE scanvar WHEN 1 THEN 10 WHEN 2 THEN 20 ELSE 30 END, in the
+        // parser's expanded shape: int4eq(CaseTestExpr, k) conditions.
+        let case_test = || {
+            Node::mk(
+                mcx,
+                ::types_nodes::primnodes::CaseTestExpr {
+                    typeId: INT4OID,
+                    typeMod: -1,
+                    collation: 0,
+                },
+            )
+            .unwrap()
+        };
+        let when = |k: i32, r: i32| {
+            let mut args = NodeList::nil();
+            args.lappend(mcx, case_test()).unwrap();
+            args.lappend(mcx, mk_int4_const(mcx, Some(k))).unwrap();
+            Node::mk(
+                mcx,
+                ::types_nodes::primnodes::CaseWhen {
+                    expr: Some(mk_opexpr(mcx, 65, BOOLOID, args)),
+                    result: Some(mk_int4_const(mcx, Some(r))),
+                    location: -1,
+                },
+            )
+            .unwrap()
+        };
+        let mut whens = NodeList::nil();
+        whens.lappend(mcx, when(1, 10)).unwrap();
+        whens.lappend(mcx, when(2, 20)).unwrap();
+        let case = Node::mk(
+            mcx,
+            ::types_nodes::primnodes::CaseExpr {
+                casetype: INT4OID,
+                casecollid: 0,
+                arg: Some(mk_scan_var(mcx, 1, INT4OID)),
+                args: whens,
+                defresult: Some(mk_int4_const(mcx, Some(30))),
+                location: -1,
+            },
+        )
+        .unwrap();
+        let mut state = exec_init_expr(mcx, Some(case), ParamBind::NONE).unwrap().unwrap();
+        let mut eval = |v: Option<i32>| {
+            let mut slot = virtual_slot(mcx, &[v]);
+            let mut slots = EvalSlots { scan: Some(&mut slot), inner: None, outer: None };
+            exec_eval_expr(&mut state, &mut slots).unwrap()
+        };
+        assert_eq!(eval(Some(1)).value.as_i32(), 10);
+        assert_eq!(eval(Some(2)).value.as_i32(), 20);
+        assert_eq!(eval(Some(7)).value.as_i32(), 30);
+        // NULL arg: strict equality yields NULL -> no match -> ELSE.
+        assert_eq!(eval(None).value.as_i32(), 30);
+    });
+}
+
+#[test]
+fn case_expr_searched_form() {
+    with_mcx(|mcx| {
+        // CASE WHEN var = 1 THEN 10 END (implicit-NULL default as a Const).
+        let mut args = NodeList::nil();
+        args.lappend(mcx, mk_scan_var(mcx, 1, INT4OID)).unwrap();
+        args.lappend(mcx, mk_int4_const(mcx, Some(1))).unwrap();
+        let mut whens = NodeList::nil();
+        whens
+            .lappend(
+                mcx,
+                Node::mk(
+                    mcx,
+                    ::types_nodes::primnodes::CaseWhen {
+                        expr: Some(mk_opexpr(mcx, 65, BOOLOID, args)),
+                        result: Some(mk_int4_const(mcx, Some(10))),
+                        location: -1,
+                    },
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let case = Node::mk(
+            mcx,
+            ::types_nodes::primnodes::CaseExpr {
+                casetype: INT4OID,
+                casecollid: 0,
+                arg: None,
+                args: whens,
+                defresult: Some(mk_int4_const(mcx, None)),
+                location: -1,
+            },
+        )
+        .unwrap();
+        let mut state = exec_init_expr(mcx, Some(case), ParamBind::NONE).unwrap().unwrap();
+        let mut eval = |v: Option<i32>| {
+            let mut slot = virtual_slot(mcx, &[v]);
+            let mut slots = EvalSlots { scan: Some(&mut slot), inner: None, outer: None };
+            exec_eval_expr(&mut state, &mut slots).unwrap()
+        };
+        assert_eq!(eval(Some(1)).value.as_i32(), 10);
+        assert!(eval(Some(2)).isnull);
+        assert!(eval(None).isnull);
+    });
+}

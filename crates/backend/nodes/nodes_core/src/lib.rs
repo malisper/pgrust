@@ -139,6 +139,24 @@ pub fn expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
             let mm = node.as_min_max_expr().unwrap();
             walk_list(&mm.args, w)
         }
+        // C walks straight through CaseWhen cells (walker "doesn't care").
+        NodeTag::T_CaseExpr => {
+            let c = node.as_case_expr().unwrap();
+            if walk_opt(c.arg, w)? {
+                return Ok(true);
+            }
+            for cell in &c.args {
+                let cw = cell.as_case_when().expect("CaseWhen");
+                if walk_opt(cw.expr, w)? || walk_opt(cw.result, w)? {
+                    return Ok(true);
+                }
+            }
+            walk_opt(c.defresult, w)
+        }
+        NodeTag::T_CaseWhen => {
+            let cw = node.as_case_when().unwrap();
+            Ok(walk_opt(cw.expr, w)? || walk_opt(cw.result, w)?)
+        }
         NodeTag::T_TargetEntry => {
             let te = node.as_variant::<TargetEntry>().unwrap();
             w.visit(te.expr)
@@ -418,6 +436,36 @@ where
 }
 
 /// Identity-preserving (module doc): `Ok(None)` = unchanged, share input.
+/// C `strip_implicit_coercions` (nodeFuncs.c) over the ported coercion nodes;
+/// unknown families return the node unchanged, as C.
+pub fn strip_implicit_coercions(node: Node<'_>) -> Node<'_> {
+    use types_nodes::primnodes::CoercionForm;
+    match node.node_tag() {
+        NodeTag::T_FuncExpr => {
+            let f = node.as_func_expr().unwrap();
+            if f.funcformat == CoercionForm::COERCE_IMPLICIT_CAST {
+                return strip_implicit_coercions(f.args.nth(0));
+            }
+            node
+        }
+        NodeTag::T_RelabelType => {
+            let r = node.as_relabel_type().unwrap();
+            if r.relabelformat == CoercionForm::COERCE_IMPLICIT_CAST {
+                return strip_implicit_coercions(r.arg);
+            }
+            node
+        }
+        NodeTag::T_CoerceViaIO => {
+            let c = node.as_coerce_via_io().unwrap();
+            if c.coerceformat == CoercionForm::COERCE_IMPLICIT_CAST {
+                return strip_implicit_coercions(c.arg);
+            }
+            node
+        }
+        _ => node,
+    }
+}
+
 pub fn expression_tree_mutator<'mcx, F>(
     mcx: Mcx<'mcx>,
     node: Node<'mcx>,
@@ -602,6 +650,58 @@ where
                     },
                 )?)),
             }
+        }
+        NodeTag::T_CaseExpr => {
+            let c = node.as_case_expr().unwrap();
+            let arg = match c.arg {
+                Some(a) => m(a)?.map(Some),
+                None => None,
+            };
+            let args = mutate_list(mcx, &c.args, m)?;
+            let defresult = match c.defresult {
+                Some(d) => m(d)?.map(Some),
+                None => None,
+            };
+            if arg.is_none() && args.is_none() && defresult.is_none() {
+                return Ok(None);
+            }
+            let args = match args {
+                Some(l) => l,
+                None => c.args.clone_in(mcx)?,
+            };
+            Ok(Some(Node::mk(
+                mcx,
+                types_nodes::primnodes::CaseExpr {
+                    casetype: c.casetype,
+                    casecollid: c.casecollid,
+                    arg: arg.unwrap_or(c.arg),
+                    args,
+                    defresult: defresult.unwrap_or(c.defresult),
+                    location: c.location,
+                },
+            )?))
+        }
+        NodeTag::T_CaseWhen => {
+            let cw = node.as_case_when().unwrap();
+            let expr = match cw.expr {
+                Some(e) => m(e)?.map(Some),
+                None => None,
+            };
+            let result = match cw.result {
+                Some(r) => m(r)?.map(Some),
+                None => None,
+            };
+            if expr.is_none() && result.is_none() {
+                return Ok(None);
+            }
+            Ok(Some(Node::mk(
+                mcx,
+                types_nodes::primnodes::CaseWhen {
+                    expr: expr.unwrap_or(cw.expr),
+                    result: result.unwrap_or(cw.result),
+                    location: cw.location,
+                },
+            )?))
         }
         NodeTag::T_TargetEntry => {
             let te = node.as_variant::<TargetEntry>().unwrap();

@@ -47,6 +47,10 @@ impl<'a, 'p, 'mcx> AssignCollationsCtx<'a, 'p, 'mcx> {
     }
 }
 
+pub fn init_seams() {
+    parse_collate_seams::assign_expr_collations::set(assign_expr_collations);
+}
+
 pub fn assign_query_collations<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &ParseState<'_, 'mcx>,

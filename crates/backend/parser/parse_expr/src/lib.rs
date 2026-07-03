@@ -291,19 +291,55 @@ fn transformCaseExpr<'mcx>(
     let c = expr.as_case_expr().unwrap();
     let last_srf = pstate.p_last_srf;
 
-    if c.arg.is_some() {
-        panic!(
-            "transformCaseExpr (parse_expr.c): CASE arg WHEN form (CaseTestExpr placeholder \
-             needs assign_expr_collations across the parse_collate dep cycle) unported — \
-             unit backend-parser-expr"
-        );
-    }
+    let (arg, placeholder) = match c.arg {
+        Some(a) => {
+            let mut arg = transformExprRecurse(mcx, pstate, a)?;
+            // C: an untyped-literal test expression is forced to text now —
+            // the placeholder can't be coerced later.
+            if expr_type(arg) == types_core::catalog::UNKNOWNOID {
+                arg = coerce::coerce_to_common_type(
+                    mcx,
+                    pstate,
+                    arg,
+                    expr_type(arg),
+                    expr_location(arg),
+                    types_core::catalog::TEXTOID,
+                    "CASE",
+                )?;
+            }
+            // C assigns collations mid-transform so the placeholder carries
+            // the test expression's collation (seam: parse_collate depends on
+            // this crate's expr accessors).
+            parse_collate_seams::assign_expr_collations::call(mcx, pstate, arg)?;
+            let placeholder = Node::mk(
+                mcx,
+                types_nodes::primnodes::CaseTestExpr {
+                    typeId: expr_type(arg),
+                    typeMod: expr_typmod(arg),
+                    collation: expr_collation(arg),
+                },
+            )?;
+            (Some(arg), Some(placeholder))
+        }
+        None => (None, None),
+    };
 
     let mut whens: mcx::PgVec<'mcx, (Node<'mcx>, Node<'mcx>, types_core::ParseLoc)> =
         mcx::vec_with_capacity_in(mcx, c.args.len())?;
     for w in &c.args {
         let w = w.as_case_when().expect("CaseWhen");
-        let cond = transformExprRecurse(mcx, pstate, w.expr.expect("CaseWhen.expr"))?;
+        let mut warg = w.expr.expect("CaseWhen.expr");
+        if let Some(placeholder) = placeholder {
+            warg = Node::mk_a_expr(
+                mcx,
+                A_Expr_Kind::AEXPR_OP,
+                types_nodes::NodeList::make1(mcx, Node::mk_string(mcx, "=")?)?,
+                Some(placeholder),
+                Some(warg),
+                w.location,
+            )?;
+        }
+        let cond = transformExprRecurse(mcx, pstate, warg)?;
         let cond = coerce::coerce_to_boolean(
             mcx,
             pstate,
@@ -373,7 +409,7 @@ fn transformCaseExpr<'mcx>(
         types_nodes::primnodes::CaseExpr {
             casetype: ptype,
             casecollid: types_core::InvalidOid,
-            arg: None,
+            arg,
             args,
             defresult: Some(defresult),
             location: c.location,

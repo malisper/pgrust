@@ -127,6 +127,23 @@ fn cost_qual_eval_walker(node: Node<'_>, cost: &mut QualCost) -> PgResult<()> {
             cost.per_tuple += sp.per_call_cost;
             Ok(())
         }
+        // C's default arm: CASE itself is free, children are charged.
+        NodeTag::T_CaseTestExpr => Ok(()),
+        NodeTag::T_CaseExpr => {
+            let c = node.as_case_expr().unwrap();
+            if let Some(a) = c.arg {
+                cost_qual_eval_walker(a, cost)?;
+            }
+            for w in &c.args {
+                let cw = w.as_case_when().expect("CaseWhen");
+                cost_qual_eval_walker(cw.expr.expect("CaseWhen.expr"), cost)?;
+                cost_qual_eval_walker(cw.result.expect("CaseWhen.result"), cost)?;
+            }
+            match c.defresult {
+                Some(d) => cost_qual_eval_walker(d, cost),
+                None => Ok(()),
+            }
+        }
         other => panic!("cost_qual_eval_walker (costsize.c): {other:?}; M2 expression lane"),
     }
 }
@@ -822,8 +839,33 @@ pub fn expr_type_typmod(node: Node<'_>) -> (u32, i32) {
         NodeTag::T_AlternativeSubPlan => expr_type_typmod(
             node.as_alternative_sub_plan().unwrap().subplans.first().expect("alternatives"),
         ),
+        NodeTag::T_CaseTestExpr => {
+            let ct = node.as_case_test_expr().unwrap();
+            (ct.typeId, ct.typeMod)
+        }
+        // C exprTypmod CaseExpr: typmod only when every result agrees.
+        NodeTag::T_CaseExpr => {
+            let c = node.as_case_expr().unwrap();
+            (c.casetype, case_expr_typmod(c))
+        }
         other => panic!("exprType (nodeFuncs.c): {other:?}; M2 expression lane"),
     }
+}
+
+fn case_expr_typmod(c: &types_nodes::primnodes::CaseExpr<'_>) -> i32 {
+    let Some(defresult) = c.defresult else { return -1 };
+    let (dtype, typmod) = expr_type_typmod(defresult);
+    if dtype != c.casetype || typmod < 0 {
+        return -1;
+    }
+    for w in &c.args {
+        let result = w.as_case_when().expect("CaseWhen").result.expect("CaseWhen.result");
+        let (rtype, rtypmod) = expr_type_typmod(result);
+        if rtype != c.casetype || rtypmod != typmod {
+            return -1;
+        }
+    }
+    typmod
 }
 
 // set_rel_width (costsize.c); PlaceHolderVars are the M2 subquery lane.

@@ -1261,6 +1261,7 @@ fn expr_collation(node: Node<'_>) -> types_core::Oid {
         NodeTag::T_FuncExpr => node.as_func_expr().unwrap().funccollid,
         NodeTag::T_OpExpr => node.as_op_expr().unwrap().opcollid,
         NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resultcollid,
+        NodeTag::T_CaseExpr => node.as_case_expr().unwrap().casecollid,
         tag => panic!("exprCollation (nodeFuncs.c): node family {tag:?} not ported here"),
     }
 }

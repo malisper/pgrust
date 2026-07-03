@@ -718,6 +718,12 @@ fn raw_expr_node_field_order_matches_c() {
         location: _,
     } = crate::primnodes::CaseExpr::default();
 
+    let mut ct = c_struct_fields(prim_h, "CaseTestExpr");
+    assert_eq!(ct.remove(0), "xpr");
+    assert_eq!(ct, ["typeId", "typeMod", "collation"]);
+    let crate::primnodes::CaseTestExpr { typeId: _, typeMod: _, collation: _ } =
+        crate::primnodes::CaseTestExpr::default();
+
     let mut cw = c_struct_fields(prim_h, "CaseWhen");
     assert_eq!(cw.remove(0), "xpr");
     assert_eq!(cw, ["expr", "result", "location"]);

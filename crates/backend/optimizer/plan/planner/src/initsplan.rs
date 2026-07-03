@@ -100,6 +100,31 @@ fn pull_var_nodes<'mcx>(node: Node<'mcx>, out: &mut PgVec<'mcx, Node<'mcx>>) {
                 pull_var_nodes(a, out);
             }
         }
+        NodeTag::T_CaseTestExpr | NodeTag::T_SQLValueFunction => {}
+        NodeTag::T_CaseExpr => {
+            let c = node.as_case_expr().unwrap();
+            if let Some(arg) = c.arg {
+                pull_var_nodes(arg, out);
+            }
+            for w in &c.args {
+                let cw = w.as_case_when().expect("CaseWhen");
+                pull_var_nodes(cw.expr.expect("CaseWhen.expr"), out);
+                pull_var_nodes(cw.result.expect("CaseWhen.result"), out);
+            }
+            if let Some(d) = c.defresult {
+                pull_var_nodes(d, out);
+            }
+        }
+        NodeTag::T_CoalesceExpr => {
+            for a in &node.as_coalesce_expr().unwrap().args {
+                pull_var_nodes(a, out);
+            }
+        }
+        NodeTag::T_MinMaxExpr => {
+            for a in &node.as_min_max_expr().unwrap().args {
+                pull_var_nodes(a, out);
+            }
+        }
         other => panic!("pull_var_clause (var.c): {other:?}; M2 expression lane"),
     }
 }

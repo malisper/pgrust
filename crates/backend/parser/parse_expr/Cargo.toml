@@ -18,6 +18,7 @@ lsyscache = { path = "../../utils/cache/lsyscache" }
 mbutils = { path = "../../utils/mb/mbutils" }
 mcx = { path = "../../../_support/mcx" }
 parse_func = { path = "../parse_func" }
+parse_collate_seams = { path = "../parse_collate_seams" }
 parse_oper = { path = "../parse_oper" }
 parse_relation = { path = "../parse_relation" }
 parse_utilcmd = { path = "../parse_utilcmd" }

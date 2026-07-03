@@ -17,6 +17,7 @@ use crate::walker::{expression_tree_mutator, expression_tree_walker, NodeWalker}
 
 const F_INT4PL: u32 = 177;
 const F_BOOLEQ: u32 = 60;
+const F_INT4EQ: u32 = 65;
 const F_FAKE_VOLATILE: u32 = 9990;
 const F_FAKE_RESTRICTED: u32 = 9991;
 
@@ -43,6 +44,7 @@ fn install_fixtures() {
             Ok(match funcid {
                 F_INT4PL => Some(shape(b'i', b's', true, 23)),
                 F_BOOLEQ => Some(shape(b'i', b's', true, 16)),
+                F_INT4EQ => Some(shape(b'i', b's', true, 16)),
                 F_NEXTVAL => Some(shape(b'v', b'u', true, 20)),
                 F_FAKE_VOLATILE => Some(shape(b'v', b's', true, 23)),
                 F_FAKE_RESTRICTED => Some(shape(b'i', b'r', true, 23)),
@@ -474,6 +476,58 @@ fn eval_const_case_expr() {
     let w = ce.args.nth(0).as_case_when().unwrap();
     assert!(w.expr.unwrap().as_var().is_some());
     assert_eq!(ce.defresult.unwrap().as_const().unwrap().constvalue.as_i32(), 3);
+}
+
+#[test]
+fn eval_const_case_arg_form() {
+    let ctx = cx();
+    let mcx = ctx.mcx();
+    // bool-typed placeholder used directly as the WHEN condition: proves the
+    // case_val substitution without needing the evaluate_expr seam (the
+    // parser's int4eq shape folds e2e — case-arg-e2e.sh EXPLAIN checks).
+    let case_test = || {
+        Node::mk(
+            mcx,
+            types_nodes::primnodes::CaseTestExpr { typeId: 16, typeMod: -1, collation: 0 },
+        )
+        .unwrap()
+    };
+
+    // CASE true WHEN <testval> THEN 1 ELSE 2 END -> 1.
+    let e = case_expr(
+        mcx,
+        Some(bool_c(mcx, Some(true))),
+        &[case_when(mcx, case_test(), int4_const(mcx, Some(1)))],
+        int4_const(mcx, Some(2)),
+    );
+    let c = eval_const_expressions(mcx, e).unwrap().as_const().unwrap().clone();
+    assert_eq!(c.constvalue.as_i32(), 1);
+
+    // NULL const arg substitutes NULL: condition drops, ELSE remains.
+    let e = case_expr(
+        mcx,
+        Some(bool_c(mcx, None)),
+        &[case_when(mcx, case_test(), int4_const(mcx, Some(1)))],
+        int4_const(mcx, Some(2)),
+    );
+    let c = eval_const_expressions(mcx, e).unwrap().as_const().unwrap().clone();
+    assert_eq!(c.constvalue.as_i32(), 2);
+
+    // Non-const arg: no substitution — arg kept, placeholder untouched.
+    let var = Node::mk_var(mcx, 1, 1, 16, -1, 0, 0).unwrap();
+    let e = case_expr(
+        mcx,
+        Some(var),
+        &[case_when(mcx, case_test(), int4_const(mcx, Some(1)))],
+        int4_const(mcx, Some(2)),
+    );
+    let out = eval_const_expressions(mcx, e).unwrap();
+    let ce = out.as_case_expr().expect("still a CaseExpr");
+    assert!(ce.arg.unwrap().as_var().is_some());
+    assert_eq!(
+        ce.args.nth(0).as_case_when().unwrap().expr.unwrap().node_tag(),
+        NodeTag::T_CaseTestExpr
+    );
 }
 
 #[test]
