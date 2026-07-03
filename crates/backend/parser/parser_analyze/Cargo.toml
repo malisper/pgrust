@@ -10,6 +10,8 @@ path = "src/lib.rs"
 
 [dependencies]
 datum = { path = "../../../_support/types/datum" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
 types_rel = { path = "../../../_support/types/rel" }
 types_tuple = { path = "../../../_support/types/types_tuple" }
 mbutils = { path = "../../utils/mb/mbutils" }
@@ -37,10 +39,8 @@ types_portal = { path = "../../../_support/types/portal" }
 [dev-dependencies]
 mbutils_seams = { path = "../../utils/mb/mbutils_seams" }
 indexcmds_seams = { path = "../../commands/indexcmds_seams" }
-lsyscache = { path = "../../utils/cache/lsyscache" }
 miscinit_seams = { path = "../../utils/init/miscinit_seams" }
 namespace_seams = { path = "../../catalog/namespace_seams" }
-catalog_namespace = { path = "../../catalog/catalog_namespace" }
 gram_core = { path = "../gram_core" }
 parser_seams = { path = "../parser_seams" }
 rel_vocab = { path = "../../../_support/types/rel_vocab" }
