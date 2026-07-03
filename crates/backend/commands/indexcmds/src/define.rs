@@ -310,29 +310,17 @@ fn ComputeIndexAttrs<'mcx>(
         let mut attcollation = attform.attcollation;
 
         if !attribute.collation.is_nil() {
-            if !lsyscache::type_is_collatable(atttype)? {
-                return Err(err(
-                    format!(
-                        "collations are not supported by type {}",
-                        format_type::format_type_be(atttype)?
-                    ),
-                    ERRCODE_DATATYPE_MISMATCH,
-                ));
-            }
-            let mut names: [&str; 4] = [""; 4];
-            let nnames = attribute.collation.len();
-            assert!((1..=3).contains(&nnames), "improper collation name list length");
-            for (i, n) in attribute.collation.iter().enumerate() {
-                names[i] = n.as_string().expect("collation name cell").sval;
-            }
-            attcollation = catalog_namespace::get_collation_oid(&names[..nnames], false)?;
+            attcollation = catalog_namespace::get_collation_oid_list(&attribute.collation, false)?;
         }
 
         if lsyscache::type_is_collatable(atttype)? {
             if attcollation == InvalidOid {
-                return Err(err(
-                    "could not determine which collation to use for index expression".into(),
-                    ERRCODE_INDETERMINATE_COLLATION,
+                return Err(Box::new(
+                    (*err(
+                        "could not determine which collation to use for index expression".into(),
+                        ERRCODE_INDETERMINATE_COLLATION,
+                    ))
+                    .with_hint("Use the COLLATE clause to set the collation explicitly."),
                 ));
             }
         } else if attcollation != InvalidOid {

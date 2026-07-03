@@ -465,7 +465,7 @@ fn get_collation_actual_version_builtin(collcollate: &str) -> PgResult<&'static 
 // version; this platform set has no LC_VERSION_MASK/WIN32 arm.
 fn get_collation_actual_version_libc(collcollate: &str) -> Option<String> {
     if collcollate.eq_ignore_ascii_case("C")
-        || collcollate.len() >= 2 && collcollate[..2].eq_ignore_ascii_case("C.")
+        || collcollate.len() >= 2 && collcollate.as_bytes()[..2].eq_ignore_ascii_case(b"C.")
         || collcollate.eq_ignore_ascii_case("POSIX")
     {
         return None;

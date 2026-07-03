@@ -139,12 +139,15 @@ pub fn RelnameGetRelid(relname: &str) -> PgResult<Oid> {
 #[cold]
 #[inline(never)]
 fn improper_qualified_name(names: &[&str]) -> Box<PgError> {
+    improper_qualified_name_joined(names.join("."))
+}
+
+#[cold]
+#[inline(never)]
+fn improper_qualified_name_joined(joined: String) -> Box<PgError> {
     Box::new(
-        PgError::error(format!(
-            "improper qualified name (too many dotted names): {}",
-            names.join(".")
-        ))
-        .with_sqlstate(ERRCODE_SYNTAX_ERROR),
+        PgError::error(format!("improper qualified name (too many dotted names): {joined}"))
+            .with_sqlstate(ERRCODE_SYNTAX_ERROR),
     )
 }
 
@@ -330,6 +333,30 @@ fn undefined_collation(collname: &[&str]) -> Box<PgError> {
         ))
         .with_sqlstate(types_error::ERRCODE_UNDEFINED_OBJECT),
     )
+}
+
+// get_collation_oid over the raw name List; >3 parts flows to C's
+// DeconstructQualifiedName 42601 instead of a length assert.
+pub fn get_collation_oid_list(
+    collname: &types_nodes::NodeList<'_>,
+    missing_ok: bool,
+) -> PgResult<Oid> {
+    let mut names: [&str; 4] = [""; 4];
+    let nnames = collname.len();
+    if nnames > 4 {
+        let mut joined = String::new();
+        for (i, n) in collname.iter().enumerate() {
+            if i > 0 {
+                joined.push('.');
+            }
+            joined.push_str(n.as_string().expect("collname cell").sval);
+        }
+        return Err(improper_qualified_name_joined(joined));
+    }
+    for (i, n) in collname.iter().enumerate() {
+        names[i] = n.as_string().expect("collname cell").sval;
+    }
+    get_collation_oid(&names[..nnames], missing_ok)
 }
 
 pub fn get_collation_oid(collname: &[&str], missing_ok: bool) -> PgResult<Oid> {
