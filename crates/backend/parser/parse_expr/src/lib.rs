@@ -103,6 +103,11 @@ pub fn transformExprRecurse<'mcx>(
             },
         ),
         NodeTag::T_CaseTestExpr | NodeTag::T_Var => Ok(expr),
+        // Everywhere DEFAULT is legal the caller strips it before transformExpr.
+        NodeTag::T_SetToDefault => Err(default_not_allowed(
+            pstate,
+            expr.as_set_to_default().unwrap().location,
+        )),
         other => panic!(
             "transformExprRecurse (parse_expr.c): arm for {other:?} unported — \
              unit backend-parser-expr (TypeCast/SubLink and friends land with their \
@@ -1317,6 +1322,26 @@ fn make_row_comparison_op<'mcx>(
         return Err(row_comparison_returns_set(pstate, location));
     }
     Ok(cmp)
+}
+
+#[cold]
+fn default_not_allowed(
+    pstate: &ParseState<'_, '_>,
+    location: types_core::ParseLoc,
+) -> Box<types_error::PgError> {
+    use types_error::{ErrorLocation, ERRCODE_SYNTAX_ERROR, ERROR};
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_SYNTAX_ERROR)
+            .errmsg("DEFAULT is not allowed in this context".to_string())
+            .errposition(parser_small1::parser_errposition(
+                pstate,
+                location,
+                mbutils::GetDatabaseEncoding(),
+            ))
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_expr.c", 0, "transformExprRecurse")),
+    )
 }
 
 #[cold]
