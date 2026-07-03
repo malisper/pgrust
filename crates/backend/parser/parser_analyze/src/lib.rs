@@ -219,16 +219,36 @@ fn transformOptionalSelectInto<'mcx>(
     pstate: &mut ParseState<'_, 'mcx>,
     parse_tree: Node<'mcx>,
 ) -> PgResult<Query<'mcx>> {
-    if let Some(mut stmt) = parse_tree.as_select_stmt() {
-        while stmt.op != types_nodes::parsenodes::SetOperation::SETOP_NONE {
-            stmt = stmt.larg.expect("set-op tree always has a leftmost SelectStmt");
+    let mut parse_tree = parse_tree;
+    if let Some(stmt) = parse_tree.as_select_stmt() {
+        let mut leftmost = stmt;
+        while leftmost.op != types_nodes::parsenodes::SetOperation::SETOP_NONE {
+            leftmost = leftmost.larg.expect("set-op tree always has a leftmost SelectStmt");
         }
-        if stmt.intoClause.is_some() {
-            panic!(
-                "transformOptionalSelectInto (analyze.c): SELECT INTO -> CREATE TABLE AS \
-                 rewrite unported (CreateTableAsStmt vocabulary + \
-                 transformCreateTableAsStmt) — unit backend-parser-analyze"
-            );
+        let has_into = leftmost.intoClause.is_some();
+        let is_setop = stmt.op != types_nodes::parsenodes::SetOperation::SETOP_NONE;
+        if has_into {
+            if is_setop {
+                // C NULLs the leftmost's intoClause through its pointer;
+                // larg is a shared borrow here, so the clear cannot reach it.
+                panic!(
+                    "transformOptionalSelectInto (analyze.c): SELECT INTO on a \
+                     set-operation tree needs mutable larg access — \
+                     unit backend-parser-analyze"
+                );
+            }
+            // SAFETY: raw tree owned by this analysis; no derived reference
+            // is live (leftmost/stmt dropped above).
+            let into = unsafe {
+                parse_tree.with_mut::<SelectStmt, _>(|s| s.intoClause.take())
+            }
+            .expect("node checked as SelectStmt");
+            let mut ctas = Node::build::<types_nodes::rawnodes::CreateTableAsStmt>(mcx)?;
+            ctas.query = Some(parse_tree);
+            ctas.into = into;
+            ctas.objtype = types_nodes::parsenodes::ObjectType::OBJECT_TABLE;
+            ctas.is_select_into = true;
+            parse_tree = ctas.seal();
         }
     }
     transformStmt(mcx, pstate, parse_tree)
@@ -265,10 +285,12 @@ set_op::transformSetOperationStmt(mcx, pstate, n)?
         NodeTag::T_DeclareCursorStmt => {
             transformDeclareCursorStmt(mcx, pstate, parse_tree)?
         }
+        NodeTag::T_CreateTableAsStmt => {
+            transformCreateTableAsStmt(mcx, pstate, parse_tree)?
+        }
         t @ (NodeTag::T_MergeStmt
         | NodeTag::T_ReturnStmt
         | NodeTag::T_PLAssignStmt
-        | NodeTag::T_CreateTableAsStmt
         | NodeTag::T_CallStmt) => panic!(
             "transformStmt (analyze.c): transform arm for {t:?} unported — \
              unit backend-parser-analyze"
@@ -283,6 +305,38 @@ set_op::transformSetOperationStmt(mcx, pstate, n)?
 
     result.querySource = QuerySource::QSRC_ORIGINAL;
     result.canSetTag = true;
+    Ok(result)
+}
+
+fn transformCreateTableAsStmt<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    ctas_node: Node<'mcx>,
+) -> PgResult<Query<'mcx>> {
+    let stmt = ctas_node
+        .as_variant::<types_nodes::rawnodes::CreateTableAsStmt>()
+        .expect("CreateTableAsStmt");
+    if stmt.objtype != types_nodes::parsenodes::ObjectType::OBJECT_TABLE {
+        panic!(
+            "transformCreateTableAsStmt (analyze.c): CREATE MATERIALIZED VIEW arm \
+             unported (matview lane) — unit backend-parser-analyze"
+        );
+    }
+    let inner = stmt.query.expect("CreateTableAsStmt has a query");
+    let query = transformStmt(mcx, pstate, inner)?;
+    let query_node = Node::mk(mcx, query)?;
+    // SAFETY: raw tree owned by this analysis; no derived reference is live.
+    unsafe {
+        ctas_node
+            .with_mut::<types_nodes::rawnodes::CreateTableAsStmt, _>(|c| {
+                c.query = Some(query_node)
+            })
+            .expect("node built as CreateTableAsStmt");
+    }
+
+    let mut result = Query::default();
+    result.commandType = CmdType::CMD_UTILITY;
+    result.utilityStmt = Some(ctas_node);
     Ok(result)
 }
 
@@ -428,11 +482,8 @@ fn transformSelectStmt<'mcx>(
         qry.hasModifyingCTE = pstate.p_hasModifyingCTE;
     }
 
-    if stmt.intoClause.is_some() {
-        panic!(
-            "transformSelectStmt (analyze.c): \"SELECT ... INTO is not allowed here\" \
-             ereport needs IntoClause vocabulary — unit backend-parser-analyze"
-        );
+    if let Some(into) = stmt.intoClause {
+        return Err(select_into_error(pstate, into, "SELECT ... INTO is not allowed here"));
     }
 
     // C aliases the raw lists into pstate; header-clone until a shared-list
@@ -1424,6 +1475,33 @@ fn transformInsertRow<'mcx>(
         result.lappend(mcx, expr)?;
     }
     Ok(result)
+}
+
+// exprLocation(IntoClause) resolves to its rel's location (nodeFuncs.c).
+#[cold]
+pub(crate) fn select_into_error(
+    pstate: &ParseState<'_, '_>,
+    into: Node<'_>,
+    msg: &str,
+) -> Box<types_error::PgError> {
+    use types_error::{ERRCODE_SYNTAX_ERROR, ERROR};
+    let loc = into
+        .as_variant::<types_nodes::rawnodes::IntoClause>()
+        .and_then(|ic| ic.rel)
+        .and_then(|r| r.as_range_var())
+        .map(|r| r.location)
+        .unwrap_or(-1);
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_SYNTAX_ERROR)
+            .errmsg(msg.to_string())
+            .errposition(parser_small1::parser_errposition(
+                pstate,
+                loc,
+                mbutils::GetDatabaseEncoding(),
+            ))
+            .into_error(),
+    )
 }
 
 #[cold]

@@ -222,9 +222,9 @@ mod heap {
         ::heapam::heap_index_delete_tuples(mcx, rel, delstate)
     }
 
-    // heapam_tuple_insert (heapam_handler.c): fetch the slot's heap tuple in
-    // place, heap_insert it, copy t_self back. Callers pass table-format
-    // slots (ri_newTupleSlot / table_slot_create), so no copy arm exists.
+    // heapam_tuple_insert (heapam_handler.c): fetch the slot's heap tuple
+    // (in place for table-format slots, formed copy otherwise), heap_insert
+    // it, copy t_self back.
     pub(super) fn tuple_insert<'mcx>(
         mcx: Mcx<'mcx>,
         rel: &Relation<'mcx>,
@@ -233,25 +233,31 @@ mod heap {
         options: i32,
         bistate: Option<&mut BulkInsertStateData>,
     ) -> PgResult<()> {
-        assert!(
-            bistate.is_none(),
-            "heapam_tuple_insert (heapam_handler.c): heap_insert bistate arm not \
-             wired for single-tuple inserts (bulk callers go through multi_insert)"
-        );
-        exectuples::exec_materialize_slot(slot, mcx)?;
         slot.base_mut().tts_tableOid = rel.rd_id;
-        let tuple = match slot {
-            SlotData::Heap(h) => h.tuple.as_mut(),
-            SlotData::BufferHeap(b) => b.base.tuple.as_mut(),
-            _ => panic!(
-                "heapam_tuple_insert (heapam_handler.c): non-heap slot copy arm \
-                 not ported"
-            ),
+        let t_self;
+        match slot {
+            SlotData::Heap(_) | SlotData::BufferHeap(_) => {
+                exectuples::exec_materialize_slot(slot, mcx)?;
+                let tuple = match slot {
+                    SlotData::Heap(h) => h.tuple.as_mut(),
+                    SlotData::BufferHeap(b) => b.base.tuple.as_mut(),
+                    _ => unreachable!(),
+                }
+                .expect("materialized heap slot holds a tuple");
+                tuple.t_tableOid = rel.rd_id;
+                ::heapam::heap_insert(rel, tuple, cid, options, bistate)?;
+                t_self = tuple.t_self;
+            }
+            // ExecFetchSlotHeapTuple's shouldFree=true arm: virtual/minimal
+            // slots (intorel_receive) insert a formed copy.
+            _ => {
+                let mut copied = exectuples::exec_copy_slot_heap_tuple(slot, mcx, mcx)?;
+                let tuple = copied.as_tuple_mut();
+                tuple.t_tableOid = rel.rd_id;
+                ::heapam::heap_insert(rel, tuple, cid, options, bistate)?;
+                t_self = tuple.t_self;
+            }
         }
-        .expect("materialized heap slot holds a tuple");
-        tuple.t_tableOid = rel.rd_id;
-        ::heapam::heap_insert(rel, tuple, cid, options)?;
-        let t_self = tuple.t_self;
         slot.base_mut().tts_tid = t_self;
         Ok(())
     }
@@ -282,7 +288,7 @@ mod heap {
         .expect("materialized heap slot holds a tuple");
         tuple.t_tableOid = rel.rd_id;
         tuple.t_data_mut().set_speculative_token(spec_token);
-        ::heapam::heap_insert(rel, tuple, cid, options | ::heapam::hio::HEAP_INSERT_SPECULATIVE)?;
+        ::heapam::heap_insert(rel, tuple, cid, options | ::heapam::hio::HEAP_INSERT_SPECULATIVE, bistate)?;
         let t_self = tuple.t_self;
         slot.base_mut().tts_tid = t_self;
         Ok(())

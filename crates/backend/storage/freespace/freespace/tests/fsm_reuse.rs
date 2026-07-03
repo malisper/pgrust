@@ -317,7 +317,7 @@ fn insert(payload: usize) -> ItemPointerData {
     let ctx = MemoryContext::new("fsm_reuse");
     let rel = test_relation(ctx.mcx());
     let mut tup = make_tuple(payload);
-    heap_insert(&rel, &mut tup, 7, 0).unwrap();
+    heap_insert(&rel, &mut tup, 7, 0, None).unwrap();
     tup.t_self
 }
 

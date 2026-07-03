@@ -27,6 +27,7 @@ pub enum DestReceiver<'mcx> {
     PrintSimple,                           // printsimpleDR shell; callbacks in printsimple.c
     SpiPrintTup,                           // spi_printtupDR shell; callbacks in spi.c
     Tuplestore(tstore_receiver::DrTstore), // CreateTuplestoreDestReceiver (tstoreReceiver.c)
+    IntoRel(createas_seams::IntoRelState<'mcx>), // CreateIntoRelDestReceiver (createas.c)
 }
 
 impl<'mcx> DestReceiver<'mcx> {
@@ -38,6 +39,7 @@ impl<'mcx> DestReceiver<'mcx> {
             DestReceiver::PrintTup(dr) => dr.receive_slot(slot),
             DestReceiver::SpiPrintTup => spi_seams::spi_printtup::call(slot),
             DestReceiver::Tuplestore(dr) => dr.receive_slot(slot),
+            DestReceiver::IntoRel(state) => createas_seams::intorel_receive::call(state, slot),
             other => other.unported("receiveSlot"),
         }
     }
@@ -48,6 +50,9 @@ impl<'mcx> DestReceiver<'mcx> {
             DestReceiver::PrintTup(dr) => dr.startup(operation, typeinfo),
             DestReceiver::SpiPrintTup => spi_seams::spi_dest_startup::call(operation, typeinfo),
             DestReceiver::Tuplestore(dr) => dr.startup(operation, typeinfo),
+            DestReceiver::IntoRel(state) => {
+                createas_seams::intorel_startup::call(state, operation, typeinfo)
+            }
             other => other.unported("rStartup"),
         }
     }
@@ -66,6 +71,7 @@ impl<'mcx> DestReceiver<'mcx> {
                 dr.shutdown();
                 Ok(())
             }
+            DestReceiver::IntoRel(state) => createas_seams::intorel_shutdown::call(state),
         }
     }
 
@@ -80,6 +86,7 @@ impl<'mcx> DestReceiver<'mcx> {
             DestReceiver::PrintSimple => CommandDest::RemoteSimple,
             DestReceiver::SpiPrintTup => CommandDest::Spi,
             DestReceiver::Tuplestore(_) => CommandDest::Tuplestore,
+            DestReceiver::IntoRel(_) => CommandDest::IntoRel,
         }
     }
 
