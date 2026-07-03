@@ -20,6 +20,28 @@ pub fn exec_re_scan<'mcx>(
         PlanStateNode::IndexOnlyScan(ios) => {
             ::nodeindexonlyscan::exec_rescan_index_only_scan(ios, estate)
         }
+        // ExecReScanAgg: outer child rescanned when chgParam is NULL (always,
+        // until the Param lanes land).
+        PlanStateNode::Agg(aps) => {
+            ::nodeagg::exec_rescan_agg(&mut aps.agg, estate);
+            exec_re_scan(&mut aps.outer, estate)
+        }
+        // ExecReScanBitmapHeapScan: bitmapqual rescanned when chgParam is
+        // NULL (always, until the Param lanes land).
+        PlanStateNode::BitmapHeapScan(b) => {
+            let b = &mut **b;
+            ::nodebitmapheapscan::exec_rescan_bitmap_heap_scan(&mut b.scan, estate)?;
+            exec_re_scan(&mut b.bitmapqual, estate)
+        }
+        PlanStateNode::BitmapIndexScan(biss) => {
+            ::nodebitmapindexscan::exec_rescan_bitmap_index_scan(biss)
+        }
+        PlanStateNode::BitmapAnd(bc) | PlanStateNode::BitmapOr(bc) => {
+            for sub in bc.substates.iter_mut() {
+                exec_re_scan(sub, estate)?;
+            }
+            Ok(())
+        }
     }
 }
 

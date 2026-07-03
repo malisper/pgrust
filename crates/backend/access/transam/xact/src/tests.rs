@@ -207,6 +207,48 @@ fn commit_record_round_trips_through_parser() {
 }
 
 #[test]
+#[ignore = "child of commit_record_works_without_origin_seam"]
+fn commit_record_no_origin_seam_child() {
+    // Fresh process: origin seams deliberately NOT installed; the C default
+    // (InvalidRepOriginId) must apply and the record must carry no origin.
+    assert!(!origin_seams::replorigin_session_origin::is_installed());
+    parallel_seams::is_parallel_worker::set(|| false);
+    xlog_seams::xlog_logical_info_active::set(|| false);
+    xloginsert_seams::xlog_insert_with_flags::set(|_, info, flags, fragments| {
+        assert_eq!(flags, XLOG_INCLUDE_ORIGIN);
+        CAPTURED.with(|c| {
+            let mut body = Vec::new();
+            for f in fragments {
+                body.extend_from_slice(f);
+            }
+            *c.borrow_mut() = Some((info, body));
+        });
+        Ok(1234)
+    });
+    reset_xact_state_for_tests();
+
+    XactLogCommitRecord(777, &[], &[], &[], &[], false, 0, InvalidTransactionId, None).unwrap();
+    let (info, body) = CAPTURED.with(|c| c.borrow_mut().take()).unwrap();
+    assert_eq!(info, XLOG_XACT_COMMIT);
+    let parsed = parse_commit_record(info, &body).unwrap();
+    assert_eq!(parsed.xinfo & XACT_XINFO_HAS_ORIGIN, 0);
+}
+
+#[test]
+fn commit_record_works_without_origin_seam() {
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "tests::commit_record_no_origin_seam_child",
+            "--exact",
+            "--ignored",
+            "--test-threads=1",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "child failed: {out:?}");
+}
+
+#[test]
 fn abort_record_round_trips_through_parser() {
     install_test_seams();
     reset_xact_state_for_tests();

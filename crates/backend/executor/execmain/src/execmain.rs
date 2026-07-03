@@ -245,12 +245,18 @@ pub fn standard_executor_run<'m>(
     let operation = qd.operation;
     let pstmt = qd.plannedstmt();
     let send_tuples = operation == CmdType::CMD_SELECT || pstmt.hasReturning;
-    let use_parallel_mode = if qd.already_executed || count != 0 {
+    // C decides parallel mode and sets already_executed inside ExecutePlan
+    // (execMain.c), so a NoMovement run does neither; hoisted here only
+    // because `exec` borrows qd through the closure.
+    let no_movement = ScanDirectionIsNoMovement(direction);
+    let use_parallel_mode = if no_movement {
         false
     } else {
-        pstmt.parallelModeNeeded
+        let upm =
+            if qd.already_executed || count != 0 { false } else { pstmt.parallelModeNeeded };
+        qd.already_executed = true;
+        upm
     };
-    qd.already_executed = true;
     let tup_desc = qd.tup_desc.clone();
     let exec = qd.exec.as_mut().expect("ExecutorRun before ExecutorStart");
     exec.with_mut_mcx(|_mcx, data| {
@@ -258,9 +264,9 @@ pub fn standard_executor_run<'m>(
         data.estate.es_processed = 0;
         if send_tuples {
             let desc = tup_desc.as_deref().expect("sendTuples without a result tupdesc");
-            dest.startup(crate::desc_mcx(), operation as i32, desc)?;
+            dest.startup(operation as i32, desc)?;
         }
-        if !ScanDirectionIsNoMovement(direction) {
+        if !no_movement {
             execute_plan(data, operation, send_tuples, count, direction, use_parallel_mode, dest)?;
         }
         data.estate.es_total_processed += data.estate.es_processed;

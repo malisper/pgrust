@@ -189,7 +189,7 @@ thread_local! {
     static PAGE_COPY: RefCell<PageCopy> = const { RefCell::new(PageCopy([0; BLCKSZ])) };
 }
 
-fn with_checksummed_page<R>(
+pub(crate) fn with_checksummed_page<R>(
     src: *const u8,
     blkno: BlockNumber,
     f: impl FnOnce(&[u8]) -> R,
@@ -200,12 +200,21 @@ fn with_checksummed_page<R>(
         u16::from_ne_bytes([*src.add(14), *src.add(15)]) == 0
     };
     if is_new || !transam_xlog_seams::data_checksums_enabled::call() {
-        // SAFETY: as above; the slice lives for the closure only.
+        // SAFETY: as above; the slice lives for the closure only. The &[u8]
+        // additionally requires NO concurrent writer, true today only
+        // because hint-bit writes don't exist (MarkBufferDirtyHint is a
+        // panic stub). C writes the live shared page here and tolerates
+        // torn hint bits (harmless without checksums); Rust cannot express
+        // that as a slice — the hint-bit lane MUST flip this arm to a
+        // raw-ptr copy into PAGE_COPY when it lands.
         return f(unsafe { core::slice::from_raw_parts(src, BLCKSZ) });
     }
     PAGE_COPY.with(|c| {
         let mut copy = c.borrow_mut();
-        // SAFETY: distinct buffers; src stays valid under the caller's pin.
+        // SAFETY: distinct buffers; src stays valid under the caller's pin;
+        // no concurrent writer while MarkBufferDirtyHint stays a panic stub
+        // (once hint-bit writers mutate under share lock, this must become
+        // a race-tolerant copy — C's memcpy accepts the race by design).
         unsafe { core::ptr::copy_nonoverlapping(src, copy.0.as_mut_ptr(), BLCKSZ) };
         copy.0[8..10].copy_from_slice(&0u16.to_ne_bytes());
         let sum = checksum::page_checksum(&copy.0, blkno);

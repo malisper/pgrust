@@ -13,6 +13,14 @@ use crate::{make_op, oper};
 const INT4_PLUS_OP: types_core::Oid = 551;
 const INT4PL_PROC: types_core::Oid = 177;
 const PG_CATALOG: types_core::Oid = 11;
+const INT4_LT: types_core::Oid = 97;
+const INT4_EQ: types_core::Oid = 96;
+const INT4_GT: types_core::Oid = 521;
+const INT4_BTREE_OPCLASS: types_core::Oid = 1978;
+const INT4_HASH_OPCLASS: types_core::Oid = 1979;
+const INT_BTREE_FAM: types_core::Oid = 1976;
+const INT_HASH_FAM: types_core::Oid = 1977;
+const NOSORT_OID: types_core::Oid = 9999;
 
 static CANDIDATE_PROBES: AtomicUsize = AtomicUsize::new(0);
 
@@ -22,9 +30,11 @@ fn install_fixture() {
     ONCE.call_once(|| {
         miscinit_seams::get_user_id::set(|| 10);
         syscache_seams::lookup_pg_operator_candidates::set(|mcx, name, l, r| {
-            CANDIDATE_PROBES.fetch_add(1, Ordering::Relaxed);
+            if name == "@@" {
+                CANDIDATE_PROBES.fetch_add(1, Ordering::Relaxed);
+            }
             let mut v = mcx::vec_with_capacity_in(mcx, 1)?;
-            if name == "+" && l == INT4OID && r == INT4OID {
+            if (name == "+" || name == "@@") && l == INT4OID && r == INT4OID {
                 v.push((INT4_PLUS_OP, PG_CATALOG));
             }
             Ok(v)
@@ -70,6 +80,70 @@ fn install_fixture() {
                 typsubscript: InvalidOid,
             }))
         });
+        syscache_seams::lookup_pg_opclass_shape::set(|opclass| {
+            Ok(match opclass {
+                INT4_BTREE_OPCLASS => Some(syscache_seams::PgOpclassShape {
+                    opcmethod: types_core::BTREE_AM_OID,
+                    opcfamily: INT_BTREE_FAM,
+                    opcintype: INT4OID,
+                }),
+                INT4_HASH_OPCLASS => Some(syscache_seams::PgOpclassShape {
+                    opcmethod: lsyscache::HASH_AM_OID,
+                    opcfamily: INT_HASH_FAM,
+                    opcintype: INT4OID,
+                }),
+                _ => None,
+            })
+        });
+        syscache_seams::lookup_pg_amop_by_strategy::set(|opfamily, _l, _r, strategy| {
+            Ok(match (opfamily, strategy) {
+                (INT_BTREE_FAM, 1) => INT4_LT,
+                (INT_BTREE_FAM, 3) => INT4_EQ,
+                (INT_BTREE_FAM, 5) => INT4_GT,
+                (INT_HASH_FAM, 1) => INT4_EQ,
+                _ => InvalidOid,
+            })
+        });
+        syscache_seams::lookup_pg_amproc::set(|opfamily, _l, _r, procnum| {
+            Ok(match (opfamily, procnum) {
+                (INT_BTREE_FAM, 1) => 351,
+                (INT_HASH_FAM, 1) => 450,
+                (INT_HASH_FAM, 2) => 425,
+                _ => InvalidOid,
+            })
+        });
+        syscache_seams::syscache_hash_value_typeoid::set(|typid| Ok(typid.wrapping_mul(31)));
+        indexcmds_seams::get_default_opclass::set(|type_id, am_id| {
+            Ok(match (type_id, am_id) {
+                (INT4OID, types_core::BTREE_AM_OID) => INT4_BTREE_OPCLASS,
+                (INT4OID, _) => INT4_HASH_OPCLASS,
+                _ => InvalidOid,
+            })
+        });
+        syscache_seams::lookup_pg_type_typcache_shape::set(|typid| {
+            let name = match typid {
+                INT4OID => "int4",
+                TEXTOID => "text",
+                NOSORT_OID => "nosort",
+                _ => return Ok(None),
+            };
+            let mut typname = types_tuple::NameData::default();
+            typname.namestrcpy(name);
+            Ok(Some(syscache_seams::PgTypeTypcacheShape {
+                typname,
+                typlen: 4,
+                typbyval: true,
+                typalign: b'i' as i8,
+                typstorage: b'p' as i8,
+                typtype: b'b' as i8,
+                typisdefined: true,
+                typrelid: InvalidOid,
+                typsubscript: InvalidOid,
+                typelem: InvalidOid,
+                typarray: InvalidOid,
+                typcollation: InvalidOid,
+            }))
+        });
     });
 }
 
@@ -88,7 +162,9 @@ fn exact_match_and_memo_hit() {
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
     let pstate = make_parsestate(mcx, None);
-    let name = plus_name(mcx);
+    // Dedicated name: CANDIDATE_PROBES counts only "@@" (tests share the
+    // process-global seams, so "+" probes race across test threads).
+    let name = NodeList::make1(mcx, Node::mk(mcx, PgStr { sval: "@@" }).unwrap()).unwrap();
 
     let op = oper(&pstate, &name, INT4OID, INT4OID, false, -1).unwrap().unwrap();
     assert_eq!(op.oid, INT4_PLUS_OP);
@@ -137,6 +213,18 @@ fn undefined_operator_is_42883() {
     assert_eq!(err.sqlstate(), ERRCODE_UNDEFINED_FUNCTION);
 
     assert!(oper(&pstate, &name, INT4OID, INT4OID, true, 7).unwrap().is_none());
+
+    // C parse_oper.c op_error via format_type_be: exact message + hint.
+    let err = oper(&pstate, &name, INT4OID, TEXTOID, false, 7).map(|_| ()).unwrap_err();
+    assert_eq!(err.sqlstate(), ERRCODE_UNDEFINED_FUNCTION);
+    assert_eq!(err.message(), "operator does not exist: integer <%> text");
+    assert_eq!(
+        err.hint(),
+        Some(
+            "No operator matches the given name and argument types. \
+             You might need to add explicit type casts."
+        )
+    );
 }
 
 #[test]
@@ -203,4 +291,29 @@ fn postfix_operator_is_syntax_error() {
     .map(|_| ())
     .unwrap_err();
     assert_eq!(err.sqlstate(), types_error::ERRCODE_SYNTAX_ERROR);
+}
+
+#[test]
+fn sort_group_operators_int4() {
+    install_fixture();
+    let ops = crate::get_sort_group_operators(INT4OID, true, true, true, true).unwrap();
+    assert_eq!(
+        (ops.lt_opr, ops.eq_opr, ops.gt_opr, ops.hashable),
+        (INT4_LT, INT4_EQ, INT4_GT, true)
+    );
+}
+
+#[test]
+fn sort_group_operators_missing_is_42883() {
+    install_fixture();
+    let err =
+        crate::get_sort_group_operators(NOSORT_OID, true, true, false, true).unwrap_err();
+    assert_eq!(err.sqlstate(), ERRCODE_UNDEFINED_FUNCTION);
+    assert_eq!(err.message(), "could not identify an ordering operator for type nosort");
+    assert_eq!(err.hint(), Some("Use an explicit ordering operator or modify the query."));
+
+    let err =
+        crate::get_sort_group_operators(NOSORT_OID, false, true, false, true).unwrap_err();
+    assert_eq!(err.message(), "could not identify an equality operator for type nosort");
+    assert_eq!(err.hint(), None);
 }

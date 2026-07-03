@@ -35,20 +35,6 @@ pub use ::types_core::CommandTag;
 #[cfg(test)]
 mod tests;
 
-pub fn init_seams() {
-    portalmem_seams::pre_commit_portals::set(PreCommit_Portals);
-    portalmem_seams::at_abort_portals::set(AtAbort_Portals);
-    portalmem_seams::at_cleanup_portals::set(AtCleanup_Portals);
-    portalmem_seams::at_subcommit_portals::set(|my_subid, parent_subid, parent_level| {
-        at_subcommit_inner(my_subid, parent_subid, parent_level, None);
-        Ok(())
-    });
-    portalmem_seams::at_subabort_portals::set(|my_subid, parent_subid| {
-        at_subabort_inner(my_subid, parent_subid, None)
-    });
-    portalmem_seams::at_subcleanup_portals::set(AtSubCleanup_Portals);
-}
-
 const PORTALS_PER_USER: usize = 16;
 
 // dynahash HASH_STRINGS key: strlcpy to MAX_PORTALNAME_LEN-1 bytes (backed off
@@ -379,7 +365,6 @@ pub fn UnpinPortal(portal: &Portal<'static>) -> PgResult<()> {
 }
 
 pub fn MarkPortalActive(portal: &Portal<'static>) -> PgResult<()> {
-    // Runtime test, not just an assert, as in C.
     if portal.borrow().status != PORTAL_READY {
         let name = portal.borrow().name.as_str().to_owned();
         return Err(ereport(ERROR)
@@ -442,9 +427,18 @@ pub fn PortalDrop(portal: &Portal<'static>, isTopCommit: bool) -> PgResult<()> {
 
     run_cleanup_hook(portal)?;
 
+    // C frees a leftover QueryDesc with the portal context (failed portals
+    // skip ExecutorEnd); the owning registry entry must drop explicitly.
+    let query_desc = {
+        let mut p = portal.borrow_mut();
+        core::mem::replace(&mut p.queryDesc, QueryDescHandle::NULL)
+    };
+    if !query_desc.is_null() {
+        execmain_seams::release_query_desc::call(query_desc);
+    }
+
     debug_assert!(portal.borrow().portalSnapshot.is_none() || !isTopCommit);
 
-    // Remove from the table first so an error below cannot retry the removal.
     let key = PortalName::new(&portal.borrow().name);
     let removed = with_mgr(|m| {
         let i = m.index.remove(&key)?;
@@ -466,8 +460,6 @@ pub fn PortalDrop(portal: &Portal<'static>, isTopCommit: bool) -> PgResult<()> {
     let resowner = portal.borrow().resowner;
     let hold_snapshot = portal.borrow_mut().holdSnapshot.take();
     if let Some(snap) = hold_snapshot {
-        // Registration rides the portal's resowner; after abort the owner (and
-        // the registration) are already gone.
         if !resowner.is_null() {
             snapmgr_portal_seams::unregister_snapshot_from_owner::call(snap, resowner);
         }
@@ -528,8 +520,6 @@ pub fn PortalDrop(portal: &Portal<'static>, isTopCommit: bool) -> PgResult<()> {
     Ok(())
 }
 
-// CLOSE ALL / DISCARD ALL; restarts the scan after each drop, as C's
-// hash_seq_term/hash_seq_init dance.
 pub fn PortalHashTableDeleteAll() -> PgResult<()> {
     loop {
         let next = with_mgr(|m| {
@@ -705,14 +695,14 @@ pub fn AtSubCommit_Portals(
     parentLevel: i32,
     parentXactOwner: ResourceOwner,
 ) {
-    at_subcommit_inner(mySubid, parentSubid, parentLevel, Some(parentXactOwner));
+    at_subcommit_inner(mySubid, parentSubid, parentLevel, parentXactOwner);
 }
 
 fn at_subcommit_inner(
     mySubid: SubTransactionId,
     parentSubid: SubTransactionId,
     parentLevel: i32,
-    parent_owner: Option<ResourceOwner>,
+    parent_owner: ResourceOwner,
 ) {
     for i in 0..table_len() {
         let Some(portal) = portal_at(i) else { break };
@@ -729,13 +719,7 @@ fn at_subcommit_inner(
             (mine && !p.resowner.is_null()).then_some(p.resowner)
         };
         if let Some(owner) = reparent {
-            // C: ResourceOwnerNewParent(portal->resowner, parentXactOwner). The
-            // portalmem_seams decl dissolved the owner parameter; refuse loudly
-            // rather than skip the reparent.
-            let new_parent = parent_owner.unwrap_or_else(|| {
-                panic!("at_subcommit_portals: portal resowner reparent needs parentXactOwner")
-            });
-            resowner_portal_seams::resource_owner_new_parent::call(owner, new_parent);
+            resowner_portal_seams::resource_owner_new_parent::call(owner, parent_owner);
         }
     }
 }
@@ -746,13 +730,13 @@ pub fn AtSubAbort_Portals(
     myXactOwner: ResourceOwner,
     _parentXactOwner: ResourceOwner,
 ) -> PgResult<()> {
-    at_subabort_inner(mySubid, parentSubid, Some(myXactOwner))
+    at_subabort_inner(mySubid, parentSubid, myXactOwner)
 }
 
 fn at_subabort_inner(
     mySubid: SubTransactionId,
     parentSubid: SubTransactionId,
-    my_owner: Option<ResourceOwner>,
+    my_owner: ResourceOwner,
 ) -> PgResult<()> {
     for i in 0..table_len() {
         let Some(portal) = portal_at(i) else { break };
@@ -780,12 +764,7 @@ fn at_subabort_inner(
                     }
                 };
                 if let Some(owner) = reparent {
-                    let new_parent = my_owner.unwrap_or_else(|| {
-                        panic!(
-                            "at_subabort_portals: portal resowner reparent needs myXactOwner"
-                        )
-                    });
-                    resowner_portal_seams::resource_owner_new_parent::call(owner, new_parent);
+                    resowner_portal_seams::resource_owner_new_parent::call(owner, my_owner);
                 }
             }
             continue;

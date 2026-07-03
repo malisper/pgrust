@@ -346,7 +346,7 @@ fn xact_redo_commit(
 
     if !parsed.stats.is_empty() {
         xlog_seams::xlog_flush::call(lsn)?;
-        pgstat_xact_seams::pgstat_execute_transactional_drops::call(&parsed.stats, true)?;
+        pgstat::xact::pgstat_execute_transactional_drops(&parsed.stats, true)?;
     }
 
     if XactCompletionForceSyncCommit(parsed.xinfo) {
@@ -407,7 +407,7 @@ fn xact_redo_abort(
 
     if !parsed.stats.is_empty() {
         xlog_seams::xlog_flush::call(lsn)?;
-        pgstat_xact_seams::pgstat_execute_transactional_drops::call(&parsed.stats, true)?;
+        pgstat::xact::pgstat_execute_transactional_drops(&parsed.stats, true)?;
     }
 
     Ok(())

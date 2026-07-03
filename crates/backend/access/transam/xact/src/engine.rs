@@ -38,7 +38,7 @@ fn RecordTransactionCommitGuts(mcx: mcx::Mcx<'_>) -> PgResult<TransactionId> {
 
     let rels = catalog_storage_seams::smgr_get_pending_deletes::call(mcx, true)?;
     let children = xactGetCommittedChildren()?;
-    let dropped_stats = pgstat_xact_seams::pgstat_get_transactional_drops::call(mcx, true)?;
+    let dropped_stats = pgstat::xact::pgstat_get_transactional_drops(mcx, true)?;
     let (inval_msgs, relcache_init_file_inval) = if xlog_seams::xlog_standby_info_active::call() {
         inval::eoxact::xactGetCommittedInvalidationMessages(mcx)?
     } else {
@@ -189,7 +189,7 @@ fn record_transaction_abort_guts(
 ) -> PgResult<TransactionId> {
     let rels = catalog_storage_seams::smgr_get_pending_deletes::call(mcx, false)?;
     let children = xactGetCommittedChildren()?;
-    let dropped_stats = pgstat_xact_seams::pgstat_get_transactional_drops::call(mcx, false)?;
+    let dropped_stats = pgstat::xact::pgstat_get_transactional_drops(mcx, false)?;
 
     init_small::globals::StartCriticalSection();
 
@@ -253,7 +253,7 @@ fn StartTransaction() -> PgResult<()> {
     {
         let rate = (guc_tables::vars::log_xact_sample_rate.get().get)();
         let sampled = rate != 0.0
-            && (rate == 1.0 || pg_prng_seams::global_prng_double::call() <= rate);
+            && (rate == 1.0 || pg_prng::global_prng(pg_prng::PgPrng::next_f64) <= rate);
         // One state borrow for the adjacent field writes (no seam between).
         xs(|s| {
             s.xact_is_sampled = sampled;
@@ -264,7 +264,7 @@ fn StartTransaction() -> PgResult<()> {
         });
     }
 
-    let (prev_user, prev_sec_context) = miscinit_seams::get_user_id_and_sec_context::call();
+    let (prev_user, prev_sec_context) = miscinit::GetUserIdAndSecContext();
     debug_assert_eq!(prev_sec_context, 0);
     xs(|s| {
         s.current_mut().prev_user = prev_user;
@@ -299,9 +299,9 @@ fn StartTransaction() -> PgResult<()> {
 
     let vxid = VirtualTransactionId {
         procNumber: init_small::globals::MyProcNumber(),
-        localTransactionId: sinval_seams::get_next_local_transaction_id::call(),
+        localTransactionId: sinval::GetNextLocalTransactionId(),
     };
-    lock_seams::virtual_xact_lock_table_insert::call(vxid)?;
+    lock::VirtualXactLockTableInsert(vxid)?;
     {
         let proc = lmgr_proc::GetPGProcByNumber(lmgr_proc::MyProc().expect("MyProc is not set"));
         debug_assert_eq!(proc.vxid.procNumber.load(Relaxed), vxid.procNumber);
@@ -330,7 +330,7 @@ fn StartTransaction() -> PgResult<()> {
     };
     backend_status_seams::pgstat_report_xact_timestamp::call(xact_start);
 
-    guc_seams::at_start_guc::call();
+    guc::AtStart_GUC();
     AtStart_Cache()?;
     trigger_seams::after_trigger_begin_xact::call()?;
 
@@ -366,7 +366,7 @@ fn CommitTransaction() -> PgResult<()> {
 
     loop {
         trigger_seams::after_trigger_fire_deferred::call()?;
-        if !portalmem_seams::pre_commit_portals::call(false)? {
+        if !portalmem::PreCommit_Portals(false)? {
             break;
         }
     }
@@ -411,7 +411,7 @@ fn CommitTransaction() -> PgResult<()> {
 
     init_small::globals::HoldInterrupts();
 
-    relmapper_seams::at_eoxact_relation_map::call(true, is_parallel_worker)?;
+    relmapper::AtEOXact_RelationMap(true, is_parallel_worker)?;
 
     xs(|s| {
         s.current_mut().state = TRANS_COMMIT;
@@ -445,12 +445,12 @@ fn CommitTransaction() -> PgResult<()> {
         XACT_EVENT_COMMIT
     })?;
 
-    resowner_seams::reset_current_resource_owner::call();
-    resowner_seams::release_transaction_owner_before_locks::call(true)?;
+    resowner::SetCurrentResourceOwner(types_resowner::ResourceOwner::NULL);
+    release_transaction_owner_before_locks(true)?;
 
     aio_seams::at_eoxact_aio::call(true);
 
-    bufmgr_seams::at_eoxact_buffers::call(true);
+    bufmgr::AtEOXact_Buffers(true);
 
     relcache_seams::at_eoxact_relation_cache::call(true)?;
 
@@ -462,29 +462,29 @@ fn CommitTransaction() -> PgResult<()> {
 
     multixact_seams::at_eoxact_multixact::call();
 
-    resowner_seams::release_transaction_owner_locks::call(true)?;
+    release_transaction_owner_locks(true)?;
 
     // Drop deleted files (after relcache/buffer pins and locks are gone).
     catalog_storage_seams::smgr_do_pending_deletes::call(true)?;
 
     async_seams::at_commit_notify::call()?;
 
-    guc_seams::at_eoxact_guc::call(true, 1)?;
+    guc::AtEOXact_GUC(true, 1);
     spi_seams::at_eoxact_spi::call(true)?;
     pg_enum_seams::at_eoxact_enum::call();
     tablecmds_seams::at_eoxact_on_commit_actions::call(true);
     namespace_seams::at_eoxact_namespace::call(true, is_parallel_worker);
-    smgr_seams::at_eoxact_smgr::call();
+    { let _ = smgr::AtEOXact_SMgr(); }
     fd::AtEOXact_Files(true)?;
     combocid_seams::at_eoxact_combocid::call();
     // AtEOXact_HashTables dissolves (crate docs).
-    pgstat_xact_seams::at_eoxact_pgstat::call(true, is_parallel_worker);
+    pgstat::xact::AtEOXact_PgStat(true, is_parallel_worker);
     snapmgr_seams::at_eoxact_snapshot::call(true, false)?;
-    launcher_seams::at_eoxact_apply_launcher::call(true);
+    launcher::AtEOXact_ApplyLauncher(true);
     logical_worker_seams::at_eoxact_logical_rep_workers::call(true);
     backend_status_seams::pgstat_report_xact_timestamp::call(0);
 
-    resowner_seams::delete_transaction_owner::call()?;
+    delete_transaction_owner()?;
     xs(|s| s.current_mut().has_resource_owner = false);
 
     AtCommit_Memory();
@@ -521,7 +521,7 @@ fn PrepareTransaction() -> PgResult<()> {
 
     loop {
         trigger_seams::after_trigger_fire_deferred::call()?;
-        if !portalmem_seams::pre_commit_portals::call(true)? {
+        if !portalmem::PreCommit_Portals(true)? {
             break;
         }
     }
@@ -570,7 +570,7 @@ fn PrepareTransaction() -> PgResult<()> {
         xid,
         &gid,
         prepared_at,
-        miscinit_seams::get_user_id::call(),
+        miscinit::GetUserId(),
         databaseid,
     )?;
 
@@ -581,15 +581,15 @@ fn PrepareTransaction() -> PgResult<()> {
     let commitrels = catalog_storage_seams::smgr_get_pending_deletes::call(prep_mcx, true)?;
     let abortrels = catalog_storage_seams::smgr_get_pending_deletes::call(prep_mcx, false)?;
     let children = xactGetCommittedChildren()?;
-    let commitstats = pgstat_xact_seams::pgstat_get_transactional_drops::call(prep_mcx, true)?;
-    let abortstats = pgstat_xact_seams::pgstat_get_transactional_drops::call(prep_mcx, false)?;
+    let commitstats = pgstat::xact::pgstat_get_transactional_drops(prep_mcx, true)?;
+    let abortstats = pgstat::xact::pgstat_get_transactional_drops(prep_mcx, false)?;
     let (invalmsgs, initfileinval) = inval::eoxact::xactGetCommittedInvalidationMessages(prep_mcx)?;
 
     let start_args = twophase_seams::StartPrepareArgs {
         xid,
         gid: gid.clone(),
         prepared_at,
-        owner: miscinit_seams::get_user_id::call(),
+        owner: miscinit::GetUserId(),
         databaseid,
         children,
         ncommitrels: commitrels.len() as i32,
@@ -607,11 +607,11 @@ fn PrepareTransaction() -> PgResult<()> {
     twophase_seams::start_prepare::call(&start_args)?;
 
     async_seams::at_prepare_notify::call()?;
-    lock_seams::at_prepare_locks::call()?;
+    lock::AtPrepare_Locks()?;
     predicate_seams::at_prepare_predicate_locks::call()?;
-    pgstat_xact_seams::at_prepare_pgstat::call()?;
+    pgstat::xact::AtPrepare_PgStat()?;
     multixact_seams::at_prepare_multixact::call()?;
-    relmapper_seams::at_prepare_relation_map::call()?;
+    relmapper::AtPrepare_RelationMap()?;
 
     twophase_seams::end_prepare::call()?;
 
@@ -619,7 +619,7 @@ fn PrepareTransaction() -> PgResult<()> {
 
     // Transfer locks to a dummy PGPROC before ProcArrayClearTransaction, so
     // GetLockConflicts can't conclude "xact already ended" for our locks.
-    lock_seams::post_prepare_locks::call(xid)?;
+    lock::PostPrepare_Locks(xid)?;
 
     procarray_seams::proc_array_clear_transaction::call()?;
 
@@ -627,18 +627,18 @@ fn PrepareTransaction() -> PgResult<()> {
 
     // Unlike Commit/Abort, Prepare does NOT reset CurrentResourceOwner here
     // (it clears it at the tail, with the delete).
-    resowner_seams::release_transaction_owner_before_locks::call(true)?;
+    release_transaction_owner_before_locks(true)?;
 
     aio_seams::at_eoxact_aio::call(true);
 
-    bufmgr_seams::at_eoxact_buffers::call(true);
+    bufmgr::AtEOXact_Buffers(true);
 
     relcache_seams::at_eoxact_relation_cache::call(true)?;
 
     typcache_seams::at_eoxact_type_cache::call();
 
 
-    pgstat_xact_seams::post_prepare_pgstat::call();
+    pgstat::xact::PostPrepare_PgStat();
 
     inval::eoxact::PostPrepare_Inval()?;
 
@@ -648,26 +648,26 @@ fn PrepareTransaction() -> PgResult<()> {
 
     predicate_seams::post_prepare_predicate_locks::call(xid)?;
 
-    resowner_seams::release_transaction_owner_locks::call(true)?;
+    release_transaction_owner_locks(true)?;
 
     twophase_seams::post_prepare_twophase::call();
 
-    guc_seams::at_eoxact_guc::call(true, 1)?;
+    guc::AtEOXact_GUC(true, 1);
     spi_seams::at_eoxact_spi::call(true)?;
     pg_enum_seams::at_eoxact_enum::call();
     tablecmds_seams::at_eoxact_on_commit_actions::call(true);
     namespace_seams::at_eoxact_namespace::call(true, false);
-    smgr_seams::at_eoxact_smgr::call();
+    { let _ = smgr::AtEOXact_SMgr(); }
     fd::AtEOXact_Files(true)?;
     combocid_seams::at_eoxact_combocid::call();
     // AtEOXact_HashTables dissolves; no AtEOXact_PgStat (pgstat fixed above).
     snapmgr_seams::at_eoxact_snapshot::call(true, true)?;
-    launcher_seams::at_eoxact_apply_launcher::call(false);
+    launcher::AtEOXact_ApplyLauncher(false);
     logical_worker_seams::at_eoxact_logical_rep_workers::call(false);
     backend_status_seams::pgstat_report_xact_timestamp::call(0);
 
-    resowner_seams::reset_current_resource_owner::call();
-    resowner_seams::delete_transaction_owner::call()?;
+    resowner::SetCurrentResourceOwner(types_resowner::ResourceOwner::NULL);
+    delete_transaction_owner()?;
     xs(|s| s.current_mut().has_resource_owner = false);
 
     AtCommit_Memory();
@@ -707,7 +707,7 @@ fn AbortTransaction() -> PgResult<()> {
 
     aio_seams::pgaio_error_cleanup::call();
 
-    bufmgr_seams::unlock_buffers::call();
+    bufmgr::UnlockBuffers();
 
     xloginsert_seams::xlog_reset_insertion::call();
 
@@ -732,7 +732,7 @@ fn AbortTransaction() -> PgResult<()> {
     xs(|s| s.current_mut().state = TRANS_ABORT);
 
     let (prev_user, prev_sec) = xs(|s| (s.current().prev_user, s.current().prev_sec_context));
-    miscinit_seams::set_user_id_and_sec_context::call(prev_user, prev_sec);
+    miscinit::SetUserIdAndSecContext(prev_user, prev_sec);
 
     catalog_index_seams::reset_reindex_state::call(xs(|s| s.current().nesting_level));
 
@@ -747,11 +747,11 @@ fn AbortTransaction() -> PgResult<()> {
     });
 
     trigger_seams::after_trigger_end_xact::call(false)?;
-    portalmem_seams::at_abort_portals::call()?;
+    portalmem::AtAbort_Portals()?;
     catalog_storage_seams::smgr_do_pending_syncs::call(false, is_parallel_worker)?;
     be_fsstubs_seams::at_eoxact_large_object::call(false)?;
     async_seams::at_abort_notify::call();
-    relmapper_seams::at_eoxact_relation_map::call(false, is_parallel_worker)?;
+    relmapper::AtEOXact_RelationMap(false, is_parallel_worker)?;
     twophase_seams::at_abort_twophase::call();
 
     let latest_xid = if !is_parallel_worker {
@@ -775,27 +775,27 @@ fn AbortTransaction() -> PgResult<()> {
             XACT_EVENT_ABORT
         })?;
 
-        resowner_seams::release_transaction_owner_before_locks::call(false)?;
+        release_transaction_owner_before_locks(false)?;
         aio_seams::at_eoxact_aio::call(false);
-        bufmgr_seams::at_eoxact_buffers::call(false);
+        bufmgr::AtEOXact_Buffers(false);
         relcache_seams::at_eoxact_relation_cache::call(false)?;
         typcache_seams::at_eoxact_type_cache::call();
         inval::eoxact::AtEOXact_Inval(false)?;
         multixact_seams::at_eoxact_multixact::call();
-        resowner_seams::release_transaction_owner_locks::call(false)?;
+        release_transaction_owner_locks(false)?;
         catalog_storage_seams::smgr_do_pending_deletes::call(false)?;
 
-        guc_seams::at_eoxact_guc::call(false, 1)?;
+        guc::AtEOXact_GUC(false, 1);
         spi_seams::at_eoxact_spi::call(false)?;
         pg_enum_seams::at_eoxact_enum::call();
         tablecmds_seams::at_eoxact_on_commit_actions::call(false);
         namespace_seams::at_eoxact_namespace::call(false, is_parallel_worker);
-        smgr_seams::at_eoxact_smgr::call();
+        { let _ = smgr::AtEOXact_SMgr(); }
         fd::AtEOXact_Files(false)?;
         combocid_seams::at_eoxact_combocid::call();
         // AtEOXact_HashTables dissolves.
-        pgstat_xact_seams::at_eoxact_pgstat::call(false, is_parallel_worker);
-        launcher_seams::at_eoxact_apply_launcher::call(false);
+        pgstat::xact::AtEOXact_PgStat(false, is_parallel_worker);
+        launcher::AtEOXact_ApplyLauncher(false);
         logical_worker_seams::at_eoxact_logical_rep_workers::call(false);
         backend_status_seams::pgstat_report_xact_timestamp::call(0);
     }
@@ -815,11 +815,11 @@ fn CleanupTransaction() -> PgResult<()> {
         )));
     }
 
-    portalmem_seams::at_cleanup_portals::call()?; // now safe to release portal memory
+    portalmem::AtCleanup_Portals()?; // now safe to release portal memory
     snapmgr_seams::at_eoxact_snapshot::call(false, true)?; // release the xact's snapshots
 
-    resowner_seams::reset_current_resource_owner::call();
-    resowner_seams::delete_transaction_owner::call()?;
+    resowner::SetCurrentResourceOwner(types_resowner::ResourceOwner::NULL);
+    delete_transaction_owner()?;
     xs(|s| s.current_mut().has_resource_owner = false);
 
     AtCleanup_Memory(); // and transaction memory
@@ -1648,7 +1648,7 @@ pub fn AbortOutOfAnyTransaction() -> PgResult<()> {
                 xs(|s| s.current_mut().block_state = TBLOCK_DEFAULT);
             }
             TBLOCK_ABORT | TBLOCK_ABORT_END => {
-                portalmem_seams::at_abort_portals::call()?;
+                portalmem::AtAbort_Portals()?;
                 CleanupTransaction()?;
                 xs(|s| s.current_mut().block_state = TBLOCK_DEFAULT);
             }
@@ -1664,7 +1664,12 @@ pub fn AbortOutOfAnyTransaction() -> PgResult<()> {
             TBLOCK_SUBABORT | TBLOCK_SUBABORT_END | TBLOCK_SUBABORT_RESTART => {
                 if xs(|s| s.current().has_resource_owner) {
                     let (my, parent) = subxact_ids();
-                    portalmem_seams::at_subabort_portals::call(my, parent)?;
+                    portalmem::AtSubAbort_Portals(
+                        my,
+                        parent,
+                        resowner::CurTransactionResourceOwner(),
+                        resowner::ResourceOwnerGetParent(resowner::CurTransactionResourceOwner()),
+                    )?;
                 }
                 CleanupSubTransaction()?;
             }
@@ -1748,13 +1753,18 @@ fn CommitSubTransaction() -> PgResult<()> {
         let last = s.stack_len() - 1;
         s.node(last - 1).nesting_level
     });
-    portalmem_seams::at_subcommit_portals::call(my, parent, parent_nesting)?;
+    portalmem::AtSubCommit_Portals(
+        my,
+        parent,
+        parent_nesting,
+        resowner::ResourceOwnerGetParent(resowner::CurTransactionResourceOwner()),
+    );
     be_fsstubs_seams::at_eosubxact_large_object::call(true, my, parent)?;
     async_seams::at_subcommit_notify::call()?;
 
     CallSubXactCallbacks(SUBXACT_EVENT_COMMIT_SUB, my, parent)?;
 
-    resowner_seams::release_subxact_owner_before_locks::call(true)?;
+    release_subxact_owner_before_locks(true)?;
     relcache_seams::at_eosubxact_relation_cache::call(true, my, parent)?;
     typcache_seams::at_eosubxact_type_cache::call();
     inval::eoxact::AtEOSubXact_Inval(true)?;
@@ -1765,24 +1775,24 @@ fn CommitSubTransaction() -> PgResult<()> {
         lmgr_seams::xact_lock_table_delete::call(xid)?;
     }
 
-    resowner_seams::release_subxact_owner_locks::call(true)?;
+    release_subxact_owner_locks(true)?;
 
     let (guc_nest_level, nesting_level) =
         xs(|s| (s.current().guc_nest_level, s.current().nesting_level));
-    guc_seams::at_eoxact_guc::call(true, guc_nest_level)?;
+    guc::AtEOXact_GUC(true, guc_nest_level);
     spi_seams::at_eosubxact_spi::call(true, my)?;
     tablecmds_seams::at_eosubxact_on_commit_actions::call(true, my, parent);
     namespace_seams::at_eosubxact_namespace::call(true, my, parent);
     fd::AtEOSubXact_Files(true, my, parent);
     // AtEOSubXact_HashTables dissolves.
-    pgstat_xact_seams::at_eosubxact_pgstat::call(true, nesting_level);
+    pgstat::xact::AtEOSubXact_PgStat(true, nesting_level);
     snapmgr_seams::at_subcommit_snapshot::call(nesting_level);
 
     xs(|s| {
         s.XactReadOnly = s.current().prev_xact_read_only;
     });
 
-    resowner_seams::cleanup_subxact_owner::call()?;
+    cleanup_subxact_owner()?;
     xs(|s| s.current_mut().has_resource_owner = false);
 
     AtSubCommit_Memory()?;
@@ -1805,7 +1815,7 @@ fn AbortSubTransaction() -> PgResult<()> {
 
     aio_seams::pgaio_error_cleanup::call();
 
-    bufmgr_seams::unlock_buffers::call();
+    bufmgr::UnlockBuffers();
 
     xloginsert_seams::xlog_reset_insertion::call();
 
@@ -1828,7 +1838,7 @@ fn AbortSubTransaction() -> PgResult<()> {
     xs(|s| s.current_mut().state = TRANS_ABORT);
 
     let (prev_user, prev_sec) = xs(|s| (s.current().prev_user, s.current().prev_sec_context));
-    miscinit_seams::set_user_id_and_sec_context::call(prev_user, prev_sec);
+    miscinit::SetUserIdAndSecContext(prev_user, prev_sec);
 
     catalog_index_seams::reset_reindex_state::call(xs(|s| s.current().nesting_level));
 
@@ -1841,7 +1851,12 @@ fn AbortSubTransaction() -> PgResult<()> {
 
     if xs(|s| s.current().has_resource_owner) {
         trigger_seams::after_trigger_end_sub_xact::call(false)?;
-        portalmem_seams::at_subabort_portals::call(my, parent)?;
+        portalmem::AtSubAbort_Portals(
+                        my,
+                        parent,
+                        resowner::CurTransactionResourceOwner(),
+                        resowner::ResourceOwnerGetParent(resowner::CurTransactionResourceOwner()),
+                    )?;
         be_fsstubs_seams::at_eosubxact_large_object::call(false, my, parent)?;
         async_seams::at_subabort_notify::call();
 
@@ -1854,23 +1869,23 @@ fn AbortSubTransaction() -> PgResult<()> {
 
         CallSubXactCallbacks(SUBXACT_EVENT_ABORT_SUB, my, parent)?;
 
-        resowner_seams::release_subxact_owner_before_locks::call(false)?;
+        release_subxact_owner_before_locks(false)?;
         aio_seams::at_eoxact_aio::call(false);
         relcache_seams::at_eosubxact_relation_cache::call(false, my, parent)?;
         typcache_seams::at_eosubxact_type_cache::call();
         inval::eoxact::AtEOSubXact_Inval(false)?;
-        resowner_seams::release_subxact_owner_locks::call(false)?;
+        release_subxact_owner_locks(false)?;
         catalog_storage_seams::at_subabort_smgr::call()?;
 
         let (guc_nest_level, nesting_level) =
             xs(|s| (s.current().guc_nest_level, s.current().nesting_level));
-        guc_seams::at_eoxact_guc::call(false, guc_nest_level)?;
+        guc::AtEOXact_GUC(false, guc_nest_level);
         spi_seams::at_eosubxact_spi::call(false, my)?;
         tablecmds_seams::at_eosubxact_on_commit_actions::call(false, my, parent);
         namespace_seams::at_eosubxact_namespace::call(false, my, parent);
         fd::AtEOSubXact_Files(false, my, parent);
         // AtEOSubXact_HashTables dissolves.
-        pgstat_xact_seams::at_eosubxact_pgstat::call(false, nesting_level);
+        pgstat::xact::AtEOSubXact_PgStat(false, nesting_level);
         snapmgr_seams::at_subabort_snapshot::call(nesting_level)?;
     }
 
@@ -1891,10 +1906,10 @@ fn CleanupSubTransaction() -> PgResult<()> {
     }
 
     let (my, _parent) = subxact_ids();
-    portalmem_seams::at_subcleanup_portals::call(my)?;
+    portalmem::AtSubCleanup_Portals(my)?;
 
     if xs(|s| s.current().has_resource_owner) {
-        resowner_seams::cleanup_subxact_owner::call()?;
+        cleanup_subxact_owner()?;
     }
     xs(|s| s.current_mut().has_resource_owner = false);
 
@@ -1922,8 +1937,8 @@ fn PushTransaction() -> PgResult<()> {
             .finish(xact_location("PushTransaction"));
     }
 
-    let guc_nest_level = guc_seams::new_guc_nest_level::call();
-    let (prev_user, prev_sec_context) = miscinit_seams::get_user_id_and_sec_context::call();
+    let guc_nest_level = guc::NewGUCNestLevel();
+    let (prev_user, prev_sec_context) = miscinit::GetUserIdAndSecContext();
 
     xs(|s| {
         let parent = s.current();

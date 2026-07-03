@@ -1,6 +1,6 @@
 //! xact.c: the transaction state machine. Sanctioned divergences: resource
-//! owners are the resowner unit's RAII owner values reached through
-//! `resowner_seams` (`has_resource_owner` keeps the C control flow); the
+//! owners are the resowner unit's RAII owner values called directly
+//! (`has_resource_owner` keeps the C control flow); the
 //! `MemoryContextSwitchTo`/`priorContext` choreography dissolves (no ambient
 //! context); `AtEOXact_HashTables` dissolves (no dynahash seq-scan tracking
 //! over PgHashMap); transaction-lifetime collections are std `Vec`/`String`
@@ -15,6 +15,9 @@ use elog::{elog, ereport, message_level_is_interesting};
 use mcx::MemoryContext;
 use types_core::xact::*;
 use types_core::{TimestampTz, TransactionId, XLogRecPtr};
+use types_resowner::{
+    RESOURCE_RELEASE_AFTER_LOCKS, RESOURCE_RELEASE_BEFORE_LOCKS, RESOURCE_RELEASE_LOCKS,
+};
 use types_error::{
     ErrorLocation, PgError, PgResult, DEBUG5, ERRCODE_ACTIVE_SQL_TRANSACTION,
     ERRCODE_INVALID_TRANSACTION_STATE, ERRCODE_NO_ACTIVE_SQL_TRANSACTION,
@@ -344,9 +347,24 @@ fn assign_transaction_id_at(idx: usize) -> PgResult<()> {
     // owner tree mirrors the stack, so idx's owner is the (deepest-idx)-th
     // ancestor of the live CurTransactionResourceOwner.
     let levels_up = xs(|s| (s.stack_len() - 1 - idx) as u32);
-    let saved = resowner_seams::swap_current_to_cur_transaction_ancestor::call(levels_up);
+    let prev_owner = resowner::CurrentResourceOwner();
+    let base = resowner::CurTransactionResourceOwner();
+    if !base.is_null() {
+        let mut owner = base;
+        for _ in 0..levels_up {
+            let parent = resowner::ResourceOwnerGetParent(owner);
+            if parent.is_null() {
+                // The owner tree mirrors the transaction stack; keep the
+                // deepest owner rather than installing NULL on overshoot.
+                owner = base;
+                break;
+            }
+            owner = parent;
+        }
+        resowner::SetCurrentResourceOwner(owner);
+    }
     let insert_result = lmgr_seams::xact_lock_table_insert::call(full.xid());
-    resowner_seams::restore_current_resource_owner::call(saved);
+    resowner::SetCurrentResourceOwner(prev_owner);
     insert_result?;
 
     if is_subxact && xlog_seams::xlog_standby_info_active::call() {
@@ -594,7 +612,13 @@ pub(crate) fn AtStart_ResourceOwner() -> PgResult<()> {
         debug_assert!(!s.current().has_resource_owner);
         s.current_mut().has_resource_owner = true;
     });
-    resowner_seams::at_start_resource_owner::call()
+    debug_assert!(resowner::TopTransactionResourceOwner().is_null());
+    let owner =
+        resowner::ResourceOwnerCreate(types_resowner::ResourceOwner::NULL, "TopTransaction")?;
+    resowner::SetTopTransactionResourceOwner(owner);
+    resowner::SetCurTransactionResourceOwner(owner);
+    resowner::SetCurrentResourceOwner(owner);
+    Ok(())
 }
 
 pub(crate) fn AtSubStart_Memory() {
@@ -619,11 +643,70 @@ pub(crate) fn AtSubStart_ResourceOwner() -> PgResult<()> {
         debug_assert!(s.is_subxact());
         s.current_mut().has_resource_owner = true;
     });
-    resowner_seams::at_substart_resource_owner::call()
+    let owner =
+        resowner::ResourceOwnerCreate(resowner::CurTransactionResourceOwner(), "SubTransaction")?;
+    resowner::SetCurTransactionResourceOwner(owner);
+    resowner::SetCurrentResourceOwner(owner);
+    Ok(())
+}
+
+pub(crate) fn release_transaction_owner_before_locks(is_commit: bool) -> PgResult<()> {
+    let owner = resowner::TopTransactionResourceOwner();
+    if !owner.is_null() {
+        resowner::ResourceOwnerRelease(owner, RESOURCE_RELEASE_BEFORE_LOCKS, is_commit, true)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn release_transaction_owner_locks(is_commit: bool) -> PgResult<()> {
+    let owner = resowner::TopTransactionResourceOwner();
+    if !owner.is_null() {
+        resowner::ResourceOwnerRelease(owner, RESOURCE_RELEASE_LOCKS, is_commit, true)?;
+        resowner::ResourceOwnerRelease(owner, RESOURCE_RELEASE_AFTER_LOCKS, is_commit, true)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn release_subxact_owner_before_locks(is_commit: bool) -> PgResult<()> {
+    let owner = resowner::CurTransactionResourceOwner();
+    if !owner.is_null() {
+        resowner::ResourceOwnerRelease(owner, RESOURCE_RELEASE_BEFORE_LOCKS, is_commit, false)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn release_subxact_owner_locks(is_commit: bool) -> PgResult<()> {
+    let owner = resowner::CurTransactionResourceOwner();
+    if !owner.is_null() {
+        resowner::ResourceOwnerRelease(owner, RESOURCE_RELEASE_LOCKS, is_commit, false)?;
+        resowner::ResourceOwnerRelease(owner, RESOURCE_RELEASE_AFTER_LOCKS, is_commit, false)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn delete_transaction_owner() -> PgResult<()> {
+    let owner = resowner::TopTransactionResourceOwner();
+    if !owner.is_null() {
+        resowner::ResourceOwnerDelete(owner);
+    }
+    resowner::SetCurTransactionResourceOwner(types_resowner::ResourceOwner::NULL);
+    resowner::SetTopTransactionResourceOwner(types_resowner::ResourceOwner::NULL);
+    Ok(())
+}
+
+pub(crate) fn cleanup_subxact_owner() -> PgResult<()> {
+    let owner = resowner::CurTransactionResourceOwner();
+    if !owner.is_null() {
+        let parent = resowner::ResourceOwnerGetParent(owner);
+        resowner::SetCurrentResourceOwner(parent);
+        resowner::SetCurTransactionResourceOwner(parent);
+        resowner::ResourceOwnerDelete(owner);
+    }
+    Ok(())
 }
 
 fn AtCCI_LocalCache() -> PgResult<()> {
-    relmapper_seams::at_cci_relation_map::call()?;
+    relmapper::AtCCI_RelationMap()?;
     inval::eoxact::CommandEndInvalidationMessages()
 }
 
@@ -711,7 +794,7 @@ pub(crate) fn AtSubAbort_Memory() {
 pub(crate) fn AtAbort_ResourceOwner() {}
 
 pub(crate) fn AtSubAbort_ResourceOwner() {
-    resowner_seams::set_current_to_cur_transaction::call();
+    resowner::SetCurrentResourceOwner(resowner::CurTransactionResourceOwner());
 }
 
 pub(crate) fn AtSubAbort_childXids() {

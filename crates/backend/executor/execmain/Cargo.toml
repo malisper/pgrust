@@ -25,6 +25,10 @@ execscan = { path = "../execscan" }
 nodeseqscan = { path = "../nodeseqscan" }
 nodeindexscan = { path = "../nodeindexscan" }
 nodeindexonlyscan = { path = "../nodeindexonlyscan" }
+nodebitmapindexscan = { path = "../nodebitmapindexscan" }
+nodebitmapheapscan = { path = "../nodebitmapheapscan" }
+tidbitmap = { path = "../../nodes/tidbitmap" }
+nodeagg = { path = "../nodeagg" }
 exectuples = { path = "../exectuples" }
 tupdesc = { path = "../../access/common/tupdesc" }
 snapmgr = { path = "../../utils/time/snapmgr" }

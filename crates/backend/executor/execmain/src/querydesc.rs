@@ -119,6 +119,10 @@ pub(crate) fn with_qd<R>(h: QueryDescHandle, f: impl FnOnce(&mut QueryDescData) 
     })
 }
 
+pub fn registry_len() -> usize {
+    ENTRIES.with(|e| e.borrow().iter().filter(|s| s.is_some()).count())
+}
+
 fn remove(h: QueryDescHandle) -> QueryDescData {
     assert!(!h.is_null(), "execmain: FreeQueryDesc of NULL handle");
     let (idx, generation) = decode(h);
@@ -168,6 +172,12 @@ pub(crate) fn create_query_desc_seam(
         exec: None,
         already_executed: false,
     }))
+}
+
+// C frees an aborted QueryDesc with the portal context, ExecutorEnd never
+// runs, and snapshot registrations are released by the resource owner.
+pub(crate) fn release_query_desc_seam(h: QueryDescHandle) {
+    drop(remove(h));
 }
 
 /// `FreeQueryDesc` (pquery.c).

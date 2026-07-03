@@ -285,14 +285,78 @@ fn coerce_arg<'mcx>(
     )
 }
 
-// C renders type names via format_type_be (format_type.c, unported).
-fn op_signature_string(parts: &[&str], arg1: Oid, arg2: Oid) -> String {
-    let opname = parts.join(".");
-    if OidIsValid(arg1) {
-        format!("{arg1} {opname} {arg2}")
-    } else {
-        format!("{opname} {arg2}")
+#[derive(Debug)]
+pub struct SortGroupOperators {
+    pub lt_opr: Oid,
+    pub eq_opr: Oid,
+    pub gt_opr: Oid,
+    pub hashable: bool,
+}
+
+/// C `get_sort_group_operators`; missing-operator errors carry no position —
+/// callers attach the parser errposition (C's callback pattern).
+pub fn get_sort_group_operators(
+    argtype: Oid,
+    need_lt: bool,
+    need_eq: bool,
+    need_gt: bool,
+    want_hashable: bool,
+) -> PgResult<SortGroupOperators> {
+    let mut cache_flags =
+        typcache::TYPECACHE_LT_OPR | typcache::TYPECACHE_EQ_OPR | typcache::TYPECACHE_GT_OPR;
+    if want_hashable {
+        cache_flags |= typcache::TYPECACHE_HASH_PROC;
     }
+
+    let typentry = typcache::lookup_type_cache(argtype, cache_flags)?;
+    let ops = SortGroupOperators {
+        lt_opr: typentry.lt_opr(),
+        eq_opr: typentry.eq_opr(),
+        gt_opr: typentry.gt_opr(),
+        hashable: OidIsValid(typentry.hash_proc()),
+    };
+
+    if (need_lt && !OidIsValid(ops.lt_opr)) || (need_gt && !OidIsValid(ops.gt_opr)) {
+        return Err(missing_op_error(argtype, true));
+    }
+    if need_eq && !OidIsValid(ops.eq_opr) {
+        return Err(missing_op_error(argtype, false));
+    }
+    Ok(ops)
+}
+
+#[cold]
+#[inline(never)]
+fn missing_op_error(argtype: Oid, ordering: bool) -> Box<PgError> {
+    let tname = match format_type::format_type_be(argtype) {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+    let mut b = elog::ereport(ERROR).errcode(ERRCODE_UNDEFINED_FUNCTION);
+    if ordering {
+        b = b
+            .errmsg(format!("could not identify an ordering operator for type {tname}"))
+            .errhint("Use an explicit ordering operator or modify the query.".to_string());
+    } else {
+        b = b.errmsg(format!("could not identify an equality operator for type {tname}"));
+    }
+    Box::new(
+        b.into_error()
+            .with_error_location(ErrorLocation::new("parse_oper.c", 0, "get_sort_group_operators")),
+    )
+}
+
+fn op_signature_string(parts: &[&str], arg1: Oid, arg2: Oid) -> PgResult<String> {
+    let opname = parts.join(".");
+    Ok(if OidIsValid(arg1) {
+        format!(
+            "{} {opname} {}",
+            format_type::format_type_be(arg1)?,
+            format_type::format_type_be(arg2)?
+        )
+    } else {
+        format!("{opname} {}", format_type::format_type_be(arg2)?)
+    })
 }
 
 #[cold]
@@ -312,13 +376,14 @@ fn op_error(
         "No operator matches the given name and argument types. \
          You might need to add explicit type casts."
     };
+    let sig = match op_signature_string(parts, arg1, arg2) {
+        Ok(sig) => sig,
+        Err(e) => return e,
+    };
     Box::new(
         elog::ereport(ERROR)
             .errcode(ERRCODE_UNDEFINED_FUNCTION)
-            .errmsg(format!(
-                "operator does not exist: {}",
-                op_signature_string(parts, arg1, arg2)
-            ))
+            .errmsg(format!("operator does not exist: {sig}"))
             .errhint(hint.to_string())
             .errposition(parser_errposition(pstate, location, encoding))
             .into_error()
@@ -335,13 +400,14 @@ fn shell_error(
     location: ParseLoc,
 ) -> Box<PgError> {
     let encoding = mbutils::GetDatabaseEncoding();
+    let sig = match op_signature_string(parts, op.shape.oprleft, op.shape.oprright) {
+        Ok(sig) => sig,
+        Err(e) => return e,
+    };
     Box::new(
         elog::ereport(ERROR)
             .errcode(ERRCODE_UNDEFINED_FUNCTION)
-            .errmsg(format!(
-                "operator is only a shell: {}",
-                op_signature_string(parts, op.shape.oprleft, op.shape.oprright)
-            ))
+            .errmsg(format!("operator is only a shell: {sig}"))
             .errposition(parser_errposition(pstate, location, encoding))
             .into_error()
             .with_error_location(ErrorLocation::new("parse_oper.c", 0, "make_op")),

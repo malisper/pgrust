@@ -32,7 +32,6 @@ fn events() -> Vec<String> {
 fn install() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
-        init_seams();
         xact_seams::get_current_sub_transaction_id::set(|| CUR_SUBID.get());
         xact_seams::get_current_transaction_nest_level::set(|| NEST_LEVEL.get());
         xact_portal_seams::get_current_statement_start_timestamp::set(|| STMT_TS.get());
@@ -127,7 +126,6 @@ fn create_lookup_drop() {
     PortalDrop(&portal, false).unwrap();
     assert!(GetPortalByName(Some("c1")).is_none());
     let ev = events();
-    // Cleanup hook, then the three release phases and the owner delete.
     assert_eq!(ev[0], "cleanup(c1)");
     assert!(ev[1].starts_with("release(1,RESOURCE_RELEASE_BEFORE_LOCKS,true,false"));
     assert!(ev[2].contains("RESOURCE_RELEASE_LOCKS"));
@@ -195,7 +193,6 @@ fn define_query_stores_and_shares_handles() {
         assert_eq!(p.qc.commandTag, CMDTAG_SELECT);
         assert_eq!(p.qc.nprocessed, 0);
     }
-    // Dropping releases the cached-plan refcount and clears the stmts share.
     PortalDrop(&portal, false).unwrap();
     assert!(events().contains(&"release_cplan(11)".to_owned()));
     assert!(portal.borrow().cplan.is_null());
@@ -224,7 +221,6 @@ fn mark_transitions() {
     MarkPortalDone(&portal).unwrap();
     assert_eq!(portal.borrow().status, PORTAL_DONE);
     assert_eq!(events(), vec!["cleanup(t)".to_owned()]);
-    // Hook cleared: dropping does not run it again.
     PortalDrop(&portal, false).unwrap();
     assert!(!events().contains(&"cleanup(t)".to_owned()));
 }
@@ -286,7 +282,6 @@ fn precommit_holds_holdable_and_drops_the_rest() {
     let ev = events();
     assert!(ev.contains(&"persist(holdme)".to_owned()));
 
-    // A second pass with nothing to do reports false.
     drop(h);
     assert!(!PreCommit_Portals(false).unwrap());
 }
@@ -344,7 +339,6 @@ fn at_cleanup_unpins_and_warns_on_unrun_hook() {
 
     AtCleanup_Portals().unwrap();
     assert!(GetPortalByName(Some("cl")).is_none());
-    // The hook is skipped (no user code during cleanup), not run.
     assert!(!events().contains(&"cleanup(cl)".to_owned()));
 }
 
@@ -380,7 +374,6 @@ fn subxact_lifecycle() {
     }
     assert!(events().iter().any(|e| e.starts_with("new_parent(") && e.ends_with(",900)")));
 
-    // Abort of an unrelated subxact leaves it alone.
     AtSubAbort_Portals(6, 1, ResourceOwner::from_parts(901, 1), parent_owner).unwrap();
     assert_eq!(portal.borrow().createSubid, 1);
 
@@ -533,19 +526,19 @@ fn pg_cursor_rows_filters_and_orders() {
 }
 
 #[test]
-fn seam_installed_entry_points_roundtrip() {
+fn xact_entry_points_roundtrip() {
     setup();
     let portal = CreatePortal("via_seam", false, false).unwrap();
     define_simple(&portal, "q");
     portal.borrow_mut().status = PORTAL_READY;
-    portalmem_seams::at_abort_portals::call().unwrap();
+    AtAbort_Portals().unwrap();
     assert_eq!(portal.borrow().status, PORTAL_FAILED);
-    portalmem_seams::at_cleanup_portals::call().unwrap();
+    AtCleanup_Portals().unwrap();
     assert!(GetPortalByName(Some("via_seam")).is_none());
-    assert!(!portalmem_seams::pre_commit_portals::call(false).unwrap());
-    portalmem_seams::at_subcommit_portals::call(3, 1, 1).unwrap();
-    portalmem_seams::at_subabort_portals::call(3, 1).unwrap();
-    portalmem_seams::at_subcleanup_portals::call(3).unwrap();
+    assert!(!PreCommit_Portals(false).unwrap());
+    AtSubCommit_Portals(3, 1, 1, ResourceOwner::NULL);
+    AtSubAbort_Portals(3, 1, ResourceOwner::NULL, ResourceOwner::NULL).unwrap();
+    AtSubCleanup_Portals(3).unwrap();
 }
 
 #[test]

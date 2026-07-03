@@ -29,12 +29,13 @@ pub use procnode::{
     exec_end_node, exec_init_node, exec_proc_node, exec_shutdown_node, PlanStateBase,
     PlanStateNode,
 };
-pub use querydesc::{ExecData, ExecutorHandle, QueryDescData};
+pub use querydesc::{registry_len, ExecData, ExecutorHandle, QueryDescData};
 pub use typefromtl::{exec_clean_type_from_tl, exec_type_from_tl, expr_collation, expr_typmod};
 
 pub fn init_seams() {
     execmain_seams::create_query_desc::set(querydesc::create_query_desc_seam);
     execmain_seams::free_query_desc::set(querydesc::free_query_desc_seam);
+    execmain_seams::release_query_desc::set(querydesc::release_query_desc_seam);
     execmain_seams::executor_start::set(execmain::executor_start_seam);
     execmain_seams::executor_run::set(execmain::executor_run_seam);
     execmain_seams::executor_finish::set(execmain::executor_finish_seam);
@@ -46,8 +47,13 @@ pub fn init_seams() {
     execmain_seams::exec_clean_type_from_tl::set(typefromtl::exec_clean_type_from_tl_seam);
 }
 
-// Divergence from C: result tupdescs live here (Rc-owned, backend-lifetime
-// aset), not in es_query_cxt — portal-held descriptors outlive ExecutorEnd.
+// Divergence from C: result tupdescs die in es_query_cxt there (execMain.c),
+// with portals copying theirs before ExecutorEnd (portalcmds.c:354); here they
+// are refcount-owned — the Rc strong count is the refcount (tupdesc.c model),
+// the executor's references drop by ExecutorEnd, and a portal's clone keeps
+// its descriptor alive. This backend-lifetime aset only backs those descs;
+// TupleDescData's drop pfrees every byte, so the context stays flat per
+// statement (desc_context_stays_flat_across_statements).
 pub(crate) fn desc_mcx() -> Mcx<'static> {
     thread_local! {
         static CTX: Cell<Option<&'static MemoryContext>> = const { Cell::new(None) };
