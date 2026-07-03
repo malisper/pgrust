@@ -693,11 +693,7 @@ fn resource_owner_release_internal(
                 if is_top_level {
                     if owner == TopTransactionResourceOwner() {
                         ::lmgr_proc::ProcReleaseLocks(is_commit)?;
-                        // C divergence: predicate.c is unported, so no
-                        // serializable xact can exist and C's
-                        // ReleasePredicateLocks(isCommit, false) reduces to its
-                        // MySerializableXact == InvalidSerializableXact early
-                        // exit; the predicate port must reroute this call site.
+                        predicate_seams::release_predicate_locks::call(is_commit, false)?;
                     }
                 } else {
                     debug_assert!(!prep.parent_is_null);

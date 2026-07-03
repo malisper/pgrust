@@ -61,6 +61,7 @@ fn setup() {
     INIT.call_once(|| {
         init_seams();
         ipc_seams::on_shmem_exit::set(|_cb, _arg| {});
+        predicate_seams::release_predicate_locks::set(|_, _| Ok(()));
     });
 }
 

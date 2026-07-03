@@ -161,6 +161,7 @@ fn install_stub_seams() {
     backend_status_seams::pgstat_report_plan_id::set(|_, _| {});
     backend_progress_seams::pgstat_progress_end_command::set(|| {});
     predicate_seams::pre_commit_check_for_serialization_failure::set(|| Ok(()));
+    predicate_seams::release_predicate_locks::set(|_, _| Ok(()));
     predicate_seams::check_for_serializable_conflict_in::set(|_rel, _tid, _blk| Ok(()));
     predicate_seams::predicate_lock_page_split::set(|_rel, _o, _n| Ok(()));
     predicate_seams::check_for_serializable_conflict_out_needed::set(|_r, _s| false);
