@@ -5946,6 +5946,7 @@ dependencies = [
  "mbutils",
  "mcx",
  "miscinit",
+ "nodes_core",
  "outfuncs",
  "parser_seams",
  "parser_small1",
