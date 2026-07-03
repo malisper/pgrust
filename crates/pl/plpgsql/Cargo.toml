@@ -26,6 +26,7 @@ format_type = { path = "../../backend/utils/adt/format_type" }
 guc_tables = { path = "../../backend/utils/misc/guc_tables" }
 lsyscache = { path = "../../backend/utils/cache/lsyscache" }
 mcx = { path = "../../_support/mcx" }
+rustc-hash = { version = "2", default-features = false }
 nodes_core = { path = "../../backend/nodes/nodes_core" }
 parse_utilcmd = { path = "../../backend/parser/parse_utilcmd" }
 parser_seams = { path = "../../backend/parser/parser_seams" }

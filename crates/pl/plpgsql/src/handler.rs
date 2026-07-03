@@ -4,6 +4,8 @@
 // (plpgsql.variable_conflict, ...) read their C-source defaults; SET on the
 // unregistered custom GUCs is loud at the GUC layer.
 use std::collections::HashMap;
+
+type FxHashMap<K, V> = HashMap<K, V, rustc_hash::FxBuildHasher>;
 use std::rc::Rc;
 
 use datum::Datum;
@@ -39,7 +41,6 @@ const EVENT_TRIGGEROID: Oid = 3838;
 const TYPTYPE_PSEUDO: i8 = b'p' as i8;
 const PROKIND_FUNCTION: i8 = b'f' as i8;
 const PROVOLATILE_VOLATILE: i8 = b'v' as i8;
-const PROARGMODE_IN: u8 = b'i';
 
 fn is_polymorphic(t: Oid) -> bool {
     // pseudotypes.dat polymorphic set.
@@ -66,8 +67,8 @@ struct FuncCacheEntry {
 }
 
 std::thread_local! {
-    static FUNC_CACHE: core::cell::RefCell<HashMap<Oid, FuncCacheEntry>> =
-        core::cell::RefCell::new(HashMap::new());
+    static FUNC_CACHE: core::cell::RefCell<FxHashMap<Oid, FuncCacheEntry>> =
+        core::cell::RefCell::new(FxHashMap::default());
 }
 
 pub fn init_seams() {
