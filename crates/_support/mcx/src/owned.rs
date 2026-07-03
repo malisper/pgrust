@@ -1,4 +1,3 @@
-use core::mem::ManuallyDrop;
 use core::ptr::NonNull;
 
 use ::types_error::PgResult;
@@ -40,8 +39,11 @@ unsafe fn ctx_from_exposed<'a>(p: *const MemoryContext) -> &'a MemoryContext {
 #[doc = "assert_eq!(stolen.len(), 0);"]
 #[doc = "```"]
 pub struct McxOwned<B: Bind> {
-    state: ManuallyDrop<B::Out<'static>>,
-    // Raw exposed owner (a Box/& field would sibling-retag the state's self-borrow).
+    // State lives IN the context arena (C's palloc'd-EState shape): the handle
+    // is two pointers, so moving it never memcpys the state (select1-gate
+    // attribution: inline state cost ~1.8KB copies per move). Raw exposed
+    // owner (a Box/& field would sibling-retag the state's self-borrow).
+    state: NonNull<B::Out<'static>>,
     ctx: NonNull<MemoryContext>,
 }
 
@@ -53,9 +55,25 @@ impl<B: Bind> McxOwned<B> {
         let raw: *mut MemoryContext = alloc::boxed::Box::into_raw(alloc::boxed::Box::new(ctx));
         // SAFETY: live heap context; the 'static is re-shortened by every access path.
         let ctx_ref: &'static MemoryContext = unsafe { ctx_from_exposed(raw) };
-        match build(ctx_ref.mcx()) {
-            Ok(state) => Ok(McxOwned {
-                state: ManuallyDrop::new(state),
+        let mcx = ctx_ref.mcx();
+        // Slot allocated before build runs so codegen can construct in place.
+        let slot: Result<crate::PgBox<'static, core::mem::MaybeUninit<B::Out<'static>>>, _> =
+            crate::PgBox::try_new_uninit_in(mcx);
+        let built = match slot {
+            Ok(mut slot) => match build(mcx) {
+                Ok(state) => {
+                    slot.write(state);
+                    let (p, _mcx) = allocator_api2::boxed::Box::into_raw_with_allocator(slot);
+                    Ok(p.cast::<B::Out<'static>>())
+                }
+                Err(e) => Err(e),
+            },
+            Err(_) => Err(mcx.oom(core::mem::size_of::<B::Out<'static>>()).into()),
+        };
+        match built {
+            // SAFETY: from Box::into_raw, hence non-null.
+            Ok(p) => Ok(McxOwned {
+                state: unsafe { NonNull::new_unchecked(p) },
                 // SAFETY: from Box::into_raw, hence non-null.
                 ctx: unsafe { NonNull::new_unchecked(raw) },
             }),
@@ -69,11 +87,13 @@ impl<B: Bind> McxOwned<B> {
 
 /// Universal over `'mcx`: no external lifetime unifies, nothing smuggles out or in.
     pub fn with<R>(&self, f: impl for<'mcx> FnOnce(&B::Out<'mcx>) -> R) -> R {
-        f(&self.state)
+        // SAFETY: state live until Drop; shared reborrow shortened to &self.
+        f(unsafe { self.state.as_ref() })
     }
 
     pub fn with_mut<R>(&mut self, f: impl for<'mcx> FnOnce(&mut B::Out<'mcx>) -> R) -> R {
-        f(&mut self.state)
+        // SAFETY: state live until Drop; unique reborrow shortened to &mut self.
+        f(unsafe { self.state.as_mut() })
     }
 
     pub fn with_mut_mcx<R>(
@@ -82,7 +102,8 @@ impl<B: Bind> McxOwned<B> {
     ) -> PgResult<R> {
         // SAFETY: live heap context (freed only in Drop); exposed rebuild, no sibling.
         let ctx: &MemoryContext = unsafe { ctx_from_exposed(self.ctx.as_ptr()) };
-        f(ctx.mcx(), &mut self.state)
+        // SAFETY: state live until Drop; unique reborrow shortened to &mut self.
+        f(ctx.mcx(), unsafe { self.state.as_mut() })
     }
 
     pub fn context(&self) -> &MemoryContext {
@@ -93,9 +114,10 @@ impl<B: Bind> McxOwned<B> {
 
 impl<B: Bind> Drop for McxOwned<B> {
     fn drop(&mut self) {
-        // SAFETY: state dropped exactly once, first; then the unique context free.
+        // SAFETY: state dropped in place exactly once, first (its arena memory
+        // is reclaimed by the context free); then the unique context free.
         unsafe {
-            ManuallyDrop::drop(&mut self.state);
+            core::ptr::drop_in_place(self.state.as_ptr());
             drop(alloc::boxed::Box::from_raw(self.ctx.as_ptr()));
         }
     }
