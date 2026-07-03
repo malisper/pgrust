@@ -1,6 +1,7 @@
 use types_core::catalog::{
     ATTRIBUTE_GENERATED_STORED, ATTRIBUTE_GENERATED_VIRTUAL, ATTRIBUTE_IDENTITY_ALWAYS,
     ATTRIBUTE_IDENTITY_BY_DEFAULT, RELPERSISTENCE_PERMANENT, RELPERSISTENCE_TEMP,
+    RELPERSISTENCE_UNLOGGED,
 };
 use types_error::PgResult;
 use types_nodes::parsenodes::{
@@ -24,8 +25,8 @@ use types_nodes::rawnodes::CreateDomainStmt;
 use types_nodes::JoinType;
 use types_nodes::rawnodes::A_Expr_Kind::{self, AEXPR_OP};
 use types_nodes::rawnodes::{
-    ColumnDef, Constraint, ConstrType, CreateSeqStmt, CreateStmt, IndexElem, IndexStmt,
-    OnCommitAction,
+    ColumnDef, Constraint, ConstrType, CreateSeqStmt, CreateStmt, CreateTableAsStmt, IndexElem,
+    IndexStmt, IntoClause, OnCommitAction,
     FKCONSTR_ACTION_CASCADE, FKCONSTR_ACTION_NOACTION, FKCONSTR_ACTION_RESTRICT,
     FKCONSTR_ACTION_SETDEFAULT, FKCONSTR_ACTION_SETNULL, FKCONSTR_MATCH_FULL,
     FKCONSTR_MATCH_SIMPLE,
@@ -447,6 +448,72 @@ impl<'mcx> Parser<'mcx> {
                 n.tablespacename = opt_str(view.v(14));
                 n.if_not_exists = false;
                 *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // CreateAsStmt: CREATE OptTemp TABLE [IF_P NOT EXISTS]
+            // create_as_target AS SelectStmt opt_with_data
+            620 | 621 => {
+                let ine = rule == 621;
+                let (t, q, w) = if ine { (7, 9, 10) } else { (4, 6, 7) };
+                let persistence = view.v(2).ival() as u8;
+                let into_node = view.v(t).node().expect("create_as_target");
+                let with_data = view.v(w).boolean();
+                // SAFETY: tree is parser-owned; no derived refs live.
+                unsafe {
+                    let rel = into_node
+                        .with_mut::<IntoClause, _>(|ic| {
+                            ic.skipData = !with_data;
+                            ic.rel
+                        })
+                        .expect("create_as_target is IntoClause")
+                        .expect("IntoClause.rel");
+                    rel.with_mut::<RangeVar, _>(|r| r.relpersistence = persistence)
+                        .expect("IntoClause.rel is RangeVar");
+                }
+                let mut n = Node::build::<CreateTableAsStmt>(mcx)?;
+                n.query = view.v(q).node();
+                n.into = Some(into_node);
+                n.objtype = ObjectType::OBJECT_TABLE;
+                n.is_select_into = false;
+                n.if_not_exists = ine;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // create_as_target: qualified_name opt_column_list
+            // table_access_method_clause OptWith OnCommitOption OptTableSpace
+            622 => {
+                let mut n = Node::build::<IntoClause>(mcx)?;
+                n.rel = view.v(1).node();
+                n.colNames = view.v(2).list();
+                n.accessMethod = opt_str(view.v(3));
+                n.options = view.v(4).list();
+                n.onCommit = on_commit_action(view.v(5).ival());
+                n.tableSpaceName = opt_str(view.v(6));
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // opt_with_data: WITH DATA_P | WITH NO DATA_P | /*EMPTY*/
+            623 | 625 => *yyval = YYSTYPE::Boolean(true),
+            624 => *yyval = YYSTYPE::Boolean(false),
+            // into_clause: INTO OptTempTableName
+            1743 => {
+                let mut n = Node::build::<IntoClause>(mcx)?;
+                n.rel = view.v(2).node();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // OptTempTableName (GLOBAL-deprecated arms stay unported).
+            1745 | 1746 | 1747 | 1748 | 1751 | 1752 | 1753 => {
+                let (slot, persistence) = match rule {
+                    1745 | 1746 => (3, RELPERSISTENCE_TEMP),
+                    1747 | 1748 => (4, RELPERSISTENCE_TEMP),
+                    1751 => (3, RELPERSISTENCE_UNLOGGED),
+                    1752 => (2, RELPERSISTENCE_PERMANENT),
+                    _ => (1, RELPERSISTENCE_PERMANENT),
+                };
+                let rel = view.v(slot).node().expect("qualified_name");
+                // SAFETY: tree is parser-owned; no derived refs live.
+                unsafe {
+                    rel.with_mut::<RangeVar, _>(|r| r.relpersistence = persistence)
+                        .expect("qualified_name is RangeVar");
+                }
+                *yyval = YYSTYPE::Node(Some(rel));
             }
             // PartitionSpec: PARTITION BY ColId '(' part_params ')'
             591 => {

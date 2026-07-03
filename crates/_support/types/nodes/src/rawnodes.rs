@@ -355,6 +355,31 @@ pub enum OnCommitAction {
     ONCOMMIT_DROP,
 }
 
+/// `rel` is a RangeVar node handle (the grammar scribbles its
+/// relpersistence); `viewQuery` is a Query node handle (matview lane).
+#[derive(Default)]
+pub struct IntoClause<'mcx> {
+    pub rel: Option<Node<'mcx>>,
+    pub colNames: NodeList<'mcx>,
+    pub accessMethod: Option<&'mcx str>,
+    pub options: NodeList<'mcx>,
+    pub onCommit: OnCommitAction,
+    pub tableSpaceName: Option<&'mcx str>,
+    pub viewQuery: Option<Node<'mcx>>,
+    pub skipData: bool,
+}
+
+/// `query` is a raw statement node until parse analysis rewrites it into a
+/// Query node in place; `into` is an IntoClause node handle.
+#[derive(Default)]
+pub struct CreateTableAsStmt<'mcx> {
+    pub query: Option<Node<'mcx>>,
+    pub into: Option<Node<'mcx>>,
+    pub objtype: crate::parsenodes::ObjectType,
+    pub is_select_into: bool,
+    pub if_not_exists: bool,
+}
+
 #[derive(Default)]
 pub struct CreateStmt<'mcx> {
     pub relation: Option<&'mcx crate::primnodes::RangeVar<'mcx>>,
@@ -628,6 +653,12 @@ unsafe impl<'mcx> NodeVariant<'mcx> for CreateDomainStmt<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for SelectStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_SelectStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for IntoClause<'mcx> {
+    const TAG: NodeTag = NodeTag::T_IntoClause;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for CreateTableAsStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CreateTableAsStmt;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for InsertStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_InsertStmt;

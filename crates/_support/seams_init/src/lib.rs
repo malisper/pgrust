@@ -125,6 +125,7 @@ pub fn init_all() {
     postgres::init_seams();
     pquery::init_seams();
     explain::init_seams();
+    commands_createas::init_seams();
     prepare::init_seams();
     portalcmds::init_seams();
     commands_async::init_seams();
