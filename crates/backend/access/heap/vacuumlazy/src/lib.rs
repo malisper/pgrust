@@ -34,7 +34,7 @@ use ::types_rel::RelationData;
 use ::types_snapshot::HTSV_Result;
 use ::types_storage::buf::BufferAccessStrategy;
 use ::types_storage::bufpage::{
-    ItemIdData, MaxHeapTuplesPerPage, PageMut, PageRef, SizeOfPageHeaderData,
+    MaxHeapTuplesPerPage, PageMut, PageRef, SizeOfPageHeaderData,
 };
 use ::types_storage::ReadBufferMode;
 use ::types_tuple::{
@@ -739,7 +739,7 @@ fn lazy_vacuum_heap_page(
     }
     debug_assert!(nunused > 0);
 
-    page_truncate_line_pointer_array(&mut pm);
+    pm.truncate_line_pointer_array();
 
     bufmgr_seams::mark_buffer_dirty::call(buffer)?;
 
@@ -781,47 +781,6 @@ fn lazy_vacuum_heap_page(
         }
     }
     Ok(())
-}
-
-/// PageTruncateLinePointerArray (bufpage.c), hosted here until the
-/// backend-storage-page unit owner lands it: shorten a trailing run of
-/// LP_UNUSED line pointers, always keeping at least one entry.
-fn page_truncate_line_pointer_array(pm: &mut PageMut<'_>) {
-    let page = pm.as_ref();
-    let maxoff = page.max_offset_number();
-    let mut countdone = false;
-    let mut sethint = false;
-    let mut nunusedend: usize = 0;
-
-    let mut i = maxoff;
-    while i >= FirstOffsetNumber {
-        let lp = page.item_id(i);
-        if !countdone && i > FirstOffsetNumber {
-            if lp.is_used() {
-                countdone = true;
-            } else {
-                nunusedend += 1;
-            }
-        } else if !lp.is_used() {
-            sethint = true;
-            break;
-        }
-        i -= 1;
-    }
-
-    if nunusedend > 0 {
-        let new_lower =
-            pm.as_ref().pd_lower() as usize - core::mem::size_of::<ItemIdData>() * nunusedend;
-        pm.set_pd_lower(new_lower as u16);
-    } else {
-        debug_assert!(!countdone);
-    }
-
-    if sethint {
-        pm.set_has_free_line_pointers();
-    } else {
-        pm.clear_has_free_line_pointers();
-    }
 }
 
 /// Returns (all_visible, all_frozen, visibility_cutoff_xid).

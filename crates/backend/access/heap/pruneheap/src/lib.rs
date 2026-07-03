@@ -697,7 +697,7 @@ fn heap_prune_record_unchanged_lp_redirect(prstate: &mut PruneState, offnum: Off
 
 /// `heap_page_prune_execute`: apply the planned line-pointer changes.
 /// `redirected` carries from/to pairs (2 entries per redirect). Requires the
-/// cleanup lock unless `lp_truncate_only` (vacuum's 2nd pass — unported).
+/// cleanup lock unless `lp_truncate_only` (vacuum's 2nd pass).
 pub fn heap_page_prune_execute(
     buffer: Buffer,
     lp_truncate_only: bool,
@@ -777,7 +777,7 @@ pub fn heap_page_prune_execute(
     }
 
     if lp_truncate_only {
-        unported("PageTruncateLinePointerArray (vacuum 2nd pass, bufpage.c)");
+        pm.truncate_line_pointer_array();
     } else {
         pm.repair_fragmentation();
         page_verify_redirects(page);
@@ -967,6 +967,7 @@ fn unported(unit: &'static str) -> ! {
 
 pub fn init_seams() {
     pruneheap_seams::heap_page_prune_opt::set(heap_page_prune_opt);
+    pruneheap_seams::heap_page_prune_execute::set(heap_page_prune_execute);
 }
 
 #[cfg(test)]

@@ -195,7 +195,7 @@ fn pg_popcount_masked(buf: &[u8], mask: u8) -> u64 {
 }
 
 // XLogHintBitIsNeeded() (xlog.h).
-fn xlog_hint_bit_is_needed() -> bool {
+pub fn xlog_hint_bit_is_needed() -> bool {
     transam_xlog_seams::data_checksums_enabled::call() || guc_tables::vars::wal_log_hints.read()
 }
 

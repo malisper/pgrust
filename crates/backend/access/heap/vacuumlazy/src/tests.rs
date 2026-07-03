@@ -379,7 +379,7 @@ fn truncate_line_pointer_array_keeps_used_prefix() {
         pm.set_item_id(off, lp);
     }
 
-    page_truncate_line_pointer_array(&mut pm);
+    pm.truncate_line_pointer_array();
 
     let page = pm.as_ref();
     assert_eq!(page.max_offset_number(), 3, "trailing unused pair dropped");
