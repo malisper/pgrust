@@ -12,9 +12,10 @@ use ::mcx::{Mcx, PgVec};
 use ::tableam::{
     table_beginscan, table_endscan, table_rescan, table_scan_getnextslot, table_slot_callbacks,
 };
-use ::types_error::PgResult;
+use ::types_error::{PgError, PgResult, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE};
 use ::types_nodes::plannodes::SeqScan;
 use ::types_rel::Relation;
+use ::types_slot::{EXEC_FLAG_EXPLAIN_ONLY, EXEC_FLAG_WITH_NO_DATA};
 
 pub fn init_seams() {}
 
@@ -104,19 +105,36 @@ pub fn exec_init_seq_scan<'mcx>(
     exec_init_seq_scan_rel(mcx, node, estate, rel)
 }
 
-// ExecOpenScanRelation; the RelationIsScannable ereport gate is
-// matview-only (unported relkind).
+/// `ExecOpenScanRelation`.
 fn exec_open_scan_relation<'mcx>(
     estate: &mut EStateData<'mcx>,
     node: &SeqScan<'mcx>,
-    _eflags: i32,
+    eflags: i32,
 ) -> PgResult<Relation<'mcx>> {
     let rel = estate.exec_get_range_table_relation(node.scan.scanrelid, false)?;
+    if eflags & (EXEC_FLAG_EXPLAIN_ONLY | EXEC_FLAG_WITH_NO_DATA) == 0
+        && !rel.rd_rel.relispopulated
+    {
+        return Err(unpopulated_matview(rel));
+    }
     Ok(rel.alias())
 }
 
-/// C divergence: init over a caller-opened relation, splitting
-/// ExecOpenScanRelation out of `ExecInitSeqScan` until the range table lands.
+#[cold]
+#[inline(never)]
+fn unpopulated_matview(rel: &Relation<'_>) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!(
+            "materialized view \"{}\" has not been populated",
+            rel.name()
+        ))
+        .with_sqlstate(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+        .with_hint("Use the REFRESH MATERIALIZED VIEW command."),
+    )
+}
+
+/// C divergence: init over a caller-opened relation (test surface;
+/// `exec_init_seq_scan` is the real path through the estate range table).
 pub fn exec_init_seq_scan_rel<'mcx>(
     mcx: Mcx<'mcx>,
     node: &SeqScan<'mcx>,

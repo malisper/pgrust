@@ -189,7 +189,7 @@ pub fn standard_executor_start(qd: &mut QueryDescData, mut eflags: i32) -> PgRes
 }
 
 /// `InitPlan` (execMain.c).
-fn init_plan<'mcx>(
+pub(crate) fn init_plan<'mcx>(
     data: &mut ExecData<'mcx>,
     pstmt: &'mcx PlannedStmt<'mcx>,
     operation: CmdType,

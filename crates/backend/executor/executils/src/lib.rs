@@ -1,8 +1,6 @@
 // execUtils.c executor-state half. EState is the per-query resource owner
 // (docs/no-drop.md): droppy resources live here by value, arena-resident
-// nodes hold u32 handles. Query + per-tuple contexts are bump arenas;
-// ResetExprContext is a wholesale rewind. PlanState-coupled routines land
-// with nodes phase 3 / execExpr; their EState fields are `*P3` handles.
+// nodes hold u32 handles. Query + per-tuple contexts are bump arenas.
 #![no_std]
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
@@ -16,8 +14,12 @@ use ::mcx::{Mcx, McxOwned, MemoryContext, PgVec};
 use ::queryenvironment::QueryEnvironment;
 use ::snapmgr::Snapshot;
 use ::types_core::CommandId;
-use ::types_error::PgResult;
-use ::types_rel::Relation;
+use ::types_error::{PgError, PgResult};
+use ::types_nodes::bitmapset::Bitmapset;
+use ::types_nodes::list::NodeList;
+use ::types_nodes::parsenodes::{RTEKind, RangeTblEntry};
+use ::types_nodes::plannodes::PlannedStmt;
+use ::types_rel::{AccessShareLock, NoLock, Relation};
 use ::types_scan::ScanDirection;
 use ::types_slot::{SlotData, TupleSlotKind};
 use ::types_tuple::TupleDescData;
@@ -32,9 +34,6 @@ macro_rules! p3 {
 }
 // Unconstructible placeholders: provably None until the owning unit lands.
 p3!(
-    PlannedStmtP3,
-    RangeTableP3,
-    PermInfosP3,
     PartPruneP3,
     JunkFilterP3,
     ResultRelInfoP3,
@@ -43,7 +42,6 @@ p3!(
     ParamListInfoP3,
     ParamExecP3,
     PlanStateP3,
-    UnprunedRelidsP3,
 );
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,14 +147,14 @@ pub struct EStateData<'mcx> {
     pub es_direction: ScanDirection,
     pub es_snapshot: Option<Snapshot>,
     pub es_crosscheck_snapshot: Option<Snapshot>,
-    pub es_range_table: Option<RangeTableP3>,
+    pub es_range_table: PgVec<'mcx, &'mcx RangeTblEntry<'mcx>>,
     pub es_range_table_size: u32,
     pub es_relations: PgVec<'mcx, Option<Relation<'mcx>>>,
     pub es_rowmarks: PgVec<'mcx, Option<RowMarkP3>>,
-    pub es_rteperminfos: Option<PermInfosP3>,
-    pub es_plannedstmt: Option<PlannedStmtP3>,
+    pub es_rteperminfos: Option<&'mcx NodeList<'mcx>>,
+    pub es_plannedstmt: Option<&'mcx PlannedStmt<'mcx>>,
     pub es_part_prune_infos: Option<PartPruneP3>,
-    pub es_unpruned_relids: Option<UnprunedRelidsP3>,
+    pub es_unpruned_relids: Bitmapset<'mcx>,
     pub es_junkFilter: Option<JunkFilterP3>,
     pub es_output_cid: CommandId,
     pub es_result_relations: PgVec<'mcx, Option<ResultRelInfoP3>>,
@@ -192,14 +190,14 @@ impl<'mcx> EStateData<'mcx> {
             es_direction: ScanDirection::ForwardScanDirection,
             es_snapshot: None,
             es_crosscheck_snapshot: None,
-            es_range_table: None,
+            es_range_table: PgVec::new_in(mcx),
             es_range_table_size: 0,
             es_relations: PgVec::new_in(mcx),
             es_rowmarks: PgVec::new_in(mcx),
             es_rteperminfos: None,
             es_plannedstmt: None,
             es_part_prune_infos: None,
-            es_unpruned_relids: None,
+            es_unpruned_relids: Bitmapset::empty(),
             es_junkFilter: None,
             es_output_cid: 0,
             es_result_relations: PgVec::new_in(mcx),
@@ -338,13 +336,84 @@ impl<'mcx> EStateData<'mcx> {
         }
     }
 
+    /// `ExecInitRangeTable(estate, rangeTable, permInfos, unpruned_relids)`.
+    pub fn exec_init_range_table(
+        &mut self,
+        range_table: &'mcx NodeList<'mcx>,
+        perm_infos: &'mcx NodeList<'mcx>,
+        unpruned_relids: Bitmapset<'mcx>,
+    ) -> PgResult<()> {
+        self.es_range_table.reserve(range_table.len());
+        for rte_node in range_table.iter() {
+            let rte = rte_node
+                .as_range_tbl_entry()
+                .expect("rtable cell is a RangeTblEntry");
+            match rte.rtekind {
+                RTEKind::RTE_RELATION | RTEKind::RTE_RESULT => {}
+                other => panic!(
+                    "ExecInitRangeTable (execUtils.c): {other:?} lane not ported"
+                ),
+            }
+            if !rte.securityQuals.is_nil() {
+                panic!("ExecInitRangeTable: row-level security (securityQuals) not ported");
+            }
+            self.es_range_table.push(rte);
+            self.es_relations.push(None);
+        }
+        self.es_rteperminfos = Some(perm_infos);
+        self.es_range_table_size = range_table.len() as u32;
+        self.es_unpruned_relids = unpruned_relids;
+        Ok(())
+    }
+
+    /// `exec_rt_fetch(rti, estate)` (executor.h); rti is 1-based.
+    #[inline]
+    pub fn exec_rt_fetch(&self, rti: u32) -> &'mcx RangeTblEntry<'mcx> {
+        self.es_range_table[(rti - 1) as usize]
+    }
+
     /// `ExecGetRangeTableRelation(estate, rti, isResultRel)`.
     pub fn exec_get_range_table_relation(
         &mut self,
-        _rti: u32,
-        _is_result_rel: bool,
+        rti: u32,
+        is_result_rel: bool,
     ) -> PgResult<&Relation<'mcx>> {
-        panic!("executils::exec_get_range_table_relation: pending nodes phase 3 (RangeTblEntry)");
+        assert!(rti > 0 && rti <= self.es_range_table_size);
+        if !is_result_rel && !self.es_unpruned_relids.is_member(rti as i32) {
+            return Err(pruned_relation_error());
+        }
+        let idx = (rti - 1) as usize;
+        if self.es_relations[idx].is_none() {
+            let rte = self.exec_rt_fetch(rti);
+            assert!(
+                rte.rtekind == RTEKind::RTE_RELATION,
+                "ExecGetRangeTableRelation of a non-relation RTE"
+            );
+            // C's IsParallelWorker arm takes its own lock; workers unported.
+            let rel = table::table_open(self.es_query_cxt, rte.relid, NoLock)?;
+            // AcquireExecutorLocks contract: parser/plancache already hold
+            // rellockmode (C asserts the same past AccessShareLock).
+            debug_assert!(
+                rte.rellockmode == AccessShareLock
+                    || lmgr_seams::check_relation_locked_by_me::call(
+                        rel.rd_id,
+                        rte.rellockmode,
+                        false
+                    )
+            );
+            self.es_relations[idx] = Some(rel);
+        }
+        Ok(self.es_relations[idx].as_ref().unwrap())
+    }
+
+    /// `ExecCloseRangeTableRelations(estate)`: locks are kept, as in C.
+    pub fn exec_close_range_table_relations(&mut self) -> PgResult<()> {
+        for slot in self.es_relations.iter_mut() {
+            if let Some(rel) = slot.take() {
+                table::table_close(rel, NoLock)?;
+            }
+        }
+        Ok(())
     }
 
     /// `FreeExecutorState` non-memory half; newest-first (C lcons order).
@@ -355,6 +424,12 @@ impl<'mcx> EStateData<'mcx> {
             }
         }
     }
+}
+
+#[cold]
+#[inline(never)]
+fn pruned_relation_error() -> alloc::boxed::Box<PgError> {
+    alloc::boxed::Box::new(PgError::error("trying to open a pruned relation"))
 }
 
 ::mcx::bind!(pub EStateTy => EStateData<'mcx>);

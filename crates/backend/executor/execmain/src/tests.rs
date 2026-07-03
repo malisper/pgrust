@@ -313,11 +313,6 @@ mod scanfix {
         pruneheap_seams::heap_page_prune_opt::set(|_r, _b| Ok(()));
         procarray_seams::global_vis_test_for::set(|_r| GlobalVisStateHandle::new(0));
 
-        resowner_seams::current_resource_owner::set(|| types_resowner::ResourceOwner::NULL);
-        resowner_seams::resource_owner_enlarge::set(|_| Ok(()));
-        resowner_seams::resource_owner_remember_snapshot::set(|_, _| {});
-        resowner_seams::resource_owner_forget_snapshot::set(|_, _| {});
-
         miscinit_seams::get_user_id::set(|| 10);
         aclchk_seams::object_aclcheck::set(|classid, objid, _roleid, _mode| {
             assert_eq!(classid, ::types_core::catalog::RELATION_RELATION_ID);
@@ -532,6 +527,9 @@ fn mk_seqscan_pstmt<'mcx>(mcx: ::mcx::Mcx<'mcx>, relid: u32) -> &'mcx PlannedStm
     pstmt.seal_ref()
 }
 
+// InitPlan → ExecInitRangeTable → ExecInitNode(SeqScan) → ExecOpenScanRelation
+// → ExecGetRangeTableRelation → table_open, then the per-tuple loop and
+// ExecEndPlan's close half; snapshot registration (proc-array lane) bypassed.
 #[test]
 fn seqscan_end_to_end_through_real_init_path() {
     install_seams();
@@ -543,41 +541,39 @@ fn seqscan_end_to_end_through_real_init_path() {
     let pstmt = mk_seqscan_pstmt(mcx, relid);
 
     let snap_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("snap")));
-    let snapshot: snapmgr::Snapshot = std::rc::Rc::new(
-        ::types_snapshot::SnapshotData::sentinel(
-            snap_ctx.mcx(),
-            ::types_snapshot::SnapshotType::SNAPSHOT_MVCC,
-        ),
-    );
+    let snapshot: snapmgr::Snapshot = std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
+        snap_ctx.mcx(),
+        ::types_snapshot::SnapshotType::SNAPSHOT_MVCC,
+    ));
 
-    let qd = execmain_seams::create_query_desc::call(
-        pstmt,
-        "SELECT a FROM t",
-        Some(snapshot),
-        None,
-        CommandDest::None,
-        ParamListHandle::NULL,
-        QueryEnvHandle::NULL,
-        0,
-    )
-    .unwrap();
-    execmain_seams::executor_start::call(qd, 0).unwrap();
-    assert_eq!(
-        scanfix::ACLCHECKED_RELID.load(std::sync::atomic::Ordering::Relaxed),
-        relid
-    );
-    let desc = execmain_seams::query_desc_result_tupdesc::call(qd).unwrap();
-    assert_eq!(desc.natts, 1);
-    assert_eq!(desc.attr(0).atttypid, INT4OID);
+    with_exec_data(pstmt, |data, pstmt| {
+        data.estate.es_snapshot = Some(snapshot);
+        let desc = crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap();
+        assert_eq!(desc.natts, 1);
+        assert_eq!(desc.attr(0).atttypid, INT4OID);
+        assert_eq!(
+            scanfix::ACLCHECKED_RELID.load(std::sync::atomic::Ordering::Relaxed),
+            relid
+        );
+        assert_eq!(data.estate.es_range_table_size, 1);
+        assert!(data.estate.es_relations[0].is_some(), "scan relation opened");
 
-    let mut dest = DestReceiver::DoNothing;
-    execmain_seams::executor_run::call(qd, ForwardScanDirection, 0, &mut dest).unwrap();
-    assert_eq!(execmain_seams::query_desc_es_processed::call(qd), 5);
+        let ExecData { estate, planstate } = data;
+        let ps = planstate.as_mut().unwrap();
+        let mut vals = Vec::new();
+        while let Some(slot_id) = exec_proc_node(ps, estate).unwrap() {
+            let mut isnull = false;
+            let v = exectuples::slot_getattr(estate.slot_mut(slot_id), 1, &mut isnull);
+            assert!(!isnull);
+            vals.push(v.as_i32());
+        }
+        assert_eq!(vals, vec![1, 2, 3, 4, 5]);
 
-    execmain_seams::executor_finish::call(qd).unwrap();
-    execmain_seams::executor_end::call(qd).unwrap();
+        crate::exec_end_node(ps, estate).unwrap();
+        estate.exec_reset_tuple_table(false);
+        estate.exec_close_range_table_relations().unwrap();
+    });
     assert_eq!(scanfix::CLOSED.load(std::sync::atomic::Ordering::Relaxed), 1);
-    execmain_seams::free_query_desc::call(qd);
     scanfix::quiesced();
 }
 
