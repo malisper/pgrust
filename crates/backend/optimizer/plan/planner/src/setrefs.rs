@@ -1225,7 +1225,7 @@ fn search_indexed_tlist_for_var<'mcx>(
                 location: var.location,
             };
             if newvar.varnosyn > 0 {
-                newvar.varnosyn += rtoffset as u32;
+                newvar.varnosyn = newvar.varnosyn.wrapping_add(rtoffset as u32);
             }
             return Node::mk(run.mcx, newvar);
         }
@@ -1297,14 +1297,9 @@ fn fix_scan_expr_mutator<'mcx>(
                 newvar.varno += rtoffset;
             }
             if newvar.varnosyn > 0 {
-                newvar.varnosyn = newvar.varnosyn.checked_add(rtoffset as u32).unwrap_or_else(
-                    || {
-                        panic!(
-                            "fix_scan_expr_mutator: varnosyn {} + rtoffset {} overflows (varno {} varattno {})",
-                            newvar.varnosyn, rtoffset, var.varno, var.varattno
-                        )
-                    },
-                );
+                // C Index is unsigned: special-varno Vars (varnosyn = INDEX_VAR
+                // as unsigned) wrap here in C too; the value is never read.
+                newvar.varnosyn = newvar.varnosyn.wrapping_add(rtoffset as u32);
             }
             Node::mk(mcx, newvar)
         }
@@ -1933,7 +1928,7 @@ fn set_dummy_tlist_references<'mcx>(
         };
         if let Some(oldvar) = oldexpr.as_var() {
             if oldvar.varnosyn > 0 {
-                newvar.varnosyn = oldvar.varnosyn + rtoffset as u32;
+                newvar.varnosyn = oldvar.varnosyn.wrapping_add(rtoffset as u32);
                 newvar.varattnosyn = oldvar.varattnosyn;
             }
         }
@@ -2657,7 +2652,7 @@ fn search_join_tlist_for_var<'mcx>(
                 location: var.location,
             };
             if newvar.varnosyn > 0 {
-                newvar.varnosyn += rtoffset as u32;
+                newvar.varnosyn = newvar.varnosyn.wrapping_add(rtoffset as u32);
             }
             return Ok(Some(Node::mk(run.mcx, newvar)?));
         }
