@@ -15,13 +15,14 @@ use crate::parsenodes::{
     WithClause,
 };
 use crate::primnodes::{
-    Aggref, Alias, ArrayExpr, BoolExpr, CoerceViaIO, Const, FromExpr, FuncExpr, GroupingFunc,
-    NullTest, OpExpr, Param, RangeTblRef, RangeVar, RelabelType, RowExpr, ScalarArrayOpExpr,
-    TargetEntry, Var, WindowFunc,
+    Aggref, Alias, ArrayExpr, BoolExpr, BooleanTest, CoerceViaIO, Const, DistinctExpr, FromExpr,
+    FuncExpr, GroupingFunc, NullTest, OpExpr, Param, RangeTblRef, RangeVar, RelabelType, RowExpr,
+    ScalarArrayOpExpr, TargetEntry, Var, WindowFunc,
 };
 use crate::rawnodes::{
-    A_Const, A_Expr, A_Star, ColumnRef, DeleteStmt, DistinctClause, FuncCall, InsertStmt,
-    ParamRef, RawStmt, ResTarget, SelectStmt, SortBy, TypeCast, TypeName, UpdateStmt, ValUnion,
+    A_Const, A_Expr, A_Star, CollateClause, ColumnRef, DeleteStmt, DistinctClause, FuncCall,
+    InsertStmt, ParamRef, RawStmt, ResTarget, SelectStmt, SortBy, TypeCast, TypeName, UpdateStmt,
+    ValUnion,
 };
 use crate::tags::NodeTag;
 
@@ -62,6 +63,9 @@ pub fn equal(a: Node<'_>, b: Node<'_>) -> bool {
         NodeTag::T_RelabelType => cmp!(as_relabel_type),
         NodeTag::T_CoerceViaIO => cmp!(as_coerce_via_io),
         NodeTag::T_NullTest => cmp!(as_null_test),
+        NodeTag::T_BooleanTest => cmp!(as_boolean_test),
+        NodeTag::T_DistinctExpr => cmp!(as_distinct_expr),
+        NodeTag::T_CollateClause => cmp!(as_collate_clause),
         NodeTag::T_TargetEntry => cmp!(as_target_entry),
         NodeTag::T_RangeTblRef => cmp!(as_range_tbl_ref),
         NodeTag::T_FromExpr => cmp!(as_from_expr),
@@ -423,6 +427,30 @@ impl NodeEqual for NullTest<'_> {
         equal_opt(self.arg, b.arg)
             && self.nulltesttype == b.nulltesttype
             && self.argisrow == b.argisrow
+    }
+}
+
+impl NodeEqual for BooleanTest<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        equal_opt(self.arg, b.arg) && self.booltesttype == b.booltesttype
+    }
+}
+
+impl NodeEqual for DistinctExpr<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.opno == b.opno
+            && (self.opfuncid == b.opfuncid || self.opfuncid == 0 || b.opfuncid == 0)
+            && self.opresulttype == b.opresulttype
+            && self.opretset == b.opretset
+            && self.opcollid == b.opcollid
+            && self.inputcollid == b.inputcollid
+            && self.args.node_equal(&b.args)
+    }
+}
+
+impl NodeEqual for CollateClause<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        equal_opt(self.arg, b.arg) && self.collname.node_equal(&b.collname)
     }
 }
 

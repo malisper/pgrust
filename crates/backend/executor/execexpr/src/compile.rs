@@ -681,7 +681,11 @@ pub fn expr_type(node: Node<'_>) -> Oid {
         NodeTag::T_MinMaxExpr => node.as_min_max_expr().unwrap().minmaxtype,
         NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resulttype,
         NodeTag::T_SQLValueFunction => node.as_sql_value_function().unwrap().r#type,
-        NodeTag::T_BoolExpr | NodeTag::T_NullTest | NodeTag::T_ScalarArrayOpExpr => 16,
+        NodeTag::T_BoolExpr
+        | NodeTag::T_NullTest
+        | NodeTag::T_ScalarArrayOpExpr
+        | NodeTag::T_BooleanTest
+        | NodeTag::T_DistinctExpr => 16,
         NodeTag::T_ArrayExpr => node.as_array_expr().unwrap().array_typeid,
         NodeTag::T_SubPlan => {
             use ::types_nodes::primnodes::SubLinkType;
@@ -785,6 +789,16 @@ fn setup_walker(node: Node<'_>, info: &mut SetupInfo) {
         }
         NodeTag::T_NullTest => {
             if let Some(a) = node.as_null_test().unwrap().arg {
+                setup_walker(a, info);
+            }
+        }
+        NodeTag::T_BooleanTest => {
+            if let Some(a) = node.as_boolean_test().unwrap().arg {
+                setup_walker(a, info);
+            }
+        }
+        NodeTag::T_DistinctExpr => {
+            for a in node.as_distinct_expr().unwrap().args.iter() {
                 setup_walker(a, info);
             }
         }
@@ -904,6 +918,34 @@ fn init_expr_rec<'mcx>(
             let step = init_func(
                 node, &op.args, op.opfuncid, op.inputcollid, state, mcx, out, agg, params, sub,
             )?;
+            push_step(state, mcx, step)
+        }
+        NodeTag::T_DistinctExpr => {
+            let op = node.as_distinct_expr().unwrap();
+            let step = init_func(
+                node, &op.args, op.opfuncid, op.inputcollid, state, mcx, out, agg, params, sub,
+            )?;
+            let call = match step {
+                Step::FuncExpr { call, .. }
+                | Step::FuncExprStrict1 { call, .. }
+                | Step::FuncExprStrict2 { call, .. }
+                | Step::FuncExprStrict { call, .. } => call,
+                _ => unreachable!("init_func returns a FuncExpr step"),
+            };
+            push_step(state, mcx, Step::Distinct { call, out })
+        }
+        NodeTag::T_BooleanTest => {
+            use ::types_nodes::BoolTestType;
+            let bt = node.as_boolean_test().unwrap();
+            init_expr_rec(bt.arg.expect("BooleanTest.arg"), state, mcx, out, agg, params, sub)?;
+            let step = match bt.booltesttype {
+                BoolTestType::IS_TRUE => Step::BoolTestIsTrue { out },
+                BoolTestType::IS_NOT_TRUE => Step::BoolTestIsNotTrue { out },
+                BoolTestType::IS_FALSE => Step::BoolTestIsFalse { out },
+                BoolTestType::IS_NOT_FALSE => Step::BoolTestIsNotFalse { out },
+                BoolTestType::IS_UNKNOWN => Step::NullTestIsNull { out },
+                BoolTestType::IS_NOT_UNKNOWN => Step::NullTestIsNotNull { out },
+            };
             push_step(state, mcx, step)
         }
         NodeTag::T_Aggref => {

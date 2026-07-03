@@ -619,6 +619,111 @@ fn ece_mutator<'mcx>(node: Node<'mcx>, cx: &EceContext<'mcx>) -> PgResult<Option
                 )?)),
             }
         }
+        NodeTag::T_BooleanTest => {
+            use types_nodes::{BoolTestType, BooleanTest};
+            let bt = node.as_boolean_test().unwrap();
+            let old_arg = bt.arg.expect("BooleanTest.arg");
+            let arg = ece_mutator(old_arg, cx)?;
+            let eff = arg.unwrap_or(old_arg);
+            if let Some(carg) = eff.as_const() {
+                let v = carg.constvalue.as_bool();
+                let result = match bt.booltesttype {
+                    BoolTestType::IS_TRUE => !carg.constisnull && v,
+                    BoolTestType::IS_NOT_TRUE => carg.constisnull || !v,
+                    BoolTestType::IS_FALSE => !carg.constisnull && !v,
+                    BoolTestType::IS_NOT_FALSE => carg.constisnull || v,
+                    BoolTestType::IS_UNKNOWN => carg.constisnull,
+                    BoolTestType::IS_NOT_UNKNOWN => !carg.constisnull,
+                };
+                return Ok(Some(make_bool_const(cx.mcx, result, false)?));
+            }
+            match arg {
+                None => Ok(None),
+                Some(arg) => Ok(Some(Node::mk(
+                    cx.mcx,
+                    BooleanTest {
+                        arg: Some(arg),
+                        booltesttype: bt.booltesttype,
+                        location: bt.location,
+                    },
+                )?)),
+            }
+        }
+        NodeTag::T_DistinctExpr => {
+            use types_nodes::DistinctExpr;
+            let d = node.as_distinct_expr().unwrap();
+            let new_args = mutate_list(cx.mcx, &d.args, &mut |n| ece_mutator(n, cx))?;
+            let eff_args = new_args.as_ref().unwrap_or(&d.args);
+
+            let mut has_null_input = false;
+            let mut all_null_input = true;
+            let mut has_nonconst_input = false;
+            for arg in eff_args.iter() {
+                match arg.as_const() {
+                    Some(c) => {
+                        has_null_input |= c.constisnull;
+                        all_null_input &= c.constisnull;
+                    }
+                    None => has_nonconst_input = true,
+                }
+            }
+            let opfuncid = if d.opfuncid == 0 {
+                lsyscache::get_opcode(d.opno)?
+            } else {
+                d.opfuncid
+            };
+            if !has_nonconst_input {
+                if all_null_input {
+                    return Ok(Some(make_bool_const(cx.mcx, false, false)?));
+                }
+                if has_null_input {
+                    return Ok(Some(make_bool_const(cx.mcx, true, false)?));
+                }
+                let (simple, _) = simplify_function(
+                    cx,
+                    opfuncid,
+                    d.opresulttype,
+                    -1,
+                    d.opcollid,
+                    d.inputcollid,
+                    eff_args,
+                    false,
+                    false,
+                    false,
+                )?;
+                if let Some(simple) = simple {
+                    let c = simple.as_const().expect("simplify_function returns a Const");
+                    // Underlying operator is "="; negate its result.
+                    return Ok(Some(make_bool_const(
+                        cx.mcx,
+                        !c.constvalue.as_bool(),
+                        c.constisnull,
+                    )?));
+                }
+            }
+            match new_args {
+                None if opfuncid == d.opfuncid => Ok(None),
+                new_args => {
+                    let args = match new_args {
+                        Some(a) => a,
+                        None => d.args.clone_in(cx.mcx)?,
+                    };
+                    Ok(Some(Node::mk(
+                        cx.mcx,
+                        DistinctExpr {
+                            opno: d.opno,
+                            opfuncid,
+                            opresulttype: d.opresulttype,
+                            opretset: d.opretset,
+                            opcollid: d.opcollid,
+                            inputcollid: d.inputcollid,
+                            args,
+                            location: d.location,
+                        },
+                    )?))
+                }
+            }
+        }
         NodeTag::T_Var
         | NodeTag::T_Const
         | NodeTag::T_RangeTblRef
@@ -980,10 +1085,25 @@ fn negate_clause<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>) -> PgResult<Node<'mcx>>
             }
             crate::classify::make_notclause(mcx, node)
         }
-        other @ NodeTag::T_BooleanTest => panic!(
-            "negate_clause (prepqual.c): {other:?} simplification unported — \
-             unit backend-optimizer-prep-prepqual"
-        ),
+        NodeTag::T_BooleanTest => {
+            use types_nodes::{BoolTestType, BooleanTest};
+            let bt = node.as_boolean_test().unwrap();
+            Node::mk(
+                mcx,
+                BooleanTest {
+                    arg: bt.arg,
+                    booltesttype: match bt.booltesttype {
+                        BoolTestType::IS_TRUE => BoolTestType::IS_NOT_TRUE,
+                        BoolTestType::IS_NOT_TRUE => BoolTestType::IS_TRUE,
+                        BoolTestType::IS_FALSE => BoolTestType::IS_NOT_FALSE,
+                        BoolTestType::IS_NOT_FALSE => BoolTestType::IS_FALSE,
+                        BoolTestType::IS_UNKNOWN => BoolTestType::IS_NOT_UNKNOWN,
+                        BoolTestType::IS_NOT_UNKNOWN => BoolTestType::IS_UNKNOWN,
+                    },
+                    location: bt.location,
+                },
+            )
+        }
         _ => crate::classify::make_notclause(mcx, node),
     }
 }

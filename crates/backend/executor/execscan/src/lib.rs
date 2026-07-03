@@ -415,11 +415,16 @@ pub fn expr_typmod(node: Node<'_>) -> i32 {
             let f = node.as_func_expr().unwrap();
             length_coercion_typmod(f).unwrap_or(-1)
         }
-        NodeTag::T_OpExpr => -1,
-        NodeTag::T_Aggref => -1,
-        NodeTag::T_GroupingFunc => -1,
-        NodeTag::T_WindowFunc => -1,
-        NodeTag::T_SubLink => -1,
+        NodeTag::T_OpExpr
+        | NodeTag::T_Aggref
+        | NodeTag::T_GroupingFunc
+        | NodeTag::T_WindowFunc
+        | NodeTag::T_SubLink
+        | NodeTag::T_BoolExpr
+        | NodeTag::T_NullTest
+        | NodeTag::T_BooleanTest
+        | NodeTag::T_DistinctExpr
+        | NodeTag::T_RowExpr => -1,
         NodeTag::T_SubPlan => {
             use types_nodes::primnodes::SubLinkType;
             let sp = node.as_sub_plan().unwrap();
@@ -502,6 +507,11 @@ pub fn expr_collation(node: Node<'_>) -> Oid {
         NodeTag::T_CaseTestExpr => node.as_case_test_expr().unwrap().collation,
         NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resultcollid,
         NodeTag::T_CoerceViaIO => node.as_coerce_via_io().unwrap().resultcollid,
+        NodeTag::T_BoolExpr
+        | NodeTag::T_NullTest
+        | NodeTag::T_BooleanTest
+        | NodeTag::T_RowExpr => ::types_core::InvalidOid,
+        NodeTag::T_DistinctExpr => node.as_distinct_expr().unwrap().opcollid,
         tag => panic!("exprCollation (nodeFuncs.c): node family {tag:?} not ported"),
     }
 }

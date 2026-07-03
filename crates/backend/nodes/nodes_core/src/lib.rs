@@ -150,6 +150,16 @@ pub fn expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
         NodeTag::T_NullTest => walk_opt(node.as_null_test().unwrap().arg, w),
         NodeTag::T_RelabelType => w.visit(node.as_relabel_type().unwrap().arg),
         NodeTag::T_CoerceViaIO => w.visit(node.as_coerce_via_io().unwrap().arg),
+        NodeTag::T_BooleanTest => walk_opt(node.as_boolean_test().unwrap().arg, w),
+        NodeTag::T_DistinctExpr => {
+            let d = node.as_distinct_expr().unwrap();
+            walk_list(&d.args, w)
+        }
+        NodeTag::T_RowExpr => {
+            // C notes: don't examine row_typeid/colnames.
+            let r = node.as_row_expr().unwrap();
+            walk_list(&r.args, w)
+        }
         NodeTag::T_MinMaxExpr => {
             let mm = node.as_min_max_expr().unwrap();
             walk_list(&mm.args, w)
@@ -418,6 +428,10 @@ pub fn raw_expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
                 || walk_opt(wd.startOffset, w)?
                 || walk_opt(wd.endOffset, w)?)
         }
+        NodeTag::T_BooleanTest => walk_opt(node.as_boolean_test().unwrap().arg, w),
+        // C: "we assume the collname is uninteresting".
+        NodeTag::T_CollateClause => walk_opt(node.as_collate_clause().unwrap().arg, w),
+        NodeTag::T_RowExpr => walk_list(&node.as_row_expr().unwrap().args, w),
         NodeTag::T_List => walk_list(node.as_list().unwrap(), w),
         other => deferred("raw_expression_tree_walker", other),
     }
@@ -477,8 +491,16 @@ where
             };
             checker(opfuncid)
         }
-        t @ (NodeTag::T_DistinctExpr
-        | NodeTag::T_NullIfExpr
+        NodeTag::T_DistinctExpr => {
+            let d = node.as_distinct_expr().unwrap();
+            let opfuncid = if d.opfuncid == 0 {
+                lsyscache::operator::get_opcode(d.opno)?
+            } else {
+                d.opfuncid
+            };
+            checker(opfuncid)
+        }
+        t @ (NodeTag::T_NullIfExpr
         | NodeTag::T_RowCompareExpr) => deferred("check_functions_in_node", t),
         _ => Ok(false),
     }
@@ -737,6 +759,59 @@ where
                         nulltesttype: nt.nulltesttype,
                         argisrow: nt.argisrow,
                         location: nt.location,
+                    },
+                )?)),
+            }
+        }
+        NodeTag::T_DistinctExpr => {
+            let d = node.as_distinct_expr().unwrap();
+            match mutate_list(mcx, &d.args, m)? {
+                None => Ok(None),
+                Some(args) => Ok(Some(Node::mk(
+                    mcx,
+                    types_nodes::DistinctExpr {
+                        opno: d.opno,
+                        opfuncid: d.opfuncid,
+                        opresulttype: d.opresulttype,
+                        opretset: d.opretset,
+                        opcollid: d.opcollid,
+                        inputcollid: d.inputcollid,
+                        args,
+                        location: d.location,
+                    },
+                )?)),
+            }
+        }
+        NodeTag::T_BooleanTest => {
+            let bt = node.as_boolean_test().unwrap();
+            let arg = match bt.arg {
+                Some(a) => m(a)?,
+                None => None,
+            };
+            match arg {
+                None => Ok(None),
+                Some(arg) => Ok(Some(Node::mk(
+                    mcx,
+                    types_nodes::BooleanTest {
+                        arg: Some(arg),
+                        booltesttype: bt.booltesttype,
+                        location: bt.location,
+                    },
+                )?)),
+            }
+        }
+        NodeTag::T_RowExpr => {
+            let r = node.as_row_expr().unwrap();
+            match mutate_list(mcx, &r.args, m)? {
+                None => Ok(None),
+                Some(args) => Ok(Some(Node::mk(
+                    mcx,
+                    types_nodes::RowExpr {
+                        args,
+                        row_typeid: r.row_typeid,
+                        row_format: r.row_format,
+                        colnames: r.colnames.clone_in(mcx)?,
+                        location: r.location,
                     },
                 )?)),
             }

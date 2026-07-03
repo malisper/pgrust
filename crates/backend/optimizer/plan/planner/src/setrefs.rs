@@ -911,6 +911,41 @@ fn fix_upper_expr<'mcx>(
                 },
             )
         }
+        NodeTag::T_BooleanTest => {
+            let bt = node.as_boolean_test().unwrap();
+            let arg = fix_upper_expr(run, bt.arg.expect("BooleanTest.arg"), subplan_tlist, rtoffset, newvarno, num_exec)?;
+            Node::mk(
+                mcx,
+                types_nodes::BooleanTest {
+                    arg: Some(arg),
+                    booltesttype: bt.booltesttype,
+                    location: bt.location,
+                },
+            )
+        }
+        NodeTag::T_DistinctExpr => {
+            let d = node.as_distinct_expr().unwrap();
+            let opfuncid =
+                if d.opfuncid != 0 { d.opfuncid } else { lsyscache::get_opcode(d.opno)? };
+            record_plan_function_dependency(run, opfuncid)?;
+            let mut args = NodeList::nil();
+            for arg in &d.args {
+                args.lappend(mcx, fix_upper_expr(run, arg, subplan_tlist, rtoffset, newvarno, num_exec)?)?;
+            }
+            Node::mk(
+                mcx,
+                types_nodes::DistinctExpr {
+                    opno: d.opno,
+                    opfuncid,
+                    opresulttype: d.opresulttype,
+                    opretset: d.opretset,
+                    opcollid: d.opcollid,
+                    inputcollid: d.inputcollid,
+                    args,
+                    location: d.location,
+                },
+            )
+        }
         NodeTag::T_SubPlan => {
             let sp = node.as_sub_plan().unwrap();
             let testexpr = match sp.testexpr {
@@ -1163,6 +1198,41 @@ fn fix_scan_expr_mutator<'mcx>(
                 },
             )
         }
+        NodeTag::T_BooleanTest => {
+            let bt = node.as_boolean_test().unwrap();
+            let arg = fix_scan_expr_mutator(run, bt.arg.expect("BooleanTest.arg"), rtoffset, num_exec)?;
+            Node::mk(
+                mcx,
+                types_nodes::BooleanTest {
+                    arg: Some(arg),
+                    booltesttype: bt.booltesttype,
+                    location: bt.location,
+                },
+            )
+        }
+        NodeTag::T_DistinctExpr => {
+            let d = node.as_distinct_expr().unwrap();
+            let opfuncid =
+                if d.opfuncid != 0 { d.opfuncid } else { lsyscache::get_opcode(d.opno)? };
+            record_plan_function_dependency(run, opfuncid)?;
+            let mut args = NodeList::nil();
+            for arg in &d.args {
+                args.lappend(mcx, fix_scan_expr_mutator(run, arg, rtoffset, num_exec)?)?;
+            }
+            Node::mk(
+                mcx,
+                types_nodes::DistinctExpr {
+                    opno: d.opno,
+                    opfuncid,
+                    opresulttype: d.opresulttype,
+                    opretset: d.opretset,
+                    opcollid: d.opcollid,
+                    inputcollid: d.inputcollid,
+                    args,
+                    location: d.location,
+                },
+            )
+        }
         NodeTag::T_SubPlan => {
             let sp = node.as_sub_plan().unwrap();
             let testexpr = match sp.testexpr {
@@ -1306,6 +1376,19 @@ fn fix_scan_expr_walker<'mcx>(run: &mut PlannerRun<'mcx>, node: Node<'mcx>) -> P
             Some(arg) => fix_scan_expr_walker(run, arg),
             None => Ok(()),
         },
+        NodeTag::T_BooleanTest => match node.as_boolean_test().unwrap().arg {
+            Some(arg) => fix_scan_expr_walker(run, arg),
+            None => Ok(()),
+        },
+        NodeTag::T_DistinctExpr => {
+            let d = node.as_distinct_expr().unwrap();
+            debug_assert!(d.opfuncid != 0, "fix_scan_expr_walker: unresolved opfuncid");
+            record_plan_function_dependency(run, d.opfuncid)?;
+            for arg in &d.args {
+                fix_scan_expr_walker(run, arg)?;
+            }
+            Ok(())
+        }
         NodeTag::T_SubPlan => {
             let sp = node.as_sub_plan().unwrap();
             if let Some(te) = sp.testexpr {
@@ -1773,6 +1856,49 @@ fn fix_join_expr_mutator<'mcx>(
                     nulltesttype: nt.nulltesttype,
                     argisrow: nt.argisrow,
                     location: nt.location,
+                },
+            )
+        }
+        NodeTag::T_BooleanTest => {
+            let bt = node.as_boolean_test().unwrap();
+            let arg = match bt.arg {
+                None => None,
+                Some(a) => Some(fix_join_expr_mutator(
+                    run, a, outer_tlist, inner_tlist, rtoffset, nrm_match, acceptable_rel, num_exec,
+                )?),
+            };
+            Node::mk(
+                mcx,
+                types_nodes::BooleanTest {
+                    arg,
+                    booltesttype: bt.booltesttype,
+                    location: bt.location,
+                },
+            )
+        }
+        NodeTag::T_DistinctExpr => {
+            let d = node.as_distinct_expr().unwrap();
+            let opfuncid =
+                if d.opfuncid != 0 { d.opfuncid } else { lsyscache::get_opcode(d.opno)? };
+            record_plan_function_dependency(run, opfuncid)?;
+            let mut args = NodeList::nil();
+            for arg in &d.args {
+                args.lappend(
+                    mcx,
+                    fix_join_expr_mutator(run, arg, outer_tlist, inner_tlist, rtoffset, nrm_match, acceptable_rel, num_exec)?,
+                )?;
+            }
+            Node::mk(
+                mcx,
+                types_nodes::DistinctExpr {
+                    opno: d.opno,
+                    opfuncid,
+                    opresulttype: d.opresulttype,
+                    opretset: d.opretset,
+                    opcollid: d.opcollid,
+                    inputcollid: d.inputcollid,
+                    args,
+                    location: d.location,
                 },
             )
         }

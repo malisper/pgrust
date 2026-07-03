@@ -287,6 +287,8 @@ fn assign_collations_walker<'mcx>(
         | NodeTag::T_GroupingFunc
         | NodeTag::T_WindowFunc
         | NodeTag::T_NullTest
+        | NodeTag::T_BooleanTest
+        | NodeTag::T_DistinctExpr
         | NodeTag::T_SubLink) => {
             match tag {
                 // C: never recurse into the CASE test expression — it was
@@ -392,6 +394,16 @@ fn assign_collations_walker<'mcx>(
                         assign_collations_walker(arg, &mut loccontext)?;
                     }
                 }
+                NodeTag::T_BooleanTest => {
+                    if let Some(arg) = node.as_boolean_test().unwrap().arg {
+                        assign_collations_walker(arg, &mut loccontext)?;
+                    }
+                }
+                NodeTag::T_DistinctExpr => {
+                    for arg in &node.as_distinct_expr().unwrap().args {
+                        assign_collations_walker(arg, &mut loccontext)?;
+                    }
+                }
                 _ => unreachable!(),
             }
 
@@ -452,11 +464,20 @@ fn assign_collations_walker<'mcx>(
                     NodeTag::T_CoerceViaIO => node
                         .with_mut::<types_nodes::CoerceViaIO, _>(|c| c.resultcollid = set_coll)
                         .unwrap(),
-                    // exprSetCollation(BoolExpr/NullTest/GroupingFunc) is
-                    // assert-only in C.
-                    NodeTag::T_BoolExpr | NodeTag::T_NullTest | NodeTag::T_GroupingFunc => {
+                    // exprSetCollation(BoolExpr/NullTest/GroupingFunc/BooleanTest)
+                    // is assert-only in C.
+                    NodeTag::T_BoolExpr
+                    | NodeTag::T_NullTest
+                    | NodeTag::T_GroupingFunc
+                    | NodeTag::T_BooleanTest => {
                         debug_assert!(!OidIsValid(set_coll))
                     }
+                    NodeTag::T_DistinctExpr => node
+                        .with_mut::<types_nodes::DistinctExpr, _>(|d| {
+                            d.opcollid = set_coll;
+                            d.inputcollid = input_coll;
+                        })
+                        .unwrap(),
                     NodeTag::T_CaseExpr => node
                         .with_mut::<types_nodes::primnodes::CaseExpr, _>(|c| {
                             c.casecollid = set_coll

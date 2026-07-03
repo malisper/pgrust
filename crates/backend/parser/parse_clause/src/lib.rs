@@ -1003,6 +1003,13 @@ fn contains_aggref(node: Node<'_>) -> bool {
         NodeTag::T_NullTest => {
             node.as_null_test().unwrap().arg.is_some_and(contains_aggref)
         }
+        NodeTag::T_BooleanTest => {
+            node.as_boolean_test().unwrap().arg.is_some_and(contains_aggref)
+        }
+        NodeTag::T_DistinctExpr => {
+            node.as_distinct_expr().unwrap().args.iter().any(contains_aggref)
+        }
+        NodeTag::T_RowExpr => node.as_row_expr().unwrap().args.iter().any(contains_aggref),
         tag => panic!(
             "contain_aggs_of_level (rewriteManip.c): node family {tag:?} unported — \
              unit backend-parser-clause"

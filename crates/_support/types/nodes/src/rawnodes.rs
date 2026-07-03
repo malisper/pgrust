@@ -184,6 +184,13 @@ pub struct A_Expr<'mcx> {
     pub location: ParseLoc,
 }
 
+#[derive(Default)]
+pub struct CollateClause<'mcx> {
+    pub arg: Option<Node<'mcx>>,
+    pub collname: NodeList<'mcx>,
+    pub location: ParseLoc,
+}
+
 /// C `union ValUnion` — the embedded value-node union of `A_Const`.
 #[derive(Clone, Copy)]
 pub enum ValUnion<'mcx> {
@@ -528,6 +535,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for A_Expr<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for A_Const<'mcx> {
     const TAG: NodeTag = NodeTag::T_A_Const;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for CollateClause<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CollateClause;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for ColumnRef<'mcx> {
     const TAG: NodeTag = NodeTag::T_ColumnRef;
 }
@@ -688,6 +698,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_a_const(self) -> Option<&'mcx A_Const<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_collate_clause(self) -> Option<&'mcx CollateClause<'mcx>> {
         self.as_variant()
     }
 

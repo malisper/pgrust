@@ -1171,25 +1171,6 @@ impl<'mcx> Parser<'mcx> {
                     view.l(1),
                 )?));
             }
-            // implicit_row -> RowExpr (COERCE_IMPLICIT_CAST "abuse").
-            2124 => {
-                *yyval = YYSTYPE::Node(Some(Node::mk(
-                    mcx,
-                    RowExpr {
-                        args: view.v(1).list(),
-                        row_format: CoercionForm::COERCE_IMPLICIT_CAST,
-                        location: view.l(1),
-                        ..Default::default()
-                    },
-                )?));
-            }
-            // implicit_row: '(' expr_list ',' a_expr ')'.
-            2262 => {
-                let mut list = view.v(2).list();
-                let item = view.v(4).node().expect("a_expr");
-                list.lappend(mcx, item)?;
-                *yyval = YYSTYPE::List(list);
-            }
             // GROUPING '(' expr_list ')' -> GroupingFunc.
             2125 => {
                 *yyval = YYSTYPE::Node(Some(Node::mk(
@@ -1739,6 +1720,99 @@ impl<'mcx> Parser<'mcx> {
             2025 => {
                 let r = view.v(2).node();
                 *yyval = self.simple_a_expr("+", None, r, view.l(1))?;
+            }
+            // a_expr IS [NOT] TRUE_P / FALSE_P / UNKNOWN
+            2062..=2067 => {
+                use types_nodes::primnodes::{BoolTestType, BooleanTest};
+                let t = match rule {
+                    2062 => BoolTestType::IS_TRUE,
+                    2063 => BoolTestType::IS_NOT_TRUE,
+                    2064 => BoolTestType::IS_FALSE,
+                    2065 => BoolTestType::IS_NOT_FALSE,
+                    2066 => BoolTestType::IS_UNKNOWN,
+                    _ => BoolTestType::IS_NOT_UNKNOWN,
+                };
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    BooleanTest { arg: view.v(1).node(), booltesttype: t, location: view.l(2) },
+                )?));
+            }
+            // a_expr IS [NOT] DISTINCT FROM a_expr
+            2068 | 2069 => {
+                use types_nodes::rawnodes::A_Expr_Kind;
+                let (kind, r_i) = if rule == 2068 {
+                    (A_Expr_Kind::AEXPR_DISTINCT, 5)
+                } else {
+                    (A_Expr_Kind::AEXPR_NOT_DISTINCT, 6)
+                };
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    types_nodes::A_Expr {
+                        kind,
+                        name: NodeList::make1(mcx, Node::mk_string(mcx, "=")?)?,
+                        lexpr: view.v(1).node(),
+                        rexpr: view.v(r_i).node(),
+                        rexpr_list_start: 0,
+                        rexpr_list_end: 0,
+                        location: view.l(2),
+                    },
+                )?));
+            }
+            // a_expr COLLATE any_name
+            2022 => {
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    types_nodes::CollateClause {
+                        arg: view.v(1).node(),
+                        collname: view.v(3).list(),
+                        location: view.l(2),
+                    },
+                )?));
+            }
+            // a_expr subquery_Op sub_type '(' a_expr ')'
+            2079 => {
+                use types_nodes::rawnodes::A_Expr_Kind;
+                let kind = if view.v(3).ival() == types_nodes::SubLinkType::ALL_SUBLINK as i32 {
+                    A_Expr_Kind::AEXPR_OP_ALL
+                } else {
+                    A_Expr_Kind::AEXPR_OP_ANY
+                };
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    types_nodes::A_Expr {
+                        kind,
+                        name: view.v(2).list(),
+                        lexpr: view.v(1).node(),
+                        rexpr: view.v(5).node(),
+                        rexpr_list_start: 0,
+                        rexpr_list_end: 0,
+                        location: view.l(2),
+                    },
+                )?));
+            }
+            // c_expr: explicit_row | implicit_row
+            2123 | 2124 => {
+                let row_format = if rule == 2123 {
+                    CoercionForm::COERCE_EXPLICIT_CALL
+                } else {
+                    CoercionForm::COERCE_IMPLICIT_CAST
+                };
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    RowExpr {
+                        args: view.v(1).list(),
+                        row_typeid: 0,
+                        row_format,
+                        colnames: NodeList::nil(),
+                        location: view.l(1),
+                    },
+                )?));
+            }
+            // implicit_row: '(' expr_list ',' a_expr ')'
+            2262 => {
+                let mut list = view.v(2).list();
+                list.lappend(mcx, view.v(4).node().expect("a_expr"))?;
+                *yyval = YYSTYPE::List(list);
             }
             // a_expr subquery_Op sub_type select_with_parens
             2078 => {

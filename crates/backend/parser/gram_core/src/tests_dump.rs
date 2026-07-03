@@ -149,12 +149,22 @@ fn node(out: &mut String, n: Node<'_>) {
         out.push('}');
     } else if let Some(e) = n.as_a_expr() {
         out.push_str("{A_EXPR");
-        match e.kind {
-            A_Expr_Kind::AEXPR_OP => {}
-            A_Expr_Kind::AEXPR_LIKE => out.push_str(" LIKE"),
-            A_Expr_Kind::AEXPR_ILIKE => out.push_str(" ILIKE"),
-            other => panic!("A_Expr kind {other:?} not rendered"),
-        }
+        out.push_str(match e.kind {
+            A_Expr_Kind::AEXPR_OP => "",
+            A_Expr_Kind::AEXPR_OP_ANY => " ANY",
+            A_Expr_Kind::AEXPR_OP_ALL => " ALL",
+            A_Expr_Kind::AEXPR_DISTINCT => " DISTINCT",
+            A_Expr_Kind::AEXPR_NOT_DISTINCT => " NOT_DISTINCT",
+            A_Expr_Kind::AEXPR_NULLIF => " NULLIF",
+            A_Expr_Kind::AEXPR_IN => " IN",
+            A_Expr_Kind::AEXPR_LIKE => " LIKE",
+            A_Expr_Kind::AEXPR_ILIKE => " ILIKE",
+            A_Expr_Kind::AEXPR_SIMILAR => " SIMILAR",
+            A_Expr_Kind::AEXPR_BETWEEN => " BETWEEN",
+            A_Expr_Kind::AEXPR_NOT_BETWEEN => " NOT_BETWEEN",
+            A_Expr_Kind::AEXPR_BETWEEN_SYM => " BETWEEN_SYM",
+            A_Expr_Kind::AEXPR_NOT_BETWEEN_SYM => " NOT_BETWEEN_SYM",
+        });
         list_field(out, "name", &e.name);
         node_field(out, "lexpr", e.lexpr);
         node_field(out, "rexpr", e.rexpr);
@@ -264,6 +274,27 @@ fn node(out: &mut String, n: Node<'_>) {
         int_field(out, "nulltesttype", nt.nulltesttype as i32);
         bool_field(out, "argisrow", nt.argisrow);
         int_field(out, "location", nt.location);
+        out.push('}');
+    } else if let Some(sl) = n.as_sub_link() {
+        out.push_str("{SUBLINK");
+        int_field(out, "subLinkType", sl.subLinkType as i32);
+        int_field(out, "subLinkId", sl.subLinkId);
+        node_field(out, "testexpr", sl.testexpr);
+        list_field(out, "operName", &sl.operName);
+        node_field(out, "subselect", Some(sl.subselect));
+        int_field(out, "location", sl.location);
+        out.push('}');
+    } else if let Some(bt) = n.as_boolean_test() {
+        out.push_str("{BOOLEANTEST");
+        node_field(out, "arg", bt.arg);
+        int_field(out, "booltesttype", bt.booltesttype as i32);
+        int_field(out, "location", bt.location);
+        out.push('}');
+    } else if let Some(cc) = n.as_collate_clause() {
+        out.push_str("{COLLATECLAUSE");
+        node_field(out, "arg", cc.arg);
+        list_field(out, "collname", &cc.collname);
+        int_field(out, "location", cc.location);
         out.push('}');
     } else if let Some(g) = n.as_grant_stmt() {
         out.push_str("{GRANTSTMT");
