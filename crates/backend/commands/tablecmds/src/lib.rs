@@ -11,7 +11,7 @@ mod oncommit;
 mod rename;
 mod truncate;
 pub use alter::{AlterTable, AlterTableGetLockLevel, AlterTableLookupRelation};
-pub use rename::{renameatt, RenameRelation, RenameRelationInternal};
+pub use rename::{renameatt, RenameConstraint, RenameRelation, RenameRelationInternal};
 pub use drop::RemoveRelations;
 pub use oncommit::{
     register_on_commit_action, remove_on_commit_action, AtEOSubXact_on_commit_actions,

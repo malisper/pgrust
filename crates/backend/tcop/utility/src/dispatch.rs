@@ -603,6 +603,9 @@ fn dispatch_switch<'mcx>(
                 types_nodes::parsenodes::ObjectType::OBJECT_COLUMN => {
                     tablecmds::renameatt(mcx, stmt)?;
                 }
+                types_nodes::parsenodes::ObjectType::OBJECT_TABCONSTRAINT => {
+                    tablecmds::RenameConstraint(mcx, stmt)?;
+                }
                 other => panic!("unported: ExecRenameStmt {other:?}"),
             }
         }

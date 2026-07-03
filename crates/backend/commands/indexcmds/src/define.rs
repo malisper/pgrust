@@ -46,6 +46,16 @@ fn err(msg: String, sqlstate: types_error::SqlState) -> Box<PgError> {
     Box::new(PgError::new(ERROR, msg).with_sqlstate(sqlstate))
 }
 
+pub(crate) fn define_index_for_alter<'mcx>(
+    mcx: Mcx<'mcx>,
+    table_id: Oid,
+    stmt_node: types_nodes::Node<'mcx>,
+    skip_build: bool,
+) -> PgResult<Oid> {
+    let stmt = stmt_node.as_variant::<IndexStmt>().expect("IndexStmt");
+    DefineIndex(mcx, table_id, stmt, InvalidOid, true, true, false, skip_build, false)
+}
+
 pub fn DefineIndex<'mcx>(
     mcx: Mcx<'mcx>,
     tableId: Oid,
@@ -78,9 +88,6 @@ pub fn DefineIndex<'mcx>(
     }
     if stmt.deferrable || stmt.initdeferred {
         unported("DefineIndex: DEFERRABLE constraint indexes");
-    }
-    if is_alter_table && stmt.primary {
-        unported("DefineIndex: index_check_primary_key (ALTER TABLE ADD PRIMARY KEY)");
     }
     if stmt.oldNumber != 0 || skip_build {
         unported("DefineIndex: skip_build / oldNumber reuse");
@@ -226,6 +233,10 @@ pub fn DefineIndex<'mcx>(
         amcanorder,
         &mut root_save_nestlevel,
     )?;
+
+    if stmt.primary {
+        catalog_index::index_check_primary_key(mcx, &rel, &indexInfo, is_alter_table)?;
+    }
 
     for i in 0..numberOfAttributes {
         if indexInfo.ii_IndexAttrNumbers[i] < 0 {

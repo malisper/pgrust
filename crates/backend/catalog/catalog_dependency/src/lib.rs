@@ -57,6 +57,7 @@ const AttrDefaultRelationId: Oid = 2604;
 const ConstraintRelationId: Oid = 2606;
 const RewriteRelationId: Oid = 2618;
 const AuthMemRelationId: Oid = 1261;
+const TriggerRelationId: Oid = 2620;
 
 #[cold]
 #[inline(never)]
@@ -705,6 +706,7 @@ fn doDeletion<'mcx>(mcx: Mcx<'mcx>, object: &ObjectAddress, flags: i32) -> PgRes
         TYPE_RELATION_ID => pg_type::RemoveTypeById(mcx, object.objectId)?,
         AttrDefaultRelationId => pg_attrdef::RemoveAttrDefaultById(mcx, object.objectId)?,
         ConstraintRelationId => pg_constraint::RemoveConstraintById(mcx, object.objectId)?,
+        TriggerRelationId => trigger::RemoveTriggerById(mcx, object.objectId)?,
         statscmds::StatisticExtRelationId => statscmds::RemoveStatisticsById(mcx, object.objectId)?,
         RewriteRelationId => {
             rewrite_define_seams::remove_rewrite_rule_by_id::call(mcx, object.objectId)?

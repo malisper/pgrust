@@ -1442,6 +1442,7 @@ dependencies = [
  "sequence_seams",
  "statscmds",
  "table",
+ "trigger",
  "types_core",
  "types_error",
  "types_nodes",
@@ -4410,9 +4411,11 @@ dependencies = [
 name = "indexcmds_seams"
 version = "0.1.0"
 dependencies = [
+ "mcx",
  "seam_core",
  "types_core",
  "types_error",
+ "types_nodes",
 ]
 
 [[package]]
@@ -10045,6 +10048,7 @@ dependencies = [
  "multixact",
  "nodes_core",
  "outfuncs",
+ "parse_clause",
  "parse_collate",
  "parse_expr",
  "parse_relation",
@@ -10317,6 +10321,7 @@ dependencies = [
  "genam",
  "heapam",
  "heaptuple",
+ "init_small",
  "inval",
  "mcx",
  "miscinit",
