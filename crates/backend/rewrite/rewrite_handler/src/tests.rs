@@ -535,8 +535,7 @@ fn row_security_defers_loud() {
 }
 
 #[test]
-#[should_panic(expected = "dropped-column fixup of joinaliasvars")]
-fn join_alias_fixup_defers_loud() {
+fn join_rte_without_dropped_columns_passes() {
     install();
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
@@ -549,7 +548,7 @@ fn join_alias_fixup_defers_loud() {
         ),
     )
     .unwrap();
-    let _ = AcquireRewriteLocks(mcx, &query, true, false);
+    AcquireRewriteLocks(mcx, &query, true, false).unwrap();
 }
 
 #[test]

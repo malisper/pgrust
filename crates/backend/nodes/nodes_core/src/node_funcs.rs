@@ -397,3 +397,34 @@ pub fn apply_relabel_type<'mcx>(
         },
     )
 }
+
+// strip_implicit_coercions (nodeFuncs.c); ArrayCoerceExpr /
+// ConvertRowtypeExpr / CoerceToDomain vocabulary is unported and cannot
+// reach here (readfuncs/parse arms are loud).
+pub fn strip_implicit_coercions(node: Node<'_>) -> Node<'_> {
+    use types_nodes::primnodes::CoercionForm::COERCE_IMPLICIT_CAST;
+    match node.node_tag() {
+        NodeTag::T_FuncExpr => {
+            let f = node.as_func_expr().unwrap();
+            if f.funcformat == COERCE_IMPLICIT_CAST {
+                return strip_implicit_coercions(f.args.nth(0));
+            }
+            node
+        }
+        NodeTag::T_RelabelType => {
+            let r = node.as_relabel_type().unwrap();
+            if r.relabelformat == COERCE_IMPLICIT_CAST {
+                return strip_implicit_coercions(r.arg);
+            }
+            node
+        }
+        NodeTag::T_CoerceViaIO => {
+            let c = node.as_coerce_via_io().unwrap();
+            if c.coerceformat == COERCE_IMPLICIT_CAST {
+                return strip_implicit_coercions(c.arg);
+            }
+            node
+        }
+        _ => node,
+    }
+}
