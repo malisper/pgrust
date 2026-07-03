@@ -727,7 +727,6 @@ fn fix_upper_expr<'mcx>(
             let a = node.as_aggref().expect("Aggref");
             record_plan_function_dependency(run, a.aggfnoid)?;
             debug_assert!(a.aggdirectargs.is_nil() && a.aggfilter.is_none());
-            debug_assert!(a.aggorder.is_nil() && a.aggdistinct.is_nil());
             let mut args = NodeList::nil();
             for arg_node in &a.args {
                 let arg = arg_node.as_target_entry().expect("agg arg is a TLE");
@@ -757,8 +756,10 @@ fn fix_upper_expr<'mcx>(
                     aggargtypes: a.aggargtypes.clone_in(mcx)?,
                     aggdirectargs: NodeList::nil(),
                     args,
-                    aggorder: NodeList::nil(),
-                    aggdistinct: NodeList::nil(),
+                    // SortGroupClause cells pass through unchanged (C
+                    // expression_tree_mutator leaves non-expression nodes).
+                    aggorder: a.aggorder.clone_in(mcx)?,
+                    aggdistinct: a.aggdistinct.clone_in(mcx)?,
                     aggfilter: None,
                     aggstar: a.aggstar,
                     aggvariadic: a.aggvariadic,

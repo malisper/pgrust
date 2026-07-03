@@ -744,6 +744,10 @@ fn run_program<'mcx>(
                     continue;
                 }
             }
+            Step::AggOrderedMark { flag } => {
+                // SAFETY: nodeagg-owned once-allocated flag slot.
+                unsafe { flag.write(true) };
+            }
             Step::AggrefEval { value, null, out } => {
                 // SAFETY: pointers into once-allocated AggState arrays (steps.rs note).
                 let (v, n) = unsafe { (value.read(), null.read()) };

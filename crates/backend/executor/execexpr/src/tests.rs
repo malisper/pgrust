@@ -566,7 +566,9 @@ fn agg_trans_and_aggref_eval_steps() {
                 inputcollid: 0,
                 init_value_is_null: false,
                 args: &empty_args,
+                aggref: None,
                 pergroup: base,
+                ordered: None,
             },
             // sum(int4): int4_sum (1841), non-strict, null init, 1 input.
             AggTransSpec {
@@ -577,8 +579,10 @@ fn agg_trans_and_aggref_eval_steps() {
                 inputcollid: 0,
                 init_value_is_null: true,
                 args: &sum_args,
+                aggref: None,
                 // SAFETY: index 1 of the 2-element local array.
                 pergroup: unsafe { NonNull::new_unchecked(base.as_ptr().add(1)) },
+                ordered: None,
             },
         ];
         let mut trans = exec_build_agg_trans(mcx, &specs, None, ParamBind::NONE).unwrap();
@@ -667,7 +671,9 @@ fn agg_trans_strict_input_check_skips_nulls() {
                 inputcollid: 0,
                 init_value_is_null: false,
                 args: &count_args,
+                aggref: None,
                 pergroup: base,
+                ordered: None,
             },
             // sum(int4): int4_sum (1841), non-strict, null init.
             AggTransSpec {
@@ -678,8 +684,10 @@ fn agg_trans_strict_input_check_skips_nulls() {
                 inputcollid: 0,
                 init_value_is_null: true,
                 args: &sum_args,
+                aggref: None,
                 // SAFETY: index 1 of the 2-element local array.
                 pergroup: unsafe { NonNull::new_unchecked(base.as_ptr().add(1)) },
+                ordered: None,
             },
         ];
         let mut trans = exec_build_agg_trans(mcx, &specs, None, ParamBind::NONE).unwrap();

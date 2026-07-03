@@ -1280,9 +1280,9 @@ fn create_ordered_paths<'mcx>(
 fn standard_qp_callback<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResult<()> {
     let parse = run.parse();
     let tlist = run.processed_tlist();
-    if run.root.numOrderedAggs > 0 {
-        panic!("adjust_group_pathkeys_for_groupagg (planner.c): M3 ordered-agg lane");
-    }
+    // DIVERGENCE: adjust_group_pathkeys_for_groupagg (planner.c) unported —
+    // aggpresorted never set, matching C under enable_presorted_aggregate=off;
+    // ordered aggs sort inside nodeagg (presorted-aggregate lane).
 
     if run.gset_data.is_some() {
         // Grouping sets: the first RollupData's groupClause, with C's

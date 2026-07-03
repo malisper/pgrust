@@ -174,6 +174,7 @@ members = [
     "crates/backend/tcop/dest",
     "crates/backend/parser/parser_small1",
     "crates/backend/parser/parse_clause",
+    "crates/backend/parser/parse_clause_seams",
     "crates/backend/parser/parse_expr",
     "crates/backend/parser/parse_oper",
     "crates/backend/parser/parse_func",

@@ -72,6 +72,7 @@ pqformat = { path = "../../backend/libpq/pqformat" }
 vars = { path = "../../backend/optimizer/util/vars" }
 parser_driver = { path = "../../backend/parser/parser_driver" }
 parse_collate = { path = "../../backend/parser/parse_collate" }
+parse_clause = { path = "../../backend/parser/parse_clause" }
 parse_expr = { path = "../../backend/parser/parse_expr" }
 parser_analyze = { path = "../../backend/parser/parser_analyze" }
 scan_fgram = { path = "../../backend/parser/scan_fgram" }
