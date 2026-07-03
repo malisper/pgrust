@@ -326,8 +326,6 @@ pub fn inv_seek<'mcx>(
     offset: int64,
     whence: i32,
 ) -> PgResult<int64> {
-    // Overflow in the additions is possible, but negative results are
-    // rejected, so no extra test is needed.
     let newoffset: int64 = match whence {
         SEEK_SET => offset,
         SEEK_CUR => (obj_desc.offset as int64).wrapping_add(offset),
@@ -400,8 +398,6 @@ pub fn inv_read<'mcx>(
     {
         read_lo_page(mcx, &lo_heap_r, tuple, obj_desc.id, &mut page)?;
 
-        // The indexscan delivers pages in order, but missing pages ("holes")
-        // read out as zeroes.
         let pageoff: uint64 = page.pageno as uint64 * LOBLKSIZE_U64;
         if pageoff > obj_desc.offset {
             let mut n = (pageoff - obj_desc.offset) as int64;
@@ -506,8 +502,6 @@ pub fn inv_write<'mcx>(
     let mut have_old = false;
 
     while nwritten < nbytes {
-        // If possible, get the next pre-existing page of the LO. The
-        // indexscan delivers these in order, but there may be holes.
         if neednextpage {
             have_old = match genam::systable_getnext_ordered(
                 mcx,
@@ -525,8 +519,6 @@ pub fn inv_write<'mcx>(
         }
 
         if have_old && oldpage.pageno == pageno {
-            // Update an existing page with fresh data: load old data into
-            // workbuf, fill any hole, then overlay the new bytes.
             let mut len = oldpage.len;
             workbuf.data[..len].copy_from_slice(&oldpage.data[..len]);
 
@@ -556,7 +548,6 @@ pub fn inv_write<'mcx>(
             have_old = false;
             neednextpage = true;
         } else {
-            // Write a brand new page: fill any hole, then the new bytes.
             let off = (obj_desc.offset % LOBLKSIZE_U64) as usize;
             if off > 0 {
                 workbuf.data[..off].fill(0);
@@ -583,8 +574,6 @@ pub fn inv_write<'mcx>(
     indexam::index_close(lo_index_r, NoLock)?;
     lo_heap_r.close(NoLock)?;
 
-    // Advance command counter so that my tuple updates will be seen by later
-    // large-object operations in this transaction.
     xact::CommandCounterIncrement()?;
 
     Ok(nwritten)
@@ -628,7 +617,6 @@ pub fn inv_truncate<'mcx>(
         &skey,
     )?;
 
-    // The truncation point may be beyond the end of the LO or in a hole.
     let mut oldpage = LoPageBuf {
         pageno: 0,
         tid: ItemPointerData::invalid(),
@@ -649,7 +637,6 @@ pub fn inv_truncate<'mcx>(
     };
 
     if have_old && oldpage.pageno == pageno {
-        // Truncate the data in the page at the truncation point.
         let pagelen = oldpage.len;
         workbuf.data[..pagelen].copy_from_slice(&oldpage.data[..pagelen]);
 
@@ -668,8 +655,6 @@ pub fn inv_truncate<'mcx>(
             &mut indstate,
         )?;
     } else {
-        // In a hole: delete the later page the loop below won't revisit, and
-        // create a page to mark the end of data.
         if have_old {
             debug_assert!(oldpage.pageno > pageno);
             catalog_indexing::CatalogTupleDelete(&lo_heap_r, &oldpage.tid)?;
@@ -685,7 +670,6 @@ pub fn inv_truncate<'mcx>(
         catalog_indexing::CatalogTupleInsertWithInfo(mcx, &lo_heap_r, &mut newtup, &mut indstate)?;
     }
 
-    // Delete any pages after the truncation point.
     if have_old {
         while let Some(tuple) =
             genam::systable_getnext_ordered(mcx, &mut sd, ScanDirection::ForwardScanDirection)?
@@ -702,8 +686,6 @@ pub fn inv_truncate<'mcx>(
     indexam::index_close(lo_index_r, NoLock)?;
     lo_heap_r.close(NoLock)?;
 
-    // Advance command counter so that tuple updates will be seen by later
-    // large-object operations in this transaction.
     xact::CommandCounterIncrement()?;
 
     Ok(())
