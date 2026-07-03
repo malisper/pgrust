@@ -10,6 +10,8 @@ const COMPOSITE_OID: Oid = 90004;
 const COMPOSITE_REL: Oid = 5001;
 const DOMAIN_OID: Oid = 90001;
 const RANGE_OID: Oid = 90005;
+const MULTI_OID: Oid = 90007;
+const F_INT4RANGE_CANONICAL: Oid = 3914;
 const SHELL_OID: Oid = 90003;
 const NOHASH_OID: Oid = 90006;
 
@@ -68,6 +70,8 @@ static SEAMS: Once = Once::new();
 fn install() {
     SEAMS.call_once(|| {
         use syscache_seams as s;
+        fmgr_core::init_seams();
+        clauses::init_seams();
         s::lookup_pg_type_typcache_shape::set(|typid| {
             Ok(match typid {
                 INT4OID => Some(typrow("int4", b'b' as i8, true, InvalidOid, InvalidOid, InvalidOid)),
@@ -82,6 +86,7 @@ fn install() {
                 COMPOSITE_OID => Some(typrow("comp", b'c' as i8, true, COMPOSITE_REL, InvalidOid, InvalidOid)),
                 DOMAIN_OID => Some(typrow("dom", b'd' as i8, true, InvalidOid, InvalidOid, InvalidOid)),
                 RANGE_OID => Some(typrow("rng", b'r' as i8, true, InvalidOid, InvalidOid, InvalidOid)),
+                MULTI_OID => Some(typrow("mrng", b'm' as i8, true, InvalidOid, InvalidOid, InvalidOid)),
                 SHELL_OID => Some(typrow("shell", b'b' as i8, false, InvalidOid, InvalidOid, InvalidOid)),
                 NOHASH_OID => Some(typrow("nohash", b'b' as i8, true, InvalidOid, InvalidOid, InvalidOid)),
                 _ => None,
@@ -203,6 +208,19 @@ fn install() {
                 }),
                 _ => None,
             })
+        });
+        s::lookup_pg_range_shape::set(|range_oid| {
+            Ok((range_oid == RANGE_OID).then_some(s::PgRangeShape {
+                rngsubtype: INT4OID,
+                rngmultitypid: MULTI_OID,
+                rngcollation: InvalidOid,
+                rngsubopc: INT4_BTREE_OPCLASS,
+                rngcanonical: F_INT4RANGE_CANONICAL,
+                rngsubdiff: InvalidOid,
+            }))
+        });
+        s::lookup_pg_range_by_multirange::set(|mr| {
+            Ok((mr == MULTI_OID).then_some(RANGE_OID))
         });
         s::lookup_pg_proc_shape::set(|funcid| {
             Ok((funcid == 147).then_some(s::PgProcShape {
@@ -394,10 +412,29 @@ fn composite_tupdesc_lane_is_loud() {
 }
 
 #[test]
-#[should_panic(expected = "RANGE_INFO lane not ported")]
-fn range_lane_is_loud() {
+fn range_info_fills_and_links_elem() {
     install();
-    let _ = lookup_type_cache(RANGE_OID, TYPECACHE_RANGE_INFO);
+    let e = lookup_type_cache(RANGE_OID, TYPECACHE_RANGE_INFO).unwrap();
+    assert_eq!(e.rng_collation(), InvalidOid);
+    assert_eq!(e.rng_opfamily(), INT_BTREE_FAM);
+    assert_eq!(e.rng_cmp_proc_finfo().fn_oid, F_BTINT4CMP);
+    assert_eq!(e.rng_canonical_finfo().fn_oid, F_INT4RANGE_CANONICAL);
+    let elem = e.rngelemtype().expect("rngelemtype linked");
+    assert_eq!(elem.type_id, INT4OID);
+    // Re-request re-verifies the elem entry, per C, and stays the same pin.
+    let e2 = lookup_type_cache(RANGE_OID, TYPECACHE_RANGE_INFO).unwrap();
+    assert!(Rc::ptr_eq(&e, &e2));
+}
+
+#[test]
+fn multirange_info_links_range_entry() {
+    install();
+    let e = lookup_type_cache(MULTI_OID, TYPECACHE_MULTIRANGE_INFO).unwrap();
+    let rt = e.rngtype().expect("rngtype linked");
+    assert_eq!(rt.type_id, RANGE_OID);
+    assert!(rt.rngelemtype().is_some());
+    let e2 = lookup_type_cache(MULTI_OID, TYPECACHE_MULTIRANGE_INFO).unwrap();
+    assert!(Rc::ptr_eq(&e, &e2));
 }
 
 const CONBIN_VALUE_GT_0: &str = "{OPEXPR :opno 521 :opfuncid 147 :opresulttype 16 \

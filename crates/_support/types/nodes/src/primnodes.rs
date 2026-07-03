@@ -404,6 +404,12 @@ pub struct RelabelType<'mcx> {
     pub location: ParseLoc,
 }
 
+#[derive(Default)]
+pub struct NextValueExpr {
+    pub seqid: Oid,
+    pub typeId: Oid,
+}
+
 // C `Expr *arg` is never NULL in a live CoerceViaIO; modeled non-optional.
 pub struct CoerceViaIO<'mcx> {
     pub arg: Node<'mcx>,
@@ -683,6 +689,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for CoerceToDomain<'mcx> {
 }
 unsafe impl NodeVariant<'_> for CoerceToDomainValue {
     const TAG: NodeTag = NodeTag::T_CoerceToDomainValue;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for NextValueExpr {
+    const TAG: NodeTag = NodeTag::T_NextValueExpr;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for BoolExpr<'mcx> {
     const TAG: NodeTag = NodeTag::T_BoolExpr;

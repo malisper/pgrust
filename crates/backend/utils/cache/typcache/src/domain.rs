@@ -116,7 +116,7 @@ pub(crate) fn load_domaintype_info(entry: &TypeCacheEntry) -> PgResult<()> {
 // C expression_planner (planner.c) = eval_const_expressions + fix_opfuncids;
 // the planner-hook/PlannerGlobal surface does not apply to a bare expression.
 fn expression_planner(mcx: Mcx<'static>, expr: Node<'static>) -> PgResult<Node<'static>> {
-    let expr = clauses::fold::eval_const_expressions(mcx, expr)?;
+    let expr = clauses_seams::eval_const_expressions::call(mcx, expr)?;
     nodes_core::fix_opfuncids(expr)?;
     Ok(expr)
 }

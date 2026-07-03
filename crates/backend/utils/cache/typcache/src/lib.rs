@@ -129,6 +129,13 @@ pub struct TypeCacheEntry {
     cmp_proc_finfo: RefCell<FmgrInfo>,
     hash_proc_finfo: RefCell<FmgrInfo>,
     hash_extended_proc_finfo: RefCell<FmgrInfo>,
+    rng_collation: Cell<Oid>,
+    rng_opfamily: Cell<Oid>,
+    rng_elemtype: RefCell<Option<Rc<TypeCacheEntry>>>,
+    rng_cmp_proc_finfo: RefCell<FmgrInfo>,
+    rng_canonical_finfo: RefCell<FmgrInfo>,
+    rng_subdiff_finfo: RefCell<FmgrInfo>,
+    rngtype: RefCell<Option<Rc<TypeCacheEntry>>>,
     domain_base_type: Cell<Oid>,
     domain_base_typmod: Cell<i32>,
     domain_data: Cell<Option<&'static domain::DomainConstraintCache>>,
@@ -183,6 +190,13 @@ impl TypeCacheEntry {
             cmp_proc_finfo: RefCell::new(FmgrInfo::unresolved()),
             hash_proc_finfo: RefCell::new(FmgrInfo::unresolved()),
             hash_extended_proc_finfo: RefCell::new(FmgrInfo::unresolved()),
+            rng_collation: Cell::new(InvalidOid),
+            rng_opfamily: Cell::new(InvalidOid),
+            rng_elemtype: RefCell::new(None),
+            rng_cmp_proc_finfo: RefCell::new(FmgrInfo::unresolved()),
+            rng_canonical_finfo: RefCell::new(FmgrInfo::unresolved()),
+            rng_subdiff_finfo: RefCell::new(FmgrInfo::unresolved()),
+            rngtype: RefCell::new(None),
             domain_base_type: Cell::new(InvalidOid),
             domain_base_typmod: Cell::new(-1),
             domain_data: Cell::new(None),
@@ -228,6 +242,29 @@ impl TypeCacheEntry {
     }
     pub fn hash_extended_proc_finfo(&self) -> RefMut<'_, FmgrInfo> {
         self.hash_extended_proc_finfo.borrow_mut()
+    }
+    pub fn rng_cmp_proc_finfo(&self) -> RefMut<'_, FmgrInfo> {
+        self.rng_cmp_proc_finfo.borrow_mut()
+    }
+    pub fn rng_canonical_finfo(&self) -> RefMut<'_, FmgrInfo> {
+        self.rng_canonical_finfo.borrow_mut()
+    }
+    pub fn rng_subdiff_finfo(&self) -> RefMut<'_, FmgrInfo> {
+        self.rng_subdiff_finfo.borrow_mut()
+    }
+    pub fn rng_collation(&self) -> Oid {
+        self.rng_collation.get()
+    }
+    pub fn rng_opfamily(&self) -> Oid {
+        self.rng_opfamily.get()
+    }
+    /// C's `rngelemtype`; `None` mirrors the NULL pointer ("not a range type").
+    pub fn rngelemtype(&self) -> Option<Rc<TypeCacheEntry>> {
+        self.rng_elemtype.borrow().clone()
+    }
+    /// C's `rngtype`; `None` mirrors the NULL pointer ("not a multirange type").
+    pub fn rngtype(&self) -> Option<Rc<TypeCacheEntry>> {
+        self.rngtype.borrow().clone()
     }
 
     #[inline]
@@ -602,11 +639,13 @@ fn fill_entry(e: &TypeCacheEntry, flags: &mut i32) -> PgResult<()> {
             hash_proc = InvalidOid;
         } else if hash_proc == F_HASH_RECORD {
             lane_unported("record/composite field-properties", type_id);
-        } else if hash_proc == F_HASH_RANGE {
-            lane_unported("range element-properties", type_id);
+        } else if hash_proc == F_HASH_RANGE && !range_element_has(e, TCFLAGS_HAVE_ELEM_HASHING)? {
+            hash_proc = InvalidOid;
         }
-        if hash_proc == F_HASH_MULTIRANGE {
-            lane_unported("multirange element-properties", type_id);
+        if hash_proc == F_HASH_MULTIRANGE
+            && !multirange_element_has(e, TCFLAGS_HAVE_ELEM_HASHING)?
+        {
+            hash_proc = InvalidOid;
         }
         if e.hash_proc.get() != hash_proc {
             e.hash_proc_finfo.borrow_mut().fn_oid = InvalidOid;
@@ -625,11 +664,15 @@ fn fill_entry(e: &TypeCacheEntry, flags: &mut i32) -> PgResult<()> {
             hash_extended_proc = InvalidOid;
         } else if hash_extended_proc == F_HASH_RECORD_EXTENDED {
             lane_unported("record/composite field-properties", type_id);
-        } else if hash_extended_proc == F_HASH_RANGE_EXTENDED {
-            lane_unported("range element-properties", type_id);
+        } else if hash_extended_proc == F_HASH_RANGE_EXTENDED
+            && !range_element_has(e, TCFLAGS_HAVE_ELEM_EXTENDED_HASHING)?
+        {
+            hash_extended_proc = InvalidOid;
         }
-        if hash_extended_proc == F_HASH_MULTIRANGE_EXTENDED {
-            lane_unported("multirange element-properties", type_id);
+        if hash_extended_proc == F_HASH_MULTIRANGE_EXTENDED
+            && !multirange_element_has(e, TCFLAGS_HAVE_ELEM_EXTENDED_HASHING)?
+        {
+            hash_extended_proc = InvalidOid;
         }
         if e.hash_extended_proc.get() != hash_extended_proc {
             e.hash_extended_proc_finfo.borrow_mut().fn_oid = InvalidOid;
@@ -644,39 +687,47 @@ fn fill_entry(e: &TypeCacheEntry, flags: &mut i32) -> PgResult<()> {
     {
         let eq_opr_func = get_opcode(e.eq_opr.get())?;
         if eq_opr_func != InvalidOid {
-            fmgr_core::fmgr_info_into(eq_opr_func, &mut e.eq_opr_finfo.borrow_mut())?;
+            *e.eq_opr_finfo.borrow_mut() = fmgr_seams::fmgr_info::call(eq_opr_func)?;
         }
     }
     if (*flags & TYPECACHE_CMP_PROC_FINFO) != 0
         && e.cmp_proc_finfo.borrow().fn_oid == InvalidOid
         && e.cmp_proc.get() != InvalidOid
     {
-        fmgr_core::fmgr_info_into(e.cmp_proc.get(), &mut e.cmp_proc_finfo.borrow_mut())?;
+        *e.cmp_proc_finfo.borrow_mut() = fmgr_seams::fmgr_info::call(e.cmp_proc.get())?;
     }
     if (*flags & TYPECACHE_HASH_PROC_FINFO) != 0
         && e.hash_proc_finfo.borrow().fn_oid == InvalidOid
         && e.hash_proc.get() != InvalidOid
     {
-        fmgr_core::fmgr_info_into(e.hash_proc.get(), &mut e.hash_proc_finfo.borrow_mut())?;
+        *e.hash_proc_finfo.borrow_mut() = fmgr_seams::fmgr_info::call(e.hash_proc.get())?;
     }
     if (*flags & TYPECACHE_HASH_EXTENDED_PROC_FINFO) != 0
         && e.hash_extended_proc_finfo.borrow().fn_oid == InvalidOid
         && e.hash_extended_proc.get() != InvalidOid
     {
-        fmgr_core::fmgr_info_into(
-            e.hash_extended_proc.get(),
-            &mut e.hash_extended_proc_finfo.borrow_mut(),
-        )?;
+        *e.hash_extended_proc_finfo.borrow_mut() =
+            fmgr_seams::fmgr_info::call(e.hash_extended_proc.get())?;
     }
 
     if (*flags & TYPECACHE_TUPDESC) != 0 && e.typtype.get() == TYPTYPE_COMPOSITE {
         lane_unported("composite TUPDESC", type_id);
     }
     if (*flags & TYPECACHE_RANGE_INFO) != 0 && e.typtype.get() == TYPTYPE_RANGE {
-        lane_unported("RANGE_INFO", type_id);
+        match e.rngelemtype() {
+            None => load_rangetype_info(e)?,
+            Some(el) => {
+                if el.flags.get() & TCFLAGS_HAVE_PG_TYPE_DATA == 0 {
+                    let _ = lookup_type_cache(el.type_id, 0)?;
+                }
+            }
+        }
     }
-    if (*flags & TYPECACHE_MULTIRANGE_INFO) != 0 && e.typtype.get() == TYPTYPE_MULTIRANGE {
-        lane_unported("MULTIRANGE_INFO", type_id);
+    if (*flags & TYPECACHE_MULTIRANGE_INFO) != 0
+        && e.rngtype.borrow().is_none()
+        && e.typtype.get() == TYPTYPE_MULTIRANGE
+    {
+        load_multirangetype_info(e)?;
     }
     if (*flags & TYPECACHE_DOMAIN_BASE_INFO) != 0
         && e.domain_base_type.get() == InvalidOid
@@ -717,6 +768,93 @@ fn resolve_hash_proc(e: &TypeCacheEntry, procnum: i16) -> PgResult<Oid> {
     } else {
         Ok(InvalidOid)
     }
+}
+
+#[cold]
+fn missing_btorder_proc(opcintype: Oid, opfamily: Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!(
+        "missing support function {BTORDER_PROC}({opcintype},{opcintype}) in opfamily {opfamily}"
+    )))
+}
+
+fn load_rangetype_info(e: &TypeCacheEntry) -> PgResult<()> {
+    let Some(r) = syscache_seams::lookup_pg_range_shape::call(e.type_id)? else {
+        return Err(Box::new(PgError::error(format!(
+            "cache lookup failed for range type {}",
+            e.type_id
+        ))));
+    };
+    e.rng_collation.set(r.rngcollation);
+    let opfamily = get_opclass_family(r.rngsubopc)?;
+    let opcintype = get_opclass_input_type(r.rngsubopc)?;
+    e.rng_opfamily.set(opfamily);
+    let cmp_fn = get_opfamily_proc(opfamily, opcintype, opcintype, BTORDER_PROC)?;
+    if cmp_fn == InvalidOid {
+        return Err(missing_btorder_proc(opcintype, opfamily));
+    }
+    *e.rng_cmp_proc_finfo.borrow_mut() = fmgr_seams::fmgr_info::call(cmp_fn)?;
+    if r.rngcanonical != InvalidOid {
+        *e.rng_canonical_finfo.borrow_mut() = fmgr_seams::fmgr_info::call(r.rngcanonical)?;
+    }
+    if r.rngsubdiff != InvalidOid {
+        *e.rng_subdiff_finfo.borrow_mut() = fmgr_seams::fmgr_info::call(r.rngsubdiff)?;
+    }
+    // C: assigning rngelemtype last marks the range data valid.
+    let elem = lookup_type_cache(r.rngsubtype, 0)?;
+    *e.rng_elemtype.borrow_mut() = Some(elem);
+    Ok(())
+}
+
+fn load_multirangetype_info(e: &TypeCacheEntry) -> PgResult<()> {
+    let range_oid = lsyscache::get_multirange_range(e.type_id)?;
+    if range_oid == InvalidOid {
+        return Err(Box::new(PgError::error(format!(
+            "cache lookup failed for multirange type {}",
+            e.type_id
+        ))));
+    }
+    let rngtype = lookup_type_cache(range_oid, TYPECACHE_RANGE_INFO)?;
+    *e.rngtype.borrow_mut() = Some(rngtype);
+    Ok(())
+}
+
+fn range_element_has(e: &TypeCacheEntry, have_bit: i32) -> PgResult<bool> {
+    if e.flags.get() & TCFLAGS_CHECKED_ELEM_PROPERTIES == 0 {
+        if e.rng_elemtype.borrow().is_none() && e.typtype.get() == TYPTYPE_RANGE {
+            load_rangetype_info(e)?;
+        }
+        let elem = e.rngelemtype();
+        if let Some(el) = elem {
+            propagate_elem_hash_flags(e, el.type_id)?;
+        }
+        e.set_flags(TCFLAGS_CHECKED_ELEM_PROPERTIES);
+    }
+    Ok(e.flags.get() & have_bit != 0)
+}
+
+fn multirange_element_has(e: &TypeCacheEntry, have_bit: i32) -> PgResult<bool> {
+    if e.flags.get() & TCFLAGS_CHECKED_ELEM_PROPERTIES == 0 {
+        if e.rngtype.borrow().is_none() && e.typtype.get() == TYPTYPE_MULTIRANGE {
+            load_multirangetype_info(e)?;
+        }
+        let elem = e.rngtype().and_then(|rt| rt.rngelemtype());
+        if let Some(el) = elem {
+            propagate_elem_hash_flags(e, el.type_id)?;
+        }
+        e.set_flags(TCFLAGS_CHECKED_ELEM_PROPERTIES);
+    }
+    Ok(e.flags.get() & have_bit != 0)
+}
+
+fn propagate_elem_hash_flags(e: &TypeCacheEntry, elem_oid: Oid) -> PgResult<()> {
+    let el = lookup_type_cache(elem_oid, TYPECACHE_HASH_PROC | TYPECACHE_HASH_EXTENDED_PROC)?;
+    if el.hash_proc.get() != InvalidOid {
+        e.set_flags(TCFLAGS_HAVE_ELEM_HASHING);
+    }
+    if el.hash_extended_proc.get() != InvalidOid {
+        e.set_flags(TCFLAGS_HAVE_ELEM_EXTENDED_HASHING);
+    }
+    Ok(())
 }
 
 fn array_element_has(e: &TypeCacheEntry, have_bit: i32) -> PgResult<bool> {
@@ -801,10 +939,12 @@ pub(crate) fn compute_ready(e: &TypeCacheEntry) -> i32 {
     if tt != TYPTYPE_COMPOSITE {
         r |= TYPECACHE_TUPDESC;
     }
+    // RANGE_INFO is never warm-satisfiable for a real range type: C re-checks
+    // the element entry's pg_type data on every hit (typcache.c:918-925).
     if tt != TYPTYPE_RANGE {
         r |= TYPECACHE_RANGE_INFO;
     }
-    if tt != TYPTYPE_MULTIRANGE {
+    if tt != TYPTYPE_MULTIRANGE || e.rngtype.borrow().is_some() {
         r |= TYPECACHE_MULTIRANGE_INFO;
     }
     if tt != TYPTYPE_DOMAIN {
