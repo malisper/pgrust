@@ -785,6 +785,22 @@ pub fn create_valuesscan_path<'mcx>(
     Ok(id)
 }
 
+// create_resultscan_path (pathnode.c).
+pub fn create_resultscan_path<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel_id: RelId,
+    required_outer: &types_pathnodes::Relids<'mcx>,
+) -> PgResult<PathId> {
+    let param_info = get_baserel_parampathinfo(run, rel_id, required_outer)?;
+    let mut path = base_path(run, NodeTag::T_Path, NodeTag::T_Result, rel_id);
+    path.param_info = param_info;
+    path.parallel_aware = false;
+    path.parallel_safe = run.root.rel(rel_id).consider_parallel;
+    let id = run.root.alloc_path(PathNode::Path(path));
+    crate::costsize::cost_resultscan(run, id, rel_id)?;
+    Ok(id)
+}
+
 // create_ctescan_path (pathnode.c); pathkeys/required_outer empty on this lane.
 pub fn create_ctescan_path<'mcx>(run: &mut PlannerRun<'mcx>, rel_id: RelId) -> PgResult<PathId> {
     let mut path = base_path(run, NodeTag::T_Path, NodeTag::T_CteScan, rel_id);

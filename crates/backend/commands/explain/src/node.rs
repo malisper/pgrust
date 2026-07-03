@@ -111,6 +111,9 @@ fn ExplainPreScanNode<'mcx>(
         NodeTag::T_CteScan => {
             rels_used.add_member(mcx, node.as_cte_scan().unwrap().scan.scanrelid as i32)?;
         }
+        NodeTag::T_ValuesScan => {
+            rels_used.add_member(mcx, node.as_values_scan().unwrap().scan.scanrelid as i32)?;
+        }
         NodeTag::T_SubqueryScan => {
             let sq = node.as_subquery_scan().unwrap();
             rels_used.add_member(mcx, sq.scan.scanrelid as i32)?;
@@ -371,6 +374,7 @@ pub fn ExplainNode<'mcx>(
         NodeTag::T_BitmapAnd => "BitmapAnd",
         NodeTag::T_BitmapOr => "BitmapOr",
         NodeTag::T_FunctionScan => "Function Scan",
+        NodeTag::T_ValuesScan => "Values Scan",
         NodeTag::T_CteScan => "CTE Scan",
         // C interpolates the join type into the node name in TEXT format:
         // "Hash"/"Merge" + " <Jointype> Join" (inner non-nestloop gets a bare
@@ -486,6 +490,9 @@ pub fn ExplainNode<'mcx>(
     if node.node_tag() == NodeTag::T_CteScan {
         ExplainScanTarget(node.as_cte_scan().unwrap().scan.scanrelid, es)?;
     }
+    if node.node_tag() == NodeTag::T_ValuesScan {
+        ExplainScanTarget(node.as_values_scan().unwrap().scan.scanrelid, es)?;
+    }
     if node.node_tag() == NodeTag::T_SubqueryScan {
         ExplainScanTarget(node.as_subquery_scan().unwrap().scan.scanrelid, es)?;
     }
@@ -551,7 +558,7 @@ pub fn ExplainNode<'mcx>(
     }
 
     match node.node_tag() {
-        NodeTag::T_SeqScan | NodeTag::T_CteScan => {
+        NodeTag::T_SeqScan | NodeTag::T_CteScan | NodeTag::T_ValuesScan => {
             show_scan_qual(&plan.qual, "Filter", node, ancestors, es)?;
             if !plan.qual.is_nil() {
                 show_instrumentation_count("Rows Removed by Filter", 1, &instrument, es);
@@ -2042,9 +2049,29 @@ fn deparse_param<'mcx>(
 ) -> PgResult<()> {
     use types_nodes::primnodes::ParamKind;
     if p.paramkind == ParamKind::PARAM_EXEC {
-        // find_param_referent: an ancestral SubPlan passing this param down.
+        // find_param_referent: a NestLoop transmitting this param to its
+        // inner side, or an ancestral SubPlan passing it down.
         let mut chain = ancestors;
+        let mut child = plan_node;
         while let Some(a) = chain {
+            if let AncestorEntry::Plan(pn) = a.entry {
+                if let Some(nl) = pn.as_nest_loop() {
+                    if nl.join.plan.righttree.is_some_and(|rt| rt.ptr_eq(child)) {
+                        for nlp_node in &nl.nestParams {
+                            let nlp = nlp_node
+                                .as_nest_loop_param()
+                                .expect("nestParams cell");
+                            if nlp.paramno == p.paramid {
+                                // push_ancestor_plan: deparse the outer Var
+                                // in the NestLoop's context, prefixes forced.
+                                deparse_expr(es, pn, a.parent, nlp.paramval, true, buf)?;
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+                child = pn;
+            }
             if let AncestorEntry::Sub(sp) = a.entry {
                 if let Some(i) = sp.parParam.iter().position(|id| id == p.paramid) {
                     let arg = sp.args.nth(i);
@@ -2438,7 +2465,7 @@ fn ExplainTargetRel<'mcx>(rti: types_core::Index, es: &mut ExplainState<'mcx>) -
             relname.as_ref().map(|s| s.as_str())
         }
         RTEKind::RTE_CTE => rte.ctename,
-        RTEKind::RTE_SUBQUERY => None,
+        RTEKind::RTE_SUBQUERY | RTEKind::RTE_VALUES => None,
         other => node_gap(
             "ExplainTargetRel",
             &format!("{other:?} target arm unported (M2+ plan lanes)"),

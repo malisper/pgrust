@@ -1390,10 +1390,24 @@ fn transformColumnRef<'mcx>(
                         cref.location,
                     )? {
                         Some(node) => Some(node),
-                        None => panic!(
-                            "transformColumnRef (parse_expr.c): ParseFuncOrColumn \
-                             whole-row fallback unported — unit backend-parser-func"
-                        ),
+                        None => {
+                            // C tries a function call on the whole row
+                            // (attribute notation). Resolvable only when a
+                            // function of that name exists; otherwise C falls
+                            // through to errorMissingColumn.
+                            if !catalog_namespace::FuncnameGetCandidates(
+                                mcx, &[name], 1, false, false,
+                            )?
+                            .is_empty()
+                            {
+                                panic!(
+                                    "transformColumnRef (parse_expr.c): ParseFuncOrColumn \
+                                     whole-row attribute notation unported — \
+                                     unit backend-parser-func"
+                                );
+                            }
+                            None
+                        }
                     }
                 }
             }

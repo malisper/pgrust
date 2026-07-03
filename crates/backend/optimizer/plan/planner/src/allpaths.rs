@@ -118,7 +118,7 @@ fn set_rel_size(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResult<()
             crate::cte::set_cte_pathlist(run, rel, rti)?;
         }
         RTEKind::RTE_RESULT => {
-            unreachable!("RTE_RESULT is handled by query_planner's trivial arm");
+            crate::costsize::set_result_size_estimates(run, rel)?;
         }
         other => panic!("set_rel_size (allpaths.c): {other:?}; M2 scan lane"),
     }
@@ -342,6 +342,7 @@ fn set_rel_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResul
             RTEKind::RTE_VALUES => set_values_pathlist(run, rel)?,
             RTEKind::RTE_SUBQUERY => {} // fully handled during set_rel_size
             RTEKind::RTE_CTE => {} // fully handled during set_rel_size
+            RTEKind::RTE_RESULT => set_result_pathlist(run, rel)?,
             other => panic!("set_rel_pathlist (allpaths.c): {other:?}; M2 scan lane"),
         }
     }
@@ -596,6 +597,14 @@ fn set_function_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> Pg
     debug_assert!(!run.rte(rti).funcordinality);
     let required_outer = crate::relnode::relids_copy(run.mcx, &run.root.rel(rel).lateral_relids);
     let path = crate::pathnode::create_functionscan_path(run, rel, &required_outer)?;
+    add_path(run, rel, path);
+    Ok(())
+}
+// set_result_pathlist (allpaths.c): one Result path, parameterized only by
+// lateral refs (join quals never push into a Result scan).
+fn set_result_pathlist(run: &mut PlannerRun<'_>, rel: RelId) -> PgResult<()> {
+    let required_outer = crate::relnode::relids_copy(run.mcx, &run.root.rel(rel).lateral_relids);
+    let path = crate::pathnode::create_resultscan_path(run, rel, &required_outer)?;
     add_path(run, rel, path);
     Ok(())
 }

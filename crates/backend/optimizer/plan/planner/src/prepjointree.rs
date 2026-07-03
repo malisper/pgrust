@@ -330,14 +330,16 @@ fn pull_up_simple_subquery<'mcx>(
         shared_sub
     };
     let sub_jt = sub.jointree.expect("jointree is a FromExpr");
-    if sub_jt.fromlist.is_nil() {
-        panic!(
-            "pull_up_simple_subquery (prepjointree.c): replace_empty_jointree of an \
-             empty-FROM subquery not ported"
-        );
-    }
 
     let rtoffset = parse.rtable.len() as i32;
+    // replace_empty_jointree (prepjointree.c): an empty-FROM subquery gets a
+    // dummy RTE_RESULT to supply its one row; it lands after the subquery's
+    // own rtable entries in the combined range table.
+    let result_rtr = if sub_jt.fromlist.is_nil() {
+        Some(Node::mk_range_tbl_ref(mcx, rtoffset + sub.rtable.len() as i32 + 1)?)
+    } else {
+        None
+    };
 
     let off_tlist = match clauses::walker::mutate_list(mcx, &sub.targetList, &mut |n| {
         offset_expr(mcx, n, rtoffset)
@@ -346,6 +348,9 @@ fn pull_up_simple_subquery<'mcx>(
         None => sub.targetList.clone_in(mcx)?,
     };
     let mut off_fromlist = NodeList::nil();
+    if let Some(rtr) = result_rtr {
+        off_fromlist.lappend(mcx, rtr)?;
+    }
     for jnode in &sub_jt.fromlist {
         off_fromlist.lappend(mcx, offset_jointree(mcx, jnode, rtoffset)?)?;
     }
@@ -417,7 +422,7 @@ fn pull_up_simple_subquery<'mcx>(
                 unsafe { copy.with_mut::<RangeTblEntry, _>(|r| r.joinaliasvars = off_aliasvars) };
             }
             RTEKind::RTE_FUNCTION => {
-                let off = match clauses::walker::mutate_list(mcx, &crte.functions, &mut |n| {
+                let off = match map_rtfunctions(mcx, &crte.functions, &mut |n| {
                     offset_expr(mcx, n, rtoffset)
                 })? {
                     Some(l) => l,
@@ -454,6 +459,25 @@ fn pull_up_simple_subquery<'mcx>(
         }
         parse.rtable.lappend(mcx, copy)?;
     }
+    if result_rtr.is_some() {
+        let eref = Node::mk_mut(
+            mcx,
+            types_nodes::Alias { aliasname: Some("*RESULT*"), colnames: NodeList::nil() },
+        )?
+        .seal_ref();
+        parse.rtable.lappend(
+            mcx,
+            Node::mk(
+                mcx,
+                RangeTblEntry {
+                    rtekind: RTEKind::RTE_RESULT,
+                    eref: Some(eref),
+                    inFromCl: true,
+                    ..Default::default()
+                },
+            )?,
+        )?;
+    }
     for p in &sub.rteperminfos {
         parse.rteperminfos.lappend(mcx, p)?;
     }
@@ -461,6 +485,46 @@ fn pull_up_simple_subquery<'mcx>(
     // SAFETY: as above — exclusive pre-seal tree fixup.
     unsafe { rte_node.with_mut::<RangeTblEntry, _>(|r| r.subquery = None) };
     Ok(())
+}
+
+// The functions list of an RTE holds RangeTblFunction wrappers, which the
+// expression mutator does not know; map their funcexprs explicitly.
+fn map_rtfunctions<'mcx>(
+    mcx: Mcx<'mcx>,
+    functions: &NodeList<'mcx>,
+    f: &mut dyn FnMut(Node<'mcx>) -> PgResult<Option<Node<'mcx>>>,
+) -> PgResult<Option<NodeList<'mcx>>> {
+    let mut changed = false;
+    let mut out = NodeList::nil();
+    for f_node in functions {
+        let rtf = f_node.as_range_tbl_function().expect("functions cell");
+        let new_expr = match rtf.funcexpr {
+            Some(e) => f(e)?,
+            None => None,
+        };
+        match new_expr {
+            Some(e) => {
+                changed = true;
+                out.lappend(
+                    mcx,
+                    Node::mk(
+                        mcx,
+                        types_nodes::parsenodes::RangeTblFunction {
+                            funcexpr: Some(e),
+                            funccolcount: rtf.funccolcount,
+                            funccolnames: rtf.funccolnames.clone_in(mcx)?,
+                            funccoltypes: rtf.funccoltypes.clone_in(mcx)?,
+                            funccoltypmods: rtf.funccoltypmods.clone_in(mcx)?,
+                            funccolcollations: rtf.funccolcollations.clone_in(mcx)?,
+                            funcparams: rtf.funcparams.clone_in(mcx)?,
+                        },
+                    )?,
+                )?;
+            }
+            None => out.lappend(mcx, f_node)?,
+        }
+    }
+    Ok(if changed { Some(out) } else { None })
 }
 
 // The jointree leg of pullup_replace_vars (replace_vars_in_jointree): swap
@@ -486,7 +550,7 @@ fn splice_and_replace<'mcx>(
                 match other.rtekind {
                     RTEKind::RTE_FUNCTION => {
                         if let Some(l) =
-                            clauses::walker::mutate_list(mcx, &other.functions, &mut |n| {
+                            map_rtfunctions(mcx, &other.functions, &mut |n| {
                                 replace_var_expr(mcx, n, varno, tlist)
                             })?
                         {
@@ -777,7 +841,7 @@ fn replace_vars_in_lateral_subquery<'mcx>(
             RTEKind::RTE_FUNCTION => {
                 // query_cells_copy shares RTE nodes with the original query;
                 // an in-place functions rewrite would scribble a shared tree.
-                if clauses::walker::mutate_list(mcx, &srte.functions, &mut |n| {
+                if map_rtfunctions(mcx, &srte.functions, &mut |n| {
                     replace_var_expr_su(mcx, n, varno, tlist, 1)
                 })?
                 .is_some()

@@ -981,7 +981,9 @@ pub fn examine_variable<'mcx>(
             vardata.stats = examine_simple_variable(run, var.varno, var.varattno)?;
             return Ok(vardata);
         }
-        panic!("examine_variable (selfuncs.c): foreign-rel Var; M2 join lane");
+        // A Var of some other rel (varRelid restricts to one rel) falls to
+        // the generic expression leg: no rel, no stats.
+        return Ok(vardata);
     }
     match node.node_tag() {
         NodeTag::T_Const => Ok(vardata),

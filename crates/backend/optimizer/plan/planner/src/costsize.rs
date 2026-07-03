@@ -426,6 +426,40 @@ pub fn cost_valuesscan(
     Ok(())
 }
 
+// set_result_size_estimates (costsize.c): RTE_RESULT natively yields one row.
+pub fn set_result_size_estimates(run: &mut PlannerRun<'_>, rel: RelId) -> PgResult<()> {
+    debug_assert!(run.root.rel(rel).relid > 0);
+    run.root.rel_mut(rel).tuples = 1.0;
+    set_baserel_size_estimates(run, rel)
+}
+
+// cost_resultscan (costsize.c).
+pub fn cost_resultscan(
+    run: &mut PlannerRun<'_>,
+    path_id: types_pathnodes::PathId,
+    rel: RelId,
+) -> PgResult<()> {
+    let (relid, rtekind, tuples, base_rows) = {
+        let baserel = run.root.rel(rel);
+        (baserel.relid, baserel.rtekind, baserel.tuples, baserel.rows)
+    };
+    debug_assert!(relid > 0 && rtekind == types_nodes::parsenodes::RTEKind::RTE_RESULT as u32);
+    let rows = match run.root.path(path_id).base().param_info.as_deref() {
+        Some(ppi) => ppi.ppi_rows,
+        None => base_rows,
+    };
+    let qpqual_cost = get_restriction_qual_cost(run, rel, path_id)?;
+    let startup_cost = qpqual_cost.startup;
+    let cpu_per_tuple = gucs::cpu_tuple_cost() + qpqual_cost.per_tuple;
+    let run_cost = cpu_per_tuple * tuples;
+    let p = run.root.path_mut(path_id).base_mut();
+    p.rows = rows;
+    p.disabled_nodes = 0;
+    p.startup_cost = startup_cost;
+    p.total_cost = startup_cost + run_cost;
+    Ok(())
+}
+
 // set_function_size_estimates (costsize.c).
 pub fn set_function_size_estimates<'mcx>(run: &mut PlannerRun<'mcx>, rel: RelId) -> PgResult<()> {
     let rti = run.root.rel(rel).relid as usize;
