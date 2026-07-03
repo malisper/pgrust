@@ -604,7 +604,7 @@ fn ExpandAllTables<'mcx>(
         if !nsitem.p_cols_visible {
             continue;
         }
-        debug_assert!(!nsitem.p_lateral_only);
+        debug_assert!(!nsitem.p_lateral_only.get());
         found_table = true;
         target.concat(
             mcx,

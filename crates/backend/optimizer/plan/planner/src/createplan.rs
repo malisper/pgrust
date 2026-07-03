@@ -217,6 +217,45 @@ fn build_physical_tlist<'mcx>(
 }
 
 // create_scan_plan (createplan.c).
+// replace_nestloop_params + _mutator (createplan.c), Var arm (PHVs loud).
+fn replace_nestloop_params<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    node: Node<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    Ok(replace_nestloop_params_mutator(run, node)?.unwrap_or(node))
+}
+
+fn replace_nestloop_params_mutator<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    node: Node<'mcx>,
+) -> PgResult<Option<Node<'mcx>>> {
+    if let Some(v) = node.as_var() {
+        debug_assert!(v.varlevelsup == 0);
+        if v.varno <= 0 || !crate::relnode::relids_is_member(v.varno, &run.root.curOuterRels) {
+            return Ok(None);
+        }
+        return Ok(Some(crate::paramassign::replace_nestloop_param_var(run, v, node)?));
+    }
+    if node.node_tag() == NodeTag::T_PlaceHolderVar {
+        panic!("replace_nestloop_params_mutator (createplan.c): PlaceHolderVar");
+    }
+    clauses::walker::expression_tree_mutator(run.mcx, node, &mut |n| {
+        replace_nestloop_params_mutator(run, n)
+    })
+}
+
+fn replace_nestloop_params_list<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    list: &NodeList<'mcx>,
+) -> PgResult<NodeList<'mcx>> {
+    match clauses::walker::mutate_list(run.mcx, list, &mut |n| {
+        replace_nestloop_params_mutator(run, n)
+    })? {
+        Some(l) => Ok(l),
+        None => Ok(*list),
+    }
+}
+
 fn create_scan_plan<'mcx>(
     run: &mut PlannerRun<'mcx>,
     best_path: PathId,
@@ -241,9 +280,16 @@ fn create_scan_plan<'mcx>(
         } else {
             v.extend(run.root.rel(rel_id).baserestrictinfo.iter().copied());
         }
+        // Parameterized paths enforce their movable join clauses at the scan.
+        if let Some(ppi) = run.root.path(best_path).base().param_info.as_deref() {
+            for &rid in ppi.ppi_clauses.iter() {
+                if !v.iter().any(|&x| x == rid) {
+                    v.push(rid);
+                }
+            }
+        }
         v
     };
-    debug_assert!(run.root.path(best_path).base().param_info.is_none());
 
     let gating_clauses = get_gating_quals(run, &scan_clauses)?;
     // A gating Result can project, so the scan needn't honor tlist flags.
@@ -462,8 +508,7 @@ fn create_seqscan_plan<'mcx>(
     Ok(plan.seal())
 }
 
-// create_functionscan_plan (createplan.c); replace_nestloop_params is dead
-// (param_info asserted None upstream).
+// create_functionscan_plan (createplan.c).
 fn create_functionscan_plan<'mcx>(
     run: &mut PlannerRun<'mcx>,
     best_path: PathId,
@@ -485,7 +530,35 @@ fn create_functionscan_plan<'mcx>(
     let funcordinality = rte.funcordinality;
 
     let ordered = order_qual_clauses(run, &scan_clauses)?;
-    let qpqual = extract_actual_clauses(run, &ordered);
+    let mut qpqual = extract_actual_clauses(run, &ordered);
+
+    if run.root.path(best_path).base().param_info.is_some() {
+        qpqual = replace_nestloop_params_list(run, &qpqual)?;
+        let mut new_functions = NodeList::nil();
+        for f_node in &functions {
+            let f = f_node.as_range_tbl_function().expect("functions cell");
+            let funcexpr = match f.funcexpr {
+                Some(e) => Some(replace_nestloop_params(run, e)?),
+                None => None,
+            };
+            new_functions.lappend(
+                mcx,
+                Node::mk(
+                    mcx,
+                    types_nodes::parsenodes::RangeTblFunction {
+                        funcexpr,
+                        funccolcount: f.funccolcount,
+                        funccolnames: f.funccolnames.clone_in(mcx)?,
+                        funccoltypes: f.funccoltypes.clone_in(mcx)?,
+                        funccoltypmods: f.funccoltypmods.clone_in(mcx)?,
+                        funccolcollations: f.funccolcollations.clone_in(mcx)?,
+                        funcparams: f.funcparams.clone_in(mcx)?,
+                    },
+                )?,
+            )?;
+        }
+        functions = new_functions;
+    }
 
     let mut plan = Node::build::<types_nodes::plannodes::FunctionScan<'mcx>>(mcx)?;
     plan.scan.plan.targetlist = tlist;
@@ -497,8 +570,7 @@ fn create_functionscan_plan<'mcx>(
     Ok(plan.seal())
 }
 
-// create_valuesscan_plan (createplan.c); replace_nestloop_params is dead
-// (param_info asserted None upstream).
+// create_valuesscan_plan (createplan.c).
 fn create_valuesscan_plan<'mcx>(
     run: &mut PlannerRun<'mcx>,
     best_path: PathId,
@@ -519,7 +591,12 @@ fn create_valuesscan_plan<'mcx>(
     }
 
     let ordered = order_qual_clauses(run, &scan_clauses)?;
-    let qpqual = extract_actual_clauses(run, &ordered);
+    let mut qpqual = extract_actual_clauses(run, &ordered);
+
+    if run.root.path(best_path).base().param_info.is_some() {
+        qpqual = replace_nestloop_params_list(run, &qpqual)?;
+        values_lists = replace_nestloop_params_list(run, &values_lists)?;
+    }
 
     let mut plan = Node::build::<types_nodes::plannodes::ValuesScan<'mcx>>(mcx)?;
     plan.scan.plan.targetlist = tlist;
@@ -2238,7 +2315,7 @@ fn create_lockrows_plan<'mcx>(
 
 // create_join_plan (createplan.c), T_NestLoop arm -> create_nestloop_plan +
 // make_nestloop. Gating (pseudoconstant) clauses are loud upstream; the
-// reparameterize/nestParams legs are dead while param_info is always None.
+// reparameterize leg is dead (no appendrels).
 // create_material_plan + make_material (createplan.c): the tlist shares the
 // child's (Material never projects).
 fn create_material_plan<'mcx>(
@@ -2267,19 +2344,17 @@ fn create_material_plan<'mcx>(
 
 fn create_join_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> PgResult<Node<'mcx>> {
     let mcx = run.mcx;
-    let (outer_path, inner_path, jointype, inner_unique, restrict, target_id) =
+    let (outer_path, inner_path, jointype, inner_unique, restrict, target_id, has_param) =
         match run.root.path(path_id) {
-            PathNode::NestPath(np) => {
-                debug_assert!(np.jpath.path.param_info.is_none());
-                (
-                    np.jpath.outerjoinpath.expect("nestloop outer path"),
-                    np.jpath.innerjoinpath.expect("nestloop inner path"),
-                    np.jpath.jointype,
-                    np.jpath.inner_unique,
-                    crate::relnode::pgvec_clone_shallow(mcx, &np.jpath.joinrestrictinfo),
-                    np.jpath.path.pathtarget_id.unwrap(),
-                )
-            }
+            PathNode::NestPath(np) => (
+                np.jpath.outerjoinpath.expect("nestloop outer path"),
+                np.jpath.innerjoinpath.expect("nestloop inner path"),
+                np.jpath.jointype,
+                np.jpath.inner_unique,
+                crate::relnode::pgvec_clone_shallow(mcx, &np.jpath.joinrestrictinfo),
+                np.jpath.path.pathtarget_id.unwrap(),
+                np.jpath.path.param_info.is_some(),
+            ),
             other => panic!(
                 "create_join_plan (createplan.c): pathtype {}; M2 merge/hash lane",
                 other.base().pathtype
@@ -2290,11 +2365,23 @@ fn create_join_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> PgResu
     let tlist = build_path_tlist(run, target_id)?;
     // NestLoop can project, so no need to be picky about child tlists.
     let outer_plan = create_plan_recurse(run, outer_path, 0)?;
-    debug_assert!(run.root.curOuterRels.is_none() && run.root.curOuterParams.is_empty());
+
+    // The inner side sees the outer rels as nestloop-param sources.
+    let save_outer_rels =
+        crate::relnode::relids_copy(mcx, &run.root.curOuterRels);
+    let outerrelids = {
+        let r = run.root.path(outer_path).base().parent;
+        crate::relnode::relids_copy(mcx, &run.root.rel(r).relids)
+    };
+    run.root.curOuterRels =
+        crate::relnode::relids_union(mcx, &run.root.curOuterRels, &outerrelids);
+
     let inner_plan = create_plan_recurse(run, inner_path, 0)?;
 
+    run.root.curOuterRels = save_outer_rels;
+
     let ordered = order_qual_clauses(run, &restrict)?;
-    let (joinclauses, otherclauses) = if crate::joinpath::is_outer_join(jointype) {
+    let (mut joinclauses, mut otherclauses) = if crate::joinpath::is_outer_join(jointype) {
         let joinrelids = crate::relnode::relids_copy(
             mcx,
             &run.root.rel(run.root.path(path_id).base().parent).relids,
@@ -2304,6 +2391,14 @@ fn create_join_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> PgResu
         (extract_actual_clauses(run, &ordered), NodeList::nil())
     };
 
+    if has_param {
+        joinclauses = replace_nestloop_params_list(run, &joinclauses)?;
+        otherclauses = replace_nestloop_params_list(run, &otherclauses)?;
+    }
+
+    let nest_params =
+        crate::paramassign::identify_current_nestloop_params(run, &outerrelids)?;
+
     let mut plan = Node::build::<types_nodes::plannodes::NestLoop>(mcx)?;
     plan.join.plan.targetlist = tlist;
     plan.join.plan.qual = otherclauses;
@@ -2312,7 +2407,7 @@ fn create_join_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> PgResu
     plan.join.jointype = jointype_enum(jointype);
     plan.join.inner_unique = inner_unique;
     plan.join.joinqual = joinclauses;
-    plan.nestParams = NodeList::nil();
+    plan.nestParams = nest_params;
     copy_generic_path_info(run, &mut plan.join.plan, path_id);
     Ok(plan.seal())
 }
@@ -2934,8 +3029,16 @@ fn create_subqueryscan_plan<'mcx>(
     let subplan = subplan?;
 
     let ordered = order_qual_clauses(run, &scan_clauses)?;
-    let qual = extract_actual_clauses(run, &ordered);
-    debug_assert!(run.root.path(best_path).base().param_info.is_none());
+    let mut qual = extract_actual_clauses(run, &ordered);
+
+    if run.root.path(best_path).base().param_info.is_some() {
+        qual = replace_nestloop_params_list(run, &qual)?;
+        let subplan_params = crate::relnode::pgvec_clone_shallow(
+            mcx,
+            &run.root.rel(rel_id).subplan_params,
+        );
+        crate::paramassign::process_subquery_nestloop_params(run, &subplan_params)?;
+    }
 
     let mut plan = Node::build::<SubqueryScan<'mcx>>(mcx)?;
     plan.scan.plan.targetlist = tlist;

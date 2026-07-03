@@ -106,16 +106,27 @@ pub fn transformFromClause<'mcx>(
 
         checkNameSpaceConflicts(pstate.p_namespace.as_slice(), namespace.as_slice())?;
 
-        // C toggles the new items lateral_only=true here and resets every
-        // item to lateral_only=false after the loop; with LATERAL loud on
-        // every arm no expression observes the interim flag state, so items
-        // keep their construction-time flags.
+        setNamespaceLateralState(namespace.as_slice(), true, true);
+
         pstate.p_joinlist.lappend(mcx, n)?;
         for nsitem in namespace {
             pstate.p_namespace.push(nsitem);
         }
     }
+
+    setNamespaceLateralState(pstate.p_namespace.as_slice(), false, true);
     Ok(())
+}
+
+fn setNamespaceLateralState(
+    namespace: &[&ParseNamespaceItem<'_>],
+    lateral_only: bool,
+    lateral_ok: bool,
+) {
+    for nsitem in namespace {
+        nsitem.p_lateral_only.set(lateral_only);
+        nsitem.p_lateral_ok.set(lateral_ok);
+    }
 }
 
 // C transformFromClauseItem's (node, *top_nsitem, *namespace) contract with
@@ -168,7 +179,22 @@ fn transformJoinExpr<'mcx>(
 
     let (larg, l_namespace) = transformFromClauseItemNs(mcx, pstate, j.larg)?;
     let l_nsitem = *l_namespace.last().expect("child namespace is never empty");
+
+    // Left-side names are LATERAL-visible to the RHS; per SQL:2008 they are
+    // exposed but not referenceable unless the join type is INNER or LEFT.
+    let lateral_ok = matches!(
+        j.jointype,
+        types_nodes::JoinType::JOIN_INNER | types_nodes::JoinType::JOIN_LEFT
+    );
+    setNamespaceLateralState(l_namespace.as_slice(), true, lateral_ok);
+    let sv_namespace_length = pstate.p_namespace.len();
+    for it in &l_namespace {
+        pstate.p_namespace.push(*it);
+    }
+
     let (rarg, r_namespace) = transformFromClauseItemNs(mcx, pstate, j.rarg)?;
+
+    pstate.p_namespace.truncate(sv_namespace_length);
     let r_nsitem = *r_namespace.last().expect("child namespace is never empty");
 
     checkNameSpaceConflicts(l_namespace.as_slice(), r_namespace.as_slice())?;
@@ -288,8 +314,8 @@ fn transformJoinExpr<'mcx>(
                     p_nscolumns: item.p_nscolumns,
                     p_rel_visible: item.p_rel_visible,
                     p_cols_visible: false,
-                    p_lateral_only: false,
-                    p_lateral_ok: true,
+                    p_lateral_only: core::cell::Cell::new(false),
+                    p_lateral_ok: core::cell::Cell::new(true),
                     p_returning_type: item.p_returning_type,
                 },
             )?));
@@ -297,8 +323,8 @@ fn transformJoinExpr<'mcx>(
     }
     nsitem.p_rel_visible = j.alias.is_some();
     nsitem.p_cols_visible = true;
-    nsitem.p_lateral_only = false;
-    nsitem.p_lateral_ok = true;
+    nsitem.p_lateral_only.set(false);
+    nsitem.p_lateral_ok.set(true);
     namespace.push(nsitem);
 
     Ok((jnode, namespace))
@@ -328,14 +354,14 @@ fn markRelsAsNulledBy<'mcx>(
 }
 
 // transformJoinOnClause (parse_clause.c): the ON expression sees exactly the
-// join's two subtrees plus upper levels. C's setNamespaceLateralState(false,
-// true) is the construction-time state of every item on this lane.
+// join's two subtrees plus upper levels.
 fn transformJoinOnClause<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'_, 'mcx>,
     quals: Node<'mcx>,
     my_namespace: &mcx::PgVec<'mcx, &'mcx ParseNamespaceItem<'mcx>>,
 ) -> PgResult<Node<'mcx>> {
+    setNamespaceLateralState(my_namespace.as_slice(), false, true);
     let mut ns: mcx::PgVec<'mcx, &'mcx ParseNamespaceItem<'mcx>> = mcx::PgVec::new_in(mcx);
     for it in my_namespace {
         ns.push(it);
@@ -438,12 +464,7 @@ fn transformRangeSubselect<'mcx>(
     pstate.p_expr_kind = ParseExprKind::EXPR_KIND_FROM_SUBSELECT;
 
     debug_assert!(!pstate.p_lateral_active);
-    if r.lateral {
-        panic!(
-            "transformRangeSubselect (parse_clause.c): LATERAL subquery unported \
-             (lateral namespace) — unit backend-parser-clause"
-        );
-    }
+    pstate.p_lateral_active = r.lateral;
 
     let locked = parse_relation::isLockedRefname(pstate, r.alias.and_then(|a| a.aliasname));
     let query = analyze_seams::parse_sub_analyze::call(
@@ -505,12 +526,6 @@ fn transformRangeFunction<'mcx>(
              unit backend-parser-clause"
         );
     }
-    if r.lateral {
-        panic!(
-            "transformRangeFunction (parse_clause.c): LATERAL functions unported \
-             (contain_vars_of_level / lateral namespace) — unit backend-parser-clause"
-        );
-    }
     if !r.coldeflist.is_nil() {
         panic!(
             "transformRangeFunction (parse_clause.c): column definition lists \
@@ -542,6 +557,8 @@ fn transformRangeFunction<'mcx>(
 
     parse_collate::assign_expr_collations(mcx, pstate, newfexpr)?;
 
+    let is_lateral = r.lateral || vars::contain_vars_of_level(newfexpr, 0)?;
+
     parse_relation::addRangeTableEntryForFunction(
         mcx,
         pstate,
@@ -549,7 +566,7 @@ fn transformRangeFunction<'mcx>(
         newfexpr,
         r.alias,
         r.ordinality,
-        false,
+        is_lateral,
         true,
     )
     .map(|nsitem| &*nsitem)
@@ -871,8 +888,8 @@ fn arbiter_target_nsitem<'mcx>(
         p_nscolumns: t.p_nscolumns,
         p_rel_visible: false,
         p_cols_visible: true,
-        p_lateral_only: false,
-        p_lateral_ok: true,
+        p_lateral_only: core::cell::Cell::new(false),
+        p_lateral_ok: core::cell::Cell::new(true),
         p_returning_type: t.p_returning_type,
     };
     Ok(mcx::leak_in(mcx::alloc_in(mcx, nsitem)?))

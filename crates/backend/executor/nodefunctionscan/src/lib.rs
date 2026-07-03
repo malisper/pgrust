@@ -43,6 +43,7 @@ pub struct FunctionScanState<'mcx> {
     tupdesc: Option<Rc<TupleDescData<'mcx>>>,
     tstore: Option<Tuplestore>,
     eflags: i32,
+    funcparams: &'mcx ::types_nodes::bitmapset::Bitmapset<'mcx>,
 }
 
 impl<'mcx> ScanNode<'mcx> for FunctionScanState<'mcx> {
@@ -128,7 +129,14 @@ pub fn exec_init_function_scan<'mcx>(
     execscan::exec_assign_scan_projection_info(mcx, estate, &mut ss, &node.scan.plan.targetlist)?;
     ss.qual = exec_init_qual(mcx, &node.scan.plan.qual, estate.param_bind())?;
 
-    Ok(FunctionScanState { ss, setexpr, tupdesc: Some(Rc::new(tupdesc)), tstore: None, eflags })
+    Ok(FunctionScanState {
+        ss,
+        setexpr,
+        tupdesc: Some(Rc::new(tupdesc)),
+        tstore: None,
+        eflags,
+        funcparams: &rtfunc.funcparams,
+    })
 }
 
 fn exec_init_table_function_result<'mcx>(
@@ -366,7 +374,7 @@ pub fn exec_end_function_scan(node: &mut FunctionScanState<'_>) {
     node.tupdesc = None;
 }
 
-/// `ExecReScanFunctionScan`; the chgParam recompute leg is dead, rewind only.
+/// `ExecReScanFunctionScan`, chgParam-NULL arm: rewind the tuplestore.
 pub fn exec_rescan_function_scan<'mcx>(
     node: &mut FunctionScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -378,8 +386,26 @@ pub fn exec_rescan_function_scan<'mcx>(
     Ok(())
 }
 
+/// `ExecReScanFunctionScan`, changed-params arm: a function whose params
+/// changed drops its tuplestore so the next fetch re-evaluates it.
+pub fn exec_rescan_function_scan_chg<'mcx>(
+    node: &mut FunctionScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    chg: &::types_nodes::bitmapset::Bitmapset<'mcx>,
+) -> PgResult<()> {
+    execscan::exec_scan_rescan(&mut node.ss, estate);
+    if chg.overlap(node.funcparams) {
+        if let Some(store) = node.tstore.take() {
+            store.end();
+        }
+    } else if let Some(store) = node.tstore.as_mut() {
+        store.rescan();
+    }
+    Ok(())
+}
+
 // Exempt: all released in exec_end_function_scan.
 mcx::forget_safe_struct!(
     SetExprState<'_> { collation, returns_set, returns_tuple; flinfo, args },
-    FunctionScanState<'_> { ss, setexpr, eflags; tupdesc, tstore },
+    FunctionScanState<'_> { ss, setexpr, eflags, funcparams; tupdesc, tstore },
 );
