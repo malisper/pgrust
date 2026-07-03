@@ -654,7 +654,9 @@ pub fn transformIndexStmt<'mcx>(
     use types_nodes::rawnodes::{IndexElem, IndexStmt};
     let (transformed, where_clause, params) = {
         let stmt = stmt_node.as_variant::<IndexStmt>().expect("IndexStmt");
-        (stmt.transformed, stmt.whereClause, stmt.indexParams)
+        let mut params: mcx::PgVec<'mcx, Node<'mcx>> = mcx::PgVec::new_in(mcx);
+        params.extend(stmt.indexParams.iter());
+        (stmt.transformed, stmt.whereClause, params)
     };
     if transformed {
         return Ok(());
