@@ -613,6 +613,7 @@ const ANUM_PG_PROC_PRONAME: i32 = 2;
 const ANUM_PG_PROC_PRONAMESPACE: i32 = 3;
 const ANUM_PG_PROC_PROVARIADIC: i32 = 8;
 const ANUM_PG_PROC_PROKIND: i32 = 10;
+const ANUM_PG_PROC_PROSECDEF: i32 = 11;
 const ANUM_PG_PROC_PROLEAKPROOF: i32 = 12;
 const ANUM_PG_PROC_PROISSTRICT: i32 = 13;
 const ANUM_PG_PROC_PRORETSET: i32 = 14;
@@ -910,6 +911,7 @@ fn lookup_pg_proc_fmgr(funcid: Oid) -> PgResult<Option<syscache_seams::PgProcFmg
         pronargs: getattr(&t, PROCOID, ANUM_PG_PROC_PRONARGS).as_i16(),
         proisstrict: getattr(&t, PROCOID, ANUM_PG_PROC_PROISSTRICT).as_bool(),
         proretset: getattr(&t, PROCOID, ANUM_PG_PROC_PRORETSET).as_bool(),
+        prosecdef: getattr(&t, PROCOID, ANUM_PG_PROC_PROSECDEF).as_bool(),
     };
     drop(t);
     ReleaseSysCache(tuple);

@@ -217,6 +217,7 @@ pub struct PgProcFmgrShape {
     pub pronargs: i16,
     pub proisstrict: bool,
     pub proretset: bool,
+    pub prosecdef: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

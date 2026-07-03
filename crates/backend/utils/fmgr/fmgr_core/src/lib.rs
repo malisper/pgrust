@@ -272,6 +272,9 @@ fn fmgr_info_pg_proc(function_id: Oid, finfo: &mut FmgrInfo) -> PgResult<()> {
             "cache lookup failed for function {function_id}"
         ))));
     };
+    if row.prosecdef {
+        panic!("fmgr: fmgr_security_definer not ported (function {function_id})");
+    }
     let fn_addr = match row.prolang {
         INTERNAL_LANGUAGE_ID => {
             let cx = ::mcx::MemoryContext::new("fmgr_info prosrc");
@@ -307,7 +310,8 @@ fn fmgr_info_pg_proc(function_id: Oid, finfo: &mut FmgrInfo) -> PgResult<()> {
     finfo.fn_nargs = row.pronargs;
     finfo.fn_strict = row.proisstrict;
     finfo.fn_retset = row.proretset;
-    finfo.fn_stats = TRACK_FUNC_ALL;
+    finfo.fn_stats =
+        if row.prolang == SQL_LANGUAGE_ID { ::fmgr::TRACK_FUNC_PL } else { TRACK_FUNC_ALL };
     finfo.fn_extra = None;
     finfo.fn_expr = None;
     finfo.fn_oid = function_id;
