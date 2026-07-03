@@ -71,7 +71,7 @@ fn callbacks_run_newest_first() {
     for tag in [1usize, 2, 3] {
         RegisterXactCallback(cb1, Datum::from_usize(tag));
     }
-    CallXactCallbacks(XACT_EVENT_COMMIT).unwrap();
+    CallXactCallbacks(xs_ptr(), XACT_EVENT_COMMIT).unwrap();
     assert_eq!(log_take(), vec![3, 2, 1]);
     reset_xact_state_for_tests();
 }
@@ -86,8 +86,8 @@ fn self_unregistration_is_safe() {
     reset_xact_state_for_tests();
     RegisterXactCallback(cb1, Datum::from_usize(1));
     RegisterXactCallback(cb_self_unregister, Datum::from_usize(2));
-    CallXactCallbacks(XACT_EVENT_COMMIT).unwrap();
-    CallXactCallbacks(XACT_EVENT_COMMIT).unwrap();
+    CallXactCallbacks(xs_ptr(), XACT_EVENT_COMMIT).unwrap();
+    CallXactCallbacks(xs_ptr(), XACT_EVENT_COMMIT).unwrap();
     assert_eq!(log_take(), vec![2, 1, 1]);
     reset_xact_state_for_tests();
 }
@@ -96,7 +96,7 @@ fn self_unregistration_is_safe() {
 fn mid_iteration_registration_not_invoked_this_round() {
     reset_xact_state_for_tests();
     RegisterXactCallback(cb_registers_nested, Datum::from_usize(1));
-    CallXactCallbacks(XACT_EVENT_COMMIT).unwrap();
+    CallXactCallbacks(xs_ptr(), XACT_EVENT_COMMIT).unwrap();
     assert_eq!(log_take(), vec![1]);
     reset_xact_state_for_tests();
 }
@@ -235,6 +235,7 @@ fn commit_record_no_origin_seam_child() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // spawns a child process, unsupported under Miri
 fn commit_record_works_without_origin_seam() {
     let out = std::process::Command::new(std::env::current_exe().unwrap())
         .args([

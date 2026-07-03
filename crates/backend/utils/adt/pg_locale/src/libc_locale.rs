@@ -46,10 +46,18 @@ impl LibcLocale {
     }
 }
 
+// glibc has no mbstowcs_l/wcstombs_l and the libc crate binds neither
+// mbstowcs nor wcstombs on linux-gnu; declare the C89 functions directly.
+#[cfg(not(target_os = "macos"))]
+extern "C" {
+    fn mbstowcs(dest: *mut wchar_t, src: *const c_char, n: size_t) -> size_t;
+    fn wcstombs(dest: *mut c_char, src: *const wchar_t, n: size_t) -> size_t;
+}
+
 #[cfg(not(target_os = "macos"))]
 unsafe fn mbstowcs_l(dest: *mut wchar_t, src: *const c_char, n: size_t, loc: locale_t) -> size_t {
     let save = libc::uselocale(loc);
-    let result = libc::mbstowcs(dest, src, n);
+    let result = mbstowcs(dest, src, n);
     libc::uselocale(save);
     result
 }
@@ -57,7 +65,7 @@ unsafe fn mbstowcs_l(dest: *mut wchar_t, src: *const c_char, n: size_t, loc: loc
 #[cfg(not(target_os = "macos"))]
 unsafe fn wcstombs_l(dest: *mut c_char, src: *const wchar_t, n: size_t, loc: locale_t) -> size_t {
     let save = libc::uselocale(loc);
-    let result = libc::wcstombs(dest, src, n);
+    let result = wcstombs(dest, src, n);
     libc::uselocale(save);
     result
 }

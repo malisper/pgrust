@@ -9,14 +9,22 @@ use types_core::VirtualTransactionId;
 use types_error::ERRCODE_FEATURE_NOT_SUPPORTED;
 use types_storage::DELAY_CHKPT_START;
 
-fn RecordTransactionCommit() -> PgResult<TransactionId> {
+fn RecordTransactionCommit(xp: XsPtr) -> PgResult<TransactionId> {
     thread_local! {
-        static RECORD_COMMIT_SCRATCH: core::cell::RefCell<MemoryContext> =
-            core::cell::RefCell::new(MemoryContext::new("RecordTransactionCommit"));
+        // Const-init + !needs_drop payload: plain TLS access, no lazy-init or
+        // dtor-registration branch (lock's LocalState shape); leaks at thread
+        // exit like C's TopMemoryContext.
+        static RECORD_COMMIT_SCRATCH: core::cell::UnsafeCell<
+            Option<core::mem::ManuallyDrop<MemoryContext>>,
+        > = const { core::cell::UnsafeCell::new(None) };
     }
     RECORD_COMMIT_SCRATCH.with(|cell| {
-        let mut scratch = cell.borrow_mut();
-        let out = RecordTransactionCommitGuts(scratch.mcx());
+        // SAFETY: single-threaded backend TLS; the &mut is confined to this
+        // call, which cannot recurse (commit records nothing that commits).
+        let scratch = unsafe { &mut *cell.get() }.get_or_insert_with(|| {
+            core::mem::ManuallyDrop::new(MemoryContext::new("RecordTransactionCommit"))
+        });
+        let out = RecordTransactionCommitGuts(xp, scratch.mcx());
         // The empty commit allocates nothing (C has no scratch on this path
         // at all): reset only if something was charged since the last reset.
         if scratch.peak() != 0 {
@@ -26,7 +34,7 @@ fn RecordTransactionCommit() -> PgResult<TransactionId> {
     })
 }
 
-fn RecordTransactionCommitGuts(mcx: mcx::Mcx<'_>) -> PgResult<TransactionId> {
+fn RecordTransactionCommitGuts(xp: XsPtr, mcx: mcx::Mcx<'_>) -> PgResult<TransactionId> {
     let xid = GetTopTransactionIdIfAny();
     let mark_xid_committed = xid != InvalidTransactionId;
     #[allow(unused_assignments)]
@@ -37,7 +45,7 @@ fn RecordTransactionCommitGuts(mcx: mcx::Mcx<'_>) -> PgResult<TransactionId> {
     }
 
     let rels = catalog_storage_seams::smgr_get_pending_deletes::call(mcx, true)?;
-    let children = xactGetCommittedChildren()?;
+    let children = committed_children_in(xp)?;
     let dropped_stats = pgstat::xact::pgstat_get_transactional_drops(mcx, true)?;
     let (inval_msgs, relcache_init_file_inval) = if xlog_seams::xlog_standby_info_active::call() {
         inval::eoxact::xactGetCommittedInvalidationMessages(mcx)?
@@ -112,7 +120,7 @@ fn RecordTransactionCommitGuts(mcx: mcx::Mcx<'_>) -> PgResult<TransactionId> {
     }
 
     if (wrote_xlog && mark_xid_committed && synchronous_commit() > SYNCHRONOUS_COMMIT_OFF)
-        || xs(|s| s.force_sync_commit)
+        || xp.with(|s| s.force_sync_commit)
         || !rels.is_empty()
     {
         xlog_seams::xlog_flush::call(xlog_seams::xact_last_rec_end::call())?;
@@ -240,12 +248,12 @@ fn record_transaction_abort_guts(
     Ok(latest_xid)
 }
 
-fn StartTransaction() -> PgResult<()> {
-    debug_assert!(xs(|s| s.stack_len() == 1));
-    debug_assert!(!xs(|s| s.top_full_xid().is_valid()));
-    debug_assert!(xs(|s| s.current().state == TRANS_DEFAULT));
+fn StartTransaction(xp: XsPtr) -> PgResult<()> {
+    debug_assert!(xp.with(|s| s.stack_len() == 1));
+    debug_assert!(!xp.with(|s| s.top_full_xid().is_valid()));
+    debug_assert!(xp.with(|s| s.current().state == TRANS_DEFAULT));
 
-    xs(|s| {
+    xp.with(|s| {
         s.current_mut().state = TRANS_START;
         s.current_mut().full_transaction_id = InvalidFullTransactionId; // until assigned
     });
@@ -255,7 +263,7 @@ fn StartTransaction() -> PgResult<()> {
         let sampled = rate != 0.0
             && (rate == 1.0 || pg_prng::global_prng(pg_prng::PgPrng::next_f64) <= rate);
         // One state borrow for the adjacent field writes (no seam between).
-        xs(|s| {
+        xp.with(|s| {
             s.xact_is_sampled = sampled;
             let mut n = s.current_mut();
             n.nesting_level = 1;
@@ -266,13 +274,13 @@ fn StartTransaction() -> PgResult<()> {
 
     let (prev_user, prev_sec_context) = miscinit::GetUserIdAndSecContext();
     debug_assert_eq!(prev_sec_context, 0);
-    xs(|s| {
+    xp.with(|s| {
         s.current_mut().prev_user = prev_user;
         s.current_mut().prev_sec_context = prev_sec_context;
     });
 
     let in_recovery = xlog_seams::recovery_in_progress::call();
-    xs(|s| {
+    xp.with(|s| {
         if in_recovery {
             s.current_mut().started_in_recovery = true;
             s.XactReadOnly = true;
@@ -294,8 +302,8 @@ fn StartTransaction() -> PgResult<()> {
         s.current_mut().did_log_xid = false;
     });
 
-    AtStart_Memory();
-    AtStart_ResourceOwner()?;
+    AtStart_Memory(xp);
+    AtStart_ResourceOwner(xp)?;
 
     let vxid = VirtualTransactionId {
         procNumber: init_small::globals::MyProcNumber(),
@@ -316,13 +324,13 @@ fn StartTransaction() -> PgResult<()> {
         } else {
             Some(timestamp_seams::get_current_timestamp::call())
         };
-        xs(|s| {
+        xp.with(|s| {
             s.xact_start_timestamp = ts.unwrap_or(s.stmt_start_timestamp);
             s.xact_stop_timestamp = 0;
             s.xact_start_timestamp
         })
     } else {
-        xs(|s| {
+        xp.with(|s| {
             debug_assert!(s.xact_start_timestamp != 0);
             s.xact_stop_timestamp = 0;
             s.xact_start_timestamp
@@ -334,7 +342,7 @@ fn StartTransaction() -> PgResult<()> {
     AtStart_Cache()?;
     trigger_seams::after_trigger_begin_xact::call()?;
 
-    xs(|s| s.current_mut().state = TRANS_INPROGRESS);
+    xp.with(|s| s.current_mut().state = TRANS_INPROGRESS);
 
     let transaction_timeout = lmgr_proc::globals::TransactionTimeout();
     if transaction_timeout > 0 {
@@ -348,7 +356,7 @@ fn StartTransaction() -> PgResult<()> {
     Ok(())
 }
 
-fn CommitTransaction() -> PgResult<()> {
+fn CommitTransaction(xp: XsPtr) -> PgResult<()> {
     let is_parallel_worker = cur_block_state() == TBLOCK_PARALLEL_INPROGRESS;
 
     if is_parallel_worker {
@@ -357,12 +365,12 @@ fn CommitTransaction() -> PgResult<()> {
 
     ShowTransactionState("CommitTransaction");
 
-    let cur_state = xs(|s| s.current().state);
+    let cur_state = xp.with(|s| s.current().state);
     if cur_state != TRANS_INPROGRESS {
         let st = TransStateAsString(cur_state);
         warn_internal(&format!("CommitTransaction while in {st} state"));
     }
-    debug_assert!(!xs(|s| s.is_subxact()));
+    debug_assert!(!xp.with(|s| s.is_subxact()));
 
     loop {
         trigger_seams::after_trigger_fire_deferred::call()?;
@@ -371,14 +379,14 @@ fn CommitTransaction() -> PgResult<()> {
         }
     }
 
-    CallXactCallbacks(if is_parallel_worker {
+    CallXactCallbacks(xp, if is_parallel_worker {
         XACT_EVENT_PARALLEL_PRE_COMMIT
     } else {
         XACT_EVENT_PRE_COMMIT
     })?;
 
     parallel_seams::at_eoxact_parallel::call(true)?;
-    let level = xs(|s| s.current().parallel_mode_level);
+    let level = xp.with(|s| s.current().parallel_mode_level);
     if is_parallel_worker {
         if level != 1 {
             warn_internal(&format!(
@@ -413,7 +421,7 @@ fn CommitTransaction() -> PgResult<()> {
 
     relmapper::AtEOXact_RelationMap(true, is_parallel_worker)?;
 
-    xs(|s| {
+    xp.with(|s| {
         s.current_mut().state = TRANS_COMMIT;
         s.current_mut().parallel_mode_level = 0;
         s.current_mut().parallel_child_xact = false; // should be false already
@@ -424,7 +432,7 @@ fn CommitTransaction() -> PgResult<()> {
     }
 
     let latest_xid = if !is_parallel_worker {
-        RecordTransactionCommit()?
+        RecordTransactionCommit(xp)?
     } else {
         parallel_seams::parallel_worker_report_last_rec_end::call(
             xlog_seams::xact_last_rec_end::call(),
@@ -439,7 +447,7 @@ fn CommitTransaction() -> PgResult<()> {
         latest_xid,
     )?;
 
-    CallXactCallbacks(if is_parallel_worker {
+    CallXactCallbacks(xp, if is_parallel_worker {
         XACT_EVENT_PARALLEL_COMMIT
     } else {
         XACT_EVENT_COMMIT
@@ -485,11 +493,11 @@ fn CommitTransaction() -> PgResult<()> {
     backend_status_seams::pgstat_report_xact_timestamp::call(0);
 
     delete_transaction_owner()?;
-    xs(|s| s.current_mut().has_resource_owner = false);
+    xp.with(|s| s.current_mut().has_resource_owner = false);
 
-    AtCommit_Memory();
+    AtCommit_Memory(xp);
 
-    xs(|s| {
+    xp.with(|s| {
         {
             let mut n = s.current_mut();
             n.full_transaction_id = InvalidFullTransactionId;
@@ -507,17 +515,17 @@ fn CommitTransaction() -> PgResult<()> {
     Ok(())
 }
 
-fn PrepareTransaction() -> PgResult<()> {
+fn PrepareTransaction(xp: XsPtr) -> PgResult<()> {
     let xid = GetCurrentTransactionId()?;
     debug_assert!(!IsInParallelMode());
 
     ShowTransactionState("PrepareTransaction");
 
-    if xs(|s| s.current().state) != TRANS_INPROGRESS {
-        let st = TransStateAsString(xs(|s| s.current().state));
+    if xp.with(|s| s.current().state) != TRANS_INPROGRESS {
+        let st = TransStateAsString(xp.with(|s| s.current().state));
         warn_internal(&format!("PrepareTransaction while in {st} state"));
     }
-    debug_assert!(!xs(|s| s.is_subxact()));
+    debug_assert!(!xp.with(|s| s.is_subxact()));
 
     loop {
         trigger_seams::after_trigger_fire_deferred::call()?;
@@ -526,7 +534,7 @@ fn PrepareTransaction() -> PgResult<()> {
         }
     }
 
-    CallXactCallbacks(XACT_EVENT_PRE_PREPARE)?;
+    CallXactCallbacks(xp, XACT_EVENT_PRE_PREPARE)?;
 
     trigger_seams::after_trigger_end_xact::call(true)?;
 
@@ -555,7 +563,7 @@ fn PrepareTransaction() -> PgResult<()> {
 
     init_small::globals::HoldInterrupts();
 
-    xs(|s| s.current_mut().state = TRANS_PREPARE);
+    xp.with(|s| s.current_mut().state = TRANS_PREPARE);
 
     if lmgr_proc::globals::TransactionTimeout() > 0 {
         timeout::disable_timeout(timeout_seams::TRANSACTION_TIMEOUT, false);
@@ -563,7 +571,7 @@ fn PrepareTransaction() -> PgResult<()> {
 
     let prepared_at = timestamp_seams::get_current_timestamp::call();
 
-    let gid = xs(|s| s.prepare_gid.take())
+    let gid = xp.with(|s| s.prepare_gid.take())
         .ok_or_else(|| PgError::error("PrepareTransaction: no prepared-transaction GID set"))?;
     let databaseid = init_small::globals::MyDatabaseId();
     twophase_seams::mark_as_preparing::call(
@@ -623,7 +631,7 @@ fn PrepareTransaction() -> PgResult<()> {
 
     procarray_seams::proc_array_clear_transaction::call()?;
 
-    CallXactCallbacks(XACT_EVENT_PREPARE)?;
+    CallXactCallbacks(xp, XACT_EVENT_PREPARE)?;
 
     // Unlike Commit/Abort, Prepare does NOT reset CurrentResourceOwner here
     // (it clears it at the tail, with the delete).
@@ -668,11 +676,11 @@ fn PrepareTransaction() -> PgResult<()> {
 
     resowner::SetCurrentResourceOwner(types_resowner::ResourceOwner::NULL);
     delete_transaction_owner()?;
-    xs(|s| s.current_mut().has_resource_owner = false);
+    xp.with(|s| s.current_mut().has_resource_owner = false);
 
-    AtCommit_Memory();
+    AtCommit_Memory(xp);
 
-    xs(|s| {
+    xp.with(|s| {
         {
             let mut n = s.current_mut();
             n.full_transaction_id = InvalidFullTransactionId;
@@ -690,14 +698,14 @@ fn PrepareTransaction() -> PgResult<()> {
     Ok(())
 }
 
-fn AbortTransaction() -> PgResult<()> {
+fn AbortTransaction(xp: XsPtr) -> PgResult<()> {
     init_small::globals::HoldInterrupts();
 
     if lmgr_proc::globals::TransactionTimeout() > 0 {
         timeout::disable_timeout(timeout_seams::TRANSACTION_TIMEOUT, false);
     }
 
-    AtAbort_Memory();
+    AtAbort_Memory(xp);
     AtAbort_ResourceOwner();
 
     let _ = lwlock::LWLockReleaseAll();
@@ -720,28 +728,28 @@ fn AbortTransaction() -> PgResult<()> {
     libpq_pqsignal::unblock_signals();
 
     let is_parallel_worker = cur_block_state() == TBLOCK_PARALLEL_INPROGRESS;
-    let st = xs(|s| s.current().state);
+    let st = xp.with(|s| s.current().state);
     if st != TRANS_INPROGRESS && st != TRANS_PREPARE {
         warn_internal(&format!(
             "AbortTransaction while in {} state",
             TransStateAsString(st)
         ));
     }
-    debug_assert!(!xs(|s| s.is_subxact()));
+    debug_assert!(!xp.with(|s| s.is_subxact()));
 
-    xs(|s| s.current_mut().state = TRANS_ABORT);
+    xp.with(|s| s.current_mut().state = TRANS_ABORT);
 
-    let (prev_user, prev_sec) = xs(|s| (s.current().prev_user, s.current().prev_sec_context));
+    let (prev_user, prev_sec) = xp.with(|s| (s.current().prev_user, s.current().prev_sec_context));
     miscinit::SetUserIdAndSecContext(prev_user, prev_sec);
 
-    catalog_index_seams::reset_reindex_state::call(xs(|s| s.current().nesting_level));
+    catalog_index_seams::reset_reindex_state::call(xp.with(|s| s.current().nesting_level));
 
     logical_seams::reset_logical_streaming_state::call();
 
     snapbuild_seams::snap_build_reset_exported_snapshot_state::call();
 
     parallel_seams::at_eoxact_parallel::call(false)?;
-    xs(|s| {
+    xp.with(|s| {
         s.current_mut().parallel_mode_level = 0;
         s.current_mut().parallel_child_xact = false; // should be false already
     });
@@ -768,8 +776,8 @@ fn AbortTransaction() -> PgResult<()> {
         latest_xid,
     )?;
 
-    if xs(|s| s.current().has_resource_owner) {
-        CallXactCallbacks(if is_parallel_worker {
+    if xp.with(|s| s.current().has_resource_owner) {
+        CallXactCallbacks(xp, if is_parallel_worker {
             XACT_EVENT_PARALLEL_ABORT
         } else {
             XACT_EVENT_ABORT
@@ -804,13 +812,13 @@ fn AbortTransaction() -> PgResult<()> {
     Ok(())
 }
 
-fn CleanupTransaction() -> PgResult<()> {
-    if xs(|s| s.current().state) != TRANS_ABORT {
+fn CleanupTransaction(xp: XsPtr) -> PgResult<()> {
+    if xp.with(|s| s.current().state) != TRANS_ABORT {
         return Err(Box::new(PgError::new(
             FATAL,
             format!(
                 "CleanupTransaction: unexpected state {}",
-                TransStateAsString(xs(|s| s.current().state))
+                TransStateAsString(xp.with(|s| s.current().state))
             ),
         )));
     }
@@ -820,11 +828,11 @@ fn CleanupTransaction() -> PgResult<()> {
 
     resowner::SetCurrentResourceOwner(types_resowner::ResourceOwner::NULL);
     delete_transaction_owner()?;
-    xs(|s| s.current_mut().has_resource_owner = false);
+    xp.with(|s| s.current_mut().has_resource_owner = false);
 
-    AtCleanup_Memory(); // and transaction memory
+    AtCleanup_Memory(xp); // and transaction memory
 
-    xs(|s| {
+    xp.with(|s| {
         {
             let mut n = s.current_mut();
             n.full_transaction_id = InvalidFullTransactionId;
@@ -843,10 +851,11 @@ fn CleanupTransaction() -> PgResult<()> {
 }
 
 pub fn StartTransactionCommand() -> PgResult<()> {
+    let xp = xs_ptr();
     match cur_block_state() {
         TBLOCK_DEFAULT => {
-            StartTransaction()?;
-            xs(|s| s.current_mut().block_state = TBLOCK_STARTED);
+            StartTransaction(xp)?;
+            xp.with(|s| s.current_mut().block_state = TBLOCK_STARTED);
         }
 
         TBLOCK_INPROGRESS | TBLOCK_IMPLICIT_INPROGRESS | TBLOCK_SUBINPROGRESS => {}
@@ -867,7 +876,11 @@ pub fn StartTransactionCommand() -> PgResult<()> {
 }
 
 pub fn SaveTransactionCharacteristics() -> SavedTransactionCharacteristics {
-    xs(|s| SavedTransactionCharacteristics {
+    save_transaction_characteristics_in(xs_ptr())
+}
+
+pub(crate) fn save_transaction_characteristics_in(xp: XsPtr) -> SavedTransactionCharacteristics {
+    xp.with(|s| SavedTransactionCharacteristics {
         save_XactIsoLevel: s.XactIsoLevel,
         save_XactReadOnly: s.XactReadOnly,
         save_XactDeferrable: s.XactDeferrable,
@@ -889,7 +902,8 @@ pub fn CommitTransactionCommand() -> PgResult<()> {
 
 /// One iteration; false means loop again (C's `return false` arms).
 fn CommitTransactionCommandInternal() -> PgResult<bool> {
-    let savetc = SaveTransactionCharacteristics();
+    let xp = xs_ptr();
+    let savetc = save_transaction_characteristics_in(xp);
 
     match cur_block_state() {
         TBLOCK_DEFAULT | TBLOCK_PARALLEL_INPROGRESS => {
@@ -903,12 +917,12 @@ fn CommitTransactionCommandInternal() -> PgResult<bool> {
         }
 
         TBLOCK_STARTED => {
-            CommitTransaction()?;
-            xs(|s| s.current_mut().block_state = TBLOCK_DEFAULT);
+            CommitTransaction(xp)?;
+            xp.with(|s| s.current_mut().block_state = TBLOCK_DEFAULT);
         }
 
         TBLOCK_BEGIN => {
-            xs(|s| s.current_mut().block_state = TBLOCK_INPROGRESS);
+            xp.with(|s| s.current_mut().block_state = TBLOCK_INPROGRESS);
         }
 
         TBLOCK_INPROGRESS | TBLOCK_IMPLICIT_INPROGRESS | TBLOCK_SUBINPROGRESS => {
@@ -916,11 +930,11 @@ fn CommitTransactionCommandInternal() -> PgResult<bool> {
         }
 
         TBLOCK_END => {
-            CommitTransaction()?;
-            xs(|s| s.current_mut().block_state = TBLOCK_DEFAULT);
-            if xs(|s| s.current().chain) {
-                StartTransaction()?;
-                xs(|s| {
+            CommitTransaction(xp)?;
+            xp.with(|s| s.current_mut().block_state = TBLOCK_DEFAULT);
+            if xp.with(|s| s.current().chain) {
+                StartTransaction(xp)?;
+                xp.with(|s| {
                     s.current_mut().block_state = TBLOCK_INPROGRESS;
                     s.current_mut().chain = false;
                 });
@@ -931,11 +945,11 @@ fn CommitTransactionCommandInternal() -> PgResult<bool> {
         TBLOCK_ABORT | TBLOCK_SUBABORT => {}
 
         TBLOCK_ABORT_END => {
-            CleanupTransaction()?;
-            xs(|s| s.current_mut().block_state = TBLOCK_DEFAULT);
-            if xs(|s| s.current().chain) {
-                StartTransaction()?;
-                xs(|s| {
+            CleanupTransaction(xp)?;
+            xp.with(|s| s.current_mut().block_state = TBLOCK_DEFAULT);
+            if xp.with(|s| s.current().chain) {
+                StartTransaction(xp)?;
+                xp.with(|s| {
                     s.current_mut().block_state = TBLOCK_INPROGRESS;
                     s.current_mut().chain = false;
                 });
@@ -944,12 +958,12 @@ fn CommitTransactionCommandInternal() -> PgResult<bool> {
         }
 
         TBLOCK_ABORT_PENDING => {
-            AbortTransaction()?;
-            CleanupTransaction()?;
-            xs(|s| s.current_mut().block_state = TBLOCK_DEFAULT);
-            if xs(|s| s.current().chain) {
-                StartTransaction()?;
-                xs(|s| {
+            AbortTransaction(xp)?;
+            CleanupTransaction(xp)?;
+            xp.with(|s| s.current_mut().block_state = TBLOCK_DEFAULT);
+            if xp.with(|s| s.current().chain) {
+                StartTransaction(xp)?;
+                xp.with(|s| {
                     s.current_mut().block_state = TBLOCK_INPROGRESS;
                     s.current_mut().chain = false;
                 });
@@ -958,13 +972,13 @@ fn CommitTransactionCommandInternal() -> PgResult<bool> {
         }
 
         TBLOCK_PREPARE => {
-            PrepareTransaction()?;
-            xs(|s| s.current_mut().block_state = TBLOCK_DEFAULT);
+            PrepareTransaction(xp)?;
+            xp.with(|s| s.current_mut().block_state = TBLOCK_DEFAULT);
         }
 
         TBLOCK_SUBBEGIN => {
             StartSubTransaction()?;
-            xs(|s| s.current_mut().block_state = TBLOCK_SUBINPROGRESS);
+            xp.with(|s| s.current_mut().block_state = TBLOCK_SUBINPROGRESS);
         }
 
         TBLOCK_SUBRELEASE => {
@@ -989,11 +1003,11 @@ fn CommitTransactionCommandInternal() -> PgResult<bool> {
             }
             match cur_block_state() {
                 TBLOCK_END => {
-                    CommitTransaction()?;
-                    xs(|s| s.current_mut().block_state = TBLOCK_DEFAULT);
-                    if xs(|s| s.current().chain) {
-                        StartTransaction()?;
-                        xs(|s| {
+                    CommitTransaction(xp)?;
+                    xp.with(|s| s.current_mut().block_state = TBLOCK_DEFAULT);
+                    if xp.with(|s| s.current().chain) {
+                        StartTransaction(xp)?;
+                        xp.with(|s| {
                             s.current_mut().block_state = TBLOCK_INPROGRESS;
                             s.current_mut().chain = false;
                         });
@@ -1001,8 +1015,8 @@ fn CommitTransactionCommandInternal() -> PgResult<bool> {
                     }
                 }
                 TBLOCK_PREPARE => {
-                    PrepareTransaction()?;
-                    xs(|s| s.current_mut().block_state = TBLOCK_DEFAULT);
+                    PrepareTransaction(xp)?;
+                    xp.with(|s| s.current_mut().block_state = TBLOCK_DEFAULT);
                 }
                 other => {
                     return Err(Box::new(PgError::new(
@@ -1028,36 +1042,36 @@ fn CommitTransactionCommandInternal() -> PgResult<bool> {
         }
 
         TBLOCK_SUBRESTART => {
-            let (name, savepoint_level) = xs(|s| {
+            let (name, savepoint_level) = xp.with(|s| {
                 let name = s.current_mut().name.take();
                 (name, s.current().savepoint_level)
             });
             AbortSubTransaction()?;
             CleanupSubTransaction()?;
             DefineSavepoint(None)?;
-            xs(|s| {
+            xp.with(|s| {
                 s.current_mut().name = name;
                 s.current_mut().savepoint_level = savepoint_level;
             });
             debug_assert_eq!(cur_block_state(), TBLOCK_SUBBEGIN);
             StartSubTransaction()?;
-            xs(|s| s.current_mut().block_state = TBLOCK_SUBINPROGRESS);
+            xp.with(|s| s.current_mut().block_state = TBLOCK_SUBINPROGRESS);
         }
 
         TBLOCK_SUBABORT_RESTART => {
-            let (name, savepoint_level) = xs(|s| {
+            let (name, savepoint_level) = xp.with(|s| {
                 let name = s.current_mut().name.take();
                 (name, s.current().savepoint_level)
             });
             CleanupSubTransaction()?;
             DefineSavepoint(None)?;
-            xs(|s| {
+            xp.with(|s| {
                 s.current_mut().name = name;
                 s.current_mut().savepoint_level = savepoint_level;
             });
             debug_assert_eq!(cur_block_state(), TBLOCK_SUBBEGIN);
             StartSubTransaction()?;
-            xs(|s| s.current_mut().block_state = TBLOCK_SUBINPROGRESS);
+            xp.with(|s| s.current_mut().block_state = TBLOCK_SUBINPROGRESS);
         }
     }
 
@@ -1070,64 +1084,65 @@ pub fn AbortCurrentTransaction() -> PgResult<()> {
 }
 
 fn AbortCurrentTransactionInternal() -> PgResult<bool> {
+    let xp = xs_ptr();
     match cur_block_state() {
         TBLOCK_DEFAULT => {
-            if xs(|s| s.current().state) == TRANS_DEFAULT {
+            if xp.with(|s| s.current().state) == TRANS_DEFAULT {
             } else {
-                if xs(|s| s.current().state) == TRANS_START {
-                    xs(|s| s.current_mut().state = TRANS_INPROGRESS);
+                if xp.with(|s| s.current().state) == TRANS_START {
+                    xp.with(|s| s.current_mut().state = TRANS_INPROGRESS);
                 }
-                AbortTransaction()?;
-                CleanupTransaction()?;
+                AbortTransaction(xp)?;
+                CleanupTransaction(xp)?;
             }
         }
 
         TBLOCK_STARTED | TBLOCK_IMPLICIT_INPROGRESS => {
-            AbortTransaction()?;
-            CleanupTransaction()?;
-            xs(|s| s.current_mut().block_state = TBLOCK_DEFAULT);
+            AbortTransaction(xp)?;
+            CleanupTransaction(xp)?;
+            xp.with(|s| s.current_mut().block_state = TBLOCK_DEFAULT);
         }
 
         TBLOCK_BEGIN => {
-            AbortTransaction()?;
-            CleanupTransaction()?;
-            xs(|s| s.current_mut().block_state = TBLOCK_DEFAULT);
+            AbortTransaction(xp)?;
+            CleanupTransaction(xp)?;
+            xp.with(|s| s.current_mut().block_state = TBLOCK_DEFAULT);
         }
 
         TBLOCK_INPROGRESS | TBLOCK_PARALLEL_INPROGRESS => {
-            AbortTransaction()?;
-            xs(|s| s.current_mut().block_state = TBLOCK_ABORT);
+            AbortTransaction(xp)?;
+            xp.with(|s| s.current_mut().block_state = TBLOCK_ABORT);
             // CleanupTransaction happens when we exit TBLOCK_ABORT_END
         }
 
         TBLOCK_END => {
-            AbortTransaction()?;
-            CleanupTransaction()?;
-            xs(|s| s.current_mut().block_state = TBLOCK_DEFAULT);
+            AbortTransaction(xp)?;
+            CleanupTransaction(xp)?;
+            xp.with(|s| s.current_mut().block_state = TBLOCK_DEFAULT);
         }
 
         TBLOCK_ABORT | TBLOCK_SUBABORT => {}
 
         TBLOCK_ABORT_END => {
-            CleanupTransaction()?;
-            xs(|s| s.current_mut().block_state = TBLOCK_DEFAULT);
+            CleanupTransaction(xp)?;
+            xp.with(|s| s.current_mut().block_state = TBLOCK_DEFAULT);
         }
 
         TBLOCK_ABORT_PENDING => {
-            AbortTransaction()?;
-            CleanupTransaction()?;
-            xs(|s| s.current_mut().block_state = TBLOCK_DEFAULT);
+            AbortTransaction(xp)?;
+            CleanupTransaction(xp)?;
+            xp.with(|s| s.current_mut().block_state = TBLOCK_DEFAULT);
         }
 
         TBLOCK_PREPARE => {
-            AbortTransaction()?;
-            CleanupTransaction()?;
-            xs(|s| s.current_mut().block_state = TBLOCK_DEFAULT);
+            AbortTransaction(xp)?;
+            CleanupTransaction(xp)?;
+            xp.with(|s| s.current_mut().block_state = TBLOCK_DEFAULT);
         }
 
         TBLOCK_SUBINPROGRESS => {
             AbortSubTransaction()?;
-            xs(|s| s.current_mut().block_state = TBLOCK_SUBABORT);
+            xp.with(|s| s.current_mut().block_state = TBLOCK_SUBABORT);
         }
 
         TBLOCK_SUBBEGIN | TBLOCK_SUBRELEASE | TBLOCK_SUBCOMMIT | TBLOCK_SUBABORT_PENDING
@@ -1620,19 +1635,20 @@ pub fn RollbackAndReleaseCurrentSubTransaction() -> PgResult<()> {
 }
 
 pub fn AbortOutOfAnyTransaction() -> PgResult<()> {
-    AtAbort_Memory();
+    let xp = xs_ptr();
+    AtAbort_Memory(xp);
 
     loop {
         match cur_block_state() {
             TBLOCK_DEFAULT => {
-                if xs(|s| s.current().state) == TRANS_DEFAULT {
+                if xp.with(|s| s.current().state) == TRANS_DEFAULT {
                     // Not in a transaction, do nothing.
                 } else {
-                    if xs(|s| s.current().state) == TRANS_START {
-                        xs(|s| s.current_mut().state = TRANS_INPROGRESS);
+                    if xp.with(|s| s.current().state) == TRANS_START {
+                        xp.with(|s| s.current_mut().state = TRANS_INPROGRESS);
                     }
-                    AbortTransaction()?;
-                    CleanupTransaction()?;
+                    AbortTransaction(xp)?;
+                    CleanupTransaction(xp)?;
                 }
             }
             TBLOCK_STARTED
@@ -1643,14 +1659,14 @@ pub fn AbortOutOfAnyTransaction() -> PgResult<()> {
             | TBLOCK_END
             | TBLOCK_ABORT_PENDING
             | TBLOCK_PREPARE => {
-                AbortTransaction()?;
-                CleanupTransaction()?;
-                xs(|s| s.current_mut().block_state = TBLOCK_DEFAULT);
+                AbortTransaction(xp)?;
+                CleanupTransaction(xp)?;
+                xp.with(|s| s.current_mut().block_state = TBLOCK_DEFAULT);
             }
             TBLOCK_ABORT | TBLOCK_ABORT_END => {
                 portalmem::AtAbort_Portals()?;
-                CleanupTransaction()?;
-                xs(|s| s.current_mut().block_state = TBLOCK_DEFAULT);
+                CleanupTransaction(xp)?;
+                xp.with(|s| s.current_mut().block_state = TBLOCK_DEFAULT);
             }
             TBLOCK_SUBBEGIN
             | TBLOCK_SUBINPROGRESS
@@ -1662,7 +1678,7 @@ pub fn AbortOutOfAnyTransaction() -> PgResult<()> {
                 CleanupSubTransaction()?;
             }
             TBLOCK_SUBABORT | TBLOCK_SUBABORT_END | TBLOCK_SUBABORT_RESTART => {
-                if xs(|s| s.current().has_resource_owner) {
+                if xp.with(|s| s.current().has_resource_owner) {
                     let (my, parent) = subxact_ids();
                     portalmem::AtSubAbort_Portals(
                         my,
@@ -1679,7 +1695,7 @@ pub fn AbortOutOfAnyTransaction() -> PgResult<()> {
         }
     }
 
-    debug_assert!(xs(|s| s.stack_len() == 1));
+    debug_assert!(xp.with(|s| s.stack_len() == 1));
     Ok(())
 }
 
@@ -2065,7 +2081,8 @@ pub fn SerializeTransactionState(out: &mut [u8]) -> PgResult<usize> {
 
 pub fn StartParallelWorkerTransaction(tstatespace: &[u8]) -> PgResult<()> {
     debug_assert_eq!(cur_block_state(), TBLOCK_DEFAULT);
-    StartTransaction()?;
+    let xp = xs_ptr();
+    StartTransaction(xp)?;
 
     if tstatespace.len() < SERIALIZED_HEADER_SIZE {
         return Err(Box::new(PgError::error("invalid serialized transaction state")));
@@ -2089,7 +2106,7 @@ pub fn StartParallelWorkerTransaction(tstatespace: &[u8]) -> PgResult<()> {
         offset += 4;
     }
 
-    xs(|s| {
+    xp.with(|s| {
         s.XactIsoLevel = i32::from_ne_bytes(tstatespace[0..4].try_into().unwrap());
         s.XactDeferrable = tstatespace[4] != 0;
         s.set_top_full_xid(FullTransactionId {
@@ -2107,7 +2124,8 @@ pub fn StartParallelWorkerTransaction(tstatespace: &[u8]) -> PgResult<()> {
 
 pub fn EndParallelWorkerTransaction() -> PgResult<()> {
     debug_assert_eq!(cur_block_state(), TBLOCK_PARALLEL_INPROGRESS);
-    CommitTransaction()?;
-    xs(|s| s.current_mut().block_state = TBLOCK_DEFAULT);
+    let xp = xs_ptr();
+    CommitTransaction(xp)?;
+    xp.with(|s| s.current_mut().block_state = TBLOCK_DEFAULT);
     Ok(())
 }
