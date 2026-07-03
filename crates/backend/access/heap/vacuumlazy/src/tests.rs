@@ -242,9 +242,11 @@ fn test_relation<'mcx>(mcx: Mcx<'mcx>) -> RelationData<'mcx> {
 
 fn vacrel<'a, 'mcx>(rel: &'a RelationData<'mcx>, mcx: Mcx<'mcx>) -> LVRelState<'a, 'mcx> {
     LVRelState {
+        mcx,
         rel,
+        indrels: ::mcx::PgVec::new_in(mcx),
+        indstats: ::mcx::PgVec::new_in(mcx),
         nindexes: 1,
-        index_oids: PgVec::new_in(mcx),
         bstrategy: None,
         aggressive: false,
         skipwithvm: true,

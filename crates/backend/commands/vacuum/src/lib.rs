@@ -605,7 +605,56 @@ pub fn init_seams() {
         get: || VACUUM_TRUNCATE.load(Relaxed),
         set: |v| VACUUM_TRUNCATE.store(v, Relaxed),
     });
-    vacuum_seams::vac_update_relstats::set(vac_update_relstats);
+    // Fixture tests pre-install a relstats sink (no pg_class there); keep it.
+    if !vacuum_seams::vac_update_relstats::is_installed() {
+        vacuum_seams::vac_update_relstats::set(vac_update_relstats);
+    }
+}
+
+/// vac_open_indexes: just the ready indexes, each locked with `lockmode`.
+pub fn vac_open_indexes<'mcx>(
+    mcx: Mcx<'mcx>,
+    relation: &RelationData<'mcx>,
+    lockmode: LOCKMODE,
+) -> PgResult<::mcx::PgVec<'mcx, Relation<'mcx>>> {
+    debug_assert!(lockmode != NoLock);
+    let indexoidlist = relcache_seams::relation_get_index_list::call(mcx, relation.rd_id)?;
+    let mut irel = ::mcx::PgVec::with_capacity_in(indexoidlist.len(), mcx);
+    for &indexoid in indexoidlist.iter() {
+        let indrel = indexam::index_open(mcx, indexoid, lockmode)?;
+        if indrel.rd_index.as_ref().is_some_and(|i| i.indisready) {
+            irel.push(indrel);
+        } else {
+            indexam::index_close(indrel, lockmode)?;
+        }
+    }
+    Ok(irel)
+}
+
+pub fn vac_close_indexes(irel: ::mcx::PgVec<'_, Relation<'_>>, lockmode: LOCKMODE) -> PgResult<()> {
+    for ind in irel {
+        indexam::index_close(ind, lockmode)?;
+    }
+    Ok(())
+}
+
+/// vac_bulkdel_one_index (ereport chatter elided; logging lane).
+pub fn vac_bulkdel_one_index<'mcx>(
+    mcx: Mcx<'mcx>,
+    ivinfo: &nbtree::IndexVacuumInfo<'_, 'mcx>,
+    istat: Option<::types_nbtree::IndexBulkDeleteResult>,
+    dead_items: &[::types_tuple::itemptr::ItemPointerData],
+) -> PgResult<::types_nbtree::IndexBulkDeleteResult> {
+    indexam::index_bulk_delete(mcx, ivinfo, istat, dead_items)
+}
+
+/// vac_cleanup_one_index (ereport chatter elided; logging lane).
+pub fn vac_cleanup_one_index<'mcx>(
+    mcx: Mcx<'mcx>,
+    ivinfo: &nbtree::IndexVacuumInfo<'_, 'mcx>,
+    istat: Option<::types_nbtree::IndexBulkDeleteResult>,
+) -> PgResult<Option<::types_nbtree::IndexBulkDeleteResult>> {
+    indexam::index_vacuum_cleanup(mcx, ivinfo, istat)
 }
 
 pub fn vacuum_delay_point(_is_analyze: bool) -> PgResult<()> {

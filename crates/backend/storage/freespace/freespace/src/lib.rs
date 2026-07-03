@@ -136,8 +136,9 @@ pub fn FreeSpaceMapPrepareTruncateRel(_rel: &RelationData<'_>, _nblocks: BlockNu
     unported("FreeSpaceMapPrepareTruncateRel (rel truncate lane, freespace.c)");
 }
 
-pub fn FreeSpaceMapVacuum(_rel: &RelationData<'_>) -> ! {
-    unported("FreeSpaceMapVacuum (vacuum lane, freespace.c)");
+pub fn FreeSpaceMapVacuum(rel: &RelationData<'_>) -> PgResult<()> {
+    fsm_vacuum_page(rel, FSM_ROOT_ADDRESS, 0, InvalidBlockNumber)?;
+    Ok(())
 }
 
 pub fn FreeSpaceMapVacuumRange(
@@ -227,7 +228,7 @@ pub fn RecordUsedIndexPage(rel: &RelationData<'_>, usedBlock: BlockNumber) -> Pg
     RecordPageWithFreeSpace(rel, usedBlock, 0)
 }
 
-pub fn IndexFreeSpaceMapVacuum(rel: &RelationData<'_>) -> ! {
+pub fn IndexFreeSpaceMapVacuum(rel: &RelationData<'_>) -> PgResult<()> {
     FreeSpaceMapVacuum(rel)
 }
 

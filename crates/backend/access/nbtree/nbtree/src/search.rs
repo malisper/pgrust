@@ -128,7 +128,7 @@ pub fn bt_search(
     key: &mut BtScanInsert,
     frame: &mut OrderProcFrame,
 ) -> PgResult<Option<BufferPin>> {
-    let Some(mut pin) = bt_getroot(rel, BT_READ)? else {
+    let Some(mut pin) = bt_getroot(rel, None, BT_READ)? else {
         return Ok(None);
     };
 
@@ -158,7 +158,7 @@ pub fn bt_search(
 }
 
 /// _bt_moveright, read arm (forupdate/finish-incomplete-split is insert-lane).
-fn bt_moveright(
+pub(crate) fn bt_moveright(
     rel: &Relation<'_>,
     key: &mut BtScanInsert,
     mut pin: BufferPin,
@@ -1252,7 +1252,7 @@ fn bt_get_endpoint(rel: &Relation<'_>, level: u32, rightmost: bool) -> PgResult<
     if level != 0 {
         unported_phase2("_bt_get_endpoint above the leaf level (_bt_gettrueroot)");
     }
-    let Some(mut pin) = bt_getroot(rel, BT_READ)? else {
+    let Some(mut pin) = bt_getroot(rel, None, BT_READ)? else {
         return Ok(None);
     };
 

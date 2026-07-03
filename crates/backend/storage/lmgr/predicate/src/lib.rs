@@ -99,6 +99,18 @@ pub fn PredicateLockPageSplit(
     unported_sxact();
 }
 
+// PredicateLockPageCombine: same single-backend gate as PageSplit.
+pub fn PredicateLockPageCombine(
+    _rel: &RelationData<'_>,
+    _oldblkno: BlockNumber,
+    _newblkno: BlockNumber,
+) -> PgResult<()> {
+    if !MY_SERIALIZABLE_XACT_SET.with(|c| c.get()) {
+        return Ok(());
+    }
+    unported_sxact();
+}
+
 pub fn CheckForSerializableConflictIn(
     rel: &RelationData<'_>,
     _tid: Option<&ItemPointerData>,
@@ -147,6 +159,7 @@ pub fn init_seams() {
     predicate_seams::check_for_serializable_conflict_out::set(CheckForSerializableConflictOut);
     predicate_seams::check_for_serializable_conflict_in::set(CheckForSerializableConflictIn);
     predicate_seams::predicate_lock_page_split::set(PredicateLockPageSplit);
+    predicate_seams::predicate_lock_page_combine::set(PredicateLockPageCombine);
     predicate_seams::pre_commit_check_for_serialization_failure::set(
         PreCommit_CheckForSerializationFailure,
     );

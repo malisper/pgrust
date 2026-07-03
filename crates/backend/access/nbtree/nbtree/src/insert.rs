@@ -52,8 +52,8 @@ const BTREE_FASTPATH_MIN_LEVEL: i32 = 2;
 
 #[derive(Clone, Copy)]
 pub(crate) struct StackEntry {
-    blkno: BlockNumber,
-    offset: OffsetNumber,
+    pub(crate) blkno: BlockNumber,
+    pub(crate) offset: OffsetNumber,
 }
 
 // RelationGetTargetBlock/RelationSetTargetBlock over the index relation
@@ -145,7 +145,7 @@ fn bt_doinsert<'mcx>(
     let mut stack: ::mcx::PgVec<'mcx, StackEntry> = ::mcx::PgVec::new_in(mcx);
     // C's `goto search` restart after waiting out a conflicting inserter.
     loop {
-        bt_search_insert(rel, &mut insertstate, &mut frame, &mut stack)?;
+        bt_search_insert(rel, heap_rel, &mut insertstate, &mut frame, &mut stack)?;
 
         if !checkingunique {
             break;
@@ -207,8 +207,8 @@ fn bt_doinsert<'mcx>(
         let itemsz = insertstate.itemsz;
         let postingoff = insertstate.postingoff;
         bt_insertonpg(
-            mcx, rel, Some(insertstate.itup_key), &mut frame, buf, None, &mut stack, itup,
-            itemsz, newitemoff, postingoff, false,
+            mcx, rel, heap_rel, Some(insertstate.itup_key), &mut frame, buf, None, &mut stack,
+            itup, itemsz, newitemoff, postingoff, false,
         )?;
     }
 
@@ -218,6 +218,7 @@ fn bt_doinsert<'mcx>(
 /// _bt_search_insert: rightmost-leaf fastpath cache, else full descent.
 fn bt_search_insert<'mcx>(
     rel: &Relation<'mcx>,
+    heaprel: &::types_rel::RelationData<'mcx>,
     insertstate: &mut InsertState<'_>,
     frame: &mut OrderProcFrame,
     stack: &mut ::mcx::PgVec<'mcx, StackEntry>,
@@ -252,23 +253,24 @@ fn bt_search_insert<'mcx>(
         set_target_block(rel, InvalidBlockNumber);
     }
 
-    insertstate.buf = Some(bt_search_write(rel, insertstate.itup_key, frame, stack)?);
+    insertstate.buf = Some(bt_search_write(rel, heaprel, insertstate.itup_key, frame, stack)?);
     Ok(())
 }
 
 /// _bt_search, BT_WRITE arm with descent stack (C's one fn splits on access).
 fn bt_search_write<'mcx>(
     rel: &Relation<'mcx>,
+    heaprel: &::types_rel::RelationData<'mcx>,
     key: &mut BtScanInsert,
     frame: &mut OrderProcFrame,
     stack: &mut ::mcx::PgVec<'mcx, StackEntry>,
 ) -> PgResult<BufferPin> {
     let mut page_access = BT_READ;
 
-    let mut pin = bt_getroot(rel, BT_WRITE)?.expect("BT_WRITE getroot creates the root");
+    let mut pin = bt_getroot(rel, Some(heaprel), BT_WRITE)?.expect("BT_WRITE getroot creates the root");
 
     loop {
-        pin = bt_moveright_for_update(rel, key, pin, stack, page_access, frame)?;
+        pin = bt_moveright_for_update(rel, heaprel, key, pin, stack, page_access, frame)?;
 
         let (child, offnum, level) = {
             let page = pin.page();
@@ -302,15 +304,16 @@ fn bt_search_write<'mcx>(
     if page_access == BT_READ {
         bt_unlockbuf(rel, &pin)?;
         bt_lockbuf(rel, &pin, BT_WRITE)?;
-        pin = bt_moveright_for_update(rel, key, pin, stack, BT_WRITE, frame)?;
+        pin = bt_moveright_for_update(rel, heaprel, key, pin, stack, BT_WRITE, frame)?;
     }
 
     Ok(pin)
 }
 
 /// _bt_moveright, forupdate arm (read arm lives in search.rs).
-fn bt_moveright_for_update(
-    rel: &Relation<'_>,
+fn bt_moveright_for_update<'mcx>(
+    rel: &Relation<'mcx>,
+    heaprel: &::types_rel::RelationData<'mcx>,
     key: &mut BtScanInsert,
     mut pin: BufferPin,
     stack: &mut [StackEntry],
@@ -346,7 +349,7 @@ fn bt_moveright_for_update(
             }
             if P_INCOMPLETE_SPLIT(&page_opaque(&pin.page())) {
                 // SAFETY: pin write-locked just above with the flag set.
-                unsafe { bt_finish_split(rel, pin, stack, frame)? };
+                unsafe { bt_finish_split(rel, heaprel, pin, stack, frame)? };
             } else {
                 bt_relbuf(rel, pin)?;
             }
@@ -860,7 +863,7 @@ unsafe fn bt_findinsertloc(
             {
                 break;
             }
-            bt_stepright(rel, insertstate, frame)?;
+            bt_stepright(rel, heap_rel, insertstate, frame)?;
             uniquedup = true;
         }
     }
@@ -897,8 +900,9 @@ unsafe fn bt_findinsertloc(
 ///
 /// # Safety
 /// As [`bt_findinsertloc`].
-unsafe fn bt_stepright(
-    rel: &Relation<'_>,
+unsafe fn bt_stepright<'mcx>(
+    rel: &Relation<'mcx>,
+    heaprel: &::types_rel::RelationData<'mcx>,
     insertstate: &mut InsertState<'_>,
     frame: &mut OrderProcFrame,
 ) -> PgResult<()> {
@@ -912,7 +916,7 @@ unsafe fn bt_stepright(
         let pin = bt_relandgetbuf(rel, rbuf.take(), rblkno, BT_WRITE)?;
         let opaque = page_opaque(&pin.page());
         if P_INCOMPLETE_SPLIT(&opaque) {
-            bt_finish_split(rel, pin, &mut [], frame)?;
+            bt_finish_split(rel, heaprel, pin, &mut [], frame)?;
             continue;
         }
         if !P_IGNORE(&opaque) {
@@ -987,6 +991,7 @@ unsafe fn bt_delete_or_dedup_one_page(
 unsafe fn bt_insertonpg<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
+    heaprel: &::types_rel::RelationData<'mcx>,
     itup_key: Option<&mut BtScanInsert>,
     frame: &mut OrderProcFrame,
     buf: BufferPin,
@@ -1057,13 +1062,13 @@ unsafe fn bt_insertonpg<'mcx>(
         if postingoff != 0 {
             unported_phase2("_bt_split posting-split coincidence (nbtdedup lane)");
         }
-        let rbuf = bt_split(mcx, rel, itup_key, frame, &buf, cbuf, newitemoff, itemsz, itup)?;
+        let rbuf = bt_split(mcx, rel, heaprel, itup_key, frame, &buf, cbuf, newitemoff, itemsz, itup)?;
         predicate_seams::predicate_lock_page_split::call(
             rel,
             buf.block_number(),
             rbuf.block_number(),
         )?;
-        bt_insert_parent(mcx, rel, frame, buf, rbuf, stack, isroot, isonly)
+        bt_insert_parent(mcx, rel, heaprel, frame, buf, rbuf, stack, isroot, isonly)
     } else {
         let mut metabuf: Option<BufferPin> = None;
         if split_only_page {
@@ -1232,6 +1237,7 @@ unsafe fn bt_insertonpg<'mcx>(
 unsafe fn bt_split<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
+    heaprel: &::types_rel::RelationData<'mcx>,
     itup_key: Option<&mut BtScanInsert>,
     frame: &mut OrderProcFrame,
     buf: &BufferPin,
@@ -1327,7 +1333,7 @@ unsafe fn bt_split<'mcx>(
     }
     afterleftoff += 1;
 
-    let rbuf = bt_allocbuf(rel)?;
+    let rbuf = bt_allocbuf(rel, heaprel)?;
     let rightpagenumber = rbuf.block_number();
 
     lopaque.btpo_next = rightpagenumber;
@@ -1606,6 +1612,7 @@ fn split_failed(rel: &Relation<'_>, blkno: BlockNumber, what: &str, side: &str) 
 unsafe fn bt_insert_parent<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
+    heaprel: &::types_rel::RelationData<'mcx>,
     frame: &mut OrderProcFrame,
     buf: BufferPin,
     rbuf: BufferPin,
@@ -1616,7 +1623,7 @@ unsafe fn bt_insert_parent<'mcx>(
     if isroot {
         debug_assert!(stack.is_empty());
         debug_assert!(isonly);
-        let rootbuf = bt_newlevel(mcx, rel, &buf, &rbuf)?;
+        let rootbuf = bt_newlevel(mcx, rel, heaprel, &buf, &rbuf)?;
         bt_relbuf(rel, rootbuf)?;
         bt_relbuf(rel, rbuf)?;
         bt_relbuf(rel, buf)?;
@@ -1641,7 +1648,7 @@ unsafe fn bt_insert_parent<'mcx>(
     };
 
     let (top, parent_stack) = stack.split_last_mut().expect("non-empty");
-    let pbuf = bt_getstackbuf(rel, frame, top, parent_stack, bknum)?;
+    let pbuf = bt_getstackbuf(rel, heaprel, frame, top, parent_stack, bknum)?;
 
     bt_relbuf(rel, rbuf)?;
 
@@ -1661,6 +1668,7 @@ unsafe fn bt_insert_parent<'mcx>(
     bt_insertonpg(
         mcx,
         rel,
+        heaprel,
         None,
         frame,
         pbuf,
@@ -1678,8 +1686,9 @@ unsafe fn bt_insert_parent<'mcx>(
 ///
 /// # Safety
 /// `lbuf` pinned + write-locked with P_INCOMPLETE_SPLIT set.
-pub(crate) unsafe fn bt_finish_split(
-    rel: &Relation<'_>,
+pub(crate) unsafe fn bt_finish_split<'mcx>(
+    rel: &Relation<'mcx>,
+    heaprel: &::types_rel::RelationData<'mcx>,
     lbuf: BufferPin,
     stack: &mut [StackEntry],
     frame: &mut OrderProcFrame,
@@ -1703,15 +1712,16 @@ pub(crate) unsafe fn bt_finish_split(
 
     // no bump allocations outlive this call: scratch context suffices
     let cx = ::mcx::MemoryContext::new("bt_finish_split");
-    bt_insert_parent(cx.mcx(), rel, frame, lbuf, rbuf, stack, wasroot, wasonly)
+    bt_insert_parent(cx.mcx(), rel, heaprel, frame, lbuf, rbuf, stack, wasroot, wasonly)
 }
 
 /// _bt_getstackbuf.
 ///
 /// # Safety
 /// caller in the parent-insertion protocol (child pages locked).
-unsafe fn bt_getstackbuf<'mcx>(
+pub(crate) unsafe fn bt_getstackbuf<'mcx>(
     rel: &Relation<'mcx>,
+    heaprel: &::types_rel::RelationData<'mcx>,
     frame: &mut OrderProcFrame,
     top: &mut StackEntry,
     parent_stack: &mut [StackEntry],
@@ -1725,7 +1735,7 @@ unsafe fn bt_getstackbuf<'mcx>(
         let opaque = page_opaque(&pin.page());
 
         if P_INCOMPLETE_SPLIT(&opaque) {
-            bt_finish_split(rel, pin, parent_stack, frame)?;
+            bt_finish_split(rel, heaprel, pin, parent_stack, frame)?;
             continue;
         }
 
@@ -1781,13 +1791,14 @@ unsafe fn bt_getstackbuf<'mcx>(
 unsafe fn bt_newlevel<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
+    heaprel: &::types_rel::RelationData<'mcx>,
     lbuf: &BufferPin,
     rbuf: &BufferPin,
 ) -> PgResult<BufferPin> {
     let lbkno = lbuf.block_number();
     let rbkno = rbuf.block_number();
 
-    let rootbuf = bt_allocbuf(rel)?;
+    let rootbuf = bt_allocbuf(rel, heaprel)?;
     let rootblknum = rootbuf.block_number();
 
     let metabuf = bt_getbuf(rel, BTREE_METAPAGE, BT_WRITE)?;

@@ -12,10 +12,12 @@ mod fcframe;
 mod insert;
 pub mod itup;
 mod page;
+mod pagedel;
 mod preprocess;
 mod search;
 mod splitloc;
 mod utils;
+pub mod vacuum;
 mod wal;
 
 #[cfg(test)]
@@ -23,23 +25,7 @@ mod tests;
 
 pub use insert::btinsert;
 pub use page::{bt_getrootheight, bt_initmetapage, bt_metaversion, bt_pageinit};
-
-/// btvacuumcleanup, the bulkdelete-free arm: a clean index (no pending
-/// deleted pages) is a no-op returning no stats; a cleanup-needing index
-/// takes the btvacuumscan lane, which stays loud.
-pub fn btvacuumcleanup(rel: &::types_rel::Relation<'_>, analyze_only: bool) -> PgResult<()> {
-    if analyze_only {
-        return Ok(());
-    }
-    if !page::bt_vacuum_needs_cleanup(rel)? {
-        return Ok(());
-    }
-    panic!(
-        "btvacuumcleanup: index \"{}\" needs a cleanup scan — btvacuumscan \
-         (nbtree vacuum-scan lane) is not ported",
-        rel.name()
-    );
-}
+pub use vacuum::{btbulkdelete, btvacuumcleanup, IndexVacuumInfo};
 
 use ::mcx::Mcx;
 use ::types_core::{BLCKSZ, InvalidSubTransactionId};

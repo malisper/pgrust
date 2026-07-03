@@ -600,6 +600,391 @@ fn btree_xlog_newroot(record: &mut XLogReaderState) -> PgResult<()> {
     bt_restore_meta(record, 2)
 }
 
+fn tup_tinfo(b: &[u8]) -> u16 {
+    u16::from_ne_bytes([b[6], b[7]])
+}
+
+fn tup_posid(b: &[u8]) -> u16 {
+    u16::from_ne_bytes([b[4], b[5]])
+}
+
+fn tup_is_posting(b: &[u8]) -> bool {
+    (tup_tinfo(b) & types_nbtree::INDEX_ALT_TID_MASK) != 0
+        && (tup_posid(b) & types_nbtree::BT_IS_POSTING) != 0
+}
+
+fn tup_nposting(b: &[u8]) -> usize {
+    debug_assert!(tup_is_posting(b));
+    (tup_posid(b) & types_nbtree::BT_OFFSET_MASK) as usize
+}
+
+fn tup_posting_offset(b: &[u8]) -> usize {
+    debug_assert!(tup_is_posting(b));
+    ((u16::from_ne_bytes([b[0], b[1]]) as usize) << 16)
+        | u16::from_ne_bytes([b[2], b[3]]) as usize
+}
+
+// _bt_update_posting over raw tuple bytes: write the replacement image
+// (original minus deletetids posting entries) into `out`, returning its size.
+fn xlog_update_posting(orig: &[u8], deletetids: &[u8], out: &mut [u8]) -> usize {
+    let ndeleted = deletetids.len() / 2;
+    let norig = tup_nposting(orig);
+    let nhtids = norig - ndeleted;
+    debug_assert!(nhtids > 0 && nhtids < norig);
+
+    let keysize = tup_posting_offset(orig);
+    let newsize = if nhtids > 1 {
+        maxalign(keysize + nhtids * 6)
+    } else {
+        keysize
+    };
+
+    out[..newsize].fill(0);
+    out[..keysize].copy_from_slice(&orig[..keysize]);
+    let info = (tup_tinfo(out) & !INDEX_SIZE_MASK) | newsize as u16;
+
+    let htids_off = if nhtids > 1 {
+        out[6..8].copy_from_slice(
+            &(info | types_nbtree::INDEX_ALT_TID_MASK).to_ne_bytes(),
+        );
+        let posid = nhtids as u16 | types_nbtree::BT_IS_POSTING;
+        out[4..6].copy_from_slice(&posid.to_ne_bytes());
+        out[0..2].copy_from_slice(&((keysize >> 16) as u16).to_ne_bytes());
+        out[2..4].copy_from_slice(&((keysize & 0xffff) as u16).to_ne_bytes());
+        keysize
+    } else {
+        out[6..8].copy_from_slice(&(info & !types_nbtree::INDEX_ALT_TID_MASK).to_ne_bytes());
+        0
+    };
+
+    let posting_base = tup_posting_offset(orig);
+    let mut ui = 0usize;
+    let mut d = 0usize;
+    for i in 0..norig {
+        if d < ndeleted
+            && u16::from_ne_bytes([deletetids[d * 2], deletetids[d * 2 + 1]]) as usize == i
+        {
+            d += 1;
+            continue;
+        }
+        let src = posting_base + i * 6;
+        let dst = htids_off + ui * 6;
+        let tid: [u8; 6] = orig[src..src + 6].try_into().unwrap();
+        out[dst..dst + 6].copy_from_slice(&tid);
+        ui += 1;
+    }
+    debug_assert!(ui == nhtids && d == ndeleted);
+    newsize
+}
+
+// btree_xlog_updates: apply the xl_btree_update stream to the page.
+fn btree_xlog_updates(
+    pm: &mut PageMut<'_>,
+    updatedoffsets: &[u8],
+    mut updates: &[u8],
+    nupdated: usize,
+) -> PgResult<()> {
+    let mut scratch = [0u8; BLCKSZ];
+    for i in 0..nupdated {
+        let offnum =
+            u16::from_ne_bytes([updatedoffsets[i * 2], updatedoffsets[i * 2 + 1]]);
+        let ndeletedtids = u16::from_ne_bytes([updates[0], updates[1]]) as usize;
+        let deletetids = &updates[2..2 + ndeletedtids * 2];
+
+        let orig = {
+            let page = pm.as_ref();
+            let id = page.item_id(offnum);
+            let (ptr, len) = page.item_raw(id);
+            // SAFETY: in-page tuple bytes under the redo exclusive lock; the
+            // borrow ends before index_tuple_overwrite mutates the page.
+            unsafe { core::slice::from_raw_parts(ptr, len as usize) }
+        };
+        let newsize = xlog_update_posting(orig, deletetids, &mut scratch);
+        let img_len = maxalign(newsize);
+        let img = &scratch[..img_len];
+        if !pm.index_tuple_overwrite(offnum, img) {
+            return Err(panic_err("failed to update partially dead item".into()));
+        }
+
+        updates = &updates[2 + ndeletedtids * 2..];
+    }
+    Ok(())
+}
+
+fn btree_xlog_vacuum(record: &mut XLogReaderState) -> PgResult<()> {
+    btree_xlog_vacuum_or_delete(record, true)
+}
+
+fn btree_xlog_delete(record: &mut XLogReaderState) -> PgResult<()> {
+    if xlogutils::InHotStandby() {
+        panic!("btree_xlog_delete arm not ported: ResolveRecoveryConflictWithSnapshot (standby lane)");
+    }
+    btree_xlog_vacuum_or_delete(record, false)
+}
+
+fn btree_xlog_vacuum_or_delete(record: &mut XLogReaderState, is_vacuum: bool) -> PgResult<()> {
+    let lsn = record.EndRecPtr;
+    let xlrec = main_data(record);
+    let (ndeleted, nupdated) = if is_vacuum {
+        (
+            u16::from_ne_bytes(xlrec[0..2].try_into().unwrap()) as usize,
+            u16::from_ne_bytes(xlrec[2..4].try_into().unwrap()) as usize,
+        )
+    } else {
+        (
+            u16::from_ne_bytes(xlrec[4..6].try_into().unwrap()) as usize,
+            u16::from_ne_bytes(xlrec[6..8].try_into().unwrap()) as usize,
+        )
+    };
+
+    // VACUUM takes a cleanup lock here, as btvacuumpage (nbtree/README).
+    let (action, buffer) = xlogutils::XLogReadBufferForRedoExtended(
+        record,
+        0,
+        types_storage::ReadBufferMode::Normal,
+        is_vacuum,
+    )?;
+    if action == BLK_NEEDS_REDO {
+        let ptr = block_data(record, 0);
+        // SAFETY: pin + exclusive lock per the redo protocol (module contract).
+        let mut pm = unsafe { page_mut(buffer) };
+
+        if nupdated > 0 {
+            let updatedoffsets = &ptr[ndeleted * 2..ndeleted * 2 + nupdated * 2];
+            let updates = &ptr[ndeleted * 2 + nupdated * 2..];
+            btree_xlog_updates(&mut pm, updatedoffsets, updates, nupdated)?;
+        }
+
+        if ndeleted > 0 {
+            let mut offsets = [0 as OffsetNumber; MaxIndexTuplesPerPage];
+            for (i, off) in offsets[..ndeleted].iter_mut().enumerate() {
+                *off = u16::from_ne_bytes([ptr[i * 2], ptr[i * 2 + 1]]);
+            }
+            pm.index_multi_delete(&offsets[..ndeleted]);
+        }
+
+        let mut opaque = page_opaque(&pm.as_ref());
+        if is_vacuum {
+            opaque.btpo_cycleid = 0;
+        }
+        opaque.btpo_flags &= !types_nbtree::BTP_HAS_GARBAGE;
+        write_opaque(&mut pm, &opaque);
+
+        pm.set_lsn(lsn);
+        bufmgr_seams::mark_buffer_dirty::call(buffer)?;
+    }
+    if buffer != InvalidBuffer {
+        unlock_release(buffer)?;
+    }
+    Ok(())
+}
+
+fn btree_xlog_mark_page_halfdead(record: &mut XLogReaderState) -> PgResult<()> {
+    let lsn = record.EndRecPtr;
+    let xlrec = main_data(record);
+    let poffset = u16::from_ne_bytes(xlrec[0..2].try_into().unwrap());
+    let leftblk = u32::from_ne_bytes(xlrec[8..12].try_into().unwrap());
+    let rightblk = u32::from_ne_bytes(xlrec[12..16].try_into().unwrap());
+    let topparent = u32::from_ne_bytes(xlrec[16..20].try_into().unwrap());
+
+    let (action, buffer) = XLogReadBufferForRedo(record, 1)?;
+    if action == BLK_NEEDS_REDO {
+        // SAFETY: pin + exclusive lock per the redo protocol (module contract).
+        let mut pm = unsafe { page_mut(buffer) };
+
+        let nextoffset = poffset + 1;
+        let rightsib = {
+            let page = pm.as_ref();
+            let id = page.item_id(nextoffset);
+            let (ptr, _) = page.item_raw(id);
+            // SAFETY: pivot tuple's downlink block number (t_tid bytes 0..4).
+            unsafe {
+                ((ptr.cast::<u16>().read() as u32) << 16)
+                    | ptr.add(2).cast::<u16>().read() as u32
+            }
+        };
+        {
+            let page = pm.as_ref();
+            let id = page.item_id(poffset);
+            let (ptr, _) = page.item_raw(id);
+            // SAFETY: same-page pivot under the exclusive redo lock; in-place
+            // 4-byte downlink store.
+            unsafe {
+                let p = ptr.cast_mut();
+                p.cast::<u16>().write((rightsib >> 16) as u16);
+                p.add(2).cast::<u16>().write((rightsib & 0xffff) as u16);
+            }
+        }
+        pm.index_tuple_delete(nextoffset);
+
+        pm.set_lsn(lsn);
+        bufmgr_seams::mark_buffer_dirty::call(buffer)?;
+    }
+    if buffer != InvalidBuffer {
+        unlock_release(buffer)?;
+    }
+
+    let buffer = XLogInitBufferForRedo(record, 0)?;
+    {
+        // SAFETY: pin + exclusive lock per the redo protocol (module contract).
+        let mut pm = unsafe { page_mut(buffer) };
+        bt_pageinit(&mut pm);
+        write_opaque(
+            &mut pm,
+            &BTPageOpaqueData {
+                btpo_prev: leftblk,
+                btpo_next: rightblk,
+                btpo_level: 0,
+                btpo_flags: types_nbtree::BTP_HALF_DEAD | BTP_LEAF,
+                btpo_cycleid: 0,
+            },
+        );
+
+        let trunctuple = trunc_hikey(topparent);
+        if pm.add_item(&trunctuple, P_HIKEY, 0).is_none() {
+            return Err(error_err("could not add dummy high key to half-dead page".into()));
+        }
+
+        pm.set_lsn(lsn);
+    }
+    bufmgr_seams::mark_buffer_dirty::call(buffer)?;
+    unlock_release(buffer)
+}
+
+// The 8-byte truncated high key holding a top-parent link
+// (BTreeTupleSetTopParent over a MemSet IndexTupleData).
+fn trunc_hikey(topparent: u32) -> [u8; 8] {
+    let mut b = [0u8; 8];
+    b[0..2].copy_from_slice(&((topparent >> 16) as u16).to_ne_bytes());
+    b[2..4].copy_from_slice(&((topparent & 0xffff) as u16).to_ne_bytes());
+    let info = 8u16 | types_nbtree::INDEX_ALT_TID_MASK;
+    b[6..8].copy_from_slice(&info.to_ne_bytes());
+    b
+}
+
+fn btree_xlog_unlink_page(info: u8, record: &mut XLogReaderState) -> PgResult<()> {
+    let lsn = record.EndRecPtr;
+    let xlrec = main_data(record);
+    let leftsib = u32::from_ne_bytes(xlrec[0..4].try_into().unwrap());
+    let rightsib = u32::from_ne_bytes(xlrec[4..8].try_into().unwrap());
+    let level = u32::from_ne_bytes(xlrec[8..12].try_into().unwrap());
+    let safexid = u64::from_ne_bytes(xlrec[16..24].try_into().unwrap());
+    let leafleftsib = u32::from_ne_bytes(xlrec[24..28].try_into().unwrap());
+    let leafrightsib = u32::from_ne_bytes(xlrec[28..32].try_into().unwrap());
+    let leaftopparent = u32::from_ne_bytes(xlrec[32..36].try_into().unwrap());
+    let isleaf = level == 0;
+
+    let mut leftbuf = InvalidBuffer;
+    if leftsib != P_NONE {
+        let (action, buf) = XLogReadBufferForRedo(record, 1)?;
+        leftbuf = buf;
+        if action == BLK_NEEDS_REDO {
+            // SAFETY: pin + exclusive lock per the redo protocol.
+            let mut pm = unsafe { page_mut(buf) };
+            let mut opaque = page_opaque(&pm.as_ref());
+            opaque.btpo_next = rightsib;
+            write_opaque(&mut pm, &opaque);
+            pm.set_lsn(lsn);
+            bufmgr_seams::mark_buffer_dirty::call(buf)?;
+        }
+    }
+
+    let target = XLogInitBufferForRedo(record, 0)?;
+    {
+        // SAFETY: pin + exclusive lock per the redo protocol.
+        let mut pm = unsafe { page_mut(target) };
+        bt_pageinit(&mut pm);
+        write_opaque(
+            &mut pm,
+            &BTPageOpaqueData {
+                btpo_prev: leftsib,
+                btpo_next: rightsib,
+                btpo_level: level,
+                btpo_flags: if isleaf { BTP_LEAF } else { 0 },
+                btpo_cycleid: 0,
+            },
+        );
+        page_set_deleted(&mut pm, safexid);
+
+        pm.set_lsn(lsn);
+        bufmgr_seams::mark_buffer_dirty::call(target)?;
+    }
+
+    let (action, rightbuf) = XLogReadBufferForRedo(record, 2)?;
+    if action == BLK_NEEDS_REDO {
+        // SAFETY: pin + exclusive lock per the redo protocol.
+        let mut pm = unsafe { page_mut(rightbuf) };
+        let mut opaque = page_opaque(&pm.as_ref());
+        opaque.btpo_prev = leftsib;
+        write_opaque(&mut pm, &opaque);
+        pm.set_lsn(lsn);
+        bufmgr_seams::mark_buffer_dirty::call(rightbuf)?;
+    }
+
+    if leftbuf != InvalidBuffer {
+        unlock_release(leftbuf)?;
+    }
+    if rightbuf != InvalidBuffer {
+        unlock_release(rightbuf)?;
+    }
+    unlock_release(target)?;
+
+    if record.block_tag_extended(3).is_some() {
+        debug_assert!(!isleaf);
+        let leafbuf = XLogInitBufferForRedo(record, 3)?;
+        {
+            // SAFETY: pin + exclusive lock per the redo protocol.
+            let mut pm = unsafe { page_mut(leafbuf) };
+            bt_pageinit(&mut pm);
+            write_opaque(
+                &mut pm,
+                &BTPageOpaqueData {
+                    btpo_prev: leafleftsib,
+                    btpo_next: leafrightsib,
+                    btpo_level: 0,
+                    btpo_flags: types_nbtree::BTP_HALF_DEAD | BTP_LEAF,
+                    btpo_cycleid: 0,
+                },
+            );
+
+            let trunctuple = trunc_hikey(leaftopparent);
+            if pm.add_item(&trunctuple, P_HIKEY, 0).is_none() {
+                return Err(error_err(
+                    "could not add dummy high key to half-dead page".into(),
+                ));
+            }
+            pm.set_lsn(lsn);
+        }
+        bufmgr_seams::mark_buffer_dirty::call(leafbuf)?;
+        unlock_release(leafbuf)?;
+    }
+
+    if info == XLOG_BTREE_UNLINK_PAGE_META {
+        bt_restore_meta(record, 4)?;
+    }
+    Ok(())
+}
+
+// BTPageSetDeleted over a freshly initialized page image.
+fn page_set_deleted(pm: &mut PageMut<'_>, safexid: u64) {
+    let mut opaque = page_opaque(&pm.as_ref());
+    opaque.btpo_flags &= !types_nbtree::BTP_HALF_DEAD;
+    opaque.btpo_flags |= types_nbtree::BTP_DELETED | types_nbtree::BTP_HAS_FULLXID;
+    write_opaque(pm, &opaque);
+    let contents_off = maxalign(SizeOfPageHeaderData);
+    pm.set_pd_lower((contents_off + 8) as u16);
+    pm.set_pd_upper(pm.as_ref().pd_special());
+    // SAFETY: PageGetContents, 8-aligned, 8B in-bounds under the redo lock.
+    unsafe {
+        pm.as_ref()
+            .as_ptr()
+            .cast_mut()
+            .add(contents_off)
+            .cast::<u64>()
+            .write(safexid)
+    };
+}
+
 pub fn btree_redo(record: &mut XLogReaderState) -> PgResult<()> {
     let info = record.record.as_ref().expect("btree_redo with no decoded record").xl_info
         & !XLR_INFO_MASK;
@@ -612,24 +997,20 @@ pub fn btree_redo(record: &mut XLogReaderState) -> PgResult<()> {
         XLOG_BTREE_NEWROOT => btree_xlog_newroot(record),
         XLOG_BTREE_INSERT_POST => btree_xlog_insert(true, false, true, record),
         XLOG_BTREE_DEDUP => btree_xlog_dedup(record),
-        XLOG_BTREE_VACUUM => {
-            panic!("btree_redo arm not ported: btree_xlog_vacuum — land backend-access-nbtree-vacuum")
-        }
-        XLOG_BTREE_DELETE => {
-            panic!("btree_redo arm not ported: btree_xlog_delete — land backend-access-nbtree-vacuum")
-        }
-        XLOG_BTREE_MARK_PAGE_HALFDEAD => {
-            panic!("btree_redo arm not ported: btree_xlog_mark_page_halfdead — land backend-access-nbtree-vacuum")
-        }
+        XLOG_BTREE_VACUUM => btree_xlog_vacuum(record),
+        XLOG_BTREE_DELETE => btree_xlog_delete(record),
+        XLOG_BTREE_MARK_PAGE_HALFDEAD => btree_xlog_mark_page_halfdead(record),
         XLOG_BTREE_UNLINK_PAGE | XLOG_BTREE_UNLINK_PAGE_META => {
-            panic!("btree_redo arm not ported: btree_xlog_unlink_page — land backend-access-nbtree-vacuum")
+            btree_xlog_unlink_page(info, record)
         }
         XLOG_BTREE_REUSE_PAGE => {
-            panic!("btree_redo arm not ported: btree_xlog_reuse_page — land backend-access-nbtree-vacuum")
+            // Conflict point for hot standby only; nothing to replay.
+            if xlogutils::InHotStandby() {
+                panic!("btree_xlog_reuse_page arm not ported: ResolveRecoveryConflictWithSnapshotFullXid (standby lane)");
+            }
+            Ok(())
         }
-        XLOG_BTREE_META_CLEANUP => {
-            panic!("btree_redo arm not ported: _bt_restore_meta cleanup — land backend-access-nbtree-vacuum")
-        }
+        XLOG_BTREE_META_CLEANUP => bt_restore_meta(record, 0),
         other => Err(panic_err(format!("btree_redo: unknown op code {other}"))),
     }
 }

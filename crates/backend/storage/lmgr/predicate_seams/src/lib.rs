@@ -28,6 +28,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    pub fn predicate_lock_page_combine<'a, 'mcx>(
+        rel: &'a RelationData<'mcx>,
+        oldblkno: types_core::BlockNumber,
+        newblkno: types_core::BlockNumber,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
     pub fn predicate_lock_tid<'a, 'mcx>(
         rel: &'a RelationData<'mcx>,
         tid: ItemPointerData,
