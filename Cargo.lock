@@ -166,6 +166,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "adt_domains"
+version = "0.1.0"
+
+[[package]]
 name = "adt_encode"
 version = "0.1.0"
 dependencies = [
@@ -9188,6 +9192,10 @@ dependencies = [
  "types_error",
  "types_tuple",
 ]
+
+[[package]]
+name = "typecmds"
+version = "0.1.0"
 
 [[package]]
 name = "types_array"
