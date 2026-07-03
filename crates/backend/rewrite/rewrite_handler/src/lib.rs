@@ -149,7 +149,26 @@ fn rewrite_insert_query<'mcx>(mcx: Mcx<'mcx>, parsetree: &mut Query<'mcx>) -> Pg
         }
     }
 
-    debug_assert!(parsetree.onConflict.is_none());
+    if let Some(oc_node) = parsetree.onConflict {
+        let oc = oc_node.as_on_conflict_expr().expect("onConflict is an OnConflictExpr");
+        if oc.action == types_nodes::primnodes::OnConflictAction::ONCONFLICT_UPDATE {
+            let new_set = rewriteTargetListIU(
+                mcx,
+                &oc.onConflictSet,
+                CmdType::CMD_UPDATE,
+                parsetree.r#override,
+                &rel,
+                None,
+            )?;
+            // SAFETY: exclusive Query-tree ownership during rewrite.
+            unsafe {
+                oc_node.with_mut::<types_nodes::primnodes::OnConflictExpr, _>(|o| {
+                    o.onConflictSet = new_set;
+                })
+            }
+            .expect("OnConflictExpr node");
+        }
+    }
     table::table_close(rel, NoLock)?;
     Ok(())
 }
@@ -367,7 +386,12 @@ fn fireRIRrules<'mcx>(
             panic!("rewriteSearchAndCycle (rewriteSearchCycle.c): SEARCH/CYCLE lane");
         }
     }
-    debug_assert!(parsetree.onConflict.is_none());
+    // The EXCLUDED pseudo-relation must stay RTE_RELATION; never expand it.
+    let excl_rel_index = parsetree
+        .onConflict
+        .and_then(|n| n.as_on_conflict_expr())
+        .map(|oc| oc.exclRelIndex)
+        .unwrap_or(0);
     let orig_result_relation = parsetree.resultRelation;
 
     let mut rt_index = 0;
@@ -386,6 +410,9 @@ fn fireRIRrules<'mcx>(
             continue;
         }
         if rte.relkind == RELKIND_MATVIEW {
+            continue;
+        }
+        if excl_rel_index != 0 && rt_index as i32 == excl_rel_index {
             continue;
         }
         if rt_index as i32 != parsetree.resultRelation

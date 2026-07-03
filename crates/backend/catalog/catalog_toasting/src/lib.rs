@@ -109,6 +109,9 @@ fn create_toast_table<'mcx>(mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgResult<bo
         ii_Summarizing: false,
         ii_Concurrent: false,
         ii_BrokenHotChain: false,
+        ii_UniqueOps: [0; INDEX_MAX_KEYS as usize],
+        ii_UniqueProcs: [0; INDEX_MAX_KEYS as usize],
+        ii_UniqueStrats: [0; INDEX_MAX_KEYS as usize],
     };
     let collationIds = [InvalidOid, InvalidOid];
     let opclassIds = [OID_BTREE_OPS_OID, INT4_BTREE_OPS_OID];
