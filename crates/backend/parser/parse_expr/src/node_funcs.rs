@@ -24,6 +24,7 @@ pub fn expr_type(node: Node<'_>) -> Oid {
         NodeTag::T_BoolExpr | NodeTag::T_NullTest => types_core::catalog::BOOLOID,
         NodeTag::T_SetToDefault => node.as_set_to_default().unwrap().typeId,
         NodeTag::T_CaseExpr => node.as_case_expr().unwrap().casetype,
+        NodeTag::T_CaseTestExpr => node.as_case_test_expr().unwrap().typeId,
         NodeTag::T_CoalesceExpr => node.as_coalesce_expr().unwrap().coalescetype,
         NodeTag::T_MinMaxExpr => node.as_min_max_expr().unwrap().minmaxtype,
         NodeTag::T_SQLValueFunction => node.as_sql_value_function().unwrap().r#type,
@@ -73,6 +74,7 @@ pub fn expr_typmod(node: Node<'_>) -> i32 {
         NodeTag::T_Param => node.as_param().unwrap().paramtypmod,
         NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resulttypmod,
         NodeTag::T_SetToDefault => node.as_set_to_default().unwrap().typeMod,
+        NodeTag::T_CaseTestExpr => node.as_case_test_expr().unwrap().typeMod,
         NodeTag::T_OpExpr
         | NodeTag::T_FuncExpr
         | NodeTag::T_Aggref
@@ -139,6 +141,7 @@ pub fn expr_collation(node: Node<'_>) -> Oid {
         NodeTag::T_BoolExpr | NodeTag::T_NullTest => types_core::InvalidOid,
         NodeTag::T_SetToDefault => node.as_set_to_default().unwrap().collation,
         NodeTag::T_CaseExpr => node.as_case_expr().unwrap().casecollid,
+        NodeTag::T_CaseTestExpr => node.as_case_test_expr().unwrap().collation,
         NodeTag::T_CoalesceExpr => node.as_coalesce_expr().unwrap().coalescecollid,
         NodeTag::T_MinMaxExpr => node.as_min_max_expr().unwrap().minmaxcollid,
         NodeTag::T_SQLValueFunction => {
@@ -226,6 +229,8 @@ pub fn expr_location(node: Node<'_>) -> ParseLoc {
         }
         // C: the CASE/WHEN/COALESCE/GREATEST/LEAST keyword is always leftmost.
         NodeTag::T_CaseExpr => node.as_case_expr().unwrap().location,
+        // C exprLocation default arm: CaseTestExpr carries no location.
+        NodeTag::T_CaseTestExpr => -1,
         NodeTag::T_CaseWhen => node.as_case_when().unwrap().location,
         NodeTag::T_CoalesceExpr => node.as_coalesce_expr().unwrap().location,
         NodeTag::T_MinMaxExpr => node.as_min_max_expr().unwrap().location,

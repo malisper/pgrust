@@ -1615,6 +1615,17 @@ pub fn expression_returns_set(node: Node<'_>) -> bool {
             node.as_null_test().unwrap().arg.is_some_and(expression_returns_set)
         }
         NodeTag::T_Const | NodeTag::T_Param | NodeTag::T_Var | NodeTag::T_CaseTestExpr => false,
+        NodeTag::T_CaseExpr => {
+            let c = node.as_case_expr().unwrap();
+            c.arg.is_some_and(expression_returns_set)
+                || c.args.iter().any(expression_returns_set)
+                || c.defresult.is_some_and(expression_returns_set)
+        }
+        NodeTag::T_CaseWhen => {
+            let cw = node.as_case_when().unwrap();
+            cw.expr.is_some_and(expression_returns_set)
+                || cw.result.is_some_and(expression_returns_set)
+        }
         // C short-circuits these before recursing (parser guarantees no SRF).
         NodeTag::T_Aggref | NodeTag::T_GroupingFunc | NodeTag::T_WindowFunc => false,
         // SubLink is not set-returning; C's walker does not enter subselects.

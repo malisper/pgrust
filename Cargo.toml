@@ -179,6 +179,7 @@ members = [
     "crates/backend/parser/parse_relation",
     "crates/backend/parser/parse_target",
     "crates/backend/parser/parse_collate",
+    "crates/backend/parser/parse_collate_seams",
     "crates/backend/parser/parser_analyze",
     "crates/backend/parser/parse_utilcmd",
     "crates/backend/utils/misc/queryenvironment",

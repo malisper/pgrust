@@ -426,6 +426,27 @@ pub fn expr_typmod(node: Node<'_>) -> i32 {
                 _ => -1,
             }
         }
+        NodeTag::T_CaseTestExpr => node.as_case_test_expr().unwrap().typeMod,
+        // C exprTypmod CaseExpr: typmod only when every result agrees.
+        NodeTag::T_CaseExpr => {
+            let c = node.as_case_expr().unwrap();
+            let Some(defresult) = c.defresult else { return -1 };
+            if execexpr::expr_type(defresult) != c.casetype {
+                return -1;
+            }
+            let typmod = expr_typmod(defresult);
+            if typmod < 0 {
+                return -1;
+            }
+            for w in &c.args {
+                let result =
+                    w.as_case_when().expect("CaseWhen").result.expect("CaseWhen.result");
+                if execexpr::expr_type(result) != c.casetype || expr_typmod(result) != typmod {
+                    return -1;
+                }
+            }
+            typmod
+        }
         tag => panic!("exprTypmod (nodeFuncs.c): node family {tag:?} not ported"),
     }
 }
@@ -465,6 +486,8 @@ pub fn expr_collation(node: Node<'_>) -> Oid {
                 _ => 0,
             }
         }
+        NodeTag::T_CaseExpr => node.as_case_expr().unwrap().casecollid,
+        NodeTag::T_CaseTestExpr => node.as_case_test_expr().unwrap().collation,
         tag => panic!("exprCollation (nodeFuncs.c): node family {tag:?} not ported"),
     }
 }

@@ -440,6 +440,8 @@ pub fn expr_collation(node: Node<'_>) -> u32 {
         NodeTag::T_AlternativeSubPlan => expr_collation(
             node.as_alternative_sub_plan().unwrap().subplans.first().expect("alternatives"),
         ),
+        NodeTag::T_CaseExpr => node.as_case_expr().unwrap().casecollid,
+        NodeTag::T_CaseTestExpr => node.as_case_test_expr().unwrap().collation,
         other => panic!("exprCollation (nodeFuncs.c): {other:?}; M2 expression lane"),
     }
 }

@@ -1504,6 +1504,58 @@ fn deparse_expr<'mcx>(
         NodeTag::T_Param => {
             deparse_param(es, plan_node, ancestors, expr.as_param().unwrap(), buf)
         }
+        // get_rule_expr T_CaseExpr, non-pretty form; arg-form WHENs show only
+        // the RHS of the parser-built "CaseTestExpr = RHS" (as C, punting to
+        // the full expression when the shape is not recognized).
+        NodeTag::T_CaseExpr => {
+            let c = expr.as_case_expr().unwrap();
+            buf.try_push_str("CASE")?;
+            if let Some(arg) = c.arg {
+                buf.try_push(' ')?;
+                deparse_expr(es, plan_node, ancestors, arg, useprefix, buf)?;
+            }
+            for cell in c.args.iter() {
+                let cw = cell.as_case_when().expect("CaseWhen");
+                let mut w = cw.expr.expect("CaseWhen.expr");
+                if c.arg.is_some() {
+                    if let Some(o) = w.as_op_expr() {
+                        if o.args.len() == 2
+                            && nodes_core::strip_implicit_coercions(o.args.nth(0)).node_tag()
+                                == NodeTag::T_CaseTestExpr
+                        {
+                            w = o.args.nth(1);
+                        }
+                    }
+                }
+                buf.try_push_str(" WHEN ")?;
+                deparse_expr(es, plan_node, ancestors, w, useprefix, buf)?;
+                buf.try_push_str(" THEN ")?;
+                deparse_expr(
+                    es,
+                    plan_node,
+                    ancestors,
+                    cw.result.expect("CaseWhen.result"),
+                    useprefix,
+                    buf,
+                )?;
+            }
+            buf.try_push_str(" ELSE ")?;
+            deparse_expr(
+                es,
+                plan_node,
+                ancestors,
+                c.defresult.expect("transformCaseExpr always adds a default"),
+                useprefix,
+                buf,
+            )?;
+            buf.try_push_str(" END")?;
+            Ok(())
+        }
+        // C: only reachable in optimized expressions (see CaseExpr comment).
+        NodeTag::T_CaseTestExpr => {
+            buf.try_push_str("CASE_TEST_EXPR")?;
+            Ok(())
+        }
         other => node_gap(
             "deparse_expression",
             &format!("{other:?} deparse unported (ruleutils lane)"),
@@ -1619,6 +1671,8 @@ fn deparse_expr_type(node: Node<'_>) -> types_core::Oid {
         NodeTag::T_Aggref => node.as_aggref().unwrap().aggtype,
         NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resulttype,
         NodeTag::T_BoolExpr | NodeTag::T_NullTest => types_core::catalog::BOOLOID,
+        NodeTag::T_CaseExpr => node.as_case_expr().unwrap().casetype,
+        NodeTag::T_CaseTestExpr => node.as_case_test_expr().unwrap().typeId,
         other => node_gap("exprType", &format!("{other:?} (ruleutils deparse lane)")),
     }
 }

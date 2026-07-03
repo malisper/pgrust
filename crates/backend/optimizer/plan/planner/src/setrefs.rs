@@ -555,6 +555,7 @@ fn exprs_collation(node: Node<'_>) -> u32 {
         NodeTag::T_FuncExpr => node.as_func_expr().unwrap().funccollid,
         NodeTag::T_OpExpr => node.as_op_expr().unwrap().opcollid,
         NodeTag::T_WindowFunc => node.as_window_func().unwrap().wincollid,
+        NodeTag::T_CaseExpr => node.as_case_expr().unwrap().casecollid,
         tag => panic!("exprCollation (nodeFuncs.c): {tag:?} not ported here"),
     }
 }
@@ -1058,6 +1059,47 @@ fn fix_scan_expr_mutator<'mcx>(
                 fix_alternative_subplan(run, node.as_alternative_sub_plan().unwrap(), num_exec);
             fix_scan_expr_mutator(run, chosen, rtoffset, num_exec)
         }
+        NodeTag::T_CaseTestExpr => Ok(node),
+        NodeTag::T_CaseExpr => {
+            let c = node.as_case_expr().unwrap();
+            let arg = match c.arg {
+                Some(a) => Some(fix_scan_expr_mutator(run, a, rtoffset, num_exec)?),
+                None => None,
+            };
+            let mut args = NodeList::nil();
+            for w in &c.args {
+                let cw = w.as_case_when().expect("CaseWhen");
+                let expr = fix_scan_expr_mutator(run, cw.expr.expect("CaseWhen.expr"), rtoffset, num_exec)?;
+                let result =
+                    fix_scan_expr_mutator(run, cw.result.expect("CaseWhen.result"), rtoffset, num_exec)?;
+                args.lappend(
+                    mcx,
+                    Node::mk(
+                        mcx,
+                        types_nodes::primnodes::CaseWhen {
+                            expr: Some(expr),
+                            result: Some(result),
+                            location: cw.location,
+                        },
+                    )?,
+                )?;
+            }
+            let defresult = match c.defresult {
+                Some(d) => Some(fix_scan_expr_mutator(run, d, rtoffset, num_exec)?),
+                None => None,
+            };
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::CaseExpr {
+                    casetype: c.casetype,
+                    casecollid: c.casecollid,
+                    arg,
+                    args,
+                    defresult,
+                    location: c.location,
+                },
+            )
+        }
         other => panic!("fix_scan_expr_mutator (setrefs.c): {other:?}; M2 expression lane"),
     }
 }
@@ -1132,6 +1174,22 @@ fn fix_scan_expr_walker<'mcx>(run: &mut PlannerRun<'mcx>, node: Node<'mcx>) -> P
                 fix_scan_expr_walker(run, arg)?;
             }
             Ok(())
+        }
+        NodeTag::T_CaseTestExpr => Ok(()),
+        NodeTag::T_CaseExpr => {
+            let c = node.as_case_expr().unwrap();
+            if let Some(a) = c.arg {
+                fix_scan_expr_walker(run, a)?;
+            }
+            for w in &c.args {
+                let cw = w.as_case_when().expect("CaseWhen");
+                fix_scan_expr_walker(run, cw.expr.expect("CaseWhen.expr"))?;
+                fix_scan_expr_walker(run, cw.result.expect("CaseWhen.result"))?;
+            }
+            match c.defresult {
+                Some(d) => fix_scan_expr_walker(run, d),
+                None => Ok(()),
+            }
         }
         other => panic!("fix_scan_expr_walker (setrefs.c): {other:?}; M2 expression lane"),
     }

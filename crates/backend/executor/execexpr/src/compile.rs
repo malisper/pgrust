@@ -641,6 +641,8 @@ pub fn expr_type(node: Node<'_>) -> Oid {
                 _ => 16,
             }
         }
+        NodeTag::T_CaseExpr => node.as_case_expr().unwrap().casetype,
+        NodeTag::T_CaseTestExpr => node.as_case_test_expr().unwrap().typeId,
         tag => panic!("execexpr exprType: node family {tag:?} not ported"),
     }
 }
@@ -738,6 +740,25 @@ fn setup_walker(node: Node<'_>, info: &mut SetupInfo) {
             }
             for a in sp.args.iter() {
                 setup_walker(a, info);
+            }
+        }
+        NodeTag::T_CaseTestExpr => {}
+        NodeTag::T_CaseExpr => {
+            let c = node.as_case_expr().unwrap();
+            if let Some(a) = c.arg {
+                setup_walker(a, info);
+            }
+            for w in c.args.iter() {
+                let cw = w.as_case_when().expect("CaseWhen");
+                if let Some(e) = cw.expr {
+                    setup_walker(e, info);
+                }
+                if let Some(r) = cw.result {
+                    setup_walker(r, info);
+                }
+            }
+            if let Some(d) = c.defresult {
+                setup_walker(d, info);
             }
         }
         tag => panic!("execexpr setup walker: node family {tag:?} not ported"),
@@ -909,6 +930,15 @@ fn init_expr_rec<'mcx>(
             state.flags |= crate::steps::EEO_FLAG_HAS_SUBPLAN;
             push_step(state, mcx, Step::SubPlan { sstate, out })
         }
+        NodeTag::T_BoolExpr => init_bool_expr(node, state, mcx, out, agg, params, sub),
+        NodeTag::T_CaseExpr => init_case_expr(node, state, mcx, out, agg, params, sub),
+        NodeTag::T_CaseTestExpr => match state.innermost_case {
+            Some(slot) => push_step(state, mcx, Step::CaseTestVal { slot, out }),
+            None => unported(
+                "EEOP_CASE_TESTVAL_EXT (externally supplied econtext caseValue — \
+                 domain checks / ArrayCoerceExpr)",
+            ),
+        },
         NodeTag::T_NullTest => {
             use ::types_nodes::primnodes::NullTestType;
             let nt = node.as_null_test().unwrap();
@@ -971,6 +1001,72 @@ fn init_bool_expr<'mcx>(
             | Step::BoolAndStep { jumpdone, .. }
             | Step::BoolOrStepFirst { jumpdone, .. }
             | Step::BoolOrStep { jumpdone, .. } => {
+                debug_assert_eq!(*jumpdone, u32::MAX);
+                *jumpdone = done;
+            }
+            _ => unreachable!(),
+        }
+    }
+    Ok(())
+}
+
+fn init_case_expr<'mcx>(
+    node: Node<'mcx>,
+    state: &mut ExprState<'mcx>,
+    mcx: Mcx<'mcx>,
+    out: OutRef,
+    agg: Option<Bind<'_, 'mcx>>,
+    params: ParamBind<'mcx>,
+    sub: Option<SubplanCompileEnv>,
+) -> PgResult<()> {
+    let c = node.as_case_expr().unwrap();
+    let caseval = match c.arg {
+        Some(arg) => {
+            let slot = alloc_nullable_datum(mcx)?;
+            init_expr_rec(arg, state, mcx, OutRef(Some(slot)), agg, params, sub)?;
+            // C: R/O-force only what could be an expanded datum.
+            if lsyscache::get_typlen(expr_type(arg))? == -1 {
+                push_step(state, mcx, Step::MakeReadonly { slot })?;
+            }
+            Some(slot)
+        }
+        None => None,
+    };
+
+    let mut adjust_jumps: PgVec<'_, usize> = PgVec::new_in(mcx);
+    for w in c.args.iter() {
+        let cw = w.as_case_when().expect("CaseWhen");
+
+        let save_innermost = state.innermost_case;
+        state.innermost_case = caseval;
+        init_expr_rec(cw.expr.expect("CaseWhen.expr"), state, mcx, out, agg, params, sub)?;
+        state.innermost_case = save_innermost;
+
+        let whenstep = state.steps.len();
+        push_step(state, mcx, Step::JumpIfNotTrue { jumpdone: u32::MAX, out })?;
+
+        init_expr_rec(cw.result.expect("CaseWhen.result"), state, mcx, out, agg, params, sub)?;
+
+        adjust_jumps.push(state.steps.len());
+        push_step(state, mcx, Step::Jump { jumpdone: u32::MAX })?;
+
+        let next = state.steps.len() as u32;
+        match &mut state.steps[whenstep] {
+            Step::JumpIfNotTrue { jumpdone, .. } => {
+                debug_assert_eq!(*jumpdone, u32::MAX);
+                *jumpdone = next;
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    let defresult = c.defresult.expect("transformCaseExpr always adds a default");
+    init_expr_rec(defresult, state, mcx, out, agg, params, sub)?;
+
+    let done = state.steps.len() as u32;
+    for ix in adjust_jumps.iter() {
+        match &mut state.steps[*ix] {
+            Step::Jump { jumpdone } => {
                 debug_assert_eq!(*jumpdone, u32::MAX);
                 *jumpdone = done;
             }
@@ -1249,6 +1345,9 @@ fn ready_expr(state: &mut ExprState<'_>) {
             Step::AggStrictInputCheck { jumpnull, .. }
             | Step::AggStrictInputCheck1 { jumpnull, .. } => {
                 assert!((*jumpnull as usize) < len, "strict-input jump target out of range");
+            }
+            Step::Jump { jumpdone } | Step::JumpIfNotTrue { jumpdone, .. } => {
+                assert!((*jumpdone as usize) < len, "case jump target out of range");
             }
             Step::FuncExpr { call, .. }
             | Step::FuncExprStrict1 { call, .. }

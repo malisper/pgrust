@@ -28,6 +28,7 @@ format_type = { path = "../../utils/adt/format_type" }
 guc_tables = { path = "../../utils/misc/guc_tables" }
 types_fmgr = { path = "../../../_support/types/fmgr" }
 keywords = { path = "../../../common/keywords" }
+nodes_core = { path = "../../nodes/nodes_core" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
 typcache = { path = "../../utils/cache/typcache" }
 postgres = { path = "../../tcop/postgres" }

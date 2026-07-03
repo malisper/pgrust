@@ -2369,6 +2369,7 @@ dependencies = [
  "mbutils_seams",
  "mcx",
  "miscinit_seams",
+ "nodes_core",
  "pg_sema_seams",
  "planner",
  "pmsignal_seams",
@@ -4762,9 +4763,21 @@ dependencies = [
  "lsyscache",
  "mbutils",
  "mcx",
+ "parse_collate_seams",
  "parse_expr",
  "parser_small1",
  "types_core",
+ "types_error",
+ "types_nodes",
+]
+
+[[package]]
+name = "parse_collate_seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "parser_small1",
+ "seam_core",
  "types_error",
  "types_nodes",
 ]
@@ -4783,6 +4796,7 @@ dependencies = [
  "mbutils",
  "mcx",
  "miscinit_seams",
+ "parse_collate_seams",
  "parse_func",
  "parse_oper",
  "parse_relation",
@@ -6987,6 +7001,7 @@ dependencies = [
  "nodeunique",
  "nodewindowagg",
  "parallel",
+ "parse_collate",
  "parse_expr",
  "parser_analyze",
  "parser_driver",

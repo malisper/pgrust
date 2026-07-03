@@ -391,6 +391,13 @@ pub struct CaseExpr<'mcx> {
     pub location: ParseLoc,
 }
 
+#[derive(Clone, Copy, Default)]
+pub struct CaseTestExpr {
+    pub typeId: Oid,
+    pub typeMod: i32,
+    pub collation: Oid,
+}
+
 #[derive(Default)]
 pub struct CaseWhen<'mcx> {
     pub expr: Option<Node<'mcx>>,
@@ -526,6 +533,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for CaseExpr<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for CaseWhen<'mcx> {
     const TAG: NodeTag = NodeTag::T_CaseWhen;
+}
+unsafe impl NodeVariant<'_> for CaseTestExpr {
+    const TAG: NodeTag = NodeTag::T_CaseTestExpr;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for CoalesceExpr<'mcx> {
     const TAG: NodeTag = NodeTag::T_CoalesceExpr;
@@ -756,6 +766,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_case_when(self) -> Option<&'mcx CaseWhen<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_case_test_expr(self) -> Option<&'mcx CaseTestExpr> {
         self.as_variant()
     }
 

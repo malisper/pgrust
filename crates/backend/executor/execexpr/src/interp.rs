@@ -581,6 +581,38 @@ fn run_program<'mcx>(
                 };
                 write_out(*out, &mut regs, value, false);
             }
+            Step::Jump { jumpdone } => {
+                // SAFETY: jump targets validated < steps.len() at ready.
+                sp = unsafe { base.add(*jumpdone as usize) };
+                continue;
+            }
+            Step::JumpIfNotTrue { jumpdone, out } => {
+                let r = read_out(*out, &regs);
+                if r.isnull || !r.value.as_bool() {
+                    // SAFETY: jump targets validated < steps.len() at ready.
+                    sp = unsafe { base.add(*jumpdone as usize) };
+                    continue;
+                }
+            }
+            Step::CaseTestVal { slot, out } => {
+                // SAFETY: compile-allocated workspace, live for 'mcx.
+                let nd = unsafe { slot.read() };
+                write_out(*out, &mut regs, nd.value, nd.isnull);
+            }
+            Step::MakeReadonly { slot } => {
+                // SAFETY: compile-allocated workspace holding a live datum.
+                unsafe {
+                    let nd = slot.read();
+                    if !nd.isnull {
+                        slot.write(NullableDatum {
+                            value: datum::expandeddatum::make_expanded_object_read_only_internal(
+                                nd.value,
+                            ),
+                            isnull: false,
+                        });
+                    }
+                }
+            }
             Step::Qual { jumpdone } => {
                 if regs.isnull || !regs.value.as_bool() {
                     regs.value = Datum::from_bool(false);
