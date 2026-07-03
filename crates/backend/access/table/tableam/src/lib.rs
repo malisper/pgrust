@@ -255,7 +255,7 @@ mod heap {
             }
             // ExecFetchSlotHeapTuple copy arm (virtual/minimal source slots,
             // e.g. multi-row VALUES routed into partitions).
-            other => {
+            ref mut other => {
                 let mut tuple = exectuples::exec_copy_slot_heap_tuple(other, mcx, mcx)?;
                 tuple.t_tableOid = rel.rd_id;
                 ::heapam::heap_insert(rel, &mut tuple, cid, options)?;
