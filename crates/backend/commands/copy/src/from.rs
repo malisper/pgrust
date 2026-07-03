@@ -64,6 +64,9 @@ pub struct CopyFromState<'mcx, 's> {
     pub(crate) defmap: PgVec<'mcx, usize>,
     pub(crate) defaults: PgVec<'mcx, bool>,
     pub(crate) where_clause: NodeList<'mcx>,
+    pub(crate) relname: String,
+    pub(crate) escontext: Option<Box<types_fmgr::ErrorSaveNode>>,
+    pub(crate) num_errors: u64,
     pub(crate) bytes_processed: u64,
 }
 
@@ -90,9 +93,6 @@ pub fn BeginCopyFrom<'mcx, 's>(
     let opts = ProcessCopyOptions(true, options, source_text)?;
     if opts.binary {
         unported("FORMAT binary (text-only lane)");
-    }
-    if opts.on_error == crate::CopyOnErrorChoice::Ignore {
-        unported("ON_ERROR ignore (soft-error skip lane)");
     }
     if opts.freeze {
         unported("FREEZE (multi-insert/frozen lane)");
@@ -237,6 +237,7 @@ pub fn BeginCopyFrom<'mcx, 's>(
     };
 
     let max_fields = attnumlist.len();
+    let opts_on_error = opts.on_error;
     Ok(CopyFromState {
         opts,
         src,
@@ -273,6 +274,10 @@ pub fn BeginCopyFrom<'mcx, 's>(
         defmap,
         defaults: vec_from_elem_in(mcx, false, num_phys_attrs),
         where_clause,
+        relname: rel.name().to_string(),
+        escontext: (opts_on_error == crate::CopyOnErrorChoice::Ignore)
+            .then(|| Box::new(types_fmgr::ErrorSaveNode::new(false))),
+        num_errors: 0,
         bytes_processed: 0,
     })
 }
@@ -375,6 +380,15 @@ fn copy_from_body<'mcx>(
                 break;
             }
         }
+        if cstate.escontext.as_ref().is_some_and(|n| n.ctx.error_occurred()) {
+            cstate.escontext.as_mut().unwrap().ctx.reset_error_occurred();
+            if cstate.opts.reject_limit > 0 && cstate.num_errors > cstate.opts.reject_limit as u64
+            {
+                return Err(reject_limit_exceeded(cstate.opts.reject_limit));
+            }
+            continue;
+        }
+
         exectuples::exec_store_virtual_tuple(slot);
         slot.base_mut().tts_tableOid = rel.rd_id;
 
@@ -432,6 +446,18 @@ fn copy_from_body<'mcx>(
     }
 
     tableam::table_finish_bulk_insert(rel, ti_options)?;
+
+    if cstate.num_errors > 0
+        && cstate.opts.log_verbosity >= crate::CopyLogVerbosityChoice::Default
+    {
+        let n = cstate.num_errors;
+        let msg = if n == 1 {
+            format!("{n} row was skipped due to data type incompatibility")
+        } else {
+            format!("{n} rows were skipped due to data type incompatibility")
+        };
+        ereport(types_error::NOTICE).errmsg(msg).finish(loc("CopyFrom"))?;
+    }
     Ok(processed)
 }
 
@@ -521,7 +547,7 @@ fn copy_from_error_context(
 
 const MAX_COPY_DATA_DISPLAY: i32 = 100;
 
-fn limit_printout_length(bytes: &[u8]) -> String {
+pub(crate) fn limit_printout_length(bytes: &[u8]) -> String {
     let slen = bytes.len() as i32;
     if slen <= MAX_COPY_DATA_DISPLAY {
         return String::from_utf8_lossy(bytes).into_owned();
@@ -571,6 +597,17 @@ pub fn EndCopyFrom(cstate: CopyFromState<'_, '_>) -> PgResult<()> {
         }
     }
     Ok(())
+}
+
+#[cold]
+#[inline(never)]
+fn reject_limit_exceeded(limit: i64) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!(
+            "skipped more than REJECT_LIMIT ({limit}) rows due to data type incompatibility"
+        ))
+        .with_sqlstate(types_error::ERRCODE_INVALID_TEXT_REPRESENTATION),
+    )
 }
 
 #[cold]

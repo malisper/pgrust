@@ -52,7 +52,7 @@ pub enum CopyOnErrorChoice {
     Ignore,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub enum CopyLogVerbosityChoice {
     Silent,
     #[default]
