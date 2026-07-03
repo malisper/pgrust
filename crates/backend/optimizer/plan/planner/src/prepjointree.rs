@@ -1,7 +1,7 @@
 //! prepjointree.c, simple-subquery slice: pull_up_subqueries over the full
 //! jointree (FromExpr/JoinExpr) plus reduce_outer_joins with the LEFT->ANTI
-//! reduction. Every non-pullable subquery is a named panic — the SubqueryScan
-//! fallback lane is unported, so a silent keep would plan nothing.
+//! reduction. Non-pullable subqueries stay as RTE_SUBQUERY for
+//! set_subquery_pathlist (allpaths.rs); LATERAL is the remaining loud arm.
 
 use mcx::Mcx;
 use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
@@ -14,11 +14,12 @@ use types_nodes::{Node, NodeTag};
 // functionally (replace the RangeTblRef, substitute Vars in every qual), so
 // the loop re-scans until no pullable subquery reference remains.
 pub fn pull_up_subqueries<'mcx>(mcx: Mcx<'mcx>, parse: &mut Query<'mcx>) -> PgResult<()> {
+    let mut kept: mcx::PgVec<'mcx, i32> = mcx::PgVec::new_in(mcx);
     loop {
         let jt = parse.jointree.expect("jointree is a FromExpr");
         let mut target: Option<i32> = None;
         for child in &jt.fromlist {
-            find_pullable_subquery(parse, child, &mut target);
+            find_pullable_subquery(parse, child, &mut target, &kept);
             if target.is_some() {
                 break;
             }
@@ -26,7 +27,10 @@ pub fn pull_up_subqueries<'mcx>(mcx: Mcx<'mcx>, parse: &mut Query<'mcx>) -> PgRe
         let Some(rti) = target else { return Ok(()) };
         let rte_node = parse.rtable.nth(rti as usize - 1);
         let rte = rte_node.as_range_tbl_entry().expect("rtable cell");
-        assert_simple_subquery(rte)?;
+        if !is_simple_subquery(rte)? {
+            kept.push(rti);
+            continue;
+        }
         pull_up_simple_subquery(mcx, parse, rti, rte_node)?;
     }
 }
@@ -35,6 +39,7 @@ fn find_pullable_subquery<'mcx>(
     parse: &Query<'mcx>,
     node: Node<'mcx>,
     target: &mut Option<i32>,
+    kept: &[i32],
 ) {
     if target.is_some() {
         return;
@@ -43,20 +48,20 @@ fn find_pullable_subquery<'mcx>(
         NodeTag::T_RangeTblRef => {
             let rti = node.as_range_tbl_ref().expect("RangeTblRef").rtindex;
             let rte = parse.rtable.nth(rti as usize - 1).as_range_tbl_entry().expect("rtable cell");
-            if rte.rtekind == RTEKind::RTE_SUBQUERY {
+            if rte.rtekind == RTEKind::RTE_SUBQUERY && !kept.contains(&rti) {
                 *target = Some(rti);
             }
         }
         NodeTag::T_FromExpr => {
             let f = node.as_from_expr().unwrap();
             for child in &f.fromlist {
-                find_pullable_subquery(parse, child, target);
+                find_pullable_subquery(parse, child, target, kept);
             }
         }
         NodeTag::T_JoinExpr => {
             let j = node.as_join_expr().unwrap();
-            find_pullable_subquery(parse, j.larg, target);
-            find_pullable_subquery(parse, j.rarg, target);
+            find_pullable_subquery(parse, j.larg, target, kept);
+            find_pullable_subquery(parse, j.rarg, target, kept);
         }
         other => panic!(
             "pull_up_subqueries_recurse (prepjointree.c): {other:?} jointree arm; \
@@ -114,9 +119,9 @@ pub(crate) fn rte_copy_with_perminfoindex<'mcx>(
     )
 }
 
-// is_simple_subquery (prepjointree.c) with every false-return a named panic:
-// C keeps the RTE and plans a SubqueryScan; that lane is unported.
-fn assert_simple_subquery(rte: &RangeTblEntry<'_>) -> PgResult<()> {
+// is_simple_subquery (prepjointree.c): false keeps the RTE for the
+// SubqueryScan path (set_subquery_pathlist); LATERAL stays loud (parser too).
+fn is_simple_subquery(rte: &RangeTblEntry<'_>) -> PgResult<bool> {
     let sub = rte.subquery.expect("RTE_SUBQUERY has a subquery");
     let blocked = if sub.setOperations.is_some() {
         Some("setOperations")
@@ -142,26 +147,19 @@ fn assert_simple_subquery(rte: &RangeTblEntry<'_>) -> PgResult<()> {
         Some("WITH")
     } else if rte.security_barrier {
         Some("security_barrier")
-    } else if rte.lateral {
-        Some("LATERAL")
     } else {
         None
     };
-    if let Some(what) = blocked {
-        panic!(
-            "is_simple_subquery (prepjointree.c): {what} subquery is not pullable — \
-             SubqueryScan planning lane unported"
-        );
+    assert!(!rte.lateral, "is_simple_subquery (prepjointree.c): LATERAL; M2 lateral lane");
+    if blocked.is_some() {
+        return Ok(false);
     }
     for te in &sub.targetList {
         if clauses::contain_volatile_functions(te)? {
-            panic!(
-                "is_simple_subquery (prepjointree.c): volatile targetlist — \
-                 SubqueryScan planning lane unported"
-            );
+            return Ok(false);
         }
     }
-    Ok(())
+    Ok(true)
 }
 
 // pull_up_simple_subquery (prepjointree.c). C copyObject's rte->subquery and

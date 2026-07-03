@@ -94,10 +94,9 @@ pub fn subquery_planner<'mcx>(
                 }
             }
             RTEKind::RTE_SUBQUERY => {
-                // Simple subqueries were pulled up above (non-pullable ones
-                // panicked there); only dangling flattened RTEs remain --
-                // except set-operation leaves, which live outside the jointree.
-                debug_assert!(rte.subquery.is_none() || parse.setOperations.is_some());
+                // Simple subqueries were pulled up above; retained ones plan
+                // recursively in set_subquery_pathlist (their expressions are
+                // preprocessed inside that subroot, never here — C matches).
             }
             RTEKind::RTE_FUNCTION => {
                 // preprocess_function_rtes: inline_set_returning_function is a

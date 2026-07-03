@@ -91,6 +91,9 @@ fn set_rel_size(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResult<()
         RTEKind::RTE_VALUES => {
             crate::costsize::set_values_size_estimates(run, rel)?;
         }
+        RTEKind::RTE_SUBQUERY => {
+            set_subquery_pathlist(run, rel, rti)?;
+        }
         RTEKind::RTE_CTE => {
             crate::cte::set_cte_pathlist(run, rel, rti)?;
         }
@@ -99,7 +102,119 @@ fn set_rel_size(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResult<()
         }
         other => panic!("set_rel_size (allpaths.c): {other:?}; M2 scan lane"),
     }
-    debug_assert!(run.root.rel(rel).rows > 0.0);
+    debug_assert!(
+        run.root.rel(rel).rows > 0.0 || crate::joinrels::is_dummy_rel(&run.root, rel)
+    );
+    Ok(())
+}
+
+// set_subquery_pathlist (allpaths.c): qual pushdown is loud (baserestrictinfo
+// empty on this lane), remove_unused_subquery_outputs skipped (plan-shape
+// optimization only), pathkeys empty (convert_subquery_pathkeys unported).
+fn set_subquery_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResult<()> {
+    let rte = run.rte(rti);
+    assert!(!rte.lateral, "set_subquery_pathlist (allpaths.c): LATERAL; M2 lateral lane");
+    assert!(
+        run.root.rel(rel).baserestrictinfo.is_empty(),
+        "set_subquery_pathlist (allpaths.c): qual pushdown \
+         (subquery_is_pushdown_safe) unported"
+    );
+
+    let parse = run.parse();
+    let mut n_baserels = 0;
+    for i in 1..run.root.simple_rel_array_size as usize {
+        if let Some(r) = run.root.simple_rel_array[i] {
+            if run.root.rel(r).reloptkind == RELOPT_BASEREL {
+                n_baserels += 1;
+            }
+        }
+    }
+    let tuple_fraction = if parse.hasAggs
+        || !parse.groupClause.is_nil()
+        || !parse.groupingSets.is_nil()
+        || run.root.hasHavingQual
+        || !parse.distinctClause.is_nil()
+        || !parse.sortClause.is_nil()
+        || n_baserels > 1
+    {
+        0.0
+    } else {
+        run.root.tuple_fraction
+    };
+
+    debug_assert!(run.root.plan_params.is_empty());
+    let sub_parse = crate::subselect::query_cells_copy(
+        run.mcx,
+        rte.subquery.expect("RTE_SUBQUERY has a subquery"),
+    )?;
+    run.push_root()?;
+    crate::subquery::subquery_planner(run, sub_parse, tuple_fraction, None)?;
+    let idx = run.pop_root_to_rel_subroot();
+    run.root.rel_mut(rel).subroot_idx = Some(idx);
+    assert!(
+        run.root.plan_params.is_empty(),
+        "set_subquery_pathlist (allpaths.c): subplan_params isolation unported"
+    );
+
+    run.swap_with_rel_subroot(idx);
+    let sub_dummy = {
+        let final_rel = crate::planmain::fetch_final_rel(run);
+        crate::joinrels::is_dummy_rel(&run.root, final_rel)
+    };
+    run.swap_with_rel_subroot(idx);
+    if sub_dummy {
+        return set_dummy_rel_pathlist(run, rel);
+    }
+
+    crate::costsize::set_subquery_size_estimates(run, rel)?;
+
+    let sub = run.rte(rti).subquery.expect("RTE_SUBQUERY has a subquery");
+    let trivial_pathtarget = {
+        let rt = run.root.rel_reltarget(rel);
+        if rt.exprs.len() != sub.targetList.len() {
+            false
+        } else {
+            let mut ok = true;
+            for (i, &eid) in rt.exprs.iter().enumerate() {
+                match run.root.expr_node(eid).as_var() {
+                    Some(v) if v.varno == rti as i32 && v.varattno as usize == i + 1 => {}
+                    _ => {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            ok
+        }
+    };
+
+    run.swap_with_rel_subroot(idx);
+    let mut candidates: mcx::PgVec<
+        '_,
+        (types_pathnodes::PathId, crate::pathnode::SubqueryScanInfo),
+    > = mcx::PgVec::new_in(run.mcx);
+    {
+        let final_rel = crate::planmain::fetch_final_rel(run);
+        debug_assert!(run.root.rel(final_rel).partial_pathlist.is_empty());
+        let paths =
+            crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.rel(final_rel).pathlist);
+        for &sp in paths.iter() {
+            candidates.push((sp, crate::prepunion::child_info(run, sp)));
+        }
+    }
+    run.swap_with_rel_subroot(idx);
+
+    for c in candidates.iter() {
+        let id = crate::pathnode::create_subqueryscan_path(
+            run,
+            rel,
+            c.0,
+            trivial_pathtarget,
+            mcx::PgVec::new_in(run.mcx),
+            &c.1,
+        )?;
+        add_path(run, rel, id);
+    }
     Ok(())
 }
 
@@ -177,6 +292,7 @@ fn set_rel_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResul
         RTEKind::RTE_RELATION => set_plain_rel_pathlist(run, rel)?,
         RTEKind::RTE_FUNCTION => set_function_pathlist(run, rel, rti)?,
         RTEKind::RTE_VALUES => set_values_pathlist(run, rel)?,
+        RTEKind::RTE_SUBQUERY => {} // fully handled during set_rel_size
         RTEKind::RTE_CTE => {} // fully handled during set_rel_size
         other => panic!("set_rel_pathlist (allpaths.c): {other:?}; M2 scan lane"),
     }
@@ -220,10 +336,10 @@ fn set_rel_consider_parallel(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -
             }
             debug_assert!(rte.tablesample.is_none());
         }
-        RTEKind::RTE_FUNCTION | RTEKind::RTE_VALUES => {
-            // C tests is_parallel_safe over the funcexprs/values_lists;
-            // parallel plans are loud on this lane, so the flag stays
-            // conservatively false.
+        RTEKind::RTE_FUNCTION | RTEKind::RTE_VALUES | RTEKind::RTE_SUBQUERY => {
+            // C tests is_parallel_safe over the funcexprs/values_lists (and
+            // security_barrier for subqueries); parallel plans are loud on
+            // this lane, so the flag stays conservatively false.
             return Ok(());
         }
         RTEKind::RTE_CTE => {

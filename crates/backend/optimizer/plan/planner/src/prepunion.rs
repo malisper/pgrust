@@ -239,7 +239,7 @@ fn build_setop_child_paths<'mcx>(
     Ok(Some(result?))
 }
 
-fn child_info(run: &PlannerRun<'_>, pid: PathId) -> SubqueryScanInfo {
+pub(crate) fn child_info(run: &PlannerRun<'_>, pid: PathId) -> SubqueryScanInfo {
     let p = run.root.path(pid).base();
     SubqueryScanInfo {
         rows: p.rows,
