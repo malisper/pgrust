@@ -1,12 +1,15 @@
 // storage.c. pendingDeletes: Vec, index 0 == C list head (C prepends);
-// pendingSyncHash stays unported (wal_level=minimal lane), AddPendingSync
-// panics instead.
+// pendingSyncs: Vec where C uses a hash — entries per transaction are the
+// relations created under wal_level=minimal, always tiny.
 #![allow(non_snake_case)]
 
 use std::cell::RefCell;
 
 use mcx::{Mcx, PgVec};
-use types_core::{ForkNumber, ProcNumber, INVALID_PROC_NUMBER};
+use types_core::{
+    BlockNumber, ForkNumber, InvalidBlockNumber, ProcNumber, BLCKSZ, INVALID_PROC_NUMBER,
+    MAX_FORKNUM,
+};
 use types_error::PgResult;
 use types_storage::{RelFileLocator, RelFileLocatorBackend};
 
@@ -26,8 +29,29 @@ struct PendingRelDelete {
     nest_level: i32,
 }
 
+#[derive(Clone, Copy)]
+struct PendingRelSync {
+    rlocator: RelFileLocator,
+    // Set by the unported RelationTruncate/RelationPreTruncate arm; a
+    // truncated relation must always take the fsync path (storage.c).
+    is_truncated: bool,
+}
+
 thread_local! {
     static PENDING: RefCell<Vec<PendingRelDelete>> = const { RefCell::new(Vec::new()) };
+    static PENDING_SYNCS: RefCell<Vec<PendingRelSync>> = const { RefCell::new(Vec::new()) };
+    static WAL_SKIP_THRESHOLD: std::cell::Cell<i32> = const { std::cell::Cell::new(2048) };
+}
+
+pub fn AddPendingSync(rlocator: RelFileLocator) {
+    PENDING_SYNCS.with_borrow_mut(|p| {
+        debug_assert!(!p.iter().any(|s| s.rlocator == rlocator));
+        p.push(PendingRelSync { rlocator, is_truncated: false });
+    });
+}
+
+pub fn RelFileLocatorSkippingWAL(rlocator: RelFileLocator) -> bool {
+    PENDING_SYNCS.with_borrow(|p| p.iter().any(|s| s.rlocator == rlocator))
 }
 
 pub fn RelationCreateStorage(
@@ -68,7 +92,7 @@ pub fn RelationCreateStorage(
     }
 
     if relpersistence == RELPERSISTENCE_PERMANENT && !transam_xlog::XLogIsNeeded() {
-        panic!("RelationCreateStorage (storage.c): AddPendingSync unported (wal_level=minimal)");
+        AddPendingSync(rlocator);
     }
 
     Ok(key)
@@ -150,9 +174,60 @@ pub fn smgrGetPendingDeletes<'mcx>(
     Ok(out)
 }
 
-pub fn smgrDoPendingSyncs(_is_commit: bool, _is_parallel_worker: bool) -> PgResult<()> {
-    // pendingSyncHash is never populated (AddPendingSync panics), so C's
-    // early-return-on-NULL arm is the whole function.
+pub fn smgrDoPendingSyncs(is_commit: bool, is_parallel_worker: bool) -> PgResult<()> {
+    let mut syncs = PENDING_SYNCS.with_borrow_mut(std::mem::take);
+    if syncs.is_empty() || !is_commit || is_parallel_worker {
+        return Ok(());
+    }
+
+    PENDING.with_borrow(|p| {
+        syncs.retain(|s| !p.iter().any(|d| d.at_commit && d.rlocator == s.rlocator));
+    });
+
+    let mut srels: Vec<RelFileLocatorBackend> = Vec::new();
+    for sync in &syncs {
+        let key = RelFileLocatorBackend { locator: sync.rlocator, backend: INVALID_PROC_NUMBER };
+        smgr::smgropen(sync.rlocator, INVALID_PROC_NUMBER)?;
+
+        let mut nblocks = [InvalidBlockNumber; MAX_FORKNUM as usize + 1];
+        let mut total_blocks: u64 = 0;
+        if !sync.is_truncated {
+            for fork_i in 0..=MAX_FORKNUM as i32 {
+                let fork = ForkNumber::from_i32(fork_i).unwrap();
+                if smgr::smgrexists(key, fork)? {
+                    debug_assert!(fork != ForkNumber::INIT_FORKNUM);
+                    let n = smgr::smgrnblocks(key, fork)?;
+                    nblocks[fork_i as usize] = n;
+                    total_blocks += n as u64;
+                }
+            }
+        }
+
+        let threshold =
+            WAL_SKIP_THRESHOLD.with(|c| c.get()) as u64 * 1024 / BLCKSZ as u64;
+        if sync.is_truncated || total_blocks >= threshold {
+            srels.push(key);
+        } else {
+            for fork_i in 0..=MAX_FORKNUM as i32 {
+                let n = nblocks[fork_i as usize];
+                if n == InvalidBlockNumber {
+                    continue;
+                }
+                let rel = xlogutils::CreateFakeRelcacheEntry(sync.rlocator);
+                xloginsert::log_newpage_range(
+                    &rel,
+                    ForkNumber::from_i32(fork_i).unwrap(),
+                    0,
+                    n as BlockNumber,
+                    false,
+                )?;
+            }
+        }
+    }
+
+    if !srels.is_empty() {
+        smgr::smgrdosyncall(&srels)?;
+    }
     Ok(())
 }
 
@@ -200,9 +275,14 @@ pub fn DropRelationFiles(delrels: &[RelFileLocator], is_redo: bool) -> PgResult<
 }
 
 pub fn init_seams() {
+    guc_tables::vars::wal_skip_threshold.install(guc_tables::GucVarAccessors {
+        get: || WAL_SKIP_THRESHOLD.with(|c| c.get()),
+        set: |v| WAL_SKIP_THRESHOLD.with(|c| c.set(v)),
+    });
     catalog_storage_seams::smgr_get_pending_deletes::set(smgrGetPendingDeletes);
     catalog_storage_seams::smgr_do_pending_deletes::set(smgrDoPendingDeletes);
     catalog_storage_seams::smgr_do_pending_syncs::set(smgrDoPendingSyncs);
+    catalog_storage_seams::rel_file_locator_skipping_wal::set(RelFileLocatorSkippingWAL);
     catalog_storage_seams::at_subcommit_smgr::set(AtSubCommit_smgr);
     catalog_storage_seams::at_subabort_smgr::set(AtSubAbort_smgr);
     catalog_storage_seams::post_prepare_smgr::set(PostPrepare_smgr);

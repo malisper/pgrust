@@ -7,16 +7,22 @@
 use elog::elog;
 use types_core::{Oid, XLogRecPtr, XACT_FLAGS_ACQUIREDACCESSEXCLUSIVELOCK};
 use types_error::{PgResult, DEBUG2};
+use types_storage::sinval::{SharedInvalidationMessage, SHARED_INVALIDATION_MESSAGE_SIZE};
 use types_storage::storage::xl_standby_lock;
 
 // rmgrlist.h / standbydefs.h; RM_STANDBY_ID is test-pinned to 8 in rmgr.
 const RM_STANDBY_ID: u8 = 8;
 const XLOG_STANDBY_LOCK: u8 = 0x00;
 const XLOG_RUNNING_XACTS: u8 = 0x10;
+const XLOG_INVALIDATIONS: u8 = 0x20;
+const XLR_INFO_MASK: u8 = 0x0F;
 const MIN_SIZE_OF_XACT_RUNNING_XACTS: usize = 24;
 // offsetof(xl_standby_locks, locks): the i32 nlocks count.
 const OFFSET_OF_XL_STANDBY_LOCKS_LOCKS: usize = 4;
 const SIZE_OF_XL_STANDBY_LOCK: usize = 12;
+// offsetof(xl_invalidations, msgs): dbId 0, tsId 4, relcacheInitFileInval 8,
+// pad, nmsgs 12.
+const MIN_SIZE_OF_INVALIDATIONS: usize = 16;
 
 #[cfg(test)]
 mod tests;
@@ -152,23 +158,57 @@ pub fn LogAccessExclusiveLockPrepare() -> PgResult<()> {
     Ok(())
 }
 
+fn invalidations_header(relcache_init_file_inval: bool, nmsgs: usize) -> [u8; MIN_SIZE_OF_INVALIDATIONS] {
+    let mut xlrec = [0u8; MIN_SIZE_OF_INVALIDATIONS];
+    xlrec[0..4].copy_from_slice(&init_small::globals::MyDatabaseId().to_ne_bytes());
+    xlrec[4..8].copy_from_slice(&init_small::globals::MyDatabaseTableSpace().to_ne_bytes());
+    xlrec[8] = relcache_init_file_inval as u8;
+    xlrec[12..16].copy_from_slice(&(nmsgs as i32).to_ne_bytes());
+    xlrec
+}
+
+pub fn LogStandbyInvalidations(
+    msgs: &[SharedInvalidationMessage],
+    relcache_init_file_inval: bool,
+) -> PgResult<()> {
+    let xlrec = invalidations_header(relcache_init_file_inval, msgs.len());
+    let mut body = Vec::with_capacity(msgs.len() * SHARED_INVALIDATION_MESSAGE_SIZE);
+    for msg in msgs {
+        body.extend_from_slice(&msg.to_wire_bytes());
+    }
+    xloginsert::insert_record(RM_STANDBY_ID, XLOG_INVALIDATIONS, 0, &[&xlrec, &body], &[])?;
+    Ok(())
+}
+
 pub fn standby_redo(record: &mut xlogreader_seams::XLogReaderState) -> PgResult<()> {
     let decoded = record
         .record
         .as_ref()
         .expect("standby_redo dispatched on a reader with no decoded record");
     debug_assert!(decoded.max_block_id < 0);
+    let info = decoded.xl_info & !XLR_INFO_MASK;
 
     // C returns before every arm unless in hot standby (recovery half unported).
-    assert!(
-        xlogutils::standby_state() == xlogutils::STANDBY_DISABLED,
-        "standby_redo: hot-standby arms unported (standby.c recovery half)"
-    );
-    Ok(())
+    if xlogutils::standby_state() == xlogutils::STANDBY_DISABLED {
+        return Ok(());
+    }
+    match info {
+        XLOG_STANDBY_LOCK => {
+            panic!("standby_redo: StandbyAcquireAccessExclusiveLock unported (hot standby)")
+        }
+        XLOG_RUNNING_XACTS => {
+            panic!("standby_redo: ProcArrayApplyRecoveryInfo unported (hot standby)")
+        }
+        XLOG_INVALIDATIONS => {
+            panic!("standby_redo: ProcessCommittedInvalidationMessages unported (hot standby)")
+        }
+        _ => panic!("standby_redo: unknown op code {info}"),
+    }
 }
 
 pub fn init_seams() {
     standby_seams::log_standby_snapshot::set(LogStandbySnapshot);
+    standby_seams::log_standby_invalidations::set(LogStandbyInvalidations);
     standby_seams::log_access_exclusive_lock::set(LogAccessExclusiveLock);
     standby_seams::log_access_exclusive_lock_prepare::set(LogAccessExclusiveLockPrepare);
 }

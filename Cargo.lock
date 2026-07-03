@@ -787,6 +787,7 @@ name = "bufmgr"
 version = "0.0.0"
 dependencies = [
  "bufmgr_seams",
+ "catalog_storage_seams",
  "checkpointer_seams",
  "condition_variable",
  "datum",
@@ -1068,6 +1069,7 @@ name = "catalog_storage"
 version = "0.1.0"
 dependencies = [
  "catalog_storage_seams",
+ "guc_tables",
  "mcx",
  "smgr",
  "storage_xlog",
@@ -1077,7 +1079,9 @@ dependencies = [
  "types_rel",
  "types_storage",
  "xact",
+ "xloginsert",
  "xloginsert_seams",
+ "xlogutils",
 ]
 
 [[package]]
@@ -7168,17 +7172,29 @@ dependencies = [
 name = "standby"
 version = "0.0.0"
 dependencies = [
+ "aio_seams",
+ "controldata_utils",
  "elog",
+ "fd",
+ "guc_tables",
+ "init_small",
  "lock",
  "lwlock",
+ "mcx",
+ "origin_seams",
  "procarray",
+ "rmgrdesc",
+ "shmem",
  "standby_seams",
+ "stringinfo",
  "transam_xlog",
  "types_core",
  "types_error",
  "types_storage",
+ "waitevent_seams",
  "xact_seams",
  "xloginsert",
+ "xlogreader",
  "xlogreader_seams",
  "xlogutils",
 ]

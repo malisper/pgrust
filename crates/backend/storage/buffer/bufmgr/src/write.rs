@@ -282,6 +282,61 @@ pub fn FlushOneBuffer(buffer: Buffer) -> PgResult<()> {
     FlushBuffer(desc)
 }
 
+pub fn FlushRelationsAllBuffers(rels: &[RelFileLocatorBackend]) -> PgResult<()> {
+    if rels.is_empty() {
+        return Ok(());
+    }
+    for r in rels {
+        assert!(
+            r.backend == INVALID_PROC_NUMBER,
+            "FlushRelationsAllBuffers: temp relations use local buffers (C asserts too)"
+        );
+    }
+    let mut locators: Vec<RelFileLocator> = rels.iter().map(|r| r.locator).collect();
+    let use_bsearch = locators.len() > crate::drop_buffers::RELS_BSEARCH_THRESHOLD;
+    if use_bsearch {
+        locators.sort_by_key(|l| (l.spcOid, l.dbOid, l.relNumber));
+    }
+
+    for i in 0..crate::buf_hdr::NBuffersInited() {
+        let desc = GetBufferDescriptor(i);
+        let tag = desc.tag();
+        // Unlocked precheck, safe as in DropRelationBuffers (C comment).
+        let rlocator = if use_bsearch {
+            locators
+                .binary_search_by_key(&(tag.spcOid, tag.dbOid, tag.relNumber), |l| {
+                    (l.spcOid, l.dbOid, l.relNumber)
+                })
+                .ok()
+                .map(|idx| locators[idx])
+        } else {
+            locators
+                .iter()
+                .find(|l| crate::drop_buffers::tag_matches(&tag, l))
+                .copied()
+        };
+        let Some(rlocator) = rlocator else { continue };
+
+        ReservePrivateRefCountEntry();
+        crate::pin::resowner_enlarge_for_pin()?;
+
+        let buf_state = LockBufHdr(desc);
+        if crate::drop_buffers::tag_matches(&desc.tag(), &rlocator)
+            && buf_state & (BM_VALID | BM_DIRTY) == (BM_VALID | BM_DIRTY)
+        {
+            PinBuffer_Locked(desc);
+            LWLockAcquire(&desc.content_lock, LW_SHARED, globals::MyProcNumber())?;
+            let flush_result = FlushBuffer(desc);
+            LWLockRelease(&desc.content_lock)?;
+            UnpinBuffer(desc);
+            flush_result?;
+        } else {
+            UnlockBufHdr(desc, buf_state);
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn SyncOneBuffer(buf_id: i32, skip_recently_used: bool, wb: &mut WritebackContext) -> PgResult<i32> {
     let desc = GetBufferDescriptor(buf_id);
     let mut result = 0;

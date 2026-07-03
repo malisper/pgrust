@@ -30,6 +30,7 @@ smgr_seams = { path = "../../smgr/smgr_seams" }
 fd = { path = "../../file/fd" }
 procsignal_seams = { path = "../../ipc/procsignal_seams" }
 transam_xlog_seams = { path = "../../../access/transam/transam_xlog_seams" }
+catalog_storage_seams = { path = "../../../catalog/storage_seams" }
 checkpointer_seams = { path = "../../../postmaster/checkpointer_seams" }
 types_core = { path = "../../../../_support/types/types_core" }
 types_error = { path = "../../../../_support/types/types_error" }
