@@ -373,7 +373,7 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
         NodeTag::T_ModifyTable => {
             let m = plan.as_modify_table().unwrap();
             debug_assert!(m.plan.targetlist.is_nil() && m.plan.qual.is_nil());
-            debug_assert!(m.withCheckOptionLists.is_nil() && m.mergeActionLists.is_nil());
+            debug_assert!(m.mergeActionLists.is_nil());
             debug_assert!(m.rootRelation == 0 && m.rowMarks.is_nil());
             assert_eq!(rtoffset, 0, "set_plan_refs (setrefs.c): ModifyTable rtoffset leg; M4 lane");
             // set_returning_clause_references: the other-relations index over
@@ -381,6 +381,21 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
             // preprocess_targetlist checked every RETURNING Var references the
             // result relation) and rtoffset is 0, so C's fix_join_expr reduces
             // to the fix_expr_common walk over unchanged Vars.
+            if !m.withCheckOptionLists.is_nil() {
+                debug_assert_eq!(m.withCheckOptionLists.len(), m.resultRelations.len());
+                for wlist_node in &m.withCheckOptionLists {
+                    let wlist = wlist_node.as_list().expect("withCheckOptionLists cell");
+                    for wco_node in wlist {
+                        let wco =
+                            wco_node.as_with_check_option().expect("WCO cell");
+                        if let Some(q) = wco.qual {
+                            let ql = q.as_list().expect("preprocessed WCO qual is a list");
+                            let fixed = fix_scan_list(run, ql, rtoffset, 1.0)?;
+                            debug_assert!(fixed.is_none());
+                        }
+                    }
+                }
+            }
             let has_returning = !m.returningLists.is_nil();
             if has_returning {
                 debug_assert_eq!(m.returningLists.len(), m.resultRelations.len());

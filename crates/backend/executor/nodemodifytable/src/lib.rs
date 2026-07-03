@@ -19,10 +19,11 @@ use tableam_vocab::{
 };
 use types_error::{
     PgError, PgResult, ERRCODE_CARDINALITY_VIOLATION, ERRCODE_CHECK_VIOLATION,
-    ERRCODE_DATATYPE_MISMATCH, ERRCODE_NOT_NULL_VIOLATION,
+    ERRCODE_DATATYPE_MISMATCH, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_NOT_NULL_VIOLATION,
     ERRCODE_TRIGGERED_DATA_CHANGE_VIOLATION, ERRCODE_T_R_SERIALIZATION_FAILURE,
 };
 use types_nodes::nodes_enums::CmdType;
+use types_nodes::parsenodes::WCOKind;
 use types_nodes::plannodes::ModifyTable;
 use types_nodes::{Node, NodeTag};
 use types_rel::{Relation, RELKIND_RELATION};
@@ -65,6 +66,8 @@ pub struct ModifyTableState<'mcx> {
     // ri_CheckConstraintExprs (built on first ExecRelCheck, per C); each
     // compiled qual rides with its constraint name for the 23514 report.
     check_exprs: Option<mcx::PgVec<'mcx, CheckExpr<'mcx>>>,
+    // ri_WithCheckOptions + ri_WithCheckOptionExprs, flattened.
+    wco_exprs: mcx::PgVec<'mcx, WcoExpr<'mcx>>,
     // C ri_TrigDesc; Rc clone of the relcache entry's desc (CopyTriggerDesc).
     trigdesc: Option<Rc<types_trigger::TriggerDesc<'static>>>,
     // ri_GeneratedExprsI/U collapsed to one set: the UPDATE updatedCols skip
@@ -102,6 +105,13 @@ struct CheckExpr<'mcx> {
     state: Option<PgBox<'mcx, ExprState<'mcx>>>,
 }
 
+struct WcoExpr<'mcx> {
+    kind: WCOKind,
+    relname: &'mcx str,
+    polname: Option<&'mcx str>,
+    state: PgBox<'mcx, ExprState<'mcx>>,
+}
+
 /// `ExecInitModifyTable` (nodeModifyTable.c); the caller inits the subplan
 /// and, when RETURNING is present, passes the result descriptor built from
 /// the node's targetlist (C's ExecInitResultTupleSlotTL).
@@ -121,14 +131,8 @@ pub fn exec_init_modify_table<'mcx>(
             node.operation
         );
     }
-    if !node.withCheckOptionLists.is_nil()
-        || !node.mergeActionLists.is_nil()
-        || !node.fdwPrivLists.is_nil()
-    {
-        panic!(
-            "ExecInitModifyTable (nodeModifyTable.c): WCO/MERGE/FDW \
-             lists not ported"
-        );
+    if !node.mergeActionLists.is_nil() || !node.fdwPrivLists.is_nil() {
+        panic!("ExecInitModifyTable (nodeModifyTable.c): MERGE/FDW lists not ported");
     }
     assert_eq!(node.resultRelations.len(), 1);
     debug_assert!(node.rootRelation == 0 && node.rowMarks.is_nil());
@@ -284,6 +288,40 @@ pub fn exec_init_modify_table<'mcx>(
         });
     }
 
+    let mut wco_exprs: mcx::PgVec<'mcx, WcoExpr<'mcx>> = mcx::PgVec::new_in(estate.es_query_cxt);
+    if !node.withCheckOptionLists.is_nil() {
+        debug_assert_eq!(node.withCheckOptionLists.len(), node.resultRelations.len());
+        let mcx = estate.es_query_cxt;
+        let params = estate.param_bind();
+        let wlist = node
+            .withCheckOptionLists
+            .nth(0)
+            .as_list()
+            .expect("withCheckOptionLists cell is a List");
+        for wco_node in wlist {
+            let wco = wco_node.as_with_check_option().expect("WCO cell");
+            if wco.kind == WCOKind::WCO_VIEW_CHECK {
+                panic!(
+                    "ExecInitModifyTable (nodeModifyTable.c): WCO_VIEW_CHECK \
+                     (views WITH CHECK OPTION lane)"
+                );
+            }
+            let qual = wco
+                .qual
+                .expect("planned WCO has a qual")
+                .as_list()
+                .expect("WCO qual is an implicit-AND List after preprocessing");
+            let state = execexpr::exec_init_qual(mcx, qual, params)?
+                .expect("planner dropped constant-true WCO quals");
+            wco_exprs.push(WcoExpr {
+                kind: wco.kind,
+                relname: wco.relname.expect("WCO relname"),
+                polname: wco.polname,
+                state,
+            });
+        }
+    }
+
     // fireBSTriggers/ExecSetupTransitionCaptureState: the trimmed relcache
     // entry carries no trigger descriptor, so statement triggers are
     // undetectable until pg_trigger lands (none exist without CREATE TRIGGER).
@@ -306,6 +344,7 @@ pub fn exec_init_modify_table<'mcx>(
         project_returning,
         on_conflict,
         check_exprs: None,
+        wco_exprs,
         trigdesc,
         generated_exprs: None,
         router: None,
@@ -802,6 +841,15 @@ fn exec_update<'mcx>(
                 mt.indexes = Some(execindexing::ExecOpenIndices(mcx, rel, false)?);
             }
 
+            if !mt.wco_exprs.is_empty() {
+                if rel.rd_rel.relispartition {
+                    panic!(
+                        "ExecUpdate: WCOs on a partition (cross-partition move \
+                         check) not ported"
+                    );
+                }
+                exec_with_check_options(&mut mt.wco_exprs, WCOKind::WCO_RLS_UPDATE_CHECK, slot)?;
+            }
             exec_constraints(mcx, &mut mt.check_exprs, rel, slot)?;
 
             tableam::table_tuple_update(
@@ -1218,6 +1266,18 @@ fn exec_insert<'mcx>(
             *indexes = Some(execindexing::ExecOpenIndices(mcx, rel, onconflict != 0)?);
         }
 
+        if !mt.wco_exprs.is_empty() {
+            if leaf_idx.is_some() {
+                panic!("ExecInsert: WCOs on a routed partition (leaf attr map) not ported");
+            }
+            let wco_kind = if mt.operation == CmdType::CMD_UPDATE {
+                WCOKind::WCO_RLS_UPDATE_CHECK
+            } else {
+                WCOKind::WCO_RLS_INSERT_CHECK
+            };
+            exec_with_check_options(&mut mt.wco_exprs, wco_kind, slot)?;
+        }
+
         exec_constraints(mcx, check_exprs, rel, slot)?;
     }
 
@@ -1479,6 +1539,12 @@ fn exec_on_conflict_update<'mcx>(
             return Ok(OnConflictOutcome::Done(None));
         }
 
+        if !mt.wco_exprs.is_empty() {
+            let scan = slots.scan.take().expect("scan slot");
+            exec_with_check_options(&mut mt.wco_exprs, WCOKind::WCO_RLS_CONFLICT_CHECK, scan)?;
+            slots.scan = Some(scan);
+        }
+
         let set_proj = oc.set_proj.as_deref_mut().expect("DO UPDATE projection");
         execexpr::exec_project(set_proj, &mut slots, setvals, mcx)?;
     }
@@ -1716,6 +1782,65 @@ fn copy_by_ref_datum<'mcx>(mcx: mcx::Mcx<'mcx>, d: Datum, attlen: i16) -> PgResu
         buf.set_len(size);
     }
     Ok(Datum::from_usize(buf.leak().as_ptr() as usize))
+}
+
+// ExecWithCheckOptions (execMain.c): NULL or false qual = violation for
+// every kind (ExecQual semantics); VIEW_CHECK is loud at init.
+fn exec_with_check_options<'mcx>(
+    wcos: &mut mcx::PgVec<'mcx, WcoExpr<'mcx>>,
+    kind: WCOKind,
+    slot: &mut SlotData<'mcx>,
+) -> PgResult<()> {
+    for w in wcos.iter_mut() {
+        if w.kind != kind {
+            continue;
+        }
+        let mut slots = EvalSlots { scan: Some(slot), inner: None, outer: None };
+        if !execexpr::exec_qual(Some(&mut *w.state), &mut slots)? {
+            return Err(wco_violation(w));
+        }
+    }
+    Ok(())
+}
+
+#[cold]
+#[inline(never)]
+fn wco_violation(w: &WcoExpr<'_>) -> Box<PgError> {
+    let relname = w.relname;
+    let msg = match w.kind {
+        WCOKind::WCO_RLS_INSERT_CHECK | WCOKind::WCO_RLS_UPDATE_CHECK => match w.polname {
+            Some(p) => format!(
+                "new row violates row-level security policy \"{p}\" for table \"{relname}\""
+            ),
+            None => {
+                format!("new row violates row-level security policy for table \"{relname}\"")
+            }
+        },
+        WCOKind::WCO_RLS_CONFLICT_CHECK => match w.polname {
+            Some(p) => format!(
+                "new row violates row-level security policy \"{p}\" (USING expression) \
+                 for table \"{relname}\""
+            ),
+            None => format!(
+                "new row violates row-level security policy (USING expression) for \
+                 table \"{relname}\""
+            ),
+        },
+        WCOKind::WCO_RLS_MERGE_UPDATE_CHECK | WCOKind::WCO_RLS_MERGE_DELETE_CHECK => {
+            match w.polname {
+                Some(p) => format!(
+                    "target row violates row-level security policy \"{p}\" (USING \
+                     expression) for table \"{relname}\""
+                ),
+                None => format!(
+                    "target row violates row-level security policy (USING expression) \
+                     for table \"{relname}\""
+                ),
+            }
+        }
+        WCOKind::WCO_VIEW_CHECK => unreachable!("loud at init"),
+    };
+    Box::new(PgError::error(msg).with_sqlstate(ERRCODE_INSUFFICIENT_PRIVILEGE))
 }
 
 // ExecConstraints (execMain.c): NOT NULL + CHECK arms live.
