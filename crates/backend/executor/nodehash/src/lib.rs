@@ -91,7 +91,9 @@ impl<'mcx> HashJoinTable<'mcx> {
 
     #[inline]
     pub fn bucket_head(&self, bucketno: u32) -> u32 {
-        self.buckets[bucketno as usize]
+        debug_assert!((bucketno & !self.bucket_mask) == 0);
+        // SAFETY: bucketno = hashvalue & bucket_mask; buckets.len() == mask+1.
+        unsafe { *self.buckets.get_unchecked(bucketno as usize) }
     }
 
     #[inline]
@@ -100,8 +102,10 @@ impl<'mcx> HashJoinTable<'mcx> {
     }
 
     #[inline]
-    pub fn entry(&self, ix: u32) -> HashJoinTupleEntry {
-        self.entries[ix as usize]
+    pub fn entry(&self, ix: u32) -> &HashJoinTupleEntry {
+        debug_assert!((ix as usize) < self.entries.len());
+        // SAFETY: every non-END ix stored in buckets/next indexes entries.
+        unsafe { self.entries.get_unchecked(ix as usize) }
     }
 
     #[inline]
@@ -111,7 +115,9 @@ impl<'mcx> HashJoinTable<'mcx> {
 
     #[inline]
     pub fn set_matched(&mut self, ix: u32) {
-        self.entries[ix as usize].matched = true;
+        debug_assert!((ix as usize) < self.entries.len());
+        // SAFETY: ix was returned by a bucket-chain walk over entries.
+        unsafe { self.entries.get_unchecked_mut(ix as usize) }.matched = true;
     }
 
     #[inline]
