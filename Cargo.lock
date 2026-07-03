@@ -1414,6 +1414,7 @@ dependencies = [
  "pg_constraint",
  "pg_depend",
  "pg_type",
+ "policy_seams",
  "rewrite_define_seams",
  "sequence_seams",
  "statscmds",
@@ -2260,6 +2261,48 @@ dependencies = [
  "types_scan",
  "types_slot",
  "types_tuple",
+ "xact",
+]
+
+[[package]]
+name = "commands_policy"
+version = "0.0.0"
+dependencies = [
+ "aclchk",
+ "catalog",
+ "catalog_dependency",
+ "catalog_indexing",
+ "catalog_namespace",
+ "datum",
+ "detoast",
+ "elog",
+ "elog_seams",
+ "fmgr_seams",
+ "genam",
+ "heaptuple",
+ "init_small",
+ "inval",
+ "lsyscache",
+ "mcx",
+ "miscinit",
+ "outfuncs",
+ "parse_clause",
+ "parse_collate",
+ "parse_relation",
+ "parser_small1",
+ "pg_depend",
+ "policy_seams",
+ "readfuncs",
+ "rel_vocab",
+ "syscache_seams",
+ "table",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_rel",
+ "types_scan",
+ "types_tuple",
+ "varlena",
  "xact",
 ]
 
@@ -3501,6 +3544,7 @@ dependencies = [
  "postgres_seams",
  "procarray_seams",
  "relation_seams",
+ "rls_seams",
  "snapmgr_seams",
  "syscache_seams",
  "tableam",
@@ -7044,6 +7088,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "policy_seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam_core",
+ "types_core",
+ "types_error",
+]
+
+[[package]]
 name = "portalcmds"
 version = "0.1.0"
 dependencies = [
@@ -8357,6 +8411,7 @@ dependencies = [
  "rewrite_handler_seams",
  "rewrite_manip",
  "rmgr",
+ "rowsecurity",
  "s_lock_seams",
  "scan_fgram",
  "shmem",
@@ -8487,6 +8542,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "rls"
+version = "0.0.0"
+dependencies = [
+ "aclchk",
+ "cache_syscache",
+ "datum",
+ "elog",
+ "guc_tables",
+ "miscinit",
+ "rls_seams",
+ "syscache_seams",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+]
+
+[[package]]
+name = "rls_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+ "types_core",
+ "types_error",
+]
+
+[[package]]
 name = "rmgr"
 version = "0.0.0"
 dependencies = [
@@ -8541,6 +8622,26 @@ dependencies = [
  "types_tuple",
  "xact",
  "xlogreader_seams",
+]
+
+[[package]]
+name = "rowsecurity"
+version = "0.1.0"
+dependencies = [
+ "adt_acl",
+ "datum",
+ "mcx",
+ "miscinit",
+ "nodes_core",
+ "parse_relation",
+ "readfuncs",
+ "relcache",
+ "rls",
+ "table",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_rel",
 ]
 
 [[package]]
@@ -8690,6 +8791,7 @@ dependencies = [
  "commands_cluster",
  "commands_createas",
  "commands_matview",
+ "commands_policy",
  "commands_tablespace",
  "commands_vacuum",
  "condition_variable",
@@ -8796,6 +8898,7 @@ dependencies = [
  "rewrite_define",
  "rewrite_handler",
  "ri_triggers",
+ "rls",
  "rmgr",
  "ruleutils",
  "s_lock",
@@ -10600,6 +10703,7 @@ dependencies = [
  "commands_comment",
  "commands_createas",
  "commands_matview",
+ "commands_policy",
  "commands_vacuum",
  "commands_view",
  "copy_cmd",
