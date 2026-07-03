@@ -1069,6 +1069,62 @@ fn transform_index_constraints<'mcx>(
     Ok(())
 }
 
+// transformIndexConstraint, isalter slice: keys are not resolved against any
+// column list (DefineIndex complains about missing ones); the PK not-null
+// forcing happened in ATPrepAddPrimaryKey. USING INDEX / DEFERRABLE /
+// INCLUDE / WITHOUT OVERLAPS are loud, as in the CREATE lane.
+pub fn transformIndexConstraintForAlter<'mcx>(
+    mcx: Mcx<'mcx>,
+    cnode: Node<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    let constraint = cnode.as_variant::<Constraint>().expect("Constraint");
+    debug_assert!(matches!(
+        constraint.contype,
+        ConstrType::CONSTR_PRIMARY | ConstrType::CONSTR_UNIQUE
+    ));
+    if constraint.indexname.is_some() {
+        unported("transformIndexConstraint: USING INDEX (ExistingIndex)");
+    }
+    if constraint.deferrable || constraint.initdeferred {
+        unported("transformIndexConstraint: DEFERRABLE constraint indexes");
+    }
+    if !constraint.including.is_nil() {
+        unported("transformIndexConstraint: INCLUDE columns");
+    }
+    let mut index = Node::build::<IndexStmt>(mcx)?;
+    index.unique = true;
+    index.primary = constraint.contype == ConstrType::CONSTR_PRIMARY;
+    index.nulls_not_distinct = constraint.nulls_not_distinct;
+    index.isconstraint = true;
+    index.idxname = constraint.conname;
+    index.accessMethod = Some("btree");
+    // SAFETY: parse tree is statement-owned; the constraint node's options
+    // list moves onto the IndexStmt (C shares the pointer).
+    index.options =
+        unsafe { cnode.with_mut::<Constraint, _>(|c| core::mem::take(&mut c.options)) }
+            .expect("Constraint");
+    index.tableSpace = constraint.indexspace;
+
+    let is_primary = index.primary;
+    let mut index_params = NodeList::nil();
+    for keynode in constraint.keys.iter() {
+        let key = keynode.as_string().expect("constraint keys").sval;
+        for ip in index_params.iter() {
+            let iparam = ip.as_variant::<IndexElem>().expect("IndexElem");
+            if iparam.name == Some(key) {
+                return Err(duplicate_key_column(key, is_primary, constraint.location));
+            }
+        }
+        let mut iparam = Node::build::<IndexElem>(mcx)?;
+        iparam.name = Some(key);
+        iparam.ordering = SortByDir::SORTBY_DEFAULT;
+        iparam.nulls_ordering = SortByNulls::SORTBY_NULLS_DEFAULT;
+        index_params.lappend(mcx, iparam.seal())?;
+    }
+    index.indexParams = index_params;
+    Ok(index.seal())
+}
+
 fn index_params_equal(a: &NodeList<'_>, b: &NodeList<'_>) -> bool {
     if a.len() != b.len() {
         return false;
@@ -1383,7 +1439,10 @@ pub fn transformAlterTableCmd<'mcx>(
         AlterTableType::AT_DropColumn
         | AlterTableType::AT_ColumnDefault
         | AlterTableType::AT_DropNotNull
-        | AlterTableType::AT_SetNotNull => {}
+        | AlterTableType::AT_SetNotNull
+        | AlterTableType::AT_DropConstraint
+        | AlterTableType::AT_SetStatistics
+        | AlterTableType::AT_SetStorage => {}
         AlterTableType::AT_AlterColumnType => {
             let defnode = cmd.def.expect("AT_AlterColumnType ColumnDef");
             let cd = defnode.as_variant::<ColumnDef>().expect("ColumnDef");
@@ -1400,7 +1459,10 @@ pub fn transformAlterTableCmd<'mcx>(
                 .expect("Constraint");
             match c.contype {
                 types_nodes::rawnodes::ConstrType::CONSTR_CHECK
-                | types_nodes::rawnodes::ConstrType::CONSTR_FOREIGN => {}
+                | types_nodes::rawnodes::ConstrType::CONSTR_FOREIGN
+                | types_nodes::rawnodes::ConstrType::CONSTR_PRIMARY
+                | types_nodes::rawnodes::ConstrType::CONSTR_UNIQUE
+                | types_nodes::rawnodes::ConstrType::CONSTR_NOTNULL => {}
                 other => unported(&format!("transformTableConstraint {other:?} arm")),
             }
         }

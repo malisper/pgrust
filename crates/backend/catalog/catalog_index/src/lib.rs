@@ -91,6 +91,73 @@ fn getattr(
     d
 }
 
+const Anum_pg_index_indisprimary: usize = 7;
+
+// index_check_primary_key (index.c); NULLS NOT DISTINCT indexes are
+// unreachable here (USING INDEX is loud upstream).
+pub fn index_check_primary_key<'mcx>(
+    mcx: Mcx<'mcx>,
+    heapRel: &Relation<'mcx>,
+    indexInfo: &IndexInfo<'mcx>,
+    is_alter_table: bool,
+) -> PgResult<()> {
+    if is_alter_table && relationHasPrimaryKey(mcx, heapRel)? {
+        return Err(err(
+            format!(
+                "multiple primary keys for table \"{}\" are not allowed",
+                heapRel.name()
+            ),
+            types_error::ERRCODE_INVALID_TABLE_DEFINITION,
+        ));
+    }
+    if indexInfo.ii_NullsNotDistinct {
+        return Err(err(
+            "primary keys cannot use NULLS NOT DISTINCT indexes".into(),
+            types_error::ERRCODE_INVALID_TABLE_DEFINITION,
+        ));
+    }
+    for i in 0..indexInfo.ii_NumIndexKeyAttrs as usize {
+        let attnum = indexInfo.ii_IndexAttrNumbers[i];
+        if attnum == 0 {
+            return Err(err(
+                "primary keys cannot be expressions".into(),
+                types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+            ));
+        }
+        if attnum < 0 {
+            continue;
+        }
+        let att = heapRel.rd_att.attr(attnum as usize - 1);
+        if !att.attnotnull {
+            let colname = core::str::from_utf8(att.attname.name_str()).expect("attname UTF-8");
+            return Err(err(
+                format!("primary key column \"{colname}\" is not marked NOT NULL"),
+                types_error::ERRCODE_INVALID_TABLE_DEFINITION,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn relationHasPrimaryKey<'mcx>(mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgResult<bool> {
+    let indexes = relcache::RelationGetIndexList(mcx, rel.rd_id)?;
+    for &indexoid in indexes.iter() {
+        let pg_index = table::table_open(mcx, INDEX_RELATION_ID, types_rel::AccessShareLock)?;
+        let key = oid_scankey(1, indexoid);
+        let mut scan =
+            genam::systable_beginscan(mcx, &pg_index, IndexRelidIndexId, true, None, &[key])?;
+        let tup = genam::systable_getnext(mcx, &mut scan)?
+            .unwrap_or_else(|| panic!("cache lookup failed for index {indexoid}"));
+        let isprimary = getattr(tup, Anum_pg_index_indisprimary, pg_index.descr()).as_bool();
+        genam::systable_endscan(mcx, scan)?;
+        pg_index.close(types_rel::AccessShareLock)?;
+        if isprimary {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 // ConstructTupleDescriptor (index.c).
 fn ConstructTupleDescriptor<'mcx>(
     mcx: Mcx<'mcx>,

@@ -4276,6 +4276,19 @@ impl<'mcx> Parser<'mcx> {
                 n.missing_ok = rule == 1307;
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
+            // RenameStmt: ALTER TABLE [IF_P EXISTS] relation_expr RENAME
+            // CONSTRAINT name TO name
+            1312 | 1313 => {
+                let (rv, sub, nm) = if rule == 1312 { (3, 6, 8) } else { (5, 8, 10) };
+                let mut n = Node::build::<RenameStmt>(mcx)?;
+                n.renameType = ObjectType::OBJECT_TABCONSTRAINT;
+                n.relationType = ObjectType::OBJECT_TABLE;
+                n.relation = view.v(rv).node().expect("relation_expr").as_variant::<RangeVar>();
+                n.subname = Some(view.v(sub).str_val());
+                n.newname = Some(view.v(nm).str_val());
+                n.missing_ok = rule == 1313;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
             // opt_column: COLUMN | /*EMPTY*/
             1329 | 1330 => *yyval = YYSTYPE::Ival(0),
             // opt_set_data: SET DATA_P | /*EMPTY*/
