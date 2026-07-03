@@ -177,6 +177,7 @@ snapmgr = { path = "../../backend/utils/time/snapmgr" }
 pg_prng = { path = "../../common/pg_prng" }
 regex_core = { path = "../../backend/regex/regex_core" }
 adt_regexp = { path = "../../backend/utils/adt/regexp" }
+twophase = { path = "../../backend/access/transam/twophase" }
 twophase_config = { path = "../../backend/access/transam/twophase_config" }
 pg_sema = { path = "../../backend/port/pg_sema" }
 autovacuum = { path = "../../backend/postmaster/autovacuum" }
