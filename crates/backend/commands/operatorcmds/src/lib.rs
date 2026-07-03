@@ -37,7 +37,7 @@ fn err(sqlstate: types_error::SqlState, msg: String) -> Box<PgError> {
 }
 
 fn typename_type_id(mcx: Mcx<'_>, tn: &TypeName<'_>) -> PgResult<Oid> {
-    Ok(parse_utilcmd::typenameTypeIdAndMod(mcx, None, tn)?.0)
+    parse_utilcmd::LookupTypeNameOid(mcx, tn)
 }
 
 fn type_acl_check(typeId: Oid) -> PgResult<()> {

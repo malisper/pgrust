@@ -299,7 +299,7 @@ fn item_owa<'mcx>(item: &CreateOpClassItem<'mcx>) -> &'mcx ObjectWithArgs<'mcx> 
 
 fn typename_type_id(mcx: Mcx<'_>, n: Node<'_>) -> PgResult<Oid> {
     let tn = n.as_variant::<TypeName>().expect("TypeName node");
-    Ok(parse_utilcmd::typenameTypeIdAndMod(mcx, None, tn)?.0)
+    parse_utilcmd::LookupTypeNameOid(mcx, tn)
 }
 
 // DefineOpClass: define a new index operator class.

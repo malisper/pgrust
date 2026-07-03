@@ -27,11 +27,7 @@ fn type_does_not_exist(name: &str) -> Box<PgError> {
 
 // typenameTypeIdAndMod (parse_type.c); pstate feeds errposition around the
 // typmodin call (C's setup_parser_errposition_callback).
-pub fn typenameTypeIdAndMod<'mcx>(
-    mcx: Mcx<'mcx>,
-    pstate: Option<&parser_small1::ParseState<'_, '_>>,
-    tn: &TypeName<'_>,
-) -> PgResult<(Oid, i32)> {
+fn lookup_type_name_oid<'mcx>(mcx: Mcx<'mcx>, tn: &TypeName<'_>) -> PgResult<Oid> {
     if tn.pct_type || tn.setof {
         unported("LookupTypeName %TYPE / SETOF");
     }
@@ -83,6 +79,22 @@ pub fn typenameTypeIdAndMod<'mcx>(
         Some(true) => {}
         _ => unported("shell types (typisdefined = false)"),
     }
+    Ok(typoid)
+}
+
+// LookupTypeNameOid (parse_type.c): plain resolution, no column-lane typtype
+// restriction (operator/opclass DDL accepts pseudo-types like internal).
+pub fn LookupTypeNameOid<'mcx>(mcx: Mcx<'mcx>, tn: &TypeName<'_>) -> PgResult<Oid> {
+    lookup_type_name_oid(mcx, tn)
+}
+
+pub fn typenameTypeIdAndMod<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: Option<&parser_small1::ParseState<'_, '_>>,
+    tn: &TypeName<'_>,
+) -> PgResult<(Oid, i32)> {
+    let typoid = lookup_type_name_oid(mcx, tn)?;
+    let typname = typename_to_string(tn);
     match syscache_seams::pg_type_typtype::call(typoid)? {
         Some(t) if t == b'b' as i8 || t == b'e' as i8 => {}
         Some(t) => unported(match t as u8 {
@@ -92,7 +104,7 @@ pub fn typenameTypeIdAndMod<'mcx>(
             b'r' | b'm' => "range/multirange column types",
             _ => "unknown typtype",
         }),
-        None => return Err(type_does_not_exist(typname)),
+        None => return Err(type_does_not_exist(&typname)),
     }
     let typmod = typenameTypeMod(mcx, pstate, tn, typoid)?;
     Ok((typoid, typmod))
