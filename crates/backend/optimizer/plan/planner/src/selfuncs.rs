@@ -1839,22 +1839,42 @@ pub fn estimate_num_groups_pgset<'mcx>(
             work.push((run.intern_expr(v), v));
         }
     }
+    // add_unique_group_var (selfuncs.c): drop exact duplicates; among
+    // known-equal vars of different rels keep the smaller ndistinct.
     for &(id, node) in work.iter() {
         let v = node.as_var().unwrap();
-        let dup = varinfos.iter().any(|vi| {
-            let u = run.root.expr_node(vi.var).as_var().unwrap();
-            u.varno == v.varno && u.varattno == v.varattno
-        });
-        if dup {
-            continue;
-        }
         let vardata = examine_variable(run, id, node, 0)?;
         let (ndistinct, _isdefault) = get_variable_numdistinct(run, &vardata);
-        varinfos.push(GroupVarInfo {
-            var: id,
-            rel: vardata.rel.expect("grouping Var has a base rel"),
-            ndistinct,
-        });
+        let rel = vardata.rel.expect("grouping Var has a base rel");
+        let mut keep_new = true;
+        let mut i = 0;
+        while i < varinfos.len() {
+            let u = run.root.expr_node(varinfos[i].var).as_var().unwrap();
+            if u.varno == v.varno && u.varattno == v.varattno {
+                keep_new = false;
+                break;
+            }
+            if varinfos[i].rel != rel
+                && crate::equivclass::exprs_known_equal(
+                    run,
+                    node,
+                    *run.root.expr_node(varinfos[i].var),
+                    0,
+                )
+            {
+                if varinfos[i].ndistinct <= ndistinct {
+                    keep_new = false;
+                    break;
+                }
+                varinfos.remove(i);
+                continue;
+            }
+            i += 1;
+        }
+        if !keep_new {
+            continue;
+        }
+        varinfos.push(GroupVarInfo { var: id, rel, ndistinct });
     }
     if varinfos.is_empty() {
         return Ok(1.0);

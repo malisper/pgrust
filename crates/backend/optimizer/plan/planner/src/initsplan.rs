@@ -1180,29 +1180,9 @@ fn check_redundant_nullability_qual(run: &PlannerRun<'_>, clause: Node<'_>) -> b
     })
 }
 
-// reconsider_outer_join_clauses (equivclass.c): the const-EC substitution leg
-// is dead under eclass-lite (no ECs carry constants), so every set-aside
-// outer-join clause is thrown back to the regular lists.
-pub fn reconsider_outer_join_clauses(run: &mut PlannerRun<'_>) -> PgResult<()> {
-    for i in 0..run.root.left_join_clauses.len() {
-        let rinfo = run.root.left_join_clauses[i].rinfo;
-        distribute_restrictinfo_to_rels(run, rinfo)?;
-    }
-    for i in 0..run.root.right_join_clauses.len() {
-        let rinfo = run.root.right_join_clauses[i].rinfo;
-        distribute_restrictinfo_to_rels(run, rinfo)?;
-    }
-    // reconsider_full_join_clause's const-EC substitution is dead under
-    // eclass-lite; every full-join clause is thrown back too.
-    for i in 0..run.root.full_join_clauses.len() {
-        let rinfo = run.root.full_join_clauses[i].rinfo;
-        distribute_restrictinfo_to_rels(run, rinfo)?;
-    }
-    Ok(())
-}
-
-// distribute_qual_to_rels (initsplan.c); the EC detour is the documented
-// divergence (see reconsider_outer_join_clauses).
+// distribute_qual_to_rels (initsplan.c). allow_equivalence is true for every
+// live caller (the clone-variant OJ commutation that passes false is loud in
+// make_outerjoininfo), so maybe_equivalence needs no parameter.
 #[allow(clippy::too_many_arguments)]
 fn distribute_qual_to_rels<'mcx>(
     run: &mut PlannerRun<'mcx>,
@@ -1304,46 +1284,49 @@ fn distribute_qual_to_rels<'mcx>(
     }
 
     check_mergejoinable(run, rinfo)?;
-    check_hashjoinable(run, rinfo)?;
-    // C divergence: C routes a mergejoinable qual through the EC machinery
-    // (process_equivalence); for a single-rel qual the detour rebuilds this
-    // identical clause, and for a join qual the EC would regenerate the same
-    // RestrictInfo at the join via generate_join_implied_equalities. Both
-    // collapse to distributing the clause directly. The equivclass unit owns
-    // the real path; every consumer of EC state (pathkeys, mergejoin,
-    // EC-derived clauses at higher join levels) is a loud arm.
-    if maybe_outer_join
-        && run.root.rinfo(rinfo).can_join
-        && !run.root.rinfo(rinfo).mergeopfamilies.is_empty()
-    {
-        let (left_sub, right_over, right_sub, left_over) = {
-            let ri = run.root.rinfo(rinfo);
-            (
-                relids_is_subset(&ri.left_relids, outerjoin_nonnullable),
-                relids_overlap(&ri.right_relids, outerjoin_nonnullable),
-                relids_is_subset(&ri.right_relids, outerjoin_nonnullable),
-                relids_overlap(&ri.left_relids, outerjoin_nonnullable),
-            )
-        };
-        let sjinfo = sjinfo.expect("outer-join clause carries its sjinfo").clone();
-        if left_sub && !right_over {
-            run.root.left_join_clauses.push(OuterJoinClauseInfo { rinfo, sjinfo });
-            return Ok(());
-        }
-        if right_sub && !left_over {
-            run.root.right_join_clauses.push(OuterJoinClauseInfo { rinfo, sjinfo });
-            return Ok(());
-        }
-        if sjinfo.jointype == types_pathnodes::JOIN_FULL {
-            // FULL JOIN: the one-sided tests above can never match.
-            run.root.full_join_clauses.push(OuterJoinClauseInfo { rinfo, sjinfo });
-            return Ok(());
+    let mut rinfo = rinfo;
+    if !run.root.rinfo(rinfo).mergeopfamilies.is_empty() {
+        if !maybe_outer_join {
+            if crate::equivclass::process_equivalence(run, &mut rinfo, jdomain)? {
+                return Ok(());
+            }
+            // EC rejected it; set left_ec/right_ec the hard way.
+            if !run.root.rinfo(rinfo).mergeopfamilies.is_empty() {
+                crate::pathkeys::initialize_mergeclause_eclasses(run, rinfo)?;
+            }
+        } else if run.root.rinfo(rinfo).can_join {
+            crate::pathkeys::initialize_mergeclause_eclasses(run, rinfo)?;
+            let (left_sub, right_over, right_sub, left_over) = {
+                let ri = run.root.rinfo(rinfo);
+                (
+                    relids_is_subset(&ri.left_relids, outerjoin_nonnullable),
+                    relids_overlap(&ri.right_relids, outerjoin_nonnullable),
+                    relids_is_subset(&ri.right_relids, outerjoin_nonnullable),
+                    relids_overlap(&ri.left_relids, outerjoin_nonnullable),
+                )
+            };
+            let sjinfo = sjinfo.expect("outer-join clause carries its sjinfo").clone();
+            if left_sub && !right_over {
+                run.root.left_join_clauses.push(OuterJoinClauseInfo { rinfo, sjinfo });
+                return Ok(());
+            }
+            if right_sub && !left_over {
+                run.root.right_join_clauses.push(OuterJoinClauseInfo { rinfo, sjinfo });
+                return Ok(());
+            }
+            if sjinfo.jointype == types_pathnodes::JOIN_FULL {
+                // FULL JOIN: the one-sided tests above can never match.
+                run.root.full_join_clauses.push(OuterJoinClauseInfo { rinfo, sjinfo });
+                return Ok(());
+            }
+        } else {
+            crate::pathkeys::initialize_mergeclause_eclasses(run, rinfo)?;
         }
     }
     distribute_restrictinfo_to_rels(run, rinfo)
 }
 
-fn pull_varnos_relids<'mcx>(
+pub(crate) fn pull_varnos_relids<'mcx>(
     run: &mut PlannerRun<'mcx>,
     node: Node<'mcx>,
 ) -> PgResult<types_pathnodes::Relids<'mcx>> {
@@ -1488,12 +1471,14 @@ fn check_hashjoinable(run: &mut PlannerRun<'_>, rinfo: RinfoId) -> PgResult<()> 
     Ok(())
 }
 
-// distribute_restrictinfo_to_rels (initsplan.c).
+// distribute_restrictinfo_to_rels (initsplan.c). check_memoizable is absent
+// (Memoize lane); hasheqoperator consumers are loud there.
 pub fn distribute_restrictinfo_to_rels(run: &mut PlannerRun<'_>, rinfo: RinfoId) -> PgResult<()> {
     let relids = relids_copy(run.mcx, &run.root.rinfo(rinfo).required_relids);
     if let Some(relid) = relids_singleton_member(&relids) {
         return add_base_clause_to_rel(run, relid, rinfo);
     }
+    check_hashjoinable(run, rinfo)?;
     // add_join_clause_to_rels (joininfo.c): one shared RestrictInfo handle
     // linked into every participating baserel's joininfo list (outer-join
     // relids have no RelOptInfo — C's find_base_rel_ignore_join skip).
@@ -1621,4 +1606,117 @@ fn substitute_false_if_always_false<'mcx>(
     run.root.rinfo_mut(new_rinfo).rinfo_serial = save_rinfo_serial;
     run.root.last_rinfo_serial = save_last_rinfo_serial;
     Ok(new_rinfo)
+}
+
+// process_implied_equality (initsplan.c): build "item1 op item2" and push it
+// into the restrictinfo lists. None = reduced to constant TRUE and dropped.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn process_implied_equality<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    opno: u32,
+    collation: u32,
+    item1: Node<'mcx>,
+    item2: Node<'mcx>,
+    qualscope: types_pathnodes::Relids<'mcx>,
+    security_level: u32,
+    both_const: bool,
+) -> PgResult<Option<RinfoId>> {
+    let mcx = run.mcx;
+    // C copyObject's both items; the arena share is our copy model.
+    let mut clause = crate::like_support::make_opclause(mcx, opno, item1, item2, collation)?;
+    if both_const {
+        clause = clauses::fold::eval_const_expressions(mcx, clause)?;
+        if let Some(c) = clause.as_const() {
+            debug_assert_eq!(c.consttype, 16);
+            if !c.constisnull && c.constvalue.as_bool() {
+                return Ok(None);
+            }
+        }
+    }
+
+    let mut relids = pull_varnos_relids(run, clause)?;
+    debug_assert!(relids_is_subset(&relids, &qualscope));
+    let mut pseudoconstant = false;
+    if relids_is_empty(&relids) {
+        relids = get_join_domain_min_rels(run, &qualscope);
+        pseudoconstant = true;
+        run.root.hasPseudoConstantQuals = true;
+    }
+
+    let rinfo = make_restrictinfo(
+        run,
+        clause,
+        true,
+        false,
+        false,
+        pseudoconstant,
+        security_level,
+        relids,
+        None,
+        None,
+    )?;
+
+    if relids_num_members(&run.root.rinfo(rinfo).required_relids) > 1 {
+        let mut vars: PgVec<'mcx, Node<'mcx>> = PgVec::new_in(mcx);
+        pull_var_nodes(clause, &mut vars);
+        let where_needed = relids_copy(mcx, &run.root.rinfo(rinfo).required_relids);
+        add_vars_to_targetlist(run, &vars, &where_needed)?;
+    }
+
+    // Usually succeeds (the op came from an EC), unless the clause was
+    // reduced to a constant.
+    check_mergejoinable(run, rinfo)?;
+
+    distribute_restrictinfo_to_rels(run, rinfo)?;
+    Ok(Some(rinfo))
+}
+
+// build_implied_join_equality (initsplan.c): like process_implied_equality
+// but never pushed into the joininfo tree.
+pub(crate) fn build_implied_join_equality<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    opno: u32,
+    collation: u32,
+    item1: Node<'mcx>,
+    item2: Node<'mcx>,
+    qualscope: types_pathnodes::Relids<'mcx>,
+    security_level: u32,
+) -> PgResult<RinfoId> {
+    let mcx = run.mcx;
+    let clause = crate::like_support::make_opclause(mcx, opno, item1, item2, collation)?;
+    let rinfo = make_restrictinfo(
+        run,
+        clause,
+        true,
+        false,
+        false,
+        false,
+        security_level,
+        qualscope,
+        None,
+        None,
+    )?;
+    check_mergejoinable(run, rinfo)?;
+    check_hashjoinable(run, rinfo)?;
+    Ok(rinfo)
+}
+
+// get_join_domain_min_rels (initsplan.c): strip lower LEFT joins that could
+// commute out from under a derived pseudoconstant qual.
+fn get_join_domain_min_rels<'mcx>(
+    run: &PlannerRun<'mcx>,
+    domain_relids: &types_pathnodes::Relids<'mcx>,
+) -> types_pathnodes::Relids<'mcx> {
+    let mcx = run.mcx;
+    let mut result = relids_copy(mcx, domain_relids);
+    if crate::relnode::relids_equal(&result, &run.root.all_query_rels) {
+        return result;
+    }
+    for sjinfo in run.root.join_info_list.iter() {
+        if sjinfo.jointype == JOIN_LEFT && relids_is_member(sjinfo.ojrelid as i32, &result) {
+            result = crate::relnode::relids_del_member(mcx, &result, sjinfo.ojrelid as i32);
+            result = relids_difference(mcx, &result, &sjinfo.syn_righthand);
+        }
+    }
+    result
 }

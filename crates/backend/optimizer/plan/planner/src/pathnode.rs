@@ -699,12 +699,19 @@ pub fn get_baserel_parampathinfo<'mcx>(
     let rel_relids = relids_copy(mcx, &run.root.rel(rel_id).relids);
     for &rid in joininfo.iter() {
         if join_clause_is_movable_into(run, rid, &rel_relids, &joinrelids) {
-            // generate_join_implied_equalities divergence: eclass-lite keeps
-            // join equalities in joininfo, but C's EC leg emits them at a
-            // parameterized scan as outer_em = inner_em; commute so the
-            // scanned rel sits on the right (EXPLAIN parity).
-            pclauses.push(commute_ec_clause_for_scan(run, rid, &rel_relids)?);
+            pclauses.push(rid);
         }
+    }
+    let eqclauses = crate::equivclass::generate_join_implied_equalities(
+        run,
+        &joinrelids,
+        required_outer,
+        rel_id,
+        None,
+    )?;
+    for &rid in eqclauses.iter() {
+        debug_assert!(join_clause_is_movable_into(run, rid, &rel_relids, &joinrelids));
+        pclauses.push(rid);
     }
     let mut pserials: types_pathnodes::Relids<'mcx> = None;
     for &rid in pclauses.iter() {
@@ -719,57 +726,6 @@ pub fn get_baserel_parampathinfo<'mcx>(
     };
     run.root.rel_mut(rel_id).ppilist.push(ppi.clone());
     Ok(Some(mcx::box_new_in(mcx, ppi)))
-}
-
-// The EC-orientation shim for get_baserel_parampathinfo (see call site).
-fn commute_ec_clause_for_scan<'mcx>(
-    run: &mut PlannerRun<'mcx>,
-    rid: types_pathnodes::RinfoId,
-    rel_relids: &types_pathnodes::Relids<'mcx>,
-) -> PgResult<types_pathnodes::RinfoId> {
-    use crate::relnode::{relids_is_empty, relids_is_subset};
-    let mcx = run.mcx;
-    let (clause_id, ok, left_in_rel) = {
-        let ri = run.root.rinfo(rid);
-        (
-            ri.clause,
-            ri.can_join
-                && ri.is_pushed_down
-                && !ri.pseudoconstant
-                && !ri.mergeopfamilies.is_empty(),
-            !relids_is_empty(&ri.left_relids) && relids_is_subset(&ri.left_relids, rel_relids),
-        )
-    };
-    if !ok || !left_in_rel {
-        return Ok(rid);
-    }
-    let clause = *run.root.expr_node(clause_id);
-    let Some(op) = clause.as_op_expr().filter(|o| o.args.len() == 2) else {
-        return Ok(rid);
-    };
-    let comm = lsyscache::get_commutator(op.opno)?;
-    if comm == 0 {
-        return Ok(rid);
-    }
-    let mut args = types_nodes::NodeList::nil();
-    args.lappend(mcx, op.args.nth(1))?;
-    args.lappend(mcx, op.args.nth(0))?;
-    let commuted = types_nodes::Node::mk(
-        mcx,
-        types_nodes::primnodes::OpExpr {
-            opno: comm,
-            opfuncid: lsyscache::get_opcode(comm)?,
-            opresulttype: op.opresulttype,
-            opretset: op.opretset,
-            opcollid: op.opcollid,
-            inputcollid: op.inputcollid,
-            args,
-            location: op.location,
-        },
-    )?;
-    crate::initsplan::make_restrictinfo(
-        run, commuted, true, false, false, false, 0, None, None, None,
-    )
 }
 
 // get_joinrel_parampathinfo (relnode.c): only the unparameterized-join arm is

@@ -685,7 +685,8 @@ fn create_indexscan_plan<'mcx>(
         debug_assert!(p.indexorderbys.is_empty());
         let mut rids = mcx::PgVec::new_in(mcx);
         for ic in p.indexclauses.iter() {
-            rids.push((ic.rinfo.expect("IndexClause rinfo"), ic.lossy));
+            let rid = ic.rinfo.expect("IndexClause rinfo");
+            rids.push((rid, ic.lossy, run.root.rinfo(rid).parent_ec));
         }
         (
             p.indexinfo.as_ref().expect("indexinfo set").indexoid,
@@ -705,9 +706,15 @@ fn create_indexscan_plan<'mcx>(
         if run.root.rinfo(rid).pseudoconstant {
             continue;
         }
-        // is_redundant_with_indexclauses: no EC parents, so rinfo identity;
-        // a lossy indexclause does not enforce the condition exactly.
-        if indexclause_rinfos.iter().any(|&(c, lossy)| c == rid && !lossy) {
+        if indexclause_rinfos
+            .iter()
+            .any(|&(c, lossy, parent_ec)| {
+                !lossy
+                    && (c == rid
+                        || (parent_ec.is_some()
+                            && run.root.rinfo(rid).parent_ec == parent_ec))
+            })
+        {
             continue;
         }
         let clause = *run.root.expr_node(run.root.rinfo(rid).clause);
