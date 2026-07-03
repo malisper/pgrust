@@ -66,8 +66,15 @@ pub(crate) fn relation_build_tuple_desc(
         &keys,
     )?;
     let mut rows: PgVec<'_, FormData_pg_attribute> = PgVec::new_in(smcx);
+    let mut missing_pairs: PgVec<'static, (i16, Datum)> = PgVec::new_in(mcx);
     while let Some(tup) = genam::systable_getnext(smcx, &mut scan)? {
-        rows.push(decode(rel.descr(), tup, relid)?);
+        let a = decode(rel.descr(), tup, relid)?;
+        if a.atthasmissing {
+            if let Some(v) = attr_missing_fetch(mcx, smcx, rel.descr(), tup, &a)? {
+                missing_pairs.push((a.attnum, v));
+            }
+        }
+        rows.push(a);
     }
     genam::systable_endscan(smcx, scan)?;
     rel.close(AccessShareLock)?;
@@ -94,14 +101,8 @@ pub(crate) fn relation_build_tuple_desc(
         if a.atthasdef {
             ndef += 1;
         }
-        if a.atthasmissing {
-            panic!(
-                "relcache_build: attribute {} of relation {relid} has a missing value: \
-                 attrmiss decode unported (array_get_element lane)",
-                a.attnum
-            );
-        }
     }
+    let has_missing = !missing_pairs.is_empty();
 
     let mut td = tupdesc::CreateTupleDesc(mcx, &slots)?;
     td.tdtypeid = if form.reltype != InvalidOid { form.reltype } else { RECORDOID };
@@ -111,7 +112,12 @@ pub(crate) fn relation_build_tuple_desc(
         td.compact_attrs[0].attcacheoff.set(0);
     }
 
-    if has_not_null || has_generated_stored || has_generated_virtual || ndef > 0 || relchecks > 0
+    if has_not_null
+        || has_generated_stored
+        || has_generated_virtual
+        || ndef > 0
+        || relchecks > 0
+        || has_missing
     {
         let is_catalog = catalog_seams::is_catalog_relation_oid::call(relid);
         let defval = if ndef > 0 {
@@ -138,6 +144,20 @@ pub(crate) fn relation_build_tuple_desc(
                 }
             }
         }
+        let mut missing: PgVec<'static, types_tuple::AttrMissing> = PgVec::new_in(mcx);
+        if has_missing {
+            missing
+                .try_reserve_exact(natts)
+                .map_err(|_| Box::new(mcx.oom(natts * core::mem::size_of::<types_tuple::AttrMissing>())))?;
+            missing.resize(
+                natts,
+                types_tuple::AttrMissing { am_present: false, am_value: Datum::null() },
+            );
+            for &(attnum, v) in missing_pairs.iter() {
+                missing[attnum as usize - 1] =
+                    types_tuple::AttrMissing { am_present: true, am_value: v };
+            }
+        }
         td.constr = Some(mcx::box_new_in(
             mcx,
             TupleConstr {
@@ -145,7 +165,7 @@ pub(crate) fn relation_build_tuple_desc(
                 num_check: check.len() as u16,
                 defval,
                 check,
-                missing: PgVec::new_in(mcx),
+                missing,
                 has_not_null,
                 has_generated_stored,
                 has_generated_virtual,
@@ -291,6 +311,55 @@ fn extract_not_null_column(
     let elems = datum::array_build::deconstruct_array_image(smcx, &full, 2, true, b's')?;
     assert!(elems.len() == 1, "not-null constraint with {} conkey entries", elems.len());
     Ok(elems[0].as_i16())
+}
+
+// relcache.c attrmiss arm: unwrap the 1-element attmissingval array; by-ref
+// values are datumCopy'd into the cache context (the tuple dies with smcx).
+fn attr_missing_fetch(
+    mcx: Mcx<'static>,
+    smcx: Mcx<'_>,
+    td: &TupleDescData<'_>,
+    tup: &HeapTupleData<'_>,
+    a: &FormData_pg_attribute,
+) -> PgResult<Option<Datum>> {
+    const Anum_pg_attribute_attmissingval: i32 = 25;
+    let (val, isnull) = getattr(td, tup, Anum_pg_attribute_attmissingval);
+    if isnull {
+        return Ok(None);
+    }
+    let p = val.as_usize() as *const u8;
+    // SAFETY: not-null anyarray column: live varlena image through its extent.
+    let image = unsafe { std::slice::from_raw_parts(p, types_tuple::varatt::varsize_any(p)) };
+    let payload = varlena::open_image(smcx, image)?;
+    let body = payload.as_bytes();
+    let total = body.len() + 4;
+    let mut full: PgVec<'_, u8> = mcx::vec_with_capacity_in(smcx, total)?;
+    mcx::vec_append_bytes(&mut full, &(((total as u32) << 2).to_ne_bytes()))?;
+    mcx::vec_append_bytes(&mut full, body)?;
+    let elems = datum::array_build::deconstruct_array_image(
+        smcx,
+        &full,
+        a.attlen,
+        a.attbyval,
+        a.attalign as u8,
+    )?;
+    assert!(elems.len() == 1, "attmissingval with {} entries", elems.len());
+    let v = elems[0];
+    if a.attbyval {
+        return Ok(Some(v));
+    }
+    let src = v.as_usize() as *const u8;
+    let len = if a.attlen > 0 {
+        a.attlen as usize
+    } else {
+        debug_assert!(a.attlen == -1);
+        // SAFETY: element datum points into `full`, a live varlena image.
+        unsafe { types_tuple::varatt::varsize_any(src) }
+    };
+    // SAFETY: `len` bytes readable at src per the array image layout.
+    let bytes = unsafe { std::slice::from_raw_parts(src, len) };
+    let copy = mcx::slice_borrow_in(mcx, bytes)?;
+    Ok(Some(Datum::from_usize(copy.as_ptr() as usize)))
 }
 
 pub(crate) fn decode(

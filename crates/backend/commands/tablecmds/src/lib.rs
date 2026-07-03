@@ -1,9 +1,11 @@
 // DefineRelation plain-table lane; BuildDescForRelation rides here as in 18.3.
-#![allow(non_snake_case)]
+#![allow(non_snake_case, non_upper_case_globals)]
 
+mod alter;
 mod constraints;
 mod drop;
 mod truncate;
+pub use alter::{AlterTable, AlterTableGetLockLevel, AlterTableLookupRelation};
 pub use drop::RemoveRelations;
 pub use truncate::ExecuteTruncate;
 

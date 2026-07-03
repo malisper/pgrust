@@ -293,7 +293,7 @@ fn rewriteTargetListIU<'mcx>(
 // build_column_default (rewriteHandler.c), atthasdef arm: the stored adbin
 // deserialized and coerced to the column type. get_typdefault (pg_type
 // typdefaultbin) stays with the domain lane; callers gate on atthasdef.
-fn build_column_default<'mcx>(
+pub fn build_column_default<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &types_rel::Relation<'mcx>,
     attrno: usize,

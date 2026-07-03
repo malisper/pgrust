@@ -469,6 +469,81 @@ fn node(out: &mut String, n: Node<'_>) {
         bool_field(out, "if_not_exists", s.if_not_exists);
         bool_field(out, "reset_default_tblspc", s.reset_default_tblspc);
         out.push('}');
+    } else if let Some(a) = n.as_variant::<types_nodes::parsenodes::AlterTableStmt>() {
+        out.push_str("{ALTERTABLESTMT");
+        out.push_str(" :relation ");
+        match a.relation {
+            Some(rv) => range_var(out, rv),
+            None => out.push_str("<>"),
+        }
+        list_field(out, "cmds", &a.cmds);
+        int_field(out, "objtype", a.objtype as i32);
+        bool_field(out, "missing_ok", a.missing_ok);
+        out.push('}');
+    } else if let Some(c) = n.as_variant::<types_nodes::parsenodes::AlterTableCmd>() {
+        out.push_str("{ALTERTABLECMD");
+        int_field(out, "subtype", c.subtype as i32);
+        string_field(out, "name", c.name);
+        int_field(out, "num", c.num as i32);
+        node_field(out, "newowner", c.newowner);
+        node_field(out, "def", c.def);
+        int_field(out, "behavior", c.behavior as i32);
+        bool_field(out, "missing_ok", c.missing_ok);
+        bool_field(out, "recurse", c.recurse);
+        out.push('}');
+    } else if let Some(c) = n.as_variant::<types_nodes::rawnodes::ColumnDef>() {
+        out.push_str("{COLUMNDEF");
+        string_field(out, "colname", c.colname);
+        node_field(out, "typeName", c.typeName);
+        string_field(out, "compression", c.compression);
+        int_field(out, "inhcount", c.inhcount as i32);
+        bool_field(out, "is_local", c.is_local);
+        bool_field(out, "is_not_null", c.is_not_null);
+        bool_field(out, "is_from_type", c.is_from_type);
+        char_field(out, "storage", c.storage);
+        string_field(out, "storage_name", c.storage_name);
+        node_field(out, "raw_default", c.raw_default);
+        node_field(out, "cooked_default", c.cooked_default);
+        char_field(out, "identity", c.identity);
+        out.push_str(" :identitySequence ");
+        match c.identitySequence {
+            Some(rv) => range_var(out, rv),
+            None => out.push_str("<>"),
+        }
+        char_field(out, "generated", c.generated);
+        node_field(out, "collClause", c.collClause);
+        int_field(out, "collOid", c.collOid as i32);
+        list_field(out, "constraints", &c.constraints);
+        list_field(out, "fdwoptions", &c.fdwoptions);
+        int_field(out, "location", c.location);
+        out.push('}');
+    } else if let Some(c) = n.as_variant::<types_nodes::rawnodes::Constraint>() {
+        // Fields absent from the ported Constraint render as palloc0 defaults.
+        out.push_str("{CONSTRAINT");
+        int_field(out, "contype", c.contype as i32);
+        string_field(out, "conname", c.conname);
+        bool_field(out, "deferrable", c.deferrable);
+        bool_field(out, "initdeferred", c.initdeferred);
+        bool_field(out, "is_enforced", c.is_enforced);
+        bool_field(out, "skip_validation", c.skip_validation);
+        bool_field(out, "initially_valid", c.initially_valid);
+        bool_field(out, "is_no_inherit", c.is_no_inherit);
+        node_field(out, "raw_expr", c.raw_expr);
+        string_field(out, "cooked_expr", c.cooked_expr);
+        char_field(out, "generated_when", 0);
+        char_field(out, "generated_kind", 0);
+        bool_field(out, "nulls_not_distinct", false);
+        list_field(out, "keys", &c.keys);
+        bool_field(out, "without_overlaps", false);
+        out.push_str(" :including <> :exclusions <> :options <> :indexname <> :indexspace <>");
+        bool_field(out, "reset_default_tblspc", false);
+        out.push_str(" :access_method <> :where_clause <> :pktable <> :fk_attrs <> :pk_attrs <>");
+        bool_field(out, "fk_with_period", false);
+        bool_field(out, "pk_with_period", false);
+        out.push_str(" :fk_matchtype <> :fk_upd_action <> :fk_del_action <> :fk_del_set_cols <> :old_conpfeqop <>");
+        int_field(out, "old_pktable_oid", 0);
+        int_field(out, "location", c.location);
+        out.push('}');
     } else {
         panic!("tests_dump: unrendered node tag {:?}", n.node_tag());
     }
@@ -489,6 +564,17 @@ fn range_var(out: &mut String, rv: &types_nodes::RangeVar<'_>) {
     }
     int_field(out, "location", rv.location);
     out.push('}');
+}
+
+fn char_field(out: &mut String, name: &str, c: u8) {
+    out.push_str(" :");
+    out.push_str(name);
+    out.push(' ');
+    if c == 0 {
+        out.push_str("<>");
+    } else {
+        out_token(out, Some(std::str::from_utf8(std::slice::from_ref(&c)).unwrap()));
+    }
 }
 
 fn alias(out: &mut String, a: &types_nodes::Alias<'_>) {

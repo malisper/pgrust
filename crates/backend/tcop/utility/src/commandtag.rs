@@ -123,7 +123,17 @@ pub fn CreateCommandTag(parsetree: Node<'_>) -> CommandTag {
         T_AlterObjectSchemaStmt => payload_gap("CreateCommandTag", "AlterObjectSchemaStmt"),
         T_AlterOwnerStmt => payload_gap("CreateCommandTag", "AlterOwnerStmt"),
         T_AlterTableMoveAllStmt => payload_gap("CreateCommandTag", "AlterTableMoveAllStmt"),
-        T_AlterTableStmt => payload_gap("CreateCommandTag", "AlterTableStmt"),
+        // AlterObjectTypeCommandTag over stmt->objtype; the ported
+        // AlterTableStmt grammar productions only emit OBJECT_TABLE.
+        T_AlterTableStmt => {
+            let stmt = parsetree
+                .as_variant::<types_nodes::parsenodes::AlterTableStmt>()
+                .expect("AlterTableStmt");
+            match stmt.objtype {
+                types_nodes::parsenodes::ObjectType::OBJECT_TABLE => CMDTAG_ALTER_TABLE,
+                _ => payload_gap("CreateCommandTag", "AlterObjectTypeCommandTag non-table"),
+            }
+        }
         T_AlterDomainStmt => CMDTAG_ALTER_DOMAIN,
         T_AlterFunctionStmt => payload_gap("CreateCommandTag", "AlterFunctionStmt"),
         T_GrantStmt => payload_gap("CreateCommandTag", "GrantStmt"),

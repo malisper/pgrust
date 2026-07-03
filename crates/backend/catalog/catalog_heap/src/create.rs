@@ -521,3 +521,69 @@ fn AddNewRelationType<'mcx>(
         },
     )
 }
+
+// StoreAttrMissingVal (heap.c): wrap the evaluated default in a 1-element
+// array of the column type and flip atthasmissing. Plain tables only.
+pub fn StoreAttrMissingVal<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    attnum: AttrNumber,
+    missingval: Datum,
+) -> PgResult<()> {
+    debug_assert!(rel.rd_rel.relkind == RELKIND_RELATION);
+    let attrrel = table::table_open(mcx, ATTRIBUTE_RELATION_ID, RowExclusiveLock)?;
+    let keys = [
+        crate::drop::oid_scankey(1, rel.rd_id),
+        crate::drop::int2_scankey(5, attnum),
+    ];
+    let mut scan = genam::systable_beginscan(
+        mcx,
+        &attrrel,
+        2659, // AttributeRelidNumIndexId
+        true,
+        None,
+        &keys,
+    )?;
+    let tup = genam::systable_getnext(mcx, &mut scan)?.unwrap_or_else(|| {
+        panic!("cache lookup failed for attribute {attnum} of relation {}", rel.rd_id)
+    });
+    let desc = attrrel.descr();
+    let get = |anum: i32| {
+        let mut isnull = false;
+        // SAFETY: fixed NOT NULL pg_attribute columns under its descriptor.
+        let d = unsafe { types_tuple::heap_getattr(tup, anum, desc, &mut isnull) };
+        debug_assert!(!isnull);
+        d
+    };
+    let atttypid = get(3).as_oid();
+    let attlen = get(4).as_i16();
+    let attbyval = get(8).as_bool();
+    let attalign = get(9).as_i8() as u8;
+
+    let arr = arrayfuncs::construct::construct_array(
+        mcx,
+        core::slice::from_ref(&missingval),
+        atttypid,
+        attlen as i32,
+        attbyval,
+        attalign,
+    )?;
+
+    let natts = desc.natts as usize;
+    let mut values: mcx::PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
+    let mut isnull: mcx::PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+    let mut replace: mcx::PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+    values.resize(natts, Datum::null());
+    isnull.resize(natts, false);
+    replace.resize(natts, false);
+    values[14 - 1] = Datum::from_bool(true); // atthasmissing
+    replace[14 - 1] = true;
+    values[25 - 1] = Datum::from_usize(arr.as_ptr() as usize); // attmissingval
+    replace[25 - 1] = true;
+
+    let mut newtup = heaptuple::heap_modify_tuple(mcx, tup, desc, &values, &isnull, &replace)?;
+    let otid = tup.t_self;
+    genam::systable_endscan(mcx, scan)?;
+    catalog_indexing::CatalogTupleUpdate(mcx, &attrrel, &otid, &mut newtup)?;
+    attrrel.close(RowExclusiveLock)
+}
