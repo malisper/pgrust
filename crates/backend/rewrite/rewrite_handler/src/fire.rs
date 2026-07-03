@@ -255,15 +255,15 @@ fn rewriteRuleAction<'mcx>(
                     "conditional UNION/INTERSECT/EXCEPT statements are not implemented",
                 ));
             }
+            let mark_sublinks = parsetree.hasSubLinks
+                && !sub_action.hasSubLinks
+                && rewrite_manip::checkExprHasSubLink_list(&newjointree)?;
             let mut merged = newjointree;
             merged.concat(mcx, &sub_jt.fromlist)?;
             let new_jt = mcx::alloc_leak_in(
                 mcx,
                 types_nodes::primnodes::FromExpr { fromlist: merged, quals: sub_jt.quals },
             )?;
-            let mark_sublinks = parsetree.hasSubLinks
-                && !sub_action.hasSubLinks
-                && rewrite_manip::checkExprHasSubLink_list(&newjointree)?;
             // SAFETY: as above.
             unsafe {
                 sub_action_node.with_mut::<Query, _>(|q| {
@@ -501,7 +501,7 @@ fn acquire_locks_on_sublinks<'mcx>(mcx: Mcx<'mcx>, node: Option<Node<'mcx>>) -> 
 }
 
 // contain_vars_of_level (var.c) over a subquery reachable only as &Query.
-fn contain_vars_of_level_query(q: &Query<'_>, levelsup: u32) -> PgResult<bool> {
+fn contain_vars_of_level_query<'mcx>(q: &'mcx Query<'mcx>, levelsup: u32) -> PgResult<bool> {
     struct W {
         sublevels_up: u32,
     }
