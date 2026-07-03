@@ -551,11 +551,6 @@ fn pull_agg_input_vars<'mcx>(
                 pull_agg_input_vars(arg, out);
             }
         }
-        NodeTag::T_BoolExpr => {
-            for a in &node.as_bool_expr().unwrap().args {
-                pull_agg_input_vars(a, out);
-            }
-        }
         NodeTag::T_DistinctExpr => {
             for a in &node.as_distinct_expr().unwrap().args {
                 pull_agg_input_vars(a, out);
@@ -577,11 +572,6 @@ fn pull_agg_input_vars<'mcx>(
                 pull_agg_input_vars(te, out);
             }
             for a in &sp.args {
-                pull_agg_input_vars(a, out);
-            }
-        }
-        NodeTag::T_RowExpr => {
-            for a in &node.as_row_expr().unwrap().args {
                 pull_agg_input_vars(a, out);
             }
         }
