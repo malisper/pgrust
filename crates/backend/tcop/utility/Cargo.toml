@@ -14,6 +14,7 @@ types_rel = { path = "../../../_support/types/rel" }
 commands_analyze = { path = "../../commands/analyze" }
 commands_vacuum = { path = "../../commands/vacuum" }
 copy_cmd = { path = "../../commands/copy" }
+discard = { path = "../../commands/discard" }
 explain = { path = "../../commands/explain" }
 portalcmds = { path = "../../commands/portalcmds" }
 prepare = { path = "../../commands/prepare" }

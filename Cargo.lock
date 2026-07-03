@@ -1766,6 +1766,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "discard"
+version = "0.1.0"
+dependencies = [
+ "catalog_namespace",
+ "guc",
+ "guc_funcs",
+ "lock",
+ "plancache",
+ "portalmem",
+ "prepare",
+ "types_error",
+ "types_nodes",
+ "types_storage",
+ "xact",
+]
+
+[[package]]
 name = "dsm_core"
 version = "0.0.0"
 dependencies = [
@@ -7713,6 +7730,7 @@ dependencies = [
  "commands_analyze",
  "commands_vacuum",
  "copy_cmd",
+ "discard",
  "elog",
  "explain",
  "guc_funcs",

@@ -661,3 +661,192 @@ fn in_subquery_shapes() {
     assert!(sl.operName.is_nil());
     assert_eq!(b.location, sl.location);
 }
+
+fn set_of<'a>(rs: &RawStmt<'a>) -> &'a types_nodes::parsenodes::VariableSetStmt<'a> {
+    rs.stmt.expect("stmt").as_variable_set_stmt().expect("VariableSetStmt")
+}
+
+#[test]
+fn set_session_and_defaults() {
+    use types_nodes::parsenodes::VariableSetKind::*;
+    let list = parse("SET SESSION work_mem = '8MB';");
+    let n = set_of(only_stmt(&list));
+    assert_eq!((n.kind, n.name, n.is_local), (VAR_SET_VALUE, Some("work_mem"), false));
+
+    let n = set_of(only_stmt(&parse("SET work_mem TO DEFAULT;")));
+    assert_eq!((n.kind, n.name), (VAR_SET_DEFAULT, Some("work_mem")));
+    let n = set_of(only_stmt(&parse("SET work_mem = DEFAULT;")));
+    assert_eq!(n.kind, VAR_SET_DEFAULT);
+    let n = set_of(only_stmt(&parse("SET work_mem FROM CURRENT;")));
+    assert_eq!(n.kind, VAR_SET_CURRENT);
+
+    let n = set_of(only_stmt(&parse("SET statement_timeout = 0;")));
+    assert_eq!((n.kind, n.args.len()), (VAR_SET_VALUE, 1));
+    let c = n.args.nth(0).as_a_const().unwrap();
+    assert!(matches!(c.val, Some(ValUnion::Integer(i)) if i.ival == 0));
+
+    let n = set_of(only_stmt(&parse("SET seed = -0.5;")));
+    let c = n.args.nth(0).as_a_const().unwrap();
+    assert!(matches!(c.val, Some(ValUnion::Float(f)) if f.fval == "-0.5"));
+}
+
+#[test]
+fn set_session_authorization_forms() {
+    use types_nodes::parsenodes::VariableSetKind::*;
+    let n = set_of(only_stmt(&parse("SET SESSION AUTHORIZATION alice;")));
+    assert_eq!((n.kind, n.name), (VAR_SET_VALUE, Some("session_authorization")));
+    let c = n.args.nth(0).as_a_const().unwrap();
+    assert!(matches!(c.val, Some(ValUnion::String(s)) if s.sval == "alice"));
+
+    let n = set_of(only_stmt(&parse("SET SESSION AUTHORIZATION 'bob';")));
+    let c = n.args.nth(0).as_a_const().unwrap();
+    assert!(matches!(c.val, Some(ValUnion::String(s)) if s.sval == "bob"));
+
+    let n = set_of(only_stmt(&parse("SET SESSION AUTHORIZATION DEFAULT;")));
+    assert_eq!((n.kind, n.name), (VAR_SET_DEFAULT, Some("session_authorization")));
+    let n = set_of(only_stmt(&parse("RESET SESSION AUTHORIZATION;")));
+    assert_eq!((n.kind, n.name), (VAR_RESET, Some("session_authorization")));
+}
+
+#[test]
+fn reset_and_show_forms() {
+    use types_nodes::parsenodes::VariableSetKind::*;
+    let n = set_of(only_stmt(&parse("RESET ALL;")));
+    assert_eq!((n.kind, n.name), (VAR_RESET_ALL, None));
+    let n = set_of(only_stmt(&parse("RESET TIME ZONE;")));
+    assert_eq!((n.kind, n.name), (VAR_RESET, Some("timezone")));
+    let n = set_of(only_stmt(&parse("RESET TRANSACTION ISOLATION LEVEL;")));
+    assert_eq!(n.name, Some("transaction_isolation"));
+
+    for (sql, want) in [
+        ("SHOW ALL;", "all"),
+        ("SHOW TIME ZONE;", "timezone"),
+        ("SHOW TRANSACTION ISOLATION LEVEL;", "transaction_isolation"),
+        ("SHOW SESSION AUTHORIZATION;", "session_authorization"),
+    ] {
+        let list = parse(sql);
+        let rs = only_stmt(&list);
+        let n = rs.stmt.unwrap().as_variable_show_stmt().expect("VariableShowStmt");
+        assert_eq!(n.name, Some(want));
+    }
+}
+
+#[test]
+fn set_time_zone() {
+    use types_nodes::parsenodes::VariableSetKind::*;
+    let n = set_of(only_stmt(&parse("SET TIME ZONE 'UTC';")));
+    assert_eq!((n.kind, n.name, n.jumble_args), (VAR_SET_VALUE, Some("timezone"), true));
+    let c = n.args.nth(0).as_a_const().unwrap();
+    assert!(matches!(c.val, Some(ValUnion::String(s)) if s.sval == "UTC"));
+
+    let n = set_of(only_stmt(&parse("SET TIME ZONE -7;")));
+    let c = n.args.nth(0).as_a_const().unwrap();
+    assert!(matches!(c.val, Some(ValUnion::Integer(i)) if i.ival == -7));
+
+    let n = set_of(only_stmt(&parse("SET TIME ZONE DEFAULT;")));
+    assert_eq!(n.kind, VAR_SET_DEFAULT);
+    let n = set_of(only_stmt(&parse("SET TIME ZONE LOCAL;")));
+    assert_eq!(n.kind, VAR_SET_DEFAULT);
+}
+
+fn xact_modes<'a>(n: &types_nodes::parsenodes::TransactionStmt<'a>) -> Vec<(&'a str, i32)> {
+    n.options
+        .iter()
+        .map(|o| {
+            let d = o.as_def_elem().expect("DefElem");
+            let c = d.arg.expect("arg").as_a_const().expect("A_Const");
+            let v = match c.val {
+                Some(ValUnion::Integer(i)) => i.ival,
+                Some(ValUnion::String(_)) => -1,
+                _ => panic!("mode arg"),
+            };
+            (d.defname.unwrap(), v)
+        })
+        .collect()
+}
+
+#[test]
+fn transaction_forms() {
+    use types_nodes::parsenodes::TransactionStmtKind::*;
+    let list = parse("BEGIN ISOLATION LEVEL REPEATABLE READ, READ ONLY, DEFERRABLE;");
+    let n = only_stmt(&list).stmt.unwrap().as_transaction_stmt().unwrap();
+    assert_eq!(n.kind, TRANS_STMT_BEGIN);
+    assert_eq!(
+        xact_modes(n),
+        [("transaction_isolation", -1), ("transaction_read_only", 1), ("transaction_deferrable", 1)]
+    );
+    let iso = n.options.nth(0).as_def_elem().unwrap().arg.unwrap().as_a_const().unwrap();
+    assert!(matches!(iso.val, Some(ValUnion::String(s)) if s.sval == "repeatable read"));
+
+    let list = parse("START TRANSACTION ISOLATION LEVEL SERIALIZABLE READ WRITE;");
+    let n = only_stmt(&list).stmt.unwrap().as_transaction_stmt().unwrap();
+    assert_eq!(n.kind, TRANS_STMT_START);
+    assert_eq!(
+        xact_modes(n),
+        [("transaction_isolation", -1), ("transaction_read_only", 0)]
+    );
+
+    let n = only_stmt(&parse("END;")).stmt.unwrap().as_transaction_stmt().unwrap();
+    assert_eq!((n.kind, n.chain), (TRANS_STMT_COMMIT, false));
+    let n = only_stmt(&parse("END AND CHAIN;")).stmt.unwrap().as_transaction_stmt().unwrap();
+    assert_eq!((n.kind, n.chain), (TRANS_STMT_COMMIT, true));
+    let n = only_stmt(&parse("ABORT AND NO CHAIN;")).stmt.unwrap().as_transaction_stmt().unwrap();
+    assert_eq!((n.kind, n.chain), (TRANS_STMT_ROLLBACK, false));
+
+    let n = set_of(only_stmt(&parse("SET TRANSACTION ISOLATION LEVEL READ COMMITTED;")));
+    assert_eq!(
+        (n.kind, n.name, n.jumble_args),
+        (types_nodes::parsenodes::VariableSetKind::VAR_SET_MULTI, Some("TRANSACTION"), true)
+    );
+    let n = set_of(only_stmt(&parse("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY;")));
+    assert_eq!(n.name, Some("SESSION CHARACTERISTICS"));
+    assert_eq!(xact_modes_of_set(n), [("transaction_read_only", 1)]);
+}
+
+fn xact_modes_of_set<'a>(
+    n: &types_nodes::parsenodes::VariableSetStmt<'a>,
+) -> Vec<(&'a str, i32)> {
+    n.args
+        .iter()
+        .map(|o| {
+            let d = o.as_def_elem().expect("DefElem");
+            let c = d.arg.expect("arg").as_a_const().expect("A_Const");
+            let v = match c.val {
+                Some(ValUnion::Integer(i)) => i.ival,
+                Some(ValUnion::String(_)) => -1,
+                _ => panic!("mode arg"),
+            };
+            (d.defname.unwrap(), v)
+        })
+        .collect()
+}
+
+#[test]
+fn discard_forms() {
+    use types_nodes::parsenodes::DiscardMode::*;
+    for (sql, want) in [
+        ("DISCARD ALL;", DISCARD_ALL),
+        ("DISCARD PLANS;", DISCARD_PLANS),
+        ("DISCARD SEQUENCES;", DISCARD_SEQUENCES),
+        ("DISCARD TEMP;", DISCARD_TEMP),
+        ("DISCARD TEMPORARY;", DISCARD_TEMP),
+    ] {
+        let list = parse(sql);
+        let n = only_stmt(&list).stmt.unwrap().as_discard_stmt().expect("DiscardStmt");
+        assert_eq!(n.target, want, "{sql}");
+    }
+}
+
+#[test]
+fn listen_notify_unlisten() {
+    let n = only_stmt(&parse("LISTEN ch;")).stmt.unwrap().as_listen_stmt().unwrap();
+    assert_eq!(n.conditionname, Some("ch"));
+    let n = only_stmt(&parse("UNLISTEN ch;")).stmt.unwrap().as_unlisten_stmt().unwrap();
+    assert_eq!(n.conditionname, Some("ch"));
+    let n = only_stmt(&parse("UNLISTEN *;")).stmt.unwrap().as_unlisten_stmt().unwrap();
+    assert_eq!(n.conditionname, None);
+    let n = only_stmt(&parse("NOTIFY ch;")).stmt.unwrap().as_notify_stmt().unwrap();
+    assert_eq!((n.conditionname, n.payload), (Some("ch"), None));
+    let n = only_stmt(&parse("NOTIFY ch, 'pay';")).stmt.unwrap().as_notify_stmt().unwrap();
+    assert_eq!((n.conditionname, n.payload), (Some("ch"), Some("pay")));
+}
