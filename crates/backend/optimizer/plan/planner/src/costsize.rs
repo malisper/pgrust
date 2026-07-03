@@ -70,6 +70,9 @@ pub fn cost_qual_eval_node(node: Node<'_>) -> PgResult<QualCost> {
 fn cost_qual_eval_walker(node: Node<'_>, cost: &mut QualCost) -> PgResult<()> {
     match node.node_tag() {
         NodeTag::T_Var | NodeTag::T_Const => Ok(()),
+        // C charges nothing for the Aggref itself and does not descend:
+        // aggregate costs are get_agg_clause_costs' job (prepagg.c).
+        NodeTag::T_Aggref => Ok(()),
         NodeTag::T_FuncExpr => {
             let f = node.as_func_expr().unwrap();
             crate::plancat::add_function_cost(f.funcid, cost)?;
@@ -244,6 +247,175 @@ pub fn cost_index(run: &mut PlannerRun<'_>, path_id: types_pathnodes::PathId, lo
     Ok(())
 }
 
+// cost_bitmap_tree_node (costsize.c): (cost, selectivity) of a bitmapqual.
+pub fn cost_bitmap_tree_node(
+    run: &PlannerRun<'_>,
+    path_id: types_pathnodes::PathId,
+) -> (f64, f64) {
+    match run.root.path(path_id) {
+        PathNode::IndexPath(ip) => (
+            // Per-tuple bitmap-manipulation charge: a one-tuple bitmap scan
+            // must not tie the plain indexscan.
+            ip.indextotalcost + 0.1 * gucs::cpu_operator_cost() * ip.path.rows,
+            ip.indexselectivity,
+        ),
+        PathNode::BitmapAndPath(ap) => (ap.path.total_cost, ap.bitmapselectivity),
+        PathNode::BitmapOrPath(op) => (op.path.total_cost, op.bitmapselectivity),
+        other => panic!(
+            "cost_bitmap_tree_node (costsize.c): pathtype {}",
+            other.base().pathtype
+        ),
+    }
+}
+
+fn get_indexpath_pages(run: &PlannerRun<'_>, path_id: types_pathnodes::PathId) -> f64 {
+    match run.root.path(path_id) {
+        PathNode::IndexPath(ip) => {
+            ip.indexinfo.as_ref().expect("indexinfo set").pages as f64
+        }
+        _ => panic!(
+            "get_indexpath_pages (costsize.c): BitmapAnd/Or subtree; M2 bitmap-combine lane"
+        ),
+    }
+}
+
+// compute_bitmap_pages (costsize.c) -> (pages_fetched, cost, tuples_fetched).
+pub fn compute_bitmap_pages(
+    run: &PlannerRun<'_>,
+    rel: RelId,
+    bitmapqual: types_pathnodes::PathId,
+    loop_count: f64,
+) -> (f64, f64, f64) {
+    let (index_total_cost, index_selectivity) = cost_bitmap_tree_node(run, bitmapqual);
+    let (pages, tuples) = {
+        let baserel = run.root.rel(rel);
+        (baserel.pages, baserel.tuples)
+    };
+    let mut tuples_fetched = clamp_row_est(index_selectivity * tuples);
+    let t = if pages > 1 { pages as f64 } else { 1.0 };
+    let mut pages_fetched = (2.0 * t * tuples_fetched) / (2.0 * t + tuples_fetched);
+    let heap_pages = pages_fetched.min(pages as f64);
+    let maxentries =
+        tidbitmap::tbm_calculate_entries(init_small::globals::work_mem() as usize * 1024) as f64;
+    if loop_count > 1.0 {
+        pages_fetched = index_pages_fetched(
+            run,
+            tuples_fetched * loop_count,
+            pages,
+            get_indexpath_pages(run, bitmapqual),
+        );
+        pages_fetched /= loop_count;
+    }
+    pages_fetched = if pages_fetched >= t { t } else { pages_fetched.ceil() };
+    if maxentries < heap_pages {
+        // tbm_lossify() sheds pages sharply once memory runs short; this
+        // matches C's crude estimate of that shape.
+        let lossy_pages = (heap_pages - maxentries / 2.0).max(0.0);
+        let exact_pages = heap_pages - lossy_pages;
+        if lossy_pages > 0.0 {
+            tuples_fetched = clamp_row_est(
+                index_selectivity * (exact_pages / heap_pages) * tuples
+                    + (lossy_pages / heap_pages) * tuples,
+            );
+        }
+    }
+    (pages_fetched, index_total_cost, tuples_fetched)
+}
+
+// cost_bitmap_heap_scan (costsize.c); loop_count > 1 rides the join lane.
+pub fn cost_bitmap_heap_scan(
+    run: &mut PlannerRun<'_>,
+    path_id: types_pathnodes::PathId,
+    rel: RelId,
+    bitmapqual: types_pathnodes::PathId,
+    loop_count: f64,
+) {
+    let (relid, rtekind, reltablespace, pages, base_rows) = {
+        let baserel = run.root.rel(rel);
+        (baserel.relid, baserel.rtekind, baserel.reltablespace, baserel.pages, baserel.rows)
+    };
+    debug_assert!(relid > 0 && rtekind == RTE_RELATION);
+    assert!(
+        run.root.path(path_id).base().param_info.is_none(),
+        "cost_bitmap_heap_scan (costsize.c): parameterized path; M2 join lane"
+    );
+    let rows = base_rows;
+
+    let (pages_fetched, index_total_cost, tuples_fetched) =
+        compute_bitmap_pages(run, rel, bitmapqual, loop_count);
+
+    let mut startup_cost = index_total_cost;
+    let t = if pages > 1 { pages as f64 } else { 1.0 };
+    let (spc_random_page_cost, spc_seq_page_cost) = get_tablespace_page_costs(reltablespace);
+    // Interpolate between random (few pages) and sequential (most of the
+    // table) per-page cost, nonlinearly, as C.
+    let cost_per_page = if pages_fetched >= 2.0 {
+        spc_random_page_cost
+            - (spc_random_page_cost - spc_seq_page_cost) * (pages_fetched / t).sqrt()
+    } else {
+        spc_random_page_cost
+    };
+    let mut run_cost = pages_fetched * cost_per_page;
+
+    // Indexquals are assumed rechecked at every tuple (lossy bitmaps), so the
+    // full scan-clause freight is charged.
+    let qpqual_cost = get_restriction_qual_cost(run, rel);
+    startup_cost += qpqual_cost.startup;
+    let cpu_per_tuple = gucs::cpu_tuple_cost() + qpqual_cost.per_tuple;
+    let cpu_run_cost = cpu_per_tuple * tuples_fetched;
+    debug_assert!(run.root.path(path_id).base().parallel_workers == 0);
+    run_cost += cpu_run_cost;
+
+    let target = run.root.path_pathtarget(path_id);
+    startup_cost += target.cost.startup;
+    run_cost += target.cost.per_tuple * rows;
+
+    let p = run.root.path_mut(path_id).base_mut();
+    p.rows = rows;
+    p.disabled_nodes = if gucs::enable_bitmapscan() { 0 } else { 1 };
+    p.startup_cost = startup_cost;
+    p.total_cost = startup_cost + run_cost;
+}
+
+// cost_agg (costsize.c), AGG_PLAIN no-quals arm; sorted/hashed strategies and
+// HAVING quals are the M3 grouping lanes.
+#[allow(clippy::too_many_arguments)]
+pub fn cost_agg(
+    run: &mut PlannerRun<'_>,
+    path_id: types_pathnodes::PathId,
+    aggstrategy: u32,
+    aggcosts: &types_pathnodes::AggClauseCosts,
+    num_group_cols: i32,
+    num_groups: f64,
+    quals_empty: bool,
+    input_disabled_nodes: i32,
+    input_startup_cost: f64,
+    input_total_cost: f64,
+    input_tuples: f64,
+) {
+    assert!(
+        aggstrategy == types_pathnodes::AGG_PLAIN,
+        "cost_agg (costsize.c): AGG_SORTED/AGG_HASHED/AGG_MIXED; M3 grouping lane"
+    );
+    assert!(quals_empty, "cost_agg (costsize.c): HAVING quals; M3 having lane");
+    debug_assert!(num_group_cols == 0 && num_groups == 1.0);
+    let _ = input_startup_cost;
+
+    let mut startup_cost = input_total_cost;
+    startup_cost += aggcosts.transCost.startup;
+    startup_cost += aggcosts.transCost.per_tuple * input_tuples;
+    startup_cost += aggcosts.finalCost.startup;
+    startup_cost += aggcosts.finalCost.per_tuple;
+    let total_cost = startup_cost + gucs::cpu_tuple_cost();
+    let output_tuples = 1.0;
+
+    let p = run.root.path_mut(path_id).base_mut();
+    p.rows = output_tuples;
+    p.disabled_nodes = input_disabled_nodes;
+    p.startup_cost = startup_cost;
+    p.total_cost = total_cost;
+}
+
 // index_pages_fetched (costsize.c): the Mackert-Lohman formula.
 pub fn index_pages_fetched(
     run: &PlannerRun<'_>,
@@ -328,6 +500,7 @@ pub fn expr_type_typmod(node: Node<'_>) -> (u32, i32) {
         }
         NodeTag::T_OpExpr => (node.as_op_expr().unwrap().opresulttype, -1),
         NodeTag::T_FuncExpr => (node.as_func_expr().unwrap().funcresulttype, -1),
+        NodeTag::T_Aggref => (node.as_aggref().unwrap().aggtype, -1),
         other => panic!("exprType (nodeFuncs.c): {other:?}; M2 expression lane"),
     }
 }

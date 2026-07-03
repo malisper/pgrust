@@ -29,6 +29,8 @@ nodebitmapindexscan = { path = "../nodebitmapindexscan" }
 nodebitmapheapscan = { path = "../nodebitmapheapscan" }
 tidbitmap = { path = "../../nodes/tidbitmap" }
 nodeagg = { path = "../nodeagg" }
+nodesort = { path = "../nodesort" }
+nodelimit = { path = "../nodelimit" }
 exectuples = { path = "../exectuples" }
 tupdesc = { path = "../../access/common/tupdesc" }
 snapmgr = { path = "../../utils/time/snapmgr" }

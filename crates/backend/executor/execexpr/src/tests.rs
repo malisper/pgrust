@@ -482,3 +482,127 @@ fn cmp_op_semantics_match_int_c() {
         assert_eq!(op.commuted(), com);
     }
 }
+
+// New agg steps under Miri: trans program (strict count + non-strict sum
+// shapes) advancing pergroup in place, and AggrefEval projecting the results.
+#[test]
+fn agg_trans_and_aggref_eval_steps() {
+    use core::ptr::NonNull;
+
+    use crate::compile::{
+        exec_build_agg_projection_info, exec_build_agg_trans, AggBind, AggTransSpec,
+    };
+    use crate::steps::AggPerGroup;
+    use ::types_nodes::primnodes::{Aggref, OUTER_VAR};
+
+    with_mcx(|mcx| {
+        let mut pergroup = [
+            AggPerGroup {
+                trans_value: Datum::from_i64(0),
+                trans_value_is_null: false,
+                no_trans_value: false,
+            },
+            AggPerGroup {
+                trans_value: Datum::null(),
+                trans_value_is_null: true,
+                no_trans_value: true,
+            },
+        ];
+        let base = NonNull::new(pergroup.as_mut_ptr()).unwrap();
+        let empty_args = NodeList::nil();
+        let var = Node::mk_var(mcx, OUTER_VAR, 1, INT4OID, -1, 0, 0).unwrap();
+        let arg_tle = Node::mk_target_entry(mcx, var, 1, None, false).unwrap();
+        let sum_args = NodeList::make1(mcx, arg_tle).unwrap();
+        let specs = [
+            // count(*): int8inc (1219), strict, non-null init, 0 inputs.
+            AggTransSpec {
+                transfn_oid: 1219,
+                inputcollid: 0,
+                init_value_is_null: false,
+                args: &empty_args,
+                pergroup: base,
+            },
+            // sum(int4): int4_sum (1841), non-strict, null init, 1 input.
+            AggTransSpec {
+                transfn_oid: 1841,
+                inputcollid: 0,
+                init_value_is_null: true,
+                args: &sum_args,
+                // SAFETY: index 1 of the 2-element local array.
+                pergroup: unsafe { NonNull::new_unchecked(base.as_ptr().add(1)) },
+            },
+        ];
+        let mut trans = exec_build_agg_trans(mcx, &specs).unwrap();
+        for v in [7i32, 35] {
+            let mut outer = virtual_slot(mcx, &[Some(v)]);
+            let mut slots =
+                EvalSlots { scan: None, inner: None, outer: Some(&mut outer) };
+            crate::exec_eval_expr(&mut trans, &mut slots).unwrap();
+        }
+        assert_eq!(pergroup[0].trans_value.as_i64(), 2);
+        assert!(!pergroup[0].trans_value_is_null);
+        assert_eq!(pergroup[1].trans_value.as_i64(), 42);
+        assert!(!pergroup[1].trans_value_is_null);
+
+        let mut aggvalues = [pergroup[0].trans_value, pergroup[1].trans_value];
+        let mut aggnulls = [false, false];
+        let bind = AggBind {
+            values: NonNull::new(aggvalues.as_mut_ptr()).unwrap(),
+            nulls: NonNull::new(aggnulls.as_mut_ptr()).unwrap(),
+            naggs: 2,
+        };
+        let mut agg0 = Node::build::<Aggref>(mcx).unwrap();
+        agg0.aggfnoid = 2803;
+        agg0.aggtype = INT8OID;
+        agg0.aggno = 0;
+        let mut agg1 = Node::build::<Aggref>(mcx).unwrap();
+        agg1.aggfnoid = 2108;
+        agg1.aggtype = INT8OID;
+        agg1.aggno = 1;
+        let tle0 = Node::mk_target_entry(mcx, agg0.seal(), 1, None, false).unwrap();
+        let tle1 = Node::mk_target_entry(mcx, agg1.seal(), 2, None, false).unwrap();
+        let tlist = NodeList::make2(mcx, tle0, tle1).unwrap();
+        let mut proj = exec_build_agg_projection_info(mcx, &tlist, None, bind).unwrap();
+        let mut result = exectuples::make_tuple_table_slot(
+            mcx,
+            TupleSlotKind::Virtual,
+            Some(desc_int4(mcx, 2)),
+        );
+        let mut slots = EvalSlots { scan: None, inner: None, outer: None };
+        crate::exec_project(&mut proj, &mut slots, &mut result, mcx).unwrap();
+        let rbase = result.base();
+        assert_eq!(rbase.tts_values[0].as_i64(), 2);
+        assert_eq!(rbase.tts_values[1].as_i64(), 42);
+        assert!(!rbase.tts_isnull[0] && !rbase.tts_isnull[1]);
+    });
+}
+
+#[test]
+#[should_panic(expected = "EEOP_AGG_STRICT_INPUT_CHECK_ARGS")]
+fn agg_trans_strict_with_args_panics() {
+    use core::ptr::NonNull;
+
+    use crate::compile::{exec_build_agg_trans, AggTransSpec};
+    use crate::steps::AggPerGroup;
+    use ::types_nodes::primnodes::OUTER_VAR;
+
+    with_mcx(|mcx| {
+        let mut pg = AggPerGroup {
+            trans_value: Datum::null(),
+            trans_value_is_null: true,
+            no_trans_value: true,
+        };
+        let var = Node::mk_var(mcx, OUTER_VAR, 1, INT8OID, -1, 0, 0).unwrap();
+        let tle = Node::mk_target_entry(mcx, var, 1, None, false).unwrap();
+        let args = NodeList::make1(mcx, tle).unwrap();
+        // int8larger (1236): strict with one aggregated arg (max()).
+        let specs = [AggTransSpec {
+            transfn_oid: 1236,
+            inputcollid: 0,
+            init_value_is_null: false,
+            args: &args,
+            pergroup: NonNull::from(&mut pg),
+        }];
+        let _ = exec_build_agg_trans(mcx, &specs);
+    });
+}

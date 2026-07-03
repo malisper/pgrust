@@ -29,6 +29,8 @@ pub enum PlanStateNode<'mcx> {
     IndexScan(::nodeindexscan::IndexScanState<'mcx>),
     IndexOnlyScan(::nodeindexonlyscan::IndexOnlyScanState<'mcx>),
     Agg(PgBox<'mcx, AggPlanState<'mcx>>),
+    Sort(SortNode<'mcx>),
+    Limit(LimitNode<'mcx>),
     BitmapHeapScan(PgBox<'mcx, BitmapHeapPlanState<'mcx>>),
     BitmapIndexScan(::nodebitmapindexscan::BitmapIndexScanState<'mcx>),
     BitmapAnd(PgBox<'mcx, BitmapCombineState<'mcx>>),
@@ -56,6 +58,17 @@ pub struct AggPlanState<'mcx> {
     pub outer: PlanStateNode<'mcx>,
 }
 
+pub struct SortNode<'mcx> {
+    pub state: ::nodesort::SortState<'mcx>,
+    pub outer: PgBox<'mcx, PlanStateNode<'mcx>>,
+    pub outer_desc: Rc<TupleDescData<'static>>,
+}
+
+pub struct LimitNode<'mcx> {
+    pub state: ::nodelimit::LimitState<'mcx>,
+    pub outer: PgBox<'mcx, PlanStateNode<'mcx>>,
+}
+
 // Init-time tree node touched by &mut per tuple; rule-9 budget covers the per-row carriers inside.
 const _: () = assert!(core::mem::size_of::<PlanStateNode<'static>>() <= 1024);
 
@@ -68,6 +81,9 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::IndexScan(is) => Some(is.ss.ps_ExprContext),
             PlanStateNode::IndexOnlyScan(ios) => Some(ios.ss.ps_ExprContext),
             PlanStateNode::Agg(aps) => Some(aps.agg.ps_ExprContext),
+            // C sorts have no ExprContext.
+            PlanStateNode::Sort(_) => None,
+            PlanStateNode::Limit(l) => Some(l.state.ps_ExprContext),
             PlanStateNode::BitmapHeapScan(b) => Some(b.scan.ss.ps_ExprContext),
             PlanStateNode::BitmapIndexScan(_)
             | PlanStateNode::BitmapAnd(_)
@@ -91,8 +107,10 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::SeqScan(_)
             | PlanStateNode::IndexScan(_)
             | PlanStateNode::IndexOnlyScan(_)
+            | PlanStateNode::Limit(_)
             | PlanStateNode::BitmapHeapScan(_) => crate::exec_type_from_tl(&plan.targetlist),
             PlanStateNode::Agg(aps) => Ok(aps.agg.ps_ResultTupleDesc.clone()),
+            PlanStateNode::Sort(s) => Ok(::nodesort::sort_result_type(&s.state)),
             PlanStateNode::BitmapIndexScan(_)
             | PlanStateNode::BitmapAnd(_)
             | PlanStateNode::BitmapOr(_) => {
@@ -198,6 +216,37 @@ pub fn exec_init_node<'mcx>(
                 init_bitmap_combine(&plan.bitmapplans, estate, eflags)?,
             )?)
         }
+        NodeTag::T_Sort => {
+            let sort_plan = node.as_sort().unwrap();
+            let outer = exec_init_node(
+                sort_plan.plan.lefttree,
+                estate,
+                ::nodesort::sort_child_eflags(eflags),
+            )?
+            .unwrap_or_else(|| panic!("ExecInitSort (nodeSort.c): Sort without an outer plan"));
+            let outer_desc = outer
+                .exec_get_result_type(sort_plan.plan.lefttree.unwrap().as_plan().unwrap())?;
+            let result_desc = crate::exec_type_from_tl(&sort_plan.plan.targetlist)?;
+            let state =
+                ::nodesort::exec_init_sort(sort_plan, estate, eflags, &outer_desc, result_desc)?;
+            PlanStateNode::Sort(SortNode {
+                state,
+                outer: ::mcx::alloc_in(estate.es_query_cxt, outer)?,
+                outer_desc,
+            })
+        }
+        NodeTag::T_Limit => {
+            let limit_plan = node.as_limit().unwrap();
+            let outer = exec_init_node(limit_plan.plan.lefttree, estate, eflags)?
+                .unwrap_or_else(|| {
+                    panic!("ExecInitLimit (nodeLimit.c): Limit without an outer plan")
+                });
+            let state = ::nodelimit::exec_init_limit(limit_plan, estate, eflags)?;
+            PlanStateNode::Limit(LimitNode {
+                state,
+                outer: ::mcx::alloc_in(estate.es_query_cxt, outer)?,
+            })
+        }
         NodeTag::T_Agg => {
             let mcx = estate.es_query_cxt;
             let agg_plan = node.as_agg().unwrap();
@@ -229,7 +278,6 @@ pub fn exec_init_node<'mcx>(
             T_MergeJoin => "nodeMergejoin.c",
             T_HashJoin => "nodeHashjoin.c",
             T_Material => "nodeMaterial.c",
-            T_Sort => "nodeSort.c",
             T_IncrementalSort => "nodeIncrementalSort.c",
             T_Memoize => "nodeMemoize.c",
             T_Group => "nodeGroup.c",
@@ -240,7 +288,6 @@ pub fn exec_init_node<'mcx>(
             T_Hash => "nodeHash.c",
             T_SetOp => "nodeSetOp.c",
             T_LockRows => "nodeLockRows.c",
-            T_Limit => "nodeLimit.c",
         }),
     };
     if !node.as_plan().expect("plan-tree node").initPlan.is_nil() {
@@ -266,6 +313,16 @@ pub fn exec_proc_node<'mcx>(
             let aps = &mut **aps;
             let outer = &mut aps.outer;
             ::nodeagg::exec_agg(&mut aps.agg, estate, |e| exec_proc_node(outer, e))
+        }
+        PlanStateNode::Sort(s) => {
+            let SortNode { state, outer, outer_desc } = s;
+            ::nodesort::exec_sort(state, estate, outer_desc.clone(), |es| {
+                exec_proc_node(outer, es)
+            })
+        }
+        PlanStateNode::Limit(l) => {
+            let LimitNode { state, outer } = l;
+            ::nodelimit::exec_limit(state, &mut **outer, estate)
         }
         PlanStateNode::BitmapHeapScan(b) => {
             let b = &mut **b;
@@ -371,6 +428,12 @@ pub fn exec_end_node<'mcx>(
             ::nodeagg::exec_end_agg(&mut aps.agg);
             exec_end_node(&mut aps.outer, estate)
         }
+        PlanStateNode::Sort(s) => {
+            ::nodesort::exec_end_sort(&mut s.state);
+            exec_end_node(&mut s.outer, estate)
+        }
+        // C ExecEndLimit only ends the child.
+        PlanStateNode::Limit(l) => exec_end_node(&mut l.outer, estate),
         PlanStateNode::BitmapHeapScan(b) => {
             let b = &mut **b;
             exec_end_node(&mut b.bitmapqual, estate)?;
@@ -402,12 +465,40 @@ pub fn exec_shutdown_node<'mcx>(node: &mut PlanStateNode<'mcx>) {
         | PlanStateNode::IndexOnlyScan(_)
         | PlanStateNode::BitmapIndexScan(_) => {}
         PlanStateNode::Agg(aps) => exec_shutdown_node(&mut aps.outer),
+        PlanStateNode::Sort(s) => exec_shutdown_node(&mut s.outer),
+        PlanStateNode::Limit(l) => exec_shutdown_node(&mut l.outer),
         PlanStateNode::BitmapHeapScan(b) => exec_shutdown_node(&mut b.bitmapqual),
         PlanStateNode::BitmapAnd(bc) | PlanStateNode::BitmapOr(bc) => {
             for sub in bc.substates.iter_mut() {
                 exec_shutdown_node(sub);
             }
         }
+    }
+}
+
+/// `ExecSetTupleBound` (execProcnode.c): Sort gets the bound, Result passes
+/// it through to its child; every other ported variant is C's silent no-op
+/// fall-through (Agg included — C only descends Sort/IncrementalSort/
+/// MergeAppend/Result/SubqueryScan/Gather/GatherMerge).
+pub fn exec_set_tuple_bound<'mcx>(tuples_needed: i64, node: &mut PlanStateNode<'mcx>) {
+    match node {
+        PlanStateNode::Sort(s) => ::nodesort::sort_set_tuple_bound(&mut s.state, tuples_needed),
+        PlanStateNode::Result(rs) => {
+            if let Some(outer) = rs.outer.as_deref_mut() {
+                exec_set_tuple_bound(tuples_needed, outer);
+            }
+        }
+        _ => {}
+    }
+}
+
+impl<'mcx> ::nodelimit::LimitChild<'mcx> for PlanStateNode<'mcx> {
+    fn exec_proc(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<Option<ExecSlotId>> {
+        exec_proc_node(self, estate)
+    }
+
+    fn set_tuple_bound(&mut self, tuples_needed: i64) {
+        exec_set_tuple_bound(tuples_needed, self);
     }
 }
 

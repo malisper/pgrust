@@ -26,6 +26,13 @@ fn install_fixtures() {
                     typstorage: b'p' as i8,
                     typcollation: 0,
                 }),
+                20 => Some(PgTypeShape {
+                    typlen: 8,
+                    typbyval: true,
+                    typalign: b'd' as i8,
+                    typstorage: b'p' as i8,
+                    typcollation: 0,
+                }),
                 _ => None,
             })
         });
@@ -41,20 +48,27 @@ const INT4_BTREE_FAM: u32 = 1976;
 
 fn install_scan_fixtures() {
     syscache_seams::lookup_pg_proc_shape::set(|funcid| {
+        let shape = |rettype, nargs, kind: u8, strict| syscache_seams::PgProcShape {
+            pronamespace: 11,
+            prorettype: rettype,
+            provariadic: 0,
+            prosupport: 0,
+            pronargs: nargs,
+            prokind: kind as i8,
+            provolatile: b'i' as i8,
+            proparallel: b's' as i8,
+            proretset: false,
+            proisstrict: strict,
+            proleakproof: false,
+        };
         Ok(match funcid {
-            177 | 65 => Some(syscache_seams::PgProcShape {
-                pronamespace: 11,
-                prorettype: if funcid == 65 { 16 } else { 23 },
-                provariadic: 0,
-                prosupport: 0,
-                pronargs: 2,
-                prokind: b'f' as i8,
-                provolatile: b'i' as i8,
-                proparallel: b's' as i8,
-                proretset: false,
-                proisstrict: true,
-                proleakproof: false,
-            }),
+            177 => Some(shape(23, 2, b'f', true)),
+            65 => Some(shape(16, 2, b'f', true)),
+            // pg_proc.dat rows for the plain-agg lane (agg::* tests).
+            2803 => Some(shape(20, 0, b'a', false)),
+            2108 => Some(shape(20, 1, b'a', false)),
+            1219 => Some(shape(20, 1, b'f', true)),
+            1841 => Some(shape(20, 2, b'f', false)),
             _ => None,
         })
     });
@@ -105,7 +119,37 @@ fn install_scan_fixtures() {
     });
     syscache_seams::pg_proc_cost_shape::set(|funcid| {
         Ok(match funcid {
-            INT4EQ_PROC => Some(syscache_seams::PgProcCostShape { procost: 1.0, prosupport: 0 }),
+            INT4EQ_PROC | 1219 | 1841 => {
+                Some(syscache_seams::PgProcCostShape { procost: 1.0, prosupport: 0 })
+            }
+            _ => None,
+        })
+    });
+    syscache_seams::lookup_pg_aggregate_shape::set(|aggfnoid| {
+        // pg_aggregate.dat rows for count() / sum(int4).
+        let shape = |transfn| syscache_seams::PgAggregateShape {
+            aggkind: b'n' as i8,
+            aggnumdirectargs: 0,
+            aggtransfn: transfn,
+            aggfinalfn: 0,
+            aggcombinefn: 463,
+            aggserialfn: 0,
+            aggdeserialfn: 0,
+            aggfinalextra: false,
+            aggfinalmodify: b'r' as i8,
+            aggtranstype: 20,
+            aggtransspace: 0,
+        };
+        Ok(match aggfnoid {
+            2803 => Some(shape(1219)),
+            2108 => Some(shape(1841)),
+            _ => None,
+        })
+    });
+    syscache_seams::pg_aggregate_agginitval::set(|mcx, aggfnoid| {
+        Ok(match aggfnoid {
+            2803 => Some(Some(mcx::PgString::from_str_in("0", mcx)?)),
+            2108 => Some(None),
             _ => None,
         })
     });
@@ -436,6 +480,74 @@ fn point_select_plans_to_index_scan() {
 }
 
 #[test]
+fn bitmap_heap_path_plans_to_bitmap_scan_nodes() {
+    let cx = cx();
+    let mcx = cx.mcx();
+    let parse = table_query(mcx, Some(eq_qual(mcx, 1, 42)));
+    let mut run = crate::run::PlannerRun::new(mcx);
+    crate::subquery::subquery_planner(&mut run, parse, 0.0).unwrap();
+    let final_rel = crate::planmain::fetch_final_rel(&mut run);
+    // The bitmap heap path was generated but is dominated by the plain index
+    // scan (as C); rebuild one over the surviving index path to plan it.
+    let ipath = run.root.rel(final_rel).cheapest_total_path.unwrap();
+    assert!(matches!(run.root.path(ipath), types_pathnodes::PathNode::IndexPath(_)));
+    let (index_total, index_scan_total) = {
+        let types_pathnodes::PathNode::IndexPath(ip) = run.root.path(ipath) else {
+            unreachable!()
+        };
+        (ip.indextotalcost, ip.path.total_cost)
+    };
+    let baserel = run.root.path(ipath).base().parent;
+    let bpath =
+        crate::pathnode::create_bitmap_heap_path(&mut run, baserel, ipath, 1.0).unwrap();
+
+    // Exact C arithmetic over the fixture (100 pages / 10000 tuples, one
+    // matching row): tree cost = indextotalcost + 0.1*cpu_operator_cost*1;
+    // one heap page at random_page_cost; cpu = cpu_tuple_cost + 0.0025.
+    let tree_cost = index_total + 0.1 * 0.0025;
+    let b = run.root.path(bpath).base();
+    assert!((b.startup_cost - tree_cost).abs() < 1e-9, "startup {}", b.startup_cost);
+    assert!(
+        (b.total_cost - (tree_cost + 4.0 + 0.01 + 0.0025)).abs() < 1e-9,
+        "total {}",
+        b.total_cost
+    );
+    assert_eq!(b.rows, 1.0);
+    // The plain index scan beats it (why C picks the index scan by default).
+    assert!(b.total_cost > index_scan_total);
+
+    let plan = crate::createplan::create_plan(&mut run, bpath).unwrap();
+    let plan = crate::setrefs::set_plan_references(&mut run, plan).unwrap();
+    assert_eq!(plan.node_tag(), NodeTag::T_BitmapHeapScan);
+    let bhs = plan.as_bitmap_heap_scan().unwrap();
+    assert_eq!(bhs.scan.scanrelid, 1);
+    assert_eq!(bhs.scan.plan.plan_rows, 1.0);
+    assert_eq!(bhs.scan.plan.plan_width, 8);
+    assert!(bhs.scan.plan.qual.is_nil());
+    assert_eq!(bhs.scan.plan.plan_node_id, 0);
+    assert_eq!(bhs.bitmapqualorig.len(), 1);
+    let orig = bhs.bitmapqualorig.nth(0).as_op_expr().unwrap();
+    assert_eq!(orig.args.nth(0).as_var().unwrap().varno, 1);
+    assert_eq!(orig.args.nth(1).as_const().unwrap().constvalue.as_i32(), 42);
+
+    let child = bhs.scan.plan.lefttree.unwrap();
+    assert_eq!(child.node_tag(), NodeTag::T_BitmapIndexScan);
+    let biss = child.as_bitmap_index_scan().unwrap();
+    assert_eq!(biss.indexid, IDX);
+    assert!(!biss.isshared);
+    assert_eq!(biss.scan.scanrelid, 1);
+    assert!(biss.scan.plan.targetlist.is_nil() && biss.scan.plan.qual.is_nil());
+    assert_eq!(biss.scan.plan.startup_cost, 0.0);
+    assert!((biss.scan.plan.total_cost - index_total).abs() < 1e-9);
+    assert_eq!(biss.scan.plan.plan_rows, 1.0);
+    assert_eq!(biss.scan.plan.plan_node_id, 1);
+    assert_eq!(biss.indexqual.len(), 1);
+    let fixed = biss.indexqual.nth(0).as_op_expr().unwrap();
+    assert_eq!(fixed.args.nth(0).as_var().unwrap().varno, -3);
+    assert_eq!(biss.indexqualorig.len(), 1);
+}
+
+#[test]
 fn select_star_plans_to_seqscan() {
     let cx = cx();
     let mcx = cx.mcx();
@@ -682,4 +794,205 @@ fn from_relation_panics_loudly() {
     parse.jointree = Some(jointree);
 
     let _ = planner(mcx, parse, "SELECT 1 FROM t", CURSOR_OPT_PARALLEL_OK, ParamListHandle::NULL);
+}
+
+// Plain-aggregation lane. Fixtures superset the shared ones so Once ordering
+// across test binaries is irrelevant; pg_aggregate/pg_proc rows are
+// pg_aggregate.dat/pg_proc.dat-exact.
+mod agg {
+    use super::*;
+    use types_nodes::primnodes::{Aggref, OUTER_VAR};
+
+    const COUNT_STAR: u32 = 2803;
+    const SUM_INT4: u32 = 2108;
+    const INT8OID: u32 = 20;
+
+    fn agg_cx() -> MemoryContext {
+        cx()
+    }
+
+    fn count_star_aggref(mcx: Mcx<'_>) -> Node<'_> {
+        Node::mk(
+            mcx,
+            Aggref {
+                aggfnoid: COUNT_STAR,
+                aggtype: INT8OID,
+                aggstar: true,
+                ..Aggref::default()
+            },
+        )
+        .unwrap()
+    }
+
+    fn sum_val_aggref(mcx: Mcx<'_>) -> Node<'_> {
+        let var = Node::mk_var(mcx, 1, 2, 23, -1, 0, 0).unwrap();
+        let arg = Node::mk_target_entry(mcx, var, 1, None, false).unwrap();
+        let mut aggargtypes = types_nodes::list::OidList::nil();
+        aggargtypes.lappend(mcx, 23).unwrap();
+        Node::mk(
+            mcx,
+            Aggref {
+                aggfnoid: SUM_INT4,
+                aggtype: INT8OID,
+                aggargtypes,
+                args: NodeList::make1(mcx, arg).unwrap(),
+                ..Aggref::default()
+            },
+        )
+        .unwrap()
+    }
+
+    fn agg_query<'mcx>(mcx: Mcx<'mcx>, aggs: &[(Node<'mcx>, &'mcx str)]) -> Query<'mcx> {
+        let mut parse = table_query(mcx, None);
+        let mut tlist = NodeList::nil();
+        for (i, (agg, name)) in aggs.iter().enumerate() {
+            let tle =
+                Node::mk_target_entry(mcx, *agg, (i + 1) as i16, Some(name), false).unwrap();
+            tlist.lappend(mcx, tle).unwrap();
+        }
+        parse.targetList = tlist;
+        parse.hasAggs = true;
+        parse
+    }
+
+    #[test]
+    fn count_star_plans_to_plain_agg_over_seqscan() {
+        let cx = agg_cx();
+        let mcx = cx.mcx();
+        let parse = agg_query(mcx, &[(count_star_aggref(mcx), "count")]);
+        let stmt = planner(
+            mcx,
+            parse,
+            "SELECT count(*) FROM t",
+            CURSOR_OPT_PARALLEL_OK,
+            ParamListHandle::NULL,
+        )
+        .unwrap();
+
+        let plan = stmt.planTree.unwrap();
+        assert_eq!(plan.node_tag(), NodeTag::T_Agg);
+        let agg = plan.as_agg().unwrap();
+        assert_eq!(agg.aggstrategy, types_pathnodes::AGG_PLAIN);
+        assert_eq!(agg.aggsplit, types_pathnodes::AGGSPLIT_SIMPLE);
+        assert_eq!(agg.numCols, 0);
+        assert_eq!(agg.numGroups, 1);
+        assert_eq!(agg.transitionSpace, 0);
+        assert!(agg.plan.qual.is_nil());
+
+        // EXPLAIN: Aggregate (cost=225.00..225.01 rows=1 width=8) over
+        // Seq Scan (cost=0.00..200.00 rows=10000 width=0).
+        assert!((agg.plan.startup_cost - 225.0).abs() < 1e-9);
+        assert!((agg.plan.total_cost - 225.01).abs() < 1e-9);
+        assert_eq!(agg.plan.plan_rows, 1.0);
+        assert_eq!(agg.plan.plan_width, 8);
+
+        assert_eq!(agg.plan.targetlist.len(), 1);
+        let tle = agg.plan.targetlist.nth(0).as_target_entry().unwrap();
+        assert_eq!(tle.resname, Some("count"));
+        let aggref = tle.expr.as_aggref().unwrap();
+        assert_eq!(aggref.aggno, 0);
+        assert_eq!(aggref.aggtransno, 0);
+        assert_eq!(aggref.aggtranstype, INT8OID);
+        assert!(aggref.args.is_nil());
+
+        let child = agg.plan.lefttree.unwrap();
+        assert_eq!(child.node_tag(), NodeTag::T_SeqScan);
+        let sscan = child.as_seq_scan().unwrap();
+        assert_eq!(sscan.scan.plan.plan_rows, 10000.0);
+        assert_eq!(sscan.scan.plan.plan_width, 0);
+        assert!((sscan.scan.plan.total_cost - 200.0).abs() < 1e-9);
+        // use_physical_tlist: the child emits the physical tuple.
+        assert_eq!(sscan.scan.plan.targetlist.len(), 2);
+        assert_eq!(sscan.scan.plan.plan_node_id, 1);
+        assert_eq!(agg.plan.plan_node_id, 0);
+    }
+
+    #[test]
+    fn sum_arg_var_retargets_to_outer_subplan_column() {
+        let cx = agg_cx();
+        let mcx = cx.mcx();
+        let parse = agg_query(mcx, &[(sum_val_aggref(mcx), "sum")]);
+        let stmt = planner(
+            mcx,
+            parse,
+            "SELECT sum(val) FROM t",
+            CURSOR_OPT_PARALLEL_OK,
+            ParamListHandle::NULL,
+        )
+        .unwrap();
+
+        let plan = stmt.planTree.unwrap();
+        let agg = plan.as_agg().unwrap();
+        assert!((agg.plan.startup_cost - 225.0).abs() < 1e-9);
+        assert!((agg.plan.total_cost - 225.01).abs() < 1e-9);
+        assert_eq!(agg.plan.plan_width, 8);
+
+        let aggref =
+            agg.plan.targetlist.nth(0).as_target_entry().unwrap().expr.as_aggref().unwrap();
+        assert_eq!((aggref.aggno, aggref.aggtransno, aggref.aggtranstype), (0, 0, INT8OID));
+        assert_eq!(aggref.args.len(), 1);
+        let arg_var =
+            aggref.args.nth(0).as_target_entry().unwrap().expr.as_var().unwrap();
+        assert_eq!(arg_var.varno, OUTER_VAR);
+        assert_eq!(arg_var.varattno, 2);
+        assert_eq!(arg_var.vartype, 23);
+
+        let child = agg.plan.lefttree.unwrap().as_seq_scan().unwrap();
+        assert_eq!(child.scan.plan.targetlist.len(), 2);
+        assert_eq!(child.scan.plan.plan_width, 4);
+    }
+
+    #[test]
+    fn two_aggs_get_distinct_agg_and_trans_numbers() {
+        let cx = agg_cx();
+        let mcx = cx.mcx();
+        let parse = agg_query(
+            mcx,
+            &[(count_star_aggref(mcx), "count"), (sum_val_aggref(mcx), "sum")],
+        );
+        let stmt = planner(
+            mcx,
+            parse,
+            "SELECT count(*), sum(val) FROM t",
+            CURSOR_OPT_PARALLEL_OK,
+            ParamListHandle::NULL,
+        )
+        .unwrap();
+
+        let agg = stmt.planTree.unwrap().as_agg().unwrap();
+        // Two transfns at procost 1: startup 200 + 2 * 0.0025 * 10000.
+        assert!((agg.plan.startup_cost - 250.0).abs() < 1e-9);
+        assert!((agg.plan.total_cost - 250.01).abs() < 1e-9);
+        assert_eq!(agg.plan.targetlist.len(), 2);
+        let a0 = agg.plan.targetlist.nth(0).as_target_entry().unwrap().expr.as_aggref().unwrap();
+        let a1 = agg.plan.targetlist.nth(1).as_target_entry().unwrap().expr.as_aggref().unwrap();
+        assert_eq!((a0.aggno, a0.aggtransno), (0, 0));
+        assert_eq!((a1.aggno, a1.aggtransno), (1, 1));
+    }
+
+    #[test]
+    fn identical_aggrefs_share_one_aggno() {
+        let cx = agg_cx();
+        let mcx = cx.mcx();
+        let parse = agg_query(
+            mcx,
+            &[(count_star_aggref(mcx), "count"), (count_star_aggref(mcx), "count")],
+        );
+        let stmt = planner(
+            mcx,
+            parse,
+            "SELECT count(*), count(*) FROM t",
+            CURSOR_OPT_PARALLEL_OK,
+            ParamListHandle::NULL,
+        )
+        .unwrap();
+
+        let agg = stmt.planTree.unwrap().as_agg().unwrap();
+        // One shared transition state: costs match the single-count plan.
+        assert!((agg.plan.startup_cost - 225.0).abs() < 1e-9);
+        let a0 = agg.plan.targetlist.nth(0).as_target_entry().unwrap().expr.as_aggref().unwrap();
+        let a1 = agg.plan.targetlist.nth(1).as_target_entry().unwrap().expr.as_aggref().unwrap();
+        assert_eq!((a0.aggno, a0.aggtransno), (0, 0));
+        assert_eq!((a1.aggno, a1.aggtransno), (0, 0));
+    }
 }

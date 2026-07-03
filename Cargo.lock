@@ -934,6 +934,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "condition_variable"
+version = "0.0.0"
+dependencies = [
+ "condition_variable_seams",
+ "init_small",
+ "ipc_seams",
+ "latch",
+ "lmgr_proc",
+ "lmgr_proc_seams",
+ "pg_sema_seams",
+ "postgres_seams",
+ "s_lock_seams",
+ "shmem_seams",
+ "types_core",
+ "types_error",
+ "types_storage",
+ "waitevent_seams",
+ "waiteventset",
+]
+
+[[package]]
 name = "condition_variable_seams"
 version = "0.0.0"
 dependencies = [
@@ -1006,6 +1027,10 @@ dependencies = [
  "types_core",
  "types_error",
 ]
+
+[[package]]
+name = "deadlock"
+version = "0.0.0"
 
 [[package]]
 name = "deadlock_seams"
@@ -1150,7 +1175,9 @@ dependencies = [
  "nodebitmapindexscan",
  "nodeindexonlyscan",
  "nodeindexscan",
+ "nodelimit",
  "nodeseqscan",
+ "nodesort",
  "postgres_seams",
  "predicate_seams",
  "procarray_seams",
@@ -1284,6 +1311,7 @@ dependencies = [
  "execmain_seams",
  "exectuples_output",
  "fmgr_seams",
+ "format_type",
  "guc_tables",
  "init_small",
  "ipc_seams",
@@ -1411,11 +1439,14 @@ dependencies = [
 name = "format_type"
 version = "0.1.0"
 dependencies = [
+ "datum",
+ "fmgr_seams",
  "keywords",
  "lsyscache",
  "syscache_seams",
  "types_core",
  "types_error",
+ "types_fmgr",
  "types_tuple",
 ]
 
@@ -2780,6 +2811,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "parallel"
+version = "0.0.0"
+
+[[package]]
 name = "parallel_seams"
 version = "0.0.0"
 dependencies = [
@@ -2940,6 +2975,7 @@ dependencies = [
  "coerce",
  "datum",
  "elog",
+ "format_type",
  "mbutils",
  "mcx",
  "parse_expr",
@@ -2959,15 +2995,19 @@ dependencies = [
  "analyze_seams",
  "backend_status",
  "datum",
+ "elog",
  "gram_core",
  "guc_tables",
  "indexcmds_seams",
  "lsyscache",
+ "mbutils",
  "mcx",
  "miscinit_seams",
  "parse_agg",
  "parse_clause",
  "parse_collate",
+ "parse_expr",
+ "parse_relation",
  "parse_target",
  "parser_seams",
  "parser_small1",
@@ -3162,6 +3202,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "pg_string"
+version = "0.0.0"
+
+[[package]]
 name = "pglz"
 version = "0.1.0"
 
@@ -3279,6 +3323,7 @@ dependencies = [
  "lsyscache",
  "mcx",
  "nbtree",
+ "parse_relation",
  "planner_seams",
  "relation_seams",
  "relcache",
@@ -3287,6 +3332,7 @@ dependencies = [
  "syscache_seams",
  "table",
  "tableam",
+ "tidbitmap",
  "types_core",
  "types_error",
  "types_nbtree",
@@ -3730,6 +3776,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "predicate"
+version = "0.0.0"
+
+[[package]]
 name = "predicate_seams"
 version = "0.0.0"
 dependencies = [
@@ -3900,6 +3950,10 @@ dependencies = [
  "seam_core",
  "types_error",
 ]
+
+[[package]]
+name = "pruneheap"
+version = "0.0.0"
 
 [[package]]
 name = "pruneheap_seams"
@@ -4293,9 +4347,12 @@ dependencies = [
  "lsyscache",
  "mbutils",
  "miscinit",
+ "nodeagg",
  "nodeindexonlyscan",
  "nodeindexscan",
+ "nodelimit",
  "nodeseqscan",
+ "nodesort",
  "parse_expr",
  "parser_analyze",
  "parser_driver",
@@ -4345,6 +4402,7 @@ dependencies = [
  "timeout",
  "transam",
  "transam_xlog",
+ "tuplesort",
  "tuplestore",
  "twophase_config",
  "typcache",
@@ -4577,6 +4635,10 @@ dependencies = [
  "types_error",
  "types_snapshot",
 ]
+
+[[package]]
+name = "spi"
+version = "0.0.0"
 
 [[package]]
 name = "spi_seams"
@@ -5065,6 +5127,10 @@ dependencies = [
  "types_error",
  "xlogreader_seams",
 ]
+
+[[package]]
+name = "trigger"
+version = "0.0.0"
 
 [[package]]
 name = "trigger_seams"

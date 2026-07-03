@@ -31,6 +31,15 @@ fn pull_var_nodes<'mcx>(node: Node<'mcx>, out: &mut PgVec<'mcx, Node<'mcx>>) {
     match node.node_tag() {
         NodeTag::T_Var => out.push(node),
         NodeTag::T_Const => {}
+        NodeTag::T_Aggref => {
+            let a = node.as_aggref().unwrap();
+            debug_assert!(a.agglevelsup == 0);
+            debug_assert!(a.aggdirectargs.is_nil() && a.aggfilter.is_none());
+            for arg in &a.args {
+                pull_var_nodes(arg, out);
+            }
+        }
+        NodeTag::T_TargetEntry => pull_var_nodes(node.as_target_entry().unwrap().expr, out),
         NodeTag::T_OpExpr => {
             for a in &node.as_op_expr().unwrap().args {
                 pull_var_nodes(a, out);

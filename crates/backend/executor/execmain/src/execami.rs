@@ -26,6 +26,19 @@ pub fn exec_re_scan<'mcx>(
             ::nodeagg::exec_rescan_agg(&mut aps.agg, estate);
             exec_re_scan(&mut aps.outer, estate)
         }
+        // ExecReScanSort: child rescanned only when the sort must be redone
+        // (chgParam NULL until the Param lanes land).
+        PlanStateNode::Sort(s) => {
+            if ::nodesort::exec_rescan_sort(&mut s.state, estate) {
+                exec_re_scan(&mut s.outer, estate)?;
+            }
+            Ok(())
+        }
+        PlanStateNode::Limit(l) => {
+            let crate::procnode::LimitNode { state, outer } = l;
+            ::nodelimit::exec_rescan_limit(state, &mut **outer, estate)?;
+            exec_re_scan(outer, estate)
+        }
         // ExecReScanBitmapHeapScan: bitmapqual rescanned when chgParam is
         // NULL (always, until the Param lanes land).
         PlanStateNode::BitmapHeapScan(b) => {

@@ -211,6 +211,57 @@ pub fn create_projection_path<'mcx>(
     PathNode::ProjectionPath(ProjectionPath { path, subpath: Some(subpath_id), dummypp })
 }
 
+// create_modifytable_path (pathnode.c), single-relation INSERT arm: no
+// RETURNING/WCO/rowmarks/ON CONFLICT/MERGE lists (loud upstream), rows = 0.
+pub fn create_modifytable_path<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel_id: RelId,
+    subpath_id: PathId,
+    operation: types_nodes::nodes_enums::CmdType,
+    can_set_tag: bool,
+    // (operation is stored as the C CmdType value; types_pathnodes uses u32)
+    result_relation: u32,
+) -> PathNode<'mcx> {
+    let sub = run.root.path(subpath_id).base();
+    let path = Path {
+        type_: tag16(NodeTag::T_ModifyTablePath),
+        pathtype: tag16(NodeTag::T_ModifyTable),
+        parent: rel_id,
+        // C reuses rel->reltarget and zeroes its width; the upper rel target
+        // is unset here and copy_generic_path_info reads width 0 from None.
+        pathtarget_id: run.root.rel(rel_id).pathtarget_id,
+        param_info: None,
+        parallel_aware: false,
+        parallel_safe: false,
+        parallel_workers: 0,
+        rows: 0.0,
+        disabled_nodes: sub.disabled_nodes,
+        startup_cost: sub.startup_cost,
+        total_cost: sub.total_cost,
+        pathkeys: PgVec::new_in(run.mcx),
+    };
+    let mut result_relations = PgVec::new_in(run.mcx);
+    result_relations.push(result_relation as i32);
+    PathNode::ModifyTablePath(types_pathnodes::ModifyTablePath {
+        path,
+        subpath: Some(subpath_id),
+        operation: operation as u32,
+        canSetTag: can_set_tag,
+        nominalRelation: result_relation,
+        rootRelation: 0,
+        partColsUpdated: false,
+        resultRelations: result_relations,
+        updateColnosLists: PgVec::new_in(run.mcx),
+        withCheckOptionLists: PgVec::new_in(run.mcx),
+        returningLists: PgVec::new_in(run.mcx),
+        rowMarks: PgVec::new_in(run.mcx),
+        onconflict: None,
+        epqParam: 0,
+        mergeActionLists: PgVec::new_in(run.mcx),
+        mergeJoinConditions: PgVec::new_in(run.mcx),
+    })
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum CostSelector {
     Startup,
@@ -491,6 +542,32 @@ pub fn create_seqscan_path<'mcx>(
     Ok(id)
 }
 
+// choose_bitmap_and (indxpath.c), single-candidate arm: with one input path
+// there is nothing to AND.
+pub fn choose_bitmap_and(_run: &PlannerRun<'_>, _rel_id: RelId, paths: &[PathId]) -> PathId {
+    debug_assert!(!paths.is_empty());
+    if paths.len() == 1 {
+        return paths[0];
+    }
+    panic!("choose_bitmap_and (indxpath.c): AND/OR path reduction; M2 bitmap-combine lane");
+}
+
+// create_bitmap_heap_path (pathnode.c); required_outer/parallel loud upstream.
+pub fn create_bitmap_heap_path<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel_id: RelId,
+    bitmapqual: PathId,
+    loop_count: f64,
+) -> PgResult<PathId> {
+    let mut path = base_path(run, NodeTag::T_BitmapHeapPath, NodeTag::T_BitmapHeapScan, rel_id);
+    path.parallel_aware = false;
+    path.parallel_safe = run.root.rel(rel_id).consider_parallel;
+    let node = types_pathnodes::BitmapHeapPath { path, bitmapqual: Some(bitmapqual) };
+    let id = run.root.alloc_path(PathNode::BitmapHeapPath(node));
+    crate::costsize::cost_bitmap_heap_scan(run, id, rel_id, bitmapqual, loop_count);
+    Ok(id)
+}
+
 // create_index_path (pathnode.c); indexorderbys/partial paths loud upstream.
 pub fn create_index_path<'mcx>(
     run: &mut PlannerRun<'mcx>,
@@ -520,6 +597,81 @@ pub fn create_index_path<'mcx>(
     let id = run.root.alloc_path(PathNode::IndexPath(node));
     crate::costsize::cost_index(run, id, loop_count)?;
     Ok(id)
+}
+
+// create_agg_path (pathnode.c); AGG_SORTED pathkey preservation is the M3
+// grouping lane (AGG_PLAIN output is unordered).
+#[allow(clippy::too_many_arguments)]
+pub fn create_agg_path<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel_id: RelId,
+    subpath_id: PathId,
+    target_id: PtId,
+    aggstrategy: u32,
+    aggsplit: u32,
+    group_clause: PgVec<'mcx, types_pathnodes::NodeId>,
+    qual: PgVec<'mcx, types_pathnodes::NodeId>,
+    aggcosts: &types_pathnodes::AggClauseCosts,
+    num_groups: f64,
+) -> PathId {
+    assert!(
+        aggstrategy == types_pathnodes::AGG_PLAIN,
+        "create_agg_path (pathnode.c): AGG_SORTED pathkeys; M3 grouping lane"
+    );
+    let sub = run.root.path(subpath_id).base();
+    let rel = run.root.rel(rel_id);
+    let path = Path {
+        type_: tag16(NodeTag::T_AggPath),
+        pathtype: tag16(NodeTag::T_Agg),
+        parent: rel_id,
+        pathtarget_id: Some(target_id),
+        param_info: None,
+        parallel_aware: false,
+        parallel_safe: rel.consider_parallel && sub.parallel_safe,
+        parallel_workers: sub.parallel_workers,
+        rows: 0.0,
+        disabled_nodes: 0,
+        startup_cost: 0.0,
+        total_cost: 0.0,
+        pathkeys: PgVec::new_in(run.mcx),
+    };
+    let (sub_disabled, sub_startup, sub_total, sub_rows) =
+        (sub.disabled_nodes, sub.startup_cost, sub.total_cost, sub.rows);
+    let num_group_cols = group_clause.len() as i32;
+    let quals_empty = qual.is_empty();
+    let transition_space = aggcosts.transitionSpace as u64;
+
+    let id = run.root.alloc_path(PathNode::AggPath(types_pathnodes::AggPath {
+        path,
+        subpath: Some(subpath_id),
+        aggstrategy,
+        aggsplit,
+        numGroups: num_groups,
+        transitionSpace: transition_space,
+        groupClause: group_clause,
+        qual,
+    }));
+    crate::costsize::cost_agg(
+        run,
+        id,
+        aggstrategy,
+        aggcosts,
+        num_group_cols,
+        num_groups,
+        quals_empty,
+        sub_disabled,
+        sub_startup,
+        sub_total,
+        sub_rows,
+    );
+
+    let target = run.root.pathtarget(target_id);
+    let (t_startup, t_per_tuple) = (target.cost.startup, target.cost.per_tuple);
+    let p = run.root.path_mut(id).base_mut();
+    let rows = p.rows;
+    p.startup_cost += t_startup;
+    p.total_cost += t_startup + t_per_tuple * rows;
+    id
 }
 
 // get_cheapest_fractional_path (planner.c).

@@ -1,0 +1,294 @@
+use mcx::{Mcx, MemoryContext};
+use parser_small1::{make_parsestate, ParseExprKind, ParseState};
+use types_core::catalog::{INT2OID, INT4OID, INT8OID, NUMERICOID};
+use types_core::{InvalidOid, Oid};
+use types_error::{ERRCODE_UNDEFINED_FUNCTION, ERRCODE_WRONG_OBJECT_TYPE};
+use types_nodes::rawnodes::FuncCall;
+use types_nodes::{Node, NodeList, String as PgStr};
+
+use crate::ParseFuncOrColumn;
+
+const ANYOID: Oid = 2276;
+const PG_CATALOG: Oid = 11;
+
+fn proc_candidate<'mcx>(
+    mcx: Mcx<'mcx>,
+    oid: Oid,
+    args: &[Oid],
+) -> syscache_seams::PgProcCandidate<'mcx> {
+    let mut v = mcx::vec_with_capacity_in(mcx, args.len()).unwrap();
+    for &a in args {
+        v.push(a);
+    }
+    syscache_seams::PgProcCandidate {
+        oid,
+        pronamespace: PG_CATALOG,
+        pronargs: args.len() as i16,
+        pronargdefaults: 0,
+        provariadic: InvalidOid,
+        proargtypes: v,
+    }
+}
+
+fn proc_shape(rettype: Oid, nargs: i16, prokind: u8) -> syscache_seams::PgProcShape {
+    syscache_seams::PgProcShape {
+        pronamespace: PG_CATALOG,
+        prorettype: rettype,
+        provariadic: InvalidOid,
+        prosupport: InvalidOid,
+        pronargs: nargs,
+        prokind: prokind as i8,
+        provolatile: b'i' as i8,
+        proparallel: b's' as i8,
+        proretset: false,
+        proisstrict: false,
+        proleakproof: false,
+    }
+}
+
+fn agg_shape(transfn: Oid, transtype: Oid) -> syscache_seams::PgAggregateShape {
+    syscache_seams::PgAggregateShape {
+        aggkind: b'n' as i8,
+        aggnumdirectargs: 0,
+        aggtransfn: transfn,
+        aggfinalfn: InvalidOid,
+        aggcombinefn: 463,
+        aggserialfn: InvalidOid,
+        aggdeserialfn: InvalidOid,
+        aggfinalextra: false,
+        aggfinalmodify: b'r' as i8,
+        aggtranstype: transtype,
+        aggtransspace: 0,
+    }
+}
+
+fn install_fixture() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        miscinit_seams::get_user_id::set(|| 10);
+        syscache_seams::lookup_pg_proc_name_candidates::set(|mcx, proname| {
+            let mut v = mcx::PgVec::new_in(mcx);
+            match proname {
+                "count" => {
+                    v.push(proc_candidate(mcx, 2147, &[ANYOID]));
+                    v.push(proc_candidate(mcx, 2803, &[]));
+                }
+                "sum" => {
+                    v.push(proc_candidate(mcx, 2107, &[INT8OID]));
+                    v.push(proc_candidate(mcx, 2108, &[INT4OID]));
+                    v.push(proc_candidate(mcx, 2109, &[INT2OID]));
+                }
+                "foo" => {
+                    v.push(proc_candidate(mcx, 9999, &[]));
+                }
+                _ => {}
+            }
+            Ok(v)
+        });
+        syscache_seams::lookup_pg_proc_shape::set(|funcid| {
+            Ok(match funcid {
+                2803 => Some(proc_shape(INT8OID, 0, b'a')),
+                2147 => Some(proc_shape(INT8OID, 1, b'a')),
+                2107 => Some(proc_shape(NUMERICOID, 1, b'a')),
+                2108 => Some(proc_shape(INT8OID, 1, b'a')),
+                2109 => Some(proc_shape(INT8OID, 1, b'a')),
+                9999 => Some(proc_shape(INT4OID, 0, b'f')),
+                _ => None,
+            })
+        });
+        syscache_seams::lookup_pg_aggregate_shape::set(|aggfnoid| {
+            Ok(match aggfnoid {
+                2803 => Some(agg_shape(1219, INT8OID)),
+                2108 => Some(agg_shape(1841, INT8OID)),
+                2109 => Some(agg_shape(1840, INT8OID)),
+                _ => None,
+            })
+        });
+    });
+}
+
+fn func_call<'mcx>(
+    mcx: Mcx<'mcx>,
+    name: &'static str,
+    agg_star: bool,
+    agg_distinct: bool,
+) -> Node<'mcx> {
+    let funcname = NodeList::make1(mcx, Node::mk(mcx, PgStr { sval: name }).unwrap()).unwrap();
+    Node::mk(
+        mcx,
+        FuncCall {
+            funcname,
+            args: NodeList::nil(),
+            agg_order: NodeList::nil(),
+            agg_filter: None,
+            over: None,
+            agg_within_group: false,
+            agg_star,
+            agg_distinct,
+            func_variadic: false,
+            funcformat: types_nodes::CoercionForm::COERCE_EXPLICIT_CALL,
+            location: 7,
+        },
+    )
+    .unwrap()
+}
+
+fn call<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    fc_node: Node<'mcx>,
+    fargs: NodeList<'mcx>,
+    arg_types: &[Oid],
+) -> types_error::PgResult<Node<'mcx>> {
+    let fc = fc_node.as_func_call().unwrap();
+    pstate.p_expr_kind = ParseExprKind::EXPR_KIND_SELECT_TARGET;
+    ParseFuncOrColumn(mcx, pstate, &fc.funcname, fargs, arg_types, fc, None, fc.location)
+}
+
+#[test]
+fn count_star_builds_aggref() {
+    install_fixture();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+
+    let fc = func_call(mcx, "count", true, false);
+    let node = call(mcx, &mut pstate, fc, NodeList::nil(), &[]).unwrap();
+
+    let agg = node.as_aggref().unwrap();
+    assert_eq!(agg.aggfnoid, 2803);
+    assert_eq!(agg.aggtype, INT8OID);
+    assert!(agg.aggstar);
+    assert!(agg.args.is_nil());
+    assert!(agg.aggargtypes.is_nil());
+    assert_eq!(agg.aggkind, types_nodes::primnodes::AGGKIND_NORMAL);
+    assert_eq!(agg.agglevelsup, 0);
+    assert_eq!(agg.aggsplit, types_nodes::primnodes::AGGSPLIT_SIMPLE);
+    assert_eq!((agg.aggno, agg.aggtransno), (-1, -1));
+    assert_eq!(agg.location, 7);
+    assert!(pstate.p_hasAggs);
+}
+
+#[test]
+fn sum_of_int4_var_builds_aggref() {
+    install_fixture();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+
+    let var = Node::mk_var(mcx, 1, 1, INT4OID, -1, InvalidOid, 0).unwrap();
+    let fargs = NodeList::make1(mcx, var).unwrap();
+    let fc = func_call(mcx, "sum", false, false);
+    let node = call(mcx, &mut pstate, fc, fargs, &[INT4OID]).unwrap();
+
+    let agg = node.as_aggref().unwrap();
+    assert_eq!(agg.aggfnoid, 2108);
+    assert_eq!(agg.aggtype, INT8OID);
+    assert!(!agg.aggstar);
+    assert_eq!(agg.args.len(), 1);
+    let tle = agg.args.nth(0).as_target_entry().unwrap();
+    assert_eq!(tle.resno, 1);
+    assert!(!tle.resjunk);
+    assert_eq!(tle.expr.as_var().unwrap().vartype, INT4OID);
+    assert_eq!(agg.aggargtypes.len(), 1);
+    assert_eq!(agg.aggargtypes.nth(0), INT4OID);
+    assert!(pstate.p_hasAggs);
+}
+
+#[test]
+#[should_panic(expected = "func_match_argtypes")]
+fn count_of_arg_panics_on_inexact_match() {
+    install_fixture();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+
+    let var = Node::mk_var(mcx, 1, 1, INT4OID, -1, InvalidOid, 0).unwrap();
+    let fargs = NodeList::make1(mcx, var).unwrap();
+    let fc = func_call(mcx, "count", false, false);
+    let _ = call(mcx, &mut pstate, fc, fargs, &[INT4OID]);
+}
+
+#[test]
+fn unknown_function_is_42883() {
+    install_fixture();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+
+    let fc = func_call(mcx, "nosuchfunc", false, false);
+    let err = call(mcx, &mut pstate, fc, NodeList::nil(), &[]).map(|_| ()).unwrap_err();
+    assert_eq!(err.sqlstate(), ERRCODE_UNDEFINED_FUNCTION);
+    assert!(err.message().contains("function nosuchfunc() does not exist"), "{}", err.message());
+}
+
+#[test]
+fn parameterless_aggregate_without_star_is_42809() {
+    install_fixture();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+
+    let fc = func_call(mcx, "count", false, false);
+    let err = call(mcx, &mut pstate, fc, NodeList::nil(), &[]).map(|_| ()).unwrap_err();
+    assert_eq!(err.sqlstate(), ERRCODE_WRONG_OBJECT_TYPE);
+    assert!(
+        err.message()
+            .contains("count(*) must be used to call a parameterless aggregate function"),
+        "{}",
+        err.message()
+    );
+}
+
+#[test]
+fn star_on_normal_function_is_42809() {
+    install_fixture();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+
+    let fc = func_call(mcx, "foo", true, false);
+    let err = call(mcx, &mut pstate, fc, NodeList::nil(), &[]).map(|_| ()).unwrap_err();
+    assert_eq!(err.sqlstate(), ERRCODE_WRONG_OBJECT_TYPE);
+    assert!(
+        err.message().contains("foo(*) specified, but foo is not an aggregate function"),
+        "{}",
+        err.message()
+    );
+}
+
+#[test]
+#[should_panic(expected = "transformDistinctClause")]
+fn distinct_aggregate_panics() {
+    install_fixture();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+
+    let var = Node::mk_var(mcx, 1, 1, INT4OID, -1, InvalidOid, 0).unwrap();
+    let fargs = NodeList::make1(mcx, var).unwrap();
+    let fc = func_call(mcx, "sum", false, true);
+    let _ = call(mcx, &mut pstate, fc, fargs, &[INT4OID]);
+}
+
+#[test]
+fn aggregate_in_where_kind_is_42803() {
+    install_fixture();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+    pstate.p_expr_kind = ParseExprKind::EXPR_KIND_WHERE;
+
+    let fc_node = func_call(mcx, "count", true, false);
+    let fc = fc_node.as_func_call().unwrap();
+    let err = ParseFuncOrColumn(mcx, &mut pstate, &fc.funcname, NodeList::nil(), &[], fc, None, 7)
+        .map(|_| ())
+        .unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_GROUPING_ERROR);
+    assert!(
+        err.message().contains("aggregate functions are not allowed in WHERE"),
+        "{}",
+        err.message()
+    );
+}

@@ -24,8 +24,14 @@ fn add_rtes_to_flat_rtable(run: &mut PlannerRun<'_>) -> PgResult<()> {
     let parse = run.parse();
     for rte_node in &parse.rtable {
         let rte = rte_node.as_range_tbl_entry().expect("rtable cell");
+        // C shares the RTEPermissionInfo node into glob->finalrteperminfos and
+        // renumbers the copied RTE's index.
+        let mut new_perminfoindex = 0;
         if rte.perminfoindex > 0 {
-            panic!("addRTEPermissionInfo (parse_relation.c): M2 relation lane");
+            let perminfo =
+                parse_relation::getRTEPermissionInfo(&parse.rteperminfos, rte)?;
+            run.glob.finalrteperminfos.lappend(mcx, perminfo)?;
+            new_perminfoindex = run.glob.finalrteperminfos.len() as types_core::Index;
         }
         let newrte = Node::mk(
             mcx,
@@ -37,7 +43,7 @@ fn add_rtes_to_flat_rtable(run: &mut PlannerRun<'_>) -> PgResult<()> {
                 inh: rte.inh,
                 relkind: rte.relkind,
                 rellockmode: rte.rellockmode,
-                perminfoindex: rte.perminfoindex,
+                perminfoindex: new_perminfoindex,
                 tablesample: None,
                 subquery: None,
                 security_barrier: rte.security_barrier,
@@ -112,9 +118,196 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
             fix_scan_list(run, &s.indexorderby, rtoffset)?;
             fix_scan_list(run, &s.indexorderbyorig, rtoffset)?;
         }
+        NodeTag::T_BitmapIndexScan => {
+            let s = plan.as_bitmap_index_scan().unwrap();
+            debug_assert!(s.scan.scanrelid as i32 + rtoffset > 0);
+            debug_assert!(s.scan.plan.targetlist.is_nil() && s.scan.plan.qual.is_nil());
+            fix_scan_list(run, &s.indexqual, rtoffset)?;
+            fix_scan_list(run, &s.indexqualorig, rtoffset)?;
+        }
+        NodeTag::T_BitmapHeapScan => {
+            let s = plan.as_bitmap_heap_scan().unwrap();
+            debug_assert!(s.scan.scanrelid as i32 + rtoffset > 0);
+            fix_scan_list(run, &s.scan.plan.targetlist, rtoffset)?;
+            fix_scan_list(run, &s.scan.plan.qual, rtoffset)?;
+            fix_scan_list(run, &s.bitmapqualorig, rtoffset)?;
+        }
+        NodeTag::T_Agg => {
+            let a = plan.as_agg().unwrap();
+            debug_assert!(a.groupingSets.is_nil() && a.chain.is_nil());
+            set_upper_references(run, plan, rtoffset)?;
+        }
+        NodeTag::T_ModifyTable => {
+            let m = plan.as_modify_table().unwrap();
+            debug_assert!(m.plan.targetlist.is_nil() && m.plan.qual.is_nil());
+            debug_assert!(
+                m.withCheckOptionLists.is_nil()
+                    && m.returningLists.is_nil()
+                    && m.onConflictSet.is_nil()
+                    && m.mergeActionLists.is_nil()
+            );
+            debug_assert!(m.rootRelation == 0 && m.rowMarks.is_nil());
+            assert_eq!(rtoffset, 0, "set_plan_refs (setrefs.c): ModifyTable rtoffset leg; M4 lane");
+            for rti in m.resultRelations.iter() {
+                run.glob.result_relations.lappend(run.mcx, rti)?;
+            }
+        }
         other => panic!("set_plan_refs (setrefs.c): {other:?}; M2 plan lane"),
     }
+
+    let base = plan.as_plan().expect("plan node");
+    assert!(base.righttree.is_none(), "set_plan_refs (setrefs.c): righttree; M2 join lane");
+    if let Some(child) = base.lefttree {
+        let new_child = set_plan_refs(run, child, rtoffset)?;
+        // SAFETY: same exclusive plan-tree ownership as the prologue above.
+        unsafe { plan.with_plan_mut(|p| p.lefttree = Some(new_child)) }.expect("plan node");
+    }
     Ok(plan)
+}
+
+// set_upper_references (setrefs.c): retarget an upper node's tlist at its
+// subplan's output; the sortgroupref fast path is the M3 grouping lane.
+fn set_upper_references<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    plan: Node<'mcx>,
+    rtoffset: i32,
+) -> PgResult<()> {
+    let mcx = run.mcx;
+    let base = plan.as_plan().expect("plan node");
+    let subplan = base.lefttree.expect("upper node has a subplan");
+    let subplan_tlist = &subplan.as_plan().expect("plan node").targetlist;
+
+    let mut output_targetlist = NodeList::nil();
+    for tle_node in &base.targetlist {
+        let tle = tle_node.as_target_entry().expect("TargetEntry");
+        assert!(
+            tle.ressortgroupref == 0,
+            "search_indexed_tlist_for_sortgroupref (setrefs.c): M3 grouping lane"
+        );
+        let newexpr = fix_upper_expr(run, tle.expr, subplan_tlist, rtoffset)?;
+        // flatCopyTargetEntry + new expr.
+        let new_tle = Node::mk(
+            mcx,
+            types_nodes::primnodes::TargetEntry {
+                expr: newexpr,
+                resno: tle.resno,
+                resname: tle.resname,
+                ressortgroupref: tle.ressortgroupref,
+                resorigtbl: tle.resorigtbl,
+                resorigcol: tle.resorigcol,
+                resjunk: tle.resjunk,
+            },
+        )?;
+        output_targetlist.lappend(mcx, new_tle)?;
+    }
+    assert!(base.qual.is_nil(), "set_upper_references (setrefs.c): quals; M3 having lane");
+    // SAFETY: exclusive plan-tree ownership (C rewrites the same list in place).
+    unsafe { plan.with_plan_mut(|p| p.targetlist = output_targetlist) }.expect("plan node");
+    Ok(())
+}
+
+// fix_upper_expr_mutator (setrefs.c) over the plain-agg tlist shapes.
+fn fix_upper_expr<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    node: Node<'mcx>,
+    subplan_tlist: &NodeList<'mcx>,
+    rtoffset: i32,
+) -> PgResult<Node<'mcx>> {
+    let mcx = run.mcx;
+    match node.node_tag() {
+        NodeTag::T_Var => {
+            let var = node.as_var().expect("Var");
+            search_indexed_tlist_for_var(run, var, subplan_tlist, rtoffset)
+        }
+        NodeTag::T_Const => {
+            fix_scan_expr_walker(run, node)?;
+            Ok(node)
+        }
+        NodeTag::T_Aggref => {
+            let a = node.as_aggref().expect("Aggref");
+            record_plan_function_dependency(a.aggfnoid);
+            debug_assert!(a.aggdirectargs.is_nil() && a.aggfilter.is_none());
+            debug_assert!(a.aggorder.is_nil() && a.aggdistinct.is_nil());
+            let mut args = NodeList::nil();
+            for arg_node in &a.args {
+                let arg = arg_node.as_target_entry().expect("agg arg is a TLE");
+                let newexpr = fix_upper_expr(run, arg.expr, subplan_tlist, rtoffset)?;
+                let new_tle = Node::mk(
+                    mcx,
+                    types_nodes::primnodes::TargetEntry {
+                        expr: newexpr,
+                        resno: arg.resno,
+                        resname: arg.resname,
+                        ressortgroupref: arg.ressortgroupref,
+                        resorigtbl: arg.resorigtbl,
+                        resorigcol: arg.resorigcol,
+                        resjunk: arg.resjunk,
+                    },
+                )?;
+                args.lappend(mcx, new_tle)?;
+            }
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::Aggref {
+                    aggfnoid: a.aggfnoid,
+                    aggtype: a.aggtype,
+                    aggcollid: a.aggcollid,
+                    inputcollid: a.inputcollid,
+                    aggtranstype: a.aggtranstype,
+                    aggargtypes: a.aggargtypes.clone_in(mcx)?,
+                    aggdirectargs: NodeList::nil(),
+                    args,
+                    aggorder: NodeList::nil(),
+                    aggdistinct: NodeList::nil(),
+                    aggfilter: None,
+                    aggstar: a.aggstar,
+                    aggvariadic: a.aggvariadic,
+                    aggkind: a.aggkind,
+                    aggpresorted: a.aggpresorted,
+                    agglevelsup: a.agglevelsup,
+                    aggsplit: a.aggsplit,
+                    aggno: a.aggno,
+                    aggtransno: a.aggtransno,
+                    location: a.location,
+                },
+            )
+        }
+        other => panic!("fix_upper_expr_mutator (setrefs.c): {other:?}; M3 expression lane"),
+    }
+}
+
+// search_indexed_tlist_for_var (setrefs.c); a miss is C's elog(ERROR).
+fn search_indexed_tlist_for_var<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    var: &types_nodes::primnodes::Var<'mcx>,
+    subplan_tlist: &NodeList<'mcx>,
+    rtoffset: i32,
+) -> PgResult<Node<'mcx>> {
+    debug_assert!(var.varlevelsup == 0 && var.varnullingrels.is_empty());
+    for tle_node in subplan_tlist {
+        let tle = tle_node.as_target_entry().expect("TargetEntry");
+        let Some(sub) = tle.expr.as_var() else { continue };
+        if sub.varno == var.varno && sub.varattno == var.varattno {
+            let mut newvar = types_nodes::primnodes::Var {
+                varno: types_nodes::primnodes::OUTER_VAR,
+                varattno: tle.resno,
+                vartype: var.vartype,
+                vartypmod: var.vartypmod,
+                varcollid: var.varcollid,
+                varnullingrels: types_nodes::bitmapset::Bitmapset::empty(),
+                varlevelsup: 0,
+                varreturningtype: var.varreturningtype,
+                varnosyn: var.varnosyn,
+                varattnosyn: var.varattnosyn,
+                location: var.location,
+            };
+            if newvar.varnosyn > 0 {
+                newvar.varnosyn += rtoffset as u32;
+            }
+            return Node::mk(run.mcx, newvar);
+        }
+    }
+    panic!("variable not found in subplan target list");
 }
 
 // fix_scan_expr, rtoffset==0 walker leg (fix_expr_common only). The mutator

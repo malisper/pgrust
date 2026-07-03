@@ -450,10 +450,9 @@ fn srf_in_agg_error(pstate: &ParseState<'_, '_>, location: ParseLoc) -> Box<PgEr
     Box::new(
         ereport(ERROR)
             .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
-            .errmsg("aggregate function calls cannot contain set-returning function calls".into())
+            .errmsg("aggregate function calls cannot contain set-returning function calls")
             .errhint(
-                "You might be able to move the set-returning function into a LATERAL FROM item."
-                    .into(),
+                "You might be able to move the set-returning function into a LATERAL FROM item.",
             )
             .errposition(parser_errposition(pstate, location, encoding))
             .into_error()

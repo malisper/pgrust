@@ -351,6 +351,39 @@ fn run_program<'mcx>(
                     continue;
                 }
             }
+            Step::AggrefEval { value, null, out } => {
+                // SAFETY: pointers into once-allocated AggState arrays (steps.rs note).
+                let (v, n) = unsafe { (value.read(), null.read()) };
+                write_out(*out, &mut regs, v, n);
+            }
+            Step::AggPlainTransByVal { call, pergroup } => {
+                // SAFETY: once-allocated stable pergroup; sole access here.
+                unsafe {
+                    let pg = pergroup.as_ptr();
+                    crate::steps::arg_slot_of(call.fcinfo, 0).write(NullableDatum {
+                        value: (*pg).trans_value,
+                        isnull: (*pg).trans_value_is_null,
+                    });
+                    let (value, isnull) = invoke(frames, call)?;
+                    (*pg).trans_value = value;
+                    (*pg).trans_value_is_null = isnull;
+                }
+            }
+            Step::AggPlainTransStrictByVal { call, pergroup } => {
+                // SAFETY: as AggPlainTransByVal.
+                unsafe {
+                    let pg = pergroup.as_ptr();
+                    if !(*pg).trans_value_is_null {
+                        crate::steps::arg_slot_of(call.fcinfo, 0).write(NullableDatum {
+                            value: (*pg).trans_value,
+                            isnull: false,
+                        });
+                        let (value, isnull) = invoke(frames, call)?;
+                        (*pg).trans_value = value;
+                        (*pg).trans_value_is_null = isnull;
+                    }
+                }
+            }
         }
         // SAFETY: Done-termination validated; +1 stays in bounds.
         sp = unsafe { sp.add(1) };
