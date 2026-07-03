@@ -2548,18 +2548,35 @@ dependencies = [
 name = "nodebitmapheapscan"
 version = "0.1.0"
 dependencies = [
+ "aclchk_seams",
+ "bufmgr_seams",
+ "datum",
  "execexpr",
  "execscan",
  "exectuples",
  "executils",
+ "heapam_visibility_seams",
  "init_small",
  "mcx",
+ "miscinit_seams",
+ "nodebitmapindexscan",
+ "predicate_seams",
+ "procarray_seams",
+ "pruneheap_seams",
+ "syscache_seams",
  "tableam",
  "tidbitmap",
+ "transam_xlog_seams",
+ "types_core",
  "types_error",
+ "types_nbtree",
  "types_nodes",
  "types_rel",
+ "types_slot",
  "types_snapshot",
+ "types_storage",
+ "types_tuple",
+ "xact_seams",
 ]
 
 [[package]]

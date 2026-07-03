@@ -1,7 +1,5 @@
-// tuplesort.c + tuplesortvariants.c, in-memory serial core: heap (MinimalTuple)
-// and by-value datum variants, quicksort with C's comparator specializations,
-// bounded top-N heapsort. External merge (tapes), parallel sort, abbreviated
-// keys, and by-reference datum sorts are loud panics naming the C lane.
+// tuplesort.c + tuplesortvariants.c in-memory serial core; external merge,
+// parallel sort, abbreviated keys, byref datum sorts = loud panics naming C.
 #![allow(non_snake_case)]
 
 use core::mem;
@@ -101,8 +99,7 @@ pub struct TuplesortData<'m> {
 
 ::mcx::bind!(pub TuplesortTy => TuplesortData<'mcx>);
 
-/// The C `Tuplesortstate *`: state + its memory contexts, one movable value.
-/// Drop is `tuplesort_end`.
+/// The C `Tuplesortstate *`; Drop is `tuplesort_end`.
 pub struct Tuplesort(McxOwned<TuplesortTy>);
 
 struct CmpCtx<'a> {
@@ -112,7 +109,6 @@ struct CmpCtx<'a> {
 }
 
 impl CmpCtx<'_> {
-    /// `comparetup_heap` / `comparetup_datum`: leading key from datum1.
     #[inline]
     fn comparetup(&self, a: &SortTuple, b: &SortTuple) -> i32 {
         let compare =
@@ -123,8 +119,7 @@ impl CmpCtx<'_> {
         self.comparetup_tiebreak(a, b)
     }
 
-    /// C's specialized `qsort_tuple_{unsigned,signed,int32}_compare`: the arm
-    /// constant `cmp` folds per instantiation.
+    /// `qsort_tuple_{unsigned,signed,int32}_compare`: `cmp` folds per instantiation.
     #[inline(always)]
     fn comparetup_spec(&self, cmp: SortComparator, a: &SortTuple, b: &SortTuple) -> i32 {
         let compare = ssup::apply_sort_comparator_as(
@@ -139,8 +134,7 @@ impl CmpCtx<'_> {
         self.comparetup_tiebreak(a, b)
     }
 
-    /// `comparetup_heap_tiebreak` (no abbreviated-key arm: converters are
-    /// never armed here); `comparetup_datum_tiebreak` reduces to 0.
+    /// `comparetup_heap_tiebreak`, no abbrev arm; datum tiebreak reduces to 0.
     fn comparetup_tiebreak(&self, a: &SortTuple, b: &SortTuple) -> i32 {
         let SortVariant::Heap { tup_desc } = self.variant else {
             return 0;
@@ -176,8 +170,7 @@ macro_rules! ctx {
 }
 
 impl Tuplesort {
-    /// `tuplesort_begin_heap`; sort keys resolved from ordering operators via
-    /// the catalog (`PrepareSortSupportFromOrderingOp`).
+    /// `tuplesort_begin_heap`.
     #[allow(clippy::too_many_arguments)]
     pub fn begin_heap(
         tup_desc: std::rc::Rc<TupleDescData<'static>>,
@@ -217,8 +210,7 @@ impl Tuplesort {
         Self::begin_common(work_mem, sortopt, keys, only_key, SortVariant::Heap { tup_desc })
     }
 
-    /// `tuplesort_begin_datum`. Pass-by-reference datum sorts (the datumCopy
-    /// + abbreviation lane) are a loud panic.
+    /// `tuplesort_begin_datum`; by-reference types are a loud panic.
     pub fn begin_datum(
         datum_type: Oid,
         sort_operator: Oid,
@@ -288,7 +280,6 @@ impl Tuplesort {
         Tuplesort(owned)
     }
 
-    /// `tuplesort_set_bound`.
     pub fn set_bound(&mut self, bound: i64) {
         self.0.with_mut(|st| {
             debug_assert!(st.status == TupSortStatus::Initial && st.memtuples.is_empty());
@@ -299,16 +290,14 @@ impl Tuplesort {
             }
             st.bounded = true;
             st.bound = bound as i32;
-            // C also disarms the abbreviated-key machinery; never armed here.
         })
     }
 
-    /// `tuplesort_used_bound`.
     pub fn used_bound(&self) -> bool {
         self.0.with(|st| st.bound_used)
     }
 
-    /// `tuplesort_puttupleslot`.
+    #[inline]
     pub fn puttupleslot<'q>(
         &mut self,
         slot: &mut SlotData<'q>,
@@ -336,25 +325,20 @@ impl Tuplesort {
             let datum1 = unsafe {
                 minimal_getattr(tuple, st.sort_keys[0].ssup_attno as i32, tup_desc, &mut isnull1)
             };
-            let stup = SortTuple { tuple, datum1, isnull1 };
-            st.puttuple_common(stup, maxalign(t_len) as i64)
+            st.puttuple_common(tuple, datum1, isnull1, maxalign(t_len) as i64)
         })
     }
 
-    /// `tuplesort_putdatum`, by-value arm (`base->tuples == false`).
+    #[inline]
     pub fn putdatum(&mut self, val: Datum, is_null: bool) -> PgResult<()> {
         self.0.with_mut(|st| {
             debug_assert!(matches!(st.variant, SortVariant::Datum));
-            let stup = SortTuple {
-                tuple: core::ptr::null_mut(),
-                datum1: if is_null { Datum::null() } else { val },
-                isnull1: is_null,
-            };
-            st.puttuple_common(stup, 0)
+            let datum1 = if is_null { Datum::null() } else { val };
+            st.puttuple_common(core::ptr::null_mut(), datum1, is_null, 0)
         })
     }
 
-    /// `tuplesort_performsort`.
+    #[inline]
     pub fn performsort(&mut self) -> PgResult<()> {
         self.0.with_mut(|st| {
             match st.status {
@@ -375,8 +359,8 @@ impl Tuplesort {
         })
     }
 
-    /// `tuplesort_gettupleslot`; `abbrev` out-param elided (abbreviated keys
-    /// are never armed here).
+    /// `tuplesort_gettupleslot`; `abbrev` out-param elided (never armed).
+    #[inline]
     pub fn gettupleslot<'q>(
         &mut self,
         forward: bool,
@@ -401,18 +385,22 @@ impl Tuplesort {
                 let owned = heaptuple::heap_copy_minimal_tuple(slot_mcx, bytes, 0)?;
                 exectuples::exec_store_minimal_tuple_owned(slot, slot_mcx, owned);
             } else {
-                // SAFETY: lifetime laundered to the slot's, as C stores the
-                // borrowed pointer with shouldFree=false: contents are valid
-                // only until the tuplesort is reset/ended (caller contract;
+                // SAFETY: whole-image pointer, live until the tuplesort is
+                // reset/ended, as C's shouldFree=false store (caller contract;
                 // nodeSort clears the slot before dropping the sort).
-                let mtref: &'q MinimalTupleData = unsafe { &*stup.tuple };
-                exectuples::exec_store_minimal_tuple(slot, slot_mcx, mtref);
+                unsafe {
+                    exectuples::exec_store_minimal_tuple_ptr(
+                        slot,
+                        slot_mcx,
+                        core::ptr::NonNull::new_unchecked(stup.tuple),
+                    );
+                }
             }
             Ok(true)
         })
     }
 
-    /// `tuplesort_getdatum`, by-value arm (no datumCopy: `copy` elided).
+    #[inline]
     pub fn getdatum(&mut self, forward: bool) -> PgResult<Option<NullableDatum>> {
         self.0.with_mut(|st| {
             debug_assert!(matches!(st.variant, SortVariant::Datum));
@@ -423,7 +411,6 @@ impl Tuplesort {
         })
     }
 
-    /// `tuplesort_rescan` (TUPLESORT_RANDOMACCESS only).
     pub fn rescan(&mut self) {
         self.0.with_mut(|st| {
             debug_assert!(st.sortopt & TUPLESORT_RANDOMACCESS != 0);
@@ -435,7 +422,6 @@ impl Tuplesort {
         })
     }
 
-    /// `tuplesort_markpos`.
     pub fn markpos(&mut self) {
         self.0.with_mut(|st| {
             debug_assert!(st.sortopt & TUPLESORT_RANDOMACCESS != 0);
@@ -445,7 +431,6 @@ impl Tuplesort {
         })
     }
 
-    /// `tuplesort_restorepos`.
     pub fn restorepos(&mut self) {
         self.0.with_mut(|st| {
             debug_assert!(st.sortopt & TUPLESORT_RANDOMACCESS != 0);
@@ -455,14 +440,22 @@ impl Tuplesort {
         })
     }
 
-    /// `tuplesort_end`: contexts (and every tuple) release on drop.
     pub fn end(self) {}
 }
 
 impl<'m> TuplesortData<'m> {
-    /// `tuplesort_puttuple_common`. `useAbbrev` is structurally false here
-    /// (no comparator carries an abbreviation converter).
-    fn puttuple_common(&mut self, tuple: SortTuple, tuplen: i64) -> PgResult<()> {
+    /// `tuplesort_puttuple_common`; `useAbbrev` is structurally false here.
+    /// SortTuple fields arrive as scalars (registers), not by-ref like C's
+    /// `SortTuple *tuple`: the 24-byte struct would bounce through the stack
+    /// into a wide reload that defeats store-to-load forwarding.
+    #[inline]
+    fn puttuple_common(
+        &mut self,
+        tuple: *mut MinimalTupleData,
+        datum1: Datum,
+        isnull1: bool,
+        tuplen: i64,
+    ) -> PgResult<()> {
         self.avail_mem -= tuplen;
 
         match self.status {
@@ -471,7 +464,16 @@ impl<'m> TuplesortData<'m> {
                     self.grow_memtuples();
                     debug_assert!(self.memtuples.len() < self.memtuples.capacity());
                 }
-                self.memtuples.push(tuple);
+                let len = self.memtuples.len();
+                // SAFETY: len < capacity (grow above keeps one free slot, as
+                // C's memtupsize-1 check does); C's unchecked store shape.
+                unsafe {
+                    core::ptr::write(
+                        self.memtuples.as_mut_ptr().add(len),
+                        SortTuple { tuple, datum1, isnull1 },
+                    );
+                    self.memtuples.set_len(len + 1);
+                }
 
                 if self.bounded
                     && (self.memtuples.len() > self.bound as usize * 2
@@ -484,32 +486,36 @@ impl<'m> TuplesortData<'m> {
                 if self.memtuples.len() < self.memtuples.capacity() && !self.lackmem() {
                     return Ok(());
                 }
-                panic!(
-                    "tuplesort: workMem exceeded; external sort \
-                     (inittapes/dumptuples, tuplesort.c) not ported"
-                );
+                external_sort_unported();
             }
             TupSortStatus::Bounded => {
-                let compare = ctx!(self).comparetup(&tuple, &self.memtuples[0]);
-                if compare <= 0 {
-                    self.free_sort_tuple(&tuple);
-                    cfi()?;
-                } else {
-                    let top = self.memtuples[0];
-                    self.free_sort_tuple(&top);
-                    let mut tuples = mem::replace(&mut self.memtuples, PgVec::new_in(self.mcx));
-                    let count = tuples.len();
-                    heap_replace_top(&ctx!(self), &mut tuples, count, tuple)?;
-                    self.memtuples = tuples;
-                }
-                Ok(())
+                self.puttuple_bounded(SortTuple { tuple, datum1, isnull1 })
             }
             TupSortStatus::SortedInMem => Err(invalid_state("tuplesort_puttuple_common")),
         }
     }
 
-    /// `grow_memtuples`; chunk-space accounting approximates C's
-    /// GetMemoryChunkSpace as capacity * sizeof(SortTuple).
+    /// TSS_BOUNDED arm; out of line so the TSS_INITIAL fast path stays lean
+    /// (C's shape: the arm's work is behind the comparetup fn pointer).
+    #[inline(never)]
+    fn puttuple_bounded(&mut self, tuple: SortTuple) -> PgResult<()> {
+        let compare = ctx!(self).comparetup(&tuple, &self.memtuples[0]);
+        if compare <= 0 {
+            self.free_sort_tuple(&tuple);
+            cfi()?;
+        } else {
+            let top = self.memtuples[0];
+            self.free_sort_tuple(&top);
+            let mut tuples = mem::replace(&mut self.memtuples, PgVec::new_in(self.mcx));
+            let count = tuples.len();
+            heap_replace_top(&ctx!(self), &mut tuples, count, tuple)?;
+            self.memtuples = tuples;
+        }
+        Ok(())
+    }
+
+    /// `grow_memtuples`; chunk space approximated as capacity * sizeof(SortTuple).
+    #[inline(never)]
     fn grow_memtuples(&mut self) -> bool {
         let memtupsize = self.memtuples.capacity();
         let mem_now_used = self.allowed_mem - self.avail_mem;
@@ -530,7 +536,6 @@ impl<'m> TuplesortData<'m> {
             let mut newsize = (memtupsize as f64 * grow_ratio) as usize;
             newsize = newsize.min(i32::MAX as usize);
             self.grow_memtuples = false;
-            // C's minimum-one-slot growth guarantee.
             if newsize < memtupsize + 1 {
                 newsize = memtupsize + 1;
             }
@@ -568,8 +573,7 @@ impl<'m> TuplesortData<'m> {
         }
     }
 
-    /// `tuplesort_sort_memtuples`: comparator-identity dispatch to the
-    /// monomorphized specializations, then onlyKey / general qsort.
+    /// `tuplesort_sort_memtuples`: comparator-identity specialization dispatch.
     fn sort_memtuples(&mut self) -> PgResult<()> {
         if self.memtuples.len() <= 1 {
             return Ok(());
@@ -602,7 +606,7 @@ impl<'m> TuplesortData<'m> {
         result
     }
 
-    /// `make_bounded_heap`.
+    #[inline(never)]
     fn make_bounded_heap(&mut self) -> PgResult<()> {
         let tupcount = self.memtuples.len();
         let bound = self.bound as usize;
@@ -639,7 +643,6 @@ impl<'m> TuplesortData<'m> {
         result
     }
 
-    /// `sort_bounded_heap`.
     fn sort_bounded_heap(&mut self) -> PgResult<()> {
         let tupcount = self.memtuples.len();
         debug_assert!(self.status == TupSortStatus::Bounded);
@@ -665,7 +668,6 @@ impl<'m> TuplesortData<'m> {
         result
     }
 
-    /// `reversedirection`.
     fn reversedirection(&mut self) {
         for key in self.sort_keys.iter_mut() {
             key.ssup_reverse = !key.ssup_reverse;
@@ -673,7 +675,6 @@ impl<'m> TuplesortData<'m> {
         }
     }
 
-    /// `tuplesort_gettuple_common`, TSS_SORTEDINMEM arms.
     fn gettuple_common(&mut self, forward: bool) -> PgResult<Option<SortTuple>> {
         match self.status {
             TupSortStatus::SortedInMem => {
@@ -718,7 +719,6 @@ fn freed_space(stup: &SortTuple) -> i64 {
     }
 }
 
-/// `tuplesort_heap_insert`.
 fn heap_insert(
     ctx: &CmpCtx<'_>,
     heap: &mut [SortTuple],
@@ -740,7 +740,6 @@ fn heap_insert(
     Ok(())
 }
 
-/// `tuplesort_heap_delete_top`.
 fn heap_delete_top(ctx: &CmpCtx<'_>, heap: &mut [SortTuple], count: &mut usize) -> PgResult<()> {
     *count -= 1;
     if *count == 0 {
@@ -785,6 +784,15 @@ fn heap_replace_top_n(
     }
     heap[i] = tuple;
     Ok(())
+}
+
+#[cold]
+#[inline(never)]
+fn external_sort_unported() -> ! {
+    panic!(
+        "tuplesort: workMem exceeded; external sort \
+         (inittapes/dumptuples, tuplesort.c) not ported"
+    )
 }
 
 #[cold]

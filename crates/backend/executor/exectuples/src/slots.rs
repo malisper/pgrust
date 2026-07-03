@@ -321,6 +321,27 @@ pub fn exec_store_minimal_tuple<'mcx>(
     store_minimal(m, mcx, NonNull::from(mtup), false);
 }
 
+/// `exec_store_minimal_tuple` over a raw image pointer. A `&MinimalTupleData`
+/// arg retags provenance down to the 16-byte header, making the later deform
+/// read past it UB (Miri-caught, tuplesort gettupleslot); borrowed whole-image
+/// callers must come through here.
+///
+/// # Safety
+/// `mtup` points to a live minimal-tuple image readable for `t_len` bytes for
+/// as long as the slot holds it.
+#[inline]
+pub unsafe fn exec_store_minimal_tuple_ptr<'mcx>(
+    slot: &mut SlotData<'mcx>,
+    mcx: Mcx<'mcx>,
+    mtup: NonNull<MinimalTupleData>,
+) {
+    let SlotData::Minimal(m) = slot else {
+        wrong_slot("minimal")
+    };
+    debug_assert!(m.base.tts_tupleDescriptor.is_some());
+    store_minimal(m, mcx, mtup, false);
+}
+
 /// C `ExecStoreMinimalTuple(mtup, slot, shouldFree=true)`.
 #[inline]
 pub fn exec_store_minimal_tuple_owned<'mcx>(

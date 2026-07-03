@@ -100,7 +100,7 @@ pub fn apply_sort_comparator(
 /// shim, and abbreviated keys (bttextsortsupport et al.) all panic loudly.
 pub fn prepare_sort_support_from_ordering_op(
     ordering_op: Oid,
-    ssup: &mut SortSupportInit,
+    ssup: &SortSupportInit,
 ) -> PgResult<SortSupport> {
     let Some((opfamily, opcintype, cmptype)) =
         lsyscache::get_ordering_op_properties(ordering_op)?
