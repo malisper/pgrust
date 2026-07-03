@@ -5,7 +5,7 @@ mod ilist;
 pub mod internals;
 pub mod serial;
 
-use types_core::{BlockNumber, InvalidBlockNumber, Oid, TransactionId};
+use types_core::{BlockNumber, Oid, TransactionId};
 use types_error::PgResult;
 use types_rel::RelationData;
 use types_snapshot::SnapshotData;
@@ -112,16 +112,13 @@ pub fn PredicateLockPageSplit(
     engine::PredicateLockPageSplit(f.db_oid, f.rd_id, f.uses_local_buffers, oldblkno, newblkno)
 }
 
-// PredicateLockPageCombine: same single-backend gate as PageSplit.
 pub fn PredicateLockPageCombine(
-    _rel: &RelationData<'_>,
-    _oldblkno: BlockNumber,
-    _newblkno: BlockNumber,
+    rel: &RelationData<'_>,
+    oldblkno: BlockNumber,
+    newblkno: BlockNumber,
 ) -> PgResult<()> {
-    if !MY_SERIALIZABLE_XACT_SET.with(|c| c.get()) {
-        return Ok(());
-    }
-    unported_sxact();
+    let f = rel_fields(rel);
+    engine::PredicateLockPageCombine(f.db_oid, f.rd_id, f.uses_local_buffers, oldblkno, newblkno)
 }
 
 pub fn CheckForSerializableConflictIn(
@@ -187,7 +184,7 @@ pub fn init_seams() {
         fn check_serial_buffers_hook(
             newval: &mut i32,
             _extra: &mut Option<guc_tables::GucHookExtra>,
-            _source: types_guc::guc::GucSource,
+            _source: types_guc::GucSource,
         ) -> PgResult<bool> {
             let (ok, detail) = slru::check_slru_buffers("serializable_buffers", *newval);
             if !ok {
