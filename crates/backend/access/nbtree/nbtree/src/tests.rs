@@ -26,9 +26,7 @@ use ::types_tuple::itemptr::{ItemPointerData, ItemPointerGetBlockNumber};
 use ::types_tuple::tupdesc::CompactAttribute;
 use ::types_tuple::TupleDescData;
 
-// ------------------------------------------------------------------
 // Fake buffer manager: pages are 8KB boxes; Buffer = block+1.
-// ------------------------------------------------------------------
 
 // MAXALIGNed like real buffer pages (the PageRef contract).
 #[repr(C, align(8))]
@@ -157,9 +155,7 @@ fn reset_wal() {
     WAL.with(|w| w.borrow_mut().clear());
 }
 
-// ------------------------------------------------------------------
 // Page builders (int4 single-key-column index).
-// ------------------------------------------------------------------
 
 fn put_u16(p: &mut FakePage, off: usize, v: u16) {
     p.0[off..off + 2].copy_from_slice(&v.to_ne_bytes());
@@ -391,7 +387,6 @@ fn test_int4cmp(
     Ok(Datum::from_i32((a > b) as i32 - (a < b) as i32))
 }
 
-// Test operator procs.
 fn test_int4eq(
     _flinfo: Option<&mut FmgrInfo>,
     fcinfo: &mut FunctionCallInfoBaseData,
@@ -435,8 +430,6 @@ fn begin_scan<'mcx>(
     crate::btrescan(&mut scan, Some(keys)).unwrap();
     scan
 }
-
-// ------------------------------------------------------------------
 
 #[test]
 fn metaversion_uses_and_primes_amcache() {

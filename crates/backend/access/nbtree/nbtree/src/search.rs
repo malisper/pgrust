@@ -1340,8 +1340,15 @@ pub(crate) fn bt_gettuple_continue(
             // 'mcx unification: killedItems shares keyData's scan context.
             ctx.so.killedItems = v;
         }
+        // C's killedItems[numKilled++]: _bt_killitems resets numKilled
+        // without truncating, so append here would replay stale indexes.
         if (ctx.so.numKilled as usize) < MaxTIDsPerBTreePage {
-            ctx.so.killedItems.push(ctx.so.currPos.itemIndex);
+            let n = ctx.so.numKilled as usize;
+            if n < ctx.so.killedItems.len() {
+                ctx.so.killedItems[n] = ctx.so.currPos.itemIndex;
+            } else {
+                ctx.so.killedItems.push(ctx.so.currPos.itemIndex);
+            }
             ctx.so.numKilled += 1;
         }
     }
