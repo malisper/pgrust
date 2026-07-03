@@ -28,6 +28,8 @@ pub struct AggBind {
     pub values: NonNull<::datum::Datum>,
     pub nulls: NonNull<bool>,
     pub naggs: u16,
+    // EEOP_GROUPING_FUNC cell; None = no grouping sets (C's NIL clauses).
+    pub grouping: Option<NonNull<crate::steps::GroupedColsCell>>,
 }
 
 pub struct AggTransSpec<'a, 'mcx> {
@@ -308,7 +310,25 @@ pub fn exec_build_agg_trans<'mcx>(
     agg_node: FmNodePtr,
     params: ParamBind<'mcx>,
 ) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
-    build_agg_trans(mcx, specs, None, agg_node, params)
+    build_agg_trans(mcx, specs, PergroupMode::Fixed, agg_node, params)
+}
+
+/// Grouping-sets variant: args evaluated once per transno, one trans call
+/// per set; pergroup(setno, transno) = set_bases[setno] + transno.
+pub fn exec_build_agg_trans_gsets<'mcx>(
+    mcx: Mcx<'mcx>,
+    specs: &[AggTransSpec<'_, 'mcx>],
+    set_bases: &[NonNull<AggPerGroup>],
+    agg_node: FmNodePtr,
+    params: ParamBind<'mcx>,
+) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
+    build_agg_trans(mcx, specs, PergroupMode::Sets(set_bases), agg_node, params)
+}
+
+enum PergroupMode<'a> {
+    Fixed,
+    Indirect(NonNull<NonNull<AggPerGroup>>),
+    Sets(&'a [NonNull<AggPerGroup>]),
 }
 
 /// AGG_HASHED variant: pergroup resolves per tuple through `base`, the cell
@@ -321,7 +341,7 @@ pub fn exec_build_agg_trans_hashed<'mcx>(
     agg_node: FmNodePtr,
     params: ParamBind<'mcx>,
 ) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
-    build_agg_trans(mcx, specs, Some(base), agg_node, params)
+    build_agg_trans(mcx, specs, PergroupMode::Indirect(base), agg_node, params)
 }
 
 // The tag proves the FmNodePtr is an AggStateNode (WindowAgg passes None).
@@ -339,7 +359,7 @@ fn agg_state_node(agg_node: FmNodePtr) -> NonNull<::types_fmgr::AggStateNode> {
 fn build_agg_trans<'mcx>(
     mcx: Mcx<'mcx>,
     specs: &[AggTransSpec<'_, 'mcx>],
-    indirect_base: Option<NonNull<NonNull<AggPerGroup>>>,
+    mode: PergroupMode<'_>,
     agg_node: FmNodePtr,
     params: ParamBind<'mcx>,
 ) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
@@ -404,53 +424,74 @@ fn build_agg_trans<'mcx>(
             bailout = Some(state.steps.len());
             push_step(&mut state, mcx, step)?;
         }
-        let step = if spec.transtype_byval {
-            match (indirect_base, fn_strict, init_strict) {
-                (None, _, true) => {
-                    Step::AggPlainTransInitStrictByVal { call, pergroup: spec.pergroup }
+        // One fixed-pergroup step (byval or by-ref) — Fixed and per-set modes.
+        let fixed_step = |pergroup: NonNull<AggPerGroup>| -> Step {
+            if spec.transtype_byval {
+                match (fn_strict, init_strict) {
+                    (_, true) => Step::AggPlainTransInitStrictByVal { call, pergroup },
+                    (true, false) => Step::AggPlainTransStrictByVal { call, pergroup },
+                    (false, false) => Step::AggPlainTransByVal { call, pergroup },
                 }
-                (None, true, false) => {
-                    Step::AggPlainTransStrictByVal { call, pergroup: spec.pergroup }
-                }
-                (None, false, false) => Step::AggPlainTransByVal { call, pergroup: spec.pergroup },
-                (Some(base), _, true) => {
-                    Step::AggTransInitStrictByValIndirect { call, base, transno: transno as u16 }
-                }
-                (Some(base), true, false) => {
-                    Step::AggTransStrictByValIndirect { call, base, transno: transno as u16 }
-                }
-                (Some(base), false, false) => {
-                    Step::AggTransByValIndirect { call, base, transno: transno as u16 }
-                }
-            }
-        } else {
-            let byref = crate::steps::AggByRef {
-                agg: agg_state_node(agg_node),
-                translen: spec.transtype_len,
-            };
-            let transno = transno as u16;
-            match (indirect_base, fn_strict, spec.init_value_is_null) {
-                (None, true, true) => {
-                    Step::AggPlainTransInitStrictByRef { call, pergroup: spec.pergroup, byref }
-                }
-                (None, true, false) => {
-                    Step::AggPlainTransStrictByRef { call, pergroup: spec.pergroup, byref }
-                }
-                (None, false, _) => {
-                    Step::AggPlainTransByRef { call, pergroup: spec.pergroup, byref }
-                }
-                (Some(base), true, true) => {
-                    Step::AggTransInitStrictByRefIndirect { call, base, transno, byref }
-                }
-                (Some(base), true, false) => {
-                    Step::AggTransStrictByRefIndirect { call, base, transno, byref }
-                }
-                (Some(base), false, _) => {
-                    Step::AggTransByRefIndirect { call, base, transno, byref }
+            } else {
+                let byref = crate::steps::AggByRef {
+                    agg: agg_state_node(agg_node),
+                    translen: spec.transtype_len,
+                };
+                match (fn_strict, spec.init_value_is_null) {
+                    (true, true) => Step::AggPlainTransInitStrictByRef { call, pergroup, byref },
+                    (true, false) => Step::AggPlainTransStrictByRef { call, pergroup, byref },
+                    (false, _) => Step::AggPlainTransByRef { call, pergroup, byref },
                 }
             }
         };
-        push_step(&mut state, mcx, step)?;
+        match &mode {
+            PergroupMode::Fixed => push_step(&mut state, mcx, fixed_step(spec.pergroup))?,
+            PergroupMode::Sets(bases) => {
+                for &base in bases.iter() {
+                    // SAFETY: transno < numtrans slots of each once-allocated
+                    // per-set pergroup array (nodeAgg contract).
+                    let pergroup =
+                        unsafe { NonNull::new_unchecked(base.as_ptr().add(transno)) };
+                    push_step(&mut state, mcx, fixed_step(pergroup))?;
+                }
+            }
+            PergroupMode::Indirect(base) => {
+                let base = *base;
+                let step = if spec.transtype_byval {
+                    match (fn_strict, init_strict) {
+                        (_, true) => Step::AggTransInitStrictByValIndirect {
+                            call,
+                            base,
+                            transno: transno as u16,
+                        },
+                        (true, false) => Step::AggTransStrictByValIndirect {
+                            call,
+                            base,
+                            transno: transno as u16,
+                        },
+                        (false, false) => {
+                            Step::AggTransByValIndirect { call, base, transno: transno as u16 }
+                        }
+                    }
+                } else {
+                    let byref = crate::steps::AggByRef {
+                        agg: agg_state_node(agg_node),
+                        translen: spec.transtype_len,
+                    };
+                    let transno = transno as u16;
+                    match (fn_strict, spec.init_value_is_null) {
+                        (true, true) => {
+                            Step::AggTransInitStrictByRefIndirect { call, base, transno, byref }
+                        }
+                        (true, false) => {
+                            Step::AggTransStrictByRefIndirect { call, base, transno, byref }
+                        }
+                        (false, _) => Step::AggTransByRefIndirect { call, base, transno, byref },
+                    }
+                };
+                push_step(&mut state, mcx, step)?;
+            }
+        }
         if let Some(ix) = bailout {
             let target = state.steps.len() as u32;
             match &mut state.steps[ix] {
@@ -627,6 +668,7 @@ pub fn expr_type(node: Node<'_>) -> Oid {
         NodeTag::T_OpExpr => node.as_op_expr().unwrap().opresulttype,
         NodeTag::T_Aggref => node.as_aggref().unwrap().aggtype,
         NodeTag::T_WindowFunc => node.as_window_func().unwrap().wintype,
+        NodeTag::T_GroupingFunc => 23,
         NodeTag::T_MinMaxExpr => node.as_min_max_expr().unwrap().minmaxtype,
         NodeTag::T_SQLValueFunction => node.as_sql_value_function().unwrap().r#type,
         NodeTag::T_BoolExpr | NodeTag::T_NullTest => 16,
@@ -708,7 +750,7 @@ fn setup_walker(node: Node<'_>, info: &mut SetupInfo) {
         NodeTag::T_Const | NodeTag::T_Param | NodeTag::T_SQLValueFunction => {}
         // C expr_setup_walker: Aggref/WindowFunc args never eval in the
         // caller's econtext.
-        NodeTag::T_Aggref | NodeTag::T_WindowFunc => {}
+        NodeTag::T_Aggref | NodeTag::T_WindowFunc | NodeTag::T_GroupingFunc => {}
         NodeTag::T_FuncExpr => {
             for a in node.as_func_expr().unwrap().args.iter() {
                 setup_walker(a, info);
@@ -863,6 +905,37 @@ fn init_expr_rec<'mcx>(
                 )
             };
             push_step(state, mcx, Step::AggrefEval { value, null, out })
+        }
+        NodeTag::T_GroupingFunc => {
+            let Some(Bind::Agg(bind)) = agg else {
+                unported("EEOP_GROUPING_FUNC outside an Agg projection (execExpr.c)");
+            };
+            let g = node.as_grouping_func().unwrap();
+            let cols_src = g.cols.as_slice();
+            let ncols = cols_src.len();
+            let cols = if bind.grouping.is_some() {
+                assert!(ncols > 0, "GroupingFunc.cols unset (setrefs must remap refs)");
+                let layout = core::alloc::Layout::array::<i32>(ncols).unwrap();
+                let raw = mcx.allocate(layout).map_err(|_| mcx.oom(layout.size()))?;
+                let p: NonNull<i32> = raw.cast();
+                // SAFETY: fresh allocation of ncols i32 slots.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(cols_src.as_ptr(), p.as_ptr(), ncols)
+                };
+                p
+            } else {
+                NonNull::dangling()
+            };
+            push_step(
+                state,
+                mcx,
+                Step::GroupingFuncEval {
+                    cols,
+                    ncols: ncols as u16,
+                    current: bind.grouping,
+                    out,
+                },
+            )
         }
         NodeTag::T_WindowFunc => {
             let Some(Bind::Win(win)) = agg else {

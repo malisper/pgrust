@@ -86,6 +86,14 @@ pub enum Step {
     NullTestIsNotNull { out: OutRef },
     // Agg pointers resolve at build into once-allocated never-moved AggState arrays.
     AggrefEval { value: NonNull<Datum>, null: NonNull<bool>, out: OutRef },
+    // C EEOP_GROUPING_FUNC: bit per clause col, 1 = ungrouped in the
+    // current set (None cell: no grouping sets, result 0).
+    GroupingFuncEval {
+        cols: NonNull<i32>,
+        ncols: u16,
+        current: Option<NonNull<GroupedColsCell>>,
+        out: OutRef,
+    },
     // C EEOP_AGG_STRICT_INPUT_CHECK_ARGS(_1): args = fcinfo args[1..].
     AggStrictInputCheck { args: NonNull<NullableDatum>, nargs: u16, jumpnull: u32 },
     AggStrictInputCheck1 { arg: NonNull<NullableDatum>, jumpnull: u32 },
@@ -155,6 +163,14 @@ pub enum Step {
 pub struct AggByRef {
     pub agg: NonNull<AggStateNode>,
     pub translen: i16,
+}
+
+// The current set's grouped child attnos; nodeAgg repoints per set.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct GroupedColsCell {
+    pub ptr: *const i16,
+    pub len: usize,
 }
 
 // C nodeAgg.h AggStatePerGroupData; the trans steps read/write it in place.

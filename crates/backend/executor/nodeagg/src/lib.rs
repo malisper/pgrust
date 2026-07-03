@@ -37,6 +37,8 @@ pub fn init_seams() {}
 #[cfg(test)]
 mod tests;
 
+mod gsets;
+
 const ACL_EXECUTE: u64 = 1 << 7;
 const ACLCHECK_OK: i32 = 0;
 
@@ -50,7 +52,7 @@ pub struct AggStateData<'mcx> {
     pub ps_ResultTupleDesc: Option<Rc<TupleDescData<'static>>>,
     pub ps_ResultTupleSlot: ExecSlotId,
     proj: PgBox<'mcx, ExprState<'mcx>>,
-    evaltrans: PgBox<'mcx, ExprState<'mcx>>,
+    evaltrans: Option<PgBox<'mcx, ExprState<'mcx>>>,
     peragg: PgVec<'mcx, PerAggData>,
     trans_init: PgVec<'mcx, NullableDatum>,
     trans_typ: PgVec<'mcx, TransTyp>,
@@ -64,6 +66,7 @@ pub struct AggStateData<'mcx> {
     numtrans: usize,
     perhash: Option<PerHashData<'mcx>>,
     persort: Option<PerSortData<'mcx>>,
+    gsets: Option<PgBox<'mcx, gsets::GroupingSetsState<'mcx>>>,
     qual: Option<PgBox<'mcx, ExprState<'mcx>>>,
 }
 
@@ -151,6 +154,9 @@ fn agg_permission_denied(aggfnoid: Oid) -> Box<PgError> {
 fn collect_aggrefs<'mcx>(node: Node<'mcx>, out: &mut PgVec<'mcx, &'mcx Aggref<'mcx>>) {
     match node.node_tag() {
         NodeTag::T_Aggref => out.push(node.as_aggref().unwrap()),
+        // GroupingFunc args are never evaluated (EEOP_GROUPING_FUNC reads
+        // grouped_cols only).
+        NodeTag::T_GroupingFunc => {}
         NodeTag::T_TargetEntry => collect_aggrefs(node.as_target_entry().unwrap().expr, out),
         NodeTag::T_Var | NodeTag::T_Const => {}
         NodeTag::T_FuncExpr => {
@@ -184,6 +190,7 @@ pub fn exec_init_agg<'mcx>(
     estate: &mut EStateData<'mcx>,
     _eflags: i32,
     result_desc: Rc<TupleDescData<'static>>,
+    outer_desc: Option<Rc<TupleDescData<'static>>>,
 ) -> PgResult<AggStateData<'mcx>> {
     let mcx = estate.es_query_cxt;
     if node.aggstrategy != AGG_PLAIN
@@ -198,8 +205,9 @@ pub fn exec_init_agg<'mcx>(
     if node.aggsplit != AGGSPLIT_SIMPLE {
         panic!("ExecInitAgg (nodeAgg.c): aggsplit {} not ported", node.aggsplit);
     }
-    if !node.groupingSets.is_nil() || !node.chain.is_nil() {
-        panic!("ExecInitAgg (nodeAgg.c): grouping sets not ported");
+    let has_grouping_sets = !node.groupingSets.is_nil() || !node.chain.is_nil();
+    if has_grouping_sets && node.aggstrategy == AGG_HASHED {
+        panic!("ExecInitAgg (nodeAgg.c): hashed grouping sets not ported — grouping-sets lane");
     }
     if node.aggstrategy == AGG_PLAIN && node.numCols != 0 {
         panic!("ExecInitAgg (nodeAgg.c): AGG_PLAIN with grouping columns cannot happen");
@@ -398,24 +406,37 @@ pub fn exec_init_agg<'mcx>(
         });
     }
     let params = estate.param_bind();
-    let (mut evaltrans, perhash) = if node.aggstrategy == AGG_HASHED {
+    let (mut evaltrans, perhash, persort, gs) = if has_grouping_sets {
+        let gs = gsets::init_grouping_sets(
+            node, estate, outer_desc, &specs, numtrans, fm_agg_node, params, tmpcontext,
+        )?;
+        (None, None, None, Some(gs))
+    } else if node.aggstrategy == AGG_HASHED {
         let ph = init_perhash(node, estate, numtrans)?;
         let evaltrans =
             exec_build_agg_trans_hashed(mcx, &specs, ph.pergroup_cell, fm_agg_node, params)?;
-        (evaltrans, Some(ph))
+        (Some(evaltrans), Some(ph), None, None)
     } else {
-        (exec_build_agg_trans(mcx, &specs, fm_agg_node, params)?, None)
+        let persort = if node.aggstrategy == AGG_SORTED {
+            Some(init_persort(node, estate)?)
+        } else {
+            None
+        };
+        (Some(exec_build_agg_trans(mcx, &specs, fm_agg_node, params)?), None, persort, None)
     };
     // C invokes transfns in the tmpcontext per-tuple memory; by-ref call
-    // results ride the armed result mcx there, reset per tuple.
-    // SAFETY: the tmpcontext ExprContext outlives the program (same estate).
-    unsafe { evaltrans.arm_result_mcx_raw(estate.ecxt(tmpcontext).per_tuple_mcx()) };
-    let persort = if node.aggstrategy == AGG_SORTED {
-        Some(init_persort(node, estate)?)
-    } else {
-        None
+    // results ride the armed result mcx there, reset per tuple (phase
+    // programs are armed inside init_grouping_sets).
+    if let Some(et) = evaltrans.as_mut() {
+        // SAFETY: the tmpcontext ExprContext outlives the program (same estate).
+        unsafe { et.arm_result_mcx_raw(estate.ecxt(tmpcontext).per_tuple_mcx()) };
+    }
+    let bind = AggBind {
+        values: agg_values_base,
+        nulls: agg_nulls_base,
+        naggs: numaggs as u16,
+        grouping: gs.as_ref().map(|g| g.grouping_cell()),
     };
-    let bind = AggBind { values: agg_values_base, nulls: agg_nulls_base, naggs: numaggs as u16 };
     let proj = exec_build_agg_projection_info(mcx, &node.plan.targetlist, None, bind, params)?;
     let qual = exec_build_agg_qual(mcx, &node.plan.qual, bind, params)?;
 
@@ -439,6 +460,7 @@ pub fn exec_init_agg<'mcx>(
         numtrans,
         perhash,
         persort,
+        gsets: gs,
         qual,
     })
 }
@@ -486,7 +508,7 @@ fn collect_base_var_cols(node: Node<'_>, out: &mut PgVec<'_, bool>) {
             assert!(v.varattno >= 1 && (v.varattno as usize) <= out.len());
             out[(v.varattno - 1) as usize] = true;
         }
-        NodeTag::T_Const | NodeTag::T_Aggref => {}
+        NodeTag::T_Const | NodeTag::T_Aggref | NodeTag::T_GroupingFunc => {}
         NodeTag::T_TargetEntry => {
             collect_base_var_cols(node.as_target_entry().unwrap().expr, out)
         }
@@ -747,6 +769,9 @@ where
     if node.agg_done {
         return Ok(None);
     }
+    if node.gsets.is_some() {
+        return gsets::agg_retrieve_grouping_sets(node, estate, &mut fetch_outer);
+    }
     if node.plan.aggstrategy == AGG_HASHED {
         if !node.perhash.as_ref().expect("hashed Agg has perhash").table_filled {
             agg_fill_hash_table(node, estate, &mut fetch_outer)?;
@@ -762,7 +787,7 @@ where
         estate.ecxt_mut(node.tmpcontext).ecxt_outertuple = Some(outer_id);
         let outer_slot = estate.slot_mut(outer_id);
         let mut slots = EvalSlots { scan: None, inner: None, outer: Some(outer_slot) };
-        exec_eval_expr(&mut node.evaltrans, &mut slots)?;
+        exec_eval_expr(node.evaltrans.as_mut().unwrap(), &mut slots)?;
         estate.reset_expr_context(node.tmpcontext);
     }
     estate.reset_expr_context(node.ps_ExprContext);
@@ -786,7 +811,7 @@ const MAX_FINAL_ARGS: usize = 4;
 // finalize_aggregate(s) (nodeAgg.c): finalfn results land in ps_ExprContext's
 // per-tuple memory via the armed result mcx (C's MemoryContextContains +
 // datumCopy discipline); no finalfn = the byval transvalue itself.
-fn finalize_aggregates<'mcx>(
+pub(crate) fn finalize_aggregates<'mcx>(
     node: &mut AggStateData<'mcx>,
     estate: &EStateData<'mcx>,
     pergroup: NonNull<AggPerGroup>,
@@ -895,7 +920,7 @@ where
             let ps = persort.as_mut().expect("sorted Agg has persort");
             let mut slots =
                 EvalSlots { scan: None, inner: None, outer: Some(&mut ps.first_slot) };
-            exec_eval_expr(evaltrans, &mut slots)?;
+            exec_eval_expr(evaltrans.as_mut().unwrap(), &mut slots)?;
         }
         estate.reset_expr_context(node.tmpcontext);
         loop {
@@ -918,7 +943,7 @@ where
                 break;
             }
             let mut slots = EvalSlots { scan: None, inner: None, outer: Some(outer_slot) };
-            exec_eval_expr(evaltrans, &mut slots)?;
+            exec_eval_expr(evaltrans.as_mut().unwrap(), &mut slots)?;
             estate.reset_expr_context(node.tmpcontext);
         }
         finalize_aggregates(node, estate, node.pergroup_base)?;
@@ -957,7 +982,7 @@ where
         {
             let outer_slot = estate.slot_mut(outer_id);
             let mut slots = EvalSlots { scan: None, inner: None, outer: Some(outer_slot) };
-            exec_eval_expr(&mut node.evaltrans, &mut slots)?;
+            exec_eval_expr(node.evaltrans.as_mut().unwrap(), &mut slots)?;
         }
         estate.reset_expr_context(node.tmpcontext);
     }
@@ -1160,6 +1185,10 @@ pub fn exec_rescan_agg_chg<'mcx>(node: &mut AggStateData<'mcx>, _estate: &mut ES
 
 pub fn exec_rescan_agg<'mcx>(node: &mut AggStateData<'mcx>, _estate: &mut EStateData<'mcx>) {
     node.agg_done = false;
+    if let Some(gs) = node.gsets.as_mut() {
+        gsets::rescan_grouping_sets(gs).expect("grouping-sets rescan");
+        return;
+    }
     if let Some(ph) = node.perhash.as_mut() {
         // C's no-chgParam arm: the filled table is reused, only the iterator
         // resets (the caller's child rescan is then redundant but harmless).

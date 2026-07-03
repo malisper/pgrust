@@ -546,7 +546,9 @@ pub fn exec_init_node<'mcx>(
             let outer = exec_init_node(agg_plan.plan.lefttree, estate, eflags)?
                 .unwrap_or_else(|| panic!("ExecInitAgg (nodeAgg.c): Agg without an outer plan"));
             let desc = crate::exec_type_from_tl(&agg_plan.plan.targetlist)?;
-            let agg = ::nodeagg::exec_init_agg(agg_plan, estate, eflags, desc)?;
+            let outer_desc =
+                outer.exec_get_result_type(agg_plan.plan.lefttree.unwrap().as_plan().unwrap())?;
+            let agg = ::nodeagg::exec_init_agg(agg_plan, estate, eflags, desc, Some(outer_desc))?;
             PlanStateNode::Agg(::mcx::alloc_in(mcx, AggPlanState { agg, outer })?)
         }
         NodeTag::T_WindowAgg => {

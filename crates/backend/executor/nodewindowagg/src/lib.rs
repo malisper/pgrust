@@ -554,7 +554,7 @@ pub fn exec_init_window_agg<'mcx>(
         None
     };
 
-    let bind = AggBind { values: agg_values_base, nulls: agg_nulls_base, naggs: numfuncs as u16 };
+    let bind = AggBind { values: agg_values_base, nulls: agg_nulls_base, naggs: numfuncs as u16, grouping: None };
     let proj = exec_build_window_projection_info(
         mcx,
         &node.plan.targetlist,
