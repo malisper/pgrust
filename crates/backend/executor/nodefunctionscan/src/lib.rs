@@ -158,8 +158,7 @@ fn exec_init_table_function_result<'mcx>(
                 .expect("non-NULL arg expression"),
         );
     }
-    // init_sexpr's ACL_EXECUTE check omitted: only built-ins (PUBLIC
-    // execute) resolve on this lane.
+    // init_sexpr's ACL_EXECUTE check omitted: built-ins are PUBLIC-execute.
     let flinfo = fmgr_core::fmgr_info(func.funcid)?;
     Ok(SetExprState {
         flinfo,
@@ -258,8 +257,7 @@ fn run_value_per_call<'mcx, const N: usize>(
         Some(core::ptr::NonNull::from(expected_desc).cast::<core::ffi::c_void>());
     let mut fcinfo = LocalFcinfo::<N>::new(setexpr.collation);
     fcinfo.resultinfo = rsinfo.as_fmnode_ptr();
-    // C evaluates the SRF in econtext per-tuple memory (reset per call); the
-    // row is copied into the tuplestore before the next call's reset.
+    // The row is copied into the tuplestore before the next call's reset.
     // SAFETY: the ExprContext outlives this loop's stack frame.
     unsafe { fcinfo.set_result_mcx(estate.ecxt(ecxt).per_tuple_mcx()) };
 
@@ -328,10 +326,8 @@ fn run_value_per_call<'mcx, const N: usize>(
     Ok(store)
 }
 
-// C execSRF.c returnsTuple arm: explode the composite datum into columns
-// (tuplestore_puttuple of the embedded tuple data; the rowtype-consistency
-// check C performs for RECORD results is subsumed by deforming with the
-// scan's expected descriptor).
+// execSRF.c returnsTuple arm: C's RECORD rowtype-consistency check is
+// subsumed by deforming with the scan's expected descriptor.
 fn put_composite_row<'mcx>(
     store: &mut Tuplestore,
     expected_desc: &TupleDescData<'mcx>,
@@ -386,8 +382,7 @@ pub fn exec_rescan_function_scan<'mcx>(
     Ok(())
 }
 
-/// `ExecReScanFunctionScan`, changed-params arm: a function whose params
-/// changed drops its tuplestore so the next fetch re-evaluates it.
+/// Changed-params rescan: drop the tuplestore; the next fetch re-evaluates.
 pub fn exec_rescan_function_scan_chg<'mcx>(
     node: &mut FunctionScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
