@@ -504,6 +504,9 @@ pub fn fmgr_sql(
     fcinfo: &mut FunctionCallInfoBaseData,
 ) -> PgResult<Datum> {
     let flinfo = flinfo.expect("fmgr_sql: called without flinfo");
+    // C's guard for runaway SQL-function recursion sits in the per-level
+    // parse/plan/exec entries; checked here once per call instead.
+    stack_depth::check_stack_depth()?;
     if flinfo.fn_retset {
         panic!("fmgr_sql: SETOF SQL functions unported (function {})", flinfo.fn_oid);
     }
