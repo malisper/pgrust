@@ -173,3 +173,298 @@ fn transform_null_equals_guc_roundtrip() {
     assert!(guc_tables::vars::Transform_null_equals.read());
     guc_tables::vars::Transform_null_equals.write(false);
 }
+
+fn bool_const<'mcx>(mcx: Mcx<'mcx>, v: bool, location: i32) -> Node<'mcx> {
+    Node::mk_a_const(
+        mcx,
+        Some(ValUnion::Boolean(types_nodes::Boolean { boolval: v })),
+        location,
+    )
+    .unwrap()
+}
+
+#[test]
+fn bool_expr_transforms_and_or_not() {
+    use types_nodes::BoolExprType::*;
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+
+    for (op, nargs) in [(AND_EXPR, 2), (OR_EXPR, 2), (NOT_EXPR, 1)] {
+        let mut args = NodeList::nil();
+        for i in 0..nargs {
+            args.lappend(mcx, bool_const(mcx, i == 0, 7 + i)).unwrap();
+        }
+        let raw = Node::mk(mcx, types_nodes::BoolExpr { boolop: op, args, location: 3 }).unwrap();
+        let out =
+            transformExpr(mcx, &mut pstate, raw, ParseExprKind::EXPR_KIND_SELECT_TARGET).unwrap();
+        let b = out.as_bool_expr().unwrap();
+        assert_eq!(b.boolop, op);
+        assert_eq!(b.args.len(), nargs as usize);
+        assert_eq!(b.args.nth(0).as_const().unwrap().consttype, types_core::catalog::BOOLOID);
+        assert_eq!(b.location, 3);
+        assert_eq!(expr_type(out), types_core::catalog::BOOLOID);
+        assert_eq!(expr_collation(out), InvalidOid);
+        assert_eq!(expr_location(out), 3);
+    }
+}
+
+fn install_typecast_fixture() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    install_oper_fixture();
+    ONCE.call_once(|| {
+        syscache_seams::lookup_pg_namespace_oid_by_name::set(|nspname| {
+            Ok(if nspname == "pg_catalog" { 11 } else { InvalidOid })
+        });
+        aclchk_seams::object_aclcheck::set(|_, _, _, _| Ok(0));
+        syscache_seams::lookup_pg_type_oid_by_name::set(|typname, nsp| {
+            Ok(if typname == "int4" && nsp == 11 { INT4OID } else { InvalidOid })
+        });
+        syscache_seams::pg_type_isdefined::set(|_| Ok(Some(true)));
+        syscache_seams::pg_type_typtype::set(|_| Ok(Some(b'b' as i8)));
+        syscache_seams::pg_type_base_shape::set(|_| {
+            Ok(Some(syscache_seams::PgTypeBaseShape {
+                typtype: b'b' as i8,
+                typbasetype: InvalidOid,
+                typtypmod: -1,
+                typelem: InvalidOid,
+                typsubscript: InvalidOid,
+            }))
+        });
+        syscache_seams::pg_type_io_shape::set(|typid| {
+            Ok(match typid {
+                INT4OID => Some(syscache_seams::PgTypeIoShape {
+                    oid: INT4OID,
+                    typinput: 42,
+                    typoutput: 43,
+                    typreceive: 2406,
+                    typsend: 2407,
+                    typmodin: InvalidOid,
+                    typmodout: InvalidOid,
+                    typelem: InvalidOid,
+                    typlen: 4,
+                    typbyval: true,
+                    typalign: b'i' as i8,
+                    typdelim: b',' as i8,
+                    typisdefined: true,
+                }),
+                types_core::catalog::TEXTOID => Some(syscache_seams::PgTypeIoShape {
+                    oid: types_core::catalog::TEXTOID,
+                    typinput: 46,
+                    typoutput: 47,
+                    typreceive: 2414,
+                    typsend: 2415,
+                    typmodin: InvalidOid,
+                    typmodout: InvalidOid,
+                    typelem: InvalidOid,
+                    typlen: -1,
+                    typbyval: false,
+                    typalign: b'i' as i8,
+                    typdelim: b',' as i8,
+                    typisdefined: true,
+                }),
+                _ => None,
+            })
+        });
+        syscache_seams::lookup_pg_type_shape::set(|typid| {
+            let is_text = typid == types_core::catalog::TEXTOID;
+            Ok(Some(types_tuple::PgTypeShape {
+                typlen: if is_text { -1 } else { 4 },
+                typbyval: !is_text,
+                typalign: b'i' as i8,
+                typstorage: b'p' as i8,
+                typcollation: if is_text { 100 } else { InvalidOid },
+            }))
+        });
+        syscache_seams::pg_type_category::set(|typid| {
+            Ok(Some(match typid {
+                types_core::catalog::TEXTOID => (b'S' as i8, true),
+                types_core::catalog::BOOLOID => (b'B' as i8, true),
+                _ => (b'N' as i8, false),
+            }))
+        });
+    });
+}
+
+fn typecast_int4<'mcx>(mcx: Mcx<'mcx>, s: &'mcx str, arg_loc: i32, cast_loc: i32) -> Node<'mcx> {
+    let mut names = NodeList::nil();
+    names.lappend(mcx, Node::mk(mcx, PgStr { sval: "pg_catalog" }).unwrap()).unwrap();
+    names.lappend(mcx, Node::mk(mcx, PgStr { sval: "int4" }).unwrap()).unwrap();
+    let tn = Node::mk(
+        mcx,
+        types_nodes::TypeName {
+            names,
+            typemod: -1,
+            location: cast_loc + 2,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let arg = Node::mk_a_const(
+        mcx,
+        Some(ValUnion::String(PgStr { sval: s })),
+        arg_loc,
+    )
+    .unwrap();
+    Node::mk(
+        mcx,
+        types_nodes::TypeCast { arg: Some(arg), typeName: Some(tn), location: cast_loc },
+    )
+    .unwrap()
+}
+
+#[test]
+fn type_cast_of_string_literal_runs_input_function() {
+    install_typecast_fixture();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+    pstate.p_sourcetext = Some(b"SELECT '42'::int4");
+
+    let tc = typecast_int4(mcx, "42", 7, 11);
+    let out =
+        transformExpr(mcx, &mut pstate, tc, ParseExprKind::EXPR_KIND_SELECT_TARGET).unwrap();
+    let c = out.as_const().unwrap();
+    assert_eq!(c.consttype, INT4OID);
+    assert!(!c.constisnull);
+    assert_eq!(c.constvalue.as_i32(), 42);
+    assert_eq!(c.location, 7);
+}
+
+#[test]
+fn type_cast_bad_literal_is_22p02_with_cursor() {
+    install_typecast_fixture();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+    pstate.p_sourcetext = Some(b"SELECT 'foo'::int4");
+
+    let tc = typecast_int4(mcx, "foo", 7, 12);
+    let err = transformExpr(mcx, &mut pstate, tc, ParseExprKind::EXPR_KIND_SELECT_TARGET)
+        .map(|_| ())
+        .unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_INVALID_TEXT_REPRESENTATION);
+    // C: errposition at the literal (location 7 -> 1-based char 8).
+    assert_eq!(err.cursor_position(), Some(8));
+}
+
+#[test]
+fn coalesce_selects_common_type_and_coerces_unknown() {
+    install_typecast_fixture();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+
+    let mut args = NodeList::nil();
+    args.lappend(mcx, Node::mk_a_const(mcx, None, 16).unwrap()).unwrap();
+    args.lappend(mcx, int_const(mcx, 42, 22)).unwrap();
+    let raw = Node::mk(
+        mcx,
+        types_nodes::primnodes::CoalesceExpr {
+            coalescetype: InvalidOid,
+            coalescecollid: InvalidOid,
+            args,
+            location: 7,
+        },
+    )
+    .unwrap();
+
+    let out =
+        transformExpr(mcx, &mut pstate, raw, ParseExprKind::EXPR_KIND_SELECT_TARGET).unwrap();
+    let c = out.as_coalesce_expr().unwrap();
+    assert_eq!(c.coalescetype, INT4OID);
+    assert_eq!(c.args.len(), 2);
+    let null_arg = c.args.nth(0).as_const().unwrap();
+    assert!(null_arg.constisnull);
+    assert_eq!(null_arg.consttype, INT4OID);
+    assert_eq!(c.args.nth(1).as_const().unwrap().constvalue.as_i32(), 42);
+    assert_eq!(c.location, 7);
+    assert_eq!(expr_type(out), INT4OID);
+    assert_eq!(expr_location(out), 7);
+}
+
+#[test]
+fn minmax_greatest_over_int4() {
+    use types_nodes::primnodes::{MinMaxExpr, MinMaxOp};
+    install_typecast_fixture();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+
+    let mut args = NodeList::nil();
+    for (i, v) in [1, 2, 3].iter().enumerate() {
+        args.lappend(mcx, int_const(mcx, *v, 16 + 3 * i as i32)).unwrap();
+    }
+    let raw = Node::mk(
+        mcx,
+        MinMaxExpr {
+            minmaxtype: InvalidOid,
+            minmaxcollid: InvalidOid,
+            inputcollid: InvalidOid,
+            op: MinMaxOp::IS_GREATEST,
+            args,
+            location: 7,
+        },
+    )
+    .unwrap();
+
+    let out =
+        transformExpr(mcx, &mut pstate, raw, ParseExprKind::EXPR_KIND_SELECT_TARGET).unwrap();
+    let m = out.as_min_max_expr().unwrap();
+    assert_eq!(m.minmaxtype, INT4OID);
+    assert_eq!(m.op, MinMaxOp::IS_GREATEST);
+    assert_eq!(m.args.len(), 3);
+    assert_eq!(expr_type(out), INT4OID);
+}
+
+#[test]
+fn case_when_common_type_text_with_default_else() {
+    use types_nodes::primnodes::{CaseExpr, CaseWhen};
+    install_typecast_fixture();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+
+    let cond = Node::mk_a_const(
+        mcx,
+        Some(ValUnion::Boolean(types_nodes::Boolean { boolval: true })),
+        12,
+    )
+    .unwrap();
+    let result = Node::mk_a_const(mcx, Some(ValUnion::String(PgStr { sval: "lt" })), 22).unwrap();
+    let when = Node::mk(
+        mcx,
+        CaseWhen { expr: Some(cond), result: Some(result), location: 12 },
+    )
+    .unwrap();
+    let raw = Node::mk(
+        mcx,
+        CaseExpr {
+            casetype: InvalidOid,
+            casecollid: InvalidOid,
+            arg: None,
+            args: NodeList::make1(mcx, when).unwrap(),
+            defresult: None,
+            location: 7,
+        },
+    )
+    .unwrap();
+
+    let out =
+        transformExpr(mcx, &mut pstate, raw, ParseExprKind::EXPR_KIND_SELECT_TARGET).unwrap();
+    let c = out.as_case_expr().unwrap();
+    assert_eq!(c.casetype, types_core::catalog::TEXTOID);
+    assert!(c.arg.is_none());
+    let w = c.args.nth(0).as_case_when().unwrap();
+    assert_eq!(w.expr.unwrap().as_const().unwrap().consttype, types_core::catalog::BOOLOID);
+    let r = w.result.unwrap().as_const().unwrap();
+    assert_eq!(r.consttype, types_core::catalog::TEXTOID);
+    assert_eq!(r.constcollid, 100);
+    // C: absent ELSE becomes a NULL default, coerced to the common type.
+    let d = c.defresult.unwrap().as_const().unwrap();
+    assert!(d.constisnull);
+    assert_eq!(d.consttype, types_core::catalog::TEXTOID);
+    assert_eq!(expr_type(out), types_core::catalog::TEXTOID);
+    assert_eq!(expr_location(out), 7);
+}
