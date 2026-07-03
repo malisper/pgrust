@@ -77,7 +77,9 @@ enum SortVariant {
     Heap {
         tup_desc: std::rc::Rc<TupleDescData<'static>>,
     },
-    Datum,
+    // byref_typlen: 0 = by-value datums (tuple stays NULL); -1/positive =
+    // by-ref datums copied into tuplecontext at put (C base->tuples).
+    Datum { byref_typlen: i16 },
     Index {
         tup_desc: std::rc::Rc<TupleDescData<'static>>,
         nkeys: u16,
@@ -216,7 +218,7 @@ impl CmpCtx<'_> {
                 }
                 0
             }
-            SortVariant::Datum => 0,
+            SortVariant::Datum { .. } => 0,
             SortVariant::Index { .. } => self.comparetup_index_btree_tiebreak(a, b),
             SortVariant::IndexHash { .. } => unreachable!("comparetup dispatches IndexHash whole"),
         }
@@ -448,11 +450,11 @@ impl Tuplesort {
         work_mem: i32,
         sortopt: i32,
     ) -> PgResult<Tuplesort> {
-        let (_typlen, typbyval) = lsyscache::get_typlenbyval(datum_type)?;
-        if !typbyval {
+        let (typlen, typbyval) = lsyscache::get_typlenbyval(datum_type)?;
+        if !typbyval && typlen < -1 {
             panic!(
-                "tuplesort_begin_datum: by-reference datum sort (datumCopy lane, \
-                 tuplesortvariants.c) not ported for type {datum_type}"
+                "tuplesort_begin_datum: cstring-typlen by-ref datum sort not ported \
+                 for type {datum_type}"
             );
         }
         let init = SortSupportInit {
@@ -461,12 +463,19 @@ impl Tuplesort {
             ssup_attno: 1,
         };
         let key = prepare_sort_support_from_ordering_op(sort_operator, &init)?;
-        Ok(Self::begin_datum_with_key(key, work_mem, sortopt))
+        let byref_typlen = if typbyval { 0 } else { typlen };
+        Ok(Self::begin_common(
+            work_mem,
+            sortopt,
+            &[key],
+            true,
+            SortVariant::Datum { byref_typlen },
+        ))
     }
 
     /// C divergence: as [`Tuplesort::begin_heap_with_keys`], datum variant.
     pub fn begin_datum_with_key(key: SortSupport, work_mem: i32, sortopt: i32) -> Tuplesort {
-        Self::begin_common(work_mem, sortopt, &[key], true, SortVariant::Datum)
+        Self::begin_common(work_mem, sortopt, &[key], true, SortVariant::Datum { byref_typlen: 0 })
     }
 
     fn begin_common(
@@ -658,9 +667,38 @@ impl Tuplesort {
     #[inline]
     pub fn putdatum(&mut self, val: Datum, is_null: bool) -> PgResult<()> {
         self.0.with_mut(|st| {
-            debug_assert!(matches!(st.variant, SortVariant::Datum));
-            let datum1 = if is_null { Datum::null() } else { val };
-            st.puttuple_common(core::ptr::null_mut(), datum1, is_null, 0)
+            let SortVariant::Datum { byref_typlen } = st.variant else {
+                panic!("tuplesort_putdatum on a non-datum tuplesort")
+            };
+            if is_null || byref_typlen == 0 {
+                let datum1 = if is_null { Datum::null() } else { val };
+                return st.puttuple_common(core::ptr::null_mut(), datum1, is_null, 0);
+            }
+            // C datumCopy into tuplecontext; the copy is the canonical value
+            // (tuplesort_getdatum returns it, valid until reset/end).
+            let src = val.as_usize() as *const u8;
+            // SAFETY: a non-null by-ref datum is readable for its full size.
+            let size = unsafe {
+                if byref_typlen == -1 {
+                    ::types_tuple::varatt::varsize_any(src)
+                } else {
+                    byref_typlen as usize
+                }
+            };
+            let tmcx = st.tuplecontext.mcx();
+            let layout = core::alloc::Layout::from_size_align(size, 8).expect("putdatum layout");
+            let dst: core::ptr::NonNull<u8> = ::mcx::Allocator::allocate(&tmcx, layout)
+                .map_err(|_| tmcx.oom(size))?
+                .cast();
+            // SAFETY: fresh size-byte allocation; src readable per above.
+            unsafe { core::ptr::copy_nonoverlapping(src, dst.as_ptr(), size) };
+            let datum1 = Datum::from_usize(dst.as_ptr() as usize);
+            st.puttuple_common(
+                dst.as_ptr().cast::<MinimalTupleData>(),
+                datum1,
+                false,
+                maxalign(size) as i64,
+            )
         })
     }
 
@@ -672,7 +710,7 @@ impl Tuplesort {
         f: impl for<'a, 'm> FnOnce(&mut DatumPutter<'a, 'm>) -> PgResult<R>,
     ) -> PgResult<R> {
         self.0.with_mut(|st| {
-            debug_assert!(matches!(st.variant, SortVariant::Datum));
+            debug_assert!(matches!(st.variant, SortVariant::Datum { byref_typlen: 0 }));
             let mut putter = DatumPutter::new(st);
             let result = f(&mut putter);
             putter.flush();
@@ -746,7 +784,7 @@ impl Tuplesort {
     #[inline]
     pub fn getdatum(&mut self, forward: bool) -> PgResult<Option<NullableDatum>> {
         self.0.with_mut(|st| {
-            debug_assert!(matches!(st.variant, SortVariant::Datum));
+            debug_assert!(matches!(st.variant, SortVariant::Datum { .. }));
             Ok(st.gettuple_common(forward)?.map(|stup| NullableDatum {
                 value: stup.datum1,
                 isnull: stup.isnull1,

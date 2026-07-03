@@ -39,9 +39,24 @@ pub struct AggTransSpec<'a, 'mcx> {
     // C build_aggregate_transfn_expr's arg types: [transtype, input types..].
     pub arg_types: &'a [Oid],
     pub args: &'a NodeList<'mcx>,
+    // The Aggref node: C fmgr_info_set_expr for get_fn_expr_argtype
+    // consumers; None for the WindowAgg builder (its fn_expr lane is unarmed).
+    pub aggref: Option<Node<'mcx>>,
     pub pergroup: NonNull<AggPerGroup>,
     pub transtype_byval: bool,
     pub transtype_len: i16,
+    pub ordered: Option<AggOrderedSpec>,
+}
+
+// Non-presorted DISTINCT/ORDER BY spec (ExecBuildAggTrans ordered arms): the
+// program evaluates args into nodeagg-owned scratch and marks the row live;
+// nodeagg feeds the pertrans tuplesort and replays the transfn at the group
+// boundary (process_ordered_aggregate_single/multi).
+#[derive(Clone, Copy)]
+pub struct AggOrderedSpec {
+    pub scratch: NonNull<::datum::NullableDatum>,
+    pub num_trans_inputs: u16,
+    pub flag: NonNull<bool>,
 }
 
 // WindowAgg projection binding: same result arrays, indexed by wfuncno,
@@ -391,9 +406,16 @@ fn build_agg_trans<'mcx>(
         if flinfo.fn_retset {
             return Err(retset_error());
         }
+        if let Some(aggref) = spec.aggref {
+            flinfo.fn_expr = Some(erase_fn_expr(mcx, aggref)?);
+        }
         let init_strict = flinfo.fn_strict && spec.init_value_is_null;
         let fn_addr = flinfo.fn_addr;
         let fn_strict = flinfo.fn_strict;
+        if let Some(ord) = spec.ordered {
+            build_agg_trans_ordered(&mut state, mcx, spec, ord, fn_strict, params)?;
+            continue;
+        }
         let frame = FuncFrame::new_in(mcx, flinfo, nargs as u16, spec.inputcollid)?;
         // SAFETY: fresh frame image; the caller's agg_node outlives the program.
         unsafe { crate::steps::fcinfo_mut(frame.fcinfo, nargs as u16).context = agg_node };
@@ -513,6 +535,55 @@ fn build_agg_trans<'mcx>(
     push_step(&mut state, mcx, Step::DoneNoReturn)?;
     ready_expr(&mut state);
     Ok(state)
+}
+
+// ExecBuildAggTrans non-presorted DISTINCT/ORDER BY arms: every arg (junk
+// sort columns included) lands in the pertrans scratch; strict transfns skip
+// rows with null trans inputs at sort-insert time (C
+// EEOP_AGG_STRICT_INPUT_CHECK_NULLS), then the mark step flags the row for
+// nodeagg's tuplesort feed.
+fn build_agg_trans_ordered<'mcx>(
+    state: &mut ExprState<'mcx>,
+    mcx: Mcx<'mcx>,
+    spec: &AggTransSpec<'_, 'mcx>,
+    ord: crate::compile::AggOrderedSpec,
+    fn_strict: bool,
+    params: ParamBind<'mcx>,
+) -> PgResult<()> {
+    debug_assert!(ord.num_trans_inputs as usize <= spec.args.len());
+    for (argno, tle_node) in spec.args.iter().enumerate() {
+        let tle = tle_node.as_target_entry().unwrap_or_else(|| {
+            panic!("Aggref.args cell: expected TargetEntry, got {:?}", tle_node.node_tag())
+        });
+        // SAFETY: argno < the nodeagg-owned num-inputs scratch array length.
+        let out =
+            OutRef(Some(unsafe { NonNull::new_unchecked(ord.scratch.as_ptr().add(argno)) }));
+        init_expr_rec(tle.expr, state, mcx, out, None, params, None)?;
+    }
+    let mut bailout: Option<usize> = None;
+    if fn_strict && ord.num_trans_inputs > 0 {
+        let step = if ord.num_trans_inputs == 1 {
+            Step::AggStrictInputCheck1 { arg: ord.scratch, jumpnull: u32::MAX }
+        } else {
+            Step::AggStrictInputCheck {
+                args: ord.scratch,
+                nargs: ord.num_trans_inputs,
+                jumpnull: u32::MAX,
+            }
+        };
+        bailout = Some(state.steps.len());
+        push_step(state, mcx, step)?;
+    }
+    push_step(state, mcx, Step::AggOrderedMark { flag: ord.flag })?;
+    if let Some(ix) = bailout {
+        let target = state.steps.len() as u32;
+        match &mut state.steps[ix] {
+            Step::AggStrictInputCheck { jumpnull, .. }
+            | Step::AggStrictInputCheck1 { jumpnull, .. } => *jumpnull = target,
+            _ => unreachable!(),
+        }
+    }
+    Ok(())
 }
 
 /// C `ExecBuildHash32FromAttrs` (execExpr.c): hash the inner slot's

@@ -126,6 +126,9 @@ pub enum Step {
     },
     // C EEOP_AGG_STRICT_INPUT_CHECK_ARGS(_1): args = fcinfo args[1..].
     AggStrictInputCheck { args: NonNull<NullableDatum>, nargs: u16, jumpnull: u32 },
+    // Ordered/DISTINCT agg row survived filter+strict checks: flag it for
+    // nodeagg's tuplesort feed (scratch already holds the evaluated args).
+    AggOrderedMark { flag: NonNull<bool> },
     AggStrictInputCheck1 { arg: NonNull<NullableDatum>, jumpnull: u32 },
     AggPlainTransByVal { call: FuncCall, pergroup: NonNull<AggPerGroup> },
     AggPlainTransStrictByVal { call: FuncCall, pergroup: NonNull<AggPerGroup> },

@@ -661,6 +661,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_fmgr",
+ "types_nodes",
 ]
 
 [[package]]
@@ -5061,6 +5062,7 @@ dependencies = [
  "mbutils",
  "mcx",
  "nodes_core",
+ "parse_clause_seams",
  "parser_small1",
  "types_core",
  "types_error",
@@ -5083,6 +5085,7 @@ dependencies = [
  "mcx",
  "miscinit_seams",
  "parse_agg",
+ "parse_clause_seams",
  "parse_collate",
  "parse_expr",
  "parse_oper",
@@ -5098,6 +5101,18 @@ dependencies = [
  "types_rel",
  "types_tuple",
  "vars",
+]
+
+[[package]]
+name = "parse_clause_seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "parser_small1",
+ "seam_core",
+ "types_core",
+ "types_error",
+ "types_nodes",
 ]
 
 [[package]]
@@ -7450,6 +7465,7 @@ dependencies = [
  "nodeunique",
  "nodewindowagg",
  "parallel",
+ "parse_clause",
  "parse_collate",
  "parse_expr",
  "parser_analyze",

@@ -26,6 +26,76 @@ use types_nodes::rawnodes::{
 };
 use types_nodes::{CoercionForm, Node, NodeList, NodeTag};
 
+pub fn init_seams() {
+    parse_clause_seams::transform_agg_order_distinct::set(transform_agg_order_distinct);
+}
+
+// transformAggregateCall's ordered/DISTINCT arm (parse_agg.c), hosted here
+// because transformSortClause/transformDistinctClause/exprType all live above
+// parse_agg; parse_agg reaches it through parse_clause_seams.
+fn transform_agg_order_distinct<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    tlist: &mut NodeList<'mcx>,
+    agg_order: &NodeList<'mcx>,
+    agg_distinct: bool,
+) -> PgResult<(NodeList<'mcx>, NodeList<'mcx>, mcx::PgVec<'mcx, Oid>)> {
+    let torder = transformSortClause(
+        mcx,
+        pstate,
+        agg_order,
+        tlist,
+        ParseExprKind::EXPR_KIND_ORDER_BY,
+        true,
+    )?;
+    let mut tdistinct = NodeList::nil();
+    if agg_distinct {
+        tdistinct = transformDistinctClause(mcx, pstate, tlist, &torder, true)?;
+        for sc_node in &tdistinct {
+            let scl = sc_node.as_sort_group_clause().expect("aggdistinct cell");
+            if scl.sortop == InvalidOid {
+                let expr = tlist
+                    .iter()
+                    .find(|n| {
+                        n.as_target_entry().expect("tlist cell").ressortgroupref
+                            == scl.tleSortGroupRef
+                    })
+                    .map(|n| n.as_target_entry().unwrap().expr)
+                    .expect("DISTINCT expression not found in targetlist");
+                return Err(no_distinct_ordering_operator(pstate, expr));
+            }
+        }
+    }
+    let mut argtypes = mcx::PgVec::new_in(mcx);
+    for tle_node in &*tlist {
+        let tle = tle_node.as_target_entry().expect("tlist cell");
+        if !tle.resjunk {
+            argtypes.push(expr_type(tle.expr));
+        }
+    }
+    Ok((torder, tdistinct, argtypes))
+}
+
+#[cold]
+fn no_distinct_ordering_operator(pstate: &ParseState<'_, '_>, expr: Node<'_>) -> Box<PgError> {
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(types_error::ERRCODE_UNDEFINED_FUNCTION)
+            .errmsg(format!(
+                "could not identify an ordering operator for type {}",
+                format_type::format_type_be(expr_type(expr)).unwrap_or_default()
+            ))
+            .errdetail("Aggregates with DISTINCT must be able to sort their inputs.".to_string())
+            .errposition(parser_errposition(
+                pstate,
+                expr_location(expr),
+                mbutils::GetDatabaseEncoding(),
+            ))
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_agg.c", 0, "transformAggregateCall")),
+    )
+}
+
 pub fn transformFromClause<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'_, 'mcx>,
