@@ -85,6 +85,48 @@ impl<B: Bind> McxOwned<B> {
         }
     }
 
+    /// In-place variant: `build` writes the state through the slot, so large
+    /// states (EStateData ~1.2KB) are constructed in the arena, never returned
+    /// by value through a `PgResult` (that shape cost a stack zero+copy per
+    /// query — select1-gate attribution).
+    pub fn try_new_in_place(
+        ctx: MemoryContext,
+        build: impl for<'mcx> FnOnce(
+            Mcx<'mcx>,
+            &mut core::mem::MaybeUninit<B::Out<'mcx>>,
+        ) -> PgResult<()>,
+    ) -> PgResult<Self> {
+        let raw: *mut MemoryContext = alloc::boxed::Box::into_raw(alloc::boxed::Box::new(ctx));
+        // SAFETY: live heap context; the 'static is re-shortened by every access path.
+        let ctx_ref: &'static MemoryContext = unsafe { ctx_from_exposed(raw) };
+        let mcx = ctx_ref.mcx();
+        let slot: Result<crate::PgBox<'static, core::mem::MaybeUninit<B::Out<'static>>>, _> =
+            crate::PgBox::try_new_uninit_in(mcx);
+        let built = match slot {
+            Ok(mut slot) => match build(mcx, &mut slot) {
+                Ok(()) => {
+                    let (p, _mcx) = allocator_api2::boxed::Box::into_raw_with_allocator(slot);
+                    Ok(p.cast::<B::Out<'static>>())
+                }
+                Err(e) => Err(e),
+            },
+            Err(_) => Err(mcx.oom(core::mem::size_of::<B::Out<'static>>()).into()),
+        };
+        match built {
+            // SAFETY: from Box::into_raw, hence non-null.
+            Ok(p) => Ok(McxOwned {
+                state: unsafe { NonNull::new_unchecked(p) },
+                // SAFETY: from Box::into_raw, hence non-null.
+                ctx: unsafe { NonNull::new_unchecked(raw) },
+            }),
+            Err(e) => {
+                // SAFETY: sole owner from Box::into_raw; build borrow dead — unique free.
+                drop(unsafe { alloc::boxed::Box::from_raw(raw) });
+                Err(e)
+            }
+        }
+    }
+
 /// Universal over `'mcx`: no external lifetime unifies, nothing smuggles out or in.
     pub fn with<R>(&self, f: impl for<'mcx> FnOnce(&B::Out<'mcx>) -> R) -> R {
         // SAFETY: state live until Drop; shared reborrow shortened to &self.
