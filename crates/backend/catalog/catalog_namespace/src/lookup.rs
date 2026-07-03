@@ -216,6 +216,32 @@ pub fn OpernameGetOprid(names: &[&str], oprleft: Oid, oprright: Oid) -> PgResult
     Ok(InvalidOid)
 }
 
+// OpclassnameGetOpcid / OpfamilynameGetOpfid (namespace.c): first visible
+// match along the search path (temp namespace skipped).
+fn path_probe(probe: impl Fn(Oid) -> PgResult<Oid>) -> PgResult<Oid> {
+    recomputeNamespacePath()?;
+    let mtn = my_temp_namespace();
+    for i in 0..base_path_len() {
+        let namespace_id = base_path_nth(i);
+        if namespace_id == mtn {
+            continue;
+        }
+        let oid = probe(namespace_id)?;
+        if OidIsValid(oid) {
+            return Ok(oid);
+        }
+    }
+    Ok(InvalidOid)
+}
+
+pub fn OpclassnameGetOpcid(amid: Oid, opcname: &str) -> PgResult<Oid> {
+    path_probe(|nsp| syscache_seams::lookup_pg_opclass_oid_exact::call(amid, opcname, nsp))
+}
+
+pub fn OpfamilynameGetOpfid(amid: Oid, opfname: &str) -> PgResult<Oid> {
+    path_probe(|nsp| syscache_seams::lookup_pg_opfamily_oid_exact::call(amid, opfname, nsp))
+}
+
 pub struct OperCandidate {
     pub oid: Oid,
     pub args: [Oid; 2],
@@ -428,7 +454,7 @@ pub fn FuncnameGetCandidates<'mcx>(
     expand_variadic: bool,
     expand_defaults: bool,
 ) -> PgResult<mcx::PgVec<'mcx, FuncCandidate<'mcx>>> {
-    debug_assert!(nargs >= 0);
+    // nargs == -1: any arity, no variadic/default expansion (C convention).
     let (schemaname, funcname) = DeconstructQualifiedName(names)?;
 
     let namespace_id = match schemaname {
@@ -457,7 +483,7 @@ pub fn FuncnameGetCandidates<'mcx>(
         let use_defaults = cand.pronargs > nargs
             && expand_defaults
             && nargs + cand.pronargdefaults >= cand.pronargs;
-        if cand.pronargs != nargs && !variadic && !use_defaults {
+        if nargs >= 0 && cand.pronargs != nargs && !variadic && !use_defaults {
             continue;
         }
         let visible = match namespace_id {

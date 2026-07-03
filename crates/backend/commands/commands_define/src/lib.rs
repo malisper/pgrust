@@ -99,7 +99,7 @@ pub fn defGetInt64(def: &DefElem<'_>) -> PgResult<i64> {
     let Some(arg) = def.arg else { return Err(err()) };
     match arg.node_tag() {
         NodeTag::T_Integer => Ok(arg.as_integer().unwrap().ival as i64),
-        NodeTag::T_Float => int8::int8in(arg.as_float().unwrap().fval, None),
+        NodeTag::T_Float => adt_int8::int8in(arg.as_float().unwrap().fval, None),
         _ => Err(err()),
     }
 }

@@ -49,6 +49,9 @@ superuser = { path = "../../utils/misc/superuser" }
 init_small = { path = "../../utils/init/init_small" }
 rel_vocab = { path = "../../../_support/types/rel_vocab" }
 
+operatorcmds = { path = "../../commands/operatorcmds" }
+opclasscmds = { path = "../../commands/opclasscmds" }
+
 [dev-dependencies]
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
 types_dest = { path = "../../../_support/types/types_dest" }

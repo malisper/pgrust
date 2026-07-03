@@ -570,6 +570,8 @@ dependencies = [
  "datum",
  "heaptuple",
  "mcx",
+ "nbt_validate",
+ "syscache_seams",
  "types_core",
  "types_error",
  "types_pathnodes",
@@ -1674,6 +1676,12 @@ dependencies = [
 [[package]]
 name = "commands_define"
 version = "0.0.0"
+dependencies = [
+ "adt_int8",
+ "mcx",
+ "types_error",
+ "types_nodes",
+]
 
 [[package]]
 name = "commands_tablespace"
@@ -3313,6 +3321,14 @@ version = "0.0.0"
 [[package]]
 name = "index_amvalidate"
 version = "0.0.0"
+dependencies = [
+ "coerce",
+ "lsyscache",
+ "mcx",
+ "syscache_seams",
+ "types_core",
+ "types_error",
+]
 
 [[package]]
 name = "indexam"
@@ -4074,6 +4090,21 @@ dependencies = [
 [[package]]
 name = "nbt_validate"
 version = "0.0.0"
+dependencies = [
+ "adt_regproc",
+ "elog",
+ "format_type",
+ "index_amvalidate",
+ "lsyscache",
+ "mcx",
+ "syscache_seams",
+ "types_core",
+ "types_error",
+ "types_nbtree",
+ "types_relscan",
+ "types_scan",
+ "xact",
+]
 
 [[package]]
 name = "nbtree"
@@ -4887,10 +4918,69 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 [[package]]
 name = "opclasscmds"
 version = "0.0.0"
+dependencies = [
+ "aclchk",
+ "adt_acl",
+ "amapi",
+ "cache_syscache",
+ "catalog",
+ "catalog_dependency",
+ "catalog_indexing",
+ "catalog_namespace",
+ "commands_define",
+ "datum",
+ "format_type",
+ "heaptuple",
+ "lsyscache",
+ "mcx",
+ "miscinit",
+ "parse_func",
+ "parse_oper",
+ "parse_utilcmd",
+ "pg_depend",
+ "superuser",
+ "syscache_seams",
+ "table",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_nbtree",
+ "types_nodes",
+ "types_rel",
+ "types_relscan",
+ "types_tuple",
+]
 
 [[package]]
 name = "operatorcmds"
 version = "0.0.0"
+dependencies = [
+ "aclchk",
+ "adt_acl",
+ "cache_syscache",
+ "catalog_indexing",
+ "catalog_namespace",
+ "commands_define",
+ "datum",
+ "dependency_seams",
+ "elog",
+ "format_type",
+ "heaptuple",
+ "lsyscache",
+ "mcx",
+ "miscinit",
+ "parse_func",
+ "parse_oper",
+ "parse_utilcmd",
+ "pg_depend",
+ "pg_operator",
+ "superuser",
+ "table",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_rel",
+]
 
 [[package]]
 name = "origin_seams"
@@ -5050,6 +5140,7 @@ dependencies = [
  "mcx",
  "miscinit_seams",
  "parse_agg",
+ "parse_utilcmd",
  "parser_small1",
  "readfuncs",
  "syscache_seams",
@@ -5075,6 +5166,7 @@ dependencies = [
  "mcx",
  "miscinit_seams",
  "parse_func",
+ "parse_utilcmd",
  "parser_small1",
  "syscache_seams",
  "typcache",
@@ -5461,6 +5553,32 @@ dependencies = [
 [[package]]
 name = "pg_operator"
 version = "0.0.0"
+dependencies = [
+ "aclchk",
+ "adt_acl",
+ "cache_syscache",
+ "catalog",
+ "catalog_dependency",
+ "catalog_indexing",
+ "catalog_namespace",
+ "commands_define",
+ "datum",
+ "heaptuple",
+ "lsyscache",
+ "mcx",
+ "miscinit",
+ "parse_oper",
+ "pg_depend",
+ "superuser",
+ "syscache_seams",
+ "table",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_rel",
+ "types_tuple",
+ "xact",
+]
 
 [[package]]
 name = "pg_path"
@@ -7299,6 +7417,8 @@ dependencies = [
  "nodesort",
  "nodeunique",
  "nodewindowagg",
+ "opclasscmds",
+ "operatorcmds",
  "parallel",
  "parse_collate",
  "parse_expr",
@@ -8773,6 +8893,8 @@ dependencies = [
  "lsyscache",
  "mcx",
  "miscinit",
+ "opclasscmds",
+ "operatorcmds",
  "parallel_seams",
  "parse_utilcmd",
  "portalcmds",

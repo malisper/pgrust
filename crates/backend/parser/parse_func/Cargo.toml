@@ -15,6 +15,7 @@ coerce = { path = "../coerce" }
 elog = { path = "../../utils/error/elog" }
 format_type = { path = "../../utils/adt/format_type" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
+parse_utilcmd = { path = "../parse_utilcmd" }
 mbutils = { path = "../../utils/mb/mbutils" }
 mcx = { path = "../../../_support/mcx" }
 parse_agg = { path = "../parse_agg" }
