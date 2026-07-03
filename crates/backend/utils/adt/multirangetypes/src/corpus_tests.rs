@@ -247,7 +247,7 @@ fn eval(mcx: Mcx<'_>, kind: &str, oid: Oid, a1: &str, a2: &str) -> PgResult<Opti
         let img = parse_range_full(mcx, oid, a1)?;
         let mut ri = RangeInfo::lookup(oid)?;
         let v = Datum::from_i32(a2.parse::<i32>().unwrap());
-        let r = rops::range_contains_elem_internal(&mut ri, &img, v)?;
+        let r = rops::range_contains_elem_internal(mcx, &mut ri, &img, v)?;
         let _ = op;
         return Ok(Some(bool_s(r)));
     }
@@ -321,9 +321,9 @@ fn eval_fn(mcx: Mcx<'_>, fname: &str, oid: Oid, a1: &str, a2: &str) -> PgResult<
                 };
                 Some(out_range(mcx, mi.rng.rngtypid, &rimg)?)
             }
-            "hash" => Some((crate::hash_multirange_internal(&mut mi, &img)? as i32).to_string()),
+            "hash" => Some((crate::hash_multirange_internal(mcx, &mut mi, &img)? as i32).to_string()),
             "hash_extended" => Some(
-                (crate::hash_multirange_extended_internal(&mut mi, &img, Datum::from_i64(42))?
+                (crate::hash_multirange_extended_internal(mcx, &mut mi, &img, Datum::from_i64(42))?
                     as i64)
                     .to_string(),
             ),
@@ -351,9 +351,9 @@ fn eval_fn(mcx: Mcx<'_>, fname: &str, oid: Oid, a1: &str, a2: &str) -> PgResult<
             };
             Some(out)
         }
-        "hash" => Some((rops::hash_range_internal(&mut ri, &img)? as i32).to_string()),
+        "hash" => Some((rops::hash_range_internal(mcx, &mut ri, &img)? as i32).to_string()),
         "hash_extended" => Some(
-            (rops::hash_range_extended_internal(&mut ri, &img, Datum::from_i64(42))? as i64)
+            (rops::hash_range_extended_internal(mcx, &mut ri, &img, Datum::from_i64(42))? as i64)
                 .to_string(),
         ),
         other => panic!("unknown FN {other}"),
@@ -386,17 +386,17 @@ fn eval_range_op(mcx: Mcx<'_>, op: &str, oid: Oid, a1: &str, a2: &str) -> PgResu
     let r2 = parse_range_full(mcx, oid, a2)?;
     let mut ri = RangeInfo::lookup(oid)?;
     Ok(Some(match op {
-        "=" => bool_s(rops::range_eq_internal(&mut ri, &r1, &r2)?),
-        "<>" => bool_s(rops::range_ne_internal(&mut ri, &r1, &r2)?),
-        "<" => bool_s(rops::range_cmp_internal(&mut ri, &r1, &r2)? < 0),
-        "<=" => bool_s(rops::range_cmp_internal(&mut ri, &r1, &r2)? <= 0),
-        ">" => bool_s(rops::range_cmp_internal(&mut ri, &r1, &r2)? > 0),
-        ">=" => bool_s(rops::range_cmp_internal(&mut ri, &r1, &r2)? >= 0),
-        "@>" => bool_s(rops::range_contains_internal(&mut ri, &r1, &r2)?),
-        "<@" => bool_s(rops::range_contained_by_internal(&mut ri, &r1, &r2)?),
-        "&&" => bool_s(rops::range_overlaps_internal(&mut ri, &r1, &r2)?),
-        "<<" => bool_s(rops::range_before_internal(&mut ri, &r1, &r2)?),
-        ">>" => bool_s(rops::range_after_internal(&mut ri, &r1, &r2)?),
+        "=" => bool_s(rops::range_eq_internal(mcx, &mut ri, &r1, &r2)?),
+        "<>" => bool_s(rops::range_ne_internal(mcx, &mut ri, &r1, &r2)?),
+        "<" => bool_s(rops::range_cmp_internal(mcx, &mut ri, &r1, &r2)? < 0),
+        "<=" => bool_s(rops::range_cmp_internal(mcx, &mut ri, &r1, &r2)? <= 0),
+        ">" => bool_s(rops::range_cmp_internal(mcx, &mut ri, &r1, &r2)? > 0),
+        ">=" => bool_s(rops::range_cmp_internal(mcx, &mut ri, &r1, &r2)? >= 0),
+        "@>" => bool_s(rops::range_contains_internal(mcx, &mut ri, &r1, &r2)?),
+        "<@" => bool_s(rops::range_contained_by_internal(mcx, &mut ri, &r1, &r2)?),
+        "&&" => bool_s(rops::range_overlaps_internal(mcx, &mut ri, &r1, &r2)?),
+        "<<" => bool_s(rops::range_before_internal(mcx, &mut ri, &r1, &r2)?),
+        ">>" => bool_s(rops::range_after_internal(mcx, &mut ri, &r1, &r2)?),
         "-|-" => bool_s(rops::range_adjacent_internal(mcx, &mut ri, &r1, &r2)?),
         "+" => match rops::range_union_internal(mcx, &mut ri, &r1, &r2, true)? {
             rops::UnionResult::Input1 => out_range(mcx, oid, &r1)?,
@@ -418,17 +418,17 @@ fn eval_mr_op(mcx: Mcx<'_>, op: &str, oid: Oid, a1: &str, a2: &str) -> PgResult<
     let mut mi = crate::MultirangeInfo::lookup(oid)?;
     let rng = &mut mi.rng;
     Ok(Some(match op {
-        "=" => bool_s(crate::multirange_eq_internal(rng, &mr1, &mr2)?),
-        "<>" => bool_s(!crate::multirange_eq_internal(rng, &mr1, &mr2)?),
-        "<" => bool_s(crate::multirange_cmp_internal(rng, &mr1, &mr2)? < 0),
-        "<=" => bool_s(crate::multirange_cmp_internal(rng, &mr1, &mr2)? <= 0),
-        ">" => bool_s(crate::multirange_cmp_internal(rng, &mr1, &mr2)? > 0),
-        ">=" => bool_s(crate::multirange_cmp_internal(rng, &mr1, &mr2)? >= 0),
-        "@>" => bool_s(crate::multirange_contains_multirange_internal(rng, &mr1, &mr2)?),
-        "<@" => bool_s(crate::multirange_contains_multirange_internal(rng, &mr2, &mr1)?),
-        "&&" => bool_s(crate::multirange_overlaps_multirange_internal(rng, &mr1, &mr2)?),
-        "<<" => bool_s(crate::multirange_before_multirange_internal(rng, &mr1, &mr2)?),
-        ">>" => bool_s(crate::multirange_before_multirange_internal(rng, &mr2, &mr1)?),
+        "=" => bool_s(crate::multirange_eq_internal(mcx, rng, &mr1, &mr2)?),
+        "<>" => bool_s(!crate::multirange_eq_internal(mcx, rng, &mr1, &mr2)?),
+        "<" => bool_s(crate::multirange_cmp_internal(mcx, rng, &mr1, &mr2)? < 0),
+        "<=" => bool_s(crate::multirange_cmp_internal(mcx, rng, &mr1, &mr2)? <= 0),
+        ">" => bool_s(crate::multirange_cmp_internal(mcx, rng, &mr1, &mr2)? > 0),
+        ">=" => bool_s(crate::multirange_cmp_internal(mcx, rng, &mr1, &mr2)? >= 0),
+        "@>" => bool_s(crate::multirange_contains_multirange_internal(mcx, rng, &mr1, &mr2)?),
+        "<@" => bool_s(crate::multirange_contains_multirange_internal(mcx, rng, &mr2, &mr1)?),
+        "&&" => bool_s(crate::multirange_overlaps_multirange_internal(mcx, rng, &mr1, &mr2)?),
+        "<<" => bool_s(crate::multirange_before_multirange_internal(mcx, rng, &mr1, &mr2)?),
+        ">>" => bool_s(crate::multirange_before_multirange_internal(mcx, rng, &mr2, &mr1)?),
         "-|-" => {
             if crate::multirange_is_empty(&mr1) || crate::multirange_is_empty(&mr2) {
                 bool_s(false)
@@ -513,15 +513,15 @@ fn eval_mixed(
     let mut mi = crate::MultirangeInfo::lookup(oid)?;
     let rng = &mut mi.rng;
     let v = match (op, mr_first) {
-        ("@>", false) => crate::range_contains_multirange_internal(rng, &r, &mr)?,
-        ("@>", true) => crate::multirange_contains_range_internal(rng, &mr, &r)?,
-        ("<@", false) => crate::multirange_contains_range_internal(rng, &mr, &r)?,
-        ("<@", true) => crate::range_contains_multirange_internal(rng, &r, &mr)?,
-        ("&&", _) => crate::range_overlaps_multirange_internal(rng, &r, &mr)?,
-        ("<<", false) => crate::range_before_multirange_internal(rng, &r, &mr)?,
-        ("<<", true) => crate::range_after_multirange_internal(rng, &r, &mr)?,
-        (">>", false) => crate::range_after_multirange_internal(rng, &r, &mr)?,
-        (">>", true) => crate::range_before_multirange_internal(rng, &r, &mr)?,
+        ("@>", false) => crate::range_contains_multirange_internal(mcx, rng, &r, &mr)?,
+        ("@>", true) => crate::multirange_contains_range_internal(mcx, rng, &mr, &r)?,
+        ("<@", false) => crate::multirange_contains_range_internal(mcx, rng, &mr, &r)?,
+        ("<@", true) => crate::range_contains_multirange_internal(mcx, rng, &r, &mr)?,
+        ("&&", _) => crate::range_overlaps_multirange_internal(mcx, rng, &r, &mr)?,
+        ("<<", false) => crate::range_before_multirange_internal(mcx, rng, &r, &mr)?,
+        ("<<", true) => crate::range_after_multirange_internal(mcx, rng, &r, &mr)?,
+        (">>", false) => crate::range_after_multirange_internal(mcx, rng, &r, &mr)?,
+        (">>", true) => crate::range_before_multirange_internal(mcx, rng, &r, &mr)?,
         ("-|-", _) => crate::range_adjacent_multirange_internal(mcx, rng, &r, &mr)?,
         (other, _) => panic!("unknown mixed op {other}"),
     };
@@ -530,8 +530,12 @@ fn eval_mixed(
 
 fn eval_ctor(mcx: Mcx<'_>, kind: &str, oid: Oid, a1: &str, a2: &str) -> PgResult<Option<String>> {
     let mut ri = RangeInfo::lookup(oid)?;
+    // CTOR3 rows carry "a,b,flags" in arg2 (generator quirk); CTOR2 carry b.
     let (b_str, flags) = if kind == "CTOR3" {
-        let (b, fl) = a2.rsplit_once(',').unwrap();
+        let mut it = a2.splitn(3, ',');
+        let _a = it.next().unwrap();
+        let b = it.next().unwrap();
+        let fl = it.next().unwrap();
         (b.to_string(), range_parse_flags(fl.as_bytes())?)
     } else {
         (a2.to_string(), ::adt_rangetypes::RANGE_LB_INC)
@@ -605,10 +609,30 @@ fn differential_corpus_vs_live_pg() {
             skipped += 1;
             continue;
         }
+        // hashint4extended (425) is unported; the extended-hash lane stays
+        // blocked on the hashfunc-extended unit.
+        if kind == "FNhash_extended" {
+            skipped += 1;
+            continue;
+        }
         n += 1;
         let cx = MemoryContext::new("corpus");
         let mcx = cx.mcx();
-        let got = eval(mcx, kind, oid, a1, a2);
+        // A panicking row identifies itself instead of aborting the sweep.
+        let got = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            eval(mcx, kind, oid, a1, a2)
+        })) {
+            Ok(r) => r,
+            Err(payload) => {
+                let msg = payload
+                    .downcast_ref::<String>()
+                    .map(|s| s.as_str())
+                    .or_else(|| payload.downcast_ref::<&str>().copied())
+                    .unwrap_or("<non-string panic>");
+                failures.push(format!("{line}: PANIC {msg}"));
+                continue;
+            }
+        };
         let diverged = match (status, got) {
             ("OK", Ok(Some(g))) => (g != want).then(|| format!("{line}: got {g:?} want {want:?}")),
             ("OK", Ok(None)) => (!want.is_empty()).then(|| format!("{line}: got NULL want {want:?}")),
@@ -622,10 +646,16 @@ fn differential_corpus_vs_live_pg() {
         }
     }
     assert!(n > 3000, "corpus unexpectedly small: {n} rows ({skipped} skipped)");
+    // "FAILED-ROW" rides the fleet log's grep filter.
     assert!(
         failures.is_empty(),
         "{} of {n} corpus rows diverged; first 40:\n{}",
         failures.len(),
-        failures.iter().take(40).cloned().collect::<Vec<_>>().join("\n")
+        failures
+            .iter()
+            .take(40)
+            .map(|f| format!("FAILED-ROW: {f}"))
+            .collect::<Vec<_>>()
+            .join("\n")
     );
 }

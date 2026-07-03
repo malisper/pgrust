@@ -134,29 +134,31 @@ fn infinite_bounds_serialize_without_payload() {
 
 #[test]
 fn cmp_bounds_matrix() {
+    let cx = MemoryContext::new("t");
+    let mcx = cx.mcx();
     let mut ri = int4_ri(false);
     // -inf lower < finite
-    assert_eq!(range_cmp_bounds(&mut ri, &inf_bound(true), &bound(0, true, true)).unwrap(), -1);
+    assert_eq!(range_cmp_bounds(mcx, &mut ri, &inf_bound(true), &bound(0, true, true)).unwrap(), -1);
     // +inf upper > finite
-    assert_eq!(range_cmp_bounds(&mut ri, &inf_bound(false), &bound(0, true, true)).unwrap(), 1);
+    assert_eq!(range_cmp_bounds(mcx, &mut ri, &inf_bound(false), &bound(0, true, true)).unwrap(), 1);
     // equal value: exclusive lower > inclusive lower
     assert_eq!(
-        range_cmp_bounds(&mut ri, &bound(5, false, true), &bound(5, true, true)).unwrap(),
+        range_cmp_bounds(mcx, &mut ri, &bound(5, false, true), &bound(5, true, true)).unwrap(),
         1
     );
     // equal value: exclusive upper < inclusive upper
     assert_eq!(
-        range_cmp_bounds(&mut ri, &bound(5, false, false), &bound(5, true, false)).unwrap(),
+        range_cmp_bounds(mcx, &mut ri, &bound(5, false, false), &bound(5, true, false)).unwrap(),
         -1
     );
     // both inclusive equal, mixed lower/upper: equal
     assert_eq!(
-        range_cmp_bounds(&mut ri, &bound(5, true, false), &bound(5, true, true)).unwrap(),
+        range_cmp_bounds(mcx, &mut ri, &bound(5, true, false), &bound(5, true, true)).unwrap(),
         0
     );
     // both exclusive equal: lower > upper
     assert_eq!(
-        range_cmp_bounds(&mut ri, &bound(5, false, true), &bound(5, false, false)).unwrap(),
+        range_cmp_bounds(mcx, &mut ri, &bound(5, false, true), &bound(5, false, false)).unwrap(),
         1
     );
 }
@@ -231,16 +233,16 @@ fn ops_over_int4_ranges() {
     let c = mk(&mut ri, 5, 8);
     let empty = make_empty_range(mcx, &mut ri).unwrap();
 
-    assert!(crate::ops::range_overlaps_internal(&mut ri, &a, &b).unwrap());
-    assert!(!crate::ops::range_overlaps_internal(&mut ri, &a, &c).unwrap());
+    assert!(crate::ops::range_overlaps_internal(mcx, &mut ri, &a, &b).unwrap());
+    assert!(!crate::ops::range_overlaps_internal(mcx, &mut ri, &a, &c).unwrap());
     assert!(crate::ops::range_adjacent_internal(mcx, &mut ri, &a, &c).unwrap());
-    assert!(crate::ops::range_before_internal(&mut ri, &a, &c).unwrap());
-    assert!(crate::ops::range_after_internal(&mut ri, &c, &a).unwrap());
-    assert!(crate::ops::range_contains_elem_internal(&mut ri, &a, Datum::from_i32(4)).unwrap());
-    assert!(!crate::ops::range_contains_elem_internal(&mut ri, &a, Datum::from_i32(5)).unwrap());
-    assert!(!crate::ops::range_contains_elem_internal(&mut ri, &empty, Datum::from_i32(1)).unwrap());
-    assert!(crate::ops::range_eq_internal(&mut ri, &a, &a).unwrap());
-    assert!(crate::ops::range_ne_internal(&mut ri, &a, &b).unwrap());
+    assert!(crate::ops::range_before_internal(mcx, &mut ri, &a, &c).unwrap());
+    assert!(crate::ops::range_after_internal(mcx, &mut ri, &c, &a).unwrap());
+    assert!(crate::ops::range_contains_elem_internal(mcx, &mut ri, &a, Datum::from_i32(4)).unwrap());
+    assert!(!crate::ops::range_contains_elem_internal(mcx, &mut ri, &a, Datum::from_i32(5)).unwrap());
+    assert!(!crate::ops::range_contains_elem_internal(mcx, &mut ri, &empty, Datum::from_i32(1)).unwrap());
+    assert!(crate::ops::range_eq_internal(mcx, &mut ri, &a, &a).unwrap());
+    assert!(crate::ops::range_ne_internal(mcx, &mut ri, &a, &b).unwrap());
 
     // union/intersect/minus
     match crate::ops::range_union_internal(mcx, &mut ri, &a, &b, true).unwrap() {
@@ -272,9 +274,9 @@ fn ops_over_int4_ranges() {
     }
 
     // cmp: empty sorts first
-    assert_eq!(crate::ops::range_cmp_internal(&mut ri, &empty, &a).unwrap(), -1);
-    assert_eq!(crate::ops::range_cmp_internal(&mut ri, &a, &b).unwrap(), -1);
-    assert_eq!(crate::ops::range_cmp_internal(&mut ri, &a, &a).unwrap(), 0);
+    assert_eq!(crate::ops::range_cmp_internal(mcx, &mut ri, &empty, &a).unwrap(), -1);
+    assert_eq!(crate::ops::range_cmp_internal(mcx, &mut ri, &a, &b).unwrap(), -1);
+    assert_eq!(crate::ops::range_cmp_internal(mcx, &mut ri, &a, &a).unwrap(), 0);
 
     // split
     let wide = mk(&mut ri, 0, 10);

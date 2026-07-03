@@ -252,7 +252,7 @@ pub fn fc_range_contains_elem(
     let r = arg_range(fcinfo, 0, mcx)?;
     let val = fcinfo.arg(1);
     let ri = flinfo_ri(flinfo, range_type_oid(&r))?;
-    Ok(Datum::from_bool(ops::range_contains_elem_internal(ri, &r, val)?))
+    Ok(Datum::from_bool(ops::range_contains_elem_internal(mcx, ri, &r, val)?))
 }
 
 pub fn fc_elem_contained_by_range(
@@ -263,7 +263,7 @@ pub fn fc_elem_contained_by_range(
     let val = fcinfo.arg(0);
     let r = arg_range(fcinfo, 1, mcx)?;
     let ri = flinfo_ri(flinfo, range_type_oid(&r))?;
-    Ok(Datum::from_bool(ops::range_contains_elem_internal(ri, &r, val)?))
+    Ok(Datum::from_bool(ops::range_contains_elem_internal(mcx, ri, &r, val)?))
 }
 
 macro_rules! fc_rr_bool {
@@ -273,7 +273,7 @@ macro_rules! fc_rr_bool {
             let r1 = arg_range(fcinfo, 0, mcx)?;
             let r2 = arg_range(fcinfo, 1, mcx)?;
             let ri = flinfo_ri(flinfo, range_type_oid(&r1))?;
-            Ok(Datum::from_bool($f(ri, &r1, &r2)?))
+            Ok(Datum::from_bool($f(mcx, ri, &r1, &r2)?))
         }
     )*};
 }
@@ -379,7 +379,7 @@ pub fn fc_range_cmp(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRes
     let r1 = arg_range(fcinfo, 0, mcx)?;
     let r2 = arg_range(fcinfo, 1, mcx)?;
     let ri = flinfo_ri(flinfo, range_type_oid(&r1))?;
-    Ok(Datum::from_i32(ops::range_cmp_internal(ri, &r1, &r2)?))
+    Ok(Datum::from_i32(ops::range_cmp_internal(mcx, ri, &r1, &r2)?))
 }
 
 macro_rules! fc_cmp_op {
@@ -389,7 +389,7 @@ macro_rules! fc_cmp_op {
             let r1 = arg_range(fcinfo, 0, mcx)?;
             let r2 = arg_range(fcinfo, 1, mcx)?;
             let ri = flinfo_ri(flinfo, range_type_oid(&r1))?;
-            Ok(Datum::from_bool(ops::range_cmp_internal(ri, &r1, &r2)? $op 0))
+            Ok(Datum::from_bool(ops::range_cmp_internal(mcx, ri, &r1, &r2)? $op 0))
         }
     )*};
 }
@@ -405,7 +405,7 @@ pub fn fc_hash_range(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRe
     let mcx = fcinfo.result_mcx();
     let r = arg_range(fcinfo, 0, mcx)?;
     let ri = flinfo_ri(flinfo, range_type_oid(&r))?;
-    Ok(Datum::from_i32(ops::hash_range_internal(ri, &r)? as i32))
+    Ok(Datum::from_i32(ops::hash_range_internal(mcx, ri, &r)? as i32))
 }
 
 pub fn fc_hash_range_extended(
@@ -416,7 +416,7 @@ pub fn fc_hash_range_extended(
     let r = arg_range(fcinfo, 0, mcx)?;
     let seed = fcinfo.arg(1);
     let ri = flinfo_ri(flinfo, range_type_oid(&r))?;
-    Ok(Datum::from_u64(ops::hash_range_extended_internal(ri, &r, seed)?))
+    Ok(Datum::from_u64(ops::hash_range_extended_internal(mcx, ri, &r, seed)?))
 }
 
 // The canonical pg_proc entry points (make_range dispatches to the adjusters

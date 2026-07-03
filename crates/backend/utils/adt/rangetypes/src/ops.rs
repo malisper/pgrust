@@ -3,7 +3,7 @@ use ::mcx::{Mcx, PgVec};
 use ::typcache::{TYPECACHE_HASH_EXTENDED_PROC_FINFO, TYPECACHE_HASH_PROC_FINFO};
 use ::types_core::{InvalidOid, Oid};
 use ::types_error::{PgError, PgResult, ERRCODE_DATA_EXCEPTION, ERRCODE_UNDEFINED_FUNCTION};
-use ::types_fmgr::{function_call1_coll, function_call2_coll, FmgrInfo};
+use ::types_fmgr::{function_call1_coll_in, function_call2_coll_in, FmgrInfo};
 
 use crate::{
     cmp_elem_vals, make_empty_range, make_range, range_cmp_bounds, range_deserialize,
@@ -18,7 +18,7 @@ fn check_same_type(r1: &[u8], r2: &[u8]) -> PgResult<()> {
     Ok(())
 }
 
-pub fn range_eq_internal(ri: &mut RangeInfo, r1: &[u8], r2: &[u8]) -> PgResult<bool> {
+pub fn range_eq_internal(mcx: Mcx<'_>, ri: &mut RangeInfo, r1: &[u8], r2: &[u8]) -> PgResult<bool> {
     check_same_type(r1, r2)?;
     let (lower1, upper1, empty1) = range_deserialize(&ri.elem, r1);
     let (lower2, upper2, empty2) = range_deserialize(&ri.elem, r2);
@@ -28,20 +28,20 @@ pub fn range_eq_internal(ri: &mut RangeInfo, r1: &[u8], r2: &[u8]) -> PgResult<b
     if empty1 != empty2 {
         return Ok(false);
     }
-    if range_cmp_bounds(ri, &lower1, &lower2)? != 0 {
+    if range_cmp_bounds(mcx, ri, &lower1, &lower2)? != 0 {
         return Ok(false);
     }
-    if range_cmp_bounds(ri, &upper1, &upper2)? != 0 {
+    if range_cmp_bounds(mcx, ri, &upper1, &upper2)? != 0 {
         return Ok(false);
     }
     Ok(true)
 }
 
-pub fn range_ne_internal(ri: &mut RangeInfo, r1: &[u8], r2: &[u8]) -> PgResult<bool> {
-    Ok(!range_eq_internal(ri, r1, r2)?)
+pub fn range_ne_internal(mcx: Mcx<'_>, ri: &mut RangeInfo, r1: &[u8], r2: &[u8]) -> PgResult<bool> {
+    Ok(!range_eq_internal(mcx, ri, r1, r2)?)
 }
 
-pub fn range_contains_internal(ri: &mut RangeInfo, r1: &[u8], r2: &[u8]) -> PgResult<bool> {
+pub fn range_contains_internal(mcx: Mcx<'_>, ri: &mut RangeInfo, r1: &[u8], r2: &[u8]) -> PgResult<bool> {
     check_same_type(r1, r2)?;
     let (lower1, upper1, empty1) = range_deserialize(&ri.elem, r1);
     let (lower2, upper2, empty2) = range_deserialize(&ri.elem, r2);
@@ -51,26 +51,31 @@ pub fn range_contains_internal(ri: &mut RangeInfo, r1: &[u8], r2: &[u8]) -> PgRe
     if empty1 {
         return Ok(false);
     }
-    if range_cmp_bounds(ri, &lower1, &lower2)? > 0 {
+    if range_cmp_bounds(mcx, ri, &lower1, &lower2)? > 0 {
         return Ok(false);
     }
-    if range_cmp_bounds(ri, &upper1, &upper2)? < 0 {
+    if range_cmp_bounds(mcx, ri, &upper1, &upper2)? < 0 {
         return Ok(false);
     }
     Ok(true)
 }
 
-pub fn range_contained_by_internal(ri: &mut RangeInfo, r1: &[u8], r2: &[u8]) -> PgResult<bool> {
-    range_contains_internal(ri, r2, r1)
+pub fn range_contained_by_internal(mcx: Mcx<'_>, ri: &mut RangeInfo, r1: &[u8], r2: &[u8]) -> PgResult<bool> {
+    range_contains_internal(mcx, ri, r2, r1)
 }
 
-pub fn range_contains_elem_internal(ri: &mut RangeInfo, r: &[u8], val: Datum) -> PgResult<bool> {
+pub fn range_contains_elem_internal(
+    mcx: Mcx<'_>,
+    ri: &mut RangeInfo,
+    r: &[u8],
+    val: Datum,
+) -> PgResult<bool> {
     let (lower, upper, empty) = range_deserialize(&ri.elem, r);
     if empty {
         return Ok(false);
     }
     if !lower.infinite {
-        let cmp = cmp_elem_vals(ri, lower.val, val)?;
+        let cmp = cmp_elem_vals(mcx, ri, lower.val, val)?;
         if cmp > 0 {
             return Ok(false);
         }
@@ -79,7 +84,7 @@ pub fn range_contains_elem_internal(ri: &mut RangeInfo, r: &[u8], val: Datum) ->
         }
     }
     if !upper.infinite {
-        let cmp = cmp_elem_vals(ri, upper.val, val)?;
+        let cmp = cmp_elem_vals(mcx, ri, upper.val, val)?;
         if cmp < 0 {
             return Ok(false);
         }
@@ -90,24 +95,24 @@ pub fn range_contains_elem_internal(ri: &mut RangeInfo, r: &[u8], val: Datum) ->
     Ok(true)
 }
 
-pub fn range_before_internal(ri: &mut RangeInfo, r1: &[u8], r2: &[u8]) -> PgResult<bool> {
+pub fn range_before_internal(mcx: Mcx<'_>, ri: &mut RangeInfo, r1: &[u8], r2: &[u8]) -> PgResult<bool> {
     check_same_type(r1, r2)?;
     let (_lower1, upper1, empty1) = range_deserialize(&ri.elem, r1);
     let (lower2, _upper2, empty2) = range_deserialize(&ri.elem, r2);
     if empty1 || empty2 {
         return Ok(false);
     }
-    Ok(range_cmp_bounds(ri, &upper1, &lower2)? < 0)
+    Ok(range_cmp_bounds(mcx, ri, &upper1, &lower2)? < 0)
 }
 
-pub fn range_after_internal(ri: &mut RangeInfo, r1: &[u8], r2: &[u8]) -> PgResult<bool> {
+pub fn range_after_internal(mcx: Mcx<'_>, ri: &mut RangeInfo, r1: &[u8], r2: &[u8]) -> PgResult<bool> {
     check_same_type(r1, r2)?;
     let (lower1, _upper1, empty1) = range_deserialize(&ri.elem, r1);
     let (_lower2, upper2, empty2) = range_deserialize(&ri.elem, r2);
     if empty1 || empty2 {
         return Ok(false);
     }
-    Ok(range_cmp_bounds(ri, &lower1, &upper2)? > 0)
+    Ok(range_cmp_bounds(mcx, ri, &lower1, &upper2)? > 0)
 }
 
 /// bounds_adjacent (rangetypes.c): A an upper bound, B a lower bound.
@@ -118,7 +123,7 @@ pub fn bounds_adjacent(
     mut bound_b: RangeBound,
 ) -> PgResult<bool> {
     debug_assert!(!bound_a.lower && bound_b.lower);
-    let cmp = range_cmp_bound_values(ri, &bound_a, &bound_b)?;
+    let cmp = range_cmp_bound_values(mcx, ri, &bound_a, &bound_b)?;
     if cmp < 0 {
         if ri.canonical_oid == InvalidOid {
             return Ok(false);
@@ -152,42 +157,42 @@ pub fn range_adjacent_internal(
     Ok(bounds_adjacent(mcx, ri, upper1, lower2)? || bounds_adjacent(mcx, ri, upper2, lower1)?)
 }
 
-pub fn range_overlaps_internal(ri: &mut RangeInfo, r1: &[u8], r2: &[u8]) -> PgResult<bool> {
+pub fn range_overlaps_internal(mcx: Mcx<'_>, ri: &mut RangeInfo, r1: &[u8], r2: &[u8]) -> PgResult<bool> {
     check_same_type(r1, r2)?;
     let (lower1, upper1, empty1) = range_deserialize(&ri.elem, r1);
     let (lower2, upper2, empty2) = range_deserialize(&ri.elem, r2);
     if empty1 || empty2 {
         return Ok(false);
     }
-    if range_cmp_bounds(ri, &lower1, &lower2)? >= 0 && range_cmp_bounds(ri, &lower1, &upper2)? <= 0
+    if range_cmp_bounds(mcx, ri, &lower1, &lower2)? >= 0 && range_cmp_bounds(mcx, ri, &lower1, &upper2)? <= 0
     {
         return Ok(true);
     }
-    if range_cmp_bounds(ri, &lower2, &lower1)? >= 0 && range_cmp_bounds(ri, &lower2, &upper1)? <= 0
+    if range_cmp_bounds(mcx, ri, &lower2, &lower1)? >= 0 && range_cmp_bounds(mcx, ri, &lower2, &upper1)? <= 0
     {
         return Ok(true);
     }
     Ok(false)
 }
 
-pub fn range_overleft_internal(ri: &mut RangeInfo, r1: &[u8], r2: &[u8]) -> PgResult<bool> {
+pub fn range_overleft_internal(mcx: Mcx<'_>, ri: &mut RangeInfo, r1: &[u8], r2: &[u8]) -> PgResult<bool> {
     check_same_type(r1, r2)?;
     let (_l1, upper1, empty1) = range_deserialize(&ri.elem, r1);
     let (_l2, upper2, empty2) = range_deserialize(&ri.elem, r2);
     if empty1 || empty2 {
         return Ok(false);
     }
-    Ok(range_cmp_bounds(ri, &upper1, &upper2)? <= 0)
+    Ok(range_cmp_bounds(mcx, ri, &upper1, &upper2)? <= 0)
 }
 
-pub fn range_overright_internal(ri: &mut RangeInfo, r1: &[u8], r2: &[u8]) -> PgResult<bool> {
+pub fn range_overright_internal(mcx: Mcx<'_>, ri: &mut RangeInfo, r1: &[u8], r2: &[u8]) -> PgResult<bool> {
     check_same_type(r1, r2)?;
     let (lower1, _u1, empty1) = range_deserialize(&ri.elem, r1);
     let (lower2, _u2, empty2) = range_deserialize(&ri.elem, r2);
     if empty1 || empty2 {
         return Ok(false);
     }
-    Ok(range_cmp_bounds(ri, &lower1, &lower2)? >= 0)
+    Ok(range_cmp_bounds(mcx, ri, &lower1, &lower2)? >= 0)
 }
 
 #[cold]
@@ -218,10 +223,10 @@ pub fn range_minus_internal<'m>(
         return Ok(MinusResult::Input1);
     }
 
-    let cmp_l1l2 = range_cmp_bounds(ri, &lower1, &lower2)?;
-    let cmp_l1u2 = range_cmp_bounds(ri, &lower1, &upper2)?;
-    let cmp_u1l2 = range_cmp_bounds(ri, &upper1, &lower2)?;
-    let cmp_u1u2 = range_cmp_bounds(ri, &upper1, &upper2)?;
+    let cmp_l1l2 = range_cmp_bounds(mcx, ri, &lower1, &lower2)?;
+    let cmp_l1u2 = range_cmp_bounds(mcx, ri, &lower1, &upper2)?;
+    let cmp_u1l2 = range_cmp_bounds(mcx, ri, &upper1, &lower2)?;
+    let cmp_u1u2 = range_cmp_bounds(mcx, ri, &upper1, &upper2)?;
 
     if cmp_l1l2 < 0 && cmp_u1u2 > 0 {
         return Err(range_minus_not_contiguous());
@@ -291,16 +296,16 @@ pub fn range_union_internal<'m>(
     }
 
     if strict
-        && !range_overlaps_internal(ri, r1, r2)?
+        && !range_overlaps_internal(mcx, ri, r1, r2)?
         && !range_adjacent_internal(mcx, ri, r1, r2)?
     {
         return Err(range_union_not_contiguous());
     }
 
     let mut result_lower =
-        if range_cmp_bounds(ri, &lower1, &lower2)? < 0 { lower1 } else { lower2 };
+        if range_cmp_bounds(mcx, ri, &lower1, &lower2)? < 0 { lower1 } else { lower2 };
     let mut result_upper =
-        if range_cmp_bounds(ri, &upper1, &upper2)? > 0 { upper1 } else { upper2 };
+        if range_cmp_bounds(mcx, ri, &upper1, &upper2)? > 0 { upper1 } else { upper2 };
 
     Ok(UnionResult::New(
         make_range(mcx, ri, &mut result_lower, &mut result_upper, false, None)?
@@ -317,14 +322,14 @@ pub fn range_intersect_internal<'m>(
     let (lower1, upper1, empty1) = range_deserialize(&ri.elem, r1);
     let (lower2, upper2, empty2) = range_deserialize(&ri.elem, r2);
 
-    if empty1 || empty2 || !range_overlaps_internal(ri, r1, r2)? {
+    if empty1 || empty2 || !range_overlaps_internal(mcx, ri, r1, r2)? {
         return make_empty_range(mcx, ri);
     }
 
     let mut result_lower =
-        if range_cmp_bounds(ri, &lower1, &lower2)? >= 0 { lower1 } else { lower2 };
+        if range_cmp_bounds(mcx, ri, &lower1, &lower2)? >= 0 { lower1 } else { lower2 };
     let mut result_upper =
-        if range_cmp_bounds(ri, &upper1, &upper2)? <= 0 { upper1 } else { upper2 };
+        if range_cmp_bounds(mcx, ri, &upper1, &upper2)? <= 0 { upper1 } else { upper2 };
 
     Ok(make_range(mcx, ri, &mut result_lower, &mut result_upper, false, None)?
         .expect("hard error path returns Some"))
@@ -341,7 +346,7 @@ pub fn range_split_internal<'m>(
     let (mut lower1, mut upper1, _e1) = range_deserialize(&ri.elem, r1);
     let (mut lower2, mut upper2, _e2) = range_deserialize(&ri.elem, r2);
 
-    if range_cmp_bounds(ri, &lower1, &lower2)? < 0 && range_cmp_bounds(ri, &upper1, &upper2)? > 0 {
+    if range_cmp_bounds(mcx, ri, &lower1, &lower2)? < 0 && range_cmp_bounds(mcx, ri, &upper1, &upper2)? > 0 {
         lower2.inclusive = !lower2.inclusive;
         lower2.lower = false;
         upper2.inclusive = !upper2.inclusive;
@@ -356,7 +361,7 @@ pub fn range_split_internal<'m>(
 }
 
 /// range_cmp core (btree comparator; empties sort first).
-pub fn range_cmp_internal(ri: &mut RangeInfo, r1: &[u8], r2: &[u8]) -> PgResult<i32> {
+pub fn range_cmp_internal(mcx: Mcx<'_>, ri: &mut RangeInfo, r1: &[u8], r2: &[u8]) -> PgResult<i32> {
     check_same_type(r1, r2)?;
     let (lower1, upper1, empty1) = range_deserialize(&ri.elem, r1);
     let (lower2, upper2, empty2) = range_deserialize(&ri.elem, r2);
@@ -367,9 +372,9 @@ pub fn range_cmp_internal(ri: &mut RangeInfo, r1: &[u8], r2: &[u8]) -> PgResult<
     } else if empty2 {
         Ok(1)
     } else {
-        let mut cmp = range_cmp_bounds(ri, &lower1, &lower2)?;
+        let mut cmp = range_cmp_bounds(mcx, ri, &lower1, &lower2)?;
         if cmp == 0 {
-            cmp = range_cmp_bounds(ri, &upper1, &upper2)?;
+            cmp = range_cmp_bounds(mcx, ri, &upper1, &upper2)?;
         }
         Ok(cmp)
     }
@@ -411,19 +416,19 @@ pub fn elem_hash_extended_finfo(ri: &mut RangeInfo) -> PgResult<&mut FmgrInfo> {
 }
 
 /// hash_range (rangetypes.c).
-pub fn hash_range_internal(ri: &mut RangeInfo, r: &[u8]) -> PgResult<u32> {
+pub fn hash_range_internal(mcx: Mcx<'_>, ri: &mut RangeInfo, r: &[u8]) -> PgResult<u32> {
     let (lower, upper, _empty) = range_deserialize(&ri.elem, r);
     let flags = range_get_flags(r);
     let collation = ri.collation;
     elem_hash_finfo(ri)?;
 
     let lower_hash = if crate::range_has_lbound(flags) {
-        function_call1_coll(ri.elem_hash.as_mut().unwrap(), collation, lower.val)?.as_u32()
+        function_call1_coll_in(ri.elem_hash.as_mut().unwrap(), collation, mcx, lower.val)?.as_u32()
     } else {
         0
     };
     let upper_hash = if crate::range_has_ubound(flags) {
-        function_call1_coll(ri.elem_hash.as_mut().unwrap(), collation, upper.val)?.as_u32()
+        function_call1_coll_in(ri.elem_hash.as_mut().unwrap(), collation, mcx, upper.val)?.as_u32()
     } else {
         0
     };
@@ -436,20 +441,25 @@ pub fn hash_range_internal(ri: &mut RangeInfo, r: &[u8]) -> PgResult<u32> {
 }
 
 /// hash_range_extended (rangetypes.c).
-pub fn hash_range_extended_internal(ri: &mut RangeInfo, r: &[u8], seed: Datum) -> PgResult<u64> {
+pub fn hash_range_extended_internal(
+    mcx: Mcx<'_>,
+    ri: &mut RangeInfo,
+    r: &[u8],
+    seed: Datum,
+) -> PgResult<u64> {
     let (lower, upper, _empty) = range_deserialize(&ri.elem, r);
     let flags = range_get_flags(r);
     let collation = ri.collation;
     elem_hash_extended_finfo(ri)?;
 
     let lower_hash = if crate::range_has_lbound(flags) {
-        function_call2_coll(ri.elem_hash_extended.as_mut().unwrap(), collation, lower.val, seed)?
+        function_call2_coll_in(ri.elem_hash_extended.as_mut().unwrap(), collation, mcx, lower.val, seed)?
             .as_u64()
     } else {
         0
     };
     let upper_hash = if crate::range_has_ubound(flags) {
-        function_call2_coll(ri.elem_hash_extended.as_mut().unwrap(), collation, upper.val, seed)?
+        function_call2_coll_in(ri.elem_hash_extended.as_mut().unwrap(), collation, mcx, upper.val, seed)?
             .as_u64()
     } else {
         0
