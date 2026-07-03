@@ -402,6 +402,8 @@ fn fixture_rel<'mcx>(mcx: Mcx<'mcx>, oid: Oid) -> Relation<'mcx> {
                     indisready: false,
                     indkey,
                     has_indpred: false,
+        indexprs_src: None,
+        indpred_src: None,
                 }),
                 &[26, 23],
             );

@@ -559,6 +559,8 @@ fn install_scan_fixtures() {
                 indisvalid: true,
                 indisreplident: false,
                 has_indpred: false,
+        indexprs_src: None,
+        indpred_src: None,
             });
         }
         Ok(v)
@@ -804,6 +806,8 @@ fn make_index_rel<'mcx>(mcx: Mcx<'mcx>) -> types_rel::Relation<'mcx> {
         indisready: true,
         indkey,
         has_indpred: false,
+        indexprs_src: None,
+        indpred_src: None,
     });
     data.rd_opfamily.push(INT4_BTREE_FAM);
     data.rd_opcintype.push(23);

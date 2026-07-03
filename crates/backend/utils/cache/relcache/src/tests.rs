@@ -36,6 +36,8 @@ struct FakeIndexRow {
     indisvalid: bool,
     indisreplident: bool,
     has_indpred: bool,
+        indexprs_src: None,
+        indpred_src: None,
 }
 
 fn fake_index_scan(
@@ -175,6 +177,8 @@ fn fake_index_info(
             indisready: true,
             indkey,
             has_indpred: false,
+        indexprs_src: None,
+        indpred_src: None,
         },
         opcintype: PgVec::new_in(mcx),
         opfamily: PgVec::new_in(mcx),
@@ -610,6 +614,8 @@ fn idxrow(indexrelid: Oid) -> FakeIndexRow {
         indisvalid: true,
         indisreplident: false,
         has_indpred: false,
+        indexprs_src: None,
+        indpred_src: None,
     }
 }
 
