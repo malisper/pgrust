@@ -6,13 +6,16 @@
 use ::datum::Varlena;
 use ::mcx::{Mcx, PgVec};
 use ::numeric::{
-    int64_to_numeric, make_result, mul_var, numeric_in, numeric_int4, numeric_out_sci, power_var,
-    Num, NumericImage, NumericVar, NUMERIC_NAN, NUMERIC_NINF, NUMERIC_PINF,
+    int64_to_numeric, make_result, make_result_into, mul_var, numeric_in, numeric_int4,
+    numeric_out_into, numeric_out_sci, numeric_overflow_error, power_var, Num, NumericImage,
+    NumericVar, NUMERIC_NAN, NUMERIC_NINF, NUMERIC_PINF,
 };
-use ::types_core::InvalidOid;
 use ::types_error::PgResult;
 
-use crate::num::{fill_str, fmt_f, fmt_f0, fmt_plus_e, int_to_roman, num_processor};
+use crate::num::{
+    fill_str, fmt_f, fmt_f0, fmt_plus_e, int_to_roman, num_processor_from_char,
+    num_processor_to_char,
+};
 use crate::tables::*;
 
 const VARHDRSZ: usize = ::datum::varlena::VARHDRSZ;
@@ -30,29 +33,16 @@ fn make_numeric_typmod(precision: i32, scale: i32) -> i32 {
     ((precision << 16) | (scale & 0x7ff)) + VARHDRSZ as i32
 }
 
-// Retained per-call buffers (numstr/inout); C's equivalents are bump pallocs.
+// Retained render scratch (C's per-call pallocs are bump-freed wholesale);
+// borrowed only inside one to_char call, never across a re-entry point.
+struct ToCharScratch {
+    img: NumericImage,
+    digits: Vec<u8>,
+}
+
 std::thread_local! {
-    static NUM_SCRATCH: std::cell::RefCell<Vec<Vec<u8>>> =
-        const { std::cell::RefCell::new(Vec::new()) };
-}
-
-fn scratch_take() -> Vec<u8> {
-    NUM_SCRATCH
-        .with(|s| s.borrow_mut().pop())
-        .map(|mut v| {
-            v.clear();
-            v
-        })
-        .unwrap_or_default()
-}
-
-fn scratch_put(v: Vec<u8>) {
-    NUM_SCRATCH.with(|s| {
-        let mut p = s.borrow_mut();
-        if p.len() < 4 {
-            p.push(v);
-        }
-    });
+    static TOCHAR_SCRATCH: std::cell::RefCell<Option<ToCharScratch>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 type Fmt = std::rc::Rc<[FormatNode]>;
@@ -70,35 +60,43 @@ fn num_cache(len: usize, fmt: &[u8]) -> PgResult<(Fmt, NUMDesc)> {
     }
 }
 
-fn num_tochar_finish(
+// C's NUM_TOCHAR_prepare/finish: one zeroed image sized (len *
+// NUM_MAX_ITEM_SIZ) + 1 + VARHDRSZ, NUM_processor writes the payload in place.
+fn num_tochar_finish<'mcx>(
+    mcx: Mcx<'mcx>,
     format: &[FormatNode],
     num: &mut NUMDesc,
-    numstr: Vec<u8>,
+    numstr: &[u8],
     out_pre_spaces: i32,
     sign: i32,
     fmt_len: usize,
-) -> PgResult<Vec<u8>> {
-    // C pallocs (unzeroed) and relies on strcpy NUL-termination; the writers
-    // resize on demand, so reserve-only is the same bytes without the memset.
-    let mut inout = scratch_take();
-    inout.reserve(fmt_len * NUM_MAX_ITEM_SIZ + 1);
-    let processed = num_processor(
+) -> PgResult<Varlena<'mcx>> {
+    let size = VARHDRSZ + fmt_len * NUM_MAX_ITEM_SIZ + 1;
+    let mut image: PgVec<'mcx, u8> = ::mcx::vec_with_capacity_in(mcx, size)?;
+    image.resize(size, 0);
+    let n = num_processor_to_char(
         format,
         num,
-        inout,
+        &mut image[VARHDRSZ..],
         numstr,
-        0,
         out_pre_spaces,
         sign,
-        true,
-        InvalidOid,
     )?;
-    scratch_put(processed.number);
-    Ok(processed.out)
+    image.truncate(VARHDRSZ + n);
+    Ok(Varlena::from_image(image))
 }
 
 fn too_big(len: usize) -> bool {
     len == 0 || len >= (i32::MAX as usize - 4) / NUM_MAX_ITEM_SIZ
+}
+
+#[cold]
+#[inline(never)]
+fn bigint_out_of_range() -> Box<::types_error::PgError> {
+    Box::new(
+        ::types_error::PgError::error("bigint out of range")
+            .with_sqlstate(::types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+    )
 }
 
 fn numeric_out_sci_str(value: Num<'_>, scale: i32) -> Vec<u8> {
@@ -141,6 +139,31 @@ fn numericvar_to_int4_opt(value: Num<'_>) -> i32 {
     }
 }
 
+// C: numeric_out(numeric_round(val, post)) — make_result normalizes a
+// rounded-to-zero negative to canonical "0" (get_str_from_var alone keeps "-0").
+fn render_var_into(x: &NumericVar, sc: &mut ToCharScratch) -> PgResult<bool> {
+    if let Some(s) = var_special_orgnum(x.sign) {
+        sc.digits.extend_from_slice(s);
+        sc.digits.push(0);
+        return Ok(true);
+    }
+    if !make_result_into(x.view(), &mut sc.img) {
+        return Err(numeric_overflow_error().into());
+    }
+    numeric_out_into(sc.img.num(), &mut sc.digits);
+    sc.digits.push(0);
+    Ok(false)
+}
+
+// Input and both outputs are NUL-terminated (C's sign-strip by pointer bump).
+fn split_sign(digits: &[u8]) -> (&[u8], i32) {
+    if digits.first() == Some(&b'-') {
+        (&digits[1..], b'-' as i32)
+    } else {
+        (digits, b'+' as i32)
+    }
+}
+
 pub fn numeric_to_char<'mcx>(
     mcx: Mcx<'mcx>,
     value: Num<'_>,
@@ -152,14 +175,14 @@ pub fn numeric_to_char<'mcx>(
     }
     let (format, mut num) = num_cache(len, fmt)?;
 
-    let mut out_pre_spaces = 0i32;
-    let mut sign = 0i32;
-    let numstr: Vec<u8>;
-
     if num.is_roman() {
-        numstr = int_to_roman(numericvar_to_int4_opt(value));
-    } else if num.is_eeee() {
+        let mut numstr = int_to_roman(numericvar_to_int4_opt(value));
+        numstr.push(0);
+        return num_tochar_finish(mcx, &format, &mut num, &numstr, 0, 0, len);
+    }
+    if num.is_eeee() {
         let orgnum = numeric_out_sci_str(value, num.post);
+        let mut numstr: Vec<u8>;
         if orgnum == b"NaN" || orgnum == b"Infinity" || orgnum == b"-Infinity" {
             let mut ns = fill_str(b'#', (num.pre + num.post + 6) as usize);
             ns[0] = b' ';
@@ -169,19 +192,32 @@ pub fn numeric_to_char<'mcx>(
             }
             numstr = ns;
         } else if orgnum.first() != Some(&b'-') {
-            let mut ns = Vec::with_capacity(orgnum.len() + 1);
+            let mut ns = Vec::with_capacity(orgnum.len() + 2);
             ns.push(b' ');
             ns.extend_from_slice(&orgnum);
             numstr = ns;
         } else {
             numstr = orgnum;
         }
-    } else {
-        if num.is_multi() {
-            num.pre += num.multi;
-        }
-        let orgnum: Vec<u8> = if value.is_special() {
-            special_orgnum(value).unwrap().to_vec()
+        numstr.push(0);
+        return num_tochar_finish(mcx, &format, &mut num, &numstr, 0, 0, len);
+    }
+
+    if num.is_multi() {
+        num.pre += num.multi;
+    }
+    TOCHAR_SCRATCH.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        let sc = slot.get_or_insert_with(|| ToCharScratch {
+            img: NumericImage::empty(),
+            digits: Vec::new(),
+        });
+        sc.digits.clear();
+
+        let special = if let Some(s) = special_orgnum(value) {
+            sc.digits.extend_from_slice(s);
+            sc.digits.push(0);
+            true
         } else if num.is_multi() {
             let ten = int64_to_numeric(10);
             let exp = int64_to_numeric(num.multi as i64);
@@ -191,42 +227,40 @@ pub fn numeric_to_char<'mcx>(
             let mut prod = NumericVar::new();
             mul_var(value.view(), xpow.view(), &mut prod, rscale);
             prod.round(num.post);
-            render_var(&prod)?
+            render_var_into(&prod, sc)?
         } else {
             let mut x = NumericVar::from_view(value.view());
             x.round(num.post);
-            render_var(&x)?
+            render_var_into(&x, sc)?
         };
 
-        let (sb, sgn) = strip_sign(orgnum);
-        sign = sgn;
-        let numstr_pre_len = pre_len(&sb);
-        numstr = if numstr_pre_len < num.pre {
-            out_pre_spaces = num.pre - numstr_pre_len;
-            sb
-        } else if numstr_pre_len > num.pre {
-            hash_fill(&num)
+        let (stripped, sign) = split_sign(&sc.digits);
+        // The dot sits num.post + 1 from the end (round pinned dscale, and
+        // get_str_from_var emits exactly dscale decimals); specials carry no
+        // dot — C's strchr/strlen without the scan.
+        let strlen = stripped.len() as i32 - 1;
+        let numstr_pre_len = if !special && num.post > 0 {
+            strlen - num.post - 1
         } else {
-            sb
+            strlen
         };
-    }
+        debug_assert_eq!(numstr_pre_len, pre_len(stripped));
+        let hf;
+        let (numstr, out_pre_spaces): (&[u8], i32) = if numstr_pre_len < num.pre {
+            (stripped, num.pre - numstr_pre_len)
+        } else if numstr_pre_len > num.pre {
+            hf = {
+                let mut v = hash_fill(&num);
+                v.push(0);
+                v
+            };
+            (&hf, 0)
+        } else {
+            (stripped, 0)
+        };
 
-    let out = num_tochar_finish(&format, &mut num, numstr, out_pre_spaces, sign, len)?;
-    let res = text_result(mcx, &out);
-    scratch_put(out);
-    res
-}
-
-// C: numeric_out(numeric_round(val, post)) — make_result normalizes a
-// rounded-to-zero negative to canonical "0" (get_str_from_var alone keeps "-0").
-fn render_var(x: &NumericVar) -> PgResult<Vec<u8>> {
-    if let Some(s) = var_special_orgnum(x.sign) {
-        return Ok(s.to_vec());
-    }
-    let img = make_result(x.view())?;
-    let mut buf = scratch_take();
-    ::numeric::numeric_out_into(img.num(), &mut buf);
-    Ok(buf)
+        num_tochar_finish(mcx, &format, &mut num, numstr, out_pre_spaces, sign, len)
+    })
 }
 
 fn strip_sign(mut orgnum: Vec<u8>) -> (Vec<u8>, i32) {
@@ -238,8 +272,9 @@ fn strip_sign(mut orgnum: Vec<u8>) -> (Vec<u8>, i32) {
     }
 }
 
+// C: strchr('.') else strlen — sb may carry a trailing NUL.
 fn pre_len(sb: &[u8]) -> i32 {
-    match sb.iter().position(|&c| c == b'.') {
+    match sb.iter().position(|&c| c == b'.' || c == 0) {
         Some(p) => p as i32,
         None => sb.len() as i32,
     }
@@ -262,7 +297,7 @@ pub fn int4_to_char<'mcx>(mcx: Mcx<'mcx>, value: i32, fmt: &[u8]) -> PgResult<Va
 
     let mut out_pre_spaces = 0i32;
     let mut sign = 0i32;
-    let numstr: Vec<u8>;
+    let mut numstr: Vec<u8>;
 
     if num.is_roman() {
         numstr = int_to_roman(value);
@@ -289,18 +324,15 @@ pub fn int4_to_char<'mcx>(mcx: Mcx<'mcx>, value: i32, fmt: &[u8]) -> PgResult<Va
         }
         let pre = orgnum.len();
         let padded = pad_post(orgnum, pre, &num);
-        let (np, ns) = adjust_pre(padded, pre as i32, &num);
+        let (np, overflowed) = adjust_pre(pre as i32, &num);
         out_pre_spaces = np;
-        let out = num_tochar_finish(&format, &mut num, ns, out_pre_spaces, sign, len)?;
-        let res = text_result(mcx, &out);
-        scratch_put(out);
-        return res;
+        let mut ns = if overflowed { hash_fill(&num) } else { padded };
+        ns.push(0);
+        return num_tochar_finish(mcx, &format, &mut num, &ns, out_pre_spaces, sign, len);
     }
 
-    let out = num_tochar_finish(&format, &mut num, numstr, out_pre_spaces, sign, len)?;
-    let res = text_result(mcx, &out);
-    scratch_put(out);
-    res
+    numstr.push(0);
+    num_tochar_finish(mcx, &format, &mut num, &numstr, out_pre_spaces, sign, len)
 }
 
 pub fn int8_to_char<'mcx>(mcx: Mcx<'mcx>, value: i64, fmt: &[u8]) -> PgResult<Varlena<'mcx>> {
@@ -312,7 +344,7 @@ pub fn int8_to_char<'mcx>(mcx: Mcx<'mcx>, value: i64, fmt: &[u8]) -> PgResult<Va
 
     let mut out_pre_spaces = 0i32;
     let mut sign = 0i32;
-    let numstr: Vec<u8>;
+    let mut numstr: Vec<u8>;
 
     let mut value = value;
     if num.is_roman() {
@@ -335,8 +367,14 @@ pub fn int8_to_char<'mcx>(mcx: Mcx<'mcx>, value: i64, fmt: &[u8]) -> PgResult<Va
         }
     } else {
         if num.is_multi() {
-            let multi = 10f64.powi(num.multi);
-            value = value.wrapping_mul(multi as i64);
+            // C: int8mul(value, dtoi8(pow(10, multi))) — both raise 22003.
+            let multi = 10f64.powi(num.multi).round_ties_even();
+            let m = if multi >= -9.223372036854776e18 && multi < 9.223372036854776e18 {
+                multi as i64
+            } else {
+                return Err(bigint_out_of_range());
+            };
+            value = value.checked_mul(m).ok_or_else(bigint_out_of_range)?;
             num.pre += num.multi;
         }
         let mut orgnum = value.to_string().into_bytes();
@@ -348,18 +386,15 @@ pub fn int8_to_char<'mcx>(mcx: Mcx<'mcx>, value: i64, fmt: &[u8]) -> PgResult<Va
         }
         let pre = orgnum.len();
         let padded = pad_post(orgnum, pre, &num);
-        let (np, ns) = adjust_pre(padded, pre as i32, &num);
+        let (np, overflowed) = adjust_pre(pre as i32, &num);
         out_pre_spaces = np;
-        let out = num_tochar_finish(&format, &mut num, ns, out_pre_spaces, sign, len)?;
-        let res = text_result(mcx, &out);
-        scratch_put(out);
-        return res;
+        let mut ns = if overflowed { hash_fill(&num) } else { padded };
+        ns.push(0);
+        return num_tochar_finish(mcx, &format, &mut num, &ns, out_pre_spaces, sign, len);
     }
 
-    let out = num_tochar_finish(&format, &mut num, numstr, out_pre_spaces, sign, len)?;
-    let res = text_result(mcx, &out);
-    scratch_put(out);
-    res
+    numstr.push(0);
+    num_tochar_finish(mcx, &format, &mut num, &numstr, out_pre_spaces, sign, len)
 }
 
 pub fn float4_to_char<'mcx>(mcx: Mcx<'mcx>, value: f32, fmt: &[u8]) -> PgResult<Varlena<'mcx>> {
@@ -370,7 +405,7 @@ pub fn float4_to_char<'mcx>(mcx: Mcx<'mcx>, value: f32, fmt: &[u8]) -> PgResult<
     let (format, mut num) = num_cache(len, fmt)?;
     let mut out_pre_spaces = 0i32;
     let mut sign = 0i32;
-    let numstr: Vec<u8>;
+    let mut numstr: Vec<u8>;
     let mut value = value;
 
     const FLT_DIG: i32 = 6;
@@ -415,18 +450,15 @@ pub fn float4_to_char<'mcx>(mcx: Mcx<'mcx>, value: f32, fmt: &[u8]) -> PgResult<
         let orgnum = fmt_f(num.post as usize, val as f64).into_bytes();
         let (sb, sgn) = strip_sign(orgnum);
         sign = sgn;
-        let (np, ns) = adjust_pre(sb.clone(), pre_len(&sb), &num);
+        let (np, overflowed) = adjust_pre(pre_len(&sb), &num);
         out_pre_spaces = np;
-        let out = num_tochar_finish(&format, &mut num, ns, out_pre_spaces, sign, len)?;
-        let res = text_result(mcx, &out);
-        scratch_put(out);
-        return res;
+        let mut ns = if overflowed { hash_fill(&num) } else { sb };
+        ns.push(0);
+        return num_tochar_finish(mcx, &format, &mut num, &ns, out_pre_spaces, sign, len);
     }
 
-    let out = num_tochar_finish(&format, &mut num, numstr, out_pre_spaces, sign, len)?;
-    let res = text_result(mcx, &out);
-    scratch_put(out);
-    res
+    numstr.push(0);
+    num_tochar_finish(mcx, &format, &mut num, &numstr, out_pre_spaces, sign, len)
 }
 
 pub fn float8_to_char<'mcx>(mcx: Mcx<'mcx>, value: f64, fmt: &[u8]) -> PgResult<Varlena<'mcx>> {
@@ -437,7 +469,7 @@ pub fn float8_to_char<'mcx>(mcx: Mcx<'mcx>, value: f64, fmt: &[u8]) -> PgResult<
     let (format, mut num) = num_cache(len, fmt)?;
     let mut out_pre_spaces = 0i32;
     let mut sign = 0i32;
-    let numstr: Vec<u8>;
+    let mut numstr: Vec<u8>;
     let mut value = value;
 
     const DBL_DIG: i32 = 15;
@@ -482,18 +514,15 @@ pub fn float8_to_char<'mcx>(mcx: Mcx<'mcx>, value: f64, fmt: &[u8]) -> PgResult<
         let orgnum = fmt_f(num.post as usize, val).into_bytes();
         let (sb, sgn) = strip_sign(orgnum);
         sign = sgn;
-        let (np, ns) = adjust_pre(sb.clone(), pre_len(&sb), &num);
+        let (np, overflowed) = adjust_pre(pre_len(&sb), &num);
         out_pre_spaces = np;
-        let out = num_tochar_finish(&format, &mut num, ns, out_pre_spaces, sign, len)?;
-        let res = text_result(mcx, &out);
-        scratch_put(out);
-        return res;
+        let mut ns = if overflowed { hash_fill(&num) } else { sb };
+        ns.push(0);
+        return num_tochar_finish(mcx, &format, &mut num, &ns, out_pre_spaces, sign, len);
     }
 
-    let out = num_tochar_finish(&format, &mut num, numstr, out_pre_spaces, sign, len)?;
-    let res = text_result(mcx, &out);
-    scratch_put(out);
-    res
+    numstr.push(0);
+    num_tochar_finish(mcx, &format, &mut num, &numstr, out_pre_spaces, sign, len)
 }
 
 fn pad_post(orgnum: Vec<u8>, pre: usize, num: &NUMDesc) -> Vec<u8> {
@@ -508,13 +537,11 @@ fn pad_post(orgnum: Vec<u8>, pre: usize, num: &NUMDesc) -> Vec<u8> {
     }
 }
 
-fn adjust_pre(numstr: Vec<u8>, pre: i32, num: &NUMDesc) -> (i32, Vec<u8>) {
+fn adjust_pre(pre: i32, num: &NUMDesc) -> (i32, bool) {
     if pre < num.pre {
-        (num.pre - pre, numstr)
-    } else if pre > num.pre {
-        (0, hash_fill(num))
+        (num.pre - pre, false)
     } else {
-        (0, numstr)
+        (0, pre > num.pre)
     }
 }
 
@@ -532,23 +559,13 @@ pub fn numeric_to_number<'mcx>(
     }
     let (format, mut num) = num_cache(len, fmt)?;
 
-    let numstr = vec![0u8; len * NUM_MAX_ITEM_SIZ + 1];
-    let processed = num_processor(
-        &format,
-        &mut num,
-        value.to_vec(),
-        numstr,
-        value.len(),
-        0,
-        0,
-        false,
-        InvalidOid,
-    )?;
+    let mut numstr = vec![0u8; len * NUM_MAX_ITEM_SIZ + 1];
+    let n = num_processor_from_char(&format, &mut num, value, &mut numstr)?;
 
     let scale = num.post;
     let precision = num.pre + num.multi + scale;
 
-    let s = String::from_utf8_lossy(&processed.out).into_owned();
+    let s = String::from_utf8_lossy(&numstr[..n]).into_owned();
     let img = numeric_in(&s, make_numeric_typmod(precision, scale), None)?
         .expect("numeric_in without soft-error context yields Some");
 
