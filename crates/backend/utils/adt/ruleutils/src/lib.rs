@@ -311,16 +311,17 @@ pub(crate) fn generate_function_name(
     )?;
     let mut best = cands.iter().find(|c| c.args.as_slice() == argtypes).map(|c| c.oid);
     if best.is_none() && !cands.is_empty() {
-        if argtypes.len() == 1 {
-            // C consults the FuncNameAsType coercion arm before fuzzy matching.
-            gap("generate_function_name", "single-arg fuzzy resolution (coercion arm)");
-        }
         let matched = parse_func::func_match_argtypes(mcx, argtypes, cands.as_slice())?;
         best = match matched.len() {
             0 => None,
             1 => Some(matched[0].oid),
             _ => parse_func::func_select_candidate(argtypes, matched)?.map(|c| c.oid),
         };
+    }
+    if best.is_none() && argtypes.len() == 1 {
+        // func_get_detail falls back to the FuncNameAsType coercion arm only
+        // after normal resolution fails.
+        gap("generate_function_name", "single-arg coercion-arm resolution (FuncNameAsType)");
     }
     if best == Some(funcid) {
         return Ok(quote_identifier(&proname).into_owned());
