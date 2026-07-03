@@ -277,7 +277,7 @@ pub fn index_create<'mcx>(
     heapRelation: &Relation<'mcx>,
     indexRelationName: &str,
     indexRelationId: Oid,
-    indexInfo: &IndexInfo,
+    indexInfo: &mut IndexInfo,
     indexColNames: &[&str],
     accessMethodId: Oid,
     tableSpaceId: Oid,
@@ -491,14 +491,14 @@ pub fn index_create<'mcx>(
     Ok(indexRelationId)
 }
 
-// index_build: btree only; ii_ParallelWorkers is identically 0 because the
-// build lane is bounded to empty heaps (plan_create_index_workers on a
-// 0-block heap computes 0).
+// index_build: btree only, serial only (C divergence: plan_create_index_workers
+// is not consulted — every build runs with ii_ParallelWorkers = 0; C picks the
+// same for tables under min_parallel_table_scan_size).
 pub fn index_build<'mcx>(
     mcx: Mcx<'mcx>,
     heapRelation: &Relation<'mcx>,
     indexRelation: &Relation<'mcx>,
-    indexInfo: &IndexInfo,
+    indexInfo: &mut IndexInfo,
     isreindex: bool,
 ) -> PgResult<()> {
     if indexRelation.rd_rel.relam != BTREE_AM_OID {
@@ -509,22 +509,49 @@ pub fn index_build<'mcx>(
     let save_nestlevel = guc::NewGUCNestLevel();
     guc::RestrictSearchPath()?;
 
-    let stats = nbtsort::btbuild(heapRelation, indexRelation)?;
+    let stats = nbtsort::btbuild(mcx, heapRelation, indexRelation, indexInfo)?;
 
     if indexRelation.rd_rel.relpersistence != types_core::RELPERSISTENCE_PERMANENT {
         unported("index_build: unlogged-index INIT_FORKNUM ambuildempty");
     }
-    let _ = indexInfo; // ii_BrokenHotChain is never set (empty build)
+
+    if indexInfo.ii_BrokenHotChain && !isreindex && !indexInfo.ii_Concurrent {
+        set_indcheckxmin(mcx, indexRelation.rd_id)?;
+    }
 
     index_update_stats(mcx, heapRelation, true, stats.heap_tuples)?;
     index_update_stats(mcx, indexRelation, false, stats.index_tuples)?;
 
     xact::CommandCounterIncrement()?;
-    let _ = isreindex;
 
     guc::AtEOXact_GUC(false, save_nestlevel);
     guard.restore();
     Ok(())
+}
+
+// index.c:3125 broken-HOT-chain arm: flip pg_index.indcheckxmin in place.
+fn set_indcheckxmin<'mcx>(mcx: Mcx<'mcx>, indexId: Oid) -> PgResult<()> {
+    const Anum_pg_index_indcheckxmin: usize = 12;
+    let pg_index = table::table_open(mcx, INDEX_RELATION_ID, RowExclusiveLock)?;
+    let key = oid_scankey(1, indexId);
+    let mut scan = genam::systable_beginscan(mcx, &pg_index, IndexRelidIndexId, true, None, &[key])?;
+    let tup = genam::systable_getnext(mcx, &mut scan)?
+        .unwrap_or_else(|| panic!("cache lookup failed for index {indexId}"));
+    let desc = pg_index.descr();
+    let natts = desc.natts as usize;
+    let mut values: mcx::PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
+    let mut isnull: mcx::PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+    let mut replace: mcx::PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+    values.resize(natts, Datum::null());
+    isnull.resize(natts, false);
+    replace.resize(natts, false);
+    values[Anum_pg_index_indcheckxmin - 1] = Datum::from_bool(true);
+    replace[Anum_pg_index_indcheckxmin - 1] = true;
+    let mut newtup = heaptuple::heap_modify_tuple(mcx, tup, desc, &values, &isnull, &replace)?;
+    let tid = tup.t_self;
+    genam::systable_endscan(mcx, scan)?;
+    catalog_indexing::CatalogTupleUpdate(mcx, &pg_index, &tid, &mut newtup)?;
+    pg_index.close(RowExclusiveLock)
 }
 
 // index_update_stats (non-transactional inplace pg_class update).
