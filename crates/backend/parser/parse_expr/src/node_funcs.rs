@@ -19,11 +19,6 @@ pub fn expr_type(node: Node<'_>) -> Oid {
         NodeTag::T_FuncExpr => node.as_func_expr().unwrap().funcresulttype,
         NodeTag::T_Aggref => node.as_aggref().unwrap().aggtype,
         NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resulttype,
-        NodeTag::T_CoerceViaIO => node.as_coerce_via_io().unwrap().resulttype,
-        NodeTag::T_BoolExpr => types_core::catalog::BOOLOID,
-        NodeTag::T_CaseExpr => node.as_case_expr().unwrap().casetype,
-        NodeTag::T_CoalesceExpr => node.as_coalesce_expr().unwrap().coalescetype,
-        NodeTag::T_MinMaxExpr => node.as_min_max_expr().unwrap().minmaxtype,
         NodeTag::T_SubLink => {
             let (sl, tent) = sublink_first_col(node);
             match sl.subLinkType {
@@ -69,37 +64,7 @@ pub fn expr_typmod(node: Node<'_>) -> i32 {
         NodeTag::T_Var => node.as_var().unwrap().vartypmod,
         NodeTag::T_Param => node.as_param().unwrap().paramtypmod,
         NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resulttypmod,
-        NodeTag::T_OpExpr
-        | NodeTag::T_FuncExpr
-        | NodeTag::T_Aggref
-        | NodeTag::T_CoerceViaIO
-        | NodeTag::T_BoolExpr => -1,
-        NodeTag::T_CaseExpr => {
-            let c = node.as_case_expr().unwrap();
-            let Some(defresult) = c.defresult else { return -1 };
-            if expr_type(defresult) != c.casetype {
-                return -1;
-            }
-            let typmod = expr_typmod(defresult);
-            if typmod < 0 {
-                return -1;
-            }
-            for w in &c.args {
-                let result = w.as_case_when().expect("CaseWhen").result.expect("result");
-                if expr_type(result) != c.casetype || expr_typmod(result) != typmod {
-                    return -1;
-                }
-            }
-            typmod
-        }
-        NodeTag::T_CoalesceExpr => {
-            let c = node.as_coalesce_expr().unwrap();
-            uniform_args_typmod(&c.args, c.coalescetype)
-        }
-        NodeTag::T_MinMaxExpr => {
-            let m = node.as_min_max_expr().unwrap();
-            uniform_args_typmod(&m.args, m.minmaxtype)
-        }
+        NodeTag::T_OpExpr | NodeTag::T_FuncExpr | NodeTag::T_Aggref => -1,
         NodeTag::T_SubLink => {
             let (sl, tent) = sublink_first_col(node);
             match sl.subLinkType {
@@ -127,11 +92,6 @@ pub fn expr_collation(node: Node<'_>) -> Oid {
         NodeTag::T_FuncExpr => node.as_func_expr().unwrap().funccollid,
         NodeTag::T_Aggref => node.as_aggref().unwrap().aggcollid,
         NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resultcollid,
-        NodeTag::T_CoerceViaIO => node.as_coerce_via_io().unwrap().resultcollid,
-        NodeTag::T_BoolExpr => types_core::InvalidOid,
-        NodeTag::T_CaseExpr => node.as_case_expr().unwrap().casecollid,
-        NodeTag::T_CoalesceExpr => node.as_coalesce_expr().unwrap().coalescecollid,
-        NodeTag::T_MinMaxExpr => node.as_min_max_expr().unwrap().minmaxcollid,
         NodeTag::T_SubLink => {
             let (sl, tent) = sublink_first_col(node);
             match sl.subLinkType {
@@ -202,49 +162,8 @@ pub fn expr_location(node: Node<'_>) -> ParseLoc {
         NodeTag::T_ParamRef => node.as_param_ref().unwrap().location,
         NodeTag::T_ResTarget => node.as_res_target().unwrap().location,
         NodeTag::T_SubLink => node.as_sub_link().unwrap().location,
-        NodeTag::T_CoerceViaIO => {
-            let c = node.as_coerce_via_io().unwrap();
-            leftmost_loc(c.location, expr_location(c.arg))
-        }
-        // C: the CASE/WHEN/COALESCE/GREATEST/LEAST keyword is always leftmost.
-        NodeTag::T_CaseExpr => node.as_case_expr().unwrap().location,
-        NodeTag::T_CaseWhen => node.as_case_when().unwrap().location,
-        NodeTag::T_CoalesceExpr => node.as_coalesce_expr().unwrap().location,
-        NodeTag::T_MinMaxExpr => node.as_min_max_expr().unwrap().location,
-        NodeTag::T_BoolExpr => {
-            let b = node.as_bool_expr().unwrap();
-            leftmost_loc(b.location, list_location(&b.args))
-        }
-        NodeTag::T_TypeCast => {
-            let tc = node.as_type_cast().unwrap();
-            let tn_loc = tc
-                .typeName
-                .and_then(|n| n.as_variant::<types_nodes::TypeName>())
-                .map_or(-1, |tn| tn.location);
-            let loc = leftmost_loc(tc.arg.map_or(-1, expr_location), tn_loc);
-            leftmost_loc(loc, tc.location)
-        }
         other => deferred("exprLocation", other),
     }
-}
-
-// exprTypmod's shared COALESCE/MinMax shape: all args agree on type+typmod.
-fn uniform_args_typmod(args: &NodeList<'_>, common_type: Oid) -> i32 {
-    let mut typmod = -1;
-    for (i, e) in args.iter().enumerate() {
-        if expr_type(e) != common_type {
-            return -1;
-        }
-        if i == 0 {
-            typmod = expr_typmod(e);
-            if typmod < 0 {
-                return -1;
-            }
-        } else if expr_typmod(e) != typmod {
-            return -1;
-        }
-    }
-    typmod
 }
 
 pub fn expr_is_null_constant(node: Node<'_>) -> bool {

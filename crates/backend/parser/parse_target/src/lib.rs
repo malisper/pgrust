@@ -409,83 +409,15 @@ fn markTargetListOrigin<'mcx>(
                     .unwrap();
             }
         }
-        RTEKind::RTE_SUBQUERY => {
-            if attnum != 0 {
-                let ste = rte
-                    .subquery
-                    .expect("RTE_SUBQUERY has subquery")
-                    .targetList
-                    .iter()
-                    .map(|n| n.as_target_entry().expect("tlist cell"))
-                    .find(|t| t.resno == attnum);
-                let ste = match ste {
-                    Some(t) if !t.resjunk => t,
-                    _ => {
-                        return Err(Box::new(types_error::PgError::error(format!(
-                            "subquery {} does not have attribute {attnum}",
-                            rte.eref.and_then(|e| e.aliasname).unwrap_or("")
-                        ))))
-                    }
-                };
-                let (resorigtbl, resorigcol) = (ste.resorigtbl, ste.resorigcol);
-                // SAFETY: as the RTE_RELATION arm — the `ste` borrow is from
-                // the subquery's tlist, not tle_node.
-                unsafe {
-                    tle_node
-                        .with_mut::<TargetEntry, _>(|t| {
-                            t.resorigtbl = resorigtbl;
-                            t.resorigcol = resorigcol;
-                        })
-                        .unwrap();
-                }
-            }
-        }
-        RTEKind::RTE_CTE => {
-            // search/cycle extra columns and self-references are dead here
-            // (the recursive lane is loud upstream).
-            debug_assert!(!rte.self_reference);
-            if attnum != 0 {
-                let cte_node = parse_relation::GetCTEForRTE(pstate, rte, netlevelsup);
-                let tl = &cte_node
-                    .as_common_table_expr()
-                    .expect("ctenamespace cell")
-                    .ctequery
-                    .expect("analyzed CTE")
-                    .as_query()
-                    .expect("analyzed CTE is a Query")
-                    .targetList;
-                let ste = tl
-                    .iter()
-                    .map(|n| n.as_target_entry().expect("tlist cell"))
-                    .find(|t| t.resno == attnum);
-                let ste = match ste {
-                    Some(t) if !t.resjunk => t,
-                    _ => {
-                        return Err(Box::new(types_error::PgError::error(format!(
-                            "CTE {} does not have attribute {attnum}",
-                            rte.eref.and_then(|e| e.aliasname).unwrap_or("")
-                        ))))
-                    }
-                };
-                let (resorigtbl, resorigcol) = (ste.resorigtbl, ste.resorigcol);
-                // SAFETY: as the RTE_RELATION arm — the `ste` borrow is from
-                // the CTE query's tlist, not tle_node.
-                unsafe {
-                    tle_node
-                        .with_mut::<TargetEntry, _>(|t| {
-                            t.resorigtbl = resorigtbl;
-                            t.resorigcol = resorigcol;
-                        })
-                        .unwrap();
-                }
-            }
-        }
         RTEKind::RTE_FUNCTION
         | RTEKind::RTE_VALUES
         | RTEKind::RTE_TABLEFUNC
         | RTEKind::RTE_NAMEDTUPLESTORE
         | RTEKind::RTE_RESULT => {}
-        other @ (RTEKind::RTE_JOIN | RTEKind::RTE_GROUP) => panic!(
+        other @ (RTEKind::RTE_SUBQUERY
+        | RTEKind::RTE_JOIN
+        | RTEKind::RTE_CTE
+        | RTEKind::RTE_GROUP) => panic!(
             "markTargetListOrigin (parse_target.c): {other:?} recursion arm unported — \
              unit backend-parser-parse-target"
         ),
@@ -668,13 +600,10 @@ fn star_with_no_tables(
 }
 
 pub fn FigureColname<'mcx>(node: Node<'mcx>) -> &'mcx str {
-    let mut name = None;
-    FigureColnameInternal(node, &mut name);
-    name.unwrap_or("?column?")
+    FigureColnameInternal(node).unwrap_or("?column?")
 }
 
-// C's strength contract: 0 = no name, 1 = weak (type-cast name), 2 = good.
-fn FigureColnameInternal<'mcx>(node: Node<'mcx>, name: &mut Option<&'mcx str>) -> i32 {
+fn FigureColnameInternal<'mcx>(node: Node<'mcx>) -> Option<&'mcx str> {
     match node.node_tag() {
         NodeTag::T_ColumnRef => {
             let mut fname = None;
@@ -683,68 +612,20 @@ fn FigureColnameInternal<'mcx>(node: Node<'mcx>, name: &mut Option<&'mcx str>) -
                     fname = Some(s.sval);
                 }
             }
-            if let Some(fname) = fname {
-                *name = Some(fname);
-                return 2;
-            }
-            0
+            fname
         }
         NodeTag::T_A_Expr => {
             if node.as_a_expr().unwrap().kind == A_Expr_Kind::AEXPR_NULLIF {
-                *name = Some("nullif");
-                return 2;
+                Some("nullif")
+            } else {
+                None
             }
-            0
-        }
-        NodeTag::T_TypeCast => {
-            let tc = node.as_type_cast().unwrap();
-            let strength = tc.arg.map_or(0, |arg| FigureColnameInternal(arg, name));
-            if strength <= 1 {
-                if let Some(tn) =
-                    tc.typeName.and_then(|n| n.as_variant::<types_nodes::TypeName>())
-                {
-                    if let Some(last) = tn.names.last().and_then(|n| n.as_string()) {
-                        *name = Some(last.sval);
-                        return 1;
-                    }
-                }
-            }
-            strength
-        }
-        NodeTag::T_CaseExpr => {
-            let strength = node
-                .as_case_expr()
-                .unwrap()
-                .defresult
-                .map_or(0, |d| FigureColnameInternal(d, name));
-            if strength <= 1 {
-                *name = Some("case");
-                return 1;
-            }
-            strength
-        }
-        NodeTag::T_CoalesceExpr => {
-            *name = Some("coalesce");
-            2
-        }
-        NodeTag::T_MinMaxExpr => {
-            *name = Some(match node.as_min_max_expr().unwrap().op {
-                types_nodes::primnodes::MinMaxOp::IS_GREATEST => "greatest",
-                types_nodes::primnodes::MinMaxOp::IS_LEAST => "least",
-            });
-            2
         }
         NodeTag::T_FuncCall => {
             let fc = node.as_func_call().unwrap();
-            match fc.funcname.last().and_then(|n| n.as_string()) {
-                Some(s) => {
-                    *name = Some(s.sval);
-                    2
-                }
-                None => 0,
-            }
+            fc.funcname.last().and_then(|n| n.as_string()).map(|s| s.sval)
         }
-        NodeTag::T_A_Const | NodeTag::T_ParamRef | NodeTag::T_BoolExpr => 0,
+        NodeTag::T_A_Const | NodeTag::T_ParamRef => None,
         other => panic!(
             "FigureColnameInternal (parse_target.c): arm for {other:?} unported — \
              unit backend-parser-parse-target"

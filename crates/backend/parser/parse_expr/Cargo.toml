@@ -10,16 +10,13 @@ path = "src/lib.rs"
 
 [dependencies]
 analyze_seams = { path = "../analyze_seams" }
-coerce = { path = "../coerce" }
 elog = { path = "../../utils/error/elog" }
-format_type = { path = "../../utils/adt/format_type" }
 guc_tables = { path = "../../utils/misc/guc_tables" }
 mbutils = { path = "../../utils/mb/mbutils" }
 mcx = { path = "../../../_support/mcx" }
 parse_func = { path = "../parse_func" }
 parse_oper = { path = "../parse_oper" }
 parse_relation = { path = "../parse_relation" }
-parse_utilcmd = { path = "../parse_utilcmd" }
 parser_small1 = { path = "../parser_small1" }
 stack_depth = { path = "../../utils/misc/stack_depth" }
 types_core = { path = "../../../_support/types/types_core" }
@@ -28,7 +25,5 @@ types_nodes = { path = "../../../_support/types/nodes" }
 wchar = { path = "../../../common/wchar" }
 
 [dev-dependencies]
-aclchk_seams = { path = "../../catalog/aclchk_seams" }
 miscinit_seams = { path = "../../utils/init/miscinit_seams" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
-types_tuple = { path = "../../../_support/types/types_tuple" }
