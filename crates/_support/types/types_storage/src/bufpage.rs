@@ -156,6 +156,9 @@ pub const SizeofHeapTupleHeader: usize = 23;
 pub const MaxHeapTuplesPerPage: usize =
     (BLCKSZ - SizeOfPageHeaderData) / (24 + core::mem::size_of::<ItemIdData>());
 
+pub const MaxIndexTuplesPerPage: usize =
+    (BLCKSZ - SizeOfPageHeaderData) / (16 + core::mem::size_of::<ItemIdData>());
+
 pub const MaxHeapTupleSize: Size = BLCKSZ - {
     let raw = SizeOfPageHeaderData + core::mem::size_of::<ItemIdData>();
     (raw + 7) & !7
@@ -799,7 +802,7 @@ impl<'a> PageMut<'a> {
     }
 
     /// `PageIndexTupleDelete`. Panics on corruption (C ereport ERROR,
-    /// DATA_CORRUPTED).
+    /// DATA_CORRUPTED; promoted inside callers' critical sections).
     pub fn index_tuple_delete(&mut self, offnum: OffsetNumber) {
         let r = self.as_ref();
         let pd_lower = r.pd_lower() as usize;
@@ -813,8 +816,10 @@ impl<'a> PageMut<'a> {
                 && pd_special == (pd_special + 7) & !7,
             "corrupted page pointers: lower = {pd_lower}, upper = {pd_upper}, special = {pd_special}"
         );
+
         let nline = r.max_offset_number();
         assert!(offnum >= 1 && offnum <= nline, "invalid index offnum: {offnum}");
+
         let tup = r.item_id(offnum);
         debug_assert!(tup.has_storage());
         let size = tup.lp_len() as usize;
@@ -824,45 +829,50 @@ impl<'a> PageMut<'a> {
             "corrupted line pointer: offset = {offset}, size = {size}"
         );
         let size = (size + 7) & !7;
+
         let offidx = (offnum - 1) as usize;
-        let id_sz = core::mem::size_of::<ItemIdData>();
-        let nbytes = pd_lower - (SizeOfPageHeaderData + (offidx + 1) * id_sz);
+        let linp_base = SizeOfPageHeaderData;
+        let nbytes = pd_lower - (linp_base + (offidx + 1) * core::mem::size_of::<ItemIdData>());
         if nbytes > 0 {
-            // SAFETY: overlapping shift within the validated line-pointer array.
+            // SAFETY: both ranges within pd_lower (validated); overlapping move.
             unsafe {
-                let dst = self.ptr.as_ptr().add(SizeOfPageHeaderData + offidx * id_sz);
-                core::ptr::copy(dst.add(id_sz), dst, nbytes);
+                let dst = self.ptr.as_ptr().add(linp_base + offidx * 4);
+                core::ptr::copy(dst.add(4), dst, nbytes);
             }
         }
-        if offset != pd_upper {
-            // SAFETY: [pd_upper, offset) shifts up by `size`; both ranges lie
-            // inside the validated tuple region.
+
+        if offset > pd_upper {
+            // SAFETY: [pd_upper, offset) shifts up by `size`; the deleted item
+            // occupied [offset, offset+size) within pd_special.
             unsafe {
-                let base = self.ptr.as_ptr();
-                core::ptr::copy(base.add(pd_upper), base.add(pd_upper + size), offset - pd_upper);
+                let addr = self.ptr.as_ptr().add(pd_upper);
+                core::ptr::copy(addr, addr.add(size), offset - pd_upper);
             }
         }
+
         self.set_pd_upper((pd_upper + size) as uint16);
-        self.set_pd_lower((pd_lower - id_sz) as uint16);
+        self.set_pd_lower((pd_lower - core::mem::size_of::<ItemIdData>()) as uint16);
+
         let nline = nline - 1;
-        for i in 1..=nline {
-            let mut ii = self.as_ref().item_id(i);
-            debug_assert!(ii.has_storage());
-            if (ii.lp_off() as usize) <= offset {
-                ii.set_storage((ii.lp_off() as usize + size) as ItemOffset, ii.lp_len());
-                self.set_item_id(i, ii);
+        if self.as_ref().pd_lower() as usize > SizeOfPageHeaderData {
+            for i in 1..=nline {
+                let mut ii = self.as_ref().item_id(i);
+                debug_assert!(ii.has_storage());
+                if (ii.lp_off() as usize) <= offset {
+                    ii.set_storage((ii.lp_off() as usize + size) as ItemOffset, ii.lp_len());
+                    self.set_item_id(i, ii);
+                }
             }
         }
     }
 
-    /// `PageIndexMultiDelete`; `itemnos` sorted ascending. Panics on
-    /// corruption (C ereport ERROR, DATA_CORRUPTED).
+    /// `PageIndexMultiDelete`; `itemnos` must be sorted ascending.
     pub fn index_multi_delete(&mut self, itemnos: &[OffsetNumber]) {
-        const MaxIndexTuplesPerPage: usize = (BLCKSZ - SizeOfPageHeaderData) / (16 + 4);
         debug_assert!(itemnos.len() <= MaxIndexTuplesPerPage);
+
         if itemnos.len() <= 2 {
-            for &offnum in itemnos.iter().rev() {
-                self.index_tuple_delete(offnum);
+            for &off in itemnos.iter().rev() {
+                self.index_tuple_delete(off);
             }
             return;
         }
@@ -882,12 +892,13 @@ impl<'a> PageMut<'a> {
 
         let nline = r.max_offset_number();
         let mut itemidbase = [ItemIdCompact::ZERO; MaxIndexTuplesPerPage];
-        let mut newitemids = [ItemIdData::new(0, LP_UNUSED, 0); MaxIndexTuplesPerPage];
-        let mut nused = 0usize;
+        let mut newitemids = [ItemIdData::default(); MaxIndexTuplesPerPage];
         let mut totallen = 0usize;
+        let mut nused = 0usize;
         let mut nextitm = 0usize;
         let mut last_offset = pd_special;
         let mut presorted = true;
+
         for offnum in 1..=nline {
             let lp = r.item_id(offnum);
             debug_assert!(lp.has_storage());
@@ -897,15 +908,16 @@ impl<'a> PageMut<'a> {
                 offset >= pd_upper && offset + size <= pd_special && offset == (offset + 7) & !7,
                 "corrupted line pointer: offset = {offset}, size = {size}"
             );
+
             if nextitm < itemnos.len() && offnum == itemnos[nextitm] {
                 nextitm += 1;
             } else {
+                let alignedlen = (size + 7) & !7;
                 if last_offset > offset {
                     last_offset = offset;
                 } else {
                     presorted = false;
                 }
-                let alignedlen = (size + 7) & !7;
                 itemidbase[nused] = ItemIdCompact {
                     offsetindex: nused as u16,
                     itemoff: offset as u16,
@@ -916,6 +928,7 @@ impl<'a> PageMut<'a> {
                 nused += 1;
             }
         }
+
         assert!(nextitm == itemnos.len(), "incorrect index offsets supplied");
         assert!(
             totallen <= pd_special - pd_lower,
