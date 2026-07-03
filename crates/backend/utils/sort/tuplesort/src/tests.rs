@@ -824,8 +824,26 @@ fn abbrev_bounded_text_sort_top_n() {
     }
     ts.performsort().unwrap();
     assert!(ts.used_bound());
-    let got = drain_text_datums(&mut ts);
-    assert_eq!(got.len(), 25);
+    // Bounded contract: fetching past the bound is an error (C elog), so
+    // drain exactly `bound` rows as Limit does.
+    let mut got = Vec::new();
+    for _ in 0..25 {
+        let nd = ts.getdatum(true).unwrap().expect("bound rows present");
+        got.push(if nd.isnull {
+            None
+        } else {
+            let p = nd.value.as_usize() as *const u8;
+            // SAFETY: sort-owned datumCopy image.
+            Some(unsafe {
+                use ::types_tuple::varatt::{varatt_is_1b, varsize_1b, varsize_4b};
+                if varatt_is_1b(p) {
+                    std::slice::from_raw_parts(p.add(1), varsize_1b(p) - 1).to_vec()
+                } else {
+                    std::slice::from_raw_parts(p.add(4), varsize_4b(p) - 4).to_vec()
+                }
+            })
+        });
+    }
     assert_eq!(got[..], text_oracle(vals, false)[..25]);
     ts.end();
 }
