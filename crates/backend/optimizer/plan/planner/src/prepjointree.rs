@@ -298,10 +298,7 @@ fn pull_up_simple_subquery<'mcx>(
     if shared_sub.hasSubLinks {
         panic!("pull_up_sublinks (prepjointree.c): sublinks in pulled-up subquery; M2 lane");
     }
-    assert!(
-        !shared_sub.hasRowSecurity,
-        "pull_up_simple_subquery (prepjointree.c): hasRowSecurity propagation unported"
-    );
+    parse.hasRowSecurity |= shared_sub.hasRowSecurity;
     assert!(
         shared_sub.rowMarks.is_nil(),
         "pull_up_simple_subquery (prepjointree.c): rowMarks concat unported"
@@ -456,6 +453,15 @@ fn pull_up_simple_subquery<'mcx>(
                 };
             }
             _ => {}
+        }
+        // range_table_walker walks securityQuals for every RTE kind.
+        if !srte.securityQuals.is_nil() {
+            if let Some(l) = clauses::walker::mutate_list(mcx, &srte.securityQuals, &mut |n| {
+                offset_expr(mcx, n, rtoffset)
+            })? {
+                // SAFETY: exclusive pre-seal fixup of the fresh copy.
+                unsafe { copy.with_mut::<RangeTblEntry, _>(|r| r.securityQuals = l) };
+            }
         }
         parse.rtable.lappend(mcx, copy)?;
     }

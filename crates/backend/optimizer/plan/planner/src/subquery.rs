@@ -172,8 +172,28 @@ pub fn subquery_planner<'mcx>(
         if rte.lateral {
             run.root.hasLateralRTEs = true;
         }
+        // C splits this across two rtable loops (planner.c:834, :1050); no
+        // preprocessing here reads qual_security_level, so one pass is safe.
         if !rte.securityQuals.is_nil() {
-            panic!("subquery_planner (planner.c): securityQuals; M2 RLS lane");
+            run.root.qual_security_level =
+                run.root.qual_security_level.max(rte.securityQuals.len() as u32);
+            let has_sublinks = parse.hasSubLinks;
+            let mut quals = types_nodes::list::NodeList::nil();
+            for sq in &rte.securityQuals {
+                // A constant-true element preprocesses to None; keep an empty
+                // sublist so per-element security levels stay aligned.
+                let one = match preprocess_expression(run, Some(sq), EXPRKIND_QUAL, has_sublinks)? {
+                    Some(n) => n,
+                    None => Node::mk_list(mcx, types_nodes::list::NodeList::nil())?,
+                };
+                quals.lappend(mcx, one)?;
+            }
+            // SAFETY: as the RTE_RELATION arm above.
+            unsafe {
+                rte_node.with_mut::<types_nodes::parsenodes::RangeTblEntry, _>(|r| {
+                    r.securityQuals = quals
+                })
+            };
         }
         // View perminfos flow through unchanged: ExecCheckOneRelPerms'
         // relation-level object_aclcheck arm covers relkind 'v'.

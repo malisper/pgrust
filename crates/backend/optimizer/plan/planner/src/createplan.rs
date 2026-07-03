@@ -404,7 +404,9 @@ fn create_gating_plan<'mcx>(
     Ok(gplan.seal())
 }
 
-// order_qual_clauses (createplan.c): stable sort by ascending eval cost.
+// order_qual_clauses (createplan.c): stable sort (C insertion sort) by
+// security_level then eval cost; a cheap (<10x cpu_operator_cost) leakproof
+// qual is demoted to level 0 so it can run ahead of pricier low-level quals.
 fn order_qual_clauses<'mcx>(
     run: &mut PlannerRun<'mcx>,
     clauses: &[RinfoId],
@@ -412,10 +414,16 @@ fn order_qual_clauses<'mcx>(
     let mut items: mcx::PgVec<'_, (RinfoId, f64, u32)> = mcx::PgVec::new_in(run.mcx);
     items.reserve(clauses.len());
     for &rid in clauses {
-        debug_assert!(run.root.rinfo(rid).security_level == 0);
         let clause = *run.root.expr_node(run.root.rinfo(rid).clause);
         let cost = crate::costsize::cost_qual_eval_node(clause)?;
-        items.push((rid, cost.per_tuple, run.root.rinfo(rid).security_level));
+        let r = run.root.rinfo(rid);
+        let security_level =
+            if r.leakproof && cost.per_tuple < 10.0 * crate::gucs::cpu_operator_cost() {
+                0
+            } else {
+                r.security_level
+            };
+        items.push((rid, cost.per_tuple, security_level));
     }
     if items.len() > 1 {
         items.sort_by(|a, b| a.2.cmp(&b.2).then(a.1.partial_cmp(&b.1).unwrap()));
