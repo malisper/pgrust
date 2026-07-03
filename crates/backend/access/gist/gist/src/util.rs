@@ -98,7 +98,7 @@ fn index_corrupted(msg: std::string::String) -> Box<PgError> {
 
 /// gistinitpage.
 pub fn gistinitpage(page: &mut PageMut<'_>, f: u16) {
-    page.init(core::mem::size_of::<GISTPageOpaqueData>());
+    page.init(::types_gist::SizeOfGistPageOpaque);
     ::types_gist::page_opaque_set(
         page,
         GISTPageOpaqueData {
@@ -126,7 +126,7 @@ pub fn gistcheckpage(rel: &Relation<'_>, pin: &BufferPin) -> PgResult<()> {
             pin.block_number()
         )));
     }
-    if BLCKSZ - page.pd_special() as usize != core::mem::size_of::<GISTPageOpaqueData>() {
+    if BLCKSZ - page.pd_special() as usize != ::types_gist::SizeOfGistPageOpaque {
         return Err(index_corrupted(format!(
             "index \"{}\" contains corrupted page at block {}",
             rel.name(),

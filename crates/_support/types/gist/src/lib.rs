@@ -51,9 +51,8 @@ pub const GIST_UNLOCK: i32 = 0;
 pub const GIST_SHARE: i32 = 1;
 pub const GIST_EXCLUSIVE: i32 = 2;
 
-// 16 bytes at pd_special (BLCKSZ - 16); nsn's on-disk PageGistNSN
-// {xlogid, xrecoff} image equals XLogRecPtr's ne image on little-endian LP64.
-#[repr(C)]
+// Decoded view; on disk nsn is PageGistNSN {xlogid HI u32, xrecoff LO u32}
+// (pre-9.3 compat), NOT a native u64 — the codec below swaps halves.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct GISTPageOpaqueData {
     pub nsn: GistNSN,
@@ -62,10 +61,21 @@ pub struct GISTPageOpaqueData {
     pub gist_page_id: uint16,
 }
 
-const _: () = assert!(core::mem::size_of::<GISTPageOpaqueData>() == 16);
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct GistPageOpaqueDisk {
+    nsn_xlogid: u32,
+    nsn_xrecoff: u32,
+    rightlink: BlockNumber,
+    flags: uint16,
+    gist_page_id: uint16,
+}
+
+const _: () = assert!(core::mem::size_of::<GistPageOpaqueDisk>() == 16);
 
 pub const GiSTPageSize: usize =
-    BLCKSZ - SizeOfPageHeaderData - core::mem::size_of::<GISTPageOpaqueData>();
+    BLCKSZ - SizeOfPageHeaderData - core::mem::size_of::<GistPageOpaqueDisk>();
+pub const SizeOfGistPageOpaque: usize = core::mem::size_of::<GistPageOpaqueDisk>();
 
 pub const GISTMaxIndexTupleSize: usize = (GiSTPageSize / 4 - 4) & !7;
 pub const GISTMaxIndexKeySize: usize = GISTMaxIndexTupleSize - 8;
@@ -80,30 +90,43 @@ fn special_off(bytes: *const u8) -> usize {
         off >= SizeOfPageHeaderData && off <= BLCKSZ,
         "corrupt pd_special"
     );
-    off.min(BLCKSZ - core::mem::size_of::<GISTPageOpaqueData>())
+    off.min(BLCKSZ - core::mem::size_of::<GistPageOpaqueDisk>())
 }
 
 #[inline]
 pub fn page_opaque(page: &PageRef<'_>) -> GISTPageOpaqueData {
     // SAFETY: in-bounds (special_off clamps); unaligned read tolerates any
     // pd_special the clamp admits.
-    unsafe {
+    let d = unsafe {
         page.as_ptr()
             .add(special_off(page.as_ptr()))
-            .cast::<GISTPageOpaqueData>()
+            .cast::<GistPageOpaqueDisk>()
             .read_unaligned()
+    };
+    GISTPageOpaqueData {
+        nsn: ((d.nsn_xlogid as u64) << 32) | d.nsn_xrecoff as u64,
+        rightlink: d.rightlink,
+        flags: d.flags,
+        gist_page_id: d.gist_page_id,
     }
 }
 
 #[inline]
 pub fn page_opaque_set(page: &mut PageMut<'_>, opaque: GISTPageOpaqueData) {
     let off = special_off(page.as_ref().as_ptr());
+    let d = GistPageOpaqueDisk {
+        nsn_xlogid: (opaque.nsn >> 32) as u32,
+        nsn_xrecoff: opaque.nsn as u32,
+        rightlink: opaque.rightlink,
+        flags: opaque.flags,
+        gist_page_id: opaque.gist_page_id,
+    };
     // SAFETY: in-bounds write to this page's special area.
     unsafe {
         page.as_mut_ptr()
             .add(off)
-            .cast::<GISTPageOpaqueData>()
-            .write_unaligned(opaque);
+            .cast::<GistPageOpaqueDisk>()
+            .write_unaligned(d);
     }
 }
 
