@@ -1,9 +1,11 @@
 #![allow(non_snake_case)]
 
 mod catalog;
+mod ddl;
 mod queue;
 
-pub use catalog::{CreateTriggerInternal, InternalTriggerArgs};
+pub use catalog::{CreateTriggerFiringOn, CreateTriggerInternal, InternalTriggerArgs};
+pub use ddl::{get_trigger_oid, renametrig, CreateTrigger, RemoveTriggerById, RemoveTriggers};
 pub use queue::{
     AfterTriggerBeginQuery, AfterTriggerEndQuery, ExecARDeleteTriggers, ExecARInsertTriggers,
     ExecARUpdateTriggers,

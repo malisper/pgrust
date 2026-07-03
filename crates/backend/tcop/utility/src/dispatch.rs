@@ -489,6 +489,7 @@ fn dispatch_switch<'mcx>(
                 }
                 OBJECT_INDEX | OBJECT_TABLE | OBJECT_SEQUENCE | OBJECT_VIEW | OBJECT_MATVIEW
                 | OBJECT_FOREIGN_TABLE => tablecmds::RemoveRelations(mcx, stmt)?,
+                OBJECT_TRIGGER => trigger::RemoveTriggers(mcx, stmt)?,
                 _ => handler_gap("RemoveObjects (dropcmds lane)"),
             }
         }
@@ -576,6 +577,17 @@ fn dispatch_switch<'mcx>(
             exec_index_stmt(mcx, stmt_node, source_text, is_top_level)?;
         }
 
+        T_CreateTrigStmt => {
+            // Retention contract as unify_stmt_lifetime: the statement arena
+            // outlives the utility call; nothing derived escapes it.
+            let stmt_node =
+                unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::rawnodes::CreateTrigStmt>()
+                .expect("CreateTrigStmt");
+            trigger::CreateTrigger(mcx, stmt, source_text)?;
+        }
+
         T_AlterTableStmt => {
             let stmt = parsetree
                 .as_variant::<types_nodes::parsenodes::AlterTableStmt>()
@@ -601,6 +613,9 @@ fn dispatch_switch<'mcx>(
                 }
                 types_nodes::parsenodes::ObjectType::OBJECT_COLUMN => {
                     tablecmds::renameatt(mcx, stmt)?;
+                }
+                types_nodes::parsenodes::ObjectType::OBJECT_TRIGGER => {
+                    trigger::renametrig(mcx, stmt)?;
                 }
                 other => panic!("unported: ExecRenameStmt {other:?}"),
             }
