@@ -1,6 +1,6 @@
 use std::sync::atomic::{AtomicI32, AtomicU32, Ordering::SeqCst};
 use std::sync::mpsc;
-use std::sync::Once;
+use std::sync::{Mutex, MutexGuard, Once};
 
 use init_small::globals as g;
 use types_core::BackendType;
@@ -12,6 +12,15 @@ const MAX_CONNECTIONS: i32 = 32;
 const MAX_BACKENDS: i32 = MAX_CONNECTIONS + 3 + 2 + 2 + 2;
 static NEXT_PID: AtomicI32 = AtomicI32::new(9300);
 static NEXT_XID: AtomicU32 = AtomicU32::new(1000);
+// Shmem (PredXact, serial control) is process-global; the multi-sxact tests
+// must not interleave and their xmins must be monotonic (SerialSetActiveSerXmin
+// asserts tailXid never regresses).
+static CONCURRENCY_GATE: Mutex<()> = Mutex::new(());
+
+fn exclusive() -> (MutexGuard<'static, ()>, u32) {
+    let guard = CONCURRENCY_GATE.lock().unwrap_or_else(|e| e.into_inner());
+    (guard, NEXT_XID.fetch_add(10, SeqCst))
+}
 
 const CFG: lmgr_proc::ProcGlobalConfig = lmgr_proc::ProcGlobalConfig {
     autovacuum_worker_slots: 3,
@@ -92,6 +101,7 @@ fn setup() {
         });
 
         lwlock::CreateLWLocks(false).unwrap();
+        lmgr_proc::init_seams();
         lmgr_proc::InitProcGlobal(&CFG);
         crate::engine::PredicateLockShmemInit(CFG.max_prepared_xacts).unwrap();
         crate::init_seams();
@@ -173,6 +183,7 @@ const REL_B: u32 = 30002;
 #[test]
 fn write_skew_pair_one_aborts_with_40001() {
     become_backend();
+    let (_gate, xmin) = exclusive();
 
     let (to_t2, from_t1) = mpsc::channel::<()>();
     let (to_t1, from_t2) = mpsc::channel::<()>();
@@ -180,7 +191,7 @@ fn write_skew_pair_one_aborts_with_40001() {
     let t2 = std::thread::spawn(move || {
         become_backend();
         let snap = mvcc_snapshot();
-        crate::engine::test_acquire_sxact(900).unwrap();
+        crate::engine::test_acquire_sxact(xmin).unwrap();
         // T2 reads B.
         crate::engine::PredicateLockPage(TESTDB, REL_B, false, 1, &snap).unwrap();
         to_t1.send(()).unwrap();
@@ -208,7 +219,7 @@ fn write_skew_pair_one_aborts_with_40001() {
     });
 
     let snap = mvcc_snapshot();
-    crate::engine::test_acquire_sxact(900).unwrap();
+    crate::engine::test_acquire_sxact(xmin).unwrap();
     // T1 reads A.
     crate::engine::PredicateLockPage(TESTDB, REL_A, false, 1, &snap).unwrap();
     from_t2.recv().unwrap();
@@ -230,6 +241,7 @@ fn write_skew_pair_one_aborts_with_40001() {
 #[test]
 fn tuple_locks_promote_to_page() {
     become_backend();
+    let (_gate, xmin) = exclusive();
 
     let (to_t2, from_t1) = mpsc::channel::<()>();
     let (to_t1, from_t2) = mpsc::channel::<()>();
@@ -237,7 +249,7 @@ fn tuple_locks_promote_to_page() {
     let t2 = std::thread::spawn(move || {
         become_backend();
         let snap = mvcc_snapshot();
-        crate::engine::test_acquire_sxact(901).unwrap();
+        crate::engine::test_acquire_sxact(xmin).unwrap();
         // Locks 3 tuples on one page (> max_predicate_locks_per_page = 2):
         // promotes to a page-granularity lock.
         for off in 1..=3u16 {
@@ -251,7 +263,7 @@ fn tuple_locks_promote_to_page() {
     });
 
     from_t2.recv().unwrap();
-    crate::engine::test_acquire_sxact(901).unwrap();
+    crate::engine::test_acquire_sxact(xmin).unwrap();
     // Write a DIFFERENT tuple (offset 9) on the same page: only the promoted
     // page lock can flag this conflict.
     crate::engine::CheckForSerializableConflictIn(TESTDB, 30011, false, Some((7, 9)), 7).unwrap();
@@ -270,6 +282,7 @@ fn tuple_locks_promote_to_page() {
 #[test]
 fn read_only_txn_never_aborts_in_simple_overlap() {
     become_backend();
+    let (_gate, xmin) = exclusive();
 
     let (to_t2, from_t1) = mpsc::channel::<()>();
     let (to_t1, from_t2) = mpsc::channel::<()>();
@@ -277,7 +290,7 @@ fn read_only_txn_never_aborts_in_simple_overlap() {
     let t2 = std::thread::spawn(move || {
         become_backend();
         let snap = mvcc_snapshot();
-        crate::engine::test_acquire_sxact(902).unwrap();
+        crate::engine::test_acquire_sxact(xmin).unwrap();
         // Reader: reads A only, never writes.
         crate::engine::PredicateLockPage(TESTDB, 30021, false, 1, &snap).unwrap();
         to_t1.send(()).unwrap();
@@ -288,7 +301,7 @@ fn read_only_txn_never_aborts_in_simple_overlap() {
         to_t1.send(()).unwrap();
     });
 
-    crate::engine::test_acquire_sxact(902).unwrap();
+    crate::engine::test_acquire_sxact(xmin).unwrap();
     from_t2.recv().unwrap();
     // Writer writes A (conflict in from the reader) and commits.
     crate::engine::CheckForSerializableConflictIn(TESTDB, 30021, false, Some((1, 1)), 1).unwrap();
