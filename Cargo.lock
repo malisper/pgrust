@@ -3060,6 +3060,7 @@ name = "instrument"
 version = "0.1.0"
 dependencies = [
  "bufmgr",
+ "fd",
  "types_core",
 ]
 
@@ -3979,9 +3980,11 @@ dependencies = [
  "execexpr",
  "exectuples",
  "executils",
+ "fd",
  "guc_tables",
  "init_small",
  "mcx",
+ "postgres_seams",
  "types_core",
  "types_error",
  "types_nodes",
@@ -3996,6 +3999,7 @@ dependencies = [
  "execexpr",
  "exectuples",
  "executils",
+ "fd",
  "init_small",
  "lsyscache",
  "mcx",

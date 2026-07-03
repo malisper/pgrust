@@ -135,13 +135,21 @@ pub fn exec_re_scan<'mcx>(
             Ok(())
         }
         // ExecReScanHashJoin: single-batch reuse keeps the built table and
-        // jumps to HJ_NEED_NEW_OUTER; the outer child is rescanned (chgParam
-        // NULL until the Param lanes land). The Hash sub-node's child is NOT
-        // rescanned here (the table is reused, not rebuilt).
+        // jumps to HJ_NEED_NEW_OUTER; a multi-batch table is destroyed and
+        // the Hash sub-node's child rescanned for the rebuild. The outer
+        // child is rescanned either way (chgParam NULL until the Param lanes
+        // land).
         PlanStateNode::HashJoin(hj) => {
             let hj = &mut **hj;
+            let inner = ::nodehashjoin::exec_rescan_hash_join(
+                &mut hj.state,
+                &mut hj.hash.state,
+                estate,
+            )?;
+            if inner == ::nodehashjoin::RescanInner::Rescan {
+                exec_re_scan(&mut hj.hash.child, estate)?;
+            }
             exec_re_scan(&mut hj.outer, estate)?;
-            ::nodehashjoin::exec_rescan_hash_join(&mut hj.state, &mut hj.hash.state);
             Ok(())
         }
         // ExecReScanMergeJoin: both children rescanned (chgParam NULL until the

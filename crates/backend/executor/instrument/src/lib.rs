@@ -19,15 +19,18 @@ pub fn instr_time_current() -> instr_time {
     instr_time { ticks: anchor.elapsed().as_nanos() as i64 + 1 }
 }
 
-// pgBufferUsage (instrument.c): shared_blks_* tick in bufmgr::counters; local
-// and temp buffers plus the track_io_timing blk_*_time clocks have no ported
-// writers (nor an installed GUC backing), so their running totals are truly zero.
+// pgBufferUsage (instrument.c): shared_blks_* tick in bufmgr::counters and
+// temp_blks_* in fd::buffile; local buffers plus the track_io_timing
+// blk_*_time clocks have no ported writers (nor an installed GUC backing),
+// so their running totals are truly zero.
 pub fn pg_buffer_usage() -> BufferUsage {
     BufferUsage {
         shared_blks_hit: bufmgr::counters::shared_blks_hit() as i64,
         shared_blks_read: bufmgr::counters::shared_blks_read() as i64,
         shared_blks_dirtied: bufmgr::counters::shared_blks_dirtied() as i64,
         shared_blks_written: bufmgr::counters::shared_blks_written() as i64,
+        temp_blks_read: fd::buffile::temp_blks_read(),
+        temp_blks_written: fd::buffile::temp_blks_written(),
         ..BufferUsage::default()
     }
 }

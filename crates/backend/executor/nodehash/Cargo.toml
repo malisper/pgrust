@@ -6,6 +6,9 @@ publish.workspace = true
 
 [dependencies]
 execexpr = { path = "../execexpr" }
+fd = { path = "../../storage/file/fd" }
+init_small = { path = "../../utils/init/init_small" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
 exectuples = { path = "../exectuples" }
 executils = { path = "../executils" }
 guc_tables = { path = "../../utils/misc/guc_tables" }
@@ -16,5 +19,3 @@ types_nodes = { path = "../../../_support/types/nodes" }
 types_slot = { path = "../../../_support/types/types_slot" }
 types_tuple = { path = "../../../_support/types/types_tuple" }
 
-[dev-dependencies]
-init_small = { path = "../../utils/init/init_small" }

@@ -8,7 +8,8 @@ use types_nodes::plannodes::PlannedStmt;
 use types_portal::{ParamListHandle, QueryDescHandle, QueryEnvHandle};
 use types_scan::sdir::ScanDirection;
 use types_core::instrument::{
-    AggregateInstrumentation, IncrementalSortInfo, Instrumentation, TuplesortInstrumentation,
+    AggregateInstrumentation, HashInstrumentation, IncrementalSortInfo, Instrumentation,
+    TuplesortInstrumentation,
 };
 use types_snapshot::SnapshotData;
 use types_tuple::TupleDescData;
@@ -112,6 +113,13 @@ seam_core::seam!(
         query_desc: QueryDescHandle,
         plan_node_id: i32,
     ) -> Option<IncrementalSortInfo>
+);
+
+seam_core::seam!(
+    pub fn query_desc_hash_instrument(
+        query_desc: QueryDescHandle,
+        plan_node_id: i32,
+    ) -> Option<HashInstrumentation>
 );
 
 seam_core::seam!(

@@ -397,7 +397,7 @@ pub(crate) fn execute_plan<'m, 'mcx>(
     }
 
     if estate.es_top_eflags & EXEC_FLAG_BACKWARD == 0 {
-        exec_shutdown_node(planstate);
+        exec_shutdown_node(planstate, estate);
     }
     Ok(())
 }

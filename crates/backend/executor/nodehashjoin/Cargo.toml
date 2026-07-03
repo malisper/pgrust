@@ -6,6 +6,7 @@ publish.workspace = true
 
 [dependencies]
 execexpr = { path = "../execexpr" }
+fd = { path = "../../storage/file/fd" }
 exectuples = { path = "../exectuples" }
 executils = { path = "../executils" }
 init_small = { path = "../../utils/init/init_small" }

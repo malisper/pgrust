@@ -14,7 +14,8 @@ use ::mcx::{Mcx, McxOwned, MemoryContext, PgVec};
 use ::queryenvironment::QueryEnvironment;
 use ::snapmgr::Snapshot;
 use ::types_core::instrument::{
-    AggregateInstrumentation, IncrementalSortInfo, Instrumentation, TuplesortInstrumentation,
+    AggregateInstrumentation, HashInstrumentation, IncrementalSortInfo, Instrumentation,
+    TuplesortInstrumentation,
 };
 use ::types_core::CommandId;
 use ::types_error::{PgError, PgResult};
@@ -114,6 +115,9 @@ pub struct EcxtId(pub u32);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExecSlotId(pub u32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuxCxtId(pub u32);
 
 pub type ExprContextCallbackFunction = for<'a> fn(Mcx<'a>, Datum);
 
@@ -242,6 +246,10 @@ pub struct EStateData<'mcx> {
     pub es_agg_instrumentation: PgVec<'mcx, (i32, AggregateInstrumentation)>,
     pub es_sort_instrumentation: PgVec<'mcx, (i32, TuplesortInstrumentation)>,
     pub es_incsort_instrumentation: PgVec<'mcx, (i32, IncrementalSortInfo)>,
+    pub es_hash_instrumentation: PgVec<'mcx, (i32, HashInstrumentation)>,
+    // Node-owned resettable contexts (C's node-local AllocSets): droppy, so
+    // they live in the estate owner; nodes hold AuxCxtId (docs/no-drop.md).
+    es_aux_contexts: PgVec<'mcx, MemoryContext>,
     pub es_finished: bool,
     es_exprcontexts: PgVec<'mcx, Option<ExprContextData<'mcx>>>,
     pub es_subplanstates: PgVec<'mcx, SubplanStateCell>,
@@ -305,6 +313,8 @@ impl<'mcx> EStateData<'mcx> {
             es_agg_instrumentation: PgVec::new_in(mcx),
             es_sort_instrumentation: PgVec::new_in(mcx),
             es_incsort_instrumentation: PgVec::new_in(mcx),
+            es_hash_instrumentation: PgVec::new_in(mcx),
+            es_aux_contexts: PgVec::new_in(mcx),
             es_finished: false,
             es_exprcontexts: PgVec::new_in(mcx),
             es_subplanstates: PgVec::new_in(mcx),
@@ -369,6 +379,53 @@ impl<'mcx> EStateData<'mcx> {
     /// `CreateWorkExprContext`; the bump backend has no work_mem block dial.
     pub fn create_work_expr_context(&mut self) -> EcxtId {
         self.create_expr_context()
+    }
+
+    pub fn create_aux_context(&mut self, name: &'static str) -> AuxCxtId {
+        let cxt = self.es_query_cxt.context().new_child_bump(name);
+        let id = AuxCxtId(self.es_aux_contexts.len() as u32);
+        self.es_aux_contexts.push(cxt);
+        id
+    }
+
+    #[inline]
+    pub fn aux_mcx(&self, id: AuxCxtId) -> Mcx<'_> {
+        self.es_aux_contexts[id.0 as usize].mcx()
+    }
+
+    /// Wholesale reset; every pointer into the context is dead after this.
+    pub fn reset_aux_context(&mut self, id: AuxCxtId) {
+        self.es_aux_contexts[id.0 as usize].reset();
+    }
+
+    /// The disjoint borrows a spill consumer needs: one slot plus an aux
+    /// context, without aliasing es_tupleTable.
+    #[inline]
+    pub fn slot_and_aux_mcx(
+        &mut self,
+        slot: ExecSlotId,
+        aux: AuxCxtId,
+    ) -> (&mut SlotData<'mcx>, Mcx<'_>) {
+        (
+            &mut self.es_tupleTable[slot.0 as usize],
+            self.es_aux_contexts[aux.0 as usize].mcx(),
+        )
+    }
+
+    /// One slot plus an expr context's per-tuple scratch, disjointly.
+    #[inline]
+    pub fn slot_and_per_tuple_mcx(
+        &mut self,
+        slot: ExecSlotId,
+        ecxt: EcxtId,
+    ) -> (&mut SlotData<'mcx>, Mcx<'_>) {
+        (
+            &mut self.es_tupleTable[slot.0 as usize],
+            self.es_exprcontexts[ecxt.0 as usize]
+                .as_ref()
+                .expect("expr context is live")
+                .per_tuple_mcx(),
+        )
     }
 
     /// `ExecAssignExprContext`: PlanState.ps_ExprContext stores the id.

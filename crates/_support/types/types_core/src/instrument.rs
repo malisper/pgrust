@@ -214,3 +214,24 @@ pub struct AggregateInstrumentation {
     pub hash_batches_used: i32,
     pub hash_planned_partitions: i32,
 }
+
+// C HashInstrumentation (execnodes.h).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct HashInstrumentation {
+    pub nbuckets: i32,
+    pub nbuckets_original: i32,
+    pub nbatch: i32,
+    pub nbatch_original: i32,
+    pub space_peak: u64,
+}
+
+impl HashInstrumentation {
+    /// `ExecHashAccumInstrumentation`: per-field maxima across instances.
+    pub fn accum(&mut self, other: &HashInstrumentation) {
+        self.nbuckets = self.nbuckets.max(other.nbuckets);
+        self.nbuckets_original = self.nbuckets_original.max(other.nbuckets_original);
+        self.nbatch = self.nbatch.max(other.nbatch);
+        self.nbatch_original = self.nbatch_original.max(other.nbatch_original);
+        self.space_peak = self.space_peak.max(other.space_peak);
+    }
+}
