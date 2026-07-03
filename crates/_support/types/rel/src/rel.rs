@@ -16,11 +16,10 @@ use crate::pg_class::{FormData_pg_class, RELKIND_HAS_STORAGE, RELKIND_RELATION};
 use crate::pg_index::FormData_pg_index;
 use crate::reloptions::RdOptions;
 
-// RelationData (utils/rel.h) trimmed to the fields ports consume. Cell fields
-// are the ones C writes through the backend-shared relcache entry pointer
-// (invalidation, subxact tracking, pgstat arming); a backend is one thread, so
-// Cell is the plain-store rendering of those writes. rd_locator/rd_smgr wait
-// on the storage unit; rd_refcnt is the handle Rc's strong count.
+// RelationData (utils/rel.h) trimmed to the fields ports consume. Cell fields are
+// the ones C writes through the backend-shared relcache entry pointer (inval, subxact
+// tracking, pgstat arming); one backend = one thread, so Cell is the plain-store
+// rendering. rd_locator/rd_smgr wait on storage; rd_refcnt is the Rc strong count.
 #[derive(Debug)]
 pub struct RelationData<'mcx> {
     pub rd_id: Oid,
@@ -41,15 +40,23 @@ pub struct RelationData<'mcx> {
     pub rd_indcollation: PgVec<'mcx, Oid>,
     pub rd_options: Option<RdOptions>,
     pub pgstat_enabled: Cell<bool>,
-    // C rd_amcache (rule-5 cache): btree keeps a BTMetaPageData copy here so
-    // descents skip the metapage read; becomes an enum when another AM lands.
-    // Cleared with the entry on relcache rebuild, as C pfrees it.
+    // C rd_amcache (rule-5 cache): btree's BTMetaPageData copy, so descents skip
+    // the metapage read; enum when another AM lands; cleared with the entry as C pfrees it.
     pub rd_amcache: Cell<Option<RdAmCacheBtree>>,
-    // C rd_support/rd_supportinfo (rule-5 cache): support procs resolved once
-    // per column per relcache entry; None until index_getprocinfo's first use.
-    // std Vec justified: the entry is an Rc-owned owner structure outside the
-    // arenas (like rd_att), written once per relation, and FmgrInfo is droppy.
+    // C rd_support/rd_supportinfo (rule-5 cache), resolved once per column;
+    // std Vec justified: Rc-owned owner structure outside the arenas, FmgrInfo is droppy.
     pub rd_supportinfo: RefCell<Vec<Option<FmgrInfo>>>,
+    // C rd_indexlist family (rule-5 cache): None == !rd_indexvalid, inval clears it;
+    // 'static (CacheMemoryContext copy, as C's) keeps RelationData covariant in 'mcx.
+    pub rd_indexlist: RefCell<Option<RdIndexList>>,
+}
+
+#[derive(Debug)]
+pub struct RdIndexList {
+    pub list: PgVec<'static, Oid>,
+    pub pkindex: Oid,
+    pub ispkdeferrable: bool,
+    pub replidindex: Oid,
 }
 
 pub type RdAmCacheBtree = BTMetaPageData;
@@ -298,6 +305,7 @@ mod tests {
             pgstat_enabled: Cell::new(false),
             rd_amcache: Default::default(),
             rd_supportinfo: Default::default(),
+            rd_indexlist: Default::default(),
         }
     }
 

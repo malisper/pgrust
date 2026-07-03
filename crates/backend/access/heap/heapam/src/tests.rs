@@ -300,6 +300,7 @@ fn test_relation<'mcx>(mcx: Mcx<'mcx>, oid: Oid) -> Relation<'mcx> {
         pgstat_enabled: std::cell::Cell::new(true),
         rd_amcache: Default::default(),
         rd_supportinfo: Default::default(),
+        rd_indexlist: Default::default(),
     };
     Relation::open(data, None)
 }

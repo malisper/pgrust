@@ -44,3 +44,21 @@ seam_core::seam!(
         form: &FormData_pg_class,
     ) -> PgResult<IndexAccessInfo>
 );
+
+pub struct PgIndexListShape {
+    pub indexrelid: Oid,
+    pub indislive: bool,
+    pub indisunique: bool,
+    pub indisprimary: bool,
+    pub indimmediate: bool,
+    pub indisvalid: bool,
+    pub indisreplident: bool,
+    pub has_indpred: bool,
+}
+
+seam_core::seam!(
+    pub fn scan_pg_index_shapes<'mcx>(
+        mcx: Mcx<'mcx>,
+        indrelid: Oid,
+    ) -> PgResult<PgVec<'mcx, PgIndexListShape>>
+);

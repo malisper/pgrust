@@ -465,6 +465,7 @@ mod scanfix {
             pgstat_enabled: std::cell::Cell::new(true),
             rd_amcache: Default::default(),
             rd_supportinfo: Default::default(),
+            rd_indexlist: Default::default(),
         };
         Ok(Relation::open(data, Some(record_close)))
     }
@@ -589,4 +590,43 @@ fn exec_clean_type_from_tl_skips_junk() {
     assert_eq!(clean.attr(0).attname.name_str(), b"a");
     let full = crate::exec_type_from_tl(&tlist).unwrap();
     assert_eq!(full.natts, 2);
+}
+
+// Refcount-ownership proof (lib.rs desc_mcx): a portal-style clone held past
+// ExecutorEnd, then dropped, returns every desc byte to the context.
+#[test]
+fn desc_context_stays_flat_across_statements() {
+    install_seams();
+    let mcx = leaked_mcx();
+    let pstmt = mk_select1_pstmt(mcx, None);
+    let cycle = || {
+        let qd = execmain_seams::create_query_desc::call(
+            pstmt,
+            "SELECT 1",
+            None,
+            None,
+            CommandDest::None,
+            ParamListHandle::NULL,
+            QueryEnvHandle::NULL,
+            0,
+        )
+        .unwrap();
+        execmain_seams::executor_start::call(qd, 0).unwrap();
+        let portal_held = execmain_seams::query_desc_result_tupdesc::call(qd).unwrap();
+        let mut dest = DestReceiver::DoNothing;
+        execmain_seams::executor_run::call(qd, ForwardScanDirection, 0, &mut dest).unwrap();
+        execmain_seams::executor_finish::call(qd).unwrap();
+        execmain_seams::executor_end::call(qd).unwrap();
+        execmain_seams::free_query_desc::call(qd);
+        drop(portal_held);
+    };
+    cycle();
+    let ctx = crate::desc_mcx().context();
+    let used_after_first = ctx.used();
+    let peak_after_first = ctx.peak();
+    for _ in 0..(if cfg!(miri) { 20 } else { 1000 }) {
+        cycle();
+    }
+    assert_eq!(ctx.used(), used_after_first, "desc context grew across statements");
+    assert_eq!(ctx.peak(), peak_after_first, "desc context peak grew across statements");
 }
