@@ -139,6 +139,8 @@ fn invalid_sxact_fast_paths_and_installs() {
     assert!(predicate_seams::check_for_serializable_conflict_out_needed::is_installed());
     assert!(predicate_seams::check_for_serializable_conflict_out::is_installed());
     assert!(predicate_seams::check_for_serializable_conflict_in::is_installed());
+    assert!(predicate_seams::check_table_for_serializable_conflict_in::is_installed());
+    assert!(predicate_seams::transfer_predicate_locks_to_heap_relation::is_installed());
     assert!(predicate_seams::predicate_lock_page_split::is_installed());
     assert!(predicate_seams::get_serializable_transaction_snapshot::is_installed());
 }

@@ -56,7 +56,6 @@ thread_local! {
     static MAX_PREDICATE_LOCKS_PER_XACT: Cell<i32> = const { Cell::new(64) };
     static MAX_PREDICATE_LOCKS_PER_RELATION: Cell<i32> = const { Cell::new(-2) };
     static MAX_PREDICATE_LOCKS_PER_PAGE: Cell<i32> = const { Cell::new(2) };
-    static SERIALIZABLE_BUFFERS: Cell<i32> = const { Cell::new(32) };
 }
 
 pub fn max_predicate_locks_per_xact() -> i32 {
@@ -77,13 +76,6 @@ pub fn max_predicate_locks_per_page() -> i32 {
 pub fn set_max_predicate_locks_per_page(v: i32) {
     MAX_PREDICATE_LOCKS_PER_PAGE.with(|c| c.set(v));
 }
-pub fn serializable_buffers() -> i32 {
-    SERIALIZABLE_BUFFERS.with(|c| c.get())
-}
-pub fn set_serializable_buffers(v: i32) {
-    SERIALIZABLE_BUFFERS.with(|c| c.set(v));
-}
-
 static SCRATCH_TARGET_TAG: PREDICATELOCKTARGETTAG = ZERO_TARGET_TAG;
 
 struct Shared {
@@ -2238,6 +2230,15 @@ pub fn CheckForSerializableConflictIn(
         CheckTargetForConflictsIn(&mut targettag)?;
         Ok(())
     }
+}
+
+pub fn TransferPredicateLocksToHeapRelation() -> PgResult<()> {
+    unsafe {
+        if !TransactionIdIsValid((*shared().pred_xact).SxactGlobalXmin) {
+            return Ok(());
+        }
+    }
+    panic!("DropAllPredicateLocksFromTable transfer arm (predicate.c) reached with a live serializable transaction; not ported")
 }
 
 pub fn CheckTableForSerializableConflictIn(

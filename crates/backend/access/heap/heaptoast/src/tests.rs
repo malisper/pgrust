@@ -171,7 +171,9 @@ fn install_seams() {
         combocid_seams::heap_tuple_header_get_cmax::set(|hdr| hdr.raw_command_id());
         multixact_seams::multi_xact_id_set_oldest_member::set(|| Ok(()));
         predicate_seams::check_for_serializable_conflict_in::set(|_, _, _| Ok(()));
-        predicate_seams::check_for_serializable_conflict_out_needed::set(|_, _| false);
+        predicate_seams::check_table_for_serializable_conflict_in::set(|_rel| Ok(()));
+        predicate_seams::transfer_predicate_locks_to_heap_relation::set(|_rel| Ok(()));
+        predicate_seams::check_for_serializable_conflict_out_needed::set(|_, _| Ok(false));
         predicate_seams::predicate_lock_relation::set(|_, _| Ok(()));
         predicate_seams::predicate_lock_tid::set(|_, _, _, _| Ok(()));
         predicate_seams::predicate_lock_page::set(|_, _, _| Ok(()));

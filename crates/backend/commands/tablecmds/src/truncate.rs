@@ -3,7 +3,7 @@
 // CASCADE, no RESTART IDENTITY (sequence lane).
 use datum::Datum;
 use mcx::Mcx;
-use types_core::{AttrNumber, InvalidBlockNumber, InvalidOid, Oid, RELATION_RELATION_ID};
+use types_core::{AttrNumber, InvalidOid, Oid, RELATION_RELATION_ID};
 use types_error::{PgError, PgResult, ERRCODE_WRONG_OBJECT_TYPE, ERROR, NOTICE};
 use types_nodes::parsenodes::{DropBehavior, ObjectType, TruncateStmt};
 use types_rel::{
@@ -163,11 +163,7 @@ fn ExecuteTruncateGuts<'mcx>(
         {
             catalog_heap::heap_truncate_one_rel(mcx, rel)?;
         } else {
-            predicate_seams::check_for_serializable_conflict_in::call(
-                rel,
-                None,
-                InvalidBlockNumber,
-            )?;
+            predicate_seams::check_table_for_serializable_conflict_in::call(rel)?;
             catalog_index::RelationSetNewRelfilenumber(mcx, rel, rel.rd_rel.relpersistence)?;
 
             let heap_relid = rel.rd_id;
