@@ -6360,12 +6360,39 @@ dependencies = [
  "multixact",
  "nbtree_xlog",
  "relmapper",
+ "rmgrdesc",
  "standby",
  "storage_xlog",
  "stringinfo",
  "transam_xlog_seams",
  "types_core",
  "types_error",
+ "xact",
+ "xlogreader_seams",
+]
+
+[[package]]
+name = "rmgrdesc"
+version = "0.0.0"
+dependencies = [
+ "adt_datetime",
+ "adt_timestamp",
+ "clog",
+ "controldata_utils",
+ "heapam_xlog",
+ "mcx",
+ "multixact",
+ "relmapper",
+ "relpath_seams",
+ "rmgr",
+ "standby",
+ "storage_xlog",
+ "stringinfo",
+ "types_core",
+ "types_error",
+ "types_nbtree",
+ "types_storage",
+ "types_tuple",
  "xact",
  "xlogreader_seams",
 ]
@@ -8043,6 +8070,22 @@ dependencies = [
  "types_core",
  "types_error",
  "types_storage",
+]
+
+[[package]]
+name = "waldesc"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "mcx",
+ "relpath",
+ "rmgr",
+ "rmgrdesc",
+ "stringinfo",
+ "types_core",
+ "types_error",
+ "xlogreader",
+ "xlogreader_seams",
 ]
 
 [[package]]

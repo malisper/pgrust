@@ -177,6 +177,18 @@ impl<'mcx> StringInfo<'mcx> {
         self.append_bytes(s.as_bytes())
     }
 
+    // C's `buf->len = n; buf->data[n] = '\0'` roll-back idiom (rmgrdesc).
+    #[inline]
+    pub fn truncate(&mut self, new_len: usize) {
+        if new_len < self.data.len() {
+            // SAFETY: new_len < len <= capacity; slot new_len is allocated.
+            unsafe {
+                self.data.set_len(new_len);
+                *self.data.as_mut_ptr().add(new_len) = 0;
+            }
+        }
+    }
+
     #[inline]
     pub fn append_byte(&mut self, ch: u8) -> PgResult<()> {
         if self.data.capacity().wrapping_sub(self.data.len()) < 2 {
