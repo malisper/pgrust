@@ -18,9 +18,10 @@ mod steps;
 mod tests;
 
 pub use compile::{
-    exec_build_agg_projection_info, exec_build_agg_trans, exec_build_projection_info,
-    exec_init_expr, exec_init_qual, expr_type, AggBind, AggTransSpec, INDEX_VAR, INNER_VAR,
-    OUTER_VAR,
+    exec_build_agg_projection_info, exec_build_agg_trans, exec_build_agg_trans_hashed,
+    exec_build_grouping_equal,
+    exec_build_hash32_from_attrs, exec_build_projection_info, exec_init_expr, exec_init_qual,
+    expr_type, AggBind, AggTransSpec, INDEX_VAR, INNER_VAR, OUTER_VAR,
 };
 pub use interp::{exec_eval_expr, exec_project, exec_qual, EvalSlots};
 pub use steps::{AggPerGroup, CmpOp, ExprState, Kernel, OutRef, SlotSrc, Step};

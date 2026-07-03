@@ -174,6 +174,7 @@ impl<'mcx> TupleTableSlot<'mcx> {
 
 pub type SlotBase<'mcx> = TupleTableSlot<'mcx>;
 
+#[repr(C)]
 pub struct VirtualTupleTableSlot<'mcx> {
     pub base: SlotBase<'mcx>,
     pub data: PgVec<'mcx, u8>,
@@ -181,12 +182,14 @@ pub struct VirtualTupleTableSlot<'mcx> {
 
 // C's HeapTuple pointer + inline tupdata workspace collapse into one by-value
 // HeapTupleData.
+#[repr(C)]
 pub struct HeapTupleTableSlot<'mcx> {
     pub base: SlotBase<'mcx>,
     pub tuple: Option<HeapTupleData<'mcx>>,
     pub off: u32,
 }
 
+#[repr(C)]
 pub struct BufferHeapTupleTableSlot<'mcx> {
     pub base: HeapTupleTableSlot<'mcx>,
     // While not InvalidBuffer the slot holds a pin on that page (SHOULDFREE
@@ -194,6 +197,7 @@ pub struct BufferHeapTupleTableSlot<'mcx> {
     pub buffer: Buffer,
 }
 
+#[repr(C)]
 pub struct MinimalTupleTableSlot<'mcx> {
     pub base: SlotBase<'mcx>,
     // The wrapper header sits MINIMAL_TUPLE_OFFSET before the minimal body so
@@ -204,6 +208,11 @@ pub struct MinimalTupleTableSlot<'mcx> {
     pub off: u32,
 }
 
+// repr(C, u8) + base-first repr(C) payloads: every variant's SlotBase sits at
+// one fixed offset (C's "TupleTableSlot is the first member" inheritance), so
+// base()/base_mut() compile to a constant GEP -- no per-access variant probe
+// (exectuples record's justified 1.4x generic-getattr class closes on this).
+#[repr(C, u8)]
 pub enum SlotData<'mcx> {
     Virtual(VirtualTupleTableSlot<'mcx>),
     Heap(HeapTupleTableSlot<'mcx>),

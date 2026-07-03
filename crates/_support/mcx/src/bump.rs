@@ -195,21 +195,12 @@ impl BumpArena {
 
     // Post-reset the window re-opens over the keeper (kept charged by the
     // caller): the next alloc takes the plain bump path, as C's BumpReset
-    // leaves the keeper in mem_allocated with freeptr rewound.
+    // leaves the keeper in mem_allocated with freeptr rewound. The common
+    // reset (everything fit in the keeper) frees nothing — window rewind only.
+    #[inline]
     pub(crate) fn reset(&mut self) {
-        if !self.oversize.is_empty() {
-            for (p, layout) in self.oversize.drain(..) {
-                self.mem_allocated -= layout.size();
-                // SAFETY: reset's &mut proves no oversize chunk is still in use.
-                unsafe { Global.deallocate(p, layout) };
-            }
-        }
-        if self.blocks.len() > 1 {
-            for b in self.blocks.drain(1..) {
-                self.mem_allocated -= b.size;
-                // SAFETY: reset's &mut proves no chunk in these blocks is in use.
-                unsafe { b.free() };
-            }
+        if !self.oversize.is_empty() || self.blocks.len() > 1 {
+            self.free_extra_blocks();
         }
         match self.blocks.first_mut() {
             Some(k) => {
@@ -226,6 +217,23 @@ impl BumpArena {
         }
         self.next_block_size = INIT_BLOCK_SIZE;
         debug_assert_eq!(self.mem_allocated, self.blocks.first().map_or(0, |b| b.size));
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn free_extra_blocks(&mut self) {
+        for (p, layout) in self.oversize.drain(..) {
+            self.mem_allocated -= layout.size();
+            // SAFETY: reset's &mut proves no oversize chunk is still in use.
+            unsafe { Global.deallocate(p, layout) };
+        }
+        if self.blocks.len() > 1 {
+            for b in self.blocks.drain(1..) {
+                self.mem_allocated -= b.size;
+                // SAFETY: reset's &mut proves no chunk in these blocks is in use.
+                unsafe { b.free() };
+            }
+        }
     }
 }
 
