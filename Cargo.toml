@@ -228,6 +228,8 @@ members = [
     "crates/backend/access/heap/vacuumlazy",
     "crates/backend/access/table/tableam_seams",
     "crates/backend/commands/analyze",
+    "crates/backend/commands/statscmds",
+    "crates/backend/statistics/statistics",
     "crates/backend/commands/vacuum_seams",
     "crates/backend/commands/cluster",
     "crates/backend/commands/cluster_seams",
