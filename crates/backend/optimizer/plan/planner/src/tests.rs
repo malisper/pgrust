@@ -15,11 +15,12 @@ use crate::planner;
 // Serializes tests that flip or observe planner strategy GUCs.
 pub(crate) static GUC_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-fn install_fixtures() {
+pub(crate) fn install_fixtures() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         crate::init_seams();
         backend_status_seams::pgstat_report_plan_id::set(|_, _| {});
+        postgres_seams::check_for_interrupts::set(|| Ok(()));
         syscache_seams::lookup_pg_type_shape::set(|typid| {
             Ok(match typid {
                 23 => Some(PgTypeShape {
@@ -531,7 +532,7 @@ fn install_scan_fixtures() {
     // cache, fed by pg_class/pg_index fixtures underneath its build seams.
     relcache_build_seams::scan_pg_relation::set(|relid, _, _| {
         Ok((relid == TBL).then(|| relcache_build_seams::ScannedPgClass {
-            relchecks: 0, relhastriggers: false,
+            relchecks: 0, relhastriggers: false, relhasrules: false,
             form: make_pg_class(TBL, "t", b'r', 2, true),
             options: None,
         }))
@@ -641,12 +642,12 @@ fn make_rel_data<'mcx>(
         rd_options: None,
         pgstat_enabled: Cell::new(false),
         rd_amcache: Default::default(),
-        rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(),
+        rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(), rd_amcache_spgist: Default::default(),
         rd_support: mcx::PgVec::new_in(mcx),
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
-            rd_hastriggers: false,
+            rd_hastriggers: false, rd_hasrules: false,
     }
 }
 

@@ -29,6 +29,7 @@ pub mod planmain;
 pub mod prep;
 pub mod prepunion;
 pub mod prepqual;
+pub mod predtest;
 pub mod prepjointree;
 pub mod prepagg;
 pub mod relnode;
@@ -107,26 +108,7 @@ pub mod gucs {
         };
     }
 
-    real_guc!(CPU_TUPLE_COST, cpu_tuple_cost, set_cpu_tuple_cost, guc_tables::consts::DEFAULT_CPU_TUPLE_COST);
-    real_guc!(SEQ_PAGE_COST, seq_page_cost, set_seq_page_cost, guc_tables::consts::DEFAULT_SEQ_PAGE_COST);
-    real_guc!(RANDOM_PAGE_COST, random_page_cost, set_random_page_cost, guc_tables::consts::DEFAULT_RANDOM_PAGE_COST);
-    real_guc!(CPU_INDEX_TUPLE_COST, cpu_index_tuple_cost, set_cpu_index_tuple_cost, guc_tables::consts::DEFAULT_CPU_INDEX_TUPLE_COST);
-    real_guc!(CPU_OPERATOR_COST, cpu_operator_cost, set_cpu_operator_cost, guc_tables::consts::DEFAULT_CPU_OPERATOR_COST);
-    int_guc!(EFFECTIVE_CACHE_SIZE, effective_cache_size, set_effective_cache_size, guc_tables::consts::DEFAULT_EFFECTIVE_CACHE_SIZE);
-    bool_guc!(ENABLE_SEQSCAN, enable_seqscan, set_enable_seqscan, true);
-    bool_guc!(ENABLE_INDEXSCAN, enable_indexscan, set_enable_indexscan, true);
-    bool_guc!(ENABLE_INDEXONLYSCAN, enable_indexonlyscan, set_enable_indexonlyscan, true);
-    bool_guc!(ENABLE_BITMAPSCAN, enable_bitmapscan, set_enable_bitmapscan, true);
-    bool_guc!(ENABLE_HASHAGG, enable_hashagg, set_enable_hashagg, true);
-    bool_guc!(ENABLE_SORT, enable_sort, set_enable_sort, true);
-    bool_guc!(ENABLE_NESTLOOP, enable_nestloop, set_enable_nestloop, true);
-    bool_guc!(ENABLE_HASHJOIN, enable_hashjoin, set_enable_hashjoin, true);
-    bool_guc!(ENABLE_MERGEJOIN, enable_mergejoin, set_enable_mergejoin, true);
-    bool_guc!(ENABLE_MATERIAL, enable_material, set_enable_material, true);
-    bool_guc!(ENABLE_MEMOIZE, enable_memoize, set_enable_memoize, true);
-    bool_guc!(ENABLE_INCREMENTAL_SORT, enable_incremental_sort, set_enable_incremental_sort, true);
-    bool_guc!(ENABLE_GROUP_BY_REORDERING, enable_group_by_reordering, set_enable_group_by_reordering, true);
-    bool_guc!(ENABLE_DISTINCT_REORDERING, enable_distinct_reordering, set_enable_distinct_reordering, true);
+    pub use ::costsize::gucs::*;
     real_guc!(CURSOR_TUPLE_FRACTION, cursor_tuple_fraction, set_cursor_tuple_fraction, 0.1);
     real_guc!(JIT_ABOVE_COST, jit_above_cost, set_jit_above_cost, 100000.0);
     real_guc!(JIT_OPTIMIZE_ABOVE_COST, jit_optimize_above_cost, set_jit_optimize_above_cost, 500000.0);
@@ -144,63 +126,20 @@ pub fn init_seams() {
     planner_seams::planner::set(|mcx, parse, query_string, cursor_options, bound_params| {
         planner(mcx, parse, query_string, cursor_options, bound_params)
     });
+    planner_seams::clauselist_selectivity::set(crate::clausesel::clauselist_selectivity);
+    planner_seams::clause_selectivity::set(crate::clausesel::clause_selectivity);
+    planner_seams::make_restrictinfo::set(crate::initsplan::make_restrictinfo);
+    planner_seams::amcostestimate::set(crate::selfuncs::amcostestimate);
+    planner_seams::estimate_num_groups::set(crate::selfuncs::estimate_num_groups);
+    planner_seams::estimate_num_groups_estinfo::set(crate::selfuncs::estimate_num_groups_estinfo);
+    planner_seams::estimate_array_length::set(crate::selfuncs::estimate_array_length);
+    planner_seams::mergejoinscansel::set(crate::selfuncs::mergejoinscansel);
+    planner_seams::estimate_hash_bucket_stats::set(crate::selfuncs::estimate_hash_bucket_stats);
+    planner_seams::add_function_cost::set(crate::plancat::add_function_cost);
+    planner_seams::get_function_rows::set(crate::plancat::get_function_rows);
+    planner_seams::get_rel_data_width::set(crate::plancat::get_rel_data_width);
+    planner_seams::match_index_to_operand::set(crate::indxpath::match_index_to_operand);
     use guc_tables::GucVarAccessors;
-    guc_tables::vars::cpu_tuple_cost
-        .install(GucVarAccessors { get: gucs::cpu_tuple_cost, set: gucs::set_cpu_tuple_cost });
-    guc_tables::vars::seq_page_cost
-        .install(GucVarAccessors { get: gucs::seq_page_cost, set: gucs::set_seq_page_cost });
-    guc_tables::vars::random_page_cost
-        .install(GucVarAccessors { get: gucs::random_page_cost, set: gucs::set_random_page_cost });
-    guc_tables::vars::cpu_index_tuple_cost.install(GucVarAccessors {
-        get: gucs::cpu_index_tuple_cost,
-        set: gucs::set_cpu_index_tuple_cost,
-    });
-    guc_tables::vars::cpu_operator_cost.install(GucVarAccessors {
-        get: gucs::cpu_operator_cost,
-        set: gucs::set_cpu_operator_cost,
-    });
-    guc_tables::vars::effective_cache_size.install(GucVarAccessors {
-        get: gucs::effective_cache_size,
-        set: gucs::set_effective_cache_size,
-    });
-    guc_tables::vars::enable_seqscan
-        .install(GucVarAccessors { get: gucs::enable_seqscan, set: gucs::set_enable_seqscan });
-    guc_tables::vars::enable_indexscan
-        .install(GucVarAccessors { get: gucs::enable_indexscan, set: gucs::set_enable_indexscan });
-    guc_tables::vars::enable_indexonlyscan.install(GucVarAccessors {
-        get: gucs::enable_indexonlyscan,
-        set: gucs::set_enable_indexonlyscan,
-    });
-    guc_tables::vars::enable_bitmapscan.install(GucVarAccessors {
-        get: gucs::enable_bitmapscan,
-        set: gucs::set_enable_bitmapscan,
-    });
-    guc_tables::vars::enable_sort
-        .install(GucVarAccessors { get: gucs::enable_sort, set: gucs::set_enable_sort });
-    guc_tables::vars::enable_nestloop
-        .install(GucVarAccessors { get: gucs::enable_nestloop, set: gucs::set_enable_nestloop });
-    guc_tables::vars::enable_hashjoin
-        .install(GucVarAccessors { get: gucs::enable_hashjoin, set: gucs::set_enable_hashjoin });
-    guc_tables::vars::enable_mergejoin
-        .install(GucVarAccessors { get: gucs::enable_mergejoin, set: gucs::set_enable_mergejoin });
-    guc_tables::vars::enable_material
-        .install(GucVarAccessors { get: gucs::enable_material, set: gucs::set_enable_material });
-    guc_tables::vars::enable_memoize
-        .install(GucVarAccessors { get: gucs::enable_memoize, set: gucs::set_enable_memoize });
-    guc_tables::vars::enable_incremental_sort.install(GucVarAccessors {
-        get: gucs::enable_incremental_sort,
-        set: gucs::set_enable_incremental_sort,
-    });
-    guc_tables::vars::enable_hashagg
-        .install(GucVarAccessors { get: gucs::enable_hashagg, set: gucs::set_enable_hashagg });
-    guc_tables::vars::enable_group_by_reordering.install(GucVarAccessors {
-        get: gucs::enable_group_by_reordering,
-        set: gucs::set_enable_group_by_reordering,
-    });
-    guc_tables::vars::enable_distinct_reordering.install(GucVarAccessors {
-        get: gucs::enable_distinct_reordering,
-        set: gucs::set_enable_distinct_reordering,
-    });
     guc_tables::vars::cursor_tuple_fraction.install(GucVarAccessors {
         get: gucs::cursor_tuple_fraction,
         set: gucs::set_cursor_tuple_fraction,
@@ -397,39 +336,4 @@ fn is_parallel_worker() -> bool {
     false
 }
 
-// is_parallel_safe (clauses.c) over a PathTarget's exprs; C passes the List*.
-pub(crate) fn is_parallel_safe_exprs(run: &PlannerRun<'_>, target: PtId) -> PgResult<bool> {
-    if run.glob.max_parallel_hazard == b's' as i8 && run.glob.param_exec_types.is_nil() {
-        return Ok(true);
-    }
-    let mcx = run.mcx;
-    let mut list = NodeList::nil();
-    let n = run.root.pathtarget(target).exprs.len();
-    for i in 0..n {
-        let id = run.root.pathtarget(target).exprs[i];
-        list.lappend(mcx, *run.root.expr_node(id))?;
-    }
-    let node = Node::mk_list(mcx, list)?;
-    clauses::is_parallel_safe(
-        run.glob.max_parallel_hazard,
-        run.glob.param_exec_types.is_nil(),
-        &[],
-        node,
-    )
-}
-
-pub(crate) fn is_parallel_safe_opt(
-    run: &PlannerRun<'_>,
-    node: Option<Node<'_>>,
-) -> PgResult<bool> {
-    match node {
-        // C is_parallel_safe(root, NULL): the walker sees nothing unsafe.
-        None => Ok(true),
-        Some(n) => clauses::is_parallel_safe(
-            run.glob.max_parallel_hazard,
-            run.glob.param_exec_types.is_nil(),
-            &[],
-            n,
-        ),
-    }
-}
+pub(crate) use clauses::{is_parallel_safe_exprs, is_parallel_safe_opt};

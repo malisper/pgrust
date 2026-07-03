@@ -9,6 +9,7 @@ use crate::pathnode::{add_existing_path, create_pathtarget, create_projection_pa
 use crate::planmain::{fetch_final_rel, query_planner};
 use crate::prep::preprocess_targetlist;
 use crate::run::PlannerRun;
+pub(crate) use types_pathnodes::run::sortgrouplist_exprs;
 use crate::{is_parallel_safe_exprs, is_parallel_safe_opt};
 
 pub fn grouping_planner<'mcx>(
@@ -506,6 +507,16 @@ fn pull_agg_input_vars<'mcx>(
                 pull_agg_input_vars(f, out);
             }
         }
+        // PVC_RECURSE_WINDOWFUNCS: window args feed the grouped input target.
+        NodeTag::T_WindowFunc => {
+            let wf = node.as_window_func().unwrap();
+            for arg in &wf.args {
+                pull_agg_input_vars(arg, out);
+            }
+            if let Some(f) = wf.aggfilter {
+                pull_agg_input_vars(f, out);
+            }
+        }
         // PVC_RECURSE_AGGREGATES treats GroupingFunc like Aggref.
         NodeTag::T_GroupingFunc => {
             let g = node.as_grouping_func().unwrap();
@@ -539,6 +550,21 @@ fn pull_agg_input_vars<'mcx>(
         }
         NodeTag::T_RelabelType => {
             pull_agg_input_vars(node.as_relabel_type().unwrap().arg, out)
+        }
+        NodeTag::T_SubscriptingRef => {
+            let sr = node.as_subscripting_ref().unwrap();
+            for a in sr.refupperindexpr.iter().flatten() {
+                pull_agg_input_vars(a, out);
+            }
+            for a in sr.reflowerindexpr.iter().flatten() {
+                pull_agg_input_vars(a, out);
+            }
+            if let Some(a) = sr.refexpr {
+                pull_agg_input_vars(a, out);
+            }
+            if let Some(a) = sr.refassgnexpr {
+                pull_agg_input_vars(a, out);
+            }
         }
         NodeTag::T_Param => {}
         NodeTag::T_NullTest => {
@@ -574,6 +600,48 @@ fn pull_agg_input_vars<'mcx>(
             for a in &sp.args {
                 pull_agg_input_vars(a, out);
             }
+        }
+        NodeTag::T_CaseTestExpr
+        | NodeTag::T_SQLValueFunction
+        | NodeTag::T_NextValueExpr
+        | NodeTag::T_CoerceToDomainValue => {}
+        NodeTag::T_CaseExpr => {
+            let c = node.as_case_expr().unwrap();
+            if let Some(arg) = c.arg {
+                pull_agg_input_vars(arg, out);
+            }
+            for w in &c.args {
+                let cw = w.as_case_when().expect("CaseWhen");
+                pull_agg_input_vars(cw.expr.expect("CaseWhen.expr"), out);
+                pull_agg_input_vars(cw.result.expect("CaseWhen.result"), out);
+            }
+            if let Some(d) = c.defresult {
+                pull_agg_input_vars(d, out);
+            }
+        }
+        NodeTag::T_CoalesceExpr => {
+            for a in &node.as_coalesce_expr().unwrap().args {
+                pull_agg_input_vars(a, out);
+            }
+        }
+        NodeTag::T_MinMaxExpr => {
+            for a in &node.as_min_max_expr().unwrap().args {
+                pull_agg_input_vars(a, out);
+            }
+        }
+        NodeTag::T_ArrayExpr => {
+            for a in &node.as_array_expr().unwrap().elements {
+                pull_agg_input_vars(a, out);
+            }
+        }
+        NodeTag::T_ScalarArrayOpExpr => {
+            for a in &node.as_scalar_array_op_expr().unwrap().args {
+                pull_agg_input_vars(a, out);
+            }
+        }
+        NodeTag::T_CoerceViaIO => pull_agg_input_vars(node.as_coerce_via_io().unwrap().arg, out),
+        NodeTag::T_CoerceToDomain => {
+            pull_agg_input_vars(node.as_coerce_to_domain().unwrap().arg, out)
         }
         other => panic!("pull_var_clause (var.c): {other:?}; M3 expression lane"),
     }
@@ -803,31 +871,6 @@ pub(crate) fn could_not_implement(what: &str) -> Box<types_error::PgError> {
                 "Some of the datatypes only support hashing, while others only support sorting.",
             ),
     )
-}
-
-// get_sortgrouplist_exprs (tlist.c) into estimate_num_groups' input shape.
-pub(crate) fn sortgrouplist_exprs<'mcx>(
-    run: &mut PlannerRun<'mcx>,
-    clauses: &[types_pathnodes::NodeId],
-    tlist: &types_nodes::list::NodeList<'mcx>,
-) -> mcx::PgVec<'mcx, (types_pathnodes::NodeId, types_nodes::Node<'mcx>)> {
-    let mut exprs = mcx::PgVec::new_in(run.mcx);
-    for &gc_id in clauses {
-        let sgref = run
-            .root
-            .expr_node(gc_id)
-            .as_sort_group_clause()
-            .expect("sortgroup clause cell")
-            .tleSortGroupRef;
-        let tle_node = tlist
-            .iter()
-            .find(|n| n.as_target_entry().expect("tlist cell").ressortgroupref == sgref)
-            .expect("sortgroupref has a tlist entry");
-        let expr = tle_node.as_target_entry().unwrap().expr;
-        let id = run.intern_expr(expr);
-        exprs.push((id, expr));
-    }
-    exprs
 }
 
 // get_number_of_groups (planner.c); the hash_sets leg needs the unported

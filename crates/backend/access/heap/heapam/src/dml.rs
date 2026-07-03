@@ -10,7 +10,8 @@
 // xloginsert), records stay redo-compatible.
 use ::bufmgr_seams::{BufferPin, BUFFER_LOCK_EXCLUSIVE, BUFFER_LOCK_UNLOCK};
 use ::tableam_vocab::{
-    LockTupleMode, LockWaitPolicy, TM_FailureData, TM_Result, TU_UpdateIndexes,
+    BulkInsertStateData, LockTupleMode, LockWaitPolicy, TM_FailureData, TM_Result,
+    TU_UpdateIndexes,
 };
 use ::types_core::xact::{InvalidTransactionId, TransactionIdIsValid};
 use ::types_core::{CommandId, InvalidBlockNumber, TransactionId};
@@ -187,12 +188,12 @@ fn needs_toast(relation: &RelationData<'_>, tup: &HeapTupleData<'_>) -> bool {
 }
 
 /// `heap_insert`: stamps `tup` and stores it; `tup.t_self` receives the TID.
-/// BulkInsertState is the multi_insert phase-3 lane.
 pub fn heap_insert(
     relation: &RelationData<'_>,
     tup: &mut HeapTupleData<'_>,
     cid: CommandId,
     options: i32,
+    bistate: Option<&mut BulkInsertStateData>,
 ) -> PgResult<()> {
     let xid = xact_seams::get_current_transaction_id::call()?;
 
@@ -233,7 +234,8 @@ pub fn heap_insert(
         tup
     };
 
-    let pin = RelationGetBufferForTuple(relation, heaptup.t_len as usize, None, options, None, 0)?;
+    let pin =
+        RelationGetBufferForTuple(relation, heaptup.t_len as usize, None, options, bistate, 0)?;
 
     predicate_seams::check_for_serializable_conflict_in::call(
         relation,
@@ -332,7 +334,7 @@ pub fn heap_insert(
 
 /// `simple_heap_insert`.
 pub fn simple_heap_insert(relation: &RelationData<'_>, tup: &mut HeapTupleData<'_>) -> PgResult<()> {
-    heap_insert(relation, tup, xact_seams::get_current_command_id::call(true)?, 0)
+    heap_insert(relation, tup, xact_seams::get_current_command_id::call(true)?, 0, None)
 }
 
 const XLOG_HEAP2_MULTI_INSERT: u8 = 0x50;

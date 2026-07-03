@@ -7,6 +7,7 @@ edition = "2021"
 path = "src/lib.rs"
 
 [dependencies]
+rewrite_define = { path = "../../rewrite/rewrite_define" }
 mcx = { path = "../../../_support/mcx" }
 types_core = { path = "../../../_support/types/types_core" }
 types_error = { path = "../../../_support/types/types_error" }
@@ -15,6 +16,7 @@ types_rel = { path = "../../../_support/types/rel" }
 types_tuple = { path = "../../../_support/types/types_tuple" }
 tupdesc = { path = "../../access/common/tupdesc" }
 parse_utilcmd = { path = "../../parser/parse_utilcmd" }
+parse_clause = { path = "../../parser/parse_clause" }
 catalog_namespace = { path = "../../catalog/catalog_namespace" }
 catalog_heap = { path = "../../catalog/catalog_heap" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }

@@ -170,12 +170,12 @@ pub(crate) fn build_desc_data(target_rel_id: Oid) -> PgResult<Option<RelationDat
             rd_options: scanned.options,
             pgstat_enabled: Cell::new(false),
             rd_amcache: Default::default(),
-            rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(),
+            rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(), rd_amcache_spgist: Default::default(),
             rd_support: support,
             rd_supportinfo: core::cell::RefCell::new(supportinfo),
             rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
-            rd_hastriggers: scanned.relhastriggers,
+            rd_hastriggers: scanned.relhastriggers, rd_hasrules: scanned.relhasrules,
         };
         RelationInitPhysicalAddr(&data)?;
 
@@ -289,12 +289,12 @@ pub fn formrdesc(cat: &BootstrapCatalog) -> PgResult<()> {
         rd_options: None,
         pgstat_enabled: Cell::new(false),
         rd_amcache: Default::default(),
-        rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(),
+        rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(), rd_amcache_spgist: Default::default(),
         rd_support: PgVec::new_in(mcx),
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
-            rd_hastriggers: false,
+            rd_hastriggers: false, rd_hasrules: false,
     };
     RelationInitPhysicalAddr(&data)?;
 

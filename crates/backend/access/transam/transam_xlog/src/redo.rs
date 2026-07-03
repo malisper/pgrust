@@ -60,6 +60,8 @@ pub fn xlog_redo(record: &mut XLogReaderState) -> PgResult<()> {
         XLOG_CHECKPOINT_SHUTDOWN => {
             let check_point = CheckPoint::from_bytes(main_data(record));
             procarray::TransamVariables().nextXid.store(check_point.nextXid.value, Relaxed);
+            varsup::TransamVariables().nextOid.store(check_point.nextOid, Relaxed);
+            varsup::TransamVariables().oidCount.store(0, Relaxed);
             if multixact_seams::multixact_set_next_mxact::is_installed() {
                 multixact_seams::multixact_set_next_mxact::call(
                     check_point.nextMulti,

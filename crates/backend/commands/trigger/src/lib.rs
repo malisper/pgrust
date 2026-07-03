@@ -3,7 +3,7 @@
 mod catalog;
 mod queue;
 
-pub use catalog::{CreateTriggerInternal, InternalTriggerArgs};
+pub use catalog::{CreateTriggerInternal, InternalTriggerArgs, RemoveTriggerById};
 pub use queue::{
     AfterTriggerBeginQuery, AfterTriggerEndQuery, ExecARDeleteTriggers, ExecARInsertTriggers,
     ExecARUpdateTriggers,

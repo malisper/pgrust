@@ -472,12 +472,12 @@ fn test_relation<'mcx>(mcx: Mcx<'mcx>) -> RelationData<'mcx> {
         rd_options: None,
         pgstat_enabled: Cell::new(false),
         rd_amcache: Default::default(),
-        rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(),
+        rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(), rd_amcache_spgist: Default::default(),
         rd_support: PgVec::new_in(mcx),
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
-            rd_hastriggers: false,
+            rd_hastriggers: false, rd_hasrules: false,
     }
 }
 
@@ -663,7 +663,7 @@ fn heap_redo_rebuilds_pages_byte_exact() {
     for v in 1u8..=4 {
         let img = raw_tuple(0, (0, 0), &vec![v; WIDE - 24]);
         let mut tup = make_writable_tuple(&img);
-        heap_insert(&rel, &mut tup, 0, 0).unwrap();
+        heap_insert(&rel, &mut tup, 0, 0, None).unwrap();
         assert_eq!(tup.t_self, ItemPointerData::new(0, v as u16));
     }
     assert_eq!(xact::GetTopTransactionIdIfAny(), XID);
@@ -737,7 +737,7 @@ fn heap_redo_rebuilds_pages_byte_exact() {
     let img = raw_tuple(0, (0, 0), &[0x44; 8]);
     let mut spec1 = make_writable_tuple(&img);
     spec1.t_data_mut().set_speculative_token(4242);
-    heap_insert(&rel, &mut spec1, 0, heapam::hio::HEAP_INSERT_SPECULATIVE).unwrap();
+    heap_insert(&rel, &mut spec1, 0, heapam::hio::HEAP_INSERT_SPECULATIVE, None).unwrap();
     assert_eq!(spec1.t_self, ItemPointerData::new(1, 2));
     assert!(tuple_hdr(1, 2).is_speculative());
     heapam::heap_finish_speculative(&rel, &spec1.t_self).unwrap();
@@ -746,7 +746,7 @@ fn heap_redo_rebuilds_pages_byte_exact() {
     let img = raw_tuple(0, (0, 0), &[0x55; 8]);
     let mut spec2 = make_writable_tuple(&img);
     spec2.t_data_mut().set_speculative_token(4243);
-    heap_insert(&rel, &mut spec2, 0, heapam::hio::HEAP_INSERT_SPECULATIVE).unwrap();
+    heap_insert(&rel, &mut spec2, 0, heapam::hio::HEAP_INSERT_SPECULATIVE, None).unwrap();
     assert_eq!(spec2.t_self, ItemPointerData::new(1, 3));
     heapam::heap_abort_speculative(&rel, &spec2.t_self).unwrap();
     assert_eq!(tuple_hdr(1, 3).xmin_raw(), 0);

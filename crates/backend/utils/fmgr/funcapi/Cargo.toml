@@ -19,6 +19,7 @@ lsyscache = { path = "../../cache/lsyscache" }
 syscache_seams = { path = "../../cache/syscache_seams" }
 typcache_seams = { path = "../../cache/typcache_seams" }
 arrayfuncs = { path = "../../adt/arrayfuncs" }
+funcapi_srf = { path = "../funcapi_srf" }
 detoast_seams = { path = "../../../access/common/detoast_seams" }
 varlena = { path = "../../adt/varlena" }
 init_small = { path = "../../init/init_small" }

@@ -186,6 +186,47 @@ fn node(out: &mut String, n: Node<'_>) {
         out.push_str("{A_STAR}");
     } else if let Some(rv) = n.as_range_var() {
         range_var(out, rv);
+    } else if let Some(v) = n.as_variant::<types_nodes::rawnodes::ViewStmt>() {
+        out.push_str("{VIEWSTMT :view ");
+        match v.view {
+            Some(rv) => range_var(out, rv),
+            None => out.push_str("<>"),
+        }
+        list_field(out, "aliases", &v.aliases);
+        node_field(out, "query", v.query);
+        bool_field(out, "replace", v.replace);
+        list_field(out, "options", &v.options);
+        int_field(out, "withCheckOption", v.withCheckOption as i32);
+        out.push('}');
+    } else if let Some(c) = n.as_variant::<types_nodes::rawnodes::CreateTableAsStmt>() {
+        out.push_str("{CREATETABLEASSTMT");
+        node_field(out, "query", c.query);
+        node_field(out, "into", c.into);
+        int_field(out, "objtype", c.objtype as i32);
+        bool_field(out, "is_select_into", c.is_select_into);
+        bool_field(out, "if_not_exists", c.if_not_exists);
+        out.push('}');
+    } else if let Some(ic) = n.as_variant::<types_nodes::rawnodes::IntoClause>() {
+        out.push_str("{INTOCLAUSE");
+        node_field(out, "rel", ic.rel);
+        list_field(out, "colNames", &ic.colNames);
+        string_field(out, "accessMethod", ic.accessMethod);
+        list_field(out, "options", &ic.options);
+        int_field(out, "onCommit", ic.onCommit as i32);
+        string_field(out, "tableSpaceName", ic.tableSpaceName);
+        node_field(out, "viewQuery", ic.viewQuery);
+        bool_field(out, "skipData", ic.skipData);
+        out.push('}');
+    } else if let Some(r) = n.as_variant::<types_nodes::rawnodes::RefreshMatViewStmt>() {
+        out.push_str("{REFRESHMATVIEWSTMT");
+        bool_field(out, "concurrent", r.concurrent);
+        bool_field(out, "skipData", r.skipData);
+        out.push_str(" :relation ");
+        match r.relation {
+            Some(rv) => range_var(out, rv),
+            None => out.push_str("<>"),
+        }
+        out.push('}');
     } else if let Some(sb) = n.as_sort_by() {
         out.push_str("{SORTBY");
         node_field(out, "node", sb.node);
@@ -352,6 +393,66 @@ fn node(out: &mut String, n: Node<'_>) {
         out.push_str(&format!(" :howMany {}", f.howMany));
         string_field(out, "portalname", f.portalname);
         bool_field(out, "ismove", f.ismove);
+        out.push('}');
+    } else if let Some(d) = n.as_variant::<types_nodes::parsenodes::DefineStmt>() {
+        out.push_str("{DEFINESTMT");
+        int_field(out, "kind", d.kind as i32);
+        bool_field(out, "oldstyle", d.oldstyle);
+        list_field(out, "defnames", &d.defnames);
+        list_field(out, "args", &d.args);
+        list_field(out, "definition", &d.definition);
+        bool_field(out, "if_not_exists", d.if_not_exists);
+        bool_field(out, "replace", d.replace);
+        out.push('}');
+    } else if let Some(o) = n.as_variant::<types_nodes::parsenodes::ObjectWithArgs>() {
+        out.push_str("{OBJECTWITHARGS");
+        list_field(out, "objname", &o.objname);
+        list_field(out, "objargs", &o.objargs);
+        list_field(out, "objfuncargs", &o.objfuncargs);
+        bool_field(out, "args_unspecified", o.args_unspecified);
+        out.push('}');
+    } else if let Some(c) = n.as_variant::<types_nodes::parsenodes::CreateOpClassStmt>() {
+        out.push_str("{CREATEOPCLASSSTMT");
+        list_field(out, "opclassname", &c.opclassname);
+        list_field(out, "opfamilyname", &c.opfamilyname);
+        string_field(out, "amname", c.amname);
+        node_field(out, "datatype", c.datatype);
+        list_field(out, "items", &c.items);
+        bool_field(out, "isDefault", c.isDefault);
+        out.push('}');
+    } else if let Some(i) = n.as_variant::<types_nodes::parsenodes::CreateOpClassItem>() {
+        out.push_str("{CREATEOPCLASSITEM");
+        int_field(out, "itemtype", i.itemtype);
+        node_field(out, "name", i.name);
+        int_field(out, "number", i.number);
+        list_field(out, "order_family", &i.order_family);
+        list_field(out, "class_args", &i.class_args);
+        node_field(out, "storedtype", i.storedtype);
+        out.push('}');
+    } else if let Some(c) = n.as_variant::<types_nodes::parsenodes::CreateOpFamilyStmt>() {
+        out.push_str("{CREATEOPFAMILYSTMT");
+        list_field(out, "opfamilyname", &c.opfamilyname);
+        string_field(out, "amname", c.amname);
+        out.push('}');
+    } else if let Some(a) = n.as_variant::<types_nodes::parsenodes::AlterOpFamilyStmt>() {
+        out.push_str("{ALTEROPFAMILYSTMT");
+        list_field(out, "opfamilyname", &a.opfamilyname);
+        string_field(out, "amname", a.amname);
+        bool_field(out, "isDrop", a.isDrop);
+        list_field(out, "items", &a.items);
+        out.push('}');
+    } else if let Some(a) = n.as_variant::<types_nodes::parsenodes::AlterOperatorStmt>() {
+        out.push_str("{ALTEROPERATORSTMT");
+        node_field(out, "opername", a.opername);
+        list_field(out, "options", &a.options);
+        out.push('}');
+    } else if let Some(p) = n.as_variant::<types_nodes::parsenodes::FunctionParameter>() {
+        out.push_str("{FUNCTIONPARAMETER");
+        string_field(out, "name", p.name);
+        node_field(out, "argType", p.argType);
+        int_field(out, "mode", p.mode as i32);
+        node_field(out, "defexpr", p.defexpr);
+        int_field(out, "location", p.location);
         out.push('}');
     } else if let Some(d) = n.as_drop_stmt() {
         out.push_str("{DROPSTMT");

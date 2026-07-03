@@ -313,7 +313,9 @@ fn index_rel_opts(mcx: Mcx<'_>, unique: bool) -> Relation<'_> {
     };
     let mut indoption = PgVec::new_in(mcx);
     indoption.push(0i16);
-    let data = RelationData { rd_locator: Default::default(), rd_smgr: Default::default(),
+    let data = RelationData {
+        rd_locator: Cell::new(::types_storage::RelFileLocator::new(1663, 5, 5000)),
+        rd_smgr: Default::default(),
         rd_id: 5000,
         rd_backend: INVALID_PROC_NUMBER,
         rd_islocaltemp: false,
@@ -374,12 +376,12 @@ fn index_rel_opts(mcx: Mcx<'_>, unique: bool) -> Relation<'_> {
         rd_options: None,
         pgstat_enabled: Cell::new(false),
         rd_amcache: Default::default(),
-        rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(),
+        rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(), rd_amcache_spgist: Default::default(),
         rd_support: PgVec::new_in(mcx),
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
-            rd_hastriggers: false,
+            rd_hastriggers: false, rd_hasrules: false,
     };
     Relation::open(data, Some(noop_close))
 }
@@ -724,12 +726,12 @@ fn heap_relation(mcx: Mcx<'_>) -> Relation<'_> {
         rd_options: None,
         pgstat_enabled: Cell::new(false),
         rd_amcache: Default::default(),
-        rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(),
+        rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(), rd_amcache_spgist: Default::default(),
         rd_support: PgVec::new_in(mcx),
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
-            rd_hastriggers: false,
+            rd_hastriggers: false, rd_hasrules: false,
     };
     Relation::open(data, Some(noop_close))
 }

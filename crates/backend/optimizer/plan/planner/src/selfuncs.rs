@@ -14,8 +14,8 @@ use crate::gucs;
 use crate::run::PlannerRun;
 
 pub const DEFAULT_EQ_SEL: f64 = 0.005;
-pub const DEFAULT_INEQ_SEL: f64 = 0.3333333333333333;
-pub const DEFAULT_NUM_DISTINCT: f64 = 200.0;
+pub use types_pathnodes::DEFAULT_INEQ_SEL;
+pub use types_pathnodes::DEFAULT_NUM_DISTINCT;
 const DEFAULT_PAGE_CPU_MULTIPLIER: f64 = 50.0;
 const BOOLOID: u32 = 16;
 const SELF_ITEM_POINTER_ATTRIBUTE_NUMBER: i16 = -1;
@@ -1133,13 +1133,7 @@ pub(crate) fn var_eq_const<'mcx>(
     Ok(clamp_probability(selec))
 }
 
-pub struct AmCostEstimate {
-    pub index_startup_cost: f64,
-    pub index_total_cost: f64,
-    pub index_selectivity: f64,
-    pub index_correlation: f64,
-    pub index_pages: f64,
-}
+pub use planner_seams::AmCostEstimate;
 
 // amcostestimate dispatch: closed set over the committed index AMs (rule 4).
 pub fn amcostestimate(
@@ -1158,6 +1152,7 @@ pub fn amcostestimate(
         types_relscan::IndexAmKind::Hash => hashcostestimate(run, path_id, loop_count),
         types_relscan::IndexAmKind::Gin => gincostestimate(run, path_id, loop_count),
         types_relscan::IndexAmKind::Gist => gistcostestimate(run, path_id, loop_count),
+        types_relscan::IndexAmKind::Spgist => spgcostestimate(run, path_id, loop_count),
         types_relscan::IndexAmKind::Brin => brincostestimate(run, path_id, loop_count),
         #[allow(unreachable_patterns)]
         other => panic!("amcostestimate (selfuncs.c): {other:?}; M2 index-AM lane"),
@@ -1218,6 +1213,60 @@ fn gistcostestimate(
     })
 }
 
+// spgcostestimate (selfuncs.c): identical structure to gistcostestimate.
+fn spgcostestimate(
+    run: &mut PlannerRun<'_>,
+    path_id: types_pathnodes::PathId,
+    loop_count: f64,
+) -> PgResult<AmCostEstimate> {
+    let (index_tuples, tree_height) = {
+        let PathNode::IndexPath(ip) = run.root.path(path_id) else {
+            panic!("spgcostestimate: not an IndexPath")
+        };
+        let index = ip.indexinfo.as_ref().expect("indexinfo set");
+        let mut tree_height = index.tree_height.get();
+        if tree_height < 0 {
+            tree_height = if index.pages > 1 {
+                ((index.pages as f64).ln() / 100.0f64.ln()) as i32
+            } else {
+                0
+            };
+            index.tree_height.set(tree_height);
+        }
+        (index.tuples, tree_height)
+    };
+
+    let mut costs = GenericCosts {
+        num_index_tuples: 0.0,
+        num_sa_scans: 1.0,
+        index_startup_cost: 0.0,
+        index_total_cost: 0.0,
+        index_selectivity: 0.0,
+        index_correlation: 0.0,
+        num_index_pages: 0.0,
+    };
+    genericcostestimate(run, path_id, loop_count, &mut costs)?;
+
+    let cpu_operator_cost = gucs::cpu_operator_cost();
+    if index_tuples > 1.0 {
+        let descent_cost = index_tuples.ln().ceil() * cpu_operator_cost;
+        costs.index_startup_cost += descent_cost;
+        costs.index_total_cost += costs.num_sa_scans * descent_cost;
+    }
+    let descent_cost =
+        (tree_height as f64 + 1.0) * DEFAULT_PAGE_CPU_MULTIPLIER * cpu_operator_cost;
+    costs.index_startup_cost += descent_cost;
+    costs.index_total_cost += costs.num_sa_scans * descent_cost;
+
+    Ok(AmCostEstimate {
+        index_startup_cost: costs.index_startup_cost,
+        index_total_cost: costs.index_total_cost,
+        index_selectivity: costs.index_selectivity,
+        index_correlation: costs.index_correlation,
+        index_pages: costs.num_index_pages,
+    })
+}
+
 struct GenericCosts {
     num_index_tuples: f64,
     num_sa_scans: f64,
@@ -1229,6 +1278,37 @@ struct GenericCosts {
 }
 
 // genericcostestimate (selfuncs.c); num_sa_scans arrives preset (no SAOP).
+// add_predicate_to_index_quals (selfuncs.c): AND the partial-index predicate
+// (as fresh RestrictInfos) into a qual list for selectivity purposes.
+fn add_predicate_to_index_quals<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    path_id: types_pathnodes::PathId,
+    index_quals: &[RinfoId],
+) -> PgResult<mcx::PgVec<'mcx, RinfoId>> {
+    let mcx = run.mcx;
+    let indpred = {
+        let PathNode::IndexPath(ip) = run.root.path(path_id) else { unreachable!() };
+        ip.indexinfo.as_ref().expect("indexinfo set").indpred.clone()
+    };
+    let mut result: mcx::PgVec<'mcx, RinfoId> = mcx::PgVec::new_in(mcx);
+    if !indpred.is_empty() {
+        let mut qual_nodes: mcx::PgVec<'mcx, Node<'mcx>> = mcx::PgVec::new_in(mcx);
+        for &rid in index_quals {
+            qual_nodes.push(*run.root.expr_node(run.root.rinfo(rid).clause));
+        }
+        for &pid in indpred.iter() {
+            let pred = *run.root.expr_node(pid);
+            if !crate::predtest::predicate_implied_by(mcx, &[pred], &qual_nodes, false)? {
+                result.push(crate::initsplan::make_restrictinfo(
+                    run, pred, true, false, false, false, 0, None, None, None,
+                )?);
+            }
+        }
+    }
+    result.extend(index_quals.iter().copied());
+    Ok(result)
+}
+
 fn genericcostestimate(
     run: &mut PlannerRun<'_>,
     path_id: types_pathnodes::PathId,
@@ -1251,13 +1331,13 @@ fn genericcostestimate(
     let index_rel_relid = run.root.rel(index_rel).relid as i32;
     let index_rel_tuples = run.root.rel(index_rel).tuples;
 
-    // add_predicate_to_index_quals: identity for a non-partial index.
     debug_assert!(costs.num_sa_scans >= 1.0);
     let num_sa_scans = costs.num_sa_scans;
 
+    let selectivity_quals = add_predicate_to_index_quals(run, path_id, &index_quals)?;
     let index_selectivity = crate::clausesel::clauselist_selectivity(
         run,
-        &index_quals,
+        &selectivity_quals,
         index_rel_relid,
         JOIN_INNER,
         None,
@@ -1574,9 +1654,11 @@ fn btcostestimate(
                     break 'buildquals;
                 }
                 if !index_skip_quals.is_empty() {
+                    let partial_skip_quals =
+                        add_predicate_to_index_quals(run, path_id, &index_skip_quals)?;
                     let ndistinctfrac = crate::clausesel::clauselist_selectivity(
                         run,
-                        &index_skip_quals,
+                        &partial_skip_quals,
                         index_rel_relid,
                         JOIN_INNER,
                         None,
@@ -1640,9 +1722,10 @@ fn btcostestimate(
     {
         1.0
     } else {
+        let selectivity_quals = add_predicate_to_index_quals(run, path_id, &index_bound_quals)?;
         let btree_selectivity = crate::clausesel::clauselist_selectivity(
             run,
-            &index_bound_quals,
+            &selectivity_quals,
             index_rel_relid,
             JOIN_INNER,
             None,
@@ -1795,7 +1878,11 @@ fn estimate_num_groups_core<'mcx>(
         }
         // C's expression leg: no expression stats, so decompose to the
         // contained Vars (a Var-free volatile expr keeps every row distinct).
-        let vars_here = vars::pull_var_clause(mcx, node, 0)?;
+        let vars_here = vars::pull_var_clause(
+            mcx,
+            node,
+            vars::PVC_RECURSE_AGGREGATES | vars::PVC_RECURSE_WINDOWFUNCS | vars::PVC_RECURSE_PLACEHOLDERS,
+        )?;
         if vars_here.is_nil() {
             if clauses::contain_volatile_functions(node)? {
                 return Ok(input_rows);
@@ -2785,7 +2872,6 @@ fn gincostestimate(
     let (index_quals, index_pages, index_tuples, index_rel, reltablespace, gin_stats, opfamily0, opcintype0) = {
         let PathNode::IndexPath(ip) = run.root.path(path_id) else { unreachable!() };
         let index = ip.indexinfo.as_ref().expect("indexinfo set");
-        debug_assert!(index.indpred.is_empty());
         (
             get_quals_from_indexclauses(run, path_id),
             index.pages,
@@ -2835,10 +2921,10 @@ fn gincostestimate(
         num_entries = 1.0;
     }
 
-    // add_predicate_to_index_quals: identity for a non-partial index.
+    let selectivity_quals = add_predicate_to_index_quals(run, path_id, &index_quals)?;
     let index_selectivity = crate::clausesel::clauselist_selectivity(
         run,
-        &index_quals,
+        &selectivity_quals,
         index_rel_relid,
         JOIN_INNER,
         None,

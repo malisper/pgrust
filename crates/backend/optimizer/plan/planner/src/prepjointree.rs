@@ -640,6 +640,17 @@ fn offset_jointree<'mcx>(
             let r = node.as_range_tbl_ref().expect("RangeTblRef");
             Node::mk_range_tbl_ref(mcx, r.rtindex + rtoffset)
         }
+        NodeTag::T_FromExpr => {
+            let f = node.as_from_expr().expect("FromExpr");
+            let mut fromlist = NodeList::nil();
+            for child in &f.fromlist {
+                fromlist.lappend(mcx, offset_jointree(mcx, child, rtoffset)?)?;
+            }
+            Node::mk(
+                mcx,
+                FromExpr { fromlist, quals: offset_opt(mcx, f.quals, rtoffset)? },
+            )
+        }
         NodeTag::T_JoinExpr => {
             let j = node.as_join_expr().expect("JoinExpr");
             let quals = offset_opt(mcx, j.quals, rtoffset)?;
@@ -654,7 +665,8 @@ fn offset_jointree<'mcx>(
                     join_using_alias: j.join_using_alias,
                     quals,
                     alias: j.alias,
-                    rtindex: j.rtindex + rtoffset,
+                    // C: if (j->rtindex) j->rtindex += offset.
+                    rtindex: if j.rtindex != 0 { j.rtindex + rtoffset } else { 0 },
                 },
             )
         }
@@ -706,7 +718,7 @@ fn offset_var<'mcx>(mcx: Mcx<'mcx>, v: &Var<'mcx>, rtoffset: i32) -> PgResult<Va
         },
         varlevelsup: v.varlevelsup,
         varreturningtype: v.varreturningtype,
-        varnosyn: if v.varnosyn > 0 { v.varnosyn + rtoffset as u32 } else { v.varnosyn },
+        varnosyn: if v.varnosyn > 0 { v.varnosyn.wrapping_add(rtoffset as u32) } else { v.varnosyn },
         varattnosyn: v.varattnosyn,
         location: v.location,
     })
@@ -1004,6 +1016,20 @@ fn get_tle_by_resno<'a, 'mcx>(
 // levels_delta is C's IncrementVarSublevelsUp(newnode, sublevels_up, 0) after
 // substitution into a deeper query level.
 fn copy_expr<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>, levels_delta: u32) -> PgResult<Node<'mcx>> {
+    use types_nodes::primnodes as pn;
+    let copy_list = |mcx: Mcx<'mcx>, l: &NodeList<'mcx>| -> PgResult<NodeList<'mcx>> {
+        let mut out = NodeList::nil();
+        for n in l {
+            out.lappend(mcx, copy_expr(mcx, n, levels_delta)?)?;
+        }
+        Ok(out)
+    };
+    let copy_opt = |mcx: Mcx<'mcx>, n: Option<Node<'mcx>>| -> PgResult<Option<Node<'mcx>>> {
+        match n {
+            Some(n) => Ok(Some(copy_expr(mcx, n, levels_delta)?)),
+            None => Ok(None),
+        }
+    };
     match node.node_tag() {
         NodeTag::T_Var => {
             let v = node.as_var().expect("Var");
@@ -1012,35 +1038,60 @@ fn copy_expr<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>, levels_delta: u32) -> PgRes
             Node::mk(mcx, nv)
         }
         NodeTag::T_Const => Node::mk(mcx, *node.as_const().expect("Const")),
-        NodeTag::T_OpExpr => {
-            let o = node.as_op_expr().expect("OpExpr");
-            let mut args = NodeList::nil();
-            for a in &o.args {
-                args.lappend(mcx, copy_expr(mcx, a, levels_delta)?)?;
-            }
+        NodeTag::T_Param => Node::mk(mcx, *node.as_param().expect("Param")),
+        NodeTag::T_CaseTestExpr => {
+            Node::mk(mcx, *node.as_case_test_expr().expect("CaseTestExpr"))
+        }
+        NodeTag::T_SetToDefault => Node::mk(mcx, *node.as_set_to_default().expect("SetToDefault")),
+        NodeTag::T_SQLValueFunction => {
+            let s = node.as_sql_value_function().expect("SQLValueFunction");
             Node::mk(
                 mcx,
-                types_nodes::primnodes::OpExpr {
+                pn::SQLValueFunction {
+                    op: s.op,
+                    r#type: s.r#type,
+                    typmod: s.typmod,
+                    location: s.location,
+                },
+            )
+        }
+        NodeTag::T_OpExpr => {
+            let o = node.as_op_expr().expect("OpExpr");
+            Node::mk(
+                mcx,
+                pn::OpExpr {
                     opno: o.opno,
                     opfuncid: o.opfuncid,
                     opresulttype: o.opresulttype,
                     opretset: o.opretset,
                     opcollid: o.opcollid,
                     inputcollid: o.inputcollid,
-                    args,
+                    args: copy_list(mcx, &o.args)?,
                     location: o.location,
+                },
+            )
+        }
+        NodeTag::T_DistinctExpr => {
+            let d = node.as_distinct_expr().expect("DistinctExpr");
+            Node::mk(
+                mcx,
+                pn::DistinctExpr {
+                    opno: d.opno,
+                    opfuncid: d.opfuncid,
+                    opresulttype: d.opresulttype,
+                    opretset: d.opretset,
+                    opcollid: d.opcollid,
+                    inputcollid: d.inputcollid,
+                    args: copy_list(mcx, &d.args)?,
+                    location: d.location,
                 },
             )
         }
         NodeTag::T_FuncExpr => {
             let f = node.as_func_expr().expect("FuncExpr");
-            let mut args = NodeList::nil();
-            for a in &f.args {
-                args.lappend(mcx, copy_expr(mcx, a, levels_delta)?)?;
-            }
             Node::mk(
                 mcx,
-                types_nodes::primnodes::FuncExpr {
+                pn::FuncExpr {
                     funcid: f.funcid,
                     funcresulttype: f.funcresulttype,
                     funcretset: f.funcretset,
@@ -1048,28 +1099,49 @@ fn copy_expr<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>, levels_delta: u32) -> PgRes
                     funcformat: f.funcformat,
                     funccollid: f.funccollid,
                     inputcollid: f.inputcollid,
-                    args,
+                    args: copy_list(mcx, &f.args)?,
                     location: f.location,
                 },
             )
         }
-        NodeTag::T_ArrayExpr => {
-            let a = node.as_array_expr().expect("ArrayExpr");
-            let mut elements = NodeList::nil();
-            for e in &a.elements {
-                elements.lappend(mcx, copy_expr(mcx, e, levels_delta)?)?;
-            }
+        NodeTag::T_ScalarArrayOpExpr => {
+            let sa = node.as_scalar_array_op_expr().expect("ScalarArrayOpExpr");
             Node::mk(
                 mcx,
-                types_nodes::primnodes::ArrayExpr {
-                    array_typeid: a.array_typeid,
-                    array_collid: a.array_collid,
-                    element_typeid: a.element_typeid,
-                    elements,
-                    multidims: a.multidims,
-                    list_start: a.list_start,
-                    list_end: a.list_end,
-                    location: a.location,
+                pn::ScalarArrayOpExpr {
+                    opno: sa.opno,
+                    opfuncid: sa.opfuncid,
+                    hashfuncid: sa.hashfuncid,
+                    negfuncid: sa.negfuncid,
+                    useOr: sa.useOr,
+                    inputcollid: sa.inputcollid,
+                    args: copy_list(mcx, &sa.args)?,
+                    location: sa.location,
+                },
+            )
+        }
+        NodeTag::T_BoolExpr => {
+            let b = node.as_bool_expr().expect("BoolExpr");
+            Node::mk(
+                mcx,
+                pn::BoolExpr {
+                    boolop: b.boolop,
+                    args: copy_list(mcx, &b.args)?,
+                    location: b.location,
+                },
+            )
+        }
+        NodeTag::T_RelabelType => {
+            let r = node.as_relabel_type().expect("RelabelType");
+            Node::mk(
+                mcx,
+                pn::RelabelType {
+                    arg: copy_expr(mcx, r.arg, levels_delta)?,
+                    resulttype: r.resulttype,
+                    resulttypmod: r.resulttypmod,
+                    resultcollid: r.resultcollid,
+                    relabelformat: r.relabelformat,
+                    location: r.location,
                 },
             )
         }
@@ -1077,7 +1149,7 @@ fn copy_expr<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>, levels_delta: u32) -> PgRes
             let c = node.as_coerce_via_io().expect("CoerceViaIO");
             Node::mk(
                 mcx,
-                types_nodes::primnodes::CoerceViaIO {
+                pn::CoerceViaIO {
                     arg: copy_expr(mcx, c.arg, levels_delta)?,
                     resulttype: c.resulttype,
                     resultcollid: c.resultcollid,
@@ -1086,16 +1158,105 @@ fn copy_expr<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>, levels_delta: u32) -> PgRes
                 },
             )
         }
-        NodeTag::T_RelabelType => {
-            let r = node.as_relabel_type().expect("RelabelType");
+        NodeTag::T_NullTest => {
+            let nt = node.as_null_test().expect("NullTest");
             Node::mk(
                 mcx,
-                types_nodes::primnodes::RelabelType {
-                    arg: copy_expr(mcx, r.arg, levels_delta)?,
-                    resulttype: r.resulttype,
-                    resulttypmod: r.resulttypmod,
-                    resultcollid: r.resultcollid,
-                    relabelformat: r.relabelformat,
+                pn::NullTest {
+                    arg: copy_opt(mcx, nt.arg)?,
+                    nulltesttype: nt.nulltesttype,
+                    argisrow: nt.argisrow,
+                    location: nt.location,
+                },
+            )
+        }
+        NodeTag::T_BooleanTest => {
+            let bt = node.as_boolean_test().expect("BooleanTest");
+            Node::mk(
+                mcx,
+                pn::BooleanTest {
+                    arg: copy_opt(mcx, bt.arg)?,
+                    booltesttype: bt.booltesttype,
+                    location: bt.location,
+                },
+            )
+        }
+        NodeTag::T_CaseExpr => {
+            let ce = node.as_case_expr().expect("CaseExpr");
+            Node::mk(
+                mcx,
+                pn::CaseExpr {
+                    casetype: ce.casetype,
+                    casecollid: ce.casecollid,
+                    arg: copy_opt(mcx, ce.arg)?,
+                    args: copy_list(mcx, &ce.args)?,
+                    defresult: copy_opt(mcx, ce.defresult)?,
+                    location: ce.location,
+                },
+            )
+        }
+        NodeTag::T_CaseWhen => {
+            let cw = node.as_case_when().expect("CaseWhen");
+            Node::mk(
+                mcx,
+                pn::CaseWhen {
+                    expr: copy_opt(mcx, cw.expr)?,
+                    result: copy_opt(mcx, cw.result)?,
+                    location: cw.location,
+                },
+            )
+        }
+        NodeTag::T_CoalesceExpr => {
+            let co = node.as_coalesce_expr().expect("CoalesceExpr");
+            Node::mk(
+                mcx,
+                pn::CoalesceExpr {
+                    coalescetype: co.coalescetype,
+                    coalescecollid: co.coalescecollid,
+                    args: copy_list(mcx, &co.args)?,
+                    location: co.location,
+                },
+            )
+        }
+        NodeTag::T_MinMaxExpr => {
+            let mm = node.as_min_max_expr().expect("MinMaxExpr");
+            Node::mk(
+                mcx,
+                pn::MinMaxExpr {
+                    minmaxtype: mm.minmaxtype,
+                    minmaxcollid: mm.minmaxcollid,
+                    inputcollid: mm.inputcollid,
+                    op: mm.op,
+                    args: copy_list(mcx, &mm.args)?,
+                    location: mm.location,
+                },
+            )
+        }
+        NodeTag::T_ArrayExpr => {
+            let a = node.as_array_expr().expect("ArrayExpr");
+            Node::mk(
+                mcx,
+                pn::ArrayExpr {
+                    array_typeid: a.array_typeid,
+                    array_collid: a.array_collid,
+                    element_typeid: a.element_typeid,
+                    elements: copy_list(mcx, &a.elements)?,
+                    multidims: a.multidims,
+                    list_start: a.list_start,
+                    list_end: a.list_end,
+                    location: a.location,
+                },
+            )
+        }
+        NodeTag::T_RowExpr => {
+            let r = node.as_row_expr().expect("RowExpr");
+            Node::mk(
+                mcx,
+                pn::RowExpr {
+                    args: copy_list(mcx, &r.args)?,
+                    row_typeid: r.row_typeid,
+                    row_format: r.row_format,
+                    colnames: r.colnames.clone_in(mcx)?,
                     location: r.location,
                 },
             )
@@ -1553,5 +1714,196 @@ mod tests {
         let qual_var = q.args.nth(0).as_var().unwrap();
         assert_eq!((qual_var.varno, qual_var.varattno), (2, 1));
         assert!(q.args.nth(1).as_const().is_some());
+    }
+
+
+    fn rel_rte<'mcx>(mcx: Mcx<'mcx>, relid: u32, perm: u32) -> Node<'mcx> {
+        Node::mk(
+            mcx,
+            RangeTblEntry {
+                rtekind: RTEKind::RTE_RELATION,
+                relid,
+                relkind: b'r',
+                perminfoindex: perm,
+                inFromCl: true,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    }
+
+    fn view_rte<'mcx>(mcx: Mcx<'mcx>, relid: u32, sub: &'mcx Query<'mcx>) -> Node<'mcx> {
+        Node::mk(
+            mcx,
+            RangeTblEntry {
+                rtekind: RTEKind::RTE_SUBQUERY,
+                subquery: Some(sub),
+                relid,
+                relkind: b'v',
+                perminfoindex: 1,
+                inFromCl: true,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    }
+
+    fn eq_qual<'mcx>(mcx: Mcx<'mcx>, l: Node<'mcx>, r: Node<'mcx>) -> Node<'mcx> {
+        Node::mk(
+            mcx,
+            OpExpr {
+                opno: 96,
+                opresulttype: 16,
+                args: NodeList::make2(mcx, l, r).unwrap(),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn join_view_subquery_flattens() {
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let join_rte = Node::mk(
+            mcx,
+            RangeTblEntry {
+                rtekind: RTEKind::RTE_JOIN,
+                jointype: types_nodes::JoinType::JOIN_INNER,
+                joinaliasvars: NodeList::make2(mcx, var(mcx, 1, 1), var(mcx, 2, 1)).unwrap(),
+                inFromCl: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let jexpr = Node::mk(
+            mcx,
+            types_nodes::JoinExpr {
+                jointype: types_nodes::JoinType::JOIN_INNER,
+                isNatural: false,
+                larg: Node::mk_range_tbl_ref(mcx, 1).unwrap(),
+                rarg: Node::mk_range_tbl_ref(mcx, 2).unwrap(),
+                usingClause: NodeList::nil(),
+                join_using_alias: None,
+                quals: Some(eq_qual(mcx, var(mcx, 1, 1), var(mcx, 2, 1))),
+                alias: None,
+                rtindex: 3,
+            },
+        )
+        .unwrap();
+        let sub = alloc_leak_in(
+            mcx,
+            Query {
+                commandType: CmdType::CMD_SELECT,
+                rtable: NodeList::make3(mcx, rel_rte(mcx, 77, 1), rel_rte(mcx, 78, 2), join_rte)
+                    .unwrap(),
+                rteperminfos: NodeList::make2(mcx, perminfo(mcx, 77), perminfo(mcx, 78)).unwrap(),
+                targetList: NodeList::make2(
+                    mcx,
+                    tle(mcx, var(mcx, 1, 1), 1),
+                    tle(mcx, var(mcx, 2, 1), 2),
+                )
+                .unwrap(),
+                jointree: Some(
+                    alloc_leak_in(
+                        mcx,
+                        FromExpr { fromlist: NodeList::make1(mcx, jexpr).unwrap(), quals: None },
+                    )
+                    .unwrap(),
+                ),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut parse = Query {
+            commandType: CmdType::CMD_SELECT,
+            rtable: NodeList::make1(mcx, view_rte(mcx, 99, sub)).unwrap(),
+            rteperminfos: NodeList::make1(mcx, perminfo(mcx, 99)).unwrap(),
+            targetList: NodeList::make1(mcx, tle(mcx, var(mcx, 1, 2), 1)).unwrap(),
+            jointree: Some(from_expr(mcx, 1, None)),
+            ..Default::default()
+        };
+
+        super::pull_up_subqueries(mcx, &mut parse).unwrap();
+
+        assert_eq!(parse.rtable.len(), 4);
+        assert_eq!(parse.rtable.nth(1).as_range_tbl_entry().unwrap().perminfoindex, 2);
+        assert_eq!(parse.rtable.nth(2).as_range_tbl_entry().unwrap().perminfoindex, 3);
+        let jrte = parse.rtable.nth(3).as_range_tbl_entry().unwrap();
+        assert_eq!(jrte.rtekind, RTEKind::RTE_JOIN);
+        let av0 = jrte.joinaliasvars.nth(0).as_var().unwrap();
+        let av1 = jrte.joinaliasvars.nth(1).as_var().unwrap();
+        assert_eq!((av0.varno, av1.varno), (2, 3));
+
+        let jt = parse.jointree.unwrap();
+        assert_eq!(jt.fromlist.len(), 1);
+        let j = jt.fromlist.nth(0).as_join_expr().unwrap();
+        assert_eq!(j.rtindex, 4);
+        assert_eq!(j.larg.as_range_tbl_ref().unwrap().rtindex, 2);
+        assert_eq!(j.rarg.as_range_tbl_ref().unwrap().rtindex, 3);
+        let jq = j.quals.unwrap().as_op_expr().unwrap();
+        assert_eq!(jq.args.nth(0).as_var().unwrap().varno, 2);
+        assert_eq!(jq.args.nth(1).as_var().unwrap().varno, 3);
+
+        let out_var = parse.targetList.nth(0).as_target_entry().unwrap().expr.as_var().unwrap();
+        assert_eq!((out_var.varno, out_var.varattno), (3, 1));
+    }
+
+    #[test]
+    fn nested_view_subquery_flattens() {
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let v1 = alloc_leak_in(
+            mcx,
+            Query {
+                commandType: CmdType::CMD_SELECT,
+                rtable: NodeList::make1(mcx, rel_rte(mcx, 77, 1)).unwrap(),
+                rteperminfos: NodeList::make1(mcx, perminfo(mcx, 77)).unwrap(),
+                targetList: NodeList::make1(mcx, tle(mcx, var(mcx, 1, 1), 1)).unwrap(),
+                jointree: Some(from_expr(mcx, 1, None)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let v2 = alloc_leak_in(
+            mcx,
+            Query {
+                commandType: CmdType::CMD_SELECT,
+                rtable: NodeList::make1(mcx, view_rte(mcx, 88, v1)).unwrap(),
+                rteperminfos: NodeList::make1(mcx, perminfo(mcx, 88)).unwrap(),
+                targetList: NodeList::make1(mcx, tle(mcx, var(mcx, 1, 1), 1)).unwrap(),
+                jointree: Some(from_expr(mcx, 1, None)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut parse = Query {
+            commandType: CmdType::CMD_SELECT,
+            rtable: NodeList::make1(mcx, view_rte(mcx, 99, v2)).unwrap(),
+            rteperminfos: NodeList::make1(mcx, perminfo(mcx, 99)).unwrap(),
+            targetList: NodeList::make1(mcx, tle(mcx, var(mcx, 1, 1), 1)).unwrap(),
+            jointree: Some(from_expr(mcx, 1, None)),
+            ..Default::default()
+        };
+
+        super::pull_up_subqueries(mcx, &mut parse).unwrap();
+
+        assert_eq!(parse.rtable.len(), 3);
+        let mid = parse.rtable.nth(1).as_range_tbl_entry().unwrap();
+        assert_eq!(mid.rtekind, RTEKind::RTE_SUBQUERY);
+        assert!(mid.subquery.is_none());
+        let base = parse.rtable.nth(2).as_range_tbl_entry().unwrap();
+        assert_eq!(base.relid, 77);
+        assert_eq!(base.perminfoindex, 3);
+        assert_eq!(parse.rteperminfos.len(), 3);
+        assert_eq!(parse.rteperminfos.nth(2).as_rte_permission_info().unwrap().relid, 77);
+
+        let jt = parse.jointree.unwrap();
+        assert_eq!(jt.fromlist.len(), 1);
+        assert_eq!(jt.fromlist.nth(0).as_range_tbl_ref().unwrap().rtindex, 3);
+        let out_var = parse.targetList.nth(0).as_target_entry().unwrap().expr.as_var().unwrap();
+        assert_eq!((out_var.varno, out_var.varattno), (3, 1));
     }
 }

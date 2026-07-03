@@ -91,6 +91,73 @@ fn getattr(
     d
 }
 
+const Anum_pg_index_indisprimary: usize = 7;
+
+// index_check_primary_key (index.c); NULLS NOT DISTINCT indexes are
+// unreachable here (USING INDEX is loud upstream).
+pub fn index_check_primary_key<'mcx>(
+    mcx: Mcx<'mcx>,
+    heapRel: &Relation<'mcx>,
+    indexInfo: &IndexInfo<'mcx>,
+    is_alter_table: bool,
+) -> PgResult<()> {
+    if (is_alter_table || heapRel.rd_rel.relispartition) && relationHasPrimaryKey(mcx, heapRel)? {
+        return Err(err(
+            format!(
+                "multiple primary keys for table \"{}\" are not allowed",
+                heapRel.name()
+            ),
+            types_error::ERRCODE_INVALID_TABLE_DEFINITION,
+        ));
+    }
+    if indexInfo.ii_NullsNotDistinct {
+        return Err(err(
+            "primary keys cannot use NULLS NOT DISTINCT indexes".into(),
+            types_error::ERRCODE_INVALID_TABLE_DEFINITION,
+        ));
+    }
+    for i in 0..indexInfo.ii_NumIndexKeyAttrs as usize {
+        let attnum = indexInfo.ii_IndexAttrNumbers[i];
+        if attnum == 0 {
+            return Err(err(
+                "primary keys cannot be expressions".into(),
+                types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+            ));
+        }
+        if attnum < 0 {
+            continue;
+        }
+        let att = heapRel.rd_att.attr(attnum as usize - 1);
+        if !att.attnotnull {
+            let colname = core::str::from_utf8(att.attname.name_str()).expect("attname UTF-8");
+            return Err(err(
+                format!("primary key column \"{colname}\" is not marked NOT NULL"),
+                types_error::ERRCODE_INVALID_TABLE_DEFINITION,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn relationHasPrimaryKey<'mcx>(mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgResult<bool> {
+    let indexes = relcache::RelationGetIndexList(mcx, rel.rd_id)?;
+    for &indexoid in indexes.iter() {
+        let pg_index = table::table_open(mcx, INDEX_RELATION_ID, types_rel::AccessShareLock)?;
+        let key = oid_scankey(1, indexoid);
+        let mut scan =
+            genam::systable_beginscan(mcx, &pg_index, IndexRelidIndexId, true, None, &[key])?;
+        let tup = genam::systable_getnext(mcx, &mut scan)?
+            .unwrap_or_else(|| panic!("cache lookup failed for index {indexoid}"));
+        let isprimary = getattr(tup, Anum_pg_index_indisprimary, pg_index.descr()).as_bool();
+        genam::systable_endscan(mcx, scan)?;
+        pg_index.close(types_rel::AccessShareLock)?;
+        if isprimary {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 // ConstructTupleDescriptor (index.c).
 fn ConstructTupleDescriptor<'mcx>(
     mcx: Mcx<'mcx>,
@@ -103,7 +170,8 @@ fn ConstructTupleDescriptor<'mcx>(
 ) -> PgResult<TupleDescData<'mcx>> {
     // amroutine->amkeytype: InvalidOid for btree/gin/gist/brin, INT4OID for hash.
     let amkeytype = match accessMethodId {
-        BTREE_AM_OID | GIN_AM_OID | GIST_AM_OID | types_core::BRIN_AM_OID => InvalidOid,
+        BTREE_AM_OID | GIN_AM_OID | GIST_AM_OID | types_core::SPGIST_AM_OID
+        | types_core::BRIN_AM_OID => InvalidOid,
         HASH_AM_OID => INT4OID,
         other => unported(&format!("ConstructTupleDescriptor: index AM {other}")),
     };
@@ -406,9 +474,10 @@ pub fn index_create<'mcx>(
         && accessMethodId != HASH_AM_OID
         && accessMethodId != GIN_AM_OID
         && accessMethodId != GIST_AM_OID
+        && accessMethodId != types_core::SPGIST_AM_OID
         && accessMethodId != types_core::BRIN_AM_OID
     {
-        unported("index_create: index AMs beyond btree/hash/gin/gist/brin");
+        unported("index_create: index AMs beyond btree/hash/gin/gist/spgist/brin");
     }
 
     let pg_class = table::table_open(mcx, RELATION_RELATION_ID, RowExclusiveLock)?;
@@ -701,9 +770,10 @@ pub fn index_build<'mcx>(
         && indexRelation.rd_rel.relam != HASH_AM_OID
         && indexRelation.rd_rel.relam != GIN_AM_OID
         && indexRelation.rd_rel.relam != GIST_AM_OID
+        && indexRelation.rd_rel.relam != types_core::SPGIST_AM_OID
         && indexRelation.rd_rel.relam != types_core::BRIN_AM_OID
     {
-        unported("index_build: index AMs beyond btree/hash/gin/gist/brin");
+        unported("index_build: index AMs beyond btree/hash/gin/gist/spgist/brin");
     }
 
     let guard = miscinit::SecContextGuard::security_restricted(heapRelation.rd_rel.relowner);
@@ -718,6 +788,9 @@ pub fn index_build<'mcx>(
         (r.heap_tuples, r.index_tuples)
     } else if indexRelation.rd_rel.relam == types_core::BRIN_AM_OID {
         let r = brin_build::brinbuild(mcx, heapRelation, indexRelation, indexInfo)?;
+        (r.heap_tuples, r.index_tuples)
+    } else if indexRelation.rd_rel.relam == types_core::SPGIST_AM_OID {
+        let r = spgist_build::spgbuild(mcx, heapRelation, indexRelation, indexInfo)?;
         (r.heap_tuples, r.index_tuples)
     } else if indexRelation.rd_rel.relam == GIN_AM_OID {
         let r = ginbuild::ginbuild(mcx, heapRelation, indexRelation, indexInfo)?;

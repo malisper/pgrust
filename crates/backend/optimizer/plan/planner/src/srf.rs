@@ -112,7 +112,11 @@ fn collect_input_items<'mcx>(
     sgref: u32,
     items: &mut PgVec<'mcx, (types_pathnodes::NodeId, u32)>,
 ) -> PgResult<()> {
-    let vars = vars::pull_var_clause(run.mcx, node, 0)?;
+    let vars = vars::pull_var_clause(
+        run.mcx,
+        node,
+        vars::PVC_INCLUDE_AGGREGATES | vars::PVC_INCLUDE_WINDOWFUNCS | vars::PVC_INCLUDE_PLACEHOLDERS,
+    )?;
     let whole_is_var = node.node_tag() == NodeTag::T_Var;
     for v in &vars {
         let item_sgref = if whole_is_var { sgref } else { 0 };

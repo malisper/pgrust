@@ -312,19 +312,7 @@ fn fetch_agg_sort_op(aggfnoid: types_core::Oid) -> PgResult<types_core::Oid> {
     })
 }
 
-pub(crate) fn subroot_path_base<'a, 'mcx>(
-    run: &'a PlannerRun<'mcx>,
-    mminfo: &MinMaxAggInfo,
-) -> &'a types_pathnodes::Path<'mcx> {
-    let idx = mminfo.subroot_idx.expect("minmax agg has a subroot");
-    let pid = mminfo.subroot_path.expect("minmax agg has a path");
-    run.minmax_subroots[idx]
-        .as_ref()
-        .expect("minmax subroot still parked")
-        .root
-        .path(pid)
-        .base()
-}
+pub(crate) use types_pathnodes::run::subroot_path_base;
 
 #[cold]
 #[inline(never)]
