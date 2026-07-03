@@ -5010,8 +5010,16 @@ impl<'mcx> Parser<'mcx> {
                     view.v(4 + off).list()
                 } else {
                     let from = Node::mk_list(mcx, view.v(5 + off).list())?;
-                    let v = def_elem(mcx, "from", Some(from), view.l(5 + off))?;
-                    let YYSTYPE::Node(Some(el)) = v else { unreachable!() };
+                    let el = Node::mk(
+                        mcx,
+                        DefElem {
+                            defnamespace: None,
+                            defname: Some("from"),
+                            arg: Some(from),
+                            defaction: DefElemAction::DEFELEM_UNSPEC,
+                            location: view.l(5 + off),
+                        },
+                    )?;
                     NodeList::make1(mcx, el)?
                 };
                 n.if_not_exists = ine;
