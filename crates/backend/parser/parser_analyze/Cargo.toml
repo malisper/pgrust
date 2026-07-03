@@ -9,6 +9,7 @@ name = "parser_analyze"
 path = "src/lib.rs"
 
 [dependencies]
+rewrite_manip = { path = "../../rewrite/rewrite_manip" }
 datum = { path = "../../../_support/types/datum" }
 types_rel = { path = "../../../_support/types/rel" }
 types_tuple = { path = "../../../_support/types/types_tuple" }

@@ -55,6 +55,7 @@ const InitPrivsObjIndexId: Oid = 3395;
 const SecLabelRelationId: Oid = 3596;
 const AttrDefaultRelationId: Oid = 2604;
 const ConstraintRelationId: Oid = 2606;
+const RewriteRelationId: Oid = 2618;
 const AuthMemRelationId: Oid = 1261;
 
 #[cold]
@@ -701,6 +702,9 @@ fn doDeletion<'mcx>(mcx: Mcx<'mcx>, object: &ObjectAddress, flags: i32) -> PgRes
         TYPE_RELATION_ID => pg_type::RemoveTypeById(mcx, object.objectId)?,
         AttrDefaultRelationId => pg_attrdef::RemoveAttrDefaultById(mcx, object.objectId)?,
         ConstraintRelationId => pg_constraint::RemoveConstraintById(mcx, object.objectId)?,
+        RewriteRelationId => {
+            rewrite_define_seams::remove_rewrite_rule_by_id::call(mcx, object.objectId)?
+        }
         other => panic!("unported: doDeletion object class {other}"),
     }
     Ok(())

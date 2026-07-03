@@ -246,7 +246,7 @@ fn RewriteQuery<'mcx>(
             }
             rewrite_events.push((rt_entry.relid, event));
             for pt_node in product_queries.iter() {
-                let ptq = fire::flat_copy_query(mcx, pt_node.as_query().expect("Query"))?;
+                let ptq = rewrite_manip::flat_copy_query(mcx, pt_node.as_query().expect("Query"))?;
                 let newstuff = RewriteQuery(
                     mcx,
                     ptq,
@@ -284,7 +284,7 @@ fn RewriteQuery<'mcx>(
     // INSERT products run after the original; UPDATE/DELETE products before.
     if !instead {
         let final_q = match qual_product {
-            Some(n) => fire::flat_copy_query(mcx, n.as_query().expect("Query"))?,
+            Some(n) => rewrite_manip::flat_copy_query(mcx, n.as_query().expect("Query"))?,
             None => parsetree,
         };
         if event == CmdType::CMD_INSERT {

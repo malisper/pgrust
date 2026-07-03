@@ -593,6 +593,15 @@ pub fn rangeTableEntry_used_query<'mcx>(
     nodes_core::query_tree_walker(q, &mut w, 0)
 }
 
+pub fn rangeTableEntry_used_list<'mcx>(
+    list: &NodeList<'mcx>,
+    rt_index: i32,
+    sublevels_up: u32,
+) -> PgResult<bool> {
+    let mut w = RtiUsed { rt_index, sublevels_up };
+    nodes_core::walk_list(list, &mut w)
+}
+
 pub fn rangeTableEntry_used_opt<'mcx>(
     node: Option<Node<'mcx>>,
     rt_index: i32,
@@ -608,7 +617,7 @@ fn eref_alias<'mcx>(rte: &RangeTblEntry<'mcx>) -> &'mcx str {
     rte.eref.and_then(|e| e.aliasname).unwrap_or("")
 }
 
-fn is_insert_select_shape<'mcx>(
+pub fn getInsertSelectQuery_parts<'mcx>(
     parsetree: &Query<'mcx>,
 ) -> PgResult<Option<(Node<'mcx>, &'mcx Query<'mcx>)>> {
     use types_nodes::nodes_enums::CmdType;
@@ -652,7 +661,7 @@ pub fn getInsertSelectQuery_ref<'a, 'mcx>(
 where
     'mcx: 'a,
 {
-    match is_insert_select_shape(parsetree)? {
+    match getInsertSelectQuery_parts(parsetree)? {
         Some((_, sub)) => Ok(sub),
         None => Ok(parsetree),
     }
@@ -667,7 +676,7 @@ pub fn getInsertSelectQuery_node<'mcx>(
     parsetree_node: Node<'mcx>,
 ) -> PgResult<(Node<'mcx>, bool)> {
     let parsetree = parsetree_node.as_query().expect("Query");
-    match is_insert_select_shape(parsetree)? {
+    match getInsertSelectQuery_parts(parsetree)? {
         None => Ok((parsetree_node, false)),
         Some((select_rte_node, selectquery)) => {
             let sub_node = copy_query_node(mcx, selectquery)?;
@@ -1222,4 +1231,57 @@ fn internal(msg: &str) -> Box<PgError> {
 #[inline(never)]
 fn feature_not_supported(msg: &str) -> Box<PgError> {
     Box::new(PgError::error(msg.to_string()).with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED))
+}
+
+// makeNode(Query)-with-memcpy flat copy: list headers re-cloned so the value
+// owns its cells, substructure shared (post-mutation conversion only).
+pub fn flat_copy_query<'mcx>(mcx: Mcx<'mcx>, q: &Query<'mcx>) -> PgResult<Query<'mcx>> {
+    Ok(Query {
+        commandType: q.commandType,
+        querySource: q.querySource,
+        queryId: q.queryId,
+        canSetTag: q.canSetTag,
+        utilityStmt: q.utilityStmt,
+        resultRelation: q.resultRelation,
+        hasAggs: q.hasAggs,
+        hasWindowFuncs: q.hasWindowFuncs,
+        hasTargetSRFs: q.hasTargetSRFs,
+        hasSubLinks: q.hasSubLinks,
+        hasDistinctOn: q.hasDistinctOn,
+        hasRecursive: q.hasRecursive,
+        hasModifyingCTE: q.hasModifyingCTE,
+        hasForUpdate: q.hasForUpdate,
+        hasRowSecurity: q.hasRowSecurity,
+        hasGroupRTE: q.hasGroupRTE,
+        isReturn: q.isReturn,
+        cteList: q.cteList.clone_in(mcx)?,
+        rtable: q.rtable.clone_in(mcx)?,
+        rteperminfos: q.rteperminfos.clone_in(mcx)?,
+        jointree: q.jointree,
+        mergeActionList: q.mergeActionList.clone_in(mcx)?,
+        mergeTargetRelation: q.mergeTargetRelation,
+        mergeJoinCondition: q.mergeJoinCondition,
+        targetList: q.targetList.clone_in(mcx)?,
+        r#override: q.r#override,
+        onConflict: q.onConflict,
+        returningOldAlias: q.returningOldAlias,
+        returningNewAlias: q.returningNewAlias,
+        returningList: q.returningList.clone_in(mcx)?,
+        groupClause: q.groupClause.clone_in(mcx)?,
+        groupDistinct: q.groupDistinct,
+        groupingSets: q.groupingSets.clone_in(mcx)?,
+        havingQual: q.havingQual,
+        windowClause: q.windowClause.clone_in(mcx)?,
+        distinctClause: q.distinctClause.clone_in(mcx)?,
+        sortClause: q.sortClause.clone_in(mcx)?,
+        limitOffset: q.limitOffset,
+        limitCount: q.limitCount,
+        limitOption: q.limitOption,
+        rowMarks: q.rowMarks.clone_in(mcx)?,
+        setOperations: q.setOperations,
+        constraintDeps: q.constraintDeps.clone_in(mcx)?,
+        withCheckOptions: q.withCheckOptions.clone_in(mcx)?,
+        stmt_location: q.stmt_location,
+        stmt_len: q.stmt_len,
+    })
 }

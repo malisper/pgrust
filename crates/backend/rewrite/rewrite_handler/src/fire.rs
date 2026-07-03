@@ -175,8 +175,8 @@ fn rewriteRuleAction<'mcx>(
 
     {
         let sub_action = sub_action_node.as_query().expect("Query");
-        let rtable_tail = sub_action.rtable;
-        let perminfos_tail = sub_action.rteperminfos;
+        let rtable_tail = sub_action.rtable.clone_in(mcx)?;
+        let perminfos_tail = sub_action.rteperminfos.clone_in(mcx)?;
         let mut new_rtable = rewrite_manip::copy_node_list(mcx, &parsetree.rtable)?;
         let mut new_perminfos = rewrite_manip::copy_node_list(mcx, &parsetree.rteperminfos)?;
         rewrite_manip::CombineRangeTables(
@@ -537,59 +537,6 @@ fn contain_vars_of_level_query(q: &Query<'_>, levelsup: u32) -> PgResult<bool> {
     }
     let mut w = W { sublevels_up: levelsup };
     nodes_core::query_tree_walker(q, &mut w, 0)
-}
-
-// makeNode(Query)-with-memcpy flat copy: list headers re-cloned so the value
-// owns its cells, substructure shared (post-mutation conversion only).
-pub(crate) fn flat_copy_query<'mcx>(mcx: Mcx<'mcx>, q: &Query<'mcx>) -> PgResult<Query<'mcx>> {
-    Ok(Query {
-        commandType: q.commandType,
-        querySource: q.querySource,
-        queryId: q.queryId,
-        canSetTag: q.canSetTag,
-        utilityStmt: q.utilityStmt,
-        resultRelation: q.resultRelation,
-        hasAggs: q.hasAggs,
-        hasWindowFuncs: q.hasWindowFuncs,
-        hasTargetSRFs: q.hasTargetSRFs,
-        hasSubLinks: q.hasSubLinks,
-        hasDistinctOn: q.hasDistinctOn,
-        hasRecursive: q.hasRecursive,
-        hasModifyingCTE: q.hasModifyingCTE,
-        hasForUpdate: q.hasForUpdate,
-        hasRowSecurity: q.hasRowSecurity,
-        hasGroupRTE: q.hasGroupRTE,
-        isReturn: q.isReturn,
-        cteList: q.cteList.clone_in(mcx)?,
-        rtable: q.rtable.clone_in(mcx)?,
-        rteperminfos: q.rteperminfos.clone_in(mcx)?,
-        jointree: q.jointree,
-        mergeActionList: q.mergeActionList.clone_in(mcx)?,
-        mergeTargetRelation: q.mergeTargetRelation,
-        mergeJoinCondition: q.mergeJoinCondition,
-        targetList: q.targetList.clone_in(mcx)?,
-        r#override: q.r#override,
-        onConflict: q.onConflict,
-        returningOldAlias: q.returningOldAlias,
-        returningNewAlias: q.returningNewAlias,
-        returningList: q.returningList.clone_in(mcx)?,
-        groupClause: q.groupClause.clone_in(mcx)?,
-        groupDistinct: q.groupDistinct,
-        groupingSets: q.groupingSets.clone_in(mcx)?,
-        havingQual: q.havingQual,
-        windowClause: q.windowClause.clone_in(mcx)?,
-        distinctClause: q.distinctClause.clone_in(mcx)?,
-        sortClause: q.sortClause.clone_in(mcx)?,
-        limitOffset: q.limitOffset,
-        limitCount: q.limitCount,
-        limitOption: q.limitOption,
-        rowMarks: q.rowMarks.clone_in(mcx)?,
-        setOperations: q.setOperations,
-        constraintDeps: q.constraintDeps.clone_in(mcx)?,
-        withCheckOptions: q.withCheckOptions.clone_in(mcx)?,
-        stmt_location: q.stmt_location,
-        stmt_len: q.stmt_len,
-    })
 }
 
 #[cold]

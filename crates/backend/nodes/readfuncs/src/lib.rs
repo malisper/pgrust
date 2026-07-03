@@ -349,12 +349,23 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
             b"JOINEXPR" => self.read_join_expr(),
             b"SORTGROUPCLAUSE" => self.read_sort_group_clause(),
             b"AGGREF" => self.read_aggref(),
+            b"SETTODEFAULT" => self.read_set_to_default(),
             other => panic!(
                 "parseNodeString (readfuncs.c): {} read arm unported (view SELECT-rule + \
                  DEFAULT/CHECK expr sets only)",
                 String::from_utf8_lossy(other)
             ),
         }
+    }
+
+    fn read_set_to_default(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let mut d = Node::build::<types_nodes::primnodes::SetToDefault>(mcx)?;
+        d.typeId = self.read_u32("typeId");
+        d.typeMod = self.read_i32("typeMod");
+        d.collation = self.read_u32("collation");
+        d.location = self.read_location("location");
+        Ok(d.seal())
     }
 
     // _readQuery (readfuncs.funcs.c); queryId is read_write_ignore/read_as(0).
@@ -450,6 +461,12 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
                 rte.joinleftcols = self.read_int_list("joinleftcols")?;
                 rte.joinrightcols = self.read_int_list("joinrightcols")?;
                 rte.join_using_alias = self.read_alias_ref("join_using_alias")?;
+            }
+            RTEKind::RTE_VALUES => {
+                rte.values_lists = self.read_node_list("values_lists")?;
+                rte.coltypes = self.read_oid_list("coltypes")?;
+                rte.coltypmods = self.read_int_list("coltypmods")?;
+                rte.colcollations = self.read_oid_list("colcollations")?;
             }
             RTEKind::RTE_GROUP => {
                 rte.groupexprs = self.read_node_list("groupexprs")?;
