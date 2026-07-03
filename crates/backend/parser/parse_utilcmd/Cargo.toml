@@ -43,3 +43,4 @@ readfuncs = { path = "../../nodes/readfuncs" }
 outfuncs = { path = "../../nodes/outfuncs" }
 relcache = { path = "../../utils/cache/relcache" }
 indexcmds_seams = { path = "../../commands/indexcmds_seams" }
+rewrite_manip = { path = "../../rewrite/rewrite_manip" }
