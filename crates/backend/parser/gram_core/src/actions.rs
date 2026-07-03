@@ -11,8 +11,8 @@ use types_nodes::primnodes::{CaseExpr, CaseWhen, CoalesceExpr, JoinExpr, MinMaxE
 use types_nodes::JoinType;
 use types_nodes::rawnodes::A_Expr_Kind::AEXPR_OP;
 use types_nodes::rawnodes::{
-    ColumnDef, Constraint, ConstrType, CreateStmt, OnCommitAction, RangeSubselect, WindowDef,
-    FRAMEOPTION_DEFAULTS,
+    ColumnDef, Constraint, ConstrType, CreateStmt, IndexElem, IndexStmt, OnCommitAction,
+    RangeSubselect, WindowDef, FRAMEOPTION_DEFAULTS,
 };
 use types_nodes::{
     Alias, DeleteStmt, InsertStmt, Node, NodeList, NodeTag, RangeFunction, RangeVar, RawStmt,
@@ -422,6 +422,117 @@ impl<'mcx> Parser<'mcx> {
             // opt_no_inherit: NO INHERIT | /*EMPTY*/
             550 => *yyval = YYSTYPE::Boolean(true),
             551 => *yyval = YYSTYPE::Boolean(false),
+            141 => *yyval = YYSTYPE::Boolean(true),
+            142 => *yyval = YYSTYPE::Boolean(false),
+            377 => {
+                let el = view.v(1).node().expect("reloption_elem");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, el)?);
+            }
+            378 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(3).node().expect("reloption_elem"))?;
+                *yyval = YYSTYPE::List(list);
+            }
+            379 => {
+                let v = def_elem(mcx, view.v(1).str_val(), view.v(3).node(), view.l(1))?;
+                *yyval = v;
+            }
+            380 => {
+                let v = def_elem(mcx, view.v(1).str_val(), Option::None, view.l(1))?;
+                *yyval = v;
+            }
+            872 => *yyval = YYSTYPE::Node(view.v(1).node()),
+            873 => {
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    types_nodes::String { sval: view.v(1).str_val() },
+                )?));
+            }
+            660 => *yyval = YYSTYPE::Node(Some(Node::mk(mcx, Float { fval: view.v(1).str_val() })?)),
+            661 => *yyval = YYSTYPE::Node(Some(Node::mk(mcx, Float { fval: view.v(2).str_val() })?)),
+            662 => {
+                let fval = negate_float(mcx, view.v(2).str_val())?;
+                *yyval = YYSTYPE::Node(Some(Node::mk(mcx, Float { fval })?));
+            }
+            663 => {
+                *yyval =
+                    YYSTYPE::Node(Some(Node::mk(mcx, Integer { ival: view.v(1).ival() })?));
+            }
+            508 | 510 => *yyval = YYSTYPE::Boolean(true),
+            509 => *yyval = YYSTYPE::Boolean(false),
+            // IndexStmt: CREATE opt_unique INDEX opt_concurrently
+            // [IF NOT EXISTS name | opt_single_name] ON relation_expr
+            // access_method_clause '(' index_params ')' opt_include
+            // opt_unique_null_treatment opt_reloptions OptTableSpace where_clause
+            1101 | 1102 => {
+                let b = if rule == 1102 { 3 } else { 0 };
+                let mut n = Node::build::<IndexStmt>(mcx)?;
+                n.unique = view.v(2).boolean();
+                n.concurrent = view.v(4).boolean();
+                n.idxname = if rule == 1102 {
+                    Some(view.v(8).str_val())
+                } else {
+                    opt_str(view.v(5))
+                };
+                let relation = view.v(7 + b).node().expect("relation_expr");
+                n.relation = relation.as_variant::<RangeVar>();
+                n.accessMethod = Some(view.v(8 + b).str_val());
+                n.indexParams = view.v(10 + b).list();
+                n.indexIncludingParams = view.v(12 + b).list();
+                n.nulls_not_distinct = !view.v(13 + b).boolean();
+                n.options = view.v(14 + b).list();
+                n.tableSpace = opt_str(view.v(15 + b));
+                n.whereClause = view.v(16 + b).node();
+                n.if_not_exists = rule == 1102;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1103 => *yyval = YYSTYPE::Boolean(true),
+            1104 => *yyval = YYSTYPE::Boolean(false),
+            1106 => *yyval = YYSTYPE::Keyword("btree"),
+            1107 | 1116 => {
+                let el = view.v(1).node().expect("index_elem");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, el)?);
+            }
+            1108 | 1117 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(3).node().expect("index_elem"))?;
+                *yyval = YYSTYPE::List(list);
+            }
+            // index_elem_options: opt_collate opt_qualified_name
+            // [reloptions] opt_asc_desc opt_nulls_order
+            1109 | 1110 => {
+                let r = if rule == 1110 { 1 } else { 0 };
+                let mut n = Node::build::<IndexElem>(mcx)?;
+                n.collation = view.v(1).list();
+                n.opclass = view.v(2).list();
+                if rule == 1110 {
+                    n.opclassopts = view.v(3).list();
+                }
+                n.ordering = sortby_dir(view.v(3 + r).ival());
+                n.nulls_ordering = sortby_nulls(view.v(4 + r).ival());
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1111 => {
+                let name = view.v(1).str_val();
+                let node = view.v(2).node().expect("index_elem_options");
+                // SAFETY: tree is parser-owned; no derived refs live.
+                unsafe {
+                    node.with_mut::<IndexElem, _>(|e| e.name = Some(name))
+                        .expect("index_elem_options is IndexElem");
+                }
+                *yyval = YYSTYPE::Node(Some(node));
+            }
+            1112 | 1113 => {
+                let (expr_i, elem_i) = if rule == 1113 { (2, 4) } else { (1, 2) };
+                let expr = view.v(expr_i).node();
+                let node = view.v(elem_i).node().expect("index_elem_options");
+                // SAFETY: tree is parser-owned; no derived refs live.
+                unsafe {
+                    node.with_mut::<IndexElem, _>(|e| e.expr = expr)
+                        .expect("index_elem_options is IndexElem");
+                }
+                *yyval = YYSTYPE::Node(Some(node));
+            }
             // OnCommitOption: /*EMPTY*/
             605 => *yyval = YYSTYPE::Ival(OnCommitAction::ONCOMMIT_NOOP as i32),
             1710 => {
