@@ -347,6 +347,41 @@ pub struct DefElem<'mcx> {
     pub location: ParseLoc,
 }
 
+// C FunctionParameterMode (parsenodes.h); values are the proargmodes chars.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(u8)]
+pub enum FunctionParameterMode {
+    #[default]
+    FUNC_PARAM_DEFAULT = b'd',
+    FUNC_PARAM_IN = b'i',
+    FUNC_PARAM_OUT = b'o',
+    FUNC_PARAM_INOUT = b'b',
+    FUNC_PARAM_VARIADIC = b'v',
+    FUNC_PARAM_TABLE = b't',
+}
+
+// C: argType is a TypeName; defexpr stays raw until transform.
+#[derive(Default)]
+pub struct FunctionParameter<'mcx> {
+    pub name: Option<&'mcx str>,
+    pub argType: Option<Node<'mcx>>,
+    pub mode: FunctionParameterMode,
+    pub defexpr: Option<Node<'mcx>>,
+    pub location: ParseLoc,
+}
+
+// C: returnType is a TypeName; sql_body is a ReturnStmt or List of stmts.
+#[derive(Default)]
+pub struct CreateFunctionStmt<'mcx> {
+    pub is_procedure: bool,
+    pub replace: bool,
+    pub funcname: NodeList<'mcx>,
+    pub parameters: NodeList<'mcx>,
+    pub returnType: Option<Node<'mcx>>,
+    pub options: NodeList<'mcx>,
+    pub sql_body: Option<Node<'mcx>>,
+}
+
 #[derive(Default)]
 pub struct CopyStmt<'mcx> {
     pub relation: Option<Node<'mcx>>,
@@ -914,6 +949,12 @@ unsafe impl<'mcx> NodeVariant<'mcx> for DefElem<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for CopyStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_CopyStmt;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for FunctionParameter<'mcx> {
+    const TAG: NodeTag = NodeTag::T_FunctionParameter;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for CreateFunctionStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CreateFunctionStmt;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for VariableSetStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_VariableSetStmt;
 }
@@ -1091,6 +1132,16 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_copy_stmt(self) -> Option<&'mcx CopyStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_function_parameter(self) -> Option<&'mcx FunctionParameter<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_create_function_stmt(self) -> Option<&'mcx CreateFunctionStmt<'mcx>> {
         self.as_variant()
     }
 
