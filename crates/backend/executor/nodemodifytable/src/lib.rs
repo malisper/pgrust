@@ -17,9 +17,9 @@ use tableam_vocab::{
     TUPLE_LOCK_FLAG_FIND_LAST_VERSION,
 };
 use types_error::{
-    PgError, PgResult, ERRCODE_CHECK_VIOLATION, ERRCODE_DATATYPE_MISMATCH,
-    ERRCODE_NOT_NULL_VIOLATION, ERRCODE_TRIGGERED_DATA_CHANGE_VIOLATION,
-    ERRCODE_T_R_SERIALIZATION_FAILURE,
+    PgError, PgResult, ERRCODE_CARDINALITY_VIOLATION, ERRCODE_CHECK_VIOLATION,
+    ERRCODE_DATATYPE_MISMATCH, ERRCODE_NOT_NULL_VIOLATION,
+    ERRCODE_TRIGGERED_DATA_CHANGE_VIOLATION, ERRCODE_T_R_SERIALIZATION_FAILURE,
 };
 use types_nodes::nodes_enums::CmdType;
 use types_nodes::plannodes::ModifyTable;
@@ -27,6 +27,7 @@ use types_nodes::{Node, NodeTag};
 use types_rel::{Relation, RELKIND_RELATION};
 use types_slot::{SlotData, TupleSlotKind, EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK};
 use types_snapshot::{SnapshotData, SNAPSHOT_ANY};
+use types_tuple::itemptr::ItemPointerSetInvalid;
 use types_tuple::{ItemPointerData, TupleDescData};
 
 // ExecBuildUpdateProjection's step stream, resolved once per statement onto a
@@ -54,9 +55,25 @@ pub struct ModifyTableState<'mcx> {
     snapshot_any: Option<Rc<SnapshotData<'mcx>>>,
     returning_slot: Option<ExecSlotId>,
     project_returning: Option<PgBox<'mcx, ExprState<'mcx>>>,
+    on_conflict: Option<OnConflictState<'mcx>>,
     // ri_CheckConstraintExprs (built on first ExecRelCheck, per C); each
     // compiled qual rides with its constraint name for the 23514 report.
     check_exprs: Option<mcx::PgVec<'mcx, CheckExpr<'mcx>>>,
+}
+
+// ri_onConflict (OnConflictSetState) + ri_onConflictArbiterIndexes. The DO
+// UPDATE projection runs in two steps: set_proj evaluates the SET exprs
+// (scan = existing tuple, inner = excluded) into setvals_slot, then the merge
+// into proj_slot overlays them onto the existing tuple at set_attnos — the
+// flat-map shape of C's ExecBuildUpdateProjection.
+struct OnConflictState<'mcx> {
+    arbiters: mcx::PgVec<'mcx, types_core::Oid>,
+    existing_slot: ExecSlotId,
+    setvals_slot: Option<ExecSlotId>,
+    proj_slot: Option<ExecSlotId>,
+    set_proj: Option<PgBox<'mcx, ExprState<'mcx>>>,
+    set_attnos: mcx::PgVec<'mcx, u16>,
+    where_clause: Option<PgBox<'mcx, ExprState<'mcx>>>,
 }
 
 struct CheckExpr<'mcx> {
@@ -82,9 +99,6 @@ pub fn exec_init_modify_table<'mcx>(
             "ExecInitModifyTable (nodeModifyTable.c): {:?} arm not ported",
             node.operation
         );
-    }
-    if node.onConflictAction != 0 {
-        panic!("ExecInitModifyTable (nodeModifyTable.c): ON CONFLICT arm not ported");
     }
     if !node.withCheckOptionLists.is_nil()
         || !node.mergeActionLists.is_nil()
@@ -149,6 +163,81 @@ pub fn exec_init_modify_table<'mcx>(
         project_returning = Some(proj);
     }
 
+    // ExecInitModifyTable's ON CONFLICT block. Slots live in the shared tuple
+    // table; the SET projection's input descriptor is the result relation's.
+    let mut on_conflict = None;
+    if node.onConflictAction != 0 {
+        let mcx = estate.es_query_cxt;
+        let mut arbiters: mcx::PgVec<'mcx, types_core::Oid> = mcx::PgVec::new_in(mcx);
+        for oid in node.arbiterIndexes.iter() {
+            arbiters.push(oid);
+        }
+        let (kind, desc) = {
+            let rel = estate.es_relations[(rti - 1) as usize]
+                .as_ref()
+                .expect("result relation opened");
+            (tableam::table_slot_callbacks(rel), rel.rd_att.clone())
+        };
+        let existing_slot = {
+            let slot = exectuples::make_tuple_table_slot(mcx, kind, Some(desc.clone()));
+            let id = ExecSlotId(estate.es_tupleTable.len() as u32);
+            estate.es_tupleTable.push(slot);
+            id
+        };
+
+        let mut setvals_slot = None;
+        let mut proj_slot = None;
+        let mut set_proj = None;
+        let mut set_attnos: mcx::PgVec<'mcx, u16> = mcx::PgVec::new_in(mcx);
+        let mut where_clause = None;
+        if node.onConflictAction == types_nodes::OnConflictAction::ONCONFLICT_UPDATE as u32 {
+            let params = estate.param_bind();
+            let proj = {
+                let rel = estate.es_relations[(rti - 1) as usize]
+                    .as_ref()
+                    .expect("result relation opened");
+                exec_build_projection_info(mcx, &node.onConflictSet, Some(&rel.rd_att), params)?
+            };
+            let set_desc = execscan::exec_type_from_tl(mcx, &node.onConflictSet)?;
+            setvals_slot = Some({
+                let slot = exectuples::make_tuple_table_slot(
+                    mcx,
+                    TupleSlotKind::Virtual,
+                    Some(set_desc),
+                );
+                let id = ExecSlotId(estate.es_tupleTable.len() as u32);
+                estate.es_tupleTable.push(slot);
+                id
+            });
+            proj_slot = Some({
+                let slot = exectuples::make_tuple_table_slot(mcx, kind, Some(desc));
+                let id = ExecSlotId(estate.es_tupleTable.len() as u32);
+                estate.es_tupleTable.push(slot);
+                id
+            });
+            set_proj = Some(proj);
+            for attno in node.onConflictCols.iter() {
+                set_attnos.push(attno as u16);
+            }
+            assert_eq!(set_attnos.len(), node.onConflictSet.len());
+            if let Some(where_node) = node.onConflictWhere {
+                let qual = where_node
+                    .as_list()
+                    .expect("onConflictWhere is an implicit-AND List after preprocessing");
+                where_clause = execexpr::exec_init_qual(mcx, qual, estate.param_bind())?;
+            }
+        }
+        on_conflict = Some(OnConflictState {
+            arbiters,
+            existing_slot,
+            setvals_slot,
+            proj_slot,
+            set_proj,
+            set_attnos,
+            where_clause,
+        });
+    }
+
     // fireBSTriggers/ExecSetupTransitionCaptureState: the trimmed relcache
     // entry carries no trigger descriptor, so statement triggers are
     // undetectable until pg_trigger lands (none exist without CREATE TRIGGER).
@@ -168,6 +257,7 @@ pub fn exec_init_modify_table<'mcx>(
         snapshot_any: Some(Rc::new(SnapshotData::sentinel(estate.es_query_cxt, SNAPSHOT_ANY))),
         returning_slot,
         project_returning,
+        on_conflict,
         check_exprs: None,
     })
 }
@@ -223,9 +313,11 @@ pub fn exec_modify_table<'mcx>(
                     exec_init_insert_projection(mt, estate)?;
                 }
                 let slot = exec_get_insert_new_tuple(mt, estate, plan_slot)?;
-                exec_insert(mt, estate, slot)?;
-                if mt.project_returning.is_some() {
-                    return Ok(Some(exec_process_returning(mt, estate, slot, plan_slot)?));
+                let result = exec_insert(mt, estate, slot, &mut epq_eval)?;
+                if let Some(rslot) = result {
+                    if mt.project_returning.is_some() {
+                        return Ok(Some(exec_process_returning(mt, estate, rslot, plan_slot)?));
+                    }
                 }
             }
             CmdType::CMD_UPDATE => {
@@ -723,7 +815,7 @@ fn exec_update<'mcx>(
                      index maintenance (BRIN lane) not ported"
                 );
             }
-            execindexing::ExecInsertIndexTuples(mcx, indexes, rel, slot)?;
+            execindexing::ExecInsertIndexTuples(mcx, indexes, rel, slot, false, None, &[])?;
         }
     }
 
@@ -932,43 +1024,405 @@ fn self_modified_violation(verb: &str) -> Box<PgError> {
     )
 }
 
-// ExecInsert (nodeModifyTable.c): the plain-heap arm — materialize, check
-// constraints, table_tuple_insert, count. Index inserts are the nbt
-// insert lane's (loud); row triggers are undetectable (no TrigDesc yet).
+enum OnConflictOutcome {
+    // The conflict was consumed; project RETURNING from the slot if any.
+    Done(Option<ExecSlotId>),
+    // Concurrent update/delete of the conflict tuple: redo from vlock.
+    Retry,
+}
+
+// ExecInsert (nodeModifyTable.c), plain-heap + speculative (ON CONFLICT)
+// arms. Returns the slot RETURNING should project from, or None when the row
+// was consumed without producing one (DO NOTHING, or a DO UPDATE whose WHERE
+// filtered). Row triggers are undetectable (no TrigDesc yet).
 fn exec_insert<'mcx>(
     mt: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
     slot_id: ExecSlotId,
-) -> PgResult<()> {
+    epq_eval: &mut impl FnMut(&mut EStateData<'mcx>, ExecSlotId) -> PgResult<Option<ExecSlotId>>,
+) -> PgResult<Option<ExecSlotId>> {
     let mcx = estate.es_query_cxt;
     let output_cid = estate.es_output_cid;
-    let EStateData { es_relations, es_tupleTable, .. } = estate;
-    let rel = es_relations[(mt.result_rti - 1) as usize]
-        .as_ref()
-        .expect("result relation opened");
-    let slot = &mut es_tupleTable[slot_id.0 as usize];
+    let onconflict = mt.plan.onConflictAction;
 
-    exectuples::exec_materialize_slot(slot, mcx)?;
-    slot.base_mut().tts_tableOid = rel.rd_id;
+    {
+        let EStateData { es_relations, es_tupleTable, .. } = &mut *estate;
+        let rel = es_relations[(mt.result_rti - 1) as usize]
+            .as_ref()
+            .expect("result relation opened");
+        let slot = &mut es_tupleTable[slot_id.0 as usize];
 
-    if rel.rd_rel.relhasindex && mt.indexes.is_none() {
-        mt.indexes = Some(execindexing::ExecOpenIndices(mcx, rel, false)?);
+        exectuples::exec_materialize_slot(slot, mcx)?;
+        slot.base_mut().tts_tableOid = rel.rd_id;
+
+        if rel.rd_rel.relhasindex && mt.indexes.is_none() {
+            mt.indexes = Some(execindexing::ExecOpenIndices(mcx, rel, onconflict != 0)?);
+        }
+
+        exec_constraints(mcx, &mut mt.check_exprs, rel, slot)?;
     }
 
-    exec_constraints(mcx, &mut mt.check_exprs, rel, slot)?;
+    let num_indices = mt.indexes.as_ref().map_or(0, |x| x.num_indices());
+    if onconflict != 0 && num_indices > 0 {
+        let existing_id = mt.on_conflict.as_ref().expect("on_conflict state").existing_slot;
+        // vlock:
+        loop {
+            let mut conflict_tid = ItemPointerData::default();
+            ItemPointerSetInvalid(&mut conflict_tid);
+            let mut invalid_tid = ItemPointerData::default();
+            ItemPointerSetInvalid(&mut invalid_tid);
 
-    tableam::table_tuple_insert(mcx, rel, slot, output_cid, 0, None)?;
+            let pre_ok = {
+                let oc = mt.on_conflict.as_ref().expect("on_conflict state");
+                let indexes = mt.indexes.as_ref().expect("indexes opened");
+                let EStateData { es_relations, es_tupleTable, .. } = &mut *estate;
+                let rel = es_relations[(mt.result_rti - 1) as usize]
+                    .as_ref()
+                    .expect("result relation opened");
+                let (s, e) = (slot_id.0 as usize, existing_id.0 as usize);
+                assert!(s != e && s < es_tupleTable.len() && e < es_tupleTable.len());
+                let base = es_tupleTable.as_mut_ptr();
+                // SAFETY: distinct in-bounds indices of one live slice.
+                let (slot, existing) = unsafe { (&mut *base.add(s), &mut *base.add(e)) };
+                execindexing::ExecCheckIndexConstraints(
+                    mcx,
+                    indexes,
+                    rel,
+                    slot,
+                    existing,
+                    &invalid_tid,
+                    &oc.arbiters,
+                    &mut conflict_tid,
+                )?
+            };
 
-    if let Some(indexes) = mt.indexes.as_mut() {
-        if indexes.num_indices() > 0 {
-            execindexing::ExecInsertIndexTuples(mcx, indexes, rel, slot)?;
+            if !pre_ok {
+                // Committed conflict tuple found.
+                if onconflict == types_nodes::OnConflictAction::ONCONFLICT_UPDATE as u32 {
+                    match exec_on_conflict_update(mt, estate, conflict_tid, slot_id, epq_eval)? {
+                        OnConflictOutcome::Done(rslot) => return Ok(rslot),
+                        OnConflictOutcome::Retry => continue,
+                    }
+                }
+                exec_check_tid_visible(mt, estate, &conflict_tid)?;
+                return Ok(None);
+            }
+
+            let xid = xact::GetCurrentTransactionId()?;
+            let spec_token = lmgr::SpeculativeInsertionLockAcquire(xid)?;
+            let mut spec_conflict = false;
+            {
+                let oc = mt.on_conflict.as_ref().expect("on_conflict state");
+                let indexes = mt.indexes.as_mut().expect("indexes opened");
+                let EStateData { es_relations, es_tupleTable, .. } = &mut *estate;
+                let rel = es_relations[(mt.result_rti - 1) as usize]
+                    .as_ref()
+                    .expect("result relation opened");
+                let slot = &mut es_tupleTable[slot_id.0 as usize];
+                tableam::table_tuple_insert_speculative(
+                    mcx, rel, slot, output_cid, 0, None, spec_token,
+                )?;
+                execindexing::ExecInsertIndexTuples(
+                    mcx,
+                    indexes,
+                    rel,
+                    slot,
+                    true,
+                    Some(&mut spec_conflict),
+                    &oc.arbiters,
+                )?;
+                tableam::table_tuple_complete_speculative(
+                    mcx,
+                    rel,
+                    slot,
+                    spec_token,
+                    !spec_conflict,
+                )?;
+            }
+            // Wake up anyone waiting for our verdict.
+            lmgr::SpeculativeInsertionLockRelease(xid)?;
+
+            if spec_conflict {
+                continue;
+            }
+            break;
+        }
+    } else {
+        let EStateData { es_relations, es_tupleTable, .. } = &mut *estate;
+        let rel = es_relations[(mt.result_rti - 1) as usize]
+            .as_ref()
+            .expect("result relation opened");
+        let slot = &mut es_tupleTable[slot_id.0 as usize];
+
+        tableam::table_tuple_insert(mcx, rel, slot, output_cid, 0, None)?;
+
+        if let Some(indexes) = mt.indexes.as_mut() {
+            if indexes.num_indices() > 0 {
+                execindexing::ExecInsertIndexTuples(mcx, indexes, rel, slot, false, None, &[])?;
+            }
         }
     }
 
     if mt.canSetTag {
         estate.es_processed += 1;
     }
+    Ok(Some(slot_id))
+}
+
+// ExecOnConflictUpdate (nodeModifyTable.c): lock the conflict tuple, verify
+// visibility, apply the DO UPDATE WHERE qual and SET projection, then run the
+// plain UPDATE path against the locked tuple.
+fn exec_on_conflict_update<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    conflict_tid: ItemPointerData,
+    excluded_id: ExecSlotId,
+    epq_eval: &mut impl FnMut(&mut EStateData<'mcx>, ExecSlotId) -> PgResult<Option<ExecSlotId>>,
+) -> PgResult<OnConflictOutcome> {
+    let mcx = estate.es_query_cxt;
+    let output_cid = estate.es_output_cid;
+    let (existing_id, setvals_id, proj_id) = {
+        let oc = mt.on_conflict.as_ref().expect("on_conflict state");
+        (
+            oc.existing_slot,
+            oc.setvals_slot.expect("DO UPDATE state"),
+            oc.proj_slot.expect("DO UPDATE state"),
+        )
+    };
+
+    let mut tmfd = TM_FailureData::default();
+    // ExecUpdateLockMode: the UPDATE path always takes LockTupleExclusive
+    // (NoKeyExclusive needs the unchanged-key-columns analysis, unported).
+    let lock_result = {
+        let EStateData { es_relations, es_tupleTable, es_snapshot, .. } = &mut *estate;
+        let snapshot: &tableam_vocab::Snapshot<'mcx> = &*es_snapshot;
+        let rel = es_relations[(mt.result_rti - 1) as usize]
+            .as_ref()
+            .expect("result relation opened");
+        tableam::table_tuple_lock(
+            mcx,
+            rel,
+            &conflict_tid,
+            snapshot,
+            &mut es_tupleTable[existing_id.0 as usize],
+            output_cid,
+            LockTupleMode::LockTupleExclusive,
+            LockWaitPolicy::LockWaitBlock,
+            0,
+            &mut tmfd,
+        )?
+    };
+
+    match lock_result {
+        TM_Result::TM_Ok => {}
+        TM_Result::TM_Invisible => {
+            // A row inserted by our own transaction later in the same
+            // command, e.g. duplicate constrained values proposed at once.
+            // C reads xmin off the lock slot; refetch under SnapshotAny.
+            let found = {
+                let EStateData { es_relations, es_tupleTable, es_query_cxt, .. } = &mut *estate;
+                let rel = es_relations[(mt.result_rti - 1) as usize]
+                    .as_ref()
+                    .expect("result relation opened");
+                tableam::table_tuple_fetch_row_version(
+                    *es_query_cxt,
+                    rel,
+                    &conflict_tid,
+                    &mt.snapshot_any,
+                    &mut es_tupleTable[existing_id.0 as usize],
+                )?
+            };
+            assert!(found, "failed to fetch invisible conflicting tuple");
+            let xmin = slot_xmin(estate, existing_id)?;
+            if xact::TransactionIdIsCurrentTransactionId(xmin) {
+                return Err(cardinality_violation());
+            }
+            panic!("attempted to lock invisible tuple");
+        }
+        TM_Result::TM_SelfModified => {
+            panic!("unexpected self-updated tuple");
+        }
+        TM_Result::TM_Updated => {
+            if xact::IsolationUsesXactSnapshot() {
+                return Err(serialization_conflict("update"));
+            }
+            clear_slot(estate, existing_id);
+            return Ok(OnConflictOutcome::Retry);
+        }
+        TM_Result::TM_Deleted => {
+            if xact::IsolationUsesXactSnapshot() {
+                return Err(serialization_conflict("delete"));
+            }
+            clear_slot(estate, existing_id);
+            return Ok(OnConflictOutcome::Retry);
+        }
+        other => panic!(
+            "ExecOnConflictUpdate (nodeModifyTable.c): unexpected \
+             table_tuple_lock status: {other:?}"
+        ),
+    }
+
+    exec_check_tuple_visible(mt, estate, existing_id)?;
+
+    // EXCLUDED reads through INNER_VAR (setrefs), the existing tuple through
+    // scan Vars; evaluate the WHERE qual then the SET projection that way.
+    {
+        let oc = mt.on_conflict.as_mut().expect("on_conflict state");
+        let EStateData { es_tupleTable, .. } = &mut *estate;
+        let (e, x, v) = (
+            existing_id.0 as usize,
+            excluded_id.0 as usize,
+            setvals_id.0 as usize,
+        );
+        assert!(e != x && e != v && x != v);
+        assert!(e < es_tupleTable.len() && x < es_tupleTable.len() && v < es_tupleTable.len());
+        let base = es_tupleTable.as_mut_ptr();
+        // SAFETY: distinct in-bounds indices of one live slice.
+        let (existing, excluded, setvals) =
+            unsafe { (&mut *base.add(e), &mut *base.add(x), &mut *base.add(v)) };
+
+        let mut slots = EvalSlots {
+            scan: Some(existing),
+            inner: Some(excluded),
+            outer: None,
+        };
+        if !execexpr::exec_qual(oc.where_clause.as_deref_mut(), &mut slots)? {
+            exectuples::exec_clear_tuple(slots.scan.take().expect("scan slot"), mcx);
+            return Ok(OnConflictOutcome::Done(None));
+        }
+
+        let set_proj = oc.set_proj.as_deref_mut().expect("DO UPDATE projection");
+        execexpr::exec_project(set_proj, &mut slots, setvals, mcx)?;
+    }
+
+    // Merge SET values over the existing tuple into the projected new tuple.
+    {
+        let oc = mt.on_conflict.as_ref().expect("on_conflict state");
+        let EStateData { es_tupleTable, .. } = &mut *estate;
+        let (e, v, p) = (
+            existing_id.0 as usize,
+            setvals_id.0 as usize,
+            proj_id.0 as usize,
+        );
+        assert!(e != v && e != p && v != p);
+        let base = es_tupleTable.as_mut_ptr();
+        // SAFETY: distinct in-bounds indices of one live slice.
+        let (existing, setvals, proj) =
+            unsafe { (&mut *base.add(e), &mut *base.add(v), &mut *base.add(p)) };
+
+        exectuples::slot_getallattrs(existing);
+        exectuples::slot_getallattrs(setvals);
+        exectuples::exec_clear_tuple(proj, mcx);
+        {
+            let (eb, vb) = (existing.base(), setvals.base());
+            let pb = proj.base_mut();
+            let natts = eb.tts_nvalid as usize;
+            pb.tts_values[..natts].copy_from_slice(&eb.tts_values[..natts]);
+            pb.tts_isnull[..natts].copy_from_slice(&eb.tts_isnull[..natts]);
+            for (i, &attno) in oc.set_attnos.iter().enumerate() {
+                pb.tts_values[attno as usize - 1] = vb.tts_values[i];
+                pb.tts_isnull[attno as usize - 1] = vb.tts_isnull[i];
+            }
+        }
+        exectuples::exec_store_virtual_tuple(proj);
+    }
+
+    let mut tupleid = conflict_tid;
+    let modified = exec_update(mt, estate, &mut tupleid, proj_id, epq_eval)?;
+    clear_slot(estate, existing_id);
+    Ok(OnConflictOutcome::Done(if modified { Some(proj_id) } else { None }))
+}
+
+// ExecCheckTIDVisible (nodeModifyTable.c): under xact-snapshot isolation the
+// DO NOTHING skip must not be based on a tuple invisible to our snapshot.
+fn exec_check_tid_visible<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    tid: &ItemPointerData,
+) -> PgResult<()> {
+    if !xact::IsolationUsesXactSnapshot() {
+        return Ok(());
+    }
+    let existing_id = mt.on_conflict.as_ref().expect("on_conflict state").existing_slot;
+    let found = {
+        let EStateData { es_relations, es_tupleTable, es_query_cxt, .. } = &mut *estate;
+        let rel = es_relations[(mt.result_rti - 1) as usize]
+            .as_ref()
+            .expect("result relation opened");
+        tableam::table_tuple_fetch_row_version(
+            *es_query_cxt,
+            rel,
+            tid,
+            &mt.snapshot_any,
+            &mut es_tupleTable[existing_id.0 as usize],
+        )?
+    };
+    assert!(found, "failed to fetch conflicting tuple for ON CONFLICT");
+    exec_check_tuple_visible(mt, estate, existing_id)?;
+    clear_slot(estate, existing_id);
     Ok(())
+}
+
+// ExecCheckTupleVisible (nodeModifyTable.c).
+fn exec_check_tuple_visible<'mcx>(
+    mt: &ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    slot_id: ExecSlotId,
+) -> PgResult<()> {
+    if !xact::IsolationUsesXactSnapshot() {
+        return Ok(());
+    }
+    let visible = {
+        let EStateData { es_relations, es_tupleTable, es_snapshot, .. } = &mut *estate;
+        let snapshot: &tableam_vocab::Snapshot<'mcx> = &*es_snapshot;
+        let rel = es_relations[(mt.result_rti - 1) as usize]
+            .as_ref()
+            .expect("result relation opened");
+        tableam::table_tuple_satisfies_snapshot(
+            rel,
+            &mut es_tupleTable[slot_id.0 as usize],
+            snapshot,
+        )?
+    };
+    if !visible {
+        let xmin = slot_xmin(estate, slot_id)?;
+        // A conflict against our own transaction's tuple isn't a
+        // serialization failure (duplicate keys proposed in one command).
+        if !xact::TransactionIdIsCurrentTransactionId(xmin) {
+            return Err(serialization_conflict("update"));
+        }
+    }
+    Ok(())
+}
+
+fn slot_xmin(estate: &EStateData<'_>, slot_id: ExecSlotId) -> PgResult<types_core::TransactionId> {
+    let slot = &estate.es_tupleTable[slot_id.0 as usize];
+    let mut isnull = false;
+    let datum = exectuples::slot_getsysattr(
+        slot,
+        types_tuple::htup::MinTransactionIdAttributeNumber,
+        &mut isnull,
+    )?;
+    debug_assert!(!isnull);
+    Ok(datum.as_usize() as types_core::TransactionId)
+}
+
+fn clear_slot<'mcx>(estate: &mut EStateData<'mcx>, slot_id: ExecSlotId) {
+    let mcx = estate.es_query_cxt;
+    exectuples::exec_clear_tuple(&mut estate.es_tupleTable[slot_id.0 as usize], mcx);
+}
+
+#[cold]
+#[inline(never)]
+fn cardinality_violation() -> Box<PgError> {
+    Box::new(
+        PgError::error("ON CONFLICT DO UPDATE command cannot affect row a second time")
+            .with_sqlstate(ERRCODE_CARDINALITY_VIOLATION)
+            .with_hint(
+                "Ensure that no rows proposed for insertion within the same command \
+                 have duplicate constrained values.",
+            ),
+    )
 }
 
 // ExecConstraints (execMain.c): NOT NULL + CHECK arms live.
