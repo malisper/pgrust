@@ -777,6 +777,21 @@ static DML_INIT: Once = Once::new();
 static XLOG_RECS: Mutex<Vec<(u8, Vec<u8>, usize)>> = Mutex::new(Vec::new());
 static NEXT_LSN: AtomicUsize = AtomicUsize::new(0x1000);
 
+pub(crate) fn wal_insert_record_hook(
+    _rmid: u8,
+    info: u8,
+    _record_flags: u8,
+    main_data: &[&[u8]],
+    blocks: &[crate::wal::RegBlock<'_>],
+) -> ::types_error::PgResult<::types_core::XLogRecPtr> {
+    let mut main = Vec::new();
+    for frag in main_data {
+        main.extend_from_slice(frag);
+    }
+    XLOG_RECS.lock().unwrap().push((info, main, blocks.len()));
+    Ok(NEXT_LSN.fetch_add(8, Ordering::Relaxed) as u64)
+}
+
 fn install_dml_seams() {
     install_seams();
     DML_INIT.call_once(|| {
@@ -830,14 +845,6 @@ fn install_dml_seams() {
             Ok(InvalidBlockNumber)
         });
         freespace_seams::record_page_with_free_space::set(|_rel, _blk, _avail| Ok(()));
-        xloginsert_seams::xlog_insert_record::set(|_rmid, info, _flags, main_data, bufs| {
-            let mut main = Vec::new();
-            for frag in main_data {
-                main.extend_from_slice(frag);
-            }
-            XLOG_RECS.lock().unwrap().push((info, main, bufs.len()));
-            Ok(NEXT_LSN.fetch_add(8, Ordering::Relaxed) as u64)
-        });
         miscinit_seams::is_bootstrap_processing_mode::set(|| false);
         catalog_seams::is_catalog_relation::set(|_rel| false);
         snapmgr_seams::transaction_xmin::set(|| FAKE_XID);

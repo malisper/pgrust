@@ -8,13 +8,13 @@ use ::types_rel::RelationData;
 use ::types_storage::bufpage::{PageMut, PageRef};
 use ::types_storage::lock::{InplaceUpdateTupleLock, XLTW_Oper};
 use ::types_tuple::{
-    HeapTupleData, ItemPointerGetOffsetNumber, HEAP_XMAX_IS_MULTI,
+    HeapTupleData, ItemPointerGetBlockNumber, ItemPointerGetOffsetNumber, HEAP_XMAX_IS_MULTI,
     HEAP_XMAX_IS_KEYSHR_LOCKED,
 };
 
 use ::bufmgr_seams::{BUFFER_LOCK_EXCLUSIVE, BUFFER_LOCK_UNLOCK};
 use ::types_storage::{SharedInvalidationMessage, SHARED_INVALIDATION_MESSAGE_SIZE};
-use ::xloginsert_seams::{XLogRegBuf, REGBUF_STANDARD};
+use ::xloginsert_seams::REGBUF_STANDARD;
 
 use crate::dml::{relation_needs_wal, XLOG_HEAP_INPLACE};
 use crate::unported;
@@ -177,17 +177,19 @@ pub fn heap_inplace_update_and_unlock(
             msgs_b.extend_from_slice(&m.to_wire_bytes());
         }
 
-        let recptr = xloginsert_seams::xlog_insert_record::call(
+        let recptr = crate::wal::insert_record(
             RM_HEAP_ID,
             XLOG_HEAP_INPLACE,
             0,
             &[&xlrec, &msgs_b],
-            &[XLogRegBuf {
-                block_id: 0,
+            &[crate::wal::reg_block(
+                0,
+                relation.rd_locator.get(),
+                ItemPointerGetBlockNumber(&tuple.t_self),
                 buffer,
-                flags: REGBUF_STANDARD,
-                bufdata: &[src],
-            }],
+                REGBUF_STANDARD,
+                &[src],
+            )],
         )?;
         // SAFETY: pin + exclusive content lock held.
         let mut pm = unsafe { PageMut::from_raw(bufmgr_seams::buffer_get_page::call(buffer)) };

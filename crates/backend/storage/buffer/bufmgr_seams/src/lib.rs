@@ -207,7 +207,7 @@ seam_core::seam!(
 );
 
 pub mod pin;
-pub use pin::{BufferPin, ContentLockGuard};
+pub use pin::{buffer_page_ptr, BufferPin, ContentLockGuard};
 
 // C's `extern char *BufferBlocks` header global: keeps BufferGetPage a header
 // inline instead of a per-tuple seam hop.
