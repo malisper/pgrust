@@ -39,10 +39,27 @@ pub fn replace_empty_jointree<'mcx>(mcx: Mcx<'mcx>, parse: &mut Query<'mcx>) -> 
 // A lone RangeTblRef under the top FromExpr can never be elided or dropped.
 pub fn remove_useless_result_rtes(run: &PlannerRun<'_>, parse: &Query<'_>) {
     let f = parse.jointree.expect("top jointree is a FromExpr");
-    // A FromExpr of plain RangeTblRefs has no RTE_RESULT children to remove
-    // (RTE_RESULT only enters via replace_empty_jointree's single-item form).
     if f.fromlist.iter().all(|n| n.node_tag() == NodeTag::T_RangeTblRef) {
         let _ = run;
+        // C drops an RTE_RESULT ref when it has siblings; only the lone form
+        // (kept by C too) passes here.
+        if f.fromlist.len() > 1 {
+            let has_result = f.fromlist.iter().any(|n| {
+                let rti = n.as_range_tbl_ref().expect("RangeTblRef").rtindex;
+                parse
+                    .rtable
+                    .nth(rti as usize - 1)
+                    .as_range_tbl_entry()
+                    .expect("rtable cell")
+                    .rtekind
+                    == RTEKind::RTE_RESULT
+            });
+            assert!(
+                !has_result,
+                "remove_useless_results_recurse (prepjointree.c): RESULT sibling \
+                 removal; M2 join lane"
+            );
+        }
         return;
     }
     panic!(

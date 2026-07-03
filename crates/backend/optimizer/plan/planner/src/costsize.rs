@@ -211,6 +211,21 @@ fn cost_qual_eval_walker(node: Node<'_>, cost: &mut QualCost) -> PgResult<()> {
             }
         }
         NodeTag::T_CoerceToDomainValue => Ok(()),
+        // C's default arm: COALESCE/GREATEST/LEAST are free, children charged.
+        NodeTag::T_CoalesceExpr => {
+            for arg in &node.as_coalesce_expr().unwrap().args {
+                cost_qual_eval_walker(arg, cost)?;
+            }
+            Ok(())
+        }
+        // C charges MinMaxExpr a flat cpu_operator_cost ("cost 1").
+        NodeTag::T_MinMaxExpr => {
+            cost.per_tuple += crate::gucs::cpu_operator_cost();
+            for arg in &node.as_min_max_expr().unwrap().args {
+                cost_qual_eval_walker(arg, cost)?;
+            }
+            Ok(())
+        }
         other => panic!("cost_qual_eval_walker (costsize.c): {other:?}; M2 expression lane"),
     }
 }

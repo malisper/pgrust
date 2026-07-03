@@ -54,15 +54,19 @@ pub fn create_index_paths<'mcx>(run: &mut PlannerRun<'mcx>, rel: RelId) -> PgRes
     if run.root.rel(rel).indexlist.is_empty() {
         return Ok(());
     }
-    // Single-member, non-const ECs (sort-expr ECs) derive no implied
-    // equalities; anything richer is the join lane.
+    // Every EC here is a single-member sort-expr EC (initsplan distributes
+    // mergejoinable quals directly), and generate_implied_equalities_for_column
+    // derives nothing from one: a lone const member never matches an index
+    // column, and a lone non-const member is skipped outright. A merged
+    // (multi-member) EC would derive join clauses — loud until the equivclass
+    // unit lands.
     let ec_can_derive = (0..run.root.eq_classes.len()).any(|i| {
         let ec = run.root.ec(types_pathnodes::EcId(i as u32));
-        ec.ec_members.len() > 1 || ec.ec_has_const
+        ec.ec_members.len() > 1
     });
     assert!(
         !ec_can_derive,
-        "match_eclass_clauses_to_index (indxpath.c): M2 join lane"
+        "match_eclass_clauses_to_index (indxpath.c): merged EC; M2 join lane"
     );
     // DIVERGENCE: match_join_clauses_to_index is skipped -- it only yields
     // parameterized index paths, which every consumer on this lane rejects
@@ -204,19 +208,27 @@ fn match_clause_to_indexcol<'mcx>(
             Ok(None)
         }
         NodeTag::T_ScalarArrayOpExpr => {
-            // match_saopclause_to_indexcol (indxpath.c): loud where C would
-            // build an amsearcharray index clause, None where C also fails.
+            // match_saopclause_to_indexcol (indxpath.c): loud exactly where C
+            // builds an amsearcharray index clause, None exactly where C also
+            // fails. Building the clause needs ExecIndexBuildScanKeys' SAOP
+            // arm + _bt_preprocess_array_keys, both unported.
             let sa = clause.as_scalar_array_op_expr().unwrap();
+            let index_relid = run.root.rel(index.rel.expect("index rel set")).relid;
             if sa.useOr
                 && index.amsearcharray
                 && match_index_to_operand(run, sa.args.nth(0), indexcol, index)
+                && !vars::pull_varnos(run.mcx, sa.args.nth(1))?.is_member(index_relid as i32)
+                && !clauses::contain_volatile_functions(sa.args.nth(1))?
                 && index_coll_matches_expr_coll(
                     index.indexcollations[indexcol],
                     sa.inputcollid,
                 )
                 && lsyscache::op_in_opfamily(sa.opno, index.opfamily[indexcol])?
             {
-                panic!("match_saopclause_to_indexcol (indxpath.c): M2 SAOP-indexqual lane");
+                panic!(
+                    "match_saopclause_to_indexcol (indxpath.c): SAOP indexqual needs \
+                     the executor SAOP scankey + nbtree array-keys lanes"
+                );
             }
             Ok(None)
         }
