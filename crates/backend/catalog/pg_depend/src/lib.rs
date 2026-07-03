@@ -274,8 +274,9 @@ pub fn recordDependencyOnSingleRelExpr<'mcx>(
     recordMultipleDependencies(mcx, depender, &addrs, behavior)
 }
 
-// eliminate_duplicate_dependencies (dependency.c): sort, drop identicals, and
-// drop a whole-object ref when a column ref of the same object precedes it.
+// eliminate_duplicate_dependencies (dependency.c): sort, drop identicals; a
+// whole-object ref (subId 0 sorts first) collapses into the first column ref
+// of the same object that follows it.
 fn eliminate_duplicate_dependencies(addrs: &mut mcx::PgVec<'_, ObjectAddress>) {
     if addrs.len() <= 1 {
         return;
@@ -289,7 +290,8 @@ fn eliminate_duplicate_dependencies(addrs: &mut mcx::PgVec<'_, ObjectAddress>) {
             if prior.objectSubId == this.objectSubId {
                 continue;
             }
-            if this.objectSubId == 0 {
+            if prior.objectSubId == 0 {
+                addrs[kept - 1].objectSubId = this.objectSubId;
                 continue;
             }
         }
