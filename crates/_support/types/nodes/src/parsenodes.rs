@@ -922,6 +922,8 @@ pub enum WCOKind {
     WCO_RLS_MERGE_DELETE_CHECK = 5,
 }
 
+mcx::forget_safe_nodrop!(WCOKind);
+
 pub struct WithCheckOption<'mcx> {
     pub kind: WCOKind,
     pub relname: Option<&'mcx str>,
