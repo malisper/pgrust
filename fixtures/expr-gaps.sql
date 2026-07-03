@@ -48,3 +48,6 @@ SELECT count(*) FROM (SELECT a FROM eg_t INTERSECT SELECT v FROM eg_u) ss;
 DROP TABLE eg_t;
 DROP TABLE eg_q;
 DROP TABLE eg_u;
+-- nested subquery pull-up (recursive pull_up_subqueries)
+SELECT * FROM (SELECT x FROM (SELECT 1 AS x) y) z;
+SELECT * FROM (SELECT x + 1 AS w FROM (SELECT 1 AS x UNION SELECT 2) y) z ORDER BY w;

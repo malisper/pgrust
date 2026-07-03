@@ -254,7 +254,7 @@ pub fn transformContainerSubscripts() -> ! {
 
 pub fn make_const<'mcx>(
     mcx: Mcx<'mcx>,
-    _pstate: &ParseState<'_, '_>,
+    pstate: &ParseState<'_, '_>,
     aconst: &A_Const<'_>,
 ) -> PgResult<Node<'mcx>> {
     let Some(val) = aconst.val else {
@@ -286,7 +286,20 @@ pub fn make_const<'mcx>(
         ValUnion::Boolean(b) => (Datum::from_bool(b.boolval), BOOLOID, 1, true),
         ValUnion::String(s) => (cstring_datum_in(mcx, s.sval)?, UNKNOWNOID, -2, false),
         ValUnion::BitString(bs) => {
-            let img = adt_varbit::bit_in_cstr(mcx, bs.bsval.as_bytes())?;
+            // C rides setup_parser_errposition_callback around bit_in.
+            let img = adt_varbit::bit_in_cstr(mcx, bs.bsval.as_bytes()).map_err(|mut e| {
+                if e.cursor_position().is_none() {
+                    let pos = parser_errposition(
+                        pstate,
+                        aconst.location,
+                        mbutils::GetDatabaseEncoding(),
+                    );
+                    if pos > 0 {
+                        e.cursor_position = Some(pos);
+                    }
+                }
+                e
+            })?;
             (Datum::from_usize(img.leak().as_ptr() as usize), BITOID, -1, false)
         }
     };

@@ -173,28 +173,42 @@ fn pull_up_simple_subquery<'mcx>(
     rte_node: Node<'mcx>,
 ) -> PgResult<()> {
     let rte = rte_node.as_range_tbl_entry().expect("rtable cell");
-    let sub = rte.subquery.expect("RTE_SUBQUERY has a subquery");
+    let shared_sub = rte.subquery.expect("RTE_SUBQUERY has a subquery");
 
-    if sub.hasSubLinks {
+    if shared_sub.hasSubLinks {
         panic!("pull_up_sublinks (prepjointree.c): sublinks in pulled-up subquery; M2 lane");
     }
     assert!(
-        !sub.hasRowSecurity,
+        !shared_sub.hasRowSecurity,
         "pull_up_simple_subquery (prepjointree.c): hasRowSecurity propagation unported"
     );
     assert!(
-        sub.rowMarks.is_nil(),
+        shared_sub.rowMarks.is_nil(),
         "pull_up_simple_subquery (prepjointree.c): rowMarks concat unported"
     );
-    for srte_node in &sub.rtable {
-        let srte = srte_node.as_range_tbl_entry().expect("rtable cell");
-        if srte.rtekind == RTEKind::RTE_SUBQUERY {
-            panic!(
-                "pull_up_simple_subquery (prepjointree.c): recursive pull_up_subqueries \
-                 (nested subquery / view-on-view) not ported"
-            );
+    // C recursively completes pull_up_subqueries for the child before
+    // splicing it in; runs on a cells-copy (C copyObject), the shared tree
+    // is never written.
+    let sub: &Query<'mcx> = if shared_sub
+        .rtable
+        .iter()
+        .any(|n| n.as_range_tbl_entry().expect("rtable cell").rtekind == RTEKind::RTE_SUBQUERY)
+    {
+        let mut sub_local = crate::subselect::query_cells_copy(mcx, shared_sub)?;
+        // Fresh RTE nodes: the recursive pass ends with a with_mut fixup
+        // (subquery = None) that must never write a shared node.
+        let mut fresh_rtable = NodeList::nil();
+        for srte_node in &sub_local.rtable {
+            let srte = srte_node.as_range_tbl_entry().expect("rtable cell");
+            fresh_rtable
+                .lappend(mcx, rte_copy_with_perminfoindex(mcx, srte, srte.perminfoindex)?)?;
         }
-    }
+        sub_local.rtable = fresh_rtable;
+        pull_up_subqueries(mcx, &mut sub_local)?;
+        mcx::alloc_leak_in(mcx, sub_local)?
+    } else {
+        shared_sub
+    };
     let sub_jt = sub.jointree.expect("jointree is a FromExpr");
     if sub_jt.fromlist.is_nil() {
         panic!(
