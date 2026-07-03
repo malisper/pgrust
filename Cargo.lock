@@ -3944,13 +3944,17 @@ dependencies = [
 name = "nodeincrementalsort"
 version = "0.1.0"
 dependencies = [
+ "aclchk_seams",
+ "datum",
  "execexpr",
  "exectuples",
  "executils",
  "init_small",
  "lsyscache",
  "mcx",
+ "miscinit_seams",
  "postgres_seams",
+ "syscache_seams",
  "tuplesort",
  "types_core",
  "types_error",

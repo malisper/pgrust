@@ -19,3 +19,9 @@ lsyscache = { path = "../../utils/cache/lsyscache" }
 postgres_seams = { path = "../../tcop/postgres_seams" }
 tuplesort = { path = "../../utils/sort/tuplesort" }
 init_small = { path = "../../utils/init/init_small" }
+
+[dev-dependencies]
+datum = { path = "../../../_support/types/datum" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+aclchk_seams = { path = "../../catalog/aclchk_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }

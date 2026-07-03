@@ -326,8 +326,7 @@ impl Tuplesort {
         })
     }
 
-    /// `tuplesort_reset`: recycle per-batch memory, keep the resolved sort
-    /// keys and the memtuples array capacity.
+    /// `tuplesort_reset`: recycle the batch, keep keys + memtuples capacity.
     pub fn reset(&mut self) {
         self.0.with_mut(|st| {
             st.updatemax();
@@ -342,8 +341,7 @@ impl Tuplesort {
             st.eof_reached = false;
             st.markpos_offset = 0;
             st.markpos_eof = false;
-            // C leaves availMem = allowedMem after reset (memtuples chunk not
-            // re-charged); mirrored for stat parity.
+            // C's reset leaves availMem = allowedMem (memtuples not re-charged).
             st.avail_mem = st.allowed_mem;
             st.recompute_put_watermark();
         })
@@ -670,7 +668,6 @@ impl<'m> TuplesortData<'m> {
         }
     }
 
-    /// `tuplesort_updatemax`, memory arm only (no tapeset).
     fn updatemax(&mut self) {
         let space_used = self.allowed_mem - self.avail_mem;
         if space_used > self.max_space {

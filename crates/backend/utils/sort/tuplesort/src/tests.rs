@@ -442,3 +442,37 @@ fn miri_scale_unsafe_paths() {
     }
     ts.end();
 }
+
+#[test]
+fn reset_recycles_batch_keeps_keys_and_max_stats() {
+    let key = int32_key(1, false, false);
+    let mut ts = Tuplesort::begin_datum_with_key(key, 1024, TUPLESORT_NONE);
+    for v in [3i32, 1, 2] {
+        ts.putdatum(Datum::from_i32(v), false).unwrap();
+    }
+    ts.performsort().unwrap();
+    let mut out = Vec::new();
+    while let Some(nd) = ts.getdatum(true).unwrap() {
+        out.push(nd.value.as_i32());
+    }
+    assert_eq!(out, [1, 2, 3]);
+    let first = ts.get_stats();
+    assert_eq!(first.sortMethod, TuplesortMethod::Quicksort);
+
+    ts.reset();
+    for v in [9i32, 7, 8, 6] {
+        ts.putdatum(Datum::from_i32(v), false).unwrap();
+    }
+    ts.performsort().unwrap();
+    let mut out = Vec::new();
+    while let Some(nd) = ts.getdatum(true).unwrap() {
+        out.push(nd.value.as_i32());
+    }
+    assert_eq!(out, [6, 7, 8, 9]);
+    // spaceUsed is the max across batches (C tuplesort_updatemax).
+    assert!(ts.get_stats().spaceUsed >= first.spaceUsed);
+
+    // Bound state does not leak across reset.
+    ts.reset();
+    assert!(!ts.used_bound());
+}

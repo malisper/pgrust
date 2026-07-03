@@ -20,6 +20,9 @@ use ::types_tuple::TupleDescData;
 
 pub fn init_seams() {}
 
+#[cfg(test)]
+mod tests;
+
 const DEFAULT_MIN_GROUP_SIZE: i64 = 32;
 const DEFAULT_MAX_FULL_SORT_GROUP_SIZE: i64 = 2 * DEFAULT_MIN_GROUP_SIZE;
 
