@@ -148,7 +148,7 @@ pub fn RelationBuildLocalRelation(
         rd_supportinfo: core::cell::RefCell::new(Vec::new()),
         rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
-            rd_hastriggers: false,
+            rd_hastriggers: false, rd_hasrules: false,
     };
     RelationInitPhysicalAddr(&data)?;
 
