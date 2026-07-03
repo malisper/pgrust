@@ -19,13 +19,12 @@ use types_storage::storage::{
 use crate::fastpath::{
     fast_path_local_can_try, fp_info_lock, strong_lock_count, ConflictsWithRelationFastPath,
     FastPathGrantRelationLock, FastPathStrongLockHashPartition, FastPathTransferRelationLocks,
-    FastPathUnGrantRelationLock, eligible_for_relation_fast_path,
-    update_locallock_after_fastpath_grant, VirtualXactLockTableCleanup,
+    FastPathUnGrantRelationLock, eligible_for_relation_fast_path, VirtualXactLockTableCleanup,
 };
 use crate::locallock::{
-    assert_no_relation_extension_lock_held, prepare_locallock, warn_not_owned, with_local,
-    AbortStrongLockAcquire, BeginStrongLockAcquire, FinishStrongLockAcquire, GrantLockLocal,
-    RemoveLocalLock,
+    assert_no_relation_extension_lock_held, grant_locallock_after_fastpath,
+    prepare_or_grant_locallock, warn_not_owned, with_local, AbortStrongLockAcquire,
+    BeginStrongLockAcquire, FinishStrongLockAcquire, GrantLockLocal, LocalGrant, RemoveLocalLock,
 };
 use crate::shared::{
     dlist_delete, dlist_is_empty, find_lock, find_proclock, foreach_proclock_on_lock,
@@ -88,10 +87,12 @@ pub fn LockAcquireExtended(
     let lockMethodTable = lock_method_checked(lockmethodid, lockmode)?;
 
     // C also exempts the startup process (InRecovery); recovery has no
-    // backends here until the standby unit lands.
-    if transam_xlog_seams::recovery_in_progress::call()
-        && (locktag.locktag_type == LOCKTAG_OBJECT || locktag.locktag_type == LOCKTAG_RELATION)
+    // backends here until the standby unit lands. Field tests run before the
+    // seam call (C tests RecoveryInProgress first, but it is a memoized read
+    // with no ordering requirement) so the hot path skips the indirect call.
+    if (locktag.locktag_type == LOCKTAG_OBJECT || locktag.locktag_type == LOCKTAG_RELATION)
         && lockmode > RowExclusiveLock
+        && transam_xlog_seams::recovery_in_progress::call()
     {
         return Err(Box::new(
             PgError::new(
@@ -111,23 +112,23 @@ pub fn LockAcquireExtended(
     let owner = if sessionLock {
         ResourceOwner::NULL
     } else {
-        resowner_seams::current_resource_owner::call()
+        resowner::CurrentResourceOwner()
     };
 
     let localtag = LOCALLOCKTAG {
         lock: *locktag,
         mode: lockmode,
     };
-    let (hashcode, held_locally, lock_cleared) = prepare_locallock(&localtag);
-
-    if held_locally {
-        GrantLockLocal(&localtag, owner);
-        return Ok(if lock_cleared {
-            LOCKACQUIRE_ALREADY_CLEAR
-        } else {
-            LOCKACQUIRE_ALREADY_HELD
-        });
-    }
+    let (hashcode, ll_ptr) = match prepare_or_grant_locallock(&localtag, owner) {
+        LocalGrant::Held { cleared } => {
+            return Ok(if cleared {
+                LOCKACQUIRE_ALREADY_CLEAR
+            } else {
+                LOCKACQUIRE_ALREADY_HELD
+            });
+        }
+        LocalGrant::NotHeld { hashcode, ll } => (hashcode, ll),
+    };
 
     assert_no_relation_extension_lock_held();
 
@@ -143,9 +144,10 @@ pub fn LockAcquireExtended(
 
     if fast_path_local_can_try(locktag, lockmode) {
         let fasthashcode = FastPathStrongLockHashPartition(hashcode);
-        let proc = lmgr_proc::GetPGProcByNumber(my_procno());
+        let procno = my_procno();
+        let proc = lmgr_proc::GetPGProcByNumber(procno);
         // The LWLock is the sequencing point for the unlocked strong-count read.
-        lwlock::LWLockAcquire(fp_info_lock(proc), lwlock::LW_EXCLUSIVE, my_procno())?;
+        lwlock::LWLockAcquire(fp_info_lock(proc), lwlock::LW_EXCLUSIVE, procno)?;
         let acquired = if strong_lock_count(fasthashcode) != 0 {
             false
         } else {
@@ -154,8 +156,9 @@ pub fn LockAcquireExtended(
         };
         lwlock::LWLockRelease(fp_info_lock(proc))?;
         if acquired {
-            update_locallock_after_fastpath_grant(&localtag);
-            GrantLockLocal(&localtag, owner);
+            // SAFETY: ll_ptr from prepare_or_grant_locallock above; the
+            // fast-path arm makes no LOCALLOCK-table access in between.
+            unsafe { grant_locallock_after_fastpath(&localtag, owner, ll_ptr) };
             return Ok(LOCKACQUIRE_OK);
         }
     }
@@ -311,26 +314,18 @@ pub fn LockRelease(locktag: &LOCKTAG, lockmode: LOCKMODE, sessionLock: bool) -> 
         mode: lockmode,
     };
 
-    let exists = with_local(|state| {
-        state
-            .table
-            .get(&localtag)
-            .is_some_and(|ll| ll.nLocks > 0)
-    });
-    if !exists {
-        warn_not_owned(lockMethodTable.lockModeNames[lockmode as usize])?;
-        return Ok(false);
-    }
-
     let owner = if sessionLock {
         ResourceOwner::NULL
     } else {
-        resowner_seams::current_resource_owner::call()
+        resowner::CurrentResourceOwner()
     };
 
+    // One probe: held check + owner bookkeeping (C's hash_search pointer).
     let (owned, forget_owner, still_held, hashcode, mut lock, proclock) =
         with_local(|state| {
-            let ll = state.table.get_mut(&localtag).expect("missing LOCALLOCK");
+            let Some(ll) = state.table.get_mut(&localtag).filter(|ll| ll.nLocks > 0) else {
+                return (false, None, false, 0, std::ptr::null_mut(), std::ptr::null_mut());
+            };
             let mut owned = false;
             let mut forget = None;
             for i in (0..ll.lockOwners.len()).rev() {
@@ -360,7 +355,7 @@ pub fn LockRelease(locktag: &LOCKTAG, lockmode: LOCKMODE, sessionLock: bool) -> 
             (true, forget, still_held, ll.hashcode, ll.lock, ll.proclock)
         });
     if let Some(o) = forget_owner {
-        resowner_seams::resource_owner_forget_lock::call(o, localtag);
+        resowner::ResourceOwnerForgetLock(o, localtag).expect("ResourceOwnerForgetLock");
     }
     if !owned {
         warn_not_owned(lockMethodTable.lockModeNames[lockmode as usize])?;
@@ -374,8 +369,9 @@ pub fn LockRelease(locktag: &LOCKTAG, lockmode: LOCKMODE, sessionLock: bool) -> 
     if eligible_for_relation_fast_path(locktag, lockmode)
         && crate::fastpath::fast_path_group_in_use(locktag.locktag_field2)
     {
-        let proc = lmgr_proc::GetPGProcByNumber(my_procno());
-        lwlock::LWLockAcquire(fp_info_lock(proc), lwlock::LW_EXCLUSIVE, my_procno())?;
+        let procno = my_procno();
+        let proc = lmgr_proc::GetPGProcByNumber(procno);
+        lwlock::LWLockAcquire(fp_info_lock(proc), lwlock::LW_EXCLUSIVE, procno)?;
         // SAFETY: fpInfoLock held exclusive.
         let released =
             unsafe { FastPathUnGrantRelationLock(locktag.locktag_field2, lockmode) };
@@ -498,7 +494,7 @@ pub fn LockReleaseAll(lockmethodid: LOCKMETHODID, allLocks: bool) -> PgResult<()
             });
             for o in old_owners.iter() {
                 if !o.owner.is_null() {
-                    resowner_seams::resource_owner_forget_lock::call(o.owner, *tag);
+                    resowner::ResourceOwnerForgetLock(o.owner, *tag).expect("ResourceOwnerForgetLock");
                 }
             }
             drop(old_owners);
@@ -650,7 +646,7 @@ fn ReleaseLockIfHeld(tag: &LOCALLOCKTAG, sessionLock: bool) -> PgResult<()> {
     let owner = if sessionLock {
         ResourceOwner::NULL
     } else {
-        resowner_seams::current_resource_owner::call()
+        resowner::CurrentResourceOwner()
     };
 
     enum Outcome {
@@ -685,7 +681,7 @@ fn ReleaseLockIfHeld(tag: &LOCALLOCKTAG, sessionLock: bool) -> PgResult<()> {
         Outcome::None => Ok(()),
         Outcome::PartialForget(forget) => {
             if let Some(o) = forget {
-                resowner_seams::resource_owner_forget_lock::call(o, *tag);
+                resowner::ResourceOwnerForgetLock(o, *tag).expect("ResourceOwnerForgetLock");
             }
             Ok(())
         }
@@ -703,8 +699,8 @@ fn ReleaseLockIfHeld(tag: &LOCALLOCKTAG, sessionLock: bool) -> PgResult<()> {
 }
 
 pub fn LockReassignCurrentOwner(locallocks: Option<&[LOCALLOCKTAG]>) -> PgResult<()> {
-    let current = resowner_seams::current_resource_owner::call();
-    let parent = resowner_seams::resource_owner_get_parent::call(current);
+    let current = resowner::CurrentResourceOwner();
+    let parent = resowner::ResourceOwnerGetParent(current);
     assert!(!parent.is_null());
 
     match locallocks {
@@ -759,11 +755,11 @@ fn LockReassignOwner(tag: &LOCALLOCKTAG, current: ResourceOwner, parent: Resourc
     match change {
         Change::None => {}
         Change::GaveSlotToParent => {
-            resowner_seams::resource_owner_remember_lock::call(parent, *tag);
-            resowner_seams::resource_owner_forget_lock::call(current, *tag);
+            resowner::ResourceOwnerRememberLock(parent, *tag);
+            resowner::ResourceOwnerForgetLock(current, *tag).expect("ResourceOwnerForgetLock");
         }
         Change::MergedIntoParent => {
-            resowner_seams::resource_owner_forget_lock::call(current, *tag);
+            resowner::ResourceOwnerForgetLock(current, *tag).expect("ResourceOwnerForgetLock");
         }
     }
 }

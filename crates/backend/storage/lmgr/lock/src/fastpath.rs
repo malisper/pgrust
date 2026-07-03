@@ -12,7 +12,7 @@ use types_storage::lock::{
 };
 use types_storage::storage::{Spinlock, SyncCell, PGPROC, FP_LOCK_SLOTS_PER_GROUP};
 
-use crate::locallock::{with_local, LOCALLOCK};
+use crate::locallock::with_local;
 use crate::shared::{find_lock, find_proclock, LockHashPartitionLock, LockTagHashCode, SetupLockInTable};
 
 pub(crate) const FAST_PATH_BITS_PER_SLOT: u32 = 3;
@@ -105,6 +105,13 @@ pub(crate) fn fast_path_rel_group(relid: Oid) -> u32 {
 
 fn local_use_count(group: u32) -> i32 {
     FAST_PATH_LOCAL_USE_COUNTS.with(|c| c[group as usize].get())
+}
+
+fn bump_local_use_count(group: u32) {
+    FAST_PATH_LOCAL_USE_COUNTS.with(|c| {
+        let cell = &c[group as usize];
+        cell.set(cell.get() + 1);
+    });
 }
 
 fn set_local_use_count(group: u32, v: i32) {
@@ -265,7 +272,7 @@ pub(crate) unsafe fn FastPathGrantRelationLock(relid: Oid, lockmode: LOCKMODE) -
     if unused_slot < FastPathLockSlotsPerBackend() {
         view.set_relid(unused_slot, relid);
         view.set_lockmode(unused_slot, lockmode);
-        set_local_use_count(group, local_use_count(group) + 1);
+        bump_local_use_count(group);
         return true;
     }
     false
@@ -423,16 +430,6 @@ pub(crate) fn FastPathGetRelationLockEntry(
         lwlock::LWLockRelease(partition_lock)?;
     }
     Ok(proclock)
-}
-
-pub(crate) fn update_locallock_after_fastpath_grant(tag: &types_storage::lock::LOCALLOCKTAG) {
-    with_local(|state| {
-        // Stale shared pointers MUST be cleared before the lock counts as
-        // fast-path acquired.
-        let ll: &mut LOCALLOCK = state.table.get_mut(tag).expect("missing LOCALLOCK");
-        ll.lock = std::ptr::null_mut();
-        ll.proclock = std::ptr::null_mut();
-    });
 }
 
 pub fn VirtualXactLockTableInsert(vxid: VirtualTransactionId) -> PgResult<()> {
