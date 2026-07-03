@@ -38,7 +38,12 @@ pub enum JsonError {
     ExpectedObjectNext,
     ExpectedString,
     InvalidToken,
+    SemActionFailed,
+    UnicodeCodePointZero,
     UnicodeEscapeFormat,
+    UnicodeHighSurrogate,
+    UnicodeLowSurrogate,
+    UnicodeUntranslatable,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -176,6 +181,75 @@ impl<'a> JsonLex<'a> {
                     _ => return JsonError::InvalidToken,
                 };
                 JsonError::Success
+            }
+        }
+    }
+
+    // lex() for the de-escape lane: identical dispatch except the string case
+    // is left to JsonLexDe (None = token_start sits on the opening quote).
+    fn lex_dispatch_no_string(&mut self) -> Option<JsonError> {
+        let end = self.end();
+        let mut s = self.token_terminator;
+
+        while s < end && matches!(self.input[s], b' ' | b'\t' | b'\n' | b'\r') {
+            let c = self.input[s];
+            s += 1;
+            if c == b'\n' {
+                self.line_number += 1;
+                self.line_start = s;
+            }
+        }
+        self.token_start = Some(s);
+
+        if s >= end {
+            self.token_start = None;
+            self.token_terminator = s;
+            self.token_type = JsonToken::End;
+            return Some(JsonError::Success);
+        }
+
+        match self.input[s] {
+            b'{' => Some(self.single(s, JsonToken::ObjectStart)),
+            b'}' => Some(self.single(s, JsonToken::ObjectEnd)),
+            b'[' => Some(self.single(s, JsonToken::ArrayStart)),
+            b']' => Some(self.single(s, JsonToken::ArrayEnd)),
+            b',' => Some(self.single(s, JsonToken::Comma)),
+            b':' => Some(self.single(s, JsonToken::Colon)),
+            b'"' => None,
+            b'-' => {
+                let r = self.lex_number(s + 1);
+                if r != JsonError::Success {
+                    return Some(r);
+                }
+                self.token_type = JsonToken::Number;
+                Some(JsonError::Success)
+            }
+            b'0'..=b'9' => {
+                let r = self.lex_number(s);
+                if r != JsonError::Success {
+                    return Some(r);
+                }
+                self.token_type = JsonToken::Number;
+                Some(JsonError::Success)
+            }
+            _ => {
+                let mut p = s;
+                while p < end && is_alnum(self.input[p]) {
+                    p += 1;
+                }
+                if p == s {
+                    self.token_terminator = s + 1;
+                    return Some(JsonError::InvalidToken);
+                }
+                self.token_terminator = p;
+                let word = &self.input[s..p];
+                self.token_type = match word {
+                    b"true" => JsonToken::True,
+                    b"null" => JsonToken::Null,
+                    b"false" => JsonToken::False,
+                    _ => return Some(JsonError::InvalidToken),
+                };
+                Some(JsonError::Success)
             }
         }
     }
@@ -390,10 +464,23 @@ impl<'a> JsonLex<'a> {
                 format!("Expected string, but found \"{}\".", tok())
             }
             JsonError::InvalidToken => format!("Token \"{}\" is invalid.", tok()),
+            JsonError::UnicodeCodePointZero => {
+                "\\u0000 cannot be converted to text.".to_string()
+            }
             JsonError::UnicodeEscapeFormat => {
                 "\"\\u\" must be followed by four hexadecimal digits.".to_string()
             }
-            JsonError::Success => String::new(),
+            JsonError::UnicodeHighSurrogate => {
+                "Unicode high surrogate must not follow a high surrogate.".to_string()
+            }
+            JsonError::UnicodeLowSurrogate => {
+                "Unicode low surrogate must follow a high surrogate.".to_string()
+            }
+            JsonError::UnicodeUntranslatable => format!(
+                "Unicode escape value could not be translated to the server's encoding {}.",
+                mbutils::GetDatabaseEncodingName()
+            ),
+            JsonError::SemActionFailed | JsonError::Success => String::new(),
         }
     }
 
@@ -541,4 +628,372 @@ fn parse_array(lex: &mut JsonLex<'_>) -> PgResult<JsonError> {
 
     result = lex.lex_expect(ParseCtx::ArrayNext, JsonToken::ArrayEnd);
     Ok(result)
+}
+
+#[derive(Clone, Copy)]
+pub enum JsonSemToken<'mcx> {
+    String(&'mcx [u8]),
+    Number(&'mcx [u8]),
+    True,
+    False,
+    Null,
+}
+
+/// C: JsonSemAction, the hook subset live consumers use (jsonb_in). Hooks
+/// return Ok(false) for JSON_SEM_ACTION_FAILED after recording a soft error.
+pub trait JsonSem<'mcx> {
+    fn object_start(&mut self) -> PgResult<bool>;
+    fn object_end(&mut self) -> PgResult<bool>;
+    fn array_start(&mut self) -> PgResult<bool>;
+    fn array_end(&mut self) -> PgResult<bool>;
+    fn object_field_start(&mut self, fname: &'mcx [u8], isnull: bool) -> PgResult<bool>;
+    fn scalar(&mut self, token: JsonSemToken<'mcx>) -> PgResult<bool>;
+}
+
+/// C: JsonLexContext with need_escapes=true — `strval` carries the de-escaped
+/// value of the current string token. The mcx feeds pg_unicode_to_server on
+/// the non-UTF8 escape arm and the arena copies handed to sem hooks.
+pub struct JsonLexDe<'src, 'mcx> {
+    pub lex: JsonLex<'src>,
+    mcx: mcx::Mcx<'mcx>,
+    strval: mcx::PgVec<'mcx, u8>,
+}
+
+impl<'src, 'mcx> JsonLexDe<'src, 'mcx> {
+    pub fn new(mcx: mcx::Mcx<'mcx>, input: &'src [u8], encoding: i32) -> Self {
+        JsonLexDe {
+            lex: JsonLex::new(input, encoding),
+            mcx,
+            strval: mcx::PgVec::new_in(mcx),
+        }
+    }
+
+    fn lex(&mut self) -> PgResult<JsonError> {
+        let r = self.lex.lex_dispatch_no_string();
+        match r {
+            Some(err) => Ok(err),
+            None => {
+                let r = self.lex_string_de()?;
+                if r == JsonError::Success {
+                    self.lex.token_type = JsonToken::String;
+                }
+                Ok(r)
+            }
+        }
+    }
+
+    // C: json_lex_string, need_escapes=true.
+    fn lex_string_de(&mut self) -> PgResult<JsonError> {
+        let input = self.lex.input;
+        let end = input.len();
+        let mut s = self.lex.token_start.expect("lex_string entered at a token");
+        let mut hi_surrogate: i32 = -1;
+        self.strval.clear();
+        loop {
+            s += 1;
+            if s >= end {
+                self.lex.token_terminator = s;
+                return Ok(JsonError::InvalidToken);
+            } else if input[s] == b'"' {
+                break;
+            } else if input[s] == b'\\' {
+                s += 1;
+                if s >= end {
+                    self.lex.token_terminator = s;
+                    return Ok(JsonError::InvalidToken);
+                } else if input[s] == b'u' {
+                    let mut ch: u32 = 0;
+                    for _ in 0..4 {
+                        s += 1;
+                        if s >= end {
+                            self.lex.token_terminator = s;
+                            return Ok(JsonError::InvalidToken);
+                        }
+                        let c = input[s];
+                        ch = match c {
+                            b'0'..=b'9' => ch * 16 + u32::from(c - b'0'),
+                            b'a'..=b'f' => ch * 16 + u32::from(c - b'a') + 10,
+                            b'A'..=b'F' => ch * 16 + u32::from(c - b'A') + 10,
+                            _ => {
+                                return Ok(self
+                                    .lex
+                                    .fail_at_char_end(s, JsonError::UnicodeEscapeFormat))
+                            }
+                        };
+                    }
+                    if wchar::is_utf16_surrogate_first(ch) {
+                        if hi_surrogate != -1 {
+                            return Ok(self
+                                .lex
+                                .fail_at_char_end(s, JsonError::UnicodeHighSurrogate));
+                        }
+                        hi_surrogate = ch as i32;
+                        continue;
+                    } else if wchar::is_utf16_surrogate_second(ch) {
+                        if hi_surrogate == -1 {
+                            return Ok(self
+                                .lex
+                                .fail_at_char_end(s, JsonError::UnicodeLowSurrogate));
+                        }
+                        ch = wchar::surrogate_pair_to_codepoint(hi_surrogate as u32, ch);
+                        hi_surrogate = -1;
+                    }
+                    if hi_surrogate != -1 {
+                        return Ok(self
+                            .lex
+                            .fail_at_char_end(s, JsonError::UnicodeLowSurrogate));
+                    }
+                    if ch == 0 {
+                        return Ok(self
+                            .lex
+                            .fail_at_char_end(s, JsonError::UnicodeCodePointZero));
+                    }
+                    // C: pg_unicode_to_server_noerror — its ASCII and UTF8
+                    // server-encoding arms inlined to skip the arena round trip.
+                    if ch <= 0x7F {
+                        self.strval.push(ch as u8);
+                    } else if mbutils::GetDatabaseEncoding() == wchar::PG_UTF8 {
+                        let mut buf = [0u8; 4];
+                        wchar::unicode_to_utf8(ch, &mut buf);
+                        let n = wchar::pg_utf_mblen(&buf) as usize;
+                        mcx::vec_append_bytes(&mut self.strval, &buf[..n])?;
+                    } else {
+                        match mbutils::pg_unicode_to_server_noerror(self.mcx, ch)? {
+                            Some(converted) => {
+                                mcx::vec_append_bytes(&mut self.strval, &converted)?
+                            }
+                            None => {
+                                return Ok(self
+                                    .lex
+                                    .fail_at_char_end(s, JsonError::UnicodeUntranslatable))
+                            }
+                        }
+                    }
+                } else {
+                    if hi_surrogate != -1 {
+                        return Ok(self
+                            .lex
+                            .fail_at_char_end(s, JsonError::UnicodeLowSurrogate));
+                    }
+                    match input[s] {
+                        c @ (b'"' | b'\\' | b'/') => self.strval.push(c),
+                        b'b' => self.strval.push(0x08),
+                        b'f' => self.strval.push(0x0c),
+                        b'n' => self.strval.push(b'\n'),
+                        b'r' => self.strval.push(b'\r'),
+                        b't' => self.strval.push(b'\t'),
+                        _ => {
+                            self.lex.token_start = Some(s);
+                            return Ok(self.lex.fail_at_char_end(s, JsonError::EscapingInvalid));
+                        }
+                    }
+                }
+            } else {
+                if hi_surrogate != -1 {
+                    return Ok(self
+                        .lex
+                        .fail_at_char_end(s, JsonError::UnicodeLowSurrogate));
+                }
+                let mut p = s;
+                while p < end {
+                    let c = input[p];
+                    if c == b'\\' || c == b'"' {
+                        break;
+                    } else if c <= 31 {
+                        self.lex.token_terminator = p;
+                        return Ok(JsonError::EscapingRequired);
+                    }
+                    p += 1;
+                }
+                mcx::vec_append_bytes(&mut self.strval, &input[s..p])?;
+                s = p - 1;
+            }
+        }
+        if hi_surrogate != -1 {
+            self.lex.token_terminator = s + 1;
+            return Ok(JsonError::UnicodeLowSurrogate);
+        }
+        self.lex.token_terminator = s + 1;
+        Ok(JsonError::Success)
+    }
+
+    fn strval_in_arena(&mut self) -> PgResult<&'mcx [u8]> {
+        Ok(mcx::slice_in(self.mcx, &self.strval)?.leak())
+    }
+
+    fn token_in_arena(&mut self) -> PgResult<&'mcx [u8]> {
+        let start = self.lex.token_start.unwrap_or(self.lex.token_terminator);
+        Ok(mcx::slice_in(self.mcx, &self.lex.input[start..self.lex.token_terminator])?.leak())
+    }
+
+    fn lex_expect(&mut self, ctx: ParseCtx, token: JsonToken) -> PgResult<JsonError> {
+        if self.lex.token_type == token {
+            self.lex()
+        } else {
+            Ok(self.lex.report_parse_error(ctx))
+        }
+    }
+}
+
+/// C: pg_parse_json with semantic actions (need_escapes=true).
+pub fn parse_sem<'mcx>(
+    lex: &mut JsonLexDe<'_, 'mcx>,
+    sem: &mut impl JsonSem<'mcx>,
+) -> PgResult<JsonError> {
+    let r = lex.lex()?;
+    if r != JsonError::Success {
+        return Ok(r);
+    }
+    let result = match lex.lex.token_type {
+        JsonToken::ObjectStart => parse_object_sem(lex, sem)?,
+        JsonToken::ArrayStart => parse_array_sem(lex, sem)?,
+        _ => parse_scalar_sem(lex, sem)?,
+    };
+    if result != JsonError::Success {
+        return Ok(result);
+    }
+    lex.lex_expect(ParseCtx::End, JsonToken::End)
+}
+
+fn parse_scalar_sem<'mcx>(
+    lex: &mut JsonLexDe<'_, 'mcx>,
+    sem: &mut impl JsonSem<'mcx>,
+) -> PgResult<JsonError> {
+    // C: parse_scalar copies the value before consuming the token (the next
+    // lex clobbers strval), then invokes the callback.
+    let tok = match lex.lex.token_type {
+        JsonToken::String => JsonSemToken::String(lex.strval_in_arena()?),
+        JsonToken::Number => JsonSemToken::Number(lex.token_in_arena()?),
+        JsonToken::True => JsonSemToken::True,
+        JsonToken::False => JsonSemToken::False,
+        JsonToken::Null => JsonSemToken::Null,
+        _ => return Ok(lex.lex.report_parse_error(ParseCtx::Value)),
+    };
+    let r = lex.lex()?;
+    if r != JsonError::Success {
+        return Ok(r);
+    }
+    if !sem.scalar(tok)? {
+        return Ok(JsonError::SemActionFailed);
+    }
+    Ok(JsonError::Success)
+}
+
+fn parse_object_field_sem<'mcx>(
+    lex: &mut JsonLexDe<'_, 'mcx>,
+    sem: &mut impl JsonSem<'mcx>,
+) -> PgResult<JsonError> {
+    if lex.lex.token_type != JsonToken::String {
+        return Ok(lex.lex.report_parse_error(ParseCtx::String));
+    }
+    let fname = lex.strval_in_arena()?;
+    let r = lex.lex()?;
+    if r != JsonError::Success {
+        return Ok(r);
+    }
+    let r = lex.lex_expect(ParseCtx::ObjectLabel, JsonToken::Colon)?;
+    if r != JsonError::Success {
+        return Ok(r);
+    }
+    let isnull = lex.lex.token_type == JsonToken::Null;
+    if !sem.object_field_start(fname, isnull)? {
+        return Ok(JsonError::SemActionFailed);
+    }
+    match lex.lex.token_type {
+        JsonToken::ObjectStart => parse_object_sem(lex, sem),
+        JsonToken::ArrayStart => parse_array_sem(lex, sem),
+        _ => parse_scalar_sem(lex, sem),
+    }
+}
+
+fn parse_object_sem<'mcx>(
+    lex: &mut JsonLexDe<'_, 'mcx>,
+    sem: &mut impl JsonSem<'mcx>,
+) -> PgResult<JsonError> {
+    check_stack_depth()?;
+
+    if !sem.object_start()? {
+        return Ok(JsonError::SemActionFailed);
+    }
+
+    let r = lex.lex()?;
+    if r != JsonError::Success {
+        return Ok(r);
+    }
+
+    let mut result = match lex.lex.token_type {
+        JsonToken::String => {
+            let mut result = parse_object_field_sem(lex, sem)?;
+            while result == JsonError::Success && lex.lex.token_type == JsonToken::Comma {
+                result = lex.lex()?;
+                if result != JsonError::Success {
+                    break;
+                }
+                result = parse_object_field_sem(lex, sem)?;
+            }
+            result
+        }
+        JsonToken::ObjectEnd => JsonError::Success,
+        _ => lex.lex.report_parse_error(ParseCtx::ObjectStart),
+    };
+    if result != JsonError::Success {
+        return Ok(result);
+    }
+
+    result = lex.lex_expect(ParseCtx::ObjectNext, JsonToken::ObjectEnd)?;
+    if result != JsonError::Success {
+        return Ok(result);
+    }
+
+    if !sem.object_end()? {
+        return Ok(JsonError::SemActionFailed);
+    }
+    Ok(JsonError::Success)
+}
+
+fn parse_array_element_sem<'mcx>(
+    lex: &mut JsonLexDe<'_, 'mcx>,
+    sem: &mut impl JsonSem<'mcx>,
+) -> PgResult<JsonError> {
+    match lex.lex.token_type {
+        JsonToken::ObjectStart => parse_object_sem(lex, sem),
+        JsonToken::ArrayStart => parse_array_sem(lex, sem),
+        _ => parse_scalar_sem(lex, sem),
+    }
+}
+
+fn parse_array_sem<'mcx>(
+    lex: &mut JsonLexDe<'_, 'mcx>,
+    sem: &mut impl JsonSem<'mcx>,
+) -> PgResult<JsonError> {
+    check_stack_depth()?;
+
+    if !sem.array_start()? {
+        return Ok(JsonError::SemActionFailed);
+    }
+
+    let mut result = lex.lex_expect(ParseCtx::ArrayStart, JsonToken::ArrayStart)?;
+    if result == JsonError::Success && lex.lex.token_type != JsonToken::ArrayEnd {
+        result = parse_array_element_sem(lex, sem)?;
+        while result == JsonError::Success && lex.lex.token_type == JsonToken::Comma {
+            result = lex.lex()?;
+            if result != JsonError::Success {
+                break;
+            }
+            result = parse_array_element_sem(lex, sem)?;
+        }
+    }
+    if result != JsonError::Success {
+        return Ok(result);
+    }
+
+    result = lex.lex_expect(ParseCtx::ArrayNext, JsonToken::ArrayEnd)?;
+    if result != JsonError::Success {
+        return Ok(result);
+    }
+
+    if !sem.array_end()? {
+        return Ok(JsonError::SemActionFailed);
+    }
+    Ok(JsonError::Success)
 }

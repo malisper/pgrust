@@ -27,6 +27,7 @@ adt_formatting = { path = "../../adt/formatting" }
 adt_int = { path = "../../adt/int" }
 adt_int8 = { path = "../../adt/int8" }
 adt_json = { path = "../../adt/json" }
+adt_jsonb = { path = "../../adt/jsonb" }
 adt_mac = { path = "../../adt/mac" }
 adt_mac8 = { path = "../../adt/mac8" }
 adt_numeric = { path = "../../adt/numeric" }

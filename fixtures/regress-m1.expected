@@ -506,3 +506,125 @@ ERROR:  42P01: relation "no_such_table" does not exist
 LINE 1: SELECT * FROM no_such_table;
                       ^
 DROP TABLE regress_m1_t;
+-- ===== jsonb core [adt_jsonb: in/out, JEntry tree, operators, cmp/hash] =====
+SELECT '{"b": 2, "a": 1, "a": 3}'::jsonb;
+      jsonb       
+------------------
+ {"a": 3, "b": 2}
+(1 row)
+
+SELECT '{"key": [1, 2.50, null, "x"], "nested": {"deep": [true, false]}}'::jsonb;
+                              jsonb                               
+------------------------------------------------------------------
+ {"key": [1, 2.50, null, "x"], "nested": {"deep": [true, false]}}
+(1 row)
+
+SELECT '[1e2, 0.5, "\u00e9\ud83d\ude00", ""]'::jsonb;
+         jsonb         
+-----------------------
+ [100, 0.5, "é😀", ""]
+(1 row)
+
+SELECT '-1.50'::jsonb::text;
+ text  
+-------
+ -1.50
+(1 row)
+
+SELECT jsonb_typeof('{"a":1}'::jsonb), jsonb_typeof('[1]'::jsonb), jsonb_typeof('"s"'::jsonb), jsonb_typeof('1'::jsonb), jsonb_typeof('true'::jsonb), jsonb_typeof('null'::jsonb);
+ jsonb_typeof | jsonb_typeof | jsonb_typeof | jsonb_typeof | jsonb_typeof | jsonb_typeof 
+--------------+--------------+--------------+--------------+--------------+--------------
+ object       | array        | string       | number       | boolean      | null
+(1 row)
+
+SELECT '{"a": {"b": [10, 20, {"c": "d"}]}}'::jsonb -> 'a';
+          ?column?           
+-----------------------------
+ {"b": [10, 20, {"c": "d"}]}
+(1 row)
+
+SELECT '{"a": {"b": "c"}}'::jsonb ->> 'a';
+  ?column?  
+------------
+ {"b": "c"}
+(1 row)
+
+SELECT '["x", 1.50, true]'::jsonb -> 1, '["x", 1.50, true]'::jsonb ->> -1;
+ ?column? | ?column? 
+----------+----------
+ 1.50     | true
+(1 row)
+
+SELECT '["x"]'::jsonb -> 5, '{"a":1}'::jsonb -> 'zz';
+ ?column? | ?column? 
+----------+----------
+          | 
+(1 row)
+
+SELECT '{"a": {"b": [10, 20]}}'::jsonb #> '{a,b,1}', '{"a": {"b": [10, 20]}}'::jsonb #>> '{a,b,-2}';
+ ?column? | ?column? 
+----------+----------
+ 20       | 10
+(1 row)
+
+SELECT '{"a":1,"b":{"c":2}}'::jsonb @> '{"b":{"c":2}}'::jsonb, '{"a":1}'::jsonb @> '{"a":2}'::jsonb;
+ ?column? | ?column? 
+----------+----------
+ t        | f
+(1 row)
+
+SELECT '[1,[2,3]]'::jsonb @> '[[3,2]]'::jsonb, '[1,2]'::jsonb <@ '[2,1,3]'::jsonb;
+ ?column? | ?column? 
+----------+----------
+ t        | t
+(1 row)
+
+SELECT '{"a":1,"b":2}'::jsonb ? 'b', '["a","b"]'::jsonb ? 'c';
+ ?column? | ?column? 
+----------+----------
+ t        | f
+(1 row)
+
+SELECT '{"a":1,"b":2}'::jsonb ?| '{x,b}', '{"a":1,"b":2}'::jsonb ?& '{a,b}';
+ ?column? | ?column? 
+----------+----------
+ t        | t
+(1 row)
+
+SELECT '{"a":1}'::jsonb = '{"a": 1}'::jsonb, '{"a":1}'::jsonb < '{"a":1,"b":0}'::jsonb;
+ ?column? | ?column? 
+----------+----------
+ t        | t
+(1 row)
+
+SELECT j FROM (VALUES (1, '[1]'::jsonb), (2, '{"a":1}'), (3, '"s"'), (4, '1'), (5, 'true'), (6, 'null'), (7, '[]'), (8, '{}')) AS v(i, j) ORDER BY j, i;
+    j     
+----------
+ []
+ null
+ "s"
+ 1
+ true
+ [1]
+ {}
+ {"a": 1}
+(8 rows)
+
+SELECT 'nope'::jsonb;
+ERROR:  22P02: invalid input syntax for type json
+LINE 1: SELECT 'nope'::jsonb;
+               ^
+DETAIL:  Token "nope" is invalid.
+CONTEXT:  JSON data, line 1: nope
+SELECT '"\u0000"'::jsonb;
+ERROR:  22P05: unsupported Unicode escape sequence
+LINE 1: SELECT '"\u0000"'::jsonb;
+               ^
+DETAIL:  \u0000 cannot be converted to text.
+CONTEXT:  JSON data, line 1: "\u0000...
+SELECT '{"a":'::jsonb;
+ERROR:  22P02: invalid input syntax for type json
+LINE 1: SELECT '{"a":'::jsonb;
+               ^
+DETAIL:  The input string ended unexpectedly.
+CONTEXT:  JSON data, line 1: {"a":
