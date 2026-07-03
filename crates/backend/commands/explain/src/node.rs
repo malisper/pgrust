@@ -1820,7 +1820,7 @@ fn deparse_expr<'mcx>(
             if need_parens {
                 buf.try_push('(')?;
             }
-            deparse_expr(es, plan_node, ancestors, refexpr, useprefix, buf)?;
+            deparse_expr(es, plan_node, ancestors, refexpr, useprefix, showimplicit, buf)?;
             if need_parens {
                 buf.try_push(')')?;
             }
@@ -1830,12 +1830,12 @@ fn deparse_expr<'mcx>(
                 buf.try_push('[')?;
                 if has_lower {
                     if let Some(Some(l)) = low.next() {
-                        deparse_expr(es, plan_node, ancestors, l, useprefix, buf)?;
+                        deparse_expr(es, plan_node, ancestors, l, useprefix, false, buf)?;
                     }
                     buf.try_push(':')?;
                 }
                 if let Some(u) = up {
-                    deparse_expr(es, plan_node, ancestors, u, useprefix, buf)?;
+                    deparse_expr(es, plan_node, ancestors, u, useprefix, false, buf)?;
                 }
                 buf.try_push(']')?;
             }
@@ -2031,7 +2031,7 @@ fn deparse_expr<'mcx>(
                 if i > 0 {
                     buf.try_push_str(", ")?;
                 }
-                deparse_expr(es, plan_node, ancestors, e, useprefix, buf)?;
+                deparse_expr(es, plan_node, ancestors, e, useprefix, true, buf)?;
             }
             buf.try_push(']')?;
             Ok(())
