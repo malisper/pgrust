@@ -1481,6 +1481,7 @@ dependencies = [
  "relcache",
  "smgr",
  "snapmgr",
+ "spgist_build",
  "syscache_seams",
  "table",
  "tableam",
@@ -4082,6 +4083,7 @@ dependencies = [
  "nbtree",
  "predicate",
  "relation_seams",
+ "spgist",
  "tableam",
  "tidbitmap",
  "types_brin",
@@ -6707,6 +6709,7 @@ dependencies = [
  "relcache",
  "relcache_build_seams",
  "relcache_seams",
+ "spgist",
  "statistics",
  "syscache_seams",
  "table",
@@ -8203,6 +8206,7 @@ dependencies = [
  "relmapper",
  "rmgrdesc",
  "sequence_xlog",
+ "spgist_xlog",
  "standby",
  "storage_xlog",
  "stringinfo",
@@ -8234,6 +8238,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_nbtree",
+ "types_spgist",
  "types_storage",
  "types_tuple",
  "xact",
@@ -8499,6 +8504,7 @@ dependencies = [
  "slot",
  "smgr",
  "snapmgr",
+ "spgist_text",
  "spi",
  "sql_functions",
  "stack_depth",
@@ -8817,6 +8823,88 @@ dependencies = [
  "types_core",
  "types_error",
  "types_snapshot",
+]
+
+[[package]]
+name = "spgist"
+version = "0.1.0"
+dependencies = [
+ "bufmgr_seams",
+ "datum",
+ "detoast",
+ "fmgr_seams",
+ "freespace",
+ "heaptuple",
+ "init_small",
+ "lsyscache",
+ "mcx",
+ "nbtree",
+ "pg_prng",
+ "predicate_seams",
+ "tidbitmap",
+ "transam_xlog",
+ "transam_xlog_seams",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_gist",
+ "types_rel",
+ "types_relscan",
+ "types_scan",
+ "types_snapshot",
+ "types_spgist",
+ "types_storage",
+ "types_tuple",
+ "xact",
+ "xloginsert",
+ "xloginsert_seams",
+]
+
+[[package]]
+name = "spgist_build"
+version = "0.1.0"
+dependencies = [
+ "bufmgr",
+ "bufmgr_seams",
+ "execindexing",
+ "mcx",
+ "spgist",
+ "types_core",
+ "types_error",
+ "types_rel",
+ "types_spgist",
+ "xloginsert",
+]
+
+[[package]]
+name = "spgist_text"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "mcx",
+ "pg_locale",
+ "pg_locale_seams",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_scan",
+ "types_spgist",
+ "types_tuple",
+ "varlena",
+]
+
+[[package]]
+name = "spgist_xlog"
+version = "0.1.0"
+dependencies = [
+ "bufmgr_seams",
+ "types_core",
+ "types_error",
+ "types_spgist",
+ "types_storage",
+ "types_tuple",
+ "xlogreader_seams",
+ "xlogutils",
 ]
 
 [[package]]
@@ -10037,6 +10125,7 @@ dependencies = [
  "types_fmgr",
  "types_hash",
  "types_nbtree",
+ "types_spgist",
  "types_storage",
  "types_trigger",
  "types_tuple",
@@ -10058,6 +10147,7 @@ dependencies = [
  "types_rel",
  "types_scan",
  "types_snapshot",
+ "types_spgist",
  "types_tuple",
 ]
 
@@ -10095,6 +10185,21 @@ version = "0.1.0"
 dependencies = [
  "mcx",
  "types_core",
+]
+
+[[package]]
+name = "types_spgist"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "mcx",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_gist",
+ "types_scan",
+ "types_storage",
+ "types_tuple",
 ]
 
 [[package]]
