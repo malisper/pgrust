@@ -1,6 +1,6 @@
-//! rmgr.c + the RmgrIds registry (rmgr.h) + GetRmgr/RmgrIdExists
-//! (xlog_internal.h). The table is a fixed compile-time array over the
-//! rmgrlist.h set, indexed by RmgrIds; entry order fixes the WAL-visible
+//! rmgr.c + GetRmgr/RmgrIdExists (xlog_internal.h); the RmgrIds registry
+//! (rmgr.h) lives in types_core, re-exported here. The table is a fixed
+//! compile-time array indexed by RmgrIds; entry order fixes the WAL-visible
 //! numeric ids. C divergences: custom-rmgr extension slots (ids 128..=255),
 //! RegisterCustomRmgr, and the pg_get_wal_resource_managers SRF are omitted —
 //! there is no extension ABI (unregistered ids take the same RmgrNotFound
@@ -43,8 +43,7 @@ fn xact_redo(record: &mut XLogReaderState) -> PgResult<()> {
 }
 pub type RmDesc = for<'mcx> fn(buf: &mut StringInfo<'mcx>, record: &XLogReaderState) -> PgResult<()>;
 pub type RmIdentify = fn(info: u8) -> Option<&'static str>;
-// C rm_startup is void(void); the btree/gin/gist/spgist impls create their
-// recovery context under CurrentMemoryContext, threaded here as `parent`.
+// C rm_startup is void(void); impls allocate under CurrentMemoryContext, threaded as `parent`.
 pub type RmStartup = for<'mcx> fn(parent: Mcx<'mcx>) -> PgResult<()>;
 pub type RmCleanup = fn();
 pub type RmMask = fn(pagedata: &mut [u8], blkno: BlockNumber) -> PgResult<()>;
@@ -61,33 +60,7 @@ pub struct RmgrData {
     pub rm_mask: Option<RmMask>,
 }
 
-#[repr(u8)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RmgrIds {
-    RM_XLOG_ID = 0,
-    RM_XACT_ID,
-    RM_SMGR_ID,
-    RM_CLOG_ID,
-    RM_DBASE_ID,
-    RM_TBLSPC_ID,
-    RM_MULTIXACT_ID,
-    RM_RELMAP_ID,
-    RM_STANDBY_ID,
-    RM_HEAP2_ID,
-    RM_HEAP_ID,
-    RM_BTREE_ID,
-    RM_HASH_ID,
-    RM_GIN_ID,
-    RM_GIST_ID,
-    RM_SEQ_ID,
-    RM_SPGIST_ID,
-    RM_BRIN_ID,
-    RM_COMMIT_TS_ID,
-    RM_REPLORIGIN_ID,
-    RM_GENERIC_ID,
-    RM_LOGICALMSG_ID,
-    RM_NEXT_ID,
-}
+pub use types_core::RmgrIds;
 pub use RmgrIds::*;
 
 pub const RM_MAX_ID: usize = u8::MAX as usize;

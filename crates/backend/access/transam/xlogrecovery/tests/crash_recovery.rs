@@ -33,8 +33,13 @@ const SEG: i32 = 16 * 1024 * 1024;
 const SYS_ID: u64 = 0x5544_3322_1100_AACE;
 const REL_OID: Oid = 61000;
 const REL2_OID: Oid = 61001;
+const REL3_OID: Oid = 61002;
 const RLOC: RelFileLocator = RelFileLocator::new(1663, 5, REL_OID);
 const RLOC2: RelFileLocator = RelFileLocator::new(1663, 5, REL2_OID);
+const RLOC3: RelFileLocator = RelFileLocator::new(1663, 5, REL3_OID);
+// MAXALIGN(SizeOfPageHeaderData): first VM map byte; heap block 0's
+// all-visible bit is its low bit.
+const VM_FIRST_MAP_BYTE: usize = 24;
 
 const CHILD_ENV: &str = "PGRUST_CRASH_RECOVERY_DD";
 
@@ -255,7 +260,7 @@ fn int4_tupdesc<'mcx>(mcx: Mcx<'mcx>) -> Rc<TupleDescData<'mcx>> {
     })
 }
 
-fn test_relation<'mcx>(mcx: Mcx<'mcx>) -> RelationData<'mcx> {
+fn test_relation<'mcx>(mcx: Mcx<'mcx>, oid: Oid) -> RelationData<'mcx> {
     let mut relname = NameData::default();
     relname.namestrcpy("t");
     let rd_rel = FormData_pg_class {
@@ -264,7 +269,7 @@ fn test_relation<'mcx>(mcx: Mcx<'mcx>) -> RelationData<'mcx> {
         reltype: 0,
         relowner: 10,
         relam: tableam_vocab::HEAP_TABLE_AM_OID,
-        relfilenode: REL_OID,
+        relfilenode: oid,
         reltablespace: 0,
         relpages: 0,
         reltuples: -1.0,
@@ -285,7 +290,7 @@ fn test_relation<'mcx>(mcx: Mcx<'mcx>) -> RelationData<'mcx> {
     RelationData {
         rd_locator: Default::default(),
         rd_smgr: Default::default(),
-        rd_id: REL_OID,
+        rd_id: oid,
         rd_backend: INVALID_PROC_NUMBER,
         rd_islocaltemp: false,
         rd_isvalid: Cell::new(true),
@@ -294,7 +299,7 @@ fn test_relation<'mcx>(mcx: Mcx<'mcx>) -> RelationData<'mcx> {
         rd_firstRelfilelocatorSubid: Cell::new(0),
         rd_droppedSubid: Cell::new(0),
         rd_lockInfo: LockInfoData {
-            lockRelId: LockRelId { relId: REL_OID, dbId: 5 },
+            lockRelId: LockRelId { relId: oid, dbId: 5 },
         },
         rd_rel,
         rd_att: int4_tupdesc(mcx),
@@ -484,7 +489,7 @@ fn crash_recovery_child() {
     // committed delete and the uncommitted (crashed) insert invisible.
     let ctx = MemoryContext::new("verify");
     let mcx = ctx.mcx();
-    let rel = test_relation(mcx);
+    let rel = test_relation(mcx, REL_OID);
     let buf = bufmgr::ReadBuffer(&rel, 0).unwrap();
     let page_addr = bufmgr::BufferGetPagePtr(buf).as_ptr();
     let snap = mvcc_snapshot(mcx);
@@ -497,6 +502,32 @@ fn crash_recovery_child() {
     assert!(visible(3), "committed insert (43) visible");
     assert!(!visible(4), "uncommitted insert (44) invisible");
     bufmgr::ReleaseBuffer(buf).unwrap();
+
+    // The XLH_INSERT_ALL_VISIBLE_CLEARED replay: PD_ALL_VISIBLE gone, tuple
+    // re-added, VM bit cleared — all through the live buffer manager.
+    let rel3 = test_relation(mcx, REL3_OID);
+    let buf3 = bufmgr::ReadBuffer(&rel3, 0).unwrap();
+    {
+        // SAFETY: pinned page image.
+        let page = unsafe { PageRef::from_raw(bufmgr::BufferGetPagePtr(buf3)) };
+        assert!(!page.is_all_visible(), "replay cleared PD_ALL_VISIBLE");
+        assert_eq!(page.max_offset_number(), 2, "replay re-added tuple (0,2)");
+    }
+    bufmgr::ReleaseBuffer(buf3).unwrap();
+    let vmbuf = bufmgr::ReadBufferExtended(
+        &rel3,
+        ForkNumber::VISIBILITYMAP_FORKNUM,
+        0,
+        types_storage::ReadBufferMode::Normal,
+        None,
+    )
+    .unwrap();
+    // SAFETY: pinned page image.
+    let vm_byte = unsafe {
+        *bufmgr::BufferGetPagePtr(vmbuf).as_ptr().add(VM_FIRST_MAP_BYTE)
+    };
+    bufmgr::ReleaseBuffer(vmbuf).unwrap();
+    assert_eq!(vm_byte, 0, "replay cleared the VM all-visible bit");
 
     println!("CRASH_RECOVERY_CHILD_OK");
 }
@@ -583,25 +614,29 @@ fn crash_recovery_replays_dml_to_precrash_state() {
 
     let ctx = MemoryContext::new("crash_recovery");
     let mcx = ctx.mcx();
-    let rel = test_relation(mcx);
+    let rel = test_relation(mcx, REL_OID);
+    let rel3 = test_relation(mcx, REL3_OID);
     let tupdesc = int4_tupdesc(mcx);
-    smgr::smgropen(RLOC, INVALID_PROC_NUMBER).unwrap();
-    smgr::smgrcreate(
-        types_storage::RelFileLocatorBackend { locator: RLOC, backend: INVALID_PROC_NUMBER },
-        ForkNumber::MAIN_FORKNUM,
-        false,
-    )
-    .unwrap();
+    for rloc in [RLOC, RLOC3] {
+        smgr::smgropen(rloc, INVALID_PROC_NUMBER).unwrap();
+        smgr::smgrcreate(
+            types_storage::RelFileLocatorBackend { locator: rloc, backend: INVALID_PROC_NUMBER },
+            ForkNumber::MAIN_FORKNUM,
+            false,
+        )
+        .unwrap();
+    }
 
     // Transaction 1 (real xact): inserts 41,42,43 then delete (0,2), commit.
     xact::StartTransactionCommand().unwrap();
-    let insert = |val: i32, cid: u32| {
+    let insert_into = |r: &RelationData<'_>, val: i32, cid: u32| {
         let mut tup =
             heaptuple::heap_form_tuple(mcx, &tupdesc, &[datum::Datum::from_i32(val)], &[false])
                 .unwrap();
-        heapam::heap_insert(&rel, tup.as_tuple_mut(), cid, 0).unwrap();
+        heapam::heap_insert(r, tup.as_tuple_mut(), cid, 0).unwrap();
         tup.as_tuple().t_self
     };
+    let insert = |val: i32, cid: u32| insert_into(&rel, val, cid);
     assert_eq!(insert(41, 0), ItemPointerData::new(0, 1));
     assert_eq!(insert(42, 0), ItemPointerData::new(0, 2));
     assert_eq!(insert(43, 0), ItemPointerData::new(0, 3));
@@ -619,12 +654,49 @@ fn crash_recovery_replays_dml_to_precrash_state() {
     )
     .unwrap();
     assert_eq!(r, TM_Result::TM_Ok);
+    // cid 0: cmin is not WAL-logged and the INIT_PAGE replay re-stamps
+    // FirstCommandId, so a nonzero cid would break the byte comparison.
+    assert_eq!(insert_into(&rel3, 51, 0), ItemPointerData::new(0, 1));
     xact::CommitTransactionCommand().unwrap();
     assert!(transam::TransactionIdDidCommit(xid1).unwrap());
 
-    // Transaction 2: insert 44, never committed (lost in the crash).
+    // Vacuum's outcome by hand (heap_xlog_visible replay is unported, so the
+    // all-visible state must predate the WAL under test): PD_ALL_VISIBLE on
+    // rel3's flushed page and a VM fork file with block 0 all-visible.
+    // Read-only xact: buffer pins need a live resource owner; no xid taken.
+    {
+        xact::StartTransactionCommand().unwrap();
+        let buf = bufmgr::ReadBuffer(&rel3, 0).unwrap();
+        bufmgr::LockBuffer(buf, bufmgr::BUFFER_LOCK_EXCLUSIVE).unwrap();
+        // SAFETY: pinned + exclusively locked page.
+        let mut pm = unsafe {
+            PageMut::from_raw(bufmgr::BufferGetPagePtr(buf))
+        };
+        pm.set_all_visible();
+        bufmgr::MarkBufferDirty(buf).unwrap();
+        bufmgr::FlushOneBuffer(buf).unwrap();
+        bufmgr::LockBuffer(buf, bufmgr::BUFFER_LOCK_UNLOCK).unwrap();
+        bufmgr::ReleaseBuffer(buf).unwrap();
+
+        #[repr(align(8))]
+        struct P([u8; BLCKSZ]);
+        let mut p = P([0u8; BLCKSZ]);
+        // SAFETY: aligned, exclusively owned stack page.
+        let mut vm = unsafe {
+            PageMut::from_raw(core::ptr::NonNull::new(p.0.as_mut_ptr()).unwrap())
+        };
+        vm.init(0);
+        p.0[VM_FIRST_MAP_BYTE] = 0x01;
+        std::fs::write(dd1.join("base/5").join(format!("{REL3_OID}_vm")), p.0).unwrap();
+        xact::CommitTransactionCommand().unwrap();
+    }
+
+    // Transaction 2: insert 44, never committed (lost in the crash). The rel3
+    // insert lands on an all-visible page: heap_insert clears PD_ALL_VISIBLE
+    // and the VM bit (buffers only) and stamps XLH_INSERT_ALL_VISIBLE_CLEARED.
     xact::StartTransactionCommand().unwrap();
     assert_eq!(insert(44, 0), ItemPointerData::new(0, 4));
+    assert_eq!(insert_into(&rel3, 52, 0), ItemPointerData::new(0, 2));
     assert_eq!(xact::GetTopTransactionIdIfAny(), 4);
 
     // An XLOG_FPI for a second relation (xlog_redo's restore arm).
@@ -639,6 +711,26 @@ fn crash_recovery_replays_dml_to_precrash_state() {
     // Pre-crash truth: the page as the buffer holds it (never flushed).
     let expected_page = read_page_from_buffer(&rel, 0);
     std::fs::write(base.join("expected_page.bin"), expected_page).unwrap();
+    let expected_page3 = read_page_from_buffer(&rel3, 0);
+    std::fs::write(base.join("expected_page3.bin"), expected_page3).unwrap();
+
+    // Clean(-shutdown) control for the VM: the buffered map byte is cleared.
+    {
+        let vmbuf = bufmgr::ReadBufferExtended(
+            &rel3,
+            ForkNumber::VISIBILITYMAP_FORKNUM,
+            0,
+            types_storage::ReadBufferMode::Normal,
+            None,
+        )
+        .unwrap();
+        // SAFETY: pinned page image.
+        let byte = unsafe {
+            *bufmgr::BufferGetPagePtr(vmbuf).as_ptr().add(VM_FIRST_MAP_BYTE)
+        };
+        bufmgr::ReleaseBuffer(vmbuf).unwrap();
+        assert_eq!(byte, 0, "heap_insert cleared the buffered VM bit");
+    }
 
     // Crash copy: heap pages live only in shared buffers; the truncate models
     // a crash that also lost the file extension.
@@ -654,6 +746,21 @@ fn crash_recovery_replays_dml_to_precrash_state() {
         .set_len(0)
         .unwrap();
     assert!(!dd2.join("base/5").join(REL2_OID.to_string()).exists());
+
+    // rel3's crash-state files: the flushed heap page still all-visible with
+    // one tuple, the VM file still carrying the set bit (clears were only in
+    // buffers).
+    {
+        let mut disk = std::fs::read(dd2.join("base/5").join(REL3_OID.to_string())).unwrap();
+        assert_eq!(disk.len(), BLCKSZ);
+        let r = unsafe {
+            PageRef::from_raw(core::ptr::NonNull::new(disk.as_mut_ptr()).unwrap())
+        };
+        assert!(r.is_all_visible(), "pre-crash disk page keeps PD_ALL_VISIBLE");
+        assert_eq!(r.max_offset_number(), 1, "second insert never flushed");
+        let vm = std::fs::read(dd2.join("base/5").join(format!("{REL3_OID}_vm"))).unwrap();
+        assert_eq!(vm[VM_FIRST_MAP_BYTE], 0x01, "pre-crash disk VM bit set");
+    }
 
     // Phase 2 in a fresh process (fresh shmem/TLS): the real recovery boot.
     let out = std::process::Command::new(std::env::current_exe().unwrap())
@@ -695,6 +802,13 @@ fn crash_recovery_replays_dml_to_precrash_state() {
     let restored = std::fs::read(dd2.join("base/5").join(REL2_OID.to_string())).unwrap();
     assert_eq!(restored.len(), BLCKSZ);
     assert_eq!(restored, fpi_page.to_vec(), "FPI restore is byte-exact");
+
+    // The VM-clear replay: heap page byte-equal to pre-crash truth (tuple 52
+    // re-added, PD_ALL_VISIBLE cleared), VM bit cleared on disk.
+    let replayed3 = std::fs::read(dd2.join("base/5").join(REL3_OID.to_string())).unwrap();
+    assert_eq!(replayed3, expected_page3.to_vec(), "VM-cleared heap page is byte-exact");
+    let vm3 = std::fs::read(dd2.join("base/5").join(format!("{REL3_OID}_vm"))).unwrap();
+    assert_eq!(vm3[VM_FIRST_MAP_BYTE], 0, "replay cleared the VM bit");
 
     let _ = std::fs::remove_dir_all(&base);
 }

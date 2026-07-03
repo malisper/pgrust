@@ -101,6 +101,24 @@ fn fix_infomask_from_infobits(infobits: u8, infomask: &mut u16, infomask2: &mut 
     }
 }
 
+fn clear_vm_bits(
+    rlocator: types_storage::RelFileLocator,
+    blkno: types_core::BlockNumber,
+) -> PgResult<()> {
+    let reln = xlogutils::CreateFakeRelcacheEntry(rlocator);
+    let mut vmbuffer = visibilitymap::VmBuffer::new();
+    visibilitymap::visibilitymap_pin(&reln, blkno, &mut vmbuffer)?;
+    visibilitymap::visibilitymap_clear(
+        &reln,
+        blkno,
+        &vmbuffer,
+        visibilitymap::VISIBILITYMAP_VALID_BITS,
+    )?;
+    vmbuffer.release();
+    xlogutils::FreeFakeRelcacheEntry(reln);
+    Ok(())
+}
+
 fn page_set_prunable(pm: &mut PageMut<'_>, xid: TransactionId) {
     debug_assert!(xid != 0);
     let old = pm.as_ref().prune_xid();
@@ -117,16 +135,13 @@ fn heap_xlog_delete(record: &mut XLogReaderState) -> PgResult<()> {
     let infobits_set = xlrec[6];
     let flags = xlrec[7];
 
-    let (_target_locator, _fork, blkno, _) = record
+    let (target_locator, _fork, blkno, _) = record
         .block_tag_extended(0)
         .expect("heap_xlog_delete: no block 0");
     let target_tid = ItemPointerData::new(blkno, offnum);
 
     if flags & XLH_DELETE_ALL_VISIBLE_CLEARED != 0 {
-        panic!(
-            "heap_xlog_delete: visibilitymap_clear redo not ported \
-             (CreateFakeRelcacheEntry / rel vocab; land with the vacuum lane)"
-        );
+        clear_vm_bits(target_locator, blkno)?;
     }
 
     let (action, buffer) = XLogReadBufferForRedo(record, 0)?;
@@ -198,10 +213,7 @@ fn heap_xlog_insert(record: &mut XLogReaderState) -> PgResult<()> {
     debug_assert!(flags & XLH_INSERT_ALL_FROZEN_SET == 0);
 
     if flags & XLH_INSERT_ALL_VISIBLE_CLEARED != 0 {
-        panic!(
-            "heap_xlog_insert: visibilitymap_clear redo not ported \
-             (CreateFakeRelcacheEntry / rel vocab; land with the vacuum lane)"
-        );
+        clear_vm_bits(target_locator, blkno)?;
     }
 
     let info = record.record.as_ref().unwrap().xl_info & !XLR_INFO_MASK;

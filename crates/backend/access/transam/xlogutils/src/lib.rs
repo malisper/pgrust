@@ -1,9 +1,7 @@
 //! xlogutils.c — WAL-replay support; recovery-only. The `InRecovery` /
 //! `standbyState` / `ignore_invalid_pages` stores live here (C's home for
 //! them is xlogutils.c); xlog/xlogrecovery write via the setters (direct
-//! dep), slru reads via xlogutils_seams::in_recovery. The fake-relcache pair
-//! is a loud panic: rd_locator/rd_smgr vocabulary landed, the fake-entry
-//! construction lands with the first redo consumer (heapam/storage redo).
+//! dep), slru reads via xlogutils_seams::in_recovery.
 
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
@@ -410,19 +408,100 @@ pub fn XLogReadBufferExtended(
 }
 
 pub struct FakeRelcacheEntry {
-    _private: (),
+    rel: ::types_rel::RelationData<'static>,
 }
 
+impl core::ops::Deref for FakeRelcacheEntry {
+    type Target = ::types_rel::RelationData<'static>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.rel
+    }
+}
+
+// Only the physical-storage fields carry meaning (C's contract): rd_locator,
+// rd_backend, relpersistence, lockRelId; everything else is C's palloc0 zero.
 #[cold]
 pub fn CreateFakeRelcacheEntry(rlocator: RelFileLocator) -> FakeRelcacheEntry {
-    panic!(
-        "CreateFakeRelcacheEntry({rlocator:?}) not ported: rd_locator/rd_smgr vocabulary landed; \
-         the fake-entry FormData_pg_class/tupdesc construction lands with the first redo consumer"
-    );
+    use std::rc::Rc;
+    use ::mcx::PgVec;
+    use ::types_rel::{FormData_pg_class, LockInfoData, LockRelId, RelationData};
+    use ::types_tuple::{NameData, TupleDescData};
+
+    thread_local! {
+        // Backs the entry's empty PgVecs only; nothing is ever allocated in it.
+        static FAKE_REL_CX: &'static ::mcx::MemoryContext =
+            Box::leak(Box::new(::mcx::MemoryContext::new("fake relcache")));
+    }
+    let mcx = FAKE_REL_CX.with(|cx| cx.mcx());
+
+    let mut relname = NameData::default();
+    relname.namestrcpy(&rlocator.relNumber.to_string());
+    FakeRelcacheEntry {
+        rel: RelationData {
+            rd_locator: Cell::new(rlocator),
+            rd_smgr: Cell::new(None),
+            rd_id: 0,
+            rd_backend: INVALID_PROC_NUMBER,
+            rd_islocaltemp: false,
+            rd_isvalid: Cell::new(false),
+            rd_createSubid: Cell::new(0),
+            rd_newRelfilelocatorSubid: Cell::new(0),
+            rd_firstRelfilelocatorSubid: Cell::new(0),
+            rd_droppedSubid: Cell::new(0),
+            rd_lockInfo: LockInfoData {
+                lockRelId: LockRelId { relId: rlocator.relNumber, dbId: rlocator.dbOid },
+            },
+            rd_rel: FormData_pg_class {
+                relname,
+                relnamespace: 0,
+                reltype: 0,
+                relowner: 0,
+                relam: 0,
+                relfilenode: rlocator.relNumber,
+                reltablespace: 0,
+                relpages: 0,
+                reltuples: 0.0,
+                relallvisible: 0,
+                reltoastrelid: 0,
+                relhasindex: false,
+                relisshared: false,
+                relpersistence: types_core::RELPERSISTENCE_PERMANENT,
+                relkind: 0,
+                relhassubclass: false,
+                relrowsecurity: false,
+                relispopulated: false,
+                relreplident: 0,
+                relispartition: false,
+                relfrozenxid: 0,
+                relminmxid: 0,
+            },
+            rd_att: Rc::new(TupleDescData {
+                natts: 0,
+                tdtypeid: 0,
+                tdtypmod: -1,
+                tdrefcount: -1,
+                constr: None,
+                compact_attrs: PgVec::new_in(mcx),
+                attrs: PgVec::new_in(mcx),
+            }),
+            rd_index: None,
+            rd_opcintype: PgVec::new_in(mcx),
+            rd_opfamily: PgVec::new_in(mcx),
+            rd_indoption: PgVec::new_in(mcx),
+            rd_indcollation: PgVec::new_in(mcx),
+            rd_options: None,
+            pgstat_enabled: Cell::new(false),
+            rd_amcache: Default::default(),
+            rd_supportinfo: Default::default(),
+            rd_indexlist: Default::default(),
+        },
+    }
 }
 
-pub fn FreeFakeRelcacheEntry(_fakerel: FakeRelcacheEntry) {
-    unreachable!("no FakeRelcacheEntry can be constructed");
+pub fn FreeFakeRelcacheEntry(fakerel: FakeRelcacheEntry) {
+    // An rd_smgr pin would leak past the entry; no fake-entry path takes one.
+    debug_assert!(fakerel.rel.rd_smgr.get().is_none());
 }
 
 pub fn XLogDropRelation(rlocator: RelFileLocator, forknum: ForkNumber) -> PgResult<()> {
