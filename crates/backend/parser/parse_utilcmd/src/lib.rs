@@ -253,3 +253,27 @@ fn multiple_defaults(colname: &str, relname: &str) -> Box<PgError> {
         .with_sqlstate(ERRCODE_SYNTAX_ERROR),
     )
 }
+
+/// transformIndexStmt: a no-op for plain-column, no-predicate statements
+/// (C only transforms index expressions and WHERE); those lanes are loud.
+pub fn transformIndexStmt(
+    _relid: Oid,
+    stmt: &types_nodes::rawnodes::IndexStmt<'_>,
+    _query_string: &str,
+) -> PgResult<()> {
+    if stmt.transformed {
+        return Ok(());
+    }
+    if stmt.whereClause.is_some() {
+        unported("transformIndexStmt: WHERE predicates");
+    }
+    for node in stmt.indexParams.iter() {
+        let elem = node
+            .as_variant::<types_nodes::rawnodes::IndexElem>()
+            .expect("IndexElem in indexParams");
+        if elem.expr.is_some() {
+            unported("transformIndexStmt: expression index columns");
+        }
+    }
+    Ok(())
+}

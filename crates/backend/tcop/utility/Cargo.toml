@@ -38,6 +38,13 @@ portalmem = { path = "../../utils/mmgr/portalmem" }
 tcop_dest = { path = "../dest" }
 utility_seams = { path = "../utility_seams" }
 catalog_toasting = { path = "../../catalog/catalog_toasting" }
+catalog = { path = "../../catalog/catalog" }
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+indexcmds = { path = "../../commands/indexcmds" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+superuser = { path = "../../utils/misc/superuser" }
+init_small = { path = "../../utils/init/init_small" }
+rel_vocab = { path = "../../../_support/types/rel_vocab" }
 
 [dev-dependencies]
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
