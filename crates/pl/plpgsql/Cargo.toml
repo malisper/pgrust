@@ -32,7 +32,6 @@ snapmgr = { path = "../../backend/utils/time/snapmgr" }
 spi = { path = "../../backend/executor/spi" }
 types_core = { path = "../../_support/types/types_core" }
 types_error = { path = "../../_support/types/types_error" }
-types_fmgr = { package = "types_fmgr", path = "../../_support/types/fmgr" }
 types_nodes = { path = "../../_support/types/nodes" }
 types_portal = { path = "../../_support/types/portal" }
 types_tuple = { path = "../../_support/types/types_tuple" }

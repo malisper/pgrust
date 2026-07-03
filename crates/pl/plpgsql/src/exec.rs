@@ -845,7 +845,7 @@ impl<'a> Estate<'a> {
     fn convert_value_to_string(&mut self, value: Datum, valtype: Oid) -> PgResult<String> {
         let (foutoid, _) = lsyscache::typ::getTypeOutputInfo(valtype)?;
         let mut finfo = fmgr_core::fmgr_info(foutoid)?;
-        let out = types_fmgr::function_call1_coll_in(
+        let out = fmgr::function_call1_coll_in(
             &mut finfo,
             types_core::InvalidOid,
             self.eval_ctx.mcx(),
