@@ -9,6 +9,8 @@ name = "seams_init"
 path = "src/lib.rs"
 
 [dependencies]
+operatorcmds = { path = "../../backend/commands/operatorcmds" }
+opclasscmds = { path = "../../backend/commands/opclasscmds" }
 detoast = { path = "../../backend/access/common/detoast" }
 heaptoast = { path = "../../backend/access/heap/heaptoast" }
 printtup = { path = "../../backend/access/common/printtup" }

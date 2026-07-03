@@ -17,7 +17,7 @@ use crate::{
     SearchSysCache3, SearchSysCache4, SearchSysCacheExists, SearchSysCacheList, SearchSysCacheList1,
     SysCacheKey,
 };
-use crate::cacheinfo::{COLLOID, AGGFNOID, AMOPOPID, AMOPSTRATEGY, AMPROCNUM, ATTNUM, CLAOID, OPFAMILYOID, PROCNAMEARGSNSP, AUTHNAME, AUTHOID, CASTSOURCETARGET, CONSTROID, INDEXRELID, NAMESPACENAME, NAMESPACEOID, OPERNAMENSP, TYPENAMENSP, OPEROID, PROCOID, RELNAMENSP, RELOID, STATRELATTINH, TYPEOID};
+use crate::cacheinfo::{CLAAMNAMENSP, OPFAMILYAMNAMENSP, COLLOID, AGGFNOID, AMOPOPID, AMOPSTRATEGY, AMPROCNUM, ATTNUM, CLAOID, OPFAMILYOID, PROCNAMEARGSNSP, AUTHNAME, AUTHOID, CASTSOURCETARGET, CONSTROID, INDEXRELID, NAMESPACENAME, NAMESPACEOID, OPERNAMENSP, TYPENAMENSP, OPEROID, PROCOID, RELNAMENSP, RELOID, STATRELATTINH, TYPEOID};
 
 const ANUM_PG_CLASS_OID: i32 = 1;
 const ANUM_PG_CLASS_RELISSHARED: i32 = 16;
@@ -257,6 +257,131 @@ fn lookup_pg_opclass_shape(
     drop(t);
     ReleaseSysCache(tuple);
     Ok(Some(shape))
+}
+
+fn lookup_pg_amop_rows<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    opfamily: Oid,
+) -> PgResult<(mcx::PgVec<'mcx, syscache_seams::PgAmopRow>, bool)> {
+    const ANUM_PG_AMOP_AMOPPURPOSE: i32 = 6;
+    const ANUM_PG_AMOP_AMOPSORTFAMILY: i32 = 9;
+    let list = SearchSysCacheList1(AMOPSTRATEGY, SysCacheKey::Value(Datum::from_oid(opfamily)))?;
+    let n = list.n_members() as usize;
+    let mut out = mcx::vec_with_capacity_in(mcx, n)?;
+    for i in 0..n {
+        let m = list.member(i);
+        let t = m.tuple();
+        out.push(syscache_seams::PgAmopRow {
+            amopfamily: getattr(&t, AMOPSTRATEGY, ANUM_PG_AMOP_AMOPFAMILY).as_oid(),
+            amoplefttype: getattr(&t, AMOPSTRATEGY, ANUM_PG_AMOP_AMOPLEFTTYPE).as_oid(),
+            amoprighttype: getattr(&t, AMOPSTRATEGY, ANUM_PG_AMOP_AMOPRIGHTTYPE).as_oid(),
+            amopstrategy: getattr(&t, AMOPSTRATEGY, ANUM_PG_AMOP_AMOPSTRATEGY).as_i16(),
+            amoppurpose: getattr(&t, AMOPSTRATEGY, ANUM_PG_AMOP_AMOPPURPOSE).as_i8(),
+            amopopr: getattr(&t, AMOPSTRATEGY, ANUM_PG_AMOP_AMOPOPR).as_oid(),
+            amopsortfamily: getattr(&t, AMOPSTRATEGY, ANUM_PG_AMOP_AMOPSORTFAMILY).as_oid(),
+        });
+    }
+    let ordered = list.ordered;
+    ReleaseSysCacheList(list);
+    Ok((out, ordered))
+}
+
+fn lookup_pg_amproc_rows<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    opfamily: Oid,
+) -> PgResult<(mcx::PgVec<'mcx, syscache_seams::PgAmprocRow>, bool)> {
+    const ANUM_PG_AMPROC_AMPROCFAMILY: i32 = 2;
+    const ANUM_PG_AMPROC_AMPROCLEFTTYPE: i32 = 3;
+    let list = SearchSysCacheList1(AMPROCNUM, SysCacheKey::Value(Datum::from_oid(opfamily)))?;
+    let n = list.n_members() as usize;
+    let mut out = mcx::vec_with_capacity_in(mcx, n)?;
+    for i in 0..n {
+        let m = list.member(i);
+        let t = m.tuple();
+        out.push(syscache_seams::PgAmprocRow {
+            amprocfamily: getattr(&t, AMPROCNUM, ANUM_PG_AMPROC_AMPROCFAMILY).as_oid(),
+            amproclefttype: getattr(&t, AMPROCNUM, ANUM_PG_AMPROC_AMPROCLEFTTYPE).as_oid(),
+            amprocrighttype: getattr(&t, AMPROCNUM, ANUM_PG_AMPROC_AMPROCRIGHTTYPE).as_oid(),
+            amprocnum: getattr(&t, AMPROCNUM, ANUM_PG_AMPROC_AMPROCNUM).as_i16(),
+            amproc: getattr(&t, AMPROCNUM, ANUM_PG_AMPROC_AMPROC).as_oid(),
+        });
+    }
+    let ordered = list.ordered;
+    ReleaseSysCacheList(list);
+    Ok((out, ordered))
+}
+
+fn lookup_pg_opclass_rows_by_am<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    amoid: Oid,
+) -> PgResult<mcx::PgVec<'mcx, (Oid, Oid, Oid, bool, types_tuple::NameData)>> {
+    const ANUM_PG_OPCLASS_OID: i32 = 1;
+    const ANUM_PG_OPCLASS_OPCNAME: i32 = 3;
+    const ANUM_PG_OPCLASS_OPCDEFAULT: i32 = 8;
+    let list = SearchSysCacheList1(CLAAMNAMENSP, SysCacheKey::Value(Datum::from_oid(amoid)))?;
+    let n = list.n_members() as usize;
+    let mut out = mcx::vec_with_capacity_in(mcx, n)?;
+    for i in 0..n {
+        let m = list.member(i);
+        let t = m.tuple();
+        // SAFETY: opcname datum points at the row's inline NameData column.
+        let name = unsafe {
+            *(getattr(&t, CLAAMNAMENSP, ANUM_PG_OPCLASS_OPCNAME).as_usize()
+                as *const types_tuple::NameData)
+        };
+        out.push((
+            getattr(&t, CLAAMNAMENSP, ANUM_PG_OPCLASS_OID).as_oid(),
+            getattr(&t, CLAAMNAMENSP, ANUM_PG_OPCLASS_OPCFAMILY).as_oid(),
+            getattr(&t, CLAAMNAMENSP, ANUM_PG_OPCLASS_OPCINTYPE).as_oid(),
+            getattr(&t, CLAAMNAMENSP, ANUM_PG_OPCLASS_OPCDEFAULT).as_bool(),
+            name,
+        ));
+    }
+    ReleaseSysCacheList(list);
+    Ok(out)
+}
+
+fn pg_opclass_opcname(opclass: Oid) -> PgResult<Option<types_tuple::NameData>> {
+    let Some(tuple) = SearchSysCache1(CLAOID, SysCacheKey::Value(Datum::from_oid(opclass)))? else {
+        return Ok(None);
+    };
+    const ANUM_PG_OPCLASS_OPCNAME: i32 = 3;
+    let d = getattr(&tuple.tuple(), CLAOID, ANUM_PG_OPCLASS_OPCNAME);
+    // SAFETY: opcname is a NameData column; the datum points at its 64-byte
+    // inline image inside the held tuple.
+    let name = unsafe { *(d.as_usize() as *const types_tuple::NameData) };
+    ReleaseSysCache(tuple);
+    Ok(Some(name))
+}
+
+fn lookup_pg_opclass_oid_exact(amoid: Oid, opcname: &str, nsp: Oid) -> PgResult<Oid> {
+    let Some(tuple) = SearchSysCache3(
+        CLAAMNAMENSP,
+        SysCacheKey::Value(Datum::from_oid(amoid)),
+        SysCacheKey::Str(opcname),
+        SysCacheKey::Value(Datum::from_oid(nsp)),
+    )?
+    else {
+        return Ok(0);
+    };
+    let oid = getattr(&tuple.tuple(), CLAAMNAMENSP, 1).as_oid();
+    ReleaseSysCache(tuple);
+    Ok(oid)
+}
+
+fn lookup_pg_opfamily_oid_exact(amoid: Oid, opfname: &str, nsp: Oid) -> PgResult<Oid> {
+    let Some(tuple) = SearchSysCache3(
+        OPFAMILYAMNAMENSP,
+        SysCacheKey::Value(Datum::from_oid(amoid)),
+        SysCacheKey::Str(opfname),
+        SysCacheKey::Value(Datum::from_oid(nsp)),
+    )?
+    else {
+        return Ok(0);
+    };
+    let oid = getattr(&tuple.tuple(), OPFAMILYAMNAMENSP, 1).as_oid();
+    ReleaseSysCache(tuple);
+    Ok(oid)
 }
 
 fn lookup_authid_by_rolname(rolname: &str) -> PgResult<Option<(Oid, bool)>> {
@@ -1449,6 +1574,12 @@ pub(crate) fn install() {
     syscache_seams::lookup_pg_amop_by_strategy::set(lookup_pg_amop_by_strategy);
     syscache_seams::lookup_pg_amop_members_by_operator::set(lookup_pg_amop_members_by_operator);
     syscache_seams::lookup_pg_opfamily_shape::set(lookup_pg_opfamily_shape);
+    syscache_seams::lookup_pg_opclass_oid_exact::set(lookup_pg_opclass_oid_exact);
+    syscache_seams::pg_opclass_opcname::set(pg_opclass_opcname);
+    syscache_seams::lookup_pg_amop_rows::set(lookup_pg_amop_rows);
+    syscache_seams::lookup_pg_amproc_rows::set(lookup_pg_amproc_rows);
+    syscache_seams::lookup_pg_opclass_rows_by_am::set(lookup_pg_opclass_rows_by_am);
+    syscache_seams::lookup_pg_opfamily_oid_exact::set(lookup_pg_opfamily_oid_exact);
     syscache_seams::pg_type_base_shape::set(pg_type_base_shape);
     syscache_seams::pg_type_io_shape::set(pg_type_io_shape);
     syscache_seams::pg_type_typarray::set(pg_type_typarray);

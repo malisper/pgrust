@@ -1106,3 +1106,135 @@ fn undefined_function(
             .with_error_location(ErrorLocation::new("parse_func.c", 0, "ParseFuncOrColumn")),
     )
 }
+
+// LookupFuncNameInternal (parse_func.c), OBJECT_FUNCTION/OBJECT_ROUTINE
+// slice; include_out_arguments lanes (procedures) are unreachable here.
+fn lookup_func_name_internal(
+    ignore_procedures: bool,
+    parts: &[&str],
+    nargs: i16,
+    argtypes: &[Oid],
+) -> PgResult<Result<Oid, bool>> {
+    // Err(true) = ambiguous, Err(false) = no such function.
+    let scratch = mcx::MemoryContext::new("LookupFuncNameInternal");
+    let clist = FuncnameGetCandidates(scratch.mcx(), parts, nargs, false, false)?;
+    let mut result = InvalidOid;
+    for cand in clist.iter() {
+        if nargs > 0 && cand.args.as_slice()[..nargs as usize] != argtypes[..nargs as usize] {
+            continue;
+        }
+        if ignore_procedures && lsyscache::get_func_prokind(cand.oid)? == PROKIND_PROCEDURE {
+            continue;
+        }
+        if OidIsValid(result) {
+            return Ok(Err(true));
+        }
+        result = cand.oid;
+    }
+    if OidIsValid(result) {
+        Ok(Ok(result))
+    } else {
+        Ok(Err(false))
+    }
+}
+
+#[cold]
+fn func_name_not_unique(parts: &[&str]) -> Box<PgError> {
+    Box::new(
+        ereport(ERROR)
+            .errcode(ERRCODE_AMBIGUOUS_FUNCTION)
+            .errmsg(format!("function name \"{}\" is not unique", name_list_to_string(parts)))
+            .errhint("Specify the argument list to select the function unambiguously.".to_string())
+            .into_error(),
+    )
+}
+
+#[cold]
+fn function_does_not_exist(parts: &[&str], argtypes: &[Oid]) -> PgResult<Box<PgError>> {
+    Ok(Box::new(
+        ereport(ERROR)
+            .errcode(ERRCODE_UNDEFINED_FUNCTION)
+            .errmsg(format!(
+                "function {} does not exist",
+                func_signature_string(parts, argtypes)?
+            ))
+            .into_error(),
+    ))
+}
+
+// LookupFuncName (parse_func.c) with explicit arg types.
+pub fn LookupFuncName(
+    funcname: &NodeList<'_>,
+    nargs: i16,
+    argtypes: &[Oid],
+    missing_ok: bool,
+) -> PgResult<Oid> {
+    let mut buf = [""; 4];
+    let parts = name_parts(funcname, &mut buf);
+    match lookup_func_name_internal(true, parts, nargs, argtypes)? {
+        Ok(oid) => Ok(oid),
+        Err(true) => Err(func_name_not_unique(parts)),
+        Err(false) => {
+            if missing_ok {
+                return Ok(InvalidOid);
+            }
+            Err(function_does_not_exist(parts, &argtypes[..nargs.max(0) as usize])?)
+        }
+    }
+}
+
+// LookupFuncWithArgs (parse_func.c), OBJECT_FUNCTION slice over a grammar
+// ObjectWithArgs (objargs TypeNames; args_unspecified => any-arity lookup).
+pub fn LookupFuncWithArgs(
+    objname: &NodeList<'_>,
+    objargs: &NodeList<'_>,
+    args_unspecified: bool,
+    missing_ok: bool,
+) -> PgResult<Oid> {
+    let argcount = objargs.len();
+    if argcount > FUNC_MAX_ARGS {
+        return Err(Box::new(
+            ereport(ERROR)
+                .errcode(ERRCODE_TOO_MANY_ARGUMENTS)
+                .errmsg(format!("functions cannot have more than {FUNC_MAX_ARGS} arguments"))
+                .into_error(),
+        ));
+    }
+    let scratch = mcx::MemoryContext::new("LookupFuncWithArgs");
+    let mut argoids = [InvalidOid; FUNC_MAX_ARGS];
+    for (i, n) in objargs.iter().enumerate() {
+        let t = n
+            .as_variant::<types_nodes::rawnodes::TypeName>()
+            .expect("objargs holds TypeName nodes");
+        let (oid, _typmod) = parse_utilcmd::typenameTypeIdAndMod(scratch.mcx(), None, t)?;
+        argoids[i] = oid;
+    }
+    let nargs: i16 = if args_unspecified { -1 } else { argcount as i16 };
+
+    let mut buf = [""; 4];
+    let parts = name_parts(objname, &mut buf);
+    // With an arg list C disables the objtype filter (OBJECT_ROUTINE);
+    // args_unspecified keeps it (OBJECT_FUNCTION ignores procedures).
+    match lookup_func_name_internal(args_unspecified, parts, nargs, &argoids)? {
+        Ok(oid) => Ok(oid),
+        Err(true) => Err(func_name_not_unique(parts)),
+        Err(false) => {
+            if missing_ok {
+                return Ok(InvalidOid);
+            }
+            if args_unspecified {
+                Err(Box::new(
+                    ereport(ERROR)
+                        .errcode(ERRCODE_UNDEFINED_FUNCTION)
+                        .errmsg(format!(
+                            "could not find a function named \"{}\"",
+                            name_list_to_string(parts)
+                        ))
+                        .into_error(),
+                ))
+            } else {
+                Err(function_does_not_exist(parts, &argoids[..argcount])?)
+            }
+        }
+    }
+}
