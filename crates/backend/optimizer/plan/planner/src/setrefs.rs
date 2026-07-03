@@ -882,7 +882,7 @@ fn fix_upper_expr<'mcx>(
         }
         NodeTag::T_CoerceToDomain => {
             let c = node.as_coerce_to_domain().unwrap();
-            let arg = fix_upper_expr(run, c.arg, subplan_tlist, rtoffset, newvarno)?;
+            let arg = fix_upper_expr(run, c.arg, subplan_tlist, rtoffset, newvarno, num_exec)?;
             Node::mk(
                 mcx,
                 types_nodes::CoerceToDomain {
@@ -1207,7 +1207,7 @@ fn fix_scan_expr_mutator<'mcx>(
         }
         NodeTag::T_CoerceToDomain => {
             let c = node.as_coerce_to_domain().unwrap();
-            let arg = fix_scan_expr_mutator(run, c.arg, rtoffset)?;
+            let arg = fix_scan_expr_mutator(run, c.arg, rtoffset, num_exec)?;
             Node::mk(
                 mcx,
                 types_nodes::CoerceToDomain {
@@ -1876,7 +1876,7 @@ fn fix_join_expr_mutator<'mcx>(
         }
         NodeTag::T_CoerceToDomain => {
             let c = node.as_coerce_to_domain().unwrap();
-            let arg = fix_join_expr_mutator(run, c.arg, outer_tlist, inner_tlist, rtoffset, nrm_match)?;
+            let arg = fix_join_expr_mutator(run, c.arg, outer_tlist, inner_tlist, rtoffset, nrm_match, acceptable_rel, num_exec)?;
             Node::mk(
                 mcx,
                 types_nodes::CoerceToDomain {
