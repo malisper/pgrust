@@ -396,9 +396,7 @@ impl<'mcx> Parser<'mcx> {
             // OptTemp (GLOBAL-deprecated and UNLOGGED variants stay unported).
             461..=464 => *yyval = YYSTYPE::Ival(RELPERSISTENCE_TEMP as i32),
             468 => *yyval = YYSTYPE::Ival(RELPERSISTENCE_PERMANENT as i32),
-            // ViewStmt: CREATE [OR REPLACE] OptTemp VIEW qualified_name
-            // opt_column_list opt_reloptions AS SelectStmt opt_check_option
-            // (RECURSIVE variants 1490/1491 stay unported).
+            // ViewStmt (RECURSIVE variants 1490/1491 stay unported).
             1488 | 1489 => {
                 let replace = rule == 1489;
                 let off = if replace { 2 } else { 0 };
@@ -419,7 +417,6 @@ impl<'mcx> Parser<'mcx> {
                 n.withCheckOption = view_check_option(view.v(9 + off).ival());
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
-            // opt_check_option
             1492 | 1493 => *yyval = YYSTYPE::Ival(ViewCheckOption::CASCADED_CHECK_OPTION as i32),
             1494 => *yyval = YYSTYPE::Ival(ViewCheckOption::LOCAL_CHECK_OPTION as i32),
             1495 => *yyval = YYSTYPE::Ival(ViewCheckOption::NO_CHECK_OPTION as i32),
