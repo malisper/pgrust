@@ -1,0 +1,11 @@
+[package]
+name = "nbt_validate"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "nbt_validate"
+path = "src/lib.rs"
+
+[dependencies]

@@ -1672,6 +1672,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "commands_define"
+version = "0.0.0"
+
+[[package]]
 name = "commands_tablespace"
 version = "0.0.0"
 dependencies = [
@@ -3307,6 +3311,10 @@ name = "ifaddr"
 version = "0.0.0"
 
 [[package]]
+name = "index_amvalidate"
+version = "0.0.0"
+
+[[package]]
 name = "indexam"
 version = "0.1.0"
 dependencies = [
@@ -4062,6 +4070,10 @@ dependencies = [
  "types_error",
  "types_fmgr",
 ]
+
+[[package]]
+name = "nbt_validate"
+version = "0.0.0"
 
 [[package]]
 name = "nbtree"
@@ -4873,6 +4885,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
+name = "opclasscmds"
+version = "0.0.0"
+
+[[package]]
+name = "operatorcmds"
+version = "0.0.0"
+
+[[package]]
 name = "origin_seams"
 version = "0.0.0"
 dependencies = [
@@ -5437,6 +5457,10 @@ dependencies = [
  "types_rel",
  "types_tuple",
 ]
+
+[[package]]
+name = "pg_operator"
+version = "0.0.0"
 
 [[package]]
 name = "pg_path"

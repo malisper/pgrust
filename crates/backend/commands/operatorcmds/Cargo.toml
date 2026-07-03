@@ -1,0 +1,11 @@
+[package]
+name = "operatorcmds"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "operatorcmds"
+path = "src/lib.rs"
+
+[dependencies]
