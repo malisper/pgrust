@@ -41,6 +41,7 @@ xact = { path = "../../access/transam/xact" }
 
 [dev-dependencies]
 autovacuum_seams = { path = "../../postmaster/autovacuum_seams" }
+relcache_seams = { path = "../../utils/cache/relcache_seams" }
 condition_variable_seams = { path = "../../storage/lmgr/condition_variable_seams" }
 deadlock_seams = { path = "../../storage/lmgr/deadlock_seams" }
 init_small = { path = "../../utils/init/init_small" }
