@@ -398,7 +398,7 @@ pub(crate) fn write_meta(pin: &BufferPin, metad: &BTMetaPageData) {
 }
 
 /// _bt_pageinit.
-pub(crate) fn bt_pageinit(page: &mut PageMut<'_>) {
+pub fn bt_pageinit(page: &mut PageMut<'_>) {
     page.init(core::mem::size_of::<BTPageOpaqueData>());
 }
 

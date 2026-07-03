@@ -217,7 +217,7 @@ unsafe fn datum_image_eq(a: Datum, b: Datum, attbyval: bool, attlen: i16) -> boo
 ///
 /// # Safety
 /// As [`bt_checkkeys`] for both tuples.
-pub(crate) unsafe fn bt_keep_natts_fast(
+pub unsafe fn bt_keep_natts_fast(
     rel: &Relation<'_>,
     lastleft: ITup,
     firstright: ITup,
@@ -459,7 +459,7 @@ pub(crate) fn bt_killitems(
 ///
 /// # Safety
 /// Both tuples per [`bt_checkkeys`]; neither is a pivot.
-pub(crate) unsafe fn bt_truncate<'mcx>(
+pub unsafe fn bt_truncate<'mcx>(
     mcx: ::mcx::Mcx<'mcx>,
     rel: &Relation<'_>,
     lastleft: ITup,
@@ -575,7 +575,7 @@ unsafe fn bt_keep_natts(
 /// `newtup` per [`bt_checkkeys`].
 #[cold]
 #[inline(never)]
-pub(crate) unsafe fn bt_check_third_page(
+pub unsafe fn bt_check_third_page(
     rel: &Relation<'_>,
     heap: &Relation<'_>,
     needheaptidspace: bool,
