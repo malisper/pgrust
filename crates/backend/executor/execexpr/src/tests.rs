@@ -465,6 +465,30 @@ fn just_func_kernel_strict_null_const() {
     });
 }
 
+// Miri repro for the Hash32Var arm: the raw arg-slot write must precede the
+// fcinfo &mut reborrow or the call retag hits an invalidated tag.
+#[test]
+fn hash32_var_kernel_arg_write_then_call() {
+    with_mcx(|mcx| {
+        let desc = desc_int4(mcx, 1);
+        let mut state =
+            crate::compile::exec_build_hash32_from_attrs(mcx, &desc, &[450], &[0], &[1], 0)
+                .unwrap();
+        assert!(matches!(state.kernel(), Kernel::Hash32Var { .. }));
+        fn hash_of<'m>(mcx: Mcx<'m>, state: &mut ExprState<'m>, v: Option<i32>) -> u32 {
+            let mut slot = virtual_slot(mcx, &[v]);
+            let mut slots = EvalSlots { scan: None, inner: Some(&mut slot), outer: None };
+            let r = exec_eval_expr(state, &mut slots).unwrap();
+            assert!(!r.isnull);
+            r.value.as_u32()
+        }
+        let h42 = hash_of(mcx, &mut state, Some(42));
+        assert_eq!(h42, hash_of(mcx, &mut state, Some(42)));
+        assert_ne!(h42, hash_of(mcx, &mut state, Some(7)));
+        assert_eq!(hash_of(mcx, &mut state, None), 0);
+    });
+}
+
 #[test]
 fn func_strict2_with_var_arg_null_propagation() {
     with_mcx(|mcx| {
