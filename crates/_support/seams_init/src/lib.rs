@@ -133,6 +133,7 @@ pub fn init_all() {
     adt_timestamp::init_seams();
     pgtz::init_seams();
     adt_bool::init_seams();
+    arrayfuncs::init_seams();
     adt_float::init_seams();
     pg_locale::init_seams();
     varlena::init_seams();

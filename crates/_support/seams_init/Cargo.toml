@@ -132,6 +132,7 @@ adt_misc = { path = "../../backend/utils/adt/adt_misc" }
 adt_timestamp = { path = "../../backend/utils/adt/adt_timestamp" }
 pgtz = { path = "../../backend/timezone/pgtz" }
 adt_bool = { path = "../../backend/utils/adt/bool" }
+arrayfuncs = { path = "../../backend/utils/adt/arrayfuncs" }
 adt_float = { path = "../../backend/utils/adt/float" }
 pg_locale = { path = "../../backend/utils/adt/pg_locale" }
 varlena = { path = "../../backend/utils/adt/varlena" }
