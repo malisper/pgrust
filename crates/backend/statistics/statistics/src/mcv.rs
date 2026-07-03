@@ -73,7 +73,7 @@ pub fn statext_mcv_build<'mcx>(
     }
 
     // Per-column frequencies over the distinct groups (for base_frequency).
-    let mut freqs: PgVec<'_, PgVec<'_, SortItem>> = mcx::vec_with_capacity_in(mcx, numattrs)?;
+    let mut freqs: PgVec<'_, PgVec<'_, SortItem>> = PgVec::new_in(mcx);
     for dim in 0..numattrs {
         let mut f: PgVec<'_, SortItem> = mcx::vec_with_capacity_in(mcx, ngroups)?;
         f.extend_from_slice(&groups[..ngroups]);
@@ -103,7 +103,7 @@ pub fn statext_mcv_build<'mcx>(
         freqs.push(f);
     }
 
-    let mut mcv_items: PgVec<'mcx, MCVItem<'mcx>> = mcx::vec_with_capacity_in(mcx, nitems)?;
+    let mut mcv_items: PgVec<'mcx, MCVItem<'mcx>> = PgVec::new_in(mcx);
     for i in 0..nitems {
         let mut values: PgVec<'mcx, Datum> = mcx::vec_with_capacity_in(mcx, numattrs)?;
         let mut isnull: PgVec<'mcx, bool> = mcx::vec_with_capacity_in(mcx, numattrs)?;
@@ -232,7 +232,7 @@ pub fn statext_mcv_serialize<'mcx>(
     let ndims = mcvlist.ndimensions;
     let nitems = mcvlist.items.len();
 
-    let mut values: PgVec<'_, PgVec<'_, Datum>> = mcx::vec_with_capacity_in(mcx, ndims)?;
+    let mut values: PgVec<'_, PgVec<'_, Datum>> = PgVec::new_in(mcx);
     let mut info: PgVec<'_, DimensionInfo> = mcx::vec_with_capacity_in(mcx, ndims)?;
     let mut cmps: Vec<MultiSort> = Vec::with_capacity(ndims);
 
@@ -451,7 +451,7 @@ pub fn statext_mcv_deserialize<'mcx>(mcx: Mcx<'mcx>, data: &[u8]) -> PgResult<MC
 
     // Deduplicated value maps; by-ref copies land in u64-backed (8-aligned)
     // arena buffers, as C's single-chunk MAXALIGN layout does.
-    let mut map: PgVec<'_, PgVec<'_, Datum>> = mcx::vec_with_capacity_in(mcx, ndims)?;
+    let mut map: PgVec<'_, PgVec<'_, Datum>> = PgVec::new_in(mcx);
     for di in info.iter() {
         let mut m: PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, di.nvalues)?;
         let start = off;
@@ -504,7 +504,7 @@ pub fn statext_mcv_deserialize<'mcx>(mcx: Mcx<'mcx>, data: &[u8]) -> PgResult<MC
         map.push(m);
     }
 
-    let mut items: PgVec<'mcx, MCVItem<'mcx>> = mcx::vec_with_capacity_in(mcx, nitems)?;
+    let mut items: PgVec<'mcx, MCVItem<'mcx>> = PgVec::new_in(mcx);
     for _ in 0..nitems {
         let mut isnull: PgVec<'mcx, bool> = mcx::vec_with_capacity_in(mcx, ndims)?;
         for d in 0..ndims {
