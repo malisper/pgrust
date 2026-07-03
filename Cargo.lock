@@ -7087,10 +7087,12 @@ version = "0.0.0"
 dependencies = [
  "cache_syscache",
  "catalog_namespace",
+ "cmdtag",
  "coerce",
  "datum",
  "detoast",
  "elog",
+ "event_trigger",
  "execexpr",
  "fmgr_core",
  "format_type",

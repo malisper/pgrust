@@ -76,13 +76,13 @@ pub fn EventTriggerSQLDropAddObject(
     }
 
     let identity =
-        catalog_dependency::description::getObjectIdentityParts(mcx, &obj.address, false)?
+        catalog_dependency::getObjectIdentityParts(mcx, &obj.address, false)?
             .expect("missing_ok=false");
     obj.objidentity = Some(identity.identity);
     obj.addrnames = Some(identity.objname);
     obj.addrargs = Some(identity.objargs);
     obj.objecttype = Some(
-        catalog_dependency::description::getObjectTypeDescription(mcx, &obj.address, false)?
+        catalog_dependency::getObjectTypeDescription(mcx, &obj.address, false)?
             .expect("missing_ok=false"),
     );
 

@@ -19,7 +19,6 @@ pub use sqldrop::EventTriggerSQLDropAddObject;
 
 const TRIGGER_FIRES_ON_ORIGIN: i8 = b'O' as i8;
 const TRIGGER_FIRES_ON_REPLICA: i8 = b'R' as i8;
-pub(crate) const TRIGGER_FIRES_ALWAYS: i8 = b'A' as i8;
 pub(crate) const TRIGGER_DISABLED: i8 = b'D' as i8;
 
 const SESSION_REPLICATION_ROLE_ORIGIN: i32 = 0;
