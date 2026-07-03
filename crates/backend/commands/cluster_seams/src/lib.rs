@@ -2,8 +2,7 @@ use types_error::PgResult;
 use types_rel::Relation;
 
 seam_core::seam!(
-    // cluster_rel (cluster.c) for VACUUM FULL; options is the CLUOPT_* mask.
-    // Consumes (closes) old_heap, keeping the lock, as C.
+    // cluster_rel (cluster.c) for VACUUM FULL; consumes old_heap, keeps lock.
     pub fn cluster_rel<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         old_heap: Relation<'mcx>,
