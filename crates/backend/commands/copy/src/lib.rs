@@ -115,8 +115,17 @@ pub fn DoCopy<'mcx>(mcx: Mcx<'mcx>, stmt: &CopyStmt<'_>) -> PgResult<u64> {
         // OBJECT_TABLE discriminant (parsenodes.h ObjectType).
         aclchk_seams::aclcheck_error::call(r, 41, rv.relname)?;
     }
-    if rel.rd_rel.relrowsecurity {
-        unported("with row-level security (query-rewrite arm)");
+    if rls::check_enable_rls(rel.rd_id, types_core::InvalidOid, false)?
+        == rls::CheckEnableRls::RlsEnabled
+    {
+        if is_from {
+            return Err(Box::new(
+                PgError::error("COPY FROM not supported with row-level security".to_string())
+                    .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED)
+                    .with_hint("Use INSERT statements instead."),
+            ));
+        }
+        unported("COPY TO with row-level security (SELECT query conversion, copy.c:236)");
     }
 
     let processed = if is_from {

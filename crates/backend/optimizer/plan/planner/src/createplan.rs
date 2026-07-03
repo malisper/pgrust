@@ -1329,11 +1329,7 @@ fn create_modifytable_plan<'mcx>(
     let mcx = run.mcx;
     let (subpath_id, operation, can_set_tag, nominal, root_rel, result_relations, epq_param, onconflict_id) = {
         let PathNode::ModifyTablePath(p) = run.root.path(path_id) else { unreachable!() };
-        debug_assert!(
-            p.withCheckOptionLists.is_empty()
-                && p.rowMarks.is_empty()
-                && p.mergeActionLists.is_empty()
-        );
+        debug_assert!(p.rowMarks.is_empty() && p.mergeActionLists.is_empty());
         (
             p.subpath.expect("ModifyTablePath has a subpath"),
             p.operation,
@@ -1370,6 +1366,25 @@ fn create_modifytable_plan<'mcx>(
         lists
     };
 
+    let with_check_option_lists = {
+        let PathNode::ModifyTablePath(p) = run.root.path(path_id) else { unreachable!() };
+        debug_assert!(p.withCheckOptionLists.len() <= 1);
+        let mut ids: mcx::PgVec<'mcx, mcx::PgVec<'mcx, types_pathnodes::NodeId>> =
+            mcx::PgVec::new_in(mcx);
+        for wlist in p.withCheckOptionLists.iter() {
+            ids.push(crate::relnode::pgvec_clone_shallow(mcx, wlist));
+        }
+        let mut lists = types_nodes::list::NodeList::nil();
+        for wlist in ids.iter() {
+            let mut nl = types_nodes::list::NodeList::nil();
+            for &id in wlist.iter() {
+                nl.lappend(mcx, *run.root.expr_node(id))?;
+            }
+            lists.lappend(mcx, Node::mk_list(mcx, nl)?)?;
+        }
+        lists
+    };
+
     let returning_lists = {
         let PathNode::ModifyTablePath(p) = run.root.path(path_id) else { unreachable!() };
         debug_assert!(p.returningLists.len() <= 1);
@@ -1393,6 +1408,7 @@ fn create_modifytable_plan<'mcx>(
     plan.plan.lefttree = Some(subplan);
     plan.operation = operation;
     plan.updateColnosLists = update_colnos_lists;
+    plan.withCheckOptionLists = with_check_option_lists;
     plan.returningLists = returning_lists;
     plan.canSetTag = can_set_tag;
     plan.nominalRelation = nominal;

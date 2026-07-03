@@ -25,6 +25,7 @@ const VIEW: Oid = 2;
 const RLS_TBL: Oid = 3;
 const MATVIEW: Oid = 4;
 const SELF_VIEW: Oid = 5;
+const RLS_REC: Oid = 6;
 
 thread_local! {
     static OPENS: RefCell<Vec<(Oid, LOCKMODE)>> = const { RefCell::new(Vec::new()) };
@@ -43,6 +44,7 @@ fn entry(oid: Oid) -> Option<(&'static str, u8, bool)> {
         TBL => Some(("tbl", RELKIND_RELATION, false)),
         VIEW => Some(("vw", RELKIND_VIEW, false)),
         RLS_TBL => Some(("rls_tbl", RELKIND_RELATION, true)),
+        RLS_REC => Some(("rls_rec", RELKIND_RELATION, true)),
         MATVIEW => Some(("mv", RELKIND_MATVIEW, false)),
         SELF_VIEW => Some(("self_vw", RELKIND_VIEW, false)),
         _ => None,
@@ -155,11 +157,61 @@ fn fake_relation_open(mcx: Mcx<'_>, oid: Oid, lockmode: LOCKMODE) -> PgResult<Re
     }
 }
 
+fn fake_check_enable_rls(
+    relid: Oid,
+    _check_as_user: Oid,
+    _no_error: bool,
+) -> PgResult<rls_seams::CheckEnableRls> {
+    Ok(if matches!(relid, RLS_TBL | RLS_REC) {
+        rls_seams::CheckEnableRls::RlsEnabled
+    } else {
+        rls_seams::CheckEnableRls::RlsNone
+    })
+}
+
+const POLICY_QUAL_A_EQ_5: &str = r#"{OPEXPR :opno 96 :opfuncid 65 :opresulttype 16 :opretset false :opcollid 0 :inputcollid 0 :args ({VAR :varno 1 :varattno 1 :vartype 23 :vartypmod -1 :varcollid 0 :varnullingrels (b) :varlevelsup 0 :varreturningtype 0 :varnosyn 1 :varattnosyn 1 :location -1} {CONST :consttype 23 :consttypmod -1 :constcollid 0 :constlen 4 :constbyval true :constisnull false :location -1 :constvalue 4 [ 5 0 0 0 0 0 0 0 ]}) :location -1}"#;
+
+fn recursive_policy_qual() -> String {
+    let action = ev_action(RLS_REC);
+    let inner = &action[1..action.len() - 1];
+    format!(
+        "{{SUBLINK :subLinkType 0 :subLinkId 0 :testexpr <> :operName <> \
+         :subselect {inner} :location -1}}"
+    )
+}
+
+fn fake_scan_pg_policy<'mcx>(
+    mcx: Mcx<'mcx>,
+    polrelid: Oid,
+) -> PgResult<PgVec<'mcx, relcache_build_seams::PgPolicyShape<'mcx>>> {
+    let mut rows = mcx::vec_with_capacity_in(mcx, 1)?;
+    let qual: Option<&'static str> = match polrelid {
+        RLS_TBL => Some(POLICY_QUAL_A_EQ_5),
+        RLS_REC => Some(Box::leak(recursive_policy_qual().into_boxed_str())),
+        _ => None,
+    };
+    if let Some(q) = qual {
+        let mut roles = mcx::vec_with_capacity_in(mcx, 1)?;
+        roles.push(0);
+        rows.push(relcache_build_seams::PgPolicyShape {
+            polname: "p1",
+            polcmd: b'*',
+            polpermissive: true,
+            polroles: roles,
+            polqual: Some(q),
+            polwithcheck: None,
+        });
+    }
+    Ok(rows)
+}
+
 fn install() {
     static INIT: Once = Once::new();
     INIT.call_once(|| {
         relation_seams::relation_open::set(fake_relation_open);
         relcache_build_seams::scan_pg_rewrite::set(fake_scan_pg_rewrite);
+        relcache_build_seams::scan_pg_policy::set(fake_scan_pg_policy);
+        rls_seams::check_enable_rls::set(fake_check_enable_rls);
         table::init_seams();
         crate::init_seams();
     });
@@ -524,17 +576,83 @@ fn self_referential_view_reports_infinite_recursion() {
         .contains("infinite recursion detected in rules for relation \"self_vw\""));
 }
 
+fn rls_query<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> Query<'mcx> {
+    let mut query = select1(mcx);
+    query.rtable = NodeList::make1(
+        mcx,
+        rte_node(
+            mcx,
+            RangeTblEntry {
+                rtekind: RTEKind::RTE_RELATION,
+                relid,
+                relkind: RELKIND_RELATION,
+                rellockmode: AccessShareLock,
+                perminfoindex: 1,
+                inFromCl: true,
+                ..Default::default()
+            },
+        ),
+    )
+    .unwrap();
+    query.rteperminfos = NodeList::make1(
+        mcx,
+        Node::mk(
+            mcx,
+            types_nodes::parsenodes::RTEPermissionInfo {
+                relid,
+                inh: true,
+                requiredPerms: 2,
+                checkAsUser: 10,
+                ..Default::default()
+            },
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    query.jointree = Some(leak_in(
+        alloc_in(
+            mcx,
+            types_nodes::primnodes::FromExpr {
+                fromlist: NodeList::make1(mcx, Node::mk_range_tbl_ref(mcx, 1).unwrap()).unwrap(),
+                quals: None,
+            },
+        )
+        .unwrap(),
+    ));
+    query
+}
+
 #[test]
-#[should_panic(expected = "row-level security needs")]
-fn row_security_defers_loud() {
+fn row_security_applies_policy_quals() {
     install();
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
-    let mut query = select1(mcx);
-    query.rtable =
-        NodeList::make1(mcx, relation_rte(mcx, RLS_TBL, RELKIND_RELATION, AccessShareLock))
-            .unwrap();
-    let _ = QueryRewrite(mcx, query);
+    let query = rls_query(mcx, RLS_TBL);
+
+    let results = QueryRewrite(mcx, query).unwrap();
+    assert_eq!(results.len(), 1);
+    let q = &results[0];
+    assert!(q.hasRowSecurity);
+    assert!(!q.hasSubLinks);
+    let rte = rte_of(q.rtable.nth(0));
+    assert_eq!(rte.securityQuals.len(), 1);
+    assert_eq!(rte.securityQuals.nth(0).node_tag(), types_nodes::NodeTag::T_OpExpr);
+    assert!(q.withCheckOptions.is_nil());
+}
+
+#[test]
+fn self_referential_policy_reports_infinite_recursion() {
+    install();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let query = rls_query(mcx, RLS_REC);
+
+    let Err(err) = QueryRewrite(mcx, query) else {
+        panic!("self-referential policy must fail")
+    };
+    assert!(err
+        .message()
+        .contains("infinite recursion detected in policy for relation \"rls_rec\""));
 }
 
 fn join_query<'mcx>(mcx: Mcx<'mcx>, aliasvars: NodeList<'mcx>) -> Query<'mcx> {

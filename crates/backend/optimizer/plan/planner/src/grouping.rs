@@ -297,11 +297,18 @@ fn grouping_planner_tail<'mcx>(
             if parse.commandType == CmdType::CMD_MERGE {
                 panic!("create_modifytable_path (pathnode.c): MERGE; M4 MERGE lane");
             }
-            debug_assert!(parse.withCheckOptions.is_nil());
             debug_assert!(run.root.rowMarks.is_empty());
             let onconflict = parse.onConflict.map(|oc| run.root.alloc_expr_node(oc));
             let update_colnos = (parse.commandType == CmdType::CMD_UPDATE).then(|| {
                 crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.update_colnos)
+            });
+            let with_check_options = (!parse.withCheckOptions.is_nil()).then(|| {
+                let mut ids: mcx::PgVec<'mcx, types_pathnodes::NodeId> =
+                    mcx::PgVec::new_in(run.mcx);
+                for wco in &parse.withCheckOptions {
+                    ids.push(run.root.alloc_expr_node(wco));
+                }
+                ids
             });
             let returning_list = (!parse.returningList.is_nil()).then(|| {
                 let mut ids: mcx::PgVec<'mcx, types_pathnodes::NodeId> =
@@ -319,6 +326,7 @@ fn grouping_planner_tail<'mcx>(
                 parse.canSetTag,
                 parse.resultRelation as u32,
                 update_colnos,
+                with_check_options,
                 returning_list,
                 onconflict,
             );

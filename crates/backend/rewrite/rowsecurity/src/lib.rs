@@ -10,15 +10,15 @@ use types_nodes::parsenodes::{
     Query, RTEKind, RangeTblEntry, WCOKind, WithCheckOption, ACL_SELECT, ACL_UPDATE,
 };
 use types_nodes::primnodes::{
-    BoolExpr, BoolExprType, Const, CurrentOfExpr, JoinExpr, OnConflictAction, RangeTblRef, Var,
+    BoolExpr, BoolExprType, Const, JoinExpr, OnConflictAction, RangeTblRef, Var,
 };
 use types_nodes::NodeTag;
 use types_rel::{NoLock, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION};
 
-use adt_acl::membership::has_privs_of_role;
+use adt_acl::has_privs_of_role;
 use miscinit::GetUserId;
 use relcache::rowsecurity::{RelationGetRowSecurityDesc, RowSecurityPolicyMeta};
-use rls::{check_enable_rls, CheckEnableRls};
+use rls_seams::CheckEnableRls;
 
 const ACL_ID_PUBLIC: Oid = 0;
 const POLCMD_ALL: u8 = b'*';
@@ -61,7 +61,7 @@ pub fn get_row_security_policies<'mcx>(
 
     let user_id = if check_as_user != InvalidOid { check_as_user } else { GetUserId() };
 
-    let rls_status = check_enable_rls(rte.relid, check_as_user, false)?;
+    let rls_status = rls_seams::check_enable_rls::call(rte.relid, check_as_user, false)?;
 
     if rls_status == CheckEnableRls::RlsNone {
         return Ok(out);
@@ -539,16 +539,8 @@ impl<'mcx> nodes_core::NodeWalker<'mcx> for Cvn {
                 Ok(false)
             }
             NodeTag::T_CurrentOfExpr => {
-                let (rt, new, lvl) = (self.rt_index, self.new_index, self.sublevels_up);
-                // SAFETY: as above.
-                unsafe {
-                    node.with_mut::<CurrentOfExpr, _>(|c| {
-                        if lvl == 0 && c.cvarno == rt as u32 {
-                            c.cvarno = new as u32;
-                        }
-                    })
-                };
-                Ok(false)
+                // EXPR_KIND_POLICY rejects CURRENT OF at parse time.
+                panic!("ChangeVarNodes (rewriteManip.c): CurrentOfExpr in a policy qual")
             }
             NodeTag::T_RangeTblRef => {
                 let (rt, new, lvl) = (self.rt_index, self.new_index, self.sublevels_up);

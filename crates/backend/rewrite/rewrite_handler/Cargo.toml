@@ -43,6 +43,7 @@ adt_float = { path = "../../utils/adt/float" }
 adt_bool = { path = "../../utils/adt/bool" }
 guc = { path = "../../utils/misc/guc" }
 relcache_seams = { path = "../../utils/cache/relcache_seams" }
+rls_seams = { path = "../../utils/misc/rls_seams" }
 aclchk_seams = { path = "../../catalog/aclchk_seams" }
 aio_seams = { path = "../../storage/aio/aio_seams" }
 async_seams = { path = "../../commands/async_seams" }

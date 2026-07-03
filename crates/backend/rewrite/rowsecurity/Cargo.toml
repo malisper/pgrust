@@ -20,5 +20,5 @@ relcache = { path = "../../utils/cache/relcache" }
 parse_relation = { path = "../../parser/parse_relation" }
 adt_acl = { path = "../../utils/adt/acl" }
 miscinit = { path = "../../utils/init/miscinit" }
-rls = { path = "../../utils/misc/rls" }
+rls_seams = { path = "../../utils/misc/rls_seams" }
 table = { path = "../../access/table/table" }

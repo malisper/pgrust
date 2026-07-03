@@ -2,7 +2,7 @@ use mcx::alloc_leak_in;
 use types_error::PgResult;
 use types_nodes::list::NodeList;
 use types_nodes::nodes_enums::CmdType;
-use types_nodes::parsenodes::{Query, RTEKind};
+use types_nodes::parsenodes::{Query, RTEKind, WithCheckOption};
 use types_nodes::{Node, NodeTag};
 use types_pathnodes::JoinDomain;
 
@@ -205,7 +205,23 @@ pub fn subquery_planner<'mcx>(
     let has_sublinks = parse.hasSubLinks;
     parse.targetList =
         preprocess_expression_list(run, parse.targetList, EXPRKIND_TARGET, has_sublinks)?;
-    debug_assert!(parse.withCheckOptions.is_nil());
+    if !parse.withCheckOptions.is_nil() {
+        let mut new_wcos = NodeList::nil();
+        for wco_node in &parse.withCheckOptions {
+            let wco_qual =
+                wco_node.as_with_check_option().expect("withCheckOptions cell").qual;
+            let qual = preprocess_expression(run, wco_qual, EXPRKIND_QUAL, has_sublinks)?;
+            // SAFETY: parse tree is planner-owned; no derived refs live.
+            unsafe {
+                wco_node.with_mut::<WithCheckOption, _>(|w| w.qual = qual)
+            }
+            .expect("WithCheckOption node");
+            if qual.is_some() {
+                new_wcos.lappend(run.mcx, wco_node)?;
+            }
+        }
+        parse.withCheckOptions = new_wcos;
+    }
     parse.returningList =
         preprocess_expression_list(run, parse.returningList, EXPRKIND_TARGET, has_sublinks)?;
     preprocess_qual_conditions(run, &mut parse, has_sublinks)?;

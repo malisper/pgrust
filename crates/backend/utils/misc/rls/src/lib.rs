@@ -85,3 +85,23 @@ pub const RLS_BUILTINS: &[FmgrBuiltin] = &[
 pub fn init_seams() {
     rls_seams::check_enable_rls::set(check_enable_rls);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The owner/FORCE/bypassrls matrix reads live pg_class/pg_authid tuples;
+    // without a bootable catcache harness those legs run in rls-e2e only.
+    #[test]
+    fn builtin_relids_bypass_rls() {
+        assert_eq!(check_enable_rls(1259, 10, false).unwrap(), RlsNone);
+        assert_eq!(check_enable_rls(16383, 10, true).unwrap(), RlsNone);
+    }
+
+    #[test]
+    fn install_seams() {
+        init_seams();
+        assert!(rls_seams::check_enable_rls::is_installed());
+        assert_eq!(rls_seams::check_enable_rls::call(1247, 10, false).unwrap(), RlsNone);
+    }
+}

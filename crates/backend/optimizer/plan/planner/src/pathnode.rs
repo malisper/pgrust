@@ -239,6 +239,7 @@ pub fn create_modifytable_path<'mcx>(
     // (operation is stored as the C CmdType value; types_pathnodes uses u32)
     result_relation: u32,
     update_colnos: Option<PgVec<'mcx, i16>>,
+    with_check_options: Option<PgVec<'mcx, types_pathnodes::NodeId>>,
     returning_list: Option<PgVec<'mcx, types_pathnodes::NodeId>>,
     onconflict: Option<types_pathnodes::NodeId>,
 ) -> PathNode<'mcx> {
@@ -279,7 +280,14 @@ pub fn create_modifytable_path<'mcx>(
             }
             None => PgVec::new_in(run.mcx),
         },
-        withCheckOptionLists: PgVec::new_in(run.mcx),
+        withCheckOptionLists: match with_check_options {
+            Some(wcos) => {
+                let mut lists = PgVec::new_in(run.mcx);
+                lists.push(wcos);
+                lists
+            }
+            None => PgVec::new_in(run.mcx),
+        },
         returningLists: match returning_list {
             Some(rlist) => {
                 let mut lists = PgVec::new_in(run.mcx);
