@@ -283,7 +283,10 @@ fn dispatch_switch<'mcx>(
             tablecmds::ExecuteTruncate(mcx, stmt)?;
         }
         T_CopyStmt => {
-            let stmt = parsetree.as_copy_stmt().unwrap();
+            // Retention contract as unify_stmt_lifetime: the statement arena
+            // outlives the utility call; nothing derived escapes it.
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node.as_copy_stmt().unwrap();
             let processed = copy_cmd::DoCopy(mcx, stmt, source_text)?;
             if let Some(qc) = qc.as_mut() {
                 qc.commandTag = crate::consts::CMDTAG_COPY;

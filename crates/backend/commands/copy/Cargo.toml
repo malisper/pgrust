@@ -37,6 +37,10 @@ fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
 mbutils = { path = "../../utils/mb/mbutils" }
 parser_small1 = { path = "../../parser/parser_small1" }
+parse_relation = { path = "../../parser/parse_relation" }
+parse_clause = { path = "../../parser/parse_clause" }
+parse_collate = { path = "../../parser/parse_collate" }
+planner = { path = "../../optimizer/plan/planner" }
 wchar = { path = "../../../common/wchar" }
 snapmgr = { path = "../../utils/time/snapmgr" }
 table = { path = "../../access/table/table" }

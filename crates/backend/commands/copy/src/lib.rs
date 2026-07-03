@@ -1,8 +1,8 @@
 // copy.c/copyto.c/copyfrom.c/copyfromparse.c — text + CSV formats, file and
-// wire STDIN/STDOUT variants; column defaults + the DEFAULT marker live.
-// Loud (named): binary format, COPY (query), WHERE, PROGRAM, ON_ERROR
-// ignore, FREEZE, HEADER match, volatile defaults, generated columns, RLS
-// rewrite. Option parsing (ProcessCopyOptions) is full-parity.
+// wire STDIN/STDOUT variants; column defaults, the DEFAULT marker and
+// FROM ... WHERE live. Loud (named): binary format, COPY (query), PROGRAM,
+// ON_ERROR ignore, FREEZE, HEADER match, volatile defaults/WHERE, generated
+// columns, RLS rewrite. Option parsing (ProcessCopyOptions) is full-parity.
 #![allow(non_snake_case)]
 
 use mcx::{vec_from_elem_in, Mcx, PgVec};
@@ -91,7 +91,7 @@ fn errpos(src: Option<&str>, location: types_core::ParseLoc) -> i32 {
 }
 
 /// `DoCopy` (copy.c). Returns rows processed.
-pub fn DoCopy<'mcx>(mcx: Mcx<'mcx>, stmt: &CopyStmt<'_>, source_text: &str) -> PgResult<u64> {
+pub fn DoCopy<'mcx>(mcx: Mcx<'mcx>, stmt: &CopyStmt<'mcx>, source_text: &str) -> PgResult<u64> {
     let is_from = stmt.is_from;
     if stmt.is_program {
         unported("TO/FROM PROGRAM (OpenPipeStream lane)");
@@ -116,9 +116,6 @@ pub fn DoCopy<'mcx>(mcx: Mcx<'mcx>, stmt: &CopyStmt<'_>, source_text: &str) -> P
         ProcessCopyOptions(false, &stmt.options, Some(source_text))?;
         unported("(query) TO (pg_analyze_and_rewrite + executor lane)");
     };
-    if stmt.whereClause.is_some() {
-        unported("FROM ... WHERE (transformExpr/ExecQual lane)");
-    }
     let rv = rv_node.as_range_var().expect("CopyStmt.relation is RangeVar");
     let rv = rel_vocab::RangeVar {
         catalogname: rv.catalogname,
@@ -153,6 +150,35 @@ pub fn DoCopy<'mcx>(mcx: Mcx<'mcx>, stmt: &CopyStmt<'_>, source_text: &str) -> P
         unported("with row-level security (query-rewrite arm)");
     }
 
+    let mut where_clause = NodeList::nil();
+    if let Some(wc) = stmt.whereClause {
+        let mut pstate = parser_small1::make_parsestate(mcx, None);
+        {
+            let mut v: mcx::PgVec<'mcx, u8> = mcx::PgVec::new_in(mcx);
+            mcx::vec_append_bytes(&mut v, source_text.as_bytes())
+                .map_err(|_| mcx.oom(source_text.len()))?;
+            pstate.p_sourcetext = Some(v.leak());
+        }
+        let nsitem =
+            parse_relation::addRangeTableEntryForRelation(mcx, &mut pstate, &rel, lockmode, None, false, false)?;
+        parse_relation::addNSItemToQuery(mcx, &mut pstate, nsitem, false, true, true)?;
+        let qual = parse_clause::transformWhereClause(
+            mcx,
+            &mut pstate,
+            Some(wc),
+            parser_small1::ParseExprKind::EXPR_KIND_COPY_WHERE,
+            "WHERE",
+        )?
+        .expect("clause in, clause out");
+        parse_collate::assign_expr_collations(mcx, &pstate, qual)?;
+        // C divergence: the pull_varattnos generated-column screen is elided
+        // (generated-column relations are loud in BeginCopyFrom).
+        let qual = clauses::eval_const_expressions(mcx, qual)?;
+        let qual = planner::prepqual::canonicalize_qual(mcx, qual, false)?;
+        where_clause = clauses::make_ands_implicit(mcx, Some(qual))?;
+        parser_small1::free_parsestate(pstate)?;
+    }
+
     let processed = if is_from {
         if xact::XactReadOnly() && !rel.rd_islocaltemp {
             xact::PreventCommandIfReadOnly("COPY FROM")?;
@@ -160,6 +186,7 @@ pub fn DoCopy<'mcx>(mcx: Mcx<'mcx>, stmt: &CopyStmt<'_>, source_text: &str) -> P
         let mut cstate = BeginCopyFrom(
             mcx,
             &rel,
+            where_clause,
             stmt.filename,
             &stmt.attlist,
             &stmt.options,
