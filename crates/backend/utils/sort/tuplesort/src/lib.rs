@@ -205,8 +205,12 @@ impl CmpCtx<'_> {
     /// `qsort_tuple_{unsigned,signed,int32}_compare`: `cmp` folds per instantiation.
     #[inline(always)]
     fn comparetup_spec(&self, cmp: SortComparator, a: &SortTuple, b: &SortTuple) -> i32 {
+        // SAFETY: every non-IndexHash variant carries >=1 sort key (begin_*
+        // asserts); dispatch_cmp guards IndexHash. Per-compare bounds check
+        // is C-unpaid work.
+        let key0 = unsafe { self.keys.get_unchecked(0) };
         let compare = ssup::apply_sort_comparator_as_in(
-            cmp, self.mcx, a.datum1, a.isnull1, b.datum1, b.isnull1, &self.keys[0],
+            cmp, self.mcx, a.datum1, a.isnull1, b.datum1, b.isnull1, key0,
         );
         if compare != 0 {
             return compare;
@@ -360,7 +364,8 @@ macro_rules! dispatch_cmp {
                 };
                 $body
             }
-            _ => match __c.keys[0].comparator {
+            // SAFETY: non-IndexHash variants carry >=1 key (begin_* asserts).
+            _ => match unsafe { __c.keys.get_unchecked(0) }.comparator {
                 SortComparator::Unsigned => {
                     let $cmp = |a: &SortTuple, b: &SortTuple| {
                         __c.comparetup_spec(SortComparator::Unsigned, a, b)
@@ -1264,9 +1269,12 @@ impl<'m> TuplesortData<'m> {
     /// (microbench 1c6520c3: tsort_int4_* 0.84x -> 0.90x).
     #[inline(never)]
     fn puttuple_bounded(&mut self, tuple: SortTuple) -> PgResult<()> {
+        // SAFETY: TSS_BOUNDED invariant — memtuples holds exactly `bound` >= 1
+        // tuples from make_bounded_heap on.
+        let heap_top = unsafe { *self.memtuples.get_unchecked(0) };
         let compare = {
             let ctx = ctx!(self);
-            dispatch_cmp!(ctx, |cmp| cmp(&tuple, &self.memtuples[0]))
+            dispatch_cmp!(ctx, |cmp| cmp(&tuple, &heap_top))
         };
         if compare <= 0 {
             self.free_sort_tuple(&tuple);
