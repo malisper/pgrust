@@ -85,6 +85,21 @@ fn pull_var_nodes<'mcx>(node: Node<'mcx>, out: &mut PgVec<'mcx, Node<'mcx>>) {
                 pull_var_nodes(a, out);
             }
         }
+        NodeTag::T_Param => {}
+        NodeTag::T_AlternativeSubPlan => {
+            for a in &node.as_alternative_sub_plan().unwrap().subplans {
+                pull_var_nodes(a, out);
+            }
+        }
+        NodeTag::T_SubPlan => {
+            let sp = node.as_sub_plan().unwrap();
+            if let Some(te) = sp.testexpr {
+                pull_var_nodes(te, out);
+            }
+            for a in &sp.args {
+                pull_var_nodes(a, out);
+            }
+        }
         other => panic!("pull_var_clause (var.c): {other:?}; M2 expression lane"),
     }
 }

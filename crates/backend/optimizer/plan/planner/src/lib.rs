@@ -28,6 +28,7 @@ pub mod cte;
 pub mod subquery;
 pub mod window;
 pub mod subselect;
+pub mod paramassign;
 
 #[cfg(test)]
 mod tests;

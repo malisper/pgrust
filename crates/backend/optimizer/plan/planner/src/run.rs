@@ -31,6 +31,7 @@ pub struct Glob<'mcx> {
     pub inval_items: NodeList<'mcx>,
     pub param_exec_types: OidList<'mcx>,
     pub all_relids: Bitmapset<'mcx>,
+    pub has_alternative_subplans: bool,
     pub prunable_relids: Bitmapset<'mcx>,
 }
 
@@ -58,6 +59,7 @@ impl Glob<'_> {
             inval_items: NodeList::nil(),
             param_exec_types: OidList::nil(),
             all_relids: Bitmapset::empty(),
+            has_alternative_subplans: false,
             prunable_relids: Bitmapset::empty(),
         }
     }
@@ -102,7 +104,7 @@ mcx::forget_safe_struct!(
         last_row_mark_id, last_plan_node_id, finalrtable, finalrteperminfos,
         finalrowmarks, subplans, rewind_plan_ids, result_relations,
         append_relations, part_prune_infos, relation_oids, inval_items,
-        param_exec_types, all_relids, prunable_relids },
+        param_exec_types, all_relids, has_alternative_subplans, prunable_relids },
     SubrootState<'_> { root, processed_tlist },
     PlannerRun<'_> { mcx, root, glob, queries, processed_tlist,
         assess_parallel, suspended_roots, subroots, rel_subroots,
@@ -145,9 +147,26 @@ impl<'mcx> PlannerRun<'mcx> {
 
     /// Restore the parent level; the finished child joins glob's subroots.
     /// Returns the subroot index (plan_id - 1).
+    /// outer_params is recomputed here: correlated planning added ancestor
+    /// plan_params entries after the push-time snapshot (C's end-of-level
+    /// SS_identify_outer_params timing).
     pub fn pop_root_to_subroot(&mut self) -> usize {
+        let outer = {
+            let mut outer: types_pathnodes::Relids<'mcx> = None;
+            if !self.glob.param_exec_types.is_nil() {
+                for i in 0..self.suspended_roots.len() {
+                    // SAFETY-free split: scan borrows one suspended root at a time.
+                    let root = &self.suspended_roots[i].root;
+                    Self::scan_outer_params(self.mcx, &mut outer, root);
+                }
+            }
+            outer
+        };
         let parent = self.suspended_roots.pop().expect("pop_root_to_subroot without push");
-        let sub = core::mem::replace(&mut self.root, parent.root);
+        let mut sub = core::mem::replace(&mut self.root, parent.root);
+        if !self.glob.param_exec_types.is_nil() {
+            sub.outer_params = outer;
+        }
         let sub_tlist = core::mem::replace(&mut self.processed_tlist, parent.processed_tlist);
         self.subroots.push(SubrootState { root: sub, processed_tlist: sub_tlist });
         self.subroots.len() - 1
@@ -169,6 +188,44 @@ impl<'mcx> PlannerRun<'mcx> {
         let s = &mut self.rel_subroots[idx];
         core::mem::swap(&mut self.root, &mut s.root);
         core::mem::swap(&mut self.processed_tlist, &mut s.processed_tlist);
+    }
+
+    /// Abandon the current child level without registering it (C's
+    /// convert_EXISTS_to_ANY twin whose path failed the hashability check:
+    /// the subroot is dropped, never appended to glob->subroots).
+    pub fn pop_root_discard(&mut self) {
+        let parent = self.suspended_roots.pop().expect("pop_root_discard without push");
+        self.root = parent.root;
+        self.processed_tlist = parent.processed_tlist;
+    }
+
+    fn scan_outer_params(
+        mcx: Mcx<'mcx>,
+        outer: &mut types_pathnodes::Relids<'mcx>,
+        root: &PlannerInfo<'mcx>,
+    ) {
+        let mut add = |outer: &mut types_pathnodes::Relids<'mcx>, id: i32| {
+            *outer = crate::relnode::relids_union(
+                mcx,
+                outer,
+                &crate::relnode::relids_singleton(mcx, id as u32),
+            );
+        };
+        for &pid in root.plan_params.iter() {
+            add(outer, root.planner_param_item(pid).paramId);
+        }
+        for &ipid in root.init_plans.iter() {
+            let sp = root
+                .expr_node(ipid)
+                .as_sub_plan()
+                .expect("init_plans holds SubPlan nodes");
+            for p in sp.setParam.iter() {
+                add(outer, p);
+            }
+        }
+        if root.wt_param_id >= 0 {
+            add(outer, root.wt_param_id);
+        }
     }
 
     // SS_identify_outer_params (subselect.c) over the ancestor chain,

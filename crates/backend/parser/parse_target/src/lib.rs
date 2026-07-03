@@ -79,7 +79,13 @@ pub fn transformTargetEntry<'mcx>(
     };
 
     let colname = match colname {
-        None if !resjunk => Some(FigureColname(node)),
+        // C's transformSubLink scribbles the transformed Query into the raw
+        // SubLink in place; the transformed expr carries that state here.
+        None if !resjunk => Some(FigureColname(if node.node_tag() == NodeTag::T_SubLink {
+            expr
+        } else {
+            node
+        })),
         other => other,
     };
 
@@ -761,6 +767,36 @@ fn FigureColnameInternal<'mcx>(node: Node<'mcx>, name: &mut Option<&'mcx str>) -
                     2
                 }
                 None => 0,
+            }
+        }
+        NodeTag::T_SubLink => {
+            use types_nodes::SubLinkType;
+            let sl = node.as_sub_link().unwrap();
+            match sl.subLinkType {
+                SubLinkType::EXISTS_SUBLINK => {
+                    *name = Some("exists");
+                    2
+                }
+                SubLinkType::ARRAY_SUBLINK => {
+                    *name = Some("array");
+                    2
+                }
+                SubLinkType::EXPR_SUBLINK => {
+                    // The sub-select reaches here already transformed; use
+                    // its single output column's name (C same).
+                    if let Some(q) = sl.subselect.as_query() {
+                        if let Some(te) =
+                            q.targetList.first().and_then(|n| n.as_target_entry())
+                        {
+                            if let Some(resname) = te.resname {
+                                *name = Some(resname);
+                                return 2;
+                            }
+                        }
+                    }
+                    0
+                }
+                _ => 0,
             }
         }
         // NullTest takes C's default arm: no name.

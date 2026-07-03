@@ -192,6 +192,212 @@ pub fn exec_re_scan<'mcx>(
     }
 }
 
+/// `ExecReScan` with a non-NULL chgParam (execAmi.c): the SubPlan scan lane's
+/// per-call rescan. `chg` is the un-intersected changed-param set; each node
+/// tests overlap against its plan's allParam (allParam sets nest, so the
+/// per-edge intersection C materializes is equivalent). C defers a changed
+/// child's rescan to its next ExecProcNode; the values are already bound, so
+/// the eager recursion here is the same rescan one call earlier.
+pub fn exec_re_scan_with_chg<'mcx>(
+    node: &mut PlanStateNode<'mcx>,
+    plan: Node<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    chg: &types_nodes::bitmapset::Bitmapset<'mcx>,
+) -> PgResult<()> {
+    let base = plan.as_plan().expect("plan-tree node");
+    if !chg.overlap(&base.allParam) {
+        return exec_re_scan(node, estate);
+    }
+
+    let mut chg_owned: Option<types_nodes::bitmapset::Bitmapset<'mcx>> = None;
+    for sp_node in base.initPlan.iter() {
+        let sp = sp_node.as_sub_plan().expect("initPlan cell is a SubPlan");
+        let init_plan = estate
+            .es_plannedstmt
+            .expect("es_plannedstmt set before rescan")
+            .subplans
+            .nth((sp.plan_id - 1) as usize);
+        let ext = &init_plan.as_plan().expect("plan node").extParam;
+        if sp.subLinkType == ::types_nodes::primnodes::SubLinkType::CTE_SUBLINK {
+            assert!(
+                !chg.overlap(ext),
+                "ExecReScan (execAmi.c): CTE initplan under a changed-param rescan not ported"
+            );
+            continue;
+        }
+        if chg.overlap(ext) {
+            let mcx = estate.es_query_cxt;
+            let owned = match chg_owned.as_mut() {
+                Some(o) => o,
+                None => {
+                    chg_owned = Some(chg.clone_in(mcx)?);
+                    chg_owned.as_mut().unwrap()
+                }
+            };
+            for pid in sp.setParam.iter() {
+                estate.es_param_exec_vals[pid as usize].exec_plan = true;
+                debug_assert!(estate.es_param_subplans[pid as usize].is_some());
+                owned.add_member(mcx, pid)?;
+            }
+        }
+    }
+    let chg: &types_nodes::bitmapset::Bitmapset<'mcx> = chg_owned.as_ref().unwrap_or(chg);
+
+    if let Some(id) = node.ps_expr_context() {
+        estate.ecxt_mut(id).rescan();
+    }
+    match node {
+        PlanStateNode::Instrumented(w) => {
+            ::instrument::instr_end_loop(&mut estate.es_instrumentation[w.instr_idx as usize]);
+            return exec_re_scan_with_chg(&mut w.inner, plan, estate, chg);
+        }
+        PlanStateNode::Result(rs) => {
+            rs.rs_done = false;
+            rs.rs_checkqual = rs.resconstantqual.is_some();
+            if let Some(outer) = rs.outer.as_deref_mut() {
+                exec_re_scan_with_chg(outer, base.lefttree.expect("Result outer plan"), estate, chg)?;
+            }
+        }
+        PlanStateNode::SeqScan(ss) => ::nodeseqscan::exec_rescan_seq_scan(ss, estate)?,
+        PlanStateNode::FunctionScan(fs) => {
+            ::nodefunctionscan::exec_rescan_function_scan(fs, estate)?
+        }
+        PlanStateNode::ValuesScan(vs) => ::nodevaluesscan::exec_rescan_values_scan(vs, estate)?,
+        PlanStateNode::CteScan(_) => {
+            panic!("ExecReScanCteScan (nodeCtescan.c): changed-param rescan not ported")
+        }
+        PlanStateNode::IndexScan(is) => ::nodeindexscan::exec_rescan_index_scan(is, estate)?,
+        PlanStateNode::IndexOnlyScan(ios) => {
+            ::nodeindexonlyscan::exec_rescan_index_only_scan(ios, estate)?
+        }
+        PlanStateNode::Agg(aps) => {
+            ::nodeagg::exec_rescan_agg_chg(&mut aps.agg, estate);
+            exec_re_scan_with_chg(&mut aps.outer, base.lefttree.expect("Agg outer plan"), estate, chg)?;
+        }
+        PlanStateNode::WindowAgg(w) => {
+            ::nodewindowagg::exec_rescan_window_agg(&mut w.state, estate);
+            exec_re_scan_with_chg(&mut w.outer, base.lefttree.expect("WindowAgg outer plan"), estate, chg)?;
+        }
+        PlanStateNode::Material(m) => {
+            let m = &mut **m;
+            ::nodematerial::exec_rescan_material_chg(&mut m.state, estate);
+            exec_re_scan_with_chg(&mut m.outer, base.lefttree.expect("Material outer plan"), estate, chg)?;
+        }
+        PlanStateNode::Sort(s) => {
+            ::nodesort::exec_rescan_sort_chg(&mut s.state, estate);
+            exec_re_scan_with_chg(&mut s.outer, base.lefttree.expect("Sort outer plan"), estate, chg)?;
+        }
+        PlanStateNode::IncrementalSort(s) => {
+            let s = &mut **s;
+            ::nodeincrementalsort::exec_rescan_incremental_sort(&mut s.state, estate);
+            exec_re_scan_with_chg(
+                &mut s.outer,
+                base.lefttree.expect("IncrementalSort outer plan"),
+                estate,
+                chg,
+            )?;
+        }
+        PlanStateNode::Unique(u) => {
+            ::nodeunique::exec_rescan_unique(&mut u.state, estate);
+            exec_re_scan_with_chg(&mut u.outer, base.lefttree.expect("Unique outer plan"), estate, chg)?;
+        }
+        PlanStateNode::Limit(l) => {
+            let crate::procnode::LimitNode { state, outer } = l;
+            ::nodelimit::exec_rescan_limit(state, &mut **outer, estate)?;
+            exec_re_scan_with_chg(outer, base.lefttree.expect("Limit outer plan"), estate, chg)?;
+        }
+        PlanStateNode::BitmapHeapScan(b) => {
+            let b = &mut **b;
+            ::nodebitmapheapscan::exec_rescan_bitmap_heap_scan(&mut b.scan, estate)?;
+            exec_re_scan_with_chg(
+                &mut b.bitmapqual,
+                base.lefttree.expect("BitmapHeapScan bitmapqual plan"),
+                estate,
+                chg,
+            )?;
+        }
+        PlanStateNode::BitmapIndexScan(biss) => {
+            ::nodebitmapindexscan::exec_rescan_bitmap_index_scan(biss)?
+        }
+        PlanStateNode::BitmapAnd(bc) => {
+            let subplans = &plan.as_bitmap_and().expect("BitmapAnd plan").bitmapplans;
+            for (sub, sub_plan) in bc.substates.iter_mut().zip(subplans.iter()) {
+                exec_re_scan_with_chg(sub, sub_plan, estate, chg)?;
+            }
+        }
+        PlanStateNode::BitmapOr(bc) => {
+            let subplans = &plan.as_bitmap_or().expect("BitmapOr plan").bitmapplans;
+            for (sub, sub_plan) in bc.substates.iter_mut().zip(subplans.iter()) {
+                exec_re_scan_with_chg(sub, sub_plan, estate, chg)?;
+            }
+        }
+        PlanStateNode::NestLoop(nl) => {
+            exec_re_scan_with_chg(&mut nl.outer, base.lefttree.expect("NestLoop outer plan"), estate, chg)?;
+            exec_re_scan_with_chg(&mut nl.inner, base.righttree.expect("NestLoop inner plan"), estate, chg)?;
+            ::nodenestloop::exec_rescan_nest_loop(&mut nl.state);
+        }
+        PlanStateNode::HashJoin(hj) => {
+            let hj = &mut **hj;
+            let inner_plan = base.righttree.expect("HashJoin Hash plan");
+            let inner_chg = chg.overlap(&inner_plan.as_plan().expect("plan node").allParam);
+            exec_re_scan_with_chg(&mut hj.outer, base.lefttree.expect("HashJoin outer plan"), estate, chg)?;
+            if inner_chg {
+                ::nodehashjoin::exec_rescan_hash_join_chg(&mut hj.state, &mut hj.hash.state, estate)?;
+                let hash_child_plan = inner_plan
+                    .as_plan()
+                    .unwrap()
+                    .lefttree
+                    .expect("Hash child plan");
+                exec_re_scan_with_chg(&mut hj.hash.child, hash_child_plan, estate, chg)?;
+            } else {
+                let inner = ::nodehashjoin::exec_rescan_hash_join(
+                    &mut hj.state,
+                    &mut hj.hash.state,
+                    estate,
+                )?;
+                if inner == ::nodehashjoin::RescanInner::Rescan {
+                    exec_re_scan(&mut hj.hash.child, estate)?;
+                }
+            }
+        }
+        PlanStateNode::MergeJoin(mj) => {
+            let mj = &mut **mj;
+            exec_re_scan_with_chg(&mut mj.outer, base.lefttree.expect("MergeJoin outer plan"), estate, chg)?;
+            exec_re_scan_with_chg(&mut mj.inner, base.righttree.expect("MergeJoin inner plan"), estate, chg)?;
+            ::nodemergejoin::exec_rescan_merge_join(&mut mj.state, estate);
+        }
+        PlanStateNode::Append(a) => {
+            let a = &mut **a;
+            let subplans = &plan.as_append().expect("Append plan").appendplans;
+            for (sub, sub_plan) in a.substates.iter_mut().zip(subplans.iter()) {
+                exec_re_scan_with_chg(sub, sub_plan, estate, chg)?;
+            }
+            ::nodeappend::exec_rescan_append(&mut a.state);
+        }
+        PlanStateNode::SubqueryScan(s) => {
+            let s = &mut **s;
+            ::execscan::exec_scan_rescan(&mut s.ss, estate);
+            let sub_plan = plan
+                .as_subquery_scan()
+                .expect("SubqueryScan plan")
+                .subplan
+                .expect("SubqueryScan subplan");
+            exec_re_scan_with_chg(&mut s.subplan, sub_plan, estate, chg)?;
+        }
+        // Changed params force the full SetOp rebuild (C's chgParam-nonnull arm).
+        PlanStateNode::SetOp(s) => {
+            let s = &mut **s;
+            ::nodesetop::exec_rescan_set_op(&mut s.state, estate);
+            exec_re_scan_with_chg(&mut s.outer, base.lefttree.expect("SetOp outer plan"), estate, chg)?;
+            exec_re_scan_with_chg(&mut s.inner, base.righttree.expect("SetOp inner plan"), estate, chg)?;
+        }
+        PlanStateNode::ModifyTable(_) => {
+            panic!("ExecReScan (execAmi.c): node type 232 does not support ExecReScan")
+        }
+    }
+    Ok(())
+}
+
 /// `ExecMarkPos` (execAmi.c): remember `node`'s current scan position. Only the
 /// mark-capable ported nodes have arms; the planner routes an unmarkable merge
 /// inner through a Sort/Material, so anything else is a loud panic.

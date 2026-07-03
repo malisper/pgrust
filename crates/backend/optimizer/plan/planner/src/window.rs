@@ -283,6 +283,21 @@ fn pull_window_input_vars<'mcx>(node: Node<'mcx>, out: &mut PgVec<'_, Node<'mcx>
         NodeTag::T_RelabelType => {
             pull_window_input_vars(node.as_relabel_type().unwrap().arg, out)
         }
+        NodeTag::T_Param => {}
+        NodeTag::T_AlternativeSubPlan => {
+            for a in &node.as_alternative_sub_plan().unwrap().subplans {
+                pull_window_input_vars(a, out);
+            }
+        }
+        NodeTag::T_SubPlan => {
+            let sp = node.as_sub_plan().unwrap();
+            if let Some(te) = sp.testexpr {
+                pull_window_input_vars(te, out);
+            }
+            for a in &sp.args {
+                pull_window_input_vars(a, out);
+            }
+        }
         other => panic!("pull_var_clause (var.c): {other:?}; window-input lane"),
     }
 }

@@ -152,6 +152,10 @@ pub fn expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
             let sp = node.as_sub_plan().unwrap();
             Ok(walk_opt(sp.testexpr, w)? || walk_list(&sp.args, w)?)
         }
+        NodeTag::T_AlternativeSubPlan => {
+            let asp = node.as_alternative_sub_plan().unwrap();
+            walk_list(&asp.subplans, w)
+        }
         NodeTag::T_FromExpr => {
             let f = node.as_variant::<FromExpr>().unwrap();
             walk_from_expr(f, w)
@@ -666,6 +670,43 @@ where
             None => Ok(None),
             Some(l) => Ok(Some(Node::mk_list(mcx, l)?)),
         },
+        // C mutates testexpr and args; the child Plan tree is not expression
+        // territory.
+        NodeTag::T_SubPlan => {
+            let sp = node.as_sub_plan().unwrap();
+            let new_te = match sp.testexpr {
+                None => None,
+                Some(te) => m(te)?,
+            };
+            let new_args = mutate_list(mcx, &sp.args, m)?;
+            if new_te.is_none() && new_args.is_none() {
+                return Ok(None);
+            }
+            Ok(Some(Node::mk(
+                mcx,
+                types_nodes::primnodes::SubPlan {
+                    subLinkType: sp.subLinkType,
+                    testexpr: new_te.or(sp.testexpr),
+                    paramIds: sp.paramIds.clone_in(mcx)?,
+                    plan_id: sp.plan_id,
+                    plan_name: sp.plan_name,
+                    firstColType: sp.firstColType,
+                    firstColTypmod: sp.firstColTypmod,
+                    firstColCollation: sp.firstColCollation,
+                    useHashTable: sp.useHashTable,
+                    unknownEqFalse: sp.unknownEqFalse,
+                    parallel_safe: sp.parallel_safe,
+                    setParam: sp.setParam.clone_in(mcx)?,
+                    parParam: sp.parParam.clone_in(mcx)?,
+                    args: match new_args {
+                        Some(l) => l,
+                        None => sp.args.clone_in(mcx)?,
+                    },
+                    startup_cost: sp.startup_cost,
+                    per_call_cost: sp.per_call_cost,
+                },
+            )?))
+        }
         // C mutates testexpr only; the subselect Query is shared untouched.
         NodeTag::T_SubLink => {
             let sl = node.as_sub_link().unwrap();

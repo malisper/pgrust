@@ -315,6 +315,8 @@ fn clause_selectivity_node<'mcx>(
                 varrelid,
             )
         }
+        // C's catch-all default: no way to estimate, use 0.5.
+        NodeTag::T_SubPlan | NodeTag::T_AlternativeSubPlan | NodeTag::T_Param => Ok(0.5),
         other => panic!("clause_selectivity_ext (clausesel.c): {other:?}; M2 qual lane"),
     }
 }

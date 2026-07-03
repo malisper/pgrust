@@ -1,4 +1,4 @@
-use ::execexpr::{exec_build_projection_info, exec_init_qual, exec_project, exec_qual, ExprState};
+use ::execexpr::{exec_build_projection_info_subplans, exec_init_qual_subplans, exec_project, exec_qual, ExprState};
 use ::executils::{EStateData, ExecSlotId};
 use ::mcx::{alloc_in, PgBox};
 use ::types_error::PgResult;
@@ -35,18 +35,30 @@ pub fn exec_init_result<'mcx>(
     let desc = exec_type_from_tl(&node.plan.targetlist)?;
     let slot = estate.exec_init_extra_tuple_slot(Some(desc.clone()), TupleSlotKind::Virtual);
     let params = estate.param_bind();
-    let proj = exec_build_projection_info(mcx, &node.plan.targetlist, None, params)?;
-
-    let qual = exec_init_qual(mcx, &node.plan.qual, params)?;
-    let resconstantqual = match node.resconstantqual {
-        None => None,
-        Some(n) => {
-            let list = n
-                .as_list()
-                .unwrap_or_else(|| panic!("Result.resconstantqual: expected List, got {:?}", n.node_tag()));
-            exec_init_qual(mcx, list, params)?
-        }
-    };
+    let (proj, qual, resconstantqual) =
+        ::executils::with_subplan_compile_env(estate, |env| -> PgResult<_> {
+            let proj = exec_build_projection_info_subplans(
+                mcx,
+                &node.plan.targetlist,
+                None,
+                params,
+                env,
+            )?;
+            let qual = exec_init_qual_subplans(mcx, &node.plan.qual, params, env)?;
+            let resconstantqual = match node.resconstantqual {
+                None => None,
+                Some(n) => {
+                    let list = n.as_list().unwrap_or_else(|| {
+                        panic!(
+                            "Result.resconstantqual: expected List, got {:?}",
+                            n.node_tag()
+                        )
+                    });
+                    exec_init_qual_subplans(mcx, list, params, env)?
+                }
+            };
+            Ok((proj, qual, resconstantqual))
+        })?;
 
     let outer = match outer {
         Some(o) => Some(alloc_in(mcx, o)?),
@@ -85,8 +97,11 @@ pub fn exec_result<'mcx>(
             ::executils::exec_eval_param_exec_params(estate, deps)?;
         }
         let resconstantqual = node.resconstantqual.as_deref_mut();
-        let qual_result =
-            with_eval_slots(estate, ecxt, None, |slots, _, _| exec_qual(resconstantqual, slots))?;
+        let qual_result = if resconstantqual.as_ref().is_some_and(|q| q.has_subplan()) {
+            ::executils::exec_qual_with_subplans(resconstantqual, estate, ecxt)?
+        } else {
+            with_eval_slots(estate, ecxt, None, |slots, _, _| exec_qual(resconstantqual, slots))?
+        };
         node.rs_checkqual = false;
         if !qual_result {
             node.rs_done = true;
@@ -122,9 +137,13 @@ pub fn exec_result<'mcx>(
         ::executils::exec_eval_param_exec_params(estate, deps)?;
     }
     let proj = node.ps.ps_ProjInfo.as_deref_mut().expect("ResultState without projection");
-    with_eval_slots(estate, ecxt, Some(result_slot), |slots, result, mcx| {
-        exec_project(proj, slots, result.unwrap(), mcx)
-    })?;
+    if proj.has_subplan() {
+        ::executils::exec_project_with_subplans(proj, estate, ecxt, result_slot)?;
+    } else {
+        with_eval_slots(estate, ecxt, Some(result_slot), |slots, result, mcx| {
+            exec_project(proj, slots, result.unwrap(), mcx)
+        })?;
+    }
     Ok(Some(result_slot))
 }
 

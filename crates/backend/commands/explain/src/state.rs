@@ -58,6 +58,8 @@ pub struct ExplainState<'mcx> {
     pub rtable_size: i32,
     pub rtable_names: PgVec<'mcx, Option<&'mcx str>>,
     pub hide_workers: bool,
+    /// plan_ids already displayed (C printed_subplans).
+    pub printed_subplans: types_nodes::bitmapset::Bitmapset<'mcx>,
 }
 
 pub fn NewExplainState(mcx: Mcx<'_>) -> PgResult<ExplainState<'_>> {
@@ -78,6 +80,7 @@ pub fn NewExplainState(mcx: Mcx<'_>) -> PgResult<ExplainState<'_>> {
         indent: 0,
         qd: types_portal::QueryDescHandle::NULL,
         pstmt: None,
+        printed_subplans: types_nodes::bitmapset::Bitmapset::empty(),
         rtable: None,
         rtable_size: 0,
         rtable_names: PgVec::new_in(mcx),

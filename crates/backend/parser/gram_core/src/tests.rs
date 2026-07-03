@@ -662,6 +662,33 @@ fn in_subquery_shapes() {
     assert_eq!(b.location, sl.location);
 }
 
+#[test]
+fn subquery_op_sub_type_shapes() {
+    use types_nodes::SubLinkType;
+
+    // a_expr subquery_Op sub_type select_with_parens (rules 2078, 2263-2265).
+    let list = parse("SELECT * FROM t1 WHERE pk = ANY (SELECT fk FROM t2);");
+    let sel = select_of(only_stmt(&list));
+    let sl = sel.whereClause.expect("WHERE").as_sub_link().expect("SubLink");
+    assert_eq!(sl.subLinkType, SubLinkType::ANY_SUBLINK);
+    assert_eq!(sl.operName.len(), 1);
+    assert_eq!(sl.operName.nth(0).as_string().expect("op name").sval, "=");
+    assert!(sl.testexpr.expect("testexpr").as_column_ref().is_some());
+
+    let list = parse("SELECT * FROM t1 WHERE pk <> SOME (SELECT fk FROM t2);");
+    let sel = select_of(only_stmt(&list));
+    let sl = sel.whereClause.expect("WHERE").as_sub_link().expect("SubLink");
+    assert_eq!(sl.subLinkType, SubLinkType::ANY_SUBLINK);
+    assert_eq!(sl.operName.nth(0).as_string().expect("op name").sval, "<>");
+
+    let list = parse("SELECT * FROM t1 WHERE pk < ALL (SELECT fk FROM t2);");
+    let sel = select_of(only_stmt(&list));
+    let sl = sel.whereClause.expect("WHERE").as_sub_link().expect("SubLink");
+    assert_eq!(sl.subLinkType, SubLinkType::ALL_SUBLINK);
+    assert_eq!(sl.operName.nth(0).as_string().expect("op name").sval, "<");
+    assert!(sl.subselect.as_select_stmt().is_some());
+}
+
 fn set_of<'a>(rs: &RawStmt<'a>) -> &'a types_nodes::parsenodes::VariableSetStmt<'a> {
     rs.stmt.expect("stmt").as_variable_set_stmt().expect("VariableSetStmt")
 }
