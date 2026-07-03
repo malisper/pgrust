@@ -24,6 +24,8 @@ const TABLES: &[&[FmgrBuiltin]] = &[
     ::adt_numeric::builtins::NUMERIC_BUILTINS,
     ::adt_oracle_compat::builtins::ORACLE_COMPAT_BUILTINS,
     ::adt_pseudotypes::builtins::PSEUDOTYPES_BUILTINS,
+    ::adt_quote::builtins::QUOTE_BUILTINS,
+    ::adt_varchar::builtins::VARCHAR_BUILTINS,
     ::adt_scalar::builtins::SCALAR_BUILTINS,
     ::adt_timestamp::builtins::TIMESTAMP_BUILTINS,
     ::name::builtins::NAME_BUILTINS,
