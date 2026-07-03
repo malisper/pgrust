@@ -126,6 +126,7 @@ pub fn init_all() {
     pquery::init_seams();
     explain::init_seams();
     commands_createas::init_seams();
+    commands_matview::init_seams();
     prepare::init_seams();
     portalcmds::init_seams();
     commands_async::init_seams();

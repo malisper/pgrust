@@ -1,6 +1,6 @@
-// createas.c — CREATE TABLE AS / SELECT INTO (PG 18.3). Matviews and
-// CREATE TABLE AS EXECUTE are loud; the DR_intorel marshal shape lives in
-// createas_seams (tcop_dest sits below the executor stack).
+// createas.c — CREATE TABLE AS / SELECT INTO / CREATE MATERIALIZED VIEW
+// (PG 18.3). CREATE TABLE AS EXECUTE is loud; the DR_intorel marshal shape
+// lives in createas_seams (tcop_dest sits below the executor stack).
 #![allow(non_snake_case)]
 
 use createas_seams::IntoRelState;
@@ -52,7 +52,7 @@ pub fn ExecCreateTableAs<'mcx>(
 ) -> PgResult<()> {
     let into_node = stmt.into.expect("CreateTableAsStmt.into");
     let into = into_node.as_variant::<IntoClause>().expect("IntoClause");
-    debug_assert!(into.viewQuery.is_none(), "matview arm loud in parse analysis");
+    let is_matview = into.viewQuery.is_some();
 
     if CreateTableAsRelExists(mcx, stmt)? {
         return Ok(());
@@ -61,7 +61,6 @@ pub fn ExecCreateTableAs<'mcx>(
     if is_query_id_enabled() {
         panic!("ExecCreateTableAs (createas.c): JumbleQuery unported — compute_query_id is on");
     }
-    // post_parse_analyze_hook: no plugin surface exists.
 
     let query_node = stmt.query.expect("CreateTableAsStmt.query");
     // C rewrites/plans the contained Query and never reads stmt->query again.
@@ -70,6 +69,7 @@ pub fn ExecCreateTableAs<'mcx>(
         .expect("CreateTableAsStmt.query is an analyzed Query");
 
     if query.commandType == CmdType::CMD_UTILITY {
+        debug_assert!(!is_matview);
         panic!(
             "ExecCreateTableAs (createas.c): CREATE TABLE AS EXECUTE arm unported \
              (ExecuteQuery has no IntoClause threading) — unit backend-commands-createas"
@@ -77,10 +77,31 @@ pub fn ExecCreateTableAs<'mcx>(
     }
     debug_assert!(query.commandType == CmdType::CMD_SELECT);
 
+    if is_matview {
+        // C forces the no-data create then fills via RefreshMatViewByOid;
+        // viewQuery aliases stmt.query, so the taken Query is C's copyObject.
+        let do_refresh = !into.skipData;
+        let mut query = query;
+        let relid = create_ctas_nodata(mcx, &mut query, into_node, true)?;
+        if do_refresh {
+            commands_matview::RefreshMatViewByOid(
+                mcx,
+                relid,
+                true,
+                false,
+                false,
+                source_text,
+                qc.as_deref_mut(),
+            )?;
+        }
+        return Ok(());
+    }
+
     if into.skipData {
         // WITH NO DATA skips rewriter/planner/executor entirely; the portal's
         // parse-time tag (CREATE TABLE AS / SELECT INTO) reaches the client.
-        create_ctas_nodata(mcx, &query.targetList, into_node)?;
+        let mut query = query;
+        create_ctas_nodata(mcx, &mut query, into_node, false)?;
         return Ok(());
     }
 
@@ -195,9 +216,13 @@ fn create_ctas_internal<'mcx>(
     mcx: Mcx<'mcx>,
     attr_list: NodeList<'mcx>,
     into_node: Node<'mcx>,
+    mut view_query: Option<&mut Query<'mcx>>,
 ) -> PgResult<Oid> {
     let into = into_node.as_variant::<IntoClause>().expect("IntoClause");
-    debug_assert!(into.viewQuery.is_none());
+    let is_matview = view_query.is_some();
+    debug_assert!(is_matview == into.viewQuery.is_some());
+    let relkind =
+        if is_matview { types_rel::RELKIND_MATVIEW } else { types_rel::RELKIND_RELATION };
 
     let create = CreateStmt {
         relation: into
@@ -213,23 +238,28 @@ fn create_ctas_internal<'mcx>(
         ..CreateStmt::default()
     };
 
-    let relid = tablecmds::DefineRelation(mcx, &create, types_rel::RELKIND_RELATION, InvalidOid, "")?;
+    let relid = tablecmds::DefineRelation(mcx, &create, relkind, InvalidOid, "")?;
     xact::CommandCounterIncrement()?;
     // toast reloptions: WITH (...) is loud in DefineRelation, so the list is
     // nil here and transformRelOptions would yield (Datum) 0.
     catalog_toasting::NewRelationCreateToastTable(mcx, relid)?;
+    if let Some(query) = view_query.take() {
+        commands_view::StoreViewQuery(mcx, relid, query, false)?;
+        xact::CommandCounterIncrement()?;
+    }
     Ok(relid)
 }
 
 fn create_ctas_nodata<'mcx>(
     mcx: Mcx<'mcx>,
-    tlist: &NodeList<'mcx>,
+    query: &mut Query<'mcx>,
     into_node: Node<'mcx>,
+    is_matview: bool,
 ) -> PgResult<Oid> {
     let into = into_node.as_variant::<IntoClause>().expect("IntoClause");
     let mut attr_list = NodeList::nil();
     let mut colnames = into.colNames.iter();
-    for t in tlist.iter() {
+    for t in query.targetList.iter() {
         let tle = t.as_target_entry().expect("targetlist entry is a TargetEntry");
         if tle.resjunk {
             continue;
@@ -251,7 +281,7 @@ fn create_ctas_nodata<'mcx>(
     if colnames.next().is_some() {
         return Err(too_many_column_names());
     }
-    create_ctas_internal(mcx, attr_list, into_node)
+    create_ctas_internal(mcx, attr_list, into_node, is_matview.then_some(query))
 }
 
 // makeColumnDef (makefuncs.c) + the collatable double-check both intorel
@@ -314,7 +344,8 @@ fn intorel_startup<'mcx>(
     let mcx = state.mcx;
     let into_node = state.into;
     let into = into_node.as_variant::<IntoClause>().expect("IntoClause");
-    debug_assert!(into.viewQuery.is_none(), "matview receiver unported");
+    // Matviews never reach the executor here (no-data create + refresh).
+    debug_assert!(into.viewQuery.is_none());
 
     let mut attr_list = NodeList::nil();
     let mut colnames = into.colNames.iter();
@@ -334,7 +365,7 @@ fn intorel_startup<'mcx>(
         return Err(too_many_column_names());
     }
 
-    let relid = create_ctas_internal(mcx, attr_list, into_node)?;
+    let relid = create_ctas_internal(mcx, attr_list, into_node, None)?;
     let rel = table::table_open(mcx, relid, types_rel::AccessExclusiveLock)?;
 
     if rel.rd_rel.relrowsecurity {

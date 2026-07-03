@@ -29,6 +29,7 @@ copy_cmd = { path = "../../commands/copy" }
 discard = { path = "../../commands/discard" }
 explain = { path = "../../commands/explain" }
 commands_createas = { path = "../../commands/createas" }
+commands_matview = { path = "../../commands/matview" }
 portalcmds = { path = "../../commands/portalcmds" }
 prepare = { path = "../../commands/prepare" }
 guc_funcs = { path = "../../utils/misc/guc_funcs" }

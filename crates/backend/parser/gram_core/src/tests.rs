@@ -1375,6 +1375,45 @@ fn create_recursive_view_is_loud() {
 }
 
 #[test]
+fn create_materialized_view_stmt() {
+    use types_nodes::rawnodes::{CreateTableAsStmt, IntoClause};
+    let list = parse("CREATE UNLOGGED MATERIALIZED VIEW IF NOT EXISTS s.mv (x) AS SELECT 1 WITH NO DATA");
+    let rs = only_stmt(&list);
+    let c = rs.stmt.expect("stmt").as_variant::<CreateTableAsStmt>().expect("CreateTableAsStmt");
+    assert_eq!(c.objtype, types_nodes::parsenodes::ObjectType::OBJECT_MATVIEW);
+    assert!(c.if_not_exists && !c.is_select_into);
+    let into = c.into.expect("into").as_variant::<IntoClause>().expect("IntoClause");
+    assert!(into.skipData);
+    assert_eq!(into.colNames.len(), 1);
+    let rv = into.rel.expect("rel").as_range_var().expect("RangeVar");
+    assert_eq!(rv.schemaname, Some("s"));
+    assert_eq!(rv.relpersistence, b'u');
+
+    let list = parse("CREATE MATERIALIZED VIEW mv AS SELECT 1");
+    let c = only_stmt(&list).stmt.unwrap().as_variant::<CreateTableAsStmt>().unwrap();
+    let into = c.into.unwrap().as_variant::<IntoClause>().unwrap();
+    assert!(!into.skipData && !c.if_not_exists);
+    assert_eq!(into.rel.unwrap().as_range_var().unwrap().relpersistence, b'p');
+}
+
+#[test]
+fn refresh_materialized_view_stmt() {
+    use types_nodes::rawnodes::RefreshMatViewStmt;
+    for (sql, concurrent, skip) in [
+        ("REFRESH MATERIALIZED VIEW mv", false, false),
+        ("REFRESH MATERIALIZED VIEW CONCURRENTLY mv", true, false),
+        ("REFRESH MATERIALIZED VIEW mv WITH NO DATA", false, true),
+        ("REFRESH MATERIALIZED VIEW mv WITH DATA", false, false),
+    ] {
+        let list = parse(sql);
+        let r = only_stmt(&list).stmt.unwrap().as_variant::<RefreshMatViewStmt>().expect("RefreshMatViewStmt");
+        assert_eq!(r.concurrent, concurrent, "{sql}");
+        assert_eq!(r.skipData, skip, "{sql}");
+        assert_eq!(r.relation.expect("relation").relname, Some("mv"));
+    }
+}
+
+#[test]
 fn parses_qualified_operator() {
     let list = parse("select 'a' operator(pg_catalog.~) 'b'");
     let sel = select_of(only_stmt(&list));

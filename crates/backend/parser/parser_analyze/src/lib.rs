@@ -316,15 +316,59 @@ fn transformCreateTableAsStmt<'mcx>(
     let stmt = ctas_node
         .as_variant::<types_nodes::rawnodes::CreateTableAsStmt>()
         .expect("CreateTableAsStmt");
-    if stmt.objtype != types_nodes::parsenodes::ObjectType::OBJECT_TABLE {
+    let is_matview = stmt.objtype == types_nodes::parsenodes::ObjectType::OBJECT_MATVIEW;
+    if stmt.objtype != types_nodes::parsenodes::ObjectType::OBJECT_TABLE && !is_matview {
         panic!(
-            "transformCreateTableAsStmt (analyze.c): CREATE MATERIALIZED VIEW arm \
-             unported (matview lane) — unit backend-parser-analyze"
+            "transformCreateTableAsStmt (analyze.c): objtype {:?} arm unported — \
+             unit backend-parser-analyze",
+            stmt.objtype
         );
     }
+    let into_node = stmt.into.expect("CreateTableAsStmt.into");
     let inner = stmt.query.expect("CreateTableAsStmt has a query");
     let query = transformStmt(mcx, pstate, inner)?;
+    if is_matview {
+        let matview_err = |msg: &'static str| {
+            elog::ereport(types_error::ERROR)
+                .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                .errmsg(msg)
+                .into_error()
+        };
+        if query.hasModifyingCTE {
+            return Err(matview_err(
+                "materialized views must not use data-modifying statements in WITH",
+            )
+            .into());
+        }
+        if is_query_using_temp_relation(mcx, &query)? {
+            return Err(
+                matview_err("materialized views must not use temporary tables or views").into()
+            );
+        }
+        // query_contains_extern_params: PARAM_EXTERN is unreachable — every
+        // live analysis entry passes zero fixed params.
+        let into = into_node
+            .as_variant::<types_nodes::rawnodes::IntoClause>()
+            .expect("IntoClause");
+        let rel = into.rel.expect("IntoClause.rel").as_range_var().expect("RangeVar");
+        if rel.relpersistence == types_core::catalog::RELPERSISTENCE_UNLOGGED {
+            return Err(matview_err("materialized views cannot be unlogged").into());
+        }
+    }
     let query_node = Node::mk(mcx, query)?;
+    if is_matview {
+        // C: into->viewQuery = copyObject(query). The one handle doubles as
+        // the is_matview discriminator; ExecCreateTableAs is the single
+        // consumer and takes the Query exactly once.
+        // SAFETY: raw tree owned by this analysis; no derived reference is live.
+        unsafe {
+            into_node
+                .with_mut::<types_nodes::rawnodes::IntoClause, _>(|ic| {
+                    ic.viewQuery = Some(query_node)
+                })
+                .expect("node built as IntoClause");
+        }
+    }
     // SAFETY: raw tree owned by this analysis; no derived reference is live.
     unsafe {
         ctas_node
@@ -338,6 +382,50 @@ fn transformCreateTableAsStmt<'mcx>(
     result.commandType = CmdType::CMD_UTILITY;
     result.utilityStmt = Some(ctas_node);
     Ok(result)
+}
+
+// isQueryUsingTempRelation (rewriteManip.c). C walks sublinks too via
+// query_tree_walker; temp relations inside sublink subselects are not
+// reachable through rtable alone — a hasSubLinks query is refused loudly
+// rather than checked incompletely.
+fn is_query_using_temp_relation<'mcx>(
+    mcx: Mcx<'mcx>,
+    query: &Query<'mcx>,
+) -> PgResult<bool> {
+    use types_nodes::parsenodes::RTEKind;
+    if query.hasSubLinks {
+        panic!(
+            "isQueryUsingTempRelation (rewriteManip.c): sublink walk unported \
+             (query_tree_walker) — unit backend-commands-matview"
+        );
+    }
+    for node in query.rtable.iter() {
+        let rte = node.as_range_tbl_entry().expect("rtable holds RangeTblEntry nodes");
+        match rte.rtekind {
+            RTEKind::RTE_RELATION => {
+                if lsyscache::get_rel_persistence(rte.relid)?
+                    == types_core::catalog::RELPERSISTENCE_TEMP as i8
+                {
+                    return Ok(true);
+                }
+            }
+            RTEKind::RTE_SUBQUERY => {
+                let sub = rte.subquery.expect("subquery RTE carries a Query");
+                if is_query_using_temp_relation(mcx, sub)? {
+                    return Ok(true);
+                }
+            }
+            _ => {}
+        }
+    }
+    for cte in query.cteList.iter() {
+        let cte = cte.as_common_table_expr().expect("cteList holds CommonTableExpr");
+        let q = cte.ctequery.expect("analyzed CTE query");
+        if is_query_using_temp_relation(mcx, q.as_query().expect("Query"))? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn transformDeclareCursorStmt<'mcx>(

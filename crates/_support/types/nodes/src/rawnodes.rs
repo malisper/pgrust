@@ -381,6 +381,13 @@ pub struct CreateTableAsStmt<'mcx> {
 }
 
 #[derive(Default)]
+pub struct RefreshMatViewStmt<'mcx> {
+    pub concurrent: bool,
+    pub skipData: bool,
+    pub relation: Option<&'mcx crate::primnodes::RangeVar<'mcx>>,
+}
+
+#[derive(Default)]
 pub struct CreateStmt<'mcx> {
     pub relation: Option<&'mcx crate::primnodes::RangeVar<'mcx>>,
     pub tableElts: NodeList<'mcx>,
@@ -659,6 +666,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for IntoClause<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for CreateTableAsStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_CreateTableAsStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for RefreshMatViewStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_RefreshMatViewStmt;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for InsertStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_InsertStmt;
