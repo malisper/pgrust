@@ -217,7 +217,7 @@ fn gistRedoPageSplitRecord(record: &XLogReaderState) -> PgResult<()> {
 
         // SAFETY: init-for-redo pin+lock contract.
         let mut pm = unsafe { page_mut(buffer) };
-        pm.init(core::mem::size_of::<GISTPageOpaqueData>());
+        pm.init(::types_gist::SizeOfGistPageOpaque);
         page_opaque_set(
             &mut pm,
             GISTPageOpaqueData {
