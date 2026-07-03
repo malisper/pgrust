@@ -747,6 +747,9 @@ mod order_by_limit_e2e {
                 Ok(make_heap_rel(mcx))
             });
             bufmgr_seams::relation_get_number_of_blocks_in_fork::set(|_rel, _fork| Ok(100));
+            relcache_seams::relation_get_stat_ext_list::set(|mcx, _relid| {
+                Ok(::mcx::PgVec::new_in(mcx))
+            });
             syscache_seams::pg_class_relname::set(|relid| {
                 let mut n = types_tuple::NameData::default();
                 match relid {
