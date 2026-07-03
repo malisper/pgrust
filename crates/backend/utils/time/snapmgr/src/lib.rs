@@ -78,6 +78,9 @@ struct SnapMgrState {
     // Resource-handle owners (Rc payloads): plain-heap Vecs per docs/no-drop.md.
     active: Vec<ActiveSnapshotElt>,
     registered: Vec<Snapshot>,
+    // Dead unique copies, xip capacity retained — C's CopySnapshot freelist
+    // palloc in TopTransactionContext (rule 7 retained scratch).
+    copy_freelist: Vec<Snapshot>,
 }
 
 impl SnapMgrState {
@@ -89,11 +92,19 @@ impl SnapMgrState {
         }
     }
 
-    fn resolve(&self, r: &SnapRef) -> Snapshot {
+    fn resolve_ref<'a>(&'a self, r: &'a SnapRef) -> &'a Snapshot {
         match r {
-            SnapRef::Static(w) => self.static_rc(*w).clone(),
-            SnapRef::Copied(rc) => rc.clone(),
+            SnapRef::Static(w) => self.static_rc(*w),
+            SnapRef::Copied(rc) => rc,
         }
+    }
+
+    fn resolve(&self, r: &SnapRef) -> Snapshot {
+        self.resolve_ref(r).clone()
+    }
+
+    fn is_ref_to(&self, r: Option<&SnapRef>, snap: &Snapshot) -> bool {
+        r.is_some_and(|r| Rc::ptr_eq(self.resolve_ref(r), snap))
     }
 }
 
@@ -136,6 +147,7 @@ fn with_state<R>(f: impl FnOnce(&mut SnapMgrState) -> R) -> R {
                 first_xact_snapshot: None,
                 active: Vec::new(),
                 registered: Vec::new(),
+                copy_freelist: Vec::new(),
             }));
         }
         f(slot.as_mut().unwrap())
@@ -162,90 +174,88 @@ pub fn FirstSnapshotSet() -> bool {
 // Always refills the SAME persistent struct so snapXactCompletionCount and
 // the once-sized xip arrays survive — the reuse fastpath depends on it.
 // Seams reached under the borrow never re-enter snapmgr.
-fn get_snapshot_data_static(which: Which) -> PgResult<Snapshot> {
-    let snap = with_state(|s| -> PgResult<Snapshot> {
-        let mcx = s.mcx;
-        let slot = match which {
-            Which::Current => &mut s.current_data,
-            Which::Secondary => &mut s.secondary_data,
-            Which::Catalog => &mut s.catalog_data,
-        };
-        if Rc::get_mut(slot).is_none() {
+fn get_snapshot_data_static_locked(s: &mut SnapMgrState, which: Which) -> PgResult<Snapshot> {
+    let mcx = s.mcx;
+    let slot = match which {
+        Which::Current => &mut s.current_data,
+        Which::Secondary => &mut s.secondary_data,
+        Which::Catalog => &mut s.catalog_data,
+    };
+    let target = match Rc::get_mut(slot) {
+        Some(target) => target,
+        None => {
             // An outstanding handle aliases the static (C clobbers it);
             // leave the holder a stale copy, refill a fresh struct.
             #[cfg(debug_assertions)]
             STATIC_REPLACED.set(STATIC_REPLACED.get() + 1);
             *slot = new_static_snapshot(mcx);
+            Rc::get_mut(slot).expect("fresh Rc is unique")
         }
-        procarray::GetSnapshotData(Rc::get_mut(slot).expect("unique"), mcx)?;
-        let snap = slot.clone();
-        match which {
-            Which::Current => s.current = Some(SnapRef::Static(Which::Current)),
-            Which::Secondary => s.secondary = Some(SnapRef::Static(Which::Secondary)),
-            Which::Catalog => s.catalog_valid = true,
-        }
-        Ok(snap)
-    })?;
+    };
+    procarray::GetSnapshotData(target, mcx)?;
+    let snap = slot.clone();
+    match which {
+        Which::Current => s.current = Some(SnapRef::Static(Which::Current)),
+        Which::Secondary => s.secondary = Some(SnapRef::Static(Which::Secondary)),
+        Which::Catalog => s.catalog_valid = true,
+    }
     Ok(snap)
 }
 
+fn get_snapshot_data_static(which: Which) -> PgResult<Snapshot> {
+    with_state(|s| get_snapshot_data_static_locked(s, which))
+}
+
 pub fn GetTransactionSnapshot() -> PgResult<Snapshot> {
-    let (historic, first_snapshot_set) =
-        with_state(|s| (s.historic.clone(), s.first_snapshot_set));
-
-    if let Some(historic) = historic {
-        debug_assert!(!first_snapshot_set);
-        return Ok(historic);
-    }
-
-    if !first_snapshot_set {
-        InvalidateCatalogSnapshot();
-
-        with_state(|s| {
-            debug_assert!(s.registered.is_empty());
-            debug_assert!(s.first_xact_snapshot.is_none());
-        });
-
-        if xact_seams::is_in_parallel_mode::call() {
-            return Err(elog(
-                ERROR,
-                "cannot take query snapshot during a parallel operation",
-            )
-            .expect_err("elog(ERROR)"));
+    with_state(|s| {
+        if let Some(historic) = &s.historic {
+            debug_assert!(!s.first_snapshot_set);
+            return Ok(historic.clone());
         }
 
-        // Xact-snapshot mode: the first snapshot must live to end of xact.
-        if xact_seams::isolation_uses_xact_snapshot::call() {
-            if xact_seams::isolation_is_serializable::call() {
-                unported("GetSerializableTransactionSnapshot (predicate.c)");
+        if !s.first_snapshot_set {
+            invalidate_catalog_snapshot_locked(s);
+
+            debug_assert!(s.registered.is_empty());
+            debug_assert!(s.first_xact_snapshot.is_none());
+
+            if xact_seams::is_in_parallel_mode::call() {
+                return Err(elog(
+                    ERROR,
+                    "cannot take query snapshot during a parallel operation",
+                )
+                .expect_err("elog(ERROR)"));
             }
-            let current = get_snapshot_data_static(Which::Current)?;
-            let copy = CopySnapshot(&current);
-            copy.regd_count.set(copy.regd_count.get() + 1);
-            with_state(|s| {
+
+            // Xact-snapshot mode: the first snapshot must live to end of xact.
+            if xact_seams::isolation_uses_xact_snapshot::call() {
+                if xact_seams::isolation_is_serializable::call() {
+                    unported("GetSerializableTransactionSnapshot (predicate.c)");
+                }
+                let current = get_snapshot_data_static_locked(s, Which::Current)?;
+                let copy = copy_snapshot_locked(s, &current);
+                copy.regd_count.set(copy.regd_count.get() + 1);
                 s.current = Some(SnapRef::Copied(copy.clone()));
                 s.first_xact_snapshot = Some(copy.clone());
                 s.registered.push(copy.clone());
                 s.first_snapshot_set = true;
-            });
-            return Ok(copy);
+                return Ok(copy);
+            }
+            let current = get_snapshot_data_static_locked(s, Which::Current)?;
+            s.first_snapshot_set = true;
+            return Ok(current);
         }
-        let current = get_snapshot_data_static(Which::Current)?;
-        with_state(|s| s.first_snapshot_set = true);
-        return Ok(current);
-    }
 
-    if xact_seams::isolation_uses_xact_snapshot::call() {
-        return Ok(with_state(|s| {
-            let r = s.current.clone().expect("CurrentSnapshot != NULL");
-            s.resolve(&r)
-        }));
-    }
+        if xact_seams::isolation_uses_xact_snapshot::call() {
+            let r = s.current.as_ref().expect("CurrentSnapshot != NULL");
+            return Ok(s.resolve_ref(r).clone());
+        }
 
-    // Don't allow catalog snapshot to be older than xact snapshot.
-    InvalidateCatalogSnapshot();
+        // Don't allow catalog snapshot to be older than xact snapshot.
+        invalidate_catalog_snapshot_locked(s);
 
-    get_snapshot_data_static(Which::Current)
+        get_snapshot_data_static_locked(s, Which::Current)
+    })
 }
 
 pub fn GetLatestSnapshot() -> PgResult<Snapshot> {
@@ -291,14 +301,16 @@ pub fn GetNonHistoricCatalogSnapshot(relid: Oid) -> PgResult<Snapshot> {
 }
 
 pub fn InvalidateCatalogSnapshot() {
-    with_state(|s| {
-        if s.catalog_valid {
-            s.catalog_valid = false;
-            let catalog = s.catalog_data.clone();
-            registered_remove(s, &catalog);
-            snapshot_reset_xmin_locked(s);
-        }
-    });
+    with_state(invalidate_catalog_snapshot_locked);
+}
+
+fn invalidate_catalog_snapshot_locked(s: &mut SnapMgrState) {
+    if s.catalog_valid {
+        s.catalog_valid = false;
+        let catalog = s.catalog_data.clone();
+        registered_remove(s, &catalog);
+        snapshot_reset_xmin_locked(s);
+    }
 }
 
 pub fn InvalidateCatalogSnapshotConditionally() {
@@ -323,47 +335,60 @@ pub fn SnapshotSetCommandId(curcid: CommandId) {
     });
 }
 
-// Single-reserve memcpy append (fabled-lessons §9).
-fn copy_xids(mcx: Mcx<'static>, src: &[TransactionId]) -> PgVec<'static, TransactionId> {
-    let mut v: PgVec<'static, TransactionId> = mcx::vec_with_capacity_in_infallible(mcx, src.len());
+// Single-reserve memcpy append (fabled-lessons §9), retained capacity.
+fn copy_xids_into(dst: &mut PgVec<'static, TransactionId>, src: &[TransactionId]) {
+    dst.clear();
+    dst.reserve(src.len());
     // SAFETY: capacity reserved above; src/dst don't overlap.
     unsafe {
-        core::ptr::copy_nonoverlapping(src.as_ptr(), v.as_mut_ptr(), src.len());
-        v.set_len(src.len());
+        core::ptr::copy_nonoverlapping(src.as_ptr(), dst.as_mut_ptr(), src.len());
+        dst.set_len(src.len());
     }
-    v
+}
+
+fn copy_snapshot_locked(s: &mut SnapMgrState, src: &SnapshotData<'static>) -> Snapshot {
+    let mut rc = match s.copy_freelist.pop() {
+        Some(rc) => rc,
+        None => Rc::new(SnapshotData::sentinel(s.mcx, src.snapshot_type)),
+    };
+    let snap = Rc::get_mut(&mut rc).expect("freelist copies are unique");
+    snap.snapshot_type = src.snapshot_type;
+    snap.xmin = src.xmin;
+    snap.xmax = src.xmax;
+    copy_xids_into(&mut snap.xip, &src.xip[..src.xcnt as usize]);
+    snap.xcnt = src.xcnt;
+    // Overflowed subxip is skipped — except in recovery (top xids live there).
+    if src.subxcnt > 0 && (!src.suboverflowed || src.takenDuringRecovery) {
+        copy_xids_into(&mut snap.subxip, &src.subxip[..src.subxcnt as usize]);
+        snap.subxcnt = src.subxcnt;
+    } else {
+        snap.subxip.clear();
+        snap.subxcnt = 0;
+    }
+    snap.suboverflowed = src.suboverflowed;
+    snap.takenDuringRecovery = src.takenDuringRecovery;
+    snap.copied = true;
+    snap.curcid.set(src.curcid.get());
+    snap.speculativeToken = src.speculativeToken;
+    snap.vistest = src.vistest;
+    snap.active_count.set(0);
+    snap.regd_count.set(0);
+    snap.snapXactCompletionCount = 0;
+    rc
+}
+
+// C FreeSnapshot: a dead copy goes back to the freelist, capacity retained.
+fn recycle_copy_locked(s: &mut SnapMgrState, snap: Snapshot) {
+    debug_assert!(snap.copied);
+    debug_assert_eq!(snap.active_count.get(), 0);
+    debug_assert_eq!(snap.regd_count.get(), 0);
+    if Rc::strong_count(&snap) == 1 {
+        s.copy_freelist.push(snap);
+    }
 }
 
 pub fn CopySnapshot(snapshot: &Snapshot) -> Snapshot {
-    let mcx = with_state(|s| s.mcx);
-
-    let xip = copy_xids(mcx, &snapshot.xip[..snapshot.xcnt as usize]);
-    // Overflowed subxip is skipped — except in recovery (top xids live there).
-    let subxip = if snapshot.subxcnt > 0 && (!snapshot.suboverflowed || snapshot.takenDuringRecovery)
-    {
-        copy_xids(mcx, &snapshot.subxip[..snapshot.subxcnt as usize])
-    } else {
-        PgVec::new_in(mcx)
-    };
-
-    Rc::new(SnapshotData {
-        snapshot_type: snapshot.snapshot_type,
-        xmin: snapshot.xmin,
-        xmax: snapshot.xmax,
-        xcnt: xip.len() as u32,
-        xip,
-        subxcnt: subxip.len() as i32,
-        subxip,
-        suboverflowed: snapshot.suboverflowed,
-        takenDuringRecovery: snapshot.takenDuringRecovery,
-        copied: true,
-        curcid: Cell::new(snapshot.curcid.get()),
-        speculativeToken: snapshot.speculativeToken,
-        vistest: snapshot.vistest,
-        active_count: Cell::new(0),
-        regd_count: Cell::new(0),
-        snapXactCompletionCount: 0,
-    })
+    with_state(|s| copy_snapshot_locked(s, snapshot))
 }
 
 pub fn PushActiveSnapshot(snapshot: &Snapshot) -> PgResult<()> {
@@ -371,32 +396,25 @@ pub fn PushActiveSnapshot(snapshot: &Snapshot) -> PgResult<()> {
 }
 
 pub fn PushActiveSnapshotWithLevel(snapshot: &Snapshot, snap_level: i32) -> PgResult<()> {
-    let needs_copy = with_state(|s| {
+    with_state(|s| {
         debug_assert!(s
             .active
             .last()
             .map(|top| snap_level >= top.as_level)
             .unwrap_or(true));
-        let is_current = s
-            .current
-            .as_ref()
-            .is_some_and(|r| Rc::ptr_eq(&s.resolve(r), snapshot));
         // Checking SecondarySnapshot is probably useless here, but be sure.
-        let is_secondary = s
-            .secondary
-            .as_ref()
-            .is_some_and(|r| Rc::ptr_eq(&s.resolve(r), snapshot));
-        is_current || is_secondary || !snapshot.copied
+        let needs_copy = s.is_ref_to(s.current.as_ref(), snapshot)
+            || s.is_ref_to(s.secondary.as_ref(), snapshot)
+            || !snapshot.copied;
+
+        let as_snap = if needs_copy {
+            copy_snapshot_locked(s, snapshot)
+        } else {
+            snapshot.clone()
+        };
+        as_snap.active_count.set(as_snap.active_count.get() + 1);
+        s.active.push(ActiveSnapshotElt { as_snap, as_level: snap_level });
     });
-
-    let as_snap = if needs_copy {
-        CopySnapshot(snapshot)
-    } else {
-        snapshot.clone()
-    };
-    as_snap.active_count.set(as_snap.active_count.get() + 1);
-
-    with_state(|s| s.active.push(ActiveSnapshotElt { as_snap, as_level: snap_level }));
     Ok(())
 }
 
@@ -437,9 +455,8 @@ pub fn PopActiveSnapshot() -> PgResult<()> {
         debug_assert!(snap.active_count.get() > 0);
         snap.active_count.set(snap.active_count.get() - 1);
         if snap.active_count.get() == 0 && snap.regd_count.get() == 0 {
-            debug_assert!(snap.copied);
+            recycle_copy_locked(s, snap);
         }
-        drop(snap);
         snapshot_reset_xmin_locked(s);
         Ok(())
     })
@@ -564,6 +581,9 @@ pub fn AtSubAbort_Snapshot(level: i32) -> PgResult<()> {
             let snap = s.active.pop().expect("checked non-empty").as_snap;
             debug_assert!(snap.active_count.get() >= 1);
             snap.active_count.set(snap.active_count.get() - 1);
+            if snap.active_count.get() == 0 && snap.regd_count.get() == 0 {
+                recycle_copy_locked(s, snap);
+            }
         }
         snapshot_reset_xmin_locked(s);
     });
