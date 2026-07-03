@@ -119,7 +119,7 @@ pub fn tsvector_in_core<'mcx>(
                     );
                 }
             } else if !arr[ptr].pos.is_empty() {
-                let moved = core::mem::take(&mut arr[ptr].pos);
+                let moved = core::mem::replace(&mut arr[ptr].pos, PgVec::new_in(mcx));
                 arr[res].pos.extend_from_slice(&moved);
             }
         }

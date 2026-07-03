@@ -238,29 +238,29 @@ impl<'s, 'e, 'mcx> TsvParser<'s, 'e, 'mcx> {
                     }
                 }
                 St::WaitPosDelim => {
-                    let last = self.pos.last_mut().expect("position pushed");
+                    let li = self.pos.len() - 1;
                     if c == b',' && !self.at_end() {
                         state = St::InPosInfo;
                     } else if !self.at_end() && matches!(c, b'a' | b'A' | b'*') {
-                        if wep_getweight(*last) != 0 {
+                        if wep_getweight(self.pos[li]) != 0 {
                             return self.syntax_error();
                         }
-                        wep_setweight(last, 3);
+                        wep_setweight(&mut self.pos[li], 3);
                     } else if !self.at_end() && matches!(c, b'b' | b'B') {
-                        if wep_getweight(*last) != 0 {
+                        if wep_getweight(self.pos[li]) != 0 {
                             return self.syntax_error();
                         }
-                        wep_setweight(last, 2);
+                        wep_setweight(&mut self.pos[li], 2);
                     } else if !self.at_end() && matches!(c, b'c' | b'C') {
-                        if wep_getweight(*last) != 0 {
+                        if wep_getweight(self.pos[li]) != 0 {
                             return self.syntax_error();
                         }
-                        wep_setweight(last, 1);
+                        wep_setweight(&mut self.pos[li], 1);
                     } else if !self.at_end() && matches!(c, b'd' | b'D') {
-                        if wep_getweight(*last) != 0 {
+                        if wep_getweight(self.pos[li]) != 0 {
                             return self.syntax_error();
                         }
-                        wep_setweight(last, 0);
+                        wep_setweight(&mut self.pos[li], 0);
                     } else if ts_isspace(c) || self.at_end() {
                         return Ok(Next::Tok);
                     } else if !c.is_ascii_digit() {
