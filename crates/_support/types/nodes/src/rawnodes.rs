@@ -113,6 +113,25 @@ pub struct InsertStmt<'mcx> {
 }
 
 #[derive(Default)]
+pub struct DeleteStmt<'mcx> {
+    pub relation: Option<Node<'mcx>>,
+    pub usingClause: NodeList<'mcx>,
+    pub whereClause: Option<Node<'mcx>>,
+    pub returningClause: Option<Node<'mcx>>,
+    pub withClause: Option<Node<'mcx>>,
+}
+
+#[derive(Default)]
+pub struct UpdateStmt<'mcx> {
+    pub relation: Option<Node<'mcx>>,
+    pub targetList: NodeList<'mcx>,
+    pub whereClause: Option<Node<'mcx>>,
+    pub fromClause: NodeList<'mcx>,
+    pub returningClause: Option<Node<'mcx>>,
+    pub withClause: Option<Node<'mcx>>,
+}
+
+#[derive(Default)]
 pub struct ResTarget<'mcx> {
     pub name: Option<&'mcx str>,
     pub indirection: NodeList<'mcx>,
@@ -224,6 +243,12 @@ unsafe impl<'mcx> NodeVariant<'mcx> for SelectStmt<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for InsertStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_InsertStmt;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for DeleteStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_DeleteStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for UpdateStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_UpdateStmt;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for ResTarget<'mcx> {
     const TAG: NodeTag = NodeTag::T_ResTarget;
 }
@@ -326,6 +351,16 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_insert_stmt(self) -> Option<&'mcx InsertStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_delete_stmt(self) -> Option<&'mcx DeleteStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_update_stmt(self) -> Option<&'mcx UpdateStmt<'mcx>> {
         self.as_variant()
     }
 

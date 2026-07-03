@@ -246,6 +246,18 @@ pub struct DefElem<'mcx> {
     pub location: ParseLoc,
 }
 
+#[derive(Default)]
+pub struct CopyStmt<'mcx> {
+    pub relation: Option<Node<'mcx>>,
+    pub query: Option<Node<'mcx>>,
+    pub attlist: NodeList<'mcx>,
+    pub is_from: bool,
+    pub is_program: bool,
+    pub filename: Option<&'mcx str>,
+    pub options: NodeList<'mcx>,
+    pub whereClause: Option<Node<'mcx>>,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[repr(u32)]
 pub enum VariableSetKind {
@@ -327,6 +339,21 @@ pub struct FetchStmt<'mcx> {
     pub ismove: bool,
 }
 
+// C: raw grammar output holds the untransformed SELECT in `query`;
+// transformDeclareCursorStmt replaces it with the analyzed Query node.
+#[derive(Default)]
+pub struct DeclareCursorStmt<'mcx> {
+    pub portalname: Option<&'mcx str>,
+    pub options: i32,
+    pub query: Option<Node<'mcx>>,
+}
+
+// C: portalname == NULL means CLOSE ALL.
+#[derive(Default)]
+pub struct ClosePortalStmt<'mcx> {
+    pub portalname: Option<&'mcx str>,
+}
+
 // C: isall is redundant with name == NULL but kept for query jumbling.
 pub struct DeallocateStmt<'mcx> {
     pub name: Option<&'mcx str>,
@@ -359,6 +386,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for TransactionStmt<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for DefElem<'mcx> {
     const TAG: NodeTag = NodeTag::T_DefElem;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for CopyStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CopyStmt;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for VariableSetStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_VariableSetStmt;
 }
@@ -376,6 +406,12 @@ unsafe impl<'mcx> NodeVariant<'mcx> for ExecuteStmt<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for FetchStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_FetchStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for DeclareCursorStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_DeclareCursorStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for ClosePortalStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_ClosePortalStmt;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for DeallocateStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_DeallocateStmt;
@@ -413,6 +449,11 @@ impl<'mcx> Node<'mcx> {
     }
 
     #[inline]
+    pub fn as_copy_stmt(self) -> Option<&'mcx CopyStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
     pub fn as_variable_set_stmt(self) -> Option<&'mcx VariableSetStmt<'mcx>> {
         self.as_variant()
     }
@@ -439,6 +480,16 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_fetch_stmt(self) -> Option<&'mcx FetchStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_declare_cursor_stmt(self) -> Option<&'mcx DeclareCursorStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_close_portal_stmt(self) -> Option<&'mcx ClosePortalStmt<'mcx>> {
         self.as_variant()
     }
 

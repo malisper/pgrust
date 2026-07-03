@@ -137,6 +137,23 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
             debug_assert!(a.groupingSets.is_nil() && a.chain.is_nil());
             set_upper_references(run, plan, rtoffset)?;
         }
+        NodeTag::T_Sort => {
+            // Sort never evaluates its tlist; fixed up for EXPLAIN only.
+            set_dummy_tlist_references(run, plan, rtoffset)?;
+            debug_assert!(plan.as_plan().unwrap().qual.is_nil());
+        }
+        NodeTag::T_Limit => {
+            let l = plan.as_limit().unwrap();
+            set_dummy_tlist_references(run, plan, rtoffset)?;
+            debug_assert!(l.plan.qual.is_nil());
+            if let Some(off) = l.limitOffset {
+                fix_scan_expr_walker(run, off)?;
+            }
+            if let Some(cnt) = l.limitCount {
+                fix_scan_expr_walker(run, cnt)?;
+            }
+            debug_assert!(l.uniqNumCols == 0);
+        }
         NodeTag::T_ModifyTable => {
             let m = plan.as_modify_table().unwrap();
             debug_assert!(m.plan.targetlist.is_nil() && m.plan.qual.is_nil());
@@ -180,11 +197,15 @@ fn set_upper_references<'mcx>(
     let mut output_targetlist = NodeList::nil();
     for tle_node in &base.targetlist {
         let tle = tle_node.as_target_entry().expect("TargetEntry");
-        assert!(
-            tle.ressortgroupref == 0,
-            "search_indexed_tlist_for_sortgroupref (setrefs.c): M3 grouping lane"
-        );
-        let newexpr = fix_upper_expr(run, tle.expr, subplan_tlist, rtoffset)?;
+        let mut newexpr = if tle.ressortgroupref != 0 {
+            search_indexed_tlist_for_sortgroupref(run, tle.expr, tle.ressortgroupref, subplan_tlist)?
+        } else {
+            None
+        };
+        if newexpr.is_none() {
+            newexpr = Some(fix_upper_expr(run, tle.expr, subplan_tlist, rtoffset)?);
+        }
+        let newexpr = newexpr.unwrap();
         // flatCopyTargetEntry + new expr.
         let new_tle = Node::mk(
             mcx,
@@ -204,6 +225,58 @@ fn set_upper_references<'mcx>(
     // SAFETY: exclusive plan-tree ownership (C rewrites the same list in place).
     unsafe { plan.with_plan_mut(|p| p.targetlist = output_targetlist) }.expect("plan node");
     Ok(())
+}
+
+// search_indexed_tlist_for_sortgroupref (setrefs.c): sortgroupref + equal()
+// match against the subplan tlist -> OUTER_VAR reference.
+fn search_indexed_tlist_for_sortgroupref<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    node: Node<'mcx>,
+    sortgroupref: u32,
+    subplan_tlist: &NodeList<'mcx>,
+) -> PgResult<Option<Node<'mcx>>> {
+    for tle_node in subplan_tlist {
+        let tle = tle_node.as_target_entry().expect("TargetEntry");
+        if tle.ressortgroupref != sortgroupref || !types_nodes::equal(tle.expr, node) {
+            continue;
+        }
+        let (vartype, vartypmod) = crate::costsize::expr_type_typmod(node);
+        let newvar = types_nodes::primnodes::Var {
+            varno: types_nodes::primnodes::OUTER_VAR,
+            varattno: tle.resno,
+            vartype,
+            vartypmod,
+            varcollid: exprs_collation(node),
+            varnullingrels: types_nodes::bitmapset::Bitmapset::empty(),
+            varlevelsup: 0,
+            varreturningtype: types_nodes::primnodes::VarReturningType::VAR_RETURNING_DEFAULT,
+            varnosyn: 0,
+            varattnosyn: 0,
+            location: expr_location(node),
+        };
+        return Ok(Some(Node::mk(run.mcx, newvar)?));
+    }
+    Ok(None)
+}
+
+fn exprs_collation(node: Node<'_>) -> u32 {
+    match node.node_tag() {
+        NodeTag::T_Var => node.as_var().unwrap().varcollid,
+        NodeTag::T_Const => node.as_const().unwrap().constcollid,
+        NodeTag::T_FuncExpr => node.as_func_expr().unwrap().funccollid,
+        NodeTag::T_OpExpr => node.as_op_expr().unwrap().opcollid,
+        tag => panic!("exprCollation (nodeFuncs.c): {tag:?} not ported here"),
+    }
+}
+
+fn expr_location(node: Node<'_>) -> i32 {
+    match node.node_tag() {
+        NodeTag::T_Var => node.as_var().unwrap().location,
+        NodeTag::T_Const => node.as_const().unwrap().location,
+        NodeTag::T_FuncExpr => node.as_func_expr().unwrap().location,
+        NodeTag::T_OpExpr => node.as_op_expr().unwrap().location,
+        _ => -1,
+    }
 }
 
 // fix_upper_expr_mutator (setrefs.c) over the plain-agg tlist shapes.
@@ -369,4 +442,60 @@ fn record_plan_function_dependency(funcid: u32) {
     if funcid >= FIRST_UNPINNED_OBJECT_ID {
         panic!("record_plan_function_dependency (setrefs.c): PlanInvalItem; M2 inval lane");
     }
+}
+
+// set_dummy_tlist_references (setrefs.c).
+fn set_dummy_tlist_references<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    plan: Node<'mcx>,
+    rtoffset: i32,
+) -> PgResult<()> {
+    let mcx = run.mcx;
+    let mut output_targetlist = NodeList::nil();
+    for tle_node in &plan.as_plan().expect("plan node").targetlist {
+        let tle = tle_node.as_target_entry().expect("TargetEntry");
+        let oldexpr = tle.expr;
+        // Consts stay Consts (cleaner EXPLAIN; C keeps the whole TLE).
+        if oldexpr.node_tag() == NodeTag::T_Const {
+            output_targetlist.lappend(mcx, tle_node)?;
+            continue;
+        }
+        let (vartype, vartypmod) = crate::costsize::expr_type_typmod(oldexpr);
+        let varcollid = crate::pathkeys::expr_collation(oldexpr);
+        let mut newvar = types_nodes::primnodes::Var {
+            varno: types_nodes::primnodes::OUTER_VAR,
+            varattno: tle.resno,
+            vartype,
+            vartypmod,
+            varcollid,
+            varnullingrels: types_nodes::bitmapset::Bitmapset::empty(),
+            varlevelsup: 0,
+            varreturningtype: Default::default(),
+            varnosyn: 0,
+            varattnosyn: 0,
+            location: -1,
+        };
+        if let Some(oldvar) = oldexpr.as_var() {
+            if oldvar.varnosyn > 0 {
+                newvar.varnosyn = oldvar.varnosyn + rtoffset as u32;
+                newvar.varattnosyn = oldvar.varattnosyn;
+            }
+        }
+        let new_tle = Node::mk(
+            mcx,
+            types_nodes::primnodes::TargetEntry {
+                expr: Node::mk(mcx, newvar)?,
+                resno: tle.resno,
+                resname: tle.resname,
+                ressortgroupref: tle.ressortgroupref,
+                resorigtbl: tle.resorigtbl,
+                resorigcol: tle.resorigcol,
+                resjunk: tle.resjunk,
+            },
+        )?;
+        output_targetlist.lappend(mcx, new_tle)?;
+    }
+    // SAFETY: exclusive plan-tree ownership (C rewrites the list in place).
+    unsafe { plan.with_plan_mut(|p| p.targetlist = output_targetlist) }.expect("plan node");
+    Ok(())
 }

@@ -3,7 +3,7 @@ use std::rc::Rc;
 use mcx::PgVec;
 use types_error::{PgError, PgResult};
 use types_nodes::list::NodeList;
-use types_nodes::{Node, NodeTag};
+use types_nodes::NodeTag;
 use types_pathnodes::{
     GroupResultPath, IndexClause, IndexOptInfo, IndexPath, Path, PathId, PathKey, PathNode,
     PathTarget, ProjectionPath, PtId, RelId, ScanDirection,
@@ -101,47 +101,6 @@ pub fn is_projection_capable_pathtype(pathtype: u16) -> bool {
     }
 }
 
-// equal() (equalfuncs.c) over the expression shapes this lane can carry.
-pub fn equal_expr(run: &PlannerRun<'_>, a: Node<'_>, b: Node<'_>) -> bool {
-    if a.node_tag() != b.node_tag() {
-        return false;
-    }
-    match a.node_tag() {
-        NodeTag::T_Var => {
-            let (x, y) = (a.as_var().unwrap(), b.as_var().unwrap());
-            x.varno == y.varno
-                && x.varattno == y.varattno
-                && x.vartype == y.vartype
-                && x.vartypmod == y.vartypmod
-                && x.varcollid == y.varcollid
-                && x.varnullingrels.equal(&y.varnullingrels)
-                && x.varlevelsup == y.varlevelsup
-                && x.varreturningtype == y.varreturningtype
-        }
-        NodeTag::T_Const => {
-            let (x, y) = (a.as_const().unwrap(), b.as_const().unwrap());
-            if !(x.consttype == y.consttype
-                && x.consttypmod == y.consttypmod
-                && x.constcollid == y.constcollid
-                && x.constlen == y.constlen
-                && x.constisnull == y.constisnull
-                && x.constbyval == y.constbyval)
-            {
-                return false;
-            }
-            if x.constisnull {
-                return true;
-            }
-            assert!(x.constbyval, "equal() (equalfuncs.c): by-ref Const datum; M2 lane");
-            x.constvalue.as_u64() == y.constvalue.as_u64()
-        }
-        other => {
-            let _ = run;
-            panic!("equal() (equalfuncs.c): {other:?}; M2 lane")
-        }
-    }
-}
-
 pub fn exprs_same(
     run: &PlannerRun<'_>,
     a: &PgVec<'_, types_pathnodes::NodeId>,
@@ -155,7 +114,7 @@ pub fn exprs_same(
     }
     a.iter()
         .zip(b.iter())
-        .all(|(&x, &y)| equal_expr(run, *run.root.expr_node(x), *run.root.expr_node(y)))
+        .all(|(&x, &y)| types_nodes::equal(*run.root.expr_node(x), *run.root.expr_node(y)))
 }
 
 // create_projection_path (pathnode.c).
@@ -348,14 +307,6 @@ fn compare_path_costs_fuzzily(
     PathCostComparison::Equal
 }
 
-// compare_pathkeys (pathkeys.c): every pathkey list on this lane is NIL.
-fn compare_pathkeys_equal(a: &[PathKey], b: &[PathKey]) -> bool {
-    if a.is_empty() && b.is_empty() {
-        return true;
-    }
-    panic!("compare_pathkeys (pathkeys.c): non-NIL pathkeys; M2 pathkey lane");
-}
-
 // add_path (pathnode.c); with no parameterized paths, PATH_REQ_OUTER
 // comparisons collapse to BMS_EQUAL.
 pub fn add_path<'mcx>(run: &mut PlannerRun<'mcx>, rel_id: RelId, new_id: PathId) -> PathId {
@@ -385,47 +336,68 @@ pub fn add_path<'mcx>(run: &mut PlannerRun<'mcx>, rel_id: RelId, new_id: PathId)
         );
 
         if costcmp != PathCostComparison::Different {
-            let keys_equal = compare_pathkeys_equal(&new_path.pathkeys, &old_path.pathkeys);
-            debug_assert!(keys_equal);
-            match costcmp {
-                PathCostComparison::Equal => {
-                    // BMS_EQUAL outer relids, PATHKEYS_EQUAL.
-                    if new_path.parallel_safe > old_path.parallel_safe {
-                        remove_old = true;
-                    } else if new_path.parallel_safe < old_path.parallel_safe {
-                        accept_new = false;
-                    } else if new_path.rows < old_path.rows {
-                        remove_old = true;
-                    } else if new_path.rows > old_path.rows {
-                        accept_new = false;
-                    } else if compare_path_costs_fuzzily(
-                        new_path,
-                        old_path,
-                        1.0000000001,
-                        consider_startup,
-                        consider_param_startup,
-                    ) == PathCostComparison::Better1
-                    {
-                        remove_old = true;
-                    } else {
-                        accept_new = false;
+            use crate::pathkeys::{compare_pathkeys, PathKeysComparison};
+            let keyscmp = compare_pathkeys(&new_path.pathkeys, &old_path.pathkeys);
+            if keyscmp != PathKeysComparison::Different {
+                match costcmp {
+                    PathCostComparison::Equal => match keyscmp {
+                        // Outer relids are BMS_EQUAL (no parameterized paths).
+                        PathKeysComparison::Better1 => {
+                            if new_path.rows <= old_path.rows
+                                && new_path.parallel_safe >= old_path.parallel_safe
+                            {
+                                remove_old = true;
+                            }
+                        }
+                        PathKeysComparison::Better2 => {
+                            if new_path.rows >= old_path.rows
+                                && new_path.parallel_safe <= old_path.parallel_safe
+                            {
+                                accept_new = false;
+                            }
+                        }
+                        PathKeysComparison::Equal => {
+                            if new_path.parallel_safe > old_path.parallel_safe {
+                                remove_old = true;
+                            } else if new_path.parallel_safe < old_path.parallel_safe {
+                                accept_new = false;
+                            } else if new_path.rows < old_path.rows {
+                                remove_old = true;
+                            } else if new_path.rows > old_path.rows {
+                                accept_new = false;
+                            } else if compare_path_costs_fuzzily(
+                                new_path,
+                                old_path,
+                                1.0000000001,
+                                consider_startup,
+                                consider_param_startup,
+                            ) == PathCostComparison::Better1
+                            {
+                                remove_old = true;
+                            } else {
+                                accept_new = false;
+                            }
+                        }
+                        PathKeysComparison::Different => unreachable!(),
+                    },
+                    PathCostComparison::Better1 => {
+                        if keyscmp != PathKeysComparison::Better2
+                            && new_path.rows <= old_path.rows
+                            && new_path.parallel_safe >= old_path.parallel_safe
+                        {
+                            remove_old = true;
+                        }
                     }
-                }
-                PathCostComparison::Better1 => {
-                    if new_path.rows <= old_path.rows
-                        && new_path.parallel_safe >= old_path.parallel_safe
-                    {
-                        remove_old = true;
+                    PathCostComparison::Better2 => {
+                        if keyscmp != PathKeysComparison::Better1
+                            && new_path.rows >= old_path.rows
+                            && new_path.parallel_safe <= old_path.parallel_safe
+                        {
+                            accept_new = false;
+                        }
                     }
+                    PathCostComparison::Different => unreachable!(),
                 }
-                PathCostComparison::Better2 => {
-                    if new_path.rows >= old_path.rows
-                        && new_path.parallel_safe <= old_path.parallel_safe
-                    {
-                        accept_new = false;
-                    }
-                }
-                PathCostComparison::Different => unreachable!(),
             }
         }
 
@@ -484,11 +456,21 @@ pub fn set_cheapest(run: &mut PlannerRun<'_>, rel_id: RelId) -> PgResult<()> {
             cheapest_total_path = Some(pid);
             continue;
         };
-        // Cost ties prefer better pathkeys; all NIL here.
-        if compare_path_costs(run.root.path(s).base(), path, CostSelector::Startup) > 0 {
+        use crate::pathkeys::{compare_pathkeys, PathKeysComparison};
+        let cmp = compare_path_costs(run.root.path(s).base(), path, CostSelector::Startup);
+        if cmp > 0
+            || (cmp == 0
+                && compare_pathkeys(&run.root.path(s).base().pathkeys, &path.pathkeys)
+                    == PathKeysComparison::Better2)
+        {
             cheapest_startup_path = Some(pid);
         }
-        if compare_path_costs(run.root.path(t).base(), path, CostSelector::Total) > 0 {
+        let cmp = compare_path_costs(run.root.path(t).base(), path, CostSelector::Total);
+        if cmp > 0
+            || (cmp == 0
+                && compare_pathkeys(&run.root.path(t).base().pathkeys, &path.pathkeys)
+                    == PathKeysComparison::Better2)
+        {
             cheapest_total_path = Some(pid);
         }
     }
@@ -615,8 +597,8 @@ pub fn create_agg_path<'mcx>(
     num_groups: f64,
 ) -> PathId {
     assert!(
-        aggstrategy == types_pathnodes::AGG_PLAIN,
-        "create_agg_path (pathnode.c): AGG_SORTED pathkeys; M3 grouping lane"
+        aggstrategy == types_pathnodes::AGG_PLAIN || aggstrategy == types_pathnodes::AGG_HASHED,
+        "create_agg_path (pathnode.c): AGG_SORTED pathkey preservation; M3 sorted-grouping lane"
     );
     let sub = run.root.path(subpath_id).base();
     let rel = run.root.rel(rel_id);
@@ -637,6 +619,7 @@ pub fn create_agg_path<'mcx>(
     };
     let (sub_disabled, sub_startup, sub_total, sub_rows) =
         (sub.disabled_nodes, sub.startup_cost, sub.total_cost, sub.rows);
+    let sub_width = sub.pathtarget_id.map_or(0, |pt| run.root.pathtarget(pt).width);
     let num_group_cols = group_clause.len() as i32;
     let quals_empty = qual.is_empty();
     let transition_space = aggcosts.transitionSpace as u64;
@@ -663,6 +646,7 @@ pub fn create_agg_path<'mcx>(
         sub_startup,
         sub_total,
         sub_rows,
+        sub_width,
     );
 
     let target = run.root.pathtarget(target_id);
@@ -676,7 +660,7 @@ pub fn create_agg_path<'mcx>(
 
 // get_cheapest_fractional_path (planner.c).
 pub fn get_cheapest_fractional_path(run: &PlannerRun<'_>, rel_id: RelId, tuple_fraction: f64) -> PathId {
-    let best = run
+    let mut best = run
         .root
         .rel(rel_id)
         .cheapest_total_path
@@ -684,8 +668,189 @@ pub fn get_cheapest_fractional_path(run: &PlannerRun<'_>, rel_id: RelId, tuple_f
     if tuple_fraction <= 0.0 {
         return best;
     }
-    panic!(
-        "get_cheapest_fractional_path (planner.c): compare_fractional_path_costs; \
-         M2 cursor lane"
+    let mut tuple_fraction = tuple_fraction;
+    if tuple_fraction >= 1.0 && run.root.path(best).base().rows > 0.0 {
+        tuple_fraction /= run.root.path(best).base().rows;
+    }
+    let npaths = run.root.rel(rel_id).pathlist.len();
+    for i in 0..npaths {
+        let pid = run.root.rel(rel_id).pathlist[i];
+        let path = run.root.path(pid).base();
+        if path.param_info.is_some() {
+            continue;
+        }
+        if Some(pid) == run.root.rel(rel_id).cheapest_total_path
+            || compare_fractional_path_costs(run.root.path(best).base(), path, tuple_fraction) <= 0
+        {
+            continue;
+        }
+        best = pid;
+    }
+    best
+}
+
+// compare_fractional_path_costs (pathnode.c).
+fn compare_fractional_path_costs(path1: &Path<'_>, path2: &Path<'_>, fraction: f64) -> i32 {
+    if path1.disabled_nodes != path2.disabled_nodes {
+        return if path1.disabled_nodes < path2.disabled_nodes { -1 } else { 1 };
+    }
+    if fraction <= 0.0 || fraction >= 1.0 {
+        return compare_path_costs(path1, path2, CostSelector::Total);
+    }
+    let cost1 = path1.startup_cost + fraction * (path1.total_cost - path1.startup_cost);
+    let cost2 = path2.startup_cost + fraction * (path2.total_cost - path2.startup_cost);
+    if cost1 < cost2 {
+        return -1;
+    }
+    if cost1 > cost2 {
+        return 1;
+    }
+    0
+}
+
+// create_sort_path (pathnode.c).
+pub fn create_sort_path<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel_id: RelId,
+    subpath_id: PathId,
+    pathkeys: PgVec<'mcx, PathKey>,
+    limit_tuples: f64,
+) -> PathId {
+    let sub = run.root.path(subpath_id).base();
+    let rel = run.root.rel(rel_id);
+    let path = Path {
+        type_: tag16(NodeTag::T_SortPath),
+        pathtype: tag16(NodeTag::T_Sort),
+        parent: rel_id,
+        // Sort doesn't project, so use the source path's pathtarget.
+        pathtarget_id: sub.pathtarget_id,
+        param_info: None,
+        parallel_aware: false,
+        parallel_safe: rel.consider_parallel && sub.parallel_safe,
+        parallel_workers: sub.parallel_workers,
+        rows: 0.0,
+        disabled_nodes: 0,
+        startup_cost: 0.0,
+        total_cost: 0.0,
+        pathkeys,
+    };
+    let (sub_disabled, sub_total, sub_rows) = (sub.disabled_nodes, sub.total_cost, sub.rows);
+    let width = sub.pathtarget_id.map_or(0, |pt| run.root.pathtarget(pt).width);
+    let id = run
+        .root
+        .alloc_path(PathNode::SortPath(types_pathnodes::SortPath {
+            path,
+            subpath: Some(subpath_id),
+        }));
+    crate::costsize::cost_sort(
+        run,
+        id,
+        sub_disabled,
+        sub_total,
+        sub_rows,
+        width,
+        0.0,
+        init_small::globals::work_mem(),
+        limit_tuples,
     );
+    id
+}
+
+// create_limit_path (pathnode.c).
+#[allow(clippy::too_many_arguments)]
+pub fn create_limit_path<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel_id: RelId,
+    subpath_id: PathId,
+    limit_offset: Option<types_nodes::Node<'mcx>>,
+    limit_count: Option<types_nodes::Node<'mcx>>,
+    limit_option: types_nodes::nodes_enums::LimitOption,
+    offset_est: i64,
+    count_est: i64,
+) -> PathId {
+    let mcx = run.mcx;
+    let sub = run.root.path(subpath_id).base();
+    let rel = run.root.rel(rel_id);
+    let mut path = Path {
+        type_: tag16(NodeTag::T_LimitPath),
+        pathtype: tag16(NodeTag::T_Limit),
+        parent: rel_id,
+        // Limit doesn't project, so use the source path's pathtarget.
+        pathtarget_id: sub.pathtarget_id,
+        param_info: None,
+        parallel_aware: false,
+        parallel_safe: rel.consider_parallel && sub.parallel_safe,
+        parallel_workers: sub.parallel_workers,
+        rows: sub.rows,
+        disabled_nodes: sub.disabled_nodes,
+        startup_cost: sub.startup_cost,
+        total_cost: sub.total_cost,
+        pathkeys: crate::relnode::pgvec_clone_shallow(mcx, &sub.pathkeys),
+    };
+    adjust_limit_rows_costs(
+        &mut path.rows,
+        &mut path.startup_cost,
+        &mut path.total_cost,
+        offset_est,
+        count_est,
+    );
+    let limit_offset_id = limit_offset.map(|n| run.intern_expr(n));
+    let limit_count_id = limit_count.map(|n| run.intern_expr(n));
+    run.root.alloc_path(PathNode::LimitPath(types_pathnodes::LimitPath {
+        path,
+        subpath: Some(subpath_id),
+        limitOffset: limit_offset_id,
+        limitCount: limit_count_id,
+        limitOption: limit_option as u32,
+    }))
+}
+
+// adjust_limit_rows_costs (pathnode.c).
+pub fn adjust_limit_rows_costs(
+    rows: &mut f64,
+    startup_cost: &mut f64,
+    total_cost: &mut f64,
+    offset_est: i64,
+    count_est: i64,
+) {
+    let input_rows = *rows;
+    let input_startup_cost = *startup_cost;
+    let input_total_cost = *total_cost;
+
+    if offset_est != 0 {
+        let mut offset_rows = if offset_est > 0 {
+            offset_est as f64
+        } else {
+            crate::costsize::clamp_row_est(input_rows * 0.10)
+        };
+        if offset_rows > *rows {
+            offset_rows = *rows;
+        }
+        if input_rows > 0.0 {
+            *startup_cost += (input_total_cost - input_startup_cost) * offset_rows / input_rows;
+        }
+        *rows -= offset_rows;
+        if *rows < 1.0 {
+            *rows = 1.0;
+        }
+    }
+
+    if count_est != 0 {
+        let mut count_rows = if count_est > 0 {
+            count_est as f64
+        } else {
+            crate::costsize::clamp_row_est(input_rows * 0.10)
+        };
+        if count_rows > *rows {
+            count_rows = *rows;
+        }
+        if input_rows > 0.0 {
+            *total_cost = *startup_cost
+                + (input_total_cost - input_startup_cost) * count_rows / input_rows;
+        }
+        *rows = count_rows;
+        if *rows < 1.0 {
+            *rows = 1.0;
+        }
+    }
 }

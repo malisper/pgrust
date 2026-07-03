@@ -51,7 +51,21 @@ pub fn subquery_planner<'mcx>(
         match rte.rtekind {
             RTEKind::RTE_RELATION => {
                 if rte.inh {
-                    panic!("has_subclass (pg_inherits.c): inh survey; M2 scan lane");
+                    // has_subclass (pg_inherits.c) reads pg_class.relhassubclass
+                    // via syscache; the relcache entry carries the same field.
+                    let rel = table::table_open(mcx, rte.relid, types_rel::NoLock)?;
+                    let sub = rel.rd_rel.relhassubclass;
+                    table::table_close(rel, types_rel::NoLock)?;
+                    if sub {
+                        panic!("expand_inherited_rtes (inherit.c): M2 scan lane");
+                    }
+                    // SAFETY: pre-seal Query owned by this invocation; the
+                    // shared `rte` borrow is not read past this write.
+                    unsafe {
+                        rte_node.with_mut::<types_nodes::parsenodes::RangeTblEntry, _>(|r| {
+                            r.inh = false
+                        })
+                    };
                 }
                 if rte.tablesample.is_some() {
                     panic!("preprocess_expression (planner.c): TABLESAMPLE; M2 lane");

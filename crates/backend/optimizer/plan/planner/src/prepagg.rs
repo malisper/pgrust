@@ -4,11 +4,10 @@
 use types_error::PgResult;
 use types_nodes::list::NodeList;
 use types_nodes::primnodes::Aggref;
-use types_nodes::{Node, NodeTag};
+use types_nodes::{Node, NodeEqual, NodeTag};
 use types_pathnodes::{AggClauseCosts, AggInfo, AggSplit, AggTransInfo, AGGSPLIT_SIMPLE};
 
 use crate::costsize::{cost_qual_eval_node, expr_type_typmod};
-use crate::pathnode::equal_expr;
 use crate::run::PlannerRun;
 
 const INT8OID: u32 = 20;
@@ -227,10 +226,10 @@ fn find_compatible_agg<'mcx>(
             || newagg.aggstar != existing.aggstar
             || newagg.aggvariadic != existing.aggvariadic
             || newagg.aggkind != existing.aggkind
-            || !equal_node_list(run, &newagg.args, &existing.args)
-            || !equal_node_list(run, &newagg.aggorder, &existing.aggorder)
-            || !equal_node_list(run, &newagg.aggdistinct, &existing.aggdistinct)
-            || !equal_opt(run, newagg.aggfilter, existing.aggfilter)
+            || !newagg.args.node_equal(&existing.args)
+            || !newagg.aggorder.node_equal(&existing.aggorder)
+            || !newagg.aggdistinct.node_equal(&existing.aggdistinct)
+            || !types_nodes::equal_opt(newagg.aggfilter, existing.aggfilter)
         {
             continue;
         }
@@ -238,7 +237,7 @@ fn find_compatible_agg<'mcx>(
         if newagg.aggfnoid == existing.aggfnoid
             && newagg.aggtype == existing.aggtype
             && newagg.aggcollid == existing.aggcollid
-            && equal_node_list(run, &newagg.aggdirectargs, &existing.aggdirectargs)
+            && newagg.aggdirectargs.node_equal(&existing.aggdirectargs)
         {
             same_input_transnos.clear();
             return Ok(Some((aggno as i32, info_id)));
@@ -294,59 +293,6 @@ fn find_compatible_trans(
         }
     }
     None
-}
-
-// equal() (equalfuncs.c) over the agg-argument shapes this lane carries.
-fn equal_node(run: &PlannerRun<'_>, a: Node<'_>, b: Node<'_>) -> bool {
-    if a.node_tag() != b.node_tag() {
-        return false;
-    }
-    match a.node_tag() {
-        NodeTag::T_TargetEntry => {
-            let (x, y) = (a.as_target_entry().unwrap(), b.as_target_entry().unwrap());
-            x.resno == y.resno
-                && x.resname == y.resname
-                && x.ressortgroupref == y.ressortgroupref
-                && x.resorigtbl == y.resorigtbl
-                && x.resorigcol == y.resorigcol
-                && x.resjunk == y.resjunk
-                && equal_node(run, x.expr, y.expr)
-        }
-        NodeTag::T_OpExpr => {
-            let (x, y) = (a.as_op_expr().unwrap(), b.as_op_expr().unwrap());
-            x.opno == y.opno
-                && x.opresulttype == y.opresulttype
-                && x.opretset == y.opretset
-                && x.opcollid == y.opcollid
-                && x.inputcollid == y.inputcollid
-                && equal_node_list(run, &x.args, &y.args)
-        }
-        NodeTag::T_FuncExpr => {
-            let (x, y) = (a.as_func_expr().unwrap(), b.as_func_expr().unwrap());
-            x.funcid == y.funcid
-                && x.funcresulttype == y.funcresulttype
-                && x.funcretset == y.funcretset
-                && x.funcvariadic == y.funcvariadic
-                && x.funccollid == y.funccollid
-                && x.inputcollid == y.inputcollid
-                && equal_node_list(run, &x.args, &y.args)
-        }
-        NodeTag::T_Var | NodeTag::T_Const => equal_expr(run, a, b),
-        other => panic!("equal() (equalfuncs.c): {other:?}; M3 agg-argument lane"),
-    }
-}
-
-fn equal_node_list(run: &PlannerRun<'_>, a: &NodeList<'_>, b: &NodeList<'_>) -> bool {
-    a.len() == b.len()
-        && a.iter().zip(b.iter()).all(|(x, y)| equal_node(run, x, y))
-}
-
-fn equal_opt(run: &PlannerRun<'_>, a: Option<Node<'_>>, b: Option<Node<'_>>) -> bool {
-    match (a, b) {
-        (None, None) => true,
-        (Some(x), Some(y)) => equal_node(run, x, y),
-        _ => false,
-    }
 }
 
 pub fn get_agg_clause_costs(

@@ -454,3 +454,100 @@ fn btcostestimate(
         index_pages: costs.num_index_pages,
     })
 }
+
+// estimate_num_groups (selfuncs.c), no-stats Var-only leg: pull_var_clause is
+// the caller's job (exprs must be plain level-0 Vars); Consts skipped, other
+// families and multivariate/extended stats are M3 lanes.
+pub fn estimate_num_groups<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    group_exprs: &[(NodeId, Node<'mcx>)],
+    input_rows: f64,
+) -> PgResult<f64> {
+    let input_rows = crate::costsize::clamp_row_est(input_rows);
+    if group_exprs.is_empty() {
+        return Ok(1.0);
+    }
+
+    struct GroupVarInfo {
+        var: NodeId,
+        rel: RelId,
+        ndistinct: f64,
+    }
+    let mcx = run.mcx;
+    let mut varinfos: mcx::PgVec<'_, GroupVarInfo> = mcx::PgVec::new_in(mcx);
+    for &(id, node) in group_exprs {
+        match node.node_tag() {
+            NodeTag::T_Const => continue,
+            NodeTag::T_Var => {}
+            other => panic!(
+                "estimate_num_groups (selfuncs.c): grouping expr {other:?}; M3 expression lane"
+            ),
+        }
+        // add_unique_group_var: dedupe on the underlying (varno, varattno).
+        let v = node.as_var().unwrap();
+        let dup = varinfos.iter().any(|vi| {
+            let u = run.root.expr_node(vi.var).as_var().unwrap();
+            u.varno == v.varno && u.varattno == v.varattno
+        });
+        if dup {
+            continue;
+        }
+        let vardata = examine_variable(run, id, node, 0)?;
+        let (ndistinct, _isdefault) = get_variable_numdistinct(run, &vardata);
+        varinfos.push(GroupVarInfo {
+            var: id,
+            rel: vardata.rel.expect("grouping Var has a base rel"),
+            ndistinct,
+        });
+    }
+    if varinfos.is_empty() {
+        return Ok(1.0);
+    }
+
+    let mut numdistinct = 1.0f64;
+    let mut remaining = varinfos;
+    while !remaining.is_empty() {
+        let rel_id = remaining[0].rel;
+        let mut reldistinct = 1.0f64;
+        let mut relmaxndistinct = 1.0f64;
+        let mut relvarcount = 0usize;
+        let mut rest: mcx::PgVec<'_, GroupVarInfo> = mcx::PgVec::new_in(mcx);
+        for vi in remaining {
+            if vi.rel == rel_id {
+                reldistinct *= vi.ndistinct;
+                if relmaxndistinct < vi.ndistinct {
+                    relmaxndistinct = vi.ndistinct;
+                }
+                relvarcount += 1;
+            } else {
+                rest.push(vi);
+            }
+        }
+        let (rel_tuples, rel_rows) = {
+            let rel = run.root.rel(rel_id);
+            (rel.tuples, rel.rows)
+        };
+        if rel_tuples > 0.0 {
+            let mut clamp = rel_tuples;
+            if relvarcount > 1 {
+                clamp *= 0.1;
+                if clamp < relmaxndistinct {
+                    clamp = relmaxndistinct.min(rel_tuples);
+                }
+            }
+            if reldistinct > clamp {
+                reldistinct = clamp;
+            }
+            if reldistinct > 0.0 && rel_rows < rel_tuples {
+                // Dell'Era approximation of Yao's formula.
+                reldistinct *=
+                    1.0 - ((rel_tuples - rel_rows) / rel_tuples).powf(rel_tuples / reldistinct);
+            }
+            numdistinct *= crate::costsize::clamp_row_est(reldistinct);
+        }
+        remaining = rest;
+    }
+
+    let numdistinct = numdistinct.ceil();
+    Ok(numdistinct.clamp(1.0, input_rows))
+}

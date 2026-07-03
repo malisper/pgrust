@@ -606,6 +606,23 @@ fn raw_expr_node_field_order_matches_c() {
     let crate::rawnodes::TypeCast { arg: _, typeName: _, location: _ } =
         crate::rawnodes::TypeCast::default();
 
+    assert_eq!(
+        c_struct_fields(parse_h, "DeleteStmt"),
+        ["relation", "usingClause", "whereClause", "returningClause", "withClause"]
+    );
+    let crate::rawnodes::DeleteStmt {
+        relation: _, usingClause: _, whereClause: _, returningClause: _, withClause: _,
+    } = crate::rawnodes::DeleteStmt::default();
+
+    assert_eq!(
+        c_struct_fields(parse_h, "UpdateStmt"),
+        ["relation", "targetList", "whereClause", "fromClause", "returningClause", "withClause"]
+    );
+    let crate::rawnodes::UpdateStmt {
+        relation: _, targetList: _, whereClause: _, fromClause: _, returningClause: _,
+        withClause: _,
+    } = crate::rawnodes::UpdateStmt::default();
+
     let mut be = c_struct_fields(prim_h, "BoolExpr");
     assert_eq!(be.remove(0), "xpr");
     assert_eq!(be, ["boolop", "args", "location"]);
@@ -641,6 +658,18 @@ fn variable_set_stmt_field_order_matches_c() {
     let crate::parsenodes::DefElem {
         defnamespace: _, defname: _, arg: _, defaction: _, location: _,
     } = crate::parsenodes::DefElem::default();
+
+    assert_eq!(
+        c_struct_fields(parse_h, "CopyStmt"),
+        [
+            "relation", "query", "attlist", "is_from", "is_program", "filename", "options",
+            "whereClause",
+        ]
+    );
+    let crate::parsenodes::CopyStmt {
+        relation: _, query: _, attlist: _, is_from: _, is_program: _, filename: _, options: _,
+        whereClause: _,
+    } = crate::parsenodes::CopyStmt::default();
 
     assert_eq!(c_struct_fields(parse_h, "ExplainStmt"), ["query", "options"]);
     let crate::parsenodes::ExplainStmt { query: _, options: _ } =
@@ -1013,4 +1042,160 @@ fn sort_group_clause_field_order_matches_c() {
     let crate::parsenodes::SortGroupClause {
         tleSortGroupRef: _, eqop: _, sortop: _, reverse_sort: _, nulls_first: _, hashable: _,
     } = crate::parsenodes::SortGroupClause::default();
+}
+
+fn mk_var_at(mcx: mcx::Mcx<'_>, varno: i32, attno: i16, location: i32) -> Node<'_> {
+    let mut v = crate::primnodes::Var {
+        varno,
+        varattno: attno,
+        vartype: 23,
+        vartypmod: -1,
+        varcollid: 0,
+        ..Default::default()
+    };
+    v.location = location;
+    v.varnosyn = varno as u32 + 7;
+    v.varattnosyn = attno + 7;
+    Node::mk(mcx, v).unwrap()
+}
+
+#[test]
+fn equal_ignores_location_and_jumble_fields() {
+    let ctx = MemoryContext::new_bump("t");
+    let mcx = ctx.mcx();
+    // Var: location + varnosyn/varattnosyn are equal_ignore in C.
+    assert!(crate::equal(mk_var_at(mcx, 1, 2, 10), mk_var_at(mcx, 1, 2, 99)));
+    assert!(!crate::equal(mk_var_at(mcx, 1, 2, 10), mk_var_at(mcx, 1, 3, 10)));
+    let p1 = Node::mk_param_ref(mcx, 4, 5).unwrap();
+    let p2 = Node::mk_param_ref(mcx, 4, 50).unwrap();
+    assert!(crate::equal(p1, p2));
+    let c1 = Node::mk_a_const(mcx, Some(crate::ValUnion::Integer(crate::Integer { ival: 3 })), 1).unwrap();
+    let c2 = Node::mk_a_const(mcx, Some(crate::ValUnion::Integer(crate::Integer { ival: 3 })), 2).unwrap();
+    assert!(crate::equal(c1, c2));
+    let f = Node::mk_a_const(
+        mcx,
+        Some(crate::ValUnion::Float(crate::Float { fval: "3" })),
+        1,
+    )
+    .unwrap();
+    assert!(!crate::equal(c1, f), "A_Const value-union tag mismatch");
+    assert!(!crate::equal(c1, Node::mk_a_const(mcx, None, 1).unwrap()));
+}
+
+#[test]
+fn equal_const_datum_semantics() {
+    let ctx = MemoryContext::new_bump("t");
+    let mcx = ctx.mcx();
+    let int4 = |v: i32| {
+        Node::mk_const(mcx, 23, -1, 0, 4, datum::Datum::from_i32(v), false, true).unwrap()
+    };
+    assert!(crate::equal(int4(7), int4(7)));
+    assert!(!crate::equal(int4(7), int4(8)));
+    // All NULLs of the same type are equal regardless of the value word.
+    let null_a = Node::mk_const(mcx, 23, -1, 0, 4, datum::Datum::from_i32(1), true, true).unwrap();
+    let null_b = Node::mk_const(mcx, 23, -1, 0, 4, datum::Datum::from_i32(2), true, true).unwrap();
+    assert!(crate::equal(null_a, null_b));
+    assert!(!crate::equal(null_a, int4(1)));
+    // By-ref: byte-image compare through the pointer word (typlen -1 varlena
+    // with a 1-byte header, and -2 cstring).
+    let v1: &[u8] = &[7, b'h', b'i'];
+    let v2: &[u8] = &[7, b'h', b'i'];
+    let v3: &[u8] = &[7, b'h', b'o'];
+    let vla = |img: &[u8]| {
+        let d = datum::Datum::from_usize(img.as_ptr() as usize);
+        Node::mk_const(mcx, 25, -1, 100, -1, d, false, false).unwrap()
+    };
+    assert!(crate::equal(vla(v1), vla(v2)));
+    assert!(!crate::equal(vla(v1), vla(v3)));
+    let s1: &[u8] = b"abc\0";
+    let s2: &[u8] = b"abc\0";
+    let s3: &[u8] = b"abd\0";
+    let cstr = |img: &[u8]| {
+        let d = datum::Datum::from_usize(img.as_ptr() as usize);
+        Node::mk_const(mcx, 2275, -1, 0, -2, d, false, false).unwrap()
+    };
+    assert!(crate::equal(cstr(s1), cstr(s2)));
+    assert!(!crate::equal(cstr(s1), cstr(s3)));
+}
+
+#[test]
+fn equal_opexpr_zero_opfuncid_matches_any() {
+    let ctx = MemoryContext::new_bump("t");
+    let mcx = ctx.mcx();
+    let op = |opfuncid: u32, location: i32| {
+        let args = NodeList::make2(mcx, mk_var_at(mcx, 1, 1, 0), mk_var_at(mcx, 1, 2, 0)).unwrap();
+        Node::mk(
+            mcx,
+            crate::OpExpr { opno: 96, opfuncid, opresulttype: 16, args, location, ..Default::default() },
+        )
+        .unwrap()
+    };
+    assert!(crate::equal(op(65, 1), op(65, 2)));
+    assert!(crate::equal(op(0, 1), op(65, 1)));
+    assert!(crate::equal(op(65, 1), op(0, 1)));
+    assert!(!crate::equal(op(65, 1), op(66, 1)));
+}
+
+#[test]
+fn equal_recurses_lists_and_ignores_coercionform() {
+    let ctx = MemoryContext::new_bump("t");
+    let mcx = ctx.mcx();
+    let fx = |fmt: crate::CoercionForm, arg_attno: i16| {
+        let args = NodeList::make1(mcx, mk_var_at(mcx, 1, arg_attno, 0)).unwrap();
+        Node::mk(
+            mcx,
+            crate::FuncExpr { funcid: 481, funcresulttype: 20, funcformat: fmt, args, ..Default::default() },
+        )
+        .unwrap()
+    };
+    assert!(crate::equal(
+        fx(crate::CoercionForm::COERCE_EXPLICIT_CALL, 1),
+        fx(crate::CoercionForm::COERCE_IMPLICIT_CAST, 1),
+    ));
+    assert!(!crate::equal(
+        fx(crate::CoercionForm::COERCE_EXPLICIT_CALL, 1),
+        fx(crate::CoercionForm::COERCE_EXPLICIT_CALL, 2),
+    ));
+    let tle = |attno: i16, resno: i16| {
+        Node::mk_target_entry(mcx, mk_var_at(mcx, 1, attno, 0), resno, Some("x"), false).unwrap()
+    };
+    let l1 = Node::mk_list(mcx, NodeList::make2(mcx, tle(1, 1), tle(2, 2)).unwrap()).unwrap();
+    let l2 = Node::mk_list(mcx, NodeList::make2(mcx, tle(1, 1), tle(2, 2)).unwrap()).unwrap();
+    let l3 = Node::mk_list(mcx, NodeList::make2(mcx, tle(1, 1), tle(3, 2)).unwrap()).unwrap();
+    let l4 = Node::mk_list(mcx, NodeList::make1(mcx, tle(1, 1)).unwrap()).unwrap();
+    assert!(crate::equal(l1, l2));
+    assert!(!crate::equal(l1, l3));
+    assert!(!crate::equal(l1, l4));
+    assert!(!crate::equal(l1, mk_var_at(mcx, 1, 1, 0)), "tag mismatch is unequal");
+    let il1 = Node::mk_int_list(mcx, IntList::make2(mcx, 1, 2).unwrap()).unwrap();
+    let il2 = Node::mk_int_list(mcx, IntList::make2(mcx, 1, 2).unwrap()).unwrap();
+    let il3 = Node::mk_int_list(mcx, IntList::make2(mcx, 1, 3).unwrap()).unwrap();
+    assert!(crate::equal(il1, il2));
+    assert!(!crate::equal(il1, il3));
+}
+
+#[test]
+fn equal_aggref_ignores_transtype_and_presorted() {
+    let ctx = MemoryContext::new_bump("t");
+    let mcx = ctx.mcx();
+    let agg = |aggtranstype: u32, aggpresorted: bool, aggno: i32| {
+        let args = NodeList::make1(mcx, mk_var_at(mcx, 1, 1, 0)).unwrap();
+        Node::mk(
+            mcx,
+            crate::primnodes::Aggref {
+                aggfnoid: 2108,
+                aggtype: 20,
+                aggargtypes: OidList::make1(mcx, 23).unwrap(),
+                args,
+                aggtranstype,
+                aggpresorted,
+                aggno,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    };
+    assert!(crate::equal(agg(20, false, -1), agg(2281, true, -1)));
+    // aggno/aggtransno ARE compared (not equal_ignore in C).
+    assert!(!crate::equal(agg(20, false, 0), agg(20, false, 1)));
 }

@@ -377,8 +377,8 @@ pub fn cost_bitmap_heap_scan(
     p.total_cost = startup_cost + run_cost;
 }
 
-// cost_agg (costsize.c), AGG_PLAIN no-quals arm; sorted/hashed strategies and
-// HAVING quals are the M3 grouping lanes.
+// cost_agg (costsize.c), AGG_PLAIN + AGG_HASHED no-quals arms; AGG_SORTED/
+// AGG_MIXED and HAVING quals are the M3 grouping lanes.
 #[allow(clippy::too_many_arguments)]
 pub fn cost_agg(
     run: &mut PlannerRun<'_>,
@@ -392,28 +392,81 @@ pub fn cost_agg(
     input_startup_cost: f64,
     input_total_cost: f64,
     input_tuples: f64,
+    input_width: i32,
 ) {
-    assert!(
-        aggstrategy == types_pathnodes::AGG_PLAIN,
-        "cost_agg (costsize.c): AGG_SORTED/AGG_HASHED/AGG_MIXED; M3 grouping lane"
-    );
     assert!(quals_empty, "cost_agg (costsize.c): HAVING quals; M3 having lane");
-    debug_assert!(num_group_cols == 0 && num_groups == 1.0);
     let _ = input_startup_cost;
+    let mut disabled_nodes = input_disabled_nodes;
 
-    let mut startup_cost = input_total_cost;
-    startup_cost += aggcosts.transCost.startup;
-    startup_cost += aggcosts.transCost.per_tuple * input_tuples;
-    startup_cost += aggcosts.finalCost.startup;
-    startup_cost += aggcosts.finalCost.per_tuple;
-    let total_cost = startup_cost + gucs::cpu_tuple_cost();
-    let output_tuples = 1.0;
+    let (mut startup_cost, mut total_cost, output_tuples);
+    if aggstrategy == types_pathnodes::AGG_PLAIN {
+        debug_assert!(num_group_cols == 0 && num_groups == 1.0);
+        startup_cost = input_total_cost;
+        startup_cost += aggcosts.transCost.startup;
+        startup_cost += aggcosts.transCost.per_tuple * input_tuples;
+        startup_cost += aggcosts.finalCost.startup;
+        startup_cost += aggcosts.finalCost.per_tuple;
+        total_cost = startup_cost + gucs::cpu_tuple_cost();
+        output_tuples = 1.0;
+    } else if aggstrategy == types_pathnodes::AGG_HASHED {
+        startup_cost = input_total_cost;
+        if !gucs::enable_hashagg() {
+            disabled_nodes += 1;
+        }
+        startup_cost += aggcosts.transCost.startup;
+        startup_cost += aggcosts.transCost.per_tuple * input_tuples;
+        startup_cost += gucs::cpu_operator_cost() * num_group_cols as f64 * input_tuples;
+        startup_cost += aggcosts.finalCost.startup;
+        total_cost = startup_cost;
+        total_cost += aggcosts.finalCost.per_tuple * num_groups;
+        total_cost += gucs::cpu_tuple_cost() * num_groups;
+        output_tuples = num_groups;
+    } else {
+        panic!("cost_agg (costsize.c): AGG_SORTED/AGG_MIXED; M3 sorted-grouping lane");
+    }
+
+    if aggstrategy == types_pathnodes::AGG_HASHED {
+        let hashentrysize = ::nodeagg::hash_agg_entry_size(
+            run.root.aggtransinfos.len(),
+            input_width.max(0) as usize,
+            aggcosts.transitionSpace as usize,
+        );
+        let (mem_limit, ngroups_limit, num_partitions) =
+            ::nodeagg::hash_agg_set_limits(hashentrysize, num_groups, 0);
+        let nbatches = ((num_groups * hashentrysize) / mem_limit as f64)
+            .max(num_groups / ngroups_limit as f64)
+            .ceil()
+            .max(1.0);
+        let num_partitions = (num_partitions.max(2)) as f64;
+        let depth = (nbatches.ln() / num_partitions.ln()).ceil();
+        let pages = relation_byte_size(input_tuples, input_width) / BLCKSZ as f64;
+        let pages_written = pages * depth * 2.0;
+        let pages_read = pages_written;
+        startup_cost += pages_written * gucs::random_page_cost();
+        total_cost += pages_written * gucs::random_page_cost();
+        total_cost += pages_read * gucs::seq_page_cost();
+        let spill_cost = depth * input_tuples * 2.0 * gucs::cpu_tuple_cost();
+        startup_cost += spill_cost;
+        total_cost += spill_cost;
+    }
 
     let p = run.root.path_mut(path_id).base_mut();
     p.rows = output_tuples;
-    p.disabled_nodes = input_disabled_nodes;
+    p.disabled_nodes = disabled_nodes;
     p.startup_cost = startup_cost;
     p.total_cost = total_cost;
+}
+
+const BLCKSZ: usize = 8192;
+const SIZEOF_HEAP_TUPLE_HEADER: usize = 23;
+
+// relation_byte_size (costsize.c).
+fn relation_byte_size(tuples: f64, width: i32) -> f64 {
+    tuples * ((maxalign(width.max(0) as usize) + maxalign(SIZEOF_HEAP_TUPLE_HEADER)) as f64)
+}
+
+const fn maxalign(n: usize) -> usize {
+    (n + 7) & !7
 }
 
 // index_pages_fetched (costsize.c): the Mackert-Lohman formula.
@@ -577,4 +630,77 @@ pub fn set_rel_width<'mcx>(run: &mut PlannerRun<'mcx>, rel: RelId) -> PgResult<(
     let width = clamp_width_est(tuple_width);
     run.root.rel_reltarget_mut(rel).width = width;
     Ok(())
+}
+
+const LOG2_DIVISOR: f64 = 0.693147180559945;
+fn log2(x: f64) -> f64 {
+    x.ln() / LOG2_DIVISOR
+}
+
+// tuplesort_merge_order (tuplesort.c); consts pinned to tuplesort.c:176-179.
+fn tuplesort_merge_order(allowed_mem: i64) -> f64 {
+    const MINORDER: i64 = 6;
+    const MAXORDER: i64 = 500;
+    const TAPE_BUFFER_OVERHEAD: i64 = BLCKSZ as i64;
+    const MERGE_BUFFER_SIZE: i64 = BLCKSZ as i64 * 32;
+    (allowed_mem / (2 * TAPE_BUFFER_OVERHEAD + MERGE_BUFFER_SIZE)).clamp(MINORDER, MAXORDER) as f64
+}
+
+// cost_tuplesort (costsize.c).
+fn cost_tuplesort(
+    tuples: f64,
+    width: i32,
+    comparison_cost: f64,
+    sort_mem: i32,
+    limit_tuples: f64,
+) -> (f64, f64) {
+    let input_bytes = relation_byte_size(tuples, width);
+    let sort_mem_bytes = sort_mem as i64 * 1024;
+    let tuples = tuples.max(2.0);
+    let comparison_cost = comparison_cost + 2.0 * gucs::cpu_operator_cost();
+
+    let (output_tuples, output_bytes) = if limit_tuples > 0.0 && limit_tuples < tuples {
+        (limit_tuples, relation_byte_size(limit_tuples, width))
+    } else {
+        (tuples, input_bytes)
+    };
+
+    let startup_cost = if output_bytes > sort_mem_bytes as f64 {
+        let npages = (input_bytes / BLCKSZ as f64).ceil();
+        let nruns = input_bytes / sort_mem_bytes as f64;
+        let mergeorder = tuplesort_merge_order(sort_mem_bytes);
+        let log_runs =
+            if nruns > mergeorder { (nruns.ln() / mergeorder.ln()).ceil() } else { 1.0 };
+        let npageaccesses = 2.0 * npages * log_runs;
+        comparison_cost * tuples * log2(tuples)
+            + npageaccesses * (gucs::seq_page_cost() * 0.75 + gucs::random_page_cost() * 0.25)
+    } else if tuples > 2.0 * output_tuples || input_bytes > sort_mem_bytes as f64 {
+        comparison_cost * tuples * log2(2.0 * output_tuples)
+    } else {
+        comparison_cost * tuples * log2(tuples)
+    };
+    (startup_cost, gucs::cpu_operator_cost() * tuples)
+}
+
+// cost_sort (costsize.c).
+#[allow(clippy::too_many_arguments)]
+pub fn cost_sort(
+    run: &mut PlannerRun<'_>,
+    path_id: types_pathnodes::PathId,
+    input_disabled_nodes: i32,
+    input_cost: f64,
+    tuples: f64,
+    width: i32,
+    comparison_cost: f64,
+    sort_mem: i32,
+    limit_tuples: f64,
+) {
+    let (startup, run_cost) =
+        cost_tuplesort(tuples, width, comparison_cost, sort_mem, limit_tuples);
+    let startup_cost = startup + input_cost;
+    let p = run.root.path_mut(path_id).base_mut();
+    p.rows = tuples;
+    p.disabled_nodes = input_disabled_nodes + if gucs::enable_sort() { 0 } else { 1 };
+    p.startup_cost = startup_cost;
+    p.total_cost = startup_cost + run_cost;
 }

@@ -1089,3 +1089,168 @@ fn insert_values_plans_to_modifytable_over_result() {
     assert!(c1.constisnull);
     assert_eq!(c1.consttype, 23);
 }
+
+// GROUP BY hashed lane: SELECT pk, count(*) FROM t GROUP BY pk.
+mod group_by_hashed {
+    use super::*;
+    use types_nodes::parsenodes::SortGroupClause;
+    use types_nodes::primnodes::{Aggref, OUTER_VAR};
+
+    const COUNT_STAR: u32 = 2803;
+    const INT4_LT_OP: u32 = 97;
+
+    fn grouped_count_query(mcx: Mcx<'_>) -> Query<'_> {
+        let mut parse = table_query(mcx, None);
+        let group_var = Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap();
+        let tle1 = Node::mk_target_entry(mcx, group_var, 1, Some("pk"), false).unwrap();
+        // SAFETY: freshly built tlist; no other reference is live.
+        unsafe {
+            tle1.with_mut::<types_nodes::primnodes::TargetEntry, _>(|t| t.ressortgroupref = 1)
+        }
+        .unwrap();
+        let aggref = Node::mk(
+            mcx,
+            Aggref { aggfnoid: COUNT_STAR, aggtype: 20, aggstar: true, ..Aggref::default() },
+        )
+        .unwrap();
+        let tle2 = Node::mk_target_entry(mcx, aggref, 2, Some("count"), false).unwrap();
+        let mut tlist = NodeList::make1(mcx, tle1).unwrap();
+        tlist.lappend(mcx, tle2).unwrap();
+        parse.targetList = tlist;
+        parse.hasAggs = true;
+        parse.groupClause = NodeList::make1(
+            mcx,
+            Node::mk(
+                mcx,
+                SortGroupClause {
+                    tleSortGroupRef: 1,
+                    eqop: INT4EQ_OP,
+                    sortop: INT4_LT_OP,
+                    reverse_sort: false,
+                    nulls_first: false,
+                    hashable: true,
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        parse
+    }
+
+    #[test]
+    fn group_by_plans_to_hashed_agg_over_seqscan() {
+        let cx = cx();
+        // cost_agg's hash_mem estimate reads the work_mem-backed globals.
+        if !guc_tables::vars::work_mem.installed() {
+            init_small::init_seams();
+        }
+        let mcx = cx.mcx();
+        let parse = grouped_count_query(mcx);
+        let stmt = planner(
+            mcx,
+            parse,
+            "SELECT pk, count(*) FROM t GROUP BY pk",
+            CURSOR_OPT_PARALLEL_OK,
+            ParamListHandle::NULL,
+        )
+        .unwrap();
+
+        let plan = stmt.planTree.unwrap();
+        assert_eq!(plan.node_tag(), NodeTag::T_Agg);
+        let agg = plan.as_agg().unwrap();
+        assert_eq!(agg.aggstrategy, types_pathnodes::AGG_HASHED);
+        assert_eq!(agg.aggsplit, types_pathnodes::AGGSPLIT_SIMPLE);
+        assert_eq!(agg.numCols, 1);
+        assert_eq!(agg.grpColIdx, &[1i16]);
+        assert_eq!(agg.grpOperators, &[INT4EQ_OP]);
+        assert_eq!(agg.grpCollations, &[0u32]);
+        assert!(agg.numGroups > 0);
+        assert!(agg.plan.qual.is_nil());
+
+        // Projection: pk keeps its sortgroupref and retargets at OUTER.1;
+        // count(*) carries planner aggno/aggtransno.
+        assert_eq!(agg.plan.targetlist.len(), 2);
+        let t0 = agg.plan.targetlist.nth(0).as_target_entry().unwrap();
+        assert_eq!(t0.resname, Some("pk"));
+        let v0 = t0.expr.as_var().unwrap();
+        assert_eq!((v0.varno, v0.varattno), (OUTER_VAR, 1));
+        let t1 = agg.plan.targetlist.nth(1).as_target_entry().unwrap();
+        let aggref = t1.expr.as_aggref().unwrap();
+        assert_eq!((aggref.aggno, aggref.aggtransno), (0, 0));
+        assert_eq!(aggref.aggtranstype, 20);
+
+        // Child scan carries the grouping column with its sortgroupref.
+        let child = agg.plan.lefttree.unwrap();
+        assert_eq!(child.node_tag(), NodeTag::T_SeqScan);
+        let ctl = &child.as_seq_scan().unwrap().scan.plan.targetlist;
+        let c0 = ctl.nth(0).as_target_entry().unwrap();
+        assert_eq!(c0.ressortgroupref, 1);
+        assert_eq!(c0.expr.as_var().unwrap().varattno, 1);
+    }
+}
+
+// find_compatible_agg (prepagg.c) via equal(): identical sum(pk) calls whose
+// argument Vars differ only in parse location share one agg/trans state.
+mod shared_aggrefs {
+    use super::*;
+    use types_nodes::primnodes::Aggref;
+
+    const SUM_INT4: u32 = 2108;
+
+    #[test]
+    fn duplicate_aggrefs_share_aggno_and_transno() {
+        let cx = cx();
+        if !guc_tables::vars::work_mem.installed() {
+            init_small::init_seams();
+        }
+        let mcx = cx.mcx();
+        let mut parse = table_query(mcx, None);
+
+        let sum_at = |loc: i32, resno: i16| {
+            let var = Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap();
+            // SAFETY: freshly built node; no other reference is live.
+            unsafe {
+                var.with_mut::<types_nodes::primnodes::Var, _>(|v| v.location = loc).unwrap()
+            };
+            let arg = Node::mk_target_entry(mcx, var, 1, None, false).unwrap();
+            let aggref = Node::mk(
+                mcx,
+                Aggref {
+                    aggfnoid: SUM_INT4,
+                    aggtype: 20,
+                    aggargtypes: types_nodes::OidList::make1(mcx, 23).unwrap(),
+                    args: NodeList::make1(mcx, arg).unwrap(),
+                    location: loc,
+                    ..Aggref::default()
+                },
+            )
+            .unwrap();
+            Node::mk_target_entry(mcx, aggref, resno, Some("sum"), false).unwrap()
+        };
+        parse.targetList = NodeList::make2(mcx, sum_at(7, 1), sum_at(29, 2)).unwrap();
+        parse.hasAggs = true;
+
+        let stmt = planner(
+            mcx,
+            parse,
+            "SELECT sum(pk), sum(pk) FROM t",
+            CURSOR_OPT_PARALLEL_OK,
+            ParamListHandle::NULL,
+        )
+        .unwrap();
+
+        let plan = stmt.planTree.unwrap();
+        assert_eq!(plan.node_tag(), NodeTag::T_Agg);
+        let agg = plan.as_agg().unwrap();
+        let tl = &agg.plan.targetlist;
+        assert_eq!(tl.len(), 2);
+        let a0 = tl.nth(0).as_target_entry().unwrap().expr.as_aggref().unwrap();
+        let a1 = tl.nth(1).as_target_entry().unwrap().expr.as_aggref().unwrap();
+        assert_eq!((a0.aggno, a0.aggtransno), (0, 0));
+        assert_eq!(
+            (a1.aggno, a1.aggtransno),
+            (0, 0),
+            "location-only differences must not defeat agg sharing"
+        );
+    }
+}

@@ -1,8 +1,33 @@
 use ::executils::EStateData;
 use ::types_error::PgResult;
+use ::types_nodes::node_tree::Node;
+use ::types_nodes::NodeTag;
 
 use crate::noderesult::ResultState;
 use crate::procnode::PlanStateNode;
+
+/// `ExecSupportsBackwardScan` (execAmi.c). Unlanded node types take C's
+/// default-false arms; the true-returning unlanded ones (Append, Material,
+/// TidScan…) cannot appear in a plan today, so false is never wrongly returned.
+pub fn exec_supports_backward_scan(node: Option<Node<'_>>) -> bool {
+    let Some(node) = node else { return false };
+    let plan = node.as_plan().expect("plan-tree node has a Plan prefix");
+    if plan.parallel_aware {
+        return false;
+    }
+    match node.node_tag() {
+        NodeTag::T_Result => match plan.lefttree {
+            Some(outer) => exec_supports_backward_scan(Some(outer)),
+            None => false,
+        },
+        // amcanbackward: the only live index AM is btree (plancat.c port
+        // loud-panics on any other relam before a plan can carry it).
+        NodeTag::T_IndexScan | NodeTag::T_IndexOnlyScan => true,
+        NodeTag::T_SeqScan | NodeTag::T_Sort => true,
+        NodeTag::T_Limit => exec_supports_backward_scan(plan.lefttree),
+        _ => false,
+    }
+}
 
 /// `ExecReScan` (execAmi.c). The chgParam/initPlan/subPlan propagation block
 /// is dead until the Param lanes land (their construction panics loudly).
@@ -54,6 +79,10 @@ pub fn exec_re_scan<'mcx>(
                 exec_re_scan(sub, estate)?;
             }
             Ok(())
+        }
+        // execAmi.c has no ModifyTable rescan arm ("node type not supported").
+        PlanStateNode::ModifyTable(_) => {
+            panic!("ExecReScan (execAmi.c): node type 232 does not support ExecReScan")
         }
     }
 }

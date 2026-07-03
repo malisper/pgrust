@@ -34,6 +34,7 @@ table = { path = "../../../access/table/table" }
 tableam = { path = "../../../access/table/tableam" }
 indexam = { path = "../../../access/index/indexam" }
 nbtree = { path = "../../../access/nbtree/nbtree" }
+nodeagg = { path = "../../../executor/nodeagg" }
 vars = { path = "../../util/vars" }
 
 [dev-dependencies]

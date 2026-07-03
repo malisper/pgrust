@@ -8,6 +8,7 @@ publish.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+nodemodifytable = { path = "../nodemodifytable" }
 mcx = { path = "../../../_support/mcx" }
 types_core = { path = "../../../_support/types/types_core" }
 types_error = { path = "../../../_support/types/types_error" }
@@ -18,6 +19,7 @@ types_nodes = { path = "../../../_support/types/nodes" }
 types_dest = { path = "../../../_support/types/types_dest" }
 types_portal = { path = "../../../_support/types/portal" }
 tcop_dest = { path = "../../tcop/dest" }
+execjunk = { path = "../execjunk" }
 execmain_seams = { path = "../execmain_seams" }
 executils = { path = "../executils" }
 execexpr = { path = "../execexpr" }
@@ -44,6 +46,8 @@ aclchk_seams = { path = "../../catalog/aclchk_seams" }
 
 [dev-dependencies]
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
+tuplestore = { path = "../../utils/sort/tuplestore" }
+tstore_receiver = { path = "../tstore_receiver" }
 datum = { path = "../../../_support/types/datum" }
 types_rel = { path = "../../../_support/types/rel" }
 types_snapshot = { path = "../../../_support/types/snapshot" }

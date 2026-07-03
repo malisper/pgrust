@@ -316,6 +316,24 @@ impl Default for ModifyTable<'_> {
     }
 }
 
+/// Abstract second-level base for join nodes (C never instantiates it).
+/// `jointype` carries the C JoinType value ([`crate::jointype::JoinType`]).
+#[derive(Default)]
+#[repr(C)]
+pub struct Join<'mcx> {
+    pub plan: Plan<'mcx>,
+    pub jointype: crate::jointype::JoinType,
+    pub inner_unique: bool,
+    pub joinqual: NodeList<'mcx>,
+}
+
+#[derive(Default)]
+#[repr(C)]
+pub struct NestLoop<'mcx> {
+    pub join: Join<'mcx>,
+    pub nestParams: NodeList<'mcx>,
+}
+
 #[derive(Default)]
 #[repr(C)]
 pub struct Limit<'mcx> {
@@ -374,6 +392,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for ModifyTable<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for Limit<'mcx> {
     const TAG: NodeTag = NodeTag::T_Limit;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for NestLoop<'mcx> {
+    const TAG: NodeTag = NodeTag::T_NestLoop;
+}
 // SAFETY: repr(C), Plan first (offset asserted below), tag in is_plan_tag.
 unsafe impl<'mcx> PlanVariant<'mcx> for Result<'mcx> {}
 // SAFETY: repr(C), Plan first via the Scan base (offsets asserted below).
@@ -398,6 +419,8 @@ unsafe impl<'mcx> PlanVariant<'mcx> for Agg<'mcx> {}
 unsafe impl<'mcx> PlanVariant<'mcx> for ModifyTable<'mcx> {}
 // SAFETY: repr(C), Plan first (offsets asserted below), tag in is_plan_tag.
 unsafe impl<'mcx> PlanVariant<'mcx> for Limit<'mcx> {}
+// SAFETY: repr(C), Plan first via the Join base (offsets asserted below).
+unsafe impl<'mcx> PlanVariant<'mcx> for NestLoop<'mcx> {}
 
 const _: () = {
     assert!(offset_of!(Result, plan) == 0);
@@ -443,6 +466,11 @@ const _: () = {
     );
     assert!(offset_of!(Limit, plan) == 0);
     assert!(offset_of!(NodeRep<Limit>, payload) == offset_of!(NodeRep<Plan>, payload));
+    assert!(offset_of!(Join, plan) == 0);
+    assert!(offset_of!(NestLoop, join) == 0);
+    assert!(
+        offset_of!(NodeRep<NestLoop>, payload) == offset_of!(NodeRep<Plan>, payload)
+    );
 };
 
 fn is_plan_tag(tag: NodeTag) -> bool {
@@ -460,6 +488,7 @@ fn is_plan_tag(tag: NodeTag) -> bool {
             | NodeTag::T_Agg
             | NodeTag::T_ModifyTable
             | NodeTag::T_Limit
+            | NodeTag::T_NestLoop
     )
 }
 
@@ -526,6 +555,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_limit(self) -> Option<&'mcx Limit<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_nest_loop(self) -> Option<&'mcx NestLoop<'mcx>> {
         self.as_variant()
     }
 
