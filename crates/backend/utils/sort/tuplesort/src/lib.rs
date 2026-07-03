@@ -806,6 +806,13 @@ impl Tuplesort {
             }
             st.bounded = true;
             st.bound = bound as i32;
+            // C: bounded sorts are not an effective target for abbreviation —
+            // disarm and restore the authoritative comparator (measured here
+            // too: top-100/200k text paid ~142 instr/put of conversion for
+            // discard-after-one-compare work; docs/optimizations/abbrev-keys.md).
+            if let Some(abbrev) = st.abbrev.take() {
+                st.sort_keys[0].comparator = abbrev.full_comparator;
+            }
             st.recompute_put_watermark();
         })
     }

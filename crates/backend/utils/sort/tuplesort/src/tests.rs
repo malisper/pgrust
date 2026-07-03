@@ -812,6 +812,11 @@ fn abbrev_bounded_text_sort_top_n() {
     let vals = random_texts(2000, 0x1234, b"");
     let mut ts = begin_text_datum_abbrev(TUPLESORT_ALLOWBOUNDED);
     ts.set_bound(25);
+    // C disarms abbreviation in tuplesort_set_bound.
+    ts.0.with(|st| {
+        assert!(st.abbrev.is_none());
+        assert!(matches!(st.sort_keys[0].comparator, SortComparator::TextC));
+    });
     let blobs: Vec<Option<Box<[u64]>>> =
         vals.iter().map(|v| v.as_ref().map(|p| text_blob(p))).collect();
     for b in &blobs {
