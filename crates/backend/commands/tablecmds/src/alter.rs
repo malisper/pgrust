@@ -365,7 +365,18 @@ fn ATRewriteTables<'mcx>(
         let oid_new_heap =
             commands_cluster::make_new_heap(mcx, tab.relid, persistence, lockmode)?;
         ATRewriteTable(mcx, tab, oid_new_heap)?;
-        commands_cluster::finish_heap_swap(mcx, tab.relid, oid_new_heap, persistence)?;
+        commands_cluster::finish_heap_swap(
+            mcx,
+            tab.relid,
+            oid_new_heap,
+            false,
+            false,
+            true,
+            true,
+            procarray::RecentXmin(),
+            multixact::ReadNextMultiXactId()?,
+            persistence,
+        )?;
     } else if !tab.constraints.is_empty() || tab.verify_new_notnull {
         ATRewriteTable(mcx, tab, InvalidOid)?;
     }

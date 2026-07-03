@@ -46,7 +46,7 @@ utility_seams = { path = "../utility_seams" }
 catalog_toasting = { path = "../../catalog/catalog_toasting" }
 catalog = { path = "../../catalog/catalog" }
 catalog_namespace = { path = "../../catalog/catalog_namespace" }
-cluster = { path = "../../commands/cluster" }
+commands_cluster = { path = "../../commands/cluster" }
 indexcmds = { path = "../../commands/indexcmds" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
 superuser = { path = "../../utils/misc/superuser" }

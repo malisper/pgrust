@@ -19,7 +19,7 @@ pub use truncate::ExecuteTruncate;
 
 pub fn init_seams() {
     tablecmds_seams::rename_relation_internal::set(RenameRelationInternal);
-    catalog_index_seams::relation_set_new_relfilenumber::set(truncate::RelationSetNewRelfilenumber);
+    tablecmds_seams::range_var_callback_maintains_table::set(RangeVarCallbackMaintainsTable);
     tablecmds_seams::pre_commit_on_commit_actions::set(PreCommit_on_commit_actions);
     tablecmds_seams::at_eoxact_on_commit_actions::set(AtEOXact_on_commit_actions);
     tablecmds_seams::at_eosubxact_on_commit_actions::set(AtEOSubXact_on_commit_actions);

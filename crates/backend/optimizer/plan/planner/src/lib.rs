@@ -5,6 +5,7 @@
 pub mod allpaths;
 pub mod analyzejoins;
 pub mod clausesel;
+pub mod cluster;
 pub mod costsize;
 pub mod createplan;
 pub mod grouping;
