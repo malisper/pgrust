@@ -34,5 +34,6 @@ miscinit_seams = { path = "../../utils/init/miscinit_seams" }
 aclchk_seams = { path = "../../catalog/aclchk_seams" }
 guc = { path = "../../utils/misc/guc" }
 
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
 [dev-dependencies]
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
