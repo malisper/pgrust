@@ -232,6 +232,27 @@ pub struct ParamRef {
 pub struct A_Star;
 
 #[derive(Default)]
+pub struct A_Indices<'mcx> {
+    pub is_slice: bool,
+    pub lidx: Option<Node<'mcx>>,
+    pub uidx: Option<Node<'mcx>>,
+}
+
+#[derive(Default)]
+pub struct A_Indirection<'mcx> {
+    pub arg: Option<Node<'mcx>>,
+    pub indirection: NodeList<'mcx>,
+}
+
+#[derive(Default)]
+pub struct A_ArrayExpr<'mcx> {
+    pub elements: NodeList<'mcx>,
+    pub list_start: ParseLoc,
+    pub list_end: ParseLoc,
+    pub location: ParseLoc,
+}
+
+#[derive(Default)]
 pub struct SortBy<'mcx> {
     pub node: Option<Node<'mcx>>,
     pub sortby_dir: SortByDir,
@@ -754,6 +775,15 @@ unsafe impl NodeVariant<'_> for ParamRef {
 unsafe impl NodeVariant<'_> for A_Star {
     const TAG: NodeTag = NodeTag::T_A_Star;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for A_Indices<'mcx> {
+    const TAG: NodeTag = NodeTag::T_A_Indices;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for A_Indirection<'mcx> {
+    const TAG: NodeTag = NodeTag::T_A_Indirection;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for A_ArrayExpr<'mcx> {
+    const TAG: NodeTag = NodeTag::T_A_ArrayExpr;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for SortBy<'mcx> {
     const TAG: NodeTag = NodeTag::T_SortBy;
 }
@@ -1047,6 +1077,21 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_create_domain_stmt(self) -> Option<&'mcx CreateDomainStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_a_indices(self) -> Option<&'mcx A_Indices<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_a_indirection(self) -> Option<&'mcx A_Indirection<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_a_array_expr(self) -> Option<&'mcx A_ArrayExpr<'mcx>> {
         self.as_variant()
     }
 }

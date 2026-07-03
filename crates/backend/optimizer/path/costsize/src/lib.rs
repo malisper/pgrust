@@ -167,6 +167,23 @@ fn cost_qual_eval_walker(node: Node<'_>, cost: &mut QualCost) -> PgResult<()> {
             }
             Ok(())
         }
+        // SubscriptingRef carries no per-node charge in C; recurse.
+        NodeTag::T_SubscriptingRef => {
+            let sr = node.as_subscripting_ref().unwrap();
+            for e in sr.refupperindexpr.iter().flatten() {
+                cost_qual_eval_walker(e, cost)?;
+            }
+            for e in sr.reflowerindexpr.iter().flatten() {
+                cost_qual_eval_walker(e, cost)?;
+            }
+            if let Some(e) = sr.refexpr {
+                cost_qual_eval_walker(e, cost)?;
+            }
+            if let Some(e) = sr.refassgnexpr {
+                cost_qual_eval_walker(e, cost)?;
+            }
+            Ok(())
+        }
         NodeTag::T_NullTest => match node.as_null_test().unwrap().arg {
             Some(arg) => cost_qual_eval_walker(arg, cost),
             None => Ok(()),

@@ -362,6 +362,34 @@ fn check_agg_arguments_walker<'mcx>(
             Ok(())
         }
         NodeTag::T_Const | NodeTag::T_Param | NodeTag::T_CaseTestExpr => Ok(()),
+        NodeTag::T_ScalarArrayOpExpr => {
+            for arg in &node.as_scalar_array_op_expr().unwrap().args {
+                check_agg_arguments_walker(pstate, arg, ctx)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_ArrayExpr => {
+            for e in &node.as_array_expr().unwrap().elements {
+                check_agg_arguments_walker(pstate, e, ctx)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_SubscriptingRef => {
+            let sr = node.as_subscripting_ref().unwrap();
+            for e in sr.refupperindexpr.iter().flatten() {
+                check_agg_arguments_walker(pstate, e, ctx)?;
+            }
+            for e in sr.reflowerindexpr.iter().flatten() {
+                check_agg_arguments_walker(pstate, e, ctx)?;
+            }
+            if let Some(e) = sr.refexpr {
+                check_agg_arguments_walker(pstate, e, ctx)?;
+            }
+            if let Some(e) = sr.refassgnexpr {
+                check_agg_arguments_walker(pstate, e, ctx)?;
+            }
+            Ok(())
+        }
         other => panic!(
             "check_agg_arguments_walker (parse_agg.c): arm for {other:?} unported — \
              backend-parser-agg (Query recursion needs query_tree_walker)"

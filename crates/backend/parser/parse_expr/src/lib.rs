@@ -1,5 +1,6 @@
 #![allow(non_snake_case)]
 
+mod subscripts;
 #[cfg(test)]
 mod tests;
 
@@ -16,6 +17,7 @@ pub use nodes_core::node_funcs::{
     expr_collation, expr_is_null_constant, expr_location, expr_location_list, expr_type,
     expr_typmod,
 };
+pub use subscripts::{subscript_handler_for, transformContainerSubscripts, SubscriptHandler};
 
 std::thread_local! {
     static TRANSFORM_NULL_EQUALS: Cell<bool> = const { Cell::new(false) };
@@ -97,6 +99,10 @@ pub fn transformExprRecurse<'mcx>(
         NodeTag::T_MinMaxExpr => transformMinMaxExpr(mcx, pstate, expr),
         NodeTag::T_SQLValueFunction => transformSQLValueFunction(mcx, expr),
         NodeTag::T_ColumnRef => transformColumnRef(mcx, pstate, expr),
+        NodeTag::T_A_Indirection => transformIndirection(mcx, pstate, expr),
+        NodeTag::T_A_ArrayExpr => {
+            transformArrayExpr(mcx, pstate, expr.as_a_array_expr().unwrap(), 0, 0, -1)
+        }
         NodeTag::T_FuncCall => transformFuncCall(mcx, pstate, expr),
         NodeTag::T_SubLink => transformSubLink(mcx, pstate, expr),
         NodeTag::T_NullTest => transformNullTest(mcx, pstate, expr),
@@ -364,6 +370,227 @@ fn transformAExprIn<'mcx>(
     Ok(result.expect("IN list is never empty"))
 }
 
+// transformIndirection (parse_expr.c): adjacent A_Indices merge into one
+// SubscriptingRef; field selection (String) needs FieldSelect — loud.
+fn transformIndirection<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    expr: Node<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    let ind = expr.as_a_indirection().unwrap();
+    let mut result = transformExprRecurse(mcx, pstate, ind.arg.expect("A_Indirection.arg"))?;
+    let mut subscripts: types_nodes::NodeList<'mcx> = types_nodes::NodeList::nil();
+
+    for n in ind.indirection.iter() {
+        match n.node_tag() {
+            NodeTag::T_A_Indices => subscripts.lappend(mcx, n)?,
+            NodeTag::T_A_Star => {
+                return Err(row_expansion_error(pstate, expr_location(result)));
+            }
+            _ => panic!(
+                "transformIndirection (parse_expr.c): field selection \
+                 (ParseFuncOrColumn over composite) unported — misc2 rowtypes lane"
+            ),
+        }
+    }
+    if !subscripts.is_nil() {
+        result = transformContainerSubscripts(
+            mcx,
+            pstate,
+            result,
+            expr_type(result),
+            expr_typmod(result),
+            &subscripts,
+            false,
+        )?;
+    }
+    Ok(result)
+}
+
+#[cold]
+fn row_expansion_error(pstate: &ParseState<'_, '_>, location: i32) -> Box<types_error::PgError> {
+    use types_error::{ErrorLocation, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg("row expansion via \"*\" is not supported here".to_string())
+            .errposition(parser_small1::parser_errposition(
+                pstate,
+                location,
+                mbutils::GetDatabaseEncoding(),
+            ))
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_expr.c", 0, "transformIndirection")),
+    )
+}
+
+// transformArrayExpr (parse_expr.c). array_type == InvalidOid means "infer a
+// common element type"; a valid array_type (cast push-down) coerces hard.
+fn transformArrayExpr<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    a: &types_nodes::A_ArrayExpr<'mcx>,
+    mut array_type: types_core::Oid,
+    mut element_type: types_core::Oid,
+    typmod: i32,
+) -> PgResult<Node<'mcx>> {
+    use types_core::{InvalidOid, OidIsValid, INT2VECTOROID, OIDVECTOROID};
+
+    let mut newelems: types_nodes::NodeList<'mcx> = types_nodes::NodeList::nil();
+    let mut multidims = false;
+
+    for e in a.elements.iter() {
+        let newe;
+        if e.node_tag() == NodeTag::T_A_ArrayExpr {
+            newe = transformArrayExpr(
+                mcx,
+                pstate,
+                e.as_a_array_expr().unwrap(),
+                array_type,
+                element_type,
+                typmod,
+            )?;
+            multidims = true;
+        } else {
+            newe = transformExprRecurse(mcx, pstate, e)?;
+            if !multidims {
+                let newetype = expr_type(newe);
+                if newetype != INT2VECTOROID
+                    && newetype != OIDVECTOROID
+                    && OidIsValid(lsyscache::typ::get_element_type(newetype)?)
+                {
+                    multidims = true;
+                }
+            }
+        }
+        newelems.lappend(mcx, newe)?;
+    }
+
+    let coerce_type_id;
+    let coerce_hard;
+    if OidIsValid(array_type) {
+        debug_assert!(OidIsValid(element_type));
+        coerce_type_id = if multidims { array_type } else { element_type };
+        coerce_hard = true;
+    } else {
+        if newelems.is_nil() {
+            return Err(empty_array_error(pstate, a.location));
+        }
+        let mut pairs: Vec<(types_core::Oid, i32)> = Vec::with_capacity(newelems.len());
+        for e in newelems.iter() {
+            pairs.push((expr_type(e), expr_location(e)));
+        }
+        coerce_type_id = coerce::select_common_type(pstate, &pairs, Some("ARRAY"))?;
+        if multidims {
+            array_type = coerce_type_id;
+            element_type = lsyscache::typ::get_element_type(array_type)?;
+            if !OidIsValid(element_type) {
+                return Err(array_elem_type_error(pstate, array_type, a.location, false));
+            }
+        } else {
+            element_type = coerce_type_id;
+            array_type = lsyscache::typ::get_array_type(element_type)?;
+            if !OidIsValid(array_type) {
+                return Err(array_elem_type_error(pstate, element_type, a.location, true));
+            }
+        }
+        coerce_hard = false;
+    }
+
+    let mut newcoercedelems: types_nodes::NodeList<'mcx> = types_nodes::NodeList::nil();
+    for e in newelems.iter() {
+        let etype = expr_type(e);
+        let newe = if coerce_hard {
+            coerce::coerce_to_target_type(
+                mcx,
+                pstate,
+                e,
+                etype,
+                coerce_type_id,
+                typmod,
+                coerce::COERCION_EXPLICIT,
+                types_nodes::CoercionForm::COERCE_EXPLICIT_CAST,
+                -1,
+            )?
+            .ok_or_else(|| cannot_cast_error(pstate, etype, coerce_type_id, -1, e))?
+        } else {
+            coerce::coerce_to_common_type(
+                mcx,
+                pstate,
+                e,
+                etype,
+                expr_location(e),
+                coerce_type_id,
+                "ARRAY",
+            )?
+        };
+        newcoercedelems.lappend(mcx, newe)?;
+    }
+
+    Node::mk(
+        mcx,
+        types_nodes::ArrayExpr {
+            array_typeid: array_type,
+            array_collid: types_core::InvalidOid,
+            element_typeid: element_type,
+            elements: newcoercedelems,
+            multidims,
+            list_start: a.list_start,
+            list_end: a.list_end,
+            location: a.location,
+        },
+    )
+}
+
+#[cold]
+fn empty_array_error(pstate: &ParseState<'_, '_>, location: i32) -> Box<types_error::PgError> {
+    use types_error::{ErrorLocation, ERRCODE_INDETERMINATE_DATATYPE, ERROR};
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_INDETERMINATE_DATATYPE)
+            .errmsg("cannot determine type of empty array".to_string())
+            .errhint(
+                "Explicitly cast to the desired type, for example ARRAY[]::integer[]."
+                    .to_string(),
+            )
+            .errposition(parser_small1::parser_errposition(
+                pstate,
+                location,
+                mbutils::GetDatabaseEncoding(),
+            ))
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_expr.c", 0, "transformArrayExpr")),
+    )
+}
+
+#[cold]
+fn array_elem_type_error(
+    pstate: &ParseState<'_, '_>,
+    typ: types_core::Oid,
+    location: i32,
+    missing_array: bool,
+) -> Box<types_error::PgError> {
+    use types_error::{ErrorLocation, ERRCODE_UNDEFINED_OBJECT, ERROR};
+    let t = format_type::format_type_be(typ).unwrap_or_else(|_| typ.to_string());
+    let msg = if missing_array {
+        format!("could not find array type for data type {t}")
+    } else {
+        format!("could not find element type for data type {t}")
+    };
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_UNDEFINED_OBJECT)
+            .errmsg(msg)
+            .errposition(parser_small1::parser_errposition(
+                pstate,
+                location,
+                mbutils::GetDatabaseEncoding(),
+            ))
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_expr.c", 0, "transformArrayExpr")),
+    )
+}
+
 fn transformNullTest<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'_, 'mcx>,
@@ -404,13 +631,26 @@ fn transformTypeCast<'mcx>(
     let (target_type, target_typmod) = parse_utilcmd::typenameTypeIdAndMod(mcx, Some(pstate), tn)?;
 
     let arg = tc.arg.expect("TypeCast.arg");
-    if arg.node_tag() == NodeTag::T_A_ArrayExpr {
-        panic!(
-            "transformTypeCast (parse_expr.c): A_ArrayExpr arm (transformArrayExpr with \
-             pushed-down element type) unported — unit backend-parser-expr"
-        );
-    }
-    let arg = transformExprRecurse(mcx, pstate, arg)?;
+    let arg = if arg.node_tag() == NodeTag::T_A_ArrayExpr {
+        let mut target_base_typmod = target_typmod;
+        let target_base_type =
+            lsyscache::typ::getBaseTypeAndTypmod(target_type, &mut target_base_typmod)?;
+        let element_type = lsyscache::typ::get_element_type(target_base_type)?;
+        if types_core::OidIsValid(element_type) {
+            transformArrayExpr(
+                mcx,
+                pstate,
+                arg.as_a_array_expr().unwrap(),
+                target_base_type,
+                element_type,
+                target_base_typmod,
+            )?
+        } else {
+            transformExprRecurse(mcx, pstate, arg)?
+        }
+    } else {
+        transformExprRecurse(mcx, pstate, arg)?
+    };
 
     let input_type = expr_type(arg);
     if input_type == types_core::InvalidOid {
