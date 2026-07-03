@@ -20,6 +20,7 @@ elog_seams = { path = "../../utils/error/elog_seams" }
 sequence = { path = "../../commands/sequence" }
 typecmds = { path = "../../commands/typecmds" }
 parser_small1 = { path = "../../parser/parser_small1" }
+commands_view = { path = "../../commands/view" }
 types_rel = { path = "../../../_support/types/rel" }
 commands_analyze = { path = "../../commands/analyze" }
 commands_async = { path = "../../commands/commands_async" }

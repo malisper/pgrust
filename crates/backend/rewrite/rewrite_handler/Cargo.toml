@@ -21,6 +21,7 @@ readfuncs = { path = "../../nodes/readfuncs" }
 relcache = { path = "../../utils/cache/relcache" }
 coerce = { path = "../../parser/coerce" }
 parse_expr = { path = "../../parser/parse_expr" }
+parse_relation = { path = "../../parser/parse_relation" }
 parser_small1 = { path = "../../parser/parser_small1" }
 format_type = { path = "../../utils/adt/format_type" }
 pg_depend = { path = "../../catalog/pg_depend" }

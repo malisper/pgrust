@@ -1,15 +1,22 @@
-// dependency.c deletion half, bounded to dropping plain tables and the
-// objects their INTERNAL/AUTO closure reaches (rowtype + array type, toast
-// table + toast index, pg_attrdef/pg_constraint entries); every other object
-// class or error-report arm is loud with its C symbol.
+// dependency.c deletion half plus recordDependencyOnExpr, bounded to plain
+// tables/views and the objects their INTERNAL/AUTO closure reaches (rowtype +
+// array type, toast table + toast index, pg_attrdef/pg_constraint entries,
+// pg_rewrite rules); the DROP RESTRICT 2BP01 report is live, every other
+// object class or report arm is loud with its C symbol.
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
+
+mod description;
+mod find_expr;
+
+pub use description::getObjectDescription;
+pub use find_expr::{eliminate_duplicate_dependencies, find_expr_references, recordDependencyOnExpr};
 
 use datum::Datum;
 use mcx::Mcx;
 use pg_depend::{object_address_comparator, ObjectAddress};
 use types_core::{AttrNumber, InvalidOid, Oid, RELATION_RELATION_ID, TYPE_RELATION_ID};
-use types_error::PgResult;
+use types_error::{PgError, PgResult, ERRCODE_DEPENDENT_OBJECTS_STILL_EXIST};
 use types_rel::{AccessExclusiveLock, Relation, RowExclusiveLock, RELKIND_INDEX, RELKIND_RELATION, RELKIND_SEQUENCE, RELKIND_TOASTVALUE};
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use types_tuple::{HeapTupleData, TupleDescData};
@@ -56,11 +63,9 @@ fn unported(what: &str) -> ! {
     panic!("unported: dependency.c {what}")
 }
 
-// dependee feeds only the loud report arms today.
 #[derive(Clone, Copy)]
 struct ObjectAddressExtra {
     flags: i32,
-    #[allow(dead_code)]
     dependee: ObjectAddress,
 }
 
@@ -230,7 +235,7 @@ pub fn performDeletion<'mcx>(
         None,
         &depRel,
     )?;
-    reportDependentObjects(&targetObjects, behavior, flags)?;
+    reportDependentObjects(mcx, &targetObjects, behavior, flags, Some(object))?;
     deleteObjectsInList(mcx, &targetObjects, &depRel, flags)?;
     depRel.close(RowExclusiveLock)
 }
@@ -260,7 +265,8 @@ pub fn performMultipleDeletions<'mcx>(
             &depRel,
         )?;
     }
-    reportDependentObjects(&targetObjects, behavior, flags)?;
+    let origObject = if objects.refs.len() == 1 { Some(&objects.refs[0]) } else { None };
+    reportDependentObjects(mcx, &targetObjects, behavior, flags, origObject)?;
     deleteObjectsInList(mcx, &targetObjects, &depRel, flags)?;
     depRel.close(RowExclusiveLock)
 }
@@ -391,10 +397,11 @@ fn findDependentObjects<'mcx>(
     }
 
     if owningObject.classId != InvalidOid {
-        unported(
-            "findDependentObjects: 2BP01 cannot-drop-required-object report \
-             (getObjectDescription)",
-        );
+        let otherObjDesc = getObjectDescription(mcx, &owningObject)?
+            .expect("owning object was just read from pg_depend");
+        let objDesc = getObjectDescription(mcx, object)?
+            .expect("drop target exists");
+        return Err(cannot_drop_required(&objDesc, &otherObjDesc));
     }
 
     // Scan what depends on this object.
@@ -491,13 +498,46 @@ fn findDependentObjects<'mcx>(
     Ok(())
 }
 
-// reportDependentObjects: the happy paths are AUTO/INTERNAL cascades (DEBUG2,
-// suppressed) and no dependents; the NOTICE/RESTRICT-error report needs
-// getObjectDescription and is loud.
-fn reportDependentObjects(
+#[cold]
+#[inline(never)]
+fn cannot_drop_required(obj_desc: &str, other_desc: &str) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!("cannot drop {obj_desc} because {other_desc} requires it"))
+            .with_sqlstate(ERRCODE_DEPENDENT_OBJECTS_STILL_EXIST)
+            .with_hint(format!("You can drop {other_desc} instead.")),
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn dependent_objects_exist(
+    orig_desc: Option<String>,
+    clientdetail: String,
+    logdetail: String,
+) -> Box<PgError> {
+    let msg = match orig_desc {
+        Some(desc) => format!("cannot drop {desc} because other objects depend on it"),
+        None => "cannot drop desired object(s) because other objects depend on them".into(),
+    };
+    Box::new(
+        PgError::error(msg)
+            .with_sqlstate(ERRCODE_DEPENDENT_OBJECTS_STILL_EXIST)
+            .with_detail(clientdetail)
+            .with_detail_log(logdetail)
+            .with_hint("Use DROP ... CASCADE to drop the dependent objects too."),
+    )
+}
+
+const MAX_REPORTED_DEPS: i32 = 100;
+
+// The auto/internal cascade arm stays a silent DEBUG2 no-op; the CASCADE
+// NOTICE report is loud.
+fn reportDependentObjects<'mcx>(
+    mcx: Mcx<'mcx>,
     targetObjects: &ObjectAddresses,
     behavior: DropBehavior,
     flags: i32,
+    origObject: Option<&ObjectAddress>,
 ) -> PgResult<()> {
     for i in (0..targetObjects.refs.len()).rev() {
         let extra = &targetObjects.extras[i];
@@ -505,7 +545,16 @@ fn reportDependentObjects(
             unported("reportDependentObjects: partition-drop 2BP01 report");
         }
     }
+
+    let mut clientdetail = String::new();
+    let mut logdetail = String::new();
+    let mut numReportedClient: i32 = 0;
+    let mut numNotReportedClient: i32 = 0;
+    let mut ok = true;
+
+    // Back to front: dependency order, not deletion order.
     for i in (0..targetObjects.refs.len()).rev() {
+        let obj = &targetObjects.refs[i];
         let extra = &targetObjects.extras[i];
         if extra.flags & DEPFLAG_ORIGINAL != 0 {
             continue;
@@ -516,14 +565,50 @@ fn reportDependentObjects(
         if extra.flags & (DEPFLAG_AUTO | DEPFLAG_INTERNAL | DEPFLAG_PARTITION | DEPFLAG_EXTENSION)
             != 0
         {
-            // drop auto-cascades: DEBUG2, not client-visible.
+            // drop auto-cascades: DEBUG2, not client-visible. C builds the
+            // object description before this arm for that log line; deferred
+            // into the reporting arms so unported-class descriptions (e.g. a
+            // table's own pg_type rowtype) stay unreached.
         } else if behavior == DropBehavior::DROP_RESTRICT {
-            unported("reportDependentObjects: DROP RESTRICT dependency report (2BP01)");
+            let Some(objDesc) = getObjectDescription(mcx, obj)? else { continue };
+            if let Some(otherDesc) = getObjectDescription(mcx, &extra.dependee)? {
+                if numReportedClient < MAX_REPORTED_DEPS {
+                    if !clientdetail.is_empty() {
+                        clientdetail.push('\n');
+                    }
+                    clientdetail.push_str(&format!("{objDesc} depends on {otherDesc}"));
+                    numReportedClient += 1;
+                } else {
+                    numNotReportedClient += 1;
+                }
+                if !logdetail.is_empty() {
+                    logdetail.push('\n');
+                }
+                logdetail.push_str(&format!("{objDesc} depends on {otherDesc}"));
+            } else {
+                numNotReportedClient += 1;
+            }
+            ok = false;
         } else if flags & PERFORM_DELETION_QUIETLY != 0 {
             // QUIETLY drops msglevel to DEBUG2: nothing client-visible.
         } else {
             unported("reportDependentObjects: DROP CASCADE NOTICE report");
         }
+    }
+
+    if numNotReportedClient > 0 {
+        let noun = if numNotReportedClient == 1 { "object" } else { "objects" };
+        clientdetail.push_str(&format!(
+            "\nand {numNotReportedClient} other {noun} (see server log for list)"
+        ));
+    }
+
+    if !ok {
+        let orig_desc = match origObject {
+            Some(orig) => getObjectDescription(mcx, orig)?,
+            None => None,
+        };
+        return Err(dependent_objects_exist(orig_desc, clientdetail, logdetail));
     }
     Ok(())
 }
@@ -620,6 +705,47 @@ fn doDeletion<'mcx>(mcx: Mcx<'mcx>, object: &ObjectAddress, flags: i32) -> PgRes
         other => panic!("unported: doDeletion object class {other}"),
     }
     Ok(())
+}
+
+// deleteDependencyRecordsFor (pg_depend.c).
+pub fn deleteDependencyRecordsFor<'mcx>(
+    mcx: Mcx<'mcx>,
+    classId: Oid,
+    objectId: Oid,
+    skipExtensionDeps: bool,
+) -> PgResult<i64> {
+    let mut count: i64 = 0;
+    let depRel = table::table_open(mcx, pg_depend::DependRelationId, RowExclusiveLock)?;
+    let keys = [
+        oid_key(Anum_pg_depend_classid, classId),
+        oid_key(Anum_pg_depend_objid, objectId),
+    ];
+    let mut scan = genam::systable_beginscan(
+        mcx,
+        &depRel,
+        pg_depend::DependDependerIndexId,
+        true,
+        None,
+        &keys,
+    )?;
+    let desc = depRel.descr();
+    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+        // SAFETY: aliases the slot-held image for the deptype read below.
+        let view = unsafe {
+            HeapTupleData::from_raw_parts(tup.header_ptr(), tup.t_len, tup.t_self, tup.t_tableOid)
+        };
+        if skipExtensionDeps
+            && getattr(&view, Anum_pg_depend_deptype, desc).as_i8() as u8 == b'e'
+        {
+            continue;
+        }
+        let tid = tup.t_self;
+        catalog_indexing::CatalogTupleDelete(&depRel, &tid)?;
+        count += 1;
+    }
+    genam::systable_endscan(mcx, scan)?;
+    depRel.close(RowExclusiveLock)?;
+    Ok(count)
 }
 
 // deleteSharedDependencyRecordsFor (pg_shdepend.c) via shdepDropDependency's

@@ -1303,3 +1303,51 @@ fn create_procedure() {
     assert_eq!(n.parameters.len(), 1);
     assert_eq!(n.options.len(), 2);
 }
+
+#[test]
+fn create_view_stmt() {
+    let list = parse("CREATE VIEW v1 AS SELECT t1.a, t2.d FROM t1 JOIN t2 ON t1.a = t2.a WHERE t1.b > 10");
+    let rs = only_stmt(&list);
+    let v = rs.stmt.expect("stmt").as_variant::<types_nodes::rawnodes::ViewStmt>().expect("ViewStmt");
+    assert_eq!(v.view.expect("view").relname, Some("v1"));
+    assert!(!v.replace);
+    assert!(v.aliases.is_nil() && v.options.is_nil());
+    assert_eq!(v.withCheckOption, types_nodes::rawnodes::ViewCheckOption::NO_CHECK_OPTION);
+    let sel = v.query.expect("query").as_select_stmt().expect("SelectStmt");
+    assert_eq!(sel.targetList.len(), 2);
+    assert!(sel.whereClause.is_some());
+}
+
+#[test]
+fn create_or_replace_view_with_aliases() {
+    let list = parse("CREATE OR REPLACE VIEW v2 (x, y) AS SELECT 1, 2");
+    let rs = only_stmt(&list);
+    let v = rs.stmt.expect("stmt").as_variant::<types_nodes::rawnodes::ViewStmt>().expect("ViewStmt");
+    assert!(v.replace);
+    assert_eq!(v.aliases.len(), 2);
+    assert_eq!(v.aliases.nth(0).as_string().unwrap().sval, "x");
+    assert_eq!(v.withCheckOption, types_nodes::rawnodes::ViewCheckOption::NO_CHECK_OPTION);
+}
+
+#[test]
+fn create_view_with_check_option_kinds() {
+    for (sql, want) in [
+        ("CREATE VIEW vc AS SELECT 1 WITH CHECK OPTION",
+         types_nodes::rawnodes::ViewCheckOption::CASCADED_CHECK_OPTION),
+        ("CREATE VIEW vc AS SELECT 1 WITH CASCADED CHECK OPTION",
+         types_nodes::rawnodes::ViewCheckOption::CASCADED_CHECK_OPTION),
+        ("CREATE VIEW vc AS SELECT 1 WITH LOCAL CHECK OPTION",
+         types_nodes::rawnodes::ViewCheckOption::LOCAL_CHECK_OPTION),
+    ] {
+        let list = parse(sql);
+        let v = only_stmt(&list).stmt.unwrap()
+            .as_variant::<types_nodes::rawnodes::ViewStmt>().expect("ViewStmt");
+        assert_eq!(v.withCheckOption, want, "{sql}");
+    }
+}
+
+#[test]
+#[should_panic(expected = "unimplemented grammar action")]
+fn create_recursive_view_is_loud() {
+    let _ = parse("CREATE RECURSIVE VIEW vr (n) AS SELECT 1");
+}
