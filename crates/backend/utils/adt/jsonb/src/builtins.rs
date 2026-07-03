@@ -102,7 +102,7 @@ pub fn fc_jsonb_object_field(
         let mcx = fcinfo.result_mcx();
         let jb = arg_jsonb(fcinfo, 0, mcx)?;
         // SAFETY: catalog arg 1 is a non-null text varlena (strict fn).
-        let key = unsafe { fcinfo.arg_varlena_packed(1) };
+        let key = unsafe { fcinfo.arg_varlena_packed(1)? };
         crate::getfield::object_field(mcx, jb.as_bytes(), key.data())?.map(image_result)
     };
     match d {
@@ -119,7 +119,7 @@ pub fn fc_jsonb_object_field_text(
         let mcx = fcinfo.result_mcx();
         let jb = arg_jsonb(fcinfo, 0, mcx)?;
         // SAFETY: catalog arg 1 is a non-null text varlena (strict fn).
-        let key = unsafe { fcinfo.arg_varlena_packed(1) };
+        let key = unsafe { fcinfo.arg_varlena_packed(1)? };
         crate::getfield::object_field_text(mcx, jb.as_bytes(), key.data())?.map(varlena_result)
     };
     match d {
@@ -234,7 +234,7 @@ pub fn fc_jsonb_exists(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> P
     let mcx = fcinfo.result_mcx();
     let jb = arg_jsonb(fcinfo, 0, mcx)?;
     // SAFETY: catalog arg 1 is a non-null text varlena (strict fn).
-    let key = unsafe { fcinfo.arg_varlena_packed(1) };
+    let key = unsafe { fcinfo.arg_varlena_packed(1)? };
     Ok(Datum::from_bool(crate::ops::exists_key(
         jb.as_bytes(),
         key.data(),

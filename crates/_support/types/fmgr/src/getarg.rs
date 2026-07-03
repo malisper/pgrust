@@ -25,8 +25,7 @@ pub struct PackedVarlena<'a> {
 }
 
 impl<'a> PackedVarlena<'a> {
-    /// Safety: `p` is a live varlena image readable for its full VARSIZE_ANY, unwritten for `'a`.
-    /// Caller guarantees the image is inline (1B-short or 4B-uncompressed).
+    /// Safety: `p` is a live inline varlena image readable for its full VARSIZE_ANY, unwritten for `'a`.
     #[inline]
     pub unsafe fn from_ptr(p: *const u8) -> PackedVarlena<'a> {
         // SAFETY: caller contract — header readable.
@@ -50,7 +49,7 @@ impl<'a> PackedVarlena<'a> {
 
     #[inline]
     pub fn image(self) -> &'a [u8] {
-        // SAFETY: from_ptr contract — image readable for its full size.
+        // SAFETY: from_ptr contract.
         unsafe { core::slice::from_raw_parts(self.ptr, self.size()) }
     }
 
@@ -107,8 +106,7 @@ impl<'a> PackedVarlena<'a> {
     }
 }
 
-// Detoast copies leak into the arena — C pallocs them in CurrentMemoryContext
-// and the context reset reclaims both.
+// Detoast copies leak into the arena (C pallocs in CurrentMemoryContext).
 #[cold]
 #[inline(never)]
 unsafe fn detoast_arg<'m>(p: *const u8, mcx: Mcx<'m>) -> PgResult<PackedVarlena<'m>> {
@@ -170,9 +168,8 @@ impl FunctionCallInfoBaseData {
         self.arg(i).as_usize() as *const u8
     }
 
-    /// C `PG_GETARG_*_PP` (`pg_detoast_datum_packed`): external/compressed
-    /// args detoast into the armed result mcx; inline images borrow.
-    /// Safety: arg `i` is a non-null varlena (`typlen == -1`), live for the call.
+    /// C `pg_detoast_datum_packed`: external/compressed args detoast into the
+    /// armed result mcx. Safety: arg `i` is a non-null live varlena.
     #[inline]
     pub unsafe fn arg_varlena_packed(&self, i: usize) -> PgResult<PackedVarlena<'_>> {
         // SAFETY: forwarded caller contract — header readable.
@@ -189,9 +186,8 @@ impl FunctionCallInfoBaseData {
         }
     }
 
-    /// Raw varlena image of any header form (C passes the raw datum to
-    /// slice-fetching paths like text_substring).
-    /// Safety: arg `i` is a non-null varlena, readable for its full VARSIZE_ANY.
+    /// Raw image, any header form (C's raw datum for slice-fetch paths).
+    /// Safety: arg `i` is a non-null varlena readable for its full VARSIZE_ANY.
     #[inline]
     pub unsafe fn arg_varlena_raw(&self, i: usize) -> &[u8] {
         // SAFETY: forwarded caller contract.
