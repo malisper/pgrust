@@ -373,6 +373,7 @@ pub fn exec_end_modify_table(mt: &mut ModifyTableState<'_>) {
     }
     mt.snapshot_any = None;
     mt.project_returning = None;
+    mt.on_conflict = None;
     mt.check_exprs = None;
 }
 
@@ -1632,8 +1633,8 @@ fn plan_output_mismatch(detail: &'static str) -> Box<PgError> {
 
 mcx::forget_safe_nodrop!(NewColSrc);
 
-// Exempt: indexes/snapshot_any/project_returning/check_exprs (and each
-// CheckExpr's state) are released in exec_end_modify_table; CmdType is
+// Exempt: indexes/snapshot_any/project_returning/on_conflict/check_exprs (and
+// each CheckExpr's state) are released in exec_end_modify_table; CmdType is
 // no-drop, const-proven below.
 const _: () = assert!(!core::mem::needs_drop::<CmdType>());
 mcx::forget_safe_struct!(
@@ -1641,5 +1642,6 @@ mcx::forget_safe_struct!(
     ModifyTableState<'_> { plan, canSetTag, mt_done, result_rti,
         ri_newTupleSlot, ri_oldTupleSlot, ri_ReturningSlot,
         ri_projectNewInfoValid, ri_RowIdAttNo, update_cols, returning_slot;
-        operation, indexes, snapshot_any, project_returning, check_exprs },
+        operation, indexes, snapshot_any, project_returning, on_conflict,
+        check_exprs },
 );
