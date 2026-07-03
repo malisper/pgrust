@@ -52,6 +52,11 @@ seam_core::seam!(
     pub fn lock_held_by_me(locktag: LOCKTAG, lockmode: LOCKMODE, orstronger: bool) -> bool
 );
 
+seam_core::seam!(
+    // DoLockModesConflict (lock.c); pure conflict-table probe.
+    pub fn do_lock_modes_conflict(mode1: LOCKMODE, mode2: LOCKMODE) -> bool
+);
+
 // C's `LOCALLOCK **locallocks, int nlocks`; None = NULL (overflowed resowner
 // cache = walk the whole LOCALLOCK table).
 seam_core::seam!(

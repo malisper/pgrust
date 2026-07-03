@@ -21,8 +21,7 @@ fc_oid2! {
     fc_oidge: oidge;
 }
 
-// Result Datum aliases the scratch (int builtins' contract): consume before
-// the next out-function call.
+// Result Datum aliases the scratch: consume before the next out call.
 std::thread_local! {
     static OUT_SCRATCH: core::cell::UnsafeCell<[u8; 16]> =
         const { core::cell::UnsafeCell::new([0; 16]) };

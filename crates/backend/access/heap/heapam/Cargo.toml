@@ -44,6 +44,7 @@ tidbitmap = { path = "../../../nodes/tidbitmap" }
 
 visibilitymap = { path = "../visibilitymap" }
 catalog_seams = { path = "../../../catalog/catalog_seams" }
+lock_seams = { path = "../../../storage/lmgr/lock_seams" }
 
 [dev-dependencies]
 miscinit_seams = { path = "../../../utils/init/miscinit_seams" }

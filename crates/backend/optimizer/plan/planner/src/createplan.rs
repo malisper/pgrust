@@ -1557,9 +1557,8 @@ fn create_limit_plan<'mcx>(
     Ok(plan.seal())
 }
 
-// create_lockrows_plan + make_lockrows (createplan.c). The PlanRowMark nodes
-// materialize here from the run store (C shares root->rowMarks pointers;
-// setrefs adjusts these copies in place the same way).
+// create_lockrows_plan + make_lockrows (createplan.c); PlanRowMark nodes
+// materialize from the run store (C shares root->rowMarks pointers).
 fn create_lockrows_plan<'mcx>(
     run: &mut PlannerRun<'mcx>,
     path_id: PathId,

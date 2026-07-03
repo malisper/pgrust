@@ -44,7 +44,7 @@ pub enum PlanStateNode<'mcx> {
     Material(PgBox<'mcx, MaterialNode<'mcx>>),
     Unique(PgBox<'mcx, UniqueNode<'mcx>>),
     Limit(LimitNode<'mcx>),
-    LockRows(LockRowsNode<'mcx>),
+    LockRows(PgBox<'mcx, LockRowsNode<'mcx>>),
     BitmapHeapScan(PgBox<'mcx, BitmapHeapPlanState<'mcx>>),
     BitmapIndexScan(::nodebitmapindexscan::BitmapIndexScanState<'mcx>),
     BitmapAnd(PgBox<'mcx, BitmapCombineState<'mcx>>),
@@ -153,6 +153,7 @@ pub struct LimitNode<'mcx> {
 pub struct LockRowsNode<'mcx> {
     pub state: ::nodelockrows::LockRowsState<'mcx>,
     pub outer: PgBox<'mcx, PlanStateNode<'mcx>>,
+    pub epq: crate::epq::EpqState<'mcx>,
 }
 
 // The Unique node's outer child lives here (nodesort/nodeagg precedent).
@@ -520,10 +521,21 @@ pub fn exec_init_node<'mcx>(
                 .expect("ExecInitNode of a non-NULL outer plan");
             let outer_tlist = &outer_plan_node.as_plan().expect("plan node").targetlist;
             let state = ::nodelockrows::exec_init_lock_rows(lr_plan, estate, eflags, outer_tlist)?;
-            PlanStateNode::LockRows(LockRowsNode {
-                state,
-                outer: ::mcx::alloc_in(estate.es_query_cxt, outer)?,
-            })
+            // EvalPlanQualInit(epqstate, outerPlan, epq_arowmarks); the test
+            // slots double as the mark slots (EvalPlanQualSlot).
+            let epq = crate::epq::EpqState {
+                plan: lr_plan.plan.lefttree,
+                recheck: None,
+                result_rti: state.lr_arowMarks.first().map_or(0, |a| a.rti),
+            };
+            PlanStateNode::LockRows(::mcx::alloc_in(
+                estate.es_query_cxt,
+                LockRowsNode {
+                    state,
+                    outer: ::mcx::alloc_in(estate.es_query_cxt, outer)?,
+                    epq,
+                },
+            )?)
         }
         NodeTag::T_Agg => {
             let mcx = estate.es_query_cxt;
@@ -1003,9 +1015,14 @@ fn limit_arm<'mcx>(l: &mut LimitNode<'mcx>, estate: &mut EStateData<'mcx>) -> Pr
 }
 
 #[inline(never)]
-fn lockrows_arm<'mcx>(l: &mut LockRowsNode<'mcx>, estate: &mut EStateData<'mcx>) -> ProcResult {
-    let LockRowsNode { state, outer } = l;
-    ::nodelockrows::exec_lock_rows(state, &mut **outer, estate)
+fn lockrows_arm<'mcx>(
+    l: &mut PgBox<'mcx, LockRowsNode<'mcx>>,
+    estate: &mut EStateData<'mcx>,
+) -> ProcResult {
+    let LockRowsNode { state, outer, epq } = &mut **l;
+    ::nodelockrows::exec_lock_rows(state, &mut **outer, estate, |e, inputslot| {
+        crate::epq::eval_plan_qual(epq, e, inputslot)
+    })
 }
 
 #[inline(never)]
@@ -1234,8 +1251,11 @@ pub fn exec_end_node<'mcx>(
         }
         // C ExecEndLimit only ends the child.
         PlanStateNode::Limit(l) => exec_end_node(&mut l.outer, estate),
-        // C ExecEndLockRows: EvalPlanQualEnd (a no-op on the non-EPQ core) + child.
-        PlanStateNode::LockRows(l) => exec_end_node(&mut l.outer, estate),
+        // C ExecEndLockRows: EvalPlanQualEnd + child.
+        PlanStateNode::LockRows(l) => {
+            crate::epq::eval_plan_qual_end(&mut l.epq, estate)?;
+            exec_end_node(&mut l.outer, estate)
+        }
         PlanStateNode::BitmapHeapScan(b) => {
             let b = &mut **b;
             exec_end_node(&mut b.bitmapqual, estate)?;

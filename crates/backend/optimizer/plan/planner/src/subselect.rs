@@ -1725,8 +1725,7 @@ fn finalize_plan<'mcx>(
                 finalize_primnode(run, cnt, &mut paramids)?;
             }
         }
-        // LockRows: epqParam becomes valid for descendants (EPQ scan_params
-        // leg dead here) and is locally added, never propagated up.
+        // epqParam becomes valid for descendants; never propagated up.
         NodeTag::T_LockRows => {
             valid.add_member(mcx, plan.as_lock_rows().unwrap().epqParam)?;
         }
