@@ -7,8 +7,7 @@ use types_nodes::parsenodes::{
 use types_nodes::rawnodes::A_Expr_Kind::AEXPR_OP;
 use types_nodes::rawnodes::{ColumnDef, Constraint, ConstrType, CreateStmt, OnCommitAction};
 use types_nodes::{
-    Alias, DeleteStmt, InsertStmt, Node, NodeList, NodeTag, RangeFunction, RangeVar, RawStmt,
-    SelectStmt,
+    Alias, DeleteStmt, InsertStmt, Node, NodeList, RangeFunction, RangeVar, RawStmt, SelectStmt,
     UpdateStmt,
     ValUnion,
 };
