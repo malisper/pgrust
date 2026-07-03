@@ -232,6 +232,16 @@ fn ExplainOneUtility<'mcx>(
                 params,
                 query_env,
                 &mut |pstmt, prepared_query, param_li, planduration, is_last| {
+                    // SAFETY: retention contract (dispatch unify_stmt_lifetime
+                    // precedent) — the cplan refcount held across this call
+                    // pins the registry-'static plan tree past 'mcx; nothing
+                    // derived from it escapes the render.
+                    let pstmt: &'mcx PlannedStmt<'mcx> = unsafe {
+                        core::mem::transmute::<
+                            &PlannedStmt<'_>,
+                            &'mcx PlannedStmt<'mcx>,
+                        >(pstmt)
+                    };
                     if bufusage.is_none() {
                         bufusage = bufusage_start.map(|start| {
                             let mut b = BufferUsage::default();
