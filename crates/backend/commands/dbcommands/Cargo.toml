@@ -55,3 +55,6 @@ miscinit = { path = "../../utils/init/miscinit" }
 init_small = { path = "../../utils/init/init_small" }
 varlena = { path = "../../utils/adt/varlena" }
 explain = { path = "../explain" }
+numutils = { path = "../../utils/adt/numutils" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+xlogrecovery_seams = { path = "../../access/transam/xlogrecovery_seams" }

@@ -14,7 +14,7 @@ use types_error::{
 };
 use types_rel::Relation;
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
-use types_storage::lock::{AccessExclusiveLock, AccessShareLock, RowExclusiveLock};
+use types_storage::lock::{AccessExclusiveLock, RowExclusiveLock};
 use types_storage::storage::ProcSignalBarrierType;
 use types_tuple::NameData;
 
@@ -69,24 +69,18 @@ fn drop_setting(mcx: Mcx<'_>, databaseid: Oid) -> PgResult<()> {
     delete_where(mcx, DbRoleSettingRelationId, DbRoleSettingDatidRolidIndexId, &keys)
 }
 
-// CountDBSubscriptions (pg_subscription.c): seqscan counting subdbid matches.
+// CountDBSubscriptions (pg_subscription.c): RowExclusiveLock held to commit
+// so a concurrent CREATE SUBSCRIPTION can't slip in behind the count.
 fn count_db_subscriptions(mcx: Mcx<'_>, dbid: Oid) -> PgResult<i32> {
-    let rel = table::table_open(mcx, SubscriptionRelationId, AccessShareLock)?;
+    let rel = table::table_open(mcx, SubscriptionRelationId, RowExclusiveLock)?;
     let mut n = 0;
-    let mut scan = genam::systable_beginscan(mcx, &rel, InvalidOid, false, None, &[])?;
-    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
-        let mut isnull = false;
-        // SAFETY: pg_subscription row under this relation's descriptor.
-        let subdbid = unsafe {
-            types_tuple::heap_getattr(tup, Anum_pg_subscription_subdbid, rel.descr(), &mut isnull)
-        }
-        .as_oid();
-        if subdbid == dbid {
-            n += 1;
-        }
+    let key = [oid_key(Anum_pg_subscription_subdbid, dbid)];
+    let mut scan = genam::systable_beginscan(mcx, &rel, InvalidOid, false, None, &key)?;
+    while genam::systable_getnext(mcx, &mut scan)?.is_some() {
+        n += 1;
     }
     genam::systable_endscan(mcx, scan)?;
-    rel.close(AccessShareLock)?;
+    rel.close(types_storage::lock::NoLock)?;
     Ok(n)
 }
 
@@ -193,8 +187,15 @@ pub fn dropdb(mcx: Mcx<'_>, dbname: &str, missing_ok: bool, force: bool) -> PgRe
             .into());
     }
 
+    // C terminates other backends here (TerminateOtherDBBackends); the signal
+    // lane is unported, so FORCE is a catchable error, never a wrong drop.
     if force {
-        panic!("dropdb: WITH (FORCE) unported (TerminateOtherDBBackends, procarray signal lane)");
+        return Err(ereport(ERROR)
+            .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg("DROP DATABASE ... WITH (FORCE) is not supported yet".to_string())
+            .errdetail("TerminateOtherDBBackends is unported (procarray signal lane).".to_string())
+            .into_error()
+            .into());
     }
 
     if let Some((notherbackends, npreparedxacts)) = procarray::CountOtherDBBackends(db_id)? {

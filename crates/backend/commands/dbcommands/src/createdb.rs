@@ -51,14 +51,18 @@ fn defGetInt32(def: &DefElem<'_>) -> PgResult<i32> {
 }
 
 fn defGetObjectId(def: &DefElem<'_>) -> PgResult<Oid> {
-    match def.arg.and_then(|n| n.as_integer()) {
-        Some(i) => Ok(i.ival as u32),
-        None => Err(ereport(ERROR)
-            .errcode(ERRCODE_SYNTAX_ERROR)
-            .errmsg(format!("{} requires a numeric value", def.defname.unwrap_or("")))
-            .into_error()
-            .into()),
+    if let Some(i) = def.arg.and_then(|n| n.as_integer()) {
+        return Ok(i.ival as u32);
     }
+    // OIDs above i32::MAX lex as Float (pg_upgrade's preserved OIDs).
+    if let Some(f) = def.arg.and_then(|n| n.as_float()) {
+        return Ok(numutils::uint32in_subr(f.fval, false, "oid", None)?.0);
+    }
+    Err(ereport(ERROR)
+        .errcode(ERRCODE_SYNTAX_ERROR)
+        .errmsg(format!("{} requires a numeric value", def.defname.unwrap_or("")))
+        .into_error()
+        .into())
 }
 
 // pg_get_encoding_from_locale (chklocale.c), reduced to the locales the fleet
@@ -289,6 +293,7 @@ pub fn createdb<'mcx>(mcx: Mcx<'mcx>, stmt: &CreatedbStmt<'mcx>) -> PgResult<Oid
                     return Err(ereport(ERROR)
                         .errcode(ERRCODE_UNDEFINED_OBJECT)
                         .errmsg(format!("{encoding} is not a valid encoding code"))
+                        .errposition(el.location + 1)
                         .into_error()
                         .into());
                 }
@@ -299,6 +304,7 @@ pub fn createdb<'mcx>(mcx: Mcx<'mcx>, stmt: &CreatedbStmt<'mcx>) -> PgResult<Oid
                     return Err(ereport(ERROR)
                         .errcode(ERRCODE_UNDEFINED_OBJECT)
                         .errmsg(format!("{name} is not a valid encoding name"))
+                        .errposition(el.location + 1)
                         .into_error()
                         .into());
                 }
@@ -308,9 +314,14 @@ pub fn createdb<'mcx>(mcx: Mcx<'mcx>, stmt: &CreatedbStmt<'mcx>) -> PgResult<Oid
     let mut dbcollate = arg_str(collate_el)?;
     let mut dbctype = arg_str(ctype_el)?;
     let mut dblocale = arg_str(locale_el)?;
+    // Explicit LC_COLLATE/LC_CTYPE override LOCALE (pg_dump emits both).
     if let Some(l) = dblocale {
-        dbcollate = Some(l);
-        dbctype = Some(l);
+        if dbcollate.is_none() {
+            dbcollate = Some(l);
+        }
+        if dbctype.is_none() {
+            dbctype = Some(l);
+        }
     }
     if let Some(l) = arg_str(builtinlocale_el)? {
         dblocale = Some(l);
@@ -360,7 +371,11 @@ pub fn createdb<'mcx>(mcx: Mcx<'mcx>, stmt: &CreatedbStmt<'mcx>) -> PgResult<Oid
             }
         }
     }
-    let mut dbcollversion = arg_str(collversion_el)?;
+    // C reads collation_version without the arg guard: a bare option errors.
+    let mut dbcollversion = match collversion_el {
+        Some(el) => Some(explain::defGetString(mcx, el)?),
+        None => None,
+    };
 
     let datdba = match dbowner {
         Some(owner) => adt_acl::get_role_oid(owner, false)?,
@@ -377,9 +392,11 @@ pub fn createdb<'mcx>(mcx: Mcx<'mcx>, stmt: &CreatedbStmt<'mcx>) -> PgResult<Oid
 
     // check_can_set_role(GetUserId(), datdba) (acl.c).
     if !adt_acl::member_can_set_role(miscinit::GetUserId(), datdba)? {
+        let rolename = miscinit::GetUserNameFromId(mcx, datdba, false)?
+            .expect("noerr=false yields a name");
         return Err(ereport(ERROR)
             .errcode(ERRCODE_INSUFFICIENT_PRIVILEGE)
-            .errmsg("permission denied to set role".to_string())
+            .errmsg(format!("permission denied to set role \"{}\"", rolename.as_str()))
             .into_error()
             .into());
     }
