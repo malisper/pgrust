@@ -107,12 +107,12 @@ pub fn grouping_planner<'mcx>(
     if parse.hasAggs {
         crate::planagg::preprocess_minmax_aggregates(run)?;
     }
-    debug_assert!(!parse.hasTargetSRFs);
     run.root.limit_tuples = if !parse.groupClause.is_nil()
         || !parse.groupingSets.is_nil()
         || !parse.distinctClause.is_nil()
         || parse.hasAggs
         || parse.hasWindowFuncs
+        || parse.hasTargetSRFs
         || run.root.hasHavingQual
     {
         -1.0
@@ -154,16 +154,35 @@ pub fn grouping_planner<'mcx>(
         grouping_target
     };
 
+    let (scanjoin_targets, scanjoin_targets_contain_srfs) = if parse.hasTargetSRFs {
+        if have_grouping || !run.active_windows.is_empty() {
+            panic!(
+                "grouping_planner (planner.c): targetlist SRFs above grouping/window \
+                 levels (split_pathtarget_at_srfs_grouping) unported"
+            );
+        }
+        debug_assert!(scanjoin_target == grouping_target && grouping_target == sort_input_target);
+        crate::srf::split_pathtarget_at_srfs(run, scanjoin_target)?
+    } else {
+        let mut ts = mcx::PgVec::new_in(run.mcx);
+        ts.push(scanjoin_target);
+        let mut cs = mcx::PgVec::new_in(run.mcx);
+        cs.push(false);
+        (ts, cs)
+    };
+    let scanjoin_target = scanjoin_targets[0];
     let reltarget = run.rel_reltarget_id(current_rel);
-    let same_exprs = crate::pathnode::exprs_same(
-        run,
-        &run.root.pathtarget(scanjoin_target).exprs,
-        &run.root.pathtarget(reltarget).exprs,
-    );
+    let same_exprs = scanjoin_targets.len() == 1
+        && crate::pathnode::exprs_same(
+            run,
+            &run.root.pathtarget(scanjoin_target).exprs,
+            &run.root.pathtarget(reltarget).exprs,
+        );
     apply_scanjoin_target_to_paths(
         run,
         current_rel,
-        scanjoin_target,
+        &scanjoin_targets,
+        &scanjoin_targets_contain_srfs,
         final_target_parallel_safe,
         same_exprs,
     )?;
@@ -1132,18 +1151,28 @@ fn make_sort_input_target<'mcx>(
     final_target: types_pathnodes::PtId,
 ) -> PgResult<types_pathnodes::PtId> {
     let parse = run.parse();
-    debug_assert!(!parse.sortClause.is_nil() && !parse.hasTargetSRFs);
+    debug_assert!(!parse.sortClause.is_nil());
+    let mut have_srf = false;
+    let mut have_srf_sortcols = false;
     let mut have_volatile = false;
     let mut have_expensive = false;
     let n = run.root.pathtarget(final_target).exprs.len();
     for i in 0..n {
         let ft = run.root.pathtarget(final_target);
         let sgref = ft.sortgrouprefs.get(i).copied().unwrap_or(0);
+        let expr = *run.root.expr_node(ft.exprs[i]);
         if sgref != 0 {
+            if !have_srf_sortcols
+                && parse.hasTargetSRFs
+                && coerce::expression_returns_set(expr)
+            {
+                have_srf_sortcols = true;
+            }
             continue;
         }
-        let expr = *run.root.expr_node(ft.exprs[i]);
-        if clauses::contain_volatile_functions(expr)? {
+        if parse.hasTargetSRFs && coerce::expression_returns_set(expr) {
+            have_srf = true;
+        } else if clauses::contain_volatile_functions(expr)? {
             have_volatile = true;
         } else {
             let cost = crate::costsize::cost_qual_eval_node(expr)?;
@@ -1152,7 +1181,9 @@ fn make_sort_input_target<'mcx>(
             }
         }
     }
-    if !(have_volatile
+    let postpone_srfs = have_srf && !have_srf_sortcols;
+    if !(postpone_srfs
+        || have_volatile
         || (have_expensive && (parse.limitCount.is_some() || run.root.tuple_fraction > 0.0)))
     {
         return Ok(final_target);
@@ -1395,10 +1426,12 @@ fn postprocess_setop_tlist<'mcx>(
 fn apply_scanjoin_target_to_paths<'mcx>(
     run: &mut PlannerRun<'mcx>,
     rel_id: RelId,
-    scanjoin_target: types_pathnodes::PtId,
+    scanjoin_targets: &mcx::PgVec<'mcx, types_pathnodes::PtId>,
+    scanjoin_targets_contain_srfs: &mcx::PgVec<'mcx, bool>,
     scanjoin_target_parallel_safe: bool,
     tlist_same_exprs: bool,
 ) -> PgResult<()> {
+    let scanjoin_target = scanjoin_targets[0];
     debug_assert!(run.root.rel(rel_id).part_scheme.is_none());
 
     if !scanjoin_target_parallel_safe {
@@ -1430,7 +1463,13 @@ fn apply_scanjoin_target_to_paths<'mcx>(
         }
     }
     debug_assert!(run.root.rel(rel_id).partial_pathlist.is_empty());
-    run.root.rel_mut(rel_id).pathtarget_id = Some(scanjoin_target);
+    crate::srf::adjust_paths_for_srfs(
+        run,
+        rel_id,
+        scanjoin_targets,
+        scanjoin_targets_contain_srfs,
+    )?;
+    run.root.rel_mut(rel_id).pathtarget_id = Some(*scanjoin_targets.last().unwrap());
     // Reassess the cheapest paths now that costs may have changed.
     crate::pathnode::set_cheapest(run, rel_id)?;
     Ok(())

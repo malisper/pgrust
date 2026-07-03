@@ -404,7 +404,7 @@ pub fn set_function_size_estimates<'mcx>(run: &mut PlannerRun<'mcx>, rel: RelId)
 
 // expression_returns_set_rows (clauses.c); the OpExpr opretset arm is dead
 // (no set-returning operators resolve on this lane).
-fn expression_returns_set_rows(clause: Node<'_>) -> PgResult<f64> {
+pub(crate) fn expression_returns_set_rows(clause: Node<'_>) -> PgResult<f64> {
     if let Some(fe) = clause.as_func_expr() {
         if fe.funcretset {
             return Ok(clamp_row_est(crate::plancat::get_function_rows(

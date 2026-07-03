@@ -862,18 +862,24 @@ fn func_get_detail<'mcx>(
     })
 }
 
-// check_srf_call_placement, FROM_FUNCTION arm only: every other expr kind's
-// SRF handling belongs to the ProjectSet/targetlist-SRF lane and stays loud.
-// DIVERGENCE: the nested-SRF errposition points at this call, not the inner
-// SRF (exprLocation walker unported).
+// check_srf_call_placement. DIVERGENCE: the nested-SRF errposition points at
+// this call, not the inner SRF (exprLocation walker unported).
 fn check_srf_call_placement(
-    pstate: &ParseState<'_, '_>,
+    pstate: &mut ParseState<'_, '_>,
     last_srf: Option<Node<'_>>,
     location: ParseLoc,
 ) -> PgResult<()> {
-    use parser_small1::ParseExprKind;
+    use parser_small1::ParseExprKind::*;
+    let mut err: Option<&'static str> = None;
+    let mut errkind = false;
     match pstate.p_expr_kind {
-        ParseExprKind::EXPR_KIND_FROM_FUNCTION => {
+        EXPR_KIND_NONE => debug_assert!(false),
+        EXPR_KIND_OTHER => {}
+        EXPR_KIND_JOIN_ON | EXPR_KIND_JOIN_USING => {
+            err = Some("set-returning functions are not allowed in JOIN conditions");
+        }
+        EXPR_KIND_FROM_SUBSELECT => errkind = true,
+        EXPR_KIND_FROM_FUNCTION => {
             let same = match (pstate.p_last_srf, last_srf) {
                 (None, None) => true,
                 (Some(a), Some(b)) => a.ptr_eq(b),
@@ -894,12 +900,117 @@ fn check_srf_call_placement(
                         )),
                 ));
             }
-            Ok(())
         }
-        other => panic!(
-            "check_srf_call_placement (parse_func.c): SRF in {other:?} — only the \
-             FROM_FUNCTION arm is ported (targetlist SRFs are the ProjectSet lane)"
-        ),
+        EXPR_KIND_WHERE => errkind = true,
+        EXPR_KIND_POLICY => {
+            err = Some("set-returning functions are not allowed in policy expressions");
+        }
+        EXPR_KIND_HAVING => errkind = true,
+        EXPR_KIND_FILTER => errkind = true,
+        EXPR_KIND_WINDOW_PARTITION | EXPR_KIND_WINDOW_ORDER => {
+            pstate.p_hasTargetSRFs = true;
+        }
+        EXPR_KIND_WINDOW_FRAME_RANGE
+        | EXPR_KIND_WINDOW_FRAME_ROWS
+        | EXPR_KIND_WINDOW_FRAME_GROUPS => {
+            err = Some("set-returning functions are not allowed in window definitions");
+        }
+        EXPR_KIND_SELECT_TARGET | EXPR_KIND_INSERT_TARGET => {
+            pstate.p_hasTargetSRFs = true;
+        }
+        EXPR_KIND_UPDATE_SOURCE | EXPR_KIND_UPDATE_TARGET => errkind = true,
+        EXPR_KIND_GROUP_BY | EXPR_KIND_ORDER_BY | EXPR_KIND_DISTINCT_ON => {
+            pstate.p_hasTargetSRFs = true;
+        }
+        EXPR_KIND_LIMIT | EXPR_KIND_OFFSET => errkind = true,
+        EXPR_KIND_RETURNING | EXPR_KIND_MERGE_RETURNING => errkind = true,
+        EXPR_KIND_VALUES => errkind = true,
+        EXPR_KIND_VALUES_SINGLE => pstate.p_hasTargetSRFs = true,
+        EXPR_KIND_MERGE_WHEN => {
+            err = Some("set-returning functions are not allowed in MERGE WHEN conditions");
+        }
+        EXPR_KIND_CHECK_CONSTRAINT | EXPR_KIND_DOMAIN_CHECK => {
+            err = Some("set-returning functions are not allowed in check constraints");
+        }
+        EXPR_KIND_COLUMN_DEFAULT | EXPR_KIND_FUNCTION_DEFAULT => {
+            err = Some("set-returning functions are not allowed in DEFAULT expressions");
+        }
+        EXPR_KIND_INDEX_EXPRESSION => {
+            err = Some("set-returning functions are not allowed in index expressions");
+        }
+        EXPR_KIND_INDEX_PREDICATE => {
+            err = Some("set-returning functions are not allowed in index predicates");
+        }
+        EXPR_KIND_STATS_EXPRESSION => {
+            err = Some("set-returning functions are not allowed in statistics expressions");
+        }
+        EXPR_KIND_ALTER_COL_TRANSFORM => {
+            err = Some("set-returning functions are not allowed in transform expressions");
+        }
+        EXPR_KIND_EXECUTE_PARAMETER => {
+            err = Some("set-returning functions are not allowed in EXECUTE parameters");
+        }
+        EXPR_KIND_TRIGGER_WHEN => {
+            err = Some("set-returning functions are not allowed in trigger WHEN conditions");
+        }
+        EXPR_KIND_PARTITION_BOUND => {
+            err = Some("set-returning functions are not allowed in partition bound");
+        }
+        EXPR_KIND_PARTITION_EXPRESSION => {
+            err = Some("set-returning functions are not allowed in partition key expressions");
+        }
+        EXPR_KIND_CALL_ARGUMENT => {
+            err = Some("set-returning functions are not allowed in CALL arguments");
+        }
+        EXPR_KIND_COPY_WHERE => {
+            err = Some("set-returning functions are not allowed in COPY FROM WHERE conditions");
+        }
+        EXPR_KIND_GENERATED_COLUMN => {
+            err = Some("set-returning functions are not allowed in column generation expressions");
+        }
+        EXPR_KIND_CYCLE_MARK => errkind = true,
+    }
+    if err.is_some() || errkind {
+        let msg = match err {
+            Some(err) => String::from(err),
+            None => format!(
+                "set-returning functions are not allowed in {}",
+                srf_expr_kind_name(pstate.p_expr_kind)
+            ),
+        };
+        let encoding = mbutils::GetDatabaseEncoding();
+        return Err(Box::new(
+            ereport(ERROR)
+                .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                .errmsg(msg)
+                .errposition(parser_errposition(pstate, location, encoding))
+                .into_error()
+                .with_error_location(ErrorLocation::new(
+                    "parse_func.c",
+                    0,
+                    "check_srf_call_placement",
+                )),
+        ));
+    }
+    Ok(())
+}
+
+// ParseExprKindName (parse_expr.c), errkind arms only — parse_expr depends on
+// this crate, so the full mapping cannot be imported (parse_agg precedent).
+fn srf_expr_kind_name(kind: parser_small1::ParseExprKind) -> &'static str {
+    use parser_small1::ParseExprKind::*;
+    match kind {
+        EXPR_KIND_FROM_SUBSELECT => "sub-SELECT in FROM",
+        EXPR_KIND_WHERE => "WHERE",
+        EXPR_KIND_HAVING => "HAVING",
+        EXPR_KIND_FILTER => "FILTER",
+        EXPR_KIND_UPDATE_SOURCE | EXPR_KIND_UPDATE_TARGET => "UPDATE",
+        EXPR_KIND_LIMIT => "LIMIT",
+        EXPR_KIND_OFFSET => "OFFSET",
+        EXPR_KIND_RETURNING | EXPR_KIND_MERGE_RETURNING => "RETURNING",
+        EXPR_KIND_VALUES => "VALUES",
+        EXPR_KIND_CYCLE_MARK => "CYCLE",
+        other => panic!("srf_expr_kind_name: non-errkind kind {other:?}"),
     }
 }
 
