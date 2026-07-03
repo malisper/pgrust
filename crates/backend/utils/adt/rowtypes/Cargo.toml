@@ -1,0 +1,18 @@
+[package]
+name = "adt_rowtypes"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+datum = { path = "../../../../_support/types/datum" }
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_fmgr = { path = "../../../../_support/types/fmgr" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+fmgr_seams = { path = "../../fmgr/fmgr_seams" }
+detoast_seams = { path = "../../../access/common/detoast_seams" }
+lsyscache = { path = "../../cache/lsyscache" }
+typcache = { path = "../../cache/typcache" }
+stack_depth = { path = "../../misc/stack_depth" }
