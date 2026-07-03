@@ -210,6 +210,9 @@ fn install() {
         syscache_seams::relation_has_sys_cache::set(|relid| {
             HAS_SYSCACHE.with(|v| v.borrow().contains(&relid))
         });
+        syscache_seams::relation_supports_sys_cache::set(|relid| {
+            HAS_SYSCACHE.with(|v| v.borrow().contains(&relid))
+        });
     });
 }
 
