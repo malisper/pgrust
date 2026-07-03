@@ -24,7 +24,11 @@ use types_nodes::rawnodes::{
     FKCONSTR_ACTION_CASCADE, FKCONSTR_ACTION_NOACTION, FKCONSTR_ACTION_RESTRICT,
     FKCONSTR_ACTION_SETDEFAULT, FKCONSTR_ACTION_SETNULL, FKCONSTR_MATCH_FULL,
     FKCONSTR_MATCH_SIMPLE,
-    RangeSubselect, WindowDef, FRAMEOPTION_BETWEEN, FRAMEOPTION_DEFAULTS,
+    RangeSubselect, TableLikeClause, WindowDef, CREATE_TABLE_LIKE_ALL,
+    CREATE_TABLE_LIKE_COMMENTS, CREATE_TABLE_LIKE_COMPRESSION, CREATE_TABLE_LIKE_CONSTRAINTS,
+    CREATE_TABLE_LIKE_DEFAULTS, CREATE_TABLE_LIKE_GENERATED, CREATE_TABLE_LIKE_IDENTITY,
+    CREATE_TABLE_LIKE_INDEXES, CREATE_TABLE_LIKE_STATISTICS, CREATE_TABLE_LIKE_STORAGE,
+    FRAMEOPTION_BETWEEN, FRAMEOPTION_DEFAULTS,
     FRAMEOPTION_END_CURRENT_ROW, FRAMEOPTION_END_OFFSET_PRECEDING,
     FRAMEOPTION_END_UNBOUNDED_PRECEDING, FRAMEOPTION_EXCLUDE_CURRENT_ROW,
     FRAMEOPTION_EXCLUDE_GROUP, FRAMEOPTION_EXCLUDE_TIES, FRAMEOPTION_GROUPS,
@@ -753,6 +757,28 @@ impl<'mcx> Parser<'mcx> {
             // opt_without_overlaps: WITHOUT OVERLAPS | /*EMPTY*/
             552 => *yyval = YYSTYPE::Boolean(true),
             553 => *yyval = YYSTYPE::Boolean(false),
+            // TableLikeClause: LIKE qualified_name TableLikeOptionList
+            522 => {
+                let relation = view.v(2).node().expect("qualified_name");
+                let mut n = Node::build::<TableLikeClause>(mcx)?;
+                n.relation = relation.as_variant::<RangeVar>();
+                n.options = view.v(3).ival() as u32;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // TableLikeOptionList: [list INCLUDING opt | list EXCLUDING opt | empty]
+            523 => *yyval = YYSTYPE::Ival(view.v(1).ival() | view.v(3).ival()),
+            524 => *yyval = YYSTYPE::Ival(view.v(1).ival() & !view.v(3).ival()),
+            525 => *yyval = YYSTYPE::Ival(0),
+            526 => *yyval = YYSTYPE::Ival(CREATE_TABLE_LIKE_COMMENTS as i32),
+            527 => *yyval = YYSTYPE::Ival(CREATE_TABLE_LIKE_COMPRESSION as i32),
+            528 => *yyval = YYSTYPE::Ival(CREATE_TABLE_LIKE_CONSTRAINTS as i32),
+            529 => *yyval = YYSTYPE::Ival(CREATE_TABLE_LIKE_DEFAULTS as i32),
+            530 => *yyval = YYSTYPE::Ival(CREATE_TABLE_LIKE_IDENTITY as i32),
+            531 => *yyval = YYSTYPE::Ival(CREATE_TABLE_LIKE_GENERATED as i32),
+            532 => *yyval = YYSTYPE::Ival(CREATE_TABLE_LIKE_INDEXES as i32),
+            533 => *yyval = YYSTYPE::Ival(CREATE_TABLE_LIKE_STATISTICS as i32),
+            534 => *yyval = YYSTYPE::Ival(CREATE_TABLE_LIKE_STORAGE as i32),
+            535 => *yyval = YYSTYPE::Ival(CREATE_TABLE_LIKE_ALL as i32),
             // opt_no_inherit: NO INHERIT | /*EMPTY*/
             550 => *yyval = YYSTYPE::Boolean(true),
             551 => *yyval = YYSTYPE::Boolean(false),

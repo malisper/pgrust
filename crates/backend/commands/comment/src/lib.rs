@@ -228,3 +228,46 @@ pub fn CreateComments<'mcx>(
     }
     description.close(NoLock)
 }
+
+// GetComment (comment.c): pg_description text for (oid, classoid, subid).
+pub fn GetComment<'mcx>(
+    mcx: Mcx<'mcx>,
+    oid: Oid,
+    classoid: Oid,
+    subid: i32,
+) -> PgResult<Option<mcx::PgString<'mcx>>> {
+    let description = table::table_open(mcx, DescriptionRelationId, types_rel::AccessShareLock)?;
+    let keys = [
+        eq_key(1, F_OIDEQ, Datum::from_oid(oid)),
+        eq_key(2, F_OIDEQ, Datum::from_oid(classoid)),
+        eq_key(3, F_INT4EQ, Datum::from_i32(subid)),
+    ];
+    let mut scan =
+        genam::systable_beginscan(mcx, &description, DescriptionObjIndexId, true, None, &keys)?;
+    let comment = match genam::systable_getnext(mcx, &mut scan)? {
+        Some(tup) => {
+            let mut isnull = false;
+            // SAFETY: pg_description.description under its own descriptor.
+            let d = unsafe {
+                types_tuple::heap_getattr(
+                    tup,
+                    Anum_pg_description_description as i32,
+                    description.descr(),
+                    &mut isnull,
+                )
+            };
+            debug_assert!(!isnull);
+            let p = d.as_usize() as *const u8;
+            // SAFETY: not-null text column: live varlena image through its extent.
+            let image =
+                unsafe { core::slice::from_raw_parts(p, types_tuple::varatt::varsize_any(p)) };
+            let payload = varlena::open_image(mcx, image)?;
+            let s = core::str::from_utf8(payload.as_bytes()).expect("comment UTF-8");
+            Some(mcx::PgString::from_str_in(s, mcx)?)
+        }
+        None => None,
+    };
+    genam::systable_endscan(mcx, scan)?;
+    description.close(types_rel::AccessShareLock)?;
+    Ok(comment)
+}

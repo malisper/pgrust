@@ -61,9 +61,15 @@ pub fn BuildDescForRelation<'mcx>(
             .as_variant::<TypeName>()
             .expect("TypeName");
         let (atttypid, atttypmod) = parse_utilcmd::typenameTypeIdAndMod(mcx, None, tn)?;
-        let attcollation = syscache_seams::lookup_pg_type_shape::call(atttypid)?
-            .expect("pg_type row vanished")
-            .typcollation;
+        // GetColumnDefCollation: collClause is loud upstream; collOid is the
+        // pre-cooked (LIKE) carrier, else the type's default.
+        let attcollation = if entry.collOid != InvalidOid {
+            entry.collOid
+        } else {
+            syscache_seams::lookup_pg_type_shape::call(atttypid)?
+                .expect("pg_type row vanished")
+                .typcollation
+        };
         tupdesc::TupleDescInitEntry(&mut desc, attnum, Some(colname), atttypid, atttypmod, 0)?;
         tupdesc::TupleDescInitEntryCollation(&mut desc, attnum, attcollation);
 
@@ -77,8 +83,10 @@ pub fn BuildDescForRelation<'mcx>(
         if entry.compression.is_some() {
             unported("GetAttributeCompression (per-column COMPRESSION)");
         }
-        if entry.storage != 0 || entry.storage_name.is_some() {
-            unported("per-column STORAGE overrides");
+        if entry.storage != 0 {
+            att.attstorage = entry.storage as i8;
+        } else if entry.storage_name.is_some() {
+            unported("GetAttributeStorage (STORAGE by name)");
         }
         tupdesc::populate_compact_attribute(&mut desc, attnum as usize - 1);
     }

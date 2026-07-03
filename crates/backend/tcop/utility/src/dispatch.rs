@@ -481,53 +481,7 @@ fn dispatch_switch<'mcx>(
             // outlives the utility call; nothing derived escapes it.
             let stmt_node =
                 unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
-            let stmt = stmt_node
-                .as_variant::<types_nodes::rawnodes::IndexStmt>()
-                .expect("IndexStmt");
-            if stmt.concurrent {
-                xact::PreventInTransactionBlock(is_top_level, "CREATE INDEX CONCURRENTLY")?;
-            }
-            let lockmode = if stmt.concurrent {
-                types_rel::ShareUpdateExclusiveLock
-            } else {
-                types_rel::ShareLock
-            };
-            let rv_node = stmt.relation.expect("IndexStmt without relation");
-            let rv = rel_vocab::RangeVar {
-                catalogname: rv_node.catalogname,
-                schemaname: rv_node.schemaname,
-                relname: rv_node.relname.expect("IndexStmt relation without relname"),
-                inh: rv_node.inh,
-                relpersistence: rv_node.relpersistence,
-                location: rv_node.location,
-            };
-            let mut cb = |rv2: &rel_vocab::RangeVar<'_>,
-                          rel_id: types_core::Oid,
-                          old_rel_id: types_core::Oid|
-             -> PgResult<()> {
-                range_var_callback_owns_relation(mcx, rv2, rel_id, old_rel_id)
-            };
-            let relid =
-                catalog_namespace::RangeVarGetRelidExtended(&rv, lockmode, 0, Some(&mut cb))?;
-            if rv.inh
-                && lsyscache::get_rel_relkind(relid)? as u8
-                    == types_rel::RELKIND_PARTITIONED_TABLE
-            {
-                handler_gap("CREATE INDEX partitioned-table recursion");
-            }
-            let is_alter_table = stmt.transformed;
-            parse_utilcmd::transformIndexStmt(relid, stmt, source_text)?;
-            indexcmds::DefineIndex(
-                mcx,
-                relid,
-                stmt,
-                types_core::InvalidOid,
-                is_alter_table,
-                true,
-                true,
-                false,
-                false,
-            )?;
+            exec_index_stmt(mcx, stmt_node, source_text, is_top_level)?;
         }
 
         T_AlterTableStmt => {
@@ -542,23 +496,7 @@ fn dispatch_switch<'mcx>(
                     &types_nodes::parsenodes::AlterTableStmt<'mcx>,
                 >(stmt)
             };
-            // DETACH CONCURRENTLY transaction-block fence: unported subtypes
-            // are loud inside AlterTableGetLockLevel.
-            let lockmode = tablecmds::AlterTableGetLockLevel(&stmt.cmds);
-            let relid = tablecmds::AlterTableLookupRelation(mcx, stmt, lockmode)?;
-            if relid != types_core::InvalidOid {
-                // Event triggers absent by design (EventTriggerAlterTable*).
-                tablecmds::AlterTable(mcx, relid, lockmode, stmt, source_text)?;
-            } else {
-                elog_seams::ereport_msg::call(
-                    types_error::NOTICE,
-                    format!(
-                        "relation \"{}\" does not exist, skipping",
-                        stmt.relation.and_then(|r| r.relname).unwrap_or("")
-                    ),
-                    None,
-                )?;
-            }
+            exec_alter_table_stmt(mcx, stmt, source_text)?;
         }
 
         T_RenameStmt => {
@@ -583,16 +521,18 @@ fn dispatch_switch<'mcx>(
             // outlives the utility call; nothing derived escapes it.
             let stmt_node =
                 unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
-            let stmts = parse_utilcmd::transformCreateStmt(mcx, stmt_node, source_text)?;
-            for (i, stmt) in stmts.iter().enumerate() {
-                if i > 0 {
-                    xact::CommandCounterIncrement()?;
-                }
+            let mut stmts = parse_utilcmd::transformCreateStmt(mcx, stmt_node, source_text)?;
+            let mut table_rv: Option<&'mcx types_nodes::primnodes::RangeVar<'mcx>> = None;
+            let mut i = 0;
+            while i < stmts.len() {
+                let stmt = stmts.nth(i);
+                i += 1;
                 match stmt.node_tag() {
                     T_CreateStmt => {
                         let cstmt = stmt
                             .as_variant::<types_nodes::rawnodes::CreateStmt>()
                             .expect("CreateStmt");
+                        table_rv = cstmt.relation;
                         let relid = tablecmds::DefineRelation(
                             mcx,
                             cstmt,
@@ -605,57 +545,30 @@ fn dispatch_switch<'mcx>(
                         // DefineRelation), so transformRelOptions yields 0.
                         catalog_toasting::NewRelationCreateToastTable(mcx, relid)?;
                     }
-                    // Constraint-generated IndexStmt (transformIndexConstraints):
-                    // the relation is already locked by DefineRelation's
-                    // transaction; C recurses through ProcessUtility.
-                    T_IndexStmt => {
-                        let istmt = stmt
-                            .as_variant::<types_nodes::rawnodes::IndexStmt>()
-                            .expect("IndexStmt");
-                        let rv_node = istmt.relation.expect("IndexStmt without relation");
-                        let rv = rel_vocab::RangeVar {
-                            catalogname: rv_node.catalogname,
-                            schemaname: rv_node.schemaname,
-                            relname: rv_node.relname.expect("IndexStmt relation relname"),
-                            inh: rv_node.inh,
-                            relpersistence: rv_node.relpersistence,
-                            location: rv_node.location,
-                        };
-                        let mut cb = |rv2: &rel_vocab::RangeVar<'_>,
-                                      rel_id: types_core::Oid,
-                                      old_rel_id: types_core::Oid|
-                         -> PgResult<()> {
-                            range_var_callback_owns_relation(mcx, rv2, rel_id, old_rel_id)
-                        };
-                        let relid = catalog_namespace::RangeVarGetRelidExtended(
-                            &rv,
-                            types_rel::ShareLock,
-                            0,
-                            Some(&mut cb),
-                        )?;
-                        let is_alter_table = istmt.transformed;
-                        parse_utilcmd::transformIndexStmt(relid, istmt, source_text)?;
-                        indexcmds::DefineIndex(
-                            mcx,
-                            relid,
-                            istmt,
-                            types_core::InvalidOid,
-                            is_alter_table,
-                            true,
-                            true,
-                            false,
-                            false,
-                        )?;
+                    T_TableLikeClause => {
+                        // Delayed LIKE expansion: sub-statements run before
+                        // any remaining actions (C list_concat(morestmts, stmts)).
+                        let tlc = stmt
+                            .as_variant::<types_nodes::rawnodes::TableLikeClause>()
+                            .expect("TableLikeClause");
+                        let rv = table_rv.expect("LIKE expansion before CreateStmt");
+                        let morestmts = parse_utilcmd::expandTableLikeClause(mcx, rv, tlc)?;
+                        for (j, m) in morestmts.iter().enumerate() {
+                            stmts.insert_nth(mcx, i + j, m)?;
+                        }
                     }
                     T_AlterTableStmt => {
-                        let astmt = stmt
+                        let atstmt = stmt
                             .as_variant::<types_nodes::parsenodes::AlterTableStmt>()
                             .expect("AlterTableStmt");
-                        let lockmode = tablecmds::AlterTableGetLockLevel(&astmt.cmds);
-                        let relid =
-                            tablecmds::AlterTableLookupRelation(mcx, astmt, lockmode)?;
-                        debug_assert!(relid != types_core::InvalidOid);
-                        tablecmds::AlterTable(mcx, relid, lockmode, astmt, source_text)?;
+                        exec_alter_table_stmt(mcx, atstmt, source_text)?;
+                    }
+                    T_IndexStmt => exec_index_stmt(mcx, stmt, source_text, is_top_level)?,
+                    T_CommentStmt => {
+                        let cstmt = stmt
+                            .as_variant::<types_nodes::parsenodes::CommentStmt>()
+                            .expect("CommentStmt");
+                        commands_comment::CommentObject(mcx, cstmt)?;
                     }
                     // C recurses through ProcessUtility for the serial
                     // blist/alist statements; the wrapper adds nothing here.
@@ -672,6 +585,9 @@ fn dispatch_switch<'mcx>(
                         sequence::AlterSequence(mcx, altstmt)?;
                     }
                     _ => handler_gap("ProcessUtilitySlow side statements (blist/alist)"),
+                }
+                if i < stmts.len() {
+                    xact::CommandCounterIncrement()?;
                 }
             }
         }
@@ -691,6 +607,92 @@ fn dispatch_switch<'mcx>(
             sequence::AlterSequence(mcx, altstmt)?;
         }
         _ => handler_gap("ProcessUtilitySlow DDL fan-out (utility slow lane)"),
+    }
+    Ok(())
+}
+
+fn exec_index_stmt<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt_node: Node<'mcx>,
+    source_text: &str,
+    is_top_level: bool,
+) -> PgResult<()> {
+    let stmt = stmt_node
+        .as_variant::<types_nodes::rawnodes::IndexStmt>()
+        .expect("IndexStmt");
+    if stmt.concurrent {
+        xact::PreventInTransactionBlock(is_top_level, "CREATE INDEX CONCURRENTLY")?;
+    }
+    let lockmode = if stmt.concurrent {
+        types_rel::ShareUpdateExclusiveLock
+    } else {
+        types_rel::ShareLock
+    };
+    let rv_node = stmt.relation.expect("IndexStmt without relation");
+    let rv = rel_vocab::RangeVar {
+        catalogname: rv_node.catalogname,
+        schemaname: rv_node.schemaname,
+        relname: rv_node.relname.expect("IndexStmt relation without relname"),
+        inh: rv_node.inh,
+        relpersistence: rv_node.relpersistence,
+        location: rv_node.location,
+    };
+    let mut cb = |rv2: &rel_vocab::RangeVar<'_>,
+                  rel_id: types_core::Oid,
+                  old_rel_id: types_core::Oid|
+     -> PgResult<()> { range_var_callback_owns_relation(mcx, rv2, rel_id, old_rel_id) };
+    let relid = catalog_namespace::RangeVarGetRelidExtended(&rv, lockmode, 0, Some(&mut cb))?;
+    if rv.inh
+        && lsyscache::get_rel_relkind(relid)? as u8 == types_rel::RELKIND_PARTITIONED_TABLE
+    {
+        handler_gap("CREATE INDEX partitioned-table recursion");
+    }
+    let is_alter_table = stmt.transformed;
+    parse_utilcmd::transformIndexStmt(relid, stmt, source_text)?;
+    let index_relid = indexcmds::DefineIndex(
+        mcx,
+        relid,
+        stmt,
+        types_core::InvalidOid,
+        is_alter_table,
+        true,
+        true,
+        false,
+        false,
+    )?;
+    if let Some(comment) = stmt.idxcomment {
+        commands_comment::CreateComments(
+            mcx,
+            index_relid,
+            types_core::RELATION_RELATION_ID,
+            0,
+            Some(comment),
+        )?;
+    }
+    Ok(())
+}
+
+fn exec_alter_table_stmt<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &types_nodes::parsenodes::AlterTableStmt<'mcx>,
+    source_text: &str,
+) -> PgResult<()> {
+    // DETACH CONCURRENTLY transaction-block fence: unported subtypes
+    // are loud inside AlterTableGetLockLevel.
+    let lockmode = tablecmds::AlterTableGetLockLevel(&stmt.cmds);
+    let relid = tablecmds::AlterTableLookupRelation(mcx, stmt, lockmode)?;
+    if relid != types_core::InvalidOid {
+        // Event triggers absent by design (EventTriggerAlterTable*).
+        tablecmds::AlterTable(mcx, relid, lockmode, stmt, source_text)?;
+    } else {
+        elog_seams::ereport_msg::call(
+            types_error::NOTICE,
+            format!(
+                "relation \"{}\" does not exist, skipping",
+                stmt.relation.and_then(|r| r.relname).unwrap_or("")
+            ),
+            None,
+        )?;
     }
     Ok(())
 }

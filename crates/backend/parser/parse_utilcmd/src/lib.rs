@@ -1,7 +1,11 @@
-// CREATE TABLE plain-column lane + the parse_type.c slice it needs, plus the
-// SERIAL expansion (generateSerialExtraStmts) and its ruleutils/indexcmds
-// helpers (quote_identifier, makeObjectName, ChooseRelationName).
+// CREATE TABLE plain-column + LIKE lanes + the parse_type.c slice they need,
+// plus the SERIAL expansion (generateSerialExtraStmts) and its
+// ruleutils/indexcmds helpers (quote_identifier, makeObjectName,
+// ChooseRelationName).
 #![allow(non_snake_case)]
+
+mod like;
+pub use like::expandTableLikeClause;
 
 use mcx::{Mcx, PgString};
 use types_core::{InvalidOid, Oid, INT2OID, INT4OID, INT8OID, NAMEDATALEN};
@@ -20,7 +24,7 @@ use types_nodes::{
 
 #[cold]
 #[inline(never)]
-fn unported(what: &str) -> ! {
+pub(crate) fn unported(what: &str) -> ! {
     panic!("unported: parse_utilcmd {what}")
 }
 
@@ -42,6 +46,20 @@ pub fn typenameTypeIdAndMod<'mcx>(
 ) -> PgResult<(Oid, i32)> {
     if tn.pct_type || tn.setof {
         unported("LookupTypeName %TYPE / SETOF");
+    }
+    if tn.names.is_nil() {
+        // LookupTypeName pre-resolved arm (makeTypeNameFromOid; LIKE / OF type).
+        assert!(tn.typeOid != InvalidOid, "TypeName without names or typeOid");
+        match syscache_seams::pg_type_isdefined::call(tn.typeOid)? {
+            Some(true) => {}
+            _ => unported("shell types (typisdefined = false)"),
+        }
+        match syscache_seams::pg_type_typtype::call(tn.typeOid)? {
+            Some(t) if t == b'b' as i8 || t == b'e' as i8 => {}
+            _ => unported("non-base/enum pre-resolved column types"),
+        }
+        let typmod = typenameTypeMod(mcx, pstate, tn, tn.typeOid)?;
+        return Ok((tn.typeOid, typmod));
     }
     if tn.typeOid != InvalidOid {
         debug_assert!(tn.names.is_nil());
@@ -532,7 +550,7 @@ fn transformColumnDefinition<'mcx>(
 pub fn transformCreateStmt<'mcx>(
     mcx: Mcx<'mcx>,
     stmt_node: Node<'mcx>,
-    _query_string: &str,
+    query_string: &str,
 ) -> PgResult<NodeList<'mcx>> {
     let stmt = stmt_node
         .as_variant::<CreateStmt>()
@@ -561,6 +579,8 @@ pub fn transformCreateStmt<'mcx>(
     let mut ixconstraints = NodeList::nil();
     let mut fkconstraints = NodeList::nil();
     let mut alist = NodeList::nil();
+    let mut likeclauses = NodeList::nil();
+    let mut save_alist = NodeList::nil();
     for elt in stmt.tableElts.iter() {
         match elt.node_tag() {
             NodeTag::T_ColumnDef => {
@@ -578,7 +598,16 @@ pub fn transformCreateStmt<'mcx>(
                 )?;
                 columns.lappend(mcx, elt)?;
             }
-            NodeTag::T_TableLikeClause => unported("LIKE clauses"),
+            NodeTag::T_TableLikeClause => {
+                let mut cxt = like::LikeCxt {
+                    relation,
+                    columns: &mut columns,
+                    nnconstraints: &mut nnconstraints,
+                    likeclauses: &mut likeclauses,
+                    alist: &mut save_alist,
+                };
+                like::transformTableLikeClause(mcx, &mut cxt, elt, query_string)?;
+            }
             NodeTag::T_Constraint => {
                 let c = elt.as_variant::<Constraint>().expect("Constraint");
                 match c.contype {
@@ -675,15 +704,18 @@ pub fn transformCreateStmt<'mcx>(
             .expect("CreateStmt");
     }
 
-    // C: result = blist ++ [stmt] ++ alist (serial's OWNED BY precedes index stmts).
+    // C: result = blist ++ [stmt] ++ likeclauses ++ alist ++ save_alist
+    // (serial's OWNED BY precedes index stmts).
     let mut result = cxt.blist;
     result.lappend(mcx, stmt_node)?;
+    result.concat(mcx, &likeclauses)?;
     for n in cxt.alist.iter() {
         result.lappend(mcx, n)?;
     }
     for a in alist.iter() {
         result.lappend(mcx, a)?;
     }
+    result.concat(mcx, &save_alist)?;
     Ok(result)
 }
 

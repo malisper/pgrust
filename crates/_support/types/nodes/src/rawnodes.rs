@@ -474,6 +474,22 @@ pub struct AlterSeqStmt<'mcx> {
     pub for_identity: bool,
     pub missing_ok: bool,
 }
+pub struct TableLikeClause<'mcx> {
+    pub relation: Option<&'mcx crate::primnodes::RangeVar<'mcx>>,
+    pub options: u32,
+    pub relationOid: Oid,
+}
+
+pub const CREATE_TABLE_LIKE_COMMENTS: u32 = 1 << 0;
+pub const CREATE_TABLE_LIKE_COMPRESSION: u32 = 1 << 1;
+pub const CREATE_TABLE_LIKE_CONSTRAINTS: u32 = 1 << 2;
+pub const CREATE_TABLE_LIKE_DEFAULTS: u32 = 1 << 3;
+pub const CREATE_TABLE_LIKE_GENERATED: u32 = 1 << 4;
+pub const CREATE_TABLE_LIKE_IDENTITY: u32 = 1 << 5;
+pub const CREATE_TABLE_LIKE_INDEXES: u32 = 1 << 6;
+pub const CREATE_TABLE_LIKE_STATISTICS: u32 = 1 << 7;
+pub const CREATE_TABLE_LIKE_STORAGE: u32 = 1 << 8;
+pub const CREATE_TABLE_LIKE_ALL: u32 = i32::MAX as u32;
 
 // DEFAULT/CHECK slice of C's Constraint; index/FK fields arrive with their DDL.
 pub const FKCONSTR_ACTION_NOACTION: u8 = b'a';
@@ -599,6 +615,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for IndexElem<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for IndexStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_IndexStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for TableLikeClause<'mcx> {
+    const TAG: NodeTag = NodeTag::T_TableLikeClause;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for LockingClause<'mcx> {
     const TAG: NodeTag = NodeTag::T_LockingClause;
