@@ -688,12 +688,65 @@ fn convert_to_scalar(
             let hi = convert_network_to_scalar(hibound, boundstypid)?;
             Some((v, lo, hi))
         }
+        TIMESTAMPOID | TIMESTAMPTZOID | DATEOID | INTERVALOID | TIMEOID | TIMETZOID => {
+            let v = convert_timevalue_to_scalar(value, valuetypid)?;
+            let lo = convert_timevalue_to_scalar(lobound, boundstypid)?;
+            let hi = convert_timevalue_to_scalar(hibound, boundstypid)?;
+            Some((v, lo, hi))
+        }
         _ => {
             let v = convert_numeric_to_scalar(value, valuetypid)?;
             let lo = convert_numeric_to_scalar(lobound, boundstypid)?;
             let hi = convert_numeric_to_scalar(hibound, boundstypid)?;
             Some((v, lo, hi))
         }
+    }
+}
+
+const TIMESTAMPOID: Oid = 1114;
+const TIMESTAMPTZOID: Oid = 1184;
+const DATEOID: Oid = 1082;
+const INTERVALOID: Oid = 1186;
+const TIMEOID: Oid = 1083;
+const TIMETZOID: Oid = 1266;
+
+// convert_timevalue_to_scalar (selfuncs.c).
+fn convert_timevalue_to_scalar(value: Datum, typid: Oid) -> Option<f64> {
+    const USECS_PER_DAY: f64 = 86_400_000_000.0;
+    match typid {
+        TIMESTAMPOID | TIMESTAMPTZOID | TIMEOID => Some(value.as_i64() as f64),
+        DATEOID => {
+            let d = value.as_i32();
+            Some(if d == i32::MIN {
+                -f64::MAX
+            } else if d == i32::MAX {
+                f64::MAX
+            } else {
+                d as f64 * USECS_PER_DAY
+            })
+        }
+        INTERVALOID => {
+            let p = value.as_usize() as *const u8;
+            // SAFETY: by-ref 16-byte interval datum {time i64, day i32, month i32}.
+            let (time, day, month) = unsafe {
+                (
+                    p.cast::<i64>().read_unaligned(),
+                    p.add(8).cast::<i32>().read_unaligned(),
+                    p.add(12).cast::<i32>().read_unaligned(),
+                )
+            };
+            Some(time as f64 + day as f64 * USECS_PER_DAY
+                + month as f64 * ((365.25 / 12.0) * USECS_PER_DAY))
+        }
+        TIMETZOID => {
+            let p = value.as_usize() as *const u8;
+            // SAFETY: by-ref 12-byte timetz datum {time i64, zone i32}.
+            let (time, zone) = unsafe {
+                (p.cast::<i64>().read_unaligned(), p.add(8).cast::<i32>().read_unaligned())
+            };
+            Some(time as f64 + zone as f64 * 1_000_000.0)
+        }
+        _ => None,
     }
 }
 
@@ -820,6 +873,7 @@ fn convert_one_string_to_scalar(value: &[u8], rangelo: i32, rangehi: i32) -> f64
 }
 
 fn convert_numeric_to_scalar(value: Datum, typid: Oid) -> Option<f64> {
+    const NUMERICOID: Oid = 1700;
     const INT2OID: Oid = 21;
     const INT4OID: Oid = 23;
     const INT8OID: Oid = 20;
@@ -841,6 +895,14 @@ fn convert_numeric_to_scalar(value: Datum, typid: Oid) -> Option<f64> {
         FLOAT8OID => Some(value.as_f64()),
         OIDOID | REGPROCOID | REGPROCEDUREOID | REGOPEROID | REGOPERATOROID | REGCLASSOID
         | REGTYPEOID => Some(value.as_u32() as f64),
+        NUMERICOID => {
+            // SAFETY: by-ref numeric datum; stats-array elements and consts
+            // carry 4-byte headers (construct_array canonicalizes short forms).
+            let v = unsafe { datum::VarlenaRef::from_ptr(value.as_usize() as *const u8) };
+            Some(adt_numeric::numeric_float8_no_overflow(adt_numeric::Num::from_payload(
+                v.data(),
+            )))
+        }
         _ => None,
     }
 }

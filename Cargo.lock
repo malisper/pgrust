@@ -7307,6 +7307,7 @@ dependencies = [
  "adt_int8",
  "adt_multirangetypes",
  "adt_network",
+ "adt_numeric",
  "adt_rangetypes",
  "adt_regexp",
  "arrayfuncs",
