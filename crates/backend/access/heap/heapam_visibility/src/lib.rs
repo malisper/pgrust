@@ -644,17 +644,17 @@ trait MvccXidResolve {
 struct DirectResolve;
 
 impl MvccXidResolve for DirectResolve {
-    #[inline]
+    #[inline(always)]
     fn in_snapshot(&mut self, xid: TransactionId, snapshot: &SnapshotData<'_>) -> PgResult<bool> {
         XidInMVCCSnapshot(xid, snapshot)
     }
 
-    #[inline]
+    #[inline(always)]
     fn did_commit(&mut self, xid: TransactionId) -> PgResult<bool> {
         TransactionIdDidCommit(xid)
     }
 
-    #[inline]
+    #[inline(always)]
     fn set_hint_bits(
         &mut self,
         tuple: &mut HeapTupleHeaderData,
