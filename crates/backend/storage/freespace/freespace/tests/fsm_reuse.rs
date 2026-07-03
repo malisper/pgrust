@@ -169,6 +169,12 @@ fn install_seams() {
                 })
             },
         );
+        bufmgr_seams::extend_buffered_rel_to_rel::set(|rel, fork, strategy, flags, extend_to, mode| {
+            bufmgr_seams::extend_buffered_rel_to::call(
+                bufmgr_seams::relation_smgr_locator::call(rel),
+                fork, strategy, flags, extend_to, mode,
+            )
+        });
 
         smgr_seams::smgr_exists::set(|_rloc, fork| {
             assert_eq!(fork, ForkNumber::FSM_FORKNUM);

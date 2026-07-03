@@ -209,6 +209,7 @@ members = [
     "crates/backend/commands/analyze",
     "crates/backend/commands/vacuum_seams",
     "crates/backend/commands/vacuum",
+    "crates/backend/commands/tablespace",
     "crates/backend/utils/fmgr/fmgr_core",
     "crates/backend/access/transam/subtrans_seams",
     "crates/backend/storage/lmgr/lmgr",

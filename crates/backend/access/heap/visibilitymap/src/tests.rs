@@ -279,6 +279,12 @@ fn get_status_bit_math() {
         ])],
         true,
     );
+    bufmgr_seams::extend_buffered_rel_to_rel::set(|rel, fork, strategy, flags, extend_to, mode| {
+        bufmgr_seams::extend_buffered_rel_to::call(
+            bufmgr_seams::relation_smgr_locator::call(rel),
+            fork, strategy, flags, extend_to, mode,
+        )
+    });
 
     let mut vmbuf = VmBuffer::new();
     assert_eq!(visibilitymap_get_status(&rel, 0, &mut vmbuf).unwrap(), 0b10);

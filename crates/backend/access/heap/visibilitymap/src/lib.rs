@@ -502,8 +502,8 @@ fn vm_readbuf(
 }
 
 fn vm_extend(rel: &RelationData<'_>, vm_nblocks: BlockNumber) -> PgResult<Buffer> {
-    let buf = bufmgr_seams::extend_buffered_rel_to::call(
-        bufmgr_seams::relation_smgr_locator::call(rel),
+    let buf = bufmgr_seams::extend_buffered_rel_to_rel::call(
+        rel,
         ForkNumber::VISIBILITYMAP_FORKNUM,
         None,
         bufmgr_seams::EB_CREATE_FORK_IF_NEEDED | bufmgr_seams::EB_CLEAR_SIZE_CACHE,

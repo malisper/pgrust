@@ -311,6 +311,7 @@ pub fn init_seams() {
         )
     });
     bufmgr_seams::extend_buffered_rel_by::set(extend::ExtendBufferedRelBy);
+    bufmgr_seams::extend_buffered_rel_to_rel::set(extend::ExtendBufferedRelTo);
     bufmgr_seams::release_buffer::set(pin::ReleaseBuffer);
     bufmgr_seams::mark_buffer_dirty::set(ops::MarkBufferDirty);
     bufmgr_seams::flush_one_buffer::set(write::FlushOneBuffer);

@@ -59,14 +59,7 @@ fn setup_backend(pid: i32) {
     g::SetMyLatch(Some(latch));
 }
 
-fn load_hba_content(name: &str, content: &str) {
-    install();
-    let _g = GUC_LOCK.lock().unwrap();
-    load_hba_content_locked(name, content);
-}
-
-// hba lines are process-global; callers needing a stable view across their
-// whole body hold GUC_LOCK themselves.
+// hba lines are process-global; every test holds GUC_LOCK across load + use.
 fn load_hba_content_locked(name: &str, content: &str) {
     install();
     let dir = std::env::temp_dir().join(format!("pgrust_auth_{}", std::process::id()));
@@ -132,7 +125,8 @@ const INITDB_DEFAULT_HBA: &str = concat!(
 #[test]
 fn trust_auth_unix_socket_end_to_end() {
     setup_backend(4243);
-    load_hba_content("pg_hba.conf", INITDB_DEFAULT_HBA);
+    let _g = GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    load_hba_content_locked("pg_hba.conf", INITDB_DEFAULT_HBA);
 
     let dir = std::env::temp_dir().join(format!("pgrust_auth_sock_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -197,7 +191,7 @@ fn trust_auth_unix_socket_end_to_end() {
 #[test]
 fn auth_fatal_under_port_borrow_reaches_client() {
     setup_backend(4244);
-    let _g = GUC_LOCK.lock().unwrap();
+    let _g = GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     load_hba_content_locked("reject_e2e.conf", "local all all reject\n");
 
     let dir = std::env::temp_dir().join(format!("pgrust_auth_fatal_{}", std::process::id()));
@@ -260,7 +254,8 @@ fn auth_fatal_under_port_borrow_reaches_client() {
 fn explicit_reject_is_fatal_28000() {
     std::thread::spawn(|| {
         install();
-        load_hba_content("reject.conf", "local all all reject\n");
+        let _g = GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        load_hba_content_locked("reject.conf", "local all all reject\n");
         let mut port = unix_port("alice", "postgres");
         let err = expect_fatal(|| {
             let _ = ClientAuthentication(&mut port);
@@ -279,7 +274,8 @@ fn explicit_reject_is_fatal_28000() {
 fn implicit_reject_is_fatal_28000() {
     std::thread::spawn(|| {
         install();
-        load_hba_content("hostonly.conf", "host all all 127.0.0.1/32 trust\n");
+        let _g = GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        load_hba_content_locked("hostonly.conf", "host all all 127.0.0.1/32 trust\n");
         let mut port = unix_port("alice", "postgres");
         let err = expect_fatal(|| {
             let _ = ClientAuthentication(&mut port);
@@ -298,7 +294,8 @@ fn implicit_reject_is_fatal_28000() {
 fn auth_failed_surfaces_exact_28000() {
     std::thread::spawn(|| {
         install();
-        load_hba_content("trust2.conf", "local all all trust\n");
+        let _g = GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        load_hba_content_locked("trust2.conf", "local all all trust\n");
         let mut port = unix_port("alice", "postgres");
         hba::hba_getauthmethod(&mut port).unwrap();
 
@@ -330,7 +327,8 @@ fn auth_failed_surfaces_exact_28000() {
 fn password_failed_is_28P01() {
     std::thread::spawn(|| {
         install();
-        load_hba_content("scram2.conf", "local all all scram-sha-256\n");
+        let _g = GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        load_hba_content_locked("scram2.conf", "local all all scram-sha-256\n");
         let mut port = unix_port("alice", "postgres");
         hba::hba_getauthmethod(&mut port).unwrap();
         let err = expect_fatal(|| {
@@ -350,7 +348,8 @@ fn password_failed_is_28P01() {
 fn scram_arm_is_loud() {
     let result = std::thread::spawn(|| {
         install();
-        load_hba_content("scram.conf", "local all all scram-sha-256\n");
+        let _g = GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        load_hba_content_locked("scram.conf", "local all all scram-sha-256\n");
         let mut port = unix_port("alice", "postgres");
         let _ = ClientAuthentication(&mut port);
     })
@@ -366,7 +365,8 @@ fn scram_arm_is_loud() {
 fn eof_status_exits_quietly() {
     let result = std::thread::spawn(|| {
         install();
-        load_hba_content("trust3.conf", "local all all trust\n");
+        let _g = GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        load_hba_content_locked("trust3.conf", "local all all trust\n");
         let mut port = unix_port("alice", "postgres");
         hba::hba_getauthmethod(&mut port).unwrap();
         let _ = auth_failed(&port, STATUS_EOF, None);

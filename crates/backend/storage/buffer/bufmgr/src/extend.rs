@@ -123,7 +123,7 @@ fn extend_to_guts(
     }
 
     if flags & bufmgr_seams::EB_CLEAR_SIZE_CACHE != 0 {
-        panic!("unported callee reached from bufmgr.c ExtendBufferedRelTo: EB_CLEAR_SIZE_CACHE needs an smgr cached-nblocks seam");
+        smgr_seams::smgr_set_cached_nblocks::call(smgr, fork, InvalidBlockNumber)?;
     }
 
     let mut current_size = smgr_seams::smgr_nblocks::call(smgr, fork)?;
@@ -218,7 +218,7 @@ fn ExtendBufferedRelShared(
     }
 
     if flags & bufmgr_seams::EB_CLEAR_SIZE_CACHE != 0 {
-        panic!("unported callee reached from bufmgr.c ExtendBufferedRelShared: EB_CLEAR_SIZE_CACHE needs an smgr cached-nblocks seam");
+        smgr_seams::smgr_set_cached_nblocks::call(smgr, fork, InvalidBlockNumber)?;
     }
 
     let first_block = smgr_seams::smgr_nblocks::call(smgr, fork)?;

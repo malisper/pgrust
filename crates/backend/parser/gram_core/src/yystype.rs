@@ -131,9 +131,8 @@ impl<'mcx> YYSTYPE<'mcx> {
         Self::mk(p, T_LIMIT, 0)
     }
 
-    // func_alias_clause's list_make2(alias, coldeflist), destructured. The
-    // 16B carrier has no room for a list next to the alias; every producer
-    // today passes NIL (ROWS FROM lands a fatter arena carrier when needed).
+    // func_alias_clause's list_make2(alias, coldeflist): every producer today
+    // passes NIL coldeflist (ROWS FROM lands an arena carrier when needed).
     #[inline(always)]
     pub fn FuncAlias(alias: Option<&'mcx Alias<'mcx>>, coldeflist: NodeList<'mcx>) -> Self {
         assert!(coldeflist.is_nil(), "gram_core: non-NIL coldeflist needs an arena carrier");
@@ -199,8 +198,7 @@ impl<'mcx> YYSTYPE<'mcx> {
         if self.tag() != T_LIST {
             confusion("List");
         }
-        // SAFETY: built by List() via into_raw_parts; the arena keeps the
-        // buffer alive and slots move (single consumer).
+        // SAFETY: built by List() via into_raw_parts; arena-live, read once.
         unsafe { NodeList::from_raw_parts(self.p.cast(), self.aux()) }
     }
 
@@ -216,8 +214,7 @@ impl<'mcx> YYSTYPE<'mcx> {
         if self.tag() != T_FUNC_ALIAS {
             confusion("FuncAlias");
         }
-        // SAFETY: built by func_alias() from &'mcx Alias; coldeflist is NIL
-        // by the constructor's assert.
+        // SAFETY: built by FuncAlias() from &'mcx Alias (coldeflist NIL-asserted).
         (unsafe { (self.p as *const Alias<'mcx>).as_ref() }, NodeList::nil())
     }
 
@@ -235,8 +232,7 @@ impl<'mcx> YYSTYPE<'mcx> {
         if self.tag() != T_LIMIT {
             confusion("Limit");
         }
-        // SAFETY: built by Limit() from &'mcx mut SelectLimit; slots move, so
-        // the exclusive borrow is never duplicated.
+        // SAFETY: built by Limit() from &'mcx mut SelectLimit; moved, never duplicated.
         unsafe { (self.p as *mut SelectLimit<'mcx>).as_mut() }
     }
 }

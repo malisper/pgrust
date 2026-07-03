@@ -47,10 +47,9 @@ impl<'mcx> Parser<'mcx> {
         })
     }
 
-    // parser.c base_yylex: the one-token-lookahead merge filter keeping the
-    // grammar LALR(1) (FORMAT/NOT/NULLS/WITH/WITHOUT + UIDENT/USCONST merges).
-    // C's exact boundary: token code returned, value/location written through
-    // the caller's yylval/yylloc.
+    // parser.c base_yylex, C's exact boundary (token code returned, value and
+    // location through the caller's yylval/yylloc): the one-token-lookahead
+    // merge filter keeping the grammar LALR(1).
     fn base_yylex(&mut self, lvalp: &mut YYSTYPE<'mcx>, llocp: &mut i32) -> PgResult<i32> {
         let cur_tok = if self.have_lookahead {
             self.have_lookahead = false;
@@ -376,8 +375,7 @@ impl<'mcx> Parser<'mcx> {
     }
 }
 
-// Bit-identical repack (both sides are p + (tag | len<<32) with aligned tag
-// values); LLVM folds the match to a two-register copy.
+// Bit-identical repack (tag values aligned across the two 16B carriers).
 fn yystype_from(v: CoreYYSTYPE<'_>) -> YYSTYPE<'_> {
     match v.get() {
         CoreVal::None => YYSTYPE::None,

@@ -1261,6 +1261,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "commands_tablespace"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "relpath",
+ "tablespace_seams",
+ "types_core",
+ "types_error",
+]
+
+[[package]]
 name = "commands_vacuum"
 version = "0.0.0"
 dependencies = [
@@ -5869,6 +5880,7 @@ dependencies = [
  "catcache",
  "checkpointer",
  "clog",
+ "commands_tablespace",
  "commands_vacuum",
  "condition_variable",
  "conffiles",

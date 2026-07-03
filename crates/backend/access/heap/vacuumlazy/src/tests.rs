@@ -89,6 +89,12 @@ fn install_seams() {
                 })
             },
         );
+        bufmgr_seams::extend_buffered_rel_to_rel::set(|rel, fork, strategy, flags, extend_to, mode| {
+            bufmgr_seams::extend_buffered_rel_to::call(
+                bufmgr_seams::relation_smgr_locator::call(rel),
+                fork, strategy, flags, extend_to, mode,
+            )
+        });
         bufmgr_seams::lock_buffer::set(|buf, mode| {
             with_fake(|f| {
                 let l = &mut f.locks[(buf - 1) as usize];
