@@ -20,6 +20,11 @@ use types_nodes::{Node, NodeList, NodeTag};
 #[cfg(test)]
 mod tests;
 
+pub mod node_funcs;
+pub use node_funcs::{
+    expr_collation, expr_is_null_constant, expr_location, expr_type, expr_typmod,
+};
+
 pub const QTW_IGNORE_RT_SUBQUERIES: u32 = 0x01;
 pub const QTW_IGNORE_CTE_SUBQUERIES: u32 = 0x02;
 pub const QTW_IGNORE_RC_SUBQUERIES: u32 = 0x03;
@@ -142,6 +147,7 @@ pub fn expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
             let b = node.as_bool_expr().unwrap();
             walk_list(&b.args, w)
         }
+        NodeTag::T_RelabelType => w.visit(node.as_relabel_type().unwrap().arg),
         NodeTag::T_NullTest => walk_opt(node.as_null_test().unwrap().arg, w),
         NodeTag::T_RelabelType => w.visit(node.as_relabel_type().unwrap().arg),
         NodeTag::T_CoerceViaIO => w.visit(node.as_coerce_via_io().unwrap().arg),

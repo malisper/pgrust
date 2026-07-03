@@ -8,6 +8,7 @@ mod tests;
 use datum::Datum;
 use fmgr::FmgrInfo;
 use mcx::Mcx;
+use nodes_core::node_funcs::expr_typmod;
 use parser_small1::{
     parser_errposition, variable_coerce_param_hook, ParseRefHookState, ParseState,
 };
@@ -380,9 +381,9 @@ fn check_generic_type_consistency(
     let mut have_anynonarray = false;
     let mut have_anyenum = false;
     let mut have_anycompatible_nonarray = false;
-    let mut n_anycompatible_args = 0usize;
     // C: Oid anycompatible_actual_types[FUNC_MAX_ARGS].
     let mut anycompatible_actual_types = [InvalidOid; FUNC_MAX_ARGS];
+    let mut n_anycompatible_args = 0usize;
 
     for (&actual, &decl_type) in actual_arg_types.iter().zip(declared_arg_types) {
         let mut actual_type = actual;
@@ -438,6 +439,7 @@ fn check_generic_type_consistency(
                 if actual_type == UNKNOWNOID {
                     continue;
                 }
+                actual_type = lsyscache::getBaseType(actual_type)?;
                 anycompatible_actual_types[n_anycompatible_args] = actual_type;
                 n_anycompatible_args += 1;
             }
@@ -571,7 +573,7 @@ fn check_generic_type_consistency(
         {
             return Ok(false);
         }
-        if OidIsValid(anycompatible_range_typeid)
+        if OidIsValid(anycompatible_range_typelem)
             && anycompatible_range_typelem != anycompatible_typeid
         {
             return Ok(false);
@@ -579,6 +581,80 @@ fn check_generic_type_consistency(
     }
 
     Ok(true)
+}
+
+fn select_common_type_from_oids(typeids: &[Oid], noerror: bool) -> PgResult<Oid> {
+    debug_assert!(!typeids.is_empty());
+    let mut ptype = typeids[0];
+    let mut rest = &typeids[1..];
+
+    if ptype != UNKNOWNOID {
+        let mut i = 0;
+        while i < rest.len() && rest[i] == ptype {
+            i += 1;
+        }
+        if i == rest.len() {
+            return Ok(ptype);
+        }
+        rest = &rest[i..];
+    }
+
+    ptype = lsyscache::getBaseType(ptype)?;
+    let (mut pcategory, mut pispreferred) = lsyscache::get_type_category_preferred(ptype)?;
+
+    for &rawtype in rest {
+        let ntype = lsyscache::getBaseType(rawtype)?;
+        if ntype != UNKNOWNOID && ntype != ptype {
+            let (ncategory, nispreferred) = lsyscache::get_type_category_preferred(ntype)?;
+            if ptype == UNKNOWNOID {
+                ptype = ntype;
+                pcategory = ncategory;
+                pispreferred = nispreferred;
+            } else if ncategory != pcategory {
+                if noerror {
+                    return Ok(InvalidOid);
+                }
+                return Err(argument_types_mismatch(ptype, ntype));
+            } else if !pispreferred
+                && can_coerce_type(&[ptype], &[ntype], COERCION_IMPLICIT)?
+                && !can_coerce_type(&[ntype], &[ptype], COERCION_IMPLICIT)?
+            {
+                ptype = ntype;
+                pcategory = ncategory;
+                pispreferred = nispreferred;
+            }
+        }
+    }
+
+    if ptype == UNKNOWNOID {
+        ptype = types_core::catalog::TEXTOID;
+    }
+    Ok(ptype)
+}
+
+fn verify_common_type_from_oids(common_type: Oid, typeids: &[Oid]) -> PgResult<bool> {
+    for &t in typeids {
+        if t != common_type
+            && t != UNKNOWNOID
+            && !can_coerce_type(&[t], &[common_type], COERCION_IMPLICIT)?
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+#[cold]
+#[inline(never)]
+fn argument_types_mismatch(ptype: Oid, ntype: Oid) -> Box<PgError> {
+    let (p, n) = match (format_type::format_type_be(ptype), format_type::format_type_be(ntype)) {
+        (Ok(p), Ok(n)) => (p, n),
+        (Err(e), _) | (_, Err(e)) => return e,
+    };
+    Box::new(
+        PgError::error(format!("argument types {p} and {n} cannot be matched"))
+            .with_sqlstate(ERRCODE_DATATYPE_MISMATCH),
+    )
 }
 
 pub fn TypeCategory(typid: Oid) -> PgResult<i8> {
@@ -717,66 +793,6 @@ pub fn IsBinaryCoercible(srctype: Oid, targettype: Oid) -> PgResult<bool> {
             && cast.castcontext == COERCION_CODE_IMPLICIT),
         None => Ok(false),
     }
-}
-
-// select_common_type_from_oids (parse_coerce.c); noerror returns InvalidOid
-// on category mismatch.
-fn select_common_type_from_oids(typeids: &[Oid], noerror: bool) -> PgResult<Oid> {
-    debug_assert!(!typeids.is_empty());
-    let mut ptype = typeids[0];
-    let mut rest = &typeids[1..];
-    if ptype != UNKNOWNOID {
-        let mut i = 0;
-        while i < rest.len() && rest[i] == ptype {
-            i += 1;
-        }
-        if i == rest.len() {
-            return Ok(ptype);
-        }
-        rest = &rest[i..];
-    }
-    ptype = lsyscache::getBaseType(ptype)?;
-    let (mut pcategory, mut pispreferred) = lsyscache::get_type_category_preferred(ptype)?;
-    for &rawtype in rest {
-        let ntype = lsyscache::getBaseType(rawtype)?;
-        if ntype != UNKNOWNOID && ntype != ptype {
-            let (ncategory, nispreferred) = lsyscache::get_type_category_preferred(ntype)?;
-            if ptype == UNKNOWNOID {
-                ptype = ntype;
-                pcategory = ncategory;
-                pispreferred = nispreferred;
-            } else if ncategory != pcategory {
-                if noerror {
-                    return Ok(InvalidOid);
-                }
-                return Err(poly_mismatch(format!(
-                    "argument types {} and {} cannot be matched",
-                    format_type::format_type_be(ptype)?,
-                    format_type::format_type_be(ntype)?
-                )));
-            } else if !pispreferred
-                && can_coerce_type(&[ptype], &[ntype], COERCION_IMPLICIT)?
-                && !can_coerce_type(&[ntype], &[ptype], COERCION_IMPLICIT)?
-            {
-                ptype = ntype;
-                pcategory = ncategory;
-                pispreferred = nispreferred;
-            }
-        }
-    }
-    if ptype == UNKNOWNOID {
-        ptype = types_core::catalog::TEXTOID;
-    }
-    Ok(ptype)
-}
-
-fn verify_common_type_from_oids(common_type: Oid, typeids: &[Oid]) -> PgResult<bool> {
-    for &t in typeids {
-        if !can_coerce_type(&[t], &[common_type], COERCION_IMPLICIT)? {
-            return Ok(false);
-        }
-    }
-    Ok(true)
 }
 
 #[cold]
@@ -1505,20 +1521,6 @@ pub fn coerce_to_target_type<'mcx>(
         mcx, result, targettype, targettypmod, ccontext, cformat, location, hide,
     )?;
     Ok(Some(result))
-}
-
-// Minimal exprTypmod slice: the node shapes coerce_type can hand back. A
-// wrong -1 only inserts a redundant (idempotent) length coercion.
-fn expr_typmod(node: Node<'_>) -> i32 {
-    if let Some(c) = node.as_variant::<Const>() {
-        c.consttypmod
-    } else if let Some(v) = node.as_variant::<types_nodes::Var>() {
-        v.vartypmod
-    } else if let Some(r) = node.as_variant::<RelabelType>() {
-        r.resulttypmod
-    } else {
-        -1
-    }
 }
 
 fn hide_coercion_node(node: Node<'_>) {

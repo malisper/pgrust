@@ -11,6 +11,9 @@ use crate::{
 };
 
 const VARCHAROID: types_core::Oid = 1043;
+const BPCHAROID: types_core::Oid = 1042;
+const BPCHAR_LEN_COERCION_FUNC: types_core::Oid = 668;
+const MISSING_TYPE: types_core::Oid = 999_999;
 const TEXT_TO_VARCHAR_CAST: types_core::Oid = 10058;
 
 fn install_fixture() {
@@ -72,6 +75,14 @@ fn install_fixture() {
         });
         // pg_cast.dat: text -> varchar is binary-coercible, implicit.
         syscache_seams::lookup_pg_cast_shape::set(|src, tgt| {
+            if src == BPCHAROID && tgt == BPCHAROID {
+                return Ok(Some(syscache_seams::PgCastShape {
+                    oid: 10096,
+                    castfunc: BPCHAR_LEN_COERCION_FUNC,
+                    castcontext: b'i' as i8,
+                    castmethod: b'f' as i8,
+                }));
+            }
             Ok((src == TEXTOID && tgt == VARCHAROID).then_some(syscache_seams::PgCastShape {
                 oid: TEXT_TO_VARCHAR_CAST,
                 castfunc: InvalidOid,
@@ -79,10 +90,28 @@ fn install_fixture() {
                 castmethod: b'b' as i8,
             }))
         });
-        syscache_seams::pg_type_element_shape::set(|_| {
+        syscache_seams::pg_type_element_shape::set(|typid| {
+            if typid == MISSING_TYPE {
+                return Ok(None);
+            }
             Ok(Some(syscache_seams::PgTypeElementShape {
                 typelem: InvalidOid,
                 typsubscript: InvalidOid,
+            }))
+        });
+        syscache_seams::lookup_pg_proc_shape::set(|funcid| {
+            Ok((funcid == BPCHAR_LEN_COERCION_FUNC).then_some(syscache_seams::PgProcShape {
+                pronamespace: 11,
+                prorettype: BPCHAROID,
+                provariadic: InvalidOid,
+                prosupport: InvalidOid,
+                pronargs: 3,
+                prokind: b'f' as i8,
+                provolatile: b'i' as i8,
+                proparallel: b's' as i8,
+                proretset: false,
+                proisstrict: true,
+                proleakproof: false,
             }))
         });
         syscache_seams::pg_type_category::set(|typid| {
@@ -347,4 +376,136 @@ fn pathways_and_predicates() {
             .unwrap(),
         INT4OID
     );
+}
+
+#[test]
+fn typmod_coercion_function_paths() {
+    install_fixture();
+    assert_eq!(
+        crate::find_typmod_coercion_function(BPCHAROID).unwrap(),
+        (crate::COERCION_PATH_FUNC, BPCHAR_LEN_COERCION_FUNC)
+    );
+    assert_eq!(
+        crate::find_typmod_coercion_function(TEXTOID).unwrap(),
+        (COERCION_PATH_NONE, InvalidOid)
+    );
+    let err = crate::find_typmod_coercion_function(999_999).unwrap_err();
+    assert_eq!(err.message(), "cache lookup failed for type 999999");
+}
+
+#[test]
+fn typmod_coercion_builds_three_arg_funcexpr() {
+    install_fixture();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let node =
+        Node::mk_const(mcx, BPCHAROID, -1, 100, -1, datum::Datum::null(), true, false).unwrap();
+
+    let out = crate::coerce_type_typmod(
+        mcx,
+        node,
+        BPCHAROID,
+        9,
+        COERCION_IMPLICIT,
+        CoercionForm::COERCE_IMPLICIT_CAST,
+        7,
+        false,
+    )
+    .unwrap();
+    let f = out.as_func_expr().unwrap();
+    assert_eq!(f.funcid, BPCHAR_LEN_COERCION_FUNC);
+    assert_eq!(f.funcresulttype, BPCHAROID);
+    assert_eq!(f.args.len(), 3);
+    let mut args = f.args.iter();
+    assert!(args.next().unwrap().ptr_eq(node));
+    let typmod_arg = args.next().unwrap().as_const().unwrap();
+    assert_eq!(typmod_arg.constvalue, datum::Datum::from_i32(9));
+    let explicit_arg = args.next().unwrap().as_const().unwrap();
+    assert_eq!(explicit_arg.constvalue, datum::Datum::from_bool(false));
+
+    let out = crate::coerce_type_typmod(
+        mcx,
+        node,
+        BPCHAROID,
+        9,
+        crate::COERCION_EXPLICIT,
+        CoercionForm::COERCE_EXPLICIT_CAST,
+        7,
+        false,
+    )
+    .unwrap();
+    let f = out.as_func_expr().unwrap();
+    let explicit_arg = f.args.iter().nth(2).unwrap().as_const().unwrap();
+    assert_eq!(explicit_arg.constvalue, datum::Datum::from_bool(true));
+}
+
+#[test]
+fn typmod_coercion_skips_when_typmod_matches() {
+    install_fixture();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let node =
+        Node::mk_const(mcx, BPCHAROID, 9, 100, -1, datum::Datum::null(), true, false).unwrap();
+    let out = crate::coerce_type_typmod(
+        mcx,
+        node,
+        BPCHAROID,
+        9,
+        COERCION_IMPLICIT,
+        CoercionForm::COERCE_IMPLICIT_CAST,
+        -1,
+        false,
+    )
+    .unwrap();
+    assert!(out.ptr_eq(node));
+}
+
+#[test]
+fn negative_typmod_relabels_const_in_place() {
+    install_fixture();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let node =
+        Node::mk_const(mcx, BPCHAROID, 9, 100, -1, datum::Datum::null(), true, false).unwrap();
+    let out = crate::coerce_type_typmod(
+        mcx,
+        node,
+        BPCHAROID,
+        -1,
+        crate::COERCION_EXPLICIT,
+        CoercionForm::COERCE_EXPLICIT_CAST,
+        -1,
+        false,
+    )
+    .unwrap();
+    // applyRelabelType Const arm: fresh Const, typmod stripped.
+    let con = out.as_const().unwrap();
+    assert!(!out.ptr_eq(node));
+    assert_eq!(con.consttype, BPCHAROID);
+    assert_eq!(con.consttypmod, -1);
+    assert_eq!(con.constcollid, 100);
+}
+
+#[test]
+fn negative_typmod_wraps_var_in_relabel() {
+    install_fixture();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let var = Node::mk_var(mcx, 1, 1, BPCHAROID, 9, 100, 0).unwrap();
+    let out = crate::coerce_type_typmod(
+        mcx,
+        var,
+        BPCHAROID,
+        -1,
+        crate::COERCION_EXPLICIT,
+        CoercionForm::COERCE_EXPLICIT_CAST,
+        -1,
+        false,
+    )
+    .unwrap();
+    let r = out.as_relabel_type().unwrap();
+    assert!(r.arg.ptr_eq(var));
+    assert_eq!(r.resulttype, BPCHAROID);
+    assert_eq!(r.resulttypmod, -1);
+    assert_eq!(r.resultcollid, 100);
 }

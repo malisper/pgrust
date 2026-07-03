@@ -11,7 +11,6 @@ keywords = { path = "../../../../common/keywords" }
 mbutils_seams = { path = "../../mb/mbutils_seams" }
 adt_numeric = { path = "../numeric" }
 wchar = { path = "../../../../common/wchar" }
-lsyscache = { path = "../../cache/lsyscache" }
 types_fmgr = { path = "../../../../_support/types/fmgr" }
 syscache_seams = { path = "../../cache/syscache_seams" }
 types_core = { path = "../../../../_support/types/types_core" }
