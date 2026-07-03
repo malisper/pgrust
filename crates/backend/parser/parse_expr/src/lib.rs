@@ -338,7 +338,7 @@ fn transformRowExpr<'mcx>(
                 ))
                 .errposition(parser_small1::parser_errposition(pstate, r.location, encoding))
                 .into_error()
-                .with_error_location(ErrorLocation::new(file!(), line!())),
+                .with_error_location(ErrorLocation::new("parse_expr.c", 0, "transformRowExpr")),
         ));
     }
     // C: anonymous RECORD row until cast; colnames invented as f1..fN.
