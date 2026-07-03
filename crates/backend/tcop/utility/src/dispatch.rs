@@ -607,6 +607,9 @@ fn dispatch_switch<'mcx>(
             }
         }
 
+        T_AlterFunctionStmt => handler_gap("AlterFunction (functioncmds lane)"),
+        T_AlterOwnerStmt => handler_gap("ExecAlterOwnerStmt (alter.c lane)"),
+
         // Everything else — the GRANT/DROP/RENAME/ALTER.../COMMENT/SECURITY
         // LABEL fast paths and the event-trigger-fenced DDL fan-out.
         T_CreateStmt => {
