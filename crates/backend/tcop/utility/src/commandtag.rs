@@ -127,12 +127,27 @@ pub fn CreateCommandTag(parsetree: Node<'_>) -> CommandTag {
             match stmt.renameType {
                 types_nodes::parsenodes::ObjectType::OBJECT_TABLE
                 | types_nodes::parsenodes::ObjectType::OBJECT_COLUMN => CMDTAG_ALTER_TABLE,
+                types_nodes::parsenodes::ObjectType::OBJECT_AGGREGATE => CMDTAG_ALTER_AGGREGATE,
+                types_nodes::parsenodes::ObjectType::OBJECT_FUNCTION => CMDTAG_ALTER_FUNCTION,
+                types_nodes::parsenodes::ObjectType::OBJECT_PROCEDURE => CMDTAG_ALTER_PROCEDURE,
+                types_nodes::parsenodes::ObjectType::OBJECT_ROUTINE => CMDTAG_ALTER_ROUTINE,
                 _ => payload_gap("CreateCommandTag", "RenameStmt non-table"),
             }
         }
         T_AlterObjectDependsStmt => payload_gap("CreateCommandTag", "AlterObjectDependsStmt"),
         T_AlterObjectSchemaStmt => payload_gap("CreateCommandTag", "AlterObjectSchemaStmt"),
-        T_AlterOwnerStmt => payload_gap("CreateCommandTag", "AlterOwnerStmt"),
+        T_AlterOwnerStmt => {
+            let stmt = parsetree
+                .as_alter_owner_stmt()
+                .expect("AlterOwnerStmt");
+            match stmt.objectType {
+                types_nodes::parsenodes::ObjectType::OBJECT_AGGREGATE => CMDTAG_ALTER_AGGREGATE,
+                types_nodes::parsenodes::ObjectType::OBJECT_FUNCTION => CMDTAG_ALTER_FUNCTION,
+                types_nodes::parsenodes::ObjectType::OBJECT_PROCEDURE => CMDTAG_ALTER_PROCEDURE,
+                types_nodes::parsenodes::ObjectType::OBJECT_ROUTINE => CMDTAG_ALTER_ROUTINE,
+                _ => payload_gap("CreateCommandTag", "AlterOwnerStmt"),
+            }
+        }
         T_AlterTableMoveAllStmt => payload_gap("CreateCommandTag", "AlterTableMoveAllStmt"),
         // AlterObjectTypeCommandTag over stmt->objtype; the ported
         // AlterTableStmt grammar productions only emit OBJECT_TABLE.
@@ -146,7 +161,16 @@ pub fn CreateCommandTag(parsetree: Node<'_>) -> CommandTag {
             }
         }
         T_AlterDomainStmt => CMDTAG_ALTER_DOMAIN,
-        T_AlterFunctionStmt => payload_gap("CreateCommandTag", "AlterFunctionStmt"),
+        T_AlterFunctionStmt => {
+            let stmt = parsetree
+                .as_alter_function_stmt()
+                .expect("AlterFunctionStmt");
+            match stmt.objtype {
+                types_nodes::parsenodes::ObjectType::OBJECT_PROCEDURE => CMDTAG_ALTER_PROCEDURE,
+                types_nodes::parsenodes::ObjectType::OBJECT_ROUTINE => CMDTAG_ALTER_ROUTINE,
+                _ => CMDTAG_ALTER_FUNCTION,
+            }
+        }
         T_GrantStmt => {
             let stmt = parsetree
                 .as_variant::<types_nodes::parsenodes::GrantStmt>()
