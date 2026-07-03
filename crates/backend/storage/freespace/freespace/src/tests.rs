@@ -333,10 +333,11 @@ fn vacuum_lanes_panic_named() {
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
     };
-    let err = catch_unwind(AssertUnwindSafe(|| FreeSpaceMapVacuum(&rel))).unwrap_err();
+    let err =
+        catch_unwind(AssertUnwindSafe(|| FreeSpaceMapPrepareTruncateRel(&rel, 0))).unwrap_err();
     let msg = err
         .downcast_ref::<String>()
         .cloned()
         .unwrap_or_default();
-    assert!(msg.contains("FreeSpaceMapVacuum"), "{msg}");
+    assert!(msg.contains("FreeSpaceMapPrepareTruncateRel"), "{msg}");
 }

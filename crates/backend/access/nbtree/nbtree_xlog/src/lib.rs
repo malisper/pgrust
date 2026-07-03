@@ -1,7 +1,8 @@
-//! nbtxlog.c — btree rmgr redo. Live arms cover exactly what the write side
-//! (nbtree insert lane) emits: INSERT_LEAF/UPPER/META/POST, SPLIT_L/R,
-//! NEWROOT, DEDUP. Every other op is a loud panic naming its C function and
-//! unit.
+//! nbtxlog.c — btree rmgr redo. Live arms cover what the write side (nbtree
+//! insert + dedup + vacuum lanes) emits: INSERT_LEAF/UPPER/META/POST,
+//! SPLIT_L/R, NEWROOT, DEDUP, VACUUM, DELETE, MARK_PAGE_HALFDEAD,
+//! UNLINK_PAGE(_META), REUSE_PAGE, META_CLEANUP. Hot-standby conflict points
+//! are loud panics naming their C function and owning unit.
 
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
