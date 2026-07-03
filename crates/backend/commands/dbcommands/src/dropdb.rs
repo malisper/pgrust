@@ -35,7 +35,7 @@ fn oid_key(attno: i32, arg: Oid) -> ScanKeyData {
     key.sk_strategy = BTEqualStrategyNumber;
     key.sk_func = fmgr_seams::fmgr_info::call(types_core::fmgr::F_OIDEQ)
         .unwrap_or_else(|e| panic!("fmgr_info(oideq) failed: {e:?}"));
-    key.sk_argument = arg.into();
+    key.sk_argument = Datum::from_oid(arg);
     key
 }
 
