@@ -331,10 +331,10 @@ backend-executor-nodeWorktablescan	src/backend/executor/nodeWorktablescan.c	todo
 backend-executor-spi	src/backend/executor/spi.c	partial	spi	cold	fabled:backend-executor-spi; m1-spine; 2026-07-02 boot lane: SPI_inside_nonatomic_context + AtEOXact/AtEOSubXact_SPI real empty-stack arms (_SPI_connected TLS=-1; SPI_connect unported => named panic on any nonempty state)
 backend-executor-tqueue	src/backend/executor/tqueue.c	todo			fabled:backend-executor-tqueue
 backend-executor-tstoreReceiver	src/backend/executor/tstoreReceiver.c	ported	tstore_receiver	cold(FillPortalStore utility/holdable output only; per-row = tuplestore put, benched at tstore_ lanes)	fabled:backend-executor-tstoreReceiver; m1-spine(EXPLAIN/SHOW); notoast arm live as DestReceiver::Tuplestore enum arm (tcop_dest); SetTuplestoreDestReceiverParams takes (handle, detoast) - C's tContext lives inside the store behind TuplestoreHandle, target_tupdesc/tupmap (CALL lane) and forced-detoast (WITH HOLD cursor lane) = loud panics; slot's own PgVec allocator IS tts_mcxt (no threaded mcx); cold: once per utility row; 3 tests, density 1.7%
-backend-foreign-foreign	src/backend/foreign/foreign.c	todo			fabled:backend-foreign-foreign; m1-dep(stub-ok)
+backend-foreign-foreign	src/backend/foreign/foreign.c	non-core			fabled:backend-foreign-foreign; m1-dep(stub-ok); 2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
 backend-geqo-all	src/backend/optimizer/geqo/geqo_copy.c,src/backend/optimizer/geqo/geqo_cx.c,src/backend/optimizer/geqo/geqo_erx.c,src/backend/optimizer/geqo/geqo_eval.c,src/backend/optimizer/geqo/geqo_main.c,src/backend/optimizer/geqo/geqo_misc.c,src/backend/optimizer/geqo/geqo_mutation.c,src/backend/optimizer/geqo/geqo_ox1.c,src/backend/optimizer/geqo/geqo_ox2.c,src/backend/optimizer/geqo/geqo_pmx.c,src/backend/optimizer/geqo/geqo_pool.c,src/backend/optimizer/geqo/geqo_px.c,src/backend/optimizer/geqo/geqo_random.c,src/backend/optimizer/geqo/geqo_recombination.c,src/backend/optimizer/geqo/geqo_selection.c	todo			fabled:backend-geqo-all; m1-dep(stub-ok)
 backend-geqo-small	-	combined-into:backend-geqo-all			fabled:backend-geqo-all; m1-dep(stub-ok)
-backend-jit-jit	src/backend/jit/jit.c	todo			m1-dep(stub-ok)
+backend-jit-jit	src/backend/jit/jit.c	non-core			m1-dep(stub-ok); 2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
 backend-lib-knapsack	src/backend/lib/knapsack.c	todo			fabled:backend-lib-knapsack; m1-dep(stub-ok)
 backend-lib-algorithms	src/common/binaryheap.c	todo			fabled:backend-lib-algorithms
 backend-lib-all	-	combined-into:backend-lib-rbtree			
@@ -431,33 +431,33 @@ backend-postmaster-syslogger	src/backend/postmaster/syslogger.c	todo	syslogger		
 backend-postmaster-walsummarizer	src/backend/postmaster/walsummarizer.c	todo			fabled:backend-postmaster-walsummarizer; m1-dep(stub-ok)
 backend-postmaster-walwriter	src/backend/postmaster/walwriter.c	ported	walwriter	cold	fabled:backend-postmaster-walwriter; m1-spine(boot); cold (200ms cadence) => rationale not bench; WalWriterMain loop C-exact incl hibernation handshake (SetWalWriterSleeping ported into transam_xlog, XLogBackgroundFlush ported into transam_xlog write.rs: page-boundary backoff, asyncXactLSN arm, flush pacing by WalWriterDelay/FlushAfter, XLogWrite under WALWriteLock, opportunistic AdvanceXLInsertBuffer; WalSndWakeupProcessRequests omitted like XLogFlush - no walsender exists); advertises walwriterProc; owns WalWriterDelay/WalWriterFlushAfter GUC backing (unblocks XLogSetAsyncXactLSN's read); 1 test, density 2.4%
 backend-regex-core	src/backend/regex/regcomp.c,src/backend/regex/regerror.c,src/backend/regex/regexec.c,src/backend/regex/regexport.c,src/backend/regex/regfree.c,src/backend/regex/regprefix.c,src/backend/regex/regc_color.c,src/backend/regex/regc_cvec.c,src/backend/regex/regc_lex.c,src/backend/regex/regc_locale.c,src/backend/regex/regc_nfa.c,src/backend/regex/regc_pg_locale.c,src/backend/regex/rege_dfa.c	benched	regex_core	1.16-1.72x-instr/1.12-1.60x-ns	OFFICIAL Graviton (job pgrust-fast-microbench-1243af7a6f-1783067532, clang-16 -mcpu=neoverse-v2, 2026-07-03): tracked dual-FAIL all 3 exec lanes, gap ~halved by the pooled-exec-scratch lever (re_lit_16 1.16/1.12, re_class_64 1.72/1.60, re_alt_64 1.32/1.33 instr/ns; was 1.51-2.24/1.56-2.14) — lever landed: thread-local ExecScratch smalldfa pair + slice-view Dfa, warm small-pattern pg_regexec allocates zero; fast-scan hoist in longest/shortest; residual = index-based sset access density (bounds checks + 48B-stride madd) vs C pointer-shaped ssets, next lever pointer-shaped sset access; off-OLTP-spine so tracked not merge-blocking — docs/benchmarks/regex_core.md; lever=pooled/retained exec scratch (regex_t-owned or thread-local, zero allocs warm); off-OLTP-spine so tracked not merge-blocking — docs/benchmarks/regex_core.md;Spencer engine (pg_regcomp NFA build + colormap/arc + subexpr tree; pg_regexec lazy-DFA matcher + dissectors; pg_regprefix/regfree/regerror). 100% SAFE Rust (0 unsafe; bare-Vec compiled state is mimalloc-backed + Rc-refcounted for the cross-statement RE cache, C-faithful vs a per-stmt mcx). Locale bridge: C-locale strategy fully ported (hard-wired ASCII ctype table, no seam); BUILTIN/LIBC/ICU wc-ctype probes loud-panic until pg_locale grows its wc surface (regress corpus compared under COLLATE "C"). stack_depth = direct dep; check_stack_depth live. Prereq seams added: mbutils {pg_mb2wchar_with_len,pg_wchar2mb_with_len,pg_encoding_mblen}. DIFFERENTIAL vs live PG 18.3: 5037 (string,pattern,icase) pairs match/no-match+error parity 0 mismatches + 20 capture-group patterns via regexp_match 0 mismatches (anchors, [..]/[^..]/ranges/POSIX classes, \d\w\s shorthands, greedy+non-greedy quantifiers, alternation, groups, backrefs, word boundaries, ICASE-ASCII). init_seams wired into seams_init. density 0.3%; bench: warm pg_regexec vs clang C lift + fleet = remaining dual-gate (regex is off the SELECT-1 OLTP spine)
-backend-replication-libpqwalreceiver	src/backend/replication/libpqwalreceiver/libpqwalreceiver.c	todo			fabled:backend-replication-libpqwalreceiver
-backend-replication-logical-applyparallelworker	src/backend/replication/logical/applyparallelworker.c	todo			fabled:backend-replication-logical-applyparallelworker; m1-dep(stub-ok)
-backend-replication-logical-conflict	src/backend/replication/logical/conflict.c	todo			fabled:backend-replication-logical-conflict
-backend-replication-logical-decode	src/backend/replication/logical/decode.c	todo			fabled:backend-replication-logical-decode; m1-dep(stub-ok)
-backend-replication-logical-launcher	src/backend/replication/logical/launcher.c	todo	launcher		fabled:backend-replication-logical-launcher; m1-spine; boot surface ported 2026-07-02 in crate launcher (launcher main still todo): 3 GUC homes, ApplyLauncherRegister (C-arm early returns; registration recorded, never launched - bgworker registry unported), AtEOXact_ApplyLauncher empty-state arm; both seams installed
-backend-replication-logical-logical	src/backend/replication/logical/logical.c	todo			fabled:backend-replication-logical-logical; m1-dep(stub-ok)
-backend-replication-logical-logicalfuncs	src/backend/replication/logical/logicalfuncs.c	todo			fabled:backend-replication-logical-logicalfuncs
-backend-replication-logical-message	src/backend/replication/logical/message.c	todo			fabled:backend-replication-logical-message; m1-dep(stub-ok)
-backend-replication-logical-origin	src/backend/replication/logical/origin.c	todo			fabled:backend-replication-logical-origin; m1-dep(stub-ok)
-backend-replication-logical-proto	src/backend/replication/logical/proto.c	todo			fabled:backend-replication-logical-proto
-backend-replication-logical-relation	src/backend/replication/logical/relation.c	todo			fabled:backend-replication-logical-relation
-backend-replication-logical-reorderbuffer	src/backend/replication/logical/reorderbuffer.c	todo			fabled:backend-replication-logical-reorderbuffer; m1-dep(stub-ok)
-backend-replication-logical-slotsync	src/backend/replication/logical/slotsync.c	todo			fabled:backend-replication-logical-slotsync; m1-dep(stub-ok)
-backend-replication-logical-snapbuild	src/backend/replication/logical/snapbuild.c	todo			fabled:backend-replication-logical-snapbuild; m1-dep(stub-ok)
-backend-replication-logical-tablesync	src/backend/replication/logical/tablesync.c	todo			
-backend-replication-logical-worker	src/backend/replication/logical/worker.c	todo			m1-spine
-backend-replication-pgoutput	src/backend/replication/pgoutput/pgoutput.c	todo			
-backend-replication-repl-gram	src/backend/replication/repl_gram.y,build-clean/src/backend/replication/repl_gram.c	todo			fabled:backend-replication-repl-gram; m1-dep(stub-ok)
-backend-replication-repl-scanner	src/backend/replication/repl_scanner.l,build-clean/src/backend/replication/repl_scanner.c	todo			fabled:backend-replication-repl-scanner; m1-dep(stub-ok)
+backend-replication-libpqwalreceiver	src/backend/replication/libpqwalreceiver/libpqwalreceiver.c	non-core			fabled:backend-replication-libpqwalreceiver; 2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+backend-replication-logical-applyparallelworker	src/backend/replication/logical/applyparallelworker.c	non-core			fabled:backend-replication-logical-applyparallelworker; m1-dep(stub-ok); 2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+backend-replication-logical-conflict	src/backend/replication/logical/conflict.c	non-core			fabled:backend-replication-logical-conflict; 2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+backend-replication-logical-decode	src/backend/replication/logical/decode.c	non-core			fabled:backend-replication-logical-decode; m1-dep(stub-ok); 2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+backend-replication-logical-launcher	src/backend/replication/logical/launcher.c	non-core	launcher		fabled:backend-replication-logical-launcher; m1-spine; boot surface ported 2026-07-02 in crate launcher (launcher main still todo): 3 GUC homes, ApplyLauncherRegister (C-arm early returns; registration recorded, never launched - bgworker registry unported), AtEOXact_ApplyLauncher empty-state arm; both seams installed; 2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+backend-replication-logical-logical	src/backend/replication/logical/logical.c	non-core			fabled:backend-replication-logical-logical; m1-dep(stub-ok); 2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+backend-replication-logical-logicalfuncs	src/backend/replication/logical/logicalfuncs.c	non-core			fabled:backend-replication-logical-logicalfuncs; 2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+backend-replication-logical-message	src/backend/replication/logical/message.c	non-core			fabled:backend-replication-logical-message; m1-dep(stub-ok); 2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+backend-replication-logical-origin	src/backend/replication/logical/origin.c	non-core			fabled:backend-replication-logical-origin; m1-dep(stub-ok); 2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+backend-replication-logical-proto	src/backend/replication/logical/proto.c	non-core			fabled:backend-replication-logical-proto; 2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+backend-replication-logical-relation	src/backend/replication/logical/relation.c	non-core			fabled:backend-replication-logical-relation; 2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+backend-replication-logical-reorderbuffer	src/backend/replication/logical/reorderbuffer.c	non-core			fabled:backend-replication-logical-reorderbuffer; m1-dep(stub-ok); 2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+backend-replication-logical-slotsync	src/backend/replication/logical/slotsync.c	non-core			fabled:backend-replication-logical-slotsync; m1-dep(stub-ok); 2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+backend-replication-logical-snapbuild	src/backend/replication/logical/snapbuild.c	non-core			fabled:backend-replication-logical-snapbuild; m1-dep(stub-ok); 2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+backend-replication-logical-tablesync	src/backend/replication/logical/tablesync.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+backend-replication-logical-worker	src/backend/replication/logical/worker.c	non-core			m1-spine; 2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+backend-replication-pgoutput	src/backend/replication/pgoutput/pgoutput.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+backend-replication-repl-gram	src/backend/replication/repl_gram.y,build-clean/src/backend/replication/repl_gram.c	non-core			fabled:backend-replication-repl-gram; m1-dep(stub-ok); 2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+backend-replication-repl-scanner	src/backend/replication/repl_scanner.l,build-clean/src/backend/replication/repl_scanner.c	non-core			fabled:backend-replication-repl-scanner; m1-dep(stub-ok); 2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
 backend-replication-slot	src/backend/replication/slot.c	in-progress	slot	cold	fabled:backend-replication-slot; m1-dep(stub-ok); boot arm only: ReplicationSlotInitialize registers ReplicationSlotShmemExit (no-op arm exact while acquire/create unported); max_replication_slots GUC home stays in walsender_config; slot machinery unclaimed
-backend-replication-slotfuncs	src/backend/replication/slotfuncs.c	todo			fabled:backend-replication-slotfuncs
-backend-replication-syncrep-scanner	src/backend/replication/syncrep_scanner.l,build-clean/src/backend/replication/syncrep_scanner.c	todo			fabled:backend-replication-syncrep-scanner; m1-dep(stub-ok)
-backend-replication-syncrep-gram	src/backend/replication/syncrep_gram.y,build-clean/src/backend/replication/syncrep_gram.c	todo			fabled:backend-replication-syncrep-gram; m1-dep(stub-ok)
-backend-replication-syncrep	src/backend/replication/syncrep.c	todo			fabled:backend-replication-syncrep; m1-dep(stub-ok)
-backend-replication-walreceiver	src/backend/replication/walreceiver.c	todo			fabled:backend-replication-walreceiver; m1-dep(stub-ok)
-backend-replication-walreceiverfuncs	src/backend/replication/walreceiverfuncs.c	todo			fabled:backend-replication-walreceiverfuncs; m1-dep(stub-ok)
-backend-replication-walsender	src/backend/replication/walsender.c	todo			fabled:backend-replication-walsender; m1-spine; max_wal_senders GUC home in walsender_config crate (boot config surface only, unit unclaimed)
+backend-replication-slotfuncs	src/backend/replication/slotfuncs.c	non-core			fabled:backend-replication-slotfuncs; 2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+backend-replication-syncrep-scanner	src/backend/replication/syncrep_scanner.l,build-clean/src/backend/replication/syncrep_scanner.c	non-core			fabled:backend-replication-syncrep-scanner; m1-dep(stub-ok); 2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+backend-replication-syncrep-gram	src/backend/replication/syncrep_gram.y,build-clean/src/backend/replication/syncrep_gram.c	non-core			fabled:backend-replication-syncrep-gram; m1-dep(stub-ok); 2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+backend-replication-syncrep	src/backend/replication/syncrep.c	non-core			fabled:backend-replication-syncrep; m1-dep(stub-ok); 2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+backend-replication-walreceiver	src/backend/replication/walreceiver.c	non-core			fabled:backend-replication-walreceiver; m1-dep(stub-ok); 2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+backend-replication-walreceiverfuncs	src/backend/replication/walreceiverfuncs.c	non-core			fabled:backend-replication-walreceiverfuncs; m1-dep(stub-ok); 2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+backend-replication-walsender	src/backend/replication/walsender.c	non-core			fabled:backend-replication-walsender; m1-spine; max_wal_senders GUC home in walsender_config crate (boot config surface only, unit unclaimed); 2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
 backend-rewrite-core	src/backend/rewrite/rewriteManip.c,src/backend/rewrite/rewriteRemove.c,src/backend/rewrite/rewriteSearchCycle.c,src/backend/rewrite/rewriteSupport.c,src/backend/rewrite/rowsecurity.c	todo			fabled:backend-rewrite-core; m1-dep(stub-ok); rewriteHandler.c decomposed into row backend-rewrite-rewritehandler (ported: QueryRewrite spine + rewrite_handler_seams::query_rewrite installed, tcop pg_rewrite_query consumer live); rewriteDefine.c has its own row; remaining c_sources still todo
 backend-rmgrdesc-extra-small	-	combined-into:backend-access-rmgrdesc-xlogdesc			
 backend-rmgrdesc-extra	-	combined-into:backend-access-rmgrdesc-xlogdesc			
@@ -465,7 +465,7 @@ backend-rmgrdesc-next	src/backend/access/rmgrdesc/brindesc.c,src/backend/access/
 backend-access-rmgrdesc-xactdesc	src/backend/access/rmgrdesc/xactdesc.c	ported	rmgrdesc		fabled:backend-access-rmgrdesc-xactdesc; m1-dep(stub-ok); xact_desc/identify + ParsePrepareRecord (commit/abort parse reused from xact::redo); COMMIT/ABORT in oracle
 backend-rmgrdesc-path	-	combined-into:backend-access-rmgrdesc-smgrdesc			
 backend-rmgrdesc-small	src/backend/access/rmgrdesc/clogdesc.c,src/backend/access/rmgrdesc/committsdesc.c,src/backend/access/rmgrdesc/dbasedesc.c,src/backend/access/rmgrdesc/genericdesc.c,src/backend/access/rmgrdesc/logicalmsgdesc.c,src/backend/access/rmgrdesc/relmapdesc.c,src/backend/access/rmgrdesc/rmgrdesc_utils.c,src/backend/access/rmgrdesc/seqdesc.c,src/backend/access/rmgrdesc/tblspcdesc.c	partial	rmgrdesc		fabled:backend-access-rmgrdesc-small; clog/dbase/generic/relmap/seq/tblspc + rmgrdesc_utils array_desc ported; committs/logicalmsg desc remain loud panics; C-format unit tests for types the oracle cannot generate
-backend-snowball-dict-snowball	src/backend/snowball/dict_snowball.c	todo			fabled:backend-snowball-dict-snowball
+backend-snowball-dict-snowball	src/backend/snowball/dict_snowball.c	non-core			fabled:backend-snowball-dict-snowball; 2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
 backend-statistics-core	src/backend/statistics/attribute_stats.c,src/backend/statistics/relation_stats.c,src/backend/statistics/stat_utils.c	todo			m1-dep(stub-ok)
 backend-statistics-dependencies	src/backend/statistics/dependencies.c	todo			fabled:backend-statistics-dependencies
 backend-statistics-mvdistinct	src/backend/statistics/mvdistinct.c	todo			fabled:backend-statistics-mvdistinct
@@ -519,12 +519,12 @@ backend-tcop-utility	src/backend/tcop/utility.c	ported	utility	select1-gate	fabl
 backend-timezone-localtime	src/timezone/localtime.c	ported	localtime	cold	fabled:backend-timezone-localtime; m1-spine(boot); cold: per-pg_tzset-load parse; timesub warm later under EXTRACT/date_trunc - C shape kept (binary-search localsub, fixed-array TzState, zero-alloc timesub, tm_zone borrows state chars via lifetime); tzload/tzparse/localsub/gmtsub/timesub/pg_next_dst_boundary/abbrev family complete vs C 18.3 incl 64-bit block reparse, footer graft w/ byte-step abbrev reuse (suffix match), goback/goahead 400y repeat mapping, leap-second hit arm, 2018e defaulttype heuristics, GMT gmtptr leak w/ reentrancy-safe publish; INPUT_BUF_SIZE 54968 = C sizeof(input_buffer) single-read accept/reject cap; consts verified vs tzfile.h/private.h (TZ_MAX_* 2000/256/50/50, SECSPERREPEAT_BITS 34, AVGSECSPERYEAR 31556952, CHARS_SIZE 512); pg_open_tzfile via pgtz_seams (only cross-unit call; direct dep would cycle); tzload name=NULL/TZDEFAULT arm dropped (unreachable: no PG caller passes NULL); differential vs real /usr/share/zoneinfo + C tzcode goldens (NY DST both edges, 2100 goahead extrapolation, Lord Howe :30 DST, UTC fixed, synthetic header bounds); 12 tests, density 4.7%
 backend-timezone-pgtz	src/timezone/pgtz.c	ported	pgtz	cold	fabled:backend-timezone-pgtz; m1-spine(boot); cold (per-GUC-assign): pg_tzset cache = PgHashMap + entries leaked into backend-lifetime mcx (C dynahash entries permanent/never freed -> &'static PgTz, no refcounts, fabled's Rc refused); session/log_timezone = TLS Cell (C NULL-until-init); pg_open_tzfile case-insensitive scan via fd AllocateDir/ReadDirExtended(LOG); pg_tzset_offset ISO-abbrev builder; pg_timezone_initialize WIRED as InitializeGUCOptions first step (guc direct dep, closes guc.c:1530 deferred note); pg_tzenumerate streaming walk (one open Dir per depth); installs pgtz_seams::pg_open_tzfile + seams-init line; DIVERGENCES: pg_TZDIR share dir = PGRUST_TZDIR runtime env / PGRUST_PGSHAREDIR build env else loud panic (get_share_path in unported src/port/path.c; GMT name keeps C's open-fail->tzparse fallback pre-config), get_dirent_type = symlink-following std stat (file_utils.c unported), escaped ereport inside Option-contract pg_tzset = named panic, non-UTF-8 zone name = open failure; std String on boot-cold fs paths justified (fd &str API, postinit precedent); GUC check/assign/show_timezone hooks NOT here - variable.c lane consumes pg_tzset/set_session_timezone/set_log_timezone directly (no seam needed, no cycle); 6 tests incl full /usr/share/zoneinfo enumeration + case-insensitive canonname; density 4.9% (pgtz_seams 3/9 = decl-crate contract comment, genam_seams precedent)
 backend-timezone-strftime	src/timezone/strftime.c	ported	strftime	cold	fabled:backend-timezone-strftime; m1-dep; cold (elog timestamps/timestamptz_to_str, none per-row): full specifier set incl ISO week %V/%G/%g back-up arms, %z zone-sign zero-offset arm, %k/%l SunOS swap, C truncate-then-ERANGE buffer semantics (no NUL on overflow); allocation-free (stack _conv, caller buffer, &[u8] format); C-locale tables byte-exact; consumer (elog log_line_prefix) wires when that lane needs it; 9 tests incl log-timestamp golden; density 4.4%
-backend-tsearch-ispell-regis	src/backend/tsearch/dict_ispell.c,src/backend/tsearch/regis.c	todo			fabled:backend-tsearch-ispell-regis
-backend-tsearch-parse	src/backend/tsearch/wparser.c,src/backend/tsearch/wparser_def.c	todo			fabled:backend-tsearch-parse; m1-dep(stub-ok)
-backend-tsearch-parse-any	src/backend/tsearch/to_tsany.c,src/backend/tsearch/ts_parse.c	todo			m1-dep(stub-ok)
-backend-tsearch-spell	src/backend/tsearch/spell.c	todo			fabled:backend-tsearch-spell
-backend-tsearch-remaining	src/backend/tsearch/dict_thesaurus.c,src/backend/tsearch/ts_selfuncs.c,src/backend/tsearch/ts_typanalyze.c	todo			
-backend-tsearch-small	src/backend/tsearch/dict.c,src/backend/tsearch/dict_simple.c,src/backend/tsearch/dict_synonym.c,src/backend/tsearch/ts_locale.c,src/backend/tsearch/ts_utils.c	todo			
+backend-tsearch-ispell-regis	src/backend/tsearch/dict_ispell.c,src/backend/tsearch/regis.c	non-core			fabled:backend-tsearch-ispell-regis; 2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+backend-tsearch-parse	src/backend/tsearch/wparser.c,src/backend/tsearch/wparser_def.c	non-core			fabled:backend-tsearch-parse; m1-dep(stub-ok); 2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+backend-tsearch-parse-any	src/backend/tsearch/to_tsany.c,src/backend/tsearch/ts_parse.c	non-core			m1-dep(stub-ok); 2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+backend-tsearch-spell	src/backend/tsearch/spell.c	non-core			fabled:backend-tsearch-spell; 2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+backend-tsearch-remaining	src/backend/tsearch/dict_thesaurus.c,src/backend/tsearch/ts_selfuncs.c,src/backend/tsearch/ts_typanalyze.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+backend-tsearch-small	src/backend/tsearch/dict.c,src/backend/tsearch/dict_simple.c,src/backend/tsearch/dict_synonym.c,src/backend/tsearch/ts_locale.c,src/backend/tsearch/ts_utils.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
 backend-utils-activity-pgstat	src/backend/utils/activity/pgstat.c	ported	pgstat	select1-gate	m1-spine; pending-entry model: #404 O(1) check structural (entry=pending), single-probe counts via entry API (#368/#191); installs all 12 pgstat_seams + 6 pgstat_xact_seams (wiring test-proven); shared-memory flush half = phase 2 documented; watch: per-row nest-level seam -> direct xact dep if heapam bench flags; 24 tests, density 4.7%; stmt bench 2026-07-02: pgstat_report_stat nothing-pending 1.28x ns/2.86x instr vs C (20 vs 7 insns; +0.2ns absolute; fix candidate = packed TLS flag word); docs/benchmarks/stmt-primitives.md stmt-primitives FAIL-close batch 2026-07-02 (verdict job pgrust-fast-microbench-1783031563, record docs/benchmarks/stmt-primitives.md): HAVE_PENDING Cell mirror + no unconditional FORCE_NEXT_FLUSH store on the nothing-pending early exit;; pgstat_initialize + pgstat_shutdown_hook (before_shmem_exit; report_disconnect connstat counters, report_stat(true) at exit) 2026-07-02; shmem attach/entry-drop no-op-exact while stats are backend-local; cold-audit 2026-07-02: retag select1-gate (pgstat_report_stat per statement; stmt lane at ns parity +7 insn; gate owns composition); 2026-07-02 stmt_pgstat_report regression CLOSED (job d48be067bb-1783052516): 39v7 was a96ad0b's second caller de-inlining pgstat_report_stat (S3b two-callers class); fix = report_stat_slow #[cold] #[inline(never)] split at C's early-exit boundary -> 10 v 7 insn (1.43x) / 1.00x ns, below the banked 14; dmb-ishst backend_status change cleared; docs/benchmarks/stmt-primitives.md
 backend-utils-activity-shmem	src/backend/utils/activity/pgstat_shmem.c	todo			
 backend-utils-activity-small	src/backend/utils/activity/backend_progress.c,src/backend/utils/activity/pgstat_archiver.c,src/backend/utils/activity/pgstat_bgwriter.c,src/backend/utils/activity/pgstat_checkpointer.c	todo			fabled:backend-utils-activity-small; m1-dep(stub-ok)
@@ -549,8 +549,8 @@ backend-utils-adt-datetime	src/backend/utils/adt/datetime.c,src/backend/utils/ad
 backend-utils-adt-float	src/backend/utils/adt/float.c	benched	adt_float	0.81-1.00x-instr/0.65-1.00x-ns	m1-spine; full float.c; PASS dual gate Graviton clang-16 all lanes; ~250k live-PG differential 0 mismatches (caught nan-payload strtod + FMA contraction parity - mul_add mirrors clang, corr() bit-exact); 3 refuted wrapper shapes journaled, landed #[cold]-tail ScalarPair = the adt idiom; 124 builtins cross-validated vs CANONICAL; 17 tests, density 2.7%; docs/benchmarks/adt_float.md
 backend-utils-adt-format-regexp	-	combined-into:backend-utils-adt-regexp			fabled:backend-utils-adt-regexp; m1-dep(stub-ok)
 backend-utils-adt-formatting	src/backend/utils/adt/formatting.c	benched	adt_formatting	1.01-1.31x-instr/0.85-1.22x-ns	OFFICIAL Graviton (job pgrust-fast-microbench-d0eeac2310-1783068591, clang-16 -mcpu=neoverse-v2, 2026-07-03, ref d0eeac23): tochar_ts_hms PASS 0.85 ns / 1.01 instr (marginal justified, unchanged); tochar_num_fm 1.31/1.20 + tochar_num_g 1.28/1.22 tracked dual-FAIL, down from 1.84/1.62 + 1.88/1.67 after executing the recorded lever (numeric_to_char rewritten to C shape: NUM_processor split to_char/from_char, to_char formats in place into the presized result varlena, retained TLS digit scratch + make_result_into, sign by offset, NUL-shaped numstr with unchecked reads, strlen/pre_len tracked not scanned; to_number reads value slice directly); residual ~+400 insn attributed to glue (C-ref 8-insn bump palloc shim lower bound vs real mcx alloc+charge, TLS/RefCell/Rc cache handshakes) with processor+render chains at ns parity — lever: fleet callgrind exact attribution, possible substrate mcx small-alloc fast path; int8_to_char V-multiplier wrapping_mul fixed to C 22003 checked_mul (silent-wrong-output, found by widened 2047-pair live-PG differential, 0 mismatches, Miri clean) — docs/benchmarks/adt_formatting.md; diff-24638/0-vs-PG18.3;to_char/to_number/to_date/to_timestamp DCH+NUM engines; parse_format+DCH_KEYWORDS/NUM_KEYWORDS tables transcribed (cache-size asserts 119/56 match C); thread-local DCH/NUM picture caches with Rc<[FormatNode]> hit-share (not fabled Arc/Mutex); isoweek readers inlined over adt_datetime date2j/j2day; case via oracle_compat casemap; FORMATTING_BUILTINS oids 1768/1770/1772-1778/1780/2049 vs pg_proc.dat registered in fmgr_core::ported; result-mcx single-image varlena out; empty-fmt/non-finite NULL + to_number len<=0 NULL in wrappers; DIFFERENTIAL vs live PG18.3 (C locale, GMT, ISO/MDY): 24638 pairs 0 mismatches (numeric 28x32 + LCG 1400x10, int 14x14, float4/8 338, timestamp 8x30 + LCG 900x9, to_date 5, to_number 6), error arms exact (EEEE-twice/9-ahead-PR/RN-twice/invalid-value-YYYY match C msgs); LOUD: TM/localized month-day names (cache_locale_time deferred), interval_to_char, ICU/non-C locale names, TZ named-zone from_char abbrevs; 14 fp -2147483648::int4 diffs are PG literal-parse artifacts (match under (-.)::int4); density 2.9%, 14 tests; WATCH: numeric to_char residual glue gap at milestone composition; int/float to_char still per-call to_string()/format! (numeric lane cleaned; perf watch); timestamptz TZ lanes need session_timezone init; fabled:backend-utils-adt-formatting
-backend-utils-adt-geo-ops	src/backend/utils/adt/geo_ops.c	todo			fabled:backend-utils-adt-geo-ops
-backend-utils-adt-geo-spgist-only	src/backend/utils/adt/geo_spgist.c	todo			fabled:backend-utils-adt-geo-spgist-only
+backend-utils-adt-geo-ops	src/backend/utils/adt/geo_ops.c	non-core			fabled:backend-utils-adt-geo-ops; 2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+backend-utils-adt-geo-spgist-only	src/backend/utils/adt/geo_spgist.c	non-core			fabled:backend-utils-adt-geo-spgist-only; 2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
 backend-utils-adt-geo	-	combined-into:backend-utils-adt-geo-ops			
 backend-utils-adt-json-core	-	combined-into:backend-utils-adt-json			fabled:duplicate-of; m1-dep(stub-ok)
 backend-utils-adt-json-small	src/backend/utils/adt/jsonb_op.c,src/backend/utils/adt/jsonbsubs.c	todo			fabled:backend-utils-adt-jsonb-op; m1-dep(stub-ok)
@@ -562,10 +562,10 @@ backend-utils-adt-jsonb-util	src/backend/utils/adt/jsonb_util.c	todo			fabled:ba
 backend-utils-adt-jsonfuncs	src/backend/utils/adt/jsonfuncs.c	todo			fabled:backend-utils-adt-jsonfuncs; m1-dep(stub-ok)
 backend-utils-adt-jsonfuncs-path-small	-	todo			m1-dep(stub-ok)
 backend-utils-adt-jsonfuncs-path	-	todo			m1-dep(stub-ok)
-backend-utils-adt-jsonpath	src/backend/utils/adt/jsonpath.c	todo			fabled:backend-utils-adt-jsonpath; m1-dep(stub-ok)
-backend-utils-adt-jsonpath-exec	src/backend/utils/adt/jsonpath_exec.c	todo			fabled:backend-utils-adt-jsonpath-exec; m1-dep(stub-ok)
-backend-utils-adt-jsonpath-gram	src/backend/utils/adt/jsonpath_gram.y,build-clean/src/backend/utils/adt/jsonpath_gram.c	todo			m1-dep(stub-ok)
-backend-utils-adt-jsonpath-scan	src/backend/utils/adt/jsonpath_scan.l,build-clean/src/backend/utils/adt/jsonpath_scan.c	todo			m1-dep(stub-ok)
+backend-utils-adt-jsonpath	src/backend/utils/adt/jsonpath.c	non-core			fabled:backend-utils-adt-jsonpath; m1-dep(stub-ok); 2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+backend-utils-adt-jsonpath-exec	src/backend/utils/adt/jsonpath_exec.c	non-core			fabled:backend-utils-adt-jsonpath-exec; m1-dep(stub-ok); 2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+backend-utils-adt-jsonpath-gram	src/backend/utils/adt/jsonpath_gram.y,build-clean/src/backend/utils/adt/jsonpath_gram.c	non-core			m1-dep(stub-ok); 2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+backend-utils-adt-jsonpath-scan	src/backend/utils/adt/jsonpath_scan.l,build-clean/src/backend/utils/adt/jsonpath_scan.c	non-core			m1-dep(stub-ok); 2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
 backend-utils-adt-lsn-trigfuncs	src/backend/utils/adt/pg_lsn.c,src/backend/utils/adt/trigfuncs.c	todo			fabled:backend-utils-adt-lsn-trigfuncs; m1-dep(stub-ok)
 backend-utils-adt-misc2	src/backend/utils/adt/domains.c,src/backend/utils/adt/expandeddatum.c,src/backend/utils/adt/expandedrecord.c,src/backend/utils/adt/genfile.c,src/backend/utils/adt/hbafuncs.c,src/backend/utils/adt/lockfuncs.c,src/backend/utils/adt/partitionfuncs.c,src/backend/utils/adt/pg_upgrade_support.c,src/backend/utils/adt/regproc.c,src/backend/utils/adt/rowtypes.c,src/backend/utils/adt/tid.c,src/backend/utils/adt/windowfuncs.c	in-progress	datum(slice)		fabled:backend-utils-adt-misc2; m1-dep(stub-ok); expandeddatum.c slice PORTED 2026-07-02 (session four-rocks) into crate datum (expandeddatum.rs rewritten C-faithful, old zero-consumer trait deleted): ExpandedObjectHeader repr(C) size/offset-asserted, self-referential RW/RO varatt_expanded images byte-faithful, DatumGetEOHP/EOH_init_header/EOHPGetRW-RODatum/DatumIsReadWriteExpandedObject/MakeExpandedObjectReadOnly(Internal)/EOH_get_flat_size/EOH_flatten_into live; Transfer/DeleteExpandedObject loud (mcx lacks SetParent/by-pointer delete); consumers flipped: detoast all 5 expanded arms live (detoast.c:80/159/279/569/629), coerce own_datum lane live via detoast, execexpr ASSIGN_TMP_MAKE_RO live; still loud: heaptuple compute/fill two-pass arms, exectuples materialize arm; new tests Miri clean, density datum 3.2%; windowfuncs.c slice 2026-07-03: prosupport rows 6233-6235 (+int8.c 6236) live in adt_windowfuncs (NULL for all carried request types, C-exact for SupportRequestCost); rank-family value fns live in nodewindowagg enum dispatch (see backend-executor-nodeWindowAgg row); percent_rank/cume_dist/ntile/lead/lag/first/last/nth loud
 backend-utils-adt-int	src/backend/utils/adt/int.c(partial)	benched	adt_int	1.03-1.18x-instr/0.81-1.13x-ns	fabled:backend-utils-adt-int; m1-spine; decomposed out of backend-utils-adt-more-scalars; 76 cores + 85 fmgr wrappers (OIDs vs pg_proc.dat), INT_BUILTINS table for fmgr-core; int4out through-fmgr 1.01x/0.99x, core 0.84x/0.97x; int4pl/eq callee bodies asm-identical to C, excess = types_fmgr justified floor; fn_extra dyn-downcast refuted (1.20x) -> const-init TLS scratch; 11 tests Miri-clean both modes, density 3.2%; Graviton official 2026-07-02 (jobs -1783028544/-1783029294): ns PASS 5/6, arith/cmp instr floor justified (types_fmgr); int4out core FLIPPED to dual FAIL 1.13x/1.10-1.13x (Linux pg_ltoa codegen, fix owner numutils); docs/benchmarks/adt_int.md; docs/optimizations/adt_int-parity.md; SRF-minimal 2026-07-02: generate_series[_step]_int4 (1066/1067) LIVE as fc_generate_series_step_int4 over the funcapi ValuePerCall frame (retset rows in INT_BUILTINS) + generate_series_int4_support (3994) SupportRequestRows over all-Const args (NULL arg -> 0 rows; non-Const -> no estimate)
@@ -608,14 +608,14 @@ backend-utils-adt-varbit	src/backend/utils/adt/varbit.c	todo			fabled:backend-ut
 backend-utils-adt-like	src/backend/utils/adt/like.c,src/backend/utils/adt/like_match.c	benched	adt_like	0.65-0.94x-instr/0.76-1.02x-ns	fabled:backend-utils-adt-like; m1-spine; like.c+like_match.c; C's 4x #include template = one generic matcher monomorphized per mode (SbCs/SbIc/Utf8Cs, execexpr/nbtree precedent); LIVE: SB + UTF8 matchers (encoding via mbutils), SB_I fold (SB_lower_char ctype_is_c/is_default ASCII arms), ILIKE multibyte via ASCII casemap (lower-into retained FmgrInfo IcScratch; C pallocs 2 texts/call), do_like_escape SB+MB (wchareq/pg_mblen live for UTF8 dbs), like_escape/like_escape_bytea through OutBuf scratch; check_stack_depth live (stack_depth crate); LOUD named panics: MB_MatchText (non-UTF8 multibyte), nondeterministic-collation substring arm (pg_strncoll lane), tolower_l/pg_tolower-highbit/pg_strlower non-C ctype arms, all 5 like_support.c prosupport rows (1023/1024/1025/1364/6242, selfuncs lane); 27 fc rows incl like/notlike/bpchar aliases, OIDs vs pg_proc.dat; 'abc' LIKE 'abc\' = f not 22025 (text exhausts first - verified live PG); no MatchLike prescan in 18.3 (verified, only plen==1 '%' fastpath); OFFICIAL Graviton job 1783041731 (clang-16 neoverse-v2): all 6 lanes PASS dual gate - exact 0.82/0.82, late 0.75/0.76, utf8-pctscan 0.66/0.87, uscore-mb 0.65/1.02(noise-band watch), sb-pctscan 0.94/0.92, sbi-fold 0.89/0.95 (instr/ns); index-reslice NextChar was a 1.13x-instr target-cpu trap, rewritten to C's do-while pointer shape (journal); differential 73,009 pairs / ~141k comparisons 0 mismatches vs live PG 18.3 (UTF8+LATIN1 LIKE/ILIKE, bytea, like_escape, 2515 SQLSTATE-22025 rows); 13 tests, density 3.8%; audit pending; non-C fold arms flipped live 2026-07-02 (NOT committed): SB_lower_char tolower_l via locale.tolower_l, pg_tolower highbit via pg_locale::pg_tolower, Generic_Text_IC_like non-C ctype lowers via adt_oracle_compat casemap (mcx threaded through texticlike family + fc_iclike); nondeterministic arm re-worded ICU-only; ILIKE non-C vectors verified vs live PG 18.3
 backend-utils-adt-varchar	src/backend/utils/adt/varchar.c	todo			fabled:backend-utils-adt-varchar
 backend-utils-adt-timestamp	src/backend/utils/adt/timestamp.c(partial)	benched	adt_timestamp	0.70-0.73x-instr/0.60-0.79x-ns	m1-spine; timestamp I/O zero-alloc (borrowed workbuf fields, caller MAXDATELEN out); PASS dual gate Graviton clang-16 beating C; live differential vs real PG (16 goldens + error surfaces); session tz engine live (backend-timezone; was GMT-only arm); installs get_current_timestamp (launch_backend blocker closed); 14 tests, density 3.6%; docs/benchmarks/adt_timestamp.md
-backend-utils-adt-ts-index-rank	src/backend/utils/adt/tsginidx.c,src/backend/utils/adt/tsgistidx.c,src/backend/utils/adt/tsrank.c	todo			fabled:backend-utils-adt-tsginidx,backend-utils-adt-tsgistidx,backend-utils-adt-tsrank
-backend-utils-adt-ts-small	src/backend/utils/adt/tsquery_cleanup.c,src/backend/utils/adt/tsquery_rewrite.c,src/backend/utils/adt/tsquery_util.c	todo			fabled:backend-utils-adt-ts-small
-backend-utils-adt-tsquery-core	src/backend/utils/adt/tsquery.c,src/backend/utils/adt/tsquery_gist.c,src/backend/utils/adt/tsquery_op.c	todo			fabled:backend-utils-adt-tsquery-core
-backend-utils-adt-tsvector-core	src/backend/utils/adt/tsvector.c,src/backend/utils/adt/tsvector_op.c,src/backend/utils/adt/tsvector_parser.c	todo			fabled:backend-utils-adt-tsvector-core
+backend-utils-adt-ts-index-rank	src/backend/utils/adt/tsginidx.c,src/backend/utils/adt/tsgistidx.c,src/backend/utils/adt/tsrank.c	non-core			fabled:backend-utils-adt-tsginidx,backend-utils-adt-tsgistidx,backend-utils-adt-tsrank; 2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+backend-utils-adt-ts-small	src/backend/utils/adt/tsquery_cleanup.c,src/backend/utils/adt/tsquery_rewrite.c,src/backend/utils/adt/tsquery_util.c	non-core			fabled:backend-utils-adt-ts-small; 2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+backend-utils-adt-tsquery-core	src/backend/utils/adt/tsquery.c,src/backend/utils/adt/tsquery_gist.c,src/backend/utils/adt/tsquery_op.c	non-core			fabled:backend-utils-adt-tsquery-core; 2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+backend-utils-adt-tsvector-core	src/backend/utils/adt/tsvector.c,src/backend/utils/adt/tsvector_op.c,src/backend/utils/adt/tsvector_parser.c	non-core			fabled:backend-utils-adt-tsvector-core; 2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
 backend-utils-adt-typanalyze-small	-	combined-into:backend-utils-adt-array-typanalyze			
 backend-utils-adt-varlena	src/backend/utils/adt/varlena.c	benched	varlena	0.59-0.84x-instr/0.57-0.95x-ns	m1-spine(boot); text/bytea I/O + cmp core; PASS dual gate Graviton clang-16 (texteq 0.59x - C pays 5 out-of-line calls per op we replace with 2 compares); C-collation fastpath seam-free; #341 sort cores + #277/#314 output endpoints day-one; regex/format/pattern lanes deferred to their rows; detoast seamed loud; fc_textin (oid 46, pg_proc.dat-verified) added to VARLENA_BUILTINS for coerce's typinput path (result in FmgrInfo scratch, outliving callers copy out); 14 tests, Miri, density 4.9%; docs/benchmarks/varlena.md; gap-fill 2026-07-02: levenshtein.c LIVE (varstr_levenshtein_less_equal single body, max_d<0 = plain varstr_levenshtein; start/stop column sliding, multibyte s_char_len cache + single-byte fast path, 22023 untrusted cap; mb via mbutils_seams incl new pg_mblen_range seam); values pinned vs live PG 18.3 fuzzystrmatch; cold (error-path only today); 2026-07-02 deferred fc_ rows registered on the result-mcx convention (notes/fc-result-convention.md): 109 unknownin, 1244 byteain, 1258 textcat, 2011 byteacat; recv/send + bttextsortsupport stay deferred (pqformat/sortsupport frames); +4 tests Miri-clean 2026-07-02 bytea half completed (this session, NOT committed): byteain hex arm rerouted through shared C-exact hex_decode_into (encode.c hex_decode_safe shape) so its invalid-digit error is the mblen-aware %.*s 22023 (was a bare divergent message) + odd-digits 22023; hex_encode_into/hex_decode_into now pub, shared with adt_encode; new bytea value fns bytea_substring (SQL substr math + DatumGetByteaPSlice clamp, negative-len 22011), byteapos (POSITION, 1-based/empty=1), bytea_get_byte/get_bit (2202E out-of-range) + set_byte/set_bit (2202E range then 22023 new-bit-0-or-1, copy-then-mutate image); fc_ rows OID-verified vs pg_proc.dat: 721 byteaGetByte/722 byteaSetByte/723 byteaGetBit/724 byteaSetBit, 2012+2085 substring/substr (bytea_substr), 2013+2086 (bytea_substr_no_len), 2014 byteapos; image_with_header made pub; +5 tests (all pass, 24 total), density 4.3%. bytea overlay/bit_count/reverse remain loud (unregistered).
 backend-utils-adt-version	src/backend/utils/adt/version.c	todo			fabled:backend-utils-adt-version
-backend-utils-adt-xml	src/backend/utils/adt/xml.c	todo			fabled:backend-utils-adt-xml; m1-dep(stub-ok)
+backend-utils-adt-xml	src/backend/utils/adt/xml.c	non-core			fabled:backend-utils-adt-xml; m1-dep(stub-ok); 2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
 backend-utils-cache-catcache	src/backend/utils/cache/catcache.c,src/include/utils/catcache.h	ported	catcache	0.78-0.89x-instr/0.82-0.98x-ns(Graviton dual-PASS job 1783028290, clang-16 neoverse-v2; was 1.05-1.24/1.17-1.53 FAIL job 1783026844)	m1-spine; full hit path (#292 shape: const-init TLS UnsafeCell state, debug/Miri reentrancy guard, borrowed probe keys, intrusive u32-linked buckets O(1) move-to-front, packed off/len by-ref key slots into stable payload allocs); ProbeKeys K1..K4/KDyn arity monomorphization + Int4 1-key lane (beat-postgres §4); miss path C-faithful via in-crate scan_seam::systable_scan_catalog (genam-owned, loud panic; genam_seams crate claimed by concurrent session) + table/indexam/tupdesc direct deps; toast_flatten -> loud panic; SearchCatCacheList hit+build, in-progress stack, invalidate/reset/flush, PrepareToInvalidateCacheTuple; installs all 3 catcache_seams; resowner Remember/Forget deferred to xact unit (pin guard = the ref; divergence noted); relcache_seams += critical(_shared)_relcaches_built; consts vs headers: CT_MAGIC/eqfunc oids/type oids/NAMEDATALEN verified; hit-path shave (2026-07-02): 2-word register-returned ProbeRet (killed 40B sret V2 forwarding stall) + IMG_PREFIX payload header (16B CatCTuple pin), canonical-word hash/eq arm collapse, inline unchecked move-to-front; 14 tests; Miri clean (Stacked+Tree Borrows, -Zmiri-ignore-leaks: TLS state is by-design never-freed); density 5.0%; miss path LIVE 2026-07-02: in-crate scan_seam deleted, search/list miss now call genam_seams::systable_scan_catalog (installed by genam::init_seams; hit fast paths untouched); bench docs/benchmarks/catcache.md; audit pending; 2026-07-02 boot-frontier lane: build_scan_keys resolves cc_skey sk_func via fmgr_seams::fmgr_info (heap-fallback catalog scans invoke it)
 backend-utils-cache-evtcache	src/backend/utils/cache/evtcache.c,src/include/utils/evtcache.h	todo			fabled:backend-utils-cache-evtcache
 backend-utils-cache-funccache	src/backend/utils/cache/funccache.c,src/include/utils/funccache.h	todo			fabled:backend-utils-cache-funccache; m1-dep(stub-ok)
@@ -679,70 +679,70 @@ backend-utils-sort-storage	src/backend/utils/sort/logtape.c,src/backend/utils/so
 backend-utils-sort-tuplesort	src/backend/utils/sort/tuplesort.c,src/backend/utils/sort/tuplesortvariants.c	benched	tuplesort	0.23-1.18x-instr/0.22-0.91x-ns(graviton4 v2-tuned clang-16; ALL lanes PASS incl putdatum; bound100 tuned-instr 1.18 ns-0.87 watch)	fabled:backend-utils-sort-tuplesort; m1-dep(stub-ok); IN-MEMORY SERIAL CORE: begin_heap(+catalog sortkey resolve)/begin_datum(byval)/puttupleslot/putdatum/performsort/gettupleslot/getdatum(fwd+bwd RANDOMACCESS)/rescan/markpos/restorepos/set_bound/used_bound/end; SortTuple 24B (datum1/isnull1 first-key, srctape dropped w/ merge); qsort = sort_template.h Bentley-McIlroy in C pointer shape, comparator-identity specialization dispatch (SortComparator enum arms Int32/SignedI64/Unsigned = ssup_datum_*_cmp; enum match replaces C fn-ptr identity), onlyKey + general lanes; bounded top-N heap live (make/sort_bounded_heap, TSS_BOUNDED puttuple); grow_memtuples C math; contexts = McxOwned main + bump tuplecontext; minimal SortSupport slice homed here until backend-utils-sort-sortsupport claims sortsupport.c (prepare_sort_support_from_ordering_op via lsyscache; btint4/btint8/date/timestamp sortsupport oids live); LOUD: external merge (inittapes/dumptuples at workMem), parallel, abbrev keys (bttextsortsupport etc), btree-proc shim, byref datum sort, int2/oid sortsupport, tuplesort_reset; DIVERGENCES: bounded-sort discards not pfreed until end (bump; footprint only), chunk-space accounting = cap*sizeof, puttuple_common takes SortTuple fields as scalars (24B by-value arg = store-fwd stall, journal); 9 tests (std-sort oracle all null/reverse orderings, bounded, backward/markpos, tiebreak), density 4.1%; docs/benchmarks/tuplesort.md; audit pending; Graviton verdict 2026-07-02 job 1783047750 (v2-tuned clang-16): int4_1k 0.79x/0.87x + int4_100k 0.82x/1.05x(noise edge) DUAL PASS core; putdatum slope 0.46x-instr/2.02x-ns tracked-FAIL stall-shaped (local 1.24x was NOT an M-series artifact - V2 prices the state RMW chain worse; fix direction register-carried counts + asm-diff); bound100_100k 0.99x-ns/1.13x-instr-tuned (generic 1.04x; v2-tuned rig codegen drift, watch); 2026-07-02 putdatum watermark fix measured on fleet branch fleet/four-residuals-1783052492 (job d48be067bb-1783052516, NOT landed here - competing PutCount fix in flight): 0.46x->0.29x instr (17.98 v 61.02) but ns UNMOVED 2.22x (13.3 v 6.0) - tuned/generic asm-identical 11-insn loop, residual is the memory-carried state chain not codegen (no ldp on the len reload and still 13.3ns); in-pod annotate failed for tsortbench (runner gap); next lever = batch-put cursor; docs/benchmarks/tuplesort.md; 2026-07-02 putdatum FAIL CLOSED (job 4fce1f182f-1783060191, sha 4fce1f18 on verdict base d48be067): reconcile = watermark per-call shape kept (PutCount dropped - measured no-ldp loop refuted the pairing theory) + NEW putdatum_batch/DatumPutter register-resident cursor (slow leg by-value, gram ActionView precedent; nodeSort datumSort feed migrated); put lane 0.23x instr/0.22x ns (1.28 v 5.95); residual was NOT the put path: glibc adaptive-mmap asymmetry faulted 0.0117 pages/put on the rust side only (minflt-proven, new bench-crate 3b class; lanes now pin M_MMAP/M_TRIM both sides); 100k ns watch cleared 1.04->0.91; WATCH rig bins should link ship allocator (mimalloc) + verify mimalloc large-block recycling at sort-heavy milestone; docs/benchmarks/tuplesort.md
 backend-utils-time-small	src/backend/utils/time/combocid.c	partial	combocid		fabled:backend-utils-time-combocid; m1-spine; 2026-07-03 ct-e2e lane: combocid.c ported C-exact (GetCmin/GetCmax/AdjustCmax/AtEOXact_ComboCid + combo array/hash, 5 tests, density 4.3%); Serialize/RestoreComboCIDState (parallel workers) unported; installs all 4 combocid_seams
 backend-utils-time-snapmgr	src/backend/utils/time/snapmgr.c	benched	snapmgr	gettxnsnapshot 1.85x/1.07x instr-FAIL ns-noise-edge (1.70x inherited from procarray reuse); push_pop 1.27x/1.09x closed-to-noise-edge, was 2.76x/2.25x (copy-freelist + single-borrow landed; Graviton job 1783037509; residuals docs/benchmarks/snapmgr.md)	fabled:backend-utils-time-snapmgr; m1-spine; GetTransactionSnapshot/GetLatestSnapshot/GetCatalog* over persistent statics (Rc handles, rule 2.3: snapmgr refcounts) — SAME struct always refilled so procarray reuse fastpath fires (test: statement_flow_hits_reuse_fastpath; debug counter catches static-replacement regressions); registration/active stack per docs/no-drop.md (owner Vecs on plain heap); XidInMVCCSnapshot (per-tuple; contains() vs C SIMD lfind = bench watch); export/import/serialize/serializable = phase 2 (notes/snapmgr-scope.md); types_snapshot.curcid -> Cell (shared-handle CCI writes); installs snapmgr_seams x6 + snapmgr_portal_seams x3; new decls appended: xact_seams x4, transam_seams did_abort, syscache_seams relation_has_sys_cache, resowner_seams x4; 10 tests, Miri clean, density 3.5%; M1-hot: statement-gate bench with procarray, pending /bench-crate; stmt bench 2026-07-02: XidInMVCCSnapshot xip search WINS vs C pg_lfind32 on c8gd (8 xids 0.74x ns/0.58x instr; 64 xids 0.72x/0.58x) - no NEON lfind kernel needed; docs/benchmarks/stmt-primitives.md
-bin-clusterdb-batch1	src/bin/scripts/clusterdb.c	todo			
-bin-createdb-batch1	src/bin/scripts/createdb.c	todo			
-bin-createuser-batch1	src/bin/scripts/createuser.c	todo			
-bin-dropdb-batch1	src/bin/scripts/dropdb.c	todo			
-bin-dropuser-batch1	src/bin/scripts/dropuser.c	todo			
-bin-pg-amcheck-main-batch1	src/bin/pg_amcheck/pg_amcheck.c	todo			
-bin-pg-archivecleanup-batch1	src/bin/pg_archivecleanup/pg_archivecleanup.c	todo			
-bin-pg-basebackup-astreamer-inject-batch1	src/bin/pg_basebackup/astreamer_inject.c	todo			
-bin-pg-basebackup-streamutil-batch1	src/bin/pg_basebackup/streamutil.c	todo			
-bin-pg-basebackup-walmethods-batch1	src/bin/pg_basebackup/walmethods.c	todo			
+bin-clusterdb-batch1	src/bin/scripts/clusterdb.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+bin-createdb-batch1	src/bin/scripts/createdb.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+bin-createuser-batch1	src/bin/scripts/createuser.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+bin-dropdb-batch1	src/bin/scripts/dropdb.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+bin-dropuser-batch1	src/bin/scripts/dropuser.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+bin-pg-amcheck-main-batch1	src/bin/pg_amcheck/pg_amcheck.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+bin-pg-archivecleanup-batch1	src/bin/pg_archivecleanup/pg_archivecleanup.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+bin-pg-basebackup-astreamer-inject-batch1	src/bin/pg_basebackup/astreamer_inject.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+bin-pg-basebackup-streamutil-batch1	src/bin/pg_basebackup/streamutil.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+bin-pg-basebackup-walmethods-batch1	src/bin/pg_basebackup/walmethods.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
 bin-pg-checksums-batch1	src/bin/pg_checksums/pg_checksums.c	combined-into:bin-pg-checksums-main-bitfields			fabled:duplicate-of
-bin-pg-checksums-main-bitfields	src/bin/pg_checksums/pg_checksums.c	todo			
+bin-pg-checksums-main-bitfields	src/bin/pg_checksums/pg_checksums.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
 bin-pg-checksums-main-probe	src/bin/pg_checksums/pg_checksums.c	combined-into:bin-pg-checksums-main-bitfields			fabled:duplicate-of
 bin-pg-checksums-probe	src/bin/pg_checksums/pg_checksums.c	combined-into:bin-pg-checksums-main-bitfields			fabled:duplicate-of
-bin-pg-combinebackup-backup-label-batch1	src/bin/pg_combinebackup/backup_label.c	todo			
-bin-pg-combinebackup-copy-file-batch1	src/bin/pg_combinebackup/copy_file.c	todo			
-bin-pg-combinebackup-load-manifest-batch1	src/bin/pg_combinebackup/load_manifest.c	todo			
-bin-pg-combinebackup-reconstruct-batch1	src/bin/pg_combinebackup/reconstruct.c	todo			
-bin-pg-config-batch1	src/bin/pg_config/pg_config.c	todo			
-bin-pg-ctl-main-batch1	src/bin/pg_ctl/pg_ctl.c	todo			
-bin-pg-dump-common-batch1	src/bin/pg_dump/common.c	todo			
-bin-pg-dump-compress-gzip-batch1	src/bin/pg_dump/compress_gzip.c	todo			
-bin-pg-dump-compress-io-batch1	src/bin/pg_dump/compress_io.c	todo			
-bin-pg-dump-compress-lz4-batch1	src/bin/pg_dump/compress_lz4.c	todo			
-bin-pg-dump-compress-none-batch1	src/bin/pg_dump/compress_none.c	todo			
-bin-pg-dump-connectdb-batch1	src/bin/pg_dump/connectdb.c	todo			
-bin-pg-dump-dumputils-batch1	src/bin/pg_dump/dumputils.c	todo			
-bin-pg-dump-filter-batch1	src/bin/pg_dump/filter.c	todo			
-bin-pg-dump-parallel-batch1	src/bin/pg_dump/parallel.c	todo			
-bin-pg-dump-pg-backup-archiver-batch1	src/bin/pg_dump/pg_backup_archiver.c	todo			
-bin-pg-dump-pg-backup-custom-batch1	src/bin/pg_dump/pg_backup_custom.c	todo			
-bin-pg-dump-pg-backup-db-batch1	src/bin/pg_dump/pg_backup_db.c	todo			
-bin-pg-dump-pg-backup-directory-batch1	src/bin/pg_dump/pg_backup_directory.c	todo			
-bin-pg-dump-pg-backup-null-batch1	src/bin/pg_dump/pg_backup_null.c	todo			
-bin-pg-dump-pg-backup-tar-batch1	src/bin/pg_dump/pg_backup_tar.c	todo			
-bin-pg-dump-pg-backup-utils-batch1	src/bin/pg_dump/pg_backup_utils.c	todo			
-bin-pg-dump-pg-dump-main-batch1	src/bin/pg_dump/pg_dump.c	todo			
-bin-pg-dump-pg-dump-sort-batch1	src/bin/pg_dump/pg_dump_sort.c	todo			
-bin-pg-dump-pg-dumpall-main-batch1	src/bin/pg_dump/pg_dumpall.c	todo			
-bin-pg-dump-pg-restore-main-batch1	src/bin/pg_dump/pg_restore.c	todo			
-bin-pg-isready-batch1	src/bin/scripts/pg_isready.c	todo			
+bin-pg-combinebackup-backup-label-batch1	src/bin/pg_combinebackup/backup_label.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+bin-pg-combinebackup-copy-file-batch1	src/bin/pg_combinebackup/copy_file.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+bin-pg-combinebackup-load-manifest-batch1	src/bin/pg_combinebackup/load_manifest.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+bin-pg-combinebackup-reconstruct-batch1	src/bin/pg_combinebackup/reconstruct.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+bin-pg-config-batch1	src/bin/pg_config/pg_config.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+bin-pg-ctl-main-batch1	src/bin/pg_ctl/pg_ctl.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+bin-pg-dump-common-batch1	src/bin/pg_dump/common.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+bin-pg-dump-compress-gzip-batch1	src/bin/pg_dump/compress_gzip.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+bin-pg-dump-compress-io-batch1	src/bin/pg_dump/compress_io.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+bin-pg-dump-compress-lz4-batch1	src/bin/pg_dump/compress_lz4.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+bin-pg-dump-compress-none-batch1	src/bin/pg_dump/compress_none.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+bin-pg-dump-connectdb-batch1	src/bin/pg_dump/connectdb.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+bin-pg-dump-dumputils-batch1	src/bin/pg_dump/dumputils.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+bin-pg-dump-filter-batch1	src/bin/pg_dump/filter.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+bin-pg-dump-parallel-batch1	src/bin/pg_dump/parallel.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+bin-pg-dump-pg-backup-archiver-batch1	src/bin/pg_dump/pg_backup_archiver.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+bin-pg-dump-pg-backup-custom-batch1	src/bin/pg_dump/pg_backup_custom.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+bin-pg-dump-pg-backup-db-batch1	src/bin/pg_dump/pg_backup_db.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+bin-pg-dump-pg-backup-directory-batch1	src/bin/pg_dump/pg_backup_directory.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+bin-pg-dump-pg-backup-null-batch1	src/bin/pg_dump/pg_backup_null.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+bin-pg-dump-pg-backup-tar-batch1	src/bin/pg_dump/pg_backup_tar.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+bin-pg-dump-pg-backup-utils-batch1	src/bin/pg_dump/pg_backup_utils.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+bin-pg-dump-pg-dump-main-batch1	src/bin/pg_dump/pg_dump.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+bin-pg-dump-pg-dump-sort-batch1	src/bin/pg_dump/pg_dump_sort.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+bin-pg-dump-pg-dumpall-main-batch1	src/bin/pg_dump/pg_dumpall.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+bin-pg-dump-pg-restore-main-batch1	src/bin/pg_dump/pg_restore.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+bin-pg-isready-batch1	src/bin/scripts/pg_isready.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
 bin-pg-resetwal-batch1	src/bin/pg_resetwal/pg_resetwal.c	combined-into:bin-pg-resetwal-main-bitfields			fabled:duplicate-of
-bin-pg-resetwal-main-bitfields	src/bin/pg_resetwal/pg_resetwal.c	todo			
+bin-pg-resetwal-main-bitfields	src/bin/pg_resetwal/pg_resetwal.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
 bin-pg-resetwal-probe	src/bin/pg_resetwal/pg_resetwal.c	combined-into:bin-pg-resetwal-main-bitfields			fabled:duplicate-of
-bin-pg-rewind-datapagemap-batch1	src/bin/pg_rewind/datapagemap.c	todo			
-bin-pg-rewind-file-ops-batch1	src/bin/pg_rewind/file_ops.c	todo			
-bin-pg-rewind-filemap-batch1	src/bin/pg_rewind/filemap.c	todo			
-bin-pg-rewind-libpq-source-batch1	src/bin/pg_rewind/libpq_source.c	todo			
-bin-pg-rewind-local-source-batch1	src/bin/pg_rewind/local_source.c	todo			
-bin-pg-rewind-timeline-batch1	src/bin/pg_rewind/timeline.c	todo			
-bin-pg-test-fsync-batch1	src/bin/pg_test_fsync/pg_test_fsync.c	todo			
-bin-pg-test-timing-batch1	src/bin/pg_test_timing/pg_test_timing.c	todo			
-bin-pg-verifybackup-astreamer-verify-batch1	src/bin/pg_verifybackup/astreamer_verify.c	todo			
-bin-pg-waldump-compat-batch1	src/bin/pg_waldump/compat.c	todo			
-bin-pg-waldump-rmgrdesc-batch1	src/bin/pg_waldump/rmgrdesc.c	todo			
+bin-pg-rewind-datapagemap-batch1	src/bin/pg_rewind/datapagemap.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+bin-pg-rewind-file-ops-batch1	src/bin/pg_rewind/file_ops.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+bin-pg-rewind-filemap-batch1	src/bin/pg_rewind/filemap.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+bin-pg-rewind-libpq-source-batch1	src/bin/pg_rewind/libpq_source.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+bin-pg-rewind-local-source-batch1	src/bin/pg_rewind/local_source.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+bin-pg-rewind-timeline-batch1	src/bin/pg_rewind/timeline.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+bin-pg-test-fsync-batch1	src/bin/pg_test_fsync/pg_test_fsync.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+bin-pg-test-timing-batch1	src/bin/pg_test_timing/pg_test_timing.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+bin-pg-verifybackup-astreamer-verify-batch1	src/bin/pg_verifybackup/astreamer_verify.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+bin-pg-waldump-compat-batch1	src/bin/pg_waldump/compat.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+bin-pg-waldump-rmgrdesc-batch1	src/bin/pg_waldump/rmgrdesc.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
 bin-pg-waldump-rmgrdesc-extra-small	-	combined-into:backend-rmgrdesc-extra-small			fabled:duplicate-of
 bin-pg-waldump-rmgrdesc-next	-	combined-into:backend-rmgrdesc-next			fabled:duplicate-of
 bin-pg-waldump-rmgrdesc-path	-	combined-into:backend-rmgrdesc-path			fabled:duplicate-of
 bin-pg-waldump-rmgrdesc-small	-	combined-into:backend-rmgrdesc-small			fabled:duplicate-of
 bin-pg-waldump-xlogstats-batch1	-	combined-into:backend-access-transam-xlogstats			fabled:duplicate-of
-bin-pg-walsummary-batch1	src/bin/pg_walsummary/pg_walsummary.c	todo			
+bin-pg-walsummary-batch1	src/bin/pg_walsummary/pg_walsummary.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
 bin-pg-walsummary-main-batch1	src/bin/pg_walsummary/pg_walsummary.c	combined-into:bin-pg-walsummary-batch1			fabled:duplicate-of
-bin-reindexdb-batch1	src/bin/scripts/reindexdb.c	todo			
-bin-vacuumdb-batch1	src/bin/scripts/vacuumdb.c	todo			
+bin-reindexdb-batch1	src/bin/scripts/reindexdb.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+bin-vacuumdb-batch1	src/bin/scripts/vacuumdb.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
 common-batch1	-	todo			
 common-batch11	src/common/link-canary.c	todo			
 common-batch15	src/common/compression.c	todo			
@@ -831,136 +831,136 @@ common-varargs-srv-batch1	src/common/psprintf.c,src/common/stringinfo.c	todo
 common-variant-frontshlib-pgfnames-rmtree	src/common/pgfnames.c,src/common/rmtree.c	todo			fabled:common-variant-frontshlib-pgfnames-rmtree
 common-variant-frontstatic-pgfnames-rmtree	-	combined-into:common-variant-frontshlib-pgfnames-rmtree			fabled:duplicate-of
 common-variant-srv-pgfnames	-	combined-into:probe-pgfnames			fabled:duplicate-of
-contrib-amcheck-verify-common	contrib/amcheck/verify_common.c	todo			fabled:contrib-amcheck-verify-common
-contrib-amcheck-verify-gin	contrib/amcheck/verify_gin.c	todo			
-contrib-amcheck-verify-heapam	contrib/amcheck/verify_heapam.c	todo			fabled:contrib-amcheck-verify-heapam
-contrib-amcheck-verify-nbtree	contrib/amcheck/verify_nbtree.c	todo			fabled:contrib-amcheck-verify-nbtree
-contrib-auth-delay-batch1	contrib/auth_delay/auth_delay.c	todo			
-contrib-auto-explain	contrib/auto_explain/auto_explain.c	todo			
-contrib-basebackup-to-shell-basebackup-to-shell	contrib/basebackup_to_shell/basebackup_to_shell.c	todo			
-contrib-basic-archive-basic-archive	contrib/basic_archive/basic_archive.c	todo			
-contrib-bloom-all-but-insert-bitfields	contrib/bloom/blcost.c,contrib/bloom/blscan.c,contrib/bloom/blutils.c,contrib/bloom/blvacuum.c,contrib/bloom/blvalidate.c	todo			
-contrib-bloom-blinsert	contrib/bloom/blinsert.c	todo			
-contrib-bloom-scan-vacuum-bitfields	contrib/bloom/blscan.c,contrib/bloom/blvacuum.c	todo			
-contrib-bloom-utils-bitfields	contrib/bloom/blcost.c,contrib/bloom/blutils.c,contrib/bloom/blvalidate.c	todo			
+contrib-amcheck-verify-common	contrib/amcheck/verify_common.c	non-core			fabled:contrib-amcheck-verify-common; 2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-amcheck-verify-gin	contrib/amcheck/verify_gin.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-amcheck-verify-heapam	contrib/amcheck/verify_heapam.c	non-core			fabled:contrib-amcheck-verify-heapam; 2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-amcheck-verify-nbtree	contrib/amcheck/verify_nbtree.c	non-core			fabled:contrib-amcheck-verify-nbtree; 2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-auth-delay-batch1	contrib/auth_delay/auth_delay.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-auto-explain	contrib/auto_explain/auto_explain.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-basebackup-to-shell-basebackup-to-shell	contrib/basebackup_to_shell/basebackup_to_shell.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-basic-archive-basic-archive	contrib/basic_archive/basic_archive.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-bloom-all-but-insert-bitfields	contrib/bloom/blcost.c,contrib/bloom/blscan.c,contrib/bloom/blutils.c,contrib/bloom/blvacuum.c,contrib/bloom/blvalidate.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-bloom-blinsert	contrib/bloom/blinsert.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-bloom-scan-vacuum-bitfields	contrib/bloom/blscan.c,contrib/bloom/blvacuum.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-bloom-utils-bitfields	contrib/bloom/blcost.c,contrib/bloom/blutils.c,contrib/bloom/blvalidate.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
 contrib-bloom-utils-probe	contrib/bloom/blcost.c,contrib/bloom/blutils.c,contrib/bloom/blvalidate.c	combined-into:contrib-bloom-utils-bitfields			fabled:duplicate-of
-contrib-bool-plperl	contrib/bool_plperl/bool_plperl.c	todo			
-contrib-btree-gin	contrib/btree_gin/btree_gin.c	todo			
-contrib-btree-gist-bitfields-batch1	contrib/btree_gist/btree_bit.c,contrib/btree_gist/btree_bool.c,contrib/btree_gist/btree_bytea.c,contrib/btree_gist/btree_cash.c,contrib/btree_gist/btree_date.c,contrib/btree_gist/btree_enum.c,contrib/btree_gist/btree_gist.c,contrib/btree_gist/btree_inet.c,contrib/btree_gist/btree_int2.c,contrib/btree_gist/btree_int4.c,contrib/btree_gist/btree_int8.c,contrib/btree_gist/btree_interval.c,contrib/btree_gist/btree_macaddr.c,contrib/btree_gist/btree_macaddr8.c,contrib/btree_gist/btree_numeric.c,contrib/btree_gist/btree_oid.c,contrib/btree_gist/btree_text.c,contrib/btree_gist/btree_time.c,contrib/btree_gist/btree_ts.c,contrib/btree_gist/btree_uuid.c	todo			
-contrib-btree-gist-btree_bool	contrib/btree_gist/btree_bool.c	todo			
-contrib-btree-gist-btree_float4	contrib/btree_gist/btree_float4.c	todo			
-contrib-btree-gist-btree_float8	contrib/btree_gist/btree_float8.c	todo			
-contrib-btree-gist-btree_int2	contrib/btree_gist/btree_int2.c	todo			
-contrib-btree-gist-btree_int4	contrib/btree_gist/btree_int4.c	todo			
-contrib-btree-gist-btree_int8	contrib/btree_gist/btree_int8.c	todo			
-contrib-btree-gist-btree_oid	contrib/btree_gist/btree_oid.c	todo			
-contrib-btree-gist-btree_utils_var	contrib/btree_gist/btree_utils_var.c	todo			
-contrib-btree-gist-float-num	contrib/btree_gist/btree_float4.c,contrib/btree_gist/btree_float8.c,contrib/btree_gist/btree_utils_num.c	todo			
-contrib-citext	contrib/citext/citext.c	todo			
-contrib-cube-cube-bitfields	contrib/cube/cube.c	todo			
+contrib-bool-plperl	contrib/bool_plperl/bool_plperl.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-btree-gin	contrib/btree_gin/btree_gin.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-btree-gist-bitfields-batch1	contrib/btree_gist/btree_bit.c,contrib/btree_gist/btree_bool.c,contrib/btree_gist/btree_bytea.c,contrib/btree_gist/btree_cash.c,contrib/btree_gist/btree_date.c,contrib/btree_gist/btree_enum.c,contrib/btree_gist/btree_gist.c,contrib/btree_gist/btree_inet.c,contrib/btree_gist/btree_int2.c,contrib/btree_gist/btree_int4.c,contrib/btree_gist/btree_int8.c,contrib/btree_gist/btree_interval.c,contrib/btree_gist/btree_macaddr.c,contrib/btree_gist/btree_macaddr8.c,contrib/btree_gist/btree_numeric.c,contrib/btree_gist/btree_oid.c,contrib/btree_gist/btree_text.c,contrib/btree_gist/btree_time.c,contrib/btree_gist/btree_ts.c,contrib/btree_gist/btree_uuid.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-btree-gist-btree_bool	contrib/btree_gist/btree_bool.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-btree-gist-btree_float4	contrib/btree_gist/btree_float4.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-btree-gist-btree_float8	contrib/btree_gist/btree_float8.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-btree-gist-btree_int2	contrib/btree_gist/btree_int2.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-btree-gist-btree_int4	contrib/btree_gist/btree_int4.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-btree-gist-btree_int8	contrib/btree_gist/btree_int8.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-btree-gist-btree_oid	contrib/btree_gist/btree_oid.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-btree-gist-btree_utils_var	contrib/btree_gist/btree_utils_var.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-btree-gist-float-num	contrib/btree_gist/btree_float4.c,contrib/btree_gist/btree_float8.c,contrib/btree_gist/btree_utils_num.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-citext	contrib/citext/citext.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-cube-cube-bitfields	contrib/cube/cube.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
 contrib-cube-cube-nightly-unsafe	contrib/cube/cube.c	combined-into:contrib-cube-cube-bitfields			fabled:duplicate-of
-contrib-cube-parser	contrib/cube/cubescan.l,contrib/cube/cubeparse.y	todo			
-contrib-dblink	contrib/dblink/dblink.c	todo			
-contrib-dict-int-batch1	contrib/dict_int/dict_int.c	todo			
-contrib-dict-xsyn-batch1	contrib/dict_xsyn/dict_xsyn.c	todo			
-contrib-earthdistance	contrib/earthdistance/earthdistance.c	todo			fabled:contrib-earthdistance
-contrib-file-fdw	contrib/file_fdw/file_fdw.c	todo			
-contrib-fuzzystrmatch	contrib/fuzzystrmatch/daitch_mokotoff.c,contrib/fuzzystrmatch/dmetaphone.c,contrib/fuzzystrmatch/fuzzystrmatch.c,src/backend/utils/adt/levenshtein.c	todo			
-contrib-hstore-all	contrib/hstore/hstore_compat.c,contrib/hstore/hstore_gin.c,contrib/hstore/hstore_gist.c,contrib/hstore/hstore_io.c,contrib/hstore/hstore_op.c,contrib/hstore/hstore_subs.c	todo			
-contrib-hstore-compat	contrib/hstore/hstore_compat.c	todo			
-contrib-hstore-plperl	contrib/hstore_plperl/hstore_plperl.c	todo			
-contrib-hstore-plpython	contrib/hstore_plpython/hstore_plpython.c	todo			
-contrib-intarray-bool	contrib/intarray/_int_bool.c	todo			
-contrib-intarray-op	contrib/intarray/_int_op.c	todo			
-contrib-intarray-remaining	contrib/intarray/_int_bool.c,contrib/intarray/_int_gin.c,contrib/intarray/_int_gist.c,contrib/intarray/_int_selfuncs.c,contrib/intarray/_int_tool.c,contrib/intarray/_intbig_gist.c	todo			
-contrib-isn	contrib/isn/isn.c	todo			
-contrib-jsonb-plperl	contrib/jsonb_plperl/jsonb_plperl.c	todo			
-contrib-jsonb-plpython	contrib/jsonb_plpython/jsonb_plpython.c	todo			
-contrib-lo-lo	contrib/lo/lo.c	todo			
-contrib-ltree-_ltree_gist-nightly-unsafe	contrib/ltree/_ltree_gist.c	todo			
-contrib-ltree-_ltree_op-nightly-unsafe	contrib/ltree/_ltree_op.c	todo			
-contrib-ltree-all-bitfields	contrib/ltree/_ltree_gist.c,contrib/ltree/_ltree_op.c,contrib/ltree/crc32.c,contrib/ltree/lquery_op.c,contrib/ltree/ltree_gist.c,contrib/ltree/ltree_io.c,contrib/ltree/ltree_op.c,contrib/ltree/ltxtquery_io.c,contrib/ltree/ltxtquery_op.c	todo			
-contrib-ltree-batch1	contrib/ltree/_ltree_op.c,contrib/ltree/crc32.c,contrib/ltree/lquery_op.c,contrib/ltree/ltree_io.c,contrib/ltree/ltree_op.c,contrib/ltree/ltxtquery_io.c,contrib/ltree/ltxtquery_op.c	todo			
-contrib-ltree-crc32-nightly-unsafe	contrib/ltree/crc32.c	todo			
-contrib-ltree-gist-bitfields	contrib/ltree/_ltree_gist.c,contrib/ltree/ltree_gist.c	todo			
-contrib-ltree-lquery_op-nightly-unsafe	contrib/ltree/lquery_op.c	todo			
-contrib-ltree-ltree_gist-nightly-unsafe	contrib/ltree/ltree_gist.c	todo			
-contrib-ltree-ltree_io-nightly-unsafe	contrib/ltree/ltree_io.c	todo			
-contrib-ltree-ltree_op-nightly-unsafe	contrib/ltree/ltree_op.c	todo			
-contrib-ltree-ltxtquery_io-nightly-unsafe	contrib/ltree/ltxtquery_io.c	todo			
-contrib-ltree-ltxtquery_op-nightly-unsafe	contrib/ltree/ltxtquery_op.c	todo			
-contrib-ltree-plpython	contrib/ltree_plpython/ltree_plpython.c	todo			
-contrib-oid2name-main-batch1	contrib/oid2name/oid2name.c	todo			
-contrib-pageinspect-brinfuncs	contrib/pageinspect/brinfuncs.c	todo			
-contrib-pageinspect-btreefuncs	contrib/pageinspect/btreefuncs.c	todo			
-contrib-pageinspect-fsm-bitfields	contrib/pageinspect/fsmfuncs.c	todo			
+contrib-cube-parser	contrib/cube/cubescan.l,contrib/cube/cubeparse.y	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-dblink	contrib/dblink/dblink.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-dict-int-batch1	contrib/dict_int/dict_int.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-dict-xsyn-batch1	contrib/dict_xsyn/dict_xsyn.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-earthdistance	contrib/earthdistance/earthdistance.c	non-core			fabled:contrib-earthdistance; 2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-file-fdw	contrib/file_fdw/file_fdw.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-fuzzystrmatch	contrib/fuzzystrmatch/daitch_mokotoff.c,contrib/fuzzystrmatch/dmetaphone.c,contrib/fuzzystrmatch/fuzzystrmatch.c,src/backend/utils/adt/levenshtein.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-hstore-all	contrib/hstore/hstore_compat.c,contrib/hstore/hstore_gin.c,contrib/hstore/hstore_gist.c,contrib/hstore/hstore_io.c,contrib/hstore/hstore_op.c,contrib/hstore/hstore_subs.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-hstore-compat	contrib/hstore/hstore_compat.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-hstore-plperl	contrib/hstore_plperl/hstore_plperl.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-hstore-plpython	contrib/hstore_plpython/hstore_plpython.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-intarray-bool	contrib/intarray/_int_bool.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-intarray-op	contrib/intarray/_int_op.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-intarray-remaining	contrib/intarray/_int_bool.c,contrib/intarray/_int_gin.c,contrib/intarray/_int_gist.c,contrib/intarray/_int_selfuncs.c,contrib/intarray/_int_tool.c,contrib/intarray/_intbig_gist.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-isn	contrib/isn/isn.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-jsonb-plperl	contrib/jsonb_plperl/jsonb_plperl.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-jsonb-plpython	contrib/jsonb_plpython/jsonb_plpython.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-lo-lo	contrib/lo/lo.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-ltree-_ltree_gist-nightly-unsafe	contrib/ltree/_ltree_gist.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-ltree-_ltree_op-nightly-unsafe	contrib/ltree/_ltree_op.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-ltree-all-bitfields	contrib/ltree/_ltree_gist.c,contrib/ltree/_ltree_op.c,contrib/ltree/crc32.c,contrib/ltree/lquery_op.c,contrib/ltree/ltree_gist.c,contrib/ltree/ltree_io.c,contrib/ltree/ltree_op.c,contrib/ltree/ltxtquery_io.c,contrib/ltree/ltxtquery_op.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-ltree-batch1	contrib/ltree/_ltree_op.c,contrib/ltree/crc32.c,contrib/ltree/lquery_op.c,contrib/ltree/ltree_io.c,contrib/ltree/ltree_op.c,contrib/ltree/ltxtquery_io.c,contrib/ltree/ltxtquery_op.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-ltree-crc32-nightly-unsafe	contrib/ltree/crc32.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-ltree-gist-bitfields	contrib/ltree/_ltree_gist.c,contrib/ltree/ltree_gist.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-ltree-lquery_op-nightly-unsafe	contrib/ltree/lquery_op.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-ltree-ltree_gist-nightly-unsafe	contrib/ltree/ltree_gist.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-ltree-ltree_io-nightly-unsafe	contrib/ltree/ltree_io.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-ltree-ltree_op-nightly-unsafe	contrib/ltree/ltree_op.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-ltree-ltxtquery_io-nightly-unsafe	contrib/ltree/ltxtquery_io.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-ltree-ltxtquery_op-nightly-unsafe	contrib/ltree/ltxtquery_op.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-ltree-plpython	contrib/ltree_plpython/ltree_plpython.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-oid2name-main-batch1	contrib/oid2name/oid2name.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-pageinspect-brinfuncs	contrib/pageinspect/brinfuncs.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-pageinspect-btreefuncs	contrib/pageinspect/btreefuncs.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-pageinspect-fsm-bitfields	contrib/pageinspect/fsmfuncs.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
 contrib-pageinspect-fsm-probe	contrib/pageinspect/fsmfuncs.c	combined-into:contrib-pageinspect-fsm-bitfields			fabled:duplicate-of
-contrib-pageinspect-ginfuncs	contrib/pageinspect/ginfuncs.c	todo			
-contrib-pageinspect-gistfuncs	contrib/pageinspect/gistfuncs.c	todo			
-contrib-pageinspect-hashfuncs	contrib/pageinspect/hashfuncs.c	todo			
-contrib-pageinspect-heapfuncs	contrib/pageinspect/heapfuncs.c	todo			
-contrib-pageinspect-rawpage	contrib/pageinspect/rawpage.c	todo			
-contrib-passwordcheck	contrib/passwordcheck/passwordcheck.c	todo			
-contrib-pg-buffercache-pg-buffercache-pages	contrib/pg_buffercache/pg_buffercache_pages.c	todo			
-contrib-pg-freespacemap-batch1	contrib/pg_freespacemap/pg_freespacemap.c	todo			
-contrib-pg-logicalinspect	contrib/pg_logicalinspect/pg_logicalinspect.c	todo			
-contrib-pg-overexplain	contrib/pg_overexplain/pg_overexplain.c	todo			
-contrib-pg-prewarm-all	contrib/pg_prewarm/pg_prewarm.c,contrib/pg_prewarm/autoprewarm.c	todo			
-contrib-pg-stat-statements	contrib/pg_stat_statements/pg_stat_statements.c	todo			
-contrib-pg-surgery-heap-bitfields	contrib/pg_surgery/heap_surgery.c	todo			
+contrib-pageinspect-ginfuncs	contrib/pageinspect/ginfuncs.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-pageinspect-gistfuncs	contrib/pageinspect/gistfuncs.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-pageinspect-hashfuncs	contrib/pageinspect/hashfuncs.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-pageinspect-heapfuncs	contrib/pageinspect/heapfuncs.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-pageinspect-rawpage	contrib/pageinspect/rawpage.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-passwordcheck	contrib/passwordcheck/passwordcheck.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-pg-buffercache-pg-buffercache-pages	contrib/pg_buffercache/pg_buffercache_pages.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-pg-freespacemap-batch1	contrib/pg_freespacemap/pg_freespacemap.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-pg-logicalinspect	contrib/pg_logicalinspect/pg_logicalinspect.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-pg-overexplain	contrib/pg_overexplain/pg_overexplain.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-pg-prewarm-all	contrib/pg_prewarm/pg_prewarm.c,contrib/pg_prewarm/autoprewarm.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-pg-stat-statements	contrib/pg_stat_statements/pg_stat_statements.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-pg-surgery-heap-bitfields	contrib/pg_surgery/heap_surgery.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
 contrib-pg-surgery-probe	contrib/pg_surgery/heap_surgery.c	combined-into:contrib-pg-surgery-heap-bitfields			fabled:duplicate-of
-contrib-pg-trgm-index	contrib/pg_trgm/trgm_gin.c,contrib/pg_trgm/trgm_gist.c	todo			
-contrib-pg-trgm-op	contrib/pg_trgm/trgm_op.c	todo			
-contrib-pg-trgm-regexp	contrib/pg_trgm/trgm_regexp.c	todo			
-contrib-pg-visibility-pg-visibility	contrib/pg_visibility/pg_visibility.c	todo			
-contrib-pg-walinspect-pg-walinspect	contrib/pg_walinspect/pg_walinspect.c	todo			
-contrib-pgcrypto-batch1	contrib/pgcrypto/crypt-blowfish.c,contrib/pgcrypto/crypt-des.c,contrib/pgcrypto/crypt-gensalt.c,contrib/pgcrypto/crypt-md5.c,contrib/pgcrypto/crypt-sha.c,contrib/pgcrypto/mbuf.c,contrib/pgcrypto/openssl.c,contrib/pgcrypto/pgcrypto.c,contrib/pgcrypto/pgp.c,contrib/pgcrypto/pgp-armor.c,contrib/pgcrypto/pgp-cfb.c,contrib/pgcrypto/pgp-compress.c,contrib/pgcrypto/pgp-decrypt.c,contrib/pgcrypto/pgp-encrypt.c,contrib/pgcrypto/pgp-info.c,contrib/pgcrypto/pgp-mpi.c,contrib/pgcrypto/pgp-mpi-openssl.c,contrib/pgcrypto/pgp-pubdec.c,contrib/pgcrypto/pgp-pubenc.c,contrib/pgcrypto/pgp-pubkey.c,contrib/pgcrypto/pgp-s2k.c,contrib/pgcrypto/px.c,contrib/pgcrypto/px-crypt.c,contrib/pgcrypto/px-hmac.c	todo			
-contrib-pgcrypto-crypt-blowfish-nightly-unsafe	contrib/pgcrypto/crypt-blowfish.c	todo			
-contrib-pgcrypto-crypt-des-nightly-unsafe	contrib/pgcrypto/crypt-des.c	todo			
-contrib-pgcrypto-crypt-gensalt	contrib/pgcrypto/crypt-gensalt.c	todo			
-contrib-pgcrypto-crypt-md5	contrib/pgcrypto/crypt-md5.c	todo			
-contrib-pgcrypto-crypt-sha	contrib/pgcrypto/crypt-sha.c	todo			
-contrib-pgcrypto-mbuf	contrib/pgcrypto/mbuf.c	todo			
-contrib-pgcrypto-openssl-nightly-unsafe	contrib/pgcrypto/openssl.c	todo			
-contrib-pgcrypto-pgcrypto-nightly-unsafe	contrib/pgcrypto/pgcrypto.c	todo			
-contrib-pgcrypto-pgp-armor	contrib/pgcrypto/pgp-armor.c	todo			
+contrib-pg-trgm-index	contrib/pg_trgm/trgm_gin.c,contrib/pg_trgm/trgm_gist.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-pg-trgm-op	contrib/pg_trgm/trgm_op.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-pg-trgm-regexp	contrib/pg_trgm/trgm_regexp.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-pg-visibility-pg-visibility	contrib/pg_visibility/pg_visibility.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-pg-walinspect-pg-walinspect	contrib/pg_walinspect/pg_walinspect.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-pgcrypto-batch1	contrib/pgcrypto/crypt-blowfish.c,contrib/pgcrypto/crypt-des.c,contrib/pgcrypto/crypt-gensalt.c,contrib/pgcrypto/crypt-md5.c,contrib/pgcrypto/crypt-sha.c,contrib/pgcrypto/mbuf.c,contrib/pgcrypto/openssl.c,contrib/pgcrypto/pgcrypto.c,contrib/pgcrypto/pgp.c,contrib/pgcrypto/pgp-armor.c,contrib/pgcrypto/pgp-cfb.c,contrib/pgcrypto/pgp-compress.c,contrib/pgcrypto/pgp-decrypt.c,contrib/pgcrypto/pgp-encrypt.c,contrib/pgcrypto/pgp-info.c,contrib/pgcrypto/pgp-mpi.c,contrib/pgcrypto/pgp-mpi-openssl.c,contrib/pgcrypto/pgp-pubdec.c,contrib/pgcrypto/pgp-pubenc.c,contrib/pgcrypto/pgp-pubkey.c,contrib/pgcrypto/pgp-s2k.c,contrib/pgcrypto/px.c,contrib/pgcrypto/px-crypt.c,contrib/pgcrypto/px-hmac.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-pgcrypto-crypt-blowfish-nightly-unsafe	contrib/pgcrypto/crypt-blowfish.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-pgcrypto-crypt-des-nightly-unsafe	contrib/pgcrypto/crypt-des.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-pgcrypto-crypt-gensalt	contrib/pgcrypto/crypt-gensalt.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-pgcrypto-crypt-md5	contrib/pgcrypto/crypt-md5.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-pgcrypto-crypt-sha	contrib/pgcrypto/crypt-sha.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-pgcrypto-mbuf	contrib/pgcrypto/mbuf.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-pgcrypto-openssl-nightly-unsafe	contrib/pgcrypto/openssl.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-pgcrypto-pgcrypto-nightly-unsafe	contrib/pgcrypto/pgcrypto.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-pgcrypto-pgp-armor	contrib/pgcrypto/pgp-armor.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
 contrib-pgcrypto-pgp-cfb-nightly-unsafe	contrib/pgcrypto/pgp-cfb.c	combined-into:contrib-pgcrypto-pgp-cfb			fabled:duplicate-of
-contrib-pgcrypto-pgp-cfb	contrib/pgcrypto/pgp-cfb.c	todo			
-contrib-pgcrypto-pgp-compress-nightly-unsafe	contrib/pgcrypto/pgp-compress.c	todo			
-contrib-pgcrypto-pgp-decrypt-nightly-unsafe	contrib/pgcrypto/pgp-decrypt.c	todo			
-contrib-pgcrypto-pgp-encrypt-nightly-unsafe	contrib/pgcrypto/pgp-encrypt.c	todo			
-contrib-pgcrypto-pgp-info-nightly-unsafe	contrib/pgcrypto/pgp-info.c	todo			
-contrib-pgcrypto-pgp-mpi-nightly-unsafe	contrib/pgcrypto/pgp-mpi.c	todo			
-contrib-pgcrypto-pgp-mpi-openssl-nightly-unsafe	contrib/pgcrypto/pgp-mpi-openssl.c	todo			
-contrib-pgcrypto-pgp-nightly-unsafe	contrib/pgcrypto/pgp.c	todo			
-contrib-pgcrypto-pgp-pgsql	contrib/pgcrypto/pgp-pgsql.c	todo			
-contrib-pgcrypto-pgp-pubdec-nightly-unsafe	contrib/pgcrypto/pgp-pubdec.c	todo			
-contrib-pgcrypto-pgp-pubenc-nightly-unsafe	contrib/pgcrypto/pgp-pubenc.c	todo			
-contrib-pgcrypto-pgp-pubkey-nightly-unsafe	contrib/pgcrypto/pgp-pubkey.c	todo			
-contrib-pgcrypto-pgp-s2k-nightly-unsafe	contrib/pgcrypto/pgp-s2k.c	todo			
-contrib-pgcrypto-px-crypt-nightly-unsafe	contrib/pgcrypto/px-crypt.c	todo			
-contrib-pgcrypto-px-hmac	contrib/pgcrypto/px-hmac.c	todo			
+contrib-pgcrypto-pgp-cfb	contrib/pgcrypto/pgp-cfb.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-pgcrypto-pgp-compress-nightly-unsafe	contrib/pgcrypto/pgp-compress.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-pgcrypto-pgp-decrypt-nightly-unsafe	contrib/pgcrypto/pgp-decrypt.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-pgcrypto-pgp-encrypt-nightly-unsafe	contrib/pgcrypto/pgp-encrypt.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-pgcrypto-pgp-info-nightly-unsafe	contrib/pgcrypto/pgp-info.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-pgcrypto-pgp-mpi-nightly-unsafe	contrib/pgcrypto/pgp-mpi.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-pgcrypto-pgp-mpi-openssl-nightly-unsafe	contrib/pgcrypto/pgp-mpi-openssl.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-pgcrypto-pgp-nightly-unsafe	contrib/pgcrypto/pgp.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-pgcrypto-pgp-pgsql	contrib/pgcrypto/pgp-pgsql.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-pgcrypto-pgp-pubdec-nightly-unsafe	contrib/pgcrypto/pgp-pubdec.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-pgcrypto-pgp-pubenc-nightly-unsafe	contrib/pgcrypto/pgp-pubenc.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-pgcrypto-pgp-pubkey-nightly-unsafe	contrib/pgcrypto/pgp-pubkey.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-pgcrypto-pgp-s2k-nightly-unsafe	contrib/pgcrypto/pgp-s2k.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-pgcrypto-px-crypt-nightly-unsafe	contrib/pgcrypto/px-crypt.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-pgcrypto-px-hmac	contrib/pgcrypto/px-hmac.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
 contrib-pgcrypto-px-nightly	contrib/pgcrypto/px.c	combined-into:contrib-pgcrypto-px			fabled:duplicate-of
-contrib-pgcrypto-px	contrib/pgcrypto/px.c	todo			
-contrib-pgrowlocks-pgrowlocks	contrib/pgrowlocks/pgrowlocks.c	todo			
-contrib-pgstattuple-all	contrib/pgstattuple/pgstatapprox.c,contrib/pgstattuple/pgstatindex.c,contrib/pgstattuple/pgstattuple.c	todo			
-contrib-postgres-fdw	contrib/postgres_fdw/connection.c,contrib/postgres_fdw/deparse.c,contrib/postgres_fdw/option.c,contrib/postgres_fdw/postgres_fdw.c,contrib/postgres_fdw/shippable.c	todo			
-contrib-seg-parser	contrib/seg/segscan.l,contrib/seg/segparse.y	todo			
-contrib-seg-seg-bitfields	contrib/seg/seg.c	todo			
+contrib-pgcrypto-px	contrib/pgcrypto/px.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-pgrowlocks-pgrowlocks	contrib/pgrowlocks/pgrowlocks.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-pgstattuple-all	contrib/pgstattuple/pgstatapprox.c,contrib/pgstattuple/pgstatindex.c,contrib/pgstattuple/pgstattuple.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-postgres-fdw	contrib/postgres_fdw/connection.c,contrib/postgres_fdw/deparse.c,contrib/postgres_fdw/option.c,contrib/postgres_fdw/postgres_fdw.c,contrib/postgres_fdw/shippable.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-seg-parser	contrib/seg/segscan.l,contrib/seg/segparse.y	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-seg-seg-bitfields	contrib/seg/seg.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
 contrib-seg-seg-nightly-unsafe	contrib/seg/seg.c	combined-into:contrib-seg-seg-bitfields			fabled:duplicate-of
-contrib-spi-autoinc	contrib/spi/autoinc.c	todo			
-contrib-spi-insert_username	contrib/spi/insert_username.c	todo			
-contrib-spi-moddatetime	contrib/spi/moddatetime.c	todo			
-contrib-spi-refint	contrib/spi/refint.c	todo			
-contrib-sslinfo-sslinfo	contrib/sslinfo/sslinfo.c	todo			
-contrib-tablefunc-tablefunc	contrib/tablefunc/tablefunc.c	todo			
-contrib-tcn-tcn	contrib/tcn/tcn.c	todo			
-contrib-test-decoding-test-decoding	contrib/test_decoding/test_decoding.c	todo			
-contrib-tsm-system-rows-tsm-system-rows	contrib/tsm_system_rows/tsm_system_rows.c	todo			
-contrib-tsm-system-time-tsm-system-time	contrib/tsm_system_time/tsm_system_time.c	todo			
-contrib-unaccent	contrib/unaccent/unaccent.c	todo			
-contrib-vacuumlo-main-batch1	contrib/vacuumlo/vacuumlo.c	todo			
-contrib-xml2	contrib/xml2/xpath.c,contrib/xml2/xslt_proc.c	todo			
+contrib-spi-autoinc	contrib/spi/autoinc.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-spi-insert_username	contrib/spi/insert_username.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-spi-moddatetime	contrib/spi/moddatetime.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-spi-refint	contrib/spi/refint.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-sslinfo-sslinfo	contrib/sslinfo/sslinfo.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-tablefunc-tablefunc	contrib/tablefunc/tablefunc.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-tcn-tcn	contrib/tcn/tcn.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-test-decoding-test-decoding	contrib/test_decoding/test_decoding.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-tsm-system-rows-tsm-system-rows	contrib/tsm_system_rows/tsm_system_rows.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-tsm-system-time-tsm-system-time	contrib/tsm_system_time/tsm_system_time.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-unaccent	contrib/unaccent/unaccent.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-vacuumlo-main-batch1	contrib/vacuumlo/vacuumlo.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-xml2	contrib/xml2/xpath.c,contrib/xml2/xslt_proc.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
 pg-prng-nostd	-	combined-into:pg-prng			fabled:duplicate-of; m1-dep(stub-ok)
 pg-prng	src/common/pg_prng.c	ported	pg_prng	cold	m1-spine; xoroshiro128** per-state + TLS global (Cell, Copy state); KATs bit-exact vs compiled REL_18_3 pg_prng.o (normal_f64 to 1e-14, libm); installs both pg_prng_seams; 6 tests, density 1.8%; cold: seeding + spin-backoff jitter; no per-statement caller on M1-M3
 port-batch14	src/port/inet_net_ntop.c,src/port/pg_localeconv_r.c,src/port/pg_numa.c,src/port/pg_strong_random.c,src/port/strerror.c,src/port/tar.c	todo			m1-spine(boot); fabled:port-pg-strong-random; only pg_strong_random.c on spine
