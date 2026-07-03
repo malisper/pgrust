@@ -1075,8 +1075,7 @@ pub fn create_agg_path<'mcx>(
     Ok(id)
 }
 
-// create_groupingsets_path (pathnode.c); hashed/AGG_MIXED rollups are loud
-// upstream, so the is_hashed cost legs are unreachable panics.
+// create_groupingsets_path (pathnode.c).
 #[allow(clippy::too_many_arguments)]
 pub fn create_groupingsets_path<'mcx>(
     run: &mut PlannerRun<'mcx>,
@@ -1098,14 +1097,13 @@ pub fn create_groupingsets_path<'mcx>(
         && rollups[0].groupClause.is_empty()
     {
         types_pathnodes::AGG_PLAIN
+    } else if aggstrategy == types_pathnodes::AGG_MIXED && rollups.len() == 1 {
+        types_pathnodes::AGG_HASHED
     } else {
         aggstrategy
     };
-    debug_assert!(
-        aggstrategy == types_pathnodes::AGG_SORTED || aggstrategy == types_pathnodes::AGG_PLAIN,
-        "create_groupingsets_path (pathnode.c): hashed/AGG_MIXED strategy; grouping-sets lane"
-    );
     debug_assert!(aggstrategy != types_pathnodes::AGG_PLAIN || rollups.len() == 1);
+    debug_assert!(aggstrategy != types_pathnodes::AGG_MIXED || rollups.len() > 1);
 
     let pathkeys = if aggstrategy == types_pathnodes::AGG_SORTED && rollups.len() == 1 {
         types_pathnodes::relids::pgvec_clone_shallow(mcx, &run.root.group_pathkeys)
@@ -1159,10 +1157,6 @@ pub fn create_groupingsets_path<'mcx>(
             ),
             _ => unreachable!(),
         };
-        assert!(
-            !is_hashed,
-            "create_groupingsets_path (pathnode.c): hashed rollup; grouping-sets lane"
-        );
         if is_first {
             let (rows, disabled, startup, total) = costsize::cost_agg_shape(
                 run,
@@ -1183,11 +1177,40 @@ pub fn create_groupingsets_path<'mcx>(
             p.startup_cost = startup;
             p.total_cost = total;
             is_first = false;
-            is_first_sort = false;
+            if !is_hashed {
+                is_first_sort = false;
+            }
+        } else if is_hashed || is_first_sort {
+            // Aggregation only; input cost is not re-charged (hashed rollups
+            // and the first sorted rollup consume the shared input).
+            let (agg_rows, agg_disabled, _agg_startup, agg_total) =
+                costsize::cost_agg_shape(
+                    run,
+                    if is_hashed {
+                        types_pathnodes::AGG_HASHED
+                    } else {
+                        types_pathnodes::AGG_SORTED
+                    },
+                    agg_costs,
+                    num_group_cols,
+                    num_groups,
+                    &quals,
+                    0,
+                    0.0,
+                    0.0,
+                    sub_rows,
+                    sub_width,
+                )?;
+            if !is_hashed {
+                is_first_sort = false;
+            }
+            let p = run.root.path_mut(id).base_mut();
+            p.disabled_nodes += agg_disabled;
+            p.total_cost += agg_total;
+            p.rows += agg_rows;
         } else {
-            // Later rollups sort the subpath themselves; input cost is not
-            // re-charged.
-            debug_assert!(!is_first_sort);
+            // Later sorted rollups sort the subpath themselves; input cost is
+            // not re-charged.
             let (sort_disabled, sort_startup, sort_total) = costsize::cost_sort_shape(
                 0,
                 0.0,
@@ -1197,7 +1220,6 @@ pub fn create_groupingsets_path<'mcx>(
                 init_small::globals::work_mem(),
                 -1.0,
             );
-            let _ = sort_startup;
             let (agg_rows, agg_disabled, _agg_startup, agg_total) =
                 costsize::cost_agg_shape(
                     run,

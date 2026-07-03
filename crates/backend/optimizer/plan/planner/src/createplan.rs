@@ -1722,16 +1722,25 @@ fn create_groupingsets_plan<'mcx>(
 
     let mut chain = NodeList::nil();
     if rollups.len() > 1 {
-        debug_assert!(!rollups[0].is_hashed);
+        let mut is_first_sort = rollups[0].is_hashed;
         for rollup in rollups[1..].iter() {
-            assert!(
-                !rollup.is_hashed,
-                "create_groupingsets_plan (createplan.c): hashed rollup; grouping-sets lane"
-            );
             let new_grp_col_idx = remap_group_col_idx(run, &rollup.groupClause);
-            let sort_plan =
-                make_sort_from_groupcols(run, &rollup.groupClause, &new_grp_col_idx, subplan)?;
-            let strat = if rollup.gsets[0].is_empty() {
+            let sort_plan = if !rollup.is_hashed && !is_first_sort {
+                Some(make_sort_from_groupcols(
+                    run,
+                    &rollup.groupClause,
+                    &new_grp_col_idx,
+                    subplan,
+                )?)
+            } else {
+                None
+            };
+            if !rollup.is_hashed {
+                is_first_sort = false;
+            }
+            let strat = if rollup.is_hashed {
+                types_pathnodes::AGG_HASHED
+            } else if rollup.gsets[0].is_empty() {
                 types_pathnodes::AGG_PLAIN
             } else {
                 types_pathnodes::AGG_SORTED
@@ -1740,7 +1749,7 @@ fn create_groupingsets_plan<'mcx>(
             let mut agg = Node::build::<Agg>(mcx)?;
             agg.plan.targetlist = NodeList::nil();
             agg.plan.qual = NodeList::nil();
-            agg.plan.lefttree = Some(sort_plan);
+            agg.plan.lefttree = sort_plan;
             agg.aggstrategy = strat;
             agg.aggsplit = types_pathnodes::AGGSPLIT_SIMPLE;
             agg.numCols = rollup.gsets[0].len() as i32;
@@ -1752,13 +1761,15 @@ fn create_groupingsets_plan<'mcx>(
             agg.transitionSpace = transition_space;
             // C strips the vestigial Sort after make_agg.
             // SAFETY: sort_plan was freshly built above; no other handle.
-            unsafe {
-                sort_plan.with_plan_mut(|p| {
-                    p.targetlist = NodeList::nil();
-                    p.lefttree = None;
-                })
+            if let Some(sp) = sort_plan {
+                unsafe {
+                    sp.with_plan_mut(|p| {
+                        p.targetlist = NodeList::nil();
+                        p.lefttree = None;
+                    })
+                }
+                .expect("Sort embeds a Plan base");
             }
-            .expect("Sort embeds a Plan base");
             chain.lappend(mcx, agg.seal())?;
         }
     }

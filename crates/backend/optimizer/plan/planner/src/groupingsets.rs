@@ -1,12 +1,10 @@
-//! Grouping-sets planning (planner.c). Only the pure sorted rollup-chain
-//! strategy is live; every branch needing the hashed/AGG_MIXED strategy is a
-//! named panic.
+//! Grouping-sets planning (planner.c).
 
 use mcx::{Mcx, PgVec};
 use types_error::PgResult;
 use types_nodes::list::NodeList;
 use types_nodes::Node;
-use types_pathnodes::{GroupingSetData, NodeId, RelId, RollupData};
+use types_pathnodes::{GroupingSetData, NodeId, PathId, RelId, RollupData};
 
 use crate::run::PlannerRun;
 
@@ -96,6 +94,7 @@ pub fn preprocess_grouping_sets<'mcx>(
         unsortable_refs,
         unhashable_refs,
         unsortable_sets,
+        hash_sets_idx: PgVec::new_in(mcx),
         tleref_to_colnum_map,
         dNumHashGroups: 0.0,
     };
@@ -130,6 +129,16 @@ pub fn preprocess_grouping_sets<'mcx>(
     }
 
     if !gd.unsortable_sets.is_empty() {
+        // C annotates: no groupclause pinned yet; index against the original
+        // groupclause for estimation.
+        let group_clause =
+            crate::relnode::pgvec_clone_shallow(mcx, &run.root.processed_groupClause);
+        gd.hash_sets_idx = remap_to_groupclause_idx(
+            run,
+            &group_clause,
+            &gd.unsortable_sets,
+            &mut gd.tleref_to_colnum_map,
+        );
         gd.any_hashable = true;
     }
     Ok(gd)
@@ -376,61 +385,281 @@ pub fn reorder_grouping_sets<'mcx>(
     result
 }
 
-/// consider_groupingsets_paths (planner.c), sorted arm only: hashed/AGG_MIXED
-/// branches panic under enable_hashagg=on and are skipped under =off, where
-/// C's equivalents carry disabled_nodes>0 and can never beat the sorted chain.
+// estimate_hashagg_tablesize (selfuncs.c).
+fn estimate_hashagg_tablesize(
+    run: &PlannerRun<'_>,
+    path: PathId,
+    agg_costs: &types_pathnodes::AggClauseCosts,
+    d_num_groups: f64,
+) -> f64 {
+    let width = run
+        .root
+        .path(path)
+        .base()
+        .pathtarget_id
+        .map_or(0, |pt| run.root.pathtarget(pt).width);
+    let hashentrysize = ::nodeagg::hash_agg_entry_size(
+        run.root.aggtransinfos.len(),
+        width.max(0) as usize,
+        agg_costs.transitionSpace as usize,
+    );
+    hashentrysize * d_num_groups
+}
+
+// DiscreteKnapsack (lib/knapsack.c): 0/1 knapsack, all item values 1;
+// weight-0 items always included; equal-value comparisons replace (<=), as C.
+fn discrete_knapsack(max_weight: i32, item_weights: &[i32]) -> Vec<bool> {
+    assert!(max_weight >= 0);
+    let num_items = item_weights.len();
+    assert!(num_items > 0);
+    let cap = max_weight as usize;
+    let mut values: Vec<f64> = vec![0.0; cap + 1];
+    let mut sets: Vec<Vec<bool>> = vec![vec![false; num_items]; cap + 1];
+    for (i, &iw) in item_weights.iter().enumerate() {
+        let iw = iw.max(0) as usize;
+        if iw > cap {
+            continue;
+        }
+        for j in (iw..=cap).rev() {
+            let ow = j - iw;
+            if values[j] <= values[ow] + 1.0 {
+                if j != ow {
+                    let (lo, hi) = sets.split_at_mut(j);
+                    hi[0].copy_from_slice(&lo[ow]);
+                }
+                sets[j][i] = true;
+                values[j] = values[ow] + 1.0;
+            }
+        }
+    }
+    sets.swap_remove(cap)
+}
+
+// One single-set hashed RollupData (the burst shape both arms share).
+fn make_hashed_rollup<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    gs: &GroupingSetData<'mcx>,
+) -> PgResult<RollupData<'mcx>> {
+    let mcx = run.mcx;
+    let gset: Vec<i32> = gs.set.iter().map(|&r| r as i32).collect();
+    let mut rollup = RollupData::new(mcx);
+    rollup.groupClause = crate::grouping::preprocess_groupclause(run, Some(&gset))?;
+    let mut gsets_data: PgVec<'mcx, GroupingSetData<'mcx>> = PgVec::new_in(mcx);
+    gsets_data.push(gs.clone());
+    let mut map = {
+        let gd = run.gset_data.as_ref().unwrap();
+        crate::relnode::pgvec_clone_shallow(mcx, &gd.tleref_to_colnum_map)
+    };
+    rollup.gsets = remap_to_groupclause_idx(run, &rollup.groupClause, &gsets_data, &mut map);
+    run.gset_data.as_mut().unwrap().tleref_to_colnum_map = map;
+    rollup.gsets_data = gsets_data;
+    rollup.numGroups = gs.numGroups;
+    rollup.hashable = true;
+    rollup.is_hashed = true;
+    Ok(rollup)
+}
+
+/// consider_groupingsets_paths (planner.c).
 #[allow(clippy::too_many_arguments)]
 pub fn consider_groupingsets_paths<'mcx>(
     run: &mut PlannerRun<'mcx>,
     grouped_rel: RelId,
-    path: types_pathnodes::PathId,
+    path: PathId,
     is_sorted: bool,
     can_hash: bool,
     agg_costs: &types_pathnodes::AggClauseCosts,
     having_qual: &[NodeId],
-    _d_num_groups: f64,
+    d_num_groups: f64,
 ) -> PgResult<()> {
-    if !is_sorted {
-        assert!(can_hash);
-        panic!(
-            "consider_groupingsets_paths (planner.c): hashed/AGG_MIXED grouping-sets \
-             strategy unported — set enable_hashagg=off; grouping-sets lane"
-        );
-    }
-
-    let gd = run.gset_data.as_ref().expect("grouping sets preprocessed");
-    if gd.rollups.is_empty() {
-        return Ok(());
-    }
-    if can_hash && gd.any_hashable {
-        if crate::gucs::enable_hashagg() {
-            panic!(
-                "consider_groupingsets_paths (planner.c): hashed/AGG_MIXED grouping-sets \
-                 strategy unported — set enable_hashagg=off; grouping-sets lane"
-            );
-        }
-    }
-    if !gd.unsortable_sets.is_empty() {
-        panic!(
-            "consider_groupingsets_paths (planner.c): unsortable grouping sets need the \
-             hashed strategy (unported); grouping-sets lane"
-        );
-    }
-    let rollups = run.gset_data.as_ref().unwrap().rollups.clone();
-    let quals = {
+    let mcx = run.mcx;
+    let hash_mem_limit = ::nodehash::get_hash_memory_limit() as f64;
+    let quals = |run: &PlannerRun<'mcx>| {
         let mut v = PgVec::new_in(run.mcx);
         v.extend_from_slice(having_qual);
         v
     };
-    let gs_path = crate::pathnode::create_groupingsets_path(
-        run,
-        grouped_rel,
-        path,
-        quals,
-        types_pathnodes::AGG_SORTED,
-        rollups,
-        agg_costs,
-    )?;
-    crate::pathnode::add_path(run, grouped_rel, gs_path);
+
+    if !is_sorted {
+        assert!(can_hash);
+
+        let mut unhashed_rollup: Option<RollupData<'mcx>> = None;
+        let mut exclude_groups = 0.0;
+        let mut l_start = 0usize;
+        {
+            let gd = run.gset_data.as_ref().expect("grouping sets preprocessed");
+            // The input can be coincidentally sorted even when is_sorted is
+            // false (the caller only set up no sort); vacuously true for a
+            // rollup of only empty sets (group_pathkeys comes from rollup 0).
+            if !gd.rollups.is_empty()
+                && crate::pathkeys::pathkeys_contained_in(
+                    &run.root.group_pathkeys,
+                    &run.root.path(path).base().pathkeys,
+                )
+            {
+                let r = gd.rollups[0].clone();
+                exclude_groups = r.numGroups;
+                unhashed_rollup = Some(r);
+                l_start = 1;
+            }
+        }
+
+        let hashsize =
+            estimate_hashagg_tablesize(run, path, agg_costs, d_num_groups - exclude_groups);
+        let gd = run.gset_data.as_ref().unwrap();
+        if hashsize > hash_mem_limit && !gd.rollups.is_empty() {
+            return Ok(());
+        }
+
+        let mut sets_data: Vec<GroupingSetData<'mcx>> =
+            gd.unsortable_sets.iter().cloned().collect();
+        for rollup in gd.rollups[l_start..].iter() {
+            // An unhashable rollup here would need a differently-sorted
+            // input we cannot get; the is_sorted case covers it.
+            if !rollup.hashable {
+                return Ok(());
+            }
+            sets_data.extend(rollup.gsets_data.iter().cloned());
+        }
+        let mut new_rollups: PgVec<'mcx, RollupData<'mcx>> = PgVec::new_in(mcx);
+        let mut empty_sets_data: Vec<GroupingSetData<'mcx>> = Vec::new();
+        for gs in sets_data {
+            if gs.set.is_empty() {
+                empty_sets_data.push(gs);
+            } else {
+                new_rollups.push(make_hashed_rollup(run, &gs)?);
+            }
+        }
+        if new_rollups.is_empty() {
+            return Ok(());
+        }
+        assert!(unhashed_rollup.is_none() || empty_sets_data.is_empty());
+        let mut strat = types_pathnodes::AGG_HASHED;
+        if let Some(r) = unhashed_rollup {
+            new_rollups.push(r);
+            strat = types_pathnodes::AGG_MIXED;
+        } else if !empty_sets_data.is_empty() {
+            let mut rollup = RollupData::new(mcx);
+            rollup.numGroups = empty_sets_data.len() as f64;
+            for gs in empty_sets_data {
+                rollup.gsets.push(PgVec::new_in(mcx));
+                rollup.gsets_data.push(gs);
+            }
+            new_rollups.push(rollup);
+            strat = types_pathnodes::AGG_MIXED;
+        }
+        let gs_path = crate::pathnode::create_groupingsets_path(
+            run,
+            grouped_rel,
+            path,
+            quals(run),
+            strat,
+            new_rollups,
+            agg_costs,
+        )?;
+        crate::pathnode::add_path(run, grouped_rel, gs_path);
+        return Ok(());
+    }
+
+    if run.gset_data.as_ref().expect("grouping sets preprocessed").rollups.is_empty() {
+        return Ok(());
+    }
+
+    // Sorted input: try one mixed sort/hash path and one pure sorted path.
+    let gd = run.gset_data.as_ref().unwrap();
+    if can_hash && gd.any_hashable {
+        let mut hash_sets: Vec<GroupingSetData<'mcx>> =
+            gd.unsortable_sets.iter().cloned().collect();
+        let availspace = hash_mem_limit
+            - estimate_hashagg_tablesize(run, path, agg_costs, gd.dNumHashGroups);
+
+        let gd = run.gset_data.as_ref().unwrap();
+        let mut rollups: Vec<RollupData<'mcx>> = Vec::new();
+        if availspace > 0.0 && gd.rollups.len() > 1 {
+            // Knapsack: capacity is hash_mem, weights are per-rollup hashtable
+            // sizes, all values equal (each hashed rollup saves one sort);
+            // 5% error margin via the scale clamp.
+            let num_rollups = gd.rollups.len();
+            let scale = (availspace / (20.0 * num_rollups as f64)).max(1.0);
+            let k_capacity = (availspace / scale).floor() as i32;
+
+            // Rollup 0 matches the input sort order and stays sorted; index
+            // i counts only hashable candidates (both loops must agree).
+            let mut k_weights: Vec<i32> = Vec::with_capacity(num_rollups);
+            let hashable_sizes: Vec<f64> = gd.rollups[1..]
+                .iter()
+                .filter(|r| r.hashable)
+                .map(|r| r.numGroups)
+                .collect();
+            for &num_groups in &hashable_sizes {
+                let sz = estimate_hashagg_tablesize(run, path, agg_costs, num_groups);
+                k_weights.push((sz / scale).floor().min(k_capacity as f64 + 1.0) as i32);
+            }
+
+            if !k_weights.is_empty() {
+                let hash_items = discrete_knapsack(k_capacity, &k_weights);
+                if hash_items.iter().any(|&b| b) {
+                    let gd = run.gset_data.as_ref().unwrap();
+                    rollups.push(gd.rollups[0].clone());
+                    let mut i = 0usize;
+                    for rollup in gd.rollups[1..].iter() {
+                        if rollup.hashable {
+                            if hash_items[i] {
+                                hash_sets.extend(rollup.gsets_data.iter().cloned());
+                            } else {
+                                rollups.push(rollup.clone());
+                            }
+                            i += 1;
+                        } else {
+                            rollups.push(rollup.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        if rollups.is_empty() && !hash_sets.is_empty() {
+            let gd = run.gset_data.as_ref().unwrap();
+            rollups = gd.rollups.iter().cloned().collect();
+        }
+
+        // C lcons's each hashed rollup: final order is reverse(hash_sets),
+        // then the sorted rollups.
+        for gs in hash_sets.iter().rev() {
+            assert!(!gs.set.is_empty());
+            rollups.insert(0, make_hashed_rollup(run, gs)?);
+        }
+
+        if !rollups.is_empty() {
+            let mut rv: PgVec<'mcx, RollupData<'mcx>> = PgVec::new_in(mcx);
+            for r in rollups {
+                rv.push(r);
+            }
+            let gs_path = crate::pathnode::create_groupingsets_path(
+                run,
+                grouped_rel,
+                path,
+                quals(run),
+                types_pathnodes::AGG_MIXED,
+                rv,
+                agg_costs,
+            )?;
+            crate::pathnode::add_path(run, grouped_rel, gs_path);
+        }
+    }
+
+    let gd = run.gset_data.as_ref().unwrap();
+    if gd.unsortable_sets.is_empty() {
+        let rollups = gd.rollups.clone();
+        let gs_path = crate::pathnode::create_groupingsets_path(
+            run,
+            grouped_rel,
+            path,
+            quals(run),
+            types_pathnodes::AGG_SORTED,
+            rollups,
+            agg_costs,
+        )?;
+        crate::pathnode::add_path(run, grouped_rel, gs_path);
+    }
     Ok(())
 }
