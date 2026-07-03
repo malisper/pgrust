@@ -63,6 +63,10 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    pub fn conditional_lock_buffer(buffer: Buffer) -> PgResult<bool>
+);
+
+seam_core::seam!(
     // Page macros compose with BufferGetPage on the bufmgr side.
     pub fn buffer_page_is_new(buffer: Buffer) -> bool
 );
@@ -78,14 +82,6 @@ seam_core::seam!(
 seam_core::seam!(
     // RestoreBlockImage's final memcpy onto BufferGetPage(buffer).
     pub fn overwrite_buffer_page(buffer: Buffer, page: &[u8])
-);
-
-seam_core::seam!(
-    pub fn at_eoxact_buffers(is_commit: bool)
-);
-
-seam_core::seam!(
-    pub fn unlock_buffers()
 );
 
 seam_core::seam!(
