@@ -492,6 +492,10 @@ pub fn deconstruct_jointree<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResult<PgVec<
     }
     for idx in 0..items.len() {
         let pending = core::mem::replace(&mut lateral_pending[idx], PgVec::new_in(mcx));
+        // C folds these into my_quals, so make_outerjoininfo's semijoin
+        // analysis sees postponed lateral clauses too.
+        let mut pending_for_sjinfo: PgVec<'mcx, Node<'mcx>> = PgVec::new_in(mcx);
+        pending_for_sjinfo.extend(pending.iter().copied());
         if !pending.is_empty() {
             let (qualscope, jdomain) = match &items[idx] {
                 JtItem::Plain { qualscope, jdomain, .. }
@@ -540,6 +544,25 @@ pub fn deconstruct_jointree<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResult<PgVec<
                 inner_join_rels,
                 rtindex,
             } => {
+                let sjinfo_quals = if pending_for_sjinfo.is_empty() {
+                    *quals
+                } else {
+                    let mut l = types_nodes::list::NodeList::nil();
+                    for &c in pending_for_sjinfo.iter() {
+                        l.lappend(mcx, c)?;
+                    }
+                    if let Some(q) = quals {
+                        match q.as_list() {
+                            Some(ql) => {
+                                for c in ql.iter() {
+                                    l.lappend(mcx, c)?;
+                                }
+                            }
+                            None => l.lappend(mcx, *q)?,
+                        }
+                    }
+                    Some(Node::mk_list(mcx, l)?)
+                };
                 let sjinfo = make_outerjoininfo(
                     run,
                     left_rels,
@@ -547,7 +570,7 @@ pub fn deconstruct_jointree<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResult<PgVec<
                     inner_join_rels,
                     *jointype,
                     *rtindex,
-                    *quals,
+                    sjinfo_quals,
                 )?;
                 // Semijoins build an sjinfo but distribute their quals with
                 // ojscope = NULL and no nonnullable side (C's hybrid case).
