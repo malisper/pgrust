@@ -10,6 +10,7 @@ types_error = { path = "../../../../_support/types/types_error" }
 types_rel = { path = "../../../../_support/types/rel" }
 types_storage = { path = "../../../../_support/types/types_storage" }
 bufmgr_seams = { path = "../../buffer/bufmgr_seams" }
+xlogutils = { path = "../../../access/transam/xlogutils" }
 smgr_seams = { path = "../../smgr/smgr_seams" }
 freespace_seams = { path = "../freespace_seams" }
 

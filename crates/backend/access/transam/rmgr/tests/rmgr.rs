@@ -117,9 +117,21 @@ fn get_rmgr_unregistered_errors_like_rmgr_not_found() {
 }
 
 #[test]
-#[should_panic(expected = "rmgr callback not ported: btree_redo — land backend-access-nbtree-nbtxlog")]
+#[should_panic(expected = "rmgr callback not ported: hash_redo — land backend-access-hash-xlog")]
 fn unported_redo_panics_loudly() {
     let mut record = xlogreader_seams::XLogReaderState::default();
+    let _ = (GetRmgr(RM_HASH_ID as u8).unwrap().rm_redo)(&mut record);
+}
+
+#[test]
+#[should_panic(expected = "btree_redo arm not ported: btree_xlog_vacuum")]
+fn btree_redo_vacuum_arm_panics_loudly() {
+    let mut rec = xlogreader_seams::DecodedXLogRecord::default();
+    rec.xl_info = 0xC0;
+    let mut record = xlogreader_seams::XLogReaderState {
+        record: Some(rec),
+        ..Default::default()
+    };
     let _ = (GetRmgr(RM_BTREE_ID as u8).unwrap().rm_redo)(&mut record);
 }
 

@@ -96,11 +96,40 @@ pub fn GetRecordedFreeSpace(rel: &RelationData<'_>, heapBlk: BlockNumber) -> PgR
 }
 
 pub fn XLogRecordPageWithFreeSpace(
-    _rlocator: RelFileLocator,
-    _heapBlk: BlockNumber,
-    _spaceAvail: Size,
-) -> ! {
-    unported("XLogRecordPageWithFreeSpace (redo lane, freespace.c)");
+    rlocator: RelFileLocator,
+    heapBlk: BlockNumber,
+    spaceAvail: Size,
+) -> PgResult<()> {
+    let new_cat = fsm_space_avail_to_cat(spaceAvail);
+    let (addr, slot) = fsm_get_location(heapBlk);
+    let blkno = fsm_logical_to_physical(addr);
+
+    let buf = xlogutils::XLogReadBufferExtended(
+        rlocator,
+        ForkNumber::FSM_FORKNUM,
+        blkno,
+        ReadBufferMode::ZeroOnError,
+        ::types_core::InvalidBuffer,
+    )?;
+    let pin = BufferPin::adopt(buf).expect("XLogReadBufferExtended: InvalidBuffer");
+    let guard = pin.lock_exclusive()?;
+
+    if guard.page().is_new() {
+        // SAFETY: exclusive content lock held for `guard`'s lifetime.
+        let mut page =
+            unsafe { PageMut::from_raw(bufmgr_seams::buffer_get_page::call(pin.buffer())) };
+        page.init(0);
+    }
+
+    // SAFETY: exclusive content lock held for `guard`'s lifetime.
+    let page =
+        unsafe { FsmPage::from_raw(bufmgr_seams::buffer_get_page::call(pin.buffer())) };
+    if fsm_set_avail(page, slot as i32, new_cat) {
+        bufmgr_seams::mark_buffer_dirty::call(pin.buffer())?;
+    }
+    guard.unlock();
+    pin.release();
+    Ok(())
 }
 
 pub fn FreeSpaceMapPrepareTruncateRel(_rel: &RelationData<'_>, _nblocks: BlockNumber) -> ! {

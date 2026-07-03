@@ -385,14 +385,14 @@ pub(crate) fn write_opaque(page: &mut PageMut<'_>, opaque: &BTPageOpaqueData) {
 // survives xlog page-hole compression).
 pub(crate) fn write_meta(pin: &BufferPin, metad: &BTMetaPageData) {
     let mut page = page_of_mut(pin);
-    // SAFETY: metapage contents at +24, 8-aligned, in-bounds; exclusive lock.
+    let img = metad.page_image();
+    // SAFETY: metapage contents at +24, 48B in-bounds; exclusive lock.
     unsafe {
-        page.as_ref()
-            .as_ptr()
-            .cast_mut()
-            .add(SizeOfPageHeaderData)
-            .cast::<BTMetaPageData>()
-            .write(*metad)
+        core::ptr::copy_nonoverlapping(
+            img.as_ptr(),
+            page.as_ref().as_ptr().cast_mut().add(SizeOfPageHeaderData),
+            img.len(),
+        )
     };
     page.set_pd_lower((SizeOfPageHeaderData + core::mem::size_of::<BTMetaPageData>()) as u16);
 }
@@ -406,24 +406,25 @@ pub(crate) fn bt_pageinit(page: &mut PageMut<'_>) {
 /// empty-index fixtures).
 pub fn bt_initmetapage(page: &mut PageMut<'_>, rootbknum: BlockNumber, level: u32, allequalimage: bool) {
     bt_pageinit(page);
-    // SAFETY: metapage contents at +24, 8-aligned, in-bounds; caller owns page.
+    let img = BTMetaPageData {
+        btm_magic: BTREE_MAGIC,
+        btm_version: BTREE_VERSION,
+        btm_root: rootbknum,
+        btm_level: level,
+        btm_fastroot: rootbknum,
+        btm_fastlevel: level,
+        btm_last_cleanup_num_delpages: 0,
+        btm_last_cleanup_num_heap_tuples: -1.0,
+        btm_allequalimage: allequalimage,
+    }
+    .page_image();
+    // SAFETY: metapage contents at +24, 48B in-bounds; caller owns page.
     unsafe {
-        page.as_ref()
-            .as_ptr()
-            .cast_mut()
-            .add(SizeOfPageHeaderData)
-            .cast::<BTMetaPageData>()
-            .write(BTMetaPageData {
-                btm_magic: BTREE_MAGIC,
-                btm_version: BTREE_VERSION,
-                btm_root: rootbknum,
-                btm_level: level,
-                btm_fastroot: rootbknum,
-                btm_fastlevel: level,
-                btm_last_cleanup_num_delpages: 0,
-                btm_last_cleanup_num_heap_tuples: -1.0,
-                btm_allequalimage: allequalimage,
-            })
+        core::ptr::copy_nonoverlapping(
+            img.as_ptr(),
+            page.as_ref().as_ptr().cast_mut().add(SizeOfPageHeaderData),
+            img.len(),
+        )
     };
     let off = page_special_off(&page.as_ref());
     // SAFETY: special area write, 4-aligned, in-bounds.

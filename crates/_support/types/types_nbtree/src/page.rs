@@ -52,6 +52,25 @@ pub struct BTMetaPageData {
     pub btm_allequalimage: bool,
 }
 
+impl BTMetaPageData {
+    // On-page image with zeroed padding (offsets 28..32, 41..48): C stores
+    // fields into a PageInit-zeroed page, so its pads are deterministically 0;
+    // a whole-struct write would copy uninit padding into WAL'd bytes.
+    pub fn page_image(&self) -> [u8; 48] {
+        let mut b = [0u8; 48];
+        b[0..4].copy_from_slice(&self.btm_magic.to_ne_bytes());
+        b[4..8].copy_from_slice(&self.btm_version.to_ne_bytes());
+        b[8..12].copy_from_slice(&self.btm_root.to_ne_bytes());
+        b[12..16].copy_from_slice(&self.btm_level.to_ne_bytes());
+        b[16..20].copy_from_slice(&self.btm_fastroot.to_ne_bytes());
+        b[20..24].copy_from_slice(&self.btm_fastlevel.to_ne_bytes());
+        b[24..28].copy_from_slice(&self.btm_last_cleanup_num_delpages.to_ne_bytes());
+        b[32..40].copy_from_slice(&self.btm_last_cleanup_num_heap_tuples.to_ne_bytes());
+        b[40] = self.btm_allequalimage as u8;
+        b
+    }
+}
+
 const _: () = assert!(core::mem::size_of::<BTMetaPageData>() == 48);
 const _: () = assert!(core::mem::offset_of!(BTMetaPageData, btm_magic) == 0);
 const _: () = assert!(core::mem::offset_of!(BTMetaPageData, btm_version) == 4);
