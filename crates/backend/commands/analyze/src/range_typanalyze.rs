@@ -7,9 +7,7 @@ use mcx::{Mcx, MemoryContext, PgVec};
 use types_core::Oid;
 use types_error::PgResult;
 use types_fmgr::FmgrInfo;
-use types_tuple::{HeapTupleData, TupleDescData};
-
-use crate::{fetch_attr, varlena_stored_size, VacAttrStats};
+use crate::{varlena_stored_size, VacAttrStats};
 
 pub(crate) const STATISTIC_KIND_RANGE_LENGTH_HISTOGRAM: i16 = 6;
 pub(crate) const STATISTIC_KIND_BOUNDS_HISTOGRAM: i16 = 7;
@@ -66,8 +64,7 @@ pub(crate) fn compute_range_stats<'mcx>(
     anl_mcx: Mcx<'mcx>,
     stats: &mut VacAttrStats<'mcx>,
     is_multirange: bool,
-    tupdesc: &TupleDescData<'_>,
-    rows: &[HeapTupleData<'_>],
+    src: &crate::FetchSource<'_, '_>,
     samplerows: i32,
     _totalrows: f64,
 ) -> PgResult<()> {
@@ -93,8 +90,8 @@ pub(crate) fn compute_range_stats<'mcx>(
     let mut lengths: PgVec<'_, f64> =
         mcx::vec_with_capacity_in(col_mcx, samplerows as usize)?;
 
-    for row in &rows[..samplerows as usize] {
-        let (value, isnull) = fetch_attr(row, stats.tupattnum, tupdesc);
+    for rowno in 0..samplerows as usize {
+        let (value, isnull) = src.fetch(rowno, stats.tupattnum);
         if isnull {
             null_cnt += 1;
             continue;
