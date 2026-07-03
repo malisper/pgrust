@@ -5044,7 +5044,9 @@ impl<'mcx> Parser<'mcx> {
             }
             out.is_enforced = true;
         }
-        if out.deferrable || out.initdeferred {
+        // Deferrable TRIGGER nodes parse; the creation/firing louds live in
+        // the commands/trigger owners.
+        if (out.deferrable || out.initdeferred) && constr_type != "TRIGGER" {
             panic!("gram_core: DEFERRABLE {constr_type} constraints unported");
         }
         if out.not_valid {
