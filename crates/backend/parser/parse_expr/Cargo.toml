@@ -22,7 +22,6 @@ mcx = { path = "../../../_support/mcx" }
 nodes_core = { path = "../../nodes/nodes_core" }
 parse_agg = { path = "../parse_agg" }
 parse_func = { path = "../parse_func" }
-catalog_namespace = { path = "../../catalog/catalog_namespace" }
 parse_oper = { path = "../parse_oper" }
 parse_relation = { path = "../parse_relation" }
 parse_utilcmd = { path = "../parse_utilcmd" }
