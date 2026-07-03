@@ -138,7 +138,7 @@ pub struct ClusterParams {
 
 fn cluster_multiple_rels<'mcx>(
     mcx: Mcx<'mcx>,
-    rtcs: &[RelToCluster],
+    rtcs: &mcx::PgVec<'mcx, RelToCluster>,
     params: &ClusterParams,
 ) -> PgResult<()> {
     if snapmgr::ActiveSnapshotSet() {
@@ -489,7 +489,7 @@ fn copy_table_data<'mcx>(
     Ok((cutoffs.FreezeLimit, cutoffs.MultiXactCutoff))
 }
 
-fn get_tables_to_cluster<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Vec<RelToCluster>> {
+fn get_tables_to_cluster<'mcx>(mcx: Mcx<'mcx>) -> PgResult<mcx::PgVec<'mcx, RelToCluster>> {
     let ind_relation = table::table_open(mcx, INDEX_RELATION_ID, AccessShareLock)?;
     let mut entry = ScanKeyData::empty();
     entry.sk_attno = Anum_pg_index_indisclustered as types_core::AttrNumber;
@@ -502,7 +502,7 @@ fn get_tables_to_cluster<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Vec<RelToCluster>> {
     let mut scan =
         genam::systable_beginscan(mcx, &ind_relation, InvalidOid, false, None, &[entry])?;
     let desc = ind_relation.descr();
-    let mut rtcs = Vec::new();
+    let mut rtcs: mcx::PgVec<'mcx, RelToCluster> = mcx::PgVec::new_in(mcx);
     while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
         let get_oid = |anum: usize| {
             let mut isnull = false;
