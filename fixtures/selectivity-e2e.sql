@@ -91,8 +91,8 @@ EXPLAIN SELECT * FROM selm WHERE mr && '{}'::int4multirange;
 
 CREATE TABLE seln(a inet, c cidr);
 INSERT INTO seln
-  SELECT (('10.' || (g % 4) || '.' || (g % 250) || '.' || (g % 200 + 1)))::inet,
-         (('10.' || (g % 4) || '.' || (g % 250) || '.0/24'))::cidr
+  SELECT (('10.' || (g % 4)::text || '.' || (g % 250)::text || '.' || (g % 200 + 1)::text))::inet,
+         (('10.' || (g % 4)::text || '.' || (g % 250)::text || '.0/24'))::cidr
   FROM generate_series(1, 1800) g;
 INSERT INTO seln
   SELECT '192.168.1.7'::inet, '192.168.0.0/16'::cidr
@@ -128,7 +128,7 @@ SET enable_seqscan = on;
 
 CREATE TABLE selb(b boolean, x int4);
 INSERT INTO selb SELECT (g % 3 = 0), g FROM generate_series(1, 1000) g;
-INSERT INTO selb SELECT NULL, g FROM generate_series(1, 100) g;
+INSERT INTO selb SELECT NULL, 1000 + g FROM generate_series(1, 100) g;
 
 EXPLAIN SELECT * FROM selb WHERE b IS TRUE;
 EXPLAIN SELECT * FROM selb WHERE b IS NOT TRUE;

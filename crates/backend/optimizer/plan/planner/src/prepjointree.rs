@@ -575,6 +575,26 @@ fn copy_expr<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>) -> PgResult<Node<'mcx>> {
                 },
             )
         }
+        NodeTag::T_ArrayExpr => {
+            let a = node.as_array_expr().expect("ArrayExpr");
+            let mut elements = NodeList::nil();
+            for e in &a.elements {
+                elements.lappend(mcx, copy_expr(mcx, e)?)?;
+            }
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::ArrayExpr {
+                    array_typeid: a.array_typeid,
+                    array_collid: a.array_collid,
+                    element_typeid: a.element_typeid,
+                    elements,
+                    multidims: a.multidims,
+                    list_start: a.list_start,
+                    list_end: a.list_end,
+                    location: a.location,
+                },
+            )
+        }
         NodeTag::T_CoerceViaIO => {
             let c = node.as_coerce_via_io().expect("CoerceViaIO");
             Node::mk(
