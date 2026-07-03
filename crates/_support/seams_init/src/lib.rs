@@ -80,6 +80,7 @@ pub fn init_all() {
     lock::init_seams();
     smgr::init_seams();
     sync::init_seams();
+    freespace::init_seams();
     backend_startup::init_seams();
     tcop_dest::init_seams();
     postgres::init_seams();
@@ -121,7 +122,6 @@ pub fn init_all() {
     stack_depth::init_seams();
     superuser::init_seams();
     timeout::init_seams();
-    portalmem::init_seams();
     tuplestore::init_seams();
     resowner::init_seams();
     snapmgr::init_seams();
