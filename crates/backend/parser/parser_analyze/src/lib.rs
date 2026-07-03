@@ -1344,7 +1344,7 @@ pub fn LCS_asString(strength: types_nodes::LockClauseStrength) -> &'static str {
     }
 }
 
-fn first_locking_strength(
+pub(crate) fn first_locking_strength(
     locking_clause: &types_nodes::NodeList<'_>,
 ) -> types_nodes::LockClauseStrength {
     locking_clause
@@ -1355,7 +1355,7 @@ fn first_locking_strength(
 }
 
 #[cold]
-fn locking_not_allowed_with(
+pub(crate) fn locking_not_allowed_with(
     strength: types_nodes::LockClauseStrength,
     what: &str,
     funcname: &'static str,
