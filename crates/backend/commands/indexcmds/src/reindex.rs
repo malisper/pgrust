@@ -32,7 +32,7 @@ pub fn ExecReindex<'mcx>(
         match opt.defname.unwrap_or("") {
             "verbose" => verbose = explain::defGetBoolean(opt)?,
             "concurrently" => concurrently = explain::defGetBoolean(opt)?,
-            "tablespace" => tablespacename = Some(explain::defGetString(opt)?),
+            "tablespace" => tablespacename = Some(explain::defGetString(mcx, opt)?),
             name => {
                 return Err(Box::new(
                     PgError::new(
@@ -202,7 +202,7 @@ fn ReindexTable<'mcx>(
     if !result {
         elog::ereport(types_error::NOTICE)
             .errmsg(format!("table \"{}\" has no indexes to reindex", rv.relname))
-            .finish(elog::loc("ReindexTable"))?;
+            .finish(types_error::ErrorLocation::new("indexcmds.c", 0, "ReindexTable"))?;
     }
     Ok(())
 }
