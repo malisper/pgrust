@@ -738,6 +738,11 @@ fn node(out: &mut String, n: Node<'_>) {
         node_field(out, "value", d.value);
         int_field(out, "location", d.location);
         out.push('}');
+    } else if let Some(r) = n.as_variant::<types_nodes::parsenodes::ReplicaIdentityStmt>() {
+        out.push_str("{REPLICAIDENTITYSTMT");
+        char_field(out, "identity_type", r.identity_type);
+        string_field(out, "name", r.name);
+        out.push('}');
     } else if let Some(lc) = n.as_locking_clause() {
         out.push_str("{LOCKINGCLAUSE");
         list_field(out, "lockedRels", &lc.lockedRels);
