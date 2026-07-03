@@ -1245,27 +1245,19 @@ fn generateSerialExtraStmts<'mcx>(
     Ok((snamespace, sname))
 }
 
-// RangeVarGetCreationNamespace (namespace.c), permanent-relation slice.
 fn RangeVarGetCreationNamespace<'mcx>(
     mcx: Mcx<'mcx>,
     relation: &RangeVar<'_>,
 ) -> PgResult<Oid> {
-    if relation.catalogname.is_some() {
-        unported("cross-database qualified names");
-    }
-    match relation.schemaname {
-        Some(schemaname) => catalog_namespace::get_namespace_oid(schemaname, false),
-        None => {
-            let path = catalog_namespace::fetch_search_path(mcx, false)?;
-            match path.first() {
-                Some(&ns) => Ok(ns),
-                None => Err(Box::new(
-                    PgError::new(ERROR, "no schema has been selected to create in".to_string())
-                        .with_sqlstate(ERRCODE_UNDEFINED_SCHEMA),
-                )),
-            }
-        }
-    }
+    let rv = rel_vocab::RangeVar {
+        catalogname: relation.catalogname,
+        schemaname: relation.schemaname,
+        relname: relation.relname.expect("RangeVar.relname"),
+        inh: relation.inh,
+        relpersistence: relation.relpersistence,
+        location: relation.location,
+    };
+    catalog_namespace::RangeVarGetCreationNamespace(mcx, &rv)
 }
 
 // makeObjectName (indexcmds.c); names here are valid UTF-8, so pg_mbcliplen
