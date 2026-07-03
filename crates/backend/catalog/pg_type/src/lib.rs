@@ -223,7 +223,7 @@ fn GenerateTypeDependencies<'mcx>(
         n += 1;
     }
     if !isDependentType {
-        pg_depend::recordDependencyOnOwner(TYPE_RELATION_ID, typeObjectId, p.ownerId);
+        pg_depend::recordDependencyOnOwner(mcx, TYPE_RELATION_ID, typeObjectId, p.ownerId)?;
     }
     // recordDependencyOnCurrentExtension: no-op — CREATE EXTENSION scripts
     // (extension.c creating_extension) are unported, so it can never fire.
