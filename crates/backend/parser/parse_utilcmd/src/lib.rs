@@ -85,12 +85,12 @@ pub fn typenameTypeIdAndMod<'mcx>(
         _ => unported("shell types (typisdefined = false)"),
     }
     match syscache_seams::pg_type_typtype::call(typoid)? {
-        Some(t) if t == b'b' as i8 || t == b'e' as i8 => {}
+        Some(t)
+            if t == b'b' as i8 || t == b'e' as i8 || t == b'r' as i8 || t == b'm' as i8 => {}
         Some(t) => unported(match t as u8 {
             b'c' => "composite column types",
             b'd' => "domain column types",
             b'p' => "pseudo-type columns",
-            b'r' | b'm' => "range/multirange column types",
             _ => "unknown typtype",
         }),
         None => return Err(type_does_not_exist(typname)),
