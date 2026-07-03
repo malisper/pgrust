@@ -100,21 +100,21 @@ impl<'mcx> ItemStore<'mcx> {
     }
 }
 
-// port/qsort.c (Bentley & McIlroy), exact algorithm: equal-key output order is
-// a byte-format parity requirement for the serialized statistics.
+// port/qsort.c (Bentley & McIlroy), exact algorithm: equal-key output order
+// is a byte-format parity requirement for the serialized statistics.
 pub fn pg_qsort<T: Copy, C: FnMut(&T, &T) -> i32>(a: &mut [T], mut cmp: C) {
     if a.len() > 1 {
-        qsort_rec(a, &mut cmp);
+        let n = a.len();
+        qsort_rec(a, 0, n, &mut cmp);
     }
 }
 
-fn qsort_rec<T: Copy, C: FnMut(&T, &T) -> i32>(mut a: &mut [T], cmp: &mut C) {
+fn qsort_rec<T: Copy, C: FnMut(&T, &T) -> i32>(a: &mut [T], mut lo: usize, mut n: usize, cmp: &mut C) {
     loop {
-        let n = a.len();
         if n < 7 {
-            for pm in 1..n {
+            for pm in lo + 1..lo + n {
                 let mut pl = pm;
-                while pl > 0 && cmp(&a[pl - 1], &a[pl]) > 0 {
+                while pl > lo && cmp(&a[pl - 1], &a[pl]) > 0 {
                     a.swap(pl, pl - 1);
                     pl -= 1;
                 }
@@ -122,7 +122,7 @@ fn qsort_rec<T: Copy, C: FnMut(&T, &T) -> i32>(mut a: &mut [T], cmp: &mut C) {
             return;
         }
         let mut presorted = true;
-        for pm in 1..n {
+        for pm in lo + 1..lo + n {
             if cmp(&a[pm - 1], &a[pm]) > 0 {
                 presorted = false;
                 break;
@@ -131,10 +131,10 @@ fn qsort_rec<T: Copy, C: FnMut(&T, &T) -> i32>(mut a: &mut [T], cmp: &mut C) {
         if presorted {
             return;
         }
-        let mut pm = n / 2;
+        let mut pm = lo + n / 2;
         {
-            let mut pl = 0usize;
-            let mut pn = n - 1;
+            let mut pl = lo;
+            let mut pn = lo + n - 1;
             if n > 40 {
                 let d = n / 8;
                 pl = med3(a, pl, pl + d, pl + 2 * d, cmp);
@@ -143,14 +143,14 @@ fn qsort_rec<T: Copy, C: FnMut(&T, &T) -> i32>(mut a: &mut [T], cmp: &mut C) {
             }
             pm = med3(a, pl, pm, pn, cmp);
         }
-        a.swap(0, pm);
-        let mut pa = 1usize;
-        let mut pb = 1usize;
-        let mut pc = n - 1;
-        let mut pd = n - 1;
+        a.swap(lo, pm);
+        let mut pa = lo + 1;
+        let mut pb = pa;
+        let mut pc = lo + n - 1;
+        let mut pd = pc;
         loop {
             while pb <= pc {
-                let r = cmp(&a[pb], &a[0]);
+                let r = cmp(&a[pb], &a[lo]);
                 if r > 0 {
                     break;
                 }
@@ -161,16 +161,13 @@ fn qsort_rec<T: Copy, C: FnMut(&T, &T) -> i32>(mut a: &mut [T], cmp: &mut C) {
                 pb += 1;
             }
             while pb <= pc {
-                let r = cmp(&a[pc], &a[0]);
+                let r = cmp(&a[pc], &a[lo]);
                 if r < 0 {
                     break;
                 }
                 if r == 0 {
                     a.swap(pc, pd);
                     pd -= 1;
-                }
-                if pc == 0 {
-                    break;
                 }
                 pc -= 1;
             }
@@ -181,30 +178,28 @@ fn qsort_rec<T: Copy, C: FnMut(&T, &T) -> i32>(mut a: &mut [T], cmp: &mut C) {
             pb += 1;
             pc -= 1;
         }
-        let mut d1 = pa.min(pb - pa);
-        swapn(a, 0, pb - d1, d1);
-        d1 = (pd - pc).min(n - pd - 1);
-        swapn(a, pb, n - d1, d1);
+        let pn = lo + n;
+        let mut d1 = (pa - lo).min(pb - pa);
+        swapn(a, lo, pb - d1, d1);
+        d1 = (pd - pc).min(pn - pd - 1);
+        swapn(a, pb, pn - d1, d1);
         d1 = pb - pa;
         let d2 = pd - pc;
         if d1 <= d2 {
             if d1 > 1 {
-                let (lo, _) = a.split_at_mut(d1);
-                qsort_rec(lo, cmp);
+                qsort_rec(a, lo, d1, cmp);
             }
             if d2 > 1 {
-                let start = n - d2;
-                a = &mut a[start..];
+                lo = pn - d2;
+                n = d2;
                 continue;
             }
         } else {
             if d2 > 1 {
-                let start = n - d2;
-                let (_, hi) = a.split_at_mut(start);
-                qsort_rec(hi, cmp);
+                qsort_rec(a, pn - d2, d2, cmp);
             }
             if d1 > 1 {
-                a = &mut a[..d1];
+                n = d1;
                 continue;
             }
         }

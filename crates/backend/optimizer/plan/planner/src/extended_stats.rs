@@ -366,8 +366,14 @@ fn statext_mcv_clauselist_selectivity<'mcx>(
             list_attnums[i] = None;
         }
 
-        let simple_sel =
-            crate::clausesel::clauselist_selectivity(run, &stat_clauses, varrelid, jointype, sjinfo)?;
+        let simple_sel = crate::clausesel::clauselist_selectivity_ext(
+            run,
+            &stat_clauses,
+            varrelid,
+            jointype,
+            sjinfo,
+            false,
+        )?;
         let (mcv_sel, mcv_basesel, mcv_totalsel) =
             mcv_clauselist_selectivity(run, stat_oid, inh, &stat_keys, &stat_clauses)?;
         let stat_sel = mcv_combine_selectivities(simple_sel, mcv_sel, mcv_basesel, mcv_totalsel);
@@ -768,12 +774,13 @@ fn dependencies_clauselist_selectivity<'mcx>(
                 estimated[i] = true;
             }
         }
-        let s = crate::clausesel::clauselist_selectivity(
+        let s = crate::clausesel::clauselist_selectivity_ext(
             run,
             &attr_clauses,
             varrelid,
             jointype,
             sjinfo,
+            false,
         )?;
         attr_sel.push(s);
     }
