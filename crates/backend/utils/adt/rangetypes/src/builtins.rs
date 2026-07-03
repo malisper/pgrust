@@ -48,11 +48,34 @@ pub fn arg_range<'m>(fcinfo: &Fcinfo, i: usize, mcx: Mcx<'m>) -> PgResult<RangeA
     }
 }
 
+// Flinfo-less callers (the tuplesort comparison shim) memo here instead:
+// C's range_fast_cmp caches the typcache entry in ssup_extra once per sort.
+std::thread_local! {
+    static SHIM_RI: core::cell::UnsafeCell<Option<core::mem::ManuallyDrop<RangeInfo>>> =
+        const { core::cell::UnsafeCell::new(None) };
+}
+
 fn flinfo_ri<'f>(
     flinfo: Option<&'f mut FmgrInfo>,
     rngtypid: Oid,
 ) -> PgResult<&'f mut RangeInfo> {
-    cached_range_info(flinfo.expect("range function: NULL flinfo"), rngtypid)
+    if let Some(fl) = flinfo {
+        return cached_range_info(fl, rngtypid);
+    }
+    SHIM_RI.with(|c| {
+        // SAFETY: single-threaded backend; the borrow ends before any path
+        // that could re-enter this slot (element cmp fns never reach ranges).
+        let slot = unsafe { &mut *c.get() };
+        let stale = match slot {
+            Some(ri) => ri.rngtypid != rngtypid,
+            None => true,
+        };
+        if stale {
+            *slot = Some(core::mem::ManuallyDrop::new(RangeInfo::lookup(rngtypid)?));
+        }
+        // SAFETY: as above — the slot outlives the call and is not re-entered.
+        Ok(unsafe { &mut *(&mut **slot.as_mut().unwrap() as *mut RangeInfo) })
+    })
 }
 
 fn range_result(fcinfo: &Fcinfo, img: &[u8]) -> PgResult<Datum> {
