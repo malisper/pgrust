@@ -253,7 +253,7 @@ pub fn clause_selectivity<'mcx>(
 }
 
 // clause_selectivity_ext (clausesel.c), bare-node arms.
-fn clause_selectivity_node<'mcx>(
+pub(crate) fn clause_selectivity_node<'mcx>(
     run: &mut PlannerRun<'mcx>,
     clause: Node<'mcx>,
     varrelid: i32,
@@ -261,6 +261,15 @@ fn clause_selectivity_node<'mcx>(
     sjinfo: Option<&SpecialJoinInfo<'mcx>>,
 ) -> PgResult<f64> {
     match clause.node_tag() {
+        NodeTag::T_Var => {
+            let v = clause.as_var().unwrap();
+            if v.varlevelsup == 0 && (varrelid == 0 || varrelid == v.varno) {
+                crate::selfuncs::boolvarsel(run, clause, varrelid)
+            } else {
+                // C: uplevel or other-rel Var takes the default.
+                Ok(0.5)
+            }
+        }
         NodeTag::T_Const => {
             let c = clause.as_const().unwrap();
             Ok(if c.constisnull || !c.constvalue.as_bool() { 0.0 } else { 1.0 })
@@ -321,6 +330,19 @@ fn clause_selectivity_node<'mcx>(
                 nt.nulltesttype == NullTestType::IS_NULL,
                 nt.arg.expect("NullTest arg"),
                 varrelid,
+            )
+        }
+        // C: "can we do better?" — DistinctExpr is a fixed 0.5.
+        NodeTag::T_DistinctExpr => Ok(0.5),
+        NodeTag::T_BooleanTest => {
+            let bt = clause.as_boolean_test().unwrap();
+            crate::selfuncs::booltestsel(
+                run,
+                bt.booltesttype,
+                bt.arg.expect("BooleanTest.arg"),
+                varrelid,
+                jointype,
+                sjinfo,
             )
         }
         // C's catch-all default: no way to estimate, use 0.5.

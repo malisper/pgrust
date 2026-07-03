@@ -7,8 +7,8 @@ use types_core::Oid;
 use types_error::PgResult;
 use types_fmgr::FmgrInfo;
 use types_nodes::parsenodes::RTEKind;
-use types_nodes::{Node, NodeTag};
-use types_pathnodes::{NodeId, PathNode, RelId, RinfoId, JOIN_INNER};
+use types_nodes::{BoolTestType, Node, NodeTag};
+use types_pathnodes::{JoinType, NodeId, PathNode, RelId, RinfoId, SpecialJoinInfo, JOIN_INNER};
 
 use crate::gucs;
 use crate::run::PlannerRun;
@@ -101,6 +101,89 @@ pub fn nulltestsel<'mcx>(
         DEFAULT_UNK_SEL
     } else {
         DEFAULT_NOT_UNK_SEL
+    };
+    Ok(clamp_probability(selec))
+}
+
+// boolvarsel (selfuncs.c): a boolean Var is the clause V = 't'.
+pub fn boolvarsel<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    arg: Node<'mcx>,
+    varrelid: i32,
+) -> PgResult<f64> {
+    let node_id = run.intern_expr(arg);
+    let vardata = examine_variable(run, node_id, arg, varrelid)?;
+    if vardata.stats.is_some() {
+        const BOOLEAN_EQUAL_OPERATOR: Oid = 91;
+        var_eq_const(
+            run,
+            &vardata,
+            BOOLEAN_EQUAL_OPERATOR,
+            0,
+            Datum::from_bool(true),
+            false,
+            true,
+            false,
+        )
+    } else {
+        Ok(0.5)
+    }
+}
+
+// booltestsel (selfuncs.c).
+pub fn booltestsel<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    booltesttype: BoolTestType,
+    arg: Node<'mcx>,
+    varrelid: i32,
+    jointype: JoinType,
+    sjinfo: Option<&SpecialJoinInfo<'mcx>>,
+) -> PgResult<f64> {
+    let node_id = run.intern_expr(arg);
+    let vardata = examine_variable(run, node_id, arg, varrelid)?;
+    let selec = if let Some(stats) = &vardata.stats {
+        let freq_null = stats.stanullfrac as f64;
+        let mcv = vardata.slot(STATISTIC_KIND_MCV, 0).and_then(|sslot| {
+            let values = sslot.values().ok()?;
+            let numbers = sslot.numbers().ok()?;
+            let first_num = *numbers.first()? as f64;
+            Some((values.first()?.as_bool(), first_num))
+        });
+        if let Some((first_is_true, first_num)) = mcv {
+            let freq_true =
+                if first_is_true { first_num } else { 1.0 - first_num - freq_null };
+            let freq_false = 1.0 - freq_true - freq_null;
+            match booltesttype {
+                BoolTestType::IS_UNKNOWN => freq_null,
+                BoolTestType::IS_NOT_UNKNOWN => 1.0 - freq_null,
+                BoolTestType::IS_TRUE => freq_true,
+                BoolTestType::IS_NOT_TRUE => 1.0 - freq_true,
+                BoolTestType::IS_FALSE => freq_false,
+                BoolTestType::IS_NOT_FALSE => 1.0 - freq_false,
+            }
+        } else {
+            match booltesttype {
+                BoolTestType::IS_UNKNOWN => freq_null,
+                BoolTestType::IS_NOT_UNKNOWN => 1.0 - freq_null,
+                BoolTestType::IS_TRUE | BoolTestType::IS_FALSE => (1.0 - freq_null) / 2.0,
+                BoolTestType::IS_NOT_TRUE | BoolTestType::IS_NOT_FALSE => {
+                    (freq_null + 1.0) / 2.0
+                }
+            }
+        }
+    } else {
+        match booltesttype {
+            BoolTestType::IS_UNKNOWN => DEFAULT_UNK_SEL,
+            BoolTestType::IS_NOT_UNKNOWN => DEFAULT_NOT_UNK_SEL,
+            BoolTestType::IS_TRUE | BoolTestType::IS_NOT_FALSE => {
+                crate::clausesel::clause_selectivity_node(run, arg, varrelid, jointype, sjinfo)?
+            }
+            BoolTestType::IS_FALSE | BoolTestType::IS_NOT_TRUE => {
+                1.0 - crate::clausesel::clause_selectivity_node(
+                    run, arg, varrelid, jointype, sjinfo,
+                )?
+            }
+        }
     };
     Ok(clamp_probability(selec))
 }

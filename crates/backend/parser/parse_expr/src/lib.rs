@@ -75,13 +75,19 @@ pub fn transformExprRecurse<'mcx>(
                 | A_Expr_Kind::AEXPR_NOT_BETWEEN_SYM => {
                     transformAExprBetween(mcx, pstate, a)
                 }
+                A_Expr_Kind::AEXPR_DISTINCT | A_Expr_Kind::AEXPR_NOT_DISTINCT => {
+                    transformAExprDistinct(mcx, pstate, a)
+                }
                 A_Expr_Kind::AEXPR_IN => transformAExprIn(mcx, pstate, a),
                 other => panic!(
                     "transformExprRecurse (parse_expr.c): A_Expr kind {other:?} arm \
-                     (DISTINCT/NULLIF/ANY/ALL) unported — unit backend-parser-expr"
+                     (NULLIF/ANY/ALL) unported — unit backend-parser-expr"
                 ),
             }
         }
+        NodeTag::T_BooleanTest => transformBooleanTest(mcx, pstate, expr),
+        NodeTag::T_CollateClause => transformCollateClause(mcx, pstate, expr),
+        NodeTag::T_RowExpr => transformRowExpr(mcx, pstate, expr),
         NodeTag::T_TypeCast => transformTypeCast(mcx, pstate, expr),
         NodeTag::T_BoolExpr => transformBoolExpr(mcx, pstate, expr),
         NodeTag::T_CaseExpr => transformCaseExpr(mcx, pstate, expr),
@@ -515,6 +521,255 @@ fn transformAExprBetween<'mcx>(
         other => panic!("unrecognized A_Expr kind: {other:?}"),
     };
     transformExprRecurse(mcx, pstate, result)
+}
+
+fn transformAExprDistinct<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    a: &A_Expr<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    if a.rexpr.is_some_and(expr_is_null_constant) {
+        return make_nulltest_from_distinct(mcx, pstate, a, a.lexpr);
+    }
+    if a.lexpr.is_some_and(expr_is_null_constant) {
+        return make_nulltest_from_distinct(mcx, pstate, a, a.rexpr);
+    }
+
+    let lexpr = match a.lexpr {
+        Some(l) => Some(transformExprRecurse(mcx, pstate, l)?),
+        None => None,
+    };
+    let rexpr = match a.rexpr {
+        Some(r) => Some(transformExprRecurse(mcx, pstate, r)?),
+        None => None,
+    };
+
+    if lexpr.is_some_and(|n| n.node_tag() == NodeTag::T_RowExpr)
+        && rexpr.is_some_and(|n| n.node_tag() == NodeTag::T_RowExpr)
+    {
+        panic!(
+            "transformAExprDistinct (parse_expr.c): make_row_distinct_op (ROW IS \
+             DISTINCT FROM ROW) unported — unit backend-parser-expr"
+        );
+    }
+
+    let result = make_distinct_op(mcx, pstate, &a.name, lexpr, rexpr, a.location)?;
+
+    if a.kind == A_Expr_Kind::AEXPR_NOT_DISTINCT {
+        return Node::mk(
+            mcx,
+            types_nodes::BoolExpr {
+                boolop: types_nodes::BoolExprType::NOT_EXPR,
+                args: types_nodes::NodeList::make1(mcx, result)?,
+                location: a.location,
+            },
+        );
+    }
+    Ok(result)
+}
+
+fn make_distinct_op<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    opname: &types_nodes::NodeList<'mcx>,
+    ltree: Option<Node<'mcx>>,
+    rtree: Option<Node<'mcx>>,
+    location: types_core::ParseLoc,
+) -> PgResult<Node<'mcx>> {
+    let last_srf = pstate.p_last_srf;
+    let ltype = ltree.map_or(types_core::InvalidOid, expr_type);
+    let rtype = rtree.map_or(types_core::InvalidOid, expr_type);
+    let result =
+        parse_oper::make_op(mcx, pstate, opname, ltree, rtree, ltype, rtype, last_srf, location)?;
+    let op = result.as_op_expr().expect("make_op returns an OpExpr");
+    if op.opresulttype != types_core::catalog::BOOLOID {
+        return Err(distinct_requires_boolean_eq(pstate, location));
+    }
+    // C NodeSetTag(result, T_DistinctExpr): same struct, new tag. make_op's
+    // retset panic covers C's opretset ereport leg.
+    Node::mk(
+        mcx,
+        types_nodes::DistinctExpr {
+            opno: op.opno,
+            opfuncid: op.opfuncid,
+            opresulttype: op.opresulttype,
+            opretset: op.opretset,
+            opcollid: op.opcollid,
+            inputcollid: op.inputcollid,
+            // Shallow list copy; C retags the same node in place.
+            args: op.args.clone_in(mcx)?,
+            location: op.location,
+        },
+    )
+}
+
+fn make_nulltest_from_distinct<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    distincta: &A_Expr<'mcx>,
+    arg: Option<Node<'mcx>>,
+) -> PgResult<Node<'mcx>> {
+    let arg = match arg {
+        Some(a) => Some(transformExprRecurse(mcx, pstate, a)?),
+        None => None,
+    };
+    let t = if distincta.kind == A_Expr_Kind::AEXPR_NOT_DISTINCT {
+        types_nodes::primnodes::NullTestType::IS_NULL
+    } else {
+        types_nodes::primnodes::NullTestType::IS_NOT_NULL
+    };
+    Node::mk(
+        mcx,
+        types_nodes::primnodes::NullTest {
+            arg,
+            nulltesttype: t,
+            argisrow: false,
+            location: distincta.location,
+        },
+    )
+}
+
+fn transformBooleanTest<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    expr: Node<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    use types_nodes::BoolTestType;
+    let b = expr.as_boolean_test().unwrap();
+    let clausename = match b.booltesttype {
+        BoolTestType::IS_TRUE => "IS TRUE",
+        BoolTestType::IS_NOT_TRUE => "IS NOT TRUE",
+        BoolTestType::IS_FALSE => "IS FALSE",
+        BoolTestType::IS_NOT_FALSE => "IS NOT FALSE",
+        BoolTestType::IS_UNKNOWN => "IS UNKNOWN",
+        BoolTestType::IS_NOT_UNKNOWN => "IS NOT UNKNOWN",
+    };
+    let arg = transformExprRecurse(mcx, pstate, b.arg.expect("BooleanTest.arg"))?;
+    let arg =
+        coerce::coerce_to_boolean(mcx, pstate, arg, expr_type(arg), expr_location(arg), clausename)?;
+    Node::mk(
+        mcx,
+        types_nodes::BooleanTest {
+            arg: Some(arg),
+            booltesttype: b.booltesttype,
+            location: b.location,
+        },
+    )
+}
+
+fn transformCollateClause<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    expr: Node<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    let c = expr.as_collate_clause().unwrap();
+    let arg = transformExprRecurse(mcx, pstate, c.arg.expect("CollateClause.arg"))?;
+    let argtype = expr_type(arg);
+    if !lsyscache::type_is_collatable(argtype)? && argtype != types_core::catalog::UNKNOWNOID {
+        return Err(collations_not_supported(pstate, argtype, c.location));
+    }
+    panic!(
+        "transformCollateClause (parse_expr.c): LookupCollation (namespace.c \
+         collation-name resolution) unported — unit backend-catalog-namespace"
+    );
+}
+
+fn transformRowExpr<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    expr: Node<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    let r = expr.as_row_expr().unwrap();
+    // C transformExpressionList(allowDefault=false): per-item transformExpr at
+    // the current p_expr_kind; the multiassign/DEFAULT legs are unreachable
+    // from the ported grammar arms.
+    let mut args = types_nodes::NodeList::nil();
+    for e in r.args.iter() {
+        args.lappend(mcx, transformExprRecurse(mcx, pstate, e)?)?;
+    }
+    if args.len() > types_tuple::htup::MaxTupleAttributeNumber as usize {
+        return Err(too_many_row_entries(pstate, r.location));
+    }
+    let mut colnames = types_nodes::NodeList::nil();
+    for fnum in 1..=args.len() {
+        let s = mcx::arena_string_in(mcx, mcx::PgString::from_str_in(&format!("f{fnum}"), mcx)?)?;
+        colnames.lappend(mcx, Node::mk_string(mcx, s.as_str())?)?;
+    }
+    Node::mk(
+        mcx,
+        types_nodes::RowExpr {
+            args,
+            row_typeid: types_core::catalog::RECORDOID,
+            row_format: types_nodes::CoercionForm::COERCE_IMPLICIT_CAST,
+            colnames,
+            location: r.location,
+        },
+    )
+}
+
+#[cold]
+fn distinct_requires_boolean_eq(
+    pstate: &ParseState<'_, '_>,
+    location: types_core::ParseLoc,
+) -> Box<types_error::PgError> {
+    use types_error::{ErrorLocation, ERRCODE_DATATYPE_MISMATCH, ERROR};
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_DATATYPE_MISMATCH)
+            .errmsg("IS DISTINCT FROM requires = operator to yield boolean".to_string())
+            .errposition(parser_small1::parser_errposition(
+                pstate,
+                location,
+                mbutils::GetDatabaseEncoding(),
+            ))
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_expr.c", 0, "make_distinct_op")),
+    )
+}
+
+#[cold]
+fn collations_not_supported(
+    pstate: &ParseState<'_, '_>,
+    argtype: types_core::Oid,
+    location: types_core::ParseLoc,
+) -> Box<types_error::PgError> {
+    use types_error::{ErrorLocation, ERRCODE_DATATYPE_MISMATCH, ERROR};
+    let tyname = format_type::format_type_be(argtype).unwrap_or_else(|_| argtype.to_string());
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_DATATYPE_MISMATCH)
+            .errmsg(format!("collations are not supported by type {tyname}"))
+            .errposition(parser_small1::parser_errposition(
+                pstate,
+                location,
+                mbutils::GetDatabaseEncoding(),
+            ))
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_expr.c", 0, "transformCollateClause")),
+    )
+}
+
+#[cold]
+fn too_many_row_entries(
+    pstate: &ParseState<'_, '_>,
+    location: types_core::ParseLoc,
+) -> Box<types_error::PgError> {
+    use types_error::{ErrorLocation, ERRCODE_TOO_MANY_COLUMNS, ERROR};
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_TOO_MANY_COLUMNS)
+            .errmsg(format!(
+                "ROW expressions can have at most {} entries",
+                types_tuple::htup::MaxTupleAttributeNumber
+            ))
+            .errposition(parser_small1::parser_errposition(
+                pstate,
+                location,
+                mbutils::GetDatabaseEncoding(),
+            ))
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_expr.c", 0, "transformRowExpr")),
+    )
 }
 
 fn transformBoolExpr<'mcx>(

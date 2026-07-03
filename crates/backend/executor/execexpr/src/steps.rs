@@ -84,6 +84,13 @@ pub enum Step {
     BoolNotStep { out: OutRef },
     NullTestIsNull { out: OutRef },
     NullTestIsNotNull { out: OutRef },
+    // C EEOP_BOOLTEST_IS_*; IS [NOT] UNKNOWN reuses the NullTest steps.
+    BoolTestIsTrue { out: OutRef },
+    BoolTestIsNotTrue { out: OutRef },
+    BoolTestIsFalse { out: OutRef },
+    BoolTestIsNotFalse { out: OutRef },
+    // C EEOP_DISTINCT: the resolved "=" call with DISTINCT null semantics.
+    Distinct { call: FuncCall, out: OutRef },
     // Agg pointers resolve at build into once-allocated never-moved AggState arrays.
     AggrefEval { value: NonNull<Datum>, null: NonNull<bool>, out: OutRef },
     // C EEOP_GROUPING_FUNC: bit per clause col, 1 = ungrouped in the

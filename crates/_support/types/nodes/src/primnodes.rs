@@ -445,6 +445,38 @@ pub struct NullTest<'mcx> {
     pub location: ParseLoc,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum BoolTestType {
+    #[default]
+    IS_TRUE = 0,
+    IS_NOT_TRUE = 1,
+    IS_FALSE = 2,
+    IS_NOT_FALSE = 3,
+    IS_UNKNOWN = 4,
+    IS_NOT_UNKNOWN = 5,
+}
+
+#[derive(Default)]
+pub struct BooleanTest<'mcx> {
+    pub arg: Option<Node<'mcx>>,
+    pub booltesttype: BoolTestType,
+    pub location: ParseLoc,
+}
+
+// C `typedef OpExpr DistinctExpr` (primnodes.h); the tag is the only difference.
+#[derive(Default)]
+pub struct DistinctExpr<'mcx> {
+    pub opno: Oid,
+    pub opfuncid: Oid,
+    pub opresulttype: Oid,
+    pub opretset: bool,
+    pub opcollid: Oid,
+    pub inputcollid: Oid,
+    pub args: NodeList<'mcx>,
+    pub location: ParseLoc,
+}
+
 #[derive(Default)]
 pub struct CaseExpr<'mcx> {
     pub casetype: Oid,
@@ -633,6 +665,12 @@ unsafe impl<'mcx> NodeVariant<'mcx> for BoolExpr<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for NullTest<'mcx> {
     const TAG: NodeTag = NodeTag::T_NullTest;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for BooleanTest<'mcx> {
+    const TAG: NodeTag = NodeTag::T_BooleanTest;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for DistinctExpr<'mcx> {
+    const TAG: NodeTag = NodeTag::T_DistinctExpr;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for CaseExpr<'mcx> {
     const TAG: NodeTag = NodeTag::T_CaseExpr;
@@ -898,6 +936,16 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_null_test(self) -> Option<&'mcx NullTest<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_boolean_test(self) -> Option<&'mcx BooleanTest<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_distinct_expr(self) -> Option<&'mcx DistinctExpr<'mcx>> {
         self.as_variant()
     }
 

@@ -36,18 +36,18 @@ pub use parsenodes::{
 pub use plannodes::{Plan, PlanVariant, PlannedStmt, Result};
 pub use plannodes::{BitmapAnd, BitmapHeapScan, BitmapIndexScan, BitmapOr};
 pub use primnodes::{
-    Alias, ArrayExpr, BoolExpr, BoolExprType, CoerceViaIO, CoercionForm, Const, FromExpr,
-    FuncExpr, InferenceElem, JoinExpr, NullTest, NullTestType, OnConflictAction, OnConflictExpr,
-    OpExpr, OverridingKind, Param, ParamKind, RangeTblRef, RangeVar, RelabelType,
-    ScalarArrayOpExpr, SetToDefault, SubLink, SubLinkType, SubPlan, TargetEntry, Var,
-    VarReturningType,
+    Alias, ArrayExpr, BoolExpr, BoolExprType, BoolTestType, BooleanTest, CoerceViaIO,
+    CoercionForm, Const, DistinctExpr, FromExpr, FuncExpr, InferenceElem, JoinExpr, NullTest,
+    NullTestType, OnConflictAction, OnConflictExpr, OpExpr, OverridingKind, Param, ParamKind,
+    RangeTblRef, RangeVar, RelabelType, RowExpr, ScalarArrayOpExpr, SetToDefault, SubLink,
+    SubLinkType, SubPlan, TargetEntry, Var, VarReturningType,
 };
 pub use plannodes::ModifyTable;
 pub use rawnodes::{
-    A_Const, A_Expr, A_Expr_Kind, A_Star, ColumnRef, DeleteStmt, DistinctClause, FuncCall,
-    IndexElem, IndexStmt, InferClause, InsertStmt, LockingClause, OnConflictClause, ParamRef,
-    RangeFunction, RawStmt, ResTarget, ReturningClause, SelectStmt, SortBy, SortByDir, SortByNulls,
-    TypeCast, TypeName, UpdateStmt, ValUnion,
+    A_Const, A_Expr, A_Expr_Kind, A_Star, CollateClause, ColumnRef, DeleteStmt, DistinctClause,
+    FuncCall, IndexElem, IndexStmt, InferClause, InsertStmt, LockingClause, OnConflictClause,
+    ParamRef, RangeFunction, RawStmt, ResTarget, ReturningClause, SelectStmt, SortBy, SortByDir,
+    SortByNulls, TypeCast, TypeName, UpdateStmt, ValUnion,
 };
 pub use tags::NodeTag;
 

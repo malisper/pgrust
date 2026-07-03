@@ -565,6 +565,17 @@ fn collect_varattnos(run: &PlannerRun<'_>, node: Node<'_>, relid: i32, out: &mut
         NodeTag::T_NullTest => {
             collect_varattnos(run, node.as_null_test().unwrap().arg.expect("NullTest.arg"), relid, out)
         }
+        NodeTag::T_BooleanTest => collect_varattnos(
+            run,
+            node.as_boolean_test().unwrap().arg.expect("BooleanTest.arg"),
+            relid,
+            out,
+        ),
+        NodeTag::T_DistinctExpr => {
+            for a in &node.as_distinct_expr().unwrap().args {
+                collect_varattnos(run, a, relid, out);
+            }
+        }
         NodeTag::T_BoolExpr => {
             for a in &node.as_bool_expr().unwrap().args {
                 collect_varattnos(run, a, relid, out);

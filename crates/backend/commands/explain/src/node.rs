@@ -321,6 +321,16 @@ fn collect_subplans_expr<'mcx>(
                 collect_subplans_expr(a, out);
             }
         }
+        NodeTag::T_BooleanTest => {
+            if let Some(a) = node.as_boolean_test().unwrap().arg {
+                collect_subplans_expr(a, out);
+            }
+        }
+        NodeTag::T_DistinctExpr => {
+            for a in &node.as_distinct_expr().unwrap().args {
+                collect_subplans_expr(a, out);
+            }
+        }
         NodeTag::T_Aggref => {
             for a in &node.as_aggref().unwrap().args {
                 collect_subplans_expr(a, out);
@@ -1651,6 +1661,33 @@ fn deparse_expr<'mcx>(
             buf.try_push_str(match nt.nulltesttype {
                 NullTestType::IS_NULL => " IS NULL",
                 NullTestType::IS_NOT_NULL => " IS NOT NULL",
+            })?;
+            buf.try_push(')')?;
+            Ok(())
+        }
+        // get_rule_expr T_DistinctExpr, non-pretty form: outer parens always.
+        NodeTag::T_DistinctExpr => {
+            let d = expr.as_distinct_expr().unwrap();
+            buf.try_push('(')?;
+            deparse_expr(es, plan_node, ancestors, d.args.nth(0), useprefix, buf)?;
+            buf.try_push_str(" IS DISTINCT FROM ")?;
+            deparse_expr(es, plan_node, ancestors, d.args.nth(1), useprefix, buf)?;
+            buf.try_push(')')?;
+            Ok(())
+        }
+        // get_rule_expr T_BooleanTest, non-pretty form: outer parens always.
+        NodeTag::T_BooleanTest => {
+            use types_nodes::BoolTestType;
+            let bt = expr.as_boolean_test().unwrap();
+            buf.try_push('(')?;
+            deparse_expr(es, plan_node, ancestors, bt.arg.expect("BooleanTest.arg"), useprefix, buf)?;
+            buf.try_push_str(match bt.booltesttype {
+                BoolTestType::IS_TRUE => " IS TRUE",
+                BoolTestType::IS_NOT_TRUE => " IS NOT TRUE",
+                BoolTestType::IS_FALSE => " IS FALSE",
+                BoolTestType::IS_NOT_FALSE => " IS NOT FALSE",
+                BoolTestType::IS_UNKNOWN => " IS UNKNOWN",
+                BoolTestType::IS_NOT_UNKNOWN => " IS NOT UNKNOWN",
             })?;
             buf.try_push(')')?;
             Ok(())

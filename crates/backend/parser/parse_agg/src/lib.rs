@@ -325,6 +325,22 @@ fn check_agg_arguments_walker<'mcx>(
             Some(arg) => check_agg_arguments_walker(pstate, arg, ctx),
             None => Ok(()),
         },
+        NodeTag::T_BooleanTest => match node.as_boolean_test().unwrap().arg {
+            Some(arg) => check_agg_arguments_walker(pstate, arg, ctx),
+            None => Ok(()),
+        },
+        NodeTag::T_DistinctExpr => {
+            for arg in &node.as_distinct_expr().unwrap().args {
+                check_agg_arguments_walker(pstate, arg, ctx)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_RowExpr => {
+            for arg in &node.as_row_expr().unwrap().args {
+                check_agg_arguments_walker(pstate, arg, ctx)?;
+            }
+            Ok(())
+        }
         NodeTag::T_List => {
             for elem in node.as_list().unwrap() {
                 check_agg_arguments_walker(pstate, elem, ctx)?;
@@ -950,6 +966,22 @@ fn check_ungrouped_columns<'mcx>(
             Some(arg) => check_ungrouped_columns(pstate, qry, arg),
             None => Ok(()),
         },
+        NodeTag::T_BooleanTest => match node.as_boolean_test().unwrap().arg {
+            Some(arg) => check_ungrouped_columns(pstate, qry, arg),
+            None => Ok(()),
+        },
+        NodeTag::T_DistinctExpr => {
+            for arg in &node.as_distinct_expr().unwrap().args {
+                check_ungrouped_columns(pstate, qry, arg)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_RowExpr => {
+            for arg in &node.as_row_expr().unwrap().args {
+                check_ungrouped_columns(pstate, qry, arg)?;
+            }
+            Ok(())
+        }
         NodeTag::T_Const | NodeTag::T_Param | NodeTag::T_CaseTestExpr => Ok(()),
         other => panic!(
             "check_ungrouped_columns (parse_agg.c): arm for {other:?} unported — \

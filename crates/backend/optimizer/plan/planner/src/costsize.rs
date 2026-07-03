@@ -155,6 +155,26 @@ fn cost_qual_eval_walker(node: Node<'_>, cost: &mut QualCost) -> PgResult<()> {
             Some(arg) => cost_qual_eval_walker(arg, cost),
             None => Ok(()),
         },
+        // C charges DistinctExpr like OpExpr; BooleanTest itself is free.
+        NodeTag::T_DistinctExpr => {
+            let d = node.as_distinct_expr().unwrap();
+            let opfuncid = if d.opfuncid != 0 { d.opfuncid } else { lsyscache::get_opcode(d.opno)? };
+            crate::plancat::add_function_cost(opfuncid, cost)?;
+            for arg in &d.args {
+                cost_qual_eval_walker(arg, cost)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_BooleanTest => match node.as_boolean_test().unwrap().arg {
+            Some(arg) => cost_qual_eval_walker(arg, cost),
+            None => Ok(()),
+        },
+        NodeTag::T_RowExpr => {
+            for arg in &node.as_row_expr().unwrap().args {
+                cost_qual_eval_walker(arg, cost)?;
+            }
+            Ok(())
+        }
         // C arbitrarily uses the first alternative's cost.
         NodeTag::T_AlternativeSubPlan => {
             let asp = node.as_alternative_sub_plan().unwrap();
@@ -946,6 +966,11 @@ pub fn expr_type_typmod(node: Node<'_>) -> (u32, i32) {
             (r.resulttype, r.resulttypmod)
         }
         NodeTag::T_OpExpr => (node.as_op_expr().unwrap().opresulttype, -1),
+        NodeTag::T_DistinctExpr => (node.as_distinct_expr().unwrap().opresulttype, -1),
+        NodeTag::T_BooleanTest
+        | NodeTag::T_BoolExpr
+        | NodeTag::T_NullTest => (types_core::catalog::BOOLOID, -1),
+        NodeTag::T_RowExpr => (node.as_row_expr().unwrap().row_typeid, -1),
         NodeTag::T_FuncExpr => (node.as_func_expr().unwrap().funcresulttype, -1),
         NodeTag::T_Aggref => (node.as_aggref().unwrap().aggtype, -1),
         NodeTag::T_GroupingFunc => (23, -1),

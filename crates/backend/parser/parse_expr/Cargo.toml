@@ -29,6 +29,7 @@ stack_depth = { path = "../../utils/misc/stack_depth" }
 types_core = { path = "../../../_support/types/types_core" }
 types_error = { path = "../../../_support/types/types_error" }
 types_nodes = { path = "../../../_support/types/nodes" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
 vars = { path = "../../optimizer/util/vars" }
 wchar = { path = "../../../common/wchar" }
 
@@ -36,4 +37,3 @@ wchar = { path = "../../../common/wchar" }
 aclchk_seams = { path = "../../catalog/aclchk_seams" }
 miscinit_seams = { path = "../../utils/init/miscinit_seams" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
-types_tuple = { path = "../../../_support/types/types_tuple" }

@@ -24,7 +24,11 @@ pub fn expr_type(node: Node<'_>) -> Oid {
         NodeTag::T_GroupingFunc => types_core::catalog::INT4OID,
         NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resulttype,
         NodeTag::T_CoerceViaIO => node.as_coerce_via_io().unwrap().resulttype,
-        NodeTag::T_BoolExpr | NodeTag::T_NullTest => types_core::catalog::BOOLOID,
+        NodeTag::T_BoolExpr | NodeTag::T_NullTest | NodeTag::T_BooleanTest => {
+            types_core::catalog::BOOLOID
+        }
+        NodeTag::T_DistinctExpr => node.as_distinct_expr().unwrap().opresulttype,
+        NodeTag::T_RowExpr => node.as_row_expr().unwrap().row_typeid,
         NodeTag::T_SetToDefault => node.as_set_to_default().unwrap().typeId,
         NodeTag::T_CaseExpr => node.as_case_expr().unwrap().casetype,
         NodeTag::T_CaseTestExpr => node.as_case_test_expr().unwrap().typeId,
@@ -106,7 +110,10 @@ pub fn expr_typmod(node: Node<'_>) -> i32 {
         | NodeTag::T_WindowFunc
         | NodeTag::T_CoerceViaIO
         | NodeTag::T_BoolExpr
-        | NodeTag::T_NullTest => -1,
+        | NodeTag::T_NullTest
+        | NodeTag::T_BooleanTest
+        | NodeTag::T_DistinctExpr
+        | NodeTag::T_RowExpr => -1,
         NodeTag::T_CaseExpr => {
             let c = node.as_case_expr().unwrap();
             let Some(defresult) = c.defresult else { return -1 };
@@ -165,9 +172,12 @@ pub fn expr_collation(node: Node<'_>) -> Oid {
         NodeTag::T_WindowFunc => node.as_window_func().unwrap().wincollid,
         NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resultcollid,
         NodeTag::T_CoerceViaIO => node.as_coerce_via_io().unwrap().resultcollid,
-        NodeTag::T_BoolExpr | NodeTag::T_NullTest | NodeTag::T_GroupingFunc => {
-            types_core::InvalidOid
-        }
+        NodeTag::T_BoolExpr
+        | NodeTag::T_NullTest
+        | NodeTag::T_GroupingFunc
+        | NodeTag::T_BooleanTest
+        | NodeTag::T_RowExpr => types_core::InvalidOid,
+        NodeTag::T_DistinctExpr => node.as_distinct_expr().unwrap().opcollid,
         NodeTag::T_SetToDefault => node.as_set_to_default().unwrap().collation,
         NodeTag::T_CaseExpr => node.as_case_expr().unwrap().casecollid,
         NodeTag::T_CaseTestExpr => node.as_case_test_expr().unwrap().collation,
@@ -285,6 +295,19 @@ pub fn expr_location(node: Node<'_>) -> ParseLoc {
         NodeTag::T_NullTest => {
             let n = node.as_null_test().unwrap();
             leftmost_loc(n.location, n.arg.map_or(-1, expr_location))
+        }
+        NodeTag::T_BooleanTest => {
+            let b = node.as_boolean_test().unwrap();
+            leftmost_loc(b.location, b.arg.map_or(-1, expr_location))
+        }
+        NodeTag::T_DistinctExpr => {
+            let d = node.as_distinct_expr().unwrap();
+            leftmost_loc(d.location, expr_location_list(&d.args))
+        }
+        NodeTag::T_RowExpr => node.as_row_expr().unwrap().location,
+        NodeTag::T_CollateClause => {
+            let c = node.as_collate_clause().unwrap();
+            leftmost_loc(c.arg.map_or(-1, expr_location), c.location)
         }
         NodeTag::T_TypeCast => {
             let tc = node.as_type_cast().unwrap();

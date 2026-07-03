@@ -703,10 +703,23 @@ fn find_nonnullable_rels_walker<'mcx>(
                 result = nonnullable_rels_args(mcx, &sa.args, false)?;
             }
         }
+        NodeTag::T_BooleanTest => {
+            use types_nodes::BoolTestType;
+            let bt = node.as_boolean_test().unwrap();
+            if top_level
+                && matches!(
+                    bt.booltesttype,
+                    BoolTestType::IS_TRUE | BoolTestType::IS_FALSE | BoolTestType::IS_NOT_UNKNOWN
+                )
+            {
+                if let Some(a) = bt.arg {
+                    result = find_nonnullable_rels_walker(mcx, Some(a), false)?;
+                }
+            }
+        }
         // C has strictness arms for these; skipping silently would
         // under-reduce vs C (silent plan-shape divergence).
-        NodeTag::T_BooleanTest
-        | NodeTag::T_SubPlan
+        NodeTag::T_SubPlan
         | NodeTag::T_PlaceHolderVar
         | NodeTag::T_ArrayCoerceExpr
         | NodeTag::T_ConvertRowtypeExpr
@@ -882,8 +895,21 @@ fn find_nonnullable_vars_walker<'mcx>(
                 result = nonnullable_vars_args(mcx, &sa.args, false)?;
             }
         }
-        NodeTag::T_BooleanTest
-        | NodeTag::T_SubPlan
+        NodeTag::T_BooleanTest => {
+            use types_nodes::BoolTestType;
+            let bt = node.as_boolean_test().unwrap();
+            if top_level
+                && matches!(
+                    bt.booltesttype,
+                    BoolTestType::IS_TRUE | BoolTestType::IS_FALSE | BoolTestType::IS_NOT_UNKNOWN
+                )
+            {
+                if let Some(a) = bt.arg {
+                    result = find_nonnullable_vars_walker(mcx, Some(a), false)?;
+                }
+            }
+        }
+        NodeTag::T_SubPlan
         | NodeTag::T_PlaceHolderVar
         | NodeTag::T_ArrayCoerceExpr
         | NodeTag::T_ConvertRowtypeExpr
@@ -938,10 +964,16 @@ pub fn find_forced_null_vars<'mcx>(
     Ok(result)
 }
 
-// BooleanTest IS UNKNOWN arm dead: that tag is loud in the walkers above.
 pub fn find_forced_null_var<'mcx>(
     node: Node<'mcx>,
 ) -> Option<&'mcx types_nodes::primnodes::Var<'mcx>> {
+    if let Some(bt) = node.as_boolean_test() {
+        if bt.booltesttype != types_nodes::BoolTestType::IS_UNKNOWN {
+            return None;
+        }
+        let var = bt.arg?.as_var()?;
+        return if var.varlevelsup == 0 { Some(var) } else { None };
+    }
     let nt = node.as_null_test()?;
     if nt.nulltesttype != types_nodes::primnodes::NullTestType::IS_NULL || nt.argisrow {
         return None;

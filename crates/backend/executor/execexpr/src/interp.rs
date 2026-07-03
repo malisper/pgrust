@@ -940,6 +940,43 @@ fn run_program<'mcx>(
                 };
                 write_out(*out, &mut regs, Datum::from_u32(combined), false);
             }
+            Step::BoolTestIsTrue { out } => {
+                let r = read_out(*out, &regs);
+                let v = if r.isnull { false } else { r.value.as_bool() };
+                write_out(*out, &mut regs, Datum::from_bool(v), false);
+            }
+            Step::BoolTestIsNotTrue { out } => {
+                let r = read_out(*out, &regs);
+                let v = if r.isnull { true } else { !r.value.as_bool() };
+                write_out(*out, &mut regs, Datum::from_bool(v), false);
+            }
+            Step::BoolTestIsFalse { out } => {
+                let r = read_out(*out, &regs);
+                let v = if r.isnull { false } else { !r.value.as_bool() };
+                write_out(*out, &mut regs, Datum::from_bool(v), false);
+            }
+            Step::BoolTestIsNotFalse { out } => {
+                let r = read_out(*out, &regs);
+                let v = if r.isnull { true } else { r.value.as_bool() };
+                write_out(*out, &mut regs, Datum::from_bool(v), false);
+            }
+            Step::Distinct { call, out } => {
+                // SAFETY: args 0/1 of the call's live fcinfo image.
+                let (a0, a1) = unsafe {
+                    (
+                        crate::steps::arg_slot_of(call.fcinfo, 0).read(),
+                        crate::steps::arg_slot_of(call.fcinfo, 1).read(),
+                    )
+                };
+                if a0.isnull && a1.isnull {
+                    write_out(*out, &mut regs, Datum::from_bool(false), false);
+                } else if a0.isnull || a1.isnull {
+                    write_out(*out, &mut regs, Datum::from_bool(true), false);
+                } else {
+                    let (value, isnull) = invoke(frames, call)?;
+                    write_out(*out, &mut regs, Datum::from_bool(!value.as_bool()), isnull);
+                }
+            }
             Step::NotDistinct { call, out } => {
                 // SAFETY: args 0/1 of the call's live fcinfo image.
                 let (a0, a1) = unsafe {

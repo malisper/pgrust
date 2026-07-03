@@ -83,6 +83,21 @@ pub(crate) fn pull_var_nodes<'mcx>(node: Node<'mcx>, out: &mut PgVec<'mcx, Node<
                 pull_var_nodes(arg, out);
             }
         }
+        NodeTag::T_BooleanTest => {
+            if let Some(arg) = node.as_boolean_test().unwrap().arg {
+                pull_var_nodes(arg, out);
+            }
+        }
+        NodeTag::T_DistinctExpr => {
+            for a in &node.as_distinct_expr().unwrap().args {
+                pull_var_nodes(a, out);
+            }
+        }
+        NodeTag::T_RowExpr => {
+            for a in &node.as_row_expr().unwrap().args {
+                pull_var_nodes(a, out);
+            }
+        }
         NodeTag::T_BoolExpr => {
             for a in &node.as_bool_expr().unwrap().args {
                 pull_var_nodes(a, out);
