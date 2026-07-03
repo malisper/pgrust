@@ -12,26 +12,72 @@ use crate::{with_state, InvalState, CAT_CACHE_MSGS, REL_CACHE_MSGS};
 pub(crate) const RM_XACT_ID: u8 = 1;
 pub(crate) const XLOG_XACT_INVALIDATIONS: u8 = 0x60;
 
-// Borrow released around each execute (it re-enters inval): one Copy message
-// image per step, no snapshot allocation. The group and walk bound are fixed
-// at entry and the array base re-probed per message — C's
-// ProcessMessageSubGroup shape (_endmsg cached, msgs pointer reloaded), so
-// mid-walk registrations are seen by neither side.
+pub(crate) const REPLAY_CHUNK: usize = 32;
+
+// Borrow released around each execute (it re-enters inval): one short borrow
+// + one memcpy per 32-message chunk into stack scratch, dispatch borrow-free.
+// The walk bound is fixed at entry (C's ProcessMessageSubGroup `_endmsg`) and
+// executes never mutate registered messages (they only append), so the chunk
+// image cannot go stale: mid-walk registrations land behind the fixed bound
+// on both sides.
+#[inline]
+pub(crate) fn process_group_with(
+    group: &InvalidationMsgsGroup,
+    func: impl FnMut(&SharedInvalidationMessage) -> PgResult<()>,
+) -> PgResult<()> {
+    // Inline guard: the empty group (every no-DDL CommandEnd/abort) must not
+    // pay the outlined walk's frame + chunk-scratch setup.
+    if group.num_in_group() == 0 {
+        return Ok(());
+    }
+    process_group_slow(group, func)
+}
+
+fn process_group_slow(
+    group: &InvalidationMsgsGroup,
+    mut func: impl FnMut(&SharedInvalidationMessage) -> PgResult<()>,
+) -> PgResult<()> {
+    use std::mem::MaybeUninit;
+    for subgroup in [CAT_CACHE_MSGS, REL_CACHE_MSGS] {
+        let end = group.num_in_sub_group(subgroup);
+        let mut off = 0usize;
+        while off < end {
+            // MaybeUninit + one memcpy: a dummy-initialized array is a
+            // per-element store loop (the enum stride defeats memset).
+            let mut chunk: [MaybeUninit<SharedInvalidationMessage>; REPLAY_CHUNK] =
+                [const { MaybeUninit::uninit() }; REPLAY_CHUNK];
+            let n = (end - off).min(REPLAY_CHUNK);
+            with_state(|state| {
+                let msgs = &subgroup_slice(&state.msg_arrays, group, subgroup)[off..off + n];
+                // SAFETY: n <= REPLAY_CHUNK; src and dst are distinct objects.
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        msgs.as_ptr(),
+                        chunk.as_mut_ptr().cast::<SharedInvalidationMessage>(),
+                        n,
+                    );
+                }
+            });
+            // SAFETY: chunk[..n] fully written under the borrow above.
+            let msgs = unsafe {
+                std::slice::from_raw_parts(chunk.as_ptr().cast::<SharedInvalidationMessage>(), n)
+            };
+            for msg in msgs {
+                func(msg)?;
+            }
+            off += n;
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn process_group_locally(
     select: impl Fn(&InvalState<'_>) -> Option<InvalidationMsgsGroup>,
 ) -> PgResult<()> {
     let Some(group) = with_state(|state| select(state)) else {
         return Ok(());
     };
-    for subgroup in [CAT_CACHE_MSGS, REL_CACHE_MSGS] {
-        let end = group.num_in_sub_group(subgroup);
-        for off in 0..end {
-            let msg =
-                with_state(|state| subgroup_slice(&state.msg_arrays, &group, subgroup)[off]);
-            LocalExecuteInvalidationMessage(&msg)?;
-        }
-    }
-    Ok(())
+    process_group_with(&group, LocalExecuteInvalidationMessage)
 }
 
 // sinval send never re-enters inval: dense subgroup slices go straight to the
@@ -47,11 +93,12 @@ fn send_group(state: &InvalState<'_>, group: &InvalidationMsgsGroup) -> PgResult
 }
 
 pub fn CommandEndInvalidationMessages() -> PgResult<()> {
-    if with_state(|state| state.trans_stack.is_empty()) {
+    let Some(group) =
+        with_state(|state| Some(state.trans_stack.last()?.ii.current_cmd_invalid_msgs))
+    else {
         return Ok(());
-    }
-
-    process_group_locally(|state| Some(state.trans_stack.last()?.ii.current_cmd_invalid_msgs))?;
+    };
+    process_group_with(&group, LocalExecuteInvalidationMessage)?;
 
     if transam_xlog_seams::xlog_logical_info_active::call() {
         LogLogicalInvalidations()?;
@@ -69,40 +116,52 @@ pub fn CommandEndInvalidationMessages() -> PgResult<()> {
 }
 
 pub fn AtEOXact_Inval(isCommit: bool) -> PgResult<()> {
-    if with_state(|state| {
-        state.inplace_info = None;
-        state.trans_stack.is_empty()
-    }) {
-        return Ok(());
+    enum Eox {
+        Empty,
+        Commit(bool),
+        Abort(InvalidationMsgsGroup),
     }
 
-    /* Must be at top of stack */
-    debug_assert!(with_state(|state| state.trans_stack.len() == 1
-        && state.trans_stack[0].my_level == 1));
-
-    if isCommit {
-        let relcache_init_file_inval =
-            with_state(|state| state.trans_stack[0].ii.relcache_init_file_inval);
-
-        if relcache_init_file_inval {
-            relcache_seams::relation_cache_init_file_pre_invalidate::call()?;
+    let action = with_state(|state| {
+        state.inplace_info = None;
+        match state.trans_stack.first() {
+            None => Eox::Empty,
+            Some(info) => {
+                /* Must be at top of stack */
+                debug_assert!(state.trans_stack.len() == 1 && info.my_level == 1);
+                if isCommit {
+                    Eox::Commit(info.ii.relcache_init_file_inval)
+                } else {
+                    Eox::Abort(info.prior_cmd_invalid_msgs)
+                }
+            }
         }
+    });
 
-        with_state(|state| {
-            let info = &mut state.trans_stack[0];
-            append_invalidation_messages(
-                &mut info.prior_cmd_invalid_msgs,
-                &mut info.ii.current_cmd_invalid_msgs,
-            );
-            let group = info.prior_cmd_invalid_msgs;
-            send_group(state, &group)
-        })?;
+    match action {
+        Eox::Empty => return Ok(()),
+        Eox::Commit(relcache_init_file_inval) => {
+            if relcache_init_file_inval {
+                relcache_seams::relation_cache_init_file_pre_invalidate::call()?;
+            }
 
-        if relcache_init_file_inval {
-            relcache_seams::relation_cache_init_file_post_invalidate::call()?;
+            with_state(|state| {
+                let info = &mut state.trans_stack[0];
+                append_invalidation_messages(
+                    &mut info.prior_cmd_invalid_msgs,
+                    &mut info.ii.current_cmd_invalid_msgs,
+                );
+                let group = info.prior_cmd_invalid_msgs;
+                send_group(state, &group)
+            })?;
+
+            if relcache_init_file_inval {
+                relcache_seams::relation_cache_init_file_post_invalidate::call()?;
+            }
         }
-    } else {
-        process_group_locally(|state| Some(state.trans_stack.first()?.prior_cmd_invalid_msgs))?;
+        Eox::Abort(group) => {
+            process_group_with(&group, LocalExecuteInvalidationMessage)?;
+        }
     }
 
     // C frees the arrays with TopTransactionContext; capacity retained here

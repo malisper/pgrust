@@ -61,7 +61,6 @@ pub(crate) struct RelsyncCallbackItem {
 // but lives outside this crate, so rule-4 enum dispatch cannot enumerate it.
 pub(crate) struct CallbackTables {
     pub(crate) syscache_list: [Option<SyscacheCallbackItem>; MAX_SYSCACHE_CALLBACKS],
-    pub(crate) syscache_links: [i16; SYS_CACHE_SIZE],
     pub(crate) syscache_count: usize,
     pub(crate) relcache_list: [Option<RelcacheCallbackItem>; MAX_RELCACHE_CALLBACKS],
     pub(crate) relcache_count: usize,
@@ -76,7 +75,6 @@ thread_local! {
     pub(crate) static CALLBACKS: RefCell<CallbackTables> = const {
         RefCell::new(CallbackTables {
             syscache_list: [None; MAX_SYSCACHE_CALLBACKS],
-            syscache_links: [0; SYS_CACHE_SIZE],
             syscache_count: 0,
             relcache_list: [None; MAX_RELCACHE_CALLBACKS],
             relcache_count: 0,
@@ -84,6 +82,10 @@ thread_local! {
             relsync_count: 0,
         })
     };
+    // Cells, not part of the RefCell table: the per-message head-link probe
+    // in CallSyscacheCallbacks must cost one load, like C's static array.
+    pub(crate) static SYSCACHE_LINKS: [Cell<i16>; SYS_CACHE_SIZE] =
+        const { [const { Cell::new(0) }; SYS_CACHE_SIZE] };
 }
 
 pub(crate) struct InvalState<'mcx> {
@@ -115,23 +117,27 @@ pub(crate) fn with_state<R>(f: impl for<'mcx> FnOnce(&mut InvalState<'mcx>) -> R
     STATE.with(|cell| {
         let mut slot = cell.borrow_mut();
         if slot.is_none() {
-            let owned = McxOwned::<InvalStateTy>::try_new(
-                MemoryContext::new("CacheInvalidation"),
-                |mcx| {
-                    Ok(InvalState {
-                        mcx,
-                        msg_arrays: [PgVec::new_in(mcx), PgVec::new_in(mcx)],
-                        trans_stack: PgVec::new_in(mcx),
-                        inplace_info: None,
-                        wal_scratch: [PgVec::new_in(mcx), PgVec::new_in(mcx)],
-                    })
-                },
-            )
-            .expect("CacheInvalidation context allocation");
-            *slot = Some(ManuallyDrop::new(owned));
+            init_state(&mut slot);
         }
         slot.as_mut().unwrap().with_mut(f)
     })
+}
+
+#[cold]
+#[inline(never)]
+fn init_state(slot: &mut Option<ManuallyDrop<McxOwned<InvalStateTy>>>) {
+    let owned =
+        McxOwned::<InvalStateTy>::try_new(MemoryContext::new("CacheInvalidation"), |mcx| {
+            Ok(InvalState {
+                mcx,
+                msg_arrays: [PgVec::new_in(mcx), PgVec::new_in(mcx)],
+                trans_stack: PgVec::new_in(mcx),
+                inplace_info: None,
+                wal_scratch: [PgVec::new_in(mcx), PgVec::new_in(mcx)],
+            })
+        })
+        .expect("CacheInvalidation context allocation");
+    *slot = Some(ManuallyDrop::new(owned));
 }
 
 pub fn set_debug_discard_caches(value: i32) {

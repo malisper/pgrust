@@ -5162,6 +5162,11 @@ dependencies = [
 [[package]]
 name = "trigger"
 version = "0.0.0"
+dependencies = [
+ "trigger_seams",
+ "types_core",
+ "types_error",
+]
 
 [[package]]
 name = "trigger_seams"
