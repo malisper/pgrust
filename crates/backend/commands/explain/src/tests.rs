@@ -211,6 +211,9 @@ fn install_fixtures() {
                 _ => None,
             })
         });
+        namespace_seams::type_is_visible::set(|_| Ok(true));
+        namespace_seams::is_temp_namespace::set(|_| false);
+        syscache_seams::pg_type_typnamespace::set(|_| Ok(Some(11)));
         syscache_seams::lookup_pg_type_typcache_shape::set(|typid| {
             let mk = |name: &str| {
                 let mut typname = types_tuple::NameData::default();

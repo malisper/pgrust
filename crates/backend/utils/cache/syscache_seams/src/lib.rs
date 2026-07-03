@@ -543,6 +543,10 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    pub fn pg_type_typnamespace(typid: Oid) -> PgResult<Option<Oid>>
+);
+
+seam_core::seam!(
     pub fn pg_type_element_shape(typid: Oid) -> PgResult<Option<PgTypeElementShape>>
 );
 

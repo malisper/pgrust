@@ -189,9 +189,59 @@ const OID_INDEX: BuiltinOidIndex<FMGR_OID_INDEX_SIZE> = BuiltinOidIndex::build(&
 pub static FMGR_BUILTINS: [FmgrBuiltin; FMGR_NBUILTINS] = BUILTINS;
 pub static FMGR_BUILTIN_OID_INDEX: BuiltinOidIndex<FMGR_OID_INDEX_SIZE> = OID_INDEX;
 
+// Overlay for builtin tables whose crates would cycle into fmgr_core via
+// cache_syscache -> catcache -> indexam -> nbtree (regproc/acl/ruleutils…),
+// plus obj/col_description (prolang=sql in C, hosted natively — result-
+// equivalent: C's inline_function rejects their table-reading bodies, so
+// treating them as non-inlinable internal fns matches C's plan shape).
+// INVARIANT (set-once): written by install_extra_builtins during
+// single-threaded startup, before any lookup, never again.
+static EXTRA_PTR: core::sync::atomic::AtomicPtr<()> =
+    core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
+static EXTRA_LEN: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+pub fn install_extra_builtins(tables: &'static [&'static [FmgrBuiltin]]) {
+    for t in tables {
+        for b in *t {
+            let live = fmgr_isbuiltin(b.foid)
+                .is_some_and(|x| x.func as usize != builtin_not_ported as usize);
+            assert!(!live, "extra builtin {} collides with a live row", b.foid);
+        }
+    }
+    let prev = EXTRA_PTR.swap(
+        tables.as_ptr() as *mut (),
+        core::sync::atomic::Ordering::Relaxed,
+    );
+    assert!(prev.is_null(), "extra builtins installed twice");
+    EXTRA_LEN.store(tables.len(), core::sync::atomic::Ordering::Relaxed);
+}
+
+#[cold]
+#[inline(never)]
+fn extra_builtin(id: Oid) -> Option<&'static FmgrBuiltin> {
+    let ptr = EXTRA_PTR.load(core::sync::atomic::Ordering::Relaxed);
+    if ptr.is_null() {
+        return None;
+    }
+    let len = EXTRA_LEN.load(core::sync::atomic::Ordering::Relaxed);
+    // SAFETY: set-once invariant above — (ptr,len) is the installed slice.
+    let tables = unsafe {
+        core::slice::from_raw_parts(ptr as *const &'static [FmgrBuiltin], len)
+    };
+    tables
+        .iter()
+        .find_map(|t| t.iter().find(|b| b.foid == id))
+}
+
 #[inline]
 pub fn fmgr_isbuiltin(id: Oid) -> Option<&'static FmgrBuiltin> {
-    FMGR_BUILTIN_OID_INDEX.lookup(&FMGR_BUILTINS, id)
+    match FMGR_BUILTIN_OID_INDEX.lookup(&FMGR_BUILTINS, id) {
+        Some(b) if b.func as usize == builtin_not_ported as usize => {
+            extra_builtin(id).or(Some(b))
+        }
+        Some(b) => Some(b),
+        None => extra_builtin(id),
+    }
 }
 
 /// C: `fmgr_lookupByName` — linear, validator/alias resolution only (cold).

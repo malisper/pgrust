@@ -78,10 +78,12 @@ pub fn transformExprRecurse<'mcx>(
                 A_Expr_Kind::AEXPR_DISTINCT | A_Expr_Kind::AEXPR_NOT_DISTINCT => {
                     transformAExprDistinct(mcx, pstate, a)
                 }
+                A_Expr_Kind::AEXPR_OP_ANY => transformAExprOpAny(mcx, pstate, a),
+                A_Expr_Kind::AEXPR_OP_ALL => transformAExprOpAll(mcx, pstate, a),
                 A_Expr_Kind::AEXPR_IN => transformAExprIn(mcx, pstate, a),
                 other => panic!(
                     "transformExprRecurse (parse_expr.c): A_Expr kind {other:?} arm \
-                     (NULLIF/ANY/ALL) unported — unit backend-parser-expr"
+                     (NULLIF) unported — unit backend-parser-expr"
                 ),
             }
         }
@@ -182,6 +184,46 @@ fn transformAExprOp<'mcx>(
     let ltypeId = lexpr.map_or(types_core::InvalidOid, expr_type);
     let rtypeId = rexpr.map_or(types_core::InvalidOid, expr_type);
     parse_oper::make_op(mcx, pstate, &a.name, lexpr, rexpr, ltypeId, rtypeId, last_srf, a.location)
+}
+
+fn transformAExprOpAny<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    a: &A_Expr<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    let lexpr = transformExprRecurse(mcx, pstate, a.lexpr.expect("AEXPR_OP_ANY lexpr"))?;
+    let rexpr = transformExprRecurse(mcx, pstate, a.rexpr.expect("AEXPR_OP_ANY rexpr"))?;
+    parse_oper::make_scalar_array_op(
+        mcx,
+        pstate,
+        &a.name,
+        true,
+        lexpr,
+        rexpr,
+        expr_type(lexpr),
+        expr_type(rexpr),
+        a.location,
+    )
+}
+
+fn transformAExprOpAll<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    a: &A_Expr<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    let lexpr = transformExprRecurse(mcx, pstate, a.lexpr.expect("AEXPR_OP_ALL lexpr"))?;
+    let rexpr = transformExprRecurse(mcx, pstate, a.rexpr.expect("AEXPR_OP_ALL rexpr"))?;
+    parse_oper::make_scalar_array_op(
+        mcx,
+        pstate,
+        &a.name,
+        false,
+        lexpr,
+        rexpr,
+        expr_type(lexpr),
+        expr_type(rexpr),
+        a.location,
+    )
 }
 
 fn transformAExprIn<'mcx>(

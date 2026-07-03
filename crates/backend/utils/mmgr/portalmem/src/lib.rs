@@ -157,7 +157,12 @@ pub fn GetPortalByName(name: Option<&str>) -> Option<Portal<'static>> {
 }
 
 pub fn CreatePortal(name: &str, allowDup: bool, dupSilent: bool) -> PgResult<Portal<'static>> {
-    if let Some(existing) = GetPortalByName(Some(name)) {
+    // One key build + one probe for the whole call (C: one HASH_ENTER); the
+    // dup lookup, dup re-check, and insert used to cost 3 probes per portal.
+    let key = PortalName::new(name);
+    let existing =
+        with_mgr(|m| m.index.get(&key).map(|&i| m.entries[i as usize].clone())).flatten();
+    if let Some(existing) = existing {
         if !allowDup {
             return Err(ereport(ERROR)
                 .errcode(ERRCODE_DUPLICATE_CURSOR)
@@ -181,13 +186,7 @@ pub fn CreatePortal(name: &str, allowDup: bool, dupSilent: bool) -> PgResult<Por
 
     mgr("CreatePortal", |m| -> PgResult<Portal<'static>> {
         let mcx = m.top.mcx();
-        let key = PortalName::new(name);
-        if m.index.contains_key(&key) {
-            return Err(ereport(ERROR)
-                .errmsg_internal("duplicate portal name")
-                .into_error()
-                .into());
-        }
+        debug_assert!(!m.index.contains_key(&key), "duplicate portal name");
         let name_copy = PgString::from_str_in(key.as_str(), mcx)?;
         // Parked contexts are already reset (PortalDrop): reuse is a pop, as
         // C's context_freelists hit in AllocSetContextCreate.
@@ -328,22 +327,6 @@ fn PortalReleaseCachedPlan(portal: &Portal<'static>) {
     plancache_portal_seams::release_cached_plan::call(cplan);
 }
 
-// C's portal->stmts/portalParams die with the portal contexts; the registry
-// handles must be released explicitly (idempotent with callers' own frees).
-fn release_portal_registry_handles(portal: &Portal<'static>) {
-    let (stmts, params) = {
-        let mut p = portal.borrow_mut();
-        (
-            core::mem::replace(&mut p.stmts, StmtListHandle::NULL),
-            core::mem::replace(&mut p.portalParams, ParamListHandle::NULL),
-        )
-    };
-    if !stmts.is_null() {
-        pquery_seams::stmt_list_free::call(stmts);
-    }
-    types_portal::params::free(params);
-}
-
 pub fn PortalCreateHoldStore(portal: &Portal<'static>) -> PgResult<()> {
     let top = mgr("PortalCreateHoldStore", |m| m.top)?;
     let random_access = {
@@ -423,6 +406,9 @@ pub fn MarkPortalFailed(portal: &Portal<'static>) -> PgResult<()> {
 }
 
 pub fn PortalDrop(portal: &Portal<'static>, isTopCommit: bool) -> PgResult<()> {
+    // One borrow for the checks + one extraction borrow + one field-clear
+    // borrow on the happy path (was ~18 borrow round trips per drop —
+    // select1-gate prepared attribution). Seam callouts stay borrow-free.
     {
         let p = portal.borrow();
         if p.portalPinned {
@@ -443,19 +429,29 @@ pub fn PortalDrop(portal: &Portal<'static>, isTopCommit: bool) -> PgResult<()> {
 
     run_cleanup_hook(portal)?;
 
+    let (query_desc, stmts, params, cplan, plan_ctx, resowner, hold_snapshot, hold_store, status, key) = {
+        let mut p = portal.borrow_mut();
+        debug_assert!(p.portalSnapshot.is_none() || !isTopCommit);
+        (
+            core::mem::replace(&mut p.queryDesc, QueryDescHandle::NULL),
+            core::mem::replace(&mut p.stmts, StmtListHandle::NULL),
+            core::mem::replace(&mut p.portalParams, ParamListHandle::NULL),
+            core::mem::replace(&mut p.cplan, CachedPlanHandle::NULL),
+            core::mem::replace(&mut p.planContext, core::ptr::null_mut()),
+            core::mem::replace(&mut p.resowner, ResourceOwner::NULL),
+            p.holdSnapshot.take(),
+            core::mem::replace(&mut p.holdStore, TuplestoreHandle::NULL),
+            p.status,
+            PortalName::new(&p.name),
+        )
+    };
+
     // C frees a leftover QueryDesc with the portal context (failed portals
     // skip ExecutorEnd); the owning registry entry must drop explicitly.
-    let query_desc = {
-        let mut p = portal.borrow_mut();
-        core::mem::replace(&mut p.queryDesc, QueryDescHandle::NULL)
-    };
     if !query_desc.is_null() {
         execmain_seams::release_query_desc::call(query_desc);
     }
 
-    debug_assert!(portal.borrow().portalSnapshot.is_none() || !isTopCommit);
-
-    let key = PortalName::new(&portal.borrow().name);
     let removed = with_mgr(|m| {
         let i = m.index.remove(&key)?;
         let last = m.entries.len() - 1;
@@ -471,19 +467,24 @@ pub fn PortalDrop(portal: &Portal<'static>, isTopCommit: bool) -> PgResult<()> {
         elog(WARNING, "trying to delete portal name that does not exist")?;
     }
 
-    release_portal_registry_handles(portal);
-    PortalReleaseCachedPlan(portal);
-    free_plan_context(portal);
+    if !stmts.is_null() {
+        pquery_seams::stmt_list_free::call(stmts);
+    }
+    types_portal::params::free(params);
+    if !cplan.is_null() {
+        plancache_portal_seams::release_cached_plan::call(cplan);
+    }
+    if !plan_ctx.is_null() {
+        // SAFETY: PortalAttachPlanContext's Box::into_raw, nulled by the take above.
+        drop(unsafe { Box::from_raw(plan_ctx) });
+    }
 
-    let resowner = portal.borrow().resowner;
-    let hold_snapshot = portal.borrow_mut().holdSnapshot.take();
     if let Some(snap) = hold_snapshot {
         if !resowner.is_null() {
             snapmgr_portal_seams::unregister_snapshot_from_owner::call(snap, resowner);
         }
     }
 
-    let status = portal.borrow().status;
     if !resowner.is_null() && (!isTopCommit || status == PORTAL_FAILED) {
         let is_commit = status != PORTAL_FAILED;
         for phase in [
@@ -495,12 +496,7 @@ pub fn PortalDrop(portal: &Portal<'static>, isTopCommit: bool) -> PgResult<()> {
         }
         resowner_portal_seams::resource_owner_delete::call(resowner);
     }
-    portal.borrow_mut().resowner = ResourceOwner::NULL;
 
-    let hold_store = {
-        let mut p = portal.borrow_mut();
-        core::mem::replace(&mut p.holdStore, TuplestoreHandle::NULL)
-    };
     if !hold_store.is_null() {
         tuplestore_hold_seams::tuplestore_end::call(hold_store);
     }
@@ -511,7 +507,7 @@ pub fn PortalDrop(portal: &Portal<'static>, isTopCommit: bool) -> PgResult<()> {
         p.holdContext = None;
         p.portalContext.take()
     };
-    // Park the empty context whole (C's AllocSetDelete → context_freelists):
+    // Park the empty context whole (C's AllocSetDelete -> context_freelists):
     // reset runs outside the manager borrow (reset callbacks are user code).
     // A context with live (leaked-in) allocations takes the full destroy path.
     let parked_ctx = ctx.and_then(|mut cb| {
@@ -543,17 +539,6 @@ pub fn PortalAttachPlanContext(portal: &Portal<'static>, ctx: Box<MemoryContext>
     let mut p = portal.borrow_mut();
     assert!(p.planContext.is_null(), "portal already owns a plan context");
     p.planContext = Box::into_raw(ctx);
-}
-
-fn free_plan_context(portal: &Portal<'static>) {
-    let ctx = {
-        let mut p = portal.borrow_mut();
-        core::mem::replace(&mut p.planContext, core::ptr::null_mut())
-    };
-    if !ctx.is_null() {
-        // SAFETY: PortalAttachPlanContext's Box::into_raw, nulled above.
-        drop(unsafe { Box::from_raw(ctx) });
-    }
 }
 
 pub fn PortalHashTableDeleteAll() -> PgResult<()> {

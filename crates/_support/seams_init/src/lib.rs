@@ -183,4 +183,12 @@ pub fn init_all() {
     pg_prng::init_seams();
     regex_core::init_seams();
     adt_regexp::init_seams();
+
+    static EXTRA_BUILTINS: [&[types_fmgr::FmgrBuiltin]; 4] = [
+        adt_misc::builtins::MISC_BUILTINS,
+        catalog_namespace::builtins::NAMESPACE_BUILTINS,
+        format_type::builtins::FORMAT_TYPE_BUILTINS,
+        ruleutils::builtins::RULEUTILS_BUILTINS,
+    ];
+    fmgr_core::install_extra_builtins(&EXTRA_BUILTINS);
 }

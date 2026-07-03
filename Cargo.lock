@@ -70,6 +70,7 @@ dependencies = [
  "miscinit_seams",
  "rel_vocab",
  "superuser",
+ "syscache_seams",
  "types_core",
  "types_error",
  "types_fmgr",
@@ -392,19 +393,29 @@ dependencies = [
 name = "adt_misc"
 version = "0.1.0"
 dependencies = [
+ "adt_numeric",
  "arrayfuncs",
  "arrayutils",
  "datum",
+ "dbcommands",
  "detoast_seams",
  "fmgr_seams",
  "funcapi",
+ "genam_seams",
  "heaptuple",
+ "init_small",
  "lsyscache",
+ "mbutils",
  "mcx",
  "parse_utilcmd",
+ "table",
  "types_core",
  "types_error",
  "types_fmgr",
+ "types_rel",
+ "types_scan",
+ "types_tuple",
+ "varlena",
 ]
 
 [[package]]
@@ -1515,8 +1526,10 @@ dependencies = [
  "sinval",
  "snapmgr",
  "syscache_seams",
+ "types_array",
  "types_core",
  "types_error",
+ "types_fmgr",
  "types_guc",
  "types_nodes",
  "types_rel",
@@ -1719,6 +1732,7 @@ name = "clauses"
 version = "0.1.0"
 dependencies = [
  "arrayfuncs",
+ "arrayutils",
  "clauses_seams",
  "datum",
  "fmgr_core",
@@ -2961,6 +2975,7 @@ dependencies = [
  "executils",
  "init_small",
  "mcx",
+ "nodes_core",
  "syscache_seams",
  "tableam",
  "tupdesc",
@@ -3064,6 +3079,7 @@ dependencies = [
  "mbutils_seams",
  "mcx",
  "miscinit_seams",
+ "namespace_seams",
  "nodes_core",
  "pg_sema_seams",
  "planner",
@@ -3223,6 +3239,7 @@ dependencies = [
  "fmgr_seams",
  "keywords",
  "mbutils_seams",
+ "mcx",
  "namespace_seams",
  "syscache_seams",
  "types_core",
@@ -4844,6 +4861,7 @@ dependencies = [
 name = "name"
 version = "0.0.0"
 dependencies = [
+ "arrayfuncs",
  "datum",
  "elog",
  "lsyscache",
@@ -5533,6 +5551,7 @@ dependencies = [
 name = "nodes_core"
 version = "0.1.0"
 dependencies = [
+ "datum",
  "lsyscache",
  "mcx",
  "types_core",
@@ -6646,6 +6665,7 @@ dependencies = [
  "adt_multirangetypes",
  "adt_network",
  "adt_rangetypes",
+ "adt_regexp",
  "arrayfuncs",
  "backend_status_seams",
  "brin",
@@ -6662,6 +6682,7 @@ dependencies = [
  "gist",
  "guc_tables",
  "indexam",
+ "indexcmds_seams",
  "init_small",
  "lsyscache",
  "mbutils",
@@ -6677,6 +6698,7 @@ dependencies = [
  "pg_locale",
  "planner_seams",
  "procarray_seams",
+ "regex_core",
  "regexp_seams",
  "relation_seams",
  "relcache",
@@ -6701,8 +6723,10 @@ dependencies = [
  "types_slot",
  "types_snapshot",
  "types_tuple",
+ "varlena",
  "vars",
  "visibilitymap",
+ "wchar",
 ]
 
 [[package]]
@@ -8239,6 +8263,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "ruleutils"
+version = "0.1.0"
+dependencies = [
+ "cache_syscache",
+ "catalog_namespace",
+ "catcache",
+ "datum",
+ "fmgr_seams",
+ "format_type",
+ "indexcmds",
+ "lsyscache",
+ "mcx",
+ "namespace_seams",
+ "parse_expr",
+ "parse_func",
+ "parse_oper",
+ "parser_small1",
+ "readfuncs",
+ "syscache_seams",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_nodes",
+ "types_tuple",
+]
+
+[[package]]
 name = "rustc-hash"
 version = "2.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8322,6 +8373,7 @@ dependencies = [
  "adt_geo",
  "adt_misc",
  "adt_regexp",
+ "adt_regproc",
  "adt_rowtypes",
  "adt_timestamp",
  "aio_config",
@@ -8365,6 +8417,7 @@ dependencies = [
  "explain",
  "fd",
  "fmgr_core",
+ "format_type",
  "freespace",
  "funcapi",
  "genam",
@@ -8451,6 +8504,7 @@ dependencies = [
  "rewrite_handler",
  "ri_triggers",
  "rmgr",
+ "ruleutils",
  "s_lock",
  "scan_fgram",
  "sequence",
@@ -8480,6 +8534,7 @@ dependencies = [
  "tuplestore",
  "twophase_config",
  "typcache",
+ "types_fmgr",
  "utility",
  "vacuumlazy",
  "variable",

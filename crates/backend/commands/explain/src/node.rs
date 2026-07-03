@@ -1766,7 +1766,7 @@ fn deparse_expr<'mcx>(
             buf.try_push(')')?;
             if let Some(f) = a.aggfilter {
                 buf.try_push_str(" FILTER (WHERE ")?;
-                deparse_expr(es, plan_node, ancestors, f, useprefix, buf)?;
+                deparse_expr(es, plan_node, ancestors, f, useprefix, false, buf)?;
                 buf.try_push(')')?;
             }
             Ok(())
