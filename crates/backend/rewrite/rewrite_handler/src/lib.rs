@@ -123,10 +123,11 @@ fn rewrite_insert_query<'mcx>(mcx: Mcx<'mcx>, parsetree: &mut Query<'mcx>) -> Pg
     let jointree = parsetree.jointree.expect("INSERT jointree is a FromExpr");
     for rtr_node in &jointree.fromlist {
         if let Some(rtr) = rtr_node.as_range_tbl_ref() {
-            let rte = rte_of(parsetree.rtable.nth(rtr.rtindex as usize - 1));
+            let rte_node = parsetree.rtable.nth(rtr.rtindex as usize - 1);
+            let rte = rte_of(rte_node);
             if rte.rtekind == RTEKind::RTE_VALUES {
                 debug_assert!(values_rte.is_none(), "more than one VALUES RTE found");
-                values_rte = Some((rte, rtr.rtindex));
+                values_rte = Some((rte, rtr.rtindex, rte_node));
             }
         }
     }
@@ -137,16 +138,11 @@ fn rewrite_insert_query<'mcx>(mcx: Mcx<'mcx>, parsetree: &mut Query<'mcx>) -> Pg
         CmdType::CMD_INSERT,
         parsetree.r#override,
         &rel,
-        values_rte,
+        values_rte.map(|(rte, rti, _)| (rte, rti)),
     )?;
 
-    if let Some((rte, _)) = values_rte {
-        // rewriteValuesRTE only rewrites SetToDefault cells; their
-        // construction is loud upstream (transformAssignedExpr).
-        for row in &rte.values_lists {
-            let row = row.as_list().expect("VALUES row is a List");
-            debug_assert!(row.iter().all(|e| e.node_tag() != types_nodes::NodeTag::T_SetToDefault));
-        }
+    if let Some((rte, rti, rte_node)) = values_rte {
+        rewriteValuesRTE(mcx, parsetree, rte, rti, rte_node, &rel)?;
     }
 
     if let Some(oc_node) = parsetree.onConflict {
@@ -267,9 +263,11 @@ fn rewriteTargetListIU<'mcx>(
             continue;
         }
         let new_tle = new_tles[attrno - 1];
-        // SetToDefault construction is loud upstream (transformAssignedExpr),
-        // so apply_default reduces to the INSERT missing-column case.
-        let apply_default = new_tle.is_none() && command_type == CmdType::CMD_INSERT;
+        let apply_default = (new_tle.is_none() && command_type == CmdType::CMD_INSERT)
+            || new_tle.is_some_and(|t| {
+                t.as_target_entry().expect("targetlist cell").expr.node_tag()
+                    == types_nodes::NodeTag::T_SetToDefault
+            });
         if att.attidentity != 0 || att.attgenerated != 0 {
             panic!(
                 "rewriteTargetListIU (rewriteHandler.c): identity/generated \
@@ -277,25 +275,48 @@ fn rewriteTargetListIU<'mcx>(
             );
         }
         debug_assert!(r#override == types_nodes::OverridingKind::OVERRIDING_NOT_SET);
-        let new_tle = if apply_default && att.atthasdef {
-            let expr = build_column_default(mcx, target_relation, attrno)?;
-            let resname = core::str::from_utf8(att.attname.name_str()).expect("attname");
-            let mut buf: PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, resname.len())?;
-            mcx::vec_append_bytes(&mut buf, resname.as_bytes())?;
-            Some(types_nodes::Node::mk(
-                mcx,
-                types_nodes::primnodes::TargetEntry {
-                    expr,
-                    resno: attrno as i16,
-                    resname: Some(
-                        core::str::from_utf8(buf.leak()).expect("was UTF-8"),
-                    ),
-                    ressortgroupref: 0,
-                    resorigtbl: 0,
-                    resorigcol: 0,
-                    resjunk: false,
-                },
-            )?)
+        let new_tle = if apply_default {
+            let expr = if att.atthasdef {
+                Some(build_column_default(mcx, target_relation, attrno)?)
+            } else if command_type == CmdType::CMD_INSERT {
+                None
+            } else {
+                // UPDATE SET col = DEFAULT with no stored default: explicit
+                // NULL. C wraps coerce_to_domain; CREATE DOMAIN is unreachable
+                // on this base, so the wrapper is dead.
+                Some(types_nodes::Node::mk_const(
+                    mcx,
+                    att.atttypid,
+                    -1,
+                    att.attcollation,
+                    att.attlen as i32,
+                    datum::Datum::null(),
+                    true,
+                    att.attbyval,
+                )?)
+            };
+            match expr {
+                None => None,
+                Some(expr) => {
+                    let resname = core::str::from_utf8(att.attname.name_str()).expect("attname");
+                    let mut buf: PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, resname.len())?;
+                    mcx::vec_append_bytes(&mut buf, resname.as_bytes())?;
+                    Some(types_nodes::Node::mk(
+                        mcx,
+                        types_nodes::primnodes::TargetEntry {
+                            expr,
+                            resno: attrno as i16,
+                            resname: Some(
+                                core::str::from_utf8(buf.leak()).expect("was UTF-8"),
+                            ),
+                            ressortgroupref: 0,
+                            resorigtbl: 0,
+                            resorigcol: 0,
+                            resjunk: false,
+                        },
+                    )?)
+                }
+            }
         } else {
             new_tle
         };
@@ -307,6 +328,90 @@ fn rewriteTargetListIU<'mcx>(
     }
     new_tlist.concat(mcx, &junk_tlist)?;
     Ok(new_tlist)
+}
+
+// rewriteValuesRTE (rewriteHandler.c): replace SetToDefault cells with the
+// column's stored default or an explicit NULL. The unused_cols and
+// auto-updatable-view legs are dead (identity/OVERRIDING and views are loud
+// upstream), so allReplaced is always true; C's coerce_to_domain wrapper is
+// dead too (CREATE DOMAIN unreachable on this base).
+fn rewriteValuesRTE<'mcx>(
+    mcx: Mcx<'mcx>,
+    parsetree: &Query<'mcx>,
+    rte: &'mcx types_nodes::RangeTblEntry<'mcx>,
+    rti: i32,
+    rte_node: Node<'mcx>,
+    target_relation: &types_rel::Relation<'mcx>,
+) -> PgResult<()> {
+    let mut has_default = false;
+    'outer: for row in &rte.values_lists {
+        for e in row.as_list().expect("VALUES row is a List").iter() {
+            if e.node_tag() == types_nodes::NodeTag::T_SetToDefault {
+                has_default = true;
+                break 'outer;
+            }
+        }
+    }
+    if !has_default {
+        return Ok(());
+    }
+
+    let numattrs = rte.values_lists.nth(0).as_list().expect("VALUES row is a List").len();
+    let mut attrnos: PgVec<'mcx, i16> = mcx::vec_with_capacity_in(mcx, numattrs)?;
+    attrnos.extend((0..numattrs).map(|_| 0i16));
+    for tle_node in &parsetree.targetList {
+        let tle = tle_node.as_target_entry().expect("targetlist cell");
+        if let Some(var) = tle.expr.as_var() {
+            if var.varno == rti {
+                let attrno = var.varattno as usize;
+                debug_assert!(attrno >= 1 && attrno <= numattrs);
+                attrnos[attrno - 1] = tle.resno;
+            }
+        }
+    }
+
+    let mut new_values = types_nodes::NodeList::nil();
+    for row in &rte.values_lists {
+        let mut new_list = types_nodes::NodeList::nil();
+        for (i, col) in row.as_list().expect("VALUES row is a List").iter().enumerate() {
+            if col.node_tag() != types_nodes::NodeTag::T_SetToDefault {
+                new_list.lappend(mcx, col)?;
+                continue;
+            }
+            let attrno = attrnos[i] as usize;
+            if attrno == 0 {
+                return Err(Box::new(PgError::error(format!(
+                    "cannot set value in column {} to DEFAULT",
+                    i + 1
+                ))));
+            }
+            debug_assert!(attrno <= target_relation.rd_att.natts as usize);
+            let att = target_relation.rd_att.attr(attrno - 1);
+            let new_expr = if !att.attisdropped && att.atthasdef {
+                build_column_default(mcx, target_relation, attrno)?
+            } else {
+                types_nodes::Node::mk_const(
+                    mcx,
+                    att.atttypid,
+                    -1,
+                    att.attcollation,
+                    att.attlen as i32,
+                    datum::Datum::null(),
+                    true,
+                    att.attbyval,
+                )?
+            };
+            new_list.lappend(mcx, new_expr)?;
+        }
+        new_values.lappend(mcx, Node::mk_list(mcx, new_list)?)?;
+    }
+    // SAFETY: exclusive pre-plan Query fixup; no derived borrow of
+    // values_lists is live across this write.
+    unsafe {
+        rte_node.with_mut::<types_nodes::RangeTblEntry, _>(|r| r.values_lists = new_values)
+    }
+    .expect("rtable holds RangeTblEntry");
+    Ok(())
 }
 
 // build_column_default (rewriteHandler.c), atthasdef arm: the stored adbin
