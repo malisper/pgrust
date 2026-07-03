@@ -489,6 +489,7 @@ fn install_relation_seams() {
         Ok(Relation::open(make_relation(mcx, relid), None))
     });
     relcache_seams::relation_get_index_list::set(|mcx, _relid| Ok(PgVec::new_in(mcx)));
+    relcache_seams::relation_get_stat_ext_list::set(|mcx, _relid| Ok(PgVec::new_in(mcx)));
 }
 
 fn install_syscache_fixture_overrides() {
