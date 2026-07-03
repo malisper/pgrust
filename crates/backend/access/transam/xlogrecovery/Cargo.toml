@@ -9,6 +9,7 @@ name = "xlogrecovery"
 path = "src/lib.rs"
 
 [dependencies]
+timeline_seams = { path = "../timeline_seams" }
 mcx = { path = "../../../../_support/mcx" }
 controldata_utils = { path = "../../../../common/controldata_utils" }
 types_core = { path = "../../../../_support/types/types_core" }
