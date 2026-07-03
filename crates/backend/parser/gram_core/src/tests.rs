@@ -1417,7 +1417,7 @@ fn parses_collate_clause() {
     assert_eq!(cc.collname.len(), 2);
     assert_eq!(cc.collname.nth(0).as_string().unwrap().sval, "pg_catalog");
     assert_eq!(cc.collname.nth(1).as_string().unwrap().sval, "default");
-    assert!(cc.arg.as_a_const().is_some());
+    assert!(cc.arg.expect("arg").as_a_const().is_some());
 }
 
 #[test]
@@ -1459,7 +1459,7 @@ fn constraint_statements_parse() {
     assert_eq!(con.conname, Some("foo"));
     assert_eq!(con.keys.len(), 2);
     assert_eq!(con.keys.nth(0).as_string().unwrap().sval, "a");
-    assert!(!con.without_overlaps && !con.deferrable && !con.initdeferred);
+    assert!(!con.deferrable && !con.initdeferred);
 
     let l = parse("create table y (a int unique nulls not distinct)");
     let cs = only_stmt(&l).stmt.unwrap().as_variant::<types_nodes::rawnodes::CreateStmt>().unwrap();
