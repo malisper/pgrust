@@ -103,7 +103,6 @@ pub(crate) fn pull_var_nodes<'mcx>(node: Node<'mcx>, out: &mut PgVec<'mcx, Node<
                 pull_var_nodes(a, out);
             }
         }
-        NodeTag::T_RelabelType => pull_var_nodes(node.as_relabel_type().unwrap().arg, out),
         NodeTag::T_CoerceToDomain => {
             pull_var_nodes(node.as_coerce_to_domain().unwrap().arg, out)
         }

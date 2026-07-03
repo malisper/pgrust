@@ -742,7 +742,7 @@ fn run_program<'mcx>(
                 let r = read_out(*out, &regs);
                 write_out(*out, &mut regs, Datum::from_bool(!r.isnull), false);
             }
-            Step::MakeReadonly { src, out } => {
+            Step::MakeReadonlyOut { src, out } => {
                 let r = read_out(*src, &regs);
                 let v = if r.isnull {
                     r.value
