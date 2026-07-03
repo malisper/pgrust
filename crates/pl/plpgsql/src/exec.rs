@@ -116,7 +116,7 @@ pub fn free_function_plans(expr_ids: &[u32]) {
 }
 
 struct SimpleExpr {
-    state: execexpr::ExprState<'static>,
+    state: mcx::PgBox<'static, execexpr::ExprState<'static>>,
     cplan: types_portal::CachedPlanHandle,
     psrc: plancache::CachedPlanSourceHandle,
     rettype: Oid,
@@ -125,7 +125,7 @@ struct SimpleExpr {
 
 struct CastEntry {
     // None = no-op relabeling.
-    state: Option<execexpr::ExprState<'static>>,
+    state: Option<mcx::PgBox<'static, execexpr::ExprState<'static>>>,
     // Stable slot the compiled Param step points into.
     param: Box<[ParamExternData; 1]>,
 }
@@ -319,7 +319,7 @@ impl<'a> Estate<'a> {
         let func = self.func;
         let mut names: Vec<(String, Dno, Oid, i32, Oid)> = Vec::new();
         let mut recs: Vec<String> = Vec::new();
-        let mut have = |names: &Vec<(String, Dno, Oid, i32, Oid)>, k: &str| {
+        let have = |names: &Vec<(String, Dno, Oid, i32, Oid)>, k: &str| {
             names.iter().any(|(n, ..)| n == k)
         };
 

@@ -628,18 +628,17 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
 
         let lineno = self.lineno(name_loc);
         let dno = self.comp.build_variable(&name, lineno, datatype, true)?;
+        if notnull && default_val.is_none() {
+            return Err(self.gram_err(
+                types_error::ERRCODE_NULL_VALUE_NOT_ALLOWED,
+                format!(
+                    "variable \"{name}\" must have a default value, since it's declared NOT NULL"
+                ),
+            ));
+        }
         if let PlDatum::Var(v) = &mut self.comp.datums[dno as usize] {
             v.isconst = isconst;
             v.notnull = notnull;
-            if notnull && default_val.is_none() {
-                return Err(self.gram_err(
-                    types_error::ERRCODE_NULL_VALUE_NOT_ALLOWED,
-                    format!(
-                        "variable \"{}\" must have a default value, since it's declared NOT NULL",
-                        v.refname
-                    ),
-                ));
-            }
             if let Some(mut e) = default_val {
                 e.target_param = dno;
                 v.default_val = Some(e);
@@ -1107,7 +1106,7 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
         }
     }
 
-    fn make_scalar_list1(&mut self, name: &str, dno: Dno, lineno: i32, loc: i32) -> PgResult<Dno> {
+    fn make_scalar_list1(&mut self, _name: &str, dno: Dno, lineno: i32, loc: i32) -> PgResult<Dno> {
         self.check_assignable(dno, loc)?;
         Ok(self.comp.build_row("(unnamed row)", lineno, vec![dno]))
     }
