@@ -193,6 +193,8 @@ members = [
     "crates/backend/access/transam/xlogrecovery_seams",
     "crates/backend/storage/buffer/bufmgr_seams",
     "crates/backend/access/transam/rmgr",
+    "crates/backend/access/rmgrdesc",
+    "crates/bin/waldesc",
     "crates/backend/access/transam/xlogutils",
     "crates/backend/access/table/tableam_vocab",
     "crates/backend/access/table/tableam",

@@ -140,52 +140,24 @@ unported_redo! {
 }
 
 unported_desc! {
-    xlog_desc => "backend-access-rmgrdesc-xlogdesc";
-    xact_desc => "backend-access-rmgrdesc-xactdesc";
-    smgr_desc => "backend-access-rmgrdesc-smgrdesc";
-    clog_desc => "backend-access-rmgrdesc-small";
-    dbase_desc => "backend-access-rmgrdesc-small";
-    tblspc_desc => "backend-access-rmgrdesc-small";
-    multixact_desc => "backend-rmgrdesc-next";
-    relmap_desc => "backend-access-rmgrdesc-small";
-    standby_desc => "backend-rmgrdesc-next";
-    heap2_desc => "backend-rmgrdesc-next";
-    heap_desc => "backend-rmgrdesc-next";
-    btree_desc => "backend-rmgrdesc-next";
     hash_desc => "backend-rmgrdesc-next";
     gin_desc => "backend-rmgrdesc-next";
     gist_desc => "backend-rmgrdesc-next";
-    seq_desc => "backend-access-rmgrdesc-small";
     spg_desc => "backend-rmgrdesc-next";
     brin_desc => "backend-rmgrdesc-next";
     commit_ts_desc => "backend-access-rmgrdesc-small";
     replorigin_desc => "backend-rmgrdesc-extra-small";
-    generic_desc => "backend-access-rmgrdesc-small";
     logicalmsg_desc => "backend-access-rmgrdesc-small";
 }
 
 unported_identify! {
-    xlog_identify => "backend-access-rmgrdesc-xlogdesc";
-    xact_identify => "backend-access-rmgrdesc-xactdesc";
-    smgr_identify => "backend-access-rmgrdesc-smgrdesc";
-    clog_identify => "backend-access-rmgrdesc-small";
-    dbase_identify => "backend-access-rmgrdesc-small";
-    tblspc_identify => "backend-access-rmgrdesc-small";
-    multixact_identify => "backend-rmgrdesc-next";
-    relmap_identify => "backend-access-rmgrdesc-small";
-    standby_identify => "backend-rmgrdesc-next";
-    heap2_identify => "backend-rmgrdesc-next";
-    heap_identify => "backend-rmgrdesc-next";
-    btree_identify => "backend-rmgrdesc-next";
     hash_identify => "backend-rmgrdesc-next";
     gin_identify => "backend-rmgrdesc-next";
     gist_identify => "backend-rmgrdesc-next";
-    seq_identify => "backend-access-rmgrdesc-small";
     spg_identify => "backend-rmgrdesc-next";
     brin_identify => "backend-rmgrdesc-next";
     commit_ts_identify => "backend-access-rmgrdesc-small";
     replorigin_identify => "backend-rmgrdesc-extra-small";
-    generic_identify => "backend-access-rmgrdesc-small";
     logicalmsg_identify => "backend-access-rmgrdesc-small";
 }
 
@@ -210,8 +182,8 @@ pub static RmgrTable: [RmgrData; RM_N_BUILTIN_IDS] = [
     RmgrData {
         rm_name: "XLOG",
         rm_redo: xlog_redo,
-        rm_desc: xlog_desc,
-        rm_identify: xlog_identify,
+        rm_desc: rmgrdesc::xlogdesc::xlog_desc,
+        rm_identify: rmgrdesc::xlogdesc::xlog_identify,
         rm_startup: None,
         rm_cleanup: None,
         rm_mask: None,
@@ -219,8 +191,8 @@ pub static RmgrTable: [RmgrData; RM_N_BUILTIN_IDS] = [
     RmgrData {
         rm_name: "Transaction",
         rm_redo: xact_redo,
-        rm_desc: xact_desc,
-        rm_identify: xact_identify,
+        rm_desc: rmgrdesc::xactdesc::xact_desc,
+        rm_identify: rmgrdesc::xactdesc::xact_identify,
         rm_startup: None,
         rm_cleanup: None,
         rm_mask: None,
@@ -228,8 +200,8 @@ pub static RmgrTable: [RmgrData; RM_N_BUILTIN_IDS] = [
     RmgrData {
         rm_name: "Storage",
         rm_redo: storage_xlog::smgr_redo,
-        rm_desc: smgr_desc,
-        rm_identify: smgr_identify,
+        rm_desc: rmgrdesc::smgrdesc::smgr_desc,
+        rm_identify: rmgrdesc::smgrdesc::smgr_identify,
         rm_startup: None,
         rm_cleanup: None,
         rm_mask: None,
@@ -237,8 +209,8 @@ pub static RmgrTable: [RmgrData; RM_N_BUILTIN_IDS] = [
     RmgrData {
         rm_name: "CLOG",
         rm_redo: clog::clog_redo,
-        rm_desc: clog_desc,
-        rm_identify: clog_identify,
+        rm_desc: rmgrdesc::clogdesc::clog_desc,
+        rm_identify: rmgrdesc::clogdesc::clog_identify,
         rm_startup: None,
         rm_cleanup: None,
         rm_mask: None,
@@ -246,8 +218,8 @@ pub static RmgrTable: [RmgrData; RM_N_BUILTIN_IDS] = [
     RmgrData {
         rm_name: "Database",
         rm_redo: dbase_redo,
-        rm_desc: dbase_desc,
-        rm_identify: dbase_identify,
+        rm_desc: rmgrdesc::dbasedesc::dbase_desc,
+        rm_identify: rmgrdesc::dbasedesc::dbase_identify,
         rm_startup: None,
         rm_cleanup: None,
         rm_mask: None,
@@ -255,8 +227,8 @@ pub static RmgrTable: [RmgrData; RM_N_BUILTIN_IDS] = [
     RmgrData {
         rm_name: "Tablespace",
         rm_redo: tblspc_redo,
-        rm_desc: tblspc_desc,
-        rm_identify: tblspc_identify,
+        rm_desc: rmgrdesc::tblspcdesc::tblspc_desc,
+        rm_identify: rmgrdesc::tblspcdesc::tblspc_identify,
         rm_startup: None,
         rm_cleanup: None,
         rm_mask: None,
@@ -264,8 +236,8 @@ pub static RmgrTable: [RmgrData; RM_N_BUILTIN_IDS] = [
     RmgrData {
         rm_name: "MultiXact",
         rm_redo: multixact::multixact_redo,
-        rm_desc: multixact_desc,
-        rm_identify: multixact_identify,
+        rm_desc: rmgrdesc::mxactdesc::multixact_desc,
+        rm_identify: rmgrdesc::mxactdesc::multixact_identify,
         rm_startup: None,
         rm_cleanup: None,
         rm_mask: None,
@@ -273,8 +245,8 @@ pub static RmgrTable: [RmgrData; RM_N_BUILTIN_IDS] = [
     RmgrData {
         rm_name: "RelMap",
         rm_redo: relmapper::relmap_redo,
-        rm_desc: relmap_desc,
-        rm_identify: relmap_identify,
+        rm_desc: rmgrdesc::relmapdesc::relmap_desc,
+        rm_identify: rmgrdesc::relmapdesc::relmap_identify,
         rm_startup: None,
         rm_cleanup: None,
         rm_mask: None,
@@ -282,8 +254,8 @@ pub static RmgrTable: [RmgrData; RM_N_BUILTIN_IDS] = [
     RmgrData {
         rm_name: "Standby",
         rm_redo: standby::standby_redo,
-        rm_desc: standby_desc,
-        rm_identify: standby_identify,
+        rm_desc: rmgrdesc::standbydesc::standby_desc,
+        rm_identify: rmgrdesc::standbydesc::standby_identify,
         rm_startup: None,
         rm_cleanup: None,
         rm_mask: None,
@@ -291,8 +263,8 @@ pub static RmgrTable: [RmgrData; RM_N_BUILTIN_IDS] = [
     RmgrData {
         rm_name: "Heap2",
         rm_redo: heapam_xlog::heap2_redo,
-        rm_desc: heap2_desc,
-        rm_identify: heap2_identify,
+        rm_desc: rmgrdesc::heapdesc::heap2_desc,
+        rm_identify: rmgrdesc::heapdesc::heap2_identify,
         rm_startup: None,
         rm_cleanup: None,
         rm_mask: Some(heap_mask),
@@ -300,8 +272,8 @@ pub static RmgrTable: [RmgrData; RM_N_BUILTIN_IDS] = [
     RmgrData {
         rm_name: "Heap",
         rm_redo: heapam_xlog::heap_redo,
-        rm_desc: heap_desc,
-        rm_identify: heap_identify,
+        rm_desc: rmgrdesc::heapdesc::heap_desc,
+        rm_identify: rmgrdesc::heapdesc::heap_identify,
         rm_startup: None,
         rm_cleanup: None,
         rm_mask: Some(heap_mask),
@@ -309,8 +281,8 @@ pub static RmgrTable: [RmgrData; RM_N_BUILTIN_IDS] = [
     RmgrData {
         rm_name: "Btree",
         rm_redo: nbtree_xlog::btree_redo,
-        rm_desc: btree_desc,
-        rm_identify: btree_identify,
+        rm_desc: rmgrdesc::nbtdesc::btree_desc,
+        rm_identify: rmgrdesc::nbtdesc::btree_identify,
         rm_startup: None,
         rm_cleanup: None,
         rm_mask: Some(btree_mask),
@@ -345,8 +317,8 @@ pub static RmgrTable: [RmgrData; RM_N_BUILTIN_IDS] = [
     RmgrData {
         rm_name: "Sequence",
         rm_redo: seq_redo,
-        rm_desc: seq_desc,
-        rm_identify: seq_identify,
+        rm_desc: rmgrdesc::seqdesc::seq_desc,
+        rm_identify: rmgrdesc::seqdesc::seq_identify,
         rm_startup: None,
         rm_cleanup: None,
         rm_mask: Some(seq_mask),
@@ -390,8 +362,8 @@ pub static RmgrTable: [RmgrData; RM_N_BUILTIN_IDS] = [
     RmgrData {
         rm_name: "Generic",
         rm_redo: generic_redo,
-        rm_desc: generic_desc,
-        rm_identify: generic_identify,
+        rm_desc: rmgrdesc::genericdesc::generic_desc,
+        rm_identify: rmgrdesc::genericdesc::generic_identify,
         rm_startup: None,
         rm_cleanup: None,
         rm_mask: Some(generic_mask),
