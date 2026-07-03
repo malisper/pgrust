@@ -95,8 +95,13 @@ pub fn finish_heap_swap<'mcx>(
     let (toast1, toast2) =
         swap_relation_files(mcx, old_heap_oid, new_heap_oid, frozen_xid, cutoff_multi)?;
 
-    if !relcache::RelationGetIndexList(mcx, old_heap_oid)?.is_empty() {
-        unported("finish_heap_swap reindex_relation (index rebuild lane)");
+    {
+        let old_heap = table::table_open(mcx, old_heap_oid, NoLock)?;
+        let has_indexes = !relcache::RelationGetIndexList(mcx, old_heap_oid)?.is_empty();
+        old_heap.close(NoLock)?;
+        if has_indexes {
+            unported("finish_heap_swap reindex_relation (index rebuild lane)");
+        }
     }
 
     let object = pg_depend::ObjectAddress::set(RELATION_RELATION_ID, new_heap_oid);
@@ -116,7 +121,9 @@ pub fn finish_heap_swap<'mcx>(
         newrel.close(NoLock)?;
         if cur_toast != InvalidOid {
             let toastidx = {
+                let toastrel = table::table_open(mcx, cur_toast, NoLock)?;
                 let idxs = relcache::RelationGetIndexList(mcx, cur_toast)?;
+                toastrel.close(NoLock)?;
                 assert!(idxs.len() == 1, "toast table with {} indexes", idxs.len());
                 idxs[0]
             };
