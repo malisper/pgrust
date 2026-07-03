@@ -12,6 +12,7 @@ pub mod regex_error;
 pub mod regguts;
 
 pub mod regex_compile;
+pub(crate) mod regex_dfa_kernel;
 pub mod regex_exec;
 pub mod regex_export_free_error;
 pub mod regex_foundation;
