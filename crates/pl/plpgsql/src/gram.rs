@@ -627,6 +627,9 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
     // decl_statement.
     fn parse_decl_statement(&mut self) -> PgResult<()> {
         let (name, name_loc) = self.decl_varname()?;
+        // decl_varname action (pl_gram.y:716): lineno computed before the
+        // datatype is read, so %TYPE compile errors report this line.
+        let lineno = self.lineno(name_loc);
 
         // ALIAS / CURSOR forms peek after the name.
         let t = self.yylex()?;
@@ -687,7 +690,6 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
             return Err(self.yyerror("syntax error", t.2));
         };
 
-        let lineno = self.lineno(name_loc);
         let dno = self.comp.build_variable(&name, lineno, datatype, true)?;
         if notnull && default_val.is_none() {
             return Err(self.gram_err_pos(
