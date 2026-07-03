@@ -592,12 +592,17 @@ pub fn exec_init_node<'mcx>(
                 .unwrap_or_else(|| {
                     panic!("ExecInitNestLoop (nodeNestloop.c): NestLoop without an outer plan")
                 });
-            // nestParams are loud in exec_init_nest_loop, so the inner child
-            // always gets EXEC_FLAG_REWIND (cheap rescans wanted).
+            // With no nestParams the inner rescans with unchanged params, so
+            // request cheap rescans (C's EXEC_FLAG_REWIND arm).
+            let inner_eflags = if nl_plan.nestParams.is_nil() {
+                eflags | ::types_slot::EXEC_FLAG_REWIND
+            } else {
+                eflags
+            };
             let inner = exec_init_node(
                 nl_plan.join.plan.righttree,
                 estate,
-                eflags | ::types_slot::EXEC_FLAG_REWIND,
+                inner_eflags,
             )?
             .unwrap_or_else(|| {
                 panic!("ExecInitNestLoop (nodeNestloop.c): NestLoop without an inner plan")
@@ -1695,6 +1700,15 @@ impl<'mcx> ::nodenestloop::NestLoopChild<'mcx> for PlanStateNode<'mcx> {
 
     fn rescan(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
         crate::execami::exec_re_scan(self, estate)
+    }
+
+    fn rescan_with_chg(
+        &mut self,
+        plan: ::types_nodes::Node<'mcx>,
+        estate: &mut EStateData<'mcx>,
+        chg: &::types_nodes::bitmapset::Bitmapset<'mcx>,
+    ) -> PgResult<()> {
+        crate::execami::exec_re_scan_with_chg(self, plan, estate, chg)
     }
 }
 

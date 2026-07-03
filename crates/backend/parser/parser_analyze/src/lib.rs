@@ -1565,8 +1565,8 @@ fn returning_target_nsitem<'mcx>(
         p_nscolumns: t.p_nscolumns,
         p_rel_visible: true,
         p_cols_visible: true,
-        p_lateral_only: false,
-        p_lateral_ok: true,
+        p_lateral_only: core::cell::Cell::new(false),
+        p_lateral_ok: core::cell::Cell::new(true),
         p_returning_type: t.p_returning_type,
     };
     Ok(mcx::leak_in(mcx::alloc_in(mcx, nsitem)?))
