@@ -76,6 +76,16 @@ fn preprocess_aggrefs_walker<'mcx>(
             }
             Ok(())
         }
+        NodeTag::T_WindowFunc => {
+            let wf = node.as_window_func().unwrap();
+            for a in &wf.args {
+                preprocess_aggrefs_walker(run, a)?;
+            }
+            match wf.aggfilter {
+                Some(f) => preprocess_aggrefs_walker(run, f),
+                None => Ok(()),
+            }
+        }
         NodeTag::T_Param
         | NodeTag::T_CaseTestExpr
         | NodeTag::T_SQLValueFunction
