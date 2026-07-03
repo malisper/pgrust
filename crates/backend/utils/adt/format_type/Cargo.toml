@@ -14,6 +14,7 @@ mbutils_seams = { path = "../../mb/mbutils_seams" }
 wchar = { path = "../../../../common/wchar" }
 types_fmgr = { path = "../../../../_support/types/fmgr" }
 syscache_seams = { path = "../../cache/syscache_seams" }
+catalog_namespace = { path = "../../../catalog/catalog_namespace" }
 types_core = { path = "../../../../_support/types/types_core" }
 types_error = { path = "../../../../_support/types/types_error" }
 

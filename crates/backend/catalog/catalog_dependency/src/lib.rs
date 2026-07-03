@@ -54,6 +54,7 @@ const InitPrivsRelationId: Oid = 3394;
 const InitPrivsObjIndexId: Oid = 3395;
 const SecLabelRelationId: Oid = 3596;
 const AttrDefaultRelationId: Oid = 2604;
+const RewriteRelationId: Oid = 2618;
 const ConstraintRelationId: Oid = 2606;
 const AuthMemRelationId: Oid = 1261;
 
@@ -291,7 +292,11 @@ fn findDependentObjects<'mcx>(
         return Ok(());
     }
     if catalog::IsPinnedObject(object.classId, object.objectId) {
-        unported("findDependentObjects: DROP of a pinned object (needs getObjectDescription)");
+        return Err(dependent_objects_error(format!(
+            "cannot drop {} because it is required by the database system",
+            describe(mcx, object)?
+        ))
+        .into());
     }
 
     // Scan what this object depends on (owner detection).
@@ -539,10 +544,23 @@ fn reportDependentObjects<'mcx>(
     flags: i32,
     origObject: Option<&ObjectAddress>,
 ) -> PgResult<()> {
-    for i in (0..targetObjects.refs.len()).rev() {
+    let quietly = flags & PERFORM_DELETION_QUIETLY != 0;
+    let mut ok = true;
+    let mut clientdetail = String::new();
+    let mut logdetail = String::new();
+    let mut numReportedClient = 0usize;
+    let mut numNotReportedClient = 0usize;
+
+    for i in 0..targetObjects.refs.len() {
         let extra = &targetObjects.extras[i];
         if extra.flags & DEPFLAG_IS_PART != 0 && extra.flags & DEPFLAG_PARTITION == 0 {
-            unported("reportDependentObjects: partition-drop 2BP01 report");
+            let otherObjDesc = describe(mcx, &extra.dependee)?;
+            return Err(dependent_objects_error(format!(
+                "cannot drop {} because {otherObjDesc} requires it",
+                describe(mcx, &targetObjects.refs[i])?
+            ))
+            .with_hint(format!("You can drop {otherObjDesc} instead."))
+            .into());
         }
     }
 
@@ -562,6 +580,9 @@ fn reportDependentObjects<'mcx>(
         if extra.flags & DEPFLAG_SUBOBJECT != 0 {
             continue;
         }
+        let Some(objDesc) = catalog_objectaddress::getObjectDescription(mcx, obj, false)? else {
+            continue; // dropped concurrently
+        };
         if extra.flags & (DEPFLAG_AUTO | DEPFLAG_INTERNAL | DEPFLAG_PARTITION | DEPFLAG_EXTENSION)
             != 0
         {
@@ -592,7 +613,20 @@ fn reportDependentObjects<'mcx>(
         } else if flags & PERFORM_DELETION_QUIETLY != 0 {
             // QUIETLY drops msglevel to DEBUG2: nothing client-visible.
         } else {
-            unported("reportDependentObjects: DROP CASCADE NOTICE report");
+            let Some(objDesc) = getObjectDescription(mcx, obj)? else { continue };
+            if numReportedClient < MAX_REPORTED_DEPS {
+                if !clientdetail.is_empty() {
+                    clientdetail.push('\n');
+                }
+                clientdetail.push_str(&format!("drop cascades to {objDesc}"));
+                numReportedClient += 1;
+            } else {
+                numNotReportedClient += 1;
+            }
+            if !logdetail.is_empty() {
+                logdetail.push('\n');
+            }
+            logdetail.push_str(&format!("drop cascades to {objDesc}"));
         }
     }
 
@@ -609,6 +643,18 @@ fn reportDependentObjects<'mcx>(
             None => None,
         };
         return Err(dependent_objects_exist(orig_desc, clientdetail, logdetail));
+    }
+
+    if numReportedClient > 1 {
+        let total = numReportedClient + numNotReportedClient;
+        let noun = if total == 1 { "object" } else { "objects" };
+        elog_seams::ereport_msg::call(
+            types_error::NOTICE,
+            format!("drop cascades to {total} other {noun}"),
+            Some(clientdetail),
+        )?;
+    } else if numReportedClient == 1 {
+        elog_seams::ereport_msg::call(types_error::NOTICE, clientdetail, None)?;
     }
     Ok(())
 }

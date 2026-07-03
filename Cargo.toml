@@ -303,6 +303,8 @@ members = [
     "crates/backend/catalog/catalog_index",
     "crates/backend/catalog/catalog_toasting",
     "crates/backend/catalog/catalog_dependency",
+    "crates/backend/catalog/objectaddress",
+    "crates/backend/commands/dropcmds",
     "crates/backend/catalog/catalog_indexing",
     "crates/backend/catalog/catalog_storage",
     "crates/backend/catalog/storage_xlog",

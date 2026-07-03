@@ -214,6 +214,36 @@ pub fn GetAttrDefaultOid<'mcx>(mcx: Mcx<'mcx>, relid: Oid, attnum: AttrNumber) -
     Ok(result)
 }
 
+// GetAttrDefaultColumnAddress (pg_attrdef.c): (adrelid, adnum) as an
+// InvalidOid-signalling pair when the pg_attrdef row is gone.
+pub fn GetAttrDefaultColumnAddress<'mcx>(
+    mcx: Mcx<'mcx>,
+    attrdef_id: Oid,
+) -> PgResult<(Oid, AttrNumber)> {
+    let adrel = table::table_open(mcx, ATTR_DEFAULT_RELATION_ID, types_rel::AccessShareLock)?;
+    let keys = [eq_key(Anum_pg_attrdef_oid, F_OIDEQ, Datum::from_oid(attrdef_id))];
+    let mut scan =
+        genam::systable_beginscan(mcx, &adrel, ATTR_DEFAULT_OID_INDEX_ID, true, None, &keys)?;
+    let mut result = (types_core::InvalidOid, 0 as AttrNumber);
+    if let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+        let desc = adrel.descr();
+        let get = |anum: i32| {
+            let mut isnull = false;
+            // SAFETY: fixed NOT NULL pg_attrdef columns under its descriptor.
+            let d = unsafe { types_tuple::heap_getattr(tup, anum, desc, &mut isnull) };
+            debug_assert!(!isnull);
+            d
+        };
+        result = (
+            get(Anum_pg_attrdef_adrelid as i32).as_oid(),
+            get(Anum_pg_attrdef_adnum as i32).as_i16(),
+        );
+    }
+    genam::systable_endscan(mcx, scan)?;
+    adrel.close(types_rel::AccessShareLock)?;
+    Ok(result)
+}
+
 pub fn RemoveAttrDefaultById<'mcx>(mcx: Mcx<'mcx>, attrdef_id: Oid) -> PgResult<()> {
     let adrel = table::table_open(mcx, ATTR_DEFAULT_RELATION_ID, RowExclusiveLock)?;
     let keys = [eq_key(Anum_pg_attrdef_oid, F_OIDEQ, Datum::from_oid(attrdef_id))];

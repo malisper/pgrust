@@ -23,6 +23,7 @@ const ANUM_PG_CLASS_OID: i32 = 1;
 const ANUM_PG_CLASS_RELISSHARED: i32 = 16;
 const ANUM_PG_TYPE_OID: i32 = 1;
 const ANUM_PG_TYPE_TYPNAME: i32 = 2;
+const ANUM_PG_TYPE_TYPNAMESPACE: i32 = 3;
 const ANUM_PG_TYPE_TYPLEN: i32 = 5;
 const ANUM_PG_TYPE_TYPBYVAL: i32 = 6;
 const ANUM_PG_TYPE_TYPTYPE: i32 = 7;
@@ -51,7 +52,10 @@ const ANUM_PG_INDEX_INDNKEYATTS: i32 = 4;
 const ANUM_PG_INDEX_INDISCLUSTERED: i32 = 10;
 const ANUM_PG_INDEX_INDISVALID: i32 = 11;
 const ANUM_PG_INDEX_INDISREPLIDENT: i32 = 15;
+const ANUM_PG_CONSTRAINT_CONNAME: i32 = 2;
+const ANUM_PG_CONSTRAINT_CONNAMESPACE: i32 = 3;
 const ANUM_PG_CONSTRAINT_CONTYPE: i32 = 4;
+const ANUM_PG_CONSTRAINT_CONTYPID: i32 = 10;
 const ANUM_PG_CONSTRAINT_CONRELID: i32 = 9;
 const ANUM_PG_AUTHID_OID: i32 = 1;
 const ANUM_PG_AUTHID_ROLNAME: i32 = 2;
@@ -470,6 +474,37 @@ fn pg_type_domain_shape(typid: Oid) -> PgResult<Option<syscache_seams::PgTypeDom
         typtype: getattr(&t, TYPEOID, ANUM_PG_TYPE_TYPTYPE).as_i8(),
         typnotnull: getattr(&t, TYPEOID, ANUM_PG_TYPE_TYPNOTNULL).as_bool(),
         typbasetype: getattr(&t, TYPEOID, ANUM_PG_TYPE_TYPBASETYPE).as_oid(),
+    };
+    drop(t);
+    ReleaseSysCache(tuple);
+    Ok(Some(shape))
+}
+
+fn pg_type_name_namespace(typid: Oid) -> PgResult<Option<(NameData, Oid)>> {
+    let Some(tuple) = SearchSysCache1(TYPEOID, SysCacheKey::Value(Datum::from_oid(typid)))? else {
+        return Ok(None);
+    };
+    let t = tuple.tuple();
+    let name = getattr_name(&t, TYPEOID, ANUM_PG_TYPE_TYPNAME);
+    let nsp = getattr(&t, TYPEOID, ANUM_PG_TYPE_TYPNAMESPACE).as_oid();
+    drop(t);
+    ReleaseSysCache(tuple);
+    Ok(Some((name, nsp)))
+}
+
+fn lookup_pg_constraint_desc_shape(
+    conoid: Oid,
+) -> PgResult<Option<syscache_seams::PgConstraintDescShape>> {
+    let Some(tuple) = SearchSysCache1(CONSTROID, SysCacheKey::Value(Datum::from_oid(conoid)))?
+    else {
+        return Ok(None);
+    };
+    let t = tuple.tuple();
+    let shape = syscache_seams::PgConstraintDescShape {
+        conname: getattr_name(&t, CONSTROID, ANUM_PG_CONSTRAINT_CONNAME),
+        connamespace: getattr(&t, CONSTROID, ANUM_PG_CONSTRAINT_CONNAMESPACE).as_oid(),
+        conrelid: getattr(&t, CONSTROID, ANUM_PG_CONSTRAINT_CONRELID).as_oid(),
+        contypid: getattr(&t, CONSTROID, ANUM_PG_CONSTRAINT_CONTYPID).as_oid(),
     };
     drop(t);
     ReleaseSysCache(tuple);
@@ -1893,6 +1928,8 @@ pub(crate) fn install() {
     syscache_seams::lookup_pg_class_relid_by_name::set(lookup_pg_class_relid_by_name);
     syscache_seams::lookup_pg_type_oid_by_name::set(lookup_pg_type_oid_by_name);
     syscache_seams::pg_namespace_nspname::set(pg_namespace_nspname);
+    syscache_seams::pg_type_name_namespace::set(pg_type_name_namespace);
+    syscache_seams::lookup_pg_constraint_desc_shape::set(lookup_pg_constraint_desc_shape);
     syscache_seams::lookup_pg_namespace_oid_by_name::set(lookup_pg_namespace_oid_by_name);
     syscache_seams::lookup_pg_operator_shape::set(lookup_pg_operator_shape);
     syscache_seams::pg_operator_oprname::set(pg_operator_oprname);

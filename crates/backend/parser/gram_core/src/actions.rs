@@ -4447,8 +4447,42 @@ impl<'mcx> Parser<'mcx> {
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
             // DropStmt: DROP {object_type_any_name any_name_list |
-            // drop_type_name name_list} [IF EXISTS] opt_drop_behavior
-            // (TYPE/DOMAIN/INDEX CONCURRENTLY/ON-name forms 922-929 stay loud).
+            // drop_type_name name_list | TYPE_P/DOMAIN_P type_name_list}
+            // [IF EXISTS] opt_drop_behavior
+            // (INDEX CONCURRENTLY/ON-name forms 922-923/928-929 stay loud).
+            924 | 926 => {
+                let mut n = Node::build::<DropStmt>(mcx)?;
+                n.removeType = if rule == 924 {
+                    ObjectType::OBJECT_TYPE
+                } else {
+                    ObjectType::OBJECT_DOMAIN
+                };
+                n.objects = view.v(3).list();
+                n.behavior = drop_behavior(view.v(4).ival());
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            925 | 927 => {
+                let mut n = Node::build::<DropStmt>(mcx)?;
+                n.removeType = if rule == 925 {
+                    ObjectType::OBJECT_TYPE
+                } else {
+                    ObjectType::OBJECT_DOMAIN
+                };
+                n.missing_ok = true;
+                n.objects = view.v(5).list();
+                n.behavior = drop_behavior(view.v(6).ival());
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            965 => {
+                let t = view.v(1).node().expect("Typename");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, t)?);
+            }
+            966 => {
+                let mut list = view.v(1).list();
+                let t = view.v(3).node().expect("Typename");
+                list.lappend(mcx, t)?;
+                *yyval = YYSTYPE::List(list);
+            }
             918 | 920 => {
                 let mut n = Node::build::<DropStmt>(mcx)?;
                 n.removeType = object_type(view.v(2).ival());

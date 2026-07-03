@@ -13,6 +13,8 @@ catalog_namespace = { path = "../catalog_namespace" }
 format_type = { path = "../../utils/adt/format_type" }
 catalog_index = { path = "../catalog_index" }
 catalog_indexing = { path = "../catalog_indexing" }
+catalog_objectaddress = { path = "../objectaddress" }
+elog_seams = { path = "../../utils/error/elog_seams" }
 datum = { path = "../../../_support/types/datum" }
 fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
 genam = { path = "../../access/index/genam" }
