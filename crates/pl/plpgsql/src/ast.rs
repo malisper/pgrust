@@ -308,4 +308,6 @@ pub struct PlFunction {
     pub resolve_option: i32,
     pub print_strict_params: bool,
     pub nstatements: u32,
+    /// Every expr's id (exec-side plan-table cleanup on recompile).
+    pub expr_ids: Vec<u32>,
 }
