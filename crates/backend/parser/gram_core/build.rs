@@ -68,10 +68,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     let cases = case_labels(&src)?;
     assert!(cases.len() > 2000, "action switch parse: {}", cases.len());
     // DISPATCH[rule]: CALL = ported/complex action; NONE = no value
-    // (empty rule, no action); EMPTY_LIST/NULL_NODE/NULL_ALIAS = constant
-    // empty actions; else n for `$$ = $n` (incl. the keyword pstrdup arms —
-    // borrowed here). Classified mechanically from the gram.c case bodies.
-    let (call, none, empty_list, null_node, null_alias) = (0u8, 255u8, 254u8, 253u8, 252u8);
+    // (empty rule, no action); EMPTY_LIST/NULL_NODE/NULL_ALIAS/NULL_LIMIT =
+    // constant empty actions; else n for `$$ = $n` (incl. the keyword pstrdup
+    // arms — borrowed here). Classified mechanically from the case bodies.
+    let (call, none, empty_list, null_node, null_alias, null_limit) =
+        (0u8, 255u8, 254u8, 253u8, 252u8, 251u8);
     let mut dispatch = vec![none; (yynrules + 1) as usize];
     for r in 1..dispatch.len() {
         if yyr2[r] >= 1 {
@@ -88,6 +89,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         match (lhs_field, rhs) {
             ("list", "NIL") => return Some(empty_list),
             ("alias", "NULL") => return Some(null_alias),
+            ("selectlimit", "NULL") => return Some(null_limit),
             (_, "NULL") => return Some(null_node),
             _ => {}
         }
@@ -111,7 +113,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     for (r, body) in cases {
         let n = classify(&body).unwrap_or(call);
         assert!(
-            n == call || n >= 252 || (n >= 1 && (n as i64) <= yyr2[r as usize]),
+            n == call || n >= 251 || (n >= 1 && (n as i64) <= yyr2[r as usize]),
             "rule {r}: $${n} out of range"
         );
         dispatch[r as usize] = n;

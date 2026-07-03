@@ -263,6 +263,10 @@ impl<'mcx> Parser<'mcx> {
                     stk.ensure(self.mcx, base + 1)?;
                     stk.write_val(base, YYSTYPE::Alias(None), yyloc);
                 }
+                251 => {
+                    stk.ensure(self.mcx, base + 1)?;
+                    stk.write_val(base, YYSTYPE::Limit(None), yyloc);
+                }
                 n => {
                     // `$$ = $n`: for n == 1 the value already sits at `base`.
                     if n > 1 {
