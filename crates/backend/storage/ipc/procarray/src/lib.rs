@@ -1102,7 +1102,7 @@ pub fn GlobalVisCheckRemovableFullXid(
     GlobalVisTestIsRemovableFullXid(GlobalVisTestFor(rel), fxid)
 }
 
-pub fn CountDBConnections(databaseid: Oid) -> PgResult<i32> {
+pub fn CountDBConnections(databaseid: types_core::Oid) -> PgResult<i32> {
     let arrayP = procArray();
     let hdr = ProcGlobal();
     let mut count = 0;
@@ -1124,7 +1124,7 @@ pub fn CountDBConnections(databaseid: Oid) -> PgResult<i32> {
 
 // C sends SIGTERM to conflicting autovacuum workers each try; no autovacuum
 // exists here, so the walk-and-retry loop is kept without the kill step.
-pub fn CountOtherDBBackends(databaseid: Oid) -> PgResult<Option<(i32, i32)>> {
+pub fn CountOtherDBBackends(databaseid: types_core::Oid) -> PgResult<Option<(i32, i32)>> {
     let arrayP = procArray();
     let hdr = ProcGlobal();
     let my_procno = MyProc().expect("no MyProc");

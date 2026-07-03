@@ -3140,8 +3140,16 @@ impl<'mcx> Parser<'mcx> {
                 let mut n = Node::build::<types_nodes::parsenodes::AlterDatabaseStmt>(mcx)?;
                 n.dbname = Some(view.v(3).str_val());
                 let s = Node::mk_string(mcx, view.v(6).str_val())?;
-                let d = def_elem(mcx, "tablespace", Some(s), view.l(6))?;
-                let YYSTYPE::Node(Some(d)) = d else { unreachable!() };
+                let d = Node::mk(
+                    mcx,
+                    DefElem {
+                        defnamespace: None,
+                        defname: Some("tablespace"),
+                        arg: Some(s),
+                        defaction: DefElemAction::DEFELEM_UNSPEC,
+                        location: view.l(6),
+                    },
+                )?;
                 n.options = NodeList::make1(mcx, d)?;
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
