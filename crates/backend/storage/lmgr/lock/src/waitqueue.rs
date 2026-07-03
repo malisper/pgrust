@@ -298,7 +298,7 @@ pub fn ProcSleep(localtag: &LOCALLOCKTAG) -> PgResult<ProcWaitStatus> {
             CheckDeadLock()?;
             lmgr_proc::ResetGotDeadlockTimeout();
         }
-        // C: CHECK_FOR_INTERRUPTS(); the interrupt machinery owns that.
+        postgres_seams::check_for_interrupts::call()?;
 
         let my_wait_status = proc.waitStatus.load(Acquire);
 

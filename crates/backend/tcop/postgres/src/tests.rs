@@ -125,17 +125,47 @@ fn recovery_conflict_arm_is_loud() {
 }
 
 #[test]
-fn idle_in_transaction_timeout_arm_is_loud() {
+fn idle_and_transaction_timeout_arms() {
     install_test_seams();
+
+    // GUC reset to zero between firing and servicing: signal ignored.
     init_small::globals::SetInterruptPending(true);
     init_small::globals::SetIdleInTransactionSessionTimeoutPending(true);
-    let payload = std::panic::catch_unwind(check_for_interrupts).unwrap_err();
-    let msg = payload
-        .downcast_ref::<&str>()
-        .copied()
-        .unwrap_or_else(|| payload.downcast_ref::<String>().unwrap());
-    assert!(msg.contains("IdleInTransactionSessionTimeout"));
+    lmgr_proc::globals::set_IdleInTransactionSessionTimeout(0);
+    assert!(check_for_interrupts().is_ok());
     assert!(!init_small::globals::IdleInTransactionSessionTimeoutPending());
+
+    for (set_pending, set_guc, sqlstate, msg) in [
+        (
+            init_small::globals::SetIdleInTransactionSessionTimeoutPending as fn(bool),
+            lmgr_proc::globals::set_IdleInTransactionSessionTimeout as fn(i32),
+            types_error::ERRCODE_IDLE_IN_TRANSACTION_SESSION_TIMEOUT,
+            "terminating connection due to idle-in-transaction timeout",
+        ),
+        (
+            init_small::globals::SetTransactionTimeoutPending,
+            lmgr_proc::globals::set_TransactionTimeout,
+            types_error::ERRCODE_TRANSACTION_TIMEOUT,
+            "terminating connection due to transaction timeout",
+        ),
+        (
+            init_small::globals::SetIdleSessionTimeoutPending,
+            lmgr_proc::globals::set_IdleSessionTimeout,
+            types_error::ERRCODE_IDLE_SESSION_TIMEOUT,
+            "terminating connection due to idle-session timeout",
+        ),
+    ] {
+        init_small::globals::SetInterruptPending(true);
+        set_pending(true);
+        set_guc(100);
+        let err = check_for_interrupts().unwrap_err();
+        assert_eq!(err.level(), types_error::FATAL);
+        assert_eq!(err.sqlstate, sqlstate);
+        assert_eq!(err.message, msg);
+        set_pending(false);
+        set_guc(0);
+    }
+    init_small::globals::SetInterruptPending(false);
 }
 
 #[test]

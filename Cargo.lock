@@ -3574,6 +3574,7 @@ dependencies = [
  "miscinit_seams",
  "pg_sema_seams",
  "pmsignal_seams",
+ "postgres_seams",
  "ps_status_seams",
  "resowner",
  "s_lock_seams",

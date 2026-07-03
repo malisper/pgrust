@@ -38,7 +38,6 @@ macro_rules! scalar_global {
 scalar_global! {
     FRONTEND_PROTOCOL, FrontendProtocol, SetFrontendProtocol, ProtocolVersion, 0;
 
-    INTERRUPT_PENDING, InterruptPending, SetInterruptPending, bool, false;
     QUERY_CANCEL_PENDING, QueryCancelPending, SetQueryCancelPending, bool, false;
     PROC_DIE_PENDING, ProcDiePending, SetProcDiePending, bool, false;
     CHECK_CLIENT_CONNECTION_PENDING, CheckClientConnectionPending,
@@ -132,6 +131,41 @@ scalar_global! {
     SERIALIZABLE_BUFFERS, serializable_buffers, set_serializable_buffers, i32, 32;
     SUBTRANSACTION_BUFFERS, subtransaction_buffers, set_subtransaction_buffers, i32, 0;
     TRANSACTION_BUFFERS, transaction_buffers, set_transaction_buffers, i32, 0;
+}
+
+// Cross-thread-writable, CFI-visible async wakes; leaked (notes/timeout-threads.md).
+thread_local! {
+    static INTERRUPT_PENDING: Cell<*const std::sync::atomic::AtomicBool> =
+        const { Cell::new(std::ptr::null()) };
+}
+
+#[inline]
+pub fn interrupt_pending_flag() -> &'static std::sync::atomic::AtomicBool {
+    let p = INTERRUPT_PENDING.get();
+    if p.is_null() {
+        claim_interrupt_pending_flag()
+    } else {
+        // SAFETY: only ever null or Box::leak'd.
+        unsafe { &*p }
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn claim_interrupt_pending_flag() -> &'static std::sync::atomic::AtomicBool {
+    let flag: &'static _ = Box::leak(Box::new(std::sync::atomic::AtomicBool::new(false)));
+    INTERRUPT_PENDING.set(flag);
+    flag
+}
+
+#[inline]
+pub fn InterruptPending() -> bool {
+    interrupt_pending_flag().load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[inline]
+pub fn SetInterruptPending(value: bool) {
+    interrupt_pending_flag().store(value, std::sync::atomic::Ordering::SeqCst);
 }
 
 // `ClientSocket *MyClientSocket` / `struct Port *MyProcPort` (globals.c).

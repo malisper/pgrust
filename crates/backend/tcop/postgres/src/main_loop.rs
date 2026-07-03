@@ -179,6 +179,22 @@ pub(crate) fn error_recovery(err: &PgError, state: &mut LoopState) -> PgResult<(
     Ok(())
 }
 
+// An earlier-or-equal TRANSACTION_TIMEOUT subsumes the idle-in-transaction timer.
+fn start_idle_in_transaction_timer(state: &mut LoopState) -> PgResult<()> {
+    let idle_in_transaction_timeout = lmgr_proc::globals::IdleInTransactionSessionTimeout();
+    let transaction_timeout = lmgr_proc::globals::TransactionTimeout();
+    if idle_in_transaction_timeout > 0
+        && (idle_in_transaction_timeout < transaction_timeout || transaction_timeout == 0)
+    {
+        state.idle_in_transaction_timeout_enabled = true;
+        timeout_seams::enable_timeout_after::call(
+            timeout_seams::IDLE_IN_TRANSACTION_SESSION_TIMEOUT,
+            idle_in_transaction_timeout,
+        )?;
+    }
+    Ok(())
+}
+
 fn ready_state(mcx: Mcx<'_>, state: &mut LoopState) -> PgResult<()> {
     use backend_status_seams::BackendState;
 
@@ -188,14 +204,14 @@ fn ready_state(mcx: Mcx<'_>, state: &mut LoopState) -> PgResult<()> {
             BackendState::STATE_IDLEINTRANSACTION_ABORTED,
             None,
         );
-        // Idle-in-transaction timer: IdleInTransactionSessionTimeout GUC
-        // backing var lands with the guc lane (boot default 0: disabled).
+        start_idle_in_transaction_timer(state)?;
     } else if xact::IsTransactionOrTransactionBlock() {
         ps_status_seams::set_ps_display::call("idle in transaction");
         backend_status_seams::pgstat_report_activity::call(
             BackendState::STATE_IDLEINTRANSACTION,
             None,
         );
+        start_idle_in_transaction_timer(state)?;
     } else {
         if commands_async::notifyInterruptPending() {
             commands_async::ProcessNotifyInterrupt(false)?;
@@ -217,8 +233,14 @@ fn ready_state(mcx: Mcx<'_>, state: &mut LoopState) -> PgResult<()> {
         ps_status_seams::set_ps_display::call("idle");
         backend_status_seams::pgstat_report_activity::call(BackendState::STATE_IDLE, None);
 
-        // Idle-session timer: IdleSessionTimeout GUC backing var lands with
-        // the guc lane (boot default 0: disabled).
+        let idle_session_timeout = lmgr_proc::globals::IdleSessionTimeout();
+        if idle_session_timeout > 0 {
+            state.idle_session_timeout_enabled = true;
+            timeout_seams::enable_timeout_after::call(
+                timeout_seams::IDLE_SESSION_TIMEOUT,
+                idle_session_timeout,
+            )?;
+        }
     }
 
     guc::report::report_changed_guc_options();

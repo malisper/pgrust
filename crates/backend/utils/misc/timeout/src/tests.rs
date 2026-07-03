@@ -152,6 +152,22 @@ fn periodic_reenables_itself() {
 }
 
 #[test]
+fn timer_post_raises_interrupt_pending() {
+    setup_thread(9007);
+    RegisterTimeout(STATEMENT_TIMEOUT, handler_a);
+    globals::SetInterruptPending(false);
+
+    enable_timeout_after(STATEMENT_TIMEOUT, 5);
+    advance_ms(10);
+    drain_when_posted();
+
+    // The timer thread raised this backend's InterruptPending alongside the
+    // post, so a CPU-bound CHECK_FOR_INTERRUPTS reaches ProcessInterrupts.
+    assert!(globals::InterruptPending());
+    globals::SetInterruptPending(false);
+}
+
+#[test]
 fn user_timeout_allocation() {
     setup_thread(9005);
     let first = RegisterTimeout(USER_TIMEOUT, handler_a);

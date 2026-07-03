@@ -26,6 +26,7 @@ latch_seams = { path = "../../ipc/latch_seams" }
 standby_seams = { path = "../../ipc/standby_seams" }
 init_small = { path = "../../../utils/init/init_small" }
 guc_tables = { path = "../../../utils/misc/guc_tables" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
 timeout_seams = { path = "../../../utils/misc/timeout_seams" }
 ps_status_seams = { path = "../../../utils/misc/ps_status_seams" }
 elog_seams = { path = "../../../utils/error/elog_seams" }
