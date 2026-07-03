@@ -140,8 +140,11 @@ pub fn standard_executor_start(qd: &mut QueryDescData, mut eflags: i32) -> PgRes
         exec_check_xact_read_only(pstmt);
     }
 
-    if !qd.params.is_null() || !pstmt.paramExecTypes.is_nil() {
-        panic!("standard_ExecutorStart (execMain.c): ParamListInfo/ParamExecData lane not ported");
+    // Extended-protocol bind params ride in qd.params; custom plans fold
+    // PARAM_EXTERN to Consts, and any plan that still reads a Param panics
+    // loudly at expression compile (execexpr T_Param arm).
+    if !pstmt.paramExecTypes.is_nil() {
+        panic!("standard_ExecutorStart (execMain.c): ParamExecData lane not ported");
     }
     if !qd.query_env.is_null() {
         panic!("standard_ExecutorStart (execMain.c): QueryEnvironment wiring not ported");
