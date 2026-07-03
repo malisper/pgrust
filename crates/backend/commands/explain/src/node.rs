@@ -529,7 +529,12 @@ pub fn ExplainNode<'mcx>(
     match node.node_tag() {
         NodeTag::T_SeqScan | NodeTag::T_CteScan => {
             show_scan_qual(&plan.qual, "Filter", node, ancestors, es)?;
-            filtered_count_gap(&plan.qual, es);
+            if !plan.qual.is_nil() {
+                show_instrumentation_count("Rows Removed by Filter", 1, &instrument, es);
+            }
+            if node.node_tag() == NodeTag::T_CteScan {
+                show_ctescan_info(node, es);
+            }
         }
         NodeTag::T_FunctionScan => {
             if es.verbose {
@@ -552,9 +557,6 @@ pub fn ExplainNode<'mcx>(
             show_scan_qual(&plan.qual, "Filter", node, ancestors, es)?;
             if !plan.qual.is_nil() {
                 show_instrumentation_count("Rows Removed by Filter", 1, &instrument, es);
-            }
-            if node.node_tag() == NodeTag::T_CteScan {
-                show_ctescan_info(node, es);
             }
         }
         NodeTag::T_BitmapIndexScan => {
