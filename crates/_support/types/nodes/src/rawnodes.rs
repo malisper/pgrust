@@ -474,6 +474,8 @@ pub struct AlterSeqStmt<'mcx> {
     pub for_identity: bool,
     pub missing_ok: bool,
 }
+
+#[derive(Default)]
 pub struct TableLikeClause<'mcx> {
     pub relation: Option<&'mcx crate::primnodes::RangeVar<'mcx>>,
     pub options: u32,
