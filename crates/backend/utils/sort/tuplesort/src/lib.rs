@@ -124,6 +124,7 @@ pub struct TuplesortData<'m> {
 pub struct Tuplesort(McxOwned<TuplesortTy>);
 
 struct CmpCtx<'a> {
+    mcx: ::mcx::Mcx<'a>,
     keys: &'a [SortSupport],
     only_key: bool,
     variant: &'a SortVariant,
@@ -133,8 +134,9 @@ struct CmpCtx<'a> {
 impl CmpCtx<'_> {
     #[inline]
     fn comparetup(&self, a: &SortTuple, b: &SortTuple) -> i32 {
-        let compare =
-            apply_sort_comparator(a.datum1, a.isnull1, b.datum1, b.isnull1, &self.keys[0]);
+        let compare = ssup::apply_sort_comparator_in(
+            self.mcx, a.datum1, a.isnull1, b.datum1, b.isnull1, &self.keys[0],
+        );
         if compare != 0 {
             return compare;
         }
@@ -144,8 +146,8 @@ impl CmpCtx<'_> {
     /// `qsort_tuple_{unsigned,signed,int32}_compare`: `cmp` folds per instantiation.
     #[inline(always)]
     fn comparetup_spec(&self, cmp: SortComparator, a: &SortTuple, b: &SortTuple) -> i32 {
-        let compare = ssup::apply_sort_comparator_as(
-            cmp, a.datum1, a.isnull1, b.datum1, b.isnull1, &self.keys[0],
+        let compare = ssup::apply_sort_comparator_as_in(
+            cmp, self.mcx, a.datum1, a.isnull1, b.datum1, b.isnull1, &self.keys[0],
         );
         if compare != 0 {
             return compare;
@@ -210,7 +212,8 @@ impl CmpCtx<'_> {
                     nbtree::itup::index_getattr(tuple2, nkey, tup_desc, &mut isnull2),
                 )
             };
-            let compare = apply_sort_comparator(datum1, isnull1, datum2, isnull2, key);
+            let compare =
+                ssup::apply_sort_comparator_in(self.mcx, datum1, isnull1, datum2, isnull2, key);
             if compare != 0 {
                 return compare;
             }
@@ -249,6 +252,7 @@ fn unique_violation_error(index_name: &str) -> Box<PgError> {
 macro_rules! ctx {
     ($st:expr) => {
         CmpCtx {
+            mcx: $st.mcx,
             keys: &$st.sort_keys,
             only_key: $st.only_key,
             variant: &$st.variant,
@@ -1002,11 +1006,14 @@ impl<'m> TuplesortData<'m> {
                     SortComparator::TextC => qsort_tuple(&mut tuples, |a, b| {
                         ctx.comparetup_spec(SortComparator::TextC, a, b)
                     }),
+                    // Shim'd comparisons are fmgr calls; nothing to fold.
+                    SortComparator::Shim(_) => qsort_tuple(&mut tuples, |a, b| ctx.comparetup(a, b)),
                 }
             } else if self.only_key {
-                let key = &self.sort_keys[0];
                 qsort_tuple(&mut tuples, |a, b| {
-                    apply_sort_comparator(a.datum1, a.isnull1, b.datum1, b.isnull1, key)
+                    ssup::apply_sort_comparator_in(
+                        ctx.mcx, a.datum1, a.isnull1, b.datum1, b.isnull1, &ctx.keys[0],
+                    )
                 })
             } else {
                 qsort_tuple(&mut tuples, |a, b| ctx.comparetup(a, b))

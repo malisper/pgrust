@@ -21,3 +21,5 @@ varlena = { path = "../../../utils/adt/varlena" }
 pg_locale = { path = "../../adt/pg_locale" }
 init_small = { path = "../../init/init_small" }
 postgres_seams = { path = "../../../tcop/postgres_seams" }
+types_fmgr = { path = "../../../../_support/types/fmgr" }
+fmgr_seams = { path = "../../fmgr/fmgr_seams" }
