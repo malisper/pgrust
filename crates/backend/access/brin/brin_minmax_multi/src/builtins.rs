@@ -21,16 +21,11 @@ unsafe fn arg_fixed<const N: usize>(fcinfo: &Fcinfo, i: usize) -> [u8; N] {
     out
 }
 
-// VARDATA_ANY view of an inline (non-external) varlena argument.
-// SAFETY: arg i is a live inline varlena image.
-unsafe fn arg_varlena_payload<'a>(fcinfo: &Fcinfo, i: usize) -> &'a [u8] {
-    let p = fcinfo.arg(i).as_usize() as *const u8;
-    let total = ::types_tuple::varatt::varsize_any(p);
-    if ::types_tuple::varatt::varatt_is_1b(p) {
-        core::slice::from_raw_parts(p.add(1), total - 1)
-    } else {
-        core::slice::from_raw_parts(p.add(4), total - 4)
-    }
+// PG_GETARG_*_PP payload: compressed/short forms detoast into the armed
+// result mcx (stored BRIN bounds keep the heap value's form verbatim).
+// SAFETY: arg i is a live varlena image.
+unsafe fn arg_varlena_payload<'a>(fcinfo: &'a Fcinfo, i: usize) -> PgResult<&'a [u8]> {
+    Ok(fcinfo.arg_varlena_packed(i)?.data())
 }
 
 fn fc_dist_float4(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
@@ -89,7 +84,7 @@ fn fc_dist_tid(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum
 
 fn fc_dist_numeric(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: numeric args are live inline varlena images.
-    let (p1, p2) = unsafe { (arg_varlena_payload(fcinfo, 0), arg_varlena_payload(fcinfo, 1)) };
+    let (p1, p2) = unsafe { (arg_varlena_payload(fcinfo, 0)?, arg_varlena_payload(fcinfo, 1)?) };
     let a1 = ::adt_numeric::Num::from_payload(p1);
     let a2 = ::adt_numeric::Num::from_payload(p2);
     let d = ::adt_numeric::ops::numeric_sub_common(a2, a1)?;
@@ -181,7 +176,7 @@ fn fc_dist_macaddr8(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<
 
 fn fc_dist_inet(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: inet args are live inline varlena images.
-    let (pa, pb) = unsafe { (arg_varlena_payload(fcinfo, 0), arg_varlena_payload(fcinfo, 1)) };
+    let (pa, pb) = unsafe { (arg_varlena_payload(fcinfo, 0)?, arg_varlena_payload(fcinfo, 1)?) };
     // inet_struct: family u8, bits u8, ipaddr [u8; 4|16].
     let (fam_a, bits_a) = (pa[0], pa[1] as i32);
     let (fam_b, bits_b) = (pb[0], pb[1] as i32);
