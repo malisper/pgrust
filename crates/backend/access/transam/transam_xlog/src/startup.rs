@@ -682,7 +682,7 @@ pub fn CreateCheckPoint(flags: i32) -> PgResult<bool> {
     wait_for_delay_chkpt(DELAY_CHKPT_COMPLETE)?;
 
     if !shutdown && XLogStandbyInfoActive() {
-        panic!("LogStandbySnapshot not ported (standby.c)");
+        standby_seams::log_standby_snapshot::call()?;
     }
 
     init_small::globals::StartCriticalSection();
