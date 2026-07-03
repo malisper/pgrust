@@ -1325,11 +1325,11 @@ fn transformColumnRef<'mcx>(
     let fields = cref.fields.as_slice();
 
     // plpgsql_pre_column_ref (pl_exec.c): variable takes precedence.
-    if let Some(st) = pstate.p_ref_hook_state.as_plpgsql_params() {
+    let plpgsql_hooks: Option<parser_small1::PlpgsqlHookState<'_>> =
+        pstate.p_ref_hook_state.as_plpgsql_params().copied();
+    if let Some(st) = &plpgsql_hooks {
         if st.resolve_option == parser_small1::PlpgsqlResolveOption::Variable {
-            if let Some(p) =
-                plpgsql_column_ref(mcx, pstate, &st.clone(), fields, cref.location, false)?
-            {
+            if let Some(p) = plpgsql_column_ref(mcx, pstate, st, fields, cref.location, false)? {
                 return Ok(p);
             }
         }
@@ -1432,7 +1432,7 @@ fn transformColumnRef<'mcx>(
 
     // plpgsql_post_column_ref (pl_exec.c): runs whether or not the core
     // resolved, to raise the variable-vs-column ambiguity error.
-    if let Some(st) = pstate.p_ref_hook_state.as_plpgsql_params() {
+    if let Some(st) = &plpgsql_hooks {
         let skip = st.resolve_option == parser_small1::PlpgsqlResolveOption::Variable
             || (node.is_some()
                 && st.resolve_option == parser_small1::PlpgsqlResolveOption::Column);
@@ -1440,7 +1440,7 @@ fn transformColumnRef<'mcx>(
             if let Some(p) = plpgsql_column_ref(
                 mcx,
                 pstate,
-                &st.clone(),
+                st,
                 fields,
                 cref.location,
                 node.is_none(),

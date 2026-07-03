@@ -159,6 +159,16 @@ pub(crate) fn exec_err(code: SqlState, msg: String) -> Box<PgError> {
     Box::new(elog::ereport(ERROR).errcode(code).errmsg(msg).into_error())
 }
 
+impl Drop for Estate<'_> {
+    fn drop(&mut self) {
+        for (_, e) in self.simple_cache.drain() {
+            if let Some(se) = e {
+                plancache::ReleaseCachedPlan(se.cplan);
+            }
+        }
+    }
+}
+
 impl<'a> Estate<'a> {
     pub fn new(func: &'a PlFunction, readonly_func: bool, atomic: bool) -> Estate<'a> {
         let mut datums = Vec::with_capacity(func.datums.len());
@@ -533,8 +543,6 @@ impl<'a> Estate<'a> {
         &mut self,
         expr: &PlExpr,
     ) -> PgResult<Option<(Datum, bool, Oid, i32)>> {
-        use std::collections::hash_map::Entry;
-
         let (psrc, paramnos, argtypes) = EXPR_PLANS.with(|t| {
             let t = t.borrow();
             let e = t.get(&expr.expr_id).expect("plan ensured");
@@ -559,9 +567,9 @@ impl<'a> Estate<'a> {
             }
         }
 
-        if let Entry::Vacant(slot) = self.simple_cache.entry(expr.expr_id) {
-            // Write param types/values BEFORE compile: exec_init_expr reads
-            // the slot types and bakes slot addresses.
+        if !self.simple_cache.contains_key(&expr.expr_id) {
+            // Write param types BEFORE compile: exec_init_expr reads the
+            // slot types and bakes slot addresses.
             let cplan = plancache::GetCachedPlan(
                 psrc,
                 types_portal::ParamListHandle::NULL,
@@ -586,6 +594,7 @@ impl<'a> Estate<'a> {
                 for &dno in &paramnos {
                     let slot = &mut self.param_buf[dno as usize];
                     slot.ptype = argtypes[dno as usize];
+                    slot.pflags = types_portal::params::PARAM_FLAG_CONST;
                 }
                 let bind = types_portal::params::ParamBind {
                     extern_params: Some(
@@ -618,7 +627,7 @@ impl<'a> Estate<'a> {
             })();
             match built {
                 Ok(Some(se)) => {
-                    slot.insert(Some(se));
+                    self.simple_cache.insert(expr.expr_id, Some(se));
                 }
                 Ok(None) => {
                     plancache::ReleaseCachedPlan(cplan);
