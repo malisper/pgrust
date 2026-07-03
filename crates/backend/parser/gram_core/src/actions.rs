@@ -406,8 +406,77 @@ impl<'mcx> Parser<'mcx> {
                 n.if_not_exists = false;
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
-            // PartitionBoundSpec: FOR VALUES WITH (hash_partbound) — HASH lane.
-            393 => panic!("gram_core: HASH partition bounds unported (rule 393)"),
+            // PartitionBoundSpec: FOR VALUES WITH '(' hash_partbound ')'
+            393 => {
+                let mut n = Node::build::<PartitionBoundSpec>(mcx)?;
+                n.strategy = PartitionStrategy::Hash as u8;
+                n.modulus = -1;
+                n.remainder = -1;
+                let opts = view.v(5).list();
+                for opt in opts.iter() {
+                    let d = opt.as_def_elem().expect("hash_partbound DefElem");
+                    let name = d.defname.expect("hash_partbound defname");
+                    match name {
+                        "modulus" => {
+                            if n.modulus != -1 {
+                                return Err(self.errposition_error_code(
+                                    types_error::ERRCODE_DUPLICATE_OBJECT,
+                                    "modulus for hash partition provided more than once".into(),
+                                    d.location,
+                                ));
+                            }
+                            n.modulus = def_get_int32(d);
+                        }
+                        "remainder" => {
+                            if n.remainder != -1 {
+                                return Err(self.errposition_error_code(
+                                    types_error::ERRCODE_DUPLICATE_OBJECT,
+                                    "remainder for hash partition provided more than once".into(),
+                                    d.location,
+                                ));
+                            }
+                            n.remainder = def_get_int32(d);
+                        }
+                        _ => {
+                            return Err(self.errposition_error(
+                                format!(
+                                    "unrecognized hash partition bound specification \"{name}\""
+                                ),
+                                d.location,
+                            ))
+                        }
+                    }
+                }
+                if n.modulus == -1 {
+                    return Err(self.errposition_error(
+                        "modulus for hash partition must be specified".into(),
+                        view.l(3),
+                    ));
+                }
+                if n.remainder == -1 {
+                    return Err(self.errposition_error(
+                        "remainder for hash partition must be specified".into(),
+                        view.l(3),
+                    ));
+                }
+                n.location = view.l(3);
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // hash_partbound_elem: NonReservedWord Iconst
+            397 => {
+                let iv = Node::mk_integer(mcx, view.v(2).ival())?;
+                *yyval = def_elem(mcx, view.v(1).str_val(), Some(iv), view.l(1))?;
+            }
+            // hash_partbound: hash_partbound_elem | hash_partbound ',' hash_partbound_elem
+            398 => {
+                let el = view.v(1).node().expect("hash_partbound_elem");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, el)?);
+            }
+            399 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(3).node().expect("hash_partbound_elem"))?;
+                *yyval = YYSTYPE::List(list);
+            }
             // PartitionBoundSpec: FOR VALUES IN_P '(' expr_list ')'
             394 => {
                 let mut n = Node::build::<PartitionBoundSpec>(mcx)?;
@@ -4131,7 +4200,7 @@ impl<'mcx> Parser<'mcx> {
             143 => *yyval = YYSTYPE::Ival(DropBehavior::DROP_CASCADE as i32),
             144 | 145 => *yyval = YYSTYPE::Ival(DropBehavior::DROP_RESTRICT as i32),
             // AlterTableStmt: ALTER TABLE [IF_P EXISTS] relation_expr
-            // alter_table_cmds (partition/tablespace forms 277-279 stay loud).
+            // alter_table_cmds (tablespace forms 279-280 stay loud).
             275 | 276 => {
                 let (rv, cmds) = if rule == 275 {
                     (view.v(3), view.v(4))
@@ -4143,6 +4212,52 @@ impl<'mcx> Parser<'mcx> {
                 n.cmds = cmds.list();
                 n.objtype = ObjectType::OBJECT_TABLE;
                 n.missing_ok = rule == 276;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // AlterTableStmt: ALTER TABLE [IF_P EXISTS] relation_expr partition_cmd
+            277 | 278 => {
+                let (rv, cmd) = if rule == 277 {
+                    (view.v(3), view.v(4))
+                } else {
+                    (view.v(5), view.v(6))
+                };
+                let mut n = Node::build::<AlterTableStmt>(mcx)?;
+                n.relation = rv.node().expect("relation_expr").as_variant::<RangeVar>();
+                n.cmds = NodeList::make1(mcx, cmd.node().expect("partition_cmd"))?;
+                n.objtype = ObjectType::OBJECT_TABLE;
+                n.missing_ok = rule == 278;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // AlterTableStmt: ALTER INDEX qualified_name index_partition_cmd
+            283 => {
+                let mut n = Node::build::<AlterTableStmt>(mcx)?;
+                n.relation = view.v(3).node().expect("qualified_name").as_variant::<RangeVar>();
+                n.cmds = NodeList::make1(mcx, view.v(4).node().expect("index_partition_cmd"))?;
+                n.objtype = ObjectType::OBJECT_INDEX;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // partition_cmd: ATTACH PARTITION qualified_name PartitionBoundSpec
+            //             | DETACH PARTITION qualified_name opt_concurrently
+            //             | DETACH PARTITION qualified_name FINALIZE
+            // index_partition_cmd: ATTACH PARTITION qualified_name
+            298..=301 => {
+                let mut cmd = Node::build::<PartitionCmd>(mcx)?;
+                cmd.name = view.v(3).node().expect("qualified_name").as_variant::<RangeVar>();
+                let subtype = match rule {
+                    298 => {
+                        cmd.bound = view.v(4).node();
+                        AlterTableType::AT_AttachPartition
+                    }
+                    299 => {
+                        cmd.concurrent = view.v(4).boolean();
+                        AlterTableType::AT_DetachPartition
+                    }
+                    300 => AlterTableType::AT_DetachPartitionFinalize,
+                    _ => AlterTableType::AT_AttachPartition,
+                };
+                let mut n = Node::build::<AlterTableCmd>(mcx)?;
+                n.subtype = subtype;
+                n.def = Some(cmd.seal());
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
             // alter_table_cmds: alter_table_cmd | alter_table_cmds ',' alter_table_cmd
@@ -5576,6 +5691,15 @@ fn alter_table_cmd<'mcx>(
     n.name = name;
     n.def = def;
     Ok(YYSTYPE::Node(Some(n.seal())))
+}
+
+// defGetInt32 (define.c); hash_partbound_elem args are always Integer.
+fn def_get_int32(d: &DefElem<'_>) -> i32 {
+    d.arg
+        .expect("defGetInt32 arg")
+        .as_integer()
+        .expect("defGetInt32 Integer")
+        .ival
 }
 
 // makeDefElem (makefuncs.c).
