@@ -1790,7 +1790,9 @@ mod group_by_hashed {
         assert_eq!(agg.aggstrategy, types_pathnodes::AGG_HASHED);
         assert_eq!(agg.aggsplit, types_pathnodes::AGGSPLIT_SIMPLE);
         assert_eq!(agg.numCols, 1);
-        assert_eq!(agg.grpColIdx, &[1i16]);
+        // Physical child tlist (use_physical_tlist under CP_LABEL_TLIST):
+        // the grouping column sits at its attnum, as C.
+        assert_eq!(agg.grpColIdx, &[2i16]);
         assert_eq!(agg.grpOperators, &[INT4EQ_OP]);
         assert_eq!(agg.grpCollations, &[0u32]);
         assert!(agg.numGroups > 0);
@@ -1802,7 +1804,7 @@ mod group_by_hashed {
         let t0 = agg.plan.targetlist.nth(0).as_target_entry().unwrap();
         assert_eq!(t0.resname, Some("val"));
         let v0 = t0.expr.as_var().unwrap();
-        assert_eq!((v0.varno, v0.varattno), (OUTER_VAR, 1));
+        assert_eq!((v0.varno, v0.varattno), (OUTER_VAR, 2));
         let t1 = agg.plan.targetlist.nth(1).as_target_entry().unwrap();
         let aggref = t1.expr.as_aggref().unwrap();
         assert_eq!((aggref.aggno, aggref.aggtransno), (0, 0));
@@ -1812,9 +1814,13 @@ mod group_by_hashed {
         let child = agg.plan.lefttree.unwrap();
         assert_eq!(child.node_tag(), NodeTag::T_SeqScan);
         let ctl = &child.as_seq_scan().unwrap().scan.plan.targetlist;
+        assert_eq!(ctl.len(), 2);
         let c0 = ctl.nth(0).as_target_entry().unwrap();
-        assert_eq!(c0.ressortgroupref, 1);
-        assert_eq!(c0.expr.as_var().unwrap().varattno, 2);
+        assert_eq!(c0.ressortgroupref, 0);
+        assert_eq!(c0.expr.as_var().unwrap().varattno, 1);
+        let c1 = ctl.nth(1).as_target_entry().unwrap();
+        assert_eq!(c1.ressortgroupref, 1);
+        assert_eq!(c1.expr.as_var().unwrap().varattno, 2);
     }
 }
 
@@ -3046,7 +3052,7 @@ mod having_distinct_sorted {
         let agg = plan.as_agg().unwrap();
         assert_eq!(agg.aggstrategy, types_pathnodes::AGG_HASHED);
         assert_eq!(agg.numCols, 1);
-        assert_eq!(agg.grpColIdx, &[1i16]);
+        assert_eq!(agg.grpColIdx, &[2i16]);
         assert_eq!(agg.grpOperators, &[INT4EQ_OP]);
         // No aggregates: the tlist is just the grouping Var.
         assert_eq!(agg.plan.targetlist.len(), 1);
