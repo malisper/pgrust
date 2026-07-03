@@ -63,18 +63,6 @@ fn install_fixture() {
                 typisdefined: true,
             }))
         });
-        namespace_seams::type_is_visible::set(|typid| Ok(typid != 20000));
-        namespace_seams::is_temp_namespace::set(|_| false);
-        syscache_seams::pg_type_typnamespace::set(|typid| {
-            Ok(Some(if typid == 20000 { 20001 } else { 11 }))
-        });
-        syscache_seams::pg_namespace_nspname::set(|nspid| {
-            Ok((nspid == 20001).then(|| {
-                let mut n = NameData::default();
-                n.namestrcpy("my schema");
-                n
-            }))
-        });
         fmgr_seams::fmgr_info::set(|oid| match oid {
             VARCHARTYPMODOUT => Ok(types_fmgr::FmgrInfo::new(
                 varchartypmodout_fn,
