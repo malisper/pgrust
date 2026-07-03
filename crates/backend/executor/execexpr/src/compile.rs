@@ -415,6 +415,12 @@ fn build_agg_trans<'mcx>(
         let fn_addr = flinfo.fn_addr;
         let fn_strict = flinfo.fn_strict;
         if let Some(ord) = spec.ordered {
+            if spec.aggfilter.is_some() {
+                panic!(
+                    "ExecBuildAggTrans (execExpr.c): FILTER over non-presorted \
+                     DISTINCT/ORDER BY aggregate not ported"
+                );
+            }
             build_agg_trans_ordered(&mut state, mcx, spec, ord, fn_strict, params)?;
             continue;
         }
