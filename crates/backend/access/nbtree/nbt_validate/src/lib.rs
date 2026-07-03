@@ -28,8 +28,6 @@ fn info(msg: String) -> PgResult<()> {
         .finish(ErrorLocation::new("nbtvalidate.c", 0, "btvalidate"))
 }
 
-// btvalidate: whole-opfamily checks run per opclass (C accepts the
-// duplication).
 pub fn btvalidate(opclassoid: Oid) -> PgResult<bool> {
     let ctx = MemoryContext::new("btvalidate");
     let mcx = ctx.mcx();
@@ -221,7 +219,6 @@ pub fn btvalidate(opclassoid: Oid) -> PgResult<bool> {
     Ok(result)
 }
 
-// btadjustmembers: choose dependency targets for new btree opfamily members.
 pub fn btadjustmembers(
     opfamilyoid: Oid,
     opclassoid: Oid,

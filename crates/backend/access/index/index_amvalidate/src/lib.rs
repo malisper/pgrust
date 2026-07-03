@@ -19,10 +19,8 @@ pub struct OpFamilyOpFuncGroup {
     pub functionset: u64,
 }
 
-// identify_opfamily_groups: one group per lefttype/righttype pair present in
-// the family's operator and support-function lists (bit K set for
-// strategy/procnum K < 64). Lists must come from AMOPSTRATEGY/AMPROCNUM in
-// cache order.
+// One group per lefttype/righttype pair; bit K set for strategy/procnum
+// K < 64. Lists must arrive in AMOPSTRATEGY/AMPROCNUM cache order.
 pub fn identify_opfamily_groups<'mcx>(
     mcx: Mcx<'mcx>,
     oprlist: &[PgAmopRow],
@@ -80,8 +78,7 @@ pub fn identify_opfamily_groups<'mcx>(
     Ok(result)
 }
 
-// check_amproc_signature: result type must match exactly; args match exactly
-// or binary-coercibly.
+// Result type must match exactly; args exactly or binary-coercibly.
 pub fn check_amproc_signature(
     funcid: Oid,
     restype: Oid,
@@ -118,7 +115,6 @@ pub fn check_amoptsproc_signature(funcid: Oid) -> PgResult<bool> {
     check_amproc_signature(funcid, VOIDOID, true, 1, 1, &[INTERNALOID])
 }
 
-// check_amop_signature: binary operators only, exact type matches.
 pub fn check_amop_signature(opno: Oid, restype: Oid, lefttype: Oid, righttype: Oid) -> PgResult<bool> {
     let shape = syscache_seams::lookup_pg_operator_shape::call(opno)?
         .unwrap_or_else(|| panic!("cache lookup failed for operator {opno}"));
@@ -129,8 +125,6 @@ pub fn check_amop_signature(opno: Oid, restype: Oid, lefttype: Oid, righttype: O
         && shape.oprright != InvalidOid)
 }
 
-// opclass_for_family_datatype: the AM's opclass whose family and input type
-// match; InvalidOid if none.
 pub fn opclass_for_family_datatype(amoid: Oid, opfamilyoid: Oid, datatypeoid: Oid) -> PgResult<Oid> {
     let scratch = mcx::MemoryContext::new("opclass_for_family_datatype");
     let rows = syscache_seams::lookup_pg_opclass_rows_by_am::call(scratch.mcx(), amoid)?;

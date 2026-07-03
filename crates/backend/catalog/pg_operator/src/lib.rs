@@ -680,3 +680,25 @@ pub fn makeOperatorDependencies(
 
     Ok(myself)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::validOperatorName;
+
+    #[test]
+    fn valid_operator_names() {
+        for ok in ["===", "<%", "!==", "@#@", "<<<", "?-", "-", "+", "~", "<@>"] {
+            assert!(validOperatorName(ok), "{ok}");
+        }
+        for bad in [
+            "", "!=", "a<", "<a", "=-", "<>-", "/*", "a--", "--", "<-/*", "++",
+            &"~".repeat(64),
+        ] {
+            assert!(!validOperatorName(bad), "{bad}");
+        }
+        assert!(validOperatorName(&"~".repeat(63)));
+        assert!(validOperatorName("?-"));
+        assert!(validOperatorName("@-"));
+        assert!(!validOperatorName("*-"));
+    }
+}
