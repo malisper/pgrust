@@ -182,8 +182,6 @@ pub fn empty_pathtarget_id<'mcx>(root: &mut PlannerInfo<'mcx>) -> PtId {
     root.alloc_pathtarget(PathTarget::new(mcx))
 }
 
-// setup_simple_rel_arrays (relnode.c).
-
 // fetch_upper_rel (relnode.c), relids=NULL form.
 pub fn fetch_upper_rel<'mcx>(root: &mut PlannerInfo<'mcx>, kind: UpperRelationKind) -> RelId {
     fetch_upper_rel_with_relids(root, kind, None)

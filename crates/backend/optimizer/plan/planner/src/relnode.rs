@@ -141,4 +141,3 @@ pub fn build_simple_rel_child<'mcx>(
     Ok(id)
 }
 
-// fetch_upper_rel (relnode.c), relids=NULL form.
