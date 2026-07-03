@@ -1259,7 +1259,9 @@ impl<'m> TuplesortData<'m> {
 
     /// TSS_BOUNDED arm; out of line so the TSS_INITIAL fast path stays lean
     /// (C's shape: the arm's work is behind the comparetup fn pointer).
-    #[inline(never)]
+    /// Discard leg inline (per-put; C reaches it in one call, we'd pay two),
+    /// sift leg outlined.
+    #[inline]
     fn puttuple_bounded(&mut self, tuple: SortTuple) -> PgResult<()> {
         let compare = {
             let ctx = ctx!(self);
@@ -1267,19 +1269,24 @@ impl<'m> TuplesortData<'m> {
         };
         if compare <= 0 {
             self.free_sort_tuple(&tuple);
-            cfi()?;
+            cfi()
         } else {
-            let top = self.memtuples[0];
-            self.free_sort_tuple(&top);
-            let mut tuples = mem::replace(&mut self.memtuples, PgVec::new_in(self.mcx));
-            let count = tuples.len();
-            {
-                let ctx = ctx!(self);
-                dispatch_cmp!(ctx, |cmp| heap_replace_top(cmp, &mut tuples, count, tuple))?;
-            }
-            self.memtuples = tuples;
+            self.puttuple_bounded_replace(tuple)
         }
-        Ok(())
+    }
+
+    #[inline(never)]
+    fn puttuple_bounded_replace(&mut self, tuple: SortTuple) -> PgResult<()> {
+        let top = self.memtuples[0];
+        self.free_sort_tuple(&top);
+        let mut tuples = mem::replace(&mut self.memtuples, PgVec::new_in(self.mcx));
+        let count = tuples.len();
+        let result = {
+            let ctx = ctx!(self);
+            dispatch_cmp!(ctx, |cmp| heap_replace_top(cmp, &mut tuples, count, tuple))
+        };
+        self.memtuples = tuples;
+        result
     }
 
     /// `grow_memtuples`; chunk space approximated as capacity * sizeof(SortTuple).
