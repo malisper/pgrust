@@ -512,9 +512,9 @@ fn process_config_file_applies_and_reverts() {
 #[test]
 fn seams_route_to_bodies() {
     setup();
-    let level = guc_seams::new_guc_nest_level::call();
+    let level = NewGUCNestLevel();
     AtEOXact_GUC(true, level);
-    guc_seams::at_start_guc::call();
+    AtStart_GUC();
     AtEOXact_GUC(true, 1);
     guc_seams::set_config_option_internal_dynamic_default::call("application_name", "seamtest")
         .unwrap();

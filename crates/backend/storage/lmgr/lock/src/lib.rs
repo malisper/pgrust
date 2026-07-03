@@ -179,6 +179,15 @@ fn my_procno() -> ProcNumber {
     lmgr_proc::MyProc().expect("lock manager entered without a PGPROC")
 }
 
+// 2PC lock transfer is phase 2.
+pub fn AtPrepare_Locks() -> PgResult<()> {
+    panic!("lock.c AtPrepare_Locks: 2PC lock transfer not ported")
+}
+
+pub fn PostPrepare_Locks(_xid: types_core::TransactionId) -> PgResult<()> {
+    panic!("lock.c PostPrepare_Locks: 2PC lock transfer not ported")
+}
+
 pub fn init_seams() {
     use lock_seams as s;
     use types_storage::lock::{DEFAULT_LOCKMETHOD, USER_LOCKMETHOD};
@@ -204,12 +213,6 @@ pub fn init_seams() {
     s::grant_awaited_lock::set(GrantAwaitedLock);
     s::reset_awaited_lock::set(ResetAwaitedLock);
     s::remove_from_wait_queue::set(RemoveFromWaitQueue);
-    s::virtual_xact_lock_table_insert::set(VirtualXactLockTableInsert);
-    // 2PC lock transfer is phase 2 (AtPrepare_Locks/PostPrepare_Locks).
-    s::at_prepare_locks::set(|| panic!("lock.c AtPrepare_Locks: 2PC lock transfer not ported"));
-    s::post_prepare_locks::set(|_| {
-        panic!("lock.c PostPrepare_Locks: 2PC lock transfer not ported")
-    });
 
     use guc_tables::{vars, GucVarAccessors};
     vars::max_locks_per_xact.install(GucVarAccessors {

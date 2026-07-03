@@ -620,7 +620,6 @@ pub fn init_seams() {
     sinval_seams::send_shared_invalid_messages::set(SendSharedInvalidMessages);
     sinval_seams::receive_shared_invalid_messages::set(ReceiveSharedInvalidMessages);
     sinval_seams::handle_catchup_interrupt::set(HandleCatchupInterrupt);
-    sinval_seams::get_next_local_transaction_id::set(GetNextLocalTransactionId);
 }
 
 #[cfg(test)]

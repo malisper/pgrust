@@ -32,13 +32,16 @@ bufmgr = { path = "../../../storage/buffer/bufmgr" }
 smgr = { path = "../../../storage/smgr/smgr" }
 launcher = { path = "../../../replication/launcher" }
 pg_prng = { path = "../../../../common/pg_prng" }
+varsup = { path = "../varsup" }
+waitevent = { path = "../../../utils/activity/waitevent" }
+lmgr = { path = "../../../storage/lmgr/lmgr" }
+timeout = { path = "../../../utils/misc/timeout" }
 
 xact_seams = { path = "../xact_seams" }
 transam_xlog_seams = { path = "../transam_xlog_seams" }
 xloginsert_seams = { path = "../xloginsert_seams" }
 xlogrecovery_seams = { path = "../xlogrecovery_seams" }
 transam_seams = { path = "../transam_seams" }
-varsup_seams = { path = "../varsup_seams" }
 subtrans_seams = { path = "../subtrans_seams" }
 commit_ts_seams = { path = "../commit_ts_seams" }
 multixact_seams = { path = "../multixact_seams" }
@@ -65,12 +68,10 @@ backend_status_seams = { path = "../../../utils/activity/backend_status_seams" }
 backend_progress_seams = { path = "../../../utils/activity/backend_progress_seams" }
 procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
 snapmgr_seams = { path = "../../../utils/time/snapmgr_seams" }
-lmgr_seams = { path = "../../../storage/lmgr/lmgr_seams" }
 relcache_seams = { path = "../../../utils/cache/relcache_seams" }
 namespace_seams = { path = "../../../catalog/namespace_seams" }
 timeout_seams = { path = "../../../utils/misc/timeout_seams" }
 syncrep_seams = { path = "../../../replication/syncrep_seams" }
 aio_seams = { path = "../../../storage/aio/aio_seams" }
-waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
 condition_variable_seams = { path = "../../../storage/lmgr/condition_variable_seams" }
 xact_portal_seams = { path = "../xact_portal_seams" }

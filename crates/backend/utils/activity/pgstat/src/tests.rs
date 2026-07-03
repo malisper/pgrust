@@ -442,8 +442,8 @@ fn seams_are_wired() {
     assert_eq!(db_pending(5).unwrap().temp_files, 1);
     assert_eq!(pgstat_seams::pgstat_get_slru_index::call("notify"), 3);
     assert!(pgstat_seams::pgstat_init_relation::call(1, b'r'));
-    pgstat_xact_seams::at_eoxact_pgstat::call(true, false);
-    pgstat_xact_seams::at_prepare_pgstat::call().unwrap();
-    pgstat_xact_seams::post_prepare_pgstat::call();
+    xact::AtEOXact_PgStat(true, false);
+    xact::AtPrepare_PgStat().unwrap();
+    xact::PostPrepare_PgStat();
     assert!(guc_tables::vars::pgstat_track_counts.read());
 }

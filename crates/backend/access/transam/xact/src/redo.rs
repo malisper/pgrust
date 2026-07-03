@@ -284,7 +284,7 @@ fn xact_redo_commit(
     let max_xid = transam_seams::transaction_id_latest::call(xid, &parsed.subxacts);
 
     // Make sure nextXid is beyond any XID mentioned in the record.
-    varsup_seams::advance_next_full_transaction_id_past_xid::call(max_xid)?;
+    varsup::AdvanceNextFullTransactionIdPastXid(max_xid)?;
 
     debug_assert_eq!(
         (parsed.xinfo & XACT_XINFO_HAS_ORIGIN) == 0,
@@ -369,7 +369,7 @@ fn xact_redo_abort(
     debug_assert!(xid != InvalidTransactionId);
 
     let max_xid = transam_seams::transaction_id_latest::call(xid, &parsed.subxacts);
-    varsup_seams::advance_next_full_transaction_id_past_xid::call(max_xid)?;
+    varsup::AdvanceNextFullTransactionIdPastXid(max_xid)?;
 
     if xlogutils::standby_state() == STANDBY_DISABLED {
         transam_seams::transaction_id_abort_tree::call(xid, &parsed.subxacts)?;

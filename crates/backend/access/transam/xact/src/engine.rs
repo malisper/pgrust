@@ -338,10 +338,10 @@ fn StartTransaction() -> PgResult<()> {
 
     let transaction_timeout = lmgr_proc::globals::TransactionTimeout();
     if transaction_timeout > 0 {
-        timeout_seams::enable_timeout_after::call(
+        timeout::enable_timeout_after(
             timeout_seams::TRANSACTION_TIMEOUT,
             transaction_timeout,
-        )?;
+        );
     }
 
     ShowTransactionState("StartTransaction");
@@ -420,7 +420,7 @@ fn CommitTransaction() -> PgResult<()> {
     });
 
     if lmgr_proc::globals::TransactionTimeout() > 0 {
-        timeout_seams::disable_timeout::call(timeout_seams::TRANSACTION_TIMEOUT, false)?;
+        timeout::disable_timeout(timeout_seams::TRANSACTION_TIMEOUT, false);
     }
 
     let latest_xid = if !is_parallel_worker {
@@ -558,7 +558,7 @@ fn PrepareTransaction() -> PgResult<()> {
     xs(|s| s.current_mut().state = TRANS_PREPARE);
 
     if lmgr_proc::globals::TransactionTimeout() > 0 {
-        timeout_seams::disable_timeout::call(timeout_seams::TRANSACTION_TIMEOUT, false)?;
+        timeout::disable_timeout(timeout_seams::TRANSACTION_TIMEOUT, false);
     }
 
     let prepared_at = timestamp_seams::get_current_timestamp::call();
@@ -694,7 +694,7 @@ fn AbortTransaction() -> PgResult<()> {
     init_small::globals::HoldInterrupts();
 
     if lmgr_proc::globals::TransactionTimeout() > 0 {
-        timeout_seams::disable_timeout::call(timeout_seams::TRANSACTION_TIMEOUT, false)?;
+        timeout::disable_timeout(timeout_seams::TRANSACTION_TIMEOUT, false);
     }
 
     AtAbort_Memory();
@@ -702,7 +702,7 @@ fn AbortTransaction() -> PgResult<()> {
 
     let _ = lwlock::LWLockReleaseAll();
 
-    waitevent_seams::pgstat_report_wait_end::call();
+    waitevent::pgstat_report_wait_end();
     backend_progress_seams::pgstat_progress_end_command::call();
 
     aio_seams::pgaio_error_cleanup::call();
@@ -715,7 +715,7 @@ fn AbortTransaction() -> PgResult<()> {
 
     lmgr_proc::LockErrorCleanup()?;
 
-    timeout_seams::reschedule_timeouts::call()?;
+    timeout::reschedule_timeouts();
 
     libpq_pqsignal::unblock_signals();
 
@@ -1772,7 +1772,7 @@ fn CommitSubTransaction() -> PgResult<()> {
 
     if xs(|s| s.current().full_transaction_id.is_valid()) {
         let xid = xs(|s| s.current().full_transaction_id.xid());
-        lmgr_seams::xact_lock_table_delete::call(xid)?;
+        lmgr::XactLockTableDelete(xid)?;
     }
 
     release_subxact_owner_locks(true)?;
@@ -1810,7 +1810,7 @@ fn AbortSubTransaction() -> PgResult<()> {
 
     let _ = lwlock::LWLockReleaseAll();
 
-    waitevent_seams::pgstat_report_wait_end::call();
+    waitevent::pgstat_report_wait_end();
     backend_progress_seams::pgstat_progress_end_command::call();
 
     aio_seams::pgaio_error_cleanup::call();
@@ -1823,7 +1823,7 @@ fn AbortSubTransaction() -> PgResult<()> {
 
     lmgr_proc::LockErrorCleanup()?;
 
-    timeout_seams::reschedule_timeouts::call()?;
+    timeout::reschedule_timeouts();
     libpq_pqsignal::unblock_signals();
 
     ShowTransactionState("AbortSubTransaction");

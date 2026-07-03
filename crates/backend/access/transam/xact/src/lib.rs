@@ -278,7 +278,7 @@ pub fn GetStableLatestTransactionId() -> PgResult<TransactionId> {
     }
     let mut stablexid = GetTopTransactionIdIfAny();
     if stablexid == InvalidTransactionId {
-        stablexid = varsup_seams::read_next_transaction_id::call()?;
+        stablexid = varsup::ReadNextTransactionId()?;
     }
     debug_assert!(stablexid != InvalidTransactionId);
     xs(|s| s.stable_latest = (my_lxid, stablexid));
@@ -323,7 +323,7 @@ fn assign_transaction_id_at(idx: usize) -> PgResult<()> {
         && xlog_seams::xlog_logical_info_active::call()
         && !xs(|s| s.node(0).did_log_xid);
 
-    let full = varsup_seams::get_new_transaction_id::call(is_subxact)?;
+    let full = varsup::GetNewTransactionId(is_subxact)?;
     xs(|s| {
         s.node_mut(idx).full_transaction_id = full;
         if !is_subxact {
@@ -363,7 +363,7 @@ fn assign_transaction_id_at(idx: usize) -> PgResult<()> {
         }
         resowner::SetCurrentResourceOwner(owner);
     }
-    let insert_result = lmgr_seams::xact_lock_table_insert::call(full.xid());
+    let insert_result = lmgr::XactLockTableInsert(full.xid());
     resowner::SetCurrentResourceOwner(prev_owner);
     insert_result?;
 

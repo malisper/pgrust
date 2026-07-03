@@ -20,6 +20,5 @@ miscinit = { path = "../../init/miscinit" }
 datum = { path = "../../../../_support/types/datum" }
 ipc_seams = { path = "../../../storage/ipc/ipc_seams" }
 pgstat_seams = { path = "../pgstat_seams" }
-pgstat_xact_seams = { path = "../pgstat_xact_seams" }
 timestamp_seams = { path = "../../adt/timestamp_seams" }
 xact_seams = { path = "../../../access/transam/xact_seams" }

@@ -53,5 +53,4 @@ pub fn init_seams() {
         set: |v| MAX_PARALLEL_APPLY_WORKERS_PER_SUBSCRIPTION.store(v, Ordering::Relaxed),
     });
     launcher_seams::apply_launcher_register::set(ApplyLauncherRegister);
-    launcher_seams::at_eoxact_apply_launcher::set(AtEOXact_ApplyLauncher);
 }

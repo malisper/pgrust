@@ -171,7 +171,8 @@ pub fn initialize_guc_options() -> PgResult<()> {
 }
 
 // InitializeGUCOptionsFromEnvironment (guc.c:1589). The stack-rlimit branch
-// needs get_stack_depth_rlimit (tcop/postgres.c, unported); deferred with it.
+// needs get_stack_depth_rlimit (ported in stack_depth, which depends on guc);
+// deferred for layering.
 pub fn initialize_guc_options_from_environment() -> PgResult<()> {
     if let Ok(env) = std::env::var("PGPORT") {
         crate::SetConfigOption("port", Some(&env), PGC_POSTMASTER, PGC_S_ENV_VAR)?;

@@ -84,14 +84,6 @@ pub fn init_seams() {
         checkpointer::pgstat_count_checkpointer_slru_written,
     );
 
-    pgstat_xact_seams::at_eoxact_pgstat::set(xact::AtEOXact_PgStat);
-    pgstat_xact_seams::at_eosubxact_pgstat::set(xact::AtEOSubXact_PgStat);
-    pgstat_xact_seams::at_prepare_pgstat::set(xact::AtPrepare_PgStat);
-    pgstat_xact_seams::post_prepare_pgstat::set(xact::PostPrepare_PgStat);
-    pgstat_xact_seams::pgstat_get_transactional_drops::set(xact::pgstat_get_transactional_drops);
-    pgstat_xact_seams::pgstat_execute_transactional_drops::set(
-        xact::pgstat_execute_transactional_drops,
-    );
 
     // pgstat.c owns these GUC variables' backing storage (pgstat.c:204-205).
     use guc_tables::{vars, GucVarAccessors};

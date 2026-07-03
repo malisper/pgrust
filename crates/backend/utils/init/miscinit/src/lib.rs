@@ -1,8 +1,8 @@
 //! miscinit.c: processing-mode/backend-type globals, the user-id /
 //! security-restriction state machine, the LocalLatchData home,
 //! ClientConnectionInfo serialization, and the lock-file interlock.
-//! Deferred (owners unported): InitStandaloneProcess,
-//! InitializeSessionUserId, has_rolreplication, the system_user() SQL wrapper.
+//! Deferred (owners unported): InitStandaloneProcess, has_rolreplication,
+//! the system_user() SQL wrapper.
 
 #![allow(non_snake_case)]
 
