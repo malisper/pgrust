@@ -588,11 +588,14 @@ fn get_outer_tuple<'mcx, O: HashJoinOuter<'mcx>>(
         let Some(slot_id) = outer.exec_proc(estate)? else {
             return Ok(None);
         };
-        estate.reset_expr_context(ecxt);
+        {
+            let e = estate.ecxt_mut(ecxt);
+            e.reset();
+            e.ecxt_outertuple = Some(slot_id);
+        }
         let slot = &mut estate.es_tupleTable[slot_id.0 as usize];
         let mut slots = EvalSlots { scan: None, inner: Some(slot), outer: None };
         let r = exec_eval_expr(&mut node.outer_hash_expr, &mut slots)?;
-        estate.ecxt_mut(ecxt).ecxt_outertuple = Some(slot_id);
         node.hj_OuterNotEmpty = true;
         Ok(Some(r.value.as_u32()))
     } else {
@@ -623,8 +626,7 @@ fn get_outer_tuple<'mcx, O: HashJoinOuter<'mcx>>(
     }
 }
 
-// ExecScanHashBucket: walk the chain from hj_CurTuple, prefilter on hashvalue,
-// recheck hashclauses via ExecQual. No allocation per probe.
+// ExecScanHashBucket: prefilter on hashvalue, recheck via ExecQual.
 fn scan_hash_bucket<'mcx>(
     node: &mut HashJoinState<'mcx>,
     hash_state: &mut HashState<'mcx>,
@@ -639,26 +641,33 @@ fn scan_hash_bucket<'mcx>(
         table.bucket_head(node.hj_CurBucketNo)
     };
 
+    if cur.is_null() {
+        return Ok(false);
+    }
+    // Slot pair/ecxt/EvalSlots resolved once per probe row (C's shape).
+    let hslot = hash_state.hash_tuple_slot;
+    let mcx = estate.es_query_cxt;
+    let ecxt = node.ps_ExprContext;
+    let outer_id = estate
+        .ecxt(ecxt)
+        .ecxt_outertuple
+        .expect("hashjoin outer tuple set");
+    estate.ecxt_mut(ecxt).ecxt_innertuple = Some(hslot);
+    let tbl = &mut estate.es_tupleTable[..];
+    let [inner, outer] = tbl
+        .get_disjoint_mut([hslot.0 as usize, outer_id.0 as usize])
+        .expect("distinct in-range hashjoin slot ids");
+    let mut slots = EvalSlots { scan: None, inner: Some(inner), outer: Some(outer) };
+
     while !cur.is_null() {
         // hashvalue-compare before tuple deref: 2 loads per non-matching link.
         let hdr = unsafe { &*cur };
         if hdr.hashvalue() == hashvalue {
             let tuple = unsafe { HashJoinTupleHdr::mintuple(cur) };
-            let hslot = hash_state.hash_tuple_slot;
-            let mcx = estate.es_query_cxt;
+            let inner = slots.inner.as_deref_mut().expect("inner slot bound");
             // SAFETY: entry images live in the batch arena until reset.
-            unsafe {
-                exectuples::exec_store_minimal_tuple_ptr(
-                    &mut estate.es_tupleTable[hslot.0 as usize],
-                    mcx,
-                    tuple,
-                )
-            };
-            estate.ecxt_mut(node.ps_ExprContext).ecxt_innertuple = Some(hslot);
-            let ecxt = node.ps_ExprContext;
-            let hashclauses = node.hashclauses.as_deref_mut();
-            let m = with_probe_slots(ecxt, hslot, estate, |slots| exec_qual(hashclauses, slots))?;
-            if m {
+            unsafe { exectuples::exec_store_minimal_tuple_ptr(inner, mcx, tuple) };
+            if exec_qual(node.hashclauses.as_deref_mut(), &mut slots)? {
                 node.hj_CurTuple = cur;
                 return Ok(true);
             }
