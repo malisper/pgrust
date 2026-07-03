@@ -59,6 +59,22 @@ impl<'mcx> HeapTuple<'mcx> {
         }
     }
 
+    /// Zeroed `t_len`-byte image; the caller initializes header and data
+    /// (the heaptoast rebuild path — C's `palloc0` + memcpy'd header).
+    pub fn alloc_zeroed(mcx: Mcx<'mcx>, t_len: usize) -> PgResult<HeapTuple<'mcx>> {
+        let image = alloc_image(mcx, t_len, true)?;
+        // SAFETY: fresh zeroed image of t_len bytes.
+        unsafe {
+            Ok(HeapTuple::from_image(
+                mcx,
+                image,
+                t_len as u32,
+                ItemPointerData::invalid(),
+                ::types_core::InvalidOid,
+            ))
+        }
+    }
+
     #[inline]
     pub fn as_tuple(&self) -> &HeapTupleData<'mcx> {
         &self.htup
@@ -73,6 +89,17 @@ impl<'mcx> HeapTuple<'mcx> {
     pub fn image(&self) -> &[u8] {
         // SAFETY: the image is owned, live, and t_len bytes long.
         unsafe { core::slice::from_raw_parts(self.htup.header_ptr(), self.htup.t_len as usize) }
+    }
+
+    #[inline]
+    pub fn image_mut(&mut self) -> &mut [u8] {
+        // SAFETY: the image is owned, live, unique, and t_len bytes long.
+        unsafe {
+            core::slice::from_raw_parts_mut(
+                self.htup.header_ptr().cast_mut(),
+                self.htup.t_len as usize,
+            )
+        }
     }
 }
 

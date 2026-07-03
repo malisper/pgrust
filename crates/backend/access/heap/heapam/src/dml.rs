@@ -174,10 +174,13 @@ fn heap_prepare_insert(
 
     if relation.rd_rel.relkind != RELKIND_RELATION && relation.rd_rel.relkind != RELKIND_MATVIEW {
         debug_assert!(!tup.has_external());
-    } else if tup.has_external() || tup.t_len as usize > TOAST_TUPLE_THRESHOLD {
-        unported("heap_toast_insert_or_update (heaptoast.c)");
     }
     Ok(())
+}
+
+fn needs_toast(relation: &RelationData<'_>, tup: &HeapTupleData<'_>) -> bool {
+    (relation.rd_rel.relkind == RELKIND_RELATION || relation.rd_rel.relkind == RELKIND_MATVIEW)
+        && (tup.has_external() || tup.t_len as usize > TOAST_TUPLE_THRESHOLD)
 }
 
 /// `heap_insert`: stamps `tup` and stores it; `tup.t_self` receives the TID.
@@ -192,7 +195,42 @@ pub fn heap_insert(
 
     heap_prepare_insert(relation, tup, xid, cid, options)?;
 
-    let pin = RelationGetBufferForTuple(relation, tup.t_len as usize, None, options)?;
+    // Cold: scratch context per oversized-value insert (C's palloc'd toasted
+    // copy dies at heap_freetuple; here it dies with the context).
+    let toast_ctx;
+    let mut toasted = None;
+    let mut erased;
+    let heaptup: &mut HeapTupleData<'_> = if needs_toast(relation, tup) {
+        toast_ctx = ::mcx::MemoryContext::new("heap_toast_insert_or_update");
+        toasted = heaptoast_seams::heap_toast_insert_or_update::call(
+            toast_ctx.mcx(),
+            relation,
+            tup,
+            None,
+            options,
+        )?;
+        match toasted.as_mut() {
+            Some(t) => {
+                let ht = t.as_tuple_mut();
+                // SAFETY: image owned by toast_ctx, which outlives every use
+                // in this function (lifetime-erased view, page_tuple model).
+                erased = unsafe {
+                    HeapTupleData::from_raw_parts(
+                        ht.header_ptr().cast_mut(),
+                        ht.t_len,
+                        ht.t_self,
+                        ht.t_tableOid,
+                    )
+                };
+                &mut erased
+            }
+            None => tup,
+        }
+    } else {
+        tup
+    };
+
+    let pin = RelationGetBufferForTuple(relation, heaptup.t_len as usize, None, options)?;
 
     predicate_seams::check_for_serializable_conflict_in::call(
         relation,
@@ -200,7 +238,7 @@ pub fn heap_insert(
         InvalidBlockNumber,
     )?;
 
-    RelationPutHeapTuple(relation, &pin, tup, (options & HEAP_INSERT_SPECULATIVE) != 0)?;
+    RelationPutHeapTuple(relation, &pin, heaptup, (options & HEAP_INSERT_SPECULATIVE) != 0)?;
 
     if pin.page().is_all_visible() {
         unported("visibilitymap_clear (visibilitymap.c)");
@@ -212,7 +250,7 @@ pub fn heap_insert(
         let page = pin.page();
         let mut info = XLOG_HEAP_INSERT;
         let mut bufflags = REGBUF_STANDARD;
-        let offnum = ItemPointerGetOffsetNumber(&tup.t_self);
+        let offnum = ItemPointerGetOffsetNumber(&heaptup.t_self);
 
         if offnum == FirstOffsetNumber && page.max_offset_number() == FirstOffsetNumber {
             info |= XLOG_HEAP_INIT_PAGE;
@@ -227,12 +265,12 @@ pub fn heap_insert(
         xlrec[0..2].copy_from_slice(&offnum.to_ne_bytes());
         xlrec[2] = flags;
 
-        let xlhdr = xl_heap_header(tup.t_data());
+        let xlhdr = xl_heap_header(heaptup.t_data());
         // SAFETY: tuple image is t_len readable bytes.
         let body = unsafe {
             core::slice::from_raw_parts(
-                tup.header_ptr().add(SizeofHeapTupleHeader),
-                tup.t_len as usize - SizeofHeapTupleHeader,
+                heaptup.header_ptr().add(SizeofHeapTupleHeader),
+                heaptup.t_len as usize - SizeofHeapTupleHeader,
             )
         };
 
@@ -256,10 +294,15 @@ pub fn heap_insert(
     bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_UNLOCK)?;
     pin.release();
 
-    inval::invalidate::CacheInvalidateHeapTuple(relation, tup, None)?;
+    inval::invalidate::CacheInvalidateHeapTuple(relation, heaptup, None)?;
 
     if relation.pgstat_enabled.get() {
         pgstat::relation::pgstat_count_heap_insert(relation.rd_id, relation.rd_rel.relisshared, 1);
+    }
+
+    let heaptup_self = heaptup.t_self;
+    if toasted.is_some() {
+        tup.t_self = heaptup_self;
     }
     Ok(())
 }
@@ -648,7 +691,9 @@ pub fn heap_delete(
 
     if relation.rd_rel.relkind == RELKIND_RELATION || relation.rd_rel.relkind == RELKIND_MATVIEW {
         if tp.has_external() {
-            unported("heap_toast_delete (heaptoast.c)");
+            // cold: per-toasted-delete scratch (deform arrays die here)
+            let toast_ctx = ::mcx::MemoryContext::new("heap_toast_delete");
+            heaptoast_seams::heap_toast_delete::call(toast_ctx.mcx(), relation, &tp, false)?;
         }
     } else {
         debug_assert!(!tp.has_external());
@@ -997,14 +1042,12 @@ pub fn heap_update(
     };
 
     let pagefree = pin.page().heap_free_space();
-    let newtupsize = (newtup.t_len as usize + 7) & !7;
+    let mut newtupsize = (newtup.t_len as usize + 7) & !7;
 
+    let toast_ctx;
+    let mut toasted = None;
     let newpin: Option<BufferPin>;
     if need_toast || newtupsize > pagefree {
-        if need_toast {
-            unported("heap_toast_insert_or_update (heap_update, heaptoast.c)");
-        }
-
         // xl_heap_lock the old tuple while off the page lock (C contract)
         let (xmax_lock_old_tuple, infomask_lock_old_tuple, infomask2_lock_old_tuple) =
             compute_new_xmax_infomask(
@@ -1062,12 +1105,29 @@ pub fn heap_update(
 
         bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_UNLOCK)?;
 
+        let ht_len = if need_toast {
+            // cold: scratch context per oversized-value update (C's palloc'd
+            // toasted copy dies at heap_freetuple)
+            toast_ctx = ::mcx::MemoryContext::new("heap_toast_insert_or_update");
+            toasted = heaptoast_seams::heap_toast_insert_or_update::call(
+                toast_ctx.mcx(),
+                relation,
+                newtup,
+                Some(&oldtup),
+                0,
+            )?;
+            toasted.as_ref().map_or(newtup.t_len, |t| t.as_tuple().t_len)
+        } else {
+            newtup.t_len
+        };
+        newtupsize = (ht_len as usize + 7) & !7;
+
         // C re-checks free space in a loop; single-backend recheck reduces to
         // one pass (no concurrent inserters can consume the page meanwhile).
         if newtupsize > pagefree {
             newpin = Some(RelationGetBufferForTuple(
                 relation,
-                newtup.t_len as usize,
+                ht_len as usize,
                 Some(&pin),
                 0,
             )?);
@@ -1078,6 +1138,25 @@ pub fn heap_update(
     } else {
         newpin = None;
     }
+    let _ = newtupsize;
+    let mut erased;
+    let heaptup: &mut HeapTupleData<'_> = match toasted.as_mut() {
+        Some(t) => {
+            let ht = t.as_tuple_mut();
+            // SAFETY: image owned by toast_ctx, which outlives every use in
+            // this function (lifetime-erased view, page_tuple model).
+            erased = unsafe {
+                HeapTupleData::from_raw_parts(
+                    ht.header_ptr().cast_mut(),
+                    ht.t_len,
+                    ht.t_self,
+                    ht.t_tableOid,
+                )
+            };
+            &mut erased
+        }
+        None => newtup,
+    };
 
     predicate_seams::check_for_serializable_conflict_in::call(
         relation,
@@ -1107,17 +1186,17 @@ pub fn heap_update(
 
     if use_hot_update {
         oldtup.t_data_mut().set_hot_updated();
-        newtup.t_data_mut().set_heap_only();
+        heaptup.t_data_mut().set_heap_only();
     } else {
         oldtup.t_data_mut().clear_hot_updated();
-        newtup.t_data_mut().clear_heap_only();
+        heaptup.t_data_mut().clear_heap_only();
     }
 
     let put_pin = newpin.as_ref().unwrap_or(&pin);
-    RelationPutHeapTuple(relation, put_pin, newtup, false)?;
+    RelationPutHeapTuple(relation, put_pin, heaptup, false)?;
 
     {
-        let new_tid = newtup.t_self;
+        let new_tid = heaptup.t_self;
         let hdr = oldtup.t_data_mut();
         hdr.t_infomask &= !(HEAP_XMAX_BITS | HEAP_MOVED);
         hdr.t_infomask2 &= !HEAP_KEYS_UPDATED;
@@ -1146,7 +1225,7 @@ pub fn heap_update(
             &pin,
             put_pin,
             &oldtup,
-            newtup,
+            heaptup,
             false,
             false,
         )?;
@@ -1166,7 +1245,7 @@ pub fn heap_update(
     }
     bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_UNLOCK)?;
 
-    inval::invalidate::CacheInvalidateHeapTuple(relation, &oldtup, Some(newtup))?;
+    inval::invalidate::CacheInvalidateHeapTuple(relation, &oldtup, Some(heaptup))?;
 
     let new_page_stat = newpin.is_some();
     if let Some(np) = newpin {
@@ -1192,6 +1271,11 @@ pub fn heap_update(
     } else {
         TU_UpdateIndexes::TU_All
     };
+
+    let heaptup_self = heaptup.t_self;
+    if toasted.is_some() {
+        newtup.t_self = heaptup_self;
+    }
     Ok(TM_Result::TM_Ok)
 }
 

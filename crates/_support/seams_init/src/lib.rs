@@ -1,6 +1,7 @@
 // One line per crate: the full seam-install closure for the postgres binary.
 pub fn init_all() {
     detoast::init_seams();
+    heaptoast::init_seams();
     printtup::init_seams();
     relation::init_seams();
     heapam_visibility::init_seams();
@@ -9,6 +10,7 @@ pub fn init_all() {
     table::init_seams();
     tableam::init_seams();
     clog::init_seams();
+    multixact::init_seams();
     rmgr::init_seams();
     subtrans::init_seams();
     transam_xlog::init_seams();
@@ -80,6 +82,14 @@ pub fn init_all() {
     waiteventset::init_seams();
     lmgr_proc::init_seams();
     s_lock::init_seams();
+    condition_variable::init_seams();
+    deadlock::init_seams();
+    predicate::init_seams();
+    parallel::init_seams();
+    spi::init_seams();
+    trigger::init_seams();
+    pruneheap::init_seams();
+    pg_string::init_seams();
     lmgr::init_seams();
     lock::init_seams();
     smgr::init_seams();
