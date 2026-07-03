@@ -1034,6 +1034,7 @@ pub mod bench_internals {
             force_null_flags: PgVec::new_in(mcx),
             defexprs: PgVec::new_in(mcx),
             defmap: PgVec::new_in(mcx),
+            where_clause: types_nodes::NodeList::nil(),
             defaults: mcx::vec_from_elem_in(mcx, false, max_fields),
             bytes_processed: 0,
         }

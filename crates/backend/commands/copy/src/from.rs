@@ -63,6 +63,7 @@ pub struct CopyFromState<'mcx, 's> {
     pub(crate) defexprs: PgVec<'mcx, Option<mcx::PgBox<'mcx, execexpr::ExprState<'mcx>>>>,
     pub(crate) defmap: PgVec<'mcx, usize>,
     pub(crate) defaults: PgVec<'mcx, bool>,
+    pub(crate) where_clause: NodeList<'mcx>,
     pub(crate) bytes_processed: u64,
 }
 
@@ -80,6 +81,7 @@ fn loc(funcname: &'static str) -> ErrorLocation {
 pub fn BeginCopyFrom<'mcx, 's>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
+    where_clause: NodeList<'mcx>,
     filename: Option<&'s str>,
     attnamelist: &NodeList<'_>,
     options: &NodeList<'s>,
@@ -270,6 +272,7 @@ pub fn BeginCopyFrom<'mcx, 's>(
         defexprs,
         defmap,
         defaults: vec_from_elem_in(mcx, false, num_phys_attrs),
+        where_clause,
         bytes_processed: 0,
     })
 }
@@ -331,6 +334,19 @@ fn copy_from_body<'mcx>(
 
     let mut index_state = execindexing::ExecOpenIndices(mcx, rel, false)?;
 
+    for wc in cstate.where_clause.iter() {
+        if clauses::contain_volatile_functions(wc)? {
+            unported("FROM ... WHERE with volatile functions (CIM_SINGLE lane)");
+        }
+    }
+    let mut qualexpr =
+        execexpr::exec_init_qual(mcx, &cstate.where_clause, execexpr::ParamBind::NONE)?;
+    if let Some(q) = qualexpr.as_mut() {
+        // SAFETY: qual scratch results land in the statement mcx, which
+        // outlives every per-row evaluation.
+        unsafe { q.arm_result_mcx_raw(mcx) };
+    }
+
     // std Vec: SlotData owns droppy state via the arena-erased views; the
     // slot pool itself is per-statement (CopyMultiInsertBuffer.slots).
     let mut slots: Vec<types_slot::SlotData<'mcx>> = Vec::new();
@@ -361,6 +377,13 @@ fn copy_from_body<'mcx>(
         }
         exectuples::exec_store_virtual_tuple(slot);
         slot.base_mut().tts_tableOid = rel.rd_id;
+
+        if qualexpr.is_some() {
+            let mut eval = execexpr::EvalSlots { scan: Some(slot), inner: None, outer: None };
+            if !execexpr::exec_qual(qualexpr.as_deref_mut(), &mut eval)? {
+                continue;
+            }
+        }
 
         if let Some(constr) = rel.rd_att.constr.as_deref() {
             if constr.num_check > 0 || !constr.check.is_empty() {
