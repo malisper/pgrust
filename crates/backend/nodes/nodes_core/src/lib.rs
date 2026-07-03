@@ -203,6 +203,9 @@ pub fn expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
             let cte = node.as_common_table_expr().unwrap();
             walk_opt(cte.ctequery, w)
         }
+        NodeTag::T_RangeTblFunction => {
+            walk_opt(node.as_range_tbl_function().unwrap().funcexpr, w)
+        }
         NodeTag::T_List => walk_list(node.as_list().unwrap(), w),
         NodeTag::T_RangeTblFunction => {
             walk_opt(node.as_range_tbl_function().unwrap().funcexpr, w)
