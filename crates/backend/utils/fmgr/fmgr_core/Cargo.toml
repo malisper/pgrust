@@ -36,6 +36,7 @@ name = { path = "../../adt/name" }
 nbt_compare = { path = "../../../access/nbtree/compare" }
 varlena = { path = "../../adt/varlena" }
 adt_windowfuncs = { path = "../../adt/windowfuncs" }
+conv = { path = "../../mb/conv" }
 
 [dev-dependencies]
 mcx = { path = "../../../../_support/mcx" }

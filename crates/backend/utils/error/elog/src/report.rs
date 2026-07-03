@@ -669,8 +669,41 @@ fn write_fd2(chunk: &[u8]) {
     }
 }
 
+std::thread_local! {
+    // C ErrorContext: backend-lifetime scratch for converting outgoing error
+    // fields to the client encoding; reset after every field.
+    static ERR_CONVERT_CX: RefCell<std::mem::ManuallyDrop<::mcx::MemoryContext>> =
+        RefCell::new(std::mem::ManuallyDrop::new(::mcx::MemoryContext::new(
+            "error conversion",
+        )));
+}
+
+// C err_sendstring: pq_sendstring (client-encoding conversion) unless already
+// in error recursion. Divergences: an uninstalled seam (unit tests, early
+// startup) and a conversion failure both fall back to the raw
+// server-encoding bytes instead of re-entering ereport.
 pub fn err_sendstring(buf: &mut Vec<u8>, s: &str) {
-    buf.extend_from_slice(s.as_bytes());
+    let converted = !stack::in_error_recursion_trouble()
+        && ::mbutils_seams::pg_server_to_client::is_installed()
+        && ERR_CONVERT_CX.with(|cell| {
+            let Ok(mut cx) = cell.try_borrow_mut() else {
+                return false;
+            };
+            let done = {
+                match ::mbutils_seams::pg_server_to_client::call(cx.mcx(), s.as_bytes()) {
+                    Ok(Some(conv)) => {
+                        buf.extend_from_slice(&conv);
+                        true
+                    }
+                    Ok(None) | Err(_) => false,
+                }
+            };
+            cx.reset();
+            done
+        });
+    if !converted {
+        buf.extend_from_slice(s.as_bytes());
+    }
     buf.push(0);
 }
 
