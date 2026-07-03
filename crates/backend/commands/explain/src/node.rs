@@ -2218,8 +2218,10 @@ fn ExplainFunctionTarget<'mcx>(
         .expect("rtable holds RTEs");
     debug_assert_eq!(rte.rtekind, RTEKind::RTE_FUNCTION);
     let mut objectname = None;
-    if rte.functions.len() == 1 {
-        let rtfunc = rte
+    // C reads the plan node's functions list (the flat rtable strips
+    // rte->functions).
+    if fs.functions.len() == 1 {
+        let rtfunc = fs
             .functions
             .nth(0)
             .as_range_tbl_function()
@@ -2230,7 +2232,7 @@ fn ExplainFunctionTarget<'mcx>(
     }
     let namespace = match (es.verbose, &objectname) {
         (true, Some(_)) => {
-            let rtfunc = rte.functions.nth(0).as_range_tbl_function().expect("functions cell");
+            let rtfunc = fs.functions.nth(0).as_range_tbl_function().expect("functions cell");
             let fe = rtfunc.funcexpr.and_then(|n| n.as_func_expr()).expect("FuncExpr");
             lsyscache::get_namespace_name_or_temp(mcx, lsyscache::get_func_namespace(fe.funcid)?)?
         }
