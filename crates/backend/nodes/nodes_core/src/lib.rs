@@ -135,6 +135,8 @@ pub fn expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
             walk_list(&b.args, w)
         }
         NodeTag::T_NullTest => walk_opt(node.as_null_test().unwrap().arg, w),
+        NodeTag::T_RelabelType => w.visit(node.as_relabel_type().unwrap().arg),
+        NodeTag::T_CoerceViaIO => w.visit(node.as_coerce_via_io().unwrap().arg),
         NodeTag::T_MinMaxExpr => {
             let mm = node.as_min_max_expr().unwrap();
             walk_list(&mm.args, w)
@@ -405,6 +407,20 @@ pub fn raw_expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
     }
 }
 
+// Closed-set exprType over CoerceViaIO's possible args.
+fn coerce_io_arg_type(node: Node<'_>) -> Oid {
+    match node.node_tag() {
+        NodeTag::T_Const => node.as_const().unwrap().consttype,
+        NodeTag::T_Var => node.as_var().unwrap().vartype,
+        NodeTag::T_Param => node.as_param().unwrap().paramtype,
+        NodeTag::T_FuncExpr => node.as_func_expr().unwrap().funcresulttype,
+        NodeTag::T_OpExpr => node.as_op_expr().unwrap().opresulttype,
+        NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resulttype,
+        NodeTag::T_CoerceViaIO => node.as_coerce_via_io().unwrap().resulttype,
+        other => deferred("coerce_io_arg_type (exprType)", other),
+    }
+}
+
 /// Apply `checker` to every function OID the node itself calls.
 pub fn check_functions_in_node<'mcx, F>(node: Node<'mcx>, checker: &mut F) -> PgResult<bool>
 where
@@ -426,10 +442,18 @@ where
             checker(opfuncid)
         }
         NodeTag::T_WindowFunc => checker(node.as_window_func().unwrap().winfnoid),
+        NodeTag::T_CoerceViaIO => {
+            let c = node.as_coerce_via_io().unwrap();
+            let (infunc, _) = lsyscache::getTypeInputInfo(c.resulttype)?;
+            if checker(infunc)? {
+                return Ok(true);
+            }
+            let (outfunc, _) = lsyscache::getTypeOutputInfo(coerce_io_arg_type(c.arg))?;
+            checker(outfunc)
+        }
         t @ (NodeTag::T_DistinctExpr
         | NodeTag::T_NullIfExpr
         | NodeTag::T_ScalarArrayOpExpr
-        | NodeTag::T_CoerceViaIO
         | NodeTag::T_RowCompareExpr) => deferred("check_functions_in_node", t),
         _ => Ok(false),
     }
@@ -612,6 +636,26 @@ where
                 Some(args) => Ok(Some(Node::mk(
                     mcx,
                     types_nodes::primnodes::BoolExpr { boolop: b.boolop, args, location: b.location },
+                )?)),
+            }
+        }
+        NodeTag::T_RelabelType => {
+            let r = node.as_relabel_type().unwrap();
+            match m(r.arg)? {
+                None => Ok(None),
+                Some(arg) => Ok(Some(Node::mk(
+                    mcx,
+                    types_nodes::primnodes::RelabelType { arg, ..*r },
+                )?)),
+            }
+        }
+        NodeTag::T_CoerceViaIO => {
+            let c = node.as_coerce_via_io().unwrap();
+            match m(c.arg)? {
+                None => Ok(None),
+                Some(arg) => Ok(Some(Node::mk(
+                    mcx,
+                    types_nodes::primnodes::CoerceViaIO { arg, ..*c },
                 )?)),
             }
         }

@@ -643,6 +643,8 @@ pub fn expr_type(node: Node<'_>) -> Oid {
         }
         NodeTag::T_CaseExpr => node.as_case_expr().unwrap().casetype,
         NodeTag::T_CaseTestExpr => node.as_case_test_expr().unwrap().typeId,
+        NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resulttype,
+        NodeTag::T_CoerceViaIO => node.as_coerce_via_io().unwrap().resulttype,
         tag => panic!("execexpr exprType: node family {tag:?} not ported"),
     }
 }
@@ -761,6 +763,8 @@ fn setup_walker(node: Node<'_>, info: &mut SetupInfo) {
                 setup_walker(d, info);
             }
         }
+        NodeTag::T_RelabelType => setup_walker(node.as_relabel_type().unwrap().arg, info),
+        NodeTag::T_CoerceViaIO => setup_walker(node.as_coerce_via_io().unwrap().arg, info),
         tag => panic!("execexpr setup walker: node family {tag:?} not ported"),
     }
 }
@@ -952,6 +956,10 @@ fn init_expr_rec<'mcx>(
             };
             push_step(state, mcx, step)
         }
+        NodeTag::T_RelabelType => {
+            init_expr_rec(node.as_relabel_type().unwrap().arg, state, mcx, out, agg, params, sub)
+        }
+        NodeTag::T_CoerceViaIO => init_coerce_via_io(node, state, mcx, out, agg, params, sub),
         tag => panic!("execexpr ExecInitExprRec: node family {tag:?} not ported"),
     }
 }
@@ -1240,6 +1248,70 @@ fn retset_error() -> Box<PgError> {
 
 // C ExecInitFunc: resolve-once FmgrInfo + step-owned fcinfo; Const args are
 // written in place at compile time, other args get their fcinfo slot as out.
+// C ExecInitExprRec T_CoerceViaIO: arg evaluates into this step's out slot;
+// EEOP_IOCOERCE then rewrites it through outfn/infn resolved once here.
+fn init_coerce_via_io<'mcx>(
+    node: Node<'mcx>,
+    state: &mut ExprState<'mcx>,
+    mcx: Mcx<'mcx>,
+    out: OutRef,
+    agg: Option<Bind<'_, 'mcx>>,
+    params: ParamBind<'mcx>,
+    sub: Option<SubplanCompileEnv>,
+) -> PgResult<()> {
+    let cio = node.as_coerce_via_io().unwrap();
+    init_expr_rec(cio.arg, state, mcx, out, agg, params, sub)?;
+
+    let argtype = expr_type(cio.arg);
+    let (outfunc, _) = lsyscache::getTypeOutputInfo(argtype)?;
+    let (infunc, typioparam) = lsyscache::getTypeInputInfo(cio.resulttype)?;
+
+    let flinfo_out = fmgr_core::fmgr_info(outfunc)?;
+    let out_addr = flinfo_out.fn_addr;
+    let frame_out = FuncFrame::new_in(mcx, flinfo_out, 1, ::types_core::primitive::InvalidOid)?;
+    let outcall = FuncCall {
+        fn_addr: out_addr,
+        fcinfo: frame_out.fcinfo,
+        frame: state.frames.len() as u32,
+        nargs: 1,
+    };
+    state.frames.try_reserve(2).map_err(|_| mcx.oom(2 * core::mem::size_of::<FuncFrame<'_>>()))?;
+    state.frames.push(frame_out);
+
+    let flinfo_in = fmgr_core::fmgr_info(infunc)?;
+    let in_addr = flinfo_in.fn_addr;
+    let in_strict = flinfo_in.fn_strict;
+    let frame_in = FuncFrame::new_in(mcx, flinfo_in, 3, ::types_core::primitive::InvalidOid)?;
+    // SAFETY: slots 1/2 of the frame's freshly allocated 3-arg fcinfo,
+    // written once at compile (C sets them in ExecInitExprRec).
+    unsafe {
+        frame_in.arg_slot(1).write(::datum::NullableDatum {
+            value: ::datum::Datum::from_oid(typioparam),
+            isnull: false,
+        });
+        frame_in.arg_slot(2).write(::datum::NullableDatum {
+            value: ::datum::Datum::from_i32(-1),
+            isnull: false,
+        });
+    }
+    let incall = FuncCall {
+        fn_addr: in_addr,
+        fcinfo: frame_in.fcinfo,
+        frame: state.frames.len() as u32,
+        nargs: 3,
+    };
+    state.frames.push(frame_in);
+
+    let calls = crate::steps::IoCoerceCalls { outcall, incall, in_strict };
+    let raw = mcx
+        .allocate(core::alloc::Layout::new::<crate::steps::IoCoerceCalls>())
+        .map_err(|_| mcx.oom(core::mem::size_of::<crate::steps::IoCoerceCalls>()))?;
+    let p: NonNull<crate::steps::IoCoerceCalls> = raw.cast();
+    // SAFETY: fresh allocation of the exact layout.
+    unsafe { p.write(calls) };
+    push_step(state, mcx, Step::IoCoerce { calls: p, out })
+}
+
 fn init_func<'mcx>(
     node: Node<'mcx>,
     args: &NodeList<'mcx>,

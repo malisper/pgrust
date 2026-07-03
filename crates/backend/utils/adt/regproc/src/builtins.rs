@@ -43,11 +43,29 @@ fc_reg_in! {
     fc_regrolein: regrolein;
 }
 
+// Retained TLS scratch, reset at call entry: printtup's text lane stays on
+// its unarmed fast path (the cash/int out-fn convention); the datum aliases
+// the context until the next reg*out call on this thread.
+fn with_out_scratch<R>(f: impl FnOnce(::mcx::Mcx<'_>) -> R) -> R {
+    std::thread_local! {
+        static OUT_CTX: core::cell::UnsafeCell<Option<::mcx::MemoryContext>> =
+            const { core::cell::UnsafeCell::new(None) };
+    }
+    OUT_CTX.with(|c| {
+        // SAFETY: single-threaded backend; the sole live access is this call.
+        let slot = unsafe { &mut *c.get() };
+        let m = slot.get_or_insert_with(|| ::mcx::MemoryContext::new_bump("RegOutScratch"));
+        m.reset();
+        f(m.mcx())
+    })
+}
+
 macro_rules! fc_reg_out {
     ($($fc:ident: $core:ident;)*) => {$(
         pub fn $fc(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
             let oid = fcinfo.arg(0).as_oid();
-            Ok(cstring_result(crate::$core(fcinfo.result_mcx(), oid)?))
+            let _ = fcinfo;
+            with_out_scratch(|mcx| Ok(cstring_result(crate::$core(mcx, oid)?)))
         }
     )*};
 }
@@ -65,7 +83,8 @@ macro_rules! fc_to_reg {
         pub fn $fc(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
             let result = {
                 // SAFETY: catalog arg 0 is a non-null text varlena (strict fn).
-                let payload = unsafe { fcinfo.arg_varlena_packed(0) }.data();
+                let payload = unsafe { fcinfo.arg_varlena_packed(0) }?;
+    let payload = payload.data();
                 let s = String::from_utf8_lossy(payload);
                 let mut soft = SoftErrorContext::new(false);
                 let r = crate::$core(fcinfo.result_mcx(), &s, Some(&mut soft))?;
@@ -89,7 +108,8 @@ fc_to_reg! {
 
 pub fn fc_text_regclass(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: catalog arg 0 is a non-null text varlena (strict fn).
-    let payload = unsafe { fcinfo.arg_varlena_packed(0) }.data();
+    let payload = unsafe { fcinfo.arg_varlena_packed(0) }?;
+    let payload = payload.data();
     let s = String::from_utf8_lossy(payload);
     Ok(Datum::from_oid(crate::text_regclass(
         fcinfo.result_mcx(),

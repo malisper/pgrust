@@ -483,6 +483,30 @@ fn run_program<'mcx>(
                 let (value, isnull) = invoke(frames, call)?;
                 write_out(*out, &mut regs, value, isnull);
             }
+            Step::IoCoerce { calls, out } => {
+                // SAFETY: 'mcx-owned pair written once at compile.
+                let c = unsafe { calls.as_ref() };
+                let nd = read_out(*out, &regs);
+                let strv = if nd.isnull {
+                    NullableDatum { value: Datum::null(), isnull: true }
+                } else {
+                    // SAFETY: arg 0 of the outcall's live fcinfo image.
+                    unsafe {
+                        crate::steps::arg_slot_of(c.outcall.fcinfo, 0)
+                            .write(NullableDatum { value: nd.value, isnull: false })
+                    };
+                    let (v, isnull) = invoke(frames, &c.outcall)?;
+                    NullableDatum { value: v, isnull }
+                };
+                if strv.isnull && c.in_strict {
+                    write_out(*out, &mut regs, Datum::null(), true);
+                } else {
+                    // SAFETY: arg 0 of the incall's live fcinfo image.
+                    unsafe { crate::steps::arg_slot_of(c.incall.fcinfo, 0).write(strv) };
+                    let (v, isnull) = invoke(frames, &c.incall)?;
+                    write_out(*out, &mut regs, v, isnull);
+                }
+            }
             Step::FuncExprStrict1 { call, out } => {
                 // SAFETY: arg 0 of the call's live fcinfo image.
                 let a0 = unsafe { crate::steps::arg_slot_of(call.fcinfo, 0).read() };

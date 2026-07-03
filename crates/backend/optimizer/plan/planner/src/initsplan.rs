@@ -70,6 +70,7 @@ fn pull_var_nodes<'mcx>(node: Node<'mcx>, out: &mut PgVec<'mcx, Node<'mcx>>) {
             }
         }
         NodeTag::T_RelabelType => pull_var_nodes(node.as_relabel_type().unwrap().arg, out),
+        NodeTag::T_CoerceViaIO => pull_var_nodes(node.as_coerce_via_io().unwrap().arg, out),
         NodeTag::T_NullTest => {
             if let Some(arg) = node.as_null_test().unwrap().arg {
                 pull_var_nodes(arg, out);

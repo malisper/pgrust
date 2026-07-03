@@ -58,6 +58,12 @@ pub enum Step {
     FuncExprStrict1 { call: FuncCall, out: OutRef },
     FuncExprStrict2 { call: FuncCall, out: OutRef },
     FuncExprStrict { call: FuncCall, out: OutRef },
+    // EEOP_IOCOERCE: out fn of the arg type then in fn of the result type;
+    // incall args 1/2 (typioparam, typmod -1) are compile-time consts. The
+    // pair lives in the state's mcx (fcinfo-image precedent) to keep Step
+    // <= 64B; one deref per eval on a cast step.
+    IoCoerce { calls: NonNull<IoCoerceCalls>, out: OutRef },
+
     Qual { jumpdone: u32 },
     Jump { jumpdone: u32 },
     JumpIfNotTrue { jumpdone: u32, out: OutRef },
@@ -167,6 +173,12 @@ const _: () = assert!(core::mem::size_of::<Step>() <= 64);
 // C ExprEvalStep.d.func minus the FmgrInfo pointer: fn_addr/fcinfo are the
 // resolve-once extra copies C keeps "to save an indirection at runtime";
 // `frame` reaches the owning FuncFrame (flinfo) in ExprState.
+pub struct IoCoerceCalls {
+    pub outcall: FuncCall,
+    pub incall: FuncCall,
+    pub in_strict: bool,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct FuncCall {
     pub fn_addr: PGFunction,

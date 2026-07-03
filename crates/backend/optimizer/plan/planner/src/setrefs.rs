@@ -1221,6 +1221,7 @@ fn fix_scan_expr_walker<'mcx>(run: &mut PlannerRun<'mcx>, node: Node<'mcx>) -> P
                 None => Ok(()),
             }
         }
+        NodeTag::T_CoerceViaIO => fix_scan_expr_walker(run, node.as_coerce_via_io().unwrap().arg),
         other => panic!("fix_scan_expr_walker (setrefs.c): {other:?}; M2 expression lane"),
     }
 }

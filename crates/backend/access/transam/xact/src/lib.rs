@@ -1185,6 +1185,7 @@ pub fn init_seams() {
     xact_seams::or_my_xact_flags::set(OrMyXactFlags);
     xact_seams::get_current_transaction_nest_level::set(GetCurrentTransactionNestLevel);
     xact_seams::get_current_transaction_stop_timestamp::set(GetCurrentTransactionStopTimestamp);
+    xact_seams::get_current_transaction_start_timestamp::set(GetCurrentTransactionStartTimestamp);
     xact_seams::get_top_transaction_id_if_any::set(GetTopTransactionIdIfAny);
     xact_seams::is_transaction_or_transaction_block::set(IsTransactionOrTransactionBlock);
     xact_seams::is_transaction_state::set(IsTransactionState);

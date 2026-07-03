@@ -378,7 +378,7 @@ fn get_eclass_for_sort_expr<'mcx>(
     sortref: u32,
     create_it: bool,
 ) -> PgResult<Option<EcId>> {
-    let expr = canonicalize_ec_expression(expr, opcintype, collation);
+    let expr = canonicalize_ec_expression(run.mcx, expr, opcintype, collation)?;
 
     for i in 0..run.root.eq_classes.len() {
         let id = EcId(i as u32);
@@ -467,15 +467,34 @@ fn get_eclass_for_sort_expr<'mcx>(
     Ok(Some(id))
 }
 
-// canonicalize_ec_expression (equivclass.c): the expr must expose opcintype;
-// the RelabelType wrap/strip legs are loud.
-fn canonicalize_ec_expression<'mcx>(expr: Node<'mcx>, req_type: u32, _req_collation: u32) -> Node<'mcx> {
-    let (expr_type, _) = crate::costsize::expr_type_typmod(expr);
-    assert!(
-        expr_type == req_type,
-        "canonicalize_ec_expression (equivclass.c): relabel leg; M2 lane"
-    );
-    expr
+// canonicalize_ec_expression (equivclass.c).
+fn canonicalize_ec_expression<'mcx>(
+    mcx: ::mcx::Mcx<'mcx>,
+    expr: Node<'mcx>,
+    req_type: u32,
+    req_collation: u32,
+) -> PgResult<Node<'mcx>> {
+    use types_core::catalog::RECORDOID;
+    use types_nodes::primnodes::CoercionForm;
+    let (expr_type, expr_typmod) = crate::costsize::expr_type_typmod(expr);
+    let req_type = if clauses::fold::is_polymorphic_type(req_type) || req_type == RECORDOID {
+        expr_type
+    } else {
+        req_type
+    };
+    if expr_type != req_type || expr_collation(expr) != req_collation {
+        let req_typmod = if expr_type != req_type { -1 } else { expr_typmod };
+        return clauses::fold::apply_relabel_type(
+            mcx,
+            expr,
+            req_type,
+            req_typmod,
+            req_collation,
+            CoercionForm::COERCE_IMPLICIT_CAST,
+            -1,
+        );
+    }
+    Ok(expr)
 }
 
 // exprCollation (nodeFuncs.c) over the sort-key shapes this lane carries.
@@ -505,6 +524,8 @@ pub fn expr_collation(node: Node<'_>) -> u32 {
         ),
         NodeTag::T_CaseExpr => node.as_case_expr().unwrap().casecollid,
         NodeTag::T_CaseTestExpr => node.as_case_test_expr().unwrap().collation,
+        NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resultcollid,
+        NodeTag::T_CoerceViaIO => node.as_coerce_via_io().unwrap().resultcollid,
         other => panic!("exprCollation (nodeFuncs.c): {other:?}; M2 expression lane"),
     }
 }
