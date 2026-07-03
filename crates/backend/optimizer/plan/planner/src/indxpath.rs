@@ -723,7 +723,8 @@ fn check_index_only(run: &PlannerRun<'_>, rel: RelId, index: &IndexOptInfo<'_>) 
     if !crate::gucs::enable_indexonlyscan() {
         return false;
     }
-    // Attrs needed above the scan plus all baserestrictinfo Vars, each
+    // Attrs needed above the scan plus indrestrictinfo Vars (quals implied by
+    // the index predicate need no recheck, hence not baserestrictinfo), each
     // checked against returnable index columns.
     let r = run.root.rel(rel);
     let mut needed: mcx::PgVec<'_, i16> = mcx::PgVec::new_in(run.mcx);
@@ -732,7 +733,7 @@ fn check_index_only(run: &PlannerRun<'_>, rel: RelId, index: &IndexOptInfo<'_>) 
             needed.push(i as i16 + r.min_attr);
         }
     }
-    for &rid in r.baserestrictinfo.iter() {
+    for &rid in index.indrestrictinfo.borrow().iter() {
         let clause = *run.root.expr_node(run.root.rinfo(rid).clause);
         collect_varattnos(run, clause, r.relid as i32, &mut needed);
     }
@@ -1189,7 +1190,9 @@ fn find_indexpath_quals<'mcx>(
                 let rid = ic.rinfo.expect("IndexClause rinfo");
                 quals.push(*run.root.expr_node(run.root.rinfo(rid).clause));
             }
-            debug_assert!(ip.indexinfo.expect("indexinfo set").indpred.is_empty());
+            for &pid in ip.indexinfo.expect("indexinfo set").indpred.iter() {
+                preds.push(*run.root.expr_node(pid));
+            }
         }
         other => panic!(
             "find_indexpath_quals (indxpath.c): pathtype {}",

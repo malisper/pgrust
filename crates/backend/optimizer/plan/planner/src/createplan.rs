@@ -948,14 +948,14 @@ fn create_bitmap_subplan<'mcx>(
         }
         _ => {}
     }
-    let (indexclauses, indexselectivity, parent, parallel_safe, has_indpred) = {
+    let (indexclauses, indexselectivity, parent, parallel_safe, indpred) = {
         match run.root.path(bitmapqual) {
             PathNode::IndexPath(ip) => (
                 ip.indexclauses.clone(),
                 ip.indexselectivity,
                 ip.path.parent,
                 ip.path.parallel_safe,
-                !ip.indexinfo.as_ref().expect("indexinfo set").indpred.is_empty(),
+                ip.indexinfo.as_ref().expect("indexinfo set").indpred.clone(),
             ),
             other => panic!(
                 "create_bitmap_subplan (createplan.c): pathtype {}",
@@ -963,10 +963,6 @@ fn create_bitmap_subplan<'mcx>(
             ),
         }
     };
-    assert!(
-        !has_indpred,
-        "create_bitmap_subplan (createplan.c): partial-index indpred; M2 predicate lane"
-    );
 
     // C builds a throwaway IndexScan via create_indexscan_plan and moves its
     // qual lists over; the direct fix_indexqual_references call is the same
@@ -1003,6 +999,15 @@ fn create_bitmap_subplan<'mcx>(
         subquals.lappend(mcx, *run.root.expr_node(run.root.rinfo(rid).clause))?;
         for &qid in ic.indexquals.iter() {
             subindexquals.lappend(mcx, *run.root.expr_node(run.root.rinfo(qid).clause))?;
+        }
+    }
+    // Index predicate conditions not implied by the pushed-down quals must be
+    // rechecked (C: "We can add any index predicate conditions, too").
+    for &pid in indpred.iter() {
+        let pred = *run.root.expr_node(pid);
+        if !crate::predtest::predicate_implied_by(mcx, &[pred], subquals.as_slice(), false)? {
+            subquals.lappend(mcx, pred)?;
+            subindexquals.lappend(mcx, pred)?;
         }
     }
     Ok((plan.seal(), subindexquals, subquals))
