@@ -14,6 +14,7 @@ pub const F_BTHANDLER: Oid = 330;
 pub const F_HASHHANDLER: Oid = 331;
 pub const F_GINHANDLER: Oid = 333;
 pub const F_GISTHANDLER: Oid = 332;
+pub const F_SPGHANDLER: Oid = 334;
 pub const F_BRINHANDLER: Oid = 335;
 const AMTYPE_INDEX: i8 = b'i' as i8;
 const Anum_pg_am_amname: i32 = 2;
@@ -30,6 +31,7 @@ pub fn GetIndexAmRoutine(amhandler: Oid) -> IndexAmKind {
         F_HASHHANDLER => IndexAmKind::Hash,
         F_GINHANDLER => IndexAmKind::Gin,
         F_GISTHANDLER => IndexAmKind::Gist,
+        F_SPGHANDLER => IndexAmKind::Spgist,
         F_BRINHANDLER => IndexAmKind::Brin,
         other => unported_handler(other),
     }
@@ -97,6 +99,8 @@ pub fn IndexAmTranslateStrategy(
         // amtranslatestrategy == NULL for gist.
         IndexAmKind::Gist => COMPARE_INVALID,
         // amtranslatestrategy == NULL.
+        IndexAmKind::Spgist => COMPARE_INVALID,
+        // amtranslatestrategy == NULL.
         IndexAmKind::Brin => COMPARE_INVALID,
         #[allow(unreachable_patterns)]
         _ => unported_translate(amoid),
@@ -139,6 +143,8 @@ pub fn IndexAmTranslateCompareType(
             "unported: gisttranslatecmptype (AMPROCNUM proc-12 lookup; \
              temporal/WITHOUT OVERLAPS lane)"
         ),
+        // amtranslatecmptype == NULL.
+        IndexAmKind::Spgist => InvalidStrategy,
         // amtranslatecmptype == NULL.
         IndexAmKind::Brin => InvalidStrategy,
         #[allow(unreachable_patterns)]

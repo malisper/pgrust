@@ -160,6 +160,7 @@ pub fn init_all() {
     sql_functions::init_seams();
     fmgr_core::register_late_builtins(adt_geo::builtins::GEO_BUILTINS);
     fmgr_core::register_late_builtins(gistproc::GISTPROC_BUILTINS);
+    fmgr_core::register_late_builtins(spgist_text::SPGIST_TEXT_BUILTINS);
     funcapi::init_seams();
     init_small::init_seams();
     miscinit::init_seams();

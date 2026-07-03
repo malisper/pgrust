@@ -183,6 +183,10 @@ pub fn index_bulk_delete<'mcx>(
             gist::gistbulkdelete(info.index)?;
             Ok(istat.unwrap_or_default())
         }
+        IndexAmKind::Spgist => {
+            spgist::spgbulkdelete(info.index)?;
+            Ok(istat.unwrap_or_default())
+        }
         IndexAmKind::Brin => brin::brinbulkdelete(),
         #[cfg(test)]
         IndexAmKind::Mock => Ok(istat.unwrap_or_default()),
@@ -211,6 +215,10 @@ pub fn index_vacuum_cleanup<'mcx>(
         }
         IndexAmKind::Gist => {
             gist::gistvacuumcleanup(info.index, info.analyze_only)?;
+            Ok(istat)
+        }
+        IndexAmKind::Spgist => {
+            spgist::spgvacuumcleanup(info.index, info.analyze_only)?;
             Ok(istat)
         }
         IndexAmKind::Brin => {
@@ -296,6 +304,7 @@ fn am_getbitmap(
         IndexScanOpaque::Hash(_) => hash::hashgetbitmap(scan, bitmap),
         IndexScanOpaque::Gin(_) => gin::gingetbitmap(scan, bitmap),
         IndexScanOpaque::Gist(_) => gist::gistgetbitmap(scan, bitmap),
+        IndexScanOpaque::Spgist(_) => spgist::spggetbitmap(scan, bitmap),
         IndexScanOpaque::Brin(_) => brin::bringetbitmap(scan, bitmap),
         #[cfg(test)]
         IndexScanOpaque::Mock(_) => unreachable!("Mock lacks amgetbitmap"),
@@ -517,6 +526,7 @@ fn am_beginscan<'mcx>(
         IndexAmKind::Hash => hash::hashbeginscan(mcx, indexRelation, nkeys, norderbys),
         IndexAmKind::Gin => gin::ginbeginscan(mcx, indexRelation, nkeys, norderbys),
         IndexAmKind::Gist => gist::gistbeginscan(mcx, indexRelation, nkeys, norderbys),
+        IndexAmKind::Spgist => spgist::spgbeginscan(mcx, indexRelation, nkeys, norderbys),
         IndexAmKind::Brin => brin::brinbeginscan(mcx, indexRelation, nkeys, norderbys),
         #[cfg(test)]
         IndexAmKind::Mock => Ok(mock::beginscan(mcx, indexRelation, nkeys, norderbys)),
@@ -536,6 +546,7 @@ fn am_rescan(
         IndexScanOpaque::Hash(_) => hash::hashrescan(scan, keys),
         IndexScanOpaque::Gin(_) => gin::ginrescan(scan, keys),
         IndexScanOpaque::Gist(_) => gist::gistrescan(scan, keys, orderbys),
+        IndexScanOpaque::Spgist(_) => spgist::spgrescan(scan, keys, orderbys),
         IndexScanOpaque::Brin(_) => brin::brinrescan(scan, keys),
         #[cfg(test)]
         IndexScanOpaque::Mock(_) => Ok(mock::rescan(scan)),
@@ -550,6 +561,7 @@ fn am_endscan(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
         IndexScanOpaque::Hash(_) => hash::hashendscan(scan),
         IndexScanOpaque::Gin(_) => gin::ginendscan(scan),
         IndexScanOpaque::Gist(_) => gist::gistendscan(scan),
+        IndexScanOpaque::Spgist(_) => spgist::spgendscan(scan),
         IndexScanOpaque::Brin(_) => brin::brinendscan(scan),
         #[cfg(test)]
         IndexScanOpaque::Mock(_) => Ok(()),
@@ -564,6 +576,7 @@ fn am_markpos(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
         IndexScanOpaque::Hash(_) => unreachable!("hash lacks ammarkpos (guarded by has_ammarkpos)"),
         IndexScanOpaque::Gin(_) => unreachable!("gin lacks ammarkpos (guarded by has_ammarkpos)"),
         IndexScanOpaque::Gist(_) => Err(missing_procedure("ammarkpos", &scan.indexRelation)),
+        IndexScanOpaque::Spgist(_) => unreachable!("has_ammarkpos gate"),
         IndexScanOpaque::Brin(_) => unreachable!("has_ammarkpos gate"),
         #[cfg(test)]
         IndexScanOpaque::Mock(_) => Ok(mock::markpos(scan)),
@@ -578,6 +591,7 @@ fn am_restrpos(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
         IndexScanOpaque::Hash(_) => unreachable!("hash lacks amrestrpos (guarded by has_amrestrpos)"),
         IndexScanOpaque::Gin(_) => unreachable!("gin lacks amrestrpos (guarded by has_amrestrpos)"),
         IndexScanOpaque::Gist(_) => Err(missing_procedure("amrestrpos", &scan.indexRelation)),
+        IndexScanOpaque::Spgist(_) => unreachable!("has_amrestrpos gate"),
         IndexScanOpaque::Brin(_) => unreachable!("has_amrestrpos gate"),
         #[cfg(test)]
         IndexScanOpaque::Mock(_) => unreachable!("Mock lacks amrestrpos"),
@@ -597,6 +611,7 @@ fn am_gettuple(scan: &mut IndexScanDescData<'_>, direction: ScanDirection) -> Pg
             scan.indexRelation.name()
         ),
         IndexScanOpaque::Gist(_) => gist::gistgettuple(scan, direction),
+        IndexScanOpaque::Spgist(_) => spgist::spggettuple(scan, direction),
         // CHECK_SCAN_PROCEDURE(amgettuple): BRIN is bitmap-only.
         IndexScanOpaque::Brin(_) => Err(missing_procedure("amgettuple", &scan.indexRelation)),
         #[cfg(test)]
@@ -667,6 +682,23 @@ fn am_insert<'mcx>(
                 unsafe { core::mem::transmute(slot) };
             gist::gistinsert(indexRelation, values, isnull, heap_t_ctid, heapRelation, slot)
         }
+        IndexAmKind::Spgist => {
+            debug_assert!(checkUnique == IndexUniqueCheck::UNIQUE_CHECK_NO);
+            if am_cache.is_none() {
+                *am_cache = Some(Box::new(
+                    None::<spgist::SpgInsertAmCache<'static>>,
+                ));
+            }
+            let slot = am_cache
+                .as_mut()
+                .expect("just filled")
+                .downcast_mut::<Option<spgist::SpgInsertAmCache<'static>>>()
+                .expect("spgist ii_AmCache slot type");
+            // SAFETY: same relcache-outlives-slot argument as the gist arm.
+            let slot: &mut Option<spgist::SpgInsertAmCache<'mcx>> =
+                unsafe { core::mem::transmute(slot) };
+            spgist::spginsert(indexRelation, values, isnull, heap_t_ctid, slot)
+        }
         IndexAmKind::Brin => {
             if am_cache.is_none() {
                 *am_cache = Some(Box::new(
@@ -701,6 +733,7 @@ fn am_insert_cleanup(
         IndexAmKind::Hash => unreachable!("hash lacks aminsertcleanup (guarded)"),
         IndexAmKind::Gin => unreachable!("gin lacks aminsertcleanup (guarded)"),
         IndexAmKind::Gist => Ok(()),
+        IndexAmKind::Spgist => unreachable!("spgist lacks aminsertcleanup (guarded)"),
         IndexAmKind::Brin => {
             let Some(boxed) = am_cache else { return Ok(()) };
             let slot = boxed
