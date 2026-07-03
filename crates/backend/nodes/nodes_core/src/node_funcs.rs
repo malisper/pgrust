@@ -324,3 +324,50 @@ pub fn expr_is_null_constant(node: Node<'_>) -> bool {
         None => false,
     }
 }
+
+// applyRelabelType (nodeFuncs.c); the Const arm rebuilds instead of C's
+// overwrite_ok in-place mutation, sharing constvalue (arena-shared, one
+// bulk-freed mcx — C copyObject's deep copy exists for eager pfree).
+pub fn apply_relabel_type<'mcx>(
+    mcx: ::mcx::Mcx<'mcx>,
+    arg: Node<'mcx>,
+    rtype: Oid,
+    rtypmod: i32,
+    rcollid: Oid,
+    rformat: types_nodes::CoercionForm,
+    rlocation: ParseLoc,
+) -> types_error::PgResult<Node<'mcx>> {
+    let mut arg = arg;
+    while arg.node_tag() == NodeTag::T_RelabelType {
+        arg = arg.as_relabel_type().unwrap().arg;
+    }
+    if let Some(con) = arg.as_const() {
+        return Node::mk(
+            mcx,
+            types_nodes::Const {
+                consttype: rtype,
+                consttypmod: rtypmod,
+                constcollid: rcollid,
+                constlen: con.constlen,
+                constvalue: con.constvalue,
+                constisnull: con.constisnull,
+                constbyval: con.constbyval,
+                location: con.location,
+            },
+        );
+    }
+    if expr_type(arg) == rtype && expr_typmod(arg) == rtypmod && expr_collation(arg) == rcollid {
+        return Ok(arg);
+    }
+    Node::mk(
+        mcx,
+        types_nodes::RelabelType {
+            arg,
+            resulttype: rtype,
+            resulttypmod: rtypmod,
+            resultcollid: rcollid,
+            relabelformat: rformat,
+            location: rlocation,
+        },
+    )
+}
