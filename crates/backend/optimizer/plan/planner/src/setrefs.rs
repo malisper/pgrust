@@ -11,11 +11,20 @@ const FIRST_UNPINNED_OBJECT_ID: u32 = 12000;
 // it because plancache.c registers PlanCacheObjectCallback for PROCOID.
 const PROCOID: i32 = 47;
 
-// Trivial arm: no rowmarks, no appendrels, no AlternativeSubPlans.
+// No appendrels, no AlternativeSubPlans.
 pub fn set_plan_references<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>) -> PgResult<Node<'mcx>> {
+    let mcx = run.mcx;
     let rtoffset = run.glob.finalrtable.len() as i32;
     add_rtes_to_flat_rtable(run)?;
-    debug_assert!(run.root.rowMarks.is_empty());
+    // Flat PlanRowMark copies with adjusted RT indexes (rowmarkId untouched)
+    // join glob->finalrowmarks; the LockRows node's copies are adjusted in
+    // the T_LockRows arm below, as C does to its shared pointers.
+    for i in 0..run.root.rowMarks.len() {
+        let mut rc = *run.rowmark(run.root.rowMarks[i]);
+        rc.rti += rtoffset as u32;
+        rc.prti += rtoffset as u32;
+        run.glob.finalrowmarks.lappend(mcx, Node::mk(mcx, rc)?)?;
+    }
     debug_assert!(run.root.append_rel_list.is_empty());
     set_plan_refs(run, plan, rtoffset)
 }
@@ -268,6 +277,25 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
             // Neither evaluates its tlist; fixed up for EXPLAIN only.
             set_dummy_tlist_references(run, plan, rtoffset)?;
             debug_assert!(plan.as_plan().unwrap().qual.is_nil());
+        }
+        NodeTag::T_LockRows => {
+            let l = plan.as_lock_rows().unwrap();
+            // LockRows evaluates neither tlist nor quals; only the rowmark
+            // RT indexes need fixing.
+            set_dummy_tlist_references(run, plan, rtoffset)?;
+            debug_assert!(l.plan.qual.is_nil());
+            if rtoffset != 0 {
+                for rc_node in &plan.as_lock_rows().unwrap().rowMarks {
+                    // SAFETY: exclusive plan-tree ownership (prologue note).
+                    unsafe {
+                        rc_node.with_mut::<types_nodes::plannodes::PlanRowMark, _>(|rc| {
+                            rc.rti += rtoffset as u32;
+                            rc.prti += rtoffset as u32;
+                        })
+                    }
+                    .expect("PlanRowMark");
+                }
+            }
         }
         NodeTag::T_Limit => {
             let l = plan.as_limit().unwrap();

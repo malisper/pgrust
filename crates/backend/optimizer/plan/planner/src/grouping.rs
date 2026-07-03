@@ -244,10 +244,17 @@ fn grouping_planner_tail<'mcx>(
         f.has_fdwroutine = has_fdw;
     }
 
-    debug_assert!(parse.rowMarks.is_nil());
     let paths = crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.rel(current_rel).pathlist);
     for path_id in paths.iter() {
         let mut path_id = *path_id;
+        // parse->rowMarks (not root->rowMarks) gates the LockRows node:
+        // non-locking marks belong to ModifyTable.
+        if !parse.rowMarks.is_nil() {
+            let epq_param = crate::cte::assign_special_exec_param(run)?;
+            let marks = crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.rowMarks);
+            path_id =
+                crate::pathnode::create_lockrows_path(run, final_rel, path_id, marks, epq_param);
+        }
         if limit_needed(parse) {
             path_id = crate::pathnode::create_limit_path(
                 run,

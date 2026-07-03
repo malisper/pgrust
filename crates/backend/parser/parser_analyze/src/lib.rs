@@ -206,7 +206,7 @@ pub fn transformStmt<'mcx>(
             } else if n.op == types_nodes::parsenodes::SetOperation::SETOP_NONE {
                 transformSelectStmt(mcx, pstate, n)?
             } else {
-                set_op::transformSetOperationStmt(mcx, pstate, n)?
+set_op::transformSetOperationStmt(mcx, pstate, n)?
             }
         }
         NodeTag::T_InsertStmt => {
@@ -502,11 +502,9 @@ fn transformSelectStmt<'mcx>(
     qry.hasTargetSRFs = pstate.p_hasTargetSRFs;
     qry.hasAggs = pstate.p_hasAggs;
 
-    if !pstate.p_locking_clause.is_nil() {
-        panic!(
-            "transformSelectStmt (analyze.c): transformLockingClause unported — \
-             unit backend-parser-analyze"
-        );
+    for lc_node in &stmt.lockingClause {
+        let lc = lc_node.as_locking_clause().expect("lockingClause cell");
+        transformLockingClause(mcx, pstate, &mut qry, lc, false)?;
     }
 
     assign_query_collations(mcx, pstate, &qry)?;
@@ -672,10 +670,11 @@ fn transformValuesClause<'mcx>(
     qry.limitOption = stmt.limitOption;
 
     if !stmt.lockingClause.is_nil() {
-        panic!(
-            "transformValuesClause (analyze.c): \"cannot be applied to VALUES\" ereport \
-             needs LCS_asString (LockingClause vocabulary) — unit backend-parser-analyze"
-        );
+        return Err(locking_not_applicable_to(
+            first_locking_strength(&stmt.lockingClause),
+            "VALUES",
+            "transformValuesClause",
+        ));
     }
 
     qry.rtable = mem::take(&mut pstate.p_rtable);
@@ -1328,5 +1327,330 @@ fn values_length_mismatch(
             ))
             .into_error()
             .with_error_location(ErrorLocation::new("analyze.c", 0, "transformInsertStmt")),
+    )
+}
+
+pub fn LCS_asString(strength: types_nodes::LockClauseStrength) -> &'static str {
+    use types_nodes::LockClauseStrength::*;
+    match strength {
+        LCS_NONE => {
+            debug_assert!(false);
+            "FOR some"
+        }
+        LCS_FORKEYSHARE => "FOR KEY SHARE",
+        LCS_FORSHARE => "FOR SHARE",
+        LCS_FORNOKEYUPDATE => "FOR NO KEY UPDATE",
+        LCS_FORUPDATE => "FOR UPDATE",
+    }
+}
+
+fn first_locking_strength(
+    locking_clause: &types_nodes::NodeList<'_>,
+) -> types_nodes::LockClauseStrength {
+    locking_clause
+        .nth(0)
+        .as_locking_clause()
+        .expect("lockingClause cell")
+        .strength
+}
+
+#[cold]
+fn locking_not_allowed_with(
+    strength: types_nodes::LockClauseStrength,
+    what: &str,
+    funcname: &'static str,
+) -> Box<types_error::PgError> {
+    use types_error::{ErrorLocation, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg(format!("{} is not allowed with {what}", LCS_asString(strength)))
+            .into_error()
+            .with_error_location(ErrorLocation::new("analyze.c", 0, funcname)),
+    )
+}
+
+#[cold]
+fn locking_not_applicable_to(
+    strength: types_nodes::LockClauseStrength,
+    what: &str,
+    funcname: &'static str,
+) -> Box<types_error::PgError> {
+    use types_error::{ErrorLocation, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg(format!("{} cannot be applied to {what}", LCS_asString(strength)))
+            .into_error()
+            .with_error_location(ErrorLocation::new("analyze.c", 0, funcname)),
+    )
+}
+
+/// `CheckSelectLocking` (analyze.c); the planner re-checks after rewriting.
+pub fn CheckSelectLocking(
+    qry: &Query<'_>,
+    strength: types_nodes::LockClauseStrength,
+) -> PgResult<()> {
+    debug_assert!(strength != types_nodes::LockClauseStrength::LCS_NONE);
+    const F: &str = "CheckSelectLocking";
+    if qry.setOperations.is_some() {
+        return Err(locking_not_allowed_with(strength, "UNION/INTERSECT/EXCEPT", F));
+    }
+    if !qry.distinctClause.is_nil() {
+        return Err(locking_not_allowed_with(strength, "DISTINCT clause", F));
+    }
+    if !qry.groupClause.is_nil() || !qry.groupingSets.is_nil() {
+        return Err(locking_not_allowed_with(strength, "GROUP BY clause", F));
+    }
+    if qry.havingQual.is_some() {
+        return Err(locking_not_allowed_with(strength, "HAVING clause", F));
+    }
+    if qry.hasAggs {
+        return Err(locking_not_allowed_with(strength, "aggregate functions", F));
+    }
+    if qry.hasWindowFuncs {
+        return Err(locking_not_allowed_with(strength, "window functions", F));
+    }
+    if qry.hasTargetSRFs {
+        return Err(locking_not_allowed_with(
+            strength,
+            "set-returning functions in the target list",
+            F,
+        ));
+    }
+    Ok(())
+}
+
+/// `transformLockingClause` (analyze.c). The RTE_SUBQUERY propagation arm
+/// (markQueryForLocking's sibling) is loud: sealed sub-Queries can't take
+/// rowmark appends yet.
+fn transformLockingClause<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    qry: &mut Query<'mcx>,
+    lc: &types_nodes::LockingClause<'mcx>,
+    pushed_down: bool,
+) -> PgResult<()> {
+    use types_nodes::parsenodes::{RTEKind, ACL_SELECT_FOR_UPDATE};
+
+    CheckSelectLocking(qry, lc.strength)?;
+
+    if lc.lockedRels.is_nil() {
+        for idx in 0..qry.rtable.len() {
+            let rte = qry.rtable.nth(idx).as_range_tbl_entry().expect("rtable cell");
+            let i = idx as u32 + 1;
+            if !rte.inFromCl {
+                continue;
+            }
+            match rte.rtekind {
+                RTEKind::RTE_RELATION => {
+                    applyLockingClause(mcx, qry, i, lc.strength, lc.waitPolicy, pushed_down)?;
+                    let perminfo =
+                        parse_relation::getRTEPermissionInfo(&qry.rteperminfos, rte)?;
+                    // SAFETY: parser-owned tree; no derived refs live.
+                    unsafe {
+                        perminfo.with_mut::<types_nodes::RTEPermissionInfo, _>(|p| {
+                            p.requiredPerms |= ACL_SELECT_FOR_UPDATE
+                        })
+                    }
+                    .expect("RTEPermissionInfo");
+                }
+                RTEKind::RTE_SUBQUERY => panic!(
+                    "transformLockingClause (analyze.c): FOR UPDATE/SHARE propagation \
+                     into subquery RTEs unported — unit backend-parser-analyze"
+                ),
+                _ => {}
+            }
+        }
+        return Ok(());
+    }
+
+    'rels: for rel_node in &lc.lockedRels {
+        let thisrel = rel_node.as_range_var().expect("lockedRels cell");
+        if thisrel.catalogname.is_some() || thisrel.schemaname.is_some() {
+            return Err(locking_unqualified_names(pstate, lc.strength, thisrel.location));
+        }
+        for idx in 0..qry.rtable.len() {
+            let rte = qry.rtable.nth(idx).as_range_tbl_entry().expect("rtable cell");
+            let i = idx as u32 + 1;
+            if !rte.inFromCl {
+                continue;
+            }
+            let mut rtename = rte.eref.expect("rte has eref").aliasname;
+            if rte.alias.is_none() {
+                match rte.rtekind {
+                    RTEKind::RTE_JOIN => match rte.join_using_alias {
+                        None => continue,
+                        Some(ja) => rtename = ja.aliasname,
+                    },
+                    RTEKind::RTE_SUBQUERY | RTEKind::RTE_VALUES => continue,
+                    _ => {}
+                }
+            }
+            if rtename != thisrel.relname {
+                continue;
+            }
+            match rte.rtekind {
+                RTEKind::RTE_RELATION => {
+                    applyLockingClause(mcx, qry, i, lc.strength, lc.waitPolicy, pushed_down)?;
+                    let perminfo =
+                        parse_relation::getRTEPermissionInfo(&qry.rteperminfos, rte)?;
+                    // SAFETY: parser-owned tree; no derived refs live.
+                    unsafe {
+                        perminfo.with_mut::<types_nodes::RTEPermissionInfo, _>(|p| {
+                            p.requiredPerms |= ACL_SELECT_FOR_UPDATE
+                        })
+                    }
+                    .expect("RTEPermissionInfo");
+                }
+                RTEKind::RTE_SUBQUERY => panic!(
+                    "transformLockingClause (analyze.c): FOR UPDATE/SHARE propagation \
+                     into subquery RTEs unported — unit backend-parser-analyze"
+                ),
+                RTEKind::RTE_JOIN => {
+                    return Err(locking_bad_target(pstate, lc.strength, "a join", thisrel.location))
+                }
+                RTEKind::RTE_FUNCTION => {
+                    return Err(locking_bad_target(
+                        pstate, lc.strength, "a function", thisrel.location,
+                    ))
+                }
+                RTEKind::RTE_TABLEFUNC => {
+                    return Err(locking_bad_target(
+                        pstate, lc.strength, "a table function", thisrel.location,
+                    ))
+                }
+                RTEKind::RTE_VALUES => {
+                    return Err(locking_bad_target(pstate, lc.strength, "VALUES", thisrel.location))
+                }
+                RTEKind::RTE_CTE => {
+                    return Err(locking_bad_target(
+                        pstate, lc.strength, "a WITH query", thisrel.location,
+                    ))
+                }
+                RTEKind::RTE_NAMEDTUPLESTORE => {
+                    return Err(locking_bad_target(
+                        pstate, lc.strength, "a named tuplestore", thisrel.location,
+                    ))
+                }
+                other => panic!("unrecognized RTE type: {}", other as i32),
+            }
+            continue 'rels;
+        }
+        return Err(locking_rel_not_found(
+            pstate,
+            thisrel.relname.expect("grammar always sets relname"),
+            lc.strength,
+            thisrel.location,
+        ));
+    }
+    Ok(())
+}
+
+/// `applyLockingClause` (analyze.c).
+fn applyLockingClause<'mcx>(
+    mcx: Mcx<'mcx>,
+    qry: &mut Query<'mcx>,
+    rtindex: u32,
+    strength: types_nodes::LockClauseStrength,
+    wait_policy: types_nodes::LockWaitPolicy,
+    pushed_down: bool,
+) -> PgResult<()> {
+    use types_nodes::parsenodes::RowMarkClause;
+
+    debug_assert!(strength != types_nodes::LockClauseStrength::LCS_NONE);
+    if !pushed_down {
+        qry.hasForUpdate = true;
+    }
+    if let Some(rc) = parse_relation::get_parse_rowmark(qry, rtindex) {
+        // Strongest strength wins; NOWAIT > SKIP LOCKED > block; pushedDown
+        // clears once any clause is explicit (C's Max/&= merge).
+        // SAFETY: parser-owned tree; no derived refs live.
+        unsafe {
+            rc.with_mut::<RowMarkClause, _>(|rc| {
+                rc.strength = rc.strength.max(strength);
+                rc.waitPolicy = rc.waitPolicy.max(wait_policy);
+                rc.pushedDown &= pushed_down;
+            })
+        }
+        .expect("RowMarkClause");
+        return Ok(());
+    }
+    let rc = Node::mk(
+        mcx,
+        RowMarkClause { rti: rtindex, strength, waitPolicy: wait_policy, pushedDown: pushed_down },
+    )?;
+    qry.rowMarks.lappend(mcx, rc)?;
+    Ok(())
+}
+
+#[cold]
+fn locking_unqualified_names(
+    pstate: &ParseState<'_, '_>,
+    strength: types_nodes::LockClauseStrength,
+    location: i32,
+) -> Box<types_error::PgError> {
+    use types_error::{ErrorLocation, ERRCODE_SYNTAX_ERROR, ERROR};
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_SYNTAX_ERROR)
+            .errmsg(format!(
+                "{} must specify unqualified relation names",
+                LCS_asString(strength)
+            ))
+            .errposition(parser_small1::parser_errposition(
+                pstate,
+                location,
+                mbutils::GetDatabaseEncoding(),
+            ))
+            .into_error()
+            .with_error_location(ErrorLocation::new("analyze.c", 0, "transformLockingClause")),
+    )
+}
+
+#[cold]
+fn locking_bad_target(
+    pstate: &ParseState<'_, '_>,
+    strength: types_nodes::LockClauseStrength,
+    what: &str,
+    location: i32,
+) -> Box<types_error::PgError> {
+    use types_error::{ErrorLocation, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg(format!("{} cannot be applied to {what}", LCS_asString(strength)))
+            .errposition(parser_small1::parser_errposition(
+                pstate,
+                location,
+                mbutils::GetDatabaseEncoding(),
+            ))
+            .into_error()
+            .with_error_location(ErrorLocation::new("analyze.c", 0, "transformLockingClause")),
+    )
+}
+
+#[cold]
+fn locking_rel_not_found(
+    pstate: &ParseState<'_, '_>,
+    relname: &str,
+    strength: types_nodes::LockClauseStrength,
+    location: i32,
+) -> Box<types_error::PgError> {
+    use types_error::{ErrorLocation, ERRCODE_UNDEFINED_TABLE, ERROR};
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_UNDEFINED_TABLE)
+            .errmsg(format!(
+                "relation \"{relname}\" in {} clause not found in FROM clause",
+                LCS_asString(strength)
+            ))
+            .errposition(parser_small1::parser_errposition(
+                pstate,
+                location,
+                mbutils::GetDatabaseEncoding(),
+            ))
+            .into_error()
+            .with_error_location(ErrorLocation::new("analyze.c", 0, "transformLockingClause")),
     )
 }

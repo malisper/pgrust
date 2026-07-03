@@ -42,7 +42,7 @@ pub fn remove_useless_result_rtes(run: &PlannerRun<'_>, parse: &Query<'_>) {
     // A FromExpr of plain RangeTblRefs has no RTE_RESULT children to remove
     // (RTE_RESULT only enters via replace_empty_jointree's single-item form).
     if f.fromlist.iter().all(|n| n.node_tag() == NodeTag::T_RangeTblRef) {
-        debug_assert!(run.root.rowMarks.is_empty());
+        let _ = run;
         return;
     }
     panic!(
@@ -51,30 +51,213 @@ pub fn remove_useless_result_rtes(run: &PlannerRun<'_>, parse: &Query<'_>) {
     );
 }
 
-// SELECT without locking clauses needs no rowmarks. For UPDATE/DELETE the
-// target rel takes no mark and every other jointree rel would; the join lane
-// (multi-rel DML) is loud in the parser, so the mark loop's input is empty.
-pub fn preprocess_rowmarks(parse: &Query<'_>) {
+// preprocess_rowmarks (planner.c). For UPDATE/DELETE the target rel takes no
+// mark and every other jointree rel would; the join lane (multi-rel DML) is
+// loud in the parser, so that mark loop's input is empty.
+pub fn preprocess_rowmarks<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    parse: &Query<'mcx>,
+) -> PgResult<()> {
+    use types_nodes::plannodes::PlanRowMark;
+
     if !parse.rowMarks.is_nil() {
-        panic!("preprocess_rowmarks (planner.c): FOR UPDATE/SHARE rowmarks; M2 lane");
-    }
-    match parse.commandType {
-        CmdType::CMD_SELECT | CmdType::CMD_INSERT => {}
-        CmdType::CMD_UPDATE | CmdType::CMD_DELETE => {
-            let f = parse.jointree.expect("jointree is a FromExpr");
-            for child in &f.fromlist {
-                let rtr = child
-                    .as_range_tbl_ref()
-                    .unwrap_or_else(|| panic!("preprocess_rowmarks: non-RTR jointree; M2 join lane"));
-                if rtr.rtindex != parse.resultRelation {
-                    panic!(
-                        "preprocess_rowmarks (planner.c): non-target rel marks \
-                         (ROW_MARK_REFERENCE); M2 join lane"
-                    );
+        parser_analyze::CheckSelectLocking(
+            parse,
+            parse
+                .rowMarks
+                .nth(0)
+                .as_row_mark_clause()
+                .expect("rowMarks cell")
+                .strength,
+        )?;
+    } else {
+        match parse.commandType {
+            CmdType::CMD_SELECT | CmdType::CMD_INSERT => return Ok(()),
+            CmdType::CMD_UPDATE | CmdType::CMD_DELETE => {
+                let f = parse.jointree.expect("jointree is a FromExpr");
+                for child in &f.fromlist {
+                    let rtr = child.as_range_tbl_ref().unwrap_or_else(|| {
+                        panic!("preprocess_rowmarks: non-RTR jointree; M2 join lane")
+                    });
+                    if rtr.rtindex != parse.resultRelation {
+                        panic!(
+                            "preprocess_rowmarks (planner.c): non-target rel marks \
+                             (ROW_MARK_REFERENCE); M2 join lane"
+                        );
+                    }
                 }
+                return Ok(());
             }
+            other => panic!("preprocess_rowmarks (planner.c): {other:?} rowmarks; M2 DML lane"),
         }
-        other => panic!("preprocess_rowmarks (planner.c): {other:?} rowmarks; M2 DML lane"),
+    }
+
+    let mcx = run.mcx;
+    let mut rels = types_nodes::bitmapset::Bitmapset::empty();
+    collect_jointree_relids(mcx, parse.jointree.expect("jointree is a FromExpr"), &mut rels)?;
+    rels.del_member(parse.resultRelation);
+
+    for rc_node in &parse.rowMarks {
+        let rc = rc_node.as_row_mark_clause().expect("rowMarks cell");
+        let rte = parse
+            .rtable
+            .nth(rc.rti as usize - 1)
+            .as_range_tbl_entry()
+            .expect("rtable cell");
+        debug_assert!(rc.rti != parse.resultRelation as u32);
+        if rte.rtekind != RTEKind::RTE_RELATION {
+            continue;
+        }
+        rels.del_member(rc.rti as i32);
+        run.glob.last_row_mark_id += 1;
+        let mark_type = select_rowmark_type(rte, rc.strength);
+        let id = run.add_rowmark(PlanRowMark {
+            rti: rc.rti,
+            prti: rc.rti,
+            rowmarkId: run.glob.last_row_mark_id,
+            markType: mark_type,
+            allMarkTypes: 1 << mark_type as i32,
+            strength: rc.strength,
+            waitPolicy: rc.waitPolicy,
+            isParent: false,
+        });
+        run.root.rowMarks.push(id);
+    }
+
+    for (idx, rte_node) in parse.rtable.iter().enumerate() {
+        let i = idx as u32 + 1;
+        if !rels.is_member(i as i32) {
+            continue;
+        }
+        let rte = rte_node.as_range_tbl_entry().expect("rtable cell");
+        run.glob.last_row_mark_id += 1;
+        let mark_type =
+            select_rowmark_type(rte, types_nodes::LockClauseStrength::LCS_NONE);
+        let id = run.add_rowmark(PlanRowMark {
+            rti: i,
+            prti: i,
+            rowmarkId: run.glob.last_row_mark_id,
+            markType: mark_type,
+            allMarkTypes: 1 << mark_type as i32,
+            strength: types_nodes::LockClauseStrength::LCS_NONE,
+            waitPolicy: types_nodes::LockWaitPolicy::LockWaitBlock,
+            isParent: false,
+        });
+        run.root.rowMarks.push(id);
+    }
+    Ok(())
+}
+
+// preprocess_targetlist's rowmark stanza (preptlist.c): junk ctid (and, for
+// inheritance parents, tableoid) columns for each rowmarked rel; ROW_MARK_COPY
+// wholerow vars are the non-relation-RTE lane, loud upstream.
+fn add_rowmark_junk_columns<'mcx>(
+    mcx: Mcx<'mcx>,
+    run: &PlannerRun<'mcx>,
+    mut tlist: NodeList<'mcx>,
+) -> PgResult<NodeList<'mcx>> {
+    use types_nodes::plannodes::RowMarkType;
+    for &id in run.root.rowMarks.iter() {
+        let rc = *run.rowmark(id);
+        if rc.rti != rc.prti {
+            continue;
+        }
+        if rc.allMarkTypes & !(1 << RowMarkType::ROW_MARK_COPY as i32) != 0 {
+            let var = Node::mk_var(
+                mcx,
+                rc.rti as i32,
+                types_tuple::htup::SelfItemPointerAttributeNumber as i16,
+                types_core::catalog::TIDOID,
+                -1,
+                0,
+                0,
+            )?;
+            let resname = arena_str(mcx, &format!("ctid{}", rc.rowmarkId))?;
+            let tle =
+                Node::mk_target_entry(mcx, var, tlist.len() as i16 + 1, Some(resname), true)?;
+            tlist.lappend(mcx, tle)?;
+        }
+        if rc.allMarkTypes & (1 << RowMarkType::ROW_MARK_COPY as i32) != 0 {
+            panic!(
+                "preprocess_targetlist (preptlist.c): ROW_MARK_COPY wholerow junk \
+                 var (makeWholeRowVar); non-relation rowmark lane"
+            );
+        }
+        if rc.isParent {
+            let var = Node::mk_var(
+                mcx,
+                rc.rti as i32,
+                types_tuple::htup::TableOidAttributeNumber as i16,
+                types_core::catalog::OIDOID,
+                -1,
+                0,
+                0,
+            )?;
+            let resname = arena_str(mcx, &format!("tableoid{}", rc.rowmarkId))?;
+            let tle =
+                Node::mk_target_entry(mcx, var, tlist.len() as i16 + 1, Some(resname), true)?;
+            tlist.lappend(mcx, tle)?;
+        }
+    }
+    Ok(tlist)
+}
+
+fn arena_str<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<&'mcx str> {
+    let bytes = mcx::slice_in(mcx, s.as_bytes())?.leak();
+    // SAFETY: byte-for-byte copy of a &str.
+    Ok(unsafe { core::str::from_utf8_unchecked(bytes) })
+}
+
+// get_relids_in_jointree (prepjointree.c), include_outer_joins=false shape:
+// RangeTblRefs collected, JoinExpr rtindexes skipped.
+fn collect_jointree_relids<'mcx>(
+    mcx: Mcx<'mcx>,
+    f: &types_nodes::primnodes::FromExpr<'mcx>,
+    out: &mut types_nodes::bitmapset::Bitmapset<'mcx>,
+) -> PgResult<()> {
+    fn walk<'mcx>(
+        mcx: Mcx<'mcx>,
+        node: types_nodes::Node<'mcx>,
+        out: &mut types_nodes::bitmapset::Bitmapset<'mcx>,
+    ) -> PgResult<()> {
+        if let Some(rtr) = node.as_range_tbl_ref() {
+            out.add_member(mcx, rtr.rtindex)?;
+        } else if let Some(j) = node.as_join_expr() {
+            walk(mcx, j.larg, out)?;
+            walk(mcx, j.rarg, out)?;
+        } else {
+            panic!(
+                "get_relids_in_jointree (prepjointree.c): {:?} jointree node",
+                node.node_tag()
+            );
+        }
+        Ok(())
+    }
+    for child in &f.fromlist {
+        walk(mcx, child, out)?;
+    }
+    Ok(())
+}
+
+// select_rowmark_type (planner.c); the FDW arm is loud.
+pub fn select_rowmark_type(
+    rte: &RangeTblEntry<'_>,
+    strength: types_nodes::LockClauseStrength,
+) -> types_nodes::plannodes::RowMarkType {
+    use types_nodes::plannodes::RowMarkType::*;
+    use types_nodes::LockClauseStrength::*;
+    if rte.rtekind != RTEKind::RTE_RELATION {
+        return ROW_MARK_COPY;
+    }
+    if rte.relkind == types_rel::RELKIND_FOREIGN_TABLE {
+        panic!("select_rowmark_type (planner.c): GetForeignRowMarkType; FDW lane");
+    }
+    match strength {
+        LCS_NONE => ROW_MARK_REFERENCE,
+        LCS_FORKEYSHARE => ROW_MARK_KEYSHARE,
+        LCS_FORSHARE => ROW_MARK_SHARE,
+        LCS_FORNOKEYUPDATE => ROW_MARK_NOKEYEXCLUSIVE,
+        LCS_FORUPDATE => ROW_MARK_EXCLUSIVE,
     }
 }
 
@@ -84,12 +267,17 @@ pub fn preprocess_rowmarks(parse: &Query<'_>) {
 pub fn preprocess_targetlist<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResult<()> {
     let mcx = run.mcx;
     let parse = run.parse();
-    debug_assert!(run.root.rowMarks.is_empty());
     if parse.resultRelation == 0 {
         debug_assert!(parse.commandType == CmdType::CMD_SELECT);
-        run.processed_tlist = Some(&parse.targetList);
+        if run.root.rowMarks.is_empty() {
+            run.processed_tlist = Some(&parse.targetList);
+            return Ok(());
+        }
+        let tlist = add_rowmark_junk_columns(mcx, run, parse.targetList.clone_in(mcx)?)?;
+        run.processed_tlist = Some(mcx::leak_in(mcx::alloc_in(mcx, tlist)?));
         return Ok(());
     }
+    debug_assert!(run.root.rowMarks.is_empty());
     let command_type = parse.commandType;
     if command_type == CmdType::CMD_MERGE {
         panic!("preprocess_targetlist (preptlist.c): MERGE action lists; M4 MERGE lane");

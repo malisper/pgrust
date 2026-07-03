@@ -65,6 +65,7 @@ fn create_plan_recurse<'mcx>(
         PathNode::MergePath(_) => create_mergejoin_plan(run, path_id),
         PathNode::HashPath(_) => create_hashjoin_plan(run, path_id),
         PathNode::LimitPath(_) => create_limit_plan(run, path_id, flags),
+        PathNode::LockRowsPath(_) => create_lockrows_plan(run, path_id, flags),
         PathNode::UniquePath(_) => panic!(
             "create_unique_plan (createplan.c): unique-ified semijoin won the cost \
              competition; unique-plan lane unported"
@@ -1552,6 +1553,39 @@ fn create_limit_plan<'mcx>(
     plan.limitOffset = limit_offset;
     plan.limitCount = limit_count;
     plan.limitOption = types_nodes::nodes_enums::LimitOption::LIMIT_OPTION_COUNT;
+    copy_generic_path_info(run, &mut plan.plan, path_id);
+    Ok(plan.seal())
+}
+
+// create_lockrows_plan + make_lockrows (createplan.c). The PlanRowMark nodes
+// materialize here from the run store (C shares root->rowMarks pointers;
+// setrefs adjusts these copies in place the same way).
+fn create_lockrows_plan<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    path_id: PathId,
+    flags: i32,
+) -> PgResult<Node<'mcx>> {
+    let mcx = run.mcx;
+    let (subpath_id, marks, epq_param) = {
+        let PathNode::LockRowsPath(lp) = run.root.path(path_id) else { unreachable!() };
+        (
+            lp.subpath.expect("LockRowsPath has a subpath"),
+            crate::relnode::pgvec_clone_shallow(mcx, &lp.rowMarks),
+            lp.epqParam,
+        )
+    };
+    // LockRows doesn't project, so tlist requirements pass through.
+    let subplan = create_plan_recurse(run, subpath_id, flags)?;
+
+    let mut plan = Node::build::<types_nodes::plannodes::LockRows>(mcx)?;
+    plan.plan.targetlist =
+        NodeList::from_slice(mcx, subplan.as_plan().expect("plan node").targetlist.as_slice())?;
+    plan.plan.qual = NodeList::nil();
+    plan.plan.lefttree = Some(subplan);
+    for &id in marks.iter() {
+        plan.rowMarks.lappend(mcx, Node::mk(mcx, *run.rowmark(id))?)?;
+    }
+    plan.epqParam = epq_param;
     copy_generic_path_info(run, &mut plan.plan, path_id);
     Ok(plan.seal())
 }
