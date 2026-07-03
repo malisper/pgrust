@@ -688,6 +688,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "adt_tsquery_core"
+version = "0.1.0"
+dependencies = [
+ "types_fmgr",
+]
+
+[[package]]
+name = "adt_tsrank"
+version = "0.1.0"
+dependencies = [
+ "types_fmgr",
+]
+
+[[package]]
+name = "adt_tsvector_core"
+version = "0.1.0"
+dependencies = [
+ "types_fmgr",
+]
+
+[[package]]
 name = "adt_uuid"
 version = "0.1.0"
 dependencies = [
@@ -2580,6 +2601,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "dict_snowball"
+version = "0.1.0"
+dependencies = [
+ "types_fmgr",
+]
+
+[[package]]
 name = "discard"
 version = "0.1.0"
 dependencies = [
@@ -3156,6 +3184,9 @@ dependencies = [
  "adt_regproc",
  "adt_scalar",
  "adt_timestamp",
+ "adt_tsquery_core",
+ "adt_tsrank",
+ "adt_tsvector_core",
  "adt_uuid",
  "adt_varbit",
  "adt_varchar",
@@ -3166,6 +3197,7 @@ dependencies = [
  "cryptohashfuncs",
  "datum",
  "dbsize",
+ "dict_snowball",
  "fmgr_seams",
  "mcx",
  "name",
@@ -3175,11 +3207,17 @@ dependencies = [
  "sequence_seams",
  "stringinfo",
  "syscache_seams",
+ "to_tsany",
+ "ts_cache",
+ "ts_parse",
+ "tsearch_dict",
+ "tsearch_spell",
  "types_core",
  "types_error",
  "types_fmgr",
  "types_nodes",
  "varlena",
+ "wparser_def",
 ]
 
 [[package]]
@@ -9662,6 +9700,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "to_tsany"
+version = "0.1.0"
+dependencies = [
+ "types_fmgr",
+]
+
+[[package]]
 name = "toast_internals_seams"
 version = "0.1.0"
 dependencies = [
@@ -9816,6 +9861,48 @@ dependencies = [
  "seam_core",
  "types_core",
  "types_error",
+]
+
+[[package]]
+name = "ts_cache"
+version = "0.1.0"
+dependencies = [
+ "types_fmgr",
+]
+
+[[package]]
+name = "ts_locale"
+version = "0.1.0"
+dependencies = [
+ "types_fmgr",
+]
+
+[[package]]
+name = "ts_parse"
+version = "0.1.0"
+dependencies = [
+ "types_fmgr",
+]
+
+[[package]]
+name = "tsearch_dict"
+version = "0.1.0"
+dependencies = [
+ "types_fmgr",
+]
+
+[[package]]
+name = "tsearch_spell"
+version = "0.1.0"
+dependencies = [
+ "types_fmgr",
+]
+
+[[package]]
+name = "tsearchcmds"
+version = "0.1.0"
+dependencies = [
+ "types_fmgr",
 ]
 
 [[package]]
@@ -10661,6 +10748,13 @@ dependencies = [
 [[package]]
 name = "wchar"
 version = "0.1.0"
+
+[[package]]
+name = "wparser_def"
+version = "0.1.0"
+dependencies = [
+ "types_fmgr",
+]
 
 [[package]]
 name = "xact"
