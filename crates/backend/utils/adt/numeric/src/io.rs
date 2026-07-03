@@ -97,11 +97,12 @@ pub fn numeric_in(
         10
     };
 
-    let (mut value, endpos) = if base == 10 {
-        match set_var_from_str(s, cp) {
-            Ok((mut v, end)) => {
-                v.sign = sign;
-                (v, end)
+    let mut value = NumericVar::new();
+    let endpos = if base == 10 {
+        match set_var_from_str(s, cp, &mut value) {
+            Ok(end) => {
+                value.sign = sign;
+                end
             }
             Err(NumErr::InvalidSyntax) => {
                 return ereturn(escontext, None, invalid_numeric_syntax(input))
@@ -111,8 +112,8 @@ pub fn numeric_in(
             }
         }
     } else {
-        match set_var_from_non_decimal_integer_str(s, cp + 2, sign, base) {
-            Ok(pair) => pair,
+        match set_var_from_non_decimal_integer_str(s, cp + 2, sign, base, &mut value) {
+            Ok(end) => end,
             Err(NumErr::InvalidSyntax) => {
                 return ereturn(escontext, None, invalid_numeric_syntax(input))
             }
@@ -140,7 +141,7 @@ pub fn numeric_in(
     }
 }
 
-fn set_var_from_str(s: &[u8], mut cp: usize) -> Result<(NumericVar, usize), NumErr> {
+fn set_var_from_str(s: &[u8], mut cp: usize, dest: &mut NumericVar) -> Result<usize, NumErr> {
     let mut have_dp = false;
     let mut sign = NUMERIC_POS;
     let mut dweight: i32 = -1;
@@ -266,7 +267,6 @@ fn set_var_from_str(s: &[u8], mut cp: usize) -> Result<(NumericVar, usize), NumE
         let offset = (weight + 1) * DEC_DIGITS - (dweight + 1);
         let ndigits = (ddigits + offset + DEC_DIGITS - 1) / DEC_DIGITS;
 
-        let mut dest = NumericVar::new();
         dest.alloc(ndigits);
         dest.sign = sign;
         dest.weight = weight;
@@ -292,7 +292,7 @@ fn set_var_from_str(s: &[u8], mut cp: usize) -> Result<(NumericVar, usize), NumE
         }
 
         dest.strip();
-        Ok((dest, cp))
+        Ok(cp)
     })
 }
 
@@ -301,11 +301,11 @@ fn set_var_from_non_decimal_integer_str(
     mut cp: usize,
     sign: u16,
     base: i32,
-) -> Result<(NumericVar, usize), NumErr> {
+    dest: &mut NumericVar,
+) -> Result<usize, NumErr> {
     let firstdigit = cp;
     let mut tmp: i64 = 0;
     let mut mul: i64 = 1;
-    let mut dest = NumericVar::new();
     dest.set_zero();
 
     let digit_ok = |b: u8| -> Option<i64> {
@@ -333,9 +333,12 @@ fn set_var_from_non_decimal_integer_str(
         if let Some(d) = digit_ok(b) {
             if mul > i64::MAX / base as i64 {
                 let mul_var_tmp = int64_to_var(mul);
-                dest = mul_var(dest.view(), mul_var_tmp.view(), 0);
+                let mut prod = NumericVar::new();
+                mul_var(dest.view(), mul_var_tmp.view(), &mut prod, 0);
                 let add_tmp = int64_to_var(tmp);
-                dest = add_var(dest.view(), add_tmp.view());
+                let mut sum = NumericVar::new();
+                add_var(prod.view(), add_tmp.view(), &mut sum);
+                *dest = sum;
 
                 if dest.weight > NUMERIC_WEIGHT_MAX {
                     return Err(NumErr::OutOfRange);
@@ -362,16 +365,19 @@ fn set_var_from_non_decimal_integer_str(
     }
 
     let mul_var_tmp = int64_to_var(mul);
-    dest = mul_var(dest.view(), mul_var_tmp.view(), 0);
+    let mut prod = NumericVar::new();
+    mul_var(dest.view(), mul_var_tmp.view(), &mut prod, 0);
     let add_tmp = int64_to_var(tmp);
-    dest = add_var(dest.view(), add_tmp.view());
+    let mut sum = NumericVar::new();
+    add_var(prod.view(), add_tmp.view(), &mut sum);
+    *dest = sum;
 
     if dest.weight > NUMERIC_WEIGHT_MAX {
         return Err(NumErr::OutOfRange);
     }
 
     dest.sign = sign;
-    Ok((dest, cp))
+    Ok(cp)
 }
 
 pub fn numeric_out_into(num: Num<'_>, out: &mut Vec<u8>) {

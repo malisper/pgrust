@@ -168,7 +168,8 @@ pub fn numeric_add_into(num1: Num<'_>, num2: Num<'_>, out: &mut NumericImage) ->
         return Ok(());
     }
 
-    let result = add_var(num1.view(), num2.view());
+    let mut result = NumericVar::new();
+    add_var(num1.view(), num2.view(), &mut result);
     if !make_result_into(result.view(), out) {
         return Err(crate::numeric_overflow_error().into());
     }
@@ -206,7 +207,8 @@ pub fn numeric_sub_into(num1: Num<'_>, num2: Num<'_>, out: &mut NumericImage) ->
         return Ok(());
     }
 
-    let result = sub_var(num1.view(), num2.view());
+    let mut result = NumericVar::new();
+    sub_var(num1.view(), num2.view(), &mut result);
     if !make_result_into(result.view(), out) {
         return Err(crate::numeric_overflow_error().into());
     }
@@ -258,7 +260,8 @@ pub fn numeric_mul_into(num1: Num<'_>, num2: Num<'_>, out: &mut NumericImage) ->
 
     let arg1 = num1.view();
     let arg2 = num2.view();
-    let mut result = mul_var(arg1, arg2, arg1.dscale + arg2.dscale);
+    let mut result = NumericVar::new();
+    mul_var(arg1, arg2, &mut result, arg1.dscale + arg2.dscale);
     if result.dscale > NUMERIC_DSCALE_MAX {
         result.round(NUMERIC_DSCALE_MAX);
     }
@@ -314,7 +317,8 @@ pub fn numeric_div_into(num1: Num<'_>, num2: Num<'_>, out: &mut NumericImage) ->
     let arg1 = num1.view();
     let arg2 = num2.view();
     let rscale = select_div_scale(arg1, arg2);
-    let result = div_var(arg1, arg2, rscale, true, true)?;
+    let mut result = NumericVar::new();
+    div_var(arg1, arg2, &mut result, rscale, true, true)?;
     if !make_result_into(result.view(), out) {
         return Err(crate::numeric_overflow_error().into());
     }
@@ -355,7 +359,8 @@ pub fn numeric_div_trunc_common(num1: Num<'_>, num2: Num<'_>) -> PgResult<Numeri
         return make_result(CONST_ZERO);
     }
 
-    let result = div_var(num1.view(), num2.view(), 0, false, true)?;
+    let mut result = NumericVar::new();
+    div_var(num1.view(), num2.view(), &mut result, 0, false, true)?;
     make_result(result.view())
 }
 

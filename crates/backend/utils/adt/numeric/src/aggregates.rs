@@ -148,11 +148,11 @@ impl NumericSumAccum {
         }
     }
 
-    pub fn finalize(&mut self) -> NumericVar {
+    pub fn finalize(&mut self, result: &mut NumericVar) {
         if self.ndigits == 0 {
-            let mut result = NumericVar::new();
             result.set_zero();
-            return result;
+            result.dscale = 0;
+            return;
         }
 
         self.carry();
@@ -184,9 +184,8 @@ impl NumericSumAccum {
             }
         }
 
-        let mut result = add_var(pos_var.view(), neg_var.view());
+        add_var(pos_var.view(), neg_var.view(), result);
         result.strip();
-        result
     }
 
     pub fn copy_from(&mut self, src: &NumericSumAccum) {
@@ -200,7 +199,8 @@ impl NumericSumAccum {
     }
 
     pub fn combine(&mut self, other: &mut NumericSumAccum) {
-        let tmp = other.finalize();
+        let mut tmp = NumericVar::new();
+        other.finalize(&mut tmp);
         self.add(tmp.view());
     }
 }
@@ -260,7 +260,8 @@ pub fn do_numeric_accum(state: &mut NumericAggState, newval: Num<'_>) {
     }
 
     if state.calc_sum_x2 {
-        let x2 = mul_var(x, x, x.dscale * 2);
+        let mut x2 = NumericVar::new();
+        mul_var(x, x, &mut x2, x.dscale * 2);
         state.n += 1;
         state.sum_x.add(x);
         state.sum_x2.add(x2.view());
@@ -297,7 +298,9 @@ pub fn do_numeric_discard(state: &mut NumericAggState, newval: Num<'_>) -> bool 
     }
 
     let x2 = if state.calc_sum_x2 {
-        Some(mul_var(x, x, x.dscale * 2))
+        let mut x2 = NumericVar::new();
+        mul_var(x, x, &mut x2, x.dscale * 2);
+        Some(x2)
     } else {
         None
     };
@@ -350,7 +353,8 @@ pub fn numeric_sum(state: Option<&mut NumericAggState>) -> PgResult<Option<Numer
         return Ok(Some(NumericImage::ninf()));
     }
 
-    let sum = state.sum_x.finalize();
+    let mut sum = NumericVar::new();
+    state.sum_x.finalize(&mut sum);
     Ok(Some(make_result(sum.view())?))
 }
 
@@ -371,7 +375,8 @@ pub fn numeric_avg(state: Option<&mut NumericAggState>) -> PgResult<Option<Numer
         return Ok(Some(NumericImage::ninf()));
     }
 
-    let sum = state.sum_x.finalize();
+    let mut sum = NumericVar::new();
+    state.sum_x.finalize(&mut sum);
     let sum_img = make_result(sum.view())?;
     Ok(Some(numeric_avg_div(sum_img.num(), state.n)?))
 }

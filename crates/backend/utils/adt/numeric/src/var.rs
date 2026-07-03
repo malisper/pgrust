@@ -41,53 +41,81 @@ fn word_buf_put(v: Vec<u16>) {
     });
 }
 
+// Covers every value the packed format can produce for typical OLTP widths
+// (numeric_in 40+10 decimal digits, mul 40x40, div) without touching the heap
+// — a structural win over C, whose NumericVar always pallocs its buf.
+pub(crate) const INLINE_DIGITS: usize = 36;
+
 pub(crate) struct DigitBuf {
-    v: Vec<NumericDigit>,
+    len: u32,
+    inline: core::mem::MaybeUninit<[NumericDigit; INLINE_DIGITS]>,
+    heap: Vec<NumericDigit>,
 }
 
 impl DigitBuf {
     pub fn empty() -> DigitBuf {
-        DigitBuf { v: Vec::new() }
-    }
-
-    pub fn zeroed(n: usize) -> DigitBuf {
-        let mut b = DigitBuf::uninit(n);
-        b.v.fill(0);
-        b
+        DigitBuf {
+            len: 0,
+            inline: core::mem::MaybeUninit::uninit(),
+            heap: Vec::new(),
+        }
     }
 
     // C's digitbuf_alloc: contents uninitialized; callers write every live
     // digit before reading (round's carry walk only reaches written spares).
-    pub fn uninit(n: usize) -> DigitBuf {
-        let mut v = DIGIT_POOL
-            .with(|p| p.borrow_mut().pop())
-            .unwrap_or_default();
-        v.clear();
-        v.reserve(n);
-        // SAFETY: capacity reserved; i16 has no invalid bit patterns and the
+    // In place: no by-value moves of the inline array, and a heap buffer once
+    // acquired is retained across reallocations (rule 7).
+    pub fn realloc_uninit(&mut self, n: usize) {
+        if n <= INLINE_DIGITS {
+            self.len = n as u32;
+            return;
+        }
+        if self.heap.capacity() < n {
+            let mut v = DIGIT_POOL
+                .with(|p| p.borrow_mut().pop())
+                .unwrap_or_default();
+            v.clear();
+            v.reserve(n);
+            self.heap = v;
+        } else {
+            self.heap.clear();
+        }
+        // SAFETY: capacity ensured; i16 has no invalid bit patterns and the
         // exposed prefix is written by the caller before any read.
-        unsafe { v.set_len(n) };
-        DigitBuf { v }
+        unsafe { self.heap.set_len(n) };
+        self.len = n as u32;
     }
 
     #[inline]
     pub fn as_slice(&self) -> &[NumericDigit] {
-        &self.v
+        let n = self.len as usize;
+        if n <= INLINE_DIGITS {
+            // SAFETY: the exposed prefix is written before reads (uninit contract).
+            unsafe { core::slice::from_raw_parts(self.inline.as_ptr().cast(), n) }
+        } else {
+            &self.heap
+        }
     }
 
     #[inline]
     pub fn as_mut_slice(&mut self) -> &mut [NumericDigit] {
-        &mut self.v
+        let n = self.len as usize;
+        if n <= INLINE_DIGITS {
+            // SAFETY: as as_slice; i16 has no invalid bit patterns.
+            unsafe { core::slice::from_raw_parts_mut(self.inline.as_mut_ptr().cast(), n) }
+        } else {
+            &mut self.heap
+        }
     }
 }
 
 // Drop is the pool-return guard (memory guard exception to the no-drop rule).
 impl Drop for DigitBuf {
     fn drop(&mut self) {
-        if self.v.capacity() == 0 {
+        if self.heap.capacity() == 0 {
             return;
         }
-        let v = core::mem::take(&mut self.v);
+        let v = core::mem::take(&mut self.heap);
         DIGIT_POOL.with(|p| {
             let mut p = p.borrow_mut();
             if p.len() < DIGIT_POOL_SLOTS {
@@ -141,15 +169,13 @@ impl NumericVar {
     }
 
     pub fn alloc(&mut self, ndigits: i32) {
-        let mut buf = DigitBuf::uninit(ndigits as usize + 1);
-        buf.as_mut_slice()[0] = 0;
-        self.buf = buf;
+        self.buf.realloc_uninit(ndigits as usize + 1);
+        self.buf.as_mut_slice()[0] = 0;
         self.offset = 1;
         self.ndigits = ndigits;
     }
 
     pub fn set_zero(&mut self) {
-        self.buf = DigitBuf::empty();
         self.offset = 0;
         self.ndigits = 0;
         self.weight = 0;
@@ -163,10 +189,10 @@ impl NumericVar {
     }
 
     pub fn set_from_view(&mut self, v: VarView<'_>) {
-        let mut buf = DigitBuf::uninit(v.ndigits as usize + 1);
-        buf.as_mut_slice()[0] = 0;
-        buf.as_mut_slice()[1..].copy_from_slice(v.digits);
-        self.buf = buf;
+        self.buf.realloc_uninit(v.ndigits as usize + 1);
+        let s = self.buf.as_mut_slice();
+        s[0] = 0;
+        s[1..].copy_from_slice(v.digits);
         self.offset = 1;
         self.ndigits = v.ndigits;
         self.weight = v.weight;
@@ -681,3 +707,5 @@ pub fn var_to_int32(var: VarView<'_>) -> Option<i32> {
     }
     Some(val as i32)
 }
+
+const _: () = assert!(core::mem::size_of::<NumericVar>() <= 128);
