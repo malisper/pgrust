@@ -5,11 +5,15 @@ compile_error!("only the little-endian pg_crc32c layout is implemented");
 mod armv8;
 mod legacy;
 mod sb8;
+#[cfg(target_arch = "x86_64")]
+mod sse42;
 
 #[cfg(target_arch = "aarch64")]
 pub use armv8::pg_comp_crc32c_armv8;
 pub use legacy::{legacy_crc32_lexeme, traditional_crc32};
 pub use sb8::pg_comp_crc32c_sb8;
+#[cfg(target_arch = "x86_64")]
+pub use sse42::pg_comp_crc32c_sse42;
 
 pub const CRC32C_INIT: u32 = 0xFFFF_FFFF;
 
@@ -18,24 +22,30 @@ pub const fn fin_crc32c(crc: u32) -> u32 {
     crc ^ 0xFFFF_FFFF
 }
 
-// Dispatch is resolved at compile time when the target enables FEAT_CRC32
-// (aarch64-apple-darwin baseline, -Ctarget-cpu=neoverse-v2 fleet builds);
-// only featureless aarch64 builds pay the resolve-once indirection below.
-// x86-64 hardware CRC (sse42) is not ported yet: non-aarch64 gets sb8, the
-// same as a C build without USE_SSE42_CRC32C.
+// Hardware CRC resolves at compile time when the target enables it (FEAT_CRC32
+// on aarch64, SSE4.2 on x86-64-v2+); featureless builds pay the resolve-once
+// indirection below, mirroring C's *_choose.c function pointer. C 18.3's
+// pg_comp_crc32c_avx512 (USE_AVX512_CRC32C_WITH_RUNTIME_CHECK) is not ported.
 #[inline]
 pub fn pg_comp_crc32c(crc: u32, data: &[u8]) -> u32 {
     #[cfg(all(target_arch = "aarch64", target_feature = "crc"))]
-    // SAFETY: this arm only compiles when FEAT_CRC32 is a build-time target
-    // feature.
+    // SAFETY: this arm only compiles when FEAT_CRC32 is a build-time feature.
     return unsafe { armv8::pg_comp_crc32c_armv8(crc, data) };
     #[cfg(all(target_arch = "aarch64", not(target_feature = "crc")))]
     return choose::comp(crc, data);
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(all(target_arch = "x86_64", target_feature = "sse4.2"))]
+    // SAFETY: this arm only compiles when SSE4.2 is a build-time feature.
+    return unsafe { sse42::pg_comp_crc32c_sse42(crc, data) };
+    #[cfg(all(target_arch = "x86_64", not(target_feature = "sse4.2")))]
+    return choose::comp(crc, data);
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
     return sb8::pg_comp_crc32c_sb8(crc, data);
 }
 
-#[cfg(all(target_arch = "aarch64", not(target_feature = "crc")))]
+#[cfg(any(
+    all(target_arch = "aarch64", not(target_feature = "crc")),
+    all(target_arch = "x86_64", not(target_feature = "sse4.2"))
+))]
 mod choose {
     use std::sync::OnceLock;
 
@@ -43,15 +53,29 @@ mod choose {
 
     static COMP: OnceLock<Comp> = OnceLock::new();
 
-    fn armv8_detected(crc: u32, data: &[u8]) -> u32 {
+    #[cfg(target_arch = "aarch64")]
+    fn hw_detected(crc: u32, data: &[u8]) -> u32 {
         // SAFETY: installed only after runtime detection of FEAT_CRC32.
         unsafe { crate::armv8::pg_comp_crc32c_armv8(crc, data) }
     }
 
+    #[cfg(target_arch = "x86_64")]
+    fn hw_detected(crc: u32, data: &[u8]) -> u32 {
+        // SAFETY: installed only after runtime detection of SSE4.2.
+        unsafe { crate::sse42::pg_comp_crc32c_sse42(crc, data) }
+    }
+
+    fn hw_available() -> bool {
+        #[cfg(target_arch = "aarch64")]
+        return std::arch::is_aarch64_feature_detected!("crc");
+        #[cfg(target_arch = "x86_64")]
+        return std::arch::is_x86_feature_detected!("sse4.2");
+    }
+
     pub fn comp(crc: u32, data: &[u8]) -> u32 {
         let f = *COMP.get_or_init(|| {
-            if std::arch::is_aarch64_feature_detected!("crc") {
-                armv8_detected
+            if hw_available() {
+                hw_detected
             } else {
                 crate::sb8::pg_comp_crc32c_sb8
             }
