@@ -26,6 +26,8 @@ pub struct PlanStateBase<'mcx> {
 pub enum PlanStateNode<'mcx> {
     Result(ResultState<'mcx>),
     SeqScan(::nodeseqscan::SeqScanState<'mcx>),
+    IndexScan(::nodeindexscan::IndexScanState<'mcx>),
+    IndexOnlyScan(::nodeindexonlyscan::IndexOnlyScanState<'mcx>),
 }
 
 // Init-time tree node touched by &mut per tuple; rule-9 budget covers the per-row carriers inside.
@@ -37,6 +39,8 @@ impl<'mcx> PlanStateNode<'mcx> {
         match self {
             PlanStateNode::Result(rs) => rs.ps.ps_ExprContext,
             PlanStateNode::SeqScan(ss) => Some(ss.ss.ps_ExprContext),
+            PlanStateNode::IndexScan(is) => Some(is.ss.ps_ExprContext),
+            PlanStateNode::IndexOnlyScan(ios) => Some(ios.ss.ps_ExprContext),
         }
     }
 
@@ -53,7 +57,9 @@ impl<'mcx> PlanStateNode<'mcx> {
                 .ps_ResultTupleDesc
                 .clone()
                 .expect("ResultState without a result type")),
-            PlanStateNode::SeqScan(_) => crate::exec_type_from_tl(&plan.targetlist),
+            PlanStateNode::SeqScan(_)
+            | PlanStateNode::IndexScan(_)
+            | PlanStateNode::IndexOnlyScan(_) => crate::exec_type_from_tl(&plan.targetlist),
         }
     }
 }
@@ -93,6 +99,24 @@ pub fn exec_init_node<'mcx>(
                 eflags,
             )?)
         }
+        NodeTag::T_IndexScan => {
+            let mcx = estate.es_query_cxt;
+            PlanStateNode::IndexScan(::nodeindexscan::exec_init_index_scan(
+                mcx,
+                node.as_index_scan().unwrap(),
+                estate,
+                eflags,
+            )?)
+        }
+        NodeTag::T_IndexOnlyScan => {
+            let mcx = estate.es_query_cxt;
+            PlanStateNode::IndexOnlyScan(::nodeindexonlyscan::exec_init_index_only_scan(
+                mcx,
+                node.as_index_only_scan().unwrap(),
+                estate,
+                eflags,
+            )?)
+        }
         tag => unported_nodes!(tag, {
             T_ProjectSet => "nodeProjectSet.c",
             T_ModifyTable => "nodeModifyTable.c",
@@ -102,8 +126,6 @@ pub fn exec_init_node<'mcx>(
             T_BitmapAnd => "nodeBitmapAnd.c",
             T_BitmapOr => "nodeBitmapOr.c",
             T_SampleScan => "nodeSamplescan.c",
-            T_IndexScan => "nodeIndexscan.c",
-            T_IndexOnlyScan => "nodeIndexonlyscan.c",
             T_BitmapIndexScan => "nodeBitmapIndexscan.c",
             T_BitmapHeapScan => "nodeBitmapHeapscan.c",
             T_TidScan => "nodeTidscan.c",
@@ -151,6 +173,10 @@ pub fn exec_proc_node<'mcx>(
     match node {
         PlanStateNode::Result(rs) => exec_result(rs, estate),
         PlanStateNode::SeqScan(ss) => ::nodeseqscan::exec_seq_scan(ss, estate),
+        PlanStateNode::IndexScan(is) => ::nodeindexscan::exec_index_scan(is, estate),
+        PlanStateNode::IndexOnlyScan(ios) => {
+            ::nodeindexonlyscan::exec_index_only_scan(ios, estate)
+        }
     }
 }
 
@@ -162,6 +188,10 @@ pub fn exec_end_node<'mcx>(
     match node {
         PlanStateNode::Result(rs) => exec_end_result(rs, estate),
         PlanStateNode::SeqScan(ss) => ::nodeseqscan::exec_end_seq_scan(ss),
+        PlanStateNode::IndexScan(is) => ::nodeindexscan::exec_end_index_scan(is),
+        PlanStateNode::IndexOnlyScan(ios) => {
+            ::nodeindexonlyscan::exec_end_index_only_scan(ios)
+        }
     }
 }
 
@@ -174,7 +204,9 @@ pub fn exec_shutdown_node<'mcx>(node: &mut PlanStateNode<'mcx>) {
                 exec_shutdown_node(outer);
             }
         }
-        PlanStateNode::SeqScan(_) => {}
+        PlanStateNode::SeqScan(_)
+        | PlanStateNode::IndexScan(_)
+        | PlanStateNode::IndexOnlyScan(_) => {}
     }
 }
 

@@ -16,6 +16,10 @@ pub fn exec_re_scan<'mcx>(
     match node {
         PlanStateNode::Result(rs) => exec_re_scan_result(rs, estate),
         PlanStateNode::SeqScan(ss) => ::nodeseqscan::exec_rescan_seq_scan(ss, estate),
+        PlanStateNode::IndexScan(is) => ::nodeindexscan::exec_rescan_index_scan(is, estate),
+        PlanStateNode::IndexOnlyScan(ios) => {
+            ::nodeindexonlyscan::exec_rescan_index_only_scan(ios, estate)
+        }
     }
 }
 

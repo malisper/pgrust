@@ -23,6 +23,8 @@ executils = { path = "../executils" }
 execexpr = { path = "../execexpr" }
 execscan = { path = "../execscan" }
 nodeseqscan = { path = "../nodeseqscan" }
+nodeindexscan = { path = "../nodeindexscan" }
+nodeindexonlyscan = { path = "../nodeindexonlyscan" }
 exectuples = { path = "../exectuples" }
 tupdesc = { path = "../../access/common/tupdesc" }
 snapmgr = { path = "../../utils/time/snapmgr" }
@@ -31,7 +33,21 @@ guc_tables = { path = "../../utils/misc/guc_tables" }
 init_small = { path = "../../utils/init/init_small" }
 postgres_seams = { path = "../../tcop/postgres_seams" }
 backend_status_seams = { path = "../../utils/activity/backend_status_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+aclchk_seams = { path = "../../catalog/aclchk_seams" }
 
 [dev-dependencies]
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
 datum = { path = "../../../_support/types/datum" }
+types_rel = { path = "../../../_support/types/rel" }
+types_snapshot = { path = "../../../_support/types/snapshot" }
+types_storage = { path = "../../../_support/types/types_storage" }
+tableam = { path = "../../access/table/tableam" }
+relation_seams = { path = "../../access/common/relation_seams" }
+bufmgr_seams = { path = "../../storage/buffer/bufmgr_seams" }
+heapam_visibility_seams = { path = "../../access/heap/heapam_visibility_seams" }
+predicate_seams = { path = "../../storage/lmgr/predicate_seams" }
+pruneheap_seams = { path = "../../access/heap/pruneheap_seams" }
+procarray_seams = { path = "../../storage/ipc/procarray_seams" }
+resowner_seams = { path = "../../utils/resowner/resowner_seams" }
+types_resowner = { path = "../../../_support/types/types_resowner" }

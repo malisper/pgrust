@@ -29,6 +29,8 @@ pub fn init_all() {
     execmain::init_seams();
     execscan::init_seams();
     nodeseqscan::init_seams();
+    nodeindexscan::init_seams();
+    nodeindexonlyscan::init_seams();
     auth::init_seams();
     be_secure::init_seams();
     hba::init_seams();
@@ -46,6 +48,11 @@ pub fn init_all() {
     launch_backend::init_seams();
     pmchild::init_seams();
     postmaster::init_seams();
+    auxprocess::init_seams();
+    checkpointer::init_seams();
+    bgwriter::init_seams();
+    walwriter::init_seams();
+    postmaster_startup::init_seams();
     syslogger::init_seams();
     launcher::init_seams();
     walsender_config::init_seams();

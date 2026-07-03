@@ -48,6 +48,7 @@ pub const FLOAT8OID: Oid = 701;
 pub const BITOID: Oid = 1560;
 pub const NUMERICOID: Oid = 1700;
 pub const INTERVALOID: Oid = 1186;
+pub const NAMEOID: Oid = 19;
 pub const CSTRINGOID: Oid = 2275;
 pub const RECORDARRAYOID: Oid = 2287;
 pub const ANYOID: Oid = 2276;

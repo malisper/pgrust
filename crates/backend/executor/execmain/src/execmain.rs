@@ -4,8 +4,10 @@ use ::executils::EStateData;
 use ::mcx::{McxOwned, MemoryContext};
 use ::tcop_dest::DestReceiver;
 use ::types_core::CommandId;
+use ::types_core::catalog::RELATION_RELATION_ID;
 use ::types_error::{PgError, PgResult};
 use ::types_nodes::nodes_enums::CmdType;
+use ::types_nodes::parsenodes::RTEPermissionInfo;
 use ::types_nodes::plannodes::PlannedStmt;
 use ::types_portal::QueryDescHandle;
 use ::types_scan::sdir::{ScanDirection, ScanDirectionIsNoMovement};
@@ -50,21 +52,60 @@ fn unrecognized_operation(operation: CmdType) -> Box<PgError> {
     )))
 }
 
-// ExecCheckXactReadOnly: a read-only SELECT with no permission targets passes
-// vacuously; anything that could write panics until the aclchk/rte lane lands.
+// acl.h values (transcribed like execexpr's ACL_EXECUTE).
+const ACL_SELECT: u64 = 1 << 1;
+const ACLCHECK_OK: i32 = 0;
+
+// ExecCheckXactReadOnly: SELECT-only permission targets pass vacuously;
+// anything that could write panics until PreventCommandIfReadOnly lands.
 fn exec_check_xact_read_only(pstmt: &PlannedStmt<'_>) {
-    if pstmt.commandType != CmdType::CMD_SELECT
-        || pstmt.hasModifyingCTE
-        || !pstmt.permInfos.is_nil()
-    {
-        panic!("ExecCheckXactReadOnly (execMain.c): read-only enforcement lane not ported");
+    for pi_node in pstmt.permInfos.iter() {
+        let pi = pi_node.as_rte_permission_info().expect("permInfos cell");
+        if pi.requiredPerms & !ACL_SELECT != 0 {
+            panic!(
+                "ExecCheckXactReadOnly (execMain.c): PreventCommandIfReadOnly not ported"
+            );
+        }
+    }
+    if pstmt.commandType != CmdType::CMD_SELECT || pstmt.hasModifyingCTE {
+        panic!("ExecCheckXactReadOnly (execMain.c): PreventCommandIfParallelMode not ported");
     }
 }
 
-fn exec_check_permissions(pstmt: &PlannedStmt<'_>) {
-    if !pstmt.permInfos.is_nil() {
-        panic!("ExecCheckPermissions (execMain.c): RTEPermissionInfo lane not ported");
+/// `ExecCheckPermissions` (ereport_on_violation arm only; no hook).
+fn exec_check_permissions(pstmt: &PlannedStmt<'_>) -> PgResult<()> {
+    for pi_node in pstmt.permInfos.iter() {
+        let pi = pi_node.as_rte_permission_info().expect("permInfos cell");
+        debug_assert!(pi.relid != 0);
+        exec_check_one_rel_perms(pi)?;
     }
+    Ok(())
+}
+
+/// `ExecCheckOneRelPerms`: the RTE_RELATION SELECT arm; write privileges and
+/// the column-level fallback are loud.
+fn exec_check_one_rel_perms(pi: &RTEPermissionInfo<'_>) -> PgResult<()> {
+    let required = pi.requiredPerms;
+    debug_assert!(required != 0);
+    if required & !ACL_SELECT != 0 {
+        panic!(
+            "ExecCheckOneRelPerms (execMain.c): non-SELECT requiredPerms lane not ported"
+        );
+    }
+    let userid = if pi.checkAsUser != 0 {
+        pi.checkAsUser
+    } else {
+        miscinit_seams::get_user_id::call()
+    };
+    let r = aclchk_seams::object_aclcheck::call(RELATION_RELATION_ID, pi.relid, userid, required)?;
+    if r != ACLCHECK_OK {
+        panic!(
+            "ExecCheckOneRelPerms (execMain.c): relation-level SELECT denied for relation {} — \
+             column-level fallback (pg_attribute_aclcheck) and aclcheck_error not ported",
+            pi.relid
+        );
+    }
+    Ok(())
 }
 
 /// `standard_ExecutorStart` (execMain.c).
@@ -154,10 +195,14 @@ fn init_plan<'mcx>(
     operation: CmdType,
     eflags: i32,
 ) -> PgResult<Rc<TupleDescData<'static>>> {
-    exec_check_permissions(pstmt);
-    if !pstmt.rtable.is_nil() {
-        panic!("ExecInitRangeTable (execUtils.c): range-table lane not ported (RangeTblEntry)");
-    }
+    exec_check_permissions(pstmt)?;
+    // C's bms_copy: the estate owns its pruning set (extended by ExecDoInitialPruning).
+    let unpruned = pstmt
+        .unprunableRelids
+        .clone_in(data.estate.es_query_cxt)?;
+    data.estate
+        .exec_init_range_table(&pstmt.rtable, &pstmt.permInfos, unpruned)?;
+    data.estate.es_plannedstmt = Some(pstmt);
     if !pstmt.partPruneInfos.is_nil() {
         panic!("ExecDoInitialPruning (execPartition.c) not ported");
     }
@@ -313,7 +358,9 @@ pub fn standard_executor_end(qd: &mut QueryDescData) -> PgResult<()> {
             exec_end_node(ps, estate)?;
         }
         estate.exec_reset_tuple_table(false);
-        debug_assert!(estate.es_relations.iter().all(Option::is_none));
+        // ExecCloseResultRelations: result-relation lanes are loud upstream.
+        debug_assert!(estate.es_opened_result_relations.is_empty());
+        estate.exec_close_range_table_relations()?;
         snapmgr::UnregisterSnapshot(estate.es_snapshot.take().as_ref());
         snapmgr::UnregisterSnapshot(estate.es_crosscheck_snapshot.take().as_ref());
         estate.teardown();

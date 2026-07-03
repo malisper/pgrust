@@ -37,6 +37,8 @@ executils = { path = "../../backend/executor/executils" }
 execmain = { path = "../../backend/executor/execmain" }
 execscan = { path = "../../backend/executor/execscan" }
 nodeseqscan = { path = "../../backend/executor/nodeseqscan" }
+nodeindexscan = { path = "../../backend/executor/nodeindexscan" }
+nodeindexonlyscan = { path = "../../backend/executor/nodeindexonlyscan" }
 auth = { path = "../../backend/libpq/auth" }
 be_secure = { path = "../../backend/libpq/be_secure" }
 hba = { path = "../../backend/libpq/hba" }
@@ -52,6 +54,11 @@ interrupt = { path = "../../backend/postmaster/interrupt" }
 launch_backend = { path = "../../backend/postmaster/launch_backend" }
 pmchild = { path = "../../backend/postmaster/pmchild" }
 postmaster = { path = "../../backend/postmaster/postmaster" }
+auxprocess = { path = "../../backend/postmaster/auxprocess" }
+checkpointer = { path = "../../backend/postmaster/checkpointer" }
+bgwriter = { path = "../../backend/postmaster/bgwriter" }
+walwriter = { path = "../../backend/postmaster/walwriter" }
+postmaster_startup = { path = "../../backend/postmaster/startup" }
 rewrite_handler = { path = "../../backend/rewrite/rewrite_handler" }
 bufmgr = { path = "../../backend/storage/buffer/bufmgr" }
 fd = { path = "../../backend/storage/file/fd" }

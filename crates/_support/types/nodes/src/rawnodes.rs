@@ -3,7 +3,7 @@
 #![allow(non_camel_case_types, non_snake_case)]
 
 use mcx::Mcx;
-use types_core::ParseLoc;
+use types_core::{Oid, ParseLoc};
 use types_error::PgResult;
 
 use crate::list::NodeList;
@@ -32,6 +32,43 @@ pub enum A_Expr_Kind {
     AEXPR_NOT_BETWEEN_SYM = 13,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum SortByDir {
+    #[default]
+    SORTBY_DEFAULT = 0,
+    SORTBY_ASC = 1,
+    SORTBY_DESC = 2,
+    SORTBY_USING = 3,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum SortByNulls {
+    #[default]
+    SORTBY_NULLS_DEFAULT = 0,
+    SORTBY_NULLS_FIRST = 1,
+    SORTBY_NULLS_LAST = 2,
+}
+
+// C divergence: C's SelectStmt.distinctClause encodes plain DISTINCT as
+// list_make1(NIL) — a one-NULL-cell list — and DISTINCT ON as the expression
+// list. NodeList cells are non-null, so the three states are explicit here.
+#[derive(Default)]
+pub enum DistinctClause<'mcx> {
+    #[default]
+    None,
+    All,
+    On(NodeList<'mcx>),
+}
+
+impl DistinctClause<'_> {
+    #[inline]
+    pub fn is_none(&self) -> bool {
+        matches!(self, DistinctClause::None)
+    }
+}
+
 #[derive(Clone, Copy, Default)]
 pub struct RawStmt<'mcx> {
     pub stmt: Option<Node<'mcx>>,
@@ -41,7 +78,7 @@ pub struct RawStmt<'mcx> {
 
 #[derive(Default)]
 pub struct SelectStmt<'mcx> {
-    pub distinctClause: NodeList<'mcx>,
+    pub distinctClause: DistinctClause<'mcx>,
     pub intoClause: Option<Node<'mcx>>,
     pub targetList: NodeList<'mcx>,
     pub fromClause: NodeList<'mcx>,
@@ -122,6 +159,49 @@ pub struct ParamRef {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct A_Star;
 
+#[derive(Default)]
+pub struct SortBy<'mcx> {
+    pub node: Option<Node<'mcx>>,
+    pub sortby_dir: SortByDir,
+    pub sortby_nulls: SortByNulls,
+    pub useOp: NodeList<'mcx>,
+    pub location: ParseLoc,
+}
+
+#[derive(Default)]
+pub struct FuncCall<'mcx> {
+    pub funcname: NodeList<'mcx>,
+    pub args: NodeList<'mcx>,
+    pub agg_order: NodeList<'mcx>,
+    pub agg_filter: Option<Node<'mcx>>,
+    pub over: Option<Node<'mcx>>,
+    pub agg_within_group: bool,
+    pub agg_star: bool,
+    pub agg_distinct: bool,
+    pub func_variadic: bool,
+    pub funcformat: crate::primnodes::CoercionForm,
+    pub location: ParseLoc,
+}
+
+#[derive(Default)]
+pub struct TypeName<'mcx> {
+    pub names: NodeList<'mcx>,
+    pub typeOid: Oid,
+    pub setof: bool,
+    pub pct_type: bool,
+    pub typmods: NodeList<'mcx>,
+    pub typemod: i32,
+    pub arrayBounds: NodeList<'mcx>,
+    pub location: ParseLoc,
+}
+
+#[derive(Default)]
+pub struct TypeCast<'mcx> {
+    pub arg: Option<Node<'mcx>>,
+    pub typeName: Option<Node<'mcx>>,
+    pub location: ParseLoc,
+}
+
 // SAFETY (each): tag/type pairing mirrors parsenodes.h.
 unsafe impl<'mcx> NodeVariant<'mcx> for RawStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_RawStmt;
@@ -146,6 +226,18 @@ unsafe impl NodeVariant<'_> for ParamRef {
 }
 unsafe impl NodeVariant<'_> for A_Star {
     const TAG: NodeTag = NodeTag::T_A_Star;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for SortBy<'mcx> {
+    const TAG: NodeTag = NodeTag::T_SortBy;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for FuncCall<'mcx> {
+    const TAG: NodeTag = NodeTag::T_FuncCall;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for TypeName<'mcx> {
+    const TAG: NodeTag = NodeTag::T_TypeName;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for TypeCast<'mcx> {
+    const TAG: NodeTag = NodeTag::T_TypeCast;
 }
 
 impl<'mcx> Node<'mcx> {
@@ -244,6 +336,26 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_a_star(self) -> Option<&'mcx A_Star> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_sort_by(self) -> Option<&'mcx SortBy<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_func_call(self) -> Option<&'mcx FuncCall<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_type_name(self) -> Option<&'mcx TypeName<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_type_cast(self) -> Option<&'mcx TypeCast<'mcx>> {
         self.as_variant()
     }
 }
