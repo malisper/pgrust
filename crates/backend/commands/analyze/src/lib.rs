@@ -1076,3 +1076,14 @@ mod tests {
         assert_eq!(analyze_mcv_list(&counts, 3, 103.0, 0.0, 30000, 1_000_000.0), 3);
     }
 }
+
+static DEFAULT_STATISTICS_TARGET: std::sync::atomic::AtomicI32 =
+    std::sync::atomic::AtomicI32::new(100);
+
+pub fn init_seams() {
+    use std::sync::atomic::Ordering::Relaxed;
+    guc_tables::vars::default_statistics_target.install(guc_tables::GucVarAccessors {
+        get: || DEFAULT_STATISTICS_TARGET.load(Relaxed),
+        set: |v| DEFAULT_STATISTICS_TARGET.store(v, Relaxed),
+    });
+}
