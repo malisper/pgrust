@@ -371,13 +371,26 @@ pub fn comparator_for_index_col(
                 SortComparator::TextC
             }
         }
-        0 => {
+        // C DIVERGENCE: uuid/network/range abbrev routines unported; the
+        // BTORDER_PROC shim is order-identical (CATALOG perf watch).
+        0 | F_UUID_SORTSUPPORT | F_NETWORK_SORTSUPPORT | F_RANGE_SORTSUPPORT => {
             let sort_function =
                 lsyscache::get_opfamily_proc(opfamily, opcintype, opcintype, BTORDER_PROC as i16)?;
-            panic!(
-                "PrepareSortSupportComparisonShim (sortsupport.c) not ported: \
-                 btree comparison proc {sort_function} for opfamily {opfamily}"
-            );
+            if sort_function == 0 {
+                panic!(
+                    "missing support function {}({opcintype},{opcintype}) in opfamily {opfamily}",
+                    BTORDER_PROC
+                );
+            }
+            if sort_function == F_INTERVAL_CMP {
+                SortComparator::Interval
+            } else {
+                let flinfo = ::fmgr_seams::fmgr_info::call(sort_function)?;
+                SortComparator::Shim(ShimCmp {
+                    fn_addr: flinfo.fn_addr,
+                    fn_oid: sort_function,
+                })
+            }
         }
         other => panic!(
             "sortsupport routine {other} (opfamily {opfamily}) has no comparator arm; \
