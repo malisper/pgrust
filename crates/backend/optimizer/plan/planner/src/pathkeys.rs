@@ -638,7 +638,6 @@ pub fn trim_mergeclauses_for_inner_pathkeys<'mcx>(
     let mut matched_pathkey = false;
 
     for &rid in mergeclauses {
-        // ECs assumed already updated (find_mergeclauses ran first).
         let (_, clause_ec) = mergeclause_outer_inner_ecs(run, rid);
         if clause_ec != pathkey_ec {
             if !matched_pathkey {
@@ -697,8 +696,6 @@ fn pathkeys_useful_for_merging(
         if !right_merge_direction(run, pathkey) {
             break;
         }
-        // has_eclass_joins never set on the eclass-lite lane; join equality
-        // clauses stay in joininfo (initsplan divergence note).
         debug_assert!(!run.root.rel(rel).has_eclass_joins);
         let joininfo = crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.rel(rel).joininfo);
         let mut matched = false;

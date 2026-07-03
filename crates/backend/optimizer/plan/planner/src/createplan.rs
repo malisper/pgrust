@@ -1500,7 +1500,6 @@ fn create_mergejoin_plan<'mcx>(
     debug_assert!(restrict.iter().all(|&r| !run.root.rinfo(r).pseudoconstant));
 
     let tlist = build_path_tlist(run, target_id)?;
-    // Request small tlists from inputs that will be re-sorted.
     let outer_flags = if outersortkeys.is_empty() { 0 } else { CP_SMALL_TLIST };
     let inner_flags = if innersortkeys.is_empty() { 0 } else { CP_SMALL_TLIST };
     let mut outer_plan = create_plan_recurse(run, outer_path, outer_flags)?;
@@ -1554,8 +1553,6 @@ fn create_mergejoin_plan<'mcx>(
         "create_mergejoin_plan (createplan.c): materialize_inner; nodeMaterial.c unported"
     );
 
-    // Per-clause opfamily/collation/reversal/nullsfirst arrays, matching the
-    // (possibly redundant) mergeclauses against the input pathkeys.
     let n_clauses = merge_rinfos.len();
     let mut merge_families: mcx::PgVec<'mcx, types_core::Oid> = mcx::PgVec::new_in(mcx);
     let mut merge_collations: mcx::PgVec<'mcx, types_core::Oid> = mcx::PgVec::new_in(mcx);
@@ -1599,7 +1596,6 @@ fn create_mergejoin_plan<'mcx>(
             }
         }
         if !first_inner_match {
-            // Redundant clause: must match some earlier inner pathkey.
             for &ipk in innerpathkeys[..lip].iter() {
                 ipathkey = Some(ipk);
                 ipeclass = ipk.pk_eclass;
@@ -1632,7 +1628,6 @@ fn create_mergejoin_plan<'mcx>(
     }
     debug_assert_eq!(merge_families.len(), n_clauses);
 
-    // make_mergejoin.
     let mut join_plan = Node::build::<types_nodes::plannodes::MergeJoin>(mcx)?;
     join_plan.join.plan.targetlist = tlist;
     join_plan.join.plan.qual = NodeList::nil();
