@@ -1,15 +1,17 @@
 #![allow(non_snake_case)]
 
-pub mod builtins;
 #[cfg(test)]
 mod tests;
 
+
+pub mod builtins;
 use datum::Datum;
 use keywords::{KeywordCategory, ScanKeywordCategories, ScanKeywordLookup, ScanKeywords};
 use types_core::primitive::InvalidOid;
 use types_core::catalog::{
-    BITOID, BOOLOID, BPCHAROID, FLOAT4OID, FLOAT8OID, INT2OID, INT4OID, INT8OID, INTERVALOID,
-    JSONOID, NUMERICOID, TIMEOID, TIMESTAMPOID, TIMESTAMPTZOID, TIMETZOID, VARBITOID, VARCHAROID,
+    FirstNormalObjectId, BITOID, BOOLOID, BPCHAROID, FLOAT4OID, FLOAT8OID, INT2OID, INT4OID,
+    INT8OID, INTERVALOID, JSONOID, NUMERICOID, TIMEOID, TIMESTAMPOID, TIMESTAMPTZOID, TIMETZOID,
+    VARBITOID, VARCHAROID,
 };
 use types_core::Oid;
 use types_error::{PgError, PgResult};
@@ -145,9 +147,6 @@ pub(crate) fn format_type_extended(
     Ok(buf)
 }
 
-
-
-
 /// C `printTypmod`; takes the type oid instead of a pre-fetched typmodout.
 fn print_typmod(typname: &str, typmod: i32, type_oid: Oid) -> PgResult<String> {
     debug_assert!(typmod >= 0);
@@ -160,9 +159,6 @@ fn print_typmod(typname: &str, typmod: i32, type_oid: Oid) -> PgResult<String> {
     }
     let mut finfo = fmgr_seams::fmgr_info::call(typmodout)?;
     let mut fcinfo = types_fmgr::LocalFcinfo::<1>::fresh(InvalidOid);
-    let ctx = mcx::MemoryContext::new("printTypmod");
-    // SAFETY: ctx outlives the single invoke below and the copy out of `out`.
-    unsafe { fcinfo.set_result_mcx(ctx.mcx()) };
     fcinfo.set_arg(0, Datum::from_i32(typmod));
     let out = finfo.invoke(&mut fcinfo)?;
     // SAFETY: typmodout fns return a NUL-terminated cstring datum.
