@@ -571,7 +571,7 @@ pub fn deleteDependencyRecordsFor<'mcx>(
     while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
         if skipExtensionDeps
             && getattr(tup, Anum_pg_depend_deptype, desc).as_i8()
-                == DependencyType::Extension.as_char()
+                == pg_depend::DependencyType::Extension.as_char()
         {
             continue;
         }
@@ -654,20 +654,20 @@ fn doDeletion<'mcx>(mcx: Mcx<'mcx>, object: &ObjectAddress, flags: i32) -> PgRes
             unported("doDeletion: RemoveConstraintById (pg_constraint.c)");
         }
         types_core::OPERATOR_RELATION_ID => {
-            dependency_seams::remove_operator_by_id::call(mcx, object.objectId)
+            dependency_seams::remove_operator_by_id::call(mcx, object.objectId)?
         }
         types_core::ACCESS_METHOD_OPERATOR_RELATION_ID => drop_row_by_oid(
             mcx,
             types_core::ACCESS_METHOD_OPERATOR_RELATION_ID,
             types_core::ACCESS_METHOD_OPERATOR_OID_INDEX_ID,
             object.objectId,
-        ),
+        )?,
         types_core::ACCESS_METHOD_PROCEDURE_RELATION_ID => drop_row_by_oid(
             mcx,
             types_core::ACCESS_METHOD_PROCEDURE_RELATION_ID,
             types_core::ACCESS_METHOD_PROCEDURE_OID_INDEX_ID,
             object.objectId,
-        ),
+        )?,
         other => panic!("unported: doDeletion object class {other}"),
     }
     Ok(())
