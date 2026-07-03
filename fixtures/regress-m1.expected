@@ -1,0 +1,488 @@
+-- pgrust-fast M1/M2 differential-regress corpus.
+-- Curated from PostgreSQL 18.3 src/test/regress idioms (select, int4, text,
+-- errors, guc, prepare, transactions, limit) down to the M1 surface:
+-- constants through the tcop/parse/analyze/plan/execute/printtup spine.
+-- Run via scripts/regress-diff.sh (psql -X -q -a on stdin; VERBOSITY verbose
+-- captures SQLSTATE + message + cursor; LOCATION lines stripped by the
+-- harness). Statements after the '-- REQUIRES: table' marker need CREATE
+-- TABLE/INSERT; gate with --skip-tables until DML lands.
+\set VERBOSITY verbose
+\pset pager off
+-- ===== constants & arithmetic [tcop simple-query -> parser -> analyze -> planner Result -> execExpr -> printtup] =====
+SELECT 1;
+ ?column? 
+----------
+        1
+(1 row)
+
+SELECT 1 + 2;
+ ?column? 
+----------
+        3
+(1 row)
+
+SELECT 2 * 3 - 4;
+ ?column? 
+----------
+        2
+(1 row)
+
+SELECT 7 / 2;
+ ?column? 
+----------
+        3
+(1 row)
+
+SELECT 7 % 3;
+ ?column? 
+----------
+        1
+(1 row)
+
+SELECT -5;
+ ?column? 
+----------
+       -5
+(1 row)
+
+SELECT 1.1 + 2.2;
+ ?column? 
+----------
+      3.3
+(1 row)
+
+SELECT 2 ^ 10;
+ ?column? 
+----------
+     1024
+(1 row)
+
+SELECT 'foo' || 'bar';
+ ?column? 
+----------
+ foobar
+(1 row)
+
+SELECT NULL;
+ ?column? 
+----------
+ 
+(1 row)
+
+SELECT NULL + 1;
+ ?column? 
+----------
+         
+(1 row)
+
+SELECT 1 = 1, 1 <> 2, 1 < 2, 2 >= 2;
+ ?column? | ?column? | ?column? | ?column? 
+----------+----------+----------+----------
+ t        | t        | t        | t
+(1 row)
+
+SELECT true AND false, true OR false, NOT true;
+ ?column? | ?column? | ?column? 
+----------+----------+----------
+ f        | t        | f
+(1 row)
+
+SELECT coalesce(NULL, 42);
+ coalesce 
+----------
+       42
+(1 row)
+
+SELECT greatest(1, 2, 3), least(1, 2, 3);
+ greatest | least 
+----------+-------
+        3 |     1
+(1 row)
+
+SELECT CASE WHEN 1 < 2 THEN 'lt' ELSE 'ge' END;
+ case 
+------
+ lt
+(1 row)
+
+SELECT length('postgres');
+ length 
+--------
+      8
+(1 row)
+
+SELECT upper('abc'), lower('ABC');
+ upper | lower 
+-------+-------
+ ABC   | abc
+(1 row)
+
+-- ===== column aliases [analyze target-list naming; commit "Add column alias (AS) support"] =====
+SELECT 1 AS one;
+ one 
+-----
+   1
+(1 row)
+
+SELECT 1 one;
+ one 
+-----
+   1
+(1 row)
+
+SELECT 1 AS "Quoted Alias";
+ Quoted Alias 
+--------------
+            1
+(1 row)
+
+SELECT 1 + 2 AS sum, 3 * 4 AS product;
+ sum | product 
+-----+---------
+   3 |      12
+(1 row)
+
+-- ===== casts [parse_coerce + I/O functions (types-* lanes)] =====
+SELECT 'x'::text;
+ text 
+------
+ x
+(1 row)
+
+SELECT CAST('42' AS integer);
+ int4 
+------
+   42
+(1 row)
+
+SELECT 42::bigint;
+ int8 
+------
+   42
+(1 row)
+
+SELECT 42::int2;
+ int2 
+------
+   42
+(1 row)
+
+SELECT 1.5::float8;
+ float8 
+--------
+    1.5
+(1 row)
+
+SELECT '3.14'::numeric;
+ numeric 
+---------
+    3.14
+(1 row)
+
+SELECT 42::text;
+ text 
+------
+ 42
+(1 row)
+
+SELECT 't'::bool, 'f'::boolean;
+ bool | bool 
+------+------
+ t    | f
+(1 row)
+
+SELECT CAST(1.4 AS int4), CAST(1.5 AS int4);
+ int4 | int4 
+------+------
+    1 |    2
+(1 row)
+
+SELECT '  7  '::int4;
+ int4 
+------
+    7
+(1 row)
+
+-- ===== SET/SHOW round-trips [guc lane: set_config_option / GetConfigOptionByName] =====
+SHOW work_mem;
+ work_mem 
+----------
+ 4MB
+(1 row)
+
+SET work_mem = '8MB';
+SHOW work_mem;
+ work_mem 
+----------
+ 8MB
+(1 row)
+
+RESET work_mem;
+SHOW work_mem;
+ work_mem 
+----------
+ 4MB
+(1 row)
+
+SET datestyle = 'ISO, YMD';
+SHOW datestyle;
+ DateStyle 
+-----------
+ ISO, YMD
+(1 row)
+
+RESET datestyle;
+SET search_path TO public;
+SHOW search_path;
+ search_path 
+-------------
+ public
+(1 row)
+
+BEGIN;
+SET LOCAL work_mem = '16MB';
+SHOW work_mem;
+ work_mem 
+----------
+ 16MB
+(1 row)
+
+COMMIT;
+SHOW work_mem;
+ work_mem 
+----------
+ 4MB
+(1 row)
+
+-- ===== EXPLAIN [planner + commands/explain lane; costs pinned by C's cost model] =====
+EXPLAIN (COSTS OFF) SELECT 1;
+ QUERY PLAN 
+------------
+ Result
+(1 row)
+
+EXPLAIN SELECT 1;
+                QUERY PLAN                
+------------------------------------------
+ Result  (cost=0.00..0.01 rows=1 width=4)
+(1 row)
+
+EXPLAIN (COSTS OFF) SELECT 1 + 2 AS three;
+ QUERY PLAN 
+------------
+ Result
+(1 row)
+
+EXPLAIN (COSTS OFF) SELECT 1 ORDER BY 1;
+ QUERY PLAN 
+------------
+ Result
+(1 row)
+
+EXPLAIN (COSTS OFF) SELECT 1 LIMIT 1;
+  QUERY PLAN  
+--------------
+ Limit
+   ->  Result
+(2 rows)
+
+EXPLAIN (VERBOSE, COSTS OFF) SELECT 1 AS one;
+ QUERY PLAN  
+-------------
+ Result
+   Output: 1
+(2 rows)
+
+-- ===== transactions [xact lane: BEGIN/COMMIT/ROLLBACK/SAVEPOINT state machine] =====
+BEGIN;
+SELECT 1;
+ ?column? 
+----------
+        1
+(1 row)
+
+COMMIT;
+BEGIN;
+SELECT 2;
+ ?column? 
+----------
+        2
+(1 row)
+
+ROLLBACK;
+BEGIN;
+SAVEPOINT sp1;
+SELECT 3;
+ ?column? 
+----------
+        3
+(1 row)
+
+ROLLBACK TO SAVEPOINT sp1;
+RELEASE SAVEPOINT sp1;
+COMMIT;
+COMMIT;
+WARNING:  25P01: there is no transaction in progress
+BEGIN;
+SELECT 1/0;
+ERROR:  22012: division by zero
+SELECT 1;
+ERROR:  25P02: current transaction is aborted, commands ignored until end of transaction block
+ROLLBACK;
+BEGIN;
+SAVEPOINT sp2;
+SELECT 1/0;
+ERROR:  22012: division by zero
+ROLLBACK TO SAVEPOINT sp2;
+SELECT 42;
+ ?column? 
+----------
+       42
+(1 row)
+
+COMMIT;
+ROLLBACK TO SAVEPOINT nope;
+ERROR:  25P01: ROLLBACK TO SAVEPOINT can only be used in transaction blocks
+-- ===== PREPARE/EXECUTE/DEALLOCATE [commands/prepare + plancache lane] =====
+PREPARE regress_m1_p1 AS SELECT 1;
+EXECUTE regress_m1_p1;
+ ?column? 
+----------
+        1
+(1 row)
+
+PREPARE regress_m1_p2(int) AS SELECT $1 + 1;
+EXECUTE regress_m1_p2(41);
+ ?column? 
+----------
+       42
+(1 row)
+
+EXECUTE regress_m1_p2('not_an_int');
+ERROR:  22P02: invalid input syntax for type integer: "not_an_int"
+LINE 1: EXECUTE regress_m1_p2('not_an_int');
+                              ^
+PREPARE regress_m1_p1 AS SELECT 2;
+ERROR:  42P05: prepared statement "regress_m1_p1" already exists
+DEALLOCATE regress_m1_p2;
+EXECUTE regress_m1_p2(1);
+ERROR:  26000: prepared statement "regress_m1_p2" does not exist
+DEALLOCATE regress_m1_p1;
+DEALLOCATE ALL;
+-- ===== ORDER BY / LIMIT on constants [sort/limit executor nodes over Result/Values] =====
+SELECT 1 ORDER BY 1;
+ ?column? 
+----------
+        1
+(1 row)
+
+SELECT 1 LIMIT 1;
+ ?column? 
+----------
+        1
+(1 row)
+
+SELECT 1 LIMIT 0;
+ ?column? 
+----------
+(0 rows)
+
+SELECT 1 OFFSET 1;
+ ?column? 
+----------
+(0 rows)
+
+VALUES (3), (1), (2) ORDER BY 1;
+ column1 
+---------
+       1
+       2
+       3
+(3 rows)
+
+VALUES (3), (1), (2) ORDER BY 1 DESC LIMIT 2;
+ column1 
+---------
+       3
+       2
+(2 rows)
+
+SELECT * FROM (VALUES (2, 'b'), (1, 'a')) AS v(n, s) ORDER BY n;
+ n | s 
+---+---
+ 1 | a
+ 2 | b
+(2 rows)
+
+-- ===== error surface [elog lane: SQLSTATE + message + cursor position parity] =====
+SELECT nonesuch;
+ERROR:  42703: column "nonesuch" does not exist
+LINE 1: SELECT nonesuch;
+               ^
+SELECT 1 +;
+ERROR:  42601: syntax error at or near ";"
+LINE 1: SELECT 1 +;
+                  ^
+SELECT 1/0;
+ERROR:  22012: division by zero
+SELECT 'foo'::int4;
+ERROR:  22P02: invalid input syntax for type integer: "foo"
+LINE 1: SELECT 'foo'::int4;
+               ^
+SELECT ''::int4;
+ERROR:  22P02: invalid input syntax for type integer: ""
+LINE 1: SELECT ''::int4;
+               ^
+SELECT 2147483647::int4 + 1;
+ERROR:  22003: integer out of range
+SHOW no_such_parameter;
+ERROR:  42704: unrecognized configuration parameter "no_such_parameter"
+SET work_mem = 'bogus';
+ERROR:  22023: invalid value for parameter "work_mem": "bogus"
+-- REQUIRES: table
+-- ===== point select / star / WHERE [heapam + seqscan executor; setup needs DML — gate with --skip-tables until INSERT lands] =====
+CREATE TABLE regress_m1_t (id int4, val text);
+INSERT INTO regress_m1_t VALUES (1, 'one'), (2, 'two'), (3, 'three');
+SELECT * FROM regress_m1_t ORDER BY id;
+ id |  val  
+----+-------
+  1 | one
+  2 | two
+  3 | three
+(3 rows)
+
+SELECT val FROM regress_m1_t WHERE id = 2;
+ val 
+-----
+ two
+(1 row)
+
+SELECT id, val FROM regress_m1_t WHERE id > 1 ORDER BY id DESC;
+ id |  val  
+----+-------
+  3 | three
+  2 | two
+(2 rows)
+
+SELECT * FROM regress_m1_t WHERE id = 2 LIMIT 1;
+ id | val 
+----+-----
+  2 | two
+(1 row)
+
+SELECT count(*) FROM regress_m1_t;
+ count 
+-------
+     3
+(1 row)
+
+SELECT vall FROM regress_m1_t;
+ERROR:  42703: column "vall" does not exist
+LINE 1: SELECT vall FROM regress_m1_t;
+               ^
+HINT:  Perhaps you meant to reference the column "regress_m1_t.val".
+SELECT * FROM no_such_table;
+ERROR:  42P01: relation "no_such_table" does not exist
+LINE 1: SELECT * FROM no_such_table;
+                      ^
+DROP TABLE regress_m1_t;
