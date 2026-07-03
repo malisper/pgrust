@@ -1,0 +1,407 @@
+//! costsize.c slice: cost_seqscan/cost_index, cost_qual_eval,
+//! set_baserel_size_estimates/set_rel_width, index_pages_fetched.
+
+use types_error::PgResult;
+use types_nodes::{Node, NodeTag};
+use types_pathnodes::{NodeId, PathNode, QualCost, RelId, RinfoId, RTE_RELATION};
+
+use crate::gucs;
+use crate::run::PlannerRun;
+
+pub const MAXIMUM_ROWCOUNT: f64 = 1e100;
+const MAX_ALLOC_SIZE: i64 = 0x3fffffff;
+
+pub fn clamp_row_est(nrows: f64) -> f64 {
+    if nrows > MAXIMUM_ROWCOUNT || nrows.is_nan() {
+        MAXIMUM_ROWCOUNT
+    } else if nrows <= 1.0 {
+        1.0
+    } else {
+        nrows.round_ties_even()
+    }
+}
+
+pub fn clamp_width_est(tuple_width: i64) -> i32 {
+    if tuple_width > MAX_ALLOC_SIZE {
+        return MAX_ALLOC_SIZE as i32;
+    }
+    debug_assert!(tuple_width >= 0);
+    tuple_width as i32
+}
+
+// get_tablespace_page_costs (spccache.c): reloptions unported, so every
+// tablespace reads the GUC defaults (divergence owned by the spccache unit).
+pub fn get_tablespace_page_costs(_spcid: u32) -> (f64, f64) {
+    (gucs::random_page_cost(), gucs::seq_page_cost())
+}
+
+// cost_qual_eval (costsize.c) with the rinfo->eval_cost cache (lesson 10).
+pub fn cost_qual_eval(run: &mut PlannerRun<'_>, quals: &[RinfoId]) -> PgResult<QualCost> {
+    let mut total = QualCost::default();
+    for &rid in quals {
+        let cached = run.root.rinfo(rid).eval_cost;
+        let cost = if cached.startup >= 0.0 {
+            cached
+        } else {
+            if run.root.rinfo(rid).orclause.is_some() {
+                panic!("cost_qual_eval_walker (costsize.c): orclause; M2 OR lane");
+            }
+            let clause = *run.root.expr_node(run.root.rinfo(rid).clause);
+            let mut cost = QualCost::default();
+            cost_qual_eval_walker(clause, &mut cost)?;
+            if run.root.rinfo(rid).pseudoconstant {
+                cost.startup += cost.per_tuple;
+                cost.per_tuple = 0.0;
+            }
+            run.root.rinfo_mut(rid).eval_cost = cost;
+            cost
+        };
+        total.startup += cost.startup;
+        total.per_tuple += cost.per_tuple;
+    }
+    Ok(total)
+}
+pub fn cost_qual_eval_node(node: Node<'_>) -> PgResult<QualCost> {
+    let mut cost = QualCost::default();
+    cost_qual_eval_walker(node, &mut cost)?;
+    Ok(cost)
+}
+
+fn cost_qual_eval_walker(node: Node<'_>, cost: &mut QualCost) -> PgResult<()> {
+    match node.node_tag() {
+        NodeTag::T_Var | NodeTag::T_Const => Ok(()),
+        NodeTag::T_FuncExpr => {
+            let f = node.as_func_expr().unwrap();
+            crate::plancat::add_function_cost(f.funcid, cost)?;
+            for arg in &f.args {
+                cost_qual_eval_walker(arg, cost)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_OpExpr => {
+            let o = node.as_op_expr().unwrap();
+            // set_opfuncid memo write-back is unmodeled (walker.rs note).
+            let opfuncid = if o.opfuncid != 0 { o.opfuncid } else { lsyscache::get_opcode(o.opno)? };
+            crate::plancat::add_function_cost(opfuncid, cost)?;
+            for arg in &o.args {
+                cost_qual_eval_walker(arg, cost)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_RelabelType => {
+            cost_qual_eval_walker(node.as_relabel_type().unwrap().arg, cost)
+        }
+        other => panic!("cost_qual_eval_walker (costsize.c): {other:?}; M2 expression lane"),
+    }
+}
+fn get_restriction_qual_cost(run: &PlannerRun<'_>, rel: RelId) -> QualCost {
+    run.root.rel(rel).baserestrictcost
+}
+pub fn cost_seqscan(run: &mut PlannerRun<'_>, path_id: types_pathnodes::PathId, rel: RelId) {
+    let (relid, rtekind, reltablespace, pages, tuples, base_rows) = {
+        let baserel = run.root.rel(rel);
+        (baserel.relid, baserel.rtekind, baserel.reltablespace, baserel.pages, baserel.tuples, baserel.rows)
+    };
+    debug_assert!(relid > 0 && rtekind == RTE_RELATION);
+    assert!(
+        run.root.path(path_id).base().param_info.is_none(),
+        "cost_seqscan (costsize.c): parameterized path; M2 lateral lane"
+    );
+    let rows = base_rows;
+
+    let mut startup_cost = 0.0;
+    let (_, spc_seq_page_cost) = get_tablespace_page_costs(reltablespace);
+    let disk_run_cost = spc_seq_page_cost * pages as f64;
+
+    let qpqual_cost = get_restriction_qual_cost(run, rel);
+    startup_cost += qpqual_cost.startup;
+    let cpu_per_tuple = gucs::cpu_tuple_cost() + qpqual_cost.per_tuple;
+    let mut cpu_run_cost = cpu_per_tuple * tuples;
+
+    // tlist eval costs are paid per output row, not per scanned tuple.
+    let target = run.root.path_pathtarget(path_id);
+    startup_cost += target.cost.startup;
+    cpu_run_cost += target.cost.per_tuple * rows;
+    debug_assert!(run.root.path(path_id).base().parallel_workers == 0);
+
+    let p = run.root.path_mut(path_id).base_mut();
+    p.rows = rows;
+    p.disabled_nodes = if gucs::enable_seqscan() { 0 } else { 1 };
+    p.startup_cost = startup_cost;
+    p.total_cost = startup_cost + cpu_run_cost + disk_run_cost;
+}
+
+// cost_index (costsize.c); nestloop loop_count and partial paths are loud.
+pub fn cost_index(run: &mut PlannerRun<'_>, path_id: types_pathnodes::PathId, loop_count: f64) -> PgResult<()> {
+    assert!(loop_count == 1.0, "cost_index (costsize.c): loop_count > 1; M2 join lane");
+
+    let (baserel_id, indexonly, index_total_pages, indrestrictinfo) = {
+        let PathNode::IndexPath(ip) = run.root.path(path_id) else {
+            panic!("cost_index: not an IndexPath")
+        };
+        let index = ip.indexinfo.as_ref().expect("indexinfo set");
+        (
+            index.rel.expect("index rel set"),
+            ip.path.pathtype == crate::pathnode::tag16(NodeTag::T_IndexOnlyScan),
+            index.pages,
+            index.indrestrictinfo.borrow().clone(),
+        )
+    };
+    {
+        let baserel = run.root.rel(baserel_id);
+        debug_assert!(baserel.relid > 0 && baserel.rtekind == RTE_RELATION);
+    }
+    assert!(
+        run.root.path(path_id).base().param_info.is_none(),
+        "cost_index (costsize.c): parameterized path; M2 join lane"
+    );
+
+    let mut startup_cost = 0.0;
+    let mut run_cost = 0.0;
+    let mut cpu_run_cost = 0.0;
+
+    // qpquals: restrictions not redundant with the index clauses.
+    let indexclause_rinfos: mcx::PgVec<'_, RinfoId> = {
+        let PathNode::IndexPath(ip) = run.root.path(path_id) else { unreachable!() };
+        let mut v = mcx::PgVec::new_in(run.mcx);
+        for ic in ip.indexclauses.iter() {
+            v.push(ic.rinfo.expect("IndexClause rinfo"));
+        }
+        v
+    };
+    let mut qpquals: mcx::PgVec<'_, RinfoId> = mcx::PgVec::new_in(run.mcx);
+    for &rid in indrestrictinfo.iter() {
+        if run.root.rinfo(rid).pseudoconstant {
+            continue;
+        }
+        // is_redundant_with_indexclauses: no EC parents, so rinfo identity.
+        if indexclause_rinfos.iter().any(|&c| c == rid) {
+            continue;
+        }
+        qpquals.push(rid);
+    }
+
+    let new_rows = run.root.rel(baserel_id).rows;
+    run.root.path_mut(path_id).base_mut().rows = new_rows;
+    run.root.path_mut(path_id).base_mut().disabled_nodes =
+        if gucs::enable_indexscan() { 0 } else { 1 };
+
+    let am = crate::selfuncs::amcostestimate(run, path_id, loop_count)?;
+    if let PathNode::IndexPath(ip) = run.root.path_mut(path_id) {
+        ip.indextotalcost = am.index_total_cost;
+        ip.indexselectivity = am.index_selectivity;
+    }
+    startup_cost += am.index_startup_cost;
+    run_cost += am.index_total_cost - am.index_startup_cost;
+
+    let (baserel_tuples, baserel_pages, baserel_allvisfrac, reltablespace) = {
+        let baserel = run.root.rel(baserel_id);
+        (baserel.tuples, baserel.pages, baserel.allvisfrac, baserel.reltablespace)
+    };
+    let tuples_fetched = clamp_row_est(am.index_selectivity * baserel_tuples);
+    let (spc_random_page_cost, spc_seq_page_cost) = get_tablespace_page_costs(reltablespace);
+
+    let mut pages_fetched =
+        index_pages_fetched(run, tuples_fetched, baserel_pages, index_total_pages as f64);
+    if indexonly {
+        pages_fetched = (pages_fetched * (1.0 - baserel_allvisfrac)).ceil();
+    }
+    let max_io_cost = pages_fetched * spc_random_page_cost;
+
+    pages_fetched = (am.index_selectivity * baserel_pages as f64).ceil();
+    if indexonly {
+        pages_fetched = (pages_fetched * (1.0 - baserel_allvisfrac)).ceil();
+    }
+    let min_io_cost = if pages_fetched > 0.0 {
+        let mut m = spc_random_page_cost;
+        if pages_fetched > 1.0 {
+            m += (pages_fetched - 1.0) * spc_seq_page_cost;
+        }
+        m
+    } else {
+        0.0
+    };
+
+    let csquared = am.index_correlation * am.index_correlation;
+    run_cost += max_io_cost + csquared * (min_io_cost - max_io_cost);
+
+    let qpqual_cost = cost_qual_eval(run, &qpquals)?;
+    startup_cost += qpqual_cost.startup;
+    let cpu_per_tuple = gucs::cpu_tuple_cost() + qpqual_cost.per_tuple;
+    cpu_run_cost += cpu_per_tuple * tuples_fetched;
+
+    let path_rows = run.root.path(path_id).base().rows;
+    let target = run.root.path_pathtarget(path_id);
+    startup_cost += target.cost.startup;
+    cpu_run_cost += target.cost.per_tuple * path_rows;
+
+    debug_assert!(run.root.path(path_id).base().parallel_workers == 0);
+    run_cost += cpu_run_cost;
+
+    let p = run.root.path_mut(path_id).base_mut();
+    p.startup_cost = startup_cost;
+    p.total_cost = startup_cost + run_cost;
+    Ok(())
+}
+
+// index_pages_fetched (costsize.c): the Mackert-Lohman formula.
+pub fn index_pages_fetched(
+    run: &PlannerRun<'_>,
+    tuples_fetched: f64,
+    pages: u32,
+    index_pages: f64,
+) -> f64 {
+    let t = if pages > 1 { pages as f64 } else { 1.0 };
+    let total_pages = (run.root.total_table_pages + index_pages).max(1.0);
+    debug_assert!(t <= total_pages);
+
+    let mut b = gucs::effective_cache_size() as f64 * t / total_pages;
+    b = if b <= 1.0 { 1.0 } else { b.ceil() };
+
+    if t <= b {
+        let pf = (2.0 * t * tuples_fetched) / (2.0 * t + tuples_fetched);
+        if pf >= t {
+            t
+        } else {
+            pf.ceil()
+        }
+    } else {
+        let lim = (2.0 * t * b) / (2.0 * t - b);
+        let pf = if tuples_fetched <= lim {
+            (2.0 * t * tuples_fetched) / (2.0 * t + tuples_fetched)
+        } else {
+            b + (tuples_fetched - lim) * (t - b) / t
+        };
+        pf.ceil()
+    }
+}
+
+// set_baserel_size_estimates (costsize.c).
+pub fn set_baserel_size_estimates<'mcx>(run: &mut PlannerRun<'mcx>, rel: RelId) -> PgResult<()> {
+    debug_assert!(run.root.rel(rel).relid > 0);
+    let quals = crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.rel(rel).baserestrictinfo);
+    let selec = crate::clausesel::clauselist_selectivity(run, &quals, 0, types_pathnodes::JOIN_INNER, None)?;
+    let nrows = run.root.rel(rel).tuples * selec;
+    run.root.rel_mut(rel).rows = clamp_row_est(nrows);
+    let qcost = cost_qual_eval(run, &quals)?;
+    run.root.rel_mut(rel).baserestrictcost = qcost;
+    set_rel_width(run, rel)?;
+    Ok(())
+}
+
+// get_expr_width (costsize.c).
+pub fn get_expr_width(run: &PlannerRun<'_>, expr: NodeId) -> PgResult<i32> {
+    let node = *run.root.expr_node(expr);
+    if let Some(var) = node.as_var() {
+        debug_assert!(var.varlevelsup == 0);
+        if var.varno >= 0 && var.varno < run.root.simple_rel_array_size {
+            if let Some(rel_id) = run.root.simple_rel_array.get(var.varno as usize).copied().flatten() {
+                let rel = run.root.rel(rel_id);
+                if var.varattno >= rel.min_attr && var.varattno <= rel.max_attr {
+                    let ndx = (var.varattno - rel.min_attr) as usize;
+                    if rel.attr_widths[ndx] > 0 {
+                        return Ok(rel.attr_widths[ndx]);
+                    }
+                }
+            }
+        }
+        let width = lsyscache::get_typavgwidth(var.vartype, var.vartypmod)?;
+        debug_assert!(width > 0);
+        return Ok(width);
+    }
+    let (typid, typmod) = expr_type_typmod(node);
+    let width = lsyscache::get_typavgwidth(typid, typmod)?;
+    debug_assert!(width > 0);
+    Ok(width)
+}
+
+// exprType/exprTypmod (nodeFuncs.c), the arms this lane can carry.
+pub fn expr_type_typmod(node: Node<'_>) -> (u32, i32) {
+    match node.node_tag() {
+        NodeTag::T_Const => {
+            let c = node.as_const().unwrap();
+            (c.consttype, c.consttypmod)
+        }
+        NodeTag::T_Var => {
+            let v = node.as_var().unwrap();
+            (v.vartype, v.vartypmod)
+        }
+        NodeTag::T_OpExpr => (node.as_op_expr().unwrap().opresulttype, -1),
+        NodeTag::T_FuncExpr => (node.as_func_expr().unwrap().funcresulttype, -1),
+        other => panic!("exprType (nodeFuncs.c): {other:?}; M2 expression lane"),
+    }
+}
+
+// set_rel_width (costsize.c); PlaceHolderVars are the M2 subquery lane.
+pub fn set_rel_width<'mcx>(run: &mut PlannerRun<'mcx>, rel: RelId) -> PgResult<()> {
+    let relid_idx = run.root.rel(rel).relid;
+    let reloid = run.rte(relid_idx as usize).relid;
+    let min_attr = run.root.rel(rel).min_attr;
+    let max_attr = run.root.rel(rel).max_attr;
+    let mut tuple_width: i64 = 0;
+    let mut have_wholerow_var = false;
+
+    {
+        let rt = run.root.rel_reltarget_mut(rel);
+        rt.cost.startup = 0.0;
+        rt.cost.per_tuple = 0.0;
+    }
+
+    let exprs = match run.root.rel(rel).pathtarget_id {
+        Some(id) => crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.pathtarget(id).exprs),
+        None => mcx::PgVec::new_in(run.mcx),
+    };
+
+    for &node_id in exprs.iter() {
+        let node = *run.root.expr_node(node_id);
+        let var = match node.as_var() {
+            Some(v) if v.varno as u32 == relid_idx => Some((v.varattno, v.vartype, v.vartypmod)),
+            _ => None,
+        };
+        if let Some((varattno, vartype, vartypmod)) = var {
+            debug_assert!(varattno >= min_attr && varattno <= max_attr);
+            let ndx = (varattno - min_attr) as usize;
+            if varattno == 0 {
+                have_wholerow_var = true;
+                continue;
+            }
+            let cached = run.root.rel(rel).attr_widths[ndx];
+            if cached > 0 {
+                tuple_width += cached as i64;
+                continue;
+            }
+            if reloid != 0 && varattno > 0 {
+                let item_width = lsyscache::get_attavgwidth(reloid, varattno)?;
+                if item_width > 0 {
+                    run.root.rel_mut(rel).attr_widths[ndx] = item_width;
+                    tuple_width += item_width as i64;
+                    continue;
+                }
+            }
+            let item_width = lsyscache::get_typavgwidth(vartype, vartypmod)?;
+            debug_assert!(item_width > 0);
+            run.root.rel_mut(rel).attr_widths[ndx] = item_width;
+            tuple_width += item_width as i64;
+        } else {
+            if node.node_tag() == NodeTag::T_Var {
+                panic!("set_rel_width (costsize.c): foreign Var in reltarget; M2 join lane");
+            }
+            let (typid, typmod) = expr_type_typmod(node);
+            let item_width = lsyscache::get_typavgwidth(typid, typmod)?;
+            debug_assert!(item_width > 0);
+            tuple_width += item_width as i64;
+            let cost = cost_qual_eval_node(node)?;
+            let rt = run.root.rel_reltarget_mut(rel);
+            rt.cost.startup += cost.startup;
+            rt.cost.per_tuple += cost.per_tuple;
+        }
+    }
+
+    if have_wholerow_var {
+        panic!("set_rel_width (costsize.c): whole-row Var; M2 lane");
+    }
+
+    let width = clamp_width_est(tuple_width);
+    run.root.rel_reltarget_mut(rel).width = width;
+    Ok(())
+}

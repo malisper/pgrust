@@ -97,7 +97,7 @@ pub fn subquery_planner<'mcx>(
     debug_assert!(parse.withCheckOptions.is_nil());
     parse.returningList =
         preprocess_expression_list(run, parse.returningList, EXPRKIND_TARGET)?;
-    preprocess_qual_conditions(run, &parse)?;
+    preprocess_qual_conditions(run, &mut parse)?;
     parse.havingQual = preprocess_expression(run, parse.havingQual, EXPRKIND_QUAL)?;
     if !parse.windowClause.is_nil() {
         panic!("preprocess_expression (planner.c): window frame offsets; M2 window lane");
@@ -167,7 +167,7 @@ pub fn preprocess_expression<'mcx>(
         expr = clauses::eval_const_expressions(run.mcx, expr)?;
     }
     if kind == EXPRKIND_QUAL {
-        panic!("canonicalize_qual (prepqual.c): M2 qual lane");
+        expr = canonicalize_qual(expr);
     }
     if kind == EXPRKIND_QUAL || kind == EXPRKIND_TARGET {
         clauses::convert_saop_to_hashed_saop(expr)?;
@@ -196,8 +196,20 @@ fn preprocess_expression_list<'mcx>(
     }
 }
 
-// Quals still hit the canonicalize_qual panic; this arm proves they're absent.
-fn preprocess_qual_conditions<'mcx>(run: &mut PlannerRun<'mcx>, parse: &Query<'mcx>) -> PgResult<()> {
+// canonicalize_qual (prepqual.c): find_duplicate_ors leaves a non-AND/OR
+// clause untouched; the boolean-connective rewrites are the M2 qual lane.
+fn canonicalize_qual(qual: Node<'_>) -> Node<'_> {
+    match qual.node_tag() {
+        NodeTag::T_BoolExpr | NodeTag::T_List => {
+            panic!("find_duplicate_ors (prepqual.c): AND/OR tree; M2 qual lane")
+        }
+        _ => qual,
+    }
+}
+
+// C mutates jointree->quals in place; the FromExpr is shared here, so an
+// equivalent one carries the preprocessed quals.
+fn preprocess_qual_conditions<'mcx>(run: &mut PlannerRun<'mcx>, parse: &mut Query<'mcx>) -> PgResult<()> {
     let f = parse.jointree.expect("jointree is a FromExpr");
     for child in &f.fromlist {
         match child.node_tag() {
@@ -205,6 +217,10 @@ fn preprocess_qual_conditions<'mcx>(run: &mut PlannerRun<'mcx>, parse: &Query<'m
             other => panic!("preprocess_qual_conditions (planner.c): {other:?}; M2 join lane"),
         }
     }
-    let _ = preprocess_expression(run, f.quals, EXPRKIND_QUAL)?;
+    let quals = preprocess_expression(run, f.quals, EXPRKIND_QUAL)?;
+    parse.jointree = Some(alloc_leak_in(
+        run.mcx,
+        types_nodes::primnodes::FromExpr { fromlist: f.fromlist.clone_in(run.mcx)?, quals },
+    )?);
     Ok(())
 }

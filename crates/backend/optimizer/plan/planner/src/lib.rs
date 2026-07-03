@@ -2,9 +2,16 @@
 //! createplan/setrefs/planmain/pathnode/relnode/tlist/costsize/prep slices it
 //! needs; everything past the lane is a named panic citing C fn + lane.
 
+pub mod allpaths;
+pub mod clausesel;
+pub mod costsize;
 pub mod createplan;
 pub mod grouping;
+pub mod indxpath;
+pub mod initsplan;
 pub mod pathnode;
+pub mod plancat;
+pub mod selfuncs;
 pub mod planmain;
 pub mod prep;
 pub mod relnode;
@@ -40,8 +47,7 @@ const PGJIT_INLINE: i32 = 1 << 2;
 const PGJIT_EXPR: i32 = 1 << 3;
 const PGJIT_DEFORM: i32 = 1 << 4;
 
-// GUC backing this crate reads; the costsize.c/jit.c-owned ones move to
-// those units when they land (double-install panics will flag it).
+// GUC backing this crate reads (double-install panics flag future homes).
 pub mod gucs {
     use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 
@@ -80,6 +86,14 @@ pub mod gucs {
     }
 
     real_guc!(CPU_TUPLE_COST, cpu_tuple_cost, set_cpu_tuple_cost, guc_tables::consts::DEFAULT_CPU_TUPLE_COST);
+    real_guc!(SEQ_PAGE_COST, seq_page_cost, set_seq_page_cost, guc_tables::consts::DEFAULT_SEQ_PAGE_COST);
+    real_guc!(RANDOM_PAGE_COST, random_page_cost, set_random_page_cost, guc_tables::consts::DEFAULT_RANDOM_PAGE_COST);
+    real_guc!(CPU_INDEX_TUPLE_COST, cpu_index_tuple_cost, set_cpu_index_tuple_cost, guc_tables::consts::DEFAULT_CPU_INDEX_TUPLE_COST);
+    real_guc!(CPU_OPERATOR_COST, cpu_operator_cost, set_cpu_operator_cost, guc_tables::consts::DEFAULT_CPU_OPERATOR_COST);
+    int_guc!(EFFECTIVE_CACHE_SIZE, effective_cache_size, set_effective_cache_size, guc_tables::consts::DEFAULT_EFFECTIVE_CACHE_SIZE);
+    bool_guc!(ENABLE_SEQSCAN, enable_seqscan, set_enable_seqscan, true);
+    bool_guc!(ENABLE_INDEXSCAN, enable_indexscan, set_enable_indexscan, true);
+    bool_guc!(ENABLE_INDEXONLYSCAN, enable_indexonlyscan, set_enable_indexonlyscan, true);
     real_guc!(CURSOR_TUPLE_FRACTION, cursor_tuple_fraction, set_cursor_tuple_fraction, 0.1);
     real_guc!(JIT_ABOVE_COST, jit_above_cost, set_jit_above_cost, 100000.0);
     real_guc!(JIT_OPTIMIZE_ABOVE_COST, jit_optimize_above_cost, set_jit_optimize_above_cost, 500000.0);
@@ -98,6 +112,30 @@ pub fn init_seams() {
     use guc_tables::GucVarAccessors;
     guc_tables::vars::cpu_tuple_cost
         .install(GucVarAccessors { get: gucs::cpu_tuple_cost, set: gucs::set_cpu_tuple_cost });
+    guc_tables::vars::seq_page_cost
+        .install(GucVarAccessors { get: gucs::seq_page_cost, set: gucs::set_seq_page_cost });
+    guc_tables::vars::random_page_cost
+        .install(GucVarAccessors { get: gucs::random_page_cost, set: gucs::set_random_page_cost });
+    guc_tables::vars::cpu_index_tuple_cost.install(GucVarAccessors {
+        get: gucs::cpu_index_tuple_cost,
+        set: gucs::set_cpu_index_tuple_cost,
+    });
+    guc_tables::vars::cpu_operator_cost.install(GucVarAccessors {
+        get: gucs::cpu_operator_cost,
+        set: gucs::set_cpu_operator_cost,
+    });
+    guc_tables::vars::effective_cache_size.install(GucVarAccessors {
+        get: gucs::effective_cache_size,
+        set: gucs::set_effective_cache_size,
+    });
+    guc_tables::vars::enable_seqscan
+        .install(GucVarAccessors { get: gucs::enable_seqscan, set: gucs::set_enable_seqscan });
+    guc_tables::vars::enable_indexscan
+        .install(GucVarAccessors { get: gucs::enable_indexscan, set: gucs::set_enable_indexscan });
+    guc_tables::vars::enable_indexonlyscan.install(GucVarAccessors {
+        get: gucs::enable_indexonlyscan,
+        set: gucs::set_enable_indexonlyscan,
+    });
     guc_tables::vars::cursor_tuple_fraction.install(GucVarAccessors {
         get: gucs::cursor_tuple_fraction,
         set: gucs::set_cursor_tuple_fraction,

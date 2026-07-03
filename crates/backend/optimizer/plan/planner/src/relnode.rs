@@ -19,6 +19,91 @@ fn relids_equal(a: &Relids<'_>, b: &Relids<'_>) -> bool {
     }
 }
 
+pub fn relids_is_empty(a: &Relids<'_>) -> bool {
+    match a {
+        None => true,
+        Some(b) => b.words.iter().all(|w| *w == 0),
+    }
+}
+
+pub fn relids_is_member(x: i32, a: &Relids<'_>) -> bool {
+    if x < 0 {
+        return false;
+    }
+    match a {
+        None => false,
+        Some(b) => b
+            .words
+            .get(x as usize / 64)
+            .is_some_and(|w| w & (1u64 << (x % 64)) != 0),
+    }
+}
+
+pub fn relids_num_members(a: &Relids<'_>) -> i32 {
+    match a {
+        None => 0,
+        Some(b) => b.words.iter().map(|w| w.count_ones() as i32).sum(),
+    }
+}
+
+pub fn relids_is_subset(a: &Relids<'_>, b: &Relids<'_>) -> bool {
+    let (Some(a), b) = (a, b) else { return true };
+    for (i, w) in a.words.iter().enumerate() {
+        if *w == 0 {
+            continue;
+        }
+        let bw = b.as_ref().and_then(|b| b.words.get(i)).copied().unwrap_or(0);
+        if w & !bw != 0 {
+            return false;
+        }
+    }
+    true
+}
+
+pub fn relids_singleton_member(a: &Relids<'_>) -> Option<i32> {
+    let mut found: Option<i32> = None;
+    if let Some(b) = a {
+        for (i, w) in b.words.iter().enumerate() {
+            let mut w = *w;
+            while w != 0 {
+                if found.is_some() {
+                    return None;
+                }
+                found = Some((i * 64) as i32 + w.trailing_zeros() as i32);
+                w &= w - 1;
+            }
+        }
+    }
+    found
+}
+
+pub fn relids_union<'mcx>(mcx: Mcx<'mcx>, a: &Relids<'mcx>, b: &Relids<'mcx>) -> Relids<'mcx> {
+    let n = a.as_ref().map_or(0, |x| x.words.len()).max(b.as_ref().map_or(0, |x| x.words.len()));
+    if n == 0 {
+        return None;
+    }
+    let mut words = vec_from_elem_in(mcx, 0u64, n);
+    for (i, w) in words.iter_mut().enumerate() {
+        *w = a.as_ref().and_then(|x| x.words.get(i)).copied().unwrap_or(0)
+            | b.as_ref().and_then(|x| x.words.get(i)).copied().unwrap_or(0);
+    }
+    Some(box_new_in(mcx, Bitmapset { words }))
+}
+
+pub fn relids_copy<'mcx>(mcx: Mcx<'mcx>, a: &Relids<'mcx>) -> Relids<'mcx> {
+    a.as_ref().map(|b| {
+        let mut words = PgVec::new_in(mcx);
+        words.extend(b.words.iter().copied());
+        box_new_in(mcx, Bitmapset { words })
+    })
+}
+
+// find_base_rel (relnode.c).
+pub fn find_base_rel(root: &PlannerInfo<'_>, relid: i32) -> RelId {
+    assert!(relid > 0 && relid < root.simple_rel_array_size, "no relation entry for relid {relid}");
+    root.simple_rel_array[relid as usize].unwrap_or_else(|| panic!("no relation entry for relid {relid}"))
+}
+
 fn empty_pathtarget_id<'mcx>(root: &mut PlannerInfo<'mcx>) -> PtId {
     let mcx = root.mcx;
     root.alloc_pathtarget(PathTarget::new(mcx))
@@ -41,20 +126,16 @@ pub fn setup_simple_rel_arrays<'mcx>(root: &mut PlannerInfo<'mcx>, nrtable: usiz
     debug_assert!(root.append_rel_list.is_empty());
 }
 
-// build_simple_rel (relnode.c), parentless RTE_RESULT arm.
+// build_simple_rel (relnode.c), parentless arm (inheritance children are the
+// M2 partition lane).
 pub fn build_simple_rel<'mcx>(
-    root: &mut PlannerInfo<'mcx>,
+    run: &mut crate::run::PlannerRun<'mcx>,
     relid: u32,
     rtekind: RTEKind,
-) -> RelId {
+) -> types_error::PgResult<RelId> {
+    let root = &mut run.root;
     assert!(relid > 0 && (relid as i32) < root.simple_rel_array_size);
     assert!(root.simple_rel_array[relid as usize].is_none(), "rel {relid} already exists");
-    if rtekind != RTEKind::RTE_RESULT {
-        panic!(
-            "build_simple_rel (relnode.c): rtekind {rtekind:?} needs \
-             get_relation_info (plancat)/attr arrays; M2 scan lane"
-        );
-    }
 
     let mcx = root.mcx;
     let mut rel = RelOptInfo::new(mcx);
@@ -66,14 +147,32 @@ pub fn build_simple_rel<'mcx>(
     rel.rel_parallel_workers = -1;
     rel.nparts = -1;
     rel.baserestrict_min_security = u32::MAX;
-    // RTE_RESULT has no columns, nor could it have a whole-row Var.
-    rel.min_attr = 0;
-    rel.max_attr = -1;
     rel.pathtarget_id = Some(empty_pathtarget_id(root));
 
-    let id = root.alloc_rel(rel);
-    root.simple_rel_array[relid as usize] = Some(id);
-    id
+    match rtekind {
+        RTEKind::RTE_RELATION => {
+            // rel.userid comes from the RTE's perminfo checkAsUser; RTEs on
+            // this lane panicked earlier when perminfoindex != 0.
+            rel.userid = 0;
+        }
+        RTEKind::RTE_RESULT => {
+            // RTE_RESULT has no columns, nor could it have a whole-row Var.
+            rel.min_attr = 0;
+            rel.max_attr = -1;
+        }
+        other => panic!("build_simple_rel (relnode.c): rtekind {other:?}; M2 scan lane"),
+    }
+
+    let id = run.root.alloc_rel(rel);
+    run.root.simple_rel_array[relid as usize] = Some(id);
+
+    if rtekind == RTEKind::RTE_RELATION {
+        let rte = run.rte(relid as usize);
+        assert!(!rte.inh, "expand_inherited_rtentry: M2 partition lane");
+        crate::plancat::get_relation_info(run, rte.relid, false, id)?;
+    }
+
+    Ok(id)
 }
 
 // fetch_upper_rel (relnode.c); only the relids=NULL form exists pre-partition.

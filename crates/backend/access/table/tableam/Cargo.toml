@@ -16,6 +16,7 @@ types_storage = { path = "../../../../_support/types/types_storage" }
 types_tuple = { path = "../../../../_support/types/types_tuple" }
 types_snapshot = { path = "../../../../_support/types/snapshot" }
 guc_tables = { path = "../../../utils/misc/guc_tables" }
+bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
 xact_seams = { path = "../../transam/xact_seams" }
 exectuples = { path = "../../../executor/exectuples" }
 tableam_vocab = { path = "../tableam_vocab" }

@@ -1256,6 +1256,57 @@ pub fn table_block_relation_size(rel: &Relation<'_>, forkNumber: ForkNumber) -> 
     unported("backend-storage-smgr (smgrnblocks) / relcache rd_locator")
 }
 
+/// `table_relation_estimate_size` for the heap AM (heapam_estimate_rel_size ->
+/// table_block_relation_estimate_size). `get_rel_data_width` lives in the
+/// planner's plancat (a direct dep here would cycle), so the never-vacuumed
+/// density fallback arrives as `data_width` (called with the attr-width cache).
+#[allow(clippy::too_many_arguments)]
+pub fn table_relation_estimate_size(
+    rel: &Relation<'_>,
+    overhead_bytes_per_tuple: usize,
+    usable_bytes_per_page: usize,
+    data_width: impl FnOnce(Option<&mut [i32]>) -> PgResult<i32>,
+    mut attr_widths: Option<&mut [i32]>,
+    pages: &mut BlockNumber,
+    tuples: &mut f64,
+    allvisfrac: &mut f64,
+) -> PgResult<()> {
+    let curpages =
+        bufmgr_seams::relation_get_number_of_blocks_in_fork::call(rel, ForkNumber::MAIN_FORKNUM)?;
+    let fillfactor = rel.get_fillfactor(HEAP_DEFAULT_FILLFACTOR);
+    block_relation_estimate_size_math(
+        curpages,
+        rel.rd_rel.relpages as BlockNumber,
+        rel.rd_rel.reltuples as f64,
+        rel.rd_rel.relallvisible as BlockNumber,
+        rel.rd_rel.relhassubclass,
+        |aw| {
+            let mut tuple_width = data_width(aw)? as usize;
+            tuple_width += overhead_bytes_per_tuple;
+            // C Size arithmetic: integer division is intentional.
+            let raw = usable_bytes_per_page * fillfactor as usize / 100 / tuple_width;
+            Ok(clamp_row_est(raw as f64))
+        },
+        attr_widths.take(),
+        pages,
+        tuples,
+        allvisfrac,
+    )
+}
+
+// clamp_row_est (costsize.c); grounded here for the density fallback (the
+// costsize copy lives with the planner).
+fn clamp_row_est(nrows: f64) -> f64 {
+    const MAXIMUM_ROWCOUNT: f64 = 1e100;
+    if nrows > MAXIMUM_ROWCOUNT || nrows.is_nan() {
+        MAXIMUM_ROWCOUNT
+    } else if nrows <= 1.0 {
+        1.0
+    } else {
+        nrows.round_ties_even()
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn table_block_relation_estimate_size(
     rel: &Relation<'_>,
