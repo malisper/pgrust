@@ -131,6 +131,7 @@ pub fn apply_cmp(cmp: SortComparator, x: Datum, y: Datum) -> i32 {
         // SAFETY: as TextC.
         SortComparator::BpcharLocale(locale) => unsafe {
             varstrfastcmp_locale(varlena_payload(x), varlena_payload(y), locale, true)
+        },
         // SAFETY: Uuid contract (enum doc) — live 16-byte images.
         SortComparator::Uuid => unsafe {
             let a = &*(x.as_usize() as *const ::adt_uuid::PgUuid);
