@@ -187,7 +187,7 @@ mod byref {
 
         let mut fci = LocalFcinfo::<1>::new(0);
         fci.set_arg(0, Datum::from_usize(image.as_ptr() as usize));
-        let v = unsafe { fci.arg_varlena_packed(0) };
+        let v = unsafe { fci.arg_varlena_packed(0) }.unwrap();
         assert_eq!(v.size(), 4 + payload.len());
         assert_eq!(v.data(), payload);
         assert_eq!(v.data().as_ptr(), image[4..].as_ptr());
@@ -199,14 +199,14 @@ mod byref {
         let image: [u8; 4] = [(4u8 << 1) | 1, b'a', b'b', b'c'];
         let mut fci = LocalFcinfo::<1>::new(0);
         fci.set_arg(0, Datum::from_usize(image.as_ptr() as usize));
-        let v = unsafe { fci.arg_varlena_packed(0) };
+        let v = unsafe { fci.arg_varlena_packed(0) }.unwrap();
         assert_eq!(v.size(), 4);
         assert_eq!(v.data(), b"abc");
     }
 
     #[test]
-    #[should_panic(expected = "detoast unit")]
-    fn external_varlena_panics_loudly() {
+    #[should_panic(expected = "never armed")]
+    fn external_varlena_needs_armed_mcx() {
         let image: [u8; 18] = [0x01, 18, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
         let mut fci = LocalFcinfo::<1>::new(0);
         fci.set_arg(0, Datum::from_usize(image.as_ptr() as usize));
@@ -214,8 +214,8 @@ mod byref {
     }
 
     #[test]
-    #[should_panic(expected = "detoast unit")]
-    fn compressed_varlena_panics_loudly() {
+    #[should_panic(expected = "never armed")]
+    fn compressed_varlena_needs_armed_mcx() {
         // 4B-C header (LE): low two bits 0b10.
         let image: [u8; 8] = [0x02, 0, 0, 0, 0, 0, 0, 0];
         let mut fci = LocalFcinfo::<1>::new(0);

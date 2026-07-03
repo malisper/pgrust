@@ -427,4 +427,5 @@ pub fn toast_datum_size(value: &[u8]) -> usize {
 
 pub fn init_seams() {
     detoast_seams::detoast_attr::set(detoast_attr);
+    detoast_seams::detoast_attr_slice::set(detoast_attr_slice);
 }

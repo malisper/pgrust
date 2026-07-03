@@ -197,9 +197,14 @@ fn byteain_hex_digit_message_is_c_exact() {
 
 #[test]
 fn bytea_substring_and_pos() {
+    detoast::init_seams();
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
-    let s = &[0u8, 1, 2, 3, 4, 5];
+    let mut img = vec![0u8; 4];
+    img.extend_from_slice(&[0u8, 1, 2, 3, 4, 5]);
+    let hdr = datum::varlena::set_varsize_4b(img.len());
+    img[..4].copy_from_slice(&hdr);
+    let s: &[u8] = &img;
     // 1-based; substring(s from 2 for 3) = bytes at index 1..4.
     assert_eq!(bytea::bytea_substring(mcx, s, 2, 3, false).unwrap().data(), &[1, 2, 3]);
     // no length -> to end.

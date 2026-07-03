@@ -26,7 +26,7 @@ pub fn fc_json_in(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResu
 
 pub fn fc_json_out(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: catalog arg 0 is a non-null text varlena (strict fn).
-    let payload = unsafe { fcinfo.arg_varlena_packed(0) }.data();
+    let payload = unsafe { fcinfo.arg_varlena_packed(0)? }.data();
     let mcx = fcinfo.result_mcx();
     Ok(cstring_result(crate::json_out(mcx, payload)?))
 }
@@ -40,7 +40,7 @@ pub fn fc_json_recv(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRe
 
 pub fn fc_json_send(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: catalog arg 0 is a non-null text varlena (strict fn).
-    let payload = unsafe { fcinfo.arg_varlena_packed(0) }.data();
+    let payload = unsafe { fcinfo.arg_varlena_packed(0)? }.data();
     let mcx = fcinfo.result_mcx();
     Ok(varlena_result(crate::json_send(mcx, payload)?))
 }

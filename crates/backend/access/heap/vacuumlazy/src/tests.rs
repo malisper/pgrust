@@ -243,6 +243,7 @@ fn vacrel<'a, 'mcx>(rel: &'a RelationData<'mcx>, mcx: Mcx<'mcx>) -> LVRelState<'
     LVRelState {
         rel,
         nindexes: 1,
+        index_oids: PgVec::new_in(mcx),
         bstrategy: None,
         aggressive: false,
         skipwithvm: true,

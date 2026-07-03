@@ -10,7 +10,7 @@ use types_fmgr::{
 
 pub fn fc_ascii(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: catalog arg 0 of ascii is a non-null text varlena (strict fn).
-    let payload = unsafe { fcinfo.arg_varlena_packed(0) }.data();
+    let payload = unsafe { fcinfo.arg_varlena_packed(0)? }.data();
     Ok(Datum::from_i32(crate::ascii(payload)?))
 }
 
@@ -18,7 +18,7 @@ macro_rules! fc_case {
     ($($fname:ident: $core:ident;)*) => {$(
         pub fn $fname(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
             // SAFETY: catalog arg 0 is a non-null text varlena (strict fn).
-            let s = unsafe { fcinfo.arg_varlena_packed(0) }.data();
+            let s = unsafe { fcinfo.arg_varlena_packed(0)? }.data();
             let mcx = fcinfo.result_mcx();
             Ok(varlena_result(crate::$core(mcx, s, fcinfo.get_collation())?))
         }
@@ -36,7 +36,7 @@ macro_rules! fc_trim1 {
     ($($fname:ident: $core:ident;)*) => {$(
         pub fn $fname(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
             // SAFETY: catalog arg 0 is a non-null text/bpchar varlena (strict fn).
-            let s = unsafe { fcinfo.arg_varlena_packed(0) }.data();
+            let s = unsafe { fcinfo.arg_varlena_packed(0)? }.data();
             let mcx = fcinfo.result_mcx();
             Ok(varlena_result(crate::$core(mcx, s)?))
         }
@@ -54,7 +54,7 @@ macro_rules! fc_trim2 {
         pub fn $fname(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
             // SAFETY: catalog args are non-null text/bytea varlenas (strict fn).
             let (s, set) = unsafe {
-                (fcinfo.arg_varlena_packed(0), fcinfo.arg_varlena_packed(1))
+                (fcinfo.arg_varlena_packed(0)?, fcinfo.arg_varlena_packed(1)?)
             };
             let mcx = fcinfo.result_mcx();
             Ok(varlena_result(crate::$core(mcx, s.data(), set.data())?))
@@ -76,7 +76,7 @@ macro_rules! fc_pad {
         pub fn $fname(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
             // SAFETY: catalog args 0/2 are non-null text varlenas (strict fn).
             let (s, fill) = unsafe {
-                (fcinfo.arg_varlena_packed(0), fcinfo.arg_varlena_packed(2))
+                (fcinfo.arg_varlena_packed(0)?, fcinfo.arg_varlena_packed(2)?)
             };
             let len = fcinfo.arg_i32(1);
             let mcx = fcinfo.result_mcx();
@@ -94,9 +94,9 @@ pub fn fc_translate(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRe
     // SAFETY: catalog args are non-null text varlenas (strict fn).
     let (s, from, to) = unsafe {
         (
-            fcinfo.arg_varlena_packed(0),
-            fcinfo.arg_varlena_packed(1),
-            fcinfo.arg_varlena_packed(2),
+            fcinfo.arg_varlena_packed(0)?,
+            fcinfo.arg_varlena_packed(1)?,
+            fcinfo.arg_varlena_packed(2)?,
         )
     };
     let mcx = fcinfo.result_mcx();
@@ -115,7 +115,7 @@ pub fn fc_chr(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<D
 
 pub fn fc_repeat(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: catalog arg 0 of repeat is a non-null text varlena (strict fn).
-    let s = unsafe { fcinfo.arg_varlena_packed(0) }.data();
+    let s = unsafe { fcinfo.arg_varlena_packed(0)? }.data();
     let mcx = fcinfo.result_mcx();
     Ok(varlena_result(crate::repeat(mcx, s, fcinfo.arg_i32(1))?))
 }

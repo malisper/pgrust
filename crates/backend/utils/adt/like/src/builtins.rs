@@ -20,7 +20,7 @@ macro_rules! fc_like {
         pub fn $fname(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
             // SAFETY: catalog args are non-null text/bpchar varlenas (strict fn).
             let (s, p) = unsafe {
-                (fcinfo.arg_varlena_packed(0), fcinfo.arg_varlena_packed(1))
+                (fcinfo.arg_varlena_packed(0)?, fcinfo.arg_varlena_packed(1)?)
             };
             Ok(Datum::from_bool(crate::$core(s.data(), p.data(), fcinfo.get_collation())?))
         }
@@ -36,7 +36,7 @@ macro_rules! fc_namelike {
     ($($fname:ident: $core:ident;)*) => {$(
         pub fn $fname(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
             // SAFETY: catalog args are a non-null name block and text varlena (strict fn).
-            let (s, p) = unsafe { (fcinfo.arg_name(0), fcinfo.arg_varlena_packed(1)) };
+            let (s, p) = unsafe { (fcinfo.arg_name(0), fcinfo.arg_varlena_packed(1)?) };
             Ok(Datum::from_bool(crate::$core(s, p.data(), fcinfo.get_collation())?))
         }
     )*};
@@ -52,7 +52,7 @@ macro_rules! fc_bytealike {
         pub fn $fname(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
             // SAFETY: catalog args are non-null bytea varlenas (strict fn).
             let (s, p) = unsafe {
-                (fcinfo.arg_varlena_packed(0), fcinfo.arg_varlena_packed(1))
+                (fcinfo.arg_varlena_packed(0)?, fcinfo.arg_varlena_packed(1)?)
             };
             Ok(Datum::from_bool(crate::$core(s.data(), p.data())?))
         }
@@ -74,7 +74,7 @@ fn ic_scratch<'a>(flinfo: Option<&'a mut FmgrInfo>, name: &'static str) -> &'a m
 
 macro_rules! arg_bytes {
     (arg_varlena_packed, $v:ident) => {
-        $v.data()
+        $v?.data()
     };
     (arg_name, $v:ident) => {
         $v
@@ -86,7 +86,7 @@ macro_rules! fc_iclike {
         pub fn $fname(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
             let scratch = ic_scratch(flinfo, stringify!($core));
             // SAFETY: catalog args are non-null per the row's types (strict fn).
-            let (s, p) = unsafe { (fcinfo.$arg0(0), fcinfo.arg_varlena_packed(1)) };
+            let (s, p) = unsafe { (fcinfo.$arg0(0), fcinfo.arg_varlena_packed(1)?) };
             Ok(Datum::from_bool(crate::$core(
                 fcinfo.result_mcx(),
                 arg_bytes!($arg0, s),
@@ -120,7 +120,7 @@ fn escape_out(
         flinfo.set_fn_extra(OutBuf(Vec::new()));
     }
     // SAFETY: catalog args are non-null text/bytea varlenas (strict fn).
-    let (pat, esc) = unsafe { (fcinfo.arg_varlena_packed(0), fcinfo.arg_varlena_packed(1)) };
+    let (pat, esc) = unsafe { (fcinfo.arg_varlena_packed(0)?, fcinfo.arg_varlena_packed(1)?) };
     let buf = &mut flinfo.fn_extra_mut::<OutBuf>().unwrap().0;
     buf.clear();
     buf.extend_from_slice(&[0; VARHDRSZ]);

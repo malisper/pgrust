@@ -786,10 +786,11 @@ pub unsafe fn agg_datum_copy(
     let size = unsafe {
         match typlen {
             -1 => {
-                if ::types_tuple::varatt::varatt_is_1b_e(p) {
+                // C copies toast pointers verbatim; only expanded flattens.
+                if ::types_tuple::varatt::varatt_is_external_expanded(p) {
                     panic!(
-                        "datumCopy (datum.c): external/expanded varlena transvalue — \
-                         detoast/expanded-object units not ported"
+                        "datumCopy (datum.c): expanded varlena transvalue — \
+                         expanded-object flatten arm has no producers"
                     );
                 }
                 ::types_tuple::varatt::varsize_any(p)

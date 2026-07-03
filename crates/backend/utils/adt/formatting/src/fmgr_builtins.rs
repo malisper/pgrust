@@ -17,7 +17,7 @@ use crate::tables::NUM_MAX_ITEM_SIZ;
 
 pub fn fc_numeric_to_char(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: strict fn — args 0/1 are non-null numeric/text varlenas.
-    let (val, fmt) = unsafe { (fcinfo.arg_varlena_packed(0), fcinfo.arg_varlena_packed(1)) };
+    let (val, fmt) = unsafe { (fcinfo.arg_varlena_packed(0)?, fcinfo.arg_varlena_packed(1)?) };
     let mcx = fcinfo.result_mcx();
     // C's PG_GETARG_NUMERIC detoast: 1B-short images realign into the result mcx.
     let n = Num::from_payload(if val.is_short() {
@@ -30,7 +30,7 @@ pub fn fc_numeric_to_char(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgR
 
 pub fn fc_int4_to_char(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: strict fn — arg 1 is a non-null text varlena.
-    let fmt = unsafe { fcinfo.arg_varlena_packed(1) };
+    let fmt = unsafe { fcinfo.arg_varlena_packed(1)? };
     let v = fcinfo.arg_i32(0);
     let mcx = fcinfo.result_mcx();
     Ok(varlena_result(num_entry::int4_to_char(mcx, v, fmt.data())?))
@@ -38,7 +38,7 @@ pub fn fc_int4_to_char(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResu
 
 pub fn fc_int8_to_char(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: strict fn — arg 1 is a non-null text varlena.
-    let fmt = unsafe { fcinfo.arg_varlena_packed(1) };
+    let fmt = unsafe { fcinfo.arg_varlena_packed(1)? };
     let v = fcinfo.arg_i64(0);
     let mcx = fcinfo.result_mcx();
     Ok(varlena_result(num_entry::int8_to_char(mcx, v, fmt.data())?))
@@ -46,7 +46,7 @@ pub fn fc_int8_to_char(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResu
 
 pub fn fc_float4_to_char(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: strict fn — arg 1 is a non-null text varlena.
-    let fmt = unsafe { fcinfo.arg_varlena_packed(1) };
+    let fmt = unsafe { fcinfo.arg_varlena_packed(1)? };
     let v = fcinfo.arg_f32(0);
     let mcx = fcinfo.result_mcx();
     Ok(varlena_result(num_entry::float4_to_char(mcx, v, fmt.data())?))
@@ -54,7 +54,7 @@ pub fn fc_float4_to_char(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRe
 
 pub fn fc_float8_to_char(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: strict fn — arg 1 is a non-null text varlena.
-    let fmt = unsafe { fcinfo.arg_varlena_packed(1) };
+    let fmt = unsafe { fcinfo.arg_varlena_packed(1)? };
     let v = fcinfo.arg_f64(0);
     let mcx = fcinfo.result_mcx();
     Ok(varlena_result(num_entry::float8_to_char(mcx, v, fmt.data())?))
@@ -62,7 +62,7 @@ pub fn fc_float8_to_char(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRe
 
 pub fn fc_numeric_to_number(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: strict fn — args 0/1 are non-null text varlenas.
-    let (val, fmt) = unsafe { (fcinfo.arg_varlena_packed(0), fcinfo.arg_varlena_packed(1)) };
+    let (val, fmt) = unsafe { (fcinfo.arg_varlena_packed(0)?, fcinfo.arg_varlena_packed(1)?) };
     // C: len <= 0 || len >= (INT_MAX)/NUM_MAX_ITEM_SIZ -> NULL.
     let len = fmt.data().len();
     if len == 0 || len >= (i32::MAX as usize) / NUM_MAX_ITEM_SIZ {
@@ -75,7 +75,7 @@ pub fn fc_numeric_to_number(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> P
 
 pub fn fc_timestamp_to_char(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: strict fn — arg 1 is a non-null text varlena.
-    let fmt = unsafe { fcinfo.arg_varlena_packed(1) };
+    let fmt = unsafe { fcinfo.arg_varlena_packed(1)? };
     let ts = fcinfo.arg_i64(0);
     if fmt.data().is_empty() || TIMESTAMP_NOT_FINITE(ts) {
         return Ok(fcinfo.return_null());
@@ -86,7 +86,7 @@ pub fn fc_timestamp_to_char(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> P
 
 pub fn fc_timestamptz_to_char(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: strict fn — arg 1 is a non-null text varlena.
-    let fmt = unsafe { fcinfo.arg_varlena_packed(1) };
+    let fmt = unsafe { fcinfo.arg_varlena_packed(1)? };
     let ts = fcinfo.arg_i64(0);
     if fmt.data().is_empty() || TIMESTAMP_NOT_FINITE(ts) {
         return Ok(fcinfo.return_null());
@@ -97,14 +97,14 @@ pub fn fc_timestamptz_to_char(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) ->
 
 pub fn fc_to_timestamp(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: strict fn — args 0/1 are non-null text varlenas.
-    let (val, fmt) = unsafe { (fcinfo.arg_varlena_packed(0), fcinfo.arg_varlena_packed(1)) };
+    let (val, fmt) = unsafe { (fcinfo.arg_varlena_packed(0)?, fcinfo.arg_varlena_packed(1)?) };
     let mcx = fcinfo.result_mcx();
     Ok(Datum::from_i64(dch_entry::to_timestamp(mcx, val.data(), fmt.data())?))
 }
 
 pub fn fc_to_date(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: strict fn — args 0/1 are non-null text varlenas.
-    let (val, fmt) = unsafe { (fcinfo.arg_varlena_packed(0), fcinfo.arg_varlena_packed(1)) };
+    let (val, fmt) = unsafe { (fcinfo.arg_varlena_packed(0)?, fcinfo.arg_varlena_packed(1)?) };
     let mcx = fcinfo.result_mcx();
     Ok(Datum::from_i32(dch_entry::to_date(mcx, val.data(), fmt.data())?))
 }

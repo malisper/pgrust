@@ -11,7 +11,7 @@ use ::types_fmgr::{
 
 pub fn fc_binary_encode(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: catalog args are non-null bytea (0) + text codec name (1); strict fn.
-    let (data, name) = unsafe { (fcinfo.arg_varlena_packed(0), fcinfo.arg_varlena_packed(1)) };
+    let (data, name) = unsafe { (fcinfo.arg_varlena_packed(0)?, fcinfo.arg_varlena_packed(1)?) };
     let mcx = fcinfo.result_mcx();
     Ok(varlena_result(crate::binary_encode(
         mcx,
@@ -22,7 +22,7 @@ pub fn fc_binary_encode(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> 
 
 pub fn fc_binary_decode(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: catalog args are non-null text data (0) + text codec name (1); strict fn.
-    let (data, name) = unsafe { (fcinfo.arg_varlena_packed(0), fcinfo.arg_varlena_packed(1)) };
+    let (data, name) = unsafe { (fcinfo.arg_varlena_packed(0)?, fcinfo.arg_varlena_packed(1)?) };
     let mcx = fcinfo.result_mcx();
     Ok(varlena_result(crate::binary_decode(
         mcx,
