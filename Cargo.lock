@@ -2667,7 +2667,6 @@ dependencies = [
 name = "format_type"
 version = "0.1.0"
 dependencies = [
- "adt_numeric",
  "datum",
  "fmgr_seams",
  "keywords",
