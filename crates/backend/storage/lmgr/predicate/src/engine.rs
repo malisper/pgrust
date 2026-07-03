@@ -266,7 +266,10 @@ unsafe fn SerializationNeededForWrite(rd_id: Oid, uses_local_buffers: bool) -> b
 }
 
 unsafe fn CreatePredXact() -> *mut SERIALIZABLEXACT {
-    let px = shared().pred_xact;
+    CreatePredXactIn(shared().pred_xact)
+}
+
+unsafe fn CreatePredXactIn(px: PredXactList) -> *mut SERIALIZABLEXACT {
     if dlist_is_empty(&raw mut (*px).availableList) {
         return ptr::null_mut();
     }
@@ -434,7 +437,7 @@ unsafe fn init_pred_xact_list(px: PredXactList, elem_count: i64, first_boot: boo
         }
         dlist_push_tail(&raw mut (*px).availableList, &raw mut (*e).xactLink);
     }
-    let oc = CreatePredXact();
+    let oc = CreatePredXactIn(px);
     (*px).OldCommittedSxact = oc;
     (*oc).vxid = VirtualTransactionId::invalid();
     (*oc).prepareSeqNo = 0;
