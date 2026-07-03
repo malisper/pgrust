@@ -310,3 +310,35 @@ fn in_progress_finds_cached_subxids() {
     GetPGProcByNumber(me).xmin.value.store(0, Relaxed);
     set_transaction_xmin(InvalidTransactionId);
 }
+
+#[test]
+fn running_transaction_data_reports_assigned_xids_and_holds_locks() {
+    let _g = test_lock();
+    let _me = my_backend();
+
+    let tv = TransamVariables();
+    tv.latestCompletedXid
+        .store(FullTransactionId::from_epoch_and_xid(0, 200).value, Relaxed);
+    tv.nextXid
+        .store(FullTransactionId::from_epoch_and_xid(0, 201).value, Relaxed);
+
+    let other = claim_other();
+    other_proc_running(other, 190);
+
+    GetRunningTransactionData(|running| {
+        assert_eq!(running.xcnt, 1);
+        assert_eq!(running.subxcnt, 0);
+        assert_eq!(running.xids, &[190]);
+        assert!(!running.subxid_overflow);
+        assert_eq!(running.next_xid, 201);
+        assert_eq!(running.oldest_running_xid, 190);
+        assert_eq!(running.latest_completed_xid, 200);
+        // The caller-releases contract: both locks are held here.
+        lwlock::LWLockRelease(lwlock::main_lock(PROC_ARRAY_LOCK)).expect("PAL held");
+        lwlock::LWLockRelease(lwlock::main_lock(XID_GEN_LOCK)).expect("XidGen held");
+        Ok(())
+    })
+    .expect("GetRunningTransactionData");
+
+    other_proc_end(other, 190);
+}

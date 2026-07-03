@@ -5,7 +5,6 @@
 
 use ::datum::Varlena;
 use ::mcx::{Mcx, PgVec};
-use ::numeric::io::get_str_from_var;
 use ::numeric::{
     int64_to_numeric, make_result, mul_var, numeric_in, numeric_int4, numeric_out_sci, power_var,
     Num, NumericImage, NumericVar, NUMERIC_NAN, NUMERIC_NINF, NUMERIC_PINF,
@@ -168,11 +167,11 @@ pub fn numeric_to_char<'mcx>(
             let mut prod = NumericVar::new();
             mul_var(value.view(), xpow.view(), &mut prod, rscale);
             prod.round(num.post);
-            render_var(&prod)
+            render_var(&prod)?
         } else {
             let mut x = NumericVar::from_view(value.view());
             x.round(num.post);
-            render_var(&x)
+            render_var(&x)?
         };
 
         let (sb, sgn) = strip_sign(orgnum);
@@ -192,13 +191,16 @@ pub fn numeric_to_char<'mcx>(
     text_result(mcx, &cstr(&out))
 }
 
-fn render_var(x: &NumericVar) -> Vec<u8> {
+// C: numeric_out(numeric_round(val, post)) — make_result normalizes a
+// rounded-to-zero negative to canonical "0" (get_str_from_var alone keeps "-0").
+fn render_var(x: &NumericVar) -> PgResult<Vec<u8>> {
     if let Some(s) = var_special_orgnum(x.sign) {
-        return s.to_vec();
+        return Ok(s.to_vec());
     }
+    let img = make_result(x.view())?;
     let mut buf = Vec::new();
-    get_str_from_var(x.view(), &mut buf);
-    buf
+    ::numeric::numeric_out_into(img.num(), &mut buf);
+    Ok(buf)
 }
 
 fn strip_sign(orgnum: Vec<u8>) -> (Vec<u8>, i32) {

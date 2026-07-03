@@ -284,9 +284,15 @@ fn install_catalog_fixture() {
             _ => None,
         })
     });
-    // The real builtin table covers every io/transition function these
-    // sessions reach.
-    fmgr_seams::fmgr_info::set(fmgr_core::fmgr_info);
+    // Pre-SRF stubs kept verbatim (the trace fixture pins their exact cost
+    // accounting); everything else resolves off the real builtin table.
+    fmgr_seams::fmgr_info::set(|oid| match oid {
+        INT4IN => Ok(FmgrInfo::new(adt_int::builtins::fc_int4in, INT4IN, 1, true, false)),
+        INT4OUT => Ok(FmgrInfo::new(adt_int::builtins::fc_int4out, INT4OUT, 1, true, false)),
+        2406 => Ok(FmgrInfo::new(adt_int::builtins::fc_int4recv, 2406, 1, true, false)),
+        2407 => Ok(FmgrInfo::new(adt_int::builtins::fc_int4send, 2407, 1, true, false)),
+        other => fmgr_core::fmgr_info(other),
+    });
     syscache_seams::lookup_pg_proc_name_candidates::set(|mcx, proname| {
         let mut v = mcx::PgVec::new_in(mcx);
         match proname {
