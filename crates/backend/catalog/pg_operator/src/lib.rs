@@ -90,7 +90,7 @@ pub fn form_of_tuple(rel: &Relation<'_>, tup: &types_tuple::HeapTupleData<'_>) -
     }
 }
 
-fn operator_values<'a>(form: &'a FormPgOperator) -> [Datum<'a>; Natts_pg_operator] {
+fn operator_values(form: &FormPgOperator) -> [Datum; Natts_pg_operator] {
     [
         Datum::from_oid(form.oid),
         Datum::from_usize(form.oprname.data.as_ptr() as usize),
@@ -224,8 +224,8 @@ pub fn OperatorCreate(
     leftTypeId: Oid,
     rightTypeId: Oid,
     procedureId: Oid,
-    commutatorName: &NodeList<'_>,
-    negatorName: &NodeList<'_>,
+    commutatorName: Option<&NodeList<'_>>,
+    negatorName: Option<&NodeList<'_>>,
     restrictionId: Oid,
     joinId: Oid,
     canMerge: bool,
@@ -243,8 +243,8 @@ pub fn OperatorCreate(
         leftTypeId,
         rightTypeId,
         operResultType,
-        !commutatorName.is_nil(),
-        !negatorName.is_nil(),
+        commutatorName.is_some(),
+        negatorName.is_some(),
         OidIsValid(restrictionId),
         OidIsValid(joinId),
         canMerge,
@@ -267,7 +267,7 @@ pub fn OperatorCreate(
     }
 
     let mut commutatorId = InvalidOid;
-    if !commutatorName.is_nil() {
+    if let Some(commutatorName) = commutatorName {
         // commutator has reversed arg types
         commutatorId = get_other_operator(
             mcx,
@@ -291,7 +291,7 @@ pub fn OperatorCreate(
     }
 
     let negatorId;
-    if !negatorName.is_nil() {
+    if let Some(negatorName) = negatorName {
         // negator has same arg types
         negatorId = get_other_operator(
             mcx,
@@ -526,7 +526,7 @@ pub fn OperatorUpd(
 
     let rel = table::table_open(mcx, OPERATOR_RELATION_ID, RowExclusiveLock)?;
 
-    let fetch = |oid: Oid| -> PgResult<Option<heaptuple::HeapTuple<'_>>> {
+    let fetch = |oid: Oid| {
         if !OidIsValid(oid) {
             return Ok(None);
         }

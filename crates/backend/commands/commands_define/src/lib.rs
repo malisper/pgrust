@@ -5,7 +5,7 @@ use mcx::{Mcx, PgString};
 use types_error::{PgError, PgResult, ERRCODE_SYNTAX_ERROR};
 use types_nodes::list::NodeList;
 use types_nodes::rawnodes::TypeName;
-use types_nodes::tags::NodeTag;
+use types_nodes::NodeTag;
 use types_nodes::{parsenodes::DefElem, Node};
 
 #[cold]
@@ -43,7 +43,7 @@ pub fn defGetString<'mcx>(mcx: Mcx<'mcx>, def: &DefElem<'mcx>) -> PgResult<&'mcx
             str_in(mcx, s.as_str())?
         }
         NodeTag::T_List => {
-            let s = NameListToString(mcx, arg.as_variant::<NodeList>().unwrap())?;
+            let s = NameListToString(mcx, arg.as_list().unwrap())?;
             str_in(mcx, s.as_str())?
         }
         NodeTag::T_A_Star => "*",
@@ -104,14 +104,21 @@ pub fn defGetInt64(def: &DefElem<'_>) -> PgResult<i64> {
     }
 }
 
-pub fn defGetQualifiedName<'mcx>(mcx: Mcx<'mcx>, def: &DefElem<'mcx>) -> PgResult<NodeList<'mcx>> {
+pub fn defGetQualifiedName<'mcx>(
+    mcx: Mcx<'mcx>,
+    def: &DefElem<'mcx>,
+) -> PgResult<&'mcx NodeList<'mcx>> {
     let Some(arg) = def.arg else {
         return Err(syntax_err(format!("{} requires a parameter", defname(def))));
     };
     match arg.node_tag() {
-        NodeTag::T_TypeName => Ok(arg.as_variant::<TypeName>().unwrap().names),
-        NodeTag::T_List => Ok(*arg.as_variant::<NodeList>().unwrap()),
-        NodeTag::T_String => NodeList::make1(mcx, arg),
+        NodeTag::T_TypeName => Ok(&arg.as_variant::<TypeName>().unwrap().names),
+        NodeTag::T_List => Ok(arg.as_list().unwrap()),
+        NodeTag::T_String => {
+            // Allow quoted name for backwards compatibility.
+            let list = NodeList::make1(mcx, arg)?;
+            Ok(Node::mk_list(mcx, list)?.as_list().unwrap())
+        }
         _ => Err(syntax_err(format!("argument of {} must be a name", defname(def)))),
     }
 }
@@ -166,11 +173,11 @@ pub fn defGetTypeLength(def: &DefElem<'_>) -> PgResult<i32> {
     )))
 }
 
-pub fn defGetStringList<'mcx>(def: &DefElem<'mcx>) -> PgResult<NodeList<'mcx>> {
+pub fn defGetStringList<'mcx>(def: &DefElem<'mcx>) -> PgResult<&'mcx NodeList<'mcx>> {
     let Some(arg) = def.arg else {
         return Err(syntax_err(format!("{} requires a parameter", defname(def))));
     };
-    let Some(list) = arg.as_variant::<NodeList>() else {
+    let Some(list) = arg.as_list() else {
         panic!("unrecognized node type: {:?}", arg.node_tag());
     };
     for n in list.iter() {
@@ -178,7 +185,7 @@ pub fn defGetStringList<'mcx>(def: &DefElem<'mcx>) -> PgResult<NodeList<'mcx>> {
             panic!("unexpected node type in name list: {:?}", n.node_tag());
         }
     }
-    Ok(*list)
+    Ok(list)
 }
 
 // NameListToString (namespace.c): '.'-joined, no quoting.
