@@ -547,11 +547,12 @@ pub fn consider_groupingsets_paths<'mcx>(
             new_rollups.push(rollup);
             strat = types_pathnodes::AGG_MIXED;
         }
+        let q = quals(run);
         let gs_path = crate::pathnode::create_groupingsets_path(
             run,
             grouped_rel,
             path,
-            quals(run),
+            q,
             strat,
             new_rollups,
             agg_costs,
@@ -634,11 +635,12 @@ pub fn consider_groupingsets_paths<'mcx>(
             for r in rollups {
                 rv.push(r);
             }
+            let q = quals(run);
             let gs_path = crate::pathnode::create_groupingsets_path(
                 run,
                 grouped_rel,
                 path,
-                quals(run),
+                q,
                 types_pathnodes::AGG_MIXED,
                 rv,
                 agg_costs,
@@ -650,11 +652,12 @@ pub fn consider_groupingsets_paths<'mcx>(
     let gd = run.gset_data.as_ref().unwrap();
     if gd.unsortable_sets.is_empty() {
         let rollups = gd.rollups.clone();
+        let q = quals(run);
         let gs_path = crate::pathnode::create_groupingsets_path(
             run,
             grouped_rel,
             path,
-            quals(run),
+            q,
             types_pathnodes::AGG_SORTED,
             rollups,
             agg_costs,

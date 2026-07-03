@@ -126,7 +126,6 @@ pub(crate) fn init_grouping_sets<'mcx>(
     tmpcontext: ::executils::EcxtId,
 ) -> PgResult<PgBox<'mcx, GroupingSetsState<'mcx>>> {
     let mcx = estate.es_query_cxt;
-    let per_tuple = estate.ecxt(tmpcontext).per_tuple_mcx();
     let numnodes = 1 + node.chain.len();
 
     // C's phase split: AGG_HASHED/AGG_MIXED aggnodes are phase-0 hash sets,
@@ -194,6 +193,7 @@ pub(crate) fn init_grouping_sets<'mcx>(
             hash_cells.push(ph.cell);
         }
     }
+    let per_tuple = estate.ecxt(tmpcontext).per_tuple_mcx();
 
     let mut phases: PgVec<'mcx, PerPhaseData<'mcx>> = droppy_vec(mcx, numphases)?;
     for (phaseidx, &aggnode) in sorted_nodes.iter().enumerate() {
