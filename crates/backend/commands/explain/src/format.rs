@@ -68,6 +68,15 @@ pub fn ExplainPropertyInteger(qlabel: &str, unit: Option<&str>, value: i64, es: 
     ExplainProperty(qlabel, unit, &format!("{value}"), es);
 }
 
+pub fn ExplainPropertyUInteger(
+    qlabel: &str,
+    unit: Option<&str>,
+    value: u64,
+    es: &mut ExplainState<'_>,
+) {
+    ExplainProperty(qlabel, unit, &format!("{value}"), es);
+}
+
 pub fn ExplainPropertyFloat(
     qlabel: &str,
     unit: Option<&str>,

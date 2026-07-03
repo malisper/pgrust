@@ -2492,6 +2492,13 @@ pub fn exec_end_window_agg(node: &mut WindowAggStateData<'_>) {
     }
 }
 
+/// show_windowagg_info's tuplestore read; None before the buffer exists.
+pub fn storage_stats(
+    node: &mut WindowAggStateData<'_>,
+) -> Option<types_core::instrument::TuplestoreInstrumentation> {
+    node.buffer.as_mut().map(Tuplestore::get_stats)
+}
+
 /// `ExecReScanWindowAgg`; the caller (execami) rescans the outer child.
 pub fn exec_rescan_window_agg<'mcx>(
     node: &mut WindowAggStateData<'mcx>,

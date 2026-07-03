@@ -53,6 +53,13 @@ pub fn child_eflags(eflags: i32) -> i32 {
     eflags & !(EXEC_FLAG_REWIND | EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK)
 }
 
+/// show_material_info's tuplestore read; None before the store exists.
+pub fn storage_stats(
+    node: &mut MaterialState<'_>,
+) -> Option<types_core::instrument::TuplestoreInstrumentation> {
+    node.tuplestorestate.as_mut().map(Tuplestore::get_stats)
+}
+
 pub fn exec_material<'mcx, C: MaterialChild<'mcx>>(
     node: &mut MaterialState<'mcx>,
     child: &mut C,

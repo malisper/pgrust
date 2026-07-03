@@ -728,6 +728,7 @@ pub fn exec_init_node<'mcx>(
                 ss_currentRelation: None,
                 ss_currentScanDesc: None,
                 ss_ScanTupleSlot,
+                instr_idx: None,
             };
             ::execscan::exec_assign_scan_projection_info(
                 mcx,
@@ -826,21 +827,10 @@ pub fn exec_init_node<'mcx>(
 
 // C: `result->instrument = InstrAlloc(1, estate->es_instrument, ...)`.
 fn instrument_node<'mcx>(
-    inner: PlanStateNode<'mcx>,
+    mut inner: PlanStateNode<'mcx>,
     node: Node<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<PlanStateNode<'mcx>> {
-    if matches!(
-        inner,
-        PlanStateNode::BitmapIndexScan(_)
-            | PlanStateNode::BitmapAnd(_)
-            | PlanStateNode::BitmapOr(_)
-    ) {
-        panic!(
-            "ExecInitNode (execProcnode.c): instrumentation of MultiExec bitmap nodes \
-             (nodeBitmapIndexscan.c InstrStopNode arm) not ported"
-        );
-    }
     let id = node.as_plan().expect("plan-tree node").plan_node_id;
     let idx = usize::try_from(id).expect("plan_node_id is non-negative");
     if estate.es_instrumentation.len() <= idx {
@@ -854,10 +844,29 @@ fn instrument_node<'mcx>(
             .resize(idx + 1, ::types_core::instrument::Instrumentation::default());
     }
     ::instrument::instr_init(&mut estate.es_instrumentation[idx], estate.es_instrument);
+    // InstrCountFiltered1/2 target for the scan driver.
+    if let Some(ss) = scan_state_of(&mut inner) {
+        ss.instr_idx = Some(idx as u32);
+    }
     Ok(PlanStateNode::Instrumented(::mcx::alloc_in(
         estate.es_query_cxt,
         InstrumentedNode { inner, instr_idx: idx as u32 },
     )?))
+}
+
+fn scan_state_of<'a, 'mcx>(
+    node: &'a mut PlanStateNode<'mcx>,
+) -> Option<&'a mut ::execscan::ScanState<'mcx>> {
+    match node {
+        PlanStateNode::SeqScan(ss) => Some(&mut ss.ss),
+        PlanStateNode::FunctionScan(fs) => Some(&mut fs.ss),
+        PlanStateNode::ValuesScan(vs) => Some(&mut vs.ss),
+        PlanStateNode::CteScan(cs) => Some(&mut cs.ss),
+        PlanStateNode::IndexScan(is) => Some(&mut is.ss),
+        PlanStateNode::IndexOnlyScan(ios) => Some(&mut ios.ss),
+        PlanStateNode::BitmapHeapScan(b) => Some(&mut b.scan.ss),
+        _ => None,
+    }
 }
 
 /// `ExecProcNode`: one match over the closed node set. Every arm is an
@@ -1159,6 +1168,27 @@ pub fn multi_exec_bitmap_node<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<::tidbitmap::TIDBitmap<'mcx>> {
     match node {
+        // C MultiExec* nodes self-instrument (nTuples = bitmap insertions).
+        PlanStateNode::Instrumented(w) => {
+            let w = &mut **w;
+            let idx = w.instr_idx as usize;
+            ::instrument::instr_start_node(&mut estate.es_instrumentation[idx]);
+            let (tbm, n_tuples) = match &mut w.inner {
+                PlanStateNode::BitmapIndexScan(biss) => {
+                    let mut tbm = ::tidbitmap::TIDBitmap::new(
+                        estate.es_query_cxt,
+                        init_small::globals::work_mem() as usize * 1024,
+                    );
+                    let n = ::nodebitmapindexscan::multi_exec_bitmap_index_scan_into(
+                        biss, estate, &mut tbm,
+                    )?;
+                    (tbm, n)
+                }
+                inner => (multi_exec_bitmap_node(inner, estate)?, 0.0),
+            };
+            ::instrument::instr_stop_node(&mut estate.es_instrumentation[idx], n_tuples);
+            Ok(tbm)
+        }
         PlanStateNode::BitmapIndexScan(biss) => {
             ::nodebitmapindexscan::multi_exec_bitmap_index_scan(biss, estate)
         }
@@ -1182,16 +1212,40 @@ pub fn multi_exec_bitmap_node<'mcx>(
         PlanStateNode::BitmapOr(bc) => {
             let mut result: Option<::tidbitmap::TIDBitmap<'mcx>> = None;
             for sub in bc.substates.iter_mut() {
-                if let PlanStateNode::BitmapIndexScan(biss) = sub {
+                // C's nodeTag check is on the plan: the hand-off survives the wrapper.
+                let (biss_child, instr_idx) = match sub {
+                    PlanStateNode::BitmapIndexScan(biss) => (Some(biss), None),
+                    PlanStateNode::Instrumented(w) => {
+                        let w = &mut **w;
+                        let idx = w.instr_idx;
+                        match &mut w.inner {
+                            PlanStateNode::BitmapIndexScan(biss) => (Some(biss), Some(idx)),
+                            _ => (None, None),
+                        }
+                    }
+                    _ => (None, None),
+                };
+                if let Some(biss) = biss_child {
                     let tbm = result.get_or_insert_with(|| {
                         ::tidbitmap::TIDBitmap::new(
                             estate.es_query_cxt,
                             init_small::globals::work_mem() as usize * 1024,
                         )
                     });
-                    ::nodebitmapindexscan::multi_exec_bitmap_index_scan_into(
+                    if let Some(idx) = instr_idx {
+                        ::instrument::instr_start_node(
+                            &mut estate.es_instrumentation[idx as usize],
+                        );
+                    }
+                    let n = ::nodebitmapindexscan::multi_exec_bitmap_index_scan_into(
                         biss, estate, tbm,
                     )?;
+                    if let Some(idx) = instr_idx {
+                        ::instrument::instr_stop_node(
+                            &mut estate.es_instrumentation[idx as usize],
+                            n,
+                        );
+                    }
                 } else {
                     let subresult = multi_exec_bitmap_node(sub, estate)?;
                     match result.as_mut() {
@@ -1253,6 +1307,114 @@ fn release_owned(node: &mut PlanStateNode<'_>) {
         | PlanStateNode::Material(_)
         | PlanStateNode::Unique(_)
         | PlanStateNode::Limit(_) => {}
+    }
+}
+
+// Per-node state EXPLAIN reads off the live PlanState tree, as C does.
+pub enum InstrExtra {
+    Storage(::types_core::instrument::TuplestoreInstrumentation),
+    Bitmap(::types_core::instrument::BitmapHeapScanInstrumentation),
+    IndexSearches(u64),
+}
+
+/// ANALYZE wraps every node, so only Instrumented arms can match the id.
+pub fn planstate_instr_extra<'mcx>(
+    node: &mut PlanStateNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    plan_node_id: u32,
+) -> Option<InstrExtra> {
+    macro_rules! walk {
+        ($($child:expr),+) => {{
+            $(if let Some(x) = planstate_instr_extra($child, estate, plan_node_id) {
+                return Some(x);
+            })+
+            None
+        }};
+    }
+    match node {
+        PlanStateNode::Instrumented(w) => {
+            let w = &mut **w;
+            if w.instr_idx == plan_node_id {
+                instr_extra_of(&mut w.inner, estate)
+            } else {
+                planstate_instr_extra(&mut w.inner, estate, plan_node_id)
+            }
+        }
+        PlanStateNode::Agg(aps) => walk!(&mut aps.outer),
+        PlanStateNode::WindowAgg(w) => walk!(&mut w.outer),
+        PlanStateNode::Sort(s) => walk!(&mut *s.outer),
+        PlanStateNode::IncrementalSort(s) => walk!(&mut s.outer),
+        PlanStateNode::Material(m) => walk!(&mut *m.outer),
+        PlanStateNode::Unique(u) => walk!(&mut u.outer),
+        PlanStateNode::Limit(l) => walk!(&mut *l.outer),
+        PlanStateNode::NestLoop(nl) => walk!(&mut *nl.outer, &mut *nl.inner),
+        PlanStateNode::MergeJoin(mj) => walk!(&mut *mj.outer, &mut *mj.inner),
+        PlanStateNode::HashJoin(hj) => {
+            let hj = &mut **hj;
+            walk!(&mut *hj.outer, &mut *hj.hash.child)
+        }
+        PlanStateNode::BitmapHeapScan(b) => walk!(&mut b.bitmapqual),
+        PlanStateNode::BitmapAnd(bc) | PlanStateNode::BitmapOr(bc) => {
+            for sub in bc.substates.iter_mut() {
+                if let Some(x) = planstate_instr_extra(sub, estate, plan_node_id) {
+                    return Some(x);
+                }
+            }
+            None
+        }
+        PlanStateNode::Append(a) => {
+            for sub in a.substates.iter_mut() {
+                if let Some(x) = planstate_instr_extra(sub, estate, plan_node_id) {
+                    return Some(x);
+                }
+            }
+            None
+        }
+        PlanStateNode::SubqueryScan(s) => walk!(&mut *s.subplan),
+        PlanStateNode::SetOp(s) => walk!(&mut s.outer, &mut s.inner),
+        PlanStateNode::LockRows(l) => walk!(&mut *l.outer),
+        PlanStateNode::ModifyTable(mps) => walk!(&mut mps.subplan),
+        PlanStateNode::Result(_)
+        | PlanStateNode::SeqScan(_)
+        | PlanStateNode::FunctionScan(_)
+        | PlanStateNode::ValuesScan(_)
+        | PlanStateNode::CteScan(_)
+        | PlanStateNode::IndexScan(_)
+        | PlanStateNode::IndexOnlyScan(_)
+        | PlanStateNode::BitmapIndexScan(_) => None,
+    }
+}
+
+fn instr_extra_of<'mcx>(
+    inner: &mut PlanStateNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> Option<InstrExtra> {
+    match inner {
+        PlanStateNode::Material(m) => {
+            ::nodematerial::storage_stats(&mut m.state).map(InstrExtra::Storage)
+        }
+        PlanStateNode::WindowAgg(w) => {
+            ::nodewindowagg::storage_stats(&mut w.state).map(InstrExtra::Storage)
+        }
+        PlanStateNode::CteScan(cs) => {
+            ::nodectescan::storage_stats(cs, estate).map(InstrExtra::Storage)
+        }
+        PlanStateNode::BitmapHeapScan(b) => Some(InstrExtra::Bitmap(
+            ::types_core::instrument::BitmapHeapScanInstrumentation {
+                exact_pages: b.scan.stats_exact_pages,
+                lossy_pages: b.scan.stats_lossy_pages,
+            },
+        )),
+        PlanStateNode::IndexScan(is) => Some(InstrExtra::IndexSearches(
+            is.iss_ScanDesc.as_deref().map_or(0, |sd| sd.xs_nsearches),
+        )),
+        PlanStateNode::IndexOnlyScan(ios) => Some(InstrExtra::IndexSearches(
+            ios.ioss_ScanDesc.as_deref().map_or(0, |sd| sd.xs_nsearches),
+        )),
+        PlanStateNode::BitmapIndexScan(biss) => Some(InstrExtra::IndexSearches(
+            biss.biss_ScanDesc.as_deref().map_or(0, |sd| sd.xs_nsearches),
+        )),
+        _ => None,
     }
 }
 

@@ -86,6 +86,7 @@ macro_rules! split_scan {
             xs_heaptid,
             xs_itup,
             xs_pgstat_index_scans,
+            xs_nsearches,
             opaque,
             ..
         } = $scan;
@@ -101,6 +102,7 @@ macro_rules! split_scan {
             xs_heaptid,
             xs_itup,
             xs_pgstat_index_scans,
+            xs_nsearches,
             frame: crate::fcframe::OrderProcFrame::new(),
         }
     }};

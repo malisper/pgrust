@@ -117,6 +117,7 @@ pub fn exec_init_function_scan<'mcx>(
         ss_currentRelation: None,
         ss_currentScanDesc: None,
         ss_ScanTupleSlot,
+        instr_idx: None,
     };
     execscan::exec_assign_scan_projection_info(mcx, estate, &mut ss, &node.scan.plan.targetlist)?;
     ss.qual = exec_init_qual(mcx, &node.scan.plan.qual, estate.param_bind())?;

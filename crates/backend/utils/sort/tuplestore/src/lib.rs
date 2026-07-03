@@ -29,6 +29,25 @@ const fn maxalign(len: usize) -> usize {
 
 const PTR_SIZE: usize = mem::size_of::<*mut MinimalTupleData>();
 
+// C availMem is GetMemoryChunkSpace: generation chunks for tuples, aset for
+// memtuples — tuplestore_get_stats byte-parity depends on these exact shapes.
+const CHUNKHDRSZ: i64 = 8;
+const ALLOC_CHUNK_LIMIT: usize = 8192;
+
+#[inline]
+fn generation_chunk_space(len: usize) -> i64 {
+    maxalign(len) as i64 + CHUNKHDRSZ
+}
+
+#[inline]
+fn aset_chunk_space(len: usize) -> i64 {
+    if len > ALLOC_CHUNK_LIMIT {
+        maxalign(len) as i64 + CHUNKHDRSZ
+    } else {
+        len.next_power_of_two().max(8) as i64 + CHUNKHDRSZ
+    }
+}
+
 #[derive(Clone, Copy)]
 struct ReadPointer {
     eflags: i32,
@@ -43,6 +62,7 @@ pub struct TuplestoreData<'m> {
     avail_mem: i64,
     grow_memtuples: bool,
     tuples: i64,
+    max_space: i64,
     memtuples: PgVec<'m, *mut MinimalTupleData>,
     readptrs: PgVec<'m, ReadPointer>,
     activeptr: usize,
@@ -72,7 +92,7 @@ impl Tuplestore {
         let owned = McxOwned::try_new(MemoryContext::new("tuplestore"), |mcx| {
             let allowed_mem = i64::from(max_kbytes) * 1024;
             let memtuples = PgVec::with_capacity_in(INITIAL_MEMTUPSIZE, mcx);
-            let avail_mem = allowed_mem - (memtuples.capacity() * PTR_SIZE) as i64;
+            let avail_mem = allowed_mem - aset_chunk_space(memtuples.capacity() * PTR_SIZE);
             let mut readptrs = PgVec::with_capacity_in(8, mcx);
             readptrs.push(ReadPointer { eflags, eof_reached: false, current: 0 });
             Ok(TuplestoreData {
@@ -84,6 +104,7 @@ impl Tuplestore {
                 avail_mem,
                 grow_memtuples: true,
                 tuples: 0,
+                max_space: 0,
                 memtuples,
                 readptrs,
                 activeptr: 0,
@@ -106,7 +127,7 @@ impl Tuplestore {
             // Ownership moves to tuplecontext (bulk-freed at clear/end); the
             // wrapper must not run its deallocating Drop.
             mem::forget(mtup);
-            st.puttuple_common(tuple, maxalign(t_len) as i64)
+            st.puttuple_common(tuple, generation_chunk_space(t_len))
         })
     }
 
@@ -122,7 +143,7 @@ impl Tuplestore {
             let t_len = mtup.t_len() as usize;
             let tuple = mtup.as_ptr().cast_mut().cast::<MinimalTupleData>();
             mem::forget(mtup);
-            st.puttuple_common(tuple, maxalign(t_len) as i64)
+            st.puttuple_common(tuple, generation_chunk_space(t_len))
         })
     }
 
@@ -163,8 +184,9 @@ impl Tuplestore {
 
     pub fn clear(&mut self) {
         self.0.with_mut(|st| {
+            st.updatemax();
             st.tuplecontext.reset();
-            st.avail_mem = st.allowed_mem - (st.memtuples.capacity() * PTR_SIZE) as i64;
+            st.avail_mem = st.allowed_mem - aset_chunk_space(st.memtuples.capacity() * PTR_SIZE);
             st.memtuples.clear();
             st.tuples = 0;
             for rp in st.readptrs.iter_mut() {
@@ -199,6 +221,17 @@ impl Tuplestore {
         true
     }
 
+    /// `tuplestore_get_stats`; usedDisk pinned false (spill is loud).
+    pub fn get_stats(&mut self) -> types_core::instrument::TuplestoreInstrumentation {
+        self.0.with_mut(|st| {
+            st.updatemax();
+            types_core::instrument::TuplestoreInstrumentation {
+                space_type: types_core::instrument::TuplesortSpaceType::Memory,
+                max_space: st.max_space,
+            }
+        })
+    }
+
     pub fn set_eflags(&mut self, eflags: i32) {
         self.0.with_mut(|st| {
             assert!(st.memtuples.is_empty(), "too late to call tuplestore_set_eflags");
@@ -228,14 +261,12 @@ impl Tuplestore {
         })
     }
 
-    /// C `tuplestore_advance`: move the active pointer one tuple without
-    /// returning it.
+    /// C `tuplestore_advance`.
     pub fn advance(&mut self, forward: bool) -> bool {
         self.0.with_mut(|st| st.gettuple(forward).is_some())
     }
 
-    /// C `tuplestore_skiptuples`, TSS_INMEM arm: position arithmetic, no
-    /// tuple reads.
+    /// C `tuplestore_skiptuples`, TSS_INMEM arm.
     pub fn skiptuples(&mut self, ntuples: i64, forward: bool) -> bool {
         if ntuples <= 0 {
             return true;
@@ -337,11 +368,15 @@ impl<'m> TuplestoreData<'m> {
             return false;
         }
 
-        self.avail_mem += (memtupsize * PTR_SIZE) as i64;
+        self.avail_mem += aset_chunk_space(memtupsize * PTR_SIZE);
         self.memtuples.reserve_exact(newmemtupsize - self.memtuples.len());
-        self.avail_mem -= (self.memtuples.capacity() * PTR_SIZE) as i64;
+        self.avail_mem -= aset_chunk_space(self.memtuples.capacity() * PTR_SIZE);
         assert!(self.avail_mem >= 0, "unexpected out-of-memory situation in tuplestore");
         true
+    }
+
+    fn updatemax(&mut self) {
+        self.max_space = self.max_space.max(self.allowed_mem - self.avail_mem);
     }
 
     fn gettuple(&mut self, forward: bool) -> Option<*mut MinimalTupleData> {

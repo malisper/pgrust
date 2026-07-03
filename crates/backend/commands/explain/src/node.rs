@@ -111,17 +111,6 @@ fn ExplainPreScanNode<'mcx>(
         NodeTag::T_CteScan => {
             rels_used.add_member(mcx, node.as_cte_scan().unwrap().scan.scanrelid as i32)?;
         }
-        NodeTag::T_IndexScan => {
-            rels_used.add_member(mcx, node.as_index_scan().unwrap().scan.scanrelid as i32)?;
-        }
-        NodeTag::T_IndexOnlyScan => {
-            rels_used
-                .add_member(mcx, node.as_index_only_scan().unwrap().scan.scanrelid as i32)?;
-        }
-        NodeTag::T_BitmapHeapScan => {
-            rels_used
-                .add_member(mcx, node.as_bitmap_heap_scan().unwrap().scan.scanrelid as i32)?;
-        }
         NodeTag::T_SubqueryScan => {
             let sq = node.as_subquery_scan().unwrap();
             rels_used.add_member(mcx, sq.scan.scanrelid as i32)?;
@@ -528,38 +517,12 @@ pub fn ExplainNode<'mcx>(
     match node.node_tag() {
         NodeTag::T_SeqScan | NodeTag::T_FunctionScan | NodeTag::T_CteScan => {
             show_scan_qual(&plan.qual, "Filter", node, ancestors, es)?;
-            filtered_count_gap(&plan.qual, es);
-        }
-        NodeTag::T_IndexScan => {
-            let s = node.as_index_scan().unwrap();
-            show_scan_qual(&s.indexqualorig, "Index Cond", node, ancestors, es)?;
-            if !s.indexqualorig.is_nil() {
-                show_instrumentation_count("Rows Removed by Index Recheck", 2, &instrument, es);
+            if !plan.qual.is_nil() {
+                show_instrumentation_count("Rows Removed by Filter", 1, &instrument, es);
             }
-            show_scan_qual(&s.indexorderbyorig, "Order By", node, ancestors, es)?;
-            show_scan_qual(&plan.qual, "Filter", node, ancestors, es)?;
-            filtered_count_gap(&plan.qual, es);
-            show_indexsearches_info(node, es);
-        }
-        NodeTag::T_IndexOnlyScan => {
-            let s = node.as_index_only_scan().unwrap();
-            show_scan_qual(&s.indexqual, "Index Cond", node, ancestors, es)?;
-            if !s.recheckqual.is_nil() {
-                show_instrumentation_count("Rows Removed by Index Recheck", 2, &instrument, es);
+            if node.node_tag() == NodeTag::T_CteScan {
+                show_ctescan_info(node, es);
             }
-            show_scan_qual(&s.indexorderby, "Order By", node, ancestors, es)?;
-            show_scan_qual(&plan.qual, "Filter", node, ancestors, es)?;
-            filtered_count_gap(&plan.qual, es);
-            if es.analyze {
-                crate::format::ExplainPropertyFloat(
-                    "Heap Fetches",
-                    None,
-                    instrument.as_ref().map_or(0.0, |i| i.ntuples2),
-                    0,
-                    es,
-                );
-            }
-            show_indexsearches_info(node, es);
         }
         NodeTag::T_BitmapIndexScan => {
             let s = node.as_bitmap_index_scan().unwrap();
@@ -573,13 +536,45 @@ pub fn ExplainNode<'mcx>(
                 show_instrumentation_count("Rows Removed by Index Recheck", 2, &instrument, es);
             }
             show_scan_qual(&plan.qual, "Filter", node, ancestors, es)?;
-            filtered_count_gap(&plan.qual, es);
+            if !plan.qual.is_nil() {
+                show_instrumentation_count("Rows Removed by Filter", 1, &instrument, es);
+            }
+            show_tidbitmap_info(node, es);
+        }
+        NodeTag::T_IndexScan => {
+            let s = node.as_index_scan().unwrap();
+            show_scan_qual(&s.indexqualorig, "Index Cond", node, ancestors, es)?;
+            if !s.indexqualorig.is_nil() {
+                show_instrumentation_count("Rows Removed by Index Recheck", 2, &instrument, es);
+            }
+            show_scan_qual(&s.indexorderbyorig, "Order By", node, ancestors, es)?;
+            show_scan_qual(&plan.qual, "Filter", node, ancestors, es)?;
+            if !plan.qual.is_nil() {
+                show_instrumentation_count("Rows Removed by Filter", 1, &instrument, es);
+            }
+            show_indexsearches_info(node, es);
+        }
+        NodeTag::T_IndexOnlyScan => {
+            let s = node.as_index_only_scan().unwrap();
+            show_scan_qual(&s.indexqual, "Index Cond", node, ancestors, es)?;
+            if !s.recheckqual.is_nil() {
+                show_instrumentation_count("Rows Removed by Index Recheck", 2, &instrument, es);
+            }
+            show_scan_qual(&s.indexorderby, "Order By", node, ancestors, es)?;
+            show_scan_qual(&plan.qual, "Filter", node, ancestors, es)?;
+            if !plan.qual.is_nil() {
+                show_instrumentation_count("Rows Removed by Filter", 1, &instrument, es);
+            }
             if es.analyze {
-                node_gap(
-                    "show_tidbitmap_info",
-                    "exact/lossy heap block counts (bitmap instrumentation lane)",
+                crate::format::ExplainPropertyFloat(
+                    "Heap Fetches",
+                    None,
+                    instrument.as_ref().map_or(0.0, |i| i.ntuples2),
+                    0,
+                    es,
                 );
             }
+            show_indexsearches_info(node, es);
         }
         NodeTag::T_NestLoop => {
             let nl = node.as_nest_loop().unwrap();
@@ -628,6 +623,7 @@ pub fn ExplainNode<'mcx>(
             debug_assert!(w.runCondition.is_nil());
             show_upper_qual(&plan.qual, "Filter", node, ancestors, es)?;
             filtered_count_gap(&plan.qual, es);
+            show_windowagg_info(node, es);
         }
         NodeTag::T_Agg => {
             show_agg_keys(node, ancestors, es)?;
@@ -636,12 +632,7 @@ pub fn ExplainNode<'mcx>(
             filtered_count_gap(&plan.qual, es);
         }
         NodeTag::T_Material => {
-            if es.analyze {
-                node_gap(
-                    "show_material_info",
-                    "storage display needs tuplestore_get_stats (tuplestore instrumentation lane)",
-                );
-            }
+            show_material_info(node, es);
         }
         NodeTag::T_SubqueryScan => {
             show_scan_qual(&plan.qual, "Filter", node, ancestors, es)?;
@@ -1375,6 +1366,88 @@ fn show_instrumentation_count(
     }
 }
 
+// show_indexsearches_info (explain.c); the SharedInfo worker sum has no
+// parallel lane.
+fn show_indexsearches_info<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) {
+    if !es.analyze {
+        return;
+    }
+    let nsearches = if es.qd.is_null() {
+        0
+    } else {
+        execmain_seams::query_desc_index_searches::call(es.qd, plan_of(node).plan_node_id)
+            .unwrap_or(0)
+    };
+    crate::format::ExplainPropertyUInteger("Index Searches", None, nsearches, es);
+}
+
+// show_tidbitmap_info (explain.c), text arm; parallel worker stats have no
+// parallel lane.
+fn show_tidbitmap_info<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) {
+    if !es.analyze {
+        return;
+    }
+    if es.format != EXPLAIN_FORMAT_TEXT {
+        crate::format::nontext_gap(es, "show_tidbitmap_info");
+    }
+    let stats = if es.qd.is_null() {
+        None
+    } else {
+        execmain_seams::query_desc_bitmap_instrument::call(es.qd, plan_of(node).plan_node_id)
+    };
+    let stats = stats.unwrap_or_default();
+    if stats.exact_pages > 0 || stats.lossy_pages > 0 {
+        crate::format::ExplainIndentText(es);
+        append!(es, "Heap Blocks:");
+        if stats.exact_pages > 0 {
+            append!(es, " exact={}", stats.exact_pages);
+        }
+        if stats.lossy_pages > 0 {
+            append!(es, " lossy={}", stats.lossy_pages);
+        }
+        append!(es, "\n");
+    }
+}
+
+// show_storage_info (explain.c), text arm. maxSpace inherits the arena-vs-
+// palloc accounting caveat only through tuplestore's chunk_space mirror
+// (byte-exact vs C by construction; see tuplestore::chunk_space).
+fn show_storage_info(stats: types_core::instrument::TuplestoreInstrumentation, es: &mut ExplainState<'_>) {
+    if es.format != EXPLAIN_FORMAT_TEXT {
+        crate::format::nontext_gap(es, "show_storage_info");
+    }
+    let kb = (stats.max_space + 1023) / 1024;
+    crate::format::ExplainIndentText(es);
+    append!(es, "Storage: {}  Maximum Storage: {}kB\n", stats.space_type.name(), kb);
+}
+
+fn tuplestore_stats<'mcx>(
+    node: Node<'mcx>,
+    es: &ExplainState<'mcx>,
+) -> Option<types_core::instrument::TuplestoreInstrumentation> {
+    if !es.analyze || es.qd.is_null() {
+        return None;
+    }
+    execmain_seams::query_desc_tuplestore_instrument::call(es.qd, plan_of(node).plan_node_id)
+}
+
+fn show_material_info<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) {
+    if let Some(stats) = tuplestore_stats(node, es) {
+        show_storage_info(stats, es);
+    }
+}
+
+fn show_windowagg_info<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) {
+    if let Some(stats) = tuplestore_stats(node, es) {
+        show_storage_info(stats, es);
+    }
+}
+
+fn show_ctescan_info<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) {
+    if let Some(stats) = tuplestore_stats(node, es) {
+        show_storage_info(stats, es);
+    }
+}
 
 // show_instrumentation_count's nfiltered read: the executor never counts
 // qual-filtered tuples (InstrCountFiltered, execScan.c), so printing would be
@@ -1996,20 +2069,6 @@ fn simple_quote_literal(buf: &mut PgString<'_>, val: &str) -> PgResult<()> {
 
 fn ExplainScanTarget(scanrelid: types_core::Index, es: &mut ExplainState<'_>) -> PgResult<()> {
     ExplainTargetRel(scanrelid, es)
-}
-
-// show_indexsearches_info (explain.c); no parallel workers on this lane.
-fn show_indexsearches_info<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) {
-    if !es.analyze {
-        return;
-    }
-    let id = plan_of(node).plan_node_id;
-    let nsearches = if es.qd.is_null() {
-        0
-    } else {
-        execmain_seams::query_desc_index_instrument::call(es.qd, id).unwrap_or(0)
-    };
-    ExplainPropertyInteger("Index Searches", None, nsearches as i64, es);
 }
 
 // ExplainTargetRel's T_FunctionScan arm: objectname is the function's name

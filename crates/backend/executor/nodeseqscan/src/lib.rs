@@ -159,6 +159,7 @@ pub fn exec_init_seq_scan_rel<'mcx>(
         ss_currentRelation: Some(rel),
         ss_currentScanDesc: None,
         ss_ScanTupleSlot,
+        instr_idx: None,
     };
     execscan::exec_assign_scan_projection_info(mcx, estate, &mut ss, &node.scan.plan.targetlist)?;
     let params = estate.param_bind();
