@@ -601,12 +601,34 @@ pub struct CreateDomainStmt<'mcx> {
     pub constraints: NodeList<'mcx>,
 }
 
+#[derive(Default)]
+pub struct CreateEnumStmt<'mcx> {
+    pub typeName: NodeList<'mcx>,
+    pub vals: NodeList<'mcx>,
+}
+
+#[derive(Default)]
+pub struct AlterEnumStmt<'mcx> {
+    pub typeName: NodeList<'mcx>,
+    pub oldVal: Option<&'mcx str>,
+    pub newVal: Option<&'mcx str>,
+    pub newValNeighbor: Option<&'mcx str>,
+    pub newValIsAfter: bool,
+    pub skipIfNewValExists: bool,
+}
+
 // SAFETY (each): tag/type pairing mirrors parsenodes.h.
 unsafe impl<'mcx> NodeVariant<'mcx> for RawStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_RawStmt;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for CreateDomainStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_CreateDomainStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for CreateEnumStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CreateEnumStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for AlterEnumStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_AlterEnumStmt;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for SelectStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_SelectStmt;
@@ -915,7 +937,17 @@ impl<'mcx> Node<'mcx> {
     }
 
     #[inline]
+    pub fn as_create_enum_stmt(self) -> Option<&'mcx CreateEnumStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
     pub fn as_alter_seq_stmt(self) -> Option<&'mcx AlterSeqStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_alter_enum_stmt(self) -> Option<&'mcx AlterEnumStmt<'mcx>> {
         self.as_variant()
     }
 
