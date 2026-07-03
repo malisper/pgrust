@@ -30,4 +30,5 @@ brin_xlog = { path = "../../brin/brin_xlog" }
 xact = { path = "../xact" }
 rmgrdesc = { path = "../../rmgrdesc" }
 gin_xlog = { path = "../../gin/gin_xlog" }
+spgist_xlog = { path = "../../spgist/spgist_xlog" }
 gist_xlog = { path = "../../gist/gist_xlog" }

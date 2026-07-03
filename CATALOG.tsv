@@ -95,17 +95,17 @@ backend-access-nbtree-nbtsort	src/backend/access/nbtree/nbtsort.c	ported	nbtsort
 backend-access-small-core	src/backend/access/sequence/sequence.c,src/backend/access/table/tableamapi.c	todo			
 backend-access-index-amvalidate	src/backend/access/index/amvalidate.c	todo			fabled:backend-access-index-amvalidate
 backend-access-index-amapi	src/backend/access/index/amapi.c	ported	amapi	cold	fabled:backend-access-index-amapi; m1-dep(stub-ok); GetIndexAmRoutine = closed-set dispatch (fn-pointer doctrine): bthandler 330 -> types_relscan IndexAmKind::Btree, non-builtin handler loud panic (needs pg_proc + extension loading); GetIndexAmRoutineByAmId real AMOID probe (amtype/amhandler checks, C-exact 55000 messages, noerror arms); IndexAmTranslateStrategy/CompareType btree shortcut + bttranslate semantics, non-btree AM arm loud; amvalidate loud (DDL opclass lane); cmptype.h COMPARE_* moved to types_pathnodes (single home; lsyscache re-exports, its wider builtin-AM translate tables kept - rerouting them through IndexAmKind would panic on hash/gist); cold: relcache index-info build + DDL consumers, no per-tuple entry; 6 tests, density 1.9%
-backend-access-spg-doinsert	src/backend/access/spgist/spgdoinsert.c	todo			fabled:backend-access-spgist-core
+backend-access-spg-doinsert	src/backend/access/spgist/spgdoinsert.c	ported	spgist		cold for M1 spine (no spgist op in milestone workloads); twin-cluster e2e gold gates: index-file byte parity vs C over 100k text_ops strings (536/536 pages, lsn-masked), scans+EXPLAIN byte-identical vs live C, WAL 3 directions, C boots+inserts through our index, regress-diff ZERO; audit notes/audits/spgist.md PASS	fabled:backend-access-spgist-core
 backend-access-spg-kdtree	src/backend/access/spgist/spgkdtreeproc.c	todo			fabled:backend-access-spg-kdtree
 backend-access-spg-proc	src/backend/access/spgist/spgproc.c	todo			fabled:backend-access-spg-proc
 backend-access-spg-quadtree	src/backend/access/spgist/spgquadtreeproc.c	todo			fabled:backend-access-spg-quadtree
-backend-access-spg-scan	src/backend/access/spgist/spgscan.c	todo			fabled:backend-access-spgist-core
-backend-access-spg-text	src/backend/access/spgist/spgtextproc.c	todo			
-backend-access-spg-utils	src/backend/access/spgist/spgutils.c	todo			fabled:backend-access-spgist-core
+backend-access-spg-scan	src/backend/access/spgist/spgscan.c	ported	spgist		ordered/KNN scans LOUD; gettuple+getbitmap+IOS live	fabled:backend-access-spgist-core
+backend-access-spg-text	src/backend/access/spgist/spgtextproc.c	ported	spgist_text		text_ops radix opclass; builtins 4027-4031 + spghandler 334 guard	
+backend-access-spg-utils	src/backend/access/spgist/spgutils.c	ported	spgist		rd_amcache_spgist cache live; spgoptions (fillfactor reloption parse) + spgproperty are follow-up lanes; tuple codecs in types_spgist	fabled:backend-access-spgist-core
 backend-access-spg-vacuum	-	combined-into:backend-access-spgist-core			fabled:backend-access-spgist-core
 backend-access-spg-validate	src/backend/access/spgist/spgvalidate.c	todo			
-backend-access-spg-xlog	src/backend/access/spgist/spgxlog.c	todo			fabled:backend-access-spgist-core
-backend-access-spgist-core	src/backend/access/spgist/spgvacuum.c,src/backend/access/spgist/spginsert.c	todo			
+backend-access-spg-xlog	src/backend/access/spgist/spgxlog.c	ported	spgist_xlog		all 8 redo arms live (incl vacuum records); spg_mask LOUD (bufmask lane); spgdesc in rmgrdesc	fabled:backend-access-spgist-core
+backend-access-spgist-core	src/backend/access/spgist/spgvacuum.c,src/backend/access/spgist/spginsert.c	ported	spgist		spginsert.c live (spginsert in spgist, spgbuild in spgist_build); spgvacuum.c LOUD lanes (spgbulkdelete/spgvacuumcleanup; vacuum redo live)	
 backend-access-spgist-entry	-	combined-into:backend-access-spgist-core			fabled:backend-access-spgist-core
 backend-access-spgist-insert	-	combined-into:backend-access-spgist-core			fabled:backend-access-spgist-core
 backend-access-table-table	src/backend/access/table/table.c	ported	table	m2-point-gate: composed point 1.362x-instr/1.016x-ns, fullscan 1.353x/1.164x (seqscan slope CONFIRMED +~68/row extra in agg composition), orderby 1.192x/1.133x - ALL FAIL (job 1783063739 @ 5d9dd99; docs/benchmarks/m2-point-gate.md)	fabled:crates/backend/access/table/table (uncataloged in fabled - gap reconciled); m1-spine slot 22; per-open not per-tuple; table_close = RAII relation.close (fabled by-OID close workaround deleted); seams: relation.c owners + pg_class errdetail; 8 tests, density 0.9%; cold-audit 2026-07-02: retag m2-point-gate (table_open/close per statement on M2)

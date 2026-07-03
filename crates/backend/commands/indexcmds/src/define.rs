@@ -92,6 +92,7 @@ pub fn DefineIndex<'mcx>(
             Some("hash") => (catalog_index::HASH_AM_OID, "hash", false, false, false),
             Some("gin") => (catalog_index::GIN_AM_OID, "gin", false, false, true),
             Some("gist") => (catalog_index::GIST_AM_OID, "gist", false, false, true),
+            Some("spgist") => (types_core::SPGIST_AM_OID, "spgist", false, false, true),
             Some("brin") => (types_core::BRIN_AM_OID, "brin", false, false, true),
             other => unported(&format!("DefineIndex: access method {other:?} (AMNAME lookup)")),
         };

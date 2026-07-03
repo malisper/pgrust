@@ -21,9 +21,11 @@ const INT2_BTREE_OPS_OID: Oid = 1979;
 const BTREE_AM_OID: Oid = 403;
 const HASH_AM_OID: Oid = 405;
 const BRIN_AM_OID: Oid = 3580;
+const SPGIST_AM_OID: Oid = 4000;
 const GIST_AM_OID: Oid = 783;
 const BTNProcs: usize = 6;
 const GISTNProcs: usize = 12;
+const SPGISTNProcs: usize = 7;
 // BRIN_LAST_OPTIONAL_PROCNUM (brin_internal.h).
 const BRINNProcs: usize = 15;
 const MAX_AM_PROCS: usize = BRINNProcs;
@@ -106,10 +108,11 @@ pub(crate) fn relation_init_index_access_info(
         HASH_AM_OID => HASHNProcs,
         GIN_AM_OID => GINNProcs,
         GIST_AM_OID => GISTNProcs,
+        SPGIST_AM_OID => SPGISTNProcs,
         BRIN_AM_OID => BRINNProcs,
         other => panic!(
             "relcache_build: index AM {other} for index {relid} unported \
-             (amapi closed set is btree+hash+gin+gist+brin)"
+             (amapi closed set is btree+hash+gin+gist+spgist+brin)"
         ),
     };
     let mut opfamily: PgVec<'static, Oid> = mcx::vec_with_capacity_in(mcx, nkey)?;
@@ -130,6 +133,7 @@ pub(crate) fn relation_init_index_access_info(
         // resolves its procs in initGISTstate; brin via lsyscache at use.
         let proc = if form.relam == GIN_AM_OID
             || form.relam == GIST_AM_OID
+            || form.relam == SPGIST_AM_OID
             || form.relam == BRIN_AM_OID
         {
             0
