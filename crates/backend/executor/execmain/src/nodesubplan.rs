@@ -1,9 +1,9 @@
 //! nodeSubplan.c: initplans (ExecInitSubPlan + ExecSetParamPlan for
-//! uncorrelated EXISTS/EXPR) plus regular SubPlan execution — ExecSubPlan's
-//! scan lane (EXISTS/EXPR/ANY/ALL with per-call rescan + parParam binding)
-//! and the HASHED ANY lane (buildSubPlanHash/findPartialMatch, C's
-//! three-valued NULL semantics). MULTIEXPR/ROWCOMPARE/ARRAY/CTE expression
-//! arms are loud.
+//! uncorrelated EXISTS/EXPR/ARRAY/ROWCOMPARE) plus regular SubPlan execution
+//! — ExecSubPlan's scan lane (EXISTS/EXPR/ANY/ALL/ARRAY/ROWCOMPARE with
+//! per-call rescan + parParam binding) and the HASHED ANY lane
+//! (buildSubPlanHash/findPartialMatch, C's three-valued NULL semantics).
+//! MULTIEXPR and CTE expression arms are loud.
 
 use core::ptr::NonNull;
 use std::rc::Rc;
@@ -29,6 +29,7 @@ use crate::procnode::{exec_proc_node, with_eval_slots, PlanStateNode};
 
 pub(crate) struct SubPlanState<'mcx> {
     sub_link_type: SubLinkType,
+    first_col_type: ::types_core::Oid,
     set_param: PgVec<'mcx, i32>,
     /// The subplan's PlanState (es_subplanstates cell); taken out for the
     /// duration of a run so same-plan re-entry is a loud panic, not aliasing.
@@ -59,11 +60,21 @@ pub(crate) fn exec_init_sub_plan<'mcx>(
     }
     if !matches!(
         subplan.subLinkType,
-        SubLinkType::EXISTS_SUBLINK | SubLinkType::EXPR_SUBLINK
+        SubLinkType::EXISTS_SUBLINK
+            | SubLinkType::EXPR_SUBLINK
+            | SubLinkType::ARRAY_SUBLINK
+            | SubLinkType::ROWCOMPARE_SUBLINK
     ) {
         panic!(
             "ExecInitSubPlan (nodeSubplan.c): {:?} initplan not ported",
             subplan.subLinkType
+        );
+    }
+    if subplan.subLinkType == SubLinkType::ARRAY_SUBLINK {
+        assert!(
+            ::lsyscache::get_element_type(subplan.firstColType)? == 0,
+            "initArrayResultAny (arrayfuncs.c): array-of-arrays accumulation \
+             (ArrayBuildStateArr) not ported"
         );
     }
     let cell = estate
@@ -76,12 +87,15 @@ pub(crate) fn exec_init_sub_plan<'mcx>(
     for id in subplan.setParam.iter() {
         set_param.push(id);
     }
-    debug_assert_eq!(set_param.len(), 1);
+    debug_assert!(
+        set_param.len() == 1 || subplan.subLinkType == SubLinkType::ROWCOMPARE_SUBLINK
+    );
 
     let mut boxed = ::mcx::alloc_in(
         mcx,
         SubPlanState {
             sub_link_type: subplan.subLinkType,
+            first_col_type: subplan.firstColType,
             set_param,
             ps_cell: cell.cast(),
         },
@@ -145,7 +159,6 @@ fn exec_set_param_plan<'mcx>(
     sstate: &SubPlanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
-    let paramid = sstate.set_param[0] as usize;
     // SAFETY: es_query_cxt-lifetime cell; exclusive by the take-out protocol
     // (a nested take of the same cell panics below).
     let cell = unsafe { &mut *sstate.ps_cell.as_ptr() };
@@ -156,7 +169,7 @@ fn exec_set_param_plan<'mcx>(
     let saved_dir = estate.es_direction;
     estate.es_direction = ScanDirection::ForwardScanDirection;
 
-    let result = run_subplan(sstate, &mut ps, estate, paramid);
+    let result = run_subplan(sstate, &mut ps, estate);
 
     estate.es_direction = saved_dir;
     *cell = Some(ps);
@@ -167,12 +180,15 @@ fn run_subplan<'mcx>(
     sstate: &SubPlanState<'mcx>,
     ps: &mut PlanStateNode<'mcx>,
     estate: &mut EStateData<'mcx>,
-    paramid: usize,
 ) -> PgResult<()> {
     let mcx = estate.es_query_cxt;
     let mut found = false;
-    let mut value = Datum::null();
-    let mut isnull = true;
+    let mut values: PgVec<'mcx, NullableDatum> = PgVec::new_in(mcx);
+    let mut astate = if sstate.sub_link_type == SubLinkType::ARRAY_SUBLINK {
+        Some(::arrayfuncs::build::init_array_result(mcx, sstate.first_col_type, true)?)
+    } else {
+        None
+    };
 
     while let Some(slot_id) = exec_proc_node(ps, estate)? {
         match sstate.sub_link_type {
@@ -180,43 +196,71 @@ fn run_subplan<'mcx>(
                 found = true;
                 break;
             }
-            SubLinkType::EXPR_SUBLINK => {
+            SubLinkType::ARRAY_SUBLINK => {
+                found = true;
+                let slot = estate.slot_mut(slot_id);
+                let mut disnull = false;
+                let dvalue = exectuples::slot_getattr(slot, 1, &mut disnull);
+                astate = Some(::arrayfuncs::build::accum_array_result(
+                    mcx,
+                    astate.take(),
+                    dvalue,
+                    disnull,
+                    sstate.first_col_type,
+                )?);
+            }
+            SubLinkType::EXPR_SUBLINK | SubLinkType::ROWCOMPARE_SUBLINK => {
                 if found {
                     return Err(too_many_rows());
                 }
                 found = true;
+                values.clear();
                 let slot = estate.slot_mut(slot_id);
-                let (attlen, attbyval) = {
-                    let desc = slot
-                        .base()
-                        .tts_tupleDescriptor
-                        .as_ref()
-                        .expect("subplan result slot has a descriptor");
-                    (desc.attrs[0].attlen, desc.attrs[0].attbyval)
-                };
-                let mut vnull = false;
-                let v = exectuples::slot_getattr(slot, 1, &mut vnull);
-                isnull = vnull;
-                value = if vnull || attbyval { v } else { datum_copy_in(mcx, v, attlen)? };
+                for col in 0..sstate.set_param.len() {
+                    let (attlen, attbyval) = {
+                        let desc = slot
+                            .base()
+                            .tts_tupleDescriptor
+                            .as_ref()
+                            .expect("subplan result slot has a descriptor");
+                        (desc.attrs[col].attlen, desc.attrs[col].attbyval)
+                    };
+                    let mut vnull = false;
+                    let v = exectuples::slot_getattr(slot, col as i32 + 1, &mut vnull);
+                    let v = if vnull || attbyval { v } else { datum_copy_in(mcx, v, attlen)? };
+                    values.push(NullableDatum { value: v, isnull: vnull });
+                }
             }
             other => unreachable!("{other:?} initplan is loud at init"),
         }
     }
 
-    let prm = &mut estate.es_param_exec_vals[paramid];
-    prm.exec_plan = false;
     match sstate.sub_link_type {
         SubLinkType::EXISTS_SUBLINK => {
+            let prm = &mut estate.es_param_exec_vals[sstate.set_param[0] as usize];
+            prm.exec_plan = false;
             prm.value = Datum::from_bool(found);
             prm.isnull = false;
         }
-        SubLinkType::EXPR_SUBLINK => {
-            if found {
-                prm.value = value;
-                prm.isnull = isnull;
-            } else {
-                prm.value = Datum::null();
-                prm.isnull = true;
+        SubLinkType::ARRAY_SUBLINK => {
+            let bytes =
+                ::arrayfuncs::build::make_array_result(mcx, &astate.expect("astate initialized"))?;
+            let prm = &mut estate.es_param_exec_vals[sstate.set_param[0] as usize];
+            prm.exec_plan = false;
+            prm.value = Datum::from_usize(bytes.leak().as_ptr() as usize);
+            prm.isnull = false;
+        }
+        SubLinkType::EXPR_SUBLINK | SubLinkType::ROWCOMPARE_SUBLINK => {
+            for (i, &pid) in sstate.set_param.iter().enumerate() {
+                let prm = &mut estate.es_param_exec_vals[pid as usize];
+                prm.exec_plan = false;
+                if found {
+                    prm.value = values[i].value;
+                    prm.isnull = values[i].isnull;
+                } else {
+                    prm.value = Datum::null();
+                    prm.isnull = true;
+                }
             }
         }
         other => unreachable!("{other:?} initplan is loud at init"),
@@ -273,12 +317,16 @@ fn datum_copy_in<'mcx>(mcx: Mcx<'mcx>, value: Datum_crate::Datum, attlen: i16) -
 
 pub(crate) struct SubPlanExprState<'mcx> {
     sub_link_type: SubLinkType,
+    first_col_type: ::types_core::Oid,
     par_param: PgVec<'mcx, i32>,
     param_ids: PgVec<'mcx, i32>,
     plan: Node<'mcx>,
     ps_cell: NonNull<Option<PlanStateNode<'mcx>>>,
     testexpr: Option<PgBox<'mcx, ExprState<'mcx>>>,
     cur_buf: PgVec<'mcx, u8>,
+    /// ARRAY accumulation scratch, reset per evaluation (C builds in the
+    /// caller's per-tuple context).
+    array_ctx: Option<::mcx::MemoryContext>,
     hashed: Option<HashedSubPlanState<'mcx>>,
 }
 
@@ -355,10 +403,19 @@ fn exec_init_sub_plan_expr<'mcx>(
             | SubLinkType::EXPR_SUBLINK
             | SubLinkType::ANY_SUBLINK
             | SubLinkType::ALL_SUBLINK
+            | SubLinkType::ARRAY_SUBLINK
+            | SubLinkType::ROWCOMPARE_SUBLINK
     ) {
         panic!(
             "ExecInitSubPlan (nodeSubplan.c): {:?} expression SubPlan not ported",
             subplan.subLinkType
+        );
+    }
+    if subplan.subLinkType == SubLinkType::ARRAY_SUBLINK {
+        assert!(
+            ::lsyscache::get_element_type(subplan.firstColType)? == 0,
+            "initArrayResultAny (arrayfuncs.c): array-of-arrays accumulation \
+             (ArrayBuildStateArr) not ported"
         );
     }
 
@@ -386,16 +443,23 @@ fn exec_init_sub_plan_expr<'mcx>(
         None
     };
 
+    let array_ctx = if subplan.subLinkType == SubLinkType::ARRAY_SUBLINK {
+        Some(mcx.context().new_child_bump("Subplan Array Context"))
+    } else {
+        None
+    };
     let boxed = ::mcx::alloc_in(
         mcx,
         SubPlanExprState {
             sub_link_type: subplan.subLinkType,
+            first_col_type: subplan.firstColType,
             par_param,
             param_ids,
             plan,
             ps_cell: cell.cast(),
             testexpr,
             cur_buf: PgVec::new_in(mcx),
+            array_ctx,
             hashed,
         },
     )?;
@@ -601,6 +665,9 @@ fn scan_sub_plan_loop<'mcx>(
         crate::execami::exec_re_scan_with_chg(ps, sstate.plan, estate, &chg)?;
     }
 
+    if link == SubLinkType::ARRAY_SUBLINK {
+        return scan_array_sub_plan(sstate, ps, estate);
+    }
     let mut found = false;
     let mut result = NullableDatum {
         value: Datum::from_bool(link == SubLinkType::ALL_SUBLINK),
@@ -620,6 +687,20 @@ fn scan_sub_plan_loop<'mcx>(
                 }
                 found = true;
                 result = store_expr_result(sstate, estate, slot_id)?;
+            }
+            SubLinkType::ROWCOMPARE_SUBLINK => {
+                if found {
+                    return Err(too_many_rows());
+                }
+                found = true;
+                load_param_ids(sstate, estate, slot_id);
+                let testexpr = sstate
+                    .testexpr
+                    .as_deref_mut()
+                    .expect("ROWCOMPARE SubPlan has a testexpr");
+                result = with_eval_slots(estate, ecxt, None, |slots, _, _| {
+                    exec_eval_expr(testexpr, slots)
+                })?;
             }
             SubLinkType::ANY_SUBLINK | SubLinkType::ALL_SUBLINK => {
                 found = true;
@@ -649,10 +730,53 @@ fn scan_sub_plan_loop<'mcx>(
         }
     }
 
-    if !found && link == SubLinkType::EXPR_SUBLINK {
+    if !found
+        && matches!(link, SubLinkType::EXPR_SUBLINK | SubLinkType::ROWCOMPARE_SUBLINK)
+    {
         result = NullableDatum::null();
     }
     Ok(result)
+}
+
+// The ARRAY_SUBLINK leg of ExecScanSubPlan: accumulate first-column values in
+// the reset-per-call scratch context, return the built array via cur_buf.
+fn scan_array_sub_plan<'mcx>(
+    sstate: &mut SubPlanExprState<'mcx>,
+    ps: &mut PlanStateNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<NullableDatum> {
+    let first_col_type = sstate.first_col_type;
+    sstate.array_ctx.as_mut().expect("ARRAY scratch context").reset();
+    {
+        let SubPlanExprState { array_ctx, cur_buf, .. } = &mut *sstate;
+        let amcx = array_ctx.as_ref().expect("ARRAY scratch context").mcx();
+        let mut astate = ::arrayfuncs::build::init_array_result(amcx, first_col_type, true)?;
+        while let Some(slot_id) = exec_proc_node(ps, estate)? {
+            let mut disnull = false;
+            let dvalue = exectuples::slot_getattr(estate.slot_mut(slot_id), 1, &mut disnull);
+            astate = ::arrayfuncs::build::accum_array_result(
+                amcx,
+                Some(astate),
+                dvalue,
+                disnull,
+                first_col_type,
+            )?;
+        }
+        let bytes = ::arrayfuncs::build::make_array_result(amcx, &astate)?;
+        cur_buf.clear();
+        cur_buf
+            .try_reserve(bytes.len())
+            .map_err(|_| estate.es_query_cxt.oom(bytes.len()))?;
+        // SAFETY: reserved capacity written, then length set.
+        unsafe {
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), cur_buf.as_mut_ptr(), bytes.len());
+            cur_buf.set_len(bytes.len());
+        }
+    }
+    Ok(NullableDatum {
+        value: Datum::from_usize(sstate.cur_buf.as_ptr() as usize),
+        isnull: false,
+    })
 }
 
 fn load_param_ids<'mcx>(

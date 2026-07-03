@@ -48,7 +48,7 @@ pub fn expr_type(node: Node<'_>) -> Oid {
             match sl.subLinkType {
                 types_nodes::SubLinkType::EXPR_SUBLINK => expr_type(tent.expect("EXPR").expr),
                 types_nodes::SubLinkType::ARRAY_SUBLINK => {
-                    deferred("exprType: ARRAY_SUBLINK", NodeTag::T_SubLink)
+                    promoted_array_type(expr_type(tent.expect("ARRAY").expr))
                 }
                 _ => types_core::catalog::BOOLOID,
             }
@@ -57,13 +57,28 @@ pub fn expr_type(node: Node<'_>) -> Oid {
             let sp = node.as_sub_plan().unwrap();
             match sp.subLinkType {
                 types_nodes::SubLinkType::EXPR_SUBLINK
-                | types_nodes::SubLinkType::ARRAY_SUBLINK
                 | types_nodes::SubLinkType::MULTIEXPR_SUBLINK => sp.firstColType,
+                types_nodes::SubLinkType::ARRAY_SUBLINK => {
+                    promoted_array_type(sp.firstColType)
+                }
                 _ => types_core::catalog::BOOLOID,
             }
         }
         other => deferred("exprType", other),
     }
+}
+
+// DIVERGENCE: C ereports 42704 for an arrayless element type (e.g. ARRAY
+// over a void-returning select); loud panic here since expr_type is
+// infallible by signature.
+pub fn promoted_array_type(elemtype: Oid) -> Oid {
+    let arraytype = lsyscache::get_promoted_array_type(elemtype)
+        .unwrap_or_else(|e| panic!("get_promoted_array_type({elemtype}): {e}"));
+    assert!(
+        arraytype != types_core::InvalidOid,
+        "could not find array type for data type {elemtype}"
+    );
+    arraytype
 }
 
 // C exprType's untransformed-sublink elog is a panic here (parse always
@@ -157,14 +172,18 @@ pub fn expr_typmod(node: Node<'_>) -> i32 {
         NodeTag::T_SubLink => {
             let (sl, tent) = sublink_first_col(node);
             match sl.subLinkType {
-                types_nodes::SubLinkType::EXPR_SUBLINK => expr_typmod(tent.expect("EXPR").expr),
+                types_nodes::SubLinkType::EXPR_SUBLINK
+                | types_nodes::SubLinkType::ARRAY_SUBLINK => {
+                    expr_typmod(tent.expect("EXPR/ARRAY").expr)
+                }
                 _ => -1,
             }
         }
         NodeTag::T_SubPlan => {
             let sp = node.as_sub_plan().unwrap();
             match sp.subLinkType {
-                types_nodes::SubLinkType::EXPR_SUBLINK => sp.firstColTypmod,
+                types_nodes::SubLinkType::EXPR_SUBLINK
+                | types_nodes::SubLinkType::ARRAY_SUBLINK => sp.firstColTypmod,
                 _ => -1,
             }
         }
