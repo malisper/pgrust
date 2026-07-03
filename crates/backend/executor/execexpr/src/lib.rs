@@ -15,6 +15,7 @@
 extern crate alloc;
 
 mod compile;
+pub mod domain;
 mod interp;
 mod steps;
 #[cfg(test)]
@@ -92,4 +93,5 @@ pub fn evaluate_expr<'mcx>(
 
 pub fn init_seams() {
     clauses_seams::evaluate_expr::set(evaluate_expr);
+    typcache_seams::domain_check_input::set(domain::domain_check_input);
 }

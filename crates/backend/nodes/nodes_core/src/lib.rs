@@ -160,6 +160,7 @@ pub fn expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
             let r = node.as_row_expr().unwrap();
             walk_list(&r.args, w)
         }
+        NodeTag::T_CoerceToDomain => w.visit(node.as_coerce_to_domain().unwrap().arg),
         NodeTag::T_MinMaxExpr => {
             let mm = node.as_min_max_expr().unwrap();
             walk_list(&mm.args, w)
@@ -557,6 +558,23 @@ where
         | NodeTag::T_NextValueExpr
         | NodeTag::T_RangeTblRef
         | NodeTag::T_SortGroupClause => Ok(None),
+        NodeTag::T_CoerceToDomain => {
+            let cd = node.as_coerce_to_domain().unwrap();
+            match m(cd.arg)? {
+                None => Ok(None),
+                Some(arg) => Ok(Some(Node::mk(
+                    mcx,
+                    types_nodes::CoerceToDomain {
+                        arg,
+                        resulttype: cd.resulttype,
+                        resulttypmod: cd.resulttypmod,
+                        resultcollid: cd.resultcollid,
+                        coercionformat: cd.coercionformat,
+                        location: cd.location,
+                    },
+                )?)),
+            }
+        }
         NodeTag::T_Aggref => {
             let a = node.as_variant::<Aggref>().unwrap();
             let args = mutate_list(mcx, &a.args, m)?;
@@ -1034,4 +1052,28 @@ where
         }
     }
     Ok(out)
+}
+
+/// C fix_opfuncids (nodeFuncs.c): planned-expression invariant that every
+/// OpExpr carries its opfuncid (readfuncs trees arrive filled; a zero memo
+/// is re-derived in place).
+pub fn fix_opfuncids(node: Node<'_>) -> PgResult<()> {
+    struct W;
+    impl<'mcx> NodeWalker<'mcx> for W {
+        fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+            if node.node_tag() == NodeTag::T_OpExpr {
+                let o = node.as_variant::<OpExpr>().unwrap();
+                if o.opfuncid == 0 {
+                    let opfuncid = lsyscache::operator::get_opcode(o.opno)?;
+                    // SAFETY: fix_opfuncids callers hold the just-read tree
+                    // exclusively; the shared borrow above has ended.
+                    unsafe {
+                        node.with_mut::<OpExpr, _>(|o| o.opfuncid = opfuncid).unwrap();
+                    }
+                }
+            }
+            expression_tree_walker(node, self)
+        }
+    }
+    W.visit(node).map(|_| ())
 }

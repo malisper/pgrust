@@ -29,6 +29,8 @@ pub fn expr_type(node: Node<'_>) -> Oid {
         }
         NodeTag::T_DistinctExpr => node.as_distinct_expr().unwrap().opresulttype,
         NodeTag::T_RowExpr => node.as_row_expr().unwrap().row_typeid,
+        NodeTag::T_CoerceToDomain => node.as_coerce_to_domain().unwrap().resulttype,
+        NodeTag::T_CoerceToDomainValue => node.as_coerce_to_domain_value().unwrap().typeId,
         NodeTag::T_SetToDefault => node.as_set_to_default().unwrap().typeId,
         NodeTag::T_CaseExpr => node.as_case_expr().unwrap().casetype,
         NodeTag::T_CaseTestExpr => node.as_case_test_expr().unwrap().typeId,
@@ -105,6 +107,8 @@ pub fn expr_typmod(node: Node<'_>) -> i32 {
         NodeTag::T_SetToDefault => node.as_set_to_default().unwrap().typeMod,
         NodeTag::T_CaseTestExpr => node.as_case_test_expr().unwrap().typeMod,
         NodeTag::T_FuncExpr => length_coercion_typmod(node.as_func_expr().unwrap()),
+        NodeTag::T_CoerceToDomain => node.as_coerce_to_domain().unwrap().resulttypmod,
+        NodeTag::T_CoerceToDomainValue => node.as_coerce_to_domain_value().unwrap().typeMod,
         NodeTag::T_OpExpr
         | NodeTag::T_ScalarArrayOpExpr
         | NodeTag::T_ArrayExpr
@@ -181,6 +185,8 @@ pub fn expr_collation(node: Node<'_>) -> Oid {
         | NodeTag::T_BooleanTest
         | NodeTag::T_RowExpr => types_core::InvalidOid,
         NodeTag::T_DistinctExpr => node.as_distinct_expr().unwrap().opcollid,
+        NodeTag::T_CoerceToDomain => node.as_coerce_to_domain().unwrap().resultcollid,
+        NodeTag::T_CoerceToDomainValue => node.as_coerce_to_domain_value().unwrap().collation,
         NodeTag::T_SetToDefault => node.as_set_to_default().unwrap().collation,
         NodeTag::T_CaseExpr => node.as_case_expr().unwrap().casecollid,
         NodeTag::T_CaseTestExpr => node.as_case_test_expr().unwrap().collation,
@@ -283,6 +289,11 @@ pub fn expr_location(node: Node<'_>) -> ParseLoc {
             let c = node.as_coerce_via_io().unwrap();
             leftmost_loc(c.location, expr_location(c.arg))
         }
+        NodeTag::T_CoerceToDomain => {
+            let c = node.as_coerce_to_domain().unwrap();
+            leftmost_loc(c.location, expr_location(c.arg))
+        }
+        NodeTag::T_CoerceToDomainValue => node.as_coerce_to_domain_value().unwrap().location,
         // C: the CASE/WHEN/COALESCE/GREATEST/LEAST keyword is always leftmost.
         NodeTag::T_CaseExpr => node.as_case_expr().unwrap().location,
         // C exprLocation default arm: CaseTestExpr carries no location.

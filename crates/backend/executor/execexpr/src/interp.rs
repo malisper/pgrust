@@ -742,6 +742,34 @@ fn run_program<'mcx>(
                 let r = read_out(*out, &regs);
                 write_out(*out, &mut regs, Datum::from_bool(!r.isnull), false);
             }
+            Step::MakeReadonly { src, out } => {
+                let r = read_out(*src, &regs);
+                let v = if r.isnull {
+                    r.value
+                } else {
+                    // SAFETY: non-null by-ref datum of a varlena-typed domain
+                    // input (compile emits this step only for typlen -1).
+                    unsafe { ::datum::expandeddatum::make_expanded_object_read_only_internal(r.value) }
+                };
+                write_out(*out, &mut regs, v, r.isnull);
+            }
+            Step::DomainTestval { src, out } => {
+                let r = read_out(*src, &regs);
+                write_out(*out, &mut regs, r.value, r.isnull);
+            }
+            Step::DomainNotNull { resulttype, out } => {
+                if read_out(*out, &regs).isnull {
+                    return Err(domain_not_null_violation(*resulttype));
+                }
+            }
+            Step::DomainCheck { resulttype, name, check } => {
+                // SAFETY: compile-allocated scratch, live for 'mcx.
+                let r = unsafe { check.read() };
+                if !r.isnull && !r.value.as_bool() {
+                    // SAFETY: name is a compile-copied &'mcx str.
+                    return Err(domain_check_violation(*resulttype, unsafe { name.as_ref() }));
+                }
+            }
             Step::AggStrictInputCheck { args, nargs, jumpnull } => {
                 // SAFETY: args[0..nargs] live fcinfo slots; jumps ready-checked.
                 let anynull = (0..*nargs as usize)
@@ -1363,4 +1391,42 @@ fn check_still_valid_slow<'mcx>(
     }
     state.flags |= EEO_FLAG_STILL_VALID_CHECKED;
     Ok(())
+}
+
+// errdatatype (domains.c): PG_DIAG schema/datatype names off one pg_type probe.
+#[cold]
+fn errdatatype(e: &mut PgError, typid: u32) {
+    if let Ok(Some(t)) = ::syscache_seams::pg_type_domain_shape::call(typid) {
+        e.datatype_name =
+            core::str::from_utf8(t.typname.name_str()).ok().map(|s| s.to_string());
+        let cx = ::mcx::MemoryContext::new("errdatatype");
+        let nsp = lsyscache::get_namespace_name(cx.mcx(), t.typnamespace);
+        if let Ok(Some(nsp)) = &nsp {
+            e.schema_name = Some(nsp.as_str().to_string());
+        }
+        drop(nsp);
+    }
+}
+
+#[cold]
+#[inline(never)]
+pub(crate) fn domain_not_null_violation(typid: u32) -> Box<PgError> {
+    let t = format_type::format_type_be(typid).unwrap_or_else(|_| typid.to_string());
+    let mut e = PgError::error(format!("domain {t} does not allow null values"))
+        .with_sqlstate(::types_error::ERRCODE_NOT_NULL_VIOLATION);
+    errdatatype(&mut e, typid);
+    Box::new(e)
+}
+
+#[cold]
+#[inline(never)]
+pub(crate) fn domain_check_violation(typid: u32, name: &str) -> Box<PgError> {
+    let t = format_type::format_type_be(typid).unwrap_or_else(|_| typid.to_string());
+    let mut e = PgError::error(format!(
+        "value for domain {t} violates check constraint \"{name}\""
+    ))
+    .with_sqlstate(::types_error::ERRCODE_CHECK_VIOLATION);
+    errdatatype(&mut e, typid);
+    e.constraint_name = Some(name.to_string());
+    Box::new(e)
 }

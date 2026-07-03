@@ -119,7 +119,12 @@ pub(crate) fn add_relation_new_constraints<'mcx>(
                 checknames.push(name);
                 // MergeWithExistingConstraint probe: allow_merge is only true
                 // in unported recursing/re-add lanes, so a hit is an error.
-                if pg_constraint::ConstraintNameIsUsed(mcx, rel.rd_id, name)? {
+                if pg_constraint::ConstraintNameIsUsed(
+                    mcx,
+                    pg_constraint::ConstraintCategory::Relation,
+                    rel.rd_id,
+                    name,
+                )? {
                     return Err(Box::new(
                         PgError::error(format!(
                             "constraint \"{name}\" for relation \"{relname}\" already exists"
@@ -222,7 +227,12 @@ pub(crate) fn add_relation_not_null_constraints<'mcx>(
         seen_attnums.push(attnum);
         let name = match cdef.conname {
             Some(given) => {
-                if pg_constraint::ConstraintNameIsUsed(mcx, rel.rd_id, given)?
+                if pg_constraint::ConstraintNameIsUsed(
+                    mcx,
+                    pg_constraint::ConstraintCategory::Relation,
+                    rel.rd_id,
+                    given,
+                )?
                     || nnnames.iter().any(|&n| n == given)
                 {
                     return Err(Box::new(

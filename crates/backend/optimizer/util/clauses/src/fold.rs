@@ -665,6 +665,39 @@ fn ece_mutator<'mcx>(node: Node<'mcx>, cx: &EceContext<'mcx>) -> PgResult<Option
                 )?)),
             }
         }
+        NodeTag::T_CoerceToDomain => {
+            let cd = node.as_coerce_to_domain().unwrap();
+            let arg = ece_mutator(cd.arg, cx)?;
+            // C also substitutes when the domain has no constraints, after
+            // record_plan_type_dependency; invalItems recording is not
+            // modeled here (module doc), same gap as function dependencies.
+            if cx.estimate || !typcache_seams::domain_has_constraints::call(cd.resulttype)? {
+                let eff = arg.unwrap_or(cd.arg);
+                return Ok(Some(apply_relabel_type(
+                    cx.mcx,
+                    eff,
+                    cd.resulttype,
+                    cd.resulttypmod,
+                    cd.resultcollid,
+                    cd.coercionformat,
+                    cd.location,
+                )?));
+            }
+            match arg {
+                None => Ok(None),
+                Some(arg) => Ok(Some(Node::mk(
+                    cx.mcx,
+                    types_nodes::CoerceToDomain {
+                        arg,
+                        resulttype: cd.resulttype,
+                        resulttypmod: cd.resulttypmod,
+                        resultcollid: cd.resultcollid,
+                        coercionformat: cd.coercionformat,
+                        location: cd.location,
+                    },
+                )?)),
+            }
+        }
         NodeTag::T_DistinctExpr => {
             use types_nodes::DistinctExpr;
             let d = node.as_distinct_expr().unwrap();
@@ -740,6 +773,7 @@ fn ece_mutator<'mcx>(node: Node<'mcx>, cx: &EceContext<'mcx>) -> PgResult<Option
                 }
             }
         }
+        NodeTag::T_CoerceToDomainValue => Ok(None),
         NodeTag::T_Var
         | NodeTag::T_Const
         | NodeTag::T_RangeTblRef
@@ -1165,6 +1199,8 @@ fn coerce_arg_type(node: Node<'_>) -> Oid {
         NodeTag::T_OpExpr => node.as_op_expr().unwrap().opresulttype,
         NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resulttype,
         NodeTag::T_CoerceViaIO => node.as_coerce_via_io().unwrap().resulttype,
+        NodeTag::T_CoerceToDomain => node.as_coerce_to_domain().unwrap().resulttype,
+        NodeTag::T_CoerceToDomainValue => node.as_coerce_to_domain_value().unwrap().typeId,
         other => deferred("coerce_arg_type (exprType)", other),
     }
 }
@@ -1234,4 +1270,74 @@ pub fn all_arguments_const(node: Node<'_>) -> PgResult<bool> {
         }
     }
     Ok(!crate::walker::expression_tree_walker(node, &mut NonConst)?)
+}
+
+// applyRelabelType (nodeFuncs.c:636); overwrite_ok collapses to a fresh Const
+// copy (sealed nodes), preserving const-flatness either way.
+fn apply_relabel_type<'mcx>(
+    mcx: Mcx<'mcx>,
+    mut arg: Node<'mcx>,
+    rtype: Oid,
+    rtypmod: i32,
+    rcollid: Oid,
+    rformat: CoercionForm,
+    rlocation: i32,
+) -> PgResult<Node<'mcx>> {
+    while let Some(r) = arg.as_relabel_type() {
+        arg = r.arg;
+    }
+    if let Some(con) = arg.as_const() {
+        return Node::mk(
+            mcx,
+            Const {
+                consttype: rtype,
+                consttypmod: rtypmod,
+                constcollid: rcollid,
+                constlen: con.constlen,
+                constvalue: con.constvalue,
+                constisnull: con.constisnull,
+                constbyval: con.constbyval,
+                location: con.location,
+            },
+        );
+    }
+    if coerce_arg_type(arg) == rtype && ece_expr_typmod(arg) == rtypmod && expr_collid(arg) == rcollid {
+        return Ok(arg);
+    }
+    Node::mk(
+        mcx,
+        types_nodes::RelabelType {
+            arg,
+            resulttype: rtype,
+            resulttypmod: rtypmod,
+            resultcollid: rcollid,
+            relabelformat: rformat,
+            location: rlocation,
+        },
+    )
+}
+
+fn ece_expr_typmod(node: Node<'_>) -> i32 {
+    match node.node_tag() {
+        NodeTag::T_Const => node.as_const().unwrap().consttypmod,
+        NodeTag::T_Var => node.as_var().unwrap().vartypmod,
+        NodeTag::T_Param => node.as_param().unwrap().paramtypmod,
+        NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resulttypmod,
+        NodeTag::T_CoerceToDomain => node.as_coerce_to_domain().unwrap().resulttypmod,
+        _ => -1,
+    }
+}
+
+fn expr_collid(node: Node<'_>) -> Oid {
+    match node.node_tag() {
+        NodeTag::T_Const => node.as_const().unwrap().constcollid,
+        NodeTag::T_Var => node.as_var().unwrap().varcollid,
+        NodeTag::T_Param => node.as_param().unwrap().paramcollid,
+        NodeTag::T_OpExpr => node.as_op_expr().unwrap().opcollid,
+        NodeTag::T_FuncExpr => node.as_func_expr().unwrap().funccollid,
+        NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resultcollid,
+        NodeTag::T_CoerceViaIO => node.as_coerce_via_io().unwrap().resultcollid,
+        NodeTag::T_CoerceToDomain => node.as_coerce_to_domain().unwrap().resultcollid,
+        other => deferred("applyRelabelType exprCollation", other),
+    }
 }

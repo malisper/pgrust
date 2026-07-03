@@ -280,6 +280,7 @@ fn assign_collations_walker<'mcx>(
         | NodeTag::T_FuncExpr
         | NodeTag::T_RelabelType
         | NodeTag::T_CoerceViaIO
+        | NodeTag::T_CoerceToDomain
         | NodeTag::T_BoolExpr
         | NodeTag::T_CaseExpr
         | NodeTag::T_CoalesceExpr
@@ -343,6 +344,12 @@ fn assign_collations_walker<'mcx>(
                 NodeTag::T_CoerceViaIO => {
                     assign_collations_walker(
                         node.as_coerce_via_io().unwrap().arg,
+                        &mut loccontext,
+                    )?;
+                }
+                NodeTag::T_CoerceToDomain => {
+                    assign_collations_walker(
+                        node.as_coerce_to_domain().unwrap().arg,
                         &mut loccontext,
                     )?;
                 }
@@ -472,6 +479,9 @@ fn assign_collations_walker<'mcx>(
                         .unwrap(),
                     NodeTag::T_CoerceViaIO => node
                         .with_mut::<types_nodes::CoerceViaIO, _>(|c| c.resultcollid = set_coll)
+                        .unwrap(),
+                    NodeTag::T_CoerceToDomain => node
+                        .with_mut::<types_nodes::CoerceToDomain, _>(|c| c.resultcollid = set_coll)
                         .unwrap(),
                     // exprSetCollation(BoolExpr/NullTest/GroupingFunc/BooleanTest)
                     // is assert-only in C.

@@ -104,14 +104,22 @@ fn format_type_extended(type_oid: Oid, typemod: i32, typemod_given: bool) -> PgR
     let mut buf = match special {
         Some(name) => name,
         None => {
-            // C schema-qualifies when !TypeIsVisible; unported, so only
-            // builtin (pg_catalog, visible barring shadowing) types render.
-            if named_oid >= FirstNormalObjectId {
-                unported("format_type_extended (format_type.c): TypeIsVisible/schema qualification for user types");
-            }
             let name = core::str::from_utf8(shape.typname.name_str())
-                .expect("pg_type.typname is ASCII for builtin types");
-            let quoted = quote_identifier(name).into_owned();
+                .unwrap_or_else(|_| panic!("non-UTF-8 pg_type.typname"));
+            // C: quote_qualified_identifier(NULL-if-visible nspname, typname).
+            let mut quoted = String::new();
+            if named_oid >= FirstNormalObjectId
+                && !namespace_seams::type_is_visible::call(named_oid)?
+            {
+                let t = syscache_seams::pg_type_domain_shape::call(named_oid)?
+                    .ok_or_else(|| type_lookup_failed(named_oid))?;
+                let cx = mcx::MemoryContext::new("format_type");
+                let nsp = lsyscache::get_namespace_name_or_temp(cx.mcx(), t.typnamespace)?
+                    .ok_or_else(|| type_lookup_failed(named_oid))?;
+                quoted.push_str(&quote_identifier(nsp.as_str()));
+                quoted.push('.');
+            }
+            quoted.push_str(&quote_identifier(name));
             if with_typemod {
                 print_typmod(&quoted, typemod, named_oid)?
             } else {

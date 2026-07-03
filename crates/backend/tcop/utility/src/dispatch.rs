@@ -629,6 +629,22 @@ fn dispatch_switch<'mcx>(
                 stmt_node.as_variant::<types_nodes::AlterSeqStmt>().expect("AlterSeqStmt");
             sequence::AlterSequence(mcx, altstmt)?;
         }
+        T_CreateDomainStmt => {
+            // Retention contract as unify_stmt_lifetime: the statement arena
+            // outlives the utility call; nothing derived escapes it.
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_create_domain_stmt()
+                .expect("CreateDomainStmt");
+            let mut pstate = parser_small1::make_parsestate(mcx, None);
+            {
+                let mut v: mcx::PgVec<'mcx, u8> = mcx::PgVec::new_in(mcx);
+                mcx::vec_append_bytes(&mut v, source_text.as_bytes())?;
+                pstate.p_sourcetext = Some(v.leak());
+            }
+            typecmds::DefineDomain(mcx, &mut pstate, stmt)?;
+            parser_small1::free_parsestate(pstate)?;
+        }
         _ => handler_gap("ProcessUtilitySlow DDL fan-out (utility slow lane)"),
     }
     Ok(())

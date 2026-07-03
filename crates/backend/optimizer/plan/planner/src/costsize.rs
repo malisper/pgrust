@@ -112,6 +112,9 @@ fn cost_qual_eval_walker(node: Node<'_>, cost: &mut QualCost) -> PgResult<()> {
             crate::plancat::add_function_cost(outfunc, cost)?;
             cost_qual_eval_walker(c.arg, cost)
         }
+        NodeTag::T_CoerceToDomain => {
+            cost_qual_eval_walker(node.as_coerce_to_domain().unwrap().arg, cost)
+        }
         // Boolean connectives are free in C; NullTest is "cheap" (no charge).
         NodeTag::T_BoolExpr => {
             for arg in &node.as_bool_expr().unwrap().args {
@@ -207,6 +210,7 @@ fn cost_qual_eval_walker(node: Node<'_>, cost: &mut QualCost) -> PgResult<()> {
                 None => Ok(()),
             }
         }
+        NodeTag::T_CoerceToDomainValue => Ok(()),
         other => panic!("cost_qual_eval_walker (costsize.c): {other:?}; M2 expression lane"),
     }
 }
@@ -966,6 +970,9 @@ pub fn expr_type_typmod(node: Node<'_>) -> (u32, i32) {
         NodeTag::T_RelabelType => {
             let r = node.as_relabel_type().unwrap();
             (r.resulttype, r.resulttypmod)
+        NodeTag::T_CoerceToDomain => {
+            let cd = node.as_coerce_to_domain().unwrap();
+            (cd.resulttype, cd.resulttypmod)
         }
         NodeTag::T_OpExpr => (node.as_op_expr().unwrap().opresulttype, -1),
         NodeTag::T_DistinctExpr => (node.as_distinct_expr().unwrap().opresulttype, -1),

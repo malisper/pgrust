@@ -20,6 +20,10 @@ relation_seams = { path = "../../../access/common/relation_seams" }
 tupdesc = { path = "../../../access/common/tupdesc" }
 types_rel = { path = "../../../../_support/types/rel" }
 types_tuple = { path = "../../../../_support/types/types_tuple" }
+readfuncs = { path = "../../../nodes/readfuncs" }
+nodes_core = { path = "../../../nodes/nodes_core" }
+clauses = { path = "../../../optimizer/util/clauses" }
+types_nodes = { path = "../../../../_support/types/nodes" }
 
 [dev-dependencies]
 types_tuple = { path = "../../../../_support/types/types_tuple" }

@@ -6,6 +6,7 @@ const TABLES: &[&[FmgrBuiltin]] = &[
     ::arrayfuncs::builtins::ARRAYFUNCS_BUILTINS,
     ::adt_cash::builtins::CASH_BUILTINS,
     ::adt_char::builtins::CHAR_BUILTINS,
+    ::adt_domains::DOMAINS_BUILTINS,
     ::adt_date::builtins::DATE_BUILTINS,
     ::adt_encode::builtins::ENCODE_BUILTINS,
     ::adt_float::builtins::FLOAT_BUILTINS,

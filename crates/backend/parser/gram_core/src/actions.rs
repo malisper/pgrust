@@ -20,6 +20,7 @@ use types_nodes::primnodes::{
     SQLValueFunction, SQLValueFunctionOp,
 };
 
+use types_nodes::rawnodes::CreateDomainStmt;
 use types_nodes::JoinType;
 use types_nodes::rawnodes::A_Expr_Kind::{self, AEXPR_OP};
 use types_nodes::rawnodes::{
@@ -467,6 +468,31 @@ impl<'mcx> Parser<'mcx> {
                 n.is_no_inherit = view.v(3).boolean();
                 n.is_enforced = true;
                 n.initially_valid = true;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // ColConstraintElem: NULL_P
+            500 => {
+                let mut n = Node::build::<Constraint>(mcx)?;
+                n.contype = ConstrType::CONSTR_NULL;
+                n.location = view.l(1);
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // CreateDomainStmt: CREATE DOMAIN_P any_name opt_as Typename ColQualList
+            1529 => {
+                let mut constraints = NodeList::nil();
+                for q in view.v(6).list().iter() {
+                    match q.node_tag() {
+                        NodeTag::T_Constraint => constraints.lappend(mcx, q)?,
+                        NodeTag::T_CollateClause => {
+                            panic!("gram_core: SplitColQualList COLLATE arm unported")
+                        }
+                        other => panic!("unexpected node type {other:?} in ColQualList"),
+                    }
+                }
+                let mut n = Node::build::<CreateDomainStmt>(mcx)?;
+                n.domainname = view.v(3).list();
+                n.typeName = view.v(5).node();
+                n.constraints = constraints;
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
             // ColConstraintElem: CHECK '(' a_expr ')' opt_no_inherit

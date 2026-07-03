@@ -145,6 +145,16 @@ pub struct ParseState<'p, 'mcx> {
     pub p_hasModifyingCTE: bool,
     pub p_last_srf: Option<Node<'mcx>>,
     pub p_ref_hook_state: ParseRefHookState<'p>,
+    pub p_pre_columnref_hook: PreColumnRefHook,
+}
+
+// C's p_pre_columnref_hook fn pointer as a closed installer set (rule-4
+// dispatch); DomainValue = typecmds.c replace_domain_constraint_value.
+#[derive(Clone, Copy, Default)]
+pub enum PreColumnRefHook {
+    #[default]
+    None,
+    DomainValue(types_nodes::CoerceToDomainValue),
 }
 
 pub fn make_parsestate<'p, 'mcx>(
@@ -183,9 +193,11 @@ pub fn make_parsestate<'p, 'mcx>(
         p_hasModifyingCTE: false,
         p_last_srf: None,
         p_ref_hook_state: ParseRefHookState::None,
+        p_pre_columnref_hook: PreColumnRefHook::None,
     };
     if let Some(parent) = parent {
         pstate.p_sourcetext = parent.p_sourcetext;
+        pstate.p_pre_columnref_hook = parent.p_pre_columnref_hook;
         pstate.p_ref_hook_state = parent.p_ref_hook_state.clone();
         pstate.p_queryEnv = parent.p_queryEnv;
     }

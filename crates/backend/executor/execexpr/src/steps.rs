@@ -187,6 +187,12 @@ pub enum Step {
     // ExecSubPlan (nodeSubplan.c in execmain) with the full estate and
     // resumes with the result (see interp::EvalOutcome).
     SubPlan { sstate: NonNull<()>, out: OutRef },
+    // EEOP_MAKE_READONLY: emitted only for typlen -1 domain-check inputs.
+    MakeReadonly { src: OutRef, out: OutRef },
+    DomainTestval { src: OutRef, out: OutRef },
+    DomainNotNull { resulttype: Oid, out: OutRef },
+    // name/check: compile-allocated in 'mcx (BoolAndStep anynull precedent).
+    DomainCheck { resulttype: Oid, name: NonNull<str>, check: NonNull<NullableDatum> },
     // slots: nelems compile-allocated NullableDatum arg targets (C's
     // d.minmax.values/nulls); call is the type's btree cmp proc.
     MinMax { call: FuncCall, slots: NonNull<NullableDatum>, nelems: u16, least: bool, out: OutRef },
@@ -510,6 +516,8 @@ pub struct ExprState<'mcx> {
     // PARAM_EXEC ids this expression reads; the owning node resolves pending
     // initplans against these before evaluation (nodeSubplan.c lane).
     pub(crate) param_exec_deps: PgVec<'mcx, u32>,
+    // C ExprState.innermost_domainval/innermost_domainnull: compile-time only.
+    pub(crate) innermost_domain: Option<OutRef>,
 }
 
 impl<'mcx> ExprState<'mcx> {
@@ -530,6 +538,7 @@ impl<'mcx> ExprState<'mcx> {
                 flags: 0,
                 innermost_case: None,
                 param_exec_deps: PgVec::new_in(mcx),
+                innermost_domain: None,
             });
             Ok(::mcx::PgBox::from_raw_in(p.as_ptr(), mcx))
         }

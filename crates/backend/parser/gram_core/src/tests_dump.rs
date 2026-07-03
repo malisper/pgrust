@@ -597,6 +597,13 @@ fn node(out: &mut String, n: Node<'_>) {
         list_field(out, "fdwoptions", &c.fdwoptions);
         int_field(out, "location", c.location);
         out.push('}');
+    } else if let Some(c) = n.as_create_domain_stmt() {
+        out.push_str("{CREATEDOMAINSTMT");
+        list_field(out, "domainname", &c.domainname);
+        node_field(out, "typeName", c.typeName);
+        node_field(out, "collClause", c.collClause);
+        list_field(out, "constraints", &c.constraints);
+        out.push('}');
     } else if let Some(c) = n.as_variant::<types_nodes::rawnodes::Constraint>() {
         // Fields absent from the ported Constraint render as palloc0 defaults.
         out.push_str("{CONSTRAINT");

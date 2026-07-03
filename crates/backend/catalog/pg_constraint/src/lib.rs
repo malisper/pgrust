@@ -458,13 +458,26 @@ fn extract_notnull_column<'mcx>(
     Ok(elems[0].as_i16())
 }
 
-// ConstraintNameIsUsed (pg_constraint.c), CONSTRAINT_RELATION arm.
-pub fn ConstraintNameIsUsed<'mcx>(mcx: Mcx<'mcx>, relid: Oid, conname: &str) -> PgResult<bool> {
+pub enum ConstraintCategory {
+    Relation,
+    Domain,
+}
+
+pub fn ConstraintNameIsUsed<'mcx>(
+    mcx: Mcx<'mcx>,
+    con_cat: ConstraintCategory,
+    obj_id: Oid,
+    conname: &str,
+) -> PgResult<bool> {
     let con_rel = table::table_open(mcx, CONSTRAINT_RELATION_ID, AccessShareLock)?;
     let cname = name_arg(mcx, conname)?;
+    let (relid, typid) = match con_cat {
+        ConstraintCategory::Relation => (obj_id, InvalidOid),
+        ConstraintCategory::Domain => (InvalidOid, obj_id),
+    };
     let keys = [
         eq_key(Anum_pg_constraint_conrelid, F_OIDEQ, Datum::from_oid(relid)),
-        eq_key(Anum_pg_constraint_contypid, F_OIDEQ, Datum::from_oid(InvalidOid)),
+        eq_key(Anum_pg_constraint_contypid, F_OIDEQ, Datum::from_oid(typid)),
         eq_key(Anum_pg_constraint_conname, F_NAMEEQ, Datum::from_usize(cname.as_ptr() as usize)),
     ];
     let mut scan = genam::systable_beginscan(

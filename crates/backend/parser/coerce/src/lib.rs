@@ -24,7 +24,8 @@ use types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_QUERY_CANCELED, ERROR,
 };
 use types_nodes::{
-    CoerceViaIO, CoercionForm, Const, FuncExpr, Node, NodeList, NodeTag, Param, RelabelType,
+    CoerceToDomain, CoerceViaIO, CoercionForm, Const, FuncExpr, Node, NodeList, NodeTag, Param,
+    RelabelType,
 };
 
 // primnodes.h CoercionContext; ordering is load-bearing (ccontext >= castcontext).
@@ -153,6 +154,7 @@ pub fn coerce_type<'mcx>(
             targetTypeId,
             targetTypeMod,
             ccontext,
+            cformat,
             location,
         );
     }
@@ -179,25 +181,35 @@ pub fn coerce_type<'mcx>(
     if pathtype != COERCION_PATH_NONE {
         let mut baseTypeMod = targetTypeMod;
         let baseTypeId = lsyscache::getBaseTypeAndTypmod(targetTypeId, &mut baseTypeMod)?;
-        if targetTypeId != baseTypeId {
-            unported("coerce_type (parse_coerce.c): coerce_to_domain");
-        }
         if pathtype != COERCION_PATH_RELABELTYPE {
-            return build_coercion_expression(
+            let result = build_coercion_expression(
                 mcx, node, pathtype, funcId, baseTypeId, baseTypeMod, ccontext, cformat, location,
+            )?;
+            if targetTypeId != baseTypeId {
+                return coerce_to_domain(
+                    mcx, result, baseTypeId, baseTypeMod, targetTypeId, ccontext, cformat,
+                    location, true,
+                );
+            }
+            return Ok(result);
+        }
+        let result = coerce_to_domain(
+            mcx, node, baseTypeId, baseTypeMod, targetTypeId, ccontext, cformat, location, false,
+        )?;
+        if result.ptr_eq(node) {
+            return Node::mk(
+                mcx,
+                RelabelType {
+                    arg: node,
+                    resulttype: targetTypeId,
+                    resulttypmod: -1,
+                    resultcollid: InvalidOid,
+                    relabelformat: cformat,
+                    location,
+                },
             );
         }
-        return Node::mk(
-            mcx,
-            RelabelType {
-                arg: node,
-                resulttype: targetTypeId,
-                resulttypmod: -1,
-                resultcollid: InvalidOid,
-                relabelformat: cformat,
-                location,
-            },
-        );
+        return Ok(result);
     }
     if (inputTypeId == RECORDOID && is_complex(targetTypeId)?)
         || (targetTypeId == RECORDOID && is_complex(inputTypeId)?)
@@ -212,14 +224,16 @@ pub fn coerce_type<'mcx>(
 }
 
 // C's coerce_type CONSTANT arm: typinput through fmgr (stringTypeDatum).
+#[allow(clippy::too_many_arguments)]
 fn coerce_unknown_const<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &ParseState<'_, 'mcx>,
     node: Node<'mcx>,
     targetTypeId: Oid,
     targetTypeMod: i32,
-    _ccontext: CoercionContext,
-    _location: ParseLoc,
+    ccontext: CoercionContext,
+    cformat: CoercionForm,
+    location: ParseLoc,
 ) -> PgResult<Node<'mcx>> {
     let con = node.as_const().unwrap();
 
@@ -258,7 +272,17 @@ fn coerce_unknown_const<'mcx>(
     )?;
 
     if baseTypeId != targetTypeId {
-        unported("coerce_type (parse_coerce.c): coerce_to_domain over the CONSTANT arm");
+        return coerce_to_domain(
+            mcx,
+            result,
+            baseTypeId,
+            baseTypeMod,
+            targetTypeId,
+            ccontext,
+            cformat,
+            location,
+            false,
+        );
     }
     Ok(result)
 }
@@ -1493,6 +1517,214 @@ fn function_lookup_failed(funcid: Oid) -> Box<PgError> {
     Box::new(PgError::error(format!("cache lookup failed for function {funcid}")))
 }
 
+/// C coerce_to_domain (parse_coerce.c:675). resultcollid starts InvalidOid;
+/// parse_collate assigns it.
+#[allow(clippy::too_many_arguments)]
+pub fn coerce_to_domain<'mcx>(
+    mcx: Mcx<'mcx>,
+    arg: Node<'mcx>,
+    baseTypeId: Oid,
+    baseTypeMod: i32,
+    typeId: Oid,
+    ccontext: CoercionContext,
+    cformat: CoercionForm,
+    location: ParseLoc,
+    hideInputCoercion: bool,
+) -> PgResult<Node<'mcx>> {
+    debug_assert!(OidIsValid(baseTypeId));
+    if baseTypeId == typeId {
+        return Ok(arg);
+    }
+    if hideInputCoercion {
+        hide_coercion_node(arg);
+    }
+    let arg = coerce_type_typmod(
+        mcx,
+        arg,
+        baseTypeId,
+        baseTypeMod,
+        ccontext,
+        CoercionForm::COERCE_IMPLICIT_CAST,
+        location,
+        false,
+    )?;
+    Node::mk(
+        mcx,
+        CoerceToDomain {
+            arg,
+            resulttype: typeId,
+            resulttypmod: -1,
+            resultcollid: InvalidOid,
+            coercionformat: cformat,
+            location,
+        },
+    )
+}
+
+// hide_coercion_node (parse_coerce.c): ArrayCoerceExpr/ConvertRowtypeExpr/
+// RowExpr arms wait on their node vocabulary; C's fallthrough elog is the
+// panic arm.
+fn hide_coercion_node(node: Node<'_>) {
+    // SAFETY: the coercion tree was just built by this parse lane; no
+    // reference derived from `node` is live here.
+    unsafe {
+        let done = match node.node_tag() {
+            NodeTag::T_FuncExpr => node
+                .with_mut::<FuncExpr, _>(|f| f.funcformat = CoercionForm::COERCE_IMPLICIT_CAST)
+                .is_some(),
+            NodeTag::T_RelabelType => node
+                .with_mut::<RelabelType, _>(|r| {
+                    r.relabelformat = CoercionForm::COERCE_IMPLICIT_CAST
+                })
+                .is_some(),
+            NodeTag::T_CoerceViaIO => node
+                .with_mut::<CoerceViaIO, _>(|c| c.coerceformat = CoercionForm::COERCE_IMPLICIT_CAST)
+                .is_some(),
+            NodeTag::T_CoerceToDomain => node
+                .with_mut::<CoerceToDomain, _>(|c| {
+                    c.coercionformat = CoercionForm::COERCE_IMPLICIT_CAST
+                })
+                .is_some(),
+            other => panic!("hide_coercion_node: unsupported node type: {other:?}"),
+        };
+        debug_assert!(done);
+    }
+}
+
+/// C coerce_type_typmod (parse_coerce.c:750); the
+/// find_typmod_coercion_function lane (targetTypMod >= 0) stays loud.
+#[allow(clippy::too_many_arguments)]
+fn coerce_type_typmod<'mcx>(
+    mcx: Mcx<'mcx>,
+    node: Node<'mcx>,
+    targetTypeId: Oid,
+    targetTypMod: i32,
+    _ccontext: CoercionContext,
+    cformat: CoercionForm,
+    location: ParseLoc,
+    hideInputCoercion: bool,
+) -> PgResult<Node<'mcx>> {
+    if targetTypMod == expr_typmod_slice(node) {
+        return Ok(node);
+    }
+    if hideInputCoercion {
+        hide_coercion_node(node);
+    }
+    if targetTypMod >= 0 {
+        unported(
+            "coerce_type_typmod (parse_coerce.c): find_typmod_coercion_function              length-coercion lane",
+        );
+    }
+    apply_relabel_type(mcx, node, targetTypeId, targetTypMod, expr_collation_slice(node), cformat, location)
+}
+
+// applyRelabelType (nodeFuncs.c:636) with overwrite_ok=false: the Const arm
+// copies (C copyObject) instead of mutating in place.
+fn apply_relabel_type<'mcx>(
+    mcx: Mcx<'mcx>,
+    mut arg: Node<'mcx>,
+    rtype: Oid,
+    rtypmod: i32,
+    rcollid: Oid,
+    rformat: CoercionForm,
+    rlocation: ParseLoc,
+) -> PgResult<Node<'mcx>> {
+    while let Some(r) = arg.as_relabel_type() {
+        arg = r.arg;
+    }
+    if let Some(con) = arg.as_const() {
+        return Node::mk(
+            mcx,
+            Const {
+                consttype: rtype,
+                consttypmod: rtypmod,
+                constcollid: rcollid,
+                constlen: con.constlen,
+                constvalue: con.constvalue,
+                constisnull: con.constisnull,
+                constbyval: con.constbyval,
+                location: con.location,
+            },
+        );
+    }
+    if expr_type_slice(arg) == rtype
+        && expr_typmod_slice(arg) == rtypmod
+        && expr_collation_slice(arg) == rcollid
+    {
+        return Ok(arg);
+    }
+    Node::mk(
+        mcx,
+        RelabelType {
+            arg,
+            resulttype: rtype,
+            resulttypmod: rtypmod,
+            resultcollid: rcollid,
+            relabelformat: rformat,
+            location: rlocation,
+        },
+    )
+}
+
+// exprType/exprTypmod/exprCollation closed-set slices over the node shapes a
+// coercion input can be (nodeFuncs home is parse_expr; direct dep would
+// cycle — expression_returns_set precedent).
+fn expr_type_slice(node: Node<'_>) -> Oid {
+    match node.node_tag() {
+        NodeTag::T_Const => node.as_const().unwrap().consttype,
+        NodeTag::T_Var => node.as_var().unwrap().vartype,
+        NodeTag::T_Param => node.as_param().unwrap().paramtype,
+        NodeTag::T_OpExpr => node.as_op_expr().unwrap().opresulttype,
+        NodeTag::T_FuncExpr => node.as_func_expr().unwrap().funcresulttype,
+        NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resulttype,
+        NodeTag::T_CoerceViaIO => node.as_coerce_via_io().unwrap().resulttype,
+        NodeTag::T_CoerceToDomain => node.as_coerce_to_domain().unwrap().resulttype,
+        other => unported_node("exprType (coercion-input slice)", other),
+    }
+}
+
+fn expr_typmod_slice(node: Node<'_>) -> i32 {
+    match node.node_tag() {
+        NodeTag::T_Const => node.as_const().unwrap().consttypmod,
+        NodeTag::T_Var => node.as_var().unwrap().vartypmod,
+        NodeTag::T_Param => node.as_param().unwrap().paramtypmod,
+        NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resulttypmod,
+        NodeTag::T_CoerceToDomain => node.as_coerce_to_domain().unwrap().resulttypmod,
+        NodeTag::T_OpExpr
+        | NodeTag::T_FuncExpr
+        | NodeTag::T_CoerceViaIO
+        | NodeTag::T_BoolExpr
+        | NodeTag::T_NullTest
+        | NodeTag::T_Aggref
+        | NodeTag::T_WindowFunc
+        | NodeTag::T_CaseExpr
+        | NodeTag::T_CoalesceExpr
+        | NodeTag::T_MinMaxExpr
+        | NodeTag::T_SubLink => -1,
+        other => unported_node("exprTypmod (coercion-input slice)", other),
+    }
+}
+
+fn expr_collation_slice(node: Node<'_>) -> Oid {
+    match node.node_tag() {
+        NodeTag::T_Const => node.as_const().unwrap().constcollid,
+        NodeTag::T_Var => node.as_var().unwrap().varcollid,
+        NodeTag::T_Param => node.as_param().unwrap().paramcollid,
+        NodeTag::T_OpExpr => node.as_op_expr().unwrap().opcollid,
+        NodeTag::T_FuncExpr => node.as_func_expr().unwrap().funccollid,
+        NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resultcollid,
+        NodeTag::T_CoerceViaIO => node.as_coerce_via_io().unwrap().resultcollid,
+        NodeTag::T_CoerceToDomain => node.as_coerce_to_domain().unwrap().resultcollid,
+        other => unported_node("exprCollation (coercion-input slice)", other),
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn unported_node(what: &str, tag: NodeTag) -> ! {
+    panic!("{what}: arm for {tag:?} unported — unit backend-parser-coerce")
+}
+
 /// Divergences from C: caller passes exprType(expr) (the nodeFuncs slice
 /// lives in parse_expr — parse_oper precedent); Ok(None) is C's NULL return.
 #[allow(clippy::too_many_arguments)]
@@ -1713,7 +1945,14 @@ pub fn expression_returns_set(node: Node<'_>) -> bool {
         NodeTag::T_RowExpr => {
             node.as_row_expr().unwrap().args.iter().any(expression_returns_set)
         }
-        NodeTag::T_Const | NodeTag::T_Param | NodeTag::T_Var | NodeTag::T_CaseTestExpr => false,
+        NodeTag::T_Const
+        | NodeTag::T_Param
+        | NodeTag::T_Var
+        | NodeTag::T_CaseTestExpr
+        | NodeTag::T_CoerceToDomainValue => false,
+        NodeTag::T_CoerceToDomain => {
+            expression_returns_set(node.as_coerce_to_domain().unwrap().arg)
+        }
         NodeTag::T_CaseExpr => {
             let c = node.as_case_expr().unwrap();
             c.arg.is_some_and(expression_returns_set)
