@@ -708,6 +708,13 @@ fn run_program<'mcx>(
                     continue;
                 }
             }
+            Step::JumpIfNull { jumpdone, out } => {
+                if read_out(*out).isnull {
+                    // SAFETY: jump targets validated < steps.len() at ready.
+                    sp = unsafe { base.add(*jumpdone as usize) };
+                    continue;
+                }
+            }
             Step::CaseTestVal { slot, out } => {
                 // SAFETY: compile-allocated workspace, live for 'mcx.
                 let nd = unsafe { slot.read() };
@@ -726,6 +733,46 @@ fn run_program<'mcx>(
                         });
                     }
                 }
+            }
+            Step::ArrayExprEval { state, out } => {
+                // SAFETY: compile-allocated state, live for 'mcx, sole access.
+                let st = unsafe { &mut *state.as_ptr() };
+                let r = crate::arrayops::eval_array_expr(st)?;
+                write_out(*out, r.value, r.isnull);
+            }
+            Step::SbsrefSubscripts { state, jumpdone, out } => {
+                // SAFETY: as ArrayExprEval.
+                let st = unsafe { &mut *state.as_ptr() };
+                if !crate::arrayops::sbsref_check_subscripts(st)? {
+                    write_out(*out, Datum::null(), true);
+                    // SAFETY: jump targets validated < steps.len() at ready.
+                    sp = unsafe { base.add(*jumpdone as usize) };
+                    continue;
+                }
+            }
+            Step::SbsrefFetch { state, slice, out } => {
+                // SAFETY: as ArrayExprEval.
+                let st = unsafe { &mut *state.as_ptr() };
+                let cur = read_out(*out);
+                let r = if *slice {
+                    crate::arrayops::sbsref_fetch_slice(st, cur)?
+                } else {
+                    crate::arrayops::sbsref_fetch(st, cur)?
+                };
+                write_out(*out, r.value, r.isnull);
+            }
+            Step::SbsrefOld { state, out } => {
+                // SAFETY: as ArrayExprEval.
+                let st = unsafe { &mut *state.as_ptr() };
+                let cur = read_out(*out);
+                crate::arrayops::sbsref_fetch_old(st, cur)?;
+            }
+            Step::SbsrefAssign { state, out } => {
+                // SAFETY: as ArrayExprEval.
+                let st = unsafe { &mut *state.as_ptr() };
+                let cur = read_out(*out);
+                let r = crate::arrayops::sbsref_assign(st, cur)?;
+                write_out(*out, r.value, r.isnull);
             }
             Step::Qual { jumpdone } => {
                 // SAFETY: res is the state's live result cell.
@@ -1136,13 +1183,19 @@ fn eval_scalar_array_op(
         return Ok((Datum::null(), true));
     }
     let p = arr.value.as_usize() as *const u8;
-    // SAFETY: non-null array datum; folded/deserialized arrays here always
-    // carry an inline 4-byte header.
-    let b0 = unsafe { *p };
-    assert!(b0 != 0x01 && b0 & 0x03 == 0, "scalararrayop: toasted/packed array image");
-    // SAFETY: 4-byte varlena header verified; the image is VARSIZE bytes.
-    let img = unsafe {
-        core::slice::from_raw_parts(p, ::arrayfuncs::foundation::arr_size(core::slice::from_raw_parts(p, 4)))
+    // DatumGetArrayTypeP: borrow in place on an inline 4-byte header, else
+    // detoast/unpack a copy into the armed per-eval result context (C's
+    // CurrentMemoryContext at eval).
+    // SAFETY: non-null array datum addresses a live varlena.
+    let img: &[u8] = unsafe {
+        if ::types_tuple::varatt::varatt_is_4b_u(p) {
+            core::slice::from_raw_parts(p, ::types_tuple::varatt::varsize_any(p))
+        } else {
+            let raw = core::slice::from_raw_parts(p, ::types_tuple::varatt::varsize_any(p));
+            let mcx = crate::steps::fcinfo_mut(call.fcinfo, call.nargs).result_mcx();
+            let flat = ::detoast_seams::detoast_attr::call(mcx, raw)?;
+            &*(flat.leak() as *const [u8])
+        }
     };
     let (ndim, dims, _lbs) = ::arrayfuncs::foundation::read_dims_lbounds(img);
     let mut nitems = 1i64;

@@ -337,10 +337,16 @@ impl<'mcx> Parser<'mcx> {
             2114 => {
                 let number = view.v(1).ival();
                 let ind = view.v(2).list();
-                if !ind.is_nil() {
-                    panic!("gram_core: A_Indirection over PARAM not ported (types_nodes gap)");
-                }
-                *yyval = YYSTYPE::Node(Some(Node::mk_param_ref(mcx, number, view.l(1))?));
+                let p = Node::mk_param_ref(mcx, number, view.l(1))?;
+                *yyval = YYSTYPE::Node(Some(if ind.is_nil() {
+                    p
+                } else {
+                    self.check_indirection(&ind)?;
+                    Node::mk(
+                        mcx,
+                        types_nodes::A_Indirection { arg: Some(p), indirection: ind },
+                    )?
+                }));
             }
             2338 | 2339 => {
                 let name = view.v(1).str_val();
@@ -2606,9 +2612,15 @@ impl<'mcx> Parser<'mcx> {
                 let e = view.v(2);
                 let ind = view.v(4).list();
                 if !ind.is_nil() {
-                    panic!("gram_core: A_Indirection over (a_expr) not ported (types_nodes gap)");
+                    let arg = e.node();
+                    self.check_indirection(&ind)?;
+                    *yyval = YYSTYPE::Node(Some(Node::mk(
+                        mcx,
+                        types_nodes::A_Indirection { arg, indirection: ind },
+                    )?));
+                } else {
+                    *yyval = e;
                 }
-                *yyval = e;
             }
             // c_expr: select_with_parens %prec UMINUS
             2118 => {
@@ -2648,6 +2660,50 @@ impl<'mcx> Parser<'mcx> {
                 "gram_core: ARRAY_SUBLINK (ARRAY select_with_parens) not ported \
                  (unit backend-parser-gram)"
             ),
+            // c_expr: ARRAY array_expr (point outermost A_ArrayExpr at ARRAY)
+            2122 => {
+                let n = view.v(2).node().expect("array_expr");
+                debug_assert!(n.node_tag() == types_nodes::NodeTag::T_A_ArrayExpr);
+                // SAFETY: node built by rules 2301-2303 below, exclusively ours.
+                unsafe {
+                    Node::with_mut::<types_nodes::A_ArrayExpr, ()>(n, |a| a.location = view.l(1));
+                }
+                *yyval = YYSTYPE::Node(Some(n));
+            }
+            // array_expr: '[' expr_list ']' | '[' array_expr_list ']' | '[' ']'
+            2301 | 2302 => {
+                let elements = view.v(2).list();
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    types_nodes::A_ArrayExpr {
+                        elements,
+                        list_start: view.l(1),
+                        list_end: view.l(3),
+                        location: view.l(1),
+                    },
+                )?));
+            }
+            2303 => {
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    types_nodes::A_ArrayExpr {
+                        elements: NodeList::nil(),
+                        list_start: view.l(1),
+                        list_end: view.l(2),
+                        location: view.l(1),
+                    },
+                )?));
+            }
+            2304 => {
+                let e = view.v(1).node().expect("array_expr");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, e)?);
+            }
+            2305 => {
+                let mut list = view.v(1).list();
+                let e = view.v(3).node().expect("array_expr");
+                list.lappend(mcx, e)?;
+                *yyval = YYSTYPE::List(list);
+            }
             // func_application: func_name '(' [args] ')' shapes.
             2126 => {
                 let funcname = view.v(1).list();
@@ -2841,9 +2897,35 @@ impl<'mcx> Parser<'mcx> {
                 *yyval = YYSTYPE::List(list);
             }
             2341 => *yyval = YYSTYPE::Node(Some(Node::mk_a_star(mcx)?)),
-            2342 | 2343 => {
-                panic!("gram_core: A_Indices subscripting not ported (types_nodes gap)")
+            1944 => *yyval = YYSTYPE::List(NodeList::nil()),
+            // SimpleTypename ARRAY -> arrayBounds = [-1]
+            1940 => {
+                let tn = view.v(1).node().expect("SimpleTypename");
+                // SAFETY: TypeName node built by this parse, exclusively ours.
+                unsafe {
+                    let bounds = NodeList::make1(mcx, Node::mk_integer(mcx, -1)?)?;
+                    Node::with_mut::<types_nodes::TypeName, ()>(tn, |t| t.arrayBounds = bounds);
+                }
+                *yyval = YYSTYPE::Node(Some(tn));
             }
+            2342 => {
+                let uidx = view.v(2).node();
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    types_nodes::A_Indices { is_slice: false, lidx: None, uidx },
+                )?));
+            }
+            2343 => {
+                let lidx = view.v(2).node();
+                let uidx = view.v(4).node();
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    types_nodes::A_Indices { is_slice: true, lidx, uidx },
+                )?));
+            }
+            // opt_slice_bound: a_expr | empty
+            2344 => *yyval = YYSTYPE::Node(view.v(1).node()),
+            2345 => *yyval = YYSTYPE::Node(None),
             2347 => {
                 let mut list = view.v(1).list();
                 let el = view.v(2).node().expect("indirection_el");
@@ -5479,7 +5561,8 @@ impl<'mcx> Parser<'mcx> {
         Ok(())
     }
 
-    // makeColumnRef; A_Indices arms unreachable (rules 2342/2343 panic).
+    // makeColumnRef: leading field selections fold into ColumnRef.fields; the
+    // first A_Indices switches the remainder into an A_Indirection wrapper.
     fn make_column_ref(
         &self,
         colname: &'mcx str,
@@ -5487,14 +5570,39 @@ impl<'mcx> Parser<'mcx> {
         location: i32,
     ) -> PgResult<Node<'mcx>> {
         let n = indirection.len();
+        let mut nfields = 0usize;
         for (i, el) in indirection.iter().enumerate() {
+            if el.node_tag() == types_nodes::NodeTag::T_A_Indices {
+                let cells = indirection.as_slice();
+                let head = NodeList::from_slice(self.mcx, &cells[..nfields])?;
+                let tail = NodeList::from_slice(self.mcx, &cells[nfields..])?;
+                self.check_indirection(&tail)?;
+                let mut fields = head;
+                fields.lcons(self.mcx, Node::mk_string(self.mcx, colname)?)?;
+                let c = Node::mk_column_ref(self.mcx, fields, location)?;
+                return Node::mk(
+                    self.mcx,
+                    types_nodes::A_Indirection { arg: Some(c), indirection: tail },
+                );
+            }
             if el.as_a_star().is_some() && i + 1 != n {
                 return Err(self.parser_yyerror("improper use of \"*\""));
             }
+            nfields += 1;
         }
         let mut fields = indirection;
         fields.lcons(self.mcx, Node::mk_string(self.mcx, colname)?)?;
         Node::mk_column_ref(self.mcx, fields, location)
+    }
+
+    // check_indirection: '*' is not allowed in subscripting contexts.
+    fn check_indirection(&self, indirection: &NodeList<'mcx>) -> PgResult<()> {
+        for el in indirection.iter() {
+            if el.as_a_star().is_some() {
+                return Err(self.parser_yyerror("improper use of \"*\""));
+            }
+        }
+        Ok(())
     }
 
     #[cold]

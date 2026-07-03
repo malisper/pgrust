@@ -345,7 +345,8 @@ fn assign_collations_walker<'mcx>(
         | NodeTag::T_ScalarArrayOpExpr
         | NodeTag::T_ArrayExpr
         | NodeTag::T_SQLValueFunction
-        | NodeTag::T_SubLink) => {
+        | NodeTag::T_SubLink
+        | NodeTag::T_SubscriptingRef) => {
             match tag {
                 // C: never recurse into the CASE test expression — it was
                 // collation-marked in transformCaseExpr and doesn't affect
@@ -472,6 +473,25 @@ fn assign_collations_walker<'mcx>(
                         assign_collations_walker(arg, &mut loccontext)?;
                     }
                 }
+                NodeTag::T_SubscriptingRef => {
+                    let s = node.as_subscripting_ref().unwrap();
+                    for e in &s.refupperindexpr {
+                        if let Some(e) = e {
+                            assign_collations_walker(e, &mut loccontext)?;
+                        }
+                    }
+                    for e in &s.reflowerindexpr {
+                        if let Some(e) = e {
+                            assign_collations_walker(e, &mut loccontext)?;
+                        }
+                    }
+                    if let Some(e) = s.refexpr {
+                        assign_collations_walker(e, &mut loccontext)?;
+                    }
+                    if let Some(e) = s.refassgnexpr {
+                        assign_collations_walker(e, &mut loccontext)?;
+                    }
+                }
                 NodeTag::T_ScalarArrayOpExpr => {
                     for arg in &node.as_scalar_array_op_expr().unwrap().args {
                         assign_collations_walker(arg, &mut loccontext)?;
@@ -587,6 +607,9 @@ fn assign_collations_walker<'mcx>(
                         .unwrap(),
                     // exprSetCollation(SubLink) is assert-only in C.
                     NodeTag::T_SubLink => {}
+                    NodeTag::T_SubscriptingRef => node
+                        .with_mut::<types_nodes::SubscriptingRef, _>(|s| s.refcollid = set_coll)
+                        .unwrap(),
                     // exprSetCollation(ScalarArrayOpExpr) is assert-only
                     // (boolean result); only inputcollid is written.
                     NodeTag::T_ScalarArrayOpExpr => {
