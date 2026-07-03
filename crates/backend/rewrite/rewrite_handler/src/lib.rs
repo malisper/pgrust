@@ -995,6 +995,12 @@ fn fireRIRrules<'mcx>(
             continue;
         }
         let rel = table::table_open(mcx, rte.relid, NoLock)?;
+        // relrowsecurity=false is check_enable_rls's RLS_NONE outcome
+        // (rls.c:78); skipping here spares the perminfo/user probes per RTE.
+        if !rel.rd_rel.relrowsecurity {
+            table::table_close(rel, NoLock)?;
+            continue;
+        }
 
         let rls = rowsecurity::get_row_security_policies(mcx, parsetree, rte, rt_index)?;
 
