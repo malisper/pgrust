@@ -58,6 +58,10 @@ pub fn make_new_heap<'mcx>(
     if persistence == types_core::RELPERSISTENCE_TEMP {
         unported("make_new_heap temp-namespace lookup");
     }
+    // rd_options reloptions are not copied by our heap_create_with_catalog.
+    if old_heap.rd_options.is_some() {
+        unported("make_new_heap: reloptions copy");
+    }
     let namespaceid = old_heap.rd_rel.relnamespace;
     let new_heap_name = format!("pg_temp_{old_heap_oid}");
 
@@ -83,6 +87,15 @@ pub fn make_new_heap<'mcx>(
     xact::CommandCounterIncrement()?;
 
     if old_heap.rd_rel.reltoastrelid != InvalidOid {
+        // C creates the new toast with the old toast's reloptions and
+        // relrewrite = old toast oid; relrewrite is reset to 0 at swap end
+        // either way (single-backend: mid-xact catalog state only).
+        let old_toast = table::table_open(mcx, old_heap.rd_rel.reltoastrelid, NoLock)?;
+        let has_opts = old_toast.rd_options.is_some();
+        old_toast.close(NoLock)?;
+        if has_opts {
+            unported("make_new_heap: toast reloptions copy");
+        }
         catalog_toasting::NewRelationCreateToastTable(mcx, oid_new_heap)?;
     }
     old_heap.close(NoLock)?;
@@ -175,6 +188,10 @@ pub fn finish_heap_swap<'mcx>(
             set_relrewrite(mcx, cur_toast, InvalidOid)?;
         }
     }
+
+    if !is_system_catalog {
+        catalog_heap::RelationClearMissing(mcx, old_heap_oid)?;
+    }
     Ok(())
 }
 
@@ -202,9 +219,9 @@ fn swap_relation_files<'mcx>(
     let desc = rel_relation.descr();
     let natts = desc.natts as usize;
 
-    struct Row {
+    struct Row<'mcx> {
         tid: types_tuple::ItemPointerData,
-        vals: Vec<(usize, Datum)>,
+        vals: PgVec<'mcx, (usize, Datum)>,
         relfilenode: Oid,
         reltablespace: Oid,
         relam: Oid,
@@ -216,7 +233,7 @@ fn swap_relation_files<'mcx>(
         relallfrozen: Datum,
     }
 
-    let read_row = |relid: Oid| -> PgResult<Row> {
+    let read_row = |relid: Oid| -> PgResult<Row<'mcx>> {
         let key = oid_key(1, relid);
         let mut scan = genam::systable_beginscan(
             mcx,
@@ -235,7 +252,7 @@ fn swap_relation_files<'mcx>(
         };
         let row = Row {
             tid: tup.t_self,
-            vals: Vec::new(),
+            vals: PgVec::new_in(mcx),
             relfilenode: get(Anum_pg_class_relfilenode).as_oid(),
             reltablespace: get(Anum_pg_class_reltablespace).as_oid(),
             relam: get(Anum_pg_class_relam).as_oid(),
@@ -258,7 +275,12 @@ fn swap_relation_files<'mcx>(
     );
     assert!(row1.relam == row2.relam);
 
-    row1.vals = vec![
+    // C's rd_createSubid/rd_*RelfilelocatorSubid transfer +
+    // RelationAssumeNewRelfilelocator(rel1) (cluster.c:1188-1205) is not
+    // ported: heapam never WAL-skips permanent rels and bulkwrite/nbtree
+    // smgrimmedsync eagerly, so no deferred pendingSyncs read those fields.
+    // Load-bearing the day a WAL-skip (wal_level=minimal) lane lands.
+    for pair in [
         (Anum_pg_class_relfilenode, Datum::from_oid(row2.relfilenode)),
         (Anum_pg_class_reltablespace, Datum::from_oid(row2.reltablespace)),
         (Anum_pg_class_relpersistence, Datum::from_i8(row2.relpersistence)),
@@ -269,8 +291,10 @@ fn swap_relation_files<'mcx>(
         (Anum_pg_class_reltuples, row2.reltuples),
         (Anum_pg_class_relallvisible, row2.relallvisible),
         (Anum_pg_class_relallfrozen, row2.relallfrozen),
-    ];
-    row2.vals = vec![
+    ] {
+        row1.vals.push(pair);
+    }
+    for pair in [
         (Anum_pg_class_relfilenode, Datum::from_oid(row1.relfilenode)),
         (Anum_pg_class_reltablespace, Datum::from_oid(row1.reltablespace)),
         (Anum_pg_class_relpersistence, Datum::from_i8(row1.relpersistence)),
@@ -279,7 +303,9 @@ fn swap_relation_files<'mcx>(
         (Anum_pg_class_reltuples, row1.reltuples),
         (Anum_pg_class_relallvisible, row1.relallvisible),
         (Anum_pg_class_relallfrozen, row1.relallfrozen),
-    ];
+    ] {
+        row2.vals.push(pair);
+    }
 
     for (relid, row) in [(r1, &row1), (r2, &row2)] {
         let key = oid_key(1, relid);

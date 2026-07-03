@@ -154,7 +154,18 @@ pub fn reindex_index<'mcx>(
     let save_nestlevel = guc::NewGUCNestLevel();
     guc::RestrictSearchPath()?;
 
-    let iRel = indexam::index_open(mcx, indexId, AccessExclusiveLock)?;
+    let iRel = if missing_ok {
+        match indexam::try_index_open(mcx, indexId, AccessExclusiveLock)? {
+            Some(rel) => rel,
+            None => {
+                guc::AtEOXact_GUC(false, save_nestlevel);
+                guard.restore();
+                return heapRelation.close(NoLock);
+            }
+        }
+    } else {
+        indexam::index_open(mcx, indexId, AccessExclusiveLock)?
+    };
 
     if iRel.rd_rel.relkind == RELKIND_PARTITIONED_INDEX {
         return Err(Box::new(PgError::new(
@@ -168,6 +179,7 @@ pub fn reindex_index<'mcx>(
             ),
         )));
     }
+    // RELATION_IS_OTHER_TEMP(iRel): const-false single-backend.
     if catalog::IsToastNamespace(iRel.namespace()) && !lsyscache::get_index_isvalid(indexId)? {
         return Err(Box::new(
             PgError::new(

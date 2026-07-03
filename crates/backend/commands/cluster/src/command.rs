@@ -177,7 +177,8 @@ pub fn cluster_rel<'mcx>(
 
     let result = (|| -> PgResult<()> {
         if recheck {
-            if !cluster_is_permitted_for_relation(mcx, table_oid, miscinit::GetUserId())? {
+            // save_userid: the sec context already switched to the table owner.
+            if !cluster_is_permitted_for_relation(mcx, table_oid, guard.saved().0)? {
                 return old_heap.close(NoLock);
             }
             if index_oid != InvalidOid {
@@ -344,10 +345,6 @@ fn rebuild_relation<'mcx>(
         mark_index_clustered(mcx, &old_heap, index.rd_id, true)?;
     }
 
-    // rd_options reloptions are not copied by our heap_create_with_catalog.
-    if old_heap.rd_options.is_some() {
-        unported("make_new_heap: reloptions copy");
-    }
     let oid_new_heap = make_new_heap(mcx, table_oid, relpersistence, NoLock)?;
     let new_heap = table::table_open(mcx, oid_new_heap, NoLock)?;
 
