@@ -241,6 +241,7 @@ pub fn init_seams() {
     namespace_seams::get_temp_namespace_proc_number::set(GetTempNamespaceProcNumber);
     namespace_seams::initialize_search_path::set(InitializeSearchPath);
     namespace_seams::fetch_search_path::set(fetch_search_path);
+    namespace_seams::find_default_conversion_proc::set(lookup::FindDefaultConversionProc);
 
     guc_tables::vars::namespace_search_path.install(guc_tables::GucVarAccessors {
         get: namespace_search_path_get,

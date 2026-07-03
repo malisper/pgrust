@@ -999,6 +999,7 @@ dependencies = [
  "mcx",
  "miscinit_seams",
  "namespace_seams",
+ "pg_conversion",
  "rel_vocab",
  "sinval",
  "syscache_seams",
@@ -1643,6 +1644,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "conv"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "fmgr_core",
+ "fmgr_seams",
+ "mbutils",
+ "mcx",
+ "namespace_seams",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "wchar",
+ "xact_seams",
+]
+
+[[package]]
 name = "copy_cmd"
 version = "0.1.0"
 dependencies = [
@@ -1824,6 +1842,8 @@ dependencies = [
  "init_small_seams",
  "ipc_seams",
  "libc",
+ "mbutils_seams",
+ "mcx",
  "pgstat_seams",
  "pqcomm_seams",
  "syslogger_seams",
@@ -2257,6 +2277,7 @@ dependencies = [
  "adt_scalar",
  "adt_windowfuncs",
  "arrayfuncs",
+ "conv",
  "datum",
  "fmgr_seams",
  "mcx",
@@ -4627,6 +4648,18 @@ dependencies = [
  "types_scan",
  "types_tuple",
  "varlena",
+]
+
+[[package]]
+name = "pg_conversion"
+version = "0.1.0"
+dependencies = [
+ "cache_syscache",
+ "catcache",
+ "datum",
+ "types_core",
+ "types_error",
+ "types_tuple",
 ]
 
 [[package]]

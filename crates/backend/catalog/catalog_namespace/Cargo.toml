@@ -21,6 +21,7 @@ namespace_seams = { path = "../namespace_seams" }
 aclchk_seams = { path = "../aclchk_seams" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
 cache_syscache = { path = "../../utils/cache/cache_syscache" }
+pg_conversion = { path = "../pg_conversion" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
 inval = { path = "../../utils/cache/inval" }
 inval_seams = { path = "../../utils/cache/inval_seams" }

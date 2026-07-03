@@ -178,9 +178,11 @@ pub fn fmgr_info_from_builtin(fbp: &FmgrBuiltin, function_id: Oid) -> FmgrInfo {
 /// C: `fmgr_info`/`fmgr_info_cxt` (fn_mcxt dropped: fn_extra owns its storage).
 /// Field-wise fill of the caller's carrier, like C — a by-value return spills
 /// the 56B carrier through an sret and its droppy slots stop folding (bench).
-/// Non-builtin legs (pg_proc syscache, secdef, C/SQL/PL languages) are not
+/// Non-builtin legs (pg_proc syscache, secdef, SQL/PL languages) are not
 /// ported; C's "cache lookup failed for function %u" cannot be told apart from
-/// an unported leg without pg_proc, so both panic loudly.
+/// an unported leg without pg_proc, so both panic loudly. In-core C-language
+/// functions (C's fmgr_info_C_lang dlopen leg) resolve from NATIVE_CLANG
+/// instead of pg_proc — their FmgrBuiltin rows carry the pg_proc metadata.
 #[inline]
 pub fn fmgr_info_into(function_id: Oid, finfo: &mut FmgrInfo) -> PgResult<()> {
     match fmgr_isbuiltin(function_id) {
@@ -188,16 +190,26 @@ pub fn fmgr_info_into(function_id: Oid, finfo: &mut FmgrInfo) -> PgResult<()> {
             fmgr_info_from_builtin_into(fbp, function_id, finfo);
             Ok(())
         }
-        None => non_builtin_unported(function_id),
+        None => match native_clang_builtin(function_id) {
+            Some(fbp) => {
+                fmgr_info_from_builtin_into(fbp, function_id, finfo);
+                Ok(())
+            }
+            None => non_builtin_unported(function_id),
+        },
     }
 }
 
 #[inline]
 pub fn fmgr_info(function_id: Oid) -> PgResult<FmgrInfo> {
-    match fmgr_isbuiltin(function_id) {
-        Some(fbp) => Ok(fmgr_info_from_builtin(fbp, function_id)),
-        None => non_builtin_unported(function_id),
-    }
+    let mut finfo = FmgrInfo::unresolved();
+    fmgr_info_into(function_id, &mut finfo)?;
+    Ok(finfo)
+}
+
+#[cold]
+fn native_clang_builtin(function_id: Oid) -> Option<&'static FmgrBuiltin> {
+    ::conv::conv_builtin(function_id)
 }
 
 #[cold]

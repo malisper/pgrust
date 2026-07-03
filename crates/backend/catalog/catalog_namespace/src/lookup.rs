@@ -108,6 +108,22 @@ pub fn LookupExplicitNamespace(nspname: &str, missing_ok: bool) -> PgResult<Oid>
     Ok(namespaceId)
 }
 
+pub fn FindDefaultConversionProc(for_encoding: i32, to_encoding: i32) -> PgResult<Oid> {
+    recomputeNamespacePath()?;
+
+    for i in 0..base_path_len() {
+        let namespaceId = base_path_nth(i);
+        if namespaceId == my_temp_namespace() {
+            continue;
+        }
+        let proc = pg_conversion::FindDefaultConversion(namespaceId, for_encoding, to_encoding)?;
+        if OidIsValid(proc) {
+            return Ok(proc);
+        }
+    }
+    Ok(InvalidOid)
+}
+
 pub fn RelnameGetRelid(relname: &str) -> PgResult<Oid> {
     recomputeNamespacePath()?;
 
