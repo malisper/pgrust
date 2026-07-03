@@ -17,6 +17,7 @@ const F_BTTEXTSORTSUPPORT: Oid = 3255;
 const F_UUID_SORTSUPPORT: Oid = 3300;
 const F_NETWORK_SORTSUPPORT: Oid = 5033;
 const F_INTERVAL_CMP: Oid = 1315;
+const F_BPCHAR_SORTSUPPORT: Oid = 3328;
 
 /// C's `ssup->comparator` fn pointer as a closed enum: identity is switchable
 /// (tuplesort_sort_memtuples specialization dispatch) and calls monomorphize.
@@ -37,6 +38,8 @@ pub enum SortComparator {
     TextC,
     /// interval_cmp direct (C shims BTORDER_PROC 1315); live 16-byte images.
     Interval,
+    /// `bpcharfastcmp_c` (varstr_sortsupport bpchar arm, collate-is-C only).
+    BpcharC,
     /// `PrepareSortSupportComparisonShim`: the opfamily's BTORDER_PROC,
     /// resolved once, invoked per comparison (C builds an fcinfo per call
     /// too). Needs an mcx-threaded apply; the mcx-less lane panics.
@@ -91,6 +94,10 @@ pub fn apply_cmp(cmp: SortComparator, x: Datum, y: Datum) -> i32 {
             let a = &*(x.as_usize() as *const adt_datetime::consts::Interval);
             let b = &*(y.as_usize() as *const adt_datetime::consts::Interval);
             adt_timestamp::interval::interval_cmp_internal(a, b)
+        },
+        // SAFETY: as TextC.
+        SortComparator::BpcharC => unsafe {
+            varlena::bpcharfastcmp_c(varlena_payload(x), varlena_payload(y))
         },
         SortComparator::Shim(shim) => panic!(
             "comparison shim (proc {}) reached an mcx-less comparator lane \
@@ -241,7 +248,8 @@ pub fn prepare_sort_support_from_ordering_op(
         panic!("operator {ordering_op} is not a valid ordering operator");
     };
     let ssup_reverse = cmptype == COMPARE_GT;
-    let comparator = comparator_for_opfamily(opfamily, opcintype, opcintype)?;
+    let comparator =
+        comparator_for_opfamily(opfamily, opcintype, opcintype, ssup.ssup_collation)?;
 
     Ok(SortSupport {
         ssup_collation: ssup.ssup_collation,
@@ -259,6 +267,7 @@ pub fn comparator_for_opfamily(
     opfamily: Oid,
     lefttype: Oid,
     righttype: Oid,
+    collation: Oid,
 ) -> PgResult<SortComparator> {
     let sort_support_function =
         lsyscache::get_opfamily_proc(opfamily, lefttype, righttype, BTSORTSUPPORT_PROC as i16)?;
@@ -267,6 +276,22 @@ pub fn comparator_for_opfamily(
         // btoidfastcmp: unsigned; the zero-extended datum word compares exact.
         F_BTOIDSORTSUPPORT => SortComparator::Unsigned,
         F_BTINT8SORTSUPPORT | F_TIMESTAMP_SORTSUPPORT => SortComparator::SignedI64,
+        F_BTINT2SORTSUPPORT => SortComparator::Int16,
+        F_BTTEXTSORTSUPPORT | F_BPCHAR_SORTSUPPORT => {
+            // varstr_sortsupport (varlena.c): C collation installs the fastcmp
+            // comparator; abbreviation is order-neutral and stays absent.
+            if !pg_locale::pg_newlocale_from_collation(collation)?.collate_is_c {
+                panic!(
+                    "varstr_sortsupport (varlena.c): non-C collation {collation} \
+                     comparator (varlenafastcmp_locale/pg_strncoll) not ported"
+                );
+            }
+            if sort_support_function == F_BPCHAR_SORTSUPPORT {
+                SortComparator::BpcharC
+            } else {
+                SortComparator::TextC
+            }
+        }
         // C DIVERGENCE: uuid 3300 / network 5033 name abbrev sortsupport
         // routines (unported); the shim on their BTORDER_PROC is
         // order-identical (CATALOG perf watch).
@@ -319,7 +344,7 @@ pub fn comparator_for_index_col(
         F_BTINT8SORTSUPPORT | F_TIMESTAMP_SORTSUPPORT => SortComparator::SignedI64,
         F_BTINT2SORTSUPPORT => SortComparator::Int16,
         F_BTOIDSORTSUPPORT => SortComparator::Uint32,
-        F_BTTEXTSORTSUPPORT => {
+        F_BTTEXTSORTSUPPORT | F_BPCHAR_SORTSUPPORT => {
             let locale = pg_locale::pg_newlocale_from_collation(collation)?;
             if !locale.collate_is_c {
                 panic!(
@@ -327,7 +352,11 @@ pub fn comparator_for_index_col(
                      index sort not ported"
                 );
             }
-            SortComparator::TextC
+            if ssup_proc == F_BPCHAR_SORTSUPPORT {
+                SortComparator::BpcharC
+            } else {
+                SortComparator::TextC
+            }
         }
         0 => {
             let sort_function =

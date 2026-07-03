@@ -1079,6 +1079,9 @@ impl<'m> TuplesortData<'m> {
                     SortComparator::Interval => qsort_tuple(&mut tuples, |a, b| {
                         ctx.comparetup_spec(SortComparator::Interval, a, b)
                     }),
+                    SortComparator::BpcharC => qsort_tuple(&mut tuples, |a, b| {
+                        ctx.comparetup_spec(SortComparator::BpcharC, a, b)
+                    }),
                     // Shim'd comparisons are fmgr calls; nothing to fold.
                     SortComparator::Shim(_) => qsort_tuple(&mut tuples, |a, b| ctx.comparetup(a, b)),
                 }
