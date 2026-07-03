@@ -124,8 +124,11 @@ macro_rules! unported_mask {
     )+};
 }
 
+fn dbase_redo(record: &mut XLogReaderState) -> PgResult<()> {
+    dbcommands_seams::dbase_redo::call(record)
+}
+
 unported_redo! {
-    dbase_redo => "backend-commands-dbcommands";
     tblspc_redo => "backend-commands-tablespace";
     gin_redo => "backend-access-gin-xlog";
     gist_redo => "backend-access-gist-xlog";

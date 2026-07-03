@@ -308,6 +308,7 @@ members = [
     "crates/backend/catalog/pg_attrdef",
     "crates/backend/catalog/pg_constraint",
     "crates/backend/catalog/pg_depend",
+    "crates/backend/catalog/pg_shdepend",
     "crates/backend/catalog/pg_namespace",
     "crates/backend/catalog/dependency_seams",
     "crates/backend/catalog/pg_type",

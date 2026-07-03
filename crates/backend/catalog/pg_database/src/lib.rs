@@ -114,11 +114,15 @@ pub(crate) fn decode_form<'mcx>(
 
     let oid = req(Anum_pg_database_oid)?.as_oid();
     let datname_d = req(Anum_pg_database_datname)?;
+    let datdba = req(Anum_pg_database_datdba)?.as_oid();
+    let datistemplate = req(Anum_pg_database_datistemplate)?.as_bool();
     let encoding = req(Anum_pg_database_encoding)?.as_i32();
     let datlocprovider = req(Anum_pg_database_datlocprovider)?.as_u8();
     let datallowconn = req(Anum_pg_database_datallowconn)?.as_bool();
     let dathasloginevt = req(Anum_pg_database_dathasloginevt)?.as_bool();
     let datconnlimit = req(Anum_pg_database_datconnlimit)?.as_i32();
+    let datfrozenxid = req(Anum_pg_database_datfrozenxid)?.as_u32();
+    let datminmxid = req(Anum_pg_database_datminmxid)?.as_u32();
     let dattablespace = req(Anum_pg_database_dattablespace)?.as_oid();
     let datcollate_d = req(Anum_pg_database_datcollate)?;
     let datctype_d = req(Anum_pg_database_datctype)?;
@@ -129,6 +133,7 @@ pub(crate) fn decode_form<'mcx>(
         Ok(if isnull { None } else { Some(d) })
     };
     let datlocale_d = opt(Anum_pg_database_datlocale)?;
+    let daticurules_d = opt(Anum_pg_database_daticurules)?;
     let datcollversion_d = opt(Anum_pg_database_datcollversion)?;
 
     let opt_text = |d: Option<Datum>, col: &'static str| -> PgResult<Option<PgString<'mcx>>> {
@@ -138,15 +143,20 @@ pub(crate) fn decode_form<'mcx>(
     Ok(PgDatabaseForm {
         oid,
         datname: name_str(mcx, datname_d)?,
+        datdba,
+        datistemplate,
         dattablespace,
         datallowconn,
         dathasloginevt,
         datconnlimit,
+        datfrozenxid,
+        datminmxid,
         encoding,
         datlocprovider,
         datcollate: text_str(mcx, datcollate_d, "datcollate")?,
         datctype: text_str(mcx, datctype_d, "datctype")?,
         datlocale: opt_text(datlocale_d, "datlocale")?,
+        daticurules: opt_text(daticurules_d, "daticurules")?,
         datcollversion: opt_text(datcollversion_d, "datcollversion")?,
     })
 }

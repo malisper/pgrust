@@ -12,6 +12,7 @@ aclchk = { path = "../../catalog/aclchk" }
 parse_utilcmd = { path = "../../parser/parse_utilcmd" }
 tablecmds = { path = "../../commands/tablecmds" }
 schemacmds = { path = "../../commands/schemacmds" }
+dbcommands = { path = "../../commands/dbcommands" }
 commands_comment = { path = "../../commands/comment" }
 elog_seams = { path = "../../utils/error/elog_seams" }
 types_rel = { path = "../../../_support/types/rel" }
