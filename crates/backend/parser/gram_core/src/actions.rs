@@ -5793,6 +5793,8 @@ fn extract_arg_types<'mcx>(
         }
     }
     Ok(result)
+}
+
 fn alter_table_cmd<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     subtype: AlterTableType,
