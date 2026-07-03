@@ -719,11 +719,17 @@ fn find_nonnullable_rels_walker<'mcx>(
         }
         // C has strictness arms for these; skipping silently would
         // under-reduce vs C (silent plan-shape divergence).
+        NodeTag::T_CollateExpr => {
+            result = find_nonnullable_rels_walker(
+                mcx,
+                Some(node.as_collate_expr().unwrap().arg),
+                top_level,
+            )?;
+        }
         NodeTag::T_SubPlan
         | NodeTag::T_PlaceHolderVar
         | NodeTag::T_ArrayCoerceExpr
-        | NodeTag::T_ConvertRowtypeExpr
-        | NodeTag::T_CollateExpr => panic!(
+        | NodeTag::T_ConvertRowtypeExpr => panic!(
             "find_nonnullable_rels_walker (clauses.c): {:?} strictness arm unported",
             node.node_tag()
         ),
@@ -895,6 +901,13 @@ fn find_nonnullable_vars_walker<'mcx>(
                 result = nonnullable_vars_args(mcx, &sa.args, false)?;
             }
         }
+        NodeTag::T_CollateExpr => {
+            result = find_nonnullable_vars_walker(
+                mcx,
+                Some(node.as_collate_expr().unwrap().arg),
+                top_level,
+            )?;
+        }
         NodeTag::T_BooleanTest => {
             use types_nodes::BoolTestType;
             let bt = node.as_boolean_test().unwrap();
@@ -912,8 +925,7 @@ fn find_nonnullable_vars_walker<'mcx>(
         NodeTag::T_SubPlan
         | NodeTag::T_PlaceHolderVar
         | NodeTag::T_ArrayCoerceExpr
-        | NodeTag::T_ConvertRowtypeExpr
-        | NodeTag::T_CollateExpr => panic!(
+        | NodeTag::T_ConvertRowtypeExpr => panic!(
             "find_nonnullable_vars_walker (clauses.c): {:?} strictness arm unported",
             node.node_tag()
         ),

@@ -35,7 +35,7 @@ pub use temp::{
 };
 
 pub use lookup::{
-    get_namespace_oid, DeconstructQualifiedName, FuncCandidate, FuncnameGetCandidates,
+    get_collation_oid, get_namespace_oid, DeconstructQualifiedName, FuncCandidate, FuncnameGetCandidates,
     LookupExplicitNamespace, LookupNamespaceNoError, OperCandidate, OpernameGetCandidates,
     OpernameGetOprid, RangeVarGetRelid, RangeVarGetRelidExtended, RelnameGetRelid,
     TypenameGetTypidExtended, RVR_MISSING_OK, RVR_NOWAIT, RVR_SKIP_LOCKED,

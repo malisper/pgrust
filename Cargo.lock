@@ -5797,6 +5797,7 @@ version = "0.0.0"
 dependencies = [
  "aclchk_seams",
  "analyze_seams",
+ "catalog_namespace",
  "coerce",
  "elog",
  "format_type",
@@ -5933,6 +5934,7 @@ dependencies = [
  "elog",
  "fmgr_core",
  "fmgr_seams",
+ "format_type",
  "genam",
  "gram_core",
  "indexam",

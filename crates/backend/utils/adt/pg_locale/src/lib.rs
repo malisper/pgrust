@@ -273,6 +273,13 @@ fn create_pg_locale(collid: Oid, cache_mcx: Mcx<'static>) -> PgResult<PgLocale> 
         return Err(support_error("create_pg_locale", row.collprovider));
     };
     result.is_default = false;
+    result.deterministic = row.collisdeterministic;
+    if !row.collisdeterministic {
+        panic!(
+            "pg_locale: nondeterministic collation {collid} not ported \
+             (hashtext/pattern-op arms, varstr equality via pg_strncoll)"
+        );
+    }
 
     if let Some(collversionstr) = row.collversion.as_ref() {
         let source = if row.collprovider == COLLPROVIDER_LIBC {

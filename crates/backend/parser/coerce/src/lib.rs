@@ -24,7 +24,7 @@ use types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_QUERY_CANCELED, ERROR,
 };
 use types_nodes::{
-    CoerceToDomain, CoerceViaIO, CoercionForm, Const, FuncExpr, Node, NodeList, NodeTag, Param,
+    CoerceToDomain, CoerceViaIO, CoercionForm, CollateExpr, Const, FuncExpr, Node, NodeList, NodeTag, Param,
     RelabelType,
 };
 
@@ -1600,7 +1600,19 @@ pub fn coerce_to_target_type<'mcx>(
         return Ok(None);
     }
     if expr.node_tag() == NodeTag::T_CollateExpr {
-        unported("coerce_to_target_type (parse_coerce.c): CollateExpr strip/reinstall arm");
+        // C: strip the CollateExpr, coerce, and put a new one back on top.
+        let coll = expr.as_collate_expr().unwrap();
+        let Some(arg) = coerce_to_target_type(
+            mcx, pstate, coll.arg, exprtype, targettype, targettypmod, ccontext, cformat,
+            location,
+        )?
+        else {
+            return Ok(None);
+        };
+        return Ok(Some(Node::mk(
+            mcx,
+            CollateExpr { arg, collOid: coll.collOid, location: coll.location },
+        )?));
     }
     let result = coerce_type(
         mcx, pstate, expr, exprtype, targettype, targettypmod, ccontext, cformat, location,

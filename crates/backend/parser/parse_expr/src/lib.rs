@@ -88,9 +88,9 @@ pub fn transformExprRecurse<'mcx>(
             }
         }
         NodeTag::T_BooleanTest => transformBooleanTest(mcx, pstate, expr),
-        NodeTag::T_CollateClause => transformCollateClause(mcx, pstate, expr),
         NodeTag::T_RowExpr => transformRowExpr(mcx, pstate, expr),
         NodeTag::T_TypeCast => transformTypeCast(mcx, pstate, expr),
+        NodeTag::T_CollateClause => transformCollateClause(mcx, pstate, expr),
         NodeTag::T_BoolExpr => transformBoolExpr(mcx, pstate, expr),
         NodeTag::T_CaseExpr => transformCaseExpr(mcx, pstate, expr),
         NodeTag::T_CoalesceExpr => transformCoalesceExpr(mcx, pstate, expr),
@@ -439,6 +439,54 @@ fn transformTypeCast<'mcx>(
 }
 
 #[cold]
+// transformCollateClause (parse_expr.c) + LookupCollation (parse_type.c);
+// the errposition callback collapses into direct positions on the errors.
+fn transformCollateClause<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    expr: Node<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    use types_core::catalog::UNKNOWNOID;
+    use types_nodes::primnodes::CollateExpr;
+
+    let c = expr.as_collate_clause().unwrap();
+    let arg = transformExprRecurse(mcx, pstate, c.arg.expect("CollateClause arg"))?;
+
+    let argtype = expr_type(arg);
+    if !lsyscache::type_is_collatable(argtype)? && argtype != UNKNOWNOID {
+        return Err(collations_not_supported(pstate, argtype, c.location));
+    }
+
+    let mut names: [&str; 4] = [""; 4];
+    let nnames = c.collname.len();
+    assert!(nnames >= 1 && nnames <= 3, "improper collation name list length");
+    for (i, n) in c.collname.iter().enumerate() {
+        names[i] = n.as_string().expect("collname cell").sval;
+    }
+    let coll_oid = catalog_namespace::get_collation_oid(&names[..nnames], false)
+        .map_err(|e| collation_lookup_position(pstate, e, c.location))?;
+
+    Node::mk(mcx, CollateExpr { arg, collOid: coll_oid, location: c.location })
+}
+
+// C: setup_parser_errposition_callback around get_collation_oid.
+#[cold]
+#[inline(never)]
+fn collation_lookup_position(
+    pstate: &ParseState<'_, '_>,
+    e: Box<types_error::PgError>,
+    location: types_core::ParseLoc,
+) -> Box<types_error::PgError> {
+    if e.cursor_position().is_some() {
+        return e;
+    }
+    Box::new((*e).with_cursor_position(parser_small1::parser_errposition(
+        pstate,
+        location,
+        mbutils::GetDatabaseEncoding(),
+    )))
+}
+
 fn cannot_cast_error(
     pstate: &ParseState<'_, '_>,
     input_type: types_core::Oid,
@@ -708,23 +756,6 @@ fn transformBooleanTest<'mcx>(
             location: b.location,
         },
     )
-}
-
-fn transformCollateClause<'mcx>(
-    mcx: Mcx<'mcx>,
-    pstate: &mut ParseState<'_, 'mcx>,
-    expr: Node<'mcx>,
-) -> PgResult<Node<'mcx>> {
-    let c = expr.as_collate_clause().unwrap();
-    let arg = transformExprRecurse(mcx, pstate, c.arg.expect("CollateClause.arg"))?;
-    let argtype = expr_type(arg);
-    if !lsyscache::type_is_collatable(argtype)? && argtype != types_core::catalog::UNKNOWNOID {
-        return Err(collations_not_supported(pstate, argtype, c.location));
-    }
-    panic!(
-        "transformCollateClause (parse_expr.c): LookupCollation (namespace.c \
-         collation-name resolution) unported — unit backend-catalog-namespace"
-    );
 }
 
 fn transformRowExpr<'mcx>(
