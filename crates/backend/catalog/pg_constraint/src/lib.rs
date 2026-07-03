@@ -104,6 +104,7 @@ pub struct ConstraintEntry<'a> {
     pub fk_del_set_cols: &'a [i16],
     pub fk_match_type: u8,
     pub conbin: Option<&'a str>,
+    pub con_expr: Option<types_nodes::Node<'a>>,
     pub is_local: bool,
     pub inhcount: i16,
     pub is_no_inherit: bool,
@@ -136,6 +137,7 @@ impl<'a> ConstraintEntry<'a> {
             fk_del_set_cols: &[],
             fk_match_type: b' ',
             conbin: None,
+            con_expr: None,
             is_local: true,
             inhcount: 0,
             is_no_inherit: false,
@@ -276,7 +278,276 @@ pub fn CreateConstraintEntry<'mcx>(mcx: Mcx<'mcx>, e: &ConstraintEntry<'_>) -> P
         pg_depend::DependencyType::Normal,
     )?;
 
+    if let Some(expr) = e.con_expr {
+        record_check_expr_dependencies(mcx, &conobject, e.relid, expr)?;
+    }
     Ok(con_oid)
+}
+
+// recordDependencyOnSingleRelExpr slice (CHECK conExpr): self-rel Var refs
+// become NORMAL column deps; every other reference must be pinned.
+fn record_check_expr_dependencies<'mcx>(
+    mcx: Mcx<'mcx>,
+    conobject: &pg_depend::ObjectAddress,
+    relid: Oid,
+    expr: types_nodes::Node<'mcx>,
+) -> PgResult<()> {
+    struct W<'m> {
+        relid: Oid,
+        addrs: PgVec<'m, pg_depend::ObjectAddress>,
+    }
+    impl<'mcx> nodes_core::NodeWalker<'mcx> for W<'mcx> {
+        fn visit(&mut self, node: types_nodes::Node<'mcx>) -> PgResult<bool> {
+            use types_nodes::NodeTag::*;
+            const TYPE_CLASS: Oid = types_core::TYPE_RELATION_ID;
+            const PROC_CLASS: Oid = 1255;
+            const OPER_CLASS: Oid = 2617;
+            const COLL_CLASS: Oid = 3456;
+            let pinned = |class: Oid, oid: Oid| oid == 0 || catalog::IsPinnedObject(class, oid);
+            let ok = match node.node_tag() {
+                T_Var => {
+                    let v = node.as_var().expect("Var");
+                    debug_assert!(v.varno == 1);
+                    self.addrs.push(pg_depend::ObjectAddress::sub_set(
+                        types_core::RELATION_RELATION_ID,
+                        self.relid,
+                        v.varattno as i32,
+                    ));
+                    true
+                }
+                T_Const => {
+                    let c = node.as_const().expect("Const");
+                    pinned(TYPE_CLASS, c.consttype) && pinned(COLL_CLASS, c.constcollid)
+                }
+                T_FuncExpr => {
+                    let f = node.as_func_expr().expect("FuncExpr");
+                    pinned(PROC_CLASS, f.funcid) && pinned(TYPE_CLASS, f.funcresulttype)
+                }
+                T_OpExpr => {
+                    let o = node.as_op_expr().expect("OpExpr");
+                    pinned(OPER_CLASS, o.opno) && pinned(TYPE_CLASS, o.opresulttype)
+                }
+                T_RelabelType | T_CoerceViaIO | T_BoolExpr | T_CaseExpr | T_CaseWhen
+                | T_NullTest | T_CoalesceExpr | T_MinMaxExpr | T_List => true,
+                other => panic!(
+                    "unported: recordDependencyOnSingleRelExpr over {other:?} CHECK expression"
+                ),
+            };
+            if !ok {
+                panic!(
+                    "unported: recordDependencyOnSingleRelExpr non-pinned reference in \
+                     CHECK expression"
+                );
+            }
+            nodes_core::expression_tree_walker(node, self)
+        }
+    }
+    let mut w = W { relid, addrs: mcx::PgVec::new_in(mcx) };
+    nodes_core::NodeWalker::visit(&mut w, expr)?;
+    let mut addrs = w.addrs;
+    pg_depend::record_object_address_dependencies(
+        mcx,
+        conobject,
+        &mut addrs,
+        pg_depend::DependencyType::Normal,
+    )
+}
+
+pub const ConstraintRelidTypidNameIndexId: Oid = 2665;
+
+pub struct NotNullConTup {
+    pub oid: Oid,
+    pub conname: [u8; 64],
+    pub coninhcount: i16,
+    pub connoinherit: bool,
+    pub conislocal: bool,
+    pub convalidated: bool,
+    pub attnum: AttrNumber,
+}
+
+impl NotNullConTup {
+    pub fn name_str(&self) -> &str {
+        let len = self.conname.iter().position(|&b| b == 0).unwrap_or(64);
+        core::str::from_utf8(&self.conname[..len]).expect("conname UTF-8")
+    }
+}
+
+// findNotNullConstraintAttnum (pg_constraint.c), decoded-form return.
+pub fn findNotNullConstraintAttnum<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+    attnum: AttrNumber,
+) -> PgResult<Option<NotNullConTup>> {
+    let con_rel = table::table_open(mcx, CONSTRAINT_RELATION_ID, AccessShareLock)?;
+    let keys = [eq_key(Anum_pg_constraint_conrelid, F_OIDEQ, Datum::from_oid(relid))];
+    let mut scan = genam::systable_beginscan(
+        mcx,
+        &con_rel,
+        ConstraintRelidTypidNameIndexId,
+        true,
+        None,
+        &keys,
+    )?;
+    let desc = con_rel.descr();
+    let mut found: Option<NotNullConTup> = None;
+    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+        let mut isnull = false;
+        // SAFETY (each): fixed NOT NULL pg_constraint columns under its descriptor.
+        let contype = unsafe {
+            types_tuple::heap_getattr(tup, Anum_pg_constraint_contype as i32, desc, &mut isnull)
+        }
+        .as_i8() as u8;
+        if contype != CONSTRAINT_NOTNULL {
+            continue;
+        }
+        let conkey = extract_notnull_column(mcx, tup, desc)?;
+        if conkey != attnum {
+            continue;
+        }
+        let get = |anum: AttrNumber| {
+            let mut isnull = false;
+            // SAFETY: as above.
+            unsafe { types_tuple::heap_getattr(tup, anum as i32, desc, &mut isnull) }
+        };
+        let mut conname = [0u8; 64];
+        // SAFETY: NameData column is a 64-byte in-tuple buffer.
+        let namebytes = unsafe {
+            core::slice::from_raw_parts(get(Anum_pg_constraint_conname).as_usize() as *const u8, 64)
+        };
+        conname.copy_from_slice(namebytes);
+        found = Some(NotNullConTup {
+            oid: get(Anum_pg_constraint_oid).as_oid(),
+            conname,
+            coninhcount: get(Anum_pg_constraint_coninhcount).as_i16(),
+            connoinherit: get(Anum_pg_constraint_connoinherit).as_bool(),
+            conislocal: get(Anum_pg_constraint_conislocal).as_bool(),
+            convalidated: get(Anum_pg_constraint_convalidated).as_bool(),
+            attnum: conkey,
+        });
+        break;
+    }
+    genam::systable_endscan(mcx, scan)?;
+    con_rel.close(AccessShareLock)?;
+    Ok(found)
+}
+
+// extractNotNullColumn (pg_constraint.c): sole conkey element.
+fn extract_notnull_column<'mcx>(
+    mcx: Mcx<'mcx>,
+    tup: &types_tuple::HeapTupleData<'mcx>,
+    desc: &types_tuple::TupleDescData<'mcx>,
+) -> PgResult<AttrNumber> {
+    let mut isnull = false;
+    // SAFETY: conkey is NOT NULL for relation constraints.
+    let d = unsafe {
+        types_tuple::heap_getattr(tup, Anum_pg_constraint_conkey as i32, desc, &mut isnull)
+    };
+    debug_assert!(!isnull);
+    let p = d.as_usize() as *const u8;
+    // SAFETY: live int2[] varlena image through its extent.
+    let image = unsafe { core::slice::from_raw_parts(p, types_tuple::varatt::varsize_any(p)) };
+    let payload = varlena::open_image(mcx, image)?;
+    // DatumGetArrayTypeP: rebuild the 4B-header form (image may be packed).
+    let body = payload.as_bytes();
+    let total = body.len() + 4;
+    let mut full: PgVec<'_, u8> = mcx::vec_with_capacity_in(mcx, total)?;
+    mcx::vec_append_bytes(&mut full, &(((total as u32) << 2).to_ne_bytes()))?;
+    mcx::vec_append_bytes(&mut full, body)?;
+    let elems = datum::array_build::deconstruct_array_image(mcx, &full, 2, true, b's')?;
+    assert!(elems.len() == 1, "extractNotNullColumn: conkey with {} elements", elems.len());
+    Ok(elems[0].as_i16())
+}
+
+// ConstraintNameIsUsed (pg_constraint.c), CONSTRAINT_RELATION arm.
+pub fn ConstraintNameIsUsed<'mcx>(mcx: Mcx<'mcx>, relid: Oid, conname: &str) -> PgResult<bool> {
+    let con_rel = table::table_open(mcx, CONSTRAINT_RELATION_ID, AccessShareLock)?;
+    let cname = name_arg(mcx, conname)?;
+    let keys = [
+        eq_key(Anum_pg_constraint_conrelid, F_OIDEQ, Datum::from_oid(relid)),
+        eq_key(Anum_pg_constraint_contypid, F_OIDEQ, Datum::from_oid(InvalidOid)),
+        eq_key(Anum_pg_constraint_conname, F_NAMEEQ, Datum::from_usize(cname.as_ptr() as usize)),
+    ];
+    let mut scan = genam::systable_beginscan(
+        mcx,
+        &con_rel,
+        ConstraintRelidTypidNameIndexId,
+        true,
+        None,
+        &keys,
+    )?;
+    let found = genam::systable_getnext(mcx, &mut scan)?.is_some();
+    genam::systable_endscan(mcx, scan)?;
+    con_rel.close(AccessShareLock)?;
+    Ok(found)
+}
+
+// get_relation_constraint_attnos-free slice of RemoveConstraintById
+// (pg_constraint.c): CHECK decrements pg_class.relchecks.
+pub fn RemoveConstraintById<'mcx>(mcx: Mcx<'mcx>, con_id: Oid) -> PgResult<()> {
+    let con_rel = table::table_open(mcx, CONSTRAINT_RELATION_ID, RowExclusiveLock)?;
+    let keys = [eq_key(Anum_pg_constraint_oid, F_OIDEQ, Datum::from_oid(con_id))];
+    let mut scan =
+        genam::systable_beginscan(mcx, &con_rel, CONSTRAINT_OID_INDEX_ID, true, None, &keys)?;
+    let tup = genam::systable_getnext(mcx, &mut scan)?
+        .unwrap_or_else(|| panic!("cache lookup failed for constraint {con_id}"));
+    let desc = con_rel.descr();
+    let mut isnull = false;
+    // SAFETY (each): fixed NOT NULL pg_constraint columns under its descriptor.
+    let contype = unsafe {
+        types_tuple::heap_getattr(tup, Anum_pg_constraint_contype as i32, desc, &mut isnull)
+    }
+    .as_i8() as u8;
+    // SAFETY: as above.
+    let conrelid = unsafe {
+        types_tuple::heap_getattr(tup, Anum_pg_constraint_conrelid as i32, desc, &mut isnull)
+    }
+    .as_oid();
+    if conrelid == InvalidOid {
+        panic!("unported: RemoveConstraintById domain constraints");
+    }
+    let rel = table::table_open(mcx, conrelid, types_rel::AccessExclusiveLock)?;
+    if contype == CONSTRAINT_CHECK {
+        decrement_relchecks(mcx, conrelid)?;
+    }
+    rel.close(types_rel::NoLock)?;
+    let tid = tup.t_self;
+    catalog_indexing::CatalogTupleDelete(&con_rel, &tid)?;
+    genam::systable_endscan(mcx, scan)?;
+    con_rel.close(RowExclusiveLock)
+}
+
+const Anum_pg_class_relchecks: AttrNumber = 20;
+
+fn decrement_relchecks<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<()> {
+    let pgrel = table::table_open(mcx, types_core::RELATION_RELATION_ID, RowExclusiveLock)?;
+    let keys = [eq_key(1, F_OIDEQ, Datum::from_oid(relid))];
+    let mut scan =
+        genam::systable_beginscan(mcx, &pgrel, catalog::ClassOidIndexId, true, None, &keys)?;
+    let reltup = genam::systable_getnext(mcx, &mut scan)?
+        .unwrap_or_else(|| panic!("cache lookup failed for relation {relid}"));
+    let desc = pgrel.descr();
+    let mut isnull = false;
+    // SAFETY: fixed NOT NULL pg_class column under pg_class's descriptor.
+    let relchecks = unsafe {
+        types_tuple::heap_getattr(reltup, Anum_pg_class_relchecks as i32, desc, &mut isnull)
+    }
+    .as_i16();
+    assert!(relchecks > 0, "relation {relid} has relchecks = 0");
+    let natts = desc.natts as usize;
+    let mut repl_values: PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
+    let mut repl_isnull: PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+    let mut repl: PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+    repl_values.resize(natts, Datum::null());
+    repl_isnull.resize(natts, false);
+    repl.resize(natts, false);
+    repl_values[(Anum_pg_class_relchecks - 1) as usize] = Datum::from_i16(relchecks - 1);
+    repl[(Anum_pg_class_relchecks - 1) as usize] = true;
+    let mut newtup =
+        heaptuple::heap_modify_tuple(mcx, reltup, desc, &repl_values, &repl_isnull, &repl)?;
+    let otid = reltup.t_self;
+    genam::systable_endscan(mcx, scan)?;
+    catalog_indexing::CatalogTupleUpdate(mcx, &pgrel, &otid, &mut newtup)?;
+    pgrel.close(RowExclusiveLock)
 }
 
 // ChooseConstraintName (pg_constraint.c): "name1_name2_label[N]" probed

@@ -810,7 +810,28 @@ pub fn transformAlterTableCmd<'mcx>(
                     .expect("ColumnDef");
             }
         }
-        AlterTableType::AT_DropColumn => {}
+        AlterTableType::AT_DropColumn
+        | AlterTableType::AT_ColumnDefault
+        | AlterTableType::AT_DropNotNull
+        | AlterTableType::AT_SetNotNull => {}
+        AlterTableType::AT_AlterColumnType => {
+            let defnode = cmd.def.expect("AT_AlterColumnType ColumnDef");
+            let cd = defnode.as_variant::<ColumnDef>().expect("ColumnDef");
+            if cd.raw_default.is_some() {
+                unported("transformAlterTableStmt AT_AlterColumnType USING transform");
+            }
+        }
+        AlterTableType::AT_AddConstraint => {
+            // transformTableConstraint: CHECK passes through untouched;
+            // index/FK-backed contypes are unported lanes.
+            let defnode = cmd.def.expect("AT_AddConstraint Constraint");
+            let c = defnode
+                .as_variant::<types_nodes::rawnodes::Constraint>()
+                .expect("Constraint");
+            if c.contype != types_nodes::rawnodes::ConstrType::CONSTR_CHECK {
+                unported(&format!("transformTableConstraint {:?} arm", c.contype));
+            }
+        }
         other => unported(&format!("transformAlterTableStmt {other:?} arm")),
     }
     if !ckconstraints.is_nil() || !nnconstraints.is_nil() {

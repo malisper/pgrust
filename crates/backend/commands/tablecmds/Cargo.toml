@@ -67,4 +67,10 @@ array = { package = "types_array", path = "../../../_support/types/array" }
 relcache = { path = "../../utils/cache/relcache" }
 types_trigger = { path = "../../../_support/types/types_trigger" }
 trigger = { path = "../trigger" }
-
+exectuples = { path = "../../executor/exectuples" }
+tableam_vocab = { path = "../../access/table/tableam_vocab" }
+heapam = { path = "../../access/heap/heapam" }
+nodes_core = { path = "../../nodes/nodes_core" }
+types_slot = { path = "../../../_support/types/types_slot" }
+pg_type = { path = "../../catalog/pg_type" }
+commands_cluster = { path = "../cluster" }

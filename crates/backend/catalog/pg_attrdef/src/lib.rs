@@ -153,6 +153,30 @@ fn assert_only_pinned_expr_refs<'mcx>(expr: Node<'mcx>) -> PgResult<()> {
     Ok(())
 }
 
+// GetAttrDefaultOid (pg_attrdef.c): pg_attrdef row for (adrelid, adnum).
+pub fn GetAttrDefaultOid<'mcx>(mcx: Mcx<'mcx>, relid: Oid, attnum: AttrNumber) -> PgResult<Oid> {
+    const AttrDefaultIndexId: Oid = 2656;
+    let adrel = table::table_open(mcx, ATTR_DEFAULT_RELATION_ID, types_rel::AccessShareLock)?;
+    let keys = [
+        eq_key(Anum_pg_attrdef_adrelid, F_OIDEQ, Datum::from_oid(relid)),
+        eq_key(Anum_pg_attrdef_adnum, F_INT2EQ, Datum::from_i16(attnum)),
+    ];
+    let mut scan =
+        genam::systable_beginscan(mcx, &adrel, AttrDefaultIndexId, true, None, &keys)?;
+    let mut result = types_core::InvalidOid;
+    if let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+        let mut isnull = false;
+        // SAFETY: fixed NOT NULL pg_attrdef oid column under its descriptor.
+        result = unsafe {
+            types_tuple::heap_getattr(tup, Anum_pg_attrdef_oid as i32, adrel.descr(), &mut isnull)
+        }
+        .as_oid();
+    }
+    genam::systable_endscan(mcx, scan)?;
+    adrel.close(types_rel::AccessShareLock)?;
+    Ok(result)
+}
+
 pub fn RemoveAttrDefaultById<'mcx>(mcx: Mcx<'mcx>, attrdef_id: Oid) -> PgResult<()> {
     let adrel = table::table_open(mcx, ATTR_DEFAULT_RELATION_ID, RowExclusiveLock)?;
     let keys = [eq_key(Anum_pg_attrdef_oid, F_OIDEQ, Datum::from_oid(attrdef_id))];

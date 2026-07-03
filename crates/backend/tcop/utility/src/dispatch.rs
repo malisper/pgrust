@@ -561,6 +561,21 @@ fn dispatch_switch<'mcx>(
             }
         }
 
+        T_RenameStmt => {
+            let stmt = parsetree
+                .as_variant::<types_nodes::parsenodes::RenameStmt>()
+                .expect("RenameStmt");
+            match stmt.renameType {
+                types_nodes::parsenodes::ObjectType::OBJECT_TABLE => {
+                    tablecmds::RenameRelation(mcx, stmt)?;
+                }
+                types_nodes::parsenodes::ObjectType::OBJECT_COLUMN => {
+                    tablecmds::renameatt(mcx, stmt)?;
+                }
+                other => panic!("unported: ExecRenameStmt {other:?}"),
+            }
+        }
+
         // Everything else — the GRANT/DROP/RENAME/ALTER.../COMMENT/SECURITY
         // LABEL fast paths and the event-trigger-fenced DDL fan-out.
         T_CreateStmt => {

@@ -21,3 +21,13 @@ seam_core::seam!(
     // remove_on_commit_action(relid) (tablecmds.c): infallible list marking.
     pub fn remove_on_commit_action(relid: types_core::Oid)
 );
+
+seam_core::seam!(
+    // RenameRelationInternal (tablecmds.c) for cluster's toast renames.
+    pub fn rename_relation_internal<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        relid: types_core::Oid,
+        newname: &str,
+        is_index: bool,
+    ) -> PgResult<()>
+);
