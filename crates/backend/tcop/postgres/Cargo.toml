@@ -16,6 +16,7 @@ types_portal = { path = "../../../_support/types/portal" }
 types_nodes = { path = "../../../_support/types/nodes" }
 types_dest = { path = "../../../_support/types/types_dest" }
 stringinfo = { path = "../../../_support/types/stringinfo" }
+datum = { path = "../../../_support/types/datum" }
 elog = { path = "../../utils/error/elog" }
 cmdtag = { path = "../cmdtag" }
 tcop_dest = { path = "../dest" }

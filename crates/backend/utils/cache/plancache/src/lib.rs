@@ -58,6 +58,9 @@ struct CachedPlanSource {
     is_complete: bool,
     is_saved: bool,
     is_valid: bool,
+    // Dropped source whose arenas must outlive it: custom plans share
+    // query-arena subnodes (C copies; we defer the free to last plan release).
+    dead: bool,
     generation: i32,
     generic_cost: f64,
     total_custom_cost: f64,
@@ -233,6 +236,7 @@ pub fn CreateCachedPlan(
             is_complete: false,
             is_saved: false,
             is_valid: false,
+            dead: false,
             generation: 0,
             generic_cost: -1.0,
             total_custom_cost: 0.0,
@@ -327,24 +331,22 @@ pub fn DropCachedPlan(h: CachedPlanSourceHandle) {
         }
     });
     ReleaseGenericPlan(h);
-    let (source_ctx, query_ctx) = with_cache(|pc| {
-        // Custom plans share query-arena subnodes; a survivor would dangle.
-        // C keeps the plan alive via its own context (full copyObject) —
-        // reaching this needs held cursors, which are portalcmds-lane.
-        if let Some(p) = pc.plans.iter().flatten().find(|p| p.source == h) {
-            panic!(
-                "DropCachedPlan (plancache.c): CachedPlan (refcount {}) outlives its \
-                 CachedPlanSource; cross-arena plan copy is portalcmds/held-cursor lane",
-                p.refcount
-            );
+    let ctxs = with_cache(|pc| {
+        // A surviving refcounted plan (pipelined portal) tombstones the
+        // source; ReleaseCachedPlan of the last survivor frees it.
+        if pc.plans.iter().flatten().any(|p| p.source == h) {
+            source_mut(pc, h).dead = true;
+            return None;
         }
         let (idx, _) = decode(h.0);
         let src = pc.sources[idx].take().expect("checked by source_mut");
         pc.source_free.push(idx as u32);
-        (src.source_ctx, src.query_ctx)
+        Some((src.source_ctx, src.query_ctx))
     });
-    reclaim_ctx(query_ctx);
-    reclaim_ctx(source_ctx);
+    if let Some((source_ctx, query_ctx)) = ctxs {
+        reclaim_ctx(query_ctx);
+        reclaim_ctx(source_ctx);
+    }
 }
 
 fn ReleaseGenericPlan(h: CachedPlanSourceHandle) {
@@ -363,12 +365,24 @@ pub fn ReleaseCachedPlan(cplan: CachedPlanHandle) {
             let (idx, _) = decode(cplan.0);
             let plan = pc.plans[idx].take().expect("checked by plan_mut");
             pc.plan_free.push(idx as u32);
-            Some(plan.plan_ctx)
+            let mut ctxs = vec![plan.plan_ctx];
+            // Last survivor of a dead source reclaims the tombstone.
+            let (sidx, sgen) = decode(plan.source.0);
+            let src_dead = pc.sources.get(sidx).and_then(Option::as_ref).is_some_and(|s| {
+                s.handle_gen == sgen && s.dead
+            });
+            if src_dead && !pc.plans.iter().flatten().any(|p| p.source == plan.source) {
+                let src = pc.sources[sidx].take().expect("checked above");
+                pc.source_free.push(sidx as u32);
+                ctxs.push(src.query_ctx);
+                ctxs.push(src.source_ctx);
+            }
+            ctxs
         } else {
-            None
+            Vec::new()
         }
     });
-    if let Some(ctx) = freed {
+    for ctx in freed {
         reclaim_ctx(ctx);
     }
 }

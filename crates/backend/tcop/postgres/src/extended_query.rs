@@ -6,6 +6,7 @@ use core::cell::Cell;
 use std::ffi::CStr;
 
 use ::elog::ereport;
+use ::datum::Datum;
 use ::mcx::{Mcx, MemoryContext, PgString, PgVec};
 use ::plancache::CachedPlanSourceHandle;
 use ::stringinfo::StringInfo;
@@ -289,6 +290,54 @@ fn fill_parse_plansource(
     outcome
 }
 
+fn copy_param_datum<'mcx>(
+    mcx: Mcx<'mcx>,
+    value: Datum,
+    is_null: bool,
+    ptype: Oid,
+) -> PgResult<Datum> {
+    if is_null {
+        return Ok(value);
+    }
+    let (typlen, typbyval) = lsyscache::typ::get_typlenbyval(ptype)?;
+    if typbyval {
+        return Ok(value);
+    }
+    datum_copy_in(mcx, value, typlen)
+}
+
+// datumCopy (datum.c) scoped to bind parameters; by-ref sources are
+// input/receive-function results (4B-header varlenas or cstrings, never
+// toast pointers).
+fn datum_copy_in<'mcx>(mcx: Mcx<'mcx>, value: Datum, typlen: i16) -> PgResult<Datum> {
+    let p = value.as_usize() as *const u8;
+    if p.is_null() {
+        return Ok(Datum::null());
+    }
+    let size = match typlen {
+        -1 => {
+            // SAFETY: non-null by-ref varlena datum (see above).
+            unsafe { ::datum::VarlenaRef::from_ptr(p).varsize() }
+        }
+        -2 => {
+            let mut n = 0usize;
+            // SAFETY: non-null NUL-terminated cstring datum.
+            while unsafe { *p.add(n) } != 0 {
+                n += 1;
+            }
+            n + 1
+        }
+        l => {
+            debug_assert!(l > 0);
+            l as usize
+        }
+    };
+    // SAFETY: `size` bytes readable per the arms above.
+    let src = unsafe { core::slice::from_raw_parts(p, size) };
+    let out = mcx::slice_in(mcx, src)?;
+    Ok(Datum::from_usize(out.leak().as_ptr() as usize))
+}
+
 fn portal_mcx(portal: &Portal<'static>) -> Mcx<'static> {
     // SAFETY: portalContext is PgBox'd for address stability and outlives
     // every use of this Mcx (freed only in PortalDrop, which first frees the
@@ -423,14 +472,22 @@ pub fn exec_bind_message<'mcx>(
                             .expect("client_to_server_cstring NUL-terminates")
                     });
                     let mut finfo = fmgr_seams::fmgr_info::call(typinput)?;
-                    types_fmgr::input_function_call(&mut finfo, cstr, typioparam, -1, pmcx)?
+                    let v =
+                        types_fmgr::input_function_call(&mut finfo, cstr, typioparam, -1, pmcx)?;
+                    // The result may alias finfo's scratch (fc_textin's
+                    // OutBuf), which dies with this arm — datumCopy into the
+                    // portal context (C pallocs there directly).
+                    copy_param_datum(pmcx, v, is_null, ptype)?
                 }
                 1 => {
                     let (typreceive, typioparam) =
                         lsyscache::typ::getTypeBinaryInputInfo(ptype)?;
                     let mut finfo = fmgr_seams::fmgr_info::call(typreceive)?;
                     if is_null {
-                        types_fmgr::receive_function_call(&mut finfo, None, typioparam, -1, pmcx)?
+                        let v = types_fmgr::receive_function_call(
+                            &mut finfo, None, typioparam, -1, pmcx,
+                        )?;
+                        copy_param_datum(pmcx, v, is_null, ptype)?
                     } else {
                         let raw =
                             pqformat::pq_getmsgbytes(input_message, plength as usize)?;
@@ -455,7 +512,7 @@ pub fn exec_bind_message<'mcx>(
                                 .into_error()
                                 .into());
                         }
-                        pval
+                        copy_param_datum(pmcx, pval, is_null, ptype)?
                     }
                 }
                 other => {
