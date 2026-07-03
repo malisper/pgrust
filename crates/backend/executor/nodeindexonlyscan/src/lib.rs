@@ -100,7 +100,7 @@ impl<'mcx> ScanNode<'mcx> for IndexOnlyScanState<'mcx> {
             let scandesc = unsafe { ioss_ScanDesc.as_deref_mut().unwrap_unchecked() };
             let tid = index_getnext_tid(scandesc, direction)?;
             if estate.es_instrument != 0 {
-                let n = scandesc.xs_pgstat_index_scans;
+                let n = scandesc.xs_nsearches;
                 estate.instr_set_index_nsearches(plan_node_id, n);
             }
             let Some(tid) = tid else {

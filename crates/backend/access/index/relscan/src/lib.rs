@@ -60,6 +60,18 @@ impl IndexAmKind {
         }
     }
 
+    pub const fn amsearcharray(self) -> bool {
+        match self {
+            IndexAmKind::Btree => true,
+            IndexAmKind::Hash => false,
+            IndexAmKind::Gin => true,
+            IndexAmKind::Gist => false,
+            IndexAmKind::Brin => false,
+            #[cfg(feature = "mock")]
+            IndexAmKind::Mock => false,
+        }
+    }
+
     pub const fn has_ammarkpos(self) -> bool {
         match self {
             IndexAmKind::Btree => true,
