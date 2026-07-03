@@ -278,7 +278,6 @@ fn build_sources<'mcx>(
     if n == 0 && rettype != VOIDOID {
         return Err(retval::retval_mismatch_final_stmt(rettype));
     }
-    drop(scratch);
     Ok(sources)
 }
 
@@ -455,7 +454,7 @@ fn execute_body<'mcx>(
         for (si, &psrc) in state.sources.iter().enumerate() {
             let is_last_source = si == nsources - 1;
             let cplan = plancache::GetCachedPlan(psrc, params_h, None, QueryEnvHandle::NULL)?;
-            let run = run_source(state, psrc, cplan, params_h, is_last_source, &mut pushed);
+            let run = run_source(mcx, state, psrc, cplan, params_h, is_last_source, &mut pushed);
             plancache::ReleaseCachedPlan(cplan);
             run?;
             // C pops at original-query boundaries so each list gets a fresh snap.
@@ -513,6 +512,7 @@ fn execute_body<'mcx>(
 }
 
 fn run_source<'mcx>(
+    mcx: Mcx<'mcx>,
     state: &SqlFcacheState<'mcx>,
     psrc: plancache::CachedPlanSourceHandle,
     cplan: types_portal::CachedPlanHandle,
@@ -549,9 +549,10 @@ fn run_source<'mcx>(
             let mut qc = types_portal::QueryCompletion::default();
             cmdtag::InitializeQueryCompletion(&mut qc);
             let mut dest = tcop_dest::CreateDestReceiver(CommandDest::None);
-            let ucx = MemoryContext::new("SQL function utility");
+            // C frees a per-utility subcontext; here the fn-cache mcx holds
+            // these allocations until the cache is released (bounded).
             utility_seams::process_utility::call(
-                ucx.mcx(),
+                mcx,
                 stmt,
                 query_string,
                 true,
@@ -561,7 +562,6 @@ fn run_source<'mcx>(
                 &mut dest,
                 Some(&mut qc),
             )?;
-            drop(ucx);
             continue;
         }
         let mut dest = if sets_result {
