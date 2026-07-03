@@ -430,6 +430,7 @@ pub fn raw_expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
             let rt = node.as_res_target().unwrap();
             Ok(walk_list(&rt.indirection, w)? || walk_opt(rt.val, w)?)
         }
+        NodeTag::T_SortBy => walk_opt(node.as_sort_by().unwrap().node, w),
         NodeTag::T_TypeCast => {
             let tc = node.as_type_cast().unwrap();
             Ok(walk_opt(tc.arg, w)? || walk_opt(tc.typeName, w)?)
