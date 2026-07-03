@@ -897,7 +897,7 @@ pub fn DefineCompositeType<'mcx>(
     let typevar = stmt.typevar.expect("CompositeTypeStmt.typevar");
     let create = CreateStmt {
         relation: Some(typevar),
-        tableElts: stmt.coldeflist,
+        tableElts: types_nodes::NodeList::from_slice(mcx, stmt.coldeflist.as_slice())?,
         inhRelations: types_nodes::NodeList::nil(),
         partbound: None,
         partspec: None,
