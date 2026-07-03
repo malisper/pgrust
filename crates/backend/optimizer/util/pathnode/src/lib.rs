@@ -13,8 +13,8 @@ use types_pathnodes::{
 use costsize::{clamp_width_est, cost_qual_eval_node, gucs, JoinCostWorkspace};
 use types_pathnodes::run::PlannerRun;
 use types_pathnodes::{
-    compare_pathkeys, tag16, HashPath, JoinPath, MaterialPath, MergePath, NestPath,
-    PathKeysComparison, SemiAntiJoinFactors, SpecialJoinInfo, RinfoId,
+    compare_pathkeys, HashPath, JoinPath, MaterialPath, MergePath, NestPath,
+    PathKeysComparison, RinfoId, SemiAntiJoinFactors, SpecialJoinInfo,
 };
 
 pub use costsize::SubqueryScanInfo;
