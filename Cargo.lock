@@ -6625,6 +6625,7 @@ dependencies = [
  "mcx",
  "miscinit_seams",
  "pg_depend",
+ "pg_enum",
  "syscache_seams",
  "table",
  "types_core",
