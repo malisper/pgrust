@@ -5263,6 +5263,7 @@ dependencies = [
  "heaptuple",
  "mcx",
  "outfuncs",
+ "pg_depend",
  "table",
  "types_core",
  "types_error",
