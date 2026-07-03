@@ -539,6 +539,10 @@ fn coerce_io_arg_type(node: Node<'_>) -> Oid {
         NodeTag::T_OpExpr => node.as_op_expr().unwrap().opresulttype,
         NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resulttype,
         NodeTag::T_CoerceViaIO => node.as_coerce_via_io().unwrap().resulttype,
+        NodeTag::T_CaseTestExpr => node.as_case_test_expr().unwrap().typeId,
+        NodeTag::T_JsonConstructorExpr => {
+            node.as_json_constructor_expr().unwrap().returning.expect("returning").typid
+        }
         other => deferred("coerce_io_arg_type (exprType)", other),
     }
 }

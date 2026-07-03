@@ -970,6 +970,41 @@ fn setup_walker(node: Node<'_>, info: &mut SetupInfo) {
         }
         NodeTag::T_CoerceToDomain => setup_walker(node.as_coerce_to_domain().unwrap().arg, info),
         NodeTag::T_CoerceToDomainValue => {}
+        NodeTag::T_JsonValueExpr => {
+            let j = node.as_json_value_expr().unwrap();
+            for e in [j.raw_expr, j.formatted_expr].into_iter().flatten() {
+                setup_walker(e, info);
+            }
+        }
+        NodeTag::T_JsonConstructorExpr => {
+            let c = node.as_json_constructor_expr().unwrap();
+            for arg in &c.args {
+                setup_walker(arg, info);
+            }
+            for e in [c.func, c.coercion].into_iter().flatten() {
+                setup_walker(e, info);
+            }
+        }
+        NodeTag::T_JsonIsPredicate => {
+            setup_walker(node.as_json_is_predicate().unwrap().expr.expect("expr"), info)
+        }
+        NodeTag::T_JsonBehavior => {
+            if let Some(e) = node.as_json_behavior().unwrap().expr {
+                setup_walker(e, info);
+            }
+        }
+        NodeTag::T_JsonExpr => {
+            let j = node.as_json_expr().unwrap();
+            for e in [j.formatted_expr, j.path_spec, j.on_empty, j.on_error]
+                .into_iter()
+                .flatten()
+            {
+                setup_walker(e, info);
+            }
+            for v in &j.passing_values {
+                setup_walker(v, info);
+            }
+        }
         tag => panic!("execexpr setup walker: node family {tag:?} not ported"),
     }
 }
