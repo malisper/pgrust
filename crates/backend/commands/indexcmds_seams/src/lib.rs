@@ -13,6 +13,10 @@ seam_core::seam!(
         table_id: Oid,
         stmt: types_nodes::Node<'mcx>,
         skip_build: bool,
+    ) -> PgResult<Oid>
+);
+
+seam_core::seam!(
     // DefineIndex; seam because indexcmds depends on tablecmds.
     pub fn define_index<'mcx>(
         mcx: mcx::Mcx<'mcx>,

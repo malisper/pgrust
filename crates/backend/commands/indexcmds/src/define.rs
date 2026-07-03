@@ -603,7 +603,10 @@ fn IndexSetParentIndex<'mcx>(
     parentOid: Oid,
 ) -> PgResult<()> {
     let partRelid = partitionIdx.rd_id;
-    debug_assert!(parentOid != InvalidOid);
+    assert!(
+        parentOid != InvalidOid,
+        "unported: indexcmds IndexSetParentIndex detach direction"
+    );
 
     const InheritsRelationId: Oid = 2611;
     const InheritsRelidSeqnoIndexId: Oid = 2680;
@@ -687,6 +690,15 @@ fn update_relispartition<'mcx>(mcx: Mcx<'mcx>, relationId: Oid, newval: bool) ->
     )?;
     let tup = genam::systable_getnext(mcx, &mut scan)?
         .unwrap_or_else(|| panic!("cache lookup failed for relation {relationId}"));
+    {
+        let mut isnull = false;
+        // SAFETY: relispartition is a fixed NOT NULL pg_class column.
+        let cur = unsafe {
+            types_tuple::heap_getattr(tup, Anum_pg_class_relispartition as i32, class_rel.descr(), &mut isnull)
+        }
+        .as_bool();
+        assert!(cur != newval, "update_relispartition: no-op write for relation {relationId}");
+    }
     let desc = class_rel.descr();
     let natts = desc.natts as usize;
     let mut values: PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
