@@ -632,44 +632,6 @@ fn deleteObjectsInList<'mcx>(
     Ok(())
 }
 
-// deleteDependencyRecordsFor (pg_depend.c).
-pub fn deleteDependencyRecordsFor<'mcx>(
-    mcx: Mcx<'mcx>,
-    classId: Oid,
-    objectId: Oid,
-    skipExtensionDeps: bool,
-) -> PgResult<i64> {
-    let mut count = 0i64;
-    let depRel = table::table_open(mcx, pg_depend::DependRelationId, RowExclusiveLock)?;
-    let keys = [
-        oid_key(Anum_pg_depend_classid, classId),
-        oid_key(Anum_pg_depend_objid, objectId),
-    ];
-    let mut scan = genam::systable_beginscan(
-        mcx,
-        &depRel,
-        pg_depend::DependDependerIndexId,
-        true,
-        None,
-        &keys,
-    )?;
-    let desc = depRel.descr();
-    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
-        if skipExtensionDeps
-            && getattr(tup, Anum_pg_depend_deptype, desc).as_i8()
-                == pg_depend::DependencyType::Extension.as_char()
-        {
-            continue;
-        }
-        let tid = tup.t_self;
-        catalog_indexing::CatalogTupleDelete(&depRel, &tid)?;
-        count += 1;
-    }
-    genam::systable_endscan(mcx, scan)?;
-    depRel.close(RowExclusiveLock)?;
-    Ok(count)
-}
-
 fn deleteOneObject<'mcx>(
     mcx: Mcx<'mcx>,
     object: &ObjectAddress,
