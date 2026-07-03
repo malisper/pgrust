@@ -1,8 +1,8 @@
 //! fmgr wrappers (`fc_*`) + `CASH_BUILTINS` for fmgr-core. cash_recv/cash_send
 //! (2492/2493) need the wire convention at the frame, cash_words (935) the
 //! text-result convention (the varlena textin precedent); their value cores
-//! live in the crate root. cash_numeric/numeric_cash (3823/3824) are loud
-//! until numeric.c ports.
+//! live in the crate root. cash_numeric/numeric_cash (3823/3824) stay loud
+//! until adt_numeric exposes div/mul/round and cash gains the dep edge.
 
 use std::borrow::Cow;
 
@@ -11,24 +11,17 @@ use ::types_core::Oid;
 use ::types_error::PgResult;
 use ::types_fmgr::{FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction};
 
-#[cold]
-#[inline(never)]
-fn soft_context_unported(name: &str) -> ! {
-    panic!("{name}: fcinfo.context soft-error demux is fmgr-core's unit (not ported)")
-}
-
-fn in_arg<'a>(fcinfo: &'a Fcinfo, name: &'static str) -> Cow<'a, str> {
-    if fcinfo.context.is_some() {
-        soft_context_unported(name);
-    }
+fn in_arg<'a>(fcinfo: &'a Fcinfo) -> Cow<'a, str> {
     // SAFETY: catalog arg 0 of cash_in is cstring (typlen -2).
     let s = unsafe { fcinfo.arg_cstring(0) };
     String::from_utf8_lossy(s.to_bytes())
 }
 
 pub fn fc_cash_in(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    let s = in_arg(fcinfo, "cash_in");
-    Ok(Datum::from_i64(crate::cash_in(&s, None)?))
+    let s = in_arg(fcinfo);
+    // SAFETY: context, if set, rides per the ErrorSaveNode contract for this call.
+    let esc = unsafe { fcinfo.soft_error_context() };
+    Ok(Datum::from_i64(crate::cash_in(&s, esc)?))
 }
 
 // C pallocs the cstring per row; the backend thread owns retained scratch

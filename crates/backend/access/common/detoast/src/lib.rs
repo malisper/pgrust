@@ -3,8 +3,8 @@
 //! crate; this build has no LZ4, matching C without USE_LZ4). Values are raw
 //! varlena images (`&[u8]`, header included); results are fresh 4B-header
 //! images charged to the caller's `Mcx`. External on-disk fetch crosses
-//! `toast_internals_seams` (loud until the toast unit lands); indirect and
-//! expanded arms panic loudly (no expanded-datum infrastructure yet).
+//! `toast_internals_seams` (loud until the toast unit lands); indirect arms
+//! panic loudly; expanded arms flatten through `datum::expandeddatum`.
 
 use mcx::{Mcx, PgVec};
 use types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED, ERRCODE_FEATURE_NOT_SUPPORTED};
@@ -134,10 +134,24 @@ fn indirect_unported(who: &str) -> ! {
     panic!("{who}: indirect TOAST pointer — toast_internals indirect dereference is not ported");
 }
 
-#[cold]
-#[inline(never)]
-fn expanded_unported(who: &str) -> ! {
-    panic!("{who}: expanded-object TOAST pointer — utils/adt/expandeddatum is not ported");
+fn flatten_expanded<'mcx>(mcx: Mcx<'mcx>, attr: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
+    // SAFETY: an expanded TOAST image embeds a pointer to its live
+    // ExpandedObjectHeader (writer invariant; C detoast.c derefs the same);
+    // flatten_into fills exactly `n` bytes of the reserved capacity.
+    unsafe {
+        let eoh = datum::expandeddatum::datum_get_eohp(datum::Datum::from_usize(
+            attr.as_ptr() as usize,
+        ));
+        let n = datum::expandeddatum::eoh_get_flat_size(eoh);
+        let mut result = mcx::vec_with_capacity_in(mcx, n)?;
+        datum::expandeddatum::eoh_flatten_into(
+            eoh,
+            result.spare_capacity_mut().as_mut_ptr() as *mut u8,
+            n,
+        );
+        result.set_len(n);
+        Ok(result)
+    }
 }
 
 /// C `detoast_external_attr`: fetch a toasted value back from external
@@ -148,7 +162,7 @@ pub fn detoast_external_attr<'mcx>(mcx: Mcx<'mcx>, attr: &[u8]) -> PgResult<PgVe
     } else if is_external_indirect(attr) {
         indirect_unported("detoast_external_attr");
     } else if is_external_expanded(attr) {
-        expanded_unported("detoast_external_attr");
+        flatten_expanded(mcx, attr)
     } else {
         // C returns `attr` unchanged; this owned port copies verbatim.
         copy_verbatim(mcx, attr)
@@ -167,7 +181,10 @@ pub fn detoast_attr<'mcx>(mcx: Mcx<'mcx>, attr: &[u8]) -> PgResult<PgVec<'mcx, u
     } else if is_external_indirect(attr) {
         indirect_unported("detoast_attr");
     } else if is_external_expanded(attr) {
-        expanded_unported("detoast_attr");
+        let flat = flatten_expanded(mcx, attr)?;
+        // C: flatteners are not allowed to produce compressed/short output.
+        debug_assert!(!is_external(&flat) && !is_compressed(&flat) && !is_short(&flat));
+        Ok(flat)
     } else if is_compressed(attr) {
         toast_decompress_datum(mcx, attr)
     } else if is_short(attr) {
@@ -238,7 +255,7 @@ pub fn detoast_attr_slice<'mcx>(
     } else if is_external_indirect(attr) {
         indirect_unported("detoast_attr_slice");
     } else if is_external_expanded(attr) {
-        expanded_unported("detoast_attr_slice");
+        Some(flatten_expanded(mcx, attr)?)
     } else {
         None
     };
@@ -373,7 +390,12 @@ pub fn toast_raw_datum_size(value: &[u8]) -> usize {
     } else if is_external_indirect(value) {
         indirect_unported("toast_raw_datum_size");
     } else if is_external_expanded(value) {
-        expanded_unported("toast_raw_datum_size");
+        // SAFETY: expanded image embeds a live header pointer (flatten_expanded).
+        unsafe {
+            datum::expandeddatum::eoh_get_flat_size(datum::expandeddatum::datum_get_eohp(
+                datum::Datum::from_usize(value.as_ptr() as usize),
+            ))
+        }
     } else if is_compressed(value) {
         toast_compress_extsize(value) as usize + VARHDRSZ
     } else if is_short(value) {
@@ -390,7 +412,12 @@ pub fn toast_datum_size(value: &[u8]) -> usize {
     } else if is_external_indirect(value) {
         indirect_unported("toast_datum_size");
     } else if is_external_expanded(value) {
-        expanded_unported("toast_datum_size");
+        // SAFETY: expanded image embeds a live header pointer (flatten_expanded).
+        unsafe {
+            datum::expandeddatum::eoh_get_flat_size(datum::expandeddatum::datum_get_eohp(
+                datum::Datum::from_usize(value.as_ptr() as usize),
+            ))
+        }
     } else if is_short(value) {
         varsize_short(value)
     } else {

@@ -20,7 +20,6 @@ fn setup() {
             }
             l as i32
         });
-        mbutils_seams::pg_client_to_server::set(|_mcx, _s| Ok(None));
         mbutils_seams::pg_server_to_client::set(|_mcx, _s| Ok(None));
     });
 }

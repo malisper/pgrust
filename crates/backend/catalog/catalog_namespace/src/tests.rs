@@ -281,3 +281,64 @@ fn lookup_namespace_helpers() {
     };
     assert!(denied.unwrap_err().message().contains("permission denied"));
 }
+
+fn install_proc_candidates() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        syscache_seams::lookup_pg_proc_name_candidates::set(|mcx, proname| {
+            let mut v = mcx::PgVec::new_in(mcx);
+            let mut cand = |oid, nsp, args: &[Oid], variadic, ndefaults| {
+                let mut a = mcx::vec_with_capacity_in(mcx, args.len()).unwrap();
+                for &t in args {
+                    a.push(t);
+                }
+                syscache_seams::PgProcCandidate {
+                    oid,
+                    pronamespace: nsp,
+                    pronargs: args.len() as i16,
+                    pronargdefaults: ndefaults,
+                    provariadic: variadic,
+                    proargtypes: a,
+                }
+            };
+            match proname {
+                "f" => {
+                    v.push(cand(9001, PG_CATALOG_NAMESPACE, &[23], InvalidOid, 0));
+                    v.push(cand(9002, 9999, &[23], InvalidOid, 0));
+                    v.push(cand(9003, PG_CATALOG_NAMESPACE, &[23, 23], InvalidOid, 0));
+                }
+                "vf" => {
+                    v.push(cand(9004, PG_CATALOG_NAMESPACE, &[2277], 2283, 0));
+                }
+                _ => {}
+            }
+            Ok(v)
+        });
+    });
+}
+
+#[test]
+fn funcname_candidates_filter_arity_and_visibility() {
+    install_fakes();
+    install_proc_candidates();
+    set_search_path("public");
+
+    let ctx = MemoryContext::new("t");
+    let cands = crate::FuncnameGetCandidates(ctx.mcx(), &["f"], 1, true, true).unwrap();
+    // 9002 is in an off-path namespace; 9003 has the wrong arity.
+    assert_eq!(cands.len(), 1);
+    assert_eq!(cands[0].oid, 9001);
+    assert_eq!(cands[0].args.as_slice(), &[23]);
+}
+
+#[test]
+#[should_panic(expected = "expand_variadic")]
+fn variadic_candidate_panics_loudly() {
+    install_fakes();
+    install_proc_candidates();
+    set_search_path("public");
+
+    let ctx = MemoryContext::new("t");
+    let _ = crate::FuncnameGetCandidates(ctx.mcx(), &["vf"], 3, true, true);
+}

@@ -77,6 +77,7 @@ pub fn transformExprRecurse<'mcx>(
         }
         NodeTag::T_ColumnRef => transformColumnRef(mcx, pstate, expr),
         NodeTag::T_FuncCall => transformFuncCall(mcx, pstate, expr),
+        NodeTag::T_SubLink => transformSubLink(mcx, pstate, expr),
         NodeTag::T_CaseTestExpr | NodeTag::T_Var => Ok(expr),
         other => panic!(
             "transformExprRecurse (parse_expr.c): arm for {other:?} unported — \
@@ -370,6 +371,161 @@ pub fn ParseExprKindName(exprKind: ParseExprKind) -> &'static str {
         EXPR_KIND_GENERATED_COLUMN => "GENERATED AS",
         EXPR_KIND_CYCLE_MARK => "CYCLE",
     }
+}
+
+fn transformSubLink<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    expr: Node<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    use parser_small1::ParseExprKind::*;
+    use types_nodes::SubLinkType;
+    let sublink = expr.as_sub_link().unwrap();
+
+    let err: Option<&str> = match pstate.p_expr_kind {
+        EXPR_KIND_NONE => unreachable!("can't happen"),
+        EXPR_KIND_OTHER
+        | EXPR_KIND_JOIN_ON
+        | EXPR_KIND_JOIN_USING
+        | EXPR_KIND_FROM_SUBSELECT
+        | EXPR_KIND_FROM_FUNCTION
+        | EXPR_KIND_WHERE
+        | EXPR_KIND_POLICY
+        | EXPR_KIND_HAVING
+        | EXPR_KIND_FILTER
+        | EXPR_KIND_WINDOW_PARTITION
+        | EXPR_KIND_WINDOW_ORDER
+        | EXPR_KIND_WINDOW_FRAME_RANGE
+        | EXPR_KIND_WINDOW_FRAME_ROWS
+        | EXPR_KIND_WINDOW_FRAME_GROUPS
+        | EXPR_KIND_SELECT_TARGET
+        | EXPR_KIND_INSERT_TARGET
+        | EXPR_KIND_UPDATE_SOURCE
+        | EXPR_KIND_UPDATE_TARGET
+        | EXPR_KIND_MERGE_WHEN
+        | EXPR_KIND_GROUP_BY
+        | EXPR_KIND_ORDER_BY
+        | EXPR_KIND_DISTINCT_ON
+        | EXPR_KIND_LIMIT
+        | EXPR_KIND_OFFSET
+        | EXPR_KIND_RETURNING
+        | EXPR_KIND_MERGE_RETURNING
+        | EXPR_KIND_VALUES
+        | EXPR_KIND_VALUES_SINGLE
+        | EXPR_KIND_CYCLE_MARK => None,
+        EXPR_KIND_CHECK_CONSTRAINT | EXPR_KIND_DOMAIN_CHECK => {
+            Some("cannot use subquery in check constraint")
+        }
+        EXPR_KIND_COLUMN_DEFAULT | EXPR_KIND_FUNCTION_DEFAULT => {
+            Some("cannot use subquery in DEFAULT expression")
+        }
+        EXPR_KIND_INDEX_EXPRESSION => Some("cannot use subquery in index expression"),
+        EXPR_KIND_INDEX_PREDICATE => Some("cannot use subquery in index predicate"),
+        EXPR_KIND_STATS_EXPRESSION => Some("cannot use subquery in statistics expression"),
+        EXPR_KIND_ALTER_COL_TRANSFORM => Some("cannot use subquery in transform expression"),
+        EXPR_KIND_EXECUTE_PARAMETER => Some("cannot use subquery in EXECUTE parameter"),
+        EXPR_KIND_TRIGGER_WHEN => Some("cannot use subquery in trigger WHEN condition"),
+        EXPR_KIND_PARTITION_BOUND => Some("cannot use subquery in partition bound"),
+        EXPR_KIND_PARTITION_EXPRESSION => {
+            Some("cannot use subquery in partition key expression")
+        }
+        EXPR_KIND_CALL_ARGUMENT => Some("cannot use subquery in CALL argument"),
+        EXPR_KIND_COPY_WHERE => Some("cannot use subquery in COPY FROM WHERE condition"),
+        EXPR_KIND_GENERATED_COLUMN => {
+            Some("cannot use subquery in column generation expression")
+        }
+    };
+    if let Some(msg) = err {
+        return Err(sublink_not_allowed(pstate, msg, sublink.location));
+    }
+
+    pstate.p_hasSubLinks = true;
+
+    let qtree = analyze_seams::parse_sub_analyze::call(
+        mcx,
+        sublink.subselect,
+        pstate,
+        None,
+        false,
+        true,
+    )?;
+
+    if qtree.commandType != types_nodes::CmdType::CMD_SELECT {
+        return Err(Box::new(types_error::PgError::error(
+            "unexpected non-SELECT command in SubLink".to_string(),
+        )));
+    }
+
+    match sublink.subLinkType {
+        SubLinkType::EXISTS_SUBLINK => {}
+        SubLinkType::EXPR_SUBLINK => {
+            let nonjunk = qtree
+                .targetList
+                .iter()
+                .filter(|te| !te.as_target_entry().expect("tlist entry").resjunk)
+                .count();
+            if nonjunk != 1 {
+                return Err(one_column_required(pstate, sublink.location));
+            }
+        }
+        other => panic!(
+            "transformSubLink (parse_expr.c): {other:?} arm (ANY/ALL/ROWCOMPARE/MULTIEXPR/\
+             ARRAY) unported — unit backend-parser-expr"
+        ),
+    }
+
+    Node::mk(
+        mcx,
+        types_nodes::SubLink {
+            subLinkType: sublink.subLinkType,
+            subLinkId: sublink.subLinkId,
+            testexpr: None,
+            operName: types_nodes::NodeList::nil(),
+            subselect: Node::mk(mcx, qtree)?,
+            location: sublink.location,
+        },
+    )
+}
+
+#[cold]
+fn sublink_not_allowed(
+    pstate: &ParseState<'_, '_>,
+    msg: &str,
+    location: types_core::ParseLoc,
+) -> Box<types_error::PgError> {
+    use types_error::{ErrorLocation, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg_internal(msg)
+            .errposition(parser_small1::parser_errposition(
+                pstate,
+                location,
+                mbutils::GetDatabaseEncoding(),
+            ))
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_expr.c", 0, "transformSubLink")),
+    )
+}
+
+#[cold]
+fn one_column_required(
+    pstate: &ParseState<'_, '_>,
+    location: types_core::ParseLoc,
+) -> Box<types_error::PgError> {
+    use types_error::{ErrorLocation, ERRCODE_SYNTAX_ERROR, ERROR};
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_SYNTAX_ERROR)
+            .errmsg("subquery must return only one column".to_string())
+            .errposition(parser_small1::parser_errposition(
+                pstate,
+                location,
+                mbutils::GetDatabaseEncoding(),
+            ))
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_expr.c", 0, "transformSubLink")),
+    )
 }
 
 fn transformFuncCall<'mcx>(

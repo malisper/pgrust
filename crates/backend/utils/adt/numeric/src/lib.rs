@@ -26,7 +26,7 @@ pub use arith::{
     add_var, cmp_var, cmp_var_common, div_var, div_var_int, div_var_int64, mul_var,
     select_div_scale, sub_var,
 };
-pub use io::{numeric_in, numeric_out_into};
+pub use io::{numeric_in, numeric_out_into, numeric_recv, numeric_send};
 pub use math::{
     div_mod_var, exp_var, gcd_var, ln_var, log_var, mod_var, numeric_exp, numeric_exp_into,
     numeric_fac, numeric_gcd_common, numeric_lcm_common, numeric_ln, numeric_ln_into,

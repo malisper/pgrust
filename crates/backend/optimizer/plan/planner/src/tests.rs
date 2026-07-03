@@ -12,6 +12,9 @@ use types_tuple::PgTypeShape;
 
 use crate::planner;
 
+// Serializes tests that flip or observe planner strategy GUCs.
+pub(crate) static GUC_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn install_fixtures() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
@@ -44,8 +47,12 @@ const TBL: u32 = 16384;
 const IDX: u32 = 16385;
 const JT1: u32 = 16400;
 const JT2: u32 = 16401;
+const JT3: u32 = 16402;
+const JT4: u32 = 16403;
+const STT: u32 = 16410;
 const INT4EQ_OP: u32 = 96;
 const INT4_LT_OP: u32 = 97;
+const INT8GT_OP: u32 = 413;
 const INT4EQ_PROC: u32 = 65;
 const INT4_BTREE_FAM: u32 = 1976;
 
@@ -67,6 +74,8 @@ fn install_scan_fixtures() {
         Ok(match funcid {
             177 => Some(shape(23, 2, b'f', true)),
             65 => Some(shape(16, 2, b'f', true)),
+            66 => Some(shape(16, 2, b'f', true)),
+            470 => Some(shape(16, 2, b'f', true)),
             // pg_proc.dat rows for the plain-agg lane (agg::* tests).
             2803 => Some(shape(20, 0, b'a', false)),
             2108 => Some(shape(20, 1, b'a', false)),
@@ -89,6 +98,31 @@ fn install_scan_fixtures() {
                 oprjoin: 105,
                 oprcanmerge: true,
                 oprcanhash: true,
+            }),
+            INT4_LT_OP => Some(syscache_seams::PgOperatorShape {
+                oprleft: 23,
+                oprright: 23,
+                oprresult: 16,
+                oprcom: 521,
+                oprnegate: 525,
+                oprcode: 66,
+                oprrest: 103,
+                oprjoin: 107,
+                oprcanmerge: false,
+                oprcanhash: false,
+            }),
+            // int8 > int8 (HAVING-lane tests).
+            INT8GT_OP => Some(syscache_seams::PgOperatorShape {
+                oprleft: 20,
+                oprright: 20,
+                oprresult: 16,
+                oprcom: 412,
+                oprnegate: 414,
+                oprcode: 470,
+                oprrest: 104,
+                oprjoin: 108,
+                oprcanmerge: false,
+                oprcanhash: false,
             }),
             _ => None,
         })
@@ -135,8 +169,8 @@ fn install_scan_fixtures() {
     });
     syscache_seams::pg_proc_cost_shape::set(|funcid| {
         Ok(match funcid {
-            INT4EQ_PROC | 1219 | 1841 => {
-                Some(syscache_seams::PgProcCostShape { procost: 1.0, prosupport: 0 })
+            INT4EQ_PROC | 66 | 1219 | 1841 | 470 => {
+                Some(syscache_seams::PgProcCostShape { procost: 1.0, prorows: 0.0, prosupport: 0 })
             }
             _ => None,
         })
@@ -170,6 +204,44 @@ fn install_scan_fixtures() {
         })
     });
     syscache_seams::lookup_pg_statistic_shape::set(|_, _, _| Ok(None));
+    // STT carries a pinned stats fixture (MCV [1->0.30, 2->0.20], histogram
+    // [0,10,20,30,40], stadistinct 10); everything else has no stats row.
+    syscache_seams::lookup_pg_statistic_bundle::set(|mcx, relid, attnum, inh| {
+        if relid != STT || attnum != 1 || inh {
+            return Ok(None);
+        }
+        let mut slots = mcx::PgVec::new_in(mcx);
+        let mut mcv_values = mcx::PgVec::new_in(mcx);
+        mcv_values.extend([datum::Datum::from_i32(1), datum::Datum::from_i32(2)]);
+        let mut mcv_numbers = mcx::PgVec::new_in(mcx);
+        mcv_numbers.extend([0.30f32, 0.20f32]);
+        slots.push(syscache_seams::PgStatisticSlotData {
+            kind: 1,
+            staop: INT4EQ_OP,
+            stacoll: 0,
+            valuetype: 23,
+            values: mcv_values,
+            numbers: mcv_numbers,
+            values_image: mcx::PgVec::new_in(mcx),
+        });
+        let mut hist_values = mcx::PgVec::new_in(mcx);
+        hist_values.extend([0i32, 10, 20, 30, 40].map(datum::Datum::from_i32));
+        slots.push(syscache_seams::PgStatisticSlotData {
+            kind: 2,
+            staop: INT4_LT_OP,
+            stacoll: 0,
+            valuetype: 23,
+            values: hist_values,
+            numbers: mcx::PgVec::new_in(mcx),
+            values_image: mcx::PgVec::new_in(mcx),
+        });
+        Ok(Some(syscache_seams::PgStatisticBundle {
+            stanullfrac: 0.0,
+            stawidth: 4,
+            stadistinct: 10.0,
+            slots,
+        }))
+    });
     syscache_seams::pg_statistic_stawidth::set(|_, _, _| Ok(None));
     relation_seams::relation_open::set(|mcx, relid, _lockmode| {
         Ok(match relid {
@@ -177,6 +249,9 @@ fn install_scan_fixtures() {
             IDX => make_index_rel(mcx),
             JT1 => make_join_rel_fixture(mcx, JT1, "jt1", 1, 1.0),
             JT2 => make_join_rel_fixture(mcx, JT2, "jt2", 1, 2.0),
+            JT3 => make_join_rel_fixture(mcx, JT3, "jt3", 100, 10000.0),
+            JT4 => make_join_rel_fixture(mcx, JT4, "jt4", 100, 10000.0),
+            STT => make_join_rel_fixture(mcx, STT, "stt", 10, 1000.0),
             other => panic!("fixture relation_open: unknown oid {other}"),
         })
     });
@@ -221,6 +296,8 @@ fn install_scan_fixtures() {
             TBL => 100,
             IDX => 30,
             JT1 | JT2 => 1,
+            JT3 | JT4 => 100,
+            STT => 10,
             other => panic!("fixture nblocks: unknown oid {other}"),
         })
     });
@@ -1155,8 +1232,10 @@ mod group_by_hashed {
 
     fn grouped_count_query(mcx: Mcx<'_>) -> Query<'_> {
         let mut parse = table_query(mcx, None);
-        let group_var = Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap();
-        let tle1 = Node::mk_target_entry(mcx, group_var, 1, Some("pk"), false).unwrap();
+        // val, not pk: the pk index's leading column would trip the loud
+        // build_index_pathkeys guard now that group_pathkeys are built.
+        let group_var = Node::mk_var(mcx, 1, 2, 23, -1, 0, 0).unwrap();
+        let tle1 = Node::mk_target_entry(mcx, group_var, 1, Some("val"), false).unwrap();
         // SAFETY: freshly built tlist; no other reference is live.
         unsafe {
             tle1.with_mut::<types_nodes::primnodes::TargetEntry, _>(|t| t.ressortgroupref = 1)
@@ -1193,6 +1272,7 @@ mod group_by_hashed {
 
     #[test]
     fn group_by_plans_to_hashed_agg_over_seqscan() {
+        let _guc = crate::tests::GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let cx = cx();
         // cost_agg's hash_mem estimate reads the work_mem-backed globals.
         if !guc_tables::vars::work_mem.installed() {
@@ -1225,7 +1305,7 @@ mod group_by_hashed {
         // count(*) carries planner aggno/aggtransno.
         assert_eq!(agg.plan.targetlist.len(), 2);
         let t0 = agg.plan.targetlist.nth(0).as_target_entry().unwrap();
-        assert_eq!(t0.resname, Some("pk"));
+        assert_eq!(t0.resname, Some("val"));
         let v0 = t0.expr.as_var().unwrap();
         assert_eq!((v0.varno, v0.varattno), (OUTER_VAR, 1));
         let t1 = agg.plan.targetlist.nth(1).as_target_entry().unwrap();
@@ -1239,7 +1319,7 @@ mod group_by_hashed {
         let ctl = &child.as_seq_scan().unwrap().scan.plan.targetlist;
         let c0 = ctl.nth(0).as_target_entry().unwrap();
         assert_eq!(c0.ressortgroupref, 1);
-        assert_eq!(c0.expr.as_var().unwrap().varattno, 1);
+        assert_eq!(c0.expr.as_var().unwrap().varattno, 2);
     }
 }
 
@@ -1459,6 +1539,10 @@ mod join {
     use types_nodes::primnodes::{INNER_VAR, OUTER_VAR};
 
     fn join_query<'mcx>(mcx: Mcx<'mcx>) -> Query<'mcx> {
+        join_query_rels(mcx, JT1, JT2)
+    }
+
+    fn join_query_rels<'mcx>(mcx: Mcx<'mcx>, r1: u32, r2: u32) -> Query<'mcx> {
         let mk_rte = |relid: u32| {
             let mut rte =
                 Node::build::<types_nodes::parsenodes::RangeTblEntry>(mcx).unwrap();
@@ -1469,8 +1553,8 @@ mod join {
             rte.inh = false;
             rte.seal()
         };
-        let mut rtable = NodeList::make1(mcx, mk_rte(JT1)).unwrap();
-        rtable.lappend(mcx, mk_rte(JT2)).unwrap();
+        let mut rtable = NodeList::make1(mcx, mk_rte(r1)).unwrap();
+        rtable.lappend(mcx, mk_rte(r2)).unwrap();
 
         let qual = {
             let l = Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap();
@@ -1596,4 +1680,681 @@ mod join {
         assert_eq!(outer.scan.plan.targetlist.len(), 2);
         assert_eq!(inner.scan.plan.targetlist.len(), 2);
     }
+
+    // Cost crossover: over two 100-page/10000-row tables both nestloop and
+    // hash paths are candidates, and hash wins. Verifies the planner picks
+    // HashJoin and that its cost is far below the nestloop it beat.
+    #[test]
+    fn large_comma_join_plans_to_hash_join() {
+        let cx = cx();
+        let mcx = cx.mcx();
+        // final_cost_hashjoin's get_hash_memory_limit reads work_mem/hash_mem_multiplier.
+        if !guc_tables::vars::work_mem.installed() {
+            init_small::init_seams();
+        }
+        let stmt = planner(
+            mcx,
+            join_query_rels(mcx, JT3, JT4),
+            "SELECT * FROM jt3, jt4 WHERE jt3.a = jt4.a",
+            CURSOR_OPT_PARALLEL_OK,
+            ParamListHandle::NULL,
+        )
+        .unwrap();
+
+        let hj = stmt
+            .planTree
+            .unwrap()
+            .as_hash_join()
+            .expect("HashJoin root (hash beats nestloop on large inputs)");
+        assert_eq!(hj.join.jointype, types_nodes::JoinType::JOIN_INNER);
+        // The equijoin clause is the hashclause; joinqual is emptied.
+        assert_eq!(hj.hashclauses.len(), 1);
+        assert!(hj.join.joinqual.is_nil());
+        assert_eq!(hj.hashkeys.len(), 1);
+        // Inner side is a Hash over a SeqScan; its hashkeys reference the child.
+        let hash = hj.join.plan.righttree.unwrap().as_hash().expect("Hash inner");
+        assert_eq!(hash.hashkeys.len(), 1);
+        hash.plan.lefttree.unwrap().as_seq_scan().expect("Hash over SeqScan");
+        hj.join.plan.lefttree.unwrap().as_seq_scan().expect("outer SeqScan");
+        // hashclause + hashkeys resolved to OUTER_VAR/INNER_VAR.
+        let hc = hj.hashclauses.nth(0).as_op_expr().expect("hashclause OpExpr");
+        assert_outer_inner_var(hc.args.nth(0), OUTER_VAR, 1);
+        assert_outer_inner_var(hc.args.nth(1), INNER_VAR, 1);
+        assert_outer_inner_var(hj.hashkeys.nth(0), OUTER_VAR, 1);
+        assert_outer_inner_var(hash.hashkeys.nth(0), OUTER_VAR, 1);
+
+        // A nestloop over the same 10000x10000 inputs would cost ~1e8 cpu; the
+        // chosen hash plan is orders of magnitude cheaper.
+        assert!(hj.join.plan.total_cost < 1.0e6, "{}", hj.join.plan.total_cost);
+    }
+
+    // Mergejoin lane: with nestloop and hashjoin disabled the explicit-sort
+    // merge path (sort_inner_and_outer) wins. Costs are C's formulas over the
+    // fixture stats (1-page tables, reltuples 1 and 2, no pg_statistic):
+    //   Merge Join  (cost=2.05..2.08 rows=1 width=16)
+    //     Merge Cond: (jt1.a = jt2.a)
+    //     ->  Sort (cost=1.02..1.02 rows=1)  ->  Seq Scan on jt1 (..1.01)
+    //     ->  Sort (cost=1.03..1.03 rows=2)  ->  Seq Scan on jt2 (..1.02)
+    #[test]
+    fn merge_join_wins_with_nestloop_and_hash_disabled() {
+        let cx = cx();
+        let mcx = cx.mcx();
+        if !guc_tables::vars::work_mem.installed() {
+            init_small::init_seams();
+        }
+        crate::gucs::set_enable_nestloop(false);
+        crate::gucs::set_enable_hashjoin(false);
+        let stmt = planner(
+            mcx,
+            join_query(mcx),
+            "SELECT * FROM jt1, jt2 WHERE jt1.a = jt2.a",
+            CURSOR_OPT_PARALLEL_OK,
+            ParamListHandle::NULL,
+        );
+        crate::gucs::set_enable_nestloop(true);
+        crate::gucs::set_enable_hashjoin(true);
+        let stmt = stmt.unwrap();
+
+        let mj = stmt.planTree.unwrap().as_merge_join().expect("MergeJoin root");
+        assert_eq!(mj.join.jointype, types_nodes::JoinType::JOIN_INNER);
+        assert!(!mj.join.inner_unique);
+        assert!(!mj.skip_mark_restore);
+        assert!((mj.join.plan.startup_cost - 2.05).abs() < 1e-9, "{}", mj.join.plan.startup_cost);
+        assert!((mj.join.plan.total_cost - 2.0775).abs() < 1e-9, "{}", mj.join.plan.total_cost);
+        assert_eq!(mj.join.plan.plan_rows, 1.0);
+        assert_eq!(mj.join.plan.plan_width, 16);
+
+        // The equijoin clause is the (unswitched) merge clause; joinqual is
+        // emptied; per-clause executor arrays carry the btree family shape.
+        assert_eq!(mj.mergeclauses.len(), 1);
+        assert!(mj.join.joinqual.is_nil());
+        assert!(mj.join.plan.qual.is_nil());
+        assert_eq!(mj.mergeFamilies, [INT4_BTREE_FAM]);
+        assert_eq!(mj.mergeCollations, [0]);
+        assert_eq!(mj.mergeReversals, [false]);
+        assert_eq!(mj.mergeNullsFirst, [false]);
+        let mc = mj.mergeclauses.nth(0).as_op_expr().expect("mergeclause OpExpr");
+        assert_eq!(mc.opno, INT4EQ_OP);
+        assert_outer_inner_var(mc.args.nth(0), OUTER_VAR, 1);
+        assert_outer_inner_var(mc.args.nth(1), INNER_VAR, 1);
+
+        // Explicit sorts on both inputs, costed by label_sort_with_costsize.
+        let osort = mj.join.plan.lefttree.unwrap().as_sort().expect("outer Sort");
+        let isort = mj.join.plan.righttree.unwrap().as_sort().expect("inner Sort");
+        assert_eq!(osort.numCols, 1);
+        assert_eq!(isort.numCols, 1);
+        assert!((osort.plan.startup_cost - 1.02).abs() < 1e-9, "{}", osort.plan.startup_cost);
+        assert!((osort.plan.total_cost - 1.025).abs() < 1e-9, "{}", osort.plan.total_cost);
+        assert_eq!(osort.plan.plan_rows, 1.0);
+        assert!((isort.plan.startup_cost - 1.03).abs() < 1e-9, "{}", isort.plan.startup_cost);
+        assert!((isort.plan.total_cost - 1.035).abs() < 1e-9, "{}", isort.plan.total_cost);
+        assert_eq!(isort.plan.plan_rows, 2.0);
+        let oscan = osort.plan.lefttree.unwrap().as_seq_scan().expect("Sort over SeqScan");
+        let iscan = isort.plan.lefttree.unwrap().as_seq_scan().expect("Sort over SeqScan");
+        assert_eq!(oscan.scan.scanrelid, 1);
+        assert_eq!(iscan.scan.scanrelid, 2);
+
+        // scansel_cache was written back on the join clause (lesson 10).
+        // (Verified indirectly: a second plan of the same query hits the
+        // cached MergeScanSelCache; the cache lives per-planner-run here, so
+        // just re-plan to prove the whole lane is reentrant.)
+        crate::gucs::set_enable_nestloop(false);
+        crate::gucs::set_enable_hashjoin(false);
+        let again = planner(
+            mcx,
+            join_query(mcx),
+            "SELECT * FROM jt1, jt2 WHERE jt1.a = jt2.a",
+            CURSOR_OPT_PARALLEL_OK,
+            ParamListHandle::NULL,
+        );
+        crate::gucs::set_enable_nestloop(true);
+        crate::gucs::set_enable_hashjoin(true);
+        let again = again.unwrap();
+        let mj2 = again.planTree.unwrap().as_merge_join().expect("MergeJoin root");
+        assert_eq!(mj2.join.plan.total_cost, mj.join.plan.total_cost);
+    }
+}
+
+mod stats_arms {
+    use super::*;
+
+    fn stt_query<'mcx>(mcx: Mcx<'mcx>, opno: u32, opfuncid: u32, constval: i32) -> Query<'mcx> {
+        let mut rte = Node::build::<types_nodes::parsenodes::RangeTblEntry>(mcx).unwrap();
+        rte.rtekind = RTEKind::RTE_RELATION;
+        rte.relid = STT;
+        rte.relkind = b'r';
+        rte.rellockmode = 1;
+        rte.inh = false;
+        let rtable = NodeList::make1(mcx, rte.seal()).unwrap();
+
+        let var = Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap();
+        let konst =
+            Node::mk_const(mcx, 23, -1, 0, 4, Datum::from_i32(constval), false, true).unwrap();
+        let qual = Node::mk(
+            mcx,
+            types_nodes::primnodes::OpExpr {
+                opno,
+                opfuncid,
+                opresulttype: 16,
+                opretset: false,
+                opcollid: 0,
+                inputcollid: 0,
+                args: NodeList::make2(mcx, var, konst).unwrap(),
+                location: -1,
+            },
+        )
+        .unwrap();
+
+        let rtr = Node::mk_range_tbl_ref(mcx, 1).unwrap();
+        let jointree = alloc_leak_in(
+            mcx,
+            FromExpr { fromlist: NodeList::make1(mcx, rtr).unwrap(), quals: Some(qual) },
+        )
+        .unwrap();
+        let v = Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap();
+        let tle = Node::mk_target_entry(mcx, v, 1, Some("a"), false).unwrap();
+        Query {
+            commandType: CmdType::CMD_SELECT,
+            canSetTag: true,
+            jointree: Some(jointree),
+            rtable,
+            targetList: NodeList::make1(mcx, tle).unwrap(),
+            stmt_location: 0,
+            stmt_len: 30,
+            ..Query::default()
+        }
+    }
+
+    fn plan_rows(mcx: Mcx<'_>, opno: u32, opfuncid: u32, constval: i32, sql: &'static str) -> f64 {
+        let stmt =
+            planner(mcx, stt_query(mcx, opno, opfuncid, constval), sql, CURSOR_OPT_PARALLEL_OK, ParamListHandle::NULL)
+                .unwrap();
+        let scan = stmt.planTree.unwrap().as_seq_scan().expect("SeqScan");
+        scan.scan.plan.plan_rows
+    }
+
+    #[test]
+    fn eqsel_mcv_match_uses_exact_frequency() {
+        let cx = cx();
+        let mcx = cx.mcx();
+        // MCV entry 1 -> 0.30; 0.30 * 1000 tuples.
+        assert_eq!(plan_rows(mcx, INT4EQ_OP, INT4EQ_PROC, 1, "SELECT a FROM stt WHERE a = 1"), 300.0);
+    }
+
+    #[test]
+    fn eqsel_non_mcv_spreads_remainder_over_other_distinct() {
+        let cx = cx();
+        let mcx = cx.mcx();
+        // (1 - 0.50 sumcommon)/(10 - 2) = 0.0625 -> rint(62.5) = 62.
+        assert_eq!(plan_rows(mcx, INT4EQ_OP, INT4EQ_PROC, 7, "SELECT a FROM stt WHERE a = 7"), 62.0);
+    }
+
+    #[test]
+    fn scalarltsel_interpolates_histogram() {
+        let cx = cx();
+        let mcx = cx.mcx();
+        // histfrac = (1 + (15-10)/(20-10))/4 - eq_selec 1/8 = 0.25;
+        // selec = (1 - 0.50)*0.25 + mcv(1,2 both < 15 -> 0.50) = 0.625.
+        assert_eq!(plan_rows(mcx, INT4_LT_OP, 66, 15, "SELECT a FROM stt WHERE a < 15"), 625.0);
+    }
+}
+
+// HAVING / DISTINCT / sorted-grouping plan lanes.
+mod having_distinct_sorted {
+    use super::*;
+    use types_nodes::parsenodes::SortGroupClause;
+    use types_nodes::primnodes::Aggref;
+
+    const COUNT_STAR: u32 = 2803;
+
+    fn ensure_work_mem() {
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            if !guc_tables::vars::work_mem.installed() {
+                init_small::init_seams();
+            }
+        });
+    }
+
+    fn grouped_count_query(mcx: Mcx<'_>, with_having: bool) -> Query<'_> {
+        let mut parse = table_query(mcx, None);
+        // val, not pk: the pk index's leading column trips the loud
+        // build_index_pathkeys guard (index-order lane unported).
+        let group_var = Node::mk_var(mcx, 1, 2, 23, -1, 0, 0).unwrap();
+        let tle1 = Node::mk_target_entry(mcx, group_var, 1, Some("val"), false).unwrap();
+        // SAFETY: freshly built tlist; no other reference is live.
+        unsafe {
+            tle1.with_mut::<types_nodes::primnodes::TargetEntry, _>(|t| t.ressortgroupref = 1)
+        }
+        .unwrap();
+        fn mk_count<'m>(mcx: Mcx<'m>) -> Node<'m> {
+            Node::mk(
+                mcx,
+                Aggref { aggfnoid: COUNT_STAR, aggtype: 20, aggstar: true, ..Aggref::default() },
+            )
+            .unwrap()
+        }
+        let tle2 = Node::mk_target_entry(mcx, mk_count(mcx), 2, Some("count"), false).unwrap();
+        let mut tlist = NodeList::make1(mcx, tle1).unwrap();
+        tlist.lappend(mcx, tle2).unwrap();
+        parse.targetList = tlist;
+        parse.hasAggs = true;
+        parse.groupClause = NodeList::make1(
+            mcx,
+            Node::mk(
+                mcx,
+                SortGroupClause {
+                    tleSortGroupRef: 1,
+                    eqop: INT4EQ_OP,
+                    sortop: INT4_LT_OP,
+                    reverse_sort: false,
+                    nulls_first: false,
+                    hashable: true,
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        if with_having {
+            let one =
+                Node::mk_const(mcx, 20, -1, 0, 8, Datum::from_i64(1), false, true).unwrap();
+            let mut args = NodeList::make1(mcx, mk_count(mcx)).unwrap();
+            args.lappend(mcx, one).unwrap();
+            parse.havingQual = Some(
+                Node::mk(
+                    mcx,
+                    types_nodes::primnodes::OpExpr {
+                        opno: INT8GT_OP,
+                        opfuncid: 470,
+                        opresulttype: 16,
+                        opretset: false,
+                        opcollid: 0,
+                        inputcollid: 0,
+                        args,
+                        location: -1,
+                    },
+                )
+                .unwrap(),
+            );
+        }
+        parse
+    }
+
+    // GROUP BY pk HAVING count(*) > 1: the qual lands on the Agg plan node
+    // (retargeted through set_upper_references), rows scaled by
+    // DEFAULT_INEQ_SEL over the no-stats 200-group estimate.
+    #[test]
+    fn having_qual_lands_on_agg_plan() {
+        let _guc = crate::tests::GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cx = cx();
+        ensure_work_mem();
+        let mcx = cx.mcx();
+        let stmt = planner(
+            mcx,
+            grouped_count_query(mcx, true),
+            "SELECT pk, count(*) FROM t GROUP BY pk HAVING count(*) > 1",
+            CURSOR_OPT_PARALLEL_OK,
+            ParamListHandle::NULL,
+        )
+        .unwrap();
+        let plan = stmt.planTree.unwrap();
+        assert_eq!(plan.node_tag(), NodeTag::T_Agg);
+        let agg = plan.as_agg().unwrap();
+        assert_eq!(agg.aggstrategy, types_pathnodes::AGG_HASHED);
+        assert_eq!(agg.plan.qual.len(), 1);
+        let q = agg.plan.qual.nth(0).as_op_expr().unwrap();
+        assert_eq!(q.opno, INT8GT_OP);
+        let qagg = q.args.nth(0).as_aggref().unwrap();
+        assert_eq!((qagg.aggno, qagg.aggtransno), (0, 0));
+        // 200 default groups * DEFAULT_INEQ_SEL, clamped.
+        assert_eq!(agg.plan.plan_rows, 67.0);
+    }
+
+    // With hashing disabled the sorted lane carries the same query:
+    // Sort(pk) under Agg(AGG_SORTED), HAVING qual intact.
+    #[test]
+    fn group_by_without_hashagg_plans_agg_sorted_over_sort() {
+        let _guc = crate::tests::GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cx = cx();
+        ensure_work_mem();
+        let mcx = cx.mcx();
+        crate::gucs::set_enable_hashagg(false);
+        let stmt = planner(
+            mcx,
+            grouped_count_query(mcx, true),
+            "SELECT pk, count(*) FROM t GROUP BY pk HAVING count(*) > 1",
+            CURSOR_OPT_PARALLEL_OK,
+            ParamListHandle::NULL,
+        );
+        crate::gucs::set_enable_hashagg(true);
+        let stmt = stmt.unwrap();
+        let plan = stmt.planTree.unwrap();
+        assert_eq!(plan.node_tag(), NodeTag::T_Agg);
+        let agg = plan.as_agg().unwrap();
+        assert_eq!(agg.aggstrategy, types_pathnodes::AGG_SORTED);
+        assert_eq!(agg.numCols, 1);
+        assert_eq!(agg.grpColIdx, &[1i16]);
+        assert_eq!(agg.plan.qual.len(), 1);
+        let sort = agg.plan.lefttree.unwrap();
+        assert_eq!(sort.node_tag(), NodeTag::T_Sort);
+        let s = sort.as_sort().unwrap();
+        assert_eq!(s.numCols, 1);
+        assert_eq!(s.sortColIdx, &[1i16]);
+        assert_eq!(s.sortOperators, &[INT4_LT_OP]);
+        assert_eq!(
+            sort.as_plan().unwrap().lefttree.unwrap().node_tag(),
+            NodeTag::T_SeqScan
+        );
+    }
+
+    fn distinct_query(mcx: Mcx<'_>) -> Query<'_> {
+        let mut parse = table_query(mcx, None);
+        let var = Node::mk_var(mcx, 1, 2, 23, -1, 0, 0).unwrap();
+        let tle = Node::mk_target_entry(mcx, var, 1, Some("val"), false).unwrap();
+        // SAFETY: freshly built tlist; no other reference is live.
+        unsafe {
+            tle.with_mut::<types_nodes::primnodes::TargetEntry, _>(|t| t.ressortgroupref = 1)
+        }
+        .unwrap();
+        parse.targetList = NodeList::make1(mcx, tle).unwrap();
+        parse.distinctClause = NodeList::make1(
+            mcx,
+            Node::mk(
+                mcx,
+                SortGroupClause {
+                    tleSortGroupRef: 1,
+                    eqop: INT4EQ_OP,
+                    sortop: INT4_LT_OP,
+                    reverse_sort: false,
+                    nulls_first: false,
+                    hashable: true,
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        parse
+    }
+
+    // SELECT DISTINCT pk FROM t: hashed DISTINCT (Agg with no Aggrefs) wins
+    // by cost over the Sort+Unique candidate on the 10000-row fixture.
+    #[test]
+    fn distinct_plans_hashed_agg_by_cost() {
+        let _guc = crate::tests::GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cx = cx();
+        ensure_work_mem();
+        let mcx = cx.mcx();
+        let stmt = planner(
+            mcx,
+            distinct_query(mcx),
+            "SELECT DISTINCT pk FROM t",
+            CURSOR_OPT_PARALLEL_OK,
+            ParamListHandle::NULL,
+        )
+        .unwrap();
+        let plan = stmt.planTree.unwrap();
+        assert_eq!(plan.node_tag(), NodeTag::T_Agg);
+        let agg = plan.as_agg().unwrap();
+        assert_eq!(agg.aggstrategy, types_pathnodes::AGG_HASHED);
+        assert_eq!(agg.numCols, 1);
+        assert_eq!(agg.grpColIdx, &[1i16]);
+        assert_eq!(agg.grpOperators, &[INT4EQ_OP]);
+        // No aggregates: the tlist is just the grouping Var.
+        assert_eq!(agg.plan.targetlist.len(), 1);
+        assert!(agg.plan.targetlist.nth(0).as_target_entry().unwrap().expr.as_var().is_some());
+        assert_eq!(
+            agg.plan.lefttree.unwrap().node_tag(),
+            NodeTag::T_SeqScan
+        );
+        // C EXPLAIN: HashAggregate (cost=225.00..227.00 rows=200) over the
+        // 100-page/10000-row fixture.
+        assert!((agg.plan.startup_cost - 225.0).abs() < 1e-9);
+        assert!((agg.plan.total_cost - 227.0).abs() < 1e-9);
+        assert_eq!(agg.plan.plan_rows, 200.0);
+    }
+
+    // The sorted strategy: Unique over an explicit Sort when hashing is off.
+    #[test]
+    fn distinct_without_hashagg_plans_unique_over_sort() {
+        let _guc = crate::tests::GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cx = cx();
+        ensure_work_mem();
+        let mcx = cx.mcx();
+        crate::gucs::set_enable_hashagg(false);
+        let stmt = planner(
+            mcx,
+            distinct_query(mcx),
+            "SELECT DISTINCT pk FROM t",
+            CURSOR_OPT_PARALLEL_OK,
+            ParamListHandle::NULL,
+        );
+        crate::gucs::set_enable_hashagg(true);
+        let stmt = stmt.unwrap();
+        let plan = stmt.planTree.unwrap();
+        assert_eq!(plan.node_tag(), NodeTag::T_Unique);
+        let uq = plan.as_unique().unwrap();
+        assert_eq!(uq.numCols, 1);
+        assert_eq!(uq.uniqColIdx, &[1i16]);
+        assert_eq!(uq.uniqOperators, &[INT4EQ_OP]);
+        assert_eq!(uq.uniqCollations, &[0u32]);
+        assert_eq!(uq.plan.plan_rows, 200.0);
+        let sort = uq.plan.lefttree.unwrap();
+        assert_eq!(sort.node_tag(), NodeTag::T_Sort);
+        assert_eq!(
+            sort.as_plan().unwrap().lefttree.unwrap().node_tag(),
+            NodeTag::T_SeqScan
+        );
+    }
+}
+
+// --- uncorrelated sublink lane (subselect.rs) ---
+
+fn scalar_subquery_node<'mcx>(mcx: Mcx<'mcx>) -> Node<'mcx> {
+    // The analyzer's output for `(SELECT pk FROM t)`.
+    let mut rte = Node::build::<types_nodes::parsenodes::RangeTblEntry>(mcx).unwrap();
+    rte.rtekind = RTEKind::RTE_RELATION;
+    rte.relid = TBL;
+    rte.relkind = b'r';
+    rte.rellockmode = 1;
+    let rtable = NodeList::make1(mcx, rte.seal()).unwrap();
+    let rtr = Node::mk_range_tbl_ref(mcx, 1).unwrap();
+    let jointree = alloc_leak_in(
+        mcx,
+        FromExpr { fromlist: NodeList::make1(mcx, rtr).unwrap(), quals: None },
+    )
+    .unwrap();
+    let pk = Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap();
+    let tle = Node::mk_target_entry(mcx, pk, 1, Some("pk"), false).unwrap();
+    let sub = Query {
+        commandType: CmdType::CMD_SELECT,
+        canSetTag: true,
+        jointree: Some(jointree),
+        rtable,
+        targetList: NodeList::make1(mcx, tle).unwrap(),
+        ..Query::default()
+    };
+    Node::mk(mcx, sub).unwrap()
+}
+
+#[test]
+fn expr_sublink_plans_to_initplan_param() {
+    let cx = cx();
+    let mcx = cx.mcx();
+
+    let sublink = Node::mk(
+        mcx,
+        types_nodes::SubLink {
+            subLinkType: types_nodes::SubLinkType::EXPR_SUBLINK,
+            subLinkId: 0,
+            testexpr: None,
+            operName: NodeList::nil(),
+            subselect: scalar_subquery_node(mcx),
+            location: -1,
+        },
+    )
+    .unwrap();
+    let var = Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap();
+    let qual = Node::mk(
+        mcx,
+        types_nodes::primnodes::OpExpr {
+            opno: INT4EQ_OP,
+            opfuncid: INT4EQ_PROC,
+            opresulttype: 16,
+            opretset: false,
+            opcollid: 0,
+            inputcollid: 0,
+            args: NodeList::make2(mcx, var, sublink).unwrap(),
+            location: -1,
+        },
+    )
+    .unwrap();
+    let mut parse = table_query(mcx, Some(qual));
+    parse.hasSubLinks = true;
+
+    let stmt = planner(
+        mcx,
+        parse,
+        "SELECT * FROM t WHERE pk = (SELECT pk FROM t)",
+        CURSOR_OPT_PARALLEL_OK,
+        ParamListHandle::NULL,
+    )
+    .unwrap();
+
+    // One initplan: glob-level lists carry it, param 0 is int4.
+    assert_eq!(stmt.subplans.len(), 1);
+    assert_eq!(stmt.paramExecTypes.len(), 1);
+    assert_eq!(stmt.paramExecTypes.nth(0), 23);
+    // The flat rtable holds the outer scan's RTE plus the subplan's.
+    assert_eq!(stmt.rtable.len(), 2);
+    assert_eq!(stmt.relationOids.len(), 2);
+
+    let top = stmt.planTree.unwrap();
+    let base = top.as_plan().unwrap();
+    assert_eq!(base.initPlan.len(), 1);
+    let sp = base.initPlan.nth(0).as_sub_plan().unwrap();
+    assert_eq!(sp.plan_id, 1);
+    assert_eq!(sp.plan_name, Some("InitPlan 1"));
+    assert_eq!(sp.firstColType, 23);
+    assert_eq!(sp.setParam.as_slice(), &[0]);
+    assert!(sp.parParam.is_nil() && !sp.useHashTable);
+    // extParam/allParam (SS_finalize_plan): the initplan's setParam is in
+    // allParam but not extParam of the node it hangs on.
+    assert!(base.allParam.is_member(0));
+    assert!(!base.extParam.is_member(0));
+
+    // The initplan's plan tree scans t and returns pk.
+    let subplan = stmt.subplans.nth(0);
+    let sub_base = subplan.as_plan().unwrap();
+    assert_eq!(sub_base.targetlist.len(), 1);
+    // Subplan scan relid was offset into the flat rtable.
+    let sub_scan = match subplan.node_tag() {
+        NodeTag::T_SeqScan => subplan.as_seq_scan().unwrap().scan.scanrelid,
+        NodeTag::T_IndexScan => subplan.as_index_scan().unwrap().scan.scanrelid,
+        other => panic!("unexpected subplan shape {other:?}"),
+    };
+    assert_eq!(sub_scan, 2);
+
+    // The outer qual compares pk against the PARAM_EXEC Param.
+    fn find_param_qual(plan: Node<'_>) -> bool {
+        let quals = match plan.node_tag() {
+            NodeTag::T_SeqScan => &plan.as_seq_scan().unwrap().scan.plan.qual,
+            NodeTag::T_IndexScan => &plan.as_index_scan().unwrap().indexqual,
+            _ => return false,
+        };
+        quals.iter().any(|q| {
+            q.as_op_expr().is_some_and(|o| {
+                o.args.iter().any(|a| {
+                    a.as_param().is_some_and(|p| {
+                        p.paramkind == types_nodes::ParamKind::PARAM_EXEC && p.paramid == 0
+                    })
+                })
+            })
+        })
+    }
+    let scan = if top.node_tag() == NodeTag::T_Result {
+        top.as_result().unwrap().plan.lefttree.unwrap()
+    } else {
+        top
+    };
+    assert!(find_param_qual(scan), "outer scan qual references $0");
+}
+
+#[test]
+fn uncorrelated_exists_plans_to_gating_result_over_initplan() {
+    let cx = cx();
+    let mcx = cx.mcx();
+
+    let one = Node::mk_const(mcx, 23, -1, 0, 4, Datum::from_i32(1), false, true).unwrap();
+    let sub_tle = Node::mk_target_entry(mcx, one, 1, None, false).unwrap();
+    let sub_node = {
+        let mut rte = Node::build::<types_nodes::parsenodes::RangeTblEntry>(mcx).unwrap();
+        rte.rtekind = RTEKind::RTE_RELATION;
+        rte.relid = TBL;
+        rte.relkind = b'r';
+        rte.rellockmode = 1;
+        let rtable = NodeList::make1(mcx, rte.seal()).unwrap();
+        let rtr = Node::mk_range_tbl_ref(mcx, 1).unwrap();
+        let jointree = alloc_leak_in(
+            mcx,
+            FromExpr { fromlist: NodeList::make1(mcx, rtr).unwrap(), quals: None },
+        )
+        .unwrap();
+        let sub = Query {
+            commandType: CmdType::CMD_SELECT,
+            canSetTag: true,
+            jointree: Some(jointree),
+            rtable,
+            targetList: NodeList::make1(mcx, sub_tle).unwrap(),
+            ..Query::default()
+        };
+        Node::mk(mcx, sub).unwrap()
+    };
+    let sublink = Node::mk(
+        mcx,
+        types_nodes::SubLink {
+            subLinkType: types_nodes::SubLinkType::EXISTS_SUBLINK,
+            subLinkId: 0,
+            testexpr: None,
+            operName: NodeList::nil(),
+            subselect: sub_node,
+            location: -1,
+        },
+    )
+    .unwrap();
+    let mut parse = table_query(mcx, Some(sublink));
+    parse.hasSubLinks = true;
+
+    let stmt = planner(
+        mcx,
+        parse,
+        "SELECT * FROM t WHERE EXISTS (SELECT 1 FROM t)",
+        CURSOR_OPT_PARALLEL_OK,
+        ParamListHandle::NULL,
+    )
+    .unwrap();
+
+    assert_eq!(stmt.subplans.len(), 1);
+    assert_eq!(stmt.paramExecTypes.len(), 1);
+    assert_eq!(stmt.paramExecTypes.nth(0), 16);
+
+    // EXISTS at qual top level is pseudoconstant: a gating Result evaluates
+    // $0 as a one-time filter above the scan.
+    let top = stmt.planTree.unwrap();
+    assert_eq!(top.node_tag(), NodeTag::T_Result);
+    let result = top.as_result().unwrap();
+    let rcq = result.resconstantqual.expect("one-time filter").as_list().unwrap();
+    assert_eq!(rcq.len(), 1);
+    let p = rcq.nth(0).as_param().unwrap();
+    assert_eq!((p.paramkind, p.paramid, p.paramtype), (types_nodes::ParamKind::PARAM_EXEC, 0, 16));
+    assert!(result.plan.lefttree.is_some());
+    assert_eq!(result.plan.initPlan.len(), 1);
+    let sp = result.plan.initPlan.nth(0).as_sub_plan().unwrap();
+    assert_eq!(sp.subLinkType, types_nodes::SubLinkType::EXISTS_SUBLINK);
+    assert_eq!(sp.firstColType, 2278);
+
+    // simplify_EXISTS_query stripped the sub-tlist.
+    let subplan = stmt.subplans.nth(0);
+    assert_eq!(subplan.node_tag(), NodeTag::T_SeqScan);
+    assert!(subplan.as_plan().unwrap().targetlist.is_nil());
+    assert_eq!(subplan.as_seq_scan().unwrap().scan.scanrelid, 2);
 }

@@ -7,8 +7,8 @@ use types_nodes::rawnodes::{ColumnRef, SortBy, SortByDir, SortByNulls, ValUnion}
 use types_nodes::{Integer, Node, NodeList, String as PgStr};
 
 use crate::{
-    transformFromClause, transformGroupClause, transformLimitClause, transformSortClause,
-    transformWhereClause, transformWindowDefinitions,
+    transformDistinctClause, transformFromClause, transformGroupClause, transformLimitClause,
+    transformSortClause, transformWhereClause, transformWindowDefinitions,
 };
 
 const INT4_LT: types_core::Oid = 97;
@@ -114,18 +114,59 @@ fn install_fixture() {
             }))
         });
         syscache_seams::lookup_pg_proc_shape::set(|funcid| {
-            Ok((funcid == F_INT48).then_some(syscache_seams::PgProcShape {
-                pronamespace: 11,
-                prorettype: INT8OID,
-                provariadic: InvalidOid,
-                prosupport: InvalidOid,
-                pronargs: 1,
-                prokind: b'f' as i8,
-                provolatile: b'i' as i8,
-                proparallel: b's' as i8,
-                proretset: false,
-                proisstrict: true,
-                proleakproof: true,
+            Ok(match funcid {
+                F_INT48 => Some(syscache_seams::PgProcShape {
+                    pronamespace: 11,
+                    prorettype: INT8OID,
+                    provariadic: InvalidOid,
+                    prosupport: InvalidOid,
+                    pronargs: 1,
+                    prokind: b'f' as i8,
+                    provolatile: b'i' as i8,
+                    proparallel: b's' as i8,
+                    proretset: false,
+                    proisstrict: true,
+                    proleakproof: true,
+                }),
+                1066 | 1067 => Some(syscache_seams::PgProcShape {
+                    pronamespace: 11,
+                    prorettype: INT4OID,
+                    provariadic: InvalidOid,
+                    prosupport: 3994,
+                    pronargs: if funcid == 1066 { 3 } else { 2 },
+                    prokind: b'f' as i8,
+                    provolatile: b'i' as i8,
+                    proparallel: b's' as i8,
+                    proretset: true,
+                    proisstrict: true,
+                    proleakproof: false,
+                }),
+                _ => None,
+            })
+        });
+        syscache_seams::lookup_pg_proc_name_candidates::set(|mcx, proname| {
+            let mut v = mcx::PgVec::new_in(mcx);
+            if proname == "generate_series" {
+                let mut two = mcx::vec_with_capacity_in(mcx, 2)?;
+                two.extend([INT4OID, INT4OID]);
+                v.push(syscache_seams::PgProcCandidate {
+                    oid: 1067,
+                    pronamespace: 11,
+                    pronargs: 2,
+                    pronargdefaults: 0,
+                    provariadic: InvalidOid,
+                    proargtypes: two,
+                });
+            }
+            Ok(v)
+        });
+        miscinit_seams::get_user_id::set(|| 10);
+        syscache_seams::pg_type_typtype::set(|_| Ok(Some(b'b' as i8)));
+        syscache_seams::pg_proc_result_arrays::set(|_, _| {
+            Ok(Some(syscache_seams::PgProcResultArraysShape {
+                proallargtypes: None,
+                proargmodes: None,
+                proargnames: None,
             }))
         });
         syscache_seams::pg_type_io_shape::set(|typid| {
@@ -717,4 +758,186 @@ fn order_by_duplicate_name_distinct_values_is_42702() {
     .unwrap_err();
     assert_eq!(err.sqlstate(), types_error::ERRCODE_AMBIGUOUS_COLUMN);
     assert_eq!(err.message(), "ORDER BY \"foo\" is ambiguous");
+}
+
+// DISTINCT = all ORDER BY items (copied) then remaining non-junk tlist items.
+#[test]
+fn distinct_absorbs_order_by_then_remaining_columns() {
+    install_fixture();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+    let mut tlist = NodeList::make2(
+        mcx,
+        int4_tle(mcx, 1, 1, Some("foo")),
+        int4_tle(mcx, 2, 2, Some("bar")),
+    )
+    .unwrap();
+
+    let orderby = NodeList::make1(
+        mcx,
+        sort_by(
+            mcx,
+            int_a_const(mcx, 2, 20),
+            SortByDir::SORTBY_DESC,
+            SortByNulls::SORTBY_NULLS_DEFAULT,
+        ),
+    )
+    .unwrap();
+    let sortlist = transformSortClause(
+        mcx,
+        &mut pstate,
+        &orderby,
+        &mut tlist,
+        ParseExprKind::EXPR_KIND_ORDER_BY,
+        false,
+    )
+    .unwrap();
+
+    let distinct =
+        transformDistinctClause(mcx, &mut pstate, &mut tlist, &sortlist, false).unwrap();
+    assert_eq!(distinct.len(), 2);
+    // First: the ORDER BY item's copied (DESC) semantics for "bar".
+    let d1 = distinct.nth(0).as_sort_group_clause().unwrap();
+    let s = sortlist.nth(0).as_sort_group_clause().unwrap();
+    assert!(!distinct.nth(0).ptr_eq(sortlist.nth(0)), "C copyObject, not a shared node");
+    assert_eq!(
+        (d1.tleSortGroupRef, d1.eqop, d1.sortop, d1.reverse_sort),
+        (s.tleSortGroupRef, s.eqop, s.sortop, s.reverse_sort)
+    );
+    // Second: "foo" under default grouping semantics.
+    let d2 = distinct.nth(1).as_sort_group_clause().unwrap();
+    assert_eq!((d2.eqop, d2.sortop, d2.reverse_sort, d2.hashable), (INT4_EQ, INT4_LT, false, true));
+    assert_eq!(tlist.nth(0).as_target_entry().unwrap().ressortgroupref, d2.tleSortGroupRef);
+}
+
+// A resjunk ORDER BY expression under SELECT DISTINCT is 42P10.
+#[test]
+fn distinct_with_junk_order_by_is_42p10() {
+    install_fixture();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+    let mut tlist = NodeList::make1(mcx, int4_tle(mcx, 1, 1, Some("foo"))).unwrap();
+    // A junk sort entry, as findTargetlistEntrySQL99 would add.
+    let junk_expr = parse_expr::transformExpr(
+        mcx,
+        &mut pstate,
+        int_a_const(mcx, 9, 30),
+        ParseExprKind::EXPR_KIND_ORDER_BY,
+    )
+    .unwrap();
+    let junk = Node::mk_target_entry(mcx, junk_expr, 2, None, true).unwrap();
+    // SAFETY: freshly built tlist; no other reference is live.
+    unsafe {
+        junk.with_mut::<types_nodes::primnodes::TargetEntry, _>(|t| t.ressortgroupref = 7)
+    }
+    .unwrap();
+    tlist.lappend(mcx, junk).unwrap();
+    let sortlist = NodeList::make1(
+        mcx,
+        Node::mk(
+            mcx,
+            types_nodes::parsenodes::SortGroupClause {
+                tleSortGroupRef: 7,
+                eqop: INT4_EQ,
+                sortop: INT4_LT,
+                reverse_sort: false,
+                nulls_first: false,
+                hashable: true,
+            },
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    let err = transformDistinctClause(mcx, &mut pstate, &mut tlist, &sortlist, false)
+        .unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_INVALID_COLUMN_REFERENCE);
+    assert_eq!(
+        err.message(),
+        "for SELECT DISTINCT, ORDER BY expressions must appear in select list"
+    );
+}
+
+fn generate_series_from_item<'mcx>(
+    mcx: Mcx<'mcx>,
+    alias: Option<&'mcx str>,
+) -> Node<'mcx> {
+    use types_nodes::rawnodes::FuncCall;
+    let name = NodeList::make1(mcx, Node::mk(mcx, PgStr { sval: "generate_series" }).unwrap())
+        .unwrap();
+    let mut args = NodeList::nil();
+    for v in [1, 10] {
+        args.lappend(mcx, int_a_const(mcx, v, -1)).unwrap();
+    }
+    let fc = Node::mk(
+        mcx,
+        FuncCall { funcname: name, args, location: 14, ..Default::default() },
+    )
+    .unwrap();
+    let alias = alias.map(|a| {
+        Node::mk_mut(mcx, types_nodes::Alias { aliasname: Some(a), colnames: NodeList::nil() })
+            .unwrap()
+            .seal_ref() as &types_nodes::Alias<'_>
+    });
+    Node::mk(
+        mcx,
+        types_nodes::RangeFunction {
+            functions: NodeList::make1(mcx, fc).unwrap(),
+            alias,
+            ..Default::default()
+        },
+    )
+    .unwrap()
+}
+
+#[test]
+fn from_generate_series_builds_function_rte() {
+    use types_nodes::parsenodes::RTEKind;
+    install_fixture();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+
+    let from = NodeList::make1(mcx, generate_series_from_item(mcx, None)).unwrap();
+    transformFromClause(mcx, &mut pstate, &from).unwrap();
+
+    assert_eq!(pstate.p_rtable.len(), 1);
+    let rte = pstate.p_rtable.nth(0).as_range_tbl_entry().unwrap();
+    assert_eq!(rte.rtekind, RTEKind::RTE_FUNCTION);
+    assert!(!rte.funcordinality && !rte.lateral && rte.inFromCl);
+    assert_eq!(rte.functions.len(), 1);
+    let rtfunc = rte.functions.nth(0).as_range_tbl_function().unwrap();
+    assert_eq!(rtfunc.funccolcount, 1);
+    let fe = rtfunc.funcexpr.unwrap().as_func_expr().unwrap();
+    assert_eq!(fe.funcid, 1067);
+    assert!(fe.funcretset);
+    assert_eq!(fe.funcresulttype, INT4OID);
+    assert_eq!(fe.args.len(), 2);
+    let eref = rte.eref.unwrap();
+    assert_eq!(eref.aliasname, Some("generate_series"));
+    assert_eq!(eref.colnames.len(), 1);
+    assert_eq!(eref.colnames.nth(0).as_string().unwrap().sval, "generate_series");
+    // The nsitem drives * expansion off its nscolumns.
+    let ns = pstate.p_namespace.last().unwrap();
+    assert_eq!(ns.p_nscolumns.len(), 1);
+    assert_eq!(ns.p_nscolumns[0].p_vartype, INT4OID);
+    assert_eq!(ns.p_nscolumns[0].p_varattno, 1);
+}
+
+#[test]
+fn from_generate_series_alias_names_the_column() {
+    install_fixture();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+
+    let from = NodeList::make1(mcx, generate_series_from_item(mcx, Some("g"))).unwrap();
+    transformFromClause(mcx, &mut pstate, &from).unwrap();
+
+    let rte = pstate.p_rtable.nth(0).as_range_tbl_entry().unwrap();
+    let eref = rte.eref.unwrap();
+    assert_eq!(eref.aliasname, Some("g"));
+    assert_eq!(eref.colnames.nth(0).as_string().unwrap().sval, "g");
 }

@@ -230,10 +230,13 @@ fn assign_collations_walker<'mcx>(
             location = expr_location(node);
         }
         // C's default arm over the closed set this lane can produce.
+        // SubLink: children walked (T_Query arm supplies the EXPR sublink's
+        // first-column collation); exprSetCollation on SubLink is a C no-op.
         tag @ (NodeTag::T_OpExpr
         | NodeTag::T_FuncExpr
         | NodeTag::T_RelabelType
-        | NodeTag::T_Aggref) => {
+        | NodeTag::T_Aggref
+        | NodeTag::T_SubLink) => {
             match tag {
                 NodeTag::T_OpExpr => {
                     for arg in &node.as_op_expr().unwrap().args {
@@ -262,6 +265,13 @@ fn assign_collations_walker<'mcx>(
                     if let Some(filter) = agg.aggfilter {
                         assign_collations_walker(filter, &mut loccontext)?;
                     }
+                }
+                NodeTag::T_SubLink => {
+                    let sl = node.as_sub_link().unwrap();
+                    if let Some(te) = sl.testexpr {
+                        assign_collations_walker(te, &mut loccontext)?;
+                    }
+                    assign_collations_walker(sl.subselect, &mut loccontext)?;
                 }
                 _ => unreachable!(),
             }
@@ -314,6 +324,8 @@ fn assign_collations_walker<'mcx>(
                             a.inputcollid = input_coll;
                         })
                         .unwrap(),
+                    // exprSetCollation(SubLink) is assert-only in C.
+                    NodeTag::T_SubLink => {}
                     _ => unreachable!(),
                 }
             }

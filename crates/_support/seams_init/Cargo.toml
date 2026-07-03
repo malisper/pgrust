@@ -40,6 +40,7 @@ pg_database = { path = "../../backend/catalog/pg_database" }
 pg_db_role_setting = { path = "../../backend/catalog/pg_db_role_setting" }
 dbcommands = { path = "../../backend/commands/dbcommands" }
 executils = { path = "../../backend/executor/executils" }
+execexpr = { path = "../../backend/executor/execexpr" }
 execjunk = { path = "../../backend/executor/execjunk" }
 execmain = { path = "../../backend/executor/execmain" }
 execscan = { path = "../../backend/executor/execscan" }

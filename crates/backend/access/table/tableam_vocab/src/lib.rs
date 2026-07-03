@@ -323,3 +323,57 @@ pub fn table_block_parallelscan_nextpage(
 
     Ok(page)
 }
+
+pub const VACOPT_VACUUM: u32 = 0x01;
+pub const VACOPT_ANALYZE: u32 = 0x02;
+pub const VACOPT_VERBOSE: u32 = 0x04;
+pub const VACOPT_FREEZE: u32 = 0x08;
+pub const VACOPT_FULL: u32 = 0x10;
+pub const VACOPT_SKIP_LOCKED: u32 = 0x20;
+pub const VACOPT_PROCESS_MAIN: u32 = 0x40;
+pub const VACOPT_PROCESS_TOAST: u32 = 0x80;
+pub const VACOPT_DISABLE_PAGE_SKIPPING: u32 = 0x100;
+pub const VACOPT_SKIP_DATABASE_STATS: u32 = 0x200;
+pub const VACOPT_ONLY_DATABASE_STATS: u32 = 0x400;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u32)]
+pub enum VacOptValue {
+    #[default]
+    Unspecified = 0,
+    Auto,
+    Disabled,
+    Enabled,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct VacuumParams {
+    pub options: u32,
+    pub freeze_min_age: i32,
+    pub freeze_table_age: i32,
+    pub multixact_freeze_min_age: i32,
+    pub multixact_freeze_table_age: i32,
+    pub is_wraparound: bool,
+    pub log_min_duration: i32,
+    pub index_cleanup: VacOptValue,
+    pub truncate: VacOptValue,
+    pub toast_parent: Oid,
+    pub max_eager_freeze_failure_rate: f64,
+    pub nworkers: i32,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct VacuumCutoffs {
+    pub relfrozenxid: TransactionId,
+    pub relminmxid: ::types_core::MultiXactId,
+    pub OldestXmin: TransactionId,
+    pub OldestMxact: ::types_core::MultiXactId,
+    pub FreezeLimit: TransactionId,
+    pub MultiXactCutoff: ::types_core::MultiXactId,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct VacDeadItemsInfo {
+    pub max_bytes: usize,
+    pub num_items: i64,
+}

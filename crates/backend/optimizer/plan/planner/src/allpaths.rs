@@ -69,6 +69,9 @@ fn set_rel_size(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResult<()
             debug_assert!(rte.tablesample.is_none());
             set_plain_rel_size(run, rel)?;
         }
+        RTEKind::RTE_FUNCTION => {
+            crate::costsize::set_function_size_estimates(run, rel)?;
+        }
         RTEKind::RTE_RESULT => {
             unreachable!("RTE_RESULT is handled by query_planner's trivial arm");
         }
@@ -80,11 +83,25 @@ fn set_rel_size(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResult<()
 
 fn set_rel_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResult<()> {
     let rte = run.rte(rti);
-    debug_assert!(!rte.inh && rte.rtekind == RTEKind::RTE_RELATION);
-    set_plain_rel_pathlist(run, rel)?;
+    debug_assert!(!rte.inh);
+    match rte.rtekind {
+        RTEKind::RTE_RELATION => set_plain_rel_pathlist(run, rel)?,
+        RTEKind::RTE_FUNCTION => set_function_pathlist(run, rel, rti)?,
+        other => panic!("set_rel_pathlist (allpaths.c): {other:?}; M2 scan lane"),
+    }
 
     debug_assert!(run.root.rel(rel).partial_pathlist.is_empty());
     set_cheapest(run, rel)?;
+    Ok(())
+}
+
+// set_function_pathlist (allpaths.c); the ORDINALITY pathkey leg is dead
+// (funcordinality is loud in the parser).
+fn set_function_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResult<()> {
+    debug_assert!(run.root.rel(rel).lateral_relids.is_none());
+    debug_assert!(!run.rte(rti).funcordinality);
+    let path = crate::pathnode::create_functionscan_path(run, rel)?;
+    add_path(run, rel, path);
     Ok(())
 }
 fn set_plain_rel_size(run: &mut PlannerRun<'_>, rel: RelId) -> PgResult<()> {
@@ -103,6 +120,11 @@ fn set_rel_consider_parallel(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -
                 return Ok(());
             }
             debug_assert!(rte.tablesample.is_none());
+        }
+        RTEKind::RTE_FUNCTION => {
+            // C tests is_parallel_safe over the funcexprs; parallel plans are
+            // loud on this lane, so the flag stays conservatively false.
+            return Ok(());
         }
         other => panic!("set_rel_consider_parallel (allpaths.c): {other:?}; M2 lane"),
     }

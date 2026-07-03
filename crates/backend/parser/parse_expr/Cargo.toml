@@ -9,6 +9,7 @@ name = "parse_expr"
 path = "src/lib.rs"
 
 [dependencies]
+analyze_seams = { path = "../analyze_seams" }
 elog = { path = "../../utils/error/elog" }
 guc_tables = { path = "../../utils/misc/guc_tables" }
 mbutils = { path = "../../utils/mb/mbutils" }

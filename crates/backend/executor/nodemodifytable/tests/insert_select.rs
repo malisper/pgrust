@@ -387,6 +387,7 @@ fn install_relation_seams() {
 
 fn install_parser_fixture_seams() {
     syscache_seams::lookup_pg_statistic_shape::set(|_, _, _| Ok(None));
+    syscache_seams::lookup_pg_statistic_bundle::set(|_, _, _, _| Ok(None));
     syscache_seams::pg_statistic_stawidth::set(|_, _, _| Ok(None));
     syscache_seams::lookup_pg_type_shape::set(|_typid| {
         Ok(Some(types_tuple::PgTypeShape {

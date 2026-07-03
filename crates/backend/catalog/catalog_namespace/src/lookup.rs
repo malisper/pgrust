@@ -297,3 +297,89 @@ pub fn RangeVarGetRelidExtended(
     }
     Ok(relId)
 }
+
+pub struct FuncCandidate<'mcx> {
+    pub oid: Oid,
+    pub nargs: i16,
+    pub args: mcx::PgVec<'mcx, Oid>,
+}
+
+// FuncnameGetCandidates (namespace.c), exact-arity slice: candidates that C
+// would only admit via variadic or default-argument expansion panic instead
+// of being silently dropped.
+pub fn FuncnameGetCandidates<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    names: &[&str],
+    nargs: i16,
+    expand_variadic: bool,
+    expand_defaults: bool,
+) -> PgResult<mcx::PgVec<'mcx, FuncCandidate<'mcx>>> {
+    debug_assert!(nargs >= 0);
+    let (schemaname, funcname) = DeconstructQualifiedName(names)?;
+
+    let namespace_id = match schemaname {
+        Some(schemaname) => {
+            let id = LookupExplicitNamespace(schemaname, false)?;
+            Some(id)
+        }
+        None => {
+            recomputeNamespacePath()?;
+            None
+        }
+    };
+
+    let raw = syscache_seams::lookup_pg_proc_name_candidates::call(mcx, funcname)?;
+    let mut result: mcx::PgVec<'mcx, FuncCandidate<'mcx>> = mcx::PgVec::new_in(mcx);
+    for cand in raw {
+        if OidIsValid(cand.provariadic) && expand_variadic && nargs >= cand.pronargs - 1 {
+            panic!(
+                "FuncnameGetCandidates (namespace.c): expand_variadic arm unported — \
+                 candidate {} for \"{funcname}\" is variadic",
+                cand.oid
+            );
+        }
+        if cand.pronargdefaults > 0
+            && expand_defaults
+            && nargs >= cand.pronargs - cand.pronargdefaults
+            && nargs < cand.pronargs
+        {
+            panic!(
+                "FuncnameGetCandidates (namespace.c): expand_defaults arm unported — \
+                 candidate {} for \"{funcname}\" needs default-argument expansion",
+                cand.oid
+            );
+        }
+        if cand.pronargs != nargs {
+            continue;
+        }
+        let visible = match namespace_id {
+            Some(id) => cand.pronamespace == id,
+            None => {
+                let mut pathpos = None;
+                for i in 0..base_path_len() {
+                    if base_path_nth(i) == cand.pronamespace {
+                        pathpos = Some(i);
+                        break;
+                    }
+                }
+                pathpos.is_some()
+            }
+        };
+        if !visible {
+            continue;
+        }
+        if result.iter().any(|prev: &FuncCandidate<'mcx>| prev.args.as_slice() == cand.proargtypes.as_slice()) {
+            panic!(
+                "FuncnameGetCandidates (namespace.c): same-signature shadowing across \
+                 schemas unported — duplicate candidate {} for \"{funcname}\"",
+                cand.oid
+            );
+        }
+        let mut args = mcx::vec_with_capacity_in(mcx, cand.proargtypes.len())?;
+        for &a in cand.proargtypes.iter() {
+            args.push(a);
+        }
+        result.push(FuncCandidate { oid: cand.oid, nargs: cand.pronargs, args });
+    }
+    Ok(result)
+}

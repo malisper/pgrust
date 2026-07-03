@@ -1,15 +1,29 @@
 //! fmgr-shaped wrappers (`fc_<cname>`) and the registry table (`INT8_BUILTINS`)
-//! the fmgr-core unit consumes. Not here: int8recv/int8send (2408/2409, pqcomm
-//! wire unit), generate_series[_step]_int8 (1068/1069, funcapi SRF frame) and
-//! the prosupport bodies int8inc_support (6236) / generate_series_int8_support
-//! (3995, planner nodes).
+//! the fmgr-core unit consumes. Not here: generate_series[_step]_int8
+//! (1068/1069, funcapi SRF frame) and the prosupport bodies int8inc_support
+//! (6236) / generate_series_int8_support (3995, planner nodes). recv/send
+//! (2408/2409) ride the binary-wire fmgr frame (types_fmgr::wire).
 
 use alloc::string::String;
 
 use ::datum::Datum;
 use ::types_core::Oid;
 use ::types_error::PgResult;
-use ::types_fmgr::{FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction};
+use ::types_fmgr::{
+    varlena_result, FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction,
+};
+
+pub fn fc_int8recv(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: recv arg0 is the live StringInfo pointer per the recv ABI.
+    let buf = unsafe { fcinfo.arg_stringinfo(0) };
+    Ok(Datum::from_i64(crate::int8recv(buf)?))
+}
+
+pub fn fc_int8send(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let [a] = fcinfo.args_n::<1>();
+    let mcx = fcinfo.result_mcx();
+    Ok(varlena_result(crate::int8send(mcx, a.value.as_i64())?))
+}
 
 #[cold]
 #[inline(never)]
@@ -117,6 +131,17 @@ fc1t! {
     fc_i8tooid: i8tooid(as_i64) -> from_oid;
 }
 
+// C home is hashfunc.c (no hash-AM adt crate yet); the low half xors the
+// (sign-complemented) high half so int2/int4/int8 hash equal for equal values.
+pub fn fc_hashint8(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let [a] = fcinfo.args_n::<1>();
+    let val = a.value.as_i64();
+    let lohalf = val as u32;
+    let hihalf = (val >> 32) as u32;
+    let lohalf = lohalf ^ if val >= 0 { hihalf } else { !hihalf };
+    Ok(Datum::from_u32(::hashfn::hash_bytes_uint32(lohalf)))
+}
+
 fc2! {
     fc_int8eq: int8eq(as_i64, as_i64) -> from_bool;
     fc_int8ne: int8ne(as_i64, as_i64) -> from_bool;
@@ -215,6 +240,9 @@ const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrB
 pub const INT8_BUILTINS: &[FmgrBuiltin] = &[
     b(460, "int8in", 1, fc_int8in),
     b(461, "int8out", 1, fc_int8out),
+    b(2408, "int8recv", 1, fc_int8recv),
+    b(2409, "int8send", 1, fc_int8send),
+    b(949, "hashint8", 1, fc_hashint8),
     b(467, "int8eq", 2, fc_int8eq),
     b(468, "int8ne", 2, fc_int8ne),
     b(469, "int8lt", 2, fc_int8lt),

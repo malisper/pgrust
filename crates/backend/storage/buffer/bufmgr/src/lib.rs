@@ -193,7 +193,6 @@ unported! {
     fn FlushRelationBuffers(RelFileLocatorBackend) -> (), "FlushRelationBuffers";
     fn FlushDatabaseBuffers(Oid) -> (), "FlushDatabaseBuffers";
     fn DropDatabaseBuffers(Oid) -> (), "DropDatabaseBuffers";
-    fn ConditionalLockBufferForCleanup(Buffer) -> bool, "ConditionalLockBufferForCleanup";
     fn IsBufferCleanupOK(Buffer) -> bool, "IsBufferCleanupOK";
     fn HoldingBufferPinThatDelaysRecovery() -> bool, "HoldingBufferPinThatDelaysRecovery";
     fn PrefetchBuffer(RelFileLocatorBackend, ForkNumber, BlockNumber) -> (), "PrefetchBuffer";
@@ -319,6 +318,7 @@ pub fn init_seams() {
     bufmgr_seams::lock_buffer::set(ops::LockBuffer);
     bufmgr_seams::conditional_lock_buffer::set(ops::ConditionalLockBuffer);
     bufmgr_seams::lock_buffer_for_cleanup::set(ops::LockBufferForCleanup);
+    bufmgr_seams::conditional_lock_buffer_for_cleanup::set(ops::ConditionalLockBufferForCleanup);
     bufmgr_seams::buffer_page_is_new::set(ops::buffer_page_is_new);
     bufmgr_seams::buffer_page_get_lsn::set(ops::buffer_page_get_lsn);
     bufmgr_seams::buffer_page_set_lsn::set(ops::buffer_page_set_lsn);

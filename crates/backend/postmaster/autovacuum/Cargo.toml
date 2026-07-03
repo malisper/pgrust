@@ -9,7 +9,38 @@ name = "autovacuum"
 path = "src/lib.rs"
 
 [dependencies]
-types_error = { path = "../../../_support/types/types_error" }
-guc_tables = { path = "../../utils/misc/guc_tables" }
-elog = { path = "../../utils/error/elog" }
+aio_seams = { path = "../../storage/aio/aio_seams" }
 autovacuum_seams = { path = "../autovacuum_seams" }
+bufmgr = { path = "../../storage/buffer/bufmgr" }
+dynahash = { path = "../../utils/hash/dynahash" }
+elog = { path = "../../utils/error/elog" }
+fd = { path = "../../storage/file/fd" }
+guc = { path = "../../utils/misc/guc" }
+guc_file_seams = { path = "../../utils/misc/guc_file_seams" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+init_small = { path = "../../utils/init/init_small" }
+interrupt = { path = "../interrupt" }
+ipc = { path = "../../storage/ipc/ipc" }
+latch = { path = "../../storage/ipc/latch" }
+libc = "0.2"
+libpq_pqsignal = { path = "../../libpq/libpq_pqsignal" }
+lmgr_proc = { path = "../../storage/lmgr/lmgr_proc" }
+lwlock = { path = "../../storage/lmgr/lwlock" }
+mcx = { path = "../../../_support/mcx" }
+mcxt_seams = { path = "../../utils/mmgr/mcxt_seams" }
+miscinit = { path = "../../utils/init/miscinit" }
+postgres = { path = "../../tcop/postgres" }
+postinit = { path = "../../utils/init/postinit" }
+procsignal = { path = "../../storage/ipc/procsignal" }
+resowner = { path = "../../utils/resowner/resowner" }
+sinval = { path = "../../storage/ipc/sinval" }
+smgr = { path = "../../storage/smgr/smgr" }
+timeout_seams = { path = "../../utils/misc/timeout_seams" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_guc = { path = "../../../_support/types/types_guc" }
+types_startup = { path = "../../../_support/types/types_startup" }
+types_storage = { path = "../../../_support/types/types_storage" }
+varsup = { path = "../../access/transam/varsup" }
+waitevent_seams = { path = "../../utils/activity/waitevent_seams" }
+xact = { path = "../../access/transam/xact" }

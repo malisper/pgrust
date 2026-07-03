@@ -20,6 +20,8 @@ planner_seams = { path = "../planner_seams" }
 backend_status_seams = { path = "../../../utils/activity/backend_status_seams" }
 adt_int8 = { path = "../../../utils/adt/int8" }
 clauses = { path = "../../util/clauses" }
+fmgr_core = { path = "../../../utils/fmgr/fmgr_core" }
+types_fmgr = { path = "../../../../_support/types/fmgr" }
 lsyscache = { path = "../../../utils/cache/lsyscache" }
 guc_tables = { path = "../../../utils/misc/guc_tables" }
 init_small = { path = "../../../utils/init/init_small" }
@@ -35,6 +37,7 @@ tableam = { path = "../../../access/table/tableam" }
 indexam = { path = "../../../access/index/indexam" }
 nbtree = { path = "../../../access/nbtree/nbtree" }
 nodeagg = { path = "../../../executor/nodeagg" }
+nodehash = { path = "../../../executor/nodehash" }
 vars = { path = "../../util/vars" }
 
 [dev-dependencies]

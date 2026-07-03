@@ -1,7 +1,8 @@
 #![forbid(unsafe_code)]
 
 use datum::{Bytea, VARHDRSZ};
-use mbutils_seams::{pg_client_to_server, pg_server_to_client};
+use mbutils::pg_client_to_server;
+use mbutils_seams::pg_server_to_client;
 use mcx::{Mcx, PgVec};
 use pqcomm_seams::pq_putmessage;
 use stringinfo::StringInfo;
@@ -273,7 +274,7 @@ pub fn pq_getmsgtext<'mcx>(
     }
     msg.cursor = cursor + rawbytes;
     let raw = &msg.as_bytes()[cursor..cursor + rawbytes];
-    match pg_client_to_server::call(mcx, raw)? {
+    match pg_client_to_server(mcx, raw)? {
         Some(p) => Ok(p),
         None => mcx::slice_in(mcx, raw),
     }
@@ -316,7 +317,7 @@ pub fn pq_getmsgstring<'a, 'mcx>(
     let start = msg.cursor;
     msg.cursor = start + slen + 1;
     let raw = &msg.as_bytes()[start..start + slen];
-    match pg_client_to_server::call(mcx, raw)? {
+    match pg_client_to_server(mcx, raw)? {
         Some(p) => Ok(PqString::Converted(p)),
         None => Ok(PqString::Borrowed(raw)),
     }

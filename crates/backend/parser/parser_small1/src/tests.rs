@@ -423,7 +423,7 @@ fn enr_lookup_through_pstate() {
     let mut env = queryenvironment::create_queryEnv(mcx);
     queryenvironment::register_ENR(
         &mut env,
-        queryenvironment::EphemeralNamedRelationData { rd_locator: Default::default(), rd_smgr: Default::default(),
+        queryenvironment::EphemeralNamedRelationData {
             md: queryenvironment::EphemeralNamedRelationMetadataData {
                 name: mcx::PgString::from_str_in("new_rows", mcx).unwrap(),
                 reliddesc: 1234,

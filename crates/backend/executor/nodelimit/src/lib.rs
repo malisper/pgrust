@@ -73,8 +73,9 @@ pub fn exec_init_limit<'mcx>(
     debug_assert!(eflags & EXEC_FLAG_MARK == 0);
     let mcx = estate.es_query_cxt;
     let ps_ExprContext = estate.exec_assign_expr_context();
-    let limitOffset = ::execexpr::exec_init_expr(mcx, node.limitOffset)?;
-    let limitCount = ::execexpr::exec_init_expr(mcx, node.limitCount)?;
+    let params = estate.param_bind();
+    let limitOffset = ::execexpr::exec_init_expr(mcx, node.limitOffset, params)?;
+    let limitCount = ::execexpr::exec_init_expr(mcx, node.limitCount, params)?;
     if node.limitOption == LimitOption::LIMIT_OPTION_WITH_TIES {
         panic!(
             "ExecInitLimit (nodeLimit.c): WITH TIES lane needs \

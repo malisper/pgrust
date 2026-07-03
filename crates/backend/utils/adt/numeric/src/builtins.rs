@@ -1,13 +1,15 @@
 //! fmgr wrappers (`fc_*`) + registry for numeric.c's fmgr-callable rows.
 //! Numeric results follow the result-mcx convention with the pool-backed
 //! NumericImage as call scratch (notes/fc-result-convention.md); numeric_out
-//! keeps the retained-cstring-scratch precedent. Still deferred: recv/send
-//! (pqformat frame), sortsupport/hash (see ops.rs).
+//! keeps the retained-cstring-scratch precedent. recv/send ride the
+//! binary-wire fmgr frame (types_fmgr::wire). Still deferred: sortsupport/hash
+//! (see ops.rs).
 
 use ::datum::Datum;
 use ::types_error::PgResult;
 use ::types_fmgr::{
-    byref_result, FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction,
+    byref_result, varlena_result, FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo,
+    PGFunction,
 };
 
 use crate::var::NumericImage;
@@ -99,6 +101,21 @@ pub fn fc_numeric_out(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgR
     crate::io::numeric_out_into(num, buf);
     buf.push(0);
     Ok(Datum::from_usize(buf.as_ptr() as usize))
+}
+
+pub fn fc_numeric_recv(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let typmod = fcinfo.arg_i32(2);
+    // SAFETY: recv arg0 is the live StringInfo pointer per the recv ABI.
+    let buf = unsafe { fcinfo.arg_stringinfo(0) };
+    let img = crate::numeric_recv(buf, typmod)?;
+    img_result(fcinfo, &img)
+}
+
+pub fn fc_numeric_send(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog arg 0 is a non-null numeric varlena (strict fn).
+    let num = unsafe { num_arg(fcinfo, 0) };
+    let mcx = fcinfo.result_mcx();
+    Ok(varlena_result(crate::numeric_send(mcx, num)?))
 }
 
 pub fn fc_numeric(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
@@ -295,6 +312,8 @@ pub const NUMERIC_BUILTINS: &[FmgrBuiltin] = &[
     b(1980, "numeric_div_trunc", 2, true, fc_numeric_div_trunc),
     b(2169, "power", 2, true, fc_numeric_power),
     b(2170, "width_bucket", 4, true, fc_width_bucket_numeric),
+    b(2460, "numeric_recv", 3, true, fc_numeric_recv),
+    b(2461, "numeric_send", 1, true, fc_numeric_send),
     b(5048, "gcd", 2, true, fc_numeric_gcd),
     b(5049, "lcm", 2, true, fc_numeric_lcm),
 ];

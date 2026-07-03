@@ -21,6 +21,7 @@ adt_cash = { path = "../../adt/cash" }
 adt_date = { path = "../../adt/adt_date" }
 adt_encode = { path = "../../adt/encode" }
 adt_float = { path = "../../adt/float" }
+adt_formatting = { path = "../../adt/formatting" }
 adt_int = { path = "../../adt/int" }
 adt_int8 = { path = "../../adt/int8" }
 adt_json = { path = "../../adt/json" }

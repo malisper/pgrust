@@ -66,12 +66,100 @@ fn transformFromClauseItem<'mcx>(
             let rtr = Node::mk_range_tbl_ref(mcx, nsitem.p_rtindex)?;
             Ok((rtr, nsitem))
         }
+        NodeTag::T_RangeFunction => {
+            let nsitem = transformRangeFunction(mcx, pstate, n.as_range_function().unwrap())?;
+            let rtr = Node::mk_range_tbl_ref(mcx, nsitem.p_rtindex)?;
+            Ok((rtr, nsitem))
+        }
         other => panic!(
             "transformFromClauseItem (parse_clause.c): arm for {other:?} \
-             (subselect/function/tablesample/tablefunc/JOIN) unported — \
+             (subselect/tablesample/tablefunc/JOIN) unported — \
              unit backend-parser-clause"
         ),
     }
+}
+
+// Single plain-function slice of C transformRangeFunction; the unnest()
+// multi-arg kluge never fires (unnest itself is unported).
+fn transformRangeFunction<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    r: &types_nodes::RangeFunction<'mcx>,
+) -> PgResult<&'mcx ParseNamespaceItem<'mcx>> {
+    if r.is_rowsfrom || r.functions.len() != 1 {
+        panic!(
+            "transformRangeFunction (parse_clause.c): ROWS FROM / multiple functions \
+             unported — unit backend-parser-clause"
+        );
+    }
+    if r.ordinality {
+        panic!(
+            "transformRangeFunction (parse_clause.c): WITH ORDINALITY unported — \
+             unit backend-parser-clause"
+        );
+    }
+    if r.lateral {
+        panic!(
+            "transformRangeFunction (parse_clause.c): LATERAL functions unported \
+             (contain_vars_of_level / lateral namespace) — unit backend-parser-clause"
+        );
+    }
+    if !r.coldeflist.is_nil() {
+        panic!(
+            "transformRangeFunction (parse_clause.c): column definition lists \
+             unported — coldeflist lane"
+        );
+    }
+
+    debug_assert!(!pstate.p_lateral_active);
+    pstate.p_lateral_active = true;
+
+    let fexpr = r.functions.nth(0);
+    let last_srf = pstate.p_last_srf;
+    let newfexpr = transformExpr(mcx, pstate, fexpr, ParseExprKind::EXPR_KIND_FROM_FUNCTION)?;
+    let moved = match (pstate.p_last_srf, last_srf) {
+        (None, None) => false,
+        (Some(a), Some(b)) => !a.ptr_eq(b),
+        _ => true,
+    };
+    if moved && !pstate.p_last_srf.expect("moved implies Some").ptr_eq(newfexpr) {
+        pstate.p_lateral_active = false;
+        return Err(srf_not_top_level(
+            pstate,
+            expr_location(pstate.p_last_srf.expect("moved implies Some")),
+        ));
+    }
+    let funcname = parse_target::FigureColname(fexpr);
+
+    pstate.p_lateral_active = false;
+
+    parse_collate::assign_expr_collations(mcx, pstate, newfexpr)?;
+
+    parse_relation::addRangeTableEntryForFunction(
+        mcx,
+        pstate,
+        funcname,
+        newfexpr,
+        r.alias,
+        r.ordinality,
+        false,
+        true,
+    )
+    .map(|nsitem| &*nsitem)
+}
+
+#[cold]
+#[inline(never)]
+fn srf_not_top_level(pstate: &ParseState<'_, '_>, location: ParseLoc) -> Box<PgError> {
+    let encoding = mbutils::GetDatabaseEncoding();
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg("set-returning functions must appear at top level of FROM")
+            .errposition(parser_errposition(pstate, location, encoding))
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_clause.c", 0, "transformRangeFunction")),
+    )
 }
 
 /// C `setTargetTable` (parse_clause.c); returns the target rangetable index.
@@ -700,16 +788,43 @@ fn addTargetToGroupList<'mcx>(
     Ok(())
 }
 
+/// C `transformDistinctClause`: all ORDER BY items (SortGroupClause copies)
+/// followed by every remaining non-resjunk tlist item.
 pub fn transformDistinctClause<'mcx>(
-    _pstate: &mut ParseState<'_, 'mcx>,
-    _targetlist: &mut NodeList<'mcx>,
-    _sort_clause: &NodeList<'mcx>,
-    _is_agg: bool,
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    targetlist: &mut NodeList<'mcx>,
+    sort_clause: &NodeList<'mcx>,
+    is_agg: bool,
 ) -> PgResult<NodeList<'mcx>> {
-    panic!(
-        "transformDistinctClause (parse_clause.c): DISTINCT transformation unported — \
-         unit backend-parser-clause"
-    );
+    let mut result = NodeList::nil();
+    for sc_node in sort_clause {
+        let scl = sc_node.as_sort_group_clause().expect("sortClause cell");
+        let tle_node = targetlist
+            .iter()
+            .find(|n| {
+                n.as_target_entry().expect("tlist cell").ressortgroupref == scl.tleSortGroupRef
+            })
+            .unwrap_or_else(|| panic!("ORDER/GROUP BY expression not found in targetlist"));
+        let tle = tle_node.as_target_entry().unwrap();
+        if tle.resjunk {
+            return Err(distinct_orderby_mismatch(pstate, is_agg, expr_location(tle.expr)));
+        }
+        result.lappend(mcx, Node::mk(mcx, *scl)?)?;
+    }
+    let n = targetlist.len();
+    for i in 0..n {
+        let tle_node = targetlist.nth(i);
+        if tle_node.as_target_entry().expect("tlist cell").resjunk {
+            continue;
+        }
+        let location = expr_location(tle_node.as_target_entry().unwrap().expr);
+        addTargetToGroupList(mcx, pstate, tle_node, &mut result, targetlist, location)?;
+    }
+    if result.is_nil() {
+        return Err(distinct_no_columns(is_agg));
+    }
+    Ok(result)
 }
 
 pub fn transformDistinctOnClause<'mcx>(
@@ -848,6 +963,53 @@ fn contains_variables(
             .errposition(parser_errposition(pstate, location, mbutils::GetDatabaseEncoding()))
             .into_error()
             .with_error_location(ErrorLocation::new("parse_clause.c", 0, "checkExprIsVarFree")),
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn distinct_orderby_mismatch(
+    pstate: &ParseState<'_, '_>,
+    is_agg: bool,
+    location: ParseLoc,
+) -> Box<PgError> {
+    let msg = if is_agg {
+        "in an aggregate with DISTINCT, ORDER BY expressions must appear in argument list"
+    } else {
+        "for SELECT DISTINCT, ORDER BY expressions must appear in select list"
+    };
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_INVALID_COLUMN_REFERENCE)
+            .errmsg(msg.to_string())
+            .errposition(parser_errposition(pstate, location, mbutils::GetDatabaseEncoding()))
+            .into_error()
+            .with_error_location(ErrorLocation::new(
+                "parse_clause.c",
+                0,
+                "transformDistinctClause",
+            )),
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn distinct_no_columns(is_agg: bool) -> Box<PgError> {
+    let msg = if is_agg {
+        "an aggregate with DISTINCT must have at least one argument"
+    } else {
+        "SELECT DISTINCT must have at least one column"
+    };
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_SYNTAX_ERROR)
+            .errmsg(msg.to_string())
+            .into_error()
+            .with_error_location(ErrorLocation::new(
+                "parse_clause.c",
+                0,
+                "transformDistinctClause",
+            )),
     )
 }
 

@@ -225,10 +225,12 @@ fn ece_mutator<'mcx>(node: Node<'mcx>, cx: &EceContext<'mcx>) -> PgResult<Option
         | NodeTag::T_CurrentOfExpr
         | NodeTag::T_SortGroupClause => Ok(None),
         // Aggref takes C's default ece_generic_processing arm: fold inside
-        // the aggregate's arguments, never the Aggref itself.
+        // the aggregate's arguments, never the Aggref itself. SubLink likewise
+        // (C folds testexpr only; the sub-Query waits for SS_process_sublinks).
         NodeTag::T_Aggref
         | NodeTag::T_TargetEntry
         | NodeTag::T_FromExpr
+        | NodeTag::T_SubLink
         | NodeTag::T_List => {
             expression_tree_mutator(cx.mcx, node, &mut |n| ece_mutator(n, cx))
         }

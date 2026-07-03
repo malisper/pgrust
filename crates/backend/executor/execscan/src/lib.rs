@@ -39,7 +39,8 @@ pub struct ScanState<'mcx> {
     pub ps_ProjInfo: Option<ProjectionInfo<'mcx>>,
     pub ps_ExprContext: EcxtId,
     pub scanrelid: Index,
-    pub ss_currentRelation: Relation<'mcx>,
+    // None for scans without an underlying relation (C's NULL: FunctionScan).
+    pub ss_currentRelation: Option<Relation<'mcx>>,
     pub ss_currentScanDesc: Option<TableScanDesc<'mcx>>,
     pub ss_ScanTupleSlot: ExecSlotId,
 }
@@ -107,6 +108,22 @@ pub fn exec_scan_extended<'mcx, N: ScanNode<'mcx>, const QUAL: bool, const PROJ:
         let scan_id = ss.ss_ScanTupleSlot;
         estate.ecxt_mut(ss.ps_ExprContext).ecxt_scantuple = Some(scan_id);
 
+        // ExecEvalParamExec's pending-initplan arm, hoisted out of the
+        // interpreter: C runs the initplan at first param use, tuple in hand.
+        if QUAL {
+            let deps = ss.qual.as_deref().unwrap().param_exec_deps();
+            if !deps.is_empty() {
+                executils::exec_eval_param_exec_params(estate, deps)?;
+            }
+        }
+        if PROJ {
+            let deps = ss.ps_ProjInfo.as_ref().unwrap().pi_state.param_exec_deps();
+            if !deps.is_empty() {
+                executils::exec_eval_param_exec_params(estate, deps)?;
+            }
+        }
+
+        let ss = node.ss_mut();
         let passes = if QUAL {
             let mut slots = EvalSlots {
                 scan: Some(estate.slot_mut(scan_id)),
@@ -203,7 +220,7 @@ pub fn exec_conditional_assign_projection_info<'mcx>(
     }
     let result_desc = exec_type_from_tl(mcx, tlist)?;
     let result_slot = estate.exec_init_extra_tuple_slot(Some(result_desc), TupleSlotKind::Virtual);
-    let pi_state = exec_build_projection_info(mcx, tlist, Some(input_desc))?;
+    let pi_state = exec_build_projection_info(mcx, tlist, Some(input_desc), estate.param_bind())?;
     Ok(Some(ProjectionInfo { pi_state, pi_result_slot: result_slot }))
 }
 
@@ -294,6 +311,7 @@ pub fn expr_typmod(node: Node<'_>) -> i32 {
             length_coercion_typmod(f).unwrap_or(-1)
         }
         NodeTag::T_OpExpr => -1,
+        NodeTag::T_Aggref => -1,
         tag => panic!("exprTypmod (nodeFuncs.c): node family {tag:?} not ported"),
     }
 }
@@ -323,6 +341,7 @@ pub fn expr_collation(node: Node<'_>) -> Oid {
         NodeTag::T_Param => node.as_param().unwrap().paramcollid,
         NodeTag::T_FuncExpr => node.as_func_expr().unwrap().funccollid,
         NodeTag::T_OpExpr => node.as_op_expr().unwrap().opcollid,
+        NodeTag::T_Aggref => node.as_aggref().unwrap().aggcollid,
         tag => panic!("exprCollation (nodeFuncs.c): node family {tag:?} not ported"),
     }
 }

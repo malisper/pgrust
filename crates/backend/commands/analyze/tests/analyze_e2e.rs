@@ -501,6 +501,10 @@ fn install_syscache_fixture_overrides() {
         })
     });
     syscache_seams::lookup_pg_attribute_stattarget::set(|_, _| Ok(None));
+    syscache_seams::pg_statistic_stawidth::set(|relid, attnum, inh| {
+        Ok(syscache_seams::lookup_pg_statistic_shape::call(relid, attnum, inh)?
+            .map(|sh| sh.stawidth))
+    });
     syscache_seams::pg_type_typanalyze::set(|_| Ok(0));
     syscache_seams::syscache_hash_value_typeoid::set(|typid| Ok(typid));
     syscache_seams::lookup_pg_type_typcache_shape::set(|typid| {
@@ -560,8 +564,27 @@ fn install_syscache_fixture_overrides() {
         };
         Ok(match opno {
             INT4_EQ_OP => Some(mk(65, INT4_EQ_OP, 518, 101)),
-            INT4_LT_OP => Some(mk(66, INT4_GT_OP, 525, 102)),
+            INT4_LT_OP => Some(mk(66, INT4_GT_OP, 525, 103)),
             INT4_GT_OP => Some(mk(147, INT4_LT_OP, 523, 104)),
+            _ => None,
+        })
+    });
+    syscache_seams::lookup_pg_proc_shape::set(|funcid| {
+        let shape = |rettype, nargs| syscache_seams::PgProcShape {
+            pronamespace: 11,
+            prorettype: rettype,
+            provariadic: 0,
+            prosupport: 0,
+            pronargs: nargs,
+            prokind: b'f' as i8,
+            provolatile: b'i' as i8,
+            proparallel: b's' as i8,
+            proretset: false,
+            proisstrict: true,
+            proleakproof: false,
+        };
+        Ok(match funcid {
+            65 | 66 | 147 => Some(shape(16, 2)),
             _ => None,
         })
     });

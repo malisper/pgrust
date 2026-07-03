@@ -148,17 +148,11 @@ pub fn RelationGetBufferForTuple<'mcx>(
                     target_block,
                 )?)
                 .expect("ReadBuffer returned InvalidBuffer");
-                if pin.page().is_all_visible() {
-                    unported("visibilitymap_pin (all-visible insert target, visibilitymap.c)");
-                }
                 bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_EXCLUSIVE)?;
                 pin
             }
             Some(ob) if ob == target_block => {
                 let pin = other_pin.unwrap().incr_clone();
-                if pin.page().is_all_visible() {
-                    unported("visibilitymap_pin (all-visible insert target, visibilitymap.c)");
-                }
                 bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_EXCLUSIVE)?;
                 pin
             }
@@ -168,9 +162,6 @@ pub fn RelationGetBufferForTuple<'mcx>(
                     target_block,
                 )?)
                 .expect("ReadBuffer returned InvalidBuffer");
-                if pin.page().is_all_visible() {
-                    unported("visibilitymap_pin (all-visible insert target, visibilitymap.c)");
-                }
                 if ob < target_block {
                     bufmgr_seams::lock_buffer::call(
                         other_pin.unwrap().buffer(),

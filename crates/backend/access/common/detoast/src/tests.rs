@@ -207,3 +207,62 @@ fn seam_install_and_external_fetch_arm() {
     let out = detoast_attr(ctx.mcx(), &ondisk).unwrap();
     assert_eq!(&out[VARHDRSZ..], &input[..]);
 }
+
+#[repr(C)]
+struct FakeExpanded {
+    hdr: datum::ExpandedObjectHeader,
+    payload: [u8; 11],
+}
+
+unsafe fn fake_flat_size(_eohptr: *mut datum::ExpandedObjectHeader) -> usize {
+    VARHDRSZ + 11
+}
+
+unsafe fn fake_flatten(eohptr: *mut datum::ExpandedObjectHeader, result: *mut u8, n: usize) {
+    assert_eq!(n, VARHDRSZ + 11);
+    let obj = eohptr as *mut FakeExpanded;
+    core::ptr::copy_nonoverlapping(((n as u32) << 2).to_ne_bytes().as_ptr(), result, VARHDRSZ);
+    core::ptr::copy_nonoverlapping((*obj).payload.as_ptr(), result.add(VARHDRSZ), 11);
+}
+
+static FAKE_METHODS: datum::ExpandedObjectMethods = datum::ExpandedObjectMethods {
+    get_flat_size: fake_flat_size,
+    flatten_into: fake_flatten,
+};
+
+#[test]
+fn expanded_arms_flatten() {
+    let ctx = MemoryContext::new("t");
+    let obj = Box::into_raw(Box::new(FakeExpanded {
+        hdr: datum::ExpandedObjectHeader::empty(),
+        payload: *b"hello world",
+    }));
+    let (rw_image, ro_image): (Vec<u8>, Vec<u8>) = unsafe {
+        let hdr = core::ptr::addr_of_mut!((*obj).hdr);
+        datum::expandeddatum::eoh_init_header(hdr, &FAKE_METHODS, core::ptr::null());
+        let rw = datum::expandeddatum::eohp_get_rw_datum(hdr).as_usize() as *const u8;
+        let ro = datum::expandeddatum::eohp_get_ro_datum(hdr).as_usize() as *const u8;
+        let sz = datum::expandeddatum::EXPANDED_POINTER_SIZE;
+        (
+            core::slice::from_raw_parts(rw, sz).to_vec(),
+            core::slice::from_raw_parts(ro, sz).to_vec(),
+        )
+    };
+
+    for image in [&rw_image, &ro_image] {
+        let out = detoast_external_attr(ctx.mcx(), image).unwrap();
+        assert_eq!(varsize_4b(&out), VARHDRSZ + 11);
+        assert_eq!(&out[VARHDRSZ..], b"hello world");
+
+        let out = detoast_attr(ctx.mcx(), image).unwrap();
+        assert_eq!(&out[VARHDRSZ..], b"hello world");
+
+        let out = detoast_attr_slice(ctx.mcx(), image, 6, 5).unwrap();
+        assert_eq!(&out[VARHDRSZ..], b"world");
+
+        assert_eq!(toast_raw_datum_size(image), VARHDRSZ + 11);
+        assert_eq!(toast_datum_size(image), VARHDRSZ + 11);
+        assert_eq!(varsize_any(image), 10);
+    }
+    drop(unsafe { Box::from_raw(obj) });
+}

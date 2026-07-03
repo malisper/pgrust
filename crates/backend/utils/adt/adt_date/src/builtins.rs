@@ -1,25 +1,23 @@
 //! fmgr wrappers (`fc_*`) + `DATE_BUILTINS` for fmgr-core. Not registrable
-//! (established precedents): recv/send (wire frame), typmodin (ArrayType),
-//! sortsupport/skipsupport/time_support (planner nodes), the interval-typed
-//! rows (interval unit deferred), extract/date_part rows (numeric image
-//! frame), timetz_zone/izone/at_local (DecodeTimezoneName), and the
-//! fresh-TimeTzADT constructors timetz_in/timetz_scale/time_timetz/
-//! timestamptz_timetz (by-reference result allocation, the namein/macaddr_in
-//! precedent) — their value cores live in the crate root.
+//! (established precedents): typmodin (ArrayType), sortsupport/skipsupport/
+//! time_support (planner nodes), the interval-typed rows (interval unit
+//! deferred), extract/date_part rows (numeric image frame), timetz_zone/izone/
+//! at_local (DecodeTimezoneName), and the fresh-TimeTzADT constructors
+//! timetz_in/timetz_scale/time_timetz/timestamptz_timetz (their value cores
+//! live in the crate root). date/time/timetz recv/send ride the binary-wire
+//! fmgr frame (types_fmgr::wire); timetz_recv builds its 12-byte by-ref image
+//! via byref_result.
 
 use ::datum::Datum;
 use ::types_core::Oid;
 use ::types_error::PgResult;
-use ::types_fmgr::{FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction};
+use ::types_fmgr::{
+    byref_result, varlena_result, FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo,
+    PGFunction,
+};
 
 use crate::{DateADT, TimeTzADT};
 use adt_datetime::MAXDATELEN;
-
-#[cold]
-#[inline(never)]
-fn soft_context_unported(name: &str) -> ! {
-    panic!("{name}: fcinfo.context soft-error demux is fmgr-core's unit (not ported)")
-}
 
 // C pallocs the cstring per row; the backend thread owns retained scratch
 // (the nameout precedent). The Datum aliases it until the next out call.
@@ -28,10 +26,7 @@ std::thread_local! {
         const { core::cell::UnsafeCell::new([0; MAXDATELEN + 1]) };
 }
 
-fn in_arg<'a>(fcinfo: &'a Fcinfo, name: &'static str) -> std::borrow::Cow<'a, str> {
-    if fcinfo.context.is_some() {
-        soft_context_unported(name);
-    }
+fn in_arg<'a>(fcinfo: &'a Fcinfo) -> std::borrow::Cow<'a, str> {
     // SAFETY: catalog arg 0 of the in-functions is cstring (typlen -2).
     let s = unsafe { fcinfo.arg_cstring(0) };
     String::from_utf8_lossy(s.to_bytes())
@@ -58,8 +53,10 @@ fn arg_timetz(fcinfo: &Fcinfo, i: usize) -> TimeTzADT {
 }
 
 pub fn fc_date_in(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    let s = in_arg(fcinfo, "date_in");
-    Ok(Datum::from_i32(crate::date_in(&s, None)?))
+    let s = in_arg(fcinfo);
+    // SAFETY: context, if set, rides per the ErrorSaveNode contract for this call.
+    let esc = unsafe { fcinfo.soft_error_context() };
+    Ok(Datum::from_i32(crate::date_in(&s, esc)?))
 }
 
 pub fn fc_date_out(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
@@ -71,6 +68,48 @@ pub fn fc_date_out(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRes
         buf[len] = 0;
         Ok(Datum::from_usize(buf.as_ptr() as usize))
     })
+}
+
+pub fn fc_date_recv(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: recv arg0 is the live StringInfo pointer per the recv ABI.
+    let buf = unsafe { fcinfo.arg_stringinfo(0) };
+    Ok(Datum::from_i32(crate::date_recv(buf)?))
+}
+
+pub fn fc_date_send(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let date = arg_date(fcinfo, 0);
+    let mcx = fcinfo.result_mcx();
+    Ok(varlena_result(crate::date_send(mcx, date)?))
+}
+
+pub fn fc_time_recv(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let typmod = fcinfo.arg_i32(2);
+    // SAFETY: recv arg0 is the live StringInfo pointer per the recv ABI.
+    let buf = unsafe { fcinfo.arg_stringinfo(0) };
+    Ok(Datum::from_i64(crate::time_recv(buf, typmod)?))
+}
+
+pub fn fc_time_send(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let time = fcinfo.arg_i64(0);
+    let mcx = fcinfo.result_mcx();
+    Ok(varlena_result(crate::time_send(mcx, time)?))
+}
+
+pub fn fc_timetz_recv(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let typmod = fcinfo.arg_i32(2);
+    // SAFETY: recv arg0 is the live StringInfo pointer per the recv ABI.
+    let buf = unsafe { fcinfo.arg_stringinfo(0) };
+    let t = crate::timetz_recv(buf, typmod)?;
+    let mut img = [0u8; 12];
+    img[..8].copy_from_slice(&t.time.to_ne_bytes());
+    img[8..].copy_from_slice(&t.zone.to_ne_bytes());
+    byref_result(fcinfo.result_mcx(), &img)
+}
+
+pub fn fc_timetz_send(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let t = arg_timetz(fcinfo, 0);
+    let mcx = fcinfo.result_mcx();
+    Ok(varlena_result(crate::timetz_send(mcx, &t)?))
 }
 
 pub fn fc_make_date(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
@@ -229,8 +268,10 @@ date_ts_cross! {
 
 pub fn fc_time_in(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let typmod = fcinfo.arg_i32(2);
-    let s = in_arg(fcinfo, "time_in");
-    Ok(Datum::from_i64(crate::time_in(&s, typmod, None)?))
+    let s = in_arg(fcinfo);
+    // SAFETY: context, if set, rides per the ErrorSaveNode contract for this call.
+    let esc = unsafe { fcinfo.soft_error_context() };
+    Ok(Datum::from_i64(crate::time_in(&s, typmod, esc)?))
 }
 
 pub fn fc_time_out(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
@@ -480,6 +521,12 @@ const fn bn(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> Fmgr
 // pg_proc.dat rows for date.c; alias OIDs over the same prosrc each get
 // their row, as in C's fmgr_builtins[].
 pub const DATE_BUILTINS: &[FmgrBuiltin] = &[
+    b(2468, "date_recv", 1, fc_date_recv),
+    b(2469, "date_send", 1, fc_date_send),
+    b(2470, "time_recv", 3, fc_time_recv),
+    b(2471, "time_send", 1, fc_time_send),
+    b(2472, "timetz_recv", 3, fc_timetz_recv),
+    b(2473, "timetz_send", 1, fc_timetz_send),
     b(1084, "date_in", 1, fc_date_in),
     b(1085, "date_out", 1, fc_date_out),
     b(1086, "date_eq", 2, fc_date_eq),

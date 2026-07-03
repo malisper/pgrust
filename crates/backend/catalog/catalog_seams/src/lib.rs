@@ -18,11 +18,9 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    // GetNewOidWithIndex (catalog.c) -- the catalog crate's OID-generation
-    // half is unported; uninstalled call = loud panic.
     pub fn get_new_oid_with_index<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        relation: &RelationData<'mcx>,
+        relation: &types_rel::Relation<'mcx>,
         index_id: Oid,
         oidcolumn: i16,
     ) -> types_error::PgResult<Oid>

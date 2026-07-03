@@ -8,8 +8,8 @@
 //! point into a compile error — never a fn-pointer table. The shared
 //! vocabulary (tableam.h/relscan.h types + block parallel-scan helpers) lives
 //! in tableam_vocab, below the heap AM crates, and is re-exported here.
-//! `mod heap` binds heapam_handler's read lane; DML/analyze/bitmap/sample
-//! arms stay loud until their heapam phases land.
+//! `mod heap` binds heapam_handler's read/analyze lanes; DML/sample arms
+//! stay loud until their heapam phases land.
 
 #![allow(non_snake_case)]
 #![allow(non_camel_case_types)]
@@ -362,10 +362,18 @@ mod heap {
 
     pub(super) fn relation_set_new_filelocator(
         _rel: &Relation<'_>,
-        _newrlocator: &RelFileLocator,
-        _persistence: i8,
+        newrlocator: &RelFileLocator,
+        persistence: i8,
     ) -> PgResult<(TransactionId, TransactionId)> {
-        unported("backend-catalog-storage (RelationCreateStorage)")
+        if persistence == b'u' as i8 {
+            unported("heapam_relation_set_new_filelocator INIT_FORKNUM lane (unlogged)");
+        }
+        let freeze_xid = procarray::RecentXmin();
+        let min_multi = multixact::GetOldestMultiXactId()?;
+        let srel =
+            catalog_storage::RelationCreateStorage(*newrlocator, persistence as u8, true)?;
+        smgr::smgrclose(srel)?;
+        Ok((freeze_xid, min_multi))
     }
 
     pub(super) fn relation_nontransactional_truncate(_rel: &Relation<'_>) -> PgResult<()> {
@@ -376,23 +384,122 @@ mod heap {
         table_block_relation_size(rel, fork_number)
     }
 
+    // next_buffer replaces C's read stream: already-pinned buffers, Invalid = done.
     pub(super) fn scan_analyze_next_block<'mcx>(
         _mcx: Mcx<'mcx>,
-        _scan: &mut HeapScanDescData<'mcx>,
-        _next_buffer: &mut dyn FnMut() -> PgResult<Buffer>,
+        scan: &mut HeapScanDescData<'mcx>,
+        next_buffer: &mut dyn FnMut() -> PgResult<Buffer>,
     ) -> PgResult<bool> {
-        unported("backend-access-heap-heapam (ANALYZE lane)")
+        let Some(pin) = bufmgr_seams::BufferPin::adopt(next_buffer()?) else {
+            return Ok(false);
+        };
+        scan.rs_cblock = pin.block_number();
+        scan.rs_cbuf = Some(pin);
+        scan.rs_cindex = ::types_tuple::FirstOffsetNumber as u32;
+        Ok(true)
     }
 
+    // C divergence: C holds the share lock across calls; ContentLockGuard
+    // cannot outlive its borrow of the pin, so it is re-taken per call (cold).
     pub(super) fn scan_analyze_next_tuple<'mcx>(
-        _mcx: Mcx<'mcx>,
-        _scan: &mut HeapScanDescData<'mcx>,
-        _oldest_xmin: TransactionId,
-        _liverows: &mut f64,
-        _deadrows: &mut f64,
-        _slot: &mut SlotData<'mcx>,
+        mcx: Mcx<'mcx>,
+        scan: &mut HeapScanDescData<'mcx>,
+        oldest_xmin: TransactionId,
+        liverows: &mut f64,
+        deadrows: &mut f64,
+        slot: &mut SlotData<'mcx>,
     ) -> PgResult<bool> {
-        unported("backend-access-heap-heapam (ANALYZE lane)")
+        use ::types_snapshot::HTSV_Result::*;
+        let pin = scan.rs_cbuf.take().expect("analyze scan positioned without a buffer");
+        let rd_id = scan.rs_base.rs_rd.rd_id;
+        let block = scan.rs_cblock;
+        let mut cindex = scan.rs_cindex;
+        let mut sampled = false;
+        {
+            let _lock = pin.lock_share()?;
+            let page = pin.page();
+            let maxoffset = page.max_offset_number();
+            while cindex <= maxoffset as u32 {
+                let offnum = cindex as ::types_core::primitive::OffsetNumber;
+                let itemid = page.item_id(offnum);
+                if !itemid.is_normal() {
+                    if itemid.is_dead() {
+                        *deadrows += 1.0;
+                    }
+                    cindex += 1;
+                    continue;
+                }
+                let (ptr, len) = page.item_raw(itemid);
+                // SAFETY: normal line pointer on the page pinned by `pin`.
+                let mut targtuple = unsafe {
+                    ::types_tuple::HeapTupleData::from_raw_parts(
+                        ptr,
+                        len,
+                        ItemPointerData::new(block, offnum),
+                        rd_id,
+                    )
+                };
+                let sample_it = match heapam_visibility_seams::heap_tuple_satisfies_vacuum::call(
+                    &mut targtuple,
+                    oldest_xmin,
+                    pin.buffer(),
+                )? {
+                    HEAPTUPLE_LIVE => {
+                        *liverows += 1.0;
+                        true
+                    }
+                    HEAPTUPLE_DEAD | HEAPTUPLE_RECENTLY_DEAD => {
+                        *deadrows += 1.0;
+                        false
+                    }
+                    HEAPTUPLE_INSERT_IN_PROGRESS => {
+                        if xact_seams::transaction_id_is_current_transaction_id::call(
+                            targtuple.t_data().xmin(),
+                        ) {
+                            *liverows += 1.0;
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    HEAPTUPLE_DELETE_IN_PROGRESS => {
+                        if xact_seams::transaction_id_is_current_transaction_id::call(
+                            ::heapam::HeapTupleHeaderGetUpdateXid(targtuple.t_data())?,
+                        ) {
+                            *deadrows += 1.0;
+                            false
+                        } else {
+                            *liverows += 1.0;
+                            true
+                        }
+                    }
+                };
+                cindex += 1;
+                if sample_it {
+                    // SAFETY: same pinned image; the slot store takes its own pin.
+                    let tuple = unsafe {
+                        ::types_tuple::HeapTupleData::from_raw_parts(
+                            targtuple.header_ptr(),
+                            targtuple.t_len,
+                            targtuple.t_self,
+                            rd_id,
+                        )
+                    };
+                    exectuples::exec_store_buffer_heap_tuple(slot, mcx, tuple, pin.buffer());
+                    sampled = true;
+                    break;
+                }
+            }
+        }
+        scan.rs_cindex = cindex;
+        if sampled {
+            scan.rs_cbuf = Some(pin);
+            Ok(true)
+        } else {
+            pin.release();
+            exectuples::exec_clear_tuple(slot, mcx);
+            Ok(false)
+        }
     }
 
     #[allow(clippy::too_many_arguments)]

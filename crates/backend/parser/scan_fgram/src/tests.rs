@@ -11,20 +11,27 @@ fn test_ctx() -> &'static MemoryContext {
     CTX.with(|c| *c)
 }
 
+fn lex<'a>(sc: &mut Scanner<'a>) -> types_error::PgResult<Token<'a>> {
+    let mut value = CoreYYSTYPE::None;
+    let mut location = 0;
+    let token = sc.core_yylex(&mut value, &mut location)?;
+    Ok(Token { token, value, location })
+}
+
 fn lex_all_with(input: &[u8], settings: ScannerSettings) -> Vec<(i32, String, i32)> {
     let ctx = test_ctx();
     let mut sc = Scanner::new(input, ctx.mcx(), settings);
     let mut out = Vec::new();
     loop {
-        let tok = sc.core_yylex().expect("unexpected lex error");
+        let tok = lex(&mut sc).expect("unexpected lex error");
         if tok.token == YY_NULL {
             break;
         }
-        let val = match tok.value {
-            CoreYYSTYPE::None => String::new(),
-            CoreYYSTYPE::Ival(v) => format!("#{v}"),
-            CoreYYSTYPE::Str(s) => format!("={}", String::from_utf8_lossy(s)),
-            CoreYYSTYPE::Keyword(k) => format!("kw:{k}"),
+        let val = match tok.value.get() {
+            CoreVal::None => String::new(),
+            CoreVal::Ival(v) => format!("#{v}"),
+            CoreVal::Str(s) => format!("={}", String::from_utf8_lossy(s)),
+            CoreVal::Keyword(k) => format!("kw:{k}"),
         };
         out.push((tok.token, val, tok.location));
         assert!(out.len() < 10_000, "runaway scanner");
@@ -40,7 +47,7 @@ fn lex_err(input: &str) -> Box<types_error::PgError> {
     let ctx = test_ctx();
     let mut sc = Scanner::new(input.as_bytes(), ctx.mcx(), ScannerSettings::default());
     loop {
-        match sc.core_yylex() {
+        match lex(&mut sc) {
             Ok(tok) if tok.token == YY_NULL => panic!("no error for {input:?}"),
             Ok(_) => {}
             Err(e) => return e,
@@ -265,11 +272,11 @@ fn every_keyword_lexes_to_its_gram_token() {
 fn eof_token_location() {
     let ctx = test_ctx();
     let mut sc = Scanner::new(b"ab", ctx.mcx(), ScannerSettings::default());
-    sc.core_yylex().unwrap();
-    let eof = sc.core_yylex().unwrap();
+    lex(&mut sc).unwrap();
+    let eof = lex(&mut sc).unwrap();
     assert_eq!(eof.token, YY_NULL);
     assert_eq!(eof.location, 2);
-    assert_eq!(sc.core_yylex().unwrap().token, YY_NULL);
+    assert_eq!(lex(&mut sc).unwrap().token, YY_NULL);
 }
 
 #[test]

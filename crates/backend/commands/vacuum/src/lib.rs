@@ -458,7 +458,39 @@ pub fn vac_update_relstats(_rel: &RelationData<'_>) -> ! {
     unported("vac_update_relstats (heap inplace-update lane)");
 }
 
+macro_rules! vacuum_guc_int {
+    ($($cell:ident, $var:ident, $boot:expr;)+) => {
+        $( static $cell: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new($boot); )+
+        fn install_guc_ints() {
+            use std::sync::atomic::Ordering::Relaxed;
+            $(
+                guc_tables::vars::$var.install(guc_tables::GucVarAccessors {
+                    get: || $cell.load(Relaxed),
+                    set: |v| $cell.store(v, Relaxed),
+                });
+            )+
+        }
+    };
+}
+
+vacuum_guc_int! {
+    VACUUM_FREEZE_MIN_AGE, vacuum_freeze_min_age, 50000000;
+    VACUUM_FREEZE_TABLE_AGE, vacuum_freeze_table_age, 150000000;
+    VACUUM_MXID_FREEZE_MIN_AGE, vacuum_multixact_freeze_min_age, 5000000;
+    VACUUM_MXID_FREEZE_TABLE_AGE, vacuum_multixact_freeze_table_age, 150000000;
+    VACUUM_FAILSAFE_AGE, vacuum_failsafe_age, 1600000000;
+    VACUUM_MXID_FAILSAFE_AGE, vacuum_multixact_failsafe_age, 1600000000;
+}
+
+static VACUUM_TRUNCATE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
 pub fn init_seams() {
+    use std::sync::atomic::Ordering::Relaxed;
+    install_guc_ints();
+    guc_tables::vars::vacuum_truncate.install(guc_tables::GucVarAccessors {
+        get: || VACUUM_TRUNCATE.load(Relaxed),
+        set: |v| VACUUM_TRUNCATE.store(v, Relaxed),
+    });
     vacuum_seams::vac_update_relstats::set(|rel, _, _, _, _, _, _| vac_update_relstats(rel));
 }
 

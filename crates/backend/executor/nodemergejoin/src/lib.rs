@@ -12,7 +12,7 @@ use ::execexpr::{
 };
 use ::executils::{EStateData, EcxtId, ExecSlotId};
 use ::mcx::PgBox;
-use ::tuplesort::{apply_sort_comparator, SortSupport, SortSupportInit};
+use ::tuplesort::{apply_sort_comparator, SortSupport};
 use ::types_error::PgResult;
 use ::types_nodes::plannodes::MergeJoin;
 use ::types_nodes::JoinType;
@@ -84,7 +84,7 @@ pub struct MergeJoinState<'mcx> {
     proj: PgBox<'mcx, ExprState<'mcx>>,
     joinqual: Option<PgBox<'mcx, ExprState<'mcx>>>,
     otherqual: Option<PgBox<'mcx, ExprState<'mcx>>>,
-    clauses: Vec<MergeJoinClause<'mcx>>,
+    clauses: ::mcx::PgVec<'mcx, MergeJoinClause<'mcx>>,
     mj_JoinState: u8,
     mj_SkipMarkRestore: bool,
     mj_ExtraMarks: bool,
@@ -176,12 +176,13 @@ pub fn inner_child_eflags(eflags: i32, skip_mark_restore: bool) -> i32 {
 fn examine_quals<'mcx>(
     node: &'mcx MergeJoin<'mcx>,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<Vec<MergeJoinClause<'mcx>>> {
+) -> PgResult<::mcx::PgVec<'mcx, MergeJoinClause<'mcx>>> {
     let mcx = estate.es_query_cxt;
     let params = estate.param_bind();
     let n = node.mergeclauses.len();
     assert_eq!(n, node.mergeFamilies.len());
-    let mut out = Vec::with_capacity(n);
+    let mut out: ::mcx::PgVec<'mcx, MergeJoinClause<'mcx>> = ::mcx::PgVec::new_in(mcx);
+    out.reserve(n);
     for (i, qual) in node.mergeclauses.iter().enumerate() {
         let op = qual.as_op_expr().filter(|o| o.args.len() == 2).unwrap_or_else(|| {
             panic!("MJExamineQuals (nodeMergejoin.c): mergeclause is not a binary OpExpr")
@@ -197,22 +198,25 @@ fn examine_quals<'mcx>(
         let nulls_first = node.mergeNullsFirst[i];
 
         // Operator's declared input types (op_strategy is EQ, guaranteed by
-        // op_mergejoinable at plan time).
-        let (_strategy, lefttype, righttype) =
+        // op_mergejoinable at plan time). The comparator resolve keys on
+        // (lefttype, righttype) like C: a cross-type clause without a
+        // sortsupport proc lands on the loud BTORDER-shim panic instead of a
+        // silently wrong same-type comparator.
+        let (op_strategy, lefttype, righttype) =
             lsyscache::amop::get_op_opfamily_properties(op.opno, opfamily, false)?;
-        let cmptype = if reversed { lsyscache::COMPARE_GT } else { lsyscache::COMPARE_LT };
-        let ordering_op = lsyscache::amop::get_opfamily_member_for_cmptype(
-            opfamily, lefttype, righttype, cmptype,
-        )?;
-        assert!(ordering_op != 0, "MJExamineQuals: no ordering operator for opfamily {opfamily}");
-        let ssup = ::tuplesort::prepare_sort_support_from_ordering_op(
-            ordering_op,
-            &SortSupportInit {
-                ssup_collation: collation,
-                ssup_nulls_first: nulls_first,
-                ssup_attno: 0,
-            },
-        )?;
+        assert!(
+            op_strategy == lsyscache::COMPARE_EQ,
+            "cannot merge using non-equality operator {}",
+            op.opno
+        );
+        let comparator = ::tuplesort::comparator_for_opfamily(opfamily, lefttype, righttype)?;
+        let ssup = SortSupport {
+            ssup_collation: collation,
+            ssup_reverse: reversed,
+            ssup_nulls_first: nulls_first,
+            ssup_attno: 0,
+            comparator,
+        };
 
         out.push(MergeJoinClause {
             lexpr,
@@ -486,8 +490,12 @@ where
                 if cmp == 0 {
                     if !node.mj_SkipMarkRestore {
                         inner.restr_pos(estate)?;
+                        // ExecRestrPos gives no slot back: the marked slot
+                        // stands in for the current inner, as C. With
+                        // skip_mark_restore the current inner is already the
+                        // first possible match and stays current.
+                        node.mj_InnerTupleSlot = Some(node.mj_MarkedTupleSlot);
                     }
-                    node.mj_InnerTupleSlot = Some(node.mj_MarkedTupleSlot);
                     node.mj_JoinState = EXEC_MJ_JOINTUPLES;
                 } else if cmp > 0 {
                     // Marked run exhausted: reload the current inner.

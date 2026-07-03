@@ -730,9 +730,10 @@ fn get_useful_pathkeys_for_distinct<'mcx>(
     run: &PlannerRun<'mcx>,
     needed_pathkeys: &mcx::PgVec<'mcx, types_pathnodes::PathKey>,
     path_pathkeys: &[types_pathnodes::PathKey],
-) -> Vec<mcx::PgVec<'mcx, types_pathnodes::PathKey>> {
+) -> mcx::PgVec<'mcx, mcx::PgVec<'mcx, types_pathnodes::PathKey>> {
     let mcx = run.mcx;
-    let mut list = Vec::new();
+    let mut list: mcx::PgVec<'mcx, mcx::PgVec<'mcx, types_pathnodes::PathKey>> =
+        mcx::PgVec::new_in(mcx);
     list.push(crate::relnode::pgvec_clone_shallow(mcx, needed_pathkeys));
     if !crate::gucs::enable_distinct_reordering() {
         return list;

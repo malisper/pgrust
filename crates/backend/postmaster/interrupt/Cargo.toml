@@ -12,6 +12,7 @@ path = "src/lib.rs"
 libc = "0.2"
 types_error = { path = "../../../_support/types/types_error" }
 types_guc = { path = "../../../_support/types/types_guc" }
+ipc = { path = "../../storage/ipc/ipc" }
 ipc_seams = { path = "../../storage/ipc/ipc_seams" }
 latch_seams = { path = "../../storage/ipc/latch_seams" }
 procsignal_seams = { path = "../../storage/ipc/procsignal_seams" }

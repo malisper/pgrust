@@ -86,14 +86,109 @@ pub enum State {
     Xeu = 11,
 }
 
-// core_YYSTYPE (parser/scanner.h). Str borrows the input or the scanner's mcx
-// arena (C pallocs into the parser context).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CoreYYSTYPE<'mcx> {
+// core_YYSTYPE (parser/scanner.h), packed to 16 bytes: p + (tag | len<<32),
+// crossing core_yylex's out-param like C's 8-byte union instead of a 24-byte
+// enum (the V2 store-forwarding class, graviton.md §4.5). Tag values mirror
+// gram_core YYSTYPE's low tags so the parser's repack is bit-identical. Str
+// borrows the input or the scanner's mcx arena (C pallocs into the parser
+// context).
+#[derive(Clone, Copy)]
+pub struct CoreYYSTYPE<'mcx> {
+    p: *const u8,
+    meta: u64,
+    _arena: core::marker::PhantomData<&'mcx ()>,
+}
+
+const _: () = assert!(core::mem::size_of::<CoreYYSTYPE<'static>>() == 16);
+
+const CT_NONE: u32 = 0;
+const CT_IVAL: u32 = 1;
+const CT_STR: u32 = 2;
+const CT_KEYWORD: u32 = 3;
+
+pub enum CoreVal<'mcx> {
     None,
     Ival(i32),
     Str(&'mcx [u8]),
     Keyword(&'static str),
+}
+
+impl<'mcx> CoreYYSTYPE<'mcx> {
+    pub const None: CoreYYSTYPE<'mcx> = CoreYYSTYPE {
+        p: core::ptr::null(),
+        meta: CT_NONE as u64,
+        _arena: core::marker::PhantomData,
+    };
+
+    #[inline(always)]
+    fn mk(p: *const u8, tag: u32, aux: u32) -> Self {
+        CoreYYSTYPE {
+            p,
+            meta: tag as u64 | ((aux as u64) << 32),
+            _arena: core::marker::PhantomData,
+        }
+    }
+
+    #[inline(always)]
+    pub fn Ival(v: i32) -> Self {
+        Self::mk(core::ptr::null(), CT_IVAL, v as u32)
+    }
+
+    #[inline(always)]
+    pub fn Str(s: &'mcx [u8]) -> Self {
+        Self::mk(s.as_ptr(), CT_STR, s.len() as u32)
+    }
+
+    #[inline(always)]
+    pub fn Keyword(s: &'static str) -> Self {
+        Self::mk(s.as_ptr(), CT_KEYWORD, s.len() as u32)
+    }
+
+    #[inline(always)]
+    pub fn get(&self) -> CoreVal<'mcx> {
+        match self.meta as u32 {
+            CT_IVAL => CoreVal::Ival((self.meta >> 32) as i32),
+            // SAFETY: built by Str from a &'mcx [u8] with this ptr/len.
+            CT_STR => CoreVal::Str(unsafe {
+                core::slice::from_raw_parts(self.p, (self.meta >> 32) as usize)
+            }),
+            // SAFETY: built by Keyword from a &'static str with this ptr/len.
+            CT_KEYWORD => CoreVal::Keyword(unsafe {
+                core::str::from_utf8_unchecked(core::slice::from_raw_parts(
+                    self.p,
+                    (self.meta >> 32) as usize,
+                ))
+            }),
+            _ => CoreVal::None,
+        }
+    }
+}
+
+// Content equality (tokens re-lexed from different buffers must compare
+// equal; gram_core's error-path binary search relies on it).
+impl PartialEq for CoreYYSTYPE<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        match (self.get(), other.get()) {
+            (CoreVal::None, CoreVal::None) => true,
+            (CoreVal::Ival(a), CoreVal::Ival(b)) => a == b,
+            (CoreVal::Str(a), CoreVal::Str(b)) => a == b,
+            (CoreVal::Keyword(a), CoreVal::Keyword(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for CoreYYSTYPE<'_> {}
+
+impl core::fmt::Debug for CoreYYSTYPE<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self.get() {
+            CoreVal::None => f.write_str("None"),
+            CoreVal::Ival(v) => write!(f, "Ival({v})"),
+            CoreVal::Str(s) => write!(f, "Str({:?})", core::str::from_utf8(s)),
+            CoreVal::Keyword(k) => write!(f, "Keyword({k:?})"),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -182,6 +182,26 @@ pub fn HeapTupleHeaderAdvanceConflictHorizon(
     Ok(())
 }
 
+pub fn heap_tuple_needs_eventual_freeze(tuple: &HeapTupleHeaderData) -> bool {
+    use ::types_core::xact::TransactionIdIsNormal;
+    if TransactionIdIsNormal(tuple.xmin()) {
+        return true;
+    }
+    if (tuple.t_infomask & HEAP_XMAX_IS_MULTI) != 0 {
+        if TransactionIdIsValid(tuple.xmax_raw()) {
+            return true;
+        }
+    } else if TransactionIdIsNormal(tuple.xmax_raw()) {
+        return true;
+    }
+    if (tuple.t_infomask & ::types_tuple::HEAP_MOVED) != 0
+        && TransactionIdIsNormal(tuple.xvac())
+    {
+        return true;
+    }
+    false
+}
+
 pub fn HeapCheckForSerializableConflictOut(
     visible: bool,
     relation: &RelationData<'_>,

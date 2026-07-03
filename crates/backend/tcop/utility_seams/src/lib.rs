@@ -41,7 +41,11 @@ seam_core::seam!(
 
 seam_core::seam!(
     // ProcessUtility (utility.c); receiver threaded by ref as in executor_run.
+    // mcx is C's ambient CurrentMemoryContext at the call (the portal
+    // context); it shares the receiver's lifetime because utility output
+    // (tupdescs, slots, text datums) is allocated in it and fed to dest.
     pub fn process_utility<'p, 'a, 's, 'd, 'q, 'mcx>(
+        mcx: mcx::Mcx<'mcx>,
         pstmt: &'p PlannedStmt<'a>,
         source_text: &'s str,
         read_only_tree: bool,

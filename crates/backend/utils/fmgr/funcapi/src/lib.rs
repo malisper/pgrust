@@ -15,8 +15,8 @@ mod srf;
 mod tests;
 
 pub use srf::{
-    end_MultiFuncCall, init_MultiFuncCall, per_MultiFuncCall, FuncCallContext,
-    InitMaterializedSRF, MAT_SRF_BLESS, MAT_SRF_USE_EXPECTED_DESC,
+    end_MultiFuncCall, init_MultiFuncCall, per_MultiFuncCall, srf_return_done, srf_return_next,
+    FuncCallContext, InitMaterializedSRF, MAT_SRF_BLESS, MAT_SRF_USE_EXPECTED_DESC,
 };
 
 pub fn init_seams() {}
@@ -176,6 +176,43 @@ pub fn get_func_result_type<'mcx>(
     function_id: Oid,
 ) -> PgResult<ResolvedResultType<'mcx>> {
     internal_get_result_type(mcx, function_id, None, None)
+}
+
+// get_func_result_name: the name of a function's single named OUT parameter,
+// else None.
+pub fn get_func_result_name<'mcx>(mcx: Mcx<'mcx>, funcid: Oid) -> PgResult<Option<&'mcx str>> {
+    let arrays = syscache_seams::pg_proc_result_arrays::call(mcx, funcid)?
+        .ok_or_else(|| function_lookup_failed(funcid))?;
+    let (Some(argmodes), Some(argnames)) = (arrays.proargmodes, arrays.proargnames) else {
+        return Ok(None);
+    };
+    debug_assert_eq!(argmodes.len(), argnames.len());
+    let mut result = None;
+    for (i, &mode) in argmodes.iter().enumerate() {
+        if mode == PROARGMODE_IN || mode == PROARGMODE_VARIADIC {
+            continue;
+        }
+        debug_assert!(
+            mode == PROARGMODE_OUT || mode == PROARGMODE_INOUT || mode == PROARGMODE_TABLE
+        );
+        if result.is_some() {
+            return Ok(None);
+        }
+        let name = argnames[i].as_str();
+        if name.is_empty() {
+            return Ok(None);
+        }
+        result = Some(name);
+    }
+    // PgString borrows arrays' storage which dies with this frame; re-own.
+    match result {
+        Some(name) => {
+            let bytes = mcx::slice_borrow_in(mcx, name.as_bytes())?;
+            // SAFETY: byte-for-byte copy of a &str.
+            Ok(Some(unsafe { core::str::from_utf8_unchecked(bytes) }))
+        }
+        None => Ok(None),
+    }
 }
 
 fn internal_get_result_type<'mcx>(

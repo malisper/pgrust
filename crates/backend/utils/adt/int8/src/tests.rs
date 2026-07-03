@@ -217,7 +217,7 @@ fn fmgr_wrappers_and_table() {
     let n = oids.len();
     oids.dedup();
     assert_eq!(n, oids.len());
-    assert_eq!(n, 84);
+    assert_eq!(n, 87);
     for b in INT8_BUILTINS {
         assert!(b.strict && !b.retset);
     }

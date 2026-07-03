@@ -122,6 +122,8 @@ types_slot = { path = "../../../_support/types/types_slot" }
 types_snapshot = { path = "../../../_support/types/snapshot" }
 types_tuple = { path = "../../../_support/types/types_tuple" }
 vacuumlazy = { path = "../../access/heap/vacuumlazy" }
+autovacuum = { path = "../../postmaster/autovacuum" }
+walwriter = { path = "../../postmaster/walwriter" }
 freespace = { path = "../../storage/freespace/freespace" }
 visibilitymap = { path = "../../access/heap/visibilitymap" }
 waitevent_seams = { path = "../../utils/activity/waitevent_seams" }

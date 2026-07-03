@@ -8,6 +8,11 @@ publish.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+parse_utilcmd = { path = "../../parser/parse_utilcmd" }
+tablecmds = { path = "../../commands/tablecmds" }
+types_rel = { path = "../../../_support/types/rel" }
+commands_analyze = { path = "../../commands/analyze" }
+commands_vacuum = { path = "../../commands/vacuum" }
 copy_cmd = { path = "../../commands/copy" }
 explain = { path = "../../commands/explain" }
 portalcmds = { path = "../../commands/portalcmds" }

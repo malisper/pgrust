@@ -323,12 +323,6 @@ pub fn parseCheckAggregates<'mcx>(
              backend-parser-agg grouping-sets lane"
         );
     }
-    if qry.havingQual.is_some() {
-        panic!(
-            "parseCheckAggregates (parse_agg.c): HAVING walk unported — \
-             backend-parser-agg having lane"
-        );
-    }
     for rte in &qry.rtable {
         let rte = rte.as_range_tbl_entry().expect("rtable cell");
         if rte.rtekind == types_nodes::parsenodes::RTEKind::RTE_JOIN {
@@ -358,6 +352,9 @@ pub fn parseCheckAggregates<'mcx>(
 
     for tle in &qry.targetList {
         check_ungrouped_columns(pstate, qry, tle)?;
+    }
+    if let Some(having) = qry.havingQual {
+        check_ungrouped_columns(pstate, qry, having)?;
     }
     Ok(())
 }

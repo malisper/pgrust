@@ -312,9 +312,6 @@ fn install_xact_periphery_seams() {
     combocid_seams::heap_tuple_header_adjust_cmax::set(|_hdr, cid| Ok((cid, false)));
     combocid_seams::heap_tuple_header_get_cmax::set(|hdr| hdr.raw_command_id());
     combocid_seams::heap_tuple_header_get_cmin::set(|hdr| hdr.raw_command_id());
-    multixact_seams::at_eoxact_multixact::set(|| {});
-    multixact_seams::multi_xact_id_set_oldest_member::set(|| Ok(()));
-    multixact_seams::multi_xact_id_is_running::set(|_, _| Ok(false));
     pg_enum_seams::at_eoxact_enum::set(|| {});
     relcache_seams::at_eoxact_relation_cache::set(|_| Ok(()));
     typcache_seams::at_eoxact_type_cache::set(|| {});
@@ -345,6 +342,15 @@ fn install_xact_periphery_seams() {
     syscache_seams::search_syscache_exists_databaseoid::set(|_| Ok(true));
     aclchk_seams::object_aclcheck::set(|_classid, _objid, _roleid, _mode| Ok(0));
     lmgr_seams::check_relation_locked_by_me::set(|_, _, _| true);
+    namespace_seams::range_var_get_relid::set(|_mcx, rv, _lockmode, missing_ok| {
+        if rv.relname == "t" {
+            Ok(REL_OID)
+        } else if missing_ok {
+            Ok(0)
+        } else {
+            Err(types_error::PgError::error("no such relation").into())
+        }
+    });
     lmgr_seams::lock_relation_oid::set(|_, _| Ok(()));
     lmgr_seams::unlock_relation_oid::set(|_, _| Ok(()));
     syscache_seams::search_syscache_exists_reloid::set(|relid| Ok(relid == REL_OID));
@@ -354,7 +360,6 @@ fn install_xact_periphery_seams() {
         let ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("rel")));
         Ok(Some(Rc::new(test_relation(ctx.mcx()))))
     });
-    pgstat_seams::pgstat_init_relation::set(|_relid, _relkind| false);
 }
 
 fn int4_x2_tupdesc<'mcx>(mcx: Mcx<'mcx>) -> Rc<TupleDescData<'mcx>> {
@@ -483,6 +488,59 @@ fn install_parser_fixture_seams() {
             typelem: 0,
             typsubscript: 0,
         }))
+    });
+    // "a <= 600": int4le resolution (pg_operator.dat oid 523, proc 149,
+    // oprrest scalarlesel 336) + its pg_proc row.
+    const INT4LE_OP: Oid = 523;
+    const INT4LE_PROC: Oid = 149;
+    syscache_seams::lookup_pg_operator_candidates::set(|mcx, name, l, r| {
+        let mut v = mcx::vec_with_capacity_in(mcx, 1)?;
+        if name == "<=" && l == INT4OID && r == INT4OID {
+            v.push((INT4LE_OP, 11));
+        }
+        Ok(v)
+    });
+    syscache_seams::pg_operator_name_candidates_exist::set(|_, _| Ok(false));
+    syscache_seams::lookup_pg_operator_shape::set(|opno| {
+        Ok(match opno {
+            INT4LE_OP => Some(syscache_seams::PgOperatorShape {
+                oprleft: 23,
+                oprright: 23,
+                oprresult: 16,
+                oprcom: 525,
+                oprnegate: 521,
+                oprcode: INT4LE_PROC,
+                oprrest: 336,
+                oprjoin: 386,
+                oprcanmerge: false,
+                oprcanhash: false,
+            }),
+            _ => None,
+        })
+    });
+    syscache_seams::lookup_pg_proc_shape::set(|funcid| {
+        Ok(match funcid {
+            INT4LE_PROC => Some(syscache_seams::PgProcShape {
+                pronamespace: 11,
+                prorettype: 16,
+                provariadic: 0,
+                prosupport: 0,
+                pronargs: 2,
+                prokind: b'f' as i8,
+                provolatile: b'i' as i8,
+                proparallel: b's' as i8,
+                proretset: false,
+                proisstrict: true,
+                proleakproof: true,
+            }),
+            _ => None,
+        })
+    });
+    syscache_seams::pg_proc_cost_shape::set(|funcid| {
+        Ok(match funcid {
+            INT4LE_PROC => Some(syscache_seams::PgProcCostShape { procost: 1.0, prorows: 0.0, prosupport: 0 }),
+            _ => None,
+        })
     });
 }
 
@@ -731,6 +789,8 @@ fn vacuum_reclaims_dead_rows_e2e() {
     freespace::init_seams();
     vacuumlazy::init_seams();
     commands_vacuum::init_seams();
+    autovacuum::init_seams();
+    walwriter::init_seams();
     execmain::init_seams();
     nodeseqscan::init_seams();
     scan_fgram::init_seams();
@@ -760,11 +820,20 @@ fn vacuum_reclaims_dead_rows_e2e() {
     clog::BootStrapCLOG().unwrap();
     subtrans::SUBTRANSShmemInit().unwrap();
     subtrans::BootStrapSUBTRANS().unwrap();
+    {
+        use std::sync::atomic::{AtomicI32, Ordering::Relaxed as R};
+        static MAX_PREPARED: AtomicI32 = AtomicI32::new(2);
+        guc_tables::vars::max_prepared_xacts.install(guc_tables::GucVarAccessors {
+            get: || MAX_PREPARED.load(R),
+            set: |v| MAX_PREPARED.store(v, R),
+        });
+    }
     multixact::MultiXactShmemInit().unwrap();
     multixact_seams::multixact_set_next_mxact::call(1, 0);
     multixact::BootStrapMultiXact().unwrap();
     multixact_seams::set_multixact_id_limit::call(1, 5, true);
     multixact_seams::startup_multixact::call().unwrap();
+    multixact_seams::trim_multixact::call().unwrap();
     lmgr_proc::InitProcess(BackendType::Backend).unwrap();
     procarray::ProcArrayAdd(lmgr_proc::MyProc().unwrap()).unwrap();
 

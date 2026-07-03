@@ -1,7 +1,7 @@
 //! cash.c: the money type over a 64-bit integer of lc_monetary fractional
 //! units. Locale symbols come from pg_locale::pglc_localeconv (C-locale arm
 //! live, non-C loud there). Deferred loud: cash_numeric / numeric_cash
-//! (numeric.c unported).
+//! (need adt_numeric public div/mul/round and a cash→numeric dep edge).
 
 pub mod builtins;
 #[cfg(test)]
@@ -593,9 +593,9 @@ pub fn cash_words<'mcx>(mcx: Mcx<'mcx>, value: Cash) -> PgResult<Varlena<'mcx>> 
 }
 
 pub fn cash_numeric(_money: Cash) -> ! {
-    panic!("cash_numeric: numeric.c not ported (backend-utils-adt-numeric)")
+    panic!("cash_numeric: needs adt_numeric public div/mul/round + cash→numeric dep edge")
 }
 
 pub fn numeric_cash() -> ! {
-    panic!("numeric_cash: numeric.c not ported (backend-utils-adt-numeric)")
+    panic!("numeric_cash: needs adt_numeric public div/mul/round + cash→numeric dep edge")
 }

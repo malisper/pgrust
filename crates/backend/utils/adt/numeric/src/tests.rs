@@ -18,6 +18,25 @@ fn rt(s: &str) -> String {
 }
 
 #[test]
+fn binary_wire_round_trip() {
+    use ::mcx::MemoryContext;
+    use ::stringinfo::StringInfo;
+
+    let ctx = MemoryContext::new("numeric-wire-test");
+    let mcx = ctx.mcx();
+    for s in ["0", "1", "-1", "12345678901234567890", "-0.00001",
+              "3.14159265358979323846", "NaN", "Infinity", "-Infinity", "12.30400"] {
+        let img = n(s);
+        let bytea = io::numeric_send(mcx, img.num()).unwrap();
+        let mut buf = StringInfo::new_in(mcx).unwrap();
+        buf.append_bytes(bytea.data()).unwrap();
+        let back = io::numeric_recv(&mut buf, -1).unwrap();
+        assert_eq!(buf.cursor, buf.len(), "recv must consume the whole buffer for {s}");
+        assert_eq!(img.as_bytes(), back.as_bytes(), "wire round-trip mismatch for {s}");
+    }
+}
+
+#[test]
 fn in_out_round_trip() {
     assert_eq!(rt("0"), "0");
     assert_eq!(rt("0.0"), "0.0");

@@ -27,9 +27,9 @@ mod path;
 mod tests;
 
 pub use lookup::{
-    get_namespace_oid, DeconstructQualifiedName, LookupExplicitNamespace, LookupNamespaceNoError,
-    OpernameGetOprid, RangeVarGetRelid, RangeVarGetRelidExtended, RelnameGetRelid, RVR_MISSING_OK,
-    RVR_NOWAIT, RVR_SKIP_LOCKED,
+    get_namespace_oid, DeconstructQualifiedName, FuncCandidate, FuncnameGetCandidates,
+    LookupExplicitNamespace, LookupNamespaceNoError, OpernameGetOprid, RangeVarGetRelid,
+    RangeVarGetRelidExtended, RelnameGetRelid, RVR_MISSING_OK, RVR_NOWAIT, RVR_SKIP_LOCKED,
 };
 pub use path::{
     assign_search_path, check_search_path, fetch_search_path, fetch_search_path_array,

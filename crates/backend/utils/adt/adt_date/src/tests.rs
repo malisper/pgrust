@@ -329,3 +329,36 @@ fn special_date_encoding_is_byte_exact() {
     assert_eq!(&buf[..n], b"infinity");
     assert_eq!(d_out(DATEVAL_NOEND), "infinity");
 }
+
+#[test]
+fn binary_wire_round_trip() {
+    use ::mcx::MemoryContext;
+    use ::stringinfo::StringInfo;
+    let ctx = MemoryContext::new("date-wire");
+    let mcx = ctx.mcx();
+
+    // date: Datum -> send -> bytea -> recv -> Datum, bit-identical.
+    for d in [0i32, 1, -1, 12345, DATEVAL_NOBEGIN, DATEVAL_NOEND] {
+        let b = date_send(mcx, d).unwrap();
+        let mut si = StringInfo::with_capacity_in(mcx, b.data().len() + 1).unwrap();
+        si.append_bytes(b.data()).unwrap();
+        assert_eq!(date_recv(&mut si).unwrap(), d);
+        assert_eq!(si.cursor, si.len());
+    }
+
+    for t in [0i64, 1, USECS_PER_DAY, 43200_000000] {
+        let b = time_send(mcx, t).unwrap();
+        let mut si = StringInfo::with_capacity_in(mcx, b.data().len() + 1).unwrap();
+        si.append_bytes(b.data()).unwrap();
+        assert_eq!(time_recv(&mut si, -1).unwrap(), t);
+        assert_eq!(si.cursor, si.len());
+    }
+
+    for tz in [TimeTzADT { time: 0, zone: 0 }, TimeTzADT { time: 3600_000000, zone: -3600 }] {
+        let b = timetz_send(mcx, &tz).unwrap();
+        let mut si = StringInfo::with_capacity_in(mcx, b.data().len() + 1).unwrap();
+        si.append_bytes(b.data()).unwrap();
+        assert_eq!(timetz_recv(&mut si, -1).unwrap(), tz);
+        assert_eq!(si.cursor, si.len());
+    }
+}

@@ -665,6 +665,7 @@ mod order_by_limit_e2e {
                 Ok((relid == TBL).then_some(n))
             });
             syscache_seams::lookup_pg_statistic_shape::set(|_, _, _| Ok(None));
+            syscache_seams::lookup_pg_statistic_bundle::set(|_, _, _, _| Ok(None));
             syscache_seams::pg_statistic_stawidth::set(|_, _, _| Ok(None));
             syscache_seams::lookup_pg_amop_members_by_operator::set(|mcx, opno| {
                 let mut v = ::mcx::PgVec::new_in(mcx);

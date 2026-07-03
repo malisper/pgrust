@@ -140,12 +140,6 @@ pub fn standard_executor_start(qd: &mut QueryDescData, mut eflags: i32) -> PgRes
         exec_check_xact_read_only(pstmt);
     }
 
-    // Extended-protocol bind params ride in qd.params; custom plans fold
-    // PARAM_EXTERN to Consts, and any plan that still reads a Param panics
-    // loudly at expression compile (execexpr T_Param arm).
-    if !pstmt.paramExecTypes.is_nil() {
-        panic!("standard_ExecutorStart (execMain.c): ParamExecData lane not ported");
-    }
     if !qd.query_env.is_null() {
         panic!("standard_ExecutorStart (execMain.c): QueryEnvironment wiring not ported");
     }
@@ -177,6 +171,7 @@ pub fn standard_executor_start(qd: &mut QueryDescData, mut eflags: i32) -> PgRes
     let source_text = qd.source_text();
     let instrument = qd.instrument_options;
     let operation = qd.operation;
+    let params = qd.params;
 
     let mut exec = McxOwned::<ExecTy>::try_new(
         MemoryContext::new_bump("ExecutorState"),
@@ -193,6 +188,23 @@ pub fn standard_executor_start(qd: &mut QueryDescData, mut eflags: i32) -> PgRes
         // contract keeps it alive past this bundle (pquery::stmt_list shape).
         let pstmt = unsafe { querydesc::shorten_pstmt(pstmt) };
         let es = &mut data.estate;
+        // SAFETY: the registered params live in the portal context, which
+        // outlives this executor state (PortalDrop frees the handle after
+        // PortalCleanup's ExecutorEnd).
+        es.es_param_list_info =
+            (!params.is_null()).then(|| unsafe { types_portal::params::resolve(params) });
+        let n_exec = pstmt.paramExecTypes.len();
+        if n_exec > 0 {
+            es.es_param_exec_vals
+                .try_reserve_exact(n_exec)
+                .map_err(|_| _mcx.oom(n_exec))?;
+            es.es_param_exec_vals
+                .extend(core::iter::repeat_n(types_portal::params::ParamExecData::EMPTY, n_exec));
+            es.es_param_subplans
+                .try_reserve_exact(n_exec)
+                .map_err(|_| _mcx.oom(n_exec))?;
+            es.es_param_subplans.extend(core::iter::repeat_n(None, n_exec));
+        }
         es.es_sourceText = Some(source_text);
         es.es_output_cid = output_cid;
         es.es_snapshot = es_snapshot;
@@ -229,7 +241,29 @@ pub(crate) fn init_plan<'mcx>(
         panic!("InitPlan (execMain.c): ExecRowMark lane not ported");
     }
     if !pstmt.subplans.is_nil() {
-        panic!("InitPlan (execMain.c): SubPlan lane not ported (nodeSubplan.c)");
+        for (i, subplan) in pstmt.subplans.iter().enumerate() {
+            let mut sp_eflags = eflags
+                & !(types_slot::EXEC_FLAG_REWIND
+                    | EXEC_FLAG_BACKWARD
+                    | types_slot::EXEC_FLAG_MARK);
+            if pstmt.rewindPlanIDs.is_member((i + 1) as i32) {
+                sp_eflags |= types_slot::EXEC_FLAG_REWIND;
+            }
+            let ps = exec_init_node(Some(subplan), &mut data.estate, sp_eflags)?
+                .expect("subplans cells are plan trees");
+            // Arena-cell ownership (not a struct field) so the type-erased
+            // pointer never aliases a live &mut ExecData; the PlanState's Rc
+            // releases run in standard_executor_end's explicit take+drop
+            // (abort-path leak is the registry hazard class; see CATALOG).
+            let mut cell = ::mcx::alloc_in(data.estate.es_query_cxt, Some(ps))?;
+            let raw: *mut Option<crate::PlanStateNode<'_>> = &mut *cell;
+            core::mem::forget(cell);
+            data.estate.es_subplanstates.push(::executils::SubplanStateCell(
+                // SAFETY: raw comes from a live arena allocation.
+                unsafe { core::ptr::NonNull::new_unchecked(raw) }.cast(),
+            ));
+        }
+        data.estate.es_subplan_hook = Some(crate::nodesubplan::subplan_hook);
     }
 
     let plan_node = pstmt.planTree.expect("PlannedStmt without planTree");
@@ -394,6 +428,18 @@ pub fn standard_executor_end(qd: &mut QueryDescData) -> PgResult<()> {
         );
         if let Some(ps) = planstate.as_mut() {
             exec_end_node(ps, estate)?;
+        }
+        for i in 0..estate.es_subplanstates.len() {
+            let cell = estate.es_subplanstates[i];
+            // SAFETY: init_plan created this arena cell; exclusive here (no
+            // subplan can be mid-run during ExecutorEnd).
+            let slot = unsafe {
+                &mut *cell.0.cast::<Option<crate::PlanStateNode<'_>>>().as_ptr()
+            };
+            if let Some(mut ps) = slot.take() {
+                exec_end_node(&mut ps, estate)?;
+                // Dropping runs the Rc releases arena reset can't (no-drop rule).
+            }
         }
         estate.exec_reset_tuple_table(false);
         estate.exec_close_result_relations();

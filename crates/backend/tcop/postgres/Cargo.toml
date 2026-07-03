@@ -61,6 +61,7 @@ miscinit = { path = "../../utils/init/miscinit" }
 types_guc = { path = "../../../_support/types/types_guc" }
 
 [dev-dependencies]
+fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
 lwlock = { path = "../../storage/lmgr/lwlock" }
 lock = { path = "../../storage/lmgr/lock" }
 predicate_seams = { path = "../../storage/lmgr/predicate_seams" }

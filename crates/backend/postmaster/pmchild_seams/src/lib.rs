@@ -50,3 +50,8 @@ seam_core::seam!(
     // signaled. Signal delivery to backend THREADS is this owner's redesign.
     pub fn signal_children(signal: i32, target_mask: u32) -> bool
 );
+
+seam_core::seam!(
+    // FindPostmasterChildByPid(pid) (pmchild.c); None = stray pid.
+    pub fn find_postmaster_child_by_pid(pid: pid_t) -> Option<(PmChildSlot, BackendType)>
+);

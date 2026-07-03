@@ -11,11 +11,13 @@ types_core = { path = "../../../_support/types/types_core" }
 types_error = { path = "../../../_support/types/types_error" }
 types_fmgr = { path = "../../../_support/types/fmgr" }
 types_nodes = { path = "../../../_support/types/nodes" }
+types_portal = { path = "../../../_support/types/portal" }
 types_slot = { path = "../../../_support/types/types_slot" }
 types_tuple = { path = "../../../_support/types/types_tuple" }
 fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
 exectuples = { path = "../exectuples" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
+clauses_seams = { path = "../../optimizer/util/clauses_seams" }
 guc_tables = { path = "../../utils/misc/guc_tables" }
 aclchk_seams = { path = "../../catalog/aclchk_seams" }
 miscinit_seams = { path = "../../utils/init/miscinit_seams" }

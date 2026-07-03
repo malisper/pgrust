@@ -10,8 +10,9 @@ use ::types_error::{
 use ::types_fmgr::{TRACK_FUNC_ALL, TRACK_FUNC_OFF};
 use ::types_nodes::list::NodeList;
 use ::types_nodes::node_tree::Node;
-use ::types_nodes::primnodes::{Var, VarReturningType};
+use ::types_nodes::primnodes::{Param, ParamKind, Var, VarReturningType};
 use ::types_nodes::NodeTag;
+use ::types_portal::params::ParamBind;
 use ::types_tuple::TupleDescData;
 
 use core::ptr::NonNull;
@@ -73,13 +74,14 @@ fn grow_steps(state: &mut ExprState<'_>, mcx: Mcx<'_>) -> PgResult<()> {
 pub fn exec_init_expr<'mcx>(
     mcx: Mcx<'mcx>,
     node: Option<Node<'mcx>>,
+    params: ParamBind<'mcx>,
 ) -> PgResult<Option<PgBox<'mcx, ExprState<'mcx>>>> {
     let Some(node) = node else {
         return Ok(None);
     };
     let mut state = ExprState::new_boxed_in(mcx)?;
     create_expr_setup_steps(&mut state, mcx, &[node])?;
-    init_expr_rec(node, &mut state, mcx, OutRef::RESULT, None)?;
+    init_expr_rec(node, &mut state, mcx, OutRef::RESULT, None, params)?;
     push_step(&mut state, mcx, Step::DoneReturn)?;
     ready_expr(&mut state);
     Ok(Some(state))
@@ -89,6 +91,7 @@ pub fn exec_init_expr<'mcx>(
 pub fn exec_init_qual<'mcx>(
     mcx: Mcx<'mcx>,
     qual: &NodeList<'mcx>,
+    params: ParamBind<'mcx>,
 ) -> PgResult<Option<PgBox<'mcx, ExprState<'mcx>>>> {
     if qual.is_nil() {
         return Ok(None);
@@ -98,7 +101,38 @@ pub fn exec_init_qual<'mcx>(
     create_expr_setup_steps(&mut state, mcx, qual.as_slice())?;
 
     for node in qual.iter() {
-        init_expr_rec(node, &mut state, mcx, OutRef::RESULT, None)?;
+        init_expr_rec(node, &mut state, mcx, OutRef::RESULT, None, params)?;
+        push_step(&mut state, mcx, Step::Qual { jumpdone: u32::MAX })?;
+    }
+    let done = state.steps.len() as u32;
+    for step in state.steps.iter_mut() {
+        if let Step::Qual { jumpdone } = step {
+            debug_assert_eq!(*jumpdone, u32::MAX);
+            *jumpdone = done;
+        }
+    }
+    push_step(&mut state, mcx, Step::DoneReturn)?;
+    ready_expr(&mut state);
+    Ok(Some(state))
+}
+
+/// `ExecInitQual` with an Agg parent: Aggrefs bind to the AggState's result
+/// arrays (nodeAgg HAVING qual).
+pub fn exec_build_agg_qual<'mcx>(
+    mcx: Mcx<'mcx>,
+    qual: &NodeList<'mcx>,
+    agg: AggBind,
+    params: ParamBind<'mcx>,
+) -> PgResult<Option<PgBox<'mcx, ExprState<'mcx>>>> {
+    if qual.is_nil() {
+        return Ok(None);
+    }
+    let mut state = ExprState::new_boxed_in(mcx)?;
+    state.flags = EEO_FLAG_IS_QUAL;
+    create_expr_setup_steps(&mut state, mcx, qual.as_slice())?;
+
+    for node in qual.iter() {
+        init_expr_rec(node, &mut state, mcx, OutRef::RESULT, Some(agg), params)?;
         push_step(&mut state, mcx, Step::Qual { jumpdone: u32::MAX })?;
     }
     let done = state.steps.len() as u32;
@@ -119,8 +153,9 @@ pub fn exec_build_projection_info<'mcx>(
     mcx: Mcx<'mcx>,
     target_list: &NodeList<'mcx>,
     input_desc: Option<&TupleDescData<'mcx>>,
+    params: ParamBind<'mcx>,
 ) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
-    build_projection_info(mcx, target_list, input_desc, None)
+    build_projection_info(mcx, target_list, input_desc, None, params)
 }
 
 /// Agg-node projection: Aggrefs bound to the AggState's result arrays.
@@ -129,8 +164,9 @@ pub fn exec_build_agg_projection_info<'mcx>(
     target_list: &NodeList<'mcx>,
     input_desc: Option<&TupleDescData<'mcx>>,
     agg: AggBind,
+    params: ParamBind<'mcx>,
 ) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
-    build_projection_info(mcx, target_list, input_desc, Some(agg))
+    build_projection_info(mcx, target_list, input_desc, Some(agg), params)
 }
 
 fn build_projection_info<'mcx>(
@@ -138,6 +174,7 @@ fn build_projection_info<'mcx>(
     target_list: &NodeList<'mcx>,
     input_desc: Option<&TupleDescData<'mcx>>,
     agg: Option<AggBind>,
+    params: ParamBind<'mcx>,
 ) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
     let mut state = ExprState::new_boxed_in(mcx)?;
     create_expr_setup_steps(&mut state, mcx, target_list.as_slice())?;
@@ -178,7 +215,7 @@ fn build_projection_info<'mcx>(
             };
             push_step(&mut state, mcx, step)?;
         } else {
-            init_expr_rec(tle.expr, &mut state, mcx, OutRef::RESULT, agg)?;
+            init_expr_rec(tle.expr, &mut state, mcx, OutRef::RESULT, agg, params)?;
             let resultnum = (tle.resno - 1) as u16;
             let step = if lsyscache::get_typlen(expr_type(tle.expr))? == -1 {
                 Step::AssignTmpMakeRo { resultnum }
@@ -199,8 +236,9 @@ fn build_projection_info<'mcx>(
 pub fn exec_build_agg_trans<'mcx>(
     mcx: Mcx<'mcx>,
     specs: &[AggTransSpec<'_, 'mcx>],
+    params: ParamBind<'mcx>,
 ) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
-    build_agg_trans(mcx, specs, None)
+    build_agg_trans(mcx, specs, None, params)
 }
 
 /// AGG_HASHED variant: pergroup resolves per tuple through `base`, the cell
@@ -210,14 +248,16 @@ pub fn exec_build_agg_trans_hashed<'mcx>(
     mcx: Mcx<'mcx>,
     specs: &[AggTransSpec<'_, 'mcx>],
     base: NonNull<NonNull<AggPerGroup>>,
+    params: ParamBind<'mcx>,
 ) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
-    build_agg_trans(mcx, specs, Some(base))
+    build_agg_trans(mcx, specs, Some(base), params)
 }
 
 fn build_agg_trans<'mcx>(
     mcx: Mcx<'mcx>,
     specs: &[AggTransSpec<'_, 'mcx>],
     indirect_base: Option<NonNull<NonNull<AggPerGroup>>>,
+    params: ParamBind<'mcx>,
 ) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
     let mut state = ExprState::new_boxed_in(mcx)?;
     let mut info = SetupInfo::default();
@@ -265,7 +305,7 @@ fn build_agg_trans<'mcx>(
             // SAFETY: argno + 1 <= num_trans_inputs < nargs of `call.fcinfo`.
             let arg_out =
                 OutRef(Some(unsafe { crate::steps::arg_slot_of(call.fcinfo, argno + 1) }));
-            init_expr_rec(tle.expr, &mut state, mcx, arg_out, None)?;
+            init_expr_rec(tle.expr, &mut state, mcx, arg_out, None, params)?;
         }
         let step = match (indirect_base, fn_strict) {
             (None, true) => Step::AggPlainTransStrictByVal { call, pergroup: spec.pergroup },
@@ -530,6 +570,7 @@ fn init_expr_rec<'mcx>(
     mcx: Mcx<'mcx>,
     out: OutRef,
     agg: Option<AggBind>,
+    params: ParamBind<'mcx>,
 ) -> PgResult<()> {
     match node.node_tag() {
         NodeTag::T_Var => {
@@ -573,17 +614,26 @@ fn init_expr_rec<'mcx>(
                 Step::Const { value: con.constvalue, isnull: con.constisnull, out },
             )
         }
-        NodeTag::T_Param => unported("EEOP_PARAM_EXEC/EEOP_PARAM_EXTERN (ParamListInfo)"),
+        NodeTag::T_Param => {
+            let p = node.as_param().unwrap();
+            let step = init_param(p, params, out)?;
+            if p.paramkind == ParamKind::PARAM_EXEC {
+                state.param_exec_deps.push(p.paramid as u32);
+            }
+            push_step(state, mcx, step)
+        }
         NodeTag::T_FuncExpr => {
             let func = node.as_func_expr().unwrap();
-            let step =
-                init_func(node, &func.args, func.funcid, func.inputcollid, state, mcx, out, agg)?;
+            let step = init_func(
+                node, &func.args, func.funcid, func.inputcollid, state, mcx, out, agg, params,
+            )?;
             push_step(state, mcx, step)
         }
         NodeTag::T_OpExpr => {
             let op = node.as_op_expr().unwrap();
-            let step =
-                init_func(node, &op.args, op.opfuncid, op.inputcollid, state, mcx, out, agg)?;
+            let step = init_func(
+                node, &op.args, op.opfuncid, op.inputcollid, state, mcx, out, agg, params,
+            )?;
             push_step(state, mcx, step)
         }
         NodeTag::T_Aggref => {
@@ -609,6 +659,55 @@ fn init_expr_rec<'mcx>(
         }
         tag => panic!("execexpr ExecInitExprRec: node family {tag:?} not ported"),
     }
+}
+
+// C's per-eval ExecEvalParamExtern checks hoisted: values are fixed for one
+// execution, so the per-tuple read is one load; mismatch guards are compile-time.
+fn init_param(param: &Param, params: ParamBind<'_>, out: OutRef) -> PgResult<Step> {
+    let paramid = param.paramid;
+    match param.paramkind {
+        ParamKind::PARAM_EXEC => {
+            assert!(
+                paramid >= 0 && (paramid as u32) < params.n_exec,
+                "EEOP_PARAM_EXEC: paramid {paramid} outside es_param_exec_vals[0..{}]",
+                params.n_exec
+            );
+            let base = params.exec_vals.expect("n_exec > 0 implies a base pointer");
+            // SAFETY: paramid bounds-checked against the once-sized array.
+            let prm = unsafe { NonNull::new_unchecked(base.as_ptr().add(paramid as usize)) };
+            Ok(Step::ParamExec { prm, out })
+        }
+        ParamKind::PARAM_EXTERN => {
+            let list = params.extern_params.unwrap_or(&[]);
+            if paramid <= 0 || paramid as usize > list.len() {
+                return Err(no_param_value(paramid));
+            }
+            let prm = &list[(paramid - 1) as usize];
+            if prm.ptype == 0 {
+                return Err(no_param_value(paramid));
+            }
+            assert!(
+                prm.ptype == param.paramtype,
+                "EEOP_PARAM_EXTERN: parameter {paramid} bound as type {} but planned as {}",
+                prm.ptype,
+                param.paramtype
+            );
+            Ok(Step::ParamExtern { prm: NonNull::from(prm), out })
+        }
+        other => panic!(
+            "execexpr ExecInitExprRec: Param kind {other:?} must not reach the executor \
+             (PARAM_SUBLINK/PARAM_MULTIEXPR are rewritten by the planner)"
+        ),
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn no_param_value(paramid: i32) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!("no value found for parameter {paramid}"))
+            .with_sqlstate(::types_error::ERRCODE_UNDEFINED_OBJECT),
+    )
 }
 
 // pg_class.dat / parsenodes.h / acl.h values, verified against 18.3 headers.
@@ -659,6 +758,7 @@ fn init_func<'mcx>(
     mcx: Mcx<'mcx>,
     out: OutRef,
     agg: Option<AggBind>,
+    params: ParamBind<'mcx>,
 ) -> PgResult<Step> {
     let nargs = args.len();
 
@@ -714,7 +814,7 @@ fn init_func<'mcx>(
         if arg.as_const().is_none() {
             // SAFETY: argno < nargs of the image `call.fcinfo` points at.
             let arg_out = OutRef(Some(unsafe { crate::steps::arg_slot_of(call.fcinfo, argno) }));
-            init_expr_rec(arg, state, mcx, arg_out, agg)?;
+            init_expr_rec(arg, state, mcx, arg_out, agg, params)?;
         }
     }
 

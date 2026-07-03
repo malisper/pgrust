@@ -293,13 +293,13 @@ fn sum_int4_of_empty_input_is_null() {
 }
 
 #[test]
-#[should_panic(expected = "AGG_SORTED/MIXED")]
-fn sorted_strategy_panics() {
+#[should_panic(expected = "AGG_MIXED")]
+fn mixed_strategy_panics() {
     install_seams();
     let mcx = leaked_mcx();
     let agg_node = {
         let mut agg = Node::build::<Agg>(mcx).unwrap();
-        agg.aggstrategy = 1;
+        agg.aggstrategy = 3;
         agg.seal_ref()
     };
     let estate_owner = create_executor_state(Box::leak(Box::new(MemoryContext::new("q"))));
@@ -488,5 +488,156 @@ fn hashed_group_by_null_keys_group_together() {
         }
         got.sort_unstable();
         assert_eq!(got, vec![(None, 2), (Some(7), 1)]);
+    });
+}
+
+const INT8_GT: u32 = 413;
+const F_INT8GT: u32 = 470;
+
+fn mk_grouped_count_agg(mcx: Mcx<'_>, strategy: u32, with_having: bool) -> &Agg<'_> {
+    let outer_var = Node::mk_var(mcx, 1, 1, INT4OID, -1, 0, 0).unwrap();
+    let outer_tle = Node::mk_target_entry(mcx, outer_var, 1, Some("a"), false).unwrap();
+    let outer_plan = {
+        let mut r = Node::build::<types_nodes::plannodes::Result>(mcx).unwrap();
+        r.plan.targetlist = NodeList::make1(mcx, outer_tle).unwrap();
+        r.plan.plan_width = 4;
+        r.seal()
+    };
+
+    let group_var = Node::mk_var(mcx, OUTER_VAR, 1, INT4OID, -1, 0, 0).unwrap();
+    let group_tle = Node::mk_target_entry(mcx, group_var, 1, Some("a"), false).unwrap();
+    fn mk_count<'m>(mcx: Mcx<'m>) -> Node<'m> {
+        let mut aggref = Node::build::<Aggref>(mcx).unwrap();
+        aggref.aggfnoid = COUNT_STAR_OID;
+        aggref.aggtype = INT8OID;
+        aggref.aggtranstype = INT8OID;
+        aggref.aggstar = true;
+        aggref.aggno = 0;
+        aggref.aggtransno = 0;
+        aggref.seal()
+    }
+    let count_tle = Node::mk_target_entry(mcx, mk_count(mcx), 2, Some("count"), false).unwrap();
+
+    let mut agg = Node::build::<Agg>(mcx).unwrap();
+    let mut tlist = NodeList::make1(mcx, group_tle).unwrap();
+    tlist.lappend(mcx, count_tle).unwrap();
+    agg.plan.targetlist = tlist;
+    if with_having {
+        // HAVING count(*) > 1 as the node qual.
+        let one = Node::mk_const(mcx, INT8OID, -1, 0, 8, Datum::from_i64(1), false, true).unwrap();
+        let mut args = NodeList::make1(mcx, mk_count(mcx)).unwrap();
+        args.lappend(mcx, one).unwrap();
+        let qual = Node::mk(
+            mcx,
+            types_nodes::primnodes::OpExpr {
+                opno: INT8_GT,
+                opfuncid: F_INT8GT,
+                opresulttype: 16,
+                opretset: false,
+                opcollid: 0,
+                inputcollid: 0,
+                args,
+                location: -1,
+            },
+        )
+        .unwrap();
+        agg.plan.qual = NodeList::make1(mcx, qual).unwrap();
+    }
+    agg.plan.lefttree = Some(outer_plan);
+    agg.aggstrategy = strategy;
+    agg.numCols = 1;
+    agg.grpColIdx = mcx::slice_borrow_in(mcx, &[1i16]).unwrap();
+    agg.grpOperators = mcx::slice_borrow_in(mcx, &[INT4_EQ]).unwrap();
+    agg.grpCollations = mcx::slice_borrow_in(mcx, &[0u32]).unwrap();
+    agg.numGroups = 4;
+    agg.seal_ref()
+}
+
+fn run_grouped(agg: &'static Agg<'static>, rows: &'static [i32]) -> Vec<(i32, i64)> {
+    let estate_owner = create_executor_state(Box::leak(Box::new(MemoryContext::new("q"))));
+    let mut estate_owner = estate_owner.unwrap();
+    estate_owner.with_mut(|estate| {
+        let mcx = estate.es_query_cxt;
+        let outer_desc = one_col_desc(mcx, INT4OID, 4, TYPALIGN_INT);
+        let outer_id = estate.exec_init_extra_tuple_slot(Some(outer_desc), TupleSlotKind::Virtual);
+        // SAFETY: agg is leaked ('static) and read-only.
+        let agg = unsafe { shorten(agg) };
+        let mut state = exec_init_agg(agg, estate, 0, two_col_desc(leaked_mcx())).unwrap();
+        let mut got: Vec<(i32, i64)> = Vec::new();
+        let mut feed = feeder(outer_id, rows);
+        while let Some(slot_id) = exec_agg(&mut state, estate, &mut feed).unwrap() {
+            let base = estate.slot_mut(slot_id).base();
+            assert!(!base.tts_isnull[0] && !base.tts_isnull[1]);
+            got.push((base.tts_values[0].as_i32(), base.tts_values[1].as_i64()));
+        }
+        got
+    })
+}
+
+// AGG_SORTED over presorted input: one row per group boundary, input order
+// preserved (no sort inside the node).
+#[test]
+fn sorted_group_by_counts_groups_in_order() {
+    install_seams();
+    let agg = mk_grouped_count_agg(leaked_mcx(), 1, false);
+    let got = run_grouped(agg, &[1, 1, 1, 2, 2, 3]);
+    assert_eq!(got, vec![(1, 3), (2, 2), (3, 1)]);
+}
+
+#[test]
+fn sorted_group_by_empty_input_returns_no_rows() {
+    install_seams();
+    let agg = mk_grouped_count_agg(leaked_mcx(), 1, false);
+    assert!(run_grouped(agg, &[]).is_empty());
+}
+
+#[test]
+fn sorted_group_by_having_filters_groups() {
+    install_seams();
+    let agg = mk_grouped_count_agg(leaked_mcx(), 1, true);
+    let got = run_grouped(agg, &[1, 1, 1, 2, 2, 3]);
+    assert_eq!(got, vec![(1, 3), (2, 2)]);
+}
+
+#[test]
+fn hashed_group_by_having_filters_groups() {
+    install_seams();
+    let agg = mk_grouped_count_agg(leaked_mcx(), 2, true);
+    let mut got = run_grouped(agg, &[1, 2, 1, 3, 2, 1]);
+    got.sort_unstable();
+    assert_eq!(got, vec![(1, 3), (2, 2)]);
+}
+
+// Sorted-agg rescan re-runs the whole pass over a fresh feed.
+#[test]
+fn sorted_group_by_rescan_reruns() {
+    install_seams();
+    let agg = mk_grouped_count_agg(leaked_mcx(), 1, false);
+    let estate_owner = create_executor_state(Box::leak(Box::new(MemoryContext::new("q"))));
+    let mut estate_owner = estate_owner.unwrap();
+    estate_owner.with_mut(|estate| {
+        let mcx = estate.es_query_cxt;
+        let outer_desc = one_col_desc(mcx, INT4OID, 4, TYPALIGN_INT);
+        let outer_id = estate.exec_init_extra_tuple_slot(Some(outer_desc), TupleSlotKind::Virtual);
+        // SAFETY: agg is leaked ('static) and read-only.
+        let agg = unsafe { shorten(agg) };
+        let mut state = exec_init_agg(agg, estate, 0, two_col_desc(leaked_mcx())).unwrap();
+        let rows: &'static [i32] = &[4, 4, 5];
+        {
+            let mut feed = feeder(outer_id, rows);
+            let mut n = 0;
+            while exec_agg(&mut state, estate, &mut feed).unwrap().is_some() {
+                n += 1;
+            }
+            assert_eq!(n, 2);
+        }
+        exec_rescan_agg(&mut state, estate);
+        let mut feed = feeder(outer_id, rows);
+        let mut got: Vec<(i32, i64)> = Vec::new();
+        while let Some(slot_id) = exec_agg(&mut state, estate, &mut feed).unwrap() {
+            let base = estate.slot_mut(slot_id).base();
+            got.push((base.tts_values[0].as_i32(), base.tts_values[1].as_i64()));
+        }
+        assert_eq!(got, vec![(4, 2), (5, 1)]);
     });
 }

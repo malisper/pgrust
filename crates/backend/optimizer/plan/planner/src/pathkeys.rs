@@ -205,9 +205,9 @@ fn group_keys_reorder_by_pathkeys<'mcx>(
 pub fn get_useful_group_keys_orderings<'mcx>(
     run: &mut PlannerRun<'mcx>,
     path_pathkeys: &[PathKey],
-) -> Vec<GroupByOrdering<'mcx>> {
+) -> PgVec<'mcx, GroupByOrdering<'mcx>> {
     let mcx = run.mcx;
-    let mut infos = Vec::new();
+    let mut infos: PgVec<'mcx, GroupByOrdering<'mcx>> = PgVec::new_in(mcx);
     infos.push(GroupByOrdering {
         pathkeys: crate::relnode::pgvec_clone_shallow(mcx, &run.root.group_pathkeys),
         clauses: crate::relnode::pgvec_clone_shallow(mcx, &run.root.processed_groupClause),
@@ -410,6 +410,8 @@ pub fn expr_collation(node: Node<'_>) -> u32 {
         NodeTag::T_Const => node.as_const().unwrap().constcollid,
         NodeTag::T_OpExpr => node.as_op_expr().unwrap().opcollid,
         NodeTag::T_FuncExpr => node.as_func_expr().unwrap().funccollid,
+        NodeTag::T_Param => node.as_param().unwrap().paramcollid,
+        NodeTag::T_Aggref => node.as_aggref().unwrap().aggcollid,
         other => panic!("exprCollation (nodeFuncs.c): {other:?}; M2 expression lane"),
     }
 }
@@ -425,4 +427,371 @@ fn pull_varnos_relids<'mcx>(
         out = crate::relnode::relids_union(mcx, &out, &crate::relnode::relids_singleton(mcx, x as u32));
     }
     Ok(out)
+}
+
+// initialize/update_mergeclause_eclasses (pathkeys.c) fused: C fills the EC
+// links during qual distribution (process_equivalence); this lane's
+// eclass-lite ECs (single-expr, never merged) are created on first use here
+// via the same get_eclass_for_sort_expr, so mergeclause/pathkey EC identity
+// holds. ec_merged chasing is vacuous (no EC merging happens).
+pub fn update_mergeclause_eclasses(
+    run: &mut PlannerRun<'_>,
+    rinfo: types_pathnodes::RinfoId,
+) -> PgResult<()> {
+    debug_assert!(!run.root.rinfo(rinfo).mergeopfamilies.is_empty());
+    if let Some(lec) = run.root.rinfo(rinfo).left_ec {
+        debug_assert!(run.root.ec(lec).ec_merged.is_none());
+        debug_assert!(run
+            .root
+            .ec(run.root.rinfo(rinfo).right_ec.unwrap())
+            .ec_merged
+            .is_none());
+        return Ok(());
+    }
+    let clause = *run.root.expr_node(run.root.rinfo(rinfo).clause);
+    let o = clause.as_op_expr().expect("mergeclause is an OpExpr");
+    let (lefttype, righttype) = lsyscache::op_input_types(o.opno)?;
+    let opfamilies =
+        crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.rinfo(rinfo).mergeopfamilies);
+    let left_ec =
+        get_eclass_for_sort_expr(run, o.args.nth(0), &opfamilies, lefttype, o.inputcollid, 0)?;
+    let right_ec =
+        get_eclass_for_sort_expr(run, o.args.nth(1), &opfamilies, righttype, o.inputcollid, 0)?;
+    let r = run.root.rinfo_mut(rinfo);
+    r.left_ec = Some(left_ec);
+    r.right_ec = Some(right_ec);
+    Ok(())
+}
+
+fn mergeclause_outer_inner_ecs(
+    run: &PlannerRun<'_>,
+    rinfo: types_pathnodes::RinfoId,
+) -> (Option<EcId>, Option<EcId>) {
+    let ri = run.root.rinfo(rinfo);
+    if ri.outer_is_left {
+        (ri.left_ec, ri.right_ec)
+    } else {
+        (ri.right_ec, ri.left_ec)
+    }
+}
+
+pub fn find_mergeclauses_for_outer_pathkeys<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    pathkeys: &[PathKey],
+    restrictinfos: &[types_pathnodes::RinfoId],
+) -> PgResult<PgVec<'mcx, types_pathnodes::RinfoId>> {
+    let mut mergeclauses: PgVec<'mcx, types_pathnodes::RinfoId> = PgVec::new_in(run.mcx);
+    for &rid in restrictinfos {
+        update_mergeclause_eclasses(run, rid)?;
+    }
+    for pathkey in pathkeys {
+        let mut matched = false;
+        for &rid in restrictinfos {
+            let (oec, _) = mergeclause_outer_inner_ecs(run, rid);
+            if oec == pathkey.pk_eclass {
+                mergeclauses.push(rid);
+                matched = true;
+            }
+        }
+        if !matched {
+            break;
+        }
+    }
+    Ok(mergeclauses)
+}
+
+pub fn select_outer_pathkeys_for_merge<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    mergeclauses: &[types_pathnodes::RinfoId],
+    joinrel: types_pathnodes::RelId,
+) -> PgResult<PgVec<'mcx, PathKey>> {
+    let mcx = run.mcx;
+    let n_clauses = mergeclauses.len();
+    let mut pathkeys: PgVec<'mcx, PathKey> = PgVec::new_in(mcx);
+    if n_clauses == 0 {
+        return Ok(pathkeys);
+    }
+
+    let mut ecs: PgVec<'mcx, EcId> = PgVec::new_in(mcx);
+    let mut scores: PgVec<'mcx, i32> = PgVec::new_in(mcx);
+    for &rid in mergeclauses {
+        update_mergeclause_eclasses(run, rid)?;
+        let (oec, _) = mergeclause_outer_inner_ecs(run, rid);
+        let oeclass = oec.expect("mergeclause has an outer EC");
+        if ecs.contains(&oeclass) {
+            continue;
+        }
+        let mut score = 0;
+        for &em_id in run.root.ec(oeclass).ec_members.iter() {
+            let em = run.root.em(em_id);
+            debug_assert!(!em.em_is_child);
+            if !em.em_is_const
+                && !crate::relnode::relids_overlap(&em.em_relids, &run.root.rel(joinrel).relids)
+            {
+                score += 1;
+            }
+        }
+        ecs.push(oeclass);
+        scores.push(score);
+    }
+
+    if !run.root.query_pathkeys.is_empty() {
+        let query_pathkeys = crate::relnode::pgvec_clone_shallow(mcx, &run.root.query_pathkeys);
+        let mut matches = 0usize;
+        let mut have_all = true;
+        for qpk in query_pathkeys.iter() {
+            let qec = qpk.pk_eclass.expect("canonical pathkey has an eclass");
+            if ecs.contains(&qec) {
+                matches += 1;
+            } else {
+                have_all = false;
+                break;
+            }
+        }
+        if have_all {
+            pathkeys.extend(query_pathkeys.iter().copied());
+            for qpk in query_pathkeys.iter() {
+                let qec = qpk.pk_eclass.unwrap();
+                if let Some(j) = ecs.iter().position(|&e| e == qec) {
+                    scores[j] = -1;
+                }
+            }
+        } else if matches == n_clauses {
+            pathkeys.extend(query_pathkeys.iter().take(matches).copied());
+            return Ok(pathkeys);
+        }
+    }
+
+    loop {
+        let mut best_j = 0usize;
+        let mut best_score = scores[0];
+        for j in 1..ecs.len() {
+            if scores[j] > best_score {
+                best_j = j;
+                best_score = scores[j];
+            }
+        }
+        if best_score < 0 {
+            break;
+        }
+        let ec = ecs[best_j];
+        scores[best_j] = -1;
+        let opfamily = run.root.ec(ec).ec_opfamilies[0];
+        let pathkey = make_canonical_pathkey(run, ec, opfamily, COMPARE_LT, false);
+        debug_assert!(!pathkey_is_redundant(run, pathkey, &pathkeys));
+        pathkeys.push(pathkey);
+    }
+    Ok(pathkeys)
+}
+
+pub fn make_inner_pathkeys_for_merge<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    mergeclauses: &[types_pathnodes::RinfoId],
+    outer_pathkeys: &[PathKey],
+) -> PgResult<PgVec<'mcx, PathKey>> {
+    let mut pathkeys: PgVec<'mcx, PathKey> = PgVec::new_in(run.mcx);
+    let mut lastoeclass: Option<EcId> = None;
+    let mut opathkey: Option<PathKey> = None;
+    let mut lop = outer_pathkeys.iter();
+
+    for &rid in mergeclauses {
+        update_mergeclause_eclasses(run, rid)?;
+        let (oeclass, ieclass) = mergeclause_outer_inner_ecs(run, rid);
+        if oeclass != lastoeclass {
+            let Some(&opk) = lop.next() else {
+                panic!("too few pathkeys for mergeclauses");
+            };
+            opathkey = Some(opk);
+            lastoeclass = opk.pk_eclass;
+            assert!(oeclass == lastoeclass, "outer pathkeys do not match mergeclause");
+        }
+        let opk = opathkey.unwrap();
+        let pathkey = if ieclass == oeclass {
+            opk
+        } else {
+            make_canonical_pathkey(
+                run,
+                ieclass.expect("mergeclause has an inner EC"),
+                opk.pk_opfamily,
+                opk.pk_cmptype,
+                opk.pk_nulls_first,
+            )
+        };
+        if !pathkey_is_redundant(run, pathkey, &pathkeys) {
+            pathkeys.push(pathkey);
+        }
+    }
+    Ok(pathkeys)
+}
+
+pub fn trim_mergeclauses_for_inner_pathkeys<'mcx>(
+    run: &PlannerRun<'mcx>,
+    mergeclauses: &[types_pathnodes::RinfoId],
+    pathkeys: &[PathKey],
+) -> PgVec<'mcx, types_pathnodes::RinfoId> {
+    let mut new_mergeclauses: PgVec<'mcx, types_pathnodes::RinfoId> = PgVec::new_in(run.mcx);
+    if pathkeys.is_empty() {
+        return new_mergeclauses;
+    }
+    let mut lip = pathkeys.iter();
+    let mut pathkey_ec = lip.next().unwrap().pk_eclass;
+    let mut matched_pathkey = false;
+
+    for &rid in mergeclauses {
+        // ECs assumed already updated (find_mergeclauses ran first).
+        let (_, clause_ec) = mergeclause_outer_inner_ecs(run, rid);
+        if clause_ec != pathkey_ec {
+            if !matched_pathkey {
+                break;
+            }
+            let Some(next) = lip.next() else {
+                break;
+            };
+            pathkey_ec = next.pk_eclass;
+            matched_pathkey = false;
+        }
+        if clause_ec == pathkey_ec {
+            new_mergeclauses.push(rid);
+            matched_pathkey = true;
+        } else {
+            break;
+        }
+    }
+    new_mergeclauses
+}
+
+// build_join_pathkeys (pathkeys.c); FULL/RIGHT/RIGHT_ANTI (NIL result) are
+// loud upstream of add_paths_to_joinrel.
+pub fn build_join_pathkeys<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    joinrel: types_pathnodes::RelId,
+    jointype: u32,
+    outer_pathkeys: &[PathKey],
+) -> PgResult<PgVec<'mcx, PathKey>> {
+    debug_assert!(jointype == types_pathnodes::JOIN_INNER);
+    truncate_useless_pathkeys(run, joinrel, outer_pathkeys)
+}
+
+pub fn truncate_useless_pathkeys<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel: types_pathnodes::RelId,
+    pathkeys: &[PathKey],
+) -> PgResult<PgVec<'mcx, PathKey>> {
+    let mut nuseful = pathkeys_useful_for_merging(run, rel, pathkeys)?;
+    nuseful = nuseful.max(pathkeys_useful_for_ordering(run, pathkeys));
+    nuseful = nuseful.max(pathkeys_useful_for_grouping(run, pathkeys));
+    nuseful = nuseful.max(pathkeys_useful_for_distinct(run, pathkeys));
+    nuseful = nuseful.max(pathkeys_useful_for_setop(run, pathkeys));
+    let mut out: PgVec<'mcx, PathKey> = PgVec::new_in(run.mcx);
+    out.extend(pathkeys.iter().take(nuseful).copied());
+    Ok(out)
+}
+
+fn pathkeys_useful_for_merging(
+    run: &mut PlannerRun<'_>,
+    rel: types_pathnodes::RelId,
+    pathkeys: &[PathKey],
+) -> PgResult<usize> {
+    let mut useful = 0usize;
+    for pathkey in pathkeys {
+        if !right_merge_direction(run, pathkey) {
+            break;
+        }
+        // has_eclass_joins never set on the eclass-lite lane; join equality
+        // clauses stay in joininfo (initsplan divergence note).
+        debug_assert!(!run.root.rel(rel).has_eclass_joins);
+        let joininfo = crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.rel(rel).joininfo);
+        let mut matched = false;
+        for &rid in joininfo.iter() {
+            if run.root.rinfo(rid).mergeopfamilies.is_empty() {
+                continue;
+            }
+            update_mergeclause_eclasses(run, rid)?;
+            let ri = run.root.rinfo(rid);
+            if pathkey.pk_eclass == ri.left_ec || pathkey.pk_eclass == ri.right_ec {
+                matched = true;
+                break;
+            }
+        }
+        if matched {
+            useful += 1;
+        } else {
+            break;
+        }
+    }
+    Ok(useful)
+}
+
+fn right_merge_direction(run: &PlannerRun<'_>, pathkey: &PathKey) -> bool {
+    for qpk in run.root.query_pathkeys.iter() {
+        if pathkey.pk_eclass == qpk.pk_eclass && pathkey.pk_opfamily == qpk.pk_opfamily {
+            return pathkey.pk_cmptype == qpk.pk_cmptype;
+        }
+    }
+    pathkey.pk_cmptype == COMPARE_LT
+}
+
+fn pathkeys_useful_for_ordering(run: &PlannerRun<'_>, pathkeys: &[PathKey]) -> usize {
+    pathkeys_count_contained_in(&run.root.query_pathkeys, pathkeys).1
+}
+
+fn pathkeys_useful_for_grouping(run: &PlannerRun<'_>, pathkeys: &[PathKey]) -> usize {
+    if run.root.group_pathkeys.is_empty() {
+        return 0;
+    }
+    let mut n = 0;
+    for pathkey in pathkeys {
+        if !run.root.group_pathkeys.contains(pathkey) {
+            break;
+        }
+        n += 1;
+    }
+    n
+}
+
+fn pathkeys_useful_for_distinct(run: &PlannerRun<'_>, pathkeys: &[PathKey]) -> usize {
+    if run.root.distinct_pathkeys.is_empty() {
+        return 0;
+    }
+    let mut n = 0;
+    for pathkey in pathkeys {
+        if !run.root.distinct_pathkeys.contains(pathkey) {
+            break;
+        }
+        n += 1;
+    }
+    n
+}
+
+fn pathkeys_useful_for_setop(run: &PlannerRun<'_>, pathkeys: &[PathKey]) -> usize {
+    pathkeys_count_contained_in(&run.root.setop_pathkeys, pathkeys).1
+}
+
+// get_cheapest_path_for_pathkeys (pathkeys.c); required_outer is always empty
+// and partial paths never reach here.
+pub fn get_cheapest_path_for_pathkeys(
+    run: &PlannerRun<'_>,
+    paths: &[types_pathnodes::PathId],
+    pathkeys: &[PathKey],
+    cost_criterion: crate::pathnode::CostSelector,
+    require_parallel_safe: bool,
+) -> Option<types_pathnodes::PathId> {
+    let mut matched_path: Option<types_pathnodes::PathId> = None;
+    for &pid in paths {
+        let path = run.root.path(pid).base();
+        if require_parallel_safe && !path.parallel_safe {
+            continue;
+        }
+        if let Some(m) = matched_path {
+            if crate::pathnode::compare_path_costs(run.root.path(m).base(), path, cost_criterion)
+                <= 0
+            {
+                continue;
+            }
+        }
+        if pathkeys_contained_in(pathkeys, &path.pathkeys) && path.param_info.is_none() {
+            matched_path = Some(pid);
+        }
+    }
+    matched_path
 }

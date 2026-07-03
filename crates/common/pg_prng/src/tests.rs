@@ -96,7 +96,7 @@ fn seams_draw_from_thread_local_global() {
         pg_prng_seams::global_prng_uint32::call(),
         (0x69e85b3631381baau64 >> 32) as u32
     );
-    let d = pg_prng_seams::global_prng_double::call();
+    let d = global_prng(PgPrng::next_f64);
     assert!((0.0..1.0).contains(&d));
     assert_ne!(global_prng(|s| s.raw()), PgPrng::seeded(42).raw());
     std::thread::spawn(|| {

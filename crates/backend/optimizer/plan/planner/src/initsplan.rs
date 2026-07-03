@@ -135,17 +135,28 @@ fn distribute_qual_to_rels<'mcx>(
     if matches!(clause.node_tag(), NodeTag::T_List | NodeTag::T_BoolExpr) {
         panic!("distribute_quals_to_rels (initsplan.c): AND/OR list; M2 multi-qual lane");
     }
-    let relids = pull_varnos_relids(run, clause)?;
+    let mut relids = pull_varnos_relids(run, clause)?;
     assert!(
         crate::relnode::relids_is_subset(&relids, qualscope),
         "distribute_qual_to_rels (initsplan.c): lateral reference; M2 lane"
     );
+    let mut pseudoconstant = false;
     if relids_is_empty(&relids) {
-        panic!("distribute_qual_to_rels (initsplan.c): pseudoconstant qual; M2 gating lane");
+        // No ojscope on this lane; single top-level join domain.
+        if clauses::contain_volatile_functions(clause)? {
+            relids = crate::relnode::relids_copy(run.mcx, qualscope);
+        } else {
+            pseudoconstant = true;
+            run.root.hasPseudoConstantQuals = true;
+            relids =
+                crate::relnode::relids_copy(run.mcx, &run.root.join_domains[0].jd_relids);
+        }
     }
 
     let is_pushed_down = true;
-    let rinfo = make_restrictinfo(run, clause, is_pushed_down, false, false, false, 0, relids, None, None)?;
+    let rinfo = make_restrictinfo(
+        run, clause, is_pushed_down, false, false, pseudoconstant, 0, relids, None, None,
+    )?;
 
     // Join clauses: mark their Vars needed at the join level so the scans
     // below emit them.
@@ -157,6 +168,7 @@ fn distribute_qual_to_rels<'mcx>(
     }
 
     check_mergejoinable(run, rinfo)?;
+    check_hashjoinable(run, rinfo)?;
     // C divergence: C routes a mergejoinable qual through the EC machinery
     // (process_equivalence); for a single-rel qual the detour rebuilds this
     // identical clause, and for a join qual the EC would regenerate the same
@@ -289,6 +301,25 @@ fn check_mergejoinable(run: &mut PlannerRun<'_>, rinfo: RinfoId) -> PgResult<()>
     if lsyscache::op_mergejoinable(opno, lefttype)? && !clauses::contain_volatile_functions(clause)? {
         let fams = lsyscache::get_mergejoin_opfamilies(run.mcx, opno)?;
         run.root.rinfo_mut(rinfo).mergeopfamilies = fams;
+    }
+    Ok(())
+}
+
+// check_hashjoinable (initsplan.c): mark the clause hashable so
+// hash_inner_and_outer can collect it. The hasheqoperator fields (SEMI/ANTI
+// unique) stay unset — the inner-join lane never reads them.
+fn check_hashjoinable(run: &mut PlannerRun<'_>, rinfo: RinfoId) -> PgResult<()> {
+    if run.root.rinfo(rinfo).pseudoconstant {
+        return Ok(());
+    }
+    let clause = *run.root.expr_node(run.root.rinfo(rinfo).clause);
+    let Some(o) = clause.as_op_expr().filter(|o| o.args.len() == 2) else {
+        return Ok(());
+    };
+    let (opno, args0) = (o.opno, o.args.nth(0));
+    let lefttype = crate::costsize::expr_type_typmod(args0).0;
+    if lsyscache::op_hashjoinable(opno, lefttype)? && !clauses::contain_volatile_functions(clause)? {
+        run.root.rinfo_mut(rinfo).hashjoinoperator = opno;
     }
     Ok(())
 }

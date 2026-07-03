@@ -5,6 +5,8 @@ use adt_datetime::{
 };
 
 fn gmt_session() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(pgtz::init_seams);
     tz::pg_timezone_initialize();
 }
 
@@ -175,9 +177,9 @@ fn timestamp_io_differential_vs_pg18_other_styles() {
 #[test]
 fn timestamp_in_errors_match_c_surface() {
     gmt_session();
-    // (unknown text fields like "junk" route through pg_tzset and stay behind
-    // adt_datetime's unported-tz panic lock; BAD_FORMAT is reachable via a
-    // time-only string)
+    // (unknown text fields like "junk" try pg_tzset in the live tz engine and
+    // decode as DTERR_BAD_FORMAT; a time-only string exercises the same
+    // BAD_FORMAT surface here)
     let err = timestamp_in("17:32:01", -1, None).unwrap_err();
     assert_eq!(err.message, "invalid input syntax for type timestamp: \"17:32:01\"");
 

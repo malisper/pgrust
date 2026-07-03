@@ -429,6 +429,11 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // GetSysCacheOid2(TYPENAMENSP): InvalidOid on miss.
+    pub fn lookup_pg_type_oid_by_name(typname: &str, typnamespace: Oid) -> PgResult<Oid>
+);
+
+seam_core::seam!(
     pub fn lookup_pg_class_ls_shape(relid: Oid) -> PgResult<Option<PgClassLsShape>>
 );
 
@@ -520,6 +525,7 @@ seam_core::seam!(
 
 pub struct PgProcCostShape {
     pub procost: f32,
+    pub prorows: f32,
     pub prosupport: Oid,
 }
 
@@ -546,6 +552,48 @@ seam_core::seam!(
 
 seam_core::seam!(
     pub fn pg_statistic_slot_shape(tuple: &HeapTupleData<'_>) -> PgStatisticSlotShape
+);
+
+// One decoded pg_statistic slot; byref `values` datums point into
+// `values_image`, whose heap buffer is stable across moves of this struct.
+pub struct PgStatisticSlotData<'mcx> {
+    pub kind: i16,
+    pub staop: Oid,
+    pub stacoll: Oid,
+    pub valuetype: Oid,
+    pub values: PgVec<'mcx, Datum>,
+    pub numbers: PgVec<'mcx, f32>,
+    pub values_image: PgVec<'mcx, u8>,
+}
+
+pub struct PgStatisticBundle<'mcx> {
+    pub stanullfrac: f32,
+    pub stawidth: i32,
+    pub stadistinct: f32,
+    pub slots: PgVec<'mcx, PgStatisticSlotData<'mcx>>,
+}
+
+seam_core::seam!(
+    // SearchSysCache3(STATRELATTINH) + full slot decode (the planner's
+    // examine_variable keeps the C statsTuple pinned; here the decode-once
+    // bundle replaces the tuple + repeated get_attstatsslot calls).
+    pub fn lookup_pg_statistic_bundle<'mcx>(
+        mcx: Mcx<'mcx>,
+        relid: Oid,
+        attnum: AttrNumber,
+        inh: bool,
+    ) -> PgResult<Option<PgStatisticBundle<'mcx>>>
+);
+
+seam_core::seam!(
+    // SysCacheGetAttr(ATTNUM, ..., Anum_pg_attribute_attstattarget); Ok(None)
+    // mirrors SQL NULL, a missing pg_attribute row is an error.
+    pub fn lookup_pg_attribute_stattarget(relid: Oid, attnum: AttrNumber) -> PgResult<Option<i16>>
+);
+
+seam_core::seam!(
+    // pg_type.typanalyze regproc for examine_attribute; InvalidOid = none.
+    pub fn pg_type_typanalyze(typid: Oid) -> PgResult<Oid>
 );
 
 seam_core::seam!(
@@ -582,6 +630,11 @@ seam_core::seam!(
 seam_core::seam!(
     // GetSysCacheHashValue1(TYPEOID, typid).
     pub fn syscache_hash_value_typeoid(typid: Oid) -> PgResult<u32>
+);
+
+seam_core::seam!(
+    // GetSysCacheHashValue1(PROCOID, funcid).
+    pub fn syscache_hash_value_procoid(funcid: Oid) -> PgResult<u32>
 );
 
 seam_core::seam!(

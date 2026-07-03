@@ -1,6 +1,7 @@
 //! fmgr wrappers (`fc_*`) + `FORMATTING_BUILTINS`. to_char/to_number/to_date/
 //! to_timestamp on the result-mcx convention. All strict (pg_proc default).
 
+use ::adt_timestamp::TIMESTAMP_NOT_FINITE;
 use ::datum::Datum;
 use ::numeric::Num;
 use ::types_core::Oid;
@@ -12,6 +13,7 @@ use ::types_fmgr::{
 
 use crate::dch_entry;
 use crate::num_entry;
+use crate::tables::NUM_MAX_ITEM_SIZ;
 
 pub fn fc_numeric_to_char(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: strict fn — args 0/1 are non-null numeric/text varlenas.
@@ -56,18 +58,23 @@ pub fn fc_float8_to_char(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRe
 pub fn fc_numeric_to_number(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: strict fn — args 0/1 are non-null text varlenas.
     let (val, fmt) = unsafe { (fcinfo.arg_varlena_packed(0), fcinfo.arg_varlena_packed(1)) };
-    let mcx = fcinfo.result_mcx();
-    // C returns NULL for empty/oversized fmt (PG_RETURN_NULL).
-    match num_entry::numeric_to_number(mcx, val.data(), fmt.data())? {
-        Some(img) => byref_result(mcx, img.as_bytes()),
-        None => Ok(fcinfo.return_null()),
+    // C: len <= 0 || len >= (INT_MAX)/NUM_MAX_ITEM_SIZ -> NULL.
+    let len = fmt.data().len();
+    if len == 0 || len >= (i32::MAX as usize) / NUM_MAX_ITEM_SIZ {
+        return Ok(fcinfo.return_null());
     }
+    let mcx = fcinfo.result_mcx();
+    let img = num_entry::numeric_to_number(mcx, val.data(), fmt.data())?;
+    byref_result(mcx, img.as_bytes())
 }
 
 pub fn fc_timestamp_to_char(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: strict fn — arg 1 is a non-null text varlena.
     let fmt = unsafe { fcinfo.arg_varlena_packed(1) };
     let ts = fcinfo.arg_i64(0);
+    if fmt.data().is_empty() || TIMESTAMP_NOT_FINITE(ts) {
+        return Ok(fcinfo.return_null());
+    }
     let mcx = fcinfo.result_mcx();
     Ok(varlena_result(dch_entry::timestamp_to_char(mcx, ts, fmt.data())?))
 }
@@ -76,6 +83,9 @@ pub fn fc_timestamptz_to_char(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) ->
     // SAFETY: strict fn — arg 1 is a non-null text varlena.
     let fmt = unsafe { fcinfo.arg_varlena_packed(1) };
     let ts = fcinfo.arg_i64(0);
+    if fmt.data().is_empty() || TIMESTAMP_NOT_FINITE(ts) {
+        return Ok(fcinfo.return_null());
+    }
     let mcx = fcinfo.result_mcx();
     Ok(varlena_result(dch_entry::timestamptz_to_char(mcx, ts, fmt.data())?))
 }
@@ -98,11 +108,11 @@ pub fn fc_interval_to_char(_f: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> P
     panic!("interval to_char (interval_to_char) not ported");
 }
 
-const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
+const fn b(foid: Oid, name: &'static str, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin {
         foid,
         name,
-        nargs,
+        nargs: 2,
         strict: true,
         retset: false,
         func,
@@ -110,15 +120,15 @@ const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrB
 }
 
 pub const FORMATTING_BUILTINS: &[FmgrBuiltin] = &[
-    b(1768, "interval_to_char", 2, fc_interval_to_char),
-    b(1770, "timestamptz_to_char", 2, fc_timestamptz_to_char),
-    b(1772, "numeric_to_char", 2, fc_numeric_to_char),
-    b(1773, "int4_to_char", 2, fc_int4_to_char),
-    b(1774, "int8_to_char", 2, fc_int8_to_char),
-    b(1775, "float4_to_char", 2, fc_float4_to_char),
-    b(1776, "float8_to_char", 2, fc_float8_to_char),
-    b(1777, "numeric_to_number", 2, fc_numeric_to_number),
-    b(1778, "to_timestamp", 2, fc_to_timestamp),
-    b(1780, "to_date", 2, fc_to_date),
-    b(2049, "timestamp_to_char", 2, fc_timestamp_to_char),
+    b(1768, "interval_to_char", fc_interval_to_char),
+    b(1770, "timestamptz_to_char", fc_timestamptz_to_char),
+    b(1772, "numeric_to_char", fc_numeric_to_char),
+    b(1773, "int4_to_char", fc_int4_to_char),
+    b(1774, "int8_to_char", fc_int8_to_char),
+    b(1775, "float4_to_char", fc_float4_to_char),
+    b(1776, "float8_to_char", fc_float8_to_char),
+    b(1777, "numeric_to_number", fc_numeric_to_number),
+    b(1778, "to_timestamp", fc_to_timestamp),
+    b(1780, "to_date", fc_to_date),
+    b(2049, "timestamp_to_char", fc_timestamp_to_char),
 ];

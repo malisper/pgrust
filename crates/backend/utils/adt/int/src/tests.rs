@@ -303,9 +303,91 @@ fn fmgr_wrappers_and_table() {
     let n = oids.len();
     oids.dedup();
     assert_eq!(n, oids.len());
-    assert_eq!(n, 85);
+    assert_eq!(n, 93);
     for b in INT_BUILTINS {
-        assert!(b.strict && !b.retset);
-        assert!(b.nargs == 1 || b.nargs == 2 || b.nargs == 5);
+        assert!(b.strict);
+        assert_eq!(b.retset, b.foid == 1066 || b.foid == 1067);
+        assert!(matches!(b.nargs, 1 | 2 | 3 | 5));
     }
+}
+
+#[test]
+fn generate_series_srf_value_per_call() {
+    use ::types_fmgr::{ExprDoneCond, ReturnSetInfo, SFRM_ValuePerCall};
+
+    let mut flinfo = FmgrInfo::new(fc_generate_series_step_int4, 1067, 2, true, true);
+    let mut rsinfo = ReturnSetInfo::new(SFRM_ValuePerCall);
+    let mut fci = LocalFcinfo::<2>::new(0);
+    fci.resultinfo = rsinfo.as_fmnode_ptr();
+    fci.set_arg(0, Datum::from_i32(1));
+    fci.set_arg(1, Datum::from_i32(3));
+
+    let mut out = Vec::new();
+    loop {
+        fci.isnull = false;
+        rsinfo.isDone = ExprDoneCond::ExprSingleResult;
+        let d = flinfo.invoke(&mut fci).unwrap();
+        if rsinfo.isDone == ExprDoneCond::ExprEndResult {
+            assert!(fci.isnull);
+            break;
+        }
+        assert_eq!(rsinfo.isDone, ExprDoneCond::ExprMultipleResult);
+        out.push(d.as_i32());
+    }
+    assert_eq!(out, [1, 2, 3]);
+    assert!(!flinfo.has_fn_extra(), "SRF_RETURN_DONE tears down the multi-call frame");
+
+    // Zero step errors before the frame is created.
+    let mut fci3 = LocalFcinfo::<3>::new(0);
+    fci3.resultinfo = rsinfo.as_fmnode_ptr();
+    fci3.set_arg(0, Datum::from_i32(1));
+    fci3.set_arg(1, Datum::from_i32(3));
+    fci3.set_arg(2, Datum::from_i32(0));
+    let mut flinfo3 = FmgrInfo::new(fc_generate_series_step_int4, 1066, 3, true, true);
+    let err = flinfo3.invoke(&mut fci3).unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_INVALID_PARAMETER_VALUE);
+    assert!(err.message().contains("step size cannot equal zero"));
+}
+
+#[test]
+fn generate_series_support_rows_estimate() {
+    use ::types_nodes::supportnodes::SupportRequestRows;
+    use ::types_nodes::{Node, NodeList};
+
+    let ctx = ::mcx::MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut args = NodeList::nil();
+    for v in [1i32, 10] {
+        args.lappend(
+            mcx,
+            Node::mk(
+                mcx,
+                ::types_nodes::Const {
+                    consttype: 23,
+                    consttypmod: -1,
+                    constcollid: 0,
+                    constlen: 4,
+                    constvalue: Datum::from_i32(v),
+                    constisnull: false,
+                    constbyval: true,
+                    location: -1,
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    }
+    let fe = Node::mk(
+        mcx,
+        ::types_nodes::FuncExpr { funcid: 1067, funcresulttype: 23, funcretset: true, args, ..Default::default() },
+    )
+    .unwrap();
+
+    let mut req = SupportRequestRows::new(1067, Some(fe));
+    let addr = core::ptr::from_mut(&mut req) as usize;
+    let mut fci = LocalFcinfo::<1>::new(0);
+    fci.set_arg(0, Datum::from_usize(addr));
+    let d = fc_generate_series_int4_support(None, &mut fci).unwrap();
+    assert_eq!(d.as_usize(), addr, "support fn claims the request");
+    assert_eq!(req.rows, 10.0);
 }

@@ -19,8 +19,43 @@ pub fn expr_type(node: Node<'_>) -> Oid {
         NodeTag::T_FuncExpr => node.as_func_expr().unwrap().funcresulttype,
         NodeTag::T_Aggref => node.as_aggref().unwrap().aggtype,
         NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resulttype,
+        NodeTag::T_SubLink => {
+            let (sl, tent) = sublink_first_col(node);
+            match sl.subLinkType {
+                types_nodes::SubLinkType::EXPR_SUBLINK => expr_type(tent.expect("EXPR").expr),
+                types_nodes::SubLinkType::ARRAY_SUBLINK => {
+                    deferred("exprType: ARRAY_SUBLINK", NodeTag::T_SubLink)
+                }
+                _ => types_core::catalog::BOOLOID,
+            }
+        }
+        NodeTag::T_SubPlan => {
+            let sp = node.as_sub_plan().unwrap();
+            match sp.subLinkType {
+                types_nodes::SubLinkType::EXPR_SUBLINK
+                | types_nodes::SubLinkType::ARRAY_SUBLINK
+                | types_nodes::SubLinkType::MULTIEXPR_SUBLINK => sp.firstColType,
+                _ => types_core::catalog::BOOLOID,
+            }
+        }
         other => deferred("exprType", other),
     }
+}
+
+// C exprType's untransformed-sublink elog is a panic here (parse always
+// rewrites subselect to a Query before any exprType consumer runs).
+fn sublink_first_col<'mcx>(
+    node: Node<'mcx>,
+) -> (&'mcx types_nodes::SubLink<'mcx>, Option<&'mcx types_nodes::TargetEntry<'mcx>>) {
+    let sl = node.as_sub_link().unwrap();
+    let tent = sl
+        .subselect
+        .as_query()
+        .unwrap_or_else(|| panic!("cannot get type for untransformed sublink"))
+        .targetList
+        .first()
+        .map(|n| n.as_target_entry().expect("tlist entry"));
+    (sl, tent)
 }
 
 pub fn expr_typmod(node: Node<'_>) -> i32 {
@@ -30,6 +65,20 @@ pub fn expr_typmod(node: Node<'_>) -> i32 {
         NodeTag::T_Param => node.as_param().unwrap().paramtypmod,
         NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resulttypmod,
         NodeTag::T_OpExpr | NodeTag::T_FuncExpr | NodeTag::T_Aggref => -1,
+        NodeTag::T_SubLink => {
+            let (sl, tent) = sublink_first_col(node);
+            match sl.subLinkType {
+                types_nodes::SubLinkType::EXPR_SUBLINK => expr_typmod(tent.expect("EXPR").expr),
+                _ => -1,
+            }
+        }
+        NodeTag::T_SubPlan => {
+            let sp = node.as_sub_plan().unwrap();
+            match sp.subLinkType {
+                types_nodes::SubLinkType::EXPR_SUBLINK => sp.firstColTypmod,
+                _ => -1,
+            }
+        }
         other => deferred("exprTypmod", other),
     }
 }
@@ -43,6 +92,25 @@ pub fn expr_collation(node: Node<'_>) -> Oid {
         NodeTag::T_FuncExpr => node.as_func_expr().unwrap().funccollid,
         NodeTag::T_Aggref => node.as_aggref().unwrap().aggcollid,
         NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resultcollid,
+        NodeTag::T_SubLink => {
+            let (sl, tent) = sublink_first_col(node);
+            match sl.subLinkType {
+                types_nodes::SubLinkType::EXPR_SUBLINK
+                | types_nodes::SubLinkType::ARRAY_SUBLINK => {
+                    expr_collation(tent.expect("EXPR/ARRAY").expr)
+                }
+                _ => 0,
+            }
+        }
+        NodeTag::T_SubPlan => {
+            let sp = node.as_sub_plan().unwrap();
+            match sp.subLinkType {
+                types_nodes::SubLinkType::EXPR_SUBLINK
+                | types_nodes::SubLinkType::ARRAY_SUBLINK
+                | types_nodes::SubLinkType::MULTIEXPR_SUBLINK => sp.firstColCollation,
+                _ => 0,
+            }
+        }
         other => deferred("exprCollation", other),
     }
 }
@@ -93,6 +161,7 @@ pub fn expr_location(node: Node<'_>) -> ParseLoc {
         NodeTag::T_ColumnRef => node.as_column_ref().unwrap().location,
         NodeTag::T_ParamRef => node.as_param_ref().unwrap().location,
         NodeTag::T_ResTarget => node.as_res_target().unwrap().location,
+        NodeTag::T_SubLink => node.as_sub_link().unwrap().location,
         other => deferred("exprLocation", other),
     }
 }

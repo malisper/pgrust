@@ -40,6 +40,15 @@ thread_local! {
     static FE_BE_WAIT_SET: Cell<Option<WaitEventSetHandle>> = const { Cell::new(None) };
     // static List *sock_paths (postmaster-thread state).
     static SOCK_PATHS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    // Live (sock, noblock, ssl_in_use), the transport's runtime truth.
+    // INVARIANT: the send/recv path reads these, never MyProcPort — a FATAL
+    // raised under WithMyProcPort (auth) sends to the client; a RefCell
+    // re-borrow there panics the backend. Port.sock/noblock stay pq_init-time.
+    static CLIENT_STATE: Cell<Option<(pgsocket, bool, bool)>> = const { Cell::new(None) };
+}
+
+pub fn client_socket_state() -> Option<(pgsocket, bool, bool)> {
+    CLIENT_STATE.get()
 }
 
 // GUC storage declared in pqcomm.c; boot values from guc_tables.c.
@@ -145,6 +154,8 @@ pub fn pq_init(client_sock: &ClientSocket) -> PgResult<Port> {
 
     crate::pq_init_buffers()?;
 
+    CLIENT_STATE.set(Some((port.sock, port.noblock, port.ssl_in_use)));
+
     ipc_seams::on_proc_exit::call(socket_close, 0);
 
     // The socket runs in nonblocking mode from here on; latches provide the
@@ -193,22 +204,17 @@ pub fn pq_init(client_sock: &ClientSocket) -> PgResult<Port> {
 
 // on_proc_exit hook: stop I/O but leave the fd open until process death.
 fn socket_close(_code: i32, _arg: usize) {
-    if g::HaveMyProcPort() {
-        g::WithMyProcPort(|port| {
-            assert!(
-                !port.ssl_in_use,
-                "socket_close: secure_close TLS arm is unported"
-            );
-            port.sock = PGINVALID_SOCKET;
-        });
+    if let Some((_, noblock, ssl_in_use)) = CLIENT_STATE.get() {
+        assert!(!ssl_in_use, "socket_close: secure_close TLS arm is unported");
+        CLIENT_STATE.set(Some((PGINVALID_SOCKET, noblock, ssl_in_use)));
     }
 }
 
 fn set_port_noblock(noblock: bool) -> bool {
-    if !g::HaveMyProcPort() {
+    let Some((sock, _, ssl_in_use)) = CLIENT_STATE.get() else {
         return false;
-    }
-    g::WithMyProcPort(|port| port.noblock = noblock);
+    };
+    CLIENT_STATE.set(Some((sock, noblock, ssl_in_use)));
     true
 }
 

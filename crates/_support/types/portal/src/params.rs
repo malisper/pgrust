@@ -16,6 +16,32 @@ pub struct ParamExternData {
     pub ptype: Oid,
 }
 
+// C params.h ParamExecData; exec_plan = `void *execPlan` presence bit (write side: nodeSubplan.c lane).
+#[derive(Clone, Copy, Debug)]
+pub struct ParamExecData {
+    pub value: Datum,
+    pub isnull: bool,
+    pub exec_plan: bool,
+}
+
+impl ParamExecData {
+    pub const EMPTY: ParamExecData =
+        ParamExecData { value: Datum::null(), isnull: true, exec_plan: false };
+}
+
+// Resolve-once compile binding (execexpr's AggBind precedent); both arrays are address-stable.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ParamBind<'a> {
+    pub extern_params: Option<&'a [ParamExternData]>,
+    pub exec_vals: Option<core::ptr::NonNull<ParamExecData>>,
+    pub n_exec: u32,
+}
+
+impl ParamBind<'_> {
+    pub const NONE: ParamBind<'static> =
+        ParamBind { extern_params: None, exec_vals: None, n_exec: 0 };
+}
+
 #[derive(Clone, Copy)]
 struct Entry {
     ptr: *const ParamExternData,
@@ -68,6 +94,14 @@ fn lookup(h: ParamListHandle) -> Entry {
         Some(e) if e.generation == generation => e,
         _ => panic!("params: stale ParamListHandle {h:?} (freed)"),
     }
+}
+
+/// # Safety
+/// The borrow must not outlive the register/[`free`] window (the portal outlives one execution).
+pub unsafe fn resolve<'a>(h: ParamListHandle) -> &'a [ParamExternData] {
+    let e = lookup(h);
+    // SAFETY: register()'s liveness contract, narrowed by the caller's bound.
+    unsafe { core::slice::from_raw_parts(e.ptr, e.len) }
 }
 
 pub fn with<R>(h: ParamListHandle, f: impl FnOnce(&[ParamExternData]) -> R) -> R {

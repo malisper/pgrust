@@ -823,9 +823,15 @@ fn AbortTransaction(xp: XsPtr) -> PgResult<()> {
         catalog_index_seams::reset_reindex_state::call(xp.with(|s| s.current().nesting_level));
     }
 
-    logical_seams::reset_logical_streaming_state::call();
+    // No logical decoding can be in progress while reorderbuffer is unported; guarded.
+    if logical_seams::reset_logical_streaming_state::is_installed() {
+        logical_seams::reset_logical_streaming_state::call();
+    }
 
-    snapbuild_seams::snap_build_reset_exported_snapshot_state::call();
+    // No exported logical snapshot can exist while snapbuild is unported; guarded.
+    if snapbuild_seams::snap_build_reset_exported_snapshot_state::is_installed() {
+        snapbuild_seams::snap_build_reset_exported_snapshot_state::call();
+    }
 
     parallel_seams::at_eoxact_parallel::call(false)?;
     xp.with(|s| {
@@ -1966,7 +1972,10 @@ fn AbortSubTransaction() -> PgResult<()> {
         catalog_index_seams::reset_reindex_state::call(xs(|s| s.current().nesting_level));
     }
 
-    logical_seams::reset_logical_streaming_state::call();
+    // No logical decoding can be in progress while reorderbuffer is unported; guarded.
+    if logical_seams::reset_logical_streaming_state::is_installed() {
+        logical_seams::reset_logical_streaming_state::call();
+    }
 
 
     let (my, parent) = subxact_ids();

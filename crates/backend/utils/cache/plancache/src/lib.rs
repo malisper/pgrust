@@ -3,8 +3,10 @@
 // loud). CachedPlan.refcount IS C's refcount. Divergences (each loud or
 // vacuously equal until its lane lands): raw parse trees are not retained
 // (classification bits captured at create; the invalidated-replan arm panics),
-// query-side invalItems are not collected (record_plan_function_dependency
-// panics on unpinned funcids repo-wide), RLS fields are constant-false.
+// query-side (source) invalItems are not collected — the generic plan's
+// invalItems (recorded by setrefs) carry the function dependency and drive
+// PlanCacheObjectCallback's generic-plan arm; source invalidation would force
+// re-analysis (the replan arm), RLS fields are constant-false.
 #![allow(non_snake_case)]
 
 use core::cell::RefCell;
@@ -1138,7 +1140,7 @@ pub fn PlanCacheRelCallback(_arg: Datum, relid: Oid) {
     // cached_expression_list is provably empty: GetCachedExpression defers loud.
 }
 
-pub fn PlanCacheObjectCallback(_arg: Datum, _cacheid: i32, _hashvalue: u32) {
+pub fn PlanCacheObjectCallback(_arg: Datum, cacheid: i32, hashvalue: u32) {
     with_cache(|pc| {
         for i in 0..pc.saved_plan_list.len() {
             let h = pc.saved_plan_list[i];
@@ -1147,25 +1149,32 @@ pub fn PlanCacheObjectCallback(_arg: Datum, _cacheid: i32, _hashvalue: u32) {
                 if !src.is_valid || !src.requires_reval {
                     continue;
                 }
+                // Source-side invalItems are uncollected: matching them would
+                // invalidate the querytree, forcing re-analysis (the replan arm
+                // needing the retained raw tree). The generic-plan scan below
+                // re-plans the analyzed querytree, covering function redefinition.
                 src.gplan
             };
-            // Source-side invalItems are never collected (header comment), so
-            // the querytree scan is C's vacuous empty-list walk. The generic
-            // plan's list must match; a populated one means the planner's
-            // inval lane landed without this arm.
-            if let Some(gplan) = gplan {
-                let plan = plan_mut(pc, gplan);
-                if plan.is_valid
-                    && plan.stmt_list.iter().any(|stmt| !stmt.invalItems.is_nil())
-                {
-                    panic!(
-                        "PlanCacheObjectCallback (plancache.c): PlanInvalItem match \
-                         needs the setrefs inval lane"
-                    );
-                }
+            let Some(gplan) = gplan else { continue };
+            let plan = plan_mut(pc, gplan);
+            if plan.is_valid && stmt_list_matches_inval(plan.stmt_list, cacheid, hashvalue) {
+                plan.is_valid = false;
             }
         }
     });
+    // cached_expression_list is provably empty: GetCachedExpression defers loud.
+}
+
+// hashvalue == 0 matches every entry of the cache (C's cacheid-wide inval).
+fn stmt_list_matches_inval(stmt_list: &[PlannedStmt<'_>], cacheid: i32, hashvalue: u32) -> bool {
+    stmt_list.iter().any(|stmt| {
+        stmt.commandType != CmdType::CMD_UTILITY
+            && stmt.invalItems.iter().any(|node| {
+                let item =
+                    node.as_plan_inval_item().expect("invalItems holds PlanInvalItem");
+                item.cacheId == cacheid && (hashvalue == 0 || item.hashValue == hashvalue)
+            })
+    })
 }
 
 pub fn PlanCacheSysCallback(_arg: Datum, _cacheid: i32, _hashvalue: u32) {

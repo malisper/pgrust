@@ -1,6 +1,7 @@
 // exec_parse/bind/execute/describe_message — the extended-query protocol
-// (postgres.c). Loud arms: binary-format parameter decode (typreceive fc ABI),
-// BuildParamLogString (log_parameter_max_length_on_error != 0).
+// (postgres.c). Binary-format params decode through the typreceive fc ABI
+// (types_fmgr::wire). Loud arm: BuildParamLogString
+// (log_parameter_max_length_on_error != 0).
 use core::cell::Cell;
 use std::ffi::CStr;
 
@@ -11,9 +12,9 @@ use ::stringinfo::StringInfo;
 use ::types_core::{Oid, OidIsValid};
 use ::types_dest::CommandDest;
 use ::types_error::{
-    PgResult, ERRCODE_INDETERMINATE_DATATYPE, ERRCODE_INVALID_PARAMETER_VALUE,
-    ERRCODE_IN_FAILED_SQL_TRANSACTION, ERRCODE_PROTOCOL_VIOLATION, ERRCODE_SYNTAX_ERROR,
-    ERRCODE_UNDEFINED_CURSOR, ERRCODE_UNDEFINED_PSTATEMENT, ERROR, LOG,
+    PgResult, ERRCODE_INDETERMINATE_DATATYPE, ERRCODE_INVALID_BINARY_REPRESENTATION,
+    ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_IN_FAILED_SQL_TRANSACTION, ERRCODE_PROTOCOL_VIOLATION,
+    ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_CURSOR, ERRCODE_UNDEFINED_PSTATEMENT, ERROR, LOG,
 };
 use ::types_nodes::nodes_enums::CmdType;
 use ::types_nodes::parsenodes::Query;
@@ -425,13 +426,37 @@ pub fn exec_bind_message<'mcx>(
                     types_fmgr::input_function_call(&mut finfo, cstr, typioparam, -1, pmcx)?
                 }
                 1 => {
-                    let (typreceive, _typioparam) =
+                    let (typreceive, typioparam) =
                         lsyscache::typ::getTypeBinaryInputInfo(ptype)?;
-                    panic!(
-                        "exec_bind_message (postgres.c:1930): binary-format parameter \
-                         decode needs the typreceive fc ABI (fmgr recv lane; typreceive \
-                         oid {typreceive})"
-                    );
+                    let mut finfo = fmgr_seams::fmgr_info::call(typreceive)?;
+                    if is_null {
+                        types_fmgr::receive_function_call(&mut finfo, None, typioparam, -1, pmcx)?
+                    } else {
+                        let raw =
+                            pqformat::pq_getmsgbytes(input_message, plength as usize)?;
+                        // C's initReadOnlyStringInfo aliases the message buffer;
+                        // no read-only StringInfo here, so copy the param bytes.
+                        let mut pbuf = StringInfo::with_capacity_in(pmcx, plength as usize + 1)?;
+                        pbuf.append_bytes(raw)?;
+                        let pval = types_fmgr::receive_function_call(
+                            &mut finfo,
+                            Some(&mut pbuf),
+                            typioparam,
+                            -1,
+                            pmcx,
+                        )?;
+                        if pbuf.cursor != pbuf.len() {
+                            return Err(ereport(ERROR)
+                                .errcode(ERRCODE_INVALID_BINARY_REPRESENTATION)
+                                .errmsg(format!(
+                                    "incorrect binary data format in bind parameter {}",
+                                    paramno + 1
+                                ))
+                                .into_error()
+                                .into());
+                        }
+                        pval
+                    }
                 }
                 other => {
                     return Err(ereport(ERROR)

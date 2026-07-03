@@ -58,7 +58,7 @@ impl<'mcx> ScanNode<'mcx> for SeqScanState<'mcx> {
             let snapshot = estate.es_snapshot.clone();
             self.ss.ss_currentScanDesc = Some(table_beginscan(
                 mcx,
-                &self.ss.ss_currentRelation,
+                self.ss.ss_currentRelation.as_ref().expect("seqscan has a relation"),
                 snapshot,
                 0,
                 PgVec::new_in(mcx),
@@ -152,12 +152,12 @@ pub fn exec_init_seq_scan_rel<'mcx>(
         ps_ProjInfo: None,
         ps_ExprContext,
         scanrelid: node.scan.scanrelid,
-        ss_currentRelation: rel,
+        ss_currentRelation: Some(rel),
         ss_currentScanDesc: None,
         ss_ScanTupleSlot,
     };
     execscan::exec_assign_scan_projection_info(mcx, estate, &mut ss, &node.scan.plan.targetlist)?;
-    ss.qual = exec_init_qual(mcx, &node.scan.plan.qual)?;
+    ss.qual = exec_init_qual(mcx, &node.scan.plan.qual, estate.param_bind())?;
 
     // es_epq_active selection arm lands with execMain's EPQState.
     let variant = match (ss.qual.is_some(), ss.ps_ProjInfo.is_some()) {

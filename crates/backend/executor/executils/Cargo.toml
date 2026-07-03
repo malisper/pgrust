@@ -14,6 +14,7 @@ types_slot = { path = "../../../_support/types/types_slot" }
 types_tuple = { path = "../../../_support/types/types_tuple" }
 types_rel = { path = "../../../_support/types/rel" }
 types_nodes = { path = "../../../_support/types/nodes" }
+types_portal = { path = "../../../_support/types/portal" }
 table = { path = "../../access/table/table" }
 lmgr_seams = { path = "../../storage/lmgr/lmgr_seams" }
 exectuples = { path = "../exectuples" }

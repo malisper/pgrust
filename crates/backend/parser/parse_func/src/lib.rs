@@ -114,13 +114,10 @@ pub fn ParseFuncOrColumn<'mcx>(
 
             check_exact_arg_types(funcid, actual_arg_types, rettype);
             if retset {
-                panic!(
-                    "ParseFuncOrColumn (parse_func.c): set-returning function needs \
-                     check_srf_call_placement — unit backend-parser-func"
-                );
+                check_srf_call_placement(pstate, _last_srf, location)?;
             }
 
-            Node::mk(
+            let retval = Node::mk(
                 mcx,
                 FuncExpr {
                     funcid,
@@ -133,7 +130,11 @@ pub fn ParseFuncOrColumn<'mcx>(
                     args: fargs,
                     location,
                 },
-            )
+            )?;
+            if retset {
+                pstate.p_last_srf = Some(retval);
+            }
+            Ok(retval)
         }
         FuncDetail::Aggregate { funcid, rettype, retset } => {
             let aggshape = syscache_seams::lookup_pg_aggregate_shape::call(funcid)?
@@ -275,6 +276,47 @@ fn func_get_detail(
         PROKIND_WINDOW => FuncDetail::WindowFunc { funcid },
         other => panic!("unrecognized prokind: {other} (parse_func.c func_get_detail)"),
     })
+}
+
+// check_srf_call_placement, FROM_FUNCTION arm only: every other expr kind's
+// SRF handling belongs to the ProjectSet/targetlist-SRF lane and stays loud.
+// DIVERGENCE: the nested-SRF errposition points at this call, not the inner
+// SRF (exprLocation walker unported).
+fn check_srf_call_placement(
+    pstate: &ParseState<'_, '_>,
+    last_srf: Option<Node<'_>>,
+    location: ParseLoc,
+) -> PgResult<()> {
+    use parser_small1::ParseExprKind;
+    match pstate.p_expr_kind {
+        ParseExprKind::EXPR_KIND_FROM_FUNCTION => {
+            let same = match (pstate.p_last_srf, last_srf) {
+                (None, None) => true,
+                (Some(a), Some(b)) => a.ptr_eq(b),
+                _ => false,
+            };
+            if !same {
+                let encoding = mbutils::GetDatabaseEncoding();
+                return Err(Box::new(
+                    ereport(ERROR)
+                        .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                        .errmsg("set-returning functions must appear at top level of FROM")
+                        .errposition(parser_errposition(pstate, location, encoding))
+                        .into_error()
+                        .with_error_location(ErrorLocation::new(
+                            "parse_func.c",
+                            0,
+                            "check_srf_call_placement",
+                        )),
+                ));
+            }
+            Ok(())
+        }
+        other => panic!(
+            "check_srf_call_placement (parse_func.c): SRF in {other:?} — only the \
+             FROM_FUNCTION arm is ported (targetlist SRFs are the ProjectSet lane)"
+        ),
+    }
 }
 
 // enforce_generic_type_consistency + make_fn_arguments on the exact-match

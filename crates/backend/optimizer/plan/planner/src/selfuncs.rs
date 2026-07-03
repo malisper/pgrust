@@ -1,7 +1,11 @@
-//! selfuncs.c slice: eqsel over Var-op-Const with no pg_statistic tuple,
-//! plus btcostestimate/genericcostestimate; a live stats tuple panics.
+//! selfuncs.c slice: eqsel/scalarineqsel over Var-op-Const with pg_statistic
+//! consumption (MCV + histogram), plus btcostestimate/genericcostestimate.
 
+use datum::Datum;
+use syscache_seams::{PgStatisticBundle, PgStatisticSlotData};
+use types_core::Oid;
 use types_error::PgResult;
+use types_fmgr::FmgrInfo;
 use types_nodes::parsenodes::RTEKind;
 use types_nodes::{Node, NodeTag};
 use types_pathnodes::{NodeId, PathNode, RelId, RinfoId, JOIN_INNER};
@@ -17,33 +21,306 @@ const BOOLOID: u32 = 16;
 const SELF_ITEM_POINTER_ATTRIBUTE_NUMBER: i16 = -1;
 const TABLE_OID_ATTRIBUTE_NUMBER: i16 = -6;
 
+pub const STATISTIC_KIND_MCV: i16 = 1;
+pub const STATISTIC_KIND_HISTOGRAM: i16 = 2;
+pub const STATISTIC_KIND_CORRELATION: i16 = 3;
+
 fn clamp_probability(p: f64) -> f64 {
     p.clamp(0.0, 1.0)
 }
 
-// VariableStatData (selfuncs.h); statsTuple is absent on this lane.
-pub struct VariableStatData {
+// VariableStatData (selfuncs.h); `stats` is the decoded statsTuple.
+// statistic_proc_security_check (pg_class_aclcheck) reduces to true on this
+// single-role substrate, so acl_ok is not modeled.
+pub struct VariableStatData<'mcx> {
     pub var: Option<NodeId>,
     pub rel: Option<RelId>,
     pub vartype: u32,
     pub isunique: bool,
+    pub stats: Option<PgStatisticBundle<'mcx>>,
 }
 
-// scalarltsel/scalargtsel family (selfuncs.c), no-statsTuple arm: without a
-// pg_statistic row the mcv/histogram fractions are absent and C lands on
-// DEFAULT_INEQ_SEL; a live stats tuple panics inside examine_variable.
+impl<'mcx> VariableStatData<'mcx> {
+    fn nullfrac(&self) -> f64 {
+        self.stats.as_ref().map_or(0.0, |s| s.stanullfrac as f64)
+    }
+
+    fn slot(&self, kind: i16, reqop: Oid) -> Option<&PgStatisticSlotData<'mcx>> {
+        self.stats.as_ref().and_then(|s| {
+            s.slots
+                .iter()
+                .find(|sl| sl.kind == kind && (reqop == 0 || sl.staop == reqop))
+        })
+    }
+}
+
+fn opproc_for(operator: Oid) -> PgResult<FmgrInfo> {
+    let opcode = lsyscache::get_opcode(operator)?;
+    fmgr_core::fmgr_info(opcode)
+}
+
+fn op_test(
+    opproc: &mut FmgrInfo,
+    collation: Oid,
+    slot_value: Datum,
+    constval: Datum,
+    varonleft: bool,
+) -> PgResult<bool> {
+    let (a0, a1) = if varonleft { (slot_value, constval) } else { (constval, slot_value) };
+    Ok(types_fmgr::function_call2_coll(opproc, collation, a0, a1)?.as_bool())
+}
+
+// scalarltsel/scalarlesel/scalargtsel/scalargesel via scalarineqsel_wrapper
+// (selfuncs.c).
 pub fn scalarineqsel_wrapper<'mcx>(
     run: &mut PlannerRun<'mcx>,
+    operator: Oid,
     args: &[NodeId],
     varrelid: i32,
+    collation: Oid,
+    isgt: bool,
+    iseq: bool,
 ) -> PgResult<f64> {
-    let Some((_vardata, other, _varonleft)) = get_restriction_variable(run, args, varrelid)?
+    let mut operator = operator;
+    let mut isgt = isgt;
+    let Some((vardata, other, varonleft)) = get_restriction_variable(run, args, varrelid)?
     else {
         return Ok(DEFAULT_INEQ_SEL);
     };
-    match other.as_const() {
-        Some(c) if c.constisnull => Ok(0.0),
-        _ => Ok(DEFAULT_INEQ_SEL),
+    let Some(c) = other.as_const() else {
+        return Ok(DEFAULT_INEQ_SEL);
+    };
+    if c.constisnull {
+        return Ok(0.0);
+    }
+    if !varonleft {
+        operator = lsyscache::get_commutator(operator)?;
+        if operator == 0 {
+            return Ok(DEFAULT_INEQ_SEL);
+        }
+        isgt = !isgt;
+    }
+    scalarineqsel(
+        run,
+        operator,
+        isgt,
+        iseq,
+        collation,
+        &vardata,
+        c.constvalue,
+        c.consttype,
+    )
+}
+
+// scalarineqsel (selfuncs.c). The C no-stats CTID arm (block-position
+// estimate) keeps this port's pre-existing DEFAULT_INEQ_SEL shape.
+fn scalarineqsel<'mcx>(
+    run: &PlannerRun<'mcx>,
+    operator: Oid,
+    isgt: bool,
+    iseq: bool,
+    collation: Oid,
+    vardata: &VariableStatData<'mcx>,
+    constval: Datum,
+    consttype: Oid,
+) -> PgResult<f64> {
+    if vardata.stats.is_none() {
+        return Ok(DEFAULT_INEQ_SEL);
+    }
+    let stanullfrac = vardata.nullfrac();
+    let mut opproc = opproc_for(operator)?;
+
+    let (mcv_selec, sumcommon) =
+        mcv_selectivity(run, vardata, &mut opproc, collation, constval, true)?;
+    let hist_selec = ineq_histogram_selectivity(
+        run, vardata, operator, &mut opproc, isgt, iseq, collation, constval, consttype,
+    )?;
+
+    let mut selec = 1.0 - stanullfrac - sumcommon;
+    if hist_selec >= 0.0 {
+        selec *= hist_selec;
+    } else {
+        selec *= 0.5;
+    }
+    selec += mcv_selec;
+    Ok(clamp_probability(selec))
+}
+
+// mcv_selectivity (selfuncs.c); returns (mcv_selec, sumcommon).
+fn mcv_selectivity<'mcx>(
+    _run: &PlannerRun<'mcx>,
+    vardata: &VariableStatData<'mcx>,
+    opproc: &mut FmgrInfo,
+    collation: Oid,
+    constval: Datum,
+    varonleft: bool,
+) -> PgResult<(f64, f64)> {
+    let mut mcv_selec = 0.0;
+    let mut sumcommon = 0.0;
+    if let Some(sslot) = vardata.slot(STATISTIC_KIND_MCV, 0) {
+        for (i, &v) in sslot.values.iter().enumerate() {
+            if op_test(opproc, collation, v, constval, varonleft)? {
+                mcv_selec += sslot.numbers[i] as f64;
+            }
+            sumcommon += sslot.numbers[i] as f64;
+        }
+    }
+    Ok((mcv_selec, sumcommon))
+}
+
+// get_actual_variable_range (selfuncs.c): the index-backed endpoint probe;
+// with no indexes on the rel C returns false without probing.
+fn get_actual_variable_range(run: &PlannerRun<'_>, vardata: &VariableStatData<'_>) -> bool {
+    let Some(rel) = vardata.rel else { return false };
+    if run.root.rel(rel).indexlist.is_empty() {
+        return false;
+    }
+    panic!("get_actual_variable_range (selfuncs.c): index-backed range probe; M2 lane");
+}
+
+// ineq_histogram_selectivity (selfuncs.c); -1 means no usable histogram.
+#[allow(clippy::too_many_arguments)]
+fn ineq_histogram_selectivity<'mcx>(
+    run: &PlannerRun<'mcx>,
+    vardata: &VariableStatData<'mcx>,
+    opoid: Oid,
+    opproc: &mut FmgrInfo,
+    isgt: bool,
+    iseq: bool,
+    collation: Oid,
+    constval: Datum,
+    consttype: Oid,
+) -> PgResult<f64> {
+    let mut hist_selec = -1.0f64;
+    let Some(sslot) = vardata.slot(STATISTIC_KIND_HISTOGRAM, 0) else {
+        return Ok(hist_selec);
+    };
+    let nvalues = sslot.values.len() as i32;
+    if nvalues > 1
+        && sslot.stacoll == collation
+        && lsyscache::comparison_ops_are_compatible(sslot.staop, opoid)?
+    {
+        let have_end = if nvalues == 2 {
+            get_actual_variable_range(run, vardata)
+        } else {
+            false
+        };
+        let mut lobound = 0i32;
+        let mut hibound = nvalues;
+        while lobound < hibound {
+            let probe = (lobound + hibound) / 2;
+            if (probe == 0 || probe == nvalues - 1) && nvalues > 2 {
+                // Endpoint replacement rides get_actual_variable_range.
+                let _ = get_actual_variable_range(run, vardata);
+            }
+            let mut ltcmp = op_test(opproc, collation, sslot.values[probe as usize], constval, true)?;
+            if isgt {
+                ltcmp = !ltcmp;
+            }
+            if ltcmp {
+                lobound = probe + 1;
+            } else {
+                hibound = probe;
+            }
+        }
+
+        let histfrac;
+        if lobound <= 0 {
+            histfrac = 0.0;
+        } else if lobound >= nvalues {
+            histfrac = 1.0;
+        } else {
+            let i = lobound;
+            let mut eq_selec = 0.0;
+            if i == 1 || isgt == iseq {
+                let mut otherdistinct = get_variable_numdistinct(run, vardata).0;
+                if let Some(mcvslot) = vardata.slot(STATISTIC_KIND_MCV, 0) {
+                    otherdistinct -= mcvslot.numbers.len() as f64;
+                }
+                if otherdistinct > 1.0 {
+                    eq_selec = 1.0 / otherdistinct;
+                }
+            }
+
+            let binfrac = match (
+                convert_numeric_to_scalar(constval, consttype),
+                convert_numeric_to_scalar(sslot.values[i as usize - 1], vardata.vartype),
+                convert_numeric_to_scalar(sslot.values[i as usize], vardata.vartype),
+            ) {
+                (Some(val), Some(low), Some(high)) => {
+                    if high <= low {
+                        0.5
+                    } else if val <= low {
+                        0.0
+                    } else if val >= high {
+                        1.0
+                    } else {
+                        let b = (val - low) / (high - low);
+                        if b.is_nan() || !(0.0..=1.0).contains(&b) { 0.5 } else { b }
+                    }
+                }
+                _ => 0.5,
+            };
+
+            let mut frac = (i - 1) as f64 + binfrac;
+            frac /= (nvalues - 1) as f64;
+            if i == 1 {
+                frac += eq_selec * (1.0 - binfrac);
+            }
+            if isgt == iseq {
+                frac -= eq_selec;
+            }
+            histfrac = frac;
+        }
+
+        hist_selec = if isgt { 1.0 - histfrac } else { histfrac };
+
+        if have_end {
+            hist_selec = clamp_probability(hist_selec);
+        } else {
+            let cutoff = 0.01 / (nvalues - 1) as f64;
+            hist_selec = hist_selec.clamp(cutoff, 1.0 - cutoff);
+        }
+    } else if nvalues > 1 {
+        let mut nmatch = 0;
+        for &v in sslot.values.iter() {
+            if op_test(opproc, collation, v, constval, true)? {
+                nmatch += 1;
+            }
+        }
+        hist_selec = nmatch as f64 / nvalues as f64;
+        let cutoff = 0.01 / (nvalues - 1) as f64;
+        hist_selec = hist_selec.clamp(cutoff, 1.0 - cutoff);
+    }
+    Ok(hist_selec)
+}
+
+// convert_to_scalar (selfuncs.c), numeric-category arm only. Strings/bytea/
+// time categories (convert_string_to_scalar etc.) fall back to None, which
+// lands on C's binfrac=0.5 failure path — a divergence for those types.
+fn convert_numeric_to_scalar(value: Datum, typid: Oid) -> Option<f64> {
+    const INT2OID: Oid = 21;
+    const INT4OID: Oid = 23;
+    const INT8OID: Oid = 20;
+    const FLOAT4OID: Oid = 700;
+    const FLOAT8OID: Oid = 701;
+    const OIDOID: Oid = 26;
+    const REGPROCOID: Oid = 24;
+    const REGPROCEDUREOID: Oid = 2202;
+    const REGOPEROID: Oid = 2203;
+    const REGOPERATOROID: Oid = 2204;
+    const REGCLASSOID: Oid = 2205;
+    const REGTYPEOID: Oid = 2206;
+    match typid {
+        BOOLOID => Some(value.as_bool() as i32 as f64),
+        INT2OID => Some(value.as_i16() as f64),
+        INT4OID => Some(value.as_i32() as f64),
+        INT8OID => Some(value.as_i64() as f64),
+        FLOAT4OID => Some(value.as_f32() as f64),
+        FLOAT8OID => Some(value.as_f64()),
+        OIDOID | REGPROCOID | REGPROCEDUREOID | REGOPEROID | REGOPERATOROID | REGCLASSOID
+        | REGTYPEOID => Some(value.as_u32() as f64),
+        _ => None,
     }
 }
 
@@ -54,22 +331,55 @@ pub fn eqsel<'mcx>(
     varrelid: i32,
     collation: u32,
 ) -> PgResult<f64> {
-    let _ = collation;
     let Some((vardata, other, varonleft)) = get_restriction_variable(run, args, varrelid)? else {
         return Ok(DEFAULT_EQ_SEL);
     };
-    let _ = varonleft;
     let selec = match other.as_const() {
-        Some(c) => var_eq_const(run, &vardata, operator, c.constisnull)?,
-        None => panic!("var_eq_non_const (selfuncs.c): M2 selfuncs lane"),
+        Some(c) => var_eq_const(
+            run,
+            &vardata,
+            operator,
+            collation,
+            c.constvalue,
+            c.constisnull,
+            varonleft,
+        )?,
+        None => var_eq_non_const(run, &vardata),
     };
     Ok(selec)
+}
+
+// var_eq_non_const (selfuncs.c), negate=false (neqsel is unported).
+fn var_eq_non_const(run: &PlannerRun<'_>, vardata: &VariableStatData<'_>) -> f64 {
+    let nullfrac = vardata.nullfrac();
+    let selec = if vardata.isunique
+        && vardata.rel.is_some_and(|r| run.root.rel(r).tuples >= 1.0)
+    {
+        1.0 / run.root.rel(vardata.rel.unwrap()).tuples
+    } else if vardata.stats.is_some() {
+        let mut selec = 1.0 - nullfrac;
+        let nd = get_variable_numdistinct(run, vardata).0;
+        if nd > 1.0 {
+            selec /= nd;
+        }
+        if let Some(sslot) = vardata.slot(STATISTIC_KIND_MCV, 0) {
+            if let Some(&first) = sslot.numbers.first() {
+                if selec > first as f64 {
+                    selec = first as f64;
+                }
+            }
+        }
+        selec
+    } else {
+        1.0 / get_variable_numdistinct(run, vardata).0
+    };
+    clamp_probability(selec)
 }
 fn get_restriction_variable<'mcx>(
     run: &mut PlannerRun<'mcx>,
     args: &[NodeId],
     varrelid: i32,
-) -> PgResult<Option<(VariableStatData, Node<'mcx>, bool)>> {
+) -> PgResult<Option<(VariableStatData<'mcx>, Node<'mcx>, bool)>> {
     if args.len() != 2 {
         return Ok(None);
     }
@@ -78,14 +388,16 @@ fn get_restriction_variable<'mcx>(
     let vardata = examine_variable(run, args[0], left, varrelid)?;
     let rdata = examine_variable(run, args[1], right, varrelid)?;
 
+    // estimate_expression_value: Consts pass through and a PARAM_EXEC stays a
+    // Param (no bound value at plan time); other shapes keep the loud arm.
     if vardata.rel.is_some() && rdata.rel.is_none() {
-        if right.node_tag() != NodeTag::T_Const {
+        if !matches!(right.node_tag(), NodeTag::T_Const | NodeTag::T_Param) {
             panic!("estimate_expression_value (clauses.c): M2 expression lane");
         }
         return Ok(Some((vardata, right, true)));
     }
     if vardata.rel.is_none() && rdata.rel.is_some() {
-        if left.node_tag() != NodeTag::T_Const {
+        if !matches!(left.node_tag(), NodeTag::T_Const | NodeTag::T_Param) {
             panic!("estimate_expression_value (clauses.c): M2 expression lane");
         }
         return Ok(Some((rdata, left, false)));
@@ -99,9 +411,10 @@ pub fn examine_variable<'mcx>(
     node_id: NodeId,
     node: Node<'mcx>,
     varrelid: i32,
-) -> PgResult<VariableStatData> {
+) -> PgResult<VariableStatData<'mcx>> {
     let (vartype, _) = crate::costsize::expr_type_typmod(node);
-    let mut vardata = VariableStatData { var: None, rel: None, vartype, isunique: false };
+    let mut vardata =
+        VariableStatData { var: None, rel: None, vartype, isunique: false, stats: None };
 
     if let Some(var) = node.as_var() {
         if varrelid == 0 || varrelid == var.varno {
@@ -109,49 +422,55 @@ pub fn examine_variable<'mcx>(
             vardata.var = Some(node_id);
             vardata.rel = Some(rel);
             vardata.isunique = crate::plancat::has_unique_index(run, rel, var.varattno);
-            examine_simple_variable(run, var.varno, var.varattno)?;
+            vardata.stats = examine_simple_variable(run, var.varno, var.varattno)?;
             return Ok(vardata);
         }
         panic!("examine_variable (selfuncs.c): foreign-rel Var; M2 join lane");
     }
     match node.node_tag() {
         NodeTag::T_Const => Ok(vardata),
-        // A var-free Aggref (HAVING quals): C's expression leg finds no
-        // relids and returns "don't know" (no rel, no stats).
-        NodeTag::T_Aggref => Ok(vardata),
+        // Var-free expressions (HAVING Aggrefs, PARAM_EXEC initplan outputs):
+        // C's expression leg finds no relids and returns "don't know".
+        NodeTag::T_Aggref | NodeTag::T_Param => Ok(vardata),
         other => panic!("examine_variable (selfuncs.c): {other:?}; M2 expression lane"),
     }
 }
 
-// examine_simple_variable (selfuncs.c): the STATRELATTINH probe; a live stats
-// tuple routes to the M2 stats lane.
-fn examine_simple_variable(run: &PlannerRun<'_>, varno: i32, varattno: i16) -> PgResult<()> {
+// examine_simple_variable (selfuncs.c): the STATRELATTINH probe, decoded once.
+fn examine_simple_variable<'mcx>(
+    run: &PlannerRun<'mcx>,
+    varno: i32,
+    varattno: i16,
+) -> PgResult<Option<PgStatisticBundle<'mcx>>> {
     let rte = run.rte(varno as usize);
     if rte.rtekind != RTEKind::RTE_RELATION {
         panic!("examine_simple_variable (selfuncs.c): {:?}; M2 lane", rte.rtekind);
     }
-    if syscache_seams::lookup_pg_statistic_shape::call(rte.relid, varattno, rte.inh)?.is_some() {
-        panic!("examine_simple_variable (selfuncs.c): pg_statistic tuple present; M2 stats lane");
-    }
-    Ok(())
+    syscache_seams::lookup_pg_statistic_bundle::call(run.mcx, rte.relid, varattno, rte.inh)
 }
 
-// get_variable_numdistinct (selfuncs.c), no-statsTuple arms. Returns
-// (ndistinct, isdefault).
-pub fn get_variable_numdistinct(run: &PlannerRun<'_>, vardata: &VariableStatData) -> (f64, bool) {
-    let stanullfrac = 0.0f64;
-    let mut stadistinct = if vardata.vartype == BOOLOID {
-        2.0
+// get_variable_numdistinct (selfuncs.c). Returns (ndistinct, isdefault).
+pub fn get_variable_numdistinct(
+    run: &PlannerRun<'_>,
+    vardata: &VariableStatData<'_>,
+) -> (f64, bool) {
+    let mut stanullfrac = 0.0f64;
+    let mut stadistinct;
+    if let Some(stats) = &vardata.stats {
+        stadistinct = stats.stadistinct as f64;
+        stanullfrac = stats.stanullfrac as f64;
+    } else if vardata.vartype == BOOLOID {
+        stadistinct = 2.0;
     } else {
         let attno = vardata
             .var
             .and_then(|id| run.root.expr_node(id).as_var().map(|v| v.varattno));
-        match attno {
+        stadistinct = match attno {
             Some(SELF_ITEM_POINTER_ATTRIBUTE_NUMBER) => -1.0,
             Some(TABLE_OID_ATTRIBUTE_NUMBER) => 1.0,
             _ => 0.0,
-        }
-    };
+        };
+    }
     if vardata.isunique {
         stadistinct = -1.0 * (1.0 - stanullfrac);
     }
@@ -174,20 +493,67 @@ pub fn get_variable_numdistinct(run: &PlannerRun<'_>, vardata: &VariableStatData
     (DEFAULT_NUM_DISTINCT, true)
 }
 
-// var_eq_const (selfuncs.c), no-statsTuple arms (nullfrac 0, negate=false).
-fn var_eq_const(
-    run: &PlannerRun<'_>,
-    vardata: &VariableStatData,
-    _oproid: u32,
+// var_eq_const (selfuncs.c), negate=false (neqsel is unported).
+fn var_eq_const<'mcx>(
+    run: &PlannerRun<'mcx>,
+    vardata: &VariableStatData<'mcx>,
+    oproid: Oid,
+    collation: Oid,
+    constval: Datum,
     constisnull: bool,
+    varonleft: bool,
 ) -> PgResult<f64> {
     if constisnull {
         return Ok(0.0);
     }
+    let nullfrac = vardata.nullfrac();
+
     let selec = if vardata.isunique
         && vardata.rel.is_some_and(|r| run.root.rel(r).tuples >= 1.0)
     {
         1.0 / run.root.rel(vardata.rel.unwrap()).tuples
+    } else if vardata.stats.is_some() {
+        match vardata.slot(STATISTIC_KIND_MCV, 0) {
+            Some(sslot) => {
+                let mut eqproc = opproc_for(oproid)?;
+                let mut matched = None;
+                for (i, &v) in sslot.values.iter().enumerate() {
+                    if op_test(&mut eqproc, collation, v, constval, varonleft)? {
+                        matched = Some(i);
+                        break;
+                    }
+                }
+                match matched {
+                    Some(i) => sslot.numbers[i] as f64,
+                    None => {
+                        let sumcommon: f64 =
+                            sslot.numbers.iter().map(|&n| n as f64).sum();
+                        let mut selec =
+                            clamp_probability(1.0 - sumcommon - nullfrac);
+                        let otherdistinct = get_variable_numdistinct(run, vardata).0
+                            - sslot.numbers.len() as f64;
+                        if otherdistinct > 1.0 {
+                            selec /= otherdistinct;
+                        }
+                        let least = sslot.numbers.last().copied().unwrap_or(0.0) as f64;
+                        if !sslot.numbers.is_empty() && selec > least {
+                            selec = least;
+                        }
+                        selec
+                    }
+                }
+            }
+            None => {
+                let mut selec = 1.0 - nullfrac;
+                // C treats an absent MCV slot as "no info" and still divides
+                // the non-null fraction by ndistinct.
+                let nd = get_variable_numdistinct(run, vardata).0;
+                if nd > 1.0 {
+                    selec /= nd;
+                }
+                selec
+            }
+        }
     } else {
         1.0 / get_variable_numdistinct(run, vardata).0
     };
@@ -456,16 +822,46 @@ fn btcostestimate(
     costs.index_startup_cost += descent_cost;
     costs.index_total_cost += costs.num_sa_scans * descent_cost;
 
-    // btcost_correlation over the leading simple column; no stats -> 0.
+    // btcost_correlation over the leading simple column.
     {
-        let PathNode::IndexPath(ip) = run.root.path(path_id) else { unreachable!() };
-        let attno = ip.indexinfo.as_ref().unwrap().indexkeys[0] as i16;
+        let (attno, opfamily0, opcintype0, reverse0, nkeycols) = {
+            let PathNode::IndexPath(ip) = run.root.path(path_id) else { unreachable!() };
+            let index = ip.indexinfo.as_ref().unwrap();
+            (
+                index.indexkeys[0] as i16,
+                index.opfamily[0],
+                index.opcintype[0],
+                index.reverse_sort[0],
+                index.nkeycolumns,
+            )
+        };
+        if attno == 0 {
+            panic!("btcost_correlation (selfuncs.c): expression index column; M2 lane");
+        }
         let rte = run.rte(index_rel_relid as usize);
-        if syscache_seams::lookup_pg_statistic_shape::call(rte.relid, attno, rte.inh)?.is_some() {
-            panic!("btcost_correlation (selfuncs.c): pg_statistic tuple present; M2 stats lane");
+        if let Some(bundle) =
+            syscache_seams::lookup_pg_statistic_bundle::call(run.mcx, rte.relid, attno, rte.inh)?
+        {
+            let sortop = lsyscache::get_opfamily_member(
+                opfamily0,
+                opcintype0,
+                opcintype0,
+                lsyscache::BTLessStrategyNumber,
+            )?;
+            let slot = bundle
+                .slots
+                .iter()
+                .find(|sl| sl.kind == STATISTIC_KIND_CORRELATION && sl.staop == sortop);
+            if let (true, Some(slot)) = (sortop != 0, slot) {
+                debug_assert!(slot.numbers.len() == 1);
+                let mut corr = slot.numbers[0] as f64;
+                if reverse0 {
+                    corr = -corr;
+                }
+                costs.index_correlation = if nkeycols > 1 { corr * 0.75 } else { corr };
+            }
         }
     }
-    debug_assert!(costs.index_correlation == 0.0);
     let _ = index_pages;
 
     Ok(AmCostEstimate {
@@ -572,9 +968,9 @@ pub fn estimate_num_groups<'mcx>(
     Ok(numdistinct.clamp(1.0, input_rows))
 }
 
-// eqjoinsel (selfuncs.c), no-pg_statistic arms (a live stats tuple panics in
-// examine_simple_variable): nullfracs are 0 and no MCV lists exist, so
-// eqjoinsel_inner reduces to 1/max(nd1, nd2).
+// eqjoinsel (selfuncs.c). C's MCV-x-MCV arm fires only when BOTH sides carry
+// MCV lists; that lane is unported and panics. Otherwise eqjoinsel_inner's
+// else arm: (1-nullfrac1)*(1-nullfrac2) / max(nd1, nd2).
 pub fn eqjoinsel<'mcx>(
     run: &mut PlannerRun<'mcx>,
     _operator: u32,
@@ -591,10 +987,278 @@ pub fn eqjoinsel<'mcx>(
     let (nd1, _isdefault1) = get_variable_numdistinct(run, &vardata1);
     let (nd2, _isdefault2) = get_variable_numdistinct(run, &vardata2);
 
-    let selec_inner = 1.0 / nd1.max(nd2);
+    if vardata1.slot(STATISTIC_KIND_MCV, 0).is_some()
+        && vardata2.slot(STATISTIC_KIND_MCV, 0).is_some()
+    {
+        panic!("eqjoinsel_inner (selfuncs.c): MCV-join lane");
+    }
+    let selec_inner =
+        (1.0 - vardata1.nullfrac()) * (1.0 - vardata2.nullfrac()) / nd1.max(nd2);
     let selec = match sj_jointype {
         JOIN_INNER | types_pathnodes::JOIN_LEFT | types_pathnodes::JOIN_FULL => selec_inner,
         other => panic!("eqjoinsel (selfuncs.c): jointype {other} (eqjoinsel_semi); M2 semi-join lane"),
     };
     Ok(clamp_probability(selec))
+}
+
+// estimate_hash_bucket_stats (selfuncs.c), no-stats/no-MCV lane. The MCV bucket
+// adjustment (mcvfreq/avgfreq) is the extended-stats lane; without an MCV list
+// mcvfreq is 0 and the bucketsize is 1/ndistinct clamped to virtualbuckets.
+pub fn estimate_hash_bucket_stats<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    hashkey: Node<'mcx>,
+    virtualbuckets: f64,
+) -> PgResult<(f64, f64)> {
+    let node_id = run.intern_expr(hashkey);
+    let vardata = examine_variable(run, node_id, hashkey, 0)?;
+    let (mut ndistinct, _isdefault) = get_variable_numdistinct(run, &vardata);
+    let mcvfreq = 0.0;
+    if ndistinct <= 0.0 {
+        ndistinct = 1.0;
+    }
+    let mut estfract = if ndistinct > virtualbuckets {
+        1.0 / virtualbuckets
+    } else {
+        1.0 / ndistinct
+    };
+    if estfract < 1.0e-6 {
+        estfract = 1.0e-6;
+    }
+    Ok((mcvfreq, estfract))
+}
+
+// mergejoinscansel (selfuncs.c) -> (leftstart, leftend, rightstart, rightend).
+// Every "insufficient info" leg (missing operators, no histogram/MCV range)
+// lands on C's silent-fail defaults 0.0/1.0, which is also the no-stats arm.
+pub fn mergejoinscansel<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rinfo: RinfoId,
+    opfamily: Oid,
+    cmptype: i32,
+    nulls_first: bool,
+) -> PgResult<(f64, f64, f64, f64)> {
+    use types_pathnodes::{COMPARE_GE, COMPARE_GT, COMPARE_LE, COMPARE_LT};
+
+    let mut leftstart = 0.0f64;
+    let mut leftend = 1.0f64;
+    let mut rightstart = 0.0f64;
+    let mut rightend = 1.0f64;
+    let fail = Ok((0.0, 1.0, 0.0, 1.0));
+
+    let clause = *run.root.expr_node(run.root.rinfo(rinfo).clause);
+    let Some(o) = clause.as_op_expr().filter(|o| o.args.len() == 2) else {
+        return fail;
+    };
+    let (opno, collation) = (o.opno, o.inputcollid);
+    let (left, right) = (o.args.nth(0), o.args.nth(1));
+    let lid = run.intern_expr(left);
+    let rid = run.intern_expr(right);
+    let leftvar = examine_variable(run, lid, left, 0)?;
+    let rightvar = examine_variable(run, rid, right, 0)?;
+
+    let (op_strategy, op_lefttype, op_righttype) =
+        lsyscache::get_op_opfamily_properties(opno, opfamily, false)?;
+    debug_assert!(op_strategy == types_pathnodes::COMPARE_EQ);
+
+    let member = |lt: Oid, rt: Oid, cmp: i32| lsyscache::get_opfamily_member_for_cmptype(opfamily, lt, rt, cmp);
+
+    let (isgt, lsortop, rsortop, lstatop, rstatop, ltop, leop, revltop, revleop);
+    match cmptype {
+        COMPARE_LT => {
+            isgt = false;
+            ltop = member(op_lefttype, op_righttype, COMPARE_LT)?;
+            leop = member(op_lefttype, op_righttype, COMPARE_LE)?;
+            if op_lefttype == op_righttype {
+                lsortop = ltop;
+                rsortop = ltop;
+                lstatop = lsortop;
+                rstatop = rsortop;
+                revltop = ltop;
+                revleop = leop;
+            } else {
+                lsortop = member(op_lefttype, op_lefttype, COMPARE_LT)?;
+                rsortop = member(op_righttype, op_righttype, COMPARE_LT)?;
+                lstatop = lsortop;
+                rstatop = rsortop;
+                revltop = member(op_righttype, op_lefttype, COMPARE_LT)?;
+                revleop = member(op_righttype, op_lefttype, COMPARE_LE)?;
+            }
+        }
+        COMPARE_GT => {
+            isgt = true;
+            ltop = member(op_lefttype, op_righttype, COMPARE_GT)?;
+            leop = member(op_lefttype, op_righttype, COMPARE_GE)?;
+            if op_lefttype == op_righttype {
+                lsortop = ltop;
+                rsortop = ltop;
+                lstatop = member(op_lefttype, op_lefttype, COMPARE_LT)?;
+                rstatop = lstatop;
+                revltop = ltop;
+                revleop = leop;
+            } else {
+                lsortop = member(op_lefttype, op_lefttype, COMPARE_GT)?;
+                rsortop = member(op_righttype, op_righttype, COMPARE_GT)?;
+                lstatop = member(op_lefttype, op_lefttype, COMPARE_LT)?;
+                rstatop = member(op_righttype, op_righttype, COMPARE_LT)?;
+                revltop = member(op_righttype, op_lefttype, COMPARE_GT)?;
+                revleop = member(op_righttype, op_lefttype, COMPARE_GE)?;
+            }
+        }
+        _ => return fail,
+    }
+
+    if lsortop == 0
+        || rsortop == 0
+        || lstatop == 0
+        || rstatop == 0
+        || ltop == 0
+        || leop == 0
+        || revltop == 0
+        || revleop == 0
+    {
+        return fail;
+    }
+
+    let Some((mut leftmin, mut leftmax)) = get_variable_range(run, &leftvar, lstatop, collation)?
+    else {
+        return fail;
+    };
+    let Some((mut rightmin, mut rightmax)) =
+        get_variable_range(run, &rightvar, rstatop, collation)?
+    else {
+        return fail;
+    };
+    if isgt {
+        core::mem::swap(&mut leftmin, &mut leftmax);
+        core::mem::swap(&mut rightmin, &mut rightmax);
+    }
+
+    let selec = scalarineqsel(run, leop, isgt, true, collation, &leftvar, rightmax, op_righttype)?;
+    if selec != DEFAULT_INEQ_SEL {
+        leftend = selec;
+    }
+    let selec = scalarineqsel(run, revleop, isgt, true, collation, &rightvar, leftmax, op_lefttype)?;
+    if selec != DEFAULT_INEQ_SEL {
+        rightend = selec;
+    }
+    if leftend > rightend {
+        leftend = 1.0;
+    } else if leftend < rightend {
+        rightend = 1.0;
+    } else {
+        leftend = 1.0;
+        rightend = 1.0;
+    }
+
+    let selec = scalarineqsel(run, ltop, isgt, false, collation, &leftvar, rightmin, op_righttype)?;
+    if selec != DEFAULT_INEQ_SEL {
+        leftstart = selec;
+    }
+    let selec =
+        scalarineqsel(run, revltop, isgt, false, collation, &rightvar, leftmin, op_lefttype)?;
+    if selec != DEFAULT_INEQ_SEL {
+        rightstart = selec;
+    }
+    if leftstart < rightstart {
+        leftstart = 0.0;
+    } else if leftstart > rightstart {
+        rightstart = 0.0;
+    } else {
+        leftstart = 0.0;
+        rightstart = 0.0;
+    }
+
+    if nulls_first {
+        if leftvar.stats.is_some() {
+            let f = leftvar.nullfrac();
+            leftstart = clamp_probability(leftstart + f);
+            leftend = clamp_probability(leftend + f);
+        }
+        if rightvar.stats.is_some() {
+            let f = rightvar.nullfrac();
+            rightstart = clamp_probability(rightstart + f);
+            rightend = clamp_probability(rightend + f);
+        }
+    }
+
+    if leftstart >= leftend {
+        leftstart = 0.0;
+        leftend = 1.0;
+    }
+    if rightstart >= rightend {
+        rightstart = 0.0;
+        rightend = 1.0;
+    }
+    Ok((leftstart, leftend, rightstart, rightend))
+}
+
+// get_variable_range (selfuncs.c) -> Some((min, max)) or None. The C
+// datumCopy is skipped: slot datums live in the planner arena already.
+// statistic_proc_security_check reduces to true on this substrate.
+fn get_variable_range<'mcx>(
+    run: &PlannerRun<'mcx>,
+    vardata: &VariableStatData<'mcx>,
+    sortop: Oid,
+    collation: Oid,
+) -> PgResult<Option<(Datum, Datum)>> {
+    let Some(stats) = &vardata.stats else {
+        return Ok(None);
+    };
+    let _ = run;
+    let opfuncoid = lsyscache::get_opcode(sortop)?;
+    let mut opproc: Option<FmgrInfo> = None;
+    let mut range: Option<(Datum, Datum)> = None;
+
+    if let Some(sslot) = vardata.slot(STATISTIC_KIND_HISTOGRAM, sortop) {
+        if sslot.stacoll == collation && !sslot.values.is_empty() {
+            range = Some((sslot.values[0], sslot.values[sslot.values.len() - 1]));
+        }
+    }
+    if range.is_none() {
+        if let Some(sslot) = vardata.slot(STATISTIC_KIND_HISTOGRAM, 0) {
+            get_stats_slot_range(&sslot.values, opfuncoid, &mut opproc, collation, &mut range)?;
+        }
+    }
+    if let Some(sslot) = vardata.slot(STATISTIC_KIND_MCV, 0) {
+        let use_mcvs = if range.is_some() {
+            true
+        } else {
+            let sumcommon: f64 = sslot.numbers.iter().map(|&n| n as f64).sum();
+            sumcommon + stats.stanullfrac as f64 > 0.99999
+        };
+        if use_mcvs {
+            get_stats_slot_range(&sslot.values, opfuncoid, &mut opproc, collation, &mut range)?;
+        }
+    }
+    Ok(range)
+}
+
+fn get_stats_slot_range(
+    values: &[Datum],
+    opfuncoid: Oid,
+    opproc: &mut Option<FmgrInfo>,
+    collation: Oid,
+    range: &mut Option<(Datum, Datum)>,
+) -> PgResult<()> {
+    if values.is_empty() {
+        return Ok(());
+    }
+    if opproc.is_none() {
+        *opproc = Some(fmgr_core::fmgr_info(opfuncoid)?);
+    }
+    let opproc = opproc.as_mut().unwrap();
+    for &v in values {
+        match range {
+            None => *range = Some((v, v)),
+            Some((tmin, tmax)) => {
+                if types_fmgr::function_call2_coll(opproc, collation, v, *tmin)?.as_bool() {
+                    *tmin = v;
+                }
+                if types_fmgr::function_call2_coll(opproc, collation, *tmax, v)?.as_bool() {
+                    *tmax = v;
+                }
+            }
+        }
+    }
+    Ok(())
 }

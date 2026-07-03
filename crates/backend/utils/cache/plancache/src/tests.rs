@@ -14,6 +14,9 @@ use types_storage::lock::LOCKACQUIRE_OK;
 use super::*;
 
 const TEST_RELID: Oid = 50001;
+// A funcid the generic plan depends on (setrefs would key its PlanInvalItem on
+// PROCOID); the hash value the object-inval message carries.
+const TEST_FUNC_HASH: u32 = 0x00AB_CDEF;
 
 thread_local! {
     static PLANNER_CALLS: Cell<u32> = const { Cell::new(0) };
@@ -39,12 +42,21 @@ fn stub_planner<'a, 'mcx>(
     )?;
     let mut relation_oids = types_nodes::list::OidList::nil();
     relation_oids.lappend(mcx, TEST_RELID)?;
+    // The generic plan carries a PROCOID PlanInvalItem the way setrefs records
+    // one for a user function; the source querytree does not (source-side
+    // collection is the re-analysis lane), so this drives the generic-plan arm.
+    let mut inval_items = types_nodes::list::NodeList::nil();
+    inval_items.lappend(
+        mcx,
+        Node::mk(mcx, types_nodes::plannodes::PlanInvalItem { cacheId: PROCOID, hashValue: TEST_FUNC_HASH })?,
+    )?;
     Ok(PlannedStmt {
         commandType: CmdType::CMD_SELECT,
         canSetTag: parse.canSetTag,
         planTree: Some(tree),
         rtable: parse.rtable.clone_in(mcx)?,
         relationOids: relation_oids,
+        invalItems: inval_items,
         ..PlannedStmt::default()
     })
 }
@@ -239,6 +251,39 @@ fn rel_inval_flushes_saved_plan_and_nonmatching_does_not() {
     PlanCacheRelCallback(Datum::from_oid(InvalidOid), TEST_RELID);
     assert!(!CachedPlanIsValid(h));
 
+    DropCachedPlan(h);
+}
+
+// The function-dependency inval loop end-to-end through the committed inval
+// machinery: a saved plan with a generic plan carrying a PROCOID PlanInvalItem,
+// a PROCOID inval message dispatched via CallSyscacheCallbacks, then the next
+// GetCachedPlan re-plans (the generic-plan arm; no re-analysis needed).
+#[test]
+fn func_inval_invalidates_generic_plan_and_replans() {
+    install();
+    InitPlanCache().unwrap();
+    push_snapshot();
+    let h = make_saved_source(true);
+
+    let p1 = GetCachedPlan(h, ParamListHandle::NULL, None, QueryEnvHandle::NULL).unwrap();
+    assert_eq!(PLANNER_CALLS.with(Cell::get), 1);
+    ReleaseCachedPlan(p1);
+
+    // A non-matching hash on PROCOID must not invalidate.
+    inval::invalidate::CallSyscacheCallbacks(PROCOID, TEST_FUNC_HASH ^ 1).unwrap();
+    let p2 = GetCachedPlan(h, ParamListHandle::NULL, None, QueryEnvHandle::NULL).unwrap();
+    assert_eq!(PLANNER_CALLS.with(Cell::get), 1, "warm hit: no re-plan on miss");
+    ReleaseCachedPlan(p2);
+
+    // Matching PROCOID inval: source stays valid, generic plan is invalidated.
+    inval::invalidate::CallSyscacheCallbacks(PROCOID, TEST_FUNC_HASH).unwrap();
+    assert!(CachedPlanIsValid(h), "source querytree stays valid");
+
+    let p3 = GetCachedPlan(h, ParamListHandle::NULL, None, QueryEnvHandle::NULL).unwrap();
+    assert_eq!(PLANNER_CALLS.with(Cell::get), 2, "generic plan re-planned after inval");
+    let stmts = CachedPlanStmtList(p3);
+    assert_eq!(stmts.len(), 1);
+    ReleaseCachedPlan(p3);
     DropCachedPlan(h);
 }
 

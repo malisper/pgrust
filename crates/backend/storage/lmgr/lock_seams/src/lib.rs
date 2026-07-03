@@ -52,14 +52,5 @@ seam_core::seam!(
     pub fn lock_held_by_me(locktag: LOCKTAG, lockmode: LOCKMODE, orstronger: bool) -> bool
 );
 
-seam_core::seam!(
-    pub fn virtual_xact_lock_table_insert(vxid: types_core::VirtualTransactionId) -> types_error::PgResult<()>
-);
 
-seam_core::seam!(
-    pub fn at_prepare_locks() -> types_error::PgResult<()>
-);
 
-seam_core::seam!(
-    pub fn post_prepare_locks(xid: types_core::TransactionId) -> types_error::PgResult<()>
-);

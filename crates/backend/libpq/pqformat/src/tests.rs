@@ -20,7 +20,6 @@ fn install_fixtures() {
             Ok(0)
         });
         pg_server_to_client::set(convert_fixture);
-        pg_client_to_server::set(convert_fixture);
     });
 }
 
@@ -270,18 +269,24 @@ fn getmsgbytes_and_copymsgbytes() {
 }
 
 #[test]
-fn getmsgtext_both_branches() {
+fn getmsgtext_copies_and_validates() {
     let f = setup();
     let mut msg = recv(&f, b"abcdef");
     let t = pq_getmsgtext(f.ctx.mcx(), &mut msg, 3).unwrap();
     assert_eq!(&t[..], b"abc");
-
-    CONVERT.with(|c| c.set(true));
     let t2 = pq_getmsgtext(f.ctx.mcx(), &mut msg, 3).unwrap();
-    assert_eq!(&t2[..], b"DEF");
+    assert_eq!(&t2[..], b"def");
 
     let err = pq_getmsgtext(f.ctx.mcx(), &mut msg, 1).unwrap_err();
     assert_eq!(err.message(), "insufficient data left in message");
+
+    mbutils::SetDatabaseEncoding(wchar::PG_UTF8).unwrap();
+    let mut bad = recv(&f, &[b'a', 0xC3, 0x28]);
+    let err = pq_getmsgtext(f.ctx.mcx(), &mut bad, 3).unwrap_err();
+    assert_eq!(
+        err.message(),
+        "invalid byte sequence for encoding \"UTF8\": 0xc3 0x28"
+    );
 }
 
 #[test]
@@ -294,12 +299,6 @@ fn getmsgstring_and_rawstring() {
     let s2 = pq_getmsgrawstring(&mut msg).unwrap();
     assert_eq!(s2, b"two");
     pq_getmsgend(&msg).unwrap();
-
-    CONVERT.with(|c| c.set(true));
-    let mut msg2 = recv(&f, b"abc\0");
-    let s3 = pq_getmsgstring(f.ctx.mcx(), &mut msg2).unwrap();
-    assert!(matches!(s3, PqString::Converted(_)));
-    assert_eq!(s3.as_bytes(), b"ABC");
 }
 
 #[test]
