@@ -3,9 +3,17 @@ use ::types_core::Oid;
 
 const TABLES: &[&[FmgrBuiltin]] = &[
     ::adt_bool::builtins::BOOL_BUILTINS,
+    ::adt_cash::builtins::CASH_BUILTINS,
+    ::adt_date::builtins::DATE_BUILTINS,
     ::adt_float::builtins::FLOAT_BUILTINS,
     ::adt_int::builtins::INT_BUILTINS,
     ::adt_int8::builtins::INT8_BUILTINS,
+    ::adt_like::builtins::LIKE_BUILTINS,
+    ::adt_mac::builtins::MAC_BUILTINS,
+    ::adt_mac8::builtins::MAC8_BUILTINS,
+    ::adt_numeric::builtins::NUMERIC_BUILTINS,
+    ::adt_oracle_compat::builtins::ORACLE_COMPAT_BUILTINS,
+    ::adt_pseudotypes::builtins::PSEUDOTYPES_BUILTINS,
     ::name::builtins::NAME_BUILTINS,
     ::nbt_compare::builtins::NBT_BUILTINS,
     ::varlena::builtins::VARLENA_BUILTINS,
