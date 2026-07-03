@@ -652,13 +652,13 @@ fn ece_mutator<'mcx>(node: Node<'mcx>, cx: &EceContext<'mcx>) -> PgResult<Option
     }
 }
 
-/// exprIsLengthCoercion shape: a two-arg cast whose second arg is a
+/// exprIsLengthCoercion shape: a 2- or 3-arg cast whose second arg is a
 /// non-null int4 Const carries that typmod.
 fn func_expr_typmod(f: &FuncExpr<'_>) -> i32 {
     if !matches!(
         f.funcformat,
         CoercionForm::COERCE_EXPLICIT_CAST | CoercionForm::COERCE_IMPLICIT_CAST
-    ) || f.args.len() != 2
+    ) || !(2..=3).contains(&f.args.len())
     {
         return -1;
     }

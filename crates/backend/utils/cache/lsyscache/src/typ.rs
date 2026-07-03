@@ -159,12 +159,12 @@ pub fn get_typavgwidth(typid: Oid, typmod: i32) -> PgResult<i32> {
     if typlen > 0 {
         return Ok(typlen as i32);
     }
-    // C consults type_maximum_size (format_type.c; ~29 lines, not yet in the
-    // landed format_type crate); it yields a positive bound only for
-    // typmod-constrained types, and typmod == -1 always falls through to the
-    // guess below.
-    if typmod >= 0 {
-        panic!("get_typavgwidth({typid}, {typmod}): type_maximum_size unported (format_type.c)");
+    let maxwidth = format_type::type_maximum_size(typid, typmod);
+    if maxwidth > 0 {
+        if maxwidth <= 32 {
+            return Ok(maxwidth);
+        }
+        return Ok(32 + (maxwidth - 32) / 2);
     }
     Ok(32)
 }

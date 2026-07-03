@@ -16,6 +16,13 @@ use types_core::Oid;
 use types_error::{PgError, PgResult};
 
 const TYPSTORAGE_PLAIN: i8 = b'p' as i8;
+const F_ARRAY_SUBSCRIPT_HANDLER: Oid = 6179;
+
+// IsTrueArrayType (pg_type.h); local copy — lsyscache deps this crate
+// (type_maximum_size), so the edge must point downward.
+fn is_true_array_type(typelem: Oid, typsubscript: Oid) -> bool {
+    typelem != InvalidOid && typsubscript == F_ARRAY_SUBSCRIPT_HANDLER
+}
 
 #[cold]
 #[inline(never)]
@@ -49,7 +56,7 @@ fn format_type_extended(type_oid: Oid, typemod: i32, typemod_given: bool) -> PgR
     let mut shape = lookup(type_oid)?;
     let mut named_oid = type_oid;
     let mut is_array = false;
-    if lsyscache::typ::is_true_array_type(shape.typelem, shape.typsubscript)
+    if is_true_array_type(shape.typelem, shape.typsubscript)
         && shape.typstorage != TYPSTORAGE_PLAIN
     {
         named_oid = shape.typelem;
@@ -121,7 +128,10 @@ fn format_type_extended(type_oid: Oid, typemod: i32, typemod_given: bool) -> PgR
 /// C `printTypmod`; takes the type oid instead of a pre-fetched typmodout.
 fn print_typmod(typname: &str, typmod: i32, type_oid: Oid) -> PgResult<String> {
     debug_assert!(typmod >= 0);
-    let typmodout = lsyscache::typ::get_typmodout(type_oid)?;
+    let typmodout = match syscache_seams::pg_type_io_shape::call(type_oid)? {
+        Some(t) => t.typmodout,
+        None => InvalidOid,
+    };
     if typmodout == InvalidOid {
         return Ok(format!("{typname}({typmod})"));
     }

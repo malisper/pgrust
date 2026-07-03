@@ -18,6 +18,7 @@ fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
 mbutils = { path = "../../utils/mb/mbutils" }
 mcx = { path = "../../../_support/mcx" }
+nodes_core = { path = "../../nodes/nodes_core" }
 parser_small1 = { path = "../parser_small1" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
 types_core = { path = "../../../_support/types/types_core" }

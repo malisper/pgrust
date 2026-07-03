@@ -70,6 +70,25 @@ fn sublink_first_col<'mcx>(
     (sl, tent)
 }
 
+// exprIsLengthCoercion (nodeFuncs.c) restricted to FuncExpr (the
+// ArrayCoerceExpr arm has no node in this vocabulary yet); -1 = not one.
+fn length_coercion_typmod(f: &types_nodes::FuncExpr<'_>) -> i32 {
+    if !matches!(
+        f.funcformat,
+        types_nodes::CoercionForm::COERCE_EXPLICIT_CAST
+            | types_nodes::CoercionForm::COERCE_IMPLICIT_CAST
+    ) || !(2..=3).contains(&f.args.len())
+    {
+        return -1;
+    }
+    match f.args.nth(1).as_const() {
+        Some(c) if c.consttype == types_core::catalog::INT4OID && !c.constisnull => {
+            c.constvalue.as_i32()
+        }
+        _ => -1,
+    }
+}
+
 pub fn expr_typmod(node: Node<'_>) -> i32 {
     match node.node_tag() {
         NodeTag::T_Const => node.as_const().unwrap().consttypmod,
@@ -78,10 +97,10 @@ pub fn expr_typmod(node: Node<'_>) -> i32 {
         NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resulttypmod,
         NodeTag::T_SetToDefault => node.as_set_to_default().unwrap().typeMod,
         NodeTag::T_CaseTestExpr => node.as_case_test_expr().unwrap().typeMod,
+        NodeTag::T_FuncExpr => length_coercion_typmod(node.as_func_expr().unwrap()),
         NodeTag::T_OpExpr
         | NodeTag::T_ScalarArrayOpExpr
         | NodeTag::T_ArrayExpr
-        | NodeTag::T_FuncExpr
         | NodeTag::T_Aggref
         | NodeTag::T_GroupingFunc
         | NodeTag::T_WindowFunc
