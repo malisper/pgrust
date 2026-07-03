@@ -603,6 +603,28 @@ pub struct InferenceElem<'mcx> {
     pub inferopclass: Oid,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum MergeMatchKind {
+    #[default]
+    MERGE_WHEN_MATCHED = 0,
+    MERGE_WHEN_NOT_MATCHED_BY_SOURCE = 1,
+    MERGE_WHEN_NOT_MATCHED_BY_TARGET = 2,
+}
+
+pub const NUM_MERGE_MATCH_KINDS: usize = 3;
+
+/// `targetList` cells are TargetEntry; `updateColnos` set for UPDATE actions.
+#[derive(Default)]
+pub struct MergeAction<'mcx> {
+    pub matchKind: MergeMatchKind,
+    pub commandType: crate::nodes_enums::CmdType,
+    pub r#override: OverridingKind,
+    pub qual: Option<Node<'mcx>>,
+    pub targetList: NodeList<'mcx>,
+    pub updateColnos: crate::list::IntList<'mcx>,
+}
+
 /// `arbiterElems` cells are InferenceElem; `onConflictSet`/`exclRelTlist`
 /// cells are TargetEntry.
 #[derive(Default)]
@@ -774,6 +796,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for InferenceElem<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for OnConflictExpr<'mcx> {
     const TAG: NodeTag = NodeTag::T_OnConflictExpr;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for MergeAction<'mcx> {
+    const TAG: NodeTag = NodeTag::T_MergeAction;
+}
 
 impl<'mcx> Node<'mcx> {
     /// C `makeConst` (constvalue passed in, location -1).
@@ -928,6 +953,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_on_conflict_expr(self) -> Option<&'mcx OnConflictExpr<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_merge_action(self) -> Option<&'mcx MergeAction<'mcx>> {
         self.as_variant()
     }
 

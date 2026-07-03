@@ -103,11 +103,11 @@ fn RewriteQuery<'mcx>(
     let mut product_count = 0usize;
     let mut has_update = false;
     if event != CmdType::CMD_SELECT && event != CmdType::CMD_UTILITY {
-        if !matches!(event, CmdType::CMD_INSERT | CmdType::CMD_UPDATE | CmdType::CMD_DELETE) {
-            panic!(
-                "RewriteQuery (rewriteHandler.c): {event:?} rewrite needs the \
-                 mergeActionList arm (MERGE vocab unported)"
-            );
+        if !matches!(
+            event,
+            CmdType::CMD_INSERT | CmdType::CMD_UPDATE | CmdType::CMD_DELETE | CmdType::CMD_MERGE
+        ) {
+            panic!("unrecognized commandType: {event:?}");
         }
         let result_relation = parsetree.resultRelation;
         debug_assert!(result_relation != 0);
@@ -206,6 +206,39 @@ fn RewriteQuery<'mcx>(
                 )?;
             }
             CmdType::CMD_DELETE => {}
+            CmdType::CMD_MERGE => {
+                debug_assert!(
+                    parsetree.r#override == types_nodes::OverridingKind::OVERRIDING_NOT_SET
+                );
+                for action_node in &parsetree.mergeActionList {
+                    let action = action_node
+                        .as_merge_action()
+                        .expect("mergeActionList cell is a MergeAction");
+                    match action.commandType {
+                        CmdType::CMD_NOTHING | CmdType::CMD_DELETE => {}
+                        CmdType::CMD_UPDATE | CmdType::CMD_INSERT => {
+                            // MERGE actions do not permit multi-row INSERTs: no VALUES RTE.
+                            let new_tlist = rewriteTargetListIU(
+                                mcx,
+                                &action.targetList,
+                                action.commandType,
+                                action.r#override,
+                                &rel,
+                                None,
+                                None,
+                            )?;
+                            // SAFETY: exclusive Query-tree ownership during rewrite.
+                            unsafe {
+                                action_node.with_mut::<types_nodes::MergeAction, _>(|a| {
+                                    a.targetList = new_tlist;
+                                })
+                            }
+                            .expect("MergeAction node");
+                        }
+                        other => panic!("unrecognized commandType: {other:?}"),
+                    }
+                }
+            }
             _ => unreachable!(),
         }
 
@@ -220,7 +253,7 @@ fn RewriteQuery<'mcx>(
             None => &empty,
         };
         let locks =
-            fire::matchLocks(event, rules, result_relation, &parsetree, &mut has_update)?;
+            fire::matchLocks(event, rules, result_relation, rel.name(), &parsetree, &mut has_update)?;
 
         let product_orig_rt_length = parsetree.rtable.len();
         let product_queries = fire::fireRules(

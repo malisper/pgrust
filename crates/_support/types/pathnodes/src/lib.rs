@@ -913,7 +913,7 @@ pub struct ModifyTablePath<'mcx> {
     pub onconflict: Option<NodeId>,
     pub epqParam: i32,
     pub mergeActionLists: PgVec<'mcx, PgVec<'mcx, NodeId>>,
-    pub mergeJoinConditions: PgVec<'mcx, PgVec<'mcx, NodeId>>,
+    pub mergeJoinConditions: PgVec<'mcx, Option<NodeId>>,
 }
 
 #[derive(Clone, Debug)]

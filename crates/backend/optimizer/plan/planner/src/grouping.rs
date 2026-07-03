@@ -295,9 +295,6 @@ fn grouping_planner_tail<'mcx>(
             );
         }
         if parse.commandType != CmdType::CMD_SELECT {
-            if parse.commandType == CmdType::CMD_MERGE {
-                panic!("create_modifytable_path (pathnode.c): MERGE; M4 MERGE lane");
-            }
             debug_assert!(parse.withCheckOptions.is_nil());
             debug_assert!(run.root.rowMarks.is_empty());
             let onconflict = parse.onConflict.map(|oc| run.root.alloc_expr_node(oc));
@@ -312,6 +309,16 @@ fn grouping_planner_tail<'mcx>(
                 }
                 ids
             });
+            let merge_action_list = (!parse.mergeActionList.is_nil()).then(|| {
+                let mut ids: mcx::PgVec<'mcx, types_pathnodes::NodeId> =
+                    mcx::PgVec::new_in(run.mcx);
+                for action in &parse.mergeActionList {
+                    ids.push(run.root.alloc_expr_node(action));
+                }
+                ids
+            });
+            let merge_join_condition = (parse.commandType == CmdType::CMD_MERGE)
+                .then(|| parse.mergeJoinCondition.map(|jc| run.root.alloc_expr_node(jc)));
             let mtpath = crate::pathnode::create_modifytable_path(
                 run,
                 final_rel,
@@ -322,6 +329,8 @@ fn grouping_planner_tail<'mcx>(
                 update_colnos,
                 returning_list,
                 onconflict,
+                merge_action_list,
+                merge_join_condition,
             );
             path_id = run.root.alloc_path(mtpath);
         }
