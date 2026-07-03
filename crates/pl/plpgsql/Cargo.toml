@@ -15,7 +15,9 @@ catalog_namespace = { path = "../../backend/catalog/catalog_namespace" }
 rel_vocab = { path = "../../_support/types/rel_vocab" }
 syscache_seams = { path = "../../backend/utils/cache/syscache_seams" }
 types_rel = { path = "../../_support/types/rel" }
+cmdtag = { path = "../../backend/tcop/cmdtag" }
 coerce = { path = "../../backend/parser/coerce" }
+event_trigger = { path = "../../backend/commands/event_trigger" }
 datum = { path = "../../_support/types/datum" }
 detoast = { path = "../../backend/access/common/detoast" }
 elog = { path = "../../backend/utils/error/elog" }
