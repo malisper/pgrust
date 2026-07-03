@@ -2676,6 +2676,7 @@ dependencies = [
  "catalog_seams",
  "datum",
  "detoast_seams",
+ "fmgr_seams",
  "format_type",
  "lsyscache",
  "mcx",
@@ -8882,13 +8883,18 @@ dependencies = [
 name = "varlena"
 version = "0.1.0"
 dependencies = [
+ "arrayfuncs",
  "datum",
  "detoast",
  "detoast_seams",
+ "fmgr_seams",
+ "format_type",
  "guc_tables",
  "hashfn",
+ "lsyscache",
  "mbutils_seams",
  "mcx",
+ "numutils",
  "parser_small1",
  "pg_locale_seams",
  "pqformat",
