@@ -575,9 +575,6 @@ fn pull_agg_input_vars<'mcx>(
                 pull_agg_input_vars(a, out);
             }
         }
-        NodeTag::T_CoerceViaIO => {
-            pull_agg_input_vars(node.as_coerce_via_io().unwrap().arg, out)
-        }
         NodeTag::T_Param => {}
         NodeTag::T_NullTest => {
             if let Some(arg) = node.as_null_test().unwrap().arg {
