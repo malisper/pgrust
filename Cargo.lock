@@ -1228,6 +1228,7 @@ dependencies = [
  "fmgr_seams",
  "genam_seams",
  "hashfn",
+ "heaptoast",
  "indexam",
  "init_small",
  "inval",

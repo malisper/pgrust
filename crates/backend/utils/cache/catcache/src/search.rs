@@ -7,7 +7,7 @@ use types_scan::scankey::ScanKeyData;
 use types_tuple::{HeapTupleData, ItemPointerData};
 
 use crate::compute::{fast_hash_probe, hash_index, int4_hash, CatCKey, CCFastKind};
-use crate::graph::{create_entry_negative, create_entry_positive, remove_ct};
+use crate::graph::{create_entry_from_scan, create_entry_negative, remove_ct};
 use crate::{eq_stored, init, with_state, NONE};
 
 /// A pinned positive entry (C's `&ct->tuple` + `ct->refcount++`); release
@@ -318,24 +318,27 @@ fn search_miss(cache_id: i32, hash_value: u32, keys: &[CatCKey<'_>; 4]) -> PgRes
 
     let mut slot: Option<u32> = None;
     let mut create_err: Option<Box<types_error::PgError>> = None;
-    genam_seams::systable_scan_catalog::call(
-        &relation,
-        indexoid,
-        index_ok,
-        &cur_skey[..nkeys as usize],
-        &mut |ntp| {
-            match with_state(|st| create_entry_positive(st, cache_id, ntp, hash_value)) {
-                Ok(s) => {
-                    slot = Some(s);
-                    Ok(false) /* break: assume only one match */
+    /* C's do-while(stale): a mid-flatten invalidation restarts the scan. */
+    loop {
+        let mut stale = false;
+        genam_seams::systable_scan_catalog::call(
+            &relation,
+            indexoid,
+            index_ok,
+            &cur_skey[..nkeys as usize],
+            &mut |ntp| {
+                match create_entry_from_scan(cache_id, ntp, hash_value) {
+                    Ok(Some(s)) => slot = Some(s),
+                    Ok(None) => stale = true,
+                    Err(e) => create_err = Some(e),
                 }
-                Err(e) => {
-                    create_err = Some(e);
-                    Ok(false)
-                }
-            }
-        },
-    )?;
+                Ok(false) /* break: assume only one match */
+            },
+        )?;
+        if !stale || create_err.is_some() {
+            break;
+        }
+    }
     table::table_close(relation, types_storage::lock::AccessShareLock)?;
     drop(scratch);
     if let Some(e) = create_err {

@@ -19,6 +19,7 @@ hashfn = { path = "../../../../common/hashfn" }
 tupdesc = { path = "../../../access/common/tupdesc" }
 table = { path = "../../../access/table/table" }
 indexam = { path = "../../../access/index/indexam" }
+heaptoast = { path = "../../../access/heap/heaptoast" }
 genam_seams = { path = "../../../access/index/genam_seams" }
 catcache_seams = { path = "../catcache_seams" }
 relcache_seams = { path = "../relcache_seams" }
