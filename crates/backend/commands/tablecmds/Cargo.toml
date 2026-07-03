@@ -74,3 +74,4 @@ nodes_core = { path = "../../nodes/nodes_core" }
 types_slot = { path = "../../../_support/types/types_slot" }
 pg_type = { path = "../../catalog/pg_type" }
 commands_cluster = { path = "../cluster" }
+relation_seams = { path = "../../access/common/relation_seams" }
