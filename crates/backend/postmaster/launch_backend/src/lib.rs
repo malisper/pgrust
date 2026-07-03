@@ -269,6 +269,10 @@ pub fn postmaster_child_launch(
             })) else {
                 unreachable!("child main_fn returns !")
             };
+            // C's process death closes fds; without this the peer never sees EOF.
+            if let Some(cs) = client_sock {
+                unsafe { libc::close(cs.sock) };
+            }
             // C wait status: ProcExitThread == WIFEXITED; other payloads == WTERMSIG(SIGABRT).
             let exitstatus = payload
                 .downcast_ref::<ipc::ProcExitThread>()

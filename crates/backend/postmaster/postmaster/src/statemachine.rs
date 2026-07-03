@@ -337,7 +337,7 @@ pub fn PostmasterStateMachine() -> PgResult<()> {
 
         transam_xlog::LocalProcessControlFile(true)?;
 
-        crate::crash_reset::reset_shared_memory_after_crash();
+        ipci::ResetShmemAfterCrash()?;
 
         UpdatePMState(PMState::PM_STARTUP);
 

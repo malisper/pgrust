@@ -20,7 +20,6 @@ use types_error::{ErrorLocation, PgResult, DEBUG2, LOG};
 use types_storage::latch::LatchHandle;
 use types_storage::waiteventset::WaitEventSetHandle;
 
-pub(crate) mod crash_reset;
 pub mod main_entry;
 pub mod serverloop;
 pub mod statemachine;
