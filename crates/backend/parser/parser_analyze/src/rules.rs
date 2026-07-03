@@ -43,8 +43,9 @@ pub fn transformRuleStmt<'mcx>(
         Alias { aliasname: Some("new"), colnames: NodeList::nil() },
     )?;
 
+    let src = mcx::slice_borrow_in(mcx, query_string.as_bytes())?;
     let mut pstate = make_parsestate(mcx, None);
-    pstate.p_sourcetext = Some(query_string);
+    pstate.p_sourcetext = Some(src);
     let oldnsitem = parse_relation::addRangeTableEntryForRelation(
         mcx,
         &mut pstate,
@@ -118,7 +119,7 @@ pub fn transformRuleStmt<'mcx>(
     } else {
         for action in &stmt.actions {
             let mut sub_pstate = make_parsestate(mcx, None);
-            sub_pstate.p_sourcetext = Some(query_string);
+            sub_pstate.p_sourcetext = Some(src);
 
             let sub_old = parse_relation::addRangeTableEntryForRelation(
                 mcx,
