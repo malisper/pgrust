@@ -959,7 +959,8 @@ impl<'a, 'mcx> Lexer<'a, 'mcx> {
         consider(&mut best, &mut which, unifail, Which::UnicodeFail);
         consider(&mut best, &mut which, hexf, Which::HexFail);
         consider(&mut best, &mut which, uni_plus_bs, Which::UnicodePlusBackslash);
-        let dot = if s.get(p + 1).is_some() { Some(2) } else { None };
+        // flex `.` excludes newline: backslash+LF falls to the lone-\\ rule.
+        let dot = if s.get(p + 1).is_some_and(|&c| c != b'\n') { Some(2) } else { None };
         consider(&mut best, &mut which, dot, Which::Dot);
         consider(&mut best, &mut which, Some(1), Which::Backslash);
 
@@ -1026,8 +1027,8 @@ impl<'a, 'mcx> Lexer<'a, 'mcx> {
                 Ok(Some(Step::Continue))
             }
             Which::Backslash => {
+                self.yyerror_yytext(escontext, p, p + 1, "unexpected end after backslash")?;
                 self.pos += 1;
-                self.yyerror(escontext, "unexpected end after backslash")?;
                 Ok(Some(Step::Terminate))
             }
             Which::None => Ok(None),
