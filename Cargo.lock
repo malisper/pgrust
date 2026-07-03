@@ -356,7 +356,10 @@ dependencies = [
 name = "adt_misc"
 version = "0.1.0"
 dependencies = [
+ "arrayfuncs",
+ "arrayutils",
  "datum",
+ "detoast_seams",
  "fmgr_seams",
  "funcapi",
  "heaptuple",
@@ -507,6 +510,7 @@ name = "adt_scalar"
 version = "0.1.0"
 dependencies = [
  "datum",
+ "hashfn",
  "mcx",
  "numutils",
  "pqformat",
@@ -2139,6 +2143,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "dbsize"
+version = "0.1.0"
+dependencies = [
+ "adt_numeric",
+ "datum",
+ "mcx",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+]
+
+[[package]]
 name = "deadlock"
 version = "0.0.0"
 dependencies = [
@@ -2743,6 +2759,7 @@ dependencies = [
  "commands_async",
  "conv",
  "datum",
+ "dbsize",
  "fmgr_seams",
  "mcx",
  "name",

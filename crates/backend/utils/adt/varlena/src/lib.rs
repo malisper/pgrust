@@ -768,3 +768,103 @@ pub fn split_identifier_string(
         }
     }
 }
+
+#[cold]
+fn invalid_surrogate_pair() -> Box<PgError> {
+    Box::new(
+        PgError::error("invalid Unicode surrogate pair")
+            .with_sqlstate(types_error::ERRCODE_SYNTAX_ERROR),
+    )
+}
+
+#[cold]
+fn invalid_codepoint(unicode: u32) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!("invalid Unicode code point: {unicode:04X}"))
+            .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE),
+    )
+}
+
+#[cold]
+fn invalid_unicode_escape() -> Box<PgError> {
+    Box::new(
+        PgError::error("invalid Unicode escape")
+            .with_sqlstate(types_error::ERRCODE_SYNTAX_ERROR)
+            .with_hint("Unicode escapes must be \\XXXX, \\+XXXXXX, \\uXXXX, or \\UXXXXXXXX."),
+    )
+}
+
+fn hexval_n(s: &[u8], n: usize) -> Option<u32> {
+    let mut v = 0u32;
+    for &c in s.get(..n)? {
+        v = (v << 4) | (c as char).to_digit(16)?;
+    }
+    Some(v)
+}
+
+pub fn unistr<'mcx>(mcx: Mcx<'mcx>, input: &[u8]) -> PgResult<Varlena<'mcx>> {
+    use wchar::{
+        is_utf16_surrogate_first, is_utf16_surrogate_second, is_valid_unicode_codepoint,
+        surrogate_pair_to_codepoint,
+    };
+    let mut out: PgVec<'mcx, u8> = image_with_header(mcx, 0)?;
+    let mut s = input;
+    let mut pair_first: u32 = 0;
+
+    while let Some(&c0) = s.first() {
+        if c0 == b'\\' {
+            let (unicode, adv) = if s.get(1) == Some(&b'\\') {
+                if pair_first != 0 {
+                    return Err(invalid_surrogate_pair());
+                }
+                mcx::vec_append_bytes(&mut out, b"\\")?;
+                s = &s[2..];
+                continue;
+            } else if let Some(u) = hexval_n(&s[1..], 4) {
+                (u, 5)
+            } else if s.get(1) == Some(&b'u') && hexval_n(&s[2..], 4).is_some() {
+                (hexval_n(&s[2..], 4).expect("checked"), 6)
+            } else if s.get(1) == Some(&b'+') && hexval_n(&s[2..], 6).is_some() {
+                (hexval_n(&s[2..], 6).expect("checked"), 8)
+            } else if s.get(1) == Some(&b'U') && hexval_n(&s[2..], 8).is_some() {
+                (hexval_n(&s[2..], 8).expect("checked"), 10)
+            } else {
+                return Err(invalid_unicode_escape());
+            };
+
+            if !is_valid_unicode_codepoint(unicode) {
+                return Err(invalid_codepoint(unicode));
+            }
+            let mut unicode = unicode;
+            if pair_first != 0 {
+                if is_utf16_surrogate_second(unicode) {
+                    unicode = surrogate_pair_to_codepoint(pair_first, unicode);
+                    pair_first = 0;
+                } else {
+                    return Err(invalid_surrogate_pair());
+                }
+            } else if is_utf16_surrogate_second(unicode) {
+                return Err(invalid_surrogate_pair());
+            }
+
+            if is_utf16_surrogate_first(unicode) {
+                pair_first = unicode;
+            } else {
+                let cbuf = mbutils::pg_unicode_to_server(mcx, unicode)?;
+                mcx::vec_append_bytes(&mut out, &cbuf)?;
+            }
+            s = &s[adv..];
+        } else {
+            if pair_first != 0 {
+                return Err(invalid_surrogate_pair());
+            }
+            mcx::vec_append_bytes(&mut out, &[c0])?;
+            s = &s[1..];
+        }
+    }
+
+    if pair_first != 0 {
+        return Err(invalid_surrogate_pair());
+    }
+    Ok(Varlena::from_image(out))
+}
