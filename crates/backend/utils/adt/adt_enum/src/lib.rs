@@ -82,12 +82,15 @@ pub fn enum_out(enumval: Oid) -> PgResult<PgEnumShape> {
 
 // enum_cmp_internal (enum.c:251). fn_extra memoizes the resolved enum *type*
 // OID (C caches the typcache pointer; same lookup shape, seam-safe carrier).
+// C divergence: the tuplesort comparison shim calls flinfo-less (C's shim
+// builds one), so a None flinfo skips memoization — the odd-OID fallback then
+// pays an ENUMOID probe per comparison (cold; C Assert(flinfo) covered by the
+// fmgr surface always passing one).
 fn enum_cmp_internal(
     arg1: Oid,
     arg2: Oid,
     flinfo: Option<&mut FmgrInfo>,
 ) -> PgResult<i32> {
-    debug_assert!(flinfo.is_some(), "enum comparison called without flinfo");
     if arg1 == arg2 {
         return Ok(0);
     }
