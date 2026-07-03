@@ -1848,6 +1848,7 @@ dependencies = [
  "nodeindexonlyscan",
  "nodeindexscan",
  "nodelimit",
+ "nodematerial",
  "nodemergejoin",
  "nodemodifytable",
  "nodenestloop",
@@ -3467,6 +3468,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "nbtree_xlog"
+version = "0.1.0"
+
+[[package]]
 name = "nodeagg"
 version = "0.0.0"
 dependencies = [
@@ -3718,6 +3723,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "nodematerial"
+version = "0.1.0"
+dependencies = [
+ "exectuples",
+ "executils",
+ "init_small",
+ "mcx",
+ "tuplestore",
+ "types_error",
+ "types_nodes",
+ "types_slot",
+ "types_tuple",
+]
+
+[[package]]
 name = "nodemergejoin"
 version = "0.1.0"
 dependencies = [
@@ -3865,6 +3885,7 @@ name = "nodenestloop"
 version = "0.1.0"
 dependencies = [
  "execexpr",
+ "exectuples",
  "executils",
  "init_small",
  "mcx",
@@ -6221,6 +6242,7 @@ dependencies = [
  "nodeindexonlyscan",
  "nodeindexscan",
  "nodelimit",
+ "nodematerial",
  "nodemergejoin",
  "nodenestloop",
  "nodeseqscan",
