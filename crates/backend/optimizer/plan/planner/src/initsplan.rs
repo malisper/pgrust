@@ -1285,11 +1285,11 @@ fn add_base_clause_to_rel(run: &mut PlannerRun<'_>, relid: i32, rinfo: RinfoId) 
 // restriction_is_always_true / _false (initsplan.c), NullTest leg only: the
 // OR leg reads orclause sub-RestrictInfos, which stay None here (documented
 // make_restrictinfo divergence).
-fn restriction_is_always_true(run: &PlannerRun<'_>, rinfo: RinfoId) -> bool {
+pub(crate) fn restriction_is_always_true(run: &PlannerRun<'_>, rinfo: RinfoId) -> bool {
     restriction_nulltest_verdict(run, rinfo, types_nodes::primnodes::NullTestType::IS_NOT_NULL)
 }
 
-fn restriction_is_always_false(run: &PlannerRun<'_>, rinfo: RinfoId) -> bool {
+pub(crate) fn restriction_is_always_false(run: &PlannerRun<'_>, rinfo: RinfoId) -> bool {
     restriction_nulltest_verdict(run, rinfo, types_nodes::primnodes::NullTestType::IS_NULL)
 }
 

@@ -193,16 +193,19 @@ pub(crate) fn add_relation_new_constraints<'mcx>(
     Ok(cooked)
 }
 
-// AddRelationNotNullConstraints, CREATE TABLE column-constraint arm (no
-// inheritance sources; attnotnull was already set by BuildDescForRelation).
+// AddRelationNotNullConstraints (heap.c): local column constraints first
+// (inhcount = matching parents), then leftover inherited ones with
+// conislocal=false. attnotnull was already set by BuildDescForRelation.
 pub(crate) fn add_relation_not_null_constraints<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     nnconstraints: &NodeList<'mcx>,
+    old_notnulls: &[crate::inheritance::InheritedNotNull<'mcx>],
 ) -> PgResult<()> {
     let relname = core::str::from_utf8(rel.rd_rel.relname.name_str()).expect("relname");
     let mut nnnames: PgVec<'mcx, &str> = PgVec::new_in(mcx);
     let mut seen_attnums: PgVec<'mcx, AttrNumber> = PgVec::new_in(mcx);
+    let mut old_pending: PgVec<'mcx, bool> = mcx::vec_from_elem_in(mcx, true, old_notnulls.len());
     for cnode in nnconstraints.iter() {
         let cdef = cnode.as_variant::<Constraint>().expect("Constraint");
         debug_assert!(cdef.contype == ConstrType::CONSTR_NOTNULL);
@@ -225,6 +228,25 @@ pub(crate) fn add_relation_not_null_constraints<'mcx>(
             );
         }
         seen_attnums.push(attnum);
+        let mut inhcount: i16 = 0;
+        for (i, old) in old_notnulls.iter().enumerate() {
+            if old_pending[i] && old.attnum == attnum {
+                if cdef.is_no_inherit {
+                    return Err(Box::new(
+                        PgError::new(
+                            types_error::ERROR,
+                            format!(
+                                "cannot define not-null constraint with NO INHERIT on column \"{colname}\""
+                            ),
+                        )
+                        .with_detail("The column has an inherited not-null constraint.")
+                        .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH),
+                    ));
+                }
+                inhcount += 1;
+                old_pending[i] = false;
+            }
+        }
         let name = match cdef.conname {
             Some(given) => {
                 if pg_constraint::ConstraintNameIsUsed(
@@ -266,7 +288,61 @@ pub(crate) fn add_relation_not_null_constraints<'mcx>(
         );
         entry.conkey = &conkey;
         entry.n_keys = 1;
+        entry.inhcount = inhcount;
         entry.is_no_inherit = cdef.is_no_inherit;
+        pg_constraint::CreateConstraintEntry(mcx, &entry)?;
+    }
+
+    for outer in 0..old_notnulls.len() {
+        if !old_pending[outer] {
+            continue;
+        }
+        let cooked = &old_notnulls[outer];
+        let mut conname: Option<&str> = Some(cooked.name);
+        let mut inhcount: i16 = 1;
+        for rest in outer + 1..old_notnulls.len() {
+            if old_pending[rest] && old_notnulls[rest].attnum == cooked.attnum {
+                inhcount += 1;
+                old_pending[rest] = false;
+            }
+        }
+        if let Some(n) = conname {
+            if nnnames.iter().any(|&t| t == n) {
+                conname = None;
+            }
+        }
+        let name = match conname {
+            Some(n) => mcx::PgString::from_str_in(n, mcx)?,
+            None => {
+                let colname = {
+                    let att = rel.rd_att.attr(cooked.attnum as usize - 1);
+                    str_in(
+                        mcx,
+                        core::str::from_utf8(att.attname.name_str()).expect("attname UTF-8"),
+                    )?
+                };
+                pg_constraint::ChooseConstraintName(
+                    mcx,
+                    relname,
+                    Some(colname),
+                    "not_null",
+                    rel.rd_rel.relnamespace,
+                    &nnnames,
+                )?
+            }
+        };
+        nnnames.push(str_in(mcx, name.as_str())?);
+        let conkey = [cooked.attnum];
+        let mut entry = pg_constraint::ConstraintEntry::base(
+            name.as_str(),
+            rel.rd_rel.relnamespace,
+            pg_constraint::CONSTRAINT_NOTNULL,
+            rel.rd_id,
+        );
+        entry.conkey = &conkey;
+        entry.n_keys = 1;
+        entry.is_local = false;
+        entry.inhcount = inhcount;
         pg_constraint::CreateConstraintEntry(mcx, &entry)?;
     }
     Ok(())

@@ -21,3 +21,4 @@ table = { path = "../../access/table/table" }
 genam = { path = "../../access/index/genam" }
 catalog_indexing = { path = "../catalog_indexing" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
+lmgr = { path = "../../storage/lmgr/lmgr" }
