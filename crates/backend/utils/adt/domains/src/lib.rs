@@ -41,7 +41,9 @@ fn domain_state_setup(domainType: Oid) -> PgResult<DomainIOData> {
 }
 
 pub fn fc_domain_in(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    let string = if fcinfo.args[0].isnull {
+    // InputFunctionCallSafe passes a NULL cstring with isnull=false (C's
+    // convention); NULL-ness of arg 0 is the pointer, not the null flag.
+    let string = if fcinfo.args[0].isnull || fcinfo.arg(0).as_usize() == 0 {
         None
     } else {
         // SAFETY: non-null arg 0 of domain_in is a cstring.
