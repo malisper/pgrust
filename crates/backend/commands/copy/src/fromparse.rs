@@ -860,10 +860,41 @@ impl<'mcx, 's> CopyFromState<'mcx, 's> {
                     self.typioparams[i],
                     self.atttypmods[i],
                     row_mcx,
-                    None,
+                    self.escontext.as_deref_mut(),
                     &mut values[m],
                 )?;
-                debug_assert!(ok);
+                if !ok {
+                    // Soft error: abandon the row, cur_att* kept for the
+                    // reject-limit error context (C parity).
+                    self.num_errors += 1;
+                    if self.opts.log_verbosity == crate::CopyLogVerbosityChoice::Verbose {
+                        let msg = match self.cur_attval_off {
+                            Some(off) => {
+                                let bytes = &self.attribute_buf[off as usize..];
+                                let nul =
+                                    bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+                                let attval = super::from::limit_printout_length(&bytes[..nul]);
+                                format!(
+                                    "skipping row due to data type incompatibility at line {} \
+                                     for column \"{}\": \"{attval}\"",
+                                    self.cur_lineno,
+                                    self.attname(m)
+                                )
+                            }
+                            None => format!(
+                                "skipping row due to data type incompatibility at line {} \
+                                 for column \"{}\": null input",
+                                self.cur_lineno,
+                                self.attname(m)
+                            ),
+                        };
+                        ereport(types_error::NOTICE)
+                            .errmsg(msg)
+                            .errcontext_msg(format!("COPY {}", self.relname))
+                            .finish(loc("CopyFromTextLikeOneRow"))?;
+                    }
+                    return Ok(true);
+                }
             }
             self.cur_attidx = None;
             self.cur_attval_off = None;
@@ -1035,6 +1066,9 @@ pub mod bench_internals {
             defexprs: PgVec::new_in(mcx),
             defmap: PgVec::new_in(mcx),
             where_clause: types_nodes::NodeList::nil(),
+            relname: String::new(),
+            escontext: None,
+            num_errors: 0,
             defaults: mcx::vec_from_elem_in(mcx, false, max_fields),
             bytes_processed: 0,
         }

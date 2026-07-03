@@ -121,6 +121,9 @@ fn mk_state<'mcx>(
         defexprs: PgVec::new_in(mcx),
         defmap: PgVec::new_in(mcx),
         where_clause: types_nodes::NodeList::nil(),
+        relname: String::new(),
+        escontext: None,
+        num_errors: 0,
         defaults: mcx::vec_from_elem_in(mcx, false, 8),
         bytes_processed: 0,
     }
