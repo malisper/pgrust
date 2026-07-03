@@ -215,3 +215,45 @@ fn hold_registry_roundtrip_and_staleness() {
     assert!(stale.is_err());
     hold::end(types_portal::TuplestoreHandle::NULL);
 }
+#[test]
+fn putvalues_packs_varlena_short_form() {
+    let mcx = leaked_mcx();
+    let att = FormData_pg_attribute {
+        attnum: 1,
+        atttypid: 25,
+        attlen: -1,
+        attbyval: false,
+        attalign: TYPALIGN_INT,
+        attstorage: b'x' as i8,
+        ..Default::default()
+    };
+    let mut attrs = PgVec::new_in(mcx);
+    let mut compact = PgVec::new_in(mcx);
+    compact.push(CompactAttribute::populate_from(&att));
+    attrs.push(att);
+    let desc = Rc::new(TupleDescData {
+        natts: 1, tdtypeid: 2249, tdtypmod: -1, tdrefcount: -1,
+        constr: None, compact_attrs: compact, attrs,
+    });
+
+    let mut image: Vec<u8> = vec![];
+    let payload = b"4MB";
+    let hdr = ((payload.len() + 4) as u32) << 2;
+    image.extend_from_slice(&hdr.to_ne_bytes());
+    image.extend_from_slice(payload);
+    let image = Box::leak(image.into_boxed_slice());
+    let d = Datum::from_usize(image.as_ptr() as usize);
+
+    let mtup = heaptuple::heap_form_minimal_tuple(mcx, &desc, &[d], &[false], 0).unwrap();
+    let mut slot = exectuples::make_tuple_table_slot(mcx, TupleSlotKind::MinimalTuple, Some(desc));
+    exectuples::exec_store_minimal_tuple_owned(&mut slot, mcx, mtup);
+    exectuples::slot_getallattrs(&mut slot);
+    // heap_form packs the 4B-header input to the 1B short form (C fill_val).
+    let out = slot.base().tts_values[0];
+    let p = out.as_usize() as *const u8;
+    let b0 = unsafe { *p };
+    assert_eq!(b0 & 0x01, 1, "short-form varlena header");
+    assert_eq!((b0 >> 1) as usize, 1 + payload.len());
+    let data = unsafe { std::slice::from_raw_parts(p.add(1), payload.len()) };
+    assert_eq!(data, payload);
+}

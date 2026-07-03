@@ -26,6 +26,7 @@ pub enum DestReceiver<'mcx> {
     PrintTup(printtup::DrPrinttup<'mcx>),  // printtup_create_DR(Remote|RemoteExecute)
     PrintSimple,                           // printsimpleDR shell; callbacks in printsimple.c
     SpiPrintTup,                           // spi_printtupDR shell; callbacks in spi.c
+    Tuplestore(tstore_receiver::DrTstore), // CreateTuplestoreDestReceiver (tstoreReceiver.c)
 }
 
 impl<'mcx> DestReceiver<'mcx> {
@@ -35,19 +36,16 @@ impl<'mcx> DestReceiver<'mcx> {
         match self {
             DestReceiver::DoNothing => Ok(true),
             DestReceiver::PrintTup(dr) => dr.receive_slot(slot),
+            DestReceiver::Tuplestore(dr) => dr.receive_slot(slot),
             other => other.unported("receiveSlot"),
         }
     }
 
-    pub fn startup(
-        &mut self,
-        mcx: Mcx<'mcx>,
-        operation: i32,
-        typeinfo: &TupleDescData<'_>,
-    ) -> PgResult<()> {
+    pub fn startup(&mut self, operation: i32, typeinfo: &TupleDescData<'_>) -> PgResult<()> {
         match self {
             DestReceiver::DoNothing => Ok(()),
-            DestReceiver::PrintTup(dr) => dr.startup(mcx, operation, typeinfo),
+            DestReceiver::PrintTup(dr) => dr.startup(operation, typeinfo),
+            DestReceiver::Tuplestore(dr) => dr.startup(operation, typeinfo),
             other => other.unported("rStartup"),
         }
     }
@@ -59,6 +57,10 @@ impl<'mcx> DestReceiver<'mcx> {
             | DestReceiver::PrintSimple
             | DestReceiver::SpiPrintTup => Ok(()),
             DestReceiver::PrintTup(dr) => {
+                dr.shutdown();
+                Ok(())
+            }
+            DestReceiver::Tuplestore(dr) => {
                 dr.shutdown();
                 Ok(())
             }
@@ -75,6 +77,7 @@ impl<'mcx> DestReceiver<'mcx> {
             DestReceiver::PrintTup(dr) => dr.mydest,
             DestReceiver::PrintSimple => CommandDest::RemoteSimple,
             DestReceiver::SpiPrintTup => CommandDest::Spi,
+            DestReceiver::Tuplestore(_) => CommandDest::Tuplestore,
         }
     }
 
@@ -97,6 +100,18 @@ pub fn SetRemoteDestReceiverParams<'mcx>(receiver: &mut DestReceiver<'mcx>, port
     }
 }
 
+// SetTuplestoreDestReceiverParams (tstoreReceiver.c) at the enum boundary.
+pub fn SetTuplestoreDestReceiverParams(
+    receiver: &mut DestReceiver<'_>,
+    tstore: types_portal::TuplestoreHandle,
+    detoast: bool,
+) {
+    match receiver {
+        DestReceiver::Tuplestore(dr) => tstore_receiver::set_params(dr, tstore, detoast),
+        _ => panic!("SetTuplestoreDestReceiverParams: not a tuplestore receiver"),
+    }
+}
+
 // DestReceiver *None_Receiver: C's shared static donothingDR.
 pub const NONE_RECEIVER: DestReceiver<'static> = DestReceiver::DoNothing;
 
@@ -113,9 +128,9 @@ pub fn CreateDestReceiver<'mcx>(dest: CommandDest) -> DestReceiver<'mcx> {
         CommandDest::None => DestReceiver::DoNothing,
         CommandDest::Debug => DestReceiver::DebugTup,
         CommandDest::Spi => DestReceiver::SpiPrintTup,
+        CommandDest::Tuplestore => DestReceiver::Tuplestore(tstore_receiver::tstore_create_DR()),
         // Constructors owned by unported units.
-        CommandDest::Tuplestore
-        | CommandDest::IntoRel
+        CommandDest::IntoRel
         | CommandDest::CopyOut
         | CommandDest::SqlFunction
         | CommandDest::TransientRel

@@ -27,7 +27,7 @@ pub fn begin_tup_output_tupdesc<'d, 'mcx>(
 ) -> PgResult<TupOutputState<'d, 'mcx>> {
     let slot =
         exectuples::make_tuple_table_slot(mcx, TupleSlotKind::Virtual, Some(tupdesc.clone()));
-    dest.startup(mcx, CmdType::CMD_SELECT as i32, &tupdesc)?;
+    dest.startup(CmdType::CMD_SELECT as i32, &tupdesc)?;
     Ok(TupOutputState { slot, dest })
 }
 

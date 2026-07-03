@@ -55,6 +55,7 @@ fn create_dest_receiver_mydest_roundtrip() {
         CommandDest::RemoteExecute,
         CommandDest::RemoteSimple,
         CommandDest::Spi,
+        CommandDest::Tuplestore,
     ] {
         assert_eq!(CreateDestReceiver(dest).mydest(), dest);
     }
@@ -64,7 +65,6 @@ fn create_dest_receiver_mydest_roundtrip() {
 #[test]
 fn create_dest_receiver_unported_owners_panic() {
     for dest in [
-        CommandDest::Tuplestore,
         CommandDest::IntoRel,
         CommandDest::CopyOut,
         CommandDest::SqlFunction,
@@ -101,7 +101,7 @@ fn donothing_receiver_is_functional() {
     let mut r = CreateDestReceiver(CommandDest::None);
     let desc = empty_desc(ctx.mcx());
     let mut slot = virtual_slot(ctx.mcx());
-    r.startup(ctx.mcx(), 1, &desc).unwrap();
+    r.startup(1, &desc).unwrap();
     assert!(r.receive_slot(&mut slot).unwrap());
     r.shutdown().unwrap();
     r.destroy();
