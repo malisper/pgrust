@@ -18,7 +18,7 @@ seam_core::seam!(
     ) -> PgResult<PlannedStmt<'mcx>>
 );
 
-/// amcostestimate output shape (C fills the six out-params of the AM handler).
+/// amcostestimate output shape (C fills the out-params of the AM handler).
 pub struct AmCostEstimate {
     pub index_startup_cost: f64,
     pub index_total_cost: f64,
