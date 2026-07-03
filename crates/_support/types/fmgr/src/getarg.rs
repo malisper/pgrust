@@ -200,6 +200,10 @@ impl FunctionCallInfoBaseData {
     /// Safety: arg `i` is a non-null `cstring` (`typlen == -2`): live, NUL-terminated.
     #[inline]
     pub unsafe fn arg_cstring(&self, i: usize) -> &CStr {
+        debug_assert!(
+            self.arg(i).as_usize() != 0,
+            "arg_cstring({i}): NULL cstring pointer (non-strict input convention: NULL rides the pointer, not isnull)"
+        );
         unsafe { CStr::from_ptr(self.arg_ptr(i).cast()) }
     }
 

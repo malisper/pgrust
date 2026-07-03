@@ -223,8 +223,8 @@ mod heap {
     }
 
     // heapam_tuple_insert (heapam_handler.c): fetch the slot's heap tuple in
-    // place, heap_insert it, copy t_self back. Callers pass table-format
-    // slots (ri_newTupleSlot / table_slot_create), so no copy arm exists.
+    // place (virtual/minimal sources take the ExecFetchSlotHeapTuple copy
+    // arm), heap_insert it, copy t_self back.
     pub(super) fn tuple_insert<'mcx>(
         mcx: Mcx<'mcx>,
         rel: &Relation<'mcx>,
@@ -240,18 +240,28 @@ mod heap {
         );
         exectuples::exec_materialize_slot(slot, mcx)?;
         slot.base_mut().tts_tableOid = rel.rd_id;
-        let tuple = match slot {
-            SlotData::Heap(h) => h.tuple.as_mut(),
-            SlotData::BufferHeap(b) => b.base.tuple.as_mut(),
-            _ => panic!(
-                "heapam_tuple_insert (heapam_handler.c): non-heap slot copy arm \
-                 not ported"
-            ),
-        }
-        .expect("materialized heap slot holds a tuple");
-        tuple.t_tableOid = rel.rd_id;
-        ::heapam::heap_insert(rel, tuple, cid, options)?;
-        let t_self = tuple.t_self;
+        let t_self = match slot {
+            SlotData::Heap(h) => {
+                let tuple = h.tuple.as_mut().expect("materialized heap slot holds a tuple");
+                tuple.t_tableOid = rel.rd_id;
+                ::heapam::heap_insert(rel, tuple, cid, options)?;
+                tuple.t_self
+            }
+            SlotData::BufferHeap(b) => {
+                let tuple = b.base.tuple.as_mut().expect("materialized heap slot holds a tuple");
+                tuple.t_tableOid = rel.rd_id;
+                ::heapam::heap_insert(rel, tuple, cid, options)?;
+                tuple.t_self
+            }
+            // ExecFetchSlotHeapTuple copy arm (virtual/minimal source slots,
+            // e.g. multi-row VALUES routed into partitions).
+            _ => {
+                let mut tuple = exectuples::exec_copy_slot_heap_tuple(slot, mcx, mcx)?;
+                tuple.t_tableOid = rel.rd_id;
+                ::heapam::heap_insert(rel, &mut tuple, cid, options)?;
+                tuple.t_self
+            }
+        };
         slot.base_mut().tts_tid = t_self;
         Ok(())
     }

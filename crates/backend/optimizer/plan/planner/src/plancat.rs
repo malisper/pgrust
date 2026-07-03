@@ -31,14 +31,16 @@ pub fn get_relation_info<'mcx>(
     inhparent: bool,
     rel: RelId,
 ) -> PgResult<()> {
-    assert!(!inhparent, "get_relation_info (plancat.c): inhparent; M2 partition lane");
     let mcx = run.mcx;
     let varno = run.root.rel(rel).relid;
 
     let relation = table::table_open(mcx, relation_object_id, NoLock)?;
     let relkind = relation.rd_rel.relkind;
-    if !(relkind_has_table_am(relkind) || relkind == RELKIND_SEQUENCE) {
-        panic!("get_relation_info (plancat.c): relkind {relkind}; M2 foreign/partitioned lane");
+    if !(relkind_has_table_am(relkind)
+        || relkind == RELKIND_SEQUENCE
+        || relkind == types_rel::RELKIND_PARTITIONED_TABLE)
+    {
+        panic!("get_relation_info (plancat.c): relkind {relkind}; M2 foreign lane");
     }
     // C's !RelationIsPermanent && RecoveryInProgress guard: no hot-standby
     // sessions exist, so the recovery arm is compile-time false.
@@ -59,18 +61,23 @@ pub fn get_relation_info<'mcx>(
         r.attr_widths = vec_from_elem_in(mcx, 0i32, span);
     }
 
-    for i in 0..natts as usize {
-        let attr = relation.rd_att.compact_attr(i);
-        debug_assert!(attr.attnullability != ATTNULLABLE_UNKNOWN);
-        if attr.attnullability == ATTNULLABLE_VALID {
-            debug_assert!(!attr.attisdropped);
-            let nn = relids_singleton(mcx, (i + 1) as u32);
-            let cur = run.root.rel_mut(rel).notnullattnums.take();
-            run.root.rel_mut(rel).notnullattnums = relids_union(mcx, &cur, &nn);
+    // C leaves notnullattnums unpopulated for traditional inheritance parents.
+    if !inhparent || relkind == types_rel::RELKIND_PARTITIONED_TABLE {
+        for i in 0..natts as usize {
+            let attr = relation.rd_att.compact_attr(i);
+            debug_assert!(attr.attnullability != ATTNULLABLE_UNKNOWN);
+            if attr.attnullability == ATTNULLABLE_VALID {
+                debug_assert!(!attr.attisdropped);
+                let nn = relids_singleton(mcx, (i + 1) as u32);
+                let cur = run.root.rel_mut(rel).notnullattnums.take();
+                run.root.rel_mut(rel).notnullattnums = relids_union(mcx, &cur, &nn);
+            }
         }
     }
 
-    {
+    // An inheritance parent's size is the appendrel's, computed in
+    // set_append_rel_size; pages/tuples stay zero here.
+    if !inhparent {
         let min_attr = run.root.rel(rel).min_attr;
         let empty = PgVec::new_in(mcx);
         let mut widths = core::mem::replace(&mut run.root.rel_mut(rel).attr_widths, empty);
@@ -85,7 +92,16 @@ pub fn get_relation_info<'mcx>(
 
     run.root.rel_mut(rel).rel_parallel_workers = relation.get_parallel_workers(-1);
 
-    let hasindex = relation.rd_rel.relhasindex;
+    let hasindex = if inhparent {
+        assert!(
+            !(relkind == types_rel::RELKIND_PARTITIONED_TABLE && relation.rd_rel.relhasindex),
+            "get_relation_info (plancat.c): partitioned indexes as unique proofs; \
+             partitioned-index lane"
+        );
+        false
+    } else {
+        relation.rd_rel.relhasindex
+    };
     let mut indexinfos: PgVec<'mcx, &'mcx IndexOptInfo<'mcx>> = PgVec::new_in(mcx);
     if hasindex {
         let indexoidlist =
@@ -264,8 +280,9 @@ pub fn estimate_rel_size(
 ) -> PgResult<(BlockNumber, f64, f64)> {
     let relkind = rel.rd_rel.relkind;
     if !relkind_has_table_am(relkind) {
-        if relkind == RELKIND_SEQUENCE {
-            // C final else arm: just use whatever's in pg_class.
+        if relkind == RELKIND_SEQUENCE || relkind == types_rel::RELKIND_PARTITIONED_TABLE {
+            // C final else arm: just use whatever's in pg_class (partitioned
+            // tables are storageless; reached with ONLY / zero partitions).
             return Ok((rel.rd_rel.relpages as BlockNumber, rel.rd_rel.reltuples as f64, 0.0));
         }
         panic!("estimate_rel_size (plancat.c): relkind {relkind}; M2 lane");
@@ -398,6 +415,9 @@ pub fn restriction_selectivity<'mcx>(
                 run, operatorid, args, varrelid, inputcollid, ptype, negate,
             )?
         }
+        3169 => crate::rangetypes_selfuncs::rangesel(run, operatorid, args, varrelid)?,
+        4243 => crate::multirangetypes_selfuncs::multirangesel(run, operatorid, args, varrelid)?,
+        3560 => crate::network_selfuncs::networksel(run, operatorid, args, varrelid)?,
         other => panic!(
             "restriction_selectivity (plancat.c): oprrest {other}; M2 selfuncs lane"
         ),
@@ -443,6 +463,10 @@ pub fn join_selectivity<'mcx>(
         F_AREAJOINSEL => 0.005,
         F_POSITIONJOINSEL => 0.1,
         F_CONTJOINSEL => 0.001,
+        106 => crate::selfuncs::neqjoinsel(run, operatorid, args, jointype, sjinfo)?,
+        3561 => crate::network_selfuncs::networkjoinsel(run, operatorid, args, sjinfo)?,
+        // matchingjoinsel (selfuncs.c) punts.
+        5041 => crate::selfuncs::DEFAULT_MATCHING_SEL,
         other => panic!("join_selectivity (plancat.c): oprjoin {other}; M2 selfuncs lane"),
     };
     if !(0.0..=1.0).contains(&result) {

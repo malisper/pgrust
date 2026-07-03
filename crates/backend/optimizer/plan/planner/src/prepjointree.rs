@@ -554,6 +554,74 @@ fn copy_expr<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>) -> PgResult<Node<'mcx>> {
                 },
             )
         }
+        NodeTag::T_FuncExpr => {
+            let f = node.as_func_expr().expect("FuncExpr");
+            let mut args = NodeList::nil();
+            for a in &f.args {
+                args.lappend(mcx, copy_expr(mcx, a)?)?;
+            }
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::FuncExpr {
+                    funcid: f.funcid,
+                    funcresulttype: f.funcresulttype,
+                    funcretset: f.funcretset,
+                    funcvariadic: f.funcvariadic,
+                    funcformat: f.funcformat,
+                    funccollid: f.funccollid,
+                    inputcollid: f.inputcollid,
+                    args,
+                    location: f.location,
+                },
+            )
+        }
+        NodeTag::T_ArrayExpr => {
+            let a = node.as_array_expr().expect("ArrayExpr");
+            let mut elements = NodeList::nil();
+            for e in &a.elements {
+                elements.lappend(mcx, copy_expr(mcx, e)?)?;
+            }
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::ArrayExpr {
+                    array_typeid: a.array_typeid,
+                    array_collid: a.array_collid,
+                    element_typeid: a.element_typeid,
+                    elements,
+                    multidims: a.multidims,
+                    list_start: a.list_start,
+                    list_end: a.list_end,
+                    location: a.location,
+                },
+            )
+        }
+        NodeTag::T_CoerceViaIO => {
+            let c = node.as_coerce_via_io().expect("CoerceViaIO");
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::CoerceViaIO {
+                    arg: copy_expr(mcx, c.arg)?,
+                    resulttype: c.resulttype,
+                    resultcollid: c.resultcollid,
+                    coerceformat: c.coerceformat,
+                    location: c.location,
+                },
+            )
+        }
+        NodeTag::T_RelabelType => {
+            let r = node.as_relabel_type().expect("RelabelType");
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::RelabelType {
+                    arg: copy_expr(mcx, r.arg)?,
+                    resulttype: r.resulttype,
+                    resulttypmod: r.resulttypmod,
+                    resultcollid: r.resultcollid,
+                    relabelformat: r.relabelformat,
+                    location: r.location,
+                },
+            )
+        }
         other => panic!(
             "copyObject (pullup_replace_vars): {other:?} copy arm unported \
              (simple-view expression set)"

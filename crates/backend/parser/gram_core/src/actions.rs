@@ -9,13 +9,15 @@ use types_nodes::parsenodes::{
     AccessPriv, DropBehavior, DropStmt, ExecuteStmt, FetchStmt, GrantStmt, GrantTargetType,
     GroupingSetKind, ListenStmt, NotifyStmt, ObjectType, PrepareStmt, RenameStmt, RoleSpec,
     RoleSpecType, SetOperation, TransactionStmt, TransactionStmtKind, TruncateStmt, UnlistenStmt,
-    VacuumRelation,
+    VacuumRelation, ReplicaIdentityStmt,
     VacuumStmt, ClusterStmt, ReindexObjectType, ReindexStmt, VariableSetKind, VariableSetStmt, VariableShowStmt, WithClause,
     CURSOR_OPT_ASENSITIVE, CURSOR_OPT_BINARY, CURSOR_OPT_FAST_PLAN, CURSOR_OPT_HOLD,
     CURSOR_OPT_INSENSITIVE, CURSOR_OPT_NO_SCROLL, CURSOR_OPT_SCROLL, FETCH_ALL,
+    REPLICA_IDENTITY_DEFAULT, REPLICA_IDENTITY_FULL, REPLICA_IDENTITY_INDEX,
+    REPLICA_IDENTITY_NOTHING,
 };
 use types_nodes::primnodes::{
-    CaseExpr, CaseWhen, CoalesceExpr, GroupingFunc, JoinExpr, MinMaxExpr, MinMaxOp,
+    CaseExpr, CaseWhen, CoalesceExpr, CollateClause, GroupingFunc, JoinExpr, MinMaxExpr, MinMaxOp,
     OverridingKind, RowExpr,
     SQLValueFunction, SQLValueFunctionOp,
 };
@@ -224,6 +226,13 @@ impl<'mcx> Parser<'mcx> {
             1851 => {
                 let name = view.v(2).str_val();
                 *yyval = YYSTYPE::Alias(Some(mk_alias(mcx, name)?));
+            }
+            1852 => {
+                let a = Node::mk_mut(
+                    mcx,
+                    Alias { aliasname: Some(view.v(1).str_val()), colnames: view.v(3).list() },
+                )?;
+                *yyval = YYSTYPE::Alias(Some(a.seal_ref()));
             }
             1853 => {
                 let name = view.v(1).str_val();
@@ -3188,8 +3197,7 @@ impl<'mcx> Parser<'mcx> {
                 )?;
                 *yyval = YYSTYPE::Node(Some(f.seal()));
             }
-            // CURRENT_DATE .. LOCALTIMESTAMP[(n)] (makeSQLValueFunction; the
-            // CURRENT_ROLE..CURRENT_SCHEMA name ops 2149-2155 stay louds).
+            // CURRENT_DATE .. LOCALTIMESTAMP[(n)] (makeSQLValueFunction).
             2140..=2148 => {
                 use SQLValueFunctionOp as Op;
                 let (op, typmod) = match rule {
@@ -3208,6 +3216,42 @@ impl<'mcx> Parser<'mcx> {
                     SQLValueFunction { op, r#type: 0, typmod, location: view.l(1) },
                 )?;
                 *yyval = YYSTYPE::Node(Some(n));
+            }
+            2149 | 2150 | 2151 | 2153 | 2154 | 2155 => {
+                use types_nodes::SQLValueFunctionOp::*;
+                let op = match rule {
+                    2149 => SVFOP_CURRENT_ROLE,
+                    2150 => SVFOP_CURRENT_USER,
+                    2151 => SVFOP_SESSION_USER,
+                    2153 => SVFOP_USER,
+                    2154 => SVFOP_CURRENT_CATALOG,
+                    _ => SVFOP_CURRENT_SCHEMA,
+                };
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    types_nodes::SQLValueFunction {
+                        op,
+                        r#type: 0,
+                        typmod: -1,
+                        location: view.l(1),
+                    },
+                )?));
+            }
+            // SYSTEM_USER: FuncCall via SystemFuncName.
+            2152 => {
+                let names = NodeList::make2(
+                    mcx,
+                    Node::mk_string(mcx, "pg_catalog")?,
+                    Node::mk_string(mcx, "system_user")?,
+                )?;
+                let f = make_func_call(
+                    mcx,
+                    names,
+                    NodeList::nil(),
+                    CoercionForm::COERCE_SQL_SYNTAX,
+                    view.l(1),
+                )?;
+                *yyval = YYSTYPE::Node(Some(f.seal()));
             }
             // EXTRACT '(' extract_list ')'.
             2157 => {
@@ -3972,51 +4016,10 @@ impl<'mcx> Parser<'mcx> {
                 n.missing_ok = rule == 303 || rule == 305;
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
-            // alter_table_cmd: ALTER opt_column ColId alter_column_default
-            306 => {
-                let mut n = Node::build::<AlterTableCmd>(mcx)?;
-                n.subtype = AlterTableType::AT_ColumnDefault;
-                n.name = Some(view.v(3).str_val());
-                n.def = view.v(4).node();
-                *yyval = YYSTYPE::Node(Some(n.seal()));
-            }
-            // alter_table_cmd: ALTER opt_column ColId {DROP|SET} NOT NULL_P
-            307 | 308 => {
-                let mut n = Node::build::<AlterTableCmd>(mcx)?;
-                n.subtype = if rule == 307 {
-                    AlterTableType::AT_DropNotNull
-                } else {
-                    AlterTableType::AT_SetNotNull
-                };
-                n.name = Some(view.v(3).str_val());
-                *yyval = YYSTYPE::Node(Some(n.seal()));
-            }
-            // alter_table_cmd: ALTER opt_column ColId opt_set_data TYPE_P
-            // Typename opt_collate_clause alter_using
-            324 => {
-                let mut def = Node::build::<ColumnDef>(mcx)?;
-                def.typeName = view.v(6).node();
-                debug_assert!(view.v(7).node().is_none()); // COLLATE arm rule 366 stays loud
-                def.raw_default = view.v(8).node();
-                def.location = view.l(3);
-                let defnode = def.seal();
-                let mut n = Node::build::<AlterTableCmd>(mcx)?;
-                n.subtype = AlterTableType::AT_AlterColumnType;
-                n.name = Some(view.v(3).str_val());
-                n.def = Some(defnode);
-                *yyval = YYSTYPE::Node(Some(n.seal()));
-            }
-            // alter_table_cmd: ADD_P TableConstraint
-            326 => {
-                let mut n = Node::build::<AlterTableCmd>(mcx)?;
-                n.subtype = AlterTableType::AT_AddConstraint;
-                n.def = view.v(2).node();
-                *yyval = YYSTYPE::Node(Some(n.seal()));
-            }
             // alter_column_default: SET DEFAULT a_expr | DROP DEFAULT
             364 => *yyval = YYSTYPE::Node(view.v(3).node()),
             365 => *yyval = YYSTYPE::Node(Option::None),
-            // opt_collate_clause: /*EMPTY*/ (COLLATE arm 366 stays loud)
+            // opt_collate_clause: /*EMPTY*/
             367 => *yyval = YYSTYPE::Node(Option::None),
             // alter_using: USING a_expr | /*EMPTY*/
             368 => *yyval = YYSTYPE::Node(view.v(2).node()),
@@ -4065,6 +4068,345 @@ impl<'mcx> Parser<'mcx> {
                 n.subtype = AlterTableType::AT_DropColumn;
                 n.name = Some(view.v(3).str_val());
                 n.behavior = drop_behavior(view.v(4).ival());
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // alter_table_cmd: ALTER [COLUMN] col forms (execution is the
+            // tablecmds/parse_utilcmd named gates; 318/327/328 stay loud —
+            // identity-generated and fk-constraints lanes own their inputs).
+            306 => {
+                *yyval = alter_table_cmd(
+                    mcx,
+                    AlterTableType::AT_ColumnDefault,
+                    Some(view.v(3).str_val()),
+                    view.v(4).node(),
+                )?;
+            }
+            307 | 308 => {
+                let subtype = if rule == 307 {
+                    AlterTableType::AT_DropNotNull
+                } else {
+                    AlterTableType::AT_SetNotNull
+                };
+                *yyval = alter_table_cmd(mcx, subtype, Some(view.v(3).str_val()), None)?;
+            }
+            309 => {
+                *yyval = alter_table_cmd(
+                    mcx,
+                    AlterTableType::AT_SetExpression,
+                    Some(view.v(3).str_val()),
+                    view.v(8).node(),
+                )?;
+            }
+            310 | 311 => {
+                let mut n = Node::build::<AlterTableCmd>(mcx)?;
+                n.subtype = AlterTableType::AT_DropExpression;
+                n.name = Some(view.v(3).str_val());
+                n.missing_ok = rule == 311;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            312 => {
+                *yyval = alter_table_cmd(
+                    mcx,
+                    AlterTableType::AT_SetStatistics,
+                    Some(view.v(3).str_val()),
+                    view.v(6).node(),
+                )?;
+            }
+            313 => {
+                let colnum = view.v(3).ival();
+                if colnum <= 0 || colnum > i16::MAX as i32 {
+                    return Err(self.invalid_parameter_error(
+                        "column number must be in range from 1 to 32767",
+                        view.l(3),
+                    ));
+                }
+                let mut n = Node::build::<AlterTableCmd>(mcx)?;
+                n.subtype = AlterTableType::AT_SetStatistics;
+                n.num = colnum as i16;
+                n.def = view.v(6).node();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            314 | 315 => {
+                let subtype = if rule == 314 {
+                    AlterTableType::AT_SetOptions
+                } else {
+                    AlterTableType::AT_ResetOptions
+                };
+                let def = Node::mk_list(mcx, view.v(5).list())?;
+                *yyval = alter_table_cmd(mcx, subtype, Some(view.v(3).str_val()), Some(def))?;
+            }
+            316 | 317 => {
+                let subtype = if rule == 316 {
+                    AlterTableType::AT_SetStorage
+                } else {
+                    AlterTableType::AT_SetCompression
+                };
+                let def = Node::mk_string(mcx, view.v(5).str_val())?;
+                *yyval = alter_table_cmd(mcx, subtype, Some(view.v(3).str_val()), Some(def))?;
+            }
+            319 => {
+                let def = Node::mk_list(mcx, view.v(4).list())?;
+                *yyval = alter_table_cmd(
+                    mcx,
+                    AlterTableType::AT_SetIdentity,
+                    Some(view.v(3).str_val()),
+                    Some(def),
+                )?;
+            }
+            320 | 321 => {
+                let mut n = Node::build::<AlterTableCmd>(mcx)?;
+                n.subtype = AlterTableType::AT_DropIdentity;
+                n.name = Some(view.v(3).str_val());
+                n.missing_ok = rule == 321;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // ALTER [COLUMN] col [SET DATA] TYPE Typename opt_collate_clause
+            // alter_using
+            324 => {
+                let mut def = Node::build::<ColumnDef>(mcx)?;
+                def.typeName = view.v(6).node();
+                def.collClause = view.v(7).node();
+                def.raw_default = view.v(8).node();
+                def.location = view.l(3);
+                *yyval = alter_table_cmd(
+                    mcx,
+                    AlterTableType::AT_AlterColumnType,
+                    Some(view.v(3).str_val()),
+                    Some(def.seal()),
+                )?;
+            }
+            325 => {
+                let def = Node::mk_list(mcx, view.v(4).list())?;
+                *yyval = alter_table_cmd(
+                    mcx,
+                    AlterTableType::AT_AlterColumnGenericOptions,
+                    Some(view.v(3).str_val()),
+                    Some(def),
+                )?;
+            }
+            326 => {
+                *yyval = alter_table_cmd(
+                    mcx,
+                    AlterTableType::AT_AddConstraint,
+                    None,
+                    view.v(2).node(),
+                )?;
+            }
+            329 => {
+                *yyval = alter_table_cmd(
+                    mcx,
+                    AlterTableType::AT_ValidateConstraint,
+                    Some(view.v(3).str_val()),
+                    None,
+                )?;
+            }
+            330 | 331 => {
+                let name_i = if rule == 330 { 5 } else { 3 };
+                let mut n = Node::build::<AlterTableCmd>(mcx)?;
+                n.subtype = AlterTableType::AT_DropConstraint;
+                n.name = Some(view.v(name_i).str_val());
+                n.behavior = drop_behavior(view.v(name_i + 1).ival());
+                n.missing_ok = rule == 330;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            332 => *yyval = alter_table_cmd(mcx, AlterTableType::AT_DropOids, None, None)?,
+            333 => {
+                *yyval = alter_table_cmd(
+                    mcx,
+                    AlterTableType::AT_ClusterOn,
+                    Some(view.v(3).str_val()),
+                    None,
+                )?;
+            }
+            334 => *yyval = alter_table_cmd(mcx, AlterTableType::AT_DropCluster, None, None)?,
+            335 => *yyval = alter_table_cmd(mcx, AlterTableType::AT_SetLogged, None, None)?,
+            336 => *yyval = alter_table_cmd(mcx, AlterTableType::AT_SetUnLogged, None, None)?,
+            337..=348 => {
+                let (subtype, name_i) = match rule {
+                    337 => (AlterTableType::AT_EnableTrig, 3),
+                    338 => (AlterTableType::AT_EnableAlwaysTrig, 4),
+                    339 => (AlterTableType::AT_EnableReplicaTrig, 4),
+                    340 => (AlterTableType::AT_EnableTrigAll, 0),
+                    341 => (AlterTableType::AT_EnableTrigUser, 0),
+                    342 => (AlterTableType::AT_DisableTrig, 3),
+                    343 => (AlterTableType::AT_DisableTrigAll, 0),
+                    344 => (AlterTableType::AT_DisableTrigUser, 0),
+                    345 => (AlterTableType::AT_EnableRule, 3),
+                    346 => (AlterTableType::AT_EnableAlwaysRule, 4),
+                    347 => (AlterTableType::AT_EnableReplicaRule, 4),
+                    _ => (AlterTableType::AT_DisableRule, 3),
+                };
+                let name = if name_i == 0 { None } else { Some(view.v(name_i).str_val()) };
+                *yyval = alter_table_cmd(mcx, subtype, name, None)?;
+            }
+            349 | 350 => {
+                let (subtype, rv_i) = if rule == 349 {
+                    (AlterTableType::AT_AddInherit, 2)
+                } else {
+                    (AlterTableType::AT_DropInherit, 3)
+                };
+                *yyval = alter_table_cmd(mcx, subtype, None, view.v(rv_i).node())?;
+            }
+            351 => {
+                let def = make_type_name(mcx, view.v(2).list(), NodeList::nil(), view.l(2))?;
+                *yyval = alter_table_cmd(mcx, AlterTableType::AT_AddOf, None, Some(def))?;
+            }
+            352 => *yyval = alter_table_cmd(mcx, AlterTableType::AT_DropOf, None, None)?,
+            353 => {
+                let mut n = Node::build::<AlterTableCmd>(mcx)?;
+                n.subtype = AlterTableType::AT_ChangeOwner;
+                n.newowner = view.v(3).node();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            354 => {
+                *yyval = alter_table_cmd(
+                    mcx,
+                    AlterTableType::AT_SetAccessMethod,
+                    opt_str(view.v(4)),
+                    None,
+                )?;
+            }
+            355 => {
+                *yyval = alter_table_cmd(
+                    mcx,
+                    AlterTableType::AT_SetTableSpace,
+                    Some(view.v(3).str_val()),
+                    None,
+                )?;
+            }
+            356 | 357 => {
+                let subtype = if rule == 356 {
+                    AlterTableType::AT_SetRelOptions
+                } else {
+                    AlterTableType::AT_ResetRelOptions
+                };
+                let def = Node::mk_list(mcx, view.v(2).list())?;
+                *yyval = alter_table_cmd(mcx, subtype, None, Some(def))?;
+            }
+            358 => {
+                *yyval = alter_table_cmd(
+                    mcx,
+                    AlterTableType::AT_ReplicaIdentity,
+                    None,
+                    view.v(3).node(),
+                )?;
+            }
+            359 => *yyval = alter_table_cmd(mcx, AlterTableType::AT_EnableRowSecurity, None, None)?,
+            360 => {
+                *yyval = alter_table_cmd(mcx, AlterTableType::AT_DisableRowSecurity, None, None)?
+            }
+            361 => *yyval = alter_table_cmd(mcx, AlterTableType::AT_ForceRowSecurity, None, None)?,
+            362 => {
+                *yyval = alter_table_cmd(mcx, AlterTableType::AT_NoForceRowSecurity, None, None)?
+            }
+            363 => {
+                let def = Node::mk_list(mcx, view.v(1).list())?;
+                *yyval = alter_table_cmd(mcx, AlterTableType::AT_GenericOptions, None, Some(def))?;
+            }
+            // opt_collate_clause: COLLATE any_name.
+            366 => {
+                let n = Node::mk(
+                    mcx,
+                    CollateClause {
+                        arg: None,
+                        collname: view.v(2).list(),
+                        location: view.l(1),
+                    },
+                )?;
+                *yyval = YYSTYPE::Node(Some(n));
+            }
+            // replica_identity: NOTHING | FULL | DEFAULT | USING INDEX name.
+            370..=373 => {
+                let (identity_type, name) = match rule {
+                    370 => (REPLICA_IDENTITY_NOTHING, None),
+                    371 => (REPLICA_IDENTITY_FULL, None),
+                    372 => (REPLICA_IDENTITY_DEFAULT, None),
+                    _ => (REPLICA_IDENTITY_INDEX, Some(view.v(3).str_val())),
+                };
+                let n = Node::mk(mcx, ReplicaIdentityStmt { identity_type, name })?;
+                *yyval = YYSTYPE::Node(Some(n));
+            }
+            // alter_identity_column_option_list / alter_identity_column_option.
+            383 => {
+                let d = view.v(1).node().expect("alter_identity_column_option");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, d)?);
+            }
+            384 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(2).node().expect("alter_identity_column_option"))?;
+                *yyval = YYSTYPE::List(list);
+            }
+            385 => *yyval = def_elem(mcx, "restart", None, view.l(1))?,
+            386 => *yyval = def_elem(mcx, "restart", view.v(3).node(), view.l(1))?,
+            387 => {
+                let d = view.v(2).node().expect("SeqOptElem");
+                let defname =
+                    d.as_def_elem().expect("DefElem").defname.expect("SeqOptElem defname");
+                if matches!(defname, "as" | "restart" | "owned_by") {
+                    return Err(self.errposition_error(
+                        format!("sequence option \"{defname}\" not supported here"),
+                        view.l(2),
+                    ));
+                }
+                *yyval = YYSTYPE::Node(Some(d));
+            }
+            388 => {
+                let arg = Node::mk_integer(mcx, view.v(3).ival())?;
+                *yyval = def_elem(mcx, "generated", Some(arg), view.l(1))?;
+            }
+            // set_statistics_value: SignedIconst (DEFAULT rides NULL dispatch).
+            389 => *yyval = YYSTYPE::Node(Some(Node::mk_integer(mcx, view.v(1).ival())?)),
+            // column_compression / column_storage: ... DEFAULT.
+            486 | 490 => *yyval = YYSTYPE::Str("default"),
+            // alter_generic_option_list / _elem / generic_option_elem / _arg.
+            726 => {
+                let d = view.v(1).node().expect("alter_generic_option_elem");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, d)?);
+            }
+            727 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(3).node().expect("alter_generic_option_elem"))?;
+                *yyval = YYSTYPE::List(list);
+            }
+            729 | 730 => {
+                let d = view.v(2).node().expect("generic_option_elem");
+                let action =
+                    if rule == 729 { DefElemAction::DEFELEM_SET } else { DefElemAction::DEFELEM_ADD };
+                // SAFETY: as rule 8 — parser-owned tree, no live derived refs.
+                unsafe {
+                    d.with_mut::<DefElem, _>(|e| e.defaction = action).expect("DefElem");
+                }
+                *yyval = YYSTYPE::Node(Some(d));
+            }
+            731 => {
+                let n = Node::mk(
+                    mcx,
+                    DefElem {
+                        defnamespace: None,
+                        defname: Some(view.v(2).str_val()),
+                        arg: None,
+                        defaction: DefElemAction::DEFELEM_DROP,
+                        location: view.l(2),
+                    },
+                )?;
+                *yyval = YYSTYPE::Node(Some(n));
+            }
+            732 => {
+                *yyval = def_elem(mcx, view.v(1).str_val(), view.v(2).node(), view.l(1))?;
+            }
+            734 => *yyval = YYSTYPE::Node(Some(Node::mk_string(mcx, view.v(1).str_val())?)),
+            // opt_with_data: WITH DATA | WITH NO DATA | EMPTY.
+            623 | 625 => *yyval = YYSTYPE::Boolean(true),
+            624 => *yyval = YYSTYPE::Boolean(false),
+            // simple_select: TABLE relation_expr.
+            1722 => {
+                let star = NodeList::make1(mcx, Node::mk_a_star(mcx)?)?;
+                let cr = Node::mk_column_ref(mcx, star, -1)?;
+                let rt = Node::mk_res_target(mcx, None, NodeList::nil(), Some(cr), -1)?;
+                let mut n = Node::build::<SelectStmt>(mcx)?;
+                n.targetList = NodeList::make1(mcx, rt)?;
+                n.fromClause =
+                    NodeList::make1(mcx, view.v(2).node().expect("relation_expr"))?;
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
             // DropStmt: DROP {object_type_any_name any_name_list |
@@ -5117,6 +5459,19 @@ fn make_a_const<'mcx>(
         panic!("make_a_const: unexpected node type {:?}", v.node_tag())
     };
     Ok(YYSTYPE::Node(Some(Node::mk_a_const(mcx, Some(val), location)?)))
+}
+
+fn alter_table_cmd<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    subtype: AlterTableType,
+    name: Option<&'mcx str>,
+    def: Option<Node<'mcx>>,
+) -> PgResult<YYSTYPE<'mcx>> {
+    let mut n = Node::build::<AlterTableCmd>(mcx)?;
+    n.subtype = subtype;
+    n.name = name;
+    n.def = def;
+    Ok(YYSTYPE::Node(Some(n.seal())))
 }
 
 // makeDefElem (makefuncs.c).

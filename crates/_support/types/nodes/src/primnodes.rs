@@ -551,6 +551,13 @@ pub struct MinMaxExpr<'mcx> {
     pub location: ParseLoc,
 }
 
+// C `Expr *arg` is never NULL in a live CollateExpr; modeled non-optional.
+pub struct CollateExpr<'mcx> {
+    pub arg: Node<'mcx>,
+    pub collOid: Oid,
+    pub location: ParseLoc,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[repr(u32)]
 pub enum SQLValueFunctionOp {
@@ -572,7 +579,7 @@ pub enum SQLValueFunctionOp {
     SVFOP_CURRENT_SCHEMA = 14,
 }
 
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 pub struct SQLValueFunction {
     pub op: SQLValueFunctionOp,
     pub r#type: Oid,
@@ -611,6 +618,13 @@ pub struct OnConflictExpr<'mcx> {
 }
 
 #[derive(Default)]
+pub struct CollateClause<'mcx> {
+    pub arg: Option<Node<'mcx>>,
+    pub collname: NodeList<'mcx>,
+    pub location: ParseLoc,
+}
+
+#[derive(Default)]
 pub struct FuncExpr<'mcx> {
     pub funcid: Oid,
     pub funcresulttype: Oid,
@@ -632,6 +646,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for RangeVar<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for Var<'mcx> {
     const TAG: NodeTag = NodeTag::T_Var;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for CollateClause<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CollateClause;
 }
 unsafe impl NodeVariant<'_> for Const {
     const TAG: NodeTag = NodeTag::T_Const;
@@ -725,6 +742,9 @@ unsafe impl NodeVariant<'_> for SQLValueFunction {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for SubLink<'mcx> {
     const TAG: NodeTag = NodeTag::T_SubLink;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for CollateExpr<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CollateExpr;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for SubPlan<'mcx> {
     const TAG: NodeTag = NodeTag::T_SubPlan;
@@ -1034,6 +1054,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_sub_plan(self) -> Option<&'mcx SubPlan<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_collate_expr(self) -> Option<&'mcx CollateExpr<'mcx>> {
         self.as_variant()
     }
 }

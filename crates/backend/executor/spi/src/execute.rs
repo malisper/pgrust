@@ -321,8 +321,9 @@ pub(crate) fn _SPI_execute_plan(
                         0,
                     )?;
                     let tcount = if can_set_tag { options.tcount } else { 0 };
-                    let r = _SPI_pquery(qd, stmt, &mut dest, fire_triggers, tcount)
-                        .inspect_err(|_| execmain_seams::release_query_desc::call(qd))?;
+                    let mut qd_owner = pquery::QueryDescOwner(qd);
+                    let r = _SPI_pquery(qd, stmt, &mut dest, fire_triggers, tcount)?;
+                    qd_owner.disarm();
                     execmain_seams::free_query_desc::call(qd);
                     r
                 } else {

@@ -104,8 +104,32 @@ fn proc_exit_prepare(code: i32) {
         ON_PROC_EXIT_INDEX.with(|c| c.set(i));
         let entry = ON_PROC_EXIT_LIST
             .with(|l| l.get()[i].expect("on_proc_exit slot below index is filled"));
-        (entry.function)(code, entry.arg);
+        run_callback_guarded("on_proc_exit", || (entry.function)(code, entry.arg));
     }
+}
+
+// A panic escaping an exit callback is announced SIGABRT (cluster-wide
+// crash-restart); degrade to WARNING and keep draining callbacks.
+fn run_callback_guarded(what: &str, f: impl FnOnce()) {
+    let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) else {
+        return;
+    };
+    if payload.is::<ProcExitThread>() || payload.is::<types_error::PanicExitThread>() {
+        std::panic::resume_unwind(payload);
+    }
+    let msg = payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
+        .or_else(|| payload.downcast_ref::<PgError>().map(|e| e.message().to_string()))
+        .unwrap_or_else(|| "unknown panic".to_string());
+    let what = what.to_string();
+    let _ = std::panic::catch_unwind(move || {
+        let _ = elog::elog(
+            types_error::WARNING,
+            format!("{what} callback failed during exit: {msg}"),
+        );
+    });
 }
 
 pub fn shmem_exit(code: i32) -> PgResult<()> {
@@ -123,9 +147,11 @@ fn shmem_exit_internal(code: i32) {
         BEFORE_SHMEM_EXIT_INDEX.with(|c| c.set(i));
         let entry = BEFORE_SHMEM_EXIT_LIST
             .with(|l| l.get()[i].expect("before_shmem_exit slot below index is filled"));
-        if let Err(e) = (entry.function)(code, entry.arg) {
-            rethrow_callback_error(*e);
-        }
+        run_callback_guarded("before_shmem_exit", || {
+            if let Err(e) = (entry.function)(code, entry.arg) {
+                rethrow_callback_error(*e);
+            }
+        });
     }
 
     // Explicit call, not an on_shmem_exit entry (C comment: progressive logic).
@@ -138,7 +164,7 @@ fn shmem_exit_internal(code: i32) {
         ON_SHMEM_EXIT_INDEX.with(|c| c.set(i));
         let entry = ON_SHMEM_EXIT_LIST
             .with(|l| l.get()[i].expect("on_shmem_exit slot below index is filled"));
-        (entry.function)(code, entry.arg);
+        run_callback_guarded("on_shmem_exit", || (entry.function)(code, entry.arg));
     }
 
     SHMEM_EXIT_INPROGRESS.with(|c| c.set(false));

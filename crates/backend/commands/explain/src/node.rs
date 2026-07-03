@@ -574,7 +574,7 @@ pub fn ExplainNode<'mcx>(
                         .expect("functions cell")
                         .funcexpr
                         .expect("RangeTblFunction has a funcexpr");
-                    deparse_expr(es, node, ancestors, fexpr, true, &mut buf)?;
+                    deparse_expr(es, node, ancestors, fexpr, true, false, &mut buf)?;
                 }
                 crate::format::ExplainPropertyText("Function Call", buf.as_str(), es);
             }
@@ -799,7 +799,7 @@ fn show_plan_tlist<'mcx>(node: Node<'mcx>, ancestors: Option<&Ancestors<'_, 'mcx
     for tle_node in plan.targetlist.iter() {
         let tle = tle_node.as_target_entry().expect("targetlist holds TargetEntries");
         let mut buf = PgString::new_in(mcx);
-        deparse_expr(es, node, ancestors, tle.expr, useprefix, &mut buf)?;
+        deparse_expr(es, node, ancestors, tle.expr, useprefix, false, &mut buf)?;
         result.push(buf);
     }
     ExplainPropertyList("Output", &result, es);
@@ -944,8 +944,7 @@ fn show_incremental_sort_info<'mcx>(
 }
 
 // show_agg_keys -> show_sort_group_keys (explain.c): key columns resolve in
-// the child plan's tlist. Divergence: C deparses with showimplicit=true; a
-// top-level implicit cast on a group key prints without its ::type here.
+// the child plan's tlist; deparsed with showimplicit=true as C.
 fn show_agg_keys<'mcx>(node: Node<'mcx>, ancestors: Option<&Ancestors<'_, 'mcx>>, es: &mut ExplainState<'mcx>) -> PgResult<()> {
     let agg = node.as_agg().expect("Agg plan node");
     if agg.numCols <= 0 && agg.groupingSets.is_nil() {
@@ -963,7 +962,7 @@ fn show_agg_keys<'mcx>(node: Node<'mcx>, ancestors: Option<&Ancestors<'_, 'mcx>>
         let tle = get_tle_by_resno(child_tlist, resno)
             .unwrap_or_else(|| node_gap("show_sort_group_keys", "no tlist entry for key column"));
         let mut buf = PgString::new_in(mcx);
-        deparse_expr(es, child, ancestors, tle.expr, useprefix, &mut buf)?;
+        deparse_expr(es, child, ancestors, tle.expr, useprefix, true, &mut buf)?;
         result.push(buf);
     }
     ExplainPropertyList("Group Key", &result, es);
@@ -1046,7 +1045,7 @@ fn show_grouping_set_keys<'mcx>(
                 node_gap("show_sort_group_keys", "no tlist entry for key column")
             });
             let mut buf = PgString::new_in(mcx);
-            deparse_expr(es, child, None, tle.expr, useprefix, &mut buf)?;
+            deparse_expr(es, child, None, tle.expr, useprefix, true, &mut buf)?;
             show_sortorder_options(
                 &mut buf,
                 tle.expr,
@@ -1071,7 +1070,7 @@ fn show_grouping_set_keys<'mcx>(
                 node_gap("show_grouping_set_keys", "no tlist entry for key column")
             });
             let mut buf = PgString::new_in(mcx);
-            deparse_expr(es, child, None, tle.expr, useprefix, &mut buf)?;
+            deparse_expr(es, child, None, tle.expr, useprefix, true, &mut buf)?;
             result.push(buf);
         }
         if result.is_empty() {
@@ -1226,7 +1225,15 @@ fn get_window_frame_options<'mcx>(
     } else if frame_options & FRAMEOPTION_START_CURRENT_ROW != 0 {
         buf.try_push_str("CURRENT ROW ")?;
     } else if frame_options & FRAMEOPTION_START_OFFSET != 0 {
-        deparse_expr(es, plan_node, None, start_offset.expect("startOffset"), useprefix, buf)?;
+        deparse_expr(
+            es,
+            plan_node,
+            None,
+            start_offset.expect("startOffset"),
+            useprefix,
+            false,
+            buf,
+        )?;
         if frame_options & FRAMEOPTION_START_OFFSET_PRECEDING != 0 {
             buf.try_push_str(" PRECEDING ")?;
         } else if frame_options & FRAMEOPTION_START_OFFSET_FOLLOWING != 0 {
@@ -1244,7 +1251,15 @@ fn get_window_frame_options<'mcx>(
         } else if frame_options & FRAMEOPTION_END_CURRENT_ROW != 0 {
             buf.try_push_str("CURRENT ROW ")?;
         } else if frame_options & FRAMEOPTION_END_OFFSET != 0 {
-            deparse_expr(es, plan_node, None, end_offset.expect("endOffset"), useprefix, buf)?;
+            deparse_expr(
+                es,
+                plan_node,
+                None,
+                end_offset.expect("endOffset"),
+                useprefix,
+                false,
+                buf,
+            )?;
             if frame_options & FRAMEOPTION_END_OFFSET_PRECEDING != 0 {
                 buf.try_push_str(" PRECEDING ")?;
             } else if frame_options & FRAMEOPTION_END_OFFSET_FOLLOWING != 0 {
@@ -1300,7 +1315,7 @@ fn deparse_plan_var<'mcx>(
             .unwrap_or_else(|| node_gap("get_variable", "bogus varattno for OUTER_VAR"));
         if tle.expr.as_var().is_none() {
             buf.try_push('(')?;
-            deparse_expr(es, child, None, tle.expr, useprefix, buf)?;
+            deparse_expr(es, child, None, tle.expr, useprefix, true, buf)?;
             buf.try_push(')')?;
             return Ok(());
         }
@@ -1390,14 +1405,14 @@ fn show_one_time_filter<'mcx>(
     let useprefix = es.rtable_size > 1 || es.verbose;
     let mut buf = PgString::new_in(mcx);
     if list.len() == 1 {
-        deparse_expr(es, node, ancestors, list.nth(0), useprefix, &mut buf)?;
+        deparse_expr(es, node, ancestors, list.nth(0), useprefix, false, &mut buf)?;
     } else {
         buf.try_push('(')?;
         for (i, item) in list.iter().enumerate() {
             if i > 0 {
                 buf.try_push_str(" AND ")?;
             }
-            deparse_expr(es, node, ancestors, item, useprefix, &mut buf)?;
+            deparse_expr(es, node, ancestors, item, useprefix, false, &mut buf)?;
         }
         buf.try_push(')')?;
     }
@@ -1584,20 +1599,22 @@ fn show_qual<'mcx>(
             },
         )?
     };
-    deparse_expr(es, node, ancestors, expr, useprefix, &mut buf)?;
+    deparse_expr(es, node, ancestors, expr, useprefix, false, &mut buf)?;
     crate::format::ExplainPropertyText(qlabel, buf.as_str(), es);
     Ok(())
 }
 
 // ruleutils.c deparse_expression slice: Const, Var (incl OUTER/INNER
-// indirection through child tlists), binary OpExpr, implicit RelabelType;
-// every other node tag is loud. Its CATALOG row stays todo and points here.
+// indirection through child tlists), binary OpExpr, RelabelType/cast forms
+// with C's showimplicit propagation; every other node tag is loud. Its
+// CATALOG row stays todo and points here.
 fn deparse_expr<'mcx>(
     es: &ExplainState<'mcx>,
     plan_node: Node<'mcx>,
     ancestors: Option<&Ancestors<'_, 'mcx>>,
     expr: Node<'mcx>,
     useprefix: bool,
+    showimplicit: bool,
     buf: &mut PgString<'mcx>,
 ) -> PgResult<()> {
     match expr.node_tag() {
@@ -1611,18 +1628,24 @@ fn deparse_expr<'mcx>(
             let opname = lsyscache::get_opname(es.str.allocator(), o.opno)?
                 .expect("operator of a planned expression exists");
             buf.try_push('(')?;
-            deparse_expr(es, plan_node, ancestors, o.args.nth(0), useprefix, buf)?;
+            deparse_expr(es, plan_node, ancestors, o.args.nth(0), useprefix, true, buf)?;
             write!(buf, " {} ", opname.as_str()).expect("PgString write");
-            deparse_expr(es, plan_node, ancestors, o.args.nth(1), useprefix, buf)?;
+            deparse_expr(es, plan_node, ancestors, o.args.nth(1), useprefix, true, buf)?;
             buf.try_push(')')?;
             Ok(())
         }
         NodeTag::T_RelabelType => {
             let r = expr.as_relabel_type().unwrap();
-            if r.relabelformat != types_nodes::CoercionForm::COERCE_IMPLICIT_CAST {
-                node_gap("get_rule_expr", "explicit RelabelType deparse (ruleutils lane)");
+            if r.relabelformat == types_nodes::CoercionForm::COERCE_IMPLICIT_CAST
+                && !showimplicit
+            {
+                deparse_expr(es, plan_node, ancestors, r.arg, useprefix, false, buf)
+            } else {
+                get_coercion_expr(
+                    es, plan_node, ancestors, r.arg, r.resulttype, r.resulttypmod, useprefix,
+                    buf,
+                )
             }
-            deparse_expr(es, plan_node, ancestors, r.arg, useprefix, buf)
         }
         // get_rule_expr T_BoolExpr, non-pretty form: outer parens always.
         NodeTag::T_BoolExpr => {
@@ -1636,14 +1659,14 @@ fn deparse_expr<'mcx>(
                         if i > 0 {
                             buf.try_push_str(sep)?;
                         }
-                        deparse_expr(es, plan_node, ancestors, arg, useprefix, buf)?;
+                        deparse_expr(es, plan_node, ancestors, arg, useprefix, false, buf)?;
                     }
                     buf.try_push(')')?;
                     Ok(())
                 }
                 BoolExprType::NOT_EXPR => {
                     buf.try_push_str("(NOT ")?;
-                    deparse_expr(es, plan_node, ancestors, b.args.nth(0), useprefix, buf)?;
+                    deparse_expr(es, plan_node, ancestors, b.args.nth(0), useprefix, false, buf)?;
                     buf.try_push(')')?;
                     Ok(())
                 }
@@ -1660,7 +1683,7 @@ fn deparse_expr<'mcx>(
                 node_gap("get_rule_expr", "row-type NullTest deparse (ruleutils lane)");
             }
             buf.try_push('(')?;
-            deparse_expr(es, plan_node, ancestors, arg, useprefix, buf)?;
+            deparse_expr(es, plan_node, ancestors, arg, useprefix, true, buf)?;
             buf.try_push_str(match nt.nulltesttype {
                 NullTestType::IS_NULL => " IS NULL",
                 NullTestType::IS_NOT_NULL => " IS NOT NULL",
@@ -1672,9 +1695,9 @@ fn deparse_expr<'mcx>(
         NodeTag::T_DistinctExpr => {
             let d = expr.as_distinct_expr().unwrap();
             buf.try_push('(')?;
-            deparse_expr(es, plan_node, ancestors, d.args.nth(0), useprefix, buf)?;
+            deparse_expr(es, plan_node, ancestors, d.args.nth(0), useprefix, true, buf)?;
             buf.try_push_str(" IS DISTINCT FROM ")?;
-            deparse_expr(es, plan_node, ancestors, d.args.nth(1), useprefix, buf)?;
+            deparse_expr(es, plan_node, ancestors, d.args.nth(1), useprefix, true, buf)?;
             buf.try_push(')')?;
             Ok(())
         }
@@ -1683,7 +1706,15 @@ fn deparse_expr<'mcx>(
             use types_nodes::BoolTestType;
             let bt = expr.as_boolean_test().unwrap();
             buf.try_push('(')?;
-            deparse_expr(es, plan_node, ancestors, bt.arg.expect("BooleanTest.arg"), useprefix, buf)?;
+            deparse_expr(
+                es,
+                plan_node,
+                ancestors,
+                bt.arg.expect("BooleanTest.arg"),
+                useprefix,
+                false,
+                buf,
+            )?;
             buf.try_push_str(match bt.booltesttype {
                 BoolTestType::IS_TRUE => " IS TRUE",
                 BoolTestType::IS_NOT_TRUE => " IS NOT TRUE",
@@ -1729,13 +1760,13 @@ fn deparse_expr<'mcx>(
                         buf.try_push_str(", ")?;
                     }
                     nargs += 1;
-                    deparse_expr(es, plan_node, ancestors, tle.expr, useprefix, buf)?;
+                    deparse_expr(es, plan_node, ancestors, tle.expr, useprefix, true, buf)?;
                 }
             }
             buf.try_push(')')?;
             if let Some(f) = a.aggfilter {
                 buf.try_push_str(" FILTER (WHERE ")?;
-                deparse_expr(es, plan_node, ancestors, f, useprefix, buf)?;
+                deparse_expr(es, plan_node, ancestors, f, useprefix, false, buf)?;
                 buf.try_push(')')?;
             }
             Ok(())
@@ -1788,7 +1819,7 @@ fn deparse_expr<'mcx>(
             buf.try_push_str(prefix)?;
             if let Some(te) = sp.testexpr {
                 let sub = Ancestors { entry: AncestorEntry::Sub(sp), parent: ancestors };
-                deparse_expr(es, plan_node, Some(&sub), te, useprefix, buf)?;
+                deparse_expr(es, plan_node, Some(&sub), te, useprefix, showimplicit, buf)?;
                 buf.try_push(')')?;
             } else {
                 if sp.useHashTable {
@@ -1808,15 +1839,19 @@ fn deparse_expr<'mcx>(
         NodeTag::T_FuncExpr => {
             use types_nodes::CoercionForm;
             let f = expr.as_func_expr().unwrap();
-            match f.funcformat {
-                CoercionForm::COERCE_IMPLICIT_CAST => {
-                    // showimplicit=false context: print the bare argument.
-                    return deparse_expr(es, plan_node, ancestors, f.args.nth(0), useprefix, buf);
-                }
-                CoercionForm::COERCE_EXPLICIT_CAST => {
-                    node_gap("get_func_expr", "explicit-cast FuncExpr deparse (ruleutils lane)")
-                }
-                _ => {}
+            if f.funcformat == CoercionForm::COERCE_IMPLICIT_CAST && !showimplicit {
+                return deparse_expr(
+                    es, plan_node, ancestors, f.args.nth(0), useprefix, false, buf,
+                );
+            }
+            if f.funcformat == CoercionForm::COERCE_IMPLICIT_CAST
+                || f.funcformat == CoercionForm::COERCE_EXPLICIT_CAST
+            {
+                let typmod = expr_is_length_coercion(f);
+                return get_coercion_expr(
+                    es, plan_node, ancestors, f.args.nth(0), f.funcresulttype, typmod,
+                    useprefix, buf,
+                );
             }
             if f.funcvariadic {
                 node_gap("get_func_expr", "VARIADIC deparse (ruleutils lane)");
@@ -1828,7 +1863,7 @@ fn deparse_expr<'mcx>(
                 if i > 0 {
                     buf.try_push_str(", ")?;
                 }
-                deparse_expr(es, plan_node, ancestors, arg, useprefix, buf)?;
+                deparse_expr(es, plan_node, ancestors, arg, useprefix, true, buf)?;
             }
             buf.try_push(')')?;
             Ok(())
@@ -1851,7 +1886,7 @@ fn deparse_expr<'mcx>(
                     if i > 0 {
                         buf.try_push_str(", ")?;
                     }
-                    deparse_expr(es, plan_node, ancestors, arg, useprefix, buf)?;
+                    deparse_expr(es, plan_node, ancestors, arg, useprefix, true, buf)?;
                 }
             }
             buf.try_push_str(") OVER ")?;
@@ -1889,7 +1924,7 @@ fn deparse_expr<'mcx>(
             buf.try_push_str("CASE")?;
             if let Some(arg) = c.arg {
                 buf.try_push(' ')?;
-                deparse_expr(es, plan_node, ancestors, arg, useprefix, buf)?;
+                deparse_expr(es, plan_node, ancestors, arg, useprefix, true, buf)?;
             }
             for cell in c.args.iter() {
                 let cw = cell.as_case_when().expect("CaseWhen");
@@ -1905,7 +1940,7 @@ fn deparse_expr<'mcx>(
                     }
                 }
                 buf.try_push_str(" WHEN ")?;
-                deparse_expr(es, plan_node, ancestors, w, useprefix, buf)?;
+                deparse_expr(es, plan_node, ancestors, w, useprefix, false, buf)?;
                 buf.try_push_str(" THEN ")?;
                 deparse_expr(
                     es,
@@ -1913,6 +1948,7 @@ fn deparse_expr<'mcx>(
                     ancestors,
                     cw.result.expect("CaseWhen.result"),
                     useprefix,
+                    true,
                     buf,
                 )?;
             }
@@ -1923,6 +1959,7 @@ fn deparse_expr<'mcx>(
                 ancestors,
                 c.defresult.expect("transformCaseExpr always adds a default"),
                 useprefix,
+                true,
                 buf,
             )?;
             buf.try_push_str(" END")?;
@@ -1939,10 +1976,10 @@ fn deparse_expr<'mcx>(
             let opname = lsyscache::get_opname(es.str.allocator(), sa.opno)?
                 .expect("operator of a planned expression exists");
             buf.try_push('(')?;
-            deparse_expr(es, plan_node, ancestors, sa.args.nth(0), useprefix, buf)?;
+            deparse_expr(es, plan_node, ancestors, sa.args.nth(0), useprefix, true, buf)?;
             write!(buf, " {} {} (", opname.as_str(), if sa.useOr { "ANY" } else { "ALL" })
                 .expect("PgString write");
-            deparse_expr(es, plan_node, ancestors, sa.args.nth(1), useprefix, buf)?;
+            deparse_expr(es, plan_node, ancestors, sa.args.nth(1), useprefix, true, buf)?;
             buf.try_push_str("))")?;
             Ok(())
         }
@@ -1951,6 +1988,46 @@ fn deparse_expr<'mcx>(
             &format!("{other:?} deparse unported (ruleutils lane)"),
         ),
     }
+}
+
+// get_coercion_expr (ruleutils.c), non-pretty form.
+#[allow(clippy::too_many_arguments)]
+fn get_coercion_expr<'mcx>(
+    es: &ExplainState<'mcx>,
+    plan_node: Node<'mcx>,
+    ancestors: Option<&Ancestors<'_, 'mcx>>,
+    arg: Node<'mcx>,
+    resulttype: types_core::Oid,
+    resulttypmod: i32,
+    useprefix: bool,
+    buf: &mut PgString<'mcx>,
+) -> PgResult<()> {
+    match arg.as_const() {
+        Some(c) if c.consttype == resulttype && c.consttypmod == -1 => {
+            get_const_expr(c, buf, -1)?;
+        }
+        _ => {
+            buf.try_push('(')?;
+            deparse_expr(es, plan_node, ancestors, arg, useprefix, false, buf)?;
+            buf.try_push(')')?;
+        }
+    }
+    let t = format_type::format_type_with_typemod(resulttype, resulttypmod)?;
+    write!(buf, "::{t}").expect("PgString write");
+    Ok(())
+}
+
+// exprIsLengthCoercion (nodeFuncs.c): the second-arg-int4-Const typmod probe.
+fn expr_is_length_coercion(f: &types_nodes::primnodes::FuncExpr<'_>) -> i32 {
+    const INT4OID: types_core::Oid = 23;
+    if f.args.len() != 2 && f.args.len() != 3 {
+        return -1;
+    }
+    let Some(second) = f.args.nth(1).as_const() else { return -1 };
+    if second.consttype != INT4OID || second.constisnull {
+        return -1;
+    }
+    second.constvalue.as_i32()
 }
 
 // get_parameter (ruleutils.c): a PARAM_EXEC prints as its referent expression
@@ -1990,7 +2067,15 @@ fn deparse_param<'mcx>(
                     if need_paren {
                         buf.try_push('(')?;
                     }
-                    deparse_expr(es, owner_plan, owner.and_then(|o| o.parent), arg, true, buf)?;
+                    deparse_expr(
+                        es,
+                        owner_plan,
+                        owner.and_then(|o| o.parent),
+                        arg,
+                        true,
+                        false,
+                        buf,
+                    )?;
                     if need_paren {
                         buf.try_push(')')?;
                     }
@@ -2087,7 +2172,7 @@ fn deparse_var<'mcx>(
         // C get_variable: a non-Var referent prints parenthesized.
         ResolvedVar::Expr(expr, ctx) => {
             buf.try_push('(')?;
-            deparse_expr(es, ctx, ancestors, expr, useprefix, buf)?;
+            deparse_expr(es, ctx, ancestors, expr, useprefix, true, buf)?;
             buf.try_push(')')?;
             return Ok(());
         }

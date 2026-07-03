@@ -860,6 +860,18 @@ pub struct AlterTableCmd<'mcx> {
     pub recurse: bool,
 }
 
+// pg_class.h REPLICA_IDENTITY_* chars.
+pub const REPLICA_IDENTITY_DEFAULT: u8 = b'd';
+pub const REPLICA_IDENTITY_NOTHING: u8 = b'n';
+pub const REPLICA_IDENTITY_FULL: u8 = b'f';
+pub const REPLICA_IDENTITY_INDEX: u8 = b'i';
+
+#[derive(Default)]
+pub struct ReplicaIdentityStmt<'mcx> {
+    pub identity_type: u8,
+    pub name: Option<&'mcx str>,
+}
+
 #[derive(Default)]
 pub struct AlterTableStmt<'mcx> {
     pub relation: Option<&'mcx crate::primnodes::RangeVar<'mcx>>,
@@ -1086,6 +1098,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for AlterTableCmd<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for RenameStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_RenameStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for ReplicaIdentityStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_ReplicaIdentityStmt;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for WithClause<'mcx> {
     const TAG: NodeTag = NodeTag::T_WithClause;

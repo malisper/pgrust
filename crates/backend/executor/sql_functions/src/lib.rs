@@ -27,7 +27,7 @@ use types_nodes::parsenodes::Query;
 use types_nodes::NodeTag;
 use types_portal::params::{ParamExternData, PARAM_FLAG_CONST};
 use types_portal::{
-    ParamListHandle, QueryEnvHandle, TuplestoreHandle, CURSOR_OPT_NO_SCROLL,
+    ParamListHandle, QueryDescHandle, QueryEnvHandle, TuplestoreHandle, CURSOR_OPT_NO_SCROLL,
     CURSOR_OPT_PARALLEL_OK,
 };
 use types_scan::sdir::ForwardScanDirection;
@@ -748,21 +748,33 @@ fn run_source<'mcx>(
         )?;
         let eflags = if lazy { EXEC_FLAG_SKIP_TRIGGERS } else { 0 };
         let count = if lazy { 1 } else { 0 };
-        let r = (|| -> PgResult<()> {
-            execmain_seams::executor_start::call(qd, eflags)?;
-            execmain_seams::executor_run::call(qd, ForwardScanDirection, count, &mut dest)?;
-            execmain_seams::executor_finish::call(qd)?;
-            execmain_seams::executor_end::call(qd)
-        })();
-        match r {
-            Ok(()) => execmain_seams::free_query_desc::call(qd),
-            Err(e) => {
-                execmain_seams::release_query_desc::call(qd);
-                return Err(e);
-            }
-        }
+        let mut qd_owner = QueryDescOwner(qd);
+        execmain_seams::executor_start::call(qd, eflags)?;
+        execmain_seams::executor_run::call(qd, ForwardScanDirection, count, &mut dest)?;
+        execmain_seams::executor_finish::call(qd)?;
+        execmain_seams::executor_end::call(qd)?;
+        qd_owner.disarm();
+        execmain_seams::free_query_desc::call(qd);
     }
     Ok(())
+}
+
+// Owning registry entry: released on Err or panic, or the EState's relcache
+// refs leak past AtEOXact_RelationCache (pquery::QueryDescOwner precedent).
+struct QueryDescOwner(QueryDescHandle);
+
+impl QueryDescOwner {
+    fn disarm(&mut self) {
+        self.0 = QueryDescHandle::NULL;
+    }
+}
+
+impl Drop for QueryDescOwner {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            execmain_seams::release_query_desc::call(self.0);
+        }
+    }
 }
 
 fn command_tag_of(stmt: &types_nodes::plannodes::PlannedStmt<'_>) -> types_core::CommandTag {

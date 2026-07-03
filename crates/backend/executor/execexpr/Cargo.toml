@@ -38,12 +38,12 @@ bench-internals = []
 
 [dev-dependencies]
 clauses = { path = "../../optimizer/util/clauses" }
+namespace_seams = { path = "../../catalog/namespace_seams" }
 adt_int = { path = "../../utils/adt/int" }
 adt_datetime = { path = "../../utils/adt/adt_datetime" }
 pgtz = { path = "../../timezone/pgtz" }
 elog = { path = "../../utils/error/elog" }
 fd = { path = "../../storage/file/fd" }
 xact_seams = { path = "../../access/transam/xact_seams" }
-namespace_seams = { path = "../../catalog/namespace_seams" }
 indexcmds_seams = { path = "../../commands/indexcmds_seams" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }

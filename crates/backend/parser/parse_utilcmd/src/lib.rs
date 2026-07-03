@@ -681,9 +681,6 @@ pub fn transformCreateStmt<'mcx>(
     if stmt.if_not_exists {
         unported("IF NOT EXISTS");
     }
-    if !stmt.inhRelations.is_nil() && stmt.partbound.is_none() {
-        unported("inheritance (inhRelations)");
-    }
     if stmt.partbound.is_some() && !stmt.tableElts.is_nil() {
         unported("PARTITION OF with a column/constraint list");
     }

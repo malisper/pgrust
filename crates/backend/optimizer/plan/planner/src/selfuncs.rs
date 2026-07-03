@@ -15,7 +15,6 @@ use crate::run::PlannerRun;
 
 pub const DEFAULT_EQ_SEL: f64 = 0.005;
 pub const DEFAULT_INEQ_SEL: f64 = 0.3333333333333333;
-pub const DEFAULT_MATCH_SEL: f64 = 0.005;
 pub const DEFAULT_NUM_DISTINCT: f64 = 200.0;
 const DEFAULT_PAGE_CPU_MULTIPLIER: f64 = 50.0;
 const BOOLOID: u32 = 16;
@@ -674,12 +673,20 @@ fn convert_to_scalar(
     const TEXTOID: Oid = 25;
     const BPCHAROID: Oid = 1042;
     const VARCHAROID: Oid = 1043;
+    const INETOID: Oid = 869;
+    const CIDROID: Oid = 650;
     match valuetypid {
         CHAROID | BPCHAROID | VARCHAROID | TEXTOID | NAMEOID => {
             let val = convert_string_datum(mcx, value, valuetypid, collid)?;
             let lostr = convert_string_datum(mcx, lobound, boundstypid, collid)?;
             let histr = convert_string_datum(mcx, hibound, boundstypid, collid)?;
             Some(convert_string_to_scalar(val, lostr, histr))
+        }
+        INETOID | CIDROID => {
+            let v = convert_network_to_scalar(value, valuetypid)?;
+            let lo = convert_network_to_scalar(lobound, boundstypid)?;
+            let hi = convert_network_to_scalar(hibound, boundstypid)?;
+            Some((v, lo, hi))
         }
         _ => {
             let v = convert_numeric_to_scalar(value, valuetypid)?;
@@ -688,6 +695,23 @@ fn convert_to_scalar(
             Some((v, lo, hi))
         }
     }
+}
+
+// convert_network_to_scalar (selfuncs.c), inet/cidr arm (mac arms deferred).
+fn convert_network_to_scalar(value: Datum, typid: Oid) -> Option<f64> {
+    const INETOID: Oid = 869;
+    const CIDROID: Oid = 650;
+    if typid != INETOID && typid != CIDROID {
+        return None;
+    }
+    let ip = crate::network_selfuncs::inet_ref(value);
+    let len = if ip.family == adt_network::PGSQL_AF_INET { 4 } else { 16 };
+    let mut res = ip.family as f64;
+    for i in 0..len {
+        res *= 256.0;
+        res += ip.addr[i] as f64;
+    }
+    Some(res)
 }
 
 // convert_string_datum (selfuncs.c); the non-C-collation pg_strxfrm leg is
@@ -940,6 +964,14 @@ pub fn examine_variable<'mcx>(
     let mut vardata =
         VariableStatData { var: None, rel: None, vartype, isunique: false, stats: None };
 
+    // C: look inside any binary-compatible relabeling (vartype stays the
+    // exposed type; the Var is returned without relabeling).
+    let (basenode, node_id) = match node.as_relabel_type() {
+        Some(r) => (r.arg, run.intern_expr(r.arg)),
+        None => (node, node_id),
+    };
+    let node = basenode;
+
     if let Some(var) = node.as_var() {
         if varrelid == 0 || varrelid == var.varno {
             let rel = crate::relnode::find_base_rel(&run.root, var.varno);
@@ -953,9 +985,10 @@ pub fn examine_variable<'mcx>(
     }
     match node.node_tag() {
         NodeTag::T_Const => Ok(vardata),
-        // Var-free expressions (HAVING Aggrefs, PARAM_EXEC initplan outputs):
-        // C's expression leg finds no relids and returns "don't know".
-        NodeTag::T_Aggref | NodeTag::T_Param => Ok(vardata),
+        // Var-free expressions (HAVING Aggrefs, PARAM_EXEC initplan outputs,
+        // scalararraysel dummies): C's expression leg finds no relids and
+        // returns "don't know".
+        NodeTag::T_Aggref | NodeTag::T_Param | NodeTag::T_CaseTestExpr => Ok(vardata),
         // C's general expression leg: a single-rel expression keeps its rel
         // (tuple-count clamps) but has no stats (extended statistics absent).
         _ => {
@@ -1899,6 +1932,51 @@ pub fn eqjoinsel<'mcx>(
     Ok(clamp_probability(selec))
 }
 
+// neqjoinsel (selfuncs.c).
+pub fn neqjoinsel<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    operator: u32,
+    args: &[NodeId],
+    jointype: JoinType,
+    sjinfo: Option<&SpecialJoinInfo<'mcx>>,
+) -> PgResult<f64> {
+    if jointype == types_pathnodes::JOIN_SEMI || jointype == types_pathnodes::JOIN_ANTI {
+        let sjinfo = sjinfo.expect("SEMI/ANTI neqjoinsel has an sjinfo");
+        let (vardata1, vardata2, reversed) = get_join_variables(run, args, sjinfo)?;
+        let nullfrac =
+            if reversed { vardata2.nullfrac() } else { vardata1.nullfrac() };
+        return Ok(1.0 - nullfrac);
+    }
+    let eqop = lsyscache::get_negator(operator)?;
+    let result = if eqop != 0 {
+        eqjoinsel(run, eqop, args, jointype, sjinfo)?
+    } else {
+        DEFAULT_EQ_SEL
+    };
+    Ok(1.0 - result)
+}
+
+// get_join_variables (selfuncs.c); returns (vardata1, vardata2, reversed).
+pub(crate) fn get_join_variables<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    args: &[NodeId],
+    sjinfo: &SpecialJoinInfo<'mcx>,
+) -> PgResult<(VariableStatData<'mcx>, VariableStatData<'mcx>, bool)> {
+    assert!(args.len() == 2, "get_join_variables (selfuncs.c): non-binary clause");
+    let left = *run.root.expr_node(args[0]);
+    let right = *run.root.expr_node(args[1]);
+    let vardata1 = examine_variable(run, args[0], left, 0)?;
+    let vardata2 = examine_variable(run, args[1], right, 0)?;
+    let rel_subset = |rel: Option<RelId>, side: &types_pathnodes::Relids<'mcx>| {
+        rel.is_some_and(|r| crate::relnode::relids_is_subset(&run.root.rel(r).relids, side))
+    };
+    let join_is_reversed = rel_subset(vardata1.rel, &sjinfo.syn_righthand)
+        || rel_subset(vardata2.rel, &sjinfo.syn_lefthand);
+    Ok((vardata1, vardata2, join_is_reversed))
+}
+
+pub const DEFAULT_MATCHING_SEL: f64 = 0.010;
+
 // eqjoinsel_semi (selfuncs.c), non-MCV arm (the MCV-x-MCV arm panics above).
 #[allow(clippy::too_many_arguments)]
 fn eqjoinsel_semi(
@@ -2198,52 +2276,52 @@ fn get_variable_range<'mcx>(
     Ok(range)
 }
 
-fn get_stats_slot_range(
-    values: &[Datum],
-    opfuncoid: Oid,
-    opproc: &mut Option<FmgrInfo>,
-    collation: Oid,
-    range: &mut Option<(Datum, Datum)>,
-) -> PgResult<()> {
-    if values.is_empty() {
-        return Ok(());
-    }
-    if opproc.is_none() {
-        *opproc = Some(fmgr_core::fmgr_info(opfuncoid)?);
-    }
-    let opproc = opproc.as_mut().unwrap();
-    for &v in values {
-        match range {
-            None => *range = Some((v, v)),
-            Some((tmin, tmax)) => {
-                if types_fmgr::function_call2_coll(opproc, collation, v, *tmin)?.as_bool() {
-                    *tmin = v;
-                }
-                if types_fmgr::function_call2_coll(opproc, collation, *tmax, v)?.as_bool() {
-                    *tmax = v;
-                }
-            }
+const TEXTOID: u32 = 25;
+const NAMEOID: u32 = 19;
+const BPCHAROID: u32 = 1042;
+const BYTEAOID: u32 = 17;
+const BOOLEAN_EQ_OP: Oid = 91;
+pub const DEFAULT_MATCH_SEL: f64 = 0.005;
+
+const PARTIAL_WILDCARD_SEL: f64 = 2.0;
+
+
+struct PrefixConst {
+    consttype: Oid,
+    constvalue: Datum,
+}
+
+fn text_datum_payload<'a>(value: Datum) -> &'a [u8] {
+    let p = value.as_usize() as *const u8;
+    debug_assert!(!p.is_null());
+    // SAFETY: by-ref varlena datum; planner consts and detoasted stats carry
+    // in-line 1B/4B images only (the asserts keep toast forms loud).
+    unsafe {
+        let b0 = *p;
+        if b0 & 0x01 == 0x01 {
+            assert!(b0 != 0x01, "text_datum_payload: external toast datum");
+            let total = ((b0 >> 1) & 0x7F) as usize;
+            core::slice::from_raw_parts(p.add(1), total - 1)
+        } else {
+            assert!(b0 & 0x03 == 0, "text_datum_payload: compressed datum");
+            datum::VarlenaRef::from_ptr(p).data()
         }
     }
-    Ok(())
 }
 
-fn strip_array_coercion<'mcx>(mut node: Node<'mcx>) -> Node<'mcx> {
-    while let Some(r) = node.as_relabel_type() {
-        node = r.arg;
-    }
-    node
-}
-
-fn expr_collation(node: Node<'_>) -> Oid {
-    match node.node_tag() {
-        NodeTag::T_Const => node.as_const().unwrap().constcollid,
-        NodeTag::T_ArrayExpr => node.as_array_expr().unwrap().array_collid,
-        NodeTag::T_Var => node.as_var().unwrap().varcollid,
-        _ => 0,
+fn varlena_image<'a>(value: Datum) -> &'a [u8] {
+    let p = value.as_usize() as *const u8;
+    debug_assert!(!p.is_null());
+    // SAFETY: as text_datum_payload; array consts are 4B uncompressed images.
+    unsafe {
+        assert!(*p & 0x03 == 0, "varlena_image: non-4B varlena");
+        datum::VarlenaRef::from_ptr(p).as_bytes()
     }
 }
 
+
+// scalararraysel_containment (array_selfuncs.c): only the early-exit legs;
+// where C would proceed to the MCELEM estimate this is loud.
 // scalararraysel (selfuncs.c). The typcache eq_opr probe only gates
 // scalararraysel_containment, whose live precondition (an array-typed
 // variable operand) is the loud arm below; the isEquality/isInequality
@@ -2429,6 +2507,74 @@ pub fn scalararraysel<'mcx>(
     Ok(clamp_probability(s1))
 }
 
+fn scalararraysel_containment<'mcx>(
+    leftop: Node<'mcx>,
+    rightop: Node<'mcx>,
+    varrelid: i32,
+) -> f64 {
+    let rightop_is_rel_var = rightop
+        .as_var()
+        .is_some_and(|v| v.varlevelsup == 0 && (varrelid == 0 || varrelid == v.varno));
+    if !rightop_is_rel_var {
+        return -1.0;
+    }
+    let Some(lc) = leftop.as_const() else {
+        return -1.0;
+    };
+    if lc.constisnull {
+        return 0.0;
+    }
+    panic!("scalararraysel_containment (array_selfuncs.c): MCELEM containment lane");
+}
+
+fn strip_array_coercion<'mcx>(mut node: Node<'mcx>) -> Node<'mcx> {
+    while let Some(r) = node.as_relabel_type() {
+        node = r.arg;
+    }
+    node
+}
+
+fn get_stats_slot_range(
+    values: &[Datum],
+    opfuncoid: Oid,
+    opproc: &mut Option<FmgrInfo>,
+    collation: Oid,
+    range: &mut Option<(Datum, Datum)>,
+) -> PgResult<()> {
+    if values.is_empty() {
+        return Ok(());
+    }
+    if opproc.is_none() {
+        *opproc = Some(fmgr_core::fmgr_info(opfuncoid)?);
+    }
+    let opproc = opproc.as_mut().unwrap();
+    for &v in values {
+        match range {
+            None => *range = Some((v, v)),
+            Some((tmin, tmax)) => {
+                if types_fmgr::function_call2_coll(opproc, collation, v, *tmin)?.as_bool() {
+                    *tmin = v;
+                }
+                if types_fmgr::function_call2_coll(opproc, collation, *tmax, v)?.as_bool() {
+                    *tmax = v;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+
+fn expr_collation(node: Node<'_>) -> Oid {
+    match node.node_tag() {
+        NodeTag::T_Const => node.as_const().unwrap().constcollid,
+        NodeTag::T_ArrayExpr => node.as_array_expr().unwrap().array_collid,
+        NodeTag::T_Var => node.as_var().unwrap().varcollid,
+        _ => 0,
+    }
+}
+
+
 // estimate_array_length (selfuncs.c); the pg_statistic DECHIST leg (array
 // variables) is unreachable while scalararraysel's array-column arm is loud.
 pub fn estimate_array_length(node: Node<'_>) -> f64 {
@@ -2543,7 +2689,7 @@ fn generic_restriction_selectivity<'mcx>(
     Ok(clamp_probability(selec))
 }
 
-// matchingsel (selfuncs.c). DEFAULT_MATCHING_SEL = 2 * DEFAULT_EQ_SEL.
+// matchingsel (selfuncs.c); DEFAULT_MATCHING_SEL = 2 * DEFAULT_EQ_SEL.
 pub fn matchingsel<'mcx>(
     run: &mut PlannerRun<'mcx>,
     operator: Oid,
@@ -2551,7 +2697,6 @@ pub fn matchingsel<'mcx>(
     varrelid: i32,
     collation: Oid,
 ) -> PgResult<f64> {
-    const DEFAULT_MATCHING_SEL: f64 = 0.010;
     generic_restriction_selectivity(run, operator, collation, args, varrelid, DEFAULT_MATCHING_SEL)
 }
 

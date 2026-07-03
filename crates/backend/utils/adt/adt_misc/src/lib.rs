@@ -1,5 +1,8 @@
 //! misc.c slice: pg_input_is_valid / pg_input_error_info (soft-error probes).
 
+pub mod builtins;
+pub mod introspect;
+
 extern crate alloc;
 
 use alloc::boxed::Box;
