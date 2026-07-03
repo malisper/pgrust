@@ -60,8 +60,6 @@ fn setup(pages: Vec<Box<AlignedPage>>, fork_exists: bool) {
     setup_n(pages, fork_exists, n as BlockNumber);
 }
 
-// `fork_nblocks` may be smaller than `pages.len()`: trailing pages are
-// non-VM buffers (heap pages) addressable only by buffer id.
 fn setup_n(pages: Vec<Box<AlignedPage>>, fork_exists: bool, fork_nblocks: BlockNumber) {
     install_seams();
     let n = pages.len();
@@ -273,7 +271,6 @@ fn get_status_bit_math() {
     let _s = serial();
     let ctx = MemoryContext::new("test");
     let rel = test_relation(ctx.mcx(), 4242);
-    // byte0 = blocks 0..=3 packed low-to-high, 2 bits each.
     setup(
         vec![vm_page(&[
             (0, 0b11_00_01_10),
@@ -298,7 +295,6 @@ fn get_status_bit_math() {
     assert!(!vm_all_frozen(&rel, 1, &mut vmbuf).unwrap());
     assert!(!vm_all_visible(&rel, 2, &mut vmbuf).unwrap());
 
-    // Every probe reused the one pinned map page.
     with_fake(|f| {
         assert_eq!(f.read_calls, 1);
         assert_eq!(f.pins[0], 1);
@@ -328,7 +324,6 @@ fn get_status_map_page_boundary() {
     );
     with_fake(|f| assert_eq!((f.pins[0], f.pins[1]), (1, 0)));
 
-    // Crossing to the next map page releases the old pin and takes the new.
     assert_eq!(
         visibilitymap_get_status(&rel, HEAPBLOCKS_PER_PAGE, &mut vmbuf).unwrap(),
         0b11
@@ -355,7 +350,6 @@ fn get_status_missing_fork_caches_zero() {
         assert_eq!(f.exists_calls, 1);
         assert_eq!(f.cached_nblocks, 0);
     });
-    // Second probe trusts the cached 0 and skips smgrexists.
     assert_eq!(visibilitymap_get_status(&rel, 7, &mut vmbuf).unwrap(), 0);
     with_fake(|f| assert_eq!(f.exists_calls, 1));
 }
@@ -376,12 +370,10 @@ fn pin_and_pin_ok() {
     assert!(visibilitymap_pin_ok(HEAPBLOCKS_PER_PAGE - 1, &vmbuf));
     assert!(!visibilitymap_pin_ok(HEAPBLOCKS_PER_PAGE, &vmbuf));
 
-    // Same map page: the pin is reused, no re-read.
     let reads = with_fake(|f| f.read_calls);
     visibilitymap_pin(&rel, 5, &mut vmbuf).unwrap();
     with_fake(|f| assert_eq!(f.read_calls, reads));
 
-    // Different existing map page: release + read.
     visibilitymap_pin(&rel, HEAPBLOCKS_PER_PAGE, &mut vmbuf).unwrap();
     with_fake(|f| assert_eq!((f.pins[0], f.pins[1]), (0, 1)));
     assert!(visibilitymap_pin_ok(HEAPBLOCKS_PER_PAGE, &vmbuf));
@@ -440,7 +432,6 @@ fn new_page_initialized_under_lock() {
         assert!(!page.is_new());
     });
 
-    // Already-initialized page: no locking on the normal path.
     let mut vmbuf2 = VmBuffer::new();
     assert_eq!(visibilitymap_get_status(&rel, 1, &mut vmbuf2).unwrap(), 0);
     with_fake(|f| assert_eq!(f.lock_calls, 2));
@@ -494,12 +485,10 @@ fn set_bits_wal_record_and_lsns() {
         assert_eq!(rec.main[4], VISIBILITYMAP_ALL_VISIBLE);
         assert_eq!(rec.bufs.len(), 2);
         assert_eq!(rec.bufs[0], (0, 1, 0));
-        // Checksums off, wal_log_hints off: heap FPI omitted.
         assert_eq!(
             rec.bufs[1],
             (1, heap_buf, xloginsert_seams::REGBUF_STANDARD | xloginsert_seams::REGBUF_NO_IMAGE)
         );
-        // VM page LSN advanced; heap page LSN untouched (no FPI protection).
         let vm_lsn = unsafe {
             PageRef::from_raw(core::ptr::NonNull::new(f.pages[0].as_mut_ptr()).unwrap())
         }
@@ -513,7 +502,6 @@ fn set_bits_wal_record_and_lsns() {
         assert_eq!(f.locks[0], 0);
     });
 
-    // Same flags already set: returns them, no new WAL, no new dirty.
     let prev = visibilitymap_set(
         &rel, heap_blk, heap_buf, 0, &vmbuf, 57, VISIBILITYMAP_ALL_VISIBLE,
     )
@@ -524,7 +512,6 @@ fn set_bits_wal_record_and_lsns() {
         assert_eq!(f.dirty[0], 1);
     });
 
-    // Checksums on: heap page is registered with an FPI and its LSN moves.
     with_fake(|f| f.checksums = true);
     let prev = visibilitymap_set(
         &rel, heap_blk, heap_buf, 0, &vmbuf, 0, VISIBILITYMAP_VALID_BITS,
@@ -556,7 +543,6 @@ fn set_rejects_wrong_buffers() {
     let mut vmbuf = VmBuffer::new();
     visibilitymap_pin(&rel, 1, &mut vmbuf).unwrap();
 
-    // Heap buffer 2 is block 1, not block 3.
     let err = visibilitymap_set(&rel, 3, 2, 0, &vmbuf, 0, VISIBILITYMAP_ALL_VISIBLE)
         .unwrap_err();
     assert!(err.message.contains("wrong heap buffer"), "{}", err.message);
@@ -586,16 +572,13 @@ fn clear_bit_operations() {
     let mut vmbuf = VmBuffer::new();
     visibilitymap_pin(&rel, 0, &mut vmbuf).unwrap();
 
-    // Clear only all_frozen of block 0: low 2 bits keep all_visible.
     assert!(visibilitymap_clear(&rel, 0, &vmbuf, VISIBILITYMAP_ALL_FROZEN).unwrap());
     assert_eq!(map_byte(0), 0b1101);
     with_fake(|f| assert_eq!(f.dirty[0], 1));
 
-    // Both bits of block 1.
     assert!(visibilitymap_clear(&rel, 1, &vmbuf, VISIBILITYMAP_VALID_BITS).unwrap());
     assert_eq!(map_byte(0), 0b0001);
 
-    // Already clear: false, not re-dirtied, lock still cycled.
     let locks_before = with_fake(|f| f.lock_calls);
     assert!(!visibilitymap_clear(&rel, 1, &vmbuf, VISIBILITYMAP_VALID_BITS).unwrap());
     with_fake(|f| {
@@ -612,11 +595,9 @@ fn prepare_truncate_clears_tail() {
     let ctx = MemoryContext::new("test");
     let rel = test_relation(ctx.mcx(), 4242);
 
-    // No VM fork at all.
     setup(vec![], false);
     assert_eq!(visibilitymap_prepare_truncate(&rel, 5).unwrap(), InvalidBlockNumber);
 
-    // nheapblocks 5: truncByte 1, truncOffset 2 -> byte 1 masked, tail zeroed.
     setup(
         vec![vm_page(&[(0, 0xff), (1, 0xff), (2, 0xff), (MAPSIZE as usize - 1, 0xff)]), vm_page(&[])],
         true,
@@ -633,27 +614,23 @@ fn prepare_truncate_clears_tail() {
         assert_eq!(f.locks[0], 0);
     });
 
-    // Checksums on: the torn-page FPI is emitted.
     setup(vec![vm_page(&[(1, 0xff)]), vm_page(&[])], true);
     with_fake(|f| f.checksums = true);
     assert_eq!(visibilitymap_prepare_truncate(&rel, 5).unwrap(), 1);
     with_fake(|f| assert_eq!(f.newpage_calls, vec![1]));
 
-    // Map-page boundary: nothing to clear; file already small enough.
     setup(vec![vm_page(&[])], true);
     assert_eq!(
         visibilitymap_prepare_truncate(&rel, HEAPBLOCKS_PER_PAGE).unwrap(),
         InvalidBlockNumber
     );
 
-    // Boundary with a larger file: truncate down to exactly truncBlock.
     setup(vec![vm_page(&[]), vm_page(&[])], true);
     assert_eq!(
         visibilitymap_prepare_truncate(&rel, HEAPBLOCKS_PER_PAGE).unwrap(),
         1
     );
 
-    // File already smaller than the block holding the cutoff.
     setup(vec![vm_page(&[])], true);
     assert_eq!(
         visibilitymap_prepare_truncate(&rel, HEAPBLOCKS_PER_PAGE + 5).unwrap(),

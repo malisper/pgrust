@@ -599,8 +599,7 @@ impl<'a> PageMut<'a> {
     }
 
     /// `PageRepairFragmentation`; caller holds the buffer cleanup lock.
-    /// Panics on corruption (inside prune's critical section C's
-    /// ereport(ERROR) promotes to PANIC).
+    /// Panics on corruption (in prune's crit section C's ERROR promotes to PANIC).
     pub fn repair_fragmentation(&mut self) {
         // SAFETY: same exclusively-held image; the read view is used only
         // between the interleaved header/line-pointer stores below.
@@ -670,7 +669,7 @@ impl<'a> PageMut<'a> {
         }
 
         if finalusedlp != nline {
-            // Trailing unused line pointers: truncate the array.
+            // Trailing unused line pointers: truncate the line-pointer array.
             let nunusedend = (nline - finalusedlp) as usize;
             debug_assert!(nunused >= nunusedend && nunusedend > 0);
             nunused -= nunusedend;
@@ -686,8 +685,7 @@ impl<'a> PageMut<'a> {
         }
     }
 
-    // compactify_tuples(itemidbase, nitems, page, presorted): close the gaps
-    // left by removed items and restore reverse line-pointer order.
+    // compactify_tuples: close removed-item gaps, restore reverse line-pointer order.
     fn compactify_tuples(&mut self, itemidbase: &[ItemIdCompact], presorted: bool) {
         debug_assert!(!itemidbase.is_empty());
         let nitems = itemidbase.len();
@@ -704,8 +702,6 @@ impl<'a> PageMut<'a> {
                     lastoff = it.itemoff as usize;
                 }
             }
-            // Skip the prefix already packed against pd_special, then memmove
-            // runs of adjacent tuples up, one call per gap.
             let mut i = 0;
             while i < nitems {
                 let it = &itemidbase[i];
@@ -745,8 +741,6 @@ impl<'a> PageMut<'a> {
                 };
             }
         } else {
-            // Not presorted: stage moving tuples in a scratch block, then copy
-            // back in reverse line-pointer order.
             let mut scratch = [0u8; BLCKSZ];
             let pd_upper = self.as_ref().pd_upper() as usize;
             let mut i = 0;
@@ -1074,5 +1068,95 @@ mod tests {
         pm.set_pd_flags(pm.as_ref().pd_flags() | PD_HAS_FREE_LINES);
         assert!(pm.as_ref().heap_free_space() > 0);
         assert_eq!(pm.add_item(&tiny, 0, PAI_IS_HEAP), Some(5));
+    }
+
+    fn add_n(pm: &mut PageMut<'_>, n: usize, len: usize) {
+        for i in 0..n {
+            let item = alloc::vec![(i + 1) as u8; len];
+            assert_eq!(pm.add_item(&item, 0, PAI_IS_HEAP), Some((i + 1) as OffsetNumber));
+        }
+    }
+
+    #[test]
+    fn repair_fragmentation_presorted() {
+        let mut t = temp_page();
+        let mut pm = page_mut(&mut t);
+        pm.init(0);
+        add_n(&mut pm, 4, 28); // offsets 8160, 8128, 8096, 8064
+        let mut lp2 = pm.as_ref().item_id(2);
+        lp2.set_unused();
+        pm.set_item_id(2, lp2);
+        pm.repair_fragmentation();
+
+        let pm = page_mut(&mut t);
+        let r = pm.as_ref();
+        assert_eq!(r.max_offset_number(), 4);
+        assert_eq!(r.pd_upper(), (BLCKSZ - 3 * 32) as u16);
+        assert!(r.has_free_line_pointers());
+        // Tuples 1,3,4 packed against pd_special in line-pointer order.
+        for (off, expect_at, tag) in [(1u16, BLCKSZ - 32, 1u8), (3, BLCKSZ - 64, 3), (4, BLCKSZ - 96, 4)] {
+            let id = r.item_id(off);
+            assert_eq!(id.lp_off() as usize, expect_at);
+            let (ptr, len) = r.item_raw(id);
+            assert_eq!(len, 28);
+            // SAFETY: in-page item.
+            assert_eq!(unsafe { *ptr }, tag);
+        }
+    }
+
+    #[test]
+    fn repair_fragmentation_not_presorted_and_trailing_truncation() {
+        let mut t = temp_page();
+        let mut pm = page_mut(&mut t);
+        pm.init(0);
+        add_n(&mut pm, 6, 28);
+        // Swap the storage of items 1 and 5 so itemoff order isn't descending.
+        let (a, b) = (pm.as_ref().item_id(1), pm.as_ref().item_id(5));
+        pm.set_item_id(1, ItemIdData::new(b.lp_off(), LP_NORMAL, b.lp_len()));
+        pm.set_item_id(5, ItemIdData::new(a.lp_off(), LP_NORMAL, a.lp_len()));
+        // Kill 2 and the trailing 5,6: the line-pointer array truncates to 4.
+        for off in [2u16, 5, 6] {
+            let mut lp = pm.as_ref().item_id(off);
+            lp.set_unused();
+            pm.set_item_id(off, lp);
+        }
+        pm.repair_fragmentation();
+
+        let pm = page_mut(&mut t);
+        let r = pm.as_ref();
+        assert_eq!(r.max_offset_number(), 4);
+        assert_eq!(r.pd_upper(), (BLCKSZ - 3 * 32) as u16);
+        assert!(r.has_free_line_pointers());
+        for (off, tag) in [(1u16, 5u8), (3, 3), (4, 4)] {
+            let id = r.item_id(off);
+            let (ptr, len) = r.item_raw(id);
+            assert_eq!(len, 28);
+            // SAFETY: in-page item.
+            assert_eq!(unsafe { *ptr }, tag);
+        }
+        let lasts: alloc::vec::Vec<usize> = (1..=4u16).filter(|&o| r.item_id(o).is_used())
+            .map(|o| r.item_id(o).lp_off() as usize).collect();
+        let mut sorted = lasts.clone();
+        sorted.sort_unstable_by(|x, y| y.cmp(x));
+        assert_eq!(lasts, sorted); // reverse line-pointer order restored
+    }
+
+    #[test]
+    fn repair_fragmentation_empty_page_resets_upper() {
+        let mut t = temp_page();
+        let mut pm = page_mut(&mut t);
+        pm.init(0);
+        add_n(&mut pm, 2, 28);
+        for off in [1u16, 2] {
+            let mut lp = pm.as_ref().item_id(off);
+            lp.set_unused();
+            pm.set_item_id(off, lp);
+        }
+        pm.repair_fragmentation();
+        let pm = page_mut(&mut t);
+        let r = pm.as_ref();
+        assert_eq!(r.pd_upper() as usize, BLCKSZ);
+        assert_eq!(r.max_offset_number(), 0);
+        assert!(!r.has_free_line_pointers());
     }
 }

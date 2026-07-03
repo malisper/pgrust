@@ -153,6 +153,35 @@ pub fn HeapTupleHeaderGetUpdateXid(hdr: &HeapTupleHeaderData) -> PgResult<Transa
     }
 }
 
+/// `HeapTupleHeaderAdvanceConflictHorizon` (heapam.c): maintain the
+/// snapshotConflictHorizon while removing tuples.
+pub fn HeapTupleHeaderAdvanceConflictHorizon(
+    tuple: &HeapTupleHeaderData,
+    snapshot_conflict_horizon: &mut TransactionId,
+) -> PgResult<()> {
+    use ::types_core::xact::TransactionIdFollows;
+    let xmin = tuple.xmin();
+    let xmax = HeapTupleHeaderGetUpdateXid(tuple)?;
+    let xvac = tuple.xvac();
+
+    if (tuple.t_infomask & ::types_tuple::HEAP_MOVED) != 0
+        && TransactionIdPrecedes(*snapshot_conflict_horizon, xvac)
+    {
+        *snapshot_conflict_horizon = xvac;
+    }
+
+    // Ignore tuples inserted by an aborted transaction or updated/deleted by
+    // the inserting transaction itself.
+    if tuple.xmin_committed()
+        || (!tuple.xmin_invalid() && transam_seams::transaction_id_did_commit::call(xmin)?)
+    {
+        if xmax != xmin && TransactionIdFollows(xmax, *snapshot_conflict_horizon) {
+            *snapshot_conflict_horizon = xmax;
+        }
+    }
+    Ok(())
+}
+
 pub fn HeapCheckForSerializableConflictOut(
     visible: bool,
     relation: &RelationData<'_>,

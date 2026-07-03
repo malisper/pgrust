@@ -467,7 +467,7 @@ fn page0_header(off: u16) -> &'static HeapTupleHeaderData {
 }
 
 fn mvcc_snapshot<'m>(mcx: Mcx<'m>) -> SnapshotData<'m> {
-    let mut s = SnapshotData::sentinel(mcx, SnapshotType::SNAPSHOT_MVCC);
+    let s = SnapshotData::sentinel(mcx, SnapshotType::SNAPSHOT_MVCC);
     s.regd_count.set(1);
     s
 }
