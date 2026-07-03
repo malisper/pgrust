@@ -39,6 +39,7 @@ xlogrecovery = { path = "../../backend/access/transam/xlogrecovery" }
 xlogutils = { path = "../../backend/access/transam/xlogutils" }
 aclchk = { path = "../../backend/catalog/aclchk" }
 be_fsstubs = { path = "../../backend/libpq/be_fsstubs" }
+large_object = { path = "../../backend/storage/large_object" }
 catalog_namespace = { path = "../../backend/catalog/catalog_namespace" }
 catalog_dependency = { path = "../../backend/catalog/catalog_dependency" }
 commands_cluster = { path = "../../backend/commands/cluster" }

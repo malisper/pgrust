@@ -104,6 +104,18 @@ pub fn close_lo_relation(_isCommit: bool) -> PgResult<()> {
     Ok(())
 }
 
+std::thread_local! {
+    // bool lo_compat_privileges (inv_api.c:56): PGC_SUSET, boot false.
+    static LO_COMPAT_PRIVILEGES: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+}
+
+pub fn init_seams() {
+    guc_tables::vars::lo_compat_privileges.install(guc_tables::GucVarAccessors {
+        get: || LO_COMPAT_PRIVILEGES.with(core::cell::Cell::get),
+        set: |v| LO_COMPAT_PRIVILEGES.with(|c| c.set(v)),
+    });
+}
+
 #[cold]
 fn corrupt_page(loid: Oid, pageno: i32, size: usize) -> Box<types_error::PgError> {
     ereport(ERROR)
@@ -126,7 +138,7 @@ fn read_lo_page<'mcx>(
 ) -> PgResult<()> {
     if tuple.has_nulls() {
         return Err(ereport(ERROR)
-            .errmsg_internal(format!("null field found in pg_largeobject (loid: {loid})"))
+            .errmsg_internal("null field found in pg_largeobject")
             .into_error()
             .into());
     }
@@ -151,14 +163,14 @@ fn read_lo_page<'mcx>(
             let flat = detoast::detoast_attr(mcx, image)?;
             let payload = &flat[VARHDRSZ..];
             if payload.len() > LOBLKSIZE_USZ {
-                return Err(corrupt_page(loid, pageno, flat.len()));
+                return Err(corrupt_page(loid, pageno, payload.len()));
             }
             out.len = payload.len();
             out.data[..payload.len()].copy_from_slice(payload);
         } else if varatt::varatt_is_1b(p) {
             let len = varatt::varsize_1b(p) - varatt::VARHDRSZ_SHORT;
             if len > LOBLKSIZE_USZ {
-                return Err(corrupt_page(loid, pageno, len + varatt::VARHDRSZ_SHORT));
+                return Err(corrupt_page(loid, pageno, len));
             }
             out.len = len;
             out.data[..len]
@@ -166,7 +178,7 @@ fn read_lo_page<'mcx>(
         } else {
             let len = varatt::varsize_4b(p) - VARHDRSZ;
             if len > LOBLKSIZE_USZ {
-                return Err(corrupt_page(loid, pageno, len + VARHDRSZ));
+                return Err(corrupt_page(loid, pageno, len));
             }
             out.len = len;
             out.data[..len]
