@@ -18,22 +18,29 @@ use mcx::Mcx;
 use stringinfo::StringInfo;
 use types_error::{
     ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_INVALID_TEXT_REPRESENTATION,
+    ERRCODE_UNTRANSLATABLE_CHARACTER,
 };
 
-// C: json_errsave_error, non-Unicode arm (the only reachable one with
-// need_escapes=false): errmsg + errdetail_internal(json_errdetail) +
-// errcontext(report_json_context), routed through a soft-error context if
-// present. The UNTRANSLATABLE_CHARACTER (22P05) arm needs de-escaping and
-// lives on the need_escapes lane.
+// C: json_errsave_error (shared by json and jsonb; the errmsg says "json" for
+// both). JSON_SEM_ACTION_FAILED never reaches here — callers handle it.
 #[cold]
 #[inline(never)]
-fn errsave_parse_error(
+pub fn errsave_parse_error(
     error: JsonError,
     lex: &JsonLex<'_>,
     escontext: Option<&mut SoftErrorContext>,
 ) -> PgResult<()> {
-    let err = PgError::error("invalid input syntax for type json")
-        .with_sqlstate(ERRCODE_INVALID_TEXT_REPRESENTATION)
+    let err = if matches!(
+        error,
+        JsonError::UnicodeUntranslatable | JsonError::UnicodeCodePointZero
+    ) {
+        PgError::error("unsupported Unicode escape sequence")
+            .with_sqlstate(ERRCODE_UNTRANSLATABLE_CHARACTER)
+    } else {
+        PgError::error("invalid input syntax for type json")
+            .with_sqlstate(ERRCODE_INVALID_TEXT_REPRESENTATION)
+    };
+    let err = err
         .with_detail(lex.errdetail(error))
         .with_context(lex.errcontext());
     ereturn(escontext, (), err)

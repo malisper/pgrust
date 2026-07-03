@@ -146,3 +146,24 @@ SELECT count(*) FROM regress_m1_t;
 SELECT vall FROM regress_m1_t;
 SELECT * FROM no_such_table;
 DROP TABLE regress_m1_t;
+
+-- ===== jsonb core [adt_jsonb: in/out, JEntry tree, operators, cmp/hash] =====
+SELECT '{"b": 2, "a": 1, "a": 3}'::jsonb;
+SELECT '{"key": [1, 2.50, null, "x"], "nested": {"deep": [true, false]}}'::jsonb;
+SELECT '[1e2, 0.5, "\u00e9\ud83d\ude00", ""]'::jsonb;
+SELECT '-1.50'::jsonb::text;
+SELECT jsonb_typeof('{"a":1}'::jsonb), jsonb_typeof('[1]'::jsonb), jsonb_typeof('"s"'::jsonb), jsonb_typeof('1'::jsonb), jsonb_typeof('true'::jsonb), jsonb_typeof('null'::jsonb);
+SELECT '{"a": {"b": [10, 20, {"c": "d"}]}}'::jsonb -> 'a';
+SELECT '{"a": {"b": "c"}}'::jsonb ->> 'a';
+SELECT '["x", 1.50, true]'::jsonb -> 1, '["x", 1.50, true]'::jsonb ->> -1;
+SELECT '["x"]'::jsonb -> 5, '{"a":1}'::jsonb -> 'zz';
+SELECT '{"a": {"b": [10, 20]}}'::jsonb #> '{a,b,1}', '{"a": {"b": [10, 20]}}'::jsonb #>> '{a,b,-2}';
+SELECT '{"a":1,"b":{"c":2}}'::jsonb @> '{"b":{"c":2}}'::jsonb, '{"a":1}'::jsonb @> '{"a":2}'::jsonb;
+SELECT '[1,[2,3]]'::jsonb @> '[[3,2]]'::jsonb, '[1,2]'::jsonb <@ '[2,1,3]'::jsonb;
+SELECT '{"a":1,"b":2}'::jsonb ? 'b', '["a","b"]'::jsonb ? 'c';
+SELECT '{"a":1,"b":2}'::jsonb ?| '{x,b}', '{"a":1,"b":2}'::jsonb ?& '{a,b}';
+SELECT '{"a":1}'::jsonb = '{"a": 1}'::jsonb, '{"a":1}'::jsonb < '{"a":1,"b":0}'::jsonb;
+SELECT j FROM (VALUES (1, '[1]'::jsonb), (2, '{"a":1}'), (3, '"s"'), (4, '1'), (5, 'true'), (6, 'null'), (7, '[]'), (8, '{}')) AS v(i, j) ORDER BY j, i;
+SELECT 'nope'::jsonb;
+SELECT '"\u0000"'::jsonb;
+SELECT '{"a":'::jsonb;

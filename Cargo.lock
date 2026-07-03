@@ -242,6 +242,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "adt_jsonb"
+version = "0.1.0"
+dependencies = [
+ "adt_json",
+ "adt_numeric",
+ "arrayfuncs",
+ "datum",
+ "detoast_seams",
+ "hashfn",
+ "mbutils",
+ "mcx",
+ "pg_locale_seams",
+ "pqformat",
+ "stack_depth",
+ "stringinfo",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_tuple",
+ "varlena",
+ "wchar",
+]
+
+[[package]]
 name = "adt_like"
 version = "0.1.0"
 dependencies = [
@@ -2334,6 +2358,7 @@ dependencies = [
  "adt_int",
  "adt_int8",
  "adt_json",
+ "adt_jsonb",
  "adt_like",
  "adt_mac",
  "adt_mac8",

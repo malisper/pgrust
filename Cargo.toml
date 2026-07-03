@@ -447,6 +447,7 @@ members = [
     "crates/_support/seams_init",
     "crates/backend/main/main_main",
     "crates/backend/utils/adt/json",
+    "crates/backend/utils/adt/jsonb",
 ]
 
 [workspace.package]
