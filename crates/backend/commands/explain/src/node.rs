@@ -1709,6 +1709,54 @@ fn deparse_expr<'mcx>(
         NodeTag::T_Param => {
             deparse_param(es, plan_node, ancestors, expr.as_param().unwrap(), buf)
         }
+        // get_windowfunc_expr (ruleutils.c), EXPLAIN leg: OVER prints the
+        // owning WindowAgg's winname. The name prints unqualified (same
+        // generate_function_name visibility divergence as the Aggref arm).
+        NodeTag::T_WindowFunc => {
+            let w = expr.as_window_func().unwrap();
+            if w.aggfilter.is_some() {
+                node_gap("get_windowfunc_expr", "FILTER deparse (ruleutils lane)");
+            }
+            let name = lsyscache::get_func_name(es.str.allocator(), w.winfnoid)?
+                .expect("window function of a planned expression exists");
+            write!(buf, "{}(", name.as_str()).expect("PgString write");
+            if w.winstar {
+                buf.try_push('*')?;
+            } else {
+                for (i, arg) in w.args.iter().enumerate() {
+                    if i > 0 {
+                        buf.try_push_str(", ")?;
+                    }
+                    deparse_expr(es, plan_node, ancestors, arg, useprefix, buf)?;
+                }
+            }
+            buf.try_push_str(") OVER ")?;
+            let mut winname = plan_node
+                .as_window_agg()
+                .filter(|wagg| wagg.winref == w.winref)
+                .map(|wagg| wagg.winname);
+            let mut chain = ancestors;
+            while winname.is_none() {
+                let Some(a) = chain else {
+                    node_gap(
+                        "get_windowfunc_expr",
+                        &format!("could not find window clause for winref {}", w.winref),
+                    );
+                };
+                if let AncestorEntry::Plan(pn) = a.entry {
+                    winname = pn
+                        .as_window_agg()
+                        .filter(|wagg| wagg.winref == w.winref)
+                        .map(|wagg| wagg.winname);
+                }
+                chain = a.parent;
+            }
+            let winname = winname
+                .flatten()
+                .expect("planned WindowAgg has a winname (name_active_windows)");
+            buf.try_push_str(&quote_identifier(winname))?;
+            Ok(())
+        }
         // get_rule_expr T_CaseExpr, non-pretty form; arg-form WHENs show only
         // the RHS of the parser-built "CaseTestExpr = RHS" (as C, punting to
         // the full expression when the shape is not recognized).
@@ -1887,6 +1935,7 @@ fn deparse_expr_type(node: Node<'_>) -> types_core::Oid {
         NodeTag::T_Var => node.as_var().unwrap().vartype,
         NodeTag::T_OpExpr => node.as_op_expr().unwrap().opresulttype,
         NodeTag::T_Aggref => node.as_aggref().unwrap().aggtype,
+        NodeTag::T_WindowFunc => node.as_window_func().unwrap().wintype,
         NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resulttype,
         NodeTag::T_BoolExpr | NodeTag::T_NullTest | NodeTag::T_ScalarArrayOpExpr => {
             types_core::catalog::BOOLOID
