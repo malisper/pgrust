@@ -28,6 +28,13 @@ pub fn nodeToString<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>) -> PgResult<PgString
     Ok(out)
 }
 
+// Query reachable only as RangeTblEntry.subquery's &Query (no node handle).
+pub fn queryToString<'mcx>(mcx: Mcx<'mcx>, q: &Query<'_>) -> PgResult<PgString<'mcx>> {
+    let mut out = PgString::new_in(mcx);
+    out_query(&mut out, q)?;
+    Ok(out)
+}
+
 macro_rules! w {
     ($out:expr, $($arg:tt)*) => {
         write!($out, $($arg)*).expect("outfuncs append")
@@ -72,6 +79,24 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
             out,
             node.as_variant::<PartitionRangeDatum>().expect("PartitionRangeDatum"),
         )?,
+        NodeTag::T_BooleanTest => {
+            let bt = node
+                .as_variant::<types_nodes::primnodes::BooleanTest>()
+                .expect("BooleanTest");
+            w!(out, "{{BOOLEANTEST :arg ");
+            out_opt_node(out, bt.arg)?;
+            w!(out, " :booltesttype {} :location -1}}", bt.booltesttype as u32);
+        }
+        NodeTag::T_SetToDefault => {
+            let d = node
+                .as_variant::<types_nodes::primnodes::SetToDefault>()
+                .expect("SetToDefault");
+            w!(
+                out,
+                "{{SETTODEFAULT :typeId {} :typeMod {} :collation {} :location -1}}",
+                d.typeId, d.typeMod, d.collation
+            );
+        }
         NodeTag::T_Query => out_query(out, node.as_variant::<Query>().expect("Query"))?,
         NodeTag::T_RangeTblEntry => {
             out_range_tbl_entry(out, node.as_variant::<RangeTblEntry>().expect("RangeTblEntry"))?
@@ -200,6 +225,15 @@ fn out_datum(out: &mut PgString<'_>, value: Datum, typlen: i32, typbyval: bool) 
         -1 => {
             // SAFETY: byref const datum points at a live in-line varlena.
             unsafe { varlena_size(p) }
+        }
+        -2 => {
+            // cstring (unknown-type Consts): NUL included, as C's strlen+1.
+            let mut n = 0usize;
+            // SAFETY: byref cstring datum points at a live NUL-terminated string.
+            while unsafe { *p.add(n) } != 0 {
+                n += 1;
+            }
+            n + 1
         }
         other => panic!("_outDatum (outfuncs.c): typlen {other} unported"),
     };
@@ -576,6 +610,16 @@ fn out_range_tbl_entry(out: &mut PgString<'_>, r: &RangeTblEntry<'_>) -> PgResul
             out_int_list(out, &r.joinrightcols);
             w!(out, " :join_using_alias ");
             out_opt_alias(out, r.join_using_alias)?;
+        }
+        RTEKind::RTE_VALUES => {
+            w!(out, " :values_lists ");
+            out_list(out, &r.values_lists)?;
+            w!(out, " :coltypes ");
+            out_oid_list(out, &r.coltypes);
+            w!(out, " :coltypmods ");
+            out_int_list(out, &r.coltypmods);
+            w!(out, " :colcollations ");
+            out_oid_list(out, &r.colcollations);
         }
         RTEKind::RTE_GROUP => {
             w!(out, " :groupexprs ");
