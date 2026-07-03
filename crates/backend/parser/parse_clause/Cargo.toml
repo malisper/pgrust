@@ -16,6 +16,8 @@ elog = { path = "../../utils/error/elog" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
 mbutils = { path = "../../utils/mb/mbutils" }
 mcx = { path = "../../../_support/mcx" }
+analyze_seams = { path = "../analyze_seams" }
+parse_agg = { path = "../parse_agg" }
 parse_expr = { path = "../parse_expr" }
 parse_collate = { path = "../parse_collate" }
 parse_oper = { path = "../parse_oper" }

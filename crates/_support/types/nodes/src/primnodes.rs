@@ -252,6 +252,21 @@ impl Default for Aggref<'_> {
     }
 }
 
+#[derive(Default)]
+pub struct WindowFunc<'mcx> {
+    pub winfnoid: Oid,
+    pub wintype: Oid,
+    pub wincollid: Oid,
+    pub inputcollid: Oid,
+    pub args: NodeList<'mcx>,
+    pub aggfilter: Option<Node<'mcx>>,
+    pub runCondition: NodeList<'mcx>,
+    pub winref: Index,
+    pub winstar: bool,
+    pub winagg: bool,
+    pub location: ParseLoc,
+}
+
 // C `Expr *expr` is never NULL in a live TargetEntry (makeTargetEntry
 // requires it); modeled non-optional, so no Default.
 pub struct TargetEntry<'mcx> {
@@ -268,6 +283,20 @@ pub struct TargetEntry<'mcx> {
 pub struct FromExpr<'mcx> {
     pub fromlist: NodeList<'mcx>,
     pub quals: Option<Node<'mcx>>,
+}
+
+// C `Node *larg/rarg` are never NULL in a live JoinExpr (the grammar always
+// sets both); modeled non-optional, so no Default.
+pub struct JoinExpr<'mcx> {
+    pub jointype: crate::jointype::JoinType,
+    pub isNatural: bool,
+    pub larg: Node<'mcx>,
+    pub rarg: Node<'mcx>,
+    pub usingClause: NodeList<'mcx>,
+    pub join_using_alias: Option<&'mcx Alias<'mcx>>,
+    pub quals: Option<Node<'mcx>>,
+    pub alias: Option<&'mcx Alias<'mcx>>,
+    pub rtindex: i32,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -294,6 +323,15 @@ pub struct RelabelType<'mcx> {
     pub resulttypmod: i32,
     pub resultcollid: Oid,
     pub relabelformat: CoercionForm,
+    pub location: ParseLoc,
+}
+
+// C `Expr *arg` is never NULL in a live CoerceViaIO; modeled non-optional.
+pub struct CoerceViaIO<'mcx> {
+    pub arg: Node<'mcx>,
+    pub resulttype: Oid,
+    pub resultcollid: Oid,
+    pub coerceformat: CoercionForm,
     pub location: ParseLoc,
 }
 
@@ -330,6 +368,49 @@ pub struct NullTest<'mcx> {
 }
 
 #[derive(Default)]
+pub struct CaseExpr<'mcx> {
+    pub casetype: Oid,
+    pub casecollid: Oid,
+    pub arg: Option<Node<'mcx>>,
+    pub args: NodeList<'mcx>,
+    pub defresult: Option<Node<'mcx>>,
+    pub location: ParseLoc,
+}
+
+#[derive(Default)]
+pub struct CaseWhen<'mcx> {
+    pub expr: Option<Node<'mcx>>,
+    pub result: Option<Node<'mcx>>,
+    pub location: ParseLoc,
+}
+
+#[derive(Default)]
+pub struct CoalesceExpr<'mcx> {
+    pub coalescetype: Oid,
+    pub coalescecollid: Oid,
+    pub args: NodeList<'mcx>,
+    pub location: ParseLoc,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum MinMaxOp {
+    #[default]
+    IS_GREATEST = 0,
+    IS_LEAST = 1,
+}
+
+#[derive(Default)]
+pub struct MinMaxExpr<'mcx> {
+    pub minmaxtype: Oid,
+    pub minmaxcollid: Oid,
+    pub inputcollid: Oid,
+    pub op: MinMaxOp,
+    pub args: NodeList<'mcx>,
+    pub location: ParseLoc,
+}
+
+#[derive(Default)]
 pub struct FuncExpr<'mcx> {
     pub funcid: Oid,
     pub funcresulttype: Oid,
@@ -361,6 +442,9 @@ unsafe impl NodeVariant<'_> for Param {
 unsafe impl<'mcx> NodeVariant<'mcx> for Aggref<'mcx> {
     const TAG: NodeTag = NodeTag::T_Aggref;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for WindowFunc<'mcx> {
+    const TAG: NodeTag = NodeTag::T_WindowFunc;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for TargetEntry<'mcx> {
     const TAG: NodeTag = NodeTag::T_TargetEntry;
 }
@@ -369,6 +453,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for FromExpr<'mcx> {
 }
 unsafe impl NodeVariant<'_> for RangeTblRef {
     const TAG: NodeTag = NodeTag::T_RangeTblRef;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for JoinExpr<'mcx> {
+    const TAG: NodeTag = NodeTag::T_JoinExpr;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for OpExpr<'mcx> {
     const TAG: NodeTag = NodeTag::T_OpExpr;
@@ -379,11 +466,26 @@ unsafe impl<'mcx> NodeVariant<'mcx> for FuncExpr<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for RelabelType<'mcx> {
     const TAG: NodeTag = NodeTag::T_RelabelType;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for CoerceViaIO<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CoerceViaIO;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for BoolExpr<'mcx> {
     const TAG: NodeTag = NodeTag::T_BoolExpr;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for NullTest<'mcx> {
     const TAG: NodeTag = NodeTag::T_NullTest;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for CaseExpr<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CaseExpr;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for CaseWhen<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CaseWhen;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for CoalesceExpr<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CoalesceExpr;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for MinMaxExpr<'mcx> {
+    const TAG: NodeTag = NodeTag::T_MinMaxExpr;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for SubLink<'mcx> {
     const TAG: NodeTag = NodeTag::T_SubLink;
@@ -514,6 +616,11 @@ impl<'mcx> Node<'mcx> {
     }
 
     #[inline]
+    pub fn as_window_func(self) -> Option<&'mcx WindowFunc<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
     pub fn as_target_entry(self) -> Option<&'mcx TargetEntry<'mcx>> {
         self.as_variant()
     }
@@ -525,6 +632,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_range_tbl_ref(self) -> Option<&'mcx RangeTblRef> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_join_expr(self) -> Option<&'mcx JoinExpr<'mcx>> {
         self.as_variant()
     }
 
@@ -571,7 +683,32 @@ impl<'mcx> Node<'mcx> {
     }
 
     #[inline]
+    pub fn as_coerce_via_io(self) -> Option<&'mcx CoerceViaIO<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
     pub fn as_null_test(self) -> Option<&'mcx NullTest<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_case_expr(self) -> Option<&'mcx CaseExpr<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_case_when(self) -> Option<&'mcx CaseWhen<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_coalesce_expr(self) -> Option<&'mcx CoalesceExpr<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_min_max_expr(self) -> Option<&'mcx MinMaxExpr<'mcx>> {
         self.as_variant()
     }
 

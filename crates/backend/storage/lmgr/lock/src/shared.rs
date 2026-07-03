@@ -7,15 +7,15 @@ use types_core::{ProcNumber, Size};
 use types_error::PgResult;
 use types_hash::hsearch::{
     HASHCTL, HASH_BLOBS, HASH_ELEM, HASH_ENTER_NULL, HASH_FIND, HASH_FIXED_SIZE, HASH_FUNCTION,
-    HASH_PARTITION, HASH_REMOVE, HASH_SHARED_MEM, HTAB,
+    HASH_PARTITION, HASH_REMOVE, HASH_SEQ_STATUS, HASH_SHARED_MEM, HTAB,
 };
 use types_storage::ilist::{dlist_head, dlist_node};
 use types_storage::lock::{
-    LockMethod, LOCK, LOCKBIT_OFF, LOCKBIT_ON, LOCKMODE, LOCKTAG, MAX_LOCKMODES, PROCLOCK,
-    PROCLOCKTAG,
+    LockMethod, LOCK, LOCKBIT_OFF, LOCKBIT_ON, LOCKMODE, LOCKTAG, LOCKTAG_RELATION, MAX_LOCKMODES,
+    PROCLOCK, PROCLOCKTAG,
 };
 use types_storage::storage::{
-    proclist_head, LOG2_NUM_LOCK_PARTITIONS, NUM_LOCK_PARTITIONS,
+    proclist_head, xl_standby_lock, LOG2_NUM_LOCK_PARTITIONS, NUM_LOCK_PARTITIONS,
 };
 
 use crate::waitqueue::ProcLockWakeup;
@@ -136,6 +136,19 @@ pub fn LockManagerShmemInit(max_prepared_xacts: i32) -> PgResult<()> {
         proclock_hash: proclock_hash_table,
     });
     Ok(())
+}
+
+/// Crash-cycle reset in place (notes/crash-restart-design.md); sizes are
+/// PGC_POSTMASTER-stable, so emptying both hashes restores the boot image.
+pub fn LockManagerShmemResetAfterCrash() {
+    let tables = shared();
+    // SAFETY: crash choreography drained every child before reset; the
+    // postmaster thread has exclusive access to both preallocated tables.
+    unsafe {
+        dynahash::hash_reset_after_crash(tables.lock_hash);
+        dynahash::hash_reset_after_crash(tables.proclock_hash);
+    }
+    crate::fastpath::reset_strong_locks_after_crash();
 }
 
 // Intrusive dlist kernel over PROCLOCK links. NULL-terminated (not C's
@@ -562,4 +575,59 @@ pub(crate) fn LockRefindAndRelease(
         crate::fastpath::decrement_strong_lock_count(hashcode);
     }
     Ok(())
+}
+
+pub fn GetRunningTransactionLocks() -> PgResult<Vec<xl_standby_lock>> {
+    let procno = crate::my_procno();
+    // Must grab LWLocks in partition-number order to avoid LWLock deadlock.
+    for i in 0..NUM_LOCK_PARTITIONS as usize {
+        lwlock::LWLockAcquire(LockHashPartitionLockByIndex(i), lwlock::LW_SHARED, procno)?;
+    }
+
+    let els = dynahash::hash_get_num_entries(shared().proclock_hash);
+    let mut accessExclusiveLocks = Vec::with_capacity(els as usize);
+
+    let mut seqstat = HASH_SEQ_STATUS::new();
+    dynahash::hash_seq_init(&mut seqstat, shared().proclock_hash)?;
+
+    // A granted relation AccessExclusiveLock has exactly one proclock holder,
+    // so no dedup is needed (C's caveat about copying this elsewhere stands).
+    loop {
+        let proclock = dynahash::hash_seq_search(&mut seqstat)? as *mut PROCLOCK;
+        if proclock.is_null() {
+            break;
+        }
+        // SAFETY: all partition locks held; entries and their LOCKs are pinned.
+        unsafe {
+            if (*proclock).holdMask & LOCKBIT_ON(crate::AccessExclusiveLock) != 0
+                && (*(*proclock).tag.myLock).tag.locktag_type == LOCKTAG_RELATION
+            {
+                let proc = lmgr_proc::GetPGProcByNumber((*proclock).tag.myProc);
+                let lock = (*proclock).tag.myLock;
+                let xid = proc.xid.read();
+
+                // Skip transactions that have already WAL-logged their commit
+                // but not yet zeroed their xid / released the lock.
+                if !types_core::TransactionIdIsValid(xid) {
+                    continue;
+                }
+
+                accessExclusiveLocks.push(xl_standby_lock {
+                    xid,
+                    dbOid: (*lock).tag.locktag_field1,
+                    relOid: (*lock).tag.locktag_field2,
+                });
+            }
+        }
+    }
+
+    debug_assert!(accessExclusiveLocks.len() as i64 <= els);
+
+    // Reverse order: anyone needing several partitions locks them in
+    // increasing order, and this avoids O(N^2) inside LWLockRelease.
+    for i in (0..NUM_LOCK_PARTITIONS as usize).rev() {
+        lwlock::LWLockRelease(LockHashPartitionLockByIndex(i))?;
+    }
+
+    Ok(accessExclusiveLocks)
 }

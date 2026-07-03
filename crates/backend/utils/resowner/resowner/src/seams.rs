@@ -11,7 +11,7 @@ use ::types_snapshot::SnapshotData;
 use crate::{
     CurTransactionResourceOwner, CurrentResourceOwner, ResourceOwnerCreate, ResourceOwnerDelete,
     ResourceOwnerEnlarge, ResourceOwnerForget, ResourceOwnerNewParent, ResourceOwnerRelease,
-    ResourceOwnerRemember,
+    ResourceOwnerRemember, SetCurrentResourceOwner, TopTransactionResourceOwner,
 };
 
 // snapmgr.c's snapshot_resowner_desc. The remembered Datum is the raw Rc
@@ -37,6 +37,10 @@ fn print_snapshot_ref<'a>(mcx: Mcx<'a>, res: Datum) -> PgResult<PgString<'a>> {
 
 pub(crate) fn install() {
     resowner_seams::current_resource_owner::set(CurrentResourceOwner);
+
+    resowner_seams::set_current_resource_owner::set(SetCurrentResourceOwner);
+
+    resowner_seams::top_transaction_resource_owner::set(TopTransactionResourceOwner);
 
     resowner_seams::resource_owner_enlarge::set(ResourceOwnerEnlarge);
 

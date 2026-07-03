@@ -65,28 +65,36 @@ pub fn deconstruct_array<'mcx>(
     let bitmap_off = arr_nullbitmap_off(array);
     let mut bitmask: u32 = 1;
     let mut bitmap_byte = 0usize;
+    let ep = elems.as_mut_ptr();
+    let np = nulls.as_mut_ptr();
 
-    for _ in 0..nelems {
+    for i in 0..nelems {
         let is_null = match bitmap_off {
             Some(bo) => (array[bo + bitmap_byte] as u32 & bitmask) == 0,
             None => false,
         };
         if is_null {
-            elems.push(Datum::null());
-            if allow_nulls {
-                nulls.push(true);
-            } else {
+            if !allow_nulls {
                 return Err(Box::new(
                     PgError::error("null array element not allowed in this context")
                         .with_sqlstate(ERRCODE_NULL_VALUE_NOT_ALLOWED),
                 ));
             }
+            // SAFETY: i < nelems = reserved capacity of both vecs; the set_len
+            // below only covers slots this loop has written.
+            unsafe {
+                *ep.add(i) = Datum::null();
+                *np.add(i) = true;
+            }
         } else {
-            // SAFETY: off is within the image; fetch_att reads elmlen bytes.
-            let p = unsafe { base.add(off) };
-            elems.push(fetch_att(p, elmbyval, elmlen));
-            nulls.push(false);
-            off = att_addlength_pointer(off, elmlen, p);
+            // SAFETY: off is within the image; fetch_att reads elmlen bytes;
+            // writes as above.
+            unsafe {
+                let p = base.add(off);
+                *ep.add(i) = fetch_att(p, elmbyval, elmlen);
+                *np.add(i) = false;
+                off = att_addlength_pointer(off, elmlen, p);
+            }
             off = att_align_nominal(off, elmalign);
         }
         if bitmap_off.is_some() {
@@ -96,6 +104,11 @@ pub fn deconstruct_array<'mcx>(
                 bitmask = 1;
             }
         }
+    }
+    // SAFETY: all nelems slots of both vecs initialized above.
+    unsafe {
+        elems.set_len(nelems);
+        nulls.set_len(nelems);
     }
     Ok((elems, nulls))
 }

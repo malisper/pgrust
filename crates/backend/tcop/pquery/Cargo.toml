@@ -25,6 +25,10 @@ xact = { path = "../../access/transam/xact" }
 exectuples = { path = "../../executor/exectuples" }
 guc_tables = { path = "../../utils/misc/guc_tables" }
 pquery_seams = { path = "../pquery_seams" }
+plancache = { path = "../../utils/cache/plancache" }
+prepare_seams = { path = "../../commands/prepare_seams" }
+resowner_seams = { path = "../../utils/resowner/resowner_seams" }
+types_resowner = { path = "../../../_support/types/types_resowner" }
 postgres_seams = { path = "../postgres_seams" }
 utility_seams = { path = "../utility_seams" }
 execmain_seams = { path = "../../executor/execmain_seams" }
@@ -59,7 +63,6 @@ pqcomm_seams = { path = "../../libpq/pqcomm_seams" }
 printtup = { path = "../../access/common/printtup" }
 procarray = { path = "../../storage/ipc/procarray" }
 resowner_portal_seams = { path = "../../utils/resowner/resowner_portal_seams" }
-resowner_seams = { path = "../../utils/resowner/resowner_seams" }
 rewrite_handler = { path = "../../rewrite/rewrite_handler" }
 s_lock_seams = { path = "../../storage/lmgr/s_lock_seams" }
 scalar_seams = { path = "../../utils/adt/scalar_seams" }
@@ -72,7 +75,6 @@ timestamp_seams = { path = "../../utils/adt/timestamp_seams" }
 transam_xlog_seams = { path = "../../access/transam/transam_xlog_seams" }
 tuplestore = { path = "../../utils/sort/tuplestore" }
 types_fmgr = { path = "../../../_support/types/fmgr" }
-types_resowner = { path = "../../../_support/types/types_resowner" }
 types_tuple = { path = "../../../_support/types/types_tuple" }
 utility = { path = "../utility" }
 variable = { path = "../../commands/variable" }

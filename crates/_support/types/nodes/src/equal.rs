@@ -10,12 +10,13 @@ use crate::bitmapset::Bitmapset;
 use crate::list::{IntList, NodeList, OidList, XidList};
 use crate::node_tree::{BitString, Boolean, Float, Integer, Node, String};
 use crate::parsenodes::{
-    DeallocateStmt, DefElem, ExecuteStmt, ExplainStmt, FetchStmt, PrepareStmt, Query,
-    RTEPermissionInfo, RangeTblEntry, TransactionStmt, VariableSetStmt, VariableShowStmt,
+    CommonTableExpr, DeallocateStmt, DefElem, ExecuteStmt, ExplainStmt, FetchStmt, PrepareStmt,
+    Query, RTEPermissionInfo, RangeTblEntry, TransactionStmt, VariableSetStmt, VariableShowStmt,
+    WithClause,
 };
 use crate::primnodes::{
-    Aggref, Alias, BoolExpr, Const, FromExpr, FuncExpr, NullTest, OpExpr, Param, RangeTblRef,
-    RangeVar, RelabelType, TargetEntry, Var,
+    Aggref, Alias, BoolExpr, CoerceViaIO, Const, FromExpr, FuncExpr, NullTest, OpExpr, Param,
+    RangeTblRef, RangeVar, RelabelType, TargetEntry, Var, WindowFunc,
 };
 use crate::rawnodes::{
     A_Const, A_Expr, A_Star, ColumnRef, DeleteStmt, DistinctClause, FuncCall, InsertStmt,
@@ -48,16 +49,20 @@ pub fn equal(a: Node<'_>, b: Node<'_>) -> bool {
         NodeTag::T_Const => cmp!(as_const),
         NodeTag::T_Param => cmp!(as_param),
         NodeTag::T_Aggref => cmp!(as_aggref),
+        NodeTag::T_WindowFunc => cmp!(as_window_func),
         NodeTag::T_FuncExpr => cmp!(as_func_expr),
         NodeTag::T_OpExpr => cmp!(as_op_expr),
         NodeTag::T_BoolExpr => cmp!(as_bool_expr),
         NodeTag::T_RelabelType => cmp!(as_relabel_type),
+        NodeTag::T_CoerceViaIO => cmp!(as_coerce_via_io),
         NodeTag::T_NullTest => cmp!(as_null_test),
         NodeTag::T_TargetEntry => cmp!(as_target_entry),
         NodeTag::T_RangeTblRef => cmp!(as_range_tbl_ref),
         NodeTag::T_FromExpr => cmp!(as_from_expr),
         NodeTag::T_Query => cmp!(as_query),
         NodeTag::T_RangeTblEntry => cmp!(as_range_tbl_entry),
+        NodeTag::T_WithClause => cmp!(as_with_clause),
+        NodeTag::T_CommonTableExpr => cmp!(as_common_table_expr),
         NodeTag::T_RTEPermissionInfo => cmp!(as_rte_permission_info),
         NodeTag::T_SortGroupClause => {
             a.as_sort_group_clause().unwrap() == b.as_sort_group_clause().unwrap()
@@ -299,6 +304,21 @@ impl NodeEqual for Aggref<'_> {
     }
 }
 
+impl NodeEqual for WindowFunc<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.winfnoid == b.winfnoid
+            && self.wintype == b.wintype
+            && self.wincollid == b.wincollid
+            && self.inputcollid == b.inputcollid
+            && self.args.node_equal(&b.args)
+            && equal_opt(self.aggfilter, b.aggfilter)
+            && self.runCondition.node_equal(&b.runCondition)
+            && self.winref == b.winref
+            && self.winstar == b.winstar
+            && self.winagg == b.winagg
+    }
+}
+
 impl NodeEqual for FuncExpr<'_> {
     fn node_equal(&self, b: &Self) -> bool {
         self.funcid == b.funcid
@@ -335,6 +355,14 @@ impl NodeEqual for RelabelType<'_> {
         equal(self.arg, b.arg)
             && self.resulttype == b.resulttype
             && self.resulttypmod == b.resulttypmod
+            && self.resultcollid == b.resultcollid
+    }
+}
+
+impl NodeEqual for CoerceViaIO<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        equal(self.arg, b.arg)
+            && self.resulttype == b.resulttype
             && self.resultcollid == b.resultcollid
     }
 }
@@ -454,6 +482,29 @@ impl NodeEqual for RangeTblEntry<'_> {
             && self.lateral == b.lateral
             && self.inFromCl == b.inFromCl
             && self.securityQuals.node_equal(&b.securityQuals)
+    }
+}
+
+impl NodeEqual for WithClause<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.ctes.node_equal(&b.ctes) && self.recursive == b.recursive
+    }
+}
+
+impl NodeEqual for CommonTableExpr<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.ctename == b.ctename
+            && self.aliascolnames.node_equal(&b.aliascolnames)
+            && self.ctematerialized == b.ctematerialized
+            && equal_opt(self.ctequery, b.ctequery)
+            && equal_opt(self.search_clause, b.search_clause)
+            && equal_opt(self.cycle_clause, b.cycle_clause)
+            && self.cterecursive == b.cterecursive
+            && self.cterefcount == b.cterefcount
+            && self.ctecolnames.node_equal(&b.ctecolnames)
+            && self.ctecoltypes.node_equal(&b.ctecoltypes)
+            && self.ctecoltypmods.node_equal(&b.ctecoltypmods)
+            && self.ctecolcollations.node_equal(&b.ctecolcollations)
     }
 }
 

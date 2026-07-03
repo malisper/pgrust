@@ -15,6 +15,11 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // Crash-cycle in-place reset (notes/crash-restart-design.md row 11).
+    pub fn backend_status_shmem_reset_after_crash()
+);
+
+seam_core::seam!(
     // pgstat_beinit (backend_status.c).
     pub fn pgstat_beinit() -> types_error::PgResult<()>
 );

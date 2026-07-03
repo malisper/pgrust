@@ -54,14 +54,7 @@ pub fn query_planner<'mcx>(
 
     // General spine, single-baserel arm.
     for item in &jointree.fromlist {
-        match item.node_tag() {
-            NodeTag::T_RangeTblRef => {
-                let varno = item.as_range_tbl_ref().unwrap().rtindex as u32;
-                let rte = run.rte(varno as usize);
-                build_simple_rel(run, varno, rte.rtekind)?;
-            }
-            other => panic!("add_base_rels_to_query (initsplan.c): {other:?}; M2 join lane"),
-        }
+        add_base_rels_to_query(run, item)?;
     }
 
     // remove_useless_groupby_columns / find_placeholders_in_jointree /
@@ -91,6 +84,27 @@ pub fn query_planner<'mcx>(
         panic!("failed to construct the join relation");
     }
     Ok(final_rel)
+}
+
+// add_base_rels_to_query (initsplan.c): FromExpr items handled by the caller.
+fn add_base_rels_to_query<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    item: types_nodes::Node<'mcx>,
+) -> PgResult<()> {
+    match item.node_tag() {
+        NodeTag::T_RangeTblRef => {
+            let varno = item.as_range_tbl_ref().unwrap().rtindex as u32;
+            let rte = run.rte(varno as usize);
+            build_simple_rel(run, varno, rte.rtekind)?;
+        }
+        NodeTag::T_JoinExpr => {
+            let j = item.as_join_expr().unwrap();
+            add_base_rels_to_query(run, j.larg)?;
+            add_base_rels_to_query(run, j.rarg)?;
+        }
+        other => panic!("add_base_rels_to_query (initsplan.c): {other:?}; M2 join lane"),
+    }
+    Ok(())
 }
 
 // The UPPERREL_FINAL rel accessor both planner.c call sites use.

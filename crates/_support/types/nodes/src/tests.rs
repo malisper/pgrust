@@ -639,6 +639,52 @@ fn raw_expr_node_field_order_matches_c() {
     assert_eq!(nt, ["arg", "nulltesttype", "argisrow", "location"]);
     let crate::primnodes::NullTest { arg: _, nulltesttype: _, argisrow: _, location: _ } =
         crate::primnodes::NullTest::default();
+
+    let mut ce = c_struct_fields(prim_h, "CaseExpr");
+    assert_eq!(ce.remove(0), "xpr");
+    assert_eq!(ce, ["casetype", "casecollid", "arg", "args", "defresult", "location"]);
+    let crate::primnodes::CaseExpr {
+        casetype: _,
+        casecollid: _,
+        arg: _,
+        args: _,
+        defresult: _,
+        location: _,
+    } = crate::primnodes::CaseExpr::default();
+
+    let mut cw = c_struct_fields(prim_h, "CaseWhen");
+    assert_eq!(cw.remove(0), "xpr");
+    assert_eq!(cw, ["expr", "result", "location"]);
+    let crate::primnodes::CaseWhen { expr: _, result: _, location: _ } =
+        crate::primnodes::CaseWhen::default();
+
+    let mut co = c_struct_fields(prim_h, "CoalesceExpr");
+    assert_eq!(co.remove(0), "xpr");
+    assert_eq!(co, ["coalescetype", "coalescecollid", "args", "location"]);
+    let crate::primnodes::CoalesceExpr {
+        coalescetype: _,
+        coalescecollid: _,
+        args: _,
+        location: _,
+    } = crate::primnodes::CoalesceExpr::default();
+
+    let mut mm = c_struct_fields(prim_h, "MinMaxExpr");
+    assert_eq!(mm.remove(0), "xpr");
+    assert_eq!(mm, ["minmaxtype", "minmaxcollid", "inputcollid", "op", "args", "location"]);
+    let crate::primnodes::MinMaxExpr {
+        minmaxtype: _,
+        minmaxcollid: _,
+        inputcollid: _,
+        op: _,
+        args: _,
+        location: _,
+    } = crate::primnodes::MinMaxExpr::default();
+    use crate::primnodes::MinMaxOp;
+    check_enum!(prim_h, "MinMaxOp", MinMaxOp, [IS_GREATEST, IS_LEAST]);
+
+    assert_eq!(c_struct_fields(parse_h, "RangeSubselect"), ["lateral", "subquery", "alias"]);
+    let crate::rawnodes::RangeSubselect { lateral: _, subquery: _, alias: _ } =
+        crate::rawnodes::RangeSubselect::default();
 }
 
 #[test]
@@ -1006,6 +1052,18 @@ fn select1_parse_and_analyze_shape() {
     assert_eq!(c.constvalue.as_i32(), 1);
     assert_eq!(c.location, -1);
     assert_eq!(q.stmt_len, 8);
+}
+
+#[test]
+fn join_expr_field_order_matches_c() {
+    let prim_h = include_str!("../vendor/primnodes.h");
+    assert_eq!(
+        c_struct_fields(prim_h, "JoinExpr"),
+        [
+            "jointype", "isNatural", "larg", "rarg", "usingClause", "join_using_alias",
+            "quals", "alias", "rtindex",
+        ]
+    );
 }
 
 #[test]

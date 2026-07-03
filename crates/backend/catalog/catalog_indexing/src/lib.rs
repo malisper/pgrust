@@ -1,12 +1,12 @@
-// indexing.c, insert lane. CatalogTupleUpdate/Delete land with the DDL that
-// needs them.
+// indexing.c, insert/update lanes. CatalogTupleDelete lands with the DDL that
+// needs it.
 #![allow(non_snake_case)]
 
 use heaptuple::HeapTuple;
 use mcx::Mcx;
 use types_error::PgResult;
 use types_rel::Relation;
-use types_tuple::HeapTupleData;
+use types_tuple::{HeapTupleData, ItemPointerData};
 
 pub type CatalogIndexState<'mcx> = execindexing::ResultRelIndexState<'mcx>;
 
@@ -55,6 +55,27 @@ pub fn CatalogTupleInsert<'mcx>(
     let mut indstate = CatalogOpenIndexes(mcx, heap_rel)?;
     heapam::simple_heap_insert(heap_rel.data_rc(), tup.as_tuple_mut())?;
     CatalogIndexInsert(mcx, &mut indstate, heap_rel, tup.as_tuple())?;
+    CatalogCloseIndexes(indstate)
+}
+
+pub fn CatalogTupleUpdate<'mcx>(
+    mcx: Mcx<'mcx>,
+    heap_rel: &Relation<'mcx>,
+    otid: &ItemPointerData,
+    tup: &mut HeapTuple<'mcx>,
+) -> PgResult<()> {
+    let mut update_indexes = tableam_vocab::TU_UpdateIndexes::TU_All;
+    let mut indstate = CatalogOpenIndexes(mcx, heap_rel)?;
+    heapam::simple_heap_update(heap_rel.data_rc(), otid, tup.as_tuple_mut(), &mut update_indexes)?;
+    match update_indexes {
+        tableam_vocab::TU_UpdateIndexes::TU_All => {
+            CatalogIndexInsert(mcx, &mut indstate, heap_rel, tup.as_tuple())?
+        }
+        tableam_vocab::TU_UpdateIndexes::TU_None => {}
+        tableam_vocab::TU_UpdateIndexes::TU_Summarizing => panic!(
+            "CatalogIndexInsert (indexing.c): TU_Summarizing on a catalog index"
+        ),
+    }
     CatalogCloseIndexes(indstate)
 }
 

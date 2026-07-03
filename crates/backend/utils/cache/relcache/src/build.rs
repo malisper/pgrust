@@ -107,7 +107,12 @@ pub(crate) fn build_desc_data(target_rel_id: Oid) -> PgResult<Option<RelationDat
         let mcx = cache_mcx();
         let (rd_backend, rd_islocaltemp) = resolve_backend(&scanned.form)?;
         let rd_att =
-            relcache_build_seams::relation_build_tuple_desc::call(mcx, target_rel_id, &scanned.form)?;
+            relcache_build_seams::relation_build_tuple_desc::call(
+                mcx,
+                target_rel_id,
+                &scanned.form,
+                scanned.relchecks,
+            )?;
 
         let (rd_index, opcintype, opfamily, indoption, indcollation, supportinfo) = if matches!(
             scanned.form.relkind,

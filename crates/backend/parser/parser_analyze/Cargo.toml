@@ -11,6 +11,7 @@ path = "src/lib.rs"
 [dependencies]
 types_tuple = { path = "../../../_support/types/types_tuple" }
 mbutils = { path = "../../utils/mb/mbutils" }
+coerce = { path = "../coerce" }
 elog = { path = "../../utils/error/elog" }
 parse_relation = { path = "../parse_relation" }
 parse_expr = { path = "../parse_expr" }
@@ -18,6 +19,7 @@ analyze_seams = { path = "../analyze_seams" }
 backend_status = { path = "../../utils/activity/backend_status" }
 guc_tables = { path = "../../utils/misc/guc_tables" }
 mcx = { path = "../../../_support/mcx" }
+nodes_core = { path = "../../nodes/nodes_core" }
 parse_agg = { path = "../parse_agg" }
 parse_clause = { path = "../parse_clause" }
 parse_collate = { path = "../parse_collate" }
@@ -32,6 +34,7 @@ types_portal = { path = "../../../_support/types/portal" }
 indexcmds_seams = { path = "../../commands/indexcmds_seams" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
 miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+namespace_seams = { path = "../../catalog/namespace_seams" }
 datum = { path = "../../../_support/types/datum" }
 gram_core = { path = "../gram_core" }
 parser_seams = { path = "../parser_seams" }

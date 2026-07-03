@@ -56,6 +56,27 @@ fn install_fixture() {
         syscache_seams::pg_operator_name_candidates_exist::set(|name, oprkind| {
             Ok(name == "+" && oprkind == b'b' as i8)
         });
+        syscache_seams::lookup_pg_operator_name_candidates::set(|mcx, name| {
+            let mut v = mcx::vec_with_capacity_in(mcx, 1)?;
+            if name == "+" || name == "@@" {
+                v.push(syscache_seams::PgOperatorNameCandidate {
+                    oid: INT4_PLUS_OP,
+                    oprnamespace: PG_CATALOG,
+                    oprkind: b'b' as i8,
+                    oprleft: INT4OID,
+                    oprright: INT4OID,
+                });
+            }
+            Ok(v)
+        });
+        syscache_seams::lookup_pg_cast_shape::set(|_, _| Ok(None));
+        syscache_seams::pg_type_typrelid::set(|_| Ok(Some(InvalidOid)));
+        syscache_seams::pg_type_element_shape::set(|_| {
+            Ok(Some(syscache_seams::PgTypeElementShape {
+                typelem: InvalidOid,
+                typsubscript: InvalidOid,
+            }))
+        });
         syscache_seams::lookup_pg_proc_shape::set(|funcid| {
             Ok((funcid == INT4PL_PROC).then_some(PgProcShape {
                 pronamespace: PG_CATALOG,
@@ -228,14 +249,17 @@ fn undefined_operator_is_42883() {
 }
 
 #[test]
-#[should_panic(expected = "inexact operator resolution")]
-fn inexact_match_panics_loudly() {
+fn inexact_without_coercible_candidate_is_42883() {
     install_fixture();
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
     let pstate = make_parsestate(mcx, None);
     let name = plus_name(mcx);
-    let _ = oper(&pstate, &name, INT4OID, TEXTOID, false, -1);
+    // int4+int4 is the only "+" candidate and text has no cast to int4 in
+    // this fixture, so func_match_argtypes eliminates it (C op_error arm).
+    let err = oper(&pstate, &name, INT4OID, TEXTOID, false, -1).map(|_| ()).unwrap_err();
+    assert_eq!(err.sqlstate(), ERRCODE_UNDEFINED_FUNCTION);
+    assert_eq!(err.message(), "operator does not exist: integer + text");
 }
 
 #[test]

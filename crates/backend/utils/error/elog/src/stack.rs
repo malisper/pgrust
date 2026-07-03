@@ -199,7 +199,7 @@ pub fn errstart(elevel: ErrorLevel, domain: Option<&str>) -> bool {
 
     if overflow {
         let _ = ThrowErrorData(PgError::new(PANIC, "ERRORDATA_STACK_SIZE exceeded"));
-        // PANIC aborts; not reached.
+        // PANIC unwinds the thread; not reached.
         std::process::abort();
     }
 
@@ -283,7 +283,10 @@ pub fn errfinish(filename: Option<&str>, lineno: i32, funcname: Option<&str>) ->
 
     if elevel >= PANIC {
         flush_all();
-        std::process::abort();
+        // C abort(): under the thread model the catchable crash class — the
+        // unwind escapes the backend thread and the postmaster runs the crash
+        // choreography (notes/crash-restart-design.md).
+        std::panic::panic_any(types_error::PanicExitThread);
     }
 
     // C ends with CHECK_FOR_INTERRUPTS(); the interrupt machinery owns that

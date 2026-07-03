@@ -67,6 +67,7 @@ fn install_fixture() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         miscinit_seams::get_user_id::set(|| 10);
+        syscache_seams::lookup_pg_type_oid_by_name::set(|_, _| Ok(InvalidOid));
         syscache_seams::lookup_pg_proc_name_candidates::set(|mcx, proname| {
             let mut v = mcx::PgVec::new_in(mcx);
             match proname {
@@ -100,6 +101,7 @@ fn install_fixture() {
         syscache_seams::lookup_pg_aggregate_shape::set(|aggfnoid| {
             Ok(match aggfnoid {
                 2803 => Some(agg_shape(1219, INT8OID)),
+                2147 => Some(agg_shape(769, INT8OID)),
                 2108 => Some(agg_shape(1841, INT8OID)),
                 2109 => Some(agg_shape(1840, INT8OID)),
                 _ => None,
@@ -197,8 +199,7 @@ fn sum_of_int4_var_builds_aggref() {
 }
 
 #[test]
-#[should_panic(expected = "func_match_argtypes")]
-fn count_of_arg_panics_on_inexact_match() {
+fn count_of_int4_resolves_through_any() {
     install_fixture();
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
@@ -207,7 +208,15 @@ fn count_of_arg_panics_on_inexact_match() {
     let var = Node::mk_var(mcx, 1, 1, INT4OID, -1, InvalidOid, 0).unwrap();
     let fargs = NodeList::make1(mcx, var).unwrap();
     let fc = func_call(mcx, "count", false, false);
-    let _ = call(mcx, &mut pstate, fc, fargs, &[INT4OID]);
+    let node = call(mcx, &mut pstate, fc, fargs, &[INT4OID]).unwrap();
+
+    let agg = node.as_aggref().unwrap();
+    assert_eq!(agg.aggfnoid, 2147);
+    assert_eq!(agg.aggtype, INT8OID);
+    // ANY-target coercion passes the arg through; aggargtypes keeps int4.
+    assert_eq!(agg.args.nth(0).as_target_entry().unwrap().expr.as_var().unwrap().vartype, INT4OID);
+    assert_eq!(agg.aggargtypes.len(), 1);
+    assert_eq!(agg.aggargtypes.nth(0), INT4OID);
 }
 
 #[test]
@@ -291,4 +300,117 @@ fn aggregate_in_where_kind_is_42803() {
         "{}",
         err.message()
     );
+}
+
+const FLOAT8OID: Oid = 701;
+const TEXTOID: Oid = 25;
+const VARBITOID: Oid = 1562;
+const UNKNOWNOID: Oid = 705;
+const ANYCOMPATIBLEOID: Oid = 5077;
+const ANYCOMPATIBLEARRAYOID: Oid = 5078;
+
+fn install_selection_fixture() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        install_fixture();
+        syscache_seams::pg_type_category::set(|typid| {
+            Ok(Some(match typid {
+                INT4OID | INT8OID | INT2OID | NUMERICOID => (b'N' as i8, false),
+                FLOAT8OID => (b'N' as i8, true),
+                TEXTOID => (b'S' as i8, true),
+                VARBITOID => (b'V' as i8, false),
+                UNKNOWNOID => (b'X' as i8, false),
+                ANYCOMPATIBLEOID | ANYCOMPATIBLEARRAYOID => (b'P' as i8, false),
+                _ => return Ok(None),
+            }))
+        });
+        syscache_seams::pg_type_base_shape::set(|_| {
+            Ok(Some(syscache_seams::PgTypeBaseShape {
+                typtype: b'b' as i8,
+                typbasetype: InvalidOid,
+                typtypmod: -1,
+                typelem: InvalidOid,
+                typsubscript: InvalidOid,
+            }))
+        });
+        syscache_seams::pg_type_element_shape::set(|_| {
+            Ok(Some(syscache_seams::PgTypeElementShape {
+                typelem: InvalidOid,
+                typsubscript: InvalidOid,
+            }))
+        });
+        syscache_seams::lookup_pg_cast_shape::set(|src, tgt| {
+            Ok(match (src, tgt) {
+                (INT4OID, FLOAT8OID) | (INT4OID, NUMERICOID) => {
+                    Some(syscache_seams::PgCastShape {
+                        oid: 1,
+                        castfunc: 2,
+                        castcontext: b'i' as i8,
+                        castmethod: b'f' as i8,
+                    })
+                }
+                _ => None,
+            })
+        });
+    });
+}
+
+// pg_operator.dat: 965 = float8^float8 (dpow), 1038 = numeric^numeric.
+#[test]
+fn power_int4_int4_selects_preferred_float8() {
+    install_selection_fixture();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+
+    let cands = [
+        catalog_namespace::OperCandidate { oid: 1038, args: [NUMERICOID, NUMERICOID] },
+        catalog_namespace::OperCandidate { oid: 965, args: [FLOAT8OID, FLOAT8OID] },
+    ];
+    let input = [INT4OID, INT4OID];
+    let matched = crate::func_match_argtypes(mcx, &input, &cands).unwrap();
+    assert_eq!(matched.len(), 2);
+    let winner = crate::func_select_candidate(&input, matched).unwrap().unwrap();
+    assert_eq!(winner.oid, 965);
+}
+
+// pg_operator.dat: 654 = text||text (textcat); STRING wins the unknown slots
+// and text is the preferred string type.
+#[test]
+fn concat_unknown_unknown_selects_textcat() {
+    install_selection_fixture();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+
+    let cands = [
+        catalog_namespace::OperCandidate {
+            oid: 349,
+            args: [ANYCOMPATIBLEARRAYOID, ANYCOMPATIBLEOID],
+        },
+        catalog_namespace::OperCandidate { oid: 1797, args: [VARBITOID, VARBITOID] },
+        catalog_namespace::OperCandidate { oid: 654, args: [TEXTOID, TEXTOID] },
+    ];
+    let input = [UNKNOWNOID, UNKNOWNOID];
+    let matched = crate::func_match_argtypes(mcx, &input, &cands).unwrap();
+    assert_eq!(matched.len(), 3);
+    let winner = crate::func_select_candidate(&input, matched).unwrap().unwrap();
+    assert_eq!(winner.oid, 654);
+}
+
+// Same-known-type last-gasp heuristic: sum(int4-domain-free unknown mix) is
+// ambiguous, but int8+unknown resolves once the known type is unique.
+#[test]
+fn all_unknown_same_category_nonpreferred_is_ambiguous() {
+    install_selection_fixture();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+
+    let cands = [
+        catalog_namespace::OperCandidate { oid: 11, args: [INT8OID, INT8OID] },
+        catalog_namespace::OperCandidate { oid: 12, args: [INT4OID, INT4OID] },
+    ];
+    let input = [UNKNOWNOID, UNKNOWNOID];
+    let matched = crate::func_match_argtypes(mcx, &input, &cands).unwrap();
+    assert_eq!(matched.len(), 2);
+    assert!(crate::func_select_candidate(&input, matched).unwrap().is_none());
 }

@@ -112,6 +112,14 @@ pub struct InsertStmt<'mcx> {
     pub r#override: crate::primnodes::OverridingKind,
 }
 
+/// `options` cells are ReturningOption nodes (the PG18 OLD/NEW alias lane);
+/// the grammar's returning_option arms are unported, so options stays NIL.
+#[derive(Default)]
+pub struct ReturningClause<'mcx> {
+    pub options: NodeList<'mcx>,
+    pub exprs: NodeList<'mcx>,
+}
+
 #[derive(Default)]
 pub struct DeleteStmt<'mcx> {
     pub relation: Option<Node<'mcx>>,
@@ -199,6 +207,60 @@ pub struct SortBy<'mcx> {
     pub location: ParseLoc,
 }
 
+// Values verified against parsenodes.h FRAMEOPTION_* (frameoption_values test).
+pub const FRAMEOPTION_NONDEFAULT: i32 = 0x00001;
+pub const FRAMEOPTION_RANGE: i32 = 0x00002;
+pub const FRAMEOPTION_ROWS: i32 = 0x00004;
+pub const FRAMEOPTION_GROUPS: i32 = 0x00008;
+pub const FRAMEOPTION_BETWEEN: i32 = 0x00010;
+pub const FRAMEOPTION_START_UNBOUNDED_PRECEDING: i32 = 0x00020;
+pub const FRAMEOPTION_END_UNBOUNDED_PRECEDING: i32 = 0x00040;
+pub const FRAMEOPTION_START_UNBOUNDED_FOLLOWING: i32 = 0x00080;
+pub const FRAMEOPTION_END_UNBOUNDED_FOLLOWING: i32 = 0x00100;
+pub const FRAMEOPTION_START_CURRENT_ROW: i32 = 0x00200;
+pub const FRAMEOPTION_END_CURRENT_ROW: i32 = 0x00400;
+pub const FRAMEOPTION_START_OFFSET_PRECEDING: i32 = 0x00800;
+pub const FRAMEOPTION_END_OFFSET_PRECEDING: i32 = 0x01000;
+pub const FRAMEOPTION_START_OFFSET_FOLLOWING: i32 = 0x02000;
+pub const FRAMEOPTION_END_OFFSET_FOLLOWING: i32 = 0x04000;
+pub const FRAMEOPTION_EXCLUDE_CURRENT_ROW: i32 = 0x08000;
+pub const FRAMEOPTION_EXCLUDE_GROUP: i32 = 0x10000;
+pub const FRAMEOPTION_EXCLUDE_TIES: i32 = 0x20000;
+pub const FRAMEOPTION_START_OFFSET: i32 =
+    FRAMEOPTION_START_OFFSET_PRECEDING | FRAMEOPTION_START_OFFSET_FOLLOWING;
+pub const FRAMEOPTION_END_OFFSET: i32 =
+    FRAMEOPTION_END_OFFSET_PRECEDING | FRAMEOPTION_END_OFFSET_FOLLOWING;
+pub const FRAMEOPTION_EXCLUSION: i32 =
+    FRAMEOPTION_EXCLUDE_CURRENT_ROW | FRAMEOPTION_EXCLUDE_GROUP | FRAMEOPTION_EXCLUDE_TIES;
+pub const FRAMEOPTION_DEFAULTS: i32 =
+    FRAMEOPTION_RANGE | FRAMEOPTION_START_UNBOUNDED_PRECEDING | FRAMEOPTION_END_CURRENT_ROW;
+
+pub struct WindowDef<'mcx> {
+    pub name: Option<&'mcx str>,
+    pub refname: Option<&'mcx str>,
+    pub partitionClause: NodeList<'mcx>,
+    pub orderClause: NodeList<'mcx>,
+    pub frameOptions: i32,
+    pub startOffset: Option<Node<'mcx>>,
+    pub endOffset: Option<Node<'mcx>>,
+    pub location: ParseLoc,
+}
+
+impl Default for WindowDef<'_> {
+    fn default() -> Self {
+        WindowDef {
+            name: None,
+            refname: None,
+            partitionClause: NodeList::nil(),
+            orderClause: NodeList::nil(),
+            frameOptions: FRAMEOPTION_DEFAULTS,
+            startOffset: None,
+            endOffset: None,
+            location: -1,
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct FuncCall<'mcx> {
     pub funcname: NodeList<'mcx>,
@@ -212,6 +274,13 @@ pub struct FuncCall<'mcx> {
     pub func_variadic: bool,
     pub funcformat: crate::primnodes::CoercionForm,
     pub location: ParseLoc,
+}
+
+#[derive(Default)]
+pub struct RangeSubselect<'mcx> {
+    pub lateral: bool,
+    pub subquery: Option<Node<'mcx>>,
+    pub alias: Option<&'mcx crate::primnodes::Alias<'mcx>>,
 }
 
 #[derive(Default)]
@@ -342,6 +411,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for SelectStmt<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for InsertStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_InsertStmt;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for ReturningClause<'mcx> {
+    const TAG: NodeTag = NodeTag::T_ReturningClause;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for DeleteStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_DeleteStmt;
 }
@@ -369,8 +441,14 @@ unsafe impl NodeVariant<'_> for A_Star {
 unsafe impl<'mcx> NodeVariant<'mcx> for SortBy<'mcx> {
     const TAG: NodeTag = NodeTag::T_SortBy;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for WindowDef<'mcx> {
+    const TAG: NodeTag = NodeTag::T_WindowDef;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for FuncCall<'mcx> {
     const TAG: NodeTag = NodeTag::T_FuncCall;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for RangeSubselect<'mcx> {
+    const TAG: NodeTag = NodeTag::T_RangeSubselect;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for RangeFunction<'mcx> {
     const TAG: NodeTag = NodeTag::T_RangeFunction;
@@ -386,6 +464,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for CreateStmt<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for ColumnDef<'mcx> {
     const TAG: NodeTag = NodeTag::T_ColumnDef;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for Constraint<'mcx> {
+    const TAG: NodeTag = NodeTag::T_Constraint;
 }
 
 impl<'mcx> Node<'mcx> {
@@ -463,6 +544,11 @@ impl<'mcx> Node<'mcx> {
     }
 
     #[inline]
+    pub fn as_returning_clause(self) -> Option<&'mcx ReturningClause<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
     pub fn as_delete_stmt(self) -> Option<&'mcx DeleteStmt<'mcx>> {
         self.as_variant()
     }
@@ -508,7 +594,17 @@ impl<'mcx> Node<'mcx> {
     }
 
     #[inline]
+    pub fn as_window_def(self) -> Option<&'mcx WindowDef<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
     pub fn as_range_function(self) -> Option<&'mcx RangeFunction<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_range_subselect(self) -> Option<&'mcx RangeSubselect<'mcx>> {
         self.as_variant()
     }
 
@@ -526,7 +622,4 @@ impl<'mcx> Node<'mcx> {
     pub fn as_type_cast(self) -> Option<&'mcx TypeCast<'mcx>> {
         self.as_variant()
     }
-}
-unsafe impl<'mcx> NodeVariant<'mcx> for Constraint<'mcx> {
-    const TAG: NodeTag = NodeTag::T_Constraint;
 }

@@ -50,6 +50,22 @@ pub struct SubplanStateCell(pub core::ptr::NonNull<()>);
 pub type SubplanHook =
     for<'a, 'mcx> unsafe fn(core::ptr::NonNull<()>, &'a mut EStateData<'mcx>) -> PgResult<()>;
 
+/// One-tuple pull from an es_subplanstates cell (CteScanNext's
+/// ExecProcNode(cteplanstate); dispatch lives in execmain).
+pub type CteProcHook = for<'a, 'mcx> unsafe fn(
+    SubplanStateCell,
+    &'a mut EStateData<'mcx>,
+) -> PgResult<Option<ExecSlotId>>;
+
+/// C's CteScanState leader fields (cte_table/eof_cte), hoisted to the estate
+/// keyed by cteParam: the leader/follower alias becomes an owned entry.
+pub struct CteShared {
+    pub tuplestore: ::tuplestore::Tuplestore,
+    pub eof_cte: bool,
+    /// Rows pulled from the CTE subplan; the materialize-once probe.
+    pub fills: u32,
+}
+
 /// C ExecEvalParamExec's pending-initplan arm, hoisted to the owning node.
 pub fn exec_eval_param_exec_params(
     estate: &mut EStateData<'_>,
@@ -226,6 +242,9 @@ pub struct EStateData<'mcx> {
     /// paramid -> initplan SubPlanState (C's ParamExecData.execPlan pointer).
     pub es_param_subplans: PgVec<'mcx, Option<SubplanStateCell>>,
     pub es_subplan_hook: Option<SubplanHook>,
+    /// cteParam -> shared CTE state; the leader installs, followers replay.
+    pub es_cte_shared: PgVec<'mcx, Option<CteShared>>,
+    pub es_cte_proc_hook: Option<CteProcHook>,
     pub es_auxmodifytables: PgVec<'mcx, ModifyTableP3>,
     es_per_tuple_exprcontext: Option<EcxtId>,
     pub es_sourceText: Option<&'mcx str>,
@@ -272,6 +291,8 @@ impl<'mcx> EStateData<'mcx> {
             es_subplanstates: PgVec::new_in(mcx),
             es_param_subplans: PgVec::new_in(mcx),
             es_subplan_hook: None,
+            es_cte_shared: PgVec::new_in(mcx),
+            es_cte_proc_hook: None,
             es_auxmodifytables: PgVec::new_in(mcx),
             es_per_tuple_exprcontext: None,
             es_sourceText: None,
@@ -381,6 +402,22 @@ impl<'mcx> EStateData<'mcx> {
         id
     }
 
+    pub fn cte_shared_slot(&mut self, param: usize) -> &mut Option<CteShared> {
+        while self.es_cte_shared.len() <= param {
+            self.es_cte_shared.push(None);
+        }
+        &mut self.es_cte_shared[param]
+    }
+
+    /// (subplan rows pulled, tuplestore rows) for the cteParam — the
+    /// materialize-once proof reads fills == tuples == |CTE result|.
+    pub fn cte_fill_probe(&self, param: usize) -> Option<(u32, i64)> {
+        self.es_cte_shared
+            .get(param)
+            .and_then(|s| s.as_ref())
+            .map(|s| (s.fills, s.tuplestore.tuple_count()))
+    }
+
     #[inline]
     pub fn slot(&self, id: ExecSlotId) -> &SlotData<'mcx> {
         &self.es_tupleTable[id.0 as usize]
@@ -416,7 +453,12 @@ impl<'mcx> EStateData<'mcx> {
                 .as_range_tbl_entry()
                 .expect("rtable cell is a RangeTblEntry");
             match rte.rtekind {
-                RTEKind::RTE_RELATION | RTEKind::RTE_RESULT | RTEKind::RTE_FUNCTION => {}
+                RTEKind::RTE_RELATION
+                | RTEKind::RTE_RESULT
+                | RTEKind::RTE_FUNCTION
+                | RTEKind::RTE_VALUES
+                | RTEKind::RTE_JOIN
+                | RTEKind::RTE_CTE => {}
                 // A pulled-up (dead) subquery RTE stays in the range table
                 // for its lock/ACL surface, as in C; a live subquery is the
                 // unported SubqueryScan lane.

@@ -13,7 +13,7 @@ use mcx::Mcx;
 use types_core::Oid;
 use types_error::PgResult;
 use types_nodes::parsenodes::{Query, RTEKind, RangeTblEntry};
-use types_nodes::primnodes::{Aggref, Alias, FromExpr, FuncExpr, OpExpr, TargetEntry};
+use types_nodes::primnodes::{Aggref, Alias, FromExpr, FuncExpr, MinMaxExpr, OpExpr, TargetEntry};
 use types_nodes::rawnodes::SelectStmt;
 use types_nodes::{Node, NodeList, NodeTag};
 
@@ -116,6 +116,12 @@ pub fn expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
                 || walk_list(&a.aggdistinct, w)?
                 || walk_opt(a.aggfilter, w)?)
         }
+        NodeTag::T_WindowFunc => {
+            let wf = node.as_window_func().unwrap();
+            Ok(walk_list(&wf.args, w)?
+                || walk_opt(wf.aggfilter, w)?
+                || walk_list(&wf.runCondition, w)?)
+        }
         NodeTag::T_FuncExpr => {
             let f = node.as_variant::<FuncExpr>().unwrap();
             walk_list(&f.args, w)
@@ -123,6 +129,10 @@ pub fn expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
         NodeTag::T_OpExpr => {
             let o = node.as_variant::<OpExpr>().unwrap();
             walk_list(&o.args, w)
+        }
+        NodeTag::T_MinMaxExpr => {
+            let mm = node.as_min_max_expr().unwrap();
+            walk_list(&mm.args, w)
         }
         NodeTag::T_TargetEntry => {
             let te = node.as_variant::<TargetEntry>().unwrap();
@@ -141,7 +151,16 @@ pub fn expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
             let f = node.as_variant::<FromExpr>().unwrap();
             walk_from_expr(f, w)
         }
+        NodeTag::T_JoinExpr => {
+            let j = node.as_join_expr().unwrap();
+            Ok(w.visit(j.larg)? || w.visit(j.rarg)? || walk_opt(j.quals, w)?)
+        }
         NodeTag::T_Query => Ok(false),
+        NodeTag::T_CommonTableExpr => {
+            // C walks only ctequery (search/cycle clauses uninteresting here).
+            let cte = node.as_common_table_expr().unwrap();
+            walk_opt(cte.ctequery, w)
+        }
         NodeTag::T_List => walk_list(node.as_list().unwrap(), w),
         other => deferred("expression_tree_walker", other),
     }
@@ -181,9 +200,13 @@ pub fn query_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
         {
             return Ok(true);
         }
-    } else if !query.windowClause.is_nil() {
-        // C walks each WindowClause's startOffset/endOffset here.
-        deferred("query_tree_walker: windowClause offsets", NodeTag::T_WindowClause);
+    } else {
+        for wc_node in &query.windowClause {
+            let wc = wc_node.as_window_clause().expect("windowClause element");
+            if walk_opt(wc.startOffset, w)? || walk_opt(wc.endOffset, w)? {
+                return Ok(true);
+            }
+        }
     }
     if flags & QTW_IGNORE_CTE_SUBQUERIES == 0 && walk_list(&query.cteList, w)? {
         return Ok(true);
@@ -338,6 +361,13 @@ pub fn raw_expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
             Ok(walk_list(&rt.indirection, w)? || walk_opt(rt.val, w)?)
         }
         NodeTag::T_SelectStmt => walk_select_stmt(node.as_select_stmt().unwrap(), w),
+        NodeTag::T_WindowDef => {
+            let wd = node.as_window_def().unwrap();
+            Ok(walk_list(&wd.partitionClause, w)?
+                || walk_list(&wd.orderClause, w)?
+                || walk_opt(wd.startOffset, w)?
+                || walk_opt(wd.endOffset, w)?)
+        }
         NodeTag::T_List => walk_list(node.as_list().unwrap(), w),
         other => deferred("raw_expression_tree_walker", other),
     }
@@ -363,8 +393,8 @@ where
             };
             checker(opfuncid)
         }
-        t @ (NodeTag::T_WindowFunc
-        | NodeTag::T_DistinctExpr
+        NodeTag::T_WindowFunc => checker(node.as_window_func().unwrap().winfnoid),
+        t @ (NodeTag::T_DistinctExpr
         | NodeTag::T_NullIfExpr
         | NodeTag::T_ScalarArrayOpExpr
         | NodeTag::T_CoerceViaIO
@@ -442,6 +472,38 @@ where
                 },
             )?))
         }
+        NodeTag::T_WindowFunc => {
+            let wf = node.as_window_func().unwrap();
+            let args = mutate_list(mcx, &wf.args, m)?;
+            let aggfilter = match wf.aggfilter {
+                Some(f) => m(f)?.map(Some),
+                None => None,
+            };
+            let run_condition = mutate_list(mcx, &wf.runCondition, m)?;
+            if args.is_none() && aggfilter.is_none() && run_condition.is_none() {
+                return Ok(None);
+            }
+            let unchanged = |new: Option<NodeList<'mcx>>, old: &NodeList<'mcx>| match new {
+                Some(l) => Ok(l),
+                None => old.clone_in(mcx),
+            };
+            Ok(Some(Node::mk(
+                mcx,
+                types_nodes::primnodes::WindowFunc {
+                    winfnoid: wf.winfnoid,
+                    wintype: wf.wintype,
+                    wincollid: wf.wincollid,
+                    inputcollid: wf.inputcollid,
+                    args: unchanged(args, &wf.args)?,
+                    aggfilter: aggfilter.unwrap_or(wf.aggfilter),
+                    runCondition: unchanged(run_condition, &wf.runCondition)?,
+                    winref: wf.winref,
+                    winstar: wf.winstar,
+                    winagg: wf.winagg,
+                    location: wf.location,
+                },
+            )?))
+        }
         NodeTag::T_FuncExpr => {
             let f = node.as_variant::<FuncExpr>().unwrap();
             match mutate_list(mcx, &f.args, m)? {
@@ -481,6 +543,23 @@ where
                 )?)),
             }
         }
+        NodeTag::T_MinMaxExpr => {
+            let mm = node.as_min_max_expr().unwrap();
+            match mutate_list(mcx, &mm.args, m)? {
+                None => Ok(None),
+                Some(args) => Ok(Some(Node::mk(
+                    mcx,
+                    MinMaxExpr {
+                        minmaxtype: mm.minmaxtype,
+                        minmaxcollid: mm.minmaxcollid,
+                        inputcollid: mm.inputcollid,
+                        op: mm.op,
+                        args,
+                        location: mm.location,
+                    },
+                )?)),
+            }
+        }
         NodeTag::T_TargetEntry => {
             let te = node.as_variant::<TargetEntry>().unwrap();
             match m(te.expr)? {
@@ -516,6 +595,32 @@ where
             Ok(Some(Node::mk(
                 mcx,
                 FromExpr { fromlist, quals: quals.unwrap_or(f.quals) },
+            )?))
+        }
+        NodeTag::T_JoinExpr => {
+            let j = node.as_join_expr().unwrap();
+            let larg = m(j.larg)?;
+            let rarg = m(j.rarg)?;
+            let quals = match j.quals {
+                Some(q) => m(q)?.map(Some),
+                None => None,
+            };
+            if larg.is_none() && rarg.is_none() && quals.is_none() {
+                return Ok(None);
+            }
+            Ok(Some(Node::mk(
+                mcx,
+                types_nodes::JoinExpr {
+                    jointype: j.jointype,
+                    isNatural: j.isNatural,
+                    larg: larg.unwrap_or(j.larg),
+                    rarg: rarg.unwrap_or(j.rarg),
+                    usingClause: j.usingClause.clone_in(mcx)?,
+                    join_using_alias: j.join_using_alias,
+                    quals: quals.unwrap_or(j.quals),
+                    alias: j.alias,
+                    rtindex: j.rtindex,
+                },
             )?))
         }
         NodeTag::T_List => match mutate_list(mcx, node.as_list().unwrap(), m)? {

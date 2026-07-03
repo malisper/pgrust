@@ -1,6 +1,5 @@
 // tuplestore.c, TSS_INMEM arms only. Spill to tape (TSS_WRITEFILE/READFILE
-// over BufFile), extra read pointers, and trim are loud panics naming their
-// C lanes.
+// over BufFile) and trim are loud panics naming their C lanes.
 #![allow(non_snake_case)]
 
 use core::mem;
@@ -30,6 +29,13 @@ const fn maxalign(len: usize) -> usize {
 
 const PTR_SIZE: usize = mem::size_of::<*mut MinimalTupleData>();
 
+#[derive(Clone, Copy)]
+struct ReadPointer {
+    eflags: i32,
+    eof_reached: bool,
+    current: usize,
+}
+
 pub struct TuplestoreData<'m> {
     tuplecontext: MemoryContext,
     eflags: i32,
@@ -38,8 +44,8 @@ pub struct TuplestoreData<'m> {
     grow_memtuples: bool,
     tuples: i64,
     memtuples: PgVec<'m, *mut MinimalTupleData>,
-    current: usize,
-    eof_reached: bool,
+    readptrs: PgVec<'m, ReadPointer>,
+    activeptr: usize,
 }
 
 bind!(pub TuplestoreTy => TuplestoreData<'mcx>);
@@ -67,6 +73,8 @@ impl Tuplestore {
             let allowed_mem = i64::from(max_kbytes) * 1024;
             let memtuples = PgVec::with_capacity_in(INITIAL_MEMTUPSIZE, mcx);
             let avail_mem = allowed_mem - (memtuples.capacity() * PTR_SIZE) as i64;
+            let mut readptrs = PgVec::with_capacity_in(8, mcx);
+            readptrs.push(ReadPointer { eflags, eof_reached: false, current: 0 });
             Ok(TuplestoreData {
                 // C: generation context (FIFO pfree); nothing here frees
                 // per-tuple, so a wholesale-reset bump arena matches cost.
@@ -77,8 +85,8 @@ impl Tuplestore {
                 grow_memtuples: true,
                 tuples: 0,
                 memtuples,
-                current: 0,
-                eof_reached: false,
+                readptrs,
+                activeptr: 0,
             })
         })
         .expect("tuplestore context construction is infallible");
@@ -159,16 +167,20 @@ impl Tuplestore {
             st.avail_mem = st.allowed_mem - (st.memtuples.capacity() * PTR_SIZE) as i64;
             st.memtuples.clear();
             st.tuples = 0;
-            st.current = 0;
-            st.eof_reached = false;
+            for rp in st.readptrs.iter_mut() {
+                rp.eof_reached = false;
+                rp.current = 0;
+            }
         })
     }
 
     pub fn rescan(&mut self) {
         self.0.with_mut(|st| {
-            debug_assert!(st.eflags & EXEC_FLAG_REWIND != 0);
-            st.eof_reached = false;
-            st.current = 0;
+            let active = st.activeptr;
+            let rp = &mut st.readptrs[active];
+            debug_assert!(rp.eflags & EXEC_FLAG_REWIND != 0);
+            rp.eof_reached = false;
+            rp.current = 0;
         })
     }
 
@@ -179,7 +191,7 @@ impl Tuplestore {
     }
 
     pub fn ateof(&self) -> bool {
-        self.0.with(|st| st.eof_reached)
+        self.0.with(|st| st.readptrs[st.activeptr].eof_reached)
     }
 
     /// Spill is loud, so always true.
@@ -187,11 +199,86 @@ impl Tuplestore {
         true
     }
 
-    pub fn alloc_read_pointer(&mut self, _eflags: i32) -> i32 {
-        panic!(
-            "tuplestore_alloc_read_pointer: multi-reader/mark-restore \
-             (nodeWindowAgg/nodeCtescan lanes, tuplestore.c) not ported"
-        )
+    pub fn set_eflags(&mut self, eflags: i32) {
+        self.0.with_mut(|st| {
+            assert!(st.memtuples.is_empty(), "too late to call tuplestore_set_eflags");
+            st.readptrs[0].eflags = eflags;
+            let mut all = eflags;
+            for rp in st.readptrs.iter().skip(1) {
+                all |= rp.eflags;
+            }
+            st.eflags = all;
+        })
+    }
+
+    /// New pointer copies pointer 0's position (C contract).
+    pub fn alloc_read_pointer(&mut self, eflags: i32) -> i32 {
+        self.0.with_mut(|st| {
+            if !st.memtuples.is_empty() {
+                assert!(
+                    (st.eflags | eflags) == st.eflags,
+                    "too late to require new tuplestore eflags"
+                );
+            }
+            let mut rp = st.readptrs[0];
+            rp.eflags = eflags;
+            st.readptrs.push(rp);
+            st.eflags |= eflags;
+            (st.readptrs.len() - 1) as i32
+        })
+    }
+
+    /// C `tuplestore_advance`: move the active pointer one tuple without
+    /// returning it.
+    pub fn advance(&mut self, forward: bool) -> bool {
+        self.0.with_mut(|st| st.gettuple(forward).is_some())
+    }
+
+    /// C `tuplestore_skiptuples`, TSS_INMEM arm: position arithmetic, no
+    /// tuple reads.
+    pub fn skiptuples(&mut self, ntuples: i64, forward: bool) -> bool {
+        if ntuples <= 0 {
+            return true;
+        }
+        let n = ntuples as usize;
+        self.0.with_mut(|st| {
+            let count = st.memtuples.len();
+            let rp = &mut st.readptrs[st.activeptr];
+            if forward {
+                if rp.eof_reached {
+                    return false;
+                }
+                if rp.current + n <= count {
+                    rp.current += n;
+                    return true;
+                }
+                rp.current = count;
+                rp.eof_reached = true;
+                false
+            } else {
+                debug_assert!(rp.eflags & EXEC_FLAG_BACKWARD != 0);
+                let cur = if rp.eof_reached { count } else { rp.current };
+                // C: n+1 backward steps then one forward re-read; net effect
+                // is current -= n with the tuple floor at position 1.
+                if cur > n {
+                    rp.eof_reached = false;
+                    rp.current = cur - n;
+                    return true;
+                }
+                rp.eof_reached = false;
+                rp.current = 0;
+                false
+            }
+        })
+    }
+
+    /// TSS_INMEM select is a pure index swap; READFILE seek save/restore is
+    /// the spill lane's problem.
+    pub fn select_read_pointer(&mut self, ptr: i32) {
+        self.0.with_mut(|st| {
+            debug_assert!((ptr as usize) < st.readptrs.len());
+            st.activeptr = ptr as usize;
+        })
     }
 }
 
@@ -200,8 +287,15 @@ impl<'m> TuplestoreData<'m> {
         self.avail_mem -= used;
         self.tuples += 1;
 
-        // Single read pointer == active: an eof_reached reader stays at EOF
-        // (advances with the write pointer), per the C API spec.
+        // Per the C API spec the ACTIVE eof reader stays at EOF (advances
+        // with the write pointer); inactive eof readers point at this tuple.
+        let count = self.memtuples.len();
+        for (i, rp) in self.readptrs.iter_mut().enumerate() {
+            if rp.eof_reached && i != self.activeptr {
+                rp.eof_reached = false;
+                rp.current = count;
+            }
+        }
         if self.memtuples.len() >= self.memtuples.capacity() - 1 {
             self.grow_memtuples();
             debug_assert!(self.memtuples.len() < self.memtuples.capacity());
@@ -251,32 +345,34 @@ impl<'m> TuplestoreData<'m> {
     }
 
     fn gettuple(&mut self, forward: bool) -> Option<*mut MinimalTupleData> {
+        let count = self.memtuples.len();
+        let rp = &mut self.readptrs[self.activeptr];
         if !forward {
-            debug_assert!(self.eflags & EXEC_FLAG_BACKWARD != 0);
+            debug_assert!(rp.eflags & EXEC_FLAG_BACKWARD != 0);
             // C's memtupdeleted floor is 0 here (trim unported).
-            if self.eof_reached {
-                self.current = self.memtuples.len();
-                self.eof_reached = false;
+            if rp.eof_reached {
+                rp.current = count;
+                rp.eof_reached = false;
             } else {
-                if self.current == 0 {
+                if rp.current == 0 {
                     return None;
                 }
-                self.current -= 1;
+                rp.current -= 1;
             }
-            if self.current == 0 {
+            if rp.current == 0 {
                 return None;
             }
-            return Some(self.memtuples[self.current - 1]);
+            return Some(self.memtuples[rp.current - 1]);
         }
-        if self.eof_reached {
+        if rp.eof_reached {
             return None;
         }
-        if self.current < self.memtuples.len() {
-            let t = self.memtuples[self.current];
-            self.current += 1;
+        if rp.current < count {
+            let t = self.memtuples[rp.current];
+            rp.current += 1;
             return Some(t);
         }
-        self.eof_reached = true;
+        rp.eof_reached = true;
         None
     }
 }

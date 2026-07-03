@@ -85,6 +85,8 @@ pub struct PlannerRun<'mcx> {
     pub suspended_roots: PgVec<'mcx, SubrootState<'mcx>>,
     /// C glob->subroots, index-aligned with glob.subplans.
     pub subroots: PgVec<'mcx, SubrootState<'mcx>>,
+    /// C qp_extra.activeWindows (WindowClause nodes in execution order).
+    pub active_windows: PgVec<'mcx, types_nodes::Node<'mcx>>,
 }
 
 impl<'mcx> PlannerRun<'mcx> {
@@ -98,6 +100,7 @@ impl<'mcx> PlannerRun<'mcx> {
             assess_parallel: false,
             suspended_roots: PgVec::new_in(mcx),
             subroots: PgVec::new_in(mcx),
+            active_windows: PgVec::new_in(mcx),
         }
     }
 

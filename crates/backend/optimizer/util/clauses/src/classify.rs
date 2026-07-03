@@ -455,8 +455,47 @@ pub fn commute_op_expr(_clause: Node<'_>) {
     panic!("CommuteOpExpr deferred: in-place OpExpr commutation (indxpath consumer unported)");
 }
 
-pub fn find_window_functions(_clause: Node<'_>, _max_win_ref: u32) -> ! {
-    panic!("find_window_functions deferred: WindowFunc payload unported");
+pub struct WindowFuncLists<'mcx> {
+    pub num_window_funcs: i32,
+    pub max_win_ref: u32,
+    /// Indexed by winref (0..=max_win_ref); C's windowFuncs array.
+    pub window_funcs: mcx::PgVec<'mcx, mcx::PgVec<'mcx, Node<'mcx>>>,
+}
+
+struct FindWindowFuncs<'a, 'mcx> {
+    lists: &'a mut WindowFuncLists<'mcx>,
+}
+
+impl<'mcx> NodeWalker<'mcx> for FindWindowFuncs<'_, 'mcx> {
+    fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+        if node.node_tag() == NodeTag::T_WindowFunc {
+            let winref = node.as_window_func().unwrap().winref;
+            assert!(
+                winref <= self.lists.max_win_ref,
+                "WindowFunc contains out-of-range winref {winref}"
+            );
+            self.lists.window_funcs[winref as usize].push(node);
+            self.lists.num_window_funcs += 1;
+            // C: parser guarantees no window funcs in args/filter; no recurse.
+            return Ok(false);
+        }
+        debug_assert!(node.node_tag() != NodeTag::T_SubLink);
+        expression_tree_walker(node, self)
+    }
+}
+
+pub fn find_window_functions<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    clause: Node<'mcx>,
+    max_win_ref: u32,
+) -> PgResult<WindowFuncLists<'mcx>> {
+    let mut window_funcs = mcx::PgVec::with_capacity_in(max_win_ref as usize + 1, mcx);
+    for _ in 0..=max_win_ref {
+        window_funcs.push(mcx::PgVec::new_in(mcx));
+    }
+    let mut lists = WindowFuncLists { num_window_funcs: 0, max_win_ref, window_funcs };
+    FindWindowFuncs { lists: &mut lists }.visit(clause)?;
+    Ok(lists)
 }
 
 pub fn find_nonnullable_rels(_clause: Node<'_>) -> ! {

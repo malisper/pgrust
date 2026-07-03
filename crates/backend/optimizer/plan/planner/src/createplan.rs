@@ -1,6 +1,8 @@
 use types_error::PgResult;
 use types_nodes::list::{NodeList, OidList};
-use types_nodes::plannodes::{Agg, Hash, HashJoin, IndexScan, Plan, Result as ResultPlan, SeqScan};
+use types_nodes::plannodes::{
+    Agg, Hash, HashJoin, IndexScan, Plan, Result as ResultPlan, SeqScan, WindowAgg,
+};
 use types_nodes::primnodes::{OpExpr, TargetEntry};
 use types_nodes::{Node, NodeTag};
 use types_pathnodes::{IndexOptInfo, PathId, PathNode, PtId, RinfoId};
@@ -39,7 +41,9 @@ fn create_plan_recurse<'mcx>(
     match run.root.path(path_id) {
         PathNode::Path(p)
             if p.pathtype == crate::pathnode::tag16(NodeTag::T_SeqScan)
-                || p.pathtype == crate::pathnode::tag16(NodeTag::T_FunctionScan) =>
+                || p.pathtype == crate::pathnode::tag16(NodeTag::T_FunctionScan)
+                || p.pathtype == crate::pathnode::tag16(NodeTag::T_ValuesScan)
+                || p.pathtype == crate::pathnode::tag16(NodeTag::T_CteScan) =>
         {
             create_scan_plan(run, path_id, flags)
         }
@@ -48,6 +52,7 @@ fn create_plan_recurse<'mcx>(
         PathNode::ProjectionPath(_) => create_projection_plan(run, path_id, flags),
         PathNode::GroupResultPath(_) => create_group_result_plan(run, path_id),
         PathNode::AggPath(_) => create_agg_plan(run, path_id),
+        PathNode::WindowAggPath(_) => create_windowagg_plan(run, path_id),
         PathNode::UpperUniquePath(_) => create_upper_unique_plan(run, path_id, flags),
         PathNode::SortPath(_) => create_sort_plan(run, path_id, flags),
         PathNode::NestPath(_) => create_join_plan(run, path_id),
@@ -186,6 +191,12 @@ fn create_scan_plan<'mcx>(
         }
         t if t == crate::pathnode::tag16(NodeTag::T_FunctionScan) => {
             create_functionscan_plan(run, best_path, tlist, scan_clauses)?
+        }
+        t if t == crate::pathnode::tag16(NodeTag::T_ValuesScan) => {
+            create_valuesscan_plan(run, best_path, tlist, scan_clauses)?
+        }
+        t if t == crate::pathnode::tag16(NodeTag::T_CteScan) => {
+            create_ctescan_plan(run, best_path, tlist, scan_clauses)?
         }
         other => panic!("create_scan_plan (createplan.c): pathtype {other}; M2 scan lane"),
     };
@@ -349,6 +360,67 @@ fn create_functionscan_plan<'mcx>(
     plan.scan.scanrelid = scan_relid;
     plan.functions = functions;
     plan.funcordinality = funcordinality;
+    copy_generic_path_info(run, &mut plan.scan.plan, best_path);
+    Ok(plan.seal())
+}
+
+// create_valuesscan_plan (createplan.c); replace_nestloop_params is dead
+// (param_info asserted None upstream).
+fn create_valuesscan_plan<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    best_path: PathId,
+    tlist: NodeList<'mcx>,
+    scan_clauses: mcx::PgVec<'mcx, RinfoId>,
+) -> PgResult<Node<'mcx>> {
+    let mcx = run.mcx;
+    let rel_id = run.root.path(best_path).base().parent;
+    let scan_relid = run.root.rel(rel_id).relid;
+    debug_assert!(scan_relid > 0);
+    let rte = run.rte(scan_relid as usize);
+    debug_assert!(rte.rtekind == types_nodes::parsenodes::RTEKind::RTE_VALUES);
+    // C shares the list pointer; the header is re-copied cell-by-cell (the
+    // per-row expression lists stay shared).
+    let mut values_lists = NodeList::nil();
+    for row in &rte.values_lists {
+        values_lists.lappend(mcx, row)?;
+    }
+
+    let ordered = order_qual_clauses(run, &scan_clauses)?;
+    let qpqual = extract_actual_clauses(run, &ordered);
+
+    let mut plan = Node::build::<types_nodes::plannodes::ValuesScan<'mcx>>(mcx)?;
+    plan.scan.plan.targetlist = tlist;
+    plan.scan.plan.qual = qpqual;
+    plan.scan.scanrelid = scan_relid;
+    plan.values_lists = values_lists;
+    copy_generic_path_info(run, &mut plan.scan.plan, best_path);
+    Ok(plan.seal())
+}
+
+// create_ctescan_plan (createplan.c).
+fn create_ctescan_plan<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    best_path: PathId,
+    tlist: NodeList<'mcx>,
+    scan_clauses: mcx::PgVec<'mcx, RinfoId>,
+) -> PgResult<Node<'mcx>> {
+    let mcx = run.mcx;
+    let rel_id = run.root.path(best_path).base().parent;
+    let scan_relid = run.root.rel(rel_id).relid;
+    debug_assert!(scan_relid > 0);
+    let rte = run.rte(scan_relid as usize);
+    debug_assert!(rte.rtekind == types_nodes::parsenodes::RTEKind::RTE_CTE);
+    let (plan_id, cte_param_id) = crate::cte::cte_plan_id_and_param(run, rte);
+
+    let ordered = order_qual_clauses(run, &scan_clauses)?;
+    let qpqual = extract_actual_clauses(run, &ordered);
+
+    let mut plan = Node::build::<types_nodes::plannodes::CteScan<'mcx>>(mcx)?;
+    plan.scan.plan.targetlist = tlist;
+    plan.scan.plan.qual = qpqual;
+    plan.scan.scanrelid = scan_relid;
+    plan.ctePlanId = plan_id;
+    plan.cteParam = cte_param_id;
     copy_generic_path_info(run, &mut plan.scan.plan, best_path);
     Ok(plan.seal())
 }
@@ -636,14 +708,14 @@ fn fix_indexqual_operand<'mcx>(
     panic!("fix_indexqual_operand (createplan.c): expression column; M2 lane");
 }
 
-// use_physical_tlist is false on every reachable input: CP_EXACT_TLIST is
-// always demanded and the parent rel is never a physical scan rel here.
+// use_physical_tlist is false on every reachable input: the parent rel is
+// never a physical scan rel here (C ignores flags in this function too).
 fn create_projection_plan<'mcx>(
     run: &mut PlannerRun<'mcx>,
     path_id: PathId,
     flags: i32,
 ) -> PgResult<Node<'mcx>> {
-    debug_assert!(flags & CP_EXACT_TLIST != 0);
+    debug_assert!(flags & (CP_EXACT_TLIST | CP_SMALL_TLIST | CP_LABEL_TLIST) != 0);
     let (subpath_id, target_id, path_costs) = match run.root.path(path_id) {
         PathNode::ProjectionPath(pp) => (
             pp.subpath.expect("projection has a subpath"),
@@ -682,8 +754,7 @@ fn create_projection_plan<'mcx>(
 }
 
 // create_modifytable_plan + make_modifytable (createplan.c), single-relation
-// INSERT/UPDATE/DELETE arm: no FDW result rels, no ON CONFLICT/MERGE/
-// RETURNING lists.
+// INSERT/UPDATE/DELETE arm: no FDW result rels, no ON CONFLICT/MERGE lists.
 fn create_modifytable_plan<'mcx>(
     run: &mut PlannerRun<'mcx>,
     path_id: PathId,
@@ -693,7 +764,6 @@ fn create_modifytable_plan<'mcx>(
         let PathNode::ModifyTablePath(p) = run.root.path(path_id) else { unreachable!() };
         debug_assert!(
             p.withCheckOptionLists.is_empty()
-                && p.returningLists.is_empty()
                 && p.rowMarks.is_empty()
                 && p.onconflict.is_none()
                 && p.mergeActionLists.is_empty()
@@ -733,10 +803,30 @@ fn create_modifytable_plan<'mcx>(
         lists
     };
 
+    let returning_lists = {
+        let PathNode::ModifyTablePath(p) = run.root.path(path_id) else { unreachable!() };
+        debug_assert!(p.returningLists.len() <= 1);
+        let mut ids: mcx::PgVec<'mcx, mcx::PgVec<'mcx, types_pathnodes::NodeId>> =
+            mcx::PgVec::new_in(mcx);
+        for rlist in p.returningLists.iter() {
+            ids.push(crate::relnode::pgvec_clone_shallow(mcx, rlist));
+        }
+        let mut lists = types_nodes::list::NodeList::nil();
+        for rlist in ids.iter() {
+            let mut nl = types_nodes::list::NodeList::nil();
+            for &id in rlist.iter() {
+                nl.lappend(mcx, *run.root.expr_node(id))?;
+            }
+            lists.lappend(mcx, Node::mk_list(mcx, nl)?)?;
+        }
+        lists
+    };
+
     let mut plan = Node::build::<types_nodes::plannodes::ModifyTable>(mcx)?;
     plan.plan.lefttree = Some(subplan);
     plan.operation = operation;
     plan.updateColnosLists = update_colnos_lists;
+    plan.returningLists = returning_lists;
     plan.canSetTag = can_set_tag;
     plan.nominalRelation = nominal;
     plan.rootRelation = root_rel;
@@ -853,6 +943,93 @@ fn create_agg_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> PgResul
     plan.grpCollations = mcx::vec_borrow_in(run.mcx, grp_collations)?;
     plan.numGroups = clamp_cardinality_to_long(num_groups);
     plan.transitionSpace = transition_space;
+    copy_generic_path_info(run, &mut plan.plan, path_id);
+    Ok(plan.seal())
+}
+
+
+// create_windowagg_plan (createplan.c); runCondition/qual/frame-offset legs
+// dead (loud upstream), startOffset/endOffset always None (default frame).
+fn create_windowagg_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> PgResult<Node<'mcx>> {
+    let (subpath_id, target_id, winclause_id, topwindow) = match run.root.path(path_id) {
+        PathNode::WindowAggPath(wp) => {
+            debug_assert!(wp.qual.is_empty() && wp.runCondition.is_empty());
+            (
+                wp.subpath.expect("WindowAggPath has a subpath"),
+                wp.path.pathtarget_id.unwrap(),
+                wp.winclause,
+                wp.topwindow,
+            )
+        }
+        _ => unreachable!(),
+    };
+    let wc_node = *run.root.expr_node(winclause_id);
+
+    // WindowAgg spools its input into a tuplestore: request a small tlist,
+    // with grouping columns labeled.
+    let subplan = create_plan_recurse(run, subpath_id, CP_LABEL_TLIST | CP_SMALL_TLIST)?;
+    let tlist = build_path_tlist(run, target_id)?;
+
+    let wc = wc_node.as_window_clause().expect("WindowClause");
+    assert!(
+        wc.startOffset.is_none() && wc.endOffset.is_none(),
+        "create_windowagg_plan (createplan.c): frame offsets unported"
+    );
+    let subplan_tlist = &subplan.as_plan().expect("plan node").targetlist;
+    let mut cols = |clause: &NodeList<'mcx>| -> PgResult<(
+        &'mcx [i16],
+        &'mcx [types_core::Oid],
+        &'mcx [types_core::Oid],
+    )> {
+        let mut idx: mcx::PgVec<'mcx, i16> = mcx::PgVec::new_in(run.mcx);
+        let mut ops: mcx::PgVec<'mcx, types_core::Oid> = mcx::PgVec::new_in(run.mcx);
+        let mut colls: mcx::PgVec<'mcx, types_core::Oid> = mcx::PgVec::new_in(run.mcx);
+        for sgc_node in clause {
+            let sgc = sgc_node.as_sort_group_clause().expect("SortGroupClause");
+            debug_assert!(sgc.eqop != 0);
+            let tle_node = subplan_tlist
+                .iter()
+                .find(|n| {
+                    n.as_target_entry().expect("tlist cell").ressortgroupref
+                        == sgc.tleSortGroupRef
+                })
+                .unwrap_or_else(|| panic!("ORDER/GROUP BY expression not found in targetlist"));
+            let tle = tle_node.as_target_entry().unwrap();
+            idx.push(tle.resno);
+            ops.push(sgc.eqop);
+            colls.push(expr_collation(tle.expr));
+        }
+        Ok((
+            mcx::vec_borrow_in(run.mcx, idx)?,
+            mcx::vec_borrow_in(run.mcx, ops)?,
+            mcx::vec_borrow_in(run.mcx, colls)?,
+        ))
+    };
+    let (part_idx, part_ops, part_colls) = cols(&wc.partitionClause)?;
+    let (ord_idx, ord_ops, ord_colls) = cols(&wc.orderClause)?;
+
+    let mut plan = Node::build::<WindowAgg>(run.mcx)?;
+    plan.plan.targetlist = tlist;
+    plan.plan.lefttree = Some(subplan);
+    plan.winname = wc.name;
+    plan.winref = wc.winref;
+    plan.partNumCols = part_idx.len() as i32;
+    plan.partColIdx = part_idx;
+    plan.partOperators = part_ops;
+    plan.partCollations = part_colls;
+    plan.ordNumCols = ord_idx.len() as i32;
+    plan.ordColIdx = ord_idx;
+    plan.ordOperators = ord_ops;
+    plan.ordCollations = ord_colls;
+    plan.frameOptions = wc.frameOptions;
+    plan.startOffset = None;
+    plan.endOffset = None;
+    plan.startInRangeFunc = wc.startInRangeFunc;
+    plan.endInRangeFunc = wc.endInRangeFunc;
+    plan.inRangeColl = wc.inRangeColl;
+    plan.inRangeAsc = wc.inRangeAsc;
+    plan.inRangeNullsFirst = wc.inRangeNullsFirst;
+    plan.topWindow = topwindow;
     copy_generic_path_info(run, &mut plan.plan, path_id);
     Ok(plan.seal())
 }

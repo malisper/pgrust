@@ -9,6 +9,7 @@ use crate::dsm_impl::*;
 
 static TEST_LOCK: Mutex<()> = Mutex::new(());
 static REGISTERED_EXITS: AtomicUsize = AtomicUsize::new(0);
+static EXIT_CALLBACKS: Mutex<Vec<(fn(i32, usize), usize)>> = Mutex::new(Vec::new());
 
 fn bringup() -> MutexGuard<'static, ()> {
     static ONCE: Once = Once::new();
@@ -21,8 +22,9 @@ fn bringup() -> MutexGuard<'static, ()> {
         });
         shmem_seams::add_size::set(|a, b| Ok(a.checked_add(b).unwrap()));
         shmem_seams::mul_size::set(|a, b| Ok(a.checked_mul(b).unwrap()));
-        ipc_seams::on_shmem_exit::set(|_cb, _arg| {
+        ipc_seams::on_shmem_exit::set(|cb, arg| {
             REGISTERED_EXITS.fetch_add(1, Ordering::Relaxed);
+            EXIT_CALLBACKS.lock().unwrap().push((cb, arg));
         });
         // splitmix64 stand-in until port/pg_prng lands.
         pg_prng_seams::global_prng_uint32::set(|| {
@@ -253,6 +255,25 @@ fn create_reports_max_segments() {
     drop(guards);
     let seg = dsm_create(16, 0).unwrap().unwrap();
     drop(seg);
+}
+
+#[test]
+fn crash_cycle_recreates_control_segment() {
+    let _g = bringup();
+    // shmem_exit(1)'s dsm arm: the exit callback registered at boot startup.
+    let (shutdown, arg) = EXIT_CALLBACKS.lock().unwrap()[0];
+    let exits_before = REGISTERED_EXITS.load(Ordering::Relaxed);
+    shutdown(1, arg);
+
+    dsm_postmaster_startup_after_crash().unwrap();
+    assert_eq!(REGISTERED_EXITS.load(Ordering::Relaxed), exits_before + 1);
+    let shim = unsafe { &*(arg as *const PGShmemHeader) };
+    assert_ne!(shim.dsm_control, 0);
+
+    let seg = dsm_create(48, 0).unwrap().unwrap();
+    let handle = dsm_segment_handle(seg.id());
+    assert_ne!(handle, 0);
+    dsm_detach(seg.into_id()).unwrap();
 }
 
 #[test]

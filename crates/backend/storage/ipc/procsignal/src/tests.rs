@@ -101,6 +101,35 @@ fn shmem_shape_matches_c() {
 }
 
 #[test]
+fn reset_after_crash_restores_boot_image() {
+    setup();
+    let _guard = serial();
+    register(2, 1002, &[1, 2, 3]);
+    let s = slot(2);
+    s.pss_signalFlags[ProcSignalReason::PROCSIG_BARRIER as usize].store(true, Release);
+    s.pss_pendingThreadSignals.store(1u32 << libc::SIGQUIT as u32, SeqCst);
+    proc_signal().psh_barrierGeneration.store(5, Relaxed);
+    s.pss_barrierCheckMask.store(3, Relaxed);
+
+    ProcSignalShmemResetAfterCrash();
+
+    assert_eq!(proc_signal().psh_barrierGeneration.load(Relaxed), 0);
+    for s in proc_signal().psh_slot {
+        assert_eq!(s.pss_pid.load(Relaxed), 0);
+        assert_eq!(s.pss_cancel_key_len.get(), 0);
+        assert_eq!(s.pss_cancel_key.get(), [0; MAX_CANCEL_KEY_LENGTH]);
+        for flag in &s.pss_signalFlags {
+            assert!(!flag.load(Relaxed));
+        }
+        assert_eq!(s.pss_pendingThreadSignals.load(Relaxed), 0);
+        assert!(s.pss_mutex.is_free());
+        assert_eq!(s.pss_barrierGeneration.load(Relaxed), u64::MAX);
+        assert_eq!(s.pss_barrierCheckMask.load(Relaxed), 0);
+    }
+    MY_PROC_SIGNAL_SLOT.set(None);
+}
+
+#[test]
 fn init_registers_and_cleanup_releases() {
     setup();
     let _guard = serial();

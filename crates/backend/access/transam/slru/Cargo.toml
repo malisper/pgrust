@@ -15,6 +15,7 @@ types_storage = { path = "../../../../_support/types/types_storage" }
 elog = { path = "../../../utils/error/elog" }
 init_small = { path = "../../../utils/init/init_small" }
 lwlock = { path = "../../../storage/lmgr/lwlock" }
+lmgr_proc_seams = { path = "../../../storage/lmgr/lmgr_proc_seams" }
 pgstat_seams = { path = "../../../utils/activity/pgstat_seams" }
 waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
 file_seams = { path = "../../../storage/file/file_seams" }

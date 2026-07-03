@@ -24,6 +24,10 @@ mod tests;
 
 pub use from::{BeginCopyFrom, CopyFrom, EndCopyFrom};
 pub use to::{BeginCopyTo, DoCopyTo, EndCopyTo};
+#[doc(hidden)]
+pub use fromparse::bench_internals;
+#[doc(hidden)]
+pub use to::copy_attribute_out_text;
 
 const ROLE_PG_READ_SERVER_FILES: Oid = 4569;
 const ROLE_PG_WRITE_SERVER_FILES: Oid = 4570;

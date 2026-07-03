@@ -200,6 +200,100 @@ pub fn OpernameGetOprid(names: &[&str], oprleft: Oid, oprright: Oid) -> PgResult
     Ok(InvalidOid)
 }
 
+pub struct OperCandidate {
+    pub oid: Oid,
+    pub args: [Oid; 2],
+}
+
+// OpernameGetCandidates (namespace.c). C prepends onto a linked list; this
+// returns that final head-first order (reverse of acceptance order).
+pub fn OpernameGetCandidates<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    names: &[&str],
+    oprkind: i8,
+    missing_schema_ok: bool,
+) -> PgResult<mcx::PgVec<'mcx, OperCandidate>> {
+    let (schemaname, opername) = DeconstructQualifiedName(names)?;
+
+    let namespace_id = match schemaname {
+        Some(schemaname) => {
+            let id = LookupExplicitNamespace(schemaname, missing_schema_ok)?;
+            if missing_schema_ok && !OidIsValid(id) {
+                return Ok(mcx::PgVec::new_in(mcx));
+            }
+            Some(id)
+        }
+        None => {
+            recomputeNamespacePath()?;
+            None
+        }
+    };
+
+    let raw = syscache_seams::lookup_pg_operator_name_candidates::call(mcx, opername)?;
+    let mut result: mcx::PgVec<'mcx, OperCandidate> = mcx::PgVec::new_in(mcx);
+    let mut pathposes: mcx::PgVec<'mcx, usize> = mcx::PgVec::new_in(mcx);
+    let mtn = my_temp_namespace();
+    for cand in raw.iter() {
+        if oprkind != 0 && cand.oprkind != oprkind {
+            continue;
+        }
+        let mut pathpos = 0usize;
+        match namespace_id {
+            Some(id) => {
+                if cand.oprnamespace != id {
+                    continue;
+                }
+            }
+            None => {
+                let mut found = false;
+                for i in 0..base_path_len() {
+                    if cand.oprnamespace == base_path_nth(i) && cand.oprnamespace != mtn {
+                        found = true;
+                        break;
+                    }
+                    pathpos += 1;
+                }
+                if !found {
+                    continue;
+                }
+                if let Some(prev) = result
+                    .iter()
+                    .position(|p| p.args == [cand.oprleft, cand.oprright])
+                {
+                    debug_assert_ne!(pathpos, pathposes[prev]);
+                    if pathpos > pathposes[prev] {
+                        continue;
+                    }
+                    pathposes[prev] = pathpos;
+                    result[prev].oid = cand.oid;
+                    continue;
+                }
+            }
+        }
+        result.push(OperCandidate { oid: cand.oid, args: [cand.oprleft, cand.oprright] });
+        pathposes.push(pathpos);
+    }
+    result.reverse();
+    Ok(result)
+}
+
+// TypenameGetTypidExtended (namespace.c).
+pub fn TypenameGetTypidExtended(typname: &str, temp_ok: bool) -> PgResult<Oid> {
+    recomputeNamespacePath()?;
+    let mtn = my_temp_namespace();
+    for i in 0..base_path_len() {
+        let namespace_id = base_path_nth(i);
+        if !temp_ok && namespace_id == mtn {
+            continue;
+        }
+        let typid = syscache_seams::lookup_pg_type_oid_by_name::call(typname, namespace_id)?;
+        if OidIsValid(typid) {
+            return Ok(typid);
+        }
+    }
+    Ok(InvalidOid)
+}
+
 pub fn RangeVarGetRelid(
     relation: &RangeVar<'_>,
     lockmode: LOCKMODE,
@@ -331,7 +425,10 @@ pub fn FuncnameGetCandidates<'mcx>(
     let raw = syscache_seams::lookup_pg_proc_name_candidates::call(mcx, funcname)?;
     let mut result: mcx::PgVec<'mcx, FuncCandidate<'mcx>> = mcx::PgVec::new_in(mcx);
     for cand in raw {
-        if OidIsValid(cand.provariadic) && expand_variadic && nargs >= cand.pronargs - 1 {
+        // C considers variadic expansion only when pronargs <= nargs; an
+        // undersupplied variadic candidate falls through to the arg-count
+        // skip (e.g. rank() never sees the hypothetical-set aggregate 3986).
+        if OidIsValid(cand.provariadic) && expand_variadic && cand.pronargs <= nargs {
             panic!(
                 "FuncnameGetCandidates (namespace.c): expand_variadic arm unported — \
                  candidate {} for \"{funcname}\" is variadic",

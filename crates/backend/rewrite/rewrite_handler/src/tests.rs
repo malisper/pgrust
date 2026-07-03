@@ -382,14 +382,20 @@ fn merge_rewrite_defers_loud() {
 }
 
 #[test]
-#[should_panic(expected = "WITH-clause rewrite needs CommonTableExpr")]
-fn with_clause_defers_loud() {
+fn select_cte_passes_rewrite_unchanged() {
     install();
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
     let mut query = select1(mcx);
-    query.cteList = NodeList::make1(mcx, Node::mk_integer(mcx, 0).unwrap()).unwrap();
-    let _ = QueryRewrite(mcx, query);
+    let cte = types_nodes::parsenodes::CommonTableExpr {
+        ctename: Some("x"),
+        ctequery: Some(Node::mk(mcx, select1(mcx)).unwrap()),
+        ..Default::default()
+    };
+    query.cteList = NodeList::make1(mcx, Node::mk(mcx, cte).unwrap()).unwrap();
+    let out = QueryRewrite(mcx, query).unwrap();
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].cteList.len(), 1);
 }
 
 #[test]

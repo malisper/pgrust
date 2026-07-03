@@ -27,7 +27,7 @@ pub use control_file::{
     GetMockAuthenticationNonce, GetSystemIdentifier, LocalProcessControlFile, ReadControlFile,
     UpdateControlFile,
 };
-pub use ctl::{XLOGShmemInit, XLOGShmemSize};
+pub use ctl::{XLOGShmemInit, XLOGShmemResetAfterCrash, XLOGShmemSize};
 pub use insert::{
     GetFullPageWriteInfo, GetInsertRecPtr, GetLastImportantRecPtr, GetRedoRecPtr,
     RecoveryInProgress, XLogInsertAllowed, XLogInsertRecord,

@@ -49,6 +49,7 @@ const ANUM_PG_NAMESPACE_OID: i32 = 1;
 const ANUM_PG_NAMESPACE_NSPNAME: i32 = 2;
 const CONSTRAINT_FOREIGN: i8 = b'f' as i8;
 const ANUM_PG_OPERATOR_OID: i32 = 1;
+const ANUM_PG_OPERATOR_OPRNAME: i32 = 2;
 const ANUM_PG_OPERATOR_OPRNAMESPACE: i32 = 3;
 const ANUM_PG_OPERATOR_OPRKIND: i32 = 5;
 const ANUM_PG_OPERATOR_OPRCANMERGE: i32 = 6;
@@ -149,6 +150,20 @@ fn lookup_pg_class_by_relid(relid: Oid) -> PgResult<Option<PgClassShape>> {
     let shape = pg_class_shape(&tuple.tuple());
     ReleaseSysCache(tuple);
     Ok(Some(shape))
+}
+
+const ANUM_PG_CLASS_RELNAME: i32 = 2;
+
+fn pg_class_relname(relid: Oid) -> PgResult<Option<types_tuple::NameData>> {
+    let Some(tuple) = SearchSysCache1(RELOID, SysCacheKey::Value(Datum::from_oid(relid)))? else {
+        return Ok(None);
+    };
+    let d = getattr(&tuple.tuple(), RELOID, ANUM_PG_CLASS_RELNAME);
+    // SAFETY: relname is a NameData column; the datum points at its 64-byte
+    // buffer inside the pinned tuple image, copied out before release.
+    let name = unsafe { *(d.as_usize() as *const types_tuple::NameData) };
+    ReleaseSysCache(tuple);
+    Ok(Some(name))
 }
 
 fn lookup_pg_type_shape(typid: Oid) -> PgResult<Option<PgTypeShape>> {
@@ -434,6 +449,18 @@ fn syscache_hash_value_procoid(funcid: Oid) -> PgResult<u32> {
         SysCacheKey::UNUSED,
         SysCacheKey::UNUSED,
     )
+}
+
+fn pg_operator_oprname(opno: Oid) -> PgResult<Option<NameData>> {
+    let Some(tuple) = SearchSysCache1(OPEROID, SysCacheKey::Value(Datum::from_oid(opno)))? else {
+        return Ok(None);
+    };
+    let d = getattr(&tuple.tuple(), OPEROID, ANUM_PG_OPERATOR_OPRNAME);
+    // SAFETY: oprname is a NameData column; the datum points at its 64-byte
+    // buffer inside the pinned tuple image, copied out before release.
+    let name = unsafe { *(d.as_usize() as *const NameData) };
+    ReleaseSysCache(tuple);
+    Ok(Some(name))
 }
 
 fn lookup_pg_operator_shape(opno: Oid) -> PgResult<Option<syscache_seams::PgOperatorShape>> {
@@ -1097,6 +1124,7 @@ pub(crate) fn install() {
     syscache_seams::relation_invalidates_snapshots_only::set(crate::RelationInvalidatesSnapshotsOnly);
     syscache_seams::lookup_pg_class_by_relid::set(lookup_pg_class_by_relid);
     syscache_seams::pg_class_shape::set(pg_class_shape);
+    syscache_seams::pg_class_relname::set(pg_class_relname);
     syscache_seams::pg_attribute_attrelid::set(pg_attribute_attrelid);
     syscache_seams::pg_index_indexrelid::set(pg_index_indexrelid);
     syscache_seams::pg_constraint_fk_target::set(pg_constraint_fk_target);
@@ -1118,6 +1146,7 @@ pub(crate) fn install() {
     syscache_seams::pg_namespace_nspname::set(pg_namespace_nspname);
     syscache_seams::lookup_pg_namespace_oid_by_name::set(lookup_pg_namespace_oid_by_name);
     syscache_seams::lookup_pg_operator_shape::set(lookup_pg_operator_shape);
+    syscache_seams::pg_operator_oprname::set(pg_operator_oprname);
     syscache_seams::lookup_pg_operator_oid_exact::set(lookup_pg_operator_oid_exact);
     syscache_seams::lookup_pg_amproc::set(lookup_pg_amproc);
     syscache_seams::lookup_pg_class_ls_shape::set(lookup_pg_class_ls_shape);

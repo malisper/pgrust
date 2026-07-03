@@ -139,9 +139,23 @@ fn install() {
             );
             Ok(select_query(mcx))
         });
+        analyze_seams::parse_analyze_varparams::set(|mcx, parse_tree, _src, param_types, _env| {
+            assert_eq!(
+                parse_tree.stmt.map(|s| s.node_tag()),
+                Some(NodeTag::T_SelectStmt)
+            );
+            let mut resolved = mcx::PgVec::new_in(mcx);
+            for &t in param_types {
+                resolved.push(t);
+            }
+            Ok((select_query(mcx), resolved))
+        });
         analyze_seams::analyze_requires_snapshot::set(|raw| {
             parser_analyze::analyze_requires_snapshot(raw)
         });
+        resowner_seams::current_resource_owner::set(|| types_resowner::ResourceOwner::NULL);
+        resowner_seams::set_current_resource_owner::set(|_| {});
+        resowner_seams::top_transaction_resource_owner::set(|| types_resowner::ResourceOwner::NULL);
         rewrite_handler_seams::query_rewrite::set(|mcx, query| {
             let mut v = mcx::PgVec::new_in(mcx);
             v.push(query);
@@ -392,14 +406,37 @@ fn empty_statement_name_is_rejected() {
     assert_eq!(err.sqlstate(), ERRCODE_INVALID_PSTATEMENT_DEFINITION);
 }
 
+// EvaluateParams' arity check (C prepare.c 42601).
 #[test]
-#[should_panic(expected = "varparams lane")]
-fn dollar_params_are_loud() {
+fn execute_with_wrong_parameter_count_is_42601() {
     install();
     let ctx = MemoryContext::new("t");
+
     let select = node_mk(&ctx, SelectStmt::default());
-    let stmt = PrepareStmt { name: Some("pp"), argtypes: NodeList::nil(), query: Some(select) };
-    let _ = PrepareQuery("PREPARE pp AS SELECT $1", &stmt, 0, 0);
+    let rawstmt = RawStmt { stmt: Some(select), stmt_location: 0, stmt_len: 0 };
+    let plansource =
+        plancache::CreateCachedPlan(Some(&rawstmt), "PREPARE pn(int) AS SELECT $1", CMDTAG_SELECT)
+            .unwrap();
+    let qmcx = plancache::SourceQueryMcx(plansource);
+    let mut qlist = mcx::PgVec::new_in(qmcx);
+    qlist.push(select_query(qmcx));
+    plancache::CompleteCachedPlan(plansource, qlist, &[INT4OID], CURSOR_OPT_PARALLEL_OK, true)
+        .unwrap();
+    StorePreparedStatement("pn", plansource, true).unwrap();
+
+    let exec = ExecuteStmt { name: Some("pn"), params: NodeList::nil() };
+    let mut dest = tcop_dest::CreateDestReceiver(CommandDest::None);
+    let err = ExecuteQuery(
+        ctx.mcx(),
+        &exec,
+        "EXECUTE pn",
+        ParamListHandle::NULL,
+        &mut dest,
+        None,
+    )
+    .unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_SYNTAX_ERROR);
+    assert!(err.message().contains("wrong number of parameters"));
 }
 
 #[test]

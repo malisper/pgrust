@@ -375,12 +375,60 @@ fn run_program<'mcx>(
                     write_out(*out, &mut regs, value, isnull);
                 }
             }
+            Step::MinMax { call, slots, nelems, least, out } => {
+                let mut value = Datum::null();
+                let mut isnull = true;
+                for off in 0..*nelems as usize {
+                    // SAFETY: off < nelems of the compile-allocated slot array.
+                    let nd = unsafe { slots.as_ptr().add(off).read() };
+                    if nd.isnull {
+                        continue;
+                    }
+                    if isnull {
+                        value = nd.value;
+                        isnull = false;
+                        continue;
+                    }
+                    // SAFETY: args 0/1 of the call's live 2-arg fcinfo image.
+                    unsafe {
+                        crate::steps::arg_slot_of(call.fcinfo, 0)
+                            .write(NullableDatum { value, isnull: false });
+                        crate::steps::arg_slot_of(call.fcinfo, 1)
+                            .write(NullableDatum { value: nd.value, isnull: false });
+                    }
+                    let (cmp, cmpnull) = invoke(frames, call)?;
+                    if cmpnull {
+                        continue;
+                    }
+                    let cmp = cmp.as_i32();
+                    if (cmp > 0 && *least) || (cmp < 0 && !*least) {
+                        value = nd.value;
+                    }
+                }
+                write_out(*out, &mut regs, value, isnull);
+            }
             Step::Qual { jumpdone } => {
                 if regs.isnull || !regs.value.as_bool() {
                     regs.value = Datum::from_bool(false);
                     regs.isnull = false;
                     // SAFETY: jump targets validated < steps.len() at ready.
                     sp = unsafe { base.add(*jumpdone as usize) };
+                    continue;
+                }
+            }
+            Step::AggStrictInputCheck { args, nargs, jumpnull } => {
+                // SAFETY: args[0..nargs] live fcinfo slots; jumps ready-checked.
+                let anynull = (0..*nargs as usize)
+                    .any(|i| unsafe { args.as_ptr().add(i).read().isnull });
+                if anynull {
+                    sp = unsafe { base.add(*jumpnull as usize) };
+                    continue;
+                }
+            }
+            Step::AggStrictInputCheck1 { arg, jumpnull } => {
+                // SAFETY: as AggStrictInputCheck.
+                if unsafe { arg.read().isnull } {
+                    sp = unsafe { base.add(*jumpnull as usize) };
                     continue;
                 }
             }

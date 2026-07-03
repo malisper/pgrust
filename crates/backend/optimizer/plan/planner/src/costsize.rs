@@ -70,9 +70,9 @@ pub fn cost_qual_eval_node(node: Node<'_>) -> PgResult<QualCost> {
 fn cost_qual_eval_walker(node: Node<'_>, cost: &mut QualCost) -> PgResult<()> {
     match node.node_tag() {
         NodeTag::T_Var | NodeTag::T_Const | NodeTag::T_Param => Ok(()),
-        // C charges nothing for the Aggref itself and does not descend:
-        // aggregate costs are get_agg_clause_costs' job (prepagg.c).
-        NodeTag::T_Aggref => Ok(()),
+        // C charges nothing for Aggref/WindowFunc themselves and does not
+        // descend: their costs are get_agg_clause_costs'/cost_windowagg's job.
+        NodeTag::T_Aggref | NodeTag::T_WindowFunc => Ok(()),
         NodeTag::T_FuncExpr => {
             let f = node.as_func_expr().unwrap();
             crate::plancat::add_function_cost(f.funcid, cost)?;
@@ -165,6 +165,97 @@ pub fn cost_functionscan(
     let qpqual_cost = get_restriction_qual_cost(run, rel);
     startup_cost += qpqual_cost.startup;
     let cpu_per_tuple = gucs::cpu_tuple_cost() + qpqual_cost.per_tuple;
+    let mut run_cost = cpu_per_tuple * tuples;
+
+    let target = run.root.path_pathtarget(path_id);
+    startup_cost += target.cost.startup;
+    run_cost += target.cost.per_tuple * rows;
+
+    let p = run.root.path_mut(path_id).base_mut();
+    p.rows = rows;
+    p.disabled_nodes = 0;
+    p.startup_cost = startup_cost;
+    p.total_cost = startup_cost + run_cost;
+    Ok(())
+}
+
+// cost_ctescan (costsize.c): 2× cpu_tuple_cost per scanned tuple (scan +
+// tuplestore); the CTE query itself is charged as initplan cost, not here.
+pub fn cost_ctescan(
+    run: &mut PlannerRun<'_>,
+    path_id: types_pathnodes::PathId,
+    rel: RelId,
+) -> PgResult<()> {
+    let (relid, rtekind, tuples, base_rows) = {
+        let baserel = run.root.rel(rel);
+        (baserel.relid, baserel.rtekind, baserel.tuples, baserel.rows)
+    };
+    debug_assert!(relid > 0 && rtekind == types_pathnodes::RTE_CTE);
+    assert!(
+        run.root.path(path_id).base().param_info.is_none(),
+        "cost_ctescan (costsize.c): parameterized path; M2 lateral lane"
+    );
+    let rows = base_rows;
+
+    let mut startup_cost = 0.0;
+    let mut cpu_per_tuple = gucs::cpu_tuple_cost();
+
+    let qpqual_cost = get_restriction_qual_cost(run, rel);
+    startup_cost += qpqual_cost.startup;
+    cpu_per_tuple += gucs::cpu_tuple_cost() + qpqual_cost.per_tuple;
+    let mut run_cost = cpu_per_tuple * tuples;
+
+    let target = run.root.path_pathtarget(path_id);
+    startup_cost += target.cost.startup;
+    run_cost += target.cost.per_tuple * rows;
+
+    let p = run.root.path_mut(path_id).base_mut();
+    p.rows = rows;
+    p.disabled_nodes = 0;
+    p.startup_cost = startup_cost;
+    p.total_cost = startup_cost + run_cost;
+    Ok(())
+}
+
+// set_cte_size_estimates (costsize.c); self-reference worktable arm loud upstream.
+pub fn set_cte_size_estimates(run: &mut PlannerRun<'_>, rel: RelId, cte_rows: f64) -> PgResult<()> {
+    debug_assert!(run.root.rel(rel).relid > 0);
+    run.root.rel_mut(rel).tuples = cte_rows;
+    set_baserel_size_estimates(run, rel)
+}
+
+// set_values_size_estimates (costsize.c): tuples = row count of the list.
+pub fn set_values_size_estimates(run: &mut PlannerRun<'_>, rel: RelId) -> PgResult<()> {
+    let rti = run.root.rel(rel).relid as usize;
+    debug_assert!(rti > 0);
+    debug_assert_eq!(run.rte(rti).rtekind, types_nodes::parsenodes::RTEKind::RTE_VALUES);
+    run.root.rel_mut(rel).tuples = run.rte(rti).values_lists.len() as f64;
+    set_baserel_size_estimates(run, rel)
+}
+
+// cost_valuesscan (costsize.c): one cpu_operator_cost per list evaluation.
+pub fn cost_valuesscan(
+    run: &mut PlannerRun<'_>,
+    path_id: types_pathnodes::PathId,
+    rel: RelId,
+) -> PgResult<()> {
+    let (relid, rtekind, tuples, base_rows) = {
+        let baserel = run.root.rel(rel);
+        (baserel.relid, baserel.rtekind, baserel.tuples, baserel.rows)
+    };
+    debug_assert!(relid > 0 && rtekind == types_pathnodes::RTE_VALUES);
+    assert!(
+        run.root.path(path_id).base().param_info.is_none(),
+        "cost_valuesscan (costsize.c): parameterized path; M2 lateral lane"
+    );
+    let rows = base_rows;
+
+    let mut startup_cost = 0.0;
+    let mut cpu_per_tuple = gucs::cpu_operator_cost();
+
+    let qpqual_cost = get_restriction_qual_cost(run, rel);
+    startup_cost += qpqual_cost.startup;
+    cpu_per_tuple += gucs::cpu_tuple_cost() + qpqual_cost.per_tuple;
     let mut run_cost = cpu_per_tuple * tuples;
 
     let target = run.root.path_pathtarget(path_id);
@@ -673,6 +764,7 @@ pub fn expr_type_typmod(node: Node<'_>) -> (u32, i32) {
         NodeTag::T_OpExpr => (node.as_op_expr().unwrap().opresulttype, -1),
         NodeTag::T_FuncExpr => (node.as_func_expr().unwrap().funcresulttype, -1),
         NodeTag::T_Aggref => (node.as_aggref().unwrap().aggtype, -1),
+        NodeTag::T_WindowFunc => (node.as_window_func().unwrap().wintype, -1),
         NodeTag::T_Param => {
             let p = node.as_param().unwrap();
             (p.paramtype, p.paramtypmod)
@@ -852,4 +944,126 @@ pub fn cost_sort(
     p.disabled_nodes = disabled_nodes;
     p.startup_cost = startup_cost;
     p.total_cost = total_cost;
+}
+
+// cost_windowagg (costsize.c); aggfilter cost leg dead (FILTER loud upstream).
+#[allow(clippy::too_many_arguments)]
+pub fn cost_windowagg<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    path_id: types_pathnodes::PathId,
+    window_funcs: &[Node<'mcx>],
+    wc_node: Node<'mcx>,
+    input_disabled_nodes: i32,
+    input_startup_cost: f64,
+    input_total_cost: f64,
+    input_tuples: f64,
+) -> PgResult<()> {
+    let wc = wc_node.as_window_clause().expect("WindowClause");
+    let num_part_cols = wc.partitionClause.len();
+    let num_order_cols = wc.orderClause.len();
+
+    let mut startup_cost = input_startup_cost;
+    let mut total_cost = input_total_cost;
+    for wf_node in window_funcs {
+        let wf = wf_node.as_window_func().expect("WindowFunc");
+        let mut argcosts = QualCost::default();
+        crate::plancat::add_function_cost(wf.winfnoid, &mut argcosts)?;
+        startup_cost += argcosts.startup;
+        let mut wfunccost = argcosts.per_tuple;
+        let mut argcosts = QualCost::default();
+        for arg in &wf.args {
+            let c = cost_qual_eval_node(arg)?;
+            argcosts.startup += c.startup;
+            argcosts.per_tuple += c.per_tuple;
+        }
+        debug_assert!(wf.aggfilter.is_none());
+        startup_cost += argcosts.startup;
+        wfunccost += argcosts.per_tuple;
+        total_cost += wfunccost * input_tuples;
+    }
+
+    total_cost +=
+        crate::gucs::cpu_operator_cost() * (num_part_cols + num_order_cols) as f64 * input_tuples;
+    total_cost += crate::gucs::cpu_tuple_cost() * input_tuples;
+
+    {
+        let p = run.root.path_mut(path_id).base_mut();
+        p.rows = input_tuples;
+        p.disabled_nodes = input_disabled_nodes;
+        p.startup_cost = startup_cost;
+        p.total_cost = total_cost;
+    }
+
+    let startup_tuples = get_windowclause_startup_tuples(run, wc_node, input_tuples)?;
+    if startup_tuples > 1.0 {
+        let p = run.root.path_mut(path_id).base_mut();
+        p.startup_cost += (total_cost - startup_cost) / input_tuples * (startup_tuples - 1.0);
+    }
+    Ok(())
+}
+
+// get_windowclause_startup_tuples (costsize.c); OFFSET/UNBOUNDED-FOLLOWING
+// frame arms are unreachable (explicit frames loud at the grammar).
+fn get_windowclause_startup_tuples<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    wc_node: Node<'mcx>,
+    input_tuples: f64,
+) -> PgResult<f64> {
+    use types_nodes::rawnodes::{
+        FRAMEOPTION_END_CURRENT_ROW, FRAMEOPTION_GROUPS, FRAMEOPTION_RANGE, FRAMEOPTION_ROWS,
+    };
+    let wc = wc_node.as_window_clause().expect("WindowClause");
+    let frame_options = wc.frameOptions;
+
+    let partition_tuples = if !wc.partitionClause.is_nil() {
+        let mut clause_ids: mcx::PgVec<'mcx, types_pathnodes::NodeId> =
+            mcx::PgVec::new_in(run.mcx);
+        for n in &wc.partitionClause {
+            clause_ids.push(run.intern_expr(n));
+        }
+        let exprs =
+            crate::grouping::sortgrouplist_exprs(run, &clause_ids, &run.parse().targetList);
+        let num_partitions = crate::selfuncs::estimate_num_groups(run, &exprs, input_tuples)?;
+        input_tuples / num_partitions
+    } else {
+        input_tuples
+    };
+
+    let wc = wc_node.as_window_clause().expect("WindowClause");
+    let peer_tuples = if !wc.orderClause.is_nil() {
+        let mut clause_ids: mcx::PgVec<'mcx, types_pathnodes::NodeId> =
+            mcx::PgVec::new_in(run.mcx);
+        for n in &wc.orderClause {
+            clause_ids.push(run.intern_expr(n));
+        }
+        let exprs =
+            crate::grouping::sortgrouplist_exprs(run, &clause_ids, &run.parse().targetList);
+        let num_groups = crate::selfuncs::estimate_num_groups(run, &exprs, partition_tuples)?;
+        partition_tuples / num_groups
+    } else {
+        1.0
+    };
+
+    let wc = wc_node.as_window_clause().expect("WindowClause");
+    let return_tuples = if frame_options & FRAMEOPTION_END_CURRENT_ROW != 0 {
+        if frame_options & FRAMEOPTION_ROWS != 0 {
+            1.0
+        } else if frame_options & (FRAMEOPTION_RANGE | FRAMEOPTION_GROUPS) != 0 {
+            if wc.orderClause.is_nil() { partition_tuples } else { peer_tuples }
+        } else {
+            unreachable!()
+        }
+    } else {
+        panic!(
+            "get_windowclause_startup_tuples (costsize.c): frame options {frame_options:#x} \
+             unported (explicit frames loud at the grammar)"
+        );
+    };
+
+    let return_tuples = if !wc.partitionClause.is_nil() || !wc.orderClause.is_nil() {
+        f64::min(return_tuples + 1.0, partition_tuples)
+    } else {
+        f64::min(return_tuples, partition_tuples)
+    };
+    Ok(clamp_row_est(return_tuples))
 }

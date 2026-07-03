@@ -221,6 +221,20 @@ impl<'a> JsonLex<'a> {
                 }
             } else {
                 let mut p = s;
+                // 16-byte clean-byte skip, C's pg_lfind8/pg_lfind8_le shape in
+                // json_lex_string; the OR-reduction has no early exit so LLVM
+                // vectorizes it (cmeq/cmhs + umaxv on aarch64).
+                while p + 16 <= end {
+                    let chunk: &[u8; 16] = self.input[p..p + 16].try_into().unwrap();
+                    let mut hit = 0u8;
+                    for &c in chunk {
+                        hit |= u8::from(c == b'\\') | u8::from(c == b'"') | u8::from(c <= 0x1F);
+                    }
+                    if hit != 0 {
+                        break;
+                    }
+                    p += 16;
+                }
                 while p < end {
                     let c = self.input[p];
                     if c == b'\\' || c == b'"' {

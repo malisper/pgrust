@@ -15,9 +15,10 @@ use types_error::{
     ERRCODE_WRONG_OBJECT_TYPE, ERROR,
 };
 use types_nodes::nodes_enums::LimitOption;
-use types_nodes::parsenodes::SortGroupClause;
+use types_nodes::parsenodes::{SortGroupClause, WindowClause};
 use types_nodes::primnodes::TargetEntry;
-use types_nodes::rawnodes::{SortBy, SortByDir, SortByNulls, ValUnion};
+use types_nodes::rawnodes::{SortBy, SortByDir, SortByNulls, ValUnion, FRAMEOPTION_DEFAULTS,
+    FRAMEOPTION_END_OFFSET, FRAMEOPTION_START_OFFSET};
 use types_nodes::{CoercionForm, Node, NodeList, NodeTag};
 
 pub fn transformFromClause<'mcx>(
@@ -26,17 +27,237 @@ pub fn transformFromClause<'mcx>(
     frm_list: &NodeList<'mcx>,
 ) -> PgResult<()> {
     for item in frm_list {
-        let (n, nsitem) = transformFromClauseItem(mcx, pstate, item)?;
+        let (n, namespace) = transformFromClauseItemNs(mcx, pstate, item)?;
 
-        checkNameSpaceConflicts(pstate.p_namespace.as_slice(), &[nsitem])?;
+        checkNameSpaceConflicts(pstate.p_namespace.as_slice(), namespace.as_slice())?;
 
         // C toggles the new items lateral_only=true here and resets every
-        // item to lateral_only=false after the loop; with only the plain
-        // relation arm live no expression is transformed in between, so the
-        // interim flag state is unobservable and items keep their
-        // buildNSItemFromTupleDesc defaults.
+        // item to lateral_only=false after the loop; with LATERAL loud on
+        // every arm no expression observes the interim flag state, so items
+        // keep their construction-time flags.
         pstate.p_joinlist.lappend(mcx, n)?;
-        pstate.p_namespace.push(nsitem);
+        for nsitem in namespace {
+            pstate.p_namespace.push(nsitem);
+        }
+    }
+    Ok(())
+}
+
+// C transformFromClauseItem's (node, *top_nsitem, *namespace) contract with
+// the top nsitem folded in as the namespace's last element (true for every
+// arm: single-item lists for the scan arms, my_namespace + join nsitem for
+// the join arm).
+fn transformFromClauseItemNs<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    n: Node<'mcx>,
+) -> PgResult<(Node<'mcx>, mcx::PgVec<'mcx, &'mcx ParseNamespaceItem<'mcx>>)> {
+    if n.node_tag() == NodeTag::T_JoinExpr {
+        return transformJoinExpr(mcx, pstate, n.as_join_expr().unwrap());
+    }
+    let (node, nsitem) = transformFromClauseItem(mcx, pstate, n)?;
+    let mut namespace: mcx::PgVec<'mcx, &'mcx ParseNamespaceItem<'mcx>> =
+        mcx::PgVec::new_in(mcx);
+    namespace.push(nsitem);
+    Ok((node, namespace))
+}
+
+// JoinExpr arm of C transformFromClauseItem, INNER JOIN ... ON slice.
+// C divergences on this lane: the temporary exposure of l_namespace to the
+// RHS exists only for LATERAL (loud on every FROM arm), so it is skipped; the
+// post-quals visibility mutations C applies in place land here as rebuilt
+// namespace items carrying the final flags.
+fn transformJoinExpr<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    j: &types_nodes::JoinExpr<'mcx>,
+) -> PgResult<(Node<'mcx>, mcx::PgVec<'mcx, &'mcx ParseNamespaceItem<'mcx>>)> {
+    if j.isNatural || !j.usingClause.is_nil() || j.join_using_alias.is_some() {
+        panic!(
+            "transformFromClauseItem (parse_clause.c): JOIN USING/NATURAL \
+             (transformJoinUsingClause/buildMergedJoinVar) unported — join-using lane"
+        );
+    }
+    if j.jointype != types_nodes::JoinType::JOIN_INNER {
+        panic!(
+            "transformFromClauseItem (parse_clause.c): {:?} (markRelsAsNulledBy) and the \
+             planner's outer-join state (SpecialJoinInfo/deconstruct) unported — \
+             join-outer lane",
+            j.jointype
+        );
+    }
+
+    let (larg, l_namespace) = transformFromClauseItemNs(mcx, pstate, j.larg)?;
+    let l_nsitem = *l_namespace.last().expect("child namespace is never empty");
+    let (rarg, r_namespace) = transformFromClauseItemNs(mcx, pstate, j.rarg)?;
+    let r_nsitem = *r_namespace.last().expect("child namespace is never empty");
+
+    checkNameSpaceConflicts(l_namespace.as_slice(), r_namespace.as_slice())?;
+
+    let mut my_namespace = l_namespace;
+    for it in r_namespace {
+        my_namespace.push(it);
+    }
+
+    let quals = match j.quals {
+        Some(q) => Some(transformJoinOnClause(mcx, pstate, q, &my_namespace)?),
+        None => None,
+    };
+
+    let rtindex = pstate.p_rtable.len() as i32 + 1;
+
+    let l_count = l_nsitem.p_names.colnames.len();
+    let r_count = r_nsitem.p_names.colnames.len();
+    let mut res_colnames = NodeList::nil();
+    let mut res_colvars = NodeList::nil();
+    let mut res_nscolumns: mcx::PgVec<'mcx, parser_small1::ParseNamespaceColumn> =
+        mcx::vec_with_capacity_in(mcx, l_count + r_count)?;
+    let mut l_colnos = types_nodes::list::IntList::nil();
+    let mut r_colnos = types_nodes::list::IntList::nil();
+    extractRemainingColumns(
+        mcx,
+        pstate,
+        l_nsitem.p_nscolumns,
+        &l_nsitem.p_names.colnames,
+        &mut l_colnos,
+        &mut res_colnames,
+        &mut res_colvars,
+        &mut res_nscolumns,
+    )?;
+    extractRemainingColumns(
+        mcx,
+        pstate,
+        r_nsitem.p_nscolumns,
+        &r_nsitem.p_names.colnames,
+        &mut r_colnos,
+        &mut res_colnames,
+        &mut res_colvars,
+        &mut res_nscolumns,
+    )?;
+
+    // A join alias syntactically hides all inputs.
+    if j.alias.is_some() {
+        for (k, nscol) in res_nscolumns.iter_mut().enumerate() {
+            nscol.p_varnosyn = rtindex as Index;
+            nscol.p_varattnosyn = k as i16 + 1;
+        }
+    }
+
+    let nsitem = parse_relation::addRangeTableEntryForJoin(
+        mcx,
+        pstate,
+        &res_colnames,
+        res_nscolumns,
+        j.jointype,
+        0,
+        res_colvars,
+        l_colnos,
+        r_colnos,
+        None,
+        j.alias,
+        true,
+    )?;
+    assert_eq!(nsitem.p_rtindex, rtindex, "predicted join RT index");
+
+    let jnode = Node::mk(
+        mcx,
+        types_nodes::JoinExpr {
+            jointype: j.jointype,
+            isNatural: false,
+            larg,
+            rarg,
+            usingClause: NodeList::nil(),
+            join_using_alias: None,
+            quals,
+            alias: j.alias,
+            rtindex,
+        },
+    )?;
+
+    while pstate.p_joinexprs.len() + 1 < rtindex as usize {
+        pstate.p_joinexprs.push(None);
+    }
+    pstate.p_joinexprs.push(Some(jnode));
+    debug_assert_eq!(pstate.p_joinexprs.len(), rtindex as usize);
+
+    // With an alias the contained RTEs are hidden completely; otherwise they
+    // stay visible as table names but not for unqualified column access.
+    let mut namespace: mcx::PgVec<'mcx, &'mcx ParseNamespaceItem<'mcx>> =
+        mcx::PgVec::new_in(mcx);
+    if j.alias.is_none() {
+        for item in &my_namespace {
+            namespace.push(&*mcx::leak_in(mcx::alloc_in(
+                mcx,
+                ParseNamespaceItem {
+                    p_names: item.p_names,
+                    p_rte: item.p_rte,
+                    p_rtindex: item.p_rtindex,
+                    p_perminfo: item.p_perminfo,
+                    p_nscolumns: item.p_nscolumns,
+                    p_rel_visible: item.p_rel_visible,
+                    p_cols_visible: false,
+                    p_lateral_only: false,
+                    p_lateral_ok: true,
+                    p_returning_type: item.p_returning_type,
+                },
+            )?));
+        }
+    }
+    nsitem.p_rel_visible = j.alias.is_some();
+    nsitem.p_cols_visible = true;
+    nsitem.p_lateral_only = false;
+    nsitem.p_lateral_ok = true;
+    namespace.push(nsitem);
+
+    Ok((jnode, namespace))
+}
+
+// transformJoinOnClause (parse_clause.c): the ON expression sees exactly the
+// join's two subtrees plus upper levels. C's setNamespaceLateralState(false,
+// true) is the construction-time state of every item on this lane.
+fn transformJoinOnClause<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    quals: Node<'mcx>,
+    my_namespace: &mcx::PgVec<'mcx, &'mcx ParseNamespaceItem<'mcx>>,
+) -> PgResult<Node<'mcx>> {
+    let mut ns: mcx::PgVec<'mcx, &'mcx ParseNamespaceItem<'mcx>> = mcx::PgVec::new_in(mcx);
+    for it in my_namespace {
+        ns.push(it);
+    }
+    let save_namespace = core::mem::replace(&mut pstate.p_namespace, ns);
+    let result =
+        transformWhereClause(mcx, pstate, Some(quals), ParseExprKind::EXPR_KIND_JOIN_ON, "JOIN/ON");
+    pstate.p_namespace = save_namespace;
+    Ok(result?.expect("quals in, quals out"))
+}
+
+// extractRemainingColumns (parse_clause.c); USING is loud upstream so no
+// columns are ever pre-merged and the prevcols bitmapset degenerates.
+#[allow(clippy::too_many_arguments)]
+fn extractRemainingColumns<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &ParseState<'_, 'mcx>,
+    src_nscolumns: &[parser_small1::ParseNamespaceColumn],
+    src_colnames: &NodeList<'mcx>,
+    src_colnos: &mut types_nodes::list::IntList<'mcx>,
+    res_colnames: &mut NodeList<'mcx>,
+    res_colvars: &mut NodeList<'mcx>,
+    res_nscolumns: &mut mcx::PgVec<'mcx, parser_small1::ParseNamespaceColumn>,
+) -> PgResult<()> {
+    debug_assert!(src_colnos.is_nil());
+    for (i, colname_node) in src_colnames.iter().enumerate() {
+        let colname = colname_node.as_string().expect("eref colnames are String nodes").sval;
+        let attnum = i as i32 + 1;
+        // Dropped columns carry empty names.
+        if colname.is_empty() || src_nscolumns[i].p_dontexpand {
+            continue;
+        }
+        src_colnos.lappend(mcx, attnum)?;
+        res_colnames.lappend(mcx, colname_node)?;
+        res_colvars
+            .lappend(mcx, parse_relation::buildVarFromNSColumn(mcx, pstate, &src_nscolumns[i])?)?;
+        res_nscolumns.push(src_nscolumns[i]);
     }
     Ok(())
 }
@@ -51,16 +272,25 @@ fn transformFromClauseItem<'mcx>(
     match n.node_tag() {
         NodeTag::T_RangeVar => {
             let rv = n.as_range_var().unwrap();
-            if rv.schemaname.is_none()
-                && (!pstate.p_ctenamespace.is_nil()
-                    || !pstate.p_future_ctes.is_nil()
-                    || pstate.p_queryEnv.is_some())
-            {
-                panic!(
-                    "transformFromClauseItem (parse_clause.c): \
-                     getNSItemForSpecialRelationTypes (CTE/ENR reference) unported — \
-                     unit backend-parser-medium1"
-                );
+            // getNSItemForSpecialRelationTypes: an unqualified name is a CTE
+            // reference if any ctenamespace up the chain carries it (before
+            // plain-relation resolution); ENRs (p_queryEnv) stay loud.
+            if rv.schemaname.is_none() {
+                if pstate.p_queryEnv.is_some() {
+                    panic!(
+                        "transformFromClauseItem (parse_clause.c): ENR reference \
+                         (scanNameSpaceForENR) unported — unit backend-parser-clause"
+                    );
+                }
+                let refname = rv.relname.expect("grammar always sets relname");
+                if let Some((cte, levelsup)) =
+                    parse_relation::scanNameSpaceForCTE(pstate, refname)
+                {
+                    let nsitem =
+                        parse_relation::addRangeTableEntryForCTE(mcx, pstate, cte, levelsup, rv, true)?;
+                    let rtr = Node::mk_range_tbl_ref(mcx, nsitem.p_rtindex)?;
+                    return Ok((rtr, nsitem));
+                }
             }
             let nsitem = addRangeTableEntry(mcx, pstate, rv, rv.alias, rv.inh, true)?;
             let rtr = Node::mk_range_tbl_ref(mcx, nsitem.p_rtindex)?;
@@ -71,12 +301,74 @@ fn transformFromClauseItem<'mcx>(
             let rtr = Node::mk_range_tbl_ref(mcx, nsitem.p_rtindex)?;
             Ok((rtr, nsitem))
         }
+        NodeTag::T_RangeSubselect => {
+            let nsitem = transformRangeSubselect(mcx, pstate, n.as_range_subselect().unwrap())?;
+            let rtr = Node::mk_range_tbl_ref(mcx, nsitem.p_rtindex)?;
+            Ok((rtr, nsitem))
+        }
         other => panic!(
             "transformFromClauseItem (parse_clause.c): arm for {other:?} \
-             (subselect/tablesample/tablefunc/JOIN) unported — \
+             (tablesample/tablefunc) unported — \
              unit backend-parser-clause"
         ),
     }
+}
+
+fn transformRangeSubselect<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    r: &types_nodes::rawnodes::RangeSubselect<'mcx>,
+) -> PgResult<&'mcx ParseNamespaceItem<'mcx>> {
+    debug_assert_eq!(pstate.p_expr_kind, ParseExprKind::EXPR_KIND_NONE);
+    pstate.p_expr_kind = ParseExprKind::EXPR_KIND_FROM_SUBSELECT;
+
+    debug_assert!(!pstate.p_lateral_active);
+    if r.lateral {
+        panic!(
+            "transformRangeSubselect (parse_clause.c): LATERAL subquery unported \
+             (lateral namespace) — unit backend-parser-clause"
+        );
+    }
+
+    let locked = parse_relation::isLockedRefname(pstate, r.alias.and_then(|a| a.aliasname));
+    let query = analyze_seams::parse_sub_analyze::call(
+        mcx,
+        r.subquery.expect("grammar always sets RangeSubselect.subquery"),
+        pstate,
+        None,
+        locked,
+        true,
+    )?;
+
+    pstate.p_lateral_active = false;
+    pstate.p_expr_kind = ParseExprKind::EXPR_KIND_NONE;
+
+    if query.commandType != types_nodes::nodes_enums::CmdType::CMD_SELECT {
+        return Err(Box::new(PgError::error(
+            "unexpected non-SELECT command in subquery in FROM".to_string(),
+        )));
+    }
+
+    let mut columns: mcx::PgVec<'mcx, (Option<&'mcx str>, Oid, i32, Oid)> =
+        mcx::vec_with_capacity_in(mcx, query.targetList.len())?;
+    for tle_node in &query.targetList {
+        let te = tle_node.as_target_entry().expect("tlist cell");
+        if te.resjunk {
+            continue;
+        }
+        columns.push((
+            te.resname,
+            expr_type(te.expr),
+            parse_expr::expr_typmod(te.expr),
+            parse_expr::expr_collation(te.expr),
+        ));
+    }
+
+    let query = &*mcx::leak_in(mcx::alloc_in(mcx, query)?);
+    let nsitem = parse_relation::addRangeTableEntryForSubquery(
+        mcx, pstate, query, &columns, r.alias, r.lateral, true,
+    )?;
+    Ok(&*nsitem)
 }
 
 // Single plain-function slice of C transformRangeFunction; the unnest()
@@ -291,13 +583,11 @@ pub fn transformSortClause<'mcx>(
     for item in orderby {
         let sortby = item.as_sort_by().expect("ORDER BY list holds SortBy nodes");
         let sort_node = sortby.node.expect("SortBy.node is never NULL");
-        if use_sql99 {
-            panic!(
-                "transformSortClause (parse_clause.c): findTargetlistEntrySQL99 \
-                 (window/aggregate ORDER BY) unported — unit backend-parser-clause"
-            );
-        }
-        let tle = findTargetlistEntrySQL92(mcx, pstate, sort_node, targetlist, expr_kind)?;
+        let tle = if use_sql99 {
+            findTargetlistEntrySQL99(mcx, pstate, sort_node, targetlist, expr_kind)?
+        } else {
+            findTargetlistEntrySQL92(mcx, pstate, sort_node, targetlist, expr_kind)?
+        };
         sortlist = addTargetToSortList(mcx, pstate, tle, sortlist, targetlist, sortby)?;
     }
     Ok(sortlist)
@@ -423,7 +713,9 @@ fn checkTargetlistEntrySQL92(
             if pstate.p_hasAggs && contains_aggref(tle_expr) {
                 return Err(aggregate_in_group_by(pstate, expr_kind, tle_expr));
             }
-            debug_assert!(!pstate.p_hasWindowFuncs, "window functions are a loud lane upstream");
+            if pstate.p_hasWindowFuncs && parse_agg::contain_windowfuncs(tle_expr) {
+                return Err(window_in_group_by(pstate, expr_kind, tle_expr));
+            }
             Ok(())
         }
         ParseExprKind::EXPR_KIND_ORDER_BY | ParseExprKind::EXPR_KIND_DISTINCT_ON => Ok(()),
@@ -690,13 +982,11 @@ fn transformGroupClauseExpr<'mcx>(
     expr_kind: ParseExprKind,
     use_sql99: bool,
 ) -> PgResult<Index> {
-    if use_sql99 {
-        panic!(
-            "transformGroupClauseExpr (parse_clause.c): findTargetlistEntrySQL99 \
-             unported — unit backend-parser-clause"
-        );
-    }
-    let tle_node = findTargetlistEntrySQL92(mcx, pstate, gexpr, targetlist, expr_kind)?;
+    let tle_node = if use_sql99 {
+        findTargetlistEntrySQL99(mcx, pstate, gexpr, targetlist, expr_kind)?
+    } else {
+        findTargetlistEntrySQL92(mcx, pstate, gexpr, targetlist, expr_kind)?
+    };
     let tle = tle_node.as_target_entry().unwrap();
 
     let mut found = false;
@@ -839,18 +1129,269 @@ pub fn transformDistinctOnClause<'mcx>(
     );
 }
 
-pub fn transformWindowDefinitions<'mcx>(
-    _pstate: &mut ParseState<'_, 'mcx>,
-    windowdefs: &NodeList<'mcx>,
-    _targetlist: &mut NodeList<'mcx>,
-) -> PgResult<NodeList<'mcx>> {
-    if !windowdefs.is_nil() {
-        panic!(
-            "transformWindowDefinitions (parse_clause.c): WindowDef transformation \
-             unported — unit backend-parser-clause"
-        );
+fn findWindowClause<'a, 'mcx>(
+    wclist: &'a NodeList<'mcx>,
+    name: &str,
+) -> Option<&'mcx WindowClause<'mcx>> {
+    let _ = wclist;
+    for wc_node in wclist {
+        let wc = wc_node.as_window_clause().expect("window clause list cell");
+        if wc.name == Some(name) {
+            return Some(wc);
+        }
     }
-    Ok(NodeList::nil())
+    None
+}
+
+pub fn transformWindowDefinitions<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    windowdefs: &NodeList<'mcx>,
+    targetlist: &mut NodeList<'mcx>,
+) -> PgResult<NodeList<'mcx>> {
+    let mut result = NodeList::nil();
+    let mut winref: Index = 0;
+
+    for windef_node in windowdefs {
+        let windef = windef_node.as_window_def().expect("windowdefs cell");
+        winref += 1;
+
+        if let Some(name) = windef.name {
+            if findWindowClause(&result, name).is_some() {
+                return Err(window_error(
+                    pstate,
+                    format!("window \"{name}\" is already defined"),
+                    types_error::ERRCODE_WINDOWING_ERROR,
+                    windef.location,
+                ));
+            }
+        }
+
+        let refwc = match windef.refname {
+            Some(refname) => match findWindowClause(&result, refname) {
+                Some(wc) => Some(wc),
+                None => {
+                    return Err(window_error(
+                        pstate,
+                        format!("window \"{refname}\" does not exist"),
+                        types_error::ERRCODE_UNDEFINED_OBJECT,
+                        windef.location,
+                    ));
+                }
+            },
+            None => None,
+        };
+
+        let orderClause = transformSortClause(
+            mcx,
+            pstate,
+            &windef.orderClause,
+            targetlist,
+            ParseExprKind::EXPR_KIND_WINDOW_ORDER,
+            true,
+        )?;
+        let mut grouping_sets = NodeList::nil();
+        let partitionClause = transformGroupClause(
+            mcx,
+            pstate,
+            &windef.partitionClause,
+            &mut grouping_sets,
+            targetlist,
+            &orderClause,
+            ParseExprKind::EXPR_KIND_WINDOW_PARTITION,
+            true,
+        )?;
+
+        let mut wc = WindowClause {
+            name: windef.name,
+            refname: windef.refname,
+            ..WindowClause::default()
+        };
+
+        // SQL:2008 7.11: a ref copies the previous partition clause (own one
+        // forbidden), may add ORDER BY only if the previous had none, and the
+        // previous must be frameless.
+        if let Some(refwc) = refwc {
+            if !partitionClause.is_nil() {
+                return Err(window_error(
+                    pstate,
+                    format!(
+                        "cannot override PARTITION BY clause of window \"{}\"",
+                        windef.refname.unwrap()
+                    ),
+                    types_error::ERRCODE_WINDOWING_ERROR,
+                    windef.location,
+                ));
+            }
+            wc.partitionClause = copy_sort_group_list(mcx, &refwc.partitionClause)?;
+        } else {
+            wc.partitionClause = partitionClause;
+        }
+        if let Some(refwc) = refwc {
+            if !orderClause.is_nil() && !refwc.orderClause.is_nil() {
+                return Err(window_error(
+                    pstate,
+                    format!(
+                        "cannot override ORDER BY clause of window \"{}\"",
+                        windef.refname.unwrap()
+                    ),
+                    types_error::ERRCODE_WINDOWING_ERROR,
+                    windef.location,
+                ));
+            }
+            if !orderClause.is_nil() {
+                wc.orderClause = orderClause;
+                wc.copiedOrder = false;
+            } else {
+                wc.orderClause = copy_sort_group_list(mcx, &refwc.orderClause)?;
+                wc.copiedOrder = true;
+            }
+        } else {
+            wc.orderClause = orderClause;
+            wc.copiedOrder = false;
+        }
+        if let Some(refwc) = refwc {
+            if refwc.frameOptions != FRAMEOPTION_DEFAULTS {
+                // C picks between two messages (same text, hint differs);
+                // both frame-ful shapes are unreachable while the grammar's
+                // explicit-frame rules panic, so the non-hint arm suffices.
+                if windef.name.is_some()
+                    || !wc.orderClause.is_nil()
+                    || windef.frameOptions != FRAMEOPTION_DEFAULTS
+                {
+                    return Err(window_error(
+                        pstate,
+                        format!(
+                            "cannot copy window \"{}\" because it has a frame clause",
+                            windef.refname.unwrap()
+                        ),
+                        types_error::ERRCODE_WINDOWING_ERROR,
+                        windef.location,
+                    ));
+                }
+                return Err(window_error_hint(
+                    pstate,
+                    format!(
+                        "cannot copy window \"{}\" because it has a frame clause",
+                        windef.refname.unwrap()
+                    ),
+                    "Omit the parentheses in this OVER clause.",
+                    windef.location,
+                ));
+            }
+        }
+        wc.frameOptions = windef.frameOptions;
+
+        if (wc.frameOptions & (FRAMEOPTION_START_OFFSET | FRAMEOPTION_END_OFFSET)) != 0
+            || windef.startOffset.is_some()
+            || windef.endOffset.is_some()
+        {
+            panic!(
+                "transformWindowDefinitions (parse_clause.c): RANGE/ROWS/GROUPS offset \
+                 frames unported (in_range lookup + transformFrameOffset) — window lane"
+            );
+        }
+        if (wc.frameOptions & types_nodes::rawnodes::FRAMEOPTION_GROUPS) != 0
+            && wc.orderClause.is_nil()
+        {
+            return Err(window_error(
+                pstate,
+                "GROUPS mode requires an ORDER BY clause".into(),
+                types_error::ERRCODE_WINDOWING_ERROR,
+                windef.location,
+            ));
+        }
+        wc.winref = winref;
+
+        result.lappend(mcx, Node::mk(mcx, wc)?)?;
+    }
+    Ok(result)
+}
+
+// copyObject on a SortGroupClause list (Copy struct; fresh cells).
+fn copy_sort_group_list<'mcx>(
+    mcx: Mcx<'mcx>,
+    list: &NodeList<'mcx>,
+) -> PgResult<NodeList<'mcx>> {
+    let mut out = NodeList::nil();
+    for sc_node in list {
+        let sc = sc_node.as_sort_group_clause().expect("SortGroupClause cell");
+        out.lappend(mcx, Node::mk(mcx, *sc)?)?;
+    }
+    Ok(out)
+}
+
+#[cold]
+#[inline(never)]
+fn window_error(
+    pstate: &ParseState<'_, '_>,
+    msg: String,
+    code: types_error::SqlState,
+    location: ParseLoc,
+) -> Box<PgError> {
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(code)
+            .errmsg(msg)
+            .errposition(parser_errposition(pstate, location, mbutils::GetDatabaseEncoding()))
+            .into_error()
+            .with_error_location(ErrorLocation::new(
+                "parse_clause.c",
+                0,
+                "transformWindowDefinitions",
+            )),
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn window_error_hint(
+    pstate: &ParseState<'_, '_>,
+    msg: String,
+    hint: &'static str,
+    location: ParseLoc,
+) -> Box<PgError> {
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(types_error::ERRCODE_WINDOWING_ERROR)
+            .errmsg(msg)
+            .errhint(hint)
+            .errposition(parser_errposition(pstate, location, mbutils::GetDatabaseEncoding()))
+            .into_error()
+            .with_error_location(ErrorLocation::new(
+                "parse_clause.c",
+                0,
+                "transformWindowDefinitions",
+            )),
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn window_in_group_by(
+    pstate: &ParseState<'_, '_>,
+    expr_kind: ParseExprKind,
+    tle_expr: Node<'_>,
+) -> Box<PgError> {
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(types_error::ERRCODE_WINDOWING_ERROR)
+            .errmsg(format!(
+                "window functions are not allowed in {}",
+                ParseExprKindName(expr_kind)
+            ))
+            .errposition(parser_errposition(
+                pstate,
+                parse_agg::locate_windowfunc(tle_expr),
+                mbutils::GetDatabaseEncoding(),
+            ))
+            .into_error()
+            .with_error_location(ErrorLocation::new(
+                "parse_clause.c",
+                0,
+                "checkTargetlistEntrySQL92",
+            )),
+    )
 }
 
 #[cold]

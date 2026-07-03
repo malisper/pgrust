@@ -16,7 +16,9 @@ use ::stringinfo::StringInfo;
 use ::types_core::{primitive::InvalidOid, Oid, NAMEDATALEN};
 use ::types_dest::CommandDest;
 use ::types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE};
-use ::types_fmgr::{function_call1_coll, send_function_call, FmgrInfo, PackedVarlena};
+use ::types_fmgr::{
+    function_call1_coll, function_call1_coll_in, send_function_call, FmgrInfo, PackedVarlena,
+};
 use ::types_portal::Portal;
 use ::types_slot::SlotData;
 use ::types_tuple::TupleDescData;
@@ -47,11 +49,12 @@ pub struct DrPrinttup<'mcx> {
     nattrs: i32,
     myinfo: Option<PgVec<'static, PrinttupAttrInfo>>,
     conv_needed: bool,
-    // C's per-row tmpcontext, but only for binary columns: send fns build a
-    // bytea per row (text out fns use retained scratch and need none). Reset
-    // after each row; must be a bump context — the row's byteas are reclaimed
-    // wholesale, never freed (exact-accounting backends assert that as a leak).
-    // None until a format-1 column appears.
+    // C's per-row tmpcontext, but only where a column can allocate per row:
+    // binary send byteas, or text-lane varlenas (short-header args detoast-
+    // expand into the armed frame; out-fn results stay retained scratch).
+    // Reset after each row; must be a bump context — the row's allocations
+    // are reclaimed wholesale, never freed (exact-accounting backends assert
+    // that as a leak). None until such a column appears.
     send_ctx: Option<MemoryContext>,
 }
 
@@ -114,8 +117,7 @@ pub fn SetRemoteDestReceiverParams<'mcx>(myState: &mut DrPrinttup<'mcx>, portal:
 
 impl<'mcx> DrPrinttup<'mcx> {
     pub fn startup(&mut self, _operation: i32, typeinfo: &TupleDescData<'_>) -> PgResult<()> {
-        // Reused across all rows; C's per-row tmpcontext has no consumer under
-        // the current out-fn ABI (docs/optimizations/printtup-parity.md).
+        // Reused across all rows (docs/optimizations/printtup-parity.md).
         let mut buf = take_wire_buf()?;
         if self.sendDescrip {
             let mcx = scratch_mcx();
@@ -190,7 +192,7 @@ impl<'mcx> DrPrinttup<'mcx> {
             };
             info.push(entry);
         }
-        if info.iter().any(|e| e.format == 1) {
+        if info.iter().any(|e| e.format == 1 || e.typisvarlena) {
             if self.send_ctx.is_none() {
                 self.send_ctx = Some(MemoryContext::new_bump("PrinttupSend"));
             }
@@ -237,7 +239,12 @@ impl<'mcx> DrPrinttup<'mcx> {
             let thisState = &mut myinfo[i];
 
             if thisState.format == 0 {
-                let out = output_function_call(&mut thisState.finfo, attr)?;
+                let out = match send_ctx.as_deref() {
+                    Some(ctx) => {
+                        function_call1_coll_in(&mut thisState.finfo, InvalidOid, ctx.mcx(), attr)?
+                    }
+                    None => output_function_call(&mut thisState.finfo, attr)?,
+                };
                 // SAFETY: text output fns return a NUL-terminated cstring
                 // datum (the contract C's DatumGetCString trusts).
                 let s =

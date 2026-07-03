@@ -1,15 +1,20 @@
 use types_core::catalog::RELPERSISTENCE_PERMANENT;
 use types_error::PgResult;
 use types_nodes::parsenodes::{
-    CopyStmt, DeallocateStmt, DefElem, DefElemAction, ExecuteStmt, PrepareStmt, VacuumRelation,
-    VacuumStmt,
+    CTEMaterialize, CommonTableExpr, CopyStmt, DeallocateStmt, DefElem, DefElemAction,
+    ExecuteStmt, PrepareStmt, TransactionStmt, TransactionStmtKind, VacuumRelation, VacuumStmt,
+    VariableSetKind, VariableSetStmt, VariableShowStmt, WithClause,
 };
+use types_nodes::primnodes::{CaseExpr, CaseWhen, CoalesceExpr, JoinExpr, MinMaxExpr, MinMaxOp};
+use types_nodes::JoinType;
 use types_nodes::rawnodes::A_Expr_Kind::AEXPR_OP;
-use types_nodes::rawnodes::{ColumnDef, Constraint, ConstrType, CreateStmt, OnCommitAction};
+use types_nodes::rawnodes::{
+    ColumnDef, Constraint, ConstrType, CreateStmt, OnCommitAction, RangeSubselect, WindowDef,
+    FRAMEOPTION_DEFAULTS,
+};
 use types_nodes::{
     Alias, DeleteStmt, InsertStmt, Node, NodeList, NodeTag, RangeFunction, RangeVar, RawStmt,
-    SelectStmt,
-    UpdateStmt,
+    SelectStmt, UpdateStmt,
     ValUnion,
 };
 use types_nodes::{BitString, Boolean, Float, Integer};
@@ -108,8 +113,8 @@ impl<'mcx> Parser<'mcx> {
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
             // select_no_parens: select_clause sort_clause | select_clause
-            // opt_sort_clause [for_locking_clause select_limit] (both orders);
-            // WITH variants (1713..1716) stay unported.
+            // opt_sort_clause [for_locking_clause select_limit] (both orders),
+            // plus the with_clause-prefixed variants (cold).
             1799 => {
                 *yyval = YYSTYPE::Group(false, NodeList::nil());
             }
@@ -383,6 +388,16 @@ impl<'mcx> Parser<'mcx> {
                 }
                 *yyval = YYSTYPE::Node(Some(node));
             }
+            // ColConstraintElem: NOT NULL_P opt_no_inherit
+            499 => {
+                let mut n = Node::build::<Constraint>(mcx)?;
+                n.contype = ConstrType::CONSTR_NOTNULL;
+                n.location = view.l(1);
+                n.is_no_inherit = view.v(3).boolean();
+                n.is_enforced = true;
+                n.initially_valid = true;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
             // ColConstraintElem: CHECK '(' a_expr ')' opt_no_inherit
             503 => {
                 let mut n = Node::build::<Constraint>(mcx)?;
@@ -410,7 +425,7 @@ impl<'mcx> Parser<'mcx> {
             1710 => {
                 let stmt = view.v(1).node().expect("select_clause");
                 let sort = view.v(2).list();
-                self.insert_select_options(stmt, sort, NodeList::nil(), None)?;
+                self.insert_select_options(stmt, sort, NodeList::nil(), None, None)?;
                 *yyval = YYSTYPE::Node(Some(stmt));
             }
             1711 | 1712 => {
@@ -419,9 +434,61 @@ impl<'mcx> Parser<'mcx> {
                 let (lock_i, limit_i) = if rule == 1711 { (3, 4) } else { (4, 3) };
                 let locking = view.v(lock_i).list();
                 let limit = view.v(limit_i).limit();
-                self.insert_select_options(stmt, sort, locking, limit)?;
+                self.insert_select_options(stmt, sort, locking, limit, None)?;
                 *yyval = YYSTYPE::Node(Some(stmt));
             }
+            1713 | 1714 => {
+                let stmt = view.v(2).node().expect("select_clause");
+                let sort = if rule == 1714 { view.v(3).list() } else { NodeList::nil() };
+                self.insert_select_options(stmt, sort, NodeList::nil(), None, view.v(1).node())?;
+                *yyval = YYSTYPE::Node(Some(stmt));
+            }
+            1715 | 1716 => {
+                let stmt = view.v(2).node().expect("select_clause");
+                let sort = view.v(3).list();
+                let (lock_i, limit_i) = if rule == 1715 { (4, 5) } else { (5, 4) };
+                let locking = view.v(lock_i).list();
+                let limit = view.v(limit_i).limit();
+                self.insert_select_options(stmt, sort, locking, limit, view.v(1).node())?;
+                *yyval = YYSTYPE::Node(Some(stmt));
+            }
+            // with_clause: WITH cte_list | WITH_LA cte_list | WITH RECURSIVE cte_list
+            1726 | 1727 | 1728 => {
+                let recursive = rule == 1728;
+                let mut n = Node::build::<WithClause>(mcx)?;
+                n.ctes = view.v(if recursive { 3 } else { 2 }).list();
+                n.recursive = recursive;
+                n.location = view.l(1);
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1729 => {
+                let cte = view.v(1).node().expect("common_table_expr");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, cte)?);
+            }
+            1730 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(3).node().expect("common_table_expr"))?;
+                *yyval = YYSTYPE::List(list);
+            }
+            1731 => {
+                let mut n = Node::build::<CommonTableExpr>(mcx)?;
+                n.ctename = Some(view.v(1).str_val());
+                n.aliascolnames = view.v(2).list();
+                n.ctematerialized = match view.v(4).ival() {
+                    1 => CTEMaterialize::CTEMaterializeAlways,
+                    2 => CTEMaterialize::CTEMaterializeNever,
+                    _ => CTEMaterialize::CTEMaterializeDefault,
+                };
+                n.ctequery = view.v(6).node();
+                // SEARCH/CYCLE productions are unported louds; only the
+                // NULL-yielding empty variants can reach here.
+                debug_assert!(view.v(8).node().is_none() && view.v(9).node().is_none());
+                n.location = view.l(1);
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1732 => *yyval = YYSTYPE::Ival(CTEMaterialize::CTEMaterializeAlways as i32),
+            1733 => *yyval = YYSTYPE::Ival(CTEMaterialize::CTEMaterializeNever as i32),
+            1734 => *yyval = YYSTYPE::Ival(CTEMaterialize::CTEMaterializeDefault as i32),
             // opt_asc_desc / opt_nulls_order constants (shared with index_elem).
             1120 => *yyval = YYSTYPE::Ival(SortByDir::SORTBY_ASC as i32),
             1121 => *yyval = YYSTYPE::Ival(SortByDir::SORTBY_DESC as i32),
@@ -596,10 +663,18 @@ impl<'mcx> Parser<'mcx> {
                 }
                 *yyval = YYSTYPE::Node(Some(istmt));
             }
-            // returning_clause: RETURNING returning_with_clause target_list
-            1636 => panic!(
-                "gram_core: RETURNING clause (ReturningClause vocabulary) not ported"
-            ),
+            // returning_clause: RETURNING returning_with_clause target_list;
+            // WITH(...) options stay loud in the returning_option arms.
+            1636 => {
+                let n = Node::mk(
+                    mcx,
+                    types_nodes::ReturningClause {
+                        options: view.v(2).list(),
+                        exprs: view.v(3).list(),
+                    },
+                )?;
+                *yyval = YYSTYPE::Node(Some(n));
+            }
             // DeleteStmt: opt_with_clause DELETE_P FROM relation_expr_opt_alias
             //             using_clause where_or_current_clause returning_clause
             1645 => {
@@ -1559,8 +1634,8 @@ impl<'mcx> Parser<'mcx> {
                 list.lappend(mcx, view.v(3).node().expect("Typename"))?;
                 *yyval = YYSTYPE::List(list);
             }
-            // ExplainStmt: EXPLAIN ExplainableStmt (options arms 1587-1589
-            // stay unimplemented-rule louds).
+            // ExplainStmt: EXPLAIN ExplainableStmt; legacy keyword arms
+            // 1587/1588 stay unimplemented-rule louds.
             1586 => {
                 let mut n = Node::build::<types_nodes::parsenodes::ExplainStmt>(mcx)?;
                 n.query = view.v(2).node();
@@ -1571,6 +1646,283 @@ impl<'mcx> Parser<'mcx> {
                 n.relation = view.v(1).node();
                 n.oid = 0;
                 n.va_cols = view.v(2).list();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // VariableSetStmt: SET set_rest / SET LOCAL set_rest.
+            201 | 202 => {
+                let n = view.v(if rule == 202 { 3 } else { 2 }).node().expect("set_rest");
+                let local = rule == 202;
+                // SAFETY: as rule 8 — parser-owned tree, no live derived refs.
+                unsafe {
+                    n.with_mut::<VariableSetStmt, _>(|v| v.is_local = local)
+                        .expect("set_rest is VariableSetStmt");
+                }
+                *yyval = YYSTYPE::Node(Some(n));
+            }
+            // generic_set: var_name TO var_list | var_name '=' var_list.
+            207 | 208 => {
+                let mut n = Node::build::<VariableSetStmt>(mcx)?;
+                n.kind = VariableSetKind::VAR_SET_VALUE;
+                n.name = Some(view.v(1).str_val());
+                n.args = view.v(3).list();
+                n.location = view.l(3);
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            211 => *yyval = view.v(1),
+            // var_name: var_name '.' ColId (psprintf "%s.%s").
+            223 => {
+                let a = view.v(1).str_val();
+                let b = view.v(3).str_val();
+                let mut v: mcx::PgVec<'mcx, u8> =
+                    mcx::vec_with_capacity_in(mcx, a.len() + 1 + b.len())?;
+                mcx::vec_append_bytes(&mut v, a.as_bytes())?;
+                v.push(b'.');
+                mcx::vec_append_bytes(&mut v, b.as_bytes())?;
+                // SAFETY: concatenation of valid UTF-8 and '.'.
+                *yyval = YYSTYPE::Str(unsafe { core::str::from_utf8_unchecked(v.leak()) });
+            }
+            224 => {
+                let v = view.v(1).node().expect("var_value");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, v)?);
+            }
+            225 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(3).node().expect("var_value"))?;
+                *yyval = YYSTYPE::List(list);
+            }
+            // var_value: opt_boolean_or_string -> makeStringConst.
+            226 => {
+                let s = view.v(1).str_val();
+                *yyval = self.a_const(
+                    ValUnion::String(types_nodes::String { sval: s }),
+                    view.l(1),
+                )?;
+            }
+            248 => *yyval = view.v(2),
+            // generic_reset: var_name.
+            253 => {
+                let mut n = Node::build::<VariableSetStmt>(mcx)?;
+                n.kind = VariableSetKind::VAR_RESET;
+                n.name = Some(view.v(1).str_val());
+                n.location = -1;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            259 => {
+                let n = Node::mk(mcx, VariableShowStmt { name: Some(view.v(2).str_val()) })?;
+                *yyval = YYSTYPE::Node(Some(n));
+            }
+            // TransactionStmt: COMMIT/ROLLBACK [chain], SAVEPOINT, RELEASE
+            // SAVEPOINT, ROLLBACK TO SAVEPOINT; TransactionStmtLegacy BEGIN.
+            1460 | 1461 => {
+                let mut n = Node::build::<TransactionStmt>(mcx)?;
+                n.kind = if rule == 1460 {
+                    TransactionStmtKind::TRANS_STMT_COMMIT
+                } else {
+                    TransactionStmtKind::TRANS_STMT_ROLLBACK
+                };
+                n.chain = view.v(3).boolean();
+                n.location = -1;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1462 | 1463 | 1465 => {
+                let (kind, i) = match rule {
+                    1462 => (TransactionStmtKind::TRANS_STMT_SAVEPOINT, 2),
+                    1463 => (TransactionStmtKind::TRANS_STMT_RELEASE, 3),
+                    _ => (TransactionStmtKind::TRANS_STMT_ROLLBACK_TO, 5),
+                };
+                let mut n = Node::build::<TransactionStmt>(mcx)?;
+                n.kind = kind;
+                n.savepoint_name = Some(view.v(i).str_val());
+                n.location = view.l(i);
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1470 => {
+                let mut n = Node::build::<TransactionStmt>(mcx)?;
+                n.kind = TransactionStmtKind::TRANS_STMT_BEGIN;
+                n.options = view.v(3).list();
+                n.location = -1;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1487 => *yyval = YYSTYPE::Boolean(false),
+            1589 => {
+                let mut n = Node::build::<types_nodes::parsenodes::ExplainStmt>(mcx)?;
+                n.query = view.v(5).node();
+                n.options = view.v(3).list();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // table_ref: select_with_parens opt_alias_clause.
+            1838 => {
+                let mut n = Node::build::<RangeSubselect>(mcx)?;
+                n.lateral = false;
+                n.subquery = view.v(1).node();
+                n.alias = view.v(2).alias();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // alias_clause: AS ColId '(' name_list ')'.
+            1850 => {
+                let a = Node::mk_mut(
+                    mcx,
+                    Alias { aliasname: Some(view.v(2).str_val()), colnames: view.v(4).list() },
+                )?;
+                *yyval = YYSTYPE::Alias(Some(a.seal_ref()));
+            }
+            // table_ref: joined_table | '(' joined_table ')' alias_clause.
+            1840 => *yyval = YYSTYPE::Node(view.v(1).node()),
+            1841 => {
+                let j = view.v(2).node().expect("joined_table");
+                let alias = view.v(4).alias();
+                // SAFETY: as rule 8 — parser-owned tree, no live derived refs.
+                unsafe {
+                    j.with_mut::<JoinExpr, _>(|n| n.alias = alias).expect("joined_table is JoinExpr")
+                };
+                *yyval = YYSTYPE::Node(Some(j));
+            }
+            // joined_table: CROSS JOIN | join_type JOIN ... join_qual |
+            // JOIN ... join_qual | NATURAL variants (unported louds).
+            1845 | 1846 | 1847 => {
+                let (jointype, rarg_at, qual_at) = match rule {
+                    1845 => (JoinType::JOIN_INNER, 4, 0),
+                    1846 => (join_type_from_ival(view.v(2).ival()), 4, 5),
+                    _ => (JoinType::JOIN_INNER, 3, 4),
+                };
+                let quals = if qual_at == 0 { None } else { view.v(qual_at).node() };
+                // join_qual USING is a loud unported rule (1869), so quals
+                // here is always the ON expression.
+                debug_assert!(!quals.is_some_and(|q| q.node_tag() == NodeTag::T_List));
+                let n = Node::mk(
+                    mcx,
+                    JoinExpr {
+                        jointype,
+                        isNatural: false,
+                        larg: view.v(1).node().expect("table_ref"),
+                        rarg: view.v(rarg_at).node().expect("table_ref"),
+                        usingClause: NodeList::nil(),
+                        join_using_alias: None,
+                        quals,
+                        alias: None,
+                        rtindex: 0,
+                    },
+                )?;
+                *yyval = YYSTYPE::Node(Some(n));
+            }
+            1848 | 1849 => panic!(
+                "gram_core: NATURAL JOIN unimplemented (rule {rule}); join-using lane"
+            ),
+            // join_type: FULL/LEFT/RIGHT/INNER opt_outer.
+            1863 => *yyval = YYSTYPE::Ival(JoinType::JOIN_FULL as i32),
+            1864 => *yyval = YYSTYPE::Ival(JoinType::JOIN_LEFT as i32),
+            1865 => *yyval = YYSTYPE::Ival(JoinType::JOIN_RIGHT as i32),
+            1866 => *yyval = YYSTYPE::Ival(JoinType::JOIN_INNER as i32),
+            1869 => panic!("gram_core: JOIN USING unimplemented (rule 1869); join-using lane"),
+            2171 => {
+                let n = Node::mk(
+                    mcx,
+                    CoalesceExpr {
+                        coalescetype: 0,
+                        coalescecollid: 0,
+                        args: view.v(3).list(),
+                        location: view.l(1),
+                    },
+                )?;
+                *yyval = YYSTYPE::Node(Some(n));
+            }
+            2172 | 2173 => {
+                let n = Node::mk(
+                    mcx,
+                    MinMaxExpr {
+                        minmaxtype: 0,
+                        minmaxcollid: 0,
+                        inputcollid: 0,
+                        op: if rule == 2172 { MinMaxOp::IS_GREATEST } else { MinMaxOp::IS_LEAST },
+                        args: view.v(3).list(),
+                        location: view.l(1),
+                    },
+                )?;
+                *yyval = YYSTYPE::Node(Some(n));
+            }
+            // case_expr / when_clause_list / when_clause.
+            2330 => {
+                let n = Node::mk(
+                    mcx,
+                    CaseExpr {
+                        casetype: 0,
+                        casecollid: 0,
+                        arg: view.v(2).node(),
+                        args: view.v(3).list(),
+                        defresult: view.v(4).node(),
+                        location: view.l(1),
+                    },
+                )?;
+                *yyval = YYSTYPE::Node(Some(n));
+            }
+            2331 => {
+                let w = view.v(1).node().expect("when_clause");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, w)?);
+            }
+            2332 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(2).node().expect("when_clause"))?;
+                *yyval = YYSTYPE::List(list);
+            }
+            2333 => {
+                let n = Node::mk(
+                    mcx,
+                    CaseWhen {
+                        expr: view.v(2).node(),
+                        result: view.v(4).node(),
+                        location: view.l(1),
+                    },
+                )?;
+                *yyval = YYSTYPE::Node(Some(n));
+            }
+            // window_definition_list: window_definition [, window_definition]
+            2230 => {
+                let w = view.v(1).node().expect("window_definition");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, w)?);
+            }
+            2231 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(3).node().expect("window_definition"))?;
+                *yyval = YYSTYPE::List(list);
+            }
+            // window_definition: ColId AS window_specification
+            2232 => {
+                let name = view.v(1).str_val();
+                let n = view.v(3).node().expect("window_specification");
+                // SAFETY: tree is parser-owned; no derived refs live.
+                unsafe {
+                    n.with_mut::<WindowDef, _>(|w| w.name = Some(name)).expect("WindowDef");
+                }
+                *yyval = YYSTYPE::Node(Some(n));
+            }
+            // over_clause: OVER ColId
+            2234 => {
+                let mut n = Node::build::<WindowDef>(mcx)?;
+                n.name = Some(view.v(2).str_val());
+                n.frameOptions = FRAMEOPTION_DEFAULTS;
+                n.location = view.l(2);
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // window_specification: '(' opt_existing_window_name
+            // opt_partition_clause opt_sort_clause opt_frame_clause ')'
+            2236 => {
+                let frame = view.v(5).node().expect("opt_frame_clause");
+                let frame = frame.as_window_def().expect("WindowDef");
+                let mut n = Node::build::<WindowDef>(mcx)?;
+                n.refname = opt_str(view.v(2));
+                n.partitionClause = view.v(3).list();
+                n.orderClause = view.v(4).list();
+                n.frameOptions = frame.frameOptions;
+                n.startOffset = frame.startOffset;
+                n.endOffset = frame.endOffset;
+                n.location = view.l(1);
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // opt_frame_clause: /*EMPTY*/ (RANGE/ROWS/GROUPS arms 2241-2243
+            // stay unimplemented-rule louds: explicit frames unported).
+            2244 => {
+                let mut n = Node::build::<WindowDef>(mcx)?;
+                n.frameOptions = FRAMEOPTION_DEFAULTS;
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
             _ => unimplemented_rule(rule),
@@ -1703,15 +2055,15 @@ impl<'mcx> Parser<'mcx> {
         )
     }
 
-    // insertSelectOptions; withClause omitted (the WITH select_no_parens
-    // alternatives are unported louds), SKIP LOCKED × WITH TIES check
-    // unreachable (for_locking_items is an unported loud).
+    // insertSelectOptions; SKIP LOCKED × WITH TIES check unreachable
+    // (for_locking_items is an unported loud).
     fn insert_select_options(
         &self,
         stmt: Node<'mcx>,
         sort_clause: NodeList<'mcx>,
         locking_clause: NodeList<'mcx>,
         limit: Option<&mut SelectLimit<'mcx>>,
+        with: Option<Node<'mcx>>,
     ) -> PgResult<()> {
         let mcx = self.mcx;
         let mut err: PgResult<()> = Ok(());
@@ -1766,7 +2118,26 @@ impl<'mcx> Parser<'mcx> {
             })
             .expect("SelectStmt");
         }
-        err
+        err?;
+        if let Some(w) = with {
+            let mut err: PgResult<()> = Ok(());
+            // SAFETY: as rule 8 — parser-owned tree, no live derived refs.
+            unsafe {
+                stmt.with_mut::<SelectStmt, _>(|n| {
+                    if n.withClause.is_some() {
+                        err = Err(self.errposition_error(
+                            "multiple WITH clauses not allowed".into(),
+                            w.as_with_clause().expect("with_clause").location,
+                        ));
+                        return;
+                    }
+                    n.withClause = Some(w);
+                })
+                .expect("SelectStmt");
+            }
+            err?;
+        }
+        Ok(())
     }
 
     #[cold]
@@ -1873,6 +2244,16 @@ fn negate_float<'mcx>(mcx: mcx::Mcx<'mcx>, fval: &'mcx str) -> PgResult<&'mcx st
     mcx::vec_append_bytes(&mut v, s.as_bytes())?;
     // SAFETY: '-' + valid UTF-8.
     Ok(unsafe { core::str::from_utf8_unchecked(v.leak()) })
+}
+
+fn join_type_from_ival(v: i32) -> JoinType {
+    match v {
+        0 => JoinType::JOIN_INNER,
+        1 => JoinType::JOIN_LEFT,
+        2 => JoinType::JOIN_FULL,
+        3 => JoinType::JOIN_RIGHT,
+        other => panic!("join_type_from_ival: {other}"),
+    }
 }
 
 fn mk_alias<'mcx>(mcx: mcx::Mcx<'mcx>, name: &'mcx str) -> PgResult<&'mcx Alias<'mcx>> {

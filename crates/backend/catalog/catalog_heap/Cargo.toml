@@ -21,9 +21,11 @@ catalog_storage = { path = "../catalog_storage" }
 heaptuple = { path = "../../access/common/heaptuple" }
 table = { path = "../../access/table/table" }
 tableam = { path = "../../access/table/tableam" }
+pg_type = { path = "../pg_type" }
+pg_depend = { path = "../pg_depend" }
 relcache = { path = "../../utils/cache/relcache" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
 lmgr = { path = "../../storage/lmgr/lmgr" }
-elog = { path = "../../utils/error/elog" }
 init_small = { path = "../../utils/init/init_small" }
 miscinit_seams = { path = "../../utils/init/miscinit_seams" }

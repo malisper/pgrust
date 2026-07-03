@@ -31,3 +31,19 @@ fn running_xacts_header_matches_c_layout() {
     };
     assert_eq!(running_xacts_header(&overflowed)[8], 1);
 }
+
+// standbydefs.h xl_standby_lock: xid 0, dbOid 4, relOid 8; 12 bytes each.
+#[test]
+fn standby_lock_body_matches_c_layout() {
+    let locks = [
+        xl_standby_lock { xid: 700, dbOid: 5, relOid: 16384 },
+        xl_standby_lock { xid: 701, dbOid: 5, relOid: 16385 },
+    ];
+    let body = standby_locks_body(&locks);
+    assert_eq!(body.len(), 2 * SIZE_OF_XL_STANDBY_LOCK);
+    assert_eq!(u32::from_ne_bytes(body[0..4].try_into().unwrap()), 700);
+    assert_eq!(u32::from_ne_bytes(body[4..8].try_into().unwrap()), 5);
+    assert_eq!(u32::from_ne_bytes(body[8..12].try_into().unwrap()), 16384);
+    assert_eq!(u32::from_ne_bytes(body[12..16].try_into().unwrap()), 701);
+    assert_eq!(u32::from_ne_bytes(body[20..24].try_into().unwrap()), 16385);
+}

@@ -52,5 +52,19 @@ seam_core::seam!(
     pub fn lock_held_by_me(locktag: LOCKTAG, lockmode: LOCKMODE, orstronger: bool) -> bool
 );
 
+// C's `LOCALLOCK **locallocks, int nlocks`; None = NULL (overflowed resowner
+// cache = walk the whole LOCALLOCK table).
+seam_core::seam!(
+    pub fn lock_reassign_current_owner<'a>(
+        locallocks: Option<&'a [types_storage::lock::LOCALLOCKTAG]>,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    pub fn lock_release_current_owner<'a>(
+        locallocks: Option<&'a [types_storage::lock::LOCALLOCKTAG]>,
+    ) -> PgResult<()>
+);
+
 
 

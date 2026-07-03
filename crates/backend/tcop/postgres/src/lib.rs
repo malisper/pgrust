@@ -21,6 +21,7 @@ mod tests;
 pub use extended_query::{
     drop_unnamed_stmt, exec_bind_message, exec_describe_portal_message,
     exec_describe_statement_message, exec_execute_message, exec_parse_message,
+    pg_analyze_and_rewrite_varparams,
 };
 pub use main_loop::PostgresMain;
 pub use simple_query::{

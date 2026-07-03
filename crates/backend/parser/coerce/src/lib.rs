@@ -21,7 +21,9 @@ use types_core::{InvalidOid, Oid, OidIsValid, ParseLoc};
 use types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_QUERY_CANCELED, ERROR,
 };
-use types_nodes::{CoercionForm, Const, FuncExpr, Node, NodeList, NodeTag, Param, RelabelType};
+use types_nodes::{
+    CoerceViaIO, CoercionForm, Const, FuncExpr, Node, NodeList, NodeTag, Param, RelabelType,
+};
 
 // primnodes.h CoercionContext; ordering is load-bearing (ccontext >= castcontext).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -50,7 +52,8 @@ const COERCION_CODE_EXPLICIT: i8 = b'e' as i8;
 const COERCION_METHOD_FUNCTION: i8 = b'f' as i8;
 const COERCION_METHOD_BINARY: i8 = b'b' as i8;
 const COERCION_METHOD_INOUT: i8 = b'i' as i8;
-const TYPCATEGORY_STRING: i8 = b'S' as i8;
+pub const TYPCATEGORY_INVALID: i8 = 0;
+pub const TYPCATEGORY_STRING: i8 = b'S' as i8;
 
 pub fn IsPolymorphicType(typid: Oid) -> bool {
     matches!(
@@ -321,12 +324,14 @@ pub fn can_coerce_type(
     ccontext: CoercionContext,
 ) -> PgResult<bool> {
     debug_assert_eq!(input_typeids.len(), target_typeids.len());
+    let mut have_generics = false;
     for (&inputTypeId, &targetTypeId) in input_typeids.iter().zip(target_typeids) {
         if inputTypeId == targetTypeId || targetTypeId == ANYOID {
             continue;
         }
         if IsPolymorphicType(targetTypeId) {
-            unported("can_coerce_type (parse_coerce.c): check_generic_type_consistency");
+            have_generics = true;
+            continue;
         }
         if inputTypeId == UNKNOWNOID {
             continue;
@@ -343,7 +348,219 @@ pub fn can_coerce_type(
         }
         return Ok(false);
     }
+    if have_generics && !check_generic_type_consistency(input_typeids, target_typeids)? {
+        return Ok(false);
+    }
     Ok(true)
+}
+
+fn check_generic_type_consistency(
+    actual_arg_types: &[Oid],
+    declared_arg_types: &[Oid],
+) -> PgResult<bool> {
+    let mut elem_typeid = InvalidOid;
+    let mut array_typeid = InvalidOid;
+    let mut range_typeid = InvalidOid;
+    let mut multirange_typeid = InvalidOid;
+    let mut anycompatible_range_typeid = InvalidOid;
+    let mut anycompatible_range_typelem = InvalidOid;
+    let mut anycompatible_multirange_typeid = InvalidOid;
+    let mut anycompatible_multirange_typelem = InvalidOid;
+    let mut have_anynonarray = false;
+    let mut have_anyenum = false;
+    let mut have_anycompatible_nonarray = false;
+    let mut n_anycompatible_args = 0usize;
+
+    for (&actual, &decl_type) in actual_arg_types.iter().zip(declared_arg_types) {
+        let mut actual_type = actual;
+        match decl_type {
+            ANYELEMENTOID | ANYNONARRAYOID | ANYENUMOID => {
+                if decl_type == ANYNONARRAYOID {
+                    have_anynonarray = true;
+                } else if decl_type == ANYENUMOID {
+                    have_anyenum = true;
+                }
+                if actual_type == UNKNOWNOID {
+                    continue;
+                }
+                if OidIsValid(elem_typeid) && actual_type != elem_typeid {
+                    return Ok(false);
+                }
+                elem_typeid = actual_type;
+            }
+            ANYARRAYOID => {
+                if actual_type == UNKNOWNOID {
+                    continue;
+                }
+                actual_type = lsyscache::getBaseType(actual_type)?;
+                if OidIsValid(array_typeid) && actual_type != array_typeid {
+                    return Ok(false);
+                }
+                array_typeid = actual_type;
+            }
+            ANYRANGEOID => {
+                if actual_type == UNKNOWNOID {
+                    continue;
+                }
+                actual_type = lsyscache::getBaseType(actual_type)?;
+                if OidIsValid(range_typeid) && actual_type != range_typeid {
+                    return Ok(false);
+                }
+                range_typeid = actual_type;
+            }
+            ANYMULTIRANGEOID => {
+                if actual_type == UNKNOWNOID {
+                    continue;
+                }
+                actual_type = lsyscache::getBaseType(actual_type)?;
+                if OidIsValid(multirange_typeid) && actual_type != multirange_typeid {
+                    return Ok(false);
+                }
+                multirange_typeid = actual_type;
+            }
+            ANYCOMPATIBLEOID | ANYCOMPATIBLENONARRAYOID => {
+                if decl_type == ANYCOMPATIBLENONARRAYOID {
+                    have_anycompatible_nonarray = true;
+                }
+                if actual_type == UNKNOWNOID {
+                    continue;
+                }
+                n_anycompatible_args += 1;
+            }
+            ANYCOMPATIBLEARRAYOID => {
+                if actual_type == UNKNOWNOID {
+                    continue;
+                }
+                actual_type = lsyscache::getBaseType(actual_type)?;
+                if !OidIsValid(lsyscache::get_element_type(actual_type)?) {
+                    return Ok(false);
+                }
+                n_anycompatible_args += 1;
+            }
+            ANYCOMPATIBLERANGEOID => {
+                if actual_type == UNKNOWNOID {
+                    continue;
+                }
+                actual_type = lsyscache::getBaseType(actual_type)?;
+                if OidIsValid(anycompatible_range_typeid) {
+                    if anycompatible_range_typeid != actual_type {
+                        return Ok(false);
+                    }
+                } else {
+                    anycompatible_range_typeid = actual_type;
+                    anycompatible_range_typelem = lsyscache::get_range_subtype(actual_type)?;
+                    if !OidIsValid(anycompatible_range_typelem) {
+                        return Ok(false);
+                    }
+                    n_anycompatible_args += 1;
+                }
+            }
+            ANYCOMPATIBLEMULTIRANGEOID => {
+                if actual_type == UNKNOWNOID {
+                    continue;
+                }
+                actual_type = lsyscache::getBaseType(actual_type)?;
+                if OidIsValid(anycompatible_multirange_typeid) {
+                    if anycompatible_multirange_typeid != actual_type {
+                        return Ok(false);
+                    }
+                } else {
+                    anycompatible_multirange_typeid = actual_type;
+                    anycompatible_multirange_typelem =
+                        lsyscache::get_multirange_range(actual_type)?;
+                    if !OidIsValid(anycompatible_multirange_typelem) {
+                        return Ok(false);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if OidIsValid(array_typeid) && array_typeid != ANYARRAYOID {
+        let array_typelem = lsyscache::get_element_type(array_typeid)?;
+        if !OidIsValid(array_typelem) {
+            return Ok(false);
+        }
+        if !OidIsValid(elem_typeid) {
+            elem_typeid = array_typelem;
+        } else if array_typelem != elem_typeid {
+            return Ok(false);
+        }
+    }
+
+    if OidIsValid(multirange_typeid) {
+        let multirange_typelem = lsyscache::get_multirange_range(multirange_typeid)?;
+        if !OidIsValid(multirange_typelem) {
+            return Ok(false);
+        }
+        if !OidIsValid(range_typeid) {
+            range_typeid = multirange_typelem;
+            if !OidIsValid(lsyscache::get_range_subtype(multirange_typelem)?) {
+                return Ok(false);
+            }
+        } else if multirange_typelem != range_typeid {
+            return Ok(false);
+        }
+    }
+
+    if OidIsValid(range_typeid) {
+        let range_typelem = lsyscache::get_range_subtype(range_typeid)?;
+        if !OidIsValid(range_typelem) {
+            return Ok(false);
+        }
+        if !OidIsValid(elem_typeid) {
+            elem_typeid = range_typelem;
+        } else if range_typelem != elem_typeid {
+            return Ok(false);
+        }
+    }
+
+    if have_anynonarray && OidIsValid(lsyscache::get_base_element_type(elem_typeid)?) {
+        return Ok(false);
+    }
+    if have_anyenum && !lsyscache::type_is_enum(elem_typeid)? {
+        return Ok(false);
+    }
+
+    if OidIsValid(anycompatible_multirange_typeid) {
+        if OidIsValid(anycompatible_range_typeid) {
+            if anycompatible_multirange_typelem != anycompatible_range_typeid {
+                return Ok(false);
+            }
+        } else {
+            anycompatible_range_typeid = anycompatible_multirange_typelem;
+            anycompatible_range_typelem =
+                lsyscache::get_range_subtype(anycompatible_range_typeid)?;
+            if !OidIsValid(anycompatible_range_typelem) {
+                return Ok(false);
+            }
+            n_anycompatible_args += 1;
+        }
+    }
+
+    if n_anycompatible_args > 0 {
+        let _ = have_anycompatible_nonarray;
+        unported(
+            "check_generic_type_consistency (parse_coerce.c): \
+             select_common_type_from_oids over non-unknown ANYCOMPATIBLE args",
+        );
+    }
+
+    Ok(true)
+}
+
+pub fn TypeCategory(typid: Oid) -> PgResult<i8> {
+    type_category(typid)
+}
+
+pub fn IsPreferredType(category: i8, typid: Oid) -> PgResult<bool> {
+    let (typcategory, typispreferred) = lsyscache::get_type_category_preferred(typid)?;
+    Ok(if category == typcategory || category == TYPCATEGORY_INVALID {
+        typispreferred
+    } else {
+        false
+    })
 }
 
 pub fn find_coercion_pathway(
@@ -575,7 +792,17 @@ fn build_coercion_expression<'mcx>(
             unported("build_coercion_expression (parse_coerce.c): ArrayCoerceExpr path")
         }
         COERCION_PATH_COERCEVIAIO => {
-            unported("build_coercion_expression (parse_coerce.c): CoerceViaIO path")
+            debug_assert!(!OidIsValid(funcId));
+            Node::mk(
+                mcx,
+                CoerceViaIO {
+                    arg: node,
+                    resulttype: targetTypeId,
+                    resultcollid: InvalidOid,
+                    coerceformat: cformat,
+                    location,
+                },
+            )
         }
         _ => Err(Box::new(PgError::error(format!(
             "unsupported pathtype {pathtype:?} in build_coercion_expression"
@@ -737,6 +964,159 @@ fn expression_returns_set(node: Node<'_>) -> bool {
              backend-nodes-core lane"
         ),
     }
+}
+
+/// C `select_common_type`; same precomputed exprType/exprLocation divergence
+/// as [`coerce_to_boolean`], one `(type, location)` pair per expr. The
+/// `which_expr` out-parameter is dropped (NULL at every ported call site).
+/// `context == None` is C's NULL: return InvalidOid instead of erroring.
+pub fn select_common_type(
+    pstate: &ParseState<'_, '_>,
+    exprs: &[(Oid, ParseLoc)],
+    context: Option<&str>,
+) -> PgResult<Oid> {
+    debug_assert!(!exprs.is_empty());
+    let mut ptype = exprs[0].0;
+    let mut rest = &exprs[1..];
+
+    if ptype != UNKNOWNOID {
+        let mut i = 0;
+        while i < rest.len() && rest[i].0 == ptype {
+            i += 1;
+        }
+        if i == rest.len() {
+            return Ok(ptype);
+        }
+        rest = &rest[i..];
+    }
+
+    ptype = lsyscache::getBaseType(ptype)?;
+    let (mut pcategory, mut pispreferred) = lsyscache::get_type_category_preferred(ptype)?;
+
+    for &(rawtype, nloc) in rest {
+        let ntype = lsyscache::getBaseType(rawtype)?;
+        if ntype != UNKNOWNOID && ntype != ptype {
+            let (ncategory, nispreferred) = lsyscache::get_type_category_preferred(ntype)?;
+            if ptype == UNKNOWNOID {
+                ptype = ntype;
+                pcategory = ncategory;
+                pispreferred = nispreferred;
+            } else if ncategory != pcategory {
+                let Some(context) = context else { return Ok(InvalidOid) };
+                return Err(common_type_mismatch(pstate, context, ptype, ntype, nloc));
+            } else if !pispreferred
+                && can_coerce_type(&[ptype], &[ntype], COERCION_IMPLICIT)?
+                && !can_coerce_type(&[ntype], &[ptype], COERCION_IMPLICIT)?
+            {
+                ptype = ntype;
+                pcategory = ncategory;
+                pispreferred = nispreferred;
+            }
+        }
+    }
+
+    if ptype == UNKNOWNOID {
+        ptype = types_core::catalog::TEXTOID;
+    }
+    Ok(ptype)
+}
+
+/// C `coerce_to_common_type`; precomputed exprType/exprLocation divergence as
+/// [`coerce_to_boolean`].
+pub fn coerce_to_common_type<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &ParseState<'_, 'mcx>,
+    node: Node<'mcx>,
+    input_type_id: Oid,
+    node_location: ParseLoc,
+    target_type_id: Oid,
+    context: &str,
+) -> PgResult<Node<'mcx>> {
+    if input_type_id == target_type_id {
+        return Ok(node);
+    }
+    if can_coerce_type(&[input_type_id], &[target_type_id], COERCION_IMPLICIT)? {
+        coerce_type(
+            mcx,
+            pstate,
+            node,
+            input_type_id,
+            target_type_id,
+            -1,
+            COERCION_IMPLICIT,
+            CoercionForm::COERCE_IMPLICIT_CAST,
+            -1,
+        )
+    } else {
+        Err(cannot_coerce(pstate, context, input_type_id, target_type_id, node_location))
+    }
+}
+
+/// C `select_common_typmod`; caller passes one `(exprType, exprTypmod)` pair
+/// per expr (pstate is unused in C too).
+pub fn select_common_typmod(exprs: &[(Oid, i32)], common_type: Oid) -> i32 {
+    let mut result = -1;
+    for (i, &(typ, typmod)) in exprs.iter().enumerate() {
+        if typ != common_type {
+            return -1;
+        }
+        if i == 0 {
+            result = typmod;
+        } else if result != typmod {
+            return -1;
+        }
+    }
+    result
+}
+
+#[cold]
+#[inline(never)]
+fn common_type_mismatch(
+    pstate: &ParseState<'_, '_>,
+    context: &str,
+    ptype: Oid,
+    ntype: Oid,
+    location: ParseLoc,
+) -> Box<PgError> {
+    let (p, n) = match (format_type::format_type_be(ptype), format_type::format_type_be(ntype)) {
+        (Ok(p), Ok(n)) => (p, n),
+        (Err(e), _) | (_, Err(e)) => return e,
+    };
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_DATATYPE_MISMATCH)
+            .errmsg(format!("{context} types {p} and {n} cannot be matched"))
+            .errposition(parser_errposition(pstate, location, mbutils::GetDatabaseEncoding()))
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_coerce.c", 0, "select_common_type")),
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn cannot_coerce(
+    pstate: &ParseState<'_, '_>,
+    context: &str,
+    input_type_id: Oid,
+    target_type_id: Oid,
+    location: ParseLoc,
+) -> Box<PgError> {
+    use types_error::ERRCODE_CANNOT_COERCE;
+    let (input, target) = match (
+        format_type::format_type_be(input_type_id),
+        format_type::format_type_be(target_type_id),
+    ) {
+        (Ok(i), Ok(t)) => (i, t),
+        (Err(e), _) | (_, Err(e)) => return e,
+    };
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_CANNOT_COERCE)
+            .errmsg(format!("{context} could not convert type {input} to {target}"))
+            .errposition(parser_errposition(pstate, location, mbutils::GetDatabaseEncoding()))
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_coerce.c", 0, "coerce_to_common_type")),
+    )
 }
 
 #[cold]

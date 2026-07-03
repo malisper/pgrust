@@ -81,6 +81,15 @@ pub(crate) fn decrement_strong_lock_count(hashcode: u32) {
     decrement_strong_lock_count_partition(FastPathStrongLockHashPartition(hashcode));
 }
 
+// Boot image: all counts zero, spinlock free. Exclusive postmaster-thread
+// access per the crash choreography.
+pub(crate) fn reset_strong_locks_after_crash() {
+    FAST_PATH_STRONG_RELATION_LOCKS.mutex.unlock();
+    for cell in FAST_PATH_STRONG_RELATION_LOCKS.count.iter() {
+        cell.set(0);
+    }
+}
+
 const ZERO_USE: Cell<i32> = Cell::new(0);
 
 thread_local! {

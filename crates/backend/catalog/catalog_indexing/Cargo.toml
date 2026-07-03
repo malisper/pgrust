@@ -14,5 +14,6 @@ types_tuple = { path = "../../../_support/types/types_tuple" }
 types_slot = { path = "../../../_support/types/types_slot" }
 heaptuple = { path = "../../access/common/heaptuple" }
 heapam = { path = "../../access/heap/heapam" }
+tableam_vocab = { path = "../../access/table/tableam_vocab" }
 exectuples = { path = "../../executor/exectuples" }
 execindexing = { path = "../../executor/execindexing" }

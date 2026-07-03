@@ -19,6 +19,8 @@ execmain_seams = { path = "../../executor/execmain_seams" }
 miscinit = { path = "../../utils/init/miscinit" }
 portalcmds_seams = { path = "../portalcmds_seams" }
 portalmem = { path = "../../utils/mmgr/portalmem" }
+resowner_seams = { path = "../../utils/resowner/resowner_seams" }
+types_resowner = { path = "../../../_support/types/types_resowner" }
 postgres = { path = "../../tcop/postgres" }
 pquery = { path = "../../tcop/pquery" }
 rewrite_handler_seams = { path = "../../rewrite/rewrite_handler_seams" }
@@ -60,7 +62,6 @@ procarray_seams = { path = "../../storage/ipc/procarray_seams" }
 pruneheap_seams = { path = "../../access/heap/pruneheap_seams" }
 relation_seams = { path = "../../access/common/relation_seams" }
 resowner_portal_seams = { path = "../../utils/resowner/resowner_portal_seams" }
-resowner_seams = { path = "../../utils/resowner/resowner_seams" }
 rewrite_handler = { path = "../../rewrite/rewrite_handler" }
 s_lock_seams = { path = "../../storage/lmgr/s_lock_seams" }
 scalar_seams = { path = "../../utils/adt/scalar_seams" }
@@ -77,7 +78,6 @@ types_core = { path = "../../../_support/types/types_core" }
 types_dest = { path = "../../../_support/types/types_dest" }
 types_fmgr = { path = "../../../_support/types/fmgr" }
 types_rel = { path = "../../../_support/types/rel" }
-types_resowner = { path = "../../../_support/types/types_resowner" }
 types_storage = { path = "../../../_support/types/types_storage" }
 types_tuple = { path = "../../../_support/types/types_tuple" }
 utility = { path = "../../tcop/utility" }

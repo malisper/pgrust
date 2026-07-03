@@ -99,6 +99,21 @@ pub fn PMSignalShmemInit(max_live_children: i32) {
     NUM_CHILD_FLAGS.set(state.num_child_flags);
 }
 
+/// Crash-cycle reset in place to the post-PMSignalShmemInit image
+/// (notes/crash-restart-design.md); postmaster thread only, all children dead.
+pub fn PMSignalShmemResetAfterCrash() {
+    let state = state();
+    for flag in &state.PMSignalFlags {
+        flag.store(false, Relaxed);
+    }
+    state
+        .sigquit_reason
+        .store(QuitSignalReason::PMQUIT_NOT_SENT as u32, Relaxed);
+    for flag in state.PMChildFlags {
+        flag.store(PM_CHILD_UNUSED, Relaxed);
+    }
+}
+
 pub fn SendPostmasterSignal(reason: PMSignalReason) {
     if !g::IsUnderPostmaster() {
         return;

@@ -1,9 +1,9 @@
 // nodeAgg.c, AGG_PLAIN/AGG_SORTED/AGG_HASHED single-grouping-set slice: byval
-// transtype, no finalfn/FILTER/DISTINCT/ORDER BY; transitions compile into one
-// execexpr program (C's evaltrans), hashed pergroup resolves through a
-// repointed cell, sorted boundaries and HAVING run compiled programs. Outer
-// child stays with the ExecProcNode dispatcher (fetch closure). AGG_MIXED,
-// aggsplit variants, grouping sets and spill are loud panics.
+// transtype only (INTERNAL is a byval pointer datum; its state lives in the
+// AggStateNode aggcontext the transfn reaches via fcinfo->context), finalfn
+// via resolve-once peragg carriers, no FILTER/DISTINCT/ORDER BY; transitions
+// compile into one execexpr program (C's evaltrans). AGG_MIXED, aggsplit
+// variants, grouping sets and spill are loud panics.
 #![allow(non_snake_case)]
 
 use core::alloc::Layout;
@@ -11,6 +11,7 @@ use std::ptr::NonNull;
 use std::rc::Rc;
 
 use ::datum::{Datum, NullableDatum};
+use ::types_fmgr::{AggStateNode, FmNodePtr, FmgrInfo, LocalFcinfo};
 use ::execexpr::{
     exec_build_agg_projection_info, exec_build_agg_qual, exec_build_agg_trans,
     exec_build_agg_trans_hashed, exec_eval_expr, exec_project, exec_qual, AggBind, AggPerGroup,
@@ -42,12 +43,14 @@ pub struct AggStateData<'mcx> {
     pub plan: &'mcx Agg<'mcx>,
     pub ps_ExprContext: EcxtId,
     pub tmpcontext: EcxtId,
-    pub aggcontext: EcxtId,
+    // C's curaggcontext, in the FmNode the transfn fcinfos carry; raw arena
+    // cell so the pointer survives self moving (drop: make_agg_state_node).
+    agg_node: NonNull<AggStateNode>,
     pub ps_ResultTupleDesc: Rc<TupleDescData<'static>>,
     pub ps_ResultTupleSlot: ExecSlotId,
     proj: PgBox<'mcx, ExprState<'mcx>>,
     evaltrans: PgBox<'mcx, ExprState<'mcx>>,
-    peragg_transno: PgVec<'mcx, u32>,
+    peragg: PgVec<'mcx, PerAggData>,
     trans_init: PgVec<'mcx, NullableDatum>,
     // Owners of once-allocated arrays; all element access goes through the
     // *_base pointers so the step-held pointers stay valid (steps.rs note).
@@ -81,7 +84,6 @@ struct PerHashData<'mcx> {
     hashslot: SlotData<'mcx>,
     retrieve_slot: SlotData<'mcx>,
     first_slot: SlotData<'mcx>,
-    hash_tablecxt: MemoryContext,
     num_cols: usize,
     hash_grp_col_idx_input: PgVec<'mcx, i16>,
     largest_grp_col_idx: i32,
@@ -92,6 +94,33 @@ struct PerHashData<'mcx> {
     hash_ngroups_current: u64,
     table_filled: bool,
     hashiter: usize,
+}
+
+// C AggStatePerAggData finalize slice; result copy discipline rides the armed
+// result mcx instead of MemoryContextContains.
+struct PerAggData {
+    transno: u32,
+    finalfn: Option<FmgrInfo>,
+    num_final_args: u16,
+    agg_collation: Oid,
+    resulttype_len: i16,
+}
+
+fn make_agg_state_node<'mcx>(
+    mcx: ::mcx::Mcx<'mcx>,
+    ctx: MemoryContext,
+) -> PgResult<NonNull<AggStateNode>> {
+    let layout = Layout::new::<AggStateNode>();
+    let raw = mcx.allocate(layout).map_err(|_| mcx.oom(layout.size()))?;
+    let p: NonNull<AggStateNode> = raw.cast();
+    // SAFETY: fresh allocation of the exact layout.
+    unsafe { p.write(AggStateNode::new(ctx)) };
+    // The node's MemoryContext is droppy inside a no-drop arena: the query
+    // context's reset callback is its destructor (docs/no-drop.md guard rule).
+    // SAFETY: fires exactly once, before the arena bytes are reclaimed.
+    mcx.context()
+        .register_reset_callback(move || unsafe { core::ptr::drop_in_place(p.as_ptr()) });
+    Ok(p)
 }
 
 #[cold]
@@ -169,7 +198,12 @@ pub fn exec_init_agg<'mcx>(
         "ExecInitAgg (nodeAgg.c): AGG_SORTED without grouping columns cannot happen"
     );
 
-    let aggcontext = estate.create_work_expr_context();
+    // Hashed: the node context IS the table context (C hands
+    // BuildTupleHashTable the same hashcontext memory).
+    let agg_ctx_name =
+        if node.aggstrategy == AGG_HASHED { "HashAgg hash table" } else { "AggContext" };
+    let agg_node = make_agg_state_node(mcx, mcx.context().new_child_bump(agg_ctx_name))?;
+    let fm_agg_node: FmNodePtr = Some(agg_node.cast());
     let tmpcontext = estate.create_expr_context();
     let ps_ExprContext = estate.exec_assign_expr_context();
     let ps_ResultTupleSlot =
@@ -209,7 +243,12 @@ pub fn exec_init_agg<'mcx>(
     }
 
     let userid = miscinit_seams::get_user_id::call();
-    let mut peragg_transno: PgVec<'mcx, u32> = vec_with_capacity_in(mcx, numaggs)?;
+    // Droppy FmgrInfo carriers: AggStateData's box owns the drops
+    // (ExprState.frames precedent), hence no no-drop ctor.
+    let mut peragg: PgVec<'mcx, PerAggData> = PgVec::new_in(mcx);
+    peragg
+        .try_reserve(numaggs)
+        .map_err(|_| mcx.oom(numaggs * core::mem::size_of::<PerAggData>()))?;
     let mut trans_init: PgVec<'mcx, NullableDatum> = vec_with_capacity_in(mcx, numtrans)?;
     trans_init.resize(numtrans, NullableDatum::null());
     let mut trans_aggref: PgVec<'mcx, Option<&'mcx Aggref<'mcx>>> =
@@ -237,12 +276,6 @@ pub fn exec_init_agg<'mcx>(
                 shape.aggkind
             );
         }
-        if shape.aggfinalfn != 0 {
-            panic!(
-                "finalize_aggregate (nodeAgg.c): finalfn {} arm not ported",
-                shape.aggfinalfn
-            );
-        }
         if !aggref.aggorder.is_nil() || !aggref.aggdistinct.is_nil() {
             panic!("ExecInitAgg (nodeAgg.c): DISTINCT/ORDER BY aggregates not ported");
         }
@@ -258,8 +291,34 @@ pub fn exec_init_agg<'mcx>(
             );
         }
 
+        let finalfn = if shape.aggfinalfn != 0 {
+            // Divergence: C aclchecks as the aggregate owner (proowner
+            // projection unported); differs only under SET ROLE.
+            let aclresult = aclchk_seams::object_aclcheck::call(
+                PROCEDURE_RELATION_ID,
+                shape.aggfinalfn,
+                userid,
+                ACL_EXECUTE,
+            )?;
+            if aclresult != ACLCHECK_OK {
+                return Err(agg_permission_denied(shape.aggfinalfn));
+            }
+            Some(fmgr_core::fmgr_info(shape.aggfinalfn)?)
+        } else {
+            None
+        };
+        let num_final_args =
+            if shape.aggfinalextra { aggref.args.len() as u16 + 1 } else { 1 };
+        let (resulttype_len, _resulttype_byval) = lsyscache::get_typlenbyval(aggref.aggtype)?;
+
         let transno = aggref.aggtransno as usize;
-        peragg_transno.push(transno as u32);
+        peragg.push(PerAggData {
+            transno: transno as u32,
+            finalfn,
+            num_final_args,
+            agg_collation: aggref.inputcollid,
+            resulttype_len,
+        });
         match trans_aggref[transno] {
             Some(prev) => assert!(
                 prev.aggfnoid == aggref.aggfnoid,
@@ -314,10 +373,11 @@ pub fn exec_init_agg<'mcx>(
     let params = estate.param_bind();
     let (evaltrans, perhash) = if node.aggstrategy == AGG_HASHED {
         let ph = init_perhash(node, estate, numtrans)?;
-        let evaltrans = exec_build_agg_trans_hashed(mcx, &specs, ph.pergroup_cell, params)?;
+        let evaltrans =
+            exec_build_agg_trans_hashed(mcx, &specs, ph.pergroup_cell, fm_agg_node, params)?;
         (evaltrans, Some(ph))
     } else {
-        (exec_build_agg_trans(mcx, &specs, params)?, None)
+        (exec_build_agg_trans(mcx, &specs, fm_agg_node, params)?, None)
     };
     let persort = if node.aggstrategy == AGG_SORTED {
         Some(init_persort(node, estate)?)
@@ -332,12 +392,12 @@ pub fn exec_init_agg<'mcx>(
         plan: node,
         ps_ExprContext,
         tmpcontext,
-        aggcontext,
+        agg_node,
         ps_ResultTupleDesc: result_desc,
         ps_ResultTupleSlot,
         proj,
         evaltrans,
-        peragg_transno,
+        peragg,
         trans_init,
         _pergroup: pergroup,
         pergroup_base,
@@ -478,7 +538,6 @@ fn init_perhash<'mcx>(
         key_col_idx.push((i + 1) as i16);
     }
 
-    let hash_tablecxt = mcx.context().new_child_bump("HashAgg hash table");
     let hashtable = ::execgrouping::build_tuple_hash_table(
         mcx,
         &hash_desc,
@@ -509,7 +568,6 @@ fn init_perhash<'mcx>(
         hashslot,
         retrieve_slot,
         first_slot,
-        hash_tablecxt,
         num_cols,
         hash_grp_col_idx_input,
         largest_grp_col_idx,
@@ -652,7 +710,8 @@ where
         exec_eval_expr(&mut node.evaltrans, &mut slots)?;
         estate.reset_expr_context(node.tmpcontext);
     }
-    finalize_group(node);
+    estate.reset_expr_context(node.ps_ExprContext);
+    finalize_aggregates(node, estate, node.pergroup_base)?;
     node.agg_done = true;
 
     // project_aggregates: the HAVING qual (var-free here) gates the one row.
@@ -667,18 +726,64 @@ where
     Ok(Some(node.ps_ResultTupleSlot))
 }
 
-// finalize_aggregates (nodeAgg.c): no finalfn in the live set, so the result
-// is the (byval) transvalue itself.
-fn finalize_group(node: &mut AggStateData<'_>) {
-    for (aggno, transno) in node.peragg_transno.iter().enumerate() {
-        // SAFETY: indices bounded by the once-allocated array lengths; base
-        // pointers are the sole access paths (struct invariant).
+const MAX_FINAL_ARGS: usize = 4;
+
+// finalize_aggregate(s) (nodeAgg.c): finalfn results land in ps_ExprContext's
+// per-tuple memory via the armed result mcx (C's MemoryContextContains +
+// datumCopy discipline); no finalfn = the byval transvalue itself.
+fn finalize_aggregates<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &EStateData<'mcx>,
+    pergroup: NonNull<AggPerGroup>,
+) -> PgResult<()> {
+    let per_tuple = estate.ecxt(node.ps_ExprContext).per_tuple_mcx();
+    let AggStateData { peragg, agg_node, agg_values_base, agg_nulls_base, .. } = node;
+    for (aggno, pa) in peragg.iter_mut().enumerate() {
+        // SAFETY: transno < the once-allocated pergroup array length; base
+        // pointers are the sole access paths (struct invariants).
+        let pg = unsafe { &*pergroup.as_ptr().add(pa.transno as usize) };
+        let (value, isnull) = match pa.finalfn.as_mut() {
+            None => (pg.trans_value, pg.trans_value_is_null),
+            Some(flinfo) => {
+                assert!(
+                    (pa.num_final_args as usize) <= MAX_FINAL_ARGS,
+                    "finalize_aggregate (nodeAgg.c): {} finalfn args not supported",
+                    pa.num_final_args
+                );
+                let mut fcinfo = LocalFcinfo::<MAX_FINAL_ARGS>::fresh(pa.agg_collation);
+                fcinfo.nargs = pa.num_final_args as i16;
+                fcinfo.context = Some(agg_node.cast());
+                // SAFETY: the per-tuple context outlives this stack frame's
+                // single call.
+                unsafe { fcinfo.set_result_mcx(per_tuple) };
+                fcinfo.args[0] =
+                    NullableDatum { value: pg.trans_value, isnull: pg.trans_value_is_null };
+                let anynull = pg.trans_value_is_null || pa.num_final_args > 1;
+                if flinfo.fn_strict && anynull {
+                    (Datum::null(), true)
+                } else {
+                    let result = flinfo.invoke(&mut fcinfo)?;
+                    let isnull = fcinfo.isnull;
+                    // C MakeExpandedObjectReadOnly on the result.
+                    // SAFETY: a non-null varlena result points at a live image.
+                    let value = if !isnull && pa.resulttype_len == -1 {
+                        unsafe {
+                            datum::expandeddatum::make_expanded_object_read_only_internal(result)
+                        }
+                    } else {
+                        result
+                    };
+                    (value, isnull)
+                }
+            }
+        };
+        // SAFETY: aggno < the once-allocated result array lengths.
         unsafe {
-            let pg = node.pergroup_base.as_ptr().add(*transno as usize);
-            node.agg_values_base.as_ptr().add(aggno).write((*pg).trans_value);
-            node.agg_nulls_base.as_ptr().add(aggno).write((*pg).trans_value_is_null);
+            agg_values_base.as_ptr().add(aggno).write(value);
+            agg_nulls_base.as_ptr().add(aggno).write(isnull);
         }
     }
+    Ok(())
 }
 
 // agg_retrieve_direct (nodeAgg.c), AGG_SORTED single-set arm: one group per
@@ -696,7 +801,9 @@ where
     let mcx = estate.es_query_cxt;
     while !node.agg_done {
         estate.reset_expr_context(node.ps_ExprContext);
-        estate.ecxt_mut(node.aggcontext).rescan();
+        // SAFETY: sole access path to the node during the reset (the frames'
+        // copies are raw and dormant between evaluations).
+        unsafe { node.agg_node.as_mut() }.reset();
 
         {
             let AggStateData { persort, .. } = node;
@@ -749,7 +856,7 @@ where
             exec_eval_expr(evaltrans, &mut slots)?;
             estate.reset_expr_context(node.tmpcontext);
         }
-        finalize_group(node);
+        finalize_aggregates(node, estate, node.pergroup_base)?;
 
         {
             let AggStateData { persort, qual, .. } = node;
@@ -803,8 +910,10 @@ fn lookup_hash_entry<'mcx>(
     outer_id: ExecSlotId,
 ) -> PgResult<()> {
     let mcx = estate.es_query_cxt;
-    let AggStateData { perhash, trans_init, .. } = node;
+    let AggStateData { perhash, trans_init, agg_node, .. } = node;
     let ph = perhash.as_mut().expect("hashed Agg has perhash");
+    // SAFETY: read of the once-allocated node; no &mut is live to it.
+    let table_mcx = unsafe { agg_node.as_ref() }.aggcontext();
 
     let outer_slot = estate.slot_mut(outer_id);
     exectuples::slot_getsomeattrs(outer_slot, ph.largest_grp_col_idx);
@@ -821,8 +930,7 @@ fn lookup_hash_entry<'mcx>(
     exectuples::exec_store_virtual_tuple(&mut ph.hashslot);
 
     let hash = ph.hashtable.hash_slot(&mut ph.hashslot)?;
-    let (ix, isnew) =
-        ph.hashtable.lookup(&mut ph.hashslot, hash, Some(ph.hash_tablecxt.mcx()), mcx)?;
+    let (ix, isnew) = ph.hashtable.lookup(&mut ph.hashslot, hash, Some(table_mcx), mcx)?;
     let ix = ix.expect("creating lookup always yields an entry");
     if isnew {
         ph.hash_ngroups_current += 1;
@@ -874,41 +982,34 @@ fn agg_retrieve_hash_table<'mcx>(
             node.agg_done = true;
             return Ok(None);
         }
-        let AggStateData { perhash, peragg_transno, agg_values_base, agg_nulls_base, .. } = node;
-        let ph = perhash.as_mut().expect("hashed Agg has perhash");
-        let ix = ph.hashiter as u32;
-        ph.hashiter += 1;
+        let pergroup = {
+            let ph = node.perhash.as_mut().expect("hashed Agg has perhash");
+            let ix = ph.hashiter as u32;
+            ph.hashiter += 1;
 
-        let tup = ph.hashtable.entry_tuple(ix);
-        // SAFETY: entry images live in hash_tablecxt for the table's lifetime.
-        unsafe { exectuples::exec_store_minimal_tuple_ptr(&mut ph.retrieve_slot, mcx, tup) };
-        exectuples::slot_getallattrs(&mut ph.retrieve_slot);
+            let tup = ph.hashtable.entry_tuple(ix);
+            // SAFETY: entry images live in the node's table context for the
+            // table's lifetime.
+            unsafe { exectuples::exec_store_minimal_tuple_ptr(&mut ph.retrieve_slot, mcx, tup) };
+            exectuples::slot_getallattrs(&mut ph.retrieve_slot);
 
-        exectuples::exec_store_all_null_tuple(&mut ph.first_slot, mcx);
-        {
-            let PerHashData { retrieve_slot: hashslot, first_slot, hash_grp_col_idx_input, .. } =
-                &mut *ph;
-            let src = hashslot.base();
-            let dst = first_slot.base_mut();
-            for (i, &attno) in hash_grp_col_idx_input.iter().enumerate() {
-                let v = (attno - 1) as usize;
-                dst.tts_values[v] = src.tts_values[i];
-                dst.tts_isnull[v] = src.tts_isnull[i];
-            }
-        }
-
-        if !peragg_transno.is_empty() {
-            let pergroup = ph.hashtable.entry_additional(ix).cast::<AggPerGroup>();
-            for (aggno, transno) in peragg_transno.iter().enumerate() {
-                // SAFETY: bounded by the once-allocated array lengths (struct
-                // invariants; entry pergroup written by lookup_hash_entry).
-                unsafe {
-                    let pg = pergroup.as_ptr().add(*transno as usize);
-                    agg_values_base.as_ptr().add(aggno).write((*pg).trans_value);
-                    agg_nulls_base.as_ptr().add(aggno).write((*pg).trans_value_is_null);
+            exectuples::exec_store_all_null_tuple(&mut ph.first_slot, mcx);
+            {
+                let PerHashData {
+                    retrieve_slot: hashslot, first_slot, hash_grp_col_idx_input, ..
+                } = &mut *ph;
+                let src = hashslot.base();
+                let dst = first_slot.base_mut();
+                for (i, &attno) in hash_grp_col_idx_input.iter().enumerate() {
+                    let v = (attno - 1) as usize;
+                    dst.tts_values[v] = src.tts_values[i];
+                    dst.tts_isnull[v] = src.tts_isnull[i];
                 }
             }
-        }
+            ph.hashtable.entry_additional(ix).cast::<AggPerGroup>()
+        };
+        // Written by lookup_hash_entry; unread when peragg is empty.
+        finalize_aggregates(node, estate, pergroup)?;
 
         {
             let AggStateData { perhash, qual, .. } = node;
@@ -933,7 +1034,7 @@ pub fn exec_end_agg(_node: &mut AggStateData<'_>) {}
 
 /// `ExecReScanAgg` (nodeAgg.c) AGG_PLAIN arm; the caller rescans the outer
 /// child (chgParam is always NULL until the Param lanes land).
-pub fn exec_rescan_agg<'mcx>(node: &mut AggStateData<'mcx>, estate: &mut EStateData<'mcx>) {
+pub fn exec_rescan_agg<'mcx>(node: &mut AggStateData<'mcx>, _estate: &mut EStateData<'mcx>) {
     node.agg_done = false;
     if let Some(ph) = node.perhash.as_mut() {
         // C's no-chgParam arm: the filled table is reused, only the iterator
@@ -944,5 +1045,6 @@ pub fn exec_rescan_agg<'mcx>(node: &mut AggStateData<'mcx>, estate: &mut EStateD
     if let Some(ps) = node.persort.as_mut() {
         ps.have_pending = false;
     }
-    estate.ecxt_mut(node.aggcontext).rescan();
+    // SAFETY: sole access path to the node during the reset.
+    unsafe { node.agg_node.as_mut() }.reset();
 }

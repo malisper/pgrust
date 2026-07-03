@@ -46,6 +46,48 @@ fn install_seams() {
                 _ => None,
             })
         });
+        // Minimal typcache backing for TYPECACHE_CMP_PROC on int4 (MinMax).
+        const INT4_BTREE_OPCLASS: u32 = 1978;
+        const INT_BTREE_FAM: u32 = 1976;
+        const F_BTINT4CMP: u32 = 351;
+        syscache_seams::lookup_pg_type_typcache_shape::set(|typid| {
+            Ok((typid == INT4OID).then(|| {
+                let mut name = ::types_tuple::NameData::default();
+                name.namestrcpy("int4");
+                syscache_seams::PgTypeTypcacheShape {
+                    typname: name,
+                    typlen: 4,
+                    typbyval: true,
+                    typalign: b'i' as i8,
+                    typstorage: b'p' as i8,
+                    typtype: b'b' as i8,
+                    typisdefined: true,
+                    typrelid: 0,
+                    typsubscript: 0,
+                    typelem: 0,
+                    typarray: 0,
+                    typcollation: 0,
+                }
+            }))
+        });
+        syscache_seams::syscache_hash_value_typeoid::set(|typid| Ok(typid.wrapping_mul(0x9e3779b1)));
+        syscache_seams::lookup_pg_opclass_shape::set(|opclass| {
+            Ok((opclass == INT4_BTREE_OPCLASS).then_some(syscache_seams::PgOpclassShape {
+                opcmethod: ::types_core::BTREE_AM_OID,
+                opcfamily: INT_BTREE_FAM,
+                opcintype: INT4OID,
+            }))
+        });
+        syscache_seams::lookup_pg_amproc::set(|opfamily, _l, _r, procnum| {
+            Ok(if opfamily == INT_BTREE_FAM && procnum == 1 { F_BTINT4CMP } else { 0 })
+        });
+        indexcmds_seams::get_default_opclass::set(|type_id, am_id| {
+            Ok(if type_id == INT4OID && am_id == ::types_core::BTREE_AM_OID {
+                INT4_BTREE_OPCLASS
+            } else {
+                0
+            })
+        });
     });
 }
 
@@ -533,7 +575,7 @@ fn agg_trans_and_aggref_eval_steps() {
                 pergroup: unsafe { NonNull::new_unchecked(base.as_ptr().add(1)) },
             },
         ];
-        let mut trans = exec_build_agg_trans(mcx, &specs, ParamBind::NONE).unwrap();
+        let mut trans = exec_build_agg_trans(mcx, &specs, None, ParamBind::NONE).unwrap();
         for v in [7i32, 35] {
             let mut outer = virtual_slot(mcx, &[Some(v)]);
             let mut slots =
@@ -579,8 +621,7 @@ fn agg_trans_and_aggref_eval_steps() {
 }
 
 #[test]
-#[should_panic(expected = "EEOP_AGG_STRICT_INPUT_CHECK_ARGS")]
-fn agg_trans_strict_with_args_panics() {
+fn agg_trans_strict_input_check_skips_nulls() {
     use core::ptr::NonNull;
 
     use crate::compile::{exec_build_agg_trans, AggTransSpec};
@@ -588,23 +629,56 @@ fn agg_trans_strict_with_args_panics() {
     use ::types_nodes::primnodes::OUTER_VAR;
 
     with_mcx(|mcx| {
-        let mut pg = AggPerGroup {
-            trans_value: Datum::null(),
-            trans_value_is_null: true,
-            no_trans_value: true,
-        };
-        let var = Node::mk_var(mcx, OUTER_VAR, 1, INT8OID, -1, 0, 0).unwrap();
-        let tle = Node::mk_target_entry(mcx, var, 1, None, false).unwrap();
-        let args = NodeList::make1(mcx, tle).unwrap();
-        // int8larger (1236): strict with one aggregated arg (max()).
-        let specs = [AggTransSpec {
-            transfn_oid: 1236,
-            inputcollid: 0,
-            init_value_is_null: false,
-            args: &args,
-            pergroup: NonNull::from(&mut pg),
-        }];
-        let _ = exec_build_agg_trans(mcx, &specs, ParamBind::NONE);
+        let mut pergroup = [
+            AggPerGroup {
+                trans_value: Datum::from_i64(0),
+                trans_value_is_null: false,
+                no_trans_value: false,
+            },
+            AggPerGroup {
+                trans_value: Datum::null(),
+                trans_value_is_null: true,
+                no_trans_value: true,
+            },
+        ];
+        let base = NonNull::new(pergroup.as_mut_ptr()).unwrap();
+        let var = Node::mk_var(mcx, OUTER_VAR, 1, INT4OID, -1, 0, 0).unwrap();
+        let count_args =
+            NodeList::make1(mcx, Node::mk_target_entry(mcx, var, 1, None, false).unwrap())
+                .unwrap();
+        let var2 = Node::mk_var(mcx, OUTER_VAR, 1, INT4OID, -1, 0, 0).unwrap();
+        let sum_args =
+            NodeList::make1(mcx, Node::mk_target_entry(mcx, var2, 1, None, false).unwrap())
+                .unwrap();
+        let specs = [
+            // count(a): int8inc_any (2804), strict, 1 input, non-null init.
+            AggTransSpec {
+                transfn_oid: 2804,
+                inputcollid: 0,
+                init_value_is_null: false,
+                args: &count_args,
+                pergroup: base,
+            },
+            // sum(int4): int4_sum (1841), non-strict, null init.
+            AggTransSpec {
+                transfn_oid: 1841,
+                inputcollid: 0,
+                init_value_is_null: true,
+                args: &sum_args,
+                // SAFETY: index 1 of the 2-element local array.
+                pergroup: unsafe { NonNull::new_unchecked(base.as_ptr().add(1)) },
+            },
+        ];
+        let mut trans = exec_build_agg_trans(mcx, &specs, None, ParamBind::NONE).unwrap();
+        for v in [Some(7i32), None, Some(35)] {
+            let mut outer = virtual_slot(mcx, &[v]);
+            let mut slots = EvalSlots { scan: None, inner: None, outer: Some(&mut outer) };
+            crate::exec_eval_expr(&mut trans, &mut slots).unwrap();
+        }
+        assert_eq!(pergroup[0].trans_value.as_i64(), 2);
+        assert!(!pergroup[0].trans_value_is_null);
+        assert_eq!(pergroup[1].trans_value.as_i64(), 42);
+        assert!(!pergroup[1].trans_value_is_null);
     });
 }
 
@@ -751,5 +825,56 @@ fn param_sublink_is_loud() {
     with_mcx(|mcx| {
         let node = mk_param(mcx, ParamKind::PARAM_SUBLINK, 1, INT4OID);
         let _ = exec_init_expr(mcx, Some(node), ParamBind::NONE);
+    });
+}
+
+fn mk_minmax<'mcx>(mcx: Mcx<'mcx>, least: bool, vals: &[Option<i32>]) -> Node<'mcx> {
+    use ::types_nodes::primnodes::{MinMaxExpr, MinMaxOp};
+    let args: alloc::vec::Vec<Node<'mcx>> =
+        vals.iter().map(|v| mk_int4_const(mcx, *v)).collect();
+    Node::mk(
+        mcx,
+        MinMaxExpr {
+            minmaxtype: INT4OID,
+            minmaxcollid: 0,
+            inputcollid: 0,
+            op: if least { MinMaxOp::IS_LEAST } else { MinMaxOp::IS_GREATEST },
+            args: NodeList::from_slice(mcx, &args).unwrap(),
+            location: -1,
+        },
+    )
+    .unwrap()
+}
+
+#[test]
+fn minmax_greatest_least_and_null_handling() {
+    with_mcx(|mcx| {
+        let out = crate::evaluate_expr(mcx, mk_minmax(mcx, false, &[Some(1), Some(2), Some(3)]), INT4OID, -1, 0)
+            .unwrap();
+        let c = out.as_const().unwrap();
+        assert!(!c.constisnull);
+        assert_eq!(c.constvalue.as_i32(), 3);
+
+        let out = crate::evaluate_expr(mcx, mk_minmax(mcx, true, &[Some(1), Some(2), Some(3)]), INT4OID, -1, 0)
+            .unwrap();
+        assert_eq!(out.as_const().unwrap().constvalue.as_i32(), 1);
+
+        // NULL inputs are ignored (C ExecEvalMinMax).
+        let out = crate::evaluate_expr(
+            mcx,
+            mk_minmax(mcx, false, &[None, Some(-5), None, Some(4)]),
+            INT4OID,
+            -1,
+            0,
+        )
+        .unwrap();
+        let c = out.as_const().unwrap();
+        assert!(!c.constisnull);
+        assert_eq!(c.constvalue.as_i32(), 4);
+
+        // All-NULL result is NULL.
+        let out =
+            crate::evaluate_expr(mcx, mk_minmax(mcx, true, &[None, None]), INT4OID, -1, 0).unwrap();
+        assert!(out.as_const().unwrap().constisnull);
     });
 }

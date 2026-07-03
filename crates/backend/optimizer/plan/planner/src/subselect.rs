@@ -236,7 +236,7 @@ pub fn generate_new_exec_param<'mcx>(
     Ok((prm, Node::mk(run.mcx, prm)?))
 }
 
-fn get_first_col_type(plan: Node<'_>) -> (types_core::Oid, i32, types_core::Oid) {
+pub(crate) fn get_first_col_type(plan: Node<'_>) -> (types_core::Oid, i32, types_core::Oid) {
     if let Some(first) = plan.as_plan().expect("plan node").targetlist.first() {
         let tent = first.as_target_entry().expect("tlist entry");
         if !tent.resjunk {
@@ -248,7 +248,7 @@ fn get_first_col_type(plan: Node<'_>) -> (types_core::Oid, i32, types_core::Oid)
 }
 
 // cost_subplan (costsize.c), initplan slice (NULL testexpr: qual costs drop out).
-fn cost_subplan<'mcx>(splan: &mut SubPlan<'mcx>, plan: Node<'mcx>) {
+pub(crate) fn cost_subplan<'mcx>(splan: &mut SubPlan<'mcx>, plan: Node<'mcx>) {
     let p = plan.as_plan().expect("plan node");
     let mut startup = 0.0;
     let mut per_tuple = 0.0;
@@ -319,7 +319,7 @@ fn simplify_exists_query<'mcx>(run: &mut PlannerRun<'mcx>, query: &mut Query<'mc
 
 // The scribble copy for make_subplan: struct fields plus list cells; nodes
 // stay shared (see make_subplan comment).
-fn query_cells_copy<'mcx>(mcx: Mcx<'mcx>, q: &Query<'mcx>) -> PgResult<Query<'mcx>> {
+pub(crate) fn query_cells_copy<'mcx>(mcx: Mcx<'mcx>, q: &Query<'mcx>) -> PgResult<Query<'mcx>> {
     Ok(Query {
         commandType: q.commandType,
         querySource: q.querySource,
@@ -525,6 +525,16 @@ fn finalize_plan<'mcx>(
             }
         }
         NodeTag::T_SeqScan | NodeTag::T_Sort | NodeTag::T_Agg | NodeTag::T_Material => {}
+        // cteParam is linkage only; the CTE plan's extParam matters (C bug #4902).
+        NodeTag::T_CteScan => {
+            let plan_id = plan.as_cte_scan().unwrap().ctePlanId;
+            assert!(
+                plan_id >= 1 && plan_id as usize <= run.glob.subplans.len(),
+                "could not find plan for CteScan referencing plan ID {plan_id}"
+            );
+            let cteplan = run.glob.subplans.nth((plan_id - 1) as usize);
+            paramids.add_members(mcx, &cteplan.as_plan().expect("plan node").extParam)?;
+        }
         NodeTag::T_IndexScan => {
             let s = plan.as_index_scan().unwrap();
             finalize_primnode_list(run, &s.indexqual, &mut paramids)?;

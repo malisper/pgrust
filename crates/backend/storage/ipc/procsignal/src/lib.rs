@@ -108,6 +108,25 @@ fn loc(funcname: &'static str) -> ErrorLocation {
     ErrorLocation::new("procsignal.c", 0, funcname)
 }
 
+/// Crash-cycle reset in place to the post-ProcSignalShmemInit image
+/// (notes/crash-restart-design.md); postmaster thread only, all children dead.
+pub fn ProcSignalShmemResetAfterCrash() {
+    let header = proc_signal();
+    header.psh_barrierGeneration.store(0, Relaxed);
+    for slot in header.psh_slot {
+        slot.pss_pid.store(0, Relaxed);
+        slot.pss_cancel_key_len.set(0);
+        slot.pss_cancel_key.set([0; MAX_CANCEL_KEY_LENGTH]);
+        for flag in &slot.pss_signalFlags {
+            flag.store(false, Relaxed);
+        }
+        slot.pss_pendingThreadSignals.store(0, Relaxed);
+        slot.pss_mutex.unlock();
+        slot.pss_barrierGeneration.store(u64::MAX, Relaxed);
+        slot.pss_barrierCheckMask.store(0, Relaxed);
+    }
+}
+
 pub fn ProcSignalInit(cancel_key: &[u8]) -> PgResult<()> {
     debug_assert!(cancel_key.len() <= MAX_CANCEL_KEY_LENGTH);
     let my_proc_number = g::MyProcNumber();

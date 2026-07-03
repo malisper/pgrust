@@ -11,4 +11,5 @@ path = "src/lib.rs"
 [dependencies]
 trigger_seams = { path = "../trigger_seams" }
 types_core = { path = "../../../_support/types/types_core" }
+xact = { path = "../../access/transam/xact" }
 types_error = { path = "../../../_support/types/types_error" }

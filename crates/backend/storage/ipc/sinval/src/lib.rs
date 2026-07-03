@@ -229,6 +229,17 @@ pub fn SharedInvalShmemInit() -> PgResult<()> {
     Ok(())
 }
 
+/// Crash-cycle reset in place to the post-SharedInvalShmemInit image
+/// (notes/crash-restart-design.md); postmaster thread only, all children dead.
+pub fn SharedInvalShmemResetAfterCrash() {
+    let base = NonNull::new(SEG_BASE.load(Acquire))
+        .expect("SharedInvalShmemResetAfterCrash before SharedInvalShmemInit");
+    init_segment(SISeg {
+        base,
+        slots: SEG_SLOTS.load(Relaxed),
+    });
+}
+
 fn init_segment(seg: SISeg) {
     let h = seg.hdr();
     h.minMsgNum.store(0, Relaxed);

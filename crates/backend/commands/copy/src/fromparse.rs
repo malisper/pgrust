@@ -597,3 +597,66 @@ fn missing_data(attname: &str) -> Box<PgError> {
             .with_sqlstate(ERRCODE_BAD_COPY_FILE_FORMAT),
     )
 }
+
+#[doc(hidden)]
+pub mod bench_internals {
+    use mcx::{vec_append_bytes, Mcx, MemoryContext, PgVec};
+
+    use crate::from::CopyFromState;
+    use crate::CopyFormatOptions;
+
+    use super::EolType;
+
+    pub fn readattrs_state<'mcx>(
+        mcx: Mcx<'mcx>,
+        delim: u8,
+        null_print: &'static str,
+        max_fields: usize,
+    ) -> CopyFromState<'mcx, 'static> {
+        CopyFromState {
+            opts: CopyFormatOptions {
+                file_encoding: -1,
+                delim,
+                null_print,
+                header_line: false,
+            },
+            copy_file: -1,
+            filename: "",
+            raw_buf: PgVec::new_in(mcx),
+            raw_buf_index: 0,
+            raw_buf_len: 0,
+            raw_reached_eof: false,
+            input_reached_eof: false,
+            input_reached_error: false,
+            input_buf: None,
+            input_buf_index: 0,
+            input_buf_len: 0,
+            line_buf: PgVec::new_in(mcx),
+            attribute_buf: PgVec::new_in(mcx),
+            raw_fields: PgVec::new_in(mcx),
+            max_fields,
+            eol_type: EolType::Unknown,
+            cur_lineno: 0,
+            file_encoding: 0,
+            need_transcoding: false,
+            conversion_proc: 0,
+            convertcx: MemoryContext::new("copy bench"),
+            attnumlist: PgVec::new_in(mcx),
+            in_functions: PgVec::new_in(mcx),
+            typioparams: PgVec::new_in(mcx),
+            atttypmods: PgVec::new_in(mcx),
+            attnames: PgVec::new_in(mcx),
+            bytes_processed: 0,
+        }
+    }
+
+    pub fn read_attributes_text(st: &mut CopyFromState<'_, '_>, line: &[u8]) -> usize {
+        st.line_buf.clear();
+        vec_append_bytes(&mut st.line_buf, line).unwrap();
+        st.copy_read_attributes_text().unwrap()
+    }
+
+    pub fn raw_fields<'a>(st: &'a CopyFromState<'_, '_>) -> (&'a [i32], &'a [u8]) {
+        (&st.raw_fields, &st.attribute_buf)
+    }
+}

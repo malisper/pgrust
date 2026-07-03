@@ -239,10 +239,91 @@ fn spill_to_tape_is_loud() {
 }
 
 #[test]
-#[should_panic(expected = "multi-reader")]
-fn extra_read_pointer_is_loud() {
+fn follower_read_pointer_replays_leader_fill() {
+    let mcx = leaked_mcx();
+    let desc = int4_desc(mcx, 1);
+    let mut ts = Tuplestore::begin_heap(true, true, 64);
+    ts.set_eflags(EXEC_FLAG_REWIND);
+    let follower = ts.alloc_read_pointer(EXEC_FLAG_REWIND);
+    assert_eq!(follower, 1);
+
+    let mut slot =
+        exectuples::make_tuple_table_slot(mcx, TupleSlotKind::MinimalTuple, Some(desc.clone()));
+    // Leader (ptr 0) reads to EOF then fills; the ACTIVE eof pointer stays
+    // at EOF across writes (why CteScanNext returns the subplan slot itself).
+    put_i32(&mut ts, &desc, 10);
+    assert!(ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
+    assert_eq!(read_i32(&mut slot), 10);
+    assert!(!ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
+    put_i32(&mut ts, &desc, 20);
+    put_i32(&mut ts, &desc, 30);
+    assert!(!ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
+
+    // Follower replays the whole store independently.
+    ts.select_read_pointer(follower);
+    for v in [10, 20, 30] {
+        assert!(ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
+        assert_eq!(read_i32(&mut slot), v);
+    }
+    assert!(!ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
+    assert!(ts.ateof());
+
+    ts.rescan();
+    assert!(ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
+    assert_eq!(read_i32(&mut slot), 10);
+
+    ts.select_read_pointer(0);
+    assert!(ts.ateof());
+}
+
+#[test]
+fn inactive_eof_pointer_advances_to_next_write() {
+    let mcx = leaked_mcx();
+    let desc = int4_desc(mcx, 1);
+    let mut ts = Tuplestore::begin_heap(true, true, 64);
+    let follower = ts.alloc_read_pointer(EXEC_FLAG_REWIND);
+
+    put_i32(&mut ts, &desc, 1);
+    let mut slot =
+        exectuples::make_tuple_table_slot(mcx, TupleSlotKind::MinimalTuple, Some(desc.clone()));
+    ts.select_read_pointer(follower);
+    assert!(ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
+    assert!(!ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
+
+    // Follower hits EOF, becomes inactive, then a write lands: C spec says an
+    // INACTIVE eof pointer un-eofs onto the new tuple.
+    ts.select_read_pointer(0);
+    put_i32(&mut ts, &desc, 2);
+    ts.select_read_pointer(follower);
+    assert!(ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
+    assert_eq!(read_i32(&mut slot), 2);
+}
+
+#[test]
+fn new_pointer_copies_pointer_zero_position() {
+    let mcx = leaked_mcx();
+    let desc = int4_desc(mcx, 1);
+    let mut ts = Tuplestore::begin_heap(true, true, 64);
+    for v in [1, 2, 3] {
+        put_i32(&mut ts, &desc, v);
+    }
+    let mut slot =
+        exectuples::make_tuple_table_slot(mcx, TupleSlotKind::MinimalTuple, Some(desc.clone()));
+    assert!(ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
+    let p = ts.alloc_read_pointer(EXEC_FLAG_REWIND);
+    ts.select_read_pointer(p);
+    assert!(ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
+    assert_eq!(read_i32(&mut slot), 2);
+}
+
+#[test]
+#[should_panic(expected = "too late to require new tuplestore eflags")]
+fn late_eflags_increase_is_loud() {
+    let mcx = leaked_mcx();
+    let desc = int4_desc(mcx, 1);
     let mut ts = Tuplestore::begin_heap(false, true, 64);
-    let _ = ts.alloc_read_pointer(0);
+    put_i32(&mut ts, &desc, 1);
+    let _ = ts.alloc_read_pointer(EXEC_FLAG_BACKWARD);
 }
 
 #[test]
@@ -308,4 +389,39 @@ fn putvalues_packs_varlena_short_form() {
     assert_eq!((b0 >> 1) as usize, 1 + payload.len());
     let data = unsafe { std::slice::from_raw_parts(p.add(1), payload.len()) };
     assert_eq!(data, payload);
+}
+
+#[test]
+fn skiptuples_and_advance_window_navigation() {
+    let mcx = leaked_mcx();
+    let desc = int4_desc(mcx, 1);
+    let mut ts = Tuplestore::begin_heap(false, true, 64);
+    ts.set_eflags(0);
+    let rp = ts.alloc_read_pointer(::types_slot::EXEC_FLAG_BACKWARD);
+    for v in 0..10 {
+        put_i32(&mut ts, &desc, v);
+    }
+    let mut slot = exectuples::make_tuple_table_slot(mcx, TupleSlotKind::MinimalTuple, Some(desc));
+
+    ts.select_read_pointer(rp);
+    assert!(ts.skiptuples(4, true));
+    assert!(ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
+    assert_eq!(read_i32(&mut slot), 4);
+
+    // seekpos == pos refetch shape: advance forward, then read backward.
+    assert!(ts.advance(true));
+    assert!(ts.gettupleslot(false, false, &mut slot, mcx).unwrap());
+    assert_eq!(read_i32(&mut slot), 4);
+
+    assert!(ts.skiptuples(3, false));
+    assert!(ts.gettupleslot(false, false, &mut slot, mcx).unwrap());
+    assert_eq!(read_i32(&mut slot), 0);
+
+    // Forward skip past EOF fails and leaves the pointer at EOF.
+    assert!(!ts.skiptuples(50, true));
+    assert!(!ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
+    // Backward from EOF: last tuple.
+    assert!(ts.gettupleslot(false, false, &mut slot, mcx).unwrap());
+    assert_eq!(read_i32(&mut slot), 9);
+    ts.end();
 }

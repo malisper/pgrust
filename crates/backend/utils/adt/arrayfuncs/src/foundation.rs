@@ -75,6 +75,9 @@ pub fn arr_lbound(a: &[u8], i: usize) -> i32 {
 }
 
 // Read ndim + dims[] + lbound[] into stack arrays.
+// inline(always): outlined, the 52-byte tuple returns via an sret stack buffer
+// (store-to-load forwarding stall on Neoverse V2 — bench-crate §3b).
+#[inline(always)]
 pub fn read_dims_lbounds(a: &[u8]) -> (i32, [i32; MAXDIM], [i32; MAXDIM]) {
     let ndim = arr_ndim(a);
     let mut dims = [0i32; MAXDIM];
@@ -144,19 +147,31 @@ fn cstr_len(p: *const u8) -> usize {
 }
 
 // fetch_att: byval reads the element word (zero-extended, consumers truncate);
-// byref returns a real pointer into the image as the Datum word.
-#[inline]
+// byref returns a real pointer into the image as the Datum word. Switched
+// direct loads (C's fetch_att macro shape) — a variable-length copy here
+// compiles to a memcpy call per element.
+#[inline(always)]
 pub fn fetch_att(p: *const u8, byval: bool, len: i32) -> Datum {
     if byval {
-        let mut w = [0u8; 8];
         // SAFETY: len in {1,2,4,8}; p points at len live bytes in the image.
         unsafe {
-            core::ptr::copy_nonoverlapping(p, w.as_mut_ptr(), len as usize);
+            match len {
+                1 => Datum::from_u64(*p as u64),
+                2 => Datum::from_u64((p as *const u16).read_unaligned() as u64),
+                4 => Datum::from_u64((p as *const u32).read_unaligned() as u64),
+                8 => Datum::from_u64((p as *const u64).read_unaligned()),
+                _ => bad_fetch_att_len(),
+            }
         }
-        Datum::from_u64(u64::from_ne_bytes(w))
     } else {
         Datum::from_usize(p as usize)
     }
+}
+
+#[cold]
+#[inline(never)]
+fn bad_fetch_att_len() -> ! {
+    panic!("fetch_att: unsupported byval length")
 }
 
 // att_addlength over a data pointer for the element at p.

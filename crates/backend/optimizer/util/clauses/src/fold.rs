@@ -11,7 +11,10 @@ use mcx::Mcx;
 use syscache_seams::PgProcShape;
 use types_core::{InvalidOid, Oid, OidIsValid};
 use types_error::{PgError, PgResult};
-use types_nodes::primnodes::{CoercionForm, Const, FuncExpr, OpExpr, ParamKind};
+use types_nodes::primnodes::{
+    BoolExpr, BoolExprType, CaseExpr, CaseWhen, CoalesceExpr, CoerceViaIO, CoercionForm, Const,
+    FuncExpr, OpExpr, ParamKind,
+};
 use types_nodes::{Node, NodeList, NodeTag};
 use types_portal::params::{ParamExternData, PARAM_FLAG_CONST};
 use types_portal::{params, ParamListHandle};
@@ -20,6 +23,9 @@ use crate::walker::{deferred, expression_tree_mutator, mutate_list};
 
 const RECORDOID: Oid = 2249;
 const INT4OID: Oid = 23;
+const BOOLOID: Oid = 16;
+const OIDOID: Oid = 26;
+const CSTRINGOID: Oid = 2275;
 const BOOLEAN_EQUAL_OPERATOR: Oid = 91;
 const BOOLEAN_NOT_EQUAL_OPERATOR: Oid = 85;
 
@@ -29,6 +35,9 @@ struct EceContext<'mcx> {
     mcx: Mcx<'mcx>,
     estimate: bool,
     bound_params: ParamListHandle,
+    // C context->case_val: the constant test value of the innermost
+    // simple-form CASE being simplified (save/restore in the CASE arm).
+    case_val: core::cell::Cell<Option<Node<'mcx>>>,
 }
 
 pub fn eval_const_expressions<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>) -> PgResult<Node<'mcx>> {
@@ -40,7 +49,8 @@ pub fn eval_const_expressions_with_params<'mcx>(
     node: Node<'mcx>,
     bound_params: ParamListHandle,
 ) -> PgResult<Node<'mcx>> {
-    let cx = EceContext { mcx, estimate: false, bound_params };
+    let cx =
+        EceContext { mcx, estimate: false, bound_params, case_val: core::cell::Cell::new(None) };
     Ok(ece_mutator(node, &cx)?.unwrap_or(node))
 }
 
@@ -48,7 +58,12 @@ pub fn estimate_expression_value<'mcx>(
     mcx: Mcx<'mcx>,
     node: Node<'mcx>,
 ) -> PgResult<Node<'mcx>> {
-    let cx = EceContext { mcx, estimate: true, bound_params: ParamListHandle::NULL };
+    let cx = EceContext {
+        mcx,
+        estimate: true,
+        bound_params: ParamListHandle::NULL,
+        case_val: core::cell::Cell::new(None),
+    };
     Ok(ece_mutator(node, &cx)?.unwrap_or(node))
 }
 
@@ -218,16 +233,269 @@ fn ece_mutator<'mcx>(node: Node<'mcx>, cx: &EceContext<'mcx>) -> PgResult<Option
                 }
             }
         }
+        NodeTag::T_BoolExpr => {
+            let b = node.as_bool_expr().unwrap();
+            match b.boolop {
+                BoolExprType::OR_EXPR | BoolExprType::AND_EXPR => {
+                    let is_or = b.boolop == BoolExprType::OR_EXPR;
+                    let mut newargs = NodeList::nil();
+                    let mut have_null = false;
+                    if simplify_bool_arguments(cx, &b.args, is_or, &mut newargs, &mut have_null)?
+                    {
+                        return Ok(Some(make_bool_const(cx.mcx, is_or, false)?));
+                    }
+                    if have_null {
+                        newargs.lappend(cx.mcx, make_bool_const(cx.mcx, false, true)?)?;
+                    }
+                    if newargs.is_nil() {
+                        return Ok(Some(make_bool_const(cx.mcx, !is_or, false)?));
+                    }
+                    if newargs.len() == 1 {
+                        return Ok(Some(newargs.nth(0)));
+                    }
+                    Ok(Some(Node::mk(
+                        cx.mcx,
+                        BoolExpr { boolop: b.boolop, args: newargs, location: -1 },
+                    )?))
+                }
+                BoolExprType::NOT_EXPR => {
+                    debug_assert_eq!(b.args.len(), 1);
+                    let arg = b.args.nth(0);
+                    let arg = ece_mutator(arg, cx)?.unwrap_or(arg);
+                    Ok(Some(negate_clause(cx.mcx, arg)?))
+                }
+            }
+        }
+        NodeTag::T_CoerceViaIO => {
+            let e = node.as_coerce_via_io().unwrap();
+            let mut args = NodeList::make1(cx.mcx, e.arg)?;
+            let (outfunc, _) = lsyscache::getTypeOutputInfo(coerce_arg_type(e.arg))?;
+            let (infunc, intypioparam) = lsyscache::getTypeInputInfo(e.resulttype)?;
+
+            let (simple, new_args) = simplify_function(
+                cx,
+                outfunc,
+                CSTRINGOID,
+                -1,
+                InvalidOid,
+                InvalidOid,
+                &args,
+                false,
+                true,
+                true,
+            )?;
+            if let Some(a) = new_args {
+                args = a;
+            }
+            if let Some(simple) = simple {
+                let mut inargs = NodeList::make1(cx.mcx, simple)?;
+                inargs.lappend(
+                    cx.mcx,
+                    Node::mk(
+                        cx.mcx,
+                        Const {
+                            consttype: OIDOID,
+                            consttypmod: -1,
+                            constcollid: InvalidOid,
+                            constlen: 4,
+                            constvalue: Datum::from_oid(intypioparam),
+                            constisnull: false,
+                            constbyval: true,
+                            location: -1,
+                        },
+                    )?,
+                )?;
+                inargs.lappend(
+                    cx.mcx,
+                    Node::mk(
+                        cx.mcx,
+                        Const {
+                            consttype: INT4OID,
+                            consttypmod: -1,
+                            constcollid: InvalidOid,
+                            constlen: 4,
+                            constvalue: Datum::from_i32(-1),
+                            constisnull: false,
+                            constbyval: true,
+                            location: -1,
+                        },
+                    )?,
+                )?;
+                let (simple, _) = simplify_function(
+                    cx,
+                    infunc,
+                    e.resulttype,
+                    -1,
+                    e.resultcollid,
+                    InvalidOid,
+                    &inargs,
+                    false,
+                    false,
+                    true,
+                )?;
+                if simple.is_some() {
+                    return Ok(simple);
+                }
+            }
+            Ok(Some(Node::mk(
+                cx.mcx,
+                CoerceViaIO {
+                    arg: args.nth(0),
+                    resulttype: e.resulttype,
+                    resultcollid: e.resultcollid,
+                    coerceformat: e.coerceformat,
+                    location: e.location,
+                },
+            )?))
+        }
+        NodeTag::T_CaseExpr => {
+            let ce = node.as_case_expr().unwrap();
+            let mut newarg = match ce.arg {
+                Some(a) => Some(ece_mutator(a, cx)?.unwrap_or(a)),
+                None => None,
+            };
+            let save_case_val = cx.case_val.replace(match newarg {
+                Some(n) if n.node_tag() == NodeTag::T_Const => newarg.take(),
+                _ => None,
+            });
+            let restore = |r: PgResult<Option<Node<'mcx>>>| {
+                cx.case_val.set(save_case_val);
+                r
+            };
+            let mut newargs = NodeList::nil();
+            let mut const_true_cond = false;
+            let mut defresult: Option<Node<'mcx>> = None;
+            for w in &ce.args {
+                let cw = w.as_case_when().expect("CASE args are CaseWhen");
+                let expr = cw.expr.expect("CaseWhen.expr is never NULL");
+                let casecond = match ece_mutator(expr, cx) {
+                    Ok(c) => c.unwrap_or(expr),
+                    Err(e) => return restore(Err(e)),
+                };
+                if let Some(c) = casecond.as_const() {
+                    if c.constisnull || !c.constvalue.as_bool() {
+                        continue;
+                    }
+                    const_true_cond = true;
+                }
+                let result = cw.result.expect("CaseWhen.result is never NULL");
+                let caseresult = match ece_mutator(result, cx) {
+                    Ok(c) => c.unwrap_or(result),
+                    Err(e) => return restore(Err(e)),
+                };
+                if !const_true_cond {
+                    let ncw = match Node::mk(
+                        cx.mcx,
+                        CaseWhen {
+                            expr: Some(casecond),
+                            result: Some(caseresult),
+                            location: cw.location,
+                        },
+                    ) {
+                        Ok(n) => n,
+                        Err(e) => return restore(Err(e)),
+                    };
+                    if let Err(e) = newargs.lappend(cx.mcx, ncw) {
+                        return restore(Err(e));
+                    }
+                    continue;
+                }
+                defresult = Some(caseresult);
+                break;
+            }
+            if !const_true_cond {
+                // transformCaseExpr always supplies an ELSE (implicit NULL).
+                let dr = ce.defresult.expect("CaseExpr.defresult is never NULL");
+                defresult = Some(match ece_mutator(dr, cx) {
+                    Ok(d) => d.unwrap_or(dr),
+                    Err(e) => return restore(Err(e)),
+                });
+            }
+            cx.case_val.set(save_case_val);
+            if newargs.is_nil() {
+                return Ok(defresult);
+            }
+            Ok(Some(Node::mk(
+                cx.mcx,
+                CaseExpr {
+                    casetype: ce.casetype,
+                    casecollid: ce.casecollid,
+                    arg: newarg,
+                    args: newargs,
+                    defresult,
+                    location: ce.location,
+                },
+            )?))
+        }
+        NodeTag::T_CaseTestExpr => match cx.case_val.get() {
+            // C copyObject(case_val); the Const is rebuilt (never shared).
+            Some(v) => Ok(Some(Node::mk(cx.mcx, *v.as_const().unwrap())?)),
+            None => Ok(None),
+        },
+        NodeTag::T_CoalesceExpr => {
+            let co = node.as_coalesce_expr().unwrap();
+            let mut newargs = NodeList::nil();
+            for a in &co.args {
+                let e = ece_mutator(a, cx)?.unwrap_or(a);
+                if let Some(c) = e.as_const() {
+                    if c.constisnull {
+                        continue;
+                    }
+                    if newargs.is_nil() {
+                        return Ok(Some(e));
+                    }
+                    newargs.lappend(cx.mcx, e)?;
+                    break;
+                }
+                newargs.lappend(cx.mcx, e)?;
+            }
+            if newargs.is_nil() {
+                return Ok(Some(make_null_const(
+                    cx.mcx,
+                    co.coalescetype,
+                    -1,
+                    co.coalescecollid,
+                )?));
+            }
+            Ok(Some(Node::mk(
+                cx.mcx,
+                CoalesceExpr {
+                    coalescetype: co.coalescetype,
+                    coalescecollid: co.coalescecollid,
+                    args: newargs,
+                    location: co.location,
+                },
+            )?))
+        }
+        // C's immutable-inputs generic arm: simplify args, fold whole node
+        // when every input is Const (SubscriptingRef/ArrayExpr/RowExpr wait
+        // for their vocabularies).
+        NodeTag::T_MinMaxExpr => {
+            let new = expression_tree_mutator(cx.mcx, node, &mut |n| ece_mutator(n, cx))?;
+            let eff = new.unwrap_or(node);
+            if all_arguments_const(eff)? {
+                let mm = eff.as_min_max_expr().unwrap();
+                return clauses_seams::evaluate_expr::call(
+                    cx.mcx,
+                    eff,
+                    mm.minmaxtype,
+                    -1,
+                    mm.minmaxcollid,
+                )
+                .map(Some);
+            }
+            Ok(new)
+        }
         NodeTag::T_Var
         | NodeTag::T_Const
         | NodeTag::T_RangeTblRef
-        | NodeTag::T_CaseTestExpr
         | NodeTag::T_CurrentOfExpr
         | NodeTag::T_SortGroupClause => Ok(None),
         // Aggref takes C's default ece_generic_processing arm: fold inside
         // the aggregate's arguments, never the Aggref itself. SubLink likewise
         // (C folds testexpr only; the sub-Query waits for SS_process_sublinks).
         NodeTag::T_Aggref
+        | NodeTag::T_WindowFunc
         | NodeTag::T_TargetEntry
         | NodeTag::T_FromExpr
         | NodeTag::T_SubLink
@@ -399,6 +667,96 @@ fn make_null_const<'mcx>(
             location: -1,
         },
     )
+}
+
+// C simplify_or_arguments/simplify_and_arguments: flatten nested same-op
+// BoolExprs (pre- and post-simplification), fold Const inputs. Returns true
+// on C's forceTrue/forceFalse.
+fn simplify_bool_arguments<'mcx>(
+    cx: &EceContext<'mcx>,
+    args: &NodeList<'mcx>,
+    is_or: bool,
+    newargs: &mut NodeList<'mcx>,
+    have_null: &mut bool,
+) -> PgResult<bool> {
+    let same_op = |n: Node<'mcx>| {
+        n.as_bool_expr().filter(|b| {
+            b.boolop
+                == if is_or { BoolExprType::OR_EXPR } else { BoolExprType::AND_EXPR }
+        })
+    };
+    for arg in args {
+        if let Some(sub) = same_op(arg) {
+            if simplify_bool_arguments(cx, &sub.args, is_or, newargs, have_null)? {
+                return Ok(true);
+            }
+            continue;
+        }
+        let arg = ece_mutator(arg, cx)?.unwrap_or(arg);
+        if let Some(sub) = same_op(arg) {
+            if simplify_bool_arguments(cx, &sub.args, is_or, newargs, have_null)? {
+                return Ok(true);
+            }
+            continue;
+        }
+        if let Some(c) = arg.as_const() {
+            if c.constisnull {
+                *have_null = true;
+            } else if c.constvalue.as_bool() == is_or {
+                return Ok(true);
+            }
+            continue;
+        }
+        newargs.lappend(cx.mcx, arg)?;
+    }
+    Ok(false)
+}
+
+fn negate_clause<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>) -> PgResult<Node<'mcx>> {
+    match node.node_tag() {
+        NodeTag::T_Const => {
+            let c = node.as_const().unwrap();
+            debug_assert_eq!(c.consttype, BOOLOID);
+            if c.constisnull {
+                return make_bool_const(mcx, false, true);
+            }
+            make_bool_const(mcx, !c.constvalue.as_bool(), false)
+        }
+        other => panic!(
+            "negate_clause (prepqual.c): arm for {other:?} unported — \
+             unit backend-optimizer-prep-prepqual"
+        ),
+    }
+}
+
+fn make_bool_const<'mcx>(mcx: Mcx<'mcx>, value: bool, isnull: bool) -> PgResult<Node<'mcx>> {
+    Node::mk(
+        mcx,
+        Const {
+            consttype: BOOLOID,
+            consttypmod: -1,
+            constcollid: InvalidOid,
+            constlen: 1,
+            constvalue: Datum::from_bool(value),
+            constisnull: isnull,
+            constbyval: true,
+            location: -1,
+        },
+    )
+}
+
+// Closed-set exprType over CoerceViaIO's possible transformed args.
+fn coerce_arg_type(node: Node<'_>) -> Oid {
+    match node.node_tag() {
+        NodeTag::T_Const => node.as_const().unwrap().consttype,
+        NodeTag::T_Var => node.as_var().unwrap().vartype,
+        NodeTag::T_Param => node.as_param().unwrap().paramtype,
+        NodeTag::T_FuncExpr => node.as_func_expr().unwrap().funcresulttype,
+        NodeTag::T_OpExpr => node.as_op_expr().unwrap().opresulttype,
+        NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resulttype,
+        NodeTag::T_CoerceViaIO => node.as_coerce_via_io().unwrap().resulttype,
+        other => deferred("coerce_arg_type (exprType)", other),
+    }
 }
 
 /// Reduce "x = true" to "x", "x <> false" to "x"; the NOT-wrapping legs

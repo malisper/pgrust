@@ -88,5 +88,6 @@ pub(crate) fn decode(
              extractRelOptions/RelationParseRelOptions unported (reloptions unit)"
         );
     }
-    Ok(ScannedPgClass { form, options: None })
+    let relchecks = req(td, tup, 20)?.as_i16();
+    Ok(ScannedPgClass { form, relchecks, options: None })
 }

@@ -186,6 +186,22 @@ pub fn ProcArrayShmemInit() {
         .unwrap_or_else(|_| panic!("ProcArrayShmemInit called twice"));
 }
 
+/// Crash-cycle reset in place (notes/crash-restart-design.md): the empty
+/// post-ProcArrayShmemInit image; maxProcs is PGC_POSTMASTER-stable.
+pub fn ProcArrayShmemResetAfterCrash() {
+    let array = procArray();
+    assert_eq!(
+        array.maxProcs as usize,
+        ProcGlobal().allProcs.len() - NUM_AUXILIARY_PROCS as usize
+    );
+    array.numProcs.set(0);
+    array.replication_slot_xmin.set(InvalidTransactionId);
+    array.replication_slot_catalog_xmin.set(InvalidTransactionId);
+    for slot in array.pgprocnos.iter() {
+        slot.set(-1);
+    }
+}
+
 pub fn GetMaxSnapshotXidCount() -> usize {
     procArray().maxProcs as usize
 }

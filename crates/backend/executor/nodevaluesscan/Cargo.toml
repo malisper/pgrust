@@ -1,0 +1,28 @@
+[package]
+name = "nodevaluesscan"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "nodevaluesscan"
+path = "src/lib.rs"
+
+[dependencies]
+datum = { path = "../../../_support/types/datum" }
+mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_nodes = { path = "../../../_support/types/nodes" }
+types_scan = { path = "../../../_support/types/types_scan" }
+types_slot = { path = "../../../_support/types/types_slot" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+clauses = { path = "../../optimizer/util/clauses" }
+execexpr = { path = "../execexpr" }
+execscan = { path = "../execscan" }
+exectuples = { path = "../exectuples" }
+executils = { path = "../executils" }
+tupdesc = { path = "../../access/common/tupdesc" }
+
+[dev-dependencies]
+syscache_seams = { path = "../../utils/cache/syscache_seams" }

@@ -143,6 +143,19 @@ unsafe fn unify_cursor_lifetime<'u>(s: &DeclareCursorStmt<'_>) -> &'u DeclareCur
     unsafe { core::mem::transmute::<&DeclareCursorStmt<'_>, &'u DeclareCursorStmt<'u>>(s) }
 }
 
+// Same retention contract: EvaluateParams transforms the raw param exprs in
+// the statement arena, which outlives the utility call.
+unsafe fn unify_execute_lifetime<'u>(
+    s: &types_nodes::parsenodes::ExecuteStmt<'_>,
+) -> &'u types_nodes::parsenodes::ExecuteStmt<'u> {
+    unsafe {
+        core::mem::transmute::<
+            &types_nodes::parsenodes::ExecuteStmt<'_>,
+            &'u types_nodes::parsenodes::ExecuteStmt<'u>,
+        >(s)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn dispatch_switch<'mcx>(
     mcx: Mcx<'mcx>,
@@ -271,7 +284,9 @@ fn dispatch_switch<'mcx>(
         }
         T_ExecuteStmt => {
             let stmt = parsetree.as_execute_stmt().unwrap();
-            prepare::ExecuteQuery(stmt, params, dest, qc.as_deref_mut())?;
+            // SAFETY: see unify_execute_lifetime.
+            let stmt = unsafe { unify_execute_lifetime(stmt) };
+            prepare::ExecuteQuery(mcx, stmt, source_text, params, dest, qc.as_deref_mut())?;
         }
         T_DeallocateStmt => {
             CheckRestrictedOperation("DEALLOCATE")?;

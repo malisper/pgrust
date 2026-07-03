@@ -78,6 +78,7 @@ fn install_scan_fixtures() {
             470 => Some(shape(16, 2, b'f', true)),
             // pg_proc.dat rows for the plain-agg lane (agg::* tests).
             2803 => Some(shape(20, 0, b'a', false)),
+            3100 | 3101 => Some(shape(20, 0, b'w', false)),
             2108 => Some(shape(20, 1, b'a', false)),
             1219 => Some(shape(20, 1, b'f', true)),
             1841 => Some(shape(20, 2, b'f', false)),
@@ -169,9 +170,21 @@ fn install_scan_fixtures() {
     });
     syscache_seams::pg_proc_cost_shape::set(|funcid| {
         Ok(match funcid {
-            INT4EQ_PROC | 66 | 1219 | 1841 | 470 => {
+            INT4EQ_PROC | 66 | 1219 | 1841 | 470 | 2108 => {
                 Some(syscache_seams::PgProcCostShape { procost: 1.0, prorows: 0.0, prosupport: 0 })
             }
+            // row_number/rank/dense_rank carry live prosupport rows; the
+            // support fns return NULL for SupportRequestCost (adt_windowfuncs).
+            3100 => Some(syscache_seams::PgProcCostShape {
+                procost: 1.0,
+                prorows: 0.0,
+                prosupport: 6233,
+            }),
+            3101 => Some(syscache_seams::PgProcCostShape {
+                procost: 1.0,
+                prorows: 0.0,
+                prosupport: 6234,
+            }),
             _ => None,
         })
     });
@@ -259,11 +272,12 @@ fn install_scan_fixtures() {
     // cache, fed by pg_class/pg_index fixtures underneath its build seams.
     relcache_build_seams::scan_pg_relation::set(|relid, _, _| {
         Ok((relid == TBL).then(|| relcache_build_seams::ScannedPgClass {
+            relchecks: 0,
             form: make_pg_class(TBL, "t", b'r', 2, true),
             options: None,
         }))
     });
-    relcache_build_seams::relation_build_tuple_desc::set(|mcx, _, _| {
+    relcache_build_seams::relation_build_tuple_desc::set(|mcx, _, _, _| {
         Ok(std::rc::Rc::new(types_tuple::TupleDescData {
             natts: 0,
             tdtypeid: 0,
@@ -905,26 +919,103 @@ fn guc_boot_values_match_the_settings_tables() {
     }
 }
 
-#[test]
-#[should_panic(expected = "M2")]
-fn from_cte_rte_panics_loudly() {
-    let cx = cx();
-    let mcx = cx.mcx();
-    let mut parse = select_1_query(mcx);
+// The analyzer's output for `WITH x AS (SELECT pk, val FROM t) SELECT pk, val FROM x`.
+fn with_cte_query(mcx: Mcx<'_>, cterefcount: i32) -> Query<'_> {
+    let cte = types_nodes::parsenodes::CommonTableExpr {
+        ctename: Some("x"),
+        ctequery: Some(Node::mk(mcx, table_query(mcx, None)).unwrap()),
+        cterefcount,
+        ..Default::default()
+    };
+    let mut colnames = NodeList::make1(mcx, Node::mk_string(mcx, "pk").unwrap()).unwrap();
+    colnames.lappend(mcx, Node::mk_string(mcx, "val").unwrap()).unwrap();
+    let eref = alloc_leak_in(
+        mcx,
+        types_nodes::primnodes::Alias { aliasname: Some("x"), colnames },
+    )
+    .unwrap();
     let mut rte = Node::build::<types_nodes::parsenodes::RangeTblEntry>(mcx).unwrap();
-    // Relations plan for real since the M2 landing; CTE RTEs are still loud.
     rte.rtekind = RTEKind::RTE_CTE;
-    rte.relid = 16384;
-    parse.rtable = NodeList::make1(mcx, rte.seal()).unwrap();
+    rte.ctename = Some("x");
+    rte.ctelevelsup = 0;
+    rte.eref = Some(eref);
+    rte.inFromCl = true;
+    let rtable = NodeList::make1(mcx, rte.seal()).unwrap();
     let rtr = Node::mk_range_tbl_ref(mcx, 1).unwrap();
     let jointree = alloc_leak_in(
         mcx,
         FromExpr { fromlist: NodeList::make1(mcx, rtr).unwrap(), quals: None },
     )
     .unwrap();
-    parse.jointree = Some(jointree);
+    let pk = Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap();
+    let val = Node::mk_var(mcx, 1, 2, 23, -1, 0, 0).unwrap();
+    let tle1 = Node::mk_target_entry(mcx, pk, 1, Some("pk"), false).unwrap();
+    let tle2 = Node::mk_target_entry(mcx, val, 2, Some("val"), false).unwrap();
+    let mut target_list = NodeList::make1(mcx, tle1).unwrap();
+    target_list.lappend(mcx, tle2).unwrap();
+    Query {
+        commandType: CmdType::CMD_SELECT,
+        canSetTag: true,
+        cteList: NodeList::make1(mcx, Node::mk(mcx, cte).unwrap()).unwrap(),
+        jointree: Some(jointree),
+        rtable,
+        targetList: target_list,
+        stmt_location: 0,
+        stmt_len: 50,
+        ..Query::default()
+    }
+}
 
-    let _ = planner(mcx, parse, "SELECT 1 FROM t", CURSOR_OPT_PARALLEL_OK, ParamListHandle::NULL);
+#[test]
+fn with_cte_plans_to_ctescan_over_an_initplan_subplan() {
+    let cx = cx();
+    let mcx = cx.mcx();
+    let stmt = planner(
+        mcx,
+        with_cte_query(mcx, 1),
+        "WITH x AS (SELECT pk, val FROM t) SELECT pk, val FROM x",
+        CURSOR_OPT_PARALLEL_OK,
+        ParamListHandle::NULL,
+    )
+    .unwrap();
+
+    assert_eq!(stmt.subplans.len(), 1);
+    assert_eq!(stmt.subplans.nth(0).node_tag(), NodeTag::T_SeqScan);
+    assert_eq!(stmt.paramExecTypes.len(), 1);
+
+    let plan = stmt.planTree.unwrap();
+    assert_eq!(plan.node_tag(), NodeTag::T_CteScan);
+    let cscan = plan.as_cte_scan().unwrap();
+    assert_eq!(cscan.ctePlanId, 1);
+    assert_eq!(cscan.cteParam, 0);
+    // Top plan flattens first (as C); the subplan's SeqScan gets the offset.
+    assert_eq!(stmt.rtable.len(), 2);
+    assert_eq!(cscan.scan.scanrelid, 1);
+    assert_eq!(stmt.subplans.nth(0).as_seq_scan().unwrap().scan.scanrelid, 2);
+    assert_eq!(cscan.scan.plan.plan_rows, 10000.0);
+
+    assert_eq!(cscan.scan.plan.initPlan.len(), 1);
+    let sp = cscan.scan.plan.initPlan.nth(0).as_sub_plan().unwrap();
+    assert_eq!(sp.plan_id, 1);
+    assert_eq!(sp.plan_name, Some("CTE x"));
+    assert_eq!(sp.setParam.nth(0), 0);
+}
+
+#[test]
+fn unreferenced_select_cte_is_skipped() {
+    let cx = cx();
+    let mcx = cx.mcx();
+    let mut parse = with_cte_query(mcx, 0);
+    parse.rtable = NodeList::nil();
+    parse.targetList = select_1_query(mcx).targetList;
+    let jointree =
+        alloc_leak_in(mcx, FromExpr { fromlist: NodeList::nil(), quals: None }).unwrap();
+    parse.jointree = Some(jointree);
+    let stmt =
+        planner(mcx, parse, "WITH x AS (...) SELECT 1", CURSOR_OPT_PARALLEL_OK, ParamListHandle::NULL)
+            .unwrap();
+    assert!(stmt.subplans.is_nil());
+    assert_eq!(stmt.planTree.unwrap().node_tag(), NodeTag::T_Result);
 }
 
 // Plain-aggregation lane. Fixtures superset the shared ones so Once ordering
@@ -1393,6 +1484,60 @@ mod sort_limit {
     use super::*;
     use types_nodes::parsenodes::SortGroupClause;
 
+    // SELECT 1 ORDER BY 1: the const sort expr forms an ec_has_const EC, the
+    // pathkey is EC_MUST_BE_REDUNDANT, and C plans a bare Result (no Sort).
+    #[test]
+    fn const_order_by_pathkey_is_redundant() {
+        install_fixtures();
+        let cx = cx();
+        let mcx = cx.mcx();
+        let mut parse = select_1_query(mcx);
+        let konst = Node::mk_const(mcx, 23, -1, 0, 4, Datum::from_i32(1), false, true).unwrap();
+        let tle = Node::mk(
+            mcx,
+            types_nodes::primnodes::TargetEntry {
+                expr: konst,
+                resno: 1,
+                resname: Some("?column?"),
+                ressortgroupref: 1,
+                resorigtbl: 0,
+                resorigcol: 0,
+                resjunk: false,
+            },
+        )
+        .unwrap();
+        parse.targetList = NodeList::make1(mcx, tle).unwrap();
+        parse.sortClause = NodeList::make1(
+            mcx,
+            Node::mk(
+                mcx,
+                SortGroupClause {
+                    tleSortGroupRef: 1,
+                    eqop: INT4EQ_OP,
+                    sortop: INT4_LT_OP,
+                    reverse_sort: false,
+                    nulls_first: false,
+                    hashable: true,
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let stmt = planner(
+            mcx,
+            parse,
+            "SELECT 1 ORDER BY 1",
+            CURSOR_OPT_PARALLEL_OK,
+            ParamListHandle::NULL,
+        )
+        .unwrap();
+        let plan = stmt.planTree.unwrap();
+        assert_eq!(plan.node_tag(), NodeTag::T_Result);
+        let result = plan.as_result().unwrap();
+        assert!(result.plan.lefttree.is_none());
+        assert_eq!(result.plan.total_cost, 0.01);
+    }
+
     // The analyzer's output for `SELECT pk FROM t ORDER BY val LIMIT 2`:
     // val is a resjunk tlist entry carrying the sortgroupref.
     fn order_by_limit_query(mcx: Mcx<'_>) -> Query<'_> {
@@ -1815,6 +1960,108 @@ mod join {
         let again = again.unwrap();
         let mj2 = again.planTree.unwrap().as_merge_join().expect("MergeJoin root");
         assert_eq!(mj2.join.plan.total_cost, mj.join.plan.total_cost);
+    }
+
+    // Parser output for `jt1 JOIN jt2 ON jt1.a = jt2.a`: an RTE_JOIN entry and
+    // a JoinExpr jointree carrying the ON qual.
+    fn join_on_query<'mcx>(mcx: Mcx<'mcx>) -> Query<'mcx> {
+        let mut q = join_query(mcx);
+        let f = q.jointree.unwrap();
+        let on_qual = f.quals.expect("equijoin qual");
+
+        let mut joinaliasvars = NodeList::nil();
+        let mut colnames = NodeList::nil();
+        for (varno, attno, name) in [(1, 1, "a"), (1, 2, "pad"), (2, 1, "a"), (2, 2, "pad")] {
+            joinaliasvars
+                .lappend(mcx, Node::mk_var(mcx, varno, attno, 23, -1, 0, 0).unwrap())
+                .unwrap();
+            colnames.lappend(mcx, Node::mk_string(mcx, name).unwrap()).unwrap();
+        }
+        let mut leftcols = types_nodes::list::IntList::nil();
+        let mut rightcols = types_nodes::list::IntList::nil();
+        for c in [1, 2] {
+            leftcols.lappend(mcx, c).unwrap();
+            rightcols.lappend(mcx, c).unwrap();
+        }
+        let eref = Node::mk_mut(
+            mcx,
+            types_nodes::Alias { aliasname: Some("unnamed_join"), colnames },
+        )
+        .unwrap()
+        .seal_ref();
+        let mut jrte = Node::build::<types_nodes::parsenodes::RangeTblEntry>(mcx).unwrap();
+        jrte.rtekind = RTEKind::RTE_JOIN;
+        jrte.jointype = types_nodes::JoinType::JOIN_INNER;
+        jrte.joinaliasvars = joinaliasvars;
+        jrte.joinleftcols = leftcols;
+        jrte.joinrightcols = rightcols;
+        jrte.eref = Some(eref);
+        jrte.inFromCl = true;
+        q.rtable.lappend(mcx, jrte.seal()).unwrap();
+
+        let join = Node::mk(
+            mcx,
+            types_nodes::JoinExpr {
+                jointype: types_nodes::JoinType::JOIN_INNER,
+                isNatural: false,
+                larg: f.fromlist.nth(0),
+                rarg: f.fromlist.nth(1),
+                usingClause: NodeList::nil(),
+                join_using_alias: None,
+                quals: Some(on_qual),
+                alias: None,
+                rtindex: 3,
+            },
+        )
+        .unwrap();
+        q.jointree = Some(
+            alloc_leak_in(
+                mcx,
+                FromExpr { fromlist: NodeList::make1(mcx, join).unwrap(), quals: None },
+            )
+            .unwrap(),
+        );
+        q
+    }
+
+    // JOIN ... ON must deconstruct to the same jointree shape as the comma
+    // join (C deconstruct_jointree) — identical plan, identical costs, with
+    // the RTE_JOIN entry riding along in the flat rtable.
+    #[test]
+    fn explicit_inner_join_on_matches_comma_join_plan() {
+        let _guc = crate::tests::GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cx = cx();
+        let mcx = cx.mcx();
+        let stmt = planner(
+            mcx,
+            join_on_query(mcx),
+            "SELECT * FROM jt1 JOIN jt2 ON jt1.a = jt2.a",
+            CURSOR_OPT_PARALLEL_OK,
+            ParamListHandle::NULL,
+        )
+        .unwrap();
+
+        assert_eq!(stmt.rtable.len(), 3);
+        assert_eq!(stmt.relationOids.len(), 2);
+        let jrte = stmt.rtable.nth(2).as_range_tbl_entry().unwrap();
+        assert_eq!(jrte.rtekind, RTEKind::RTE_JOIN);
+        // add_rte_to_flat_rtable zaps the join alias lists.
+        assert!(jrte.joinaliasvars.is_nil());
+
+        let nl = stmt.planTree.unwrap().as_nest_loop().expect("NestLoop root");
+        assert_eq!(nl.join.plan.startup_cost, 0.0);
+        assert!((nl.join.plan.total_cost - 2.055).abs() < 1e-9, "{}", nl.join.plan.total_cost);
+        assert_eq!(nl.join.plan.plan_rows, 1.0);
+        assert_eq!(nl.join.plan.plan_width, 16);
+        assert_eq!(nl.join.joinqual.len(), 1);
+        let op = nl.join.joinqual.nth(0).as_op_expr().expect("join filter OpExpr");
+        assert_eq!(op.opno, INT4EQ_OP);
+        assert_outer_inner_var(op.args.nth(0), OUTER_VAR, 1);
+        assert_outer_inner_var(op.args.nth(1), INNER_VAR, 1);
+        let outer = nl.join.plan.lefttree.unwrap().as_seq_scan().expect("outer SeqScan");
+        assert_eq!(outer.scan.scanrelid, 1);
+        let inner = nl.join.plan.righttree.unwrap().as_seq_scan().expect("inner SeqScan");
+        assert_eq!(inner.scan.scanrelid, 2);
     }
 }
 
@@ -2360,4 +2607,500 @@ fn uncorrelated_exists_plans_to_gating_result_over_initplan() {
     assert_eq!(subplan.node_tag(), NodeTag::T_SeqScan);
     assert!(subplan.as_plan().unwrap().targetlist.is_nil());
     assert_eq!(subplan.as_seq_scan().unwrap().scan.scanrelid, 2);
+}
+
+// The analyzer's output for `VALUES (3), (1), (2)` (bare multi-row VALUES).
+fn values_query(mcx: Mcx<'_>) -> Query<'_> {
+    let mut values_lists = NodeList::nil();
+    for v in [3, 1, 2] {
+        let konst = Node::mk_const(mcx, 23, -1, 0, 4, Datum::from_i32(v), false, true).unwrap();
+        let row = Node::mk_list(mcx, NodeList::make1(mcx, konst).unwrap()).unwrap();
+        values_lists.lappend(mcx, row).unwrap();
+    }
+    let colname = Node::mk_string(mcx, "column1").unwrap();
+    let eref = mcx::alloc_leak_in(
+        mcx,
+        types_nodes::primnodes::Alias {
+            aliasname: Some("*VALUES*"),
+            colnames: NodeList::make1(mcx, colname).unwrap(),
+        },
+    )
+    .unwrap();
+    let mut rte = Node::build::<types_nodes::parsenodes::RangeTblEntry>(mcx).unwrap();
+    rte.rtekind = RTEKind::RTE_VALUES;
+    rte.values_lists = values_lists;
+    rte.eref = Some(eref);
+    let rtable = NodeList::make1(mcx, rte.seal()).unwrap();
+    let rtr = Node::mk_range_tbl_ref(mcx, 1).unwrap();
+    let jointree =
+        alloc_leak_in(mcx, FromExpr { fromlist: NodeList::make1(mcx, rtr).unwrap(), quals: None })
+            .unwrap();
+    let var = Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap();
+    let tle = Node::mk_target_entry(mcx, var, 1, Some("column1"), false).unwrap();
+    Query {
+        commandType: CmdType::CMD_SELECT,
+        canSetTag: true,
+        jointree: Some(jointree),
+        rtable,
+        targetList: NodeList::make1(mcx, tle).unwrap(),
+        stmt_location: 0,
+        stmt_len: 22,
+        ..Query::default()
+    }
+}
+
+#[test]
+fn multi_row_values_plans_to_values_scan() {
+    let cx = cx();
+    let mcx = cx.mcx();
+    let stmt = planner(
+        mcx,
+        values_query(mcx),
+        "VALUES (3), (1), (2)",
+        CURSOR_OPT_PARALLEL_OK,
+        ParamListHandle::NULL,
+    )
+    .unwrap();
+
+    let plan = stmt.planTree.unwrap();
+    assert_eq!(plan.node_tag(), NodeTag::T_ValuesScan);
+    let vscan = plan.as_values_scan().unwrap();
+    assert_eq!(vscan.scan.scanrelid, 1);
+    assert_eq!(vscan.values_lists.len(), 3);
+    assert_eq!(vscan.scan.plan.plan_rows, 3.0);
+    assert_eq!(vscan.scan.plan.plan_width, 4);
+    // C EXPLAIN: Values Scan on "*VALUES*" (cost=0.00..0.04 rows=3 width=4):
+    // 3 * (cpu_operator_cost 0.0025 + cpu_tuple_cost 0.01).
+    assert_eq!(vscan.scan.plan.startup_cost, 0.0);
+    assert!((vscan.scan.plan.total_cost - 0.0375).abs() < 1e-9);
+    let tle = vscan.scan.plan.targetlist.nth(0).as_target_entry().unwrap();
+    assert_eq!(tle.resname, Some("column1"));
+    assert_eq!(tle.expr.as_var().unwrap().varattno, 1);
+}
+
+// `SELECT * FROM (VALUES (2, 6), (1, 7)) v(a, b)` after parse analysis:
+// outer query over an RTE_SUBQUERY whose subquery is the VALUES Query.
+#[test]
+fn from_values_subquery_pulls_up_to_values_scan() {
+    let cx = cx();
+    let mcx = cx.mcx();
+
+    let mut values_lists = NodeList::nil();
+    for (a, b) in [(2, 6), (1, 7)] {
+        let mut row = NodeList::nil();
+        for v in [a, b] {
+            row.lappend(
+                mcx,
+                Node::mk_const(mcx, 23, -1, 0, 4, Datum::from_i32(v), false, true).unwrap(),
+            )
+            .unwrap();
+        }
+        values_lists.lappend(mcx, Node::mk_list(mcx, row).unwrap()).unwrap();
+    }
+    let mut colnames = NodeList::make1(mcx, Node::mk_string(mcx, "column1").unwrap()).unwrap();
+    colnames.lappend(mcx, Node::mk_string(mcx, "column2").unwrap()).unwrap();
+    let eref = mcx::alloc_leak_in(
+        mcx,
+        types_nodes::primnodes::Alias { aliasname: Some("*VALUES*"), colnames },
+    )
+    .unwrap();
+    let mut vrte = Node::build::<types_nodes::parsenodes::RangeTblEntry>(mcx).unwrap();
+    vrte.rtekind = RTEKind::RTE_VALUES;
+    vrte.values_lists = values_lists;
+    vrte.eref = Some(eref);
+    let inner_rtable = NodeList::make1(mcx, vrte.seal()).unwrap();
+    let inner_jt = alloc_leak_in(
+        mcx,
+        FromExpr {
+            fromlist: NodeList::make1(mcx, Node::mk_range_tbl_ref(mcx, 1).unwrap()).unwrap(),
+            quals: None,
+        },
+    )
+    .unwrap();
+    let mut inner_tl = NodeList::nil();
+    for j in 1..=2i16 {
+        let var = Node::mk_var(mcx, 1, j, 23, -1, 0, 0).unwrap();
+        inner_tl
+            .lappend(mcx, Node::mk_target_entry(mcx, var, j, Some("column"), false).unwrap())
+            .unwrap();
+    }
+    let inner = mcx::alloc_leak_in(
+        mcx,
+        Query {
+            commandType: CmdType::CMD_SELECT,
+            jointree: Some(inner_jt),
+            rtable: inner_rtable,
+            targetList: inner_tl,
+            ..Query::default()
+        },
+    )
+    .unwrap();
+
+    let mut srte = Node::build::<types_nodes::parsenodes::RangeTblEntry>(mcx).unwrap();
+    srte.rtekind = RTEKind::RTE_SUBQUERY;
+    srte.subquery = Some(inner);
+    let vcols = {
+        let mut l = NodeList::make1(mcx, Node::mk_string(mcx, "a").unwrap()).unwrap();
+        l.lappend(mcx, Node::mk_string(mcx, "b").unwrap()).unwrap();
+        l
+    };
+    srte.eref = Some(
+        mcx::alloc_leak_in(
+            mcx,
+            types_nodes::primnodes::Alias { aliasname: Some("v"), colnames: vcols },
+        )
+        .unwrap(),
+    );
+    let rtable = NodeList::make1(mcx, srte.seal()).unwrap();
+    let jointree = alloc_leak_in(
+        mcx,
+        FromExpr {
+            fromlist: NodeList::make1(mcx, Node::mk_range_tbl_ref(mcx, 1).unwrap()).unwrap(),
+            quals: None,
+        },
+    )
+    .unwrap();
+    let mut target_list = NodeList::nil();
+    for (j, name) in [(1i16, "a"), (2, "b")] {
+        let var = Node::mk_var(mcx, 1, j, 23, -1, 0, 0).unwrap();
+        target_list
+            .lappend(mcx, Node::mk_target_entry(mcx, var, j, Some(name), false).unwrap())
+            .unwrap();
+    }
+    let parse = Query {
+        commandType: CmdType::CMD_SELECT,
+        canSetTag: true,
+        jointree: Some(jointree),
+        rtable,
+        targetList: target_list,
+        stmt_location: 0,
+        stmt_len: 48,
+        ..Query::default()
+    };
+
+    let stmt = planner(
+        mcx,
+        parse,
+        "SELECT * FROM (VALUES (2, 6), (1, 7)) v(a, b)",
+        CURSOR_OPT_PARALLEL_OK,
+        ParamListHandle::NULL,
+    )
+    .unwrap();
+
+    assert_eq!(stmt.rtable.len(), 2);
+    let plan = stmt.planTree.unwrap();
+    assert_eq!(plan.node_tag(), NodeTag::T_ValuesScan);
+    let vscan = plan.as_values_scan().unwrap();
+    assert_eq!(vscan.scan.scanrelid, 2);
+    assert_eq!(vscan.values_lists.len(), 2);
+    assert_eq!(vscan.scan.plan.plan_rows, 2.0);
+    let tle = vscan.scan.plan.targetlist.nth(0).as_target_entry().unwrap();
+    assert_eq!(tle.resname, Some("a"));
+    let v = tle.expr.as_var().unwrap();
+    assert_eq!((v.varno, v.varattno), (2, 1));
+}
+
+mod window {
+    use super::*;
+    use types_nodes::parsenodes::{SortGroupClause, WindowClause};
+    use types_nodes::primnodes::{WindowFunc, OUTER_VAR};
+    use types_nodes::rawnodes::FRAMEOPTION_DEFAULTS;
+
+    const ROW_NUMBER: u32 = 3100;
+    const RANK: u32 = 3101;
+    const SUM_INT4: u32 = 2108;
+    const INT8OID: u32 = 20;
+
+    fn sgc(sortgroupref: u32) -> SortGroupClause {
+        SortGroupClause {
+            tleSortGroupRef: sortgroupref,
+            eqop: INT4EQ_OP,
+            sortop: INT4_LT_OP,
+            reverse_sort: false,
+            nulls_first: false,
+            hashable: true,
+        }
+    }
+
+    // The analyzer's output for
+    //   SELECT pk, row_number() OVER (PARTITION BY pk ORDER BY val) FROM t.
+    fn window_query(mcx: Mcx<'_>) -> Query<'_> {
+        let mut parse = table_query(mcx, None);
+        let wfunc = Node::mk(
+            mcx,
+            WindowFunc {
+                winfnoid: ROW_NUMBER,
+                wintype: INT8OID,
+                winref: 1,
+                ..WindowFunc::default()
+            },
+        )
+        .unwrap();
+        let pk = Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap();
+        let val = Node::mk_var(mcx, 1, 2, 23, -1, 0, 0).unwrap();
+        let tle1 = Node::mk(
+            mcx,
+            types_nodes::primnodes::TargetEntry {
+                expr: pk,
+                resno: 1,
+                resname: Some("pk"),
+                ressortgroupref: 1,
+                resorigtbl: 0,
+                resorigcol: 0,
+                resjunk: false,
+            },
+        )
+        .unwrap();
+        let tle2 = Node::mk_target_entry(mcx, wfunc, 2, Some("row_number"), false).unwrap();
+        let tle3 = Node::mk(
+            mcx,
+            types_nodes::primnodes::TargetEntry {
+                expr: val,
+                resno: 3,
+                resname: None,
+                ressortgroupref: 2,
+                resorigtbl: 0,
+                resorigcol: 0,
+                resjunk: true,
+            },
+        )
+        .unwrap();
+        let mut tlist = NodeList::make2(mcx, tle1, tle2).unwrap();
+        tlist.lappend(mcx, tle3).unwrap();
+        parse.targetList = tlist;
+        let wc = Node::mk(
+            mcx,
+            WindowClause {
+                partitionClause: NodeList::make1(mcx, Node::mk(mcx, sgc(2)).unwrap()).unwrap(),
+                orderClause: NodeList::make1(mcx, Node::mk(mcx, sgc(2)).unwrap()).unwrap(),
+                frameOptions: FRAMEOPTION_DEFAULTS,
+                winref: 1,
+                ..WindowClause::default()
+            },
+        )
+        .unwrap();
+        parse.windowClause = NodeList::make1(mcx, wc).unwrap();
+        parse.hasWindowFuncs = true;
+        parse
+    }
+
+    #[test]
+    fn window_plans_to_windowagg_over_sort() {
+        let _guc = crate::tests::GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cx = cx();
+        let mcx = cx.mcx();
+        let stmt = planner(
+            mcx,
+            window_query(mcx),
+            "SELECT pk, row_number() OVER (PARTITION BY val ORDER BY val) FROM t",
+            CURSOR_OPT_PARALLEL_OK,
+            ParamListHandle::NULL,
+        )
+        .unwrap();
+
+        let plan = stmt.planTree.unwrap();
+        let wagg = plan.as_window_agg().expect("WindowAgg root");
+        assert_eq!(wagg.winname, Some("w1"));
+        assert_eq!(wagg.winref, 1);
+        assert_eq!(wagg.partNumCols, 1);
+        assert_eq!(wagg.partOperators, &[INT4EQ_OP]);
+        assert_eq!(wagg.partCollations, &[0]);
+        assert_eq!(wagg.ordNumCols, 1);
+        assert_eq!(wagg.ordOperators, &[INT4EQ_OP]);
+        assert_eq!(wagg.frameOptions, FRAMEOPTION_DEFAULTS);
+        assert!(wagg.startOffset.is_none() && wagg.endOffset.is_none());
+        assert!(wagg.runCondition.is_nil());
+        assert_eq!(wagg.plan.plan_rows, 10000.0);
+
+        // tlist: pk (OUTER var), row_number (WindowFunc), junk val. The
+        // window input target lists sgref columns first (val), then the
+        // flattened pk — so pk reads child column 2.
+        assert_eq!(wagg.plan.targetlist.len(), 3);
+        let tle1 = wagg.plan.targetlist.nth(0).as_target_entry().unwrap();
+        let v = tle1.expr.as_var().unwrap();
+        assert_eq!((v.varno, v.varattno), (OUTER_VAR, 2));
+        let tle2 = wagg.plan.targetlist.nth(1).as_target_entry().unwrap();
+        let wf = tle2.expr.as_window_func().expect("WindowFunc survives setrefs");
+        assert_eq!(wf.winfnoid, ROW_NUMBER);
+        assert_eq!(wf.winref, 1);
+
+        let sort = wagg.plan.lefttree.unwrap().as_sort().expect("Sort below WindowAgg");
+        // PARTITION BY val ORDER BY val: the order pathkey is redundant with
+        // the partition pathkey, so one sort key; both plan arrays keep val.
+        assert_eq!(sort.numCols, 1);
+        // Sort's own tlist is dummy OUTER refs after setrefs; the real key
+        // expr lives in the scan tlist below (projection scribbles onto it).
+        let scan_tl = &plan_of_node(sort.plan.lefttree.unwrap()).targetlist;
+        let key_att = |resno: i16| get_sort_tl_var(scan_tl, resno);
+        assert_eq!(key_att(sort.sortColIdx[0]), 2);
+        assert_eq!(sort.sortOperators, &[INT4_LT_OP]);
+        assert_eq!(sort.nullsFirst, &[false]);
+        assert_eq!(wagg.partColIdx[0], sort.sortColIdx[0]);
+        assert_eq!(wagg.ordColIdx[0], sort.sortColIdx[0]);
+
+        let sscan = sort.plan.lefttree.unwrap().as_seq_scan().expect("SeqScan below Sort");
+        assert_eq!(sscan.scan.plan.plan_rows, 10000.0);
+
+        // WindowAgg preserves input ordering and never lowers cost.
+        assert!(wagg.plan.total_cost > sort.plan.total_cost);
+        assert!(wagg.plan.startup_cost >= sort.plan.startup_cost);
+    }
+
+    // SELECT val, sum(val) OVER (PARTITION BY pk), rank() OVER (ORDER BY val):
+    // two windows stack two WindowAggs with a Sort under each (rank's
+    // (val) ordering sorts after sum's (pk) — select_active_windows order).
+    #[test]
+    fn two_windows_stack_two_windowaggs() {
+        let _guc = crate::tests::GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cx = cx();
+        let mcx = cx.mcx();
+        let mut parse = table_query(mcx, None);
+        let val = Node::mk_var(mcx, 1, 2, 23, -1, 0, 0).unwrap();
+        let sum_arg = val;
+        let sum_wf = Node::mk(
+            mcx,
+            WindowFunc {
+                winfnoid: SUM_INT4,
+                wintype: INT8OID,
+                args: NodeList::make1(mcx, sum_arg).unwrap(),
+                winref: 1,
+                winagg: true,
+                ..WindowFunc::default()
+            },
+        )
+        .unwrap();
+        let rank_wf = Node::mk(
+            mcx,
+            WindowFunc {
+                winfnoid: RANK,
+                wintype: INT8OID,
+                winref: 2,
+                ..WindowFunc::default()
+            },
+        )
+        .unwrap();
+        let tle1 = Node::mk(
+            mcx,
+            types_nodes::primnodes::TargetEntry {
+                expr: val,
+                resno: 1,
+                resname: Some("val"),
+                ressortgroupref: 2,
+                resorigtbl: 0,
+                resorigcol: 0,
+                resjunk: false,
+            },
+        )
+        .unwrap();
+        let tle2 = Node::mk_target_entry(mcx, sum_wf, 2, Some("sum"), false).unwrap();
+        let tle3 = Node::mk_target_entry(mcx, rank_wf, 3, Some("rank"), false).unwrap();
+        let pk = Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap();
+        let tle4 = Node::mk(
+            mcx,
+            types_nodes::primnodes::TargetEntry {
+                expr: pk,
+                resno: 4,
+                resname: None,
+                ressortgroupref: 1,
+                resorigtbl: 0,
+                resorigcol: 0,
+                resjunk: true,
+            },
+        )
+        .unwrap();
+        let mut tlist = NodeList::make2(mcx, tle1, tle2).unwrap();
+        tlist.lappend(mcx, tle3).unwrap();
+        tlist.lappend(mcx, tle4).unwrap();
+        parse.targetList = tlist;
+        let wc1 = Node::mk(
+            mcx,
+            WindowClause {
+                partitionClause: NodeList::make1(mcx, Node::mk(mcx, sgc(1)).unwrap()).unwrap(),
+                frameOptions: FRAMEOPTION_DEFAULTS,
+                winref: 1,
+                ..WindowClause::default()
+            },
+        )
+        .unwrap();
+        let wc2 = Node::mk(
+            mcx,
+            WindowClause {
+                orderClause: NodeList::make1(mcx, Node::mk(mcx, sgc(2)).unwrap()).unwrap(),
+                frameOptions: FRAMEOPTION_DEFAULTS,
+                winref: 2,
+                ..WindowClause::default()
+            },
+        )
+        .unwrap();
+        let mut wcl = NodeList::make1(mcx, wc1).unwrap();
+        wcl.lappend(mcx, wc2).unwrap();
+        parse.windowClause = wcl;
+        parse.hasWindowFuncs = true;
+
+        let stmt = planner(
+            mcx,
+            parse,
+            "SELECT val, sum(val) OVER (PARTITION BY pk), rank() OVER (ORDER BY val) FROM t",
+            CURSOR_OPT_PARALLEL_OK,
+            ParamListHandle::NULL,
+        )
+        .unwrap();
+
+        let top = stmt.planTree.unwrap().as_window_agg().expect("top WindowAgg");
+        let top_wf = top
+            .plan
+            .targetlist
+            .nth(1)
+            .as_target_entry()
+            .unwrap()
+            .expr
+            .as_window_func()
+            .expect("top window func");
+        assert_eq!(top_wf.winfnoid, SUM_INT4);
+        assert!(top_wf.args.nth(0).as_var().is_some());
+        assert_eq!(top.partNumCols, 1);
+        assert_eq!(top.ordNumCols, 0);
+        assert!(top.topWindow);
+
+        let sort2 = top.plan.lefttree.unwrap().as_sort().expect("Sort between WindowAggs");
+        assert_eq!(sort2.numCols, 1);
+        let lower = sort2.plan.lefttree.unwrap().as_window_agg().expect("lower WindowAgg");
+        assert_eq!(lower.partNumCols, 0);
+        assert_eq!(lower.ordNumCols, 1);
+        assert!(!lower.topWindow);
+        let lower_wf_tle = lower
+            .plan
+            .targetlist
+            .iter()
+            .filter_map(|n| n.as_target_entry().unwrap().expr.as_window_func())
+            .next()
+            .expect("rank in lower tlist");
+        assert_eq!(lower_wf_tle.winfnoid, RANK);
+        assert!(lower_wf_tle.args.is_nil());
+        let sort1 = lower.plan.lefttree.unwrap().as_sort().expect("Sort below lower WindowAgg");
+        assert_eq!(sort1.numCols, 1);
+        assert!(sort1.plan.lefttree.unwrap().as_seq_scan().is_some());
+
+        assert_eq!(lower.winname, Some("w1"));
+        assert_eq!(top.winname, Some("w2"));
+    }
+
+    fn plan_of_node<'a, 'mcx>(n: Node<'mcx>) -> &'a types_nodes::plannodes::Plan<'mcx>
+    where
+        'mcx: 'a,
+    {
+        n.as_plan().expect("plan node")
+    }
+
+    fn get_sort_tl_var(tlist: &NodeList<'_>, resno: i16) -> i16 {
+        tlist
+            .iter()
+            .map(|n| n.as_target_entry().unwrap())
+            .find(|t| t.resno == resno)
+            .expect("sort key tle")
+            .expr
+            .as_var()
+            .expect("sort key is a Var")
+            .varattno
+    }
 }

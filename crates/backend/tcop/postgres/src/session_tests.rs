@@ -20,6 +20,10 @@ thread_local! {
     static WIRE: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     static INPUT: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     static INPUT_POS: Cell<usize> = const { Cell::new(0) };
+    static CURRENT_RESOWNER: Cell<types_resowner::ResourceOwner> =
+        const { Cell::new(types_resowner::ResourceOwner::NULL) };
+    static SNAPSHOT_REFS: RefCell<Vec<(types_resowner::ResourceOwner, usize)>> =
+        const { RefCell::new(Vec::new()) };
 }
 
 // The process-wide stub set shared by every test module in this crate (the
@@ -328,6 +332,18 @@ fn install_catalog_fixture() {
                     proargtypes: mcx::PgVec::new_in(mcx),
                 });
             }
+            "sum" => {
+                let mut one = mcx::vec_with_capacity_in(mcx, 1)?;
+                one.extend([INT4OID]);
+                v.push(syscache_seams::PgProcCandidate {
+                    oid: 2108,
+                    pronamespace: 11,
+                    pronargs: 1,
+                    pronargdefaults: 0,
+                    provariadic: 0,
+                    proargtypes: one,
+                });
+            }
             _ => {}
         }
         Ok(v)
@@ -347,12 +363,12 @@ fn install_catalog_fixture() {
                 proisstrict: true,
                 proleakproof: false,
             }),
-            2803 => Some(syscache_seams::PgProcShape {
+            2803 | 2108 => Some(syscache_seams::PgProcShape {
                 pronamespace: 11,
                 prorettype: INT8OID,
                 provariadic: 0,
                 prosupport: 0,
-                pronargs: 0,
+                pronargs: if funcid == 2108 { 1 } else { 0 },
                 prokind: b'a' as i8,
                 provolatile: b'i' as i8,
                 proparallel: b's' as i8,
@@ -373,8 +389,11 @@ fn install_catalog_fixture() {
     syscache_seams::pg_type_typtype::set(|_| Ok(Some(b'b' as i8)));
     aclchk_seams::object_aclcheck::set(|_, _, _, _| Ok(0));
     syscache_seams::pg_aggregate_agginitval::set(|mcx, aggfnoid| {
-        debug_assert_eq!(aggfnoid, 2803);
-        Ok(Some(Some(mcx::PgString::from_str_in("0", mcx)?)))
+        Ok(match aggfnoid {
+            2803 => Some(Some(mcx::PgString::from_str_in("0", mcx)?)),
+            2108 => Some(None),
+            _ => None,
+        })
     });
     syscache_seams::pg_proc_result_arrays::set(|_, _| {
         Ok(Some(syscache_seams::PgProcResultArraysShape {
@@ -384,10 +403,10 @@ fn install_catalog_fixture() {
         }))
     });
     syscache_seams::lookup_pg_aggregate_shape::set(|aggfnoid| {
-        Ok((aggfnoid == 2803).then_some(syscache_seams::PgAggregateShape {
+        Ok(matches!(aggfnoid, 2803 | 2108).then_some(syscache_seams::PgAggregateShape {
             aggkind: b'n' as i8,
             aggnumdirectargs: 0,
-            aggtransfn: 1219,
+            aggtransfn: if aggfnoid == 2108 { 1841 } else { 1219 },
             aggfinalfn: 0,
             aggcombinefn: 463,
             aggserialfn: 0,
@@ -455,10 +474,30 @@ fn install_fixtures() {
         });
         aclchk_seams::pg_parameter_aclcheck_set::set(|_, _| Ok(true));
         mbutils_seams::get_database_encoding::set(|| 6 /* UTF8 */);
-        resowner_seams::current_resource_owner::set(|| types_resowner::ResourceOwner::NULL);
+        // Stateful stand-ins: remember/forget must pair on the same owner, as
+        // the real resowner enforces (pins the PortalRun owner-switch fix).
+        resowner_seams::current_resource_owner::set(|| CURRENT_RESOWNER.with(|c| c.get()));
+        resowner_seams::set_current_resource_owner::set(|owner| {
+            CURRENT_RESOWNER.with(|c| c.set(owner))
+        });
+        resowner_seams::top_transaction_resource_owner::set(|| {
+            types_resowner::ResourceOwner::from_parts(7, 7)
+        });
         resowner_seams::resource_owner_enlarge::set(|_| Ok(()));
-        resowner_seams::resource_owner_remember_snapshot::set(|_, _| {});
-        resowner_seams::resource_owner_forget_snapshot::set(|_, _| {});
+        resowner_seams::resource_owner_remember_snapshot::set(|owner, snapshot| {
+            SNAPSHOT_REFS.with(|v| v.borrow_mut().push((owner, std::rc::Rc::as_ptr(&snapshot) as usize)));
+        });
+        resowner_seams::resource_owner_forget_snapshot::set(|owner, snapshot| {
+            let key = (owner, std::rc::Rc::as_ptr(&snapshot) as usize);
+            SNAPSHOT_REFS.with(|v| {
+                let mut v = v.borrow_mut();
+                let i = v
+                    .iter()
+                    .rposition(|&e| e == key)
+                    .unwrap_or_else(|| panic!("snapshot not owned by {owner:?}"));
+                v.remove(i);
+            });
+        });
         resowner_portal_seams::resource_owner_create_portal::set(|| {
             types_resowner::ResourceOwner::from_parts(1, 1)
         });
@@ -477,9 +516,19 @@ fn install_fixtures() {
             };
             if !qd.is_null() {
                 if !failed {
-                    execmain_seams::executor_finish::call(qd)?;
-                    execmain_seams::executor_end::call(qd)?;
-                    execmain_seams::free_query_desc::call(qd);
+                    let save = CURRENT_RESOWNER.with(|c| c.get());
+                    let owner = portal.borrow().resowner;
+                    if !owner.is_null() {
+                        CURRENT_RESOWNER.with(|c| c.set(owner));
+                    }
+                    let r = (|| -> types_error::PgResult<()> {
+                        execmain_seams::executor_finish::call(qd)?;
+                        execmain_seams::executor_end::call(qd)?;
+                        execmain_seams::free_query_desc::call(qd);
+                        Ok(())
+                    })();
+                    CURRENT_RESOWNER.with(|c| c.set(save));
+                    r?;
                 } else {
                     execmain_seams::release_query_desc::call(qd);
                 }
@@ -893,6 +942,72 @@ fn simple_query_count_over_generate_series() {
     let datarows: Vec<&Vec<u8>> = all.iter().filter(|(t, _)| *t == b'D').map(|(_, b)| b).collect();
     assert_eq!(datarows.len(), 1, "frame types: {:?}", all.iter().map(|f| f.0 as char).collect::<Vec<_>>());
     assert_eq!(core::str::from_utf8(&datarows[0][6..]).unwrap(), "1000");
+}
+
+fn datarow_cols(body: &[u8]) -> Vec<String> {
+    let ncols = u16::from_be_bytes([body[0], body[1]]) as usize;
+    let mut cols = Vec::with_capacity(ncols);
+    let mut off = 2;
+    for _ in 0..ncols {
+        let len = i32::from_be_bytes(body[off..off + 4].try_into().unwrap());
+        off += 4;
+        assert!(len >= 0);
+        cols.push(String::from_utf8(body[off..off + len as usize].to_vec()).unwrap());
+        off += len as usize;
+    }
+    cols
+}
+
+#[test]
+fn simple_query_count_sum_over_generate_series() {
+    install_generate_series_fixture();
+
+    let input: Vec<u8> = [
+        simple_query_msg("SELECT count(*), sum(g) FROM generate_series(1, 100) g"),
+        msg(b'X', &[]),
+    ]
+    .concat();
+    let wire = run_session(input);
+    let all = frames(&wire);
+
+    let datarows: Vec<&Vec<u8>> = all.iter().filter(|(t, _)| *t == b'D').map(|(_, b)| b).collect();
+    assert_eq!(datarows.len(), 1, "frame types: {:?}", all.iter().map(|f| f.0 as char).collect::<Vec<_>>());
+    assert_eq!(datarow_cols(datarows[0]), ["100", "5050"]);
+}
+
+#[test]
+fn simple_query_prepare_execute_deallocate_round_trip() {
+    install_generate_series_fixture();
+
+    let input: Vec<u8> = [
+        simple_query_msg("PREPARE s AS SELECT 1; EXECUTE s; DEALLOCATE s"),
+        simple_query_msg("EXECUTE s"),
+        msg(b'X', &[]),
+    ]
+    .concat();
+    let wire = run_session(input);
+    let all = frames(&wire);
+
+    let tags: Vec<&[u8]> =
+        all.iter().filter(|(t, _)| *t == b'C').map(|(_, b)| b.as_slice()).collect();
+    assert_eq!(
+        tags,
+        [b"PREPARE\0".as_slice(), b"SELECT 1\0", b"DEALLOCATE\0"],
+        "frame types: {:?}",
+        all.iter().map(|f| f.0 as char).collect::<Vec<_>>()
+    );
+    let datarows: Vec<&Vec<u8>> = all.iter().filter(|(t, _)| *t == b'D').map(|(_, b)| b).collect();
+    assert_eq!(datarows.len(), 1);
+    assert_eq!(core::str::from_utf8(&datarows[0][6..]).unwrap(), "1");
+
+    // EXECUTE after DEALLOCATE: C's 26000 through the same wire path.
+    let errs: Vec<&Vec<u8>> = all.iter().filter(|(t, _)| *t == b'E').map(|(_, b)| b).collect();
+    assert_eq!(errs.len(), 1);
+    assert_eq!(error_field(errs[0], b'C').as_deref(), Some("26000"));
+    assert_eq!(
+        error_field(errs[0], b'M').as_deref(),
+        Some("prepared statement \"s\" does not exist")
+    );
 }
 
 #[test]

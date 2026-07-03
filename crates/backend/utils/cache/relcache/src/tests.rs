@@ -119,6 +119,7 @@ fn fake_scan(target: Oid, _index_ok: bool, _fnh: bool) -> PgResult<Option<relcac
     }
     Ok(ROWS.with(|r| {
         r.borrow().get(&target).map(|f| relcache_build_seams::ScannedPgClass {
+            relchecks: 0,
             form: f.form.clone(),
             options: None,
         })
@@ -129,6 +130,7 @@ fn fake_tupdesc(
     mcx: Mcx<'static>,
     relid: Oid,
     _form: &FormData_pg_class,
+    _relchecks: i16,
 ) -> PgResult<Rc<types_tuple::TupleDescData<'static>>> {
     let (natts, version) =
         ROWS.with(|r| r.borrow().get(&relid).map(|f| (f.natts, f.tupdesc_version)).unwrap());

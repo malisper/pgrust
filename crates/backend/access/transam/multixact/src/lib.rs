@@ -1260,6 +1260,31 @@ pub fn MultiXactShmemInit() -> PgResult<()> {
     Ok(())
 }
 
+/// Crash-cycle reset in place to the post-MultiXactShmemInit boot image
+/// (notes/crash-restart-design.md); TrimMultiXact re-seeds after recovery.
+pub fn MultiXactShmemResetAfterCrash() {
+    slru::SimpleLruResetAfterCrash(OffsetCtl());
+    slru::SimpleLruResetAfterCrash(MemberCtl());
+
+    let st = MultiXactState();
+    assert_eq!(st.max_oldest_slot, max_oldest_slot());
+    st.nextMXact.store(0, Relaxed);
+    st.nextOffset.store(0, Relaxed);
+    st.finishedStartup.store(false, Relaxed);
+    st.oldestMultiXactId.store(0, Relaxed);
+    st.oldestMultiXactDB.store(0, Relaxed);
+    st.oldestOffset.store(0, Relaxed);
+    st.oldestOffsetKnown.store(false, Relaxed);
+    st.multiVacLimit.store(0, Relaxed);
+    st.multiWarnLimit.store(0, Relaxed);
+    st.multiStopLimit.store(0, Relaxed);
+    st.multiWrapLimit.store(0, Relaxed);
+    st.offsetStopLimit.store(0, Relaxed);
+    for slot in st.perBackendXactIds.iter() {
+        slot.store(0, Relaxed);
+    }
+}
+
 pub fn check_multixact_offset_buffers(newval: i32) -> (bool, Option<String>) {
     check_slru_buffers("multixact_offset_buffers", newval)
 }

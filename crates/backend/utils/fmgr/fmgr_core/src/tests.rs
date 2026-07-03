@@ -348,6 +348,11 @@ fn error_save_context_tag_matches_nodetags() {
 }
 
 #[test]
+fn agg_state_tag_matches_nodetags() {
+    assert_eq!(::fmgr::T_AGG_STATE, ::nodes::NodeTag::T_AggState as u32);
+}
+
+#[test]
 fn input_function_call_safe_over_resolved_int4in() {
     let ctx = ::mcx::MemoryContext::new_bump("ifcs-test");
     let mut flinfo = fmgr_info(42).unwrap();

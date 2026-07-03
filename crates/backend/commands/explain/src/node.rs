@@ -16,7 +16,7 @@ use types_nodes::{Node, NodeTag};
 
 use crate::format::{
     append, ExplainCloseGroup, ExplainOpenGroup, ExplainPropertyBool, ExplainPropertyInteger,
-    ExplainPropertyList,
+    ExplainPropertyList, ExplainPropertyText,
 };
 use crate::options::str_in;
 use crate::state::{ExplainState, EXPLAIN_FORMAT_TEXT};
@@ -50,7 +50,7 @@ pub fn ExplainPrintPlan<'mcx>(
     es.rtable = Some(&pstmt.rtable);
     let root = pstmt.planTree.expect("ExplainPrintPlan: PlannedStmt without planTree");
     let mut rels_used = Bitmapset::empty();
-    ExplainPreScanNode(mcx, root, &mut rels_used)?;
+    ExplainPreScanNode(mcx, root, &pstmt.subplans, &mut rels_used)?;
     es.rtable_names = select_rtable_names_for_explain(mcx, &pstmt.rtable, &rels_used)?;
     // deparse_context_for_plan_tree / printed_subplans: every consumer
     // (Var/subplan deparse) is loud below.
@@ -81,20 +81,31 @@ pub fn ExplainPrintPlan<'mcx>(
 fn ExplainPreScanNode<'mcx>(
     mcx: Mcx<'mcx>,
     node: Node<'mcx>,
+    subplans: &NodeList<'mcx>,
     rels_used: &mut Bitmapset<'mcx>,
 ) -> PgResult<()> {
-    if node.node_tag() == NodeTag::T_SeqScan {
-        rels_used.add_member(mcx, node.as_seq_scan().unwrap().scan.scanrelid as i32)?;
+    match node.node_tag() {
+        NodeTag::T_SeqScan => {
+            rels_used.add_member(mcx, node.as_seq_scan().unwrap().scan.scanrelid as i32)?;
+        }
+        NodeTag::T_CteScan => {
+            rels_used.add_member(mcx, node.as_cte_scan().unwrap().scan.scanrelid as i32)?;
+        }
+        _ => {}
     }
     let plan = plan_of(node);
-    if !plan.initPlan.is_nil() {
-        node_gap("ExplainPreScanNode", "initPlan walk needs PlanState (SubPlan lane)");
+    // planstate_tree_walker's initPlan leg: reach each SubPlan's plan tree
+    // through PlannedStmt.subplans (the walk here is Plan-based, not PlanState).
+    for sp_node in plan.initPlan.iter() {
+        let sp = sp_node.as_sub_plan().expect("initPlan holds SubPlan nodes");
+        let child = subplans.nth(sp.plan_id as usize - 1);
+        ExplainPreScanNode(mcx, child, subplans, rels_used)?;
     }
     if let Some(l) = plan.lefttree {
-        ExplainPreScanNode(mcx, l, rels_used)?;
+        ExplainPreScanNode(mcx, l, subplans, rels_used)?;
     }
     if let Some(r) = plan.righttree {
-        ExplainPreScanNode(mcx, r, rels_used)?;
+        ExplainPreScanNode(mcx, r, subplans, rels_used)?;
     }
     Ok(())
 }
@@ -167,7 +178,27 @@ pub fn ExplainNode<'mcx>(
         NodeTag::T_Result => "Result",
         NodeTag::T_SeqScan => "Seq Scan",
         NodeTag::T_FunctionScan => "Function Scan",
+        NodeTag::T_CteScan => "CTE Scan",
+        NodeTag::T_NestLoop => "Nested Loop",
+        // INNER-only lane: C composes "<method> <jointype> Join" for outer
+        // joins; non-INNER jointypes cannot be planned yet (join-outer lane).
+        NodeTag::T_HashJoin => {
+            debug_assert_eq!(
+                node.as_hash_join().unwrap().join.jointype,
+                types_nodes::JoinType::JOIN_INNER
+            );
+            "Hash Join"
+        }
+        NodeTag::T_MergeJoin => {
+            debug_assert_eq!(
+                node.as_merge_join().unwrap().join.jointype,
+                types_nodes::JoinType::JOIN_INNER
+            );
+            "Merge Join"
+        }
+        NodeTag::T_Hash => "Hash",
         NodeTag::T_Sort => "Sort",
+        NodeTag::T_WindowAgg => "WindowAgg",
         NodeTag::T_Limit => "Limit",
         t => node_gap("ExplainNode", &format!("{t:?} display arm unported (M2+ plan lanes)")),
     };
@@ -198,6 +229,9 @@ pub fn ExplainNode<'mcx>(
 
     if node.node_tag() == NodeTag::T_SeqScan {
         ExplainScanTarget(node.as_seq_scan().unwrap().scan.scanrelid, es)?;
+    }
+    if node.node_tag() == NodeTag::T_CteScan {
+        ExplainScanTarget(node.as_cte_scan().unwrap().scan.scanrelid, es)?;
     }
     if let Some(fs) = node.as_function_scan() {
         ExplainFunctionTarget(fs, es)?;
@@ -249,15 +283,43 @@ pub fn ExplainNode<'mcx>(
     }
 
     match node.node_tag() {
-        NodeTag::T_SeqScan | NodeTag::T_FunctionScan => {
-            show_scan_qual(&plan.qual, "Filter", es)?;
+        NodeTag::T_SeqScan | NodeTag::T_FunctionScan | NodeTag::T_CteScan => {
+            show_scan_qual(&plan.qual, "Filter", node, es)?;
             filtered_count_gap(&plan.qual, es);
+        }
+        NodeTag::T_NestLoop => {
+            let nl = node.as_nest_loop().unwrap();
+            show_upper_qual(&nl.join.joinqual, "Join Filter", node, es)?;
+            filtered_count_gap(&nl.join.joinqual, es);
+            show_upper_qual(&plan.qual, "Filter", node, es)?;
+            filtered_count_gap(&plan.qual, es);
+        }
+        NodeTag::T_HashJoin => {
+            let hj = node.as_hash_join().unwrap();
+            show_upper_qual(&hj.hashclauses, "Hash Cond", node, es)?;
+            show_upper_qual(&hj.join.joinqual, "Join Filter", node, es)?;
+            filtered_count_gap(&hj.join.joinqual, es);
+            show_upper_qual(&plan.qual, "Filter", node, es)?;
+            filtered_count_gap(&plan.qual, es);
+        }
+        NodeTag::T_MergeJoin => {
+            let mj = node.as_merge_join().unwrap();
+            show_upper_qual(&mj.mergeclauses, "Merge Cond", node, es)?;
+            show_upper_qual(&mj.join.joinqual, "Join Filter", node, es)?;
+            filtered_count_gap(&mj.join.joinqual, es);
+            show_upper_qual(&plan.qual, "Filter", node, es)?;
+            filtered_count_gap(&plan.qual, es);
+        }
+        NodeTag::T_Hash => {
+            if es.analyze {
+                node_gap("show_hash_info", "Hash instrumentation (analyze join lane)");
+            }
         }
         NodeTag::T_Result => {
             if let Some(q) = node.as_result().unwrap().resconstantqual {
-                show_one_time_filter(q, es)?;
+                show_one_time_filter(q, node, es)?;
             }
-            show_scan_qual(&plan.qual, "Filter", es)?;
+            show_scan_qual(&plan.qual, "Filter", node, es)?;
             filtered_count_gap(&plan.qual, es);
         }
         NodeTag::T_Sort => {
@@ -268,6 +330,13 @@ pub fn ExplainNode<'mcx>(
                     "Sort Method display needs tuplesort_get_stats (sort instrumentation lane)",
                 );
             }
+        }
+        NodeTag::T_WindowAgg => {
+            show_window_def(node, es)?;
+            let w = node.as_window_agg().unwrap();
+            debug_assert!(w.runCondition.is_nil());
+            show_scan_qual(&plan.qual, "Filter", node, es)?;
+            filtered_count_gap(&plan.qual, es);
         }
         // Limit shows nothing extra without ANALYZE.
         NodeTag::T_Limit => {}
@@ -280,8 +349,16 @@ pub fn ExplainNode<'mcx>(
         }
     }
 
-    if !plan.initPlan.is_nil() {
-        node_gap("ExplainNode", "InitPlan display needs PlanState (SubPlan lane)");
+    // ExplainSubPlans over initPlan (printed_subplans dedup unneeded:
+    // initplans attach once).
+    for sp_node in plan.initPlan.iter() {
+        let sp = sp_node.as_sub_plan().expect("initPlan holds SubPlan nodes");
+        let child = es
+            .pstmt
+            .expect("ExplainNode before ExplainPrintPlan")
+            .subplans
+            .nth(sp.plan_id as usize - 1);
+        ExplainNode(child, Some("InitPlan"), sp.plan_name, es)?;
     }
     let haschildren = plan.lefttree.is_some() || plan.righttree.is_some();
     if haschildren {
@@ -314,7 +391,9 @@ fn show_plan_tlist<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) -> PgRes
     let mut result: PgVec<'mcx, PgString<'mcx>> = PgVec::new_in(mcx);
     for tle_node in plan.targetlist.iter() {
         let tle = tle_node.as_target_entry().expect("targetlist holds TargetEntries");
-        result.push(deparse_expression_minimal(mcx, tle.expr, useprefix)?);
+        let mut buf = PgString::new_in(mcx);
+        deparse_expr(es, node, tle.expr, useprefix, &mut buf)?;
+        result.push(buf);
     }
     ExplainPropertyList("Output", &result, es);
     Ok(())
@@ -345,6 +424,54 @@ fn show_sort_keys<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) -> PgResu
         result.push(buf);
     }
     ExplainPropertyList("Sort Key", &result, es);
+    Ok(())
+}
+
+// show_window_def + show_window_keys (explain.c); the frame-options string is
+// dead while frameOptions stays FRAMEOPTION_DEFAULTS (optimize_window_clauses
+// unported, explicit frames loud at the grammar).
+fn show_window_def<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) -> PgResult<()> {
+    use types_nodes::rawnodes::FRAMEOPTION_NONDEFAULT;
+    let wagg = node.as_window_agg().expect("WindowAgg node");
+    let mcx = es.str.allocator();
+    let mut buf = PgString::new_in(mcx);
+    buf.try_push_str(quote_identifier(wagg.winname.expect("named window (name_active_windows)")))?;
+    buf.try_push_str(" AS (")?;
+    let child = wagg.plan.lefttree;
+    let mut needspace = false;
+    let mut keys = |buf: &mut PgString<'mcx>,
+                    es: &mut ExplainState<'mcx>,
+                    idx: &[i16]|
+     -> PgResult<()> {
+        let useprefix = es.rtable_size > 1 || es.verbose;
+        let child_tlist = &plan_of(child.expect("WindowAgg has a child")).targetlist;
+        for (i, &resno) in idx.iter().enumerate() {
+            if i > 0 {
+                buf.try_push_str(", ")?;
+            }
+            let tle = get_tle_by_resno(child_tlist, resno)
+                .unwrap_or_else(|| node_gap("show_window_keys", "no tlist entry for key column"));
+            deparse_plan_var(plan_of(child.unwrap()).lefttree, tle.expr, useprefix, es, buf)?;
+        }
+        Ok(())
+    };
+    if wagg.partNumCols > 0 {
+        buf.try_push_str("PARTITION BY ")?;
+        keys(&mut buf, es, wagg.partColIdx)?;
+        needspace = true;
+    }
+    if wagg.ordNumCols > 0 {
+        if needspace {
+            buf.try_push(' ')?;
+        }
+        buf.try_push_str("ORDER BY ")?;
+        keys(&mut buf, es, wagg.ordColIdx)?;
+    }
+    if wagg.frameOptions & FRAMEOPTION_NONDEFAULT != 0 {
+        node_gap("show_window_def", "nondefault frame options display unported");
+    }
+    buf.try_push(')')?;
+    ExplainPropertyText("Window", buf.as_str(), es);
     Ok(())
 }
 
@@ -450,11 +577,16 @@ fn execscan_expr_type(node: Node<'_>) -> types_core::primitive::Oid {
 
 // show_upper_qual on Result.resconstantqual: C stores it as a bare expression
 // (not an implicit-AND list).
-fn show_one_time_filter<'mcx>(qual: Node<'mcx>, es: &mut ExplainState<'mcx>) -> PgResult<()> {
+fn show_one_time_filter<'mcx>(
+    qual: Node<'mcx>,
+    node: Node<'mcx>,
+    es: &mut ExplainState<'mcx>,
+) -> PgResult<()> {
     let mcx = es.str.allocator();
     let useprefix = es.rtable_size > 1 || es.verbose;
-    let s = deparse_expression_minimal(mcx, qual, useprefix)?;
-    crate::format::ExplainPropertyText("One-Time Filter", s.as_str(), es);
+    let mut buf = PgString::new_in(mcx);
+    deparse_expr(es, node, qual, useprefix, &mut buf)?;
+    crate::format::ExplainPropertyText("One-Time Filter", buf.as_str(), es);
     Ok(())
 }
 
@@ -473,6 +605,25 @@ fn filtered_count_gap(qual: &NodeList<'_>, es: &ExplainState<'_>) {
 fn show_scan_qual<'mcx>(
     qual: &NodeList<'mcx>,
     qlabel: &str,
+    node: Node<'mcx>,
+    es: &mut ExplainState<'mcx>,
+) -> PgResult<()> {
+    show_qual(qual, qlabel, node, es)
+}
+
+fn show_upper_qual<'mcx>(
+    qual: &NodeList<'mcx>,
+    qlabel: &str,
+    node: Node<'mcx>,
+    es: &mut ExplainState<'mcx>,
+) -> PgResult<()> {
+    show_qual(qual, qlabel, node, es)
+}
+
+fn show_qual<'mcx>(
+    qual: &NodeList<'mcx>,
+    qlabel: &str,
+    node: Node<'mcx>,
     es: &mut ExplainState<'mcx>,
 ) -> PgResult<()> {
     if qual.is_nil() {
@@ -483,27 +634,109 @@ fn show_scan_qual<'mcx>(
     }
     let mcx = es.str.allocator();
     let useprefix = es.rtable_size > 1 || es.verbose;
-    let s = deparse_expression_minimal(mcx, qual.nth(0), useprefix)?;
-    crate::format::ExplainPropertyText(qlabel, s.as_str(), es);
+    let mut buf = PgString::new_in(mcx);
+    deparse_expr(es, node, qual.nth(0), useprefix, &mut buf)?;
+    crate::format::ExplainPropertyText(qlabel, buf.as_str(), es);
     Ok(())
 }
 
-// ruleutils.c deparse_expression slice: Const deparse is complete; every
-// other node tag is loud. Its CATALOG row stays todo and points here.
-fn deparse_expression_minimal<'mcx>(
-    mcx: Mcx<'mcx>,
-    node: Node<'mcx>,
-    _useprefix: bool,
-) -> PgResult<PgString<'mcx>> {
-    let Some(c) = node.as_const() else {
-        node_gap(
+// ruleutils.c deparse_expression slice: Const, Var (incl OUTER/INNER
+// indirection through child tlists), binary OpExpr, implicit RelabelType;
+// every other node tag is loud. Its CATALOG row stays todo and points here.
+fn deparse_expr<'mcx>(
+    es: &ExplainState<'mcx>,
+    plan_node: Node<'mcx>,
+    expr: Node<'mcx>,
+    useprefix: bool,
+    buf: &mut PgString<'mcx>,
+) -> PgResult<()> {
+    match expr.node_tag() {
+        NodeTag::T_Const => get_const_expr(expr.as_const().unwrap(), buf, 0),
+        NodeTag::T_Var => deparse_var(es, plan_node, expr.as_var().unwrap(), useprefix, buf),
+        NodeTag::T_OpExpr => {
+            let o = expr.as_op_expr().unwrap();
+            if o.args.len() != 2 {
+                node_gap("get_oper_expr", "unary operator deparse (ruleutils lane)");
+            }
+            let opname = lsyscache::get_opname(es.str.allocator(), o.opno)?
+                .expect("operator of a planned expression exists");
+            buf.try_push('(')?;
+            deparse_expr(es, plan_node, o.args.nth(0), useprefix, buf)?;
+            write!(buf, " {} ", opname.as_str()).expect("PgString write");
+            deparse_expr(es, plan_node, o.args.nth(1), useprefix, buf)?;
+            buf.try_push(')')?;
+            Ok(())
+        }
+        NodeTag::T_RelabelType => {
+            let r = expr.as_relabel_type().unwrap();
+            if r.relabelformat != types_nodes::CoercionForm::COERCE_IMPLICIT_CAST {
+                node_gap("get_rule_expr", "explicit RelabelType deparse (ruleutils lane)");
+            }
+            deparse_expr(es, plan_node, r.arg, useprefix, buf)
+        }
+        other => node_gap(
             "deparse_expression",
-            &format!("{:?} deparse unported (ruleutils lane)", node.node_tag()),
-        );
+            &format!("{other:?} deparse unported (ruleutils lane)"),
+        ),
+    }
+}
+
+// get_variable (ruleutils.c) slice: setrefs' OUTER_VAR/INNER_VAR retargets
+// resolve through the child plan's tlist (C's deparse namespace ancestry);
+// the base Var prints as [refname.]eref-colname.
+fn deparse_var<'mcx>(
+    es: &ExplainState<'mcx>,
+    plan_node: Node<'mcx>,
+    var: &types_nodes::Var<'mcx>,
+    useprefix: bool,
+    buf: &mut PgString<'mcx>,
+) -> PgResult<()> {
+    let (varno, varattno) = resolve_plan_var(plan_node, var.varno, var.varattno);
+    if varattno <= 0 {
+        node_gap("get_variable", "whole-row/system column deparse (ruleutils lane)");
+    }
+    let rtable = es.rtable.expect("deparse before rtable capture");
+    debug_assert!(varno >= 1 && varno as usize <= rtable.len());
+    let rte = rtable.nth(varno as usize - 1).as_range_tbl_entry().expect("rtable cell");
+    let eref = rte.eref.expect("analyzed RTE always has eref");
+    if useprefix {
+        let refname = es.rtable_names[varno as usize - 1]
+            .or(eref.aliasname)
+            .expect("relation RTE has a refname");
+        push_identifier(buf, refname)?;
+        buf.try_push('.')?;
+    }
+    let colname = eref
+        .colnames
+        .nth(varattno as usize - 1)
+        .as_string()
+        .expect("eref colnames are String nodes")
+        .sval;
+    push_identifier(buf, colname)
+}
+
+fn resolve_plan_var(plan_node: Node<'_>, varno: i32, varattno: i16) -> (i32, i16) {
+    let child = match varno {
+        types_nodes::primnodes::OUTER_VAR => plan_of(plan_node).lefttree,
+        types_nodes::primnodes::INNER_VAR => plan_of(plan_node).righttree,
+        _ => return (varno, varattno),
     };
-    let mut buf = PgString::new_in(mcx);
-    get_const_expr(c, &mut buf, 0)?;
-    Ok(buf)
+    let child = child.expect("OUTER/INNER var without child plan");
+    let tle = plan_of(child)
+        .targetlist
+        .nth(varattno as usize - 1)
+        .as_target_entry()
+        .expect("tlist cell");
+    debug_assert_eq!(tle.resno, varattno);
+    let Some(v) = tle.expr.as_var() else {
+        node_gap("get_variable", "non-Var child tlist deparse (ruleutils lane)");
+    };
+    resolve_plan_var(child, v.varno, v.varattno)
+}
+
+fn push_identifier<'mcx>(buf: &mut PgString<'mcx>, name: &str) -> PgResult<()> {
+    buf.try_push_str(&format_type::quote_identifier(name))?;
+    Ok(())
 }
 
 pub(crate) fn get_const_expr(c: &Const, buf: &mut PgString<'_>, showtype: i32) -> PgResult<()> {
@@ -654,9 +887,18 @@ fn ExplainTargetRel<'mcx>(rti: types_core::Index, es: &mut ExplainState<'mcx>) -
         .nth(rti as usize - 1)
         .as_range_tbl_entry()
         .expect("rtable holds RTEs");
-    debug_assert_eq!(rte.rtekind, RTEKind::RTE_RELATION);
-    let objectname = lsyscache::get_rel_name(mcx, rte.relid)?;
-    let objectname = objectname.as_ref().map(|s| s.as_str());
+    let relname;
+    let objectname = match rte.rtekind {
+        RTEKind::RTE_RELATION => {
+            relname = lsyscache::get_rel_name(mcx, rte.relid)?;
+            relname.as_ref().map(|s| s.as_str())
+        }
+        RTEKind::RTE_CTE => rte.ctename,
+        other => node_gap(
+            "ExplainTargetRel",
+            &format!("{other:?} target arm unported (M2+ plan lanes)"),
+        ),
+    };
     if es.verbose {
         node_gap(
             "ExplainTargetRel",

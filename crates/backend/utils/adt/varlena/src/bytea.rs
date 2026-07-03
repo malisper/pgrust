@@ -14,15 +14,38 @@ use crate::{image_with_header, varstrfastcmp_c, VARHDRSZ};
 
 pub const HEXTBL: &[u8; 16] = b"0123456789abcdef";
 
-// C encode.c hexlookup via get_hex: digits + both cases, -1 otherwise.
+// C encode.c hextbl[512]: both output bytes for each input byte, one 2-byte store.
+static HEXTBL2: [u8; 512] = {
+    let mut t = [0u8; 512];
+    let mut b = 0usize;
+    while b < 256 {
+        t[2 * b] = HEXTBL[b >> 4];
+        t[2 * b + 1] = HEXTBL[b & 0xf];
+        b += 1;
+    }
+    t
+};
+
+// C encode.c hexlookup via get_hex: digits + both cases, -1 otherwise
+// (widened to 256 entries to drop C's c < 127 guard).
+static HEXLOOKUP: [i8; 256] = {
+    let mut t = [-1i8; 256];
+    let mut c = 0usize;
+    while c < 256 {
+        t[c] = match c as u8 {
+            b'0'..=b'9' => (c as u8 - b'0') as i8,
+            b'a'..=b'f' => (c as u8 - b'a' + 10) as i8,
+            b'A'..=b'F' => (c as u8 - b'A' + 10) as i8,
+            _ => -1,
+        };
+        c += 1;
+    }
+    t
+};
+
 #[inline]
 fn get_hex(c: u8) -> i8 {
-    match c {
-        b'0'..=b'9' => (c - b'0') as i8,
-        b'a'..=b'f' => (c - b'a' + 10) as i8,
-        b'A'..=b'F' => (c - b'A' + 10) as i8,
-        _ => -1,
-    }
+    HEXLOOKUP[c as usize]
 }
 
 #[cold]
@@ -55,9 +78,17 @@ fn odd_hex_digits() -> PgError {
 
 // C: encode.c hex_encode — two lowercase nibbles per byte, into reserved space.
 pub fn hex_encode_into(src: &[u8], out: &mut PgVec<'_, u8>) {
-    for &b in src {
-        out.push(HEXTBL[(b >> 4) as usize]);
-        out.push(HEXTBL[(b & 0xf) as usize]);
+    let old = out.len();
+    assert!(out.capacity() - old >= 2 * src.len());
+    // SAFETY: capacity holds 2*src.len() bytes past old (asserted); the loop
+    // writes exactly 2 bytes per input byte; set_len covers exactly those.
+    unsafe {
+        let mut p = out.as_mut_ptr().add(old);
+        for &b in src {
+            core::ptr::copy_nonoverlapping(HEXTBL2.as_ptr().add(2 * b as usize), p, 2);
+            p = p.add(2);
+        }
+        out.set_len(old + 2 * src.len());
     }
 }
 
@@ -68,6 +99,9 @@ pub fn hex_decode_into(
     mut escontext: Option<&mut SoftErrorContext>,
     out: &mut PgVec<'_, u8>,
 ) -> PgResult<Option<()>> {
+    let old = out.len();
+    assert!(out.capacity() - old >= src.len() / 2);
+    let mut written = 0usize;
     let mut i = 0usize;
     while i < src.len() {
         let c = src[i];
@@ -88,8 +122,15 @@ pub fn hex_decode_into(
             return ereturn(escontext.as_deref_mut(), None, invalid_hex_digit(&src[i..])?);
         }
         i += 1;
-        out.push(((v1 as u8) << 4) | v2 as u8);
+        // SAFETY: one output byte per digit pair; pairs <= src.len()/2, within
+        // the asserted spare capacity past old.
+        unsafe {
+            out.as_mut_ptr().add(old + written).write(((v1 as u8) << 4) | v2 as u8);
+        }
+        written += 1;
     }
+    // SAFETY: the first `written` bytes past old were initialized above.
+    unsafe { out.set_len(old + written) };
     Ok(Some(()))
 }
 
@@ -129,23 +170,32 @@ pub fn byteain<'mcx>(
     }
 
     let mut image = image_with_header(mcx, bc)?;
-    let mut i = 0usize;
-    while i < input.len() {
-        let tp = &input[i..];
-        if tp[0] != b'\\' {
-            image.push(tp[0]);
-            i += 1;
-        } else if tp.len() >= 4
-            && (b'0'..=b'3').contains(&tp[1])
-            && (b'0'..=b'7').contains(&tp[2])
-            && (b'0'..=b'7').contains(&tp[3])
-        {
-            image.push(((tp[1] - b'0') << 6) | ((tp[2] - b'0') << 3) | (tp[3] - b'0'));
-            i += 4;
-        } else {
-            image.push(b'\\');
-            i += 2;
+    let old = image.len();
+    // SAFETY: pass one counted exactly bc output bytes for this input and the
+    // image was reserved for bc past the header; pass two writes one byte per
+    // counted unit; set_len covers exactly those bytes.
+    unsafe {
+        let mut p = image.as_mut_ptr().add(old);
+        let mut i = 0usize;
+        while i < input.len() {
+            let tp = &input[i..];
+            if tp[0] != b'\\' {
+                p.write(tp[0]);
+                i += 1;
+            } else if tp.len() >= 4
+                && (b'0'..=b'3').contains(&tp[1])
+                && (b'0'..=b'7').contains(&tp[2])
+                && (b'0'..=b'7').contains(&tp[3])
+            {
+                p.write(((tp[1] - b'0') << 6) | ((tp[2] - b'0') << 3) | (tp[3] - b'0'));
+                i += 4;
+            } else {
+                p.write(b'\\');
+                i += 2;
+            }
+            p = p.add(1);
         }
+        image.set_len(old + bc);
     }
     Ok(Some(Varlena::from_image(image)))
 }
@@ -160,10 +210,15 @@ pub fn byteaout_into(v: &[u8], mode: i32, out: &mut Vec<u8>) -> PgResult<()> {
         out.reserve(v.len() * 2 + 3);
         out.push(b'\\');
         out.push(b'x');
-        for &b in v {
-            // C hex_encode: 2-byte table copy per input byte.
-            out.push(HEXTBL[(b >> 4) as usize]);
-            out.push(HEXTBL[(b & 0xf) as usize]);
+        // SAFETY: reserve above covers 2 bytes per input byte past the "\x";
+        // the loop writes exactly that; set_len covers exactly those bytes.
+        unsafe {
+            let mut p = out.as_mut_ptr().add(2);
+            for &b in v {
+                core::ptr::copy_nonoverlapping(HEXTBL2.as_ptr().add(2 * b as usize), p, 2);
+                p = p.add(2);
+            }
+            out.set_len(2 + 2 * v.len());
         }
     } else if mode == guc_tables::consts::BYTEA_OUTPUT_ESCAPE {
         let mut len: u64 = 1;

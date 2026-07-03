@@ -235,6 +235,41 @@ pub fn BackendStatusShmemInit() -> PgResult<()> {
     Ok(())
 }
 
+/// Crash-cycle reset in place to the post-BackendStatusShmemInit image
+/// (notes/crash-restart-design.md); postmaster thread only, all children dead.
+pub fn BackendStatusShmemResetAfterCrash() {
+    let array = backend_status_array();
+    let buf = BACKEND_ACTIVITY_BUFFER
+        .get()
+        .unwrap_or_else(|| panic!("BackendStatusShmemInit has not run"));
+    for e in array {
+        e.st_changecount.store(0, Relaxed);
+        e.st_procpid.set(0);
+        e.st_backendType.set(BackendType::Invalid);
+        e.st_proc_start_timestamp.set(0);
+        e.st_xact_start_timestamp.set(0);
+        e.st_activity_start_timestamp.set(0);
+        e.st_state_start_timestamp.set(0);
+        e.st_databaseid.set(InvalidOid);
+        e.st_userid.set(InvalidOid);
+        e.st_clientaddr.set(SockAddr::zeroed());
+        e.st_clienthostname.set([0; NAMELEN]);
+        e.st_ssl.set(false);
+        e.st_gss.set(false);
+        e.st_state.set(BackendState::STATE_UNDEFINED);
+        e.st_appname.set([0; NAMELEN]);
+        e.st_progress_command.set(PROGRESS_COMMAND_INVALID);
+        e.st_progress_command_target.set(InvalidOid);
+        for p in &e.st_progress_param {
+            p.set(0);
+        }
+        e.st_query_id.set(0);
+        e.st_plan_id.set(0);
+    }
+    // SAFETY: buf spans `total` bytes; exclusive access per the fn contract.
+    unsafe { std::ptr::write_bytes(buf.base, 0, buf.total) };
+}
+
 fn backend_status_array() -> &'static [PgBackendStatus] {
     BACKEND_STATUS_ARRAY
         .get()
@@ -546,6 +581,7 @@ pub fn init_seams() {
     });
     s::backend_status_shmem_size::set(BackendStatusShmemSize);
     s::backend_status_shmem_init::set(BackendStatusShmemInit);
+    s::backend_status_shmem_reset_after_crash::set(BackendStatusShmemResetAfterCrash);
     s::pgstat_beinit::set(pgstat_beinit);
     s::pgstat_bestart_initial::set(pgstat_bestart_initial);
     s::pgstat_bestart_security::set(pgstat_bestart_security);

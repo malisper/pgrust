@@ -194,6 +194,11 @@ pub fn check_subtrans_buffers(newval: i32) -> (bool, Option<String>) {
     check_slru_buffers("subtransaction_buffers", newval)
 }
 
+/// Crash-cycle reset in place (notes/crash-restart-design.md).
+pub fn SUBTRANSShmemResetAfterCrash() {
+    slru::SimpleLruResetAfterCrash(SubTransCtl());
+}
+
 pub fn BootStrapSUBTRANS() -> PgResult<()> {
     let ctl = SubTransCtl();
     let mut bank = LwGuard::acquire(SimpleLruGetBankLock(ctl, 0), LW_EXCLUSIVE)?;

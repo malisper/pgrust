@@ -1,6 +1,9 @@
+use core::alloc::Layout;
 use core::ffi::CStr;
 use core::marker::PhantomData;
 
+use ::mcx::{Allocator, Mcx};
+use ::types_error::PgResult;
 use ::types_tuple::varatt;
 
 use crate::fcinfo::FunctionCallInfoBaseData;
@@ -53,6 +56,29 @@ impl<'a> PackedVarlena<'a> {
             } else {
                 varatt::varsize_4b(self.ptr)
             }
+        }
+    }
+
+    #[inline]
+    pub fn is_short(self) -> bool {
+        // SAFETY: from_ptr contract — header readable.
+        unsafe { varatt::varatt_is_1b(self.ptr) }
+    }
+
+    /// C's detoast_attr short-header arm (PG_DETOAST_DATUM): copy the payload
+    /// into `mcx` at palloc alignment (8) so aligned payloads (numeric digits)
+    /// stay readable; the arming context's reset reclaims it, like C's palloc.
+    pub fn data_expanded<'m>(self, mcx: Mcx<'m>) -> PgResult<&'m [u8]> {
+        let src = self.data();
+        let layout = Layout::from_size_align(src.len(), 8).expect("data_expanded layout");
+        let dst: core::ptr::NonNull<u8> = mcx
+            .allocate(layout)
+            .map_err(|_| mcx.oom(layout.size()))?
+            .cast();
+        // SAFETY: fresh `src.len()`-byte allocation; `src` is a live slice.
+        unsafe {
+            core::ptr::copy_nonoverlapping(src.as_ptr(), dst.as_ptr(), src.len());
+            Ok(core::slice::from_raw_parts(dst.as_ptr(), src.len()))
         }
     }
 

@@ -63,6 +63,8 @@ pub const PgTablespaceToastIndex: Oid = 4186;
 pub const SecLabelObjectIndexId: Oid = 3597;
 pub const LargeObjectRelationId: Oid = 2613;
 pub const NamespaceRelationId: Oid = 2615;
+pub const AccessMethodRelationId: Oid = 2601;
+pub const CollationRelationId: Oid = 3456;
 pub const PG_PUBLIC_NAMESPACE: Oid = 2200;
 
 pub fn IsSystemRelation(relation: &RelationData<'_>) -> bool {

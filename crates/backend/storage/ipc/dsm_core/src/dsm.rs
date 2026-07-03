@@ -123,6 +123,8 @@ static DSM_CONTROL: AtomicPtr<DsmControlHeader> = AtomicPtr::new(std::ptr::null_
 static DSM_CONTROL_HANDLE: AtomicU32 = AtomicU32::new(0);
 static DSM_CONTROL_MAPPED_SIZE: AtomicUsize = AtomicUsize::new(0);
 static DSM_MAIN_SPACE_BEGIN: AtomicPtr<u8> = AtomicPtr::new(std::ptr::null_mut());
+// Boot shim retained so the crash-cycle re-create reuses it (ipci leaks it).
+static DSM_STARTUP_SHIM: AtomicPtr<PGShmemHeader> = AtomicPtr::new(std::ptr::null_mut());
 
 fn control() -> *mut DsmControlHeader {
     DSM_CONTROL.load(Ordering::Acquire)
@@ -315,7 +317,25 @@ pub fn dsm_postmaster_startup(shim: *mut PGShmemHeader) -> PgResult<()> {
         (*control).nitems = 0;
         (*control).maxitems = maxitems;
     }
+    DSM_STARTUP_SHIM.store(shim, Ordering::Release);
     Ok(())
+}
+
+/// Crash-cycle re-create of the control segment
+/// (notes/crash-restart-design.md): shmem_exit(1) already ran
+/// dsm_postmaster_shutdown (destroying the old segment and popping its exit
+/// callback), so this re-runs the boot startup against the retained shim.
+pub fn dsm_postmaster_startup_after_crash() -> PgResult<()> {
+    let shim = DSM_STARTUP_SHIM.load(Ordering::Acquire);
+    assert!(
+        !shim.is_null(),
+        "dsm_postmaster_startup_after_crash before dsm_postmaster_startup"
+    );
+    assert!(
+        control().is_null(),
+        "dsm control segment still mapped; shmem_exit(1) must run first"
+    );
+    dsm_postmaster_startup(shim)
 }
 
 pub fn dsm_cleanup_using_control_segment(old_control_handle: dsm_handle) -> PgResult<()> {

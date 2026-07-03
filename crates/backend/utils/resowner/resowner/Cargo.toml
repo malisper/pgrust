@@ -10,6 +10,7 @@ elog = { path = "../../error/elog" }
 hashfn = { path = "../../../../common/hashfn" }
 ipc_seams = { path = "../../../storage/ipc/ipc_seams" }
 lmgr_proc = { path = "../../../storage/lmgr/lmgr_proc" }
+lock_seams = { path = "../../../storage/lmgr/lock_seams" }
 mcx = { path = "../../../../_support/mcx" }
 resowner_portal_seams = { path = "../resowner_portal_seams" }
 resowner_seams = { path = "../resowner_seams" }

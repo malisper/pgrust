@@ -132,6 +132,31 @@ fn appname_and_xact_timestamp_roundtrip() {
 }
 
 #[test]
+fn reset_after_crash_restores_boot_image() {
+    let _g = bringup();
+    start_backend(5, 900006);
+    backend_status_seams::pgstat_report_activity::call(
+        BackendState::STATE_RUNNING,
+        Some("CRASHING QUERY"),
+    );
+    assert_eq!(MyBEEntry().unwrap().st_procpid.get(), 900006);
+
+    BackendStatusShmemResetAfterCrash();
+
+    for e in backend_status_array() {
+        assert_eq!(e.st_changecount.load(Relaxed), 0);
+        assert_eq!(e.st_procpid.get(), 0);
+        assert_eq!(e.st_backendType.get(), BackendType::Invalid);
+        assert_eq!(e.st_state.get(), BackendState::STATE_UNDEFINED);
+        assert_eq!(e.st_databaseid.get(), InvalidOid);
+        assert_eq!(e.st_userid.get(), InvalidOid);
+        assert_eq!(e.st_query_id.get(), 0);
+        assert_eq!(read_activity(e.slot), b"");
+    }
+    MY_BE_ENTRY.set(None);
+}
+
+#[test]
 fn cross_thread_entry_is_readable() {
     let _g = bringup();
     let handle = std::thread::spawn(|| {

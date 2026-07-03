@@ -46,6 +46,13 @@ fn pull_var_nodes<'mcx>(node: Node<'mcx>, out: &mut PgVec<'mcx, Node<'mcx>>) {
                 pull_var_nodes(arg, out);
             }
         }
+        NodeTag::T_WindowFunc => {
+            let wf = node.as_window_func().unwrap();
+            debug_assert!(wf.aggfilter.is_none());
+            for arg in &wf.args {
+                pull_var_nodes(arg, out);
+            }
+        }
         NodeTag::T_TargetEntry => pull_var_nodes(node.as_target_entry().unwrap().expr, out),
         NodeTag::T_OpExpr => {
             for a in &node.as_op_expr().unwrap().args {
@@ -93,9 +100,11 @@ pub fn add_vars_to_targetlist<'mcx>(
     Ok(())
 }
 
-// deconstruct_jointree (initsplan.c): FromExpr over plain RangeTblRefs
-// (explicit JOIN syntax is loud at parse time). Vars: qualscope = the union of
-// member relids; a multi-item FROM is an inner join subsuming all below it.
+// deconstruct_jointree (initsplan.c): FromExpr over RangeTblRefs and INNER
+// JoinExprs (outer joins are loud at parse time). Mirrors C's split: recurse
+// first (relids + joinlist + quals in post-order), set the query-wide relid
+// sets, then distribute the collected quals — an INNER JOIN's ON quals land
+// exactly like WHERE quals scoped to the join's relids.
 pub fn deconstruct_jointree<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResult<PgVec<'mcx, JoinlistNode<'mcx>>> {
     let mcx = run.mcx;
     debug_assert!(!run.root.join_domains.is_empty());
@@ -103,27 +112,68 @@ pub fn deconstruct_jointree<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResult<PgVec<
     let f = run.parse().jointree.expect("jointree is a FromExpr");
     let mut qualscope: types_pathnodes::Relids<'mcx> = None;
     let mut joinlist = PgVec::new_in(mcx);
+    let mut pending_quals: PgVec<'mcx, (Node<'mcx>, types_pathnodes::Relids<'mcx>)> =
+        PgVec::new_in(mcx);
     for item in &f.fromlist {
-        assert!(
-            item.node_tag() == NodeTag::T_RangeTblRef,
-            "deconstruct_recurse (initsplan.c): {:?} jointree item; M2 join lane",
-            item.node_tag()
-        );
-        let varno = item.as_range_tbl_ref().unwrap().rtindex;
-        qualscope = relids_union(mcx, &qualscope, &relids_singleton(mcx, varno as u32));
-        joinlist.push(JoinlistNode::Rel(varno));
+        let (item_relids, item_joinlist) = deconstruct_recurse(run, item, &mut pending_quals)?;
+        qualscope = relids_union(mcx, &qualscope, &item_relids);
+        for jl in item_joinlist {
+            joinlist.push(jl);
+        }
     }
     debug_assert!(!joinlist.is_empty());
+    if joinlist.len() > crate::gucs::join_collapse_limit() as usize {
+        panic!("deconstruct_recurse (initsplan.c): joinlist beyond collapse limit; M2 join lane");
+    }
 
     run.root.all_baserels = relids_copy(mcx, &qualscope);
     run.root.all_query_rels = relids_copy(mcx, &qualscope);
     run.root.join_domains[0].jd_relids = relids_copy(mcx, &qualscope);
 
+    for (quals, scope) in pending_quals {
+        distribute_qual_to_rels(run, quals, &scope)?;
+    }
     if let Some(quals) = f.quals {
         distribute_qual_to_rels(run, quals, &qualscope)?;
     }
 
     Ok(joinlist)
+}
+
+fn deconstruct_recurse<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    item: Node<'mcx>,
+    pending_quals: &mut PgVec<'mcx, (Node<'mcx>, types_pathnodes::Relids<'mcx>)>,
+) -> PgResult<(types_pathnodes::Relids<'mcx>, PgVec<'mcx, JoinlistNode<'mcx>>)> {
+    let mcx = run.mcx;
+    match item.node_tag() {
+        NodeTag::T_RangeTblRef => {
+            let varno = item.as_range_tbl_ref().unwrap().rtindex;
+            let mut joinlist = PgVec::new_in(mcx);
+            joinlist.push(JoinlistNode::Rel(varno));
+            Ok((relids_singleton(mcx, varno as u32), joinlist))
+        }
+        NodeTag::T_JoinExpr => {
+            let j = item.as_join_expr().unwrap();
+            assert!(
+                j.jointype == types_nodes::JoinType::JOIN_INNER,
+                "deconstruct_recurse (initsplan.c): {:?} needs SpecialJoinInfo; join-outer lane",
+                j.jointype
+            );
+            let (l_relids, l_list) = deconstruct_recurse(run, j.larg, pending_quals)?;
+            let (r_relids, r_list) = deconstruct_recurse(run, j.rarg, pending_quals)?;
+            let scope = relids_union(mcx, &l_relids, &r_relids);
+            if let Some(quals) = j.quals {
+                pending_quals.push((quals, relids_copy(mcx, &scope)));
+            }
+            let mut joinlist = l_list;
+            for jl in r_list {
+                joinlist.push(jl);
+            }
+            Ok((scope, joinlist))
+        }
+        other => panic!("deconstruct_recurse (initsplan.c): {other:?} jointree item; M2 join lane"),
+    }
 }
 
 // distribute_qual_to_rels (initsplan.c), pushed-down arm (security 0).

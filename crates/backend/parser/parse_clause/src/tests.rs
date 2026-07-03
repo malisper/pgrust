@@ -276,7 +276,7 @@ fn trivial_arms_are_noops() {
     assert!(group.is_nil() && gsets.is_nil());
 
     let windows =
-        transformWindowDefinitions(&mut pstate, &NodeList::nil(), &mut tlist).unwrap();
+        transformWindowDefinitions(ctx.mcx(), &mut pstate, &NodeList::nil(), &mut tlist).unwrap();
     assert!(windows.is_nil());
 }
 

@@ -52,6 +52,8 @@ pub fn exec_re_scan<'mcx>(
         PlanStateNode::FunctionScan(fs) => {
             ::nodefunctionscan::exec_rescan_function_scan(fs, estate)
         }
+        PlanStateNode::ValuesScan(vs) => ::nodevaluesscan::exec_rescan_values_scan(vs, estate),
+        PlanStateNode::CteScan(cs) => ::nodectescan::exec_rescan_cte_scan(cs, estate),
         PlanStateNode::IndexScan(is) => ::nodeindexscan::exec_rescan_index_scan(is, estate),
         PlanStateNode::IndexOnlyScan(ios) => {
             ::nodeindexonlyscan::exec_rescan_index_only_scan(ios, estate)
@@ -61,6 +63,12 @@ pub fn exec_re_scan<'mcx>(
         PlanStateNode::Agg(aps) => {
             ::nodeagg::exec_rescan_agg(&mut aps.agg, estate);
             exec_re_scan(&mut aps.outer, estate)
+        }
+        // ExecReScanWindowAgg: outer child rescanned when chgParam is NULL
+        // (always, until the Param lanes land).
+        PlanStateNode::WindowAgg(w) => {
+            ::nodewindowagg::exec_rescan_window_agg(&mut w.state, estate);
+            exec_re_scan(&mut w.outer, estate)
         }
         // ExecReScanSort: child rescanned only when the sort must be redone
         // (chgParam NULL until the Param lanes land).

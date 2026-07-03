@@ -94,6 +94,7 @@ pub fn is_projection_capable_pathtype(pathtype: u16) -> bool {
         t if t == tag16(NodeTag::T_SeqScan) => true,
         t if t == tag16(NodeTag::T_IndexScan) => true,
         t if t == tag16(NodeTag::T_IndexOnlyScan) => true,
+        t if t == tag16(NodeTag::T_CteScan) => true,
         t if t == tag16(NodeTag::T_NestLoop) => true,
         t if t == tag16(NodeTag::T_MergeJoin) => true,
         _ => panic!(
@@ -173,8 +174,7 @@ pub fn create_projection_path<'mcx>(
 }
 
 // create_modifytable_path (pathnode.c), single-relation INSERT/UPDATE/DELETE
-// arm: no RETURNING/WCO/rowmarks/ON CONFLICT/MERGE lists (loud upstream),
-// rows = 0.
+// arm: no WCO/rowmarks/ON CONFLICT/MERGE lists (loud upstream), rows = 0.
 pub fn create_modifytable_path<'mcx>(
     run: &mut PlannerRun<'mcx>,
     rel_id: RelId,
@@ -184,6 +184,7 @@ pub fn create_modifytable_path<'mcx>(
     // (operation is stored as the C CmdType value; types_pathnodes uses u32)
     result_relation: u32,
     update_colnos: Option<PgVec<'mcx, i16>>,
+    returning_list: Option<PgVec<'mcx, types_pathnodes::NodeId>>,
 ) -> PathNode<'mcx> {
     let sub = run.root.path(subpath_id).base();
     let path = Path {
@@ -223,7 +224,14 @@ pub fn create_modifytable_path<'mcx>(
             None => PgVec::new_in(run.mcx),
         },
         withCheckOptionLists: PgVec::new_in(run.mcx),
-        returningLists: PgVec::new_in(run.mcx),
+        returningLists: match returning_list {
+            Some(rlist) => {
+                let mut lists = PgVec::new_in(run.mcx);
+                lists.push(rlist);
+                lists
+            }
+            None => PgVec::new_in(run.mcx),
+        },
         rowMarks: PgVec::new_in(run.mcx),
         onconflict: None,
         epqParam: 0,
@@ -546,6 +554,30 @@ pub fn create_functionscan_path<'mcx>(
     path.parallel_safe = run.root.rel(rel_id).consider_parallel;
     let id = run.root.alloc_path(PathNode::Path(path));
     crate::costsize::cost_functionscan(run, id, rel_id)?;
+    Ok(id)
+}
+
+// create_valuesscan_path (pathnode.c); pathkeys/required_outer empty on this
+// lane (LATERAL is loud upstream); result is always unordered.
+pub fn create_valuesscan_path<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel_id: RelId,
+) -> PgResult<PathId> {
+    let mut path = base_path(run, NodeTag::T_Path, NodeTag::T_ValuesScan, rel_id);
+    path.parallel_aware = false;
+    path.parallel_safe = run.root.rel(rel_id).consider_parallel;
+    let id = run.root.alloc_path(PathNode::Path(path));
+    crate::costsize::cost_valuesscan(run, id, rel_id)?;
+    Ok(id)
+}
+
+// create_ctescan_path (pathnode.c); pathkeys/required_outer empty on this lane.
+pub fn create_ctescan_path<'mcx>(run: &mut PlannerRun<'mcx>, rel_id: RelId) -> PgResult<PathId> {
+    let mut path = base_path(run, NodeTag::T_Path, NodeTag::T_CteScan, rel_id);
+    path.parallel_aware = false;
+    path.parallel_safe = run.root.rel(rel_id).consider_parallel;
+    let id = run.root.alloc_path(PathNode::Path(path));
+    crate::costsize::cost_ctescan(run, id, rel_id)?;
     Ok(id)
 }
 
@@ -914,4 +946,65 @@ pub fn adjust_limit_rows_costs(
             *rows = 1.0;
         }
     }
+}
+
+// create_windowagg_path (pathnode.c); runCondition/qual legs dead
+// (WindowFuncRunCondition loud upstream, topqual only feeds runconditions).
+pub fn create_windowagg_path<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel_id: RelId,
+    subpath_id: PathId,
+    target_id: PtId,
+    window_funcs: &[types_nodes::Node<'mcx>],
+    winclause_node: types_nodes::Node<'mcx>,
+    topwindow: bool,
+) -> PgResult<PathId> {
+    let _ = topwindow;
+    let sub = run.root.path(subpath_id).base();
+    let rel = run.root.rel(rel_id);
+    // WindowAgg preserves the input sort order.
+    let pathkeys = crate::relnode::pgvec_clone_shallow(run.mcx, &sub.pathkeys);
+    let path = Path {
+        type_: tag16(NodeTag::T_WindowAggPath),
+        pathtype: tag16(NodeTag::T_WindowAgg),
+        parent: rel_id,
+        pathtarget_id: Some(target_id),
+        param_info: None,
+        parallel_aware: false,
+        parallel_safe: rel.consider_parallel && sub.parallel_safe,
+        parallel_workers: sub.parallel_workers,
+        rows: 0.0,
+        disabled_nodes: 0,
+        startup_cost: 0.0,
+        total_cost: 0.0,
+        pathkeys,
+    };
+    let (sub_disabled, sub_startup, sub_total, sub_rows) =
+        (sub.disabled_nodes, sub.startup_cost, sub.total_cost, sub.rows);
+    let winclause = run.intern_expr(winclause_node);
+    let id = run.root.alloc_path(PathNode::WindowAggPath(types_pathnodes::WindowAggPath {
+        path,
+        subpath: Some(subpath_id),
+        winclause,
+        qual: PgVec::new_in(run.mcx),
+        runCondition: PgVec::new_in(run.mcx),
+        topwindow,
+    }));
+    crate::costsize::cost_windowagg(
+        run,
+        id,
+        window_funcs,
+        winclause_node,
+        sub_disabled,
+        sub_startup,
+        sub_total,
+        sub_rows,
+    )?;
+    let target = run.root.pathtarget(target_id);
+    let (t_startup, t_per_tuple) = (target.cost.startup, target.cost.per_tuple);
+    let p = run.root.path_mut(id).base_mut();
+    let rows = p.rows;
+    p.startup_cost += t_startup;
+    p.total_cost += t_startup + t_per_tuple * rows;
+    Ok(id)
 }

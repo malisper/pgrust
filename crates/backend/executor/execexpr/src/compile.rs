@@ -7,7 +7,7 @@ use ::types_core::{Oid, FUNC_MAX_ARGS};
 use ::types_error::{
     PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_TOO_MANY_ARGUMENTS,
 };
-use ::types_fmgr::{TRACK_FUNC_ALL, TRACK_FUNC_OFF};
+use ::types_fmgr::{FmNodePtr, TRACK_FUNC_ALL, TRACK_FUNC_OFF};
 use ::types_nodes::list::NodeList;
 use ::types_nodes::node_tree::Node;
 use ::types_nodes::primnodes::{Param, ParamKind, Var, VarReturningType};
@@ -36,6 +36,20 @@ pub struct AggTransSpec<'a, 'mcx> {
     pub init_value_is_null: bool,
     pub args: &'a NodeList<'mcx>,
     pub pergroup: NonNull<AggPerGroup>,
+}
+
+// WindowAgg projection binding: same result arrays, indexed by wfuncno,
+// resolved by node identity (wfuncnos assigned at ExecInitWindowAgg).
+#[derive(Clone, Copy)]
+pub struct WinBind<'a, 'mcx> {
+    pub agg: AggBind,
+    pub wfuncnos: &'a [(Node<'mcx>, u16)],
+}
+
+#[derive(Clone, Copy)]
+enum Bind<'a, 'mcx> {
+    Agg(AggBind),
+    Win(WinBind<'a, 'mcx>),
 }
 
 pub const INNER_VAR: i32 = -1;
@@ -132,7 +146,7 @@ pub fn exec_build_agg_qual<'mcx>(
     create_expr_setup_steps(&mut state, mcx, qual.as_slice())?;
 
     for node in qual.iter() {
-        init_expr_rec(node, &mut state, mcx, OutRef::RESULT, Some(agg), params)?;
+        init_expr_rec(node, &mut state, mcx, OutRef::RESULT, Some(Bind::Agg(agg)), params)?;
         push_step(&mut state, mcx, Step::Qual { jumpdone: u32::MAX })?;
     }
     let done = state.steps.len() as u32;
@@ -166,14 +180,26 @@ pub fn exec_build_agg_projection_info<'mcx>(
     agg: AggBind,
     params: ParamBind<'mcx>,
 ) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
-    build_projection_info(mcx, target_list, input_desc, Some(agg), params)
+    build_projection_info(mcx, target_list, input_desc, Some(Bind::Agg(agg)), params)
+}
+
+/// WindowAgg-node projection: WindowFuncs bound to the result arrays by
+/// wfuncno (C EEOP_WINDOW_FUNC over ExecBuildProjectionInfo).
+pub fn exec_build_window_projection_info<'mcx>(
+    mcx: Mcx<'mcx>,
+    target_list: &NodeList<'mcx>,
+    input_desc: Option<&TupleDescData<'mcx>>,
+    win: WinBind<'_, 'mcx>,
+    params: ParamBind<'mcx>,
+) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
+    build_projection_info(mcx, target_list, input_desc, Some(Bind::Win(win)), params)
 }
 
 fn build_projection_info<'mcx>(
     mcx: Mcx<'mcx>,
     target_list: &NodeList<'mcx>,
     input_desc: Option<&TupleDescData<'mcx>>,
-    agg: Option<AggBind>,
+    agg: Option<Bind<'_, 'mcx>>,
     params: ParamBind<'mcx>,
 ) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
     let mut state = ExprState::new_boxed_in(mcx)?;
@@ -232,13 +258,14 @@ fn build_projection_info<'mcx>(
 }
 
 /// C `ExecBuildAggTrans`, AGG_PLAIN one-set byval slice; unported trans
-/// shapes panic at build, never at run.
+/// shapes panic at build. `agg_node` rides every transfn fcinfo's `context`.
 pub fn exec_build_agg_trans<'mcx>(
     mcx: Mcx<'mcx>,
     specs: &[AggTransSpec<'_, 'mcx>],
+    agg_node: FmNodePtr,
     params: ParamBind<'mcx>,
 ) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
-    build_agg_trans(mcx, specs, None, params)
+    build_agg_trans(mcx, specs, None, agg_node, params)
 }
 
 /// AGG_HASHED variant: pergroup resolves per tuple through `base`, the cell
@@ -248,15 +275,17 @@ pub fn exec_build_agg_trans_hashed<'mcx>(
     mcx: Mcx<'mcx>,
     specs: &[AggTransSpec<'_, 'mcx>],
     base: NonNull<NonNull<AggPerGroup>>,
+    agg_node: FmNodePtr,
     params: ParamBind<'mcx>,
 ) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
-    build_agg_trans(mcx, specs, Some(base), params)
+    build_agg_trans(mcx, specs, Some(base), agg_node, params)
 }
 
 fn build_agg_trans<'mcx>(
     mcx: Mcx<'mcx>,
     specs: &[AggTransSpec<'_, 'mcx>],
     indirect_base: Option<NonNull<NonNull<AggPerGroup>>>,
+    agg_node: FmNodePtr,
     params: ParamBind<'mcx>,
 ) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
     let mut state = ExprState::new_boxed_in(mcx)?;
@@ -278,15 +307,14 @@ fn build_agg_trans<'mcx>(
         if flinfo.fn_retset {
             return Err(retset_error());
         }
-        if flinfo.fn_strict && num_trans_inputs > 0 {
-            unported("EEOP_AGG_STRICT_INPUT_CHECK_ARGS (strict transfn with aggregated args)");
-        }
         if flinfo.fn_strict && spec.init_value_is_null {
             unported("EEOP_AGG_PLAIN_TRANS_INIT_STRICT_BYVAL (strict transfn, NULL initval)");
         }
         let fn_addr = flinfo.fn_addr;
         let fn_strict = flinfo.fn_strict;
         let frame = FuncFrame::new_in(mcx, flinfo, nargs as u16, spec.inputcollid)?;
+        // SAFETY: fresh frame image; the caller's agg_node outlives the program.
+        unsafe { crate::steps::fcinfo_mut(frame.fcinfo, nargs as u16).context = agg_node };
         let frame_ix = state.frames.len() as u32;
         let call =
             FuncCall { fn_addr, fcinfo: frame.fcinfo, frame: frame_ix, nargs: nargs as u16 };
@@ -307,6 +335,22 @@ fn build_agg_trans<'mcx>(
                 OutRef(Some(unsafe { crate::steps::arg_slot_of(call.fcinfo, argno + 1) }));
             init_expr_rec(tle.expr, &mut state, mcx, arg_out, None, params)?;
         }
+        let mut bailout: Option<usize> = None;
+        if fn_strict && num_trans_inputs > 0 {
+            // SAFETY: slot 1 of the nargs >= 2 fcinfo image (C's &args[1]).
+            let args1 = unsafe { crate::steps::arg_slot_of(call.fcinfo, 1) };
+            let step = if num_trans_inputs == 1 {
+                Step::AggStrictInputCheck1 { arg: args1, jumpnull: u32::MAX }
+            } else {
+                Step::AggStrictInputCheck {
+                    args: args1,
+                    nargs: num_trans_inputs as u16,
+                    jumpnull: u32::MAX,
+                }
+            };
+            bailout = Some(state.steps.len());
+            push_step(&mut state, mcx, step)?;
+        }
         let step = match (indirect_base, fn_strict) {
             (None, true) => Step::AggPlainTransStrictByVal { call, pergroup: spec.pergroup },
             (None, false) => Step::AggPlainTransByVal { call, pergroup: spec.pergroup },
@@ -318,6 +362,14 @@ fn build_agg_trans<'mcx>(
             }
         };
         push_step(&mut state, mcx, step)?;
+        if let Some(ix) = bailout {
+            let target = state.steps.len() as u32;
+            match &mut state.steps[ix] {
+                Step::AggStrictInputCheck { jumpnull, .. }
+                | Step::AggStrictInputCheck1 { jumpnull, .. } => *jumpnull = target,
+                _ => unreachable!(),
+            }
+        }
     }
     push_step(&mut state, mcx, Step::DoneNoReturn)?;
     ready_expr(&mut state);
@@ -485,6 +537,8 @@ pub fn expr_type(node: Node<'_>) -> Oid {
         NodeTag::T_FuncExpr => node.as_func_expr().unwrap().funcresulttype,
         NodeTag::T_OpExpr => node.as_op_expr().unwrap().opresulttype,
         NodeTag::T_Aggref => node.as_aggref().unwrap().aggtype,
+        NodeTag::T_WindowFunc => node.as_window_func().unwrap().wintype,
+        NodeTag::T_MinMaxExpr => node.as_min_max_expr().unwrap().minmaxtype,
         tag => panic!("execexpr exprType: node family {tag:?} not ported"),
     }
 }
@@ -546,8 +600,9 @@ fn setup_walker(node: Node<'_>, info: &mut SetupInfo) {
             }
         }
         NodeTag::T_Const | NodeTag::T_Param => {}
-        // C expr_setup_walker: Aggref args never eval in the caller's econtext.
-        NodeTag::T_Aggref => {}
+        // C expr_setup_walker: Aggref/WindowFunc args never eval in the
+        // caller's econtext.
+        NodeTag::T_Aggref | NodeTag::T_WindowFunc => {}
         NodeTag::T_FuncExpr => {
             for a in node.as_func_expr().unwrap().args.iter() {
                 setup_walker(a, info);
@@ -559,6 +614,11 @@ fn setup_walker(node: Node<'_>, info: &mut SetupInfo) {
             }
         }
         NodeTag::T_TargetEntry => setup_walker(node.as_target_entry().unwrap().expr, info),
+        NodeTag::T_MinMaxExpr => {
+            for a in node.as_min_max_expr().unwrap().args.iter() {
+                setup_walker(a, info);
+            }
+        }
         tag => panic!("execexpr setup walker: node family {tag:?} not ported"),
     }
 }
@@ -569,7 +629,7 @@ fn init_expr_rec<'mcx>(
     state: &mut ExprState<'mcx>,
     mcx: Mcx<'mcx>,
     out: OutRef,
-    agg: Option<AggBind>,
+    agg: Option<Bind<'_, 'mcx>>,
     params: ParamBind<'mcx>,
 ) -> PgResult<()> {
     match node.node_tag() {
@@ -638,7 +698,7 @@ fn init_expr_rec<'mcx>(
         }
         NodeTag::T_Aggref => {
             let aggref = node.as_aggref().unwrap();
-            let Some(bind) = agg else {
+            let Some(Bind::Agg(bind)) = agg else {
                 unported("EEOP_AGGREF outside an Agg projection (nodeAgg.c)");
             };
             let aggno = aggref.aggno;
@@ -657,8 +717,90 @@ fn init_expr_rec<'mcx>(
             };
             push_step(state, mcx, Step::AggrefEval { value, null, out })
         }
+        NodeTag::T_WindowFunc => {
+            let Some(Bind::Win(win)) = agg else {
+                unported("EEOP_WINDOW_FUNC outside a WindowAgg projection (nodeWindowAgg.c)");
+            };
+            let wfuncno = win
+                .wfuncnos
+                .iter()
+                .find(|(n, _)| n.ptr_eq(node))
+                .map(|&(_, i)| i)
+                .unwrap_or_else(|| {
+                    panic!("WindowFunc not registered with the WindowAggState (init order bug)")
+                });
+            assert!(wfuncno < win.agg.naggs);
+            // SAFETY: wfuncno bounds-checked against the bind's array length;
+            // the arrays are allocated once and stable (steps.rs note).
+            let (value, null) = unsafe {
+                (
+                    NonNull::new_unchecked(win.agg.values.as_ptr().add(wfuncno as usize)),
+                    NonNull::new_unchecked(win.agg.nulls.as_ptr().add(wfuncno as usize)),
+                )
+            };
+            push_step(state, mcx, Step::AggrefEval { value, null, out })
+        }
+        NodeTag::T_MinMaxExpr => {
+            let mm = node.as_min_max_expr().unwrap();
+            let step = init_minmax(node, mm, state, mcx, out, agg, params)?;
+            push_step(state, mcx, step)
+        }
         tag => panic!("execexpr ExecInitExprRec: node family {tag:?} not ported"),
     }
+}
+
+// C ExecInitExprRec T_MinMaxExpr: btree cmp proc via typcache, resolve-once
+// 2-arg frame, args evaluated into a compile-allocated slot array.
+fn init_minmax<'mcx>(
+    node: Node<'mcx>,
+    mm: &'mcx ::types_nodes::primnodes::MinMaxExpr<'mcx>,
+    state: &mut ExprState<'mcx>,
+    mcx: Mcx<'mcx>,
+    out: OutRef,
+    agg: Option<Bind<'_, 'mcx>>,
+    params: ParamBind<'mcx>,
+) -> PgResult<Step> {
+    let nelems = mm.args.len();
+    let entry = typcache::lookup_type_cache(mm.minmaxtype, typcache::TYPECACHE_CMP_PROC)?;
+    let cmp_proc = entry.cmp_proc();
+    if cmp_proc == 0 {
+        return Err(no_cmp_function(mm.minmaxtype)?);
+    }
+    let mut flinfo = fmgr_core::fmgr_info(cmp_proc)?;
+    flinfo.fn_expr = Some(FnExprErased::from_node_erased::<Node<'mcx>, Node<'static>>(node));
+    let fn_addr = flinfo.fn_addr;
+    let frame = FuncFrame::new_in(mcx, flinfo, 2, mm.inputcollid)?;
+    let frame_ix = state.frames.len() as u32;
+    let call = FuncCall { fn_addr, fcinfo: frame.fcinfo, frame: frame_ix, nargs: 2 };
+    state.frames.try_reserve(1).map_err(|_| mcx.oom(core::mem::size_of::<FuncFrame<'_>>()))?;
+    state.frames.push(frame);
+
+    let layout = core::alloc::Layout::array::<::datum::NullableDatum>(nelems)
+        .expect("minmax slots layout");
+    let slots: NonNull<::datum::NullableDatum> =
+        mcx.allocate(layout).map_err(|_| mcx.oom(layout.size()))?.cast();
+    for (i, arg) in mm.args.iter().enumerate() {
+        // SAFETY: i < nelems of the freshly allocated slot array.
+        let arg_out = OutRef(Some(unsafe { NonNull::new_unchecked(slots.as_ptr().add(i)) }));
+        init_expr_rec(arg, state, mcx, arg_out, agg, params)?;
+    }
+    Ok(Step::MinMax {
+        call,
+        slots,
+        nelems: nelems as u16,
+        least: mm.op == ::types_nodes::primnodes::MinMaxOp::IS_LEAST,
+        out,
+    })
+}
+
+#[cold]
+#[inline(never)]
+fn no_cmp_function(type_oid: Oid) -> PgResult<Box<PgError>> {
+    let name = format_type::format_type_be(type_oid)?;
+    Ok(Box::new(
+        PgError::error(format!("could not identify a comparison function for type {name}"))
+            .with_sqlstate(::types_error::ERRCODE_UNDEFINED_FUNCTION),
+    ))
 }
 
 // C's per-eval ExecEvalParamExtern checks hoisted: values are fixed for one
@@ -757,7 +899,7 @@ fn init_func<'mcx>(
     state: &mut ExprState<'mcx>,
     mcx: Mcx<'mcx>,
     out: OutRef,
-    agg: Option<AggBind>,
+    agg: Option<Bind<'_, 'mcx>>,
     params: ParamBind<'mcx>,
 ) -> PgResult<Step> {
     let nargs = args.len();
@@ -856,6 +998,10 @@ fn ready_expr(state: &mut ExprState<'_>) {
             Step::Qual { jumpdone } => {
                 assert!((*jumpdone as usize) < len, "qual jump target out of range");
             }
+            Step::AggStrictInputCheck { jumpnull, .. }
+            | Step::AggStrictInputCheck1 { jumpnull, .. } => {
+                assert!((*jumpnull as usize) < len, "strict-input jump target out of range");
+            }
             Step::FuncExpr { call, .. }
             | Step::FuncExprStrict1 { call, .. }
             | Step::FuncExprStrict2 { call, .. }
@@ -866,7 +1012,8 @@ fn ready_expr(state: &mut ExprState<'_>) {
             | Step::AggTransStrictByValIndirect { call, .. }
             | Step::HashDatumFirst { call, .. }
             | Step::HashDatumNext32 { call, .. }
-            | Step::NotDistinct { call, .. } => {
+            | Step::NotDistinct { call, .. }
+            | Step::MinMax { call, .. } => {
                 let f = &state.frames[call.frame as usize];
                 assert!(call.nargs == f.nargs && call.fcinfo == f.fcinfo);
             }

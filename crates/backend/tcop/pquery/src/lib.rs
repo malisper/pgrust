@@ -62,17 +62,34 @@ fn set_query_completion(qc: &mut QueryCompletion, tag: types_core::CommandTag, n
     qc.nprocessed = nprocessed;
 }
 
-// The PG_TRY/PG_CATCH shared by PortalStart/PortalRun: set ActivePortal, run,
-// MarkPortalFailed on Err or panic, restore ActivePortal either way.
-// (CurrentResourceOwner / PortalContext / MemoryContextSwitchTo dissolve under
-// RAII + explicit Mcx.)
+// The PG_TRY/PG_CATCH shared by PortalStart/PortalRun/PortalRunFetch: set
+// ActivePortal + CurrentResourceOwner = portal->resowner, run, MarkPortalFailed
+// on Err or panic, restore both either way. (PortalContext /
+// MemoryContextSwitchTo dissolve under RAII + explicit Mcx.)
+// may_commit renders PortalRun's restore rule: a utility inside the portal can
+// commit and destroy the saved owner, so a saved TopTransactionResourceOwner
+// re-targets the exit-time one (pquery.c:816).
 fn run_protected<R>(
     portal: &Portal<'static>,
+    may_commit: bool,
     body: impl FnOnce() -> PgResult<R>,
 ) -> PgResult<R> {
     let save = swap_active_portal(Some(portal.clone()));
+    let save_owner = resowner_seams::current_resource_owner::call();
+    let save_top_owner = resowner_seams::top_transaction_resource_owner::call();
+    let portal_owner = portal.borrow().resowner;
+    if !portal_owner.is_null() {
+        resowner_seams::set_current_resource_owner::call(portal_owner);
+    }
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
     let restore = |save: Option<Portal<'static>>| {
+        if may_commit && save_owner == save_top_owner {
+            resowner_seams::set_current_resource_owner::call(
+                resowner_seams::top_transaction_resource_owner::call(),
+            );
+        } else {
+            resowner_seams::set_current_resource_owner::call(save_owner);
+        }
         swap_active_portal(save);
     };
     match outcome {
@@ -237,13 +254,26 @@ pub fn FetchPortalTargetList<'a, 'mcx>(
         let pstmt = &stmts[primary];
         if pstmt.commandType == CmdType::CMD_UTILITY {
             let tag = pstmt.utilityStmt.map(Node::node_tag);
-            if tag == Some(NodeTag::T_FetchStmt) || tag == Some(NodeTag::T_ExecuteStmt) {
+            if tag == Some(NodeTag::T_FetchStmt) {
                 panic!(
-                    "FetchStatementTargetList (pquery.c:349): FETCH/EXECUTE target-list \
-                     recursion not ported — FETCH needs the portalcmds lane + FetchStmt \
-                     grammar payload; EXECUTE needs FetchPreparedStatementTargetList \
-                     wiring into the landed prepare crate"
+                    "FetchStatementTargetList (pquery.c:349): FETCH target-list recursion \
+                     not ported — needs the portalcmds lane + FetchStmt grammar payload"
                 );
+            }
+            // C FetchStatementTargetList T_ExecuteStmt arm:
+            // FetchPreparedStatementTargetList = CachedPlanGetTargetList(plansource, NULL).
+            if tag == Some(NodeTag::T_ExecuteStmt) {
+                let name = pstmt
+                    .utilityStmt
+                    .and_then(Node::as_execute_stmt)
+                    .expect("utilityStmt is ExecuteStmt")
+                    .name
+                    .expect("EXECUTE has a name");
+                if let Some(psrc) =
+                    prepare_seams::fetch_prepared_statement_plansource::call(name, false)?
+                {
+                    out = plancache::CachedPlanGetTargetList(mcx, psrc, QueryEnvHandle::NULL)?;
+                }
             }
             return Ok(());
         }
@@ -278,7 +308,7 @@ pub fn PortalStart(
 ) -> PgResult<()> {
     debug_assert_eq!(portal.borrow().status, PORTAL_DEFINED);
 
-    run_protected(portal, || -> PgResult<()> {
+    run_protected(portal, false, || -> PgResult<()> {
         portal.borrow_mut().portalParams = params;
 
         let stmts_handle = portal.borrow().stmts;
@@ -437,7 +467,7 @@ pub fn PortalRun<'mcx>(
 
     portalmem::MarkPortalActive(portal)?;
 
-    let result = run_protected(portal, || -> PgResult<bool> {
+    let result = run_protected(portal, true, || -> PgResult<bool> {
         match strategy {
             PORTAL_ONE_SELECT | PORTAL_ONE_RETURNING | PORTAL_ONE_MOD_WITH
             | PORTAL_UTIL_SELECT => {
@@ -914,7 +944,7 @@ pub fn PortalRunFetch(
 ) -> PgResult<u64> {
     portalmem::MarkPortalActive(portal)?;
 
-    let result = run_protected(portal, || -> PgResult<u64> {
+    let result = run_protected(portal, false, || -> PgResult<u64> {
         let strategy = portal.borrow().strategy;
         match strategy {
             PORTAL_ONE_SELECT => DoPortalRunFetch(portal, fdirection, count, dest),

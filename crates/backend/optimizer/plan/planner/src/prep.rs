@@ -113,7 +113,28 @@ pub fn preprocess_targetlist<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResult<()> {
         }
     };
     table::table_close(rel, types_rel::NoLock)?;
-    debug_assert!(parse.returningList.is_nil());
+    // C adds resjunk entries for RETURNING Vars of OTHER relations; the join
+    // DML lane is loud upstream, so only result-rel Vars can appear here.
+    if !parse.returningList.is_nil() && parse.rtable.len() > 1 {
+        let result_relation = parse.resultRelation;
+        for tle_node in &parse.returningList {
+            let vars = vars::pull_var_clause(
+                mcx,
+                tle_node,
+                vars::PVC_RECURSE_AGGREGATES
+                    | vars::PVC_RECURSE_WINDOWFUNCS
+                    | vars::PVC_INCLUDE_PLACEHOLDERS,
+            )?;
+            for var_node in &vars {
+                if var_node.as_var().unwrap().varno != result_relation {
+                    panic!(
+                        "preprocess_targetlist (preptlist.c): RETURNING Var of a \
+                         non-result relation (resjunk tlist addition); M2 join lane"
+                    );
+                }
+            }
+        }
+    }
     run.processed_tlist = Some(mcx::leak_in(mcx::alloc_in(mcx, tlist)?));
     Ok(())
 }

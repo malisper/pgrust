@@ -387,6 +387,44 @@ pub fn SimpleLruInit(
     })
 }
 
+fn reset_lwlock_in_place(lock: &LWLock) {
+    lock.state.store(lwlock::LW_FLAG_RELEASE_OK, Ordering::Relaxed);
+    // SAFETY: crash choreography drained every child before reset; the
+    // postmaster thread has exclusive access, so no holder or waiter exists.
+    unsafe {
+        *lock.waiters.get() = lmgr_proc_seams::proclist_head {
+            head: types_core::INVALID_PROC_NUMBER,
+            tail: types_core::INVALID_PROC_NUMBER,
+        };
+    }
+}
+
+/// Crash-cycle reset in place to the post-SimpleLruInit boot image
+/// (notes/crash-restart-design.md); startup re-seeds from pg_control/WAL.
+pub fn SimpleLruResetAfterCrash(ctl: &SlruCtlData) {
+    let sh = &ctl.shared;
+    let nslots = sh.num_slots as usize;
+    for i in 0..nslots {
+        sh.page_status.set(i, SLRU_PAGE_EMPTY);
+        sh.page_dirty.set(i, false);
+        sh.page_number.set(i, 0);
+        sh.page_lru_count[i].store(0, Ordering::Relaxed);
+        reset_lwlock_in_place(&sh.buffer_locks[i].lock);
+        // SAFETY: exclusive access as above; each slot page spans BLCKSZ bytes.
+        unsafe { core::ptr::write_bytes(sh.pages.page_ptr(i), 0, BLCKSZ) };
+    }
+    for b in 0..ctl.nbanks as usize {
+        sh.bank_cur_lru_count[b].store(0, Ordering::Relaxed);
+        reset_lwlock_in_place(&sh.bank_locks[b].lock);
+    }
+    if sh.lsn_groups_per_page > 0 {
+        for i in 0..nslots * sh.lsn_groups_per_page as usize {
+            sh.group_lsn.set(i, InvalidXLogRecPtr);
+        }
+    }
+    sh.latest_page_number.store(0, Ordering::Relaxed);
+}
+
 pub fn check_slru_buffers(name: &str, newval: i32) -> (bool, Option<String>) {
     if newval % SLRU_BANK_SIZE == 0 {
         (true, None)
@@ -1454,4 +1492,78 @@ pub fn SlruSyncFileTag(ctl: &SlruCtlData, ftag: &FileTag) -> PgResult<(i32, Slru
 
     set_errno(save_errno);
     Ok((result, path))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reset_after_crash_restores_boot_image() {
+        shmem_seams::shmem_init_struct::set(|_, size| {
+            let layout = std::alloc::Layout::from_size_align(size, 128).unwrap();
+            // SAFETY: non-zero size; leaked for the test-process lifetime.
+            let p = unsafe { std::alloc::alloc_zeroed(layout) };
+            assert!(!p.is_null());
+            Ok((p, false))
+        });
+        pgstat_seams::pgstat_get_slru_index::set(|_| 0);
+
+        let nslots = 64;
+        let nlsns = 2;
+        let ctl = SimpleLruInit(
+            "reset_test",
+            nslots,
+            nlsns,
+            "pg_reset_test",
+            100,
+            101,
+            SyncRequestHandler::SYNC_HANDLER_NONE,
+            false,
+        )
+        .unwrap();
+
+        let sh = &ctl.shared;
+        sh.page_status.set(3, SLRU_PAGE_VALID);
+        sh.page_dirty.set(3, true);
+        sh.page_number.set(3, 777);
+        sh.page_lru_count[3].store(9, Ordering::Relaxed);
+        sh.bank_cur_lru_count[0].store(9, Ordering::Relaxed);
+        sh.group_lsn.set(5, 0xDEAD);
+        sh.latest_page_number.store(42, Ordering::Relaxed);
+        sh.buffer_locks[3].lock.state.store(5, Ordering::Relaxed);
+        sh.bank_locks[0].lock.state.store(5, Ordering::Relaxed);
+        // SAFETY: single-threaded test, exclusive access.
+        unsafe { *sh.pages.page_ptr(3) = 0xAB };
+
+        SimpleLruResetAfterCrash(&ctl);
+
+        assert_eq!(sh.page_status.get(3), SLRU_PAGE_EMPTY);
+        assert!(!sh.page_dirty.get(3));
+        assert_eq!(sh.page_number.get(3), 0);
+        assert_eq!(sh.page_lru_count[3].load(Ordering::Relaxed), 0);
+        assert_eq!(sh.bank_cur_lru_count[0].load(Ordering::Relaxed), 0);
+        assert_eq!(sh.group_lsn.get(5), InvalidXLogRecPtr);
+        assert_eq!(sh.latest_page_number.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            sh.buffer_locks[3].lock.state.load(Ordering::Relaxed),
+            lwlock::LW_FLAG_RELEASE_OK
+        );
+        assert_eq!(
+            sh.bank_locks[0].lock.state.load(Ordering::Relaxed),
+            lwlock::LW_FLAG_RELEASE_OK
+        );
+        // SAFETY: as above.
+        assert_eq!(unsafe { *sh.pages.page_ptr(3) }, 0);
+        for b in 0..(nslots / SLRU_BANK_SIZE) as usize {
+            assert_eq!(
+                // SAFETY: as above.
+                unsafe { *sh.bank_locks[b].lock.waiters.get() },
+                lmgr_proc_seams::proclist_head {
+                    head: types_core::INVALID_PROC_NUMBER,
+                    tail: types_core::INVALID_PROC_NUMBER,
+                }
+            );
+        }
+    }
 }

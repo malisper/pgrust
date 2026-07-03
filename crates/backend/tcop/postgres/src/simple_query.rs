@@ -155,6 +155,16 @@ pub fn pg_plan_queries<'mcx>(
 }
 
 pub fn exec_simple_query<'mcx>(mcx: Mcx<'mcx>, query_string: &'mcx str) -> PgResult<()> {
+    // Crash-restart test injection: PANIC-class fault on demand, env-gated so
+    // the surface is inert in production (notes/crash-restart-design.md).
+    if query_string == "pgrust: inject panic"
+        && std::env::var_os("PGRUST_CRASH_TEST").is_some()
+    {
+        ereport(types_error::PANIC)
+            .errmsg("crash-restart test injection")
+            .finish(loc(0, "exec_simple_query"))?;
+    }
+
     let dest = elog::config::where_to_send_output();
     let save_log_statement_stats = log_statement_stats();
     let mut was_logged = false;

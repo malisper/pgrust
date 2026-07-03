@@ -11,6 +11,10 @@ types_nodes = { path = "../../../_support/types/nodes" }
 types_rel = { path = "../../../_support/types/rel" }
 types_slot = { path = "../../../_support/types/types_slot" }
 executils = { path = "../executils" }
+execexpr = { path = "../execexpr" }
+readfuncs = { path = "../../nodes/readfuncs" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
+fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
 exectuples = { path = "../exectuples" }
 execindexing = { path = "../execindexing" }
 tableam = { path = "../../access/table/tableam" }
@@ -99,6 +103,8 @@ table = { path = "../../access/table/table" }
 tableam_vocab = { path = "../../access/table/tableam_vocab" }
 tablecmds_seams = { path = "../../commands/tablecmds_seams" }
 tcop_dest = { path = "../../tcop/dest" }
+tuplestore = { path = "../../utils/sort/tuplestore" }
+tuplestore_hold_seams = { path = "../../utils/sort/tuplestore_hold_seams" }
 timeout_seams = { path = "../../utils/misc/timeout_seams" }
 timestamp_seams = { path = "../../utils/adt/timestamp_seams" }
 transam = { path = "../../access/transam/transam" }

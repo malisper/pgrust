@@ -26,6 +26,14 @@ parser_seams = { path = "../../parser/parser_seams" }
 utility_seams = { path = "../../tcop/utility_seams" }
 postgres = { path = "../../tcop/postgres" }
 prepare_seams = { path = "../prepare_seams" }
+parse_expr = { path = "../../parser/parse_expr" }
+parse_collate = { path = "../../parser/parse_collate" }
+parse_utilcmd = { path = "../../parser/parse_utilcmd" }
+parser_small1 = { path = "../../parser/parser_small1" }
+coerce = { path = "../../parser/coerce" }
+format_type = { path = "../../utils/adt/format_type" }
+execexpr = { path = "../../executor/execexpr" }
+mbutils = { path = "../../utils/mb/mbutils" }
 
 [dev-dependencies]
 datum = { path = "../../../_support/types/datum" }
@@ -56,3 +64,4 @@ inval_seams = { path = "../../utils/cache/inval_seams" }
 lock_seams = { path = "../../storage/lmgr/lock_seams" }
 catalog_seams = { path = "../../catalog/catalog_seams" }
 portalcmds_seams = { path = "../portalcmds_seams" }
+resowner_seams = { path = "../../utils/resowner/resowner_seams" }

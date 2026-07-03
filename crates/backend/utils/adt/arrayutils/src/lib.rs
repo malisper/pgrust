@@ -40,10 +40,12 @@ pub fn array_get_offset(n: i32, dim: &[i32], lb: &[i32], indx: &[i32]) -> i32 {
     offset
 }
 
+#[inline]
 pub fn array_get_n_items(ndim: i32, dims: &[i32]) -> PgResult<i32> {
     array_get_n_items_safe(ndim, dims, None)
 }
 
+#[inline]
 pub fn array_get_n_items_safe(
     ndim: i32,
     dims: &[i32],

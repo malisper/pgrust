@@ -874,10 +874,12 @@ pub fn heap_update(
         ));
     }
 
-    if relation.rd_rel.relhasindex {
-        unported("RelationGetIndexAttrBitmap (relcache index-attr bitmaps)");
-    }
-    // Empty hot/sum/key/id attr sets from here (indexless relation).
+    // Indexless relations take the C empty-bitmap path (HOT when same-page).
+    let attr_bitmaps = if relation.rd_rel.relhasindex {
+        Some(relcache_seams::relation_get_index_attr_bitmap::call(relation.rd_id)?)
+    } else {
+        None
+    };
 
     let block = ItemPointerGetBlockNumber(otid);
     let pin = BufferPin::adopt(bufmgr_seams::read_buffer::call(relation, block)?)
@@ -903,9 +905,22 @@ pub fn heap_update(
     let mut oldtup = unsafe { page_tuple(pin.page(), lp, *otid, relation) };
     newtup.t_tableOid = relation.rd_id;
 
-    // modified_attrs is empty; no key columns modified
-    *lockmode = LockTupleMode::LockTupleNoKeyExclusive;
-    let key_intact = true;
+    // HeapDetermineColumnsInfo over the four attr sets (empty when indexless).
+    let (hot_modified, sum_modified, key_modified, id_modified) = match &attr_bitmaps {
+        Some(bm) => (
+            any_attr_modified(relation, &oldtup, newtup, &bm.hot_blocking),
+            any_attr_modified(relation, &oldtup, newtup, &bm.summarized),
+            any_attr_modified(relation, &oldtup, newtup, &bm.key),
+            any_attr_modified(relation, &oldtup, newtup, &bm.identity),
+        ),
+        None => (false, false, false, false),
+    };
+    let key_intact = !key_modified;
+    *lockmode = if key_intact {
+        LockTupleMode::LockTupleNoKeyExclusive
+    } else {
+        LockTupleMode::LockTupleExclusive
+    };
     multixact_seams::multi_xact_id_set_oldest_member::call()?;
 
     let mut have_tuple_lock = false;
@@ -1187,15 +1202,15 @@ pub fn heap_update(
     let same_page = newpin.is_none();
     let mut use_hot_update = false;
     if same_page {
-        // no hot-blocking attrs modified (empty sets)
-        use_hot_update = true;
-    } else {
+        use_hot_update = !hot_modified;
+    }
+    if !same_page {
         // SAFETY: pin + exclusive lock held.
         let mut pm = unsafe { PageMut::from_raw(bufmgr_seams::buffer_get_page::call(pin.buffer())) };
         pm.set_full();
     }
 
-    let old_key_tuple = extract_replica_identity(relation, &oldtup, false);
+    let old_key_tuple = extract_replica_identity(relation, &oldtup, id_modified);
     debug_assert!(old_key_tuple.is_none());
 
     {
@@ -1287,7 +1302,11 @@ pub fn heap_update(
     }
 
     *update_indexes = if use_hot_update {
-        TU_UpdateIndexes::TU_None
+        if sum_modified {
+            TU_UpdateIndexes::TU_Summarizing
+        } else {
+            TU_UpdateIndexes::TU_None
+        }
     } else {
         TU_UpdateIndexes::TU_All
     };
@@ -1328,4 +1347,70 @@ pub fn simple_heap_update(
             "unexpected heap_update status: {result:?}"
         )))),
     }
+}
+
+// HeapDetermineColumnsInfo + heap_attr_equals (heapam.c), reduced to a
+// per-set any-modified probe; datumIsEqual's toasted false-negatives only
+// cost HOT, as in C.
+fn any_attr_modified(
+    relation: &RelationData<'_>,
+    oldtup: &HeapTupleData<'_>,
+    newtup: &HeapTupleData<'_>,
+    attnums: &[i16],
+) -> bool {
+    let td = &relation.rd_att;
+    for &attnum in attnums {
+        debug_assert!(attnum > 0);
+        let mut isnull1 = false;
+        let mut isnull2 = false;
+        // SAFETY: both tuples were formed/read under this relation's
+        // descriptor; attnum comes off its own index definitions.
+        let (v1, v2) = unsafe {
+            (
+                ::types_tuple::heap_getattr(oldtup, attnum as i32, td, &mut isnull1),
+                ::types_tuple::heap_getattr(newtup, attnum as i32, td, &mut isnull2),
+            )
+        };
+        if isnull1 != isnull2 {
+            return true;
+        }
+        if isnull1 {
+            continue;
+        }
+        let att = td.attr(attnum as usize - 1);
+        if !datum_is_equal(v1, v2, att.attbyval, att.attlen as i32) {
+            return true;
+        }
+    }
+    false
+}
+
+// datumIsEqual (datum.c).
+fn datum_is_equal(v1: ::datum::Datum, v2: ::datum::Datum, typbyval: bool, typlen: i32) -> bool {
+    if typbyval {
+        return v1 == v2;
+    }
+    let (p1, p2) = (v1.as_usize() as *const u8, v2.as_usize() as *const u8);
+    let size = match typlen {
+        l if l > 0 => l as usize,
+        -1 => {
+            // SAFETY: byref varlena datums off live tuples.
+            let (s1, s2) = unsafe {
+                (::types_tuple::varatt::varsize_any(p1), ::types_tuple::varatt::varsize_any(p2))
+            };
+            if s1 != s2 {
+                return false;
+            }
+            s1
+        }
+        other => unported_ret(other),
+    };
+    // SAFETY: both images readable for `size` per their headers/typlen.
+    unsafe { core::slice::from_raw_parts(p1, size) == core::slice::from_raw_parts(p2, size) }
+}
+
+#[cold]
+#[inline(never)]
+fn unported_ret(typlen: i32) -> ! {
+    panic!("backend-access-heap-heapam reached unported unit: datumIsEqual cstring typlen {typlen} (datum.c)")
 }

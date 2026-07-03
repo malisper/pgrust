@@ -556,6 +556,22 @@ pub fn ResourceOwnerRelease(
     resource_owner_release_internal(owner, phase, is_commit, is_top_level)
 }
 
+// C: an overflowed cache passes NULL/0 = lock.c walks the whole LOCALLOCK
+// table. Tags are copied out first: the lock manager re-enters resowner
+// (ForgetLock on us / RememberLock on the parent) mid-call.
+fn reassign_or_release_owner_locks(owner: ResourceOwner, is_commit: bool) -> PgResult<()> {
+    let cached = with_arena(|a| {
+        let d = a.data(owner);
+        (d.nlocks <= MAX_RESOWNER_LOCKS).then(|| (d.locks, d.nlocks as usize))
+    });
+    let locallocks = cached.as_ref().map(|(locks, n)| &locks[..*n]);
+    if is_commit {
+        lock_seams::lock_reassign_current_owner::call(locallocks)
+    } else {
+        lock_seams::lock_release_current_owner::call(locallocks)
+    }
+}
+
 struct PhasePrep {
     has_items: bool,
     nlocks: u8,
@@ -626,7 +642,10 @@ fn resource_owner_release_internal(
             } else {
                 debug_assert!(!parent_is_null);
                 if nlocks != 0 {
-                    unported("LockReassignCurrentOwner/LockReleaseCurrentOwner (storage/lmgr/lock.c)");
+                    let save = CURRENT_OWNER.with(|c| c.replace(owner));
+                    let result = reassign_or_release_owner_locks(owner, is_commit);
+                    CURRENT_OWNER.with(|c| c.set(save));
+                    result?;
                 }
             }
         }
@@ -667,11 +686,7 @@ fn resource_owner_release_internal(
                 } else {
                     debug_assert!(!prep.parent_is_null);
                     if prep.nlocks != 0 {
-                        // With an empty, un-overflowed cache C's
-                        // LockReassignCurrentOwner/LockReleaseCurrentOwner
-                        // iterate zero locks; any owned/overflowed locks need
-                        // the in-flight lock.c port.
-                        unported("LockReassignCurrentOwner/LockReleaseCurrentOwner (storage/lmgr/lock.c)");
+                        reassign_or_release_owner_locks(owner, is_commit)?;
                     }
                 }
             }
