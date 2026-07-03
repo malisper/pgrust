@@ -148,6 +148,7 @@ fn PinBufferForBlock(
 }
 
 /// The partitioned mapping lookup, warm-hit pin, and victim install.
+#[inline(never)] // QUANTIFY(buftable-dense): pinned for dist-prof attribution
 fn BufferAlloc(
     smgr: RelFileLocatorBackend,
     relpersistence: u8,

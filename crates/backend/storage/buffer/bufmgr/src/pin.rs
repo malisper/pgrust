@@ -81,7 +81,7 @@ pub(crate) fn buffer_refcount(state: u32) -> u32 {
 // M2 swizzling decision site: under swizzling + optimistic latching a warm-hit
 // pin becomes a version-validated read with zero atomics; this CAS (and the
 // UnpinBuffer decrement) is what that replaces (docs/beat-postgres.md §7).
-#[inline]
+#[inline(never)] // QUANTIFY(buftable-dense): pinned for dist-prof attribution
 pub(crate) fn PinBuffer(desc: &BufferDesc, strategy: &BufferAccessStrategy) -> bool {
     let b = BufferDescriptorGetBuffer(desc);
     let already = privref::track_pin(b);
@@ -139,7 +139,7 @@ pub(crate) fn PinBuffer_Locked(desc: &BufferDesc) {
     RememberBufferPin(b);
 }
 
-#[inline]
+#[inline(never)] // QUANTIFY(buftable-dense): pinned for dist-prof attribution
 pub(crate) fn UnpinBuffer(desc: &BufferDesc) {
     let b = BufferDescriptorGetBuffer(desc);
     resowner::ResourceOwnerForget(
