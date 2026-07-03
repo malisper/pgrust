@@ -117,6 +117,21 @@ pub(crate) fn pull_var_nodes<'mcx>(node: Node<'mcx>, out: &mut PgVec<'mcx, Node<
                 pull_var_nodes(a, out);
             }
         }
+        NodeTag::T_SubscriptingRef => {
+            let sr = node.as_subscripting_ref().unwrap();
+            for a in sr.refupperindexpr.iter().flatten() {
+                pull_var_nodes(a, out);
+            }
+            for a in sr.reflowerindexpr.iter().flatten() {
+                pull_var_nodes(a, out);
+            }
+            if let Some(a) = sr.refexpr {
+                pull_var_nodes(a, out);
+            }
+            if let Some(a) = sr.refassgnexpr {
+                pull_var_nodes(a, out);
+            }
+        }
         NodeTag::T_Param => {}
         NodeTag::T_AlternativeSubPlan => {
             for a in &node.as_alternative_sub_plan().unwrap().subplans {
