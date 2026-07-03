@@ -132,6 +132,7 @@ fn rewrite_insert_query<'mcx>(mcx: Mcx<'mcx>, parsetree: &mut Query<'mcx>) -> Pg
         }
     }
 
+    let mut unused_values_attrnos: PgVec<'_, i16> = PgVec::new_in(mcx);
     parsetree.targetList = rewriteTargetListIU(
         mcx,
         &parsetree.targetList,
@@ -139,10 +140,11 @@ fn rewrite_insert_query<'mcx>(mcx: Mcx<'mcx>, parsetree: &mut Query<'mcx>) -> Pg
         parsetree.r#override,
         &rel,
         values_rte.map(|(rte, rti, _)| (rte, rti)),
+        Some(&mut unused_values_attrnos),
     )?;
 
     if let Some((rte, rti, rte_node)) = values_rte {
-        rewriteValuesRTE(mcx, parsetree, rte, rti, rte_node, &rel)?;
+        rewriteValuesRTE(mcx, parsetree, rte, rti, rte_node, &rel, &unused_values_attrnos)?;
     }
 
     if let Some(oc_node) = parsetree.onConflict {
@@ -154,6 +156,7 @@ fn rewrite_insert_query<'mcx>(mcx: Mcx<'mcx>, parsetree: &mut Query<'mcx>) -> Pg
                 CmdType::CMD_UPDATE,
                 parsetree.r#override,
                 &rel,
+                None,
                 None,
             )?;
             // SAFETY: exclusive Query-tree ownership during rewrite.
@@ -200,6 +203,7 @@ fn rewrite_update_delete_query<'mcx>(
             parsetree.r#override,
             &rel,
             None,
+            None,
         )?;
     }
 
@@ -210,8 +214,8 @@ fn rewrite_update_delete_query<'mcx>(
 // rewriteTargetListIU, INSERT/UPDATE arms: reorder non-junk TLEs into
 // attribute order (junk entries keep their post-column resnos and trail the
 // list) and apply stored pg_attrdef defaults for unassigned INSERT columns
-// (no stored default => the planner NULL-fills). Identity/generated columns
-// and multiple assignment merges (process_matched_tle) are loud.
+// (no stored default => the planner NULL-fills). Multiple assignment merges
+// (process_matched_tle) are loud.
 fn rewriteTargetListIU<'mcx>(
     mcx: Mcx<'mcx>,
     target_list: &types_nodes::NodeList<'mcx>,
@@ -219,8 +223,8 @@ fn rewriteTargetListIU<'mcx>(
     r#override: types_nodes::OverridingKind,
     target_relation: &types_rel::Relation<'mcx>,
     values_rte: Option<(&'mcx types_nodes::RangeTblEntry<'mcx>, i32)>,
+    mut unused_values_attrnos: Option<&mut PgVec<'mcx, i16>>,
 ) -> PgResult<types_nodes::NodeList<'mcx>> {
-    let _ = values_rte;
     let numattrs = target_relation.rd_att.natts as usize;
     let mut new_tles: PgVec<'mcx, Option<types_nodes::Node<'mcx>>> =
         mcx::vec_with_capacity_in(mcx, numattrs)?;
@@ -256,6 +260,13 @@ fn rewriteTargetListIU<'mcx>(
         new_tles[attrno - 1] = Some(tle_node);
     }
 
+    use types_core::catalog::{ATTRIBUTE_IDENTITY_ALWAYS, ATTRIBUTE_IDENTITY_BY_DEFAULT};
+    use types_nodes::OverridingKind;
+
+    // findDefaultOnlyColumns (rewriteHandler.c), computed once on demand:
+    // true per VALUES column iff every row's cell is SetToDefault.
+    let mut default_only_cols: Option<PgVec<'mcx, bool>> = None;
+
     let mut new_tlist = types_nodes::NodeList::nil();
     for attrno in 1..=numattrs {
         let att = target_relation.rd_att.attr(attrno - 1);
@@ -263,22 +274,99 @@ fn rewriteTargetListIU<'mcx>(
             continue;
         }
         let new_tle = new_tles[attrno - 1];
-        let apply_default = (new_tle.is_none() && command_type == CmdType::CMD_INSERT)
+        let mut apply_default = (new_tle.is_none() && command_type == CmdType::CMD_INSERT)
             || new_tle.is_some_and(|t| {
                 t.as_target_entry().expect("targetlist cell").expr.node_tag()
                     == types_nodes::NodeTag::T_SetToDefault
             });
-        if att.attidentity != 0 || att.attgenerated != 0 {
-            panic!(
-                "rewriteTargetListIU (rewriteHandler.c): identity/generated \
-                 column arms not ported"
-            );
+        let values_attrno: i16 = match (values_rte, new_tle) {
+            (Some((_, rti)), Some(t)) => t
+                .as_target_entry()
+                .expect("targetlist cell")
+                .expr
+                .as_var()
+                .filter(|v| v.varno == rti)
+                .map_or(0, |v| v.varattno),
+            _ => 0,
+        };
+        let mut values_col_is_default_only =
+            |default_only_cols: &mut Option<PgVec<'mcx, bool>>| -> PgResult<bool> {
+                if values_attrno == 0 {
+                    return Ok(false);
+                }
+                if default_only_cols.is_none() {
+                    let rte = values_rte.expect("values_attrno nonzero").0;
+                    let width = rte
+                        .values_lists
+                        .nth(0)
+                        .as_list()
+                        .expect("VALUES row is a List")
+                        .len();
+                    let mut cols: PgVec<'mcx, bool> = mcx::vec_with_capacity_in(mcx, width)?;
+                    cols.extend((0..width).map(|_| true));
+                    for row in &rte.values_lists {
+                        for (i, cell) in
+                            row.as_list().expect("VALUES row is a List").iter().enumerate()
+                        {
+                            if cell.node_tag() != types_nodes::NodeTag::T_SetToDefault {
+                                cols[i] = false;
+                            }
+                        }
+                    }
+                    *default_only_cols = Some(cols);
+                }
+                Ok(default_only_cols.as_ref().expect("just built")[values_attrno as usize - 1])
+            };
+        if command_type == CmdType::CMD_INSERT {
+            if att.attidentity as u8 == ATTRIBUTE_IDENTITY_ALWAYS && !apply_default {
+                if r#override == OverridingKind::OVERRIDING_USER_VALUE {
+                    apply_default = true;
+                } else if r#override != OverridingKind::OVERRIDING_SYSTEM_VALUE {
+                    if values_col_is_default_only(&mut default_only_cols)? {
+                        apply_default = true;
+                    } else {
+                        return Err(generated_always_insert_error(att, true));
+                    }
+                }
+            }
+            if att.attidentity as u8 == ATTRIBUTE_IDENTITY_BY_DEFAULT
+                && r#override == OverridingKind::OVERRIDING_USER_VALUE
+            {
+                apply_default = true;
+            }
+            if att.attgenerated != 0 && !apply_default {
+                if values_col_is_default_only(&mut default_only_cols)? {
+                    apply_default = true;
+                } else {
+                    return Err(generated_always_insert_error(att, false));
+                }
+            }
+            if values_attrno != 0 && apply_default {
+                if let Some(unused) = unused_values_attrnos.as_deref_mut() {
+                    unused.push(values_attrno);
+                }
+            }
         }
-        debug_assert!(r#override == types_nodes::OverridingKind::OVERRIDING_NOT_SET);
-        let new_tle = if apply_default {
-            let expr = if att.atthasdef {
+        if command_type == CmdType::CMD_UPDATE {
+            if att.attidentity as u8 == ATTRIBUTE_IDENTITY_ALWAYS
+                && new_tle.is_some()
+                && !apply_default
+            {
+                return Err(generated_always_update_error(att, true));
+            }
+            if att.attgenerated != 0 && new_tle.is_some() && !apply_default {
+                return Err(generated_always_update_error(att, false));
+            }
+        }
+        let new_tle = if att.attgenerated != 0 {
+            // Stored generated columns are computed in the executor.
+            None
+        } else if apply_default {
+            let expr = if att.attidentity != 0 || att.atthasdef {
                 Some(build_column_default(mcx, target_relation, attrno)?)
             } else if command_type == CmdType::CMD_INSERT {
+                // No stored default: C omits the entry; the planner inserts
+                // the NULL (expand_insert_targetlist).
                 None
             } else {
                 // UPDATE SET col = DEFAULT with no stored default: explicit
@@ -320,8 +408,6 @@ fn rewriteTargetListIU<'mcx>(
         } else {
             new_tle
         };
-        // No stored default: C omits the entry; the planner inserts the NULL
-        // (expand_insert_targetlist).
         if let Some(tle) = new_tle {
             new_tlist.lappend(mcx, tle)?;
         }
@@ -331,10 +417,11 @@ fn rewriteTargetListIU<'mcx>(
 }
 
 // rewriteValuesRTE (rewriteHandler.c): replace SetToDefault cells with the
-// column's stored default or an explicit NULL. The unused_cols and
-// auto-updatable-view legs are dead (identity/OVERRIDING and views are loud
-// upstream), so allReplaced is always true; C's coerce_to_domain wrapper is
-// dead too (CREATE DOMAIN unreachable on this base).
+// column's stored default or an explicit NULL; unused_cols (targetlist entry
+// replaced by a default expression) NULL-fill. The auto-updatable-view leg is
+// dead (views are loud upstream), so allReplaced is always true; C's
+// coerce_to_domain wrapper is dead too (CREATE DOMAIN unreachable on this
+// base).
 fn rewriteValuesRTE<'mcx>(
     mcx: Mcx<'mcx>,
     parsetree: &Query<'mcx>,
@@ -342,6 +429,7 @@ fn rewriteValuesRTE<'mcx>(
     rti: i32,
     rte_node: Node<'mcx>,
     target_relation: &types_rel::Relation<'mcx>,
+    unused_cols: &[i16],
 ) -> PgResult<()> {
     let mut has_default = false;
     'outer: for row in &rte.values_lists {
@@ -378,6 +466,28 @@ fn rewriteValuesRTE<'mcx>(
                 new_list.lappend(mcx, col)?;
                 continue;
             }
+            if unused_cols.contains(&((i + 1) as i16)) {
+                // The targetlist entry was replaced by a default expression;
+                // C NULL-fills the now-unused cell (makeNullConst).
+                let def = col
+                    .as_variant::<types_nodes::primnodes::SetToDefault>()
+                    .expect("SetToDefault");
+                let (typlen, typbyval) = lsyscache::get_typlenbyval(def.typeId)?;
+                new_list.lappend(
+                    mcx,
+                    types_nodes::Node::mk_const(
+                        mcx,
+                        def.typeId,
+                        def.typeMod,
+                        def.collation,
+                        typlen as i32,
+                        datum::Datum::null(),
+                        true,
+                        typbyval,
+                    )?,
+                )?;
+                continue;
+            }
             let attrno = attrnos[i] as usize;
             if attrno == 0 {
                 return Err(Box::new(PgError::error(format!(
@@ -387,7 +497,12 @@ fn rewriteValuesRTE<'mcx>(
             }
             debug_assert!(attrno <= target_relation.rd_att.natts as usize);
             let att = target_relation.rd_att.attr(attrno - 1);
-            let new_expr = if !att.attisdropped && att.atthasdef {
+            // Stored generated columns get the NULL placeholder (C leaves
+            // new_expr NULL); the executor recomputes them.
+            let new_expr = if !att.attisdropped
+                && att.attgenerated == 0
+                && (att.atthasdef || att.attidentity != 0)
+            {
                 build_column_default(mcx, target_relation, attrno)?
             } else {
                 types_nodes::Node::mk_const(
@@ -423,7 +538,14 @@ pub fn build_column_default<'mcx>(
     attrno: usize,
 ) -> PgResult<types_nodes::Node<'mcx>> {
     let att = rel.rd_att.attr(attrno - 1);
-    debug_assert!(att.attidentity == 0 && att.atthasdef);
+    if att.attidentity != 0 {
+        let seqid = pg_depend::getIdentitySequence(mcx, rel.rd_id, attrno as i32)?;
+        return types_nodes::Node::mk(
+            mcx,
+            types_nodes::primnodes::NextValueExpr { seqid, typeId: att.atttypid },
+        );
+    }
+    debug_assert!(att.atthasdef);
     let constr = rel.rd_att.constr.as_deref();
     let adbin = constr
         .and_then(|c| c.defval.iter().find(|d| d.adnum == attrno as i16))
@@ -450,6 +572,50 @@ pub fn build_column_default<'mcx>(
         Some(e) => Ok(e),
         None => Err(default_type_mismatch(att.attname.name_str(), att.atttypid, exprtype)),
     }
+}
+
+#[cold]
+#[inline(never)]
+fn generated_always_insert_error(
+    att: &types_tuple::FormData_pg_attribute,
+    identity: bool,
+) -> Box<PgError> {
+    let name = String::from_utf8_lossy(att.attname.name_str()).into_owned();
+    let mut e = PgError::error(format!(
+        "cannot insert a non-DEFAULT value into column \"{name}\""
+    ))
+    .with_sqlstate(types_error::ERRCODE_GENERATED_ALWAYS);
+    if identity {
+        e = e
+            .with_detail(format!(
+                "Column \"{name}\" is an identity column defined as GENERATED ALWAYS."
+            ))
+            .with_hint("Use OVERRIDING SYSTEM VALUE to override.");
+    } else {
+        e = e.with_detail(format!("Column \"{name}\" is a generated column."));
+    }
+    Box::new(e)
+}
+
+#[cold]
+#[inline(never)]
+fn generated_always_update_error(
+    att: &types_tuple::FormData_pg_attribute,
+    identity: bool,
+) -> Box<PgError> {
+    let name = String::from_utf8_lossy(att.attname.name_str()).into_owned();
+    let mut e = PgError::error(format!(
+        "column \"{name}\" can only be updated to DEFAULT"
+    ))
+    .with_sqlstate(types_error::ERRCODE_GENERATED_ALWAYS);
+    if identity {
+        e = e.with_detail(format!(
+            "Column \"{name}\" is an identity column defined as GENERATED ALWAYS."
+        ));
+    } else {
+        e = e.with_detail(format!("Column \"{name}\" is a generated column."));
+    }
+    Box::new(e)
 }
 
 #[cold]

@@ -70,9 +70,11 @@ pub fn cost_qual_eval_node(node: Node<'_>) -> PgResult<QualCost> {
 fn cost_qual_eval_walker(node: Node<'_>, cost: &mut QualCost) -> PgResult<()> {
     match node.node_tag() {
         // SQLValueFunction: no explicit C case; childless leaf, no charge.
-        NodeTag::T_Var | NodeTag::T_Const | NodeTag::T_Param | NodeTag::T_SQLValueFunction => {
-            Ok(())
-        }
+        NodeTag::T_Var
+        | NodeTag::T_Const
+        | NodeTag::T_Param
+        | NodeTag::T_SQLValueFunction
+        | NodeTag::T_NextValueExpr => Ok(()),
         // C charges nothing for Aggref/WindowFunc themselves and does not
         // descend: their costs are get_agg_clause_costs'/cost_windowagg's job.
         NodeTag::T_Aggref | NodeTag::T_WindowFunc => Ok(()),
@@ -1013,6 +1015,10 @@ pub fn expr_type_typmod(node: Node<'_>) -> (u32, i32) {
             (r.resulttype, r.resulttypmod)
         }
         NodeTag::T_CoerceViaIO => (node.as_coerce_via_io().unwrap().resulttype, -1),
+        NodeTag::T_NextValueExpr => (
+            node.as_variant::<types_nodes::primnodes::NextValueExpr>().unwrap().typeId,
+            -1,
+        ),
         other => panic!("exprType (nodeFuncs.c): {other:?}; M2 expression lane"),
     }
 }

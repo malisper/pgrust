@@ -35,6 +35,9 @@ pub fn expr_type(node: Node<'_>) -> Oid {
         NodeTag::T_CoalesceExpr => node.as_coalesce_expr().unwrap().coalescetype,
         NodeTag::T_MinMaxExpr => node.as_min_max_expr().unwrap().minmaxtype,
         NodeTag::T_SQLValueFunction => node.as_sql_value_function().unwrap().r#type,
+        NodeTag::T_NextValueExpr => {
+            node.as_variant::<types_nodes::primnodes::NextValueExpr>().unwrap().typeId
+        }
         NodeTag::T_SubLink => {
             let (sl, tent) = sublink_first_col(node);
             match sl.subLinkType {

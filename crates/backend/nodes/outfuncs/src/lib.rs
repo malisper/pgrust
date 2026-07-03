@@ -12,7 +12,7 @@ use mcx::{Mcx, PgString};
 use types_error::PgResult;
 use types_nodes::bitmapset::Bitmapset;
 use types_nodes::list::NodeList;
-use types_nodes::primnodes::{BoolExpr, BoolExprType, Const, FuncExpr, OpExpr, RelabelType, Var};
+use types_nodes::primnodes::{BoolExpr, BoolExprType, CoerceViaIO, Const, FuncExpr, OpExpr, RelabelType, Var};
 use types_nodes::{Node, NodeTag};
 
 pub fn nodeToString<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>) -> PgResult<PgString<'mcx>> {
@@ -40,6 +40,9 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
         }
         NodeTag::T_RelabelType => {
             out_relabel_type(out, node.as_variant::<RelabelType>().expect("RelabelType"))?
+        }
+        NodeTag::T_CoerceViaIO => {
+            out_coerce_via_io(out, node.as_variant::<CoerceViaIO>().expect("CoerceViaIO"))?
         }
         other => panic!(
             "outNode (outfuncs.c): {other:?} write arm unported (DEFAULT/CHECK expr set only)"
@@ -206,6 +209,17 @@ fn out_relabel_type(out: &mut PgString<'_>, r: &RelabelType<'_>) -> PgResult<()>
         out,
         " :resulttype {} :resulttypmod {} :resultcollid {} :relabelformat {} :location -1}}",
         r.resulttype, r.resulttypmod, r.resultcollid, r.relabelformat as u32
+    );
+    Ok(())
+}
+
+fn out_coerce_via_io(out: &mut PgString<'_>, c: &CoerceViaIO<'_>) -> PgResult<()> {
+    w!(out, "{{COERCEVIAIO :arg ");
+    out_node(out, c.arg)?;
+    w!(
+        out,
+        " :resulttype {} :resultcollid {} :coerceformat {} :location -1}}",
+        c.resulttype, c.resultcollid, c.coerceformat as u32
     );
     Ok(())
 }

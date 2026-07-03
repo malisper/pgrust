@@ -1,4 +1,7 @@
-use types_core::catalog::{RELPERSISTENCE_PERMANENT, RELPERSISTENCE_TEMP};
+use types_core::catalog::{
+    ATTRIBUTE_GENERATED_STORED, ATTRIBUTE_GENERATED_VIRTUAL, ATTRIBUTE_IDENTITY_ALWAYS,
+    ATTRIBUTE_IDENTITY_BY_DEFAULT, RELPERSISTENCE_PERMANENT, RELPERSISTENCE_TEMP,
+};
 use types_error::PgResult;
 use types_nodes::parsenodes::{
     AlterTableCmd, AlterTableStmt, AlterTableType, CTEMaterialize, ClosePortalStmt, CommentStmt, CommonTableExpr, CopyStmt, CreateFunctionStmt, CreateSchemaStmt,
@@ -12,7 +15,8 @@ use types_nodes::parsenodes::{
     CURSOR_OPT_INSENSITIVE, CURSOR_OPT_NO_SCROLL, CURSOR_OPT_SCROLL, FETCH_ALL,
 };
 use types_nodes::primnodes::{
-    CaseExpr, CaseWhen, CoalesceExpr, GroupingFunc, JoinExpr, MinMaxExpr, MinMaxOp, RowExpr,
+    CaseExpr, CaseWhen, CoalesceExpr, GroupingFunc, JoinExpr, MinMaxExpr, MinMaxOp,
+    OverridingKind, RowExpr,
     SQLValueFunction, SQLValueFunctionOp,
 };
 
@@ -779,6 +783,40 @@ impl<'mcx> Parser<'mcx> {
             533 => *yyval = YYSTYPE::Ival(CREATE_TABLE_LIKE_STATISTICS as i32),
             534 => *yyval = YYSTYPE::Ival(CREATE_TABLE_LIKE_STORAGE as i32),
             535 => *yyval = YYSTYPE::Ival(CREATE_TABLE_LIKE_ALL as i32),
+            // ColConstraintElem: GENERATED generated_when AS IDENTITY_P
+            // OptParenthesizedSeqOptList
+            505 => {
+                let mut n = Node::build::<Constraint>(mcx)?;
+                n.contype = ConstrType::CONSTR_IDENTITY;
+                n.generated_when = view.v(2).ival() as u8;
+                n.options = view.v(5).list();
+                n.location = view.l(1);
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // ColConstraintElem: GENERATED generated_when AS '(' a_expr ')'
+            // opt_virtual_or_stored
+            506 => {
+                let when = view.v(2).ival() as u8;
+                if when != ATTRIBUTE_IDENTITY_ALWAYS {
+                    return Err(self.errposition_error(
+                        "for a generated column, GENERATED ALWAYS must be specified".into(),
+                        view.l(2),
+                    ));
+                }
+                let mut n = Node::build::<Constraint>(mcx)?;
+                n.contype = ConstrType::CONSTR_GENERATED;
+                n.generated_when = when;
+                n.raw_expr = view.v(5).node();
+                n.generated_kind = view.v(7).ival() as u8;
+                n.location = view.l(1);
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // generated_when: ALWAYS | BY DEFAULT
+            511 => *yyval = YYSTYPE::Ival(ATTRIBUTE_IDENTITY_ALWAYS as i32),
+            512 => *yyval = YYSTYPE::Ival(ATTRIBUTE_IDENTITY_BY_DEFAULT as i32),
+            // opt_virtual_or_stored: STORED | VIRTUAL | /*EMPTY*/
+            513 => *yyval = YYSTYPE::Ival(ATTRIBUTE_GENERATED_STORED as i32),
+            514 | 515 => *yyval = YYSTYPE::Ival(ATTRIBUTE_GENERATED_VIRTUAL as i32),
             // opt_no_inherit: NO INHERIT | /*EMPTY*/
             550 => *yyval = YYSTYPE::Boolean(true),
             551 => *yyval = YYSTYPE::Boolean(false),
@@ -917,6 +955,9 @@ impl<'mcx> Parser<'mcx> {
                 n.if_not_exists = rule == 633;
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
+            // OptParenthesizedSeqOptList: '(' SeqOptList ')' | /*EMPTY*/
+            638 => *yyval = YYSTYPE::List(view.v(2).list()),
+            639 => *yyval = YYSTYPE::List(NodeList::nil()),
             // SeqOptList: SeqOptElem | SeqOptList SeqOptElem
             640 => {
                 let el = view.v(1).node().expect("SeqOptElem");
@@ -1464,17 +1505,33 @@ impl<'mcx> Parser<'mcx> {
                 *yyval = YYSTYPE::Node(Some(rv));
             }
             // insert_rest: SelectStmt | '(' insert_column_list ')' SelectStmt
-            //            | DEFAULT VALUES
-            1620 | 1622 | 1624 => {
+            //            | OVERRIDING override_kind VALUE_P SelectStmt
+            //            | '(' insert_column_list ')' OVERRIDING override_kind
+            //              VALUE_P SelectStmt | DEFAULT VALUES
+            1620 | 1621 | 1622 | 1623 | 1624 => {
                 let mut n = Node::build::<InsertStmt>(mcx)?;
-                if rule == 1622 {
+                if rule == 1622 || rule == 1623 {
                     n.cols = view.v(2).list();
                 }
+                match rule {
+                    1621 => n.r#override = override_kind(view.v(2).ival()),
+                    1623 => n.r#override = override_kind(view.v(5).ival()),
+                    _ => {}
+                }
                 if rule != 1624 {
-                    n.selectStmt = view.v(if rule == 1622 { 4 } else { 1 }).node();
+                    n.selectStmt = view
+                        .v(match rule {
+                            1620 => 1,
+                            1621 | 1622 => 4,
+                            _ => 7,
+                        })
+                        .node();
                 }
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
+            // override_kind: USER | SYSTEM_P
+            1625 => *yyval = YYSTYPE::Ival(OverridingKind::OVERRIDING_USER_VALUE as i32),
+            1626 => *yyval = YYSTYPE::Ival(OverridingKind::OVERRIDING_SYSTEM_VALUE as i32),
             1627 => {
                 let t = view.v(1).node().expect("insert_column_item");
                 *yyval = YYSTYPE::List(NodeList::make1(mcx, t)?);
@@ -4550,6 +4607,14 @@ impl<'mcx> Parser<'mcx> {
             (*self.errposition_error(message.into(), location))
                 .with_sqlstate(types_error::ERRCODE_WINDOWING_ERROR),
         )
+    }
+}
+
+fn override_kind(v: i32) -> OverridingKind {
+    match v {
+        1 => OverridingKind::OVERRIDING_USER_VALUE,
+        2 => OverridingKind::OVERRIDING_SYSTEM_VALUE,
+        _ => OverridingKind::OVERRIDING_NOT_SET,
     }
 }
 

@@ -98,21 +98,34 @@ pub fn StoreAttrDefault<'mcx>(
     catalog_indexing::CatalogTupleUpdate(mcx, &attrrel, &otid, &mut newtup)?;
     attrrel.close(RowExclusiveLock)?;
 
-    // attgenerated is '\0' in every ported lane (identity/generated loud
-    // upstream), so the default depends AUTO on the column.
+    // C: generated column defaults depend INTERNAL, plain defaults AUTO.
+    let deptype = if rel.rd_att.attr(attnum as usize - 1).attgenerated != 0 {
+        pg_depend::DependencyType::Internal
+    } else {
+        pg_depend::DependencyType::Auto
+    };
     let defobject = pg_depend::ObjectAddress::set(ATTR_DEFAULT_RELATION_ID, attrdef_oid);
     let colobject =
         pg_depend::ObjectAddress::sub_set(types_core::RELATION_RELATION_ID, rel.rd_id, attnum as i32);
-    pg_depend::recordDependencyOn(mcx, &defobject, &colobject, pg_depend::DependencyType::Auto)?;
-    assert_only_pinned_expr_refs(expr)?;
+    pg_depend::recordDependencyOn(mcx, &defobject, &colobject, deptype)?;
+    record_single_rel_expr_deps(mcx, &defobject, rel.rd_id, expr)?;
 
     Ok(attrdef_oid)
 }
 
-// recordDependencyOnSingleRelExpr slice: pinned references record nothing, so
-// the walk only needs to prove every referenced object is pinned.
-fn assert_only_pinned_expr_refs<'mcx>(expr: Node<'mcx>) -> PgResult<()> {
-    struct W;
+// recordDependencyOnSingleRelExpr slice (behavior == self_behavior == NORMAL
+// per StoreAttrDefault): pinned references record nothing; same-relation Vars
+// record NORMAL column deps; anything else is loud.
+fn record_single_rel_expr_deps<'mcx>(
+    mcx: Mcx<'mcx>,
+    depender: &pg_depend::ObjectAddress,
+    relid: Oid,
+    expr: Node<'mcx>,
+) -> PgResult<()> {
+    const MAX_HEAP_ATTRIBUTE_NUMBER: usize = 1600;
+    struct W {
+        attnums: [bool; MAX_HEAP_ATTRIBUTE_NUMBER + 1],
+    }
     impl<'mcx> nodes_core::NodeWalker<'mcx> for W {
         fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
             use types_nodes::NodeTag::*;
@@ -122,6 +135,14 @@ fn assert_only_pinned_expr_refs<'mcx>(expr: Node<'mcx>) -> PgResult<()> {
             const COLL_CLASS: Oid = 3456;
             let pinned = |class: Oid, oid: Oid| oid == 0 || catalog::IsPinnedObject(class, oid);
             let ok = match node.node_tag() {
+                T_Var => {
+                    let v = node.as_var().expect("Var");
+                    if v.varlevelsup != 0 || v.varno != 1 || v.varattno < 0 {
+                        panic!("unported: recordDependencyOnSingleRelExpr non-self Var");
+                    }
+                    self.attnums[v.varattno as usize] = true;
+                    true
+                }
                 T_Const => {
                     let c = node.as_const().expect("Const");
                     pinned(TYPE_CLASS, c.consttype) && pinned(COLL_CLASS, c.constcollid)
@@ -149,7 +170,23 @@ fn assert_only_pinned_expr_refs<'mcx>(expr: Node<'mcx>) -> PgResult<()> {
             nodes_core::expression_tree_walker(node, self)
         }
     }
-    nodes_core::NodeWalker::visit(&mut W, expr)?;
+    let mut w = W { attnums: [false; MAX_HEAP_ATTRIBUTE_NUMBER + 1] };
+    nodes_core::NodeWalker::visit(&mut w, expr)?;
+    for (attnum, seen) in w.attnums.iter().enumerate() {
+        if *seen {
+            let refobj = pg_depend::ObjectAddress::sub_set(
+                types_core::RELATION_RELATION_ID,
+                relid,
+                attnum as i32,
+            );
+            pg_depend::recordDependencyOn(
+                mcx,
+                depender,
+                &refobj,
+                pg_depend::DependencyType::Normal,
+            )?;
+        }
+    }
     Ok(())
 }
 

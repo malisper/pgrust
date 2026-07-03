@@ -610,8 +610,8 @@ fn node(out: &mut String, n: Node<'_>) {
         bool_field(out, "is_no_inherit", c.is_no_inherit);
         node_field(out, "raw_expr", c.raw_expr);
         string_field(out, "cooked_expr", c.cooked_expr);
-        char_field(out, "generated_when", 0);
-        char_field(out, "generated_kind", 0);
+        char_field(out, "generated_when", c.generated_when);
+        char_field(out, "generated_kind", c.generated_kind);
         bool_field(out, "nulls_not_distinct", c.nulls_not_distinct);
         list_field(out, "keys", &c.keys);
         bool_field(out, "without_overlaps", false);

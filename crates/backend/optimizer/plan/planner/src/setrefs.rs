@@ -717,7 +717,10 @@ fn fix_upper_expr<'mcx>(
             let var = node.as_var().expect("Var");
             search_indexed_tlist_for_var(run, var, subplan_tlist, rtoffset, newvarno)
         }
-        NodeTag::T_Const | NodeTag::T_Param | NodeTag::T_SQLValueFunction => {
+        NodeTag::T_Const
+        | NodeTag::T_Param
+        | NodeTag::T_SQLValueFunction
+        | NodeTag::T_NextValueExpr => {
             fix_scan_expr_walker(run, node)?;
             Ok(node)
         }
@@ -1115,7 +1118,10 @@ fn fix_scan_expr_mutator<'mcx>(
             }
             Node::mk(mcx, newvar)
         }
-        NodeTag::T_Param | NodeTag::T_Const | NodeTag::T_SQLValueFunction => {
+        NodeTag::T_Param
+        | NodeTag::T_Const
+        | NodeTag::T_SQLValueFunction
+        | NodeTag::T_NextValueExpr => {
             fix_scan_expr_walker(run, node)?;
             Ok(node)
         }
@@ -1365,7 +1371,7 @@ fn fix_scan_expr_walker<'mcx>(run: &mut PlannerRun<'mcx>, node: Node<'mcx>) -> P
         // asserted empty in fix_scan_list); PARAM_EXEC passes through.
         NodeTag::T_Param => Ok(()),
         // fix_expr_common has nothing to record for a SQLValueFunction.
-        NodeTag::T_SQLValueFunction => Ok(()),
+        NodeTag::T_SQLValueFunction | NodeTag::T_NextValueExpr => Ok(()),
         NodeTag::T_RelabelType => {
             fix_scan_expr_walker(run, node.as_relabel_type().unwrap().arg)
         }
@@ -1789,7 +1795,7 @@ fn fix_join_expr_mutator<'mcx>(
             }
             panic!("variable not found in subplan target lists");
         }
-        NodeTag::T_Const | NodeTag::T_SQLValueFunction => {
+        NodeTag::T_Const | NodeTag::T_SQLValueFunction | NodeTag::T_NextValueExpr => {
             fix_scan_expr_walker(run, node)?;
             Ok(node)
         }
