@@ -187,6 +187,7 @@ fn decode_member(tup: &HeapTupleData<'_>, descr: &types_tuple::TupleDescData<'_>
     };
     let mut enumlabel = NameData::default();
     let label_ptr = get(Anum_pg_enum_enumlabel, &mut isnull).as_usize() as *const u8;
+    debug_assert!(!isnull, "pg_enum.enumlabel NOT NULL invariant");
     // SAFETY: name-column datum points at NAMEDATALEN bytes in the tuple image.
     unsafe {
         core::ptr::copy_nonoverlapping(label_ptr, enumlabel.data.as_mut_ptr(), NAMEDATALEN as usize)
@@ -233,6 +234,10 @@ pub fn AddEnumLabel<'mcx>(
         return Err(invalid_label(newVal));
     }
 
+    if init_small::globals::IsBinaryUpgrade() {
+        panic!("pg_enum: binary-upgrade OID override (pg_enum.c:458-477) unported");
+    }
+
     // Held until commit: serializes concurrent modifications of one enum.
     lmgr::LockDatabaseObject(TYPE_RELATION_ID, enumTypeOid, 0, ExclusiveLock)?;
 
@@ -244,10 +249,9 @@ pub fn AddEnumLabel<'mcx>(
     if let Some(tup) = dup {
         ReleaseSysCache(tup);
         if skipIfExists {
-            elog_seams::ereport_msg::call(
-                NOTICE,
-                format!("enum label \"{newVal}\" already exists, skipping"),
-                None,
+            elog_seams::ereport::call(
+                PgError::new(NOTICE, format!("enum label \"{newVal}\" already exists, skipping"))
+                    .with_sqlstate(ERRCODE_DUPLICATE_OBJECT),
             )?;
             return Ok(());
         }
@@ -512,4 +516,78 @@ pub fn init_seams() {
     pg_enum_seams::enum_uncommitted::set(EnumUncommitted);
     pg_enum_seams::scan_enum_members::set(scan_enum_members);
     pg_enum_seams::scan_enum_typid_sorted::set(scan_enum_typid_sorted);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use types_core::{FLOAT4OID, NAMEOID, OIDOID};
+    use types_tuple::{FormData_pg_attribute, CompactAttribute, TupleDescData};
+    use types_tuple::{TYPALIGN_CHAR, TYPALIGN_INT};
+
+    fn attr(num: i16, typid: Oid, len: i16, byval: bool, align: i8) -> FormData_pg_attribute {
+        let mut attname = NameData::default();
+        attname.namestrcpy(&format!("a{num}"));
+        FormData_pg_attribute {
+            attname,
+            attnum: num,
+            atttypid: typid,
+            atttypmod: -1,
+            attlen: len,
+            attbyval: byval,
+            attalign: align,
+            attnotnull: true,
+            ..Default::default()
+        }
+    }
+
+    fn pg_enum_desc(mcx: Mcx<'_>) -> TupleDescData<'_> {
+        let atts = [
+            attr(1, OIDOID, 4, true, TYPALIGN_INT),
+            attr(2, OIDOID, 4, true, TYPALIGN_INT),
+            attr(3, FLOAT4OID, 4, true, TYPALIGN_INT),
+            attr(4, NAMEOID, NAMEDATALEN as i16, false, TYPALIGN_CHAR),
+        ];
+        let mut attrs = PgVec::new_in(mcx);
+        let mut compact = PgVec::new_in(mcx);
+        for att in atts {
+            compact.push(CompactAttribute::populate_from(&att));
+            attrs.push(att);
+        }
+        TupleDescData {
+            natts: 4,
+            tdtypeid: 0,
+            tdtypmod: -1,
+            tdrefcount: -1,
+            constr: None,
+            compact_attrs: compact,
+            attrs,
+        }
+    }
+
+    // Miri gate for decode_member's raw NAMEDATALEN copy: the formed tuple
+    // image is exactly-sized, so an over-read past the name column faults.
+    #[test]
+    fn decode_member_roundtrip_tight_image() {
+        let ctx = mcx::MemoryContext::new("pg_enum-test");
+        let mcx = ctx.mcx();
+        let descr = pg_enum_desc(mcx);
+        for label in ["a", &"x".repeat(NAMEDATALEN as usize - 1)] {
+            let mut name = NameData::default();
+            name.namestrcpy(label);
+            let values = [
+                Datum::from_oid(90101),
+                Datum::from_oid(90000),
+                Datum::from_f32(2.5),
+                Datum::from_usize(name.data.as_ptr() as usize),
+            ];
+            let nulls = [false; 4];
+            let tup = heaptuple::heap_form_tuple(mcx, &descr, &values, &nulls).unwrap();
+            let m = decode_member(&tup, &descr);
+            assert_eq!(m.oid, 90101);
+            assert_eq!(m.enumtypid, 90000);
+            assert_eq!(m.enumsortorder, 2.5);
+            assert_eq!(label_str(&m.enumlabel), label);
+        }
+    }
 }

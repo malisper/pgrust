@@ -516,7 +516,6 @@ fn CommitTransaction(xp: XsPtr) -> PgResult<()> {
 
     guc::AtEOXact_GUC(true, 1);
     spi_seams::at_eoxact_spi::call(true)?;
-    // uncommitted_enum_types has no writer while pg_enum.c is unported; guarded.
     if pg_enum_seams::at_eoxact_enum::is_installed() {
         pg_enum_seams::at_eoxact_enum::call();
     }
@@ -720,7 +719,6 @@ fn PrepareTransaction(xp: XsPtr) -> PgResult<()> {
 
     guc::AtEOXact_GUC(true, 1);
     spi_seams::at_eoxact_spi::call(true)?;
-    // uncommitted_enum_types has no writer while pg_enum.c is unported; guarded.
     if pg_enum_seams::at_eoxact_enum::is_installed() {
         pg_enum_seams::at_eoxact_enum::call();
     }

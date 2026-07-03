@@ -476,6 +476,10 @@ fn creation_namespace<'mcx, 'a>(
     }
     let (schemaname, name) = catalog_namespace::DeconstructQualifiedName(&names[..nnames])?;
     let namespace = match schemaname {
+        // C resolves the alias via AccessTempTableNamespace (namespace.c:3498).
+        Some("pg_temp") => {
+            unported(&format!("{what} (typecmds.c): pg_temp-alias type creation"))
+        }
         Some(schemaname) => catalog_namespace::get_namespace_oid(schemaname, false)?,
         None => {
             let path = catalog_namespace::fetch_search_path(mcx, false)?;

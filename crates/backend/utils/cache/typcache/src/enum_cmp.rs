@@ -66,10 +66,14 @@ pub fn compare_values_of_enum(tcache: &TypeCacheEntry, arg1: Oid, arg2: Oid) -> 
 
     // One or both values missing: the enum changed under us — reload once.
     load_enum_cache_data(tcache)?;
-    let data = tcache.enum_data.borrow();
-    let data = data.as_ref().expect("enumData reloaded above");
-    let item1 = data.find(arg1).ok_or_else(|| value_not_found(arg1, tcache.type_id))?;
-    let item2 = data.find(arg2).ok_or_else(|| value_not_found(arg2, tcache.type_id))?;
+    // Borrow released before value_not_found: format_type_be re-enters caches.
+    let (item1, item2) = {
+        let data = tcache.enum_data.borrow();
+        let data = data.as_ref().expect("enumData reloaded above");
+        (data.find(arg1), data.find(arg2))
+    };
+    let item1 = item1.ok_or_else(|| value_not_found(arg1, tcache.type_id))?;
+    let item2 = item2.ok_or_else(|| value_not_found(arg2, tcache.type_id))?;
     Ok(order_cmp(item1, item2))
 }
 
