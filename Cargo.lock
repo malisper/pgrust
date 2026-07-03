@@ -195,6 +195,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "adt_enum"
+version = "0.0.0"
+dependencies = [
+ "arrayfuncs",
+ "datum",
+ "format_type",
+ "hashfn",
+ "mcx",
+ "pg_enum_seams",
+ "pqformat",
+ "procarray_seams",
+ "syscache_seams",
+ "transam_seams",
+ "typcache_seams",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_nodes",
+]
+
+[[package]]
 name = "adt_float"
 version = "0.1.0"
 dependencies = [
@@ -3101,6 +3122,7 @@ dependencies = [
  "adt_date",
  "adt_domains",
  "adt_encode",
+ "adt_enum",
  "adt_float",
  "adt_formatting",
  "adt_int",
@@ -6243,12 +6265,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "pg_enum"
+version = "0.0.0"
+dependencies = [
+ "cache_syscache",
+ "catalog",
+ "catalog_indexing",
+ "datum",
+ "elog_seams",
+ "fmgr_seams",
+ "genam",
+ "heaptuple",
+ "indexam",
+ "init_small",
+ "lmgr",
+ "mcx",
+ "pg_enum_seams",
+ "table",
+ "types_core",
+ "types_error",
+ "types_rel",
+ "types_scan",
+ "types_tuple",
+ "xact",
+]
+
+[[package]]
 name = "pg_enum_seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam_core",
  "types_core",
  "types_error",
+ "types_tuple",
 ]
 
 [[package]]
@@ -6440,6 +6490,7 @@ dependencies = [
  "fmgr_seams",
  "genam",
  "heaptuple",
+ "init_small",
  "mbutils_seams",
  "mcx",
  "miscinit_seams",
@@ -8371,6 +8422,7 @@ dependencies = [
  "pg_class",
  "pg_database",
  "pg_db_role_setting",
+ "pg_enum",
  "pg_locale",
  "pg_prng",
  "pg_sema",
@@ -9754,11 +9806,13 @@ dependencies = [
  "datum",
  "fmgr_core",
  "fmgr_seams",
+ "format_type",
  "indexcmds_seams",
  "inval",
  "lsyscache",
  "mcx",
  "nodes_core",
+ "pg_enum_seams",
  "readfuncs",
  "relation_seams",
  "syscache_seams",
@@ -9807,7 +9861,9 @@ dependencies = [
  "parse_utilcmd",
  "parser_small1",
  "pg_constraint",
+ "pg_enum",
  "pg_type",
+ "superuser",
  "syscache_seams",
  "table",
  "types_core",
