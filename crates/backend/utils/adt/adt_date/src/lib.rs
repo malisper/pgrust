@@ -18,9 +18,10 @@ use adt_datetime::{
     MINS_PER_HOUR, POSTGRES_EPOCH_JDATE, SECS_PER_MINUTE, USECS_PER_DAY, USECS_PER_HOUR,
     USECS_PER_MINUTE, USECS_PER_SEC,
 };
+use adt_datetime::Interval;
 use adt_timestamp::{
-    timestamp2tm, GetEpochTime, DT_NOBEGIN, DT_NOEND, IS_VALID_TIMESTAMP, MIN_TIMESTAMP,
-    TIMESTAMP_IS_NOBEGIN, TIMESTAMP_IS_NOEND, TIMESTAMP_NOT_FINITE,
+    interval, timestamp2tm, GetEpochTime, DT_NOBEGIN, DT_NOEND, IS_VALID_TIMESTAMP,
+    MIN_TIMESTAMP, TIMESTAMP_IS_NOBEGIN, TIMESTAMP_IS_NOEND, TIMESTAMP_NOT_FINITE,
 };
 use adt_datetime::consts::TZDISP_LIMIT;
 use datum::Bytea;
@@ -34,6 +35,8 @@ use types_error::{
 
 pub mod builtins;
 
+#[cfg(test)]
+mod interval_corpus;
 #[cfg(test)]
 mod tests;
 
@@ -878,4 +881,89 @@ pub fn timetz_send<'mcx>(mcx: Mcx<'mcx>, t: &TimeTzADT) -> PgResult<Bytea<'mcx>>
 #[inline(never)]
 fn datetime_out_of_range(msg: &'static str) -> Box<PgError> {
     Box::new(PgError::error(msg).with_sqlstate(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE))
+}
+
+pub fn date_pl_interval(date: DateADT, span: &Interval) -> PgResult<Timestamp> {
+    interval::timestamp_pl_interval(date2timestamp(date)?, span)
+}
+
+pub fn date_mi_interval(date: DateADT, span: &Interval) -> PgResult<Timestamp> {
+    interval::timestamp_mi_interval(date2timestamp(date)?, span)
+}
+
+pub fn time_interval(time: TimeADT) -> Interval {
+    Interval { time, day: 0, month: 0 }
+}
+
+/// Fractional-day portion of the interval; negatives wrap ('-2 hours' -> 22:00).
+pub fn interval_time(span: &Interval) -> PgResult<TimeADT> {
+    if span.not_finite() {
+        return Err(Box::new(
+            PgError::error("cannot convert infinite interval to time")
+                .with_sqlstate(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
+        ));
+    }
+    let mut result = span.time % USECS_PER_DAY;
+    if result < 0 {
+        result += USECS_PER_DAY;
+    }
+    Ok(result)
+}
+
+pub fn time_mi_time(time1: TimeADT, time2: TimeADT) -> Interval {
+    Interval { time: time1 - time2, day: 0, month: 0 }
+}
+
+#[cold]
+#[inline(never)]
+fn infinite_interval_time_err(msg: &'static str) -> Box<PgError> {
+    Box::new(PgError::error(msg).with_sqlstate(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE))
+}
+
+pub fn time_pl_interval(time: TimeADT, span: &Interval) -> PgResult<TimeADT> {
+    if span.not_finite() {
+        return Err(infinite_interval_time_err("cannot add infinite interval to time"));
+    }
+    let mut result = time.wrapping_add(span.time);
+    result -= result / USECS_PER_DAY * USECS_PER_DAY;
+    if result < 0 {
+        result += USECS_PER_DAY;
+    }
+    Ok(result)
+}
+
+pub fn time_mi_interval(time: TimeADT, span: &Interval) -> PgResult<TimeADT> {
+    if span.not_finite() {
+        return Err(infinite_interval_time_err("cannot subtract infinite interval from time"));
+    }
+    let mut result = time.wrapping_sub(span.time);
+    result -= result / USECS_PER_DAY * USECS_PER_DAY;
+    if result < 0 {
+        result += USECS_PER_DAY;
+    }
+    Ok(result)
+}
+
+pub fn timetz_pl_interval(time: &TimeTzADT, span: &Interval) -> PgResult<TimeTzADT> {
+    if span.not_finite() {
+        return Err(infinite_interval_time_err("cannot add infinite interval to time"));
+    }
+    let mut t = time.time.wrapping_add(span.time);
+    t -= t / USECS_PER_DAY * USECS_PER_DAY;
+    if t < 0 {
+        t += USECS_PER_DAY;
+    }
+    Ok(TimeTzADT { time: t, zone: time.zone })
+}
+
+pub fn timetz_mi_interval(time: &TimeTzADT, span: &Interval) -> PgResult<TimeTzADT> {
+    if span.not_finite() {
+        return Err(infinite_interval_time_err("cannot subtract infinite interval from time"));
+    }
+    let mut t = time.time.wrapping_sub(span.time);
+    t -= t / USECS_PER_DAY * USECS_PER_DAY;
+    if t < 0 {
+        t += USECS_PER_DAY;
+    }
+    Ok(TimeTzADT { time: t, zone: time.zone })
 }

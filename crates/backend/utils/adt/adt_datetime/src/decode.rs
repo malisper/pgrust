@@ -1974,6 +1974,768 @@ pub fn DecodeTimeOnly<'a>(
     0
 }
 
+#[inline]
+fn int64_multiply_add(val: i64, multiplier: i64, sum: &mut i64) -> bool {
+    match val.checked_mul(multiplier).and_then(|p| sum.checked_add(p)) {
+        Some(v) => {
+            *sum = v;
+            true
+        }
+        None => false,
+    }
+}
+
+fn AdjustFractMicroseconds(mut frac: f64, scale: i64, itm_in: &mut pg_itm_in) -> bool {
+    if frac == 0.0 {
+        return true;
+    }
+    frac *= scale as f64;
+    let mut usec = frac as i64;
+    frac -= usec as f64;
+    if frac > 0.5 {
+        usec += 1;
+    } else if frac < -0.5 {
+        usec -= 1;
+    }
+    match itm_in.tm_usec.checked_add(usec) {
+        Some(v) => {
+            itm_in.tm_usec = v;
+            true
+        }
+        None => false,
+    }
+}
+
+fn AdjustFractDays(mut frac: f64, scale: i32, itm_in: &mut pg_itm_in) -> bool {
+    if frac == 0.0 {
+        return true;
+    }
+    frac *= scale as f64;
+    let extra_days = frac as i32;
+    let Some(v) = itm_in.tm_mday.checked_add(extra_days) else {
+        return false;
+    };
+    itm_in.tm_mday = v;
+    frac -= extra_days as f64;
+    AdjustFractMicroseconds(frac, USECS_PER_DAY, itm_in)
+}
+
+fn AdjustFractYears(frac: f64, scale: i32, itm_in: &mut pg_itm_in) -> bool {
+    // C rint() rounds half to even
+    let extra_months = (frac * scale as f64 * MONTHS_PER_YEAR as f64).round_ties_even() as i32;
+    match itm_in.tm_mon.checked_add(extra_months) {
+        Some(v) => {
+            itm_in.tm_mon = v;
+            true
+        }
+        None => false,
+    }
+}
+
+fn AdjustMicroseconds(val: i64, fval: f64, scale: i64, itm_in: &mut pg_itm_in) -> bool {
+    if !int64_multiply_add(val, scale, &mut itm_in.tm_usec) {
+        return false;
+    }
+    AdjustFractMicroseconds(fval, scale, itm_in)
+}
+
+fn AdjustDays(val: i64, scale: i32, itm_in: &mut pg_itm_in) -> bool {
+    if val < i32::MIN as i64 || val > i32::MAX as i64 {
+        return false;
+    }
+    match (val as i32).checked_mul(scale).and_then(|days| itm_in.tm_mday.checked_add(days)) {
+        Some(v) => {
+            itm_in.tm_mday = v;
+            true
+        }
+        None => false,
+    }
+}
+
+fn AdjustMonths(val: i64, itm_in: &mut pg_itm_in) -> bool {
+    if val < i32::MIN as i64 || val > i32::MAX as i64 {
+        return false;
+    }
+    match itm_in.tm_mon.checked_add(val as i32) {
+        Some(v) => {
+            itm_in.tm_mon = v;
+            true
+        }
+        None => false,
+    }
+}
+
+fn AdjustYears(val: i64, scale: i32, itm_in: &mut pg_itm_in) -> bool {
+    if val < i32::MIN as i64 || val > i32::MAX as i64 {
+        return false;
+    }
+    match (val as i32).checked_mul(scale).and_then(|years| itm_in.tm_year.checked_add(years)) {
+        Some(v) => {
+            itm_in.tm_year = v;
+            true
+        }
+        None => false,
+    }
+}
+
+fn ClearPgItmIn(itm_in: &mut pg_itm_in) {
+    itm_in.tm_usec = 0;
+    itm_in.tm_mday = 0;
+    itm_in.tm_mon = 0;
+    itm_in.tm_year = 0;
+}
+
+// On DTERR return tm_usec may already be clobbered (the assignment precedes
+// the overflow checks); DecodeInterval's DTK_TZ fallthrough keeps this C shape.
+fn DecodeTimeForInterval(
+    str_: &[u8],
+    fmask: i32,
+    range: i32,
+    tmask: &mut i32,
+    itm_in: &mut pg_itm_in,
+) -> i32 {
+    let mut itm = pg_itm::default();
+    let dterr = DecodeTimeCommon(str_, fmask, range, tmask, &mut itm);
+    if dterr != 0 {
+        return dterr;
+    }
+    itm_in.tm_usec = itm.tm_usec as i64;
+    if !int64_multiply_add(itm.tm_hour, USECS_PER_HOUR, &mut itm_in.tm_usec)
+        || !int64_multiply_add(itm.tm_min as i64, USECS_PER_MINUTE, &mut itm_in.tm_usec)
+        || !int64_multiply_add(itm.tm_sec as i64, USECS_PER_SEC, &mut itm_in.tm_usec)
+    {
+        return DTERR_FIELD_OVERFLOW;
+    }
+    0
+}
+
+pub fn DecodeInterval(
+    field: &[&[u8]],
+    ftype: &[i32],
+    nf: usize,
+    range: i32,
+    dtype: &mut i32,
+    itm_in: &mut pg_itm_in,
+) -> i32 {
+    use crate::settings::interval_style;
+
+    let mut force_negative = false;
+    let mut is_before = false;
+    let mut parsing_unit_val = false;
+    let mut fmask = 0i32;
+    let mut tmask;
+    let mut type_ = IGNORE_DTF;
+    let mut uval = 0i32;
+
+    *dtype = DTK_DELTA;
+    ClearPgItmIn(itm_in);
+
+    // SQL "standard" syntax: the sign applies to the whole thing, but only
+    // when there are no other explicit signs
+    if interval_style() == INTSTYLE_SQL_STANDARD && nf > 0 && field[0].first() == Some(&b'-') {
+        force_negative = true;
+        for f in field.iter().take(nf).skip(1) {
+            if matches!(f.first(), Some(&b'-') | Some(&b'+')) {
+                force_negative = false;
+                break;
+            }
+        }
+    }
+
+    // read through list backwards to pick up units before values
+    for i in (0..nf).rev() {
+        tmask = 0;
+        let mut handled = false;
+        match ftype[i] {
+            t if t == DTK_TIME => {
+                let dterr = DecodeTimeForInterval(field[i], fmask, range, &mut tmask, itm_in);
+                if dterr != 0 {
+                    return dterr;
+                }
+                if force_negative && itm_in.tm_usec > 0 {
+                    itm_in.tm_usec = -itm_in.tm_usec;
+                }
+                type_ = DTK_DAY;
+                parsing_unit_val = false;
+                handled = true;
+            }
+            t if t == DTK_TZ => {
+                // signed hh:mm or hh:mm:ss? then treat as a time value
+                let rest = &field[i][1..];
+                let mut tz_tmask = 0;
+                if rest.contains(&b':')
+                    && DecodeTimeForInterval(rest, fmask, range, &mut tz_tmask, itm_in) == 0
+                {
+                    tmask = tz_tmask;
+                    if field[i][0] == b'-' {
+                        if itm_in.tm_usec == i64::MIN {
+                            return DTERR_FIELD_OVERFLOW;
+                        }
+                        itm_in.tm_usec = -itm_in.tm_usec;
+                    }
+                    if force_negative && itm_in.tm_usec > 0 {
+                        itm_in.tm_usec = -itm_in.tm_usec;
+                    }
+                    type_ = DTK_DAY;
+                    parsing_unit_val = false;
+                    handled = true;
+                }
+                // else fall through to DTK_NUMBER handling
+            }
+            _ => {}
+        }
+
+        if !handled && matches!(ftype[i], t if t == DTK_TZ || t == DTK_DATE || t == DTK_NUMBER) {
+            if type_ == IGNORE_DTF {
+                // use typmod to decide what rightmost field is
+                type_ = match range {
+                    r if r == INTERVAL_MASK(YEAR) => DTK_YEAR,
+                    r if r == INTERVAL_MASK(MONTH)
+                        || r == INTERVAL_MASK(YEAR) | INTERVAL_MASK(MONTH) =>
+                    {
+                        DTK_MONTH
+                    }
+                    r if r == INTERVAL_MASK(DAY) => DTK_DAY,
+                    r if r == INTERVAL_MASK(HOUR)
+                        || r == INTERVAL_MASK(DAY) | INTERVAL_MASK(HOUR) =>
+                    {
+                        DTK_HOUR
+                    }
+                    r if r == INTERVAL_MASK(MINUTE)
+                        || r == INTERVAL_MASK(HOUR) | INTERVAL_MASK(MINUTE)
+                        || r == INTERVAL_MASK(DAY) | INTERVAL_MASK(HOUR) | INTERVAL_MASK(MINUTE) =>
+                    {
+                        DTK_MINUTE
+                    }
+                    _ => DTK_SECOND,
+                };
+            }
+
+            let r = strtoi64(field[i]);
+            if r.erange {
+                return DTERR_FIELD_OVERFLOW;
+            }
+            let mut val = r.val;
+            let mut cp = r.end;
+            let mut fval: f64;
+
+            if field[i].get(cp) == Some(&b'-') {
+                // SQL "years-months" syntax
+                let r2 = strtoint(&field[i][cp + 1..]);
+                let mut val2 = r2.val;
+                if r2.erange || val2 < 0 || val2 >= MONTHS_PER_YEAR {
+                    return DTERR_FIELD_OVERFLOW;
+                }
+                cp = cp + 1 + r2.end;
+                if cp < field[i].len() {
+                    return DTERR_BAD_FORMAT;
+                }
+                type_ = DTK_MONTH;
+                if field[i][0] == b'-' {
+                    val2 = -val2;
+                }
+                let Some(v) = val
+                    .checked_mul(MONTHS_PER_YEAR as i64)
+                    .and_then(|v| v.checked_add(val2 as i64))
+                else {
+                    return DTERR_FIELD_OVERFLOW;
+                };
+                val = v;
+                fval = 0.0;
+            } else if field[i].get(cp) == Some(&b'.') {
+                fval = 0.0;
+                let dterr = ParseFraction(&field[i][cp..], &mut fval);
+                if dterr != 0 {
+                    return dterr;
+                }
+                if field[i][0] == b'-' {
+                    fval = -fval;
+                }
+            } else if cp >= field[i].len() {
+                fval = 0.0;
+            } else {
+                return DTERR_BAD_FORMAT;
+            }
+
+            if force_negative {
+                if val > 0 {
+                    val = -val;
+                }
+                if fval > 0.0 {
+                    fval = -fval;
+                }
+            }
+
+            match type_ {
+                t if t == DTK_MICROSEC => {
+                    if !AdjustMicroseconds(val, fval, 1, itm_in) {
+                        return DTERR_FIELD_OVERFLOW;
+                    }
+                    tmask = DTK_M(MICROSECOND);
+                }
+                t if t == DTK_MILLISEC => {
+                    if !AdjustMicroseconds(val, fval, 1000, itm_in) {
+                        return DTERR_FIELD_OVERFLOW;
+                    }
+                    tmask = DTK_M(MILLISECOND);
+                }
+                t if t == DTK_SECOND => {
+                    if !AdjustMicroseconds(val, fval, USECS_PER_SEC, itm_in) {
+                        return DTERR_FIELD_OVERFLOW;
+                    }
+                    // if any subseconds were specified, this counts as micro-
+                    // and millisecond input too
+                    tmask = if fval == 0.0 { DTK_M(SECOND) } else { DTK_ALL_SECS_M };
+                }
+                t if t == DTK_MINUTE => {
+                    if !AdjustMicroseconds(val, fval, USECS_PER_MINUTE, itm_in) {
+                        return DTERR_FIELD_OVERFLOW;
+                    }
+                    tmask = DTK_M(MINUTE);
+                }
+                t if t == DTK_HOUR => {
+                    if !AdjustMicroseconds(val, fval, USECS_PER_HOUR, itm_in) {
+                        return DTERR_FIELD_OVERFLOW;
+                    }
+                    tmask = DTK_M(HOUR);
+                    type_ = DTK_DAY; // set for next field
+                }
+                t if t == DTK_DAY => {
+                    if !AdjustDays(val, 1, itm_in)
+                        || !AdjustFractMicroseconds(fval, USECS_PER_DAY, itm_in)
+                    {
+                        return DTERR_FIELD_OVERFLOW;
+                    }
+                    tmask = DTK_M(DAY);
+                }
+                t if t == DTK_WEEK => {
+                    if !AdjustDays(val, 7, itm_in) || !AdjustFractDays(fval, 7, itm_in) {
+                        return DTERR_FIELD_OVERFLOW;
+                    }
+                    tmask = DTK_M(WEEK);
+                }
+                t if t == DTK_MONTH => {
+                    if !AdjustMonths(val, itm_in) || !AdjustFractDays(fval, DAYS_PER_MONTH, itm_in)
+                    {
+                        return DTERR_FIELD_OVERFLOW;
+                    }
+                    tmask = DTK_M(MONTH);
+                }
+                t if t == DTK_YEAR => {
+                    if !AdjustYears(val, 1, itm_in) || !AdjustFractYears(fval, 1, itm_in) {
+                        return DTERR_FIELD_OVERFLOW;
+                    }
+                    tmask = DTK_M(YEAR);
+                }
+                t if t == DTK_DECADE => {
+                    if !AdjustYears(val, 10, itm_in) || !AdjustFractYears(fval, 10, itm_in) {
+                        return DTERR_FIELD_OVERFLOW;
+                    }
+                    tmask = DTK_M(DECADE);
+                }
+                t if t == DTK_CENTURY => {
+                    if !AdjustYears(val, 100, itm_in) || !AdjustFractYears(fval, 100, itm_in) {
+                        return DTERR_FIELD_OVERFLOW;
+                    }
+                    tmask = DTK_M(CENTURY);
+                }
+                t if t == DTK_MILLENNIUM => {
+                    if !AdjustYears(val, 1000, itm_in) || !AdjustFractYears(fval, 1000, itm_in) {
+                        return DTERR_FIELD_OVERFLOW;
+                    }
+                    tmask = DTK_M(MILLENNIUM);
+                }
+                _ => return DTERR_BAD_FORMAT,
+            }
+            parsing_unit_val = false;
+            handled = true;
+        }
+
+        if !handled {
+            match ftype[i] {
+                t if t == DTK_STRING || t == DTK_SPECIAL => {
+                    // reject consecutive unhandled units
+                    if parsing_unit_val {
+                        return DTERR_BAD_FORMAT;
+                    }
+                    type_ = DecodeUnits(i, field[i], &mut uval);
+                    if type_ == UNKNOWN_FIELD {
+                        type_ = DecodeSpecial(i, field[i], &mut uval);
+                    }
+                    if type_ == IGNORE_DTF {
+                        continue;
+                    }
+
+                    tmask = 0;
+                    match type_ {
+                        t if t == UNITS => {
+                            type_ = uval;
+                            parsing_unit_val = true;
+                        }
+                        t if t == AGO => {
+                            // "ago" is only allowed to appear at the end
+                            if i != nf - 1 {
+                                return DTERR_BAD_FORMAT;
+                            }
+                            is_before = true;
+                            type_ = uval;
+                        }
+                        t if t == RESERV => {
+                            tmask = DTK_DATE_M | DTK_TIME_M;
+                            // only reserved words for infinite intervals,
+                            // standing alone
+                            if uval != DTK_LATE && uval != DTK_EARLY {
+                                return DTERR_BAD_FORMAT;
+                            }
+                            if i != nf - 1 {
+                                return DTERR_BAD_FORMAT;
+                            }
+                            *dtype = uval;
+                        }
+                        _ => return DTERR_BAD_FORMAT,
+                    }
+                }
+                _ => return DTERR_BAD_FORMAT,
+            }
+        }
+
+        if tmask & fmask != 0 {
+            return DTERR_BAD_FORMAT;
+        }
+        fmask |= tmask;
+    }
+
+    // ensure that at least one time field has been found
+    if fmask == 0 {
+        return DTERR_BAD_FORMAT;
+    }
+
+    // reject if unit appeared and was never handled
+    if parsing_unit_val {
+        return DTERR_BAD_FORMAT;
+    }
+
+    // finally, AGO negates everything
+    if is_before {
+        if itm_in.tm_usec == i64::MIN
+            || itm_in.tm_mday == i32::MIN
+            || itm_in.tm_mon == i32::MIN
+            || itm_in.tm_year == i32::MIN
+        {
+            return DTERR_FIELD_OVERFLOW;
+        }
+        itm_in.tm_usec = -itm_in.tm_usec;
+        itm_in.tm_mday = -itm_in.tm_mday;
+        itm_in.tm_mon = -itm_in.tm_mon;
+        itm_in.tm_year = -itm_in.tm_year;
+    }
+
+    0
+}
+
+/// C strtod prefix parse: value and byte offset just past the parsed number.
+fn strtod_prefix(s: &[u8]) -> Option<(f64, usize)> {
+    let mut i = 0usize;
+    while i < s.len() && is_space(s[i]) {
+        i += 1;
+    }
+    let start = i;
+    if i < s.len() && (s[i] == b'+' || s[i] == b'-') {
+        i += 1;
+    }
+    let mut saw_digit = false;
+    while i < s.len() && is_digit(s[i]) {
+        i += 1;
+        saw_digit = true;
+    }
+    if i < s.len() && s[i] == b'.' {
+        i += 1;
+        while i < s.len() && is_digit(s[i]) {
+            i += 1;
+            saw_digit = true;
+        }
+    }
+    if saw_digit && i < s.len() && (s[i] == b'e' || s[i] == b'E') {
+        let mut j = i + 1;
+        if j < s.len() && (s[j] == b'+' || s[j] == b'-') {
+            j += 1;
+        }
+        let exp_start = j;
+        while j < s.len() && is_digit(s[j]) {
+            j += 1;
+        }
+        if j > exp_start {
+            i = j;
+        }
+    }
+    if !saw_digit {
+        return None;
+    }
+    let parsed = core::str::from_utf8(&s[start..i]).ok()?;
+    parsed.parse::<f64>().ok().map(|v| (v, i))
+}
+
+fn ParseISO8601Number(s: &[u8], end: &mut usize, ipart: &mut i64, fpart: &mut f64) -> i32 {
+    if !(s.first().is_some_and(|&c| is_digit(c))
+        || s.first() == Some(&b'-')
+        || s.first() == Some(&b'.'))
+    {
+        return DTERR_BAD_FORMAT;
+    }
+    let Some((val, e)) = strtod_prefix(s) else {
+        return DTERR_BAD_FORMAT;
+    };
+    if e == 0 {
+        return DTERR_BAD_FORMAT;
+    }
+    *end = e;
+    // watch out for overflow, including infinities; reject NaN too
+    if val.is_nan() || !(-1.0e15..=1.0e15).contains(&val) {
+        return DTERR_FIELD_OVERFLOW;
+    }
+    // be very sure we truncate towards zero (cf dtrunc())
+    *ipart = if val >= 0.0 { val.floor() as i64 } else { -((-val).floor() as i64) };
+    *fpart = val - *ipart as f64;
+    0
+}
+
+fn ISO8601IntegerWidth(fieldstart: &[u8]) -> i32 {
+    // we might have had a leading '-'
+    let mut i = usize::from(fieldstart.first() == Some(&b'-'));
+    let mut n = 0;
+    while i < fieldstart.len() && is_digit(fieldstart[i]) {
+        n += 1;
+        i += 1;
+    }
+    n
+}
+
+pub fn DecodeISO8601Interval(s: &[u8], dtype: &mut i32, itm_in: &mut pg_itm_in) -> i32 {
+    let mut datepart = true;
+    let mut havefield = false;
+
+    *dtype = DTK_DELTA;
+    ClearPgItmIn(itm_in);
+
+    if s.len() < 2 || s[0] != b'P' {
+        return DTERR_BAD_FORMAT;
+    }
+
+    let mut pos = 1usize;
+    while pos < s.len() {
+        if s[pos] == b'T' {
+            datepart = false;
+            havefield = false;
+            pos += 1;
+            continue;
+        }
+
+        let fieldstart = pos;
+        let mut val: i64 = 0;
+        let mut fval: f64 = 0.0;
+        let mut adv = 0usize;
+        let dterr = ParseISO8601Number(&s[pos..], &mut adv, &mut val, &mut fval);
+        if dterr != 0 {
+            return dterr;
+        }
+        pos += adv;
+
+        // note: we could step off the end of the string here (unit = NUL)
+        let unit = s.get(pos).copied().unwrap_or(0);
+        if pos < s.len() {
+            pos += 1;
+        }
+
+        if datepart {
+            match unit {
+                b'Y' => {
+                    if !AdjustYears(val, 1, itm_in) || !AdjustFractYears(fval, 1, itm_in) {
+                        return DTERR_FIELD_OVERFLOW;
+                    }
+                }
+                b'M' => {
+                    if !AdjustMonths(val, itm_in) || !AdjustFractDays(fval, DAYS_PER_MONTH, itm_in)
+                    {
+                        return DTERR_FIELD_OVERFLOW;
+                    }
+                }
+                b'W' => {
+                    if !AdjustDays(val, 7, itm_in) || !AdjustFractDays(fval, 7, itm_in) {
+                        return DTERR_FIELD_OVERFLOW;
+                    }
+                }
+                b'D' => {
+                    if !AdjustDays(val, 1, itm_in)
+                        || !AdjustFractMicroseconds(fval, USECS_PER_DAY, itm_in)
+                    {
+                        return DTERR_FIELD_OVERFLOW;
+                    }
+                }
+                u @ (b'T' | 0 | b'-') => {
+                    // ISO 8601 4.4.3.3 Basic Format (yyyymmdd), else Extended
+                    if (u == b'T' || u == 0)
+                        && ISO8601IntegerWidth(&s[fieldstart..]) == 8
+                        && !havefield
+                    {
+                        if !AdjustYears(val / 10000, 1, itm_in)
+                            || !AdjustMonths((val / 100) % 100, itm_in)
+                            || !AdjustDays(val % 100, 1, itm_in)
+                            || !AdjustFractMicroseconds(fval, USECS_PER_DAY, itm_in)
+                        {
+                            return DTERR_FIELD_OVERFLOW;
+                        }
+                        if u == 0 {
+                            return 0;
+                        }
+                        datepart = false;
+                        havefield = false;
+                        continue;
+                    }
+
+                    if havefield {
+                        return DTERR_BAD_FORMAT;
+                    }
+                    if !AdjustYears(val, 1, itm_in) || !AdjustFractYears(fval, 1, itm_in) {
+                        return DTERR_FIELD_OVERFLOW;
+                    }
+                    if u == 0 {
+                        return 0;
+                    }
+                    if u == b'T' {
+                        datepart = false;
+                        havefield = false;
+                        continue;
+                    }
+
+                    let mut adv2 = 0;
+                    let dterr = ParseISO8601Number(&s[pos..], &mut adv2, &mut val, &mut fval);
+                    if dterr != 0 {
+                        return dterr;
+                    }
+                    pos += adv2;
+                    if !AdjustMonths(val, itm_in) || !AdjustFractDays(fval, DAYS_PER_MONTH, itm_in)
+                    {
+                        return DTERR_FIELD_OVERFLOW;
+                    }
+                    if pos >= s.len() {
+                        return 0;
+                    }
+                    if s[pos] == b'T' {
+                        datepart = false;
+                        havefield = false;
+                        pos += 1;
+                        continue;
+                    }
+                    if s[pos] != b'-' {
+                        return DTERR_BAD_FORMAT;
+                    }
+                    pos += 1;
+
+                    let mut adv3 = 0;
+                    let dterr = ParseISO8601Number(&s[pos..], &mut adv3, &mut val, &mut fval);
+                    if dterr != 0 {
+                        return dterr;
+                    }
+                    pos += adv3;
+                    if !AdjustDays(val, 1, itm_in)
+                        || !AdjustFractMicroseconds(fval, USECS_PER_DAY, itm_in)
+                    {
+                        return DTERR_FIELD_OVERFLOW;
+                    }
+                    if pos >= s.len() {
+                        return 0;
+                    }
+                    if s[pos] == b'T' {
+                        datepart = false;
+                        havefield = false;
+                        pos += 1;
+                        continue;
+                    }
+                    return DTERR_BAD_FORMAT;
+                }
+                _ => return DTERR_BAD_FORMAT,
+            }
+        } else {
+            match unit {
+                b'H' => {
+                    if !AdjustMicroseconds(val, fval, USECS_PER_HOUR, itm_in) {
+                        return DTERR_FIELD_OVERFLOW;
+                    }
+                }
+                b'M' => {
+                    if !AdjustMicroseconds(val, fval, USECS_PER_MINUTE, itm_in) {
+                        return DTERR_FIELD_OVERFLOW;
+                    }
+                }
+                b'S' => {
+                    if !AdjustMicroseconds(val, fval, USECS_PER_SEC, itm_in) {
+                        return DTERR_FIELD_OVERFLOW;
+                    }
+                }
+                u @ (0 | b':') => {
+                    // ISO 8601 4.4.3.3 Basic Format (hhmmss), else Extended
+                    if u == 0 && ISO8601IntegerWidth(&s[fieldstart..]) == 6 && !havefield {
+                        if !AdjustMicroseconds(val / 10000, 0.0, USECS_PER_HOUR, itm_in)
+                            || !AdjustMicroseconds((val / 100) % 100, 0.0, USECS_PER_MINUTE, itm_in)
+                            || !AdjustMicroseconds(val % 100, 0.0, USECS_PER_SEC, itm_in)
+                            || !AdjustFractMicroseconds(fval, 1, itm_in)
+                        {
+                            return DTERR_FIELD_OVERFLOW;
+                        }
+                        return 0;
+                    }
+
+                    if havefield {
+                        return DTERR_BAD_FORMAT;
+                    }
+                    if !AdjustMicroseconds(val, fval, USECS_PER_HOUR, itm_in) {
+                        return DTERR_FIELD_OVERFLOW;
+                    }
+                    if u == 0 {
+                        return 0;
+                    }
+
+                    let mut adv2 = 0;
+                    let dterr = ParseISO8601Number(&s[pos..], &mut adv2, &mut val, &mut fval);
+                    if dterr != 0 {
+                        return dterr;
+                    }
+                    pos += adv2;
+                    if !AdjustMicroseconds(val, fval, USECS_PER_MINUTE, itm_in) {
+                        return DTERR_FIELD_OVERFLOW;
+                    }
+                    if pos >= s.len() {
+                        return 0;
+                    }
+                    if s[pos] != b':' {
+                        return DTERR_BAD_FORMAT;
+                    }
+                    pos += 1;
+
+                    let mut adv3 = 0;
+                    let dterr = ParseISO8601Number(&s[pos..], &mut adv3, &mut val, &mut fval);
+                    if dterr != 0 {
+                        return dterr;
+                    }
+                    pos += adv3;
+                    if !AdjustMicroseconds(val, fval, USECS_PER_SEC, itm_in) {
+                        return DTERR_FIELD_OVERFLOW;
+                    }
+                    if pos >= s.len() {
+                        return 0;
+                    }
+                    return DTERR_BAD_FORMAT;
+                }
+                _ => return DTERR_BAD_FORMAT,
+            }
+        }
+
+        havefield = true;
+    }
+
+    0
+}
+
 pub fn CheckDateTokenTable(table: &[DateTkn]) -> bool {
     let mut ok = true;
     for i in 0..table.len() {

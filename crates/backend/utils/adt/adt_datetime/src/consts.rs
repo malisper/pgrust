@@ -116,6 +116,7 @@ pub const TZNAME_DYNTZ: i32 = 1;
 pub const TZNAME_ZONE: i32 = 2;
 
 pub const MONTHS_PER_YEAR: i32 = 12;
+pub const DAYS_PER_MONTH: i32 = 30;
 pub const DAYS_PER_WEEK: i32 = 7;
 pub const HOURS_PER_DAY: i32 = 24;
 pub const MINS_PER_HOUR: i32 = 60;
@@ -178,6 +179,52 @@ pub struct pg_itm {
     pub tm_mday: i32,
     pub tm_mon: i32,
     pub tm_year: i32,
+}
+
+#[allow(non_camel_case_types)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct pg_itm_in {
+    pub tm_usec: i64,
+    pub tm_mday: i32,
+    pub tm_mon: i32,
+    pub tm_year: i32,
+}
+
+/// typlen 16, typalign d: time(8) + day(4) + month(4), field order per
+/// datatype/timestamp.h; all-min/all-max field values encode -/+infinity.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Interval {
+    pub time: i64,
+    pub day: i32,
+    pub month: i32,
+}
+
+const _: () = {
+    assert!(core::mem::size_of::<Interval>() == 16);
+    assert!(core::mem::offset_of!(Interval, time) == 0);
+    assert!(core::mem::offset_of!(Interval, day) == 8);
+    assert!(core::mem::offset_of!(Interval, month) == 12);
+};
+
+impl Interval {
+    pub const NOBEGIN: Interval = Interval { time: i64::MIN, day: i32::MIN, month: i32::MIN };
+    pub const NOEND: Interval = Interval { time: i64::MAX, day: i32::MAX, month: i32::MAX };
+
+    #[inline]
+    pub const fn is_nobegin(&self) -> bool {
+        self.month == i32::MIN && self.day == i32::MIN && self.time == i64::MIN
+    }
+
+    #[inline]
+    pub const fn is_noend(&self) -> bool {
+        self.month == i32::MAX && self.day == i32::MAX && self.time == i64::MAX
+    }
+
+    #[inline]
+    pub const fn not_finite(&self) -> bool {
+        self.is_nobegin() || self.is_noend()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]

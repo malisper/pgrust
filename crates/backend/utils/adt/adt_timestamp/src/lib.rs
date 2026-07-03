@@ -35,6 +35,7 @@ use types_error::{
 };
 
 pub mod builtins;
+pub mod interval;
 
 #[cfg(test)]
 mod tests;
@@ -71,7 +72,7 @@ pub type TsBuf = [u8; MAXDATELEN + 1];
 pub const TS_WORKBUF: usize = MAXDATELEN + MAXDATEFIELDS;
 
 #[cold]
-fn timestamp_out_of_range() -> Box<PgError> {
+pub(crate) fn timestamp_out_of_range() -> Box<PgError> {
     Box::new(
         PgError::error("timestamp out of range")
             .with_sqlstate(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
@@ -1640,4 +1641,49 @@ pub fn init_seams() {
     timestamp_seams::get_current_timestamp::set(GetCurrentTimestamp);
     timestamp_seams::get_current_datetime::set(current_time_usec_snapshot);
     timestamp_seams::get_current_time_usec::set(current_time_usec_snapshot);
+}
+
+pub fn timestamp_recv(buf: &mut stringinfo::StringInfo<'_>, typmod: i32) -> PgResult<Timestamp> {
+    let mut timestamp = pqformat::pq_getmsgint64(buf)?;
+    let mut tm = pg_tm::default();
+    let mut fsec: fsec_t = 0;
+    // range check: see if timestamp_out would like it
+    if !TIMESTAMP_NOT_FINITE(timestamp)
+        && (timestamp2tm(timestamp, None, &mut tm, &mut fsec, None, None).is_err()
+            || !IS_VALID_TIMESTAMP(timestamp))
+    {
+        return Err(timestamp_out_of_range());
+    }
+    AdjustTimestampForTypmod(&mut timestamp, typmod, None)?;
+    Ok(timestamp)
+}
+
+pub fn timestamptz_recv(
+    buf: &mut stringinfo::StringInfo<'_>,
+    typmod: i32,
+) -> PgResult<TimestampTz> {
+    let mut timestamp = pqformat::pq_getmsgint64(buf)?;
+    let mut tm = pg_tm::default();
+    let mut fsec: fsec_t = 0;
+    let mut tz = 0i32;
+    if !TIMESTAMP_NOT_FINITE(timestamp)
+        && (timestamp2tm(timestamp, Some(&mut tz), &mut tm, &mut fsec, None, None).is_err()
+            || !IS_VALID_TIMESTAMP(timestamp))
+    {
+        return Err(timestamp_out_of_range());
+    }
+    AdjustTimestampForTypmod(&mut timestamp, typmod, None)?;
+    Ok(timestamp)
+}
+
+pub fn timestamp_send<'mcx>(mcx: mcx::Mcx<'mcx>, t: Timestamp) -> PgResult<datum::Bytea<'mcx>> {
+    let mut b = pqformat::pq_begintypsend(mcx)?;
+    pqformat::pq_sendint64(&mut b, t as u64)?;
+    Ok(pqformat::pq_endtypsend(b))
+}
+
+pub fn timestamp_scale(timestamp: Timestamp, typmod: i32) -> PgResult<Timestamp> {
+    let mut result = timestamp;
+    AdjustTimestampForTypmod(&mut result, typmod, None)?;
+    Ok(result)
 }

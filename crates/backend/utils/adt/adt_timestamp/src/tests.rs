@@ -49,6 +49,7 @@ fn tstz_out(ts: TimestampTz) -> String {
 
 #[test]
 fn epoch_timestamp_matches_c_constant() {
+    gmt_session();
     // (UNIX_EPOCH_JDATE - POSTGRES_EPOCH_JDATE) * USECS_PER_DAY
     assert_eq!(SetEpochTimestamp(), -946_684_800_000_000);
     let mut tm = pg_tm::default();

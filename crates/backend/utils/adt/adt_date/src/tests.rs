@@ -366,3 +366,174 @@ fn binary_wire_round_trip() {
         assert_eq!(si.cursor, si.len());
     }
 }
+
+use adt_datetime::{
+    set_interval_style, Interval, INTSTYLE_ISO_8601, INTSTYLE_POSTGRES, INTSTYLE_POSTGRES_VERBOSE,
+    INTSTYLE_SQL_STANDARD, INTERVAL_MASK, DAY, HOUR, MINUTE, MONTH, SECOND, YEAR,
+};
+use adt_timestamp::interval::{
+    interval_cmp_internal, interval_div, interval_in, interval_justify_days,
+    interval_justify_hours, interval_justify_interval, interval_mi, interval_mul, interval_out,
+    interval_pl, interval_um, timestamp2timestamptz, timestamp_mi, timestamp_mi_interval,
+    timestamp_pl_interval, timestamptz2timestamp, timestamptz_mi_interval_internal,
+    timestamptz_pl_interval_internal, INTERVAL_FULL_PRECISION, INTERVAL_TYPMOD,
+};
+use crate::interval_corpus as corpus;
+
+fn iv_out(iv: &Interval) -> String {
+    let mut buf = [0u8; MAXDATELEN + 1];
+    let n = interval_out(iv, &mut buf);
+    String::from_utf8(buf[..n].to_vec()).unwrap()
+}
+
+// expected is the probe encoding: "OK|<text>" or "ERR|<sqlstate>|<message>"
+fn check(input_desc: &str, got: PgResult<String>, expected: &str) {
+    match got {
+        Ok(text) => {
+            let want = expected
+                .strip_prefix("OK|")
+                .unwrap_or_else(|| panic!("{input_desc}: got Ok({text}), want {expected}"));
+            assert_eq!(text, want, "{input_desc}");
+        }
+        Err(e) => {
+            let rest = expected
+                .strip_prefix("ERR|")
+                .unwrap_or_else(|| panic!("{input_desc}: got Err({}), want {expected}", e.message()));
+            let (state, msg) = rest.split_once('|').unwrap();
+            let got_state = types_error::unpack_sqlstate(e.sqlstate());
+            assert_eq!(&got_state, state.as_bytes(), "{input_desc}: message {}", e.message());
+            assert_eq!(e.message(), msg, "{input_desc}");
+        }
+    }
+}
+
+fn iv_round_trip(s: &str, typmod: i32) -> PgResult<String> {
+    Ok(iv_out(&interval_in(s, typmod, None)?))
+}
+
+#[test]
+fn interval_in_out_live_pg_corpus() {
+    gmt_session();
+    for &(input, expected) in corpus::INTERVAL_IN_OK.iter().chain(corpus::INTERVAL_IN_ERR) {
+        check(input, iv_round_trip(input, -1), expected);
+    }
+}
+
+#[test]
+fn interval_out_styles_live_pg_corpus() {
+    gmt_session();
+    for (style, table) in [
+        (INTSTYLE_SQL_STANDARD, corpus::INTERVAL_OUT_SQL_STANDARD),
+        (INTSTYLE_POSTGRES_VERBOSE, corpus::INTERVAL_OUT_POSTGRES_VERBOSE),
+        (INTSTYLE_ISO_8601, corpus::INTERVAL_OUT_ISO_8601),
+    ] {
+        set_interval_style(style);
+        for &(input, expected) in table {
+            check(input, iv_round_trip(input, -1), expected);
+        }
+        set_interval_style(INTSTYLE_POSTGRES);
+    }
+}
+
+fn typmod_of(cast: &str) -> Option<i32> {
+    let rest = cast.strip_prefix("interval")?.trim_start();
+    let (precision, rest) = if let Some(r) = rest.strip_prefix('(') {
+        let (p, r) = r.split_once(')')?;
+        (p.trim().parse::<i32>().ok()?, r.trim_start())
+    } else {
+        (INTERVAL_FULL_PRECISION, rest)
+    };
+    let range = match rest {
+        "" => adt_datetime::INTERVAL_FULL_RANGE,
+        "year" => INTERVAL_MASK(YEAR),
+        "month" => INTERVAL_MASK(MONTH),
+        "year to month" => INTERVAL_MASK(YEAR) | INTERVAL_MASK(MONTH),
+        "day" => INTERVAL_MASK(DAY),
+        "hour" => INTERVAL_MASK(HOUR),
+        "minute" => INTERVAL_MASK(MINUTE),
+        "second" => INTERVAL_MASK(SECOND),
+        "day to hour" => INTERVAL_MASK(DAY) | INTERVAL_MASK(HOUR),
+        "day to minute" => INTERVAL_MASK(DAY) | INTERVAL_MASK(HOUR) | INTERVAL_MASK(MINUTE),
+        "day to second" => {
+            INTERVAL_MASK(DAY) | INTERVAL_MASK(HOUR) | INTERVAL_MASK(MINUTE) | INTERVAL_MASK(SECOND)
+        }
+        "hour to minute" => INTERVAL_MASK(HOUR) | INTERVAL_MASK(MINUTE),
+        "hour to second" => INTERVAL_MASK(HOUR) | INTERVAL_MASK(MINUTE) | INTERVAL_MASK(SECOND),
+        "minute to second" => INTERVAL_MASK(MINUTE) | INTERVAL_MASK(SECOND),
+        _ => return None,
+    };
+    Some(INTERVAL_TYPMOD(precision, range))
+}
+
+#[test]
+fn interval_typmod_live_pg_corpus() {
+    gmt_session();
+    for &(input, cast, expected) in corpus::INTERVAL_TYPMOD {
+        if expected.starts_with("ERR|42601") {
+            continue; // PG grammar-level syntax error, not an interval_in arm
+        }
+        let typmod = typmod_of(cast).unwrap_or_else(|| panic!("unparsed cast {cast}"));
+        check(input, iv_round_trip(input, typmod), expected);
+    }
+}
+
+#[test]
+fn interval_arithmetic_live_pg_corpus() {
+    gmt_session();
+    let ts = |s: &str| adt_timestamp::timestamp_in(s, -1, None).unwrap();
+    let tstz = |s: &str| adt_timestamp::timestamptz_in(s, -1, None).unwrap();
+    let iv = |s: &str| interval_in(s, -1, None).unwrap();
+    let ts_out = |t: Timestamp| {
+        let mut buf = [0u8; MAXDATELEN + 1];
+        let n = adt_timestamp::timestamp_out(t, &mut buf).unwrap();
+        String::from_utf8(buf[..n].to_vec()).unwrap()
+    };
+    let tstz_out = |t: TimestampTz| {
+        let mut buf = [0u8; MAXDATELEN + 1];
+        let n = adt_timestamp::timestamptz_out(t, &mut buf).unwrap();
+        String::from_utf8(buf[..n].to_vec()).unwrap()
+    };
+    for &(tag, a, b, expected) in corpus::ARITH {
+        let desc = format!("{tag}({a}, {b})");
+        let got: PgResult<String> = match tag {
+            "ts_pl" => timestamp_pl_interval(ts(a), &iv(b)).map(ts_out),
+            "ts_mi" => timestamp_mi_interval(ts(a), &iv(b)).map(ts_out),
+            "tstz_pl" => timestamptz_pl_interval_internal(tstz(a), &iv(b), None).map(&tstz_out),
+            "tstz_mi" => timestamptz_mi_interval_internal(tstz(a), &iv(b), None).map(&tstz_out),
+            "date_pl" => date_pl_interval(d_in(a), &iv(b)).map(ts_out),
+            "date_mi" => date_mi_interval(d_in(a), &iv(b)).map(ts_out),
+            "time_pl" => time_pl_interval(t_in(&format!("{a}+00"), -1), &iv(b)).map(t_out),
+            "time_mi" => time_mi_interval(t_in(&format!("{a}+00"), -1), &iv(b)).map(t_out),
+            "timetz_pl" => timetz_pl_interval(&tz_in(a, -1), &iv(b)).map(|t| tz_out(&t)),
+            "timetz_mi" => timetz_mi_interval(&tz_in(a, -1), &iv(b)).map(|t| tz_out(&t)),
+            "ts_mi_ts" => timestamp_mi(ts(a), ts(b)).map(|i| iv_out(&i)),
+            "iv_pl" => interval_pl(&iv(a), &iv(b)).map(|i| iv_out(&i)),
+            "iv_mi" => interval_mi(&iv(a), &iv(b)).map(|i| iv_out(&i)),
+            "iv_um" => interval_um(&iv(a)).map(|i| iv_out(&i)),
+            "iv_mul" => interval_mul(&iv(a), b.parse().unwrap()).map(|i| iv_out(&i)),
+            "mul_d" => interval_mul(&iv(a), b.parse().unwrap()).map(|i| iv_out(&i)),
+            "iv_div" => interval_div(&iv(a), b.parse().unwrap()).map(|i| iv_out(&i)),
+            "just_h" => interval_justify_hours(&iv(a)).map(|i| iv_out(&i)),
+            "just_d" => interval_justify_days(&iv(a)).map(|i| iv_out(&i)),
+            "just_i" => interval_justify_interval(&iv(a)).map(|i| iv_out(&i)),
+            "ts2tstz" => timestamp2timestamptz(ts(a)).map(&tstz_out),
+            "tstz2ts" => timestamptz2timestamp(tstz(a)).map(ts_out),
+            other => panic!("unknown tag {other}"),
+        };
+        check(&desc, got, expected);
+    }
+}
+
+#[test]
+fn interval_sort_matches_live_pg_order() {
+    gmt_session();
+    let mut items: Vec<&str> = corpus::SORT_INPUT.to_vec();
+    items.sort_by(|x, y| {
+        let c = interval_cmp_internal(
+            &interval_in(x, -1, None).unwrap(),
+            &interval_in(y, -1, None).unwrap(),
+        );
+        c.cmp(&0).then_with(|| x.cmp(y))
+    });
+    assert_eq!(items, corpus::SORT_EXPECTED);
+}
