@@ -61,13 +61,19 @@ fn is_polymorphic(t: Oid) -> bool {
     )
 }
 
+// use_count lives behind an Rc shared with each in-flight invocation, so a
+// mid-call cache eviction can neither free storage under the invocation nor
+// have the decrement land on a different entry (funccache.c use_count).
+#[derive(Clone)]
 struct FuncCacheEntry {
     func: Rc<PlFunction>,
-    use_count: u32,
+    use_count: Rc<core::cell::Cell<u32>>,
 }
 
 std::thread_local! {
-    static FUNC_CACHE: core::cell::RefCell<FxHashMap<Oid, FuncCacheEntry>> =
+    // Keyed by (fn_oid, input_collation): C's hashkey includes
+    // fcinfo->fncollation (funccache.c compute_function_hashkey).
+    static FUNC_CACHE: core::cell::RefCell<FxHashMap<(Oid, Oid), FuncCacheEntry>> =
         core::cell::RefCell::new(FxHashMap::default());
 }
 
@@ -80,29 +86,33 @@ pub fn init_seams() {
 }
 
 // plpgsql_compile (pl_comp.c) with funccache.c's xmin/tid staleness rule.
-fn plpgsql_compile(fn_oid: Oid, fn_collation: Oid, for_validator: bool) -> PgResult<Rc<PlFunction>> {
+fn plpgsql_compile(fn_oid: Oid, fn_collation: Oid, for_validator: bool) -> PgResult<FuncCacheEntry> {
     let (cur_xmin, cur_tid) = proc_row_stamp(fn_oid)?;
-    let cached = FUNC_CACHE.with(|c| {
-        c.borrow().get(&fn_oid).map(|e| (e.func.clone(), e.use_count))
-    });
-    if let Some((func, _)) = cached {
-        if func.fn_xmin == cur_xmin && func.fn_tid == cur_tid {
-            return Ok(func);
+    let key = (fn_oid, fn_collation);
+    let cached = FUNC_CACHE.with(|c| c.borrow().get(&key).cloned());
+    if let Some(entry) = cached {
+        if entry.func.fn_xmin == cur_xmin && entry.func.fn_tid == cur_tid {
+            return Ok(entry);
         }
         FUNC_CACHE.with(|c| {
-            if let Some(e) = c.borrow_mut().remove(&fn_oid) {
-                crate::exec::free_function_plans(&e.func.expr_ids);
-            }
+            c.borrow_mut().remove(&key);
         });
+        // delete_function (funccache.c:433): free subsidiary storage only
+        // when no invocation is in flight; otherwise the old definition runs
+        // to completion and the entry leaks, as in C.
+        if entry.use_count.get() == 0 {
+            crate::exec::free_function_plans(&entry.func.expr_ids);
+        }
     }
 
     let func = Rc::new(do_compile(fn_oid, fn_collation, cur_xmin, cur_tid, for_validator)?);
+    let entry = FuncCacheEntry { func, use_count: Rc::new(core::cell::Cell::new(0)) };
     if !for_validator {
         FUNC_CACHE.with(|c| {
-            c.borrow_mut().insert(fn_oid, FuncCacheEntry { func: func.clone(), use_count: 0 })
+            c.borrow_mut().insert(key, entry.clone());
         });
     }
-    Ok(func)
+    Ok(entry)
 }
 
 fn proc_row_stamp(fn_oid: Oid) -> PgResult<(u32, (u32, u16))> {
@@ -413,7 +423,7 @@ fn attach_compile_context(
 fn add_parameter_name(comp: &mut CompState, dno: Dno, name: &str) -> PgResult<()> {
     if comp.ns_lookup(comp.ns_top, true, name, None, None).is_some() {
         return Err(crate::exec::exec_err(
-            types_error::ERRCODE_DUPLICATE_OBJECT,
+            types_error::ERRCODE_INVALID_FUNCTION_DEFINITION,
             format!("parameter name \"{name}\" used more than once"),
         ));
     }
@@ -448,18 +458,10 @@ fn plpgsql_call_handler(
     assert_eq!(rc, spi::SPI_OK_CONNECT, "SPI_connect failed");
 
     let outcome = (|| -> PgResult<Datum> {
-        let func = plpgsql_compile(fn_oid, fcinfo.fncollation, false)?;
-        FUNC_CACHE.with(|c| {
-            if let Some(e) = c.borrow_mut().get_mut(&fn_oid) {
-                e.use_count += 1;
-            }
-        });
-        let r = plpgsql_exec_function(&func, fcinfo);
-        FUNC_CACHE.with(|c| {
-            if let Some(e) = c.borrow_mut().get_mut(&fn_oid) {
-                e.use_count -= 1;
-            }
-        });
+        let entry = plpgsql_compile(fn_oid, fcinfo.fncollation, false)?;
+        entry.use_count.set(entry.use_count.get() + 1);
+        let r = plpgsql_exec_function(&entry.func, fcinfo);
+        entry.use_count.set(entry.use_count.get() - 1);
         r
     })();
 
@@ -529,6 +531,10 @@ fn plpgsql_exec_function(
         let _ = ty;
         estate.set_var(dno, arg.value, arg.isnull);
     }
+
+    // C sets FOUND=false at function entry (pl_exec.c:623).
+    estate.err_text = Some("during function entry");
+    estate.set_var(func.found_varno, Datum::from_bool(false), false);
     estate.err_text = None;
 
     let outcome = (|| -> PgResult<i32> {

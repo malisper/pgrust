@@ -7,6 +7,7 @@ use datum::Datum;
 use tcop_dest::CreateDestReceiver;
 use types_dest::CommandDest;
 use types_error::{PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_CURSOR_DEFINITION};
+use types_portal::params::{ParamExternData, PARAM_FLAG_CONST};
 use types_portal::{
     FetchDirection, ParamListHandle, Portal, QueryEnvHandle, StmtListHandle,
     CURSOR_OPT_NO_SCROLL, CURSOR_OPT_SCROLL,
@@ -14,7 +15,6 @@ use types_portal::{
 
 use elog::ereport;
 
-use crate::execute::convert_params;
 use crate::plan::{single_source, SpiPlanPtr};
 use crate::{
     set_spi_processed, set_spi_tuptable, with_current, TuptabHandle, _SPI_begin_call,
@@ -24,7 +24,44 @@ use crate::{
 pub struct SpiCursor {
     pub portal: Portal<'static>,
     stmts: StmtListHandle,
-    params: ParamListHandle,
+}
+
+// C SPI_cursor_open_internal's copyParamList into portal->portalContext: the
+// param array must survive _SPI_end_call's exec-context reset, so it gets
+// portal lifetime. Storing the handle in portalParams immediately makes
+// PortalDrop (close or abort-time cleanup) the single free path.
+fn cursor_params(
+    portal: &Portal<'static>,
+    argtypes: &[types_core::Oid],
+    values: &[Datum],
+    nulls: &[bool],
+) -> PgResult<ParamListHandle> {
+    if argtypes.is_empty() {
+        return Ok(ParamListHandle::NULL);
+    }
+    // SAFETY: portalContext is PgBox'd for address stability and outlives this
+    // call (freed only in PortalDrop, after release_portal_registry_handles).
+    let ctx: &mcx::MemoryContext = unsafe {
+        let p = portal.borrow();
+        &*(&**p.portalContext.as_ref().expect("portal has portalContext")
+            as *const mcx::MemoryContext)
+    };
+    let mcx = ctx.mcx();
+    let mut v = mcx::vec_with_capacity_in(mcx, argtypes.len())?;
+    for i in 0..argtypes.len() {
+        v.push(ParamExternData {
+            value: values[i],
+            isnull: nulls[i],
+            pflags: PARAM_FLAG_CONST,
+            ptype: argtypes[i],
+        });
+    }
+    let slice = mcx::vec_borrow_in(mcx, v)?;
+    // SAFETY: slice lives in portalContext, which PortalDrop deletes only
+    // after release_portal_registry_handles frees the handle.
+    let params = unsafe { types_portal::params::register(slice) };
+    portal.borrow_mut().portalParams = params;
+    Ok(params)
 }
 
 // SPI_cursor_open_internal (spi.c); the paramlist arrives as values/nulls
@@ -78,7 +115,7 @@ pub fn SPI_cursor_open(
             Some(n) => portalmem::CreatePortal(n, false, false)?,
         };
 
-        let params = convert_params(&state.argtypes, values, nulls)?;
+        let params = cursor_params(&portal, &state.argtypes, values, nulls)?;
 
         let query_string = plancache::CachedPlanQueryString(psrc);
         let cplan = plancache::GetCachedPlan(psrc, params, None, QueryEnvHandle::NULL)?;
@@ -125,7 +162,7 @@ pub fn SPI_cursor_open(
 
         pquery::PortalStart(&portal, params, 0, Some(snapshot))?;
 
-        Ok(SpiCursor { portal, stmts, params })
+        Ok(SpiCursor { portal, stmts })
     })();
 
     _SPI_end_call(true);
@@ -166,8 +203,5 @@ pub fn SPI_cursor_fetch(cursor: &SpiCursor, forward: bool, count: i64) -> PgResu
 pub fn SPI_cursor_close(cursor: SpiCursor) -> PgResult<()> {
     portalmem::PortalDrop(&cursor.portal, false)?;
     pquery::stmt_list::free(cursor.stmts);
-    if !cursor.params.is_null() {
-        types_portal::params::free(cursor.params);
-    }
     Ok(())
 }

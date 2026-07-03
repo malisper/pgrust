@@ -1,17 +1,7 @@
 // plerrcodes.h (generated from errcodes.txt, same rule as
-// generate-plerrcodes.pl): condition name -> SQLSTATE.
+// generate-plerrcodes.pl): condition name -> SQLSTATE. Only type-E lines
+// are included, so classes 00/01/02 (success/warning/no-data) are absent.
 pub static EXCEPTION_LABEL_MAP: &[(&str, [u8; 5])] = &[
-    ("successful_completion", *b"00000"),
-    ("warning", *b"01000"),
-    ("dynamic_result_sets_returned", *b"0100C"),
-    ("implicit_zero_bit_padding", *b"01008"),
-    ("null_value_eliminated_in_set_function", *b"01003"),
-    ("privilege_not_granted", *b"01007"),
-    ("privilege_not_revoked", *b"01006"),
-    ("string_data_right_truncation", *b"01004"),
-    ("deprecated_feature", *b"01P01"),
-    ("no_data", *b"02000"),
-    ("no_additional_dynamic_result_sets_returned", *b"02001"),
     ("sql_statement_not_yet_complete", *b"03000"),
     ("connection_exception", *b"08000"),
     ("connection_does_not_exist", *b"08003"),

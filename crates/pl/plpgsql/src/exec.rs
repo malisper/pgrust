@@ -42,6 +42,7 @@ const INT8OID: Oid = 20;
 const UNKNOWNOID: Oid = 705;
 const RECORDOID: Oid = 2249;
 const VOIDOID: Oid = 2278;
+const TYPTYPE_DOMAIN: i8 = b'd' as i8;
 
 const CURSOR_OPT_PARALLEL_OK: i32 = 0x0100;
 
@@ -129,6 +130,9 @@ struct CastEntry {
     state: Option<mcx::PgBox<'static, execexpr::ExprState<'static>>>,
     // Stable slot the compiled Param step points into.
     param: Box<[ParamExternData; 1]>,
+    // PlanCacheInvalCounter at build; any bump forces a rebuild (coarse
+    // stand-in for C's per-CachedExpression is_valid, pl_exec.c:7982).
+    inval_gen: u64,
 }
 
 pub struct Estate<'a> {
@@ -171,7 +175,7 @@ fn spi_ctx_err(
         return e;
     }
     let line = match mode {
-        M::RAW_PARSE_PLPGSQL_EXPR => format!("SQL expression \"{query}\""),
+        M::RAW_PARSE_PLPGSQL_EXPR => format!("PL/pgSQL expression \"{query}\""),
         M::RAW_PARSE_PLPGSQL_ASSIGN1
         | M::RAW_PARSE_PLPGSQL_ASSIGN2
         | M::RAW_PARSE_PLPGSQL_ASSIGN3 => format!("PL/pgSQL assignment \"{query}\""),
@@ -308,6 +312,7 @@ impl<'a> Estate<'a> {
         let hooks = parser_small1::PlpgsqlHookState {
             names: &name_entries,
             params_by_dno: &params_by_dno,
+            arg_dnos: &self.func.fn_argvarnos,
             recs: &rec_names,
             resolve_option: match self.func.resolve_option {
                 crate::comp::PLPGSQL_RESOLVE_VARIABLE => {
@@ -390,8 +395,19 @@ impl<'a> Estate<'a> {
                 NsType::Rec => {
                     let recname = item.name.to_ascii_lowercase();
                     let recno = item.itemno;
-                    // Whole-record references are unported: a marker entry
-                    // (InvalidOid) panics in the resolve hook.
+                    // Whole-record references are unported: an InvalidOid
+                    // marker entry panics loud in resolve_column_ref.
+                    let marker = (
+                        recname.clone(),
+                        recno,
+                        types_core::InvalidOid,
+                        -1,
+                        types_core::InvalidOid,
+                    );
+                    if !have(&names, &recname) {
+                        names.push(marker.clone());
+                    }
+                    pending.push(marker);
                     for d in &func.datums {
                         if let PlDatum::RecField(f) = d {
                             if f.recparentno == recno {
@@ -584,12 +600,13 @@ impl<'a> Estate<'a> {
             return Ok(None);
         };
 
-        // Invalidation check for a cached state.
+        // Per-eval revalidation (C CachedPlanIsSimplyValid): source valid,
+        // plan is the source's current gplan, plan valid, search_path match.
         if let Some(entry) = self.simple_cache.get(&expr.expr_id) {
             match entry {
                 None => return Ok(None),
                 Some(se) => {
-                    if !plancache::CachedPlanIsValid(se.psrc) {
+                    if !plancache::CachedPlanIsSimplyValid(se.psrc, se.cplan)? {
                         if let Some(Some(se)) = self.simple_cache.remove(&expr.expr_id) {
                             plancache::ReleaseCachedPlan(se.cplan);
                         }
@@ -761,7 +778,12 @@ impl<'a> Estate<'a> {
         reqtypmod: i32,
     ) -> PgResult<Datum> {
         let key = (valtype, valtypmod, reqtype, reqtypmod);
-        if !self.cast_cache.contains_key(&key) {
+        let cur_gen = plancache::PlanCacheInvalCounter();
+        let stale = match self.cast_cache.get(&key) {
+            Some(e) => e.inval_gen != cur_gen,
+            None => true,
+        };
+        if stale {
             let entry = self.build_cast_entry(valtype, valtypmod, reqtype, reqtypmod)?;
             self.cast_cache.insert(key, entry);
         }
@@ -786,6 +808,9 @@ impl<'a> Estate<'a> {
     ) -> PgResult<CastEntry> {
         use types_nodes::primnodes::{CoercionForm, Param, ParamKind};
 
+        // Read before catalog lookups: an inval firing mid-build leaves this
+        // entry stamped old, so the next use rebuilds.
+        let inval_gen = plancache::PlanCacheInvalCounter();
         let mut param: Box<[ParamExternData; 1]> = Box::new([ParamExternData {
             value: Datum::null(),
             isnull: true,
@@ -857,12 +882,12 @@ impl<'a> Estate<'a> {
         parser_small1::free_parsestate(pstate)?;
 
         let Some(cast_expr) = cast_expr else {
-            return Ok(CastEntry { state: None, param });
+            return Ok(CastEntry { state: None, param, inval_gen });
         };
         // No-op relabeling of the bare placeholder: skip evaluation.
         if let Some(r) = cast_expr.as_relabel_type() {
             if r.arg.as_variant::<Param>().is_some() {
-                return Ok(CastEntry { state: None, param });
+                return Ok(CastEntry { state: None, param, inval_gen });
             }
         }
 
@@ -876,10 +901,10 @@ impl<'a> Estate<'a> {
             n_exec: 0,
         };
         let Some(mut state) = execexpr::exec_init_expr(mcx, Some(cast_expr), bind)? else {
-            return Ok(CastEntry { state: None, param });
+            return Ok(CastEntry { state: None, param, inval_gen });
         };
         state.arm_result_mcx(self.eval_ctx.mcx());
-        Ok(CastEntry { state: Some(state), param })
+        Ok(CastEntry { state: Some(state), param, inval_gen })
     }
 
     // convert_value_to_string: type output function in eval scratch.
@@ -1083,6 +1108,12 @@ impl<'a> Estate<'a> {
                                     v.refname
                                 ),
                             ));
+                        }
+                        // C (pl_exec.c:1702-1719): a defaultless domain var
+                        // gets NULL assigned through an UNKNOWN cast so the
+                        // domain's NOT NULL/CHECK constraints run.
+                        if v.datatype.typtype == TYPTYPE_DOMAIN {
+                            self.exec_assign_value(dno, Datum::null(), true, UNKNOWNOID, -1)?;
                         }
                     }
                 }
@@ -1611,10 +1642,11 @@ impl<'a> Estate<'a> {
             Some(m) => m,
             None => match cond.take() {
                 Some(c) => c,
-                None => {
-                    let code = err_code.expect("errcode set for ERROR levels");
-                    unpack_sql_state(code)
-                }
+                // C: unpack_sql_state(err_code) with err_code 0 = "00000".
+                None => match err_code {
+                    Some(code) => unpack_sql_state(code),
+                    None => "00000".to_string(),
+                },
             },
         };
 
