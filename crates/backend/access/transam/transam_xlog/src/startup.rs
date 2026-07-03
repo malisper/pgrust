@@ -140,8 +140,8 @@ pub fn StartupXLOG() -> PgResult<()> {
 
     let did_crash = if state != DB_SHUTDOWNED && state != DB_SHUTDOWNED_IN_RECOVERY {
         RemoveTempXlogFiles()?;
-        // SyncDataDirectory() (fd.c) — crash-restart durability sweep.
-        panic!("crash recovery boot: SyncDataDirectory not ported");
+        fd::SyncDataDirectory()?;
+        true
     } else {
         false
     };

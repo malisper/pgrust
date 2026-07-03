@@ -307,6 +307,7 @@ members = [
     "crates/backend/storage/buffer/bufmgr",
     "crates/backend/utils/activity/pgstat",
     "crates/backend/utils/cache/relcache_build_seams",
+    "crates/backend/utils/cache/relcache_build",
     "crates/backend/utils/cache/relcache",
     "crates/backend/access/index/relscan",
     "crates/backend/access/nbtree/compare",

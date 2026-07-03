@@ -222,4 +222,5 @@ pub fn init_seams() {
     });
     startup_seams::begin_startup_progress_phase::set(begin_startup_progress_phase);
     startup_seams::register_startup_progress_timeout::set(register_startup_progress_timeout);
+    startup_seams::process_startup_proc_interrupts::set(ProcessStartupProcInterrupts);
 }

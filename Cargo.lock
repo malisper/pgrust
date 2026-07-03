@@ -860,6 +860,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_nodes",
+ "types_portal",
  "types_tuple",
  "var_seams",
 ]
@@ -1027,6 +1028,34 @@ dependencies = [
 [[package]]
 name = "copy_cmd"
 version = "0.1.0"
+dependencies = [
+ "acl_seams",
+ "aclchk_seams",
+ "datum",
+ "elog",
+ "execindexing",
+ "exectuples",
+ "fd",
+ "fmgr_core",
+ "libc",
+ "lsyscache",
+ "mbutils",
+ "mcx",
+ "miscinit_seams",
+ "snapmgr",
+ "stringinfo",
+ "table",
+ "tableam",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_nodes",
+ "types_rel",
+ "types_scan",
+ "types_slot",
+ "wchar",
+ "xact",
+]
 
 [[package]]
 name = "crc32c"
@@ -1441,6 +1470,7 @@ version = "0.1.0"
 dependencies = [
  "autovacuum_seams",
  "backend_status_seams",
+ "bufmgr_seams",
  "condition_variable_seams",
  "datum",
  "deadlock_seams",
@@ -1451,7 +1481,9 @@ dependencies = [
  "fmgr_seams",
  "format_type",
  "guc_tables",
+ "indexcmds_seams",
  "init_small",
+ "instrument",
  "ipc_seams",
  "keywords",
  "latch_seams",
@@ -1470,6 +1502,7 @@ dependencies = [
  "pqcomm_seams",
  "printtup",
  "procarray",
+ "relation_seams",
  "resowner_seams",
  "rewrite_handler",
  "rewrite_handler_seams",
@@ -1491,7 +1524,9 @@ dependencies = [
  "types_fmgr",
  "types_nodes",
  "types_portal",
+ "types_rel",
  "types_resowner",
+ "types_scan",
  "types_slot",
  "types_snapshot",
  "types_tuple",
@@ -3152,6 +3187,17 @@ dependencies = [
 [[package]]
 name = "nodenestloop"
 version = "0.1.0"
+dependencies = [
+ "execexpr",
+ "executils",
+ "init_small",
+ "mcx",
+ "postgres_seams",
+ "types_error",
+ "types_nodes",
+ "types_slot",
+ "types_tuple",
+]
 
 [[package]]
 name = "nodes_core"
@@ -3898,6 +3944,7 @@ dependencies = [
  "mcx",
  "plancache_portal_seams",
  "portalcmds_seams",
+ "pquery_seams",
  "resowner_portal_seams",
  "snapmgr_portal_seams",
  "tuplestore_hold_seams",
@@ -4645,6 +4692,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "relcache_build"
+version = "0.0.0"
+dependencies = [
+ "cache_syscache",
+ "catalog_seams",
+ "datum",
+ "fmgr_seams",
+ "genam",
+ "init_small",
+ "mcx",
+ "relcache",
+ "relcache_build_seams",
+ "table",
+ "tupdesc",
+ "types_array",
+ "types_core",
+ "types_error",
+ "types_rel",
+ "types_scan",
+ "types_tuple",
+]
+
+[[package]]
 name = "relcache_build_seams"
 version = "0.0.0"
 dependencies = [
@@ -4775,7 +4845,11 @@ version = "0.1.0"
 dependencies = [
  "datum",
  "mcx",
+ "nodes_core",
+ "readfuncs",
  "relation_seams",
+ "relcache",
+ "relcache_build_seams",
  "rewrite_handler_seams",
  "table",
  "types_core",
@@ -4896,6 +4970,7 @@ dependencies = [
  "detoast",
  "dsm_core",
  "elog",
+ "execjunk",
  "execmain",
  "execscan",
  "executils",
@@ -4949,6 +5024,7 @@ dependencies = [
  "plancache",
  "pmchild",
  "pmsignal",
+ "portalcmds",
  "postgres",
  "postmaster",
  "postmaster_startup",
@@ -4964,6 +5040,7 @@ dependencies = [
  "queryenvironment",
  "relation",
  "relcache",
+ "relcache_build",
  "relmapper",
  "relpath",
  "resowner",
@@ -6092,6 +6169,7 @@ dependencies = [
  "mcx",
  "miscinit",
  "parallel_seams",
+ "portalcmds",
  "portalmem",
  "prepare",
  "syscache_seams",

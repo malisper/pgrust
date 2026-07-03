@@ -24,6 +24,7 @@ predicate_seams = { path = "../../../storage/lmgr/predicate_seams" }
 pruneheap_seams = { path = "../pruneheap_seams" }
 syncscan_seams = { path = "../../common/syncscan_seams" }
 heapam_visibility_seams = { path = "../heapam_visibility_seams" }
+heaptoast_seams = { path = "../heaptoast_seams" }
 procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
 snapmgr_seams = { path = "../../../utils/time/snapmgr_seams" }
 subtrans_seams = { path = "../../transam/subtrans_seams" }

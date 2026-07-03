@@ -1,9 +1,10 @@
 //! xlogrecovery.c (PostgreSQL 18.3): the startup process' WAL-recovery
-//! driver. Ported here: the clean-shutdown boot path — InitWalRecovery's
-//! checkpoint read+validate through the startup page reader, FinishWalRecovery
-//! (EndOfLog + last partial page), ShutdownWalRecovery, and the shared
-//! replay-position getters. Archive recovery, standby mode, recovery targets,
-//! backup_label and the replay loop (PerformWalRecovery) are loud panics.
+//! driver. Ported here: InitWalRecovery's checkpoint read+validate through
+//! the startup page reader, the PerformWalRecovery redo loop (rmgr dispatch
+//! + redo-context bookkeeping), FinishWalRecovery (EndOfLog + last partial
+//! page), ShutdownWalRecovery, and the shared replay-position getters.
+//! Archive recovery, standby mode, recovery targets, backup_label, timeline
+//! switches and the consistency/pause machinery are loud panics.
 
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
@@ -366,10 +367,13 @@ impl XLogReaderRoutine for PageSource {
 }
 
 struct Recovery {
+    context: &'static mcx::MemoryContext,
     reader: XLogReaderState<'static>,
     src: PageSource,
     check_point_loc: XLogRecPtr,
     check_point_tli: TimeLineID,
+    redo_start_lsn: XLogRecPtr,
+    redo_start_tli: TimeLineID,
     aborted_rec_ptr: XLogRecPtr,
     missing_contrec_ptr: XLogRecPtr,
     oldest_active_xid: TransactionId,
@@ -536,10 +540,13 @@ pub fn InitWalRecovery() -> PgResult<InitWalRecoveryResult> {
     }
 
     let mut rec = Recovery {
+        context,
         reader,
         src: PageSource::new(),
         check_point_loc: cf.checkPoint,
         check_point_tli: cf.checkPointCopy.ThisTimeLineID,
+        redo_start_lsn: cf.checkPointCopy.redo,
+        redo_start_tli: cf.checkPointCopy.ThisTimeLineID,
         aborted_rec_ptr: InvalidXLogRecPtr,
         missing_contrec_ptr: InvalidXLogRecPtr,
         oldest_active_xid: types_core::InvalidTransactionId,
@@ -558,6 +565,8 @@ pub fn InitWalRecovery() -> PgResult<InitWalRecoveryResult> {
     let was_shutdown = (rec.reader.XLogRecGetInfo() & !transam_xlog::XLR_INFO_MASK)
         == transam_xlog::XLOG_CHECKPOINT_SHUTDOWN;
     rec.oldest_active_xid = check_point.oldestActiveXid;
+    rec.redo_start_lsn = check_point.redo;
+    rec.redo_start_tli = check_point.ThisTimeLineID;
 
     if check_point.redo < rec.check_point_loc {
         rec.reader.XLogBeginRead(check_point.redo);
@@ -651,8 +660,178 @@ pub fn InitWalRecovery() -> PgResult<InitWalRecoveryResult> {
     })
 }
 
+// CheckRecoveryConsistency: in crash recovery minRecoveryPoint stays invalid,
+// so everything past the early return is archive-recovery-only.
+fn check_recovery_consistency() -> PgResult<()> {
+    if transam_xlog::control_file::control_file().minRecoveryPoint == InvalidXLogRecPtr {
+        return Ok(());
+    }
+    panic!(
+        "CheckRecoveryConsistency archive-recovery arms not ported \
+         (minRecoveryPoint is set during crash recovery)"
+    );
+}
+
+// The XLOG-rmgr record types handled by the recovery driver itself.
+fn xlogrecovery_redo(rec: &Recovery) -> PgResult<()> {
+    let record = &rec.reader.v;
+    let info = rec.reader.XLogRecGetInfo() & !transam_xlog::XLR_INFO_MASK;
+    debug_assert_eq!(rec.reader.XLogRecGetRmid(), transam_xlog::RM_XLOG_ID);
+
+    if info == transam_xlog::XLOG_OVERWRITE_CONTRECORD {
+        panic!(
+            "XLOG_OVERWRITE_CONTRECORD verification not ported \
+             (torn-record overwrite; lands with CreateOverwriteContrecordRecord)"
+        );
+    } else if info == transam_xlog::XLOG_BACKUP_END {
+        // backupStartPoint is nonzero only under backup_label recovery
+        // (panics at init); C's mismatch arm is a DEBUG2, elided.
+        let data = record.record.as_ref().expect("no decoded record");
+        // SAFETY: main_data points into the reader's decode buffer.
+        let startpoint =
+            u64::from_ne_bytes(unsafe { data.main_data_bytes() }[..8].try_into().unwrap());
+        if startpoint == transam_xlog::control_file::control_file().backupStartPoint
+            && startpoint != InvalidXLogRecPtr
+        {
+            panic!("XLOG_BACKUP_END during an online backup: backup_label recovery not ported");
+        }
+    }
+    Ok(())
+}
+
+const XLR_CHECK_CONSISTENCY: u8 = 0x02;
+
+fn apply_wal_record(rec: &mut Recovery, replay_tli: &mut TimeLineID) -> PgResult<()> {
+    let xid = rec.reader.XLogRecGetXid();
+    let rmid = rec.reader.XLogRecGetRmid();
+    let info = rec.reader.XLogRecGetInfo();
+
+    varsup::AdvanceNextFullTransactionIdPastXid(xid)?;
+
+    if rmid == transam_xlog::RM_XLOG_ID {
+        let stripped = info & !transam_xlog::XLR_INFO_MASK;
+        let mut new_replay_tli = *replay_tli;
+        if stripped == transam_xlog::XLOG_CHECKPOINT_SHUTDOWN {
+            let cp = controldata_utils::CheckPoint::from_bytes(rec.reader.XLogRecGetData());
+            new_replay_tli = cp.ThisTimeLineID;
+        } else if stripped == transam_xlog::XLOG_END_OF_RECOVERY {
+            let data = rec.reader.XLogRecGetData();
+            new_replay_tli = u32::from_ne_bytes(data[8..12].try_into().unwrap());
+        }
+        if new_replay_tli != *replay_tli {
+            panic!(
+                "timeline switch at {} not ported (checkTimeLineSwitch; timeline unit)",
+                lsn_fmt(rec.reader.v.EndRecPtr)
+            );
+        }
+    }
+
+    REPLAY_END_REC_PTR.store(rec.reader.v.EndRecPtr, Relaxed);
+    REPLAY_END_TLI.store(*replay_tli, Relaxed);
+
+    debug_assert!(xlogutils::standby_state() == xlogutils::STANDBY_DISABLED);
+
+    if rmid == transam_xlog::RM_XLOG_ID {
+        xlogrecovery_redo(rec)?;
+    }
+
+    (rmgr::GetRmgr(rmid)?.rm_redo)(&mut rec.reader.v)?;
+
+    if info & XLR_CHECK_CONSISTENCY != 0 {
+        panic!("verifyBackupPageConsistency not ported (wal_consistency_checking record seen)");
+    }
+
+    LAST_REPLAYED_READ_REC_PTR.store(rec.reader.v.ReadRecPtr, Relaxed);
+    LAST_REPLAYED_END_REC_PTR.store(rec.reader.v.EndRecPtr, Relaxed);
+    LAST_REPLAYED_TLI.store(*replay_tli, Relaxed);
+
+    // WalSndWakeup: cascade replication only (standby-mode, unreachable).
+    if DO_REQUEST_WALRCV_REPLY.get() {
+        panic!("WalRcvForceReply not ported (walreceiver): apply-feedback commit replayed");
+    }
+
+    check_recovery_consistency()
+}
+
 pub fn PerformWalRecovery() -> PgResult<()> {
-    panic!("PerformWalRecovery not ported (xlogrecovery.c): crash/archive replay loop");
+    let mut rec = RECOVERY
+        .with(|cell| cell.borrow_mut().take())
+        .expect("PerformWalRecovery before InitWalRecovery");
+    let result = perform_wal_recovery_guts(&mut rec);
+    RECOVERY.with(|cell| *cell.borrow_mut() = Some(rec));
+    result
+}
+
+fn perform_wal_recovery_guts(rec: &mut Recovery) -> PgResult<()> {
+    if rec.redo_start_lsn < rec.check_point_loc {
+        LAST_REPLAYED_READ_REC_PTR.store(InvalidXLogRecPtr, Relaxed);
+        LAST_REPLAYED_END_REC_PTR.store(rec.redo_start_lsn, Relaxed);
+        LAST_REPLAYED_TLI.store(rec.redo_start_tli, Relaxed);
+    } else {
+        LAST_REPLAYED_READ_REC_PTR.store(rec.reader.v.ReadRecPtr, Relaxed);
+        LAST_REPLAYED_END_REC_PTR.store(rec.reader.v.EndRecPtr, Relaxed);
+        LAST_REPLAYED_TLI.store(rec.check_point_tli, Relaxed);
+    }
+    REPLAY_END_REC_PTR.store(LAST_REPLAYED_END_REC_PTR.load(Relaxed), Relaxed);
+    REPLAY_END_TLI.store(LAST_REPLAYED_TLI.load(Relaxed), Relaxed);
+
+    if init_small::globals::IsUnderPostmaster() {
+        pmsignal::SendPostmasterSignal(pmsignal::PMSignalReason::PMSIGNAL_RECOVERY_STARTED);
+    }
+
+    check_recovery_consistency()?;
+
+    let mut replay_tli;
+    let mut have_record;
+    if rec.redo_start_lsn < rec.check_point_loc {
+        replay_tli = rec.redo_start_tli;
+        let redo_start = rec.redo_start_lsn;
+        rec.reader.XLogBeginRead(redo_start);
+        have_record = read_record(rec, PANIC, false, replay_tli)?;
+        debug_assert!(have_record);
+        if rec.reader.XLogRecGetRmid() != transam_xlog::RM_XLOG_ID
+            || rec.reader.XLogRecGetInfo() & !transam_xlog::XLR_INFO_MASK
+                != transam_xlog::XLOG_CHECKPOINT_REDO
+        {
+            ereport(FATAL)
+                .errmsg(format!(
+                    "unexpected record type found at redo point {}",
+                    lsn_fmt(rec.reader.v.ReadRecPtr)
+                ))
+                .finish(loc("PerformWalRecovery"))?;
+        }
+    } else {
+        debug_assert_eq!(rec.reader.v.ReadRecPtr, rec.check_point_loc);
+        replay_tli = rec.check_point_tli;
+        have_record = read_record(rec, LOG, false, replay_tli)?;
+    }
+
+    if have_record {
+        rmgr::RmgrStartup(rec.context.mcx())?;
+        let _ = elog(
+            LOG,
+            format!("redo starts at {}", lsn_fmt(rec.reader.v.ReadRecPtr)),
+        );
+
+        while have_record {
+            if startup_seams::process_startup_proc_interrupts::is_installed() {
+                startup_seams::process_startup_proc_interrupts::call()?;
+            }
+            // recoveryStopsBefore/After + pause/delay arms: recovery targets
+            // and hot standby are archive-only (panics in InitWalRecovery).
+            apply_wal_record(rec, &mut replay_tli)?;
+            have_record = read_record(rec, LOG, false, replay_tli)?;
+        }
+
+        rmgr::RmgrCleanup();
+        let _ = elog(
+            LOG,
+            format!("redo done at {}", lsn_fmt(rec.reader.v.ReadRecPtr)),
+        );
+    } else {
+        let _ = elog(LOG, "redo is not required".to_string());
+    }
+    Ok(())
 }
 
 pub fn FinishWalRecovery() -> PgResult<EndOfWalRecoveryInfo> {
