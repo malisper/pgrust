@@ -266,6 +266,32 @@ pub struct ExplainStmt<'mcx> {
     pub options: NodeList<'mcx>,
 }
 
+#[derive(Default)]
+pub struct PrepareStmt<'mcx> {
+    pub name: Option<&'mcx str>,
+    pub argtypes: NodeList<'mcx>,
+    pub query: Option<Node<'mcx>>,
+}
+
+#[derive(Default)]
+pub struct ExecuteStmt<'mcx> {
+    pub name: Option<&'mcx str>,
+    pub params: NodeList<'mcx>,
+}
+
+// C: isall is redundant with name == NULL but kept for query jumbling.
+pub struct DeallocateStmt<'mcx> {
+    pub name: Option<&'mcx str>,
+    pub isall: bool,
+    pub location: ParseLoc,
+}
+
+impl Default for DeallocateStmt<'_> {
+    fn default() -> Self {
+        DeallocateStmt { name: None, isall: false, location: -1 }
+    }
+}
+
 // SAFETY (each): tag/type pairing mirrors parsenodes.h.
 unsafe impl<'mcx> NodeVariant<'mcx> for Query<'mcx> {
     const TAG: NodeTag = NodeTag::T_Query;
@@ -290,6 +316,15 @@ unsafe impl<'mcx> NodeVariant<'mcx> for VariableShowStmt<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for ExplainStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_ExplainStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for PrepareStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_PrepareStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for ExecuteStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_ExecuteStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for DeallocateStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_DeallocateStmt;
 }
 
 impl<'mcx> Node<'mcx> {
@@ -330,6 +365,21 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_explain_stmt(self) -> Option<&'mcx ExplainStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_prepare_stmt(self) -> Option<&'mcx PrepareStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_execute_stmt(self) -> Option<&'mcx ExecuteStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_deallocate_stmt(self) -> Option<&'mcx DeallocateStmt<'mcx>> {
         self.as_variant()
     }
 }

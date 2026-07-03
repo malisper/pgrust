@@ -264,7 +264,7 @@ fn show_plan_tlist<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) -> PgRes
     // tags already panic in plan_of.
     let mcx = es.str.allocator();
     let useprefix = es.rtable_size > 1;
-    let mut result: Vec<PgString<'mcx>> = Vec::new();
+    let mut result: PgVec<'mcx, PgString<'mcx>> = PgVec::new_in(mcx);
     for tle_node in plan.targetlist.iter() {
         let tle = tle_node.as_target_entry().expect("targetlist holds TargetEntries");
         result.push(deparse_expression_minimal(mcx, tle.expr, useprefix)?);

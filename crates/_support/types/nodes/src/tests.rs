@@ -554,6 +554,69 @@ fn enum_values_match_c_headers() {
     check_enum!(parse_h, "DefElemAction", DefElemAction, [
         DEFELEM_UNSPEC, DEFELEM_SET, DEFELEM_ADD, DEFELEM_DROP,
     ]);
+    use crate::primnodes::{BoolExprType, NullTestType};
+    use crate::rawnodes::{SortByDir, SortByNulls};
+    check_enum!(parse_h, "SortByDir", SortByDir, [
+        SORTBY_DEFAULT, SORTBY_ASC, SORTBY_DESC, SORTBY_USING,
+    ]);
+    check_enum!(parse_h, "SortByNulls", SortByNulls, [
+        SORTBY_NULLS_DEFAULT, SORTBY_NULLS_FIRST, SORTBY_NULLS_LAST,
+    ]);
+    check_enum!(prim_h, "BoolExprType", BoolExprType, [AND_EXPR, OR_EXPR, NOT_EXPR]);
+    check_enum!(prim_h, "NullTestType", NullTestType, [IS_NULL, IS_NOT_NULL]);
+}
+
+#[test]
+fn raw_expr_node_field_order_matches_c() {
+    let parse_h = include_str!("../vendor/parsenodes.h");
+    let prim_h = include_str!("../vendor/primnodes.h");
+
+    assert_eq!(
+        c_struct_fields(parse_h, "SortBy"),
+        ["node", "sortby_dir", "sortby_nulls", "useOp", "location"]
+    );
+    let crate::rawnodes::SortBy { node: _, sortby_dir: _, sortby_nulls: _, useOp: _, location: _ } =
+        crate::rawnodes::SortBy::default();
+
+    assert_eq!(
+        c_struct_fields(parse_h, "FuncCall"),
+        [
+            "funcname", "args", "agg_order", "agg_filter", "over", "agg_within_group",
+            "agg_star", "agg_distinct", "func_variadic", "funcformat", "location",
+        ]
+    );
+    let crate::rawnodes::FuncCall {
+        funcname: _, args: _, agg_order: _, agg_filter: _, over: _, agg_within_group: _,
+        agg_star: _, agg_distinct: _, func_variadic: _, funcformat: _, location: _,
+    } = crate::rawnodes::FuncCall::default();
+
+    assert_eq!(
+        c_struct_fields(parse_h, "TypeName"),
+        [
+            "names", "typeOid", "setof", "pct_type", "typmods", "typemod", "arrayBounds",
+            "location",
+        ]
+    );
+    let crate::rawnodes::TypeName {
+        names: _, typeOid: _, setof: _, pct_type: _, typmods: _, typemod: _, arrayBounds: _,
+        location: _,
+    } = crate::rawnodes::TypeName::default();
+
+    assert_eq!(c_struct_fields(parse_h, "TypeCast"), ["arg", "typeName", "location"]);
+    let crate::rawnodes::TypeCast { arg: _, typeName: _, location: _ } =
+        crate::rawnodes::TypeCast::default();
+
+    let mut be = c_struct_fields(prim_h, "BoolExpr");
+    assert_eq!(be.remove(0), "xpr");
+    assert_eq!(be, ["boolop", "args", "location"]);
+    let crate::primnodes::BoolExpr { boolop: _, args: _, location: _ } =
+        crate::primnodes::BoolExpr::default();
+
+    let mut nt = c_struct_fields(prim_h, "NullTest");
+    assert_eq!(nt.remove(0), "xpr");
+    assert_eq!(nt, ["arg", "nulltesttype", "argisrow", "location"]);
+    let crate::primnodes::NullTest { arg: _, nulltesttype: _, argisrow: _, location: _ } =
+        crate::primnodes::NullTest::default();
 }
 
 #[test]

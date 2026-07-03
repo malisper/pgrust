@@ -3134,6 +3134,7 @@ dependencies = [
  "mcxt_seams",
  "miscinit",
  "parser_seams",
+ "pg_sema_seams",
  "pgstat",
  "pgstat_seams",
  "planner_seams",
@@ -3148,6 +3149,8 @@ dependencies = [
  "procsignal_seams",
  "ps_status_seams",
  "rewrite_handler_seams",
+ "s_lock_seams",
+ "shmem_seams",
  "sinval",
  "snapmgr",
  "stringinfo",
@@ -3159,6 +3162,7 @@ dependencies = [
  "types_guc",
  "types_nodes",
  "types_portal",
+ "types_storage",
  "utility_seams",
  "xact",
 ]
@@ -3939,13 +3943,16 @@ dependencies = [
  "relation",
  "relcache",
  "relmapper",
+ "relpath",
  "resowner",
  "rewrite_handler",
  "rmgr",
  "s_lock",
  "scan_fgram",
+ "session",
  "shmem",
  "sinval",
+ "slot",
  "smgr",
  "snapmgr",
  "stack_depth",
@@ -4690,6 +4697,20 @@ dependencies = [
 [[package]]
 name = "tuplesort"
 version = "0.1.0"
+dependencies = [
+ "datum",
+ "exectuples",
+ "heaptuple",
+ "init_small",
+ "lsyscache",
+ "mcx",
+ "postgres_seams",
+ "types_core",
+ "types_error",
+ "types_nbtree",
+ "types_slot",
+ "types_tuple",
+]
 
 [[package]]
 name = "tuplestore_hold_seams"

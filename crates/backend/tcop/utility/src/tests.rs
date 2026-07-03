@@ -212,6 +212,7 @@ fn run_utility(ctx: &MemoryContext, kind: TransactionStmtKind) -> types_error::P
     let mut receiver = tcop_dest::CreateDestReceiver(types_dest::CommandDest::None);
     let mut qc = types_portal::QueryCompletion::default();
     ProcessUtility(
+        ctx.mcx(),
         &pstmt,
         "test",
         false,
@@ -283,4 +284,57 @@ fn create_command_tag_variable_set() {
         .unwrap();
         assert_eq!(CreateCommandTag(node), tag);
     }
+}
+
+#[test]
+fn explain_log_level_and_descriptor() {
+    use guc_tables::consts::{LOGSTMT_ALL, LOGSTMT_MOD};
+    use types_nodes::parsenodes::{DefElem, ExplainStmt};
+
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        syscache_seams::lookup_pg_type_shape::set(|typid| {
+            Ok((typid == types_core::TEXTOID).then_some(types_tuple::PgTypeShape {
+                typlen: -1,
+                typbyval: false,
+                typalign: b'i' as i8,
+                typstorage: b'x' as i8,
+                typcollation: 100,
+            }))
+        });
+    });
+
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+
+    let insert_query =
+        Node::mk(mcx, Query { commandType: CmdType::CMD_INSERT, ..Query::default() }).unwrap();
+    let plain = Node::mk(
+        mcx,
+        ExplainStmt { query: Some(insert_query), ..ExplainStmt::default() },
+    )
+    .unwrap();
+    // Plain EXPLAIN never recurses; EXPLAIN ANALYZE takes the inner level.
+    assert_eq!(GetCommandLogLevel(plain), LOGSTMT_ALL);
+
+    let analyze = Node::mk(
+        mcx,
+        DefElem { defname: Some("analyze"), ..DefElem::default() },
+    )
+    .unwrap();
+    let analyzed = Node::mk(
+        mcx,
+        ExplainStmt {
+            query: Some(insert_query),
+            options: types_nodes::list::NodeList::make1(mcx, analyze).unwrap(),
+        },
+    )
+    .unwrap();
+    assert_eq!(GetCommandLogLevel(analyzed), LOGSTMT_MOD);
+
+    assert!(UtilityReturnsTuples(plain));
+    let desc = UtilityTupleDescriptor(plain).unwrap().unwrap();
+    assert_eq!(desc.natts, 1);
+    assert_eq!(desc.attr(0).atttypid, types_core::TEXTOID);
+    assert_eq!(desc.attr(0).attname.name_str(), b"QUERY PLAN");
 }

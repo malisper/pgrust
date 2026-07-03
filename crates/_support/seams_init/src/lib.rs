@@ -56,6 +56,9 @@ pub fn init_all() {
     syslogger::init_seams();
     launcher::init_seams();
     walsender_config::init_seams();
+    slot::init_seams();
+    session::init_seams();
+    relpath::init_seams();
     rewrite_handler::init_seams();
     aio_config::init_seams();
     bufmgr::init_seams();
@@ -71,6 +74,7 @@ pub fn init_all() {
     sinval::init_seams();
     waiteventset::init_seams();
     lmgr_proc::init_seams();
+    s_lock::init_seams();
     lmgr::init_seams();
     lock::init_seams();
     smgr::init_seams();
@@ -79,8 +83,10 @@ pub fn init_all() {
     tcop_dest::init_seams();
     postgres::init_seams();
     pquery::init_seams();
+    explain::init_seams();
     utility::init_seams();
     backend_status::init_seams();
+    waitevent::init_seams();
     pgstat::init_seams();
     adt_acl::init_seams();
     adt_timestamp::init_seams();

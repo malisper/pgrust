@@ -8,7 +8,9 @@ publish.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+explain = { path = "../../commands/explain" }
 guc_funcs = { path = "../../utils/misc/guc_funcs" }
+mcx = { path = "../../../_support/mcx" }
 types_core = { path = "../../../_support/types/types_core" }
 types_error = { path = "../../../_support/types/types_error" }
 types_nodes = { path = "../../../_support/types/nodes" }
@@ -25,7 +27,7 @@ tcop_dest = { path = "../dest" }
 utility_seams = { path = "../utility_seams" }
 
 [dev-dependencies]
-mcx = { path = "../../../_support/mcx" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
 types_dest = { path = "../../../_support/types/types_dest" }
 parallel_seams = { path = "../../access/transam/parallel_seams" }
 transam_xlog_seams = { path = "../../access/transam/transam_xlog_seams" }

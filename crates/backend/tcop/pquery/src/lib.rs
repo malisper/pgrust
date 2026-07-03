@@ -706,6 +706,16 @@ fn PortalRunUtility(
     };
     let read_only_tree = !portal.borrow().cplan.is_null(); /* protect tree if in plancache */
 
+    // C switches into PortalContext around ProcessUtility.
+    // SAFETY: portalContext is PgBox'd for address stability and outlives this
+    // call (freed only in PortalDrop); the Ref is released before use.
+    let ctx: &MemoryContext = unsafe {
+        let p = portal.borrow();
+        &*(&**p.portalContext.as_ref().expect("portal has portalContext")
+            as *const MemoryContext)
+    };
+    let mcx = ctx.mcx();
+
     stmt_list::with(stmts, |s| {
         let (params, query_env) = {
             let p = portal.borrow();
@@ -713,6 +723,7 @@ fn PortalRunUtility(
         };
         with_source_text(portal, |source_text| {
             utility_seams::process_utility::call(
+                mcx,
                 &s[idx],
                 source_text,
                 read_only_tree,

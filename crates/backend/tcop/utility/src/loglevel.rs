@@ -50,11 +50,29 @@ pub fn GetCommandLogLevel(parsetree: Node<'_>) -> i32 {
         | T_CheckPointStmt
         | T_ReindexStmt => LOGSTMT_ALL,
 
-        // C recurses into the PREPAREd / EXECUTEd / EXPLAIN ANALYZEd statement;
-        // those payloads land with commands/prepare.c and commands/explain.c.
+        // C recurses into the PREPAREd / EXECUTEd statement; those payloads
+        // land with commands/prepare.c.
         T_PrepareStmt => payload_gap("GetCommandLogLevel", "PrepareStmt"),
         T_ExecuteStmt => payload_gap("GetCommandLogLevel", "ExecuteStmt"),
-        T_ExplainStmt => payload_gap("GetCommandLogLevel", "ExplainStmt"),
+
+        T_ExplainStmt => {
+            let stmt = parsetree.as_explain_stmt().unwrap();
+            let mut analyze = false;
+            for opt in stmt.options.iter() {
+                let opt = opt.as_def_elem().expect("EXPLAIN options are DefElems");
+                if opt.defname == Some("analyze") {
+                    // C ereports through this probe; here a malformed value
+                    // panics and the statement itself raises the real error.
+                    analyze = explain::defGetBoolean(opt)
+                        .expect("analyze option requires a Boolean value");
+                }
+                // don't break: explain.c will use the last value.
+            }
+            if analyze {
+                return GetCommandLogLevel(stmt.query.expect("ExplainStmt.query is NULL"));
+            }
+            LOGSTMT_ALL
+        }
 
         // C splits on stmt->is_from; the CopyStmt payload lands with copy.c.
         T_CopyStmt => payload_gap("GetCommandLogLevel", "CopyStmt"),
