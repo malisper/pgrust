@@ -662,13 +662,6 @@ pub fn GetLastImportantRecPtr() -> XLogRecPtr {
     res
 }
 
-// GetXLogInsertRecPtr (xlog.c): current WAL insertion point.
-pub fn GetXLogInsertRecPtr() -> XLogRecPtr {
-    let insert = &XLogCtl().Insert;
-    let bytepos = insert.insertpos_lck.with(|| insert.CurrBytePos.load(Relaxed));
-    XLogBytePosToRecPtr(bytepos)
-}
-
 pub fn GetInsertRecPtr() -> XLogRecPtr {
     let ctl = XLogCtl();
     ctl.info_lck.with(|| ctl.LogwrtRqstWrite.load(Relaxed))
