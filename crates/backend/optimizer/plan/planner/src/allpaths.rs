@@ -81,7 +81,14 @@ fn set_rel_size(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResult<()
     assert!(!rte.inh, "set_append_rel_size (allpaths.c): M2 partition lane");
     match rte.rtekind {
         RTEKind::RTE_RELATION => {
-            debug_assert_eq!(rte.relkind, types_rel::RELKIND_RELATION);
+            // Toast relations are plain heaps in C's set_plain_rel_size arm
+            // (direct SELECT from pg_toast.* is legal).
+            debug_assert!(
+                rte.relkind == types_rel::RELKIND_RELATION
+                    || rte.relkind == types_rel::RELKIND_TOASTVALUE,
+                "set_rel_size relkind {}",
+                rte.relkind
+            );
             debug_assert!(rte.tablesample.is_none());
             set_plain_rel_size(run, rel)?;
         }
