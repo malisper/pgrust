@@ -305,7 +305,11 @@ fn eval_kernel<'mcx>(
             let f = &mut state.frames[frame as usize];
             // SAFETY: 'mcx-live frame fcinfo image + boxed FmgrInfo, sole refs.
             let fcinfo = unsafe { fcinfo_mut(f.fcinfo, 1) };
-            unsafe { f.arg_slot(0).write(NullableDatum { value: v, isnull: false }) };
+            // SAFETY: arg 0 of the live image, via the reborrow — an older-tag write would invalidate fcinfo.
+            unsafe {
+                crate::steps::arg_slot_of(core::ptr::NonNull::from(&mut *fcinfo).cast(), 0)
+                    .write(NullableDatum { value: v, isnull: false })
+            };
             fcinfo.isnull = false;
             let flinfo = unsafe { &mut *f.flinfo.as_ptr() };
             let value = (flinfo.fn_addr)(Some(flinfo), fcinfo)?;

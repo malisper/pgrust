@@ -381,7 +381,7 @@ fn minimal_fetch_lends_from_slot() {
     let mut slot = make_tuple_table_slot(mcx, TupleSlotKind::MinimalTuple, Some(desc));
     exec_store_minimal_tuple_owned(&mut slot, mcx, mtup);
     match exec_fetch_slot_minimal_tuple(&mut slot, mcx, mcx).unwrap() {
-        FetchedMinimalTuple::Slot(m) => assert_eq!(m.t_len, expect_len),
+        FetchedMinimalTuple::Slot(m, _) => assert_eq!(unsafe { m.as_ref() }.t_len, expect_len),
         FetchedMinimalTuple::Copied(_) => panic!("minimal slot must lend"),
     }
     exec_clear_tuple(&mut slot, mcx);
