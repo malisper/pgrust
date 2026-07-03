@@ -9132,6 +9132,7 @@ dependencies = [
  "inval",
  "ipc",
  "ipci",
+ "large_object",
  "latch",
  "launch_backend",
  "launcher",
