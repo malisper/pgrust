@@ -30,6 +30,9 @@ adt_json = { path = "../../adt/json" }
 adt_jsonb = { path = "../../adt/jsonb" }
 adt_mac = { path = "../../adt/mac" }
 adt_mac8 = { path = "../../adt/mac8" }
+adt_uuid = { path = "../../adt/uuid" }
+adt_network = { path = "../../adt/network" }
+adt_regproc = { path = "../../adt/regproc" }
 adt_numeric = { path = "../../adt/numeric" }
 adt_like = { path = "../../adt/like" }
 adt_oracle_compat = { path = "../../adt/oracle_compat" }
