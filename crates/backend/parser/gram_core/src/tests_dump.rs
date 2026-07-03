@@ -186,6 +186,18 @@ fn node(out: &mut String, n: Node<'_>) {
         out.push_str("{A_STAR}");
     } else if let Some(rv) = n.as_range_var() {
         range_var(out, rv);
+    } else if let Some(v) = n.as_variant::<types_nodes::rawnodes::ViewStmt>() {
+        out.push_str("{VIEWSTMT :view ");
+        match v.view {
+            Some(rv) => range_var(out, rv),
+            None => out.push_str("<>"),
+        }
+        list_field(out, "aliases", &v.aliases);
+        node_field(out, "query", v.query);
+        bool_field(out, "replace", v.replace);
+        list_field(out, "options", &v.options);
+        int_field(out, "withCheckOption", v.withCheckOption as i32);
+        out.push('}');
     } else if let Some(sb) = n.as_sort_by() {
         out.push_str("{SORTBY");
         node_field(out, "node", sb.node);

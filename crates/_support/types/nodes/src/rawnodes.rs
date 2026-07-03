@@ -372,6 +372,24 @@ pub struct CreateStmt<'mcx> {
     pub if_not_exists: bool,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ViewCheckOption {
+    #[default]
+    NO_CHECK_OPTION = 0,
+    LOCAL_CHECK_OPTION,
+    CASCADED_CHECK_OPTION,
+}
+
+#[derive(Default)]
+pub struct ViewStmt<'mcx> {
+    pub view: Option<&'mcx crate::primnodes::RangeVar<'mcx>>,
+    pub aliases: NodeList<'mcx>,
+    pub query: Option<Node<'mcx>>,
+    pub replace: bool,
+    pub options: NodeList<'mcx>,
+    pub withCheckOption: ViewCheckOption,
+}
+
 #[derive(Default)]
 pub struct ColumnDef<'mcx> {
     pub colname: Option<&'mcx str>,
@@ -673,6 +691,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for TypeCast<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for CreateStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_CreateStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for ViewStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_ViewStmt;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for ColumnDef<'mcx> {
     const TAG: NodeTag = NodeTag::T_ColumnDef;

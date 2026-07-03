@@ -14,7 +14,7 @@ use types_nodes::{Node, NodeTag};
 
 pub use nodes_core::node_funcs::{
     expr_collation, expr_is_null_constant, expr_location, expr_location_list, expr_type,
-    expr_typmod,
+    expr_typmod, strip_implicit_coercions,
 };
 
 std::thread_local! {

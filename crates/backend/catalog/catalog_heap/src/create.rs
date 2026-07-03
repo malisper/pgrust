@@ -319,8 +319,9 @@ pub fn heap_create_with_catalog<'mcx>(
         p.relkind == RELKIND_RELATION
             || p.relkind == types_rel::RELKIND_TOASTVALUE
             || p.relkind == types_rel::RELKIND_SEQUENCE
-            || p.relkind == types_rel::RELKIND_PARTITIONED_TABLE,
-        "only plain/partitioned tables, toast tables and sequences ported"
+            || p.relkind == types_rel::RELKIND_PARTITIONED_TABLE
+            || p.relkind == RELKIND_VIEW,
+        "only plain/partitioned tables, toast tables, sequences and views ported"
     );
     // C: no rowtype/array pg_type entry where the relation is an
     // implementation detail (toast, sequences, indexes).
@@ -468,7 +469,7 @@ pub fn heap_create_with_catalog<'mcx>(
         // above) and the owner needs no entry, so C records nothing.
         // recordDependencyOnCurrentExtension: extension.c unported; C no-ops
         // outside CREATE EXTENSION scripts.
-        let mut addrs = [
+        let mut addrs: [ObjectAddress; 2] = [
             ObjectAddress::set(catalog::NamespaceRelationId, p.relnamespace),
             ObjectAddress::set(AccessMethodRelationId, p.accessmtd),
         ];

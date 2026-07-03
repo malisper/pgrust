@@ -208,7 +208,7 @@ fn null_const_and_escaped_strings() {
 #[should_panic(expected = "read arm unported")]
 fn unknown_node_label_is_loud() {
     let ctx = MemoryContext::new("t");
-    let _ = stringToNode(ctx.mcx(), "{SORTGROUPCLAUSE :tleSortGroupRef 1}");
+    let _ = stringToNode(ctx.mcx(), "{WINDOWCLAUSE :name <>}");
 }
 
 #[test]
