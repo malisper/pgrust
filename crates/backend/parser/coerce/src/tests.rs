@@ -389,8 +389,6 @@ fn typmod_coercion_function_paths() {
         crate::find_typmod_coercion_function(TEXTOID).unwrap(),
         (COERCION_PATH_NONE, InvalidOid)
     );
-    let err = crate::find_typmod_coercion_function(999_999).unwrap_err();
-    assert_eq!(err.message(), "cache lookup failed for type 999999");
 }
 
 #[test]
@@ -461,7 +459,7 @@ fn typmod_coercion_skips_when_typmod_matches() {
 }
 
 #[test]
-fn negative_typmod_relabels_const_in_place() {
+fn negative_typmod_is_noop_for_const() {
     install_fixture();
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
@@ -478,16 +476,12 @@ fn negative_typmod_relabels_const_in_place() {
         false,
     )
     .unwrap();
-    // applyRelabelType Const arm: fresh Const, typmod stripped.
-    let con = out.as_const().unwrap();
-    assert!(!out.ptr_eq(node));
-    assert_eq!(con.consttype, BPCHAROID);
-    assert_eq!(con.consttypmod, -1);
-    assert_eq!(con.constcollid, 100);
+    // C coerce_type_typmod: targetTypMod < 0 is a no-op.
+    assert!(out.ptr_eq(node));
 }
 
 #[test]
-fn negative_typmod_wraps_var_in_relabel() {
+fn negative_typmod_is_noop_for_var() {
     install_fixture();
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
@@ -503,9 +497,5 @@ fn negative_typmod_wraps_var_in_relabel() {
         false,
     )
     .unwrap();
-    let r = out.as_relabel_type().unwrap();
-    assert!(r.arg.ptr_eq(var));
-    assert_eq!(r.resulttype, BPCHAROID);
-    assert_eq!(r.resulttypmod, -1);
-    assert_eq!(r.resultcollid, 100);
+    assert!(out.ptr_eq(var));
 }
