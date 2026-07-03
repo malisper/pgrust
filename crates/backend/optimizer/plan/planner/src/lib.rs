@@ -29,6 +29,7 @@ pub mod planmain;
 pub mod prep;
 pub mod prepunion;
 pub mod prepqual;
+pub mod predtest;
 pub mod prepjointree;
 pub mod prepagg;
 pub mod relnode;

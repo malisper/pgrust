@@ -699,3 +699,85 @@ pub fn infer_arbiter_indexes<'mcx>(
     }
     Ok(results)
 }
+
+// get_relation_constraints (plancat.c) for the constraint-exclusion refutation
+// leg. include_partition is loud: partition_qual/set_baserel_partition_constraint
+// are unported (reachable only under constraint_exclusion=on on a directly
+// named partition).
+pub fn get_relation_constraints<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    relation_object_id: Oid,
+    rel: RelId,
+    include_noinherit: bool,
+    include_notnull: bool,
+    include_partition: bool,
+) -> PgResult<PgVec<'mcx, types_nodes::Node<'mcx>>> {
+    let mcx = run.mcx;
+    let varno = run.root.rel(rel).relid;
+    let mut result: PgVec<'mcx, types_nodes::Node<'mcx>> = PgVec::new_in(mcx);
+
+    let relation = table::table_open(mcx, relation_object_id, NoLock)?;
+    if let Some(constr) = relation.rd_att.constr.as_deref() {
+        for check in constr.check.iter() {
+            if !check.ccvalid {
+                continue;
+            }
+            debug_assert!(check.ccenforced);
+            if check.ccnoinherit && !include_noinherit {
+                continue;
+            }
+            let ccbin = check.ccbin.as_ref().expect("CHECK constraint has ccbin");
+            let cexpr = readfuncs::stringToNode(mcx, ccbin.as_str())?;
+            let cexpr = clauses::eval_const_expressions(mcx, cexpr)?;
+            let cexpr = crate::prepqual::canonicalize_qual(mcx, cexpr, true)?;
+            if varno != 1 {
+                change_var_nodes(cexpr, varno as i32);
+            }
+            let implicit = clauses::make_ands_implicit(mcx, Some(cexpr))?;
+            for item in implicit.iter() {
+                result.push(item);
+            }
+        }
+        if include_notnull && constr.has_not_null {
+            let natts = relation.rd_att.natts;
+            for i in 1..=natts {
+                let att = &relation.rd_att.compact_attrs[(i - 1) as usize];
+                if att.attnullability == ATTNULLABLE_VALID && !att.attisdropped {
+                    let wholeatt = relation.rd_att.attrs[(i - 1) as usize];
+                    let var = types_nodes::Node::mk_var(
+                        mcx,
+                        varno as i32,
+                        i as i16,
+                        wholeatt.atttypid,
+                        wholeatt.atttypmod,
+                        wholeatt.attcollation,
+                        0,
+                    )?;
+                    // argisrow=false is correct even for a composite column
+                    // (attnotnull is IS DISTINCT FROM NULL there, not SQL-spec).
+                    let ntest = types_nodes::Node::mk(
+                        mcx,
+                        types_nodes::primnodes::NullTest {
+                            arg: Some(var),
+                            nulltesttype: types_nodes::primnodes::NullTestType::IS_NOT_NULL,
+                            argisrow: false,
+                            location: -1,
+                        },
+                    )?;
+                    result.push(ntest);
+                }
+            }
+        }
+        assert!(
+            !constr.has_generated_virtual || result.is_empty(),
+            "get_relation_constraints (plancat.c): expand_generated_columns_in_expr unported"
+        );
+    }
+    assert!(
+        !(include_partition && relation.rd_rel.relispartition),
+        "get_relation_constraints (plancat.c): partition constraint under \
+         constraint_exclusion=on; set_baserel_partition_constraint unported"
+    );
+    relation.close(NoLock)?;
+    Ok(result)
+}
