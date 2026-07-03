@@ -42,11 +42,11 @@ pub(crate) fn transformSetOperationStmt<'mcx>(
     // before recursing; here the raw tree stays shared, so the tree walk
     // ignores them on the isTopLevel node instead.
     if !stmt.lockingClause.is_nil() {
-        panic!(
-            "transformSetOperationStmt (analyze.c): 0A000 \"%s is not allowed with \
-             UNION/INTERSECT/EXCEPT\" needs LockingClause vocabulary (for_locking_items \
-             is an unported loud in gram) — unit backend-parser-analyze"
-        );
+        return Err(crate::locking_not_allowed_with(
+            crate::first_locking_strength(&stmt.lockingClause),
+            "UNION/INTERSECT/EXCEPT",
+            "transformSetOperationStmt",
+        ));
     }
 
     if let Some(with) = stmt.withClause {
@@ -218,11 +218,11 @@ fn transformSetOperationTree<'mcx>(
         );
     }
     if !stmt.lockingClause.is_nil() {
-        panic!(
-            "transformSetOperationTree (analyze.c): 0A000 \"%s is not allowed with \
-             UNION/INTERSECT/EXCEPT\" needs LockingClause vocabulary (for_locking_items \
-             is an unported loud in gram) — unit backend-parser-analyze"
-        );
+        return Err(crate::locking_not_allowed_with(
+            crate::first_locking_strength(&stmt.lockingClause),
+            "UNION/INTERSECT/EXCEPT",
+            "transformSetOperationTree",
+        ));
     }
 
     // The isTopLevel caller consumed ORDER BY/LIMIT/locking/WITH (C NULLs them
