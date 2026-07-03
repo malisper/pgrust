@@ -340,6 +340,7 @@ fn install_xact_periphery_seams() {
     catalog_seams::is_catalog_relation::set(|_rel| false);
     dbcommands_seams::get_database_name::set(|_| Ok(Some("testdb".to_string())));
     syscache_seams::search_syscache_exists_databaseoid::set(|_| Ok(true));
+    aclchk_seams::pg_class_aclmask::set(|_relid, _roleid, mask, _how_all| Ok(mask));
     aclchk_seams::object_aclcheck::set(|_classid, _objid, _roleid, _mode| Ok(0));
     lmgr_seams::check_relation_locked_by_me::set(|_, _, _| true);
     namespace_seams::range_var_get_relid::set(|_mcx, rv, _lockmode, missing_ok| {

@@ -746,6 +746,67 @@ pub struct AlterTableStmt<'mcx> {
     pub missing_ok: bool,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum RoleSpecType {
+    #[default]
+    ROLESPEC_CSTRING = 0,
+    ROLESPEC_CURRENT_ROLE = 1,
+    ROLESPEC_CURRENT_USER = 2,
+    ROLESPEC_SESSION_USER = 3,
+    ROLESPEC_PUBLIC = 4,
+}
+
+#[derive(Default)]
+pub struct RoleSpec<'mcx> {
+    pub roletype: RoleSpecType,
+    pub rolename: Option<&'mcx str>,
+    pub location: ParseLoc,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum GrantTargetType {
+    #[default]
+    ACL_TARGET_OBJECT = 0,
+    ACL_TARGET_ALL_IN_SCHEMA = 1,
+    ACL_TARGET_DEFAULTS = 2,
+}
+
+pub struct GrantStmt<'mcx> {
+    pub is_grant: bool,
+    pub targtype: GrantTargetType,
+    pub objtype: ObjectType,
+    pub objects: NodeList<'mcx>,
+    pub privileges: NodeList<'mcx>,
+    pub grantees: NodeList<'mcx>,
+    pub grant_option: bool,
+    pub grantor: Option<&'mcx RoleSpec<'mcx>>,
+    pub behavior: DropBehavior,
+}
+
+impl Default for GrantStmt<'_> {
+    fn default() -> Self {
+        GrantStmt {
+            is_grant: false,
+            targtype: GrantTargetType::ACL_TARGET_OBJECT,
+            objtype: ObjectType::OBJECT_TABLE,
+            objects: NodeList::nil(),
+            privileges: NodeList::nil(),
+            grantees: NodeList::nil(),
+            grant_option: false,
+            grantor: None,
+            behavior: DropBehavior::DROP_RESTRICT,
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct AccessPriv<'mcx> {
+    pub priv_name: Option<&'mcx str>,
+    pub cols: NodeList<'mcx>,
+}
+
 // C: isall is redundant with name == NULL but kept for query jumbling.
 pub struct DeallocateStmt<'mcx> {
     pub name: Option<&'mcx str>,
@@ -792,6 +853,15 @@ unsafe impl<'mcx> NodeVariant<'mcx> for CopyStmt<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for VariableSetStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_VariableSetStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for RoleSpec<'mcx> {
+    const TAG: NodeTag = NodeTag::T_RoleSpec;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for GrantStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_GrantStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for AccessPriv<'mcx> {
+    const TAG: NodeTag = NodeTag::T_AccessPriv;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for VariableShowStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_VariableShowStmt;
@@ -941,6 +1011,21 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_variable_set_stmt(self) -> Option<&'mcx VariableSetStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_role_spec(self) -> Option<&'mcx RoleSpec<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_grant_stmt(self) -> Option<&'mcx GrantStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_access_priv(self) -> Option<&'mcx AccessPriv<'mcx>> {
         self.as_variant()
     }
 

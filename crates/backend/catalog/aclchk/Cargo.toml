@@ -18,6 +18,22 @@ adt_acl = { path = "../../utils/adt/acl" }
 guc = { path = "../../utils/misc/guc" }
 cache_syscache = { path = "../../utils/cache/cache_syscache" }
 aclchk_seams = { path = "../aclchk_seams" }
+mcx = { path = "../../../_support/mcx" }
+types_nodes = { path = "../../../_support/types/nodes" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+types_storage = { path = "../../../_support/types/types_storage" }
+catcache = { path = "../../utils/cache/catcache" }
+catalog_namespace = { path = "../catalog_namespace" }
+table = { path = "../../access/table/table" }
+heaptuple = { path = "../../access/common/heaptuple" }
+catalog_indexing = { path = "../catalog_indexing" }
+pg_depend = { path = "../pg_depend" }
+xact = { path = "../../access/transam/xact" }
+miscinit = { path = "../../utils/init/miscinit" }
+init_small = { path = "../../utils/init/init_small" }
+lock_seams = { path = "../../storage/lmgr/lock_seams" }
+rel_vocab = { path = "../../../_support/types/rel_vocab" }
+elog = { path = "../../utils/error/elog" }
 
 [dev-dependencies]
 init_small = { path = "../../utils/init/init_small" }

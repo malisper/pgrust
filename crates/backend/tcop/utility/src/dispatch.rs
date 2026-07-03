@@ -304,6 +304,10 @@ fn dispatch_switch<'mcx>(
             prepare::DeallocateQuery(parsetree.as_deallocate_stmt().unwrap())?;
         }
 
+        T_GrantStmt => {
+            let stmt = parsetree.as_grant_stmt().unwrap();
+            aclchk::ExecuteGrantStmt(mcx, stmt)?;
+        }
         T_GrantRoleStmt => handler_gap("GrantRole (user lane)"),
 
         T_CreatedbStmt => {

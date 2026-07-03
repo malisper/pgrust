@@ -153,3 +153,35 @@ pub fn recordDependencyOnOwner(classId: Oid, objectId: Oid, owner: Oid) {
         );
     }
 }
+
+// updateAclDependencies (pg_shdepend.c). SHARED_DEPENDENCY_ACL rows never
+// cover PUBLIC (never listed by aclmembers), the owner, or pinned roles, so
+// grants limited to those need no pg_shdepend writes; any other role is loud
+// until shdep writes land.
+pub fn updateAclDependencies(
+    classId: Oid,
+    objectId: Oid,
+    objsubId: i32,
+    ownerId: Oid,
+    oldmembers: &[Oid],
+    newmembers: &[Oid],
+) {
+    let check = |roleid: Oid, other: &[Oid]| {
+        if other.contains(&roleid)
+            || roleid == ownerId
+            || catalog::IsPinnedObject(types_core::AUTH_ID_RELATION_ID, roleid)
+        {
+            return;
+        }
+        panic!(
+            "updateAclDependencies (pg_shdepend.c): pg_shdepend recording unported \
+             (class {classId} object {objectId} subid {objsubId} role {roleid})"
+        );
+    };
+    for &r in newmembers {
+        check(r, oldmembers);
+    }
+    for &r in oldmembers {
+        check(r, newmembers);
+    }
+}

@@ -73,11 +73,63 @@ impl<const N: usize> BuiltinOidIndex<N> {
     }
 }
 
+// Builtin tables from crates that sit above fmgr_core in the crate graph
+// (adt_acl needs syscache). Consulted only where the entry would otherwise
+// panic as unported; fn metadata still comes from the canonical row.
+const MAX_LATE_TABLES: usize = 4;
+static LATE_TABLE_PTR: [core::sync::atomic::AtomicPtr<FmgrBuiltin>; MAX_LATE_TABLES] =
+    [const { core::sync::atomic::AtomicPtr::new(core::ptr::null_mut()) }; MAX_LATE_TABLES];
+static LATE_TABLE_LEN: [core::sync::atomic::AtomicUsize; MAX_LATE_TABLES] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; MAX_LATE_TABLES];
+
+pub fn register_late_builtins(table: &'static [FmgrBuiltin]) {
+    use core::sync::atomic::Ordering;
+    for i in 0..MAX_LATE_TABLES {
+        if LATE_TABLE_PTR[i]
+            .compare_exchange(
+                core::ptr::null_mut(),
+                table.as_ptr() as *mut FmgrBuiltin,
+                Ordering::Release,
+                Ordering::Relaxed,
+            )
+            .is_ok()
+        {
+            LATE_TABLE_LEN[i].store(table.len(), Ordering::Release);
+            return;
+        }
+    }
+    panic!("fmgr: too many late builtin tables");
+}
+
+#[cold]
+fn late_builtin(oid: Oid) -> Option<&'static FmgrBuiltin> {
+    use core::sync::atomic::Ordering;
+    for i in 0..MAX_LATE_TABLES {
+        let p = LATE_TABLE_PTR[i].load(Ordering::Acquire);
+        if p.is_null() {
+            return None;
+        }
+        let len = LATE_TABLE_LEN[i].load(Ordering::Acquire);
+        if len == 0 {
+            continue;
+        }
+        // SAFETY: registered as &'static [FmgrBuiltin] with this length.
+        let table = unsafe { core::slice::from_raw_parts(p, len) };
+        if let Some(b) = table.iter().find(|b| b.foid == oid) {
+            return Some(b);
+        }
+    }
+    None
+}
+
 fn builtin_not_ported(
     flinfo: Option<&mut FmgrInfo>,
-    _fcinfo: &mut FunctionCallInfoBaseData,
+    fcinfo: &mut FunctionCallInfoBaseData,
 ) -> PgResult<Datum> {
-    let oid = flinfo.map_or(InvalidOid, |f| f.fn_oid);
+    let oid = flinfo.as_ref().map_or(InvalidOid, |f| f.fn_oid);
+    if let Some(b) = late_builtin(oid) {
+        return (b.func)(flinfo, fcinfo);
+    }
     panic!("fmgr: builtin function {oid} is in the canonical table but not ported");
 }
 

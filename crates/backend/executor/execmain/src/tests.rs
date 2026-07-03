@@ -520,6 +520,10 @@ mod scanfix {
         procarray_seams::global_vis_test_for::set(|_r| GlobalVisStateHandle::new(0));
 
         miscinit_seams::get_user_id::set(|| 10);
+        aclchk_seams::pg_class_aclmask::set(|objid, _roleid, mask, _how_all| {
+            ACLCHECKED_RELID.store(objid, Ordering::Relaxed);
+            Ok(mask)
+        });
         aclchk_seams::object_aclcheck::set(|classid, objid, _roleid, _mode| {
             // Relations (scans) and procedures (ExecInitAgg's aggfnoid check).
             if classid == ::types_core::catalog::RELATION_RELATION_ID {

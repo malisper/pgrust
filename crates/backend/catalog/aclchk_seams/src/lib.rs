@@ -27,3 +27,42 @@ seam_core::seam!(
         objectname: &str,
     ) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    // pg_class_aclcheck_ext (aclchk.c): (AclResult, is_missing).
+    pub fn pg_class_aclcheck_ext(
+        table_oid: types_core::Oid,
+        roleid: types_core::Oid,
+        mode: u64,
+    ) -> types_error::PgResult<(i32, bool)>
+);
+
+seam_core::seam!(
+    // pg_class_aclmask (aclchk.c); how_all selects ACLMASK_ALL vs ACLMASK_ANY.
+    pub fn pg_class_aclmask(
+        table_oid: types_core::Oid,
+        roleid: types_core::Oid,
+        mask: u64,
+        how_all: bool,
+    ) -> types_error::PgResult<u64>
+);
+
+seam_core::seam!(
+    // pg_attribute_aclcheck (aclchk.c).
+    pub fn pg_attribute_aclcheck(
+        table_oid: types_core::Oid,
+        attnum: i16,
+        roleid: types_core::Oid,
+        mode: u64,
+    ) -> types_error::PgResult<i32>
+);
+
+seam_core::seam!(
+    // pg_attribute_aclcheck_all (aclchk.c); how_all as above.
+    pub fn pg_attribute_aclcheck_all(
+        table_oid: types_core::Oid,
+        roleid: types_core::Oid,
+        mode: u64,
+        how_all: bool,
+    ) -> types_error::PgResult<i32>
+);

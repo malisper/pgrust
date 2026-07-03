@@ -314,6 +314,7 @@ fn install_xact_periphery_seams() {
     syscache_seams::relation_has_sys_cache::set(|relid| relid == STAT_OID);
     syscache_seams::search_syscache_exists_reloid::set(|_| Ok(true));
     syscache_seams::sys_cache_invalidate::set(|_, _| Ok(()));
+    aclchk_seams::pg_class_aclmask::set(|_relid, _roleid, mask, _how_all| Ok(mask));
     aclchk_seams::object_aclcheck::set(|_classid, _objid, _roleid, _mode| Ok(0));
     lmgr_seams::check_relation_locked_by_me::set(|_, _, _| true);
 }

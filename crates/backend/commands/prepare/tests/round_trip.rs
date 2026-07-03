@@ -172,6 +172,7 @@ fn install() {
                 typcollation: types_core::InvalidOid,
             }))
         });
+        aclchk_seams::pg_class_aclmask::set(|_relid, _roleid, mask, _how_all| Ok(mask));
         aclchk_seams::object_aclcheck::set(|_, _, _, _| Ok(0));
         syscache_seams::lookup_authid_rolname::set(|_, _| Ok(None));
         syscache_seams::lookup_pg_namespace_oid_by_name::set(|_| Ok(types_core::InvalidOid));

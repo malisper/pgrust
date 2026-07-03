@@ -115,3 +115,120 @@ fn cache_ids_match_cacheinfo() {
     assert_eq!(cache_syscache::cacheinfo::AUTHMEMROLEMEM, AUTHMEMROLEMEM);
     assert_eq!(cache_syscache::cacheinfo::DATABASEOID, DATABASEOID);
 }
+
+fn item(grantee: Oid, grantor: Oid, privs: u64, gopts: u64) -> AclItem {
+    let mut it = AclItem { ai_grantee: grantee, ai_grantor: grantor, ai_privs: 0 };
+    aclitem_set_privs_goptions(&mut it, privs, gopts);
+    it
+}
+
+#[test]
+fn acl_image_roundtrips_and_matches_allocacl_layout() {
+    let ctx = mcx::MemoryContext::new_bump("t");
+    let mcx = ctx.mcx();
+    let items = [item(0, 10, ACL_SELECT, 0), item(11, 10, ACL_ALL_RIGHTS_RELATION, ACL_SELECT)];
+    let img = varlena::acl_image(mcx, &items).unwrap();
+    assert_eq!(img.len(), 4 + 20 + 2 * 16);
+    assert_eq!(&img[0..4], &(((img.len() as u32) << 2).to_le_bytes()));
+    assert_eq!(&img[4..8], &1i32.to_le_bytes());
+    assert_eq!(&img[8..12], &0i32.to_le_bytes());
+    assert_eq!(&img[12..16], &ACLITEMOID.to_le_bytes());
+    assert_eq!(&img[16..20], &2i32.to_le_bytes());
+    assert_eq!(&img[20..24], &1i32.to_le_bytes());
+    let decoded = varlena::decode_acl_payload(mcx, &img[4..]).unwrap();
+    assert_eq!(decoded.as_slice(), &items);
+}
+
+#[test]
+fn decode_rejects_wrong_elemtype_and_nulls() {
+    let ctx = mcx::MemoryContext::new_bump("t");
+    let mcx = ctx.mcx();
+    let img = varlena::acl_image(mcx, &[item(0, 10, ACL_SELECT, 0)]).unwrap();
+    let mut bad = img.as_slice()[4..].to_vec();
+    bad[8] = 0x17;
+    assert!(varlena::decode_acl_payload(mcx, &bad).is_err());
+    let mut withnulls = img.as_slice()[4..].to_vec();
+    withnulls[4] = 24;
+    assert!(varlena::decode_acl_payload(mcx, &withnulls).is_err());
+}
+
+#[test]
+fn aclupdate_add_del_and_prune() {
+    let ctx = mcx::MemoryContext::new_bump("t");
+    let mcx = ctx.mcx();
+    let base = [item(11, 10, ACL_ALL_RIGHTS_RELATION, 0)];
+    let grant = item(0, 10, ACL_SELECT, 0);
+    let acl = aclupdate(mcx, &base, &grant, ACL_MODECHG_ADD, 10, DROP_RESTRICT).unwrap();
+    assert_eq!(acl.len(), 2);
+    assert_eq!(acl[1], grant);
+    let more = aclupdate(mcx, &acl, &item(0, 10, ACL_INSERT, 0), ACL_MODECHG_ADD, 10, DROP_RESTRICT)
+        .unwrap();
+    assert_eq!(aclitem_get_privs(&more[1]), ACL_SELECT | ACL_INSERT);
+    let gone = aclupdate(
+        mcx,
+        &more,
+        &item(0, 10, ACL_SELECT | ACL_INSERT, ACL_SELECT | ACL_INSERT),
+        ACL_MODECHG_DEL,
+        10,
+        DROP_RESTRICT,
+    )
+    .unwrap();
+    assert_eq!(gone.len(), 1, "empty entry pruned");
+}
+
+#[test]
+fn aclnewowner_substitutes_and_merges_duplicates() {
+    let ctx = mcx::MemoryContext::new_bump("t");
+    let mcx = ctx.mcx();
+    let acl = [
+        item(11, 10, ACL_ALL_RIGHTS_RELATION, 0),
+        item(12, 10, ACL_SELECT, 0),
+        item(12, 11, ACL_INSERT, 0),
+    ];
+    let out = aclnewowner(mcx, &acl, 10, 11).unwrap();
+    assert_eq!(out.len(), 2);
+    assert_eq!(out[0], item(11, 11, ACL_ALL_RIGHTS_RELATION, 0));
+    assert_eq!(out[1], item(12, 11, ACL_SELECT | ACL_INSERT, 0));
+}
+
+#[test]
+fn aclcontains_requires_rights_subset() {
+    let acl = [item(11, 10, ACL_SELECT | ACL_INSERT, ACL_SELECT)];
+    assert!(aclcontains(&acl, &item(11, 10, ACL_SELECT, 0)));
+    assert!(aclcontains(&acl, &item(11, 10, ACL_SELECT, ACL_SELECT)));
+    assert!(!aclcontains(&acl, &item(11, 10, ACL_UPDATE, 0)));
+    assert!(!aclcontains(&acl, &item(11, 11, ACL_SELECT, 0)));
+}
+
+#[test]
+fn aclmembers_dedups_and_skips_public() {
+    let ctx = mcx::MemoryContext::new_bump("t");
+    let mcx = ctx.mcx();
+    let acl = [item(0, 10, ACL_SELECT, 0), item(11, 10, ACL_SELECT, 0), item(10, 11, ACL_INSERT, 0)];
+    let m = aclmembers(mcx, &acl).unwrap();
+    assert_eq!(m.as_slice(), &[10, 11]);
+}
+
+#[test]
+fn convert_priv_string_case_and_spaces() {
+    let map = [
+        PrivMapEntry { name: "SELECT", value: ACL_SELECT },
+        PrivMapEntry { name: "SELECT WITH GRANT OPTION", value: acl_grant_option_for(ACL_SELECT) },
+        PrivMapEntry { name: "INSERT", value: ACL_INSERT },
+    ];
+    assert_eq!(convert_any_priv_string("select", &map).unwrap(), ACL_SELECT);
+    assert_eq!(
+        convert_any_priv_string(" Select ,insert", &map).unwrap(),
+        ACL_SELECT | ACL_INSERT
+    );
+    assert!(convert_any_priv_string("bogus", &map).is_err());
+}
+
+#[test]
+fn aclmask_direct_owner_goptions_only_on_exact_match() {
+    let acl = [item(11, 10, ACL_SELECT, 0)];
+    let g = crate::ACLITEM_ALL_GOPTION_BITS;
+    assert_eq!(aclmask_direct(&acl, 10, 10, g, AclMaskHow::AclmaskAll), g);
+    assert_eq!(aclmask_direct(&acl, 11, 10, ACL_SELECT, AclMaskHow::AclmaskAll), ACL_SELECT);
+    assert_eq!(aclmask_direct(&acl, 12, 10, ACL_SELECT, AclMaskHow::AclmaskAll), 0);
+}

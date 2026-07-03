@@ -18,13 +18,28 @@ dependencies = [
  "aclchk_seams",
  "adt_acl",
  "cache_syscache",
+ "catalog_indexing",
+ "catalog_namespace",
+ "catcache",
  "datum",
+ "elog",
  "guc",
+ "heaptuple",
  "init_small",
+ "lock_seams",
+ "mcx",
+ "miscinit",
+ "pg_depend",
+ "rel_vocab",
  "superuser",
+ "table",
  "types_core",
  "types_error",
+ "types_nodes",
  "types_rel",
+ "types_storage",
+ "types_tuple",
+ "xact",
 ]
 
 [[package]]
@@ -41,16 +56,26 @@ name = "adt_acl"
 version = "0.0.0"
 dependencies = [
  "acl_seams",
+ "aclchk_seams",
  "cache_syscache",
+ "catalog_namespace",
  "catcache",
  "datum",
+ "elog",
  "init_small",
  "inval",
+ "mbutils_seams",
+ "mcx",
  "miscinit",
+ "miscinit_seams",
+ "rel_vocab",
  "superuser",
  "types_core",
  "types_error",
+ "types_fmgr",
  "types_tuple",
+ "varlena",
+ "wchar",
 ]
 
 [[package]]
@@ -8368,6 +8393,7 @@ version = "0.1.0"
 name = "utility"
 version = "0.1.0"
 dependencies = [
+ "aclchk",
  "catalog",
  "catalog_namespace",
  "catalog_toasting",

@@ -699,6 +699,7 @@ mod scanfix {
         pruneheap_seams::heap_page_prune_opt::set(|_r, _b| Ok(()));
 
         miscinit_seams::get_user_id::set(|| 10);
+        aclchk_seams::pg_class_aclmask::set(|_relid, _roleid, mask, _how_all| Ok(mask));
         aclchk_seams::object_aclcheck::set(|_classid, _objid, _roleid, _mode| Ok(0));
 
         relation_seams::relation_open::set(fake_relation_open);

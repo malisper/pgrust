@@ -214,6 +214,27 @@ pub fn is_member_of_role_nosuper(member: Oid, role: Oid) -> PgResult<bool> {
     roles_is_member_of_contains(member, RoleRecurseType::Members, role)
 }
 
+// roles_is_member_of (acl.c) list form: snapshot of the cached expansion.
+pub(crate) fn roles_is_member_of_list(
+    roleid: Oid,
+    rtype: RoleRecurseType,
+) -> PgResult<Vec<Oid>> {
+    roles_is_member_of_contains(roleid, rtype, InvalidOid)?;
+    let t = rtype as usize;
+    Ok(CACHE.with(|c| {
+        let cache = c.borrow();
+        debug_assert_eq!(cache.role[t], roleid);
+        cache.roles[t].clone()
+    }))
+}
+
+pub fn get_role_oid_or_public(rolname: &str) -> PgResult<Oid> {
+    if rolname == "public" {
+        return Ok(crate::ACL_ID_PUBLIC);
+    }
+    get_role_oid(rolname, false)
+}
+
 pub fn get_role_oid(rolname: &str, missing_ok: bool) -> PgResult<Oid> {
     let oid = GetSysCacheOid(
         AUTHNAME,

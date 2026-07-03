@@ -21,6 +21,7 @@ types_portal = { path = "../../../_support/types/portal" }
 tcop_dest = { path = "../../tcop/dest" }
 execjunk = { path = "../execjunk" }
 execmain_seams = { path = "../execmain_seams" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
 executils = { path = "../executils" }
 instrument = { path = "../instrument" }
 execexpr = { path = "../execexpr" }
@@ -67,7 +68,6 @@ types_rel = { path = "../../../_support/types/rel" }
 nodelockrows = { path = "../nodelockrows" }
 
 [dev-dependencies]
-syscache_seams = { path = "../../utils/cache/syscache_seams" }
 fd = { path = "../../storage/file/fd" }
 resowner = { path = "../../utils/resowner/resowner" }
 resowner_seams = { path = "../../utils/resowner/resowner_seams" }

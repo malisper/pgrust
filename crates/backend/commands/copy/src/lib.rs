@@ -102,8 +102,8 @@ pub fn DoCopy<'mcx>(mcx: Mcx<'mcx>, stmt: &CopyStmt<'_>) -> PgResult<u64> {
     };
     let rel = table::table_openrv(mcx, &rv, lockmode)?;
 
-    // ExecCheckPermissions, relation-level arm (execmain precedent): the
-    // column-level fallback is loud.
+    // ExecCheckPermissions, relation-level arm. Column-level GRANT is
+    // unported, so the column fallback reduces to the plain denial error.
     let required = if is_from { ACL_INSERT } else { ACL_SELECT };
     let r = aclchk_seams::object_aclcheck::call(
         types_core::catalog::RELATION_RELATION_ID,
@@ -112,11 +112,8 @@ pub fn DoCopy<'mcx>(mcx: Mcx<'mcx>, stmt: &CopyStmt<'_>) -> PgResult<u64> {
         required,
     )?;
     if r != ACLCHECK_OK {
-        panic!(
-            "DoCopy (copy.c): relation-level access denied for relation {} — \
-             column-level aclcheck fallback and aclcheck_error not ported",
-            rel.rd_id
-        );
+        // OBJECT_TABLE discriminant (parsenodes.h ObjectType).
+        aclchk_seams::aclcheck_error::call(r, 41, rv.relname)?;
     }
     if rel.rd_rel.relrowsecurity {
         unported("with row-level security (query-rewrite arm)");

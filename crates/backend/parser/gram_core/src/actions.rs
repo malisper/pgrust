@@ -3,8 +3,9 @@ use types_error::PgResult;
 use types_nodes::parsenodes::{
     AlterTableCmd, AlterTableStmt, AlterTableType, CTEMaterialize, ClosePortalStmt, CommentStmt, CommonTableExpr, CopyStmt, CreateSchemaStmt,
     DeallocateStmt, DeclareCursorStmt, DefElem, DefElemAction, DiscardMode, DiscardStmt,
-    DropBehavior, DropStmt, ExecuteStmt, FetchStmt, ListenStmt, NotifyStmt, ObjectType,
-    PrepareStmt, SetOperation, TransactionStmt, TransactionStmtKind, TruncateStmt, UnlistenStmt, VacuumRelation,
+    AccessPriv, DropBehavior, DropStmt, ExecuteStmt, FetchStmt, GrantStmt, GrantTargetType,
+    ListenStmt, NotifyStmt, ObjectType, PrepareStmt, RoleSpec, RoleSpecType, SetOperation,
+    TransactionStmt, TransactionStmtKind, TruncateStmt, UnlistenStmt, VacuumRelation,
     VacuumStmt, VariableSetKind, VariableSetStmt, VariableShowStmt, WithClause,
     CURSOR_OPT_ASENSITIVE, CURSOR_OPT_BINARY, CURSOR_OPT_FAST_PLAN, CURSOR_OPT_HOLD,
     CURSOR_OPT_INSENSITIVE, CURSOR_OPT_NO_SCROLL, CURSOR_OPT_SCROLL, FETCH_ALL,
@@ -2833,6 +2834,151 @@ impl<'mcx> Parser<'mcx> {
                 n.relations = view.v(3).list();
                 n.restart_seqs = view.v(4).boolean();
                 n.behavior = drop_behavior(view.v(5).ival());
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // GrantStmt / RevokeStmt; privilege_target rides as a GrantStmt
+            // carrier holding (targtype, objtype, objects).
+            1027 => {
+                let target = view.v(4).node().expect("privilege_target");
+                // SAFETY: parser-owned carrier; no derived refs live.
+                let (targtype, objtype, objects) = unsafe {
+                    target.with_mut::<GrantStmt, _>(|t| {
+                        (t.targtype, t.objtype, core::mem::take(&mut t.objects))
+                    })
+                }
+                .expect("privilege_target carrier");
+                let mut n = Node::build::<GrantStmt>(mcx)?;
+                n.is_grant = true;
+                n.privileges = view.v(2).list();
+                n.targtype = targtype;
+                n.objtype = objtype;
+                n.objects = objects;
+                n.grantees = view.v(6).list();
+                n.grant_option = view.v(7).boolean();
+                n.grantor = view.v(8).node().map(|g| g.as_role_spec().expect("RoleSpec"));
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1028 | 1029 => {
+                let (pi, ti, gi, byi, bi) =
+                    if rule == 1028 { (2, 4, 6, 7, 8) } else { (5, 7, 9, 10, 11) };
+                let target = view.v(ti).node().expect("privilege_target");
+                // SAFETY: parser-owned carrier; no derived refs live.
+                let (targtype, objtype, objects) = unsafe {
+                    target.with_mut::<GrantStmt, _>(|t| {
+                        (t.targtype, t.objtype, core::mem::take(&mut t.objects))
+                    })
+                }
+                .expect("privilege_target carrier");
+                let mut n = Node::build::<GrantStmt>(mcx)?;
+                n.is_grant = false;
+                n.grant_option = rule == 1029;
+                n.privileges = view.v(pi).list();
+                n.targtype = targtype;
+                n.objtype = objtype;
+                n.objects = objects;
+                n.grantees = view.v(gi).list();
+                n.grantor = view.v(byi).node().map(|g| g.as_role_spec().expect("RoleSpec"));
+                n.behavior = drop_behavior(view.v(bi).ival());
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // privileges: list | ALL [PRIVILEGES] -> NIL | ALL [(cols)].
+            1030 => *yyval = YYSTYPE::List(view.v(1).list()),
+            1031 | 1032 => *yyval = YYSTYPE::List(NodeList::nil()),
+            1033 | 1034 => {
+                let cols = view.v(if rule == 1033 { 3 } else { 4 }).list();
+                let mut n = Node::build::<AccessPriv>(mcx)?;
+                n.priv_name = None;
+                n.cols = cols;
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, n.seal())?);
+            }
+            1035 => {
+                let n = view.v(1).node().expect("privilege");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, n)?);
+            }
+            1036 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(3).node().expect("privilege"))?;
+                *yyval = YYSTYPE::List(list);
+            }
+            // privilege: SELECT | REFERENCES | CREATE [cols] | ALTER SYSTEM |
+            // ColId [cols].
+            1037..=1039 | 1041 => {
+                let (name, cols) = match rule {
+                    1037 => ("select", view.v(2).list()),
+                    1038 => ("references", view.v(2).list()),
+                    1039 => ("create", view.v(2).list()),
+                    _ => (view.v(1).str_val(), view.v(2).list()),
+                };
+                let mut n = Node::build::<AccessPriv>(mcx)?;
+                n.priv_name = Some(name);
+                n.cols = cols;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1040 => {
+                let mut n = Node::build::<AccessPriv>(mcx)?;
+                n.priv_name = Some("alter system");
+                n.cols = NodeList::nil();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // privilege_target: [TABLE] qualified_name_list | SEQUENCE ...
+            // (other target forms 1049-1066 stay louds).
+            1046 | 1047 | 1048 => {
+                let mut n = Node::build::<GrantStmt>(mcx)?;
+                n.targtype = GrantTargetType::ACL_TARGET_OBJECT;
+                n.objtype = if rule == 1048 {
+                    ObjectType::OBJECT_SEQUENCE
+                } else {
+                    ObjectType::OBJECT_TABLE
+                };
+                n.objects = view.v(if rule == 1046 { 1 } else { 2 }).list();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1067 => {
+                let n = view.v(1).node().expect("grantee");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, n)?);
+            }
+            1068 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(3).node().expect("grantee"))?;
+                *yyval = YYSTYPE::List(list);
+            }
+            1069 => *yyval = YYSTYPE::Node(view.v(1).node()),
+            1070 => *yyval = YYSTYPE::Node(view.v(2).node()),
+            1071 => *yyval = YYSTYPE::Boolean(true),
+            1072 => *yyval = YYSTYPE::Boolean(false),
+            // opt_granted_by: GRANTED BY RoleSpec | EMPTY.
+            1083 => *yyval = YYSTYPE::Node(view.v(3).node()),
+            1084 => *yyval = YYSTYPE::Node(None),
+            // RoleSpec: NonReservedWord | CURRENT_ROLE | CURRENT_USER |
+            // SESSION_USER ("public"/"none" are not keywords).
+            2458 => {
+                let name = view.v(1).str_val();
+                let mut n = Node::build::<RoleSpec>(mcx)?;
+                n.location = view.l(1);
+                if name == "public" {
+                    n.roletype = RoleSpecType::ROLESPEC_PUBLIC;
+                } else if name == "none" {
+                    return Err(Box::new(
+                        (*self.errposition_error(
+                            "role name \"none\" is reserved".into(),
+                            view.l(1),
+                        ))
+                        .with_sqlstate(types_error::ERRCODE_RESERVED_NAME),
+                    ));
+                } else {
+                    n.roletype = RoleSpecType::ROLESPEC_CSTRING;
+                    n.rolename = Some(name);
+                }
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            2459..=2461 => {
+                let mut n = Node::build::<RoleSpec>(mcx)?;
+                n.location = view.l(1);
+                n.roletype = match rule {
+                    2459 => RoleSpecType::ROLESPEC_CURRENT_ROLE,
+                    2460 => RoleSpecType::ROLESPEC_CURRENT_USER,
+                    _ => RoleSpecType::ROLESPEC_SESSION_USER,
+                };
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
             968 | 970 => *yyval = YYSTYPE::Boolean(false),
