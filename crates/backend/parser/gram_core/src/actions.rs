@@ -10,7 +10,7 @@ use types_nodes::parsenodes::{
     GroupingSetKind, ListenStmt, NotifyStmt, ObjectType, PrepareStmt, RenameStmt, RoleSpec,
     RoleSpecType, SetOperation, TransactionStmt, TransactionStmtKind, TruncateStmt, UnlistenStmt,
     VacuumRelation,
-    VacuumStmt, VariableSetKind, VariableSetStmt, VariableShowStmt, WithClause,
+    VacuumStmt, ClusterStmt, ReindexObjectType, ReindexStmt, VariableSetKind, VariableSetStmt, VariableShowStmt, WithClause,
     CURSOR_OPT_ASENSITIVE, CURSOR_OPT_BINARY, CURSOR_OPT_FAST_PLAN, CURSOR_OPT_HOLD,
     CURSOR_OPT_INSENSITIVE, CURSOR_OPT_NO_SCROLL, CURSOR_OPT_SCROLL, FETCH_ALL,
 };
@@ -2671,6 +2671,79 @@ impl<'mcx> Parser<'mcx> {
                 let s = view.v(1).str_val();
                 *yyval = YYSTYPE::Node(Some(Node::mk_string(mcx, s)?));
             }
+            // REINDEX + CLUSTER productions; rule numbers pinned by
+            // cluster_reindex_rule_numbers_match_tables.
+            1263 => {
+                let v2 = view.v(2);
+                let mut params =
+                    if v2.is_null_node() { NodeList::nil() } else { v2.list() };
+                if view.v(4).boolean() {
+                    let d = def_elem(mcx, "concurrently", None, view.l(4))?.node().unwrap();
+                    params.lappend(mcx, d)?;
+                }
+                let mut n = Node::build::<ReindexStmt>(mcx)?;
+                n.kind = reindex_object_type(view.v(3).ival());
+                n.relation = view.v(5).node();
+                n.name = None;
+                n.params = params;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1264 | 1265 => {
+                let v2 = view.v(2);
+                let mut params =
+                    if v2.is_null_node() { NodeList::nil() } else { v2.list() };
+                if view.v(4).boolean() {
+                    let d = def_elem(mcx, "concurrently", None, view.l(4))?.node().unwrap();
+                    params.lappend(mcx, d)?;
+                }
+                let mut n = Node::build::<ReindexStmt>(mcx)?;
+                n.kind = if rule == 1264 {
+                    ReindexObjectType::REINDEX_OBJECT_SCHEMA
+                } else {
+                    reindex_object_type(view.v(3).ival())
+                };
+                n.relation = None;
+                n.name = opt_str(view.v(5));
+                n.params = params;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1266 => *yyval = YYSTYPE::Ival(ReindexObjectType::REINDEX_OBJECT_INDEX as i32),
+            1267 => *yyval = YYSTYPE::Ival(ReindexObjectType::REINDEX_OBJECT_TABLE as i32),
+            1268 => *yyval = YYSTYPE::Ival(ReindexObjectType::REINDEX_OBJECT_SYSTEM as i32),
+            1269 => *yyval = YYSTYPE::Ival(ReindexObjectType::REINDEX_OBJECT_DATABASE as i32),
+            1549 => {
+                let mut n = Node::build::<ClusterStmt>(mcx)?;
+                n.relation = view.v(5).node();
+                n.indexname = opt_str(view.v(6));
+                n.params = view.v(3).list();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1550 => {
+                let mut n = Node::build::<ClusterStmt>(mcx)?;
+                n.params = view.v(3).list();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1551 | 1552 | 1553 => {
+                let mut params = NodeList::nil();
+                if view.v(2).boolean() {
+                    let d = def_elem(mcx, "verbose", None, view.l(2))?.node().unwrap();
+                    params.lappend(mcx, d)?;
+                }
+                let mut n = Node::build::<ClusterStmt>(mcx)?;
+                match rule {
+                    1551 => {
+                        n.relation = view.v(3).node();
+                        n.indexname = opt_str(view.v(4));
+                    }
+                    1553 => {
+                        n.indexname = Some(view.v(3).str_val());
+                        n.relation = view.v(5).node();
+                    }
+                    _ => {}
+                }
+                n.params = params;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
             // VACUUM/ANALYZE productions; rule numbers pinned by
             // vacuum_analyze_rule_numbers_match_tables.
             1556 => {
@@ -5018,5 +5091,16 @@ fn expr_location(n: Node<'_>) -> i32 {
         t.location
     } else {
         panic!("gram_core: exprLocation arm unported for tag {:?}", n.node_tag())
+    }
+}
+
+fn reindex_object_type(v: i32) -> ReindexObjectType {
+    match v {
+        0 => ReindexObjectType::REINDEX_OBJECT_INDEX,
+        1 => ReindexObjectType::REINDEX_OBJECT_TABLE,
+        2 => ReindexObjectType::REINDEX_OBJECT_SCHEMA,
+        3 => ReindexObjectType::REINDEX_OBJECT_SYSTEM,
+        4 => ReindexObjectType::REINDEX_OBJECT_DATABASE,
+        _ => unreachable!("reindex_target ival {v}"),
     }
 }

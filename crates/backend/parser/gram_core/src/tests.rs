@@ -559,6 +559,76 @@ fn vacuum_analyze_rule_numbers_match_tables() {
 }
 
 #[test]
+fn cluster_reindex_rule_numbers_match_tables() {
+    use crate::tables::names::{YYRLINE, YYTNAME};
+    use crate::tables::YYR1;
+    for (rule, name, line) in [
+        (1263, "ReindexStmt", 9298),
+        (1264, "ReindexStmt", 9311),
+        (1265, "ReindexStmt", 9324),
+        (1266, "reindex_target_relation", 9338),
+        (1267, "reindex_target_relation", 9339),
+        (1268, "reindex_target_all", 9342),
+        (1269, "reindex_target_all", 9343),
+        (1270, "opt_reindex_option_list", 9346),
+        (1271, "opt_reindex_option_list", 9347),
+        (1549, "ClusterStmt", 11838),
+        (1550, "ClusterStmt", 11847),
+        (1551, "ClusterStmt", 11857),
+        (1552, "ClusterStmt", 11869),
+        (1553, "ClusterStmt", 11881),
+        (1554, "cluster_index_specification", 11894),
+        (1555, "cluster_index_specification", 11895),
+    ] {
+        assert_eq!(YYTNAME[YYR1[rule] as usize], name, "rule {rule}");
+        assert_eq!(YYRLINE[rule], line, "rule {rule}");
+    }
+}
+
+#[test]
+fn cluster_statement_forms() {
+    use types_nodes::parsenodes::{ClusterStmt, ReindexObjectType, ReindexStmt};
+    let list = parse("CLUSTER t USING idx");
+    let rs = only_stmt(&list);
+    let n = rs.stmt.unwrap().as_variant::<ClusterStmt>().unwrap();
+    assert_eq!(n.relation.unwrap().as_range_var().unwrap().relname, Some("t"));
+    assert_eq!(n.indexname, Some("idx"));
+    assert!(n.params.is_nil());
+
+    let list = parse("CLUSTER VERBOSE");
+    let rs = only_stmt(&list);
+    let n = rs.stmt.unwrap().as_variant::<ClusterStmt>().unwrap();
+    assert!(n.relation.is_none() && n.indexname.is_none());
+    assert_eq!(n.params.nth(0).as_def_elem().unwrap().defname, Some("verbose"));
+
+    let list = parse("CLUSTER idx ON t");
+    let rs = only_stmt(&list);
+    let n = rs.stmt.unwrap().as_variant::<ClusterStmt>().unwrap();
+    assert_eq!(n.relation.unwrap().as_range_var().unwrap().relname, Some("t"));
+    assert_eq!(n.indexname, Some("idx"));
+
+    let list = parse("REINDEX INDEX i1");
+    let rs = only_stmt(&list);
+    let n = rs.stmt.unwrap().as_variant::<ReindexStmt>().unwrap();
+    assert_eq!(n.kind, ReindexObjectType::REINDEX_OBJECT_INDEX);
+    assert_eq!(n.relation.unwrap().as_range_var().unwrap().relname, Some("i1"));
+    assert!(n.params.is_nil() && n.name.is_none());
+
+    let list = parse("REINDEX (VERBOSE) TABLE t");
+    let rs = only_stmt(&list);
+    let n = rs.stmt.unwrap().as_variant::<ReindexStmt>().unwrap();
+    assert_eq!(n.kind, ReindexObjectType::REINDEX_OBJECT_TABLE);
+    assert_eq!(n.params.nth(0).as_def_elem().unwrap().defname, Some("verbose"));
+
+    let list = parse("REINDEX DATABASE CONCURRENTLY d");
+    let rs = only_stmt(&list);
+    let n = rs.stmt.unwrap().as_variant::<ReindexStmt>().unwrap();
+    assert_eq!(n.kind, ReindexObjectType::REINDEX_OBJECT_DATABASE);
+    assert_eq!(n.name, Some("d"));
+    assert_eq!(n.params.nth(0).as_def_elem().unwrap().defname, Some("concurrently"));
+}
+
+#[test]
 fn create_table_two_columns() {
     use types_nodes::rawnodes::{ColumnDef, CreateStmt, OnCommitAction, TypeName};
     let list = parse("CREATE TABLE t2 (a int4, b int8)");

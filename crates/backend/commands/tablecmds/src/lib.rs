@@ -19,6 +19,7 @@ pub use truncate::ExecuteTruncate;
 
 pub fn init_seams() {
     tablecmds_seams::rename_relation_internal::set(RenameRelationInternal);
+    catalog_index_seams::relation_set_new_relfilenumber::set(truncate::RelationSetNewRelfilenumber);
     tablecmds_seams::pre_commit_on_commit_actions::set(PreCommit_on_commit_actions);
     tablecmds_seams::at_eoxact_on_commit_actions::set(AtEOXact_on_commit_actions);
     tablecmds_seams::at_eosubxact_on_commit_actions::set(AtEOSubXact_on_commit_actions);
@@ -33,6 +34,52 @@ use types_rel::{RELKIND_RELATION, RELKIND_SEQUENCE};
 use types_tuple::TupleDescData;
 
 const HEAP_TABLE_AM_OID: Oid = 2;
+
+// RangeVarCallbackMaintainsTable (tablecmds.c); shared by CLUSTER and
+// REINDEX TABLE lookups.
+pub fn RangeVarCallbackMaintainsTable(
+    relation: &rel_vocab::RangeVar<'_>,
+    relId: Oid,
+    _oldRelId: Oid,
+) -> PgResult<()> {
+    if relId == InvalidOid {
+        return Ok(());
+    }
+    let relkind = lsyscache::get_rel_relkind(relId)? as u8;
+    if relkind == 0 {
+        return Ok(());
+    }
+    if !matches!(
+        relkind,
+        RELKIND_RELATION
+            | types_rel::RELKIND_TOASTVALUE
+            | types_rel::RELKIND_MATVIEW
+            | types_rel::RELKIND_PARTITIONED_TABLE
+    ) {
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                format!(
+                    "\"{}\" is not a table or materialized view",
+                    relation.relname
+                ),
+            )
+            .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE),
+        ));
+    }
+    let aclresult =
+        aclchk::pg_class_aclcheck(relId, miscinit::GetUserId(), adt_acl::ACL_MAINTAIN)?;
+    if aclresult != aclchk::ACLCHECK_OK {
+        // get_relkind_objtype: every reachable relkind maps to OBJECT_TABLE
+        // except matview; both render the same aclcheck_error message class.
+        aclchk_seams::aclcheck_error::call(
+            aclresult,
+            types_nodes::parsenodes::ObjectType::OBJECT_TABLE as i32,
+            relation.relname,
+        )?;
+    }
+    Ok(())
+}
 
 #[cold]
 #[inline(never)]

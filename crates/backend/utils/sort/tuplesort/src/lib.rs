@@ -93,7 +93,27 @@ enum SortVariant {
         low_mask: u32,
         max_buckets: u32,
     },
+    // CLUSTER: full heap-tuple images sorted by btree index keys; attnums
+    // are the heap attnos of the index key columns (expression columns are
+    // rejected upstream by BuildIndexInfo).
+    Cluster {
+        tup_desc: std::rc::Rc<TupleDescData<'static>>,
+        attnums: [i16; 32],
+        nkeys: u16,
+    },
 }
+
+// Blob prefix for SortVariant::Cluster images (t_self survives the sort for
+// the rewrite ctid-chain mapping); image starts MAXALIGNed at +16.
+#[repr(C)]
+struct ClusterTupleHeader {
+    t_len: u32,
+    blk: u32,
+    pos: u16,
+    _pad: [u16; 3],
+}
+const _: () = assert!(mem::size_of::<ClusterTupleHeader>() == 16);
+
 
 pub struct TuplesortData<'m> {
     mcx: Mcx<'m>,
@@ -220,6 +240,31 @@ impl CmpCtx<'_> {
             SortVariant::Datum { .. } => 0,
             SortVariant::Index { .. } => self.comparetup_index_btree_tiebreak(a, b),
             SortVariant::IndexHash { .. } => unreachable!("comparetup dispatches IndexHash whole"),
+            SortVariant::Cluster { tup_desc, attnums, nkeys } => {
+                // comparetup_cluster_tiebreak, simple-column haveDatum1 lane;
+                // no TID tiebreak (C leaves equal keys in qsort order).
+                let (ta, tb) = unsafe {
+                    (cluster_tuple_of(a.tuple), cluster_tuple_of(b.tuple))
+                };
+                for nkey in 1..*nkeys as usize {
+                    let key = &self.keys[nkey];
+                    let (mut isnull1, mut isnull2) = (false, false);
+                    // SAFETY: blobs written by putheaptuple under this descriptor.
+                    let (datum1, datum2) = unsafe {
+                        (
+                            ::types_tuple::heap_getattr(&ta, attnums[nkey] as i32, tup_desc, &mut isnull1),
+                            ::types_tuple::heap_getattr(&tb, attnums[nkey] as i32, tup_desc, &mut isnull2),
+                        )
+                    };
+                    let compare = ssup::apply_sort_comparator_in(
+                        self.mcx, datum1, isnull1, datum2, isnull2, key,
+                    );
+                    if compare != 0 {
+                        return compare;
+                    }
+                }
+                0
+            }
         }
     }
 
@@ -410,6 +455,49 @@ impl Tuplesort {
             false,
             SortVariant::IndexHash { tup_desc, high_mask, low_mask, max_buckets },
         )
+    }
+
+    /// `tuplesort_begin_cluster`, serial arm; keys read off the index
+    /// relation as [`Tuplesort::begin_index_btree`] does (C `_bt_mkscankey`).
+    pub fn begin_cluster(
+        heap_tup_desc: std::rc::Rc<TupleDescData<'static>>,
+        index_rel: &types_rel::Relation<'_>,
+        index_attnums: &[i16],
+        work_mem: i32,
+        sortopt: i32,
+    ) -> PgResult<Tuplesort> {
+        const INDOPTION_DESC: i16 = 1 << 0;
+        const INDOPTION_NULLS_FIRST: i16 = 1 << 1;
+        debug_assert!(index_rel.rd_rel.relam == 403);
+        let nkeys = index_rel.indnkeyatts() as usize;
+        assert!(nkeys > 0 && nkeys <= index_attnums.len());
+        let mut attnums = [0i16; 32];
+        attnums[..nkeys].copy_from_slice(&index_attnums[..nkeys]);
+        assert!(attnums[..nkeys].iter().all(|&a| a > 0), "expression index columns");
+        let mut keys = Vec::with_capacity(nkeys);
+        for i in 0..nkeys {
+            let indoption = index_rel.rd_indoption[i];
+            let collation = index_rel.rd_indcollation[i];
+            let comparator = comparator_for_index_col(
+                index_rel.rd_opfamily[i],
+                index_rel.rd_opcintype[i],
+                collation,
+            )?;
+            keys.push(SortSupport {
+                ssup_collation: collation,
+                ssup_reverse: indoption & INDOPTION_DESC != 0,
+                ssup_nulls_first: indoption & INDOPTION_NULLS_FIRST != 0,
+                ssup_attno: (i + 1) as i16,
+                comparator,
+            });
+        }
+        Ok(Self::begin_common(
+            work_mem,
+            sortopt,
+            &keys,
+            false,
+            SortVariant::Cluster { tup_desc: heap_tup_desc, attnums, nkeys: nkeys as u16 },
+        ))
     }
 
     /// C divergence: as [`Tuplesort::begin_heap_with_keys`], index variant.
@@ -646,6 +734,77 @@ impl Tuplesort {
             let datum1 =
                 unsafe { nbtree::itup::index_getattr(tuple, 1, tup_desc, &mut isnull1) };
             st.puttuple_common(tuple.cast::<MinimalTupleData>(), datum1, isnull1, tuplen)
+        })
+    }
+
+    /// `tuplesort_putheaptuple` (cluster variant).
+    pub fn putheaptuple(&mut self, tup: &::types_tuple::htup::HeapTupleData<'_>) -> PgResult<()> {
+        self.0.with_mut(|st| {
+            let SortVariant::Cluster { tup_desc, attnums, .. } = &st.variant else {
+                panic!("tuplesort_putheaptuple on a non-cluster tuplesort")
+            };
+            let t_len = tup.t_len as usize;
+            let words = (16 + t_len).div_ceil(8);
+            let mut blob: PgVec<'_, u64> =
+                ::mcx::vec_with_capacity_in(st.tuplecontext.mcx(), words)?;
+            blob.resize(words, 0);
+            let base = blob.as_mut_ptr().cast::<u8>();
+            // SAFETY: fresh words*8 >= 16+t_len byte buffer; source image is
+            // live for t_len bytes (HeapTupleData invariant).
+            unsafe {
+                let hdr = base.cast::<ClusterTupleHeader>();
+                (*hdr).t_len = tup.t_len;
+                (*hdr).blk = ::types_tuple::ItemPointerGetBlockNumberNoCheck(&tup.t_self);
+                (*hdr).pos = tup.t_self.ip_posid;
+                core::ptr::copy_nonoverlapping(tup.header_ptr(), base.add(16), t_len);
+            }
+            mem::forget(blob);
+
+            // SAFETY: image copied above under the heap descriptor.
+            let stored = unsafe {
+                ::types_tuple::htup::HeapTupleData::from_raw_parts(
+                    base.add(16),
+                    tup.t_len,
+                    tup.t_self,
+                    tup.t_tableOid,
+                )
+            };
+            let mut isnull1 = false;
+            // SAFETY: live image; attnums[0] is a valid user attno.
+            let datum1 = unsafe {
+                ::types_tuple::heap_getattr(&stored, attnums[0] as i32, tup_desc, &mut isnull1)
+            };
+            st.puttuple_common(
+                base.cast::<MinimalTupleData>(),
+                datum1,
+                isnull1,
+                maxalign(16 + t_len) as i64,
+            )
+        })
+    }
+
+    /// `tuplesort_getheaptuple`; image owned by the sort, valid until the
+    /// next tuplesort call (caller contract, as C's shouldFree=false).
+    pub fn getheaptuple(
+        &mut self,
+        forward: bool,
+    ) -> PgResult<Option<::types_tuple::htup::HeapTupleData<'static>>> {
+        self.0.with_mut(|st| {
+            debug_assert!(matches!(st.variant, SortVariant::Cluster { .. }));
+            Ok(st.gettuple_common(forward)?.map(|stup| {
+                let base = stup.tuple.cast_const().cast::<u8>();
+                // SAFETY: blob written by putheaptuple; lives until the sort
+                // is reset/ended.
+                unsafe {
+                    let hdr = base.cast::<ClusterTupleHeader>();
+                    ::types_tuple::htup::HeapTupleData::from_raw_parts(
+                        base.add(16),
+                        (*hdr).t_len,
+                        ::types_tuple::ItemPointerData::new((*hdr).blk, (*hdr).pos),
+                        ::types_core::InvalidOid,
+                    )
+                }
+            }))
         })
     }
 
@@ -1368,4 +1527,17 @@ fn too_many_bounded() -> Box<PgError> {
     Box::new(PgError::error(
         "retrieved too many tuples in a bounded sort",
     ))
+}
+
+/// # Safety
+/// `p` must be a live cluster blob written by `putheaptuple`.
+unsafe fn cluster_tuple_of(p: *mut MinimalTupleData) -> ::types_tuple::htup::HeapTupleData<'static> {
+    let base = p.cast_const().cast::<u8>();
+    let hdr = base.cast::<ClusterTupleHeader>();
+    ::types_tuple::htup::HeapTupleData::from_raw_parts(
+        base.add(16),
+        (*hdr).t_len,
+        ::types_tuple::ItemPointerData::new((*hdr).blk, (*hdr).pos),
+        ::types_core::InvalidOid,
+    )
 }

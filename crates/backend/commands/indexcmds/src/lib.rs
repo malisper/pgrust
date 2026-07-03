@@ -7,6 +7,9 @@ mod tests;
 mod define;
 pub use define::DefineIndex;
 
+mod reindex;
+pub use reindex::ExecReindex;
+
 use datum::Datum;
 use mcx::MemoryContext;
 use types_core::catalog::C_COLLATION_OID;
