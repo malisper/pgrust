@@ -2,7 +2,7 @@
 // the bison grammar's pushback tricks map 1:1). Named louds: CASE, FOREACH,
 // EXECUTE, OPEN/FETCH/MOVE/CLOSE, CALL/DO, COMMIT/ROLLBACK, EXCEPTION
 // sections, RETURN NEXT/QUERY, cursor declarations, %ROWTYPE, qualified
-// %TYPE.
+// %TYPE, #option dump.
 use parser_seams::RawParseMode;
 use types_core::{Oid, OidIsValid};
 use types_error::{PgError, PgResult, ERRCODE_SYNTAX_ERROR, ERROR};
@@ -361,7 +361,8 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
                 t = self.yylex()?;
             }
             self.push_back(&t)?;
-            if is_array {
+            // pl_comp.c:2094-2095: already-array types pass through unchanged.
+            if is_array && !ty.typisarray {
                 let arr = lsyscache::typ::get_array_type(ty.typoid)?;
                 if !OidIsValid(arr) {
                     return Err(self.gram_err(
@@ -452,14 +453,36 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
             let opt = self.yylex()?;
             if opt.0 == K_OPTION {
                 let v = self.yylex()?;
-                if Self::tok_is_keyword(&v, K_DUMP, "dump") {
-                    // ignored (debug dump not ported)
-                } else {
-                    return Err(self.yyerror("unrecognized option", v.2));
+                if v.0 == K_DUMP {
+                    panic!(
+                        "comp_option '#option dump' (pl_gram.y): plpgsql_DumpExecTree \
+                         unported — unit backend-pl-plpgsql-gram"
+                    );
                 }
-            } else if Self::tok_is_keyword(&opt, K_PRINT_STRICT_PARAMS, "print_strict_params") {
-                self.comp.print_strict_params = true;
-            } else if Self::tok_is_keyword(&opt, K_VARIABLE_CONFLICT, "variable_conflict") {
+                return Err(self.yyerror("syntax error", v.2));
+            } else if opt.0 == K_PRINT_STRICT_PARAMS {
+                // pl_gram.y:389-397: option_value is T_WORD | unreserved_keyword;
+                // "on"/"off" set the flag, anything else is elog(ERROR).
+                let v = self.yylex()?;
+                let val: Option<String> = if v.0 == T_WORD {
+                    v.1.word.as_ref().map(|w| w.ident.clone())
+                } else {
+                    Self::unreserved_keyword_name(&v).map(|s| s.to_string())
+                };
+                let Some(val) = val else {
+                    return Err(self.yyerror("syntax error", v.2));
+                };
+                if val == "on" {
+                    self.comp.print_strict_params = true;
+                } else if val == "off" {
+                    self.comp.print_strict_params = false;
+                } else {
+                    return Err(self.gram_err(
+                        types_error::ERRCODE_INTERNAL_ERROR,
+                        format!("unrecognized print_strict_params option {val}"),
+                    ));
+                }
+            } else if opt.0 == K_VARIABLE_CONFLICT {
                 let v = self.yylex()?;
                 if Self::tok_is_keyword(&v, K_ERROR, "error") {
                     self.comp.resolve_option = crate::comp::PLPGSQL_RESOLVE_ERROR;
@@ -1289,12 +1312,18 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
         }
 
         let t = self.yylex()?;
+        // pl_gram.y:3408-3412: fast path only for VAR/PROMISE/ROW/REC datums;
+        // RECFIELD falls through to the expression path.
         if t.0 == T_DATUM && self.peek()? == (';' as i32) {
-            let w = t.1.wdatum.as_ref().expect("T_DATUM");
-            let retvarno = w.dno;
-            let semi = self.yylex()?;
-            debug_assert_eq!(semi.0, ';' as i32);
-            return Ok(PlStmt::Return { lineno, expr: None, retvarno });
+            let retvarno = t.1.wdatum.as_ref().expect("T_DATUM").dno;
+            if matches!(
+                self.comp.datums[retvarno as usize],
+                PlDatum::Var(_) | PlDatum::Row(_) | PlDatum::Rec(_)
+            ) {
+                let semi = self.yylex()?;
+                debug_assert_eq!(semi.0, ';' as i32);
+                return Ok(PlStmt::Return { lineno, expr: None, retvarno });
+            }
         }
         self.push_back(&t)?;
         let expr = self.read_sql_expression(';' as i32, ";")?;

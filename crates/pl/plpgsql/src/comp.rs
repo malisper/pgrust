@@ -1,7 +1,8 @@
 // pl_comp.c + the pl_funcs.c namespace stack, phase-1 subset.
 // Unported louds (named at their sites): %ROWTYPE, cword %TYPE beyond
-// var/2-3-part type names, composite/record declarations, trigger compile,
-// polymorphic argument resolution, OUT/INOUT/TABLE arg modes.
+// var/2-3-part type names, record %TYPE, composite- and domain-typed
+// variables, trigger compile, polymorphic argument resolution,
+// OUT/INOUT/TABLE arg modes.
 use types_core::{Oid, OidIsValid};
 use types_error::{
     PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_UNDEFINED_OBJECT, ERROR,
@@ -14,6 +15,8 @@ pub const PLPGSQL_RESOLVE_ERROR: i32 = 0;
 pub const PLPGSQL_RESOLVE_VARIABLE: i32 = 1;
 pub const PLPGSQL_RESOLVE_COLUMN: i32 = 2;
 
+const TYPTYPE_COMPOSITE: i8 = b'c' as i8;
+const TYPTYPE_DOMAIN: i8 = b'd' as i8;
 const TYPTYPE_PSEUDO: i8 = b'p' as i8;
 
 std::thread_local! {
@@ -184,10 +187,31 @@ impl CompState {
         let (typlen, typbyval) = lsyscache::typ::get_typlenbyval(typoid)?;
         let typtype = lsyscache::typ::get_typtype(typoid)?;
         let typcollation = lsyscache::typ::get_typcollation(typoid)?;
-        let coll = if OidIsValid(collation) { collation } else { typcollation };
+        // pl_comp.c:2021-2023: caller collation only overrides a collatable type.
+        let coll = if OidIsValid(collation) && OidIsValid(typcollation) {
+            collation
+        } else {
+            typcollation
+        };
         let (typinput, typioparam) = lsyscache::typ::getTypeInputInfo(typoid)?;
         let elem = lsyscache::typ::get_element_type(typoid)?;
         const RECORDOID: Oid = 2249;
+        if typtype == TYPTYPE_COMPOSITE {
+            panic!(
+                "plpgsql build_datatype (pl_comp.c): composite-type variables \
+                 (PLPGSQL_TTYPE_REC for named composites) unported — \
+                 unit backend-pl-plpgsql-comp"
+            );
+        }
+        if typtype == TYPTYPE_DOMAIN
+            && lsyscache::typ::get_typtype(lsyscache::typ::getBaseType(typoid)?)?
+                == TYPTYPE_COMPOSITE
+        {
+            panic!(
+                "plpgsql build_datatype (pl_comp.c:1998-2005): domain-over-composite \
+                 variables (PLPGSQL_TTYPE_REC) unported — unit backend-pl-plpgsql-comp"
+            );
+        }
         let ttype = if typoid == RECORDOID {
             TypeKind::Rec
         } else if typtype == TYPTYPE_PSEUDO {
@@ -301,6 +325,12 @@ impl CompState {
                     return Ok(v.datatype.clone());
                 }
             }
+            if item.itemtype == NsType::Rec {
+                panic!(
+                    "plpgsql_parse_wordtype (pl_comp.c): record %TYPE unported — \
+                     unit backend-pl-plpgsql-comp"
+                );
+            }
         }
         Err(comp_err(
             ERRCODE_UNDEFINED_OBJECT,
@@ -348,13 +378,21 @@ impl CompState {
             location: -1,
         };
         let class_oid = catalog_namespace::RangeVarGetRelid(&rv, types_rel::NoLock, false)?;
-        let attnum = syscache_seams::lookup_pg_attribute_attnum_by_name::call(class_oid, fldname)?;
-        if attnum <= 0 {
+        // SearchSysCacheAttName excludes dropped columns (pl_comp.c:1626).
+        const ANUM_PG_ATTRIBUTE_ATTNUM: i32 = 5;
+        let Some(atttup) = cache_syscache::SearchSysCacheAttName(class_oid, fldname)? else {
             return Err(comp_err(
                 types_error::ERRCODE_UNDEFINED_COLUMN,
                 format!("column \"{fldname}\" of relation \"{relname}\" does not exist"),
             ));
-        }
+        };
+        let attnum = cache_syscache::SysCacheGetAttrNotNull(
+            cache_syscache::ATTNAME,
+            &atttup,
+            ANUM_PG_ATTRIBUTE_ATTNUM,
+        )?
+        .as_i16();
+        cache_syscache::ReleaseSysCache(atttup);
         let shape = syscache_seams::lookup_pg_attribute_shape::call(class_oid, attnum)?
             .unwrap_or_else(|| panic!("cache lookup failed for attribute {attnum} of relation {class_oid}"));
         Self::build_datatype(shape.atttypid, shape.atttypmod, shape.attcollation)
@@ -438,15 +476,27 @@ impl WordResolver for CompState {
     }
 
     fn parse_tripword(&mut self, word1: &str, word2: &str, word3: &str) -> PgResult<CwordRes> {
-        let idents = vec![word1.to_string(), word2.to_string(), word3.to_string()];
         if self.identifier_lookup != IdentifierLookup::Declare {
-            // C looks up word1.word2 requiring nnames == 2 (label.rec.field).
-            if let Some((idx, 2)) =
+            if let Some((idx, nnames)) =
                 self.ns_lookup(self.ns_top, false, word1, Some(word2), Some(word3))
             {
                 let item = &self.ns[idx as usize];
                 if item.itemtype == NsType::Rec {
-                    let dno = self.build_recfield(item.itemno, word3);
+                    let recno = item.itemno;
+                    // pl_comp.c:1463-1475: nnames==1 is rec.field.subfield —
+                    // RECFIELD on word2, only two idents claimed; nnames==2 is
+                    // label.rec.field — RECFIELD on word3.
+                    let (dno, idents) = if nnames == 1 {
+                        (
+                            self.build_recfield(recno, word2),
+                            vec![word1.to_string(), word2.to_string()],
+                        )
+                    } else {
+                        (
+                            self.build_recfield(recno, word3),
+                            vec![word1.to_string(), word2.to_string(), word3.to_string()],
+                        )
+                    };
                     return Ok(CwordRes::Datum(PLwdatum {
                         dno,
                         ident: String::new(),
@@ -456,7 +506,9 @@ impl WordResolver for CompState {
                 }
             }
         }
-        Ok(CwordRes::Cword(PLcword { idents }))
+        Ok(CwordRes::Cword(PLcword {
+            idents: vec![word1.to_string(), word2.to_string(), word3.to_string()],
+        }))
     }
 
     fn identifier_lookup(&self) -> IdentifierLookup {

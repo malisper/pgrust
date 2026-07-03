@@ -81,9 +81,12 @@ pub enum PlpgsqlResolveOption {
 #[derive(Clone, Copy)]
 pub struct PlpgsqlHookState<'p> {
     pub names: &'p [PlpgsqlNameEntry<'p>],
-    /// `$n` → datum dno n-1 (plpgsql_param_ref): (typoid, typmod, collation).
-    /// A None slot is a datum `$n` cannot reference.
+    /// dno → (typoid, typmod, collation); a None slot is a datum a Param
+    /// cannot carry.
     pub params_by_dno: &'p [Option<(Oid, i32, Oid)>],
+    /// Function argument dnos in signature order: `$n` resolves through
+    /// slot n-1 only (C's ns holds just parameter names, pl_comp.c:1062).
+    pub arg_dnos: &'p [i32],
     /// Record/row variable names (incl. label-qualified) for the
     /// "record has no field" error arm of resolve_column_ref.
     pub recs: &'p [&'p str],
@@ -277,7 +280,9 @@ pub fn variable_paramref_hook<'mcx>(
     mk_param(mcx, paramno, paramtype, pref.location)
 }
 
-/// plpgsql_param_ref (pl_exec.c): `$n` names datum n-1 directly.
+/// plpgsql_param_ref (pl_exec.c): `$n` names the n-th function argument;
+/// anything else is undefined_parameter (C looks the name "$n" up in a
+/// namespace that holds only parameters).
 pub fn plpgsql_paramref_hook<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &ParseState<'_, 'mcx>,
@@ -289,25 +294,26 @@ pub fn plpgsql_paramref_hook<'mcx>(
         .as_plpgsql_params()
         .expect("plpgsql_paramref_hook: p_ref_hook_state is not PlpgsqlParams");
     let paramno = pref.number;
-    let slot = if paramno >= 1 && (paramno as usize) <= parstate.params_by_dno.len() {
-        parstate.params_by_dno[(paramno - 1) as usize]
+    let dno = if paramno >= 1 && (paramno as usize) <= parstate.arg_dnos.len() {
+        Some(parstate.arg_dnos[(paramno - 1) as usize])
     } else {
         None
     };
+    let slot = dno.and_then(|d| parstate.params_by_dno.get(d as usize).copied().flatten());
     // C's hook returns NULL and the core reports undefined_parameter.
-    let Some((typoid, typmod, collation)) = slot else {
+    let (Some(dno), Some((typoid, typmod, collation))) = (dno, slot) else {
         return Err(no_parameter_err(
             paramno,
             parser_errposition(pstate, pref.location, encoding),
             "plpgsql_param_ref",
         ));
     };
-    parstate.mark_used(paramno - 1);
+    parstate.mark_used(dno);
     Node::mk(
         mcx,
         Param {
             paramkind: ParamKind::PARAM_EXTERN,
-            paramid: paramno,
+            paramid: dno + 1,
             paramtype: typoid,
             paramtypmod: typmod,
             paramcollid: collation,
@@ -333,6 +339,12 @@ pub fn plpgsql_resolve_column_ref<'mcx>(
     }
     let key = fields.join(".").to_ascii_lowercase();
     if let Some(e) = parstate.names.iter().find(|e| e.key == key) {
+        if !OidIsValid(e.typoid) {
+            panic!(
+                "resolve_column_ref (pl_exec.c): whole-record reference \"{key}\" in a \
+                 SQL expression unported — unit backend-pl-plpgsql-exec"
+            );
+        }
         parstate.mark_used(e.dno);
         return Ok(Some(Node::mk(
             mcx,
