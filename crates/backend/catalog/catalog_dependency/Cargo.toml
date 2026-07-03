@@ -37,3 +37,4 @@ types_scan = { path = "../../../_support/types/types_scan" }
 types_tuple = { path = "../../../_support/types/types_tuple" }
 xact = { path = "../../access/transam/xact" }
 rewrite_remove = { path = "../../rewrite/rewrite_remove" }
+pg_namespace = { path = "../pg_namespace" }

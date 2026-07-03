@@ -742,6 +742,9 @@ fn doDeletion<'mcx>(mcx: Mcx<'mcx>, object: &ObjectAddress, flags: i32) -> PgRes
         ConstraintRelationId => pg_constraint::RemoveConstraintById(mcx, object.objectId)?,
         statscmds::StatisticExtRelationId => statscmds::RemoveStatisticsById(mcx, object.objectId)?,
         TriggerRelationId => commands_trigger::RemoveTriggerById(mcx, object.objectId)?,
+        types_core::NAMESPACE_RELATION_ID => {
+            pg_namespace::RemoveSchemaById(mcx, object.objectId)?
+        }
         RewriteRelationId => rewrite_remove::RemoveRewriteRuleById(mcx, object.objectId)?,
         other => panic!("unported: doDeletion object class {other}"),
     }
