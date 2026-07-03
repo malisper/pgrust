@@ -75,18 +75,27 @@ impl<'mcx> ScanNode<'mcx> for SeqScanState<'mcx> {
 }
 
 impl<'mcx> SeqScanState<'mcx> {
+    // Hot per-row check stays a single inlined test+branch (C's scandesc ==
+    // NULL check); the once-per-scan open is outlined.
+    #[inline(always)]
     fn ensure_scandesc(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
         if self.ss.ss_currentScanDesc.is_none() {
-            let mcx = estate.es_query_cxt;
-            let snapshot = estate.es_snapshot.clone();
-            self.ss.ss_currentScanDesc = Some(table_beginscan(
-                mcx,
-                self.ss.ss_currentRelation.as_ref().expect("seqscan has a relation"),
-                snapshot,
-                0,
-                PgVec::new_in(mcx),
-            )?);
+            self.open_scandesc(estate)?;
         }
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn open_scandesc(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
+        let mcx = estate.es_query_cxt;
+        let snapshot = estate.es_snapshot.clone();
+        self.ss.ss_currentScanDesc = Some(table_beginscan(
+            mcx,
+            self.ss.ss_currentRelation.as_ref().expect("seqscan has a relation"),
+            snapshot,
+            0,
+            PgVec::new_in(mcx),
+        )?);
         Ok(())
     }
 }
