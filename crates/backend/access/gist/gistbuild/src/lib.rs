@@ -46,7 +46,7 @@ pub fn gistbuild<'mcx>(
     }
 
     let mut giststate = initGISTstate(index)?;
-    let mut temp = MemoryContext::new("GiST temporary context");
+    let mut temp = MemoryContext::new_bump("GiST temporary context");
 
     {
         let buffer = gistNewBuffer(index, heap)?;

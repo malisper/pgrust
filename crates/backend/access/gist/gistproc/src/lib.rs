@@ -303,9 +303,10 @@ fn g_box_consider_split(
     let ratio = ::adt_float::float4_div(
         left_count.min(right_count) as f32,
         context.entries_count as f32,
-    )? as f32;
+    )?;
 
-    if ratio > LIMIT_RATIO as f32 {
+    // C compares float4 ratio against the double literal 0.3.
+    if ratio as f64 > LIMIT_RATIO {
         let mut selectthis = false;
         let range = if dim_num == 0 {
             ::adt_float::float8_mi(context.bounding_box.high.x, context.bounding_box.low.x)?
