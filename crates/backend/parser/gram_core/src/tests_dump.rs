@@ -828,6 +828,47 @@ fn node(out: &mut String, n: Node<'_>) {
         int_field(out, "strength", lc.strength as i32);
         int_field(out, "waitPolicy", lc.waitPolicy as i32);
         out.push('}');
+    } else if let Some(c) = n.as_variant::<types_nodes::parsenodes::CreatePolicyStmt>() {
+        out.push_str("{CREATEPOLICYSTMT");
+        string_field(out, "policy_name", c.policy_name);
+        out.push_str(" :table ");
+        match c.table {
+            Some(rv) => range_var(out, rv),
+            None => out.push_str("<>"),
+        }
+        string_field(out, "cmd_name", c.cmd_name);
+        bool_field(out, "permissive", c.permissive);
+        list_field(out, "roles", &c.roles);
+        node_field(out, "qual", c.qual);
+        node_field(out, "with_check", c.with_check);
+        out.push('}');
+    } else if let Some(a) = n.as_variant::<types_nodes::parsenodes::AlterPolicyStmt>() {
+        out.push_str("{ALTERPOLICYSTMT");
+        string_field(out, "policy_name", a.policy_name);
+        out.push_str(" :table ");
+        match a.table {
+            Some(rv) => range_var(out, rv),
+            None => out.push_str("<>"),
+        }
+        list_field(out, "roles", &a.roles);
+        node_field(out, "qual", a.qual);
+        node_field(out, "with_check", a.with_check);
+        out.push('}');
+    } else if let Some(r) = n.as_variant::<types_nodes::parsenodes::RenameStmt>() {
+        out.push_str("{RENAMESTMT");
+        int_field(out, "renameType", r.renameType as i32);
+        int_field(out, "relationType", r.relationType as i32);
+        out.push_str(" :relation ");
+        match r.relation {
+            Some(rv) => range_var(out, rv),
+            None => out.push_str("<>"),
+        }
+        node_field(out, "object", r.object);
+        string_field(out, "subname", r.subname);
+        string_field(out, "newname", r.newname);
+        int_field(out, "behavior", r.behavior as i32);
+        bool_field(out, "missing_ok", r.missing_ok);
+        out.push('}');
     } else {
         panic!("tests_dump: unrendered node tag {:?}", n.node_tag());
     }
