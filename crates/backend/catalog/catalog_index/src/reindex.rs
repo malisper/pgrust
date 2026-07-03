@@ -169,6 +169,12 @@ pub fn reindex_index<'mcx>(
     // const-false in this tree; systable scans never touch user indexes.
     RelationSetNewRelfilenumber(mcx, &iRel, persistence)?;
 
+    // C's CCI inval refreshes the same Relation struct in place; our handles
+    // are snapshots, so reopen to see the reset rd_rel (index_update_stats
+    // reads reltuples for its -1 hack). Lock already held.
+    indexam::index_close(iRel, NoLock)?;
+    let iRel = indexam::index_open(mcx, indexId, NoLock)?;
+
     crate::index_build(mcx, &heapRelation, &iRel, &mut indexInfo, true)?;
 
     if !skipped_constraint {
