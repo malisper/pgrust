@@ -970,6 +970,7 @@ pub fn expr_type_typmod(node: Node<'_>) -> (u32, i32) {
         NodeTag::T_RelabelType => {
             let r = node.as_relabel_type().unwrap();
             (r.resulttype, r.resulttypmod)
+        }
         NodeTag::T_CoerceToDomain => {
             let cd = node.as_coerce_to_domain().unwrap();
             (cd.resulttype, cd.resulttypmod)
@@ -1016,10 +1017,6 @@ pub fn expr_type_typmod(node: Node<'_>) -> (u32, i32) {
         NodeTag::T_CaseExpr => {
             let c = node.as_case_expr().unwrap();
             (c.casetype, case_expr_typmod(c))
-        }
-        NodeTag::T_RelabelType => {
-            let r = node.as_relabel_type().unwrap();
-            (r.resulttype, r.resulttypmod)
         }
         NodeTag::T_CoerceViaIO => (node.as_coerce_via_io().unwrap().resulttype, -1),
         NodeTag::T_NextValueExpr => (
