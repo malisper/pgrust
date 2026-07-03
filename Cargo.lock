@@ -363,6 +363,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "adt_jsonpath"
+version = "0.1.0"
+dependencies = [
+ "adt_json",
+ "adt_numeric",
+ "datum",
+ "mbutils",
+ "mcx",
+ "numutils",
+ "pqformat",
+ "regex_core",
+ "stack_depth",
+ "stringinfo",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_tuple",
+ "varlena",
+ "wchar",
+]
+
+[[package]]
 name = "adt_like"
 version = "0.1.0"
 dependencies = [
@@ -3346,6 +3368,7 @@ dependencies = [
  "adt_int8",
  "adt_json",
  "adt_jsonb",
+ "adt_jsonpath",
  "adt_like",
  "adt_mac",
  "adt_mac8",
