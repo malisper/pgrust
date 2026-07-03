@@ -4878,7 +4878,9 @@ mod grouping_sets {
         let agg = stmt.planTree.unwrap().as_agg().expect("top plan is Agg");
         assert_eq!(agg.aggstrategy, types_pathnodes::AGG_MIXED);
         assert_eq!(agg.numCols, 1);
-        assert_eq!(agg.grpColIdx, &[1i16]);
+        // The unsorted subplan keeps the seqscan physical tlist: val is
+        // column 2 of t.
+        assert_eq!(agg.grpColIdx, &[2i16]);
         assert_eq!(agg.numGroups, 200);
         let gsets: Vec<Vec<i32>> =
             agg.groupingSets.iter().map(|n| n.as_int_list().unwrap().iter().collect()).collect();
