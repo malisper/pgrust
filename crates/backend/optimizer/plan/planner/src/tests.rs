@@ -39,6 +39,29 @@ fn install_fixtures() {
                 _ => None,
             })
         });
+        syscache_seams::pg_type_io_shape::set(|typid| {
+            // (typinput, typoutput) = int4in/out, int8in/out.
+            let (typlen, typbyval, typalign, io) = match typid {
+                23 => (4i16, true, b'i' as i8, (42, 43)),
+                20 => (8i16, true, b'd' as i8, (460, 461)),
+                _ => return Ok(None),
+            };
+            Ok(Some(syscache_seams::PgTypeIoShape {
+                oid: typid,
+                typinput: io.0,
+                typoutput: io.1,
+                typreceive: 0,
+                typsend: 0,
+                typmodin: 0,
+                typmodout: 0,
+                typelem: 0,
+                typlen,
+                typbyval,
+                typalign,
+                typdelim: b',' as i8,
+                typisdefined: true,
+            }))
+        });
         install_scan_fixtures();
     });
 }
