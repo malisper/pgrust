@@ -939,16 +939,13 @@ pub(crate) fn get_restriction_variable<'mcx>(
     let vardata = examine_variable(run, args[0], left, varrelid)?;
     let rdata = examine_variable(run, args[1], right, varrelid)?;
 
-    // estimate_expression_value: Consts pass through and a PARAM_EXEC stays a
-    // Param (no bound value at plan time); other shapes keep the loud arm.
-    // C runs estimate_expression_value over the non-var side (stable-fn
-    // folding); unfolded expressions land on the var_eq_non_const leg, which
-    // matches C exactly whenever the var side has no MCV stats.
     if vardata.rel.is_some() && rdata.rel.is_none() {
-        return Ok(Some((vardata, right, true)));
+        let other = clauses::estimate_expression_value(run.mcx, right)?;
+        return Ok(Some((vardata, other, true)));
     }
     if vardata.rel.is_none() && rdata.rel.is_some() {
-        return Ok(Some((rdata, left, false)));
+        let other = clauses::estimate_expression_value(run.mcx, left)?;
+        return Ok(Some((rdata, other, false)));
     }
     Ok(None)
 }
