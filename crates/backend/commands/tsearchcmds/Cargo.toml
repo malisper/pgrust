@@ -5,4 +5,32 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+mcx = { path = "../../../_support/mcx" }
+datum = { path = "../../../_support/types/datum" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_nodes = { path = "../../../_support/types/nodes" }
+types_rel = { path = "../../../_support/types/rel" }
+types_scan = { path = "../../../_support/types/types_scan" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+heaptuple = { path = "../../access/common/heaptuple" }
+table = { path = "../../access/table/table" }
+genam = { path = "../../access/index/genam" }
+xact = { path = "../../access/transam/xact" }
+catalog = { path = "../../catalog/catalog" }
+catalog_indexing = { path = "../../catalog/catalog_indexing" }
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+catalog_dependency = { path = "../../catalog/catalog_dependency" }
+pg_depend = { path = "../../catalog/pg_depend" }
+aclchk = { path = "../../catalog/aclchk" }
+miscinit = { path = "../../utils/init/miscinit" }
+superuser = { path = "../../utils/misc/superuser" }
+cache_syscache = { path = "../../utils/cache/cache_syscache" }
 types_fmgr = { path = "../../../_support/types/fmgr" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+elog_seams = { path = "../../utils/error/elog_seams" }
+format_type = { path = "../../utils/adt/format_type" }
+varlena = { path = "../../utils/adt/varlena" }
+ts_locale = { path = "../../tsearch/ts_locale" }
+rel_vocab = { path = "../../../_support/types/rel_vocab" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
