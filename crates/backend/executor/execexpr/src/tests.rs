@@ -103,6 +103,7 @@ const CONBIN_VALUE_GT_0: &str = "{OPEXPR :opno 521 :opfuncid 147 :opresulttype 1
     false :location 55 :constvalue 4 [ 0 0 0 0 0 0 0 0 ]}) :location 53}";
 
 fn install_domain_seams() {
+    clauses::init_seams();
     syscache_seams::pg_type_domain_shape::set(|typid| {
         let mk = |nm: &str, nsp, tt, nn, base| {
             let mut n = ::types_tuple::NameData::default();
