@@ -1170,7 +1170,65 @@ fn check_ungrouped_columns<'mcx>(
             }
             Ok(())
         }
-        NodeTag::T_Const | NodeTag::T_Param | NodeTag::T_CaseTestExpr => Ok(()),
+        NodeTag::T_Const
+        | NodeTag::T_Param
+        | NodeTag::T_CaseTestExpr
+        | NodeTag::T_SQLValueFunction
+        | NodeTag::T_CoerceToDomainValue => Ok(()),
+        NodeTag::T_CaseExpr => {
+            let c = node.as_case_expr().unwrap();
+            if let Some(arg) = c.arg {
+                check_ungrouped_columns(pstate, qry, hnvg, arg)?;
+            }
+            for w in &c.args {
+                check_ungrouped_columns(pstate, qry, hnvg, w)?;
+            }
+            match c.defresult {
+                Some(d) => check_ungrouped_columns(pstate, qry, hnvg, d),
+                None => Ok(()),
+            }
+        }
+        NodeTag::T_CaseWhen => {
+            let cw = node.as_case_when().unwrap();
+            check_ungrouped_columns(pstate, qry, hnvg, cw.expr.expect("CaseWhen.expr"))?;
+            check_ungrouped_columns(pstate, qry, hnvg, cw.result.expect("CaseWhen.result"))
+        }
+        NodeTag::T_CoalesceExpr => {
+            for arg in &node.as_coalesce_expr().unwrap().args {
+                check_ungrouped_columns(pstate, qry, hnvg, arg)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_MinMaxExpr => {
+            for arg in &node.as_min_max_expr().unwrap().args {
+                check_ungrouped_columns(pstate, qry, hnvg, arg)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_ScalarArrayOpExpr => {
+            for arg in &node.as_scalar_array_op_expr().unwrap().args {
+                check_ungrouped_columns(pstate, qry, hnvg, arg)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_ArrayExpr => {
+            for elem in &node.as_array_expr().unwrap().elements {
+                check_ungrouped_columns(pstate, qry, hnvg, elem)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_CoerceViaIO => {
+            check_ungrouped_columns(pstate, qry, hnvg, node.as_coerce_via_io().unwrap().arg)
+        }
+        NodeTag::T_CoerceToDomain => {
+            check_ungrouped_columns(pstate, qry, hnvg, node.as_coerce_to_domain().unwrap().arg)
+        }
+        NodeTag::T_List => {
+            for elem in node.as_list().unwrap() {
+                check_ungrouped_columns(pstate, qry, hnvg, elem)?;
+            }
+            Ok(())
+        }
         other => panic!(
             "check_ungrouped_columns (parse_agg.c): arm for {other:?} unported — \
              backend-parser-agg"

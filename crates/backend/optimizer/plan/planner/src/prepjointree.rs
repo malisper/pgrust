@@ -718,7 +718,7 @@ fn offset_var<'mcx>(mcx: Mcx<'mcx>, v: &Var<'mcx>, rtoffset: i32) -> PgResult<Va
         },
         varlevelsup: v.varlevelsup,
         varreturningtype: v.varreturningtype,
-        varnosyn: if v.varnosyn > 0 { v.varnosyn + rtoffset as u32 } else { v.varnosyn },
+        varnosyn: if v.varnosyn > 0 { v.varnosyn.wrapping_add(rtoffset as u32) } else { v.varnosyn },
         varattnosyn: v.varattnosyn,
         location: v.location,
     })
