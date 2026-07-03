@@ -917,16 +917,13 @@ pub(crate) fn get_restriction_variable<'mcx>(
 
     // estimate_expression_value: Consts pass through and a PARAM_EXEC stays a
     // Param (no bound value at plan time); other shapes keep the loud arm.
+    // C runs estimate_expression_value over the non-var side (stable-fn
+    // folding); unfolded expressions land on the var_eq_non_const leg, which
+    // matches C exactly whenever the var side has no MCV stats.
     if vardata.rel.is_some() && rdata.rel.is_none() {
-        if !matches!(right.node_tag(), NodeTag::T_Const | NodeTag::T_Param) {
-            panic!("estimate_expression_value (clauses.c): M2 expression lane");
-        }
         return Ok(Some((vardata, right, true)));
     }
     if vardata.rel.is_none() && rdata.rel.is_some() {
-        if !matches!(left.node_tag(), NodeTag::T_Const | NodeTag::T_Param) {
-            panic!("estimate_expression_value (clauses.c): M2 expression lane");
-        }
         return Ok(Some((rdata, left, false)));
     }
     Ok(None)
@@ -981,8 +978,11 @@ fn examine_simple_variable<'mcx>(
     varattno: i16,
 ) -> PgResult<Option<PgStatisticBundle<'mcx>>> {
     let rte = run.rte(varno as usize);
-    if rte.rtekind != RTEKind::RTE_RELATION {
-        panic!("examine_simple_variable (selfuncs.c): {:?}; M2 lane", rte.rtekind);
+    match rte.rtekind {
+        RTEKind::RTE_RELATION => {}
+        // C falls through with no stats for these RTE kinds.
+        RTEKind::RTE_FUNCTION | RTEKind::RTE_VALUES | RTEKind::RTE_JOIN => return Ok(None),
+        other => panic!("examine_simple_variable (selfuncs.c): {other:?}; M2 lane"),
     }
     syscache_seams::lookup_pg_statistic_bundle::call(run.mcx, rte.relid, varattno, rte.inh)
 }

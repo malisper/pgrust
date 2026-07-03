@@ -1023,6 +1023,7 @@ pub fn expr_type_typmod(node: Node<'_>) -> (u32, i32) {
             node.as_variant::<types_nodes::primnodes::NextValueExpr>().unwrap().typeId,
             -1,
         ),
+        NodeTag::T_CoalesceExpr => (node.as_coalesce_expr().unwrap().coalescetype, -1),
         other => panic!("exprType (nodeFuncs.c): {other:?}; M2 expression lane"),
     }
 }

@@ -31,6 +31,7 @@ const TABLES: &[&[FmgrBuiltin]] = &[
     ::adt_pseudotypes::builtins::PSEUDOTYPES_BUILTINS,
     ::adt_quote::builtins::QUOTE_BUILTINS,
     ::adt_varchar::builtins::VARCHAR_BUILTINS,
+    ::pgstatfuncs::PGSTATFUNCS_BUILTINS,
     ::adt_scalar::builtins::SCALAR_BUILTINS,
     ::adt_timestamp::builtins::TIMESTAMP_BUILTINS,
     ::sequence_seams::builtins::SEQUENCE_BUILTINS,

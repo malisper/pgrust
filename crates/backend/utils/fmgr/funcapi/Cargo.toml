@@ -21,6 +21,10 @@ typcache_seams = { path = "../../cache/typcache_seams" }
 arrayfuncs = { path = "../../adt/arrayfuncs" }
 detoast_seams = { path = "../../../access/common/detoast_seams" }
 varlena = { path = "../../adt/varlena" }
+init_small = { path = "../../init/init_small" }
+tuplestore = { path = "../../sort/tuplestore" }
 
 [dev-dependencies]
 catalog_seams = { path = "../../../catalog/catalog_seams" }
+exectuples = { path = "../../../executor/exectuples" }
+types_slot = { path = "../../../../_support/types/types_slot" }

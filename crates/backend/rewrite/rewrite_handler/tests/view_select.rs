@@ -166,6 +166,7 @@ fn install_proc_boot_seams() {
     g::set_transaction_buffers(64);
     g::set_subtransaction_buffers(64);
 
+    backend_status_seams::pgstat_clear_backend_status_snapshot::set(|| {});
     pg_sema_seams::pg_semaphore_create::set(|_| {});
     pg_sema_seams::pg_semaphore_reset::set(|_| {});
     pg_sema_seams::pg_semaphore_lock::set(|_| {});

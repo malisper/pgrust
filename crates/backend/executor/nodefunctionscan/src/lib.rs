@@ -1,5 +1,5 @@
 // nodeFunctionscan.c simple case + execSRF.c's table-function half; ROWS
-// FROM, ORDINALITY, coldeflists and SFRM_Materialize functions are loud.
+// FROM, ORDINALITY and coldeflists are loud.
 #![allow(non_snake_case)]
 
 extern crate alloc;
@@ -21,6 +21,9 @@ use ::types_nodes::RangeTblFunction;
 use ::types_slot::{TupleSlotKind, EXEC_FLAG_BACKWARD};
 use ::types_tuple::TupleDescData;
 use ::tuplestore::Tuplestore;
+
+#[cfg(test)]
+mod tests;
 
 pub fn init_seams() {}
 
@@ -201,6 +204,15 @@ fn value_per_call_violated() -> Box<PgError> {
     )
 }
 
+#[cold]
+#[inline(never)]
+fn materialize_violated() -> Box<PgError> {
+    Box::new(
+        PgError::error("table-function protocol for materialize mode was not followed")
+            .with_sqlstate(ERRCODE_E_R_I_E_SRF_PROTOCOL_VIOLATED),
+    )
+}
+
 /// `ExecMakeTableFunctionResult`, ValuePerCall arm.
 fn exec_make_table_function_result<'mcx>(
     setexpr: &mut SetExprState<'mcx>,
@@ -232,6 +244,10 @@ fn run_value_per_call<'mcx, const N: usize>(
         allowed |= SFRM_Materialize_Random;
     }
     let mut rsinfo = ReturnSetInfo::new(allowed);
+    // SAFETY: expectedDesc contract — points at the scan tupdesc, which
+    // outlives this call frame; rsinfo dies with the frame.
+    rsinfo.expectedDesc =
+        Some(core::ptr::NonNull::from(expected_desc).cast::<core::ffi::c_void>());
     let mut fcinfo = LocalFcinfo::<N>::new(setexpr.collation);
     fcinfo.resultinfo = rsinfo.as_fmnode_ptr();
     // C evaluates the SRF in econtext per-tuple memory (reset per call); the
@@ -258,6 +274,7 @@ fn run_value_per_call<'mcx, const N: usize>(
         return Ok(store);
     }
 
+    let mut first_time = true;
     loop {
         estate.ecxt_mut(ecxt).reset();
         fcinfo.isnull = false;
@@ -281,11 +298,24 @@ fn run_value_per_call<'mcx, const N: usize>(
                     return Err(value_per_call_violated());
                 }
             }
-            SetFunctionReturnMode::Materialize => panic!(
-                "ExecMakeTableFunctionResult (execSRF.c): SFRM_Materialize function \
-                 result — tuplestore-returning SRFs unported"
-            ),
+            SetFunctionReturnMode::Materialize => {
+                if !first_time
+                    || rsinfo.isDone != ExprDoneCond::ExprSingleResult
+                    || !setexpr.returns_set
+                {
+                    return Err(materialize_violated());
+                }
+                // C's setResult-NULL leg hands back an empty tuplestore; the
+                // pre-built `store` already is one.
+                if let Some(set_result) = rsinfo.setResult.take() {
+                    store = *set_result
+                        .downcast::<Tuplestore>()
+                        .expect("rsinfo.setResult downcasts to Tuplestore");
+                }
+                break;
+            }
         }
+        first_time = false;
     }
     Ok(store)
 }

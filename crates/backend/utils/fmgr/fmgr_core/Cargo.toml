@@ -46,6 +46,7 @@ adt_oracle_compat = { path = "../../adt/oracle_compat" }
 adt_pseudotypes = { path = "../../adt/pseudotypes" }
 adt_quote = { path = "../../adt/quote" }
 adt_varchar = { path = "../../adt/varchar" }
+pgstatfuncs = { path = "../../adt/pgstatfuncs" }
 name = { path = "../../adt/name" }
 nbt_compare = { path = "../../../access/nbtree/compare" }
 varlena = { path = "../../adt/varlena" }

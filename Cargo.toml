@@ -348,6 +348,7 @@ members = [
     "crates/backend/utils/adt/varlena",
     "crates/backend/utils/adt/varchar",
     "crates/backend/utils/adt/quote",
+    "crates/backend/utils/adt/pgstatfuncs",
     "crates/backend/utils/adt/encode",
     "crates/_support/types/regex",
     "crates/_support/types/locale",
