@@ -246,8 +246,11 @@ impl DfaMeta {
     fn new(eflags: i32, cnfa: &Cnfa) -> DfaMeta {
         let nss = (cnfa.nstates as usize) * 2;
         DfaMeta {
+            // C sizes its arrays to nssets; ours are sized to nss, so the
+            // REG_SMALL cache cap must not exceed the physical rows
+            // (INV-1 in regex_dfa_kernel.rs).
             nssets: if (eflags & REG_SMALL) != 0 {
-                REG_SMALL_NSSETS
+                REG_SMALL_NSSETS.min(nss)
             } else {
                 nss
             },
@@ -377,6 +380,10 @@ fn dfa_from_parts<'s>(
     let nss = meta.nstates * 2;
     let nssw = nss * meta.wordsper;
     let (statesarea, work) = statesarea_full[..nssw + WORK * meta.wordsper].split_at_mut(nssw);
+    // INV-1 (regex_dfa_kernel.rs) is established here, once per DFA: the
+    // kernel's raw accessors never re-check lengths.
+    assert!(meta.nssused <= meta.nssets && meta.nssets <= nss);
+    assert!(nss * meta.ncolors <= outs.len() && nss * meta.ncolors <= incarea.len());
     Dfa {
         nssets: meta.nssets,
         nssused: meta.nssused,
@@ -461,14 +468,11 @@ pub fn hash(uv: &[u32], n: usize) -> u32 {
 }
 
 
-pub fn initialize(d: &mut Dfa<'_>, cnfa: &Cnfa, start: usize) -> RegResult<Option<usize>> {
+pub fn initialize(d: &mut Dfa<'_>, cnfa: &Cnfa, start: usize) -> RegResult<usize> {
     let ss: usize = if d.nssused > 0 && (d.ssets[0].flags & STARTER) != 0 {
         0
     } else {
-        let ss = match getvacant(d, start, start)? {
-            Some(ss) => ss,
-            None => return Ok(None),
-        };
+        let ss = getvacant(d, start, start)?;
         for i in 0..d.wordsper {
             d.sset_states_mut(ss)[i] = 0;
         }
@@ -480,79 +484,23 @@ pub fn initialize(d: &mut Dfa<'_>, cnfa: &Cnfa, start: usize) -> RegResult<Optio
         ss
     };
 
-    for i in 0..d.nssused {
-        d.ssets[i].lastseen = Pos::NONE;
+    for s in &mut d.ssets[..d.nssused] {
+        s.lastseen = Pos::NONE;
     }
     d.ssets[ss].lastseen = Pos::at(start); // maybe untrue, but harmless
     d.lastpost = Pos::NONE;
     d.lastnopr = Pos::NONE;
-    Ok(Some(ss))
+    Ok(ss)
 }
 
 
-pub fn getvacant(d: &mut Dfa<'_>, cp: usize, start: usize) -> RegResult<Option<usize>> {
-    let ss = match pickss(d, cp, start)? {
-        Some(ss) => ss,
-        None => return Ok(None),
-    };
-    debug_assert!((d.ssets[ss].flags & LOCKED) == 0);
-
-    let mut ap: Arcp = d.ssets[ss].ins;
-    while ap.ss != NOSS {
-        let p = ap.ss as usize;
-        let co_idx = ap.co as usize;
-        d.outs[d.ssets[p].outs_base + co_idx] = NOSS;
-        ap = d.incarea[d.ssets[p].inchain_base + co_idx];
-        d.incarea[d.ssets[p].inchain_base + co_idx].ss = NOSS;
-    }
-    d.ssets[ss].ins.ss = NOSS;
-
-    for i in 0..d.ncolors {
-        let p = d.outs[d.ssets[ss].outs_base + i];
-        if p == NOSS {
-            continue; // NOTE CONTINUE
-        }
-        let p = p as usize;
-        debug_assert!(p != ss); // not self-referential
-
-        if d.ssets[p].ins.ss == ss as u32 && d.ssets[p].ins.co as usize == i {
-            d.ssets[p].ins = d.incarea[d.ssets[ss].inchain_base + i];
-        } else {
-            let mut lastap: Arcp = Arcp::null();
-            debug_assert!(d.ssets[p].ins.ss != NOSS);
-            let mut ap = d.ssets[p].ins;
-            while ap.ss != NOSS {
-                if ap.ss as usize == ss && ap.co as usize == i {
-                    break;
-                }
-                lastap = ap;
-                ap = d.incarea[d.ssets[ap.ss as usize].inchain_base + ap.co as usize];
-            }
-            debug_assert!(ap.ss != NOSS);
-            if lastap.ss == NOSS {
-                return Err(RegError(REG_ASSERT));
-            }
-            let lastap_ss = lastap.ss as usize;
-            let val = d.incarea[d.ssets[ss].inchain_base + i];
-            d.incarea[d.ssets[lastap_ss].inchain_base + lastap.co as usize] = val;
-        }
-        d.outs[d.ssets[ss].outs_base + i] = NOSS;
-        d.incarea[d.ssets[ss].inchain_base + i].ss = NOSS;
-    }
-
-    if (d.ssets[ss].flags & POSTSTATE) != 0 && d.lastpost < d.ssets[ss].lastseen {
-        d.lastpost = d.ssets[ss].lastseen;
-    }
-
-    if (d.ssets[ss].flags & NOPROGRESS) != 0 && d.lastnopr < d.ssets[ss].lastseen {
-        d.lastnopr = d.ssets[ss].lastseen;
-    }
-
-    Ok(Some(ss))
+#[inline]
+pub fn getvacant(d: &mut Dfa<'_>, cp: usize, start: usize) -> RegResult<usize> {
+    crate::regex_dfa_kernel::getvacant(d, cp, start)
 }
 
 
-pub fn pickss(d: &mut Dfa<'_>, cp: usize, start: usize) -> RegResult<Option<usize>> {
+pub fn pickss(d: &mut Dfa<'_>, cp: usize, start: usize) -> RegResult<usize> {
     debug_assert!(cp >= start);
 
     if d.nssused < d.nssets {
@@ -570,11 +518,9 @@ pub fn pickss(d: &mut Dfa<'_>, cp: usize, start: usize) -> RegResult<Option<usiz
             outs_base,
             inchain_base,
         };
-        for j in 0..d.ncolors {
-            d.outs[outs_base + j] = NOSS;
-            d.incarea[inchain_base + j] = Arcp::null();
-        }
-        return Ok(Some(i));
+        d.outs[outs_base..outs_base + d.ncolors].fill(NOSS);
+        d.incarea[inchain_base..inchain_base + d.ncolors].fill(Arcp::null());
+        return Ok(i);
     }
 
     let span = d.nssets * 2 / 3;
@@ -585,11 +531,11 @@ pub fn pickss(d: &mut Dfa<'_>, cp: usize, start: usize) -> RegResult<Option<usiz
     if let Some(off) = d.ssets[d.search..d.nssets].iter().position(is_vacant) {
         let ss = d.search + off;
         d.search = ss + 1;
-        return Ok(Some(ss));
+        return Ok(ss);
     }
     if let Some(ss) = d.ssets[..d.search].iter().position(is_vacant) {
         d.search = ss + 1;
-        return Ok(Some(ss));
+        return Ok(ss);
     }
 
     Err(RegError(REG_ASSERT))
@@ -652,47 +598,19 @@ fn miss(
     co: color,
     cp: usize,
     start: usize,
-) -> RegResult<Option<usize>> {
-    let hit = d.out(css, co);
+) -> RegResult<u32> {
+    let hit = crate::regex_dfa_kernel::cached_out(d, css, co);
     if hit != NOSS {
-        return Ok(Some(hit as usize));
+        return Ok(hit);
     }
 
 
     let ispseudocolor = (cm.cd[co as usize].flags & PSEUDO) != 0;
-    let mut ispost = false;
-    let mut noprogress = true;
-    let mut gotstate = false;
-    {
-        // Hoisted borrows: C walks css->states/d->work as raw pointers; the
-        // per-state slice re-derivation was ~1/3 of miss()'s instructions.
-        let base = d.ssets[css].states_base;
-        let css_states = &d.statesarea[base..base + d.wordsper];
-        let work = &mut d.work[..];
-        for w in work.iter_mut() {
-            *w = 0; // build new stateset bitmap in d.work
-        }
-        let arcs = &cnfa.arcs[..];
-        let stflags = &cnfa.stflags[..];
-        for i in 0..css_states.len() * UBITS {
-            if isbset(css_states, i) {
-                for ca in &arcs[cnfa.states[i].clone()] {
-                    if ca.co == co || (ca.co == RAINBOW && !ispseudocolor) {
-                        bset(work, ca.to as usize);
-                        gotstate = true;
-                        if ca.to == cnfa.post {
-                            ispost = true;
-                        }
-                        if (stflags[ca.to as usize] & CNFA_NOPROGRESS) == 0 {
-                            noprogress = false;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    if !gotstate {
-        return Ok(None); // character cannot reach any new state
+    let built = crate::regex_dfa_kernel::build_stateset(d, cnfa, css, co, ispseudocolor);
+    let mut ispost = built.ispost;
+    let mut noprogress = built.noprogress;
+    if !built.gotstate {
+        return Ok(NOSS); // character cannot reach any new state
     }
     let mut dolacons = (cnfa.flags & HASLACONS) != 0;
     let mut sawlacons = false;
@@ -744,14 +662,12 @@ fn miss(
     let p = match found {
         Some(p) => p,
         None => {
-            let p = match getvacant(d, cp, start)? {
-                Some(p) => p,
-                None => return Ok(None),
-            };
+            let p = getvacant(d, cp, start)?;
             debug_assert!(p != css);
-            for i in 0..d.wordsper {
-                let val = d.work[i];
-                d.sset_states_mut(p)[i] = val;
+            let base = d.ssets[p].states_base;
+            let wp = d.wordsper;
+            for (dst, &src) in d.statesarea[base..base + wp].iter_mut().zip(&d.work[..]) {
+                *dst = src;
             }
             d.ssets[p].hash = h;
             d.ssets[p].flags = if ispost { POSTSTATE } else { 0 };
@@ -763,15 +679,16 @@ fn miss(
     };
 
     if !sawlacons {
-        d.outs[d.ssets[css].outs_base + co as usize] = p as u32;
-        d.incarea[d.ssets[css].inchain_base + co as usize] = d.ssets[p].ins;
-        d.ssets[p].ins.ss = css as u32;
-        d.ssets[p].ins.co = co;
+        crate::regex_dfa_kernel::install_out(d, css, co, p);
     }
-    Ok(Some(p))
+    Ok(p as u32)
 }
 
 
+// LACON traversal is rare; keeping it out of line keeps miss()'s frame and
+// register pressure at C's density.
+#[cold]
+#[inline(never)]
 fn lacon(
     v: &mut ExecVars,
     g: &Guts,
@@ -889,10 +806,7 @@ fn longest(
         return Ok(Some(stop));
     }
 
-    let mut css = match initialize(d, cnfa, start)? {
-        Some(css) => css,
-        None => return Ok(None),
-    };
+    let mut css = initialize(d, cnfa, start)?;
     let mut cp = start;
 
     let co = if cp == v.start {
@@ -900,53 +814,39 @@ fn longest(
     } else {
         getcolor(cm, v.input[cp - 1])
     };
-    css = match miss(v, g, d, cnfa, cm, css, co, cp, start)? {
-        Some(css) => css,
-        None => return Ok(None),
-    };
+    let m = miss(v, g, d, cnfa, cm, css, co, cp, start)?;
+    if m == NOSS {
+        return Ok(None);
+    }
+    css = m as usize;
     d.ssets[css].lastseen = Pos::at(cp);
 
     // Slice pinned to the loop bound so the per-char input bounds check folds
-    // into the loop condition (C reads *cp bare). Fast scan holds d's arrays
-    // as locals: a lastseen store through &mut d otherwise forces ptr/len
-    // reloads of every other array each char (all derive from one noalias d).
+    // into the loop condition (C reads *cp bare). The per-char loop lives in
+    // the kernel (pointer-shaped sset access).
     let input = v.input;
     debug_assert!(realstop <= input.len());
     let input = &input[..realstop];
-    let locolormap = &cm.locolormap[..(MAX_SIMPLE_CHR - CHR_MIN + 1) as usize];
-    'scan: while cp < input.len() {
-        let pend_co: color;
-        {
-            let ssets = &mut *d.ssets;
-            let outs = &*d.outs;
-            loop {
-                let c = input[cp];
-                let co = if c <= MAX_SIMPLE_CHR {
-                    locolormap[(c - CHR_MIN) as usize]
-                } else {
-                    crate::regex_foundation::pg_reg_getcolor(cm, c)
-                };
-                let hit = outs[ssets[css].outs_base + co as usize];
-                if hit == NOSS {
-                    pend_co = co;
-                    break;
+    loop {
+        use crate::regex_dfa_kernel::{scan_longest, Scan};
+        match scan_longest(d, cm, input, cp, css) {
+            Scan::End { cp: ncp, css: ncss } => {
+                cp = ncp;
+                css = ncss;
+                break;
+            }
+            Scan::Post { .. } => unreachable!(),
+            Scan::Miss { cp: ncp, css: ncss, co } => {
+                cp = ncp;
+                css = ncss;
+                let m = miss(v, g, d, cnfa, cm, css, co, cp + 1, start)?;
+                if m == NOSS {
+                    break; // NOTE BREAK OUT
                 }
                 cp += 1;
-                let ss = hit as usize;
-                ssets[ss].lastseen = Pos::at(cp);
-                css = ss;
-                if cp >= input.len() {
-                    break 'scan;
-                }
+                css = m as usize;
+                d.ssets[css].lastseen = Pos::at(cp);
             }
-        }
-        match miss(v, g, d, cnfa, cm, css, pend_co, cp + 1, start)? {
-            Some(ss) => {
-                cp += 1;
-                d.ssets[ss].lastseen = Pos::at(cp);
-                css = ss;
-            }
-            None => break, // NOTE BREAK OUT
         }
     }
 
@@ -955,18 +855,20 @@ fn longest(
             *hs = true;
         }
         let co = cnfa.eos[if (v.eflags & REG_NOTEOL) != 0 { 0 } else { 1 }];
-        let ss = miss(v, g, d, cnfa, cm, css, co, cp, start)?;
-        match ss {
-            Some(ss) if (d.ssets[ss].flags & POSTSTATE) != 0 => return Ok(Some(cp)),
-            Some(ss) => d.ssets[ss].lastseen = Pos::at(cp), // to be tidy
-            None => {}
+        let m = miss(v, g, d, cnfa, cm, css, co, cp, start)?;
+        if m != NOSS {
+            let ss = m as usize;
+            if (d.ssets[ss].flags & POSTSTATE) != 0 {
+                return Ok(Some(cp));
+            }
+            d.ssets[ss].lastseen = Pos::at(cp); // to be tidy
         }
     }
 
     let mut post = d.lastpost;
-    for ss in 0..d.nssused {
-        if (d.ssets[ss].flags & POSTSTATE) != 0 && post < d.ssets[ss].lastseen {
-            post = d.ssets[ss].lastseen;
+    for s in &d.ssets[..d.nssused] {
+        if (s.flags & POSTSTATE) != 0 && post < s.lastseen {
+            post = s.lastseen;
         }
     }
     if !post.is_none() {
@@ -1030,10 +932,7 @@ fn shortest(
         return Ok(Some(min));
     }
 
-    let mut css = match initialize(d, cnfa, start)? {
-        Some(css) => css,
-        None => return Ok(None),
-    };
+    let mut css = initialize(d, cnfa, start)?;
     let mut cp = start;
 
     let co = if cp == v.start {
@@ -1041,61 +940,43 @@ fn shortest(
     } else {
         getcolor(cm, v.input[cp - 1])
     };
-    css = match miss(v, g, d, cnfa, cm, css, co, cp, start)? {
-        Some(css) => css,
-        None => return Ok(None),
-    };
+    let m = miss(v, g, d, cnfa, cm, css, co, cp, start)?;
+    if m == NOSS {
+        return Ok(None);
+    }
+    css = m as usize;
     d.ssets[css].lastseen = Pos::at(cp);
     let mut ss: Option<usize> = Some(css);
 
-    // Same bounds-check fold and fast-scan hoist as longest().
+    // Same bounds-check fold as longest(); per-char loop in the kernel.
     let input = v.input;
     debug_assert!(realmax <= input.len());
     let input = &input[..realmax];
-    let locolormap = &cm.locolormap[..(MAX_SIMPLE_CHR - CHR_MIN + 1) as usize];
-    'scan: while cp < input.len() {
-        let pend_co: color;
-        {
-            let ssets = &mut *d.ssets;
-            let outs = &*d.outs;
-            loop {
-                let c = input[cp];
-                let co = if c <= MAX_SIMPLE_CHR {
-                    locolormap[(c - CHR_MIN) as usize]
-                } else {
-                    crate::regex_foundation::pg_reg_getcolor(cm, c)
-                };
-                let hit = outs[ssets[css].outs_base + co as usize];
-                if hit == NOSS {
-                    pend_co = co;
-                    break;
-                }
-                cp += 1;
-                let next = hit as usize;
-                ssets[next].lastseen = Pos::at(cp);
-                css = next;
-                ss = Some(next);
-                if (ssets[next].flags & POSTSTATE) != 0 && cp >= realmin {
-                    break 'scan; // NOTE BREAK OUT
-                }
-                if cp >= input.len() {
-                    break 'scan;
-                }
+    loop {
+        use crate::regex_dfa_kernel::{scan_shortest, Scan};
+        match scan_shortest(d, cm, input, cp, css, realmin) {
+            Scan::End { cp: ncp, css: ncss } | Scan::Post { cp: ncp, css: ncss } => {
+                cp = ncp;
+                css = ncss;
+                ss = Some(ncss);
+                break;
             }
-        }
-        match miss(v, g, d, cnfa, cm, css, pend_co, cp + 1, start)? {
-            Some(next) => {
+            Scan::Miss { cp: ncp, css: ncss, co } => {
+                cp = ncp;
+                css = ncss;
+                let m = miss(v, g, d, cnfa, cm, css, co, cp + 1, start)?;
+                if m == NOSS {
+                    ss = None;
+                    break; // NOTE BREAK OUT
+                }
                 cp += 1;
+                let next = m as usize;
                 d.ssets[next].lastseen = Pos::at(cp);
                 css = next;
                 ss = Some(next);
                 if (d.ssets[next].flags & POSTSTATE) != 0 && cp >= realmin {
                     break; // NOTE BREAK OUT
                 }
-            }
-            None => {
-                ss = None;
-                break; // NOTE BREAK OUT
             }
         }
     }
@@ -1119,7 +1000,8 @@ fn shortest(
         cp -= 1;
     } else if cp == v.stop && max == v.stop {
         let co = cnfa.eos[if (v.eflags & REG_NOTEOL) != 0 { 0 } else { 1 }];
-        ss_opt = miss(v, g, d, cnfa, cm, css, co, cp, start)?;
+        let m = miss(v, g, d, cnfa, cm, css, co, cp, start)?;
+        ss_opt = if m == NOSS { None } else { Some(m as usize) };
         let not_post = match ss_opt {
             None => true,
             Some(s) => (d.ssets[s].flags & POSTSTATE) == 0,
@@ -1163,18 +1045,13 @@ fn matchuntil(
     if cp.is_none() || cp > Some(probe) {
         let start = v.start;
         cp = Some(start);
-        let init = match initialize(d, cnfa, start)? {
-            Some(s) => s,
-            None => return Ok(false),
-        };
+        let init = initialize(d, cnfa, start)?;
         let co = cnfa.bos[if (v.eflags & REG_NOTBOL) != 0 { 0 } else { 1 }];
         let m = miss(v, g, d, cnfa, cm, init, co, start, start)?;
-        let css_i = match m {
-            Some(s) => s,
-            None => {
-                return Ok(false);
-            }
-        };
+        if m == NOSS {
+            return Ok(false);
+        }
+        let css_i = m as usize;
         css = Some(css_i);
         d.ssets[css_i].lastseen = Pos::at(start);
     } else if css.is_none() {
@@ -1190,13 +1067,12 @@ fn matchuntil(
         let next = if hit != NOSS {
             hit as usize
         } else {
-            match miss(v, g, d, cnfa, cm, css_v, co, cp_v + 1, v.start)? {
-                Some(s) => s,
-                None => {
-                    ss = None;
-                    break; // NOTE BREAK OUT
-                }
+            let m = miss(v, g, d, cnfa, cm, css_v, co, cp_v + 1, v.start)?;
+            if m == NOSS {
+                ss = None;
+                break; // NOTE BREAK OUT
             }
+            m as usize
         };
         cp_v += 1;
         d.ssets[next].lastseen = Pos::at(cp_v);
@@ -1217,7 +1093,7 @@ fn matchuntil(
         let co = getcolor(cm, v.input[cp_v]);
         let hit = d.out(css_v, co);
         if hit != NOSS {
-            Some(hit as usize)
+            hit
         } else {
             miss(v, g, d, cnfa, cm, css_v, co, cp_v + 1, v.start)?
         }
@@ -1228,7 +1104,7 @@ fn matchuntil(
     };
 
     match ss {
-        Some(s) if (d.ssets[s].flags & POSTSTATE) != 0 => Ok(true),
+        s if s != NOSS && (d.ssets[s as usize].flags & POSTSTATE) != 0 => Ok(true),
         _ => Ok(false),
     }
 }
@@ -1311,9 +1187,9 @@ fn lastcold(v: &ExecVars, d: &Dfa<'_>) -> usize {
     } else {
         d.lastnopr
     };
-    for ss in 0..d.nssused {
-        if (d.ssets[ss].flags & NOPROGRESS) != 0 && nopr < d.ssets[ss].lastseen {
-            nopr = d.ssets[ss].lastseen;
+    for s in &d.ssets[..d.nssused] {
+        if (s.flags & NOPROGRESS) != 0 && nopr < s.lastseen {
+            nopr = s.lastseen;
         }
     }
     nopr.get()
