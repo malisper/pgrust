@@ -58,6 +58,13 @@ fn pull_var_nodes<'mcx>(node: Node<'mcx>, out: &mut PgVec<'mcx, Node<'mcx>>) {
                 pull_var_nodes(arg, out);
             }
         }
+        NodeTag::T_GroupingFunc => {
+            let g = node.as_grouping_func().unwrap();
+            debug_assert!(g.agglevelsup == 0);
+            for arg in &g.args {
+                pull_var_nodes(arg, out);
+            }
+        }
         NodeTag::T_TargetEntry => pull_var_nodes(node.as_target_entry().unwrap().expr, out),
         NodeTag::T_OpExpr => {
             for a in &node.as_op_expr().unwrap().args {

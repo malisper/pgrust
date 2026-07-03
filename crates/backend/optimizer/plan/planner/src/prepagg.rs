@@ -41,6 +41,13 @@ fn preprocess_aggrefs_walker<'mcx>(
 ) -> PgResult<()> {
     match node.node_tag() {
         NodeTag::T_Aggref => preprocess_aggref(run, node),
+        // C's default expression_tree_walker arm: descend into the args.
+        NodeTag::T_GroupingFunc => {
+            for a in &node.as_grouping_func().unwrap().args {
+                preprocess_aggrefs_walker(run, a)?;
+            }
+            Ok(())
+        }
         NodeTag::T_TargetEntry => {
             preprocess_aggrefs_walker(run, node.as_target_entry().unwrap().expr)
         }

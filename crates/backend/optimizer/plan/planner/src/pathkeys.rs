@@ -201,7 +201,7 @@ fn group_keys_reorder_by_pathkeys<'mcx>(
     n
 }
 
-/// C `get_useful_group_keys_orderings` (grouping sets loud upstream).
+/// C `get_useful_group_keys_orderings`.
 pub fn get_useful_group_keys_orderings<'mcx>(
     run: &mut PlannerRun<'mcx>,
     path_pathkeys: &[PathKey],
@@ -213,6 +213,10 @@ pub fn get_useful_group_keys_orderings<'mcx>(
         clauses: crate::relnode::pgvec_clone_shallow(mcx, &run.root.processed_groupClause),
     });
     if !crate::gucs::enable_group_by_reordering() {
+        return infos;
+    }
+    // Grouping sets have their own, more complex ordering logic.
+    if !run.parse().groupingSets.is_nil() {
         return infos;
     }
     if !path_pathkeys.is_empty()

@@ -10,6 +10,7 @@ path = "src/lib.rs"
 [dependencies]
 execmain = { path = "../../../executor/execmain" }
 nodes_core = { path = "../../../nodes/nodes_core" }
+parse_agg = { path = "../../../parser/parse_agg" }
 parse_relation = { path = "../../../parser/parse_relation" }
 parser_analyze = { path = "../../../parser/parser_analyze" }
 mcx = { path = "../../../../_support/mcx" }

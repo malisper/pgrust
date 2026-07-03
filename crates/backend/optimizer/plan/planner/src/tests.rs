@@ -4058,3 +4058,427 @@ mod setops {
         assert_eq!(rscan.scan.scanrelid, 4);
     }
 }
+
+mod grouping_sets {
+    use super::*;
+    use types_nodes::list::IntList;
+    use types_nodes::parsenodes::{GroupingSet, GroupingSetKind, SortGroupClause};
+    use types_nodes::primnodes::{Aggref, GroupingFunc};
+
+    const COUNT_STAR: u32 = 2803;
+
+    fn ensure_work_mem() {
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            if !guc_tables::vars::work_mem.installed() {
+                init_small::init_seams();
+            }
+        });
+    }
+
+    fn set_of<'m>(mcx: Mcx<'m>, refs: &[i32]) -> mcx::PgVec<'m, i32> {
+        let mut v = mcx::PgVec::new_in(mcx);
+        v.extend_from_slice(refs);
+        v
+    }
+
+    fn sets_of<'m>(mcx: Mcx<'m>, sets: &[&[i32]]) -> mcx::PgVec<'m, mcx::PgVec<'m, i32>> {
+        let mut v = mcx::PgVec::new_in(mcx);
+        for s in sets {
+            v.push(set_of(mcx, s));
+        }
+        v
+    }
+
+    fn chain_sets(chain: &[types_pathnodes::GroupingSetData<'_>]) -> Vec<Vec<u32>> {
+        chain.iter().map(|gs| gs.set.to_vec()).collect()
+    }
+
+    #[test]
+    fn extract_rollup_sets_single_chain() {
+        let cx = cx();
+        let mcx = cx.mcx();
+        // (a),(a,b),(a,b,c) nest into one rollup chain.
+        let sets = sets_of(mcx, &[&[1], &[1, 2], &[1, 2, 3]]);
+        let chains = crate::groupingsets::extract_rollup_sets(mcx, sets);
+        assert_eq!(chains.len(), 1);
+        assert_eq!(chains[0].len(), 3);
+    }
+
+    #[test]
+    fn extract_rollup_sets_disjoint_and_overlapping_need_two_chains() {
+        let cx = cx();
+        let mcx = cx.mcx();
+        let chains =
+            crate::groupingsets::extract_rollup_sets(mcx, sets_of(mcx, &[&[1], &[2]]));
+        assert_eq!(chains.len(), 2);
+        // (a,b),(b,c): neither is a subset of the other.
+        let chains = crate::groupingsets::extract_rollup_sets(
+            mcx,
+            sets_of(mcx, &[&[1, 2], &[2, 3]]),
+        );
+        assert_eq!(chains.len(), 2);
+    }
+
+    #[test]
+    fn extract_rollup_sets_puts_empty_sets_on_first_chain() {
+        let cx = cx();
+        let mcx = cx.mcx();
+        let chains = crate::groupingsets::extract_rollup_sets(
+            mcx,
+            sets_of(mcx, &[&[], &[1], &[2]]),
+        );
+        assert_eq!(chains.len(), 2);
+        assert_eq!(chains[0].iter().map(|s| s.to_vec()).collect::<Vec<_>>(), vec![
+            Vec::<i32>::new(),
+            vec![1]
+        ]);
+        assert_eq!(chains[1][0].to_vec(), vec![2]);
+    }
+
+    #[test]
+    fn reorder_grouping_sets_prefix_orders_largest_first() {
+        let cx = cx();
+        let mcx = cx.mcx();
+        let chain = sets_of(mcx, &[&[], &[2], &[2, 1]]);
+        let data =
+            crate::groupingsets::reorder_grouping_sets(mcx, chain, &NodeList::nil());
+        assert_eq!(chain_sets(&data), vec![vec![2, 1], vec![2], vec![]]);
+    }
+
+    fn mk_sgc<'m>(mcx: Mcx<'m>, sgref: u32) -> Node<'m> {
+        Node::mk(
+            mcx,
+            SortGroupClause {
+                tleSortGroupRef: sgref,
+                eqop: INT4EQ_OP,
+                sortop: INT4_LT_OP,
+                reverse_sort: false,
+                nulls_first: false,
+                hashable: true,
+            },
+        )
+        .unwrap()
+    }
+
+    fn int_list_node<'m>(mcx: Mcx<'m>, refs: &[i32]) -> Node<'m> {
+        let mut il = IntList::nil();
+        for &r in refs {
+            il.lappend(mcx, r).unwrap();
+        }
+        Node::mk_int_list(mcx, il).unwrap()
+    }
+
+    // preprocess_grouping_sets over an already-expanded ROLLUP(a,b):
+    // [[],[1],[1,2]] -> one rollup, gsets [[0,1],[0],[]].
+    #[test]
+    fn preprocess_grouping_sets_rollup_shape() {
+        let cx = cx();
+        let mcx = cx.mcx();
+        let mut parse = table_query(mcx, None);
+        let mut gc = NodeList::make1(mcx, mk_sgc(mcx, 1)).unwrap();
+        gc.lappend(mcx, mk_sgc(mcx, 2)).unwrap();
+        parse.groupClause = gc;
+        let mut gsets = NodeList::make1(mcx, int_list_node(mcx, &[])).unwrap();
+        gsets.lappend(mcx, int_list_node(mcx, &[1])).unwrap();
+        gsets.lappend(mcx, int_list_node(mcx, &[1, 2])).unwrap();
+        parse.groupingSets = gsets;
+        let mut run = crate::run::PlannerRun::new(mcx);
+        let sealed: &Query<'_> = alloc_leak_in(mcx, parse).unwrap();
+        run.root.parse = run.intern_query(sealed);
+
+        let gd = crate::groupingsets::preprocess_grouping_sets(&mut run).unwrap();
+        assert_eq!(gd.rollups.len(), 1);
+        let rollup = &gd.rollups[0];
+        assert_eq!(rollup.groupClause.len(), 2);
+        let gsets: Vec<Vec<i32>> = rollup.gsets.iter().map(|s| s.to_vec()).collect();
+        assert_eq!(gsets, vec![vec![0, 1], vec![0], vec![]]);
+        assert_eq!(chain_sets(&rollup.gsets_data), vec![vec![1, 2], vec![1], vec![]]);
+        assert!(rollup.hashable);
+        assert!(gd.any_hashable);
+        assert!(gd.unsortable_sets.is_empty());
+        assert_eq!(run.root.processed_groupClause.len(), 2);
+    }
+
+    fn mk_count<'m>(mcx: Mcx<'m>) -> Node<'m> {
+        Node::mk(
+            mcx,
+            Aggref { aggfnoid: COUNT_STAR, aggtype: 20, aggstar: true, ..Aggref::default() },
+        )
+        .unwrap()
+    }
+
+    // SELECT val, grouping(val), count(*) FROM t GROUP BY ROLLUP(val).
+    fn rollup_val_query(mcx: Mcx<'_>) -> Query<'_> {
+        let mut parse = table_query(mcx, None);
+        let val = Node::mk_var(mcx, 1, 2, 23, -1, 0, 0).unwrap();
+        let tle1 = Node::mk_target_entry(mcx, val, 1, Some("val"), false).unwrap();
+        // SAFETY: freshly built tlist; no other reference is live.
+        unsafe {
+            tle1.with_mut::<types_nodes::primnodes::TargetEntry, _>(|t| t.ressortgroupref = 1)
+        }
+        .unwrap();
+        let gf = Node::mk(
+            mcx,
+            GroupingFunc {
+                args: NodeList::make1(mcx, val).unwrap(),
+                refs: IntList::make1(mcx, 1).unwrap(),
+                cols: IntList::nil(),
+                agglevelsup: 0,
+                location: -1,
+            },
+        )
+        .unwrap();
+        let tle2 = Node::mk_target_entry(mcx, gf, 2, Some("grouping"), false).unwrap();
+        let tle3 = Node::mk_target_entry(mcx, mk_count(mcx), 3, Some("count"), false).unwrap();
+        let mut tlist = NodeList::make1(mcx, tle1).unwrap();
+        tlist.lappend(mcx, tle2).unwrap();
+        tlist.lappend(mcx, tle3).unwrap();
+        parse.targetList = tlist;
+        parse.hasAggs = true;
+        parse.groupClause = NodeList::make1(mcx, mk_sgc(mcx, 1)).unwrap();
+        let simple = Node::mk(
+            mcx,
+            GroupingSet {
+                kind: GroupingSetKind::GROUPING_SET_SIMPLE,
+                content: NodeList::make1(mcx, Node::mk_integer(mcx, 1).unwrap()).unwrap(),
+                location: -1,
+            },
+        )
+        .unwrap();
+        let rollup = Node::mk(
+            mcx,
+            GroupingSet {
+                kind: GroupingSetKind::GROUPING_SET_ROLLUP,
+                content: NodeList::make1(mcx, simple).unwrap(),
+                location: -1,
+            },
+        )
+        .unwrap();
+        parse.groupingSets = NodeList::make1(mcx, rollup).unwrap();
+        parse
+    }
+
+    // GROUP BY ROLLUP(val) under enable_hashagg=off: one rollup, so a single
+    // AGG_SORTED phase (empty chain) atop Sort(val); groupingSets [[0],[]];
+    // GROUPING(val) resolved to cols [1] by setrefs.
+    #[test]
+    fn rollup_plans_sorted_agg_chain() {
+        let _guc = crate::tests::GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cx = cx();
+        ensure_work_mem();
+        let mcx = cx.mcx();
+        crate::gucs::set_enable_hashagg(false);
+        let stmt = planner(
+            mcx,
+            rollup_val_query(mcx),
+            "SELECT val, grouping(val), count(*) FROM t GROUP BY ROLLUP(val)",
+            CURSOR_OPT_PARALLEL_OK,
+            ParamListHandle::NULL,
+        );
+        crate::gucs::set_enable_hashagg(true);
+        let stmt = stmt.unwrap();
+        let plan = stmt.planTree.unwrap();
+        assert_eq!(plan.node_tag(), NodeTag::T_Agg);
+        let agg = plan.as_agg().unwrap();
+        assert_eq!(agg.aggstrategy, types_pathnodes::AGG_SORTED);
+        assert_eq!(agg.numCols, 1);
+        assert_eq!(agg.grpColIdx, &[1i16]);
+        assert_eq!(agg.grpOperators, &[INT4EQ_OP]);
+        let gsets: Vec<Vec<i32>> =
+            agg.groupingSets.iter().map(|n| n.as_int_list().unwrap().iter().collect()).collect();
+        assert_eq!(gsets, vec![vec![0], vec![]]);
+        assert!(agg.chain.is_nil());
+        // 200 default groups for (val) + 1 for the empty set.
+        assert_eq!(agg.numGroups, 201);
+        assert_eq!(agg.plan.plan_rows, 201.0);
+
+        // GROUPING(val): refs [1] remapped through grouping_map to cols [1].
+        let gf_tle = agg.plan.targetlist.nth(1).as_target_entry().unwrap();
+        let gf = gf_tle.expr.as_grouping_func().unwrap();
+        assert_eq!(gf.refs.iter().collect::<Vec<i32>>(), vec![1]);
+        assert_eq!(gf.cols.iter().collect::<Vec<i32>>(), vec![1]);
+        assert!(gf.args.nth(0).as_var().is_some());
+
+        let sort = agg.plan.lefttree.unwrap();
+        assert_eq!(sort.node_tag(), NodeTag::T_Sort);
+        let s = sort.as_sort().unwrap();
+        assert_eq!(s.sortColIdx, &[1i16]);
+        assert_eq!(
+            sort.as_plan().unwrap().lefttree.unwrap().node_tag(),
+            NodeTag::T_SeqScan
+        );
+    }
+
+    // Default settings: C would consider the hashed/AGG_MIXED strategies,
+    // which this lane leaves loud.
+    #[test]
+    #[should_panic(expected = "consider_groupingsets_paths (planner.c): hashed/AGG_MIXED")]
+    fn rollup_with_hashagg_panics_loud() {
+        let _guc = crate::tests::GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cx = cx();
+        ensure_work_mem();
+        let mcx = cx.mcx();
+        let _ = planner(
+            mcx,
+            rollup_val_query(mcx),
+            "SELECT val, grouping(val), count(*) FROM t GROUP BY ROLLUP(val)",
+            CURSOR_OPT_PARALLEL_OK,
+            ParamListHandle::NULL,
+        );
+    }
+
+    // SELECT val, pk, count(*) FROM t GROUP BY GROUPING SETS ((val),(pk)):
+    // two rollups -> top Agg for (val) plus a one-element chain for (pk)
+    // with a vestigial stripped Sort.
+    #[test]
+    fn grouping_sets_two_rollups_build_chain() {
+        let _guc = crate::tests::GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cx = cx();
+        ensure_work_mem();
+        let mcx = cx.mcx();
+        let mut parse = table_query(mcx, None);
+        let val = Node::mk_var(mcx, 1, 2, 23, -1, 0, 0).unwrap();
+        let pk = Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap();
+        let tle1 = Node::mk_target_entry(mcx, val, 1, Some("val"), false).unwrap();
+        let tle2 = Node::mk_target_entry(mcx, pk, 2, Some("pk"), false).unwrap();
+        // SAFETY: freshly built tlist; no other reference is live.
+        unsafe {
+            tle1.with_mut::<types_nodes::primnodes::TargetEntry, _>(|t| t.ressortgroupref = 1)
+        }
+        .unwrap();
+        // SAFETY: as above.
+        unsafe {
+            tle2.with_mut::<types_nodes::primnodes::TargetEntry, _>(|t| t.ressortgroupref = 2)
+        }
+        .unwrap();
+        let tle3 = Node::mk_target_entry(mcx, mk_count(mcx), 3, Some("count"), false).unwrap();
+        let mut tlist = NodeList::make1(mcx, tle1).unwrap();
+        tlist.lappend(mcx, tle2).unwrap();
+        tlist.lappend(mcx, tle3).unwrap();
+        parse.targetList = tlist;
+        parse.hasAggs = true;
+        let mut gc = NodeList::make1(mcx, mk_sgc(mcx, 1)).unwrap();
+        gc.lappend(mcx, mk_sgc(mcx, 2)).unwrap();
+        parse.groupClause = gc;
+        let simple = |r: i32| {
+            Node::mk(
+                mcx,
+                GroupingSet {
+                    kind: GroupingSetKind::GROUPING_SET_SIMPLE,
+                    content: NodeList::make1(mcx, Node::mk_integer(mcx, r).unwrap()).unwrap(),
+                    location: -1,
+                },
+            )
+            .unwrap()
+        };
+        let mut content = NodeList::make1(mcx, simple(1)).unwrap();
+        content.lappend(mcx, simple(2)).unwrap();
+        let sets = Node::mk(
+            mcx,
+            GroupingSet {
+                kind: GroupingSetKind::GROUPING_SET_SETS,
+                content,
+                location: -1,
+            },
+        )
+        .unwrap();
+        parse.groupingSets = NodeList::make1(mcx, sets).unwrap();
+
+        crate::gucs::set_enable_hashagg(false);
+        let stmt = planner(
+            mcx,
+            parse,
+            "SELECT val, pk, count(*) FROM t GROUP BY GROUPING SETS ((val),(pk))",
+            CURSOR_OPT_PARALLEL_OK,
+            ParamListHandle::NULL,
+        );
+        crate::gucs::set_enable_hashagg(true);
+        let stmt = stmt.unwrap();
+        let plan = stmt.planTree.unwrap();
+        let agg = plan.as_agg().unwrap();
+        assert_eq!(agg.aggstrategy, types_pathnodes::AGG_SORTED);
+        assert_eq!(agg.numCols, 1);
+        assert_eq!(agg.grpColIdx, &[1i16]);
+        let gsets: Vec<Vec<i32>> =
+            agg.groupingSets.iter().map(|n| n.as_int_list().unwrap().iter().collect()).collect();
+        assert_eq!(gsets, vec![vec![0]]);
+        // First phase covers (val): 200 default groups; the (pk) phase adds
+        // the unique-index estimate of 10000, so 10200 rows total.
+        assert_eq!(agg.numGroups, 200);
+        assert_eq!(agg.plan.plan_rows, 10200.0);
+
+        assert_eq!(agg.chain.len(), 1);
+        let chain_agg = agg.chain.nth(0).as_agg().unwrap();
+        assert_eq!(chain_agg.aggstrategy, types_pathnodes::AGG_SORTED);
+        assert_eq!(chain_agg.numCols, 1);
+        assert_eq!(chain_agg.grpColIdx, &[2i16]);
+        assert!(chain_agg.plan.targetlist.is_nil() && chain_agg.plan.qual.is_nil());
+        let chain_gsets: Vec<Vec<i32>> = chain_agg
+            .groupingSets
+            .iter()
+            .map(|n| n.as_int_list().unwrap().iter().collect())
+            .collect();
+        assert_eq!(chain_gsets, vec![vec![0]]);
+        // The vestigial Sort: keyed on pk's column, stripped of tlist/child.
+        let vsort = chain_agg.plan.lefttree.unwrap();
+        let vs = vsort.as_sort().unwrap();
+        assert_eq!(vs.sortColIdx, &[2i16]);
+        assert!(vs.plan.targetlist.is_nil() && vs.plan.lefttree.is_none());
+
+        // The real input: Sort(val) over SeqScan.
+        let sort = agg.plan.lefttree.unwrap();
+        assert_eq!(sort.node_tag(), NodeTag::T_Sort);
+        assert_eq!(sort.as_sort().unwrap().sortColIdx, &[1i16]);
+        assert_eq!(
+            sort.as_plan().unwrap().lefttree.unwrap().node_tag(),
+            NodeTag::T_SeqScan
+        );
+    }
+
+    // GROUP BY (): grouping sets [EMPTY] flow the ordinary path and collapse
+    // to a single AGG_PLAIN phase with groupingSets [[]].
+    #[test]
+    fn group_by_empty_set_plans_plain_agg() {
+        let _guc = crate::tests::GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cx = cx();
+        ensure_work_mem();
+        let mcx = cx.mcx();
+        let mut parse = table_query(mcx, None);
+        let tle = Node::mk_target_entry(mcx, mk_count(mcx), 1, Some("count"), false).unwrap();
+        parse.targetList = NodeList::make1(mcx, tle).unwrap();
+        parse.hasAggs = true;
+        let empty = Node::mk(
+            mcx,
+            GroupingSet {
+                kind: GroupingSetKind::GROUPING_SET_EMPTY,
+                content: NodeList::nil(),
+                location: -1,
+            },
+        )
+        .unwrap();
+        parse.groupingSets = NodeList::make1(mcx, empty).unwrap();
+
+        let stmt = planner(
+            mcx,
+            parse,
+            "SELECT count(*) FROM t GROUP BY ()",
+            CURSOR_OPT_PARALLEL_OK,
+            ParamListHandle::NULL,
+        )
+        .unwrap();
+        let plan = stmt.planTree.unwrap();
+        let agg = plan.as_agg().unwrap();
+        assert_eq!(agg.aggstrategy, types_pathnodes::AGG_PLAIN);
+        assert_eq!(agg.numCols, 0);
+        let gsets: Vec<Vec<i32>> =
+            agg.groupingSets.iter().map(|n| n.as_int_list().unwrap().iter().collect()).collect();
+        assert_eq!(gsets, vec![Vec::<i32>::new()]);
+        assert!(agg.chain.is_nil());
+        assert_eq!(agg.plan.plan_rows, 1.0);
+        assert_eq!(
+            agg.plan.lefttree.unwrap().node_tag(),
+            NodeTag::T_SeqScan
+        );
+    }
+}

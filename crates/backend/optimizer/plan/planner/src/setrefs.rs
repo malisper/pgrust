@@ -270,8 +270,14 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
             }
         }
         NodeTag::T_Agg => {
+            // C's set_plan_refs never walks agg->chain: the chain Aggs
+            // carry NIL tlists/quals and stripped Sorts; nothing to fix.
             let a = plan.as_agg().unwrap();
-            debug_assert!(a.groupingSets.is_nil() && a.chain.is_nil());
+            debug_assert!(a.chain.is_nil() || !a.groupingSets.is_nil());
+            for chain_node in &a.chain {
+                let c = chain_node.as_agg().expect("chain cell is an Agg");
+                debug_assert!(c.plan.targetlist.is_nil() && c.plan.qual.is_nil());
+            }
             set_upper_references(run, plan, rtoffset)?;
         }
         NodeTag::T_WindowAgg => {
@@ -689,6 +695,40 @@ fn fix_upper_expr<'mcx>(
                     aggno: a.aggno,
                     aggtransno: a.aggtransno,
                     location: a.location,
+                },
+            )
+        }
+        NodeTag::T_GroupingFunc => {
+            // fix_expr_common (setrefs.c): cols built from refs through
+            // root->grouping_map; args mutated like any other expression.
+            let g = node.as_grouping_func().expect("GroupingFunc");
+            let grouping_map = &run.root.grouping_map;
+            debug_assert!(!grouping_map.is_empty() || g.cols.is_nil());
+            let cols = if !run.root.grouping_map.is_empty() {
+                let mut cols = types_nodes::list::IntList::nil();
+                for r in &g.refs {
+                    cols.lappend(mcx, run.root.grouping_map[r as usize] as i32)?;
+                }
+                debug_assert!(
+                    g.cols.is_nil() || g.cols.iter().eq(cols.iter()),
+                    "GroupingFunc cols disagree with grouping_map"
+                );
+                cols
+            } else {
+                g.cols.clone_in(mcx)?
+            };
+            let mut args = NodeList::nil();
+            for arg in &g.args {
+                args.lappend(mcx, fix_upper_expr(run, arg, subplan_tlist, rtoffset)?)?;
+            }
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::GroupingFunc {
+                    args,
+                    refs: g.refs.clone_in(mcx)?,
+                    cols,
+                    agglevelsup: g.agglevelsup,
+                    location: g.location,
                 },
             )
         }

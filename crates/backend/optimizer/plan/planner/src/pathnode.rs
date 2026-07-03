@@ -766,6 +766,159 @@ pub fn create_agg_path<'mcx>(
     Ok(id)
 }
 
+// create_groupingsets_path (pathnode.c); hashed/AGG_MIXED rollups are loud
+// upstream, so the is_hashed cost legs are unreachable panics.
+#[allow(clippy::too_many_arguments)]
+pub fn create_groupingsets_path<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel_id: RelId,
+    subpath_id: PathId,
+    having_qual: PgVec<'mcx, types_pathnodes::NodeId>,
+    aggstrategy: u32,
+    rollups: PgVec<'mcx, types_pathnodes::RollupData<'mcx>>,
+    agg_costs: &types_pathnodes::AggClauseCosts,
+) -> PgResult<PathId> {
+    let mcx = run.mcx;
+    let sub = run.root.path(subpath_id).base();
+    let rel = run.root.rel(rel_id);
+    let target_id = rel.pathtarget_id.expect("grouped rel has a reltarget");
+
+    debug_assert!(!rollups.is_empty());
+    let aggstrategy = if aggstrategy == types_pathnodes::AGG_SORTED
+        && rollups.len() == 1
+        && rollups[0].groupClause.is_empty()
+    {
+        types_pathnodes::AGG_PLAIN
+    } else {
+        aggstrategy
+    };
+    debug_assert!(
+        aggstrategy == types_pathnodes::AGG_SORTED || aggstrategy == types_pathnodes::AGG_PLAIN,
+        "create_groupingsets_path (pathnode.c): hashed/AGG_MIXED strategy; grouping-sets lane"
+    );
+    debug_assert!(aggstrategy != types_pathnodes::AGG_PLAIN || rollups.len() == 1);
+
+    let pathkeys = if aggstrategy == types_pathnodes::AGG_SORTED && rollups.len() == 1 {
+        crate::relnode::pgvec_clone_shallow(mcx, &run.root.group_pathkeys)
+    } else {
+        PgVec::new_in(mcx)
+    };
+
+    let path = Path {
+        type_: tag16(NodeTag::T_GroupingSetsPath),
+        pathtype: tag16(NodeTag::T_Agg),
+        parent: rel_id,
+        pathtarget_id: Some(target_id),
+        param_info: None,
+        parallel_aware: false,
+        parallel_safe: rel.consider_parallel && sub.parallel_safe,
+        parallel_workers: sub.parallel_workers,
+        rows: 0.0,
+        disabled_nodes: 0,
+        startup_cost: 0.0,
+        total_cost: 0.0,
+        pathkeys,
+    };
+    let (sub_disabled, sub_startup, sub_total, sub_rows) =
+        (sub.disabled_nodes, sub.startup_cost, sub.total_cost, sub.rows);
+    let sub_width = sub.pathtarget_id.map_or(0, |pt| run.root.pathtarget(pt).width);
+    let quals = crate::relnode::pgvec_clone_shallow(mcx, &having_qual);
+
+    let id = run
+        .root
+        .alloc_path(PathNode::GroupingSetsPath(types_pathnodes::GroupingSetsPath {
+            path,
+            subpath: Some(subpath_id),
+            aggstrategy,
+            rollups,
+            qual: having_qual,
+            transitionSpace: agg_costs.transitionSpace as u64,
+        }));
+
+    let nrollups = match run.root.path(id) {
+        PathNode::GroupingSetsPath(p) => p.rollups.len(),
+        _ => unreachable!(),
+    };
+    let mut is_first = true;
+    let mut is_first_sort = true;
+    for i in 0..nrollups {
+        let (num_group_cols, num_groups, is_hashed) = match run.root.path(id) {
+            PathNode::GroupingSetsPath(p) => (
+                p.rollups[i].gsets[0].len() as i32,
+                p.rollups[i].numGroups,
+                p.rollups[i].is_hashed,
+            ),
+            _ => unreachable!(),
+        };
+        assert!(
+            !is_hashed,
+            "create_groupingsets_path (pathnode.c): hashed rollup; grouping-sets lane"
+        );
+        if is_first {
+            let (rows, disabled, startup, total) = crate::costsize::cost_agg_shape(
+                run,
+                aggstrategy,
+                agg_costs,
+                num_group_cols,
+                num_groups,
+                &quals,
+                sub_disabled,
+                sub_startup,
+                sub_total,
+                sub_rows,
+                sub_width,
+            )?;
+            let p = run.root.path_mut(id).base_mut();
+            p.rows = rows;
+            p.disabled_nodes = disabled;
+            p.startup_cost = startup;
+            p.total_cost = total;
+            is_first = false;
+            is_first_sort = false;
+        } else {
+            // Later rollups sort the subpath themselves; input cost is not
+            // re-charged.
+            debug_assert!(!is_first_sort);
+            let (sort_disabled, sort_startup, sort_total) = crate::costsize::cost_sort_shape(
+                0,
+                0.0,
+                sub_rows,
+                sub_width,
+                0.0,
+                init_small::globals::work_mem(),
+                -1.0,
+            );
+            let _ = sort_startup;
+            let (agg_rows, agg_disabled, _agg_startup, agg_total) =
+                crate::costsize::cost_agg_shape(
+                    run,
+                    types_pathnodes::AGG_SORTED,
+                    agg_costs,
+                    num_group_cols,
+                    num_groups,
+                    &quals,
+                    sort_disabled,
+                    sort_startup,
+                    sort_total,
+                    sub_rows,
+                    sub_width,
+                )?;
+            let p = run.root.path_mut(id).base_mut();
+            p.disabled_nodes += agg_disabled;
+            p.total_cost += agg_total;
+            p.rows += agg_rows;
+        }
+    }
+
+    let target = run.root.pathtarget(target_id);
+    let (t_startup, t_per_tuple) = (target.cost.startup, target.cost.per_tuple);
+    let p = run.root.path_mut(id).base_mut();
+    let rows = p.rows;
+    p.startup_cost += t_startup;
+    p.total_cost += t_startup + t_per_tuple * rows;
+    Ok(id)
+}
+
 /// C `create_upper_unique_path` (pathnode.c): one cpu_operator_cost per
 /// compared column per input tuple; input ordering preserved.
 pub fn create_upper_unique_path<'mcx>(

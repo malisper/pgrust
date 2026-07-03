@@ -76,6 +76,10 @@ fn cost_qual_eval_walker(node: Node<'_>, cost: &mut QualCost) -> PgResult<()> {
         // C charges nothing for Aggref/WindowFunc themselves and does not
         // descend: their costs are get_agg_clause_costs'/cost_windowagg's job.
         NodeTag::T_Aggref | NodeTag::T_WindowFunc => Ok(()),
+        NodeTag::T_GroupingFunc => {
+            cost.per_tuple += gucs::cpu_operator_cost();
+            Ok(())
+        }
         NodeTag::T_FuncExpr => {
             let f = node.as_func_expr().unwrap();
             crate::plancat::add_function_cost(f.funcid, cost)?;
@@ -623,11 +627,48 @@ pub fn cost_agg(
     input_tuples: f64,
     input_width: i32,
 ) -> PgResult<()> {
+    let (rows, disabled_nodes, startup_cost, total_cost) = cost_agg_shape(
+        run,
+        aggstrategy,
+        aggcosts,
+        num_group_cols,
+        num_groups,
+        quals,
+        input_disabled_nodes,
+        input_startup_cost,
+        input_total_cost,
+        input_tuples,
+        input_width,
+    )?;
+    let p = run.root.path_mut(path_id).base_mut();
+    p.rows = rows;
+    p.disabled_nodes = disabled_nodes;
+    p.startup_cost = startup_cost;
+    p.total_cost = total_cost;
+    Ok(())
+}
+
+/// cost_agg without a Path to write into (C's dummy `Path agg_path` callers);
+/// returns (rows, disabled_nodes, startup, total).
+#[allow(clippy::too_many_arguments)]
+pub fn cost_agg_shape(
+    run: &mut PlannerRun<'_>,
+    aggstrategy: u32,
+    aggcosts: &types_pathnodes::AggClauseCosts,
+    num_group_cols: i32,
+    num_groups: f64,
+    quals: &[types_pathnodes::NodeId],
+    input_disabled_nodes: i32,
+    input_startup_cost: f64,
+    input_total_cost: f64,
+    input_tuples: f64,
+    input_width: i32,
+) -> PgResult<(f64, i32, f64, f64)> {
     let mut disabled_nodes = input_disabled_nodes;
 
     let (mut startup_cost, mut total_cost, mut output_tuples);
     if aggstrategy == types_pathnodes::AGG_PLAIN {
-        debug_assert!(num_group_cols == 0 && num_groups == 1.0);
+        debug_assert!(num_group_cols == 0);
         startup_cost = input_total_cost;
         startup_cost += aggcosts.transCost.startup;
         startup_cost += aggcosts.transCost.per_tuple * input_tuples;
@@ -718,12 +759,7 @@ pub fn cost_agg(
         output_tuples = clamp_row_est(output_tuples * sel);
     }
 
-    let p = run.root.path_mut(path_id).base_mut();
-    p.rows = output_tuples;
-    p.disabled_nodes = disabled_nodes;
-    p.startup_cost = startup_cost;
-    p.total_cost = total_cost;
-    Ok(())
+    Ok((output_tuples, disabled_nodes, startup_cost, total_cost))
 }
 
 const BLCKSZ: usize = 8192;
@@ -823,6 +859,7 @@ pub fn expr_type_typmod(node: Node<'_>) -> (u32, i32) {
         NodeTag::T_OpExpr => (node.as_op_expr().unwrap().opresulttype, -1),
         NodeTag::T_FuncExpr => (node.as_func_expr().unwrap().funcresulttype, -1),
         NodeTag::T_Aggref => (node.as_aggref().unwrap().aggtype, -1),
+        NodeTag::T_GroupingFunc => (23, -1),
         NodeTag::T_WindowFunc => (node.as_window_func().unwrap().wintype, -1),
         NodeTag::T_Param => {
             let p = node.as_param().unwrap();
