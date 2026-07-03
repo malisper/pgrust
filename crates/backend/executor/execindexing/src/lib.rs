@@ -113,8 +113,7 @@ pub fn BuildIndexInfo<'mcx>(mcx: Mcx<'mcx>, index: &Relation<'_>) -> PgResult<In
         ii_PredicateState: None,
         ii_Unique: indexstruct.indisunique,
         ii_NullsNotDistinct: indexstruct.indnullsnotdistinct,
-        // indisready only (index.c:2452): an invalid-but-ready index still
-        // receives inserts.
+        // indisready only (index.c:2452): invalid-but-ready still gets inserts.
         ii_ReadyForInserts: indexstruct.indisready,
         ii_Summarizing: false, // btree only (relam gates in indexam)
         ii_Concurrent: false,
@@ -217,8 +216,7 @@ pub fn ExecCloseIndices(mut state: ResultRelIndexState<'_>) -> PgResult<()> {
 /// states resolve once onto the IndexInfo (C's lazy ExecPrepareExprList; the
 /// exprs already passed eval_const_expressions in RelationGetIndexExpressions,
 /// so ExecPrepareExpr's expression_planner rerun is skipped as a no-op).
-/// `eval_mcx` is C's per-tuple context: results land there and the caller
-/// resets it per row.
+/// `eval_mcx` is C's per-tuple context: the caller resets it per row.
 pub fn FormIndexDatum<'mcx>(
     mcx: Mcx<'mcx>,
     eval_mcx: Mcx<'_>,
