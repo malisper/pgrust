@@ -276,3 +276,18 @@ pub(crate) fn query_desc_incsort_instrument_seam(
         })
     })
 }
+
+pub(crate) fn query_desc_hash_instrument_seam(
+    h: QueryDescHandle,
+    plan_node_id: i32,
+) -> Option<types_core::instrument::HashInstrumentation> {
+    with_qd(h, |qd| {
+        let exec = qd.exec.as_ref()?;
+        exec.with(|d| {
+            d.estate
+                .es_hash_instrumentation
+                .iter()
+                .find_map(|(id, hi)| (*id == plan_node_id).then_some(*hi))
+        })
+    })
+}

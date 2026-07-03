@@ -152,6 +152,20 @@ scalar_global! {
     PG_DIR_CREATE_MODE, pg_dir_create_mode, set_pg_dir_create_mode, u32, 0o700;
 }
 
+// temp_tablespaces backing store; C home is tablespace.c (see lib.rs install).
+thread_local! {
+    static TEMP_TABLESPACES_GUC: core::cell::RefCell<Option<String>> =
+        const { core::cell::RefCell::new(None) };
+}
+
+pub fn temp_tablespaces_guc() -> Option<String> {
+    TEMP_TABLESPACES_GUC.with(|c| c.borrow().clone())
+}
+
+pub fn set_temp_tablespaces_guc(value: Option<String>) {
+    TEMP_TABLESPACES_GUC.with(|c| *c.borrow_mut() = value);
+}
+
 #[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd"))]
 fn errno_location() -> *mut libc::c_int {
     // SAFETY: returns the thread-local errno lvalue.

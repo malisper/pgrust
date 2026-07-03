@@ -1,0 +1,349 @@
+// Serial temp-file BufFile; the FileSet (shared) arms are loud. Arena data,
+// no Drop: the VFDs are FD_CLOSE_AT_EOXACT+FD_DELETE_AT_CLOSE, so abort
+// cleanup is AtEOXact_Files; close() is the normal-path release.
+use core::cell::Cell;
+
+use ::elog::ereport;
+use ::mcx::{vec_with_capacity_in, Mcx, PgVec};
+use ::types_error::{PgResult, ERROR};
+use ::types_storage::File;
+
+use crate::io::{FileClose, FilePathName, FileRead, FileSize, FileWrite};
+use crate::temp::OpenTemporaryFile;
+use crate::vfd::{get_errno, loc};
+
+const BLCKSZ: usize = 8192;
+const MAX_PHYSICAL_FILESIZE: i64 = 0x4000_0000;
+
+pub const SEEK_SET: i32 = 0;
+pub const SEEK_CUR: i32 = 1;
+pub const SEEK_END: i32 = 2;
+
+thread_local! {
+    static TEMP_BLKS_READ: Cell<i64> = const { Cell::new(0) };
+    static TEMP_BLKS_WRITTEN: Cell<i64> = const { Cell::new(0) };
+}
+
+pub fn temp_blks_read() -> i64 {
+    TEMP_BLKS_READ.with(Cell::get)
+}
+
+pub fn temp_blks_written() -> i64 {
+    TEMP_BLKS_WRITTEN.with(Cell::get)
+}
+
+pub struct BufFile<'mcx> {
+    // All files except the last have length exactly MAX_PHYSICAL_FILESIZE.
+    files: PgVec<'mcx, File>,
+    is_inter_xact: bool,
+    dirty: bool,
+    read_only: bool,
+    cur_file: i32,
+    cur_offset: i64,
+    pos: i32,
+    nbytes: i32,
+    buffer: PgVec<'mcx, u8>,
+}
+
+// C PrepareTempTablespaces (commands/tablespace.c): the default empty GUC
+// resolves to zero temp tablespaces; a configured list is unported.
+pub fn PrepareTempTablespaces() {
+    if crate::temp::TempTablespacesAreSet() {
+        return;
+    }
+    let spaces = guc_tables::vars::temp_tablespaces.read();
+    assert!(
+        spaces.as_deref().unwrap_or("").is_empty(),
+        "PrepareTempTablespaces (tablespace.c): non-empty temp_tablespaces GUC; tablespace lane unported"
+    );
+    crate::temp::SetTempTablespaces(&[]);
+}
+
+pub fn BufFileCreateTemp<'mcx>(mcx: Mcx<'mcx>, inter_xact: bool) -> PgResult<BufFile<'mcx>> {
+    PrepareTempTablespaces();
+    let pfile = OpenTemporaryFile(inter_xact)?;
+    debug_assert!(pfile.0 >= 0);
+    let mut files = vec_with_capacity_in(mcx, 1)?;
+    files.push(pfile);
+    let mut buffer = vec_with_capacity_in(mcx, BLCKSZ)?;
+    buffer.resize(BLCKSZ, 0);
+    Ok(BufFile {
+        files,
+        is_inter_xact: inter_xact,
+        dirty: false,
+        read_only: false,
+        cur_file: 0,
+        cur_offset: 0,
+        pos: 0,
+        nbytes: 0,
+        buffer,
+    })
+}
+
+impl<'mcx> BufFile<'mcx> {
+    fn extend(&mut self) -> PgResult<()> {
+        let pfile = OpenTemporaryFile(self.is_inter_xact)?;
+        debug_assert!(pfile.0 >= 0);
+        self.files.push(pfile);
+        Ok(())
+    }
+
+    pub fn close(mut self) -> PgResult<()> {
+        self.flush()?;
+        for i in 0..self.files.len() {
+            FileClose(self.files[i])?;
+        }
+        Ok(())
+    }
+
+    fn load_buffer(&mut self) -> PgResult<()> {
+        if self.cur_offset >= MAX_PHYSICAL_FILESIZE
+            && (self.cur_file + 1) < self.files.len() as i32
+        {
+            self.cur_file += 1;
+            self.cur_offset = 0;
+        }
+        let thisfile = self.files[self.cur_file as usize];
+        let nread = FileRead(thisfile, &mut self.buffer[..], self.cur_offset, 0)?;
+        if nread < 0 {
+            self.nbytes = 0;
+            return read_failed(thisfile);
+        }
+        self.nbytes = nread as i32;
+        if self.nbytes > 0 {
+            TEMP_BLKS_READ.with(|c| c.set(c.get() + 1));
+        }
+        Ok(())
+    }
+
+    fn dump_buffer(&mut self) -> PgResult<()> {
+        let mut wpos: i32 = 0;
+        while wpos < self.nbytes {
+            if self.cur_offset >= MAX_PHYSICAL_FILESIZE {
+                while (self.cur_file + 1) >= self.files.len() as i32 {
+                    self.extend()?;
+                }
+                self.cur_file += 1;
+                self.cur_offset = 0;
+            }
+            let mut bytestowrite = (self.nbytes - wpos) as i64;
+            let availbytes = MAX_PHYSICAL_FILESIZE - self.cur_offset;
+            if bytestowrite > availbytes {
+                bytestowrite = availbytes;
+            }
+            let thisfile = self.files[self.cur_file as usize];
+            let written = FileWrite(
+                thisfile,
+                &self.buffer[wpos as usize..(wpos as i64 + bytestowrite) as usize],
+                self.cur_offset,
+                0,
+            )?;
+            if written <= 0 {
+                return write_failed(thisfile);
+            }
+            self.cur_offset += written as i64;
+            wpos += written as i32;
+            TEMP_BLKS_WRITTEN.with(|c| c.set(c.get() + 1));
+        }
+        self.dirty = false;
+
+        // Make curOffset point to the logical position (original + pos); a
+        // small backwards seek in a dirty buffer can leave pos < nbytes.
+        self.cur_offset -= (self.nbytes - self.pos) as i64;
+        if self.cur_offset < 0 {
+            self.cur_file -= 1;
+            debug_assert!(self.cur_file >= 0);
+            self.cur_offset += MAX_PHYSICAL_FILESIZE;
+        }
+        self.pos = 0;
+        self.nbytes = 0;
+        Ok(())
+    }
+
+    fn flush(&mut self) -> PgResult<()> {
+        if self.dirty {
+            self.dump_buffer()?;
+        }
+        debug_assert!(!self.dirty);
+        Ok(())
+    }
+
+    fn read_common(&mut self, ptr: &mut [u8], exact: bool, eof_ok: bool) -> PgResult<usize> {
+        let start_size = ptr.len();
+        let mut size = ptr.len();
+        let mut nread = 0usize;
+
+        self.flush()?;
+
+        while size > 0 {
+            if self.pos >= self.nbytes {
+                self.cur_offset += self.pos as i64;
+                self.pos = 0;
+                self.nbytes = 0;
+                self.load_buffer()?;
+                if self.nbytes <= 0 {
+                    break;
+                }
+            }
+            let mut nthistime = (self.nbytes - self.pos) as usize;
+            if nthistime > size {
+                nthistime = size;
+            }
+            debug_assert!(nthistime > 0);
+            ptr[nread..nread + nthistime]
+                .copy_from_slice(&self.buffer[self.pos as usize..self.pos as usize + nthistime]);
+            self.pos += nthistime as i32;
+            size -= nthistime;
+            nread += nthistime;
+        }
+
+        if exact && nread != start_size && !(nread == 0 && eof_ok) {
+            ereport(ERROR)
+                .errcode_for_file_access()
+                .errmsg(format!(
+                    "could not read from temporary file: read only {nread} of {start_size} bytes"
+                ))
+                .finish(loc("BufFileReadCommon"))?;
+        }
+        Ok(nread)
+    }
+
+    pub fn read(&mut self, ptr: &mut [u8]) -> PgResult<usize> {
+        self.read_common(ptr, false, false)
+    }
+
+    pub fn read_exact(&mut self, ptr: &mut [u8]) -> PgResult<()> {
+        self.read_common(ptr, true, false)?;
+        Ok(())
+    }
+
+    pub fn read_maybe_eof(&mut self, ptr: &mut [u8], eof_ok: bool) -> PgResult<usize> {
+        self.read_common(ptr, true, eof_ok)
+    }
+
+    pub fn write(&mut self, mut ptr: &[u8]) -> PgResult<()> {
+        debug_assert!(!self.read_only);
+        while !ptr.is_empty() {
+            if self.pos >= BLCKSZ as i32 {
+                if self.dirty {
+                    self.dump_buffer()?;
+                } else {
+                    // Went directly from reading to writing.
+                    self.cur_offset += self.pos as i64;
+                    self.pos = 0;
+                    self.nbytes = 0;
+                }
+            }
+            let mut nthistime = BLCKSZ - self.pos as usize;
+            if nthistime > ptr.len() {
+                nthistime = ptr.len();
+            }
+            debug_assert!(nthistime > 0);
+            self.buffer[self.pos as usize..self.pos as usize + nthistime]
+                .copy_from_slice(&ptr[..nthistime]);
+            self.dirty = true;
+            self.pos += nthistime as i32;
+            if self.nbytes < self.pos {
+                self.nbytes = self.pos;
+            }
+            ptr = &ptr[nthistime..];
+        }
+        Ok(())
+    }
+
+    /// 0 on success, EOF (-1) if an impossible seek was attempted.
+    pub fn seek(&mut self, fileno: i32, offset: i64, whence: i32) -> PgResult<i32> {
+        let mut new_file: i32;
+        let mut new_offset: i64;
+        match whence {
+            SEEK_SET => {
+                if fileno < 0 {
+                    return Ok(-1);
+                }
+                new_file = fileno;
+                new_offset = offset;
+            }
+            SEEK_CUR => {
+                new_file = self.cur_file;
+                new_offset = (self.cur_offset + self.pos as i64) + offset;
+            }
+            SEEK_END => {
+                new_file = self.files.len() as i32 - 1;
+                new_offset = FileSize(self.files[self.files.len() - 1])?;
+                if new_offset < 0 {
+                    ereport(ERROR)
+                        .with_saved_errno(get_errno())
+                        .errcode_for_file_access()
+                        .errmsg(format!(
+                            "could not determine size of temporary file \"{}\" from BufFile \"\": %m",
+                            FilePathName(self.files[self.files.len() - 1])
+                        ))
+                        .finish(loc("BufFileSeek"))?;
+                }
+            }
+            other => panic!("invalid whence: {other}"),
+        }
+        while new_offset < 0 {
+            new_file -= 1;
+            if new_file < 0 {
+                return Ok(-1);
+            }
+            new_offset += MAX_PHYSICAL_FILESIZE;
+        }
+        if new_file == self.cur_file
+            && new_offset >= self.cur_offset
+            && new_offset <= self.cur_offset + self.nbytes as i64
+        {
+            self.pos = (new_offset - self.cur_offset) as i32;
+            return Ok(0);
+        }
+        self.flush()?;
+        // The flush may have created a new segment, so only now translate a
+        // start-of-next-seg position and range-check.
+        if new_file == self.files.len() as i32 && new_offset == 0 {
+            new_file -= 1;
+            new_offset = MAX_PHYSICAL_FILESIZE;
+        }
+        while new_offset > MAX_PHYSICAL_FILESIZE {
+            new_file += 1;
+            if new_file >= self.files.len() as i32 {
+                return Ok(-1);
+            }
+            new_offset -= MAX_PHYSICAL_FILESIZE;
+        }
+        if new_file >= self.files.len() as i32 {
+            return Ok(-1);
+        }
+        self.cur_file = new_file;
+        self.cur_offset = new_offset;
+        self.pos = 0;
+        self.nbytes = 0;
+        Ok(0)
+    }
+
+    pub fn tell(&self) -> (i32, i64) {
+        (self.cur_file, self.cur_offset + self.pos as i64)
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn read_failed(file: File) -> PgResult<()> {
+    ereport(ERROR)
+        .with_saved_errno(get_errno())
+        .errcode_for_file_access()
+        .errmsg(format!("could not read file \"{}\": %m", FilePathName(file)))
+        .finish(loc("BufFileLoadBuffer"))
+        .map(|_| ())
+}
+
+#[cold]
+#[inline(never)]
+fn write_failed(file: File) -> PgResult<()> {
+    ereport(ERROR)
+        .with_saved_errno(get_errno())
+        .errcode_for_file_access()
+        .errmsg(format!("could not write to file \"{}\": %m", FilePathName(file)))
+        .finish(loc("BufFileDumpBuffer"))
+        .map(|_| ())
+}

@@ -6,12 +6,14 @@
 //! virtual file descriptor cache (LRU ring over kernel fds), temp files, the
 //! allocated-descriptor table, and the fsync/durability helpers.
 
+pub mod buffile;
 pub mod desc;
 pub mod io;
 pub mod sync;
 pub mod temp;
 pub mod vfd;
 
+pub use buffile::{BufFile, BufFileCreateTemp, PrepareTempTablespaces};
 pub use desc::{
     closeAllVfds, with_allocated_dir, with_allocated_stdio, AllocateDir, AllocateFile,
     ClosePipeStream, CloseTransientFile, FreeDir, FreeFile, OpenPipeStream, OpenTransientFile,
@@ -68,6 +70,12 @@ pub fn init_seams() {
         vars::file_extend_method.install(GucVarAccessors {
             get: vfd::file_extend_method,
             set: vfd::set_file_extend_method,
+        });
+        // C home is tablespace.c; hosted here until that unit ports so
+        // PrepareTempTablespaces sees SET values (non-empty stays loud there).
+        vars::temp_tablespaces.install(GucVarAccessors {
+            get: vfd::temp_tablespaces_guc,
+            set: vfd::set_temp_tablespaces_guc,
         });
 
         hooks::check_debug_io_direct.install(|newval, extra, _source| {

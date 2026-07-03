@@ -393,9 +393,7 @@ pub fn ExplainNode<'mcx>(
             filtered_count_gap(&plan.qual, es);
         }
         NodeTag::T_Hash => {
-            if es.analyze {
-                node_gap("show_hash_info", "Hash instrumentation (analyze join lane)");
-            }
+            show_hash_info(node, es)?;
         }
         NodeTag::T_Result => {
             if let Some(q) = node.as_result().unwrap().resconstantqual {
@@ -655,6 +653,47 @@ fn show_agg_keys<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) -> PgResul
         result.push(buf);
     }
     ExplainPropertyList("Group Key", &result, es);
+    Ok(())
+}
+
+// show_hash_info (explain.c), text arm; the shared_info (parallel) merge has
+// no parallel lane.
+fn show_hash_info<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) -> PgResult<()> {
+    if !es.analyze || es.qd.is_null() {
+        return Ok(());
+    }
+    let plan = plan_of(node);
+    let Some(hi) = execmain_seams::query_desc_hash_instrument::call(es.qd, plan.plan_node_id)
+    else {
+        return Ok(());
+    };
+    if hi.nbatch <= 0 {
+        return Ok(());
+    }
+    if es.format != EXPLAIN_FORMAT_TEXT {
+        crate::format::nontext_gap(es, "show_hash_info");
+    }
+    let space_peak_kb = hi.space_peak.div_ceil(1024);
+    crate::format::ExplainIndentText(es);
+    if hi.nbatch_original != hi.nbatch || hi.nbuckets_original != hi.nbuckets {
+        append!(
+            es,
+            "Buckets: {} (originally {})  Batches: {} (originally {})  Memory Usage: {}kB\n",
+            hi.nbuckets,
+            hi.nbuckets_original,
+            hi.nbatch,
+            hi.nbatch_original,
+            space_peak_kb
+        );
+    } else {
+        append!(
+            es,
+            "Buckets: {}  Batches: {}  Memory Usage: {}kB\n",
+            hi.nbuckets,
+            hi.nbatch,
+            space_peak_kb
+        );
+    }
     Ok(())
 }
 

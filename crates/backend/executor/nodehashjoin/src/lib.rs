@@ -1,6 +1,7 @@
-// nodeHashjoin.c single-batch machine, every jointype but FULL; the Hash
-// sub-node build runs through nodehash. FULL, multi-batch, parallel are
-// loud. Per-probe bucket scan is allocation-free.
+// nodeHashjoin.c serial state machine, all jointypes, single- and multi-batch
+// (outer batch routing + HJ_NEED_NEW_BATCH reload); parallel is loud. The
+// Hash sub-node build runs through nodehash. Per-probe bucket scan is
+// allocation-free.
 #![allow(non_snake_case)]
 
 use std::rc::Rc;
@@ -10,7 +11,7 @@ use ::execexpr::{
     exec_eval_expr, exec_qual, EvalSlots, ExprState, ParamBind,
 };
 use ::executils::{EStateData, EcxtId, ExecSlotId};
-use ::mcx::PgBox;
+use ::mcx::{PgBox, PgVec};
 use ::nodehash::{HashBuildInput, HashState};
 use ::types_error::PgResult;
 use ::types_nodes::plannodes::HashJoin;
@@ -25,6 +26,7 @@ const HJ_NEED_NEW_OUTER: u8 = 2;
 const HJ_SCAN_BUCKET: u8 = 3;
 const HJ_FILL_OUTER_TUPLE: u8 = 4;
 const HJ_FILL_INNER_TUPLES: u8 = 5;
+const HJ_NEED_NEW_BATCH: u8 = 6;
 
 #[inline(always)]
 fn cfi() -> PgResult<()> {
@@ -54,12 +56,15 @@ pub struct HashJoinState<'mcx> {
     hj_fill_inner: bool,
     hj_NullInnerTupleSlot: Option<ExecSlotId>,
     hj_NullOuterTupleSlot: Option<ExecSlotId>,
+    hj_OuterTupleSlot: ExecSlotId,
     hj_JoinState: u8,
     hj_CurHashValue: u32,
     hj_CurBucketNo: u32,
     hj_CurTuple: u32,
     hj_MatchedOuter: bool,
     hj_OuterNotEmpty: bool,
+    outer_saved_scratch: PgVec<'mcx, u64>,
+    inner_saved_scratch: PgVec<'mcx, u64>,
 }
 
 /// `ExecInitHashJoin` minus child linkage; builds the outer hash program +
@@ -87,19 +92,24 @@ pub fn exec_init_hash_join<'mcx>(
             JoinType::JOIN_INNER
                 | JoinType::JOIN_LEFT
                 | JoinType::JOIN_RIGHT
+                | JoinType::JOIN_FULL
                 | JoinType::JOIN_SEMI
                 | JoinType::JOIN_ANTI
                 | JoinType::JOIN_RIGHT_SEMI
                 | JoinType::JOIN_RIGHT_ANTI
         ),
-        "ExecInitHashJoin (nodeHashjoin.c): jointype {:?}; FULL lane unported",
+        "ExecInitHashJoin (nodeHashjoin.c): unrecognized join type {:?}",
         node.join.jointype
     );
     let mcx = estate.es_query_cxt;
-    let hj_fill_outer =
-        matches!(node.join.jointype, JoinType::JOIN_LEFT | JoinType::JOIN_ANTI);
-    let hj_fill_inner =
-        matches!(node.join.jointype, JoinType::JOIN_RIGHT | JoinType::JOIN_RIGHT_ANTI);
+    let hj_fill_outer = matches!(
+        node.join.jointype,
+        JoinType::JOIN_LEFT | JoinType::JOIN_ANTI | JoinType::JOIN_FULL
+    );
+    let hj_fill_inner = matches!(
+        node.join.jointype,
+        JoinType::JOIN_RIGHT | JoinType::JOIN_RIGHT_ANTI | JoinType::JOIN_FULL
+    );
     let hj_NullInnerTupleSlot = if hj_fill_outer {
         Some(exec_init_null_tuple_slot(estate, inner_desc.clone()))
     } else {
@@ -110,6 +120,8 @@ pub fn exec_init_hash_join<'mcx>(
     } else {
         None
     };
+    let hj_OuterTupleSlot =
+        estate.exec_init_extra_tuple_slot(Some(outer_desc.clone()), TupleSlotKind::MinimalTuple);
 
     // get_op_hash_functions -> (outer_hashfn, inner_hashfn); outer is left.
     let n = node.hashoperators.len();
@@ -170,12 +182,15 @@ pub fn exec_init_hash_join<'mcx>(
         hj_fill_inner,
         hj_NullInnerTupleSlot,
         hj_NullOuterTupleSlot,
+        hj_OuterTupleSlot,
         hj_JoinState: HJ_BUILD_HASHTABLE,
         hj_CurHashValue: 0,
         hj_CurBucketNo: 0,
         hj_CurTuple: ::nodehash::HashJoinTable::chain_end(),
         hj_MatchedOuter: false,
         hj_OuterNotEmpty: false,
+        outer_saved_scratch: PgVec::new_in(mcx),
+        inner_saved_scratch: PgVec::new_in(mcx),
     };
     Ok((hjstate, hash_state))
 }
@@ -196,7 +211,8 @@ fn hashkey_attnums<'mcx>(
     out
 }
 
-/// `ExecHashJoin`, JOIN_INNER single batch; the Hash sub-node is built once.
+/// `ExecHashJoin` (serial `ExecHashJoinImpl`); the Hash sub-node is built once
+/// per (re)build.
 pub fn exec_hash_join<'mcx, O, C>(
     node: &mut HashJoinState<'mcx>,
     outer: &mut O,
@@ -212,31 +228,66 @@ where
         cfi()?;
         match node.hj_JoinState {
             HJ_BUILD_HASHTABLE => {
+                debug_assert!(hash_state.table.is_none());
+                hash_state.table = Some(::nodehash::exec_hash_table_create(hash_state, estate)?);
                 ::nodehash::multi_exec_hash(hash_state, hash_child, estate)?;
-                let table = hash_state.table.as_ref().expect("hash table built");
+                let table = hash_state.table.as_mut().expect("hash table built");
                 if table.total_tuples() == 0.0 && !node.hj_fill_outer {
                     return Ok(None);
                 }
+                table.nbatch_outstart = table.nbatch;
                 node.hj_OuterNotEmpty = false;
                 node.hj_JoinState = HJ_NEED_NEW_OUTER;
             }
             HJ_NEED_NEW_OUTER => {
-                let Some(hashvalue) = get_outer_tuple(node, outer, estate)? else {
+                let Some(hashvalue) = get_outer_tuple(node, outer, hash_state, estate)? else {
+                    // End of batch, or maybe whole join.
                     if node.hj_fill_inner {
                         // ExecPrepHashTableForUnmatched.
                         node.hj_CurBucketNo = 0;
                         node.hj_CurTuple = ::nodehash::HashJoinTable::chain_end();
                         node.hj_JoinState = HJ_FILL_INNER_TUPLES;
-                        continue;
+                    } else {
+                        node.hj_JoinState = HJ_NEED_NEW_BATCH;
                     }
-                    // Single batch: HJ_NEED_NEW_BATCH ends the join.
-                    return Ok(None);
+                    continue;
                 };
                 node.hj_MatchedOuter = false;
                 node.hj_CurHashValue = hashvalue;
-                node.hj_CurBucketNo =
-                    hash_state.table.as_ref().unwrap().bucket_of(hashvalue);
+                let table = hash_state.table.as_ref().expect("hash table built");
+                let (bucketno, batchno) = table.get_bucket_and_batch(hashvalue);
+                node.hj_CurBucketNo = bucketno;
                 node.hj_CurTuple = ::nodehash::HashJoinTable::chain_end();
+
+                if batchno != table.curbatch {
+                    // Postpone this outer tuple to its batch's file.
+                    debug_assert!(batchno > table.curbatch);
+                    let outer_id = estate
+                        .ecxt(node.ps_ExprContext)
+                        .ecxt_outertuple
+                        .expect("outer tuple set");
+                    let query_mcx = estate.es_query_cxt;
+                    let (slot, scratch_mcx) =
+                        estate.slot_and_per_tuple_mcx(outer_id, node.ps_ExprContext);
+                    let fetched =
+                        exectuples::exec_fetch_slot_minimal_tuple(slot, query_mcx, scratch_mcx)?;
+                    let (ptr, t_len): (*const u8, u32) = match &fetched {
+                        exectuples::FetchedMinimalTuple::Slot(m) => {
+                            ((*m as *const ::types_tuple::MinimalTupleData).cast(), m.t_len)
+                        }
+                        exectuples::FetchedMinimalTuple::Copied(t) => (t.as_ptr(), t.t_len()),
+                    };
+                    // SAFETY: a minimal tuple image is t_len readable bytes.
+                    let bytes = unsafe { core::slice::from_raw_parts(ptr, t_len as usize) };
+                    let table = hash_state.table.as_mut().expect("hash table built");
+                    ::nodehash::save_tuple(
+                        &mut table.outer_batch_file[batchno as usize],
+                        hashvalue,
+                        bytes,
+                        query_mcx,
+                    )?;
+                    continue;
+                }
                 node.hj_JoinState = HJ_SCAN_BUCKET;
             }
             HJ_SCAN_BUCKET => {
@@ -312,8 +363,8 @@ where
             }
             HJ_FILL_INNER_TUPLES => {
                 if !scan_hash_table_for_unmatched(node, hash_state, estate)? {
-                    // Single batch: no more batches to fill from.
-                    return Ok(None);
+                    node.hj_JoinState = HJ_NEED_NEW_BATCH;
+                    continue;
                 }
                 let null_outer = node.hj_NullOuterTupleSlot.expect("null outer slot");
                 estate.ecxt_mut(node.ps_ExprContext).ecxt_outertuple = Some(null_outer);
@@ -329,9 +380,113 @@ where
                     return Ok(Some(project_result(node, inner_id, estate)?));
                 }
             }
+            HJ_NEED_NEW_BATCH => {
+                if !new_batch(node, hash_state, estate)? {
+                    return Ok(None);
+                }
+                node.hj_JoinState = HJ_NEED_NEW_OUTER;
+            }
             other => panic!("ExecHashJoin (nodeHashjoin.c): unrecognized state {other}"),
         }
     }
+}
+
+/// `ExecHashJoinNewBatch`: false when no batches remain.
+fn new_batch<'mcx>(
+    node: &mut HashJoinState<'mcx>,
+    hash_state: &mut HashState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<bool> {
+    let table = hash_state.table.as_mut().expect("hash table built");
+    let nbatch = table.nbatch;
+    let mut curbatch = table.curbatch;
+
+    if curbatch > 0 {
+        if let Some(f) = table.outer_batch_file[curbatch as usize].take() {
+            f.close()?;
+        }
+    }
+
+    // Skip batches empty on both sides; one-sided emptiness is skippable
+    // except for fill requirements and post-growth reassignment scans.
+    curbatch += 1;
+    while curbatch < nbatch
+        && (table.outer_batch_file[curbatch as usize].is_none()
+            || table.inner_batch_file[curbatch as usize].is_none())
+    {
+        if table.outer_batch_file[curbatch as usize].is_some() && node.hj_fill_outer {
+            break;
+        }
+        if table.inner_batch_file[curbatch as usize].is_some() && node.hj_fill_inner {
+            break;
+        }
+        if table.inner_batch_file[curbatch as usize].is_some()
+            && nbatch != table.nbatch_original
+        {
+            break;
+        }
+        if table.outer_batch_file[curbatch as usize].is_some()
+            && nbatch != table.nbatch_outstart
+        {
+            break;
+        }
+        if let Some(f) = table.inner_batch_file[curbatch as usize].take() {
+            f.close()?;
+        }
+        if let Some(f) = table.outer_batch_file[curbatch as usize].take() {
+            f.close()?;
+        }
+        curbatch += 1;
+    }
+
+    if curbatch >= nbatch {
+        return Ok(false);
+    }
+    table.curbatch = curbatch;
+    table.reset(estate);
+
+    let inner_file = hash_state
+        .table
+        .as_mut()
+        .expect("hash table built")
+        .inner_batch_file[curbatch as usize]
+        .take();
+    if let Some(mut inner_file) = inner_file {
+        if inner_file.seek(0, 0, ::fd::buffile::SEEK_SET)? != 0 {
+            panic!("could not rewind hash-join temporary file");
+        }
+        let hslot = hash_state.hash_tuple_slot;
+        let ecxt = hash_state.ps_ExprContext;
+        while let Some((hashvalue, tuple)) =
+            ::nodehash::get_saved_tuple(&mut inner_file, &mut node.inner_saved_scratch)?
+        {
+            let mcx = estate.es_query_cxt;
+            // SAFETY: the scratch image is live until the next get_saved_tuple,
+            // and insert copies it out before that.
+            unsafe {
+                exectuples::exec_store_minimal_tuple_ptr(
+                    &mut estate.es_tupleTable[hslot.0 as usize],
+                    mcx,
+                    tuple,
+                )
+            };
+            // NOTE: some tuples may go to future batches; nbatch can grow here.
+            hash_state
+                .table
+                .as_mut()
+                .expect("hash table built")
+                .insert(estate, hslot, ecxt, hashvalue)?;
+        }
+        inner_file.close()?;
+    }
+
+    let table = hash_state.table.as_mut().expect("hash table built");
+    if let Some(f) = table.outer_batch_file[curbatch as usize].as_mut() {
+        if f.seek(0, 0, ::fd::buffile::SEEK_SET)? != 0 {
+            panic!("could not rewind hash-join temporary file");
+        }
+    }
+    Ok(true)
 }
 
 // ExecInitNullTupleSlot: a virtual all-null slot with the given descriptor.
@@ -372,7 +527,7 @@ fn scan_hash_table_for_unmatched<'mcx>(
         if !e.matched {
             let hslot = hash_state.hash_tuple_slot;
             let mcx = estate.es_query_cxt;
-            // SAFETY: entry images live in the query arena until reset.
+            // SAFETY: entry images live in the batch arena until reset.
             unsafe {
                 exectuples::exec_store_minimal_tuple_ptr(
                     &mut estate.es_tupleTable[hslot.0 as usize],
@@ -389,14 +544,17 @@ fn scan_hash_table_for_unmatched<'mcx>(
     }
 }
 
-// ExecHashJoinOuterGetTuple (curbatch==0): compute the outer hash per tuple.
+// ExecHashJoinOuterGetTuple: the plan child on the first pass, the outer
+// batch file afterwards.
 fn get_outer_tuple<'mcx, O: HashJoinOuter<'mcx>>(
     node: &mut HashJoinState<'mcx>,
     outer: &mut O,
+    hash_state: &mut HashState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<u32>> {
+    let curbatch = hash_state.table.as_ref().expect("hash table built").curbatch;
     let ecxt = node.ps_ExprContext;
-    loop {
+    if curbatch == 0 {
         let Some(slot_id) = outer.exec_proc(estate)? else {
             return Ok(None);
         };
@@ -406,7 +564,32 @@ fn get_outer_tuple<'mcx, O: HashJoinOuter<'mcx>>(
         let r = exec_eval_expr(&mut node.outer_hash_expr, &mut slots)?;
         estate.ecxt_mut(ecxt).ecxt_outertuple = Some(slot_id);
         node.hj_OuterNotEmpty = true;
-        return Ok(Some(r.value.as_u32()));
+        Ok(Some(r.value.as_u32()))
+    } else {
+        let table = hash_state.table.as_mut().expect("hash table built");
+        // In outer-join cases the batch file can be empty.
+        let Some(file) = table.outer_batch_file[curbatch as usize].as_mut() else {
+            return Ok(None);
+        };
+        let Some((hashvalue, tuple)) =
+            ::nodehash::get_saved_tuple(file, &mut node.outer_saved_scratch)?
+        else {
+            return Ok(None);
+        };
+        let mcx = estate.es_query_cxt;
+        let oslot = node.hj_OuterTupleSlot;
+        // SAFETY: the scratch image is live until the next saved-tuple read,
+        // which happens only after this outer tuple is fully processed.
+        unsafe {
+            exectuples::exec_store_minimal_tuple_ptr(
+                &mut estate.es_tupleTable[oslot.0 as usize],
+                mcx,
+                tuple,
+            )
+        };
+        estate.reset_expr_context(ecxt);
+        estate.ecxt_mut(ecxt).ecxt_outertuple = Some(oslot);
+        Ok(Some(hashvalue))
     }
 }
 
@@ -432,7 +615,7 @@ fn scan_hash_bucket<'mcx>(
             let tuple = e.tuple;
             let hslot = hash_state.hash_tuple_slot;
             let mcx = estate.es_query_cxt;
-            // SAFETY: entry images live in the query arena until reset.
+            // SAFETY: entry images live in the batch arena until reset.
             unsafe {
                 exectuples::exec_store_minimal_tuple_ptr(
                     &mut estate.es_tupleTable[hslot.0 as usize],
@@ -454,23 +637,104 @@ fn scan_hash_bucket<'mcx>(
     Ok(false)
 }
 
-/// `ExecEndHashJoin`: table lives in the query arena; children ended by caller.
-pub fn exec_end_hash_join(_node: &mut HashJoinState<'_>, hash_state: &mut HashState<'_>) {
+/// `ExecEndHashJoin` (+ the serial half of `ExecShutdownHash`'s
+/// instrumentation hand-off, keyed by the Hash sub-node's plan_node_id).
+pub fn exec_end_hash_join<'mcx>(
+    node: &mut HashJoinState<'mcx>,
+    hash_state: &mut HashState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    accum_instrumentation(node, hash_state, estate);
+    if let Some(table) = hash_state.table.as_mut() {
+        table.destroy()?;
+        hash_state.table = None;
+    }
     ::nodehash::exec_end_hash(hash_state);
+    Ok(())
 }
 
-/// `ExecReScanHashJoin` single-batch reuse: keep the table, restart the probe.
-pub fn exec_rescan_hash_join(node: &mut HashJoinState<'_>, hash_state: &mut HashState<'_>) {
-    if let Some(table) = hash_state.table.as_mut() {
-        if node.hj_fill_inner || node.plan.join.jointype == JoinType::JOIN_RIGHT_SEMI {
-            table.reset_match_flags();
-        }
-        node.hj_OuterNotEmpty = false;
-        node.hj_JoinState = HJ_NEED_NEW_OUTER;
-    } else {
-        node.hj_JoinState = HJ_BUILD_HASHTABLE;
+/// The `ExecShutdownHash` half exposed to the shutdown walk (EXPLAIN reads
+/// before ExecutorEnd).
+pub fn shutdown_accum_instrumentation<'mcx>(
+    node: &HashJoinState<'mcx>,
+    hash_state: &HashState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) {
+    accum_instrumentation(node, hash_state, estate);
+}
+
+fn accum_instrumentation<'mcx>(
+    node: &HashJoinState<'mcx>,
+    hash_state: &HashState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) {
+    if estate.es_instrument == 0 {
+        return;
     }
+    let Some(table) = hash_state.table.as_ref() else { return };
+    let hash_plan_id = node
+        .plan
+        .join
+        .plan
+        .righttree
+        .expect("HashJoin has a Hash inner plan")
+        .as_hash()
+        .expect("HashJoin inner is a Hash node")
+        .plan
+        .plan_node_id;
+    let hi = table.instrumentation();
+    if let Some((_, slot)) = estate
+        .es_hash_instrumentation
+        .iter_mut()
+        .find(|(id, _)| *id == hash_plan_id)
+    {
+        slot.accum(&hi);
+    } else {
+        estate.es_hash_instrumentation.push((hash_plan_id, hi));
+    }
+}
+
+/// Multi-batch rescan destroys the table, so the caller must rescan the Hash
+/// child subtree too (C's `ExecReScan(innerPlan)`).
+#[derive(PartialEq, Eq)]
+pub enum RescanInner {
+    Keep,
+    Rescan,
+}
+
+/// `ExecReScanHashJoin`: reuse the table only for a single-batch join whose
+/// inner subtree is unchanged; otherwise destroy and rebuild.
+pub fn exec_rescan_hash_join<'mcx>(
+    node: &mut HashJoinState<'mcx>,
+    hash_state: &mut HashState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<RescanInner> {
+    let mut rescan_inner = RescanInner::Keep;
+    if hash_state.table.is_some() {
+        if hash_state.table.as_ref().expect("just checked").nbatch == 1 {
+            let table = hash_state.table.as_mut().expect("just checked");
+            if node.hj_fill_inner || node.plan.join.jointype == JoinType::JOIN_RIGHT_SEMI {
+                table.reset_match_flags();
+            }
+            node.hj_OuterNotEmpty = false;
+            node.hj_JoinState = HJ_NEED_NEW_OUTER;
+        } else {
+            accum_instrumentation(node, hash_state, estate);
+            hash_state
+                .table
+                .as_mut()
+                .expect("just checked")
+                .destroy()?;
+            hash_state.table = None;
+            node.hj_JoinState = HJ_BUILD_HASHTABLE;
+            rescan_inner = RescanInner::Rescan;
+        }
+    }
+    node.hj_CurHashValue = 0;
+    node.hj_CurBucketNo = 0;
     node.hj_CurTuple = ::nodehash::HashJoinTable::chain_end();
+    node.hj_MatchedOuter = false;
+    Ok(rescan_inner)
 }
 
 // The outer/inner slot pair for qual eval, disjoint &mut of es_tupleTable.

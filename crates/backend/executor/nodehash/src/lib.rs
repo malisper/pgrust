@@ -1,13 +1,20 @@
-// nodeHash.c single-batch build side; multi-batch/skew/parallel are loud.
-// Bucket chains are arena+u32-handle (rule 2), not raw pointer chains.
+// nodeHash.c serial build side, single- and multi-batch; skew and parallel
+// are loud/absent (planner sets no skewTable; sizing still reserves skew
+// memory like C when the plan shape would). Bucket chains are arena+u32-handle
+// (rule 2). Batch tuple images live in an estate-owned aux context reset per
+// batch (C's batchCxt); chunk ids replicate C's dense_alloc chunk list so
+// rebuild walks emit bucket chains in C's order (unmatched-scan output order
+// depends on it).
 #![allow(non_snake_case)]
 
 use core::ptr::NonNull;
 use std::rc::Rc;
 
 use ::execexpr::{exec_build_hash32_from_attrs, exec_eval_expr, EvalSlots, ExprState};
-use ::executils::{EStateData, ExecSlotId};
+use ::executils::{AuxCxtId, EStateData, EcxtId, ExecSlotId};
+use ::fd::buffile::BufFile;
 use ::mcx::{vec_with_capacity_in, Mcx, PgBox, PgVec};
+use ::types_core::instrument::HashInstrumentation;
 use ::types_core::Oid;
 use ::types_error::{PgError, PgResult};
 use ::types_nodes::plannodes::Hash;
@@ -27,61 +34,391 @@ pub struct HashJoinTupleEntry {
     pub next: u32,
     pub hashvalue: u32,
     pub matched: bool,
+    chunk: u32,
+    t_len: u32,
     pub tuple: NonNull<MinimalTupleData>,
 }
 
 const END: u32 = u32::MAX;
 
+// C dense_alloc chunk list, metadata only (the bytes live in the aux arena).
+#[derive(Clone, Copy)]
+struct ChunkMeta {
+    next: u32,
+    used: u32,
+    maxlen: u32,
+}
+
 pub struct HashJoinTable<'mcx> {
-    bucket_mask: u32,
+    nbuckets: u32,
+    log2_nbuckets: u32,
+    nbuckets_original: u32,
+    nbuckets_optimal: u32,
+    log2_nbuckets_optimal: u32,
     buckets: PgVec<'mcx, u32>,
     entries: PgVec<'mcx, HashJoinTupleEntry>,
+    chunks: PgVec<'mcx, ChunkMeta>,
+    chunk_head: u32,
+    pub nbatch: i32,
+    pub curbatch: i32,
+    pub nbatch_original: i32,
+    pub nbatch_outstart: i32,
+    grow_enabled: bool,
     total_tuples: f64,
+    space_used: usize,
+    space_peak: usize,
+    space_allowed: usize,
+    pub inner_batch_file: PgVec<'mcx, Option<BufFile<'mcx>>>,
+    pub outer_batch_file: PgVec<'mcx, Option<BufFile<'mcx>>>,
+    batch_cxt: AuxCxtId,
 }
 
 impl<'mcx> HashJoinTable<'mcx> {
-    fn create(mcx: Mcx<'mcx>, nbuckets: u32) -> PgResult<HashJoinTable<'mcx>> {
+    /// `ExecHashTableCreate` serial arm.
+    fn create(
+        mcx: Mcx<'mcx>,
+        estate: &mut EStateData<'mcx>,
+        nbuckets: u32,
+        nbatch: i32,
+        space_allowed: usize,
+    ) -> PgResult<HashJoinTable<'mcx>> {
         debug_assert!(nbuckets.is_power_of_two());
         let mut buckets = vec_with_capacity_in(mcx, nbuckets as usize)?;
         buckets.resize(nbuckets as usize, END);
-        Ok(HashJoinTable {
-            bucket_mask: nbuckets - 1,
+        let mut table = HashJoinTable {
+            nbuckets,
+            log2_nbuckets: nbuckets.trailing_zeros(),
+            nbuckets_original: nbuckets,
+            nbuckets_optimal: nbuckets,
+            log2_nbuckets_optimal: nbuckets.trailing_zeros(),
             buckets,
             entries: PgVec::new_in(mcx),
+            chunks: PgVec::new_in(mcx),
+            chunk_head: END,
+            nbatch,
+            curbatch: 0,
+            nbatch_original: nbatch,
+            nbatch_outstart: nbatch,
+            grow_enabled: true,
             total_tuples: 0.0,
-        })
+            space_used: 0,
+            space_peak: 0,
+            space_allowed,
+            inner_batch_file: PgVec::new_in(mcx),
+            outer_batch_file: PgVec::new_in(mcx),
+            batch_cxt: estate.create_aux_context("HashBatchContext"),
+        };
+        if nbatch > 1 {
+            table.inner_batch_file.resize_with(nbatch as usize, || None);
+            table.outer_batch_file.resize_with(nbatch as usize, || None);
+            ::fd::buffile::PrepareTempTablespaces();
+        }
+        Ok(table)
     }
 
-    fn insert(
+    // dense_alloc (nodeHash.c), metadata arm: which chunk receives a tuple of
+    // this size; replicates C's list order exactly.
+    fn dense_alloc_chunk(&mut self, size: usize) -> u32 {
+        let size = maxalign(size) as u32;
+        if size as usize > HASH_CHUNK_THRESHOLD {
+            let id = self.chunks.len() as u32;
+            if self.chunk_head != END {
+                let head_next = self.chunks[self.chunk_head as usize].next;
+                self.chunks.push(ChunkMeta { next: head_next, used: size, maxlen: size });
+                self.chunks[self.chunk_head as usize].next = id;
+            } else {
+                self.chunks.push(ChunkMeta { next: END, used: size, maxlen: size });
+                self.chunk_head = id;
+            }
+            return id;
+        }
+        if self.chunk_head == END
+            || self.chunks[self.chunk_head as usize].maxlen
+                - self.chunks[self.chunk_head as usize].used
+                < size
+        {
+            let id = self.chunks.len() as u32;
+            self.chunks.push(ChunkMeta {
+                next: self.chunk_head,
+                used: size,
+                maxlen: HASH_CHUNK_SIZE as u32,
+            });
+            self.chunk_head = id;
+            return id;
+        }
+        self.chunks[self.chunk_head as usize].used += size;
+        self.chunk_head
+    }
+
+    // C's chunk walk (head -> next, tuples within a chunk in layout order) as
+    // an entry-index permutation: stable counting sort by chunk position.
+    fn chunk_walk_order(&self, mcx: Mcx<'mcx>) -> PgResult<PgVec<'mcx, u32>> {
+        let nchunks = self.chunks.len();
+        let mut pos: PgVec<'mcx, u32> = vec_with_capacity_in(mcx, nchunks)?;
+        pos.resize(nchunks, 0);
+        let mut npos = 0u32;
+        let mut c = self.chunk_head;
+        while c != END {
+            pos[c as usize] = npos;
+            npos += 1;
+            c = self.chunks[c as usize].next;
+        }
+        let mut counts: PgVec<'mcx, u32> = vec_with_capacity_in(mcx, npos as usize + 1)?;
+        counts.resize(npos as usize + 1, 0);
+        for e in self.entries.iter() {
+            counts[pos[e.chunk as usize] as usize + 1] += 1;
+        }
+        for i in 1..counts.len() {
+            let prev = counts[i - 1];
+            counts[i] += prev;
+        }
+        let mut order: PgVec<'mcx, u32> = vec_with_capacity_in(mcx, self.entries.len())?;
+        order.resize(self.entries.len(), 0);
+        for (ix, e) in self.entries.iter().enumerate() {
+            let p = pos[e.chunk as usize] as usize;
+            order[counts[p] as usize] = ix as u32;
+            counts[p] += 1;
+        }
+        Ok(order)
+    }
+
+    /// `ExecHashTableInsert`: current batch goes into memory, later batches
+    /// into their inner batch file.
+    pub fn insert(
         &mut self,
-        slot: &mut ::types_slot::SlotData<'mcx>,
-        slot_mcx: Mcx<'mcx>,
-        table_mcx: Mcx<'mcx>,
+        estate: &mut EStateData<'mcx>,
+        slot_id: ExecSlotId,
+        scratch_ecxt: EcxtId,
         hashvalue: u32,
     ) -> PgResult<()> {
-        let tup = exectuples::exec_copy_slot_minimal_tuple(slot, slot_mcx, table_mcx, 0)?;
-        let tuple = NonNull::new(tup.as_ptr().cast_mut().cast::<MinimalTupleData>())
-            .expect("minimal tuple image is non-null");
-        // Bulk-freed at query-context reset: forget, never drop (docs/no-drop.md).
-        core::mem::forget(tup);
+        let query_mcx = estate.es_query_cxt;
+        let (bucketno, batchno) = self.get_bucket_and_batch(hashvalue);
+        if batchno == self.curbatch {
+            let (slot, batch_mcx) = estate.slot_and_aux_mcx(slot_id, self.batch_cxt);
+            let mut tup =
+                exectuples::exec_copy_slot_minimal_tuple(slot, query_mcx, batch_mcx, 0)?;
+            // HeapTupleHeaderClearMatch: a reloaded tuple can't be pre-matched.
+            tup.data_mut().clear_match();
+            let t_len = tup.t_len();
+            let tuple = NonNull::new(tup.as_ptr().cast_mut().cast::<MinimalTupleData>())
+                .expect("minimal tuple image is non-null");
+            // Bulk-freed at batch reset: forget, never drop (docs/no-drop.md).
+            core::mem::forget(tup);
 
-        let bucketno = (hashvalue & self.bucket_mask) as usize;
-        let ix = self.entries.len() as u32;
-        if self.entries.len() == self.entries.capacity() {
-            let add = self.entries.capacity().max(16);
-            self.entries
-                .try_reserve(add)
-                .map_err(|_| oom_entries(*self.entries.allocator(), add))?;
+            let hash_tuple_size = HJTUPLE_OVERHEAD + t_len as usize;
+            let ntuples = self.total_tuples;
+            let chunk = self.dense_alloc_chunk(hash_tuple_size);
+            let ix = self.entries.len() as u32;
+            if self.entries.len() == self.entries.capacity() {
+                let add = self.entries.capacity().max(16);
+                self.entries
+                    .try_reserve(add)
+                    .map_err(|_| oom_entries(*self.entries.allocator(), add))?;
+            }
+            self.entries.push(HashJoinTupleEntry {
+                next: self.buckets[bucketno as usize],
+                hashvalue,
+                matched: false,
+                chunk,
+                t_len,
+                tuple,
+            });
+            self.buckets[bucketno as usize] = ix;
+
+            if self.nbatch == 1 && ntuples > (self.nbuckets_optimal as f64) * NTUP_PER_BUCKET {
+                if self.nbuckets_optimal <= i32::MAX as u32 / 2
+                    && (self.nbuckets_optimal as usize) * 2
+                        <= MAX_ALLOC_SIZE / core::mem::size_of::<usize>()
+                {
+                    self.nbuckets_optimal *= 2;
+                    self.log2_nbuckets_optimal += 1;
+                }
+            }
+
+            self.space_used += hash_tuple_size;
+            if self.space_used > self.space_peak {
+                self.space_peak = self.space_used;
+            }
+            if self.space_used
+                + self.nbuckets_optimal as usize * core::mem::size_of::<usize>()
+                > self.space_allowed
+            {
+                self.increase_num_batches(query_mcx)?;
+            }
+        } else {
+            debug_assert!(batchno > self.curbatch);
+            let (slot, scratch_mcx) = estate.slot_and_per_tuple_mcx(slot_id, scratch_ecxt);
+            let fetched =
+                exectuples::exec_fetch_slot_minimal_tuple(slot, query_mcx, scratch_mcx)?;
+            let (ptr, t_len): (*const u8, u32) = match &fetched {
+                exectuples::FetchedMinimalTuple::Slot(m) => {
+                    ((*m as *const MinimalTupleData).cast(), m.t_len)
+                }
+                exectuples::FetchedMinimalTuple::Copied(t) => (t.as_ptr(), t.t_len()),
+            };
+            // SAFETY: a minimal tuple image is t_len readable bytes.
+            let bytes = unsafe { core::slice::from_raw_parts(ptr, t_len as usize) };
+            save_tuple(
+                &mut self.inner_batch_file[batchno as usize],
+                hashvalue,
+                bytes,
+                query_mcx,
+            )?;
         }
-        self.entries.push(HashJoinTupleEntry {
-            next: self.buckets[bucketno],
-            hashvalue,
-            matched: false,
-            tuple,
-        });
-        self.buckets[bucketno] = ix;
         self.total_tuples += 1.0;
         Ok(())
+    }
+
+    /// `ExecHashIncreaseNumBatches` + `ExecHashIncreaseBatchSize`.
+    fn increase_num_batches(&mut self, mcx: Mcx<'mcx>) -> PgResult<()> {
+        if !self.grow_enabled {
+            return Ok(());
+        }
+        let oldnbatch = self.nbatch;
+        if oldnbatch as usize
+            > (i32::MAX as usize / 2).min(MAX_ALLOC_SIZE / (core::mem::size_of::<usize>() * 2))
+        {
+            return Ok(());
+        }
+        // Doubling the in-memory table can beat doubling the batch files.
+        let batch_space = self.nbatch as usize * 2 * BLCKSZ;
+        if self.space_allowed <= batch_space {
+            self.space_allowed *= 2;
+            return Ok(());
+        }
+        let nbatch = oldnbatch * 2;
+        if self.inner_batch_file.is_empty() {
+            ::fd::buffile::PrepareTempTablespaces();
+        }
+        self.inner_batch_file.resize_with(nbatch as usize, || None);
+        self.outer_batch_file.resize_with(nbatch as usize, || None);
+        self.nbatch = nbatch;
+
+        if self.nbuckets_optimal != self.nbuckets {
+            debug_assert!(self.nbuckets_optimal > self.nbuckets);
+            self.nbuckets = self.nbuckets_optimal;
+            self.log2_nbuckets = self.log2_nbuckets_optimal;
+        }
+        self.buckets.clear();
+        self.buckets.resize(self.nbuckets as usize, END);
+
+        let order = self.chunk_walk_order(mcx)?;
+        let mut kept: PgVec<'mcx, HashJoinTupleEntry> =
+            vec_with_capacity_in(mcx, self.entries.len())?;
+        self.chunks.clear();
+        self.chunk_head = END;
+        let ninmemory = order.len();
+        let mut nfreed = 0usize;
+        for &ix in order.iter() {
+            let e = self.entries[ix as usize];
+            let hash_tuple_size = HJTUPLE_OVERHEAD + e.t_len as usize;
+            let (bucketno, batchno) = self.get_bucket_and_batch(e.hashvalue);
+            if batchno == self.curbatch {
+                let chunk = self.dense_alloc_chunk(hash_tuple_size);
+                let new_ix = kept.len() as u32;
+                kept.push(HashJoinTupleEntry {
+                    next: self.buckets[bucketno as usize],
+                    chunk,
+                    ..e
+                });
+                self.buckets[bucketno as usize] = new_ix;
+            } else {
+                debug_assert!(batchno > self.curbatch);
+                // SAFETY: entry images live in the batch arena until reset.
+                let bytes = unsafe {
+                    core::slice::from_raw_parts(
+                        e.tuple.as_ptr().cast_const().cast::<u8>(),
+                        e.t_len as usize,
+                    )
+                };
+                save_tuple(
+                    &mut self.inner_batch_file[batchno as usize],
+                    e.hashvalue,
+                    bytes,
+                    mcx,
+                )?;
+                self.space_used -= hash_tuple_size;
+                nfreed += 1;
+            }
+        }
+        self.entries = kept;
+
+        // All or none moved: more batches can't subdivide this key set.
+        if nfreed == 0 || nfreed == ninmemory {
+            self.grow_enabled = false;
+        }
+        Ok(())
+    }
+
+    /// `ExecHashIncreaseNumBuckets`.
+    fn increase_num_buckets(&mut self, mcx: Mcx<'mcx>) -> PgResult<()> {
+        if self.nbuckets >= self.nbuckets_optimal {
+            return Ok(());
+        }
+        self.nbuckets = self.nbuckets_optimal;
+        self.log2_nbuckets = self.log2_nbuckets_optimal;
+        self.buckets.clear();
+        self.buckets.resize(self.nbuckets as usize, END);
+        let order = self.chunk_walk_order(mcx)?;
+        for &ix in order.iter() {
+            let hashvalue = self.entries[ix as usize].hashvalue;
+            let (bucketno, _batchno) = self.get_bucket_and_batch(hashvalue);
+            self.entries[ix as usize].next = self.buckets[bucketno as usize];
+            self.buckets[bucketno as usize] = ix;
+        }
+        Ok(())
+    }
+
+    /// `MultiExecPrivateHash`'s post-build steps.
+    fn finish_build(&mut self, mcx: Mcx<'mcx>) -> PgResult<()> {
+        if self.nbuckets != self.nbuckets_optimal {
+            self.increase_num_buckets(mcx)?;
+        }
+        self.space_used += self.nbuckets as usize * core::mem::size_of::<usize>();
+        if self.space_used > self.space_peak {
+            self.space_peak = self.space_used;
+        }
+        Ok(())
+    }
+
+    /// `ExecHashTableReset`: drop the previous batch's tuples wholesale.
+    pub fn reset(&mut self, estate: &mut EStateData<'mcx>) {
+        estate.reset_aux_context(self.batch_cxt);
+        self.entries.clear();
+        self.chunks.clear();
+        self.chunk_head = END;
+        self.buckets.clear();
+        self.buckets.resize(self.nbuckets as usize, END);
+        self.space_used = 0;
+    }
+
+    /// `ExecHashTableDestroy`: close remaining batch files (batch 0 never has
+    /// any); arena memory goes with the query context.
+    pub fn destroy(&mut self) -> PgResult<()> {
+        for i in 1..self.inner_batch_file.len() {
+            if let Some(f) = self.inner_batch_file[i].take() {
+                f.close()?;
+            }
+            if let Some(f) = self.outer_batch_file[i].take() {
+                f.close()?;
+            }
+        }
+        Ok(())
+    }
+
+    /// `ExecHashGetBucketAndBatch`.
+    #[inline]
+    pub fn get_bucket_and_batch(&self, hashvalue: u32) -> (u32, i32) {
+        let nbuckets = self.nbuckets;
+        let nbatch = self.nbatch as u32;
+        if nbatch > 1 {
+            (
+                hashvalue & (nbuckets - 1),
+                (hashvalue.rotate_right(self.log2_nbuckets) & (nbatch - 1)) as i32,
+            )
+        } else {
+            (hashvalue & (nbuckets - 1), 0)
+        }
     }
 
     #[inline]
@@ -96,7 +433,7 @@ impl<'mcx> HashJoinTable<'mcx> {
 
     #[inline]
     pub fn bucket_of(&self, hashvalue: u32) -> u32 {
-        hashvalue & self.bucket_mask
+        hashvalue & (self.nbuckets - 1)
     }
 
     #[inline]
@@ -116,7 +453,17 @@ impl<'mcx> HashJoinTable<'mcx> {
 
     #[inline]
     pub fn nbuckets(&self) -> u32 {
-        self.bucket_mask + 1
+        self.nbuckets
+    }
+
+    pub fn instrumentation(&self) -> HashInstrumentation {
+        HashInstrumentation {
+            nbuckets: self.nbuckets as i32,
+            nbuckets_original: self.nbuckets_original as i32,
+            nbatch: self.nbatch,
+            nbatch_original: self.nbatch_original,
+            space_peak: self.space_peak as u64,
+        }
     }
 
     /// ExecHashTableResetMatchFlags.
@@ -127,10 +474,57 @@ impl<'mcx> HashJoinTable<'mcx> {
     }
 }
 
+/// `ExecHashJoinSaveTuple` (nodeHashjoin.c): hashvalue then the minimal
+/// tuple image; the batch file is created lazily.
+pub fn save_tuple<'mcx>(
+    fileptr: &mut Option<BufFile<'mcx>>,
+    hashvalue: u32,
+    tuple: &[u8],
+    mcx: Mcx<'mcx>,
+) -> PgResult<()> {
+    if fileptr.is_none() {
+        *fileptr = Some(::fd::buffile::BufFileCreateTemp(mcx, false)?);
+    }
+    let file = fileptr.as_mut().expect("batch file just ensured");
+    file.write(&hashvalue.to_ne_bytes())?;
+    file.write(tuple)?;
+    Ok(())
+}
+
+/// `ExecHashJoinGetSavedTuple` (nodeHashjoin.c): None at EOF; the image lands
+/// in `scratch` (u64-backed for MAXALIGN) and stays valid until the next call.
+pub fn get_saved_tuple<'mcx>(
+    file: &mut BufFile<'mcx>,
+    scratch: &mut PgVec<'mcx, u64>,
+) -> PgResult<Option<(u32, NonNull<MinimalTupleData>)>> {
+    if init_small::globals::InterruptPending() {
+        postgres_seams::check_for_interrupts::call()?;
+    }
+    let mut header = [0u8; 8];
+    let nread = file.read_maybe_eof(&mut header, true)?;
+    if nread == 0 {
+        return Ok(None);
+    }
+    let hashvalue = u32::from_ne_bytes(header[0..4].try_into().unwrap());
+    let t_len = u32::from_ne_bytes(header[4..8].try_into().unwrap());
+    debug_assert!(t_len as usize >= SizeofMinimalTupleHeader);
+    scratch.clear();
+    scratch.resize((t_len as usize).div_ceil(8), 0);
+    // SAFETY: u64 backing reinterpreted as bytes; length covers t_len.
+    let image: &mut [u8] =
+        unsafe { core::slice::from_raw_parts_mut(scratch.as_mut_ptr().cast(), t_len as usize) };
+    image[0..4].copy_from_slice(&t_len.to_ne_bytes());
+    file.read_exact(&mut image[4..])?;
+    let ptr = NonNull::new(image.as_mut_ptr().cast::<MinimalTupleData>())
+        .expect("scratch image is non-null");
+    Ok(Some((hashvalue, ptr)))
+}
+
 pub struct HashState<'mcx> {
     hash_expr: PgBox<'mcx, ExprState<'mcx>>,
     pub table: Option<HashJoinTable<'mcx>>,
     pub hash_tuple_slot: ExecSlotId,
+    pub ps_ExprContext: EcxtId,
     ntuples_est: f64,
     tupwidth: i32,
     #[allow(dead_code)]
@@ -158,6 +552,7 @@ pub fn exec_init_hash<'mcx>(
     )?;
     let hash_tuple_slot =
         estate.exec_init_extra_tuple_slot(Some(inner_desc.clone()), TupleSlotKind::MinimalTuple);
+    let ps_ExprContext = estate.exec_assign_expr_context();
 
     let child = node
         .plan
@@ -175,43 +570,57 @@ pub fn exec_init_hash<'mcx>(
         hash_expr,
         table: None,
         hash_tuple_slot,
+        ps_ExprContext,
         ntuples_est,
         tupwidth: child.plan_width,
         inner_desc,
     })
 }
 
-/// `MultiExecHash`/`MultiExecPrivateHash`: build the single-batch table.
+/// `ExecHashTableCreate` sizing + control block (HJ_BUILD_HASHTABLE calls it).
+/// useskew mirrors C's OidIsValid(node->skewTable) for these plan shapes; the
+/// skew table itself only forms from outer-key MCV stats, and the loud gap is
+/// downstream (no skew bucket code exists to route to).
+pub fn exec_hash_table_create<'mcx>(
+    hs: &HashState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<HashJoinTable<'mcx>> {
+    let mcx = estate.es_query_cxt;
+    let (nbuckets, nbatch, _num_skew_mcvs, space_allowed) =
+        exec_choose_hash_table_size_full(hs.ntuples_est, hs.tupwidth, true);
+    HashJoinTable::create(mcx, estate, nbuckets, nbatch, space_allowed)
+}
+
+/// `MultiExecHash`/`MultiExecPrivateHash`: build the (possibly multi-batch)
+/// table; later-batch tuples spill to inner batch files.
 pub fn multi_exec_hash<'mcx, C: HashBuildInput<'mcx>>(
     hs: &mut HashState<'mcx>,
     child: &mut C,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     let mcx = estate.es_query_cxt;
-    let (nbuckets, nbatch, _skew) = exec_choose_hash_table_size(hs.ntuples_est, hs.tupwidth, true);
-    assert_eq!(
-        nbatch, 1,
-        "MultiExecHash (nodeHash.c): nbatch>1 multi-batch spill; work_mem overflow lane not ported"
-    );
-    let mut table = HashJoinTable::create(mcx, nbuckets)?;
-
+    debug_assert!(hs.table.is_some(), "table created in HJ_BUILD_HASHTABLE");
     loop {
         let Some(slot_id) = child.exec_proc(estate)? else {
             break;
         };
+        estate.reset_expr_context(hs.ps_ExprContext);
         let hashvalue = {
             let slot = &mut estate.es_tupleTable[slot_id.0 as usize];
             let mut slots = EvalSlots { scan: None, inner: Some(slot), outer: None };
             let r = exec_eval_expr(&mut hs.hash_expr, &mut slots)?;
             // Non-strict fold keeps NULL-key tuples; they never match the
-            // inner-join hashqual recheck, so the result equals C's strict drop.
+            // hashqual recheck, so results equal C's strict drop for
+            // non-fill-inner joins and C's keep for fill-inner ones.
             r.value.as_u32()
         };
-        let slot = &mut estate.es_tupleTable[slot_id.0 as usize];
-        table.insert(slot, mcx, mcx, hashvalue)?;
+        let ecxt = hs.ps_ExprContext;
+        hs.table
+            .as_mut()
+            .expect("hash table created")
+            .insert(estate, slot_id, ecxt, hashvalue)?;
     }
-
-    hs.table = Some(table);
+    hs.table.as_mut().expect("hash table created").finish_build(mcx)?;
     Ok(())
 }
 
@@ -225,6 +634,9 @@ const NTUP_PER_BUCKET: f64 = 1.0;
 const MAX_ALLOC_SIZE: usize = 0x3fff_ffff;
 const SKEW_HASH_MEM_PERCENT: usize = 2;
 const SKEW_BUCKET_OVERHEAD: usize = 16; // MAXALIGN(sizeof(HashSkewBucket))
+const HASH_CHUNK_SIZE: usize = 32 * 1024;
+const HASH_CHUNK_THRESHOLD: usize = HASH_CHUNK_SIZE / 4;
+const BLCKSZ: usize = 8192;
 
 #[inline]
 const fn maxalign(n: usize) -> usize {
@@ -245,6 +657,16 @@ pub fn get_hash_memory_limit() -> usize {
 
 /// C `ExecChooseHashTableSize` serial path -> (numbuckets, numbatches, num_skew_mcvs).
 pub fn exec_choose_hash_table_size(ntuples: f64, tupwidth: i32, useskew: bool) -> (u32, i32, i32) {
+    let (b, n, s, _) = exec_choose_hash_table_size_full(ntuples, tupwidth, useskew);
+    (b, n, s)
+}
+
+/// As above plus `*space_allowed` (the executor's create path needs it).
+pub fn exec_choose_hash_table_size_full(
+    ntuples: f64,
+    tupwidth: i32,
+    useskew: bool,
+) -> (u32, i32, i32, usize) {
     let ntuples = if ntuples <= 0.0 { 1000.0 } else { ntuples };
 
     let tupsize = HJTUPLE_OVERHEAD + maxalign(SizeofMinimalTupleHeader) + maxalign(tupwidth as usize);
@@ -296,7 +718,6 @@ pub fn exec_choose_hash_table_size(ntuples: f64, tupwidth: i32, useskew: bool) -
         nbatch = nextpower2_32(2i64.max(minbatch) as u32) as i64;
     }
 
-    const BLCKSZ: usize = 8192;
     while nbatch > 1 {
         if nbuckets > (MAX_ALLOC_SIZE / SIZEOF_HASHJOINTUPLE / 2) {
             break;
@@ -313,7 +734,7 @@ pub fn exec_choose_hash_table_size(ntuples: f64, tupwidth: i32, useskew: bool) -
         nbatch /= 2;
     }
 
-    (nbuckets as u32, nbatch as i32, num_skew_mcvs as i32)
+    (nbuckets as u32, nbatch as i32, num_skew_mcvs as i32, space_allowed)
 }
 
 #[inline]

@@ -1089,7 +1089,7 @@ pub fn exec_end_node<'mcx>(
         }
         PlanStateNode::HashJoin(hj) => {
             let hj = &mut **hj;
-            ::nodehashjoin::exec_end_hash_join(&mut hj.state, &mut hj.hash.state);
+            ::nodehashjoin::exec_end_hash_join(&mut hj.state, &mut hj.hash.state, estate)?;
             exec_end_node(&mut hj.outer, estate)?;
             exec_end_node(&mut hj.hash.child, estate)
         }
@@ -1104,12 +1104,12 @@ pub fn exec_end_node<'mcx>(
 
 /// `ExecShutdownNode` (execProcnode.c): per-node arms are all no-ops for the
 /// ported set (Gather/ForeignScan/CustomScan/Hash own real shutdowns).
-pub fn exec_shutdown_node<'mcx>(node: &mut PlanStateNode<'mcx>) {
+pub fn exec_shutdown_node<'mcx>(node: &mut PlanStateNode<'mcx>, estate: &mut EStateData<'mcx>) {
     match node {
-        PlanStateNode::Instrumented(w) => exec_shutdown_node(&mut w.inner),
+        PlanStateNode::Instrumented(w) => exec_shutdown_node(&mut w.inner, estate),
         PlanStateNode::Result(rs) => {
             if let Some(outer) = rs.outer.as_deref_mut() {
-                exec_shutdown_node(outer);
+                exec_shutdown_node(outer, estate);
             }
         }
         PlanStateNode::SeqScan(_)
@@ -1119,31 +1119,35 @@ pub fn exec_shutdown_node<'mcx>(node: &mut PlanStateNode<'mcx>) {
         | PlanStateNode::IndexScan(_)
         | PlanStateNode::IndexOnlyScan(_)
         | PlanStateNode::BitmapIndexScan(_) => {}
-        PlanStateNode::Agg(aps) => exec_shutdown_node(&mut aps.outer),
-        PlanStateNode::WindowAgg(w) => exec_shutdown_node(&mut w.outer),
-        PlanStateNode::Sort(s) => exec_shutdown_node(&mut s.outer),
-        PlanStateNode::IncrementalSort(s) => exec_shutdown_node(&mut s.outer),
-        PlanStateNode::Material(m) => exec_shutdown_node(&mut m.outer),
-        PlanStateNode::Unique(u) => exec_shutdown_node(&mut u.outer),
-        PlanStateNode::Limit(l) => exec_shutdown_node(&mut l.outer),
-        PlanStateNode::BitmapHeapScan(b) => exec_shutdown_node(&mut b.bitmapqual),
+        PlanStateNode::Agg(aps) => exec_shutdown_node(&mut aps.outer, estate),
+        PlanStateNode::WindowAgg(w) => exec_shutdown_node(&mut w.outer, estate),
+        PlanStateNode::Sort(s) => exec_shutdown_node(&mut s.outer, estate),
+        PlanStateNode::IncrementalSort(s) => exec_shutdown_node(&mut s.outer, estate),
+        PlanStateNode::Material(m) => exec_shutdown_node(&mut m.outer, estate),
+        PlanStateNode::Unique(u) => exec_shutdown_node(&mut u.outer, estate),
+        PlanStateNode::Limit(l) => exec_shutdown_node(&mut l.outer, estate),
+        PlanStateNode::BitmapHeapScan(b) => exec_shutdown_node(&mut b.bitmapqual, estate),
         PlanStateNode::BitmapAnd(bc) | PlanStateNode::BitmapOr(bc) => {
             for sub in bc.substates.iter_mut() {
-                exec_shutdown_node(sub);
+                exec_shutdown_node(sub, estate);
             }
         }
-        PlanStateNode::ModifyTable(mps) => exec_shutdown_node(&mut mps.subplan),
+        PlanStateNode::ModifyTable(mps) => exec_shutdown_node(&mut mps.subplan, estate),
         PlanStateNode::NestLoop(nl) => {
-            exec_shutdown_node(&mut nl.outer);
-            exec_shutdown_node(&mut nl.inner);
+            exec_shutdown_node(&mut nl.outer, estate);
+            exec_shutdown_node(&mut nl.inner, estate);
         }
+        // ExecShutdownHash: hand the table's instrumentation to the estate
+        // (C: HashState.hinstrument) before EXPLAIN reads it.
         PlanStateNode::HashJoin(hj) => {
-            exec_shutdown_node(&mut hj.outer);
-            exec_shutdown_node(&mut hj.hash.child);
+            let hj = &mut **hj;
+            ::nodehashjoin::shutdown_accum_instrumentation(&hj.state, &hj.hash.state, estate);
+            exec_shutdown_node(&mut hj.outer, estate);
+            exec_shutdown_node(&mut hj.hash.child, estate);
         }
         PlanStateNode::MergeJoin(mj) => {
-            exec_shutdown_node(&mut mj.outer);
-            exec_shutdown_node(&mut mj.inner);
+            exec_shutdown_node(&mut mj.outer, estate);
+            exec_shutdown_node(&mut mj.inner, estate);
         }
     }
 }
