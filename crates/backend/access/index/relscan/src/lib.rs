@@ -90,6 +90,10 @@ impl IndexAmKind {
         match self {
             IndexAmKind::Btree => 5,
             IndexAmKind::Hash => 1,
+            IndexAmKind::Gin => 0,
+            IndexAmKind::Gist => 0,
+            IndexAmKind::Spgist => 0,
+            IndexAmKind::Brin => 0,
             #[cfg(feature = "mock")]
             IndexAmKind::Mock => 5,
         }
@@ -99,6 +103,10 @@ impl IndexAmKind {
         match self {
             IndexAmKind::Btree => 6,
             IndexAmKind::Hash => 3,
+            IndexAmKind::Gin => 7,
+            IndexAmKind::Gist => 12,
+            IndexAmKind::Spgist => 7,
+            IndexAmKind::Brin => 15,
             #[cfg(feature = "mock")]
             IndexAmKind::Mock => 6,
         }
@@ -108,6 +116,10 @@ impl IndexAmKind {
         match self {
             IndexAmKind::Btree => 5,
             IndexAmKind::Hash => 3,
+            IndexAmKind::Gin => 7,
+            IndexAmKind::Gist => 10,
+            IndexAmKind::Spgist => 7,
+            IndexAmKind::Brin => 5,
             #[cfg(feature = "mock")]
             IndexAmKind::Mock => 5,
         }
@@ -117,6 +129,10 @@ impl IndexAmKind {
         match self {
             IndexAmKind::Btree => false,
             IndexAmKind::Hash => false,
+            IndexAmKind::Gin => true,
+            IndexAmKind::Gist => true,
+            IndexAmKind::Spgist => true,
+            IndexAmKind::Brin => true,
             #[cfg(feature = "mock")]
             IndexAmKind::Mock => false,
         }
@@ -126,6 +142,10 @@ impl IndexAmKind {
         match self {
             IndexAmKind::Btree => true,
             IndexAmKind::Hash => false,
+            IndexAmKind::Gin => false,
+            IndexAmKind::Gist => false,
+            IndexAmKind::Spgist => false,
+            IndexAmKind::Brin => false,
             #[cfg(feature = "mock")]
             IndexAmKind::Mock => true,
         }
@@ -135,6 +155,10 @@ impl IndexAmKind {
         match self {
             IndexAmKind::Btree => false,
             IndexAmKind::Hash => true,
+            IndexAmKind::Gin => false,
+            IndexAmKind::Gist => false,
+            IndexAmKind::Spgist => false,
+            IndexAmKind::Brin => false,
             #[cfg(feature = "mock")]
             IndexAmKind::Mock => false,
         }
@@ -144,6 +168,10 @@ impl IndexAmKind {
         match self {
             IndexAmKind::Btree => false,
             IndexAmKind::Hash => false,
+            IndexAmKind::Gin => false,
+            IndexAmKind::Gist => true,
+            IndexAmKind::Spgist => true,
+            IndexAmKind::Brin => false,
             #[cfg(feature = "mock")]
             IndexAmKind::Mock => false,
         }
