@@ -5,16 +5,18 @@ use datum::Varlena;
 use mcx::{Mcx, PgVec};
 use stringinfo::StringInfo;
 use types_error::{
-    ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_INVALID_PARAMETER_VALUE,
-    ERRCODE_INVALID_TEXT_REPRESENTATION, ERRCODE_PROGRAM_LIMIT_EXCEEDED,
+    ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_ARRAY_SUBSCRIPT_ERROR,
+    ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_INVALID_TEXT_REPRESENTATION,
+    ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_SUBSTRING_ERROR,
 };
 
-use crate::{image_with_header, varstrfastcmp_c};
+use crate::{image_with_header, varstrfastcmp_c, VARHDRSZ};
 
-const HEXTBL: &[u8; 16] = b"0123456789abcdef";
+pub const HEXTBL: &[u8; 16] = b"0123456789abcdef";
 
+// C encode.c hexlookup via get_hex: digits + both cases, -1 otherwise.
 #[inline]
-fn hexval(c: u8) -> i8 {
+fn get_hex(c: u8) -> i8 {
     match c {
         b'0'..=b'9' => (c - b'0') as i8,
         b'a'..=b'f' => (c - b'a' + 10) as i8,
@@ -30,10 +32,18 @@ fn invalid_bytea_input() -> PgError {
         .with_sqlstate(ERRCODE_INVALID_TEXT_REPRESENTATION)
 }
 
+// C: encode.c error path renders the offending mbchar (pg_mblen_range).
 #[cold]
 #[inline(never)]
-fn invalid_hex_digit() -> PgError {
-    PgError::error("invalid hexadecimal digit").with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE)
+fn invalid_hex_digit(s: &[u8]) -> PgResult<PgError> {
+    let n = (mbutils_seams::pg_mblen_range::call(s)? as usize).min(s.len());
+    Ok(
+        PgError::error(format!(
+            "invalid hexadecimal digit: \"{}\"",
+            String::from_utf8_lossy(&s[..n])
+        ))
+        .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE),
+    )
 }
 
 #[cold]
@@ -43,8 +53,21 @@ fn odd_hex_digits() -> PgError {
         .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE)
 }
 
-// C: hex_decode_safe (encode.c) appending into the reserved-capacity image.
-fn hex_decode_append(src: &[u8], out: &mut PgVec<'_, u8>) -> Result<(), PgError> {
+// C: encode.c hex_encode — two lowercase nibbles per byte, into reserved space.
+pub fn hex_encode_into(src: &[u8], out: &mut PgVec<'_, u8>) {
+    for &b in src {
+        out.push(HEXTBL[(b >> 4) as usize]);
+        out.push(HEXTBL[(b & 0xf) as usize]);
+    }
+}
+
+// C: encode.c hex_decode_safe — whitespace-skipping, mblen-aware digit error,
+// odd-length error, soft-error channel. Shared by byteain and encode's `decode`.
+pub fn hex_decode_into(
+    src: &[u8],
+    mut escontext: Option<&mut SoftErrorContext>,
+    out: &mut PgVec<'_, u8>,
+) -> PgResult<Option<()>> {
     let mut i = 0usize;
     while i < src.len() {
         let c = src[i];
@@ -52,22 +75,22 @@ fn hex_decode_append(src: &[u8], out: &mut PgVec<'_, u8>) -> Result<(), PgError>
             i += 1;
             continue;
         }
-        let v1 = hexval(c);
+        let v1 = get_hex(c);
         if v1 < 0 {
-            return Err(invalid_hex_digit());
+            return ereturn(escontext.as_deref_mut(), None, invalid_hex_digit(&src[i..])?);
         }
         i += 1;
         if i >= src.len() {
-            return Err(odd_hex_digits());
+            return ereturn(escontext.as_deref_mut(), None, odd_hex_digits());
         }
-        let v2 = hexval(src[i]);
+        let v2 = get_hex(src[i]);
         if v2 < 0 {
-            return Err(invalid_hex_digit());
+            return ereturn(escontext.as_deref_mut(), None, invalid_hex_digit(&src[i..])?);
         }
         i += 1;
         out.push(((v1 as u8) << 4) | v2 as u8);
     }
-    Ok(())
+    Ok(Some(()))
 }
 
 pub fn byteain<'mcx>(
@@ -78,9 +101,9 @@ pub fn byteain<'mcx>(
     if input.first() == Some(&b'\\') && input.get(1) == Some(&b'x') {
         // C: palloc((len-2)/2 + VARHDRSZ) then decode to the actual length.
         let mut image = image_with_header(mcx, (input.len() - 2) / 2)?;
-        return match hex_decode_append(&input[2..], &mut image) {
-            Ok(()) => Ok(Some(Varlena::from_image(image))),
-            Err(e) => ereturn(escontext.as_deref_mut(), None, e),
+        return match hex_decode_into(&input[2..], escontext.as_deref_mut(), &mut image)? {
+            Some(()) => Ok(Some(Varlena::from_image(image))),
+            None => Ok(None),
         };
     }
 
@@ -242,4 +265,144 @@ pub fn bytea_smaller<'a>(v1: &'a [u8], v2: &'a [u8]) -> &'a [u8] {
     } else {
         v2
     }
+}
+
+#[cold]
+#[inline(never)]
+fn index_out_of_range_i32(n: i32, len: i32) -> PgError {
+    PgError::error(format!("index {n} out of valid range, 0..{}", len - 1))
+        .with_sqlstate(ERRCODE_ARRAY_SUBSCRIPT_ERROR)
+}
+
+#[cold]
+#[inline(never)]
+fn index_out_of_range_i64(n: i64, hi: i64) -> PgError {
+    PgError::error(format!("index {n} out of valid range, 0..{hi}"))
+        .with_sqlstate(ERRCODE_ARRAY_SUBSCRIPT_ERROR)
+}
+
+#[cold]
+#[inline(never)]
+fn negative_substring() -> PgError {
+    PgError::error("negative substring length not allowed").with_sqlstate(ERRCODE_SUBSTRING_ERROR)
+}
+
+// C: bytea_substring — SQL substring math, then DatumGetByteaPSlice(str, S1-1, L1).
+pub fn bytea_substring<'mcx>(
+    mcx: Mcx<'mcx>,
+    payload: &[u8],
+    s: i32,
+    l: i32,
+    length_not_specified: bool,
+) -> PgResult<Varlena<'mcx>> {
+    let s1 = s.max(1);
+    let l1: i32 = if length_not_specified {
+        -1
+    } else if l < 0 {
+        return Err(negative_substring().into());
+    } else {
+        match s.checked_add(l) {
+            None => -1,
+            Some(e) => {
+                if e < 1 {
+                    return byteasend(mcx, b"");
+                }
+                e - s1
+            }
+        }
+    };
+
+    let total = payload.len();
+    let begin = ((s1 - 1) as usize).min(total);
+    let take = if l1 < 0 {
+        total - begin
+    } else {
+        (l1 as usize).min(total - begin)
+    };
+    let mut image = image_with_header(mcx, take)?;
+    mcx::vec_append_bytes(&mut image, &payload[begin..begin + take])?;
+    Ok(Varlena::from_image(image))
+}
+
+// C: byteapos — POSITION(); 1-based, 0 if absent, 1 for the empty pattern.
+pub fn byteapos(t1: &[u8], t2: &[u8]) -> i32 {
+    let len1 = t1.len() as i32;
+    let len2 = t2.len() as i32;
+    if len2 <= 0 {
+        return 1;
+    }
+    let px = len1 - len2;
+    let n2 = len2 as usize;
+    let mut p = 0i32;
+    while p <= px {
+        let pi = p as usize;
+        if t1[pi] == t2[0] && t1[pi..pi + n2] == *t2 {
+            return p + 1;
+        }
+        p += 1;
+    }
+    0
+}
+
+pub fn bytea_get_byte(v: &[u8], n: i32) -> PgResult<i32> {
+    let len = v.len() as i32;
+    if n < 0 || n >= len {
+        return Err(index_out_of_range_i32(n, len).into());
+    }
+    Ok(v[n as usize] as i32)
+}
+
+pub fn bytea_get_bit(v: &[u8], n: i64) -> PgResult<i32> {
+    let len = v.len() as i64;
+    if n < 0 || n >= len * 8 {
+        return Err(index_out_of_range_i64(n, len * 8 - 1).into());
+    }
+    let byte_no = (n / 8) as usize;
+    let bit_no = (n % 8) as u32;
+    Ok(((v[byte_no] >> bit_no) & 1) as i32)
+}
+
+pub fn bytea_set_byte<'mcx>(
+    mcx: Mcx<'mcx>,
+    v: &[u8],
+    n: i32,
+    new_byte: i32,
+) -> PgResult<Varlena<'mcx>> {
+    let len = v.len() as i32;
+    if n < 0 || n >= len {
+        return Err(index_out_of_range_i32(n, len).into());
+    }
+    let mut image = image_with_header(mcx, v.len())?;
+    mcx::vec_append_bytes(&mut image, v)?;
+    image[VARHDRSZ + n as usize] = new_byte as u8;
+    Ok(Varlena::from_image(image))
+}
+
+pub fn bytea_set_bit<'mcx>(
+    mcx: Mcx<'mcx>,
+    v: &[u8],
+    n: i64,
+    new_bit: i32,
+) -> PgResult<Varlena<'mcx>> {
+    let len = v.len() as i64;
+    if n < 0 || n >= len * 8 {
+        return Err(index_out_of_range_i64(n, len * 8 - 1).into());
+    }
+    let byte_no = (n / 8) as usize;
+    let bit_no = (n % 8) as u32;
+    if new_bit != 0 && new_bit != 1 {
+        return Err(PgError::error("new bit must be 0 or 1")
+            .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE)
+            .into());
+    }
+    let mut image = image_with_header(mcx, v.len())?;
+    mcx::vec_append_bytes(&mut image, v)?;
+    let idx = VARHDRSZ + byte_no;
+    let old = image[idx];
+    image[idx] = if new_bit == 0 {
+        old & !(1 << bit_no)
+    } else {
+        old | (1 << bit_no)
+    };
+    Ok(Varlena::from_image(image))
 }

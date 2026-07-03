@@ -107,7 +107,6 @@ fn wire_io_round_trips() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         // Identity client<->server conversion (single-encoding test setup).
-        mbutils_seams::pg_client_to_server::set(|_, _| Ok(None));
         mbutils_seams::pg_server_to_client::set(|_, _| Ok(None));
     });
     let ctx = MemoryContext::new("t");
@@ -135,6 +134,7 @@ fn wire_io_round_trips() {
 
 #[test]
 fn byteain_hex_and_escape() {
+    install_mb_for_levenshtein();
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
     let v = bytea::byteain(mcx, b"\\xDEADbeef", None).unwrap().unwrap();
@@ -181,6 +181,75 @@ fn byteaout_hex_and_escape() {
     assert_eq!(&buf[..], b"a\\\\\\001\\177\0");
 
     assert!(bytea::byteaout_into(b"x", 99, &mut buf).is_err());
+}
+
+#[test]
+fn byteain_hex_digit_message_is_c_exact() {
+    install_mb_for_levenshtein();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let err = bytea::byteain(mcx, b"\\xzz", None).unwrap_err();
+    assert_eq!(err.message, "invalid hexadecimal digit: \"z\"");
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_INVALID_PARAMETER_VALUE);
+    let err = bytea::byteain(mcx, b"\\xa", None).unwrap_err();
+    assert_eq!(err.message, "invalid hexadecimal data: odd number of digits");
+}
+
+#[test]
+fn bytea_substring_and_pos() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let s = &[0u8, 1, 2, 3, 4, 5];
+    // 1-based; substring(s from 2 for 3) = bytes at index 1..4.
+    assert_eq!(bytea::bytea_substring(mcx, s, 2, 3, false).unwrap().data(), &[1, 2, 3]);
+    // no length -> to end.
+    assert_eq!(bytea::bytea_substring(mcx, s, 3, -1, true).unwrap().data(), &[2, 3, 4, 5]);
+    // start <= 0 shifts window; length trims per SQL end position.
+    assert_eq!(bytea::bytea_substring(mcx, s, -1, 3, false).unwrap().data(), &[0]);
+    // start past end -> empty.
+    assert_eq!(bytea::bytea_substring(mcx, s, 10, 2, false).unwrap().data(), b"");
+    // E < 1 -> empty.
+    assert_eq!(bytea::bytea_substring(mcx, s, 0, 0, false).unwrap().data(), b"");
+    // negative length -> error 22011.
+    let err = bytea::bytea_substring(mcx, s, 1, -2, false).unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_SUBSTRING_ERROR);
+
+    assert_eq!(bytea::byteapos(b"abcabc", b"bc"), 2);
+    assert_eq!(bytea::byteapos(b"abc", b"xy"), 0);
+    assert_eq!(bytea::byteapos(b"abc", b""), 1);
+    assert_eq!(bytea::byteapos(b"a", b"abc"), 0);
+}
+
+#[test]
+fn bytea_get_set_byte_and_bit() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let v = &[0x00u8, 0xff, 0x10];
+    assert_eq!(bytea::bytea_get_byte(v, 1).unwrap(), 255);
+    assert_eq!(bytea::bytea_get_byte(v, 2).unwrap(), 16);
+    assert_eq!(
+        bytea::bytea_get_byte(v, 3).unwrap_err().sqlstate(),
+        types_error::ERRCODE_ARRAY_SUBSCRIPT_ERROR
+    );
+    // bit 0 of byte 1 (0xff) is the LSB.
+    assert_eq!(bytea::bytea_get_bit(v, 8).unwrap(), 1);
+    // byte 2 = 0x10 = bit 4 set; global bit index 16+4 = 20.
+    assert_eq!(bytea::bytea_get_bit(v, 20).unwrap(), 1);
+    assert_eq!(bytea::bytea_get_bit(v, 21).unwrap(), 0);
+    assert_eq!(
+        bytea::bytea_get_bit(v, 24).unwrap_err().sqlstate(),
+        types_error::ERRCODE_ARRAY_SUBSCRIPT_ERROR
+    );
+
+    let r = bytea::bytea_set_byte(mcx, v, 0, 0xab).unwrap();
+    assert_eq!(r.data(), &[0xab, 0xff, 0x10]);
+    let r = bytea::bytea_set_bit(mcx, v, 0, 1).unwrap();
+    assert_eq!(r.data(), &[0x01, 0xff, 0x10]);
+    let r = bytea::bytea_set_bit(mcx, v, 8, 0).unwrap();
+    assert_eq!(r.data(), &[0x00, 0xfe, 0x10]);
+    let err = bytea::bytea_set_bit(mcx, v, 0, 2).unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_INVALID_PARAMETER_VALUE);
+    assert_eq!(err.message, "new bit must be 0 or 1");
 }
 
 #[test]
@@ -231,7 +300,7 @@ fn fc_wrappers_dispatch() {
 fn builtin_table_matches_declared_arity() {
     for row in crate::builtins::VARLENA_BUILTINS {
         assert!(row.strict && !row.retset);
-        assert!(row.nargs == 1 || row.nargs == 2, "{}", row.name);
+        assert!((1..=3).contains(&row.nargs), "{}", row.name);
     }
 }
 

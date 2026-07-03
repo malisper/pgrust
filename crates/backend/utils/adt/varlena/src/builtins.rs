@@ -1,6 +1,8 @@
 //! fmgr wrappers (`fc_*`) + the `VARLENA_BUILTINS` table for fmgr-core.
-//! Still deferred: *recv/*send (pqformat wire frame is a separate unit) and
-//! bttextsortsupport (SortSupport substrate); value cores live in the crate root.
+//! Still deferred: bttextsortsupport (SortSupport substrate); value cores live
+//! in the crate root. text/bytea recv/send ride the binary-wire fmgr frame
+//! (types_fmgr::wire). unknownrecv/unknownsend stay value-core-only (unknown is
+//! a pseudo-type; no binary wire registration in pg_proc.dat).
 
 use datum::Datum;
 use types_core::Oid;
@@ -179,6 +181,34 @@ pub fn fc_byteacat(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRes
     )?))
 }
 
+pub fn fc_textrecv(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: recv arg0 is the live StringInfo pointer per the recv ABI.
+    let buf = unsafe { fcinfo.arg_stringinfo(0) };
+    let mcx = fcinfo.result_mcx();
+    Ok(varlena_result(crate::textrecv(mcx, buf)?))
+}
+
+pub fn fc_textsend(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog arg 0 of textsend is a non-null text varlena (strict fn).
+    let payload = unsafe { fcinfo.arg_varlena_packed(0) }.data();
+    let mcx = fcinfo.result_mcx();
+    Ok(varlena_result(crate::textsend(mcx, payload)?))
+}
+
+pub fn fc_bytearecv(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: recv arg0 is the live StringInfo pointer per the recv ABI.
+    let buf = unsafe { fcinfo.arg_stringinfo(0) };
+    let mcx = fcinfo.result_mcx();
+    Ok(varlena_result(crate::bytea::bytearecv(mcx, buf)?))
+}
+
+pub fn fc_byteasend(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog arg 0 of byteasend is a non-null bytea varlena (strict fn).
+    let payload = unsafe { fcinfo.arg_varlena_packed(0) }.data();
+    let mcx = fcinfo.result_mcx();
+    Ok(varlena_result(crate::bytea::byteasend(mcx, payload)?))
+}
+
 pub fn fc_byteain(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: catalog arg 0 of byteain is a non-null cstring (strict fn).
     let s = unsafe { fcinfo.arg_cstring(0) }.to_bytes();
@@ -219,6 +249,86 @@ pub fn fc_byteaoctetlen(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> 
     Ok(Datum::from_i32(crate::bytea::byteaoctetlen(payload)))
 }
 
+pub fn fc_bytea_get_byte(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog arg 0 is a non-null bytea varlena (strict fn).
+    let v = unsafe { fcinfo.arg_varlena_packed(0) };
+    let n = fcinfo.arg_i32(1);
+    Ok(Datum::from_i32(crate::bytea::bytea_get_byte(v.data(), n)?))
+}
+
+pub fn fc_bytea_get_bit(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog arg 0 is a non-null bytea varlena (strict fn).
+    let v = unsafe { fcinfo.arg_varlena_packed(0) };
+    let n = fcinfo.arg_i64(1);
+    Ok(Datum::from_i32(crate::bytea::bytea_get_bit(v.data(), n)?))
+}
+
+pub fn fc_bytea_set_byte(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog arg 0 is a non-null bytea varlena (strict fn).
+    let v = unsafe { fcinfo.arg_varlena_packed(0) };
+    let n = fcinfo.arg_i32(1);
+    let new_byte = fcinfo.arg_i32(2);
+    let mcx = fcinfo.result_mcx();
+    Ok(varlena_result(crate::bytea::bytea_set_byte(
+        mcx,
+        v.data(),
+        n,
+        new_byte,
+    )?))
+}
+
+pub fn fc_bytea_set_bit(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog arg 0 is a non-null bytea varlena (strict fn).
+    let v = unsafe { fcinfo.arg_varlena_packed(0) };
+    let n = fcinfo.arg_i64(1);
+    let new_bit = fcinfo.arg_i32(2);
+    let mcx = fcinfo.result_mcx();
+    Ok(varlena_result(crate::bytea::bytea_set_bit(
+        mcx,
+        v.data(),
+        n,
+        new_bit,
+    )?))
+}
+
+pub fn fc_bytea_substr(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog arg 0 is a non-null bytea varlena (strict fn).
+    let v = unsafe { fcinfo.arg_varlena_packed(0) };
+    let s = fcinfo.arg_i32(1);
+    let l = fcinfo.arg_i32(2);
+    let mcx = fcinfo.result_mcx();
+    Ok(varlena_result(crate::bytea::bytea_substring(
+        mcx,
+        v.data(),
+        s,
+        l,
+        false,
+    )?))
+}
+
+pub fn fc_bytea_substr_no_len(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    // SAFETY: catalog arg 0 is a non-null bytea varlena (strict fn).
+    let v = unsafe { fcinfo.arg_varlena_packed(0) };
+    let s = fcinfo.arg_i32(1);
+    let mcx = fcinfo.result_mcx();
+    Ok(varlena_result(crate::bytea::bytea_substring(
+        mcx,
+        v.data(),
+        s,
+        -1,
+        true,
+    )?))
+}
+
+pub fn fc_byteapos(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog args are non-null bytea varlenas (strict fn).
+    let (a, b) = unsafe { (fcinfo.arg_varlena_packed(0), fcinfo.arg_varlena_packed(1)) };
+    Ok(Datum::from_i32(crate::bytea::byteapos(a.data(), b.data())))
+}
+
 pub fn fc_btvarstrequalimage(
     _flinfo: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
@@ -244,6 +354,10 @@ pub const VARLENA_BUILTINS: &[FmgrBuiltin] = &[
     b(31, "byteaout", 1, fc_byteaout),
     b(46, "textin", 1, fc_textin),
     b(47, "textout", 1, fc_textout),
+    b(2412, "bytearecv", 1, fc_bytearecv),
+    b(2413, "byteasend", 1, fc_byteasend),
+    b(2414, "textrecv", 1, fc_textrecv),
+    b(2415, "textsend", 1, fc_textsend),
     b(67, "texteq", 2, fc_texteq),
     b(109, "unknownin", 1, fc_unknownin),
     b(110, "unknownout", 1, fc_unknownout),
@@ -252,6 +366,10 @@ pub const VARLENA_BUILTINS: &[FmgrBuiltin] = &[
     b(458, "text_larger", 2, fc_text_larger),
     b(459, "text_smaller", 2, fc_text_smaller),
     b(720, "byteaoctetlen", 1, fc_byteaoctetlen),
+    b(721, "byteaGetByte", 2, fc_bytea_get_byte),
+    b(722, "byteaSetByte", 3, fc_bytea_set_byte),
+    b(723, "byteaGetBit", 2, fc_bytea_get_bit),
+    b(724, "byteaSetBit", 3, fc_bytea_set_bit),
     b(740, "text_lt", 2, fc_text_lt),
     b(741, "text_le", 2, fc_text_le),
     b(742, "text_gt", 2, fc_text_gt),
@@ -272,6 +390,11 @@ pub const VARLENA_BUILTINS: &[FmgrBuiltin] = &[
     b(1954, "byteacmp", 2, fc_byteacmp),
     b(2010, "byteaoctetlen", 1, fc_byteaoctetlen),
     b(2011, "byteacat", 2, fc_byteacat),
+    b(2012, "bytea_substr", 3, fc_bytea_substr),
+    b(2013, "bytea_substr_no_len", 2, fc_bytea_substr_no_len),
+    b(2014, "byteapos", 2, fc_byteapos),
+    b(2085, "bytea_substr", 3, fc_bytea_substr),
+    b(2086, "bytea_substr_no_len", 2, fc_bytea_substr_no_len),
     b(5050, "btvarstrequalimage", 1, fc_btvarstrequalimage),
     b(6393, "bytea_larger", 2, fc_bytea_larger),
     b(6394, "bytea_smaller", 2, fc_bytea_smaller),
