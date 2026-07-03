@@ -514,15 +514,15 @@ pub fn ExplainNode<'mcx>(
         show_plan_tlist(node, ancestors, es)?;
     }
 
-    let unique_join = match node.node_tag() {
+    // C: "try not to be too chatty about this in text mode".
+    if let Some(inner_unique) = match node.node_tag() {
         NodeTag::T_NestLoop => Some(node.as_nest_loop().unwrap().join.inner_unique),
-        NodeTag::T_HashJoin => Some(node.as_hash_join().unwrap().join.inner_unique),
         NodeTag::T_MergeJoin => Some(node.as_merge_join().unwrap().join.inner_unique),
+        NodeTag::T_HashJoin => Some(node.as_hash_join().unwrap().join.inner_unique),
         _ => None,
-    };
-    if let Some(iu) = unique_join {
-        if es.verbose && iu {
-            ExplainPropertyBool("Inner Unique", iu, es);
+    } {
+        if es.format != EXPLAIN_FORMAT_TEXT || (es.verbose && inner_unique) {
+            ExplainPropertyBool("Inner Unique", inner_unique, es);
         }
     }
 
