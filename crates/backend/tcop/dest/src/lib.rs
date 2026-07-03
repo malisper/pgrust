@@ -36,6 +36,7 @@ impl<'mcx> DestReceiver<'mcx> {
         match self {
             DestReceiver::DoNothing => Ok(true),
             DestReceiver::PrintTup(dr) => dr.receive_slot(slot),
+            DestReceiver::SpiPrintTup => spi_seams::spi_printtup::call(slot),
             DestReceiver::Tuplestore(dr) => dr.receive_slot(slot),
             other => other.unported("receiveSlot"),
         }
@@ -45,6 +46,7 @@ impl<'mcx> DestReceiver<'mcx> {
         match self {
             DestReceiver::DoNothing => Ok(()),
             DestReceiver::PrintTup(dr) => dr.startup(operation, typeinfo),
+            DestReceiver::SpiPrintTup => spi_seams::spi_dest_startup::call(operation, typeinfo),
             DestReceiver::Tuplestore(dr) => dr.startup(operation, typeinfo),
             other => other.unported("rStartup"),
         }
