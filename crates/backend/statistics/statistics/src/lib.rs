@@ -413,12 +413,8 @@ fn is_plain_inline(d: Datum) -> bool {
     }
 }
 
-pub fn build_mss<'mcx>(
-    mcx: Mcx<'mcx>,
-    stats: &[ColStats],
-    dims: &[usize],
-) -> PgResult<MultiSort<'mcx>> {
-    let mut mss = MultiSort::init(mcx, dims.len())?;
+pub fn build_mss(stats: &[ColStats], dims: &[usize]) -> PgResult<MultiSort> {
+    let mut mss = MultiSort::init(dims.len());
     for &d in dims {
         mss.add_dimension(stats[d].attrtypid, stats[d].attrcollid)?;
     }
@@ -431,7 +427,7 @@ pub fn build_mss<'mcx>(
 pub fn build_sorted_items<'mcx>(
     mcx: Mcx<'mcx>,
     data: &StatsBuildData<'_>,
-    mss: &mut MultiSort<'_>,
+    mss: &mut MultiSort,
     dims: &[usize],
 ) -> PgResult<Option<(PgVec<'mcx, SortItem>, ItemStore<'mcx>)>> {
     let width = dims.len();

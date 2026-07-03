@@ -1,20 +1,24 @@
+use std::rc::Rc;
+
 use datum::Datum;
 use types_core::Oid;
-use types_core::fmgr::FmgrInfo;
 use types_error::PgResult;
+use typcache::TypeCacheEntry;
 
 pub struct SortDim {
-    pub cmp: FmgrInfo,
+    pub entry: Rc<TypeCacheEntry>,
     pub collation: Oid,
 }
 
-pub struct MultiSort<'mcx> {
-    pub dims: mcx::PgVec<'mcx, SortDim>,
+// Rc payloads (typcache pins) can't live in arena vecs; std Vec justified:
+// bounded by ndims (<= 8), ANALYZE/planner cold path.
+pub struct MultiSort {
+    pub dims: Vec<SortDim>,
 }
 
-impl<'mcx> MultiSort<'mcx> {
-    pub fn init(mcx: mcx::Mcx<'mcx>, ndims: usize) -> PgResult<MultiSort<'mcx>> {
-        Ok(MultiSort { dims: mcx::vec_with_capacity_in(mcx, ndims)? })
+impl MultiSort {
+    pub fn init(ndims: usize) -> MultiSort {
+        MultiSort { dims: Vec::with_capacity(ndims) }
     }
 
     pub fn add_dimension(&mut self, typid: Oid, collation: Oid) -> PgResult<()> {
@@ -25,7 +29,7 @@ impl<'mcx> MultiSort<'mcx> {
         if entry.lt_opr() == types_core::InvalidOid {
             panic!("cache lookup failed for ordering operator for type {typid}");
         }
-        self.dims.push(SortDim { cmp: entry.cmp_proc_finfo().clone(), collation });
+        self.dims.push(SortDim { entry, collation });
         Ok(())
     }
 
@@ -40,8 +44,9 @@ impl<'mcx> MultiSort<'mcx> {
         if bn {
             return -1;
         }
-        let d = &mut self.dims[dim];
-        types_fmgr::function_call2_coll(&mut d.cmp, d.collation, a, b)
+        let d = &self.dims[dim];
+        let mut finfo = d.entry.cmp_proc_finfo();
+        types_fmgr::function_call2_coll(&mut finfo, d.collation, a, b)
             .unwrap_or_else(|e| panic!("multi_sort_compare: comparison failed: {e:?}"))
             .as_i32()
     }
@@ -68,7 +73,7 @@ impl<'mcx> ItemStore<'mcx> {
         (self.values[i], self.isnull[i])
     }
 
-    pub fn compare(&self, mss: &mut MultiSort<'_>, a: SortItem, b: SortItem) -> i32 {
+    pub fn compare(&self, mss: &mut MultiSort, a: SortItem, b: SortItem) -> i32 {
         for dim in 0..mss.dims.len() {
             let (av, an) = self.value(a, dim);
             let (bv, bn) = self.value(b, dim);
@@ -82,7 +87,7 @@ impl<'mcx> ItemStore<'mcx> {
 
     pub fn compare_dims(
         &self,
-        mss: &mut MultiSort<'_>,
+        mss: &mut MultiSort,
         start: usize,
         end: usize,
         a: SortItem,

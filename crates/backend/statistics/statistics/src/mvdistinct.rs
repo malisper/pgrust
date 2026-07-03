@@ -108,7 +108,7 @@ fn ndistinct_for_combination<'mcx>(
         }
         v
     };
-    let mut mss = build_mss(mcx, &data.stats, &dims)?;
+    let mut mss = build_mss(&data.stats, &dims)?;
 
     // C copies raw values without the width/detoast filtering of
     // build_sorted_items; mirror that exactly.
