@@ -67,15 +67,16 @@ fn uescapechar_rejects_hex_quote_space() {
 }
 
 #[test]
-#[should_panic(expected = "scan_fgram")]
-fn raw_parser_is_a_loud_seam() {
+fn raw_parser_parses_select_1() {
     crate::init_seams();
     let ctx = MemoryContext::new("t");
-    let _ = parser_seams::raw_parser::call(
+    let stmts = parser_seams::raw_parser::call(
         ctx.mcx(),
         "select 1",
         parser_seams::RawParseMode::RAW_PARSE_DEFAULT,
-    );
+    )
+    .unwrap();
+    assert_eq!(stmts.len(), 1);
 }
 
 #[test]

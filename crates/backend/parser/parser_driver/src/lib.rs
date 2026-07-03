@@ -11,15 +11,18 @@ mod udeescape;
 pub use udeescape::{check_uescapechar, str_udeescape, UdeescapeError};
 
 pub fn raw_parser<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _query_string: &str,
-    _mode: RawParseMode,
+    mcx: Mcx<'mcx>,
+    query_string: &str,
+    mode: RawParseMode,
 ) -> PgResult<PgVec<'mcx, RawStmt<'mcx>>> {
-    panic!(
-        "raw_parser (parser.c): the core scanner (backend-parser-scan, crate scan_fgram, \
-         in flight) and the bison grammar (backend-parser-gram, c2rust gram unit) are not \
-         available; base_yylex's merge filter and the mode-token seed land with them"
-    )
+    let list = gram_core::raw_parser(mcx, query_string, mode)?;
+    let mut v = PgVec::new_in(mcx);
+    v.try_reserve_exact(list.len()).map_err(|_| mcx.oom(list.len()))?;
+    for n in list.iter() {
+        let rs = n.as_raw_stmt().expect("raw_parser yields RawStmt");
+        v.push(RawStmt { stmt: rs.stmt, stmt_location: rs.stmt_location, stmt_len: rs.stmt_len });
+    }
+    Ok(v)
 }
 
 pub fn base_yylex() -> ! {

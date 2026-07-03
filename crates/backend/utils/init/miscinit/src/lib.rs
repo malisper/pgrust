@@ -185,6 +185,7 @@ pub fn init_seams() {
     s::check_data_dir::set(checkDataDir);
     s::initialize_session_user_id::set(InitializeSessionUserId);
     s::process_shared_preload_libraries::set(process_shared_preload_libraries);
+    s::process_session_preload_libraries::set(preload::process_session_preload_libraries);
     s::process_shmem_requests::set(process_shmem_requests);
     preload::install_preload_guc_vars();
 }

@@ -50,7 +50,14 @@ fn object_aclmask(
     how: AclMaskHow,
 ) -> PgResult<u64> {
     match classid {
-        NAMESPACE_RELATION_ID => panic!("object_aclmask: pg_namespace_aclmask unported"),
+        // pg_namespace_aclmask_ext's superuser fast path; the nspacl decode
+        // (non-superuser roles) is the unported remainder.
+        NAMESPACE_RELATION_ID => {
+            if superuser::superuser_arg(roleid)? {
+                return Ok(mask);
+            }
+            panic!("object_aclmask: pg_namespace_aclmask nspacl arm unported (non-superuser)")
+        }
         TYPE_RELATION_ID => panic!("object_aclmask: pg_type_aclmask unported"),
         // C divergence: C asserts callers use pg_class_aclmask directly; the
         // executor consumes it through the object_aclcheck seam, so route it.

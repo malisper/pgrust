@@ -3,7 +3,7 @@
 
 use datum::Datum;
 use mcx::{Mcx, PgString};
-use types_core::Oid;
+use types_core::{InvalidOid, Oid};
 use types_error::PgResult;
 use types_storage::PgClassShape;
 use syscache_seams::PgTypeTypcacheShape;
@@ -17,10 +17,11 @@ use crate::{
     SearchSysCache3, SearchSysCache4, SearchSysCacheExists, SearchSysCacheList, SearchSysCacheList1,
     SysCacheKey,
 };
-use crate::cacheinfo::{ATTNUM, AUTHNAME, AUTHOID, CASTSOURCETARGET, CONSTROID, INDEXRELID, NAMESPACENAME, NAMESPACEOID, OPERNAMENSP, OPEROID, PROCOID, RELNAMENSP, RELOID, STATRELATTINH, TYPEOID};
+use crate::cacheinfo::{AMPROCNUM, ATTNUM, AUTHNAME, AUTHOID, CASTSOURCETARGET, CONSTROID, INDEXRELID, NAMESPACENAME, NAMESPACEOID, OPERNAMENSP, TYPENAMENSP, OPEROID, PROCOID, RELNAMENSP, RELOID, STATRELATTINH, TYPEOID};
 
 const ANUM_PG_CLASS_OID: i32 = 1;
 const ANUM_PG_CLASS_RELISSHARED: i32 = 16;
+const ANUM_PG_TYPE_OID: i32 = 1;
 const ANUM_PG_TYPE_TYPNAME: i32 = 2;
 const ANUM_PG_TYPE_TYPLEN: i32 = 5;
 const ANUM_PG_TYPE_TYPBYVAL: i32 = 6;
@@ -59,10 +60,20 @@ const ANUM_PG_OPERATOR_OPRCODE: i32 = 13;
 const ANUM_PG_OPERATOR_OPRREST: i32 = 14;
 const ANUM_PG_OPERATOR_OPRJOIN: i32 = 15;
 const ANUM_PG_PROC_PROCOST: i32 = 6;
+const ANUM_PG_PROC_PROROWS: i32 = 7;
 const ANUM_PG_PROC_PROSUPPORT: i32 = 9;
 const ANUM_PG_STATISTIC_STANULLFRAC: i32 = 4;
 const ANUM_PG_STATISTIC_STAWIDTH: i32 = 5;
 const ANUM_PG_STATISTIC_STADISTINCT: i32 = 6;
+const ANUM_PG_STATISTIC_STAKIND1: i32 = 7;
+const ANUM_PG_STATISTIC_STAOP1: i32 = 12;
+const ANUM_PG_STATISTIC_STACOLL1: i32 = 17;
+const ANUM_PG_STATISTIC_STANUMBERS1: i32 = 22;
+const ANUM_PG_STATISTIC_STAVALUES1: i32 = 27;
+const STATISTIC_NUM_SLOTS: i32 = 5;
+const ANUM_PG_ATTRIBUTE_ATTSTATTARGET: i32 = 21;
+const ANUM_PG_TYPE_TYPANALYZE: i32 = 22;
+const FLOAT4OID: Oid = 700;
 const ANUM_PG_CAST_OID: i32 = 1;
 const ANUM_PG_CAST_CASTFUNC: i32 = 4;
 const ANUM_PG_CAST_CASTCONTEXT: i32 = 5;
@@ -288,6 +299,17 @@ fn lookup_pg_class_relid_by_name(relname: &str, relnamespace: Oid) -> PgResult<O
     )
 }
 
+fn lookup_pg_type_oid_by_name(typname: &str, typnamespace: Oid) -> PgResult<Oid> {
+    GetSysCacheOid(
+        TYPENAMENSP,
+        ANUM_PG_TYPE_OID,
+        SysCacheKey::Str(typname),
+        SysCacheKey::Value(Datum::from_oid(typnamespace)),
+        SysCacheKey::UNUSED,
+        SysCacheKey::UNUSED,
+    )
+}
+
 fn lookup_pg_namespace_oid_by_name(nspname: &str) -> PgResult<Oid> {
     GetSysCacheOid(
         NAMESPACENAME,
@@ -319,6 +341,16 @@ fn syscache_hash_value_typeoid(typid: Oid) -> PgResult<u32> {
     )
 }
 
+fn syscache_hash_value_procoid(funcid: Oid) -> PgResult<u32> {
+    crate::GetSysCacheHashValue(
+        PROCOID,
+        SysCacheKey::Value(Datum::from_oid(funcid)),
+        SysCacheKey::UNUSED,
+        SysCacheKey::UNUSED,
+        SysCacheKey::UNUSED,
+    )
+}
+
 fn lookup_pg_operator_shape(opno: Oid) -> PgResult<Option<syscache_seams::PgOperatorShape>> {
     let Some(tuple) = SearchSysCache1(OPEROID, SysCacheKey::Value(Datum::from_oid(opno)))? else {
         return Ok(None);
@@ -335,6 +367,115 @@ fn lookup_pg_operator_shape(opno: Oid) -> PgResult<Option<syscache_seams::PgOper
         oprjoin: getattr(&t, OPEROID, ANUM_PG_OPERATOR_OPRJOIN).as_oid(),
         oprcanmerge: getattr(&t, OPEROID, ANUM_PG_OPERATOR_OPRCANMERGE).as_bool(),
         oprcanhash: getattr(&t, OPEROID, ANUM_PG_OPERATOR_OPRCANHASH).as_bool(),
+    };
+    drop(t);
+    ReleaseSysCache(tuple);
+    Ok(Some(shape))
+}
+
+const ANUM_PG_TYPE_TYPDELIM: i32 = 11;
+const ANUM_PG_TYPE_TYPINPUT: i32 = 16;
+const ANUM_PG_TYPE_TYPOUTPUT: i32 = 17;
+const ANUM_PG_TYPE_TYPRECEIVE: i32 = 18;
+const ANUM_PG_TYPE_TYPSEND: i32 = 19;
+const ANUM_PG_TYPE_TYPMODIN: i32 = 20;
+const ANUM_PG_TYPE_TYPMODOUT: i32 = 21;
+const ANUM_PG_TYPE_TYPBASETYPE: i32 = 26;
+const ANUM_PG_TYPE_TYPTYPMOD: i32 = 27;
+const ANUM_PG_PROC_PRONAMESPACE: i32 = 3;
+const ANUM_PG_PROC_PROVARIADIC: i32 = 8;
+const ANUM_PG_PROC_PROKIND: i32 = 10;
+const ANUM_PG_PROC_PROLEAKPROOF: i32 = 12;
+const ANUM_PG_PROC_PROISSTRICT: i32 = 13;
+const ANUM_PG_PROC_PRORETSET: i32 = 14;
+const ANUM_PG_PROC_PROVOLATILE: i32 = 15;
+const ANUM_PG_PROC_PROPARALLEL: i32 = 16;
+const ANUM_PG_PROC_PRONARGS: i32 = 17;
+const ANUM_PG_PROC_PRORETTYPE: i32 = 19;
+const ANUM_PG_AMPROC_AMPROC: i32 = 6;
+
+// get_opfamily_proc (lsyscache.c): GetSysCacheOid4(AMPROCNUM, Anum_pg_amproc_amproc, ...).
+fn lookup_pg_amproc(opfamily: Oid, lefttype: Oid, righttype: Oid, procnum: i16) -> PgResult<Oid> {
+    crate::GetSysCacheOid(
+        AMPROCNUM,
+        ANUM_PG_AMPROC_AMPROC,
+        SysCacheKey::Value(Datum::from_oid(opfamily)),
+        SysCacheKey::Value(Datum::from_oid(lefttype)),
+        SysCacheKey::Value(Datum::from_oid(righttype)),
+        SysCacheKey::Value(Datum::from_i16(procnum)),
+    )
+}
+
+fn pg_type_base_shape(typid: Oid) -> PgResult<Option<syscache_seams::PgTypeBaseShape>> {
+    let Some(tuple) = SearchSysCache1(TYPEOID, SysCacheKey::Value(Datum::from_oid(typid)))? else {
+        return Ok(None);
+    };
+    let t = tuple.tuple();
+    let shape = syscache_seams::PgTypeBaseShape {
+        typtype: getattr(&t, TYPEOID, ANUM_PG_TYPE_TYPTYPE).as_i8(),
+        typbasetype: getattr(&t, TYPEOID, ANUM_PG_TYPE_TYPBASETYPE).as_oid(),
+        typtypmod: getattr(&t, TYPEOID, ANUM_PG_TYPE_TYPTYPMOD).as_i32(),
+        typelem: getattr(&t, TYPEOID, ANUM_PG_TYPE_TYPELEM).as_oid(),
+        typsubscript: getattr(&t, TYPEOID, ANUM_PG_TYPE_TYPSUBSCRIPT).as_oid(),
+    };
+    drop(t);
+    ReleaseSysCache(tuple);
+    Ok(Some(shape))
+}
+
+fn pg_type_io_shape(typid: Oid) -> PgResult<Option<syscache_seams::PgTypeIoShape>> {
+    let Some(tuple) = SearchSysCache1(TYPEOID, SysCacheKey::Value(Datum::from_oid(typid)))? else {
+        return Ok(None);
+    };
+    let t = tuple.tuple();
+    let shape = syscache_seams::PgTypeIoShape {
+        oid: typid,
+        typinput: getattr(&t, TYPEOID, ANUM_PG_TYPE_TYPINPUT).as_oid(),
+        typoutput: getattr(&t, TYPEOID, ANUM_PG_TYPE_TYPOUTPUT).as_oid(),
+        typreceive: getattr(&t, TYPEOID, ANUM_PG_TYPE_TYPRECEIVE).as_oid(),
+        typsend: getattr(&t, TYPEOID, ANUM_PG_TYPE_TYPSEND).as_oid(),
+        typmodin: getattr(&t, TYPEOID, ANUM_PG_TYPE_TYPMODIN).as_oid(),
+        typmodout: getattr(&t, TYPEOID, ANUM_PG_TYPE_TYPMODOUT).as_oid(),
+        typelem: getattr(&t, TYPEOID, ANUM_PG_TYPE_TYPELEM).as_oid(),
+        typlen: getattr(&t, TYPEOID, ANUM_PG_TYPE_TYPLEN).as_i16(),
+        typbyval: getattr(&t, TYPEOID, ANUM_PG_TYPE_TYPBYVAL).as_bool(),
+        typalign: getattr(&t, TYPEOID, ANUM_PG_TYPE_TYPALIGN).as_i8(),
+        typdelim: getattr(&t, TYPEOID, ANUM_PG_TYPE_TYPDELIM).as_i8(),
+        typisdefined: getattr(&t, TYPEOID, ANUM_PG_TYPE_TYPISDEFINED).as_bool(),
+    };
+    drop(t);
+    ReleaseSysCache(tuple);
+    Ok(Some(shape))
+}
+
+fn pg_type_typarray(typid: Oid) -> PgResult<Option<Oid>> {
+    let Some(tuple) = SearchSysCache1(TYPEOID, SysCacheKey::Value(Datum::from_oid(typid)))? else {
+        return Ok(None);
+    };
+    let t = tuple.tuple();
+    let arr = getattr(&t, TYPEOID, ANUM_PG_TYPE_TYPARRAY).as_oid();
+    drop(t);
+    ReleaseSysCache(tuple);
+    Ok(Some(arr))
+}
+
+fn lookup_pg_proc_shape(funcid: Oid) -> PgResult<Option<syscache_seams::PgProcShape>> {
+    let Some(tuple) = SearchSysCache1(PROCOID, SysCacheKey::Value(Datum::from_oid(funcid)))? else {
+        return Ok(None);
+    };
+    let t = tuple.tuple();
+    let shape = syscache_seams::PgProcShape {
+        pronamespace: getattr(&t, PROCOID, ANUM_PG_PROC_PRONAMESPACE).as_oid(),
+        prorettype: getattr(&t, PROCOID, ANUM_PG_PROC_PRORETTYPE).as_oid(),
+        provariadic: getattr(&t, PROCOID, ANUM_PG_PROC_PROVARIADIC).as_oid(),
+        prosupport: getattr(&t, PROCOID, ANUM_PG_PROC_PROSUPPORT).as_oid(),
+        pronargs: getattr(&t, PROCOID, ANUM_PG_PROC_PRONARGS).as_i16(),
+        prokind: getattr(&t, PROCOID, ANUM_PG_PROC_PROKIND).as_i8(),
+        provolatile: getattr(&t, PROCOID, ANUM_PG_PROC_PROVOLATILE).as_i8(),
+        proparallel: getattr(&t, PROCOID, ANUM_PG_PROC_PROPARALLEL).as_i8(),
+        proretset: getattr(&t, PROCOID, ANUM_PG_PROC_PRORETSET).as_bool(),
+        proisstrict: getattr(&t, PROCOID, ANUM_PG_PROC_PROISSTRICT).as_bool(),
+        proleakproof: getattr(&t, PROCOID, ANUM_PG_PROC_PROLEAKPROOF).as_bool(),
     };
     drop(t);
     ReleaseSysCache(tuple);
@@ -432,11 +573,147 @@ fn pg_proc_cost_shape(funcid: Oid) -> PgResult<Option<syscache_seams::PgProcCost
     let t = tuple.tuple();
     let shape = syscache_seams::PgProcCostShape {
         procost: getattr(&t, PROCOID, ANUM_PG_PROC_PROCOST).as_f32(),
+        prorows: getattr(&t, PROCOID, ANUM_PG_PROC_PROROWS).as_f32(),
         prosupport: getattr(&t, PROCOID, ANUM_PG_PROC_PROSUPPORT).as_oid(),
     };
     drop(t);
     ReleaseSysCache(tuple);
     Ok(Some(shape))
+}
+
+/// Nullable-column read off a raw catalog tuple; None mirrors SQL NULL.
+fn getattr_nullable(tuple: &HeapTupleData<'_>, cache_id: i32, attnum: i32) -> Option<Datum> {
+    let td = tupdesc_for(cache_id);
+    let mut isnull = false;
+    // SAFETY: caller passes a tuple of this catalog's row type.
+    let d = unsafe { types_tuple::heap_getattr(tuple, attnum, td, &mut isnull) };
+    if isnull { None } else { Some(d) }
+}
+
+fn lookup_pg_attribute_stattarget(
+    relid: Oid,
+    attnum: types_core::AttrNumber,
+) -> PgResult<Option<i16>> {
+    let Some(tuple) = SearchSysCache2(
+        ATTNUM,
+        SysCacheKey::Value(Datum::from_oid(relid)),
+        SysCacheKey::Value(Datum::from_i16(attnum)),
+    )?
+    else {
+        return Err(types_error::PgError::error(format!(
+            "cache lookup failed for attribute {attnum} of relation {relid}"
+        ))
+        .into());
+    };
+    let out = getattr_nullable(&tuple.tuple(), ATTNUM, ANUM_PG_ATTRIBUTE_ATTSTATTARGET)
+        .map(|d| d.as_i16());
+    ReleaseSysCache(tuple);
+    Ok(out)
+}
+
+fn pg_type_typanalyze(typid: Oid) -> PgResult<Oid> {
+    let Some(tuple) = SearchSysCache1(TYPEOID, SysCacheKey::Value(Datum::from_oid(typid)))? else {
+        return Err(types_error::PgError::error(format!(
+            "cache lookup failed for type {typid}"
+        ))
+        .into());
+    };
+    let out = getattr(&tuple.tuple(), TYPEOID, ANUM_PG_TYPE_TYPANALYZE).as_oid();
+    ReleaseSysCache(tuple);
+    Ok(out)
+}
+
+// Owned copy of a varlena attr's full image; None mirrors SQL NULL.
+fn varlena_image<'mcx>(
+    mcx: Mcx<'mcx>,
+    tuple: &HeapTupleData<'_>,
+    cache_id: i32,
+    attnum: i32,
+) -> PgResult<Option<PgVec<'mcx, u8>>> {
+    let Some(d) = getattr_nullable(tuple, cache_id, attnum) else {
+        return Ok(None);
+    };
+    let p = d.as_usize() as *const u8;
+    // SAFETY: non-null varlena attr datum points into the live tuple.
+    let b0 = unsafe { *p };
+    assert!(
+        b0 & 0x01 == 0 && b0 & 0x03 != 0x02,
+        "pg_statistic array attr is toasted/compressed: detoast (heaptoast) gap in stats decode"
+    );
+    let len = {
+        // SAFETY: 4-byte varlena header verified above.
+        let w = unsafe { u32::from_ne_bytes(*(p as *const [u8; 4])) };
+        (w >> 2) as usize
+    };
+    // SAFETY: the datum addresses `len` in-tuple bytes.
+    let src = unsafe { core::slice::from_raw_parts(p, len) };
+    let mut out: PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, len)?;
+    out.extend_from_slice(src);
+    Ok(Some(out))
+}
+
+fn lookup_pg_statistic_bundle<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+    attnum: types_core::AttrNumber,
+    inh: bool,
+) -> PgResult<Option<syscache_seams::PgStatisticBundle<'mcx>>> {
+    let Some(tuple) = SearchSysCache3(
+        STATRELATTINH,
+        SysCacheKey::Value(Datum::from_oid(relid)),
+        SysCacheKey::Value(Datum::from_i16(attnum)),
+        SysCacheKey::Value(Datum::from_bool(inh)),
+    )?
+    else {
+        return Ok(None);
+    };
+    let t = tuple.tuple();
+    let mut slots = PgVec::new_in(mcx);
+    for i in 0..STATISTIC_NUM_SLOTS {
+        let kind = getattr(&t, STATRELATTINH, ANUM_PG_STATISTIC_STAKIND1 + i).as_i16();
+        if kind == 0 {
+            continue;
+        }
+        let numbers = match varlena_image(mcx, &t, STATRELATTINH, ANUM_PG_STATISTIC_STANUMBERS1 + i)? {
+            Some(img) => {
+                let elems = datum::array_build::deconstruct_array_image(mcx, &img, 4, true, b'i')?;
+                let mut nums: PgVec<'mcx, f32> = mcx::vec_with_capacity_in(mcx, elems.len())?;
+                nums.extend(elems.iter().map(|d| d.as_f32()));
+                nums
+            }
+            None => PgVec::new_in(mcx),
+        };
+        let (values, values_image, valuetype) =
+            match varlena_image(mcx, &t, STATRELATTINH, ANUM_PG_STATISTIC_STAVALUES1 + i)? {
+                Some(img) => {
+                    let elemtype = datum::array_build::array_image_elemtype(&img);
+                    let ty = lookup_pg_type_shape(elemtype)?.expect("stavalues element type");
+                    let values = datum::array_build::deconstruct_array_image(
+                        mcx, &img, ty.typlen, ty.typbyval, ty.typalign as u8,
+                    )?;
+                    (values, img, elemtype)
+                }
+                None => (PgVec::new_in(mcx), PgVec::new_in(mcx), InvalidOid),
+            };
+        slots.push(syscache_seams::PgStatisticSlotData {
+            kind,
+            staop: getattr(&t, STATRELATTINH, ANUM_PG_STATISTIC_STAOP1 + i).as_oid(),
+            stacoll: getattr(&t, STATRELATTINH, ANUM_PG_STATISTIC_STACOLL1 + i).as_oid(),
+            valuetype,
+            values,
+            numbers,
+            values_image,
+        });
+    }
+    let bundle = syscache_seams::PgStatisticBundle {
+        stanullfrac: getattr(&t, STATRELATTINH, ANUM_PG_STATISTIC_STANULLFRAC).as_f32(),
+        stawidth: getattr(&t, STATRELATTINH, ANUM_PG_STATISTIC_STAWIDTH).as_i32(),
+        stadistinct: getattr(&t, STATRELATTINH, ANUM_PG_STATISTIC_STADISTINCT).as_f32(),
+        slots,
+    };
+    drop(t);
+    ReleaseSysCache(tuple);
+    Ok(Some(bundle))
 }
 
 fn lookup_pg_statistic_shape(
@@ -481,14 +758,30 @@ pub(crate) fn install() {
     syscache_seams::lookup_authid_session_by_oid::set(lookup_authid_session_by_oid);
     syscache_seams::lookup_pg_type_typcache_shape::set(lookup_pg_type_typcache_shape);
     syscache_seams::syscache_hash_value_typeoid::set(syscache_hash_value_typeoid);
+    syscache_seams::syscache_hash_value_procoid::set(syscache_hash_value_procoid);
     syscache_seams::lookup_pg_class_relid_by_name::set(lookup_pg_class_relid_by_name);
+    syscache_seams::lookup_pg_type_oid_by_name::set(lookup_pg_type_oid_by_name);
     syscache_seams::pg_namespace_nspname::set(pg_namespace_nspname);
     syscache_seams::lookup_pg_namespace_oid_by_name::set(lookup_pg_namespace_oid_by_name);
     syscache_seams::lookup_pg_operator_shape::set(lookup_pg_operator_shape);
     syscache_seams::lookup_pg_operator_oid_exact::set(lookup_pg_operator_oid_exact);
+    syscache_seams::lookup_pg_amproc::set(lookup_pg_amproc);
+    syscache_seams::pg_type_base_shape::set(pg_type_base_shape);
+    syscache_seams::pg_type_io_shape::set(pg_type_io_shape);
+    syscache_seams::pg_type_typarray::set(pg_type_typarray);
+    syscache_seams::lookup_pg_proc_shape::set(lookup_pg_proc_shape);
     syscache_seams::lookup_pg_operator_candidates::set(lookup_pg_operator_candidates);
     syscache_seams::pg_operator_name_candidates_exist::set(pg_operator_name_candidates_exist);
     syscache_seams::lookup_pg_cast_shape::set(lookup_pg_cast_shape);
     syscache_seams::pg_proc_cost_shape::set(pg_proc_cost_shape);
+    syscache_seams::lookup_pg_attribute_stattarget::set(lookup_pg_attribute_stattarget);
+    syscache_seams::pg_type_typanalyze::set(pg_type_typanalyze);
+    install_pg_statistic();
+}
+
+// Fixture rigs that mock the other catalogs still install the real
+// pg_statistic decode (set-once seams forbid override-after-install).
+pub(crate) fn install_pg_statistic() {
     syscache_seams::lookup_pg_statistic_shape::set(lookup_pg_statistic_shape);
+    syscache_seams::lookup_pg_statistic_bundle::set(lookup_pg_statistic_bundle);
 }

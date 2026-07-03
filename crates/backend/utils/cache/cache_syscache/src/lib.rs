@@ -382,3 +382,7 @@ pub fn init_seams() {
     projections::install();
     syscache_seams::relation_has_sys_cache::set(RelationHasSysCache);
 }
+
+pub fn init_seams_pg_statistic_only() {
+    projections::install_pg_statistic();
+}

@@ -23,14 +23,14 @@ fn superuser_bypasses_parameter_aclcheck() {
 #[test]
 fn unported_classid_is_loud() {
     let probe = std::panic::catch_unwind(|| {
-        object_aclmask(NAMESPACE_RELATION_ID, 11, 42, ACL_CONNECT, AclMaskHow::AclmaskAny)
+        object_aclmask(TYPE_RELATION_ID, 11, 42, ACL_CONNECT, AclMaskHow::AclmaskAny)
     });
     let payload = probe.unwrap_err();
     let msg = payload
         .downcast_ref::<&str>()
         .copied()
         .unwrap_or_else(|| payload.downcast_ref::<String>().unwrap());
-    assert!(msg.contains("pg_namespace_aclmask unported"), "{msg}");
+    assert!(msg.contains("pg_type_aclmask unported"), "{msg}");
 }
 
 #[test]

@@ -120,7 +120,7 @@ pub fn LockAcquireExtended(
         mode: lockmode,
     };
     let (hashcode, ll_ptr) = match prepare_or_grant_locallock(&localtag, owner) {
-        LocalGrant::Held { cleared } => {
+        LocalGrant::Held { cleared, .. } => {
             return Ok(if cleared {
                 LOCKACQUIRE_ALREADY_CLEAR
             } else {
