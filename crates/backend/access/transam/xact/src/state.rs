@@ -6,7 +6,8 @@
 // access goes through `NodeMut`, whose Drop refreshes the mirrors, and
 // scalar writes go through `set_*` that write both sides.
 
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, UnsafeCell};
+use std::mem::ManuallyDrop;
 
 use mcx::MemoryContext;
 use types_core::xact::*;
@@ -340,13 +341,42 @@ impl XactState {
 }
 
 thread_local! {
-    // `XactState::new()` is const, so the TLS is const-init: no lazy-init
-    // branch on the access path.
-    static STATE: RefCell<XactState> = const { RefCell::new(XactState::new()) };
+    // UnsafeCell + ManuallyDrop, not RefCell (rule 10, lock's with_local
+    // precedent): const-init + !needs_drop payload compiles each access to a
+    // plain TLS address, no dtor-registration branch, no borrow flags. The
+    // arena-less state leaks at thread exit exactly as C's globals do.
+    static STATE: UnsafeCell<ManuallyDrop<XactState>> =
+        const { UnsafeCell::new(ManuallyDrop::new(XactState::new())) };
+    static XS_BUSY: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Borrows must never be held across a seam call or anything that may
-/// re-enter this crate.
+/// Every closure is a leaf: no seam call, no call that may re-enter this
+/// crate. XS_BUSY enforces in debug builds and under Miri.
 pub(crate) fn xs<R>(f: impl FnOnce(&mut XactState) -> R) -> R {
-    STATE.with(|s| f(&mut s.borrow_mut()))
+    xs_ptr().with(f)
+}
+
+/// The state's TLS address, resolved once per transaction phase and threaded
+/// through the phase's helpers (C reads plain globals). Callouts between
+/// `with` blocks may re-enter `xs`; only the brief `&mut` inside `with` must
+/// stay a leaf (XS_BUSY).
+#[derive(Clone, Copy)]
+pub(crate) struct XsPtr(*mut XactState);
+
+impl XsPtr {
+    #[inline(always)]
+    pub(crate) fn with<R>(self, f: impl FnOnce(&mut XactState) -> R) -> R {
+        debug_assert!(!XS_BUSY.replace(true), "xs re-entered");
+        // SAFETY: single-threaded backend TLS, live for the thread lifetime;
+        // the leaf invariant excludes a second live &mut (XS_BUSY in debug).
+        let r = f(unsafe { &mut *self.0 });
+        if cfg!(debug_assertions) {
+            XS_BUSY.set(false);
+        }
+        r
+    }
+}
+
+pub(crate) fn xs_ptr() -> XsPtr {
+    XsPtr(STATE.with(|s| s.get()).cast::<XactState>())
 }

@@ -297,12 +297,16 @@ fn xact_redo_commit(
         parsed.xact_time
     };
 
-    commit_ts_seams::transaction_tree_set_commit_ts_data::call(
-        xid,
-        &parsed.subxacts,
-        commit_time,
-        origin_id,
-    )?;
+    // Guarded: commit_ts unported means track_commit_timestamp is stuck at
+    // its boot-default false, where C's TransactionTreeSetCommitTsData no-ops.
+    if commit_ts_seams::transaction_tree_set_commit_ts_data::is_installed() {
+        commit_ts_seams::transaction_tree_set_commit_ts_data::call(
+            xid,
+            &parsed.subxacts,
+            commit_time,
+            origin_id,
+        )?;
+    }
 
     if xlogutils::standby_state() == STANDBY_DISABLED {
         transam_seams::transaction_id_commit_tree::call(xid, &parsed.subxacts)?;

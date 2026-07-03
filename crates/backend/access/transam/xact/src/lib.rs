@@ -34,7 +34,7 @@ mod wal;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use state::{xs, TransactionNode};
+pub(crate) use state::{xs, xs_ptr, TransactionNode, XsPtr};
 
 pub use engine::{
     AbortCurrentTransaction, AbortOutOfAnyTransaction, BeginImplicitTransactionBlock,
@@ -596,8 +596,8 @@ pub(crate) fn AtStart_Cache() -> PgResult<()> {
     inval::local::AcceptInvalidationMessages()
 }
 
-pub(crate) fn AtStart_Memory() {
-    xs(|s| {
+pub(crate) fn AtStart_Memory(xp: XsPtr) {
+    xp.with(|s| {
         if s.transaction_abort_context.is_none() {
             s.transaction_abort_context = Some(MemoryContext::new("TransactionAbortContext"));
         }
@@ -607,8 +607,8 @@ pub(crate) fn AtStart_Memory() {
     });
 }
 
-pub(crate) fn AtStart_ResourceOwner() -> PgResult<()> {
-    xs(|s| {
+pub(crate) fn AtStart_ResourceOwner(xp: XsPtr) -> PgResult<()> {
+    xp.with(|s| {
         debug_assert!(!s.current().has_resource_owner);
         s.current_mut().has_resource_owner = true;
     });
@@ -710,8 +710,8 @@ fn AtCCI_LocalCache() -> PgResult<()> {
     inval::eoxact::CommandEndInvalidationMessages()
 }
 
-pub(crate) fn AtCommit_Memory() {
-    xs(|s| {
+pub(crate) fn AtCommit_Memory(xp: XsPtr) {
+    xp.with(|s| {
         s.node_mut(0).retained_child_contexts.clear();
         if let Some(ctx) = s.top_transaction_context.as_mut() {
             ctx.reset();
@@ -777,8 +777,8 @@ pub(crate) fn AtSubCommit_childXids() -> PgResult<()> {
     })
 }
 
-pub(crate) fn AtAbort_Memory() {
-    xs(|s| {
+pub(crate) fn AtAbort_Memory(xp: XsPtr) {
+    xp.with(|s| {
         if s.transaction_abort_context.is_none() {
             s.transaction_abort_context = Some(MemoryContext::new("TransactionAbortContext"));
         }
@@ -803,8 +803,8 @@ pub(crate) fn AtSubAbort_childXids() {
     });
 }
 
-pub(crate) fn AtCleanup_Memory() {
-    xs(|s| {
+pub(crate) fn AtCleanup_Memory(xp: XsPtr) {
+    xp.with(|s| {
         debug_assert_eq!(s.stack_len(), 1);
         if let Some(ctx) = s.transaction_abort_context.as_mut() {
             ctx.reset();
@@ -871,8 +871,8 @@ pub fn UnregisterSubXactCallback(callback: SubXactCallback, arg: Datum) {
     });
 }
 
-pub(crate) fn CallXactCallbacks(event: XactEvent) -> PgResult<()> {
-    let items: Vec<XactCallbackItem> = xs(|s| {
+pub(crate) fn CallXactCallbacks(xp: XsPtr, event: XactEvent) -> PgResult<()> {
+    let items: Vec<XactCallbackItem> = xp.with(|s| {
         let mut v = Vec::new();
         v.try_reserve(s.xact_callbacks.len())
             .map_err(|_| PgError::error("out of memory calling transaction callbacks"))?;
@@ -880,7 +880,7 @@ pub(crate) fn CallXactCallbacks(event: XactEvent) -> PgResult<()> {
         Ok::<_, PgError>(v)
     })?;
     for item in items {
-        let live = xs(|s| {
+        let live = xp.with(|s| {
             s.xact_callbacks
                 .iter()
                 .any(|it| std::ptr::fn_addr_eq(it.callback, item.callback) && it.arg == item.arg)
@@ -918,7 +918,11 @@ pub(crate) fn CallSubXactCallbacks(
 }
 
 pub fn xactGetCommittedChildren() -> PgResult<Vec<TransactionId>> {
-    xs(|s| {
+    committed_children_in(xs_ptr())
+}
+
+pub(crate) fn committed_children_in(xp: XsPtr) -> PgResult<Vec<TransactionId>> {
+    xp.with(|s| {
         let src = &s.current().child_xids;
         let mut out = Vec::new();
         out.try_reserve_exact(src.len())
