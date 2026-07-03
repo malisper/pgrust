@@ -573,6 +573,208 @@ pub fn transformWhereClause<'mcx>(
     Ok(Some(qual))
 }
 
+/// C `transformOnConflictArbiter` (parse_clause.c); returns
+/// (arbiterElems, arbiterWhere, constraint).
+pub fn transformOnConflictArbiter<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    onConflictClause: &types_nodes::OnConflictClause<'mcx>,
+) -> PgResult<(NodeList<'mcx>, Option<Node<'mcx>>, Oid)> {
+    use types_nodes::OnConflictAction;
+
+    let infer = onConflictClause
+        .infer
+        .map(|n| n.as_infer_clause().expect("grammar builds InferClause"));
+
+    if onConflictClause.action == OnConflictAction::ONCONFLICT_UPDATE && infer.is_none() {
+        return Err(on_conflict_requires_inference(pstate, onConflictClause.location));
+    }
+
+    // Speculative insertion into system catalogs is disallowed.
+    let target = pstate.p_target_relation.as_ref().expect("ON CONFLICT with no target relation");
+    if catalog::IsCatalogRelation(target) {
+        return Err(on_conflict_on_catalog(pstate, onConflictClause.location));
+    }
+    // C also rejects RelationIsUsedAsCatalogTable; the user_catalog_table
+    // reloption has no storage here, so the check has nothing to test.
+
+    let mut arbiter_elems = NodeList::nil();
+    let mut arbiter_where = None;
+    let constraint = InvalidOid;
+
+    if let Some(infer) = infer {
+        // Arbiter expressions see only non-qualified references to the
+        // target table; hide every other relation.
+        let save_namespace =
+            core::mem::replace(&mut pstate.p_namespace, mcx::PgVec::new_in(mcx));
+        let target_nsitem = arbiter_target_nsitem(mcx, pstate)?;
+        parse_relation::addNSItemToQuery(mcx, pstate, target_nsitem, false, false, true)?;
+
+        if !infer.indexElems.is_nil() {
+            arbiter_elems = resolve_unique_index_expr(mcx, pstate, infer)?;
+        }
+        if let Some(where_clause) = infer.whereClause {
+            arbiter_where = Some(transformExpr(
+                mcx,
+                pstate,
+                where_clause,
+                ParseExprKind::EXPR_KIND_INDEX_PREDICATE,
+            )?);
+        }
+        pstate.p_namespace = save_namespace;
+
+        if infer.conname.is_some() {
+            panic!(
+                "transformOnConflictArbiter (parse_clause.c): ON CONSTRAINT arbiter \
+                 (get_relation_constraint_attnos) unported — upsert lane"
+            );
+        }
+    }
+
+    Ok((arbiter_elems, arbiter_where, constraint))
+}
+
+// C `resolve_unique_index_expr` (parse_clause.c).
+fn resolve_unique_index_expr<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    infer: &types_nodes::InferClause<'mcx>,
+) -> PgResult<NodeList<'mcx>> {
+    use types_nodes::rawnodes::ColumnRef;
+
+    let mut result = NodeList::nil();
+    for elem_node in &infer.indexElems {
+        let ielem = elem_node.as_variant::<types_nodes::IndexElem>().expect("index_params cell");
+
+        if ielem.ordering != SortByDir::SORTBY_DEFAULT {
+            return Err(on_conflict_bad_index_elem(
+                pstate,
+                "ASC/DESC is not allowed in ON CONFLICT clause",
+                infer.location,
+            ));
+        }
+        if ielem.nulls_ordering != SortByNulls::SORTBY_NULLS_DEFAULT {
+            return Err(on_conflict_bad_index_elem(
+                pstate,
+                "NULLS FIRST/LAST is not allowed in ON CONFLICT clause",
+                infer.location,
+            ));
+        }
+
+        let parse = match ielem.expr {
+            Some(expr) => expr,
+            None => {
+                let name = ielem.name.expect("IndexElem without expr has a name");
+                let mut fields = NodeList::nil();
+                fields.lappend(mcx, Node::mk_string(mcx, name)?)?;
+                Node::mk(mcx, ColumnRef { fields, location: infer.location })?
+            }
+        };
+        let expr = transformExpr(mcx, pstate, parse, ParseExprKind::EXPR_KIND_INDEX_EXPRESSION)?;
+
+        if !ielem.collation.is_nil() || !ielem.opclass.is_nil() || !ielem.opclassopts.is_nil() {
+            panic!(
+                "resolve_unique_index_expr (parse_clause.c): COLLATE/opclass arbiter \
+                 elements (LookupCollation/ResolveOpClass) unported — upsert lane"
+            );
+        }
+
+        result.lappend(
+            mcx,
+            Node::mk(
+                mcx,
+                types_nodes::InferenceElem {
+                    expr: Some(expr),
+                    infercollid: InvalidOid,
+                    inferopclass: InvalidOid,
+                },
+            )?,
+        )?;
+    }
+    Ok(result)
+}
+
+// The target nsitem is stored as a shared ref; addNSItemToQuery needs an
+// owned-mutable copy to set visibility flags on.
+fn arbiter_target_nsitem<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &ParseState<'_, 'mcx>,
+) -> PgResult<&'mcx mut ParseNamespaceItem<'mcx>> {
+    let t = pstate.p_target_nsitem.expect("setTargetTable set p_target_nsitem");
+    let nsitem = ParseNamespaceItem {
+        p_names: t.p_names,
+        p_rte: t.p_rte,
+        p_rtindex: t.p_rtindex,
+        p_perminfo: t.p_perminfo,
+        p_nscolumns: t.p_nscolumns,
+        p_rel_visible: false,
+        p_cols_visible: true,
+        p_lateral_only: false,
+        p_lateral_ok: true,
+        p_returning_type: t.p_returning_type,
+    };
+    Ok(mcx::leak_in(mcx::alloc_in(mcx, nsitem)?))
+}
+
+#[cold]
+#[inline(never)]
+fn on_conflict_requires_inference(
+    pstate: &ParseState<'_, '_>,
+    location: ParseLoc,
+) -> Box<PgError> {
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_SYNTAX_ERROR)
+            .errmsg("ON CONFLICT DO UPDATE requires inference specification or constraint name")
+            .errhint("For example, ON CONFLICT (column_name).")
+            .errposition(parser_errposition(pstate, location, mbutils::GetDatabaseEncoding()))
+            .into_error()
+            .with_error_location(ErrorLocation::new(
+                "parse_clause.c",
+                0,
+                "transformOnConflictArbiter",
+            )),
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn on_conflict_on_catalog(pstate: &ParseState<'_, '_>, location: ParseLoc) -> Box<PgError> {
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg("ON CONFLICT is not supported with system catalog tables")
+            .errposition(parser_errposition(pstate, location, mbutils::GetDatabaseEncoding()))
+            .into_error()
+            .with_error_location(ErrorLocation::new(
+                "parse_clause.c",
+                0,
+                "transformOnConflictArbiter",
+            )),
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn on_conflict_bad_index_elem(
+    pstate: &ParseState<'_, '_>,
+    msg: &'static str,
+    location: ParseLoc,
+) -> Box<PgError> {
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg(msg)
+            .errposition(parser_errposition(pstate, location, mbutils::GetDatabaseEncoding()))
+            .into_error()
+            .with_error_location(ErrorLocation::new(
+                "parse_clause.c",
+                0,
+                "resolve_unique_index_expr",
+            )),
+    )
+}
+
 pub fn transformLimitClause<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'_, 'mcx>,

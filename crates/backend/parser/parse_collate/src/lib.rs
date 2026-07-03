@@ -205,6 +205,33 @@ fn assign_collations_walker<'mcx>(
             }
             return Ok(());
         }
+        // C recurses through ON CONFLICT nodes only to reach the contained
+        // expressions; the nodes themselves carry no collation.
+        NodeTag::T_OnConflictExpr => {
+            let oc = node.as_on_conflict_expr().unwrap();
+            for elem in &oc.arbiterElems {
+                assign_collations_walker(elem, &mut loccontext)?;
+            }
+            if let Some(w) = oc.arbiterWhere {
+                assign_collations_walker(w, &mut loccontext)?;
+            }
+            for tle in &oc.onConflictSet {
+                assign_collations_walker(tle, &mut loccontext)?;
+            }
+            if let Some(w) = oc.onConflictWhere {
+                assign_collations_walker(w, &mut loccontext)?;
+            }
+            for tle in &oc.exclRelTlist {
+                assign_collations_walker(tle, &mut loccontext)?;
+            }
+            return Ok(());
+        }
+        NodeTag::T_InferenceElem => {
+            if let Some(expr) = node.as_inference_elem().unwrap().expr {
+                assign_collations_walker(expr, &mut loccontext)?;
+            }
+            return Ok(());
+        }
         NodeTag::T_RangeTblRef | NodeTag::T_SortGroupClause => return Ok(()),
         NodeTag::T_Query => {
             let qtree = node.as_query().unwrap();

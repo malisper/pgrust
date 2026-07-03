@@ -903,6 +903,61 @@ impl<'mcx> Parser<'mcx> {
                 }
                 *yyval = YYSTYPE::Node(Some(istmt));
             }
+            // opt_on_conflict: ON CONFLICT opt_conf_expr DO UPDATE SET
+            //                  set_clause_list where_clause
+            1630 => {
+                let n = Node::mk(
+                    mcx,
+                    types_nodes::OnConflictClause {
+                        action: types_nodes::OnConflictAction::ONCONFLICT_UPDATE,
+                        infer: view.v(3).node(),
+                        targetList: view.v(7).list(),
+                        whereClause: view.v(8).node(),
+                        location: view.l(1),
+                    },
+                )?;
+                *yyval = YYSTYPE::Node(Some(n));
+            }
+            // opt_on_conflict: ON CONFLICT opt_conf_expr DO NOTHING
+            1631 => {
+                let n = Node::mk(
+                    mcx,
+                    types_nodes::OnConflictClause {
+                        action: types_nodes::OnConflictAction::ONCONFLICT_NOTHING,
+                        infer: view.v(3).node(),
+                        targetList: NodeList::nil(),
+                        whereClause: None,
+                        location: view.l(1),
+                    },
+                )?;
+                *yyval = YYSTYPE::Node(Some(n));
+            }
+            // opt_conf_expr: '(' index_params ')' where_clause
+            1633 => {
+                let n = Node::mk(
+                    mcx,
+                    types_nodes::InferClause {
+                        indexElems: view.v(2).list(),
+                        whereClause: view.v(4).node(),
+                        conname: None,
+                        location: view.l(1),
+                    },
+                )?;
+                *yyval = YYSTYPE::Node(Some(n));
+            }
+            // opt_conf_expr: ON CONSTRAINT name
+            1634 => {
+                let n = Node::mk(
+                    mcx,
+                    types_nodes::InferClause {
+                        indexElems: NodeList::nil(),
+                        whereClause: None,
+                        conname: Some(view.v(3).str_val()),
+                        location: view.l(1),
+                    },
+                )?;
+                *yyval = YYSTYPE::Node(Some(n));
+            }
             // returning_clause: RETURNING returning_with_clause target_list;
             // WITH(...) options stay loud in the returning_option arms.
             1636 => {

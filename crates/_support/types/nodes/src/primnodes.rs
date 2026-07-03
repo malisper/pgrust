@@ -524,6 +524,36 @@ pub struct SQLValueFunction {
     pub location: ParseLoc,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum OnConflictAction {
+    #[default]
+    ONCONFLICT_NONE = 0,
+    ONCONFLICT_NOTHING = 1,
+    ONCONFLICT_UPDATE = 2,
+}
+
+#[derive(Default)]
+pub struct InferenceElem<'mcx> {
+    pub expr: Option<Node<'mcx>>,
+    pub infercollid: Oid,
+    pub inferopclass: Oid,
+}
+
+/// `arbiterElems` cells are InferenceElem; `onConflictSet`/`exclRelTlist`
+/// cells are TargetEntry.
+#[derive(Default)]
+pub struct OnConflictExpr<'mcx> {
+    pub action: OnConflictAction,
+    pub arbiterElems: NodeList<'mcx>,
+    pub arbiterWhere: Option<Node<'mcx>>,
+    pub constraint: Oid,
+    pub onConflictSet: NodeList<'mcx>,
+    pub onConflictWhere: Option<Node<'mcx>>,
+    pub exclRelIndex: i32,
+    pub exclRelTlist: NodeList<'mcx>,
+}
+
 #[derive(Default)]
 pub struct FuncExpr<'mcx> {
     pub funcid: Oid,
@@ -630,6 +660,12 @@ unsafe impl<'mcx> NodeVariant<'mcx> for SubPlan<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for AlternativeSubPlan<'mcx> {
     const TAG: NodeTag = NodeTag::T_AlternativeSubPlan;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for InferenceElem<'mcx> {
+    const TAG: NodeTag = NodeTag::T_InferenceElem;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for OnConflictExpr<'mcx> {
+    const TAG: NodeTag = NodeTag::T_OnConflictExpr;
 }
 
 impl<'mcx> Node<'mcx> {
@@ -775,6 +811,16 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_from_expr(self) -> Option<&'mcx FromExpr<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_inference_elem(self) -> Option<&'mcx InferenceElem<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_on_conflict_expr(self) -> Option<&'mcx OnConflictExpr<'mcx>> {
         self.as_variant()
     }
 

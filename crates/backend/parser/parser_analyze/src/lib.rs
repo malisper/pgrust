@@ -710,12 +710,6 @@ fn transformInsertStmt<'mcx>(
         );
     }
     qry.r#override = stmt.r#override;
-    if stmt.onConflictClause.is_some() {
-        panic!(
-            "transformInsertStmt (analyze.c): transformOnConflictClause unported — \
-             unit backend-parser-analyze"
-        );
-    }
 
     let select_stmt = stmt.selectStmt.map(|n| n.as_select_stmt().expect("grammar builds SelectStmt"));
     let is_general_select = select_stmt.is_some_and(|s| {
@@ -840,10 +834,19 @@ fn transformInsertStmt<'mcx>(
     }
     qry.targetList = target_list;
 
-    if stmt.returningClause.is_some() {
+    // Clauses past this point see only the target relation, removing any
+    // entries added in a sub-SELECT or VALUES list.
+    if stmt.onConflictClause.is_some() || stmt.returningClause.is_some() {
         pstate.p_namespace.clear();
         let nsitem = returning_target_nsitem(mcx, pstate)?;
         parse_relation::addNSItemToQuery(mcx, pstate, nsitem, false, true, true)?;
+    }
+
+    if let Some(clause) = stmt.onConflictClause {
+        qry.onConflict = Some(transformOnConflictClause(mcx, pstate, clause)?);
+    }
+
+    if stmt.returningClause.is_some() {
         transformReturningClause(
             mcx,
             pstate,
@@ -864,6 +867,142 @@ fn transformInsertStmt<'mcx>(
 
     assign_query_collations(mcx, pstate, &qry)?;
     Ok(qry)
+}
+
+// C `transformOnConflictClause` (analyze.c).
+fn transformOnConflictClause<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    clause_node: Node<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    use types_nodes::primnodes::OnConflictAction;
+
+    let clause = clause_node.as_on_conflict_clause().expect("grammar builds OnConflictClause");
+
+    let mut excl_rel_index = 0i32;
+    let mut excl_rel_tlist = types_nodes::NodeList::nil();
+    let mut excl_nsitem = None;
+
+    if clause.action == OnConflictAction::ONCONFLICT_UPDATE {
+        // The EXCLUDED pseudo relation must exist while arbiter expressions
+        // are processed (referencing it from there draws a useful error).
+        let targetrel = pstate
+            .p_target_relation
+            .as_ref()
+            .expect("setTargetTable set p_target_relation")
+            .alias();
+        let alias = mcx::leak_in(mcx::alloc_in(
+            mcx,
+            types_nodes::Alias { aliasname: Some("excluded"), colnames: types_nodes::NodeList::nil() },
+        )?);
+        let nsitem = parse_relation::addRangeTableEntryForRelation(
+            mcx,
+            pstate,
+            &targetrel,
+            types_rel::RowExclusiveLock,
+            Some(alias),
+            false,
+            false,
+        )?;
+        excl_rel_index = nsitem.p_rtindex;
+        excl_nsitem = Some(nsitem);
+        // Composite relkind signals this is not an actual relation and needs
+        // no permission checks; the real target relation is checked instead.
+        let rte_node = pstate.p_rtable.nth(excl_rel_index as usize - 1);
+        // SAFETY: parser-owned rtable; nsitem's p_rte probe is not read
+        // before the namespace lookups that follow rebuild it.
+        unsafe {
+            rte_node.with_mut::<types_nodes::RangeTblEntry, _>(|r| {
+                r.relkind = types_rel::RELKIND_COMPOSITE_TYPE
+            })
+        }
+        .expect("rtable holds RangeTblEntry");
+
+        excl_rel_tlist = BuildOnConflictExcludedTargetlist(mcx, &targetrel, excl_rel_index)?;
+    }
+
+    let (arbiter_elems, arbiter_where, constraint) =
+        parse_clause::transformOnConflictArbiter(mcx, pstate, clause)?;
+
+    let mut on_conflict_set = types_nodes::NodeList::nil();
+    let mut on_conflict_where = None;
+    if clause.action == OnConflictAction::ONCONFLICT_UPDATE {
+        // The UPDATE subexpressions are handled like UPDATE, not INSERT; all
+        // INSERT expressions were parsed already.
+        pstate.p_is_insert = false;
+
+        parse_relation::addNSItemToQuery(
+            mcx,
+            pstate,
+            excl_nsitem.take().expect("built above"),
+            false,
+            true,
+            true,
+        )?;
+
+        on_conflict_set = transformUpdateTargetList(mcx, pstate, &clause.targetList)?;
+        on_conflict_where = transformWhereClause(
+            mcx,
+            pstate,
+            clause.whereClause,
+            ParseExprKind::EXPR_KIND_WHERE,
+            "WHERE",
+        )?;
+
+        // EXCLUDED is not visible in RETURNING.
+        let popped = pstate.p_namespace.pop().expect("excluded nsitem was pushed");
+        debug_assert_eq!(popped.p_rtindex, excl_rel_index);
+    }
+
+    Node::mk(
+        mcx,
+        types_nodes::OnConflictExpr {
+            action: clause.action,
+            arbiterElems: arbiter_elems,
+            arbiterWhere: arbiter_where,
+            constraint,
+            onConflictSet: on_conflict_set,
+            onConflictWhere: on_conflict_where,
+            exclRelIndex: excl_rel_index,
+            exclRelTlist: excl_rel_tlist,
+        },
+    )
+}
+
+// C `BuildOnConflictExcludedTargetlist` (analyze.c): resnos must equal the
+// Var varattnos (including the resjunk whole-row Var at resno 0) — setrefs
+// resolves EXCLUDED references positionally; this is never a real tlist.
+fn BuildOnConflictExcludedTargetlist<'mcx>(
+    mcx: Mcx<'mcx>,
+    targetrel: &types_rel::Relation<'mcx>,
+    excl_rel_index: i32,
+) -> PgResult<types_nodes::NodeList<'mcx>> {
+    use types_core::catalog::INT4OID;
+
+    let mut tlist = types_nodes::NodeList::nil();
+    for i in 0..targetrel.rd_att.natts as usize {
+        let attr = targetrel.rd_att.attr(i);
+        let var = if attr.attisdropped {
+            // Any claimed type works for the placeholder null.
+            Node::mk_const(mcx, INT4OID, -1, 0, 4, datum::Datum::from_i32(0), true, true)?
+        } else {
+            Node::mk_var(
+                mcx,
+                excl_rel_index,
+                (i + 1) as types_core::AttrNumber,
+                attr.atttypid,
+                attr.atttypmod,
+                attr.attcollation,
+                0,
+            )?
+        };
+        tlist.lappend(mcx, Node::mk_target_entry(mcx, var, (i + 1) as i16, None, false)?)?;
+    }
+
+    let whole_row =
+        Node::mk_var(mcx, excl_rel_index, 0, targetrel.rd_rel.reltype, -1, 0, 0)?;
+    tlist.lappend(mcx, Node::mk_target_entry(mcx, whole_row, 0, None, true)?)?;
+    Ok(tlist)
 }
 
 fn transformDeleteStmt<'mcx>(

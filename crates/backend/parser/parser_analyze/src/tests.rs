@@ -722,15 +722,22 @@ mod from_where {
     use crate::parse_analyze_fixedparams;
 
     const T_OID: Oid = 4242;
+    // Past FirstUnpinnedObjectId, so ON CONFLICT's catalog-relation gate
+    // does not fire.
+    const U_OID: Oid = 40000;
 
     fn make_t(mcx: Mcx<'_>) -> Relation<'_> {
+        make_rel(mcx, "t", T_OID)
+    }
+
+    fn make_rel<'m>(mcx: Mcx<'m>, name: &str, oid: Oid) -> Relation<'m> {
         let mut relname = NameData::default();
-        relname.namestrcpy("t");
+        relname.namestrcpy(name);
         let cols = [("x", INT4OID, types_core::InvalidOid), ("y", TEXTOID, 100)];
         let mut attrs = Vec::new();
         for (i, (name, typid, coll)) in cols.iter().enumerate() {
             let mut a = FormData_pg_attribute {
-                attrelid: T_OID,
+                attrelid: oid,
                 atttypid: *typid,
                 attlen: if *typid == INT4OID { 4 } else { -1 },
                 attnum: i as i16 + 1,
@@ -746,7 +753,7 @@ mod from_where {
             attrs.push(a);
         }
         let data = RelationData { rd_locator: Default::default(), rd_smgr: Default::default(),
-            rd_id: T_OID,
+            rd_id: oid,
             rd_backend: INVALID_PROC_NUMBER,
             rd_islocaltemp: false,
             rd_isvalid: std::cell::Cell::new(true),
@@ -754,14 +761,14 @@ mod from_where {
             rd_newRelfilelocatorSubid: std::cell::Cell::new(0),
             rd_firstRelfilelocatorSubid: std::cell::Cell::new(0),
             rd_droppedSubid: std::cell::Cell::new(0),
-            rd_lockInfo: LockInfoData { lockRelId: LockRelId { relId: T_OID, dbId: 5 } },
+            rd_lockInfo: LockInfoData { lockRelId: LockRelId { relId: oid, dbId: 5 } },
             rd_rel: FormData_pg_class {
                 relname,
                 relnamespace: 2200,
                 reltype: 0,
                 relowner: 10,
                 relam: 2,
-                relfilenode: T_OID,
+                relfilenode: oid,
                 reltablespace: 0,
                 relpages: 0,
                 reltuples: -1.0,
@@ -803,6 +810,7 @@ mod from_where {
     ) -> PgResult<Option<Relation<'mcx>>> {
         match rv.relname {
             "t" => Ok(Some(make_t(mcx))),
+            "u" => Ok(Some(make_rel(mcx, "u", U_OID))),
             _ if missing_ok => Ok(None),
             _ => Err(types_error::PgError::error("no such relation").into()),
         }
@@ -812,6 +820,7 @@ mod from_where {
         static INIT: Once = Once::new();
         INIT.call_once(|| {
             super::install_type_fixture();
+            mbutils_seams::pg_mbstrlen_with_len::set(mbutils::pg_mbstrlen_with_len);
             relation_seams::relation_openrv_extended::set(fake_openrv_extended);
             // errorMissingRTE's searchRangeTableForRel probe; InvalidOid =
             // "no such relation", falling back to eref-alias matching.
@@ -1641,6 +1650,100 @@ mod from_where {
         let err =
             analyze_sql(mcx, "INSERT INTO t (x) VALUES (1), (2, 3)").map(|_| ()).unwrap_err();
         assert_eq!(err.message, "VALUES lists must all be the same length");
+    }
+
+    #[test]
+    fn insert_on_conflict_do_update_end_to_end() {
+        use types_nodes::primnodes::OnConflictAction;
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let q = analyze_sql(
+            mcx,
+            "INSERT INTO u VALUES (1, 'foo') ON CONFLICT (x) DO UPDATE SET y = excluded.y \
+             WHERE u.x > 0",
+        )
+        .unwrap();
+        assert_eq!(q.commandType, CmdType::CMD_INSERT);
+        let oc = q.onConflict.unwrap().as_on_conflict_expr().unwrap();
+        assert_eq!(oc.action, OnConflictAction::ONCONFLICT_UPDATE);
+        assert_eq!(oc.constraint, types_core::InvalidOid);
+
+        assert_eq!(q.rtable.len(), 2);
+        assert_eq!(oc.exclRelIndex, 2);
+        let excl_rte = q.rtable.nth(1).as_range_tbl_entry().unwrap();
+        assert_eq!(excl_rte.relid, U_OID);
+        assert_eq!(excl_rte.relkind, types_rel::RELKIND_COMPOSITE_TYPE);
+        assert_eq!(excl_rte.eref.unwrap().aliasname, Some("excluded"));
+
+        assert_eq!(oc.arbiterElems.len(), 1);
+        let elem = oc.arbiterElems.nth(0).as_inference_elem().unwrap();
+        let v = elem.expr.unwrap().as_var().unwrap();
+        assert_eq!((v.varno, v.varattno), (1, 1));
+        assert!(oc.arbiterWhere.is_none());
+
+        assert_eq!(oc.onConflictSet.len(), 1);
+        let te = oc.onConflictSet.nth(0).as_target_entry().unwrap();
+        assert_eq!((te.resno, te.resname), (2, Some("y")));
+        let sv = te.expr.as_var().unwrap();
+        assert_eq!((sv.varno, sv.varattno), (2, 2));
+
+        let wv = oc.onConflictWhere.unwrap();
+        assert_eq!(parse_expr::expr_type(wv), BOOLOID);
+
+        // Per-column Vars at resnos 1..natts, then the resjunk whole-row Var.
+        assert_eq!(oc.exclRelTlist.len(), 3);
+        let t0 = oc.exclRelTlist.nth(0).as_target_entry().unwrap();
+        assert_eq!((t0.resno, t0.expr.as_var().unwrap().varattno), (1, 1));
+        let tw = oc.exclRelTlist.nth(2).as_target_entry().unwrap();
+        assert!(tw.resjunk);
+        assert_eq!((tw.resno, tw.expr.as_var().unwrap().varattno), (0, 0));
+
+        let q =
+            analyze_sql(mcx, "INSERT INTO u VALUES (1, 'foo') ON CONFLICT DO NOTHING").unwrap();
+        let oc = q.onConflict.unwrap().as_on_conflict_expr().unwrap();
+        assert_eq!(oc.action, OnConflictAction::ONCONFLICT_NOTHING);
+        assert!(oc.arbiterElems.is_nil() && oc.arbiterWhere.is_none());
+        assert_eq!(oc.exclRelIndex, 0);
+        assert!(oc.exclRelTlist.is_nil() && oc.onConflictSet.is_nil());
+        assert_eq!(q.rtable.len(), 1);
+    }
+
+    #[test]
+    fn insert_on_conflict_error_shapes() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let err =
+            analyze_sql(mcx, "INSERT INTO u VALUES (1, 'a') ON CONFLICT DO UPDATE SET y = 'b'")
+                .map(|_| ())
+                .unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_SYNTAX_ERROR);
+        assert_eq!(
+            err.message,
+            "ON CONFLICT DO UPDATE requires inference specification or constraint name"
+        );
+
+        // t's OID is below FirstUnpinnedObjectId, i.e. a catalog relation.
+        let err = analyze_sql(mcx, "INSERT INTO t VALUES (1, 'a') ON CONFLICT (x) DO NOTHING")
+            .map(|_| ())
+            .unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
+        assert_eq!(err.message, "ON CONFLICT is not supported with system catalog tables");
+
+        let err =
+            analyze_sql(mcx, "INSERT INTO u VALUES (1, 'a') ON CONFLICT (x DESC) DO NOTHING")
+                .map(|_| ())
+                .unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
+        assert_eq!(err.message, "ASC/DESC is not allowed in ON CONFLICT clause");
+
+        let err = analyze_sql(mcx, "INSERT INTO u VALUES (1, 'a') ON CONFLICT (nope) DO NOTHING")
+            .map(|_| ())
+            .unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_UNDEFINED_COLUMN);
     }
 
     #[test]

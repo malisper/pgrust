@@ -9,6 +9,7 @@ name = "parse_clause"
 path = "src/lib.rs"
 
 [dependencies]
+catalog = { path = "../../catalog/catalog" }
 table = { path = "../../access/table/table" }
 types_rel = { path = "../../../_support/types/rel" }
 coerce = { path = "../coerce" }

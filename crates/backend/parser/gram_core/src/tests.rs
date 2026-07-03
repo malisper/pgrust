@@ -305,6 +305,65 @@ fn insert_values_shapes() {
 }
 
 #[test]
+fn on_conflict_shapes() {
+    use types_nodes::OnConflictAction;
+
+    let list = parse("INSERT INTO t VALUES (1) ON CONFLICT DO NOTHING;");
+    let ins = only_stmt(&list).stmt.unwrap().as_insert_stmt().expect("InsertStmt");
+    let occ = ins.onConflictClause.unwrap().as_on_conflict_clause().expect("OnConflictClause");
+    assert_eq!(occ.action, OnConflictAction::ONCONFLICT_NOTHING);
+    assert!(occ.infer.is_none() && occ.targetList.is_nil() && occ.whereClause.is_none());
+
+    let list =
+        parse("INSERT INTO t VALUES (1) ON CONFLICT (a) DO UPDATE SET b = excluded.b WHERE t.c > 0;");
+    let ins = only_stmt(&list).stmt.unwrap().as_insert_stmt().unwrap();
+    let occ = ins.onConflictClause.unwrap().as_on_conflict_clause().unwrap();
+    assert_eq!(occ.action, OnConflictAction::ONCONFLICT_UPDATE);
+    let infer = occ.infer.unwrap().as_infer_clause().expect("InferClause");
+    assert_eq!(infer.indexElems.len(), 1);
+    let elem =
+        infer.indexElems.nth(0).as_variant::<types_nodes::IndexElem>().expect("IndexElem");
+    assert_eq!(elem.name, Some("a"));
+    assert!(infer.whereClause.is_none() && infer.conname.is_none());
+    assert_eq!(occ.targetList.len(), 1);
+    let rt = occ.targetList.nth(0).as_res_target().expect("ResTarget");
+    assert_eq!(rt.name, Some("b"));
+    let cr = rt.val.unwrap().as_column_ref().expect("ColumnRef");
+    assert_eq!(cr.fields.nth(0).as_string().unwrap().sval, "excluded");
+    assert!(occ.whereClause.is_some());
+
+    let list = parse("INSERT INTO t VALUES (1) ON CONFLICT (a) WHERE a > 0 DO NOTHING;");
+    let ins = only_stmt(&list).stmt.unwrap().as_insert_stmt().unwrap();
+    let occ = ins.onConflictClause.unwrap().as_on_conflict_clause().unwrap();
+    let infer = occ.infer.unwrap().as_infer_clause().unwrap();
+    assert!(infer.whereClause.is_some());
+
+    let list = parse("INSERT INTO t VALUES (1) ON CONFLICT ON CONSTRAINT t_pkey DO NOTHING;");
+    let ins = only_stmt(&list).stmt.unwrap().as_insert_stmt().unwrap();
+    let occ = ins.onConflictClause.unwrap().as_on_conflict_clause().unwrap();
+    let infer = occ.infer.unwrap().as_infer_clause().unwrap();
+    assert!(infer.indexElems.is_nil());
+    assert_eq!(infer.conname, Some("t_pkey"));
+}
+
+#[test]
+fn on_conflict_rule_numbers_match_tables() {
+    use crate::tables::names::{YYRLINE, YYTNAME};
+    use crate::tables::YYR1;
+    for (rule, name, line) in [
+        (1630, "opt_on_conflict", 12328),
+        (1631, "opt_on_conflict", 12338),
+        (1632, "opt_on_conflict", 12348),
+        (1633, "opt_conf_expr", 12354),
+        (1634, "opt_conf_expr", 12363),
+        (1635, "opt_conf_expr", 12372),
+    ] {
+        assert_eq!(YYTNAME[YYR1[rule] as usize], name, "rule {rule}");
+        assert_eq!(YYRLINE[rule], line, "rule {rule}");
+    }
+}
+
+#[test]
 fn returning_clause_shapes() {
     let list = parse("INSERT INTO t VALUES (1, 2) RETURNING id;");
     let ins = only_stmt(&list).stmt.unwrap().as_insert_stmt().expect("InsertStmt");
