@@ -1,9 +1,7 @@
-//! joinpath.c nestloop arm + the pathnode.c/costsize.c join-cost slice it
-//! needs (create_nestloop_path, create_material_path, add_path_precheck,
-//! initial/final_cost_nestloop, cost_rescan, cost_material).
-//! DIVERGENCE: sort_inner_and_outer/hash_inner_and_outer candidates (merge and
-//! hash joins) are not generated -- plan choice (not results) can differ from
-//! C where one of those would win; parameterized nestloops are loud.
+//! joinpath.c nestloop arm + its pathnode.c/costsize.c join-cost slice.
+//! DIVERGENCE: merge/hash join candidates (sort_inner_and_outer/
+//! hash_inner_and_outer) are not generated -- plan choice (not results) can
+//! differ from C where one would win; parameterized nestloops are loud.
 
 use mcx::PgVec;
 use types_error::PgResult;
@@ -17,7 +15,6 @@ use crate::gucs;
 use crate::pathnode::tag16;
 use crate::run::PlannerRun;
 
-// JoinCostWorkspace (pathnodes.h), nestloop fields only.
 struct JoinCostWorkspace {
     startup_cost: f64,
     total_cost: f64,
@@ -40,8 +37,6 @@ pub fn add_paths_to_joinrel<'mcx>(
         "add_paths_to_joinrel (joinpath.c): jointype {jointype}; M2 outer/semi-join lane"
     );
     let inner_unique = innerrel_is_unique(run, innerrel, restrictlist);
-    // compute_semi_anti_join_factors only runs for SEMI/ANTI/inner_unique;
-    // param_source_rels stays empty (join_info_list empty, no lateral rels).
     debug_assert!(run.root.join_info_list.is_empty());
     match_unsorted_outer(run, joinrel, outerrel, innerrel, jointype, inner_unique, sjinfo, restrictlist)
 }
@@ -87,7 +82,6 @@ fn match_unsorted_outer<'mcx>(
         .expect("inner rel has a cheapest path");
     debug_assert!(run.root.path(inner_cheapest_total).base().param_info.is_none());
 
-    // Materialize the cheapest inner unless it materializes its output.
     let matpath = if gucs::enable_material()
         && !exec_materializes_output(run.root.path(inner_cheapest_total).base().pathtype)
     {
@@ -100,13 +94,10 @@ fn match_unsorted_outer<'mcx>(
         crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.rel(outerrel).pathlist);
     for &outerpath in outer_paths.iter() {
         debug_assert!(run.root.path(outerpath).base().param_info.is_none());
-        // build_join_pathkeys: NIL while the outer path carries no pathkeys.
         assert!(
             run.root.path(outerpath).base().pathkeys.is_empty(),
             "build_join_pathkeys (pathkeys.c): ordered outer path; M2 pathkey lane"
         );
-        // cheapest_parameterized_paths holds only the unparameterized
-        // cheapest-total here; get_memoize_path returns NULL for it.
         let inner_candidates = crate::relnode::pgvec_clone_shallow(
             run.mcx,
             &run.root.rel(innerrel).cheapest_parameterized_paths,
@@ -117,14 +108,11 @@ fn match_unsorted_outer<'mcx>(
         if let Some(mp) = matpath {
             try_nestloop_path(run, joinrel, outerpath, mp, jointype, inner_unique, sjinfo, restrictlist)?;
         }
-        // generate_mergejoin_paths: divergence (module doc).
     }
-    // Partial/parallel nestloops: no partial paths exist on this lane.
     debug_assert!(run.root.rel(outerrel).partial_pathlist.is_empty());
     Ok(())
 }
 
-// ExecMaterializesOutput (execAmi.c) over the pathtypes reachable here.
 fn exec_materializes_output(pathtype: u16) -> bool {
     pathtype == tag16(NodeTag::T_Material)
         || pathtype == tag16(NodeTag::T_Sort)
@@ -146,7 +134,6 @@ fn try_nestloop_path<'mcx>(
     restrictlist: &[RinfoId],
 ) -> PgResult<()> {
     debug_assert!(sjinfo.ojrelid == 0);
-    // calc_nestloop_required_outer: both inputs unparameterized -> NULL.
     assert!(
         run.root.path(outer_path).base().param_info.is_none()
             && run.root.path(inner_path).base().param_info.is_none(),
@@ -199,7 +186,6 @@ fn add_path_precheck(
     true
 }
 
-// create_material_path (pathnode.c) + cost_material (costsize.c).
 pub fn create_material_path(run: &mut PlannerRun<'_>, rel: RelId, subpath: PathId) -> PathId {
     let sub = run.root.path(subpath).base();
     debug_assert!(sub.parent == rel);
@@ -242,7 +228,6 @@ pub fn create_material_path(run: &mut PlannerRun<'_>, rel: RelId, subpath: PathI
         }))
 }
 
-// cost_rescan (costsize.c) -> (rescan_startup_cost, rescan_total_cost).
 fn cost_rescan(run: &PlannerRun<'_>, path: PathId) -> (f64, f64) {
     let p = run.root.path(path).base();
     let pathtype = p.pathtype;
@@ -268,7 +253,6 @@ fn cost_rescan(run: &PlannerRun<'_>, path: PathId) -> (f64, f64) {
     }
 }
 
-// initial_cost_nestloop (costsize.c).
 fn initial_cost_nestloop(
     run: &PlannerRun<'_>,
     jointype: u32,
@@ -294,7 +278,6 @@ fn initial_cost_nestloop(
     let inner_run_cost = inner.total_cost - inner.startup_cost;
     let inner_rescan_run_cost = inner_rescan_total - inner_rescan_start;
 
-    // SEMI/ANTI/inner_unique early-stop costing is the loud lane upstream.
     debug_assert!(jointype == JOIN_INNER && !inner_unique);
     run_cost += inner_run_cost;
     if outer_path_rows > 1.0 {
@@ -309,7 +292,6 @@ fn initial_cost_nestloop(
     }
 }
 
-// final_cost_nestloop (costsize.c), plain inner arm.
 fn final_cost_nestloop(
     run: &mut PlannerRun<'_>,
     path: &mut NestPath<'_>,

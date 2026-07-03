@@ -1,0 +1,719 @@
+// nodeModifyTable.c, single-relation INSERT/UPDATE/DELETE arms. The subplan
+// stays with the ExecProcNode dispatcher (execmain owns the node enum;
+// nodesort precedent) — exec_modify_table takes a fetch closure. MERGE, ON
+// CONFLICT, triggers, FDW batching, RETURNING and EvalPlanQual (single-session
+// M4) are loud named panics.
+#![allow(non_snake_case)]
+
+use std::rc::Rc;
+
+use datum::Datum;
+use executils::{EStateData, ExecSlotId};
+use tableam_vocab::{LockTupleMode, TM_FailureData, TM_Result, TU_UpdateIndexes};
+use types_error::{
+    PgError, PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_NOT_NULL_VIOLATION,
+    ERRCODE_TRIGGERED_DATA_CHANGE_VIOLATION,
+};
+use types_nodes::nodes_enums::CmdType;
+use types_nodes::plannodes::ModifyTable;
+use types_nodes::{Node, NodeTag};
+use types_rel::{Relation, RELKIND_RELATION};
+use types_slot::{SlotData, EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK};
+use types_snapshot::{SnapshotData, SNAPSHOT_ANY};
+use types_tuple::ItemPointerData;
+
+// ExecBuildUpdateProjection's step stream, resolved once per statement onto a
+// flat per-target-column source map (rule 4: known-set dispatch, no ExprState).
+#[derive(Clone, Copy)]
+enum NewColSrc {
+    Outer(u16),
+    Old(u16),
+    NullDropped,
+}
+
+pub struct ModifyTableState<'mcx> {
+    pub plan: &'mcx ModifyTable<'mcx>,
+    pub operation: CmdType,
+    pub canSetTag: bool,
+    pub mt_done: bool,
+    pub result_rti: u32,
+    ri_newTupleSlot: Option<ExecSlotId>,
+    ri_oldTupleSlot: Option<ExecSlotId>,
+    ri_projectNewInfoValid: bool,
+    ri_RowIdAttNo: i16,
+    update_cols: mcx::PgVec<'mcx, NewColSrc>,
+    indexes: Option<execindexing::ResultRelIndexState<'mcx>>,
+    snapshot_any: Option<Rc<SnapshotData<'mcx>>>,
+}
+
+/// `ExecInitModifyTable` (nodeModifyTable.c); the caller inits the subplan.
+pub fn exec_init_modify_table<'mcx>(
+    node: &'mcx ModifyTable<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    eflags: i32,
+) -> PgResult<ModifyTableState<'mcx>> {
+    assert!(eflags & (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK) == 0);
+    if !matches!(
+        node.operation,
+        CmdType::CMD_INSERT | CmdType::CMD_UPDATE | CmdType::CMD_DELETE
+    ) {
+        panic!(
+            "ExecInitModifyTable (nodeModifyTable.c): {:?} arm not ported",
+            node.operation
+        );
+    }
+    if node.onConflictAction != 0 {
+        panic!("ExecInitModifyTable (nodeModifyTable.c): ON CONFLICT arm not ported");
+    }
+    if !node.withCheckOptionLists.is_nil()
+        || !node.returningLists.is_nil()
+        || !node.mergeActionLists.is_nil()
+        || !node.fdwPrivLists.is_nil()
+    {
+        panic!(
+            "ExecInitModifyTable (nodeModifyTable.c): WCO/RETURNING/MERGE/FDW \
+             lists not ported"
+        );
+    }
+    assert_eq!(node.resultRelations.len(), 1);
+    debug_assert!(node.rootRelation == 0 && node.rowMarks.is_nil());
+    let rti = node.resultRelations.nth(0) as u32;
+    debug_assert!(estate.es_unpruned_relids.is_member(rti as i32));
+
+    estate.exec_init_result_relation(rti)?;
+    {
+        let rel = estate.es_relations[(rti - 1) as usize]
+            .as_ref()
+            .expect("result relation opened");
+        check_valid_result_rel(rel);
+    }
+
+    // The UPDATE/DELETE row identity: the plain-relation leg carries a junk
+    // ctid attribute in the subplan targetlist (wholerow legs are the
+    // FDW/view lanes, loud at CheckValidResultRel).
+    let mut rowid_attno: i16 = 0;
+    if matches!(node.operation, CmdType::CMD_UPDATE | CmdType::CMD_DELETE) {
+        let subplan = node
+            .plan
+            .lefttree
+            .expect("ModifyTable has a subplan")
+            .as_plan()
+            .expect("plan node");
+        rowid_attno = exec_find_junk_attribute_in_tlist(&subplan.targetlist, "ctid");
+        assert!(rowid_attno > 0, "could not find junk ctid column");
+    }
+
+    // fireBSTriggers/ExecSetupTransitionCaptureState: the trimmed relcache
+    // entry carries no trigger descriptor, so statement triggers are
+    // undetectable until pg_trigger lands (none exist without CREATE TRIGGER).
+    Ok(ModifyTableState {
+        plan: node,
+        operation: node.operation,
+        canSetTag: node.canSetTag,
+        mt_done: false,
+        result_rti: rti,
+        ri_newTupleSlot: None,
+        ri_oldTupleSlot: None,
+        ri_projectNewInfoValid: false,
+        ri_RowIdAttNo: rowid_attno,
+        update_cols: mcx::PgVec::new_in(estate.es_query_cxt),
+        indexes: None,
+        snapshot_any: Some(Rc::new(SnapshotData::sentinel(estate.es_query_cxt, SNAPSHOT_ANY))),
+    })
+}
+
+// ExecFindJunkAttributeInTlist (execJunk.c); hosted here while the execjunk
+// crate is claimed by the ORDER-BY-junk lane.
+fn exec_find_junk_attribute_in_tlist(tlist: &types_nodes::NodeList<'_>, attr_name: &str) -> i16 {
+    for tle_node in tlist {
+        let tle = tle_node.as_target_entry().expect("TargetEntry");
+        if tle.resjunk && tle.resname == Some(attr_name) {
+            return tle.resno;
+        }
+    }
+    0
+}
+
+// CheckValidResultRel (execMain.c), plain-table arm.
+fn check_valid_result_rel(rel: &Relation<'_>) {
+    if rel.rd_rel.relkind != RELKIND_RELATION {
+        panic!(
+            "CheckValidResultRel (execMain.c): relkind '{}' result relation not ported",
+            rel.rd_rel.relkind as char
+        );
+    }
+    if rel.rd_rel.relispartition {
+        panic!("CheckValidResultRel (execMain.c): partition routing not ported");
+    }
+}
+
+/// `ExecModifyTable` (nodeModifyTable.c), INSERT/UPDATE/DELETE loop.
+pub fn exec_modify_table<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    mut fetch_outer: impl FnMut(&mut EStateData<'mcx>) -> PgResult<Option<ExecSlotId>>,
+) -> PgResult<Option<ExecSlotId>> {
+    if mt.mt_done {
+        return Ok(None);
+    }
+
+    loop {
+        estate.reset_per_tuple_expr_context();
+
+        let Some(plan_slot) = fetch_outer(estate)? else {
+            break;
+        };
+
+        match mt.operation {
+            CmdType::CMD_INSERT => {
+                if !mt.ri_projectNewInfoValid {
+                    exec_init_insert_projection(mt, estate)?;
+                }
+                let slot = exec_get_insert_new_tuple(mt, estate, plan_slot)?;
+                exec_insert(mt, estate, slot)?;
+            }
+            CmdType::CMD_UPDATE => {
+                let tupleid = fetch_row_id(mt, estate, plan_slot);
+                if !mt.ri_projectNewInfoValid {
+                    exec_init_update_projection(mt, estate)?;
+                }
+                let old_slot = mt.ri_oldTupleSlot.expect("ExecInitUpdateProjection ran");
+                let found = {
+                    let EStateData { es_relations, es_tupleTable, es_query_cxt, .. } = estate;
+                    let rel = es_relations[(mt.result_rti - 1) as usize]
+                        .as_ref()
+                        .expect("result relation opened");
+                    tableam::table_tuple_fetch_row_version(
+                        *es_query_cxt,
+                        rel,
+                        &tupleid,
+                        &mt.snapshot_any,
+                        &mut es_tupleTable[old_slot.0 as usize],
+                    )?
+                };
+                assert!(found, "failed to fetch tuple being updated");
+                let slot = exec_get_update_new_tuple(mt, estate, plan_slot)?;
+                exec_update(mt, estate, &tupleid, slot)?;
+            }
+            CmdType::CMD_DELETE => {
+                let tupleid = fetch_row_id(mt, estate, plan_slot);
+                exec_delete(mt, estate, &tupleid)?;
+            }
+            other => panic!("ExecModifyTable (nodeModifyTable.c): {other:?} arm not ported"),
+        }
+        // RETURNING is loud at init; every row yields None to the caller.
+    }
+
+    debug_assert!(estate.es_insert_pending_result_relations.is_empty());
+    mt.mt_done = true;
+    Ok(None)
+}
+
+// The ctid-junk fetch of ExecModifyTable's row-identity block; the datum is a
+// pointer into the plan slot's tuple, copied out as C copies to tuple_ctid.
+fn fetch_row_id<'mcx>(
+    mt: &ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    plan_slot: ExecSlotId,
+) -> ItemPointerData {
+    debug_assert!(mt.ri_RowIdAttNo > 0);
+    let slot = &mut estate.es_tupleTable[plan_slot.0 as usize];
+    let mut isnull = false;
+    let datum = exectuples::slot_getattr(slot, mt.ri_RowIdAttNo as i32, &mut isnull);
+    assert!(!isnull, "ctid is NULL");
+    // SAFETY: a tid datum is a pointer to an ItemPointerData inside the
+    // deformed plan tuple, live for this row.
+    unsafe { *(datum.as_usize() as *const ItemPointerData) }
+}
+
+/// `ExecEndModifyTable` node-local half; the caller ends the subplan.
+pub fn exec_end_modify_table(mt: &mut ModifyTableState<'_>) {
+    if let Some(indexes) = mt.indexes.take() {
+        execindexing::ExecCloseIndices(indexes).expect("ExecCloseIndices");
+    }
+}
+
+// ExecInitInsertProjection (nodeModifyTable.c). INSERT subplans carry no junk
+// columns on this lane (loud below), so need_projection is always false and
+// ri_newTupleSlot only exists for slot-type coercion.
+fn exec_init_insert_projection<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    let subplan = mt
+        .plan
+        .plan
+        .lefttree
+        .expect("ModifyTable has a subplan")
+        .as_plan()
+        .expect("plan node");
+    for tle_node in &subplan.targetlist {
+        let tle = tle_node.as_target_entry().expect("TargetEntry");
+        if tle.resjunk {
+            panic!(
+                "ExecInitInsertProjection (nodeModifyTable.c): junk-column \
+                 projection (ExecBuildProjectionInfo) not ported"
+            );
+        }
+    }
+
+    let mcx = estate.es_query_cxt;
+    let (kind, desc) = {
+        let rel = estate.es_relations[(mt.result_rti - 1) as usize]
+            .as_ref()
+            .expect("result relation opened");
+        exec_check_plan_output(rel, &subplan.targetlist)?;
+        (tableam::table_slot_callbacks(rel), rel.rd_att.clone())
+    };
+    let slot = exectuples::make_tuple_table_slot(mcx, kind, Some(desc));
+    let id = ExecSlotId(estate.es_tupleTable.len() as u32);
+    estate.es_tupleTable.push(slot);
+    mt.ri_newTupleSlot = Some(id);
+    mt.ri_projectNewInfoValid = true;
+    Ok(())
+}
+
+// ExecCheckPlanOutput (execMain.c), non-junk arm.
+fn exec_check_plan_output<'mcx>(
+    rel: &Relation<'mcx>,
+    tlist: &types_nodes::NodeList<'mcx>,
+) -> PgResult<()> {
+    let desc = &rel.rd_att;
+    let mut attno = 0usize;
+    for tle_node in tlist {
+        let tle = tle_node.as_target_entry().expect("TargetEntry");
+        debug_assert!(!tle.resjunk);
+        if attno >= desc.natts as usize {
+            return Err(plan_output_mismatch("Query has too many columns."));
+        }
+        let att = desc.attr(attno);
+        attno += 1;
+        if !att.attisdropped {
+            let exprtype = expr_type(tle.expr);
+            if exprtype != att.atttypid {
+                return Err(plan_output_mismatch(
+                    "Table has a column of one type at a position where the \
+                     query expects another type.",
+                ));
+            }
+        } else if tle.expr.node_tag() != NodeTag::T_Const
+            || !tle.expr.as_const().unwrap().constisnull
+        {
+            return Err(plan_output_mismatch(
+                "Query provides a value for a dropped column.",
+            ));
+        }
+    }
+    if attno != desc.natts as usize {
+        return Err(plan_output_mismatch("Query has too few columns."));
+    }
+    Ok(())
+}
+
+// exprType over the shapes an INSERT subplan tlist can carry today.
+fn expr_type(node: Node<'_>) -> u32 {
+    match node.node_tag() {
+        NodeTag::T_Const => node.as_const().unwrap().consttype,
+        NodeTag::T_Var => node.as_var().unwrap().vartype,
+        NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resulttype,
+        NodeTag::T_FuncExpr => node.as_func_expr().unwrap().funcresulttype,
+        NodeTag::T_OpExpr => node.as_op_expr().unwrap().opresulttype,
+        other => panic!("ExecCheckPlanOutput exprType arm for {other:?} not ported"),
+    }
+}
+
+// ExecGetInsertNewTuple (nodeModifyTable.c), no-projection arm.
+fn exec_get_insert_new_tuple<'mcx>(
+    mt: &ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    plan_slot: ExecSlotId,
+) -> PgResult<ExecSlotId> {
+    let new_slot = mt.ri_newTupleSlot.expect("ExecInitInsertProjection ran");
+    let mcx = estate.es_query_cxt;
+    let table: &mut [SlotData<'mcx>] = &mut estate.es_tupleTable;
+    if table[new_slot.0 as usize].kind() == table[plan_slot.0 as usize].kind() {
+        return Ok(plan_slot);
+    }
+    assert_ne!(new_slot, plan_slot);
+    let base = table.as_mut_ptr();
+    // SAFETY: distinct in-bounds indices of one live slice.
+    let (dst, src) = unsafe {
+        (
+            &mut *base.add(new_slot.0 as usize),
+            &mut *base.add(plan_slot.0 as usize),
+        )
+    };
+    exectuples::exec_copy_slot(dst, src, mcx, mcx)?;
+    Ok(new_slot)
+}
+
+// ExecInitUpdateProjection + ExecBuildUpdateProjection (execExpr.c): resolve
+// the merge of subplan output columns (via updateColnos) and old-tuple
+// columns into a flat per-column source map, with ExecCheckPlanOutput-grade
+// sanity checks; two table-format slots (old/new) join the tuple table.
+fn exec_init_update_projection<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    let subplan = mt
+        .plan
+        .plan
+        .lefttree
+        .expect("ModifyTable has a subplan")
+        .as_plan()
+        .expect("plan node");
+    let update_colnos = mt
+        .plan
+        .updateColnosLists
+        .nth(0)
+        .as_int_list()
+        .expect("updateColnosLists cell is an IntList");
+
+    let mcx = estate.es_query_cxt;
+    let (kind, desc) = {
+        let rel = estate.es_relations[(mt.result_rti - 1) as usize]
+            .as_ref()
+            .expect("result relation opened");
+        (tableam::table_slot_callbacks(rel), rel.rd_att.clone())
+    };
+    let natts = desc.natts as usize;
+
+    let mut n_assignable = 0usize;
+    let mut saw_junk = false;
+    for tle_node in &subplan.targetlist {
+        let tle = tle_node.as_target_entry().expect("TargetEntry");
+        if tle.resjunk {
+            saw_junk = true;
+        } else {
+            assert!(!saw_junk, "subplan target list is out of order");
+            n_assignable += 1;
+        }
+    }
+    assert_eq!(
+        n_assignable,
+        update_colnos.len(),
+        "targetColnos does not match subplan target list"
+    );
+
+    let mut cols: mcx::PgVec<'mcx, NewColSrc> = mcx::PgVec::new_in(mcx);
+    cols.try_reserve_exact(natts).map_err(|_| mcx.oom(natts))?;
+    for attno in 1..=natts {
+        cols.push(if desc.attr(attno - 1).attisdropped {
+            NewColSrc::NullDropped
+        } else {
+            NewColSrc::Old(attno as u16)
+        });
+    }
+    for (outer_idx, (tle_node, target_attnum)) in subplan
+        .targetlist
+        .iter()
+        .zip(update_colnos.iter())
+        .enumerate()
+    {
+        let tle = tle_node.as_target_entry().expect("TargetEntry");
+        debug_assert!(!tle.resjunk);
+        let target_attnum = target_attnum as usize;
+        if target_attnum < 1 || target_attnum > natts {
+            return Err(plan_output_mismatch("Query has too many columns."));
+        }
+        let att = desc.attr(target_attnum - 1);
+        if att.attisdropped {
+            return Err(plan_output_mismatch(
+                "Query provides a value for a dropped column.",
+            ));
+        }
+        if expr_type(tle.expr) != att.atttypid {
+            return Err(plan_output_mismatch(
+                "Table has a column of one type at a position where the \
+                 query expects another type.",
+            ));
+        }
+        cols[target_attnum - 1] = NewColSrc::Outer(outer_idx as u16);
+    }
+    mt.update_cols = cols;
+
+    let old_slot = exectuples::make_tuple_table_slot(mcx, kind, Some(desc.clone()));
+    let old_id = ExecSlotId(estate.es_tupleTable.len() as u32);
+    estate.es_tupleTable.push(old_slot);
+    let new_slot = exectuples::make_tuple_table_slot(mcx, kind, Some(desc));
+    let new_id = ExecSlotId(estate.es_tupleTable.len() as u32);
+    estate.es_tupleTable.push(new_slot);
+    mt.ri_oldTupleSlot = Some(old_id);
+    mt.ri_newTupleSlot = Some(new_id);
+    mt.ri_projectNewInfoValid = true;
+    Ok(())
+}
+
+// ExecGetUpdateNewTuple (nodeModifyTable.c): run the resolved column map over
+// the plan (outer) and old (scan) tuples into ri_newTupleSlot. Per row: two
+// deforms + one datum copy loop, no allocations.
+fn exec_get_update_new_tuple<'mcx>(
+    mt: &ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    plan_slot: ExecSlotId,
+) -> PgResult<ExecSlotId> {
+    let new_id = mt.ri_newTupleSlot.expect("ExecInitUpdateProjection ran");
+    let old_id = mt.ri_oldTupleSlot.expect("ExecInitUpdateProjection ran");
+    let mcx = estate.es_query_cxt;
+    let table: &mut [SlotData<'mcx>] = &mut estate.es_tupleTable;
+    let (n, o, p) = (new_id.0 as usize, old_id.0 as usize, plan_slot.0 as usize);
+    assert!(n < table.len() && o < table.len() && p < table.len());
+    assert!(n != o && n != p && o != p);
+    let base = table.as_mut_ptr();
+    // SAFETY: distinct in-bounds indices of one live slice.
+    let (new_slot, old_slot, outer) = unsafe {
+        (&mut *base.add(n), &mut *base.add(o), &mut *base.add(p))
+    };
+
+    exectuples::slot_getallattrs(outer);
+    exectuples::slot_getallattrs(old_slot);
+    exectuples::exec_clear_tuple(new_slot, mcx);
+    {
+        let (ob, sb) = (outer.base(), old_slot.base());
+        let nb = new_slot.base_mut();
+        for (i, src) in mt.update_cols.iter().enumerate() {
+            let (v, isnull) = match *src {
+                NewColSrc::Outer(j) => (ob.tts_values[j as usize], ob.tts_isnull[j as usize]),
+                NewColSrc::Old(a) => {
+                    (sb.tts_values[a as usize - 1], sb.tts_isnull[a as usize - 1])
+                }
+                NewColSrc::NullDropped => (Datum::null(), true),
+            };
+            nb.tts_values[i] = v;
+            nb.tts_isnull[i] = isnull;
+        }
+    }
+    exectuples::exec_store_virtual_tuple(new_slot);
+    Ok(new_id)
+}
+
+// ExecUpdate + ExecUpdatePrologue/Act/Epilogue (nodeModifyTable.c), plain-heap
+// single-session arm: no triggers/FDW/partitions; concurrent-update outcomes
+// (EvalPlanQual) are loud.
+fn exec_update<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    tupleid: &ItemPointerData,
+    slot_id: ExecSlotId,
+) -> PgResult<()> {
+    let mcx = estate.es_query_cxt;
+    let output_cid = estate.es_output_cid;
+    let EStateData { es_relations, es_tupleTable, es_snapshot, .. } = estate;
+    let snapshot: &tableam_vocab::Snapshot<'mcx> = &*es_snapshot;
+    let rel = es_relations[(mt.result_rti - 1) as usize]
+        .as_ref()
+        .expect("result relation opened");
+    let slot = &mut es_tupleTable[slot_id.0 as usize];
+
+    exectuples::exec_materialize_slot(slot, mcx)?;
+    slot.base_mut().tts_tableOid = rel.rd_id;
+
+    if rel.rd_rel.relhasindex && mt.indexes.is_none() {
+        mt.indexes = Some(execindexing::ExecOpenIndices(mcx, rel, false)?);
+    }
+
+    exec_constraints(rel, slot)?;
+
+    let mut tmfd = TM_FailureData::default();
+    let mut lockmode = LockTupleMode::LockTupleExclusive;
+    let mut update_indexes = TU_UpdateIndexes::TU_None;
+    let result = tableam::table_tuple_update(
+        mcx,
+        rel,
+        tupleid,
+        slot,
+        output_cid,
+        &snapshot,
+        &None,
+        true,
+        &mut tmfd,
+        &mut lockmode,
+        &mut update_indexes,
+    )?;
+
+    match result {
+        TM_Result::TM_Ok => {}
+        TM_Result::TM_SelfModified => {
+            if tmfd.cmax != output_cid {
+                return Err(self_modified_violation("updated"));
+            }
+            return Ok(());
+        }
+        TM_Result::TM_Updated | TM_Result::TM_Deleted => panic!(
+            "ExecUpdate (nodeModifyTable.c): concurrent {result:?} needs \
+             EvalPlanQual (single-session M4)"
+        ),
+        other => panic!("ExecUpdate (nodeModifyTable.c): unexpected {other:?}"),
+    }
+
+    if let Some(indexes) = mt.indexes.as_mut() {
+        if indexes.num_indices() > 0 && update_indexes != TU_UpdateIndexes::TU_None {
+            if update_indexes == TU_UpdateIndexes::TU_Summarizing {
+                panic!(
+                    "ExecUpdateEpilogue (nodeModifyTable.c): onlySummarizing \
+                     index maintenance (BRIN lane) not ported"
+                );
+            }
+            execindexing::ExecInsertIndexTuples(mcx, indexes, rel, slot)?;
+        }
+    }
+
+    if mt.canSetTag {
+        estate.es_processed += 1;
+    }
+    Ok(())
+}
+
+// ExecDelete + ExecDeletePrologue/Act/Epilogue (nodeModifyTable.c), plain-heap
+// single-session arm.
+fn exec_delete<'mcx>(
+    mt: &ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    tupleid: &ItemPointerData,
+) -> PgResult<()> {
+    let mcx = estate.es_query_cxt;
+    let output_cid = estate.es_output_cid;
+    let EStateData { es_relations, es_snapshot, .. } = &*estate;
+    let snapshot: &tableam_vocab::Snapshot<'mcx> = es_snapshot;
+    let rel = es_relations[(mt.result_rti - 1) as usize]
+        .as_ref()
+        .expect("result relation opened");
+
+    let mut tmfd = TM_FailureData::default();
+    let result = tableam::table_tuple_delete(
+        mcx,
+        rel,
+        tupleid,
+        output_cid,
+        &snapshot,
+        &None,
+        true,
+        &mut tmfd,
+        false,
+    )?;
+
+    match result {
+        TM_Result::TM_Ok => {}
+        TM_Result::TM_SelfModified => {
+            if tmfd.cmax != output_cid {
+                return Err(self_modified_violation("deleted"));
+            }
+            return Ok(());
+        }
+        TM_Result::TM_Updated | TM_Result::TM_Deleted => panic!(
+            "ExecDelete (nodeModifyTable.c): concurrent {result:?} needs \
+             EvalPlanQual (single-session M4)"
+        ),
+        other => panic!("ExecDelete (nodeModifyTable.c): unexpected {other:?}"),
+    }
+
+    if mt.canSetTag {
+        estate.es_processed += 1;
+    }
+    Ok(())
+}
+
+#[cold]
+#[inline(never)]
+fn self_modified_violation(verb: &str) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!(
+            "tuple to be {verb} was already modified by an operation triggered \
+             by the current command"
+        ))
+        .with_sqlstate(ERRCODE_TRIGGERED_DATA_CHANGE_VIOLATION)
+        .with_hint(
+            "Consider using an AFTER trigger instead of a BEFORE trigger to \
+             propagate changes to other rows.",
+        ),
+    )
+}
+
+// ExecInsert (nodeModifyTable.c): the plain-heap arm — materialize, check
+// NOT NULL constraints, table_tuple_insert, count. Index inserts are the nbt
+// insert lane's (loud); row triggers are undetectable (no TrigDesc yet).
+fn exec_insert<'mcx>(
+    mt: &ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    slot_id: ExecSlotId,
+) -> PgResult<()> {
+    let mcx = estate.es_query_cxt;
+    let output_cid = estate.es_output_cid;
+    let EStateData { es_relations, es_tupleTable, .. } = estate;
+    let rel = es_relations[(mt.result_rti - 1) as usize]
+        .as_ref()
+        .expect("result relation opened");
+    let slot = &mut es_tupleTable[slot_id.0 as usize];
+
+    exectuples::exec_materialize_slot(slot, mcx)?;
+    slot.base_mut().tts_tableOid = rel.rd_id;
+
+    if rel.rd_rel.relhasindex {
+        panic!(
+            "ExecInsert (nodeModifyTable.c): ExecOpenIndices/ExecInsertIndexTuples \
+             not ported (nbtree insert lane)"
+        );
+    }
+
+    exec_constraints(rel, slot)?;
+
+    tableam::table_tuple_insert(mcx, rel, slot, output_cid, 0, None)?;
+
+    if mt.canSetTag {
+        estate.es_processed += 1;
+    }
+    Ok(())
+}
+
+// ExecConstraints (execMain.c): CHECK constraints loud, NOT NULL live.
+fn exec_constraints<'mcx>(rel: &Relation<'mcx>, slot: &mut SlotData<'mcx>) -> PgResult<()> {
+    if let Some(constr) = rel.rd_att.constr.as_deref() {
+        if constr.num_check > 0 || !constr.check.is_empty() {
+            panic!("ExecConstraints (execMain.c): CHECK constraints not ported");
+        }
+        debug_assert!(!constr.has_generated_stored && !constr.has_generated_virtual);
+        if constr.has_not_null {
+            exec_not_null_constraints(rel, slot)?;
+        }
+    }
+    Ok(())
+}
+
+// ExecConstraints (execMain.c), NOT NULL arm.
+fn exec_not_null_constraints<'mcx>(
+    rel: &Relation<'mcx>,
+    slot: &mut SlotData<'mcx>,
+) -> PgResult<()> {
+    for i in 0..rel.rd_att.natts as usize {
+        let att = rel.rd_att.attr(i);
+        if att.attnotnull && exectuples::slot_attisnull(slot, i as i32 + 1) {
+            return Err(not_null_violation(rel, i));
+        }
+    }
+    Ok(())
+}
+
+#[cold]
+#[inline(never)]
+fn not_null_violation(rel: &Relation<'_>, attidx: usize) -> Box<PgError> {
+    let att = rel.rd_att.attr(attidx);
+    let col = String::from_utf8_lossy(att.attname.name_str()).into_owned();
+    let table = String::from_utf8_lossy(rel.rd_rel.relname.name_str()).into_owned();
+    Box::new(
+        PgError::error(format!(
+            "null value in column \"{col}\" of relation \"{table}\" violates \
+             not-null constraint"
+        ))
+        .with_sqlstate(ERRCODE_NOT_NULL_VIOLATION),
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn plan_output_mismatch(detail: &'static str) -> Box<PgError> {
+    Box::new(
+        PgError::error("table row type and query-specified row type do not match")
+            .with_sqlstate(ERRCODE_DATATYPE_MISMATCH)
+            .with_detail(detail),
+    )
+}
