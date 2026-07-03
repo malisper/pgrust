@@ -47,6 +47,7 @@ syscache_seams = { path = "../../../utils/cache/syscache_seams" }
 heapam_visibility = { path = "../../heap/heapam_visibility" }
 pruneheap_seams = { path = "../../heap/pruneheap_seams" }
 smgr_seams = { path = "../../../storage/smgr/smgr_seams" }
+smgr = { path = "../../../storage/smgr/smgr" }
 xloginsert = { path = "../../transam/xloginsert" }
 xlogreader = { path = "../../transam/xlogreader" }
 xlogreader_seams = { path = "../../transam/xlogreader_seams" }

@@ -1,6 +1,6 @@
 //! brin.c: the BRIN index access method (build, insert, bitmap scan).
 //! Loud lanes: summarize/desummarize SQL paths, autosummarize, vacuum,
-//! parallel build, reloptions, non-minmax opclasses.
+//! parallel build, reloptions, inclusion/bloom opclasses.
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 #![allow(clippy::too_many_arguments)]
@@ -66,7 +66,9 @@ pub fn brin_build_desc<'mcx>(mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgResult<B
         )?;
         let col = match opcinfo_proc {
             F_BRIN_MINMAX_OPCINFO => brin_minmax::brin_minmax_opcinfo(opcintype),
-            F_BRIN_MINMAX_MULTI_OPCINFO => unported("BRIN minmax_multi opclass"),
+            F_BRIN_MINMAX_MULTI_OPCINFO => {
+                brin_minmax_multi::brin_minmax_multi_opcinfo(opcintype)
+            }
             F_BRIN_INCLUSION_OPCINFO => unported("BRIN inclusion opclass"),
             F_BRIN_BLOOM_OPCINFO => unported("BRIN bloom opclass"),
             other => panic!("unported: BRIN opclass with opcinfo proc {other}"),
@@ -79,12 +81,25 @@ pub fn brin_build_desc<'mcx>(mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgResult<B
     let mut attrs: PgVec<'mcx, FormData_pg_attribute> = vec_with_capacity_in(mcx, totalstored)?;
     let mut compact: PgVec<'mcx, CompactAttribute> = vec_with_capacity_in(mcx, totalstored)?;
     for keyno in 0..natts {
-        for _ in 0..info[keyno].oi_nstored {
+        for i in 0..info[keyno].oi_nstored as usize {
             let mut att = tupdesc.attr(keyno).clone();
             att.attnum = (attrs.len() + 1) as i16;
             att.atttypmod = -1;
             att.attndims = 0;
             att.attnotnull = false;
+            let stored_typid = info[keyno].oi_typids[i];
+            if stored_typid != att.atttypid {
+                // TupleDescInitEntry over the opclass's summary type; only the
+                // fill/deform-relevant pg_type fields matter for the disk desc.
+                debug_assert!(stored_typid == PG_BRIN_MINMAX_MULTI_SUMMARYOID);
+                att.atttypid = stored_typid;
+                att.attlen = -1;
+                att.attbyval = false;
+                att.attalign = types_tuple::TYPALIGN_INT;
+                att.attstorage = types_tuple::TYPSTORAGE_EXTENDED;
+                att.attcompression = 0;
+                att.attcollation = types_core::DEFAULT_COLLATION_OID;
+            }
             compact.push(CompactAttribute::populate_from(&att));
             attrs.push(att);
         }
@@ -104,7 +119,9 @@ pub fn brin_build_desc<'mcx>(mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgResult<B
         bd_disktdesc: disktdesc,
         bd_totalstored: totalstored,
         bd_opfamily: rel.rd_opfamily.iter().copied().collect(),
+        bd_opcintype: rel.rd_opcintype.iter().copied().collect(),
         bd_indcollation: rel.rd_indcollation.iter().copied().collect(),
+        bd_pages_per_range: brin_get_pages_per_range(rel),
         bd_info: info,
     })
 }
@@ -192,7 +209,7 @@ pub fn brininsert<'mcx>(
         if !need_insert {
             lock_buffer::call(buf, BUFFER_LOCK_UNLOCK)?;
         } else {
-            let newtup = brin_form_tuple(cmcx, bdesc, heapBlk, &dtup)?;
+            let newtup = brin_form_tuple(cmcx, bdesc, heapBlk, &mut dtup)?;
             let samepage = brin_can_do_samepage_update(buf, brtup.len(), newtup.len());
             lock_buffer::call(buf, BUFFER_LOCK_UNLOCK)?;
 
@@ -351,18 +368,30 @@ pub fn bringetbitmap(
                         break;
                     }
 
-                    for key in &keys[attno - 1] {
-                        let add = match bdesc.bd_info[attno - 1].kind {
-                            BrinOpcKind::MinMax => brin_minmax::brin_minmax_consistent(
+                    match bdesc.bd_info[attno - 1].kind {
+                        BrinOpcKind::MinMax => {
+                            for key in &keys[attno - 1] {
+                                addrange = brin_minmax::brin_minmax_consistent(
+                                    per_range.mcx(),
+                                    bdesc,
+                                    bval,
+                                    key,
+                                )?;
+                                if !addrange {
+                                    break;
+                                }
+                            }
+                        }
+                        // Multi-key consistent (C fn_nargs >= 4): all keys at
+                        // once, collation from the first key.
+                        BrinOpcKind::MinMaxMulti => {
+                            addrange = brin_minmax_multi::brin_minmax_multi_consistent(
                                 per_range.mcx(),
                                 bdesc,
                                 bval,
-                                key,
-                            )?,
-                        };
-                        addrange = add;
-                        if !addrange {
-                            break;
+                                &keys[attno - 1],
+                                keys[attno - 1][0].sk_collation,
+                            )?;
                         }
                     }
                     if !addrange {
@@ -453,6 +482,14 @@ pub fn add_values_to_range(
 
         let result = match bdesc.bd_info[keyno].kind {
             BrinOpcKind::MinMax => brin_minmax::brin_minmax_add_value(
+                mcx,
+                bdesc,
+                bval,
+                values[keyno],
+                nulls[keyno],
+                bdesc.bd_indcollation[keyno],
+            )?,
+            BrinOpcKind::MinMaxMulti => brin_minmax_multi::brin_minmax_multi_add_value(
                 mcx,
                 bdesc,
                 bval,
@@ -553,6 +590,13 @@ pub fn union_tuples(bdesc: &BrinDesc<'_>, a: &mut BrinMemTuple, b: &[u8]) -> PgR
 
         match bdesc.bd_info[keyno].kind {
             BrinOpcKind::MinMax => brin_minmax::brin_minmax_union(
+                mcx,
+                bdesc,
+                bdesc.bd_indcollation[keyno],
+                col_a,
+                col_b,
+            )?,
+            BrinOpcKind::MinMaxMulti => brin_minmax_multi::brin_minmax_multi_union(
                 mcx,
                 bdesc,
                 bdesc.bd_indcollation[keyno],

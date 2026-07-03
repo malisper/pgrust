@@ -1,0 +1,266 @@
+use ::datum::Datum;
+use ::fmgr::{FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo};
+use ::types_core::Oid;
+use ::types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
+use ::types_storage::bufpage::MaxHeapTuplesPerPage;
+
+const USECS_PER_SEC: i64 = 1_000_000;
+const USECS_PER_DAY: i64 = 86_400_000_000;
+const PGSQL_AF_INET: u8 = 2;
+
+#[inline]
+fn ret_f64(v: f64) -> PgResult<Datum> {
+    Ok(Datum::from_f64(v))
+}
+
+// SAFETY: arg i is a live by-ref image of at least N bytes.
+unsafe fn arg_fixed<const N: usize>(fcinfo: &Fcinfo, i: usize) -> [u8; N] {
+    let p = fcinfo.arg(i).as_usize() as *const u8;
+    let mut out = [0u8; N];
+    core::ptr::copy_nonoverlapping(p, out.as_mut_ptr(), N);
+    out
+}
+
+// VARDATA_ANY view of an inline (non-external) varlena argument.
+// SAFETY: arg i is a live inline varlena image.
+unsafe fn arg_varlena_payload<'a>(fcinfo: &Fcinfo, i: usize) -> &'a [u8] {
+    let p = fcinfo.arg(i).as_usize() as *const u8;
+    let total = ::types_tuple::varatt::varsize_any(p);
+    if ::types_tuple::varatt::varatt_is_1b(p) {
+        core::slice::from_raw_parts(p.add(1), total - 1)
+    } else {
+        core::slice::from_raw_parts(p.add(4), total - 4)
+    }
+}
+
+fn fc_dist_float4(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let a1 = f32::from_bits(fcinfo.arg(0).as_u32());
+    let a2 = f32::from_bits(fcinfo.arg(1).as_u32());
+    if a1.is_nan() && a2.is_nan() {
+        return ret_f64(0.0);
+    }
+    if a1.is_nan() || a2.is_nan() {
+        return ret_f64(f64::INFINITY);
+    }
+    debug_assert!(a1 <= a2);
+    ret_f64(a2 as f64 - a1 as f64)
+}
+
+fn fc_dist_float8(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let a1 = fcinfo.arg(0).as_f64();
+    let a2 = fcinfo.arg(1).as_f64();
+    if a1.is_nan() && a2.is_nan() {
+        return ret_f64(0.0);
+    }
+    if a1.is_nan() || a2.is_nan() {
+        return ret_f64(f64::INFINITY);
+    }
+    debug_assert!(a1 <= a2);
+    ret_f64(a2 - a1)
+}
+
+fn fc_dist_int2(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    ret_f64(fcinfo.arg(1).as_i16() as f64 - fcinfo.arg(0).as_i16() as f64)
+}
+
+fn fc_dist_int4(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    ret_f64(fcinfo.arg(1).as_i32() as f64 - fcinfo.arg(0).as_i32() as f64)
+}
+
+fn fc_dist_int8(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    ret_f64(fcinfo.arg(1).as_i64() as f64 - fcinfo.arg(0).as_i64() as f64)
+}
+
+fn fc_dist_tid(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: tid args are live 6-byte ItemPointerData images.
+    let (a, b) = unsafe { (arg_fixed::<6>(fcinfo, 0), arg_fixed::<6>(fcinfo, 1)) };
+    // C computes block*MaxHeapTuplesPerPage+off in uint32 (wraps) before the
+    // double conversion.
+    let tid_map = |t: [u8; 6]| -> f64 {
+        let bi_hi = u16::from_ne_bytes([t[0], t[1]]) as u32;
+        let bi_lo = u16::from_ne_bytes([t[2], t[3]]) as u32;
+        let posid = u16::from_ne_bytes([t[4], t[5]]) as u32;
+        ((bi_hi << 16 | bi_lo)
+            .wrapping_mul(MaxHeapTuplesPerPage as u32)
+            .wrapping_add(posid)) as f64
+    };
+    ret_f64(tid_map(b) - tid_map(a))
+}
+
+fn fc_dist_numeric(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: numeric args are live inline varlena images.
+    let (p1, p2) = unsafe { (arg_varlena_payload(fcinfo, 0), arg_varlena_payload(fcinfo, 1)) };
+    let a1 = ::adt_numeric::Num::from_payload(p1);
+    let a2 = ::adt_numeric::Num::from_payload(p2);
+    let d = ::adt_numeric::ops::numeric_sub_common(a2, a1)?;
+    ret_f64(::adt_numeric::ops::numeric_float8(d.num())?)
+}
+
+fn fc_dist_uuid(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: uuid args are live 16-byte images.
+    let (u1, u2) = unsafe { (arg_fixed::<16>(fcinfo, 0), arg_fixed::<16>(fcinfo, 1)) };
+    let mut delta = 0f64;
+    for i in (0..16).rev() {
+        delta += (u2[i] as i32 - u1[i] as i32) as f64;
+        delta /= 256.0;
+    }
+    debug_assert!(delta >= 0.0);
+    ret_f64(delta)
+}
+
+fn fc_dist_date(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    ret_f64(fcinfo.arg(1).as_i32() as f64 - fcinfo.arg(0).as_i32() as f64)
+}
+
+fn fc_dist_time(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    ret_f64((fcinfo.arg(1).as_i64() - fcinfo.arg(0).as_i64()) as f64)
+}
+
+fn fc_dist_timetz(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: timetz args are live 12-byte {time: i64, zone: i32} images.
+    let (a, b) = unsafe { (arg_fixed::<12>(fcinfo, 0), arg_fixed::<12>(fcinfo, 1)) };
+    let parse = |t: [u8; 12]| {
+        (
+            i64::from_ne_bytes(t[0..8].try_into().unwrap()),
+            i32::from_ne_bytes(t[8..12].try_into().unwrap()),
+        )
+    };
+    let (ta, tb) = (parse(a), parse(b));
+    ret_f64(((tb.0 - ta.0) + (tb.1 as i64 - ta.1 as i64) * USECS_PER_SEC) as f64)
+}
+
+fn fc_dist_timestamp(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    ret_f64(fcinfo.arg(1).as_i64() as f64 - fcinfo.arg(0).as_i64() as f64)
+}
+
+fn fc_dist_interval(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: interval args are live 16-byte {time: i64, day: i32, month: i32}.
+    let (a, b) = unsafe { (arg_fixed::<16>(fcinfo, 0), arg_fixed::<16>(fcinfo, 1)) };
+    let parse = |t: [u8; 16]| {
+        (
+            i64::from_ne_bytes(t[0..8].try_into().unwrap()),
+            i32::from_ne_bytes(t[8..12].try_into().unwrap()),
+            i32::from_ne_bytes(t[12..16].try_into().unwrap()),
+        )
+    };
+    let (ia, ib) = (parse(a), parse(b));
+    let dayfraction = (ib.0 % USECS_PER_DAY) - (ia.0 % USECS_PER_DAY);
+    let mut days = (ib.0 / USECS_PER_DAY) - (ia.0 / USECS_PER_DAY);
+    days += ib.1 as i64 - ia.1 as i64;
+    days += (ib.2 as i64 - ia.2 as i64) * 30;
+    ret_f64(days as f64 + dayfraction as f64 / USECS_PER_DAY as f64)
+}
+
+fn fc_dist_pg_lsn(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    ret_f64(fcinfo.arg(1).as_u64().wrapping_sub(fcinfo.arg(0).as_u64()) as f64)
+}
+
+fn fc_dist_macaddr(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: macaddr args are live 6-byte images.
+    let (a, b) = unsafe { (arg_fixed::<6>(fcinfo, 0), arg_fixed::<6>(fcinfo, 1)) };
+    let mut delta = 0f64;
+    for i in (0..6).rev() {
+        delta += b[i] as f64 - a[i] as f64;
+        delta /= 256.0;
+    }
+    debug_assert!(delta >= 0.0);
+    ret_f64(delta)
+}
+
+fn fc_dist_macaddr8(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: macaddr8 args are live 8-byte images.
+    let (a, b) = unsafe { (arg_fixed::<8>(fcinfo, 0), arg_fixed::<8>(fcinfo, 1)) };
+    let mut delta = 0f64;
+    for i in (0..8).rev() {
+        delta += b[i] as f64 - a[i] as f64;
+        delta /= 256.0;
+    }
+    debug_assert!(delta >= 0.0);
+    ret_f64(delta)
+}
+
+fn fc_dist_inet(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: inet args are live inline varlena images.
+    let (pa, pb) = unsafe { (arg_varlena_payload(fcinfo, 0), arg_varlena_payload(fcinfo, 1)) };
+    // inet_struct: family u8, bits u8, ipaddr [u8; 4|16].
+    let (fam_a, bits_a) = (pa[0], pa[1] as i32);
+    let (fam_b, bits_b) = (pb[0], pb[1] as i32);
+    if fam_a != fam_b {
+        return ret_f64(1.0);
+    }
+    let len = if fam_a == PGSQL_AF_INET { 4 } else { 16 };
+    let mut addra = [0u8; 16];
+    let mut addrb = [0u8; 16];
+    addra[..len].copy_from_slice(&pa[2..2 + len]);
+    addrb[..len].copy_from_slice(&pb[2..2 + len]);
+
+    for i in 0..len {
+        let nbits = (bits_a - (i as i32 * 8)).max(0);
+        if nbits < 8 {
+            addra[i] &= (0xFFu32 << (8 - nbits)) as u8;
+        }
+        let nbits = (bits_b - (i as i32 * 8)).max(0);
+        if nbits < 8 {
+            addrb[i] &= (0xFFu32 << (8 - nbits)) as u8;
+        }
+    }
+
+    let mut delta = 0f64;
+    for i in (0..len).rev() {
+        delta += addrb[i] as f64 - addra[i] as f64;
+        delta /= 256.0;
+    }
+    debug_assert!((0.0..=1.0).contains(&delta));
+    ret_f64(delta)
+}
+
+#[cold]
+#[inline(never)]
+fn cannot_accept() -> PgError {
+    PgError::error("cannot accept a value of type brin_minmax_multi_summary")
+        .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED)
+}
+
+fn fc_summary_in(_f: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    Err(cannot_accept().into())
+}
+
+fn fc_summary_recv(_f: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    Err(cannot_accept().into())
+}
+
+fn fc_summary_out(_f: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    panic!("unported: brin_minmax_multi_summary_out (pageinspect lane)")
+}
+
+fn fc_summary_send(_f: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    panic!("unported: brin_minmax_multi_summary_send (binary-copy lane)")
+}
+
+const fn b(foid: Oid, name: &'static str, nargs: i16, func: ::fmgr::PGFunction) -> FmgrBuiltin {
+    FmgrBuiltin { foid, name, nargs, strict: true, retset: false, func }
+}
+
+pub const MINMAX_MULTI_BUILTINS: &[FmgrBuiltin] = &[
+    b(4621, "brin_minmax_multi_distance_int2", 2, fc_dist_int2),
+    b(4622, "brin_minmax_multi_distance_int4", 2, fc_dist_int4),
+    b(4623, "brin_minmax_multi_distance_int8", 2, fc_dist_int8),
+    b(4624, "brin_minmax_multi_distance_float4", 2, fc_dist_float4),
+    b(4625, "brin_minmax_multi_distance_float8", 2, fc_dist_float8),
+    b(4626, "brin_minmax_multi_distance_numeric", 2, fc_dist_numeric),
+    b(4627, "brin_minmax_multi_distance_tid", 2, fc_dist_tid),
+    b(4628, "brin_minmax_multi_distance_uuid", 2, fc_dist_uuid),
+    b(4629, "brin_minmax_multi_distance_date", 2, fc_dist_date),
+    b(4630, "brin_minmax_multi_distance_time", 2, fc_dist_time),
+    b(4631, "brin_minmax_multi_distance_interval", 2, fc_dist_interval),
+    b(4632, "brin_minmax_multi_distance_timetz", 2, fc_dist_timetz),
+    b(4633, "brin_minmax_multi_distance_pg_lsn", 2, fc_dist_pg_lsn),
+    b(4634, "brin_minmax_multi_distance_macaddr", 2, fc_dist_macaddr),
+    b(4635, "brin_minmax_multi_distance_macaddr8", 2, fc_dist_macaddr8),
+    b(4636, "brin_minmax_multi_distance_inet", 2, fc_dist_inet),
+    b(4637, "brin_minmax_multi_distance_timestamp", 2, fc_dist_timestamp),
+    b(4638, "brin_minmax_multi_summary_in", 1, fc_summary_in),
+    b(4639, "brin_minmax_multi_summary_out", 1, fc_summary_out),
+    b(4640, "brin_minmax_multi_summary_recv", 1, fc_summary_recv),
+    b(4641, "brin_minmax_multi_summary_send", 1, fc_summary_send),
+];
