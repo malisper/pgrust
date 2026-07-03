@@ -260,6 +260,8 @@ fn install_xact_periphery_seams() {
     syncrep_seams::sync_rep_wait_for_lsn::set(|_, _| Ok(()));
     backend_status_seams::pgstat_report_xact_timestamp::set(|_| {});
     backend_status_seams::pgstat_report_query_id::set(|_, _| {});
+    backend_status_seams::pgstat_clear_backend_status_snapshot::set(|| {});
+    relcache_seams::relation_get_stat_ext_list::set(|mcx, _relid| Ok(mcx::PgVec::new_in(mcx)));
     backend_status_seams::pgstat_report_plan_id::set(|_, _| {});
     backend_status_seams::pgstat_clear_backend_status_snapshot::set(|| {});
     backend_progress_seams::pgstat_progress_end_command::set(|| {});
