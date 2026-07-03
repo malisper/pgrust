@@ -955,3 +955,52 @@ fn select1_parse_and_analyze_shape() {
     assert_eq!(c.location, -1);
     assert_eq!(q.stmt_len, 8);
 }
+
+#[test]
+fn aggref_field_order_matches_c() {
+    let prim_h = include_str!("../vendor/primnodes.h");
+    let rust_order = [
+        "aggfnoid", "aggtype", "aggcollid", "inputcollid", "aggtranstype", "aggargtypes",
+        "aggdirectargs", "args", "aggorder", "aggdistinct", "aggfilter", "aggstar",
+        "aggvariadic", "aggkind", "aggpresorted", "agglevelsup", "aggsplit", "aggno",
+        "aggtransno", "location",
+    ];
+    let mut c_fields = c_struct_fields(prim_h, "Aggref");
+    assert_eq!(c_fields.remove(0), "xpr");
+    assert_eq!(c_fields, rust_order);
+    let crate::primnodes::Aggref {
+        aggfnoid: _, aggtype: _, aggcollid: _, inputcollid: _, aggtranstype: _, aggargtypes: _,
+        aggdirectargs: _, args: _, aggorder: _, aggdistinct: _, aggfilter: _, aggstar: _,
+        aggvariadic: _, aggkind: _, aggpresorted: _, agglevelsup: _, aggsplit: _, aggno: _,
+        aggtransno: _, location: _,
+    } = crate::primnodes::Aggref::default();
+}
+
+#[test]
+fn agg_plan_field_order_matches_c() {
+    let plan_h = include_str!("../vendor/plannodes.h");
+    let rust_order = [
+        "aggstrategy", "aggsplit", "numCols", "grpColIdx", "grpOperators", "grpCollations",
+        "numGroups", "transitionSpace", "aggParams", "groupingSets", "chain",
+    ];
+    let mut c_fields = c_struct_fields(plan_h, "Agg");
+    assert_eq!(c_fields.remove(0), "plan");
+    assert_eq!(c_fields, rust_order);
+    let crate::plannodes::Agg {
+        plan: _, aggstrategy: _, aggsplit: _, numCols: _, grpColIdx: _, grpOperators: _,
+        grpCollations: _, numGroups: _, transitionSpace: _, aggParams: _, groupingSets: _,
+        chain: _,
+    } = crate::plannodes::Agg::default();
+}
+
+#[test]
+fn sort_group_clause_field_order_matches_c() {
+    let parse_h = include_str!("../vendor/parsenodes.h");
+    assert_eq!(
+        c_struct_fields(parse_h, "SortGroupClause"),
+        ["tleSortGroupRef", "eqop", "sortop", "reverse_sort", "nulls_first", "hashable"]
+    );
+    let crate::parsenodes::SortGroupClause {
+        tleSortGroupRef: _, eqop: _, sortop: _, reverse_sort: _, nulls_first: _, hashable: _,
+    } = crate::parsenodes::SortGroupClause::default();
+}

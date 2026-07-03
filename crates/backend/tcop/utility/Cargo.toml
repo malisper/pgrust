@@ -9,6 +9,7 @@ path = "src/lib.rs"
 
 [dependencies]
 explain = { path = "../../commands/explain" }
+prepare = { path = "../../commands/prepare" }
 guc_funcs = { path = "../../utils/misc/guc_funcs" }
 mcx = { path = "../../../_support/mcx" }
 types_core = { path = "../../../_support/types/types_core" }

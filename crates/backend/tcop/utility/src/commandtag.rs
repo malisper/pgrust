@@ -151,7 +151,14 @@ pub fn CreateCommandTag(parsetree: Node<'_>) -> CommandTag {
         T_ExecuteStmt => CMDTAG_EXECUTE,
         T_CreateStatsStmt => CMDTAG_CREATE_STATISTICS,
         T_AlterStatsStmt => CMDTAG_ALTER_STATISTICS,
-        T_DeallocateStmt => payload_gap("CreateCommandTag", "DeallocateStmt"),
+        T_DeallocateStmt => {
+            let stmt = parsetree.as_deallocate_stmt().unwrap();
+            if stmt.isall {
+                CMDTAG_DEALLOCATE_ALL
+            } else {
+                CMDTAG_DEALLOCATE
+            }
+        }
 
         T_PlannedStmt => {
             let stmt: &PlannedStmt<'_> = parsetree.as_variant().unwrap();

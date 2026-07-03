@@ -182,6 +182,43 @@ pub struct Sort<'mcx> {
     pub nullsFirst: &'mcx [bool],
 }
 
+/// `aggstrategy`/`aggsplit` carry the C AggStrategy/AggSplit values
+/// (canonical consts in types_pathnodes); per-key arrays as in [`Sort`].
+#[repr(C)]
+pub struct Agg<'mcx> {
+    pub plan: Plan<'mcx>,
+    pub aggstrategy: u32,
+    pub aggsplit: u32,
+    pub numCols: i32,
+    pub grpColIdx: &'mcx [i16],
+    pub grpOperators: &'mcx [Oid],
+    pub grpCollations: &'mcx [Oid],
+    pub numGroups: i64,
+    pub transitionSpace: u64,
+    pub aggParams: Bitmapset<'mcx>,
+    pub groupingSets: NodeList<'mcx>,
+    pub chain: NodeList<'mcx>,
+}
+
+impl Default for Agg<'_> {
+    fn default() -> Self {
+        Agg {
+            plan: Plan::default(),
+            aggstrategy: 0,
+            aggsplit: 0,
+            numCols: 0,
+            grpColIdx: &[],
+            grpOperators: &[],
+            grpCollations: &[],
+            numGroups: 0,
+            transitionSpace: 0,
+            aggParams: Bitmapset::empty(),
+            groupingSets: NodeList::nil(),
+            chain: NodeList::nil(),
+        }
+    }
+}
+
 #[derive(Default)]
 #[repr(C)]
 pub struct Limit<'mcx> {
@@ -219,6 +256,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for IndexOnlyScan<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for Sort<'mcx> {
     const TAG: NodeTag = NodeTag::T_Sort;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for Agg<'mcx> {
+    const TAG: NodeTag = NodeTag::T_Agg;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for Limit<'mcx> {
     const TAG: NodeTag = NodeTag::T_Limit;
 }
@@ -232,6 +272,8 @@ unsafe impl<'mcx> PlanVariant<'mcx> for IndexScan<'mcx> {}
 unsafe impl<'mcx> PlanVariant<'mcx> for IndexOnlyScan<'mcx> {}
 // SAFETY: repr(C), Plan first (offsets asserted below), tag in is_plan_tag.
 unsafe impl<'mcx> PlanVariant<'mcx> for Sort<'mcx> {}
+// SAFETY: repr(C), Plan first (offsets asserted below), tag in is_plan_tag.
+unsafe impl<'mcx> PlanVariant<'mcx> for Agg<'mcx> {}
 // SAFETY: repr(C), Plan first (offsets asserted below), tag in is_plan_tag.
 unsafe impl<'mcx> PlanVariant<'mcx> for Limit<'mcx> {}
 
@@ -255,6 +297,8 @@ const _: () = {
     );
     assert!(offset_of!(Sort, plan) == 0);
     assert!(offset_of!(NodeRep<Sort>, payload) == offset_of!(NodeRep<Plan>, payload));
+    assert!(offset_of!(Agg, plan) == 0);
+    assert!(offset_of!(NodeRep<Agg>, payload) == offset_of!(NodeRep<Plan>, payload));
     assert!(offset_of!(Limit, plan) == 0);
     assert!(offset_of!(NodeRep<Limit>, payload) == offset_of!(NodeRep<Plan>, payload));
 };
@@ -267,6 +311,7 @@ fn is_plan_tag(tag: NodeTag) -> bool {
             | NodeTag::T_IndexScan
             | NodeTag::T_IndexOnlyScan
             | NodeTag::T_Sort
+            | NodeTag::T_Agg
             | NodeTag::T_Limit
     )
 }
@@ -299,6 +344,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_sort(self) -> Option<&'mcx Sort<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_agg(self) -> Option<&'mcx Agg<'mcx>> {
         self.as_variant()
     }
 

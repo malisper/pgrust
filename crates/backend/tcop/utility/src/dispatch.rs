@@ -114,7 +114,17 @@ pub fn standard_ProcessUtility<'p, 'a, 's, 'd, 'q, 'mcx>(
     // (p_sourcetext, p_queryEnv) are threaded as parameters instead.
 
     let mut qc = qc;
-    dispatch_switch(mcx, parsetree, source_text, is_top_level, params, query_env, dest, &mut qc)?;
+    dispatch_switch(
+        mcx,
+        parsetree,
+        pstmt,
+        source_text,
+        is_top_level,
+        params,
+        query_env,
+        dest,
+        &mut qc,
+    )?;
 
     xact::CommandCounterIncrement()?;
     Ok(())
@@ -131,6 +141,7 @@ unsafe fn unify_stmt_lifetime<'u>(s: &ExplainStmt<'_>) -> &'u ExplainStmt<'u> {
 fn dispatch_switch<'mcx>(
     mcx: Mcx<'mcx>,
     parsetree: Node<'_>,
+    pstmt: &PlannedStmt<'_>,
     source_text: &str,
     is_top_level: bool,
     params: ParamListHandle,
@@ -233,12 +244,16 @@ fn dispatch_switch<'mcx>(
 
         T_PrepareStmt => {
             CheckRestrictedOperation("PREPARE")?;
-            handler_gap("PrepareQuery (prepare lane)")
+            let stmt = parsetree.as_prepare_stmt().unwrap();
+            prepare::PrepareQuery(source_text, stmt, pstmt.stmt_location, pstmt.stmt_len)?;
         }
-        T_ExecuteStmt => handler_gap("ExecuteQuery (prepare lane)"),
+        T_ExecuteStmt => {
+            let stmt = parsetree.as_execute_stmt().unwrap();
+            prepare::ExecuteQuery(stmt, params, dest, qc.as_deref_mut())?;
+        }
         T_DeallocateStmt => {
             CheckRestrictedOperation("DEALLOCATE")?;
-            handler_gap("DeallocateQuery (prepare lane)")
+            prepare::DeallocateQuery(parsetree.as_deallocate_stmt().unwrap())?;
         }
 
         T_GrantRoleStmt => handler_gap("GrantRole (user lane)"),

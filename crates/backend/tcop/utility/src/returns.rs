@@ -34,7 +34,18 @@ pub fn UtilityReturnsTuples(parsetree: Node<'_>) -> bool {
         // statement; those land with functioncmds/portalcmds/prepare.c.
         T_CallStmt => payload_gap("UtilityReturnsTuples", "CallStmt"),
         T_FetchStmt => payload_gap("UtilityReturnsTuples", "FetchStmt"),
-        T_ExecuteStmt => payload_gap("UtilityReturnsTuples", "ExecuteStmt"),
+        T_ExecuteStmt => {
+            let stmt = parsetree.as_execute_stmt().unwrap();
+            let entry = prepare::FetchPreparedStatement(
+                stmt.name.expect("EXECUTE has a name"),
+                false,
+            )
+            .expect("throwError=false cannot fail");
+            match entry {
+                Some(e) => prepare::FetchPreparedStatementResultDesc(&e).is_some(),
+                None => false,
+            }
+        }
         T_ExplainStmt => true,
         T_VariableShowStmt => true,
         _ => false,
@@ -48,7 +59,15 @@ pub fn UtilityTupleDescriptor(
     match parsetree.node_tag() {
         T_CallStmt => payload_gap("UtilityTupleDescriptor", "CallStmt"),
         T_FetchStmt => payload_gap("UtilityTupleDescriptor", "FetchStmt"),
-        T_ExecuteStmt => payload_gap("UtilityTupleDescriptor", "ExecuteStmt"),
+        T_ExecuteStmt => {
+            let stmt = parsetree.as_execute_stmt().unwrap();
+            let entry = prepare::FetchPreparedStatement(
+                stmt.name.expect("EXECUTE has a name"),
+                false,
+            )
+            .expect("throwError=false cannot fail");
+            Ok(entry.and_then(|e| prepare::FetchPreparedStatementResultDesc(&e)))
+        }
         T_ExplainStmt => {
             let stmt = parsetree.as_explain_stmt().unwrap();
             Ok(Some(Rc::new(explain::ExplainResultDesc(desc_mcx(), stmt)?)))

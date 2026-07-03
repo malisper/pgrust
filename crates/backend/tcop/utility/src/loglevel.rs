@@ -50,10 +50,13 @@ pub fn GetCommandLogLevel(parsetree: Node<'_>) -> i32 {
         | T_CheckPointStmt
         | T_ReindexStmt => LOGSTMT_ALL,
 
-        // C recurses into the PREPAREd / EXECUTEd statement; those payloads
-        // land with commands/prepare.c.
-        T_PrepareStmt => payload_gap("GetCommandLogLevel", "PrepareStmt"),
-        T_ExecuteStmt => payload_gap("GetCommandLogLevel", "ExecuteStmt"),
+        T_PrepareStmt => {
+            let stmt = parsetree.as_prepare_stmt().unwrap();
+            GetCommandLogLevel(stmt.query.expect("PREPARE has a query"))
+        }
+        // C recurses into the entry's retained raw parse tree; plancache does
+        // not retain raw trees, which is C's own else-branch: LOGSTMT_ALL.
+        T_ExecuteStmt => LOGSTMT_ALL,
 
         T_ExplainStmt => {
             let stmt = parsetree.as_explain_stmt().unwrap();

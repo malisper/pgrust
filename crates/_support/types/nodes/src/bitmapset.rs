@@ -499,6 +499,12 @@ impl Iterator for BmsIter<'_, '_> {
     }
 }
 
+impl Default for Bitmapset<'_> {
+    fn default() -> Self {
+        Bitmapset::empty()
+    }
+}
+
 impl core::fmt::Debug for Bitmapset<'_> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_set().entries(self.iter()).finish()

@@ -67,6 +67,11 @@ pub struct RangeVar<'mcx> {
     pub location: ParseLoc,
 }
 
+// C: primnodes.h special varno values.
+pub const INNER_VAR: i32 = -1;
+pub const OUTER_VAR: i32 = -2;
+pub const INDEX_VAR: i32 = -3;
+
 pub struct Var<'mcx> {
     pub varno: i32,
     pub varattno: AttrNumber,
@@ -119,6 +124,66 @@ pub struct Param {
     pub paramtypmod: i32,
     pub paramcollid: Oid,
     pub location: ParseLoc,
+}
+
+// C: nodes.h AggSplit; AGGSPLITOP_* bit values.
+pub type AggSplit = u32;
+pub const AGGSPLIT_SIMPLE: AggSplit = 0;
+pub const AGGSPLIT_INITIAL_SERIAL: AggSplit = 0x02 | 0x04;
+pub const AGGSPLIT_FINAL_DESERIAL: AggSplit = 0x01 | 0x08;
+
+pub const AGGKIND_NORMAL: i8 = b'n' as i8;
+pub const AGGKIND_ORDERED_SET: i8 = b'o' as i8;
+pub const AGGKIND_HYPOTHETICAL: i8 = b'h' as i8;
+
+pub struct Aggref<'mcx> {
+    pub aggfnoid: Oid,
+    pub aggtype: Oid,
+    pub aggcollid: Oid,
+    pub inputcollid: Oid,
+    pub aggtranstype: Oid,
+    pub aggargtypes: crate::list::OidList<'mcx>,
+    pub aggdirectargs: NodeList<'mcx>,
+    pub args: NodeList<'mcx>,
+    pub aggorder: NodeList<'mcx>,
+    pub aggdistinct: NodeList<'mcx>,
+    pub aggfilter: Option<Node<'mcx>>,
+    pub aggstar: bool,
+    pub aggvariadic: bool,
+    pub aggkind: i8,
+    pub aggpresorted: bool,
+    pub agglevelsup: Index,
+    pub aggsplit: AggSplit,
+    pub aggno: i32,
+    pub aggtransno: i32,
+    pub location: ParseLoc,
+}
+
+impl Default for Aggref<'_> {
+    fn default() -> Self {
+        Aggref {
+            aggfnoid: 0,
+            aggtype: 0,
+            aggcollid: 0,
+            inputcollid: 0,
+            aggtranstype: 0,
+            aggargtypes: crate::list::OidList::nil(),
+            aggdirectargs: NodeList::nil(),
+            args: NodeList::nil(),
+            aggorder: NodeList::nil(),
+            aggdistinct: NodeList::nil(),
+            aggfilter: None,
+            aggstar: false,
+            aggvariadic: false,
+            aggkind: AGGKIND_NORMAL,
+            aggpresorted: false,
+            agglevelsup: 0,
+            aggsplit: AGGSPLIT_SIMPLE,
+            aggno: -1,
+            aggtransno: -1,
+            location: -1,
+        }
+    }
 }
 
 // C `Expr *expr` is never NULL in a live TargetEntry (makeTargetEntry
@@ -226,6 +291,9 @@ unsafe impl NodeVariant<'_> for Const {
 }
 unsafe impl NodeVariant<'_> for Param {
     const TAG: NodeTag = NodeTag::T_Param;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for Aggref<'mcx> {
+    const TAG: NodeTag = NodeTag::T_Aggref;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for TargetEntry<'mcx> {
     const TAG: NodeTag = NodeTag::T_TargetEntry;
@@ -365,6 +433,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_param(self) -> Option<&'mcx Param> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_aggref(self) -> Option<&'mcx Aggref<'mcx>> {
         self.as_variant()
     }
 
