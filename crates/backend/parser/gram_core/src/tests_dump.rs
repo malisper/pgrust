@@ -222,6 +222,29 @@ fn node(out: &mut String, n: Node<'_>) {
         bool_field(out, "argisrow", nt.argisrow);
         int_field(out, "location", nt.location);
         out.push('}');
+    } else if let Some(g) = n.as_grant_stmt() {
+        out.push_str("{GRANTSTMT");
+        bool_field(out, "is_grant", g.is_grant);
+        int_field(out, "targtype", g.targtype as i32);
+        int_field(out, "objtype", g.objtype as i32);
+        list_field(out, "objects", &g.objects);
+        list_field(out, "privileges", &g.privileges);
+        list_field(out, "grantees", &g.grantees);
+        bool_field(out, "grant_option", g.grant_option);
+        out.push_str(" :grantor ");
+        match g.grantor {
+            Some(r) => role_spec(out, r),
+            None => out.push_str("<>"),
+        }
+        int_field(out, "behavior", g.behavior as i32);
+        out.push('}');
+    } else if let Some(ap) = n.as_access_priv() {
+        out.push_str("{ACCESSPRIV");
+        string_field(out, "priv_name", ap.priv_name);
+        list_field(out, "cols", &ap.cols);
+        out.push('}');
+    } else if let Some(r) = n.as_role_spec() {
+        role_spec(out, r);
     } else if let Some(p) = n.as_prepare_stmt() {
         out.push_str("{PREPARESTMT");
         string_field(out, "name", p.name);
@@ -525,6 +548,14 @@ fn node(out: &mut String, n: Node<'_>) {
     } else {
         panic!("tests_dump: unrendered node tag {:?}", n.node_tag());
     }
+}
+
+fn role_spec(out: &mut String, r: &types_nodes::parsenodes::RoleSpec<'_>) {
+    out.push_str("{ROLESPEC");
+    out.push_str(&format!(" :roletype {}", r.roletype as i32));
+    string_field(out, "rolename", r.rolename);
+    int_field(out, "location", r.location);
+    out.push('}');
 }
 
 fn range_var(out: &mut String, rv: &types_nodes::RangeVar<'_>) {

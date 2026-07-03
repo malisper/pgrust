@@ -20,3 +20,13 @@ catcache = { path = "../../cache/catcache" }
 cache_syscache = { path = "../../cache/cache_syscache" }
 inval = { path = "../../cache/inval" }
 acl_seams = { path = "../acl_seams" }
+aclchk_seams = { path = "../../../catalog/aclchk_seams" }
+types_fmgr = { path = "../../../../_support/types/fmgr" }
+mcx = { path = "../../../../_support/mcx" }
+rel_vocab = { path = "../../../../_support/types/rel_vocab" }
+miscinit_seams = { path = "../../init/miscinit_seams" }
+elog = { path = "../../error/elog" }
+varlena = { path = "../varlena" }
+wchar = { path = "../../../../common/wchar" }
+mbutils_seams = { path = "../../mb/mbutils_seams" }
+catalog_namespace = { path = "../../../catalog/catalog_namespace" }

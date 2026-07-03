@@ -4,14 +4,28 @@
 use types_core::Oid;
 use types_error::PgResult;
 
+pub mod builtins;
+mod io;
 mod membership;
+mod ops;
+pub mod varlena;
 #[cfg(test)]
 mod tests;
 
+pub use io::{aclitemin, aclitemout, aclparse, ACL_ALL_RIGHTS_STR};
 pub use membership::{
-    get_role_oid, has_privs_of_role, initialize_acl, is_member_of_role, is_member_of_role_nosuper,
-    member_can_set_role, RoleMembershipCacheCallback,
+    get_role_oid, get_role_oid_or_public, has_privs_of_role, initialize_acl, is_member_of_role,
+    is_member_of_role_nosuper, member_can_set_role, RoleMembershipCacheCallback,
 };
+pub(crate) use membership::RoleRecurseType;
+pub use ops::{
+    aclconcat, aclcontains, aclcopy, aclequal, aclitem_comparator, aclitem_match, aclitemsort,
+    aclmask_direct, aclmembers, aclmerge, aclnewowner, aclupdate, convert_any_priv_string,
+    select_best_grantor, PrivMapEntry, ACL_MODECHG_ADD, ACL_MODECHG_DEL, ACL_MODECHG_EQL,
+    DROP_CASCADE, DROP_RESTRICT,
+};
+
+pub const ACLITEMOID: u32 = 1033;
 
 pub const ACL_INSERT: u64 = 1 << 0;
 pub const ACL_SELECT: u64 = 1 << 1;
@@ -43,6 +57,7 @@ pub const ACL_ALL_RIGHTS_RELATION: u64 = ACL_INSERT
     | ACL_REFERENCES
     | ACL_TRIGGER
     | ACL_MAINTAIN;
+pub const ACL_ALL_RIGHTS_COLUMN: u64 = ACL_INSERT | ACL_SELECT | ACL_UPDATE | ACL_REFERENCES;
 pub const ACL_ALL_RIGHTS_SEQUENCE: u64 = ACL_USAGE | ACL_SELECT | ACL_UPDATE;
 pub const ACL_ALL_RIGHTS_DATABASE: u64 = ACL_CREATE | ACL_CREATE_TEMP | ACL_CONNECT;
 pub const ACL_ALL_RIGHTS_FDW: u64 = ACL_USAGE;
@@ -55,11 +70,49 @@ pub const ACL_ALL_RIGHTS_SCHEMA: u64 = ACL_USAGE | ACL_CREATE;
 pub const ACL_ALL_RIGHTS_TABLESPACE: u64 = ACL_CREATE;
 pub const ACL_ALL_RIGHTS_TYPE: u64 = ACL_USAGE;
 
+#[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AclItem {
     pub ai_grantee: Oid,
     pub ai_grantor: Oid,
     pub ai_privs: u64,
+}
+
+const _: () = assert!(core::mem::size_of::<AclItem>() == 16);
+
+#[inline]
+pub const fn aclitem_get_privs(item: &AclItem) -> u64 {
+    item.ai_privs & 0xFFFF_FFFF
+}
+
+#[inline]
+pub const fn aclitem_get_goptions(item: &AclItem) -> u64 {
+    (item.ai_privs >> 32) & 0xFFFF_FFFF
+}
+
+#[inline]
+pub const fn aclitem_get_rights(item: &AclItem) -> u64 {
+    item.ai_privs
+}
+
+#[inline]
+pub fn aclitem_set_rights(item: &mut AclItem, rights: u64) {
+    item.ai_privs = rights;
+}
+
+#[inline]
+pub fn aclitem_set_privs_goptions(item: &mut AclItem, privs: u64, goptions: u64) {
+    item.ai_privs = (privs & 0xFFFF_FFFF) | ((goptions & 0xFFFF_FFFF) << 32);
+}
+
+#[inline]
+pub const fn acl_grant_option_for(privs: u64) -> u64 {
+    (privs & 0xFFFF_FFFF) << 32
+}
+
+#[inline]
+pub const fn acl_option_to_privs(privs: u64) -> u64 {
+    (privs >> 32) & 0xFFFF_FFFF
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

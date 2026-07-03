@@ -8,6 +8,7 @@ publish.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+aclchk = { path = "../../catalog/aclchk" }
 parse_utilcmd = { path = "../../parser/parse_utilcmd" }
 tablecmds = { path = "../../commands/tablecmds" }
 schemacmds = { path = "../../commands/schemacmds" }
