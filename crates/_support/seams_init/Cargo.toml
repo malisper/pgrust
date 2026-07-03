@@ -39,6 +39,7 @@ catalog_storage = { path = "../../backend/catalog/catalog_storage" }
 catalog = { path = "../../backend/catalog/catalog" }
 pg_database = { path = "../../backend/catalog/pg_database" }
 pg_db_role_setting = { path = "../../backend/catalog/pg_db_role_setting" }
+catalog_index = { path = "../../backend/catalog/catalog_index" }
 indexcmds = { path = "../../backend/commands/indexcmds" }
 dbcommands = { path = "../../backend/commands/dbcommands" }
 executils = { path = "../../backend/executor/executils" }

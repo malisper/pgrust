@@ -25,6 +25,7 @@ xact_seams = { path = "../../transam/xact_seams" }
 exectuples = { path = "../../../executor/exectuples" }
 tableam_vocab = { path = "../tableam_vocab" }
 heapam = { path = "../../heap/heapam" }
+format_type = { path = "../../../utils/adt/format_type" }
 heapam_handler = { path = "../../heap/heapam_handler" }
 heapam_visibility_seams = { path = "../../heap/heapam_visibility_seams" }
 tidbitmap = { path = "../../../nodes/tidbitmap" }

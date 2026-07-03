@@ -27,5 +27,10 @@ relcache = { path = "../../utils/cache/relcache" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
 lmgr = { path = "../../storage/lmgr/lmgr" }
+genam = { path = "../../access/index/genam" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+pgstat = { path = "../../utils/activity/pgstat" }
+types_scan = { path = "../../../_support/types/types_scan" }
+xact = { path = "../../access/transam/xact" }
 init_small = { path = "../../utils/init/init_small" }
 miscinit_seams = { path = "../../utils/init/miscinit_seams" }

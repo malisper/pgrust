@@ -34,6 +34,7 @@ cmdtag = { path = "../cmdtag" }
 portalmem = { path = "../../utils/mmgr/portalmem" }
 tcop_dest = { path = "../dest" }
 utility_seams = { path = "../utility_seams" }
+catalog_toasting = { path = "../../catalog/catalog_toasting" }
 
 [dev-dependencies]
 syscache_seams = { path = "../../utils/cache/syscache_seams" }

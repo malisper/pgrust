@@ -676,6 +676,45 @@ pub fn log_newpage(
     Ok(recptr)
 }
 
+pub fn log_newpages(
+    rlocator: &RelFileLocator,
+    forknum: ForkNumber,
+    blknos: &[BlockNumber],
+    pages: &mut [&mut [u8]],
+    page_std: bool,
+) -> PgResult<()> {
+    debug_assert!(blknos.len() == pages.len());
+    let mut flags = REGBUF_FORCE_IMAGE;
+    if page_std {
+        flags |= REGBUF_STANDARD;
+    }
+    let mut i = 0;
+    while i < pages.len() {
+        let nbatch = (pages.len() - i).min(XLR_MAX_BLOCK_ID);
+        let mut blocks: Vec<RegBlock<'_>> = Vec::with_capacity(nbatch);
+        for j in 0..nbatch {
+            blocks.push(RegBlock {
+                block_id: j as u8,
+                rlocator: *rlocator,
+                forknum,
+                block: blknos[i + j],
+                page: &pages[i + j],
+                flags,
+                bufdata: &[],
+            });
+        }
+        let recptr = insert_record(RM_XLOG_ID, XLOG_FPI, 0, &[], &blocks)?;
+        drop(blocks);
+        for j in 0..nbatch {
+            if !page_is_new(pages[i + j]) {
+                page_set_lsn(pages[i + j], recptr);
+            }
+        }
+        i += nbatch;
+    }
+    Ok(())
+}
+
 pub fn log_newpage_buffer(buffer: Buffer, page_std: bool) -> PgResult<XLogRecPtr> {
     debug_assert!(init_small::globals::CritSectionCount() > 0);
     let tag = bufmgr::BufferGetTag(buffer);

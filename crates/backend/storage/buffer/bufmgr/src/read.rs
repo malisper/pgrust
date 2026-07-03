@@ -277,7 +277,7 @@ fn InvalidateVictimBuffer(desc: &BufferDesc) -> PgResult<bool> {
 }
 
 /// WaitIO (bufmgr.c) with the pgaio wait arm collapsed away (io_method=sync).
-fn WaitIO(desc: &BufferDesc) -> PgResult<()> {
+pub(crate) fn WaitIO(desc: &BufferDesc) -> PgResult<()> {
     let cv = BufferDescriptorGetIOCV(desc);
     ConditionVariablePrepareToSleep(cv);
     loop {

@@ -9,6 +9,9 @@ name = "pg_type"
 path = "src/lib.rs"
 
 [dependencies]
+genam = { path = "../../access/index/genam" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+types_scan = { path = "../../../_support/types/types_scan" }
 mcx = { path = "../../../_support/mcx" }
 datum = { path = "../../../_support/types/datum" }
 types_core = { path = "../../../_support/types/types_core" }

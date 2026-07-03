@@ -46,6 +46,12 @@ pub fn fc_btoidvectorcmp(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) ->
     Ok(Datum::from_i32(crate::btoidvectorcmp(a, a_values, b, b_values)))
 }
 
+// btequalimage (nbtutils.c): unconditionally true for these opclasses.
+pub fn fc_btequalimage(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let _ = fcinfo;
+    Ok(Datum::from_bool(true))
+}
+
 const fn b(foid: Oid, name: &'static str, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin {
         foid,
@@ -72,4 +78,12 @@ pub const NBT_BUILTINS: &[FmgrBuiltin] = &[
     b(2191, "btint42cmp", fc_btint42cmp),
     b(2192, "btint28cmp", fc_btint28cmp),
     b(2193, "btint82cmp", fc_btint82cmp),
+    FmgrBuiltin {
+        foid: 5051,
+        name: "btequalimage",
+        nargs: 1,
+        strict: true,
+        retset: false,
+        func: fc_btequalimage,
+    },
 ];

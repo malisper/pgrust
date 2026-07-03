@@ -134,6 +134,23 @@ fn print_typmod(typname: &str, typmod: i32, type_oid: Oid) -> PgResult<String> {
     Ok(format!("{typname}{}", s.to_str().expect("typmodout output is ASCII")))
 }
 
+pub fn type_maximum_size(type_oid: Oid, typemod: i32) -> i32 {
+    if typemod < 0 {
+        return -1;
+    }
+    const VARHDRSZ: i32 = 4;
+    match type_oid {
+        BPCHAROID | VARCHAROID => {
+            let max_len =
+                wchar::pg_encoding_max_length(mbutils_seams::get_database_encoding::call());
+            (typemod - VARHDRSZ) * max_len + VARHDRSZ
+        }
+        NUMERICOID => adt_numeric::numeric_maximum_size(typemod),
+        VARBITOID | BITOID => (typemod + 7) / 8 + 2 * 4,
+        _ => -1,
+    }
+}
+
 /// C `quote_identifier` (ruleutils.c) minus the quote_all_identifiers GUC.
 pub fn quote_identifier(ident: &str) -> std::borrow::Cow<'_, str> {
     let bytes = ident.as_bytes();

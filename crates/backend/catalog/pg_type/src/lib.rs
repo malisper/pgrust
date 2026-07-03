@@ -330,6 +330,40 @@ pub fn makeArrayTypeName(typeName: &str, typeNamespace: Oid) -> PgResult<NameDat
     }
 }
 
+// RemoveTypeById (typecmds.c); enum/range cleanup arms are loud.
+pub fn RemoveTypeById<'mcx>(mcx: Mcx<'mcx>, typeOid: Oid) -> PgResult<()> {
+    const Anum_pg_type_typtype: i32 = 7;
+    let relation = table::table_open(mcx, TYPE_RELATION_ID, RowExclusiveLock)?;
+    let mut key = types_scan::scankey::ScanKeyData::empty();
+    key.sk_attno = Anum_pg_type_oid;
+    key.sk_strategy = types_scan::scankey::BTEqualStrategyNumber;
+    key.sk_collation = 0;
+    key.sk_func = fmgr_seams::fmgr_info::call(types_core::fmgr::F_OIDEQ)
+        .unwrap_or_else(|e| panic!("fmgr_info(F_OIDEQ) failed: {e:?}"));
+    key.sk_argument = Datum::from_oid(typeOid);
+    let mut scan = genam::systable_beginscan(mcx, &relation, TypeOidIndexId, true, None, &[key])?;
+    let tup = genam::systable_getnext(mcx, &mut scan)?
+        .unwrap_or_else(|| panic!("cache lookup failed for type {typeOid}"));
+    let tid = tup.t_self;
+    let mut isnull = false;
+    // SAFETY: typtype is a fixed NOT NULL pg_type column.
+    let typtype = unsafe {
+        types_tuple::heap_getattr(tup, Anum_pg_type_typtype, relation.descr(), &mut isnull)
+    }
+    .as_i8();
+    catalog_indexing::CatalogTupleDelete(&relation, &tid)?;
+    const TYPTYPE_ENUM: i8 = b'e' as i8;
+    const TYPTYPE_RANGE: i8 = b'r' as i8;
+    if typtype == TYPTYPE_ENUM {
+        panic!("unported: RemoveTypeById EnumValuesDelete (pg_enum.c)");
+    }
+    if typtype == TYPTYPE_RANGE {
+        panic!("unported: RemoveTypeById RangeDelete (pg_range.c)");
+    }
+    genam::systable_endscan(mcx, scan)?;
+    relation.close(RowExclusiveLock)
+}
+
 pub fn moveArrayTypeName(typeOid: Oid, typeName: &str, typeNamespace: Oid) -> PgResult<bool> {
     if !syscache_seams::pg_type_isdefined::call(typeOid)?.unwrap_or(false) {
         return Ok(true);

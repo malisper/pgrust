@@ -353,12 +353,7 @@ pub fn ExplainNode<'mcx>(
         }
         NodeTag::T_Sort => {
             show_sort_keys(node, es)?;
-            if es.analyze {
-                node_gap(
-                    "show_sort_info",
-                    "Sort Method display needs tuplesort_get_stats (sort instrumentation lane)",
-                );
-            }
+            show_sort_info(node, es)?;
         }
         NodeTag::T_WindowAgg => {
             show_window_def(node, es)?;
@@ -467,6 +462,30 @@ fn show_sort_keys<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) -> PgResu
         result.push(buf);
     }
     ExplainPropertyList("Sort Key", &result, es);
+    Ok(())
+}
+
+// show_sort_info (explain.c); the shared_info worker stanza has no parallel
+// lane. spaceUsed value diverges from C (arena vs palloc accounting) —
+// notes/sort-explain-lane.md.
+fn show_sort_info<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) -> PgResult<()> {
+    if !es.analyze || es.qd.is_null() {
+        return Ok(());
+    }
+    let id = plan_of(node).plan_node_id;
+    let Some(si) = execmain_seams::query_desc_sort_instrument::call(es.qd, id) else {
+        return Ok(());
+    };
+    let sort_method = si.sortMethod.name();
+    let space_type = si.spaceType.name();
+    if es.format == EXPLAIN_FORMAT_TEXT {
+        crate::format::ExplainIndentText(es);
+        append!(es, "Sort Method: {}  {}: {}kB\n", sort_method, space_type, si.spaceUsed);
+    } else {
+        ExplainPropertyText("Sort Method", sort_method, es);
+        ExplainPropertyInteger("Sort Space Used", Some("kB"), si.spaceUsed, es);
+        ExplainPropertyText("Sort Space Type", space_type, es);
+    }
     Ok(())
 }
 

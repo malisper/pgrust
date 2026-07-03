@@ -17,6 +17,10 @@ seam_core::seam!(
     // smgrnblocks(smgropen(rlocator), forknum) (smgr.c).
     pub fn smgr_nblocks(rlocator: RelFileLocatorBackend, forknum: ForkNumber) -> PgResult<BlockNumber>
 );
+seam_core::seam!(
+    // smgrnblocks_cached (smgr.c): recovery-gated cache read.
+    pub fn smgr_nblocks_cached(rlocator: RelFileLocatorBackend, forknum: ForkNumber) -> BlockNumber
+);
 
 seam_core::seam!(
     // smgrexists(smgropen(rlocator), forknum) (smgr.c).

@@ -65,6 +65,7 @@ pub const LargeObjectRelationId: Oid = 2613;
 pub const NamespaceRelationId: Oid = 2615;
 pub const AccessMethodRelationId: Oid = 2601;
 pub const CollationRelationId: Oid = 3456;
+pub const OperatorClassRelationId: Oid = 2616;
 pub const PG_PUBLIC_NAMESPACE: Oid = 2200;
 
 pub fn IsSystemRelation(relation: &RelationData<'_>) -> bool {

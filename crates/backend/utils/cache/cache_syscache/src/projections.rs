@@ -696,6 +696,17 @@ fn pg_type_typarray(typid: Oid) -> PgResult<Option<Oid>> {
     Ok(Some(arr))
 }
 
+fn pg_type_typrelid(typid: Oid) -> PgResult<Option<Oid>> {
+    let Some(tuple) = SearchSysCache1(TYPEOID, SysCacheKey::Value(Datum::from_oid(typid)))? else {
+        return Ok(None);
+    };
+    let t = tuple.tuple();
+    let relid = getattr(&t, TYPEOID, ANUM_PG_TYPE_TYPRELID).as_oid();
+    drop(t);
+    ReleaseSysCache(tuple);
+    Ok(Some(relid))
+}
+
 fn pg_proc_proname(funcid: Oid) -> PgResult<Option<types_tuple::NameData>> {
     let Some(tuple) = SearchSysCache1(PROCOID, SysCacheKey::Value(Datum::from_oid(funcid)))? else {
         return Ok(None);
@@ -1154,6 +1165,7 @@ pub(crate) fn install() {
     syscache_seams::pg_type_base_shape::set(pg_type_base_shape);
     syscache_seams::pg_type_io_shape::set(pg_type_io_shape);
     syscache_seams::pg_type_typarray::set(pg_type_typarray);
+    syscache_seams::pg_type_typrelid::set(pg_type_typrelid);
     syscache_seams::pg_proc_proname::set(pg_proc_proname);
     syscache_seams::lookup_pg_proc_shape::set(lookup_pg_proc_shape);
     syscache_seams::lookup_pg_proc_name_candidates::set(lookup_pg_proc_name_candidates);

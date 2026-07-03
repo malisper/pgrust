@@ -6,6 +6,7 @@ use core::mem;
 
 use ::datum::{Datum, NullableDatum};
 use ::mcx::{McxOwned, Mcx, MemoryContext, PgVec};
+use ::types_core::instrument::{TuplesortInstrumentation, TuplesortMethod, TuplesortSpaceType};
 use ::types_core::Oid;
 use ::types_error::{PgError, PgResult};
 use ::types_slot::SlotData;
@@ -302,6 +303,20 @@ impl Tuplesort {
 
     pub fn used_bound(&self) -> bool {
         self.0.with(|st| st.bound_used)
+    }
+
+    pub fn get_stats(&self) -> TuplesortInstrumentation {
+        self.0.with(|st| TuplesortInstrumentation {
+            sortMethod: match st.status {
+                TupSortStatus::SortedInMem if st.bound_used => TuplesortMethod::TopNHeapsort,
+                TupSortStatus::SortedInMem => TuplesortMethod::Quicksort,
+                TupSortStatus::Initial | TupSortStatus::Bounded => {
+                    TuplesortMethod::StillInProgress
+                }
+            },
+            spaceType: TuplesortSpaceType::Memory,
+            spaceUsed: (st.allowed_mem - st.avail_mem + 1023) / 1024,
+        })
     }
 
     #[inline]

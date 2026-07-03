@@ -143,6 +143,13 @@ where
 
         ts.performsort()?;
 
+        let id = node.plan.plan.plan_node_id;
+        let stats = ts.get_stats();
+        match estate.es_sort_instrumentation.iter_mut().find(|(i, _)| *i == id) {
+            Some((_, s)) => *s = stats,
+            None => estate.es_sort_instrumentation.push((id, stats)),
+        }
+
         estate.es_direction = dir;
         node.sort_Done = true;
         node.bounded_Done = node.bounded;

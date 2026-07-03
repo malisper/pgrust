@@ -9,7 +9,7 @@ use types_core::{
     RELPERSISTENCE_UNLOGGED,
 };
 use types_error::PgResult;
-use types_rel::{FormData_pg_class, RelationData, REPLICA_IDENTITY_DEFAULT};
+use types_rel::{FormData_pg_class, RelationData, RELKIND_MATVIEW, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION, REPLICA_IDENTITY_DEFAULT, REPLICA_IDENTITY_NOTHING};
 use types_tuple::{NameData, TupleConstr, TupleDescData};
 
 use crate::build::RelationInitPhysicalAddr;
@@ -87,8 +87,10 @@ pub fn RelationBuildLocalRelation(
         relam: accessmtd,
         relfilenode: relfilenumber,
         reltablespace,
+        // C's palloc0 leaves relpages/reltuples/relallvisible zero; the pokes
+        // in AddNewRelationTuple (tables: reltuples -1) happen at insert time.
         relpages: 0,
-        reltuples: -1.0,
+        reltuples: 0.0,
         relallvisible: 0,
         reltoastrelid: InvalidOid,
         relhasindex: false,
@@ -98,7 +100,16 @@ pub fn RelationBuildLocalRelation(
         relhassubclass: false,
         relrowsecurity: false,
         relispopulated: true,
-        relreplident: REPLICA_IDENTITY_DEFAULT,
+        // IsCatalogNamespace || IsToastNamespace (catalog.c): PG_CATALOG(11)/pg_toast(99).
+        relreplident: if !(relnamespace == 11 || relnamespace == 99)
+            && matches!(
+                relkind,
+                RELKIND_RELATION | RELKIND_MATVIEW | RELKIND_PARTITIONED_TABLE
+            ) {
+            REPLICA_IDENTITY_DEFAULT
+        } else {
+            REPLICA_IDENTITY_NOTHING
+        },
         relispartition: false,
         relfrozenxid: 0,
         relminmxid: 0,

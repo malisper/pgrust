@@ -19,6 +19,7 @@ mod pin;
 mod privref;
 mod read;
 mod write;
+mod drop_buffers;
 
 use types_core::{
     BlockNumber, Buffer, ForkNumber, Oid, INVALID_PROC_NUMBER, RELPERSISTENCE_TEMP,
@@ -46,7 +47,7 @@ pub use ops::{
     UnlockReleaseBuffer, BUFFER_LOCK_EXCLUSIVE, BUFFER_LOCK_SHARE, BUFFER_LOCK_UNLOCK,
 };
 pub use bgwriter_sync::{bgwriter_writeback_context_init, pending_bgwriter_stats, BgBufferSync};
-pub use write::{BufferSync, CheckPointBuffers, FlushOneBuffer};
+pub use write::{BufferSync, CheckPointBuffers, FlushOneBuffer, PageSetChecksumInplace};
 pub use pin::{
     AtEOXact_Buffers, BufferIsPinned, CheckBufferIsPinnedOnce, IncrBufferRefCount, ReleaseBuffer,
     UnlockBuffers,
@@ -347,9 +348,7 @@ pub fn init_seams() {
     bufmgr_seams::drop_relation_buffers::set(|_, _, _| {
         panic!("unported callee reached from bufmgr.c: DropRelationBuffers (phase 2)")
     });
-    bufmgr_seams::drop_relations_all_buffers::set(|_| {
-        panic!("unported callee reached from bufmgr.c: DropRelationsAllBuffers (phase 2)")
-    });
+    bufmgr_seams::drop_relations_all_buffers::set(drop_buffers::DropRelationsAllBuffers);
     bufmgr_seams::flush_relations_all_buffers::set(|_| {
         panic!("unported callee reached from bufmgr.c: FlushRelationsAllBuffers (write-back, phase 2)")
     });

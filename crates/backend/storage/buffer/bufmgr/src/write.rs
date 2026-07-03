@@ -180,6 +180,17 @@ mod checksum {
     }
 }
 
+/// PageSetChecksumInplace (bufpage.c).
+pub fn PageSetChecksumInplace(page: &mut [u8; BLCKSZ], blkno: BlockNumber) {
+    let is_new = u16::from_ne_bytes([page[14], page[15]]) == 0;
+    if is_new || !transam_xlog_seams::data_checksums_enabled::call() {
+        return;
+    }
+    page[8..10].copy_from_slice(&0u16.to_ne_bytes());
+    let sum = checksum::page_checksum(page, blkno);
+    page[8..10].copy_from_slice(&sum.to_ne_bytes());
+}
+
 // PageSetChecksumCopy's static pageCopy (bufpage.c): hint bits may change
 // under a share lock, so the checksummed image is built in private storage.
 #[repr(align(4096))]
