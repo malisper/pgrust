@@ -56,8 +56,8 @@ pub fn grouping_planner<'mcx>(run: &mut PlannerRun<'mcx>, tuple_fraction: f64) -
             parse.windowClause.len() as u32,
         )?;
         if wfl.num_window_funcs > 0 {
-            // optimize_window_clauses (planner.c) unported: frame-option
-            // rewrites + run conditions are pure executor-speed levers.
+            let mut wfl = wfl;
+            crate::window::optimize_window_clauses(run, &mut wfl)?;
             let active = crate::window::select_active_windows(run, &wfl)?;
             crate::window::name_active_windows(run.mcx, &active)?;
             run.active_windows = active;

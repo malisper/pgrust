@@ -157,8 +157,16 @@ pub fn subquery_planner<'mcx>(
         preprocess_expression(run, parse.havingQual, EXPRKIND_QUAL, has_sublinks)?;
     for wc_node in &parse.windowClause {
         let wc = wc_node.as_window_clause().expect("windowClause cell");
-        if wc.startOffset.is_some() || wc.endOffset.is_some() {
-            panic!("preprocess_expression (planner.c): window frame offsets (explicit frames unported)");
+        let start = preprocess_expression(run, wc.startOffset, EXPRKIND_LIMIT, has_sublinks)?;
+        let end = preprocess_expression(run, wc.endOffset, EXPRKIND_LIMIT, has_sublinks)?;
+        // SAFETY: parse tree is planner-owned; no derived refs live.
+        unsafe {
+            wc_node
+                .with_mut::<types_nodes::parsenodes::WindowClause, _>(|w| {
+                    w.startOffset = start;
+                    w.endOffset = end;
+                })
+                .expect("WindowClause");
         }
     }
     parse.limitOffset =

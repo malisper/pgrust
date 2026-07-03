@@ -158,7 +158,7 @@ pub fn ParseFuncOrColumn<'mcx>(
                 declared_arg_types.as_mut_slice(),
                 rettype,
                 false,
-            );
+            )?;
             let fargs =
                 make_fn_arguments(mcx, pstate, fargs, actual_arg_types, &declared_arg_types)?;
             if retset {
@@ -213,7 +213,7 @@ pub fn ParseFuncOrColumn<'mcx>(
                 declared_arg_types.as_mut_slice(),
                 rettype,
                 false,
-            );
+            )?;
             let fargs =
                 make_fn_arguments(mcx, pstate, fargs, actual_arg_types, &declared_arg_types)?;
             if let Some(over_node) = over {
@@ -308,7 +308,7 @@ pub fn ParseFuncOrColumn<'mcx>(
                 declared_arg_types.as_mut_slice(),
                 rettype,
                 false,
-            );
+            )?;
             let fargs =
                 make_fn_arguments(mcx, pstate, fargs, actual_arg_types, &declared_arg_types)?;
             build_window_func(

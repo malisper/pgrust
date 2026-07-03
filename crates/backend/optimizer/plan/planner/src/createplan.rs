@@ -1062,8 +1062,8 @@ fn create_agg_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> PgResul
 }
 
 
-// create_windowagg_plan (createplan.c); runCondition/qual/frame-offset legs
-// dead (loud upstream), startOffset/endOffset always None (default frame).
+// create_windowagg_plan (createplan.c); runCondition/qual legs dead (loud
+// upstream).
 fn create_windowagg_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> PgResult<Node<'mcx>> {
     let (subpath_id, target_id, winclause_id, topwindow) = match run.root.path(path_id) {
         PathNode::WindowAggPath(wp) => {
@@ -1085,10 +1085,6 @@ fn create_windowagg_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> P
     let tlist = build_path_tlist(run, target_id)?;
 
     let wc = wc_node.as_window_clause().expect("WindowClause");
-    assert!(
-        wc.startOffset.is_none() && wc.endOffset.is_none(),
-        "create_windowagg_plan (createplan.c): frame offsets unported"
-    );
     let subplan_tlist = &subplan.as_plan().expect("plan node").targetlist;
     let mut cols = |clause: &NodeList<'mcx>| -> PgResult<(
         &'mcx [i16],
@@ -1136,8 +1132,8 @@ fn create_windowagg_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> P
     plan.ordOperators = ord_ops;
     plan.ordCollations = ord_colls;
     plan.frameOptions = wc.frameOptions;
-    plan.startOffset = None;
-    plan.endOffset = None;
+    plan.startOffset = wc.startOffset;
+    plan.endOffset = wc.endOffset;
     plan.startInRangeFunc = wc.startInRangeFunc;
     plan.endInRangeFunc = wc.endInRangeFunc;
     plan.inRangeColl = wc.inRangeColl;

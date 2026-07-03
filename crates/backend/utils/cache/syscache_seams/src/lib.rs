@@ -117,6 +117,13 @@ pub struct PgAmopMemberShape {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PgAmprocMemberShape {
+    pub amprocrighttype: Oid,
+    pub amprocnum: i16,
+    pub amproc: Oid,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PgAttributeLsShape {
     pub attname: NameData,
     pub atttypid: Oid,
@@ -292,6 +299,14 @@ seam_core::seam!(
         righttype: Oid,
         procnum: i16,
     ) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    pub fn lookup_pg_amproc_members<'mcx>(
+        mcx: Mcx<'mcx>,
+        opfamily: Oid,
+        lefttype: Oid,
+    ) -> PgResult<PgVec<'mcx, PgAmprocMemberShape>>
 );
 
 seam_core::seam!(
@@ -783,10 +798,16 @@ pub struct PgAggregateShape {
     pub aggcombinefn: Oid,
     pub aggserialfn: Oid,
     pub aggdeserialfn: Oid,
+    pub aggmtransfn: Oid,
+    pub aggminvtransfn: Oid,
+    pub aggmfinalfn: Oid,
     pub aggfinalextra: bool,
+    pub aggmfinalextra: bool,
     pub aggfinalmodify: i8,
+    pub aggmfinalmodify: i8,
     pub aggtranstype: Oid,
     pub aggtransspace: i32,
+    pub aggmtranstype: Oid,
 }
 
 seam_core::seam!(
@@ -798,6 +819,15 @@ seam_core::seam!(
     // SysCacheGetAttr(AGGFNOID tuple, agginitval) as text; outer None mirrors
     // !HeapTupleIsValid, inner None mirrors attisnull.
     pub fn pg_aggregate_agginitval<'mcx>(
+        mcx: Mcx<'mcx>,
+        aggfnoid: Oid,
+    ) -> PgResult<Option<Option<PgString<'mcx>>>>
+);
+
+seam_core::seam!(
+    // SysCacheGetAttr(AGGFNOID tuple, aggminitval) as text; same contract as
+    // pg_aggregate_agginitval.
+    pub fn pg_aggregate_aggminitval<'mcx>(
         mcx: Mcx<'mcx>,
         aggfnoid: Oid,
     ) -> PgResult<Option<Option<PgString<'mcx>>>>

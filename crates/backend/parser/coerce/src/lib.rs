@@ -11,6 +11,7 @@ use mcx::Mcx;
 use parser_small1::{
     parser_errposition, variable_coerce_param_hook, ParseRefHookState, ParseState,
 };
+use types_core::primitive::FUNC_MAX_ARGS;
 use types_core::catalog::{
     ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYCOMPATIBLEMULTIRANGEOID, ANYCOMPATIBLENONARRAYOID,
     ANYCOMPATIBLEOID, ANYCOMPATIBLERANGEOID, ANYELEMENTOID, ANYENUMOID, ANYMULTIRANGEOID,
@@ -54,6 +55,15 @@ const COERCION_METHOD_BINARY: i8 = b'b' as i8;
 const COERCION_METHOD_INOUT: i8 = b'i' as i8;
 pub const TYPCATEGORY_INVALID: i8 = 0;
 pub const TYPCATEGORY_STRING: i8 = b'S' as i8;
+
+// IsPolymorphicTypeFamily1 (pg_type.h).
+fn is_polymorphic_type_family1(typid: Oid) -> bool {
+    matches!(
+        typid,
+        ANYELEMENTOID | ANYARRAYOID | ANYNONARRAYOID | ANYENUMOID | ANYRANGEOID
+            | ANYMULTIRANGEOID
+    )
+}
 
 pub fn IsPolymorphicType(typid: Oid) -> bool {
     matches!(
@@ -370,6 +380,8 @@ fn check_generic_type_consistency(
     let mut have_anyenum = false;
     let mut have_anycompatible_nonarray = false;
     let mut n_anycompatible_args = 0usize;
+    // C: Oid anycompatible_actual_types[FUNC_MAX_ARGS].
+    let mut anycompatible_actual_types = [InvalidOid; FUNC_MAX_ARGS];
 
     for (&actual, &decl_type) in actual_arg_types.iter().zip(declared_arg_types) {
         let mut actual_type = actual;
@@ -425,6 +437,7 @@ fn check_generic_type_consistency(
                 if actual_type == UNKNOWNOID {
                     continue;
                 }
+                anycompatible_actual_types[n_anycompatible_args] = actual_type;
                 n_anycompatible_args += 1;
             }
             ANYCOMPATIBLEARRAYOID => {
@@ -432,9 +445,11 @@ fn check_generic_type_consistency(
                     continue;
                 }
                 actual_type = lsyscache::getBaseType(actual_type)?;
-                if !OidIsValid(lsyscache::get_element_type(actual_type)?) {
+                let elem = lsyscache::get_element_type(actual_type)?;
+                if !OidIsValid(elem) {
                     return Ok(false);
                 }
+                anycompatible_actual_types[n_anycompatible_args] = elem;
                 n_anycompatible_args += 1;
             }
             ANYCOMPATIBLERANGEOID => {
@@ -452,6 +467,8 @@ fn check_generic_type_consistency(
                     if !OidIsValid(anycompatible_range_typelem) {
                         return Ok(false);
                     }
+                    anycompatible_actual_types[n_anycompatible_args] =
+                        anycompatible_range_typelem;
                     n_anycompatible_args += 1;
                 }
             }
@@ -535,16 +552,29 @@ fn check_generic_type_consistency(
             if !OidIsValid(anycompatible_range_typelem) {
                 return Ok(false);
             }
+            anycompatible_actual_types[n_anycompatible_args] = anycompatible_range_typelem;
             n_anycompatible_args += 1;
         }
     }
 
     if n_anycompatible_args > 0 {
-        let _ = have_anycompatible_nonarray;
-        unported(
-            "check_generic_type_consistency (parse_coerce.c): \
-             select_common_type_from_oids over non-unknown ANYCOMPATIBLE args",
-        );
+        let types = &anycompatible_actual_types[..n_anycompatible_args];
+        let anycompatible_typeid = select_common_type_from_oids(types, true)?;
+        if !OidIsValid(anycompatible_typeid)
+            || !verify_common_type_from_oids(anycompatible_typeid, types)?
+        {
+            return Ok(false);
+        }
+        if have_anycompatible_nonarray
+            && OidIsValid(lsyscache::get_base_element_type(anycompatible_typeid)?)
+        {
+            return Ok(false);
+        }
+        if OidIsValid(anycompatible_range_typeid)
+            && anycompatible_range_typelem != anycompatible_typeid
+        {
+            return Ok(false);
+        }
     }
 
     Ok(true)
@@ -688,21 +718,651 @@ pub fn IsBinaryCoercible(srctype: Oid, targettype: Oid) -> PgResult<bool> {
     }
 }
 
-/// Minimal `enforce_generic_type_consistency`: the no-polymorphic fast exit.
+// select_common_type_from_oids (parse_coerce.c); noerror returns InvalidOid
+// on category mismatch.
+fn select_common_type_from_oids(typeids: &[Oid], noerror: bool) -> PgResult<Oid> {
+    debug_assert!(!typeids.is_empty());
+    let mut ptype = typeids[0];
+    let mut rest = &typeids[1..];
+    if ptype != UNKNOWNOID {
+        let mut i = 0;
+        while i < rest.len() && rest[i] == ptype {
+            i += 1;
+        }
+        if i == rest.len() {
+            return Ok(ptype);
+        }
+        rest = &rest[i..];
+    }
+    ptype = lsyscache::getBaseType(ptype)?;
+    let (mut pcategory, mut pispreferred) = lsyscache::get_type_category_preferred(ptype)?;
+    for &rawtype in rest {
+        let ntype = lsyscache::getBaseType(rawtype)?;
+        if ntype != UNKNOWNOID && ntype != ptype {
+            let (ncategory, nispreferred) = lsyscache::get_type_category_preferred(ntype)?;
+            if ptype == UNKNOWNOID {
+                ptype = ntype;
+                pcategory = ncategory;
+                pispreferred = nispreferred;
+            } else if ncategory != pcategory {
+                if noerror {
+                    return Ok(InvalidOid);
+                }
+                return Err(poly_mismatch(format!(
+                    "argument types {} and {} cannot be matched",
+                    format_type::format_type_be(ptype)?,
+                    format_type::format_type_be(ntype)?
+                )));
+            } else if !pispreferred
+                && can_coerce_type(&[ptype], &[ntype], COERCION_IMPLICIT)?
+                && !can_coerce_type(&[ntype], &[ptype], COERCION_IMPLICIT)?
+            {
+                ptype = ntype;
+                pcategory = ncategory;
+                pispreferred = nispreferred;
+            }
+        }
+    }
+    if ptype == UNKNOWNOID {
+        ptype = types_core::catalog::TEXTOID;
+    }
+    Ok(ptype)
+}
+
+fn verify_common_type_from_oids(common_type: Oid, typeids: &[Oid]) -> PgResult<bool> {
+    for &t in typeids {
+        if !can_coerce_type(&[t], &[common_type], COERCION_IMPLICIT)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+#[cold]
+#[inline(never)]
+fn poly_mismatch(msg: String) -> Box<PgError> {
+    Box::new(PgError::error(msg).with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH))
+}
+
+#[cold]
+#[inline(never)]
+fn poly_not_alike(what: &str, a: Oid, b: Oid) -> Box<PgError> {
+    let (fa, fb) = (
+        format_type::format_type_be(a).unwrap_or_else(|_| a.to_string()),
+        format_type::format_type_be(b).unwrap_or_else(|_| b.to_string()),
+    );
+    Box::new(
+        PgError::error(format!("arguments declared \"{what}\" are not all alike"))
+            .with_detail(format!("{fa} versus {fb}"))
+            .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH),
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn poly_not_consistent(a_name: &str, b_name: &str, a: Oid, b: Oid) -> Box<PgError> {
+    let (fa, fb) = (
+        format_type::format_type_be(a).unwrap_or_else(|_| a.to_string()),
+        format_type::format_type_be(b).unwrap_or_else(|_| b.to_string()),
+    );
+    Box::new(
+        PgError::error(format!(
+            "argument declared {a_name} is not consistent with argument declared {b_name}"
+        ))
+        .with_detail(format!("{fa} versus {fb}"))
+        .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH),
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn no_array_type_for(elem: Oid) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!(
+            "could not find array type for data type {}",
+            format_type::format_type_be(elem).unwrap_or_else(|_| elem.to_string())
+        ))
+        .with_sqlstate(types_error::ERRCODE_UNDEFINED_OBJECT),
+    )
+}
+
+/// C `enforce_generic_type_consistency` (parse_coerce.c).
 pub fn enforce_generic_type_consistency(
     actual_arg_types: &[Oid],
     declared_arg_types: &mut [Oid],
     rettype: Oid,
-    _allow_poly: bool,
-) -> Oid {
-    let _ = actual_arg_types;
-    if declared_arg_types.iter().any(|&t| IsPolymorphicType(t)) || IsPolymorphicType(rettype) {
-        unported(
-            "enforce_generic_type_consistency (parse_coerce.c): polymorphic argument/result \
-             resolution",
-        );
+    allow_poly: bool,
+) -> PgResult<Oid> {
+    let nargs = declared_arg_types.len();
+    let mut have_poly_anycompatible = false;
+    let mut have_poly_unknowns = false;
+    let mut elem_typeid = InvalidOid;
+    let mut array_typeid = InvalidOid;
+    let mut range_typeid = InvalidOid;
+    let mut multirange_typeid = InvalidOid;
+    let anycompatible_typeid;
+    let mut anycompatible_array_typeid = InvalidOid;
+    let mut anycompatible_range_typeid = InvalidOid;
+    let mut anycompatible_range_typelem = InvalidOid;
+    let mut anycompatible_multirange_typeid = InvalidOid;
+    let mut anycompatible_multirange_typelem = InvalidOid;
+    let mut have_anynonarray = rettype == ANYNONARRAYOID;
+    let mut have_anyenum = rettype == ANYENUMOID;
+    let mut have_anymultirange = rettype == ANYMULTIRANGEOID;
+    let mut have_anycompatible_nonarray = rettype == ANYCOMPATIBLENONARRAYOID;
+    let mut have_anycompatible_array = rettype == ANYCOMPATIBLEARRAYOID;
+    let mut have_anycompatible_range = rettype == ANYCOMPATIBLERANGEOID;
+    let mut have_anycompatible_multirange = rettype == ANYCOMPATIBLEMULTIRANGEOID;
+    let mut n_poly_args = 0;
+    let mut n_anycompatible_args = 0usize;
+    // C: Oid anycompatible_actual_types[FUNC_MAX_ARGS].
+    let mut anycompatible_actual_types = [InvalidOid; FUNC_MAX_ARGS];
+
+    for j in 0..nargs {
+        let decl_type = declared_arg_types[j];
+        let mut actual_type = actual_arg_types[j];
+        match decl_type {
+            ANYELEMENTOID | ANYNONARRAYOID | ANYENUMOID => {
+                n_poly_args += 1;
+                if decl_type == ANYNONARRAYOID {
+                    have_anynonarray = true;
+                } else if decl_type == ANYENUMOID {
+                    have_anyenum = true;
+                }
+                if actual_type == UNKNOWNOID {
+                    have_poly_unknowns = true;
+                    continue;
+                }
+                if allow_poly && decl_type == actual_type {
+                    continue;
+                }
+                if OidIsValid(elem_typeid) && actual_type != elem_typeid {
+                    return Err(poly_not_alike("anyelement", elem_typeid, actual_type));
+                }
+                elem_typeid = actual_type;
+            }
+            ANYARRAYOID => {
+                n_poly_args += 1;
+                if actual_type == UNKNOWNOID {
+                    have_poly_unknowns = true;
+                    continue;
+                }
+                if allow_poly && decl_type == actual_type {
+                    continue;
+                }
+                actual_type = lsyscache::getBaseType(actual_type)?;
+                if OidIsValid(array_typeid) && actual_type != array_typeid {
+                    return Err(poly_not_alike("anyarray", array_typeid, actual_type));
+                }
+                array_typeid = actual_type;
+            }
+            ANYRANGEOID => {
+                n_poly_args += 1;
+                if actual_type == UNKNOWNOID {
+                    have_poly_unknowns = true;
+                    continue;
+                }
+                if allow_poly && decl_type == actual_type {
+                    continue;
+                }
+                actual_type = lsyscache::getBaseType(actual_type)?;
+                if OidIsValid(range_typeid) && actual_type != range_typeid {
+                    return Err(poly_not_alike("anyrange", range_typeid, actual_type));
+                }
+                range_typeid = actual_type;
+            }
+            ANYMULTIRANGEOID => {
+                n_poly_args += 1;
+                have_anymultirange = true;
+                if actual_type == UNKNOWNOID {
+                    have_poly_unknowns = true;
+                    continue;
+                }
+                if allow_poly && decl_type == actual_type {
+                    continue;
+                }
+                actual_type = lsyscache::getBaseType(actual_type)?;
+                if OidIsValid(multirange_typeid) && actual_type != multirange_typeid {
+                    return Err(poly_not_alike(
+                        "anymultirange",
+                        multirange_typeid,
+                        actual_type,
+                    ));
+                }
+                multirange_typeid = actual_type;
+            }
+            ANYCOMPATIBLEOID | ANYCOMPATIBLENONARRAYOID => {
+                have_poly_anycompatible = true;
+                if decl_type == ANYCOMPATIBLENONARRAYOID {
+                    have_anycompatible_nonarray = true;
+                }
+                if actual_type == UNKNOWNOID {
+                    continue;
+                }
+                if allow_poly && decl_type == actual_type {
+                    continue;
+                }
+                anycompatible_actual_types[n_anycompatible_args] = actual_type;
+                n_anycompatible_args += 1;
+            }
+            ANYCOMPATIBLEARRAYOID => {
+                have_poly_anycompatible = true;
+                have_anycompatible_array = true;
+                if actual_type == UNKNOWNOID {
+                    continue;
+                }
+                if allow_poly && decl_type == actual_type {
+                    continue;
+                }
+                actual_type = lsyscache::getBaseType(actual_type)?;
+                let elem = lsyscache::get_element_type(actual_type)?;
+                if !OidIsValid(elem) {
+                    return Err(poly_mismatch(format!(
+                        "argument declared anycompatiblearray is not an array but type {}",
+                        format_type::format_type_be(actual_type)?
+                    )));
+                }
+                anycompatible_actual_types[n_anycompatible_args] = elem;
+                n_anycompatible_args += 1;
+            }
+            ANYCOMPATIBLERANGEOID => {
+                have_poly_anycompatible = true;
+                have_anycompatible_range = true;
+                if actual_type == UNKNOWNOID {
+                    continue;
+                }
+                if allow_poly && decl_type == actual_type {
+                    continue;
+                }
+                actual_type = lsyscache::getBaseType(actual_type)?;
+                if OidIsValid(anycompatible_range_typeid) {
+                    if anycompatible_range_typeid != actual_type {
+                        return Err(poly_not_alike(
+                            "anycompatiblerange",
+                            anycompatible_range_typeid,
+                            actual_type,
+                        ));
+                    }
+                } else {
+                    anycompatible_range_typeid = actual_type;
+                    anycompatible_range_typelem = lsyscache::get_range_subtype(actual_type)?;
+                    if !OidIsValid(anycompatible_range_typelem) {
+                        return Err(poly_mismatch(format!(
+                            "argument declared anycompatiblerange is not a range type but \
+                             type {}",
+                            format_type::format_type_be(actual_type)?
+                        )));
+                    }
+                    anycompatible_actual_types[n_anycompatible_args] =
+                        anycompatible_range_typelem;
+                    n_anycompatible_args += 1;
+                }
+            }
+            ANYCOMPATIBLEMULTIRANGEOID => {
+                have_poly_anycompatible = true;
+                have_anycompatible_multirange = true;
+                if actual_type == UNKNOWNOID {
+                    continue;
+                }
+                if allow_poly && decl_type == actual_type {
+                    continue;
+                }
+                actual_type = lsyscache::getBaseType(actual_type)?;
+                if OidIsValid(anycompatible_multirange_typeid) {
+                    if anycompatible_multirange_typeid != actual_type {
+                        return Err(poly_not_alike(
+                            "anycompatiblemultirange",
+                            anycompatible_multirange_typeid,
+                            actual_type,
+                        ));
+                    }
+                } else {
+                    anycompatible_multirange_typeid = actual_type;
+                    anycompatible_multirange_typelem =
+                        lsyscache::get_multirange_range(actual_type)?;
+                    if !OidIsValid(anycompatible_multirange_typelem) {
+                        return Err(poly_mismatch(format!(
+                            "argument declared anycompatiblemultirange is not a multirange \
+                             type but type {}",
+                            format_type::format_type_be(actual_type)?
+                        )));
+                    }
+                }
+            }
+            _ => {}
+        }
     }
-    rettype
+
+    if n_poly_args == 0 && !have_poly_anycompatible {
+        return Ok(rettype);
+    }
+
+    if n_poly_args > 0 {
+        if OidIsValid(array_typeid) {
+            let array_typelem;
+            if array_typeid == ANYARRAYOID {
+                if n_poly_args != 1
+                    || (rettype != ANYARRAYOID && is_polymorphic_type_family1(rettype))
+                {
+                    return Err(poly_mismatch(
+                        "cannot determine element type of \"anyarray\" argument".to_string(),
+                    ));
+                }
+                array_typelem = ANYELEMENTOID;
+            } else {
+                array_typelem = lsyscache::get_element_type(array_typeid)?;
+                if !OidIsValid(array_typelem) {
+                    return Err(poly_mismatch(format!(
+                        "argument declared anyarray is not an array but type {}",
+                        format_type::format_type_be(array_typeid)?
+                    )));
+                }
+            }
+            if !OidIsValid(elem_typeid) {
+                elem_typeid = array_typelem;
+            } else if array_typelem != elem_typeid {
+                return Err(poly_not_consistent(
+                    "anyarray",
+                    "anyelement",
+                    array_typeid,
+                    elem_typeid,
+                ));
+            }
+        }
+
+        if OidIsValid(multirange_typeid) {
+            let multirange_typelem = lsyscache::get_multirange_range(multirange_typeid)?;
+            if !OidIsValid(multirange_typelem) {
+                return Err(poly_mismatch(format!(
+                    "argument declared anymultirange is not a multirange type but type {}",
+                    format_type::format_type_be(multirange_typeid)?
+                )));
+            }
+            if !OidIsValid(range_typeid) {
+                range_typeid = multirange_typelem;
+            } else if multirange_typelem != range_typeid {
+                return Err(poly_not_consistent(
+                    "anymultirange",
+                    "anyrange",
+                    multirange_typeid,
+                    range_typeid,
+                ));
+            }
+        } else if have_anymultirange && OidIsValid(range_typeid) {
+            multirange_typeid = lsyscache::get_range_multirange(range_typeid)?;
+        }
+
+        if OidIsValid(range_typeid) {
+            let range_typelem = lsyscache::get_range_subtype(range_typeid)?;
+            if !OidIsValid(range_typelem) {
+                return Err(poly_mismatch(format!(
+                    "argument declared anyrange is not a range type but type {}",
+                    format_type::format_type_be(range_typeid)?
+                )));
+            }
+            if !OidIsValid(elem_typeid) {
+                elem_typeid = range_typelem;
+            } else if range_typelem != elem_typeid {
+                return Err(poly_not_consistent(
+                    "anyrange",
+                    "anyelement",
+                    range_typeid,
+                    elem_typeid,
+                ));
+            }
+        }
+
+        if !OidIsValid(elem_typeid) {
+            if allow_poly {
+                elem_typeid = ANYELEMENTOID;
+                array_typeid = ANYARRAYOID;
+                range_typeid = ANYRANGEOID;
+                multirange_typeid = ANYMULTIRANGEOID;
+            } else {
+                return Err(poly_mismatch(
+                    "could not determine polymorphic type because input has type unknown"
+                        .to_string(),
+                ));
+            }
+        }
+
+        if have_anynonarray
+            && elem_typeid != ANYELEMENTOID
+            && OidIsValid(lsyscache::get_base_element_type(elem_typeid)?)
+        {
+            return Err(poly_mismatch(format!(
+                "type matched to anynonarray is an array type: {}",
+                format_type::format_type_be(elem_typeid)?
+            )));
+        }
+        if have_anyenum
+            && elem_typeid != ANYELEMENTOID
+            && !lsyscache::type_is_enum(elem_typeid)?
+        {
+            return Err(poly_mismatch(format!(
+                "type matched to anyenum is not an enum type: {}",
+                format_type::format_type_be(elem_typeid)?
+            )));
+        }
+    }
+
+    if have_poly_anycompatible {
+        if OidIsValid(anycompatible_multirange_typeid) {
+            if OidIsValid(anycompatible_range_typeid) {
+                if anycompatible_multirange_typelem != anycompatible_range_typeid {
+                    return Err(poly_not_consistent(
+                        "anycompatiblemultirange",
+                        "anycompatiblerange",
+                        anycompatible_multirange_typeid,
+                        anycompatible_range_typeid,
+                    ));
+                }
+            } else {
+                anycompatible_range_typeid = anycompatible_multirange_typelem;
+                anycompatible_range_typelem =
+                    lsyscache::get_range_subtype(anycompatible_range_typeid)?;
+                if !OidIsValid(anycompatible_range_typelem) {
+                    return Err(poly_mismatch(format!(
+                        "argument declared anycompatiblemultirange is not a multirange type \
+                         but type {}",
+                        format_type::format_type_be(anycompatible_multirange_typeid)?
+                    )));
+                }
+                have_anycompatible_range = true;
+                anycompatible_actual_types[n_anycompatible_args] =
+                    anycompatible_range_typelem;
+                n_anycompatible_args += 1;
+            }
+        } else if have_anycompatible_multirange && OidIsValid(anycompatible_range_typeid) {
+            anycompatible_multirange_typeid =
+                lsyscache::get_range_multirange(anycompatible_range_typeid)?;
+        }
+
+        if n_anycompatible_args > 0 {
+            let types = &anycompatible_actual_types[..n_anycompatible_args];
+            anycompatible_typeid = select_common_type_from_oids(types, false)?;
+            if !verify_common_type_from_oids(anycompatible_typeid, types)? {
+                return Err(poly_mismatch(
+                    "arguments of anycompatible family cannot be cast to a common type"
+                        .to_string(),
+                ));
+            }
+            if have_anycompatible_array {
+                anycompatible_array_typeid = lsyscache::get_array_type(anycompatible_typeid)?;
+                if !OidIsValid(anycompatible_array_typeid) {
+                    return Err(no_array_type_for(anycompatible_typeid));
+                }
+            }
+            if have_anycompatible_range {
+                if !OidIsValid(anycompatible_range_typeid) {
+                    return Err(poly_mismatch(
+                        "could not determine polymorphic type anycompatiblerange because \
+                         input has type unknown"
+                            .to_string(),
+                    ));
+                }
+                if anycompatible_range_typelem != anycompatible_typeid {
+                    return Err(poly_mismatch(format!(
+                        "anycompatiblerange type {} does not match anycompatible type {}",
+                        format_type::format_type_be(anycompatible_range_typeid)?,
+                        format_type::format_type_be(anycompatible_typeid)?
+                    )));
+                }
+            }
+            if have_anycompatible_multirange {
+                if !OidIsValid(anycompatible_multirange_typeid) {
+                    return Err(poly_mismatch(
+                        "could not determine polymorphic type anycompatiblemultirange \
+                         because input has type unknown"
+                            .to_string(),
+                    ));
+                }
+                if anycompatible_range_typelem != anycompatible_typeid {
+                    return Err(poly_mismatch(format!(
+                        "anycompatiblemultirange type {} does not match anycompatible type {}",
+                        format_type::format_type_be(anycompatible_multirange_typeid)?,
+                        format_type::format_type_be(anycompatible_typeid)?
+                    )));
+                }
+            }
+            if have_anycompatible_nonarray
+                && OidIsValid(lsyscache::get_base_element_type(anycompatible_typeid)?)
+            {
+                return Err(poly_mismatch(format!(
+                    "type matched to anycompatiblenonarray is an array type: {}",
+                    format_type::format_type_be(anycompatible_typeid)?
+                )));
+            }
+        } else if allow_poly {
+            anycompatible_typeid = ANYCOMPATIBLEOID;
+            anycompatible_array_typeid = ANYCOMPATIBLEARRAYOID;
+            anycompatible_range_typeid = ANYCOMPATIBLERANGEOID;
+            anycompatible_multirange_typeid = ANYCOMPATIBLEMULTIRANGEOID;
+        } else {
+            anycompatible_typeid = types_core::catalog::TEXTOID;
+            anycompatible_array_typeid = lsyscache::get_array_type(anycompatible_typeid)?;
+            if have_anycompatible_range {
+                return Err(poly_mismatch(
+                    "could not determine polymorphic type anycompatiblerange because input \
+                     has type unknown"
+                        .to_string(),
+                ));
+            }
+            if have_anycompatible_multirange {
+                return Err(poly_mismatch(
+                    "could not determine polymorphic type anycompatiblemultirange because \
+                     input has type unknown"
+                        .to_string(),
+                ));
+            }
+        }
+
+        for j in 0..nargs {
+            match declared_arg_types[j] {
+                ANYCOMPATIBLEOID | ANYCOMPATIBLENONARRAYOID => {
+                    declared_arg_types[j] = anycompatible_typeid;
+                }
+                ANYCOMPATIBLEARRAYOID => declared_arg_types[j] = anycompatible_array_typeid,
+                ANYCOMPATIBLERANGEOID => declared_arg_types[j] = anycompatible_range_typeid,
+                ANYCOMPATIBLEMULTIRANGEOID => {
+                    declared_arg_types[j] = anycompatible_multirange_typeid;
+                }
+                _ => {}
+            }
+        }
+    } else {
+        anycompatible_typeid = InvalidOid;
+    }
+
+    if have_poly_unknowns {
+        for j in 0..nargs {
+            if actual_arg_types[j] != UNKNOWNOID {
+                continue;
+            }
+            match declared_arg_types[j] {
+                ANYELEMENTOID | ANYNONARRAYOID | ANYENUMOID => {
+                    declared_arg_types[j] = elem_typeid;
+                }
+                ANYARRAYOID => {
+                    if !OidIsValid(array_typeid) {
+                        array_typeid = lsyscache::get_array_type(elem_typeid)?;
+                        if !OidIsValid(array_typeid) {
+                            return Err(no_array_type_for(elem_typeid));
+                        }
+                    }
+                    declared_arg_types[j] = array_typeid;
+                }
+                ANYRANGEOID => {
+                    if !OidIsValid(range_typeid) {
+                        return Err(poly_mismatch(
+                            "could not determine polymorphic type anyrange because input \
+                             has type unknown"
+                                .to_string(),
+                        ));
+                    }
+                    declared_arg_types[j] = range_typeid;
+                }
+                ANYMULTIRANGEOID => {
+                    if !OidIsValid(multirange_typeid) {
+                        return Err(poly_mismatch(
+                            "could not determine polymorphic type anymultirange because \
+                             input has type unknown"
+                                .to_string(),
+                        ));
+                    }
+                    declared_arg_types[j] = multirange_typeid;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    match rettype {
+        ANYELEMENTOID | ANYNONARRAYOID | ANYENUMOID => Ok(elem_typeid),
+        ANYARRAYOID => {
+            if !OidIsValid(array_typeid) {
+                array_typeid = lsyscache::get_array_type(elem_typeid)?;
+                if !OidIsValid(array_typeid) {
+                    return Err(no_array_type_for(elem_typeid));
+                }
+            }
+            Ok(array_typeid)
+        }
+        ANYRANGEOID => {
+            assert!(OidIsValid(range_typeid), "could not determine anyrange result");
+            Ok(range_typeid)
+        }
+        ANYMULTIRANGEOID => {
+            assert!(OidIsValid(multirange_typeid), "could not determine anymultirange result");
+            Ok(multirange_typeid)
+        }
+        ANYCOMPATIBLEOID | ANYCOMPATIBLENONARRAYOID => {
+            assert!(OidIsValid(anycompatible_typeid), "could not identify anycompatible type");
+            Ok(anycompatible_typeid)
+        }
+        ANYCOMPATIBLEARRAYOID => {
+            assert!(
+                OidIsValid(anycompatible_array_typeid),
+                "could not identify anycompatiblearray type"
+            );
+            Ok(anycompatible_array_typeid)
+        }
+        ANYCOMPATIBLERANGEOID => {
+            assert!(
+                OidIsValid(anycompatible_range_typeid),
+                "could not identify anycompatiblerange type"
+            );
+            Ok(anycompatible_range_typeid)
+        }
+        ANYCOMPATIBLEMULTIRANGEOID => {
+            assert!(
+                OidIsValid(anycompatible_multirange_typeid),
+                "could not identify anycompatiblemultirange type"
+            );
+            Ok(anycompatible_multirange_typeid)
+        }
+        _ => Ok(rettype),
+    }
 }
 
 #[cold]

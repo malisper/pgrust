@@ -1122,15 +1122,16 @@ pub fn cost_windowagg<'mcx>(
     Ok(())
 }
 
-// get_windowclause_startup_tuples (costsize.c); OFFSET/UNBOUNDED-FOLLOWING
-// frame arms are unreachable (explicit frames loud at the grammar).
+// get_windowclause_startup_tuples (costsize.c).
 fn get_windowclause_startup_tuples<'mcx>(
     run: &mut PlannerRun<'mcx>,
     wc_node: Node<'mcx>,
     input_tuples: f64,
 ) -> PgResult<f64> {
     use types_nodes::rawnodes::{
-        FRAMEOPTION_END_CURRENT_ROW, FRAMEOPTION_GROUPS, FRAMEOPTION_RANGE, FRAMEOPTION_ROWS,
+        FRAMEOPTION_END_CURRENT_ROW, FRAMEOPTION_END_OFFSET_FOLLOWING,
+        FRAMEOPTION_END_OFFSET_PRECEDING, FRAMEOPTION_END_UNBOUNDED_FOLLOWING,
+        FRAMEOPTION_GROUPS, FRAMEOPTION_RANGE, FRAMEOPTION_ROWS,
     };
     let wc = wc_node.as_window_clause().expect("WindowClause");
     let frame_options = wc.frameOptions;
@@ -1165,7 +1166,9 @@ fn get_windowclause_startup_tuples<'mcx>(
     };
 
     let wc = wc_node.as_window_clause().expect("WindowClause");
-    let return_tuples = if frame_options & FRAMEOPTION_END_CURRENT_ROW != 0 {
+    let return_tuples = if frame_options & FRAMEOPTION_END_UNBOUNDED_FOLLOWING != 0 {
+        partition_tuples
+    } else if frame_options & FRAMEOPTION_END_CURRENT_ROW != 0 {
         if frame_options & FRAMEOPTION_ROWS != 0 {
             1.0
         } else if frame_options & (FRAMEOPTION_RANGE | FRAMEOPTION_GROUPS) != 0 {
@@ -1173,11 +1176,34 @@ fn get_windowclause_startup_tuples<'mcx>(
         } else {
             unreachable!()
         }
+    } else if frame_options & FRAMEOPTION_END_OFFSET_PRECEDING != 0 {
+        1.0
+    } else if frame_options & FRAMEOPTION_END_OFFSET_FOLLOWING != 0 {
+        let end_offset_value = match wc.endOffset.and_then(|n| n.as_const()) {
+            Some(c) => {
+                if c.constisnull {
+                    // NULL errors at execution; assume one row/range/group.
+                    1.0
+                } else {
+                    match c.consttype {
+                        types_core::catalog::INT2OID => c.constvalue.as_i16() as f64,
+                        types_core::catalog::INT4OID => c.constvalue.as_i32() as f64,
+                        types_core::catalog::INT8OID => c.constvalue.as_i64() as f64,
+                        _ => partition_tuples / peer_tuples * crate::selfuncs::DEFAULT_INEQ_SEL,
+                    }
+                }
+            }
+            None => partition_tuples / peer_tuples * crate::selfuncs::DEFAULT_INEQ_SEL,
+        };
+        if frame_options & FRAMEOPTION_ROWS != 0 {
+            end_offset_value + 1.0
+        } else if frame_options & (FRAMEOPTION_RANGE | FRAMEOPTION_GROUPS) != 0 {
+            peer_tuples * (end_offset_value + 1.0)
+        } else {
+            unreachable!()
+        }
     } else {
-        panic!(
-            "get_windowclause_startup_tuples (costsize.c): frame options {frame_options:#x} \
-             unported (explicit frames loud at the grammar)"
-        );
+        unreachable!()
     };
 
     let return_tuples = if !wc.partitionClause.is_nil() || !wc.orderClause.is_nil() {

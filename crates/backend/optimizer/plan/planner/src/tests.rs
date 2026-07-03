@@ -221,10 +221,16 @@ fn install_scan_fixtures() {
             aggcombinefn: 463,
             aggserialfn: 0,
             aggdeserialfn: 0,
+            aggmtransfn: 0,
+            aggminvtransfn: 0,
+            aggmfinalfn: 0,
             aggfinalextra: false,
+            aggmfinalextra: false,
             aggfinalmodify: b'r' as i8,
+            aggmfinalmodify: b'r' as i8,
             aggtranstype: 20,
             aggtransspace: 0,
+            aggmtranstype: 0,
         };
         Ok(match aggfnoid {
             2803 => Some(shape(1219)),

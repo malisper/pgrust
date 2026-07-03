@@ -702,9 +702,7 @@ fn show_hashagg_info<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) -> PgR
     Ok(())
 }
 
-// show_window_def + show_window_keys (explain.c); the frame-options string is
-// dead while frameOptions stays FRAMEOPTION_DEFAULTS (optimize_window_clauses
-// unported, explicit frames loud at the grammar).
+// show_window_def + show_window_keys (explain.c).
 fn show_window_def<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) -> PgResult<()> {
     use types_nodes::rawnodes::FRAMEOPTION_NONDEFAULT;
     let wagg = node.as_window_agg().expect("WindowAgg node");
@@ -743,10 +741,101 @@ fn show_window_def<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) -> PgRes
         keys(&mut buf, es, wagg.ordColIdx)?;
     }
     if wagg.frameOptions & FRAMEOPTION_NONDEFAULT != 0 {
-        node_gap("show_window_def", "nondefault frame options display unported");
+        if needspace || wagg.ordNumCols > 0 {
+            buf.try_push(' ')?;
+        }
+        get_window_frame_options(
+            wagg.frameOptions,
+            wagg.startOffset,
+            wagg.endOffset,
+            node,
+            es,
+            &mut buf,
+        )?;
     }
     buf.try_push(')')?;
     ExplainPropertyText("Window", buf.as_str(), es);
+    Ok(())
+}
+
+// get_window_frame_options (ruleutils.c); offsets deparse through the
+// Const/expr slice with the WindowAgg itself as deparse context.
+fn get_window_frame_options<'mcx>(
+    frame_options: i32,
+    start_offset: Option<Node<'mcx>>,
+    end_offset: Option<Node<'mcx>>,
+    plan_node: Node<'mcx>,
+    es: &ExplainState<'mcx>,
+    buf: &mut PgString<'mcx>,
+) -> PgResult<()> {
+    use types_nodes::rawnodes::{
+        FRAMEOPTION_BETWEEN, FRAMEOPTION_END_CURRENT_ROW, FRAMEOPTION_END_OFFSET,
+        FRAMEOPTION_END_OFFSET_FOLLOWING, FRAMEOPTION_END_OFFSET_PRECEDING,
+        FRAMEOPTION_END_UNBOUNDED_FOLLOWING, FRAMEOPTION_EXCLUDE_CURRENT_ROW,
+        FRAMEOPTION_EXCLUDE_GROUP, FRAMEOPTION_EXCLUDE_TIES, FRAMEOPTION_GROUPS,
+        FRAMEOPTION_NONDEFAULT, FRAMEOPTION_RANGE, FRAMEOPTION_ROWS,
+        FRAMEOPTION_START_CURRENT_ROW, FRAMEOPTION_START_OFFSET,
+        FRAMEOPTION_START_OFFSET_FOLLOWING, FRAMEOPTION_START_OFFSET_PRECEDING,
+        FRAMEOPTION_START_UNBOUNDED_PRECEDING,
+    };
+    debug_assert!(frame_options & FRAMEOPTION_NONDEFAULT != 0);
+    let useprefix = es.rtable_size > 1 || es.verbose;
+    if frame_options & FRAMEOPTION_RANGE != 0 {
+        buf.try_push_str("RANGE ")?;
+    } else if frame_options & FRAMEOPTION_ROWS != 0 {
+        buf.try_push_str("ROWS ")?;
+    } else if frame_options & FRAMEOPTION_GROUPS != 0 {
+        buf.try_push_str("GROUPS ")?;
+    } else {
+        unreachable!()
+    }
+    if frame_options & FRAMEOPTION_BETWEEN != 0 {
+        buf.try_push_str("BETWEEN ")?;
+    }
+    if frame_options & FRAMEOPTION_START_UNBOUNDED_PRECEDING != 0 {
+        buf.try_push_str("UNBOUNDED PRECEDING ")?;
+    } else if frame_options & FRAMEOPTION_START_CURRENT_ROW != 0 {
+        buf.try_push_str("CURRENT ROW ")?;
+    } else if frame_options & FRAMEOPTION_START_OFFSET != 0 {
+        deparse_expr(es, plan_node, start_offset.expect("startOffset"), useprefix, buf)?;
+        if frame_options & FRAMEOPTION_START_OFFSET_PRECEDING != 0 {
+            buf.try_push_str(" PRECEDING ")?;
+        } else if frame_options & FRAMEOPTION_START_OFFSET_FOLLOWING != 0 {
+            buf.try_push_str(" FOLLOWING ")?;
+        } else {
+            unreachable!()
+        }
+    } else {
+        unreachable!()
+    }
+    if frame_options & FRAMEOPTION_BETWEEN != 0 {
+        buf.try_push_str("AND ")?;
+        if frame_options & FRAMEOPTION_END_UNBOUNDED_FOLLOWING != 0 {
+            buf.try_push_str("UNBOUNDED FOLLOWING ")?;
+        } else if frame_options & FRAMEOPTION_END_CURRENT_ROW != 0 {
+            buf.try_push_str("CURRENT ROW ")?;
+        } else if frame_options & FRAMEOPTION_END_OFFSET != 0 {
+            deparse_expr(es, plan_node, end_offset.expect("endOffset"), useprefix, buf)?;
+            if frame_options & FRAMEOPTION_END_OFFSET_PRECEDING != 0 {
+                buf.try_push_str(" PRECEDING ")?;
+            } else if frame_options & FRAMEOPTION_END_OFFSET_FOLLOWING != 0 {
+                buf.try_push_str(" FOLLOWING ")?;
+            } else {
+                unreachable!()
+            }
+        } else {
+            unreachable!()
+        }
+    }
+    if frame_options & FRAMEOPTION_EXCLUDE_CURRENT_ROW != 0 {
+        buf.try_push_str("EXCLUDE CURRENT ROW ")?;
+    } else if frame_options & FRAMEOPTION_EXCLUDE_GROUP != 0 {
+        buf.try_push_str("EXCLUDE GROUP ")?;
+    } else if frame_options & FRAMEOPTION_EXCLUDE_TIES != 0 {
+        buf.try_push_str("EXCLUDE TIES ")?;
+    }
+    let len = buf.as_str().len();
+    buf.truncate(len - 1);
     Ok(())
 }
 

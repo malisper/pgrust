@@ -53,13 +53,15 @@ fn frameoption_defaults_value_matches_c() {
 }
 
 #[test]
-#[should_panic(expected = "frameOptions")]
-fn explicit_frame_panics_at_init() {
+#[should_panic(expected = "GROUPS frame mode")]
+fn groups_frame_panics_at_init() {
     let mcx = leaked_mcx();
     let node = Node::mk(
         mcx,
         WindowAgg {
-            frameOptions: (FRAMEOPTION_DEFAULTS & !FRAMEOPTION_RANGE) | FRAMEOPTION_ROWS,
+            frameOptions: (FRAMEOPTION_DEFAULTS & !FRAMEOPTION_RANGE)
+                | types_nodes::rawnodes::FRAMEOPTION_GROUPS
+                | types_nodes::rawnodes::FRAMEOPTION_NONDEFAULT,
             ..Default::default()
         },
     )

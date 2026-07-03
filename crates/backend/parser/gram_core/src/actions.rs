@@ -17,7 +17,13 @@ use types_nodes::JoinType;
 use types_nodes::rawnodes::A_Expr_Kind::AEXPR_OP;
 use types_nodes::rawnodes::{
     ColumnDef, Constraint, ConstrType, CreateStmt, IndexElem, IndexStmt, OnCommitAction,
-    RangeSubselect, WindowDef, FRAMEOPTION_DEFAULTS,
+    RangeSubselect, WindowDef, FRAMEOPTION_BETWEEN, FRAMEOPTION_DEFAULTS,
+    FRAMEOPTION_END_CURRENT_ROW, FRAMEOPTION_END_OFFSET_PRECEDING,
+    FRAMEOPTION_END_UNBOUNDED_PRECEDING, FRAMEOPTION_EXCLUDE_CURRENT_ROW,
+    FRAMEOPTION_EXCLUDE_GROUP, FRAMEOPTION_EXCLUDE_TIES, FRAMEOPTION_GROUPS,
+    FRAMEOPTION_NONDEFAULT, FRAMEOPTION_RANGE, FRAMEOPTION_ROWS, FRAMEOPTION_START_CURRENT_ROW,
+    FRAMEOPTION_START_OFFSET_FOLLOWING, FRAMEOPTION_START_OFFSET_PRECEDING,
+    FRAMEOPTION_START_UNBOUNDED_FOLLOWING, FRAMEOPTION_START_UNBOUNDED_PRECEDING,
 };
 use types_nodes::{
     Alias, DeleteStmt, InsertStmt, Node, NodeList, NodeTag, RangeFunction, RangeVar, RawStmt,
@@ -2431,13 +2437,123 @@ impl<'mcx> Parser<'mcx> {
                 n.location = view.l(1);
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
-            // opt_frame_clause: /*EMPTY*/ (RANGE/ROWS/GROUPS arms 2241-2243
-            // stay unimplemented-rule louds: explicit frames unported).
+            // opt_frame_clause: RANGE|ROWS|GROUPS frame_extent
+            // opt_window_exclusion_clause
+            2241 | 2242 | 2243 => {
+                let n = view.v(2).node().expect("frame_extent");
+                let mode = match rule {
+                    2241 => FRAMEOPTION_RANGE,
+                    2242 => FRAMEOPTION_ROWS,
+                    _ => FRAMEOPTION_GROUPS,
+                };
+                let exclusion = view.v(3).ival();
+                // SAFETY: tree is parser-owned; no derived refs live.
+                unsafe {
+                    n.with_mut::<WindowDef, _>(|w| {
+                        w.frameOptions |= FRAMEOPTION_NONDEFAULT | mode | exclusion;
+                    })
+                    .expect("WindowDef");
+                }
+                *yyval = YYSTYPE::Node(Some(n));
+            }
             2244 => {
                 let mut n = Node::build::<WindowDef>(mcx)?;
                 n.frameOptions = FRAMEOPTION_DEFAULTS;
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
+            // frame_extent: frame_bound
+            2245 => {
+                let n = view.v(1).node().expect("frame_bound");
+                let fo = n.as_window_def().expect("WindowDef").frameOptions;
+                if fo & FRAMEOPTION_START_UNBOUNDED_FOLLOWING != 0 {
+                    return Err(self.windowing_error(
+                        "frame start cannot be UNBOUNDED FOLLOWING",
+                        view.l(1),
+                    ));
+                }
+                if fo & FRAMEOPTION_START_OFFSET_FOLLOWING != 0 {
+                    return Err(self.windowing_error(
+                        "frame starting from following row cannot end with current row",
+                        view.l(1),
+                    ));
+                }
+                // SAFETY: tree is parser-owned; no derived refs live.
+                unsafe {
+                    n.with_mut::<WindowDef, _>(|w| {
+                        w.frameOptions |= FRAMEOPTION_END_CURRENT_ROW;
+                    })
+                    .expect("WindowDef");
+                }
+                *yyval = YYSTYPE::Node(Some(n));
+            }
+            // frame_extent: BETWEEN frame_bound AND frame_bound
+            2246 => {
+                let n1 = view.v(2).node().expect("frame_bound");
+                let n2 = view.v(4).node().expect("frame_bound");
+                let n2 = n2.as_window_def().expect("WindowDef");
+                let mut fo = n1.as_window_def().expect("WindowDef").frameOptions;
+                fo |= n2.frameOptions << 1;
+                fo |= FRAMEOPTION_BETWEEN;
+                if fo & FRAMEOPTION_START_UNBOUNDED_FOLLOWING != 0 {
+                    return Err(self.windowing_error(
+                        "frame start cannot be UNBOUNDED FOLLOWING",
+                        view.l(2),
+                    ));
+                }
+                if fo & FRAMEOPTION_END_UNBOUNDED_PRECEDING != 0 {
+                    return Err(self.windowing_error(
+                        "frame end cannot be UNBOUNDED PRECEDING",
+                        view.l(4),
+                    ));
+                }
+                if fo & FRAMEOPTION_START_CURRENT_ROW != 0
+                    && fo & FRAMEOPTION_END_OFFSET_PRECEDING != 0
+                {
+                    return Err(self.windowing_error(
+                        "frame starting from current row cannot have preceding rows",
+                        view.l(4),
+                    ));
+                }
+                if fo & FRAMEOPTION_START_OFFSET_FOLLOWING != 0
+                    && fo & (FRAMEOPTION_END_OFFSET_PRECEDING | FRAMEOPTION_END_CURRENT_ROW) != 0
+                {
+                    return Err(self.windowing_error(
+                        "frame starting from following row cannot have preceding rows",
+                        view.l(4),
+                    ));
+                }
+                let end_offset = n2.startOffset;
+                // SAFETY: tree is parser-owned; no derived refs live.
+                unsafe {
+                    n1.with_mut::<WindowDef, _>(|w| {
+                        w.frameOptions = fo;
+                        w.endOffset = end_offset;
+                    })
+                    .expect("WindowDef");
+                }
+                *yyval = YYSTYPE::Node(Some(n1));
+            }
+            // frame_bound: UNBOUNDED PRECEDING | UNBOUNDED FOLLOWING |
+            // CURRENT ROW | a_expr PRECEDING | a_expr FOLLOWING
+            2247..=2251 => {
+                let mut n = Node::build::<WindowDef>(mcx)?;
+                n.frameOptions = match rule {
+                    2247 => FRAMEOPTION_START_UNBOUNDED_PRECEDING,
+                    2248 => FRAMEOPTION_START_UNBOUNDED_FOLLOWING,
+                    2249 => FRAMEOPTION_START_CURRENT_ROW,
+                    2250 => FRAMEOPTION_START_OFFSET_PRECEDING,
+                    _ => FRAMEOPTION_START_OFFSET_FOLLOWING,
+                };
+                if rule >= 2250 {
+                    n.startOffset = view.v(1).node();
+                }
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // opt_window_exclusion_clause
+            2252 => *yyval = YYSTYPE::Ival(FRAMEOPTION_EXCLUDE_CURRENT_ROW),
+            2253 => *yyval = YYSTYPE::Ival(FRAMEOPTION_EXCLUDE_GROUP),
+            2254 => *yyval = YYSTYPE::Ival(FRAMEOPTION_EXCLUDE_TIES),
+            2255 | 2256 => *yyval = YYSTYPE::Ival(0),
             // opt_drop_behavior: CASCADE | RESTRICT | /*EMPTY*/.
             143 => *yyval = YYSTYPE::Ival(DropBehavior::DROP_CASCADE as i32),
             144 | 145 => *yyval = YYSTYPE::Ival(DropBehavior::DROP_RESTRICT as i32),
@@ -2746,6 +2862,14 @@ impl<'mcx> Parser<'mcx> {
         Box::new(
             (*self.errposition_error(message.into(), location))
                 .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE),
+        )
+    }
+
+    #[cold]
+    fn windowing_error(&self, message: &str, location: i32) -> Box<types_error::PgError> {
+        Box::new(
+            (*self.errposition_error(message.into(), location))
+                .with_sqlstate(types_error::ERRCODE_WINDOWING_ERROR),
         )
     }
 }

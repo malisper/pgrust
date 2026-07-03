@@ -13,6 +13,8 @@ types_nodes = { path = "../../../_support/types/nodes" }
 types_slot = { path = "../../../_support/types/types_slot" }
 types_tuple = { path = "../../../_support/types/types_tuple" }
 adt_int8 = { path = "../../utils/adt/int8" }
+fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
+types_fmgr = { path = "../../../_support/types/fmgr" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
 aclchk_seams = { path = "../../catalog/aclchk_seams" }
