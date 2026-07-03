@@ -126,12 +126,15 @@ where
         }
 
         if node.datumSort {
-            while let Some(id) = fetch_outer(estate)? {
-                let slot = estate.slot_mut(id);
-                exectuples::slot_getsomeattrs(slot, 1);
-                let base = slot.base();
-                ts.putdatum(base.tts_values[0], base.tts_isnull[0])?;
-            }
+            ts.putdatum_batch(|p| {
+                while let Some(id) = fetch_outer(estate)? {
+                    let slot = estate.slot_mut(id);
+                    exectuples::slot_getsomeattrs(slot, 1);
+                    let base = slot.base();
+                    p.put(base.tts_values[0], base.tts_isnull[0])?;
+                }
+                Ok(())
+            })?;
         } else {
             while let Some(id) = fetch_outer(estate)? {
                 ts.puttupleslot(estate.slot_mut(id), mcx)?;
