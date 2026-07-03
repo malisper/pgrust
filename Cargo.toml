@@ -494,6 +494,8 @@ members = [
     "crates/backend/utils/adt/acl",
     "crates/backend/catalog/aclchk",
     "crates/backend/commands/copy",
+    "crates/backend/commands/createas",
+    "crates/backend/commands/createas_seams",
     "crates/backend/commands/dbcommands",
     "crates/backend/commands/schemacmds",
     "crates/backend/commands/functioncmds",

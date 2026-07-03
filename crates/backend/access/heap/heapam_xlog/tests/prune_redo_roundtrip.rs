@@ -778,7 +778,7 @@ fn prune_freeze_visible_redo_rebuilds_pages_byte_exact() {
     for v in 1u8..=3 {
         let img = raw_tuple(0, &vec![v; WIDE - 24]);
         let mut tup = make_writable_tuple(&img);
-        heap_insert(&rel, &mut tup, 7, 0).unwrap();
+        heap_insert(&rel, &mut tup, 7, 0, None).unwrap();
         assert_eq!(tup.t_self, ItemPointerData::new(0, v as u16));
     }
     assert_eq!(xact::GetTopTransactionIdIfAny(), COMMITTED_XID);
@@ -788,7 +788,7 @@ fn prune_freeze_visible_redo_rebuilds_pages_byte_exact() {
     {
         let img = raw_tuple(0, &vec![4u8; WIDE - 24]);
         let mut tup = make_writable_tuple(&img);
-        heap_insert(&rel, &mut tup, 7, 0).unwrap();
+        heap_insert(&rel, &mut tup, 7, 0, None).unwrap();
         assert_eq!(tup.t_self, ItemPointerData::new(0, 4));
     }
     assert_eq!(xact::GetTopTransactionIdIfAny(), ABORTED_XID);
@@ -830,7 +830,7 @@ fn prune_freeze_visible_redo_rebuilds_pages_byte_exact() {
     for v in 5u8..=13 {
         let img = raw_tuple(0, &vec![v; WIDE - 24]);
         let mut tup = make_writable_tuple(&img);
-        heap_insert(&rel, &mut tup, 7, 0).unwrap();
+        heap_insert(&rel, &mut tup, 7, 0, None).unwrap();
         let want = if v <= 9 {
             ItemPointerData::new(1, (v - 4) as u16)
         } else {

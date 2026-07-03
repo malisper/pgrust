@@ -2044,6 +2044,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "commands_createas"
+version = "0.1.0"
+dependencies = [
+ "catalog_namespace",
+ "catalog_toasting",
+ "createas_seams",
+ "elog",
+ "elog_seams",
+ "execmain_seams",
+ "format_type",
+ "guc_tables",
+ "heapam",
+ "lsyscache",
+ "mcx",
+ "parse_expr",
+ "postgres",
+ "rel_vocab",
+ "rewrite_handler_seams",
+ "snapmgr",
+ "table",
+ "tableam",
+ "tableam_vocab",
+ "tablecmds",
+ "tcop_dest",
+ "types_core",
+ "types_dest",
+ "types_error",
+ "types_nodes",
+ "types_portal",
+ "types_rel",
+ "types_scan",
+ "types_slot",
+ "types_tuple",
+ "xact",
+]
+
+[[package]]
 name = "commands_tablespace"
 version = "0.0.0"
 dependencies = [
@@ -2322,6 +2359,21 @@ dependencies = [
 [[package]]
 name = "crc32c"
 version = "0.1.0"
+
+[[package]]
+name = "createas_seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "seam_core",
+ "tableam_vocab",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_rel",
+ "types_slot",
+ "types_tuple",
+]
 
 [[package]]
 name = "crypt"
@@ -8117,6 +8169,7 @@ dependencies = [
  "commands_analyze",
  "commands_async",
  "commands_cluster",
+ "commands_createas",
  "commands_tablespace",
  "commands_vacuum",
  "condition_variable",
@@ -9228,6 +9281,7 @@ name = "tcop_dest"
 version = "0.1.0"
 dependencies = [
  "cmdtag",
+ "createas_seams",
  "mcx",
  "pqcomm_seams",
  "pqformat",
@@ -9900,6 +9954,7 @@ dependencies = [
  "commands_async",
  "commands_cluster",
  "commands_comment",
+ "commands_createas",
  "commands_vacuum",
  "copy_cmd",
  "dbcommands",
