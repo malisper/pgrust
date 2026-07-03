@@ -779,6 +779,6 @@ pub fn expr_collation(node: Node<'_>) -> u32 {
         NodeTag::T_CoerceViaIO => node.as_coerce_via_io().unwrap().resultcollid,
         NodeTag::T_CoerceToDomain => node.as_coerce_to_domain().unwrap().resultcollid,
         NodeTag::T_CoerceToDomainValue => node.as_coerce_to_domain_value().unwrap().collation,
-        other => panic!("exprCollation (nodeFuncs.c): {other:?}; M2 expression lane"),
+        _ => nodes_core::expr_collation(node),
     }
 }

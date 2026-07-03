@@ -107,7 +107,7 @@ pub fn DefineIndex<'mcx>(
         CheckPredicate(mcx, wc)?;
     }
 
-    let root_save_nestlevel = guc::NewGUCNestLevel();
+    let mut root_save_nestlevel = guc::NewGUCNestLevel();
     guc::RestrictSearchPath()?;
 
     let numberOfKeyAttributes = stmt.indexParams.len();
@@ -224,6 +224,7 @@ pub fn DefineIndex<'mcx>(
         accessMethodId,
         amname,
         amcanorder,
+        &mut root_save_nestlevel,
     )?;
 
     for i in 0..numberOfAttributes {
@@ -362,6 +363,7 @@ fn ComputeIndexAttrs<'mcx>(
     accessMethodId: Oid,
     amname: &str,
     amcanorder: bool,
+    ddl_save_nestlevel: &mut i32,
 ) -> PgResult<()> {
     for (attn, node) in attList.iter().enumerate() {
         let attribute = node
@@ -411,7 +413,11 @@ fn ComputeIndexAttrs<'mcx>(
         // COLLATE clause overrides either leg's collation (indexcmds.c:2050-2062,
         // resolved before the collatable check).
         if !attribute.collation.is_nil() {
-            attcollation = catalog_namespace::get_collation_oid_list(&attribute.collation, false)?;
+            guc::AtEOXact_GUC(false, *ddl_save_nestlevel);
+            let resolved = catalog_namespace::get_collation_oid_list(&attribute.collation, false);
+            *ddl_save_nestlevel = guc::NewGUCNestLevel();
+            guc::RestrictSearchPath()?;
+            attcollation = resolved?;
         }
 
         if lsyscache::type_is_collatable(atttype)? {
@@ -435,10 +441,19 @@ fn ComputeIndexAttrs<'mcx>(
         }
         collationIds[attn] = attcollation;
 
-        if !attribute.opclass.is_nil() {
-            opclassIds[attn] = ResolveOpClass(&attribute.opclass, atttype, amname, accessMethodId)?;
+        // Opclass (and collation above) resolve under the DDL owner's original
+        // search path: the RestrictSearchPath nest level pops around the
+        // lookup (indexcmds.c ComputeIndexAttrs, ddl_save_nestlevel dance).
+        guc::AtEOXact_GUC(false, *ddl_save_nestlevel);
+        let resolved = if !attribute.opclass.is_nil() {
+            ResolveOpClass(&attribute.opclass, atttype, amname, accessMethodId)
         } else {
-            opclassIds[attn] = GetDefaultOpClass(atttype, accessMethodId)?;
+            GetDefaultOpClass(atttype, accessMethodId)
+        };
+        *ddl_save_nestlevel = guc::NewGUCNestLevel();
+        guc::RestrictSearchPath()?;
+        opclassIds[attn] = resolved?;
+        if attribute.opclass.is_nil() {
             if opclassIds[attn] == InvalidOid {
                 return Err(err(
                     format!(

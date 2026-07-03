@@ -363,6 +363,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "adt_jsonpath"
+version = "0.1.0"
+dependencies = [
+ "adt_json",
+ "adt_numeric",
+ "datum",
+ "mbutils",
+ "mcx",
+ "numutils",
+ "pqformat",
+ "regex_core",
+ "stack_depth",
+ "stringinfo",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_tuple",
+ "varlena",
+ "wchar",
+]
+
+[[package]]
 name = "adt_like"
 version = "0.1.0"
 dependencies = [
@@ -807,6 +829,8 @@ dependencies = [
  "datum",
  "heaptuple",
  "mcx",
+ "nbt_validate",
+ "syscache_seams",
  "types_core",
  "types_error",
  "types_pathnodes",
@@ -2222,6 +2246,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "commands_define"
+version = "0.0.0"
+dependencies = [
+ "adt_int8",
+ "mcx",
+ "types_error",
+ "types_nodes",
+]
+
+[[package]]
 name = "commands_matview"
 version = "0.1.0"
 dependencies = [
@@ -3354,6 +3388,7 @@ dependencies = [
  "adt_int8",
  "adt_json",
  "adt_jsonb",
+ "adt_jsonpath",
  "adt_like",
  "adt_mac",
  "adt_mac8",
@@ -4287,6 +4322,18 @@ name = "ifaddr"
 version = "0.0.0"
 
 [[package]]
+name = "index_amvalidate"
+version = "0.0.0"
+dependencies = [
+ "coerce",
+ "lsyscache",
+ "mcx",
+ "syscache_seams",
+ "types_core",
+ "types_error",
+]
+
+[[package]]
 name = "indexam"
 version = "0.1.0"
 dependencies = [
@@ -5100,6 +5147,25 @@ dependencies = [
  "types_core",
  "types_error",
  "types_fmgr",
+]
+
+[[package]]
+name = "nbt_validate"
+version = "0.0.0"
+dependencies = [
+ "adt_regproc",
+ "elog",
+ "format_type",
+ "index_amvalidate",
+ "lsyscache",
+ "mcx",
+ "syscache_seams",
+ "types_core",
+ "types_error",
+ "types_nbtree",
+ "types_relscan",
+ "types_scan",
+ "xact",
 ]
 
 [[package]]
@@ -5919,6 +5985,73 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
+name = "opclasscmds"
+version = "0.0.0"
+dependencies = [
+ "aclchk",
+ "adt_acl",
+ "amapi",
+ "cache_syscache",
+ "catalog",
+ "catalog_dependency",
+ "catalog_indexing",
+ "catalog_namespace",
+ "commands_define",
+ "datum",
+ "format_type",
+ "heaptuple",
+ "lsyscache",
+ "mcx",
+ "miscinit",
+ "parse_func",
+ "parse_oper",
+ "parse_utilcmd",
+ "pg_depend",
+ "superuser",
+ "syscache_seams",
+ "table",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_nbtree",
+ "types_nodes",
+ "types_rel",
+ "types_relscan",
+ "types_tuple",
+]
+
+[[package]]
+name = "operatorcmds"
+version = "0.0.0"
+dependencies = [
+ "aclchk",
+ "adt_acl",
+ "cache_syscache",
+ "catalog_indexing",
+ "catalog_namespace",
+ "commands_define",
+ "datum",
+ "dependency_seams",
+ "elog",
+ "format_type",
+ "heaptuple",
+ "lsyscache",
+ "mcx",
+ "miscinit",
+ "parse_func",
+ "parse_oper",
+ "parse_utilcmd",
+ "pg_depend",
+ "pg_operator",
+ "superuser",
+ "table",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_rel",
+]
+
+[[package]]
 name = "origin_seams"
 version = "0.0.0"
 dependencies = [
@@ -6093,6 +6226,7 @@ dependencies = [
  "mcx",
  "miscinit_seams",
  "parse_agg",
+ "parse_utilcmd",
  "parser_small1",
  "readfuncs",
  "syscache_seams",
@@ -6118,6 +6252,7 @@ dependencies = [
  "mcx",
  "miscinit_seams",
  "parse_func",
+ "parse_utilcmd",
  "parser_small1",
  "syscache_seams",
  "typcache",
@@ -6664,6 +6799,36 @@ dependencies = [
  "types_error",
  "types_rel",
  "types_tuple",
+]
+
+[[package]]
+name = "pg_operator"
+version = "0.0.0"
+dependencies = [
+ "aclchk",
+ "adt_acl",
+ "cache_syscache",
+ "catalog",
+ "catalog_dependency",
+ "catalog_indexing",
+ "catalog_namespace",
+ "commands_define",
+ "datum",
+ "heaptuple",
+ "lsyscache",
+ "mcx",
+ "miscinit",
+ "parse_oper",
+ "pg_depend",
+ "superuser",
+ "syscache_seams",
+ "table",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_rel",
+ "types_tuple",
+ "xact",
 ]
 
 [[package]]
@@ -8813,6 +8978,8 @@ dependencies = [
  "nodesort",
  "nodeunique",
  "nodewindowagg",
+ "opclasscmds",
+ "operatorcmds",
  "parallel",
  "parse_clause",
  "parse_collate",
@@ -10683,6 +10850,8 @@ dependencies = [
  "lsyscache",
  "mcx",
  "miscinit",
+ "opclasscmds",
+ "operatorcmds",
  "parallel_seams",
  "parse_clause",
  "parse_utilcmd",

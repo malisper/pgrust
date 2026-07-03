@@ -358,6 +358,75 @@ fn collect_aggrefs<'mcx>(
                 collect_aggrefs(a, out);
             }
         }
+        NodeTag::T_Param
+        | NodeTag::T_CaseTestExpr
+        | NodeTag::T_SQLValueFunction
+        | NodeTag::T_NextValueExpr
+        | NodeTag::T_CoerceToDomainValue => {}
+        NodeTag::T_RelabelType => collect_aggrefs(node.as_relabel_type().unwrap().arg, out),
+        NodeTag::T_CoerceViaIO => collect_aggrefs(node.as_coerce_via_io().unwrap().arg, out),
+        NodeTag::T_CoerceToDomain => {
+            collect_aggrefs(node.as_coerce_to_domain().unwrap().arg, out)
+        }
+        NodeTag::T_BoolExpr => {
+            for a in node.as_bool_expr().unwrap().args.iter() {
+                collect_aggrefs(a, out);
+            }
+        }
+        NodeTag::T_NullTest => {
+            if let Some(a) = node.as_null_test().unwrap().arg {
+                collect_aggrefs(a, out);
+            }
+        }
+        NodeTag::T_BooleanTest => {
+            if let Some(a) = node.as_boolean_test().unwrap().arg {
+                collect_aggrefs(a, out);
+            }
+        }
+        NodeTag::T_DistinctExpr => {
+            for a in node.as_distinct_expr().unwrap().args.iter() {
+                collect_aggrefs(a, out);
+            }
+        }
+        NodeTag::T_ScalarArrayOpExpr => {
+            for a in node.as_scalar_array_op_expr().unwrap().args.iter() {
+                collect_aggrefs(a, out);
+            }
+        }
+        NodeTag::T_ArrayExpr => {
+            for e in node.as_array_expr().unwrap().elements.iter() {
+                collect_aggrefs(e, out);
+            }
+        }
+        NodeTag::T_RowExpr => {
+            for a in node.as_row_expr().unwrap().args.iter() {
+                collect_aggrefs(a, out);
+            }
+        }
+        NodeTag::T_CaseExpr => {
+            let c = node.as_case_expr().unwrap();
+            if let Some(a) = c.arg {
+                collect_aggrefs(a, out);
+            }
+            for w in c.args.iter() {
+                let cw = w.as_case_when().expect("CaseWhen");
+                collect_aggrefs(cw.expr.expect("CaseWhen.expr"), out);
+                collect_aggrefs(cw.result.expect("CaseWhen.result"), out);
+            }
+            if let Some(d) = c.defresult {
+                collect_aggrefs(d, out);
+            }
+        }
+        NodeTag::T_CoalesceExpr => {
+            for a in node.as_coalesce_expr().unwrap().args.iter() {
+                collect_aggrefs(a, out);
+            }
+        }
+        NodeTag::T_MinMaxExpr => {
+            for a in node.as_min_max_expr().unwrap().args.iter() {
+                collect_aggrefs(a, out);
+            }
+        }
         tag => panic!("ExecInitAgg (nodeAgg.c): Agg tlist node family {tag:?} not ported"),
     }
 }
@@ -742,6 +811,75 @@ fn collect_base_var_cols(node: Node<'_>, out: &mut PgVec<'_, bool>) {
         }
         NodeTag::T_OpExpr => {
             for a in node.as_op_expr().unwrap().args.iter() {
+                collect_base_var_cols(a, out);
+            }
+        }
+        NodeTag::T_Param
+        | NodeTag::T_CaseTestExpr
+        | NodeTag::T_SQLValueFunction
+        | NodeTag::T_NextValueExpr
+        | NodeTag::T_CoerceToDomainValue => {}
+        NodeTag::T_RelabelType => collect_base_var_cols(node.as_relabel_type().unwrap().arg, out),
+        NodeTag::T_CoerceViaIO => collect_base_var_cols(node.as_coerce_via_io().unwrap().arg, out),
+        NodeTag::T_CoerceToDomain => {
+            collect_base_var_cols(node.as_coerce_to_domain().unwrap().arg, out)
+        }
+        NodeTag::T_BoolExpr => {
+            for a in node.as_bool_expr().unwrap().args.iter() {
+                collect_base_var_cols(a, out);
+            }
+        }
+        NodeTag::T_NullTest => {
+            if let Some(a) = node.as_null_test().unwrap().arg {
+                collect_base_var_cols(a, out);
+            }
+        }
+        NodeTag::T_BooleanTest => {
+            if let Some(a) = node.as_boolean_test().unwrap().arg {
+                collect_base_var_cols(a, out);
+            }
+        }
+        NodeTag::T_DistinctExpr => {
+            for a in node.as_distinct_expr().unwrap().args.iter() {
+                collect_base_var_cols(a, out);
+            }
+        }
+        NodeTag::T_ScalarArrayOpExpr => {
+            for a in node.as_scalar_array_op_expr().unwrap().args.iter() {
+                collect_base_var_cols(a, out);
+            }
+        }
+        NodeTag::T_ArrayExpr => {
+            for e in node.as_array_expr().unwrap().elements.iter() {
+                collect_base_var_cols(e, out);
+            }
+        }
+        NodeTag::T_RowExpr => {
+            for a in node.as_row_expr().unwrap().args.iter() {
+                collect_base_var_cols(a, out);
+            }
+        }
+        NodeTag::T_CaseExpr => {
+            let c = node.as_case_expr().unwrap();
+            if let Some(a) = c.arg {
+                collect_base_var_cols(a, out);
+            }
+            for w in c.args.iter() {
+                let cw = w.as_case_when().expect("CaseWhen");
+                collect_base_var_cols(cw.expr.expect("CaseWhen.expr"), out);
+                collect_base_var_cols(cw.result.expect("CaseWhen.result"), out);
+            }
+            if let Some(d) = c.defresult {
+                collect_base_var_cols(d, out);
+            }
+        }
+        NodeTag::T_CoalesceExpr => {
+            for a in node.as_coalesce_expr().unwrap().args.iter() {
+                collect_base_var_cols(a, out);
+            }
+        }
+        NodeTag::T_MinMaxExpr => {
+            for a in node.as_min_max_expr().unwrap().args.iter() {
                 collect_base_var_cols(a, out);
             }
         }

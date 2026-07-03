@@ -159,8 +159,31 @@ pub fn IndexAmTranslateCompareType(
     Ok(result)
 }
 
-pub fn amvalidate(_opclassoid: Oid) -> PgResult<bool> {
-    panic!("unported: amvalidate (DDL opclass-validation lane; needs CLAOID probe + per-AM validate)")
+pub fn amvalidate(opclassoid: Oid) -> PgResult<bool> {
+    let shape = syscache_seams::lookup_pg_opclass_shape::call(opclassoid)?
+        .unwrap_or_else(|| panic!("cache lookup failed for operator class {opclassoid}"));
+    let kind = GetIndexAmRoutineByAmId(shape.opcmethod, false)?.expect("noerror=false");
+    match kind {
+        IndexAmKind::Btree => nbt_validate::btvalidate(opclassoid),
+        other => panic!("unported: amvalidate for index AM {other:?} (hashvalidate lane)"),
+    }
+}
+
+// amadjustmembers dispatch (DefineOpClass/AlterOpFamilyAdd).
+pub fn am_adjust_members(
+    kind: IndexAmKind,
+    opfamilyoid: Oid,
+    opclassoid: Oid,
+    operators: &mut [types_relscan::OpFamilyMember],
+    functions: &mut [types_relscan::OpFamilyMember],
+) -> PgResult<()> {
+    match kind {
+        IndexAmKind::Btree => {
+            nbt_validate::btadjustmembers(opfamilyoid, opclassoid, operators, functions)
+        }
+        // hashadjustmembers exists in C; loud until the hash opclass lane.
+        other => panic!("unported: amadjustmembers for index AM {other:?}"),
+    }
 }
 
 fn am_name(tuple: &catcache::CatCTuple) -> PgResult<String> {

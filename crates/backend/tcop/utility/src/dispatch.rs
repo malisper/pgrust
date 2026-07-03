@@ -684,6 +684,52 @@ fn dispatch_switch<'mcx>(
                 }
             }
         }
+        T_DefineStmt => {
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::parsenodes::DefineStmt>()
+                .expect("DefineStmt");
+            match stmt.kind {
+                types_nodes::parsenodes::ObjectType::OBJECT_OPERATOR => {
+                    debug_assert!(!stmt.oldstyle);
+                    operatorcmds::DefineOperator(mcx, &stmt.defnames, &stmt.definition)?;
+                }
+                other => handler_gap(&format!("DefineStmt kind {other:?} (define lanes)")),
+            }
+        }
+
+        T_CreateOpClassStmt => {
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::parsenodes::CreateOpClassStmt>()
+                .expect("CreateOpClassStmt");
+            opclasscmds::DefineOpClass(mcx, stmt)?;
+        }
+
+        T_CreateOpFamilyStmt => {
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::parsenodes::CreateOpFamilyStmt>()
+                .expect("CreateOpFamilyStmt");
+            opclasscmds::DefineOpFamily(mcx, stmt)?;
+        }
+
+        T_AlterOpFamilyStmt => {
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::parsenodes::AlterOpFamilyStmt>()
+                .expect("AlterOpFamilyStmt");
+            opclasscmds::AlterOpFamily(mcx, stmt)?;
+        }
+
+        T_AlterOperatorStmt => {
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::parsenodes::AlterOperatorStmt>()
+                .expect("AlterOperatorStmt");
+            operatorcmds::AlterOperator(mcx, stmt)?;
+        }
+
         T_CreateTableAsStmt => {
             // Retention contract as unify_stmt_lifetime: the statement arena
             // outlives the utility call; nothing derived escapes it.

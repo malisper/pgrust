@@ -709,6 +709,21 @@ fn doDeletion<'mcx>(mcx: Mcx<'mcx>, object: &ObjectAddress, flags: i32) -> PgRes
         RewriteRelationId => {
             rewrite_define_seams::remove_rewrite_rule_by_id::call(mcx, object.objectId)?
         }
+        types_core::OPERATOR_RELATION_ID => {
+            dependency_seams::remove_operator_by_id::call(mcx, object.objectId)?
+        }
+        types_core::ACCESS_METHOD_OPERATOR_RELATION_ID => drop_row_by_oid(
+            mcx,
+            types_core::ACCESS_METHOD_OPERATOR_RELATION_ID,
+            types_core::ACCESS_METHOD_OPERATOR_OID_INDEX_ID,
+            object.objectId,
+        )?,
+        types_core::ACCESS_METHOD_PROCEDURE_RELATION_ID => drop_row_by_oid(
+            mcx,
+            types_core::ACCESS_METHOD_PROCEDURE_RELATION_ID,
+            types_core::ACCESS_METHOD_PROCEDURE_OID_INDEX_ID,
+            object.objectId,
+        )?,
         other => panic!("unported: doDeletion object class {other}"),
     }
     Ok(())
@@ -757,7 +772,7 @@ pub fn deleteDependencyRecordsFor<'mcx>(
 
 // deleteSharedDependencyRecordsFor (pg_shdepend.c) via shdepDropDependency's
 // dependent-object scan.
-fn deleteSharedDependencyRecordsFor<'mcx>(
+pub fn deleteSharedDependencyRecordsFor<'mcx>(
     mcx: Mcx<'mcx>,
     classId: Oid,
     objectId: Oid,
@@ -871,4 +886,24 @@ fn seam_perform_deletion(
 
 pub fn init_seams() {
     dependency_seams::perform_deletion::set(seam_perform_deletion);
+}
+
+// DropObjectById (dependency.c) reduced to the oid-indexed catalogs above:
+// delete the catalog row addressed by its oid.
+fn drop_row_by_oid<'mcx>(
+    mcx: Mcx<'mcx>,
+    relation_id: Oid,
+    oid_index_id: Oid,
+    oid: Oid,
+) -> PgResult<()> {
+    let rel = table::table_open(mcx, relation_id, RowExclusiveLock)?;
+    let keys = [oid_key(1, oid)];
+    let mut scan = genam::systable_beginscan(mcx, &rel, oid_index_id, true, None, &keys)?;
+    let Some(tup) = genam::systable_getnext(mcx, &mut scan)? else {
+        panic!("could not find tuple for object {oid} in catalog {relation_id}");
+    };
+    let tid = tup.t_self;
+    catalog_indexing::CatalogTupleDelete(&rel, &tid)?;
+    genam::systable_endscan(mcx, scan)?;
+    rel.close(RowExclusiveLock)
 }

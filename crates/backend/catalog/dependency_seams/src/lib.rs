@@ -13,3 +13,8 @@ seam_core::seam!(
         flags: i32,
     ) -> PgResult<()>
 );
+
+seam_core::seam!(
+    // RemoveOperatorById (operatorcmds.c), reached from doDeletion.
+    pub fn remove_operator_by_id(mcx: Mcx<'_>, oper_oid: Oid) -> PgResult<()>
+);
