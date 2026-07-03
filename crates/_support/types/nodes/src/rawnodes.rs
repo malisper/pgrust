@@ -538,9 +538,20 @@ pub struct Constraint<'mcx> {
     pub location: ParseLoc,
 }
 
+#[derive(Default)]
+pub struct CreateDomainStmt<'mcx> {
+    pub domainname: NodeList<'mcx>,
+    pub typeName: Option<Node<'mcx>>,
+    pub collClause: Option<Node<'mcx>>,
+    pub constraints: NodeList<'mcx>,
+}
+
 // SAFETY (each): tag/type pairing mirrors parsenodes.h.
 unsafe impl<'mcx> NodeVariant<'mcx> for RawStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_RawStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for CreateDomainStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CreateDomainStmt;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for SelectStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_SelectStmt;
@@ -814,6 +825,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_alter_seq_stmt(self) -> Option<&'mcx AlterSeqStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_create_domain_stmt(self) -> Option<&'mcx CreateDomainStmt<'mcx>> {
         self.as_variant()
     }
 }

@@ -404,18 +404,30 @@ pub struct RelabelType<'mcx> {
     pub location: ParseLoc,
 }
 
-#[derive(Default)]
-pub struct NextValueExpr {
-    pub seqid: Oid,
-    pub typeId: Oid,
-}
-
 // C `Expr *arg` is never NULL in a live CoerceViaIO; modeled non-optional.
 pub struct CoerceViaIO<'mcx> {
     pub arg: Node<'mcx>,
     pub resulttype: Oid,
     pub resultcollid: Oid,
     pub coerceformat: CoercionForm,
+    pub location: ParseLoc,
+}
+
+// C `Expr *arg` is never NULL in a live CoerceToDomain; modeled non-optional.
+pub struct CoerceToDomain<'mcx> {
+    pub arg: Node<'mcx>,
+    pub resulttype: Oid,
+    pub resulttypmod: i32,
+    pub resultcollid: Oid,
+    pub coercionformat: CoercionForm,
+    pub location: ParseLoc,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CoerceToDomainValue {
+    pub typeId: Oid,
+    pub typeMod: i32,
+    pub collation: Oid,
     pub location: ParseLoc,
 }
 
@@ -666,8 +678,11 @@ unsafe impl<'mcx> NodeVariant<'mcx> for RelabelType<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for CoerceViaIO<'mcx> {
     const TAG: NodeTag = NodeTag::T_CoerceViaIO;
 }
-unsafe impl<'mcx> NodeVariant<'mcx> for NextValueExpr {
-    const TAG: NodeTag = NodeTag::T_NextValueExpr;
+unsafe impl<'mcx> NodeVariant<'mcx> for CoerceToDomain<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CoerceToDomain;
+}
+unsafe impl NodeVariant<'_> for CoerceToDomainValue {
+    const TAG: NodeTag = NodeTag::T_CoerceToDomainValue;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for BoolExpr<'mcx> {
     const TAG: NodeTag = NodeTag::T_BoolExpr;
@@ -940,6 +955,16 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_coerce_via_io(self) -> Option<&'mcx CoerceViaIO<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_coerce_to_domain(self) -> Option<&'mcx CoerceToDomain<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_coerce_to_domain_value(self) -> Option<&'mcx CoerceToDomainValue> {
         self.as_variant()
     }
 
