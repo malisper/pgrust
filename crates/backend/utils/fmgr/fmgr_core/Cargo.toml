@@ -21,6 +21,7 @@ adt_date = { path = "../../adt/adt_date" }
 adt_float = { path = "../../adt/float" }
 adt_int = { path = "../../adt/int" }
 adt_int8 = { path = "../../adt/int8" }
+adt_json = { path = "../../adt/json" }
 adt_mac = { path = "../../adt/mac" }
 adt_mac8 = { path = "../../adt/mac8" }
 adt_numeric = { path = "../../adt/numeric" }
@@ -33,4 +34,5 @@ varlena = { path = "../../adt/varlena" }
 
 [dev-dependencies]
 mcx = { path = "../../../../_support/mcx" }
+stringinfo = { path = "../../../../_support/types/stringinfo" }
 nodes = { package = "types_nodes", path = "../../../../_support/types/nodes" }

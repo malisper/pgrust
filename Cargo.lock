@@ -126,7 +126,9 @@ dependencies = [
  "datum",
  "fmgr_core",
  "guc_tables",
+ "pqformat",
  "ryu",
+ "stringinfo",
  "types_array",
  "types_core",
  "types_error",
@@ -141,6 +143,7 @@ dependencies = [
  "adt_date",
  "adt_datetime",
  "adt_numeric",
+ "adt_oracle_compat",
  "adt_timestamp",
  "datum",
  "formatting_seams",
@@ -166,6 +169,8 @@ dependencies = [
  "hashfn",
  "mcx",
  "numutils",
+ "pqformat",
+ "stringinfo",
  "types_array",
  "types_core",
  "types_error",
@@ -179,7 +184,10 @@ version = "0.1.0"
 dependencies = [
  "datum",
  "hashfn",
+ "mcx",
  "numutils",
+ "pqformat",
+ "stringinfo",
  "types_core",
  "types_error",
  "types_fmgr",
@@ -257,6 +265,8 @@ dependencies = [
  "datum",
  "init_small",
  "mcx",
+ "pqformat",
+ "stringinfo",
  "types_core",
  "types_error",
  "types_fmgr",
@@ -391,6 +401,22 @@ dependencies = [
 [[package]]
 name = "arrayfuncs"
 version = "0.1.0"
+dependencies = [
+ "arrayutils",
+ "datum",
+ "detoast_seams",
+ "fmgr_seams",
+ "lsyscache",
+ "mcx",
+ "numutils",
+ "pqformat",
+ "stringinfo",
+ "types_array",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_tuple",
+]
 
 [[package]]
 name = "arrayutils"
@@ -1119,10 +1145,12 @@ dependencies = [
  "miscinit",
  "pg_prng",
  "procarray",
+ "rel_vocab",
  "relcache_seams",
  "syscache_seams",
  "table",
  "tableam",
+ "tableam_vocab",
  "typcache",
  "types_core",
  "types_error",
@@ -1800,6 +1828,7 @@ dependencies = [
  "adt_float",
  "adt_int",
  "adt_int8",
+ "adt_json",
  "adt_like",
  "adt_mac",
  "adt_mac8",
@@ -1812,6 +1841,7 @@ dependencies = [
  "mcx",
  "name",
  "nbt_compare",
+ "stringinfo",
  "types_core",
  "types_error",
  "types_fmgr",
@@ -3208,9 +3238,12 @@ name = "nodehash"
 version = "0.1.0"
 dependencies = [
  "execexpr",
+ "exectuples",
  "executils",
+ "guc_tables",
  "init_small",
  "mcx",
+ "types_core",
  "types_error",
  "types_nodes",
  "types_slot",
@@ -3222,11 +3255,14 @@ name = "nodehashjoin"
 version = "0.1.0"
 dependencies = [
  "execexpr",
+ "exectuples",
  "executils",
  "init_small",
+ "lsyscache",
  "mcx",
  "nodehash",
  "postgres_seams",
+ "types_core",
  "types_error",
  "types_nodes",
  "types_slot",
@@ -3522,13 +3558,18 @@ dependencies = [
 name = "nodeunique"
 version = "0.1.0"
 dependencies = [
+ "aclchk_seams",
+ "datum",
  "execexpr",
  "exectuples",
  "executils",
  "init_small",
  "lsyscache",
  "mcx",
+ "miscinit_seams",
  "postgres_seams",
+ "syscache_seams",
+ "types_core",
  "types_error",
  "types_nodes",
  "types_slot",
@@ -3752,6 +3793,14 @@ dependencies = [
 [[package]]
 name = "parse_utilcmd"
 version = "0.1.0"
+dependencies = [
+ "catalog_namespace",
+ "mcx",
+ "syscache_seams",
+ "types_core",
+ "types_error",
+ "types_nodes",
+]
 
 [[package]]
 name = "parser_analyze"
@@ -4119,6 +4168,7 @@ dependencies = [
  "clauses",
  "clauses_seams",
  "datum",
+ "fmgr_core",
  "guc_tables",
  "indexam",
  "init_small",
@@ -4138,6 +4188,7 @@ dependencies = [
  "tidbitmap",
  "types_core",
  "types_error",
+ "types_fmgr",
  "types_nbtree",
  "types_nodes",
  "types_pathnodes",
@@ -6196,6 +6247,21 @@ dependencies = [
 [[package]]
 name = "tablecmds"
 version = "0.1.0"
+dependencies = [
+ "catalog_heap",
+ "catalog_namespace",
+ "mcx",
+ "miscinit",
+ "parse_utilcmd",
+ "syscache_seams",
+ "tupdesc",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_rel",
+ "types_tuple",
+ "xact",
+]
 
 [[package]]
 name = "tablecmds_seams"
@@ -6764,6 +6830,7 @@ name = "utility"
 version = "0.1.0"
 dependencies = [
  "cmdtag",
+ "commands_analyze",
  "copy_cmd",
  "elog",
  "explain",
@@ -6772,10 +6839,12 @@ dependencies = [
  "mcx",
  "miscinit",
  "parallel_seams",
+ "parse_utilcmd",
  "portalcmds",
  "portalmem",
  "prepare",
  "syscache_seams",
+ "tablecmds",
  "tcop_dest",
  "transam_xlog",
  "transam_xlog_seams",
@@ -6785,6 +6854,7 @@ dependencies = [
  "types_error",
  "types_nodes",
  "types_portal",
+ "types_rel",
  "types_tuple",
  "utility_seams",
  "xact",
@@ -6817,6 +6887,28 @@ dependencies = [
 [[package]]
 name = "vacuumlazy"
 version = "0.0.0"
+dependencies = [
+ "bufmgr_seams",
+ "commands_vacuum",
+ "freespace",
+ "heapam",
+ "heapam_visibility_seams",
+ "init_small",
+ "mcx",
+ "procarray_seams",
+ "pruneheap",
+ "relcache_seams",
+ "tableam_seams",
+ "tableam_vocab",
+ "types_core",
+ "types_error",
+ "types_rel",
+ "types_snapshot",
+ "types_storage",
+ "types_tuple",
+ "visibilitymap",
+ "xloginsert_seams",
+]
 
 [[package]]
 name = "var_seams"
