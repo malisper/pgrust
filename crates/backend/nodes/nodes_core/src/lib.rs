@@ -247,6 +247,10 @@ pub fn expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
             let cte = node.as_common_table_expr().unwrap();
             walk_opt(cte.ctequery, w)
         }
+        NodeTag::T_MergeAction => {
+            let a = node.as_merge_action().unwrap();
+            Ok(walk_opt(a.qual, w)? || walk_list(&a.targetList, w)?)
+        }
         NodeTag::T_List => walk_list(node.as_list().unwrap(), w),
         NodeTag::T_RangeTblFunction => {
             walk_opt(node.as_range_tbl_function().unwrap().funcexpr, w)
@@ -486,6 +490,10 @@ pub fn raw_expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
         // C: "we assume the collname is uninteresting".
         NodeTag::T_CollateClause => walk_opt(node.as_collate_clause().unwrap().arg, w),
         NodeTag::T_RowExpr => walk_list(&node.as_row_expr().unwrap().args, w),
+        NodeTag::T_MergeAction => {
+            let a = node.as_merge_action().unwrap();
+            Ok(walk_opt(a.qual, w)? || walk_list(&a.targetList, w)?)
+        }
         NodeTag::T_List => walk_list(node.as_list().unwrap(), w),
         other => deferred("raw_expression_tree_walker", other),
     }

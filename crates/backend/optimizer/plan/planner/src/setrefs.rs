@@ -373,7 +373,7 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
         NodeTag::T_ModifyTable => {
             let m = plan.as_modify_table().unwrap();
             debug_assert!(m.plan.targetlist.is_nil() && m.plan.qual.is_nil());
-            debug_assert!(m.withCheckOptionLists.is_nil() && m.mergeActionLists.is_nil());
+            debug_assert!(m.withCheckOptionLists.is_nil());
             debug_assert!(m.rootRelation == 0 && m.rowMarks.is_nil());
             assert_eq!(rtoffset, 0, "set_plan_refs (setrefs.c): ModifyTable rtoffset leg; M4 lane");
             // set_returning_clause_references: the other-relations index over
@@ -384,10 +384,50 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
             let has_returning = !m.returningLists.is_nil();
             if has_returning {
                 debug_assert_eq!(m.returningLists.len(), m.resultRelations.len());
-                for rlist_node in &m.returningLists {
-                    let rlist = rlist_node.as_list().expect("returningLists cell is a List");
-                    let fixed = fix_scan_list(run, rlist, rtoffset, m.plan.plan_rows)?;
-                    debug_assert!(fixed.is_none());
+                if m.operation == types_nodes::nodes_enums::CmdType::CMD_MERGE {
+                    // set_returning_clause_references: source-relation Vars
+                    // become OUTER_VAR over the subplan tlist (the plan slot
+                    // is the RETURNING projection's outer tuple).
+                    let subplan_tlist = &m
+                        .plan
+                        .lefttree
+                        .expect("ModifyTable has a subplan")
+                        .as_plan()
+                        .expect("plan node")
+                        .targetlist;
+                    let empty = NodeList::nil();
+                    let mut new_lists = NodeList::nil();
+                    for (rlist_node, resultrel) in
+                        m.returningLists.iter().zip(m.resultRelations.iter())
+                    {
+                        let rlist =
+                            rlist_node.as_list().expect("returningLists cell is a List");
+                        let fixed = fix_join_expr_list(
+                            run,
+                            rlist,
+                            subplan_tlist,
+                            &empty,
+                            rtoffset,
+                            NrmMatch::Equal,
+                            resultrel,
+                            m.plan.plan_rows,
+                        )?;
+                        new_lists.lappend(run.mcx, Node::mk_list(run.mcx, fixed)?)?;
+                    }
+                    // SAFETY: exclusive plan-tree ownership (prologue note).
+                    unsafe {
+                        plan.with_mut::<types_nodes::plannodes::ModifyTable, _>(|p| {
+                            p.returningLists = new_lists;
+                        })
+                    }
+                    .expect("ModifyTable node");
+                } else {
+                    for rlist_node in &m.returningLists {
+                        let rlist =
+                            rlist_node.as_list().expect("returningLists cell is a List");
+                        let fixed = fix_scan_list(run, rlist, rtoffset, m.plan.plan_rows)?;
+                        debug_assert!(fixed.is_none());
+                    }
                 }
             }
             // The EXCLUDED pseudo-rel is a 'pseudo join' inner side: its Vars
@@ -435,6 +475,80 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
                 }
                 .expect("ModifyTable node");
             }
+            if !m.mergeActionLists.is_nil() {
+                // Source-relation Vars in the action targetlists/quals and
+                // join conditions become INNER_VAR over the subplan tlist
+                // (ecxt_innertuple = the join output); result-relation Vars
+                // pass through to read the scan slot (the old target tuple).
+                let subplan_tlist = &m
+                    .plan
+                    .lefttree
+                    .expect("ModifyTable has a subplan")
+                    .as_plan()
+                    .expect("plan node")
+                    .targetlist;
+                let empty = NodeList::nil();
+                debug_assert_eq!(m.mergeActionLists.len(), m.resultRelations.len());
+                debug_assert_eq!(m.mergeJoinConditions.len(), m.resultRelations.len());
+                let plan_rows = m.plan.plan_rows;
+                for ((mal_node, mjc_node), resultrel) in m
+                    .mergeActionLists
+                    .iter()
+                    .zip(m.mergeJoinConditions.iter())
+                    .zip(m.resultRelations.iter())
+                {
+                    let mal = mal_node.as_list().expect("mergeActionLists cell is a List");
+                    for action_node in mal {
+                        let action =
+                            action_node.as_merge_action().expect("MergeAction cell");
+                        let new_tlist = fix_join_expr_list(
+                            run,
+                            &action.targetList,
+                            &empty,
+                            subplan_tlist,
+                            rtoffset,
+                            NrmMatch::Equal,
+                            resultrel,
+                            plan_rows,
+                        )?;
+                        let new_qual = match action.qual {
+                            None => None,
+                            Some(q) => {
+                                let ql =
+                                    q.as_list().expect("preprocessed action qual is a list");
+                                let mapped = fix_join_expr_list(
+                                    run,
+                                    ql,
+                                    &empty,
+                                    subplan_tlist,
+                                    rtoffset,
+                                    NrmMatch::Equal,
+                                    resultrel,
+                                    plan_rows,
+                                )?;
+                                Some(Node::mk_list(run.mcx, mapped)?)
+                            }
+                        };
+                        // SAFETY: exclusive plan-tree ownership (prologue note).
+                        unsafe {
+                            action_node.with_mut::<types_nodes::primnodes::MergeAction, _>(
+                                |a| {
+                                    a.targetList = new_tlist;
+                                    a.qual = new_qual;
+                                },
+                            )
+                        }
+                        .expect("MergeAction node");
+                    }
+                    let jc = mjc_node.as_list().expect("mergeJoinConditions cell is a List");
+                    if !jc.is_nil() {
+                        panic!(
+                            "set_plan_refs (setrefs.c): non-NULL MERGE join condition \
+                             (NOT MATCHED BY SOURCE) unported"
+                        );
+                    }
+                }
+            }
             for rti in m.resultRelations.iter() {
                 run.glob.result_relations.lappend(run.mcx, rti)?;
             }
@@ -442,7 +556,9 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
                 // C copyObject's the first RETURNING list into the visible
                 // tlist (EXPLAIN + the node's result slot descriptor); the
                 // cells are shared here — the executor never mutates them.
-                let first = m
+                let first = plan
+                    .as_modify_table()
+                    .unwrap()
                     .returningLists
                     .nth(0)
                     .as_list()

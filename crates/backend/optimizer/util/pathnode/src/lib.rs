@@ -233,8 +233,10 @@ pub fn create_set_projection_path<'mcx>(
     }))
 }
 
-// create_modifytable_path (pathnode.c), single-relation INSERT/UPDATE/DELETE
-// arm: no WCO/rowmarks/MERGE lists (loud upstream), rows = 0.
+// create_modifytable_path (pathnode.c), single-relation arm: no WCO/rowmarks
+// (loud upstream), rows = 0. merge_join_condition is Some for CMD_MERGE with
+// the per-rel condition inside (None = C's NULL condition).
+#[allow(clippy::too_many_arguments)]
 pub fn create_modifytable_path<'mcx>(
     run: &mut PlannerRun<'mcx>,
     rel_id: RelId,
@@ -246,6 +248,8 @@ pub fn create_modifytable_path<'mcx>(
     update_colnos: Option<PgVec<'mcx, i16>>,
     returning_list: Option<PgVec<'mcx, types_pathnodes::NodeId>>,
     onconflict: Option<types_pathnodes::NodeId>,
+    merge_action_list: Option<PgVec<'mcx, types_pathnodes::NodeId>>,
+    merge_join_condition: Option<Option<types_pathnodes::NodeId>>,
 ) -> PathNode<'mcx> {
     let sub = run.root.path(subpath_id).base();
     let path = Path {
@@ -296,8 +300,22 @@ pub fn create_modifytable_path<'mcx>(
         rowMarks: PgVec::new_in(run.mcx),
         onconflict,
         epqParam: 0,
-        mergeActionLists: PgVec::new_in(run.mcx),
-        mergeJoinConditions: PgVec::new_in(run.mcx),
+        mergeActionLists: match merge_action_list {
+            Some(actions) => {
+                let mut lists = PgVec::new_in(run.mcx);
+                lists.push(actions);
+                lists
+            }
+            None => PgVec::new_in(run.mcx),
+        },
+        mergeJoinConditions: match merge_join_condition {
+            Some(cond) => {
+                let mut conds = PgVec::new_in(run.mcx);
+                conds.push(cond);
+                conds
+            }
+            None => PgVec::new_in(run.mcx),
+        },
     })
 }
 

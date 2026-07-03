@@ -1,6 +1,7 @@
 #![allow(non_snake_case)]
 
 pub mod parse_cte;
+mod parse_merge;
 mod set_op;
 mod rules;
 pub use rules::transformRuleStmt;
@@ -328,8 +329,10 @@ set_op::transformSetOperationStmt(mcx, pstate, n)?
         NodeTag::T_PLAssignStmt => {
             transformPLAssignStmt(mcx, pstate, parse_tree.as_pl_assign_stmt().unwrap())?
         }
-        t @ (NodeTag::T_MergeStmt
-        | NodeTag::T_ReturnStmt
+        NodeTag::T_MergeStmt => {
+            parse_merge::transformMergeStmt(mcx, pstate, parse_tree.as_merge_stmt().unwrap())?
+        }
+        t @ (NodeTag::T_ReturnStmt
         | NodeTag::T_CallStmt) => panic!(
             "transformStmt (analyze.c): transform arm for {t:?} unported — \
              unit backend-parser-analyze"
@@ -1723,7 +1726,7 @@ fn transformUpdateStmt<'mcx>(
 
 // C transformUpdateTargetList (analyze.c): resnos become the target attribute
 // numbers; resjunk entries renumber past the relation's column count.
-fn transformUpdateTargetList<'mcx>(
+pub(crate) fn transformUpdateTargetList<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'_, 'mcx>,
     orig_tlist: &types_nodes::NodeList<'mcx>,
@@ -1837,7 +1840,7 @@ fn undefined_update_column(
 
 // C transformInsertRow (analyze.c). strip_indirection is inert: FieldStore/
 // SubscriptingRef construction panics upstream (transformAssignedExpr).
-fn transformInsertRow<'mcx>(
+pub(crate) fn transformInsertRow<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'_, 'mcx>,
     exprlist: types_nodes::NodeList<'mcx>,
@@ -1933,7 +1936,7 @@ fn insert_row_length_error(
 // list (PG18 OLD/NEW aliases) is loud, and instead of adding old/new namespace
 // items we panic when a RETURNING expression would resolve through one; the
 // Query alias fields still get C's "old"/"new" defaults when unmasked.
-fn transformReturningClause<'mcx>(
+pub(crate) fn transformReturningClause<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'_, 'mcx>,
     qry: &mut Query<'mcx>,
@@ -2034,7 +2037,7 @@ fn returning_no_columns(
 // The INSERT arm's stand-in for C's addNSItemToQuery(p_target_nsitem, ...):
 // p_target_nsitem is a shared borrow here, so the namespace entry is a fresh
 // copy with the visibility flags C would have scribbled in place.
-fn returning_target_nsitem<'mcx>(
+pub(crate) fn returning_target_nsitem<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &ParseState<'_, 'mcx>,
 ) -> PgResult<&'mcx mut parser_small1::ParseNamespaceItem<'mcx>> {

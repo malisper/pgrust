@@ -1919,6 +1919,109 @@ impl<'mcx> Parser<'mcx> {
                 list.lappend(mcx, view.v(3).node().expect("set_target"))?;
                 *yyval = YYSTYPE::List(list);
             }
+            // MergeStmt: opt_with_clause MERGE INTO relation_expr_opt_alias
+            //            USING table_ref ON a_expr merge_when_list
+            //            returning_clause
+            1672 => {
+                let n = Node::mk(
+                    mcx,
+                    types_nodes::MergeStmt {
+                        withClause: view.v(1).node(),
+                        relation: view.v(4).node(),
+                        sourceRelation: view.v(6).node(),
+                        joinCondition: view.v(8).node(),
+                        mergeWhenClauses: view.v(9).list(),
+                        returningClause: view.v(10).node(),
+                    },
+                )?;
+                *yyval = YYSTYPE::Node(Some(n));
+            }
+            1673 => {
+                let t = view.v(1).node().expect("merge_when_clause");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, t)?);
+            }
+            1674 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(2).node().expect("merge_when_clause"))?;
+                *yyval = YYSTYPE::List(list);
+            }
+            // merge_when_clause: the merge_update/merge_delete/merge_insert
+            // sub-rule built the MergeWhenClause node.
+            1675 | 1676 | 1677 => {
+                let m = view.v(4).node().expect("merge action");
+                let kind = merge_match_kind(view.v(1).ival());
+                let cond = view.v(2).node();
+                // SAFETY: as rule 8 — parser-owned tree, no live derived refs.
+                unsafe {
+                    m.with_mut::<types_nodes::MergeWhenClause, _>(|w| {
+                        w.matchKind = kind;
+                        w.condition = cond;
+                    })
+                }
+                .expect("merge action is MergeWhenClause");
+                *yyval = YYSTYPE::Node(Some(m));
+            }
+            1678 | 1679 => {
+                let mut n = Node::build::<types_nodes::MergeWhenClause>(mcx)?;
+                n.matchKind = merge_match_kind(view.v(1).ival());
+                n.commandType = types_nodes::CmdType::CMD_NOTHING;
+                n.condition = view.v(2).node();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1680 => {
+                *yyval =
+                    YYSTYPE::Ival(types_nodes::MergeMatchKind::MERGE_WHEN_MATCHED as i32)
+            }
+            1681 => {
+                *yyval = YYSTYPE::Ival(
+                    types_nodes::MergeMatchKind::MERGE_WHEN_NOT_MATCHED_BY_SOURCE as i32,
+                )
+            }
+            1682 | 1683 => {
+                *yyval = YYSTYPE::Ival(
+                    types_nodes::MergeMatchKind::MERGE_WHEN_NOT_MATCHED_BY_TARGET as i32,
+                )
+            }
+            // opt_merge_when_condition: AND a_expr | empty
+            1684 => *yyval = YYSTYPE::Node(view.v(2).node()),
+            1685 => *yyval = YYSTYPE::Node(None),
+            // merge_update: UPDATE SET set_clause_list
+            1686 => {
+                let mut n = Node::build::<types_nodes::MergeWhenClause>(mcx)?;
+                n.commandType = types_nodes::CmdType::CMD_UPDATE;
+                n.targetList = view.v(3).list();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1687 => {
+                let mut n = Node::build::<types_nodes::MergeWhenClause>(mcx)?;
+                n.commandType = types_nodes::CmdType::CMD_DELETE;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // merge_insert: values / OVERRIDING / column-list / DEFAULT VALUES
+            1688 | 1689 | 1690 | 1691 | 1692 => {
+                let mut n = Node::build::<types_nodes::MergeWhenClause>(mcx)?;
+                n.commandType = types_nodes::CmdType::CMD_INSERT;
+                match rule {
+                    1688 => n.values = view.v(2).list(),
+                    1689 => {
+                        n.r#override = override_kind(view.v(3).ival());
+                        n.values = view.v(5).list();
+                    }
+                    1690 => {
+                        n.targetList = view.v(3).list();
+                        n.values = view.v(5).list();
+                    }
+                    1691 => {
+                        n.targetList = view.v(3).list();
+                        n.r#override = override_kind(view.v(6).ival());
+                        n.values = view.v(8).list();
+                    }
+                    _ => {}
+                }
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // merge_values_clause: VALUES '(' expr_list ')'
+            1693 => *yyval = YYSTYPE::List(view.v(3).list()),
             // relation_expr_opt_alias: relation_expr [AS] ColId
             1879 | 1880 => {
                 let rv = view.v(1).node().expect("relation_expr");
@@ -5938,6 +6041,15 @@ impl<'mcx> Parser<'mcx> {
             (*self.errposition_error(message.into(), location))
                 .with_sqlstate(types_error::ERRCODE_WINDOWING_ERROR),
         )
+    }
+}
+
+fn merge_match_kind(v: i32) -> types_nodes::MergeMatchKind {
+    match v {
+        0 => types_nodes::MergeMatchKind::MERGE_WHEN_MATCHED,
+        1 => types_nodes::MergeMatchKind::MERGE_WHEN_NOT_MATCHED_BY_SOURCE,
+        2 => types_nodes::MergeMatchKind::MERGE_WHEN_NOT_MATCHED_BY_TARGET,
+        other => panic!("gram_core: bad MergeMatchKind {other}"),
     }
 }
 
