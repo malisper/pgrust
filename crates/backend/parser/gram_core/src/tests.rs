@@ -1080,3 +1080,96 @@ fn sql_value_functions() {
         assert_eq!(svf.location, 7);
     }
 }
+
+#[test]
+fn create_function_sql() {
+    use types_nodes::rawnodes::TypeName;
+    let list = parse("CREATE FUNCTION add1(int) RETURNS int AS 'select $1 + 1' LANGUAGE sql;");
+    let rs = only_stmt(&list);
+    let n = rs.stmt.expect("stmt").as_create_function_stmt().expect("CreateFunctionStmt");
+    assert!(!n.is_procedure && !n.replace && n.sql_body.is_none());
+    assert_eq!(n.funcname.len(), 1);
+    assert_eq!(n.funcname.nth(0).as_string().expect("name").sval, "add1");
+    assert_eq!(n.parameters.len(), 1);
+    let p = n.parameters.nth(0).as_function_parameter().expect("FunctionParameter");
+    assert!(p.name.is_none() && p.defexpr.is_none());
+    assert_eq!(p.mode, types_nodes::parsenodes::FunctionParameterMode::FUNC_PARAM_DEFAULT);
+    let pt = p.argType.expect("argType").as_variant::<TypeName>().expect("TypeName");
+    assert_eq!(pt.names.nth(pt.names.len() - 1).as_string().expect("t").sval, "int4");
+    let rt = n.returnType.expect("returnType").as_variant::<TypeName>().expect("TypeName");
+    assert!(!rt.setof);
+    assert_eq!(rt.names.nth(rt.names.len() - 1).as_string().expect("t").sval, "int4");
+    assert_eq!(n.options.len(), 2);
+    let as_el = n.options.nth(0).as_def_elem().expect("DefElem");
+    assert_eq!(as_el.defname, Some("as"));
+    let as_list = as_el.arg.expect("arg").as_list().expect("List");
+    assert_eq!(as_list.len(), 1);
+    assert_eq!(as_list.nth(0).as_string().expect("src").sval, "select $1 + 1");
+    let lang = n.options.nth(1).as_def_elem().expect("DefElem");
+    assert_eq!(lang.defname, Some("language"));
+    assert_eq!(lang.arg.expect("arg").as_string().expect("lang").sval, "sql");
+}
+
+#[test]
+fn create_or_replace_function_options() {
+    let list = parse(
+        "CREATE OR REPLACE FUNCTION f() RETURNS int AS 'select 1' LANGUAGE sql STRICT IMMUTABLE COST 100;",
+    );
+    let n = only_stmt(&list)
+        .stmt
+        .expect("stmt")
+        .as_create_function_stmt()
+        .expect("CreateFunctionStmt");
+    assert!(n.replace && !n.is_procedure);
+    assert!(n.parameters.is_nil());
+    assert_eq!(n.options.len(), 5);
+    let names: Vec<_> =
+        n.options.iter().map(|o| o.as_def_elem().unwrap().defname.unwrap()).collect();
+    assert_eq!(names, ["as", "language", "strict", "volatility", "cost"]);
+    let strict = n.options.nth(2).as_def_elem().unwrap();
+    assert!(strict.arg.expect("arg").as_boolean().expect("Boolean").boolval);
+    let vol = n.options.nth(3).as_def_elem().unwrap();
+    assert_eq!(vol.arg.expect("arg").as_string().expect("Str").sval, "immutable");
+    let cost = n.options.nth(4).as_def_elem().unwrap();
+    assert!(cost.arg.expect("arg").as_integer().is_some());
+}
+
+#[test]
+fn create_function_param_modes_and_default() {
+    use types_nodes::parsenodes::{FunctionParameter, FunctionParameterMode as M};
+    let list = parse(
+        "CREATE FUNCTION g(a int, OUT b int, VARIADIC c int[], IN d text DEFAULT 'x') \
+         RETURNS int LANGUAGE sql AS 'select 1';",
+    );
+    let n = only_stmt(&list)
+        .stmt
+        .expect("stmt")
+        .as_create_function_stmt()
+        .expect("CreateFunctionStmt");
+    assert_eq!(n.parameters.len(), 4);
+    let modes = [M::FUNC_PARAM_DEFAULT, M::FUNC_PARAM_OUT, M::FUNC_PARAM_VARIADIC, M::FUNC_PARAM_IN];
+    let names = ["a", "b", "c", "d"];
+    for (i, (m, nm)) in modes.iter().zip(names).enumerate() {
+        let p = n.parameters.nth(i).as_variant::<FunctionParameter>().expect("FunctionParameter");
+        assert_eq!(p.mode, *m, "param {nm}");
+        assert_eq!(p.name, Some(nm));
+        assert_eq!(p.defexpr.is_some(), i == 3, "param {nm}");
+    }
+    let d = n.parameters.nth(3).as_variant::<FunctionParameter>().unwrap();
+    let c = d.defexpr.expect("defexpr").as_a_const().expect("A_Const");
+    assert!(matches!(c.val, Some(ValUnion::String(_))));
+}
+
+#[test]
+fn create_procedure() {
+    let list = parse("CREATE PROCEDURE p(x int) LANGUAGE sql AS 'select 1';");
+    let n = only_stmt(&list)
+        .stmt
+        .expect("stmt")
+        .as_create_function_stmt()
+        .expect("CreateFunctionStmt");
+    assert!(n.is_procedure && !n.replace);
+    assert!(n.returnType.is_none());
+    assert_eq!(n.parameters.len(), 1);
+    assert_eq!(n.options.len(), 2);
+}

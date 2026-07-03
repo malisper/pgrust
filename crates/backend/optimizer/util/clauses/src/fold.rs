@@ -873,11 +873,9 @@ fn simplify_function<'mcx>(
             );
         }
     }
-    if newexpr.is_none() && allow_non_const && fmgr_core::fmgr_isbuiltin(funcid).is_none() {
-        // A builtin is internal-language, which C's inline_function rejects
-        // up front; anything else needs the prolang gate + SQL inliner.
-        panic!("simplify_function deferred: inline_function for non-builtin funcid {funcid}");
-    }
+    // DIVERGENCE: C's inline_function inlines simple SQL-language bodies for
+    // non-builtin funcids here; unported, so SQL functions always execute via
+    // the fmgr call. Non-SQL languages match C (inline_function returns NULL).
     Ok((newexpr, new_args))
 }
 

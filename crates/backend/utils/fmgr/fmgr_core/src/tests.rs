@@ -80,8 +80,8 @@ fn fmgr_info_into_refills_carrier() {
 }
 
 #[test]
-#[should_panic(expected = "not a builtin")]
-fn fmgr_info_non_builtin_panics() {
+#[should_panic(expected = "seam not installed")]
+fn fmgr_info_non_builtin_reads_pg_proc() {
     let _ = fmgr_info(16384);
 }
 
@@ -117,8 +117,8 @@ fn internal_function_lookup() {
 }
 
 #[test]
-#[should_panic(expected = "not a builtin")]
-fn oid_function_call_non_builtin_panics() {
+#[should_panic(expected = "seam not installed")]
+fn oid_function_call_non_builtin_reads_pg_proc() {
     let _ = oid_function_call2_coll(16385, InvalidOid, Datum::from_i32(1), Datum::from_i32(2));
 }
 

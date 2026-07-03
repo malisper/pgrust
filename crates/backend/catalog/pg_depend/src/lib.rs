@@ -143,6 +143,54 @@ fn isObjectPinned(object: &ObjectAddress) -> bool {
     catalog::IsPinnedObject(object.classId, object.objectId)
 }
 
+// deleteDependencyRecordsFor (pg_depend.c).
+pub fn deleteDependencyRecordsFor<'mcx>(
+    mcx: Mcx<'mcx>,
+    classId: Oid,
+    objectId: Oid,
+    skipExtensionDeps: bool,
+) -> PgResult<i64> {
+    const Anum_pg_depend_classid: usize = 1;
+    const Anum_pg_depend_objid: usize = 2;
+    const Anum_pg_depend_deptype: i32 = 7;
+    const DEPENDENCY_EXTENSION: i8 = b'e' as i8;
+    const DEPENDENCY_AUTO_EXTENSION: i8 = b'x' as i8;
+
+    let mut count = 0i64;
+    let rel = table::table_open(mcx, DependRelationId, RowExclusiveLock)?;
+    let key = |attno: usize, oid: Oid| -> types_scan::scankey::ScanKeyData {
+        let mut k = types_scan::scankey::ScanKeyData::empty();
+        k.sk_attno = attno as types_core::AttrNumber;
+        k.sk_strategy = types_scan::scankey::BTEqualStrategyNumber;
+        k.sk_collation = 0;
+        k.sk_func = fmgr_seams::fmgr_info::call(types_core::fmgr::F_OIDEQ)
+            .unwrap_or_else(|e| panic!("fmgr_info(F_OIDEQ) failed: {e:?}"));
+        k.sk_argument = Datum::from_oid(oid);
+        k
+    };
+    let keys = [key(Anum_pg_depend_classid, classId), key(Anum_pg_depend_objid, objectId)];
+    let mut scan = genam::systable_beginscan(mcx, &rel, DependDependerIndexId, true, None, &keys)?;
+    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+        if skipExtensionDeps {
+            let mut isnull = false;
+            // SAFETY: deptype is a fixed NOT NULL pg_depend column.
+            let deptype = unsafe {
+                types_tuple::heap_getattr(tup, Anum_pg_depend_deptype, rel.descr(), &mut isnull)
+            }
+            .as_i8();
+            if deptype == DEPENDENCY_EXTENSION || deptype == DEPENDENCY_AUTO_EXTENSION {
+                continue;
+            }
+        }
+        let tid = tup.t_self;
+        catalog_indexing::CatalogTupleDelete(&rel, &tid)?;
+        count += 1;
+    }
+    genam::systable_endscan(mcx, scan)?;
+    rel.close(RowExclusiveLock)?;
+    Ok(count)
+}
+
 // recordDependencyOnOwner (pg_shdepend.c): a pinned owner records nothing;
 // pg_shdepend writes are unported, so any unpinned owner is loud.
 pub fn recordDependencyOnOwner(classId: Oid, objectId: Oid, owner: Oid) {

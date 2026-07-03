@@ -1,8 +1,8 @@
 use types_core::catalog::{RELPERSISTENCE_PERMANENT, RELPERSISTENCE_TEMP};
 use types_error::PgResult;
 use types_nodes::parsenodes::{
-    AlterTableCmd, AlterTableStmt, AlterTableType, CTEMaterialize, ClosePortalStmt, CommentStmt, CommonTableExpr, CopyStmt, CreateSchemaStmt,
-    DeallocateStmt, DeclareCursorStmt, DefElem, DefElemAction, DiscardMode, DiscardStmt,
+    AlterTableCmd, AlterTableStmt, AlterTableType, CTEMaterialize, ClosePortalStmt, CommentStmt, CommonTableExpr, CopyStmt, CreateFunctionStmt, CreateSchemaStmt,
+    DeallocateStmt, DeclareCursorStmt, DefElem, DefElemAction, DiscardMode, DiscardStmt, FunctionParameter, FunctionParameterMode,
     AccessPriv, DropBehavior, DropStmt, ExecuteStmt, FetchStmt, GrantStmt, GrantTargetType,
     GroupingSetKind, ListenStmt, NotifyStmt, ObjectType, PrepareStmt, RenameStmt, RoleSpec,
     RoleSpecType, SetOperation, TransactionStmt, TransactionStmtKind, TruncateStmt, UnlistenStmt,
@@ -3773,6 +3773,133 @@ impl<'mcx> Parser<'mcx> {
                 n.behavior = drop_behavior(view.v(5).ival());
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
+            // CreateFunctionStmt (RETURNS TABLE 1127 stays loud:
+            // mergeTableFuncParameters unported).
+            1126 | 1128 | 1129 => {
+                let mut n = Node::build::<CreateFunctionStmt>(mcx)?;
+                n.is_procedure = rule == 1129;
+                n.replace = view.v(2).boolean();
+                n.funcname = view.v(4).list();
+                n.parameters = view.v(5).list();
+                let (ret, opts, body) = if rule == 1126 { (Some(7), 8, 9) } else { (None, 6, 7) };
+                n.returnType = ret.and_then(|i| view.v(i).node());
+                n.options = view.v(opts).list();
+                n.sql_body = view.v(body).node();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1130 => *yyval = YYSTYPE::Boolean(true),
+            1131 => *yyval = YYSTYPE::Boolean(false),
+            // func_args_with_defaults_list
+            1144 => {
+                let el = view.v(1).node().expect("func_arg_with_default");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, el)?);
+            }
+            1145 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(3).node().expect("func_arg_with_default"))?;
+                *yyval = YYSTYPE::List(list);
+            }
+            // func_arg: [arg_class] [param_name] func_type permutations.
+            1146..=1150 => {
+                let (mode, name, ty) = match rule {
+                    1146 => (Some(1), Some(2), 3),
+                    1147 => (Some(2), Some(1), 3),
+                    1148 => (None, Some(1), 2),
+                    1149 => (Some(1), None, 2),
+                    _ => (None, None, 1),
+                };
+                let mut n = Node::build::<FunctionParameter>(mcx)?;
+                n.name = name.map(|i| view.v(i).str_val());
+                n.argType = view.v(ty).node();
+                n.mode = mode
+                    .map(|i| param_mode(view.v(i).ival()))
+                    .unwrap_or(FunctionParameterMode::FUNC_PARAM_DEFAULT);
+                n.location = view.l(1);
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1151 => *yyval = YYSTYPE::Ival(FunctionParameterMode::FUNC_PARAM_IN as i32),
+            1152 => *yyval = YYSTYPE::Ival(FunctionParameterMode::FUNC_PARAM_OUT as i32),
+            1153 | 1154 => *yyval = YYSTYPE::Ival(FunctionParameterMode::FUNC_PARAM_INOUT as i32),
+            1155 => *yyval = YYSTYPE::Ival(FunctionParameterMode::FUNC_PARAM_VARIADIC as i32),
+            1157 => *yyval = view.v(1),
+            // func_arg_with_default DEFAULT/'=' a_expr (%TYPE 1159/1160 stay loud).
+            1162 | 1163 => {
+                let param = view.v(1).node().expect("func_arg");
+                let def = view.v(3).node();
+                // SAFETY: tree is parser-owned; no derived refs live.
+                unsafe {
+                    param
+                        .with_mut::<FunctionParameter, _>(|p| p.defexpr = def)
+                        .expect("func_arg is FunctionParameter");
+                }
+                *yyval = YYSTYPE::Node(Some(param));
+            }
+            // createfunc_opt_list
+            1176 => {
+                let el = view.v(1).node().expect("createfunc_opt_item");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, el)?);
+            }
+            1177 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(2).node().expect("createfunc_opt_item"))?;
+                *yyval = YYSTYPE::List(list);
+            }
+            // common_func_opt_item
+            1178 => {
+                *yyval = def_elem(mcx, "strict", Some(Node::mk_boolean(mcx, false)?), view.l(1))?;
+            }
+            1179 | 1180 => {
+                *yyval = def_elem(mcx, "strict", Some(Node::mk_boolean(mcx, true)?), view.l(1))?;
+            }
+            1181..=1183 => {
+                let v = ["immutable", "stable", "volatile"][rule - 1181];
+                *yyval = def_elem(mcx, "volatility", Some(Node::mk_string(mcx, v)?), view.l(1))?;
+            }
+            1184 | 1186 => {
+                *yyval = def_elem(mcx, "security", Some(Node::mk_boolean(mcx, true)?), view.l(1))?;
+            }
+            1185 | 1187 => {
+                *yyval = def_elem(mcx, "security", Some(Node::mk_boolean(mcx, false)?), view.l(1))?;
+            }
+            1188 => {
+                *yyval = def_elem(mcx, "leakproof", Some(Node::mk_boolean(mcx, true)?), view.l(1))?;
+            }
+            1189 => {
+                *yyval = def_elem(mcx, "leakproof", Some(Node::mk_boolean(mcx, false)?), view.l(1))?;
+            }
+            1190 => *yyval = def_elem(mcx, "cost", view.v(2).node(), view.l(1))?,
+            1191 => *yyval = def_elem(mcx, "rows", view.v(2).node(), view.l(1))?,
+            1192 => {
+                let arg = Node::mk_list(mcx, view.v(2).list())?;
+                *yyval = def_elem(mcx, "support", Some(arg), view.l(1))?;
+            }
+            1193 => *yyval = def_elem(mcx, "set", view.v(1).node(), view.l(1))?,
+            1194 => {
+                let arg = Node::mk_string(mcx, view.v(2).str_val())?;
+                *yyval = def_elem(mcx, "parallel", Some(arg), view.l(1))?;
+            }
+            // createfunc_opt_item (TRANSFORM 1197 stays loud).
+            1195 => {
+                let arg = Node::mk_list(mcx, view.v(2).list())?;
+                *yyval = def_elem(mcx, "as", Some(arg), view.l(1))?;
+            }
+            1196 => {
+                let arg = Node::mk_string(mcx, view.v(2).str_val())?;
+                *yyval = def_elem(mcx, "language", Some(arg), view.l(1))?;
+            }
+            1198 => {
+                *yyval = def_elem(mcx, "window", Some(Node::mk_boolean(mcx, true)?), view.l(1))?;
+            }
+            // func_as
+            1200 => {
+                let s = Node::mk_string(mcx, view.v(1).str_val())?;
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, s)?);
+            }
+            1201 => {
+                let mut list = NodeList::make1(mcx, Node::mk_string(mcx, view.v(1).str_val())?)?;
+                list.lappend(mcx, Node::mk_string(mcx, view.v(3).str_val())?)?;
+                *yyval = YYSTYPE::List(list);
+            }
             // GrantStmt / RevokeStmt; privilege_target rides as a GrantStmt
             // carrier holding (targtype, objtype, objects).
             1027 => {
@@ -4432,6 +4559,17 @@ fn opt_str<'mcx>(v: YYSTYPE<'mcx>) -> Option<&'mcx str> {
         None
     } else {
         Some(v.str_val())
+    }
+}
+
+fn param_mode(v: i32) -> FunctionParameterMode {
+    match v as u8 {
+        b'i' => FunctionParameterMode::FUNC_PARAM_IN,
+        b'o' => FunctionParameterMode::FUNC_PARAM_OUT,
+        b'b' => FunctionParameterMode::FUNC_PARAM_INOUT,
+        b'v' => FunctionParameterMode::FUNC_PARAM_VARIADIC,
+        b't' => FunctionParameterMode::FUNC_PARAM_TABLE,
+        _ => FunctionParameterMode::FUNC_PARAM_DEFAULT,
     }
 }
 
