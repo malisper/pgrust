@@ -147,7 +147,6 @@ pub fn expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
             let b = node.as_bool_expr().unwrap();
             walk_list(&b.args, w)
         }
-        NodeTag::T_RelabelType => w.visit(node.as_relabel_type().unwrap().arg),
         NodeTag::T_NullTest => walk_opt(node.as_null_test().unwrap().arg, w),
         NodeTag::T_RelabelType => w.visit(node.as_relabel_type().unwrap().arg),
         NodeTag::T_CoerceViaIO => w.visit(node.as_coerce_via_io().unwrap().arg),

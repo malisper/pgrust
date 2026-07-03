@@ -414,6 +414,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "adt_quote"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "guc_tables",
+ "keywords",
+ "mcx",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "varlena",
+]
+
+[[package]]
 name = "adt_regexp"
 version = "0.1.0"
 dependencies = [
@@ -508,6 +522,26 @@ dependencies = [
  "types_core",
  "types_error",
  "types_fmgr",
+]
+
+[[package]]
+name = "adt_varchar"
+version = "0.1.0"
+dependencies = [
+ "arrayfuncs",
+ "datum",
+ "hashfn",
+ "mbutils",
+ "mcx",
+ "numutils",
+ "pg_locale_seams",
+ "pqformat",
+ "stringinfo",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "varlena",
+ "wchar",
 ]
 
 [[package]]
@@ -1461,6 +1495,7 @@ dependencies = [
  "lsyscache",
  "mbutils",
  "mcx",
+ "nodes_core",
  "parser_small1",
  "syscache_seams",
  "types_core",
@@ -2576,11 +2611,13 @@ dependencies = [
  "adt_numeric",
  "adt_oracle_compat",
  "adt_pseudotypes",
+ "adt_quote",
  "adt_regexp",
  "adt_regproc",
  "adt_scalar",
  "adt_timestamp",
  "adt_uuid",
+ "adt_varchar",
  "adt_windowfuncs",
  "arrayfuncs",
  "commands_async",
@@ -2616,7 +2653,6 @@ dependencies = [
  "datum",
  "fmgr_seams",
  "keywords",
- "lsyscache",
  "mbutils_seams",
  "syscache_seams",
  "types_core",
@@ -3811,6 +3847,7 @@ version = "0.1.0"
 dependencies = [
  "datum",
  "fmgr_seams",
+ "format_type",
  "init_small",
  "lsyscache_seams",
  "mcx",
@@ -5001,6 +5038,7 @@ dependencies = [
  "mbutils",
  "mcx",
  "miscinit_seams",
+ "nodes_core",
  "parse_agg",
  "parse_collate_seams",
  "parse_func",
@@ -8892,6 +8930,7 @@ dependencies = [
  "guc_tables",
  "hashfn",
  "lsyscache",
+ "mbutils",
  "mbutils_seams",
  "mcx",
  "numutils",
