@@ -112,7 +112,13 @@ pub fn get_relation_info<'mcx>(
             let am_is_btree = relam == BTREE_AM_OID;
             let am_is_gin = relam == types_core::GIN_AM_OID;
             let am_is_gist = relam == types_core::GIST_AM_OID;
-            if !am_is_btree && !am_is_gin && !am_is_gist && relam != types_core::HASH_AM_OID {
+            let am_is_brin = relam == types_core::BRIN_AM_OID;
+            if !am_is_btree
+                && !am_is_gin
+                && !am_is_gist
+                && !am_is_brin
+                && relam != types_core::HASH_AM_OID
+            {
                 panic!("get_relation_info (plancat.c): index AM {relam}; M2 index-AM lane");
             }
             if ind.has_indpred {
@@ -147,13 +153,13 @@ pub fn get_relation_info<'mcx>(
                 });
             }
             info.relam = relam;
-            // Per-AM IndexAmRoutine flags (bt/hash/gin/gist handlers).
+            // Per-AM IndexAmRoutine flags (bt/hash/gin/gist/brin handlers).
             info.amcanorderbyop = am_is_gist;
-            info.amoptionalkey = am_is_btree || am_is_gin || am_is_gist;
+            info.amoptionalkey = am_is_btree || am_is_gin || am_is_gist || am_is_brin;
             info.amsearcharray = am_is_btree;
-            info.amsearchnulls = am_is_btree || am_is_gist;
+            info.amsearchnulls = am_is_btree || am_is_gist || am_is_brin;
             info.amcanparallel = am_is_btree;
-            info.amhasgettuple = !am_is_gin;
+            info.amhasgettuple = !am_is_gin && !am_is_brin;
             info.amhasgetbitmap = true;
             info.amcanmarkpos = am_is_btree;
 

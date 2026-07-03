@@ -101,9 +101,9 @@ fn ConstructTupleDescriptor<'mcx>(
     collationIds: &[Oid],
     opclassIds: &[Oid],
 ) -> PgResult<TupleDescData<'mcx>> {
-    // amroutine->amkeytype: InvalidOid for btree/gin/gist, INT4OID for hash.
+    // amroutine->amkeytype: InvalidOid for btree/gin/gist/brin, INT4OID for hash.
     let amkeytype = match accessMethodId {
-        BTREE_AM_OID | GIN_AM_OID | GIST_AM_OID => InvalidOid,
+        BTREE_AM_OID | GIN_AM_OID | GIST_AM_OID | types_core::BRIN_AM_OID => InvalidOid,
         HASH_AM_OID => INT4OID,
         other => unported(&format!("ConstructTupleDescriptor: index AM {other}")),
     };
@@ -361,8 +361,9 @@ pub fn index_create<'mcx>(
         && accessMethodId != HASH_AM_OID
         && accessMethodId != GIN_AM_OID
         && accessMethodId != GIST_AM_OID
+        && accessMethodId != types_core::BRIN_AM_OID
     {
-        unported("index_create: index AMs beyond btree/hash/gin/gist");
+        unported("index_create: index AMs beyond btree/hash/gin/gist/brin");
     }
 
     let pg_class = table::table_open(mcx, RELATION_RELATION_ID, RowExclusiveLock)?;
@@ -632,8 +633,9 @@ pub fn index_build<'mcx>(
         && indexRelation.rd_rel.relam != HASH_AM_OID
         && indexRelation.rd_rel.relam != GIN_AM_OID
         && indexRelation.rd_rel.relam != GIST_AM_OID
+        && indexRelation.rd_rel.relam != types_core::BRIN_AM_OID
     {
-        unported("index_build: index AMs beyond btree/hash/gin/gist");
+        unported("index_build: index AMs beyond btree/hash/gin/gist/brin");
     }
 
     let guard = miscinit::SecContextGuard::security_restricted(heapRelation.rd_rel.relowner);
@@ -645,6 +647,9 @@ pub fn index_build<'mcx>(
         (r.heap_tuples, r.index_tuples)
     } else if indexRelation.rd_rel.relam == HASH_AM_OID {
         let r = hashsort::hashbuild(mcx, heapRelation, indexRelation, indexInfo)?;
+        (r.heap_tuples, r.index_tuples)
+    } else if indexRelation.rd_rel.relam == types_core::BRIN_AM_OID {
+        let r = brin_build::brinbuild(mcx, heapRelation, indexRelation, indexInfo)?;
         (r.heap_tuples, r.index_tuples)
     } else if indexRelation.rd_rel.relam == GIN_AM_OID {
         let r = ginbuild::ginbuild(mcx, heapRelation, indexRelation, indexInfo)?;

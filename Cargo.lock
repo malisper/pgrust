@@ -1067,6 +1067,116 @@ dependencies = [
 ]
 
 [[package]]
+name = "brin"
+version = "0.1.0"
+dependencies = [
+ "brin_minmax",
+ "brin_pageops",
+ "brin_tuple",
+ "bufmgr_seams",
+ "datum",
+ "lsyscache",
+ "mcx",
+ "table",
+ "tidbitmap",
+ "types_brin",
+ "types_core",
+ "types_error",
+ "types_rel",
+ "types_relscan",
+ "types_scan",
+ "types_storage",
+ "types_tuple",
+ "xact",
+]
+
+[[package]]
+name = "brin_build"
+version = "0.1.0"
+dependencies = [
+ "brin",
+ "brin_pageops",
+ "brin_tuple",
+ "bufmgr_seams",
+ "datum",
+ "execindexing",
+ "freespace",
+ "mcx",
+ "types_brin",
+ "types_core",
+ "types_error",
+ "types_rel",
+ "types_storage",
+ "types_tuple",
+ "xloginsert_seams",
+]
+
+[[package]]
+name = "brin_minmax"
+version = "0.1.0"
+dependencies = [
+ "brin_tuple",
+ "datum",
+ "fmgr_core",
+ "lsyscache",
+ "mcx",
+ "types_brin",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_scan",
+]
+
+[[package]]
+name = "brin_pageops"
+version = "0.1.0"
+dependencies = [
+ "bufmgr_seams",
+ "freespace",
+ "lmgr",
+ "mcx",
+ "transam_xlog_seams",
+ "types_brin",
+ "types_core",
+ "types_error",
+ "types_rel",
+ "types_storage",
+ "types_tuple",
+ "xloginsert_seams",
+]
+
+[[package]]
+name = "brin_tuple"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "detoast",
+ "heaptoast_seams",
+ "heaptuple",
+ "mcx",
+ "types_brin",
+ "types_core",
+ "types_error",
+ "types_storage",
+ "types_tuple",
+]
+
+[[package]]
+name = "brin_xlog"
+version = "0.1.0"
+dependencies = [
+ "brin_pageops",
+ "bufmgr_seams",
+ "types_brin",
+ "types_core",
+ "types_error",
+ "types_storage",
+ "types_tuple",
+ "xlogreader_seams",
+ "xlogutils",
+]
+
+[[package]]
 name = "bufmgr"
 version = "0.0.0"
 dependencies = [
@@ -1261,6 +1371,7 @@ name = "catalog_index"
 version = "0.1.0"
 dependencies = [
  "autovacuum_seams",
+ "brin_build",
  "bufmgr",
  "catalog",
  "catalog_heap",
@@ -2564,6 +2675,7 @@ dependencies = [
  "tableam",
  "tableam_vocab",
  "transam_xlog_seams",
+ "types_brin",
  "types_core",
  "types_error",
  "types_fmgr",
@@ -3849,6 +3961,7 @@ version = "0.0.0"
 name = "indexam"
 version = "0.1.0"
 dependencies = [
+ "brin",
  "datum",
  "gin",
  "gist",
@@ -3856,9 +3969,11 @@ dependencies = [
  "indexam_seams",
  "mcx",
  "nbtree",
+ "predicate",
  "relation_seams",
  "tableam",
  "tidbitmap",
+ "types_brin",
  "types_core",
  "types_error",
  "types_nbtree",
@@ -6336,6 +6451,7 @@ dependencies = [
  "adt_int8",
  "arrayfuncs",
  "backend_status_seams",
+ "brin",
  "bufmgr_seams",
  "clauses",
  "clauses_seams",
@@ -7842,6 +7958,7 @@ dependencies = [
 name = "rmgr"
 version = "0.0.0"
 dependencies = [
+ "brin_xlog",
  "clog",
  "dbcommands_seams",
  "elog",
@@ -7882,6 +7999,7 @@ dependencies = [
  "standby",
  "storage_xlog",
  "stringinfo",
+ "types_brin",
  "types_core",
  "types_error",
  "types_nbtree",
@@ -9517,6 +9635,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "types_brin"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "mcx",
+ "types_core",
+ "types_fmgr",
+ "types_storage",
+ "types_tuple",
+]
+
+[[package]]
 name = "types_core"
 version = "0.0.0"
 
@@ -9639,6 +9769,7 @@ dependencies = [
  "gin_vocab",
  "mcx",
  "tableam",
+ "types_brin",
  "types_core",
  "types_error",
  "types_gist",

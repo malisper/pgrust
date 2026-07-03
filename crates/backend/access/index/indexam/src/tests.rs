@@ -404,10 +404,9 @@ fn insert_dispatches_through_am() {
         &heap,
         types_nbtree::UNIQUE_CHECK_NO,
         false,
-    
         &mut am_cache,
     )
     .unwrap();
     assert!(ok);
-    index_insert_cleanup(&idx).unwrap();
+    index_insert_cleanup(&idx, &mut am_cache).unwrap();
 }

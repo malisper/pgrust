@@ -1126,6 +1126,7 @@ pub fn amcostestimate(
         types_relscan::IndexAmKind::Hash => hashcostestimate(run, path_id, loop_count),
         types_relscan::IndexAmKind::Gin => gincostestimate(run, path_id, loop_count),
         types_relscan::IndexAmKind::Gist => gistcostestimate(run, path_id, loop_count),
+        types_relscan::IndexAmKind::Brin => brincostestimate(run, path_id, loop_count),
         #[allow(unreachable_patterns)]
         other => panic!("amcostestimate (selfuncs.c): {other:?}; M2 index-AM lane"),
     }
@@ -1340,6 +1341,118 @@ fn hashcostestimate(
         index_selectivity: costs.index_selectivity,
         index_correlation: 0.0,
         index_pages: costs.num_index_pages,
+    })
+}
+
+// brincostestimate (selfuncs.c): search behavior completely different from
+// other index types.
+fn brincostestimate(
+    run: &mut PlannerRun<'_>,
+    path_id: types_pathnodes::PathId,
+    loop_count: f64,
+) -> PgResult<AmCostEstimate> {
+    let (index_quals, index_pages, index_rel, reltablespace, indexoid, clause_attnums) = {
+        let PathNode::IndexPath(ip) = run.root.path(path_id) else {
+            panic!("brincostestimate: not an IndexPath")
+        };
+        let index = ip.indexinfo.as_ref().expect("indexinfo set");
+        let mut attnums: Vec<i16> = Vec::new();
+        for ic in ip.indexclauses.iter() {
+            attnums.push(index.indexkeys[ic.indexcol as usize] as i16);
+        }
+        (
+            get_quals_from_indexclauses(run, path_id),
+            index.pages,
+            index.rel.expect("index rel set"),
+            index.reltablespace,
+            index.indexoid,
+            attnums,
+        )
+    };
+    let num_pages = index_pages as f64;
+    let baserel_relid = run.root.rel(index_rel).relid as i32;
+    let baserel_pages = run.root.rel(index_rel).pages as f64;
+
+    let (spc_random_page_cost, spc_seq_page_cost) =
+        crate::costsize::get_tablespace_page_costs(reltablespace);
+
+    // Fetch pagesPerRange/revmapNumPages from the index itself (a lock is
+    // already held from plancat).
+    let mcx = run.mcx;
+    let (pages_per_range, revmap_num_pages) = {
+        let index_rel_open = indexam::index_open(mcx, indexoid, types_rel::NoLock)?;
+        let stats = brin::brinGetStats(&index_rel_open)?;
+        indexam::index_close(index_rel_open, types_rel::NoLock)?;
+        (stats.pagesPerRange as f64, stats.revmapNumPages as f64)
+    };
+    let index_ranges = (baserel_pages / pages_per_range).ceil().max(1.0);
+
+    // Index correlation: the largest absolute correlation among the queried
+    // columns (0 when no stats).
+    let mut index_correlation = 0.0f64;
+    let rte_relid = run.rte(baserel_relid as usize).relid;
+    let rte_inh = run.rte(baserel_relid as usize).inh;
+    for &attnum in &clause_attnums {
+        if attnum == 0 {
+            panic!("brincostestimate (selfuncs.c): expression index column; M2 lane");
+        }
+        if let Some(bundle) =
+            syscache_seams::lookup_pg_statistic_bundle::call(mcx, rte_relid, attnum, rte_inh)?
+        {
+            if let Some(slot) =
+                bundle.slots.iter().find(|sl| sl.kind == STATISTIC_KIND_CORRELATION)
+            {
+                let numbers = slot.numbers()?;
+                let var_correlation = if !numbers.is_empty() {
+                    (numbers[0] as f64).abs()
+                } else {
+                    0.0
+                };
+                if var_correlation > index_correlation {
+                    index_correlation = var_correlation;
+                }
+            }
+        }
+    }
+
+    let qual_selectivity = crate::clausesel::clauselist_selectivity(
+        run,
+        &index_quals,
+        baserel_relid,
+        JOIN_INNER,
+        None,
+    )?;
+
+    let minimal_ranges = (index_ranges * qual_selectivity).ceil();
+    let estimated_ranges = if index_correlation < 1.0e-10 {
+        index_ranges
+    } else {
+        (minimal_ranges / index_correlation).min(index_ranges)
+    };
+
+    let selec = clamp_probability(estimated_ranges / index_ranges);
+
+    let qual_arg_cost = index_other_operands_eval_cost(run, &index_quals)?;
+
+    // Startup: read the whole revmap sequentially, plus the qual setup.
+    let mut index_startup_cost = spc_seq_page_cost * revmap_num_pages * loop_count;
+    index_startup_cost += qual_arg_cost;
+
+    // Total: the rest of the index in random order.
+    let mut index_total_cost = index_startup_cost
+        + spc_random_page_cost * (num_pages - revmap_num_pages) * loop_count;
+
+    // Small per-matched-range charge, scaled by pages per range (bitmap
+    // manipulation cost).
+    index_total_cost +=
+        0.1 * gucs::cpu_operator_cost() * estimated_ranges * pages_per_range;
+
+    Ok(AmCostEstimate {
+        index_startup_cost,
+        index_total_cost,
+        index_selectivity: selec,
+        index_correlation: index_correlation,
+        index_pages: num_pages,
     })
 }
 

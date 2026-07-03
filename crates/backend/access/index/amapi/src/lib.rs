@@ -14,6 +14,7 @@ pub const F_BTHANDLER: Oid = 330;
 pub const F_HASHHANDLER: Oid = 331;
 pub const F_GINHANDLER: Oid = 333;
 pub const F_GISTHANDLER: Oid = 332;
+pub const F_BRINHANDLER: Oid = 335;
 const AMTYPE_INDEX: i8 = b'i' as i8;
 const Anum_pg_am_amname: i32 = 2;
 const Anum_pg_am_amhandler: i32 = 3;
@@ -29,6 +30,7 @@ pub fn GetIndexAmRoutine(amhandler: Oid) -> IndexAmKind {
         F_HASHHANDLER => IndexAmKind::Hash,
         F_GINHANDLER => IndexAmKind::Gin,
         F_GISTHANDLER => IndexAmKind::Gist,
+        F_BRINHANDLER => IndexAmKind::Brin,
         other => unported_handler(other),
     }
 }
@@ -94,6 +96,8 @@ pub fn IndexAmTranslateStrategy(
         IndexAmKind::Gin => COMPARE_INVALID,
         // amtranslatestrategy == NULL for gist.
         IndexAmKind::Gist => COMPARE_INVALID,
+        // amtranslatestrategy == NULL.
+        IndexAmKind::Brin => COMPARE_INVALID,
         #[allow(unreachable_patterns)]
         _ => unported_translate(amoid),
     };
@@ -135,6 +139,8 @@ pub fn IndexAmTranslateCompareType(
             "unported: gisttranslatecmptype (AMPROCNUM proc-12 lookup; \
              temporal/WITHOUT OVERLAPS lane)"
         ),
+        // amtranslatecmptype == NULL.
+        IndexAmKind::Brin => InvalidStrategy,
         #[allow(unreachable_patterns)]
         _ => unported_translate(amoid),
     };
@@ -168,7 +174,7 @@ fn am_name(tuple: &catcache::CatCTuple) -> PgResult<String> {
 #[cold]
 #[inline(never)]
 fn unported_handler(amhandler: Oid) -> ! {
-    panic!("unported: index AM handler function {amhandler} (IndexAmKind covers btree only; non-builtin handlers need pg_proc + extension loading)")
+    panic!("unported: index AM handler function {amhandler} (IndexAmKind covers btree+brin; non-builtin handlers need pg_proc + extension loading)")
 }
 
 #[cold]
