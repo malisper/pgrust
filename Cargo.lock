@@ -1100,17 +1100,20 @@ version = "0.0.0"
 dependencies = [
  "arrayfuncs",
  "catalog",
+ "catalog_index_seams",
  "catalog_indexing",
  "catalog_storage",
  "datum",
  "fmgr_seams",
  "genam",
  "heaptuple",
+ "indexam",
  "init_small",
  "lmgr",
  "lsyscache",
  "mcx",
  "miscinit_seams",
+ "pg_constraint",
  "pg_depend",
  "pg_type",
  "pgstat",
@@ -1139,6 +1142,7 @@ dependencies = [
  "catalog_indexing",
  "catalog_storage",
  "datum",
+ "elog_seams",
  "execindexing",
  "fmgr_seams",
  "genam",
@@ -1159,6 +1163,7 @@ dependencies = [
  "relcache",
  "snapmgr",
  "table",
+ "tableam",
  "tupdesc",
  "types_core",
  "types_error",
@@ -1173,9 +1178,11 @@ dependencies = [
 name = "catalog_index_seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam_core",
  "types_core",
  "types_error",
+ "types_rel",
 ]
 
 [[package]]
