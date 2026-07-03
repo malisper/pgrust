@@ -7874,6 +7874,7 @@ dependencies = [
  "procarray_seams",
  "s_lock_seams",
  "shmem",
+ "shmem_seams",
  "slru",
  "snapmgr",
  "transam_xlog_seams",

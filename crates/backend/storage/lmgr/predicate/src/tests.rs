@@ -73,6 +73,12 @@ fn setup() {
         xact_seams::get_top_transaction_id_if_any::set(|| 0);
         xact_seams::transaction_id_is_current_transaction_id::set(|_| false);
 
+        shmem_seams::add_size::set(|a, b| Ok(a.checked_add(b).expect("size overflow")));
+        shmem_seams::mul_size::set(|a, b| Ok(a.checked_mul(b).expect("size overflow")));
+        shmem_seams::shmem_alloc::set(|size| {
+            Ok(Box::leak(vec![0u8; size].into_boxed_slice()).as_mut_ptr())
+        });
+
         lwlock::CreateLWLocks(false).unwrap();
         lmgr_proc::InitProcGlobal(&CFG);
         crate::engine::PredicateLockShmemInit(CFG.max_prepared_xacts).unwrap();
