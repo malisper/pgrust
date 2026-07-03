@@ -193,13 +193,101 @@ unported! {
     fn FlushRelationBuffers(RelFileLocatorBackend) -> (), "FlushRelationBuffers";
     fn FlushDatabaseBuffers(Oid) -> (), "FlushDatabaseBuffers";
     fn DropDatabaseBuffers(Oid) -> (), "DropDatabaseBuffers";
-    fn MarkBufferDirtyHint(Buffer, bool) -> (), "MarkBufferDirtyHint (needs XLogSaveBufferForHint)";
-    fn BufferGetLSNAtomic(Buffer) -> u64, "BufferGetLSNAtomic";
-    fn BufferIsPermanent(Buffer) -> bool, "BufferIsPermanent";
     fn ConditionalLockBufferForCleanup(Buffer) -> bool, "ConditionalLockBufferForCleanup";
     fn IsBufferCleanupOK(Buffer) -> bool, "IsBufferCleanupOK";
     fn HoldingBufferPinThatDelaysRecovery() -> bool, "HoldingBufferPinThatDelaysRecovery";
     fn PrefetchBuffer(RelFileLocatorBackend, ForkNumber, BlockNumber) -> (), "PrefetchBuffer";
+}
+
+pub fn BufferIsPermanent(buffer: Buffer) -> bool {
+    if buffer < 0 {
+        return false;
+    }
+    debug_assert!(pin::BufferIsPinned(buffer));
+    let desc = GetBufferDescriptor(buffer - 1);
+    desc.state.load(core::sync::atomic::Ordering::Relaxed) & types_storage::buf::BM_PERMANENT != 0
+}
+
+// XLogHintBitIsNeeded() (xlog.h). Uninstalled slots read as their boot
+// defaults (false / checksums-off) until the owning units wire them.
+fn xlog_hint_bit_is_needed() -> bool {
+    (guc_tables::vars::wal_log_hints.installed() && guc_tables::vars::wal_log_hints.read())
+        || (transam_xlog_seams::data_checksums_enabled::is_installed()
+            && transam_xlog_seams::data_checksums_enabled::call())
+}
+
+pub fn BufferGetLSNAtomic(buffer: Buffer) -> types_core::XLogRecPtr {
+    if !xlog_hint_bit_is_needed() || buffer < 0 {
+        return ops::buffer_page_get_lsn(buffer);
+    }
+    debug_assert!(types_core::BufferIsValid(buffer));
+    debug_assert!(pin::BufferIsPinned(buffer));
+    let desc = GetBufferDescriptor(buffer - 1);
+    let state = LockBufHdr(desc);
+    let lsn = ops::buffer_page_get_lsn(buffer);
+    UnlockBufHdr(desc, state);
+    lsn
+}
+
+// DELAY_CHKPT_START (proc.h).
+const DELAY_CHKPT_START: i32 = 1 << 0;
+
+pub fn MarkBufferDirtyHint(buffer: Buffer, buffer_std: bool) -> PgResult<()> {
+    use types_storage::buf::{BM_DIRTY, BM_JUST_DIRTIED, BM_PERMANENT};
+    if !types_core::BufferIsValid(buffer) {
+        return Err(Box::new(types_error::PgError::new(
+            ERROR,
+            format!("bad buffer ID: {buffer}"),
+        )));
+    }
+    if buffer < 0 {
+        panic!("unported callee reached from bufmgr.c MarkBufferDirtyHint: MarkLocalBufferDirty (localbuf.c)");
+    }
+    let desc = GetBufferDescriptor(buffer - 1);
+    debug_assert!(GetPrivateRefCount(buffer) > 0);
+
+    let state = desc.state.load(core::sync::atomic::Ordering::Relaxed);
+    if state & (BM_DIRTY | BM_JUST_DIRTIED) == (BM_DIRTY | BM_JUST_DIRTIED) {
+        return Ok(());
+    }
+
+    let mut lsn: types_core::XLogRecPtr = 0;
+    let mut delay_chkpt = false;
+    if xlog_hint_bit_is_needed() && state & BM_PERMANENT != 0 {
+        // The dirty-page-without-usable-LSN window must not span a
+        // checkpoint's REDO-pointer read (C delayChkptFlags contract).
+        if let Some(procno) = lmgr_proc::MyProc() {
+            lmgr_proc::GetPGProcByNumber(procno)
+                .delayChkptFlags
+                .fetch_or(DELAY_CHKPT_START, core::sync::atomic::Ordering::Relaxed);
+            delay_chkpt = true;
+        }
+        lsn = xloginsert_seams::xlog_save_buffer_for_hint::call(buffer, buffer_std)?;
+    }
+
+    let mut buf_state = LockBufHdr(desc);
+    debug_assert!(pin::buffer_refcount(buf_state) > 0);
+    let mut dirtied = false;
+    if buf_state & BM_DIRTY == 0 {
+        dirtied = true;
+        if lsn != 0 {
+            ops::buffer_page_set_lsn(buffer, lsn);
+        }
+    }
+    buf_state |= BM_DIRTY | BM_JUST_DIRTIED;
+    UnlockBufHdr(desc, buf_state);
+
+    if delay_chkpt {
+        if let Some(procno) = lmgr_proc::MyProc() {
+            lmgr_proc::GetPGProcByNumber(procno)
+                .delayChkptFlags
+                .fetch_and(!DELAY_CHKPT_START, core::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    if dirtied {
+        counters::dirtied();
+    }
+    Ok(())
 }
 
 /// Private-refcount TLS is const-init; AtProcExit leak check pends proc unit.
@@ -229,6 +317,7 @@ pub fn init_seams() {
     bufmgr_seams::flush_one_buffer::set(write::FlushOneBuffer);
     bufmgr_seams::check_point_buffers::set(write::CheckPointBuffers);
     bufmgr_seams::lock_buffer::set(ops::LockBuffer);
+    bufmgr_seams::conditional_lock_buffer::set(ops::ConditionalLockBuffer);
     bufmgr_seams::lock_buffer_for_cleanup::set(ops::LockBufferForCleanup);
     bufmgr_seams::buffer_page_is_new::set(ops::buffer_page_is_new);
     bufmgr_seams::buffer_page_get_lsn::set(ops::buffer_page_get_lsn);
@@ -262,10 +351,7 @@ pub fn init_seams() {
     bufmgr_seams::flush_relations_all_buffers::set(|_| {
         panic!("unported callee reached from bufmgr.c: FlushRelationsAllBuffers (write-back, phase 2)")
     });
-    bufmgr_seams::mark_buffer_dirty_hint::set(|b, s| {
-        MarkBufferDirtyHint(b, s);
-        Ok(())
-    });
+    bufmgr_seams::mark_buffer_dirty_hint::set(MarkBufferDirtyHint);
     bufmgr_seams::buffer_is_permanent::set(BufferIsPermanent);
     bufmgr_seams::buffer_get_lsn_atomic::set(BufferGetLSNAtomic);
 }

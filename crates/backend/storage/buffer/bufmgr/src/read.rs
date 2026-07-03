@@ -180,7 +180,7 @@ fn BufferAlloc(
 }
 
 /// Clock-sweep victim, pinned, evicted from the mapping table.
-fn GetVictimBuffer(strategy: &BufferAccessStrategy) -> PgResult<Buffer> {
+pub(crate) fn GetVictimBuffer(strategy: &BufferAccessStrategy) -> PgResult<Buffer> {
     loop {
         reserve_entry();
         let (victim, _from_ring) = StrategyGetBuffer(strategy)?;

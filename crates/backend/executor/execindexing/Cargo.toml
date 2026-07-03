@@ -35,3 +35,15 @@ predicate_seams = { path = "../../storage/lmgr/predicate_seams" }
 relation_seams = { path = "../../access/common/relation_seams" }
 freespace_seams = { path = "../../storage/freespace/freespace_seams" }
 seam_core = { path = "../../../_support/seam_core" }
+types_nodes = { path = "../../../_support/types/nodes" }
+heaptuple = { path = "../../access/common/heaptuple" }
+tableam = { path = "../../access/table/tableam" }
+rmgr = { path = "../../access/transam/rmgr" }
+xact_seams = { path = "../../access/transam/xact_seams" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+catalog_seams = { path = "../../catalog/catalog_seams" }
+pruneheap_seams = { path = "../../access/heap/pruneheap_seams" }
+heapam_visibility_seams = { path = "../../access/heap/heapam_visibility_seams" }
+smgr_seams = { path = "../../storage/smgr/smgr_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+aclchk_seams = { path = "../../catalog/aclchk_seams" }

@@ -222,15 +222,34 @@ mod heap {
         unported("backend-access-heap-heapam (heap_index_delete_tuples)")
     }
 
+    // heapam_tuple_insert (heapam_handler.c): fetch the slot's heap tuple in
+    // place, heap_insert it, copy t_self back. Callers pass table-format
+    // slots (ri_newTupleSlot / table_slot_create), so no copy arm exists.
     pub(super) fn tuple_insert<'mcx>(
-        _mcx: Mcx<'mcx>,
-        _rel: &Relation<'mcx>,
-        _slot: &mut SlotData<'mcx>,
-        _cid: CommandId,
-        _options: i32,
-        _bistate: Option<&mut BulkInsertStateData>,
+        mcx: Mcx<'mcx>,
+        rel: &Relation<'mcx>,
+        slot: &mut SlotData<'mcx>,
+        cid: CommandId,
+        options: i32,
+        bistate: Option<&mut BulkInsertStateData>,
     ) -> PgResult<()> {
-        unported(DML_UNIT)
+        debug_assert!(bistate.is_none(), "GetBulkInsertState lane (COPY) not ported");
+        exectuples::exec_materialize_slot(slot, mcx)?;
+        slot.base_mut().tts_tableOid = rel.rd_id;
+        let tuple = match slot {
+            SlotData::Heap(h) => h.tuple.as_mut(),
+            SlotData::BufferHeap(b) => b.base.tuple.as_mut(),
+            _ => panic!(
+                "heapam_tuple_insert (heapam_handler.c): non-heap slot copy arm \
+                 not ported"
+            ),
+        }
+        .expect("materialized heap slot holds a tuple");
+        tuple.t_tableOid = rel.rd_id;
+        ::heapam::heap_insert(rel, tuple, cid, options)?;
+        let t_self = tuple.t_self;
+        slot.base_mut().tts_tid = t_self;
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]

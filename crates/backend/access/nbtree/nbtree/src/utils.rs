@@ -19,7 +19,7 @@ use ::types_scan::scankey::{
 };
 use ::types_scan::sdir::{ScanDirection, ScanDirectionIsBackward, ScanDirectionIsForward};
 use ::types_storage::bufpage::{ItemIdData, PageRef, SizeOfPageHeaderData};
-use ::types_tuple::itemptr::ItemPointerEquals;
+use ::types_tuple::itemptr::{ItemPointerCompare, ItemPointerData, ItemPointerEquals};
 use ::types_tuple::varatt::varsize_any;
 use ::types_tuple::TupleDescData;
 
@@ -452,6 +452,184 @@ pub(crate) fn bt_killitems(
         None => bufmgr::lock_buffer::call(buf, bufmgr::BUFFER_LOCK_UNLOCK)?,
     }
     Ok(())
+}
+
+/// _bt_truncate: pivot tuple for a leaf split, suffix-truncated where the
+/// keys distinguish the halves, heap-TID-appended where they don't.
+///
+/// # Safety
+/// Both tuples per [`bt_checkkeys`]; neither is a pivot.
+pub(crate) unsafe fn bt_truncate<'mcx>(
+    mcx: ::mcx::Mcx<'mcx>,
+    rel: &Relation<'_>,
+    lastleft: ITup,
+    firstright: ITup,
+    itup_key: &mut BtScanInsert,
+    frame: &mut OrderProcFrame,
+) -> PgResult<crate::itup::ItupBuf<'mcx>> {
+    use crate::itup::{
+        bt_tuple_get_max_heap_tid, bt_tuple_get_posting_offset, bt_tuple_set_natts,
+        index_truncate_tuple, maxalign, index_tuple_size, set_t_info, t_info,
+        INDEX_SIZE_MASK,
+    };
+
+    let tupdesc: &TupleDescData<'_> = &rel.rd_att;
+    let nkeyatts = rel.indnkeyatts() as usize;
+
+    debug_assert!(!bt_tuple_is_pivot(lastleft) && !bt_tuple_is_pivot(firstright));
+
+    let keepnatts = bt_keep_natts(rel, lastleft, firstright, itup_key, frame)?;
+
+    let mut pivot = index_truncate_tuple(mcx, tupdesc, firstright, keepnatts.min(nkeyatts))?;
+
+    if bt_tuple_is_posting(pivot.as_ptr()) {
+        // straight copy of a posting firstright: chop the posting list here.
+        debug_assert!(keepnatts == nkeyatts || keepnatts == nkeyatts + 1);
+        debug_assert!(rel.indnatts() as usize == nkeyatts);
+        let sz = maxalign(bt_tuple_get_posting_offset(pivot.as_ptr()));
+        set_t_info(
+            pivot.as_mut_ptr(),
+            (t_info(pivot.as_ptr()) & !INDEX_SIZE_MASK) | sz as u16,
+        );
+    }
+
+    if keepnatts <= nkeyatts {
+        bt_tuple_set_natts(pivot.as_mut_ptr(), keepnatts as u16, false);
+        return Ok(pivot);
+    }
+
+    let newsize =
+        maxalign(index_tuple_size(pivot.as_ptr())) + maxalign(core::mem::size_of::<ItemPointerData>());
+    let mut tidpivot = crate::itup::ItupBuf::with_size(mcx, newsize)?;
+    core::ptr::copy_nonoverlapping(
+        pivot.as_ptr(),
+        tidpivot.as_mut_ptr(),
+        maxalign(index_tuple_size(pivot.as_ptr())),
+    );
+    set_t_info(
+        tidpivot.as_mut_ptr(),
+        (t_info(tidpivot.as_ptr()) & !INDEX_SIZE_MASK) | newsize as u16,
+    );
+    bt_tuple_set_natts(tidpivot.as_mut_ptr(), nkeyatts as u16, true);
+    let heaptid_off = newsize - core::mem::size_of::<ItemPointerData>();
+    let pivotheaptid = bt_tuple_get_max_heap_tid(lastleft);
+    tidpivot
+        .as_mut_ptr()
+        .add(heaptid_off)
+        .cast::<ItemPointerData>()
+        .write_unaligned(pivotheaptid);
+
+    debug_assert!(
+        ItemPointerCompare(&bt_tuple_get_max_heap_tid(lastleft),
+            &bt_tuple_get_heap_tid(firstright).expect("non-pivot")) < 0
+    );
+    Ok(tidpivot)
+}
+
+/// _bt_keep_natts: authoritative (opclass-comparator) variant.
+///
+/// # Safety
+/// As [`bt_truncate`].
+unsafe fn bt_keep_natts(
+    rel: &Relation<'_>,
+    lastleft: ITup,
+    firstright: ITup,
+    itup_key: &mut BtScanInsert,
+    frame: &mut OrderProcFrame,
+) -> PgResult<usize> {
+    let nkeyatts = rel.indnkeyatts() as usize;
+    let tupdesc: &TupleDescData<'_> = &rel.rd_att;
+
+    if !itup_key.heapkeyspace {
+        return Ok(nkeyatts);
+    }
+
+    let mut keepnatts = 1usize;
+    for attnum in 1..=nkeyatts {
+        let mut null1 = false;
+        let mut null2 = false;
+        let d1 = index_getattr(lastleft, attnum as AttrNumber, tupdesc, &mut null1);
+        let d2 = index_getattr(firstright, attnum as AttrNumber, tupdesc, &mut null2);
+
+        if null1 != null2 {
+            break;
+        }
+        if !null1 {
+            let key = &mut itup_key.keys_mut()[attnum - 1];
+            if frame.cmp(key, d1, d2)? != 0 {
+                break;
+            }
+        }
+        keepnatts += 1;
+    }
+
+    debug_assert!(
+        !itup_key.allequalimage || keepnatts == bt_keep_natts_fast(rel, lastleft, firstright) as usize
+    );
+    Ok(keepnatts)
+}
+
+/// _bt_check_third_page: 1/3-of-a-page limit ereport.
+///
+/// # Safety
+/// `newtup` per [`bt_checkkeys`].
+#[cold]
+#[inline(never)]
+pub(crate) unsafe fn bt_check_third_page(
+    rel: &Relation<'_>,
+    heap: &Relation<'_>,
+    needheaptidspace: bool,
+    page: &PageRef<'_>,
+    newtup: ITup,
+) -> PgResult<()> {
+    use ::types_nbtree::{BTMaxItemSize, BTMaxItemSizeNoHeapTid, P_ISLEAF, BTREE_NOVAC_VERSION, BTREE_VERSION};
+
+    let itemsz = crate::itup::maxalign(crate::itup::index_tuple_size(newtup));
+    if itemsz <= BTMaxItemSize {
+        return Ok(());
+    }
+    if !needheaptidspace && itemsz <= BTMaxItemSizeNoHeapTid {
+        return Ok(());
+    }
+
+    let opaque = page_opaque(page);
+    if !P_ISLEAF(&opaque) {
+        return Err(Box::new(::types_error::PgError::error(format!(
+            "cannot insert oversized tuple of size {itemsz} on internal page of index \"{}\"",
+            rel.name()
+        ))));
+    }
+
+    let tid = crate::itup::bt_tuple_get_heap_tid(newtup).expect("non-pivot new tuple");
+    let (version, max) = if needheaptidspace {
+        (BTREE_VERSION, BTMaxItemSize)
+    } else {
+        (BTREE_NOVAC_VERSION, BTMaxItemSizeNoHeapTid)
+    };
+    Err(Box::new(
+        ::types_error::PgError::error(format!(
+            "index row size {itemsz} exceeds btree version {version} maximum {max} for index \"{}\"",
+            rel.name()
+        ))
+        .with_sqlstate(::types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED)
+        .with_detail(format!(
+            "Index row references tuple ({},{}) in relation \"{}\".",
+            ::types_tuple::itemptr::ItemPointerGetBlockNumberNoCheck(&tid),
+            tid.ip_posid,
+            heap.name()
+        ))
+        .with_hint(
+            "Values larger than 1/3 of a buffer page cannot be indexed.\n\
+             Consider a function index of an MD5 hash of the value, \
+             or use full text indexing.",
+        ),
+    ))
+}
+
+// _bt_vacuum_cycleid: reads the shared vacuum-cycle array, which is empty
+// until the vacuum lane lands — C returns 0 when no vacuum is active.
+pub(crate) fn bt_vacuum_cycleid(_rel: &Relation<'_>) -> u16 {
+    0
 }
 
 /// _bt_mkscankey; `itup: None` is the utility-statement arm. C divergence:

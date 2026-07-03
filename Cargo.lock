@@ -3122,6 +3122,7 @@ dependencies = [
  "timeout_seams",
  "timestamp_seams",
  "transam",
+ "transam_seams",
  "transam_xlog",
  "transam_xlog_seams",
  "trigger_seams",
@@ -5918,6 +5919,7 @@ dependencies = [
 name = "types_portal"
 version = "0.1.0"
 dependencies = [
+ "datum",
  "mcx",
  "types_core",
  "types_nodes",
@@ -6586,6 +6588,7 @@ dependencies = [
  "timeout_seams",
  "timestamp_seams",
  "transam",
+ "transam_seams",
  "transam_xlog",
  "transam_xlog_seams",
  "trigger_seams",

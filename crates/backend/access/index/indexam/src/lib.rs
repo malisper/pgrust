@@ -190,6 +190,44 @@ pub fn index_beginscan<'mcx>(
     Ok(scan)
 }
 
+/// `index_beginscan_bitmap`: no heap relation, no heap fetch — the bitmap
+/// heap scan node owns heap access.
+pub fn index_beginscan_bitmap<'mcx>(
+    mcx: Mcx<'mcx>,
+    indexRelation: &Relation<'mcx>,
+    snapshot: Rc<SnapshotData<'mcx>>,
+    nkeys: i32,
+) -> PgResult<IndexScanDescData<'mcx>> {
+    let mut scan = index_beginscan_internal(mcx, indexRelation, nkeys, 0, false)?;
+    scan.xs_snapshot = Some(snapshot);
+    Ok(scan)
+}
+
+/// `index_getbitmap`: drop all matching TIDs into the bitmap; returns ntids.
+pub fn index_getbitmap<'mcx>(
+    scan: &mut IndexScanDescData<'mcx>,
+    bitmap: &mut tidbitmap::TIDBitmap<'_>,
+) -> PgResult<i64> {
+    scan.kill_prior_tuple = false;
+    let ntids = am_getbitmap(scan, bitmap)?;
+    scan.xs_pgstat_index_tuples += ntids as u64;
+    Ok(ntids)
+}
+
+// CHECK_SCAN_PROCEDURE(amgetbitmap): a tuple-only AM would get an error arm here.
+fn am_getbitmap(
+    scan: &mut IndexScanDescData<'_>,
+    bitmap: &mut tidbitmap::TIDBitmap<'_>,
+) -> PgResult<i64> {
+    match scan.opaque {
+        IndexScanOpaque::Btree(_) => nbtree::btgetbitmap(scan, bitmap),
+        #[cfg(test)]
+        IndexScanOpaque::Mock(_) => unreachable!("Mock lacks amgetbitmap"),
+        #[allow(unreachable_patterns)]
+        _ => mock_outside_tests(),
+    }
+}
+
 fn index_beginscan_internal<'mcx>(
     mcx: Mcx<'mcx>,
     indexRelation: &Relation<'mcx>,
@@ -473,7 +511,16 @@ fn am_insert<'mcx>(
     indexUnchanged: bool,
 ) -> PgResult<bool> {
     match kind {
-        IndexAmKind::Btree => unported("nbtree btinsert (insert lane is phase 2)"),
+        IndexAmKind::Btree => nbtree::btinsert(
+            mcx,
+            indexRelation,
+            values,
+            isnull,
+            heap_t_ctid,
+            heapRelation,
+            checkUnique,
+            indexUnchanged,
+        ),
         #[cfg(test)]
         IndexAmKind::Mock => Ok(true),
         #[allow(unreachable_patterns)]

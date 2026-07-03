@@ -14,8 +14,11 @@ dynahash = { path = "../../../utils/hash/dynahash" }
 elog = { path = "../../../utils/error/elog" }
 guc_tables = { path = "../../../utils/misc/guc_tables" }
 init_small = { path = "../../../utils/init/init_small" }
+lmgr = { path = "../../lmgr/lmgr" }
+lmgr_proc = { path = "../../lmgr/lmgr_proc" }
 lwlock = { path = "../../lmgr/lwlock" }
 mcx = { path = "../../../../_support/mcx" }
+xloginsert_seams = { path = "../../../access/transam/xloginsert_seams" }
 relmapper_seams = { path = "../../../utils/cache/relmapper_seams" }
 seam_core = { path = "../../../../_support/seam_core" }
 smgr_seams = { path = "../../smgr/smgr_seams" }

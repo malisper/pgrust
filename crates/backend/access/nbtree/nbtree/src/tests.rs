@@ -38,7 +38,6 @@ struct FakePage([u8; BLCKSZ]);
 #[repr(C, align(8))]
 struct Img<const N: usize>([u8; N]);
 
-// heap fixture pages live above HEAP_BUF_BASE in buffer-id space.
 const HEAP_BUF_BASE: Buffer = 10000;
 const HEAP_OID: Oid = 4999;
 
@@ -670,10 +669,6 @@ fn redundant_inequalities_are_eliminated() {
     crate::btendscan(&mut scan).unwrap();
 }
 
-// ------------------------------------------------------------------
-// Insert lane: empty-index fixture, heap fixture for unique checks.
-// ------------------------------------------------------------------
-
 fn heap_relation(mcx: Mcx<'_>) -> Relation<'_> {
     let mut relname = ::types_tuple::NameData::default();
     relname.namestrcpy("t");
@@ -696,7 +691,7 @@ fn heap_relation(mcx: Mcx<'_>) -> Relation<'_> {
             relnamespace: 2200,
             reltype: 0,
             relowner: 10,
-            relam: ::types_core::HEAP_TABLE_AM_OID,
+            relam: ::tableam::HEAP_TABLE_AM_OID,
             relfilenode: HEAP_OID,
             reltablespace: 0,
             relpages: 0,
@@ -852,7 +847,6 @@ fn sequential_inserts_split_and_stay_navigable() {
         assert_eq!(ItemPointerGetBlockNumber(t), i as u32 + 1);
     }
 
-    // rightmost splits + a root split happened, WAL shape recorded.
     let infos = wal_infos();
     let splits = infos
         .iter()
@@ -874,7 +868,6 @@ fn sequential_inserts_split_and_stay_navigable() {
 
     assert_eq!(crate::bt_getrootheight(&rel).unwrap(), 1);
 
-    // descent still finds point values after the splits.
     for probe in [1i32, 366, 367, 1000, 1500] {
         let keys = [key(1, probe, test_int4eq, BTEqualStrategyNumber)];
         let mut scan = begin_scan(cx.mcx(), &rel, &keys);
@@ -884,7 +877,6 @@ fn sequential_inserts_split_and_stay_navigable() {
         crate::btendscan(&mut scan).unwrap();
     }
 
-    // backward over the whole tree too.
     let mut scan = begin_scan(cx.mcx(), &rel, &[]);
     let mut back = Vec::new();
     while crate::btgettuple(&mut scan, ::types_scan::sdir::BackwardScanDirection).unwrap() {
@@ -916,6 +908,37 @@ fn interleaved_inserts_split_interior_pages() {
     assert_eq!(seen.len(), 2000);
     for (i, t) in seen.iter().enumerate() {
         assert_eq!(ItemPointerGetBlockNumber(t), i as u32 + 1);
+    }
+    assert_eq!(PINS.with(Cell::get), 0, "no pins leaked");
+}
+
+#[test]
+fn rightmost_fastpath_arms_on_a_three_level_tree() {
+    install();
+    build_empty_index(false);
+    let cx = MemoryContext::new("t");
+    let rel = index_rel(cx.mcx());
+    prime_supportinfo(&rel);
+
+    // Enough sequential inserts for a level-2 root (~400 leaves), the
+    // BTREE_FASTPATH_MIN_LEVEL gate for the rightmost-block cache.
+    let n = 160_000u32;
+    for k in 1..=n {
+        insert_key(&rel, &rel, k as i32, tid(k, 1));
+    }
+    assert!(crate::bt_getrootheight(&rel).unwrap() >= 2);
+
+    // cached-target insert: ONE index page touched, no root descent.
+    READS.with(|c| c.set(0));
+    insert_key(&rel, &rel, (n + 1) as i32, tid(n + 1, 1));
+    assert_eq!(READS.with(Cell::get), 1, "fastpath skipped the descent");
+
+    for probe in [1u32, 12345, 100_000, n + 1] {
+        let keys = [key(1, probe as i32, test_int4eq, BTEqualStrategyNumber)];
+        let mut scan = begin_scan(cx.mcx(), &rel, &keys);
+        assert!(crate::btgettuple(&mut scan, ForwardScanDirection).unwrap());
+        assert_eq!(ItemPointerGetBlockNumber(&scan.xs_heaptid), probe);
+        crate::btendscan(&mut scan).unwrap();
     }
     assert_eq!(PINS.with(Cell::get), 0, "no pins leaked");
 }

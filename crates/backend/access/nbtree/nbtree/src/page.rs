@@ -1,16 +1,18 @@
-//! nbtpage.c, READ side: metapage decode + rd_amcache, _bt_getroot, buffer
-//! traffic helpers. The write side is phase 2.
+//! nbtpage.c: metapage decode + rd_amcache, _bt_getroot (read + root-creation
+//! arms), buffer traffic helpers, _bt_allocbuf. Vacuum/page-deletion write
+//! arms stay loud.
 
 use ::bufmgr_seams::{self as bufmgr, BufferPin};
-use ::types_core::{BlockNumber, BLCKSZ};
+use ::types_core::{BlockNumber, Buffer, ForkNumber, InvalidBlockNumber, BLCKSZ};
 use ::types_error::{PgError, PgResult, ERRCODE_INDEX_CORRUPTED};
 use ::types_nbtree::{
-    BTMetaPageData, BTPageOpaqueData, P_IGNORE, P_ISMETA, P_LEFTMOST, P_RIGHTMOST,
-    BTREE_MAGIC, BTREE_METAPAGE, BTREE_MIN_VERSION, BTREE_NOVAC_VERSION, BTREE_VERSION, BT_READ,
-    BT_WRITE, P_NONE,
+    BTMetaPageData, BTPageOpaqueData, BTP_LEAF, BTP_META, BTP_ROOT, P_IGNORE, P_ISMETA,
+    P_LEFTMOST, P_RIGHTMOST, BTREE_MAGIC, BTREE_METAPAGE, BTREE_MIN_VERSION, BTREE_NOVAC_VERSION,
+    BTREE_VERSION, BT_READ, BT_WRITE, P_NONE, XLOG_BTREE_NEWROOT,
 };
 use ::types_rel::Relation;
-use ::types_storage::bufpage::{ItemIdData, PageRef, SizeOfPageHeaderData};
+use ::types_storage::bufpage::{ItemIdData, PageMut, PageRef, SizeOfPageHeaderData};
+use ::xloginsert_seams::{XLogRegBuf, REGBUF_STANDARD, REGBUF_WILL_INIT};
 
 use crate::unported_phase2;
 
@@ -43,7 +45,7 @@ pub fn page_item(page: &PageRef<'_>, id: ItemIdData) -> crate::itup::ITup {
 }
 
 // BTPageGetMeta: contents start at MAXALIGN(SizeOfPageHeaderData).
-fn page_meta(page: &PageRef<'_>) -> BTMetaPageData {
+pub(crate) fn page_meta(page: &PageRef<'_>) -> BTMetaPageData {
     // SAFETY: metapage contents at +24, 8-aligned, 48B in-bounds.
     unsafe {
         page.as_ptr()
@@ -167,13 +169,9 @@ fn amcache_sane(metad: &BTMetaPageData) -> bool {
         && metad.btm_root != P_NONE
 }
 
-/// _bt_getroot, BT_READ arm: the pinned+read-locked (fast) root, or None for
-/// an empty index. BT_WRITE root creation is nbtinsert's phase 2.
+/// _bt_getroot: the pinned+read-locked (fast) root. `None` for an empty index
+/// under BT_READ; BT_WRITE creates the first root page.
 pub(crate) fn bt_getroot(rel: &Relation<'_>, access: i32) -> PgResult<Option<BufferPin>> {
-    if access != BT_READ {
-        unported_phase2("_bt_getroot(BT_WRITE) root creation (nbtinsert lane)");
-    }
-
     if let Some(metad) = rel.rd_amcache.get() {
         debug_assert!(amcache_sane(&metad));
         let rootblkno = metad.btm_fastroot;
@@ -199,8 +197,85 @@ pub(crate) fn bt_getroot(rel: &Relation<'_>, access: i32) -> PgResult<Option<Buf
     let metad = bt_getmeta(rel, &metapin)?;
 
     if metad.btm_root == P_NONE {
+        if access == BT_READ {
+            bt_relbuf(rel, metapin)?;
+            return Ok(None);
+        }
+
+        bt_unlockbuf(rel, &metapin)?;
+        bt_lockbuf(rel, &metapin, BT_WRITE)?;
+
+        // C's create-root race recheck; single lock trade keeps the shape.
+        if page_meta(&metapin.page()).btm_root != P_NONE {
+            bt_relbuf(rel, metapin)?;
+            return bt_getroot(rel, access);
+        }
+
+        let rootpin = bt_allocbuf(rel)?;
+        let rootblkno = rootpin.block_number();
+        {
+            let mut rootpage = page_of_mut(&rootpin);
+            write_opaque(
+                &mut rootpage,
+                &BTPageOpaqueData {
+                    btpo_prev: P_NONE,
+                    btpo_next: P_NONE,
+                    btpo_level: 0,
+                    btpo_flags: BTP_LEAF | BTP_ROOT,
+                    btpo_cycleid: 0,
+                },
+            );
+        }
+
+        if page_meta(&metapin.page()).btm_version < BTREE_NOVAC_VERSION {
+            unported_phase2("_bt_upgrademetapage (v2/v3 pg_upgrade metapages)");
+        }
+        let mut metad = page_meta(&metapin.page());
+        metad.btm_root = rootblkno;
+        metad.btm_level = 0;
+        metad.btm_fastroot = rootblkno;
+        metad.btm_fastlevel = 0;
+        metad.btm_last_cleanup_num_delpages = 0;
+        metad.btm_last_cleanup_num_heap_tuples = -1.0;
+        write_meta(&metapin, &metad);
+
+        bufmgr::mark_buffer_dirty::call(rootpin.buffer())?;
+        bufmgr::mark_buffer_dirty::call(metapin.buffer())?;
+
+        if crate::relation_needs_wal(rel) {
+            debug_assert!(metad.btm_version >= BTREE_NOVAC_VERSION);
+            let md = crate::wal::xl_btree_metadata(&metad);
+            let xlrec = crate::wal::xl_btree_newroot(rootblkno, 0);
+            let recptr = ::xloginsert_seams::xlog_insert_record::call(
+                ::rmgr::RM_BTREE_ID as u8,
+                XLOG_BTREE_NEWROOT,
+                0,
+                &[&xlrec],
+                &[
+                    XLogRegBuf {
+                        block_id: 0,
+                        buffer: rootpin.buffer(),
+                        flags: REGBUF_WILL_INIT,
+                        bufdata: &[],
+                    },
+                    XLogRegBuf {
+                        block_id: 2,
+                        buffer: metapin.buffer(),
+                        flags: REGBUF_WILL_INIT | REGBUF_STANDARD,
+                        bufdata: &[&md],
+                    },
+                ],
+            )?;
+            page_of_mut(&rootpin).set_lsn(recptr);
+            page_of_mut(&metapin).set_lsn(recptr);
+        }
+
+        // swap the new root's write lock for the read lock callers expect.
+        bt_unlockbuf(rel, &rootpin)?;
+        bt_lockbuf(rel, &rootpin, BT_READ)?;
+
         bt_relbuf(rel, metapin)?;
-        return Ok(None);
+        return Ok(Some(rootpin));
     }
 
     let rootblkno = metad.btm_fastroot;
@@ -279,6 +354,134 @@ pub fn bt_metaversion(rel: &Relation<'_>) -> PgResult<(bool, bool)> {
         metad.btm_version > BTREE_NOVAC_VERSION,
         metad.btm_allequalimage,
     ))
+}
+
+/// Mutable view of a pinned, exclusively locked buffer's page.
+pub(crate) fn page_of_mut<'p>(pin: &'p BufferPin) -> PageMut<'p> {
+    // SAFETY: pin held; callers hold the exclusive content lock (BT_WRITE).
+    unsafe { PageMut::from_raw(bufmgr::buffer_get_page::call(pin.buffer())) }
+}
+
+/// # Safety
+/// `buf` pinned + write-locked for the borrow.
+pub(crate) unsafe fn buf_page_mut<'p>(buf: Buffer) -> PageMut<'p> {
+    PageMut::from_raw(bufmgr::buffer_get_page::call(buf))
+}
+
+pub(crate) fn write_opaque(page: &mut PageMut<'_>, opaque: &BTPageOpaqueData) {
+    let off = page_special_off(&page.as_ref());
+    // SAFETY: in-bounds special area, 4-aligned, exclusive page access.
+    unsafe {
+        page.as_ref()
+            .as_ptr()
+            .cast_mut()
+            .add(off)
+            .cast::<BTPageOpaqueData>()
+            .write(*opaque)
+    }
+}
+
+// BTPageGetMeta store + the pd_lower bump _bt_initmetapage documents (metadata
+// survives xlog page-hole compression).
+pub(crate) fn write_meta(pin: &BufferPin, metad: &BTMetaPageData) {
+    let mut page = page_of_mut(pin);
+    // SAFETY: metapage contents at +24, 8-aligned, in-bounds; exclusive lock.
+    unsafe {
+        page.as_ref()
+            .as_ptr()
+            .cast_mut()
+            .add(SizeOfPageHeaderData)
+            .cast::<BTMetaPageData>()
+            .write(*metad)
+    };
+    page.set_pd_lower((SizeOfPageHeaderData + core::mem::size_of::<BTMetaPageData>()) as u16);
+}
+
+/// _bt_pageinit.
+pub(crate) fn bt_pageinit(page: &mut PageMut<'_>) {
+    page.init(core::mem::size_of::<BTPageOpaqueData>());
+}
+
+/// _bt_initmetapage: fill `page` with a fresh metapage image (index build /
+/// empty-index fixtures).
+pub fn bt_initmetapage(page: &mut PageMut<'_>, rootbknum: BlockNumber, level: u32, allequalimage: bool) {
+    bt_pageinit(page);
+    // SAFETY: metapage contents at +24, 8-aligned, in-bounds; caller owns page.
+    unsafe {
+        page.as_ref()
+            .as_ptr()
+            .cast_mut()
+            .add(SizeOfPageHeaderData)
+            .cast::<BTMetaPageData>()
+            .write(BTMetaPageData {
+                btm_magic: BTREE_MAGIC,
+                btm_version: BTREE_VERSION,
+                btm_root: rootbknum,
+                btm_level: level,
+                btm_fastroot: rootbknum,
+                btm_fastlevel: level,
+                btm_last_cleanup_num_delpages: 0,
+                btm_last_cleanup_num_heap_tuples: -1.0,
+                btm_allequalimage: allequalimage,
+            })
+    };
+    let off = page_special_off(&page.as_ref());
+    // SAFETY: special area write, 4-aligned, in-bounds.
+    unsafe {
+        page.as_ref()
+            .as_ptr()
+            .cast_mut()
+            .add(off)
+            .cast::<BTPageOpaqueData>()
+            .write(BTPageOpaqueData {
+                btpo_prev: 0,
+                btpo_next: 0,
+                btpo_level: 0,
+                btpo_flags: BTP_META,
+                btpo_cycleid: 0,
+            })
+    };
+    page.set_pd_lower((SizeOfPageHeaderData + core::mem::size_of::<BTMetaPageData>()) as u16);
+}
+
+/// _bt_conditionallockbuf.
+pub(crate) fn bt_conditionallockbuf(_rel: &Relation<'_>, pin: &BufferPin) -> PgResult<bool> {
+    bufmgr::conditional_lock_buffer::call(pin.buffer())
+}
+
+/// _bt_allocbuf: a write-locked, freshly initialized page. C divergence:
+/// heaprel isn't threaded — it only feeds the FSM-recycle conflict horizon,
+/// and page deletion (the only producer of recyclable pages) is unported.
+pub(crate) fn bt_allocbuf(rel: &Relation<'_>) -> PgResult<BufferPin> {
+    loop {
+        let blkno = ::freespace::GetFreeIndexPage(rel)?;
+        if blkno == InvalidBlockNumber {
+            break;
+        }
+        let pin = BufferPin::adopt(bufmgr::read_buffer::call(rel, blkno)?)
+            .expect("ReadBuffer returned InvalidBuffer");
+        if bt_conditionallockbuf(rel, &pin)? {
+            if pin.page().is_new() {
+                bt_pageinit(&mut page_of_mut(&pin));
+                return Ok(pin);
+            }
+            unported_phase2("BTPageIsRecyclable reuse (vacuum/page-deletion lane)");
+        }
+        pin.release();
+    }
+
+    let (buf, extended_by) = bufmgr::extend_buffered_rel_by::call(
+        rel,
+        ForkNumber::MAIN_FORKNUM,
+        None,
+        bufmgr::EB_LOCK_FIRST,
+        1,
+    )?;
+    debug_assert!(extended_by == 1);
+    let pin = BufferPin::adopt(buf).expect("ExtendBufferedRelBy returned InvalidBuffer");
+    debug_assert!(pin.page().is_new());
+    bt_pageinit(&mut page_of_mut(&pin));
+    Ok(pin)
 }
 
 const _: () = assert!(BT_READ != BT_WRITE);
