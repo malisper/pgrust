@@ -86,11 +86,11 @@ pub fn DefineOperator<'mcx>(
     let mut canHash = false;
     let mut typeName1: Option<&TypeName<'mcx>> = None;
     let mut typeName2: Option<&TypeName<'mcx>> = None;
-    let mut functionName = NodeList::nil();
-    let mut commutatorName = NodeList::nil();
-    let mut negatorName = NodeList::nil();
-    let mut restrictionName = NodeList::nil();
-    let mut joinName = NodeList::nil();
+    let mut functionName: Option<&NodeList<'mcx>> = None;
+    let mut commutatorName: Option<&NodeList<'mcx>> = None;
+    let mut negatorName: Option<&NodeList<'mcx>> = None;
+    let mut restrictionName: Option<&NodeList<'mcx>> = None;
+    let mut joinName: Option<&NodeList<'mcx>> = None;
 
     for n in parameters.iter() {
         let defel = n.as_def_elem().expect("CREATE OPERATOR definition: DefElem list");
@@ -116,12 +116,16 @@ pub fn DefineOperator<'mcx>(
                 typeName2 = Some(tn);
             }
             "function" | "procedure" => {
-                functionName = commands_define::defGetQualifiedName(mcx, defel)?
+                functionName = Some(commands_define::defGetQualifiedName(mcx, defel)?)
             }
-            "commutator" => commutatorName = commands_define::defGetQualifiedName(mcx, defel)?,
-            "negator" => negatorName = commands_define::defGetQualifiedName(mcx, defel)?,
-            "restrict" => restrictionName = commands_define::defGetQualifiedName(mcx, defel)?,
-            "join" => joinName = commands_define::defGetQualifiedName(mcx, defel)?,
+            "commutator" => {
+                commutatorName = Some(commands_define::defGetQualifiedName(mcx, defel)?)
+            }
+            "negator" => negatorName = Some(commands_define::defGetQualifiedName(mcx, defel)?),
+            "restrict" => {
+                restrictionName = Some(commands_define::defGetQualifiedName(mcx, defel)?)
+            }
+            "join" => joinName = Some(commands_define::defGetQualifiedName(mcx, defel)?),
             "hashes" => canHash = commands_define::defGetBoolean(defel)?,
             "merges" => canMerge = commands_define::defGetBoolean(defel)?,
             // Obsolete options taken as meaning canMerge.
@@ -136,12 +140,12 @@ pub fn DefineOperator<'mcx>(
         }
     }
 
-    if functionName.is_nil() {
+    let Some(functionName) = functionName else {
         return Err(err(
             ERRCODE_INVALID_FUNCTION_DEFINITION,
             "operator function must be specified".into(),
         ));
-    }
+    };
 
     let typeId1 = match typeName1 {
         Some(tn) => typename_type_id(mcx, tn)?,
@@ -182,7 +186,7 @@ pub fn DefineOperator<'mcx>(
     } else {
         ([typeId1, typeId2], 2)
     };
-    let functionOid = parse_func::LookupFuncName(&functionName, nargs, &typeId, false)?;
+    let functionOid = parse_func::LookupFuncName(functionName, nargs, &typeId, false)?;
 
     let aclresult = aclchk::object_aclcheck(
         PROCEDURE_RELATION_ID,
@@ -191,22 +195,20 @@ pub fn DefineOperator<'mcx>(
         adt_acl::ACL_EXECUTE,
     )?;
     if aclresult != aclchk::ACLCHECK_OK {
-        let name = commands_define::NameListToString(mcx, &functionName)?;
+        let name = commands_define::NameListToString(mcx, functionName)?;
         aclchk::aclcheck_error(aclresult, ObjectType::OBJECT_FUNCTION, name.as_str())?;
     }
 
     let rettype = lsyscache::get_func_rettype(functionOid)?;
     type_acl_check(rettype)?;
 
-    let restrictionOid = if !restrictionName.is_nil() {
-        ValidateRestrictionEstimator(mcx, &restrictionName)?
-    } else {
-        InvalidOid
+    let restrictionOid = match restrictionName {
+        Some(n) => ValidateRestrictionEstimator(mcx, n)?,
+        None => InvalidOid,
     };
-    let joinOid = if !joinName.is_nil() {
-        ValidateJoinEstimator(mcx, &joinName)?
-    } else {
-        InvalidOid
+    let joinOid = match joinName {
+        Some(n) => ValidateJoinEstimator(mcx, n)?,
+        None => InvalidOid,
     };
 
     OperatorCreate(
@@ -216,8 +218,8 @@ pub fn DefineOperator<'mcx>(
         typeId1,
         typeId2,
         functionOid,
-        &commutatorName,
-        &negatorName,
+        commutatorName,
+        negatorName,
         restrictionOid,
         joinOid,
         canMerge,
@@ -340,8 +342,8 @@ fn ValidateOperatorReference(
 pub fn RemoveOperatorById(mcx: Mcx<'_>, operOid: Oid) -> PgResult<()> {
     let rel = table::table_open(mcx, OPERATOR_RELATION_ID, RowExclusiveLock)?;
 
-    let fetch = || -> PgResult<heaptuple::HeapTuple<'_>> {
-        Ok(SearchSysCacheCopy(
+    let fetch = || {
+        Ok::<_, Box<types_error::PgError>>(SearchSysCacheCopy(
             mcx,
             OPEROID,
             SysCacheKey::Value(Datum::from_oid(operOid)),
@@ -393,12 +395,12 @@ pub fn AlterOperator<'mcx>(
     .unwrap_or_else(|| panic!("cache lookup failed for operator {oprId}"));
     let oprForm = form_of_tuple(&catalog, tup.as_tuple());
 
-    let mut restrictionName = NodeList::nil();
+    let mut restrictionName: Option<&NodeList<'mcx>> = None;
     let mut updateRestriction = false;
-    let mut joinName = NodeList::nil();
+    let mut joinName: Option<&NodeList<'mcx>> = None;
     let mut updateJoin = false;
-    let mut commutatorName = NodeList::nil();
-    let mut negatorName = NodeList::nil();
+    let mut commutatorName: Option<&NodeList<'mcx>> = None;
+    let mut negatorName: Option<&NodeList<'mcx>> = None;
     let mut canMerge = false;
     let mut updateMerges = false;
     let mut canHash = false;
@@ -407,8 +409,8 @@ pub fn AlterOperator<'mcx>(
     for n in stmt.options.iter() {
         let defel = n.as_def_elem().expect("ALTER OPERATOR options: DefElem list");
         let param = match defel.arg {
-            None => NodeList::nil(), // NONE removes the function
-            Some(_) => commands_define::defGetQualifiedName(mcx, defel)?,
+            None => None, // NONE removes the function
+            Some(_) => Some(commands_define::defGetQualifiedName(mcx, defel)?),
         };
         match defel.defname.unwrap_or("") {
             "restrict" => {
@@ -419,8 +421,10 @@ pub fn AlterOperator<'mcx>(
                 joinName = param;
                 updateJoin = true;
             }
-            "commutator" => commutatorName = commands_define::defGetQualifiedName(mcx, defel)?,
-            "negator" => negatorName = commands_define::defGetQualifiedName(mcx, defel)?,
+            "commutator" => {
+                commutatorName = Some(commands_define::defGetQualifiedName(mcx, defel)?)
+            }
+            "negator" => negatorName = Some(commands_define::defGetQualifiedName(mcx, defel)?),
             "merges" => {
                 canMerge = commands_define::defGetBoolean(defel)?;
                 updateMerges = true;
@@ -449,26 +453,24 @@ pub fn AlterOperator<'mcx>(
         panic!("unported: object_ownercheck for non-superusers (ALTER OPERATOR)");
     }
 
-    let restrictionOid = if !restrictionName.is_nil() {
-        ValidateRestrictionEstimator(mcx, &restrictionName)?
-    } else {
-        InvalidOid
+    let restrictionOid = match restrictionName {
+        Some(n) => ValidateRestrictionEstimator(mcx, n)?,
+        None => InvalidOid,
     };
-    let joinOid = if !joinName.is_nil() {
-        ValidateJoinEstimator(mcx, &joinName)?
-    } else {
-        InvalidOid
+    let joinOid = match joinName {
+        Some(n) => ValidateJoinEstimator(mcx, n)?,
+        None => InvalidOid,
     };
 
-    let commutatorOid = if !commutatorName.is_nil() {
+    let commutatorOid = if let Some(commutatorName) = commutatorName {
         // commutator has reversed arg types; a self-commutator surely exists.
-        ValidateOperatorReference(&commutatorName, oprForm.oprright, oprForm.oprleft)?
+        ValidateOperatorReference(commutatorName, oprForm.oprright, oprForm.oprleft)?
     } else {
         InvalidOid
     };
 
-    let negatorOid = if !negatorName.is_nil() {
-        let oid = ValidateOperatorReference(&negatorName, oprForm.oprleft, oprForm.oprright)?;
+    let negatorOid = if let Some(negatorName) = negatorName {
+        let oid = ValidateOperatorReference(negatorName, oprForm.oprleft, oprForm.oprright)?;
         if oid == oprForm.oid {
             return Err(err(
                 ERRCODE_INVALID_FUNCTION_DEFINITION,
@@ -516,7 +518,7 @@ pub fn AlterOperator<'mcx>(
     let nulls = [false; Natts_pg_operator];
     let mut replaces = [false; Natts_pg_operator];
     {
-        let mut set = |attnum: i32, value: Datum<'static>| {
+        let mut set = |attnum: i32, value: Datum| {
             values[attnum as usize - 1] = value;
             replaces[attnum as usize - 1] = true;
         };

@@ -332,8 +332,8 @@ pub fn DefineOpClass<'mcx>(mcx: Mcx<'mcx>, stmt: &CreateOpClassStmt<'mcx>) -> Pg
         }
     };
 
-    let mut operators: Vec<OpFamilyMember> = Vec::new();
-    let mut procedures: Vec<OpFamilyMember> = Vec::new();
+    let mut operators: mcx::PgVec<'_, OpFamilyMember> = mcx::PgVec::new_in(mcx);
+    let mut procedures: mcx::PgVec<'_, OpFamilyMember> = mcx::PgVec::new_in(mcx);
     let mut storageoid = InvalidOid;
 
     for n in stmt.items.iter() {
@@ -587,8 +587,8 @@ fn AlterOpFamilyAdd<'mcx>(
     am: &AmInfo,
     opfamilyoid: Oid,
 ) -> PgResult<()> {
-    let mut operators: Vec<OpFamilyMember> = Vec::new();
-    let mut procedures: Vec<OpFamilyMember> = Vec::new();
+    let mut operators: mcx::PgVec<'_, OpFamilyMember> = mcx::PgVec::new_in(mcx);
+    let mut procedures: mcx::PgVec<'_, OpFamilyMember> = mcx::PgVec::new_in(mcx);
 
     for n in stmt.items.iter() {
         let item = n.as_variant::<CreateOpClassItem>().expect("CreateOpClassItem");
@@ -688,8 +688,8 @@ fn AlterOpFamilyDrop<'mcx>(
     am: &AmInfo,
     opfamilyoid: Oid,
 ) -> PgResult<()> {
-    let mut operators: Vec<OpFamilyMember> = Vec::new();
-    let mut procedures: Vec<OpFamilyMember> = Vec::new();
+    let mut operators: mcx::PgVec<'_, OpFamilyMember> = mcx::PgVec::new_in(mcx);
+    let mut procedures: mcx::PgVec<'_, OpFamilyMember> = mcx::PgVec::new_in(mcx);
 
     for n in stmt.items.iter() {
         let item = n.as_variant::<CreateOpClassItem>().expect("CreateOpClassItem");
@@ -947,7 +947,7 @@ fn assignProcTypes(
 }
 
 // Reject duplicated strategy/proc numbers, then append.
-fn addFamilyMember(list: &mut Vec<OpFamilyMember>, member: OpFamilyMember) -> PgResult<()> {
+fn addFamilyMember(list: &mut mcx::PgVec<'_, OpFamilyMember>, member: OpFamilyMember) -> PgResult<()> {
     for old in list.iter() {
         if old.number == member.number
             && old.lefttype == member.lefttype
