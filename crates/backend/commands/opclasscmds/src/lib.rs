@@ -154,7 +154,7 @@ pub fn get_opclass_oid(amID: Oid, opclassname: &NodeList<'_>, missing_ok: bool) 
             if !OidIsValid(namespaceId) {
                 InvalidOid
             } else {
-                syscache_seams::lookup_pg_opclass_oid_exact::call(amID, opcname, namespaceId)?
+                syscache_seams::lookup_pg_opclass_oid_by_name::call(amID, opcname, namespaceId)?
             }
         }
         None => catalog_namespace::OpclassnameGetOpcid(amID, opcname)?,
@@ -433,7 +433,7 @@ pub fn DefineOpClass<'mcx>(mcx: Mcx<'mcx>, stmt: &CreateOpClassStmt<'mcx>) -> Pg
 
     let rel = table::table_open(mcx, OPERATOR_CLASS_RELATION_ID, RowExclusiveLock)?;
 
-    if OidIsValid(syscache_seams::lookup_pg_opclass_oid_exact::call(
+    if OidIsValid(syscache_seams::lookup_pg_opclass_oid_by_name::call(
         am.amoid,
         opcname,
         namespaceoid,

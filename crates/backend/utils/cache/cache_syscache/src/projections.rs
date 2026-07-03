@@ -2016,7 +2016,6 @@ pub(crate) fn install() {
     syscache_seams::lookup_pg_amop_by_strategy::set(lookup_pg_amop_by_strategy);
     syscache_seams::lookup_pg_amop_members_by_operator::set(lookup_pg_amop_members_by_operator);
     syscache_seams::lookup_pg_opfamily_shape::set(lookup_pg_opfamily_shape);
-    syscache_seams::lookup_pg_opclass_oid_exact::set(lookup_pg_opclass_oid_exact);
     syscache_seams::pg_opclass_opcname::set(pg_opclass_opcname);
     syscache_seams::lookup_pg_amop_rows::set(lookup_pg_amop_rows);
     syscache_seams::lookup_pg_amproc_rows::set(lookup_pg_amproc_rows);
