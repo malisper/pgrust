@@ -65,7 +65,7 @@ where
     // C's per-tuple econtext reset (heapam_handler.c:1611): expression and
     // predicate results land here, consumed by `callback` within the
     // iteration, freed before the next tuple.
-    let mut per_tuple = mcx::MemoryContext::new("IndexBuildPerTuple");
+    let mut per_tuple = mcx::MemoryContext::new_bump("IndexBuildPerTuple");
 
     loop {
         per_tuple.reset();
