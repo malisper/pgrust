@@ -402,7 +402,7 @@ pub fn fc_multirange_contains_elem(
     let mr = arg_multirange(fcinfo, 0, mcx)?;
     let val = fcinfo.arg(1);
     let mi = flinfo_mi(flinfo, multirange_type_oid(&mr))?;
-    Ok(Datum::from_bool(crate::multirange_contains_elem_internal(&mut mi.rng, &mr, val)?))
+    Ok(Datum::from_bool(crate::multirange_contains_elem_internal(mcx, &mut mi.rng, &mr, val)?))
 }
 
 pub fn fc_elem_contained_by_multirange(
@@ -413,7 +413,7 @@ pub fn fc_elem_contained_by_multirange(
     let val = fcinfo.arg(0);
     let mr = arg_multirange(fcinfo, 1, mcx)?;
     let mi = flinfo_mi(flinfo, multirange_type_oid(&mr))?;
-    Ok(Datum::from_bool(crate::multirange_contains_elem_internal(&mut mi.rng, &mr, val)?))
+    Ok(Datum::from_bool(crate::multirange_contains_elem_internal(mcx, &mut mi.rng, &mr, val)?))
 }
 
 // (multirange, range) and (range, multirange) argument shapes.
@@ -425,7 +425,7 @@ macro_rules! fc_mr_r {
             let mr = arg_multirange(fcinfo, mr_idx, mcx)?;
             let r = arg_range(fcinfo, r_idx, mcx)?;
             let mi = flinfo_mi(flinfo, multirange_type_oid(&mr))?;
-            Ok(Datum::from_bool($f(&mut mi.rng, &r, &mr)?))
+            Ok(Datum::from_bool($f(mcx, &mut mi.rng, &r, &mr)?))
         }
     )*};
 }
@@ -446,11 +446,12 @@ fc_mr_r! {
 }
 
 fn multirange_contains_range_flip(
+    mcx: Mcx<'_>,
     rng: &mut ::adt_rangetypes::RangeInfo,
     r: &[u8],
     mr: &[u8],
 ) -> PgResult<bool> {
-    crate::multirange_contains_range_internal(rng, mr, r)
+    crate::multirange_contains_range_internal(mcx, rng, mr, r)
 }
 
 pub fn fc_multirange_overleft_range(
@@ -467,7 +468,7 @@ pub fn fc_multirange_overleft_range(
     let rng = &mut mi.rng;
     let (_l1, upper1) = multirange_get_bounds(rng, &mr, multirange_count(&mr) as usize - 1);
     let (_l2, upper2, _e) = ::adt_rangetypes::range_deserialize(&rng.elem, &r);
-    Ok(Datum::from_bool(::adt_rangetypes::range_cmp_bounds(rng, &upper1, &upper2)? <= 0))
+    Ok(Datum::from_bool(::adt_rangetypes::range_cmp_bounds(mcx, rng, &upper1, &upper2)? <= 0))
 }
 
 pub fn fc_multirange_overright_range(
@@ -484,7 +485,7 @@ pub fn fc_multirange_overright_range(
     let rng = &mut mi.rng;
     let (lower1, _u1) = multirange_get_bounds(rng, &mr, 0);
     let (lower2, _u2, _e) = ::adt_rangetypes::range_deserialize(&rng.elem, &r);
-    Ok(Datum::from_bool(::adt_rangetypes::range_cmp_bounds(rng, &lower1, &lower2)? >= 0))
+    Ok(Datum::from_bool(::adt_rangetypes::range_cmp_bounds(mcx, rng, &lower1, &lower2)? >= 0))
 }
 
 macro_rules! fc_mr_mr_bool {
@@ -499,7 +500,7 @@ macro_rules! fc_mr_mr_bool {
             $(swapped = $swap;)?
             let (a, b): (&[u8], &[u8]) =
                 if swapped { (&mr2, &mr1) } else { (&mr1, &mr2) };
-            Ok(Datum::from_bool($f(&mut mi.rng, a, b)?))
+            Ok(Datum::from_bool($f(mcx, &mut mi.rng, a, b)?))
         }
     )*};
 }
@@ -515,11 +516,12 @@ fc_mr_mr_bool! {
 }
 
 fn multirange_ne_internal(
+    mcx: Mcx<'_>,
     rng: &mut ::adt_rangetypes::RangeInfo,
     mr1: &[u8],
     mr2: &[u8],
 ) -> PgResult<bool> {
-    Ok(!crate::multirange_eq_internal(rng, mr1, mr2)?)
+    Ok(!crate::multirange_eq_internal(mcx, rng, mr1, mr2)?)
 }
 
 pub fn fc_multirange_overleft_multirange(
@@ -536,7 +538,7 @@ pub fn fc_multirange_overleft_multirange(
     let rng = &mut mi.rng;
     let (_l1, upper1) = multirange_get_bounds(rng, &mr1, multirange_count(&mr1) as usize - 1);
     let (_l2, upper2) = multirange_get_bounds(rng, &mr2, multirange_count(&mr2) as usize - 1);
-    Ok(Datum::from_bool(::adt_rangetypes::range_cmp_bounds(rng, &upper1, &upper2)? <= 0))
+    Ok(Datum::from_bool(::adt_rangetypes::range_cmp_bounds(mcx, rng, &upper1, &upper2)? <= 0))
 }
 
 pub fn fc_multirange_overright_multirange(
@@ -553,7 +555,7 @@ pub fn fc_multirange_overright_multirange(
     let rng = &mut mi.rng;
     let (lower1, _u1) = multirange_get_bounds(rng, &mr1, 0);
     let (lower2, _u2) = multirange_get_bounds(rng, &mr2, 0);
-    Ok(Datum::from_bool(::adt_rangetypes::range_cmp_bounds(rng, &lower1, &lower2)? >= 0))
+    Ok(Datum::from_bool(::adt_rangetypes::range_cmp_bounds(mcx, rng, &lower1, &lower2)? >= 0))
 }
 
 pub fn fc_range_adjacent_multirange(
@@ -618,7 +620,7 @@ pub fn fc_multirange_cmp(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> 
     let mr1 = arg_multirange(fcinfo, 0, mcx)?;
     let mr2 = arg_multirange(fcinfo, 1, mcx)?;
     let mi = flinfo_mi(flinfo, multirange_type_oid(&mr1))?;
-    Ok(Datum::from_i32(crate::multirange_cmp_internal(&mut mi.rng, &mr1, &mr2)?))
+    Ok(Datum::from_i32(crate::multirange_cmp_internal(mcx, &mut mi.rng, &mr1, &mr2)?))
 }
 
 macro_rules! fc_mr_cmp_op {
@@ -628,7 +630,7 @@ macro_rules! fc_mr_cmp_op {
             let mr1 = arg_multirange(fcinfo, 0, mcx)?;
             let mr2 = arg_multirange(fcinfo, 1, mcx)?;
             let mi = flinfo_mi(flinfo, multirange_type_oid(&mr1))?;
-            Ok(Datum::from_bool(crate::multirange_cmp_internal(&mut mi.rng, &mr1, &mr2)? $op 0))
+            Ok(Datum::from_bool(crate::multirange_cmp_internal(mcx, &mut mi.rng, &mr1, &mr2)? $op 0))
         }
     )*};
 }
@@ -700,7 +702,7 @@ pub fn fc_hash_multirange(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) ->
     let mcx = fcinfo.result_mcx();
     let mr = arg_multirange(fcinfo, 0, mcx)?;
     let mi = flinfo_mi(flinfo, multirange_type_oid(&mr))?;
-    Ok(Datum::from_u32(crate::hash_multirange_internal(mi, &mr)?))
+    Ok(Datum::from_u32(crate::hash_multirange_internal(mcx, mi, &mr)?))
 }
 
 pub fn fc_hash_multirange_extended(
@@ -711,7 +713,7 @@ pub fn fc_hash_multirange_extended(
     let mr = arg_multirange(fcinfo, 0, mcx)?;
     let seed = fcinfo.arg(1);
     let mi = flinfo_mi(flinfo, multirange_type_oid(&mr))?;
-    Ok(Datum::from_u64(crate::hash_multirange_extended_internal(mi, &mr, seed)?))
+    Ok(Datum::from_u64(crate::hash_multirange_extended_internal(mcx, mi, &mr, seed)?))
 }
 
 const fn b(

@@ -396,6 +396,7 @@ dependencies = [
  "indexcmds_seams",
  "lsyscache",
  "mcx",
+ "miscinit_seams",
  "pqformat",
  "stringinfo",
  "syscache_seams",

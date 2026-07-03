@@ -239,7 +239,7 @@ where
             return core::cmp::Ordering::Equal;
         }
         let mut rngm = rng_cell.borrow_mut();
-        match range_compare(&mut rngm, a, b) {
+        match range_compare(mcx, &mut rngm, a, b) {
             Ok(c) => c.cmp(&0),
             Err(e) => {
                 sort_err = Some(e);
@@ -273,7 +273,7 @@ where
             };
             ranges[out - 1] = merged;
             last = Some(merged);
-        } else if range_ops::range_before_internal(rng, prev, current)? {
+        } else if range_ops::range_before_internal(mcx, rng, prev, current)? {
             ranges[out] = current;
             last = Some(current);
             out += 1;
@@ -291,7 +291,7 @@ where
 }
 
 /// range_compare (rangetypes.c qsort callback).
-pub fn range_compare(rng: &mut RangeInfo, r1: &[u8], r2: &[u8]) -> PgResult<i32> {
+pub fn range_compare(mcx: Mcx<'_>, rng: &mut RangeInfo, r1: &[u8], r2: &[u8]) -> PgResult<i32> {
     let (lower1, upper1, empty1) = range_deserialize(&rng.elem, r1);
     let (lower2, upper2, empty2) = range_deserialize(&rng.elem, r2);
     if empty1 && empty2 {
@@ -301,9 +301,9 @@ pub fn range_compare(rng: &mut RangeInfo, r1: &[u8], r2: &[u8]) -> PgResult<i32>
     } else if empty2 {
         Ok(1)
     } else {
-        let mut cmp = range_cmp_bounds(rng, &lower1, &lower2)?;
+        let mut cmp = range_cmp_bounds(mcx, rng, &lower1, &lower2)?;
         if cmp == 0 {
-            cmp = range_cmp_bounds(rng, &upper1, &upper2)?;
+            cmp = range_cmp_bounds(mcx, rng, &upper1, &upper2)?;
         }
         Ok(cmp)
     }
@@ -400,35 +400,42 @@ pub fn multirange_get_union_range<'m>(
 }
 
 fn range_bounds_overlaps(
+    mcx: Mcx<'_>,
     rng: &mut RangeInfo,
     lower1: &RangeBound,
     upper1: &RangeBound,
     lower2: &RangeBound,
     upper2: &RangeBound,
 ) -> PgResult<bool> {
-    if range_cmp_bounds(rng, lower1, lower2)? >= 0 && range_cmp_bounds(rng, lower1, upper2)? <= 0 {
+    if range_cmp_bounds(mcx, rng, lower1, lower2)? >= 0 && range_cmp_bounds(mcx, rng, lower1, upper2)? <= 0 {
         return Ok(true);
     }
-    if range_cmp_bounds(rng, lower2, lower1)? >= 0 && range_cmp_bounds(rng, lower2, upper1)? <= 0 {
+    if range_cmp_bounds(mcx, rng, lower2, lower1)? >= 0 && range_cmp_bounds(mcx, rng, lower2, upper1)? <= 0 {
         return Ok(true);
     }
     Ok(false)
 }
 
 fn range_bounds_contains(
+    mcx: Mcx<'_>,
     rng: &mut RangeInfo,
     lower1: &RangeBound,
     upper1: &RangeBound,
     lower2: &RangeBound,
     upper2: &RangeBound,
 ) -> PgResult<bool> {
-    Ok(range_cmp_bounds(rng, lower1, lower2)? <= 0 && range_cmp_bounds(rng, upper1, upper2)? >= 0)
+    Ok(range_cmp_bounds(mcx, rng, lower1, lower2)? <= 0 && range_cmp_bounds(mcx, rng, upper1, upper2)? >= 0)
 }
 
 // multirange_bsearch_match (multirangetypes.c).
-fn multirange_bsearch_match<F>(rng: &mut RangeInfo, mr: &[u8], mut cmp: F) -> PgResult<bool>
+fn multirange_bsearch_match<F>(
+    mcx: Mcx<'_>,
+    rng: &mut RangeInfo,
+    mr: &[u8],
+    mut cmp: F,
+) -> PgResult<bool>
 where
-    F: FnMut(&mut RangeInfo, &RangeBound, &RangeBound, &mut bool) -> PgResult<i32>,
+    F: FnMut(Mcx<'_>, &mut RangeInfo, &RangeBound, &RangeBound, &mut bool) -> PgResult<i32>,
 {
     let mut l = 0u32;
     let mut u = multirange_count(mr);
@@ -436,7 +443,7 @@ where
         let idx = (l + u) / 2;
         let (lower, upper) = multirange_get_bounds(rng, mr, idx as usize);
         let mut matched = false;
-        let comparison = cmp(rng, &lower, &upper, &mut matched)?;
+        let comparison = cmp(mcx, rng, &lower, &upper, &mut matched)?;
         if comparison < 0 {
             u = idx;
         } else if comparison > 0 {
@@ -453,7 +460,7 @@ pub fn multirange_types_do_not_match() -> Box<PgError> {
     Box::new(PgError::error("multirange types do not match"))
 }
 
-pub fn multirange_eq_internal(rng: &mut RangeInfo, mr1: &[u8], mr2: &[u8]) -> PgResult<bool> {
+pub fn multirange_eq_internal(mcx: Mcx<'_>, rng: &mut RangeInfo, mr1: &[u8], mr2: &[u8]) -> PgResult<bool> {
     if multirange_type_oid(mr1) != multirange_type_oid(mr2) {
         return Err(multirange_types_do_not_match());
     }
@@ -465,8 +472,8 @@ pub fn multirange_eq_internal(rng: &mut RangeInfo, mr1: &[u8], mr2: &[u8]) -> Pg
     for i in 0..n1 as usize {
         let (lower1, upper1) = multirange_get_bounds(rng, mr1, i);
         let (lower2, upper2) = multirange_get_bounds(rng, mr2, i);
-        if range_cmp_bounds(rng, &lower1, &lower2)? != 0
-            || range_cmp_bounds(rng, &upper1, &upper2)? != 0
+        if range_cmp_bounds(mcx, rng, &lower1, &lower2)? != 0
+            || range_cmp_bounds(mcx, rng, &upper1, &upper2)? != 0
         {
             return Ok(false);
         }
@@ -475,6 +482,7 @@ pub fn multirange_eq_internal(rng: &mut RangeInfo, mr1: &[u8], mr2: &[u8]) -> Pg
 }
 
 pub fn multirange_contains_elem_internal(
+    mcx: Mcx<'_>,
     rng: &mut RangeInfo,
     mr: &[u8],
     val: Datum,
@@ -482,15 +490,15 @@ pub fn multirange_contains_elem_internal(
     if multirange_is_empty(mr) {
         return Ok(false);
     }
-    multirange_bsearch_match(rng, mr, |rng, lower, upper, matched| {
+    multirange_bsearch_match(mcx, rng, mr, |mcx, rng, lower, upper, matched| {
         if !lower.infinite {
-            let cmp = ::adt_rangetypes::cmp_elem_vals(rng, lower.val, val)?;
+            let cmp = ::adt_rangetypes::cmp_elem_vals(mcx, rng, lower.val, val)?;
             if cmp > 0 || (cmp == 0 && !lower.inclusive) {
                 return Ok(-1);
             }
         }
         if !upper.infinite {
-            let cmp = ::adt_rangetypes::cmp_elem_vals(rng, upper.val, val)?;
+            let cmp = ::adt_rangetypes::cmp_elem_vals(mcx, rng, upper.val, val)?;
             if cmp < 0 || (cmp == 0 && !upper.inclusive) {
                 return Ok(1);
             }
@@ -501,6 +509,7 @@ pub fn multirange_contains_elem_internal(
 }
 
 pub fn multirange_contains_range_internal(
+    mcx: Mcx<'_>,
     rng: &mut RangeInfo,
     mr: &[u8],
     r: &[u8],
@@ -512,19 +521,20 @@ pub fn multirange_contains_range_internal(
         return Ok(false);
     }
     let (key_lower, key_upper, _empty) = range_deserialize(&rng.elem, r);
-    multirange_bsearch_match(rng, mr, |rng, lower, upper, matched| {
-        if range_cmp_bounds(rng, &key_upper, lower)? < 0 {
+    multirange_bsearch_match(mcx, rng, mr, |mcx, rng, lower, upper, matched| {
+        if range_cmp_bounds(mcx, rng, &key_upper, lower)? < 0 {
             return Ok(-1);
         }
-        if range_cmp_bounds(rng, &key_lower, upper)? > 0 {
+        if range_cmp_bounds(mcx, rng, &key_lower, upper)? > 0 {
             return Ok(1);
         }
-        *matched = range_bounds_contains(rng, lower, upper, &key_lower, &key_upper)?;
+        *matched = range_bounds_contains(mcx, rng, lower, upper, &key_lower, &key_upper)?;
         Ok(0)
     })
 }
 
 pub fn range_contains_multirange_internal(
+    mcx: Mcx<'_>,
     rng: &mut RangeInfo,
     r: &[u8],
     mr: &[u8],
@@ -538,10 +548,11 @@ pub fn range_contains_multirange_internal(
     let (lower1, upper1, _empty) = range_deserialize(&rng.elem, r);
     let (lower2, _t1) = multirange_get_bounds(rng, mr, 0);
     let (_t2, upper2) = multirange_get_bounds(rng, mr, multirange_count(mr) as usize - 1);
-    range_bounds_contains(rng, &lower1, &upper1, &lower2, &upper2)
+    range_bounds_contains(mcx, rng, &lower1, &upper1, &lower2, &upper2)
 }
 
 pub fn multirange_contains_multirange_internal(
+    mcx: Mcx<'_>,
     rng: &mut RangeInfo,
     mr1: &[u8],
     mr2: &[u8],
@@ -558,14 +569,14 @@ pub fn multirange_contains_multirange_internal(
     let (mut lower1, mut upper1) = multirange_get_bounds(rng, mr1, i1);
     for i2 in 0..n2 {
         let (lower2, upper2) = multirange_get_bounds(rng, mr2, i2);
-        while range_cmp_bounds(rng, &upper1, &lower2)? < 0 {
+        while range_cmp_bounds(mcx, rng, &upper1, &lower2)? < 0 {
             i1 += 1;
             if i1 >= n1 {
                 return Ok(false);
             }
             (lower1, upper1) = multirange_get_bounds(rng, mr1, i1);
         }
-        if !range_bounds_contains(rng, &lower1, &upper1, &lower2, &upper2)? {
+        if !range_bounds_contains(mcx, rng, &lower1, &upper1, &lower2, &upper2)? {
             return Ok(false);
         }
     }
@@ -573,6 +584,7 @@ pub fn multirange_contains_multirange_internal(
 }
 
 pub fn range_overlaps_multirange_internal(
+    mcx: Mcx<'_>,
     rng: &mut RangeInfo,
     r: &[u8],
     mr: &[u8],
@@ -581,11 +593,11 @@ pub fn range_overlaps_multirange_internal(
         return Ok(false);
     }
     let (key_lower, key_upper, _empty) = range_deserialize(&rng.elem, r);
-    multirange_bsearch_match(rng, mr, |rng, lower, upper, matched| {
-        if range_cmp_bounds(rng, &key_upper, lower)? < 0 {
+    multirange_bsearch_match(mcx, rng, mr, |mcx, rng, lower, upper, matched| {
+        if range_cmp_bounds(mcx, rng, &key_upper, lower)? < 0 {
             return Ok(-1);
         }
-        if range_cmp_bounds(rng, &key_lower, upper)? > 0 {
+        if range_cmp_bounds(mcx, rng, &key_lower, upper)? > 0 {
             return Ok(1);
         }
         *matched = true;
@@ -594,6 +606,7 @@ pub fn range_overlaps_multirange_internal(
 }
 
 pub fn multirange_overlaps_multirange_internal(
+    mcx: Mcx<'_>,
     rng: &mut RangeInfo,
     mr1: &[u8],
     mr2: &[u8],
@@ -607,14 +620,14 @@ pub fn multirange_overlaps_multirange_internal(
     let (mut lower1, mut upper1) = multirange_get_bounds(rng, mr1, i1);
     for i2 in 0..n2 {
         let (lower2, upper2) = multirange_get_bounds(rng, mr2, i2);
-        while range_cmp_bounds(rng, &upper1, &lower2)? < 0 {
+        while range_cmp_bounds(mcx, rng, &upper1, &lower2)? < 0 {
             i1 += 1;
             if i1 >= n1 {
                 return Ok(false);
             }
             (lower1, upper1) = multirange_get_bounds(rng, mr1, i1);
         }
-        if range_bounds_overlaps(rng, &lower1, &upper1, &lower2, &upper2)? {
+        if range_bounds_overlaps(mcx, rng, &lower1, &upper1, &lower2, &upper2)? {
             return Ok(true);
         }
     }
@@ -622,6 +635,7 @@ pub fn multirange_overlaps_multirange_internal(
 }
 
 pub fn range_overleft_multirange_internal(
+    mcx: Mcx<'_>,
     rng: &mut RangeInfo,
     r: &[u8],
     mr: &[u8],
@@ -631,10 +645,11 @@ pub fn range_overleft_multirange_internal(
     }
     let (_l1, upper1, _e) = range_deserialize(&rng.elem, r);
     let (_l2, upper2) = multirange_get_bounds(rng, mr, multirange_count(mr) as usize - 1);
-    Ok(range_cmp_bounds(rng, &upper1, &upper2)? <= 0)
+    Ok(range_cmp_bounds(mcx, rng, &upper1, &upper2)? <= 0)
 }
 
 pub fn range_overright_multirange_internal(
+    mcx: Mcx<'_>,
     rng: &mut RangeInfo,
     r: &[u8],
     mr: &[u8],
@@ -644,10 +659,11 @@ pub fn range_overright_multirange_internal(
     }
     let (lower1, _u1, _e) = range_deserialize(&rng.elem, r);
     let (lower2, _u2) = multirange_get_bounds(rng, mr, 0);
-    Ok(range_cmp_bounds(rng, &lower1, &lower2)? >= 0)
+    Ok(range_cmp_bounds(mcx, rng, &lower1, &lower2)? >= 0)
 }
 
 pub fn range_before_multirange_internal(
+    mcx: Mcx<'_>,
     rng: &mut RangeInfo,
     r: &[u8],
     mr: &[u8],
@@ -657,10 +673,11 @@ pub fn range_before_multirange_internal(
     }
     let (_l1, upper1, _e) = range_deserialize(&rng.elem, r);
     let (lower2, _u2) = multirange_get_bounds(rng, mr, 0);
-    Ok(range_cmp_bounds(rng, &upper1, &lower2)? < 0)
+    Ok(range_cmp_bounds(mcx, rng, &upper1, &lower2)? < 0)
 }
 
 pub fn range_after_multirange_internal(
+    mcx: Mcx<'_>,
     rng: &mut RangeInfo,
     r: &[u8],
     mr: &[u8],
@@ -670,10 +687,11 @@ pub fn range_after_multirange_internal(
     }
     let (lower1, _u1, _e) = range_deserialize(&rng.elem, r);
     let (_l2, upper2) = multirange_get_bounds(rng, mr, multirange_count(mr) as usize - 1);
-    Ok(range_cmp_bounds(rng, &lower1, &upper2)? > 0)
+    Ok(range_cmp_bounds(mcx, rng, &lower1, &upper2)? > 0)
 }
 
 pub fn multirange_before_multirange_internal(
+    mcx: Mcx<'_>,
     rng: &mut RangeInfo,
     mr1: &[u8],
     mr2: &[u8],
@@ -683,7 +701,7 @@ pub fn multirange_before_multirange_internal(
     }
     let (_l1, upper1) = multirange_get_bounds(rng, mr1, multirange_count(mr1) as usize - 1);
     let (lower2, _u2) = multirange_get_bounds(rng, mr2, 0);
-    Ok(range_cmp_bounds(rng, &upper1, &lower2)? < 0)
+    Ok(range_cmp_bounds(mcx, rng, &upper1, &lower2)? < 0)
 }
 
 pub fn range_adjacent_multirange_internal(
@@ -712,7 +730,7 @@ pub fn range_adjacent_multirange_internal(
 }
 
 /// multirange_cmp core.
-pub fn multirange_cmp_internal(rng: &mut RangeInfo, mr1: &[u8], mr2: &[u8]) -> PgResult<i32> {
+pub fn multirange_cmp_internal(mcx: Mcx<'_>, rng: &mut RangeInfo, mr1: &[u8], mr2: &[u8]) -> PgResult<i32> {
     if multirange_type_oid(mr1) != multirange_type_oid(mr2) {
         return Err(multirange_types_do_not_match());
     }
@@ -730,9 +748,9 @@ pub fn multirange_cmp_internal(rng: &mut RangeInfo, mr1: &[u8], mr2: &[u8]) -> P
         }
         let (lower1, upper1) = multirange_get_bounds(rng, mr1, i);
         let (lower2, upper2) = multirange_get_bounds(rng, mr2, i);
-        cmp = range_cmp_bounds(rng, &lower1, &lower2)?;
+        cmp = range_cmp_bounds(mcx, rng, &lower1, &lower2)?;
         if cmp == 0 {
-            cmp = range_cmp_bounds(rng, &upper1, &upper2)?;
+            cmp = range_cmp_bounds(mcx, rng, &upper1, &upper2)?;
         }
         if cmp != 0 {
             break;
@@ -761,7 +779,7 @@ where
         let mut r1: &'r [u8] = orig_r1;
 
         while let Some(rr2) = r2 {
-            if range_ops::range_before_internal(rng, rr2, r1)? {
+            if range_ops::range_before_internal(mcx, rng, rr2, r1)? {
                 i2 += 1;
                 r2 = ranges2.get(i2).copied();
             } else {
@@ -775,12 +793,12 @@ where
                 r1 = leak_image(rest);
                 i2 += 1;
                 r2 = ranges2.get(i2).copied();
-            } else if range_ops::range_overlaps_internal(rng, r1, rr2)? {
+            } else if range_ops::range_overlaps_internal(mcx, rng, r1, rr2)? {
                 r1 = match range_ops::range_minus_internal(mcx, rng, r1, rr2)? {
                     range_ops::MinusResult::Input1 => r1,
                     range_ops::MinusResult::New(img) => leak_image(img),
                 };
-                if range_is_empty(r1) || range_ops::range_before_internal(rng, r1, rr2)? {
+                if range_is_empty(r1) || range_ops::range_before_internal(mcx, rng, r1, rr2)? {
                     break;
                 } else {
                     i2 += 1;
@@ -819,7 +837,7 @@ where
     let mut r2: Option<&'r [u8]> = ranges2.first().copied();
     'outer: for &r1 in ranges1 {
         while let Some(rr2) = r2 {
-            if range_ops::range_before_internal(rng, rr2, r1)? {
+            if range_ops::range_before_internal(mcx, rng, rr2, r1)? {
                 i2 += 1;
                 r2 = ranges2.get(i2).copied();
             } else {
@@ -828,9 +846,9 @@ where
         }
 
         while let Some(rr2) = r2 {
-            if range_ops::range_overlaps_internal(rng, r1, rr2)? {
+            if range_ops::range_overlaps_internal(mcx, rng, r1, rr2)? {
                 ranges3.push(leak_image(range_ops::range_intersect_internal(mcx, rng, r1, rr2)?));
-                if range_ops::range_overleft_internal(rng, rr2, r1)? {
+                if range_ops::range_overleft_internal(mcx, rng, rr2, r1)? {
                     i2 += 1;
                     r2 = ranges2.get(i2).copied();
                 } else {
@@ -850,7 +868,7 @@ where
 }
 
 /// hash_multirange (multirangetypes.c).
-pub fn hash_multirange_internal(mi: &mut MultirangeInfo, mr: &[u8]) -> PgResult<u32> {
+pub fn hash_multirange_internal(mcx: Mcx<'_>, mi: &mut MultirangeInfo, mr: &[u8]) -> PgResult<u32> {
     let rng = &mut mi.rng;
     let collation = rng.collation;
     range_ops::elem_hash_finfo(rng)?;
@@ -860,14 +878,24 @@ pub fn hash_multirange_internal(mi: &mut MultirangeInfo, mr: &[u8]) -> PgResult<
         let flags = multirange_flags(mr, i);
         let (lower, upper) = multirange_get_bounds(rng, mr, i);
         let lower_hash = if range_has_lbound(flags) {
-            ::types_fmgr::function_call1_coll(rng.elem_hash.as_mut().unwrap(), collation, lower.val)?
-                .as_u32()
+            ::types_fmgr::function_call1_coll_in(
+                rng.elem_hash.as_mut().unwrap(),
+                collation,
+                mcx,
+                lower.val,
+            )?
+            .as_u32()
         } else {
             0
         };
         let upper_hash = if range_has_ubound(flags) {
-            ::types_fmgr::function_call1_coll(rng.elem_hash.as_mut().unwrap(), collation, upper.val)?
-                .as_u32()
+            ::types_fmgr::function_call1_coll_in(
+                rng.elem_hash.as_mut().unwrap(),
+                collation,
+                mcx,
+                upper.val,
+            )?
+            .as_u32()
         } else {
             0
         };
@@ -882,6 +910,7 @@ pub fn hash_multirange_internal(mi: &mut MultirangeInfo, mr: &[u8]) -> PgResult<
 
 /// hash_multirange_extended (multirangetypes.c).
 pub fn hash_multirange_extended_internal(
+    mcx: Mcx<'_>,
     mi: &mut MultirangeInfo,
     mr: &[u8],
     seed: Datum,
@@ -895,9 +924,10 @@ pub fn hash_multirange_extended_internal(
         let flags = multirange_flags(mr, i);
         let (lower, upper) = multirange_get_bounds(rng, mr, i);
         let lower_hash = if range_has_lbound(flags) {
-            ::types_fmgr::function_call2_coll(
+            ::types_fmgr::function_call2_coll_in(
                 rng.elem_hash_extended.as_mut().unwrap(),
                 collation,
+                mcx,
                 lower.val,
                 seed,
             )?
@@ -906,9 +936,10 @@ pub fn hash_multirange_extended_internal(
             0
         };
         let upper_hash = if range_has_ubound(flags) {
-            ::types_fmgr::function_call2_coll(
+            ::types_fmgr::function_call2_coll_in(
                 rng.elem_hash_extended.as_mut().unwrap(),
                 collation,
+                mcx,
                 upper.val,
                 seed,
             )?

@@ -105,19 +105,19 @@ fn contains_and_overlaps_bsearch() {
 
     for (v, want) in [(0, false), (1, true), (3, false), (6, true), (15, true), (20, false)] {
         assert_eq!(
-            multirange_contains_elem_internal(&mut rng, &mr, Datum::from_i32(v)).unwrap(),
+            multirange_contains_elem_internal(mcx, &mut rng, &mr, Datum::from_i32(v)).unwrap(),
             want,
             "elem {v}"
         );
     }
 
     let probe = mk(mcx, &mut rng, 11, 14);
-    assert!(multirange_contains_range_internal(&mut rng, &mr, &probe).unwrap());
+    assert!(multirange_contains_range_internal(mcx, &mut rng, &mr, &probe).unwrap());
     let probe = mk(mcx, &mut rng, 6, 12);
-    assert!(!multirange_contains_range_internal(&mut rng, &mr, &probe).unwrap());
-    assert!(range_overlaps_multirange_internal(&mut rng, &probe, &mr).unwrap());
+    assert!(!multirange_contains_range_internal(mcx, &mut rng, &mr, &probe).unwrap());
+    assert!(range_overlaps_multirange_internal(mcx, &mut rng, &probe, &mr).unwrap());
     let probe = mk(mcx, &mut rng, 8, 9);
-    assert!(!range_overlaps_multirange_internal(&mut rng, &probe, &mr).unwrap());
+    assert!(!range_overlaps_multirange_internal(mcx, &mut rng, &probe, &mr).unwrap());
 }
 
 #[test]
@@ -136,11 +136,11 @@ fn cmp_and_eq_and_setops() {
     let b = build(&mut rng, &[(1, 3)]);
     let c = build(&mut rng, &[(2, 6), (7, 10)]);
 
-    assert!(multirange_eq_internal(&mut rng, &a, &a).unwrap());
-    assert!(!multirange_eq_internal(&mut rng, &a, &b).unwrap());
+    assert!(multirange_eq_internal(mcx, &mut rng, &a, &a).unwrap());
+    assert!(!multirange_eq_internal(mcx, &mut rng, &a, &b).unwrap());
     // shorter with equal prefix sorts first
-    assert_eq!(multirange_cmp_internal(&mut rng, &b, &a).unwrap(), -1);
-    assert_eq!(multirange_cmp_internal(&mut rng, &a, &c).unwrap(), -1);
+    assert_eq!(multirange_cmp_internal(mcx, &mut rng, &b, &a).unwrap(), -1);
+    assert_eq!(multirange_cmp_internal(mcx, &mut rng, &a, &c).unwrap(), -1);
 
     // minus: {[1,3),[5,8)} - {[2,6),[7,10)} = {[1,2),[6,7)}
     let r1 = multirange_deserialize(mcx, &rng, &a).unwrap();

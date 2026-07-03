@@ -366,12 +366,15 @@ pub fn range_out<'m>(
     let (lower, upper, _empty) = range_deserialize(&cache.ri.elem, range);
     let flags = range_get_flags(range);
 
-    let lbound_str;
+    // An out function's cstring may alias its retained scratch; copy the
+    // lower bound before the upper bound's out call overwrites it.
+    let mut lbound_copy: PgVec<'m, u8> = ::mcx::vec_with_capacity_in(mcx, 0)?;
     let mut lb: Option<&[u8]> = None;
     if range_has_lbound(flags) {
-        lbound_str =
+        let d =
             function_call1_coll_in(&mut cache.typioproc, ::types_core::InvalidOid, mcx, lower.val)?;
-        lb = Some(cstr_bytes(lbound_str));
+        ::mcx::vec_append_bytes(&mut lbound_copy, cstr_bytes(d))?;
+        lb = Some(&lbound_copy);
     }
     let ubound_str;
     let mut ub: Option<&[u8]> = None;

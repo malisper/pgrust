@@ -14,7 +14,7 @@ use ::types_error::{
     ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_DATA_EXCEPTION,
     ERRCODE_DATETIME_VALUE_OUT_OF_RANGE, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
 };
-use ::types_fmgr::{function_call2_coll, FmgrInfo};
+use ::types_fmgr::{function_call2_coll_in, FmgrInfo};
 
 pub use arrayfuncs::foundation::{att_align_nominal, fetch_att};
 
@@ -266,6 +266,9 @@ fn datum_compute_size(
     let p = val.as_usize() as *const u8;
     if type_is_packable(typlen, typstorage) && varatt_can_make_short(p) {
         data_length += varsize_4b(p) - 4 + 1;
+    } else if typlen == -1 && !typbyval && varatt_is_1b(p) {
+        // att_align_datum: an already-short varlena takes no padding.
+        data_length += varsize_short(p);
     } else {
         data_length = att_align_nominal(data_length, typalign);
         data_length += if typbyval {
@@ -388,7 +391,7 @@ pub fn range_serialize<'m>(
     if empty {
         flags |= RANGE_EMPTY;
     } else {
-        let cmp = range_cmp_bound_values(ri, lower, upper)?;
+        let cmp = range_cmp_bound_values(mcx, ri, lower, upper)?;
         if cmp > 0 {
             return ereturn(esc, None, lower_gt_upper());
         }
@@ -582,12 +585,17 @@ pub fn make_empty_range<'m>(mcx: Mcx<'m>, ri: &mut RangeInfo) -> PgResult<PgVec<
 }
 
 #[inline]
-pub fn cmp_elem_vals(ri: &mut RangeInfo, a: Datum, b: Datum) -> PgResult<i32> {
-    Ok(function_call2_coll(&mut ri.cmp, ri.collation, a, b)?.as_i32())
+pub fn cmp_elem_vals(mcx: Mcx<'_>, ri: &mut RangeInfo, a: Datum, b: Datum) -> PgResult<i32> {
+    Ok(function_call2_coll_in(&mut ri.cmp, ri.collation, mcx, a, b)?.as_i32())
 }
 
 /// range_cmp_bounds (rangetypes.c).
-pub fn range_cmp_bounds(ri: &mut RangeInfo, b1: &RangeBound, b2: &RangeBound) -> PgResult<i32> {
+pub fn range_cmp_bounds(
+    mcx: Mcx<'_>,
+    ri: &mut RangeInfo,
+    b1: &RangeBound,
+    b2: &RangeBound,
+) -> PgResult<i32> {
     if b1.infinite && b2.infinite {
         return Ok(if b1.lower == b2.lower {
             0
@@ -602,7 +610,7 @@ pub fn range_cmp_bounds(ri: &mut RangeInfo, b1: &RangeBound, b2: &RangeBound) ->
         return Ok(if b2.lower { 1 } else { -1 });
     }
 
-    let result = cmp_elem_vals(ri, b1.val, b2.val)?;
+    let result = cmp_elem_vals(mcx, ri, b1.val, b2.val)?;
     if result == 0 {
         if !b1.inclusive && !b2.inclusive {
             return Ok(if b1.lower == b2.lower {
@@ -623,6 +631,7 @@ pub fn range_cmp_bounds(ri: &mut RangeInfo, b1: &RangeBound, b2: &RangeBound) ->
 
 /// range_cmp_bound_values (rangetypes.c).
 pub fn range_cmp_bound_values(
+    mcx: Mcx<'_>,
     ri: &mut RangeInfo,
     b1: &RangeBound,
     b2: &RangeBound,
@@ -640,6 +649,6 @@ pub fn range_cmp_bound_values(
     } else if b2.infinite {
         Ok(if b2.lower { 1 } else { -1 })
     } else {
-        cmp_elem_vals(ri, b1.val, b2.val)
+        cmp_elem_vals(mcx, ri, b1.val, b2.val)
     }
 }
