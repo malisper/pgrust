@@ -258,6 +258,26 @@ impl Default for Aggref<'_> {
     }
 }
 
+pub struct GroupingFunc<'mcx> {
+    pub args: NodeList<'mcx>,
+    pub refs: crate::list::IntList<'mcx>,
+    pub cols: crate::list::IntList<'mcx>,
+    pub agglevelsup: Index,
+    pub location: ParseLoc,
+}
+
+impl Default for GroupingFunc<'_> {
+    fn default() -> Self {
+        GroupingFunc {
+            args: NodeList::nil(),
+            refs: crate::list::IntList::nil(),
+            cols: crate::list::IntList::nil(),
+            agglevelsup: 0,
+            location: -1,
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct WindowFunc<'mcx> {
     pub winfnoid: Oid,
@@ -492,6 +512,9 @@ unsafe impl NodeVariant<'_> for Param {
 unsafe impl<'mcx> NodeVariant<'mcx> for Aggref<'mcx> {
     const TAG: NodeTag = NodeTag::T_Aggref;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for GroupingFunc<'mcx> {
+    const TAG: NodeTag = NodeTag::T_GroupingFunc;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for WindowFunc<'mcx> {
     const TAG: NodeTag = NodeTag::T_WindowFunc;
 }
@@ -674,6 +697,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_aggref(self) -> Option<&'mcx Aggref<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_grouping_func(self) -> Option<&'mcx GroupingFunc<'mcx>> {
         self.as_variant()
     }
 

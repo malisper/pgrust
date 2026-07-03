@@ -11,10 +11,11 @@ use crate::list::{IntList, NodeList, OidList, XidList};
 use crate::node_tree::{BitString, Boolean, Float, Integer, Node, String};
 use crate::parsenodes::{
     CommonTableExpr, DeallocateStmt, DefElem, ExecuteStmt, ExplainStmt, FetchStmt, PrepareStmt,
-    Query, RTEPermissionInfo, RangeTblEntry, TransactionStmt, VariableSetStmt, VariableShowStmt,
+    GroupingSet, Query, RTEPermissionInfo, RangeTblEntry, TransactionStmt, VariableSetStmt, VariableShowStmt,
     WithClause,
 };
 use crate::primnodes::{
+    GroupingFunc,
     Aggref, Alias, BoolExpr, CoerceViaIO, Const, FromExpr, FuncExpr, NullTest, OpExpr, Param,
     RangeTblRef, RangeVar, RelabelType, TargetEntry, Var, WindowFunc,
 };
@@ -49,7 +50,9 @@ pub fn equal(a: Node<'_>, b: Node<'_>) -> bool {
         NodeTag::T_Const => cmp!(as_const),
         NodeTag::T_Param => cmp!(as_param),
         NodeTag::T_Aggref => cmp!(as_aggref),
+        NodeTag::T_GroupingFunc => cmp!(as_grouping_func),
         NodeTag::T_WindowFunc => cmp!(as_window_func),
+        NodeTag::T_GroupingSet => cmp!(as_grouping_set),
         NodeTag::T_FuncExpr => cmp!(as_func_expr),
         NodeTag::T_OpExpr => cmp!(as_op_expr),
         NodeTag::T_BoolExpr => cmp!(as_bool_expr),
@@ -301,6 +304,19 @@ impl NodeEqual for Aggref<'_> {
             && self.aggsplit == b.aggsplit
             && self.aggno == b.aggno
             && self.aggtransno == b.aggtransno
+    }
+}
+
+// C: refs/cols are equal_ignore; locations never compared.
+impl NodeEqual for GroupingFunc<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.args.node_equal(&b.args) && self.agglevelsup == b.agglevelsup
+    }
+}
+
+impl NodeEqual for GroupingSet<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.kind == b.kind && self.content.node_equal(&b.content)
     }
 }
 

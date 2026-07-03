@@ -4,15 +4,15 @@ use types_nodes::parsenodes::{
     AlterTableCmd, AlterTableStmt, AlterTableType, CTEMaterialize, ClosePortalStmt, CommentStmt, CommonTableExpr, CopyStmt, CreateSchemaStmt,
     DeallocateStmt, DeclareCursorStmt, DefElem, DefElemAction, DiscardMode, DiscardStmt,
     AccessPriv, DropBehavior, DropStmt, ExecuteStmt, FetchStmt, GrantStmt, GrantTargetType,
-    ListenStmt, NotifyStmt, ObjectType, PrepareStmt, RoleSpec, RoleSpecType, SetOperation,
-    TransactionStmt, TransactionStmtKind, TruncateStmt, UnlistenStmt, VacuumRelation,
+    GroupingSetKind, ListenStmt, NotifyStmt, ObjectType, PrepareStmt, RoleSpec, RoleSpecType,
+    SetOperation, TransactionStmt, TransactionStmtKind, TruncateStmt, UnlistenStmt, VacuumRelation,
     VacuumStmt, VariableSetKind, VariableSetStmt, VariableShowStmt, WithClause,
     CURSOR_OPT_ASENSITIVE, CURSOR_OPT_BINARY, CURSOR_OPT_FAST_PLAN, CURSOR_OPT_HOLD,
     CURSOR_OPT_INSENSITIVE, CURSOR_OPT_NO_SCROLL, CURSOR_OPT_SCROLL, FETCH_ALL,
 };
 use types_nodes::primnodes::{
-    CaseExpr, CaseWhen, CoalesceExpr, JoinExpr, MinMaxExpr, MinMaxOp, SQLValueFunction,
-    SQLValueFunctionOp,
+    CaseExpr, CaseWhen, CoalesceExpr, GroupingFunc, JoinExpr, MinMaxExpr, MinMaxOp,
+    SQLValueFunction, SQLValueFunctionOp,
 };
 use types_nodes::JoinType;
 use types_nodes::rawnodes::A_Expr_Kind::AEXPR_OP;
@@ -807,8 +807,8 @@ impl<'mcx> Parser<'mcx> {
                 let list = view.v(4).list();
                 *yyval = YYSTYPE::Group(quantifier == 2, list);
             }
-            // group_by_list; group_by_item's a_expr arm passes through, the
-            // grouping-sets arms (empty/CUBE/ROLLUP/SETS) panic loudly.
+            // group_by_list; group_by_item's five arms are DISPATCH
+            // passthroughs.
             1800 => {
                 let item = view.v(1).node().expect("group_by_item");
                 *yyval = YYSTYPE::List(NodeList::make1(mcx, item)?);
@@ -818,6 +818,51 @@ impl<'mcx> Parser<'mcx> {
                 let item = view.v(3).node().expect("group_by_item");
                 list.lappend(mcx, item)?;
                 *yyval = YYSTYPE::List(list);
+            }
+            // empty_grouping_set / rollup_clause / cube_clause /
+            // grouping_sets_clause -> GroupingSet.
+            1807 => {
+                *yyval = YYSTYPE::Node(Some(Node::mk_grouping_set(
+                    mcx,
+                    GroupingSetKind::GROUPING_SET_EMPTY,
+                    NodeList::nil(),
+                    view.l(1),
+                )?));
+            }
+            1808 => {
+                *yyval = YYSTYPE::Node(Some(Node::mk_grouping_set(
+                    mcx,
+                    GroupingSetKind::GROUPING_SET_ROLLUP,
+                    view.v(3).list(),
+                    view.l(1),
+                )?));
+            }
+            1809 => {
+                *yyval = YYSTYPE::Node(Some(Node::mk_grouping_set(
+                    mcx,
+                    GroupingSetKind::GROUPING_SET_CUBE,
+                    view.v(3).list(),
+                    view.l(1),
+                )?));
+            }
+            1810 => {
+                *yyval = YYSTYPE::Node(Some(Node::mk_grouping_set(
+                    mcx,
+                    GroupingSetKind::GROUPING_SET_SETS,
+                    view.v(4).list(),
+                    view.l(1),
+                )?));
+            }
+            // GROUPING '(' expr_list ')' -> GroupingFunc.
+            2125 => {
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    GroupingFunc {
+                        args: view.v(3).list(),
+                        location: view.l(1),
+                        ..Default::default()
+                    },
+                )?));
             }
             1617 => {
                 let istmt = view.v(5).node().expect("insert_rest");

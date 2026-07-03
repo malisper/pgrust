@@ -235,6 +235,23 @@ pub struct SortGroupClause {
     pub hashable: bool,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(u32)]
+pub enum GroupingSetKind {
+    #[default]
+    GROUPING_SET_EMPTY = 0,
+    GROUPING_SET_SIMPLE = 1,
+    GROUPING_SET_ROLLUP = 2,
+    GROUPING_SET_CUBE = 3,
+    GROUPING_SET_SETS = 4,
+}
+
+pub struct GroupingSet<'mcx> {
+    pub kind: GroupingSetKind,
+    pub content: NodeList<'mcx>,
+    pub location: ParseLoc,
+}
+
 pub struct WindowClause<'mcx> {
     pub name: Option<&'mcx str>,
     pub refname: Option<&'mcx str>,
@@ -836,6 +853,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for RangeTblFunction<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for RTEPermissionInfo<'mcx> {
     const TAG: NodeTag = NodeTag::T_RTEPermissionInfo;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for GroupingSet<'mcx> {
+    const TAG: NodeTag = NodeTag::T_GroupingSet;
+}
 unsafe impl NodeVariant<'_> for SortGroupClause {
     const TAG: NodeTag = NodeTag::T_SortGroupClause;
 }
@@ -977,6 +997,20 @@ impl<'mcx> Node<'mcx> {
     #[inline]
     pub fn as_sort_group_clause(self) -> Option<&'mcx SortGroupClause> {
         self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_grouping_set(self) -> Option<&'mcx GroupingSet<'mcx>> {
+        self.as_variant()
+    }
+
+    pub fn mk_grouping_set(
+        mcx: mcx::Mcx<'mcx>,
+        kind: GroupingSetKind,
+        content: NodeList<'mcx>,
+        location: ParseLoc,
+    ) -> types_error::PgResult<Node<'mcx>> {
+        Self::mk(mcx, GroupingSet { kind, content, location })
     }
 
     #[inline]
