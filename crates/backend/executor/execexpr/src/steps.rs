@@ -109,6 +109,17 @@ pub enum Step {
     // typcache tupdesc resolves at compile; the slot-compat check runs once
     // at first eval, per C.
     WholeRow { src: SlotSrc, wr: NonNull<WholeRowState>, frame: u32, out: OutRef },
+    // EEOP_HASHED_SCALARARRAYOP: array operand is a non-null Const; the
+    // element table (and its hash FuncCall) lives in state.saop_tables.
+    HashedScalarArrayOp {
+        call: FuncCall,
+        inclause: bool,
+        typlen: i16,
+        typbyval: bool,
+        typalign: u8,
+        table: u32,
+        out: OutRef,
+    },
     // EEOP_ARRAYEXPR, 1-D: elements evaluate into the `elems` scratch;
     // `frame` is an argless FuncFrame carried only for its armed result mcx.
     ArrayExprStep {
@@ -270,6 +281,16 @@ impl FuncCall {
         // SAFETY: frame-owned mcx-boxed FmgrInfo, live for 'mcx.
         unsafe { self.flinfo.as_ref() }.fn_addr
     }
+}
+
+// C ScalarArrayOpExprHashTable: lazily built on first eval, per-query
+// lifetime; buckets keyed by the element type's hash-fn result, dedup and
+// probe through the step's equality FuncCall.
+pub(crate) struct SaopTable<'mcx> {
+    pub(crate) hashcall: FuncCall,
+    pub(crate) built: bool,
+    pub(crate) has_nulls: bool,
+    pub(crate) map: ::mcx::PgFxHashMap<'mcx, u32, PgVec<'mcx, Datum>>,
 }
 
 // Step-owned call state: the FmgrInfo carrier plus its heap fcinfo image
@@ -542,6 +563,7 @@ pub enum SlotSrc {
 pub struct ExprState<'mcx> {
     pub(crate) steps: PgVec<'mcx, Step>,
     pub(crate) frames: PgVec<'mcx, FuncFrame<'mcx>>,
+    pub(crate) saop_tables: PgVec<'mcx, SaopTable<'mcx>>,
     pub(crate) kernel: Kernel,
     pub(crate) flags: u8,
     // C ExprState.resvalue/resnull: mcx-allocated result cell — OutRef raw
@@ -577,6 +599,7 @@ impl<'mcx> ExprState<'mcx> {
             p.write(ExprState {
                 steps,
                 frames: PgVec::new_in(mcx),
+                saop_tables: PgVec::new_in(mcx),
                 kernel: Kernel::Program,
                 flags: 0,
                 resnd,

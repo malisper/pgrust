@@ -1362,13 +1362,13 @@ fn init_scalar_array_op<'mcx>(
     params: ParamBind<'mcx>,
     sub: Option<SubplanCompileEnv>,
 ) -> PgResult<Step> {
-    if saop.hashfuncid != 0 {
-        unported("EEOP_HASHED_SCALARARRAYOP (convert_saop_to_hashed_saop lane)");
-    }
     debug_assert!(saop.args.len() == 2);
     let scalararg = saop.args.nth(0);
     let arrayarg = saop.args.nth(1);
-    let opfuncid = if saop.opfuncid != 0 {
+    // C: hash probes use the equality function (negfuncid) for NOT IN.
+    let opfuncid = if saop.hashfuncid != 0 && saop.negfuncid != 0 {
+        saop.negfuncid
+    } else if saop.opfuncid != 0 {
         saop.opfuncid
     } else {
         // set_sa_opfuncid (nodeFuncs.c).
@@ -1404,6 +1404,47 @@ fn init_scalar_array_op<'mcx>(
         init_expr_rec(scalararg, state, mcx, arg_out, agg, params, sub)?;
     }
     init_expr_rec(arrayarg, state, mcx, out, agg, params, sub)?;
+
+    if saop.hashfuncid != 0 {
+        let mut hash_flinfo = fmgr_core::fmgr_info(saop.hashfuncid)?;
+        hash_flinfo.fn_expr = Some(erase_fn_expr(mcx, node)?);
+        let hash_fn_addr = hash_flinfo.fn_addr;
+        let hash_frame = FuncFrame::new_in(mcx, hash_flinfo, 1, saop.inputcollid)?;
+        let hash_frame_ix = state.frames.len() as u32;
+        let hashcall = FuncCall {
+            fn_addr: hash_fn_addr,
+            fcinfo: hash_frame.fcinfo,
+            frame: hash_frame_ix,
+            nargs: 1,
+        };
+        state
+            .frames
+            .try_reserve(1)
+            .map_err(|_| mcx.oom(core::mem::size_of::<FuncFrame<'_>>()))?;
+        state.frames.push(hash_frame);
+
+        let table = state.saop_tables.len() as u32;
+        state
+            .saop_tables
+            .try_reserve(1)
+            .map_err(|_| mcx.oom(core::mem::size_of::<crate::steps::SaopTable<'_>>()))?;
+        state.saop_tables.push(crate::steps::SaopTable {
+            hashcall,
+            built: false,
+            has_nulls: false,
+            map: ::mcx::PgFxHashMap::with_hasher_in(Default::default(), mcx),
+        });
+
+        return Ok(Step::HashedScalarArrayOp {
+            call,
+            inclause: saop.useOr,
+            typlen,
+            typbyval,
+            typalign: typalign as u8,
+            table,
+            out,
+        });
+    }
 
     Ok(Step::ScalarArrayOp {
         call,

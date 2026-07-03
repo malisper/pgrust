@@ -30,6 +30,7 @@ pub fn init_all() {
     twophase_config::init_seams();
     aclchk::init_seams();
     be_fsstubs::init_seams();
+    large_object::init_seams();
     catalog_namespace::init_seams();
     catalog_dependency::init_seams();
     tablecmds::init_seams();
