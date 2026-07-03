@@ -75,7 +75,7 @@ fn make<'mcx>(mcx: Mcx<'mcx>, oid: Oid, relkind: u8, relam: Oid) -> Relation<'mc
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
-            rd_hastriggers: false,
+            rd_hastriggers: false, rd_hasrules: false,
     };
     Relation::open(data, None)
 }

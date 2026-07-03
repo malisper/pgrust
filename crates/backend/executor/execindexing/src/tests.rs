@@ -393,7 +393,7 @@ fn heap_relation_data(mcx: Mcx<'_>) -> RelationData<'_> {
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
-            rd_hastriggers: false,
+            rd_hastriggers: false, rd_hasrules: false,
     }
 }
 
@@ -449,7 +449,7 @@ fn index_relation_data(mcx: Mcx<'_>, unique: bool) -> RelationData<'_> {
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
-            rd_hastriggers: false,
+            rd_hastriggers: false, rd_hasrules: false,
     }
 }
 

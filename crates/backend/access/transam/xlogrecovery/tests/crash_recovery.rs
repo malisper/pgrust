@@ -335,7 +335,7 @@ fn test_relation<'mcx>(mcx: Mcx<'mcx>, oid: Oid) -> RelationData<'mcx> {
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
-            rd_hastriggers: false,
+            rd_hastriggers: false, rd_hasrules: false,
     }
 }
 
@@ -429,7 +429,7 @@ fn index_rel<'mcx>(mcx: Mcx<'mcx>) -> Relation<'mcx> {
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
-            rd_hastriggers: false,
+            rd_hastriggers: false, rd_hasrules: false,
     };
     let rel = Relation::open(data, Some(noop_close));
     rel.rd_supportinfo

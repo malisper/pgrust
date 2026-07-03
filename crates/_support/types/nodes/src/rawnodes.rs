@@ -390,6 +390,16 @@ pub struct ViewStmt<'mcx> {
     pub withCheckOption: ViewCheckOption,
 }
 
+pub struct RuleStmt<'mcx> {
+    pub relation: Option<&'mcx crate::primnodes::RangeVar<'mcx>>,
+    pub rulename: &'mcx str,
+    pub whereClause: Option<Node<'mcx>>,
+    pub event: crate::nodes_enums::CmdType,
+    pub instead: bool,
+    pub actions: NodeList<'mcx>,
+    pub replace: bool,
+}
+
 #[derive(Default)]
 pub struct ColumnDef<'mcx> {
     pub colname: Option<&'mcx str>,
@@ -628,6 +638,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for CreateStmt<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for ViewStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_ViewStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for RuleStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_RuleStmt;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for ColumnDef<'mcx> {
     const TAG: NodeTag = NodeTag::T_ColumnDef;

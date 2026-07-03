@@ -352,7 +352,7 @@ fn install_scan_fixtures() {
     // cache, fed by pg_class/pg_index fixtures underneath its build seams.
     relcache_build_seams::scan_pg_relation::set(|relid, _, _| {
         Ok((relid == TBL).then(|| relcache_build_seams::ScannedPgClass {
-            relchecks: 0, relhastriggers: false,
+            relchecks: 0, relhastriggers: false, relhasrules: false,
             form: make_pg_class(TBL, "t", b'r', 2, true),
             options: None,
         }))
@@ -465,7 +465,7 @@ fn make_rel_data<'mcx>(
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
-            rd_hastriggers: false,
+            rd_hastriggers: false, rd_hasrules: false,
     }
 }
 

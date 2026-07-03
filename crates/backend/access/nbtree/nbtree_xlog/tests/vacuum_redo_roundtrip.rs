@@ -419,7 +419,7 @@ fn index_rel(mcx: Mcx<'_>) -> Relation<'_> {
         pgstat_enabled: Cell::new(false),
         rd_amcache: Default::default(),
         rd_trigdesc: Default::default(),
-        rd_hastriggers: false,
+        rd_hastriggers: false, rd_hasrules: false,
         rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(),
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),

@@ -65,6 +65,8 @@ pub struct RelationData<'mcx> {
     // pg_class.relhastriggers, threaded beside the trimmed rd_rel form
     // (ScannedPgClass.relchecks precedent).
     pub rd_hastriggers: bool,
+    // pg_class.relhasrules, same threading (matchLocks/fireRIRrules gate).
+    pub rd_hasrules: bool,
 }
 
 #[derive(Debug)]
@@ -337,7 +339,7 @@ mod tests {
             rd_supportinfo: Default::default(),
             rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
-            rd_hastriggers: false,
+            rd_hastriggers: false, rd_hasrules: false,
         }
     }
 
