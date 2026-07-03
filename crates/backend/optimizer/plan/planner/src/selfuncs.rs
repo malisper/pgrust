@@ -1664,16 +1664,46 @@ pub fn estimate_num_groups_pgset<'mcx>(
         let mut relmaxndistinct = 1.0f64;
         let mut relvarcount = 0usize;
         let mut rest: mcx::PgVec<'_, GroupVarInfo> = mcx::PgVec::new_in(mcx);
+        let mut relvars: mcx::PgVec<'_, GroupVarInfo> = mcx::PgVec::new_in(mcx);
         for vi in remaining {
             if vi.rel == rel_id {
-                reldistinct *= vi.ndistinct;
-                if relmaxndistinct < vi.ndistinct {
-                    relmaxndistinct = vi.ndistinct;
-                }
-                relvarcount += 1;
+                relvars.push(vi);
             } else {
                 rest.push(vi);
             }
+        }
+        // estimate_multivariate_ndistinct loop (selfuncs.c): consume vars
+        // covered by ndistinct extended statistics first.
+        while relvars.len() >= 2 && !run.root.rel(rel_id).statlist.is_empty() {
+            let mut varattnos: mcx::PgVec<'_, i16> = mcx::PgVec::new_in(mcx);
+            for vi in relvars.iter() {
+                varattnos.push(run.root.expr_node(vi.var).as_var().unwrap().varattno);
+            }
+            let Some((mvndistinct, covered)) =
+                crate::extended_stats::estimate_multivariate_ndistinct(run, rel_id, &varattnos)?
+            else {
+                break;
+            };
+            reldistinct *= mvndistinct;
+            if relmaxndistinct < mvndistinct {
+                relmaxndistinct = mvndistinct;
+            }
+            relvarcount += 1;
+            let mut kept: mcx::PgVec<'_, GroupVarInfo> = mcx::PgVec::new_in(mcx);
+            for vi in relvars {
+                let attno = run.root.expr_node(vi.var).as_var().unwrap().varattno;
+                if !covered.contains(&attno) {
+                    kept.push(vi);
+                }
+            }
+            relvars = kept;
+        }
+        for vi in relvars {
+            reldistinct *= vi.ndistinct;
+            if relmaxndistinct < vi.ndistinct {
+                relmaxndistinct = vi.ndistinct;
+            }
+            relvarcount += 1;
         }
         let (rel_tuples, rel_rows) = {
             let rel = run.root.rel(rel_id);

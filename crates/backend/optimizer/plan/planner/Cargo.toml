@@ -39,6 +39,7 @@ types_tuple = { path = "../../../../_support/types/types_tuple" }
 types_relscan = { path = "../../../access/index/relscan" }
 syscache_seams = { path = "../../../utils/cache/syscache_seams" }
 relcache_seams = { path = "../../../utils/cache/relcache_seams" }
+statistics = { path = "../../../statistics/statistics" }
 bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
 table = { path = "../../../access/table/table" }
 tableam = { path = "../../../access/table/tableam" }

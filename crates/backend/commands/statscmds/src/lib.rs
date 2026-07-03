@@ -342,7 +342,7 @@ pub fn CreateStatistics<'mcx>(mcx: Mcx<'mcx>, stmt: &CreateStatsStmt<'_>) -> PgR
 
     let statrel = table::table_open(mcx, StatisticExtRelationId, RowExclusiveLock)?;
 
-    let statoid = catalog::n(mcx, &statrel, StatisticExtOidIndexId, Anum_oid as i32)?;
+    let statoid = catalog::GetNewOidWithIndex(mcx, &statrel, StatisticExtOidIndexId, Anum_oid as AttrNumber)?;
 
     let stxname = name_arg(mcx, &namestr)?;
     let stxkeys = int2vector_image(mcx, &attnums[..nattnums])?;
