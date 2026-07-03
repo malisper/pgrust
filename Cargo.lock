@@ -1798,6 +1798,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_nodes",
+ "types_pathnodes",
  "types_portal",
  "types_tuple",
  "var_seams",
@@ -2562,6 +2563,25 @@ dependencies = [
 [[package]]
 name = "costsize"
 version = "0.1.0"
+dependencies = [
+ "guc_tables",
+ "init_small",
+ "lsyscache",
+ "mcx",
+ "nodeagg",
+ "nodehash",
+ "nodes_core",
+ "planner_seams",
+ "table",
+ "tidbitmap",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_pathnodes",
+ "types_rel",
+ "types_tuple",
+ "vars",
+]
 
 [[package]]
 name = "crc32c"
@@ -6338,6 +6358,19 @@ dependencies = [
 [[package]]
 name = "pathnode"
 version = "0.1.0"
+dependencies = [
+ "clauses",
+ "costsize",
+ "init_small",
+ "lsyscache",
+ "mcx",
+ "nodehash",
+ "planner_seams",
+ "types_error",
+ "types_nodes",
+ "types_pathnodes",
+ "types_tuple",
+]
 
 [[package]]
 name = "pg_attrdef"
@@ -6893,6 +6926,7 @@ dependencies = [
  "clauses",
  "clauses_seams",
  "coerce",
+ "costsize",
  "datum",
  "execexpr",
  "execmain",
@@ -6918,6 +6952,7 @@ dependencies = [
  "parser_analyze",
  "parser_small1",
  "partdesc",
+ "pathnode",
  "pg_inherits",
  "pg_locale",
  "planner_seams",
@@ -6964,7 +6999,9 @@ dependencies = [
  "seam_core",
  "types_error",
  "types_nodes",
+ "types_pathnodes",
  "types_portal",
+ "types_rel",
 ]
 
 [[package]]
@@ -8707,6 +8744,7 @@ dependencies = [
  "commands_vacuum",
  "condition_variable",
  "conffiles",
+ "costsize",
  "dbcommands",
  "deadlock",
  "detoast",
@@ -10422,8 +10460,10 @@ dependencies = [
  "datum",
  "mcx",
  "types_core",
+ "types_error",
  "types_hash",
  "types_nodes",
+ "types_portal",
 ]
 
 [[package]]
