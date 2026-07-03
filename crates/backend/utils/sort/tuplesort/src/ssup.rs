@@ -133,7 +133,11 @@ pub fn apply_cmp_in(cmp: SortComparator, x: Datum, y: Datum, collation: Oid, mcx
 unsafe fn varlena_payload<'a>(d: Datum) -> &'a [u8] {
     use ::types_tuple::varatt::{varatt_is_1b, varatt_is_1b_e, varsize_1b, varsize_4b};
     let p = d.as_usize() as *const u8;
-    debug_assert!(!varatt_is_1b_e(p));
+    if varatt_is_1b_e(p) {
+        // Ordered-agg datum sorts can carry toast pointers; C detoasts in
+        // bttextfastcmp (DatumGetTextPP) — loud until that lane lands.
+        panic!("varstrfastcmp: external/toasted varlena sort key (detoast-in-comparator lane)");
+    }
     if varatt_is_1b(p) {
         core::slice::from_raw_parts(p.add(1), varsize_1b(p) - 1)
     } else {
