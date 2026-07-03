@@ -102,7 +102,6 @@ pub fn RelationBuildLocalRelation(
         relisshared: false,
         relpersistence,
         relkind,
-        relhastriggers: false,
         relhassubclass: false,
         relrowsecurity: false,
         relispopulated: true,

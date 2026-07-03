@@ -422,7 +422,6 @@ fn make_pg_class(
         relisshared: false,
         relpersistence: b'p',
         relkind,
-        relhastriggers: false,
         relhassubclass: false,
         relrowsecurity: false,
         relispopulated: true,

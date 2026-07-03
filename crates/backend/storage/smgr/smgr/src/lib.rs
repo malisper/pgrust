@@ -990,7 +990,6 @@ mod tests {
             relisshared: false,
             relpersistence: ::types_core::RELPERSISTENCE_PERMANENT,
             relkind: ::types_rel::RELKIND_RELATION,
-            relhastriggers: false,
             relhassubclass: false,
             relrowsecurity: false,
             relispopulated: true,

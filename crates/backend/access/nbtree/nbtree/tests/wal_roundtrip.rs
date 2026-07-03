@@ -268,7 +268,6 @@ fn index_rel(mcx: Mcx<'_>) -> Relation<'_> {
             relisshared: false,
             relpersistence: RELPERSISTENCE_PERMANENT,
             relkind: RELKIND_INDEX,
-            relhastriggers: false,
             relhassubclass: false,
             relrowsecurity: false,
             relispopulated: true,

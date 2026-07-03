@@ -119,12 +119,16 @@ fn ExecuteTruncateGuts<'mcx>(
         catalog_heap::heap_truncate_check_FKs(mcx, rels, false)?;
     }
 
-    // ExecBS/ASTruncateTriggers + the estate choreography: nothing to fire
-    // until CREATE TRIGGER lands, and relhastriggers cannot be set before the
-    // trigger/FK lanes land. Refine to TRIGGER_TYPE_TRUNCATE when they do.
+    // ExecBS/ASTruncateTriggers fire only TRIGGER_TYPE_TRUNCATE triggers; FK RI
+    // triggers set relhastriggers but never that type, so they pass through.
     for rel in rels.iter() {
-        if rel.rd_rel.relhastriggers {
-            unported("ExecuteTruncateGuts: TRUNCATE triggers (trigger lane)");
+        if rel.rd_hastriggers {
+            let trigdesc = relcache::RelationGetTriggerDesc(rel.rd_id)?;
+            if trigdesc.is_some_and(|d| {
+                d.trig_truncate_before_statement || d.trig_truncate_after_statement
+            }) {
+                unported("ExecuteTruncateGuts: TRUNCATE triggers (trigger lane)");
+            }
         }
     }
 

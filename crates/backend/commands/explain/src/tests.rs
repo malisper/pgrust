@@ -864,7 +864,6 @@ mod order_by_limit_e2e {
             relisshared: false,
             relpersistence: b'p',
             relkind: types_rel::RELKIND_RELATION,
-            relhastriggers: false,
             relhassubclass: false,
             relrowsecurity: false,
             relispopulated: true,

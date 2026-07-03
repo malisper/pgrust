@@ -196,7 +196,6 @@ fn fake_relation_open(mcx: Mcx<'_>, oid: Oid, lockmode: LOCKMODE) -> PgResult<Re
             relisshared: false,
             relpersistence: RELPERSISTENCE_PERMANENT,
             relkind: RELKIND_RELATION,
-            relhastriggers: false,
             relhassubclass: false,
             relrowsecurity: false,
             relispopulated: true,
