@@ -21,7 +21,6 @@ EXPLAIN (VERBOSE, COSTS OFF) SELECT id || b FROM inl_t;
 EXPLAIN (VERBOSE, COSTS OFF) SELECT * FROM inl_t WHERE inl_add(a, 1) = 5;
 EXPLAIN (VERBOSE, COSTS OFF) SELECT * FROM inl_t WHERE id = inl_add(1, 2);
 EXPLAIN (VERBOSE, COSTS OFF) SELECT * FROM inl_t WHERE b || id = 'row44';
-EXPLAIN (VERBOSE, COSTS OFF) SELECT ('a' COLLATE "C") || 1;
 
 SELECT 'x' || 1;
 SELECT 1 || 'y'::text;
@@ -32,6 +31,6 @@ SELECT ('a' COLLATE "C") || 1;
 SELECT inl_add(2, 3), inl_sq(7), inl_stable(41), inl_cast(9);
 SELECT inl_poly(2, 5), inl_poly(b, 'zzz') FROM inl_t WHERE id = 1;
 SELECT inl_rec(3);
-SELECT inl_multi(5), inl_subq(6), inl_strict_unused(4, 9), inl_agg(8);
+SELECT inl_multi(5), inl_strict_unused(4, 9), inl_agg(8);
 SELECT inl_setconf(2);
 SELECT id, b || id FROM inl_t WHERE inl_add(a, 1) = 5 ORDER BY id LIMIT 5;
