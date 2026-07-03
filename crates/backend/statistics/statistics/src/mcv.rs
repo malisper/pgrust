@@ -49,7 +49,7 @@ pub fn statext_mcv_build<'mcx>(
         }
         v
     };
-    let mut mss = build_mss(mcx, &data.stats, &dims)?;
+    let mut mss = build_mss(&data.stats, &dims)?;
 
     let Some((items, store)) = build_sorted_items(mcx, data, &mut mss, &dims)? else {
         return Ok(None);
@@ -135,7 +135,7 @@ pub fn statext_mcv_build<'mcx>(
 fn bsearch_dim(
     f: &[SortItem],
     store: &ItemStore<'_>,
-    mss: &mut MultiSort<'_>,
+    mss: &mut MultiSort,
     dim: usize,
     v: Datum,
     isnull: bool,
@@ -159,7 +159,7 @@ fn build_distinct_groups<'mcx>(
     mcx: Mcx<'mcx>,
     items: &[SortItem],
     store: &ItemStore<'_>,
-    mss: &mut MultiSort<'_>,
+    mss: &mut MultiSort,
 ) -> PgResult<(PgVec<'mcx, SortItem>, usize)> {
     let numrows = items.len();
     let mut groups: PgVec<'mcx, SortItem> = PgVec::new_in(mcx);
@@ -234,10 +234,10 @@ pub fn statext_mcv_serialize<'mcx>(
 
     let mut values: PgVec<'_, PgVec<'_, Datum>> = mcx::vec_with_capacity_in(mcx, ndims)?;
     let mut info: PgVec<'_, DimensionInfo> = mcx::vec_with_capacity_in(mcx, ndims)?;
-    let mut cmps: PgVec<'_, MultiSort<'_>> = mcx::vec_with_capacity_in(mcx, ndims)?;
+    let mut cmps: Vec<MultiSort> = Vec::with_capacity(ndims);
 
     for dim in 0..ndims {
-        let mut mss = MultiSort::init(mcx, 1)?;
+        let mut mss = MultiSort::init(1);
         mss.add_dimension(stats[dim].attrtypid, stats[dim].attrcollid)?;
 
         let typlen = stats[dim].typlen;

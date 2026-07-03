@@ -71,7 +71,7 @@ fn dependency_degree(
         }
         v
     };
-    let mut mss = build_mss(mcx, &data.stats, &dims)?;
+    let mut mss = build_mss(&data.stats, &dims)?;
     let Some((items, store)) = build_sorted_items(mcx, data, &mut mss, &dims)? else {
         return Ok(0.0);
     };
