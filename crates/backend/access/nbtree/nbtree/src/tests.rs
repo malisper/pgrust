@@ -626,3 +626,42 @@ fn high_key_offset_constant() {
     assert_eq!(P_HIKEY, 1);
     assert_eq!(BTREE_METAPAGE, 0);
 }
+
+#[test]
+fn mkscankey_builds_insertion_key() {
+    install();
+    build_single_leaf_index(&[1]);
+    let cx = MemoryContext::new("t");
+    let rel = index_rel(cx.mcx());
+    prime_supportinfo(&rel);
+
+    let mut img = Img([0u8; 16]);
+    let heap_tid = tid(42, 3);
+    // SAFETY: owned image writes within bounds.
+    unsafe {
+        img.0
+            .as_mut_ptr()
+            .cast::<ItemPointerData>()
+            .write_unaligned(heap_tid)
+    };
+    img.0[6..8].copy_from_slice(&16u16.to_ne_bytes());
+    img.0[8..12].copy_from_slice(&555i32.to_ne_bytes());
+
+    let mut key = crate::bt_mkscankey(&rel, Some(img.0.as_ptr())).unwrap();
+    assert!(key.heapkeyspace && key.allequalimage);
+    assert!(!key.anynullkeys && !key.nextkey && !key.backward);
+    assert_eq!(key.scantid, Some(heap_tid));
+    let keys = key.keys_mut();
+    assert_eq!(keys.len(), 1);
+    assert_eq!(keys[0].sk_attno, 1);
+    assert_eq!(keys[0].sk_argument.as_i32(), 555);
+    assert_eq!(keys[0].sk_flags, 0);
+    assert_eq!(keys[0].sk_func.fn_oid, 351);
+
+    // Utility-statement arm: no tuple, no metapage read.
+    let mut key = crate::bt_mkscankey(&rel, None).unwrap();
+    assert!(key.heapkeyspace && !key.allequalimage);
+    assert!(key.anynullkeys, "truncated attributes count as null keys");
+    assert_eq!(key.scantid, None);
+    assert_eq!(key.keys_mut().len(), 0);
+}

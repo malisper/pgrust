@@ -21,23 +21,25 @@ const _: () = assert!(core::mem::size_of::<BTPageOpaqueData>() == 16);
 pub(crate) fn page_special_off(page: &PageRef<'_>) -> usize {
     // SAFETY: pd_special lives at a 2-aligned in-page offset (PageRef contract).
     let off = unsafe { page.as_ptr().add(PD_SPECIAL_OFF).cast::<u16>().read() } as usize;
-    assert!(off >= SizeOfPageHeaderData && off <= BLCKSZ, "corrupt pd_special");
-    off
+    // hard-validated once per acquisition (bt_checkpage, C's model)
+    debug_assert!(off >= SizeOfPageHeaderData && off <= BLCKSZ, "corrupt pd_special");
+    off.min(BLCKSZ - core::mem::size_of::<BTPageOpaqueData>())
 }
 
 /// BTPageGetOpaque, by value (read-only users; killitems writes raw).
 #[inline]
-pub(crate) fn page_opaque(page: &PageRef<'_>) -> BTPageOpaqueData {
+pub fn page_opaque(page: &PageRef<'_>) -> BTPageOpaqueData {
     let off = page_special_off(page);
-    assert!(off + core::mem::size_of::<BTPageOpaqueData>() <= BLCKSZ);
-    // SAFETY: in-bounds (asserted), 4-aligned (special areas are MAXALIGNed).
+    // SAFETY: in-bounds (page_special_off clamps), 4-aligned (MAXALIGNed).
     unsafe { page.as_ptr().add(off).cast::<BTPageOpaqueData>().read() }
 }
 
 
 #[inline]
-pub(crate) fn page_item(page: &PageRef<'_>, id: ItemIdData) -> crate::itup::ITup {
-    page.item_raw(id).0
+pub fn page_item(page: &PageRef<'_>, id: ItemIdData) -> crate::itup::ITup {
+    // SAFETY: ids come from this page's line-pointer array on a pinned+locked
+    // page that passed bt_checkpage — the invariant C reads unchecked.
+    unsafe { page.item_raw_unchecked(id).0 }
 }
 
 // BTPageGetMeta: contents start at MAXALIGN(SizeOfPageHeaderData).
@@ -150,7 +152,7 @@ pub(crate) fn bt_relandgetbuf(
 }
 
 /// _bt_relbuf: drop lock and pin.
-pub(crate) fn bt_relbuf(rel: &Relation<'_>, pin: BufferPin) -> PgResult<()> {
+pub fn bt_relbuf(rel: &Relation<'_>, pin: BufferPin) -> PgResult<()> {
     bt_unlockbuf(rel, &pin)?;
     pin.release();
     Ok(())

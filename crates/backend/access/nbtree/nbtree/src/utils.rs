@@ -5,7 +5,7 @@
 
 use ::bufmgr_seams as bufmgr;
 use ::datum::Datum;
-use ::types_core::{OffsetNumber, XLogRecPtr};
+use ::types_core::{AttrNumber, OffsetNumber, XLogRecPtr};
 use ::types_error::PgResult;
 use ::types_nbtree::{
     BTScanOpaqueData, BTScanPosIsPinned, BTScanPosIsValid, BTPageOpaqueData, BTP_HAS_GARBAGE,
@@ -13,9 +13,9 @@ use ::types_nbtree::{
 };
 use ::types_rel::Relation;
 use ::types_scan::scankey::{
-    BTEqualStrategyNumber, SK_BT_MAXVAL, SK_BT_MINVAL, SK_BT_NEXT, SK_BT_PRIOR,
-    SK_BT_REQBKWD, SK_BT_REQFWD, SK_BT_SKIP, SK_ISNULL, SK_ROW_HEADER, SK_SEARCHARRAY,
-    SK_SEARCHNULL, SK_BT_NULLS_FIRST,
+    BTEqualStrategyNumber, InvalidStrategy, ScanKeyData, SK_BT_INDOPTION_SHIFT, SK_BT_MAXVAL,
+    SK_BT_MINVAL, SK_BT_NEXT, SK_BT_PRIOR, SK_BT_REQBKWD, SK_BT_REQFWD, SK_BT_SKIP, SK_ISNULL,
+    SK_ROW_HEADER, SK_SEARCHARRAY, SK_SEARCHNULL, SK_BT_NULLS_FIRST,
 };
 use ::types_scan::sdir::{ScanDirection, ScanDirectionIsBackward, ScanDirectionIsForward};
 use ::types_storage::bufpage::{ItemIdData, PageRef, SizeOfPageHeaderData};
@@ -25,11 +25,11 @@ use ::types_tuple::TupleDescData;
 
 use crate::fcframe::OrderProcFrame;
 use crate::itup::{
-    bt_tuple_get_nposting, bt_tuple_get_posting_n, bt_tuple_is_pivot, bt_tuple_is_posting,
-    index_getattr, ITup,
+    bt_tuple_get_heap_tid, bt_tuple_get_natts, bt_tuple_get_nposting, bt_tuple_get_posting_n,
+    bt_tuple_is_pivot, bt_tuple_is_posting, index_getattr, ITup,
 };
 use crate::page::{bt_getbuf, bt_relbuf, page_item, page_opaque, page_special_off};
-use crate::search::BtReadPageState;
+use crate::search::{BtReadPageState, BtScanInsert};
 use crate::unported_phase2;
 
 /// _bt_checkkeys. `tupnatts` is the tuple's own attribute count (may be less
@@ -452,4 +452,66 @@ pub(crate) fn bt_killitems(
         None => bufmgr::lock_buffer::call(buf, bufmgr::BUFFER_LOCK_UNLOCK)?,
     }
     Ok(())
+}
+
+/// _bt_mkscankey; `itup: None` is the utility-statement arm. C divergence:
+/// C's defensive never-read SK_ISNULL scankeys past keysz are not built;
+/// anynullkeys still counts truncated attributes.
+pub fn bt_mkscankey(rel: &Relation<'_>, itup: Option<ITup>) -> PgResult<BtScanInsert> {
+    let tupdesc: &TupleDescData<'_> = &rel.rd_att;
+    let indnkeyatts = rel.indnkeyatts();
+
+    let mut key = BtScanInsert::new();
+    // SAFETY: caller guarantees `itup` points at a live index tuple.
+    let tupnatts = match itup {
+        Some(itup) => {
+            let (heapkeyspace, allequalimage) = crate::page::bt_metaversion(rel)?;
+            key.heapkeyspace = heapkeyspace;
+            key.allequalimage = allequalimage;
+            unsafe { bt_tuple_get_natts(itup, rel.indnatts()) }
+        }
+        None => 0,
+    };
+    debug_assert!(tupnatts <= rel.indnatts());
+
+    key.scantid = match itup {
+        Some(itup) if key.heapkeyspace => unsafe { bt_tuple_get_heap_tid(itup) },
+        _ => None,
+    };
+
+    let keysz = indnkeyatts.min(tupnatts);
+    for i in 0..keysz as usize {
+        let sk_func = crate::search::order_procinfo(rel, i + 1)?;
+        let mut is_null = false;
+        // SAFETY: itup is Some (keysz <= tupnatts) and attribute i+1 <= tupnatts.
+        let arg = unsafe {
+            index_getattr(
+                itup.expect("keysz > 0 implies a tuple"),
+                (i + 1) as AttrNumber,
+                tupdesc,
+                &mut is_null,
+            )
+        };
+        if is_null {
+            key.anynullkeys = true;
+        }
+        let null_flag = if is_null { SK_ISNULL } else { 0 };
+        key.push(ScanKeyData {
+            sk_flags: null_flag | ((rel.rd_indoption[i] as i32) << SK_BT_INDOPTION_SHIFT),
+            sk_attno: (i + 1) as AttrNumber,
+            sk_strategy: InvalidStrategy,
+            sk_subtype: 0,
+            sk_collation: rel.rd_indcollation[i],
+            sk_func,
+            sk_argument: arg,
+        });
+    }
+    if tupnatts < indnkeyatts {
+        key.anynullkeys = true; // truncated attributes count as null keys
+    }
+
+    if rel.rd_index.as_ref().is_some_and(|i| i.indnullsnotdistinct) {
+        key.anynullkeys = false;
+    }
+    Ok(key)
 }

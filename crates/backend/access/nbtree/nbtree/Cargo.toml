@@ -4,6 +4,9 @@ version = "0.1.0"
 edition.workspace = true
 publish.workspace = true
 
+[features]
+bench-internals = []
+
 [dependencies]
 mcx = { path = "../../../../_support/mcx" }
 datum = { path = "../../../../_support/types/datum" }
@@ -19,6 +22,8 @@ types_fmgr = { path = "../../../../_support/types/fmgr" }
 types_relscan = { path = "../../index/relscan" }
 fmgr_core = { path = "../../../utils/fmgr/fmgr_core" }
 lsyscache = { path = "../../../utils/cache/lsyscache" }
+nbt_compare = { path = "../compare" }
+varlena = { path = "../../../utils/adt/varlena" }
 bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
 predicate_seams = { path = "../../../storage/lmgr/predicate_seams" }
 transam_xlog_seams = { path = "../../transam/transam_xlog_seams" }

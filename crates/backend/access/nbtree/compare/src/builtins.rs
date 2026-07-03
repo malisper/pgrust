@@ -7,9 +7,8 @@ use ::types_fmgr::{FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PG
 macro_rules! fc_cmp {
     ($($fname:ident: $core:ident($a:ident, $b:ident);)*) => {$(
         pub fn $fname(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-            let a = fcinfo.arg(0).$a();
-            let b = fcinfo.arg(1).$b();
-            Ok(Datum::from_i32(crate::$core(a, b)))
+            let [a, b] = fcinfo.args_n::<2>();
+            Ok(Datum::from_i32(crate::$core(a.value.$a(), b.value.$b())))
         }
     )*};
 }
