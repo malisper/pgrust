@@ -763,9 +763,27 @@ fn index_update_stats<'mcx>(
 // pending/currently-reindexed globals land with the REINDEX lane.
 fn ResetReindexState(_nest_level: i32) {}
 
+// BuildDummyIndexInfo reduces to BuildIndexInfo here: expression/predicate/
+// exclusion arms (the fields the dummy form skips) are loud inside it.
+fn index_build_dummy<'mcx>(
+    mcx: Mcx<'mcx>,
+    heap_relation: &Relation<'mcx>,
+    index_relation: &Relation<'mcx>,
+    isreindex: bool,
+) -> types_error::PgResult<()> {
+    let mut indexInfo = execindexing::BuildIndexInfo(index_relation);
+    index_build(mcx, heap_relation, index_relation, &mut indexInfo, isreindex)
+}
+
 pub fn init_seams() {
     catalog_index_seams::reset_reindex_state::set(ResetReindexState);
+    catalog_index_seams::index_build_dummy::set(index_build_dummy);
 }
 
 pub use drop::{index_drop, IndexGetRelation};
 mod drop;
+pub use reindex::{
+    reindex_index, reindex_relation, RelationSetNewRelfilenumber,
+    REINDEX_REL_CHECK_CONSTRAINTS, REINDEX_REL_PROCESS_TOAST,
+};
+mod reindex;

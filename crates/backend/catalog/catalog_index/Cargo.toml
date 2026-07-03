@@ -41,3 +41,5 @@ types_scan = { path = "../../../_support/types/types_scan" }
 types_tuple = { path = "../../../_support/types/types_tuple" }
 visibilitymap = { path = "../../access/heap/visibilitymap" }
 xact = { path = "../../access/transam/xact" }
+tableam = { path = "../../access/table/tableam" }
+elog_seams = { path = "../../utils/error/elog_seams" }

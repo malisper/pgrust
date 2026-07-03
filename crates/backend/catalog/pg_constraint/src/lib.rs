@@ -22,6 +22,7 @@ use types_rel::{AccessShareLock, RowExclusiveLock};
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 
 pub const CONSTRAINT_CHECK: u8 = b'c';
+pub const CONSTRAINT_FOREIGN: u8 = b'f';
 pub const CONSTRAINT_NOTNULL: u8 = b'n';
 pub const CONSTRAINT_FOREIGN: u8 = b'f';
 pub const CONSTRAINT_PRIMARY: u8 = b'p';
