@@ -552,6 +552,11 @@ fn pull_agg_input_vars<'mcx>(
                 pull_agg_input_vars(a, out);
             }
         }
+        NodeTag::T_RowExpr => {
+            for a in &node.as_row_expr().unwrap().args {
+                pull_agg_input_vars(a, out);
+            }
+        }
         other => panic!("pull_var_clause (var.c): {other:?}; M3 expression lane"),
     }
 }
