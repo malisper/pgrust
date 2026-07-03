@@ -105,6 +105,25 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // ReadBufferExtended(reln, forkNum, blockNum, mode, strategy).
+    pub fn read_buffer_extended<'a, 'mcx>(
+        rel: &'a types_rel::RelationData<'mcx>,
+        forknum: ForkNumber,
+        block_num: BlockNumber,
+        mode: ReadBufferMode,
+        strategy: BufferAccessStrategy,
+    ) -> PgResult<Buffer>
+);
+
+seam_core::seam!(
+    // RelationGetSmgr(rel)'s locator key (RelationInitPhysicalAddr steady
+    // state); homed in bufmgr until rd_locator lands on RelationData.
+    pub fn relation_smgr_locator<'a, 'mcx>(
+        rel: &'a types_rel::RelationData<'mcx>,
+    ) -> RelFileLocatorBackend
+);
+
+seam_core::seam!(
     pub fn buffer_get_block_number(buffer: Buffer) -> BlockNumber
 );
 

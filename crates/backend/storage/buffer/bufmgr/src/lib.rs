@@ -223,6 +223,8 @@ pub fn init_seams() {
             strategy,
         )
     });
+    bufmgr_seams::read_buffer_extended::set(ReadBufferExtended);
+    bufmgr_seams::relation_smgr_locator::set(rel_locator_backend);
     bufmgr_seams::buffer_get_block_number::set(ops::BufferGetBlockNumber);
     bufmgr_seams::buffer_get_page::set(ops::BufferGetPagePtr);
     bufmgr_seams::incr_buffer_ref_count::set(pin::IncrBufferRefCount);

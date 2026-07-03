@@ -19,6 +19,29 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // smgrexists(smgropen(rlocator), forknum) (smgr.c).
+    pub fn smgr_exists(rlocator: RelFileLocatorBackend, forknum: ForkNumber) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    // reln->smgr_cached_nblocks[forknum] raw field read; InvalidBlockNumber
+    // when uncached (fsm/vm size checks trust it outside recovery).
+    pub fn smgr_cached_nblocks(
+        rlocator: RelFileLocatorBackend,
+        forknum: ForkNumber,
+    ) -> BlockNumber
+);
+
+seam_core::seam!(
+    // reln->smgr_cached_nblocks[forknum] = value.
+    pub fn smgr_set_cached_nblocks(
+        rlocator: RelFileLocatorBackend,
+        forknum: ForkNumber,
+        value: BlockNumber,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
     // smgrdestroyall() (smgr.c).
     pub fn smgr_destroy_all() -> PgResult<()>
 );

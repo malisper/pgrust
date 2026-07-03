@@ -647,6 +647,14 @@ pub fn mdfiletagmatches(ftag: FileTag, candidate: FileTag) -> bool {
 
 pub fn init_seams() {
     smgr_seams::smgr_release_rel_locator::set(smgrreleaserellocator);
+    smgr_seams::smgr_exists::set(|rlocator, forknum| {
+        // smgrexists(smgropen(rlocator), forknum): one probe, as smgr_nblocks.
+        opened(rlocator, |r| match r.which {
+            SmgrKind::Md => md::mdexists(rlocator, &mut r.md, forknum),
+        })?
+    });
+    smgr_seams::smgr_cached_nblocks::set(smgr_cached_nblocks_raw);
+    smgr_seams::smgr_set_cached_nblocks::set(smgr_set_cached_nblocks);
     smgr_seams::smgr_create::set(|rlocator, forknum, is_redo| {
         // smgrcreate(smgropen(rlocator), forknum, isRedo); open is idempotent.
         smgropen(rlocator.locator, rlocator.backend)?;
