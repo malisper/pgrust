@@ -537,9 +537,7 @@ pub(crate) fn create_entry_positive(
     ntp: &HeapTupleData<'_>,
     hash_value: u32,
 ) -> PgResult<u32> {
-    if ntp.has_external() {
-        panic!("catcache: toast_flatten_tuple not ported (unit backend-access-common-toast)");
-    }
+    debug_assert!(!ntp.has_external(), "caller flattens via create_entry_from_scan");
     let mcx = st.mcx;
     let t_len = ntp.t_len;
     let payload_len = crate::IMG_PREFIX + t_len as usize;
@@ -599,6 +597,30 @@ pub(crate) fn create_entry_positive(
     st.ch_ntup += 1;
     maybe_rehash(st, cache_id);
     Ok(slot)
+}
+
+/// The `HeapTupleHasExternal` arm of `CatalogCacheCreateEntry`; toast access
+/// runs outside the state borrow (detoast re-enters the caches). `None` is
+/// C's NULL return: the entry went stale mid-flatten and the caller rescans.
+pub(crate) fn create_entry_from_scan(
+    cache_id: i32,
+    ntp: &HeapTupleData<'_>,
+    hash_value: u32,
+) -> PgResult<Option<u32>> {
+    if !ntp.has_external() {
+        return with_state(|st| create_entry_positive(st, cache_id, ntp, hash_value)).map(Some);
+    }
+    let tupdesc = with_state(|st| st.cache(cache_id).cc_tupdesc)
+        .expect("catcache: entry created before phase-2 init");
+    with_state(|st| push_in_progress(st, cache_id, hash_value, false));
+    let scratch = mcx::MemoryContext::new("catcache toast_flatten_tuple");
+    let flat = heaptoast::toast_flatten_tuple(scratch.mcx(), ntp, tupdesc);
+    let dead = with_state(pop_in_progress);
+    let flat = flat?;
+    if dead {
+        return Ok(None);
+    }
+    with_state(|st| create_entry_positive(st, cache_id, flat.as_tuple(), hash_value)).map(Some)
 }
 
 /// `CatalogCacheCreateEntry` (negative): `CatCacheCopyKeys` into `payload`.

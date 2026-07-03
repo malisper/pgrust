@@ -7,7 +7,7 @@ use types_tuple::{HeapTupleData, ItemPointerData};
 
 use crate::compute::{compute_hash_value, hash_index, CatCKey, CCFastKind};
 use crate::graph::{
-    compute_tuple_hash_value, create_entry_positive, pop_in_progress, push_in_progress,
+    compute_tuple_hash_value, create_entry_from_scan, pop_in_progress, push_in_progress,
     remove_cl, remove_ct, rehash_cat_cache_lists,
 };
 use crate::search::build_scan_keys;
@@ -262,9 +262,16 @@ fn build_list_scan(
             index_ok,
             &cur_skey[..nkeys as usize],
             &mut |ntp| match reuse_or_create_member(cache_id, ntp) {
-                Ok(slot) => {
+                Ok(Some(slot)) => {
                     members.push(slot);
                     Ok(true)
+                }
+                Ok(None) => {
+                    /* C: member create failed stale — mark the list build dead. */
+                    with_state(|st| {
+                        st.in_progress.last_mut().expect("in-progress underflow").dead = true;
+                    });
+                    Ok(false)
                 }
                 Err(e) => {
                     inner_err = Some(e);
@@ -301,7 +308,8 @@ fn build_list_scan(
 }
 
 /// Reuse a usable existing entry for `ntp` or create one; temp refcount++.
-fn reuse_or_create_member(cache_id: i32, ntp: &HeapTupleData<'_>) -> PgResult<u32> {
+/// `None`: the new entry went stale mid-flatten (caller restarts the scan).
+fn reuse_or_create_member(cache_id: i32, ntp: &HeapTupleData<'_>) -> PgResult<Option<u32>> {
     let found = with_state(|st| {
         let cache = st.cache(cache_id);
         let tupdesc = cache.cc_tupdesc.expect("list build before phase-2 init");
@@ -324,10 +332,13 @@ fn reuse_or_create_member(cache_id: i32, ntp: &HeapTupleData<'_>) -> PgResult<u3
     });
     let slot = match found {
         (_, Some(slot)) => slot,
-        (hv, None) => with_state(|st| create_entry_positive(st, cache_id, ntp, hv))?,
+        (hv, None) => match create_entry_from_scan(cache_id, ntp, hv)? {
+            Some(slot) => slot,
+            None => return Ok(None),
+        },
     };
     with_state(|st| st.cache_mut(cache_id).tuples[slot as usize].refcount += 1);
-    Ok(slot)
+    Ok(Some(slot))
 }
 
 /// `ReleaseCatCacheList(list)`.
