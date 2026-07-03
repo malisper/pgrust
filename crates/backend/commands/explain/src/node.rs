@@ -18,7 +18,7 @@ use crate::format::{
     append, ExplainCloseGroup, ExplainOpenGroup, ExplainPropertyBool, ExplainPropertyFloat,
     ExplainPropertyInteger, ExplainPropertyList, ExplainPropertyText,
 };
-use crate::options::str_in;
+use define::str_in;
 use crate::state::{ExplainState, EXPLAIN_FORMAT_TEXT};
 
 // SetOpCmd/SetOpStrategy wire values (nodes.h; canonical consts live in

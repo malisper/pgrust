@@ -22,14 +22,13 @@ use tupdesc::{CreateTemplateTupleDesc, TupleDescInitEntry};
 
 mod format;
 mod node;
-mod options;
 mod state;
 #[cfg(test)]
 mod tests;
 
 pub use format::*;
 pub use node::{ExplainNode, ExplainPrintPlan};
-pub use options::{defGetBoolean, defGetString};
+pub use define::{defGetBoolean, defGetString};
 pub use state::*;
 
 // pg_type.dat pins.

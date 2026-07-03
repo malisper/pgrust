@@ -2547,6 +2547,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "define"
+version = "0.1.0"
+dependencies = [
+ "elog",
+ "mcx",
+ "types_error",
+ "types_nodes",
+]
+
+[[package]]
 name = "dependency_seams"
 version = "0.0.0"
 dependencies = [
@@ -3018,6 +3028,7 @@ dependencies = [
  "condition_variable_seams",
  "datum",
  "deadlock_seams",
+ "define",
  "elog",
  "execmain",
  "execmain_seams",
@@ -4137,6 +4148,7 @@ dependencies = [
  "miscinit_seams",
  "nodes_core",
  "rel_vocab",
+ "reloptions",
  "syscache_seams",
  "table",
  "tablecmds",
@@ -7837,6 +7849,7 @@ dependencies = [
  "mcx",
  "relcache",
  "relcache_build_seams",
+ "reloptions",
  "table",
  "tupdesc",
  "typcache_seams",
@@ -7916,6 +7929,24 @@ dependencies = [
  "seam_core",
  "types_core",
  "types_error",
+]
+
+[[package]]
+name = "reloptions"
+version = "0.1.0"
+dependencies = [
+ "adt_bool",
+ "datum",
+ "define",
+ "elog",
+ "guc",
+ "mcx",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_rel",
+ "types_tuple",
+ "varlena",
 ]
 
 [[package]]
@@ -9543,6 +9574,7 @@ dependencies = [
  "relation_seams",
  "relcache",
  "relcache_seams",
+ "reloptions",
  "rewrite_handler",
  "rewrite_manip",
  "snapmgr",
@@ -10311,6 +10343,7 @@ dependencies = [
  "portalmem",
  "prepare",
  "rel_vocab",
+ "reloptions",
  "schemacmds",
  "sequence",
  "statscmds",
@@ -10363,6 +10396,7 @@ name = "vacuumlazy"
 version = "0.0.0"
 dependencies = [
  "bufmgr_seams",
+ "catalog_storage",
  "commands_vacuum",
  "freespace",
  "guc_tables",
@@ -10370,8 +10404,10 @@ dependencies = [
  "heapam_visibility_seams",
  "indexam",
  "init_small",
+ "lmgr",
  "mcx",
  "nbtree",
+ "postgres_seams",
  "procarray_seams",
  "pruneheap",
  "relcache_seams",
