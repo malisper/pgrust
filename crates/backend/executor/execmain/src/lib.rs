@@ -1,6 +1,7 @@
 // execMain.c + execProcnode.c + nodeResult.c + execAmi.c minimal spine.
-// Live: the SELECT 1 lane (Result node, no rangetable/params/triggers/junk);
-// every other node type and lane is a loud panic naming the owning C file.
+// Live: SELECT over Result/scan nodes with a real range table (RTE_RELATION/
+// RTE_RESULT, SELECT-only perminfos); every other node type and lane is a
+// loud panic naming the owning C file.
 #![allow(non_snake_case)]
 
 use std::cell::Cell;

@@ -9,6 +9,7 @@ mcx = { path = "../../../_support/mcx" }
 types_error = { path = "../../../_support/types/types_error" }
 types_nodes = { path = "../../../_support/types/nodes" }
 types_rel = { path = "../../../_support/types/rel" }
+types_slot = { path = "../../../_support/types/types_slot" }
 tableam = { path = "../../access/table/tableam" }
 execscan = { path = "../execscan" }
 execexpr = { path = "../execexpr" }
@@ -17,7 +18,6 @@ executils = { path = "../executils" }
 [dev-dependencies]
 datum = { path = "../../../_support/types/datum" }
 types_core = { path = "../../../_support/types/types_core" }
-types_slot = { path = "../../../_support/types/types_slot" }
 types_snapshot = { path = "../../../_support/types/snapshot" }
 types_storage = { path = "../../../_support/types/types_storage" }
 types_tuple = { path = "../../../_support/types/types_tuple" }

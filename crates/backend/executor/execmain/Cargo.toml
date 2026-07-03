@@ -49,5 +49,3 @@ heapam_visibility_seams = { path = "../../access/heap/heapam_visibility_seams" }
 predicate_seams = { path = "../../storage/lmgr/predicate_seams" }
 pruneheap_seams = { path = "../../access/heap/pruneheap_seams" }
 procarray_seams = { path = "../../storage/ipc/procarray_seams" }
-resowner_seams = { path = "../../utils/resowner/resowner_seams" }
-types_resowner = { path = "../../../_support/types/types_resowner" }
