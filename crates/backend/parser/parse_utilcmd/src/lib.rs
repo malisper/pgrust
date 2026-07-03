@@ -822,14 +822,16 @@ pub fn transformAlterTableCmd<'mcx>(
             }
         }
         AlterTableType::AT_AddConstraint => {
-            // transformTableConstraint: CHECK passes through untouched;
-            // index/FK-backed contypes are unported lanes.
+            // transformTableConstraint: CHECK/FOREIGN pass through untouched;
+            // index-backed contypes are unported lanes.
             let defnode = cmd.def.expect("AT_AddConstraint Constraint");
             let c = defnode
                 .as_variant::<types_nodes::rawnodes::Constraint>()
                 .expect("Constraint");
-            if c.contype != types_nodes::rawnodes::ConstrType::CONSTR_CHECK {
-                unported(&format!("transformTableConstraint {:?} arm", c.contype));
+            match c.contype {
+                types_nodes::rawnodes::ConstrType::CONSTR_CHECK
+                | types_nodes::rawnodes::ConstrType::CONSTR_FOREIGN => {}
+                other => unported(&format!("transformTableConstraint {other:?} arm")),
             }
         }
         other => unported(&format!("transformAlterTableStmt {other:?} arm")),

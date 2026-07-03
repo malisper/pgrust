@@ -3575,37 +3575,8 @@ impl<'mcx> Parser<'mcx> {
             // alter_using: USING a_expr | /*EMPTY*/
             368 => *yyval = YYSTYPE::Node(view.v(2).node()),
             369 => *yyval = YYSTYPE::Node(Option::None),
-            // TableConstraint: CONSTRAINT name ConstraintElem | ConstraintElem
-            536 => {
-                let name = view.v(2).str_val();
-                let node = view.v(3).node().expect("ConstraintElem");
-                let loc = view.l(1);
-                // SAFETY: tree is parser-owned; no derived refs live.
-                unsafe {
-                    node.with_mut::<Constraint, _>(|c| {
-                        c.conname = Some(name);
-                        c.location = loc;
-                    })
-                    .expect("ConstraintElem is Constraint");
-                }
-                *yyval = YYSTYPE::Node(Some(node));
-            }
+            // TableConstraint: ConstraintElem (536 CONSTRAINT-name arm above)
             537 => *yyval = YYSTYPE::Node(view.v(1).node()),
-            // ConstraintElem: CHECK '(' a_expr ')' ConstraintAttributeSpec
-            // (CAS bits beyond empty ride rule 826, loud).
-            538 => {
-                debug_assert!(view.v(5).ival() == 0);
-                let mut n = Node::build::<Constraint>(mcx)?;
-                n.contype = ConstrType::CONSTR_CHECK;
-                n.location = view.l(1);
-                n.raw_expr = view.v(3).node();
-                n.is_enforced = true;
-                n.skip_validation = false;
-                n.initially_valid = true;
-                *yyval = YYSTYPE::Node(Some(n.seal()));
-            }
-            // ConstraintAttributeSpec: /*EMPTY*/
-            825 => *yyval = YYSTYPE::Ival(0),
             // RenameStmt: ALTER TABLE [IF_P EXISTS] relation_expr RENAME TO name
             1294 | 1295 => {
                 let (rv, nm) = if rule == 1294 { (3, 6) } else { (5, 8) };
