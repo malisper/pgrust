@@ -4,7 +4,10 @@
 mod tests;
 
 use mcx::Mcx;
-use parse_expr::{expr_collation, expr_location, expr_type, transformExpr, ParseExprKindName};
+use parse_expr::{
+    expr_collation, expr_location, expr_location_list, expr_type, transformExpr,
+    ParseExprKindName,
+};
 use parse_relation::{addRangeTableEntry, checkNameSpaceConflicts};
 use parser_small1::{parser_errposition, ParseExprKind, ParseNamespaceItem, ParseState};
 use types_core::catalog::{INT8OID, TEXTOID, UNKNOWNOID};
@@ -12,10 +15,10 @@ use types_core::{Index, InvalidOid, Oid, ParseLoc};
 use types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_INVALID_COLUMN_REFERENCE,
     ERRCODE_INVALID_ROW_COUNT_IN_LIMIT_CLAUSE, ERRCODE_QUERY_CANCELED, ERRCODE_SYNTAX_ERROR,
-    ERRCODE_WRONG_OBJECT_TYPE, ERROR,
+    ERRCODE_TOO_MANY_COLUMNS, ERRCODE_WRONG_OBJECT_TYPE, ERROR,
 };
 use types_nodes::nodes_enums::LimitOption;
-use types_nodes::parsenodes::{SortGroupClause, WindowClause};
+use types_nodes::parsenodes::{GroupingSet, GroupingSetKind, SortGroupClause, WindowClause};
 use types_nodes::primnodes::TargetEntry;
 use types_nodes::rawnodes::{
     SortBy, SortByDir, SortByNulls, ValUnion, FRAMEOPTION_DEFAULTS, FRAMEOPTION_END_OFFSET,
@@ -771,7 +774,8 @@ fn checkTargetlistEntrySQL92(
 // outer-level aggs are a loud lane upstream so any Aggref counts.
 fn contains_aggref(node: Node<'_>) -> bool {
     match node.node_tag() {
-        NodeTag::T_Aggref => true,
+        // C's walker matches GroupingFunc agglevelsup like an Aggref.
+        NodeTag::T_Aggref | NodeTag::T_GroupingFunc => true,
         NodeTag::T_Var | NodeTag::T_Const | NodeTag::T_Param => false,
         NodeTag::T_FuncExpr => node.as_func_expr().unwrap().args.iter().any(contains_aggref),
         NodeTag::T_OpExpr => node.as_op_expr().unwrap().args.iter().any(contains_aggref),
@@ -791,6 +795,7 @@ fn contains_aggref(node: Node<'_>) -> bool {
 fn locate_aggref(node: Node<'_>) -> ParseLoc {
     match node.node_tag() {
         NodeTag::T_Aggref => node.as_aggref().unwrap().location,
+        NodeTag::T_GroupingFunc => node.as_grouping_func().unwrap().location,
         NodeTag::T_FuncExpr => node
             .as_func_expr()
             .unwrap()
@@ -966,8 +971,96 @@ pub fn targetIsInSortList(
     Ok(false)
 }
 
-/// C `transformGroupClause`, simple-expression arm: GROUPING SETS/CUBE/
-/// ROLLUP (and the implicit-RowExpr flattening they ride on) are loud.
+/// The three shapes C `flatten_grouping_sets` returns through `Node *`:
+/// `(Node *) NIL`, one node, or a `List *`.
+enum Flattened<'mcx> {
+    Nil,
+    One(Node<'mcx>),
+    Many(NodeList<'mcx>),
+}
+
+fn flatten_grouping_sets<'mcx>(
+    mcx: Mcx<'mcx>,
+    expr: Node<'mcx>,
+    toplevel: bool,
+    has_grouping_sets: Option<&mut bool>,
+) -> PgResult<Flattened<'mcx>> {
+    match expr.node_tag() {
+        NodeTag::T_RowExpr => panic!(
+            "flatten_grouping_sets (parse_clause.c): implicit RowExpr arm unported — \
+             unit backend-parser-clause"
+        ),
+        NodeTag::T_GroupingSet => {
+            let gset = expr.as_grouping_set().unwrap();
+            if let Some(flag) = has_grouping_sets {
+                *flag = true;
+            }
+            // At top level, skip over all empty grouping sets; the caller
+            // supplies the canonical GROUP BY () if nothing is left.
+            if toplevel && gset.kind == GroupingSetKind::GROUPING_SET_EMPTY {
+                return Ok(Flattened::Nil);
+            }
+            let mut result_set = NodeList::nil();
+            for n1 in &gset.content {
+                let n2 = flatten_grouping_sets(mcx, n1, false, None)?;
+                let n1_is_sets = n1
+                    .as_grouping_set()
+                    .is_some_and(|g| g.kind == GroupingSetKind::GROUPING_SET_SETS);
+                if n1_is_sets {
+                    match n2 {
+                        Flattened::Nil => {}
+                        Flattened::One(node) => result_set.lappend(mcx, node)?,
+                        Flattened::Many(nodes) => result_set.concat(mcx, &nodes)?,
+                    }
+                } else {
+                    match n2 {
+                        Flattened::One(node) => result_set.lappend(mcx, node)?,
+                        // A `List *` cell only arises from the RowExpr arm,
+                        // loud above; Nil is never appended by the C walk.
+                        Flattened::Nil | Flattened::Many(_) => unreachable!(
+                            "flatten_grouping_sets: non-node cell in a grouping list"
+                        ),
+                    }
+                }
+            }
+            // At top level keep the node; a simply-nested (non-SETS) set also
+            // stays one node, while nested SETS concat into the outer list.
+            if toplevel || gset.kind != GroupingSetKind::GROUPING_SET_SETS {
+                Ok(Flattened::One(Node::mk_grouping_set(
+                    mcx,
+                    gset.kind,
+                    result_set,
+                    gset.location,
+                )?))
+            } else {
+                Ok(Flattened::Many(result_set))
+            }
+        }
+        _ => Ok(Flattened::One(expr)),
+    }
+}
+
+// The C T_List arm of flatten_grouping_sets: the grouping list itself.
+fn flatten_grouping_sets_list<'mcx>(
+    mcx: Mcx<'mcx>,
+    list: &NodeList<'mcx>,
+    toplevel: bool,
+    has_grouping_sets: Option<&mut bool>,
+) -> PgResult<NodeList<'mcx>> {
+    let mut result = NodeList::nil();
+    let mut flag = has_grouping_sets;
+    for l in list {
+        match flatten_grouping_sets(mcx, l, toplevel, flag.as_deref_mut())? {
+            Flattened::Nil => {}
+            Flattened::One(node) => result.lappend(mcx, node)?,
+            Flattened::Many(nodes) => result.concat(mcx, &nodes)?,
+        }
+    }
+    Ok(result)
+}
+
+/// C `transformGroupClause`: flat SortGroupClause list out, grouping-set tree
+/// through the `grouping_sets` out-param (SIMPLE content = Integer refs).
 pub fn transformGroupClause<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'_, 'mcx>,
@@ -978,40 +1071,87 @@ pub fn transformGroupClause<'mcx>(
     expr_kind: ParseExprKind,
     use_sql99: bool,
 ) -> PgResult<NodeList<'mcx>> {
-    *grouping_sets = NodeList::nil();
     let mut result = NodeList::nil();
+    let mut gsets = NodeList::nil();
+    let mut has_grouping_sets = false;
     let mut seen_local: mcx::PgVec<'_, Index> = mcx::PgVec::new_in(mcx);
-    for gexpr in grouplist {
-        match gexpr.node_tag() {
-            NodeTag::T_GroupingSet => panic!(
-                "transformGroupClause (parse_clause.c): GROUPING SETS/CUBE/ROLLUP \
-                 (transformGroupingSet) unported — unit backend-parser-clause"
-            ),
-            NodeTag::T_RowExpr => panic!(
-                "flatten_grouping_sets (parse_clause.c): implicit RowExpr arm unported — \
-                 unit backend-parser-clause"
-            ),
-            _ => {}
-        }
-        let r#ref = transformGroupClauseExpr(
-            &mut result,
-            &seen_local,
+
+    let mut flat_grouplist =
+        flatten_grouping_sets_list(mcx, grouplist, true, Some(&mut has_grouping_sets))?;
+
+    // Only redundant empty grouping sets were elided: restore the canonical
+    // form GROUP BY ().
+    if flat_grouplist.is_nil() && has_grouping_sets {
+        flat_grouplist = NodeList::make1(
             mcx,
-            pstate,
-            gexpr,
-            targetlist,
-            sort_clause,
-            expr_kind,
-            use_sql99,
+            Node::mk_grouping_set(
+                mcx,
+                GroupingSetKind::GROUPING_SET_EMPTY,
+                NodeList::nil(),
+                expr_location_list(grouplist),
+            )?,
         )?;
-        if r#ref > 0 {
-            seen_local.push(r#ref);
+    }
+
+    for gexpr in &flat_grouplist {
+        if let Some(gset) = gexpr.as_grouping_set() {
+            match gset.kind {
+                GroupingSetKind::GROUPING_SET_EMPTY => gsets.lappend(mcx, gexpr)?,
+                GroupingSetKind::GROUPING_SET_SIMPLE => {
+                    unreachable!("SIMPLE grouping set ahead of transformGroupingSet")
+                }
+                GroupingSetKind::GROUPING_SET_SETS
+                | GroupingSetKind::GROUPING_SET_CUBE
+                | GroupingSetKind::GROUPING_SET_ROLLUP => {
+                    let tg = transformGroupingSet(
+                        &mut result,
+                        mcx,
+                        pstate,
+                        gset,
+                        targetlist,
+                        sort_clause,
+                        expr_kind,
+                        use_sql99,
+                    )?;
+                    gsets.lappend(mcx, tg)?;
+                }
+            }
+        } else {
+            let r#ref = transformGroupClauseExpr(
+                &mut result,
+                &seen_local,
+                mcx,
+                pstate,
+                gexpr,
+                targetlist,
+                sort_clause,
+                expr_kind,
+                use_sql99,
+                true,
+            )?;
+            if r#ref > 0 {
+                seen_local.push(r#ref);
+                if has_grouping_sets {
+                    let content =
+                        NodeList::make1(mcx, Node::mk_integer(mcx, r#ref as i32)?)?;
+                    gsets.lappend(
+                        mcx,
+                        Node::mk_grouping_set(
+                            mcx,
+                            GroupingSetKind::GROUPING_SET_SIMPLE,
+                            content,
+                            expr_location(gexpr),
+                        )?,
+                    )?;
+                }
+            }
         }
     }
+
+    *grouping_sets = gsets;
     Ok(result)
 }
 
-// C transformGroupClauseExpr, toplevel arm (grouping sets are loud upstream).
 #[allow(clippy::too_many_arguments)]
 fn transformGroupClauseExpr<'mcx>(
     flatresult: &mut NodeList<'mcx>,
@@ -1023,6 +1163,7 @@ fn transformGroupClauseExpr<'mcx>(
     sort_clause: &NodeList<'mcx>,
     expr_kind: ParseExprKind,
     use_sql99: bool,
+    toplevel: bool,
 ) -> PgResult<Index> {
     let tle_node = if use_sql99 {
         findTargetlistEntrySQL99(mcx, pstate, gexpr, targetlist, expr_kind)?
@@ -1033,18 +1174,25 @@ fn transformGroupClauseExpr<'mcx>(
 
     let mut found = false;
     if tle.ressortgroupref > 0 {
-        // GROUP BY x, x: local duplicates drop out.
+        // GROUP BY x, x: local duplicates drop out.  (Duplicates in grouping
+        // sets can affect the number of returned rows, so the caller passes a
+        // per-clause seen_local.)
         if seen_local.contains(&tle.ressortgroupref) {
             return Ok(0);
         }
         found = targetIsInSortList(tle, InvalidOid, flatresult)?;
         if !found {
             // A matching ORDER BY item donates its operator info (C copies
-            // the SortGroupClause node).
+            // the SortGroupClause node); inside a grouping set the requested
+            // ordering is forced to NULLS LAST.
             for sc_node in sort_clause {
                 let sc = sc_node.as_sort_group_clause().expect("sortClause cell");
                 if sc.tleSortGroupRef == tle.ressortgroupref {
-                    flatresult.lappend(mcx, Node::mk(mcx, *sc)?)?;
+                    let mut grpc = *sc;
+                    if !toplevel {
+                        grpc.nulls_first = false;
+                    }
+                    flatresult.lappend(mcx, Node::mk(mcx, grpc)?)?;
                     found = true;
                     break;
                 }
@@ -1055,6 +1203,129 @@ fn transformGroupClauseExpr<'mcx>(
         addTargetToGroupList(mcx, pstate, tle_node, flatresult, targetlist, expr_location(gexpr))?;
     }
     Ok(tle_node.as_target_entry().unwrap().ressortgroupref)
+}
+
+// C transformGroupClauseList: one grouping-set sublist, local dup elimination;
+// returns the sublist's ressortgrouprefs as Integer nodes (SIMPLE content).
+#[allow(clippy::too_many_arguments)]
+fn transformGroupClauseList<'mcx>(
+    flatresult: &mut NodeList<'mcx>,
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    list: &NodeList<'mcx>,
+    targetlist: &mut NodeList<'mcx>,
+    sort_clause: &NodeList<'mcx>,
+    expr_kind: ParseExprKind,
+    use_sql99: bool,
+) -> PgResult<NodeList<'mcx>> {
+    let mut seen_local: mcx::PgVec<'_, Index> = mcx::PgVec::new_in(mcx);
+    let mut result = NodeList::nil();
+    for gexpr in list {
+        let r#ref = transformGroupClauseExpr(
+            flatresult,
+            &seen_local,
+            mcx,
+            pstate,
+            gexpr,
+            targetlist,
+            sort_clause,
+            expr_kind,
+            use_sql99,
+            false,
+        )?;
+        if r#ref > 0 {
+            seen_local.push(r#ref);
+            result.lappend(mcx, Node::mk_integer(mcx, r#ref as i32)?)?;
+        }
+    }
+    Ok(result)
+}
+
+// C transformGroupingSet: SETS-in-SETS already flattened; SIMPLE children now
+// carry ressortgroupref Integer lists rather than expressions.
+#[allow(clippy::too_many_arguments)]
+fn transformGroupingSet<'mcx>(
+    flatresult: &mut NodeList<'mcx>,
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    gset: &GroupingSet<'mcx>,
+    targetlist: &mut NodeList<'mcx>,
+    sort_clause: &NodeList<'mcx>,
+    expr_kind: ParseExprKind,
+    use_sql99: bool,
+) -> PgResult<Node<'mcx>> {
+    let mut content = NodeList::nil();
+    for n in &gset.content {
+        match n.node_tag() {
+            NodeTag::T_List => {
+                let sublist = n.as_list().unwrap();
+                let l = transformGroupClauseList(
+                    flatresult, mcx, pstate, sublist, targetlist, sort_clause, expr_kind,
+                    use_sql99,
+                )?;
+                content.lappend(
+                    mcx,
+                    Node::mk_grouping_set(
+                        mcx,
+                        GroupingSetKind::GROUPING_SET_SIMPLE,
+                        l,
+                        expr_location_list(sublist),
+                    )?,
+                )?;
+            }
+            NodeTag::T_GroupingSet => {
+                let gset2 = n.as_grouping_set().unwrap();
+                let tg = transformGroupingSet(
+                    flatresult, mcx, pstate, gset2, targetlist, sort_clause, expr_kind, use_sql99,
+                )?;
+                content.lappend(mcx, tg)?;
+            }
+            _ => {
+                let r#ref = transformGroupClauseExpr(
+                    flatresult,
+                    &[],
+                    mcx,
+                    pstate,
+                    n,
+                    targetlist,
+                    sort_clause,
+                    expr_kind,
+                    use_sql99,
+                    false,
+                )?;
+                content.lappend(
+                    mcx,
+                    Node::mk_grouping_set(
+                        mcx,
+                        GroupingSetKind::GROUPING_SET_SIMPLE,
+                        NodeList::make1(mcx, Node::mk_integer(mcx, r#ref as i32)?)?,
+                        expr_location(n),
+                    )?,
+                )?;
+            }
+        }
+    }
+
+    // Arbitrarily cap the size of CUBE, which has exponential growth.
+    if gset.kind == GroupingSetKind::GROUPING_SET_CUBE && content.len() > 12 {
+        return Err(cube_limit_error(pstate, gset.location));
+    }
+
+    Node::mk_grouping_set(mcx, gset.kind, content, gset.location)
+}
+
+#[cold]
+#[inline(never)]
+fn cube_limit_error(pstate: &ParseState<'_, '_>, location: ParseLoc) -> Box<PgError> {
+    let encoding = mbutils::GetDatabaseEncoding();
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_TOO_MANY_COLUMNS)
+            .errmsg("CUBE is limited to 12 elements")
+            .errposition(parser_errposition(pstate, location, encoding))
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_clause.c", 0, "transformGroupingSet")),
+    )
 }
 
 // C addTargetToGroupList: default grouping semantics via

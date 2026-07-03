@@ -14,7 +14,8 @@ use types_nodes::rawnodes::{A_Expr, A_Expr_Kind};
 use types_nodes::{Node, NodeTag};
 
 pub use node_funcs::{
-    expr_collation, expr_is_null_constant, expr_location, expr_type, expr_typmod,
+    expr_collation, expr_is_null_constant, expr_location, expr_location_list, expr_type,
+    expr_typmod,
 };
 
 std::thread_local! {
@@ -91,6 +92,15 @@ pub fn transformExprRecurse<'mcx>(
         NodeTag::T_FuncCall => transformFuncCall(mcx, pstate, expr),
         NodeTag::T_SubLink => transformSubLink(mcx, pstate, expr),
         NodeTag::T_NullTest => transformNullTest(mcx, pstate, expr),
+        NodeTag::T_GroupingFunc => parse_agg::transformGroupingFunc(
+            mcx,
+            pstate,
+            expr.as_grouping_func().unwrap(),
+            |mcx, pstate, arg| {
+                let kind = pstate.p_expr_kind;
+                transformExpr(mcx, pstate, arg, kind)
+            },
+        ),
         NodeTag::T_CaseTestExpr | NodeTag::T_Var => Ok(expr),
         other => panic!(
             "transformExprRecurse (parse_expr.c): arm for {other:?} unported — \

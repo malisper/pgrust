@@ -941,3 +941,252 @@ fn from_generate_series_alias_names_the_column() {
     assert_eq!(eref.aliasname, Some("g"));
     assert_eq!(eref.colnames.nth(0).as_string().unwrap().sval, "g");
 }
+
+use types_nodes::parsenodes::GroupingSetKind;
+
+fn name_ref<'mcx>(mcx: Mcx<'mcx>, name: &'static str, loc: i32) -> Node<'mcx> {
+    let f = NodeList::make1(mcx, Node::mk(mcx, PgStr { sval: name }).unwrap()).unwrap();
+    Node::mk(mcx, ColumnRef { fields: f, location: loc }).unwrap()
+}
+
+fn raw_gset<'mcx>(
+    mcx: Mcx<'mcx>,
+    kind: GroupingSetKind,
+    content: &[Node<'mcx>],
+    loc: i32,
+) -> Node<'mcx> {
+    let mut list = NodeList::nil();
+    for &n in content {
+        list.lappend(mcx, n).unwrap();
+    }
+    Node::mk_grouping_set(mcx, kind, list, loc).unwrap()
+}
+
+fn simple_refs(n: Node<'_>) -> Vec<i32> {
+    let gs = n.as_grouping_set().unwrap();
+    assert_eq!(gs.kind, GroupingSetKind::GROUPING_SET_SIMPLE);
+    gs.content.iter().map(|c| c.as_integer().unwrap().ival).collect()
+}
+
+fn group_clause_fixture<'mcx>(
+    mcx: Mcx<'mcx>,
+) -> (parser_small1::ParseState<'mcx, 'mcx>, NodeList<'mcx>) {
+    install_fixture();
+    let pstate = make_parsestate(mcx, None);
+    let tlist = NodeList::make2(
+        mcx,
+        int4_tle(mcx, 1, 1, Some("foo")),
+        int4_tle(mcx, 2, 2, Some("bar")),
+    )
+    .unwrap();
+    (pstate, tlist)
+}
+
+#[test]
+fn group_by_rollup_builds_tree_and_flat_clause() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let (mut pstate, mut tlist) = group_clause_fixture(mcx);
+
+    let rollup = raw_gset(
+        mcx,
+        GroupingSetKind::GROUPING_SET_ROLLUP,
+        &[name_ref(mcx, "foo", 20), name_ref(mcx, "bar", 25)],
+        13,
+    );
+    let grouplist = NodeList::make1(mcx, rollup).unwrap();
+
+    let mut gsets = NodeList::nil();
+    let group = transformGroupClause(
+        mcx,
+        &mut pstate,
+        &grouplist,
+        &mut gsets,
+        &mut tlist,
+        &NodeList::nil(),
+        ParseExprKind::EXPR_KIND_GROUP_BY,
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(group.len(), 2);
+    assert_eq!(gsets.len(), 1);
+    let gs = gsets.nth(0).as_grouping_set().unwrap();
+    assert_eq!((gs.kind, gs.location), (GroupingSetKind::GROUPING_SET_ROLLUP, 13));
+    assert_eq!(gs.content.len(), 2);
+    assert_eq!(simple_refs(gs.content.nth(0)), [1]);
+    assert_eq!(simple_refs(gs.content.nth(1)), [2]);
+}
+
+#[test]
+fn group_by_expr_beside_cube_wraps_simple_sets() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let (mut pstate, mut tlist) = group_clause_fixture(mcx);
+
+    let cube = raw_gset(
+        mcx,
+        GroupingSetKind::GROUPING_SET_CUBE,
+        &[name_ref(mcx, "bar", 30)],
+        24,
+    );
+    let grouplist = NodeList::make2(mcx, name_ref(mcx, "foo", 20), cube).unwrap();
+
+    let mut gsets = NodeList::nil();
+    let group = transformGroupClause(
+        mcx,
+        &mut pstate,
+        &grouplist,
+        &mut gsets,
+        &mut tlist,
+        &NodeList::nil(),
+        ParseExprKind::EXPR_KIND_GROUP_BY,
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(group.len(), 2);
+    assert_eq!(gsets.len(), 2);
+    // The plain expression is wrapped as a SIMPLE set when sets are present.
+    assert_eq!(simple_refs(gsets.nth(0)), [1]);
+    let cube = gsets.nth(1).as_grouping_set().unwrap();
+    assert_eq!(cube.kind, GroupingSetKind::GROUPING_SET_CUBE);
+    assert_eq!(simple_refs(cube.content.nth(0)), [2]);
+}
+
+#[test]
+fn group_by_empty_grouping_set_restores_canonical_form() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let (mut pstate, mut tlist) = group_clause_fixture(mcx);
+
+    let empty = raw_gset(mcx, GroupingSetKind::GROUPING_SET_EMPTY, &[], 9);
+    let grouplist = NodeList::make2(
+        mcx,
+        empty,
+        raw_gset(mcx, GroupingSetKind::GROUPING_SET_EMPTY, &[], 13),
+    )
+    .unwrap();
+
+    let mut gsets = NodeList::nil();
+    let group = transformGroupClause(
+        mcx,
+        &mut pstate,
+        &grouplist,
+        &mut gsets,
+        &mut tlist,
+        &NodeList::nil(),
+        ParseExprKind::EXPR_KIND_GROUP_BY,
+        false,
+    )
+    .unwrap();
+
+    assert!(group.is_nil());
+    assert_eq!(gsets.len(), 1, "empty sets collapse to one canonical GROUP BY ()");
+    let gs = gsets.nth(0).as_grouping_set().unwrap();
+    assert_eq!((gs.kind, gs.location), (GroupingSetKind::GROUPING_SET_EMPTY, 9));
+    assert!(gs.content.is_nil());
+}
+
+#[test]
+fn nested_grouping_sets_flatten() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let (mut pstate, mut tlist) = group_clause_fixture(mcx);
+
+    let inner = raw_gset(
+        mcx,
+        GroupingSetKind::GROUPING_SET_SETS,
+        &[name_ref(mcx, "bar", 40)],
+        35,
+    );
+    let outer = raw_gset(
+        mcx,
+        GroupingSetKind::GROUPING_SET_SETS,
+        &[name_ref(mcx, "foo", 25), inner],
+        13,
+    );
+    let grouplist = NodeList::make1(mcx, outer).unwrap();
+
+    let mut gsets = NodeList::nil();
+    let group = transformGroupClause(
+        mcx,
+        &mut pstate,
+        &grouplist,
+        &mut gsets,
+        &mut tlist,
+        &NodeList::nil(),
+        ParseExprKind::EXPR_KIND_GROUP_BY,
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(group.len(), 2);
+    assert_eq!(gsets.len(), 1);
+    let gs = gsets.nth(0).as_grouping_set().unwrap();
+    assert_eq!(gs.kind, GroupingSetKind::GROUPING_SET_SETS);
+    assert_eq!(gs.content.len(), 2, "SETS-in-SETS flattens into the outer list");
+    assert_eq!(simple_refs(gs.content.nth(0)), [1]);
+    assert_eq!(simple_refs(gs.content.nth(1)), [2]);
+}
+
+#[test]
+fn cube_with_13_elements_is_54011() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let (mut pstate, mut tlist) = group_clause_fixture(mcx);
+
+    let elems: Vec<_> = (0..13).map(|i| name_ref(mcx, "foo", 20 + i)).collect();
+    let cube = raw_gset(mcx, GroupingSetKind::GROUPING_SET_CUBE, &elems, 13);
+    let grouplist = NodeList::make1(mcx, cube).unwrap();
+
+    let mut gsets = NodeList::nil();
+    let err = transformGroupClause(
+        mcx,
+        &mut pstate,
+        &grouplist,
+        &mut gsets,
+        &mut tlist,
+        &NodeList::nil(),
+        ParseExprKind::EXPR_KIND_GROUP_BY,
+        false,
+    )
+    .map(|_| ())
+    .unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_TOO_MANY_COLUMNS);
+    assert_eq!(err.message(), "CUBE is limited to 12 elements");
+}
+
+#[test]
+fn grouping_set_sublist_dedups_locally() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let (mut pstate, mut tlist) = group_clause_fixture(mcx);
+
+    // A parenthesized sublist reaches transformGroupingSet as a T_List cell
+    // (the implicit-RowExpr flattening product).
+    let sublist = Node::mk_list(
+        mcx,
+        NodeList::make2(mcx, name_ref(mcx, "foo", 30), name_ref(mcx, "foo", 35)).unwrap(),
+    )
+    .unwrap();
+    let sets = raw_gset(mcx, GroupingSetKind::GROUPING_SET_SETS, &[sublist], 13);
+    let grouplist = NodeList::make1(mcx, sets).unwrap();
+
+    let mut gsets = NodeList::nil();
+    let group = transformGroupClause(
+        mcx,
+        &mut pstate,
+        &grouplist,
+        &mut gsets,
+        &mut tlist,
+        &NodeList::nil(),
+        ParseExprKind::EXPR_KIND_GROUP_BY,
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(group.len(), 1);
+    let gs = gsets.nth(0).as_grouping_set().unwrap();
+    assert_eq!(simple_refs(gs.content.nth(0)), [1], "sublist duplicates drop out");
+}

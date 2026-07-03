@@ -514,7 +514,7 @@ fn transformSelectStmt<'mcx>(
         || !qry.groupingSets.is_nil()
         || qry.havingQual.is_some()
     {
-        parse_agg::parseCheckAggregates(pstate, &qry)?;
+        parse_agg::parseCheckAggregates(mcx, pstate, &mut qry)?;
     }
 
     Ok(qry)
@@ -931,7 +931,7 @@ fn transformDeleteStmt<'mcx>(
     assign_query_collations(mcx, pstate, &qry)?;
 
     if pstate.p_hasAggs {
-        parse_agg::parseCheckAggregates(pstate, &qry)?;
+        parse_agg::parseCheckAggregates(mcx, pstate, &mut qry)?;
     }
     Ok(qry)
 }
