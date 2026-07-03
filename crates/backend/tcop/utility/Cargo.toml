@@ -11,6 +11,7 @@ path = "src/lib.rs"
 aclchk = { path = "../../catalog/aclchk" }
 parse_utilcmd = { path = "../../parser/parse_utilcmd" }
 tablecmds = { path = "../../commands/tablecmds" }
+typecmds = { path = "../../commands/typecmds" }
 schemacmds = { path = "../../commands/schemacmds" }
 dbcommands = { path = "../../commands/dbcommands" }
 functioncmds = { path = "../../commands/functioncmds" }
@@ -18,7 +19,6 @@ statscmds = { path = "../../commands/statscmds" }
 commands_comment = { path = "../../commands/comment" }
 elog_seams = { path = "../../utils/error/elog_seams" }
 sequence = { path = "../../commands/sequence" }
-typecmds = { path = "../../commands/typecmds" }
 parser_small1 = { path = "../../parser/parser_small1" }
 types_rel = { path = "../../../_support/types/rel" }
 commands_analyze = { path = "../../commands/analyze" }
