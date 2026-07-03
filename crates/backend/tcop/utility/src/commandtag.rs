@@ -126,7 +126,10 @@ pub fn CreateCommandTag(parsetree: Node<'_>) -> CommandTag {
                 .expect("RenameStmt");
             match stmt.renameType {
                 types_nodes::parsenodes::ObjectType::OBJECT_TABLE
-                | types_nodes::parsenodes::ObjectType::OBJECT_COLUMN => CMDTAG_ALTER_TABLE,
+                | types_nodes::parsenodes::ObjectType::OBJECT_COLUMN
+                | types_nodes::parsenodes::ObjectType::OBJECT_TABCONSTRAINT => {
+                    CMDTAG_ALTER_TABLE
+                }
                 _ => payload_gap("CreateCommandTag", "RenameStmt non-table"),
             }
         }
