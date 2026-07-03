@@ -74,6 +74,59 @@ fn transformFromClauseItem<'mcx>(
     }
 }
 
+/// C `setTargetTable` (parse_clause.c); returns the target rangetable index.
+pub fn setTargetTable<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    relation: &types_nodes::RangeVar<'mcx>,
+    inh: bool,
+    alsoSource: bool,
+    requiredPerms: types_nodes::parsenodes::AclMode,
+) -> PgResult<i32> {
+    if relation.schemaname.is_none() && pstate.p_queryEnv.is_some() {
+        panic!(
+            "setTargetTable (parse_clause.c): scanNameSpaceForENR unported — \
+             unit backend-parser-clause"
+        );
+    }
+    if alsoSource {
+        panic!(
+            "setTargetTable (parse_clause.c): UPDATE/DELETE alsoSource lane \
+             (addNSItemToQuery of the target) unported — unit backend-parser-clause"
+        );
+    }
+    if let Some(old) = pstate.p_target_relation.take() {
+        table::table_close(old, types_rel::NoLock)?;
+    }
+
+    let rel =
+        parse_relation::parserOpenTable(mcx, pstate, relation, types_rel::RowExclusiveLock)?;
+    let nsitem = parse_relation::addRangeTableEntryForRelation(
+        mcx,
+        pstate,
+        &rel,
+        types_rel::RowExclusiveLock,
+        relation.alias,
+        inh,
+        false,
+    )?;
+    pstate.p_target_relation = Some(rel);
+
+    let perminfo = nsitem.p_perminfo.expect("relation nsitem has perminfo");
+    // SAFETY: perminfo nodes are read only through transient as_* lookups; no
+    // derived reference is live across this write.
+    unsafe {
+        perminfo.with_mut::<types_nodes::RTEPermissionInfo, _>(|p| {
+            p.requiredPerms = requiredPerms
+        })
+    }
+    .expect("p_perminfo is RTEPermissionInfo");
+
+    let rtindex = nsitem.p_rtindex;
+    pstate.p_target_nsitem = Some(nsitem);
+    Ok(rtindex)
+}
+
 pub fn transformWhereClause<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'_, 'mcx>,

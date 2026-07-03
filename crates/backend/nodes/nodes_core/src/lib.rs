@@ -13,7 +13,7 @@ use mcx::Mcx;
 use types_core::Oid;
 use types_error::PgResult;
 use types_nodes::parsenodes::{Query, RTEKind, RangeTblEntry};
-use types_nodes::primnodes::{Alias, FromExpr, FuncExpr, OpExpr, TargetEntry};
+use types_nodes::primnodes::{Aggref, Alias, FromExpr, FuncExpr, OpExpr, TargetEntry};
 use types_nodes::rawnodes::SelectStmt;
 use types_nodes::{Node, NodeList, NodeTag};
 
@@ -108,6 +108,14 @@ pub fn expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
         | NodeTag::T_SortGroupClause
         | NodeTag::T_CTESearchClause
         | NodeTag::T_MergeSupportFunc => Ok(false),
+        NodeTag::T_Aggref => {
+            let a = node.as_variant::<Aggref>().unwrap();
+            Ok(walk_list(&a.aggdirectargs, w)?
+                || walk_list(&a.args, w)?
+                || walk_list(&a.aggorder, w)?
+                || walk_list(&a.aggdistinct, w)?
+                || walk_opt(a.aggfilter, w)?)
+        }
         NodeTag::T_FuncExpr => {
             let f = node.as_variant::<FuncExpr>().unwrap();
             walk_list(&f.args, w)
@@ -332,6 +340,7 @@ where
     F: FnMut(Oid) -> PgResult<bool>,
 {
     match node.node_tag() {
+        NodeTag::T_Aggref => checker(node.as_aggref().unwrap().aggfnoid),
         NodeTag::T_FuncExpr => checker(node.as_func_expr().unwrap().funcid),
         NodeTag::T_OpExpr => {
             let o = node.as_op_expr().unwrap();
@@ -345,8 +354,7 @@ where
             };
             checker(opfuncid)
         }
-        t @ (NodeTag::T_Aggref
-        | NodeTag::T_WindowFunc
+        t @ (NodeTag::T_WindowFunc
         | NodeTag::T_DistinctExpr
         | NodeTag::T_NullIfExpr
         | NodeTag::T_ScalarArrayOpExpr
@@ -377,6 +385,54 @@ where
         | NodeTag::T_NextValueExpr
         | NodeTag::T_RangeTblRef
         | NodeTag::T_SortGroupClause => Ok(None),
+        NodeTag::T_Aggref => {
+            let a = node.as_variant::<Aggref>().unwrap();
+            let args = mutate_list(mcx, &a.args, m)?;
+            let directargs = mutate_list(mcx, &a.aggdirectargs, m)?;
+            let aggorder = mutate_list(mcx, &a.aggorder, m)?;
+            let aggdistinct = mutate_list(mcx, &a.aggdistinct, m)?;
+            let aggfilter = match a.aggfilter {
+                Some(f) => m(f)?.map(Some),
+                None => None,
+            };
+            if args.is_none()
+                && directargs.is_none()
+                && aggorder.is_none()
+                && aggdistinct.is_none()
+                && aggfilter.is_none()
+            {
+                return Ok(None);
+            }
+            let unchanged = |new: Option<NodeList<'mcx>>, old: &NodeList<'mcx>| match new {
+                Some(l) => Ok(l),
+                None => old.clone_in(mcx),
+            };
+            Ok(Some(Node::mk(
+                mcx,
+                Aggref {
+                    aggfnoid: a.aggfnoid,
+                    aggtype: a.aggtype,
+                    aggcollid: a.aggcollid,
+                    inputcollid: a.inputcollid,
+                    aggtranstype: a.aggtranstype,
+                    aggargtypes: a.aggargtypes.clone_in(mcx)?,
+                    aggdirectargs: unchanged(directargs, &a.aggdirectargs)?,
+                    args: unchanged(args, &a.args)?,
+                    aggorder: unchanged(aggorder, &a.aggorder)?,
+                    aggdistinct: unchanged(aggdistinct, &a.aggdistinct)?,
+                    aggfilter: aggfilter.unwrap_or(a.aggfilter),
+                    aggstar: a.aggstar,
+                    aggvariadic: a.aggvariadic,
+                    aggkind: a.aggkind,
+                    aggpresorted: a.aggpresorted,
+                    agglevelsup: a.agglevelsup,
+                    aggsplit: a.aggsplit,
+                    aggno: a.aggno,
+                    aggtransno: a.aggtransno,
+                    location: a.location,
+                },
+            )?))
+        }
         NodeTag::T_FuncExpr => {
             let f = node.as_variant::<FuncExpr>().unwrap();
             match mutate_list(mcx, &f.args, m)? {
