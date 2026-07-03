@@ -1475,6 +1475,7 @@ dependencies = [
  "arrayfuncs",
  "clauses_seams",
  "datum",
+ "fmgr_core",
  "lsyscache",
  "mcx",
  "nodes_core",
