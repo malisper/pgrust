@@ -25,8 +25,9 @@ pub use execute::{
 };
 pub use cursor::{SPI_cursor_close, SPI_cursor_fetch, SPI_cursor_open, SpiCursor};
 pub use plan::{
-    SPI_freeplan, SPI_getargcount, SPI_getargtypeid, SPI_keepplan, SPI_plan_is_valid, SPI_prepare,
-    SPI_prepare_cursor, SPI_prepare_plpgsql, SpiPlanPtr,
+    SPI_freeplan, SPI_getargcount, SPI_getargtypeid, SPI_keepplan, SPI_plan_command_tags,
+    SPI_plan_is_valid, SPI_plan_single_source, SPI_prepare, SPI_prepare_cursor,
+    SPI_prepare_plpgsql, SpiPlanPtr,
 };
 pub use tuptable::{tuptable_with, SPI_freetuptable, TuptabData, TuptabHandle};
 

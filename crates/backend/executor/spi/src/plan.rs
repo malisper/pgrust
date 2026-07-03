@@ -280,6 +280,10 @@ pub fn SPI_prepare_plpgsql(
 
 /// SPI_plan_get_cached_plan's single-source precondition (SPI_is_cursor_plan
 /// shape): the one plansource of a single-statement plan.
+pub fn SPI_plan_single_source(ptr: SpiPlanPtr) -> Option<(plancache::CachedPlanSourceHandle, i32)> {
+    single_source(ptr)
+}
+
 pub(crate) fn single_source(ptr: SpiPlanPtr) -> Option<(plancache::CachedPlanSourceHandle, i32)> {
     with_plan(ptr, |p| {
         if p.sources.len() == 1 {
@@ -358,6 +362,14 @@ pub(crate) fn free_connection_plans(plans: &[SpiPlanPtr]) {
             drop_state_sources(&mut state);
         }
     }
+}
+
+/// Command tags of the plan's sources (plpgsql mod_stmt detection).
+pub fn SPI_plan_command_tags(ptr: SpiPlanPtr) -> Vec<types_core::CommandTag> {
+    with_plan(ptr, |p| {
+        p.sources.iter().map(|&(s, _)| plancache::CachedPlanCommandTag(s)).collect()
+    })
+    .unwrap_or_default()
 }
 
 pub fn SPI_getargcount(ptr: SpiPlanPtr) -> i32 {
