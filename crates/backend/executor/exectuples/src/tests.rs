@@ -521,3 +521,53 @@ fn copy_slot_buffer_to_buffer_shares_pin() {
     exec_clear_tuple(&mut dst, mcx);
     exec_clear_tuple(&mut src, mcx);
 }
+
+#[test]
+fn deform_resumes_past_cstring_attrs() {
+    let ctx = MemoryContext::new("test");
+    let mcx = ctx.mcx();
+    let desc = make_desc(
+        mcx,
+        &[
+            col(1, 4, true, TYPALIGN_INT, TYPSTORAGE_PLAIN),
+            col(2, -2, false, ::types_tuple::TYPALIGN_CHAR, TYPSTORAGE_PLAIN),
+            col(3, -1, false, TYPALIGN_INT, TYPSTORAGE_EXTENDED),
+            col(4, -2, false, ::types_tuple::TYPALIGN_CHAR, TYPSTORAGE_PLAIN),
+            col(5, 8, true, TYPALIGN_DOUBLE, TYPSTORAGE_PLAIN),
+        ],
+    );
+    let cs1 = b"alpha\0";
+    let cs2 = b"z\0";
+    let txt = text_varlena("varlena");
+    for null_mid in [false, true] {
+        let values = [
+            Datum::from_i32(41),
+            Datum::from_usize(cs1.as_ptr() as usize),
+            text_datum(&txt),
+            Datum::from_usize(cs2.as_ptr() as usize),
+            Datum::from_i64(-9),
+        ];
+        let isnull = [false, false, null_mid, false, false];
+        let tuple = heap_form_tuple(mcx, &desc, &values, &isnull).unwrap();
+        let mut slot = make_tuple_table_slot(mcx, TupleSlotKind::HeapTuple, Some(desc.clone()));
+        exec_store_heap_tuple_owned(&mut slot, mcx, tuple);
+        slot_getallattrs(&mut slot);
+        let base = slot.base();
+        assert_eq!(base.tts_nvalid, 5);
+        assert_eq!(base.tts_values[0].as_i32(), 41);
+        let got1 = unsafe {
+            core::ffi::CStr::from_ptr(base.tts_values[1].as_usize() as *const core::ffi::c_char)
+        };
+        assert_eq!(got1.to_bytes(), b"alpha");
+        assert_eq!(base.tts_isnull[2], null_mid);
+        if !null_mid {
+            assert_eq!(datum_text_bytes(base.tts_values[2]), b"varlena");
+        }
+        let got3 = unsafe {
+            core::ffi::CStr::from_ptr(base.tts_values[3].as_usize() as *const core::ffi::c_char)
+        };
+        assert_eq!(got3.to_bytes(), b"z");
+        assert_eq!(base.tts_values[4].as_i64(), -9);
+        exec_clear_tuple(&mut slot, mcx);
+    }
+}

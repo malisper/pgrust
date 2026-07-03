@@ -168,6 +168,41 @@ fn lossify_under_memory_pressure() {
 }
 
 #[test]
+fn lossify_grow_during_walk() {
+    let ctx = MemoryContext::new("t");
+    // Every page in its own chunk (stride > PAGES_PER_CHUNK, bitno != 0):
+    // each lossified page deletes its exact entry and inserts a fresh chunk
+    // entry, so the pagetable keeps inserting (and growing) while the raw
+    // bucket walk is mid-flight, across many sustained lossify rounds.
+    let mut tbm = TIDBitmap::new(ctx.mcx(), 1);
+    assert_eq!(tbm_calculate_entries(1), 16);
+    let stride = (PAGES_PER_CHUNK + 1) as BlockNumber;
+    let mut expected = alloc::vec::Vec::new();
+    for i in 0..1200u32 {
+        let blk = i * stride + 1;
+        tbm.add_tuples(&[tid(blk, 2)], false).unwrap();
+        expected.push(blk);
+    }
+    let pages = drain(&mut tbm);
+    let mut seen: alloc::vec::Vec<BlockNumber> = pages.iter().map(|p| p.0).collect();
+    let dedup_len = {
+        let mut s = seen.clone();
+        s.dedup();
+        s.len()
+    };
+    assert_eq!(dedup_len, seen.len(), "no duplicate pages emitted");
+    assert!(seen.windows(2).all(|w| w[0] < w[1]), "iteration sorted");
+    seen.sort_unstable();
+    assert_eq!(seen, expected, "every added page emitted exactly once");
+    assert!(pages.iter().any(|p| p.1), "pressure must have lossified pages");
+    for (blockno, lossy, offs) in pages {
+        if !lossy {
+            assert_eq!(offs, alloc::vec![2], "block {blockno}");
+        }
+    }
+}
+
+#[test]
 fn chunk_header_page_roundtrip() {
     let ctx = MemoryContext::new("t");
     let mut tbm = TIDBitmap::new(ctx.mcx(), 1);
