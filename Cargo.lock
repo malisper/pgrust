@@ -9874,6 +9874,8 @@ dependencies = [
 name = "ts_locale"
 version = "0.1.0"
 dependencies = [
+ "mcx",
+ "types_error",
  "types_fmgr",
 ]
 
