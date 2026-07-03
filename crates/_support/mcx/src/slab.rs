@@ -324,7 +324,7 @@ mod tests {
 
     fn acct() -> Acct {
         Acct {
-            name: "slab-test",
+            name: Cell::new("slab-test"),
             ident: RefCell::new(None),
             self_used: Cell::new(0),
             self_peak: Cell::new(0),

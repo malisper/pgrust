@@ -262,7 +262,7 @@ mod tests {
 
     fn acct() -> Acct {
         Acct {
-            name: "bump-test",
+            name: Cell::new("bump-test"),
             ident: RefCell::new(None),
             self_used: Cell::new(0),
             self_peak: Cell::new(0),
