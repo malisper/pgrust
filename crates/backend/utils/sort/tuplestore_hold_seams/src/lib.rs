@@ -21,3 +21,8 @@ seam_core::seam!(
         slot: &'a mut types_slot::SlotData<'mcx>,
     ) -> types_error::PgResult<bool>
 );
+
+seam_core::seam!(
+    // tuplestore_rescan(state) (tuplestore.c) — active read pointer to start.
+    pub fn tuplestore_rescan(store: types_portal::TuplestoreHandle)
+);
