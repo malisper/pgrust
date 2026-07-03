@@ -92,18 +92,19 @@ pub(crate) fn add_relation_new_constraints<'mcx>(
                 cdef.contype
             );
         }
-        let raw_expr = match cdef.raw_expr {
+        let relname = core::str::from_utf8(rel.rd_rel.relname.name_str()).expect("relname");
+        let expr = match cdef.raw_expr {
             Some(e) => {
                 debug_assert!(cdef.cooked_expr.is_none());
-                e
+                cook_constraint(mcx, &mut pstate, e, relname)?
             }
-            None => panic!(
-                "AddRelationNewConstraints (heap.c): cooked_expr (inheritance/ALTER \
-                 lane) unported"
-            ),
+            None => {
+                let cooked = cdef
+                    .cooked_expr
+                    .expect("Constraint without raw_expr or cooked_expr");
+                readfuncs::stringToNode(mcx, cooked)?
+            }
         };
-        let relname = core::str::from_utf8(rel.rd_rel.relname.name_str()).expect("relname");
-        let expr = cook_constraint(mcx, &mut pstate, raw_expr, relname)?;
 
         let ccname = match cdef.conname {
             Some(name) => {
@@ -191,6 +192,7 @@ pub(crate) fn add_relation_not_null_constraints<'mcx>(
 ) -> PgResult<()> {
     let relname = core::str::from_utf8(rel.rd_rel.relname.name_str()).expect("relname");
     let mut nnnames: PgVec<'mcx, &str> = PgVec::new_in(mcx);
+    let mut seen_attnums: PgVec<'mcx, AttrNumber> = PgVec::new_in(mcx);
     for cnode in nnconstraints.iter() {
         let cdef = cnode.as_variant::<Constraint>().expect("Constraint");
         debug_assert!(cdef.contype == ConstrType::CONSTR_NOTNULL);
@@ -206,20 +208,39 @@ pub(crate) fn add_relation_not_null_constraints<'mcx>(
             .unwrap_or_else(|| {
                 panic!("AddRelationNotNullConstraints (heap.c): column {colname:?} not found")
             });
-        if cdef.conname.is_some() {
+        if seen_attnums.iter().any(|&a| a == attnum) {
             panic!(
-                "AddRelationNotNullConstraints (heap.c): named not-null constraints \
-                 (ConstraintNameIsUsed) unported"
+                "AddRelationNotNullConstraints (heap.c): duplicate not-null merge lane \
+                 unported (column {colname:?})"
             );
         }
-        let name = pg_constraint::ChooseConstraintName(
-            mcx,
-            relname,
-            Some(colname),
-            "not_null",
-            rel.rd_rel.relnamespace,
-            &nnnames,
-        )?;
+        seen_attnums.push(attnum);
+        let name = match cdef.conname {
+            Some(given) => {
+                if pg_constraint::ConstraintNameIsUsed(mcx, rel.rd_id, given)?
+                    || nnnames.iter().any(|&n| n == given)
+                {
+                    return Err(Box::new(
+                        PgError::new(
+                            types_error::ERROR,
+                            format!(
+                                "constraint \"{given}\" for relation \"{relname}\" already exists"
+                            ),
+                        )
+                        .with_sqlstate(ERRCODE_DUPLICATE_OBJECT),
+                    ));
+                }
+                mcx::PgString::from_str_in(given, mcx)?
+            }
+            None => pg_constraint::ChooseConstraintName(
+                mcx,
+                relname,
+                Some(colname),
+                "not_null",
+                rel.rd_rel.relnamespace,
+                &nnnames,
+            )?,
+        };
         nnnames.push(str_in(mcx, name.as_str())?);
         let conkey = [attnum];
         let mut entry = pg_constraint::ConstraintEntry::base(

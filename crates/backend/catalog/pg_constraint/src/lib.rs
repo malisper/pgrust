@@ -616,3 +616,159 @@ fn make_object_name<'mcx>(
     );
     Ok(s)
 }
+
+fn conrelid_scan_keys(relid: Oid) -> [ScanKeyData; 1] {
+    [eq_key(Anum_pg_constraint_conrelid, F_OIDEQ, Datum::from_oid(relid))]
+}
+
+fn getattr<'a>(
+    rel: &types_rel::Relation<'_>,
+    tup: &types_tuple::HeapTupleData<'a>,
+    attno: AttrNumber,
+) -> (Datum, bool) {
+    let mut isnull = false;
+    // SAFETY: pg_constraint column under pg_constraint's own descriptor.
+    let d = unsafe { types_tuple::heap_getattr(tup, attno as i32, rel.descr(), &mut isnull) };
+    (d, isnull)
+}
+
+fn name_str<'mcx>(mcx: Mcx<'mcx>, d: Datum) -> PgResult<&'mcx str> {
+    let p = d.as_usize() as *const u8;
+    // SAFETY: NOT NULL name column; 64-byte NameData in the live tuple.
+    let bytes = unsafe { core::slice::from_raw_parts(p, NAMEDATALEN as usize) };
+    let len = bytes.iter().position(|&b| b == 0).unwrap_or(NAMEDATALEN as usize);
+    let mut v: PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, len)?;
+    mcx::vec_append_bytes(&mut v, &bytes[..len])?;
+    Ok(core::str::from_utf8(v.leak()).expect("conname UTF-8"))
+}
+
+// extractNotNullColumn (pg_constraint.c): conkey[0] of a not-null row.
+fn extract_not_null_column<'mcx>(mcx: Mcx<'mcx>, conkey: Datum) -> PgResult<AttrNumber> {
+    let p = conkey.as_usize() as *const u8;
+    // SAFETY: not-null int2[] column: live varlena image through its extent.
+    let image = unsafe { core::slice::from_raw_parts(p, types_tuple::varatt::varsize_any(p)) };
+    let payload = varlena::open_image(mcx, image)?;
+    let body = payload.as_bytes();
+    let total = body.len() + 4;
+    let mut full: PgVec<'_, u8> = mcx::vec_with_capacity_in(mcx, total)?;
+    mcx::vec_append_bytes(&mut full, &(((total as u32) << 2).to_ne_bytes()))?;
+    mcx::vec_append_bytes(&mut full, body)?;
+    let elems = datum::array_build::deconstruct_array_image(mcx, &full, 2, true, b's')?;
+    assert!(elems.len() == 1, "not-null constraint with {} conkey entries", elems.len());
+    Ok(elems[0].as_i16())
+}
+
+// RelationGetNotNullConstraints, cooked=false arm (raw Constraint nodes).
+pub fn RelationGetNotNullConstraints<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &types_rel::Relation<'mcx>,
+    include_noinh: bool,
+) -> PgResult<types_nodes::NodeList<'mcx>> {
+    use types_nodes::rawnodes::{Constraint, ConstrType};
+    let relid = rel.rd_id;
+    let con_rel = table::table_open(mcx, CONSTRAINT_RELATION_ID, AccessShareLock)?;
+    let keys = conrelid_scan_keys(relid);
+    let mut scan = genam::systable_beginscan(
+        mcx,
+        &con_rel,
+        types_core::catalog::CONSTRAINT_RELID_TYPID_NAME_INDEX_ID,
+        true,
+        None,
+        &keys,
+    )?;
+    let mut notnulls = types_nodes::NodeList::nil();
+    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+        let contype = getattr(&con_rel, tup, Anum_pg_constraint_contype).0.as_i8() as u8;
+        if contype != CONSTRAINT_NOTNULL {
+            continue;
+        }
+        let noinherit = getattr(&con_rel, tup, Anum_pg_constraint_connoinherit).0.as_bool();
+        if noinherit && !include_noinh {
+            continue;
+        }
+        let colnum = extract_not_null_column(mcx, getattr(&con_rel, tup, Anum_pg_constraint_conkey).0)?;
+        let conname = name_str(mcx, getattr(&con_rel, tup, Anum_pg_constraint_conname).0)?;
+        let convalidated = getattr(&con_rel, tup, Anum_pg_constraint_convalidated).0.as_bool();
+        let att = rel.rd_att.attr(colnum as usize - 1);
+        let colname = {
+            let raw = att.attname.name_str();
+            let mut v: PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, raw.len())?;
+            mcx::vec_append_bytes(&mut v, raw)?;
+            core::str::from_utf8(v.leak()).expect("attname UTF-8")
+        };
+        let keys1 = types_nodes::NodeList::make1(
+            mcx,
+            types_nodes::Node::mk_string(mcx, colname)?,
+        )?;
+        let constr = Constraint {
+            contype: ConstrType::CONSTR_NOTNULL,
+            conname: Some(conname),
+            keys: keys1,
+            is_enforced: true,
+            skip_validation: !convalidated,
+            initially_valid: true,
+            is_no_inherit: noinherit,
+            location: -1,
+            ..Constraint::default()
+        };
+        notnulls.lappend(mcx, types_nodes::Node::mk(mcx, constr)?)?;
+    }
+    genam::systable_endscan(mcx, scan)?;
+    con_rel.close(AccessShareLock)?;
+    Ok(notnulls)
+}
+
+// get_relation_constraint_oid (pg_constraint.c), missing_ok=false lane.
+pub fn get_relation_constraint_oid<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+    conname: &str,
+) -> PgResult<Oid> {
+    let con_rel = table::table_open(mcx, CONSTRAINT_RELATION_ID, AccessShareLock)?;
+    let keys = conrelid_scan_keys(relid);
+    let mut scan = genam::systable_beginscan(
+        mcx,
+        &con_rel,
+        types_core::catalog::CONSTRAINT_RELID_TYPID_NAME_INDEX_ID,
+        true,
+        None,
+        &keys,
+    )?;
+    let mut found = InvalidOid;
+    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+        let this_name = name_str(mcx, getattr(&con_rel, tup, Anum_pg_constraint_conname).0)?;
+        if this_name == conname {
+            found = getattr(&con_rel, tup, Anum_pg_constraint_oid).0.as_oid();
+            break;
+        }
+    }
+    genam::systable_endscan(mcx, scan)?;
+    con_rel.close(AccessShareLock)?;
+    assert!(found != InvalidOid, "constraint \"{conname}\" for table {relid} does not exist");
+    Ok(found)
+}
+
+// ConstraintNameIsUsed(CONSTRAINT_RELATION) probe.
+pub fn ConstraintNameIsUsed<'mcx>(mcx: Mcx<'mcx>, relid: Oid, conname: &str) -> PgResult<bool> {
+    let con_rel = table::table_open(mcx, CONSTRAINT_RELATION_ID, AccessShareLock)?;
+    let keys = conrelid_scan_keys(relid);
+    let mut scan = genam::systable_beginscan(
+        mcx,
+        &con_rel,
+        types_core::catalog::CONSTRAINT_RELID_TYPID_NAME_INDEX_ID,
+        true,
+        None,
+        &keys,
+    )?;
+    let mut used = false;
+    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+        let this_name = name_str(mcx, getattr(&con_rel, tup, Anum_pg_constraint_conname).0)?;
+        if this_name == conname {
+            used = true;
+            break;
+        }
+    }
+    genam::systable_endscan(mcx, scan)?;
+    con_rel.close(AccessShareLock)?;
+    Ok(used)
+}

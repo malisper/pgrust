@@ -249,6 +249,41 @@ pub fn sequenceIsOwned<'mcx>(
                 dep_attr(&view, Anum_pg_depend_refobjid, desc).as_oid(),
                 dep_attr(&view, Anum_pg_depend_refobjsubid, desc).as_i32(),
             ));
+// get_index_constraint: the index's internal-dependency constraint, or InvalidOid.
+pub fn get_index_constraint<'mcx>(mcx: Mcx<'mcx>, index_id: Oid) -> PgResult<Oid> {
+    use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+    const ConstraintRelationId: Oid = 2606;
+    let mut keys = [ScanKeyData::empty(), ScanKeyData::empty(), ScanKeyData::empty()];
+    let fns = [
+        (1u16, types_core::fmgr::F_OIDEQ, Datum::from_oid(types_core::RELATION_RELATION_ID)),
+        (2u16, types_core::fmgr::F_OIDEQ, Datum::from_oid(index_id)),
+        (3u16, types_core::fmgr::F_INT4EQ, Datum::from_i32(0)),
+    ];
+    for (k, (attno, f, arg)) in keys.iter_mut().zip(fns) {
+        k.sk_attno = attno as types_core::AttrNumber;
+        k.sk_strategy = BTEqualStrategyNumber;
+        k.sk_collation = 0;
+        k.sk_func = fmgr_seams::fmgr_info::call(f)
+            .unwrap_or_else(|e| panic!("fmgr_info({f}) failed: {e:?}"));
+        k.sk_argument = arg;
+    }
+    let rel = table::table_open(mcx, DependRelationId, types_rel::AccessShareLock)?;
+    let mut scan =
+        genam::systable_beginscan(mcx, &rel, DependDependerIndexId, true, None, &keys)?;
+    let mut constraint_id = types_core::InvalidOid;
+    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+        let mut isnull = false;
+        // SAFETY (each): fixed NOT NULL pg_depend columns under its descriptor.
+        let refclassid =
+            unsafe { types_tuple::heap_getattr(tup, 4, rel.descr(), &mut isnull) }.as_oid();
+        let refobjid =
+            unsafe { types_tuple::heap_getattr(tup, 5, rel.descr(), &mut isnull) }.as_oid();
+        let refobjsubid =
+            unsafe { types_tuple::heap_getattr(tup, 6, rel.descr(), &mut isnull) }.as_i32();
+        let deptype =
+            unsafe { types_tuple::heap_getattr(tup, 7, rel.descr(), &mut isnull) }.as_i8() as u8;
+        if refclassid == ConstraintRelationId && refobjsubid == 0 && deptype == b'i' {
+            constraint_id = refobjid;
             break;
         }
     }
@@ -291,4 +326,5 @@ pub fn deleteDependencyRecordsForClass<'mcx>(
     genam::systable_endscan(mcx, scan)?;
     rel.close(RowExclusiveLock)?;
     Ok(count)
+    Ok(constraint_id)
 }

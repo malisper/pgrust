@@ -75,7 +75,8 @@ pub fn AlterTableGetLockLevel(cmds: &NodeList<'_>) -> LOCKMODE {
             | AlterTableType::AT_ColumnDefault
             | AlterTableType::AT_DropNotNull
             | AlterTableType::AT_SetNotNull
-            | AlterTableType::AT_AlterColumnType => {
+            | AlterTableType::AT_AlterColumnType
+            | AlterTableType::AT_CookedColumnDefault => {
                 return AccessExclusiveLock;
             }
             AlterTableType::AT_AddConstraint => {}
@@ -284,6 +285,7 @@ fn ATPrepCmd<'mcx>(
             ATPrepAlterColumnType(mcx, tab, rel, cmd, query_string)?;
             AT_PASS_ALTER_TYPE
         }
+        AlterTableType::AT_CookedColumnDefault => AT_PASS_ADD_OTHERCONSTR,
         other => unported(&format!("ATPrepCmd {other:?}")),
     };
     tab.subcmds[pass].lappend(mcx, cnode)?;
@@ -322,6 +324,10 @@ fn ATRewriteCatalogs<'mcx>(
                 }
                 AlterTableType::AT_SetNotNull => {
                     ATExecSetNotNull(mcx, tab, &rel, cmd)?;
+                }
+                AlterTableType::AT_CookedColumnDefault => {
+                    let defnode = cmd.def.expect("AT_CookedColumnDefault expr");
+                    pg_attrdef::StoreAttrDefault(mcx, &rel, cmd.num, defnode)?;
                 }
                 AlterTableType::AT_AddConstraint => {
                     ATExecAddConstraint(mcx, tab, &rel, cmd, query_string)?;
@@ -697,6 +703,8 @@ fn ATExecAddColumn<'mcx>(
     Ok(())
 }
 
+// ATExecAddConstraint -> ATAddCheckNNConstraint, CHECK-only-cooked slice
+// (recursion moot: no inheritance children on ported lanes).
 // check_for_column_name_collision: deliberately not attisdropped-aware.
 pub(crate) fn check_for_column_name_collision<'mcx>(
     mcx: Mcx<'mcx>,

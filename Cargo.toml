@@ -437,6 +437,7 @@ members = [
     "crates/backend/executor/execmain",
     "crates/backend/parser/parser_seams",
     "crates/backend/parser/analyze_seams",
+    "crates/backend/rewrite/rewrite_manip",
     "crates/backend/rewrite/rewrite_handler_seams",
     "crates/backend/rewrite/rewrite_handler",
     "crates/backend/optimizer/plan/planner_seams",

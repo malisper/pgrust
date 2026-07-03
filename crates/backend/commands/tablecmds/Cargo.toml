@@ -41,6 +41,7 @@ catalog_index = { path = "../../catalog/catalog_index" }
 lmgr = { path = "../../storage/lmgr/lmgr" }
 pg_attrdef = { path = "../../catalog/pg_attrdef" }
 pg_constraint = { path = "../../catalog/pg_constraint" }
+readfuncs = { path = "../../nodes/readfuncs" }
 clauses = { path = "../../optimizer/util/clauses" }
 execexpr = { path = "../../executor/execexpr" }
 rewrite_handler = { path = "../../rewrite/rewrite_handler" }
