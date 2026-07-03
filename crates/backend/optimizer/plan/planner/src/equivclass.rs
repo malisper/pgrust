@@ -16,7 +16,7 @@ use types_pathnodes::{
 use crate::relnode::{
     find_base_rel, pgvec_clone_shallow, relids_add_member, relids_copy, relids_equal,
     relids_is_empty, relids_is_member, relids_is_subset, relids_members, relids_num_members,
-    relids_overlap, relids_singleton, relids_union,
+    relids_overlap, relids_union,
 };
 use crate::run::PlannerRun;
 

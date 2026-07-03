@@ -1840,10 +1840,24 @@ pub fn estimate_num_groups_pgset<'mcx>(
         }
     }
     // add_unique_group_var (selfuncs.c): drop exact duplicates; among
-    // known-equal vars of different rels keep the smaller ndistinct.
+    // known-equal vars of different rels keep the smaller ndistinct. The
+    // probe var is compared with nullingrels stripped, per C.
     for &(id, node) in work.iter() {
-        let v = node.as_var().unwrap();
         let vardata = examine_variable(run, id, node, 0)?;
+        let (id, node) = {
+            let v = node.as_var().unwrap();
+            if v.varnullingrels.is_empty() {
+                (id, node)
+            } else {
+                let stripped = types_nodes::primnodes::Var {
+                    varnullingrels: types_nodes::Bitmapset::empty(),
+                    ..*v
+                };
+                let n = Node::mk(mcx, stripped)?;
+                (run.intern_expr(n), n)
+            }
+        };
+        let v = node.as_var().unwrap();
         let (ndistinct, _isdefault) = get_variable_numdistinct(run, &vardata);
         let rel = vardata.rel.expect("grouping Var has a base rel");
         let mut keep_new = true;
