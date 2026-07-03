@@ -45,8 +45,6 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    // The open Relation crosses whole so the impl reads rd_id/persistence off
-    // the pointer in hand (no relcache re-open per page).
     pub fn check_for_serializable_conflict_out_needed<'a, 'mcx>(
         rel: &'a RelationData<'mcx>,
         snapshot: &'a SnapshotData<'mcx>,
@@ -78,12 +76,10 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    // CheckPointPredicate() (predicate.c).
     pub fn check_point_predicate() -> PgResult<()>
 );
 
 seam_core::seam!(
-    // CheckForSerializableConflictIn (predicate.c); InvalidBlockNumber = relation-level only.
     pub fn check_for_serializable_conflict_in<'a, 'mcx>(
         rel: &'a RelationData<'mcx>,
         tid: Option<&'a ItemPointerData>,
@@ -92,9 +88,6 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    // GetSerializableTransactionSnapshot (predicate.c): fills `snapshot` via
-    // GetSnapshotData under SerializableXactHashLock (snapmgr's static
-    // CurrentSnapshotData is the target, exactly C's in/out pointer).
     pub fn get_serializable_transaction_snapshot<'a>(
         snapshot: &'a mut SnapshotData<'static>,
         mcx: mcx::Mcx<'static>,
@@ -102,24 +95,17 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    // ReleasePredicateLocks(isCommit, isReadOnlySafe) (predicate.c); caller is
-    // resowner's RESOURCE_RELEASE_LOCKS top-level phase, per C.
     pub fn release_predicate_locks(is_commit: bool, is_read_only_safe: bool) -> PgResult<()>
 );
 
 seam_core::seam!(
-    // CheckTableForSerializableConflictIn (predicate.c): whole-table DDL
-    // (TRUNCATE, heap drop) flags conflicts from SIREAD locks of ANY
-    // granularity on the table, unlike the relation-tag-only conflict_in.
     pub fn check_table_for_serializable_conflict_in<'a, 'mcx>(
         rel: &'a RelationData<'mcx>,
     ) -> PgResult<()>
 );
 
 seam_core::seam!(
-    // TransferPredicateLocksToHeapRelation (predicate.c): DROP INDEX /
-    // REINDEX / CLUSTER. C gates inside on PredXact->SxactGlobalXmin, NOT on
-    // the calling backend's isolation level — call unconditionally.
+    // C gates inside on PredXact->SxactGlobalXmin, not caller isolation — call unconditionally.
     pub fn transfer_predicate_locks_to_heap_relation<'a, 'mcx>(
         rel: &'a RelationData<'mcx>,
     ) -> PgResult<()>
