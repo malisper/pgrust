@@ -11,6 +11,7 @@ types_core = { path = "../../../../_support/types/types_core" }
 types_error = { path = "../../../../_support/types/types_error" }
 types_tuple = { path = "../../../../_support/types/types_tuple" }
 fmgr = { package = "types_fmgr", path = "../../../../_support/types/fmgr" }
+fmgr_seams = { path = "../fmgr_seams" }
 nodes = { package = "types_nodes", path = "../../../../_support/types/nodes" }
 tupdesc = { path = "../../../access/common/tupdesc" }
 format_type = { path = "../../adt/format_type" }
