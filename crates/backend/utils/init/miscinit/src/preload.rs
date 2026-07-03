@@ -46,6 +46,18 @@ pub fn process_shared_preload_libraries_done() -> bool {
     DONE.get()
 }
 
+pub fn process_session_preload_libraries() -> PgResult<()> {
+    load_libraries(
+        string_get(&SESSION_PRELOAD_LIBRARIES).as_deref(),
+        "session_preload_libraries",
+    );
+    load_libraries(
+        string_get(&LOCAL_PRELOAD_LIBRARIES).as_deref(),
+        "local_preload_libraries",
+    );
+    Ok(())
+}
+
 // shmem_request_hook can only be set from a preloaded library; with the
 // empty-list fast path live there is never a hook to run.
 pub fn process_shmem_requests() -> PgResult<()> {

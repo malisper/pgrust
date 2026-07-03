@@ -603,14 +603,19 @@ pub fn ProcKill(_code: i32, _arg: usize) {
         panic!("ProcKill() called in child process");
     }
 
-    syncrep_seams::sync_rep_cleanup_at_proc_exit::call();
+    // No walsender/syncrep queue entry can exist while syncrep is unported; guarded.
+    if syncrep_seams::sync_rep_cleanup_at_proc_exit::is_installed() {
+        syncrep_seams::sync_rep_cleanup_at_proc_exit::call();
+    }
 
     for i in 0..NUM_LOCK_PARTITIONS as usize {
         debug_assert!(proc.myProcLocks[i].get().head.next.is_none());
     }
 
     lwlock::LWLockReleaseAll().expect("LWLockReleaseAll failed in ProcKill");
-    condition_variable_seams::condition_variable_cancel_sleep::call();
+    if condition_variable_seams::condition_variable_cancel_sleep::is_installed() {
+        condition_variable_seams::condition_variable_cancel_sleep::call();
+    }
 
     let leader_no = proc.lockGroupLeader.load(Relaxed);
     if leader_no != INVALID_PROC_NUMBER {
@@ -660,7 +665,11 @@ pub fn ProcKill(_code: i32, _arg: usize) {
         ));
     ProcStructLock.unlock();
 
-    autovacuum_seams::wake_autovacuum_launcher::call();
+    // C: kill(AutovacuumLauncherPid) only when a launcher runs; none can while
+    // AutoVacLauncherMain is unported; guarded.
+    if autovacuum_seams::wake_autovacuum_launcher::is_installed() {
+        autovacuum_seams::wake_autovacuum_launcher::call();
+    }
 }
 
 pub fn AuxiliaryProcKill(_code: i32, arg: usize) {
@@ -676,7 +685,10 @@ pub fn AuxiliaryProcKill(_code: i32, arg: usize) {
     debug_assert_eq!(procno, AuxiliaryProcsBase() + proctype);
 
     lwlock::LWLockReleaseAll().expect("LWLockReleaseAll failed in AuxiliaryProcKill");
-    condition_variable_seams::condition_variable_cancel_sleep::call();
+    // CV unit unported => no sleep can be pending; skip is C's no-op arm.
+    if condition_variable_seams::condition_variable_cancel_sleep::is_installed() {
+        condition_variable_seams::condition_variable_cancel_sleep::call();
+    }
 
     miscinit_seams::switch_back_to_local_latch::call();
     waitevent_seams::pgstat_reset_wait_event_storage::call();
@@ -805,6 +817,7 @@ pub fn BecomeLockGroupMember(leader_no: ProcNumber, pid: i32) -> PgResult<bool> 
 pub fn init_seams() {
     use lmgr_proc_seams as s;
 
+    s::proc_latch::set(|procno| &GetPGProcByNumber(procno).procLatch);
     s::proc_lw_waiting::set(|procno| GetPGProcByNumber(procno).lwWaiting.load(Relaxed));
     s::set_proc_lw_waiting::set(|procno, state| {
         GetPGProcByNumber(procno).lwWaiting.store(state, Relaxed)

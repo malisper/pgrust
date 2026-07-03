@@ -122,14 +122,17 @@ fn new_locallock(tag: &LOCALLOCKTAG, mcx: Mcx<'static>) -> LOCALLOCK {
 }
 
 #[inline]
-fn grant_owner_slot(owners: &mut PgVec<'static, LOCALLOCKOWNER>, owner: ResourceOwner) {
+// Returns true when a new owner slot was created: C's GrantLockLocal calls
+// ResourceOwnerRememberLock only then (re-grants bump the slot count only).
+fn grant_owner_slot(owners: &mut PgVec<'static, LOCALLOCKOWNER>, owner: ResourceOwner) -> bool {
     for slot in owners.iter_mut() {
         if slot.owner == owner {
             slot.nLocks += 1;
-            return;
+            return false;
         }
     }
     owners.push(LOCALLOCKOWNER { owner, nLocks: 1 });
+    true
 }
 
 /// Entry pointer carried across the straight-line fast-path grant (C's
@@ -138,7 +141,7 @@ fn grant_owner_slot(owners: &mut PgVec<'static, LOCALLOCKOWNER>, owner: Resource
 pub(crate) struct LocalLockPtr(std::ptr::NonNull<LOCALLOCK>);
 
 pub(crate) enum LocalGrant {
-    Held { cleared: bool },
+    Held { cleared: bool, new_slot: bool },
     NotHeld { hashcode: u32, ll: LocalLockPtr },
 }
 
@@ -150,9 +153,10 @@ pub(crate) fn prepare_or_grant_locallock(tag: &LOCALLOCKTAG, owner: ResourceOwne
         let entry = state.table.entry(*tag).or_insert_with(|| new_locallock(tag, mcx));
         if entry.nLocks > 0 {
             entry.nLocks += 1;
-            grant_owner_slot(&mut entry.lockOwners, owner);
+            let new_slot = grant_owner_slot(&mut entry.lockOwners, owner);
             LocalGrant::Held {
                 cleared: entry.lockCleared,
+                new_slot,
             }
         } else {
             entry.lockOwners.reserve(1);
@@ -162,8 +166,8 @@ pub(crate) fn prepare_or_grant_locallock(tag: &LOCALLOCKTAG, owner: ResourceOwne
             }
         }
     });
-    if let LocalGrant::Held { .. } = out {
-        if !owner.is_null() {
+    if let LocalGrant::Held { new_slot, .. } = out {
+        if new_slot && !owner.is_null() {
             resowner::ResourceOwnerRememberLock(owner, *tag);
         }
         CheckAndSetLockHeld(tag, true);
@@ -179,30 +183,30 @@ pub(crate) unsafe fn grant_locallock_after_fastpath(
     owner: ResourceOwner,
     ll: LocalLockPtr,
 ) {
-    {
+    let new_slot = {
         // SAFETY: caller contract; no other LocalState borrow is live.
         let ll = unsafe { &mut *ll.0.as_ptr() };
         ll.lock = std::ptr::null_mut();
         ll.proclock = std::ptr::null_mut();
         ll.nLocks += 1;
-        grant_owner_slot(&mut ll.lockOwners, owner);
-    }
+        grant_owner_slot(&mut ll.lockOwners, owner)
+    };
     debug_assert!(with_local(|state| {
         state.table.get(tag).is_some_and(|e| e.nLocks > 0)
     }));
-    if !owner.is_null() {
+    if new_slot && !owner.is_null() {
         resowner::ResourceOwnerRememberLock(owner, *tag);
     }
     CheckAndSetLockHeld(tag, true);
 }
 
 pub(crate) fn GrantLockLocal(tag: &LOCALLOCKTAG, owner: ResourceOwner) {
-    with_local(|state| {
+    let new_slot = with_local(|state| {
         let ll = state.table.get_mut(tag).expect("missing LOCALLOCK");
         ll.nLocks += 1;
-        grant_owner_slot(&mut ll.lockOwners, owner);
+        grant_owner_slot(&mut ll.lockOwners, owner)
     });
-    if !owner.is_null() {
+    if new_slot && !owner.is_null() {
         resowner::ResourceOwnerRememberLock(owner, *tag);
     }
     CheckAndSetLockHeld(tag, true);
