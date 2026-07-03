@@ -261,10 +261,12 @@ fn run_value_per_call<'mcx, const N: usize>(
     // SAFETY: the ExprContext outlives this loop's stack frame.
     unsafe { fcinfo.set_result_mcx(estate.ecxt(ecxt).per_tuple_mcx()) };
 
-    // ExecEvalFuncArgs; C's argContext hop is unneeded: only Consts and
-    // by-value datums feed args on this lane, surviving the resets below.
+    // ExecEvalFuncArgs; by-ref arg datums (e.g. a built array) land in the
+    // scan econtext's per-tuple memory, which lives across the SRF loop.
     let mut all_null_skip = false;
     for i in 0..N {
+        // SAFETY: the per-tuple context outlives this scan-start call.
+        unsafe { setexpr.args[i].arm_result_mcx_raw(estate.ecxt(ecxt).per_tuple_mcx()) };
         let mut slots = EvalSlots { scan: None, inner: None, outer: None };
         let NullableDatum { value, isnull } = exec_eval_expr(&mut setexpr.args[i], &mut slots)?;
         if isnull {
