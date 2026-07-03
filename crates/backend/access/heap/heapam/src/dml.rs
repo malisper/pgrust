@@ -231,7 +231,7 @@ pub fn heap_insert(
         tup
     };
 
-    let pin = RelationGetBufferForTuple(relation, heaptup.t_len as usize, None, options)?;
+    let pin = RelationGetBufferForTuple(relation, heaptup.t_len as usize, None, options, None, 0)?;
 
     predicate_seams::check_for_serializable_conflict_in::call(
         relation,
@@ -331,6 +331,287 @@ pub fn heap_insert(
 /// `simple_heap_insert`.
 pub fn simple_heap_insert(relation: &RelationData<'_>, tup: &mut HeapTupleData<'_>) -> PgResult<()> {
     heap_insert(relation, tup, xact_seams::get_current_command_id::call(true)?, 0)
+}
+
+const XLOG_HEAP2_MULTI_INSERT: u8 = 0x50;
+const XLH_INSERT_LAST_IN_MULTI: u8 = 1 << 1;
+const SizeOfHeapMultiInsert: usize = 4;
+const SizeOfMultiInsertTuple: usize = 7;
+const RM_HEAP2_ID: u8 = rmgr::RmgrIds::RM_HEAP2_ID as u8;
+
+fn heap_multi_insert_pages(
+    heaptuples: &[HeapTupleData<'_>],
+    done: usize,
+    save_free_space: usize,
+) -> i32 {
+    let fresh =
+        ::types_core::BLCKSZ - ::types_storage::bufpage::SizeOfPageHeaderData - save_free_space;
+    let mut page_avail = fresh;
+    let mut npages = 1;
+    for t in &heaptuples[done..] {
+        let tup_sz = core::mem::size_of::<ItemIdData>() + ((t.t_len as usize + 7) & !7);
+        if page_avail < tup_sz {
+            npages += 1;
+            page_avail = fresh;
+        }
+        page_avail -= tup_sz;
+    }
+    npages
+}
+
+/// `heap_multi_insert`: slots are materialized in place; `tts_tid` and the
+/// slot tuples' `t_self` receive the TIDs.
+pub fn heap_multi_insert<'mcx>(
+    mcx: ::mcx::Mcx<'mcx>,
+    relation: &RelationData<'mcx>,
+    slots: &mut [&mut ::types_slot::SlotData<'mcx>],
+    cid: CommandId,
+    options: i32,
+    mut bistate: Option<&mut ::tableam_vocab::BulkInsertStateData>,
+) -> PgResult<()> {
+    use ::types_slot::SlotData;
+
+    debug_assert!(options & crate::hio::HEAP_INSERT_NO_LOGICAL == 0);
+    let xid = xact_seams::get_current_transaction_id::call()?;
+    let needwal = relation_needs_wal(relation);
+    let save_free_space =
+        relation.get_target_page_free_space(crate::hio::HEAP_DEFAULT_FILLFACTOR) as usize;
+    let ntuples = slots.len();
+
+    // std Vecs: droppy owners (contexts) and per-call scratch views — neither
+    // may live in an mcx arena (no-drop rule); C pallocs the pointer array.
+    let mut toast_ctxs: Vec<::mcx::MemoryContext> = Vec::new();
+    let mut heaptuples: Vec<HeapTupleData<'_>> = Vec::with_capacity(ntuples);
+    for slot in slots.iter_mut() {
+        exectuples::exec_materialize_slot(slot, mcx)?;
+        slot.base_mut().tts_tableOid = relation.rd_id;
+        let tuple = match &mut **slot {
+            SlotData::Heap(h) => h.tuple.as_mut(),
+            SlotData::BufferHeap(b) => b.base.tuple.as_mut(),
+            _ => panic!("heap_multi_insert: non-heap slot copy arm not ported"),
+        }
+        .expect("materialized heap slot holds a tuple");
+        tuple.t_tableOid = relation.rd_id;
+        heap_prepare_insert(relation, tuple, xid, cid, options)?;
+        if needs_toast(relation, tuple) {
+            let toast_ctx = ::mcx::MemoryContext::new("heap_multi_insert_toast");
+            let erased = {
+                let toasted = heaptoast_seams::heap_toast_insert_or_update::call(
+                    toast_ctx.mcx(),
+                    relation,
+                    tuple,
+                    None,
+                    options,
+                )?;
+                toasted.map(|mut t| {
+                    let ht = t.as_tuple_mut();
+                    // SAFETY: image owned by toast_ctx, kept alive in
+                    // toast_ctxs past the last use (page_tuple model).
+                    unsafe {
+                        HeapTupleData::from_raw_parts(
+                            ht.header_ptr().cast_mut(),
+                            ht.t_len,
+                            ht.t_self,
+                            ht.t_tableOid,
+                        )
+                    }
+                })
+            };
+            match erased {
+                Some(erased) => {
+                    toast_ctxs.push(toast_ctx);
+                    heaptuples.push(erased);
+                }
+                None => {
+                    // SAFETY: image owned by the materialized slot, which
+                    // outlives every use in this function.
+                    heaptuples.push(unsafe {
+                        HeapTupleData::from_raw_parts(
+                            tuple.header_ptr().cast_mut(),
+                            tuple.t_len,
+                            tuple.t_self,
+                            tuple.t_tableOid,
+                        )
+                    });
+                }
+            }
+        } else {
+            // SAFETY: as above; the materialized slot image outlives this call.
+            heaptuples.push(unsafe {
+                HeapTupleData::from_raw_parts(
+                    tuple.header_ptr().cast_mut(),
+                    tuple.t_len,
+                    tuple.t_self,
+                    tuple.t_tableOid,
+                )
+            });
+        }
+    }
+
+    predicate_seams::check_for_serializable_conflict_in::call(relation, None, InvalidBlockNumber)?;
+
+    // C's PGAlignedBlock WAL scratch.
+    let mut scratch = std::vec![0u8; ::types_core::BLCKSZ];
+    let mut ndone = 0usize;
+    let mut npages = 0i32;
+    let mut npages_used = 0i32;
+    let mut starting_with_empty_page = false;
+    while ndone < ntuples {
+        if ndone == 0 || !starting_with_empty_page {
+            npages = heap_multi_insert_pages(&heaptuples, ndone, save_free_space);
+            npages_used = 0;
+        } else {
+            npages_used += 1;
+        }
+
+        let pin = RelationGetBufferForTuple(
+            relation,
+            heaptuples[ndone].t_len as usize,
+            None,
+            options,
+            bistate.as_deref_mut(),
+            npages - npages_used,
+        )?;
+        starting_with_empty_page = pin.page().max_offset_number() == 0;
+
+        RelationPutHeapTuple(relation, &pin, &mut heaptuples[ndone], false)?;
+        let mut nthispage = 1usize;
+        while ndone + nthispage < ntuples {
+            let need =
+                ((heaptuples[ndone + nthispage].t_len as usize + 7) & !7) + save_free_space;
+            if pin.page().heap_free_space() < need {
+                break;
+            }
+            RelationPutHeapTuple(relation, &pin, &mut heaptuples[ndone + nthispage], false)?;
+            nthispage += 1;
+        }
+
+        // Pin-at-clear divergence (heap_insert shape): C pins the vm page in
+        // RelationGetBufferForTuple, before the content lock.
+        let mut all_visible_cleared = false;
+        if pin.page().is_all_visible() {
+            all_visible_cleared = true;
+            let mut vmb = visibilitymap::VmBuffer::new();
+            visibilitymap::visibilitymap_pin(relation, pin.block_number(), &mut vmb)?;
+            // SAFETY: pinned + exclusive content lock since RelationGetBufferForTuple.
+            let mut pm =
+                unsafe { PageMut::from_raw(bufmgr_seams::buffer_get_page::call(pin.buffer())) };
+            pm.clear_all_visible();
+            visibilitymap::visibilitymap_clear(
+                relation,
+                pin.block_number(),
+                &vmb,
+                visibilitymap::VISIBILITYMAP_VALID_BITS,
+            )?;
+            vmb.release();
+        }
+
+        bufmgr_seams::mark_buffer_dirty::call(pin.buffer())?;
+
+        if needwal {
+            let init = starting_with_empty_page;
+            let mut xl_flags = 0u8;
+            if all_visible_cleared {
+                xl_flags |= XLH_INSERT_ALL_VISIBLE_CLEARED;
+            }
+            if ndone + nthispage == ntuples {
+                xl_flags |= XLH_INSERT_LAST_IN_MULTI;
+            }
+            scratch[0] = xl_flags;
+            scratch[1] = 0;
+            scratch[2..4].copy_from_slice(&(nthispage as u16).to_ne_bytes());
+            let mut off = SizeOfHeapMultiInsert;
+            if !init {
+                for i in 0..nthispage {
+                    let offnum = ItemPointerGetOffsetNumber(&heaptuples[ndone + i].t_self);
+                    scratch[off..off + 2].copy_from_slice(&offnum.to_ne_bytes());
+                    off += 2;
+                }
+            }
+            let tupledata_off = off;
+            for i in 0..nthispage {
+                let heaptup = &heaptuples[ndone + i];
+                // xl_multi_insert_tuple needs two-byte alignment; offsets are
+                // relative to the scratch base like C's SHORTALIGN(scratchptr).
+                off = (off + 1) & !1;
+                let hdr = heaptup.t_data();
+                let datalen = heaptup.t_len as usize - SizeofHeapTupleHeader;
+                scratch[off..off + 2].copy_from_slice(&(datalen as u16).to_ne_bytes());
+                scratch[off + 2..off + 4].copy_from_slice(&hdr.t_infomask2.to_ne_bytes());
+                scratch[off + 4..off + 6].copy_from_slice(&hdr.t_infomask.to_ne_bytes());
+                scratch[off + 6] = hdr.t_hoff;
+                off += SizeOfMultiInsertTuple;
+                // SAFETY: tuple image is t_len readable bytes.
+                let body = unsafe {
+                    core::slice::from_raw_parts(
+                        heaptup.header_ptr().add(SizeofHeapTupleHeader),
+                        datalen,
+                    )
+                };
+                scratch[off..off + datalen].copy_from_slice(body);
+                off += datalen;
+            }
+            debug_assert!(off < ::types_core::BLCKSZ);
+
+            let mut info = XLOG_HEAP2_MULTI_INSERT;
+            let mut bufflags = REGBUF_STANDARD;
+            if init {
+                info |= XLOG_HEAP_INIT_PAGE;
+                bufflags |= REGBUF_WILL_INIT;
+            }
+
+            let recptr = xloginsert_seams::xlog_insert_record::call(
+                RM_HEAP2_ID,
+                info,
+                XLOG_INCLUDE_ORIGIN,
+                &[&scratch[..tupledata_off]],
+                &[XLogRegBuf {
+                    block_id: 0,
+                    buffer: pin.buffer(),
+                    flags: bufflags,
+                    bufdata: &[&scratch[tupledata_off..off]],
+                }],
+            )?;
+            // SAFETY: pinned + exclusively locked since RelationGetBufferForTuple.
+            let mut pm =
+                unsafe { PageMut::from_raw(bufmgr_seams::buffer_get_page::call(pin.buffer())) };
+            pm.set_lsn(recptr);
+        }
+
+        bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_UNLOCK)?;
+        pin.release();
+        ndone += nthispage;
+    }
+
+    predicate_seams::check_for_serializable_conflict_in::call(relation, None, InvalidBlockNumber)?;
+
+    if catalog_seams::is_catalog_relation::call(relation) {
+        for t in &heaptuples {
+            inval::invalidate::CacheInvalidateHeapTuple(relation, t, None)?;
+        }
+    }
+
+    for (slot, t) in slots.iter_mut().zip(&heaptuples) {
+        slot.base_mut().tts_tid = t.t_self;
+        if let Some(tuple) = match &mut **slot {
+            SlotData::Heap(h) => h.tuple.as_mut(),
+            SlotData::BufferHeap(b) => b.base.tuple.as_mut(),
+            _ => None,
+        } {
+            tuple.t_self = t.t_self;
+        }
+    }
+
+    if relation.pgstat_enabled.get() {
+        pgstat::relation::pgstat_count_heap_insert(
+            relation.rd_id,
+            relation.rd_rel.relisshared,
+            ntuples as i64,
+        );
+    }
+
+    drop(toast_ctxs);
+    Ok(())
 }
 
 /// `compute_new_xmax_infomask`: (new_xmax, new_infomask, new_infomask2).
@@ -1457,6 +1738,8 @@ pub fn heap_update(
                 relation,
                 ht_len as usize,
                 Some(&pin),
+                0,
+                None,
                 0,
             )?);
         } else {

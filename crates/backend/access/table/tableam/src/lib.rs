@@ -275,15 +275,16 @@ mod heap {
         unported(DML_UNIT)
     }
 
+    // heapam_multi_insert (heapam_handler.c).
     pub(super) fn multi_insert<'mcx>(
-        _mcx: Mcx<'mcx>,
-        _rel: &Relation<'mcx>,
-        _slots: &mut [&mut SlotData<'mcx>],
-        _cid: CommandId,
-        _options: i32,
-        _bistate: Option<&mut BulkInsertStateData>,
+        mcx: Mcx<'mcx>,
+        rel: &Relation<'mcx>,
+        slots: &mut [&mut SlotData<'mcx>],
+        cid: CommandId,
+        options: i32,
+        bistate: Option<&mut BulkInsertStateData>,
     ) -> PgResult<()> {
-        unported(DML_UNIT)
+        ::heapam::heap_multi_insert(mcx, rel, slots, cid, options, bistate)
     }
 
     #[allow(clippy::too_many_arguments)]

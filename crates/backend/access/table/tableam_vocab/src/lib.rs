@@ -146,9 +146,14 @@ pub struct ParallelBlockTableScanWorkerData {
     pub phsw_chunk_size: u32,
 }
 
-// hio.h BulkInsertStateData, opaque until backend-access-heap-hio lands.
+// hio.h BulkInsertStateData; `current_buf` is a BufferPin (RAII replaces C's
+// FreeBulkInsertState/ReleaseBulkInsertStatePin ReleaseBuffer).
 pub struct BulkInsertStateData {
-    _opaque: (),
+    pub strategy: ::types_storage::buf::BufferAccessStrategy,
+    pub current_buf: Option<::bufmgr_seams::BufferPin>,
+    pub next_free: BlockNumber,
+    pub last_free: BlockNumber,
+    pub already_extended_by: u32,
 }
 
 // tsmapi.h sample capability; an OPEN extension point in C, so dyn is faithful.

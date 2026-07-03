@@ -43,10 +43,10 @@ freespace_seams = { path = "../../../storage/freespace/freespace_seams" }
 tidbitmap = { path = "../../../nodes/tidbitmap" }
 
 visibilitymap = { path = "../visibilitymap" }
+catalog_seams = { path = "../../../catalog/catalog_seams" }
 
 [dev-dependencies]
 miscinit_seams = { path = "../../../utils/init/miscinit_seams" }
-catalog_seams = { path = "../../../catalog/catalog_seams" }
 heaptuple = { path = "../../common/heaptuple" }
 heapam_visibility = { path = "../heapam_visibility" }
 xact = { path = "../../transam/xact" }

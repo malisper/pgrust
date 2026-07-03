@@ -64,6 +64,12 @@ pub fn ExtendBufferedRelBy(
         InvalidBlockNumber,
         &mut buffers,
     )?;
+    // C returns every extended buffer pinned; the only multi-page caller
+    // (hio.c RelationAddBlocks) uses buffers[1..] solely to ReleaseBuffer
+    // them, so the pins drop here and only the first crosses the seam.
+    for buf in buffers.iter().take(extended_by as usize).skip(1) {
+        UnpinBuffer(GetBufferDescriptor(*buf - 1));
+    }
     Ok((buffers[0], extended_by))
 }
 

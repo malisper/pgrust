@@ -26,3 +26,12 @@ seam_core::seam!(
         space_avail: Size,
     ) -> PgResult<()>
 );
+
+seam_core::seam!(
+    // FreeSpaceMapVacuumRange (freespace.c): end is exclusive.
+    pub fn free_space_map_vacuum_range<'a, 'mcx>(
+        rel: &'a RelationData<'mcx>,
+        start: BlockNumber,
+        end: BlockNumber,
+    ) -> PgResult<()>
+);
