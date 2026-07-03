@@ -1,4 +1,3 @@
-use datum::Datum;
 use mcx::{Mcx, PgVec};
 use types_core::{InvalidOid, Oid, CONSTRAINT_OID_INDEX_ID, CONSTRAINT_RELATION_ID};
 use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};

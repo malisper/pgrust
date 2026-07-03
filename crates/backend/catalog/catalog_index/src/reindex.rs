@@ -47,8 +47,22 @@ pub fn RelationSetNewRelfilenumber<'mcx>(
 
     let mut newrlocator = rel.rd_locator.get();
     newrlocator.relNumber = newrelfilenumber;
-    let (freeze_xid, minmulti) =
-        tableam::table_relation_set_new_filelocator(rel, &newrlocator, persistence as i8)?;
+    let (freeze_xid, minmulti) = match rel.rd_rel.relkind {
+        types_rel::RELKIND_INDEX | types_rel::RELKIND_SEQUENCE => {
+            let srel = catalog_storage::RelationCreateStorage(newrlocator, persistence, true)?;
+            smgr::smgrclose(srel)?;
+            (
+                types_core::InvalidTransactionId,
+                types_core::InvalidTransactionId,
+            )
+        }
+        types_rel::RELKIND_RELATION
+        | types_rel::RELKIND_TOASTVALUE
+        | types_rel::RELKIND_MATVIEW => {
+            tableam::table_relation_set_new_filelocator(rel, &newrlocator, persistence as i8)?
+        }
+        k => panic!("relation \"{}\" does not have storage (relkind {k})", rel.name()),
+    };
 
     let mut values = [Datum::null(); Natts_pg_class];
     let isnull = [false; Natts_pg_class];
