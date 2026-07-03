@@ -560,7 +560,7 @@ fn innerrel_is_unique(
     let inner_relid = run.root.rel(innerrel).relid;
     let n_indexes = run.root.rel(innerrel).indexlist.len();
     for i in 0..n_indexes {
-        let ind = std::rc::Rc::clone(&run.root.rel(innerrel).indexlist[i]);
+        let ind = run.root.rel(innerrel).indexlist[i];
         if !ind.unique || !ind.immediate || !ind.indpred.is_empty() {
             continue;
         }

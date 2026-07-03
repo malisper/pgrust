@@ -10,6 +10,8 @@ pub struct Datum(usize);
 
 const _: () = assert!(core::mem::size_of::<Datum>() == 8);
 
+mcx::forget_safe_nodrop!(Datum);
+
 impl Datum {
     pub const fn null() -> Self {
         Self(0)

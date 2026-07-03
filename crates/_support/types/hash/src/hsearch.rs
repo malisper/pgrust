@@ -79,6 +79,10 @@ pub struct HTAB {
     pub sshift: i32,
 }
 
+// Forgetting a live HTAB strands its dynahash registry entry — planner use
+// (join_rel_hash) must stay never-created or explicitly destroyed.
+mcx::forget_safe_nodrop!(HTAB);
+
 #[derive(Debug)]
 pub struct HASHCTL {
     pub num_partitions: i64,

@@ -2,7 +2,6 @@
 //! indexes, estimate_rel_size, has_unique_index, restriction_selectivity.
 
 use std::cell::{Cell, RefCell};
-use std::rc::Rc;
 
 use mcx::{vec_from_elem_in, PgVec};
 use types_core::{BlockNumber, Oid, BTREE_AM_OID};
@@ -88,7 +87,7 @@ pub fn get_relation_info<'mcx>(
     run.root.rel_mut(rel).rel_parallel_workers = relation.get_parallel_workers(-1);
 
     let hasindex = relation.rd_rel.relhasindex;
-    let mut indexinfos: PgVec<'mcx, Rc<IndexOptInfo<'mcx>>> = PgVec::new_in(mcx);
+    let mut indexinfos: PgVec<'mcx, &'mcx IndexOptInfo<'mcx>> = PgVec::new_in(mcx);
     if hasindex {
         let indexoidlist =
             relcache_seams::relation_get_index_list::call(mcx, relation_object_id)?;
@@ -176,7 +175,7 @@ pub fn get_relation_info<'mcx>(
             info.tree_height = Cell::new(nbtree::bt_getrootheight(&index_rel)?);
 
             indexam::index_close(index_rel, NoLock)?;
-            indexinfos.insert(0, Rc::new(info));
+            indexinfos.insert(0, &*mcx::forget_box_in(mcx, info)?);
         }
     }
     run.root.rel_mut(rel).indexlist = indexinfos;

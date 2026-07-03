@@ -670,7 +670,7 @@ fn fix_indexqual_references<'mcx>(
     let (index, iclauses) = {
         let PathNode::IndexPath(p) = run.root.path(best_path) else { unreachable!() };
         (
-            std::rc::Rc::clone(p.indexinfo.as_ref().expect("indexinfo set")),
+            p.indexinfo.expect("indexinfo set"),
             p.indexclauses.clone(),
         )
     };

@@ -1,7 +1,6 @@
 //! indxpath.c slice: create_index_paths over restriction clauses for the
 //! Var-op-Const btree shape; everything else loud or dead upstream.
 
-use std::rc::Rc;
 
 use mcx::PgVec;
 use types_error::PgResult;
@@ -33,7 +32,7 @@ pub fn check_index_predicates<'mcx>(run: &mut PlannerRun<'mcx>, rel: RelId) {
     let mcx = run.mcx;
     let nindexes = run.root.rel(rel).indexlist.len();
     for i in 0..nindexes {
-        let index = Rc::clone(&run.root.rel(rel).indexlist[i]);
+        let index = run.root.rel(rel).indexlist[i];
         assert!(index.indpred.is_empty(), "check_index_predicates (indxpath.c): M2 partial-index lane");
         let mut clauses = PgVec::new_in(mcx);
         clauses.extend(run.root.rel(rel).baserestrictinfo.iter().copied());
@@ -78,7 +77,7 @@ pub fn create_index_paths<'mcx>(run: &mut PlannerRun<'mcx>, rel: RelId) -> PgRes
     let mut bitindexpaths: PgVec<'mcx, PathId> = PgVec::new_in(run.mcx);
     let nindexes = run.root.rel(rel).indexlist.len();
     for idx in 0..nindexes {
-        let index = Rc::clone(&run.root.rel(rel).indexlist[idx]);
+        let index = run.root.rel(rel).indexlist[idx];
         if !index.indpred.is_empty() && !index.predOK.get() {
             continue;
         }
@@ -253,7 +252,7 @@ pub fn match_index_to_operand(
 fn get_index_paths<'mcx>(
     run: &mut PlannerRun<'mcx>,
     rel: RelId,
-    index: &Rc<IndexOptInfo<'mcx>>,
+    index: &'mcx IndexOptInfo<'mcx>,
     clauses: &IndexClauseSet<'mcx>,
     bitindexpaths: &mut PgVec<'mcx, PathId>,
 ) -> PgResult<()> {
@@ -284,7 +283,7 @@ fn get_index_paths<'mcx>(
 fn build_index_paths<'mcx>(
     run: &mut PlannerRun<'mcx>,
     rel: RelId,
-    index: &Rc<IndexOptInfo<'mcx>>,
+    index: &'mcx IndexOptInfo<'mcx>,
     clauses: &IndexClauseSet<'mcx>,
 ) -> PgResult<PgVec<'mcx, PathId>> {
     let mcx = run.mcx;
@@ -337,7 +336,7 @@ fn build_index_paths<'mcx>(
     if !index_clauses.is_empty() || index_only_scan {
         let ipath = crate::pathnode::create_index_path(
             run,
-            Rc::clone(index),
+            index,
             index_clauses,
             useful_pathkeys,
             types_pathnodes::ForwardScanDirection,

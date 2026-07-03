@@ -1,4 +1,3 @@
-use std::rc::Rc;
 
 use mcx::PgVec;
 use types_error::{PgError, PgResult};
@@ -613,7 +612,7 @@ pub fn create_bitmap_heap_path<'mcx>(
 // create_index_path (pathnode.c); indexorderbys/partial paths loud upstream.
 pub fn create_index_path<'mcx>(
     run: &mut PlannerRun<'mcx>,
-    index: Rc<IndexOptInfo<'mcx>>,
+    index: &'mcx IndexOptInfo<'mcx>,
     indexclauses: PgVec<'mcx, IndexClause<'mcx>>,
     pathkeys: PgVec<'mcx, PathKey>,
     indexscandir: ScanDirection,
@@ -1272,7 +1271,7 @@ fn relation_has_unique_index_for<'mcx>(
     };
     let n_indexes = run.root.rel(rel_id).indexlist.len();
     for i in 0..n_indexes {
-        let ind = std::rc::Rc::clone(&run.root.rel(rel_id).indexlist[i]);
+        let ind = run.root.rel(rel_id).indexlist[i];
         if !ind.unique || !ind.immediate || !ind.indpred.is_empty() {
             continue;
         }

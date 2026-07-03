@@ -89,6 +89,20 @@ pub struct PlannerRun<'mcx> {
     pub active_windows: PgVec<'mcx, types_nodes::Node<'mcx>>,
 }
 
+// A run is forgotten at the planner boundary (mcx reset reclaims), never
+// dropped; the census keeps every member forget-safe.
+mcx::forget_safe_struct!(
+    Glob<'_> { bound_params, parallel_mode_ok, parallel_mode_needed,
+        max_parallel_hazard, transient_plan, depends_on_role, last_ph_id,
+        last_row_mark_id, last_plan_node_id, finalrtable, finalrteperminfos,
+        finalrowmarks, subplans, rewind_plan_ids, result_relations,
+        append_relations, part_prune_infos, relation_oids, inval_items,
+        param_exec_types, all_relids, prunable_relids },
+    SubrootState<'_> { root, processed_tlist },
+    PlannerRun<'_> { mcx, root, glob, queries, processed_tlist,
+        assess_parallel, suspended_roots, subroots, active_windows },
+);
+
 impl<'mcx> PlannerRun<'mcx> {
     pub fn new(mcx: Mcx<'mcx>) -> Self {
         PlannerRun {
