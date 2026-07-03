@@ -1165,6 +1165,12 @@ fn br_row_triggers<'mcx>(
     let trigdesc = mt.trigdesc.as_ref().expect("BR caller checked trigdesc").clone();
     let tg_event = event_op | TRIGGER_EVENT_ROW | TRIGGER_EVENT_BEFORE;
     let is_delete = event_op == TRIGGER_EVENT_DELETE;
+    // C: INSERT/DELETE put the affected row in tg_trigtuple; UPDATE carries
+    // old in tg_trigtuple and new in tg_newtuple.
+    let old_nn = old_t.as_mut().map(core::ptr::NonNull::from);
+    let new_nn = new_t.as_mut().map(core::ptr::NonNull::from);
+    let (trig_nn, newtup_nn) =
+        if old_nn.is_some() { (old_nn, new_nn) } else { (new_nn, None) };
     for (i, trigger) in trigdesc.triggers.iter().enumerate() {
         if trigger.tgtype & (TRIGGER_TYPE_LEVEL_MASK | TRIGGER_TYPE_TIMING_MASK | tgtype_event)
             != TRIGGER_TYPE_ROW | TRIGGER_TYPE_BEFORE | tgtype_event
@@ -1184,20 +1190,10 @@ fn br_row_triggers<'mcx>(
         let rel = estate.es_relations[(mt.result_rti - 1) as usize]
             .as_ref()
             .expect("result relation opened");
-        // C: INSERT/DELETE put the affected row in tg_trigtuple; UPDATE
-        // carries old in tg_trigtuple and new in tg_newtuple.
-        let (trig_tup, new_tup) = if old_t.is_some() {
-            (old_t.as_mut(), new_t.as_mut())
-        } else {
-            (new_t.as_mut(), None)
-        };
-        let mut tdata =
-            types_trigger_call::TriggerData::new(tg_event, rel, trig_tup, new_tup, trigger);
-        let expected = if tdata.tg_newtuple.is_some() {
-            tdata.tg_newtuple
-        } else {
-            tdata.tg_trigtuple
-        };
+        let mut tdata = types_trigger_call::TriggerData::from_raw(
+            tg_event, rel, trig_nn, newtup_nn, trigger,
+        );
+        let expected = if newtup_nn.is_some() { newtup_nn } else { trig_nn };
         let ret = ::trigger::ExecCallTriggerFunc(mcx, &mut tdata, finfo)?;
         match ret {
             None => return Ok(false),
