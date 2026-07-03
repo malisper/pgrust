@@ -1803,6 +1803,24 @@ fn transformFuncCall<'mcx>(
         arg_types.push(expr_type(arg));
     }
 
+    // C transforms fn->agg_filter first thing inside ParseFuncOrColumn
+    // (transformWhereClause, parse_clause.c); hoisted here to keep the
+    // parse_func -> parse_expr edge acyclic. Same evaluation order.
+    let agg_filter = match fc.agg_filter {
+        None => None,
+        Some(f) => {
+            let qual = transformExpr(mcx, pstate, f, ParseExprKind::EXPR_KIND_FILTER)?;
+            Some(coerce::coerce_to_boolean(
+                mcx,
+                pstate,
+                qual,
+                expr_type(qual),
+                expr_location(qual),
+                "FILTER",
+            )?)
+        }
+    };
+
     parse_func::ParseFuncOrColumn(
         mcx,
         pstate,
@@ -1810,6 +1828,7 @@ fn transformFuncCall<'mcx>(
         fargs,
         arg_types.as_slice(),
         fc,
+        agg_filter,
         last_srf,
         fc.location,
     )

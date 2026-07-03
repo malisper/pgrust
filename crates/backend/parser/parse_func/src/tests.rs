@@ -152,7 +152,7 @@ fn call<'mcx>(
 ) -> types_error::PgResult<Node<'mcx>> {
     let fc = fc_node.as_func_call().unwrap();
     pstate.p_expr_kind = ParseExprKind::EXPR_KIND_SELECT_TARGET;
-    ParseFuncOrColumn(mcx, pstate, &fc.funcname, fargs, arg_types, fc, None, fc.location)
+    ParseFuncOrColumn(mcx, pstate, &fc.funcname, fargs, arg_types, fc, None, None, fc.location)
 }
 
 #[test]
@@ -298,7 +298,7 @@ fn aggregate_in_where_kind_is_42803() {
 
     let fc_node = func_call(mcx, "count", true, false);
     let fc = fc_node.as_func_call().unwrap();
-    let err = ParseFuncOrColumn(mcx, &mut pstate, &fc.funcname, NodeList::nil(), &[], fc, None, 7)
+    let err = ParseFuncOrColumn(mcx, &mut pstate, &fc.funcname, NodeList::nil(), &[], fc, None, None, 7)
         .map(|_| ())
         .unwrap_err();
     assert_eq!(err.sqlstate(), types_error::ERRCODE_GROUPING_ERROR);
