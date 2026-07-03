@@ -166,6 +166,10 @@ pub fn expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
             let mm = node.as_min_max_expr().unwrap();
             walk_list(&mm.args, w)
         }
+        NodeTag::T_CoalesceExpr => {
+            let co = node.as_coalesce_expr().unwrap();
+            walk_list(&co.args, w)
+        }
         // C walks straight through CaseWhen cells (walker "doesn't care").
         NodeTag::T_CaseExpr => {
             let c = node.as_case_expr().unwrap();
@@ -880,6 +884,21 @@ where
                         op: mm.op,
                         args,
                         location: mm.location,
+                    },
+                )?)),
+            }
+        }
+        NodeTag::T_CoalesceExpr => {
+            let co = node.as_coalesce_expr().unwrap();
+            match mutate_list(mcx, &co.args, m)? {
+                None => Ok(None),
+                Some(args) => Ok(Some(Node::mk(
+                    mcx,
+                    types_nodes::primnodes::CoalesceExpr {
+                        coalescetype: co.coalescetype,
+                        coalescecollid: co.coalescecollid,
+                        args,
+                        location: co.location,
                     },
                 )?)),
             }

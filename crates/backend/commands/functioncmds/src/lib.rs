@@ -484,8 +484,10 @@ pub fn CreateFunction<'mcx>(
     .as_oid();
     cache_syscache::ReleaseSysCache(lang_tuple);
 
-    if languageOid != SQLlanguageId && languageOid != INTERNALlanguageId {
-        unported("languages beyond sql and internal (plpgsql, c, ...)");
+    if languageOid != SQLlanguageId && languageOid != INTERNALlanguageId
+        && language != "plpgsql"
+    {
+        unported("languages beyond sql, internal and plpgsql (c, ...)");
     }
 
     if lanpltrusted {

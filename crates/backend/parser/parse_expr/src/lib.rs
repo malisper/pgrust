@@ -1303,6 +1303,7 @@ fn transformColumnRef<'mcx>(
     expr: Node<'mcx>,
 ) -> PgResult<Node<'mcx>> {
     use parser_small1::ParseExprKind::*;
+    use types_error::{ErrorLocation, ERROR};
     let cref = expr.as_column_ref().unwrap();
 
     debug_assert!(pstate.p_expr_kind != EXPR_KIND_NONE);
@@ -1322,6 +1323,17 @@ fn transformColumnRef<'mcx>(
 
     let field_str = |n: Node<'mcx>| n.as_string().map(|s| s.sval);
     let fields = cref.fields.as_slice();
+
+    // plpgsql_pre_column_ref (pl_exec.c): variable takes precedence.
+    let plpgsql_hooks: Option<parser_small1::PlpgsqlHookState<'_>> =
+        pstate.p_ref_hook_state.as_plpgsql_params().copied();
+    if let Some(st) = &plpgsql_hooks {
+        if st.resolve_option == parser_small1::PlpgsqlResolveOption::Variable {
+            if let Some(p) = plpgsql_column_ref(mcx, pstate, st, fields, cref.location, false)? {
+                return Ok(p);
+            }
+        }
+    }
 
     let mut nspname: Option<&str> = None;
     let mut relname: Option<&str> = None;
@@ -1418,6 +1430,53 @@ fn transformColumnRef<'mcx>(
         ),
     };
 
+    // plpgsql_post_column_ref (pl_exec.c): runs whether or not the core
+    // resolved, to raise the variable-vs-column ambiguity error.
+    if let Some(st) = &plpgsql_hooks {
+        let skip = st.resolve_option == parser_small1::PlpgsqlResolveOption::Variable
+            || (node.is_some()
+                && st.resolve_option == parser_small1::PlpgsqlResolveOption::Column);
+        if !skip {
+            if let Some(p) = plpgsql_column_ref(
+                mcx,
+                pstate,
+                st,
+                fields,
+                cref.location,
+                node.is_none(),
+            )? {
+                if node.is_some() {
+                    let mut name = String::new();
+                    for (i, f) in fields.iter().enumerate() {
+                        if i > 0 {
+                            name.push('.');
+                        }
+                        name.push_str(field_str(*f).unwrap_or("*"));
+                    }
+                    return Err(elog::ereport(ERROR)
+                        .errcode(types_error::ERRCODE_AMBIGUOUS_COLUMN)
+                        .errmsg(format!("column reference \"{name}\" is ambiguous"))
+                        .errdetail(
+                            "It could refer to either a PL/pgSQL variable or a table column.",
+                        )
+                        .errposition(parser_small1::parser_errposition(
+                            pstate,
+                            cref.location,
+                            mbutils::GetDatabaseEncoding(),
+                        ))
+                        .into_error()
+                        .with_error_location(ErrorLocation::new(
+                            "pl_exec.c",
+                            0,
+                            "plpgsql_post_column_ref",
+                        ))
+                        .into());
+                }
+                return Ok(p);
+            }
+        }
+    }
+
     match node {
         Some(node) => Ok(node),
         None => {
@@ -1449,6 +1508,37 @@ fn transformColumnRef<'mcx>(
     }
 }
 
+
+// resolve_column_ref marshal: ColumnRef fields to &str names (an A_Star
+// field means the reference cannot be a plpgsql name).
+fn plpgsql_column_ref<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &ParseState<'_, 'mcx>,
+    st: &parser_small1::PlpgsqlHookState<'_>,
+    fields: &[Node<'mcx>],
+    location: types_core::ParseLoc,
+    error_if_no_field: bool,
+) -> PgResult<Option<Node<'mcx>>> {
+    let mut names: [&str; 3] = [""; 3];
+    if fields.is_empty() || fields.len() > 3 {
+        return Ok(None);
+    }
+    for (i, f) in fields.iter().enumerate() {
+        match f.as_string() {
+            Some(s) => names[i] = s.sval,
+            None => return Ok(None),
+        }
+    }
+    parser_small1::plpgsql_resolve_column_ref(
+        mcx,
+        pstate,
+        st,
+        &names[..fields.len()],
+        location,
+        error_if_no_field,
+        mbutils::GetDatabaseEncoding(),
+    )
+}
 
 // C sql_fn_post_column_ref (executor/functions.c): resolve unmatched column
 // references against SQL-function parameter names. Runs only after normal
@@ -1560,6 +1650,9 @@ fn transformParamRef<'mcx>(
         }
         ParseRefHookState::SqlFnParams(_) => {
             parser_small1::sql_fn_paramref_hook(mcx, pstate, pref, encoding)
+        }
+        ParseRefHookState::PlpgsqlParams(_) => {
+            parser_small1::plpgsql_paramref_hook(mcx, pstate, pref, encoding)
         }
         ParseRefHookState::None => Err(no_parameter_error(pstate, pref, encoding)),
     }

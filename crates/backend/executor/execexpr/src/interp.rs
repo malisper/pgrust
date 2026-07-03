@@ -700,6 +700,14 @@ fn run_program<'mcx>(
                     continue;
                 }
             }
+            Step::JumpIfNotNull { jumpdone, out } => {
+                let r = read_out(*out);
+                if !r.isnull {
+                    // SAFETY: jump targets validated < steps.len() at ready.
+                    sp = unsafe { base.add(*jumpdone as usize) };
+                    continue;
+                }
+            }
             Step::CaseTestVal { slot, out } => {
                 // SAFETY: compile-allocated workspace, live for 'mcx.
                 let nd = unsafe { slot.read() };

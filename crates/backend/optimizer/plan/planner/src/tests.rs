@@ -15,11 +15,12 @@ use crate::planner;
 // Serializes tests that flip or observe planner strategy GUCs.
 pub(crate) static GUC_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-fn install_fixtures() {
+pub(crate) fn install_fixtures() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         crate::init_seams();
         backend_status_seams::pgstat_report_plan_id::set(|_, _| {});
+        postgres_seams::check_for_interrupts::set(|| Ok(()));
         syscache_seams::lookup_pg_type_shape::set(|typid| {
             Ok(match typid {
                 23 => Some(PgTypeShape {

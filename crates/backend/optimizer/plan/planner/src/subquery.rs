@@ -307,6 +307,9 @@ pub fn subquery_planner<'mcx>(
     if has_outer_joins {
         crate::prepjointree::reduce_outer_joins(mcx, &mut parse)?;
     }
+    if has_result_rtes {
+        remove_useless_result_rtes(run, &mut parse)?;
+    }
 
     // Mutation done; seal the Query (C shares root->parse by pointer).
     let sealed: &'mcx Query<'mcx> = alloc_leak_in(mcx, parse)?;
@@ -325,10 +328,6 @@ pub fn subquery_planner<'mcx>(
     }
     run.glob.parallel_mode_needed = run.glob.parallel_mode_ok
         && crate::gucs::debug_parallel_query() != guc_tables::consts::DEBUG_PARALLEL_OFF;
-
-    if has_result_rtes {
-        remove_useless_result_rtes(run, sealed);
-    }
 
     grouping_planner(run, tuple_fraction, setops)?;
 
