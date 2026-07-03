@@ -368,7 +368,7 @@ pub fn DefineOpClass<'mcx>(mcx: Mcx<'mcx>, stmt: &CreateOpClassStmt<'mcx>) -> Pg
                     sortfamily: sortfamilyOid,
                     ..Default::default()
                 };
-                assignOperTypes(&mut member, am.kind, typeoid)?;
+                assignOperTypes(&mut member, am.kind, amname, typeoid)?;
                 addFamilyMember(&mut operators, member)?;
             }
             OPCLASS_ITEM_FUNCTION => {
@@ -628,7 +628,7 @@ fn AlterOpFamilyAdd<'mcx>(
                     refobjid: opfamilyoid,
                     ..Default::default()
                 };
-                assignOperTypes(&mut member, am.kind, InvalidOid)?;
+                assignOperTypes(&mut member, am.kind, stmt.amname.expect("amname"), InvalidOid)?;
                 addFamilyMember(&mut operators, member)?;
             }
             OPCLASS_ITEM_FUNCTION => {
@@ -762,7 +762,12 @@ fn processTypesSpec(mcx: Mcx<'_>, args: &NodeList<'_>) -> PgResult<(Oid, Oid)> {
 }
 
 // Determine lefttype/righttype for an operator member and validate.
-fn assignOperTypes(member: &mut OpFamilyMember, amkind: IndexAmKind, _typeoid: Oid) -> PgResult<()> {
+fn assignOperTypes(
+    member: &mut OpFamilyMember,
+    amkind: IndexAmKind,
+    amname: &str,
+    _typeoid: Oid,
+) -> PgResult<()> {
     let opform = syscache_seams::lookup_pg_operator_shape::call(member.object)?
         .unwrap_or_else(|| panic!("cache lookup failed for operator {}", member.object));
 
@@ -780,13 +785,7 @@ fn assignOperTypes(member: &mut OpFamilyMember, amkind: IndexAmKind, _typeoid: O
             return Err(err(
                 ERRCODE_INVALID_OBJECT_DEFINITION,
                 format!(
-                    "access method \"{}\" does not support ordering operators",
-                    match amkind {
-                        IndexAmKind::Btree => "btree",
-                        IndexAmKind::Hash => "hash",
-                        #[cfg(feature = "mock")]
-                        _ => "mock",
-                    }
+                    "access method \"{amname}\" does not support ordering operators"
                 ),
             ));
         }

@@ -189,7 +189,7 @@ pub fn defGetStringList<'mcx>(def: &DefElem<'mcx>) -> PgResult<&'mcx NodeList<'m
 }
 
 // NameListToString (namespace.c): '.'-joined, no quoting.
-pub fn NameListToString<'mcx>(mcx: Mcx<'mcx>, names: &NodeList<'mcx>) -> PgResult<PgString<'mcx>> {
+pub fn NameListToString<'a>(mcx: Mcx<'a>, names: &NodeList<'_>) -> PgResult<PgString<'a>> {
     let mut out = PgString::new_in(mcx);
     for (i, n) in names.iter().enumerate() {
         if i > 0 {
@@ -205,7 +205,7 @@ pub fn NameListToString<'mcx>(mcx: Mcx<'mcx>, names: &NodeList<'mcx>) -> PgResul
 
 // TypeNameToString (parse_type.c) for grammar-produced TypeNames (names
 // always present); the format_type_be(typeOid) arm is unreachable here.
-pub fn TypeNameToString<'mcx>(mcx: Mcx<'mcx>, tn: &TypeName<'mcx>) -> PgResult<PgString<'mcx>> {
+pub fn TypeNameToString<'a>(mcx: Mcx<'a>, tn: &TypeName<'_>) -> PgResult<PgString<'a>> {
     assert!(!tn.names.is_nil(), "TypeNameToString: empty names (format_type_be arm unported)");
     let mut out = NameListToString(mcx, &tn.names)?;
     for _ in tn.arrayBounds.iter() {
