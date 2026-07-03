@@ -538,6 +538,7 @@ members = [
     "crates/backend/main/main_main",
     "crates/backend/utils/adt/json",
     "crates/backend/utils/adt/jsonb",
+    "crates/backend/utils/adt/jsonpath",
     "crates/port/pg_strong_random",
     "crates/common/md5",
     "crates/backend/utils/adt/cryptohashfuncs",
