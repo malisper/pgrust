@@ -37,7 +37,10 @@ INSERT INTO arr_t VALUES (1, ARRAY[1,2,3], ARRAY['a','b']);
 INSERT INTO arr_t VALUES (2, '{4,5,6}', '{"c","d"}');
 INSERT INTO arr_t VALUES (3, NULL, NULL);
 SELECT id, xs[1], xs[2:3], ys[2] FROM arr_t ORDER BY id;
-SELECT id FROM arr_t WHERE 2 = ANY (xs) ORDER BY id;
+-- WHERE <const> = ANY(<array column>) rides scalararraysel_containment
+-- (array_selfuncs.c) — loud on main (M2 selectivity lane); tlist form
+-- exercises the executor leg.
+SELECT id, 2 = ANY (xs) FROM arr_t ORDER BY id;
 SELECT id FROM arr_t WHERE id = ANY (ARRAY[1,3]) ORDER BY id;
 SELECT array_agg(id) FROM arr_t;
 SELECT array_agg(xs[1]) FROM arr_t WHERE xs IS NOT NULL;
