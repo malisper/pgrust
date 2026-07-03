@@ -659,14 +659,20 @@ fn transformValuesClause<'mcx>(
         exprs_lists.lappend(mcx, Node::mk_list(mcx, row)?)?;
     }
 
-    // C marks the RTE LATERAL when NEW/OLD Vars appear (CREATE RULE only);
-    // no rule machinery can put an RTE in this pstate yet.
-    if !pstate.p_rtable.is_nil() {
-        panic!(
-            "transformValuesClause (analyze.c): contain_vars_of_level LATERAL arm \
-             (CREATE RULE NEW/OLD) unported — unit backend-parser-analyze"
-        );
-    }
+    // C marks the RTE LATERAL when it references NEW/OLD (CREATE RULE is the
+    // only way this pstate already holds RTEs).
+    let lateral = !pstate.p_rtable.is_nil() && {
+        let mut w = rules::VarsOfLevel { sublevels_up: 0 };
+        use nodes_core::NodeWalker as _;
+        let mut hit = false;
+        for row in &exprs_lists {
+            if w.visit(row)? {
+                hit = true;
+                break;
+            }
+        }
+        hit
+    };
 
     let nsitem = parse_relation::addRangeTableEntryForValues(
         mcx,
@@ -676,7 +682,7 @@ fn transformValuesClause<'mcx>(
         coltypmods,
         colcollations,
         None,
-        false,
+        lateral,
         true,
     )?;
     // C calls addNSItemToQuery before expandNSItemAttrs; swapped because the
@@ -763,8 +769,17 @@ fn transformInsertStmt<'mcx>(
             || !s.lockingClause.is_nil()
             || s.withClause.is_some()
     });
-    // The CREATE RULE rtable pass-down only matters for isGeneralSelect.
-    debug_assert!(pstate.p_rtable.is_nil());
+    // CREATE RULE pass-down: OLD/NEW move out of pstate and ride into the
+    // INSERT ... SELECT sub-analysis (analyze.c isGeneralSelect block).
+    let (sub_rtable, sub_perminfos, sub_namespace) = if is_general_select {
+        (
+            core::mem::replace(&mut pstate.p_rtable, types_nodes::NodeList::nil()),
+            core::mem::replace(&mut pstate.p_rteperminfos, types_nodes::NodeList::nil()),
+            core::mem::replace(&mut pstate.p_namespace, mcx::PgVec::new_in(mcx)),
+        )
+    } else {
+        (types_nodes::NodeList::nil(), types_nodes::NodeList::nil(), mcx::PgVec::new_in(mcx))
+    };
 
     let relation = stmt
         .relation
@@ -781,15 +796,22 @@ fn transformInsertStmt<'mcx>(
         None => types_nodes::NodeList::nil(),
         Some(_) if is_general_select => {
             // C hands the sub-SELECT an unknowns-unresolved pstate so target
-            // columns drive the coercion below.
-            let select_query = parse_sub_analyze(
-                mcx,
-                stmt.selectStmt.expect("isGeneralSelect implies selectStmt"),
-                pstate,
-                None,
-                false,
-                false,
-            )?;
+            // columns drive the coercion below; the moved-out rtable/namespace
+            // (CREATE RULE OLD/NEW) seed it.
+            let select_query = {
+                let mut sub_pstate = make_parsestate(mcx, Some(&*pstate));
+                sub_pstate.p_rtable = sub_rtable;
+                sub_pstate.p_rteperminfos = sub_perminfos;
+                sub_pstate.p_namespace = sub_namespace;
+                sub_pstate.p_resolve_unknowns = false;
+                let q = transformStmt(
+                    mcx,
+                    &mut sub_pstate,
+                    stmt.selectStmt.expect("isGeneralSelect implies selectStmt"),
+                )?;
+                free_parsestate(sub_pstate)?;
+                q
+            };
             if select_query.commandType != CmdType::CMD_SELECT {
                 return Err(Box::new(types_error::PgError::error(
                     "unexpected non-SELECT command in INSERT ... SELECT".to_string(),
