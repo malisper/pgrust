@@ -391,7 +391,7 @@ fn flush_multi_insert<'mcx>(
 
     if index_state.num_indices() > 0 {
         // C resets the per-tuple econtext per buffered row (CopyMultiInsertBufferFlush).
-        let mut eval_cx = MemoryContext::new("CopyIndexEvalPerTuple");
+        let mut eval_cx = MemoryContext::new_bump("CopyIndexEvalPerTuple");
         for (i, slot) in refs.into_iter().enumerate() {
             eval_cx.reset();
             cstate.cur_lineno = linenos[i];

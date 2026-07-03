@@ -300,7 +300,7 @@ pub fn exec_init_modify_table<'mcx>(
         ri_RowIdAttNo: rowid_attno,
         update_cols: mcx::PgVec::new_in(estate.es_query_cxt),
         indexes: None,
-        index_eval_cx: Some(mcx::MemoryContext::new("IndexEvalPerTuple")),
+        index_eval_cx: Some(mcx::MemoryContext::new_bump("IndexEvalPerTuple")),
         snapshot_any: Some(Rc::new(SnapshotData::sentinel(estate.es_query_cxt, SNAPSHOT_ANY))),
         returning_slot,
         project_returning,
