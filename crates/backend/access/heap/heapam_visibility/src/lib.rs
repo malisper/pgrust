@@ -673,6 +673,11 @@ struct PageMemoResolve<'a> {
 impl MvccXidResolve for PageMemoResolve<'_> {
     #[inline]
     fn in_snapshot(&mut self, xid: TransactionId, snapshot: &SnapshotData<'_>) -> PgResult<bool> {
+        // XidInMVCCSnapshot's first branch, hoisted: hinted pages resolve here
+        // at the direct path's cost; the memo serves only >= xmin xids.
+        if TransactionIdPrecedes(xid, snapshot.xmin) {
+            return Ok(false);
+        }
         let f = self.memo.get(xid);
         if f & XVM_SNAP_VALID != 0 {
             return Ok(f & XVM_IN_SNAPSHOT != 0);
@@ -734,6 +739,10 @@ pub fn HeapTupleSatisfiesMVCCPage(
     satisfies_mvcc_res(htup, snapshot, buffer, &mut PageMemoResolve { memo })
 }
 
+// inline(always): each resolver seat collapses into its wrapper, keeping the
+// Direct seat's codegen the pre-generic concrete body (index-fetch lanes are
+// sensitive to the extra call edge).
+#[inline(always)]
 fn satisfies_mvcc_res<R: MvccXidResolve>(
     htup: &mut HeapTupleData<'_>,
     snapshot: &SnapshotData<'_>,
