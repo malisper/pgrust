@@ -646,10 +646,10 @@ pub fn index_build<'mcx>(
     } else if indexRelation.rd_rel.relam == HASH_AM_OID {
         let r = hashsort::hashbuild(mcx, heapRelation, indexRelation, indexInfo)?;
         (r.heap_tuples, r.index_tuples)
-    } else {
+    } else if indexRelation.rd_rel.relam == GIN_AM_OID {
         let r = ginbuild::ginbuild(mcx, heapRelation, indexRelation, indexInfo)?;
         (r.heap_tuples, r.index_tuples)
-    } else if indexRelation.rd_rel.relam == GIST_AM_OID {
+    } else {
         let r = gistbuild::gistbuild(mcx, heapRelation, indexRelation, indexInfo)?;
         (r.heap_tuples, r.index_tuples)
     };
