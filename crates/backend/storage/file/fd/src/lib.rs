@@ -7,6 +7,7 @@
 //! allocated-descriptor table, and the fsync/durability helpers.
 
 pub mod buffile;
+pub mod copydir;
 pub mod desc;
 pub mod io;
 pub mod sync;
@@ -14,6 +15,7 @@ pub mod temp;
 pub mod vfd;
 
 pub use buffile::{BufFile, BufFileCreateTemp, PrepareTempTablespaces};
+pub use copydir::{copy_file, copydir, directory_is_empty, pg_mkdir_p, rmtree};
 pub use desc::{
     closeAllVfds, with_allocated_dir, with_allocated_stdio, AllocateDir, AllocateFile,
     ClosePipeStream, CloseTransientFile, FreeDir, FreeFile, OpenPipeStream, OpenTransientFile,

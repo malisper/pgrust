@@ -125,6 +125,25 @@ fn FindAndDropRelationBuffers(
     Ok(())
 }
 
+/// DropDatabaseBuffers (bufmgr.c): whole-pool sweep; no relation-count
+/// optimization is possible, as in C.
+pub fn DropDatabaseBuffers(dbid: types_core::Oid) -> PgResult<()> {
+    for i in 0..NBuffersInited() {
+        let desc = GetBufferDescriptor(i);
+        // Unlocked precheck, safe as in DropRelationBuffers (C comment).
+        if desc.tag().dbOid != dbid {
+            continue;
+        }
+        let buf_state = LockBufHdr(desc);
+        if desc.tag().dbOid == dbid {
+            InvalidateBuffer(desc, buf_state)?;
+        } else {
+            UnlockBufHdr(desc, buf_state);
+        }
+    }
+    Ok(())
+}
+
 pub fn DropRelationsAllBuffers(smgr_reln: &[RelFileLocatorBackend]) -> PgResult<()> {
     let mut rels: Vec<RelFileLocatorBackend> = Vec::with_capacity(smgr_reln.len());
     for r in smgr_reln {

@@ -282,6 +282,33 @@ pub fn FlushOneBuffer(buffer: Buffer) -> PgResult<()> {
     FlushBuffer(desc)
 }
 
+/// FlushDatabaseBuffers (bufmgr.c): write out all dirty buffers of a database.
+pub fn FlushDatabaseBuffers(dbid: types_core::Oid) -> PgResult<()> {
+    for i in 0..crate::buf_hdr::NBuffersInited() {
+        let desc = GetBufferDescriptor(i);
+        // Unlocked precheck, safe as in DropRelationBuffers (C comment).
+        if desc.tag().dbOid != dbid {
+            continue;
+        }
+
+        ReservePrivateRefCountEntry();
+        crate::pin::resowner_enlarge_for_pin()?;
+
+        let buf_state = LockBufHdr(desc);
+        if desc.tag().dbOid == dbid && buf_state & (BM_VALID | BM_DIRTY) == (BM_VALID | BM_DIRTY) {
+            PinBuffer_Locked(desc);
+            LWLockAcquire(&desc.content_lock, LW_SHARED, globals::MyProcNumber())?;
+            let flush_result = FlushBuffer(desc);
+            LWLockRelease(&desc.content_lock)?;
+            UnpinBuffer(desc);
+            flush_result?;
+        } else {
+            UnlockBufHdr(desc, buf_state);
+        }
+    }
+    Ok(())
+}
+
 pub fn FlushRelationsAllBuffers(rels: &[RelFileLocatorBackend]) -> PgResult<()> {
     if rels.is_empty() {
         return Ok(());

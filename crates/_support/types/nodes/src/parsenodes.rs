@@ -662,6 +662,37 @@ pub struct CreateSchemaStmt<'mcx> {
     pub if_not_exists: bool,
 }
 
+#[derive(Default)]
+pub struct CreatedbStmt<'mcx> {
+    pub dbname: Option<&'mcx str>,
+    pub options: NodeList<'mcx>,
+}
+
+#[derive(Default)]
+pub struct DropdbStmt<'mcx> {
+    pub dbname: Option<&'mcx str>,
+    pub missing_ok: bool,
+    pub options: NodeList<'mcx>,
+}
+
+#[derive(Default)]
+pub struct AlterDatabaseStmt<'mcx> {
+    pub dbname: Option<&'mcx str>,
+    pub options: NodeList<'mcx>,
+}
+
+#[derive(Default)]
+pub struct AlterDatabaseRefreshCollStmt<'mcx> {
+    pub dbname: Option<&'mcx str>,
+}
+
+// C: setstmt is a VariableSetStmt node.
+#[derive(Default)]
+pub struct AlterDatabaseSetStmt<'mcx> {
+    pub dbname: Option<&'mcx str>,
+    pub setstmt: Option<Node<'mcx>>,
+}
+
 // C: object is a List for TABLE/COLUMN forms; comment NULL removes it.
 #[derive(Default)]
 pub struct CommentStmt<'mcx> {
@@ -931,6 +962,21 @@ unsafe impl<'mcx> NodeVariant<'mcx> for CreateSchemaStmt<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for CommentStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_CommentStmt;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for CreatedbStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CreatedbStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for DropdbStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_DropdbStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for AlterDatabaseStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_AlterDatabaseStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for AlterDatabaseRefreshCollStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_AlterDatabaseRefreshCollStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for AlterDatabaseSetStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_AlterDatabaseSetStmt;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for AlterTableStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_AlterTableStmt;
 }
@@ -1140,6 +1186,16 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_comment_stmt(self) -> Option<&'mcx CommentStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_createdb_stmt(self) -> Option<&'mcx CreatedbStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_dropdb_stmt(self) -> Option<&'mcx DropdbStmt<'mcx>> {
         self.as_variant()
     }
 }

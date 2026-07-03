@@ -312,7 +312,15 @@ fn dispatch_switch<'mcx>(
 
         T_CreatedbStmt => {
             xact::PreventInTransactionBlock(is_top_level, "CREATE DATABASE")?;
-            handler_gap("createdb (dbcommands lane)")
+            let stmt = parsetree.as_createdb_stmt().unwrap();
+            // Retention contract as unify_stmt_lifetime.
+            let stmt = unsafe {
+                core::mem::transmute::<
+                    &types_nodes::parsenodes::CreatedbStmt<'_>,
+                    &types_nodes::parsenodes::CreatedbStmt<'mcx>,
+                >(stmt)
+            };
+            dbcommands::createdb(mcx, stmt)?;
         }
         T_AlterDatabaseStmt => handler_gap("AlterDatabase (dbcommands lane)"),
         T_AlterDatabaseRefreshCollStmt => {
@@ -321,7 +329,16 @@ fn dispatch_switch<'mcx>(
         T_AlterDatabaseSetStmt => handler_gap("AlterDatabaseSet (dbcommands lane)"),
         T_DropdbStmt => {
             xact::PreventInTransactionBlock(is_top_level, "DROP DATABASE")?;
-            handler_gap("dropdb (dbcommands lane)")
+            let stmt = parsetree.as_dropdb_stmt().unwrap();
+            let mut force = false;
+            for opt in stmt.options.iter() {
+                let d = opt.as_def_elem().expect("dropdb options are DefElems");
+                match d.defname.unwrap_or("") {
+                    "force" => force = true,
+                    other => panic!("dropdb: unrecognized option \"{other}\""),
+                }
+            }
+            dbcommands::dropdb(mcx, stmt.dbname.unwrap_or(""), stmt.missing_ok, force)?;
         }
 
         T_NotifyStmt => {

@@ -1102,12 +1102,91 @@ pub fn GlobalVisCheckRemovableFullXid(
     GlobalVisTestIsRemovableFullXid(GlobalVisTestFor(rel), fxid)
 }
 
+pub fn CountDBConnections(databaseid: Oid) -> PgResult<i32> {
+    let arrayP = procArray();
+    let hdr = ProcGlobal();
+    let mut count = 0;
+
+    LWLockAcquire(ProcArrayLock(), LW_SHARED, MyProc().expect("no MyProc"))?;
+    for index in 0..arrayP.numProcs.get() as usize {
+        let pgprocno = arrayP.pgprocnos[index].get();
+        let proc = &hdr.allProcs[pgprocno as usize];
+        if proc.pid.load(Relaxed) == 0 {
+            continue;
+        }
+        if proc.databaseId.load(Relaxed) == databaseid {
+            count += 1;
+        }
+    }
+    LWLockRelease(ProcArrayLock())?;
+    Ok(count)
+}
+
+// C sends SIGTERM to conflicting autovacuum workers each try; no autovacuum
+// exists here, so the walk-and-retry loop is kept without the kill step.
+pub fn CountOtherDBBackends(databaseid: Oid) -> PgResult<Option<(i32, i32)>> {
+    let arrayP = procArray();
+    let hdr = ProcGlobal();
+    let my_procno = MyProc().expect("no MyProc");
+
+    for _ in 0..50 {
+        postgres_seams::check_for_interrupts::call()?;
+
+        let mut nbackends = 0;
+        let mut nprepared = 0;
+        let mut found = false;
+
+        LWLockAcquire(ProcArrayLock(), LW_SHARED, my_procno)?;
+        for index in 0..arrayP.numProcs.get() as usize {
+            let pgprocno = arrayP.pgprocnos[index].get();
+            let proc = &hdr.allProcs[pgprocno as usize];
+            if proc.databaseId.load(Relaxed) != databaseid {
+                continue;
+            }
+            if pgprocno == my_procno {
+                continue;
+            }
+            found = true;
+            if proc.pid.load(Relaxed) == 0 {
+                nprepared += 1;
+            } else {
+                nbackends += 1;
+            }
+        }
+        LWLockRelease(ProcArrayLock())?;
+
+        if !found {
+            return Ok(None);
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let mut nbackends = 0;
+    let mut nprepared = 0;
+    LWLockAcquire(ProcArrayLock(), LW_SHARED, my_procno)?;
+    for index in 0..arrayP.numProcs.get() as usize {
+        let pgprocno = arrayP.pgprocnos[index].get();
+        let proc = &hdr.allProcs[pgprocno as usize];
+        if proc.databaseId.load(Relaxed) != databaseid || pgprocno == my_procno {
+            continue;
+        }
+        if proc.pid.load(Relaxed) == 0 {
+            nprepared += 1;
+        } else {
+            nbackends += 1;
+        }
+    }
+    LWLockRelease(ProcArrayLock())?;
+    Ok(Some((nbackends, nprepared)))
+}
+
 pub fn init_seams() {
     procarray_seams::proc_array_add::set(ProcArrayAdd);
     procarray_seams::proc_array_remove::set(ProcArrayRemove);
     procarray_seams::proc_array_end_transaction::set(ProcArrayEndTransaction);
     procarray_seams::transaction_id_is_in_progress::set(TransactionIdIsInProgress);
     procarray_seams::xid_cache_remove_running_xids::set(XidCacheRemoveRunningXids);
+    procarray_seams::count_db_connections::set(CountDBConnections);
     // Tests pre-install controllable global-vis fakes; keep them.
     if !procarray_seams::global_vis_test_for::is_installed() {
         procarray_seams::global_vis_test_for::set(GlobalVisTestFor);

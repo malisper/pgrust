@@ -19,6 +19,7 @@ relmapper = { path = "../../../utils/cache/relmapper" }
 clog = { path = "../clog" }
 multixact = { path = "../multixact" }
 transam_xlog_seams = { path = "../transam_xlog_seams" }
+dbcommands_seams = { path = "../../../commands/dbcommands_seams" }
 storage_xlog = { path = "../../../catalog/storage_xlog" }
 standby = { path = "../../../storage/ipc/standby" }
 heapam_xlog = { path = "../../heap/heapam_xlog" }

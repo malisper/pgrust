@@ -2028,11 +2028,51 @@ dependencies = [
 name = "dbcommands"
 version = "0.0.0"
 dependencies = [
+ "adt_acl",
+ "bufmgr",
  "cache_syscache",
+ "catalog",
+ "catalog_indexing",
+ "checkpointer",
  "datum",
  "dbcommands_seams",
+ "elog",
+ "explain",
+ "fd",
+ "fmgr_seams",
+ "genam",
+ "heaptuple",
+ "init_small",
+ "libc",
+ "lmgr",
+ "mbutils",
+ "mcx",
+ "miscinit",
+ "pg_database",
+ "pg_database_seams",
+ "pg_depend",
+ "pg_locale",
+ "pg_shdepend",
+ "procarray",
+ "procsignal",
+ "relpath",
+ "smgr",
+ "superuser",
+ "table",
+ "transam_xlog",
  "types_core",
  "types_error",
+ "types_nodes",
+ "types_rel",
+ "types_scan",
+ "types_storage",
+ "types_tuple",
+ "varlena",
+ "wchar",
+ "xact",
+ "xloginsert",
+ "xlogreader_seams",
+ "xlogutils",
 ]
 
 [[package]]
@@ -2043,6 +2083,7 @@ dependencies = [
  "seam_core",
  "types_core",
  "types_error",
+ "xlogreader_seams",
 ]
 
 [[package]]
@@ -5544,6 +5585,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "pg_shdepend"
+version = "0.0.0"
+dependencies = [
+ "catalog_indexing",
+ "datum",
+ "fmgr_seams",
+ "genam",
+ "heaptuple",
+ "mcx",
+ "table",
+ "types_core",
+ "types_error",
+ "types_rel",
+ "types_scan",
+ "types_tuple",
+]
+
+[[package]]
 name = "pg_string"
 version = "0.0.0"
 dependencies = [
@@ -6501,6 +6560,7 @@ dependencies = [
  "miscinit_seams",
  "pg_sema_seams",
  "pmsignal_seams",
+ "postgres_seams",
  "procarray_seams",
  "s_lock_seams",
  "shmem_seams",
@@ -7137,6 +7197,7 @@ name = "rmgr"
 version = "0.0.0"
 dependencies = [
  "clog",
+ "dbcommands_seams",
  "elog",
  "hash_xlog",
  "heapam_xlog",
@@ -8805,6 +8866,7 @@ dependencies = [
  "commands_comment",
  "commands_vacuum",
  "copy_cmd",
+ "dbcommands",
  "discard",
  "elog",
  "elog_seams",

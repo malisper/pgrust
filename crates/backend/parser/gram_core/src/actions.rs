@@ -3104,6 +3104,85 @@ impl<'mcx> Parser<'mcx> {
             // opt_transaction_chain: AND CHAIN | AND NO CHAIN | empty (1487).
             1485 => *yyval = YYSTYPE::Boolean(true),
             1486 | 1487 => *yyval = YYSTYPE::Boolean(false),
+            // CreatedbStmt: CREATE DATABASE name opt_with createdb_opt_list.
+            1497 => {
+                let mut n = Node::build::<types_nodes::parsenodes::CreatedbStmt>(mcx)?;
+                n.dbname = Some(view.v(3).str_val());
+                n.options = view.v(5).list();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1500 => {
+                let item = view.v(1).node().expect("createdb_opt_item");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, item)?);
+            }
+            1501 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(2).node().expect("createdb_opt_item"))?;
+                *yyval = YYSTYPE::List(list);
+            }
+            // createdb_opt_item: name opt_equal (NumericOnly | opt_boolean_or_string | DEFAULT).
+            1502 => *yyval = def_elem(mcx, view.v(1).str_val(), view.v(3).node(), view.l(1))?,
+            1503 => {
+                let s = Node::mk_string(mcx, view.v(3).str_val())?;
+                *yyval = def_elem(mcx, view.v(1).str_val(), Some(s), view.l(1))?;
+            }
+            1504 => *yyval = def_elem(mcx, view.v(1).str_val(), None, view.l(1))?,
+            // createdb_opt_name: CONNECTION LIMIT (IDENT/keyword arms ride DISPATCH).
+            1506 => *yyval = YYSTYPE::Str("connection_limit"),
+            // AlterDatabaseStmt / AlterDatabaseRefreshCollStmt / AlterDatabaseSetStmt.
+            1514 | 1515 => {
+                let mut n = Node::build::<types_nodes::parsenodes::AlterDatabaseStmt>(mcx)?;
+                n.dbname = Some(view.v(3).str_val());
+                n.options = view.v(if rule == 1514 { 5 } else { 4 }).list();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1516 => {
+                let mut n = Node::build::<types_nodes::parsenodes::AlterDatabaseStmt>(mcx)?;
+                n.dbname = Some(view.v(3).str_val());
+                let s = Node::mk_string(mcx, view.v(6).str_val())?;
+                let d = def_elem(mcx, "tablespace", Some(s), view.l(6))?;
+                let YYSTYPE::Node(Some(d)) = d else { unreachable!() };
+                n.options = NodeList::make1(mcx, d)?;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1517 => {
+                let mut n =
+                    Node::build::<types_nodes::parsenodes::AlterDatabaseRefreshCollStmt>(mcx)?;
+                n.dbname = Some(view.v(3).str_val());
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1518 => {
+                let mut n = Node::build::<types_nodes::parsenodes::AlterDatabaseSetStmt>(mcx)?;
+                n.dbname = Some(view.v(3).str_val());
+                n.setstmt = view.v(4).node();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // DropdbStmt: DROP DATABASE [IF EXISTS] name [opt_with '(' drop_option_list ')'].
+            1519 | 1520 => {
+                let mut n = Node::build::<types_nodes::parsenodes::DropdbStmt>(mcx)?;
+                n.dbname = Some(view.v(if rule == 1519 { 3 } else { 5 }).str_val());
+                n.missing_ok = rule == 1520;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1521 | 1522 => {
+                let mut n = Node::build::<types_nodes::parsenodes::DropdbStmt>(mcx)?;
+                let (name, opts) = if rule == 1521 { (3, 6) } else { (5, 8) };
+                n.dbname = Some(view.v(name).str_val());
+                n.missing_ok = rule == 1522;
+                n.options = view.v(opts).list();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1523 => {
+                let item = view.v(1).node().expect("drop_option");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, item)?);
+            }
+            1524 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(3).node().expect("drop_option"))?;
+                *yyval = YYSTYPE::List(list);
+            }
+            // drop_option: FORCE.
+            1525 => *yyval = def_elem(mcx, "force", None, view.l(1))?,
             1589 => {
                 let mut n = Node::build::<types_nodes::parsenodes::ExplainStmt>(mcx)?;
                 n.query = view.v(5).node();

@@ -26,6 +26,7 @@ types_rel = { path = "../../../../_support/types/rel" }
 catalog_seams = { path = "../../../catalog/catalog_seams" }
 init_small = { path = "../../../utils/init/init_small" }
 elog = { path = "../../../utils/error/elog" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
 
 [dev-dependencies]
 pg_sema_seams = { path = "../../../port/pg_sema_seams" }
