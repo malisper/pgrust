@@ -55,6 +55,7 @@ fn create_plan_recurse<'mcx>(
         PathNode::WindowAggPath(_) => create_windowagg_plan(run, path_id),
         PathNode::UpperUniquePath(_) => create_upper_unique_plan(run, path_id, flags),
         PathNode::SortPath(_) => create_sort_plan(run, path_id, flags),
+        PathNode::MaterialPath(_) => create_material_plan(run, path_id, flags),
         PathNode::NestPath(_) => create_join_plan(run, path_id),
         PathNode::MergePath(_) => create_mergejoin_plan(run, path_id),
         PathNode::HashPath(_) => create_hashjoin_plan(run, path_id),
@@ -291,6 +292,38 @@ fn extract_actual_clauses<'mcx>(
             .expect("lappend");
     }
     out
+}
+
+// extract_actual_join_clauses (restrictinfo.c): joinquals vs pushed-down
+// otherquals for outer joins; pseudoconstants are gating quals.
+fn extract_actual_join_clauses<'mcx>(
+    run: &PlannerRun<'mcx>,
+    rinfos: &[RinfoId],
+    joinrelids: &types_pathnodes::Relids<'mcx>,
+) -> (NodeList<'mcx>, NodeList<'mcx>) {
+    let mut joinquals = NodeList::nil();
+    let mut otherquals = NodeList::nil();
+    for &rid in rinfos {
+        if run.root.rinfo(rid).pseudoconstant {
+            continue;
+        }
+        let clause = *run.root.expr_node(run.root.rinfo(rid).clause);
+        if crate::joinrels::rinfo_is_pushed_down(run, rid, joinrelids) {
+            otherquals.lappend(run.mcx, clause).expect("lappend");
+        } else {
+            joinquals.lappend(run.mcx, clause).expect("lappend");
+        }
+    }
+    (joinquals, otherquals)
+}
+
+fn jointype_enum(jointype: u32) -> types_nodes::JoinType {
+    match jointype {
+        types_pathnodes::JOIN_INNER => types_nodes::JoinType::JOIN_INNER,
+        types_pathnodes::JOIN_LEFT => types_nodes::JoinType::JOIN_LEFT,
+        types_pathnodes::JOIN_RIGHT => types_nodes::JoinType::JOIN_RIGHT,
+        other => panic!("create_join_plan (createplan.c): jointype {other} unported"),
+    }
 }
 
 fn copy_generic_path_info(run: &PlannerRun<'_>, plan: &mut Plan<'_>, path_id: PathId) {
@@ -1373,6 +1406,32 @@ fn create_limit_plan<'mcx>(
 // create_join_plan (createplan.c), T_NestLoop arm -> create_nestloop_plan +
 // make_nestloop. Gating (pseudoconstant) clauses are loud upstream; the
 // reparameterize/nestParams legs are dead while param_info is always None.
+// create_material_plan + make_material (createplan.c): the tlist shares the
+// child's (Material never projects).
+fn create_material_plan<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    path_id: PathId,
+    flags: i32,
+) -> PgResult<Node<'mcx>> {
+    let mcx = run.mcx;
+    let subpath = match run.root.path(path_id) {
+        PathNode::MaterialPath(mp) => mp.subpath.expect("Material subpath"),
+        other => panic!("create_material_plan (createplan.c): pathtype {}", other.base().pathtype),
+    };
+    let subplan = create_plan_recurse(run, subpath, flags | CP_SMALL_TLIST)?;
+    let mut tlist = NodeList::nil();
+    for te in subplan.as_plan().expect("subplan").targetlist.iter() {
+        tlist.lappend(mcx, te)?;
+    }
+    let mut plan = Node::build::<types_nodes::plannodes::Material>(mcx)?;
+    plan.plan.targetlist = tlist;
+    plan.plan.qual = NodeList::nil();
+    plan.plan.lefttree = Some(subplan);
+    plan.plan.righttree = None;
+    copy_generic_path_info(run, &mut plan.plan, path_id);
+    Ok(plan.seal())
+}
+
 fn create_join_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> PgResult<Node<'mcx>> {
     let mcx = run.mcx;
     let (outer_path, inner_path, jointype, inner_unique, restrict, target_id) =
@@ -1393,10 +1452,6 @@ fn create_join_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> PgResu
                 other.base().pathtype
             ),
         };
-    assert!(
-        jointype == types_pathnodes::JOIN_INNER,
-        "create_nestloop_plan (createplan.c): jointype {jointype}; M2 outer-join lane"
-    );
     debug_assert!(restrict.iter().all(|&r| !run.root.rinfo(r).pseudoconstant));
 
     let tlist = build_path_tlist(run, target_id)?;
@@ -1406,15 +1461,22 @@ fn create_join_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> PgResu
     let inner_plan = create_plan_recurse(run, inner_path, 0)?;
 
     let ordered = order_qual_clauses(run, &restrict)?;
-    // Inner join: all clauses alike become joinquals, otherclauses stay NIL.
-    let joinclauses = extract_actual_clauses(run, &ordered);
+    let (joinclauses, otherclauses) = if jointype != types_pathnodes::JOIN_INNER {
+        let joinrelids = crate::relnode::relids_copy(
+            mcx,
+            &run.root.rel(run.root.path(path_id).base().parent).relids,
+        );
+        extract_actual_join_clauses(run, &ordered, &joinrelids)
+    } else {
+        (extract_actual_clauses(run, &ordered), NodeList::nil())
+    };
 
     let mut plan = Node::build::<types_nodes::plannodes::NestLoop>(mcx)?;
     plan.join.plan.targetlist = tlist;
-    plan.join.plan.qual = NodeList::nil();
+    plan.join.plan.qual = otherclauses;
     plan.join.plan.lefttree = Some(outer_plan);
     plan.join.plan.righttree = Some(inner_plan);
-    plan.join.jointype = types_nodes::JoinType::JOIN_INNER;
+    plan.join.jointype = jointype_enum(jointype);
     plan.join.inner_unique = inner_unique;
     plan.join.joinqual = joinclauses;
     plan.nestParams = NodeList::nil();
@@ -1447,18 +1509,21 @@ fn create_hashjoin_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> Pg
                 other.base().pathtype
             ),
         };
-    assert!(
-        jointype == types_pathnodes::JOIN_INNER,
-        "create_hashjoin_plan (createplan.c): jointype {jointype}; M2 outer-join lane"
-    );
-
     let tlist = build_path_tlist(run, target_id)?;
     let outer_flags = if num_batches > 1 { CP_SMALL_TLIST } else { 0 };
     let outer_plan = create_plan_recurse(run, outer_path, outer_flags)?;
     let inner_plan = create_plan_recurse(run, inner_path, CP_SMALL_TLIST)?;
 
     let ordered = order_qual_clauses(run, &restrict)?;
-    let joinclauses = extract_actual_clauses(run, &ordered);
+    let (joinclauses, otherclauses) = if jointype != types_pathnodes::JOIN_INNER {
+        let joinrelids = crate::relnode::relids_copy(
+            mcx,
+            &run.root.rel(run.root.path(path_id).base().parent).relids,
+        );
+        extract_actual_join_clauses(run, &ordered, &joinrelids)
+    } else {
+        (extract_actual_clauses(run, &ordered), NodeList::nil())
+    };
     // hashclauses (plain OpExpr form) removed from joinclauses (no double eval).
     let hashclauses_actual = get_actual_clauses(run, &hash_rinfos);
     let joinclauses = list_difference(mcx, &joinclauses, &hashclauses_actual);
@@ -1506,14 +1571,14 @@ fn create_hashjoin_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> Pg
     // make_hashjoin.
     let mut join_plan = Node::build::<HashJoin>(mcx)?;
     join_plan.join.plan.targetlist = tlist;
-    join_plan.join.plan.qual = NodeList::nil();
+    join_plan.join.plan.qual = otherclauses;
     join_plan.join.plan.lefttree = Some(outer_plan);
     join_plan.join.plan.righttree = Some(hash_node);
     join_plan.hashclauses = switched;
     join_plan.hashoperators = hashoperators;
     join_plan.hashcollations = hashcollations;
     join_plan.hashkeys = outer_hashkeys;
-    join_plan.join.jointype = types_nodes::JoinType::JOIN_INNER;
+    join_plan.join.jointype = jointype_enum(jointype);
     join_plan.join.inner_unique = inner_unique;
     join_plan.join.joinqual = joinclauses;
     copy_generic_path_info(run, &mut join_plan.join.plan, path_id);
@@ -1670,10 +1735,6 @@ fn create_mergejoin_plan<'mcx>(
             other.base().pathtype
         ),
     };
-    assert!(
-        jointype == types_pathnodes::JOIN_INNER,
-        "create_mergejoin_plan (createplan.c): jointype {jointype}; M2 outer-join lane"
-    );
     debug_assert!(restrict.iter().all(|&r| !run.root.rinfo(r).pseudoconstant));
 
     let tlist = build_path_tlist(run, target_id)?;
@@ -1683,8 +1744,15 @@ fn create_mergejoin_plan<'mcx>(
     let mut inner_plan = create_plan_recurse(run, inner_path, inner_flags)?;
 
     let ordered = order_qual_clauses(run, &restrict)?;
-    // Inner join: all clauses alike become joinquals, otherclauses stay NIL.
-    let joinclauses = extract_actual_clauses(run, &ordered);
+    let (joinclauses, otherclauses) = if jointype != types_pathnodes::JOIN_INNER {
+        let joinrelids = crate::relnode::relids_copy(
+            mcx,
+            &run.root.rel(run.root.path(path_id).base().parent).relids,
+        );
+        extract_actual_join_clauses(run, &ordered, &joinrelids)
+    } else {
+        (extract_actual_clauses(run, &ordered), NodeList::nil())
+    };
     // NB: mergeclauses keep RestrictInfo order (never reordered by cost).
     let merge_actual = get_actual_clauses(run, &merge_rinfos);
     let joinclauses = list_difference(mcx, &joinclauses, &merge_actual);
@@ -1807,7 +1875,7 @@ fn create_mergejoin_plan<'mcx>(
 
     let mut join_plan = Node::build::<types_nodes::plannodes::MergeJoin>(mcx)?;
     join_plan.join.plan.targetlist = tlist;
-    join_plan.join.plan.qual = NodeList::nil();
+    join_plan.join.plan.qual = otherclauses;
     join_plan.join.plan.lefttree = Some(outer_plan);
     join_plan.join.plan.righttree = Some(inner_plan);
     join_plan.skip_mark_restore = skip_mark_restore;
@@ -1816,7 +1884,7 @@ fn create_mergejoin_plan<'mcx>(
     join_plan.mergeCollations = mcx::vec_borrow_in(mcx, merge_collations)?;
     join_plan.mergeReversals = mcx::vec_borrow_in(mcx, merge_reversals)?;
     join_plan.mergeNullsFirst = mcx::vec_borrow_in(mcx, merge_nulls_first)?;
-    join_plan.join.jointype = types_nodes::JoinType::JOIN_INNER;
+    join_plan.join.jointype = jointype_enum(jointype);
     join_plan.join.inner_unique = inner_unique;
     join_plan.join.joinqual = joinclauses;
     copy_generic_path_info(run, &mut join_plan.join.plan, path_id);

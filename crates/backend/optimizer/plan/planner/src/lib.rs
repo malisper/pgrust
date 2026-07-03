@@ -17,6 +17,7 @@ pub mod plancat;
 pub mod selfuncs;
 pub mod planmain;
 pub mod prep;
+pub mod prepqual;
 pub mod prepjointree;
 pub mod prepagg;
 pub mod relnode;

@@ -56,6 +56,7 @@ nodeunique = { path = "../../backend/executor/nodeunique" }
 nodelimit = { path = "../../backend/executor/nodelimit" }
 nodenestloop = { path = "../../backend/executor/nodenestloop" }
 nodemergejoin = { path = "../../backend/executor/nodemergejoin" }
+nodematerial = { path = "../../backend/executor/nodematerial" }
 tuplesort = { path = "../../backend/utils/sort/tuplesort" }
 auth = { path = "../../backend/libpq/auth" }
 be_secure = { path = "../../backend/libpq/be_secure" }

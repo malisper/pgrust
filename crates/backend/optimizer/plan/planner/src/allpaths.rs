@@ -11,8 +11,14 @@ pub fn make_one_rel<'mcx>(
     run: &mut PlannerRun<'mcx>,
     joinlist: &[JoinlistNode<'mcx>],
 ) -> PgResult<RelId> {
-    // set_base_rel_consider_startup: no SEMI/ANTI joins exist.
-    debug_assert!(run.root.join_info_list.is_empty());
+    // set_base_rel_consider_startup: consider_param_startup only flips for
+    // SEMI/ANTI RHS singletons, which cannot exist here.
+    debug_assert!(run
+        .root
+        .join_info_list
+        .iter()
+        .all(|sj| sj.jointype != types_pathnodes::JOIN_SEMI
+            && sj.jointype != types_pathnodes::JOIN_ANTI));
 
     set_base_rel_sizes(run)?;
 

@@ -94,6 +94,23 @@ fn cost_qual_eval_walker(node: Node<'_>, cost: &mut QualCost) -> PgResult<()> {
         NodeTag::T_RelabelType => {
             cost_qual_eval_walker(node.as_relabel_type().unwrap().arg, cost)
         }
+        // Boolean connectives are free in C; NullTest is "cheap" (no charge).
+        NodeTag::T_BoolExpr => {
+            for arg in &node.as_bool_expr().unwrap().args {
+                cost_qual_eval_walker(arg, cost)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_List => {
+            for arg in node.as_list().unwrap() {
+                cost_qual_eval_walker(arg, cost)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_NullTest => match node.as_null_test().unwrap().arg {
+            Some(arg) => cost_qual_eval_walker(arg, cost),
+            None => Ok(()),
+        },
         other => panic!("cost_qual_eval_walker (costsize.c): {other:?}; M2 expression lane"),
     }
 }

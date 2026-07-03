@@ -1,7 +1,7 @@
 use alloc::boxed::Box;
 use alloc::format;
 
-use ::mcx::{Allocator, Mcx, PgBox};
+use ::mcx::{Allocator, Mcx, PgBox, PgVec};
 use ::types_core::fmgr::FnExprErased;
 use ::types_core::{Oid, FUNC_MAX_ARGS};
 use ::types_error::{
@@ -539,6 +539,7 @@ pub fn expr_type(node: Node<'_>) -> Oid {
         NodeTag::T_Aggref => node.as_aggref().unwrap().aggtype,
         NodeTag::T_WindowFunc => node.as_window_func().unwrap().wintype,
         NodeTag::T_MinMaxExpr => node.as_min_max_expr().unwrap().minmaxtype,
+        NodeTag::T_BoolExpr => 16,
         tag => panic!("execexpr exprType: node family {tag:?} not ported"),
     }
 }
@@ -614,6 +615,11 @@ fn setup_walker(node: Node<'_>, info: &mut SetupInfo) {
             }
         }
         NodeTag::T_TargetEntry => setup_walker(node.as_target_entry().unwrap().expr, info),
+        NodeTag::T_BoolExpr => {
+            for a in node.as_bool_expr().unwrap().args.iter() {
+                setup_walker(a, info);
+            }
+        }
         NodeTag::T_MinMaxExpr => {
             for a in node.as_min_max_expr().unwrap().args.iter() {
                 setup_walker(a, info);
@@ -745,8 +751,71 @@ fn init_expr_rec<'mcx>(
             let step = init_minmax(node, mm, state, mcx, out, agg, params)?;
             push_step(state, mcx, step)
         }
+        NodeTag::T_BoolExpr => init_bool_expr(node, state, mcx, out, agg, params),
         tag => panic!("execexpr ExecInitExprRec: node family {tag:?} not ported"),
     }
+}
+
+// C ExecInitExprRec T_BoolExpr: args evaluate into the BoolExpr's own output,
+// AND/OR short-circuit via jumpdone with anynull NULL bookkeeping.
+fn init_bool_expr<'mcx>(
+    node: Node<'mcx>,
+    state: &mut ExprState<'mcx>,
+    mcx: Mcx<'mcx>,
+    out: OutRef,
+    agg: Option<Bind<'_, 'mcx>>,
+    params: ParamBind<'mcx>,
+) -> PgResult<()> {
+    use ::types_nodes::primnodes::BoolExprType;
+    let b = node.as_bool_expr().unwrap();
+    let nargs = b.args.len();
+    if b.boolop == BoolExprType::NOT_EXPR {
+        assert!(nargs == 1, "NOT with {nargs} args");
+        init_expr_rec(b.args.nth(0), state, mcx, out, agg, params)?;
+        return push_step(state, mcx, Step::BoolNotStep { out });
+    }
+    assert!(nargs >= 2, "{:?} with {nargs} args", b.boolop);
+    let anynull = alloc_bool(mcx)?;
+    let is_and = b.boolop == BoolExprType::AND_EXPR;
+    let mut adjust_jumps: PgVec<'_, usize> = PgVec::new_in(mcx);
+    for (off, arg) in b.args.iter().enumerate() {
+        init_expr_rec(arg, state, mcx, out, agg, params)?;
+        let step = match (is_and, off) {
+            (true, 0) => Step::BoolAndStepFirst { anynull, jumpdone: u32::MAX, out },
+            (true, o) if o + 1 == nargs => Step::BoolAndStepLast { anynull, out },
+            (true, _) => Step::BoolAndStep { anynull, jumpdone: u32::MAX, out },
+            (false, 0) => Step::BoolOrStepFirst { anynull, jumpdone: u32::MAX, out },
+            (false, o) if o + 1 == nargs => Step::BoolOrStepLast { anynull, out },
+            (false, _) => Step::BoolOrStep { anynull, jumpdone: u32::MAX, out },
+        };
+        if !matches!(step, Step::BoolAndStepLast { .. } | Step::BoolOrStepLast { .. }) {
+            adjust_jumps.push(state.steps.len());
+        }
+        push_step(state, mcx, step)?;
+    }
+    let done = state.steps.len() as u32;
+    for ix in adjust_jumps.iter() {
+        match &mut state.steps[*ix] {
+            Step::BoolAndStepFirst { jumpdone, .. }
+            | Step::BoolAndStep { jumpdone, .. }
+            | Step::BoolOrStepFirst { jumpdone, .. }
+            | Step::BoolOrStep { jumpdone, .. } => {
+                debug_assert_eq!(*jumpdone, u32::MAX);
+                *jumpdone = done;
+            }
+            _ => unreachable!(),
+        }
+    }
+    Ok(())
+}
+
+fn alloc_bool(mcx: Mcx<'_>) -> PgResult<NonNull<bool>> {
+    let layout = core::alloc::Layout::new::<bool>();
+    let raw = mcx.allocate(layout).map_err(|_| mcx.oom(layout.size()))?;
+    let p: NonNull<bool> = raw.cast();
+    // SAFETY: fresh allocation of the exact layout.
+    unsafe { p.write(false) };
+    Ok(p)
 }
 
 // C ExecInitExprRec T_MinMaxExpr: btree cmp proc via typcache, resolve-once
@@ -997,6 +1066,12 @@ fn ready_expr(state: &mut ExprState<'_>) {
         match s {
             Step::Qual { jumpdone } => {
                 assert!((*jumpdone as usize) < len, "qual jump target out of range");
+            }
+            Step::BoolAndStepFirst { jumpdone, .. }
+            | Step::BoolAndStep { jumpdone, .. }
+            | Step::BoolOrStepFirst { jumpdone, .. }
+            | Step::BoolOrStep { jumpdone, .. } => {
+                assert!((*jumpdone as usize) < len, "boolexpr jump target out of range");
             }
             Step::AggStrictInputCheck { jumpnull, .. }
             | Step::AggStrictInputCheck1 { jumpnull, .. } => {

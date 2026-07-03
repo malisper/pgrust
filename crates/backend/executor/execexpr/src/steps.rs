@@ -58,6 +58,15 @@ pub enum Step {
     FuncExprStrict2 { call: FuncCall, out: OutRef },
     FuncExprStrict { call: FuncCall, out: OutRef },
     Qual { jumpdone: u32 },
+    // anynull: per-BoolExpr compile-allocated scratch (C d.boolexpr.anynull);
+    // FIRST/STEP short-circuit to jumpdone, LAST resolves the NULL outcome.
+    BoolAndStepFirst { anynull: NonNull<bool>, jumpdone: u32, out: OutRef },
+    BoolAndStep { anynull: NonNull<bool>, jumpdone: u32, out: OutRef },
+    BoolAndStepLast { anynull: NonNull<bool>, out: OutRef },
+    BoolOrStepFirst { anynull: NonNull<bool>, jumpdone: u32, out: OutRef },
+    BoolOrStep { anynull: NonNull<bool>, jumpdone: u32, out: OutRef },
+    BoolOrStepLast { anynull: NonNull<bool>, out: OutRef },
+    BoolNotStep { out: OutRef },
     // Agg pointers resolve at build into once-allocated never-moved AggState arrays.
     AggrefEval { value: NonNull<Datum>, null: NonNull<bool>, out: OutRef },
     // C EEOP_AGG_STRICT_INPUT_CHECK_ARGS(_1): args = fcinfo args[1..].

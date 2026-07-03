@@ -130,6 +130,11 @@ pub fn expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
             let o = node.as_variant::<OpExpr>().unwrap();
             walk_list(&o.args, w)
         }
+        NodeTag::T_BoolExpr => {
+            let b = node.as_bool_expr().unwrap();
+            walk_list(&b.args, w)
+        }
+        NodeTag::T_NullTest => walk_opt(node.as_null_test().unwrap().arg, w),
         NodeTag::T_MinMaxExpr => {
             let mm = node.as_min_max_expr().unwrap();
             walk_list(&mm.args, w)
@@ -540,6 +545,16 @@ where
                         args,
                         location: o.location,
                     },
+                )?)),
+            }
+        }
+        NodeTag::T_BoolExpr => {
+            let b = node.as_bool_expr().unwrap();
+            match mutate_list(mcx, &b.args, m)? {
+                None => Ok(None),
+                Some(args) => Ok(Some(Node::mk(
+                    mcx,
+                    types_nodes::primnodes::BoolExpr { boolop: b.boolop, args, location: b.location },
                 )?)),
             }
         }

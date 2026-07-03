@@ -65,9 +65,8 @@ impl<'a> PackedVarlena<'a> {
         unsafe { varatt::varatt_is_1b(self.ptr) }
     }
 
-    /// C's detoast_attr short-header arm (PG_DETOAST_DATUM): copy the payload
-    /// into `mcx` at palloc alignment (8) so aligned payloads (numeric digits)
-    /// stay readable; the arming context's reset reclaims it, like C's palloc.
+    /// C's detoast_attr short-header arm: payload copy at palloc alignment
+    /// (8), reclaimed by the arming context's reset (numeric digits need it).
     pub fn data_expanded<'m>(self, mcx: Mcx<'m>) -> PgResult<&'m [u8]> {
         let src = self.data();
         let layout = Layout::from_size_align(src.len(), 8).expect("data_expanded layout");

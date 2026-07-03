@@ -62,6 +62,19 @@ pub fn create_index_paths<'mcx>(run: &mut PlannerRun<'mcx>, rel: RelId) -> PgRes
     // parameterized index paths, which every consumer on this lane rejects
     // loudly; plan choice (not results) can differ where one would win.
 
+    // C runs generate_bitmap_or_paths here; skipping it would silently
+    // diverge plan choice on indexed rels.
+    for i in 0..run.root.rel(rel).baserestrictinfo.len() {
+        let rid = run.root.rel(rel).baserestrictinfo[i];
+        let clause = *run.root.expr_node(run.root.rinfo(rid).clause);
+        if clauses::is_orclause(clause) {
+            panic!(
+                "generate_bitmap_or_paths (indxpath.c): OR restriction on an indexed rel; \
+                 M2 OR-index/BitmapOr lane"
+            );
+        }
+    }
+
     let mut bitindexpaths: PgVec<'mcx, PathId> = PgVec::new_in(run.mcx);
     let nindexes = run.root.rel(rel).indexlist.len();
     for idx in 0..nindexes {

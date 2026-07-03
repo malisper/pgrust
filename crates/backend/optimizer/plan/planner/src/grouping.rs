@@ -392,6 +392,16 @@ fn pull_agg_input_vars<'mcx>(
         NodeTag::T_TargetEntry => {
             pull_agg_input_vars(node.as_target_entry().unwrap().expr, out)
         }
+        NodeTag::T_BoolExpr => {
+            for a in &node.as_bool_expr().unwrap().args {
+                pull_agg_input_vars(a, out);
+            }
+        }
+        NodeTag::T_List => {
+            for a in node.as_list().unwrap() {
+                pull_agg_input_vars(a, out);
+            }
+        }
         NodeTag::T_OpExpr => {
             for a in &node.as_op_expr().unwrap().args {
                 pull_agg_input_vars(a, out);
@@ -517,7 +527,9 @@ fn create_grouping_paths<'mcx>(
     let having_qual: mcx::PgVec<'mcx, types_pathnodes::NodeId> = {
         let mut v = mcx::PgVec::new_in(run.mcx);
         if let Some(h) = parse.havingQual {
-            v.push(run.intern_expr(h));
+            for hc in h.as_list().expect("preprocessed havingQual is a list") {
+                v.push(run.intern_expr(hc));
+            }
         }
         v
     };

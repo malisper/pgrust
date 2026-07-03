@@ -1,6 +1,6 @@
-// nodeHashjoin.c JOIN_INNER single-batch machine; the Hash sub-node build runs
-// through nodehash. LEFT/SEMI/ANTI, outer-fill, multi-batch, parallel are loud.
-// Per-probe bucket scan is allocation-free.
+// nodeHashjoin.c INNER/LEFT/RIGHT single-batch machine; the Hash sub-node
+// build runs through nodehash. SEMI/ANTI/FULL, multi-batch, parallel are
+// loud. Per-probe bucket scan is allocation-free.
 #![allow(non_snake_case)]
 
 use std::rc::Rc;
@@ -23,6 +23,8 @@ pub fn init_seams() {}
 const HJ_BUILD_HASHTABLE: u8 = 1;
 const HJ_NEED_NEW_OUTER: u8 = 2;
 const HJ_SCAN_BUCKET: u8 = 3;
+const HJ_FILL_OUTER_TUPLE: u8 = 4;
+const HJ_FILL_INNER_TUPLES: u8 = 5;
 
 #[inline(always)]
 fn cfi() -> PgResult<()> {
@@ -48,6 +50,11 @@ pub struct HashJoinState<'mcx> {
     otherqual: Option<PgBox<'mcx, ExprState<'mcx>>>,
     outer_hash_expr: PgBox<'mcx, ExprState<'mcx>>,
     js_single_match: bool,
+    // HJ_FILL_OUTER / HJ_FILL_INNER (LEFT and RIGHT joins respectively).
+    hj_fill_outer: bool,
+    hj_fill_inner: bool,
+    hj_NullInnerTupleSlot: Option<ExecSlotId>,
+    hj_NullOuterTupleSlot: Option<ExecSlotId>,
     hj_JoinState: u8,
     hj_CurHashValue: u32,
     hj_CurBucketNo: u32,
@@ -76,11 +83,26 @@ pub fn exec_init_hash_join<'mcx>(
 ) -> PgResult<(HashJoinState<'mcx>, HashState<'mcx>)> {
     debug_assert!(eflags & (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK) == 0);
     assert!(
-        node.join.jointype == JoinType::JOIN_INNER,
-        "ExecInitHashJoin (nodeHashjoin.c): jointype {:?}; LEFT/SEMI/ANTI + outer-fill lane unported",
+        matches!(
+            node.join.jointype,
+            JoinType::JOIN_INNER | JoinType::JOIN_LEFT | JoinType::JOIN_RIGHT
+        ),
+        "ExecInitHashJoin (nodeHashjoin.c): jointype {:?}; SEMI/ANTI/FULL lane unported",
         node.join.jointype
     );
     let mcx = estate.es_query_cxt;
+    let hj_fill_outer = node.join.jointype == JoinType::JOIN_LEFT;
+    let hj_fill_inner = node.join.jointype == JoinType::JOIN_RIGHT;
+    let hj_NullInnerTupleSlot = if hj_fill_outer {
+        Some(exec_init_null_tuple_slot(estate, inner_desc.clone()))
+    } else {
+        None
+    };
+    let hj_NullOuterTupleSlot = if hj_fill_inner {
+        Some(exec_init_null_tuple_slot(estate, outer_desc.clone()))
+    } else {
+        None
+    };
 
     // get_op_hash_functions -> (outer_hashfn, inner_hashfn); outer is left.
     let n = node.hashoperators.len();
@@ -136,6 +158,10 @@ pub fn exec_init_hash_join<'mcx>(
         otherqual,
         outer_hash_expr,
         js_single_match: node.join.inner_unique,
+        hj_fill_outer,
+        hj_fill_inner,
+        hj_NullInnerTupleSlot,
+        hj_NullOuterTupleSlot,
         hj_JoinState: HJ_BUILD_HASHTABLE,
         hj_CurHashValue: 0,
         hj_CurBucketNo: 0,
@@ -180,7 +206,7 @@ where
             HJ_BUILD_HASHTABLE => {
                 ::nodehash::multi_exec_hash(hash_state, hash_child, estate)?;
                 let table = hash_state.table.as_ref().expect("hash table built");
-                if table.total_tuples() == 0.0 {
+                if table.total_tuples() == 0.0 && !node.hj_fill_outer {
                     return Ok(None);
                 }
                 node.hj_OuterNotEmpty = false;
@@ -188,6 +214,14 @@ where
             }
             HJ_NEED_NEW_OUTER => {
                 let Some(hashvalue) = get_outer_tuple(node, outer, estate)? else {
+                    if node.hj_fill_inner {
+                        // ExecPrepHashTableForUnmatched.
+                        node.hj_CurBucketNo = 0;
+                        node.hj_CurTuple = ::nodehash::HashJoinTable::chain_end();
+                        node.hj_JoinState = HJ_FILL_INNER_TUPLES;
+                        continue;
+                    }
+                    // Single batch: HJ_NEED_NEW_BATCH ends the join.
                     return Ok(None);
                 };
                 node.hj_MatchedOuter = false;
@@ -199,7 +233,7 @@ where
             }
             HJ_SCAN_BUCKET => {
                 if !scan_hash_bucket(node, hash_state, estate)? {
-                    node.hj_JoinState = HJ_NEED_NEW_OUTER;
+                    node.hj_JoinState = HJ_FILL_OUTER_TUPLE;
                     continue;
                 }
                 let ecxt = node.ps_ExprContext;
@@ -209,6 +243,11 @@ where
                     with_probe_slots(ecxt, inner_id, estate, |slots| exec_qual(joinqual, slots))?;
                 if matched {
                     node.hj_MatchedOuter = true;
+                    hash_state
+                        .table
+                        .as_mut()
+                        .expect("hash table built")
+                        .set_matched(node.hj_CurTuple);
                     if node.js_single_match {
                         node.hj_JoinState = HJ_NEED_NEW_OUTER;
                     }
@@ -217,12 +256,99 @@ where
                         exec_qual(otherqual, slots)
                     })?;
                     if pass {
-                        return Ok(Some(project_result(node, hash_state, estate)?));
+                        return Ok(Some(project_result(node, inner_id, estate)?));
                     }
                 }
             }
-            other => panic!("ExecHashJoin (nodeHashjoin.c): state {other} not reachable for inner join"),
+            HJ_FILL_OUTER_TUPLE => {
+                node.hj_JoinState = HJ_NEED_NEW_OUTER;
+                if !node.hj_MatchedOuter && node.hj_fill_outer {
+                    let null_inner = node.hj_NullInnerTupleSlot.expect("null inner slot");
+                    estate.ecxt_mut(node.ps_ExprContext).ecxt_innertuple = Some(null_inner);
+                    let ecxt = node.ps_ExprContext;
+                    let otherqual = node.otherqual.as_deref_mut();
+                    let pass = with_probe_slots(ecxt, null_inner, estate, |slots| {
+                        exec_qual(otherqual, slots)
+                    })?;
+                    if pass {
+                        return Ok(Some(project_result(node, null_inner, estate)?));
+                    }
+                }
+            }
+            HJ_FILL_INNER_TUPLES => {
+                if !scan_hash_table_for_unmatched(node, hash_state, estate)? {
+                    // Single batch: no more batches to fill from.
+                    return Ok(None);
+                }
+                let null_outer = node.hj_NullOuterTupleSlot.expect("null outer slot");
+                estate.ecxt_mut(node.ps_ExprContext).ecxt_outertuple = Some(null_outer);
+                let ecxt = node.ps_ExprContext;
+                let inner_id = hash_state.hash_tuple_slot;
+                let otherqual = node.otherqual.as_deref_mut();
+                let pass = with_probe_slots(ecxt, inner_id, estate, |slots| {
+                    exec_qual(otherqual, slots)
+                })?;
+                if pass {
+                    return Ok(Some(project_result(node, inner_id, estate)?));
+                }
+            }
+            other => panic!("ExecHashJoin (nodeHashjoin.c): unrecognized state {other}"),
         }
+    }
+}
+
+// ExecInitNullTupleSlot: a virtual all-null slot with the given descriptor.
+fn exec_init_null_tuple_slot<'mcx>(
+    estate: &mut EStateData<'mcx>,
+    desc: Rc<TupleDescData<'static>>,
+) -> ExecSlotId {
+    let mcx = estate.es_query_cxt;
+    let slot_id = estate.exec_init_extra_tuple_slot(Some(desc), TupleSlotKind::Virtual);
+    exectuples::exec_store_all_null_tuple(&mut estate.es_tupleTable[slot_id.0 as usize], mcx);
+    slot_id
+}
+
+// ExecScanHashTableForUnmatched: bucket-ordered walk emitting never-matched
+// inner tuples into the hash tuple slot.
+fn scan_hash_table_for_unmatched<'mcx>(
+    node: &mut HashJoinState<'mcx>,
+    hash_state: &mut HashState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<bool> {
+    let table = hash_state.table.as_ref().expect("hash table built");
+    let end = ::nodehash::HashJoinTable::chain_end();
+    let nbuckets = table.nbuckets();
+    let mut cur = if node.hj_CurTuple != end {
+        table.entry(node.hj_CurTuple).next
+    } else {
+        end
+    };
+    loop {
+        while cur == end {
+            if node.hj_CurBucketNo >= nbuckets {
+                return Ok(false);
+            }
+            cur = table.bucket_head(node.hj_CurBucketNo);
+            node.hj_CurBucketNo += 1;
+        }
+        let e = table.entry(cur);
+        if !e.matched {
+            let hslot = hash_state.hash_tuple_slot;
+            let mcx = estate.es_query_cxt;
+            // SAFETY: entry images live in the query arena until reset.
+            unsafe {
+                exectuples::exec_store_minimal_tuple_ptr(
+                    &mut estate.es_tupleTable[hslot.0 as usize],
+                    mcx,
+                    e.tuple,
+                )
+            };
+            estate.ecxt_mut(node.ps_ExprContext).ecxt_innertuple = Some(hslot);
+            estate.reset_expr_context(node.ps_ExprContext);
+            node.hj_CurTuple = cur;
+            return Ok(true);
+        }
+        cur = e.next;
     }
 }
 
@@ -295,8 +421,11 @@ pub fn exec_end_hash_join(_node: &mut HashJoinState<'_>, hash_state: &mut HashSt
 }
 
 /// `ExecReScanHashJoin` single-batch reuse: keep the table, restart the probe.
-pub fn exec_rescan_hash_join(node: &mut HashJoinState<'_>, hash_state: &HashState<'_>) {
-    if hash_state.table.is_some() {
+pub fn exec_rescan_hash_join(node: &mut HashJoinState<'_>, hash_state: &mut HashState<'_>) {
+    if let Some(table) = hash_state.table.as_mut() {
+        if node.hj_fill_inner {
+            table.reset_match_flags();
+        }
         node.hj_OuterNotEmpty = false;
         node.hj_JoinState = HJ_NEED_NEW_OUTER;
     } else {
@@ -326,7 +455,7 @@ fn with_probe_slots<'mcx, R>(
 
 fn project_result<'mcx>(
     node: &mut HashJoinState<'mcx>,
-    hash_state: &HashState<'mcx>,
+    inner_id: ExecSlotId,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<ExecSlotId> {
     let mcx = estate.es_query_cxt;
@@ -334,7 +463,6 @@ fn project_result<'mcx>(
         .ecxt(node.ps_ExprContext)
         .ecxt_outertuple
         .expect("hashjoin outer tuple set");
-    let inner_id = hash_state.hash_tuple_slot;
     let result_id = node.ps_ResultTupleSlot;
     let table = &mut estate.es_tupleTable[..];
     let [inner, outer, result] = table

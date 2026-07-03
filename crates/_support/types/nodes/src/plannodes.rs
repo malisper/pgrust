@@ -464,6 +464,12 @@ pub struct Hash<'mcx> {
 
 #[derive(Default)]
 #[repr(C)]
+pub struct Material<'mcx> {
+    pub plan: Plan<'mcx>,
+}
+
+#[derive(Default)]
+#[repr(C)]
 pub struct Limit<'mcx> {
     pub plan: Plan<'mcx>,
     pub limitOffset: Option<Node<'mcx>>,
@@ -557,6 +563,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for HashJoin<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for Hash<'mcx> {
     const TAG: NodeTag = NodeTag::T_Hash;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for Material<'mcx> {
+    const TAG: NodeTag = NodeTag::T_Material;
+}
 // SAFETY: repr(C), Plan first (offset asserted below), tag in is_plan_tag.
 unsafe impl<'mcx> PlanVariant<'mcx> for Result<'mcx> {}
 // SAFETY: repr(C), Plan first via the Scan base (offsets asserted below).
@@ -597,6 +606,8 @@ unsafe impl<'mcx> PlanVariant<'mcx> for MergeJoin<'mcx> {}
 unsafe impl<'mcx> PlanVariant<'mcx> for HashJoin<'mcx> {}
 // SAFETY: repr(C), Plan first (offset asserted below), tag in is_plan_tag.
 unsafe impl<'mcx> PlanVariant<'mcx> for Hash<'mcx> {}
+// SAFETY: repr(C), Plan first (offset asserted below), tag in is_plan_tag.
+unsafe impl<'mcx> PlanVariant<'mcx> for Material<'mcx> {}
 
 const _: () = {
     assert!(offset_of!(Result, plan) == 0);
@@ -697,6 +708,7 @@ fn is_plan_tag(tag: NodeTag) -> bool {
             | NodeTag::T_MergeJoin
             | NodeTag::T_HashJoin
             | NodeTag::T_Hash
+            | NodeTag::T_Material
     )
 }
 
@@ -763,6 +775,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_sort(self) -> Option<&'mcx Sort<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_material(self) -> Option<&'mcx Material<'mcx>> {
         self.as_variant()
     }
 

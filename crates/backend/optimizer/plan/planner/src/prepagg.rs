@@ -57,6 +57,18 @@ fn preprocess_aggrefs_walker<'mcx>(
             }
             Ok(())
         }
+        NodeTag::T_BoolExpr => {
+            for a in &node.as_bool_expr().unwrap().args {
+                preprocess_aggrefs_walker(run, a)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_List => {
+            for a in node.as_list().unwrap() {
+                preprocess_aggrefs_walker(run, a)?;
+            }
+            Ok(())
+        }
         other => panic!(
             "preprocess_aggrefs_walker (prepagg.c): {other:?}; M3 expression lane"
         ),

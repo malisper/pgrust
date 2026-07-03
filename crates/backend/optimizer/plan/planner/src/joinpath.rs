@@ -6,7 +6,7 @@ use types_error::PgResult;
 use types_nodes::NodeTag;
 use types_pathnodes::{
     HashPath, JoinPath, MaterialPath, MergePath, MergeScanSelCache, NestPath, Path, PathId,
-    PathKey, RelId, RinfoId, SpecialJoinInfo, JOIN_INNER,
+    PathKey, RelId, RinfoId, SpecialJoinInfo, JOIN_INNER, JOIN_LEFT, JOIN_RIGHT,
 };
 
 use crate::gucs;
@@ -48,46 +48,66 @@ pub fn add_paths_to_joinrel<'mcx>(
     restrictlist: &[RinfoId],
 ) -> PgResult<()> {
     assert!(
-        jointype == JOIN_INNER,
-        "add_paths_to_joinrel (joinpath.c): jointype {jointype}; M2 outer/semi-join lane"
+        matches!(jointype, JOIN_INNER | JOIN_LEFT | JOIN_RIGHT),
+        "add_paths_to_joinrel (joinpath.c): jointype {jointype}; semi/full-join lane"
     );
     let inner_unique = innerrel_is_unique(run, outerrel, innerrel, restrictlist);
-    debug_assert!(run.root.join_info_list.is_empty());
-    // mergejoin_allowed is always true for inner joins.
-    let mergeclause_list = select_mergejoin_clauses(run, outerrel, innerrel, restrictlist)?;
-    if gucs::enable_mergejoin() {
+    let (mergeclause_list, mergejoin_allowed) =
+        select_mergejoin_clauses(run, joinrel, outerrel, innerrel, jointype, restrictlist)?;
+    if gucs::enable_mergejoin() && mergejoin_allowed {
         sort_inner_and_outer(
             run, joinrel, outerrel, innerrel, jointype, inner_unique, sjinfo, restrictlist,
             &mergeclause_list,
         )?;
     }
-    match_unsorted_outer(run, joinrel, outerrel, innerrel, jointype, inner_unique, sjinfo, restrictlist, &mergeclause_list)?;
+    if mergejoin_allowed {
+        match_unsorted_outer(run, joinrel, outerrel, innerrel, jointype, inner_unique, sjinfo, restrictlist, &mergeclause_list)?;
+    } else {
+        panic!(
+            "add_paths_to_joinrel (joinpath.c): !mergejoin_allowed nestloop-suppression arm \
+             (right/full join with non-mergeable clause)"
+        );
+    }
     hash_inner_and_outer(run, joinrel, outerrel, innerrel, jointype, inner_unique, sjinfo, restrictlist)
 }
 
-// select_mergejoin_clauses (joinpath.c), inner-join arm: pushed-down clauses
-// are usable and mergejoin_allowed is unconditionally true.
+// select_mergejoin_clauses (joinpath.c). For outer joins only the join's own
+// clauses (not pushed-down ones) participate, and a non-mergeable joinclause
+// forbids mergejoin for right/full joins (have_nonmergeable_joinclause).
 fn select_mergejoin_clauses<'mcx>(
     run: &mut PlannerRun<'mcx>,
+    joinrel: RelId,
     outerrel: RelId,
     innerrel: RelId,
+    jointype: u32,
     restrictlist: &[RinfoId],
-) -> PgResult<PgVec<'mcx, RinfoId>> {
+) -> PgResult<(PgVec<'mcx, RinfoId>, bool)> {
+    let isouterjoin = jointype != JOIN_INNER;
+    let joinrelids = crate::relnode::relids_copy(run.mcx, &run.root.rel(joinrel).relids);
+    let mut have_nonmergeable_joinclause = false;
     let mut result: PgVec<'mcx, RinfoId> = PgVec::new_in(run.mcx);
     for &rid in restrictlist {
+        if isouterjoin && crate::joinrels::rinfo_is_pushed_down(run, rid, &joinrelids) {
+            continue;
+        }
         {
             let ri = run.root.rinfo(rid);
             if !ri.can_join || ri.mergeopfamilies.is_empty() {
+                if !ri.pseudoconstant {
+                    have_nonmergeable_joinclause = true;
+                }
                 continue;
             }
         }
         if !clause_sides_match_join(run, rid, outerrel, innerrel) {
+            have_nonmergeable_joinclause = true;
             continue;
         }
         if !run.root.rinfo(rid).outer_is_left {
             let clause = *run.root.expr_node(run.root.rinfo(rid).clause);
             let opno = clause.as_op_expr().expect("mergeclause is an OpExpr").opno;
             if lsyscache::get_commutator(opno)? == 0 {
+                have_nonmergeable_joinclause = true;
                 continue;
             }
         }
@@ -97,7 +117,13 @@ fn select_mergejoin_clauses<'mcx>(
         debug_assert!(!run.root.ec(run.root.rinfo(rid).right_ec.unwrap()).ec_has_const);
         result.push(rid);
     }
-    Ok(result)
+    let mergejoin_allowed = match jointype {
+        JOIN_RIGHT | types_pathnodes::JOIN_RIGHT_ANTI | types_pathnodes::JOIN_FULL => {
+            !have_nonmergeable_joinclause
+        }
+        _ => true,
+    };
+    Ok((result, mergejoin_allowed))
 }
 
 // sort_inner_and_outer (joinpath.c); the unique-ify and partial legs are loud
@@ -170,8 +196,7 @@ fn sort_inner_and_outer<'mcx>(
     Ok(())
 }
 
-// generate_mergejoin_paths (joinpath.c); useallclauses is false (inner join)
-// and partial paths are dead.
+// generate_mergejoin_paths (joinpath.c); partial paths are dead.
 #[allow(clippy::too_many_arguments)]
 fn generate_mergejoin_paths<'mcx>(
     run: &mut PlannerRun<'mcx>,
@@ -183,6 +208,7 @@ fn generate_mergejoin_paths<'mcx>(
     sjinfo: &SpecialJoinInfo<'mcx>,
     restrictlist: &[RinfoId],
     mergeclause_list: &[RinfoId],
+    useallclauses: bool,
     inner_cheapest_total: PathId,
     merge_pathkeys: &[PathKey],
 ) -> PgResult<()> {
@@ -192,6 +218,9 @@ fn generate_mergejoin_paths<'mcx>(
     let mergeclauses =
         find_mergeclauses_for_outer_pathkeys(run, &outer_pathkeys, mergeclause_list)?;
     if mergeclauses.is_empty() {
+        return Ok(());
+    }
+    if useallclauses && mergeclauses.len() != mergeclause_list.len() {
         return Ok(());
     }
 
@@ -338,6 +367,9 @@ fn generate_mergejoin_paths<'mcx>(
                 cheapest_startup_inner = Some(ip);
             }
         }
+        if useallclauses {
+            break;
+        }
     }
     Ok(())
 }
@@ -440,6 +472,11 @@ fn match_unsorted_outer<'mcx>(
     restrictlist: &[RinfoId],
     mergeclause_list: &[RinfoId],
 ) -> PgResult<()> {
+    let (nestjoin_ok, useallclauses) = match jointype {
+        JOIN_INNER | JOIN_LEFT => (true, false),
+        JOIN_RIGHT => (false, true),
+        other => panic!("match_unsorted_outer (joinpath.c): jointype {other}"),
+    };
     let inner_cheapest_total = run
         .root
         .rel(innerrel)
@@ -447,7 +484,8 @@ fn match_unsorted_outer<'mcx>(
         .expect("inner rel has a cheapest path");
     debug_assert!(run.root.path(inner_cheapest_total).base().param_info.is_none());
 
-    let matpath = if gucs::enable_material()
+    let matpath = if nestjoin_ok
+        && gucs::enable_material()
         && !exec_materializes_output(run.root.path(inner_cheapest_total).base().pathtype)
     {
         Some(create_material_path(run, innerrel, inner_cheapest_total))
@@ -464,15 +502,17 @@ fn match_unsorted_outer<'mcx>(
             &run.root.path(outerpath).base().pathkeys,
         );
         let merge_pathkeys = build_join_pathkeys(run, joinrel, jointype, &outer_pathkeys)?;
-        let inner_candidates = crate::relnode::pgvec_clone_shallow(
-            run.mcx,
-            &run.root.rel(innerrel).cheapest_parameterized_paths,
-        );
-        for &innerpath in inner_candidates.iter() {
-            try_nestloop_path(run, joinrel, outerpath, innerpath, &merge_pathkeys, jointype, inner_unique, sjinfo, restrictlist)?;
-        }
-        if let Some(mp) = matpath {
-            try_nestloop_path(run, joinrel, outerpath, mp, &merge_pathkeys, jointype, inner_unique, sjinfo, restrictlist)?;
+        if nestjoin_ok {
+            let inner_candidates = crate::relnode::pgvec_clone_shallow(
+                run.mcx,
+                &run.root.rel(innerrel).cheapest_parameterized_paths,
+            );
+            for &innerpath in inner_candidates.iter() {
+                try_nestloop_path(run, joinrel, outerpath, innerpath, &merge_pathkeys, jointype, inner_unique, sjinfo, restrictlist)?;
+            }
+            if let Some(mp) = matpath {
+                try_nestloop_path(run, joinrel, outerpath, mp, &merge_pathkeys, jointype, inner_unique, sjinfo, restrictlist)?;
+            }
         }
         if !mergeclause_list.is_empty() && gucs::enable_mergejoin() {
             generate_mergejoin_paths(
@@ -485,6 +525,7 @@ fn match_unsorted_outer<'mcx>(
                 sjinfo,
                 restrictlist,
                 mergeclause_list,
+                useallclauses,
                 inner_cheapest_total,
                 &merge_pathkeys,
             )?;
@@ -515,7 +556,6 @@ fn try_nestloop_path<'mcx>(
     sjinfo: &SpecialJoinInfo<'mcx>,
     restrictlist: &[RinfoId],
 ) -> PgResult<()> {
-    debug_assert!(sjinfo.ojrelid == 0);
     assert!(
         run.root.path(outer_path).base().param_info.is_none()
             && run.root.path(inner_path).base().param_info.is_none(),
@@ -557,7 +597,6 @@ fn try_mergejoin_path<'mcx>(
     sjinfo: &SpecialJoinInfo<'mcx>,
     restrictlist: &[RinfoId],
 ) -> PgResult<()> {
-    debug_assert!(sjinfo.ojrelid == 0);
     assert!(
         run.root.path(outer_path).base().param_info.is_none()
             && run.root.path(inner_path).base().param_info.is_none(),
@@ -749,7 +788,8 @@ fn initial_cost_nestloop(
     let inner_run_cost = inner.total_cost - inner.startup_cost;
     let inner_rescan_run_cost = inner_rescan_total - inner_rescan_start;
 
-    debug_assert!(jointype == JOIN_INNER && !inner_unique);
+    // SEMI/ANTI/inner_unique early-stop costing is loud upstream.
+    debug_assert!(matches!(jointype, JOIN_INNER | JOIN_LEFT) && !inner_unique);
     run_cost += inner_run_cost;
     if outer_path_rows > 1.0 {
         run_cost += (outer_path_rows - 1.0) * inner_rescan_run_cost;
@@ -781,7 +821,9 @@ fn final_cost_nestloop(
     debug_assert!(path.jpath.path.param_info.is_none());
     path.jpath.path.rows = run.root.rel(path.jpath.path.parent).rows;
     debug_assert!(path.jpath.path.parallel_workers == 0);
-    debug_assert!(path.jpath.jointype == JOIN_INNER && !path.jpath.inner_unique);
+    debug_assert!(
+        matches!(path.jpath.jointype, JOIN_INNER | JOIN_LEFT) && !path.jpath.inner_unique
+    );
 
     let ntuples = outer_path_rows * inner_path_rows;
 
@@ -869,9 +911,13 @@ fn hash_inner_and_outer<'mcx>(
     sjinfo: &SpecialJoinInfo<'mcx>,
     restrictlist: &[RinfoId],
 ) -> PgResult<()> {
-    debug_assert!(jointype == JOIN_INNER);
+    let isouterjoin = jointype != JOIN_INNER;
+    let joinrelids = crate::relnode::relids_copy(run.mcx, &run.root.rel(joinrel).relids);
     let mut hashclauses: PgVec<'mcx, RinfoId> = PgVec::new_in(run.mcx);
     for &ri in restrictlist {
+        if isouterjoin && crate::joinrels::rinfo_is_pushed_down(run, ri, &joinrelids) {
+            continue;
+        }
         let r = run.root.rinfo(ri);
         if !r.can_join || r.hashjoinoperator == 0 {
             continue;
@@ -965,7 +1011,6 @@ fn try_hashjoin_path<'mcx>(
     sjinfo: &SpecialJoinInfo<'mcx>,
     restrictlist: &[RinfoId],
 ) -> PgResult<()> {
-    debug_assert!(sjinfo.ojrelid == 0);
     assert!(
         run.root.path(outer_path).base().param_info.is_none()
             && run.root.path(inner_path).base().param_info.is_none(),
@@ -1066,7 +1111,8 @@ fn final_cost_hashjoin(
     path.jpath.path.rows = run.root.rel(path.jpath.path.parent).rows;
     debug_assert!(path.jpath.path.parallel_workers == 0);
     assert!(
-        path.jpath.jointype == JOIN_INNER && !path.jpath.inner_unique,
+        matches!(path.jpath.jointype, JOIN_INNER | JOIN_LEFT | JOIN_RIGHT)
+            && !path.jpath.inner_unique,
         "final_cost_hashjoin (costsize.c): SEMI/ANTI/inner_unique branch; M2 lane"
     );
 
@@ -1144,9 +1190,15 @@ fn final_cost_hashjoin(
         * crate::costsize::clamp_row_est(inner_path_rows * innerbucketsize)
         * 0.5;
 
-    // approx_tuple_count divergence: the joinrel size estimate already applies
-    // the (equijoin) hashclause selectivity, so reuse it for the CPU term.
-    let hashjointuples = path.jpath.path.rows;
+    // approx_tuple_count divergence (inner arm): the joinrel size estimate
+    // already applies the (equijoin) hashclause selectivity, so reuse it for
+    // the CPU term. Outer joins can't reuse it (null-extension clamp +
+    // pushed-qual selectivity), so take C's approx_tuple_count directly.
+    let hashjointuples = if path.jpath.jointype == JOIN_INNER {
+        path.jpath.path.rows
+    } else {
+        approx_tuple_count(run, outer_path, inner_path, &hcls)?
+    };
 
     startup_cost += qp_startup;
     let cpu_per_tuple = gucs::cpu_tuple_cost() + qp_per_tuple;
@@ -1298,9 +1350,9 @@ fn initial_cost_mergejoin(
     let outer_path_rows = run.root.path(outer_path).base().rows.max(1.0);
     let inner_path_rows = run.root.path(inner_path).base().rows.max(1.0);
 
-    let (outerstartsel, outerendsel, innerstartsel, innerendsel);
+    let (mut outerstartsel, mut outerendsel, mut innerstartsel, mut innerendsel);
     if !mergeclauses.is_empty() {
-        debug_assert!(jointype == JOIN_INNER);
+        debug_assert!(matches!(jointype, JOIN_INNER | JOIN_LEFT | JOIN_RIGHT));
         let firstclause = mergeclauses[0];
         let opathkey = if !outersortkeys.is_empty() {
             outersortkeys[0]
@@ -1336,6 +1388,13 @@ fn initial_cost_mergejoin(
             outerendsel = cache.rightendsel;
             innerstartsel = cache.leftstartsel;
             innerendsel = cache.leftendsel;
+        }
+        if jointype == JOIN_LEFT {
+            outerstartsel = 0.0;
+            outerendsel = 1.0;
+        } else if jointype == JOIN_RIGHT {
+            innerstartsel = 0.0;
+            innerendsel = 1.0;
         }
     } else {
         outerstartsel = 0.0;
@@ -1490,7 +1549,7 @@ fn final_cost_mergejoin(
     qp_qual_cost.startup -= merge_qual_cost.startup;
     qp_qual_cost.per_tuple -= merge_qual_cost.per_tuple;
 
-    debug_assert!(path.jpath.jointype == JOIN_INNER);
+    debug_assert!(matches!(path.jpath.jointype, JOIN_INNER | JOIN_LEFT | JOIN_RIGHT));
     path.skip_mark_restore =
         inner_unique && path.jpath.joinrestrictinfo.len() == path.path_mergeclauses.len();
 

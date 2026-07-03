@@ -95,6 +95,60 @@ pub fn relids_union<'mcx>(mcx: Mcx<'mcx>, a: &Relids<'mcx>, b: &Relids<'mcx>) ->
     Some(box_new_in(mcx, Bitmapset { words }))
 }
 
+pub fn relids_intersect<'mcx>(mcx: Mcx<'mcx>, a: &Relids<'mcx>, b: &Relids<'mcx>) -> Relids<'mcx> {
+    let (Some(x), Some(y)) = (a, b) else { return None };
+    let n = x.words.len().min(y.words.len());
+    if n == 0 {
+        return None;
+    }
+    let mut words = vec_from_elem_in(mcx, 0u64, n);
+    for (i, w) in words.iter_mut().enumerate() {
+        *w = x.words[i] & y.words[i];
+    }
+    Some(box_new_in(mcx, Bitmapset { words }))
+}
+
+pub fn relids_add_member<'mcx>(mcx: Mcx<'mcx>, a: &Relids<'mcx>, x: u32) -> Relids<'mcx> {
+    relids_union(mcx, a, &relids_singleton(mcx, x))
+}
+
+pub fn relids_del_member<'mcx>(mcx: Mcx<'mcx>, a: &Relids<'mcx>, x: i32) -> Relids<'mcx> {
+    let mut out = relids_copy(mcx, a);
+    if x >= 0 {
+        if let Some(b) = out.as_mut() {
+            if let Some(w) = b.words.get_mut(x as usize / 64) {
+                *w &= !(1u64 << (x % 64));
+            }
+        }
+    }
+    out
+}
+
+pub fn relids_difference<'mcx>(mcx: Mcx<'mcx>, a: &Relids<'mcx>, b: &Relids<'mcx>) -> Relids<'mcx> {
+    let Some(x) = a else { return None };
+    let mut words = vec_from_elem_in(mcx, 0u64, x.words.len());
+    for (i, w) in words.iter_mut().enumerate() {
+        *w = x.words[i] & !b.as_ref().and_then(|y| y.words.get(i)).copied().unwrap_or(0);
+    }
+    Some(box_new_in(mcx, Bitmapset { words }))
+}
+
+pub fn relids_members<'a>(a: &'a Relids<'_>) -> impl Iterator<Item = i32> + 'a {
+    a.iter()
+        .flat_map(|b| b.words.iter().enumerate())
+        .flat_map(|(i, w)| {
+            let mut w = *w;
+            core::iter::from_fn(move || {
+                if w == 0 {
+                    return None;
+                }
+                let bit = w.trailing_zeros();
+                w &= w - 1;
+                Some((i * 64) as i32 + bit as i32)
+            })
+        })
+}
+
 pub fn relids_copy<'mcx>(mcx: Mcx<'mcx>, a: &Relids<'mcx>) -> Relids<'mcx> {
     a.as_ref().map(|b| {
         let mut words = PgVec::new_in(mcx);

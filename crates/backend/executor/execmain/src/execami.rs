@@ -70,6 +70,13 @@ pub fn exec_re_scan<'mcx>(
             ::nodewindowagg::exec_rescan_window_agg(&mut w.state, estate);
             exec_re_scan(&mut w.outer, estate)
         }
+        PlanStateNode::Material(m) => {
+            let m = &mut **m;
+            if ::nodematerial::exec_rescan_material(&mut m.state, estate) {
+                exec_re_scan(&mut m.outer, estate)?;
+            }
+            Ok(())
+        }
         // ExecReScanSort: child rescanned only when the sort must be redone
         // (chgParam NULL until the Param lanes land).
         PlanStateNode::Sort(s) => {
@@ -120,7 +127,7 @@ pub fn exec_re_scan<'mcx>(
         PlanStateNode::HashJoin(hj) => {
             let hj = &mut **hj;
             exec_re_scan(&mut hj.outer, estate)?;
-            ::nodehashjoin::exec_rescan_hash_join(&mut hj.state, &hj.hash.state);
+            ::nodehashjoin::exec_rescan_hash_join(&mut hj.state, &mut hj.hash.state);
             Ok(())
         }
         // ExecReScanMergeJoin: both children rescanned (chgParam NULL until the
