@@ -295,9 +295,7 @@ fn eval_kernel<'mcx>(
                 return Ok(NullableDatum { value: Datum::from_u32(0), isnull: false });
             }
             let f = &mut state.frames[frame as usize];
-            // SAFETY: the frame's 1-arg fcinfo image and mcx-boxed FmgrInfo
-            // are live and exclusively referenced during this call
-            // (HashDatumFirst's contract).
+            // SAFETY: 'mcx-live frame fcinfo image + boxed FmgrInfo, sole refs.
             let fcinfo = unsafe { fcinfo_mut(f.fcinfo, 1) };
             unsafe { f.arg_slot(0).write(NullableDatum { value: v, isnull: false }) };
             fcinfo.isnull = false;
@@ -358,13 +356,10 @@ fn read_var(slot: &SlotData<'_>, attnum: u16) -> NullableDatum {
     }
 }
 
-// C threads `Datum *resv/bool *resnull`; every OutRef is a resolved pointer
-// (an fcinfo arg slot or the state's mcx-allocated result cell), so the
-// write path is branch-free and the loop head carries no result phi.
 #[inline(always)]
 fn write_out(out: OutRef, value: Datum, isnull: bool) {
-    // SAFETY: OutRef targets one arg slot of a frame-owned fcinfo image or
-    // the state's result cell, both live for 'mcx (compile-time invariant).
+    // SAFETY: every OutRef is an 'mcx-live fcinfo arg slot or the state's
+    // result cell (compile-time invariant); branch-free by design.
     unsafe { out.0.write(NullableDatum { value, isnull }) }
 }
 
@@ -391,9 +386,7 @@ fn run_program<'mcx>(
     let mut scan = slots.scan.as_deref_mut();
     let mut inner = slots.inner.as_deref_mut();
     let mut outer = slots.outer.as_deref_mut();
-    // No entry reset: as in C, every DONE_RETURN-reaching path writes the
-    // result cell first (compile mirrors C's emission, incl. NULL for
-    // missing CASE arms).
+    // No entry reset: as in C, every DONE_RETURN path writes the cell first.
     let base = steps.as_ptr();
     let mut sp = base;
     if let Some(r) = resume {
@@ -517,9 +510,7 @@ fn run_program<'mcx>(
             }
             Step::AssignTmpMakeRo { resultnum } => {
                 let rslot = result_slot.as_deref_mut().unwrap_or_else(|| no_result_slot());
-                // SAFETY: res is the state's live result cell; a non-null
-                // by-ref result datum points at a live varlena image (same
-                // read exectuples materialize performs).
+                // SAFETY: live result cell; non-null by-ref datum = live varlena.
                 let r = unsafe { res.read() };
                 let value = if !r.isnull {
                     unsafe { datum::expandeddatum::make_expanded_object_read_only_internal(r.value) }
@@ -1292,9 +1283,8 @@ fn eval_array_expr(
 
 #[inline(always)]
 fn invoke(call: &FuncCall) -> PgResult<(Datum, bool)> {
-    // SAFETY: the call's mcx-boxed FmgrInfo and fcinfo image are live for
-    // 'mcx; these are the only references during the call (arg OutRef raw
-    // writes are not live borrows).
+    // SAFETY: 'mcx-live mcx-boxed FmgrInfo + fcinfo image; sole references
+    // during the call.
     let flinfo = unsafe { &mut *call.flinfo.as_ptr() };
     let fn_addr = flinfo.fn_addr;
     let fcinfo = unsafe { fcinfo_mut(call.fcinfo, call.nargs) };

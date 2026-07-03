@@ -13,10 +13,8 @@ pub const EEO_FLAG_HAS_SUBPLAN: u8 = 1 << 1;
 pub const EEO_FLAG_INTERPRETER_INITIALIZED: u8 = 1 << 5;
 pub const EEO_FLAG_STILL_VALID_CHECKED: u8 = 1 << 7;
 
-// C's `Datum *resv, bool *resnull` pair, always resolved: either the
-// state's result cell (ExprState.resnd, C's state->resvalue/resnull) or one
-// NullableDatum arg slot inside a frame's fcinfo image. Always-pointer keeps
-// the interpreter's write path branch-free and its loop head phi-free.
+// C's `Datum *resv, bool *resnull` pair, always resolved (a frame's fcinfo
+// arg slot or ExprState.resnd) — branch-free writes, phi-free loop head.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OutRef(pub(crate) NonNull<NullableDatum>);
 
@@ -249,9 +247,8 @@ pub struct IoCoerceCalls {
     pub in_strict: bool,
 }
 
-// Resolved once at compile; the interpreter never indexes frames. fn_addr
-// rides in the FmgrInfo header (same line as the flinfo deref every call
-// makes) — keeping a copy here would push ScalarArrayOp/MinMax steps >64B.
+// Resolved once at compile; fn_addr rides in the FmgrInfo header line —
+// a copy here would push ScalarArrayOp/MinMax steps past the 64B budget.
 #[derive(Clone, Copy, Debug)]
 pub struct FuncCall {
     pub(crate) fcinfo: NonNull<u8>,
@@ -295,8 +292,8 @@ impl<'mcx> FuncFrame<'mcx> {
         let fl_layout = Layout::new::<FmgrInfo>();
         let fl: NonNull<FmgrInfo> =
             mcx.allocate(fl_layout).map_err(|_| mcx.oom(fl_layout.size()))?.cast();
-        // SAFETY: fresh exclusive allocation; fn_extra Box ownership moves in
-        // (released via release_frames, never by arena drop — C fn_mcxt shape).
+        // SAFETY: fresh exclusive allocation; fn_extra released via
+        // release_frames, never by arena drop (C fn_mcxt shape).
         unsafe { fl.write(flinfo) };
         let flinfo = fl;
         let layout = fcinfo_layout(nargs as usize);
@@ -540,9 +537,8 @@ pub struct ExprState<'mcx> {
     pub(crate) frames: PgVec<'mcx, FuncFrame<'mcx>>,
     pub(crate) kernel: Kernel,
     pub(crate) flags: u8,
-    // C ExprState.resvalue/resnull: the program's result cell, mcx-allocated
-    // like the fcinfo arg slots so OutRef raw access carries no Rust borrow
-    // provenance; OutRefs of result-targeting steps point here.
+    // C ExprState.resvalue/resnull: mcx-allocated result cell — OutRef raw
+    // access carries no Rust borrow provenance.
     pub(crate) resnd: NonNull<NullableDatum>,
     // C ExprState.innermost_caseval/casenull: compile-time only.
     pub(crate) innermost_case: Option<NonNull<NullableDatum>>,
