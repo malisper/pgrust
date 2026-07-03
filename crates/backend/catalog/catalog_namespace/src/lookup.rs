@@ -394,6 +394,23 @@ pub fn get_collation_oid(collname: &[&str], missing_ok: bool) -> PgResult<Oid> {
 }
 
 // TypenameGetTypidExtended (namespace.c).
+pub fn OpclassnameGetOpcid(amid: Oid, opcname: &str) -> PgResult<Oid> {
+    recomputeNamespacePath()?;
+    let mtn = my_temp_namespace();
+    for i in 0..base_path_len() {
+        let namespaceId = base_path_nth(i);
+        if namespaceId == mtn {
+            continue;
+        }
+        let opcid =
+            syscache_seams::lookup_pg_opclass_oid_by_name::call(amid, opcname, namespaceId)?;
+        if OidIsValid(opcid) {
+            return Ok(opcid);
+        }
+    }
+    Ok(InvalidOid)
+}
+
 pub fn TypenameGetTypidExtended(typname: &str, temp_ok: bool) -> PgResult<Oid> {
     recomputeNamespacePath()?;
     let mtn = my_temp_namespace();
