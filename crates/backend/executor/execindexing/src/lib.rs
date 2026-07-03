@@ -223,8 +223,9 @@ pub fn FormIndexDatum<'mcx>(
 ) -> PgResult<()> {
     if !indexInfo.ii_Expressions.is_nil() && indexInfo.ii_ExpressionsState.is_empty() {
         for expr in indexInfo.ii_Expressions.iter() {
-            let state = execexpr::exec_init_expr(mcx, Some(expr), execexpr::ParamBind::NONE)?
+            let mut state = execexpr::exec_init_expr(mcx, Some(expr), execexpr::ParamBind::NONE)?
                 .expect("index expression");
+            state.arm_result_mcx(mcx);
             indexInfo.ii_ExpressionsState.push(state);
         }
     }
