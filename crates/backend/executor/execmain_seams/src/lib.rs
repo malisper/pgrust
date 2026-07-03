@@ -7,6 +7,7 @@ use types_nodes::nodes_enums::CmdType;
 use types_nodes::plannodes::PlannedStmt;
 use types_portal::{ParamListHandle, QueryDescHandle, QueryEnvHandle};
 use types_scan::sdir::ScanDirection;
+use types_core::instrument::Instrumentation;
 use types_snapshot::SnapshotData;
 use types_tuple::TupleDescData;
 
@@ -57,6 +58,10 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    pub fn executor_rewind(query_desc: QueryDescHandle) -> PgResult<()>
+);
+
+seam_core::seam!(
     pub fn executor_end(query_desc: QueryDescHandle) -> PgResult<()>
 );
 
@@ -76,6 +81,14 @@ seam_core::seam!(
 
 seam_core::seam!(
     pub fn query_desc_operation(query_desc: QueryDescHandle) -> CmdType
+);
+
+seam_core::seam!(
+    // ExplainNode's planstate->instrument read (runs C's forced InstrEndLoop).
+    pub fn query_desc_instrument(
+        query_desc: QueryDescHandle,
+        plan_node_id: i32,
+    ) -> Option<Instrumentation>
 );
 
 seam_core::seam!(

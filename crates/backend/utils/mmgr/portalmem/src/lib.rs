@@ -328,6 +328,22 @@ fn PortalReleaseCachedPlan(portal: &Portal<'static>) {
     plancache_portal_seams::release_cached_plan::call(cplan);
 }
 
+// C's portal->stmts/portalParams die with the portal contexts; the registry
+// handles must be released explicitly (idempotent with callers' own frees).
+fn release_portal_registry_handles(portal: &Portal<'static>) {
+    let (stmts, params) = {
+        let mut p = portal.borrow_mut();
+        (
+            core::mem::replace(&mut p.stmts, StmtListHandle::NULL),
+            core::mem::replace(&mut p.portalParams, ParamListHandle::NULL),
+        )
+    };
+    if !stmts.is_null() {
+        pquery_seams::stmt_list_free::call(stmts);
+    }
+    types_portal::params::free(params);
+}
+
 pub fn PortalCreateHoldStore(portal: &Portal<'static>) -> PgResult<()> {
     let top = mgr("PortalCreateHoldStore", |m| m.top)?;
     let random_access = {
@@ -455,6 +471,7 @@ pub fn PortalDrop(portal: &Portal<'static>, isTopCommit: bool) -> PgResult<()> {
         elog(WARNING, "trying to delete portal name that does not exist")?;
     }
 
+    release_portal_registry_handles(portal);
     PortalReleaseCachedPlan(portal);
 
     let resowner = portal.borrow().resowner;

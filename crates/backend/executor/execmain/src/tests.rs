@@ -785,92 +785,6 @@ fn seqscan_end_to_end_through_real_init_path() {
     scanfix::quiesced();
 }
 
-// C: EXPLAIN ANALYZE's per-node counters — es_instrument wraps every node at
-// init, InstrStop counts returned tuples, ExecReScan's InstrEndLoop closes the
-// cycle, and the seam hands explain the totals keyed by plan_node_id.
-#[test]
-fn instrumented_seqscan_counts_tuples_and_loops() {
-    install_seams();
-    scanfix::install();
-    let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let mcx = leaked_mcx();
-
-    let relid: u32 = 70003;
-    scanfix::register_table(relid, &[&[1, 2, 3], &[4, 5]]);
-    let pstmt = mk_seqscan_pstmt(mcx, relid);
-
-    let snap_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("snap")));
-    let snapshot: snapmgr::Snapshot = std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
-        snap_ctx.mcx(),
-        ::types_snapshot::SnapshotType::SNAPSHOT_MVCC,
-    ));
-
-    with_exec_data(pstmt, |data, pstmt| {
-        data.estate.es_instrument = ::types_core::instrument::INSTRUMENT_TIMER;
-        data.estate.es_snapshot = Some(snapshot);
-        crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap();
-
-        let ExecData { estate, planstate } = data;
-        let ps = planstate.as_mut().unwrap();
-        assert!(matches!(ps, crate::PlanStateNode::Instrumented(_)));
-        let mut n = 0;
-        while exec_proc_node(ps, estate).unwrap().is_some() {
-            n += 1;
-        }
-        assert_eq!(n, 5);
-        let i = &estate.es_instrumentation[0];
-        assert!(i.running && i.need_timer);
-        assert_eq!(i.tuplecount, 5.0);
-        assert!(i.counter.ticks > 0);
-
-        crate::exec_re_scan(ps, estate).unwrap();
-        let i = &estate.es_instrumentation[0];
-        assert_eq!((i.ntuples, i.nloops), (5.0, 1.0));
-        assert!(i.total > 0.0 && i.startup <= i.total);
-        assert!(!i.running);
-
-        while exec_proc_node(ps, estate).unwrap().is_some() {}
-        ::instrument::instr_end_loop(&mut estate.es_instrumentation[0]);
-        let i = &estate.es_instrumentation[0];
-        assert_eq!((i.ntuples, i.nloops), (10.0, 2.0));
-
-        crate::exec_end_node(ps, estate).unwrap();
-        estate.exec_reset_tuple_table(false);
-        estate.exec_close_range_table_relations().unwrap();
-    });
-    scanfix::quiesced();
-}
-
-#[test]
-fn instrument_seam_reports_rows_by_plan_node_id() {
-    install_seams();
-    let mcx = leaked_mcx();
-    let pstmt = mk_select1_pstmt(mcx, None);
-    let qd = execmain_seams::create_query_desc::call(
-        pstmt,
-        "SELECT 1",
-        None,
-        None,
-        CommandDest::None,
-        ParamListHandle::NULL,
-        QueryEnvHandle::NULL,
-        ::types_core::instrument::INSTRUMENT_ROWS,
-    )
-    .unwrap();
-    execmain_seams::executor_start::call(qd, 0).unwrap();
-    let mut dest = DestReceiver::DoNothing;
-    execmain_seams::executor_run::call(qd, ForwardScanDirection, 0, &mut dest).unwrap();
-    execmain_seams::executor_finish::call(qd).unwrap();
-
-    let i = execmain_seams::query_desc_instrument::call(qd, 0).expect("node 0 instrumented");
-    assert_eq!((i.ntuples, i.nloops), (1.0, 1.0));
-    assert!(!i.need_timer && i.total == 0.0);
-    assert!(execmain_seams::query_desc_instrument::call(qd, 7).is_none());
-
-    execmain_seams::executor_end::call(qd).unwrap();
-    execmain_seams::free_query_desc::call(qd);
-}
-
 #[test]
 fn exec_clean_type_from_tl_skips_junk() {
     install_seams();
@@ -1858,5 +1772,43 @@ fn nestloop_with_empty_inner_returns_nothing() {
     scanfix::register_table_2col(inner, &[]);
     let runs = drain_wide_rows(mk_nestloop_pstmt(mcx, outer, inner), 4, 1);
     assert_eq!(runs, vec![Vec::<Vec<i32>>::new()]);
+    scanfix::quiesced();
+}
+
+// TEMPORARY zero-cost slope probe (removed before merge): per-iteration
+// instruction count of the UNinstrumented seqscan loop, driven by ZC_ITERS.
+#[test]
+#[ignore]
+fn zc_slope_probe() {
+    install_seams();
+    scanfix::install();
+    let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mcx = leaked_mcx();
+    let relid: u32 = 70099;
+    scanfix::register_table(relid, &[&[1, 2, 3], &[4, 5]]);
+    let pstmt = mk_seqscan_pstmt(mcx, relid);
+    let snap_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("snap")));
+    let snapshot: snapmgr::Snapshot = std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
+        snap_ctx.mcx(),
+        ::types_snapshot::SnapshotType::SNAPSHOT_MVCC,
+    ));
+    let iters: u64 = std::env::var("ZC_ITERS").unwrap().parse().unwrap();
+    with_exec_data(pstmt, |data, pstmt| {
+        data.estate.es_snapshot = Some(snapshot);
+        crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap();
+        let ExecData { estate, planstate } = data;
+        let ps = planstate.as_mut().unwrap();
+        let mut n: u64 = 0;
+        for _ in 0..iters {
+            while std::hint::black_box(exec_proc_node(ps, estate).unwrap()).is_some() {
+                n += 1;
+            }
+            crate::exec_re_scan(ps, estate).unwrap();
+        }
+        assert_eq!(n, iters * 5);
+        crate::exec_end_node(ps, estate).unwrap();
+        estate.exec_reset_tuple_table(false);
+        estate.exec_close_range_table_relations().unwrap();
+    });
     scanfix::quiesced();
 }

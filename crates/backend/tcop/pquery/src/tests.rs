@@ -425,10 +425,17 @@ mod e2e {
     }
 
     fn start_scroll_show_portal(name: &'static str) -> types_portal::Portal<'static> {
+        start_scroll_portal(name, "work_mem")
+    }
+
+    fn start_scroll_portal(
+        name: &'static str,
+        guc_name: &'static str,
+    ) -> types_portal::Portal<'static> {
         install_fixtures();
         SENT.with(|s| s.borrow_mut().clear());
         let mcx = leaked_mcx();
-        let show = Node::mk(mcx, VariableShowStmt { name: Some("work_mem") }).unwrap();
+        let show = Node::mk(mcx, VariableShowStmt { name: Some(guc_name) }).unwrap();
         let stmts = utility_pstmt(show);
         // SAFETY: stmts is leaked 'static.
         let h = unsafe { stmt_list::register(stmts) };
@@ -565,17 +572,76 @@ mod e2e {
         assert_eq!(data_rows(&SENT.with(|s| s.borrow().clone())), ["4MB", "4MB"]);
     }
 
-    #[test]
-    #[should_panic(expected = "FETCH_ABSOLUTE")]
-    fn fetch_absolute_is_loud() {
-        use types_nodes::parsenodes::FetchDirection;
+    fn first_cols(sent: &[(u8, Vec<u8>)]) -> Vec<String> {
+        sent.iter()
+            .filter(|(t, _)| *t == b'D')
+            .map(|(_, b)| {
+                let len = i32::from_be_bytes([b[2], b[3], b[4], b[5]]) as usize;
+                String::from_utf8(b[6..6 + len].to_vec()).unwrap()
+            })
+            .collect()
+    }
 
-        let portal = start_scroll_show_portal("absolute-e2e");
-        // Keep MarkPortalFailed from reaching the uninstalled cleanup seam so
-        // the loud FETCH_ABSOLUTE payload is the one that surfaces.
-        portal.borrow_mut().cleanup = types_portal::PortalCleanupHook::None;
+    fn fetch_rows(
+        portal: &types_portal::Portal<'static>,
+        direction: types_nodes::parsenodes::FetchDirection,
+        count: i64,
+    ) -> (u64, Vec<String>) {
+        SENT.with(|s| s.borrow_mut().clear());
+        let mut dest = remote_dest(portal);
+        let n = crate::PortalRunFetch(portal, direction, count, &mut dest).unwrap();
+        (n, first_cols(&SENT.with(|s| s.borrow().clone())))
+    }
+
+    // FETCH_ABSOLUTE/RELATIVE arm math (pquery.c DoPortalRunFetch) over a
+    // multi-row held store: SHOW ALL, first column = GUC name.
+    #[test]
+    fn fetch_absolute_and_relative_through_held_store() {
+        use types_nodes::parsenodes::FetchDirection::*;
+
+        let portal = start_scroll_portal("absolute-e2e", "all");
         let mut none = tcop_dest::DestReceiver::DoNothing;
-        let _ = crate::PortalRunFetch(&portal, FetchDirection::FETCH_ABSOLUTE, 1, &mut none);
+
+        let (n, all) = fetch_rows(&portal, FETCH_FORWARD, FETCH_ALL);
+        assert!(n >= 5, "SHOW ALL yields a multi-row store");
+        assert_eq!(all.len() as u64, n);
+        assert_eq!(
+            crate::PortalRunFetch(&portal, FETCH_BACKWARD, FETCH_ALL, &mut none).unwrap(),
+            n
+        );
+        assert_eq!(pos(&portal), (true, false, 0));
+
+        // Forward-from-here leg: goal past halfway.
+        assert_eq!(fetch_rows(&portal, FETCH_ABSOLUTE, 3), (1, vec![all[2].clone()]));
+        assert_eq!(pos(&portal), (false, false, 3));
+
+        // Rewind leg: goal at most halfway back.
+        assert_eq!(fetch_rows(&portal, FETCH_ABSOLUTE, 2), (1, vec![all[1].clone()]));
+        assert_eq!(pos(&portal), (false, false, 2));
+
+        assert_eq!(fetch_rows(&portal, FETCH_ABSOLUTE, 4), (1, vec![all[3].clone()]));
+        assert_eq!(pos(&portal), (false, false, 4));
+
+        // Negative: advance to end, return the last row.
+        assert_eq!(
+            fetch_rows(&portal, FETCH_ABSOLUTE, -1),
+            (1, vec![all[all.len() - 1].clone()])
+        );
+        assert_eq!(pos(&portal), (false, false, n));
+
+        // Zero: rewind, zero rows.
+        assert_eq!(fetch_rows(&portal, FETCH_ABSOLUTE, 0), (0, vec![]));
+        assert_eq!(pos(&portal), (true, false, 0));
+
+        assert_eq!(fetch_rows(&portal, FETCH_RELATIVE, 3), (1, vec![all[2].clone()]));
+        assert_eq!(pos(&portal), (false, false, 3));
+
+        assert_eq!(fetch_rows(&portal, FETCH_RELATIVE, -2), (1, vec![all[0].clone()]));
+        assert_eq!(pos(&portal), (false, false, 1));
+
+        // RELATIVE 0 == FETCH FORWARD 0: re-fetch the current row.
+        assert_eq!(fetch_rows(&portal, FETCH_RELATIVE, 0), (1, vec![all[0].clone()]));
+        assert_eq!(pos(&portal), (false, false, 1));
     }
 
     // Expected line pinned against real PostgreSQL 18.3 (the explain crate's

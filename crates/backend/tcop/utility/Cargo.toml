@@ -8,7 +8,9 @@ publish.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+copy_cmd = { path = "../../commands/copy" }
 explain = { path = "../../commands/explain" }
+portalcmds = { path = "../../commands/portalcmds" }
 prepare = { path = "../../commands/prepare" }
 guc_funcs = { path = "../../utils/misc/guc_funcs" }
 mcx = { path = "../../../_support/mcx" }

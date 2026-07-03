@@ -26,8 +26,10 @@ pub fn init_all() {
     catalog_namespace::init_seams();
     catalog::init_seams();
     pg_database::init_seams();
+    pg_db_role_setting::init_seams();
     dbcommands::init_seams();
     executils::init_seams();
+    execjunk::init_seams();
     execmain::init_seams();
     execscan::init_seams();
     nodeseqscan::init_seams();
@@ -36,6 +38,7 @@ pub fn init_all() {
     nodeagg::init_seams();
     nodesort::init_seams();
     nodelimit::init_seams();
+    nodenestloop::init_seams();
     tuplesort::init_seams();
     auth::init_seams();
     be_secure::init_seams();
@@ -100,6 +103,8 @@ pub fn init_all() {
     postgres::init_seams();
     pquery::init_seams();
     explain::init_seams();
+    prepare::init_seams();
+    portalcmds::init_seams();
     utility::init_seams();
     backend_status::init_seams();
     waitevent::init_seams();
@@ -117,6 +122,7 @@ pub fn init_all() {
     lsyscache::init_seams();
     plancache::init_seams();
     relcache::init_seams();
+    relcache_build::init_seams();
     relmapper::init_seams();
     typcache::init_seams();
     elog::init_seams();

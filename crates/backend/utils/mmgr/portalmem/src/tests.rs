@@ -54,6 +54,9 @@ fn install() {
         plancache_portal_seams::release_cached_plan::set(|c| {
             log(format!("release_cplan({})", c.0));
         });
+        pquery_seams::stmt_list_free::set(|h| {
+            log(format!("stmt_list_free({})", h.0));
+        });
         portalcmds_seams::portal_cleanup::set(|p| {
             log(format!("cleanup({})", p.borrow().name.as_str()));
             if CLEANUP_FAILS.get() {
