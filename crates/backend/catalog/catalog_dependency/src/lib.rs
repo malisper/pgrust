@@ -112,7 +112,7 @@ impl Default for ObjectAddresses {
     }
 }
 
-fn object_address_present(object: &ObjectAddress, addrs: &ObjectAddresses) -> bool {
+pub fn object_address_present(object: &ObjectAddress, addrs: &ObjectAddresses) -> bool {
     addrs.refs.iter().rev().any(|thisobj| {
         object.classId == thisobj.classId
             && object.objectId == thisobj.objectId
@@ -736,13 +736,16 @@ fn doDeletion<'mcx>(mcx: Mcx<'mcx>, object: &ObjectAddress, flags: i32) -> PgRes
                     object.objectId,
                     object.objectSubId as types_core::AttrNumber,
                 )?;
-            } else if matches!(relKind, RELKIND_RELATION | RELKIND_TOASTVALUE | RELKIND_SEQUENCE) {
+            } else if matches!(
+                relKind,
+                RELKIND_RELATION | RELKIND_TOASTVALUE | RELKIND_SEQUENCE | RELKIND_VIEW
+            ) {
                 catalog_heap::heap_drop_with_catalog(mcx, object.objectId)?;
                 if relKind == RELKIND_SEQUENCE {
                     sequence_seams::delete_sequence_tuple::call(object.objectId)?;
                 }
             } else {
-                unported("doDeletion: non-table relkind (view/matview lanes)");
+                unported("doDeletion: non-table relkind (matview/partition lanes)");
             }
         }
         TYPE_RELATION_ID => pg_type::RemoveTypeById(mcx, object.objectId)?,
@@ -750,9 +753,7 @@ fn doDeletion<'mcx>(mcx: Mcx<'mcx>, object: &ObjectAddress, flags: i32) -> PgRes
         ConstraintRelationId => pg_constraint::RemoveConstraintById(mcx, object.objectId)?,
         statscmds::StatisticExtRelationId => statscmds::RemoveStatisticsById(mcx, object.objectId)?,
         TriggerRelationId => commands_trigger::RemoveTriggerById(mcx, object.objectId)?,
-        RewriteRelationId => {
-            unported("doDeletion: RemoveRewriteRuleById (rewriteRemove.c)");
-        }
+        RewriteRelationId => rewrite_remove::RemoveRewriteRuleById(mcx, object.objectId)?,
         other => panic!("unported: doDeletion object class {other}"),
     }
     Ok(())

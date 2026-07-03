@@ -460,7 +460,6 @@ fn lookup_pg_type_typcache_shape(typid: Oid) -> PgResult<Option<PgTypeTypcacheSh
     Ok(Some(shape))
 }
 
-const ANUM_PG_TYPE_TYPNAMESPACE: i32 = 3;
 const ANUM_PG_TYPE_TYPNOTNULL: i32 = 25;
 
 fn pg_type_domain_shape(typid: Oid) -> PgResult<Option<syscache_seams::PgTypeDomainShape>> {

@@ -99,7 +99,7 @@ fn format_procedure(mcx: Mcx<'_>, procid: Oid, force_qualify: bool) -> PgResult<
         .unwrap_or_else(|| panic!("cache lookup failed for function {procid}"));
     let (_, argtypes) = syscache_seams::lookup_pg_proc_signature::call(mcx, procid)?
         .unwrap_or_else(|| panic!("cache lookup failed for function {procid}"));
-    let nspname = if !force_qualify && catalog_namespace::FunctionIsVisible(mcx, procid)? {
+    let nspname = if !force_qualify && catalog_namespace::FunctionIsVisible(procid)? {
         None
     } else {
         get_namespace_name(shape.pronamespace)?
