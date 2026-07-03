@@ -152,6 +152,40 @@ pub fn gistXLogSplit(
     )
 }
 
+/// gistXLogPageDelete (producer for the LOUD gistvacuum lane; redo is live).
+pub fn gistXLogPageDelete(
+    buffer: &BufferPin,
+    xid: FullTransactionId,
+    parent_buffer: &BufferPin,
+    downlink_offset: OffsetNumber,
+) -> PgResult<XLogRecPtr> {
+    let xlrec = ::types_gist::GistxlogPageDelete {
+        deleteXid: xid,
+        downlinkOffset: downlink_offset,
+    }
+    .encode();
+    xloginsert_seams::xlog_insert_record::call(
+        RM_GIST_ID,
+        ::types_gist::XLOG_GIST_PAGE_DELETE,
+        0,
+        &[&xlrec],
+        &[
+            XLogRegBuf {
+                block_id: 0,
+                buffer: buffer.buffer(),
+                flags: REGBUF_STANDARD,
+                bufdata: &[],
+            },
+            XLogRegBuf {
+                block_id: 1,
+                buffer: parent_buffer.buffer(),
+                flags: REGBUF_STANDARD,
+                bufdata: &[],
+            },
+        ],
+    )
+}
+
 /// gistXLogAssignLSN.
 pub fn gistXLogAssignLSN() -> PgResult<XLogRecPtr> {
     let dummy: i32 = 0;
