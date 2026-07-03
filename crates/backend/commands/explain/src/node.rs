@@ -1654,6 +1654,18 @@ fn deparse_expr<'mcx>(
                 )
             }
         }
+        NodeTag::T_CoerceViaIO => {
+            let io = expr.as_coerce_via_io().unwrap();
+            if io.coerceformat == types_nodes::CoercionForm::COERCE_IMPLICIT_CAST
+                && !showimplicit
+            {
+                deparse_expr(es, plan_node, ancestors, io.arg, useprefix, false, buf)
+            } else {
+                get_coercion_expr(
+                    es, plan_node, ancestors, io.arg, io.resulttype, -1, useprefix, buf,
+                )
+            }
+        }
         // get_rule_expr T_BoolExpr, non-pretty form: outer parens always.
         NodeTag::T_BoolExpr => {
             use types_nodes::primnodes::BoolExprType;

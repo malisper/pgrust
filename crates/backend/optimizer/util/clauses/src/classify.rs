@@ -351,7 +351,12 @@ impl<'mcx> NodeWalker<'mcx> for ContainNonstrict {
                     return Ok(true);
                 }
             }
-            t @ (NodeTag::T_CoerceViaIO | NodeTag::T_ArrayCoerceExpr) => {
+            // CoerceViaIO is strict regardless of its I/O functions; look
+            // only at its argument (checking the functions could be wrong).
+            NodeTag::T_CoerceViaIO => {
+                return self.visit(node.as_coerce_via_io().unwrap().arg);
+            }
+            t @ NodeTag::T_ArrayCoerceExpr => {
                 deferred("contain_nonstrict_functions_walker", t)
             }
             _ => {}
