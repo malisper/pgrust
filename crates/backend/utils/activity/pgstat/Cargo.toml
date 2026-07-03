@@ -25,3 +25,4 @@ ipc_seams = { path = "../../../storage/ipc/ipc_seams" }
 pgstat_seams = { path = "../pgstat_seams" }
 timestamp_seams = { path = "../../adt/timestamp_seams" }
 xact_seams = { path = "../../../access/transam/xact_seams" }
+twophase_seams = { path = "../../../access/transam/twophase_seams" }
