@@ -207,6 +207,13 @@ fn exec_scan_impl<'mcx, N: ScanNode<'mcx>, const QUAL: bool, const PROJ: bool, c
                 let ecxt = ss.ps_ExprContext;
                 executils::exec_qual_with_subplans(ss.qual.as_deref_mut(), estate, ecxt)?
             } else {
+                // Per-tuple result mcx for arg-detoasting quals (C's
+                // ecxt_per_tuple_memory; ExprContext reset frees it).
+                let per_tuple = estate.ecxt(ss.ps_ExprContext).per_tuple_mcx();
+                // SAFETY: reset-only context, outlives the plan.
+                unsafe {
+                    ss.qual.as_deref_mut().unwrap().arm_result_mcx_raw(per_tuple);
+                }
                 let mut slots = EvalSlots {
                     scan: Some(estate.slot_mut(scan_id)),
                     inner: None,
@@ -456,6 +463,7 @@ pub fn expr_typmod(node: Node<'_>) -> i32 {
         }
         NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resulttypmod,
         NodeTag::T_CoerceViaIO => -1,
+        NodeTag::T_NextValueExpr => -1,
         NodeTag::T_CoerceToDomain => node.as_coerce_to_domain().unwrap().resulttypmod,
         NodeTag::T_CoerceToDomainValue => node.as_coerce_to_domain_value().unwrap().typeMod,
         tag => panic!("exprTypmod (nodeFuncs.c): node family {tag:?} not ported"),
@@ -512,7 +520,8 @@ pub fn expr_collation(node: Node<'_>) -> Oid {
         NodeTag::T_BoolExpr
         | NodeTag::T_NullTest
         | NodeTag::T_BooleanTest
-        | NodeTag::T_RowExpr => ::types_core::InvalidOid,
+        | NodeTag::T_RowExpr
+        | NodeTag::T_NextValueExpr => ::types_core::InvalidOid,
         NodeTag::T_DistinctExpr => node.as_distinct_expr().unwrap().opcollid,
         NodeTag::T_CoerceToDomain => node.as_coerce_to_domain().unwrap().resultcollid,
         NodeTag::T_CoerceToDomainValue => node.as_coerce_to_domain_value().unwrap().collation,

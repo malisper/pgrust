@@ -22,9 +22,10 @@ types_rel = { path = "../../../../_support/types/rel" }
 types_tuple = { path = "../../../../_support/types/types_tuple" }
 readfuncs = { path = "../../../nodes/readfuncs" }
 nodes_core = { path = "../../../nodes/nodes_core" }
-clauses = { path = "../../../optimizer/util/clauses" }
+clauses_seams = { path = "../../../optimizer/util/clauses_seams" }
 types_nodes = { path = "../../../../_support/types/nodes" }
 
 [dev-dependencies]
 types_tuple = { path = "../../../../_support/types/types_tuple" }
 fmgr_core = { path = "../../fmgr/fmgr_core" }
+clauses = { path = "../../../optimizer/util/clauses" }

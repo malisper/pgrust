@@ -7803,6 +7803,7 @@ dependencies = [
  "catalog_storage",
  "catcache",
  "checkpointer",
+ "clauses",
  "clog",
  "combocid",
  "commands_async",
@@ -9182,6 +9183,7 @@ name = "typcache"
 version = "0.1.0"
 dependencies = [
  "clauses",
+ "clauses_seams",
  "datum",
  "fmgr_core",
  "fmgr_seams",

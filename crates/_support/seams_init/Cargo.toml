@@ -39,6 +39,7 @@ catalog_namespace = { path = "../../backend/catalog/catalog_namespace" }
 catalog_dependency = { path = "../../backend/catalog/catalog_dependency" }
 commands_cluster = { path = "../../backend/commands/cluster" }
 tablecmds = { path = "../../backend/commands/tablecmds" }
+clauses = { path = "../../backend/optimizer/util/clauses" }
 catalog_storage = { path = "../../backend/catalog/catalog_storage" }
 catalog = { path = "../../backend/catalog/catalog" }
 pg_database = { path = "../../backend/catalog/pg_database" }

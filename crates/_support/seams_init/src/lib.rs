@@ -147,6 +147,7 @@ pub fn init_all() {
     relcache_build::init_seams();
     relmapper::init_seams();
     typcache::init_seams();
+    clauses::init_seams();
     elog::init_seams();
     fmgr_core::init_seams();
     fmgr_core::register_late_builtins(adt_acl::builtins::ACL_BUILTINS);
