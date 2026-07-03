@@ -24,19 +24,20 @@ pub fn expr_type(node: Node<'_>) -> Oid {
         NodeTag::T_GroupingFunc => types_core::catalog::INT4OID,
         NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resulttype,
         NodeTag::T_CoerceViaIO => node.as_coerce_via_io().unwrap().resulttype,
-        NodeTag::T_BoolExpr | NodeTag::T_NullTest | NodeTag::T_BooleanTest => {
-            types_core::catalog::BOOLOID
-        }
+        NodeTag::T_BoolExpr
+        | NodeTag::T_NullTest
+        | NodeTag::T_BooleanTest => types_core::catalog::BOOLOID,
         NodeTag::T_DistinctExpr => node.as_distinct_expr().unwrap().opresulttype,
         NodeTag::T_RowExpr => node.as_row_expr().unwrap().row_typeid,
         NodeTag::T_CoerceToDomain => node.as_coerce_to_domain().unwrap().resulttype,
         NodeTag::T_CoerceToDomainValue => node.as_coerce_to_domain_value().unwrap().typeId,
         NodeTag::T_SetToDefault => node.as_set_to_default().unwrap().typeId,
-        NodeTag::T_CaseExpr => node.as_case_expr().unwrap().casetype,
+        NodeTag::T_CollateExpr => expr_type(node.as_collate_expr().unwrap().arg),
+        NodeTag::T_SQLValueFunction => node.as_sql_value_function().unwrap().r#type,
         NodeTag::T_CaseTestExpr => node.as_case_test_expr().unwrap().typeId,
+        NodeTag::T_CaseExpr => node.as_case_expr().unwrap().casetype,
         NodeTag::T_CoalesceExpr => node.as_coalesce_expr().unwrap().coalescetype,
         NodeTag::T_MinMaxExpr => node.as_min_max_expr().unwrap().minmaxtype,
-        NodeTag::T_SQLValueFunction => node.as_sql_value_function().unwrap().r#type,
         NodeTag::T_NextValueExpr => {
             node.as_variant::<types_nodes::primnodes::NextValueExpr>().unwrap().typeId
         }
@@ -121,6 +122,8 @@ pub fn expr_typmod(node: Node<'_>) -> i32 {
         | NodeTag::T_BooleanTest
         | NodeTag::T_DistinctExpr
         | NodeTag::T_RowExpr => -1,
+        NodeTag::T_CollateExpr => expr_typmod(node.as_collate_expr().unwrap().arg),
+        NodeTag::T_SQLValueFunction => node.as_sql_value_function().unwrap().typmod,
         NodeTag::T_CaseExpr => {
             let c = node.as_case_expr().unwrap();
             let Some(defresult) = c.defresult else { return -1 };
@@ -147,7 +150,6 @@ pub fn expr_typmod(node: Node<'_>) -> i32 {
             let m = node.as_min_max_expr().unwrap();
             uniform_args_typmod(&m.args, m.minmaxtype)
         }
-        NodeTag::T_SQLValueFunction => node.as_sql_value_function().unwrap().typmod,
         NodeTag::T_SubLink => {
             let (sl, tent) = sublink_first_col(node);
             match sl.subLinkType {
@@ -188,10 +190,8 @@ pub fn expr_collation(node: Node<'_>) -> Oid {
         NodeTag::T_CoerceToDomain => node.as_coerce_to_domain().unwrap().resultcollid,
         NodeTag::T_CoerceToDomainValue => node.as_coerce_to_domain_value().unwrap().collation,
         NodeTag::T_SetToDefault => node.as_set_to_default().unwrap().collation,
-        NodeTag::T_CaseExpr => node.as_case_expr().unwrap().casecollid,
+        NodeTag::T_CollateExpr => node.as_collate_expr().unwrap().collOid,
         NodeTag::T_CaseTestExpr => node.as_case_test_expr().unwrap().collation,
-        NodeTag::T_CoalesceExpr => node.as_coalesce_expr().unwrap().coalescecollid,
-        NodeTag::T_MinMaxExpr => node.as_min_max_expr().unwrap().minmaxcollid,
         NodeTag::T_SQLValueFunction => {
             if node.as_sql_value_function().unwrap().r#type == types_core::catalog::NAMEOID {
                 types_core::catalog::C_COLLATION_OID
@@ -199,6 +199,9 @@ pub fn expr_collation(node: Node<'_>) -> Oid {
                 types_core::InvalidOid
             }
         }
+        NodeTag::T_CaseExpr => node.as_case_expr().unwrap().casecollid,
+        NodeTag::T_CoalesceExpr => node.as_coalesce_expr().unwrap().coalescecollid,
+        NodeTag::T_MinMaxExpr => node.as_min_max_expr().unwrap().minmaxcollid,
         NodeTag::T_SubLink => {
             let (sl, tent) = sublink_first_col(node);
             match sl.subLinkType {
@@ -294,14 +297,14 @@ pub fn expr_location(node: Node<'_>) -> ParseLoc {
             leftmost_loc(c.location, expr_location(c.arg))
         }
         NodeTag::T_CoerceToDomainValue => node.as_coerce_to_domain_value().unwrap().location,
+        NodeTag::T_CollateExpr => expr_location(node.as_collate_expr().unwrap().arg),
+        NodeTag::T_SQLValueFunction => node.as_sql_value_function().unwrap().location,
+        NodeTag::T_CaseTestExpr => -1,
         // C: the CASE/WHEN/COALESCE/GREATEST/LEAST keyword is always leftmost.
         NodeTag::T_CaseExpr => node.as_case_expr().unwrap().location,
-        // C exprLocation default arm: CaseTestExpr carries no location.
-        NodeTag::T_CaseTestExpr => -1,
         NodeTag::T_CaseWhen => node.as_case_when().unwrap().location,
         NodeTag::T_CoalesceExpr => node.as_coalesce_expr().unwrap().location,
         NodeTag::T_MinMaxExpr => node.as_min_max_expr().unwrap().location,
-        NodeTag::T_SQLValueFunction => node.as_sql_value_function().unwrap().location,
         NodeTag::T_BoolExpr => {
             let b = node.as_bool_expr().unwrap();
             leftmost_loc(b.location, expr_location_list(&b.args))

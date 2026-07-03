@@ -17,8 +17,9 @@ use types_nodes::parsenodes::{
     SortGroupClause,
 };
 use types_nodes::primnodes::{
-    Aggref, Alias, BoolExpr, BoolExprType, CoercionForm, Const, FromExpr, FuncExpr, JoinExpr,
-    OpExpr, OverridingKind, RangeTblRef, RelabelType, TargetEntry, Var, VarReturningType,
+    Aggref, Alias, BoolExpr, BoolExprType, CoerceViaIO, CoercionForm, Const, FromExpr, FuncExpr,
+    JoinExpr, NullTest, NullTestType, OpExpr, OverridingKind, RangeTblRef, RelabelType,
+    TargetEntry, Var, VarReturningType,
 };
 use types_nodes::Node;
 
@@ -355,6 +356,7 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
             b"PARTITIONRANGEDATUM" => self.read_partition_range_datum(),
             b"SORTGROUPCLAUSE" => self.read_sort_group_clause(),
             b"AGGREF" => self.read_aggref(),
+            b"NULLTEST" => self.read_null_test(),
             other => panic!(
                 "parseNodeString (readfuncs.c): {} read arm unported (view SELECT-rule + \
                  DEFAULT/CHECK expr sets only)",
@@ -780,6 +782,21 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
         a.aggtransno = self.read_i32("aggtransno");
         a.location = self.read_location("location");
         Ok(a.seal())
+    }
+
+    fn read_null_test(&mut self) -> PgResult<Node<'mcx>> {
+        let arg = self.read_node("arg")?;
+        let n = NullTest {
+            arg,
+            nulltesttype: match self.read_u32("nulltesttype") {
+                0 => NullTestType::IS_NULL,
+                1 => NullTestType::IS_NOT_NULL,
+                other => panic!("readfuncs.c: bad NullTestType {other}"),
+            },
+            argisrow: self.read_bool("argisrow"),
+            location: self.read_location("location"),
+        };
+        Node::mk(self.mcx, n)
     }
 
     // readDatum (readfuncs.c): "<len> [ <byte> ... ]"; byval always carries

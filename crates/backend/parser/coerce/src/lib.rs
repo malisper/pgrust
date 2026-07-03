@@ -174,8 +174,23 @@ pub fn coerce_type<'mcx>(
             return Ok(node);
         }
     }
-    if node.node_tag() == NodeTag::T_CollateExpr {
-        unported("coerce_type (parse_coerce.c): CollateExpr push-down arm");
+    // Push the coercion underneath the COLLATE so it acts before collation.
+    if let Some(coll) = node.as_collate_expr() {
+        let arg = coerce_type(
+            mcx,
+            pstate,
+            coll.arg,
+            inputTypeId,
+            targetTypeId,
+            targetTypeMod,
+            ccontext,
+            cformat,
+            location,
+        )?;
+        return Node::mk(
+            mcx,
+            types_nodes::CollateExpr { arg, collOid: coll.collOid, location: coll.location },
+        );
     }
     let (pathtype, funcId) = find_coercion_pathway(targetTypeId, inputTypeId, ccontext)?;
     if pathtype != COERCION_PATH_NONE {
@@ -1779,6 +1794,9 @@ pub fn expression_returns_set(node: Node<'_>) -> bool {
             node.as_array_expr().unwrap().elements.iter().any(expression_returns_set)
         }
         NodeTag::T_RelabelType => expression_returns_set(node.as_relabel_type().unwrap().arg),
+        NodeTag::T_CoerceViaIO => expression_returns_set(node.as_coerce_via_io().unwrap().arg),
+        NodeTag::T_CollateExpr => expression_returns_set(node.as_collate_expr().unwrap().arg),
+        NodeTag::T_SQLValueFunction => false,
         NodeTag::T_NullTest => {
             node.as_null_test().unwrap().arg.is_some_and(expression_returns_set)
         }

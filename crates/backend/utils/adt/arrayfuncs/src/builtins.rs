@@ -10,6 +10,7 @@ use ::types_fmgr::{
 };
 
 use crate::foundation::varsize_any;
+use ::mcx::vec_with_capacity_in;
 use crate::io::{array_in, array_out, array_recv, array_send, ArrayIoMeta};
 
 // Cached in FmgrInfo.fn_extra: resolved element I/O metadata + proc carrier,
@@ -195,6 +196,70 @@ pub fn fc_array_agg_finalfn(
     byref_result(mcx, &img)
 }
 
+// C array_length (arrayfuncs.c).
+pub fn fc_array_length(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let (ndim, dims) = {
+        let mcx = fcinfo.result_mcx();
+        let array = arg_array_bytes(fcinfo, 0, mcx)?;
+        let (ndim, dims, _lb) = crate::foundation::read_dims_lbounds(&array);
+        (ndim, dims)
+    };
+    let reqdim = fcinfo.arg(1).as_i32();
+    if ndim <= 0 || ndim > crate::foundation::MAXDIM as i32 || reqdim <= 0 || reqdim > ndim {
+        return Ok(fcinfo.return_null());
+    }
+    Ok(Datum::from_i32(dims[(reqdim - 1) as usize]))
+}
+
+// C array_to_text (varlena.c array_to_text_internal, null_string=NULL arm),
+// hosted with the array machinery it consumes.
+pub fn fc_array_to_text(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let mcx = fcinfo.result_mcx();
+    let array = arg_array_bytes(fcinfo, 0, mcx)?;
+    let sep: alloc::vec::Vec<u8> = {
+        // SAFETY: strict fn; arg 1 is a live text varlena.
+        let v = unsafe { fcinfo.arg_varlena_packed(1) }?;
+        v.data().to_vec()
+    };
+    let element_type = crate::foundation::arr_elemtype(&array);
+    let (ndim, dims, _lb) = crate::foundation::read_dims_lbounds(&array);
+    let nitems = ::arrayutils::array_get_n_items(ndim, &dims)?;
+    let mut out: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    if nitems > 0 {
+        let flinfo = flinfo.expect("array_to_text: NULL flinfo");
+        let ams = cached_meta(flinfo, element_type, IOFuncSelector::IOFunc_output, false)?;
+        let (elems, nulls) = crate::construct::deconstruct_array(
+            mcx,
+            &array,
+            ams.meta.typlen,
+            ams.meta.typbyval,
+            ams.meta.typalign,
+            true,
+        )?;
+        let mut printed = false;
+        for (i, &d) in elems.iter().enumerate() {
+            if nulls[i] {
+                continue;
+            }
+            let v = ::types_fmgr::function_call1_coll(&mut ams.proc, 0, d)?;
+            // SAFETY: out fns return NUL-terminated cstrings.
+            let cs = unsafe {
+                core::ffi::CStr::from_ptr(v.as_usize() as *const core::ffi::c_char)
+            };
+            if printed {
+                out.extend_from_slice(&sep);
+            }
+            out.extend_from_slice(cs.to_bytes());
+            printed = true;
+        }
+    }
+    let total = 4 + out.len();
+    let mut img: ::mcx::PgVec<'_, u8> = vec_with_capacity_in(mcx, total)?;
+    ::mcx::vec_append_bytes(&mut img, &(((total as u32) << 2)).to_ne_bytes())?;
+    ::mcx::vec_append_bytes(&mut img, &out)?;
+    byref_result(mcx, &img)
+}
+
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin {
         foid,
@@ -214,6 +279,8 @@ const fn agg(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> Fmg
 pub const ARRAYFUNCS_BUILTINS: &[FmgrBuiltin] = &[
     b(750, "array_in", 3, fc_array_in),
     b(751, "array_out", 1, fc_array_out),
+    b(395, "array_to_text", 2, fc_array_to_text),
+    b(2176, "array_length", 2, fc_array_length),
     b(2400, "array_recv", 3, fc_array_recv),
     b(2401, "array_send", 1, fc_array_send),
     agg(2333, "array_agg_transfn", 2, fc_array_agg_transfn),

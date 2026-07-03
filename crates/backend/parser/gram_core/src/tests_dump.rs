@@ -750,6 +750,35 @@ fn node(out: &mut String, n: Node<'_>) {
         node_field(out, "value", d.value);
         int_field(out, "location", d.location);
         out.push('}');
+    } else if let Some(rf) = n.as_variant::<types_nodes::RangeFunction>() {
+        out.push_str("{RANGEFUNCTION");
+        bool_field(out, "lateral", rf.lateral);
+        bool_field(out, "ordinality", rf.ordinality);
+        bool_field(out, "is_rowsfrom", rf.is_rowsfrom);
+        // C: functions is a list of (funcexpr, coldeflist) 2-lists; the port
+        // holds bare funcexprs with NIL coldeflists (actions.rs rule 1884).
+        out.push_str(" :functions (");
+        for (i, f) in rf.functions.iter().enumerate() {
+            if i > 0 {
+                out.push(' ');
+            }
+            out.push('(');
+            node(out, f);
+            out.push_str(" <>)");
+        }
+        out.push(')');
+        out.push_str(" :alias ");
+        match rf.alias {
+            Some(a) => alias(out, a),
+            None => out.push_str("<>"),
+        }
+        list_field(out, "coldeflist", &rf.coldeflist);
+        out.push('}');
+    } else if let Some(r) = n.as_variant::<types_nodes::parsenodes::ReplicaIdentityStmt>() {
+        out.push_str("{REPLICAIDENTITYSTMT");
+        char_field(out, "identity_type", r.identity_type);
+        string_field(out, "name", r.name);
+        out.push('}');
     } else if let Some(lc) = n.as_locking_clause() {
         out.push_str("{LOCKINGCLAUSE");
         list_field(out, "lockedRels", &lc.lockedRels);
