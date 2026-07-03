@@ -224,9 +224,7 @@ pub fn get_relation_info<'mcx>(
     }
     run.root.rel_mut(rel).indexlist = indexinfos;
 
-    // Divergence: RelationGetStatExtList unported; extended stats absent
-    // (multi-clause selectivity panics upstream).
-    debug_assert!(run.root.rel(rel).statlist.is_empty());
+    crate::extended_stats::get_relation_statistics(run, rel, relation.rd_id)?;
 
     {
         let r = run.root.rel_mut(rel);

@@ -36,8 +36,23 @@ pub fn clauselist_selectivity<'mcx>(
         return clause_selectivity(run, clauses[0], varrelid, jointype, sjinfo);
     }
     let mut s1 = 1.0;
+    let mut estimated: PgVec<'_, bool> = mcx::vec_from_elem_in(run.mcx, false, clauses.len());
+    if let Some(rel) =
+        crate::extended_stats::find_single_rel_for_clauses(run, clauses, varrelid)
+    {
+        if run.root.rel(rel).reloptkind == types_pathnodes::RELOPT_BASEREL
+            && !run.root.rel(rel).statlist.is_empty()
+        {
+            s1 *= crate::extended_stats::statext_clauselist_selectivity(
+                run, clauses, varrelid, jointype, sjinfo, rel, &mut estimated,
+            )?;
+        }
+    }
     let mut rqlist: PgVec<'mcx, RangeQueryClause<'mcx>> = PgVec::new_in(run.mcx);
-    for &rid in clauses {
+    for (i, &rid) in clauses.iter().enumerate() {
+        if estimated[i] {
+            continue;
+        }
         let s2 = clause_selectivity(run, rid, varrelid, jointype, sjinfo)?;
         if run.root.rinfo(rid).pseudoconstant {
             s1 *= s2;
