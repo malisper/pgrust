@@ -448,11 +448,15 @@ fn MaintainLatestCompletedXid(latestXid: TransactionId) {
     }
 }
 
-fn GetSnapshotDataReuse(snapshot: &mut SnapshotData<'_>, my_proc: &PGPROC) -> bool {
+fn GetSnapshotDataReuse(
+    snapshot: &mut SnapshotData<'_>,
+    my_proc: &PGPROC,
+    tv: &TransamVariablesShared,
+) -> bool {
     if snapshot.snapXactCompletionCount == 0 {
         return false;
     }
-    let cur_count = TransamVariables().xactCompletionCount.load(Relaxed);
+    let cur_count = tv.xactCompletionCount.load(Relaxed);
     if cur_count != snapshot.snapXactCompletionCount {
         return false;
     }
@@ -481,6 +485,8 @@ fn GetSnapshotDataReuse(snapshot: &mut SnapshotData<'_>, my_proc: &PGPROC) -> bo
 pub fn GetSnapshotData<'m>(snapshot: &mut SnapshotData<'m>, mcx: Mcx<'m>) -> PgResult<()> {
     let arrayP = procArray();
     let hdr = ProcGlobal();
+    let tv = TransamVariables();
+    let pa_lock = ProcArrayLock();
     let myprocno = MyProc().expect("GetSnapshotData requires MyProc");
     let my_proc = GetPGProcByNumber(myprocno);
 
@@ -491,21 +497,21 @@ pub fn GetSnapshotData<'m>(snapshot: &mut SnapshotData<'m>, mcx: Mcx<'m>) -> PgR
         reserve_exact(&mut snapshot.subxip, GetMaxSnapshotSubxidCount(), mcx)?;
     }
 
-    LWLockAcquire(ProcArrayLock(), LW_SHARED, myprocno)?;
+    LWLockAcquire(pa_lock, LW_SHARED, myprocno)?;
 
-    if GetSnapshotDataReuse(snapshot, my_proc) {
-        LWLockRelease(ProcArrayLock())?;
+    if GetSnapshotDataReuse(snapshot, my_proc, tv) {
+        LWLockRelease(pa_lock)?;
         snapshot.curcid.set(xact::GetCurrentCommandId(false)?);
         return Ok(());
     }
 
-    let latest_completed = latest_completed_xid();
+    let latest_completed = FullTransactionId::from_u64(tv.latestCompletedXid.load(Relaxed));
     let mypgxactoff = my_proc.pgxactoff.load(Relaxed) as usize;
     let myxid = hdr.xids[mypgxactoff].read();
     debug_assert_eq!(myxid, my_proc.xid.read());
 
-    let oldestxid = TransamVariables().oldestXid.load(Relaxed);
-    let cur_xact_completion_count = TransamVariables().xactCompletionCount.load(Relaxed);
+    let oldestxid = tv.oldestXid.load(Relaxed);
+    let cur_xact_completion_count = tv.xactCompletionCount.load(Relaxed);
 
     let mut xmax = latest_completed.xid();
     TransactionIdAdvance(&mut xmax);
@@ -599,7 +605,7 @@ pub fn GetSnapshotData<'m>(snapshot: &mut SnapshotData<'m>, mcx: Mcx<'m>) -> PgR
         TRANSACTION_XMIN.set(xmin);
     }
 
-    LWLockRelease(ProcArrayLock())?;
+    LWLockRelease(pa_lock)?;
 
     {
         let oldestfxid = FullXidRelativeTo(latest_completed, oldestxid);
@@ -682,10 +688,13 @@ fn reserve_exact<'m>(
         .map_err(|_| Box::new(_mcx.oom(n * core::mem::size_of::<TransactionId>())))
 }
 
+// Split so the fast exits stay a frameless leaf with register returns; the
+// outlined scan body carries the frame (bench procarray_xidinprog_recent).
+#[inline]
 pub fn TransactionIdIsInProgress(xid: TransactionId) -> PgResult<bool> {
     // Nothing older than RecentXmin can still be running; this also rejects
     // Invalid/Frozen/Bootstrap ids. Fast exits run before any shared-state
-    // resolution (C touches only two globals here; bench procarray_xidinprog_recent).
+    // resolution (C touches only two globals here).
     if TransactionIdPrecedes(xid, RECENT_XMIN.get()) {
         return Ok(false);
     }
@@ -698,6 +707,11 @@ pub fn TransactionIdIsInProgress(xid: TransactionId) -> PgResult<bool> {
         return Ok(true);
     }
 
+    transaction_id_is_in_progress_scan(xid)
+}
+
+#[inline(never)]
+fn transaction_id_is_in_progress_scan(xid: TransactionId) -> PgResult<bool> {
     if transam_xlog_seams::recovery_in_progress::call() {
         panic!(
             "TransactionIdIsInProgress in recovery is not ported: KnownAssignedXids \

@@ -831,7 +831,12 @@ pub fn LWLockAcquire(
 ) -> PgResult<bool> {
     debug_assert!(mode == LW_SHARED || mode == LW_EXCLUSIVE);
 
-    if !with_held(|held| held.num_held < MAX_SIMUL_LWLOCKS) {
+    // One TLS resolution for probe + record; a raw pointer, not a borrow,
+    // crosses the wait path (which can reach seams).
+    let held: *mut HeldLWLocks = HELD_LWLOCKS.with(|h| h.get());
+
+    // SAFETY: backend-local TLS, no live borrow (with_held is not re-entered here).
+    if unsafe { (*held).num_held } >= MAX_SIMUL_LWLOCKS {
         return Err(err_too_many_lwlocks());
     }
 
@@ -846,7 +851,12 @@ pub fn LWLockAcquire(
         true
     };
 
-    record_held(lock, mode);
+    // SAFETY: as above; room checked before the acquire.
+    unsafe {
+        let n = (*held).num_held;
+        *(*held).locks.get_unchecked_mut(n) = LWLockHandle { lock, mode };
+        (*held).num_held = n + 1;
+    }
     Ok(result)
 }
 
