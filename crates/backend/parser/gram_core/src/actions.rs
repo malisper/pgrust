@@ -940,6 +940,23 @@ impl<'mcx> Parser<'mcx> {
                 n.initially_valid = !n.skip_validation;
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
+            // ConstraintElem: NOT NULL_P ColId ConstraintAttributeSpec
+            539 => {
+                let mut n = Node::build::<Constraint>(mcx)?;
+                n.contype = ConstrType::CONSTR_NOTNULL;
+                n.location = view.l(1);
+                n.keys = NodeList::make1(mcx, Node::mk_string(mcx, view.v(3).str_val())?)?;
+                let cas = self.process_cas_bits(
+                    view.v(4).ival(),
+                    view.l(4),
+                    "NOT NULL",
+                    CasTargets { deferrable: false, initdeferred: false, is_enforced: false, not_valid: true, no_inherit: true },
+                )?;
+                n.skip_validation = cas.not_valid;
+                n.is_no_inherit = cas.no_inherit;
+                n.initially_valid = !n.skip_validation;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
             // ConstraintElem: UNIQUE opt_unique_null_treatment '(' columnList
             // opt_without_overlaps ')' opt_c_include opt_definition
             // OptConsTableSpace ConstraintAttributeSpec
