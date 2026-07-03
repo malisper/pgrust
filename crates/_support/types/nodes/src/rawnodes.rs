@@ -384,6 +384,47 @@ pub enum ConstrType {
     CONSTR_ATTR_NOT_ENFORCED,
 }
 
+#[derive(Default)]
+pub struct IndexElem<'mcx> {
+    pub name: Option<&'mcx str>,
+    pub expr: Option<Node<'mcx>>,
+    pub indexcolname: Option<&'mcx str>,
+    pub collation: NodeList<'mcx>,
+    pub opclass: NodeList<'mcx>,
+    pub opclassopts: NodeList<'mcx>,
+    pub ordering: SortByDir,
+    pub nulls_ordering: SortByNulls,
+}
+
+#[derive(Default)]
+pub struct IndexStmt<'mcx> {
+    pub idxname: Option<&'mcx str>,
+    pub relation: Option<&'mcx crate::primnodes::RangeVar<'mcx>>,
+    pub accessMethod: Option<&'mcx str>,
+    pub tableSpace: Option<&'mcx str>,
+    pub indexParams: NodeList<'mcx>,
+    pub indexIncludingParams: NodeList<'mcx>,
+    pub options: NodeList<'mcx>,
+    pub whereClause: Option<Node<'mcx>>,
+    pub excludeOpNames: NodeList<'mcx>,
+    pub idxcomment: Option<&'mcx str>,
+    pub indexOid: Oid,
+    pub oldNumber: types_core::RelFileNumber,
+    pub oldCreateSubid: types_core::xact::SubTransactionId,
+    pub oldFirstRelfilelocatorSubid: types_core::xact::SubTransactionId,
+    pub unique: bool,
+    pub nulls_not_distinct: bool,
+    pub primary: bool,
+    pub isconstraint: bool,
+    pub iswithoutoverlaps: bool,
+    pub deferrable: bool,
+    pub initdeferred: bool,
+    pub transformed: bool,
+    pub concurrent: bool,
+    pub if_not_exists: bool,
+    pub reset_default_tblspc: bool,
+}
+
 // DEFAULT/CHECK slice of C's Constraint; index/FK fields arrive with their DDL.
 #[derive(Default)]
 pub struct Constraint<'mcx> {
@@ -467,6 +508,12 @@ unsafe impl<'mcx> NodeVariant<'mcx> for ColumnDef<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for Constraint<'mcx> {
     const TAG: NodeTag = NodeTag::T_Constraint;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for IndexElem<'mcx> {
+    const TAG: NodeTag = NodeTag::T_IndexElem;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for IndexStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_IndexStmt;
 }
 
 impl<'mcx> Node<'mcx> {
