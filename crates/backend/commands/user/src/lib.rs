@@ -507,15 +507,24 @@ pub fn CreateRole<'mcx, 'a>(mcx: Mcx<'mcx>, stmt: &CreateRoleStmt<'a>) -> PgResu
     new_record[(Anum_pg_authid_rolreplication - 1) as usize] = Datum::from_bool(isreplication);
     new_record[(Anum_pg_authid_rolconnlimit - 1) as usize] = Datum::from_i32(connlimit);
 
+    let mut _shadow_pass_text = None;
     match password {
         Some(p) if p.is_empty() => {
             notice("empty string is not a valid password, clearing password".into(), "CreateRole")?;
             new_record_nulls[(Anum_pg_authid_rolpassword - 1) as usize] = true;
         }
-        Some(_) => panic!(
-            "CreateRole/AlterRole (user.c): password verifiers unported \
-             (common-probe-scram-srv todo) — PASSWORD <string> unsupported, use PASSWORD NULL"
-        ),
+        Some(p) => {
+            let shadow_pass = crypt::encrypt_password(
+                mcx,
+                crypt::PasswordType::from_guc(password_encryption()),
+                role,
+                p,
+            )?;
+            let t = varlena::cstring_to_text(mcx, shadow_pass.as_str().as_bytes())?;
+            new_record[(Anum_pg_authid_rolpassword - 1) as usize] =
+                Datum::from_usize(t.as_bytes().as_ptr() as usize);
+            _shadow_pass_text = Some(t);
+        }
         None => new_record_nulls[(Anum_pg_authid_rolpassword - 1) as usize] = true,
     }
 
@@ -812,16 +821,26 @@ pub fn AlterRole<'mcx, 'a>(mcx: Mcx<'mcx>, stmt: &AlterRoleStmt<'a>) -> PgResult
         new_record_repl[(Anum_pg_authid_rolconnlimit - 1) as usize] = true;
     }
 
+    let mut _shadow_pass_text = None;
     match password {
         Some(p) if p.is_empty() => {
             notice("empty string is not a valid password, clearing password".into(), "AlterRole")?;
             new_record_nulls[(Anum_pg_authid_rolpassword - 1) as usize] = true;
             new_record_repl[(Anum_pg_authid_rolpassword - 1) as usize] = true;
         }
-        Some(_) => panic!(
-            "CreateRole/AlterRole (user.c): password verifiers unported \
-             (common-probe-scram-srv todo) — PASSWORD <string> unsupported, use PASSWORD NULL"
-        ),
+        Some(p) => {
+            let shadow_pass = crypt::encrypt_password(
+                mcx,
+                crypt::PasswordType::from_guc(password_encryption()),
+                &rolename,
+                p,
+            )?;
+            let t = varlena::cstring_to_text(mcx, shadow_pass.as_str().as_bytes())?;
+            new_record[(Anum_pg_authid_rolpassword - 1) as usize] =
+                Datum::from_usize(t.as_bytes().as_ptr() as usize);
+            new_record_repl[(Anum_pg_authid_rolpassword - 1) as usize] = true;
+            _shadow_pass_text = Some(t);
+        }
         None => {}
     }
 
@@ -1814,7 +1833,20 @@ pub fn assign_createrole_self_grant(
     });
 }
 
+// int Password_encryption = PASSWORD_TYPE_SCRAM_SHA_256 (user.c:85).
+thread_local! {
+    static PASSWORD_ENCRYPTION: Cell<i32> = const { Cell::new(2) };
+}
+
+fn password_encryption() -> i32 {
+    PASSWORD_ENCRYPTION.with(Cell::get)
+}
+
 pub fn init_seams() {
     guc_tables::hooks::check_createrole_self_grant.install(check_createrole_self_grant);
     guc_tables::hooks::assign_createrole_self_grant.install(assign_createrole_self_grant);
+    guc_tables::vars::Password_encryption.install(guc_tables::GucVarAccessors {
+        get: password_encryption,
+        set: |v| PASSWORD_ENCRYPTION.with(|c| c.set(v)),
+    });
 }
