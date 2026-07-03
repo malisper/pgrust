@@ -36,6 +36,7 @@ pub fn heap_truncate_one_rel<'mcx>(mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgRe
 
 // C uses BuildDummyIndexInfo to avoid evaluating expression/predicate code;
 // both are loud inside BuildIndexInfo here, so the full form is equivalent.
+#[allow(unused_variables)]
 fn RelationTruncateIndexes<'mcx>(mcx: Mcx<'mcx>, heapRelation: &Relation<'mcx>) -> PgResult<()> {
     let indexIds = relcache::indexlist::RelationGetIndexList(mcx, heapRelation.rd_id)?;
     for &indexId in indexIds.iter() {

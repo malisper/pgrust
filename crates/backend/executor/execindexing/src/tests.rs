@@ -354,6 +354,7 @@ fn pg_class(relname: &str, oid: Oid, relam: Oid, relkind: u8, hasindex: bool) ->
         relisshared: false,
         relpersistence: RELPERSISTENCE_PERMANENT,
         relkind,
+        relhastriggers: false,
         relhassubclass: false,
         relrowsecurity: false,
         relispopulated: true,

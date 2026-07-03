@@ -46,6 +46,7 @@ fn make<'mcx>(mcx: Mcx<'mcx>, oid: Oid, relkind: u8, relam: Oid) -> Relation<'mc
             relisshared: false,
             relpersistence: RELPERSISTENCE_PERMANENT,
             relkind,
+            relhastriggers: false,
             relhassubclass: false,
             relrowsecurity: false,
             relispopulated: true,

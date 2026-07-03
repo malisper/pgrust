@@ -124,6 +124,7 @@ fn make_rel(mcx: mcx::Mcx<'_>, oid: Oid) -> RelationData<'_> {
             relisshared: false,
             relpersistence: types_core::RELPERSISTENCE_PERMANENT,
             relkind: RELKIND_RELATION,
+            relhastriggers: false,
             relhassubclass: false,
             relrowsecurity: false,
             relispopulated: true,
