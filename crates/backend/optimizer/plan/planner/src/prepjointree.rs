@@ -1076,4 +1076,195 @@ mod tests {
         assert_eq!((qual_var.varno, qual_var.varattno), (2, 1));
         assert!(q.args.nth(1).as_const().is_some());
     }
+
+
+    fn rel_rte<'mcx>(mcx: Mcx<'mcx>, relid: u32, perm: u32) -> Node<'mcx> {
+        Node::mk(
+            mcx,
+            RangeTblEntry {
+                rtekind: RTEKind::RTE_RELATION,
+                relid,
+                relkind: b'r',
+                perminfoindex: perm,
+                inFromCl: true,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    }
+
+    fn view_rte<'mcx>(mcx: Mcx<'mcx>, relid: u32, sub: &'mcx Query<'mcx>) -> Node<'mcx> {
+        Node::mk(
+            mcx,
+            RangeTblEntry {
+                rtekind: RTEKind::RTE_SUBQUERY,
+                subquery: Some(sub),
+                relid,
+                relkind: b'v',
+                perminfoindex: 1,
+                inFromCl: true,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    }
+
+    fn eq_qual<'mcx>(mcx: Mcx<'mcx>, l: Node<'mcx>, r: Node<'mcx>) -> Node<'mcx> {
+        Node::mk(
+            mcx,
+            OpExpr {
+                opno: 96,
+                opresulttype: 16,
+                args: NodeList::make2(mcx, l, r).unwrap(),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn join_view_subquery_flattens() {
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let join_rte = Node::mk(
+            mcx,
+            RangeTblEntry {
+                rtekind: RTEKind::RTE_JOIN,
+                jointype: types_nodes::JoinType::JOIN_INNER,
+                joinaliasvars: NodeList::make2(mcx, var(mcx, 1, 1), var(mcx, 2, 1)).unwrap(),
+                inFromCl: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let jexpr = Node::mk(
+            mcx,
+            types_nodes::JoinExpr {
+                jointype: types_nodes::JoinType::JOIN_INNER,
+                isNatural: false,
+                larg: Node::mk_range_tbl_ref(mcx, 1).unwrap(),
+                rarg: Node::mk_range_tbl_ref(mcx, 2).unwrap(),
+                usingClause: NodeList::nil(),
+                join_using_alias: None,
+                quals: Some(eq_qual(mcx, var(mcx, 1, 1), var(mcx, 2, 1))),
+                alias: None,
+                rtindex: 3,
+            },
+        )
+        .unwrap();
+        let sub = alloc_leak_in(
+            mcx,
+            Query {
+                commandType: CmdType::CMD_SELECT,
+                rtable: NodeList::make3(mcx, rel_rte(mcx, 77, 1), rel_rte(mcx, 78, 2), join_rte)
+                    .unwrap(),
+                rteperminfos: NodeList::make2(mcx, perminfo(mcx, 77), perminfo(mcx, 78)).unwrap(),
+                targetList: NodeList::make2(
+                    mcx,
+                    tle(mcx, var(mcx, 1, 1), 1),
+                    tle(mcx, var(mcx, 2, 1), 2),
+                )
+                .unwrap(),
+                jointree: Some(
+                    alloc_leak_in(
+                        mcx,
+                        FromExpr { fromlist: NodeList::make1(mcx, jexpr).unwrap(), quals: None },
+                    )
+                    .unwrap(),
+                ),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut parse = Query {
+            commandType: CmdType::CMD_SELECT,
+            rtable: NodeList::make1(mcx, view_rte(mcx, 99, sub)).unwrap(),
+            rteperminfos: NodeList::make1(mcx, perminfo(mcx, 99)).unwrap(),
+            targetList: NodeList::make1(mcx, tle(mcx, var(mcx, 1, 2), 1)).unwrap(),
+            jointree: Some(from_expr(mcx, 1, None)),
+            ..Default::default()
+        };
+
+        super::pull_up_subqueries(mcx, &mut parse).unwrap();
+
+        assert_eq!(parse.rtable.len(), 4);
+        assert_eq!(parse.rtable.nth(1).as_range_tbl_entry().unwrap().perminfoindex, 2);
+        assert_eq!(parse.rtable.nth(2).as_range_tbl_entry().unwrap().perminfoindex, 3);
+        let jrte = parse.rtable.nth(3).as_range_tbl_entry().unwrap();
+        assert_eq!(jrte.rtekind, RTEKind::RTE_JOIN);
+        let av0 = jrte.joinaliasvars.nth(0).as_var().unwrap();
+        let av1 = jrte.joinaliasvars.nth(1).as_var().unwrap();
+        assert_eq!((av0.varno, av1.varno), (2, 3));
+
+        let jt = parse.jointree.unwrap();
+        assert_eq!(jt.fromlist.len(), 1);
+        let j = jt.fromlist.nth(0).as_join_expr().unwrap();
+        assert_eq!(j.rtindex, 4);
+        assert_eq!(j.larg.as_range_tbl_ref().unwrap().rtindex, 2);
+        assert_eq!(j.rarg.as_range_tbl_ref().unwrap().rtindex, 3);
+        let jq = j.quals.unwrap().as_op_expr().unwrap();
+        assert_eq!(jq.args.nth(0).as_var().unwrap().varno, 2);
+        assert_eq!(jq.args.nth(1).as_var().unwrap().varno, 3);
+
+        let out_var = parse.targetList.nth(0).as_target_entry().unwrap().expr.as_var().unwrap();
+        assert_eq!((out_var.varno, out_var.varattno), (3, 1));
+    }
+
+    #[test]
+    fn nested_view_subquery_flattens() {
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let v1 = alloc_leak_in(
+            mcx,
+            Query {
+                commandType: CmdType::CMD_SELECT,
+                rtable: NodeList::make1(mcx, rel_rte(mcx, 77, 1)).unwrap(),
+                rteperminfos: NodeList::make1(mcx, perminfo(mcx, 77)).unwrap(),
+                targetList: NodeList::make1(mcx, tle(mcx, var(mcx, 1, 1), 1)).unwrap(),
+                jointree: Some(from_expr(mcx, 1, None)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let v2 = alloc_leak_in(
+            mcx,
+            Query {
+                commandType: CmdType::CMD_SELECT,
+                rtable: NodeList::make1(mcx, view_rte(mcx, 88, v1)).unwrap(),
+                rteperminfos: NodeList::make1(mcx, perminfo(mcx, 88)).unwrap(),
+                targetList: NodeList::make1(mcx, tle(mcx, var(mcx, 1, 1), 1)).unwrap(),
+                jointree: Some(from_expr(mcx, 1, None)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut parse = Query {
+            commandType: CmdType::CMD_SELECT,
+            rtable: NodeList::make1(mcx, view_rte(mcx, 99, v2)).unwrap(),
+            rteperminfos: NodeList::make1(mcx, perminfo(mcx, 99)).unwrap(),
+            targetList: NodeList::make1(mcx, tle(mcx, var(mcx, 1, 1), 1)).unwrap(),
+            jointree: Some(from_expr(mcx, 1, None)),
+            ..Default::default()
+        };
+
+        super::pull_up_subqueries(mcx, &mut parse).unwrap();
+
+        assert_eq!(parse.rtable.len(), 3);
+        let mid = parse.rtable.nth(1).as_range_tbl_entry().unwrap();
+        assert_eq!(mid.rtekind, RTEKind::RTE_SUBQUERY);
+        assert!(mid.subquery.is_none());
+        let base = parse.rtable.nth(2).as_range_tbl_entry().unwrap();
+        assert_eq!(base.relid, 77);
+        assert_eq!(base.perminfoindex, 3);
+        assert_eq!(parse.rteperminfos.len(), 3);
+        assert_eq!(parse.rteperminfos.nth(2).as_rte_permission_info().unwrap().relid, 77);
+
+        let jt = parse.jointree.unwrap();
+        assert_eq!(jt.fromlist.len(), 1);
+        assert_eq!(jt.fromlist.nth(0).as_range_tbl_ref().unwrap().rtindex, 3);
+        let out_var = parse.targetList.nth(0).as_target_entry().unwrap().expr.as_var().unwrap();
+        assert_eq!((out_var.varno, out_var.varattno), (3, 1));
+    }
 }
