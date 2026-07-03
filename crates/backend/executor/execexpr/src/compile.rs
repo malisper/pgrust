@@ -1593,12 +1593,21 @@ fn init_json_constructor<'mcx>(
         let (scalar_json, scalar_jsonb) = if ctor.r#type == JC::JSCTOR_JSON_SCALAR {
             // SAFETY: nargs == 1 for JSCTOR_JSON_SCALAR; types[0] just written.
             let typid = unsafe { types.as_ptr().read() };
+            // Raw write: the carriers hold an FmgrInfo (droppy fn_extra slot);
+            // like FuncFrame flinfo they are released by plan teardown, never
+            // by arena drop.
             if is_jsonb {
                 let cat = ::adt_jsonb::tojsonb::json_categorize_type(typid)?;
-                (None, Some(NonNull::from(::mcx::leak_in(::mcx::alloc_in(mcx, cat)?))))
+                let slot: NonNull<::adt_jsonb::tojsonb::ValCategory> = alloc_array(mcx, 1)?;
+                // SAFETY: fresh exclusive allocation.
+                unsafe { slot.as_ptr().write(cat) };
+                (None, Some(slot))
             } else {
                 let cat = ::adt_json::tojson::json_categorize_type(typid)?;
-                (Some(NonNull::from(::mcx::leak_in(::mcx::alloc_in(mcx, cat)?))), None)
+                let slot: NonNull<::adt_json::tojson::TypeCat> = alloc_array(mcx, 1)?;
+                // SAFETY: fresh exclusive allocation.
+                unsafe { slot.as_ptr().write(cat) };
+                (Some(slot), None)
             }
         } else {
             (None, None)
