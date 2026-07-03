@@ -7,6 +7,10 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    pub fn get_session_user_id() -> Oid
+);
+
+seam_core::seam!(
     pub fn set_user_id_and_sec_context(userid: Oid, sec_context: i32)
 );
 

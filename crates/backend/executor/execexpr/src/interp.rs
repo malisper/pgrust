@@ -41,6 +41,14 @@ fn missing_slot(src: SlotSrc) -> ! {
 
 #[cold]
 #[inline(never)]
+fn invalid_role_oid(roleid: ::types_core::Oid) -> Box<PgError> {
+    PgError::new(::types_error::ERROR, format!("invalid role OID: {roleid}"))
+        .with_sqlstate(::types_error::ERRCODE_UNDEFINED_OBJECT)
+        .into()
+}
+
+#[cold]
+#[inline(never)]
 fn no_result_slot() -> ! {
     panic!("execexpr: projection step without a result slot")
 }
@@ -657,7 +665,7 @@ fn run_program<'mcx>(
                 }
                 write_out(*out, value, isnull);
             }
-            Step::SqlValueFunction { op, typmod, timetz, out } => {
+            Step::SqlValueFunction { op, typmod, scratch, out } => {
                 use ::types_nodes::primnodes::SQLValueFunctionOp as Op;
                 let value = match op {
                     Op::SVFOP_CURRENT_DATE => Datum::from_i32(adt_date::GetSQLCurrentDate()),
@@ -666,10 +674,10 @@ fn run_program<'mcx>(
                         // SAFETY: compile-allocated 12-byte 8-aligned image
                         // slot owned by this step (steps.rs note).
                         unsafe {
-                            timetz.as_ptr().cast::<i64>().write(t.time);
-                            timetz.as_ptr().add(8).cast::<i32>().write(t.zone);
+                            scratch.as_ptr().cast::<i64>().write(t.time);
+                            scratch.as_ptr().add(8).cast::<i32>().write(t.zone);
                         }
-                        Datum::from_usize(timetz.as_ptr() as usize)
+                        Datum::from_usize(scratch.as_ptr() as usize)
                     }
                     Op::SVFOP_CURRENT_TIMESTAMP | Op::SVFOP_CURRENT_TIMESTAMP_N => {
                         Datum::from_i64(adt_timestamp::GetSQLCurrentTimestamp(*typmod))
@@ -680,9 +688,28 @@ fn run_program<'mcx>(
                     Op::SVFOP_LOCALTIMESTAMP | Op::SVFOP_LOCALTIMESTAMP_N => {
                         Datum::from_i64(adt_timestamp::GetSQLLocalTimestamp(*typmod)?)
                     }
+                    Op::SVFOP_CURRENT_ROLE | Op::SVFOP_CURRENT_USER | Op::SVFOP_USER
+                    | Op::SVFOP_SESSION_USER => {
+                        let roleid = if matches!(op, Op::SVFOP_SESSION_USER) {
+                            miscinit_seams::get_session_user_id::call()
+                        } else {
+                            miscinit_seams::get_user_id::call()
+                        };
+                        let shape = syscache_seams::lookup_authid_session_by_oid::call(roleid)?
+                            .ok_or_else(|| invalid_role_oid(roleid))?;
+                        // SAFETY: compile-allocated NameData-sized image slot
+                        // owned by this step (steps.rs note).
+                        unsafe {
+                            scratch
+                                .as_ptr()
+                                .cast::<::types_tuple::NameData>()
+                                .write(shape.rolname);
+                        }
+                        Datum::from_usize(scratch.as_ptr() as usize)
+                    }
                     other => panic!(
-                        "execexpr EEOP_SQLVALUEFUNCTION: name op {other:?} unported \
-                         (grammar arms 2149-2155 are louds)"
+                        "execexpr EEOP_SQLVALUEFUNCTION: op {other:?} unported \
+                         (CURRENT_CATALOG/CURRENT_SCHEMA — dbcommands/namespace lanes)"
                     ),
                 };
                 write_out(*out, value, false);
