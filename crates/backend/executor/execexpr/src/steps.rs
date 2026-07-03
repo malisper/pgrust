@@ -188,7 +188,7 @@ pub enum Step {
     // resumes with the result (see interp::EvalOutcome).
     SubPlan { sstate: NonNull<()>, out: OutRef },
     // EEOP_MAKE_READONLY: emitted only for typlen -1 domain-check inputs.
-    MakeReadonly { src: OutRef, out: OutRef },
+    MakeReadonlyOut { src: OutRef, out: OutRef },
     DomainTestval { src: OutRef, out: OutRef },
     DomainNotNull { resulttype: Oid, out: OutRef },
     // name/check: compile-allocated in 'mcx (BoolAndStep anynull precedent).

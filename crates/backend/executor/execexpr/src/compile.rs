@@ -778,7 +778,6 @@ pub fn expr_type(node: Node<'_>) -> Oid {
         NodeTag::T_CoerceViaIO => node.as_coerce_via_io().unwrap().resulttype,
         NodeTag::T_CoerceToDomain => node.as_coerce_to_domain().unwrap().resulttype,
         NodeTag::T_CoerceToDomainValue => node.as_coerce_to_domain_value().unwrap().typeId,
-        NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resulttype,
         tag => panic!("execexpr exprType: node family {tag:?} not ported"),
     }
 }
@@ -1452,7 +1451,7 @@ fn init_coerce_to_domain<'mcx>(
                         // R/W expanded inputs must be read R/O by the checks.
                         let dv = if typlen == -1 {
                             let ro = OutRef(Some(alloc_nullable_datum(mcx)?));
-                            push_step(state, mcx, Step::MakeReadonly { src: out, out: ro })?;
+                            push_step(state, mcx, Step::MakeReadonlyOut { src: out, out: ro })?;
                             ro
                         } else {
                             out
