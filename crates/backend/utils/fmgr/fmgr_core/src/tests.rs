@@ -374,3 +374,84 @@ fn input_function_call_safe_over_resolved_int4in() {
     .unwrap_err();
     assert_eq!(err.sqlstate(), ::types_error::ERRCODE_INVALID_TEXT_REPRESENTATION);
 }
+
+// Binary wire round-trip through the registered recv/send builtins:
+// Datum -> send fc -> bytea -> recv fc -> Datum, exercising the actual OID
+// registration (a not-ported OID would panic in builtin_not_ported).
+mod wire_round_trip {
+    use ::datum::varlena::VarlenaRef;
+    use ::datum::{Datum, Varlena};
+    use ::fmgr::{receive_function_call, send_function_call};
+    use ::mcx::{Mcx, MemoryContext, PgVec};
+    use ::stringinfo::StringInfo;
+
+    use crate::fmgr_info;
+
+    // send oid, then recv oid; runs the datum both ways.
+    fn round_trip_byval(mcx: Mcx<'_>, send_oid: u32, recv_oid: u32, d: Datum) -> Datum {
+        let mut send = fmgr_info(send_oid).unwrap();
+        let out = send_function_call(&mut send, d, mcx).unwrap();
+        // SAFETY: send builtins return a 4B-header bytea image.
+        let payload = unsafe { VarlenaRef::from_ptr(out.as_usize() as *const u8) }.data();
+        let mut buf = StringInfo::with_capacity_in(mcx, payload.len() + 1).unwrap();
+        buf.append_bytes(payload).unwrap();
+        let mut recv = fmgr_info(recv_oid).unwrap();
+        let back = receive_function_call(&mut recv, Some(&mut buf), 0, -1, mcx).unwrap();
+        assert_eq!(buf.cursor, buf.len(), "recv must consume the whole buffer");
+        back
+    }
+
+    fn text_datum(mcx: Mcx<'_>, s: &[u8]) -> Datum {
+        let mut img: PgVec<u8> = PgVec::new_in(mcx);
+        img.try_reserve_exact(4 + s.len()).unwrap();
+        img.extend_from_slice(&[0u8; 4]);
+        img.extend_from_slice(s);
+        let v = Varlena::from_image(img);
+        let d = Datum::from_usize(v.as_bytes().as_ptr() as usize);
+        core::mem::forget(v);
+        d
+    }
+
+    #[test]
+    fn byval_types_round_trip_bit_identical() {
+        let ctx = MemoryContext::new("wire-rt");
+        let mcx = ctx.mcx();
+
+        assert_eq!(round_trip_byval(mcx, 2437, 2436, Datum::from_bool(true)).as_bool(), true);
+        assert_eq!(round_trip_byval(mcx, 2437, 2436, Datum::from_bool(false)).as_bool(), false);
+
+        for v in [0i16, -1, 12345, i16::MIN, i16::MAX] {
+            assert_eq!(round_trip_byval(mcx, 2405, 2404, Datum::from_i16(v)).as_i16(), v);
+        }
+        for v in [0i32, -123456789, i32::MIN, i32::MAX] {
+            assert_eq!(round_trip_byval(mcx, 2407, 2406, Datum::from_i32(v)).as_i32(), v);
+        }
+        for v in [0i64, -1234567890123, i64::MIN, i64::MAX] {
+            assert_eq!(round_trip_byval(mcx, 2409, 2408, Datum::from_i64(v)).as_i64(), v);
+        }
+        for v in [0.0f32, -3.5, f32::MIN, f32::MAX] {
+            assert_eq!(round_trip_byval(mcx, 2425, 2424, Datum::from_f32(v)).as_f32(), v);
+        }
+        let nan = round_trip_byval(mcx, 2425, 2424, Datum::from_f32(f32::NAN));
+        assert!(nan.as_f32().is_nan());
+        for v in [0.0f64, 2.718281828459045, f64::MIN, f64::MAX] {
+            assert_eq!(round_trip_byval(mcx, 2427, 2426, Datum::from_f64(v)).as_f64(), v);
+        }
+    }
+
+    // bytea recv/send take no encoding conversion (text recv/send route through
+    // the mbutils server<->client seam, which the extended-query byte-trace
+    // integration exercises with the seam installed).
+    #[test]
+    fn bytea_round_trip() {
+        let ctx = MemoryContext::new("wire-rt-varlena");
+        let mcx = ctx.mcx();
+        for s in [&b""[..], b"hello", b"binary\x00wire\xff"] {
+            let d = text_datum(mcx, s);
+            let back = round_trip_byval(mcx, 2413, 2412, d);
+            // SAFETY: recv returns a 4B-header bytea varlena image.
+            let got = unsafe { VarlenaRef::from_ptr(back.as_usize() as *const u8) }.data();
+            assert_eq!(got, s, "bytea recv/send payload mismatch");
+        }
+    }
+}

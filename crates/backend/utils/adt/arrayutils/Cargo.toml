@@ -1,0 +1,8 @@
+[package]
+name = "arrayutils"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+types_error = { path = "../../../../_support/types/types_error" }

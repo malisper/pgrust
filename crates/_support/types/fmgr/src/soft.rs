@@ -55,6 +55,24 @@ impl FunctionCallInfoBaseData {
             Some(&mut p.cast::<ErrorSaveNode>().as_mut().ctx)
         }
     }
+
+    /// The whole `ErrorSaveNode`, for functions that both record their own
+    /// soft errors and forward the node to a sub-function (e.g. array_in →
+    /// element InputFunctionCallSafe).
+    ///
+    /// # Safety
+    /// Same contract as [`Self::soft_error_context`].
+    #[inline]
+    pub unsafe fn error_save_node<'a>(&self) -> Option<&'a mut ErrorSaveNode> {
+        let p = self.context?;
+        // SAFETY: caller contract; the tag check proves the concrete type.
+        unsafe {
+            if p.as_ref().tag != T_ERROR_SAVE_CONTEXT {
+                return None;
+            }
+            Some(p.cast::<ErrorSaveNode>().as_mut())
+        }
+    }
 }
 
 #[cold]

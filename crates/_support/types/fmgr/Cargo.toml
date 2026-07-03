@@ -9,4 +9,5 @@ types_core = { path = "../types_core" }
 types_error = { path = "../types_error" }
 datum = { path = "../datum" }
 types_tuple = { path = "../types_tuple" }
+stringinfo = { path = "../stringinfo" }
 mcx = { path = "../../mcx" }

@@ -137,6 +137,13 @@ impl FunctionCallInfoBaseData {
         unsafe { CStr::from_ptr(self.arg_ptr(i).cast()) }
     }
 
+    /// C's `(StringInfo) PG_GETARG_POINTER(0)` (recv arg0).
+    /// Safety: arg `i` is a live, unaliased `&mut StringInfo` pointer.
+    #[inline]
+    pub unsafe fn arg_stringinfo(&self, i: usize) -> &mut ::stringinfo::StringInfo<'_> {
+        unsafe { &mut *(self.arg_ptr(i) as *mut ::stringinfo::StringInfo) }
+    }
+
     /// Safety: arg `i` is non-null with catalog `typlen == n`, live for the call.
     #[inline]
     pub unsafe fn arg_fixed(&self, i: usize, n: usize) -> &[u8] {

@@ -8,12 +8,16 @@ extern crate alloc;
 pub mod fcinfo;
 pub mod getarg;
 pub mod result;
+pub mod rsinfo;
 pub mod soft;
+pub mod wire;
 
 pub use fcinfo::*;
 pub use getarg::*;
 pub use result::*;
+pub use rsinfo::*;
 pub use soft::*;
+pub use wire::*;
 
 #[cfg(test)]
 mod tests;

@@ -97,7 +97,10 @@ dependencies = [
  "fd",
  "guc_tables",
  "hashfn",
+ "mcx",
  "pgtz",
+ "pqformat",
+ "stringinfo",
  "types_core",
  "types_error",
  "types_fmgr",
@@ -117,6 +120,19 @@ dependencies = [
  "types_core",
  "types_error",
  "xact_seams",
+]
+
+[[package]]
+name = "adt_encode"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "mbutils_seams",
+ "mcx",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "varlena",
 ]
 
 [[package]]
@@ -402,20 +418,18 @@ dependencies = [
 name = "arrayfuncs"
 version = "0.1.0"
 dependencies = [
+ "adt_int",
  "arrayutils",
  "datum",
  "detoast_seams",
  "fmgr_seams",
  "lsyscache",
  "mcx",
- "numutils",
  "pqformat",
  "stringinfo",
- "types_array",
  "types_core",
  "types_error",
  "types_fmgr",
- "types_tuple",
 ]
 
 [[package]]
@@ -1143,7 +1157,6 @@ dependencies = [
  "backend_progress_seams",
  "backend_status_seams",
  "be_fsstubs_seams",
- "bufmgr",
  "bufmgr_seams",
  "cache_syscache",
  "catalog_index_seams",
@@ -1192,6 +1205,7 @@ dependencies = [
  "pg_prng",
  "pg_sema_seams",
  "pgstat",
+ "planner",
  "pmsignal_seams",
  "predicate_seams",
  "procarray",
@@ -1228,6 +1242,7 @@ dependencies = [
  "types_error",
  "types_fmgr",
  "types_nodes",
+ "types_portal",
  "types_rel",
  "types_scan",
  "types_slot",
@@ -1908,6 +1923,7 @@ dependencies = [
  "adt_bool",
  "adt_cash",
  "adt_date",
+ "adt_encode",
  "adt_float",
  "adt_int",
  "adt_int8",
@@ -1919,6 +1935,7 @@ dependencies = [
  "adt_oracle_compat",
  "adt_pseudotypes",
  "adt_scalar",
+ "arrayfuncs",
  "datum",
  "fmgr_seams",
  "mcx",
@@ -3478,6 +3495,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "nodemergejoin"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "execexpr",
+ "exectuples",
+ "executils",
+ "init_small",
+ "lsyscache",
+ "mcx",
+ "postgres_seams",
+ "tuplesort",
+ "types_error",
+ "types_nbtree",
+ "types_nodes",
+ "types_slot",
+ "types_tuple",
+]
+
+[[package]]
 name = "nodemodifytable"
 version = "0.1.0"
 dependencies = [
@@ -4290,6 +4327,7 @@ dependencies = [
  "mcx",
  "nbtree",
  "nodeagg",
+ "nodehash",
  "parse_relation",
  "planner_seams",
  "relation_seams",
@@ -7055,6 +7093,7 @@ dependencies = [
  "bufmgr_seams",
  "commands_vacuum",
  "freespace",
+ "guc_tables",
  "heapam",
  "heapam_visibility_seams",
  "init_small",
@@ -7062,8 +7101,11 @@ dependencies = [
  "procarray_seams",
  "pruneheap",
  "relcache_seams",
+ "sinval_seams",
+ "smgr_seams",
  "tableam_seams",
  "tableam_vocab",
+ "transam_xlog_seams",
  "types_core",
  "types_error",
  "types_rel",
@@ -7072,6 +7114,7 @@ dependencies = [
  "types_tuple",
  "visibilitymap",
  "xloginsert_seams",
+ "xlogutils_seams",
 ]
 
 [[package]]

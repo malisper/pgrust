@@ -3,8 +3,10 @@ use ::types_core::Oid;
 
 const TABLES: &[&[FmgrBuiltin]] = &[
     ::adt_bool::builtins::BOOL_BUILTINS,
+    ::arrayfuncs::builtins::ARRAYFUNCS_BUILTINS,
     ::adt_cash::builtins::CASH_BUILTINS,
     ::adt_date::builtins::DATE_BUILTINS,
+    ::adt_encode::builtins::ENCODE_BUILTINS,
     ::adt_float::builtins::FLOAT_BUILTINS,
     ::adt_int::builtins::INT_BUILTINS,
     ::adt_int8::builtins::INT8_BUILTINS,
