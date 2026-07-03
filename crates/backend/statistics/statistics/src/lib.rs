@@ -357,8 +357,8 @@ fn make_build_data<'mcx>(
 
     let mut attnums: PgVec<'mcx, AttrNumber> = mcx::vec_with_capacity_in(mcx, nkeys)?;
     let mut statsv: PgVec<'mcx, ColStats> = mcx::vec_with_capacity_in(mcx, nkeys)?;
-    let mut values: PgVec<'mcx, PgVec<'mcx, Datum>> = mcx::vec_with_capacity_in(mcx, nkeys)?;
-    let mut nulls: PgVec<'mcx, PgVec<'mcx, bool>> = mcx::vec_with_capacity_in(mcx, nkeys)?;
+    let mut values: PgVec<'mcx, PgVec<'mcx, Datum>> = PgVec::new_in(mcx);
+    let mut nulls: PgVec<'mcx, PgVec<'mcx, bool>> = PgVec::new_in(mcx);
 
     for (idx, &k) in stat.columns.iter().enumerate() {
         attnums.push(k);

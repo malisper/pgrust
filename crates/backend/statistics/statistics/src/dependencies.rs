@@ -178,7 +178,7 @@ pub fn statext_dependencies_deserialize<'mcx>(
     if ndeps == 0 {
         return Err(PgError::error("invalid zero-length item array in MVDependencies").into());
     }
-    let mut deps: PgVec<'mcx, MVDependency<'mcx>> = mcx::vec_with_capacity_in(mcx, ndeps)?;
+    let mut deps: PgVec<'mcx, MVDependency<'mcx>> = PgVec::new_in(mcx);
     let mut off = 12usize;
     for _ in 0..ndeps {
         let degree = f64::from_ne_bytes(data[off..off + 8].try_into().unwrap());

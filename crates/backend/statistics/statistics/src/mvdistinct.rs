@@ -77,7 +77,7 @@ pub fn statext_ndistinct_build<'mcx>(
 ) -> PgResult<MVNDistinct<'mcx>> {
     let numattrs = data.attnums.len();
     let numcombs = num_combinations(numattrs);
-    let mut items: PgVec<'mcx, MVNDistinctItem<'mcx>> = mcx::vec_with_capacity_in(mcx, numcombs)?;
+    let mut items: PgVec<'mcx, MVNDistinctItem<'mcx>> = PgVec::new_in(mcx);
 
     for k in 2..=numattrs {
         let mut generator = CombinationGenerator::init(mcx, numattrs, k)?;
@@ -205,7 +205,7 @@ pub fn statext_ndistinct_deserialize<'mcx>(
     if nitems == 0 {
         return Err(PgError::error("invalid zero-length item array in MVNDistinct").into());
     }
-    let mut items: PgVec<'mcx, MVNDistinctItem<'mcx>> = mcx::vec_with_capacity_in(mcx, nitems)?;
+    let mut items: PgVec<'mcx, MVNDistinctItem<'mcx>> = PgVec::new_in(mcx);
     let mut off = 12usize;
     for _ in 0..nitems {
         let ndistinct = f64::from_ne_bytes(data[off..off + 8].try_into().unwrap());
