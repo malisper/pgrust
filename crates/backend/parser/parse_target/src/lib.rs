@@ -759,6 +759,11 @@ fn FigureColnameInternal<'mcx>(node: Node<'mcx>, name: &mut Option<&'mcx str>) -
             });
             2
         }
+        // C: make GROUPING() act like a regular function.
+        NodeTag::T_GroupingFunc => {
+            *name = Some("grouping");
+            2
+        }
         NodeTag::T_FuncCall => {
             let fc = node.as_func_call().unwrap();
             match fc.funcname.last().and_then(|n| n.as_string()) {

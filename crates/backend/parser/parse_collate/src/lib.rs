@@ -255,6 +255,7 @@ fn assign_collations_walker<'mcx>(
         | NodeTag::T_CoalesceExpr
         | NodeTag::T_MinMaxExpr
         | NodeTag::T_Aggref
+        | NodeTag::T_GroupingFunc
         | NodeTag::T_WindowFunc
         | NodeTag::T_NullTest
         | NodeTag::T_SubLink) => {
@@ -326,6 +327,11 @@ fn assign_collations_walker<'mcx>(
                         assign_collations_walker(filter, &mut loccontext)?;
                     }
                 }
+                NodeTag::T_GroupingFunc => {
+                    for arg in &node.as_grouping_func().unwrap().args {
+                        assign_collations_walker(arg, &mut loccontext)?;
+                    }
+                }
                 NodeTag::T_WindowFunc => {
                     let wf = node.as_window_func().unwrap();
                     for arg in &wf.args {
@@ -395,8 +401,9 @@ fn assign_collations_walker<'mcx>(
                     NodeTag::T_CoerceViaIO => node
                         .with_mut::<types_nodes::CoerceViaIO, _>(|c| c.resultcollid = set_coll)
                         .unwrap(),
-                    // exprSetCollation(BoolExpr/NullTest) is assert-only in C.
-                    NodeTag::T_BoolExpr | NodeTag::T_NullTest => {
+                    // exprSetCollation(BoolExpr/NullTest/GroupingFunc) is
+                    // assert-only in C.
+                    NodeTag::T_BoolExpr | NodeTag::T_NullTest | NodeTag::T_GroupingFunc => {
                         debug_assert!(!OidIsValid(set_coll))
                     }
                     NodeTag::T_CaseExpr => node

@@ -4,15 +4,16 @@
 mod tests;
 
 use elog::ereport;
-use mcx::Mcx;
+use mcx::{Mcx, PgVec};
 use parser_small1::{parser_errposition, ParseExprKind, ParseState};
-use types_core::{Oid, ParseLoc};
+use types_core::{Index, Oid, ParseLoc};
 use types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_GROUPING_ERROR,
-    ERRCODE_UNDEFINED_OBJECT, ERRCODE_WINDOWING_ERROR, ERROR,
+    ERRCODE_STATEMENT_TOO_COMPLEX, ERRCODE_TOO_MANY_ARGUMENTS, ERRCODE_UNDEFINED_OBJECT,
+    ERRCODE_WINDOWING_ERROR, ERROR,
 };
-use types_nodes::parsenodes::Query;
-use types_nodes::primnodes::{Aggref, WindowFunc};
+use types_nodes::parsenodes::{GroupingSet, GroupingSetKind, Query};
+use types_nodes::primnodes::{Aggref, GroupingFunc, WindowFunc};
 use types_nodes::rawnodes::FRAMEOPTION_DEFAULTS;
 use types_nodes::{equal_opt, Node, NodeEqual, NodeList, NodeTag};
 
@@ -65,8 +66,52 @@ pub fn transformAggregateCall<'mcx>(
     agg.aggargtypes = argtypes;
 
     agg.agglevelsup =
-        check_agglevels_and_constraints(pstate, &agg.args, agg.aggfilter, agg.location)?;
+        check_agglevels_and_constraints(pstate, &agg.args, agg.aggfilter, agg.location, true)?;
     Ok(())
+}
+
+/// C `transformGroupingFunc`: GROUPING() behaves very like an aggregate
+/// (levels, nesting, p_hasAggs).  `transform_expr` is the caller-supplied
+/// transformExpr (parse_expr sits above this crate).
+pub fn transformGroupingFunc<'p, 'mcx, F>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'p, 'mcx>,
+    p: &GroupingFunc<'mcx>,
+    mut transform_expr: F,
+) -> PgResult<Node<'mcx>>
+where
+    F: FnMut(Mcx<'mcx>, &mut ParseState<'p, 'mcx>, Node<'mcx>) -> PgResult<Node<'mcx>>,
+{
+    if p.args.len() > 31 {
+        return Err(Box::new(
+            ereport(ERROR)
+                .errcode(ERRCODE_TOO_MANY_ARGUMENTS)
+                .errmsg("GROUPING must have fewer than 32 arguments")
+                .errposition(parser_errposition(pstate, p.location, mbutils::GetDatabaseEncoding()))
+                .into_error()
+                .with_error_location(ErrorLocation::new("parse_agg.c", 0, "transformGroupingFunc")),
+        ));
+    }
+
+    let mut result_list = NodeList::nil();
+    for arg in &p.args {
+        // Acceptability of the expressions is checked later
+        // (finalize_grouping_exprs).
+        result_list.lappend(mcx, transform_expr(mcx, pstate, arg)?)?;
+    }
+
+    let agglevelsup =
+        check_agglevels_and_constraints(pstate, &result_list, None, p.location, false)?;
+    Node::mk(
+        mcx,
+        GroupingFunc {
+            args: result_list,
+            refs: types_nodes::IntList::nil(),
+            cols: types_nodes::IntList::nil(),
+            agglevelsup,
+            location: p.location,
+        },
+    )
 }
 
 fn check_agglevels_and_constraints<'mcx>(
@@ -74,6 +119,7 @@ fn check_agglevels_and_constraints<'mcx>(
     args: &NodeList<'mcx>,
     filter: Option<Node<'mcx>>,
     location: ParseLoc,
+    is_agg: bool,
 ) -> PgResult<u32> {
     let min_varlevel = check_agg_arguments(pstate, args, filter, location)?;
     if min_varlevel > 0 {
@@ -84,6 +130,10 @@ fn check_agglevels_and_constraints<'mcx>(
     }
     pstate.p_hasAggs = true;
 
+    // C keeps two full string tables ("aggregate functions ..." vs "grouping
+    // operations ...") for translation; the rendered text is identical to
+    // composing noun + context here.
+    let noun = if is_agg { "aggregate functions" } else { "grouping operations" };
     let err: Option<&'static str> = match pstate.p_expr_kind {
         ParseExprKind::EXPR_KIND_NONE => {
             panic!("check_agglevels_and_constraints (parse_agg.c): EXPR_KIND_NONE cannot happen")
@@ -96,68 +146,34 @@ fn check_agglevels_and_constraints<'mcx>(
         | ParseExprKind::EXPR_KIND_ORDER_BY
         | ParseExprKind::EXPR_KIND_DISTINCT_ON => None,
         ParseExprKind::EXPR_KIND_JOIN_ON | ParseExprKind::EXPR_KIND_JOIN_USING => {
-            Some("aggregate functions are not allowed in JOIN conditions")
+            Some("JOIN conditions")
         }
         ParseExprKind::EXPR_KIND_FROM_SUBSELECT => {
-            Some("aggregate functions are not allowed in FROM clause of their own query level")
+            Some("FROM clause of their own query level")
         }
-        ParseExprKind::EXPR_KIND_FROM_FUNCTION => {
-            Some("aggregate functions are not allowed in functions in FROM")
-        }
-        ParseExprKind::EXPR_KIND_POLICY => {
-            Some("aggregate functions are not allowed in policy expressions")
-        }
-        ParseExprKind::EXPR_KIND_WINDOW_FRAME_RANGE => {
-            Some("aggregate functions are not allowed in window RANGE")
-        }
-        ParseExprKind::EXPR_KIND_WINDOW_FRAME_ROWS => {
-            Some("aggregate functions are not allowed in window ROWS")
-        }
-        ParseExprKind::EXPR_KIND_WINDOW_FRAME_GROUPS => {
-            Some("aggregate functions are not allowed in window GROUPS")
-        }
-        ParseExprKind::EXPR_KIND_MERGE_WHEN => {
-            Some("aggregate functions are not allowed in MERGE WHEN conditions")
-        }
+        ParseExprKind::EXPR_KIND_FROM_FUNCTION => Some("functions in FROM"),
+        ParseExprKind::EXPR_KIND_POLICY => Some("policy expressions"),
+        ParseExprKind::EXPR_KIND_WINDOW_FRAME_RANGE => Some("window RANGE"),
+        ParseExprKind::EXPR_KIND_WINDOW_FRAME_ROWS => Some("window ROWS"),
+        ParseExprKind::EXPR_KIND_WINDOW_FRAME_GROUPS => Some("window GROUPS"),
+        ParseExprKind::EXPR_KIND_MERGE_WHEN => Some("MERGE WHEN conditions"),
         ParseExprKind::EXPR_KIND_CHECK_CONSTRAINT | ParseExprKind::EXPR_KIND_DOMAIN_CHECK => {
-            Some("aggregate functions are not allowed in check constraints")
+            Some("check constraints")
         }
         ParseExprKind::EXPR_KIND_COLUMN_DEFAULT | ParseExprKind::EXPR_KIND_FUNCTION_DEFAULT => {
-            Some("aggregate functions are not allowed in DEFAULT expressions")
+            Some("DEFAULT expressions")
         }
-        ParseExprKind::EXPR_KIND_INDEX_EXPRESSION => {
-            Some("aggregate functions are not allowed in index expressions")
-        }
-        ParseExprKind::EXPR_KIND_INDEX_PREDICATE => {
-            Some("aggregate functions are not allowed in index predicates")
-        }
-        ParseExprKind::EXPR_KIND_STATS_EXPRESSION => {
-            Some("aggregate functions are not allowed in statistics expressions")
-        }
-        ParseExprKind::EXPR_KIND_ALTER_COL_TRANSFORM => {
-            Some("aggregate functions are not allowed in transform expressions")
-        }
-        ParseExprKind::EXPR_KIND_EXECUTE_PARAMETER => {
-            Some("aggregate functions are not allowed in EXECUTE parameters")
-        }
-        ParseExprKind::EXPR_KIND_TRIGGER_WHEN => {
-            Some("aggregate functions are not allowed in trigger WHEN conditions")
-        }
-        ParseExprKind::EXPR_KIND_PARTITION_BOUND => {
-            Some("aggregate functions are not allowed in partition bound")
-        }
-        ParseExprKind::EXPR_KIND_PARTITION_EXPRESSION => {
-            Some("aggregate functions are not allowed in partition key expressions")
-        }
-        ParseExprKind::EXPR_KIND_GENERATED_COLUMN => {
-            Some("aggregate functions are not allowed in column generation expressions")
-        }
-        ParseExprKind::EXPR_KIND_CALL_ARGUMENT => {
-            Some("aggregate functions are not allowed in CALL arguments")
-        }
-        ParseExprKind::EXPR_KIND_COPY_WHERE => {
-            Some("aggregate functions are not allowed in COPY FROM WHERE conditions")
-        }
+        ParseExprKind::EXPR_KIND_INDEX_EXPRESSION => Some("index expressions"),
+        ParseExprKind::EXPR_KIND_INDEX_PREDICATE => Some("index predicates"),
+        ParseExprKind::EXPR_KIND_STATS_EXPRESSION => Some("statistics expressions"),
+        ParseExprKind::EXPR_KIND_ALTER_COL_TRANSFORM => Some("transform expressions"),
+        ParseExprKind::EXPR_KIND_EXECUTE_PARAMETER => Some("EXECUTE parameters"),
+        ParseExprKind::EXPR_KIND_TRIGGER_WHEN => Some("trigger WHEN conditions"),
+        ParseExprKind::EXPR_KIND_PARTITION_BOUND => Some("partition bound"),
+        ParseExprKind::EXPR_KIND_PARTITION_EXPRESSION => Some("partition key expressions"),
+        ParseExprKind::EXPR_KIND_GENERATED_COLUMN => Some("column generation expressions"),
+        ParseExprKind::EXPR_KIND_CALL_ARGUMENT => Some("CALL arguments"),
+        ParseExprKind::EXPR_KIND_COPY_WHERE => Some("COPY FROM WHERE conditions"),
         ParseExprKind::EXPR_KIND_WHERE
         | ParseExprKind::EXPR_KIND_FILTER
         | ParseExprKind::EXPR_KIND_INSERT_TARGET
@@ -174,7 +190,7 @@ fn check_agglevels_and_constraints<'mcx>(
             return Err(grouping_error(
                 pstate,
                 format!(
-                    "aggregate functions are not allowed in {}",
+                    "{noun} are not allowed in {}",
                     parse_expr_kind_name(pstate.p_expr_kind)
                 ),
                 location,
@@ -182,8 +198,13 @@ fn check_agglevels_and_constraints<'mcx>(
             ));
         }
     };
-    if let Some(msg) = err {
-        return Err(grouping_error(pstate, msg.into(), location, "check_agglevels_and_constraints"));
+    if let Some(what) = err {
+        return Err(grouping_error(
+            pstate,
+            format!("{noun} are not allowed in {what}"),
+            location,
+            "check_agglevels_and_constraints",
+        ));
     }
     Ok(min_varlevel as u32)
 }
@@ -245,6 +266,20 @@ fn check_agg_arguments_walker<'mcx>(
             }
             for tle in &agg.args {
                 check_agg_arguments_walker(pstate, tle, ctx)?;
+            }
+            Ok(())
+        }
+        // C treats GroupingFunc agglevelsup exactly like an Aggref's, then
+        // descends into the subtree.
+        NodeTag::T_GroupingFunc => {
+            let grp = node.as_grouping_func().unwrap();
+            let agglevelsup = grp.agglevelsup as i32;
+            if ctx.min_agglevel < 0 || ctx.min_agglevel > agglevelsup {
+                ctx.min_agglevel = agglevelsup;
+                ctx.agg_loc = grp.location;
+            }
+            for arg in &grp.args {
+                check_agg_arguments_walker(pstate, arg, ctx)?;
             }
             Ok(())
         }
@@ -502,6 +537,11 @@ pub fn locate_windowfunc_in_list(nodes: &NodeList<'_>) -> Option<ParseLoc> {
                 self.loc = wf.location;
                 return Ok(true);
             }
+            // C's expression_tree_walker GroupingFunc arm (unported in
+            // nodes_core): walk the args.
+            if let Some(g) = node.as_grouping_func() {
+                return nodes_core::walk_list(&g.args, self);
+            }
             nodes_core::expression_tree_walker(node, self)
         }
     }
@@ -522,6 +562,11 @@ pub fn locate_windowfunc(node: Node<'_>) -> ParseLoc {
                 self.loc = wf.location;
                 return Ok(true);
             }
+            // C's expression_tree_walker GroupingFunc arm (unported in
+            // nodes_core): walk the args.
+            if let Some(g) = node.as_grouping_func() {
+                return nodes_core::walk_list(&g.args, self);
+            }
             nodes_core::expression_tree_walker(node, self)
         }
     }
@@ -539,6 +584,11 @@ pub fn contain_windowfuncs(node: Node<'_>) -> bool {
             if node.node_tag() == NodeTag::T_WindowFunc {
                 return Ok(true);
             }
+            // C's expression_tree_walker GroupingFunc arm (unported in
+            // nodes_core): walk the args.
+            if let Some(g) = node.as_grouping_func() {
+                return nodes_core::walk_list(&g.args, self);
+            }
             nodes_core::expression_tree_walker(node, self)
         }
     }
@@ -550,8 +600,9 @@ pub fn contain_windowfuncs(node: Node<'_>) -> bool {
 /// performed — the Query keeps the pre-18 direct-Var shape and the planner's
 /// grouping arm consumes it directly; the 42803 checks are C-equivalent.
 pub fn parseCheckAggregates<'mcx>(
+    mcx: Mcx<'mcx>,
     pstate: &ParseState<'_, 'mcx>,
-    qry: &Query<'mcx>,
+    qry: &mut Query<'mcx>,
 ) -> PgResult<()> {
     debug_assert!(
         pstate.p_hasAggs
@@ -559,12 +610,41 @@ pub fn parseCheckAggregates<'mcx>(
             || qry.havingQual.is_some()
             || !qry.groupingSets.is_nil()
     );
+
     if !qry.groupingSets.is_nil() {
-        panic!(
-            "parseCheckAggregates (parse_agg.c): expand_grouping_sets unported — \
-             backend-parser-agg grouping-sets lane"
-        );
+        // The 4096 limit is arbitrary, bounding pathological constructs.
+        let Some(gsets) = expand_grouping_sets(mcx, &qry.groupingSets, qry.groupDistinct, 4096)?
+        else {
+            let location = if !qry.groupClause.is_nil() {
+                // C exprLocation over the SortGroupClause list is always -1.
+                -1
+            } else {
+                grouping_sets_location(&qry.groupingSets)
+            };
+            return Err(grouping_sets_limit_error(pstate, location));
+        };
+        // gset_common (intersection seeded with the smallest set) feeds
+        // functional-dependency checks and varnullingrels, both on unported
+        // lanes here.
+        let mut gset_common: PgVec<'_, i32> = PgVec::new_in(mcx);
+        if let Some(first) = gsets.first() {
+            gset_common.extend_from_slice(first);
+            if !gset_common.is_empty() {
+                for s in gsets.iter().skip(1) {
+                    gset_common = list_intersection_int(mcx, &gset_common, s);
+                    if gset_common.is_empty() {
+                        break;
+                    }
+                }
+            }
+        }
+        // One expanded set plus a non-empty groupClause: ditch the grouping
+        // sets and pretend plain GROUP BY.
+        if gsets.len() == 1 && !qry.groupClause.is_nil() {
+            qry.groupingSets = NodeList::nil();
+        }
     }
+
     for rte in &qry.rtable {
         let rte = rte.as_range_tbl_entry().expect("rtable cell");
         if rte.rtekind == types_nodes::parsenodes::RTEKind::RTE_JOIN {
@@ -593,12 +673,192 @@ pub fn parseCheckAggregates<'mcx>(
     }
 
     for tle in &qry.targetList {
+        finalize_grouping_exprs(mcx, pstate, qry, tle)?;
+    }
+    for tle in &qry.targetList {
         check_ungrouped_columns(pstate, qry, tle)?;
     }
     if let Some(having) = qry.havingQual {
+        finalize_grouping_exprs(mcx, pstate, qry, having)?;
         check_ungrouped_columns(pstate, qry, having)?;
     }
     Ok(())
+}
+
+// C exprLocation over the groupingSets list: first member with a location.
+fn grouping_sets_location(grouping_sets: &NodeList<'_>) -> ParseLoc {
+    for gs in grouping_sets {
+        let loc = gs.as_grouping_set().expect("groupingSets cell").location;
+        if loc >= 0 {
+            return loc;
+        }
+    }
+    -1
+}
+
+#[cold]
+#[inline(never)]
+fn grouping_sets_limit_error(pstate: &ParseState<'_, '_>, location: ParseLoc) -> Box<PgError> {
+    Box::new(
+        ereport(ERROR)
+            .errcode(ERRCODE_STATEMENT_TOO_COMPLEX)
+            .errmsg("too many grouping sets present (maximum 4096)")
+            .errposition(parser_errposition(pstate, location, mbutils::GetDatabaseEncoding()))
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_agg.c", 0, "parseCheckAggregates")),
+    )
+}
+
+/// C `finalize_grouping_exprs_walker`, direct-Var Query shape (no RTE_GROUP,
+/// no join-alias flattening, sublevels_up fixed at 0 — subqueries are loud):
+/// resolve each GROUPING() argument to a group-clause ressortgroupref and
+/// store the list into `grp.refs` in place.
+fn finalize_grouping_exprs<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &ParseState<'_, 'mcx>,
+    qry: &Query<'mcx>,
+    node: Node<'mcx>,
+) -> PgResult<()> {
+    match node.node_tag() {
+        NodeTag::T_Const | NodeTag::T_Param | NodeTag::T_CaseTestExpr | NodeTag::T_Var => Ok(()),
+        NodeTag::T_Aggref => {
+            let agg = node.as_aggref().unwrap();
+            if agg.agglevelsup == 0 {
+                // Do not recurse into a same-level aggregate's normal
+                // arguments, ORDER BY, or filter; only direct arguments are
+                // checked as though outside the aggregate.
+                for arg in &agg.aggdirectargs {
+                    finalize_grouping_exprs(mcx, pstate, qry, arg)?;
+                }
+                return Ok(());
+            }
+            panic!(
+                "finalize_grouping_exprs (parse_agg.c): outer-level Aggref recursion \
+                 unported — backend-parser-agg"
+            );
+        }
+        NodeTag::T_GroupingFunc => {
+            let grp = node.as_grouping_func().unwrap();
+            debug_assert!(grp.agglevelsup == 0);
+            let mut ref_list = types_nodes::IntList::nil();
+            for expr in &grp.args {
+                // Each argument must match a grouping entry at the current
+                // query level; no functional dependencies or outer
+                // references.  All grouping exprs are Vars on this lane
+                // (non-Var grouping is loud in parseCheckAggregates), so the
+                // have_non_var_grouping equal() leg is unreachable.
+                let r#ref = expr
+                    .as_var()
+                    .filter(|v| v.varlevelsup == 0)
+                    .and_then(|var| grouping_var_ref(qry, var));
+                let Some(r#ref) = r#ref else {
+                    return Err(grouping_error(
+                        pstate,
+                        "arguments to GROUPING must be grouping expressions of the \
+                         associated query level"
+                            .into(),
+                        grouping_arg_location(expr),
+                        "finalize_grouping_exprs",
+                    ));
+                };
+                ref_list.lappend(mcx, r#ref as i32)?;
+            }
+            // SAFETY: parse analysis holds exclusive access to the tree it is
+            // finalizing; the `grp` borrow above is dead before this write.
+            unsafe {
+                node.with_mut::<GroupingFunc, _>(|g| g.refs = ref_list).unwrap();
+            }
+            let grp = node.as_grouping_func().unwrap();
+            for arg in &grp.args {
+                finalize_grouping_exprs(mcx, pstate, qry, arg)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_WindowFunc => {
+            let wf = node.as_window_func().unwrap();
+            for arg in &wf.args {
+                finalize_grouping_exprs(mcx, pstate, qry, arg)?;
+            }
+            match wf.aggfilter {
+                Some(f) => finalize_grouping_exprs(mcx, pstate, qry, f),
+                None => Ok(()),
+            }
+        }
+        NodeTag::T_TargetEntry => {
+            finalize_grouping_exprs(mcx, pstate, qry, node.as_target_entry().unwrap().expr)
+        }
+        NodeTag::T_OpExpr => {
+            for arg in &node.as_op_expr().unwrap().args {
+                finalize_grouping_exprs(mcx, pstate, qry, arg)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_FuncExpr => {
+            for arg in &node.as_func_expr().unwrap().args {
+                finalize_grouping_exprs(mcx, pstate, qry, arg)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_RelabelType => {
+            finalize_grouping_exprs(mcx, pstate, qry, node.as_relabel_type().unwrap().arg)
+        }
+        NodeTag::T_BoolExpr => {
+            for arg in &node.as_bool_expr().unwrap().args {
+                finalize_grouping_exprs(mcx, pstate, qry, arg)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_NullTest => match node.as_null_test().unwrap().arg {
+            Some(arg) => finalize_grouping_exprs(mcx, pstate, qry, arg),
+            None => Ok(()),
+        },
+        other => panic!(
+            "finalize_grouping_exprs (parse_agg.c): arm for {other:?} unported — \
+             backend-parser-agg"
+        ),
+    }
+}
+
+// The Var leg of the GROUPING()-argument match against group-clause TLEs.
+fn grouping_var_ref(qry: &Query<'_>, var: &types_nodes::primnodes::Var<'_>) -> Option<Index> {
+    for gc_node in &qry.groupClause {
+        let gc = gc_node.as_sort_group_clause().expect("groupClause cell");
+        let tle = qry
+            .targetList
+            .iter()
+            .find(|n| {
+                n.as_target_entry().expect("tlist cell").ressortgroupref == gc.tleSortGroupRef
+            })
+            .expect("groupClause sortgroupref has a tlist entry")
+            .as_target_entry()
+            .unwrap();
+        if let Some(gvar) = tle.expr.as_var() {
+            if gvar.varno == var.varno
+                && gvar.varattno == var.varattno
+                && gvar.varlevelsup == 0
+            {
+                return Some(tle.ressortgroupref);
+            }
+        }
+    }
+    None
+}
+
+// Local slice of C exprLocation over transformed GROUPING() arguments (the
+// full accessor lives in parse_expr, above this crate); -1 is C's default arm.
+fn grouping_arg_location(node: Node<'_>) -> ParseLoc {
+    match node.node_tag() {
+        NodeTag::T_Var => node.as_var().unwrap().location,
+        NodeTag::T_Const => node.as_const().unwrap().location,
+        NodeTag::T_Param => node.as_param().unwrap().location,
+        NodeTag::T_Aggref => node.as_aggref().unwrap().location,
+        NodeTag::T_GroupingFunc => node.as_grouping_func().unwrap().location,
+        NodeTag::T_WindowFunc => node.as_window_func().unwrap().location,
+        NodeTag::T_OpExpr => node.as_op_expr().unwrap().location,
+        NodeTag::T_FuncExpr => node.as_func_expr().unwrap().location,
+        NodeTag::T_RelabelType => node.as_relabel_type().unwrap().location,
+        _ => -1,
+    }
 }
 
 // is_var_grouped: the substitute_grouped_columns Var match, direct-Var shape.
@@ -649,6 +909,9 @@ fn check_ungrouped_columns<'mcx>(
                  unported — backend-parser-agg"
             );
         }
+        // C's mutator skips a current-level GroupingFunc entirely: its
+        // arguments are not evaluated, so they are not checked here.
+        NodeTag::T_GroupingFunc => Ok(()),
         NodeTag::T_WindowFunc => {
             let wf = node.as_window_func().unwrap();
             for arg in &wf.args {
@@ -693,6 +956,170 @@ fn check_ungrouped_columns<'mcx>(
              backend-parser-agg"
         ),
     }
+}
+
+/// C `expand_groupingset_node`: one GroupingSet into its list of integer
+/// grouping sets (EMPTY -> [()], SIMPLE -> [content], ROLLUP/CUBE -> the
+/// expansions, SETS -> concatenated recursion).
+fn expand_groupingset_node<'mcx>(
+    mcx: Mcx<'mcx>,
+    gs: &GroupingSet<'mcx>,
+) -> PgResult<PgVec<'mcx, PgVec<'mcx, i32>>> {
+    let mut result: PgVec<'_, PgVec<'_, i32>> = PgVec::new_in(mcx);
+
+    match gs.kind {
+        GroupingSetKind::GROUPING_SET_EMPTY => result.push(PgVec::new_in(mcx)),
+        GroupingSetKind::GROUPING_SET_SIMPLE => {
+            let mut s = PgVec::new_in(mcx);
+            collect_simple_content(&gs.content, &mut s);
+            result.push(s);
+        }
+        GroupingSetKind::GROUPING_SET_ROLLUP => {
+            let mut curgroup_size = gs.content.len();
+            while curgroup_size > 0 {
+                let mut current = PgVec::new_in(mcx);
+                let mut i = curgroup_size;
+                for n in &gs.content {
+                    let gs_current = n.as_grouping_set().expect("ROLLUP content cell");
+                    debug_assert!(gs_current.kind == GroupingSetKind::GROUPING_SET_SIMPLE);
+                    collect_simple_content(&gs_current.content, &mut current);
+                    i -= 1;
+                    if i == 0 {
+                        break;
+                    }
+                }
+                result.push(current);
+                curgroup_size -= 1;
+            }
+            result.push(PgVec::new_in(mcx));
+        }
+        GroupingSetKind::GROUPING_SET_CUBE => {
+            let number_bits = gs.content.len();
+            // The parser caps CUBE at 12 elements.
+            debug_assert!(number_bits < 31);
+            let num_sets = 1u32 << number_bits;
+            for i in 0..num_sets {
+                let mut current = PgVec::new_in(mcx);
+                let mut mask = 1u32;
+                for n in &gs.content {
+                    let gs_current = n.as_grouping_set().expect("CUBE content cell");
+                    debug_assert!(gs_current.kind == GroupingSetKind::GROUPING_SET_SIMPLE);
+                    if mask & i != 0 {
+                        collect_simple_content(&gs_current.content, &mut current);
+                    }
+                    mask <<= 1;
+                }
+                result.push(current);
+            }
+        }
+        GroupingSetKind::GROUPING_SET_SETS => {
+            for n in &gs.content {
+                let sub =
+                    expand_groupingset_node(mcx, n.as_grouping_set().expect("SETS content cell"))?;
+                result.extend(sub);
+            }
+        }
+    }
+
+    Ok(result)
+}
+
+// SIMPLE content is a list of Integer ressortgroupref cells (transformGroupingSet).
+fn collect_simple_content<'mcx>(content: &NodeList<'_>, out: &mut PgVec<'mcx, i32>) {
+    for n in content {
+        out.push(n.as_integer().expect("SIMPLE grouping-set content cell").ival);
+    }
+}
+
+fn cmp_list_len_asc(a: &[i32], b: &[i32]) -> core::cmp::Ordering {
+    a.len().cmp(&b.len())
+}
+
+fn cmp_list_len_contents_asc(a: &[i32], b: &[i32]) -> core::cmp::Ordering {
+    cmp_list_len_asc(a, b).then_with(|| a.cmp(b))
+}
+
+// C list_union_int: list1's cells plus each list2 cell not already present.
+fn list_union_int<'mcx>(mcx: Mcx<'mcx>, list1: &[i32], list2: &[i32]) -> PgVec<'mcx, i32> {
+    let mut result: PgVec<'_, i32> = PgVec::new_in(mcx);
+    result.extend_from_slice(list1);
+    for &v in list2 {
+        if !result.contains(&v) {
+            result.push(v);
+        }
+    }
+    result
+}
+
+// C list_intersection_int: list1 cells also present in list2, in list1 order.
+fn list_intersection_int<'mcx>(mcx: Mcx<'mcx>, list1: &[i32], list2: &[i32]) -> PgVec<'mcx, i32> {
+    let mut result: PgVec<'_, i32> = PgVec::new_in(mcx);
+    for &v in list1 {
+        if list2.contains(&v) {
+            result.push(v);
+        }
+    }
+    result
+}
+
+/// C `expand_grouping_sets`: flat list of integer grouping sets sorted
+/// shortest-first (groupDistinct also dedups); `None` past `limit`.
+pub fn expand_grouping_sets<'mcx>(
+    mcx: Mcx<'mcx>,
+    grouping_sets: &NodeList<'mcx>,
+    group_distinct: bool,
+    limit: i32,
+) -> PgResult<Option<PgVec<'mcx, PgVec<'mcx, i32>>>> {
+    if grouping_sets.is_nil() {
+        return Ok(None);
+    }
+
+    let mut expanded_groups: PgVec<'_, PgVec<'_, PgVec<'_, i32>>> = PgVec::new_in(mcx);
+    let mut numsets = 1f64;
+    for gs_node in grouping_sets {
+        let current =
+            expand_groupingset_node(mcx, gs_node.as_grouping_set().expect("groupingSets cell"))?;
+        debug_assert!(!current.is_empty());
+        numsets *= current.len() as f64;
+        if limit >= 0 && numsets > limit as f64 {
+            return Ok(None);
+        }
+        expanded_groups.push(current);
+    }
+
+    // Cartesian product across the sublists, dropping duplicate members from
+    // individual sets (without changing the number of sets).
+    let mut result: PgVec<'_, PgVec<'_, i32>> = PgVec::new_in(mcx);
+    for set in expanded_groups.first().expect("groupingSets is non-nil").iter() {
+        result.push(list_union_int(mcx, &[], set));
+    }
+    for p in expanded_groups.iter().skip(1) {
+        let mut new_result = PgVec::new_in(mcx);
+        for q in result.iter() {
+            for set in p.iter() {
+                new_result.push(list_union_int(mcx, q, set));
+            }
+        }
+        result = new_result;
+    }
+
+    if !group_distinct || result.len() < 2 {
+        result.sort_by(|a, b| cmp_list_len_asc(a, b));
+    } else {
+        for set in result.iter_mut() {
+            set.sort_unstable();
+        }
+        result.sort_by(|a, b| cmp_list_len_contents_asc(a, b));
+        let mut dedup: PgVec<'_, PgVec<'_, i32>> = PgVec::new_in(mcx);
+        for set in result {
+            if dedup.last().is_none_or(|prev| prev.as_slice() != set.as_slice()) {
+                dedup.push(set);
+            }
+        }
+        result = dedup;
+    }
+
+    Ok(Some(result))
 }
 
 // C parse_expr.c ParseExprKindName; only the kinds the generic 42803 message

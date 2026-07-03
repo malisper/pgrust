@@ -860,6 +860,223 @@ mod from_where {
         );
     }
 
+    fn simple_refs(gs: &types_nodes::parsenodes::GroupingSet<'_>) -> Vec<i32> {
+        use types_nodes::parsenodes::GroupingSetKind;
+        assert_eq!(gs.kind, GroupingSetKind::GROUPING_SET_SIMPLE);
+        gs.content.iter().map(|n| n.as_integer().unwrap().ival).collect()
+    }
+
+    #[test]
+    fn group_by_rollup_end_to_end() {
+        use types_nodes::parsenodes::GroupingSetKind;
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let q = analyze_sql(
+            mcx,
+            "SELECT t.x, u.x, count(*) FROM t, t u GROUP BY ROLLUP(t.x, u.x)",
+        )
+        .unwrap();
+
+        assert_eq!(q.groupClause.len(), 2);
+        let r0 = q.targetList.nth(0).as_target_entry().unwrap().ressortgroupref;
+        let r1 = q.targetList.nth(1).as_target_entry().unwrap().ressortgroupref;
+        assert!(r0 > 0 && r1 > 0);
+        assert_eq!(q.groupingSets.len(), 1);
+        let gs = q.groupingSets.nth(0).as_grouping_set().unwrap();
+        assert_eq!(gs.kind, GroupingSetKind::GROUPING_SET_ROLLUP);
+        assert_eq!(gs.content.len(), 2);
+        assert_eq!(simple_refs(gs.content.nth(0).as_grouping_set().unwrap()), [r0 as i32]);
+        assert_eq!(simple_refs(gs.content.nth(1).as_grouping_set().unwrap()), [r1 as i32]);
+    }
+
+    #[test]
+    fn group_by_cube_end_to_end() {
+        use types_nodes::parsenodes::GroupingSetKind;
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let q = analyze_sql(
+            mcx,
+            "SELECT t.x, u.x, count(*) FROM t, t u GROUP BY CUBE(t.x, u.x)",
+        )
+        .unwrap();
+
+        assert_eq!(q.groupClause.len(), 2);
+        assert_eq!(q.groupingSets.len(), 1);
+        let gs = q.groupingSets.nth(0).as_grouping_set().unwrap();
+        assert_eq!(gs.kind, GroupingSetKind::GROUPING_SET_CUBE);
+        assert_eq!(gs.content.len(), 2);
+    }
+
+    #[test]
+    fn group_by_grouping_sets_end_to_end() {
+        use types_nodes::parsenodes::GroupingSetKind;
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let q = analyze_sql(
+            mcx,
+            "SELECT t.x, u.x, count(*) FROM t, t u \
+             GROUP BY GROUPING SETS ((t.x), (u.x), ())",
+        )
+        .unwrap();
+
+        assert_eq!(q.groupClause.len(), 2);
+        let r0 = q.targetList.nth(0).as_target_entry().unwrap().ressortgroupref;
+        let r1 = q.targetList.nth(1).as_target_entry().unwrap().ressortgroupref;
+        assert_eq!(q.groupingSets.len(), 1);
+        let gs = q.groupingSets.nth(0).as_grouping_set().unwrap();
+        assert_eq!(gs.kind, GroupingSetKind::GROUPING_SET_SETS);
+        assert_eq!(gs.content.len(), 3);
+        assert_eq!(simple_refs(gs.content.nth(0).as_grouping_set().unwrap()), [r0 as i32]);
+        assert_eq!(simple_refs(gs.content.nth(1).as_grouping_set().unwrap()), [r1 as i32]);
+        let empty = gs.content.nth(2).as_grouping_set().unwrap();
+        assert_eq!(empty.kind, GroupingSetKind::GROUPING_SET_EMPTY);
+        assert!(empty.content.is_nil());
+    }
+
+    #[test]
+    fn group_by_empty_parens_end_to_end() {
+        use types_nodes::parsenodes::GroupingSetKind;
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let q = analyze_sql(mcx, "SELECT count(*) FROM t GROUP BY ()").unwrap();
+        assert!(q.groupClause.is_nil());
+        assert_eq!(q.groupingSets.len(), 1);
+        let gs = q.groupingSets.nth(0).as_grouping_set().unwrap();
+        assert_eq!(gs.kind, GroupingSetKind::GROUPING_SET_EMPTY);
+        assert!(gs.content.is_nil());
+
+        // No aggregates at all: parseCheckAggregates still runs (and rejects
+        // ungrouped columns) on groupingSets alone.
+        let q = analyze_sql(mcx, "SELECT 1 FROM t GROUP BY ()").unwrap();
+        assert!(!q.hasAggs);
+        assert_eq!(q.groupingSets.len(), 1);
+        let err = analyze_sql(mcx, "SELECT x FROM t GROUP BY ()").map(|_| ()).unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_GROUPING_ERROR);
+    }
+
+    #[test]
+    fn single_grouping_set_collapses_to_plain_group_by() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let q = analyze_sql(mcx, "SELECT x, count(*) FROM t GROUP BY GROUPING SETS ((x))")
+            .unwrap();
+        assert_eq!(q.groupClause.len(), 1);
+        assert!(q.groupingSets.is_nil(), "single-set expansion drops the grouping sets");
+    }
+
+    #[test]
+    fn grouping_func_refs_resolve() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let q = analyze_sql(
+            mcx,
+            "SELECT t.x, u.x, GROUPING(t.x, u.x), count(*) FROM t, t u \
+             GROUP BY ROLLUP(t.x, u.x)",
+        )
+        .unwrap();
+
+        assert!(q.hasAggs);
+        let r0 = q.targetList.nth(0).as_target_entry().unwrap().ressortgroupref;
+        let r1 = q.targetList.nth(1).as_target_entry().unwrap().ressortgroupref;
+        let t2 = q.targetList.nth(2).as_target_entry().unwrap();
+        assert_eq!(t2.resname, Some("grouping"));
+        let grp = t2.expr.as_grouping_func().unwrap();
+        assert_eq!(grp.agglevelsup, 0);
+        assert_eq!(grp.args.len(), 2);
+        let refs: Vec<i32> = grp.refs.iter().collect();
+        assert_eq!(refs, [r0 as i32, r1 as i32]);
+    }
+
+    #[test]
+    fn grouping_alone_sets_hasaggs_and_runs_check() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let q = analyze_sql(mcx, "SELECT GROUPING(x) FROM t GROUP BY x").unwrap();
+        assert!(q.hasAggs);
+        let grp =
+            q.targetList.nth(0).as_target_entry().unwrap().expr.as_grouping_func().unwrap();
+        assert_eq!(grp.refs.len(), 1);
+    }
+
+    #[test]
+    fn grouping_of_ungrouped_column_is_42803() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let err = analyze_sql(mcx, "SELECT GROUPING(y) FROM t GROUP BY x")
+            .map(|_| ())
+            .unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_GROUPING_ERROR);
+        assert_eq!(
+            err.message(),
+            "arguments to GROUPING must be grouping expressions of the associated query level"
+        );
+    }
+
+    #[test]
+    fn grouping_with_32_args_is_54023() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let args = ["x"; 32].join(", ");
+        let err = analyze_sql(mcx, &format!("SELECT GROUPING({args}) FROM t GROUP BY x"))
+            .map(|_| ())
+            .unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_TOO_MANY_ARGUMENTS);
+        assert_eq!(err.message(), "GROUPING must have fewer than 32 arguments");
+    }
+
+    #[test]
+    fn cube_with_13_elements_is_54011() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let cols = ["x"; 13].join(", ");
+        let err = analyze_sql(
+            mcx,
+            &format!("SELECT count(*) FROM t GROUP BY CUBE({cols})"),
+        )
+        .map(|_| ())
+        .unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_TOO_MANY_COLUMNS);
+        assert_eq!(err.message(), "CUBE is limited to 12 elements");
+    }
+
+    #[test]
+    fn grouping_sets_expansion_over_4096_is_54001() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        // 4^7 = 16384 expanded sets.
+        let clause = ["CUBE(x, x)"; 7].join(", ");
+        let err = analyze_sql(
+            mcx,
+            &format!("SELECT x, count(*) FROM t GROUP BY {clause}"),
+        )
+        .map(|_| ())
+        .unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_STATEMENT_TOO_COMPLEX);
+        assert_eq!(err.message(), "too many grouping sets present (maximum 4096)");
+    }
+
     #[test]
     fn window_functions_end_to_end() {
         install();

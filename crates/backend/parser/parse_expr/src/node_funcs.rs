@@ -19,6 +19,7 @@ pub fn expr_type(node: Node<'_>) -> Oid {
         NodeTag::T_FuncExpr => node.as_func_expr().unwrap().funcresulttype,
         NodeTag::T_Aggref => node.as_aggref().unwrap().aggtype,
         NodeTag::T_WindowFunc => node.as_window_func().unwrap().wintype,
+        NodeTag::T_GroupingFunc => types_core::catalog::INT4OID,
         NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resulttype,
         NodeTag::T_CoerceViaIO => node.as_coerce_via_io().unwrap().resulttype,
         NodeTag::T_BoolExpr | NodeTag::T_NullTest => types_core::catalog::BOOLOID,
@@ -78,6 +79,7 @@ pub fn expr_typmod(node: Node<'_>) -> i32 {
         NodeTag::T_OpExpr
         | NodeTag::T_FuncExpr
         | NodeTag::T_Aggref
+        | NodeTag::T_GroupingFunc
         | NodeTag::T_WindowFunc
         | NodeTag::T_CoerceViaIO
         | NodeTag::T_BoolExpr
@@ -138,7 +140,9 @@ pub fn expr_collation(node: Node<'_>) -> Oid {
         NodeTag::T_WindowFunc => node.as_window_func().unwrap().wincollid,
         NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resultcollid,
         NodeTag::T_CoerceViaIO => node.as_coerce_via_io().unwrap().resultcollid,
-        NodeTag::T_BoolExpr | NodeTag::T_NullTest => types_core::InvalidOid,
+        NodeTag::T_BoolExpr | NodeTag::T_NullTest | NodeTag::T_GroupingFunc => {
+            types_core::InvalidOid
+        }
         NodeTag::T_SetToDefault => node.as_set_to_default().unwrap().collation,
         NodeTag::T_CaseExpr => node.as_case_expr().unwrap().casecollid,
         NodeTag::T_CaseTestExpr => node.as_case_test_expr().unwrap().collation,
@@ -184,7 +188,8 @@ fn leftmost_loc(loc1: ParseLoc, loc2: ParseLoc) -> ParseLoc {
     }
 }
 
-fn list_location(list: &NodeList<'_>) -> ParseLoc {
+/// C `exprLocation` T_List arm: first member with a known location.
+pub fn expr_location_list(list: &NodeList<'_>) -> ParseLoc {
     for n in list {
         let loc = expr_location(n);
         if loc >= 0 {
@@ -201,18 +206,21 @@ pub fn expr_location(node: Node<'_>) -> ParseLoc {
         NodeTag::T_Param => node.as_param().unwrap().location,
         NodeTag::T_OpExpr => {
             let op = node.as_op_expr().unwrap();
-            leftmost_loc(op.location, list_location(&op.args))
+            leftmost_loc(op.location, expr_location_list(&op.args))
         }
         NodeTag::T_FuncExpr => {
             let f = node.as_func_expr().unwrap();
-            leftmost_loc(f.location, list_location(&f.args))
+            leftmost_loc(f.location, expr_location_list(&f.args))
         }
         NodeTag::T_RelabelType => {
             let r = node.as_relabel_type().unwrap();
             leftmost_loc(r.location, expr_location(r.arg))
         }
         NodeTag::T_Aggref => node.as_aggref().unwrap().location,
+        NodeTag::T_GroupingFunc => node.as_grouping_func().unwrap().location,
+        NodeTag::T_GroupingSet => node.as_grouping_set().unwrap().location,
         NodeTag::T_WindowFunc => node.as_window_func().unwrap().location,
+        NodeTag::T_List => expr_location_list(node.as_list().unwrap()),
         NodeTag::T_A_Const => node.as_a_const().unwrap().location,
         NodeTag::T_A_Expr => {
             let a = node.as_a_expr().unwrap();
@@ -237,7 +245,7 @@ pub fn expr_location(node: Node<'_>) -> ParseLoc {
         NodeTag::T_SQLValueFunction => node.as_sql_value_function().unwrap().location,
         NodeTag::T_BoolExpr => {
             let b = node.as_bool_expr().unwrap();
-            leftmost_loc(b.location, list_location(&b.args))
+            leftmost_loc(b.location, expr_location_list(&b.args))
         }
         NodeTag::T_NullTest => {
             let n = node.as_null_test().unwrap();

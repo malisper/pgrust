@@ -17,6 +17,7 @@ guc_tables = { path = "../../utils/misc/guc_tables" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
 mbutils = { path = "../../utils/mb/mbutils" }
 mcx = { path = "../../../_support/mcx" }
+parse_agg = { path = "../parse_agg" }
 parse_func = { path = "../parse_func" }
 parse_collate_seams = { path = "../parse_collate_seams" }
 parse_oper = { path = "../parse_oper" }
