@@ -3972,51 +3972,10 @@ impl<'mcx> Parser<'mcx> {
                 n.missing_ok = rule == 303 || rule == 305;
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
-            // alter_table_cmd: ALTER opt_column ColId alter_column_default
-            306 => {
-                let mut n = Node::build::<AlterTableCmd>(mcx)?;
-                n.subtype = AlterTableType::AT_ColumnDefault;
-                n.name = Some(view.v(3).str_val());
-                n.def = view.v(4).node();
-                *yyval = YYSTYPE::Node(Some(n.seal()));
-            }
-            // alter_table_cmd: ALTER opt_column ColId {DROP|SET} NOT NULL_P
-            307 | 308 => {
-                let mut n = Node::build::<AlterTableCmd>(mcx)?;
-                n.subtype = if rule == 307 {
-                    AlterTableType::AT_DropNotNull
-                } else {
-                    AlterTableType::AT_SetNotNull
-                };
-                n.name = Some(view.v(3).str_val());
-                *yyval = YYSTYPE::Node(Some(n.seal()));
-            }
-            // alter_table_cmd: ALTER opt_column ColId opt_set_data TYPE_P
-            // Typename opt_collate_clause alter_using
-            324 => {
-                let mut def = Node::build::<ColumnDef>(mcx)?;
-                def.typeName = view.v(6).node();
-                debug_assert!(view.v(7).node().is_none()); // COLLATE arm rule 366 stays loud
-                def.raw_default = view.v(8).node();
-                def.location = view.l(3);
-                let defnode = def.seal();
-                let mut n = Node::build::<AlterTableCmd>(mcx)?;
-                n.subtype = AlterTableType::AT_AlterColumnType;
-                n.name = Some(view.v(3).str_val());
-                n.def = Some(defnode);
-                *yyval = YYSTYPE::Node(Some(n.seal()));
-            }
-            // alter_table_cmd: ADD_P TableConstraint
-            326 => {
-                let mut n = Node::build::<AlterTableCmd>(mcx)?;
-                n.subtype = AlterTableType::AT_AddConstraint;
-                n.def = view.v(2).node();
-                *yyval = YYSTYPE::Node(Some(n.seal()));
-            }
             // alter_column_default: SET DEFAULT a_expr | DROP DEFAULT
             364 => *yyval = YYSTYPE::Node(view.v(3).node()),
             365 => *yyval = YYSTYPE::Node(Option::None),
-            // opt_collate_clause: /*EMPTY*/ (COLLATE arm 366 stays loud)
+            // opt_collate_clause: /*EMPTY*/
             367 => *yyval = YYSTYPE::Node(Option::None),
             // alter_using: USING a_expr | /*EMPTY*/
             368 => *yyval = YYSTYPE::Node(view.v(2).node()),
@@ -4300,9 +4259,6 @@ impl<'mcx> Parser<'mcx> {
                 let def = Node::mk_list(mcx, view.v(1).list())?;
                 *yyval = alter_table_cmd(mcx, AlterTableType::AT_GenericOptions, None, Some(def))?;
             }
-            // opt_set_data: SET DATA | EMPTY.
-            1331 => *yyval = YYSTYPE::Ival(1),
-            1332 => *yyval = YYSTYPE::Ival(0),
             // opt_collate_clause: COLLATE any_name.
             366 => {
                 let n = Node::mk(
@@ -4358,9 +4314,6 @@ impl<'mcx> Parser<'mcx> {
             389 => *yyval = YYSTYPE::Node(Some(Node::mk_integer(mcx, view.v(1).ival())?)),
             // column_compression / column_storage: ... DEFAULT.
             486 | 490 => *yyval = YYSTYPE::Str("default"),
-            // generated_when: ALWAYS | BY DEFAULT (pg_attribute.h chars).
-            511 => *yyval = YYSTYPE::Ival(b'a' as i32),
-            512 => *yyval = YYSTYPE::Ival(b'd' as i32),
             // alter_generic_option_list / _elem / generic_option_elem / _arg.
             726 => {
                 let d = view.v(1).node().expect("alter_generic_option_elem");
@@ -4401,16 +4354,6 @@ impl<'mcx> Parser<'mcx> {
             // opt_with_data: WITH DATA | WITH NO DATA | EMPTY.
             623 | 625 => *yyval = YYSTYPE::Boolean(true),
             624 => *yyval = YYSTYPE::Boolean(false),
-            // any_operator: all_Op | ColId '.' any_operator.
-            1238 => {
-                let s = view.v(1).str_val();
-                *yyval = YYSTYPE::List(NodeList::make1(mcx, Node::mk_string(mcx, s)?)?);
-            }
-            1239 => {
-                let mut list = view.v(3).list();
-                list.lcons(mcx, Node::mk_string(mcx, view.v(1).str_val())?)?;
-                *yyval = YYSTYPE::List(list);
-            }
             // simple_select: TABLE relation_expr.
             1722 => {
                 let star = NodeList::make1(mcx, Node::mk_a_star(mcx)?)?;
