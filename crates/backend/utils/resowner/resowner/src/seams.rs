@@ -44,6 +44,10 @@ pub(crate) fn install() {
 
     resowner_seams::resource_owner_enlarge::set(ResourceOwnerEnlarge);
 
+    resowner_seams::resource_owner_remember::set(ResourceOwnerRemember);
+
+    resowner_seams::resource_owner_forget::set(ResourceOwnerForget);
+
     resowner_seams::resource_owner_remember_snapshot::set(|owner, snapshot| {
         let ptr = Rc::into_raw(snapshot);
         ResourceOwnerRemember(owner, Datum::from_usize(ptr as usize), &SNAPSHOT_REF_DESC)

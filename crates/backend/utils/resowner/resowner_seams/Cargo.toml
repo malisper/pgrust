@@ -6,6 +6,7 @@ publish.workspace = true
 
 [dependencies]
 seam_core = { path = "../../../../_support/seam_core" }
+datum = { path = "../../../../_support/types/datum" }
 types_core = { path = "../../../../_support/types/types_core" }
 types_error = { path = "../../../../_support/types/types_error" }
 types_resowner = { path = "../../../../_support/types/types_resowner" }

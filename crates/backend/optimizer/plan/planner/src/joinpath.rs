@@ -79,6 +79,7 @@ pub fn add_paths_to_joinrel<'mcx>(
             JOIN_INNER
                 | JOIN_LEFT
                 | JOIN_RIGHT
+                | types_pathnodes::JOIN_FULL
                 | JOIN_SEMI
                 | JOIN_ANTI
                 | JOIN_RIGHT_SEMI
@@ -86,7 +87,7 @@ pub fn add_paths_to_joinrel<'mcx>(
                 | JOIN_UNIQUE_INNER
                 | JOIN_UNIQUE_OUTER
         ),
-        "add_paths_to_joinrel (joinpath.c): jointype {jointype}; full-join lane"
+        "add_paths_to_joinrel (joinpath.c): unrecognized jointype {jointype}"
     );
     let inner_unique = match jointype {
         JOIN_SEMI | JOIN_ANTI => false,
@@ -627,7 +628,7 @@ fn match_unsorted_outer<'mcx>(
     }
     let (nestjoin_ok, useallclauses) = match jointype {
         JOIN_INNER | JOIN_LEFT | JOIN_SEMI | JOIN_ANTI => (true, false),
-        JOIN_RIGHT | JOIN_RIGHT_ANTI => (false, true),
+        JOIN_RIGHT | JOIN_RIGHT_ANTI | types_pathnodes::JOIN_FULL => (false, true),
         JOIN_UNIQUE_OUTER | JOIN_UNIQUE_INNER => {
             jointype = JOIN_INNER;
             (true, false)
@@ -1648,7 +1649,7 @@ fn initial_cost_mergejoin(
     let inner_path_rows = run.root.path(inner_path).base().rows.max(1.0);
 
     let (mut outerstartsel, mut outerendsel, mut innerstartsel, mut innerendsel);
-    if !mergeclauses.is_empty() {
+    if !mergeclauses.is_empty() && jointype != types_pathnodes::JOIN_FULL {
         let firstclause = mergeclauses[0];
         let opathkey = if !outersortkeys.is_empty() {
             outersortkeys[0]

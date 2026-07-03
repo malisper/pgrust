@@ -1819,6 +1819,21 @@ fn drain_wide_rows(
     natts: usize,
     passes: usize,
 ) -> Vec<Vec<Vec<i32>>> {
+    drain_wide_rows_nullable(pstmt, natts, passes)
+        .into_iter()
+        .map(|rows| {
+            rows.into_iter()
+                .map(|row| row.into_iter().map(|v| v.expect("unexpected NULL")).collect())
+                .collect()
+        })
+        .collect()
+}
+
+fn drain_wide_rows_nullable(
+    pstmt: &'static PlannedStmt<'static>,
+    natts: usize,
+    passes: usize,
+) -> Vec<Vec<Vec<Option<i32>>>> {
     let snap_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("snap")));
     let snapshot: snapmgr::Snapshot = std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
         snap_ctx.mcx(),
@@ -1846,8 +1861,7 @@ fn drain_wide_rows(
                         attno as i32,
                         &mut isnull,
                     );
-                    assert!(!isnull);
-                    row.push(v.as_i32());
+                    row.push(if isnull { None } else { Some(v.as_i32()) });
                 }
                 rows.push(row);
             }
@@ -1946,6 +1960,18 @@ fn mk_hashjoin_pstmt<'mcx>(
     inner_relid: u32,
     jointype: ::types_nodes::JoinType,
 ) -> &'mcx PlannedStmt<'mcx> {
+    mk_hashjoin_pstmt_est(mcx, outer_relid, inner_relid, jointype, None)
+}
+
+// inner_est = (plan_rows, plan_width) on the Hash child's SeqScan: it drives
+// ExecChooseHashTableSize, so multi-batch tests pin it.
+fn mk_hashjoin_pstmt_est<'mcx>(
+    mcx: ::mcx::Mcx<'mcx>,
+    outer_relid: u32,
+    inner_relid: u32,
+    jointype: ::types_nodes::JoinType,
+    inner_est: Option<(f64, i32)>,
+) -> &'mcx PlannedStmt<'mcx> {
     use ::types_nodes::bitmapset::Bitmapset;
     use ::types_nodes::parsenodes::{RTEKind, RTEPermissionInfo, RangeTblEntry};
     use ::types_nodes::plannodes::{Hash, HashJoin, Join, Plan, Scan, SeqScan};
@@ -1962,11 +1988,21 @@ fn mk_hashjoin_pstmt<'mcx>(
         .unwrap()
     };
     let mk_scan = |scanrelid: u32, varno: i32| {
+        let (plan_rows, plan_width) = if scanrelid == 2 {
+            inner_est.unwrap_or((0.0, 0))
+        } else {
+            (0.0, 0)
+        };
         Node::mk(
             mcx,
             SeqScan {
                 scan: Scan {
-                    plan: Plan { targetlist: scan_tlist(varno), ..Default::default() },
+                    plan: Plan {
+                        targetlist: scan_tlist(varno),
+                        plan_rows,
+                        plan_width,
+                        ..Default::default()
+                    },
                     scanrelid,
                 },
             },
@@ -2231,6 +2267,156 @@ fn hashjoin_right_semi_and_right_anti_join_over_fake_heaps() {
     for run in runs {
         assert_eq!(sorted(run), all_inner);
     }
+    scanfix::quiesced();
+}
+
+// FULL = matched pairs + null-extended unmatched outer AND inner rows; the
+// second pass exercises the rescan match-flag reset (unmatched inners would
+// vanish on pass 2 without it).
+#[test]
+fn hashjoin_full_join_over_fake_heaps() {
+    install_seams();
+    scanfix::install();
+    let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mcx = leaked_mcx();
+    let outer: u32 = 70050;
+    let inner: u32 = 70051;
+    scanfix::register_table_2col(outer, &[&[(1, 10), (2, 20), (3, 30)]]);
+    scanfix::register_table_2col(inner, &[&[(2, 200), (3, 300), (3, 301), (4, 400)]]);
+
+    let expected = vec![
+        vec![None, None, Some(4), Some(400)],
+        vec![Some(1), Some(10), None, None],
+        vec![Some(2), Some(20), Some(2), Some(200)],
+        vec![Some(3), Some(30), Some(3), Some(300)],
+        vec![Some(3), Some(30), Some(3), Some(301)],
+    ];
+    let runs = drain_wide_rows_nullable(
+        mk_hashjoin_pstmt(mcx, outer, inner, ::types_nodes::JoinType::JOIN_FULL),
+        4,
+        2,
+    );
+    assert_eq!(runs.len(), 2);
+    for run in runs {
+        let mut got = run;
+        got.sort();
+        assert_eq!(got, expected);
+    }
+    scanfix::quiesced();
+}
+
+// work_mem=64kB + a 4000-row/width-8 inner estimate forces nbatch>1 through
+// the real spill path (BufFile batch files, HJ_NEED_NEW_BATCH reload, outer
+// routing). Results must equal the single-batch answer; pass 2 exercises the
+// multi-batch rescan (destroy + rebuild, Hash child rescanned).
+#[test]
+fn hashjoin_multibatch_matches_single_batch_results() {
+    install_seams();
+    scanfix::install();
+    if !guc_tables::vars::work_mem.installed() {
+        init_small::init_seams();
+    }
+    // Temp-file substrate: fd VFDs + resowner + a scratch datadir cwd.
+    if !guc_tables::vars::temp_file_limit.installed() {
+        guc_tables::init_seams();
+    }
+    resowner::init_seams();
+    ipc_seams::before_shmem_exit::set(|_cb, _arg| Ok(()));
+    ipc_seams::on_shmem_exit::set(|_cb, _arg| {});
+    waitevent_seams::pgstat_report_wait_start::set(|_| {});
+    waitevent_seams::pgstat_report_wait_end::set(|| {});
+    pgstat_seams::pgstat_report_tempfile::set(|_| {});
+    let owner =
+        resowner::ResourceOwnerCreate(::types_resowner::ResourceOwner::NULL, "hj-multibatch")
+            .unwrap();
+    resowner_seams::set_current_resource_owner::call(owner);
+    let dir = std::env::temp_dir().join(format!("pgrust_hj_mb_{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("base/pgsql_tmp")).unwrap();
+    std::env::set_current_dir(&dir).unwrap();
+    ::fd::InitFileAccess();
+    ::fd::InitTemporaryFileAccess().unwrap();
+    if !guc_tables::vars::temp_tablespaces.installed() {
+        guc_tables::vars::temp_tablespaces.install(guc_tables::GucVarAccessors {
+            get: ::fd::vfd::temp_tablespaces_guc,
+            set: ::fd::vfd::set_temp_tablespaces_guc,
+        });
+    }
+
+    let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mcx = leaked_mcx();
+    let outer: u32 = 70052;
+    let inner: u32 = 70053;
+    let outer_rows: Vec<(i32, i32)> = (3990..=4010).map(|i| (i, i)).collect();
+    scanfix::register_table_2col(outer, &[&outer_rows]);
+    let inner_rows: Vec<(i32, i32)> = (1..=4000).map(|i| (i, i * 10)).collect();
+    let inner_pages: Vec<&[(i32, i32)]> = inner_rows.chunks(200).collect();
+    scanfix::register_table_2col(inner, &inner_pages);
+
+    let saved_work_mem = guc_tables::vars::work_mem.read();
+    guc_tables::vars::work_mem.write(64);
+    let (_b, nbatch, _s) = ::nodehash::exec_choose_hash_table_size(4000.0, 8, true);
+    assert!(nbatch > 1, "fixture must force a multi-batch table, got nbatch={nbatch}");
+
+    let inner_expected: Vec<Vec<i32>> =
+        (3990..=4000).map(|k| vec![k, k, k, k * 10]).collect();
+    let runs = drain_wide_rows(
+        mk_hashjoin_pstmt_est(
+            mcx,
+            outer,
+            inner,
+            ::types_nodes::JoinType::JOIN_INNER,
+            Some((4000.0, 8)),
+        ),
+        4,
+        2,
+    );
+    assert_eq!(runs.len(), 2);
+    for run in runs {
+        let mut got = run;
+        got.sort();
+        assert_eq!(got, inner_expected);
+    }
+
+    // FULL at the same work_mem: 11 matched + 10 unmatched outer + 3989
+    // unmatched inner = 4010 rows; spot-check the null-extension edges.
+    let runs = drain_wide_rows_nullable(
+        mk_hashjoin_pstmt_est(
+            mcx,
+            outer,
+            inner,
+            ::types_nodes::JoinType::JOIN_FULL,
+            Some((4000.0, 8)),
+        ),
+        4,
+        2,
+    );
+    assert_eq!(runs.len(), 2);
+    for run in runs {
+        let mut got = run;
+        got.sort();
+        assert_eq!(got.len(), 4010);
+        let unmatched_inner: Vec<_> =
+            got.iter().filter(|r| r[0].is_none()).collect();
+        assert_eq!(unmatched_inner.len(), 3989);
+        assert!(unmatched_inner.iter().all(|r| {
+            let k = r[2].unwrap();
+            (1..=3989).contains(&k) && r[3] == Some(k * 10) && r[1].is_none()
+        }));
+        let unmatched_outer: Vec<_> =
+            got.iter().filter(|r| r[0].is_some() && r[2].is_none()).collect();
+        assert_eq!(
+            unmatched_outer.iter().map(|r| r[0].unwrap()).collect::<Vec<_>>(),
+            (4001..=4010).collect::<Vec<_>>()
+        );
+        let matched: Vec<_> =
+            got.iter().filter(|r| r[0].is_some() && r[2].is_some()).collect();
+        assert_eq!(matched.len(), 11);
+        assert!(matched
+            .iter()
+            .all(|r| r[0] == r[2] && r[3] == Some(r[0].unwrap() * 10)));
+    }
+
+    guc_tables::vars::work_mem.write(saved_work_mem);
     scanfix::quiesced();
 }
 

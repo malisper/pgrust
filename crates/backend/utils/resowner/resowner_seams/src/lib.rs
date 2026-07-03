@@ -36,3 +36,21 @@ seam_core::seam!(
     )
 );
 
+
+seam_core::seam!(
+    // ResourceOwnerRemember over a caller-supplied desc (fd.c's File kind);
+    // caller must have done resource_owner_enlarge first.
+    pub fn resource_owner_remember(
+        owner: types_resowner::ResourceOwner,
+        value: datum::Datum,
+        kind: &'static types_resowner::ResourceOwnerDesc,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    pub fn resource_owner_forget(
+        owner: types_resowner::ResourceOwner,
+        value: datum::Datum,
+        kind: &'static types_resowner::ResourceOwnerDesc,
+    ) -> PgResult<()>
+);

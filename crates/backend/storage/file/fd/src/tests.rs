@@ -437,3 +437,56 @@ fn allocate_file_stdio_modes() {
     assert_eq!(missing, -1);
     assert_eq!(vfd::get_errno(), libc::ENOENT);
 }
+
+#[test]
+fn buffile_write_seek_read_roundtrip() {
+    setup();
+    resowner::init_seams();
+    ipc_seams::on_shmem_exit::set(|_cb, _arg| {});
+    let owner = resowner::ResourceOwnerCreate(types_resowner::ResourceOwner::NULL, "buffile-test")
+        .unwrap();
+    resowner_seams::set_current_resource_owner::call(owner);
+    let dir = scratch_dir("buffile");
+    let _cwd = enter_datadir(&dir);
+    with_fd(|fd| fd.temporary_files_allowed = true);
+
+    let ctx = mcx::MemoryContext::new("buffile-test");
+    let mcx = ctx.mcx();
+    let mut bf = crate::buffile::BufFileCreateTemp(mcx, false).unwrap();
+
+    // Spans several 8KB buffer loads; per-chunk patterns catch misplaced writes.
+    let mut expected = Vec::new();
+    for i in 0u32..100 {
+        let chunk = vec![(i % 251) as u8; 997];
+        bf.write(&chunk).unwrap();
+        expected.extend_from_slice(&chunk);
+    }
+    assert_eq!(bf.tell(), (0, expected.len() as i64));
+
+    assert_eq!(bf.seek(0, 0, crate::buffile::SEEK_SET).unwrap(), 0);
+    let mut got = vec![0u8; expected.len()];
+    bf.read_exact(&mut got).unwrap();
+    assert_eq!(got, expected);
+
+    // EOF: read_maybe_eof returns 0, plain read returns short.
+    let mut tail = [0u8; 8];
+    assert_eq!(bf.read_maybe_eof(&mut tail, true).unwrap(), 0);
+
+    // Overwrite mid-file through a dirty-buffer backwards seek.
+    assert_eq!(bf.seek(0, 10_000, crate::buffile::SEEK_SET).unwrap(), 0);
+    bf.write(&[0xAB; 16]).unwrap();
+    assert_eq!(bf.seek(0, 9_990, crate::buffile::SEEK_SET).unwrap(), 0);
+    let mut window = [0u8; 40];
+    bf.read_exact(&mut window).unwrap();
+    assert_eq!(&window[10..26], &[0xAB; 16]);
+    assert_eq!(&window[..10], &expected[9_990..10_000]);
+    assert_eq!(&window[26..], &expected[10_016..10_030]);
+
+    // Relative seek; (1, 0) legally aliases end-of-segment-0; segment 2 is EOF.
+    assert_eq!(bf.seek(0, 0, crate::buffile::SEEK_CUR).unwrap(), 0);
+    assert_eq!(bf.tell(), (0, 10_030));
+    assert_eq!(bf.seek(1, 0, crate::buffile::SEEK_SET).unwrap(), 0);
+    assert_eq!(bf.seek(2, 0, crate::buffile::SEEK_SET).unwrap(), -1);
+
+    bf.close().unwrap();
+}

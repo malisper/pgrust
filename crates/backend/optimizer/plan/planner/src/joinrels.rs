@@ -27,9 +27,9 @@ pub fn make_rel_from_joinlist<'mcx>(
     for jl in joinlist {
         match jl {
             JoinlistNode::Rel(varno) => initial_rels.push(find_base_rel(&run.root, *varno)),
-            JoinlistNode::Sub(_) => panic!(
-                "make_rel_from_joinlist (allpaths.c): sub-joinlist; M2 collapse-limit lane"
-            ),
+            // A sub-joinlist (a forced FULL-join pair, or collapse-limit
+            // grouping) is planned as its own subproblem.
+            JoinlistNode::Sub(sub) => initial_rels.push(make_rel_from_joinlist(run, sub)?),
         }
     }
     if levels_needed == 1 {
@@ -254,6 +254,13 @@ pub fn make_join_rel(run: &mut PlannerRun<'_>, rel1: RelId, rel2: RelId) -> PgRe
             crate::joinpath::add_paths_to_joinrel(run, joinrel, rel1, rel2, types_pathnodes::JOIN_ANTI, &sjinfo, &restrictlist)?;
             crate::joinpath::add_paths_to_joinrel(run, joinrel, rel2, rel1, types_pathnodes::JOIN_RIGHT_ANTI, &sjinfo, &restrictlist)?;
         }
+        types_pathnodes::JOIN_FULL => {
+            crate::joinpath::add_paths_to_joinrel(run, joinrel, rel1, rel2, types_pathnodes::JOIN_FULL, &sjinfo, &restrictlist)?;
+            crate::joinpath::add_paths_to_joinrel(run, joinrel, rel2, rel1, types_pathnodes::JOIN_FULL, &sjinfo, &restrictlist)?;
+            // C errors here when neither mergeable nor hashable clauses
+            // exist; add_paths_to_joinrel's !mergejoin_allowed arm is loud
+            // upstream of that.
+        }
         other => panic!(
             "populate_joinrel_with_paths (joinrels.c): jointype {other}; join-outer lane \
              covers INNER/LEFT/SEMI/ANTI"
@@ -292,7 +299,10 @@ fn join_is_legal<'mcx>(
         }
         debug_assert!(matches!(
             sj.jointype,
-            JOIN_LEFT | types_pathnodes::JOIN_SEMI | types_pathnodes::JOIN_ANTI
+            JOIN_LEFT
+                | types_pathnodes::JOIN_SEMI
+                | types_pathnodes::JOIN_ANTI
+                | types_pathnodes::JOIN_FULL
         ));
         // A semijoin whose RHS was already joined to other rels inside an
         // input must have been unique-ified there; it's no longer relevant.
@@ -387,8 +397,7 @@ fn build_join_rel<'mcx>(
     let joinrel = run.root.alloc_rel(joinrel);
 
     debug_assert!(run.root.placeholder_list.is_empty());
-    debug_assert!(sjinfo.jointype != types_pathnodes::JOIN_FULL);
-    build_joinrel_tlist(run, joinrel, outer_rel, sjinfo, false)?;
+    build_joinrel_tlist(run, joinrel, outer_rel, sjinfo, sjinfo.jointype == types_pathnodes::JOIN_FULL)?;
     build_joinrel_tlist(run, joinrel, inner_rel, sjinfo, sjinfo.jointype != JOIN_INNER)?;
 
     let restrictlist = build_joinrel_restrictlist(run, &joinrelids, outer_rel, inner_rel);
@@ -457,12 +466,17 @@ fn build_joinrel_tlist<'mcx>(
             continue;
         }
         tuple_width += run.root.rel(baserel).attr_widths[ndx] as i64;
-        let out_id = if can_null
+        let in_oj = can_null
             && sjinfo.ojrelid != 0
-            && relids_is_member(sjinfo.ojrelid as i32, &relids)
-            && relids_is_member(var.varno, &sjinfo.syn_righthand)
-        {
-            debug_assert!(sjinfo.commute_above_r.is_none());
+            && relids_is_member(sjinfo.ojrelid as i32, &relids);
+        let nullable_side = in_oj
+            && (relids_is_member(var.varno, &sjinfo.syn_righthand)
+                || (sjinfo.jointype == types_pathnodes::JOIN_FULL
+                    && relids_is_member(var.varno, &sjinfo.syn_lefthand)));
+        let out_id = if nullable_side {
+            debug_assert!(
+                sjinfo.commute_above_r.is_none() && sjinfo.commute_above_l.is_none()
+            );
             let mut nulled = types_nodes::primnodes::Var {
                 varnullingrels: var.varnullingrels.clone_in(mcx)?,
                 ..*var
@@ -592,6 +606,16 @@ fn set_joinrel_size_estimates<'mcx>(
         }
         types_pathnodes::JOIN_SEMI => outer_rows * jselec,
         types_pathnodes::JOIN_ANTI => outer_rows * (1.0 - jselec) * pselec,
+        types_pathnodes::JOIN_FULL => {
+            let mut nrows = outer_rows * inner_rows * jselec;
+            if nrows < outer_rows {
+                nrows = outer_rows;
+            }
+            if nrows < inner_rows {
+                nrows = inner_rows;
+            }
+            nrows * pselec
+        }
         other => panic!("calc_joinrel_size_estimate (costsize.c): jointype {other}"),
     };
     run.root.rel_mut(joinrel).rows = crate::costsize::clamp_row_est(nrows);

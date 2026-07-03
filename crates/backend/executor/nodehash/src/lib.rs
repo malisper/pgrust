@@ -1,10 +1,7 @@
-// nodeHash.c serial build side, single- and multi-batch; skew and parallel
-// are loud/absent (planner sets no skewTable; sizing still reserves skew
-// memory like C when the plan shape would). Bucket chains are arena+u32-handle
-// (rule 2). Batch tuple images live in an estate-owned aux context reset per
-// batch (C's batchCxt); chunk ids replicate C's dense_alloc chunk list so
-// rebuild walks emit bucket chains in C's order (unmatched-scan output order
-// depends on it).
+// nodeHash.c serial build side; skew and parallel are absent (sizing still
+// reserves skew memory like C). Batch tuples live in an estate-owned aux
+// context reset per batch; chunk ids replicate C's dense_alloc list so
+// rebuild walks keep C's chain order (unmatched-scan output depends on it).
 #![allow(non_snake_case)]
 
 use core::ptr::NonNull;
@@ -28,7 +25,7 @@ pub trait HashBuildInput<'mcx> {
     fn exec_proc(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<Option<ExecSlotId>>;
 }
 
-// C HashJoinTupleData; matched = HeapTupleHeaderSetMatch; u32::MAX ends chains.
+// C HashJoinTupleData; u32::MAX ends chains.
 #[derive(Clone, Copy)]
 pub struct HashJoinTupleEntry {
     pub next: u32,
@@ -41,7 +38,7 @@ pub struct HashJoinTupleEntry {
 
 const END: u32 = u32::MAX;
 
-// C dense_alloc chunk list, metadata only (the bytes live in the aux arena).
+// dense_alloc chunk list, metadata only (bytes live in the aux arena).
 #[derive(Clone, Copy)]
 struct ChunkMeta {
     next: u32,
@@ -116,8 +113,6 @@ impl<'mcx> HashJoinTable<'mcx> {
         Ok(table)
     }
 
-    // dense_alloc (nodeHash.c), metadata arm: which chunk receives a tuple of
-    // this size; replicates C's list order exactly.
     fn dense_alloc_chunk(&mut self, size: usize) -> u32 {
         let size = maxalign(size) as u32;
         if size as usize > HASH_CHUNK_THRESHOLD {
@@ -150,8 +145,7 @@ impl<'mcx> HashJoinTable<'mcx> {
         self.chunk_head
     }
 
-    // C's chunk walk (head -> next, tuples within a chunk in layout order) as
-    // an entry-index permutation: stable counting sort by chunk position.
+    // C's chunk walk as an entry permutation: stable sort by chunk position.
     fn chunk_walk_order(&self, mcx: Mcx<'mcx>) -> PgResult<PgVec<'mcx, u32>> {
         let nchunks = self.chunks.len();
         let mut pos: PgVec<'mcx, u32> = vec_with_capacity_in(mcx, nchunks)?;
@@ -197,7 +191,6 @@ impl<'mcx> HashJoinTable<'mcx> {
             let (slot, batch_mcx) = estate.slot_and_aux_mcx(slot_id, self.batch_cxt);
             let mut tup =
                 exectuples::exec_copy_slot_minimal_tuple(slot, query_mcx, batch_mcx, 0)?;
-            // HeapTupleHeaderClearMatch: a reloaded tuple can't be pre-matched.
             tup.data_mut().clear_match();
             let t_len = tup.t_len();
             let tuple = NonNull::new(tup.as_ptr().cast_mut().cast::<MinimalTupleData>())
@@ -280,7 +273,6 @@ impl<'mcx> HashJoinTable<'mcx> {
         {
             return Ok(());
         }
-        // Doubling the in-memory table can beat doubling the batch files.
         let batch_space = self.nbatch as usize * 2 * BLCKSZ;
         if self.space_allowed <= batch_space {
             self.space_allowed *= 2;
@@ -369,7 +361,6 @@ impl<'mcx> HashJoinTable<'mcx> {
         Ok(())
     }
 
-    /// `MultiExecPrivateHash`'s post-build steps.
     fn finish_build(&mut self, mcx: Mcx<'mcx>) -> PgResult<()> {
         if self.nbuckets != self.nbuckets_optimal {
             self.increase_num_buckets(mcx)?;
@@ -381,7 +372,7 @@ impl<'mcx> HashJoinTable<'mcx> {
         Ok(())
     }
 
-    /// `ExecHashTableReset`: drop the previous batch's tuples wholesale.
+    /// `ExecHashTableReset`.
     pub fn reset(&mut self, estate: &mut EStateData<'mcx>) {
         estate.reset_aux_context(self.batch_cxt);
         self.entries.clear();
@@ -392,8 +383,7 @@ impl<'mcx> HashJoinTable<'mcx> {
         self.space_used = 0;
     }
 
-    /// `ExecHashTableDestroy`: close remaining batch files (batch 0 never has
-    /// any); arena memory goes with the query context.
+    /// `ExecHashTableDestroy`: batch 0 never has files.
     pub fn destroy(&mut self) -> PgResult<()> {
         for i in 1..self.inner_batch_file.len() {
             if let Some(f) = self.inner_batch_file[i].take() {
@@ -474,8 +464,7 @@ impl<'mcx> HashJoinTable<'mcx> {
     }
 }
 
-/// `ExecHashJoinSaveTuple` (nodeHashjoin.c): hashvalue then the minimal
-/// tuple image; the batch file is created lazily.
+/// `ExecHashJoinSaveTuple` (nodeHashjoin.c): hashvalue then the image.
 pub fn save_tuple<'mcx>(
     fileptr: &mut Option<BufFile<'mcx>>,
     hashvalue: u32,
@@ -491,8 +480,8 @@ pub fn save_tuple<'mcx>(
     Ok(())
 }
 
-/// `ExecHashJoinGetSavedTuple` (nodeHashjoin.c): None at EOF; the image lands
-/// in `scratch` (u64-backed for MAXALIGN) and stays valid until the next call.
+/// `ExecHashJoinGetSavedTuple` (nodeHashjoin.c): None at EOF; the image in
+/// `scratch` (u64-backed for MAXALIGN) is valid until the next call.
 pub fn get_saved_tuple<'mcx>(
     file: &mut BufFile<'mcx>,
     scratch: &mut PgVec<'mcx, u64>,
@@ -531,8 +520,7 @@ pub struct HashState<'mcx> {
     inner_desc: Rc<TupleDescData<'static>>,
 }
 
-/// `ExecInitHash`: the inner hash program + the slot the probe stores bucket
-/// tuples into.
+/// `ExecInitHash`.
 pub fn exec_init_hash<'mcx>(
     node: &'mcx Hash<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -577,10 +565,8 @@ pub fn exec_init_hash<'mcx>(
     })
 }
 
-/// `ExecHashTableCreate` sizing + control block (HJ_BUILD_HASHTABLE calls it).
-/// useskew mirrors C's OidIsValid(node->skewTable) for these plan shapes; the
-/// skew table itself only forms from outer-key MCV stats, and the loud gap is
-/// downstream (no skew bucket code exists to route to).
+/// `ExecHashTableCreate`; useskew mirrors C's OidIsValid(node->skewTable) for
+/// these plan shapes (the skew table itself only forms from MCV stats).
 pub fn exec_hash_table_create<'mcx>(
     hs: &HashState<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -591,8 +577,7 @@ pub fn exec_hash_table_create<'mcx>(
     HashJoinTable::create(mcx, estate, nbuckets, nbatch, space_allowed)
 }
 
-/// `MultiExecHash`/`MultiExecPrivateHash`: build the (possibly multi-batch)
-/// table; later-batch tuples spill to inner batch files.
+/// `MultiExecHash`/`MultiExecPrivateHash`.
 pub fn multi_exec_hash<'mcx, C: HashBuildInput<'mcx>>(
     hs: &mut HashState<'mcx>,
     child: &mut C,
@@ -609,9 +594,8 @@ pub fn multi_exec_hash<'mcx, C: HashBuildInput<'mcx>>(
             let slot = &mut estate.es_tupleTable[slot_id.0 as usize];
             let mut slots = EvalSlots { scan: None, inner: Some(slot), outer: None };
             let r = exec_eval_expr(&mut hs.hash_expr, &mut slots)?;
-            // Non-strict fold keeps NULL-key tuples; they never match the
-            // hashqual recheck, so results equal C's strict drop for
-            // non-fill-inner joins and C's keep for fill-inner ones.
+            // Non-strict fold keeps NULL-key tuples: they never match the
+            // recheck, so results equal C for every jointype.
             r.value.as_u32()
         };
         let ecxt = hs.ps_ExprContext;
@@ -655,13 +639,13 @@ pub fn get_hash_memory_limit() -> usize {
     }
 }
 
-/// C `ExecChooseHashTableSize` serial path -> (numbuckets, numbatches, num_skew_mcvs).
+/// `ExecChooseHashTableSize` -> (numbuckets, numbatches, num_skew_mcvs).
 pub fn exec_choose_hash_table_size(ntuples: f64, tupwidth: i32, useskew: bool) -> (u32, i32, i32) {
     let (b, n, s, _) = exec_choose_hash_table_size_full(ntuples, tupwidth, useskew);
     (b, n, s)
 }
 
-/// As above plus `*space_allowed` (the executor's create path needs it).
+/// As above plus `*space_allowed`.
 pub fn exec_choose_hash_table_size_full(
     ntuples: f64,
     tupwidth: i32,
