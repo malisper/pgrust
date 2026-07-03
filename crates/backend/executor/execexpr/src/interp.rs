@@ -1275,17 +1275,18 @@ fn eval_json_constructor(
     let n = jc.nargs as usize;
     // SAFETY: n compile-allocated slots, written by the arg steps just run;
     // values/nulls are same-size split scratch (exclusive during this step).
-    let (values, nulls, types) = unsafe {
+    unsafe {
         let src = core::slice::from_raw_parts(jc.slots.as_ptr(), n);
-        let values = core::slice::from_raw_parts_mut(jc.values.as_ptr(), n);
-        let nulls = core::slice::from_raw_parts_mut(jc.nulls.as_ptr(), n);
         for (i, nd) in src.iter().enumerate() {
-            values[i] = nd.value;
-            nulls[i] = nd.isnull;
+            jc.values.as_ptr().add(i).write(nd.value);
+            jc.nulls.as_ptr().add(i).write(nd.isnull);
         }
+    }
+    // SAFETY: just initialized above / at compile.
+    let (values, nulls, types) = unsafe {
         (
-            &values[..],
-            &nulls[..],
+            core::slice::from_raw_parts(jc.values.as_ptr(), n),
+            core::slice::from_raw_parts(jc.nulls.as_ptr(), n),
             core::slice::from_raw_parts(jc.types.as_ptr(), n),
         )
     };
