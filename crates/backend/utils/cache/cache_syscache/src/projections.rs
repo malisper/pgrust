@@ -677,6 +677,7 @@ const ANUM_PG_CLASS_RELPERSISTENCE: i32 = 17;
 const ANUM_PG_CLASS_RELKIND: i32 = 18;
 const ANUM_PG_CLASS_RELNATTS: i32 = 19;
 const ANUM_PG_CLASS_RELISPARTITION: i32 = 28;
+const ANUM_PG_CLASS_RELHASSUBCLASS: i32 = 23;
 const ANUM_PG_OPFAMILY_OPFMETHOD: i32 = 2;
 const ANUM_PG_OPFAMILY_OPFNAME: i32 = 3;
 
@@ -694,6 +695,7 @@ fn lookup_pg_class_ls_shape(relid: Oid) -> PgResult<Option<syscache_seams::PgCla
         relkind: getattr(&t, RELOID, ANUM_PG_CLASS_RELKIND).as_i8(),
         relpersistence: getattr(&t, RELOID, ANUM_PG_CLASS_RELPERSISTENCE).as_i8(),
         relispartition: getattr(&t, RELOID, ANUM_PG_CLASS_RELISPARTITION).as_bool(),
+        relhassubclass: getattr(&t, RELOID, ANUM_PG_CLASS_RELHASSUBCLASS).as_bool(),
     };
     drop(t);
     ReleaseSysCache(tuple);

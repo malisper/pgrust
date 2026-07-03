@@ -395,6 +395,61 @@ pub struct ColumnDef<'mcx> {
     pub location: ParseLoc,
 }
 
+#[derive(Default)]
+pub struct PartitionElem<'mcx> {
+    pub name: Option<&'mcx str>,
+    pub expr: Option<Node<'mcx>>,
+    pub collation: NodeList<'mcx>,
+    pub opclass: NodeList<'mcx>,
+    pub location: ParseLoc,
+}
+
+// C PartitionStrategy (parsenodes.h): char-valued.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum PartitionStrategy {
+    #[default]
+    List = b'l',
+    Range = b'r',
+    Hash = b'h',
+}
+
+#[derive(Default)]
+pub struct PartitionSpec<'mcx> {
+    pub strategy: PartitionStrategy,
+    pub partParams: NodeList<'mcx>,
+    pub location: ParseLoc,
+}
+
+#[derive(Default)]
+pub struct PartitionBoundSpec<'mcx> {
+    pub strategy: u8,
+    pub is_default: bool,
+    pub modulus: i32,
+    pub remainder: i32,
+    pub listdatums: NodeList<'mcx>,
+    pub lowerdatums: NodeList<'mcx>,
+    pub upperdatums: NodeList<'mcx>,
+    pub location: ParseLoc,
+}
+
+// C PartitionRangeDatumKind (parsenodes.h).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(i8)]
+pub enum PartitionRangeDatumKind {
+    Minvalue = -1,
+    #[default]
+    Value = 0,
+    Maxvalue = 1,
+}
+
+#[derive(Default)]
+pub struct PartitionRangeDatum<'mcx> {
+    pub kind: PartitionRangeDatumKind,
+    pub value: Option<Node<'mcx>>,
+    pub location: ParseLoc,
+}
+
 // C ConstrType (parsenodes.h).
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ConstrType {
@@ -642,6 +697,18 @@ unsafe impl<'mcx> NodeVariant<'mcx> for CreateSeqStmt<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for AlterSeqStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_AlterSeqStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for PartitionElem<'mcx> {
+    const TAG: NodeTag = NodeTag::T_PartitionElem;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for PartitionSpec<'mcx> {
+    const TAG: NodeTag = NodeTag::T_PartitionSpec;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for PartitionBoundSpec<'mcx> {
+    const TAG: NodeTag = NodeTag::T_PartitionBoundSpec;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for PartitionRangeDatum<'mcx> {
+    const TAG: NodeTag = NodeTag::T_PartitionRangeDatum;
 }
 
 impl<'mcx> Node<'mcx> {

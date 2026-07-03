@@ -40,3 +40,7 @@ miscinit_seams = { path = "../../utils/init/miscinit_seams" }
 indexam = { path = "../../access/index/indexam" }
 catalog_index_seams = { path = "../catalog_index_seams" }
 pg_constraint = { path = "../pg_constraint" }
+outfuncs = { path = "../../nodes/outfuncs" }
+varlena = { path = "../../utils/adt/varlena" }
+inval = { path = "../../utils/cache/inval" }
+types_nodes = { path = "../../../_support/types/nodes" }
