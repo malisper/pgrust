@@ -13,19 +13,12 @@ pub const EEO_FLAG_HAS_SUBPLAN: u8 = 1 << 1;
 pub const EEO_FLAG_INTERPRETER_INITIALIZED: u8 = 1 << 5;
 pub const EEO_FLAG_STILL_VALID_CHECKED: u8 = 1 << 7;
 
-// C's `Datum *resv, bool *resnull` pair: None = the interpreter's result
-// registers, Some = one NullableDatum arg slot inside a frame's fcinfo image.
+// C's `Datum *resv, bool *resnull` pair, always resolved: either the
+// state's result cell (ExprState.resnd, C's state->resvalue/resnull) or one
+// NullableDatum arg slot inside a frame's fcinfo image. Always-pointer keeps
+// the interpreter's write path branch-free and its loop head phi-free.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct OutRef(pub(crate) Option<NonNull<NullableDatum>>);
-
-impl OutRef {
-    pub const RESULT: OutRef = OutRef(None);
-
-    #[inline(always)]
-    pub(crate) fn is_result(self) -> bool {
-        self.0.is_none()
-    }
-}
+pub struct OutRef(pub(crate) NonNull<NullableDatum>);
 
 // EEOP program step: C ExprEvalStep's (opcode, union d) collapsed into one
 // dense #[repr(u8)] enum; only the SELECT-1/point-select families are ported
@@ -528,6 +521,10 @@ pub struct ExprState<'mcx> {
     pub(crate) frames: PgVec<'mcx, FuncFrame<'mcx>>,
     pub(crate) kernel: Kernel,
     pub(crate) flags: u8,
+    // C ExprState.resvalue/resnull: the program's result cell, mcx-allocated
+    // like the fcinfo arg slots so OutRef raw access carries no Rust borrow
+    // provenance; OutRefs of result-targeting steps point here.
+    pub(crate) resnd: NonNull<NullableDatum>,
     // C ExprState.innermost_caseval/casenull: compile-time only.
     pub(crate) innermost_case: Option<NonNull<NullableDatum>>,
     // PARAM_EXEC ids this expression reads; the owning node resolves pending
@@ -544,6 +541,11 @@ impl<'mcx> ExprState<'mcx> {
         let layout = Layout::new::<ExprState<'mcx>>();
         let raw = mcx.allocate(layout).map_err(|_| mcx.oom(layout.size()))?;
         let p = raw.cast::<ExprState<'mcx>>();
+        let rl = Layout::new::<NullableDatum>();
+        let resnd: NonNull<NullableDatum> =
+            mcx.allocate(rl).map_err(|_| mcx.oom(rl.size()))?.cast();
+        // SAFETY: fresh exclusive allocation.
+        unsafe { resnd.write(NullableDatum::null()) };
         // On steps-alloc failure the header chunk stays until reset (C's palloc-then-throw shape).
         let steps = ::mcx::vec_with_capacity_in(mcx, 16)?;
         // SAFETY: fresh exclusive layout-sized allocation from `mcx`; written once, then box-owned.
@@ -553,6 +555,7 @@ impl<'mcx> ExprState<'mcx> {
                 frames: PgVec::new_in(mcx),
                 kernel: Kernel::Program,
                 flags: 0,
+                resnd,
                 innermost_case: None,
                 param_exec_deps: PgVec::new_in(mcx),
                 innermost_domain: None,
@@ -571,6 +574,16 @@ impl<'mcx> ExprState<'mcx> {
 
     pub fn kernel(&self) -> Kernel {
         self.kernel
+    }
+
+    #[inline(always)]
+    pub(crate) fn result_out(&self) -> OutRef {
+        OutRef(self.resnd)
+    }
+
+    #[inline(always)]
+    pub(crate) fn is_result(&self, out: OutRef) -> bool {
+        out.0 == self.resnd
     }
 
     pub fn is_qual(&self) -> bool {

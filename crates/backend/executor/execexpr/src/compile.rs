@@ -133,7 +133,8 @@ pub fn exec_init_expr_subplans<'mcx>(
     };
     let mut state = ExprState::new_boxed_in(mcx)?;
     create_expr_setup_steps(&mut state, mcx, &[node])?;
-    init_expr_rec(node, &mut state, mcx, OutRef::RESULT, None, params, sub)?;
+    let rout = state.result_out();
+    init_expr_rec(node, &mut state, mcx, rout, None, params, sub)?;
     push_step(&mut state, mcx, Step::DoneReturn)?;
     ready_expr(&mut state);
     Ok(Some(state))
@@ -163,7 +164,8 @@ pub fn exec_init_qual_subplans<'mcx>(
     create_expr_setup_steps(&mut state, mcx, qual.as_slice())?;
 
     for node in qual.iter() {
-        init_expr_rec(node, &mut state, mcx, OutRef::RESULT, None, params, sub)?;
+        let rout = state.result_out();
+    init_expr_rec(node, &mut state, mcx, rout, None, params, sub)?;
         push_step(&mut state, mcx, Step::Qual { jumpdone: u32::MAX })?;
     }
     let done = state.steps.len() as u32;
@@ -198,7 +200,8 @@ pub fn exec_build_agg_qual<'mcx>(
     create_expr_setup_steps(&mut state, mcx, qual.as_slice())?;
 
     for node in qual.iter() {
-        init_expr_rec(node, &mut state, mcx, OutRef::RESULT, Some(Bind::Agg(agg)), params, None)?;
+        let rout = state.result_out();
+        init_expr_rec(node, &mut state, mcx, rout, Some(Bind::Agg(agg)), params, None)?;
         push_step(&mut state, mcx, Step::Qual { jumpdone: u32::MAX })?;
     }
     let done = state.steps.len() as u32;
@@ -305,7 +308,8 @@ fn build_projection_info<'mcx>(
             };
             push_step(&mut state, mcx, step)?;
         } else {
-            init_expr_rec(tle.expr, &mut state, mcx, OutRef::RESULT, agg, params, sub)?;
+            let rout = state.result_out();
+            init_expr_rec(tle.expr, &mut state, mcx, rout, agg, params, sub)?;
             let resultnum = (tle.resno - 1) as u16;
             let step = if lsyscache::get_typlen(expr_type(tle.expr))? == -1 {
                 Step::AssignTmpMakeRo { resultnum }
@@ -454,7 +458,7 @@ fn build_agg_trans<'mcx>(
             }
             // SAFETY: argno + 1 <= num_trans_inputs < nargs of `call.fcinfo`.
             let arg_out =
-                OutRef(Some(unsafe { crate::steps::arg_slot_of(call.fcinfo, argno + 1) }));
+                OutRef(unsafe { crate::steps::arg_slot_of(call.fcinfo, argno + 1) });
             init_expr_rec(tle.expr, &mut state, mcx, arg_out, None, params, None)?;
         }
         let mut bailout: Option<usize> = None;
@@ -581,7 +585,7 @@ fn build_agg_trans_ordered<'mcx>(
         });
         // SAFETY: argno < the nodeagg-owned num-inputs scratch array length.
         let out =
-            OutRef(Some(unsafe { NonNull::new_unchecked(ord.scratch.as_ptr().add(argno)) }));
+            OutRef(unsafe { NonNull::new_unchecked(ord.scratch.as_ptr().add(argno)) });
         init_expr_rec(tle.expr, state, mcx, out, None, params, None)?;
     }
     let mut bailout: Option<usize> = None;
@@ -639,7 +643,11 @@ pub fn exec_build_hash32_from_attrs<'mcx>(
 
     let mut first = true;
     if init_value != 0 {
-        let out = if num_cols > 0 { OutRef(iresult) } else { OutRef::RESULT };
+        let out = if num_cols > 0 {
+            OutRef(iresult.expect("multi-part hash requires an intermediate slot"))
+        } else {
+            state.result_out()
+        };
         push_step(
             &mut state,
             mcx,
@@ -662,11 +670,15 @@ pub fn exec_build_hash32_from_attrs<'mcx>(
         state.frames.push(frame);
 
         // SAFETY: arg 0 of the frame's freshly allocated 1-arg fcinfo.
-        let arg_out = OutRef(Some(unsafe { crate::steps::arg_slot_of(call.fcinfo, 0) }));
+        let arg_out = OutRef(unsafe { crate::steps::arg_slot_of(call.fcinfo, 0) });
         let vartype = desc.attrs[attnum as usize].atttypid;
         push_step(&mut state, mcx, Step::InnerVar { attnum, vartype, out: arg_out })?;
 
-        let out = if i == num_cols - 1 { OutRef::RESULT } else { OutRef(iresult) };
+        let out = if i == num_cols - 1 {
+            state.result_out()
+        } else {
+            OutRef(iresult.expect("multi-part hash requires an intermediate slot"))
+        };
         let step = if first {
             Step::HashDatumFirst { call, out }
         } else {
@@ -730,15 +742,16 @@ pub fn exec_build_grouping_equal<'mcx>(
         // SAFETY: args 0/1 of the frame's freshly allocated 2-arg fcinfo.
         let (arg0, arg1) = unsafe {
             (
-                OutRef(Some(crate::steps::arg_slot_of(call.fcinfo, 0))),
-                OutRef(Some(crate::steps::arg_slot_of(call.fcinfo, 1))),
+                OutRef(crate::steps::arg_slot_of(call.fcinfo, 0)),
+                OutRef(crate::steps::arg_slot_of(call.fcinfo, 1)),
             )
         };
         let ltype = ldesc.attrs[attnum as usize].atttypid;
         let rtype = rdesc.attrs[attnum as usize].atttypid;
         push_step(&mut state, mcx, Step::InnerVar { attnum, vartype: ltype, out: arg0 })?;
         push_step(&mut state, mcx, Step::OuterVar { attnum, vartype: rtype, out: arg1 })?;
-        push_step(&mut state, mcx, Step::NotDistinct { call, out: OutRef::RESULT })?;
+        let rout = state.result_out();
+        push_step(&mut state, mcx, Step::NotDistinct { call, out: rout })?;
         push_step(&mut state, mcx, Step::Qual { jumpdone: u32::MAX })?;
     }
 
@@ -1341,7 +1354,7 @@ fn init_scalar_array_op<'mcx>(
 
     if scalararg.as_const().is_none() {
         // SAFETY: arg 0 of the image `call.fcinfo` points at.
-        let arg_out = OutRef(Some(unsafe { crate::steps::arg_slot_of(call.fcinfo, 0) }));
+        let arg_out = OutRef(unsafe { crate::steps::arg_slot_of(call.fcinfo, 0) });
         init_expr_rec(scalararg, state, mcx, arg_out, agg, params, sub)?;
     }
     init_expr_rec(arrayarg, state, mcx, out, agg, params, sub)?;
@@ -1388,7 +1401,7 @@ fn init_array_expr<'mcx>(
     for (i, e) in arr.elements.iter().enumerate() {
         // SAFETY: i < nelems slots of the fresh scratch allocation.
         let slot = unsafe { NonNull::new_unchecked(elems.as_ptr().add(i)) };
-        init_expr_rec(e, state, mcx, OutRef(Some(slot)), agg, params, sub)?;
+        init_expr_rec(e, state, mcx, OutRef(slot), agg, params, sub)?;
     }
 
     Ok(Step::ArrayExprStep {
@@ -1466,7 +1479,7 @@ fn init_row_expr<'mcx>(
     for (i, e) in r.args.iter().enumerate() {
         // SAFETY: i < nelems slots of the fresh scratch allocation.
         let slot = unsafe { NonNull::new_unchecked(elems.as_ptr().add(i)) };
-        init_expr_rec(e, state, mcx, OutRef(Some(slot)), agg, params, sub)?;
+        init_expr_rec(e, state, mcx, OutRef(slot), agg, params, sub)?;
     }
 
     let desc_layout = core::alloc::Layout::new::<TupleDescData<'static>>();
@@ -1523,7 +1536,7 @@ fn init_coerce_to_domain<'mcx>(
                     None => {
                         // R/W expanded inputs must be read R/O by the checks.
                         let dv = if typlen == -1 {
-                            let ro = OutRef(Some(alloc_nullable_datum(mcx)?));
+                            let ro = OutRef(alloc_nullable_datum(mcx)?);
                             push_step(state, mcx, Step::MakeReadonlyOut { src: out, out: ro })?;
                             ro
                         } else {
@@ -1539,7 +1552,7 @@ fn init_coerce_to_domain<'mcx>(
                     con.check_expr.expect("CHECK DomainConstraintState carries check_expr"),
                     state,
                     mcx,
-                    OutRef(Some(check)),
+                    OutRef(check),
                     agg,
                     params,
                     sub,
@@ -1634,7 +1647,7 @@ fn init_case_expr<'mcx>(
     let caseval = match c.arg {
         Some(arg) => {
             let slot = alloc_nullable_datum(mcx)?;
-            init_expr_rec(arg, state, mcx, OutRef(Some(slot)), agg, params, sub)?;
+            init_expr_rec(arg, state, mcx, OutRef(slot), agg, params, sub)?;
             // C: R/O-force only what could be an expanded datum.
             if lsyscache::get_typlen(expr_type(arg))? == -1 {
                 push_step(state, mcx, Step::MakeReadonly { slot })?;
@@ -1741,7 +1754,7 @@ fn init_minmax<'mcx>(
         mcx.allocate(layout).map_err(|_| mcx.oom(layout.size()))?.cast();
     for (i, arg) in mm.args.iter().enumerate() {
         // SAFETY: i < nelems of the freshly allocated slot array.
-        let arg_out = OutRef(Some(unsafe { NonNull::new_unchecked(slots.as_ptr().add(i)) }));
+        let arg_out = OutRef(unsafe { NonNull::new_unchecked(slots.as_ptr().add(i)) });
         init_expr_rec(arg, state, mcx, arg_out, agg, params, sub)?;
     }
     Ok(Step::MinMax {
@@ -1980,7 +1993,7 @@ fn init_func<'mcx>(
     for (argno, arg) in args.iter().enumerate() {
         if arg.as_const().is_none() {
             // SAFETY: argno < nargs of the image `call.fcinfo` points at.
-            let arg_out = OutRef(Some(unsafe { crate::steps::arg_slot_of(call.fcinfo, argno) }));
+            let arg_out = OutRef(unsafe { crate::steps::arg_slot_of(call.fcinfo, argno) });
             init_expr_rec(arg, state, mcx, arg_out, agg, params, sub)?;
         }
     }
@@ -2097,14 +2110,14 @@ fn select_kernel(state: &ExprState<'_>) -> Kernel {
     let steps = state.steps.as_slice();
     match steps.len() {
         2 => match &steps[0] {
-            Step::Const { value, isnull, out } if out.is_result() => {
+            Step::Const { value, isnull, out } if state.is_result(*out) => {
                 Kernel::JustConst { value: *value, isnull: *isnull }
             }
             Step::FuncExpr { call, out }
             | Step::FuncExprStrict1 { call, out }
             | Step::FuncExprStrict2 { call, out }
             | Step::FuncExprStrict { call, out }
-                if out.is_result() && all_args_const(state, *call) =>
+                if state.is_result(*out) && all_args_const(state, *call) =>
             {
                 Kernel::JustFunc {
                     fn_addr: call.fn_addr,
@@ -2124,7 +2137,7 @@ fn select_kernel(state: &ExprState<'_>) -> Kernel {
                 Kernel::AggTransByVal { call: *call, pergroup: *pergroup, strict: true }
             }
             _ => match (var_src(&steps[0]), assign_var_src(&steps[0])) {
-                (Some((src, attnum, out)), _) if out.is_result() => {
+                (Some((src, attnum, out)), _) if state.is_result(out) => {
                     Kernel::JustVarVirt { src, attnum }
                 }
                 (_, Some((src, attnum, resultnum))) => {
@@ -2135,7 +2148,7 @@ fn select_kernel(state: &ExprState<'_>) -> Kernel {
         },
         3 => {
             if let (Some(fsrc), Some((src, attnum, out))) = (fetch_src(&steps[0]), var_src(&steps[1])) {
-                if fsrc == src && out.is_result() {
+                if fsrc == src && state.is_result(out) {
                     return Kernel::JustVar { src, attnum };
                 }
             }
@@ -2149,7 +2162,7 @@ fn select_kernel(state: &ExprState<'_>) -> Kernel {
             if let (Step::Const { value, isnull, out }, Step::AssignTmp { resultnum }) =
                 (&steps[0], &steps[1])
             {
-                if out.is_result() {
+                if state.is_result(*out) {
                     return Kernel::JustConstAssign { value: *value, isnull: *isnull, resultnum: *resultnum };
                 }
             }
@@ -2244,7 +2257,7 @@ fn select_fused_qual(state: &ExprState<'_>) -> Option<Kernel> {
     let Step::FuncExprStrict2 { call, out } = &steps[2] else {
         return None;
     };
-    if !out.is_result() {
+    if !state.is_result(*out) {
         return None;
     }
     let Step::Qual { jumpdone } = steps[3] else {
@@ -2256,9 +2269,9 @@ fn select_fused_qual(state: &ExprState<'_>) -> Option<Kernel> {
 
     let frame = &state.frames[call.frame as usize];
     let cmp = CmpOp::for_fn_oid(frame.flinfo.fn_oid)?;
-    let var_is_arg0 = var_out.0 == Some(frame.arg_slot(0));
+    let var_is_arg0 = var_out.0 == frame.arg_slot(0);
     let const_argno = if var_is_arg0 { 1usize } else { 0 };
-    if var_out.0 != Some(frame.arg_slot(if var_is_arg0 { 0 } else { 1 })) {
+    if var_out.0 != frame.arg_slot(if var_is_arg0 { 0 } else { 1 }) {
         return None;
     }
     if frame.const_args & (1 << const_argno) == 0 || frame.const_null_args & (1 << const_argno) != 0

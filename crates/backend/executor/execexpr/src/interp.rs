@@ -356,36 +356,21 @@ fn read_var(slot: &SlotData<'_>, attnum: u16) -> NullableDatum {
     }
 }
 
-struct ResultRegs {
-    value: Datum,
-    isnull: bool,
-}
-
-// C threads `Datum *resv/bool *resnull`; the flat program's OutRef keeps the
-// common target (the result registers) in locals instead of memory.
+// C threads `Datum *resv/bool *resnull`; every OutRef is a resolved pointer
+// (an fcinfo arg slot or the state's mcx-allocated result cell), so the
+// write path is branch-free and the loop head carries no result phi.
 #[inline(always)]
-fn write_out(out: OutRef, regs: &mut ResultRegs, value: Datum, isnull: bool) {
-    match out.0 {
-        None => {
-            regs.value = value;
-            regs.isnull = isnull;
-        }
-        Some(p) => {
-            // SAFETY: OutRef targets one arg slot of a frame-owned fcinfo
-            // image live for 'mcx (compile-time invariant).
-            unsafe { p.write(NullableDatum { value, isnull }) }
-        }
-    }
+fn write_out(out: OutRef, value: Datum, isnull: bool) {
+    // SAFETY: OutRef targets one arg slot of a frame-owned fcinfo image or
+    // the state's result cell, both live for 'mcx (compile-time invariant).
+    unsafe { out.0.write(NullableDatum { value, isnull }) }
 }
 
 // Bool steps read-modify their own output (C's resv/resnull aliasing).
 #[inline(always)]
-fn read_out(out: OutRef, regs: &ResultRegs) -> NullableDatum {
-    match out.0 {
-        None => NullableDatum { value: regs.value, isnull: regs.isnull },
-        // SAFETY: as write_out.
-        Some(p) => unsafe { p.read() },
-    }
+fn read_out(out: OutRef) -> NullableDatum {
+    // SAFETY: as write_out.
+    unsafe { out.0.read() }
 }
 
 // The interpreter: flat step array walked by a pointer cursor, loop { match }
@@ -398,21 +383,24 @@ fn run_program<'mcx>(
     mut result_slot: Option<&mut SlotData<'mcx>>,
     resume: Option<Resume>,
 ) -> PgResult<EvalOutcome> {
-    let ExprState { steps, frames, .. } = state;
+    let ExprState { steps, frames, resnd, .. } = state;
+    let res = *resnd;
     let steps = steps.as_slice();
     let mut scan = slots.scan.as_deref_mut();
     let mut inner = slots.inner.as_deref_mut();
     let mut outer = slots.outer.as_deref_mut();
-    let mut regs = ResultRegs { value: Datum::null(), isnull: true };
+    // No entry reset: as in C, every DONE_RETURN-reaching path writes the
+    // result cell first (compile mirrors C's emission, incl. NULL for
+    // missing CASE arms).
     let base = steps.as_ptr();
     let mut sp = base;
     if let Some(r) = resume {
-        regs.value = r.regs.value;
-        regs.isnull = r.regs.isnull;
+        // SAFETY: as above.
+        unsafe { res.write(r.regs) };
         let Step::SubPlan { out, .. } = steps[r.step as usize] else {
             panic!("resume target is not a SubPlan step")
         };
-        write_out(out, &mut regs, r.result.value, r.result.isnull);
+        write_out(out, r.result.value, r.result.isnull);
         // SAFETY: r.step is a validated in-bounds index; the program is
         // Done-terminated so step+1 is in bounds.
         sp = unsafe { base.add(r.step as usize + 1) };
@@ -423,14 +411,12 @@ fn run_program<'mcx>(
         let step = unsafe { &*sp };
         match step {
             Step::DoneReturn => {
-                return Ok(EvalOutcome::Done(NullableDatum {
-                    value: regs.value,
-                    isnull: regs.isnull,
-                }))
+                // SAFETY: res is the state's live result cell.
+                return Ok(EvalOutcome::Done(unsafe { res.read() }));
             }
             Step::DoneNoReturn => return Ok(EvalOutcome::Done(NullableDatum::null())),
             Step::ParamSet { prm, out } => {
-                let r = read_out(*out, &regs);
+                let r = read_out(*out);
                 // SAFETY: compile-resolved pointer into stable es_param_exec_vals.
                 unsafe {
                     let p = prm.as_ptr();
@@ -445,7 +431,8 @@ fn run_program<'mcx>(
                 return Ok(EvalOutcome::Suspended(Suspension {
                     sstate: *sstate,
                     step: step_ix,
-                    regs: NullableDatum { value: regs.value, isnull: regs.isnull },
+                    // SAFETY: res is the state's live result cell.
+                    regs: unsafe { res.read() },
                 }));
             }
             Step::ScanFetchSome { last_var } => {
@@ -459,15 +446,15 @@ fn run_program<'mcx>(
             }
             Step::ScanVar { attnum, out, .. } => {
                 let nd = read_var(need_slot(&mut scan), *attnum);
-                write_out(*out, &mut regs, nd.value, nd.isnull);
+                write_out(*out, nd.value, nd.isnull);
             }
             Step::InnerVar { attnum, out, .. } => {
                 let nd = read_var(need_slot(&mut inner), *attnum);
-                write_out(*out, &mut regs, nd.value, nd.isnull);
+                write_out(*out, nd.value, nd.isnull);
             }
             Step::OuterVar { attnum, out, .. } => {
                 let nd = read_var(need_slot(&mut outer), *attnum);
-                write_out(*out, &mut regs, nd.value, nd.isnull);
+                write_out(*out, nd.value, nd.isnull);
             }
             Step::NextValueExpr { seqid, seqtypid, out } => {
                 let newval = sequence_seams::nextval_internal::call(*seqid, false)?;
@@ -477,7 +464,7 @@ fn run_program<'mcx>(
                     types_core::INT8OID => Datum::from_i64(newval),
                     other => panic!("unsupported sequence type {other}"),
                 };
-                write_out(*out, &mut regs, d, false);
+                write_out(*out, d, false);
             }
             Step::WholeRow { src, wr, frame, out } => {
                 let slot = match src {
@@ -491,19 +478,19 @@ fn run_program<'mcx>(
             Step::ScanSysVar { attnum, out } => {
                 let mut isnull = false;
                 let d = exectuples::slot_getsysattr(need_slot(&mut scan), *attnum as i32, &mut isnull)?;
-                write_out(*out, &mut regs, d, isnull);
+                write_out(*out, d, isnull);
             }
             Step::InnerSysVar { attnum, out } => {
                 let mut isnull = false;
                 let d =
                     exectuples::slot_getsysattr(need_slot(&mut inner), *attnum as i32, &mut isnull)?;
-                write_out(*out, &mut regs, d, isnull);
+                write_out(*out, d, isnull);
             }
             Step::OuterSysVar { attnum, out } => {
                 let mut isnull = false;
                 let d =
                     exectuples::slot_getsysattr(need_slot(&mut outer), *attnum as i32, &mut isnull)?;
-                write_out(*out, &mut regs, d, isnull);
+                write_out(*out, d, isnull);
             }
             Step::AssignScanVar { attnum, resultnum } => {
                 let nd = read_var(need_slot(&mut scan), *attnum);
@@ -522,26 +509,30 @@ fn run_program<'mcx>(
             }
             Step::AssignTmp { resultnum } => {
                 let rslot = result_slot.as_deref_mut().unwrap_or_else(|| no_result_slot());
-                assign_to_result(rslot, *resultnum, regs.value, regs.isnull);
+                // SAFETY: res is the state's live result cell.
+                let r = unsafe { res.read() };
+                assign_to_result(rslot, *resultnum, r.value, r.isnull);
             }
             Step::AssignTmpMakeRo { resultnum } => {
                 let rslot = result_slot.as_deref_mut().unwrap_or_else(|| no_result_slot());
-                // SAFETY: a non-null by-ref result datum points at a live
-                // varlena image (same read exectuples materialize performs).
-                let value = if !regs.isnull {
-                    unsafe { datum::expandeddatum::make_expanded_object_read_only_internal(regs.value) }
+                // SAFETY: res is the state's live result cell; a non-null
+                // by-ref result datum points at a live varlena image (same
+                // read exectuples materialize performs).
+                let r = unsafe { res.read() };
+                let value = if !r.isnull {
+                    unsafe { datum::expandeddatum::make_expanded_object_read_only_internal(r.value) }
                 } else {
-                    regs.value
+                    r.value
                 };
-                assign_to_result(rslot, *resultnum, value, regs.isnull);
+                assign_to_result(rslot, *resultnum, value, r.isnull);
             }
             Step::Const { value, isnull, out } => {
-                write_out(*out, &mut regs, *value, *isnull);
+                write_out(*out, *value, *isnull);
             }
             Step::ParamExtern { prm, out } => {
                 // SAFETY: compile-resolved pointer, portal-lived (steps.rs note).
                 let p = unsafe { prm.read() };
-                write_out(*out, &mut regs, p.value, p.isnull);
+                write_out(*out, p.value, p.isnull);
             }
             Step::ParamExec { prm, out } => {
                 // SAFETY: compile-resolved pointer into stable es_param_exec_vals.
@@ -549,16 +540,16 @@ fn run_program<'mcx>(
                 if p.exec_plan {
                     param_exec_plan_pending();
                 }
-                write_out(*out, &mut regs, p.value, p.isnull);
+                write_out(*out, p.value, p.isnull);
             }
             Step::FuncExpr { call, out } => {
                 let (value, isnull) = invoke(frames, call)?;
-                write_out(*out, &mut regs, value, isnull);
+                write_out(*out, value, isnull);
             }
             Step::IoCoerce { calls, out } => {
                 // SAFETY: 'mcx-owned pair written once at compile.
                 let c = unsafe { calls.as_ref() };
-                let nd = read_out(*out, &regs);
+                let nd = read_out(*out);
                 let strv = if nd.isnull {
                     NullableDatum { value: Datum::null(), isnull: true }
                 } else {
@@ -571,20 +562,20 @@ fn run_program<'mcx>(
                     NullableDatum { value: v, isnull }
                 };
                 if strv.isnull && c.in_strict {
-                    write_out(*out, &mut regs, Datum::null(), true);
+                    write_out(*out, Datum::null(), true);
                 } else {
                     // SAFETY: arg 0 of the incall's live fcinfo image.
                     unsafe { crate::steps::arg_slot_of(c.incall.fcinfo, 0).write(strv) };
                     let (v, isnull) = invoke(frames, &c.incall)?;
-                    write_out(*out, &mut regs, v, isnull);
+                    write_out(*out, v, isnull);
                 }
             }
             Step::ScalarArrayOp { call, use_or, strict, typlen, typbyval, typalign, out } => {
-                let arr = read_out(*out, &regs);
+                let arr = read_out(*out);
                 let (value, isnull) = eval_scalar_array_op(
                     frames, call, *use_or, *strict, *typlen, *typbyval, *typalign, arr,
                 )?;
-                write_out(*out, &mut regs, value, isnull);
+                write_out(*out, value, isnull);
             }
             Step::ArrayExprStep {
                 elems,
@@ -599,20 +590,20 @@ fn run_program<'mcx>(
                 let (value, isnull) = eval_array_expr(
                     frames, *elems, *nelems, *frame, *elmtype, *elmlen, *elmbyval, *elmalign,
                 )?;
-                write_out(*out, &mut regs, value, isnull);
+                write_out(*out, value, isnull);
             }
             Step::RowExprStep { elems, nelems, frame, desc, out } => {
                 let (value, isnull) = eval_row_expr(frames, *elems, *nelems, *frame, *desc)?;
-                write_out(*out, &mut regs, value, isnull);
+                write_out(*out, value, isnull);
             }
             Step::FuncExprStrict1 { call, out } => {
                 // SAFETY: arg 0 of the call's live fcinfo image.
                 let a0 = unsafe { crate::steps::arg_slot_of(call.fcinfo, 0).read() };
                 if a0.isnull {
-                    write_out(*out, &mut regs, Datum::null(), true);
+                    write_out(*out, Datum::null(), true);
                 } else {
                     let (value, isnull) = invoke(frames, call)?;
-                    write_out(*out, &mut regs, value, isnull);
+                    write_out(*out, value, isnull);
                 }
             }
             Step::FuncExprStrict2 { call, out } => {
@@ -624,10 +615,10 @@ fn run_program<'mcx>(
                     )
                 };
                 if a0.isnull || a1.isnull {
-                    write_out(*out, &mut regs, Datum::null(), true);
+                    write_out(*out, Datum::null(), true);
                 } else {
                     let (value, isnull) = invoke(frames, call)?;
-                    write_out(*out, &mut regs, value, isnull);
+                    write_out(*out, value, isnull);
                 }
             }
             Step::FuncExprStrict { call, out } => {
@@ -635,10 +626,10 @@ fn run_program<'mcx>(
                 let anynull = (0..call.nargs as usize)
                     .any(|i| unsafe { crate::steps::arg_slot_of(call.fcinfo, i).read().isnull });
                 if anynull {
-                    write_out(*out, &mut regs, Datum::null(), true);
+                    write_out(*out, Datum::null(), true);
                 } else {
                     let (value, isnull) = invoke(frames, call)?;
-                    write_out(*out, &mut regs, value, isnull);
+                    write_out(*out, value, isnull);
                 }
             }
             Step::MinMax { call, slots, nelems, least, out } => {
@@ -671,7 +662,7 @@ fn run_program<'mcx>(
                         value = nd.value;
                     }
                 }
-                write_out(*out, &mut regs, value, isnull);
+                write_out(*out, value, isnull);
             }
             Step::SqlValueFunction { op, typmod, timetz, out } => {
                 use ::types_nodes::primnodes::SQLValueFunctionOp as Op;
@@ -701,7 +692,7 @@ fn run_program<'mcx>(
                          (grammar arms 2149-2155 are louds)"
                     ),
                 };
-                write_out(*out, &mut regs, value, false);
+                write_out(*out, value, false);
             }
             Step::Jump { jumpdone } => {
                 // SAFETY: jump targets validated < steps.len() at ready.
@@ -709,7 +700,7 @@ fn run_program<'mcx>(
                 continue;
             }
             Step::JumpIfNotTrue { jumpdone, out } => {
-                let r = read_out(*out, &regs);
+                let r = read_out(*out);
                 if r.isnull || !r.value.as_bool() {
                     // SAFETY: jump targets validated < steps.len() at ready.
                     sp = unsafe { base.add(*jumpdone as usize) };
@@ -719,7 +710,7 @@ fn run_program<'mcx>(
             Step::CaseTestVal { slot, out } => {
                 // SAFETY: compile-allocated workspace, live for 'mcx.
                 let nd = unsafe { slot.read() };
-                write_out(*out, &mut regs, nd.value, nd.isnull);
+                write_out(*out, nd.value, nd.isnull);
             }
             Step::MakeReadonly { slot } => {
                 // SAFETY: compile-allocated workspace holding a live datum.
@@ -736,9 +727,13 @@ fn run_program<'mcx>(
                 }
             }
             Step::Qual { jumpdone } => {
-                if regs.isnull || !regs.value.as_bool() {
-                    regs.value = Datum::from_bool(false);
-                    regs.isnull = false;
+                // SAFETY: res is the state's live result cell.
+                let r = unsafe { res.read() };
+                if r.isnull || !r.value.as_bool() {
+                    // SAFETY: as above.
+                    unsafe {
+                        res.write(NullableDatum { value: Datum::from_bool(false), isnull: false })
+                    };
                     // SAFETY: jump targets validated < steps.len() at ready.
                     sp = unsafe { base.add(*jumpdone as usize) };
                     continue;
@@ -750,7 +745,7 @@ fn run_program<'mcx>(
                     // SAFETY: compile-allocated scratch, live for 'mcx.
                     unsafe { anynull.write(false) };
                 }
-                let r = read_out(*out, &regs);
+                let r = read_out(*out);
                 if r.isnull {
                     // SAFETY: as above.
                     unsafe { anynull.write(true) };
@@ -761,10 +756,10 @@ fn run_program<'mcx>(
                 }
             }
             Step::BoolAndStepLast { anynull, out } => {
-                let r = read_out(*out, &regs);
+                let r = read_out(*out);
                 // SAFETY: compile-allocated scratch, live for 'mcx.
                 if !r.isnull && r.value.as_bool() && unsafe { anynull.read() } {
-                    write_out(*out, &mut regs, Datum::null(), true);
+                    write_out(*out, Datum::null(), true);
                 }
             }
             Step::BoolOrStepFirst { anynull, jumpdone, out }
@@ -773,7 +768,7 @@ fn run_program<'mcx>(
                     // SAFETY: compile-allocated scratch, live for 'mcx.
                     unsafe { anynull.write(false) };
                 }
-                let r = read_out(*out, &regs);
+                let r = read_out(*out);
                 if r.isnull {
                     // SAFETY: as above.
                     unsafe { anynull.write(true) };
@@ -784,28 +779,28 @@ fn run_program<'mcx>(
                 }
             }
             Step::BoolOrStepLast { anynull, out } => {
-                let r = read_out(*out, &regs);
+                let r = read_out(*out);
                 // SAFETY: compile-allocated scratch, live for 'mcx.
                 if !r.isnull && !r.value.as_bool() && unsafe { anynull.read() } {
-                    write_out(*out, &mut regs, Datum::null(), true);
+                    write_out(*out, Datum::null(), true);
                 }
             }
             Step::BoolNotStep { out } => {
                 // NULL in gives NULL out: isnull rides through untouched (C
                 // flips the datum even when nominally null).
-                let r = read_out(*out, &regs);
-                write_out(*out, &mut regs, Datum::from_bool(!r.value.as_bool()), r.isnull);
+                let r = read_out(*out);
+                write_out(*out, Datum::from_bool(!r.value.as_bool()), r.isnull);
             }
             Step::NullTestIsNull { out } => {
-                let r = read_out(*out, &regs);
-                write_out(*out, &mut regs, Datum::from_bool(r.isnull), false);
+                let r = read_out(*out);
+                write_out(*out, Datum::from_bool(r.isnull), false);
             }
             Step::NullTestIsNotNull { out } => {
-                let r = read_out(*out, &regs);
-                write_out(*out, &mut regs, Datum::from_bool(!r.isnull), false);
+                let r = read_out(*out);
+                write_out(*out, Datum::from_bool(!r.isnull), false);
             }
             Step::MakeReadonlyOut { src, out } => {
-                let r = read_out(*src, &regs);
+                let r = read_out(*src);
                 let v = if r.isnull {
                     r.value
                 } else {
@@ -813,14 +808,14 @@ fn run_program<'mcx>(
                     // input (compile emits this step only for typlen -1).
                     unsafe { ::datum::expandeddatum::make_expanded_object_read_only_internal(r.value) }
                 };
-                write_out(*out, &mut regs, v, r.isnull);
+                write_out(*out, v, r.isnull);
             }
             Step::DomainTestval { src, out } => {
-                let r = read_out(*src, &regs);
-                write_out(*out, &mut regs, r.value, r.isnull);
+                let r = read_out(*src);
+                write_out(*out, r.value, r.isnull);
             }
             Step::DomainNotNull { resulttype, out } => {
-                if read_out(*out, &regs).isnull {
+                if read_out(*out).isnull {
                     return Err(domain_not_null_violation(*resulttype));
                 }
             }
@@ -855,7 +850,7 @@ fn run_program<'mcx>(
             Step::AggrefEval { value, null, out } => {
                 // SAFETY: pointers into once-allocated AggState arrays (steps.rs note).
                 let (v, n) = unsafe { (value.read(), null.read()) };
-                write_out(*out, &mut regs, v, n);
+                write_out(*out, v, n);
             }
             Step::GroupingFuncEval { cols, ncols, current, out } => {
                 let mut result: i64 = 0;
@@ -876,7 +871,7 @@ fn run_program<'mcx>(
                         }
                     }
                 }
-                write_out(*out, &mut regs, Datum::from_i32(result as i32), false);
+                write_out(*out, Datum::from_i32(result as i32), false);
             }
             Step::AggPlainTransByVal { call, pergroup } => {
                 // SAFETY: once-allocated stable pergroup; sole access here.
@@ -1027,14 +1022,14 @@ fn run_program<'mcx>(
                 }
             }
             Step::HashDatumSetInitVal { init_value, out } => {
-                write_out(*out, &mut regs, *init_value, false);
+                write_out(*out, *init_value, false);
             }
             Step::HashDatumFirst { call, out } => {
                 // SAFETY: arg 0 of the call's live fcinfo image; hash fns
                 // never return NULL (C reads fn_addr's Datum directly).
                 let a0 = unsafe { crate::steps::arg_slot_of(call.fcinfo, 0).read() };
                 let v = if a0.isnull { Datum::null() } else { invoke(frames, call)?.0 };
-                write_out(*out, &mut regs, v, false);
+                write_out(*out, v, false);
             }
             Step::HashDatumNext32 { call, iresult, out } => {
                 // SAFETY: iresult is a build-owned once-allocated slot; arg 0
@@ -1046,27 +1041,27 @@ fn run_program<'mcx>(
                 } else {
                     existing ^ invoke(frames, call)?.0.as_u32()
                 };
-                write_out(*out, &mut regs, Datum::from_u32(combined), false);
+                write_out(*out, Datum::from_u32(combined), false);
             }
             Step::BoolTestIsTrue { out } => {
-                let r = read_out(*out, &regs);
+                let r = read_out(*out);
                 let v = if r.isnull { false } else { r.value.as_bool() };
-                write_out(*out, &mut regs, Datum::from_bool(v), false);
+                write_out(*out, Datum::from_bool(v), false);
             }
             Step::BoolTestIsNotTrue { out } => {
-                let r = read_out(*out, &regs);
+                let r = read_out(*out);
                 let v = if r.isnull { true } else { !r.value.as_bool() };
-                write_out(*out, &mut regs, Datum::from_bool(v), false);
+                write_out(*out, Datum::from_bool(v), false);
             }
             Step::BoolTestIsFalse { out } => {
-                let r = read_out(*out, &regs);
+                let r = read_out(*out);
                 let v = if r.isnull { false } else { !r.value.as_bool() };
-                write_out(*out, &mut regs, Datum::from_bool(v), false);
+                write_out(*out, Datum::from_bool(v), false);
             }
             Step::BoolTestIsNotFalse { out } => {
-                let r = read_out(*out, &regs);
+                let r = read_out(*out);
                 let v = if r.isnull { true } else { r.value.as_bool() };
-                write_out(*out, &mut regs, Datum::from_bool(v), false);
+                write_out(*out, Datum::from_bool(v), false);
             }
             Step::Distinct { call, out } => {
                 // SAFETY: args 0/1 of the call's live fcinfo image.
@@ -1077,12 +1072,12 @@ fn run_program<'mcx>(
                     )
                 };
                 if a0.isnull && a1.isnull {
-                    write_out(*out, &mut regs, Datum::from_bool(false), false);
+                    write_out(*out, Datum::from_bool(false), false);
                 } else if a0.isnull || a1.isnull {
-                    write_out(*out, &mut regs, Datum::from_bool(true), false);
+                    write_out(*out, Datum::from_bool(true), false);
                 } else {
                     let (value, isnull) = invoke(frames, call)?;
-                    write_out(*out, &mut regs, Datum::from_bool(!value.as_bool()), isnull);
+                    write_out(*out, Datum::from_bool(!value.as_bool()), isnull);
                 }
             }
             Step::NotDistinct { call, out } => {
@@ -1094,12 +1089,12 @@ fn run_program<'mcx>(
                     )
                 };
                 if a0.isnull && a1.isnull {
-                    write_out(*out, &mut regs, Datum::from_bool(true), false);
+                    write_out(*out, Datum::from_bool(true), false);
                 } else if a0.isnull || a1.isnull {
-                    write_out(*out, &mut regs, Datum::from_bool(false), false);
+                    write_out(*out, Datum::from_bool(false), false);
                 } else {
                     let (value, isnull) = invoke(frames, call)?;
-                    write_out(*out, &mut regs, value, isnull);
+                    write_out(*out, value, isnull);
                 }
             }
         }
