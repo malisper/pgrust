@@ -1,11 +1,12 @@
 // printtup.c — the DestRemote/DestRemoteExecute per-row output path (PG 18.3).
 #![allow(non_snake_case)]
 
+use core::cell::Cell;
 use core::ffi::CStr;
 use std::rc::Rc;
 
 use ::datum::Datum;
-use ::mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, MemoryContext, PgVec};
 use ::pqformat::{
     pq_beginmessage_reuse, pq_endmessage_reuse, pq_sendbytes, pq_sendcountedtext, pq_sendint16,
     pq_sendint32, pq_writeint16, pq_writeint32, pq_writestring,
@@ -40,12 +41,47 @@ pub struct DrPrinttup<'mcx> {
     pub mydest: CommandDest,
     pub sendDescrip: bool,
     portal: Option<Portal<'mcx>>,
-    buf: Option<StringInfo<'mcx>>,
+    buf: Option<StringInfo<'static>>,
     // C compares the TupleDesc pointer; the Rc's address is the same token.
     attrinfo: usize,
     nattrs: i32,
-    myinfo: Option<PgVec<'mcx, PrinttupAttrInfo>>,
+    myinfo: Option<PgVec<'static, PrinttupAttrInfo>>,
     conv_needed: bool,
+}
+
+// C allocates the wire buf/myinfo in es_query_cxt per executor (printtup.c:120,
+// execMain.c:330); here the receiver outlives any query context lifetime it
+// could borrow, so it owns its scratch: a backend-lifetime context plus a
+// pooled wire buffer whose capacity is retained across statements (rule 7).
+fn scratch_mcx() -> Mcx<'static> {
+    thread_local! {
+        static CTX: Cell<Option<&'static MemoryContext>> = const { Cell::new(None) };
+    }
+    CTX.with(|c| match c.get() {
+        Some(m) => m.mcx(),
+        None => {
+            let m: &'static MemoryContext =
+                Box::leak(Box::new(MemoryContext::new("PrinttupScratch")));
+            c.set(Some(m));
+            m.mcx()
+        }
+    })
+}
+
+thread_local! {
+    static WIRE_BUF: Cell<Option<StringInfo<'static>>> = const { Cell::new(None) };
+}
+
+fn take_wire_buf() -> PgResult<StringInfo<'static>> {
+    match WIRE_BUF.with(Cell::take) {
+        Some(buf) => Ok(buf),
+        None => StringInfo::new_in(scratch_mcx()),
+    }
+}
+
+fn put_wire_buf(mut buf: StringInfo<'static>) {
+    buf.reset();
+    WIRE_BUF.with(|c| c.set(Some(buf)));
 }
 
 pub fn printtup_create_DR<'mcx>(dest: CommandDest) -> DrPrinttup<'mcx> {
@@ -70,16 +106,12 @@ pub fn SetRemoteDestReceiverParams<'mcx>(myState: &mut DrPrinttup<'mcx>, portal:
 }
 
 impl<'mcx> DrPrinttup<'mcx> {
-    pub fn startup(
-        &mut self,
-        mcx: Mcx<'mcx>,
-        _operation: i32,
-        typeinfo: &TupleDescData<'_>,
-    ) -> PgResult<()> {
+    pub fn startup(&mut self, _operation: i32, typeinfo: &TupleDescData<'_>) -> PgResult<()> {
         // Reused across all rows; C's per-row tmpcontext has no consumer under
         // the current out-fn ABI (docs/optimizations/printtup-parity.md).
-        let mut buf = StringInfo::new_in(mcx)?;
+        let mut buf = take_wire_buf()?;
         if self.sendDescrip {
+            let mcx = scratch_mcx();
             let portal = self
                 .portal
                 .as_ref()
@@ -109,11 +141,7 @@ impl<'mcx> DrPrinttup<'mcx> {
         // (strategy lever 2; the pqformat benchmark record's watch item).
         self.conv_needed = mbutils_seams::server_to_client_conversion_needed::call();
 
-        let mcx = self
-            .buf
-            .as_ref()
-            .expect("printtup before printtup_startup")
-            .allocator();
+        let mcx = scratch_mcx();
         let portal = self
             .portal
             .as_ref()
@@ -122,7 +150,7 @@ impl<'mcx> DrPrinttup<'mcx> {
         let formats = (!portal.formats.is_empty()).then_some(&portal.formats[..]);
         // Droppy payload (FmgrInfo's fn_extra), so PgVec::new_in rather than
         // the !needs_drop capacity helper; resolve-once, never per row.
-        let mut info: PgVec<'mcx, PrinttupAttrInfo> = PgVec::new_in(mcx);
+        let mut info: PgVec<'static, PrinttupAttrInfo> = PgVec::new_in(mcx);
         info.try_reserve_exact(numAttrs as usize)
             .map_err(|_| mcx.oom(numAttrs as usize * core::mem::size_of::<PrinttupAttrInfo>()))?;
         for i in 0..numAttrs as usize {
@@ -224,7 +252,9 @@ impl<'mcx> DrPrinttup<'mcx> {
     pub fn shutdown(&mut self) {
         self.myinfo = None;
         self.attrinfo = 0;
-        self.buf = None;
+        if let Some(buf) = self.buf.take() {
+            put_wire_buf(buf);
+        }
     }
 }
 

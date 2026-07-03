@@ -261,7 +261,7 @@ fn startup_sends_row_description_for_dest_remote_only() {
 
     let mut dr = remote_receiver(ctx.mcx(), &[]);
     assert!(dr.sendDescrip);
-    dr.startup(ctx.mcx(), 1, &desc).unwrap();
+    dr.startup(1, &desc).unwrap();
     let msgs = sent();
     assert_eq!(msgs.len(), 1);
     let (t, body) = &msgs[0];
@@ -275,7 +275,7 @@ fn startup_sends_row_description_for_dest_remote_only() {
     let mut dr = printtup_create_DR(CommandDest::RemoteExecute);
     SetRemoteDestReceiverParams(&mut dr, make_portal(ctx.mcx(), &[]));
     assert!(!dr.sendDescrip);
-    dr.startup(ctx.mcx(), 1, &desc).unwrap();
+    dr.startup(1, &desc).unwrap();
     assert_eq!(sent().len(), 1);
 }
 
@@ -298,7 +298,7 @@ fn row_description_skips_resjunk_and_zero_fills_missing_tlist() {
     });
     let desc = int4_desc(ctx.mcx(), 2);
     let mut dr = remote_receiver(ctx.mcx(), &[]);
-    dr.startup(ctx.mcx(), 1, &desc).unwrap();
+    dr.startup(1, &desc).unwrap();
 
     let (_, body) = &sent()[0];
     let mut expect = 2u16.to_be_bytes().to_vec();
@@ -315,7 +315,7 @@ fn row_description_resolves_domain_base_type_and_formats() {
     att.atttypmod = -1;
     let desc = make_desc(ctx.mcx(), vec![att]);
     let mut dr = remote_receiver(ctx.mcx(), &[1]);
-    dr.startup(ctx.mcx(), 1, &desc).unwrap();
+    dr.startup(1, &desc).unwrap();
 
     let (_, body) = &sent()[0];
     let mut expect = 1u16.to_be_bytes().to_vec();
@@ -338,7 +338,7 @@ fn datarow_text_output_with_nulls() {
         ],
     );
     let mut dr = remote_receiver(ctx.mcx(), &[]);
-    dr.startup(ctx.mcx(), 1, &desc).unwrap();
+    dr.startup(1, &desc).unwrap();
     // RowDescription's attname sends go through the conversion seam; the
     // hoist claim is about the row loop only.
     let calls_after_startup = CONVERT_CALLS.with(|c| c.get());
@@ -368,7 +368,7 @@ fn datarow_binary_and_mixed_formats() {
 
     let mut slot = make_slot(ctx.mcx(), Rc::clone(&desc), &values);
     let mut dr = remote_receiver(ctx.mcx(), &[1, 1]);
-    dr.startup(ctx.mcx(), 1, &desc).unwrap();
+    dr.startup(1, &desc).unwrap();
     dr.receive_slot(&mut slot).unwrap();
     let mut expect = 2u16.to_be_bytes().to_vec();
     expect.extend_from_slice(&counted(&[1, 2, 3, 4]));
@@ -377,7 +377,7 @@ fn datarow_binary_and_mixed_formats() {
 
     let mut slot = make_slot(ctx.mcx(), Rc::clone(&desc), &values);
     let mut dr = remote_receiver(ctx.mcx(), &[0, 1]);
-    dr.startup(ctx.mcx(), 1, &desc).unwrap();
+    dr.startup(1, &desc).unwrap();
     dr.receive_slot(&mut slot).unwrap();
     let mut expect = 2u16.to_be_bytes().to_vec();
     expect.extend_from_slice(&counted(b"16909060"));
@@ -392,7 +392,7 @@ fn attr_info_prepared_once_per_descriptor() {
     let values = [(Datum::from_i32(7), false), (Datum::from_i32(8), false)];
     let mut slot = make_slot(ctx.mcx(), Rc::clone(&desc), &values);
     let mut dr = remote_receiver(ctx.mcx(), &[]);
-    dr.startup(ctx.mcx(), 1, &desc).unwrap();
+    dr.startup(1, &desc).unwrap();
 
     dr.receive_slot(&mut slot).unwrap();
     dr.receive_slot(&mut slot).unwrap();
@@ -424,7 +424,7 @@ fn text_output_converts_when_encodings_differ() {
     );
     let mut dr = printtup_create_DR(CommandDest::RemoteExecute);
     SetRemoteDestReceiverParams(&mut dr, make_portal(ctx.mcx(), &[]));
-    dr.startup(ctx.mcx(), 1, &desc).unwrap();
+    dr.startup(1, &desc).unwrap();
     dr.receive_slot(&mut slot).unwrap();
 
     let mut expect = 1u16.to_be_bytes().to_vec();
@@ -439,7 +439,7 @@ fn unsupported_format_code_is_rejected() {
     let desc = int4_desc(ctx.mcx(), 1);
     let mut slot = make_slot(ctx.mcx(), Rc::clone(&desc), &[(Datum::from_i32(1), false)]);
     let mut dr = remote_receiver(ctx.mcx(), &[2]);
-    dr.startup(ctx.mcx(), 1, &desc).unwrap();
+    dr.startup(1, &desc).unwrap();
     let err = dr.receive_slot(&mut slot).unwrap_err();
     assert_eq!(err.message(), "unsupported format code: 2");
     assert_eq!(err.sqlstate(), ERRCODE_INVALID_PARAMETER_VALUE);
@@ -451,11 +451,42 @@ fn shutdown_releases_buffer_and_attr_info() {
     let desc = int4_desc(ctx.mcx(), 1);
     let mut slot = make_slot(ctx.mcx(), Rc::clone(&desc), &[(Datum::from_i32(1), false)]);
     let mut dr = remote_receiver(ctx.mcx(), &[]);
-    dr.startup(ctx.mcx(), 1, &desc).unwrap();
+    dr.startup(1, &desc).unwrap();
     dr.receive_slot(&mut slot).unwrap();
     dr.shutdown();
     assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let _ = dr.receive_slot(&mut slot);
     }))
     .is_err());
+}
+
+// The retained-scratch contract: statement N reuses statement 1's wire-buffer
+// capacity and the scratch context never grows.
+#[test]
+fn scratch_stays_flat_across_statement_cycles() {
+    let ctx = setup();
+    let desc = int4_desc(ctx.mcx(), 2);
+    let values = [(Datum::from_i32(7), false), (Datum::from_i32(8), false)];
+    let mut cycle = || {
+        let mut slot = make_slot(ctx.mcx(), Rc::clone(&desc), &values);
+        let mut dr = remote_receiver(ctx.mcx(), &[]);
+        dr.startup(1, &desc).unwrap();
+        dr.receive_slot(&mut slot).unwrap();
+        dr.shutdown();
+    };
+    cycle();
+    let scratch = scratch_mcx().context();
+    let used_after_first = scratch.used();
+    let peak_after_first = scratch.peak();
+    for _ in 0..(if cfg!(miri) { 20 } else { 500 }) {
+        cycle();
+    }
+    assert_eq!(scratch.used(), used_after_first, "printtup scratch grew");
+    assert_eq!(scratch.peak(), peak_after_first, "printtup scratch peak grew");
+    assert!(WIRE_BUF.with(|c| {
+        let buf = c.take();
+        let pooled = buf.is_some();
+        c.set(buf);
+        pooled
+    }));
 }
