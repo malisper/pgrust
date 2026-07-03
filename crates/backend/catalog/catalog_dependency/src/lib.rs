@@ -55,6 +55,7 @@ const InitPrivsObjIndexId: Oid = 3395;
 const SecLabelRelationId: Oid = 3596;
 const AttrDefaultRelationId: Oid = 2604;
 const ConstraintRelationId: Oid = 2606;
+const RewriteRelationId: Oid = 2618;
 const AuthMemRelationId: Oid = 1261;
 
 #[cold]
@@ -689,7 +690,10 @@ fn doDeletion<'mcx>(mcx: Mcx<'mcx>, object: &ObjectAddress, flags: i32) -> PgRes
                     object.objectId,
                     object.objectSubId as types_core::AttrNumber,
                 )?;
-            } else if matches!(relKind, RELKIND_RELATION | RELKIND_TOASTVALUE | RELKIND_SEQUENCE) {
+            } else if matches!(
+                relKind,
+                RELKIND_RELATION | RELKIND_TOASTVALUE | RELKIND_SEQUENCE | types_rel::RELKIND_MATVIEW
+            ) {
                 catalog_heap::heap_drop_with_catalog(mcx, object.objectId)?;
                 if relKind == RELKIND_SEQUENCE {
                     sequence_seams::delete_sequence_tuple::call(object.objectId)?;
@@ -702,6 +706,9 @@ fn doDeletion<'mcx>(mcx: Mcx<'mcx>, object: &ObjectAddress, flags: i32) -> PgRes
         AttrDefaultRelationId => pg_attrdef::RemoveAttrDefaultById(mcx, object.objectId)?,
         ConstraintRelationId => pg_constraint::RemoveConstraintById(mcx, object.objectId)?,
         statscmds::StatisticExtRelationId => statscmds::RemoveStatisticsById(mcx, object.objectId)?,
+        RewriteRelationId => {
+            rewrite_define_seams::remove_rewrite_rule_by_id::call(mcx, object.objectId)?
+        }
         other => panic!("unported: doDeletion object class {other}"),
     }
     Ok(())

@@ -8,6 +8,8 @@ publish.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+rewrite_define = { path = "../../rewrite/rewrite_define" }
+dropcmds = { path = "../../commands/dropcmds" }
 aclchk = { path = "../../catalog/aclchk" }
 parse_utilcmd = { path = "../../parser/parse_utilcmd" }
 parse_clause = { path = "../../parser/parse_clause" }
@@ -29,6 +31,8 @@ commands_vacuum = { path = "../../commands/vacuum" }
 copy_cmd = { path = "../../commands/copy" }
 discard = { path = "../../commands/discard" }
 explain = { path = "../../commands/explain" }
+commands_createas = { path = "../../commands/createas" }
+commands_matview = { path = "../../commands/matview" }
 portalcmds = { path = "../../commands/portalcmds" }
 prepare = { path = "../../commands/prepare" }
 guc_funcs = { path = "../../utils/misc/guc_funcs" }

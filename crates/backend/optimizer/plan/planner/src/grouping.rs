@@ -9,6 +9,7 @@ use crate::pathnode::{add_existing_path, create_pathtarget, create_projection_pa
 use crate::planmain::{fetch_final_rel, query_planner};
 use crate::prep::preprocess_targetlist;
 use crate::run::PlannerRun;
+pub(crate) use types_pathnodes::run::sortgrouplist_exprs;
 use crate::{is_parallel_safe_exprs, is_parallel_safe_opt};
 
 pub fn grouping_planner<'mcx>(
@@ -803,31 +804,6 @@ pub(crate) fn could_not_implement(what: &str) -> Box<types_error::PgError> {
                 "Some of the datatypes only support hashing, while others only support sorting.",
             ),
     )
-}
-
-// get_sortgrouplist_exprs (tlist.c) into estimate_num_groups' input shape.
-pub(crate) fn sortgrouplist_exprs<'mcx>(
-    run: &mut PlannerRun<'mcx>,
-    clauses: &[types_pathnodes::NodeId],
-    tlist: &types_nodes::list::NodeList<'mcx>,
-) -> mcx::PgVec<'mcx, (types_pathnodes::NodeId, types_nodes::Node<'mcx>)> {
-    let mut exprs = mcx::PgVec::new_in(run.mcx);
-    for &gc_id in clauses {
-        let sgref = run
-            .root
-            .expr_node(gc_id)
-            .as_sort_group_clause()
-            .expect("sortgroup clause cell")
-            .tleSortGroupRef;
-        let tle_node = tlist
-            .iter()
-            .find(|n| n.as_target_entry().expect("tlist cell").ressortgroupref == sgref)
-            .expect("sortgroupref has a tlist entry");
-        let expr = tle_node.as_target_entry().unwrap().expr;
-        let id = run.intern_expr(expr);
-        exprs.push((id, expr));
-    }
-    exprs
 }
 
 // get_number_of_groups (planner.c); the hash_sets leg needs the unported

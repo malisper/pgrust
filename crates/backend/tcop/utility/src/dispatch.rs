@@ -489,6 +489,7 @@ fn dispatch_switch<'mcx>(
                 }
                 OBJECT_INDEX | OBJECT_TABLE | OBJECT_SEQUENCE | OBJECT_VIEW | OBJECT_MATVIEW
                 | OBJECT_FOREIGN_TABLE => tablecmds::RemoveRelations(mcx, stmt)?,
+                OBJECT_RULE => dropcmds::RemoveObjects(mcx, stmt)?,
                 _ => handler_gap("RemoveObjects (dropcmds lane)"),
             }
         }
@@ -683,6 +684,33 @@ fn dispatch_switch<'mcx>(
                 }
             }
         }
+        T_CreateTableAsStmt => {
+            // Retention contract as unify_stmt_lifetime: the statement arena
+            // outlives the utility call; nothing derived escapes it.
+            let stmt_node =
+                unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::rawnodes::CreateTableAsStmt>()
+                .expect("CreateTableAsStmt");
+            commands_createas::ExecCreateTableAs(
+                mcx,
+                stmt,
+                source_text,
+                params,
+                query_env,
+                qc.as_deref_mut(),
+            )?;
+        }
+        T_RefreshMatViewStmt => {
+            // C wraps this in EventTriggerInhibitCommandCollection; no event
+            // trigger surface exists.
+            let stmt_node =
+                unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::rawnodes::RefreshMatViewStmt>()
+                .expect("RefreshMatViewStmt");
+            commands_matview::ExecRefreshMatView(mcx, stmt, source_text, qc.as_deref_mut())?;
+        }
         T_CreateSeqStmt => {
             let stmt_node =
                 unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
@@ -725,6 +753,19 @@ fn dispatch_switch<'mcx>(
             let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
             let stmt = stmt_node.as_alter_enum_stmt().expect("AlterEnumStmt");
             typecmds::AlterEnum(mcx, stmt)?;
+        }
+        T_RuleStmt => {
+            // Retention contract as unify_stmt_lifetime.
+            let stmt = parsetree
+                .as_variant::<types_nodes::rawnodes::RuleStmt>()
+                .expect("RuleStmt");
+            let stmt = unsafe {
+                core::mem::transmute::<
+                    &types_nodes::rawnodes::RuleStmt<'_>,
+                    &types_nodes::rawnodes::RuleStmt<'mcx>,
+                >(stmt)
+            };
+            rewrite_define::DefineRule(mcx, stmt, source_text)?;
         }
         T_ViewStmt => {
             // Retention contract as unify_stmt_lifetime: the statement arena

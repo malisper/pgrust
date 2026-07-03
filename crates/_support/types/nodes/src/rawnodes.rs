@@ -355,6 +355,38 @@ pub enum OnCommitAction {
     ONCOMMIT_DROP,
 }
 
+/// `rel` is a RangeVar node handle (the grammar scribbles its
+/// relpersistence); `viewQuery` is a Query node handle (matview lane).
+#[derive(Default)]
+pub struct IntoClause<'mcx> {
+    pub rel: Option<Node<'mcx>>,
+    pub colNames: NodeList<'mcx>,
+    pub accessMethod: Option<&'mcx str>,
+    pub options: NodeList<'mcx>,
+    pub onCommit: OnCommitAction,
+    pub tableSpaceName: Option<&'mcx str>,
+    pub viewQuery: Option<Node<'mcx>>,
+    pub skipData: bool,
+}
+
+/// `query` is a raw statement node until parse analysis rewrites it into a
+/// Query node in place; `into` is an IntoClause node handle.
+#[derive(Default)]
+pub struct CreateTableAsStmt<'mcx> {
+    pub query: Option<Node<'mcx>>,
+    pub into: Option<Node<'mcx>>,
+    pub objtype: crate::parsenodes::ObjectType,
+    pub is_select_into: bool,
+    pub if_not_exists: bool,
+}
+
+#[derive(Default)]
+pub struct RefreshMatViewStmt<'mcx> {
+    pub concurrent: bool,
+    pub skipData: bool,
+    pub relation: Option<&'mcx crate::primnodes::RangeVar<'mcx>>,
+}
+
 #[derive(Default)]
 pub struct CreateStmt<'mcx> {
     pub relation: Option<&'mcx crate::primnodes::RangeVar<'mcx>>,
@@ -388,6 +420,16 @@ pub struct ViewStmt<'mcx> {
     pub replace: bool,
     pub options: NodeList<'mcx>,
     pub withCheckOption: ViewCheckOption,
+}
+
+pub struct RuleStmt<'mcx> {
+    pub relation: Option<&'mcx crate::primnodes::RangeVar<'mcx>>,
+    pub rulename: &'mcx str,
+    pub whereClause: Option<Node<'mcx>>,
+    pub event: crate::nodes_enums::CmdType,
+    pub instead: bool,
+    pub actions: NodeList<'mcx>,
+    pub replace: bool,
 }
 
 #[derive(Default)]
@@ -635,9 +677,22 @@ pub struct AlterEnumStmt<'mcx> {
     pub skipIfNewValExists: bool,
 }
 
+/// `val` is a SelectStmt node (the PLpgSQL_Expr production's result).
+#[derive(Default)]
+pub struct PLAssignStmt<'mcx> {
+    pub name: &'mcx str,
+    pub indirection: NodeList<'mcx>,
+    pub nnames: i32,
+    pub val: Option<Node<'mcx>>,
+    pub location: ParseLoc,
+}
+
 // SAFETY (each): tag/type pairing mirrors parsenodes.h.
 unsafe impl<'mcx> NodeVariant<'mcx> for RawStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_RawStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for PLAssignStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_PLAssignStmt;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for CreateDomainStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_CreateDomainStmt;
@@ -650,6 +705,15 @@ unsafe impl<'mcx> NodeVariant<'mcx> for AlterEnumStmt<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for SelectStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_SelectStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for IntoClause<'mcx> {
+    const TAG: NodeTag = NodeTag::T_IntoClause;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for CreateTableAsStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CreateTableAsStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for RefreshMatViewStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_RefreshMatViewStmt;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for InsertStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_InsertStmt;
@@ -716,6 +780,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for CreateStmt<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for ViewStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_ViewStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for RuleStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_RuleStmt;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for ColumnDef<'mcx> {
     const TAG: NodeTag = NodeTag::T_ColumnDef;
@@ -839,6 +906,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_raw_stmt(self) -> Option<&'mcx RawStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_pl_assign_stmt(self) -> Option<&'mcx PLAssignStmt<'mcx>> {
         self.as_variant()
     }
 

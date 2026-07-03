@@ -57,6 +57,53 @@ impl Default for VarParamState {
     }
 }
 
+#[derive(Clone, Copy)]
+pub struct PlpgsqlNameEntry<'p> {
+    /// Down-cased dotted key: "v", "label.v", "rec.f", "label.rec.f".
+    pub key: &'p str,
+    pub dno: i32,
+    pub typoid: Oid,
+    pub typmod: i32,
+    pub collation: Oid,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum PlpgsqlResolveOption {
+    Error,
+    Variable,
+    Column,
+}
+
+/// plpgsql_parser_setup's hooks, data-driven: the plpgsql executor
+/// pre-resolves the expr's namespace chain into a flat name table (C walks
+/// the live ns via plpgsql_ns_lookup inside the hooks; the tables are a
+/// compile-time constant of the expr, so the flattening is lossless).
+#[derive(Clone, Copy)]
+pub struct PlpgsqlHookState<'p> {
+    pub names: &'p [PlpgsqlNameEntry<'p>],
+    /// dno → (typoid, typmod, collation); a None slot is a datum a Param
+    /// cannot carry.
+    pub params_by_dno: &'p [Option<(Oid, i32, Oid)>],
+    /// Function argument dnos in signature order: `$n` resolves through
+    /// slot n-1 only (C's ns holds just parameter names, pl_comp.c:1062).
+    pub arg_dnos: &'p [i32],
+    /// Record/row variable names (incl. label-qualified) for the
+    /// "record has no field" error arm of resolve_column_ref.
+    pub recs: &'p [&'p str],
+    pub resolve_option: PlpgsqlResolveOption,
+    /// Out-param: dnos the analysis referenced (C expr->paramnos).
+    pub used: &'p RefCell<Vec<i32>>,
+}
+
+impl<'p> PlpgsqlHookState<'p> {
+    pub fn mark_used(&self, dno: i32) {
+        let mut used = self.used.borrow_mut();
+        if !used.contains(&dno) {
+            used.push(dno);
+        }
+    }
+}
+
 /// C selects param hooks by installing fn pointers alongside a `void *`
 /// `p_ref_hook_state`; the closed arm set is the dispatch here (rule 4).
 #[derive(Clone, Default)]
@@ -66,6 +113,7 @@ pub enum ParseRefHookState<'p> {
     FixedParams(FixedParamState<'p>),
     VarParams(VarParamState),
     SqlFnParams(SqlFnParamState<'p>),
+    PlpgsqlParams(PlpgsqlHookState<'p>),
 }
 
 impl<'p> ParseRefHookState<'p> {
@@ -86,6 +134,13 @@ impl<'p> ParseRefHookState<'p> {
     pub fn as_sql_fn_params(&self) -> Option<&SqlFnParamState<'p>> {
         match self {
             ParseRefHookState::SqlFnParams(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    pub fn as_plpgsql_params(&self) -> Option<&PlpgsqlHookState<'p>> {
+        match self {
+            ParseRefHookState::PlpgsqlParams(s) => Some(s),
             _ => None,
         }
     }
@@ -223,6 +278,105 @@ pub fn variable_paramref_hook<'mcx>(
     drop(param_types);
 
     mk_param(mcx, paramno, paramtype, pref.location)
+}
+
+/// plpgsql_param_ref (pl_exec.c): `$n` names the n-th function argument;
+/// anything else is undefined_parameter (C looks the name "$n" up in a
+/// namespace that holds only parameters).
+pub fn plpgsql_paramref_hook<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &ParseState<'_, 'mcx>,
+    pref: &ParamRef,
+    encoding: pg_enc,
+) -> PgResult<Node<'mcx>> {
+    let parstate = pstate
+        .p_ref_hook_state
+        .as_plpgsql_params()
+        .expect("plpgsql_paramref_hook: p_ref_hook_state is not PlpgsqlParams");
+    let paramno = pref.number;
+    let dno = if paramno >= 1 && (paramno as usize) <= parstate.arg_dnos.len() {
+        Some(parstate.arg_dnos[(paramno - 1) as usize])
+    } else {
+        None
+    };
+    let slot = dno.and_then(|d| parstate.params_by_dno.get(d as usize).copied().flatten());
+    // C's hook returns NULL and the core reports undefined_parameter.
+    let (Some(dno), Some((typoid, typmod, collation))) = (dno, slot) else {
+        return Err(no_parameter_err(
+            paramno,
+            parser_errposition(pstate, pref.location, encoding),
+            "plpgsql_param_ref",
+        ));
+    };
+    parstate.mark_used(dno);
+    Node::mk(
+        mcx,
+        Param {
+            paramkind: ParamKind::PARAM_EXTERN,
+            paramid: dno + 1,
+            paramtype: typoid,
+            paramtypmod: typmod,
+            paramcollid: collation,
+            location: pref.location,
+        },
+    )
+}
+
+/// resolve_column_ref (pl_exec.c) over the flattened name table. Returns the
+/// Param for a match; `error_if_no_field` raises the record-has-no-field
+/// error when the name's rec prefix is known but the field key is not.
+pub fn plpgsql_resolve_column_ref<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &ParseState<'_, 'mcx>,
+    parstate: &PlpgsqlHookState<'_>,
+    fields: &[&str],
+    location: i32,
+    error_if_no_field: bool,
+    encoding: pg_enc,
+) -> PgResult<Option<Node<'mcx>>> {
+    if fields.is_empty() || fields.len() > 3 {
+        return Ok(None);
+    }
+    let key = fields.join(".").to_ascii_lowercase();
+    if let Some(e) = parstate.names.iter().find(|e| e.key == key) {
+        if !OidIsValid(e.typoid) {
+            panic!(
+                "resolve_column_ref (pl_exec.c): whole-record reference \"{key}\" in a \
+                 SQL expression unported — unit backend-pl-plpgsql-exec"
+            );
+        }
+        parstate.mark_used(e.dno);
+        return Ok(Some(Node::mk(
+            mcx,
+            Param {
+                paramkind: ParamKind::PARAM_EXTERN,
+                paramid: e.dno + 1,
+                paramtype: e.typoid,
+                paramtypmod: e.typmod,
+                paramcollid: e.collation,
+                location,
+            },
+        )?));
+    }
+    if error_if_no_field && fields.len() >= 2 {
+        // C reports against the last-1 prefix that named a rec/row.
+        let prefix = fields[..fields.len() - 1].join(".").to_ascii_lowercase();
+        if parstate.recs.iter().any(|r| *r == prefix) {
+            let recname = fields[fields.len() - 2];
+            let field = fields[fields.len() - 1];
+            return Err(Box::new(
+                ereport(ERROR)
+                    .errcode(types_error::ERRCODE_UNDEFINED_COLUMN)
+                    .errmsg(alloc::format!(
+                        "record \"{recname}\" has no field \"{field}\""
+                    ))
+                    .errposition(parser_errposition(pstate, location, encoding))
+                    .into_error()
+                    .with_error_location(loc("resolve_column_ref")),
+            ));
+        }
+    }
+    Ok(None)
 }
 
 fn mk_param<'mcx>(

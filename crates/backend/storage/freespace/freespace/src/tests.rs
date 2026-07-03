@@ -334,7 +334,7 @@ fn vacuum_lanes_panic_named() {
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
-            rd_hastriggers: false,
+            rd_hastriggers: false, rd_hasrules: false,
     };
     let err =
         catch_unwind(AssertUnwindSafe(|| FreeSpaceMapPrepareTruncateRel(&rel, 0))).unwrap_err();

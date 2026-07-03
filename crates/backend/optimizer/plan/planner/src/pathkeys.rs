@@ -8,47 +8,9 @@ use types_nodes::parsenodes::SortGroupClause;
 use types_nodes::Node;
 use types_pathnodes::{EcId, PathKey, COMPARE_EQ, COMPARE_GT, COMPARE_LT};
 
+pub use types_pathnodes::{compare_pathkeys, pathkeys_contained_in, pathkeys_count_contained_in, PathKeysComparison};
+
 use crate::run::PlannerRun;
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum PathKeysComparison {
-    Equal,
-    Better1,
-    Better2,
-    Different,
-}
-
-pub fn compare_pathkeys(keys1: &[PathKey], keys2: &[PathKey]) -> PathKeysComparison {
-    for (k1, k2) in keys1.iter().zip(keys2.iter()) {
-        if k1 != k2 {
-            return PathKeysComparison::Different;
-        }
-    }
-    match keys1.len().cmp(&keys2.len()) {
-        core::cmp::Ordering::Greater => PathKeysComparison::Better1,
-        core::cmp::Ordering::Less => PathKeysComparison::Better2,
-        core::cmp::Ordering::Equal => PathKeysComparison::Equal,
-    }
-}
-
-// Returns (contained, n leading matches).
-pub fn pathkeys_count_contained_in(keys1: &[PathKey], keys2: &[PathKey]) -> (bool, usize) {
-    let mut n = 0;
-    for (k1, k2) in keys1.iter().zip(keys2.iter()) {
-        if k1 != k2 {
-            return (false, n);
-        }
-        n += 1;
-    }
-    (n == keys1.len(), n)
-}
-
-pub fn pathkeys_contained_in(keys1: &[PathKey], keys2: &[PathKey]) -> bool {
-    matches!(
-        compare_pathkeys(keys1, keys2),
-        PathKeysComparison::Equal | PathKeysComparison::Better2
-    )
-}
 
 pub fn get_sortgroupclause_expr<'mcx>(
     sortcl: &SortGroupClause,

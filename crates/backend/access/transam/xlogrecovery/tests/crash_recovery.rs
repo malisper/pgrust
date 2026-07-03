@@ -336,7 +336,7 @@ fn test_relation<'mcx>(mcx: Mcx<'mcx>, oid: Oid) -> RelationData<'mcx> {
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
-            rd_hastriggers: false,
+            rd_hastriggers: false, rd_hasrules: false,
     }
 }
 
@@ -433,7 +433,7 @@ fn index_rel<'mcx>(mcx: Mcx<'mcx>) -> Relation<'mcx> {
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
-            rd_hastriggers: false,
+            rd_hastriggers: false, rd_hasrules: false,
     };
     let rel = Relation::open(data, Some(noop_close));
     rel.rd_supportinfo
@@ -814,7 +814,7 @@ fn crash_recovery_replays_dml_to_precrash_state() {
         let mut tup =
             heaptuple::heap_form_tuple(mcx, &tupdesc, &[datum::Datum::from_i32(val)], &[false])
                 .unwrap();
-        heapam::heap_insert(r, tup.as_tuple_mut(), cid, 0).unwrap();
+        heapam::heap_insert(r, tup.as_tuple_mut(), cid, 0, None).unwrap();
         tup.as_tuple().t_self
     };
     let insert = |val: i32, cid: u32| insert_into(&rel, val, cid);
@@ -872,7 +872,7 @@ fn crash_recovery_replays_dml_to_precrash_state() {
         };
         for v in 1u8..=4 {
             let mut tup = wide_tuple(v);
-            heapam::heap_insert(&rel5, &mut tup, 0, 0).unwrap();
+            heapam::heap_insert(&rel5, &mut tup, 0, 0, None).unwrap();
             assert_eq!(tup.t_self, ItemPointerData::new(0, v as u16));
         }
         let mut lockmode = tableam_vocab::LockTupleMode::LockTupleNoKeyExclusive;

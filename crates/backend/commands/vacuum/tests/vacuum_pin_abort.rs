@@ -256,6 +256,7 @@ fn install_xact_periphery_seams() {
     backend_status_seams::pgstat_report_xact_timestamp::set(|_| {});
     backend_status_seams::pgstat_report_query_id::set(|_, _| {});
     backend_status_seams::pgstat_report_plan_id::set(|_, _| {});
+    backend_status_seams::pgstat_clear_backend_status_snapshot::set(|| {});
     backend_progress_seams::pgstat_progress_end_command::set(|| {});
     predicate_seams::pre_commit_check_for_serialization_failure::set(|| Ok(()));
     predicate_seams::register_predicate_locking_xid::set(|_| Ok(()));
@@ -283,6 +284,7 @@ fn install_xact_periphery_seams() {
     lmgr_seams::unlock_relation_oid::set(|_, _| Ok(()));
     syscache_seams::search_syscache_exists_reloid::set(|relid| Ok(relid == REL_OID));
     relcache_seams::relation_get_index_list::set(|mcx, _relid| Ok(PgVec::new_in(mcx)));
+    relcache_seams::relation_get_stat_ext_list::set(|mcx, _relid| Ok(PgVec::new_in(mcx)));
     relcache_seams::relation_id_get_relation::set(|relid| {
         assert_eq!(relid, REL_OID);
         let ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("rel")));
@@ -378,7 +380,7 @@ fn test_relation<'mcx>(mcx: Mcx<'mcx>) -> RelationData<'mcx> {
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
-            rd_hastriggers: false,
+            rd_hastriggers: false, rd_hasrules: false,
     }
 }
 

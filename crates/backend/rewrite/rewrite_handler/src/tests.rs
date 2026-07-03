@@ -142,6 +142,7 @@ fn make<'mcx>(mcx: Mcx<'mcx>, oid: Oid, name: &str, relkind: u8, rls: bool) -> R
         rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
             rd_hastriggers: false,
+            rd_hasrules: relkind == RELKIND_VIEW,
     };
     Relation::open(data, None)
 }

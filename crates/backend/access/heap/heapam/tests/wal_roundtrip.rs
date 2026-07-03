@@ -302,7 +302,7 @@ fn test_relation<'mcx>(mcx: Mcx<'mcx>) -> RelationData<'mcx> {
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
-            rd_hastriggers: false,
+            rd_hastriggers: false, rd_hasrules: false,
     }
 }
 
@@ -465,7 +465,7 @@ fn dml_wal_roundtrip_page_parity_and_visibility() {
         );
         let mut tup =
             heap_form_tuple(mcx, &tupdesc, &[::datum::Datum::from_i32(*val)], &[false]).unwrap();
-        heap_insert(&rel, tup.as_tuple_mut(), CID, 0).unwrap();
+        heap_insert(&rel, tup.as_tuple_mut(), CID, 0, None).unwrap();
         tids.push(tup.as_tuple().t_self);
     }
     assert_eq!(tids[0], ItemPointerData::new(0, 1));

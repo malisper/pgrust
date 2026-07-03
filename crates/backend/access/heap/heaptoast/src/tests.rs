@@ -329,7 +329,7 @@ fn rel_from<'mcx>(
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
-            rd_hastriggers: false,
+            rd_hastriggers: false, rd_hasrules: false,
     };
     Relation::open(data, Some(noop_close))
 }
@@ -575,7 +575,7 @@ fn insert_row(mcx: Mcx<'_>, rel: &Relation<'_>, payloads: &[&[u8]]) -> ItemPoint
         .collect();
     let isnull = vec![false; payloads.len()];
     let mut tup = heaptuple::heap_form_tuple(mcx, &rel.rd_att, &values, &isnull).unwrap();
-    heapam::dml::heap_insert(rel, tup.as_tuple_mut(), CID, 0).unwrap();
+    heapam::dml::heap_insert(rel, tup.as_tuple_mut(), CID, 0, None).unwrap();
     tup.as_tuple().t_self
 }
 
