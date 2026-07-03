@@ -772,3 +772,71 @@ pub fn ConstraintNameIsUsed<'mcx>(mcx: Mcx<'mcx>, relid: Oid, conname: &str) -> 
     con_rel.close(AccessShareLock)?;
     Ok(used)
 }
+
+pub fn RemoveConstraintById<'mcx>(mcx: Mcx<'mcx>, con_id: Oid) -> PgResult<()> {
+    const Anum_pg_class_relchecks: AttrNumber = 20;
+    let con_rel = table::table_open(mcx, CONSTRAINT_RELATION_ID, RowExclusiveLock)?;
+    let keys = [eq_key(Anum_pg_constraint_oid, F_OIDEQ, Datum::from_oid(con_id))];
+    let mut scan =
+        genam::systable_beginscan(mcx, &con_rel, CONSTRAINT_OID_INDEX_ID, true, None, &keys)?;
+    let tup = genam::systable_getnext(mcx, &mut scan)?
+        .unwrap_or_else(|| panic!("cache lookup failed for constraint {con_id}"));
+
+    let conrelid = getattr(&con_rel, tup, Anum_pg_constraint_conrelid).0.as_oid();
+    let contypid = getattr(&con_rel, tup, Anum_pg_constraint_contypid).0.as_oid();
+    let contype = getattr(&con_rel, tup, Anum_pg_constraint_contype).0.as_i8() as u8;
+
+    if conrelid != InvalidOid {
+        let rel = table::table_open(mcx, conrelid, types_rel::AccessExclusiveLock)?;
+        if contype == CONSTRAINT_CHECK {
+            let relrel = table::table_open(mcx, RELATION_RELATION_ID, RowExclusiveLock)?;
+            let relkeys = [eq_key(1, F_OIDEQ, Datum::from_oid(conrelid))];
+            let mut relscan = genam::systable_beginscan(
+                mcx,
+                &relrel,
+                catalog::ClassOidIndexId,
+                true,
+                None,
+                &relkeys,
+            )?;
+            let reltup = genam::systable_getnext(mcx, &mut relscan)?
+                .unwrap_or_else(|| panic!("cache lookup failed for relation {conrelid}"));
+            let relchecks = getattr(&relrel, reltup, Anum_pg_class_relchecks).0.as_i16();
+            assert!(relchecks != 0, "relation \"{}\" has relchecks = 0", rel.name());
+            let natts = relrel.descr().natts as usize;
+            let mut repl_values: PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
+            let mut repl_isnull: PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+            let mut repl: PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+            repl_values.resize(natts, Datum::null());
+            repl_isnull.resize(natts, false);
+            repl.resize(natts, false);
+            repl_values[(Anum_pg_class_relchecks - 1) as usize] =
+                Datum::from_i16(relchecks - 1);
+            repl[(Anum_pg_class_relchecks - 1) as usize] = true;
+            let mut newtup = heaptuple::heap_modify_tuple(
+                mcx,
+                reltup,
+                relrel.descr(),
+                &repl_values,
+                &repl_isnull,
+                &repl,
+            )?;
+            let otid = reltup.t_self;
+            genam::systable_endscan(mcx, relscan)?;
+            catalog_indexing::CatalogTupleUpdate(mcx, &relrel, &otid, &mut newtup)?;
+            relrel.close(RowExclusiveLock)?;
+        }
+        // Keep lock on constraint's rel until end of xact.
+        rel.close(types_rel::NoLock)?;
+    } else if contypid != InvalidOid {
+        // C: no special processing for domain constraints.
+    } else {
+        panic!("constraint {con_id} is not of a known type");
+    }
+
+    let tid = tup.t_self;
+    catalog_indexing::CatalogTupleDelete(&con_rel, &tid)?;
+    genam::systable_endscan(mcx, scan)?;
+    con_rel.close(RowExclusiveLock)?;
+    Ok(())
+}
