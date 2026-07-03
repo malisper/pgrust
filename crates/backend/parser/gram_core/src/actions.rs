@@ -1298,6 +1298,32 @@ impl<'mcx> Parser<'mcx> {
                     },
                 )?));
             }
+            // a_expr [NOT_LA] BETWEEN [SYMMETRIC] b_expr AND a_expr
+            2070..=2073 => {
+                use types_nodes::rawnodes::A_Expr_Kind;
+                let (kind, name, b_i) = match rule {
+                    2070 => (A_Expr_Kind::AEXPR_BETWEEN, "BETWEEN", 4),
+                    2071 => (A_Expr_Kind::AEXPR_NOT_BETWEEN, "NOT BETWEEN", 5),
+                    2072 => (A_Expr_Kind::AEXPR_BETWEEN_SYM, "BETWEEN SYMMETRIC", 4),
+                    _ => (A_Expr_Kind::AEXPR_NOT_BETWEEN_SYM, "NOT BETWEEN SYMMETRIC", 5),
+                };
+                let lexpr = view.v(1).node();
+                let lo = view.v(b_i).node().expect("b_expr");
+                let hi = view.v(b_i + 2).node().expect("a_expr");
+                let rexpr = Node::mk_list(mcx, NodeList::make2(mcx, lo, hi)?)?;
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    types_nodes::A_Expr {
+                        kind,
+                        name: NodeList::make1(mcx, Node::mk_string(mcx, name)?)?,
+                        lexpr,
+                        rexpr: Some(rexpr),
+                        rexpr_list_start: 0,
+                        rexpr_list_end: 0,
+                        location: view.l(2),
+                    },
+                )?));
+            }
             // a_expr [NOT] IN_P select_with_parens
             2074 | 2076 => {
                 let subselect_i = if rule == 2074 { 3 } else { 4 };

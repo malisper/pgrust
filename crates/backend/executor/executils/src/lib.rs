@@ -390,6 +390,8 @@ pub struct EStateData<'mcx> {
     pub es_sort_instrumentation: PgVec<'mcx, (i32, TuplesortInstrumentation)>,
     pub es_incsort_instrumentation: PgVec<'mcx, (i32, IncrementalSortInfo)>,
     pub es_hash_instrumentation: PgVec<'mcx, (i32, HashInstrumentation)>,
+    /// (plan_node_id, nsearches); C's IndexScanInstrumentation, hoisted.
+    pub es_index_instrumentation: PgVec<'mcx, (i32, u64)>,
     // Node-owned resettable contexts (C's node-local AllocSets): droppy, so
     // they live in the estate owner; nodes hold AuxCxtId (docs/no-drop.md).
     es_aux_contexts: PgVec<'mcx, MemoryContext>,
@@ -427,6 +429,18 @@ pub struct EpqSubs<'mcx> {
 }
 
 impl<'mcx> EStateData<'mcx> {
+    /// C `scan->instrument->nsearches`, republished per node; ANALYZE-only.
+    #[cold]
+    pub fn instr_set_index_nsearches(&mut self, plan_node_id: i32, nsearches: u64) {
+        for e in self.es_index_instrumentation.iter_mut() {
+            if e.0 == plan_node_id {
+                e.1 = nsearches;
+                return;
+            }
+        }
+        self.es_index_instrumentation.push((plan_node_id, nsearches));
+    }
+
     pub fn new_in(mcx: Mcx<'mcx>) -> Self {
         EStateData {
             es_query_cxt: mcx,
@@ -462,6 +476,7 @@ impl<'mcx> EStateData<'mcx> {
             es_sort_instrumentation: PgVec::new_in(mcx),
             es_incsort_instrumentation: PgVec::new_in(mcx),
             es_hash_instrumentation: PgVec::new_in(mcx),
+            es_index_instrumentation: PgVec::new_in(mcx),
             es_aux_contexts: PgVec::new_in(mcx),
             es_finished: false,
             es_exprcontexts: PgVec::new_in(mcx),

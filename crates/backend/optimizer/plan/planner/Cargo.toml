@@ -44,6 +44,12 @@ nodehash = { path = "../../../executor/nodehash" }
 vars = { path = "../../util/vars" }
 coerce = { path = "../../../parser/coerce" }
 parser_small1 = { path = "../../../parser/parser_small1" }
+types_scan = { path = "../../../../_support/types/types_scan" }
+types_snapshot = { path = "../../../../_support/types/snapshot" }
+types_slot = { path = "../../../../_support/types/types_slot" }
+visibilitymap = { path = "../../../access/heap/visibilitymap" }
+procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
+exectuples = { path = "../../../executor/exectuples" }
 
 [dev-dependencies]
 clauses_seams = { path = "../../util/clauses_seams" }

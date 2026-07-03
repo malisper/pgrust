@@ -245,9 +245,10 @@ fn make_pathkey_from_sortop<'mcx>(
     let (opfamily, opcintype, _cmptype) = lsyscache::amop::get_ordering_op_properties(ordering_op)?
         .unwrap_or_else(|| panic!("operator {ordering_op} is not a valid ordering operator"));
     let collation = expr_collation(expr);
-    make_pathkey_from_sortinfo(
-        run, expr, opfamily, opcintype, collation, reverse_sort, nulls_first, sortref,
-    )
+    Ok(make_pathkey_from_sortinfo(
+        run, expr, opfamily, opcintype, collation, reverse_sort, nulls_first, sortref, true,
+    )?
+    .expect("create_it pathkey"))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -260,7 +261,8 @@ fn make_pathkey_from_sortinfo<'mcx>(
     reverse_sort: bool,
     nulls_first: bool,
     sortref: u32,
-) -> PgResult<PathKey> {
+    create_it: bool,
+) -> PgResult<Option<PathKey>> {
     let cmptype = if reverse_sort { COMPARE_GT } else { COMPARE_LT };
     let equality_op =
         lsyscache::amop::get_opfamily_member_for_cmptype(opfamily, opcintype, opcintype, COMPARE_EQ)?;
@@ -270,8 +272,64 @@ fn make_pathkey_from_sortinfo<'mcx>(
     );
     let opfamilies = lsyscache::amop::get_mergejoin_opfamilies(run.mcx, equality_op)?;
     assert!(!opfamilies.is_empty(), "could not find opfamilies for equality operator {equality_op}");
-    let eclass = get_eclass_for_sort_expr(run, expr, &opfamilies, opcintype, collation, sortref)?;
-    Ok(make_canonical_pathkey(run, eclass, opfamily, cmptype, nulls_first))
+    let Some(eclass) =
+        get_eclass_for_sort_expr(run, expr, &opfamilies, opcintype, collation, sortref, create_it)?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(make_canonical_pathkey(run, eclass, opfamily, cmptype, nulls_first)))
+}
+
+// build_index_pathkeys (pathkeys.c): key columns of an ordered (btree) index;
+// caller runs truncate_useless_pathkeys.
+pub fn build_index_pathkeys<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    index: &types_pathnodes::IndexOptInfo<'mcx>,
+    scandir: types_pathnodes::ScanDirection,
+) -> PgResult<PgVec<'mcx, PathKey>> {
+    let mut retval: PgVec<'mcx, PathKey> = PgVec::new_in(run.mcx);
+    if index.sortopfamily.is_empty() {
+        return Ok(retval);
+    }
+    for i in 0..index.nkeycolumns as usize {
+        let indexkey = *run.root.expr_node(index.indextlist[i]);
+        let indexkey = indexkey.as_target_entry().expect("indextlist holds TargetEntries").expr;
+        let (reverse_sort, nulls_first) = if scandir == types_pathnodes::BackwardScanDirection {
+            (!index.reverse_sort[i], !index.nulls_first[i])
+        } else {
+            (index.reverse_sort[i], index.nulls_first[i])
+        };
+        let cpathkey = make_pathkey_from_sortinfo(
+            run,
+            indexkey,
+            index.sortopfamily[i],
+            index.opcintype[i],
+            index.indexcollations[i],
+            reverse_sort,
+            nulls_first,
+            0,
+            false,
+        )?;
+        match cpathkey {
+            Some(pk) => {
+                if !pathkey_is_redundant(run, pk, &retval) {
+                    retval.push(pk);
+                }
+            }
+            None => {
+                // indexcol_is_bool_constant_for_query: bool equality never
+                // reaches an EC; the continue leg must be loud, not a lost
+                // sort order.
+                const BOOLOID: u32 = 16;
+                assert!(
+                    index.opcintype[i] != BOOLOID,
+                    "indexcol_is_bool_constant_for_query (pathkeys.c): M2 boolean-index lane"
+                );
+                break;
+            }
+        }
+    }
+    Ok(retval)
 }
 
 pub fn make_canonical_pathkey(
@@ -310,7 +368,7 @@ fn pathkey_is_redundant(run: &PlannerRun<'_>, new_pathkey: PathKey, pathkeys: &[
     pathkeys.iter().any(|old| old.pk_eclass == new_pathkey.pk_eclass)
 }
 
-// create_it=true, rel=NULL; jdomain is always the top domain here.
+// rel=NULL; jdomain is always the top domain here.
 fn get_eclass_for_sort_expr<'mcx>(
     run: &mut PlannerRun<'mcx>,
     expr: Node<'mcx>,
@@ -318,7 +376,8 @@ fn get_eclass_for_sort_expr<'mcx>(
     opcintype: u32,
     collation: u32,
     sortref: u32,
-) -> PgResult<EcId> {
+    create_it: bool,
+) -> PgResult<Option<EcId>> {
     let expr = canonicalize_ec_expression(expr, opcintype, collation);
 
     for i in 0..run.root.eq_classes.len() {
@@ -345,9 +404,13 @@ fn get_eclass_for_sort_expr<'mcx>(
             // members always match.
             if opcintype == em.em_datatype && types_nodes::equal(*run.root.expr_node(em.em_expr), expr)
             {
-                return Ok(id);
+                return Ok(Some(id));
             }
         }
+    }
+
+    if !create_it {
+        return Ok(None);
     }
 
     let mcx = run.mcx;
@@ -401,7 +464,7 @@ fn get_eclass_for_sort_expr<'mcx>(
             run.root.rel_mut(rel_id).eclass_indexes = updated;
         }
     }
-    Ok(id)
+    Ok(Some(id))
 }
 
 // canonicalize_ec_expression (equivclass.c): the expr must expose opcintype;
@@ -512,12 +575,12 @@ pub fn update_mergeclause_eclasses(
     let opfamilies =
         crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.rinfo(rinfo).mergeopfamilies);
     let left_ec =
-        get_eclass_for_sort_expr(run, o.args.nth(0), &opfamilies, lefttype, o.inputcollid, 0)?;
+        get_eclass_for_sort_expr(run, o.args.nth(0), &opfamilies, lefttype, o.inputcollid, 0, true)?;
     let right_ec =
-        get_eclass_for_sort_expr(run, o.args.nth(1), &opfamilies, righttype, o.inputcollid, 0)?;
+        get_eclass_for_sort_expr(run, o.args.nth(1), &opfamilies, righttype, o.inputcollid, 0, true)?;
     let r = run.root.rinfo_mut(rinfo);
-    r.left_ec = Some(left_ec);
-    r.right_ec = Some(right_ec);
+    r.left_ec = left_ec;
+    r.right_ec = right_ec;
     Ok(())
 }
 

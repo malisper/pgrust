@@ -247,6 +247,22 @@ pub(crate) fn query_desc_agg_instrument_seam(
     })
 }
 
+/// nsearches for an IndexScan/IndexOnlyScan node (EXPLAIN's Index Searches).
+pub(crate) fn query_desc_index_instrument_seam(
+    h: QueryDescHandle,
+    plan_node_id: i32,
+) -> Option<u64> {
+    with_qd(h, |qd| {
+        let exec = qd.exec.as_ref()?;
+        exec.with(|d| {
+            d.estate
+                .es_index_instrumentation
+                .iter()
+                .find_map(|(id, n)| (*id == plan_node_id).then_some(*n))
+        })
+    })
+}
+
 pub(crate) fn query_desc_sort_instrument_seam(
     h: QueryDescHandle,
     plan_node_id: i32,

@@ -202,14 +202,194 @@ fn mcv_selectivity<'mcx>(
     Ok((mcv_selec, sumcommon))
 }
 
-// get_actual_variable_range (selfuncs.c): the index-backed endpoint probe;
-// with no indexes on the rel C returns false without probing.
-fn get_actual_variable_range(run: &PlannerRun<'_>, vardata: &VariableStatData<'_>) -> bool {
-    let Some(rel) = vardata.rel else { return false };
+// get_actual_variable_range (selfuncs.c). Returns (have_data, min, max);
+// an endpoint is Some only when its probe succeeded (C writes through the
+// out-pointer exactly then). Partitioned rels are loud upstream in plancat.
+fn get_actual_variable_range<'mcx>(
+    run: &PlannerRun<'mcx>,
+    vardata: &VariableStatData<'mcx>,
+    sortop: Oid,
+    collation: Oid,
+    want_min: bool,
+    want_max: bool,
+) -> PgResult<(bool, Option<Datum>, Option<Datum>)> {
+    const BT_LESS: i32 = 1;
+    const BT_GREATER: i32 = 5;
+    let Some(rel) = vardata.rel else { return Ok((false, None, None)) };
     if run.root.rel(rel).indexlist.is_empty() {
-        return false;
+        return Ok((false, None, None));
     }
-    panic!("get_actual_variable_range (selfuncs.c): index-backed range probe; M2 lane");
+    let Some(var_id) = vardata.var else { return Ok((false, None, None)) };
+    let var_node = *run.root.expr_node(var_id);
+
+    let nindexes = run.root.rel(rel).indexlist.len();
+    for i in 0..nindexes {
+        let index = run.root.rel(rel).indexlist[i];
+        if index.sortopfamily.is_empty()
+            || !index.indpred.is_empty()
+            || index.hypothetical
+            || !index.canreturn[0]
+            || collation != index.indexcollations[0]
+            || !crate::indxpath::match_index_to_operand(run, var_node, 0, &index)
+        {
+            continue;
+        }
+        // IndexAmTranslateStrategy, btree arm (non-btree loud in plancat).
+        let indexscandir = match lsyscache::amop::get_op_opfamily_strategy(
+            sortop,
+            index.sortopfamily[0],
+        )? {
+            BT_LESS => {
+                if index.reverse_sort[0] { -1 } else { 1 }
+            }
+            BT_GREATER => {
+                if index.reverse_sort[0] { 1 } else { -1 }
+            }
+            _ => continue,
+        };
+
+        let mcx = run.mcx;
+        let relid = run.root.rel(rel).relid;
+        let reloid = run.rte(relid as usize).relid;
+        let heap_rel = table::table_open(mcx, reloid, types_rel::NoLock)?;
+        let index_rel = indexam::index_open(mcx, index.indexoid, types_rel::NoLock)?;
+        let mut slot = tableam::table_slot_create(mcx, &heap_rel)?;
+        let (typlen, typbyval) = lsyscache::typ::get_typlenbyval(vardata.vartype)?;
+
+        let mut scankey = types_scan::scankey::ScanKeyData::empty();
+        scankey.sk_flags = types_scan::scankey::SK_ISNULL
+            | types_scan::scankey::SK_SEARCHNOTNULL;
+        scankey.sk_attno = 1;
+
+        let mut min = None;
+        let mut max = None;
+        let mut have_data = true;
+        if want_min {
+            min = get_actual_variable_endpoint(
+                run, &heap_rel, &index_rel, indexscandir, &scankey, typlen, typbyval, &mut slot,
+            )?;
+            have_data = min.is_some();
+        }
+        if want_max && have_data {
+            max = get_actual_variable_endpoint(
+                run, &heap_rel, &index_rel, -indexscandir, &scankey, typlen, typbyval, &mut slot,
+            )?;
+            have_data = max.is_some();
+        }
+
+        indexam::index_close(index_rel, types_rel::NoLock)?;
+        heap_rel.close(types_rel::NoLock)?;
+        return Ok((have_data, min, max));
+    }
+    Ok((false, None, None))
+}
+
+// get_actual_variable_endpoint (selfuncs.c): index-only probe under
+// SnapshotNonVacuumable; gives up after VISITED_PAGES_LIMIT dead heap pages.
+#[allow(clippy::too_many_arguments)]
+fn get_actual_variable_endpoint<'mcx>(
+    run: &PlannerRun<'mcx>,
+    heap_rel: &types_rel::Relation<'mcx>,
+    index_rel: &types_rel::Relation<'mcx>,
+    indexscandir: i32,
+    scankey: &types_scan::scankey::ScanKeyData,
+    typlen: i16,
+    typbyval: bool,
+    tableslot: &mut types_slot::SlotData<'mcx>,
+) -> PgResult<Option<Datum>> {
+    const VISITED_PAGES_LIMIT: i32 = 100;
+    let mcx = run.mcx;
+    let mut snapshot = types_snapshot::SnapshotData::sentinel(
+        mcx,
+        types_snapshot::SnapshotType::SNAPSHOT_NON_VACUUMABLE,
+    );
+    snapshot.vistest = procarray_seams::global_vis_test_for::call(heap_rel);
+    let mut scan =
+        indexam::index_beginscan(mcx, heap_rel, index_rel, std::rc::Rc::new(snapshot), 1, 0)?;
+    scan.xs_want_itup = true;
+    let keys = [scankey.clone()];
+    indexam::index_rescan(&mut scan, Some(&keys), None)?;
+
+    let dir = match indexscandir {
+        -1 => types_scan::sdir::ScanDirection::BackwardScanDirection,
+        1 => types_scan::sdir::ScanDirection::ForwardScanDirection,
+        other => panic!("invalid index scan direction {other}"),
+    };
+    let mut vmbuffer = visibilitymap::VmBuffer::new();
+    let mut last_heap_block = None;
+    let mut n_visited_heap_pages = 0;
+    let mut result = None;
+    while let Some(tid) = indexam::index_getnext_tid(&mut scan, dir)? {
+        let block = types_tuple::itemptr::ItemPointerGetBlockNumber(&tid);
+        if !visibilitymap::vm_all_visible(heap_rel, block, &mut vmbuffer)? {
+            if !indexam::index_fetch_heap(mcx, &mut scan, tableslot)? {
+                if last_heap_block != Some(block) {
+                    last_heap_block = Some(block);
+                    n_visited_heap_pages += 1;
+                    if n_visited_heap_pages > VISITED_PAGES_LIMIT {
+                        break;
+                    }
+                }
+                continue;
+            }
+            exectuples::exec_clear_tuple(tableslot, mcx);
+        }
+        let Some(itup) = scan.xs_itup else {
+            panic!("no data returned for index-only scan");
+        };
+        if scan.xs_recheck {
+            break;
+        }
+        let itupdesc =
+            scan.xs_itupdesc.as_deref().expect("amgettuple published xs_itup without xs_itupdesc");
+        let mut isnull = false;
+        // SAFETY: xs_itup points at the AM's page-copy buffer, live until the
+        // next amgettuple/amendscan on this descriptor.
+        let value =
+            unsafe { nbtree::itup::index_getattr(itup.as_ptr(), 1, itupdesc, &mut isnull) };
+        assert!(!isnull, "found unexpected null value in index");
+        result = Some(endpoint_datum_copy(mcx, value, typbyval, typlen)?);
+        break;
+    }
+    indexam::index_endscan(scan)?;
+    Ok(result)
+}
+
+// datumCopy (datum.c): the probed value points into the AM's page buffer and
+// must outlive the scan; toast pointers cannot appear in an index key image.
+fn endpoint_datum_copy<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    value: Datum,
+    typbyval: bool,
+    typlen: i16,
+) -> PgResult<Datum> {
+    if typbyval {
+        return Ok(value);
+    }
+    let p = value.as_usize() as *const u8;
+    assert!(!p.is_null());
+    let size = match typlen {
+        -1 => {
+            // SAFETY: non-null by-ref varlena datum.
+            unsafe { datum::VarlenaRef::from_ptr(p).varsize() }
+        }
+        -2 => {
+            let mut n = 0usize;
+            // SAFETY: non-null NUL-terminated cstring datum.
+            while unsafe { *p.add(n) } != 0 {
+                n += 1;
+            }
+            n + 1
+        }
+        l => {
+            debug_assert!(l > 0);
+            l as usize
+        }
+    };
+    // SAFETY: `size` bytes readable per the arms above.
+    let src = unsafe { core::slice::from_raw_parts(p, size) };
+    let out = mcx::slice_in(mcx, src)?;
+    Ok(Datum::from_usize(out.leak().as_ptr() as usize))
 }
 
 // ineq_histogram_selectivity (selfuncs.c); -1 means no usable histogram.
@@ -234,20 +414,44 @@ fn ineq_histogram_selectivity<'mcx>(
         && sslot.stacoll == collation
         && lsyscache::comparison_ops_are_compatible(sslot.staop, opoid)?
     {
-        let have_end = if nvalues == 2 {
-            get_actual_variable_range(run, vardata)
-        } else {
-            false
-        };
+        // C overwrites sslot.values[0]/[nvalues-1] in place with the probed
+        // actual endpoints; the overrides model that without mutating the
+        // cached stats bundle.
+        let mut min_override: Option<Datum> = None;
+        let mut max_override: Option<Datum> = None;
+        let mut have_end = false;
+        if nvalues == 2 {
+            let (ok, min, max) =
+                get_actual_variable_range(run, vardata, sslot.staop, collation, true, true)?;
+            have_end = ok;
+            min_override = min;
+            max_override = max;
+        }
         let mut lobound = 0i32;
         let mut hibound = nvalues;
         while lobound < hibound {
             let probe = (lobound + hibound) / 2;
-            if (probe == 0 || probe == nvalues - 1) && nvalues > 2 {
-                // Endpoint replacement rides get_actual_variable_range.
-                let _ = get_actual_variable_range(run, vardata);
+            if probe == 0 && nvalues > 2 {
+                let (ok, min, _) = get_actual_variable_range(
+                    run, vardata, sslot.staop, collation, true, false,
+                )?;
+                have_end = ok;
+                min_override = min;
+            } else if probe == nvalues - 1 && nvalues > 2 {
+                let (ok, _, max) = get_actual_variable_range(
+                    run, vardata, sslot.staop, collation, false, true,
+                )?;
+                have_end = ok;
+                max_override = max;
             }
-            let mut ltcmp = op_test(opproc, collation, sslot.values()?[probe as usize], constval, true)?;
+            let probe_val = if probe == 0 && min_override.is_some() {
+                min_override.unwrap()
+            } else if probe == nvalues - 1 && max_override.is_some() {
+                max_override.unwrap()
+            } else {
+                sslot.values()?[probe as usize]
+            };
+            let mut ltcmp = op_test(opproc, collation, probe_val, constval, true)?;
             if isgt {
                 ltcmp = !ltcmp;
             }
@@ -276,10 +480,19 @@ fn ineq_histogram_selectivity<'mcx>(
                 }
             }
 
+            let hist_val = |idx: i32| -> PgResult<Datum> {
+                if idx == 0 && min_override.is_some() {
+                    Ok(min_override.unwrap())
+                } else if idx == nvalues - 1 && max_override.is_some() {
+                    Ok(max_override.unwrap())
+                } else {
+                    Ok(sslot.values()?[idx as usize])
+                }
+            };
             let binfrac = match (
                 convert_numeric_to_scalar(constval, consttype),
-                convert_numeric_to_scalar(sslot.values()?[i as usize - 1], vardata.vartype),
-                convert_numeric_to_scalar(sslot.values()?[i as usize], vardata.vartype),
+                convert_numeric_to_scalar(hist_val(i - 1)?, vardata.vartype),
+                convert_numeric_to_scalar(hist_val(i)?, vardata.vartype),
             ) {
                 (Some(val), Some(low), Some(high)) => {
                     if high <= low {

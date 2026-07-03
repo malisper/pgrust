@@ -158,6 +158,26 @@ pub fn get_relation_info<'mcx>(
                 info.nulls_first.push(opt & INDOPTION_NULLS_FIRST != 0);
             }
 
+            // build_index_tlist (plancat.c): simple columns only (expression
+            // columns panicked above); system attrs are unreachable in an
+            // index key.
+            for i in 0..ncolumns as usize {
+                let indexkey = info.indexkeys[i];
+                assert!(indexkey > 0, "build_index_tlist: system-attribute index key");
+                let att = relation.rd_att.attrs[indexkey as usize - 1];
+                let var = types_nodes::Node::mk_var(
+                    mcx,
+                    varno as i32,
+                    indexkey as i16,
+                    att.atttypid,
+                    att.atttypmod,
+                    att.attcollation,
+                    0,
+                )?;
+                let tle =
+                    types_nodes::Node::mk_target_entry(mcx, var, (i + 1) as i16, None, false)?;
+                info.indextlist.push(run.intern_expr(tle));
+            }
 
             info.indrestrictinfo = RefCell::new(PgVec::new_in(mcx));
             info.predOK = Cell::new(false);

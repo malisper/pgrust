@@ -307,37 +307,36 @@ fn build_index_paths<'mcx>(
 
     let loop_count = 1.0;
 
-    // build_index_pathkeys is unported: an index whose leading column could
-    // satisfy query_pathkeys must be loud, not a silently lost plan.
-    if !run.root.query_pathkeys.is_empty() && !index.sortopfamily.is_empty() {
-        let leading_attno = index.indexkeys[0];
-        for pk in run.root.query_pathkeys.iter() {
-            let ec = pk.pk_eclass.expect("canonical pathkey has an eclass");
-            for &em_id in run.root.ec(ec).ec_members.iter() {
-                let em = run.root.em(em_id);
-                let node = *run.root.expr_node(em.em_expr);
-                if let Some(var) = node.as_var() {
-                    if var.varno as u32 == run.root.rel(rel).relid
-                        && var.varattno as i32 == leading_attno
-                    {
-                        panic!(
-                            "build_index_pathkeys (pathkeys.c): index-provided ordering; \
-                             M2 index-order lane"
-                        );
-                    }
-                }
-            }
-        }
-    }
-    let useful_pathkeys: PgVec<'mcx, types_pathnodes::PathKey> = PgVec::new_in(mcx);
+    // has_useful_pathkeys (allpaths.c); amcanorderbyop is false for btree so
+    // the match_pathkeys_to_index arm is dead.
+    let pathkeys_possibly_useful = !run.root.rel(rel).joininfo.is_empty()
+        || run.root.rel(rel).has_eclass_joins
+        || !run.root.query_pathkeys.is_empty();
+    let index_is_ordered = !index.sortopfamily.is_empty();
+    let useful_pathkeys: PgVec<'mcx, types_pathnodes::PathKey> =
+        if index_is_ordered && pathkeys_possibly_useful {
+            let index_pathkeys = crate::pathkeys::build_index_pathkeys(
+                run,
+                index,
+                types_pathnodes::ForwardScanDirection,
+            )?;
+            crate::pathkeys::truncate_useless_pathkeys(run, rel, &index_pathkeys)?
+        } else {
+            PgVec::new_in(mcx)
+        };
 
     let index_only_scan = check_index_only(run, rel, index);
 
-    if !index_clauses.is_empty() || index_only_scan {
+    if !index_clauses.is_empty() || !useful_pathkeys.is_empty() || index_only_scan {
+        let forward_clauses = {
+            let mut v: PgVec<'mcx, IndexClause<'mcx>> = PgVec::new_in(mcx);
+            v.extend(index_clauses.iter().cloned());
+            v
+        };
         let ipath = crate::pathnode::create_index_path(
             run,
             index,
-            index_clauses,
+            forward_clauses,
             useful_pathkeys,
             types_pathnodes::ForwardScanDirection,
             index_only_scan,
@@ -346,6 +345,28 @@ fn build_index_paths<'mcx>(
         result.push(ipath);
         // Parallel index scan (partial paths): M3 lane.
         debug_assert!(run.root.rel(rel).partial_pathlist.is_empty());
+    }
+
+    if index_is_ordered && pathkeys_possibly_useful {
+        let index_pathkeys = crate::pathkeys::build_index_pathkeys(
+            run,
+            index,
+            types_pathnodes::BackwardScanDirection,
+        )?;
+        let useful_pathkeys =
+            crate::pathkeys::truncate_useless_pathkeys(run, rel, &index_pathkeys)?;
+        if !useful_pathkeys.is_empty() {
+            let ipath = crate::pathnode::create_index_path(
+                run,
+                index,
+                index_clauses,
+                useful_pathkeys,
+                types_pathnodes::BackwardScanDirection,
+                index_only_scan,
+                loop_count,
+            )?;
+            result.push(ipath);
+        }
     }
 
     Ok(result)
