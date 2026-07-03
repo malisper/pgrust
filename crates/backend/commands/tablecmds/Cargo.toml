@@ -79,9 +79,3 @@ commands_cluster = { path = "../cluster" }
 relation_seams = { path = "../../access/common/relation_seams" }
 procarray = { path = "../../storage/ipc/procarray" }
 multixact = { path = "../../access/transam/multixact" }
-
-indexcmds_seams = { path = "../indexcmds_seams" }
-partcache = { path = "../../utils/cache/partcache" }
-partbounds = { path = "../../partitioning/partbounds" }
-partdesc = { path = "../../partitioning/partdesc" }
-pg_inherits = { path = "../../catalog/pg_inherits" }

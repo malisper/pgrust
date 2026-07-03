@@ -36,7 +36,6 @@ adt_mac8 = { path = "../../adt/mac8" }
 adt_pg_lsn = { path = "../../adt/pg_lsn" }
 dbsize = { path = "../../adt/dbsize" }
 adt_uuid = { path = "../../adt/uuid" }
-adt_varbit = { path = "../../adt/varbit" }
 adt_network = { path = "../../adt/network" }
 adt_rangetypes = { path = "../../adt/rangetypes" }
 adt_multirangetypes = { path = "../../adt/multirangetypes" }
@@ -47,7 +46,6 @@ adt_oracle_compat = { path = "../../adt/oracle_compat" }
 adt_pseudotypes = { path = "../../adt/pseudotypes" }
 adt_quote = { path = "../../adt/quote" }
 adt_varchar = { path = "../../adt/varchar" }
-pgstatfuncs = { path = "../../adt/pgstatfuncs" }
 name = { path = "../../adt/name" }
 nbt_compare = { path = "../../../access/nbtree/compare" }
 varlena = { path = "../../adt/varlena" }

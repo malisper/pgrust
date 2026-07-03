@@ -75,7 +75,6 @@ fn install_fakes() {
                         relkind: b'r' as i8,
                         relpersistence: b'p' as i8,
                         relispartition: false,
-                        relhassubclass: false,
                     }
                 })
             }))

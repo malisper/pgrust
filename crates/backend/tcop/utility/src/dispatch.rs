@@ -22,6 +22,9 @@ use crate::consts::{
 };
 use crate::handler_gap;
 
+// pg_authid.dat oid 4544.
+const ROLE_PG_CHECKPOINT: ::types_core::Oid = 4544;
+
 #[inline]
 fn set_query_completion(qc: &mut Option<&mut QueryCompletion>, tag: types_core::CommandTag) {
     if let Some(qc) = qc.as_mut() {
@@ -375,7 +378,12 @@ fn dispatch_switch<'mcx>(
             }
         }
 
-        T_LoadStmt => handler_gap("load_file (dfmgr lane)"),
+        // load_file: no dynamic loader exists; every linked library is
+        // "already loaded", which C treats as silent success. A filename that
+        // C would dlopen diverges (notes/divergences).
+        T_LoadStmt => {
+            let _ = parsetree.as_load_stmt().expect("LoadStmt");
+        }
         T_CallStmt => handler_gap("ExecuteCallStmt (functioncmds lane)"),
         T_ClusterStmt => {
             let stmt = parsetree
@@ -433,13 +441,35 @@ fn dispatch_switch<'mcx>(
 
         T_LockStmt => {
             xact::RequireTransactionBlock(is_top_level, "LOCK TABLE")?;
-            handler_gap("LockTableCommand (lockcmds lane)")
+            let stmt = parsetree.as_lock_stmt().unwrap();
+            lockcmds::LockTableCommand(mcx, stmt)?;
         }
         T_ConstraintsSetStmt => {
             xact::WarnNoTransactionBlock(is_top_level, "SET CONSTRAINTS")?;
             handler_gap("AfterTriggerSetState (trigger lane)")
         }
-        T_CheckPointStmt => handler_gap("RequestCheckpoint (checkpointer lane)"),
+        T_CheckPointStmt => {
+            if !acl_seams::has_privs_of_role::call(
+                miscinit::GetUserId(),
+                ROLE_PG_CHECKPOINT,
+            )? {
+                return Err(::elog::ereport(types_error::ERROR)
+                    .errcode(types_error::ERRCODE_INSUFFICIENT_PRIVILEGE)
+                    .errmsg("permission denied to execute CHECKPOINT command")
+                    .errdetail(
+                        "Only roles with privileges of the \"pg_checkpoint\" role may \
+                         execute this command."
+                            .to_string(),
+                    )
+                    .into_error()
+                    .into());
+            }
+            let force =
+                if transam_xlog::RecoveryInProgress() { 0 } else { transam_xlog::CHECKPOINT_FORCE };
+            checkpointer_seams::request_checkpoint::call(
+                transam_xlog::CHECKPOINT_IMMEDIATE | transam_xlog::CHECKPOINT_WAIT | force,
+            )?;
+        }
 
         T_DropStmt => {
             use types_nodes::parsenodes::ObjectType::*;
@@ -497,45 +527,6 @@ fn dispatch_switch<'mcx>(
                 >(stmt)
             };
             functioncmds::CreateFunction(mcx, stmt)?;
-        }
-
-        T_CreateStatsStmt => {
-            // Retention contract as unify_stmt_lifetime: the statement arena
-            // outlives the utility call; nothing derived escapes it.
-            let stmt_node =
-                unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
-            let stmt = stmt_node
-                .as_variant::<types_nodes::rawnodes::CreateStatsStmt>()
-                .expect("CreateStatsStmt");
-            if let Some(first) = stmt.relations.iter().next() {
-                let Some(rv_node) = first.as_range_var() else {
-                    return Err(Box::new(
-                        types_error::PgError::new(
-                            types_error::ERROR,
-                            "CREATE STATISTICS only supports relation names in the FROM clause"
-                                .to_string(),
-                        )
-                        .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
-                    ));
-                };
-                let rv = rel_vocab::RangeVar {
-                    catalogname: rv_node.catalogname,
-                    schemaname: rv_node.schemaname,
-                    relname: rv_node.relname.expect("CreateStatsStmt relation without relname"),
-                    inh: rv_node.inh,
-                    relpersistence: rv_node.relpersistence,
-                    location: rv_node.location,
-                };
-                catalog_namespace::RangeVarGetRelidExtended(
-                    &rv,
-                    types_rel::ShareUpdateExclusiveLock,
-                    0,
-                    None,
-                )?;
-            }
-            // transformStatsStmt is a no-op for plain column references; the
-            // expression lane panics inside CreateStatistics.
-            statscmds::CreateStatistics(mcx, stmt)?;
         }
 
         T_IndexStmt => {

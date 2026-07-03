@@ -95,8 +95,6 @@ pub fn DefineIndex<'mcx>(
             Some("btree") => (BTREE_AM_OID, "btree", true, true, true),
             Some("hash") => (catalog_index::HASH_AM_OID, "hash", false, false, false),
             Some("gin") => (catalog_index::GIN_AM_OID, "gin", false, false, true),
-            Some("gist") => (catalog_index::GIST_AM_OID, "gist", false, false, true),
-            Some("brin") => (types_core::BRIN_AM_OID, "brin", false, false, true),
             other => unported(&format!("DefineIndex: access method {other:?} (AMNAME lookup)")),
         };
     if stmt.unique && !amcanunique {
@@ -190,7 +188,6 @@ pub fn DefineIndex<'mcx>(
 
     let mut indexInfo = IndexInfo {
         ii_NumIndexAttrs: numberOfAttributes as i32,
-        ii_AmCache: None,
         ii_NumIndexKeyAttrs: numberOfKeyAttributes as i32,
         ii_IndexAttrNumbers: [0; INDEX_MAX_KEYS as usize],
         ii_Unique: stmt.unique,

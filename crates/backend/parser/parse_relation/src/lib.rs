@@ -1429,103 +1429,10 @@ pub fn expandRTE<'mcx>(
             location,
             include_dropped,
         ),
-        RTEKind::RTE_FUNCTION => expandFunction(
-            mcx,
-            rte,
-            rtindex,
-            sublevels_up,
-            returning_type,
-            location,
-            include_dropped,
-        ),
         other => panic!(
             "expandRTE (parse_relation.c): arm for {other:?} unported — \
              unit backend-parser-relation"
         ),
-    }
-}
-
-fn expandFunction<'mcx>(
-    mcx: Mcx<'mcx>,
-    rte: &RangeTblEntry<'mcx>,
-    rtindex: i32,
-    sublevels_up: i32,
-    returning_type: VarReturningType,
-    location: ParseLoc,
-    include_dropped: bool,
-) -> PgResult<(NodeList<'mcx>, NodeList<'mcx>)> {
-    if rte.funcordinality || rte.functions.len() != 1 {
-        panic!(
-            "expandRTE (parse_relation.c): ORDINALITY / multiple functions \
-             unported — unit backend-parser-relation"
-        );
-    }
-    let rtfunc = rte
-        .functions
-        .nth(0)
-        .as_range_tbl_function()
-        .expect("functions cell is RangeTblFunction");
-    if !rtfunc.funccolnames.is_nil() {
-        panic!(
-            "expandRTE (parse_relation.c): coldeflist (RECORD-returning) arm \
-             unported — coldeflist lane"
-        );
-    }
-    let eref = rte.eref.expect("function RTE has eref");
-    let funcexpr = rtfunc.funcexpr.expect("RangeTblFunction has funcexpr");
-    let resolved = funcapi::get_expr_result_type(mcx, Some(funcexpr))?;
-    match resolved.class {
-        funcapi::TypeFuncClass::Composite | funcapi::TypeFuncClass::CompositeDomain => {
-            let tupdesc = resolved.result_tuple_desc.expect("composite result carries a tupdesc");
-            debug_assert_eq!(rtfunc.funccolcount, tupdesc.natts);
-            expandTupleDesc(
-                mcx,
-                &tupdesc,
-                eref,
-                rtfunc.funccolcount as usize,
-                0,
-                rtindex,
-                sublevels_up,
-                returning_type,
-                location,
-                include_dropped,
-            )
-        }
-        funcapi::TypeFuncClass::Scalar => {
-            // exprTypmod/exprCollation of the grammar-guaranteed FuncExpr:
-            // no FuncExpr arm in exprTypmod (-1); collation is funccollid.
-            let (typmod, collation) = match funcexpr.as_func_expr() {
-                Some(fe) => (-1, fe.funccollid),
-                None => panic!(
-                    "expandRTE (parse_relation.c): non-FuncExpr scalar function \
-                     item (planner-folded expr) unported"
-                ),
-            };
-            let mut colnames = NodeList::nil();
-            let mut colvars = NodeList::nil();
-            colnames.lappend(mcx, eref.colnames.nth(0))?;
-            colvars.lappend(
-                mcx,
-                Node::mk(
-                    mcx,
-                    Var {
-                        varno: rtindex,
-                        varattno: 1,
-                        vartype: resolved.result_type_id,
-                        vartypmod: typmod,
-                        varcollid: collation,
-                        varnullingrels: types_nodes::Bitmapset::empty(),
-                        varlevelsup: sublevels_up as Index,
-                        varreturningtype: returning_type,
-                        varnosyn: rtindex as Index,
-                        varattnosyn: 1,
-                        location,
-                    },
-                )?,
-            )?;
-            Ok((colnames, colvars))
-        }
-        other => panic!("expandRTE: function in FROM has unsupported return type ({other:?})"),
     }
 }
 

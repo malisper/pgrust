@@ -65,11 +65,6 @@ pub struct ModifyTableState<'mcx> {
     // ri_GeneratedExprsI/U collapsed to one set: the UPDATE updatedCols skip
     // is perf-only (values are immutable functions of non-generated columns).
     generated_exprs: Option<mcx::PgVec<'mcx, GeneratedExpr<'mcx>>>,
-    // Partitioned-target INSERT routing (execPartition.c); per-leaf insert
-    // state is indexed by the router's leaf index.
-    router: Option<execpartition::PartitionTupleRouting<'mcx>>,
-    leaf_indexes: Vec<Option<execindexing::ResultRelIndexState<'mcx>>>,
-    leaf_checks: Vec<Option<mcx::PgVec<'mcx, CheckExpr<'mcx>>>>,
 }
 
 struct GeneratedExpr<'mcx> {
@@ -135,7 +130,7 @@ pub fn exec_init_modify_table<'mcx>(
         let rel = estate.es_relations[(rti - 1) as usize]
             .as_ref()
             .expect("result relation opened");
-        check_valid_result_rel(rel, node.operation);
+        check_valid_result_rel(rel);
         if rel.rd_hastriggers {
             let td = relcache::RelationGetTriggerDesc(rel.rd_id)?;
             if let Some(td) = &td {
@@ -302,9 +297,6 @@ pub fn exec_init_modify_table<'mcx>(
         check_exprs: None,
         trigdesc,
         generated_exprs: None,
-        router: None,
-        leaf_indexes: Vec::new(),
-        leaf_checks: Vec::new(),
     })
 }
 
@@ -321,27 +313,15 @@ fn exec_find_junk_attribute_in_tlist(tlist: &types_nodes::NodeList<'_>, attr_nam
 }
 
 // CheckValidResultRel (execMain.c), plain-table arm.
-fn check_valid_result_rel(rel: &Relation<'_>, operation: CmdType) {
-    if rel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_TABLE {
-        if operation != CmdType::CMD_INSERT {
-            panic!(
-                "ExecInitModifyTable: {operation:?} on a partitioned table                  (inherited result relations) not ported"
-            );
-        }
-        return;
-    }
+fn check_valid_result_rel(rel: &Relation<'_>) {
     if rel.rd_rel.relkind != RELKIND_RELATION {
         panic!(
             "CheckValidResultRel (execMain.c): relkind '{}' result relation not ported",
             rel.rd_rel.relkind as char
         );
     }
-    if rel.rd_rel.relispartition
-        && matches!(operation, CmdType::CMD_INSERT | CmdType::CMD_UPDATE)
-    {
-        panic!(
-            "ExecPartitionCheck (execPartition.c): direct {operation:?} into a              partition not ported (route via the parent)"
-        );
+    if rel.rd_rel.relispartition {
+        panic!("CheckValidResultRel (execMain.c): partition routing not ported");
     }
 }
 
@@ -435,16 +415,6 @@ pub fn exec_end_modify_table(mt: &mut ModifyTableState<'_>) {
     mt.check_exprs = None;
     mt.trigdesc = None;
     mt.generated_exprs = None;
-    // ExecCleanupTupleRouting: close routed leaves (Relation Drop = NoLock
-    // close, lock kept to commit as C) and their per-leaf insert state.
-    for idx in mt.leaf_indexes.iter_mut() {
-        if let Some(indexes) = idx.take() {
-            execindexing::ExecCloseIndices(indexes).expect("ExecCloseIndices");
-        }
-    }
-    mt.leaf_indexes.clear();
-    mt.leaf_checks.clear();
-    mt.router = None;
 }
 
 // ExecInitInsertProjection (nodeModifyTable.c). INSERT subplans carry no junk
@@ -1136,57 +1106,12 @@ fn exec_insert<'mcx>(
     let output_cid = estate.es_output_cid;
     let onconflict = mt.plan.onConflictAction;
 
-    // ExecPrepareTupleRouting: partitioned targets route to a leaf; slots are
-    // shared unconverted (attno-remapped children are loud in the router).
-    let leaf_idx = {
-        let EStateData { es_relations, es_tupleTable, .. } = &mut *estate;
-        let target = es_relations[(mt.result_rti - 1) as usize]
-            .as_ref()
-            .expect("result relation opened");
-        if target.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_TABLE {
-            if onconflict != 0 {
-                panic!("ExecInsert: ON CONFLICT on a partitioned table not ported");
-            }
-            let slot = &mut es_tupleTable[slot_id.0 as usize];
-            let router = match mt.router.as_mut() {
-                Some(r) => r,
-                None => {
-                    mt.router =
-                        Some(execpartition::PartitionTupleRouting::new(mcx, target)?);
-                    mt.router.as_mut().unwrap()
-                }
-            };
-            let idx = router.find_partition(slot)?;
-            while mt.leaf_indexes.len() <= idx {
-                mt.leaf_indexes.push(None);
-                mt.leaf_checks.push(None);
-            }
-            Some(idx)
-        } else {
-            None
-        }
-    };
-
     {
         let EStateData { es_relations, es_tupleTable, .. } = &mut *estate;
+        let rel = es_relations[(mt.result_rti - 1) as usize]
+            .as_ref()
+            .expect("result relation opened");
         let slot = &mut es_tupleTable[slot_id.0 as usize];
-        let (rel, indexes, check_exprs) = match leaf_idx {
-            Some(idx) => (
-                mt.router.as_ref().unwrap().leaf_rel(idx),
-                &mut mt.leaf_indexes[idx],
-                &mut mt.leaf_checks[idx],
-            ),
-            None => (
-                es_relations[(mt.result_rti - 1) as usize]
-                    .as_ref()
-                    .expect("result relation opened"),
-                &mut mt.indexes,
-                &mut mt.check_exprs,
-            ),
-        };
-        if leaf_idx.is_some() && rel.rd_hastriggers {
-            panic!("ExecInsert: row triggers on a routed-into partition not ported");
-        }
 
         slot.base_mut().tts_tableOid = rel.rd_id;
         if rel.rd_att.constr.as_deref().is_some_and(|c| c.has_generated_stored) {
@@ -1195,11 +1120,11 @@ fn exec_insert<'mcx>(
         exectuples::exec_materialize_slot(slot, mcx)?;
         slot.base_mut().tts_tableOid = rel.rd_id;
 
-        if rel.rd_rel.relhasindex && indexes.is_none() {
-            *indexes = Some(execindexing::ExecOpenIndices(mcx, rel, onconflict != 0)?);
+        if rel.rd_rel.relhasindex && mt.indexes.is_none() {
+            mt.indexes = Some(execindexing::ExecOpenIndices(mcx, rel, onconflict != 0)?);
         }
 
-        exec_constraints(mcx, check_exprs, rel, slot)?;
+        exec_constraints(mcx, &mut mt.check_exprs, rel, slot)?;
     }
 
     let num_indices = mt.indexes.as_ref().map_or(0, |x| x.num_indices());
@@ -1289,23 +1214,14 @@ fn exec_insert<'mcx>(
         }
     } else {
         let EStateData { es_relations, es_tupleTable, .. } = &mut *estate;
+        let rel = es_relations[(mt.result_rti - 1) as usize]
+            .as_ref()
+            .expect("result relation opened");
         let slot = &mut es_tupleTable[slot_id.0 as usize];
-        let (rel, indexes) = match leaf_idx {
-            Some(idx) => (
-                mt.router.as_ref().unwrap().leaf_rel(idx),
-                &mut mt.leaf_indexes[idx],
-            ),
-            None => (
-                es_relations[(mt.result_rti - 1) as usize]
-                    .as_ref()
-                    .expect("result relation opened"),
-                &mut mt.indexes,
-            ),
-        };
 
         tableam::table_tuple_insert(mcx, rel, slot, output_cid, 0, None)?;
 
-        if let Some(indexes) = indexes.as_mut() {
+        if let Some(indexes) = mt.indexes.as_mut() {
             if indexes.num_indices() > 0 {
                 execindexing::ExecInsertIndexTuples(mcx, indexes, rel, slot, false, None, &[])?;
             }
@@ -1898,8 +1814,7 @@ fn plan_output_mismatch(detail: &'static str) -> Box<PgError> {
 mcx::forget_safe_nodrop!(NewColSrc);
 
 // Exempt: indexes/snapshot_any/project_returning/on_conflict/check_exprs/
-// trigdesc/generated_exprs/router/leaf_indexes/leaf_checks (and each
-// CheckExpr's/GeneratedExpr's state) are
+// trigdesc/generated_exprs (and each CheckExpr's/GeneratedExpr's state) are
 // released in exec_end_modify_table; CmdType is no-drop, const-proven below.
 const _: () = assert!(!core::mem::needs_drop::<CmdType>());
 mcx::forget_safe_struct!(
@@ -1909,5 +1824,5 @@ mcx::forget_safe_struct!(
         ri_newTupleSlot, ri_oldTupleSlot, ri_ReturningSlot,
         ri_projectNewInfoValid, ri_RowIdAttNo, update_cols, returning_slot;
         operation, indexes, snapshot_any, project_returning, on_conflict,
-        check_exprs, trigdesc, generated_exprs, router, leaf_indexes, leaf_checks },
+        check_exprs, trigdesc, generated_exprs },
 );

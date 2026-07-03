@@ -13,7 +13,9 @@ use types_core::{
 use types_error::PgResult;
 use types_storage::{RelFileLocator, RelFileLocatorBackend};
 
-pub use storage_xlog::{smgr_redo, XLOG_SMGR_CREATE, XLOG_SMGR_TRUNCATE};
+pub use storage_xlog::{
+    smgr_redo, SMGR_TRUNCATE_ALL, XLOG_SMGR_CREATE, XLOG_SMGR_TRUNCATE,
+};
 const RM_SMGR_ID: u8 = 2;
 const XLR_SPECIAL_REL_UPDATE: u8 = 0x01;
 
@@ -32,8 +34,7 @@ struct PendingRelDelete {
 #[derive(Clone, Copy)]
 struct PendingRelSync {
     rlocator: RelFileLocator,
-    // Set by the unported RelationTruncate/RelationPreTruncate arm; a
-    // truncated relation must always take the fsync path (storage.c).
+    // A truncated relation must always take the fsync path (storage.c).
     is_truncated: bool,
 }
 
@@ -93,6 +94,102 @@ pub fn RelationCreateStorage(
     }
 
     Ok(key)
+}
+
+pub fn RelationTruncate(rel: &types_rel::RelationData<'_>, nblocks: BlockNumber) -> PgResult<()> {
+    use std::sync::atomic::Ordering::Relaxed;
+    use types_storage::{DELAY_CHKPT_COMPLETE, DELAY_CHKPT_START};
+
+    let key = RelFileLocatorBackend { locator: rel.rd_locator.get(), backend: rel.rd_backend };
+    smgr::smgropen(key.locator, key.backend)?;
+    smgr::smgrsettargblock(key, InvalidBlockNumber);
+    for fork_i in 0..=MAX_FORKNUM as i32 {
+        let fork = ForkNumber::from_i32(fork_i).unwrap();
+        smgr::smgr_set_cached_nblocks(key, fork, InvalidBlockNumber)?;
+    }
+
+    const NF: usize = MAX_FORKNUM as usize;
+    let mut forks = [ForkNumber::MAIN_FORKNUM; NF];
+    let mut old_blocks = [InvalidBlockNumber; NF];
+    let mut blocks = [InvalidBlockNumber; NF];
+    old_blocks[0] = smgr::smgrnblocks(key, ForkNumber::MAIN_FORKNUM)?;
+    blocks[0] = nblocks;
+    let mut nforks = 1;
+
+    if smgr::smgrexists(key, ForkNumber::FSM_FORKNUM)? {
+        // Loud: FSM prepare-truncate (and the FreeSpaceMapVacuumRange that
+        // follows a live FSM truncation) is unported.
+        freespace::FreeSpaceMapPrepareTruncateRel(rel, nblocks);
+    }
+    if smgr::smgrexists(key, ForkNumber::VISIBILITYMAP_FORKNUM)? {
+        let b = visibilitymap::visibilitymap_prepare_truncate(rel, nblocks)?;
+        if b != InvalidBlockNumber {
+            forks[nforks] = ForkNumber::VISIBILITYMAP_FORKNUM;
+            old_blocks[nforks] = smgr::smgrnblocks(key, ForkNumber::VISIBILITYMAP_FORKNUM)?;
+            blocks[nforks] = b;
+            nforks += 1;
+        }
+    }
+
+    RelationPreTruncate(rel);
+
+    // DELAY_CHKPT_COMPLETE: truncated-on-disk must precede the checkpoint
+    // record; DELAY_CHKPT_START: the smgrtruncate sync request must be
+    // processed before the checkpoint completes (storage.c).
+    let proc = lmgr_proc::GetPGProcByNumber(lmgr_proc::MyProc().expect("MyProc is not set"));
+    debug_assert_eq!(
+        proc.delayChkptFlags.load(Relaxed) & (DELAY_CHKPT_START | DELAY_CHKPT_COMPLETE),
+        0
+    );
+    proc.delayChkptFlags.fetch_or(DELAY_CHKPT_START | DELAY_CHKPT_COMPLETE, Relaxed);
+
+    init_small::globals::StartCriticalSection();
+    if relation_needs_wal(rel) {
+        let lsn = log_smgrtruncate(&key.locator, nblocks)?;
+        transam_xlog::XLogFlush(lsn)?;
+    }
+    smgr::smgrtruncate(key, &forks[..nforks], &old_blocks[..nforks], &blocks[..nforks])?;
+    init_small::globals::EndCriticalSection();
+
+    proc.delayChkptFlags.fetch_and(!(DELAY_CHKPT_START | DELAY_CHKPT_COMPLETE), Relaxed);
+    Ok(())
+}
+
+fn RelationPreTruncate(rel: &types_rel::RelationData<'_>) {
+    let locator = rel.rd_locator.get();
+    PENDING_SYNCS.with_borrow_mut(|p| {
+        if let Some(s) = p.iter_mut().find(|s| s.rlocator == locator) {
+            s.is_truncated = true;
+        }
+    });
+}
+
+// RelationNeedsWAL (rel.h).
+fn relation_needs_wal(rel: &types_rel::RelationData<'_>) -> bool {
+    rel.rd_rel.relpersistence == RELPERSISTENCE_PERMANENT
+        && (transam_xlog::XLogIsNeeded()
+            || (rel.rd_createSubid.get() == types_core::InvalidSubTransactionId
+                && rel.rd_firstRelfilelocatorSubid.get() == types_core::InvalidSubTransactionId))
+}
+
+fn log_smgrtruncate(
+    rlocator: &RelFileLocator,
+    blkno: BlockNumber,
+) -> PgResult<types_core::XLogRecPtr> {
+    // xl_smgr_truncate image: blkno + RelFileLocator + flags.
+    let mut xlrec = [0u8; 20];
+    xlrec[0..4].copy_from_slice(&blkno.to_ne_bytes());
+    xlrec[4..8].copy_from_slice(&rlocator.spcOid.to_ne_bytes());
+    xlrec[8..12].copy_from_slice(&rlocator.dbOid.to_ne_bytes());
+    xlrec[12..16].copy_from_slice(&rlocator.relNumber.to_ne_bytes());
+    xlrec[16..20].copy_from_slice(&(SMGR_TRUNCATE_ALL as i32).to_ne_bytes());
+    xloginsert_seams::xlog_insert_record::call(
+        RM_SMGR_ID,
+        XLOG_SMGR_TRUNCATE | XLR_SPECIAL_REL_UPDATE,
+        0,
+        &[&xlrec],
+        &[],
+    )
 }
 
 pub fn RelationDropStorage(rel: &types_rel::RelationData<'_>) -> PgResult<()> {

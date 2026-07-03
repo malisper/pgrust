@@ -209,22 +209,6 @@ pub fn pgstat_count_heap_scan(relid: Oid, relisshared: bool) {
     with_counts(relid, relisshared, |c| c.numscans += 1);
 }
 
-// Drain of heapam's per-scan batched counters (one probe per scan, not per row).
-pub fn pgstat_count_heap_scan_batched(
-    relid: Oid,
-    relisshared: bool,
-    numscans: u64,
-    tuples_returned: u64,
-) {
-    if numscans == 0 && tuples_returned == 0 {
-        return;
-    }
-    with_counts(relid, relisshared, |c| {
-        c.numscans += numscans as PgStat_Counter;
-        c.tuples_returned += tuples_returned as PgStat_Counter;
-    });
-}
-
 pub fn pgstat_count_heap_getnext(relid: Oid, relisshared: bool) {
     with_counts(relid, relisshared, |c| c.tuples_returned += 1);
 }
@@ -321,21 +305,6 @@ pub fn find_tabstat_entry(rel_id: Oid) -> Option<PgStat_TableCounts> {
         }
         Some(counts)
     })
-}
-
-pub fn pgstat_fetch_stat_tabentry(relid: Oid) -> Option<crate::shmem::PgStat_StatTabEntry> {
-    pgstat_fetch_stat_tabentry_ext(catalog_seams::is_shared_relation::call(relid), relid)
-}
-
-pub fn pgstat_fetch_stat_tabentry_ext(
-    shared: bool,
-    reloid: Oid,
-) -> Option<crate::shmem::PgStat_StatTabEntry> {
-    match crate::shmem::fetch_entry(relation_key(reloid, shared)) {
-        Some(crate::shmem::SharedEntry::Relation(t)) => Some(t),
-        Some(_) => unreachable!("relation key holds non-relation shared entry"),
-        None => None,
-    }
 }
 
 pub(crate) fn AtEOXact_PgStat_Relations(

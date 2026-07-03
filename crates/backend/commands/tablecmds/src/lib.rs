@@ -2,7 +2,6 @@
 #![allow(non_snake_case, non_upper_case_globals)]
 
 mod alter;
-mod partition;
 mod constraints;
 mod fk;
 mod drop;
@@ -85,7 +84,7 @@ pub fn RangeVarCallbackMaintainsTable(
 
 #[cold]
 #[inline(never)]
-pub(crate) fn unported(what: &str) -> ! {
+fn unported(what: &str) -> ! {
     panic!("unported: tablecmds {what}")
 }
 
@@ -149,8 +148,6 @@ pub fn DefineRelation<'mcx>(
     query_string: &str,
 ) -> PgResult<Oid> {
     debug_assert!(relkind == RELKIND_RELATION || relkind == RELKIND_SEQUENCE);
-    let partitioned = stmt.partspec.is_some();
-    let relkind = if partitioned { types_rel::RELKIND_PARTITIONED_TABLE } else { relkind };
     let rv = stmt.relation.expect("CreateStmt.relation");
     let relname = rv.relname.expect("RangeVar.relname");
     if relname.len() >= NAMEDATALEN as usize {
@@ -162,42 +159,18 @@ pub fn DefineRelation<'mcx>(
     if stmt.tablespacename.is_some() {
         unported("TABLESPACE clauses");
     }
-    if !stmt.inhRelations.is_nil() && stmt.partbound.is_none() {
+    if !stmt.inhRelations.is_nil() {
         unported("MergeAttributes inheritance");
     }
-    // PARTITION OF: the parent's partition descriptor changes — take an
-    // exclusive lock (C parentLockmode).
-    let parent_oid = if stmt.partbound.is_some() {
-        assert_eq!(stmt.inhRelations.len(), 1);
-        let prv = stmt
-            .inhRelations
-            .nth(0)
-            .as_variant::<types_nodes::RangeVar>()
-            .expect("inhRelations RangeVar");
-        let creation_rv = rel_vocab::RangeVar {
-            catalogname: prv.catalogname,
-            schemaname: prv.schemaname,
-            relname: prv.relname.expect("RangeVar.relname"),
-            inh: prv.inh,
-            relpersistence: prv.relpersistence,
-            location: prv.location,
-        };
-        Some(catalog_namespace::RangeVarGetRelid(
-            &creation_rv,
-            types_rel::AccessExclusiveLock,
-            false,
-        )?)
+    // C: accessMethodId is InvalidOid unless RELKIND_HAS_TABLE_AM.
+    let access_method_id = if !types_rel::RELKIND_HAS_TABLE_AM(relkind) {
+        InvalidOid
     } else {
-        None
-    };
-    // C: accessMethodId is InvalidOid unless RELKIND_HAS_TABLE_AM;
-    // partitions inherit the parent's relam and the parent USING is loud,
-    // so heap is the only reachable AM.
-    let access_method_id = match stmt.accessMethod {
-        None if !types_rel::RELKIND_HAS_TABLE_AM(relkind) => InvalidOid,
-        None => HEAP_TABLE_AM_OID, // default_table_access_method = "heap"
-        Some("heap") => HEAP_TABLE_AM_OID,
-        Some(_) => unported("get_table_am_oid (non-heap USING)"),
+        match stmt.accessMethod {
+            None => HEAP_TABLE_AM_OID, // default_table_access_method = "heap"
+            Some("heap") => HEAP_TABLE_AM_OID,
+            Some(_) => unported("get_table_am_oid (non-heap USING)"),
+        }
     };
 
     // RangeVarGetAndCheckCreationNamespace resolve-only: CREATE ACL check and
@@ -225,44 +198,7 @@ pub fn DefineRelation<'mcx>(
 
     let owner_id = if owner_id != InvalidOid { owner_id } else { miscinit::GetUserId() };
 
-    let descriptor = match parent_oid {
-        // MergeAttributes, empty-column partition arm: the partition's
-        // columns are exactly the parent's (attislocal=false, attinhcount=1).
-        Some(parent_oid) => {
-            assert!(stmt.tableElts.is_nil(), "loud in transformCreateStmt");
-            let parent = table::table_open(mcx, parent_oid, types_rel::NoLock)?;
-            if parent.rd_rel.relkind != types_rel::RELKIND_PARTITIONED_TABLE {
-                let pname = parent.name().to_string();
-                return Err(Box::new(
-                    PgError::new(ERROR, format!("\"{pname}\" is not partitioned"))
-                        .with_sqlstate(types_error::ERRCODE_INVALID_OBJECT_DEFINITION),
-                ));
-            }
-            if let Some(constr) = parent.rd_att.constr.as_deref() {
-                if constr.num_check > 0 || constr.has_generated_stored {
-                    unported("inherited CHECK/generated constraints on partitions");
-                }
-            }
-            let mut desc = tupdesc::CreateTupleDescCopy(mcx, parent.descr())?;
-            for i in 0..desc.natts as usize {
-                let parent_att = parent.rd_att.attr(i);
-                if parent_att.atthasdef {
-                    unported("inherited column defaults on partitions");
-                }
-                if parent_att.attidentity != 0 || parent_att.attgenerated != 0 {
-                    unported("identity/generated columns on partitions");
-                }
-                let att = desc.attr_mut(i);
-                att.attnotnull = parent_att.attnotnull;
-                att.attislocal = false;
-                att.attinhcount = 1;
-                tupdesc::populate_compact_attribute(&mut desc, i);
-            }
-            parent.close(types_rel::NoLock)?;
-            desc
-        }
-        None => BuildDescForRelation(mcx, &stmt.tableElts)?,
-    };
+    let descriptor = BuildDescForRelation(mcx, &stmt.tableElts)?;
 
     let relation_id = catalog_heap::heap_create_with_catalog(
         mcx,
@@ -282,68 +218,6 @@ pub fn DefineRelation<'mcx>(
     register_on_commit_action(relation_id, stmt.oncommit);
 
     xact::CommandCounterIncrement()?;
-
-    // Partition bound: transform, validate against siblings, store.
-    if let Some(parent_oid) = parent_oid {
-        let bound_spec_node = stmt.partbound.expect("checked above");
-        let parent = table::table_open(mcx, parent_oid, types_rel::NoLock)?;
-        let rel = table::table_open(mcx, relation_id, types_rel::AccessExclusiveLock)?;
-        let mut pstate = parser_small1::make_parsestate(mcx, None);
-        let bound = partition::transformPartitionBound(
-            mcx,
-            &mut pstate,
-            &parent,
-            bound_spec_node,
-        )?;
-        let _ = query_string;
-        {
-            let key = partcache::RelationGetPartitionKey(&parent)?;
-            let pdesc = partdesc::RelationGetPartitionDesc(&parent)?;
-            let spec = bound
-                .as_variant::<types_nodes::rawnodes::PartitionBoundSpec>()
-                .expect("PartitionBoundSpec");
-            partbounds::check_new_partition_bound(
-                mcx,
-                relname,
-                &key,
-                pdesc.boundinfo.as_ref(),
-                &pdesc.oids,
-                spec,
-            )?;
-        }
-        catalog_heap::StorePartitionBound(mcx, &rel, &parent, bound)?;
-        partition::store_catalog_inheritance1(mcx, relation_id, parent_oid)?;
-        if parent.rd_rel.relhasindex
-            && !relcache::RelationGetIndexList(mcx, parent_oid)?.is_empty()
-        {
-            unported("cloning parent indexes onto new partitions (DefineIndex recursion)");
-        }
-        rel.close(types_rel::NoLock)?;
-        parent.close(types_rel::NoLock)?;
-        xact::CommandCounterIncrement()?;
-    }
-
-    // Partition key: compute and store pg_partitioned_table.
-    if partitioned {
-        let spec = stmt
-            .partspec
-            .expect("checked above")
-            .as_variant::<types_nodes::rawnodes::PartitionSpec>()
-            .expect("PartitionSpec");
-        let rel = table::table_open(mcx, relation_id, types_rel::AccessExclusiveLock)?;
-        let info = partition::compute_partition_key(mcx, &rel, spec)?;
-        catalog_heap::StorePartitionKey(
-            mcx,
-            &rel,
-            info.strategy,
-            info.partattrs.len() as i16,
-            &info.partattrs,
-            &info.partopclass,
-            &info.partcollation,
-        )?;
-        rel.close(types_rel::NoLock)?;
-        xact::CommandCounterIncrement()?;
-    }
 
     let raw_defaults = constraints::collect_raw_defaults(mcx, &stmt.tableElts)?;
     if !raw_defaults.is_empty() || !stmt.constraints.is_nil() || !stmt.nnconstraints.is_nil() {

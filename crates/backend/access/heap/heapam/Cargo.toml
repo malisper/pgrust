@@ -33,6 +33,7 @@ multixact_seams = { path = "../../transam/multixact_seams" }
 xact_seams = { path = "../../transam/xact_seams" }
 lmgr = { path = "../../../storage/lmgr/lmgr" }
 inval = { path = "../../../utils/cache/inval" }
+smgr = { path = "../../../storage/smgr/smgr" }
 pgstat = { path = "../../../utils/activity/pgstat" }
 rmgr = { path = "../../transam/rmgr" }
 transam_seams = { path = "../../transam/transam_seams" }

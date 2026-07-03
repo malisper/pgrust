@@ -150,8 +150,16 @@ pub fn ClassifyUtilityCommandAsReadOnly(parsetree: Node<'_>) -> PgResult<i32> {
 
         T_ListenStmt | T_NotifyStmt => COMMAND_OK_IN_READ_ONLY_TXN,
 
-        // C splits on stmt->mode > RowExclusiveLock; payload lands with lockcmds.
-        T_LockStmt => payload_gap("ClassifyUtilityCommandAsReadOnly", "LockStmt"),
+        // Only weaker lock modes are allowed during recovery (must match
+        // LockAcquireExtended's restrictions).
+        T_LockStmt => {
+            let stmt = parsetree.as_lock_stmt().unwrap();
+            if stmt.mode > types_storage::RowExclusiveLock {
+                COMMAND_OK_IN_READ_ONLY_TXN
+            } else {
+                COMMAND_IS_STRICTLY_READ_ONLY
+            }
+        }
 
         T_TransactionStmt => {
             let stmt = parsetree.as_transaction_stmt().unwrap();

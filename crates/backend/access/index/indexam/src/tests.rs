@@ -87,7 +87,6 @@ fn make<'mcx>(mcx: Mcx<'mcx>, oid: Oid, name: &str, relkind: u8, relam: Oid) -> 
         pgstat_enabled: Cell::new(false),
         rd_amcache: Default::default(),
         rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(),
-        rd_support: PgVec::new_in(mcx),
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
@@ -394,7 +393,6 @@ fn insert_dispatches_through_am() {
     let heap = make(ctx.mcx(), TBL, "tbl", RELKIND_RELATION, 2);
     let idx = make(ctx.mcx(), IDX, "idx", RELKIND_INDEX, MOCK_AM_OID);
     let t = tid(1, 1);
-    let mut am_cache: Option<Box<dyn core::any::Any>> = None;
     let ok = index_insert(
         ctx.mcx(),
         &idx,
@@ -404,9 +402,8 @@ fn insert_dispatches_through_am() {
         &heap,
         types_nbtree::UNIQUE_CHECK_NO,
         false,
-        &mut am_cache,
     )
     .unwrap();
     assert!(ok);
-    index_insert_cleanup(&idx, &mut am_cache).unwrap();
+    index_insert_cleanup(&idx).unwrap();
 }

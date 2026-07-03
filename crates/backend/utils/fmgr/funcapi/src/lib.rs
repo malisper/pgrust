@@ -17,8 +17,7 @@ mod tests;
 pub use srf::{
     end_MultiFuncCall, init_MultiFuncCall, per_MultiFuncCall, srf_return_done, srf_return_next,
     srf_return_next_null,
-    FuncCallContext, InitMaterializedSRF, MaterializedSRF, MAT_SRF_BLESS,
-    MAT_SRF_USE_EXPECTED_DESC,
+    FuncCallContext, InitMaterializedSRF, MAT_SRF_BLESS, MAT_SRF_USE_EXPECTED_DESC,
 };
 
 pub fn init_seams() {

@@ -19,6 +19,7 @@ mod tests;
 pub fn init_seams() {
     lmgr_seams::lock_relation_oid::set(LockRelationOid);
     lmgr_seams::unlock_relation_oid::set(UnlockRelationOid);
+    lmgr_seams::conditional_lock_relation_oid::set(ConditionalLockRelationOid);
     lmgr_seams::check_relation_locked_by_me::set(CheckRelationOidLockedByMe);
     lmgr_seams::describe_lock_tag::set(DescribeLockTag);
 }

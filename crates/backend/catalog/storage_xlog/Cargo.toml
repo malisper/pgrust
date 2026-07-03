@@ -12,3 +12,6 @@ types_error = { path = "../../../_support/types/types_error" }
 types_storage = { path = "../../../_support/types/types_storage" }
 smgr = { path = "../../storage/smgr/smgr" }
 xlogreader_seams = { path = "../../access/transam/xlogreader_seams" }
+transam_xlog = { path = "../../access/transam/transam_xlog" }
+xlogutils = { path = "../../access/transam/xlogutils" }
+init_small = { path = "../../utils/init/init_small" }

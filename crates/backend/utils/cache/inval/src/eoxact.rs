@@ -289,12 +289,15 @@ pub fn ForgetInplace_Inval() {
 }
 
 // C only nulls inplaceInvalInfo; the owned arrays physically hold the stash,
-// so roll them back to re-establish `nextmsg == len` at the live end.
+// so roll them back to the stash start. An aborted subtransaction leaves dead
+// slots past the live cursor (cursor-write overwrites them, C shape), so len
+// may exceed nextmsg; the stash still ends the live region, making the
+// firstmsg rollback sound.
 pub(crate) fn forget_inplace_invalidation_state(state: &mut InvalState<'_>) {
     if let Some(info) = state.inplace_info.take() {
         let group = info.current_cmd_invalid_msgs;
         for subgroup in [CAT_CACHE_MSGS, REL_CACHE_MSGS] {
-            debug_assert_eq!(state.msg_arrays[subgroup].len(), group.nextmsg[subgroup]);
+            debug_assert!(state.msg_arrays[subgroup].len() >= group.nextmsg[subgroup]);
             state.msg_arrays[subgroup].truncate(group.firstmsg[subgroup]);
         }
     }

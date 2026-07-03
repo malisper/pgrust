@@ -237,6 +237,35 @@ fn forget_inplace_rolls_dense_arrays_back() {
 }
 
 #[test]
+fn forget_inplace_tolerates_aborted_subxact_tail() {
+    install();
+    CacheInvalidateCatalog(1259).unwrap();
+    CommandEndInvalidationMessages().unwrap();
+
+    NEST_LEVEL.set(2);
+    CacheInvalidateCatalog(2606).unwrap();
+    CommandEndInvalidationMessages().unwrap();
+    AtEOSubXact_Inval(false).unwrap();
+    NEST_LEVEL.set(1);
+
+    with_state(|state| {
+        registration::prepare_inplace_invalidation_state(state);
+        assert!(state.msg_arrays[0].len() > state.trans_stack[0].prior_cmd_invalid_msgs.nextmsg[0]);
+    });
+    ForgetInplace_Inval();
+
+    AtEOXact_Inval(true).unwrap();
+    let cat_ids: Vec<Oid> = sent_flat()
+        .iter()
+        .filter_map(|m| match m {
+            SharedInvalidationMessage::Catalog(c) => Some(c.catId),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(cat_ids, vec![1259]);
+}
+
+#[test]
 fn init_file_relcache_inval_brackets_the_send() {
     install();
     CacheInvalidateRelcacheByRelid(INIT_FILE_REL).unwrap();

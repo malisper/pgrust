@@ -178,19 +178,6 @@ impl FunctionCallInfoBaseData {
         }
     }
 
-    /// # Safety
-    /// `'a` must not exceed set_result_mcx's liveness window (until re-arm or
-    /// frame death); the detached lifetime lets a callee hold the mcx (e.g.
-    /// in a `MaterializedSRF`) while also passing `&mut self` around.
-    #[inline]
-    pub unsafe fn result_mcx_detached<'a>(&self) -> Mcx<'a> {
-        match self.result_mcx {
-            // SAFETY: caller upholds the window above.
-            Some(p) => unsafe { p.as_ref() }.mcx(),
-            None => result_mcx_unarmed(),
-        }
-    }
-
     #[inline]
     pub fn nargs(&self) -> usize {
         if self.nargs < 0 {

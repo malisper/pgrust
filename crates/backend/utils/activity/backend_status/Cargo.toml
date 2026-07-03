@@ -21,7 +21,6 @@ adt_timestamp = { path = "../../adt/adt_timestamp" }
 xact = { path = "../../../access/transam/xact" }
 pgstat = { path = "../pgstat" }
 lmgr_proc = { path = "../../../storage/lmgr/lmgr_proc" }
-procarray = { path = "../../../storage/ipc/procarray" }
 shmem = { path = "../../../storage/ipc/shmem" }
 ipc_seams = { path = "../../../storage/ipc/ipc_seams" }
 superuser_seams = { path = "../../misc/superuser_seams" }
@@ -29,16 +28,3 @@ backend_status_seams = { path = "../backend_status_seams" }
 
 [dev-dependencies]
 guc_seams = { path = "../../misc/guc_seams" }
-lwlock = { path = "../../../storage/lmgr/lwlock" }
-pg_sema_seams = { path = "../../../port/pg_sema_seams" }
-s_lock_seams = { path = "../../../storage/lmgr/s_lock_seams" }
-latch_seams = { path = "../../../storage/ipc/latch_seams" }
-miscinit_seams = { path = "../../init/miscinit_seams" }
-waitevent_seams = { path = "../waitevent_seams" }
-deadlock_seams = { path = "../../../storage/lmgr/deadlock_seams" }
-pmsignal_seams = { path = "../../../storage/ipc/pmsignal_seams" }
-lock_seams = { path = "../../../storage/lmgr/lock_seams" }
-timeout_seams = { path = "../../misc/timeout_seams" }
-condition_variable_seams = { path = "../../../storage/lmgr/condition_variable_seams" }
-syncrep_seams = { path = "../../../replication/syncrep_seams" }
-autovacuum_seams = { path = "../../../postmaster/autovacuum_seams" }

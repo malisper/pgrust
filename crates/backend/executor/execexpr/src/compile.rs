@@ -39,7 +39,6 @@ pub struct AggTransSpec<'a, 'mcx> {
     // C build_aggregate_transfn_expr's arg types: [transtype, input types..].
     pub arg_types: &'a [Oid],
     pub args: &'a NodeList<'mcx>,
-    pub aggfilter: Option<Node<'mcx>>,
     pub pergroup: NonNull<AggPerGroup>,
     pub transtype_byval: bool,
     pub transtype_len: i16,
@@ -388,9 +387,6 @@ fn build_agg_trans<'mcx>(
         for tle in spec.args.iter() {
             setup_walker(tle, &mut info);
         }
-        if let Some(f) = spec.aggfilter {
-            setup_walker(f, &mut info);
-        }
     }
     push_fetch_steps(&mut state, mcx, &info)?;
 
@@ -415,12 +411,6 @@ fn build_agg_trans<'mcx>(
         let fn_addr = flinfo.fn_addr;
         let fn_strict = flinfo.fn_strict;
         if let Some(ord) = spec.ordered {
-            if spec.aggfilter.is_some() {
-                panic!(
-                    "ExecBuildAggTrans (execExpr.c): FILTER over non-presorted \
-                     DISTINCT/ORDER BY aggregate not ported"
-                );
-            }
             build_agg_trans_ordered(&mut state, mcx, spec, ord, fn_strict, params)?;
             continue;
         }
@@ -435,16 +425,6 @@ fn build_agg_trans<'mcx>(
             .try_reserve(1)
             .map_err(|_| mcx.oom(core::mem::size_of::<FuncFrame<'_>>()))?;
         state.frames.push(frame);
-        let mut filter_jump: Option<usize> = None;
-        if let Some(f) = spec.aggfilter {
-            init_expr_rec(f, &mut state, mcx, OutRef::RESULT, None, params, None)?;
-            filter_jump = Some(state.steps.len());
-            push_step(
-                &mut state,
-                mcx,
-                Step::JumpIfNotTrue { jumpdone: u32::MAX, out: OutRef::RESULT },
-            )?;
-        }
         for (argno, tle_node) in spec.args.iter().enumerate() {
             let tle = tle_node.as_target_entry().unwrap_or_else(|| {
                 panic!("Aggref.args cell: expected TargetEntry, got {:?}", tle_node.node_tag())
@@ -541,14 +521,8 @@ fn build_agg_trans<'mcx>(
                 push_step(&mut state, mcx, step)?;
             }
         }
-        let target = state.steps.len() as u32;
-        if let Some(ix) = filter_jump {
-            match &mut state.steps[ix] {
-                Step::JumpIfNotTrue { jumpdone, .. } => *jumpdone = target,
-                _ => unreachable!(),
-            }
-        }
         if let Some(ix) = bailout {
+            let target = state.steps.len() as u32;
             match &mut state.steps[ix] {
                 Step::AggStrictInputCheck { jumpnull, .. }
                 | Step::AggStrictInputCheck1 { jumpnull, .. } => *jumpnull = target,
@@ -800,6 +774,7 @@ pub fn expr_type(node: Node<'_>) -> Oid {
         }
         NodeTag::T_CaseExpr => node.as_case_expr().unwrap().casetype,
         NodeTag::T_CaseTestExpr => node.as_case_test_expr().unwrap().typeId,
+        NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resulttype,
         NodeTag::T_CoerceViaIO => node.as_coerce_via_io().unwrap().resulttype,
         NodeTag::T_CoerceToDomain => node.as_coerce_to_domain().unwrap().resulttype,
         NodeTag::T_CoerceToDomainValue => node.as_coerce_to_domain_value().unwrap().typeId,
@@ -955,54 +930,6 @@ fn setup_walker(node: Node<'_>, info: &mut SetupInfo) {
     }
 }
 
-// C ExecInitExprRec whole-row Var + ExecEvalWholeRowVar's first-eval split:
-// the composite tupdesc resolves here (plan-stable typcache row; C defers to
-// first eval only to reach the slot). RECORD legs (subquery/join whole-row,
-// junk filtering) and RETURNING OLD/NEW stay loud.
-fn init_whole_row<'mcx>(
-    variable: &::types_nodes::primnodes::Var<'mcx>,
-    state: &mut ExprState<'mcx>,
-    mcx: Mcx<'mcx>,
-    out: OutRef,
-) -> PgResult<()> {
-    use crate::steps::{SlotSrc, WholeRowState};
-    if variable.varreturningtype != VarReturningType::VAR_RETURNING_DEFAULT {
-        unported("EEOP_WHOLEROW OLD/NEW (RETURNING)");
-    }
-    if variable.vartype == ::types_core::catalog::RECORDOID {
-        unported("EEOP_WHOLEROW RECORD leg (subquery/CTE whole-row + junkfilter)");
-    }
-    let src = match variable.varno {
-        INNER_VAR => SlotSrc::Inner,
-        OUTER_VAR => SlotSrc::Outer,
-        _ => SlotSrc::Scan,
-    };
-    let desc = typcache::lookup_rowtype_tupdesc_copy(mcx, variable.vartype, -1)?;
-    let desc_layout = core::alloc::Layout::new::<::types_tuple::TupleDescData<'static>>();
-    let desc_ptr: NonNull<::types_tuple::TupleDescData<'static>> =
-        mcx.allocate(desc_layout).map_err(|_| mcx.oom(desc_layout.size()))?.cast();
-    // SAFETY: fresh exact-layout allocation; the plan mcx outlives every eval
-    // of this step, so the 'static restamp never escapes it.
-    unsafe {
-        desc_ptr.as_ptr().write(core::mem::transmute::<
-            ::types_tuple::TupleDescData<'mcx>,
-            ::types_tuple::TupleDescData<'static>,
-        >(desc));
-    }
-    let wr_layout = core::alloc::Layout::new::<WholeRowState>();
-    let wr: NonNull<WholeRowState> =
-        mcx.allocate(wr_layout).map_err(|_| mcx.oom(wr_layout.size()))?.cast();
-    // SAFETY: fresh exact-layout allocation.
-    unsafe { wr.as_ptr().write(WholeRowState { tupdesc: desc_ptr, first: true, slow: false }) };
-
-    let frame_ix = state.frames.len() as u32;
-    let frame = FuncFrame::new_in(mcx, FmgrInfo::unresolved(), 0, 0)?;
-    state.frames.try_reserve(1).map_err(|_| mcx.oom(core::mem::size_of::<FuncFrame<'_>>()))?;
-    state.frames.push(frame);
-
-    push_step(state, mcx, Step::WholeRow { src, wr, frame: frame_ix, out })
-}
-
 // C ExecInitExprRec over the ported families.
 pub(crate) fn init_expr_rec<'mcx>(
     node: Node<'mcx>,
@@ -1017,7 +944,7 @@ pub(crate) fn init_expr_rec<'mcx>(
         NodeTag::T_Var => {
             let variable = node.as_var().unwrap();
             if variable.varattno == 0 {
-                return init_whole_row(variable, state, mcx, out);
+                unported("EEOP_WHOLEROW");
             }
             if variable.varattno < 0 {
                 let attnum = variable.varattno;

@@ -165,7 +165,10 @@ fn preprocess_aggref<'mcx>(run: &mut PlannerRun<'mcx>, node: Node<'mcx>) -> PgRe
                     let id = run.root.alloc_expr_node(arg);
                     ti.args.push(id);
                 }
-                ti.aggfilter = aggref.aggfilter.map(|f| run.root.alloc_expr_node(f));
+                assert!(
+                    aggref.aggfilter.is_none(),
+                    "preprocess_aggref (prepagg.c): FILTER; M3 filter lane"
+                );
                 ti.transfn_oid = shape.aggtransfn;
                 ti.combinefn_oid = shape.aggcombinefn;
                 ti.serialfn_oid = shape.aggserialfn;
@@ -334,6 +337,7 @@ pub fn get_agg_clause_costs(
         let id = run.root.aggtransinfos[i];
         let (transfn_oid, byval, transtype, transtypmod, transspace, transfn, nargs) = {
             let ti = run.root.agg_trans_info(id);
+            debug_assert!(ti.aggfilter.is_none());
             (
                 ti.transfn_oid,
                 ti.transtypeByVal,
@@ -352,13 +356,6 @@ pub fn get_agg_clause_costs(
             let arg = *run.root.expr_node(arg_id);
             let expr = arg.as_target_entry().map(|t| t.expr).unwrap_or(arg);
             let argcost = cost_qual_eval_node(expr)?;
-            costs.transCost.startup += argcost.startup;
-            costs.transCost.per_tuple += argcost.per_tuple;
-        }
-
-        if let Some(fid) = run.root.agg_trans_info(id).aggfilter {
-            let filter = *run.root.expr_node(fid);
-            let argcost = cost_qual_eval_node(filter)?;
             costs.transCost.startup += argcost.startup;
             costs.transCost.per_tuple += argcost.per_tuple;
         }

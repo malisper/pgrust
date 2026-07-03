@@ -20,7 +20,6 @@ lsyscache = { path = "../../utils/cache/lsyscache" }
 fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
 exectuples = { path = "../exectuples" }
 heaptuple = { path = "../../access/common/heaptuple" }
-execpartition = { path = "../execpartition" }
 execindexing = { path = "../execindexing" }
 tableam = { path = "../../access/table/tableam" }
 tableam_vocab = { path = "../../access/table/tableam_vocab" }

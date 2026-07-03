@@ -707,37 +707,6 @@ fn node(out: &mut String, n: Node<'_>) {
         list_field(out, "arrayBounds", &tn.arrayBounds);
         int_field(out, "location", tn.location);
         out.push('}');
-    } else if let Some(p) = n.as_variant::<types_nodes::rawnodes::PartitionSpec>() {
-        out.push_str("{PARTITIONSPEC");
-        int_field(out, "strategy", p.strategy as i32);
-        list_field(out, "partParams", &p.partParams);
-        int_field(out, "location", p.location);
-        out.push('}');
-    } else if let Some(e) = n.as_variant::<types_nodes::rawnodes::PartitionElem>() {
-        out.push_str("{PARTITIONELEM");
-        string_field(out, "name", e.name);
-        node_field(out, "expr", e.expr);
-        list_field(out, "collation", &e.collation);
-        list_field(out, "opclass", &e.opclass);
-        int_field(out, "location", e.location);
-        out.push('}');
-    } else if let Some(b) = n.as_variant::<types_nodes::rawnodes::PartitionBoundSpec>() {
-        out.push_str("{PARTITIONBOUNDSPEC");
-        char_field(out, "strategy", b.strategy);
-        bool_field(out, "is_default", b.is_default);
-        int_field(out, "modulus", b.modulus);
-        int_field(out, "remainder", b.remainder);
-        list_field(out, "listdatums", &b.listdatums);
-        list_field(out, "lowerdatums", &b.lowerdatums);
-        list_field(out, "upperdatums", &b.upperdatums);
-        int_field(out, "location", b.location);
-        out.push('}');
-    } else if let Some(d) = n.as_variant::<types_nodes::rawnodes::PartitionRangeDatum>() {
-        out.push_str("{PARTITIONRANGEDATUM");
-        int_field(out, "kind", d.kind as i32);
-        node_field(out, "value", d.value);
-        int_field(out, "location", d.location);
-        out.push('}');
     } else if let Some(lc) = n.as_locking_clause() {
         out.push_str("{LOCKINGCLAUSE");
         list_field(out, "lockedRels", &lc.lockedRels);

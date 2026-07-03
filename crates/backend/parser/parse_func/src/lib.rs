@@ -72,9 +72,6 @@ pub fn ParseFuncOrColumn<'mcx>(
     fargs: NodeList<'mcx>,
     actual_arg_types: &[Oid],
     fn_call: &FuncCall<'mcx>,
-    // fn->agg_filter, already through transformWhereClause(EXPR_KIND_FILTER)
-    // by the caller (dependency direction; C transforms it here first).
-    agg_filter: Option<Node<'mcx>>,
     _last_srf: Option<Node<'mcx>>,
     location: ParseLoc,
 ) -> PgResult<Node<'mcx>> {
@@ -82,6 +79,12 @@ pub fn ParseFuncOrColumn<'mcx>(
     let mut buf = [""; 4];
     let parts = name_parts(funcname, &mut buf);
 
+    if fn_call.agg_filter.is_some() {
+        panic!(
+            "ParseFuncOrColumn (parse_func.c): FILTER needs transformWhereClause \
+             EXPR_KIND_FILTER lane — unit backend-parser-func"
+        );
+    }
     let over = fn_call.over;
 
     if fargs.len() > FUNC_MAX_ARGS {
@@ -155,16 +158,6 @@ pub fn ParseFuncOrColumn<'mcx>(
                     pstate,
                     format!(
                         "ORDER BY specified, but {} is not an aggregate function",
-                        name_list_to_string(parts)
-                    ),
-                    location,
-                ));
-            }
-            if agg_filter.is_some() {
-                return Err(wrong_object_type(
-                    pstate,
-                    format!(
-                        "FILTER specified, but {} is not an aggregate function",
                         name_list_to_string(parts)
                     ),
                     location,
@@ -343,8 +336,8 @@ pub fn ParseFuncOrColumn<'mcx>(
                 make_fn_arguments(mcx, pstate, fargs, actual_arg_types, &declared_arg_types)?;
             if let Some(over_node) = over {
                 return build_window_func(
-                    mcx, pstate, funcid, rettype, retset, fargs, true, fn_call, agg_filter,
-                    parts, over_node, _last_srf, location,
+                    mcx, pstate, funcid, rettype, retset, fargs, true, fn_call, parts,
+                    over_node, _last_srf, location,
                 );
             }
             // C's aggargtypes = exprType per coerced arg (parse_agg.c);
@@ -385,7 +378,6 @@ pub fn ParseFuncOrColumn<'mcx>(
             aggref.aggfnoid = funcid;
             aggref.aggtype = rettype;
             aggref.aggkind = aggkind;
-            aggref.aggfilter = agg_filter;
             aggref.aggstar = fn_call.agg_star;
             aggref.location = location;
 
@@ -438,8 +430,8 @@ pub fn ParseFuncOrColumn<'mcx>(
             let fargs =
                 make_fn_arguments(mcx, pstate, fargs, actual_arg_types, &declared_arg_types)?;
             build_window_func(
-                mcx, pstate, funcid, rettype, retset, fargs, false, fn_call, agg_filter, parts,
-                over_node, _last_srf, location,
+                mcx, pstate, funcid, rettype, retset, fargs, false, fn_call, parts, over_node,
+                _last_srf, location,
             )
         }
         FuncDetail::NotFound => Err(undefined_function(
@@ -466,7 +458,6 @@ fn build_window_func<'mcx>(
     fargs: NodeList<'mcx>,
     winagg: bool,
     fn_call: &FuncCall<'mcx>,
-    agg_filter: Option<Node<'mcx>>,
     parts: &[&str],
     over_node: Node<'mcx>,
     last_srf: Option<Node<'mcx>>,
@@ -498,14 +489,7 @@ fn build_window_func<'mcx>(
             location,
         ));
     }
-    if !winagg && agg_filter.is_some() {
-        return Err(feature_not_supported(
-            pstate,
-            "FILTER is not implemented for non-aggregate window functions".into(),
-            None,
-            location,
-        ));
-    }
+    debug_assert!(fn_call.agg_filter.is_none(), "FILTER is a loud lane upstream");
     let srf_added = match (pstate.p_last_srf, last_srf) {
         (None, None) => false,
         (Some(a), Some(b)) => !a.ptr_eq(b),
@@ -539,7 +523,7 @@ fn build_window_func<'mcx>(
     wfunc.args = fargs;
     wfunc.winstar = fn_call.agg_star;
     wfunc.winagg = winagg;
-    wfunc.aggfilter = agg_filter;
+    wfunc.aggfilter = None;
     wfunc.location = location;
 
     parse_agg::transformWindowFuncCall(mcx, pstate, &mut wfunc, over_node)?;

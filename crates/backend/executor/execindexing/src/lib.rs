@@ -30,8 +30,6 @@ pub(crate) fn unported(what: &str) -> ! {
 // expression/predicate state slots land with the expression-index lane.
 pub struct IndexInfo {
     pub ii_NumIndexAttrs: i32,
-    // C ii_AmCache (per-statement AM scratch; gist stores its GISTSTATE).
-    pub ii_AmCache: Option<Box<dyn core::any::Any>>,
     pub ii_NumIndexKeyAttrs: i32,
     pub ii_IndexAttrNumbers: [AttrNumber; INDEX_MAX_KEYS as usize],
     pub ii_Unique: bool,
@@ -69,7 +67,6 @@ pub fn BuildIndexInfo(index: &Relation<'_>) -> IndexInfo {
 
     IndexInfo {
         ii_NumIndexAttrs: numatts,
-        ii_AmCache: None,
         ii_NumIndexKeyAttrs: indexstruct.indnkeyatts as i32,
         ii_IndexAttrNumbers: attrs,
         ii_Unique: indexstruct.indisunique,
@@ -164,9 +161,9 @@ pub fn ExecOpenIndices<'mcx>(
 }
 
 /// ExecCloseIndices.
-pub fn ExecCloseIndices(mut state: ResultRelIndexState<'_>) -> PgResult<()> {
-    for (i, indexDesc) in state.descs.iter().enumerate() {
-        indexam::index_insert_cleanup(indexDesc, &mut state.infos[i].ii_AmCache)?;
+pub fn ExecCloseIndices(state: ResultRelIndexState<'_>) -> PgResult<()> {
+    for indexDesc in state.descs.iter() {
+        indexam::index_insert_cleanup(indexDesc)?;
     }
     // index_close(RowExclusiveLock): the Relation close hook runs on drop.
     Ok(())
@@ -222,7 +219,6 @@ pub fn ExecInsertIndexTuples<'mcx>(
         }
 
         FormIndexDatum(indexInfo, slot, &mut values, &mut isnull)?;
-        let n_index_attrs = indexInfo.ii_NumIndexAttrs as usize;
 
         let indexRelation = &state.descs[i];
         let index_form = indexRelation.rd_index.as_ref().expect("index relation");
@@ -242,13 +238,12 @@ pub fn ExecInsertIndexTuples<'mcx>(
         let satisfiesConstraint = indexam::index_insert(
             mcx,
             indexRelation,
-            &values[..n_index_attrs],
-            &isnull[..n_index_attrs],
+            &values[..indexInfo.ii_NumIndexAttrs as usize],
+            &isnull[..indexInfo.ii_NumIndexAttrs as usize],
             &tupleid,
             heap_relation,
             checkUnique,
             false,
-            &mut state.infos[i].ii_AmCache,
         )?;
 
         if checkUnique == IndexUniqueCheck::UNIQUE_CHECK_PARTIAL && !satisfiesConstraint {

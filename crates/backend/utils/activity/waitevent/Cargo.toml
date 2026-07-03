@@ -10,4 +10,3 @@ path = "src/lib.rs"
 
 [dependencies]
 waitevent_seams = { path = "../waitevent_seams" }
-lwlock = { path = "../../../storage/lmgr/lwlock" }

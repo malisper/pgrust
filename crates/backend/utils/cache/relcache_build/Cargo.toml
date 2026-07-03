@@ -21,7 +21,6 @@ types_tuple = { path = "../../../../_support/types/types_tuple" }
 tupdesc = { path = "../../../access/common/tupdesc" }
 table = { path = "../../../access/table/table" }
 genam = { path = "../../../access/index/genam" }
-detoast = { path = "../../../access/common/detoast" }
 varlena = { path = "../../../utils/adt/varlena" }
 cache_syscache = { path = "../cache_syscache" }
 relcache = { path = "../relcache" }
