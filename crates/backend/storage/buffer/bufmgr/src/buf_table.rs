@@ -75,7 +75,7 @@ pub fn InitBufTable(size: i32) -> PgResult<()> {
     Ok(())
 }
 
-#[inline]
+#[inline(never)] // QUANTIFY(buftable-dense): pinned for dist-prof attribution
 pub fn BufTableHashCode(tag: &buftag) -> u32 {
     get_hash_value(htab(), tag as *const buftag as *const u8)
 }
@@ -89,7 +89,7 @@ pub fn BufTableHashCode(tag: &buftag) -> u32 {
 static PARTITION_BASE: core::sync::atomic::AtomicPtr<lwlock::LWLockPadded> =
     core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
 
-#[inline]
+#[inline(never)] // QUANTIFY(buftable-dense): pinned for dist-prof attribution
 pub fn BufMappingPartitionLock(hashcode: u32) -> &'static LWLock {
     let base = PARTITION_BASE.load(core::sync::atomic::Ordering::Relaxed);
     if base.is_null() {
@@ -112,6 +112,7 @@ pub(crate) fn BufTableResetAfterCrash() {
 }
 
 /// Caller holds the partition lock (shared or better).
+#[inline(never)] // QUANTIFY(buftable-dense): pinned for dist-prof attribution
 pub fn BufTableLookup(tag: &buftag, hashcode: u32) -> PgResult<i32> {
     let entry = hash_search_with_hash_value(
         htab(),
