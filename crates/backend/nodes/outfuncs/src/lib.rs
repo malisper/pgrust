@@ -108,13 +108,14 @@ fn out_const(out: &mut PgString<'_>, c: &Const) {
     w!(out, "}}");
 }
 
-// _outDatum (outfuncs.c): bytes printed as signed chars.
+// _outDatum (outfuncs.c) prints bytes as `char`, unsigned on aarch64 Linux —
+// the byte-compare oracle; readfuncs accepts either signedness.
 fn out_datum(out: &mut PgString<'_>, value: Datum, typlen: i32, typbyval: bool) {
     if typbyval {
         let bytes = value.as_usize().to_le_bytes();
         w!(out, "{} [ ", typlen as u32);
         for b in bytes {
-            w!(out, "{} ", b as i8);
+            w!(out, "{b} ");
         }
         w!(out, "]");
         return;
@@ -140,7 +141,7 @@ fn out_datum(out: &mut PgString<'_>, value: Datum, typlen: i32, typbyval: bool) 
     for i in 0..length {
         // SAFETY: length derived from the datum's own size.
         let b = unsafe { *p.add(i) };
-        w!(out, "{} ", b as i8);
+        w!(out, "{b} ");
     }
     w!(out, "]");
 }
