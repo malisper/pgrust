@@ -18,5 +18,8 @@ catalog_namespace = { path = "../../catalog/catalog_namespace" }
 catalog_dependency = { path = "../../catalog/catalog_dependency" }
 pg_depend = { path = "../../catalog/pg_depend" }
 rewrite_define = { path = "../../rewrite/rewrite_define" }
+event_trigger = { path = "../event_trigger" }
+superuser = { path = "../../utils/misc/superuser" }
+miscinit = { path = "../../utils/init/miscinit" }
 elog_seams = { path = "../../utils/error/elog_seams" }
 relcache = { path = "../../utils/cache/relcache" }

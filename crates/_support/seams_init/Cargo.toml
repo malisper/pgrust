@@ -38,6 +38,7 @@ xlogutils = { path = "../../backend/access/transam/xlogutils" }
 aclchk = { path = "../../backend/catalog/aclchk" }
 catalog_namespace = { path = "../../backend/catalog/catalog_namespace" }
 catalog_dependency = { path = "../../backend/catalog/catalog_dependency" }
+event_trigger = { path = "../../backend/commands/event_trigger" }
 commands_cluster = { path = "../../backend/commands/cluster" }
 tablecmds = { path = "../../backend/commands/tablecmds" }
 clauses = { path = "../../backend/optimizer/util/clauses" }

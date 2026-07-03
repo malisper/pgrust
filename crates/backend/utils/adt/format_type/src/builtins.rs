@@ -12,12 +12,16 @@ pub fn fc_format_type(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> Pg
         return Ok(fcinfo.return_null());
     }
     let type_oid = fcinfo.arg_oid(0);
-    let (typemod, typemod_given) = if fcinfo.argisnull(1) {
-        (-1, false)
+    let (typemod, flags) = if fcinfo.argisnull(1) {
+        (-1, crate::FORMAT_TYPE_ALLOW_INVALID)
     } else {
-        (fcinfo.arg_i32(1), true)
+        (
+            fcinfo.arg_i32(1),
+            crate::FORMAT_TYPE_ALLOW_INVALID | crate::FORMAT_TYPE_TYPEMOD_GIVEN,
+        )
     };
-    let s = crate::format_type_extended(type_oid, typemod, typemod_given, true)?;
+    let s = crate::format_type_extended(type_oid, typemod, flags)?
+        .expect("no FORMAT_TYPE_INVALID_AS_NULL");
 
     let mcx = fcinfo.result_mcx();
     let mut image = mcx::vec_with_capacity_in(mcx, datum::varlena::VARHDRSZ + s.len())?;

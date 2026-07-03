@@ -1,10 +1,10 @@
-// RemoveObjects (dropcmds.c), OBJECT_RULE arm; other object classes stay
-// with their own DDL lanes.
+// RemoveObjects (dropcmds.c), OBJECT_RULE and OBJECT_EVENT_TRIGGER arms;
+// other object classes stay with their own DDL lanes.
 #![allow(non_snake_case)]
 
 use mcx::Mcx;
 use types_core::{InvalidOid, Oid};
-use types_error::{PgResult, NOTICE};
+use types_error::{PgError, PgResult, ERRCODE_SYNTAX_ERROR, NOTICE};
 use types_nodes::parsenodes::{DropStmt, ObjectType};
 use rel_vocab::RangeVar;
 use types_rel::AccessExclusiveLock;
@@ -12,12 +12,55 @@ use types_rel::AccessExclusiveLock;
 const REWRITE_RELATION_ID: Oid = 2618;
 
 pub fn RemoveObjects<'mcx>(mcx: Mcx<'mcx>, stmt: &DropStmt<'mcx>) -> PgResult<()> {
-    if stmt.removeType != ObjectType::OBJECT_RULE {
-        panic!(
-            "RemoveObjects (dropcmds.c): {:?} arm unported (its DDL lane owns it)",
-            stmt.removeType
-        );
+    match stmt.removeType {
+        ObjectType::OBJECT_RULE => remove_rules(mcx, stmt),
+        ObjectType::OBJECT_EVENT_TRIGGER => remove_event_triggers(mcx, stmt),
+        other => panic!(
+            "RemoveObjects (dropcmds.c): {other:?} arm unported (its DDL lane owns it)"
+        ),
     }
+}
+
+fn remove_event_triggers<'mcx>(mcx: Mcx<'mcx>, stmt: &DropStmt<'mcx>) -> PgResult<()> {
+    let mut objects = catalog_dependency::ObjectAddresses::new();
+    for cell in stmt.objects.iter() {
+        let name = match cell.as_string() {
+            Some(s) => s.sval,
+            None => {
+                let names = cell.as_list().expect("DROP EVENT TRIGGER object");
+                if names.len() != 1 {
+                    return Err(Box::new(
+                        PgError::error("event trigger name cannot be qualified".to_string())
+                            .with_sqlstate(ERRCODE_SYNTAX_ERROR),
+                    ));
+                }
+                names.iter().next().and_then(|n| n.as_string()).expect("name").sval
+            }
+        };
+        let oid = event_trigger::get_event_trigger_oid(name, stmt.missing_ok)?;
+        if oid == InvalidOid {
+            elog_seams::ereport_msg::call(
+                NOTICE,
+                format!("event trigger \"{name}\" does not exist, skipping"),
+                None,
+            )?;
+            continue;
+        }
+        // object_ownercheck superuser fast path; C also locks the object in
+        // get_object_address — AcquireDeletionLock covers it at deletion.
+        if !superuser::superuser_arg(miscinit::GetUserId())? {
+            panic!("unported: RemoveObjects object_ownercheck for non-superusers");
+        }
+        objects.add_exact_object_address(pg_depend::ObjectAddress::set(
+            event_trigger::EVENT_TRIGGER_RELATION_ID,
+            oid,
+        ));
+    }
+    catalog_dependency::performMultipleDeletions(mcx, &objects, stmt.behavior, 0)?;
+    Ok(())
+}
+
+fn remove_rules<'mcx>(mcx: Mcx<'mcx>, stmt: &DropStmt<'mcx>) -> PgResult<()> {
     let mut objects = catalog_dependency::ObjectAddresses::new();
     for cell in stmt.objects.iter() {
         let names = cell.as_list().expect("DROP RULE object is a name list");
