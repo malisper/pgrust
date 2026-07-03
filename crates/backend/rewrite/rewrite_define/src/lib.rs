@@ -181,10 +181,14 @@ pub fn DefineQueryRewrite<'mcx>(
         && relkind != RELKIND_VIEW
         && relkind != RELKIND_PARTITIONED_TABLE
     {
-        return Err(wrong_object(format!(
-            "relation \"{}\" cannot have rules",
-            event_relation.name()
-        )));
+        return Err(Box::new(
+            PgError::error(format!(
+                "relation \"{}\" cannot have rules",
+                event_relation.name()
+            ))
+            .with_sqlstate(ERRCODE_WRONG_OBJECT_TYPE)
+            .with_detail(relkind_not_supported_detail(relkind)),
+        ));
     }
     if !init_small::globals::allowSystemTableMods() && catalog::IsSystemRelation(&event_relation) {
         return Err(Box::new(
@@ -236,10 +240,14 @@ pub fn DefineQueryRewrite<'mcx>(
     }
 
     if relkind != RELKIND_VIEW && relkind != RELKIND_MATVIEW {
-        return Err(wrong_object(format!(
-            "relation \"{}\" cannot have ON SELECT rules",
-            event_relation.name()
-        )));
+        return Err(Box::new(
+            PgError::error(format!(
+                "relation \"{}\" cannot have ON SELECT rules",
+                event_relation.name()
+            ))
+            .with_sqlstate(ERRCODE_WRONG_OBJECT_TYPE)
+            .with_detail(relkind_not_supported_detail(relkind)),
+        ));
     }
     if action.is_nil() {
         return Err(Box::new(
@@ -532,10 +540,12 @@ pub fn SetRelationRuleStatus<'mcx>(
         types_tuple::heap_getattr(tup, Anum_pg_class_relhasrules as i32, rel.descr(), &mut isnull)
     };
     if !isnull && cur.as_bool() == relHasRules {
-        panic!(
-            "SetRelationRuleStatus: no-change relcache-inval branch unported \
-             (CacheInvalidateRelcacheByTuple)"
-        );
+        // No change: still broadcast the SI notice so every backend reloads
+        // the relation's rules.
+        inval::invalidate::CacheInvalidateRelcacheByTuple(tup)?;
+        genam::systable_endscan(mcx, scan)?;
+        rel.close(RowExclusiveLock)?;
+        return Ok(());
     }
     let natts = rel.descr().natts as usize;
     let mut repl_values: mcx::PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
@@ -567,10 +577,21 @@ fn invalid_object(msg: &str) -> Box<PgError> {
     Box::new(PgError::error(msg).with_sqlstate(ERRCODE_INVALID_OBJECT_DEFINITION))
 }
 
-#[cold]
-#[inline(never)]
-fn wrong_object(msg: String) -> Box<PgError> {
-    Box::new(PgError::error(msg).with_sqlstate(ERRCODE_WRONG_OBJECT_TYPE))
+// errdetail_relkind_not_supported (pg_class.c).
+fn relkind_not_supported_detail(relkind: u8) -> &'static str {
+    match relkind {
+        b'r' => "This operation is not supported for tables.",
+        b'i' => "This operation is not supported for indexes.",
+        b'S' => "This operation is not supported for sequences.",
+        b't' => "This operation is not supported for TOAST tables.",
+        b'v' => "This operation is not supported for views.",
+        b'm' => "This operation is not supported for materialized views.",
+        b'c' => "This operation is not supported for composite types.",
+        b'f' => "This operation is not supported for foreign tables.",
+        b'p' => "This operation is not supported for partitioned tables.",
+        b'I' => "This operation is not supported for partitioned indexes.",
+        other => panic!("unrecognized relkind: {other}"),
+    }
 }
 
 const Anum_pg_rewrite_ev_enabled: AttrNumber = 5;
