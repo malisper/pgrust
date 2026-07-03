@@ -146,10 +146,7 @@ pub fn SPI_prepare(src: &str, argtypes: &[Oid]) -> PgResult<SpiPlanPtr> {
 }
 
 pub fn SPI_prepare_cursor(src: &str, argtypes: &[Oid], cursor_options: i32) -> PgResult<SpiPlanPtr> {
-    if src.is_empty() {
-        set_spi_result(SPI_ERROR_ARGUMENT);
-        return Ok(SpiPlanPtr::NULL);
-    }
+    // C rejects only src == NULL; an empty string is a legal empty plan.
     let res = _SPI_begin_call(true);
     if res < 0 {
         set_spi_result(res);
