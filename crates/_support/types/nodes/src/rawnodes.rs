@@ -100,6 +100,18 @@ pub struct SelectStmt<'mcx> {
     pub rarg: Option<&'mcx SelectStmt<'mcx>>,
 }
 
+/// `relation` is a RangeVar node handle (the grammar scribbles its alias).
+#[derive(Default)]
+pub struct InsertStmt<'mcx> {
+    pub relation: Option<Node<'mcx>>,
+    pub cols: NodeList<'mcx>,
+    pub selectStmt: Option<Node<'mcx>>,
+    pub onConflictClause: Option<Node<'mcx>>,
+    pub returningClause: Option<Node<'mcx>>,
+    pub withClause: Option<Node<'mcx>>,
+    pub r#override: crate::primnodes::OverridingKind,
+}
+
 #[derive(Default)]
 pub struct ResTarget<'mcx> {
     pub name: Option<&'mcx str>,
@@ -209,6 +221,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for RawStmt<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for SelectStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_SelectStmt;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for InsertStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_InsertStmt;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for ResTarget<'mcx> {
     const TAG: NodeTag = NodeTag::T_ResTarget;
 }
@@ -306,6 +321,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_select_stmt(self) -> Option<&'mcx SelectStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_insert_stmt(self) -> Option<&'mcx InsertStmt<'mcx>> {
         self.as_variant()
     }
 

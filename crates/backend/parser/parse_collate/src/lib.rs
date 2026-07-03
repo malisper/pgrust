@@ -230,10 +230,18 @@ fn assign_collations_walker<'mcx>(
             location = expr_location(node);
         }
         // C's default arm over the closed set this lane can produce.
-        tag @ (NodeTag::T_OpExpr | NodeTag::T_RelabelType) => {
+        tag @ (NodeTag::T_OpExpr
+        | NodeTag::T_FuncExpr
+        | NodeTag::T_RelabelType
+        | NodeTag::T_Aggref) => {
             match tag {
                 NodeTag::T_OpExpr => {
                     for arg in &node.as_op_expr().unwrap().args {
+                        assign_collations_walker(arg, &mut loccontext)?;
+                    }
+                }
+                NodeTag::T_FuncExpr => {
+                    for arg in &node.as_func_expr().unwrap().args {
                         assign_collations_walker(arg, &mut loccontext)?;
                     }
                 }
@@ -242,6 +250,18 @@ fn assign_collations_walker<'mcx>(
                         node.as_relabel_type().unwrap().arg,
                         &mut loccontext,
                     )?;
+                }
+                NodeTag::T_Aggref => {
+                    let agg = node.as_aggref().unwrap();
+                    for arg in &agg.aggdirectargs {
+                        assign_collations_walker(arg, &mut loccontext)?;
+                    }
+                    for tle in &agg.args {
+                        assign_collations_walker(tle, &mut loccontext)?;
+                    }
+                    if let Some(filter) = agg.aggfilter {
+                        assign_collations_walker(filter, &mut loccontext)?;
+                    }
                 }
                 _ => unreachable!(),
             }
@@ -279,8 +299,20 @@ fn assign_collations_walker<'mcx>(
                             o.inputcollid = input_coll;
                         })
                         .unwrap(),
+                    NodeTag::T_FuncExpr => node
+                        .with_mut::<types_nodes::FuncExpr, _>(|f| {
+                            f.funccollid = set_coll;
+                            f.inputcollid = input_coll;
+                        })
+                        .unwrap(),
                     NodeTag::T_RelabelType => node
                         .with_mut::<types_nodes::RelabelType, _>(|r| r.resultcollid = set_coll)
+                        .unwrap(),
+                    NodeTag::T_Aggref => node
+                        .with_mut::<types_nodes::primnodes::Aggref, _>(|a| {
+                            a.aggcollid = set_coll;
+                            a.inputcollid = input_coll;
+                        })
                         .unwrap(),
                     _ => unreachable!(),
                 }

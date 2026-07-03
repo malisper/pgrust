@@ -24,6 +24,8 @@ types_nodes = { path = "../../../_support/types/nodes" }
 types_portal = { path = "../../../_support/types/portal" }
 
 [dev-dependencies]
+indexcmds_seams = { path = "../../commands/indexcmds_seams" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
 miscinit_seams = { path = "../../utils/init/miscinit_seams" }
 datum = { path = "../../../_support/types/datum" }
 gram_core = { path = "../gram_core" }

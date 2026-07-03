@@ -1,6 +1,6 @@
 use datum::Datum;
 use mcx::{Mcx, MemoryContext};
-use types_core::catalog::{BOOLOID, INT4OID, TEXTOID, UNKNOWNOID};
+use types_core::catalog::{BOOLOID, INT4OID, INT8OID, TEXTOID, UNKNOWNOID};
 use types_core::InvalidOid;
 use types_nodes::nodes_enums::CmdType;
 use types_nodes::parsenodes::{QuerySource, TransactionStmt};
@@ -286,21 +286,241 @@ fn install_type_fixture() {
             Ok(name == "+" || name == ">")
         });
         syscache_seams::lookup_pg_proc_shape::set(|funcid| {
-            Ok(matches!(funcid, 177 | 147).then_some(syscache_seams::PgProcShape {
-                pronamespace: 11,
-                prorettype: if funcid == 147 { BOOLOID } else { INT4OID },
-                provariadic: InvalidOid,
-                prosupport: InvalidOid,
-                pronargs: 2,
-                prokind: b'f' as i8,
-                provolatile: b'i' as i8,
-                proparallel: b's' as i8,
-                proretset: false,
-                proisstrict: true,
-                proleakproof: false,
+            Ok(match funcid {
+                // 481 = int8(int4), the pg_cast int4->int8 coercion function.
+                177 | 147 | 481 => Some(syscache_seams::PgProcShape {
+                    pronamespace: 11,
+                    prorettype: match funcid {
+                        147 => BOOLOID,
+                        481 => INT8OID,
+                        _ => INT4OID,
+                    },
+                    provariadic: InvalidOid,
+                    prosupport: InvalidOid,
+                    pronargs: if funcid == 481 { 1 } else { 2 },
+                    prokind: b'f' as i8,
+                    provolatile: b'i' as i8,
+                    proparallel: b's' as i8,
+                    proretset: false,
+                    proisstrict: true,
+                    proleakproof: false,
+                }),
+                2803 => Some(syscache_seams::PgProcShape {
+                    pronamespace: 11,
+                    prorettype: 20,
+                    provariadic: InvalidOid,
+                    prosupport: InvalidOid,
+                    pronargs: 0,
+                    prokind: b'a' as i8,
+                    provolatile: b'i' as i8,
+                    proparallel: b's' as i8,
+                    proretset: false,
+                    proisstrict: false,
+                    proleakproof: false,
+                }),
+                _ => None,
+            })
+        });
+        syscache_seams::lookup_pg_proc_name_candidates::set(|mcx, proname| {
+            let mut v = mcx::PgVec::new_in(mcx);
+            if proname == "count" {
+                let mut anyarg = mcx::vec_with_capacity_in(mcx, 1)?;
+                anyarg.push(2276);
+                v.push(syscache_seams::PgProcCandidate {
+                    oid: 2147,
+                    pronamespace: 11,
+                    pronargs: 1,
+                    pronargdefaults: 0,
+                    provariadic: InvalidOid,
+                    proargtypes: anyarg,
+                });
+                v.push(syscache_seams::PgProcCandidate {
+                    oid: 2803,
+                    pronamespace: 11,
+                    pronargs: 0,
+                    pronargdefaults: 0,
+                    provariadic: InvalidOid,
+                    proargtypes: mcx::PgVec::new_in(mcx),
+                });
+            }
+            Ok(v)
+        });
+        syscache_seams::lookup_pg_aggregate_shape::set(|aggfnoid| {
+            Ok((aggfnoid == 2803).then_some(syscache_seams::PgAggregateShape {
+                aggkind: b'n' as i8,
+                aggnumdirectargs: 0,
+                aggtransfn: 1219,
+                aggfinalfn: InvalidOid,
+                aggcombinefn: 463,
+                aggserialfn: InvalidOid,
+                aggdeserialfn: InvalidOid,
+                aggfinalextra: false,
+                aggfinalmodify: b'r' as i8,
+                aggtranstype: 20,
+                aggtransspace: 0,
             }))
         });
+        syscache_seams::lookup_pg_cast_shape::set(|src, tgt| {
+            // pg_cast: int4 -> int8 via 481 int8(int4), implicit, function.
+            Ok((src == INT4OID && tgt == INT8OID).then_some(syscache_seams::PgCastShape {
+                oid: 10001,
+                castfunc: 481,
+                castcontext: b'i' as i8,
+                castmethod: b'f' as i8,
+            }))
+        });
+        syscache_seams::lookup_pg_type_typcache_shape::set(|typid| {
+            let name = match typid {
+                INT4OID => "int4",
+                INT8OID => "int8",
+                TEXTOID => "text",
+                _ => return Ok(None),
+            };
+            let mut typname = types_tuple::NameData::default();
+            typname.namestrcpy(name);
+            Ok(Some(syscache_seams::PgTypeTypcacheShape {
+                typname,
+                typlen: match typid {
+                    TEXTOID => -1,
+                    INT8OID => 8,
+                    _ => 4,
+                },
+                typbyval: typid != TEXTOID,
+                typalign: b'i' as i8,
+                typstorage: b'p' as i8,
+                typtype: b'b' as i8,
+                typisdefined: true,
+                typrelid: InvalidOid,
+                typsubscript: InvalidOid,
+                typelem: InvalidOid,
+                typarray: InvalidOid,
+                typcollation: if typid == TEXTOID { 100 } else { InvalidOid },
+            }))
+        });
+        syscache_seams::syscache_hash_value_typeoid::set(|typid| Ok(typid.wrapping_mul(31)));
+        // 1978/1979 = int4 btree/hash default opclasses over the 1976/1977
+        // integer_ops families (pg_opclass.dat) — the ORDER BY operator spine.
+        syscache_seams::lookup_pg_opclass_shape::set(|opclass| {
+            Ok(match opclass {
+                1978 => Some(syscache_seams::PgOpclassShape {
+                    opcmethod: types_core::BTREE_AM_OID,
+                    opcfamily: 1976,
+                    opcintype: INT4OID,
+                }),
+                1979 => Some(syscache_seams::PgOpclassShape {
+                    opcmethod: lsyscache::HASH_AM_OID,
+                    opcfamily: 1977,
+                    opcintype: INT4OID,
+                }),
+                _ => None,
+            })
+        });
+        syscache_seams::lookup_pg_amop_by_strategy::set(|opfamily, _l, _r, strategy| {
+            Ok(match (opfamily, strategy) {
+                (1976, 1) => 97,
+                (1976, 3) => 96,
+                (1976, 5) => 521,
+                (1977, 1) => 96,
+                _ => InvalidOid,
+            })
+        });
+        syscache_seams::lookup_pg_amproc::set(|opfamily, _l, _r, procnum| {
+            Ok(match (opfamily, procnum) {
+                (1976, 1) => 351,
+                (1977, 1) => 450,
+                (1977, 2) => 425,
+                _ => InvalidOid,
+            })
+        });
+        indexcmds_seams::get_default_opclass::set(|type_id, am_id| {
+            Ok(match (type_id, am_id) {
+                (INT4OID, types_core::BTREE_AM_OID) => 1978,
+                (INT4OID, _) => 1979,
+                _ => InvalidOid,
+            })
+        });
     });
+}
+
+#[test]
+fn select_1_order_by_1_end_to_end() {
+    install_type_fixture();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let target = Node::mk_res_target(mcx, None, NodeList::nil(), Some(int_const(mcx, 1, 7)), 7)
+        .unwrap();
+    let sortby = Node::mk(
+        mcx,
+        types_nodes::rawnodes::SortBy {
+            node: Some(int_const(mcx, 1, 18)),
+            sortby_dir: types_nodes::rawnodes::SortByDir::SORTBY_DEFAULT,
+            sortby_nulls: types_nodes::rawnodes::SortByNulls::SORTBY_NULLS_DEFAULT,
+            useOp: NodeList::nil(),
+            location: -1,
+        },
+    )
+    .unwrap();
+    let stmt = Node::mk(
+        mcx,
+        SelectStmt {
+            targetList: NodeList::make1(mcx, target).unwrap(),
+            sortClause: NodeList::make1(mcx, sortby).unwrap(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let raw_stmt = raw(stmt, 19);
+
+    let q = analyze(mcx, "SELECT 1 ORDER BY 1", &raw_stmt);
+
+    // C Query shape: sortClause = [SortGroupClause(ref 1, eqop 96 int4eq,
+    // sortop 97 int4lt, forward, nulls last, hashable)], tle marked.
+    assert_eq!(q.sortClause.len(), 1);
+    let s = q.sortClause.nth(0).as_sort_group_clause().unwrap();
+    assert_eq!(s.tleSortGroupRef, 1);
+    assert_eq!((s.eqop, s.sortop), (96, 97));
+    assert!(!s.reverse_sort && !s.nulls_first && s.hashable);
+    let te = q.targetList.nth(0).as_target_entry().unwrap();
+    assert_eq!(te.ressortgroupref, 1);
+    assert!(!te.resjunk);
+    assert!(q.limitCount.is_none() && q.limitOffset.is_none());
+}
+
+#[test]
+fn select_1_limit_1_end_to_end() {
+    install_type_fixture();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let target = Node::mk_res_target(mcx, None, NodeList::nil(), Some(int_const(mcx, 1, 7)), 7)
+        .unwrap();
+    let stmt = Node::mk(
+        mcx,
+        SelectStmt {
+            targetList: NodeList::make1(mcx, target).unwrap(),
+            limitCount: Some(int_const(mcx, 1, 15)),
+            limitOption: types_nodes::nodes_enums::LimitOption::LIMIT_OPTION_COUNT,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let raw_stmt = raw(stmt, 16);
+
+    let q = analyze(mcx, "SELECT 1 LIMIT 1", &raw_stmt);
+
+    // C Query shape: limitCount = FuncExpr(funcid 481 int8(int4), rettype
+    // int8, COERCE_IMPLICIT_CAST, args [Const int4 1]).
+    assert!(q.limitOffset.is_none());
+    assert_eq!(q.limitOption, types_nodes::nodes_enums::LimitOption::LIMIT_OPTION_COUNT);
+    let f = q.limitCount.unwrap().as_func_expr().unwrap();
+    assert_eq!((f.funcid, f.funcresulttype), (481, INT8OID));
+    assert_eq!(f.funcformat, types_nodes::CoercionForm::COERCE_IMPLICIT_CAST);
+    assert!(!f.funcretset && !f.funcvariadic);
+    assert_eq!((f.funccollid, f.inputcollid), (InvalidOid, InvalidOid));
+    assert_eq!(f.args.len(), 1);
+    let arg = f.args.nth(0).as_const().unwrap();
+    assert_eq!((arg.consttype, arg.constvalue), (INT4OID, Datum::from_i32(1)));
+    assert_eq!(arg.location, 15);
+    assert!(q.sortClause.is_nil());
 }
 
 #[test]
@@ -585,4 +805,86 @@ mod from_where {
         assert_eq!(err.message, "relation \"nope\" does not exist");
         assert_eq!(err.cursor_position(), Some(15));
     }
+}
+
+fn count_star_call(mcx: Mcx<'_>) -> Node<'_> {
+    let funcname = NodeList::make1(
+        mcx,
+        Node::mk(mcx, PgStr { sval: "count" }).unwrap(),
+    )
+    .unwrap();
+    Node::mk(
+        mcx,
+        types_nodes::rawnodes::FuncCall {
+            funcname,
+            args: NodeList::nil(),
+            agg_order: NodeList::nil(),
+            agg_filter: None,
+            over: None,
+            agg_within_group: false,
+            agg_star: true,
+            agg_distinct: false,
+            func_variadic: false,
+            funcformat: types_nodes::CoercionForm::COERCE_EXPLICIT_CALL,
+            location: 7,
+        },
+    )
+    .unwrap()
+}
+
+#[test]
+fn select_count_star_end_to_end() {
+    install_type_fixture();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let target =
+        Node::mk_res_target(mcx, None, NodeList::nil(), Some(count_star_call(mcx)), 7).unwrap();
+    let raw_stmt = raw(select_stmt(mcx, &[target]), 15);
+
+    let q = analyze(mcx, "SELECT count(*)", &raw_stmt);
+
+    assert!(q.hasAggs);
+    let te = q.targetList.nth(0).as_target_entry().unwrap();
+    assert_eq!(te.resname, Some("count"));
+    let agg = te.expr.as_aggref().unwrap();
+    assert_eq!(agg.aggfnoid, 2803);
+    assert_eq!(agg.aggtype, 20);
+    assert!(agg.aggstar);
+    assert!(agg.args.is_nil());
+    assert_eq!((agg.aggcollid, agg.inputcollid), (InvalidOid, InvalidOid));
+}
+
+#[test]
+fn count_star_in_where_is_42803() {
+    install_type_fixture();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let target = Node::mk_res_target(mcx, None, NodeList::nil(), Some(int_const(mcx, 1, 7)), 7)
+        .unwrap();
+    let sel = Node::mk(
+        mcx,
+        SelectStmt {
+            targetList: NodeList::from_slice(mcx, &[target]).unwrap(),
+            whereClause: Some(count_star_call(mcx)),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let raw_stmt = raw(sel, 30);
+
+    let err = parse_analyze_fixedparams(
+        mcx,
+        &raw_stmt,
+        "SELECT 1 WHERE count(*)",
+        &[],
+        Default::default(),
+    )
+    .map(|_| ())
+    .unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_GROUPING_ERROR);
+    assert!(
+        err.message().contains("aggregate functions are not allowed in WHERE"),
+        "{}",
+        err.message()
+    );
 }

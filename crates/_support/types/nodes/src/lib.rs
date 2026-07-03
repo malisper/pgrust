@@ -36,9 +36,11 @@ pub use primnodes::{
     NullTestType, OpExpr, OverridingKind, Param, ParamKind, RangeTblRef, RangeVar, RelabelType,
     TargetEntry, Var, VarReturningType,
 };
+pub use plannodes::ModifyTable;
 pub use rawnodes::{
-    A_Const, A_Expr, A_Expr_Kind, A_Star, ColumnRef, DistinctClause, FuncCall, ParamRef, RawStmt,
-    ResTarget, SelectStmt, SortBy, SortByDir, SortByNulls, TypeCast, TypeName, ValUnion,
+    A_Const, A_Expr, A_Expr_Kind, A_Star, ColumnRef, DistinctClause, FuncCall, InsertStmt,
+    ParamRef, RawStmt, ResTarget, SelectStmt, SortBy, SortByDir, SortByNulls, TypeCast, TypeName,
+    ValUnion,
 };
 pub use tags::NodeTag;
 
