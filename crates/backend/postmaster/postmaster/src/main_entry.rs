@@ -38,17 +38,33 @@ pub fn InitProcessGlobals() {
     pg_prng::global_prng(|prng| prng.seed(rseed));
 }
 
-fn getInstallationPaths(_argv0: &str) {
-    let exe = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.into_os_string().into_string().ok())
-        .unwrap_or_default();
+fn getInstallationPaths(argv0: &str) {
+    let exe = match pg_path::find_my_exec(argv0, |m| {
+        let _ = elog::ereport(LOG)
+            .errmsg(m)
+            .finish(types_error::ErrorLocation::new("src/common/exec.c", 0, "find_my_exec"));
+    }) {
+        Ok(exe) => exe,
+        Err(_) => {
+            write_stderr(format!(
+                "FATAL:  {argv0}: could not locate my own executable path\n"
+            ));
+            ExitPostmaster(1);
+        }
+    };
     let mut buf = [0u8; types_core::MAXPGPATH];
     let n = exe.len().min(types_core::MAXPGPATH - 1);
     buf[..n].copy_from_slice(&exe.as_bytes()[..n]);
     init_small::globals::set_my_exec_path(buf);
-    // get_pkglib_path/postgres-check: extension loading is unported; the
-    // preload seams panic before pkglib_path is consulted.
+
+    let pkglib = pg_path::get_pkglib_path(&exe);
+    let mut buf = [0u8; types_core::MAXPGPATH];
+    let n = pkglib.len().min(types_core::MAXPGPATH - 1);
+    buf[..n].copy_from_slice(&pkglib.as_bytes()[..n]);
+    init_small::globals::set_pkglib_path(buf);
+    // DIVERGENCE: C verifies pkglib_path is a readable dir; skipped while
+    // extension loading is unported (the boot must not require an installed
+    // lib/ tree).
 }
 
 fn checkControlFile() {

@@ -308,7 +308,11 @@ fn CleanupProcSignalState(_code: i32, _arg: usize) {
     slot.pss_barrierGeneration.store(u64::MAX, Relaxed);
     slot.pss_mutex.unlock();
 
-    condition_variable_seams::proc_signal_barrier_cv_broadcast::call(slot_index as i32);
+    // CV unit unported => no sleeper can exist; the uninstalled skip is C's
+    // no-waiter broadcast no-op.
+    if condition_variable_seams::proc_signal_barrier_cv_broadcast::is_installed() {
+        condition_variable_seams::proc_signal_barrier_cv_broadcast::call(slot_index as i32);
+    }
 }
 
 // C's kill(pid, SIGUSR1). One backend = one thread: the sender cannot run the
@@ -495,7 +499,9 @@ pub fn ProcessProcSignalBarrier() -> PgResult<()> {
     }
 
     my_slot.pss_barrierGeneration.store(shared_gen, Release);
-    condition_variable_seams::proc_signal_barrier_cv_broadcast::call(my_index as i32);
+    if condition_variable_seams::proc_signal_barrier_cv_broadcast::is_installed() {
+        condition_variable_seams::proc_signal_barrier_cv_broadcast::call(my_index as i32);
+    }
     Ok(())
 }
 

@@ -11,7 +11,7 @@ use std::cell::{Cell, RefCell, UnsafeCell};
 use std::mem::size_of;
 use std::ptr::NonNull;
 use std::sync::atomic::{
-    AtomicBool, AtomicI32, AtomicU32,
+    AtomicBool, AtomicI32, AtomicPtr, AtomicU32, AtomicUsize,
     Ordering::{Acquire, Relaxed, Release},
 };
 
@@ -170,6 +170,25 @@ fn current_seg() -> SISeg {
         .expect("shared invalidation memory is not attached (SharedInvalShmemInit)")
 }
 
+// C attaches shmInvalBuffer per-process at shmem attach; in the thread model
+// SharedInvalShmemInit runs once (postmaster thread) and publishes here, and
+// each backend thread binds its TLS copy at SharedInvalBackendInit.
+static SEG_BASE: AtomicPtr<SISegHdr> = AtomicPtr::new(std::ptr::null_mut());
+static SEG_SLOTS: AtomicUsize = AtomicUsize::new(0);
+
+fn attach_seg() {
+    LOCAL.with(|st| {
+        if st.seg.get().is_none() {
+            if let Some(base) = NonNull::new(SEG_BASE.load(Acquire)) {
+                st.seg.set(Some(SISeg {
+                    base,
+                    slots: SEG_SLOTS.load(Relaxed),
+                }));
+            }
+        }
+    });
+}
+
 fn spin_acquire(lock: &Spinlock, func: &'static str) {
     if lock.tas() != 0 {
         let mut delay = s_lock_seams::SpinDelayStatus::new(file!(), line!() as i32, func);
@@ -204,6 +223,8 @@ pub fn SharedInvalShmemInit() -> PgResult<()> {
     if !found {
         init_segment(seg);
     }
+    SEG_SLOTS.store(slots, Relaxed);
+    SEG_BASE.store(seg.base.as_ptr(), Release);
     LOCAL.with(|st| st.seg.set(Some(seg)));
     Ok(())
 }
@@ -231,6 +252,7 @@ pub fn SharedInvalBackendInit(sendOnly: bool) -> PgResult<()> {
     if my < 0 {
         return Err(Box::new(PgError::error("MyProcNumber not set")));
     }
+    attach_seg();
     let seg = current_seg();
     if my as usize >= seg.slots {
         return Err(Box::new(PgError::new(

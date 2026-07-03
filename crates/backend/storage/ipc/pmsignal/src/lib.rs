@@ -104,9 +104,13 @@ pub fn SendPostmasterSignal(reason: PMSignalReason) {
         return;
     }
     state().PMSignalFlags[reason as usize].store(true, Release);
-    // C: kill(PostmasterPid, SIGUSR1); the CheckPostmasterSignal drain
-    // belongs to the postmaster loop, delivery is its wait-loop kick.
-    waiteventset_seams::wakeup_other_proc::call(g::PostmasterPid());
+    // C: kill(PostmasterPid, SIGUSR1) -> the postmaster's handler pends
+    // process_pm_pmsignal and sets the PM latch.
+    if postmaster_seams::signal_postmaster_sigusr1::is_installed() {
+        postmaster_seams::signal_postmaster_sigusr1::call();
+    } else {
+        waiteventset_seams::wakeup_other_proc::call(g::PostmasterPid());
+    }
 }
 
 pub fn CheckPostmasterSignal(reason: PMSignalReason) -> bool {

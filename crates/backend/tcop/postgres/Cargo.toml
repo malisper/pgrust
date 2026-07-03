@@ -47,6 +47,7 @@ planner_seams = { path = "../../optimizer/plan/planner_seams" }
 ps_status_seams = { path = "../../utils/misc/ps_status_seams" }
 timeout_seams = { path = "../../utils/misc/timeout_seams" }
 backend_status_seams = { path = "../../utils/activity/backend_status_seams" }
+ipc = { path = "../../storage/ipc/ipc" }
 ipc_seams = { path = "../../storage/ipc/ipc_seams" }
 postinit = { path = "../../utils/init/postinit" }
 miscinit = { path = "../../utils/init/miscinit" }

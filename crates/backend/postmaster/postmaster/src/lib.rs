@@ -1,9 +1,9 @@
 //! postmaster.c core — the boot half: PostmasterMain startup sequencing,
-//! ServerLoop, backend spawn, and shutdown-signal handling, C order preserved.
-//! Thread model per launch_backend: children are threads; signals reaching
-//! the process land on the postmaster (the only installer of handlers), and
-//! child-exit notification/child signaling is the pmchild unit's redesign
-//! (loud seams here). The auth/bgworker/syslogger child matrix defers.
+//! ServerLoop, backend spawn, shutdown-signal handling, and the crash-restart
+//! cycle for the catchable (caught-panic) crash class, C order preserved
+//! (notes/crash-restart-design.md). Thread model per launch_backend: children
+//! are threads; signals reaching the process land on the postmaster (the only
+//! installer of handlers). The auth/bgworker/syslogger child matrix defers.
 
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
@@ -20,6 +20,7 @@ use types_error::{ErrorLocation, PgResult, DEBUG2, LOG};
 use types_storage::latch::LatchHandle;
 use types_storage::waiteventset::WaitEventSetHandle;
 
+pub(crate) mod crash_reset;
 pub mod main_entry;
 pub mod serverloop;
 pub mod statemachine;
@@ -387,7 +388,11 @@ pub fn process_pm_pmsignal() -> PgResult<()> {
             pmchild_seams::signal_children::call(libc::SIGUSR2, btmask(BackendType::WalSender));
             statemachine::UpdatePMState(PMState::PM_WAIT_XLOG_ARCHIVAL);
         } else if with_pm(|pm| !pm.fatal_error && pm.shutdown != ImmediateShutdown) {
-            panic!("process_pm_pmsignal: unexpected shutdown checkpoint; crash-restart needs the reaper (backend-postmaster-pmchild)");
+            report(LOG, "WAL was shut down unexpectedly".into(), 3846, "process_pm_pmsignal");
+            statemachine::HandleFatalError(
+                pmsignal::QuitSignalReason::PMQUIT_FOR_CRASH,
+                false,
+            )?;
         }
     }
 
@@ -499,7 +504,8 @@ pub fn process_pm_child_exit() -> PgResult<()> {
                 } else {
                     with_pm(|pm| pm.startup_status = StartupStatusEnum::Crashed);
                 }
-                handle_child_crash("startup process", pid, exitstatus);
+                handle_child_crash("startup process", pid, exitstatus)?;
+                continue;
             }
 
             with_pm(|pm| {
@@ -526,7 +532,7 @@ pub fn process_pm_child_exit() -> PgResult<()> {
             let bgwriter = with_pm(|pm| pm.bgwriter.take()).expect("checked");
             pmchild_seams::release_postmaster_child_slot::call(bgwriter.child_slot);
             if !status0 {
-                handle_child_crash("background writer process", pid, exitstatus);
+                handle_child_crash("background writer process", pid, exitstatus)?;
             }
             continue;
         }
@@ -542,7 +548,7 @@ pub fn process_pm_child_exit() -> PgResult<()> {
                     btmask_all_except(&[BackendType::Logger]),
                 );
             } else {
-                handle_child_crash("checkpointer process", pid, exitstatus);
+                handle_child_crash("checkpointer process", pid, exitstatus)?;
             }
             continue;
         }
@@ -551,7 +557,7 @@ pub fn process_pm_child_exit() -> PgResult<()> {
             let walwriter = with_pm(|pm| pm.walwriter.take()).expect("checked");
             pmchild_seams::release_postmaster_child_slot::call(walwriter.child_slot);
             if !status0 {
-                handle_child_crash("WAL writer process", pid, exitstatus);
+                handle_child_crash("WAL writer process", pid, exitstatus)?;
             }
             continue;
         }
@@ -563,7 +569,7 @@ pub fn process_pm_child_exit() -> PgResult<()> {
                 // CleanupBackend: bgworker-notify n/a (registry empty).
                 pmchild_seams::release_postmaster_child_slot::call(child_slot);
                 if !(status0 || status1) {
-                    handle_child_crash("server process", pid, exitstatus);
+                    handle_child_crash("server process", pid, exitstatus)?;
                 }
             }
             Some((_slot, btype)) => panic!(
@@ -579,14 +585,23 @@ pub fn process_pm_child_exit() -> PgResult<()> {
     statemachine::PostmasterStateMachine()
 }
 
-// HandleChildCrash: the crash-restart cycle (TerminateChildren(SIGQUIT/SIGABRT),
-// FatalError, shmem reset) is undesigned under threads — a crashed thread may
-// have poisoned the shared address space, so die loudly instead.
-fn handle_child_crash(procname: &str, pid: pid_t, exitstatus: i32) -> ! {
+/// HandleChildCrash. Covers the catchable crash class only (caught panics);
+/// memory-safety violations are process-fatal by design
+/// (notes/crash-restart-design.md).
+fn handle_child_crash(procname: &str, pid: pid_t, exitstatus: i32) -> PgResult<()> {
+    if with_pm(|pm| pm.fatal_error || pm.shutdown == ImmediateShutdown) {
+        return Ok(());
+    }
+
     log_child_exit(procname, pid, exitstatus);
-    panic!(
-        "HandleChildCrash({procname}, pid {pid}): crash-restart cycle is undesigned under the thread model (backend-postmaster-pmchild redesign)"
+    report(
+        LOG,
+        "terminating any other active server processes".into(),
+        2804,
+        "HandleChildCrash",
     );
+
+    statemachine::HandleFatalError(pmsignal::QuitSignalReason::PMQUIT_FOR_CRASH, true)
 }
 
 pub fn init_seams() {

@@ -402,6 +402,22 @@ fn InitializeLWLocks(locks: &mut [LWLockPadded]) -> Vec<NamedLWLockTrancheRange>
 
 pub fn InitLWLockAccess() {}
 
+/// Crash-cycle reset in place (notes/crash-restart-design.md): re-arm every
+/// published lock. Tranche ids are boot-stable (named requests fixed before
+/// CreateLWLocks), so only state and wait lists reset.
+pub fn LWLockResetAfterCrash() {
+    let table = MAIN_LWLOCKS
+        .get()
+        .expect("LWLockResetAfterCrash before CreateLWLocks");
+    for slot in table.locks() {
+        slot.lock.state.store(LW_FLAG_RELEASE_OK, Ordering::Relaxed);
+        // SAFETY: crash choreography drained every child before reset; the
+        // postmaster thread has exclusive access, so no LW_FLAG_LOCKED holder
+        // or waiter can exist.
+        proclist_init(unsafe { &mut *slot.lock.waiters.get() });
+    }
+}
+
 pub fn GetNamedLWLockTranche<'a>(
     table: &'a LWLockTable,
     tranche_name: &str,

@@ -314,3 +314,23 @@ fn shmem_size_matches_layout() {
     assert_eq!(WRITE_QUANTUM, 64);
     assert_eq!(MAXINVALMSGS, 32);
 }
+
+#[test]
+fn backend_thread_attaches_without_local_shmem_init() {
+    let _guard = serial();
+    setup();
+    let mark = std::thread::spawn(|| {
+        thread_globals(7, 9700);
+        // No SharedInvalShmemInit on this thread: BackendInit must bind the
+        // TLS seg from the process-global publication.
+        let mark = EXIT_CALLBACKS.lock().unwrap().len();
+        SharedInvalBackendInit(false).unwrap();
+        let (msgs, reset) = receive_all();
+        assert!(msgs.is_empty());
+        assert!(!reset);
+        mark
+    })
+    .join()
+    .unwrap();
+    backend_exit(7, 9700, mark);
+}

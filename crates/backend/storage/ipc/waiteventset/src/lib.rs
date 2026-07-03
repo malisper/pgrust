@@ -179,8 +179,17 @@ pub fn AddWaitEventToSet(
     latch: Option<LatchHandle>,
     user_data: Option<i32>,
 ) -> PgResult<i32> {
+    // One address space: the postmaster cannot die while any backend thread
+    // runs, so the death watch is an event that can never fire — registered
+    // inert (position reserved, nothing handed to the kernel).
     if events == WL_EXIT_ON_PM_DEATH || events == WL_POSTMASTER_DEATH {
-        panic!("postmaster death watch is not ported (threaded-model owner: postmaster)");
+        return run_with_set(handle, |set| {
+            assert!(set.nevents < set.nevents_space, "no space for wait event");
+            let pos = set.nevents;
+            set.nevents += 1;
+            set.events.push(WaitEvent { pos, fd: PGINVALID_SOCKET, events, user_data });
+            Ok(pos)
+        });
     }
     let my_pid = MyProcPid();
 
@@ -237,8 +246,9 @@ pub fn ModifyWaitEvent(
         assert!(pos < set.nevents, "wait event position out of range");
         let old_events = set.events[pos as usize].events;
 
-        if old_events == WL_POSTMASTER_DEATH {
-            unreachable!("postmaster death watch is not ported");
+        if old_events & (WL_EXIT_ON_PM_DEATH | WL_POSTMASTER_DEATH) != 0 {
+            set.events[pos as usize].events = events;
+            return Ok(());
         }
 
         // Fast path: mask and latch unchanged (read<->write socket switch).
