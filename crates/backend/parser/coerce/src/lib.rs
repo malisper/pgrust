@@ -1855,6 +1855,19 @@ pub fn expression_returns_set(node: Node<'_>) -> bool {
         NodeTag::T_SubLink => {
             node.as_sub_link().unwrap().testexpr.is_some_and(expression_returns_set)
         }
+        NodeTag::T_ScalarArrayOpExpr => {
+            node.as_scalar_array_op_expr().unwrap().args.iter().any(expression_returns_set)
+        }
+        NodeTag::T_ArrayExpr => {
+            node.as_array_expr().unwrap().elements.iter().any(expression_returns_set)
+        }
+        NodeTag::T_SubscriptingRef => {
+            let sr = node.as_subscripting_ref().unwrap();
+            sr.refupperindexpr.iter().flatten().any(expression_returns_set)
+                || sr.reflowerindexpr.iter().flatten().any(expression_returns_set)
+                || sr.refexpr.is_some_and(expression_returns_set)
+                || sr.refassgnexpr.is_some_and(expression_returns_set)
+        }
         other => panic!(
             "expression_returns_set (nodeFuncs.c): arm for {other:?} unported — \
              backend-nodes-core lane"

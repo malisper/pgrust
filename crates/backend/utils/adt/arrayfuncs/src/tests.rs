@@ -190,3 +190,61 @@ fn text_send_recv_roundtrip() {
     let mut op = text_out();
     assert_eq!(as_str(&array_out(mcx, &img2, &m, &mut op).unwrap()), r#"{a,"b,c",d}"#);
 }
+
+#[test]
+fn element_fetch_and_slice() {
+    let ctx = MemoryContext::new_bump("t");
+    let mcx = ctx.mcx();
+    let m = meta_int4();
+    let mut ip = int4_in();
+    let img = array_in(mcx, "{10,20,NULL,40}", &m, &mut ip, -1, None).unwrap().unwrap();
+
+    let (d, isnull) = crate::element::array_get_element(&img, &[2], -1, 4, true, b'i');
+    assert!(!isnull);
+    assert_eq!(d.as_i32(), 20);
+    let (_, isnull) = crate::element::array_get_element(&img, &[3], -1, 4, true, b'i');
+    assert!(isnull);
+    let (_, isnull) = crate::element::array_get_element(&img, &[99], -1, 4, true, b'i');
+    assert!(isnull);
+
+    // Slice [2:99] silently truncates to the array bound (C shape).
+    let mut upper = [99i32, 0, 0, 0, 0, 0];
+    let mut lower = [2i32, 0, 0, 0, 0, 0];
+    let provided = [true, false, false, false, false, false];
+    let slice = crate::element::array_get_slice(
+        mcx, &img, 1, &mut upper, &mut lower, &provided, &provided, -1, 4, b'i',
+    )
+    .unwrap();
+    let mut op = int4_out();
+    assert_eq!(as_str(&array_out(mcx, &slice, &m, &mut op).unwrap()), "{20,NULL,40}");
+}
+
+#[test]
+fn element_set_replaces_and_extends() {
+    let ctx = MemoryContext::new_bump("t");
+    let mcx = ctx.mcx();
+    let m = meta_int4();
+    let mut ip = int4_in();
+    let img = array_in(mcx, "{1,2,3}", &m, &mut ip, -1, None).unwrap().unwrap();
+    let mut op = int4_out();
+
+    let set = crate::element::array_set_element(
+        mcx, &img, &[2], Datum::from_i32(99), false, -1, 4, true, b'i',
+    )
+    .unwrap();
+    assert_eq!(as_str(&array_out(mcx, &set, &m, &mut op).unwrap()), "{1,99,3}");
+
+    // 1-D extension past the end inserts intervening NULLs (C shape).
+    let ext = crate::element::array_set_element(
+        mcx, &img, &[5], Datum::from_i32(7), false, -1, 4, true, b'i',
+    )
+    .unwrap();
+    assert_eq!(as_str(&array_out(mcx, &ext, &m, &mut op).unwrap()), "{1,2,3,NULL,7}");
+
+    // Extension below the lower bound shifts it (renders with explicit dims).
+    let low = crate::element::array_set_element(
+        mcx, &img, &[-1], Datum::from_i32(0), false, -1, 4, true, b'i',
+    )
+    .unwrap();
+    assert_eq!(as_str(&array_out(mcx, &low, &m, &mut op).unwrap()), "[-1:3]={0,NULL,1,2,3}");
+}

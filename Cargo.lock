@@ -857,6 +857,7 @@ dependencies = [
  "datum",
  "detoast_seams",
  "fmgr_seams",
+ "funcapi_srf",
  "lsyscache",
  "mcx",
  "numutils",
@@ -865,6 +866,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_fmgr",
+ "types_nodes",
 ]
 
 [[package]]
@@ -2913,9 +2915,11 @@ dependencies = [
  "adt_int",
  "adt_timestamp",
  "arrayfuncs",
+ "arrayutils",
  "clauses",
  "clauses_seams",
  "datum",
+ "detoast_seams",
  "elog",
  "exectuples",
  "fd",
@@ -3503,6 +3507,7 @@ dependencies = [
  "exectuples",
  "fmgr_seams",
  "format_type",
+ "funcapi_srf",
  "init_small",
  "lsyscache",
  "mcx",
@@ -3517,6 +3522,16 @@ dependencies = [
  "types_slot",
  "types_tuple",
  "varlena",
+]
+
+[[package]]
+name = "funcapi_srf"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "types_error",
+ "types_fmgr",
+ "types_nodes",
 ]
 
 [[package]]
@@ -6176,6 +6191,7 @@ dependencies = [
  "analyze_seams",
  "catalog_namespace",
  "coerce",
+ "datum",
  "elog",
  "format_type",
  "guc_tables",
@@ -6290,6 +6306,7 @@ dependencies = [
  "datum",
  "elog",
  "format_type",
+ "lsyscache",
  "mbutils",
  "mcx",
  "parse_expr",

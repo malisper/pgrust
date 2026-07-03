@@ -11,7 +11,9 @@ types_core = { path = "../../../../_support/types/types_core" }
 types_error = { path = "../../../../_support/types/types_error" }
 types_fmgr = { path = "../../../../_support/types/fmgr" }
 fmgr_seams = { path = "../../fmgr/fmgr_seams" }
+funcapi_srf = { path = "../../fmgr/funcapi_srf" }
 lsyscache = { path = "../../cache/lsyscache" }
+types_nodes = { path = "../../../../_support/types/nodes" }
 stringinfo = { path = "../../../../_support/types/stringinfo" }
 pqformat = { path = "../../../libpq/pqformat" }
 detoast_seams = { path = "../../../access/common/detoast_seams" }

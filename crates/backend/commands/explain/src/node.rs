@@ -1808,6 +1808,39 @@ fn deparse_expr<'mcx>(
             }
             Ok(())
         }
+        // get_rule_expr T_SubscriptingRef (fetch form; stores never reach
+        // EXPLAIN expressions).
+        NodeTag::T_SubscriptingRef => {
+            let sr = expr.as_subscripting_ref().unwrap();
+            if sr.refassgnexpr.is_some() {
+                node_gap("get_rule_expr", "SubscriptingRef store deparse (ruleutils lane)");
+            }
+            let refexpr = sr.refexpr.expect("SubscriptingRef.refexpr");
+            let need_parens = refexpr.node_tag() != NodeTag::T_Var;
+            if need_parens {
+                buf.try_push('(')?;
+            }
+            deparse_expr(es, plan_node, ancestors, refexpr, useprefix, showimplicit, buf)?;
+            if need_parens {
+                buf.try_push(')')?;
+            }
+            let mut low = sr.reflowerindexpr.iter();
+            let has_lower = !sr.reflowerindexpr.is_nil();
+            for up in sr.refupperindexpr.iter() {
+                buf.try_push('[')?;
+                if has_lower {
+                    if let Some(Some(l)) = low.next() {
+                        deparse_expr(es, plan_node, ancestors, l, useprefix, false, buf)?;
+                    }
+                    buf.try_push(':')?;
+                }
+                if let Some(u) = up {
+                    deparse_expr(es, plan_node, ancestors, u, useprefix, false, buf)?;
+                }
+                buf.try_push(']')?;
+            }
+            Ok(())
+        }
         // get_rule_expr T_SubPlan: reference the subplan by name; a testexpr
         // shows the combining expression instead, with its output Params
         // rendered by the Param arm below.
@@ -1988,6 +2021,19 @@ fn deparse_expr<'mcx>(
                 .expect("PgString write");
             deparse_expr(es, plan_node, ancestors, sa.args.nth(1), useprefix, true, buf)?;
             buf.try_push_str("))")?;
+            Ok(())
+        }
+        // get_rule_expr T_ArrayExpr.
+        NodeTag::T_ArrayExpr => {
+            let a = expr.as_array_expr().unwrap();
+            buf.try_push_str("ARRAY[")?;
+            for (i, e) in a.elements.iter().enumerate() {
+                if i > 0 {
+                    buf.try_push_str(", ")?;
+                }
+                deparse_expr(es, plan_node, ancestors, e, useprefix, true, buf)?;
+            }
+            buf.try_push(']')?;
             Ok(())
         }
         other => node_gap(
@@ -2179,6 +2225,8 @@ fn deparse_expr_type(node: Node<'_>) -> types_core::Oid {
         }
         NodeTag::T_CaseExpr => node.as_case_expr().unwrap().casetype,
         NodeTag::T_CaseTestExpr => node.as_case_test_expr().unwrap().typeId,
+        NodeTag::T_SubscriptingRef => node.as_subscripting_ref().unwrap().refrestype,
+        NodeTag::T_ArrayExpr => node.as_array_expr().unwrap().array_typeid,
         other => node_gap("exprType", &format!("{other:?} (ruleutils deparse lane)")),
     }
 }
