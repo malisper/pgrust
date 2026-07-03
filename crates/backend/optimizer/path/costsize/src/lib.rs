@@ -886,7 +886,7 @@ pub fn cost_tidscan(
     let (spc_random_page_cost, _) = get_tablespace_page_costs(reltablespace);
     let mut run_cost = spc_random_page_cost * ntuples;
 
-    let qpqual_cost = get_restriction_qual_cost(run, rel);
+    let qpqual_cost = get_restriction_qual_cost(run, rel, path_id)?;
     // TID quals are assumed a subset of the qpquals (C's XXX note).
     let mut startup_cost = qpqual_cost.startup + tid_qual_cost.per_tuple;
     let cpu_per_tuple = gucs::cpu_tuple_cost() + qpqual_cost.per_tuple - tid_qual_cost.per_tuple;
