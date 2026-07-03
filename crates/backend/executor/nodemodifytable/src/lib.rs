@@ -62,6 +62,9 @@ pub struct ModifyTableState<'mcx> {
     check_exprs: Option<mcx::PgVec<'mcx, CheckExpr<'mcx>>>,
     // C ri_TrigDesc; Rc clone of the relcache entry's desc (CopyTriggerDesc).
     trigdesc: Option<Rc<types_trigger::TriggerDesc<'static>>>,
+    // C ri_TrigFunctions + ExecGetTriggerOldSlot.
+    trig_fmgr: ::trigger::TriggerFmgrCache,
+    trig_old_slot: Option<ExecSlotId>,
     // ri_GeneratedExprsI/U collapsed to one set: the UPDATE updatedCols skip
     // is perf-only (values are immutable functions of non-generated columns).
     generated_exprs: Option<mcx::PgVec<'mcx, GeneratedExpr<'mcx>>>,
@@ -139,21 +142,23 @@ pub fn exec_init_modify_table<'mcx>(
         if rel.rd_hastriggers {
             let td = relcache::RelationGetTriggerDesc(rel.rd_id)?;
             if let Some(td) = &td {
-                let unported = td.trig_insert_before_row
-                    || td.trig_insert_instead_row
-                    || td.trig_update_before_row
+                let unported = td.trig_insert_instead_row
                     || td.trig_update_instead_row
-                    || td.trig_delete_before_row
                     || td.trig_delete_instead_row
                     || td.trig_insert_before_statement
                     || td.trig_insert_after_statement
                     || td.trig_update_before_statement
                     || td.trig_update_after_statement
                     || td.trig_delete_before_statement
-                    || td.trig_delete_after_statement;
+                    || td.trig_delete_after_statement
+                    || td
+                        .triggers
+                        .iter()
+                        .any(|t| t.tgoldtable.is_some() || t.tgnewtable.is_some());
                 if unported {
                     panic!(
-                        "ExecInitModifyTable (nodeModifyTable.c): BEFORE/INSTEAD/                         statement triggers unported (AFTER ROW RI lane only)"
+                        "ExecInitModifyTable (nodeModifyTable.c): INSTEAD OF/\
+                         statement triggers/transition tables unported"
                     );
                 }
             }
@@ -301,6 +306,8 @@ pub fn exec_init_modify_table<'mcx>(
         on_conflict,
         check_exprs: None,
         trigdesc,
+        trig_fmgr: ::trigger::TriggerFmgrCache::default(),
+        trig_old_slot: None,
         generated_exprs: None,
         router: None,
         leaf_indexes: Vec::new(),
@@ -434,6 +441,7 @@ pub fn exec_end_modify_table(mt: &mut ModifyTableState<'_>) {
     mt.on_conflict = None;
     mt.check_exprs = None;
     mt.trigdesc = None;
+    mt.trig_fmgr = ::trigger::TriggerFmgrCache::default();
     mt.generated_exprs = None;
     // ExecCleanupTupleRouting: close routed leaves (Relation Drop = NoLock
     // close, lock kept to commit as C) and their per-leaf insert state.
@@ -770,6 +778,22 @@ fn exec_update<'mcx>(
     let mut slot_id = slot_id;
     let mut tmfd = TM_FailureData::default();
     let mut lockmode = LockTupleMode::LockTupleExclusive;
+
+    if mt.trigdesc.as_ref().is_some_and(|td| td.trig_update_before_row) {
+        let Some(old_slot) = get_tuple_for_trigger(mt, estate, tupleid)? else {
+            return Ok(false);
+        };
+        if !br_row_triggers(
+            mt,
+            estate,
+            types_trigger::TRIGGER_TYPE_UPDATE,
+            types_trigger::TRIGGER_EVENT_UPDATE,
+            Some(old_slot),
+            Some(slot_id),
+        )? {
+            return Ok(false);
+        }
+    }
     let mut update_indexes = TU_UpdateIndexes::TU_None;
 
     // redo_act:
@@ -913,13 +937,29 @@ fn exec_update<'mcx>(
 // ExecDelete + ExecDeletePrologue/Act/Epilogue (nodeModifyTable.c), plain-heap
 // arm; concurrent TM_Updated runs the EPQ recheck (ldelete loop).
 fn exec_delete<'mcx>(
-    mt: &ModifyTableState<'mcx>,
+    mt: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
     tupleid: &mut ItemPointerData,
     epq_eval: &mut impl FnMut(&mut EStateData<'mcx>, ExecSlotId) -> PgResult<Option<ExecSlotId>>,
 ) -> PgResult<bool> {
     let output_cid = estate.es_output_cid;
     let mut tmfd = TM_FailureData::default();
+
+    if mt.trigdesc.as_ref().is_some_and(|td| td.trig_delete_before_row) {
+        let Some(old_slot) = get_tuple_for_trigger(mt, estate, tupleid)? else {
+            return Ok(false);
+        };
+        if !br_row_triggers(
+            mt,
+            estate,
+            types_trigger::TRIGGER_TYPE_DELETE,
+            types_trigger::TRIGGER_EVENT_DELETE,
+            Some(old_slot),
+            None,
+        )? {
+            return Ok(false);
+        }
+    }
 
     // ldelete:
     loop {
@@ -1071,6 +1111,187 @@ fn exec_delete_fetch_old<'mcx>(
     Ok(slot_id)
 }
 
+
+// ExecBR{Insert,Update,Delete}Triggers + GetTupleForTrigger (trigger.c),
+// plain-heap BEFORE ROW lane. LOUD: WHEN clauses, UPDATE OF columns,
+// replacement tuples returned by a trigger, and the concurrent-update EPQ
+// recheck (single-backend port: loud beats silently wrong).
+fn slot_raw_tuple<'mcx>(
+    estate: &mut EStateData<'mcx>,
+    slot_id: ExecSlotId,
+) -> PgResult<(*const u8, u32, ItemPointerData, types_core::Oid)> {
+    let mcx = estate.es_query_cxt;
+    let slot = &mut estate.es_tupleTable[slot_id.0 as usize];
+    let fetched = exectuples::exec_fetch_slot_heap_tuple(slot, true, mcx, mcx)?;
+    Ok(match fetched {
+        exectuples::FetchedHeapTuple::Slot(t) => {
+            (t.header_ptr(), t.t_len, t.t_self, t.t_tableOid)
+        }
+        exectuples::FetchedHeapTuple::Copied(t) => {
+            (t.header_ptr(), t.t_len, t.t_self, t.t_tableOid)
+        }
+    })
+}
+
+fn br_row_triggers<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    tgtype_event: i16,
+    event_op: u32,
+    old_slot: Option<ExecSlotId>,
+    new_slot: Option<ExecSlotId>,
+) -> PgResult<bool> {
+    use types_trigger::{
+        TRIGGER_EVENT_BEFORE, TRIGGER_EVENT_DELETE, TRIGGER_EVENT_ROW, TRIGGER_TYPE_BEFORE,
+        TRIGGER_TYPE_LEVEL_MASK, TRIGGER_TYPE_ROW, TRIGGER_TYPE_TIMING_MASK,
+    };
+    let mcx = estate.es_query_cxt;
+    let raw_old = match old_slot {
+        Some(id) => Some(slot_raw_tuple(estate, id)?),
+        None => None,
+    };
+    let raw_new = match new_slot {
+        Some(id) => Some(slot_raw_tuple(estate, id)?),
+        None => None,
+    };
+    // SAFETY (both): materialized query-context images; the slots are not
+    // written while these handles live.
+    let mut old_t = raw_old.map(|(img, len, tid, oid)| unsafe {
+        types_tuple::HeapTupleData::from_raw_parts(img, len, tid, oid)
+    });
+    let mut new_t = raw_new.map(|(img, len, tid, oid)| unsafe {
+        types_tuple::HeapTupleData::from_raw_parts(img, len, tid, oid)
+    });
+    let trigdesc = mt.trigdesc.as_ref().expect("BR caller checked trigdesc").clone();
+    let tg_event = event_op | TRIGGER_EVENT_ROW | TRIGGER_EVENT_BEFORE;
+    let is_delete = event_op == TRIGGER_EVENT_DELETE;
+    for (i, trigger) in trigdesc.triggers.iter().enumerate() {
+        if trigger.tgtype & (TRIGGER_TYPE_LEVEL_MASK | TRIGGER_TYPE_TIMING_MASK | tgtype_event)
+            != TRIGGER_TYPE_ROW | TRIGGER_TYPE_BEFORE | tgtype_event
+        {
+            continue;
+        }
+        if !::trigger::TriggerEnabled(trigger) {
+            continue;
+        }
+        if trigger.tgnattr > 0 || trigger.tgqual.is_some() {
+            panic!(
+                "TriggerEnabled (trigger.c): WHEN clause / UPDATE OF columns \
+                 unported on the BEFORE ROW path"
+            );
+        }
+        let finfo = mt.trig_fmgr.get(i, trigger.tgfoid)?;
+        let rel = estate.es_relations[(mt.result_rti - 1) as usize]
+            .as_ref()
+            .expect("result relation opened");
+        // C: INSERT/DELETE put the affected row in tg_trigtuple; UPDATE
+        // carries old in tg_trigtuple and new in tg_newtuple.
+        let (trig_tup, new_tup) = if old_t.is_some() {
+            (old_t.as_mut(), new_t.as_mut())
+        } else {
+            (new_t.as_mut(), None)
+        };
+        let mut tdata =
+            types_trigger_call::TriggerData::new(tg_event, rel, trig_tup, new_tup, trigger);
+        let expected = if tdata.tg_newtuple.is_some() {
+            tdata.tg_newtuple
+        } else {
+            tdata.tg_trigtuple
+        };
+        let ret = ::trigger::ExecCallTriggerFunc(mcx, &mut tdata, finfo)?;
+        match ret {
+            None => return Ok(false),
+            Some(p) if Some(p) == expected => {}
+            Some(_) if is_delete => {}
+            Some(_) => panic!(
+                "ExecBRInsertTriggers/ExecBRUpdateTriggers (trigger.c): trigger \
+                 returned a replacement tuple (store-back lane unported)"
+            ),
+        }
+    }
+    Ok(true)
+}
+
+// GetTupleForTrigger (trigger.c): lock + fetch the target row into the
+// trigger old slot. Ok(None) = row gone, skip the operation.
+fn get_tuple_for_trigger<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    tupleid: &ItemPointerData,
+) -> PgResult<Option<ExecSlotId>> {
+    if mt.trig_old_slot.is_none() {
+        let mcx = estate.es_query_cxt;
+        let (kind, desc) = {
+            let rel = estate.es_relations[(mt.result_rti - 1) as usize]
+                .as_ref()
+                .expect("result relation opened");
+            (tableam::table_slot_callbacks(rel), rel.rd_att.clone())
+        };
+        let slot = exectuples::make_tuple_table_slot(mcx, kind, Some(desc));
+        let id = ExecSlotId(estate.es_tupleTable.len() as u32);
+        estate.es_tupleTable.push(slot);
+        mt.trig_old_slot = Some(id);
+    }
+    let slot_id = mt.trig_old_slot.expect("just initialized");
+    let output_cid = estate.es_output_cid;
+    let mut tmfd = TM_FailureData::default();
+    let lock_result = {
+        let mcx = estate.es_query_cxt;
+        let EStateData { es_relations, es_tupleTable, es_snapshot, .. } = &mut *estate;
+        let snapshot: &tableam_vocab::Snapshot<'mcx> = &*es_snapshot;
+        let rel = es_relations[(mt.result_rti - 1) as usize]
+            .as_ref()
+            .expect("result relation opened");
+        let flags = if xact::IsolationUsesXactSnapshot() {
+            0
+        } else {
+            TUPLE_LOCK_FLAG_FIND_LAST_VERSION
+        };
+        tableam::table_tuple_lock(
+            mcx,
+            rel,
+            tupleid,
+            snapshot,
+            &mut es_tupleTable[slot_id.0 as usize],
+            output_cid,
+            LockTupleMode::LockTupleExclusive,
+            LockWaitPolicy::LockWaitBlock,
+            flags,
+            &mut tmfd,
+        )?
+    };
+    match lock_result {
+        TM_Result::TM_SelfModified => {
+            if tmfd.cmax != output_cid {
+                return Err(self_modified_violation("updated"));
+            }
+            Ok(None)
+        }
+        TM_Result::TM_Ok => {
+            if tmfd.traversed {
+                panic!(
+                    "GetTupleForTrigger (trigger.c): EPQ recheck after a \
+                     concurrent update unported on the BEFORE ROW path"
+                );
+            }
+            Ok(Some(slot_id))
+        }
+        TM_Result::TM_Updated => {
+            if xact::IsolationUsesXactSnapshot() {
+                return Err(serialization_conflict("update"));
+            }
+            panic!("GetTupleForTrigger (trigger.c): unexpected table_tuple_lock status")
+        }
+        TM_Result::TM_Deleted => {
+            if xact::IsolationUsesXactSnapshot() {
+                return Err(serialization_conflict("delete"));
+            }
+            Ok(None)
+        }
+        other => panic!("GetTupleForTrigger (trigger.c): unrecognized status {other:?}"),
+    }
+}
+
 // ExecProcessReturning (nodeModifyTable.c): scan slot = the returned tuple,
 // outer slot = the plan tuple, projected into the node's virtual result slot
 // (C's econtext scantuple/outertuple + ExecProject).
@@ -1137,6 +1358,19 @@ fn exec_insert<'mcx>(
     let mcx = estate.es_query_cxt;
     let output_cid = estate.es_output_cid;
     let onconflict = mt.plan.onConflictAction;
+
+    if mt.trigdesc.as_ref().is_some_and(|td| td.trig_insert_before_row) {
+        if !br_row_triggers(
+            mt,
+            estate,
+            types_trigger::TRIGGER_TYPE_INSERT,
+            types_trigger::TRIGGER_EVENT_INSERT,
+            None,
+            Some(slot_id),
+        )? {
+            return Ok(None);
+        }
+    }
 
     // ExecPrepareTupleRouting: partitioned targets route to a leaf; slots are
     // shared unconverted (attno-remapped children are loud in the router).
@@ -1911,5 +2145,6 @@ mcx::forget_safe_struct!(
         ri_newTupleSlot, ri_oldTupleSlot, ri_ReturningSlot,
         ri_projectNewInfoValid, ri_RowIdAttNo, update_cols, returning_slot;
         operation, indexes, snapshot_any, project_returning, on_conflict,
-        check_exprs, trigdesc, generated_exprs, router, leaf_indexes, leaf_checks },
+        check_exprs, trigdesc, trig_fmgr, trig_old_slot, generated_exprs, router,
+        leaf_indexes, leaf_checks },
 );
