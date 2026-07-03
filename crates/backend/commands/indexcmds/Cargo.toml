@@ -10,6 +10,7 @@ path = "src/lib.rs"
 
 [dependencies]
 coerce = { path = "../../parser/coerce" }
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
 datum = { path = "../../../_support/types/datum" }
 elog = { path = "../../utils/error/elog" }
 fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
@@ -34,7 +35,6 @@ aclchk_seams = { path = "../../catalog/aclchk_seams" }
 guc = { path = "../../utils/misc/guc" }
 xact = { path = "../../access/transam/xact" }
 explain = { path = "../explain" }
-catalog_namespace = { path = "../../catalog/catalog_namespace" }
 tablecmds = { path = "../tablecmds" }
 rel_vocab = { path = "../../../_support/types/rel_vocab" }
 aclchk = { path = "../../catalog/aclchk" }

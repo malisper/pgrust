@@ -1856,7 +1856,11 @@ pub fn estimate_num_groups_pgset<'mcx>(
         }
         // C's expression leg: no expression stats, so decompose to the
         // contained Vars (a Var-free volatile expr keeps every row distinct).
-        let vars_here = vars::pull_var_clause(mcx, node, 0)?;
+        let vars_here = vars::pull_var_clause(
+            mcx,
+            node,
+            vars::PVC_RECURSE_AGGREGATES | vars::PVC_RECURSE_WINDOWFUNCS | vars::PVC_RECURSE_PLACEHOLDERS,
+        )?;
         if vars_here.is_nil() {
             if clauses::contain_volatile_functions(node)? {
                 return Ok(input_rows);

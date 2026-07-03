@@ -103,6 +103,35 @@ pub fn typenameTypeIdAndMod<'mcx>(
     Ok((typoid, typmod))
 }
 
+// LookupTypeNameOid (parse_type.c): plain resolution, no column-lane typtype
+// restriction (operator/opclass DDL accepts pseudo-types like internal).
+pub fn LookupTypeNameOid<'mcx>(mcx: Mcx<'mcx>, tn: &TypeName<'_>) -> PgResult<Oid> {
+    if tn.pct_type || tn.setof {
+        unported("LookupTypeName %TYPE / SETOF");
+    }
+    if tn.names.is_nil() || tn.typeOid != InvalidOid {
+        unported("pre-resolved TypeName.typeOid lane");
+    }
+    let (typoid, typname) = resolveTypeNames(mcx, tn)?;
+    if typoid == InvalidOid {
+        return Err(type_does_not_exist(typname));
+    }
+    let typoid = if tn.arrayBounds.is_nil() {
+        typoid
+    } else {
+        let arr = syscache_seams::pg_type_typarray::call(typoid)?.unwrap_or(InvalidOid);
+        if arr == InvalidOid {
+            return Err(type_does_not_exist(typname));
+        }
+        arr
+    };
+    match syscache_seams::pg_type_isdefined::call(typoid)? {
+        Some(true) => {}
+        _ => unported("shell types (typisdefined = false)"),
+    }
+    Ok(typoid)
+}
+
 // The names→Oid walk shared by typenameTypeIdAndMod and parseTypeString
 // (LookupTypeNameExtended's "normal reference" arm, pre array-bounds).
 fn resolveTypeNames<'mcx, 'tn>(
