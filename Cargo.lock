@@ -10729,6 +10729,7 @@ dependencies = [
  "tableam_vocab",
  "tablecmds_seams",
  "tablespace_seams",
+ "timeline_seams",
  "timeout_seams",
  "timestamp_seams",
  "transam",
