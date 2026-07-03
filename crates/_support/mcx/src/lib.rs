@@ -615,7 +615,9 @@ impl MemoryContext {
     }
 
     pub fn reset(&mut self) {
-        self.fire_reset_callbacks();
+        if !self.reset_cbs.get_mut().is_empty() {
+            self.fire_reset_callbacks();
+        }
         // Leak check only for exact-accounting backends (bump charges release wholesale here).
         if !self.acct.is_bump {
             debug_assert_eq!(
@@ -626,43 +628,58 @@ impl MemoryContext {
                 self.acct.self_used.get(),
             );
         }
+        let acct = &*self.acct;
         match &mut self.backend {
-            Backend::Aset(set) => set.get_mut().reset(),
-            Backend::Malloc => {}
-            Backend::Bump(a) | Backend::BumpForget(a) => a.get_mut().reset(),
+            Backend::Aset(set) => {
+                set.get_mut().reset();
+                acct.arena_footprint.set(0);
+                acct.arena_nblocks.set(0);
+                acct.self_peak.set(0);
+            }
+            Backend::Malloc => {
+                acct.arena_footprint.set(0);
+                acct.arena_nblocks.set(0);
+                acct.self_peak.set(0);
+            }
+            // Bump re-opens the keeper's window at reset (BumpArena::reset), so
+            // the keeper stays charged here (C's mem_allocated shape).
+            Backend::Bump(a) | Backend::BumpForget(a) => {
+                let a = a.get_mut();
+                a.reset();
+                let footprint = a.footprint();
+                acct.self_used.set(footprint);
+                acct.self_peak.set(footprint);
+                acct.arena_footprint.set(footprint);
+                acct.arena_nblocks.set(a.nblocks());
+            }
             Backend::BumpDrop(a, droplist) => {
                 // Run destructors BEFORE the bytes are reclaimed (order load-bearing).
                 droplist.get_mut().run();
-                a.get_mut().reset();
-            }
-            Backend::Generation(a) => a.get_mut().reset(),
-            Backend::Slab(a) => a.get_mut().reset(),
-        }
-        match &mut self.backend {
-            Backend::Bump(a) | Backend::BumpDrop(a, _) | Backend::BumpForget(a) => {
                 let a = a.get_mut();
-                self.acct.self_used.set(0);
-                self.acct.arena_footprint.set(a.footprint());
-                self.acct.arena_nblocks.set(a.nblocks());
+                a.reset();
+                let footprint = a.footprint();
+                acct.self_used.set(footprint);
+                acct.self_peak.set(footprint);
+                acct.arena_footprint.set(footprint);
+                acct.arena_nblocks.set(a.nblocks());
             }
             Backend::Generation(a) => {
                 let a = a.get_mut();
-                self.acct.self_used.set(0);
-                self.acct.arena_footprint.set(a.footprint());
-                self.acct.arena_nblocks.set(a.nblocks());
+                a.reset();
+                acct.self_used.set(0);
+                acct.self_peak.set(0);
+                acct.arena_footprint.set(a.footprint());
+                acct.arena_nblocks.set(a.nblocks());
             }
             Backend::Slab(a) => {
                 let a = a.get_mut();
-                self.acct.self_used.set(0);
-                self.acct.arena_footprint.set(a.footprint());
-                self.acct.arena_nblocks.set(a.nblocks());
-            }
-            Backend::Aset(_) | Backend::Malloc => {
-                self.acct.arena_footprint.set(0);
-                self.acct.arena_nblocks.set(0);
+                a.reset();
+                acct.self_used.set(0);
+                acct.self_peak.set(0);
+                acct.arena_footprint.set(a.footprint());
+                acct.arena_nblocks.set(a.nblocks());
             }
         }
-        self.acct.self_peak.set(0);
     }
 
     pub fn stats(&self) -> ContextStats {
@@ -1087,6 +1104,7 @@ pub fn check_alloc_size(request: usize) -> PgResult<()> {
 }
 
 /// Droppy `T` allowed: the returned box runs `Drop`.
+#[inline]
 pub fn alloc_in<'mcx, T>(mcx: Mcx<'mcx>, value: T) -> PgResult<PgBox<'mcx, T>> {
     check_alloc_size(core::mem::size_of::<T>())?;
     PgBox::try_new_in(value, mcx)
@@ -1252,6 +1270,12 @@ pub fn vec_append_bytes(v: &mut PgVec<'_, u8>, bytes: &[u8]) -> PgResult<()> {
         v.set_len(old + n);
     }
     Ok(())
+}
+
+#[inline]
+pub fn vec_new_in<'mcx, T>(mcx: Mcx<'mcx>) -> PgVec<'mcx, T> {
+    const { assert!(!core::mem::needs_drop::<T>()) };
+    PgVec::new_in(mcx)
 }
 
 #[inline]

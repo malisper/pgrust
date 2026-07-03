@@ -98,7 +98,11 @@ fn bump_context_reset_reclaims_and_reuses() {
     let footprint_before = ctx.stats().arena_footprint;
     assert!(footprint_before > 0, "arena retains memory after drops");
     ctx.reset();
-    assert_eq!(ctx.used(), 0, "reset releases the whole charge in one counter-zero");
+    assert_eq!(
+        ctx.used(),
+        ctx.stats().arena_footprint,
+        "reset releases everything but the retained keeper (which stays charged)"
+    );
     {
         let mcx = ctx.mcx();
         let mut v: PgVec<u32> = PgVec::new_in(mcx);
@@ -463,7 +467,7 @@ mod bumpdrop {
 
         ctx.reset();
         assert_eq!(drops.get(), 5, "all destructors run exactly once at reset");
-        assert_eq!(ctx.used(), 0, "reset releases the whole live charge");
+        assert_eq!(ctx.used(), ctx.stats().arena_footprint, "only the keeper stays charged");
 
         ctx.reset();
         assert_eq!(drops.get(), 5, "no destructor runs twice");
@@ -522,7 +526,7 @@ mod bumpdrop {
         assert_eq!(drops.get(), 0, "vec leaked, elements still live");
         ctx.reset();
         assert_eq!(drops.get(), 10, "all 10 elements dropped once at reset");
-        assert_eq!(ctx.used(), 0);
+        assert_eq!(ctx.used(), ctx.stats().arena_footprint);
     }
 
     #[test]
@@ -536,7 +540,7 @@ mod bumpdrop {
             assert!(ctx.used() > 0);
         }
         ctx.reset();
-        assert_eq!(ctx.used(), 0, "string buffer reclaimed at reset");
+        assert_eq!(ctx.used(), ctx.stats().arena_footprint, "string buffer reclaimed at reset");
     }
 
     #[test]
@@ -558,10 +562,11 @@ mod bumpdrop {
                 );
             }
             arena.reset();
-            assert_eq!(arena.used(), 0, "round {round}: reset zeroes self_used");
+            let keeper = arena.stats().arena_footprint;
+            assert_eq!(arena.used(), keeper, "round {round}: only the keeper stays charged");
             assert_eq!(
                 root.subtree_used(),
-                0,
+                keeper,
                 "round {round}: reset propagates to ancestor subtree_used"
             );
             assert_eq!(drops.get(), 20 * (round + 1), "round {round}: 20 more drops");
@@ -635,7 +640,7 @@ mod bumpdrop {
             assert_eq!(*r, 42);
         }
         ctx.reset();
-        assert_eq!(ctx.used(), 0);
+        assert_eq!(ctx.used(), ctx.stats().arena_footprint);
     }
 
     // The hash-join batchCxt pattern: per-batch drop + wholesale reset + reuse.
@@ -667,7 +672,11 @@ mod bumpdrop {
                 "every element dropped exactly once at the batch boundary"
             );
             batch.reset();
-            assert_eq!(batch.used(), 0, "wholesale reset returns the charge to zero");
+            assert_eq!(
+                batch.used(),
+                batch.stats().arena_footprint,
+                "wholesale reset releases everything but the keeper"
+            );
         }
         assert_eq!(drops.get() as usize, total_batches * per_batch);
 
@@ -696,7 +705,7 @@ mod bumpdrop {
             assert_eq!(drops.get(), 8, "elements drop once when the new arena drops");
         }
         batch.reset();
-        assert_eq!(batch.used(), 0);
+        assert_eq!(batch.used(), batch.stats().arena_footprint);
     }
 
     // OLD (Aset, per-tuple frees) vs NEW (bump, wholesale reset) churn counts.
@@ -744,7 +753,11 @@ mod bumpdrop {
                 }
                 batch_cxt.reset();
                 wholesale_resets += 1;
-                assert_eq!(batch_cxt.used(), 0, "wholesale reset returns charge to zero");
+                assert_eq!(
+                    batch_cxt.used(),
+                    batch_cxt.stats().arena_footprint,
+                    "wholesale reset releases everything but the keeper"
+                );
             }
         }
         let new_real_frees = crate::churn_probe::take();
@@ -1060,7 +1073,11 @@ mod acct_pool {
                 assert!(ctx.used() > 0, "charged while live");
             }
             ctx.reset();
-            assert_eq!(ctx.used(), 0, "forget-reset returns charge to baseline");
+            assert_eq!(
+                ctx.used(),
+                ctx.stats().arena_footprint,
+                "forget-reset returns the charge to the keeper baseline"
+            );
         }
     }
 
@@ -1078,7 +1095,11 @@ mod acct_pool {
                 let _b = arena_box_in_forget(mcx, Node { oid: run, cost: 1.0 }).unwrap();
             }
             ctx.reset();
-            assert_eq!(ctx.used(), baseline, "run {run}: no accounting leak");
+            assert_eq!(
+                ctx.used(),
+                ctx.stats().arena_footprint,
+                "run {run}: no accounting leak beyond the keeper"
+            );
         }
         drop(ctx);
     }

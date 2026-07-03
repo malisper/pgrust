@@ -64,7 +64,7 @@ pub enum XLTW_Oper {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct LOCKTAG {
     pub locktag_field1: uint32,
     pub locktag_field2: uint32,
@@ -75,6 +75,29 @@ pub struct LOCKTAG {
 }
 
 const _: () = assert!(core::mem::size_of::<LOCKTAG>() == 16);
+
+impl LOCKTAG {
+    #[inline]
+    pub fn as_hash_words(&self) -> (u64, u64) {
+        let w0 = self.locktag_field1 as u64 | ((self.locktag_field2 as u64) << 32);
+        let w1 = self.locktag_field3 as u64
+            | ((self.locktag_field4 as u64) << 32)
+            | ((self.locktag_type as u64) << 48)
+            | ((self.locktag_lockmethodid as u64) << 56);
+        (w0, w1)
+    }
+}
+
+// Two word writes, not seven field writes: LOCALLOCK map probes are
+// per-statement hot (docs/benchmarks/lock.md).
+impl core::hash::Hash for LOCKTAG {
+    #[inline]
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        let (w0, w1) = self.as_hash_words();
+        state.write_u64(w0);
+        state.write_u64(w1);
+    }
+}
 
 // Constructors mirror lock.h's SET_LOCKTAG_* field-for-field; these tags key
 // the shared lock hash, so the encodings must match C exactly.
@@ -349,10 +372,20 @@ const _: () = {
     assert!(!core::mem::needs_drop::<PROCLOCK>());
 };
 
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct LOCALLOCKTAG {
     pub lock: LOCKTAG,
     pub mode: LOCKMODE,
+}
+
+impl core::hash::Hash for LOCALLOCKTAG {
+    #[inline]
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        let (w0, w1) = self.lock.as_hash_words();
+        state.write_u64(w0);
+        state.write_u64(w1);
+        state.write_u32(self.mode as u32);
+    }
 }
 
 #[cfg(test)]

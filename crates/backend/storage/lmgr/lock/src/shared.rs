@@ -6,8 +6,8 @@ use dynahash::{get_hash_value, hash_search_with_hash_value};
 use types_core::{ProcNumber, Size};
 use types_error::PgResult;
 use types_hash::hsearch::{
-    HASHCTL, HASH_BLOBS, HASH_ELEM, HASH_ENTER, HASH_ENTER_NULL, HASH_FIND, HASH_FUNCTION,
-    HASH_REMOVE, HTAB, NUM_FREELISTS,
+    HASHCTL, HASH_BLOBS, HASH_ELEM, HASH_ENTER_NULL, HASH_FIND, HASH_FIXED_SIZE, HASH_FUNCTION,
+    HASH_PARTITION, HASH_REMOVE, HASH_SHARED_MEM, HTAB,
 };
 use types_storage::ilist::{dlist_head, dlist_node};
 use types_storage::lock::{
@@ -44,41 +44,22 @@ pub(crate) fn shared() -> &'static SharedTables {
         .unwrap_or_else(|| panic!("lock manager shmem not initialized"))
 }
 
-// ShmemInitHash stand-in until dynahash lands HASH_SHARED_MEM: arm the
-// partitioned machinery post-create, preallocate every entry single-threaded,
-// then freeze (isfixed) so no mcx allocation can race across backends;
-// HASH_ENTER_NULL then plays C's bounded-shmem exhaustion.
+// C's ShmemInitHash flag set (no HASH_ATTACH: one address space). Divergences
+// vs C stand: preallocation is max-size (C: init_size then grow within shmem)
+// and the bound is entry-count, not shmem bytes; HASH_ENTER_NULL plays C's
+// bounded-shmem exhaustion.
 fn shmem_init_hash(
     name: &str,
     max_size: i64,
     info: &HASHCTL,
     hash_flags: i32,
 ) -> PgResult<*mut HTAB> {
-    let table = dynahash::hash_create(name, max_size, info, hash_flags)?;
-    unsafe {
-        let hctl = (*table).hctl;
-        (*hctl).num_partitions = NUM_LOCK_PARTITIONS as i64;
-        for i in 0..NUM_FREELISTS {
-            (*hctl).freeList[i].mutex = std::sync::atomic::AtomicI32::new(0);
-        }
-        // Counter lives in bytes 8..16: bytes 0..8 stay zero so a PROCLOCKTAG
-        // key never carries a fake myLock pointer into proclock_hash.
-        assert_eq!(info.keysize, 16);
-        let mut key = [0u8; 16];
-        for i in 0..max_size as u64 {
-            key[8..16].copy_from_slice(&(i + 1).to_ne_bytes());
-            let hv = get_hash_value(table, key.as_ptr());
-            let p = hash_search_with_hash_value(table, key.as_ptr(), hv, HASH_ENTER, None)?;
-            assert!(!p.is_null(), "lock table preallocation failed");
-        }
-        for i in 0..max_size as u64 {
-            key[8..16].copy_from_slice(&(i + 1).to_ne_bytes());
-            let hv = get_hash_value(table, key.as_ptr());
-            hash_search_with_hash_value(table, key.as_ptr(), hv, HASH_REMOVE, None)?;
-        }
-        (*table).isfixed = true;
-    }
-    Ok(table)
+    dynahash::hash_create(
+        name,
+        max_size,
+        info,
+        hash_flags | HASH_PARTITION | HASH_SHARED_MEM | HASH_FIXED_SIZE,
+    )
 }
 
 fn proclock_hash(key: &[u8], _keysize: Size) -> u32 {
@@ -88,14 +69,9 @@ fn proclock_hash(key: &[u8], _keysize: Size) -> u32 {
     let mut procno_bytes = [0u8; 4];
     procno_bytes.copy_from_slice(&key[8..12]);
     let procno = i32::from_ne_bytes(procno_bytes);
-    if lock.is_null() {
-        // Preallocation-pass keys only (myLock is never null in a live tag).
-        let mut rest = [0u8; 4];
-        rest.copy_from_slice(&key[12..16]);
-        return (procno as u32) ^ u32::from_ne_bytes(rest).rotate_left(16);
-    }
     // SAFETY: a non-null myLock in a PROCLOCKTAG points at a live LOCK entry
-    // (its tag is immutable for the entry's lifetime).
+    // (its tag is immutable for the entry's lifetime; preallocation never
+    // hashes, so no synthetic key reaches here).
     let lockhash = LockTagHashCode(unsafe { &(*lock).tag });
     // C xors the PGPROC address; the ProcNumber is this port's PGPROC identity.
     lockhash ^ ((procno as u32) << LOG2_NUM_LOCK_PARTITIONS)

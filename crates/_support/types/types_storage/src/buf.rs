@@ -37,7 +37,7 @@ pub struct BufferAccessStrategyData {
     pub btype: BufferAccessStrategyType,
     pub nbuffers: i32,
     pub current: i32,
-    pub buffers: Vec<Buffer>,
+    pub buffers: Vec<Buffer>, // std Vec + Rc justified: owner state sized once, not per-row
 }
 
 pub type BufferAccessStrategy = Option<Rc<RefCell<BufferAccessStrategyData>>>;

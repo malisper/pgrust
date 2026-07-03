@@ -15,7 +15,7 @@ pub type Dir = i32;
 // C's `struct dirent *`: d_name is the only field PostgreSQL reads.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DirEnt {
-    pub d_name: String,
+    pub d_name: String, // std String justified: cold directory walks, no query context
 }
 
 #[derive(Clone, Debug)]
