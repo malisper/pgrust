@@ -1294,9 +1294,10 @@ fn invoke(call: &FuncCall) -> PgResult<(Datum, bool)> {
     // 'mcx; these are the only references during the call (arg OutRef raw
     // writes are not live borrows).
     let flinfo = unsafe { &mut *call.flinfo.as_ptr() };
+    let fn_addr = flinfo.fn_addr;
     let fcinfo = unsafe { fcinfo_mut(call.fcinfo, call.nargs) };
     fcinfo.isnull = false;
-    let d = (call.fn_addr)(Some(flinfo), fcinfo)?;
+    let d = fn_addr(Some(flinfo), fcinfo)?;
     Ok((d, fcinfo.isnull))
 }
 
