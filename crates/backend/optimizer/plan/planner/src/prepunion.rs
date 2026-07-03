@@ -199,6 +199,7 @@ fn build_setop_child_paths<'mcx>(
             c.pid,
             trivial_tlist,
             PgVec::new_in(run.mcx),
+            &None,
             &c.info,
         )?;
         add_path(run, rel, id);

@@ -118,7 +118,7 @@ fn set_rel_size(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResult<()
             crate::cte::set_cte_pathlist(run, rel, rti)?;
         }
         RTEKind::RTE_RESULT => {
-            unreachable!("RTE_RESULT is handled by query_planner's trivial arm");
+            crate::costsize::set_result_size_estimates(run, rel)?;
         }
         other => panic!("set_rel_size (allpaths.c): {other:?}; M2 scan lane"),
     }
@@ -133,7 +133,7 @@ fn set_rel_size(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResult<()
 // optimization only), pathkeys empty (convert_subquery_pathkeys unported).
 fn set_subquery_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResult<()> {
     let rte = run.rte(rti);
-    assert!(!rte.lateral, "set_subquery_pathlist (allpaths.c): LATERAL; M2 lateral lane");
+    let required_outer = crate::relnode::relids_copy(run.mcx, &run.root.rel(rel).lateral_relids);
     assert!(
         run.root.rel(rel).baserestrictinfo.is_empty(),
         "set_subquery_pathlist (allpaths.c): qual pushdown \
@@ -171,10 +171,9 @@ fn set_subquery_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> Pg
     crate::subquery::subquery_planner(run, sub_parse, tuple_fraction, None)?;
     let idx = run.pop_root_to_rel_subroot();
     run.root.rel_mut(rel).subroot_idx = Some(idx);
-    assert!(
-        run.root.plan_params.is_empty(),
-        "set_subquery_pathlist (allpaths.c): subplan_params isolation unported"
-    );
+    // Isolate the params needed by this specific subplan.
+    let sp = core::mem::replace(&mut run.root.plan_params, mcx::PgVec::new_in(run.mcx));
+    run.root.rel_mut(rel).subplan_params = sp;
 
     run.swap_with_rel_subroot(idx);
     let sub_dummy = {
@@ -231,6 +230,7 @@ fn set_subquery_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> Pg
             c.0,
             trivial_pathtarget,
             mcx::PgVec::new_in(run.mcx),
+            &required_outer,
             &c.1,
         )?;
         add_path(run, rel, id);
@@ -342,6 +342,7 @@ fn set_rel_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResul
             RTEKind::RTE_VALUES => set_values_pathlist(run, rel)?,
             RTEKind::RTE_SUBQUERY => {} // fully handled during set_rel_size
             RTEKind::RTE_CTE => {} // fully handled during set_rel_size
+            RTEKind::RTE_RESULT => set_result_pathlist(run, rel)?,
             other => panic!("set_rel_pathlist (allpaths.c): {other:?}; M2 scan lane"),
         }
     }
@@ -593,16 +594,24 @@ fn accumulate_append_subpath(
 // set_function_pathlist (allpaths.c); the ORDINALITY pathkey leg is dead
 // (funcordinality is loud in the parser).
 fn set_function_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResult<()> {
-    debug_assert!(run.root.rel(rel).lateral_relids.is_none());
     debug_assert!(!run.rte(rti).funcordinality);
-    let path = crate::pathnode::create_functionscan_path(run, rel)?;
+    let required_outer = crate::relnode::relids_copy(run.mcx, &run.root.rel(rel).lateral_relids);
+    let path = crate::pathnode::create_functionscan_path(run, rel, &required_outer)?;
     add_path(run, rel, path);
     Ok(())
 }
-// set_values_pathlist (allpaths.c); required_outer empty (LATERAL loud upstream).
+// set_result_pathlist (allpaths.c): one Result path, parameterized only by
+// lateral refs (join quals never push into a Result scan).
+fn set_result_pathlist(run: &mut PlannerRun<'_>, rel: RelId) -> PgResult<()> {
+    let required_outer = crate::relnode::relids_copy(run.mcx, &run.root.rel(rel).lateral_relids);
+    let path = crate::pathnode::create_resultscan_path(run, rel, &required_outer)?;
+    add_path(run, rel, path);
+    Ok(())
+}
+// set_values_pathlist (allpaths.c).
 fn set_values_pathlist(run: &mut PlannerRun<'_>, rel: RelId) -> PgResult<()> {
-    debug_assert!(run.root.rel(rel).lateral_relids.is_none());
-    let path = crate::pathnode::create_valuesscan_path(run, rel)?;
+    let required_outer = crate::relnode::relids_copy(run.mcx, &run.root.rel(rel).lateral_relids);
+    let path = crate::pathnode::create_valuesscan_path(run, rel, &required_outer)?;
     add_path(run, rel, path);
     Ok(())
 }
@@ -632,6 +641,9 @@ fn set_rel_consider_parallel(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -
         }
         RTEKind::RTE_CTE => {
             return Ok(()); // tuplestores aren't shared among workers
+        }
+        RTEKind::RTE_RESULT => {
+            // RESULT RTEs, in themselves, are no problem.
         }
         other => panic!("set_rel_consider_parallel (allpaths.c): {other:?}; M2 lane"),
     }

@@ -891,6 +891,24 @@ seam_core::seam!(
     ) -> PgResult<Option<PgCollationLocaleRow<'mcx>>>
 );
 
+// The pg_collation columns namespace.c's lookup_collation reads off one
+// COLLNAMEENCNSP probe.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PgCollationNameEncNspRow {
+    pub oid: Oid,
+    pub collprovider: u8,
+}
+
+seam_core::seam!(
+    // SearchSysCache3(COLLNAMEENCNSP, collname, encoding, collnamespace);
+    // None mirrors !HeapTupleIsValid.
+    pub fn lookup_pg_collation_by_name_enc_nsp(
+        collname: &str,
+        encoding: i32,
+        collnamespace: Oid,
+    ) -> PgResult<Option<PgCollationNameEncNspRow>>
+);
+
 // The pg_aggregate columns parse_func/prepagg/ExecInitAgg read off one
 // AGGFNOID probe, decoded once.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

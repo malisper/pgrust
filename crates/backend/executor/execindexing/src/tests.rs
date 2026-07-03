@@ -389,7 +389,7 @@ fn heap_relation_data(mcx: Mcx<'_>) -> RelationData<'_> {
         rd_options: None,
         pgstat_enabled: Cell::new(false),
         rd_amcache: Default::default(),
-        rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(),
+        rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(), rd_amcache_spgist: Default::default(),
         rd_support: PgVec::new_in(mcx),
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
@@ -438,6 +438,8 @@ fn index_relation_data(mcx: Mcx<'_>, unique: bool) -> RelationData<'_> {
             indisready: true,
             indkey,
             has_indpred: false,
+        indexprs_src: None,
+        indpred_src: None,
         }),
         rd_opcintype: one(INT4OID),
         rd_opfamily: one(INT4_BTREE_OPFAMILY),
@@ -446,7 +448,7 @@ fn index_relation_data(mcx: Mcx<'_>, unique: bool) -> RelationData<'_> {
         rd_options: None,
         pgstat_enabled: Cell::new(false),
         rd_amcache: Default::default(),
-        rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(),
+        rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(), rd_amcache_spgist: Default::default(),
         rd_support: PgVec::new_in(mcx),
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
@@ -478,7 +480,7 @@ fn insert_row<'mcx>(
     slot.base_mut().tts_tid = tuple.as_tuple_mut().t_self;
     slot.base_mut().tts_tableOid = HEAP_OID;
 
-    crate::ExecInsertIndexTuples(mcx, idxstate, heap, &mut slot, false, None, &[])
+    crate::ExecInsertIndexTuples(mcx, mcx, idxstate, heap, &mut slot, false, None, &[])
 }
 
 fn static_mvcc_snapshot() -> Rc<SnapshotData<'static>> {

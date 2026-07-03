@@ -17,7 +17,7 @@ use crate::{
     SearchSysCache3, SearchSysCache4, SearchSysCacheExists, SearchSysCacheList, SearchSysCacheList1,
     SysCacheGetAttr, SysCacheKey,
 };
-use crate::cacheinfo::{COLLOID, AGGFNOID, AMOPOPID, AMOPSTRATEGY, AMPROCNUM, ATTNUM, CLAOID, OPFAMILYOID, PROCNAMEARGSNSP, AUTHNAME, ENUMOID, ENUMTYPOIDNAME, AUTHOID, CASTSOURCETARGET, CONSTROID, INDEXRELID, NAMESPACENAME, NAMESPACEOID, OPERNAMENSP, TYPENAMENSP, ATTNAME, OPEROID, PROCOID, RANGEMULTIRANGE, RANGETYPE, RELNAMENSP, RELOID, SEQRELID, STATEXTDATASTXOID, STATEXTOID, STATRELATTINH, TYPEOID};
+use crate::cacheinfo::{COLLNAMEENCNSP, COLLOID, AGGFNOID, AMOPOPID, AMOPSTRATEGY, AMPROCNUM, ATTNUM, CLAOID, OPFAMILYOID, PROCNAMEARGSNSP, AUTHNAME, ENUMOID, ENUMTYPOIDNAME, AUTHOID, CASTSOURCETARGET, CONSTROID, INDEXRELID, NAMESPACENAME, NAMESPACEOID, OPERNAMENSP, TYPENAMENSP, ATTNAME, OPEROID, PROCOID, RANGEMULTIRANGE, RANGETYPE, RELNAMENSP, RELOID, SEQRELID, STATEXTDATASTXOID, STATEXTOID, STATRELATTINH, TYPEOID};
 
 const ANUM_PG_CLASS_OID: i32 = 1;
 const ANUM_PG_CLASS_RELISSHARED: i32 = 16;
@@ -60,6 +60,15 @@ const ANUM_PG_AUTHID_ROLCANLOGIN: i32 = 7;
 const ANUM_PG_AUTHID_ROLCONNLIMIT: i32 = 10;
 const ANUM_PG_NAMESPACE_OID: i32 = 1;
 const ANUM_PG_NAMESPACE_NSPNAME: i32 = 2;
+const ANUM_PG_COLLATION_OID: i32 = 1;
+const ANUM_PG_COLLATION_COLLNAME: i32 = 2;
+const ANUM_PG_COLLATION_COLLNAMESPACE: i32 = 3;
+const ANUM_PG_COLLATION_COLLPROVIDER: i32 = 5;
+const ANUM_PG_COLLATION_COLLISDETERMINISTIC: i32 = 6;
+const ANUM_PG_COLLATION_COLLCOLLATE: i32 = 8;
+const ANUM_PG_COLLATION_COLLCTYPE: i32 = 9;
+const ANUM_PG_COLLATION_COLLLOCALE: i32 = 10;
+const ANUM_PG_COLLATION_COLLVERSION: i32 = 12;
 const CONSTRAINT_FOREIGN: i8 = b'f' as i8;
 const ANUM_PG_OPERATOR_OID: i32 = 1;
 const ANUM_PG_OPERATOR_OPRNAME: i32 = 2;
@@ -1126,9 +1135,6 @@ fn getattr_nullable(tuple: &HeapTupleData<'_>, cache_id: i32, attnum: i32) -> Op
     if isnull { None } else { Some(d) }
 }
 
-const ANUM_PG_COLLATION_COLLNAME: i32 = 2;
-const ANUM_PG_COLLATION_COLLISDETERMINISTIC: i32 = 6;
-
 fn lookup_pg_collation_shape(
     colloid: Oid,
 ) -> PgResult<Option<syscache_seams::PgCollationShape>> {
@@ -1310,6 +1316,68 @@ fn statext_data_blob<'mcx>(
     drop(t);
     ReleaseSysCache(tuple);
     Ok(img)
+}
+
+fn text_attr<'mcx>(
+    mcx: Mcx<'mcx>,
+    tuple: &HeapTupleData<'_>,
+    cache_id: i32,
+    attnum: i32,
+) -> PgResult<Option<PgString<'mcx>>> {
+    match varlena_image(mcx, tuple, cache_id, attnum)? {
+        Some(img) => {
+            let s = core::str::from_utf8(&img[4..]).expect("server-encoding text attr");
+            Ok(Some(PgString::from_str_in(s, mcx)?))
+        }
+        None => Ok(None),
+    }
+}
+
+fn lookup_pg_collation_locale_row<'mcx>(
+    mcx: Mcx<'mcx>,
+    collid: Oid,
+) -> PgResult<Option<syscache_seams::PgCollationLocaleRow<'mcx>>> {
+    let Some(tuple) = SearchSysCache1(COLLOID, SysCacheKey::Value(Datum::from_oid(collid)))?
+    else {
+        return Ok(None);
+    };
+    let t = tuple.tuple();
+    let out = syscache_seams::PgCollationLocaleRow {
+        collname: getattr_name(&t, COLLOID, ANUM_PG_COLLATION_COLLNAME),
+        collnamespace: getattr(&t, COLLOID, ANUM_PG_COLLATION_COLLNAMESPACE).as_oid(),
+        collprovider: getattr(&t, COLLOID, ANUM_PG_COLLATION_COLLPROVIDER).as_i8() as u8,
+        collisdeterministic: getattr(&t, COLLOID, ANUM_PG_COLLATION_COLLISDETERMINISTIC)
+            .as_bool(),
+        collcollate: text_attr(mcx, &t, COLLOID, ANUM_PG_COLLATION_COLLCOLLATE)?,
+        collctype: text_attr(mcx, &t, COLLOID, ANUM_PG_COLLATION_COLLCTYPE)?,
+        colllocale: text_attr(mcx, &t, COLLOID, ANUM_PG_COLLATION_COLLLOCALE)?,
+        collversion: text_attr(mcx, &t, COLLOID, ANUM_PG_COLLATION_COLLVERSION)?,
+    };
+    ReleaseSysCache(tuple);
+    Ok(Some(out))
+}
+
+fn lookup_pg_collation_by_name_enc_nsp(
+    collname: &str,
+    encoding: i32,
+    collnamespace: Oid,
+) -> PgResult<Option<syscache_seams::PgCollationNameEncNspRow>> {
+    let Some(tuple) = SearchSysCache3(
+        COLLNAMEENCNSP,
+        SysCacheKey::Str(collname),
+        SysCacheKey::Value(Datum::from_i32(encoding)),
+        SysCacheKey::Value(Datum::from_oid(collnamespace)),
+    )?
+    else {
+        return Ok(None);
+    };
+    let t = tuple.tuple();
+    let out = syscache_seams::PgCollationNameEncNspRow {
+        oid: getattr(&t, COLLNAMEENCNSP, ANUM_PG_COLLATION_OID).as_oid(),
+        collprovider: getattr(&t, COLLNAMEENCNSP, ANUM_PG_COLLATION_COLLPROVIDER).as_i8() as u8,
+    };
+    ReleaseSysCache(tuple);
+    Ok(Some(out))
 }
 
 fn pg_statistic_stawidth(
@@ -1839,6 +1907,8 @@ pub(crate) fn install() {
     syscache_seams::lookup_pg_attribute_stattarget::set(lookup_pg_attribute_stattarget);
     syscache_seams::lookup_pg_collation_shape::set(lookup_pg_collation_shape);
     syscache_seams::pg_type_typanalyze::set(pg_type_typanalyze);
+    syscache_seams::lookup_pg_collation_locale_row::set(lookup_pg_collation_locale_row);
+    syscache_seams::lookup_pg_collation_by_name_enc_nsp::set(lookup_pg_collation_by_name_enc_nsp);
     syscache_seams::lookup_pg_aggregate_shape::set(lookup_pg_aggregate_shape);
     syscache_seams::pg_aggregate_agginitval::set(pg_aggregate_agginitval);
     syscache_seams::pg_aggregate_aggminitval::set(pg_aggregate_aggminitval);

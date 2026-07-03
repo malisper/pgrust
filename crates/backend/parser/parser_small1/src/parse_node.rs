@@ -101,8 +101,10 @@ pub struct ParseNamespaceItem<'mcx> {
     pub p_nscolumns: &'mcx [ParseNamespaceColumn],
     pub p_rel_visible: bool,
     pub p_cols_visible: bool,
-    pub p_lateral_only: bool,
-    pub p_lateral_ok: bool,
+    // Cell: C's setNamespaceLateralState mutates items in place while they
+    // are aliased by p_namespace and the per-join namespace lists.
+    pub p_lateral_only: core::cell::Cell<bool>,
+    pub p_lateral_ok: core::cell::Cell<bool>,
     pub p_returning_type: VarReturningType,
 }
 

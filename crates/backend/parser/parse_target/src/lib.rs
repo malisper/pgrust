@@ -604,7 +604,7 @@ fn ExpandAllTables<'mcx>(
         if !nsitem.p_cols_visible {
             continue;
         }
-        debug_assert!(!nsitem.p_lateral_only);
+        debug_assert!(!nsitem.p_lateral_only.get());
         found_table = true;
         target.concat(
             mcx,
@@ -686,6 +686,13 @@ pub fn FigureColname<'mcx>(node: Node<'mcx>) -> &'mcx str {
     let mut name = None;
     FigureColnameInternal(node, &mut name);
     name.unwrap_or("?column?")
+}
+
+// FigureIndexColname (parse_utilcmd.c): None when nothing suggests a name.
+pub fn FigureIndexColname<'mcx>(node: Node<'mcx>) -> Option<&'mcx str> {
+    let mut name = None;
+    FigureColnameInternal(node, &mut name);
+    name
 }
 
 // C's strength contract: 0 = no name, 1 = weak (type-cast name), 2 = good.

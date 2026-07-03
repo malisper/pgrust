@@ -947,6 +947,7 @@ impl<'mcx> Node<'mcx> {
         self.as_variant()
     }
 
+
     #[inline]
     pub fn as_locking_clause(self) -> Option<&'mcx LockingClause<'mcx>> {
         self.as_variant()

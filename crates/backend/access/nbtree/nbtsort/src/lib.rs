@@ -59,7 +59,7 @@ pub fn btbuild<'mcx>(
     mcx: Mcx<'mcx>,
     heap: &Relation<'mcx>,
     index: &Relation<'mcx>,
-    indexInfo: &mut IndexInfo,
+    indexInfo: &mut IndexInfo<'mcx>,
 ) -> PgResult<IndexBuildResult> {
     if bufmgr::RelationGetNumberOfBlocksInFork(index, ForkNumber::MAIN_FORKNUM)? != 0 {
         panic!("index \"{}\" already contains data", index.name());
@@ -94,7 +94,7 @@ pub fn btbuild<'mcx>(
 fn spool_begin<'mcx>(
     heap: &Relation<'mcx>,
     index: &Relation<'mcx>,
-    indexInfo: &IndexInfo,
+    indexInfo: &IndexInfo<'_>,
 ) -> PgResult<tuplesort::Tuplesort> {
     tuplesort::Tuplesort::begin_index_btree(
         heap,

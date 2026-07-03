@@ -641,7 +641,7 @@ fn make_rel_data<'mcx>(
         rd_options: None,
         pgstat_enabled: Cell::new(false),
         rd_amcache: Default::default(),
-        rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(),
+        rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(), rd_amcache_spgist: Default::default(),
         rd_support: mcx::PgVec::new_in(mcx),
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
@@ -804,6 +804,8 @@ fn make_index_rel<'mcx>(mcx: Mcx<'mcx>) -> types_rel::Relation<'mcx> {
         indisready: true,
         indkey,
         has_indpred: false,
+        indexprs_src: None,
+        indpred_src: None,
     });
     data.rd_opfamily.push(INT4_BTREE_FAM);
     data.rd_opcintype.push(23);

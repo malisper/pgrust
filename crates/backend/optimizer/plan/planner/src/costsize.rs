@@ -214,8 +214,48 @@ fn cost_qual_eval_walker(node: Node<'_>, cost: &mut QualCost) -> PgResult<()> {
         other => panic!("cost_qual_eval_walker (costsize.c): {other:?}; M2 expression lane"),
     }
 }
-fn get_restriction_qual_cost(run: &PlannerRun<'_>, rel: RelId) -> QualCost {
-    run.root.rel(rel).baserestrictcost
+fn get_restriction_qual_cost(
+    run: &mut PlannerRun<'_>,
+    rel: RelId,
+    path_id: types_pathnodes::PathId,
+) -> PgResult<QualCost> {
+    let Some(ppi) = run.root.path(path_id).base().param_info.as_deref() else {
+        return Ok(run.root.rel(rel).baserestrictcost);
+    };
+    let clauses = crate::relnode::pgvec_clone_shallow(run.mcx, &ppi.ppi_clauses);
+    let mut qc = cost_qual_eval(run, &clauses)?;
+    qc.startup += run.root.rel(rel).baserestrictcost.startup;
+    qc.per_tuple += run.root.rel(rel).baserestrictcost.per_tuple;
+    Ok(qc)
+}
+
+// get_parameterized_baserel_size (costsize.c).
+pub fn get_parameterized_baserel_size<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel: RelId,
+    param_clauses: &[types_pathnodes::RinfoId],
+) -> PgResult<f64> {
+    let mut allclauses: mcx::PgVec<'mcx, types_pathnodes::RinfoId> =
+        mcx::PgVec::new_in(run.mcx);
+    for &r in param_clauses {
+        allclauses.push(r);
+    }
+    for i in 0..run.root.rel(rel).baserestrictinfo.len() {
+        allclauses.push(run.root.rel(rel).baserestrictinfo[i]);
+    }
+    let relid = run.root.rel(rel).relid as i32;
+    let selec = crate::clausesel::clauselist_selectivity(
+        run,
+        &allclauses,
+        relid,
+        types_pathnodes::JOIN_INNER,
+        None,
+    )?;
+    let mut nrows = clamp_row_est(run.root.rel(rel).tuples * selec);
+    if nrows > run.root.rel(rel).rows {
+        nrows = run.root.rel(rel).rows;
+    }
+    Ok(nrows)
 }
 pub fn cost_seqscan(run: &mut PlannerRun<'_>, path_id: types_pathnodes::PathId, rel: RelId) {
     let (relid, rtekind, reltablespace, pages, tuples, base_rows) = {
@@ -233,7 +273,8 @@ pub fn cost_seqscan(run: &mut PlannerRun<'_>, path_id: types_pathnodes::PathId, 
     let (_, spc_seq_page_cost) = get_tablespace_page_costs(reltablespace);
     let disk_run_cost = spc_seq_page_cost * pages as f64;
 
-    let qpqual_cost = get_restriction_qual_cost(run, rel);
+    let qpqual_cost = get_restriction_qual_cost(run, rel, path_id)
+        .expect("unparameterized path has no param clauses");
     startup_cost += qpqual_cost.startup;
     let cpu_per_tuple = gucs::cpu_tuple_cost() + qpqual_cost.per_tuple;
     let mut cpu_run_cost = cpu_per_tuple * tuples;
@@ -263,11 +304,10 @@ pub fn cost_functionscan(
         (baserel.relid, baserel.rtekind, baserel.tuples, baserel.rows)
     };
     debug_assert!(relid > 0 && rtekind == types_pathnodes::RTE_FUNCTION);
-    assert!(
-        run.root.path(path_id).base().param_info.is_none(),
-        "cost_functionscan (costsize.c): parameterized path; M2 lateral lane"
-    );
-    let rows = base_rows;
+    let rows = match run.root.path(path_id).base().param_info.as_deref() {
+        Some(ppi) => ppi.ppi_rows,
+        None => base_rows,
+    };
 
     let mut startup_cost = 0.0;
     let mut exprcost = QualCost::default();
@@ -279,7 +319,7 @@ pub fn cost_functionscan(
     }
     startup_cost += exprcost.startup + exprcost.per_tuple;
 
-    let qpqual_cost = get_restriction_qual_cost(run, rel);
+    let qpqual_cost = get_restriction_qual_cost(run, rel, path_id)?;
     startup_cost += qpqual_cost.startup;
     let cpu_per_tuple = gucs::cpu_tuple_cost() + qpqual_cost.per_tuple;
     let mut run_cost = cpu_per_tuple * tuples;
@@ -317,7 +357,7 @@ pub fn cost_ctescan(
     let mut startup_cost = 0.0;
     let mut cpu_per_tuple = gucs::cpu_tuple_cost();
 
-    let qpqual_cost = get_restriction_qual_cost(run, rel);
+    let qpqual_cost = get_restriction_qual_cost(run, rel, path_id)?;
     startup_cost += qpqual_cost.startup;
     cpu_per_tuple += gucs::cpu_tuple_cost() + qpqual_cost.per_tuple;
     let mut run_cost = cpu_per_tuple * tuples;
@@ -361,16 +401,15 @@ pub fn cost_valuesscan(
         (baserel.relid, baserel.rtekind, baserel.tuples, baserel.rows)
     };
     debug_assert!(relid > 0 && rtekind == types_pathnodes::RTE_VALUES);
-    assert!(
-        run.root.path(path_id).base().param_info.is_none(),
-        "cost_valuesscan (costsize.c): parameterized path; M2 lateral lane"
-    );
-    let rows = base_rows;
+    let rows = match run.root.path(path_id).base().param_info.as_deref() {
+        Some(ppi) => ppi.ppi_rows,
+        None => base_rows,
+    };
 
     let mut startup_cost = 0.0;
     let mut cpu_per_tuple = gucs::cpu_operator_cost();
 
-    let qpqual_cost = get_restriction_qual_cost(run, rel);
+    let qpqual_cost = get_restriction_qual_cost(run, rel, path_id)?;
     startup_cost += qpqual_cost.startup;
     cpu_per_tuple += gucs::cpu_tuple_cost() + qpqual_cost.per_tuple;
     let mut run_cost = cpu_per_tuple * tuples;
@@ -379,6 +418,40 @@ pub fn cost_valuesscan(
     startup_cost += target.cost.startup;
     run_cost += target.cost.per_tuple * rows;
 
+    let p = run.root.path_mut(path_id).base_mut();
+    p.rows = rows;
+    p.disabled_nodes = 0;
+    p.startup_cost = startup_cost;
+    p.total_cost = startup_cost + run_cost;
+    Ok(())
+}
+
+// set_result_size_estimates (costsize.c): RTE_RESULT natively yields one row.
+pub fn set_result_size_estimates(run: &mut PlannerRun<'_>, rel: RelId) -> PgResult<()> {
+    debug_assert!(run.root.rel(rel).relid > 0);
+    run.root.rel_mut(rel).tuples = 1.0;
+    set_baserel_size_estimates(run, rel)
+}
+
+// cost_resultscan (costsize.c).
+pub fn cost_resultscan(
+    run: &mut PlannerRun<'_>,
+    path_id: types_pathnodes::PathId,
+    rel: RelId,
+) -> PgResult<()> {
+    let (relid, rtekind, tuples, base_rows) = {
+        let baserel = run.root.rel(rel);
+        (baserel.relid, baserel.rtekind, baserel.tuples, baserel.rows)
+    };
+    debug_assert!(relid > 0 && rtekind == types_nodes::parsenodes::RTEKind::RTE_RESULT as u32);
+    let rows = match run.root.path(path_id).base().param_info.as_deref() {
+        Some(ppi) => ppi.ppi_rows,
+        None => base_rows,
+    };
+    let qpqual_cost = get_restriction_qual_cost(run, rel, path_id)?;
+    let startup_cost = qpqual_cost.startup;
+    let cpu_per_tuple = gucs::cpu_tuple_cost() + qpqual_cost.per_tuple;
+    let run_cost = cpu_per_tuple * tuples;
     let p = run.root.path_mut(path_id).base_mut();
     p.rows = rows;
     p.disabled_nodes = 0;
@@ -704,7 +777,8 @@ pub fn cost_bitmap_heap_scan(
 
     // Indexquals are assumed rechecked at every tuple (lossy bitmaps), so the
     // full scan-clause freight is charged.
-    let qpqual_cost = get_restriction_qual_cost(run, rel);
+    let qpqual_cost = get_restriction_qual_cost(run, rel, path_id)
+        .expect("unparameterized path has no param clauses");
     startup_cost += qpqual_cost.startup;
     let cpu_per_tuple = gucs::cpu_tuple_cost() + qpqual_cost.per_tuple;
     let cpu_run_cost = cpu_per_tuple * tuples_fetched;
@@ -1543,8 +1617,18 @@ pub fn cost_subqueryscan(
         run.root.rel(rel).rtekind
             == types_nodes::parsenodes::RTEKind::RTE_SUBQUERY as u32
     );
-    let qpquals =
-        crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.rel(rel).baserestrictinfo);
+    let qpquals = match run.root.path(path_id).base().param_info.as_deref() {
+        Some(ppi) => {
+            let mut q = crate::relnode::pgvec_clone_shallow(run.mcx, &ppi.ppi_clauses);
+            for i in 0..run.root.rel(rel).baserestrictinfo.len() {
+                q.push(run.root.rel(rel).baserestrictinfo[i]);
+            }
+            q
+        }
+        None => {
+            crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.rel(rel).baserestrictinfo)
+        }
+    };
     let selec = crate::clausesel::clauselist_selectivity(
         run,
         &qpquals,
@@ -1565,7 +1649,7 @@ pub fn cost_subqueryscan(
         return Ok(());
     }
 
-    let qpqual_cost = get_restriction_qual_cost(run, rel);
+    let qpqual_cost = get_restriction_qual_cost(run, rel, path_id)?;
     let mut startup_cost = qpqual_cost.startup;
     let cpu_per_tuple = gucs::cpu_tuple_cost() + qpqual_cost.per_tuple;
     let mut run_cost = cpu_per_tuple * sub.rows;

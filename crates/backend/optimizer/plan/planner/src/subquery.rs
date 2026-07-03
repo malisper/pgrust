@@ -16,7 +16,9 @@ use crate::run::PlannerRun;
 pub const EXPRKIND_QUAL: i32 = 0;
 pub const EXPRKIND_TARGET: i32 = 1;
 pub const EXPRKIND_RTFUNC: i32 = 2;
+pub const EXPRKIND_RTFUNC_LATERAL: i32 = 3;
 pub const EXPRKIND_VALUES: i32 = 4;
+pub const EXPRKIND_VALUES_LATERAL: i32 = 5;
 pub const EXPRKIND_LIMIT: i32 = 6;
 pub const EXPRKIND_ARBITER_ELEM: i32 = 10;
 
@@ -98,15 +100,50 @@ pub fn subquery_planner<'mcx>(
             RTEKind::RTE_FUNCTION => {
                 // preprocess_function_rtes: inline_set_returning_function is a
                 // no-op for non-SQL-language functions and non-builtins cannot
-                // resolve on this lane; EXPRKIND_RTFUNC preprocess_expression
-                // skipped (grammar-Const args).
+                // resolve on this lane. Non-lateral EXPRKIND_RTFUNC
+                // preprocess_expression skipped (grammar-Const args); lateral
+                // args carry Vars (possibly uplevel) and must be processed.
+                if rte.lateral {
+                    let mut new_functions = NodeList::nil();
+                    for f_node in &rte.functions {
+                        let f = f_node.as_range_tbl_function().expect("functions cell");
+                        let funcexpr = preprocess_expression(
+                            run,
+                            f.funcexpr,
+                            EXPRKIND_RTFUNC_LATERAL,
+                            parse.hasSubLinks,
+                        )?;
+                        new_functions.lappend(
+                            mcx,
+                            Node::mk(
+                                mcx,
+                                types_nodes::parsenodes::RangeTblFunction {
+                                    funcexpr,
+                                    funccolcount: f.funccolcount,
+                                    funccolnames: f.funccolnames.clone_in(mcx)?,
+                                    funccoltypes: f.funccoltypes.clone_in(mcx)?,
+                                    funccoltypmods: f.funccoltypmods.clone_in(mcx)?,
+                                    funccolcollations: f.funccolcollations.clone_in(mcx)?,
+                                    funcparams: f.funcparams.clone_in(mcx)?,
+                                },
+                            )?,
+                        )?;
+                    }
+                    // SAFETY: as the RTE_RELATION arm above.
+                    unsafe {
+                        rte_node.with_mut::<types_nodes::parsenodes::RangeTblEntry, _>(|r| {
+                            r.functions = new_functions
+                        })
+                    };
+                }
             }
             RTEKind::RTE_VALUES => {
-                assert!(!rte.lateral, "preprocess_expression (planner.c): EXPRKIND_VALUES_LATERAL; M2 lateral lane");
+                let kind =
+                    if rte.lateral { EXPRKIND_VALUES_LATERAL } else { EXPRKIND_VALUES };
                 let lists = preprocess_expression_list(
                     run,
                     rte.values_lists.clone_in(mcx)?,
-                    EXPRKIND_VALUES,
+                    kind,
                     parse.hasSubLinks,
                 )?;
                 // SAFETY: as the RTE_RELATION arm above.

@@ -1,4 +1,4 @@
-use ::mcx::PgVec;
+use ::mcx::{PgString, PgVec};
 use ::types_core::{AttrNumber, InvalidAttrNumber, Oid};
 
 // FormData_pg_index trimmed to the fields ports consume (the decode-once
@@ -20,6 +20,11 @@ pub struct FormData_pg_index<'mcx> {
     pub indkey: PgVec<'mcx, AttrNumber>,
     // !heap_attisnull(rd_indextuple, Anum_pg_index_indpred): partial index.
     pub has_indpred: bool,
+    // C caches parsed trees (rd_indexprs/rd_indpred) and copyObjects them out
+    // per call; here the nodeToString sources are cached and callers re-parse
+    // per open — same O(tree) per-statement cost shape, no copyObject port.
+    pub indexprs_src: Option<PgString<'mcx>>,
+    pub indpred_src: Option<PgString<'mcx>>,
 }
 
 impl FormData_pg_index<'_> {

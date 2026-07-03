@@ -97,7 +97,7 @@ pub fn brinbuild<'mcx>(
     mcx: Mcx<'mcx>,
     heap: &Relation<'mcx>,
     index: &Relation<'mcx>,
-    indexInfo: &mut execindexing::IndexInfo,
+    indexInfo: &mut execindexing::IndexInfo<'mcx>,
 ) -> PgResult<BrinBuildResult> {
     if bufmgr_seams::relation_get_number_of_blocks_in_fork::call(
         index,

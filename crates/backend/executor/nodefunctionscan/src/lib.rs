@@ -43,6 +43,7 @@ pub struct FunctionScanState<'mcx> {
     tupdesc: Option<Rc<TupleDescData<'mcx>>>,
     tstore: Option<Tuplestore>,
     eflags: i32,
+    funcparams: &'mcx ::types_nodes::bitmapset::Bitmapset<'mcx>,
 }
 
 impl<'mcx> ScanNode<'mcx> for FunctionScanState<'mcx> {
@@ -128,7 +129,14 @@ pub fn exec_init_function_scan<'mcx>(
     execscan::exec_assign_scan_projection_info(mcx, estate, &mut ss, &node.scan.plan.targetlist)?;
     ss.qual = exec_init_qual(mcx, &node.scan.plan.qual, estate.param_bind())?;
 
-    Ok(FunctionScanState { ss, setexpr, tupdesc: Some(Rc::new(tupdesc)), tstore: None, eflags })
+    Ok(FunctionScanState {
+        ss,
+        setexpr,
+        tupdesc: Some(Rc::new(tupdesc)),
+        tstore: None,
+        eflags,
+        funcparams: &rtfunc.funcparams,
+    })
 }
 
 fn exec_init_table_function_result<'mcx>(
@@ -150,8 +158,7 @@ fn exec_init_table_function_result<'mcx>(
                 .expect("non-NULL arg expression"),
         );
     }
-    // init_sexpr's ACL_EXECUTE check omitted: only built-ins (PUBLIC
-    // execute) resolve on this lane.
+    // init_sexpr's ACL_EXECUTE check omitted: built-ins are PUBLIC-execute.
     let flinfo = fmgr_core::fmgr_info(func.funcid)?;
     Ok(SetExprState {
         flinfo,
@@ -250,8 +257,7 @@ fn run_value_per_call<'mcx, const N: usize>(
         Some(core::ptr::NonNull::from(expected_desc).cast::<core::ffi::c_void>());
     let mut fcinfo = LocalFcinfo::<N>::new(setexpr.collation);
     fcinfo.resultinfo = rsinfo.as_fmnode_ptr();
-    // C evaluates the SRF in econtext per-tuple memory (reset per call); the
-    // row is copied into the tuplestore before the next call's reset.
+    // The row is copied into the tuplestore before the next call's reset.
     // SAFETY: the ExprContext outlives this loop's stack frame.
     unsafe { fcinfo.set_result_mcx(estate.ecxt(ecxt).per_tuple_mcx()) };
 
@@ -320,10 +326,8 @@ fn run_value_per_call<'mcx, const N: usize>(
     Ok(store)
 }
 
-// C execSRF.c returnsTuple arm: explode the composite datum into columns
-// (tuplestore_puttuple of the embedded tuple data; the rowtype-consistency
-// check C performs for RECORD results is subsumed by deforming with the
-// scan's expected descriptor).
+// execSRF.c returnsTuple arm: C's RECORD rowtype-consistency check is
+// subsumed by deforming with the scan's expected descriptor.
 fn put_composite_row<'mcx>(
     store: &mut Tuplestore,
     expected_desc: &TupleDescData<'mcx>,
@@ -366,7 +370,7 @@ pub fn exec_end_function_scan(node: &mut FunctionScanState<'_>) {
     node.tupdesc = None;
 }
 
-/// `ExecReScanFunctionScan`; the chgParam recompute leg is dead, rewind only.
+/// `ExecReScanFunctionScan`, chgParam-NULL arm: rewind the tuplestore.
 pub fn exec_rescan_function_scan<'mcx>(
     node: &mut FunctionScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -378,8 +382,25 @@ pub fn exec_rescan_function_scan<'mcx>(
     Ok(())
 }
 
+/// Changed-params rescan: drop the tuplestore; the next fetch re-evaluates.
+pub fn exec_rescan_function_scan_chg<'mcx>(
+    node: &mut FunctionScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    chg: &::types_nodes::bitmapset::Bitmapset<'mcx>,
+) -> PgResult<()> {
+    execscan::exec_scan_rescan(&mut node.ss, estate);
+    if chg.overlap(node.funcparams) {
+        if let Some(store) = node.tstore.take() {
+            store.end();
+        }
+    } else if let Some(store) = node.tstore.as_mut() {
+        store.rescan();
+    }
+    Ok(())
+}
+
 // Exempt: all released in exec_end_function_scan.
 mcx::forget_safe_struct!(
     SetExprState<'_> { collation, returns_set, returns_tuple; flinfo, args },
-    FunctionScanState<'_> { ss, setexpr, eflags; tupdesc, tstore },
+    FunctionScanState<'_> { ss, setexpr, eflags, funcparams; tupdesc, tstore },
 );

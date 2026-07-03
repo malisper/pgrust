@@ -27,13 +27,20 @@ impl<'mcx> IndexClauseSet<'mcx> {
 }
 
 // check_index_predicates (indxpath.c): the non-partial arm shares the rel's
-// baserestrictinfo with each index (partial indexes panicked upstream).
+// baserestrictinfo with each index. LOUD BOUNDARY: proving a partial index
+// usable (predOK) and filtering implied quals out of indrestrictinfo both
+// require predicate_implied_by — predtest.c is unported — so ANY planning
+// over a rel that has a partial index panics here.
 pub fn check_index_predicates<'mcx>(run: &mut PlannerRun<'mcx>, rel: RelId) {
     let mcx = run.mcx;
     let nindexes = run.root.rel(rel).indexlist.len();
     for i in 0..nindexes {
         let index = run.root.rel(rel).indexlist[i];
-        assert!(index.indpred.is_empty(), "check_index_predicates (indxpath.c): M2 partial-index lane");
+        assert!(
+            index.indpred.is_empty(),
+            "check_index_predicates (indxpath.c): partial index; predicate_implied_by \
+             (predtest.c) unported"
+        );
         let mut clauses = PgVec::new_in(mcx);
         clauses.extend(run.root.rel(rel).baserestrictinfo.iter().copied());
         *index.indrestrictinfo.borrow_mut() = clauses;
@@ -450,8 +457,8 @@ fn index_coll_matches_expr_coll(idxcollation: u32, exprcollation: u32) -> bool {
     idxcollation == 0 || idxcollation == exprcollation
 }
 
-// match_index_to_operand (indxpath.c), simple-column arm; expression columns
-// panicked in get_relation_info.
+// match_index_to_operand (indxpath.c); PlaceHolderVar stripping is dead (PHVs
+// are loud upstream).
 pub fn match_index_to_operand(
     run: &PlannerRun<'_>,
     mut operand: Node<'_>,
@@ -461,14 +468,30 @@ pub fn match_index_to_operand(
     while operand.node_tag() == NodeTag::T_RelabelType {
         operand = operand.as_relabel_type().unwrap().arg;
     }
-    let index_relid = run.root.rel(index.rel.expect("index rel set")).relid;
     let indkey = index.indexkeys[indexcol];
-    debug_assert!(indkey != 0, "expression index survived get_relation_info");
-    if let Some(var) = operand.as_var() {
-        if var.varno as u32 == index_relid
-            && indkey == var.varattno as i32
-            && var.varnullingrels.is_empty()
-        {
+    if indkey != 0 {
+        let index_relid = run.root.rel(index.rel.expect("index rel set")).relid;
+        if let Some(var) = operand.as_var() {
+            if var.varno as u32 == index_relid
+                && indkey == var.varattno as i32
+                && var.varnullingrels.is_empty()
+            {
+                return true;
+            }
+        }
+    } else {
+        let mut pos = 0usize;
+        for i in 0..indexcol {
+            if index.indexkeys[i] == 0 {
+                pos += 1;
+            }
+        }
+        let id = *index.indexprs.get(pos).expect("wrong number of index expressions");
+        let mut indexkey = *run.root.expr_node(id);
+        if indexkey.node_tag() == NodeTag::T_RelabelType {
+            indexkey = indexkey.as_relabel_type().unwrap().arg;
+        }
+        if types_nodes::equal(indexkey, operand) {
             return true;
         }
     }

@@ -139,12 +139,15 @@ pub fn RelnameGetRelid(relname: &str) -> PgResult<Oid> {
 #[cold]
 #[inline(never)]
 fn improper_qualified_name(names: &[&str]) -> Box<PgError> {
+    improper_qualified_name_joined(names.join("."))
+}
+
+#[cold]
+#[inline(never)]
+fn improper_qualified_name_joined(joined: String) -> Box<PgError> {
     Box::new(
-        PgError::error(format!(
-            "improper qualified name (too many dotted names): {}",
-            names.join(".")
-        ))
-        .with_sqlstate(ERRCODE_SYNTAX_ERROR),
+        PgError::error(format!("improper qualified name (too many dotted names): {joined}"))
+            .with_sqlstate(ERRCODE_SYNTAX_ERROR),
     )
 }
 
@@ -291,6 +294,103 @@ pub fn OpernameGetCandidates<'mcx>(
     }
     result.reverse();
     Ok(result)
+}
+
+// is_encoding_supported_by_icu (encnames.c): the pg_enc2icu_tbl NULL slots
+// are SQL_ASCII(0), EUC_JIS_2004(5), MULE_INTERNAL(7), LATIN10(17), WIN874(21).
+fn is_encoding_supported_by_icu(encoding: i32) -> bool {
+    (0..=34).contains(&encoding) && !matches!(encoding, 0 | 5 | 7 | 17 | 21)
+}
+
+// lookup_collation (namespace.c).
+fn lookup_collation(collname: &str, collnamespace: Oid, encoding: i32) -> PgResult<Oid> {
+    if let Some(row) = syscache_seams::lookup_pg_collation_by_name_enc_nsp::call(
+        collname,
+        encoding,
+        collnamespace,
+    )? {
+        return Ok(row.oid);
+    }
+    let Some(row) =
+        syscache_seams::lookup_pg_collation_by_name_enc_nsp::call(collname, -1, collnamespace)?
+    else {
+        return Ok(InvalidOid);
+    };
+    if row.collprovider == b'i' && !is_encoding_supported_by_icu(encoding) {
+        return Ok(InvalidOid);
+    }
+    Ok(row.oid)
+}
+
+#[cold]
+#[inline(never)]
+fn undefined_collation(collname: &[&str]) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!(
+            "collation \"{}\" for encoding \"{}\" does not exist",
+            collname.join("."),
+            mbutils_seams::get_database_encoding_name::call()
+        ))
+        .with_sqlstate(types_error::ERRCODE_UNDEFINED_OBJECT),
+    )
+}
+
+// get_collation_oid over the raw name List; >3 parts flows to C's
+// DeconstructQualifiedName 42601 instead of a length assert.
+pub fn get_collation_oid_list(
+    collname: &types_nodes::NodeList<'_>,
+    missing_ok: bool,
+) -> PgResult<Oid> {
+    let mut names: [&str; 4] = [""; 4];
+    let nnames = collname.len();
+    if nnames > 4 {
+        let mut joined = String::new();
+        for (i, n) in collname.iter().enumerate() {
+            if i > 0 {
+                joined.push('.');
+            }
+            joined.push_str(n.as_string().expect("collname cell").sval);
+        }
+        return Err(improper_qualified_name_joined(joined));
+    }
+    for (i, n) in collname.iter().enumerate() {
+        names[i] = n.as_string().expect("collname cell").sval;
+    }
+    get_collation_oid(&names[..nnames], missing_ok)
+}
+
+pub fn get_collation_oid(collname: &[&str], missing_ok: bool) -> PgResult<Oid> {
+    let dbencoding = mbutils_seams::get_database_encoding::call();
+    let (schemaname, collation_name) = DeconstructQualifiedName(collname)?;
+
+    if let Some(schemaname) = schemaname {
+        let namespace_id = LookupExplicitNamespace(schemaname, missing_ok)?;
+        if missing_ok && !OidIsValid(namespace_id) {
+            return Ok(InvalidOid);
+        }
+        let colloid = lookup_collation(collation_name, namespace_id, dbencoding)?;
+        if OidIsValid(colloid) {
+            return Ok(colloid);
+        }
+    } else {
+        recomputeNamespacePath()?;
+        let mtn = my_temp_namespace();
+        for i in 0..base_path_len() {
+            let namespace_id = base_path_nth(i);
+            if namespace_id == mtn {
+                continue;
+            }
+            let colloid = lookup_collation(collation_name, namespace_id, dbencoding)?;
+            if OidIsValid(colloid) {
+                return Ok(colloid);
+            }
+        }
+    }
+
+    if !missing_ok {
+        return Err(undefined_collation(collname));
+    }
+    Ok(InvalidOid)
 }
 
 // TypenameGetTypidExtended (namespace.c).
