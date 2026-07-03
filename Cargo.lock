@@ -1161,6 +1161,7 @@ dependencies = [
  "pg_depend",
  "pgstat",
  "relcache",
+ "smgr",
  "snapmgr",
  "table",
  "tableam",

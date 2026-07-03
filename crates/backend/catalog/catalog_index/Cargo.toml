@@ -43,3 +43,4 @@ visibilitymap = { path = "../../access/heap/visibilitymap" }
 xact = { path = "../../access/transam/xact" }
 tableam = { path = "../../access/table/tableam" }
 elog_seams = { path = "../../utils/error/elog_seams" }
+smgr = { path = "../../storage/smgr/smgr" }
