@@ -10,6 +10,7 @@ path = "src/lib.rs"
 
 [dependencies]
 detoast = { path = "../../backend/access/common/detoast" }
+heaptoast = { path = "../../backend/access/heap/heaptoast" }
 printtup = { path = "../../backend/access/common/printtup" }
 relation = { path = "../../backend/access/common/relation" }
 heapam_visibility = { path = "../../backend/access/heap/heapam_visibility" }
@@ -18,6 +19,7 @@ indexam = { path = "../../backend/access/index/indexam" }
 table = { path = "../../backend/access/table/table" }
 tableam = { path = "../../backend/access/table/tableam" }
 clog = { path = "../../backend/access/transam/clog" }
+multixact = { path = "../../backend/access/transam/multixact" }
 rmgr = { path = "../../backend/access/transam/rmgr" }
 subtrans = { path = "../../backend/access/transam/subtrans" }
 transam_xlog = { path = "../../backend/access/transam/transam_xlog" }
@@ -78,6 +80,14 @@ sinval = { path = "../../backend/storage/ipc/sinval" }
 waiteventset = { path = "../../backend/storage/ipc/waiteventset" }
 lmgr_proc = { path = "../../backend/storage/lmgr/lmgr_proc" }
 s_lock = { path = "../../backend/storage/lmgr/s_lock" }
+condition_variable = { path = "../../backend/storage/lmgr/condition_variable" }
+deadlock = { path = "../../backend/storage/lmgr/deadlock" }
+predicate = { path = "../../backend/storage/lmgr/predicate" }
+parallel = { path = "../../backend/access/transam/parallel" }
+spi = { path = "../../backend/executor/spi" }
+trigger = { path = "../../backend/commands/trigger" }
+pruneheap = { path = "../../backend/access/heap/pruneheap" }
+pg_string = { path = "../../common/string" }
 lmgr = { path = "../../backend/storage/lmgr/lmgr" }
 lock = { path = "../../backend/storage/lmgr/lock" }
 smgr = { path = "../../backend/storage/smgr/smgr" }

@@ -50,6 +50,18 @@ pub const fn set_varsize_4b_word(len: u32) -> u32 {
     len & 0x3FFF_FFFF
 }
 
+#[cfg(target_endian = "little")]
+#[inline]
+pub const fn set_varsize_4b_c_word(len: u32) -> u32 {
+    (len << 2) | 0x02
+}
+
+#[cfg(target_endian = "big")]
+#[inline]
+pub const fn set_varsize_4b_c_word(len: u32) -> u32 {
+    (len & 0x3FFF_FFFF) | 0x4000_0000
+}
+
 /// # Safety
 /// `p` points to a live varlena's first byte.
 #[inline]

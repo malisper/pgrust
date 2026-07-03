@@ -14,7 +14,7 @@ use ::types_tuple::{
 #[cold]
 #[inline(never)]
 pub(crate) fn expanded_object_unsupported() -> ! {
-    panic!("expanded-object flatten (EOH_get_flat_size/EOH_flatten_into) not ported; expandeddatum unit owns it")
+    panic!("expanded-object flatten: datum::expandeddatum vocabulary landed; heap_compute_data_size/heap_fill_tuple two-pass flatten arms not wired here")
 }
 
 /// Data-area size of a tuple to be constructed; by-ref datums must be live.
