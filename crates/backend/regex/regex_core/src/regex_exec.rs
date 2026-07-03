@@ -112,17 +112,128 @@ impl Sset {
     }
 }
 
-pub struct Dfa {
+// C's smalldfa (regexec.c): DFAs whose NFA fits these bounds run in
+// caller-owned fixed arrays (stack for find/cfind, one boxed block for
+// sub-DFAs) — a warm pg_regexec on a small pattern allocates zero. Same
+// byte budget as C's smalldfa (its arrays are FEWSTATES*2 = 40 ssets); we
+// admit up to the physical capacity where C's guard stops at nss <= 20.
+pub const FEWSTATES: usize = 40;
+pub const FEWCOLORS: usize = 15;
+
+pub struct SmallDfaSpace {
+    ssets: [Sset; FEWSTATES],
+    statesarea: [u32; FEWSTATES + WORK],
+    outs: [u32; FEWSTATES * FEWCOLORS],
+    incarea: [Arcp; FEWSTATES * FEWCOLORS],
+}
+
+impl SmallDfaSpace {
+    // All-zero contents (one memset; pickss initializes every row before use).
+    #[inline(always)]
+    fn new() -> Self {
+        let zsset = Sset {
+            states_base: 0,
+            hash: 0,
+            flags: 0,
+            ins: Arcp { ss: 0, co: WHITE },
+            lastseen: Pos::NONE,
+            outs_base: 0,
+            inchain_base: 0,
+        };
+        SmallDfaSpace {
+            ssets: [zsset; FEWSTATES],
+            statesarea: [0; FEWSTATES + WORK],
+            outs: [0; FEWSTATES * FEWCOLORS],
+            incarea: [Arcp { ss: 0, co: WHITE }; FEWSTATES * FEWCOLORS],
+        }
+    }
+}
+
+// C's vars carries two stack smalldfas (dfa1/dfa2, uninitialized memory).
+// The safe-Rust equivalent of that zero-cost space is a retained per-thread
+// pair: zeroed once per thread, dirty reuse after (every row is written by
+// pickss before it is read, same discipline C relies on for its stack).
+pub struct ExecScratch {
+    s1: SmallDfaSpace,
+    s2: SmallDfaSpace,
+}
+
+impl ExecScratch {
+    fn new() -> ExecScratch {
+        ExecScratch {
+            s1: SmallDfaSpace::new(),
+            s2: SmallDfaSpace::new(),
+        }
+    }
+}
+
+std::thread_local! {
+    static EXEC_SCRATCH: core::cell::RefCell<Option<Box<ExecScratch>>> =
+        const { core::cell::RefCell::new(None) };
+}
+
+fn small_ok(cnfa: &Cnfa) -> bool {
+    (cnfa.nstates as usize) * 2 <= FEWSTATES && (cnfa.ncolors as usize) <= FEWCOLORS
+}
+
+fn zeroed_u32_vec(n: usize) -> RegResult<Vec<u32>> {
+    if usize::BITS < 64 && n > isize::MAX as usize / 4 {
+        return Err(RegError(REG_ESPACE));
+    }
+    Ok(alloc::vec![0u32; n])
+}
+
+pub struct HeapSpace {
+    ssets: Vec<Sset>,
+    statesarea: Vec<u32>,
+    outs: Vec<u32>,
+    incarea: Vec<Arcp>,
+}
+
+impl HeapSpace {
+    fn for_cnfa(cnfa: &Cnfa) -> RegResult<HeapSpace> {
+        let nss: usize = (cnfa.nstates as usize)
+            .checked_mul(2)
+            .ok_or(RegError(REG_ESPACE))?;
+        let wordsper: usize = (cnfa.nstates as usize).div_ceil(UBITS);
+        let ncolors: usize = cnfa.ncolors as usize;
+        let statesarea_words = nss
+            .checked_add(WORK)
+            .and_then(|n| n.checked_mul(wordsper))
+            .ok_or(RegError(REG_ESPACE))?;
+        let vec_area = nss.checked_mul(ncolors).ok_or(RegError(REG_ESPACE))?;
+        Ok(HeapSpace {
+            ssets: fill_vec(nss, Sset::blank())?,
+            statesarea: zeroed_u32_vec(statesarea_words)?,
+            outs: zeroed_u32_vec(vec_area)?,
+            incarea: fill_vec(vec_area, Arcp::null())?,
+        })
+    }
+}
+
+pub enum DfaSpace {
+    Small(SmallDfaSpace),
+    Heap(HeapSpace),
+}
+
+impl DfaSpace {
+    fn for_cnfa(cnfa: &Cnfa) -> RegResult<DfaSpace> {
+        debug_assert!(cnfa.nstates != 0);
+        if small_ok(cnfa) {
+            Ok(DfaSpace::Small(SmallDfaSpace::new()))
+        } else {
+            Ok(DfaSpace::Heap(HeapSpace::for_cnfa(cnfa)?))
+        }
+    }
+}
+
+#[derive(Copy, Clone)]
+pub struct DfaMeta {
     pub nssets: usize,
     pub nssused: usize,
     pub nstates: usize,
     pub ncolors: usize,
     pub wordsper: usize,
-    pub ssets: Vec<Sset>,
-    pub statesarea: Vec<u32>,
-    pub work: Vec<u32>,
-    pub outs: Vec<u32>,
-    pub incarea: Vec<Arcp>,
     pub lastpost: Pos,
     pub lastnopr: Pos,
     pub search: usize,
@@ -131,7 +242,85 @@ pub struct Dfa {
     pub backmax: i16,
 }
 
-impl Dfa {
+impl DfaMeta {
+    fn new(eflags: i32, cnfa: &Cnfa) -> DfaMeta {
+        let nss = (cnfa.nstates as usize) * 2;
+        DfaMeta {
+            nssets: if (eflags & REG_SMALL) != 0 {
+                REG_SMALL_NSSETS
+            } else {
+                nss
+            },
+            nssused: 0,
+            nstates: cnfa.nstates as usize,
+            ncolors: cnfa.ncolors as usize,
+            wordsper: (cnfa.nstates as usize).div_ceil(UBITS),
+            lastpost: Pos::NONE,
+            lastnopr: Pos::NONE,
+            search: 0,
+            backno: -1,
+            backmin: 0,
+            backmax: 0,
+        }
+    }
+}
+
+pub struct SubDfa {
+    meta: DfaMeta,
+    space: Box<DfaSpace>,
+}
+
+impl SubDfa {
+    fn new(eflags: i32, cnfa: &Cnfa) -> RegResult<SubDfa> {
+        Ok(SubDfa {
+            meta: DfaMeta::new(eflags, cnfa),
+            space: Box::new(DfaSpace::for_cnfa(cnfa)?),
+        })
+    }
+
+    fn with<R>(&mut self, f: impl FnOnce(&mut Dfa) -> R) -> R {
+        let mut d = make_dfa(self.meta, &mut self.space);
+        let r = f(&mut d);
+        self.meta = d.meta();
+        r
+    }
+}
+
+pub struct Dfa<'s> {
+    pub nssets: usize,
+    pub nssused: usize,
+    pub nstates: usize,
+    pub ncolors: usize,
+    pub wordsper: usize,
+    pub ssets: &'s mut [Sset],
+    pub statesarea: &'s mut [u32],
+    pub work: &'s mut [u32],
+    pub outs: &'s mut [u32],
+    pub incarea: &'s mut [Arcp],
+    pub lastpost: Pos,
+    pub lastnopr: Pos,
+    pub search: usize,
+    pub backno: i32,
+    pub backmin: i16,
+    pub backmax: i16,
+}
+
+impl Dfa<'_> {
+    fn meta(&self) -> DfaMeta {
+        DfaMeta {
+            nssets: self.nssets,
+            nssused: self.nssused,
+            nstates: self.nstates,
+            ncolors: self.ncolors,
+            wordsper: self.wordsper,
+            lastpost: self.lastpost,
+            lastnopr: self.lastnopr,
+            search: self.search,
+            backno: self.backno,
+            backmin: self.backmin,
+            backmax: self.backmax,
+        }
+    }
     #[inline]
     fn hashbits(&self, bv: &[u32]) -> u32 {
         if self.wordsper == 1 {
@@ -169,62 +358,94 @@ pub struct ExecVars<'a> {
     pub search_start: usize,
     pub stop: usize,
     pub depth: u32,
-    pub subdfas: Vec<Option<Box<Dfa>>>,
-    pub ladfas: Vec<Option<Box<Dfa>>>,
+    pub ntree: usize,
+    pub subdfas: Vec<Option<SubDfa>>,
+    pub ladfas: Vec<Option<SubDfa>>,
     pub lblastcss: Vec<Option<usize>>,
     pub lblastcp: Vec<Option<usize>>,
     pub max_depth: u32,
 }
 
 
-pub fn newdfa<'mcx>(_mcx: Mcx<'mcx>, eflags: i32, cnfa: &Cnfa) -> RegResult<Dfa> {
-    debug_assert!(cnfa.nstates != 0);
-
-    let nss: usize = (cnfa.nstates as usize)
-        .checked_mul(2)
-        .ok_or(RegError(REG_ESPACE))?;
-    let wordsper: usize = (cnfa.nstates as usize).div_ceil(UBITS);
-    let ncolors: usize = cnfa.ncolors as usize;
-
-    let statesarea_words = nss
-        .checked_add(WORK)
-        .and_then(|n| n.checked_mul(wordsper))
-        .ok_or(RegError(REG_ESPACE))?;
-    let vec_area = nss.checked_mul(ncolors).ok_or(RegError(REG_ESPACE))?;
-
-    // C's newdfa leaves ssets/statesarea/outs/incarea uninitialized (stack
-    // smalldfa or bare malloc); pickss writes each row before first read.
-    // Reserve-only + lazy growth in pickss mirrors that write discipline.
-    let ssets = reserve_vec(nss)?;
-    let statesarea = reserve_vec(statesarea_words)?;
-    let work = fill_vec(wordsper, 0u32)?;
-    let outs = reserve_vec::<u32>(vec_area)?;
-    let incarea = reserve_vec(vec_area)?;
-
-    let nssets = if (eflags & REG_SMALL) != 0 {
-        REG_SMALL_NSSETS
-    } else {
-        nss
-    };
-
-    Ok(Dfa {
-        nssets,
-        nssused: 0,
-        nstates: cnfa.nstates as usize,
-        ncolors,
-        wordsper,
-        ssets,
+fn dfa_from_parts<'s>(
+    meta: DfaMeta,
+    ssets: &'s mut [Sset],
+    statesarea_full: &'s mut [u32],
+    outs: &'s mut [u32],
+    incarea: &'s mut [Arcp],
+) -> Dfa<'s> {
+    let nss = meta.nstates * 2;
+    let nssw = nss * meta.wordsper;
+    let (statesarea, work) = statesarea_full[..nssw + WORK * meta.wordsper].split_at_mut(nssw);
+    Dfa {
+        nssets: meta.nssets,
+        nssused: meta.nssused,
+        nstates: meta.nstates,
+        ncolors: meta.ncolors,
+        wordsper: meta.wordsper,
+        ssets: &mut ssets[..nss],
         statesarea,
         work,
-        outs,
-        incarea,
-        lastpost: Pos::NONE,
-        lastnopr: Pos::NONE,
-        search: 0,  // d->search = d->ssets (first entry)
-        backno: -1, // may be set by caller
-        backmin: 0,
-        backmax: 0,
-    })
+        outs: &mut outs[..nss * meta.ncolors],
+        incarea: &mut incarea[..nss * meta.ncolors],
+        lastpost: meta.lastpost,
+        lastnopr: meta.lastnopr,
+        search: meta.search,
+        backno: meta.backno,
+        backmin: meta.backmin,
+        backmax: meta.backmax,
+    }
+}
+
+fn make_dfa<'s>(meta: DfaMeta, space: &'s mut DfaSpace) -> Dfa<'s> {
+    match space {
+        DfaSpace::Small(sml) => {
+            debug_assert!(meta.wordsper == 1);
+            dfa_from_parts(
+                meta,
+                &mut sml.ssets,
+                &mut sml.statesarea,
+                &mut sml.outs,
+                &mut sml.incarea,
+            )
+        }
+        DfaSpace::Heap(h) => dfa_from_parts(
+            meta,
+            &mut h.ssets,
+            &mut h.statesarea,
+            &mut h.outs,
+            &mut h.incarea,
+        ),
+    }
+}
+
+pub fn newdfa<'s>(
+    eflags: i32,
+    cnfa: &Cnfa,
+    sml: &'s mut SmallDfaSpace,
+    heap: &'s mut Option<HeapSpace>,
+) -> RegResult<Dfa<'s>> {
+    debug_assert!(cnfa.nstates != 0);
+    let meta = DfaMeta::new(eflags, cnfa);
+    if small_ok(cnfa) {
+        debug_assert!(meta.wordsper == 1);
+        Ok(dfa_from_parts(
+            meta,
+            &mut sml.ssets,
+            &mut sml.statesarea,
+            &mut sml.outs,
+            &mut sml.incarea,
+        ))
+    } else {
+        let h = heap.insert(HeapSpace::for_cnfa(cnfa)?);
+        Ok(dfa_from_parts(
+            meta,
+            &mut h.ssets,
+            &mut h.statesarea,
+            &mut h.outs,
+            &mut h.incarea,
+        ))
+    }
 }
 
 fn fill_vec<T: Copy>(n: usize, val: T) -> RegResult<Vec<T>> {
@@ -234,19 +455,13 @@ fn fill_vec<T: Copy>(n: usize, val: T) -> RegResult<Vec<T>> {
     Ok(v)
 }
 
-fn reserve_vec<T>(n: usize) -> RegResult<Vec<T>> {
-    let mut v: Vec<T> = Vec::new();
-    v.try_reserve_exact(n)?;
-    Ok(v)
-}
-
 
 pub fn hash(uv: &[u32], n: usize) -> u32 {
     uv[..n].iter().fold(0u32, |h, &w| h ^ w)
 }
 
 
-pub fn initialize(d: &mut Dfa, cnfa: &Cnfa, start: usize) -> RegResult<Option<usize>> {
+pub fn initialize(d: &mut Dfa<'_>, cnfa: &Cnfa, start: usize) -> RegResult<Option<usize>> {
     let ss: usize = if d.nssused > 0 && (d.ssets[0].flags & STARTER) != 0 {
         0
     } else {
@@ -275,7 +490,7 @@ pub fn initialize(d: &mut Dfa, cnfa: &Cnfa, start: usize) -> RegResult<Option<us
 }
 
 
-pub fn getvacant(d: &mut Dfa, cp: usize, start: usize) -> RegResult<Option<usize>> {
+pub fn getvacant(d: &mut Dfa<'_>, cp: usize, start: usize) -> RegResult<Option<usize>> {
     let ss = match pickss(d, cp, start)? {
         Some(ss) => ss,
         None => return Ok(None),
@@ -337,7 +552,7 @@ pub fn getvacant(d: &mut Dfa, cp: usize, start: usize) -> RegResult<Option<usize
 }
 
 
-pub fn pickss(d: &mut Dfa, cp: usize, start: usize) -> RegResult<Option<usize>> {
+pub fn pickss(d: &mut Dfa<'_>, cp: usize, start: usize) -> RegResult<Option<usize>> {
     debug_assert!(cp >= start);
 
     if d.nssused < d.nssets {
@@ -346,8 +561,7 @@ pub fn pickss(d: &mut Dfa, cp: usize, start: usize) -> RegResult<Option<usize>> 
         let states_base = i * d.wordsper;
         let outs_base = i * d.ncolors;
         let inchain_base = i * d.ncolors;
-        debug_assert_eq!(d.ssets.len(), i);
-        d.ssets.push(Sset {
+        d.ssets[i] = Sset {
             states_base,
             hash: 0,
             flags: 0,
@@ -355,10 +569,11 @@ pub fn pickss(d: &mut Dfa, cp: usize, start: usize) -> RegResult<Option<usize>> 
             lastseen: Pos::NONE,
             outs_base,
             inchain_base,
-        });
-        d.statesarea.resize(d.statesarea.len() + d.wordsper, 0);
-        d.outs.resize(d.outs.len() + d.ncolors, NOSS);
-        d.incarea.resize(d.incarea.len() + d.ncolors, Arcp::null());
+        };
+        for j in 0..d.ncolors {
+            d.outs[outs_base + j] = NOSS;
+            d.incarea[inchain_base + j] = Arcp::null();
+        }
         return Ok(Some(i));
     }
 
@@ -366,17 +581,15 @@ pub fn pickss(d: &mut Dfa, cp: usize, start: usize) -> RegResult<Option<usize>> 
     let ancient: usize = if cp - start > span { cp - span } else { start };
     let ancient = Pos::at(ancient);
 
-    for ss in d.search..d.nssets {
-        if d.ssets[ss].lastseen < ancient && (d.ssets[ss].flags & LOCKED) == 0 {
-            d.search = ss + 1;
-            return Ok(Some(ss));
-        }
+    let is_vacant = |s: &Sset| s.lastseen < ancient && (s.flags & LOCKED) == 0;
+    if let Some(off) = d.ssets[d.search..d.nssets].iter().position(is_vacant) {
+        let ss = d.search + off;
+        d.search = ss + 1;
+        return Ok(Some(ss));
     }
-    for ss in 0..d.search {
-        if d.ssets[ss].lastseen < ancient && (d.ssets[ss].flags & LOCKED) == 0 {
-            d.search = ss + 1;
-            return Ok(Some(ss));
-        }
+    if let Some(ss) = d.ssets[..d.search].iter().position(is_vacant) {
+        d.search = ss + 1;
+        return Ok(Some(ss));
     }
 
     Err(RegError(REG_ASSERT))
@@ -393,44 +606,46 @@ fn getcolor(cm: &ColorMap, c: chr) -> color {
 }
 
 
-pub fn getsubdfa<'mcx>(mcx: Mcx<'mcx>, v: &mut ExecVars, t: &Subre) -> RegResult<usize> {
+pub fn getsubdfa(v: &mut ExecVars, t: &Subre) -> RegResult<usize> {
+    if v.subdfas.is_empty() {
+        v.subdfas.try_reserve_exact(v.ntree)?;
+        v.subdfas.resize_with(v.ntree, || None);
+    }
     let id = t.id as usize;
     if v.subdfas[id].is_none() {
         let cnfa = t
             .cnfa
             .as_ref()
             .expect("getsubdfa: subre has no cnfa (NULLCNFA)");
-        let mut d = newdfa(mcx, v.eflags, cnfa)?;
+        let mut sub = SubDfa::new(v.eflags, cnfa)?;
         if t.op == b'b' {
-            d.backno = t.backno;
-            d.backmin = t.min;
-            d.backmax = t.max;
+            sub.meta.backno = t.backno;
+            sub.meta.backmin = t.min;
+            sub.meta.backmax = t.max;
         }
-        v.subdfas[id] = Some(Box::new(d));
+        v.subdfas[id] = Some(sub);
     }
     Ok(id)
 }
 
-pub fn getladfa<'mcx>(mcx: Mcx<'mcx>, v: &mut ExecVars, g: &Guts, n: usize) -> RegResult<usize> {
+pub fn getladfa(v: &mut ExecVars, g: &Guts, n: usize) -> RegResult<usize> {
     debug_assert!(n > 0 && (n as i32) < g.nlacons);
     if v.ladfas[n].is_none() {
         let cnfa = g.lacons[n]
             .cnfa
             .as_ref()
             .expect("getladfa: lacon has no cnfa (NULLCNFA)");
-        let d = newdfa(mcx, v.eflags, cnfa)?;
-        v.ladfas[n] = Some(Box::new(d));
+        v.ladfas[n] = Some(SubDfa::new(v.eflags, cnfa)?);
     }
     Ok(n)
 }
 
 
 #[allow(clippy::too_many_arguments)]
-fn miss<'mcx>(
-    mcx: Mcx<'mcx>,
+fn miss(
     v: &mut ExecVars,
     g: &Guts,
-    d: &mut Dfa,
+    d: &mut Dfa<'_>,
     cnfa: &Cnfa,
     cm: &ColorMap,
     css: usize,
@@ -461,9 +676,7 @@ fn miss<'mcx>(
         let stflags = &cnfa.stflags[..];
         for i in 0..css_states.len() * UBITS {
             if isbset(css_states, i) {
-                let arc_range = cnfa.states[i].clone();
-                for ai in arc_range {
-                    let ca = arcs[ai];
+                for ca in &arcs[cnfa.states[i].clone()] {
                     if ca.co == co || (ca.co == RAINBOW && !ispseudocolor) {
                         bset(work, ca.to as usize);
                         gotstate = true;
@@ -497,7 +710,7 @@ fn miss<'mcx>(
                         continue; // arc would be a no-op anyway
                     }
                     sawlacons = true; // this LACON affects our result
-                    if !lacon(mcx, v, g, cnfa, cp, ca.co)? {
+                    if !lacon(v, g, cnfa, cp, ca.co)? {
                         continue; // LACON arc cannot be traversed
                     }
                     bset(&mut d.work, ca.to as usize);
@@ -515,10 +728,17 @@ fn miss<'mcx>(
     let h = d.hashbits(&d.work);
 
     let mut found: Option<usize> = None;
-    for p in 0..d.nssused {
-        if d.ssets[p].hash == h && (d.wordsper == 1 || d.sset_states(p) == &d.work[..]) {
-            found = Some(p);
-            break;
+    {
+        let wordsper = d.wordsper;
+        let used = &d.ssets[..d.nssused];
+        for (p, s) in used.iter().enumerate() {
+            if s.hash == h
+                && (wordsper == 1
+                    || d.statesarea[s.states_base..s.states_base + wordsper] == d.work[..])
+            {
+                found = Some(p);
+                break;
+            }
         }
     }
     let p = match found {
@@ -552,8 +772,7 @@ fn miss<'mcx>(
 }
 
 
-fn lacon<'mcx>(
-    mcx: Mcx<'mcx>,
+fn lacon(
     v: &mut ExecVars,
     g: &Guts,
     pcnfa: &Cnfa,
@@ -564,13 +783,12 @@ fn lacon<'mcx>(
         return Err(RegError(REG_ETOOBIG));
     }
     v.depth += 1;
-    let result = lacon_inner(mcx, v, g, pcnfa, cp, co);
+    let result = lacon_inner(v, g, pcnfa, cp, co);
     v.depth -= 1;
     result
 }
 
-fn lacon_inner<'mcx>(
-    mcx: Mcx<'mcx>,
+fn lacon_inner(
     v: &mut ExecVars,
     g: &Guts,
     pcnfa: &Cnfa,
@@ -581,17 +799,17 @@ fn lacon_inner<'mcx>(
     debug_assert!(n > 0 && (n as i32) < g.nlacons);
     let latype = g.lacons[n].latype as i32;
 
-    let d_idx = getladfa(mcx, v, g, n)?;
+    let d_idx = getladfa(v, g, n)?;
 
     if latype_is_ahead(latype) {
         let stop = v.stop;
-        let mut d = v.ladfas[d_idx].take().expect("ladfa present");
+        let mut sub = v.ladfas[d_idx].take().expect("ladfa present");
         let cnfa = g.lacons[n]
             .cnfa
             .as_ref()
             .expect("lacon has no cnfa (NULLCNFA)");
-        let end = shortest(mcx, v, g, &mut d, cnfa, &g.cmap, cp, cp, stop, None, None);
-        v.ladfas[d_idx] = Some(d);
+        let end = sub.with(|d| shortest(v, g, d, cnfa, &g.cmap, cp, cp, stop, None, None));
+        v.ladfas[d_idx] = Some(sub);
         let end = end?;
         let satisfied = if latype_is_pos(latype) {
             end.is_some()
@@ -600,13 +818,13 @@ fn lacon_inner<'mcx>(
         };
         Ok(satisfied)
     } else {
-        let mut d = v.ladfas[d_idx].take().expect("ladfa present");
+        let mut sub = v.ladfas[d_idx].take().expect("ladfa present");
         let cnfa = g.lacons[n]
             .cnfa
             .as_ref()
             .expect("lacon has no cnfa (NULLCNFA)");
-        let r = matchuntil(mcx, v, g, &mut d, cnfa, &g.cmap, cp, n);
-        v.ladfas[d_idx] = Some(d);
+        let r = sub.with(|d| matchuntil(v, g, d, cnfa, &g.cmap, cp, n));
+        v.ladfas[d_idx] = Some(sub);
         let mut satisfied = r?;
         if !latype_is_pos(latype) {
             satisfied = !satisfied;
@@ -617,11 +835,10 @@ fn lacon_inner<'mcx>(
 
 
 #[allow(clippy::too_many_arguments)]
-fn longest<'mcx>(
-    mcx: Mcx<'mcx>,
+fn longest(
     v: &mut ExecVars,
     g: &Guts,
-    d: &mut Dfa,
+    d: &mut Dfa<'_>,
     cnfa: &Cnfa,
     cm: &ColorMap,
     start: usize,
@@ -683,31 +900,54 @@ fn longest<'mcx>(
     } else {
         getcolor(cm, v.input[cp - 1])
     };
-    css = match miss(mcx, v, g, d, cnfa, cm, css, co, cp, start)? {
+    css = match miss(v, g, d, cnfa, cm, css, co, cp, start)? {
         Some(css) => css,
         None => return Ok(None),
     };
     d.ssets[css].lastseen = Pos::at(cp);
 
     // Slice pinned to the loop bound so the per-char input bounds check folds
-    // into the loop condition (C reads *cp bare).
+    // into the loop condition (C reads *cp bare). Fast scan holds d's arrays
+    // as locals: a lastseen store through &mut d otherwise forces ptr/len
+    // reloads of every other array each char (all derive from one noalias d).
     let input = v.input;
     debug_assert!(realstop <= input.len());
     let input = &input[..realstop];
-    while cp < input.len() {
-        let co = getcolor(cm, input[cp]);
-        let hit = d.out(css, co);
-        let ss = if hit != NOSS {
-            hit as usize
-        } else {
-            match miss(mcx, v, g, d, cnfa, cm, css, co, cp + 1, start)? {
-                Some(ss) => ss,
-                None => break, // NOTE BREAK OUT
+    let locolormap = &cm.locolormap[..(MAX_SIMPLE_CHR - CHR_MIN + 1) as usize];
+    'scan: while cp < input.len() {
+        let pend_co: color;
+        {
+            let ssets = &mut *d.ssets;
+            let outs = &*d.outs;
+            loop {
+                let c = input[cp];
+                let co = if c <= MAX_SIMPLE_CHR {
+                    locolormap[(c - CHR_MIN) as usize]
+                } else {
+                    crate::regex_foundation::pg_reg_getcolor(cm, c)
+                };
+                let hit = outs[ssets[css].outs_base + co as usize];
+                if hit == NOSS {
+                    pend_co = co;
+                    break;
+                }
+                cp += 1;
+                let ss = hit as usize;
+                ssets[ss].lastseen = Pos::at(cp);
+                css = ss;
+                if cp >= input.len() {
+                    break 'scan;
+                }
             }
-        };
-        cp += 1;
-        d.ssets[ss].lastseen = Pos::at(cp);
-        css = ss;
+        }
+        match miss(v, g, d, cnfa, cm, css, pend_co, cp + 1, start)? {
+            Some(ss) => {
+                cp += 1;
+                d.ssets[ss].lastseen = Pos::at(cp);
+                css = ss;
+            }
+            None => break, // NOTE BREAK OUT
+        }
     }
 
     if cp == v.stop && stop == v.stop {
@@ -715,7 +955,7 @@ fn longest<'mcx>(
             *hs = true;
         }
         let co = cnfa.eos[if (v.eflags & REG_NOTEOL) != 0 { 0 } else { 1 }];
-        let ss = miss(mcx, v, g, d, cnfa, cm, css, co, cp, start)?;
+        let ss = miss(v, g, d, cnfa, cm, css, co, cp, start)?;
         match ss {
             Some(ss) if (d.ssets[ss].flags & POSTSTATE) != 0 => return Ok(Some(cp)),
             Some(ss) => d.ssets[ss].lastseen = Pos::at(cp), // to be tidy
@@ -738,11 +978,10 @@ fn longest<'mcx>(
 
 
 #[allow(clippy::too_many_arguments)]
-fn shortest<'mcx>(
-    mcx: Mcx<'mcx>,
+fn shortest(
     v: &mut ExecVars,
     g: &Guts,
-    d: &mut Dfa,
+    d: &mut Dfa<'_>,
     cnfa: &Cnfa,
     cm: &ColorMap,
     start: usize,
@@ -802,37 +1041,62 @@ fn shortest<'mcx>(
     } else {
         getcolor(cm, v.input[cp - 1])
     };
-    css = match miss(mcx, v, g, d, cnfa, cm, css, co, cp, start)? {
+    css = match miss(v, g, d, cnfa, cm, css, co, cp, start)? {
         Some(css) => css,
         None => return Ok(None),
     };
     d.ssets[css].lastseen = Pos::at(cp);
     let mut ss: Option<usize> = Some(css);
 
-    // Same bounds-check fold as longest().
+    // Same bounds-check fold and fast-scan hoist as longest().
     let input = v.input;
     debug_assert!(realmax <= input.len());
     let input = &input[..realmax];
-    while cp < input.len() {
-        let co = getcolor(cm, input[cp]);
-        let hit = d.out(css, co);
-        let next = if hit != NOSS {
-            hit as usize
-        } else {
-            match miss(mcx, v, g, d, cnfa, cm, css, co, cp + 1, start)? {
-                Some(ss) => ss,
-                None => {
-                    ss = None;
+    let locolormap = &cm.locolormap[..(MAX_SIMPLE_CHR - CHR_MIN + 1) as usize];
+    'scan: while cp < input.len() {
+        let pend_co: color;
+        {
+            let ssets = &mut *d.ssets;
+            let outs = &*d.outs;
+            loop {
+                let c = input[cp];
+                let co = if c <= MAX_SIMPLE_CHR {
+                    locolormap[(c - CHR_MIN) as usize]
+                } else {
+                    crate::regex_foundation::pg_reg_getcolor(cm, c)
+                };
+                let hit = outs[ssets[css].outs_base + co as usize];
+                if hit == NOSS {
+                    pend_co = co;
+                    break;
+                }
+                cp += 1;
+                let next = hit as usize;
+                ssets[next].lastseen = Pos::at(cp);
+                css = next;
+                ss = Some(next);
+                if (ssets[next].flags & POSTSTATE) != 0 && cp >= realmin {
+                    break 'scan; // NOTE BREAK OUT
+                }
+                if cp >= input.len() {
+                    break 'scan;
+                }
+            }
+        }
+        match miss(v, g, d, cnfa, cm, css, pend_co, cp + 1, start)? {
+            Some(next) => {
+                cp += 1;
+                d.ssets[next].lastseen = Pos::at(cp);
+                css = next;
+                ss = Some(next);
+                if (d.ssets[next].flags & POSTSTATE) != 0 && cp >= realmin {
                     break; // NOTE BREAK OUT
                 }
             }
-        };
-        cp += 1;
-        d.ssets[next].lastseen = Pos::at(cp);
-        css = next;
-        ss = Some(next);
-        if (d.ssets[next].flags & POSTSTATE) != 0 && cp >= realmin {
-            break; // NOTE BREAK OUT
+            None => {
+                ss = None;
+                break; // NOTE BREAK OUT
+            }
         }
     }
 
@@ -855,7 +1119,7 @@ fn shortest<'mcx>(
         cp -= 1;
     } else if cp == v.stop && max == v.stop {
         let co = cnfa.eos[if (v.eflags & REG_NOTEOL) != 0 { 0 } else { 1 }];
-        ss_opt = miss(mcx, v, g, d, cnfa, cm, css, co, cp, start)?;
+        ss_opt = miss(v, g, d, cnfa, cm, css, co, cp, start)?;
         let not_post = match ss_opt {
             None => true,
             Some(s) => (d.ssets[s].flags & POSTSTATE) == 0,
@@ -875,11 +1139,10 @@ fn shortest<'mcx>(
 
 
 #[allow(clippy::too_many_arguments)]
-fn matchuntil<'mcx>(
-    mcx: Mcx<'mcx>,
+fn matchuntil(
     v: &mut ExecVars,
     g: &Guts,
-    d: &mut Dfa,
+    d: &mut Dfa<'_>,
     cnfa: &Cnfa,
     cm: &ColorMap,
     probe: usize,
@@ -905,7 +1168,7 @@ fn matchuntil<'mcx>(
             None => return Ok(false),
         };
         let co = cnfa.bos[if (v.eflags & REG_NOTBOL) != 0 { 0 } else { 1 }];
-        let m = miss(mcx, v, g, d, cnfa, cm, init, co, start, start)?;
+        let m = miss(v, g, d, cnfa, cm, init, co, start, start)?;
         let css_i = match m {
             Some(s) => s,
             None => {
@@ -927,7 +1190,7 @@ fn matchuntil<'mcx>(
         let next = if hit != NOSS {
             hit as usize
         } else {
-            match miss(mcx, v, g, d, cnfa, cm, css_v, co, cp_v + 1, v.start)? {
+            match miss(v, g, d, cnfa, cm, css_v, co, cp_v + 1, v.start)? {
                 Some(s) => s,
                 None => {
                     ss = None;
@@ -956,12 +1219,12 @@ fn matchuntil<'mcx>(
         if hit != NOSS {
             Some(hit as usize)
         } else {
-            miss(mcx, v, g, d, cnfa, cm, css_v, co, cp_v + 1, v.start)?
+            miss(v, g, d, cnfa, cm, css_v, co, cp_v + 1, v.start)?
         }
     } else {
         debug_assert!(cp_v == v.stop);
         let co = cnfa.eos[if (v.eflags & REG_NOTEOL) != 0 { 0 } else { 1 }];
-        miss(mcx, v, g, d, cnfa, cm, css_v, co, cp_v, v.start)?
+        miss(v, g, d, cnfa, cm, css_v, co, cp_v, v.start)?
     };
 
     match ss {
@@ -974,7 +1237,7 @@ fn matchuntil<'mcx>(
 fn dfa_backref(
     v: &ExecVars,
     g: &Guts,
-    d: &Dfa,
+    d: &Dfa<'_>,
     start: usize,
     min: usize,
     max: usize,
@@ -1042,7 +1305,7 @@ fn dfa_backref(
 }
 
 
-fn lastcold(v: &ExecVars, d: &Dfa) -> usize {
+fn lastcold(v: &ExecVars, d: &Dfa<'_>) -> usize {
     let mut nopr = if d.lastnopr.is_none() {
         Pos::at(v.start)
     } else {
@@ -1062,28 +1325,34 @@ fn off(v: &ExecVars, p: usize) -> isize {
     (p - v.start) as isize
 }
 
-fn find<'mcx>(mcx: Mcx<'mcx>, v: &mut ExecVars, g: &Guts, cnfa: &Cnfa, cm: &ColorMap) -> RegResult<i32> {
+fn find(
+    v: &mut ExecVars,
+    g: &Guts,
+    cnfa: &Cnfa,
+    cm: &ColorMap,
+    scratch: &mut ExecScratch,
+) -> RegResult<i32> {
     let troot = g.tree.expect("find: tree root present");
     let shorter = (g.tree_nodes[troot.0 as usize].flags & SHORTER) != 0;
 
-    let mut s = newdfa(mcx, v.eflags, &g.search)?;
     let search_start = v.search_start;
     let stop = v.stop;
     let mut cold: Option<usize> = None;
-    let close = shortest(
-        mcx,
-        v,
-        g,
-        &mut s,
-        &g.search,
-        cm,
-        search_start,
-        search_start,
-        stop,
-        Some(&mut cold),
-        None,
-    );
-    drop(s); // freedfa(s)
+    let close = {
+        let mut sheap = None;
+        let mut s = newdfa(v.eflags, &g.search, &mut scratch.s1, &mut sheap)?;
+        shortest(v,
+            g,
+            &mut s,
+            &g.search,
+            cm,
+            search_start,
+            search_start,
+            stop,
+            Some(&mut cold),
+            None,
+        )
+    };
     let close = close?;
 
     let _ = REG_EXPECT;
@@ -1099,23 +1368,18 @@ fn find<'mcx>(mcx: Mcx<'mcx>, v: &mut ExecVars, g: &Guts, cnfa: &Cnfa, cm: &Colo
     let open = cold.expect("find: cold set when close found");
     let mut cold: Option<usize> = None;
 
-    let mut d = newdfa(mcx, v.eflags, cnfa)?;
+    let mut dheap = None;
+    let mut d = newdfa(v.eflags, cnfa, &mut scratch.s1, &mut dheap)?;
     let mut begin = open;
     let mut end: Option<usize> = None;
     while begin <= close {
         let mut hitend = false;
         let r = if shorter {
-            shortest(mcx, v, g, &mut d, cnfa, cm, begin, begin, stop, None, Some(&mut hitend))
+            shortest(v, g, &mut d, cnfa, cm, begin, begin, stop, None, Some(&mut hitend))
         } else {
-            longest(mcx, v, g, &mut d, cnfa, cm, begin, stop, Some(&mut hitend))
+            longest(v, g, &mut d, cnfa, cm, begin, stop, Some(&mut hitend))
         };
-        end = match r {
-            Ok(e) => e,
-            Err(e) => {
-                drop(d); // freedfa(d) on error
-                return Err(e);
-            }
-        };
+        end = r?;
         if hitend && cold.is_none() {
             cold = Some(begin);
         }
@@ -1125,7 +1389,7 @@ fn find<'mcx>(mcx: Mcx<'mcx>, v: &mut ExecVars, g: &Guts, cnfa: &Cnfa, cm: &Colo
         begin += 1;
     }
     let end = end.expect("find: search RE succeeded so loop should find an end");
-    drop(d); // freedfa(d)
+    drop(d);
     let _ = cold;
 
     debug_assert!(v.nmatch > 0);
@@ -1135,38 +1399,40 @@ fn find<'mcx>(mcx: Mcx<'mcx>, v: &mut ExecVars, g: &Guts, cnfa: &Cnfa, cm: &Colo
         return Ok(REG_OKAY);
     }
 
-    cdissect(mcx, v, g, troot, begin, end)
+    cdissect(v, g, troot, begin, end)
 }
 
-fn cfind<'mcx>(
-    mcx: Mcx<'mcx>,
+fn cfind(
     v: &mut ExecVars,
     g: &Guts,
     cnfa: &Cnfa,
     cm: &ColorMap,
+    scratch: &mut ExecScratch,
 ) -> RegResult<i32> {
-    let mut s = newdfa(mcx, v.eflags, &g.search)?;
-    let mut d = newdfa(mcx, v.eflags, cnfa)?;
+    let mut sheap = None;
+    let mut dheap = None;
+    let (sml1, sml2) = (&mut scratch.s1, &mut scratch.s2);
+    let mut s = newdfa(v.eflags, &g.search, sml1, &mut sheap)?;
+    let mut d = newdfa(v.eflags, cnfa, sml2, &mut dheap)?;
 
     let mut cold: Option<usize> = None;
-    let ret = cfindloop(mcx, v, g, cnfa, cm, &mut d, &mut s, &mut cold);
+    let ret = cfindloop(v, g, cnfa, cm, &mut d, &mut s, &mut cold);
 
-    drop(d); // freedfa(d)
-    drop(s); // freedfa(s)
+    drop(d);
+    drop(s);
     let ret = ret?;
     let _ = cold; // C surfaces it via details.rm_extend (no out-param here).
     Ok(ret)
 }
 
 #[allow(clippy::too_many_arguments)]
-fn cfindloop<'mcx>(
-    mcx: Mcx<'mcx>,
+fn cfindloop(
     v: &mut ExecVars,
     g: &Guts,
     cnfa: &Cnfa,
     cm: &ColorMap,
-    d: &mut Dfa,
-    s: &mut Dfa,
+    d: &mut Dfa<'_>,
+    s: &mut Dfa<'_>,
     coldp: &mut Option<usize>,
 ) -> RegResult<i32> {
     let troot = g.tree.expect("cfindloop: tree root present");
@@ -1177,9 +1443,7 @@ fn cfindloop<'mcx>(
     let mut close = v.search_start;
 
     loop {
-        let close_opt = shortest(
-            mcx,
-            v,
+        let close_opt = shortest(v,
             g,
             s,
             &g.search,
@@ -1212,9 +1476,9 @@ fn cfindloop<'mcx>(
             loop {
                 let mut hitend = false;
                 let end_res = if shorter {
-                    shortest(mcx, v, g, d, cnfa, cm, begin, estart, estop, None, Some(&mut hitend))
+                    shortest(v, g, d, cnfa, cm, begin, estart, estop, None, Some(&mut hitend))
                 } else {
-                    longest(mcx, v, g, d, cnfa, cm, begin, estop, Some(&mut hitend))
+                    longest(v, g, d, cnfa, cm, begin, estop, Some(&mut hitend))
                 };
                 let end = match end_res {
                     Ok(e) => e,
@@ -1230,7 +1494,7 @@ fn cfindloop<'mcx>(
                     Some(e) => e,
                     None => break, // no match with this begin point, try next
                 };
-                let er = cdissect(mcx, v, g, troot, begin, end)?;
+                let er = cdissect(v, g, troot, begin, end)?;
                 if er == REG_OKAY {
                     if v.nmatch > 0 {
                         v.pmatch[0].0 = off(v, begin);
@@ -1270,14 +1534,14 @@ fn cfindloop<'mcx>(
 
 
 pub fn pg_regexec<'mcx>(
-    mcx: Mcx<'mcx>,
+    _mcx: Mcx<'mcx>,
     guts: &Guts,
     data: &[chr],
     search_start: i32,
     pmatch: &mut [RegMatch],
     eflags: i32,
 ) -> RegResult<bool> {
-    let code = pg_regexec_code(mcx, guts, data, search_start, pmatch, eflags);
+    let code = pg_regexec_code(guts, data, search_start, pmatch, eflags);
     match code {
         REG_OKAY => Ok(true),
         REG_NOMATCH => Ok(false),
@@ -1285,8 +1549,7 @@ pub fn pg_regexec<'mcx>(
     }
 }
 
-fn pg_regexec_code<'mcx>(
-    mcx: Mcx<'mcx>,
+fn pg_regexec_code(
     g: &Guts,
     string: &[chr],
     search_start: i32,
@@ -1342,10 +1605,9 @@ fn pg_regexec_code<'mcx>(
     let stop = len;
     debug_assert!(g.ntree >= 0);
     let ntree = g.ntree as usize;
-    let subdfas: Vec<Option<Box<Dfa>>> = (0..ntree).map(|_| None).collect();
     debug_assert!(g.nlacons >= 0);
     let nlacons = g.nlacons as usize;
-    let ladfas: Vec<Option<Box<Dfa>>> = (0..nlacons).map(|_| None).collect();
+    let ladfas: Vec<Option<SubDfa>> = (0..nlacons).map(|_| None).collect();
     let lblastcss: Vec<Option<usize>> = alloc::vec![None; nlacons];
     let lblastcp: Vec<Option<usize>> = alloc::vec![None; nlacons];
 
@@ -1358,7 +1620,8 @@ fn pg_regexec_code<'mcx>(
         search_start,
         stop,
         depth: 0,
-        subdfas,
+        ntree,
+        subdfas: Vec::new(), // sized on first getsubdfa; dissect-only
         ladfas,
         lblastcss,
         lblastcp,
@@ -1372,11 +1635,14 @@ fn pg_regexec_code<'mcx>(
         .as_ref()
         .expect("pg_regexec: tree root has a cnfa");
 
+    let mut slot = EXEC_SCRATCH.with(|c| c.borrow_mut().take());
+    let scratch = slot.get_or_insert_with(|| Box::new(ExecScratch::new()));
     let st = if backref {
-        cfind(mcx, &mut v, g, main_cnfa, &g.cmap)
+        cfind(&mut v, g, main_cnfa, &g.cmap, scratch)
     } else {
-        find(mcx, &mut v, g, main_cnfa, &g.cmap)
+        find(&mut v, g, main_cnfa, &g.cmap, scratch)
     };
+    EXEC_SCRATCH.with(|c| *c.borrow_mut() = slot);
     let st = match st {
         Ok(code) => code,
         Err(e) => e.0,
@@ -1407,8 +1673,7 @@ fn pg_regexec_code<'mcx>(
 }
 
 
-fn longest_sub<'mcx>(
-    mcx: Mcx<'mcx>,
+fn longest_sub(
     v: &mut ExecVars,
     g: &Guts,
     nid: NodeId,
@@ -1422,14 +1687,13 @@ fn longest_sub<'mcx>(
         .cnfa
         .as_ref()
         .expect("longest_sub: subre has no cnfa (NULLCNFA)");
-    let mut d = v.subdfas[id].take().expect("longest_sub: subdfa present");
-    let r = longest(mcx, v, g, &mut d, cnfa, &g.cmap, start, stop, hitstopp);
-    v.subdfas[id] = Some(d);
+    let mut sub = v.subdfas[id].take().expect("longest_sub: subdfa present");
+    let r = sub.with(|d| longest(v, g, d, cnfa, &g.cmap, start, stop, hitstopp));
+    v.subdfas[id] = Some(sub);
     r
 }
 
-fn shortest_sub<'mcx>(
-    mcx: Mcx<'mcx>,
+fn shortest_sub(
     v: &mut ExecVars,
     g: &Guts,
     nid: NodeId,
@@ -1444,15 +1708,15 @@ fn shortest_sub<'mcx>(
         .cnfa
         .as_ref()
         .expect("shortest_sub: subre has no cnfa (NULLCNFA)");
-    let mut d = v.subdfas[id].take().expect("shortest_sub: subdfa present");
+    let mut sub = v.subdfas[id].take().expect("shortest_sub: subdfa present");
     let mut scratch: Option<usize> = None;
     let coldp = if record_coldp {
         Some(&mut scratch)
     } else {
         None
     };
-    let r = shortest(mcx, v, g, &mut d, cnfa, &g.cmap, start, min, max, coldp, None);
-    v.subdfas[id] = Some(d);
+    let r = sub.with(|d| shortest(v, g, d, cnfa, &g.cmap, start, min, max, coldp, None));
+    v.subdfas[id] = Some(sub);
     r
 }
 
@@ -1492,8 +1756,7 @@ fn subset(v: &mut ExecVars, g: &Guts, sub: NodeId, begin: usize, end: usize) {
 }
 
 
-fn cdissect<'mcx>(
-    mcx: Mcx<'mcx>,
+fn cdissect(
     v: &mut ExecVars,
     g: &Guts,
     t: NodeId,
@@ -1504,13 +1767,12 @@ fn cdissect<'mcx>(
         return Ok(REG_ETOOBIG);
     }
     v.depth += 1;
-    let r = cdissect_inner(mcx, v, g, t, begin, end);
+    let r = cdissect_inner(v, g, t, begin, end);
     v.depth -= 1;
     r
 }
 
-fn cdissect_inner<'mcx>(
-    mcx: Mcx<'mcx>,
+fn cdissect_inner(
     v: &mut ExecVars,
     g: &Guts,
     t: NodeId,
@@ -1534,26 +1796,26 @@ fn cdissect_inner<'mcx>(
         b'.' => {
             let child = g.tree_nodes[id].child.expect("concat has child");
             if (g.tree_nodes[child.0 as usize].flags & SHORTER) != 0 {
-                crevcondissect(mcx, v, g, t, begin, end)? // reverse scan
+                crevcondissect(v, g, t, begin, end)? // reverse scan
             } else {
-                ccondissect(mcx, v, g, t, begin, end)?
+                ccondissect(v, g, t, begin, end)?
             }
         }
         b'|' => {
             debug_assert!(g.tree_nodes[id].child.is_some());
-            caltdissect(mcx, v, g, t, begin, end)?
+            caltdissect(v, g, t, begin, end)?
         }
         b'*' => {
             let child = g.tree_nodes[id].child.expect("iter has child");
             if (g.tree_nodes[child.0 as usize].flags & SHORTER) != 0 {
-                creviterdissect(mcx, v, g, t, begin, end)? // reverse scan
+                creviterdissect(v, g, t, begin, end)? // reverse scan
             } else {
-                citerdissect(mcx, v, g, t, begin, end)?
+                citerdissect(v, g, t, begin, end)?
             }
         }
         b'(' => {
             let child = g.tree_nodes[id].child.expect("capture has child");
-            cdissect(mcx, v, g, child, begin, end)?
+            cdissect(v, g, child, begin, end)?
         }
         _ => REG_ASSERT,
     };
@@ -1568,8 +1830,7 @@ fn cdissect_inner<'mcx>(
 }
 
 
-fn ccondissect<'mcx>(
-    mcx: Mcx<'mcx>,
+fn ccondissect(
     v: &mut ExecVars,
     g: &Guts,
     t: NodeId,
@@ -1584,19 +1845,19 @@ fn ccondissect<'mcx>(
     debug_assert!(g.tree_nodes[right.0 as usize].sibling.is_none());
     debug_assert!((g.tree_nodes[left.0 as usize].flags & SHORTER) == 0);
 
-    getsubdfa(mcx, v, &g.tree_nodes[left.0 as usize])?;
-    getsubdfa(mcx, v, &g.tree_nodes[right.0 as usize])?;
+    getsubdfa(v, &g.tree_nodes[left.0 as usize])?;
+    getsubdfa(v, &g.tree_nodes[right.0 as usize])?;
 
-    let mut mid = match longest_sub(mcx, v, g, left, begin, end, None)? {
+    let mut mid = match longest_sub(v, g, left, begin, end, None)? {
         Some(m) => m,
         None => return Ok(REG_NOMATCH),
     };
 
     loop {
-        if longest_sub(mcx, v, g, right, mid, end, None)? == Some(end) {
-            let mut er = cdissect(mcx, v, g, left, begin, mid)?;
+        if longest_sub(v, g, right, mid, end, None)? == Some(end) {
+            let mut er = cdissect(v, g, left, begin, mid)?;
             if er == REG_OKAY {
-                er = cdissect(mcx, v, g, right, mid, end)?;
+                er = cdissect(v, g, right, mid, end)?;
                 if er == REG_OKAY {
                     return Ok(REG_OKAY);
                 }
@@ -1610,7 +1871,7 @@ fn ccondissect<'mcx>(
         if mid == begin {
             return Ok(REG_NOMATCH);
         }
-        mid = match longest_sub(mcx, v, g, left, begin, mid - 1, None)? {
+        mid = match longest_sub(v, g, left, begin, mid - 1, None)? {
             Some(m) => m,
             None => {
                 return Ok(REG_NOMATCH);
@@ -1620,8 +1881,7 @@ fn ccondissect<'mcx>(
 }
 
 
-fn crevcondissect<'mcx>(
-    mcx: Mcx<'mcx>,
+fn crevcondissect(
     v: &mut ExecVars,
     g: &Guts,
     t: NodeId,
@@ -1636,19 +1896,19 @@ fn crevcondissect<'mcx>(
     debug_assert!(g.tree_nodes[right.0 as usize].sibling.is_none());
     debug_assert!((g.tree_nodes[left.0 as usize].flags & SHORTER) != 0);
 
-    getsubdfa(mcx, v, &g.tree_nodes[left.0 as usize])?;
-    getsubdfa(mcx, v, &g.tree_nodes[right.0 as usize])?;
+    getsubdfa(v, &g.tree_nodes[left.0 as usize])?;
+    getsubdfa(v, &g.tree_nodes[right.0 as usize])?;
 
-    let mut mid = match shortest_sub(mcx, v, g, left, begin, begin, end, false)? {
+    let mut mid = match shortest_sub(v, g, left, begin, begin, end, false)? {
         Some(m) => m,
         None => return Ok(REG_NOMATCH),
     };
 
     loop {
-        if longest_sub(mcx, v, g, right, mid, end, None)? == Some(end) {
-            let mut er = cdissect(mcx, v, g, left, begin, mid)?;
+        if longest_sub(v, g, right, mid, end, None)? == Some(end) {
+            let mut er = cdissect(v, g, left, begin, mid)?;
             if er == REG_OKAY {
-                er = cdissect(mcx, v, g, right, mid, end)?;
+                er = cdissect(v, g, right, mid, end)?;
                 if er == REG_OKAY {
                     return Ok(REG_OKAY);
                 }
@@ -1662,7 +1922,7 @@ fn crevcondissect<'mcx>(
         if mid == end {
             return Ok(REG_NOMATCH);
         }
-        mid = match shortest_sub(mcx, v, g, left, begin, mid + 1, end, false)? {
+        mid = match shortest_sub(v, g, left, begin, mid + 1, end, false)? {
             Some(m) => m,
             None => {
                 return Ok(REG_NOMATCH);
@@ -1727,8 +1987,7 @@ fn cbrdissect(v: &mut ExecVars, g: &Guts, t: NodeId, begin: usize, end: usize) -
 }
 
 
-fn caltdissect<'mcx>(
-    mcx: Mcx<'mcx>,
+fn caltdissect(
     v: &mut ExecVars,
     g: &Guts,
     t: NodeId,
@@ -1749,9 +2008,9 @@ fn caltdissect<'mcx>(
                 .unwrap_or(false)
         );
 
-        getsubdfa(mcx, v, &g.tree_nodes[node.0 as usize])?;
-        if longest_sub(mcx, v, g, node, begin, end, None)? == Some(end) {
-            let er = cdissect(mcx, v, g, node, begin, end)?;
+        getsubdfa(v, &g.tree_nodes[node.0 as usize])?;
+        if longest_sub(v, g, node, begin, end, None)? == Some(end) {
+            let er = cdissect(v, g, node, begin, end)?;
             if er != REG_NOMATCH {
                 return Ok(er);
             }
@@ -1764,8 +2023,7 @@ fn caltdissect<'mcx>(
 }
 
 
-fn citerdissect<'mcx>(
-    mcx: Mcx<'mcx>,
+fn citerdissect(
     v: &mut ExecVars,
     g: &Guts,
     t: NodeId,
@@ -1796,14 +2054,14 @@ fn citerdissect<'mcx>(
     let mut endpts: Vec<usize> = fill_vec(max_matches + 1, 0usize)?;
     endpts[0] = begin;
 
-    getsubdfa(mcx, v, &g.tree_nodes[child.0 as usize])?;
+    getsubdfa(v, &g.tree_nodes[child.0 as usize])?;
 
     let mut nverified: i32 = 0;
     let mut k: i32 = 1;
     let mut limit = end;
 
     'outer: while k > 0 {
-        let ep = longest_sub(mcx, v, g, child, endpts[(k - 1) as usize], limit, None)?;
+        let ep = longest_sub(v, g, child, endpts[(k - 1) as usize], limit, None)?;
         match ep {
             None => {
                 k -= 1;
@@ -1832,9 +2090,7 @@ fn citerdissect<'mcx>(
                     let mut i = nverified + 1;
                     while i <= k {
                         zaptreesubs(v, g, child);
-                        let er = cdissect(
-                            mcx,
-                            v,
+                        let er = cdissect(v,
                             g,
                             child,
                             endpts[(i - 1) as usize],
@@ -1883,8 +2139,7 @@ fn citerdissect<'mcx>(
 }
 
 
-fn creviterdissect<'mcx>(
-    mcx: Mcx<'mcx>,
+fn creviterdissect(
     v: &mut ExecVars,
     g: &Guts,
     t: NodeId,
@@ -1918,7 +2173,7 @@ fn creviterdissect<'mcx>(
     let mut endpts: Vec<usize> = fill_vec(max_matches + 1, 0usize)?;
     endpts[0] = begin;
 
-    getsubdfa(mcx, v, &g.tree_nodes[child.0 as usize])?;
+    getsubdfa(v, &g.tree_nodes[child.0 as usize])?;
 
     let mut nverified: i32 = 0;
     let mut k: i32 = 1;
@@ -1936,7 +2191,7 @@ fn creviterdissect<'mcx>(
             limit = end;
         }
 
-        let ep = shortest_sub(mcx, v, g, child, endpts[(k - 1) as usize], limit, end, false)?;
+        let ep = shortest_sub(v, g, child, endpts[(k - 1) as usize], limit, end, false)?;
         match ep {
             None => {
                 k -= 1;
@@ -1961,9 +2216,7 @@ fn creviterdissect<'mcx>(
                     let mut i = nverified + 1;
                     while i <= k {
                         zaptreesubs(v, g, child);
-                        let er = cdissect(
-                            mcx,
-                            v,
+                        let er = cdissect(v,
                             g,
                             child,
                             endpts[(i - 1) as usize],
