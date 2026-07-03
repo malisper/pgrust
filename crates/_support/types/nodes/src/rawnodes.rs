@@ -8,7 +8,7 @@ use types_error::PgResult;
 
 use crate::list::NodeList;
 use crate::node_tree::{BitString, Boolean, Float, Integer, Node, NodeVariant, String};
-use crate::nodes_enums::LimitOption;
+use crate::nodes_enums::{LimitOption, LockClauseStrength, LockWaitPolicy};
 use crate::parsenodes::SetOperation;
 use crate::tags::NodeTag;
 
@@ -98,6 +98,13 @@ pub struct SelectStmt<'mcx> {
     pub all: bool,
     pub larg: Option<&'mcx SelectStmt<'mcx>>,
     pub rarg: Option<&'mcx SelectStmt<'mcx>>,
+}
+
+#[derive(Default)]
+pub struct LockingClause<'mcx> {
+    pub lockedRels: NodeList<'mcx>,
+    pub strength: LockClauseStrength,
+    pub waitPolicy: LockWaitPolicy,
 }
 
 /// `relation` is a RangeVar node handle (the grammar scribbles its alias).
@@ -515,6 +522,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for IndexElem<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for IndexStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_IndexStmt;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for LockingClause<'mcx> {
+    const TAG: NodeTag = NodeTag::T_LockingClause;
+}
 
 impl<'mcx> Node<'mcx> {
     pub fn mk_raw_stmt(
@@ -667,6 +677,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_type_cast(self) -> Option<&'mcx TypeCast<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_locking_clause(self) -> Option<&'mcx LockingClause<'mcx>> {
         self.as_variant()
     }
 }

@@ -8,7 +8,7 @@ use crate::bitmapset::Bitmapset;
 use crate::jointype::JoinType;
 use crate::list::{IntList, NodeList, OidList};
 use crate::node_tree::{Node, NodeVariant};
-use crate::nodes_enums::{CmdType, LimitOption};
+use crate::nodes_enums::{CmdType, LimitOption, LockClauseStrength, LockWaitPolicy};
 use crate::primnodes::{Alias, FromExpr, OverridingKind};
 use crate::tags::NodeTag;
 
@@ -30,6 +30,15 @@ pub const ACL_SET: AclMode = 1 << 12;
 pub const ACL_ALTER_SYSTEM: AclMode = 1 << 13;
 pub const ACL_MAINTAIN: AclMode = 1 << 14;
 pub const ACL_NO_RIGHTS: AclMode = 0;
+pub const ACL_SELECT_FOR_UPDATE: AclMode = ACL_UPDATE;
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RowMarkClause {
+    pub rti: Index,
+    pub strength: LockClauseStrength,
+    pub waitPolicy: LockWaitPolicy,
+    pub pushedDown: bool,
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[repr(u32)]
@@ -850,10 +859,18 @@ unsafe impl<'mcx> NodeVariant<'mcx> for VacuumStmt<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for VacuumRelation<'mcx> {
     const TAG: NodeTag = NodeTag::T_VacuumRelation;
 }
+unsafe impl NodeVariant<'_> for RowMarkClause {
+    const TAG: NodeTag = NodeTag::T_RowMarkClause;
+}
 
 impl<'mcx> Node<'mcx> {
     #[inline]
     pub fn as_query(self) -> Option<&'mcx Query<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_row_mark_clause(self) -> Option<&'mcx RowMarkClause> {
         self.as_variant()
     }
 

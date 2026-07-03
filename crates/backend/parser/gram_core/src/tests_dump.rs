@@ -516,6 +516,12 @@ fn node(out: &mut String, n: Node<'_>) {
         int_field(out, "old_pktable_oid", 0);
         int_field(out, "location", c.location);
         out.push('}');
+    } else if let Some(lc) = n.as_locking_clause() {
+        out.push_str("{LOCKINGCLAUSE");
+        list_field(out, "lockedRels", &lc.lockedRels);
+        int_field(out, "strength", lc.strength as i32);
+        int_field(out, "waitPolicy", lc.waitPolicy as i32);
+        out.push('}');
     } else {
         panic!("tests_dump: unrendered node tag {:?}", n.node_tag());
     }

@@ -22,3 +22,25 @@ pub enum LimitOption {
     LIMIT_OPTION_COUNT = 0,
     LIMIT_OPTION_WITH_TIES = 1,
 }
+
+// Ordering carries applyLockingClause's Max() precedence (lockoptions.h).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(u32)]
+pub enum LockClauseStrength {
+    #[default]
+    LCS_NONE = 0,
+    LCS_FORKEYSHARE = 1,
+    LCS_FORSHARE = 2,
+    LCS_FORNOKEYUPDATE = 3,
+    LCS_FORUPDATE = 4,
+}
+
+// Ordering carries applyLockingClause's Max() precedence (lockoptions.h).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(u32)]
+pub enum LockWaitPolicy {
+    #[default]
+    LockWaitBlock = 0,
+    LockWaitSkip = 1,
+    LockWaitError = 2,
+}
