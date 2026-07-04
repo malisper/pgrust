@@ -956,7 +956,7 @@ fn bitmap_heap_path_plans_to_bitmap_scan_nodes() {
     let mcx = cx.mcx();
     let parse = table_query(mcx, Some(eq_qual(mcx, 1, 42)));
     let mut run = crate::run::PlannerRun::new(mcx);
-    crate::subquery::subquery_planner(&mut run, parse, 0.0, None).unwrap();
+    crate::subquery::subquery_planner(&mut run, parse, false, 0.0, None).unwrap();
     let final_rel = crate::planmain::fetch_final_rel(&mut run);
     // The bitmap heap path was generated but is dominated by the plain index
     // scan (as C); rebuild one over the surviving index path to plan it.
@@ -1047,7 +1047,7 @@ fn competing_paths_pick_cheapest_total_and_startup() {
     // tuple_fraction > 0 sets consider_startup: the seqscan (startup 0) and
     // the index scan (cheaper total) both survive add_path's fuzzy compare.
     let mut run = crate::run::PlannerRun::new(mcx);
-    crate::subquery::subquery_planner(&mut run, parse, 0.1, None).unwrap();
+    crate::subquery::subquery_planner(&mut run, parse, false, 0.1, None).unwrap();
     let final_rel = crate::planmain::fetch_final_rel(&mut run);
     let rel = run.root.rel(final_rel);
     assert_eq!(rel.pathlist.len(), 2);

@@ -1,11 +1,12 @@
-//! SS_process_ctes (subselect.c) + set_cte_pathlist (allpaths.c), materialize-only.
+//! SS_process_ctes + inline_cte (subselect.c), set_cte_pathlist /
+//! set_worktable_pathlist (allpaths.c).
 
 use mcx::Mcx;
 use types_error::PgResult;
-use types_nodes::list::{IntList, NodeList};
-use types_nodes::parsenodes::{CTEMaterialize, Query, RangeTblEntry};
+use types_nodes::list::{IntList, NodeList, OidList};
+use types_nodes::parsenodes::{CTEMaterialize, Query, RTEKind, RangeTblEntry};
 use types_nodes::primnodes::{SubLinkType, SubPlan};
-use types_nodes::Node;
+use types_nodes::{Node, NodeTag};
 use types_pathnodes::{PlannerInfo, RelId};
 
 use crate::createplan::create_plan;
@@ -13,9 +14,6 @@ use crate::pathnode::{add_path, get_cheapest_fractional_path};
 use crate::planmain::fetch_final_rel;
 use crate::run::PlannerRun;
 
-// DIVERGENCE from C: every referenced CTE is force-materialized — the
-// single-reference inline arm (inline_cte) is skipped so the CTE Scan plan
-// shape always holds; explicit hints that would change that are loud.
 pub fn ss_process_ctes<'mcx>(run: &mut PlannerRun<'mcx>, parse: &Query<'mcx>) -> PgResult<()> {
     let mcx = run.mcx;
     debug_assert!(run.root.cte_plan_ids.is_empty());
@@ -23,25 +21,38 @@ pub fn ss_process_ctes<'mcx>(run: &mut PlannerRun<'mcx>, parse: &Query<'mcx>) ->
     for cte_node in &parse.cteList {
         let cte = cte_node.as_common_table_expr().expect("cteList cell");
         let ctename = cte.ctename.expect("CTE has a name");
-        let ctequery = cte
-            .ctequery
-            .and_then(|n| n.as_query())
-            .expect("CTE ctequery is an analyzed Query");
+        let ctequery_node = cte.ctequery.expect("CTE has a ctequery");
+        let ctequery = ctequery_node.as_query().expect("CTE ctequery is an analyzed Query");
+        let cmd_type = ctequery.commandType;
 
-        if cte.cterefcount == 0 && ctequery.commandType == types_nodes::CmdType::CMD_SELECT {
+        if cte.cterefcount == 0 && cmd_type == types_nodes::CmdType::CMD_SELECT {
             run.root.cte_plan_ids.push(-1);
             continue;
         }
-        if cte.ctematerialized != CTEMaterialize::CTEMaterializeDefault {
+
+        if (cte.ctematerialized == CTEMaterialize::CTEMaterializeNever
+            || (cte.ctematerialized == CTEMaterialize::CTEMaterializeDefault
+                && cte.cterefcount == 1))
+            && !cte.cterecursive
+            && cmd_type == types_nodes::CmdType::CMD_SELECT
+            && !contain_dml(ctequery_node)?
+            && (cte.cterefcount <= 1 || !contain_outer_selfref(ctequery_node)?)
+            && !clauses::contain_volatile_functions(ctequery_node)?
+        {
+            inline_cte(run, parse, ctename, ctequery_node, cte.cterefcount)?;
+            run.root.cte_plan_ids.push(-1);
+            continue;
+        }
+
+        if cte.cterecursive
+            && (cte.search_clause.is_some() || cte.cycle_clause.is_some())
+        {
             panic!(
-                "SS_process_ctes (subselect.c): MATERIALIZED/NOT MATERIALIZED hint on \
-                 \"{ctename}\"; CTE inline lane"
+                "rewriteSearchAndCycle (rewriteSearchCycle.c): SEARCH/CYCLE on \
+                 \"{ctename}\" survived rewrite; SEARCH/CYCLE lane"
             );
         }
-        if cte.cterecursive {
-            panic!("SS_process_ctes (subselect.c): WITH RECURSIVE \"{ctename}\"; M2 recursive-CTE lane");
-        }
-        if ctequery.commandType != types_nodes::CmdType::CMD_SELECT {
+        if cmd_type != types_nodes::CmdType::CMD_SELECT {
             panic!("SS_process_ctes (subselect.c): data-modifying CTE \"{ctename}\"; M2 DML-CTE lane");
         }
 
@@ -49,7 +60,7 @@ pub fn ss_process_ctes<'mcx>(run: &mut PlannerRun<'mcx>, parse: &Query<'mcx>) ->
 
         debug_assert!(run.root.plan_params.is_empty());
         run.push_root()?;
-        crate::subquery::subquery_planner(run, subquery, 0.0, None)?;
+        crate::subquery::subquery_planner(run, subquery, cte.cterecursive, 0.0, None)?;
         let final_rel = fetch_final_rel(run);
         let best_path = get_cheapest_fractional_path(run, final_rel, 0.0);
         let plan = create_plan(run, best_path)?;
@@ -93,6 +104,185 @@ pub fn ss_process_ctes<'mcx>(run: &mut PlannerRun<'mcx>, parse: &Query<'mcx>) ->
     Ok(())
 }
 
+// contain_dml (subselect.c): any subquery that isn't a plain SELECT (row
+// marks included).
+fn contain_dml(node: Node<'_>) -> PgResult<bool> {
+    struct W;
+    impl<'mcx> nodes_core::NodeWalker<'mcx> for W {
+        fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+            if let Some(q) = node.as_query() {
+                if q.commandType != types_nodes::CmdType::CMD_SELECT || !q.rowMarks.is_nil() {
+                    return Ok(true);
+                }
+                return nodes_core::query_tree_walker(q, self, 0);
+            }
+            nodes_core::expression_tree_walker(node, self)
+        }
+        fn visit_query_ref(&mut self, q: &'mcx Query<'mcx>) -> PgResult<bool> {
+            if q.commandType != types_nodes::CmdType::CMD_SELECT || !q.rowMarks.is_nil() {
+                return Ok(true);
+            }
+            nodes_core::query_tree_walker(q, self, 0)
+        }
+    }
+    nodes_core::NodeWalker::visit(&mut W, node)
+}
+
+// contain_outer_selfref (subselect.c): a recursive self-reference above the
+// query the search started at.
+fn contain_outer_selfref(node: Node<'_>) -> PgResult<bool> {
+    struct W {
+        depth: u32,
+    }
+    impl<'mcx> nodes_core::NodeWalker<'mcx> for W {
+        fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+            if let Some(rte) = node.as_range_tbl_entry() {
+                return Ok(rte.rtekind == RTEKind::RTE_CTE
+                    && rte.self_reference
+                    && rte.ctelevelsup >= self.depth);
+            }
+            if let Some(q) = node.as_query() {
+                return self.visit_query_ref(q);
+            }
+            nodes_core::expression_tree_walker(node, self)
+        }
+        fn visit_query_ref(&mut self, q: &'mcx Query<'mcx>) -> PgResult<bool> {
+            self.depth += 1;
+            let r =
+                nodes_core::query_tree_walker(q, self, nodes_core::QTW_EXAMINE_RTES_BEFORE)?;
+            self.depth -= 1;
+            Ok(r)
+        }
+    }
+    debug_assert_eq!(node.node_tag(), NodeTag::T_Query);
+    let mut w = W { depth: 0 };
+    nodes_core::NodeWalker::visit(&mut w, node)
+}
+
+struct InlineCteWalker<'a, 'mcx> {
+    mcx: Mcx<'mcx>,
+    ctename: &'a str,
+    levelsup: i64,
+    ctequery: Node<'mcx>,
+    // cterefcount == 1: the source is dead after its single inlining, so the
+    // tree moves; multi-reference NOT MATERIALIZED deep-copies per reference
+    // (C copyObject; out/read round trip is this repo's deep copy).
+    share: bool,
+}
+
+impl<'a, 'mcx> nodes_core::NodeWalker<'mcx> for InlineCteWalker<'a, 'mcx> {
+    fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+        if let Some(q) = node.as_query() {
+            return self.visit_query_ref(q);
+        }
+        if let Some(rte) = node.as_range_tbl_entry() {
+            if rte.rtekind == RTEKind::RTE_CTE
+                && rte.ctename == Some(self.ctename)
+                && rte.ctelevelsup as i64 == self.levelsup
+            {
+                let newquery_node = if self.share {
+                    self.ctequery
+                } else {
+                    let s = outfuncs::nodeToString(self.mcx, self.ctequery)?;
+                    readfuncs::stringToNode(self.mcx, s.as_str())?
+                };
+                if self.levelsup > 0 {
+                    rewrite_manip::IncrementVarSublevelsUp(
+                        newquery_node,
+                        self.levelsup as u32,
+                        1,
+                    )?;
+                }
+                let newquery = newquery_node.as_query().expect("CTE ctequery is a Query");
+                // FOR UPDATE never extends into CTEs, so no rowmark pushdown.
+                // SAFETY: the parse tree is planner-owned; no borrow of this
+                // RTE is read across the write.
+                unsafe {
+                    node.with_mut::<RangeTblEntry, _>(|r| {
+                        r.rtekind = RTEKind::RTE_SUBQUERY;
+                        r.subquery = Some(newquery);
+                        r.security_barrier = false;
+                        r.ctename = None;
+                        r.ctelevelsup = 0;
+                        r.self_reference = false;
+                        r.coltypes = OidList::nil();
+                        r.coltypmods = IntList::nil();
+                        r.colcollations = OidList::nil();
+                    })
+                }
+                .expect("RangeTblEntry");
+            }
+            return Ok(false);
+        }
+        nodes_core::expression_tree_walker(node, self)
+    }
+
+    // Visit RTEs after their contents so the walk never descends into the
+    // freshly inlined subquery.
+    fn visit_query_ref(&mut self, q: &'mcx Query<'mcx>) -> PgResult<bool> {
+        self.levelsup += 1;
+        let r = nodes_core::query_tree_walker(q, self, nodes_core::QTW_EXAMINE_RTES_AFTER)?;
+        self.levelsup -= 1;
+        Ok(r)
+    }
+}
+
+// inline_cte (subselect.c). The outer Query is a pre-seal local, so its
+// fields walk here in query_tree_walker's order; nested queries are sealed
+// nodes and take the generic walker.
+fn inline_cte<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    parse: &Query<'mcx>,
+    ctename: &str,
+    ctequery: Node<'mcx>,
+    cterefcount: i32,
+) -> PgResult<()> {
+    let mut w = InlineCteWalker {
+        mcx: run.mcx,
+        ctename,
+        levelsup: 0,
+        ctequery,
+        share: cterefcount == 1,
+    };
+    let visit_all = |w: &mut InlineCteWalker<'_, 'mcx>,
+                     list: &NodeList<'mcx>|
+     -> PgResult<()> {
+        for n in list {
+            nodes_core::NodeWalker::visit(w, n)?;
+        }
+        Ok(())
+    };
+    let visit_opt =
+        |w: &mut InlineCteWalker<'_, 'mcx>, n: Option<Node<'mcx>>| -> PgResult<()> {
+            if let Some(n) = n {
+                nodes_core::NodeWalker::visit(w, n)?;
+            }
+            Ok(())
+        };
+    visit_all(&mut w, &parse.targetList)?;
+    visit_all(&mut w, &parse.withCheckOptions)?;
+    visit_opt(&mut w, parse.onConflict)?;
+    visit_all(&mut w, &parse.mergeActionList)?;
+    visit_opt(&mut w, parse.mergeJoinCondition)?;
+    visit_all(&mut w, &parse.returningList)?;
+    if let Some(jt) = parse.jointree {
+        visit_all(&mut w, &jt.fromlist)?;
+        visit_opt(&mut w, jt.quals)?;
+    }
+    visit_opt(&mut w, parse.setOperations)?;
+    visit_opt(&mut w, parse.havingQual)?;
+    visit_opt(&mut w, parse.limitOffset)?;
+    visit_opt(&mut w, parse.limitCount)?;
+    for wc_node in &parse.windowClause {
+        let wc = wc_node.as_window_clause().expect("windowClause cell");
+        visit_opt(&mut w, wc.startOffset)?;
+        visit_opt(&mut w, wc.endOffset)?;
+    }
+    visit_all(&mut w, &parse.cteList)?;
+    nodes_core::range_table_walker(&parse.rtable, &mut w, nodes_core::QTW_EXAMINE_RTES_AFTER)?;
+    Ok(())
+}
+
 // SS_assign_special_exec_param (paramassign.c).
 pub(crate) fn assign_special_exec_param(run: &mut PlannerRun<'_>) -> PgResult<i32> {
     let paramid = run.glob.param_exec_types.len() as i32;
@@ -120,11 +310,48 @@ pub fn set_cte_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgR
     Ok(())
 }
 
+// set_worktable_pathlist (allpaths.c). The cteroot (the level planning the
+// recursive union) is ctelevelsup-1 parents up: the suspended_roots chain at
+// path time. Its wt_param_id is stashed on this level's root because the
+// chain is gone by createplan time (see PlannerInfo.self_ref_wt_param).
+pub fn set_worktable_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResult<()> {
+    let rte = run.rte(rti);
+    debug_assert!(rte.self_reference);
+    let ctename = rte.ctename.expect("CTE RTE has ctename");
+    let levelsup = rte.ctelevelsup as usize;
+    assert!(levelsup > 0, "bad levelsup for CTE \"{ctename}\"");
+    let up = levelsup - 1;
+    let (wt_param, nr_path) = if up == 0 {
+        (run.root.wt_param_id, run.root.non_recursive_path)
+    } else {
+        assert!(
+            up <= run.suspended_roots.len(),
+            "bad levelsup for CTE \"{ctename}\""
+        );
+        let cteroot: &PlannerInfo<'_> =
+            &run.suspended_roots[run.suspended_roots.len() - up].root;
+        (cteroot.wt_param_id, cteroot.non_recursive_path)
+    };
+    assert!(wt_param >= 0, "could not find param ID for CTE \"{ctename}\"");
+    let nr_rows = {
+        let pid = nr_path.unwrap_or_else(|| panic!("could not find path for CTE \"{ctename}\""));
+        if up == 0 {
+            run.root.path(pid).base().rows
+        } else {
+            run.suspended_roots[run.suspended_roots.len() - up].root.path(pid).base().rows
+        }
+    };
+    run.root.self_ref_wt_param = wt_param;
+
+    crate::costsize::set_cte_size_estimates(run, rel, nr_rows)?;
+    debug_assert!(run.root.rel(rel).lateral_relids.is_none());
+    let path = crate::pathnode::create_worktablescan_path(run, rel)?;
+    add_path(run, rel, path);
+    Ok(())
+}
+
 pub(crate) fn cte_plan_id_and_param(run: &PlannerRun<'_>, rte: &RangeTblEntry<'_>) -> (i32, i32) {
-    assert!(
-        !rte.self_reference,
-        "set_worktable_pathlist (allpaths.c): recursive self-reference; M2 recursive-CTE lane"
-    );
+    debug_assert!(!rte.self_reference);
     let ctename = rte.ctename.expect("CTE RTE has ctename");
     let levelsup = rte.ctelevelsup as usize;
     // Parent roots intern their parse Query only after preprocessing, so an

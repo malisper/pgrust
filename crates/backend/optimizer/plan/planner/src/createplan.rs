@@ -45,6 +45,7 @@ fn create_plan_recurse<'mcx>(
                 || p.pathtype == crate::pathnode::tag16(NodeTag::T_FunctionScan)
                 || p.pathtype == crate::pathnode::tag16(NodeTag::T_ValuesScan)
                 || p.pathtype == crate::pathnode::tag16(NodeTag::T_CteScan)
+                || p.pathtype == crate::pathnode::tag16(NodeTag::T_WorkTableScan)
                 || p.pathtype == crate::pathnode::tag16(NodeTag::T_Result) =>
         {
             create_scan_plan(run, path_id, flags)
@@ -54,6 +55,7 @@ fn create_plan_recurse<'mcx>(
         PathNode::SubqueryScanPath(_) => create_scan_plan(run, path_id, flags),
         PathNode::AppendPath(_) => create_append_plan(run, path_id, flags),
         PathNode::SetOpPath(_) => create_setop_plan(run, path_id, flags),
+        PathNode::RecursiveUnionPath(_) => create_recursiveunion_plan(run, path_id),
         PathNode::ProjectionPath(_) => create_projection_plan(run, path_id, flags),
         PathNode::ProjectSetPath(_) => create_project_set_plan(run, path_id),
         PathNode::GroupResultPath(_) => create_group_result_plan(run, path_id),
@@ -335,6 +337,9 @@ fn create_scan_plan<'mcx>(
         }
         t if t == crate::pathnode::tag16(NodeTag::T_CteScan) => {
             create_ctescan_plan(run, best_path, tlist, scan_clauses)?
+        }
+        t if t == crate::pathnode::tag16(NodeTag::T_WorkTableScan) => {
+            create_worktablescan_plan(run, best_path, tlist, scan_clauses)?
         }
         t if t == crate::pathnode::tag16(NodeTag::T_SubqueryScan) => {
             create_subqueryscan_plan(run, best_path, tlist, scan_clauses)?
@@ -644,6 +649,42 @@ fn create_resultscan_plan<'mcx>(
     plan.resconstantqual =
         if quals.is_nil() { None } else { Some(Node::mk_list(mcx, quals)?) };
     copy_generic_path_info(run, &mut plan.plan, best_path);
+    Ok(plan.seal())
+}
+
+// create_worktablescan_plan (createplan.c): the wt param ID comes from the
+// cteroot, resolved at set_worktable_pathlist time (the parent-root chain is
+// detached here; see PlannerInfo.self_ref_wt_param).
+fn create_worktablescan_plan<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    best_path: PathId,
+    tlist: NodeList<'mcx>,
+    scan_clauses: mcx::PgVec<'mcx, RinfoId>,
+) -> PgResult<Node<'mcx>> {
+    let mcx = run.mcx;
+    let rel_id = run.root.path(best_path).base().parent;
+    let scan_relid = run.root.rel(rel_id).relid;
+    debug_assert!(scan_relid > 0);
+    let rte = run.rte(scan_relid as usize);
+    debug_assert!(rte.rtekind == types_nodes::parsenodes::RTEKind::RTE_CTE);
+    debug_assert!(rte.self_reference);
+    let wt_param = run.root.self_ref_wt_param;
+    assert!(
+        wt_param >= 0,
+        "could not find param ID for CTE \"{}\"",
+        rte.ctename.unwrap_or("?")
+    );
+    debug_assert!(run.root.path(best_path).base().param_info.is_none());
+
+    let ordered = order_qual_clauses(run, &scan_clauses)?;
+    let qpqual = extract_actual_clauses(run, &ordered);
+
+    let mut plan = Node::build::<types_nodes::plannodes::WorkTableScan<'mcx>>(mcx)?;
+    plan.scan.plan.targetlist = tlist;
+    plan.scan.plan.qual = qpqual;
+    plan.scan.scanrelid = scan_relid;
+    plan.wtParam = wt_param;
+    copy_generic_path_info(run, &mut plan.scan.plan, best_path);
     Ok(plan.seal())
 }
 
@@ -3240,6 +3281,63 @@ fn create_setop_plan<'mcx>(
     plan.cmpOperators = mcx::slice_borrow_in(mcx, &cmp_operators)?;
     plan.cmpCollations = mcx::slice_borrow_in(mcx, &cmp_collations)?;
     plan.cmpNullsFirst = mcx::slice_borrow_in(mcx, &cmp_nulls_first)?;
+    plan.numGroups = clamp_cardinality_to_long(num_groups);
+    copy_generic_path_info(run, &mut plan.plan, path_id);
+    Ok(plan.seal())
+}
+
+// create_recursiveunion_plan + make_recursive_union (createplan.c).
+fn create_recursiveunion_plan<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    path_id: PathId,
+) -> PgResult<Node<'mcx>> {
+    let mcx = run.mcx;
+    let (target_id, leftpath, rightpath, wt_param, distinct_ids, num_groups) =
+        match run.root.path(path_id) {
+            PathNode::RecursiveUnionPath(p) => (
+                p.path.pathtarget_id.expect("RecursiveUnion path has a pathtarget"),
+                p.leftpath.expect("RecursiveUnion leftpath"),
+                p.rightpath.expect("RecursiveUnion rightpath"),
+                p.wtParam,
+                crate::relnode::pgvec_clone_shallow(mcx, &p.distinctList),
+                p.numGroups,
+            ),
+            _ => unreachable!(),
+        };
+    // Both children must produce the same tlist.
+    let leftplan = create_plan_recurse(run, leftpath, CP_EXACT_TLIST)?;
+    let rightplan = create_plan_recurse(run, rightpath, CP_EXACT_TLIST)?;
+    let tlist = build_path_tlist(run, target_id)?;
+
+    let mut dup_col_idx: mcx::PgVec<'mcx, i16> = mcx::PgVec::new_in(mcx);
+    let mut dup_operators: mcx::PgVec<'mcx, u32> = mcx::PgVec::new_in(mcx);
+    let mut dup_collations: mcx::PgVec<'mcx, u32> = mcx::PgVec::new_in(mcx);
+    for &gid in distinct_ids.iter() {
+        let sortcl = *run
+            .root
+            .expr_node(gid)
+            .as_sort_group_clause()
+            .expect("distinctList holds SortGroupClauses");
+        let tle = tlist
+            .iter()
+            .map(|n| n.as_target_entry().expect("tlist cell"))
+            .find(|t| t.ressortgroupref == sortcl.tleSortGroupRef)
+            .expect("grouping column matches a tlist entry");
+        dup_col_idx.push(tle.resno);
+        debug_assert!(sortcl.eqop != 0);
+        dup_operators.push(sortcl.eqop);
+        dup_collations.push(expr_collation(tle.expr));
+    }
+
+    let mut plan = Node::build::<types_nodes::plannodes::RecursiveUnion<'mcx>>(mcx)?;
+    plan.plan.targetlist = tlist;
+    plan.plan.lefttree = Some(leftplan);
+    plan.plan.righttree = Some(rightplan);
+    plan.wtParam = wt_param;
+    plan.numCols = dup_col_idx.len() as i32;
+    plan.dupColIdx = mcx::slice_borrow_in(mcx, &dup_col_idx)?;
+    plan.dupOperators = mcx::slice_borrow_in(mcx, &dup_operators)?;
+    plan.dupCollations = mcx::slice_borrow_in(mcx, &dup_collations)?;
     plan.numGroups = clamp_cardinality_to_long(num_groups);
     copy_generic_path_info(run, &mut plan.plan, path_id);
     Ok(plan.seal())

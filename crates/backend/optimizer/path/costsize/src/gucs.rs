@@ -41,6 +41,7 @@ real_guc!(SEQ_PAGE_COST, seq_page_cost, set_seq_page_cost, guc_tables::consts::D
 real_guc!(RANDOM_PAGE_COST, random_page_cost, set_random_page_cost, guc_tables::consts::DEFAULT_RANDOM_PAGE_COST);
 real_guc!(CPU_INDEX_TUPLE_COST, cpu_index_tuple_cost, set_cpu_index_tuple_cost, guc_tables::consts::DEFAULT_CPU_INDEX_TUPLE_COST);
 real_guc!(CPU_OPERATOR_COST, cpu_operator_cost, set_cpu_operator_cost, guc_tables::consts::DEFAULT_CPU_OPERATOR_COST);
+real_guc!(RECURSIVE_WORKTABLE_FACTOR, recursive_worktable_factor, set_recursive_worktable_factor, guc_tables::consts::DEFAULT_RECURSIVE_WORKTABLE_FACTOR);
 int_guc!(EFFECTIVE_CACHE_SIZE, effective_cache_size, set_effective_cache_size, guc_tables::consts::DEFAULT_EFFECTIVE_CACHE_SIZE);
 bool_guc!(ENABLE_SEQSCAN, enable_seqscan, set_enable_seqscan, true);
 bool_guc!(ENABLE_TIDSCAN, enable_tidscan, set_enable_tidscan, true);
@@ -102,4 +103,6 @@ pub fn install() {
         .install(GucVarAccessors { get: enable_group_by_reordering, set: set_enable_group_by_reordering });
     guc_tables::vars::enable_distinct_reordering
         .install(GucVarAccessors { get: enable_distinct_reordering, set: set_enable_distinct_reordering });
+    guc_tables::vars::recursive_worktable_factor
+        .install(GucVarAccessors { get: recursive_worktable_factor, set: set_recursive_worktable_factor });
 }
