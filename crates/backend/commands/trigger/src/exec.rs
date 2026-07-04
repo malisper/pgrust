@@ -4,7 +4,7 @@ use core::ptr::NonNull;
 
 use mcx::{Mcx, PgBox};
 use types_error::{PgError, PgResult, ERRCODE_E_R_I_E_TRIGGER_PROTOCOL_VIOLATED};
-use types_fmgr::{FmgrInfo, LocalFcinfo};
+use types_fmgr::{FmgrInfo, LocalFcinfo, TRACK_FUNC_ALL};
 use types_nodes::Bitmapset;
 use types_nodes::primnodes::{INNER_VAR, OUTER_VAR};
 use types_rel::Relation;
@@ -239,7 +239,19 @@ pub fn ExecCallTriggerFunc<'a, 'mcx>(
     fcinfo.context = trigdata.fm_node_ptr();
     // SAFETY: the scratch context outlives this single invocation.
     unsafe { fcinfo.set_result_mcx(per_tuple_mcx) };
+    // C: pgstat_init_function_usage's `pgstat_track_functions <= fn_stats`
+    // early-out, hoisted to the caller as the crate's API requires.
+    let fcu = if finfo.fn_stats < TRACK_FUNC_ALL
+        && ::pgstat::function::pgstat_track_functions() > finfo.fn_stats as i32
+    {
+        Some(::pgstat::function::pgstat_init_function_usage(finfo.fn_oid)?)
+    } else {
+        None
+    };
     let result = finfo.invoke(&mut fcinfo)?;
+    if let Some(fcu) = &fcu {
+        ::pgstat::function::pgstat_end_function_usage(fcu, true);
+    }
     if fcinfo.isnull {
         return Err(returned_null(finfo.fn_oid));
     }

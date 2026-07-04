@@ -1,10 +1,9 @@
 // pgstat.c's statsfile half: write pg_stat/pgstat.stat on clean shutdown
 // (checkpointer's before_shmem_exit), restore + unlink on clean start,
 // unlink on crash recovery. Record payloads are this port's repr(C) entry
-// structs (all-i64, native-endian), not C's PgStatShared_* layouts — the
-// file is never exchanged with C; corruption behavior matches C (log,
-// reset, unlink). No shared fixed-numbered kinds are ported, so C's
-// PGSTAT_FILE_ENTRY_FIXED records don't exist here.
+// structs (fixed-size scalars, native-endian), not C's PgStatShared_*
+// layouts — the file is never exchanged with C; corruption behavior matches
+// C (log, reset, unlink).
 
 use core::mem::size_of;
 use std::io::{Read, Write};
@@ -20,10 +19,11 @@ use crate::shmem::SharedEntry;
 // Deliberately NOT C's 0x01A5BCB7: a C-initdb'd datadir carries a C-format
 // pgstat.stat whose payloads we can't parse; a distinct id rejects it at the
 // header (C's own incorrect-format path) instead of mid-entry.
-pub const PGSTAT_FILE_FORMAT_ID: i32 = 0x51A5BCB7;
+pub const PGSTAT_FILE_FORMAT_ID: i32 = 0x51A5BCB8;
 
 const PGSTAT_FILE_ENTRY_END: u8 = b'E';
 const PGSTAT_FILE_ENTRY_HASH: u8 = b'S';
+const PGSTAT_FILE_ENTRY_FIXED: u8 = b'F';
 
 const PGSTAT_STAT_PERMANENT_FILENAME: &str = "pg_stat/pgstat.stat";
 const PGSTAT_STAT_PERMANENT_TMPFILE: &str = "pg_stat/pgstat.tmp";
@@ -51,15 +51,29 @@ fn from_bytes<T: Copy + Default>(b: &[u8]) -> Option<T> {
     Some(v)
 }
 
-fn entry_payload(entry: &SharedEntry) -> &[u8] {
+fn entry_payload(entry: &SharedEntry) -> Option<&[u8]> {
     match entry {
-        SharedEntry::Relation(t) => as_bytes(t),
-        SharedEntry::Database(d) => as_bytes(d),
-        SharedEntry::Function(f) => as_bytes(f),
+        SharedEntry::Relation(t) => Some(as_bytes(t)),
+        SharedEntry::Database(d) => Some(as_bytes(d)),
+        SharedEntry::Function(f) => Some(as_bytes(f)),
+        // BACKEND is write_to_file = false in C's kind table.
+        SharedEntry::Backend(_) => None,
     }
 }
 
+fn push_fixed<T: Copy>(out: &mut Vec<u8>, kind: PgStat_Kind, v: &T) {
+    out.push(PGSTAT_FILE_ENTRY_FIXED);
+    out.extend_from_slice(&kind.0.to_ne_bytes());
+    let payload = as_bytes(v);
+    out.extend_from_slice(&(payload.len() as u32).to_ne_bytes());
+    out.extend_from_slice(payload);
+}
+
 pub(crate) fn pgstat_write_statsfile() -> std::io::Result<()> {
+    use crate::pending::{
+        PGSTAT_KIND_ARCHIVER, PGSTAT_KIND_BGWRITER, PGSTAT_KIND_CHECKPOINTER, PGSTAT_KIND_IO,
+        PGSTAT_KIND_SLRU, PGSTAT_KIND_WAL,
+    };
     let tmp = stat_path(PGSTAT_STAT_PERMANENT_TMPFILE);
     let dst = stat_path(PGSTAT_STAT_PERMANENT_FILENAME);
     if let Some(dir) = tmp.parent() {
@@ -67,12 +81,24 @@ pub(crate) fn pgstat_write_statsfile() -> std::io::Result<()> {
     }
     let mut out = Vec::with_capacity(8192);
     out.extend_from_slice(&PGSTAT_FILE_FORMAT_ID.to_ne_bytes());
+    push_fixed(&mut out, PGSTAT_KIND_ARCHIVER, &crate::archiver::export_archiver_stats());
+    push_fixed(&mut out, PGSTAT_KIND_BGWRITER, &crate::bgwriter::export_bgwriter_stats());
+    push_fixed(
+        &mut out,
+        PGSTAT_KIND_CHECKPOINTER,
+        &crate::checkpointer::export_checkpointer_stats(),
+    );
+    push_fixed(&mut out, PGSTAT_KIND_IO, &crate::io::export_io_stats());
+    push_fixed(&mut out, PGSTAT_KIND_SLRU, &crate::slru::export_slru_stats());
+    push_fixed(&mut out, PGSTAT_KIND_WAL, &crate::wal::export_wal_stats());
     crate::shmem::export_entries(|key, entry| {
+        let Some(payload) = entry_payload(&entry) else {
+            return;
+        };
         out.push(PGSTAT_FILE_ENTRY_HASH);
         out.extend_from_slice(&key.kind.0.to_ne_bytes());
         out.extend_from_slice(&key.dboid.to_ne_bytes());
         out.extend_from_slice(&key.objid.to_ne_bytes());
-        let payload = entry_payload(&entry);
         out.extend_from_slice(&(payload.len() as u32).to_ne_bytes());
         out.extend_from_slice(payload);
     });
@@ -86,10 +112,15 @@ pub(crate) fn pgstat_write_statsfile() -> std::io::Result<()> {
     Ok(())
 }
 
-// pgstat_reset_after_failure: with no shared fixed-numbered kinds ported
-// there are no reset timestamps to stamp; discard any partially-read entries.
 fn pgstat_reset_after_failure() {
+    let ts = timestamp_seams::get_current_timestamp::call();
     crate::shmem::clear_all_entries();
+    crate::archiver::pgstat_archiver_reset_all_cb(ts);
+    crate::bgwriter::pgstat_bgwriter_reset_all_cb(ts);
+    crate::checkpointer::pgstat_checkpointer_reset_all_cb(ts);
+    crate::io::pgstat_io_reset_all_cb(ts);
+    crate::slru::pgstat_slru_reset_all_cb(ts);
+    crate::wal::pgstat_wal_reset_all_cb(ts);
 }
 
 struct Cursor<'a> {
@@ -136,6 +167,30 @@ pub(crate) fn read_statsfile_body(buf: &[u8]) -> Option<()> {
                     _ => return None,
                 };
                 crate::shmem::import_entry(PgStat_HashKey { kind, dboid, objid }, entry);
+            }
+            PGSTAT_FILE_ENTRY_FIXED => {
+                use crate::pending::{
+                    PGSTAT_KIND_ARCHIVER, PGSTAT_KIND_BGWRITER, PGSTAT_KIND_CHECKPOINTER,
+                    PGSTAT_KIND_IO, PGSTAT_KIND_SLRU, PGSTAT_KIND_WAL,
+                };
+                let kind = PgStat_Kind(c.take_u32()?);
+                let len = c.take_u32()? as usize;
+                let payload = c.take(len)?;
+                match kind {
+                    PGSTAT_KIND_ARCHIVER => {
+                        crate::archiver::import_archiver_stats(from_bytes(payload)?)
+                    }
+                    PGSTAT_KIND_BGWRITER => {
+                        crate::bgwriter::import_bgwriter_stats(from_bytes(payload)?)
+                    }
+                    PGSTAT_KIND_CHECKPOINTER => {
+                        crate::checkpointer::import_checkpointer_stats(from_bytes(payload)?)
+                    }
+                    PGSTAT_KIND_IO => crate::io::import_io_stats(from_bytes(payload)?),
+                    PGSTAT_KIND_SLRU => crate::slru::import_slru_stats(from_bytes(payload)?),
+                    PGSTAT_KIND_WAL => crate::wal::import_wal_stats(from_bytes(payload)?),
+                    _ => return None,
+                }
             }
             _ => return None,
         }

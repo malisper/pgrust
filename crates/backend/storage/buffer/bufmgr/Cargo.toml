@@ -23,6 +23,7 @@ lmgr_proc = { path = "../../lmgr/lmgr_proc" }
 lmgr_proc_seams = { path = "../../lmgr/lmgr_proc_seams" }
 lwlock = { path = "../../lmgr/lwlock" }
 mcx = { path = "../../../../_support/mcx" }
+pgstat = { path = "../../../utils/activity/pgstat" }
 xloginsert_seams = { path = "../../../access/transam/xloginsert_seams" }
 parallel_seams = { path = "../../../access/transam/parallel_seams" }
 guc_seams = { path = "../../../utils/misc/guc_seams" }

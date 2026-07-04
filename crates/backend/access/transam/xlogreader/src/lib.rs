@@ -2142,6 +2142,13 @@ pub fn WALRead<R: XLogSegmentRoutine>(
 
         let segbytes = nbytes.min(v.segcxt.ws_segsize as usize - startoff);
 
+        let io_start = if pgstat_seams::pgstat_prepare_io_time::is_installed() {
+            pgstat_seams::pgstat_prepare_io_time::call(
+                guc_tables::vars::track_wal_io_timing.read(),
+            )
+        } else {
+            0
+        };
         clear_errno();
         // SAFETY: buf[p..p+segbytes] is in-bounds writable memory
         // (segbytes <= nbytes <= buf.len() - p).
@@ -2153,6 +2160,16 @@ pub fn WALRead<R: XLogSegmentRoutine>(
                 startoff as libc::off_t,
             )
         };
+        if pgstat_seams::pgstat_count_io_op_time::is_installed() {
+            pgstat_seams::pgstat_count_io_op_time::call(
+                pgstat_seams::IOOBJECT_WAL,
+                pgstat_seams::IOCONTEXT_NORMAL,
+                pgstat_seams::IOOP_READ,
+                io_start,
+                1,
+                readbytes.max(0) as u64,
+            );
+        }
         if readbytes <= 0 {
             return Ok(Err(WALReadError {
                 wre_errno: current_errno(),

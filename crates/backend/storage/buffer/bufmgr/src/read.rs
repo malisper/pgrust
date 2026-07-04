@@ -15,9 +15,12 @@ use types_core::{
 use types_error::{
     ErrorLocation, PgResult, ERRCODE_DATA_CORRUPTED, ERROR, WARNING,
 };
+use pgstat::io::{
+    pgstat_count_io_op, pgstat_count_io_op_time, pgstat_prepare_io_time, IOObject, IOOp,
+};
 use types_storage::buf::{
-    buftag, BufferAccessStrategy, BM_DIRTY, BM_IO_ERROR, BM_IO_IN_PROGRESS, BM_PERMANENT,
-    BM_TAG_VALID, BM_VALID, BUF_FLAG_MASK, BUF_USAGECOUNT_MASK, BUF_USAGECOUNT_ONE,
+    buftag, BufferAccessStrategy, IOContext, BM_DIRTY, BM_IO_ERROR, BM_IO_IN_PROGRESS,
+    BM_PERMANENT, BM_TAG_VALID, BM_VALID, BUF_FLAG_MASK, BUF_USAGECOUNT_MASK, BUF_USAGECOUNT_ONE,
 };
 use types_storage::{ReadBufferMode, RelFileLocator, RelFileLocatorBackend};
 
@@ -29,7 +32,7 @@ use crate::buf_table::{
     BufMappingPartitionLock, BufTableDelete, BufTableHashCode, BufTableInsert, BufTableLookup,
 };
 use crate::counters;
-use crate::freelist::{StrategyFreeBuffer, StrategyGetBuffer};
+use crate::freelist::{IOContextForStrategy, StrategyFreeBuffer, StrategyGetBuffer};
 use crate::ops::{LockBuffer, LockBufferForCleanup, BUFFER_LOCK_EXCLUSIVE};
 use crate::pin::{buffer_refcount, PinBuffer, PinBuffer_Locked, UnpinBuffer};
 use crate::privref::{GetPrivateRefCount, ReservePrivateRefCountEntry as reserve_entry};
@@ -120,7 +123,14 @@ pub fn ReadBuffer_common(
         // C consults zero_damaged_pages only on the miss/completion side.
         let zero_on_error =
             mode == ReadBufferMode::ZeroOnError || crate::gucs::zero_damaged_pages();
-        complete_read_sync(smgr, forknum, blkno, buffer, zero_on_error)?;
+        complete_read_sync(
+            smgr,
+            forknum,
+            blkno,
+            buffer,
+            zero_on_error,
+            IOContextForStrategy(&strategy),
+        )?;
     }
     Ok(buffer)
 }
@@ -137,12 +147,21 @@ fn PinBufferForBlock(
         let (buffer, found) = crate::localbuf::LocalBufferAlloc(smgr, forknum, blkno)?;
         if found {
             counters::local_hit();
+            pgstat_count_io_op(
+                IOObject::TempRelation,
+                IOContext::IOCONTEXT_NORMAL,
+                IOOp::Hit,
+                1,
+                0,
+            );
         }
         return Ok((buffer, found));
     }
-    let (buffer, found) = BufferAlloc(smgr, persistence, forknum, blkno, strategy)?;
+    let io_context = IOContextForStrategy(strategy);
+    let (buffer, found) = BufferAlloc(smgr, persistence, forknum, blkno, strategy, io_context)?;
     if found {
         counters::hit();
+        pgstat_count_io_op(IOObject::Relation, io_context, IOOp::Hit, 1, 0);
     }
     Ok((buffer, found))
 }
@@ -154,6 +173,7 @@ pub(crate) fn BufferAlloc(
     forknum: ForkNumber,
     blkno: BlockNumber,
     strategy: &BufferAccessStrategy,
+    io_context: IOContext,
 ) -> PgResult<(Buffer, bool)> {
     reserve_entry();
     crate::pin::resowner_enlarge_for_pin()?;
@@ -177,7 +197,7 @@ pub(crate) fn BufferAlloc(
     }
     LWLockRelease(partition_lock)?;
 
-    let victim_buffer = GetVictimBuffer(strategy)?;
+    let victim_buffer = GetVictimBuffer(strategy, io_context)?;
     let victim_desc = GetBufferDescriptor(victim_buffer - 1);
 
     LWLockAcquire(partition_lock, LW_EXCLUSIVE, init_small::globals::MyProcNumber())?;
@@ -210,11 +230,14 @@ pub(crate) fn BufferAlloc(
 }
 
 /// Clock-sweep victim, pinned, evicted from the mapping table.
-pub(crate) fn GetVictimBuffer(strategy: &BufferAccessStrategy) -> PgResult<Buffer> {
+pub(crate) fn GetVictimBuffer(
+    strategy: &BufferAccessStrategy,
+    io_context: IOContext,
+) -> PgResult<Buffer> {
     loop {
         reserve_entry();
         crate::pin::resowner_enlarge_for_pin()?;
-        let (victim, _from_ring) = StrategyGetBuffer(strategy)?;
+        let (victim, from_ring) = StrategyGetBuffer(strategy)?;
         let (buf_id, buf_state) = victim.into_parts();
         let desc = GetBufferDescriptor(buf_id);
         debug_assert!(buffer_refcount(buf_state) == 0);
@@ -235,20 +258,27 @@ pub(crate) fn GetVictimBuffer(strategy: &BufferAccessStrategy) -> PgResult<Buffe
                 let lsn = crate::ops::buffer_page_get_lsn(BufferDescriptorGetBuffer(desc));
                 UnlockBufHdr(desc, hdr_state);
                 if transam_xlog_seams::xlog_needs_flush::call(lsn)
-                    && crate::freelist::StrategyRejectBuffer(strategy, desc.buf_id, _from_ring)
+                    && crate::freelist::StrategyRejectBuffer(strategy, desc.buf_id, from_ring)
                 {
                     LWLockRelease(&desc.content_lock)?;
                     UnpinBuffer(desc);
                     continue;
                 }
             }
-            let flush_result = crate::write::FlushBuffer(desc);
+            let flush_result = crate::write::FlushBuffer(desc, io_context);
             LWLockRelease(&desc.content_lock)?;
             flush_result?;
-            crate::write::schedule_backend_writeback(&desc.tag())?;
+            crate::write::schedule_backend_writeback(io_context, &desc.tag())?;
         }
         if buf_state & BM_VALID != 0 {
             counters::evict();
+            pgstat_count_io_op(
+                IOObject::Relation,
+                io_context,
+                if from_ring { IOOp::Reuse } else { IOOp::Evict },
+                1,
+                0,
+            );
         }
         if buf_state & BM_TAG_VALID != 0 && !InvalidateVictimBuffer(desc)? {
             UnpinBuffer(desc);
@@ -401,12 +431,29 @@ fn complete_read_local(
     zero_on_error: bool,
 ) -> PgResult<()> {
     if !crate::localbuf::StartLocalBufferIO(buffer, true) {
+        counters::local_hit();
+        pgstat_count_io_op(
+            IOObject::TempRelation,
+            IOContext::IOCONTEXT_NORMAL,
+            IOOp::Hit,
+            1,
+            0,
+        );
         return Ok(());
     }
     let blk = crate::localbuf::local_block_ptr(buffer);
     // SAFETY: pinned local block, single thread; image not yet valid.
     let page = unsafe { core::slice::from_raw_parts_mut(blk, BLCKSZ) };
+    let io_start = pgstat_prepare_io_time(crate::gucs::track_io_timing());
     smgr_seams::smgr_read::call(smgr, forknum, blkno, page)?;
+    pgstat_count_io_op_time(
+        IOObject::TempRelation,
+        IOContext::IOCONTEXT_NORMAL,
+        IOOp::Read,
+        io_start,
+        1,
+        BLCKSZ as u64,
+    );
     counters::local_read();
     if !page_is_verified(blk) {
         if zero_on_error {
@@ -440,21 +487,35 @@ fn complete_read_sync(
     blkno: BlockNumber,
     buffer: Buffer,
     zero_on_error: bool,
+    io_context: IOContext,
 ) -> PgResult<()> {
     if buffer < 0 {
         return complete_read_local(smgr, forknum, blkno, buffer, zero_on_error);
     }
     let desc = GetBufferDescriptor(buffer - 1);
     if !StartBufferIO(desc, true, false, true)? {
+        // Another backend completed the read: our miss became a hit
+        // (C WaitReadBuffers' already-valid arm).
+        counters::hit();
+        pgstat_count_io_op(IOObject::Relation, io_context, IOOp::Hit, 1, 0);
         return Ok(());
     }
     let blk = BufferGetBlockPtr(buffer);
     // SAFETY: pinned + BM_IO_IN_PROGRESS: we own the (not yet valid) page image.
     let page = unsafe { core::slice::from_raw_parts_mut(blk, BLCKSZ) };
+    let io_start = pgstat_prepare_io_time(crate::gucs::track_io_timing());
     if let Err(e) = smgr_seams::smgr_read::call(smgr, forknum, blkno, page) {
         TerminateBufferIO(desc, false, BM_IO_ERROR, true);
         return Err(e);
     }
+    pgstat_count_io_op_time(
+        IOObject::Relation,
+        io_context,
+        IOOp::Read,
+        io_start,
+        1,
+        BLCKSZ as u64,
+    );
     counters::read();
     if !page_is_verified(blk) {
         if zero_on_error {

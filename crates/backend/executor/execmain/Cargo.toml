@@ -84,6 +84,7 @@ datum = { path = "../../../_support/types/datum" }
 types_rel = { path = "../../../_support/types/rel" }
 nodelockrows = { path = "../nodelockrows" }
 types_snapshot = { path = "../../../_support/types/snapshot" }
+pgstat = { path = "../../utils/activity/pgstat" }
 [dev-dependencies]
 fd = { path = "../../storage/file/fd" }
 resowner = { path = "../../utils/resowner/resowner" }

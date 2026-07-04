@@ -15,6 +15,7 @@ types_storage = { path = "../../../../_support/types/types_storage" }
 elog = { path = "../../../utils/error/elog" }
 guc_tables = { path = "../../../utils/misc/guc_tables" }
 init_small = { path = "../../../utils/init/init_small" }
+pgstat = { path = "../../../utils/activity/pgstat" }
 fd = { path = "../../file/fd" }
 xlogutils = { path = "../../../access/transam/xlogutils" }
 sync_seams = { path = "../../sync/sync_seams" }

@@ -511,8 +511,7 @@ fn postgres_main_inner(dbname: &str, username: &str) -> PgResult<()> {
     guc::report::begin_reporting_guc_options();
 
 
-    // pgstat_report_connect(MyDatabaseId): session-connect stat, lands with
-    // pgstat's connect tracking.
+    pgstat::database::pgstat_report_connect(init_small::globals::MyDatabaseId());
 
     if elog::config::where_to_send_output() == CommandDest::Remote {
         let key = init_small::globals::MyCancelKey();

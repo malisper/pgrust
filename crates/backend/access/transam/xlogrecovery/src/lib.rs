@@ -328,6 +328,8 @@ impl XLogReaderRoutine for PageSource {
         debug_assert!(self.read_file >= 0);
 
         self.read_off = target_page_off;
+        let io_start =
+            pgstat::io::pgstat_prepare_io_time(guc_tables::vars::track_wal_io_timing.read());
         // SAFETY: cur_page is the reader's XLOG_BLCKSZ read buffer.
         let r = unsafe {
             libc::pread(
@@ -337,6 +339,14 @@ impl XLogReaderRoutine for PageSource {
                 self.read_off as libc::off_t,
             )
         };
+        pgstat::io::pgstat_count_io_op_time(
+            pgstat::io::IOObject::Wal,
+            pgstat::io::IOContext::IOCONTEXT_NORMAL,
+            pgstat::io::IOOp::Read,
+            io_start,
+            1,
+            r.max(0) as u64,
+        );
         if r != XLOG_BLCKSZ as isize {
             let errno = std::io::Error::last_os_error();
             let fname = transam_xlog::XLogFileName(self.cur_file_tli, self.read_seg_no, wal_segsz);

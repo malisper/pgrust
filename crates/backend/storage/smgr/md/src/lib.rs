@@ -63,6 +63,11 @@ pub fn set_errno(value: i32) {
     }
 }
 
+// bufmgr owns track_io_timing's backing; unread until its install runs.
+pub fn track_io_timing() -> bool {
+    guc_tables::vars::track_io_timing.installed() && guc_tables::vars::track_io_timing.read()
+}
+
 #[inline]
 fn file_possibly_deleted(err: i32) -> bool {
     err == ENOENT
@@ -1066,6 +1071,8 @@ fn register_dirty_segment(
             .errmsg_internal("could not forward fsync request because request queue is full")
             .finish(loc("register_dirty_segment"))?;
 
+        let io_start = pgstat::io::pgstat_prepare_io_time(track_io_timing());
+
         if file_sync_failed(seg.mdfd_vfd, WAIT_EVENT_DATA_FILE_SYNC)? {
             return throw(
                 ereport(fd::data_sync_elevel(ERROR))
@@ -1078,6 +1085,15 @@ fn register_dirty_segment(
                 "register_dirty_segment",
             );
         }
+
+        pgstat::io::pgstat_count_io_op_time(
+            pgstat::io::IOObject::Relation,
+            pgstat::io::IOContext::IOCONTEXT_NORMAL,
+            pgstat::io::IOOp::Fsync,
+            io_start,
+            1,
+            0,
+        );
     }
     Ok(())
 }

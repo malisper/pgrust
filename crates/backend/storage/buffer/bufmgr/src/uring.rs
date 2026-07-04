@@ -5,7 +5,8 @@
 
 use types_core::{BlockNumber, Buffer, ForkNumber, BLCKSZ};
 use types_error::PgResult;
-use types_storage::buf::{PgAioWaitRef, BM_IO_ERROR, BM_VALID};
+use pgstat::io::{pgstat_count_io_op_time, pgstat_prepare_io_time, IOObject, IOOp};
+use types_storage::buf::{IOContext, PgAioWaitRef, BM_IO_ERROR, BM_VALID};
 use types_storage::RelFileLocatorBackend;
 
 use crate::buf_hdr::{BufferGetBlockPtr, GetBufferDescriptor, LockBufHdr, UnlockBufHdr};
@@ -22,7 +23,8 @@ pub fn start_read(
     blkno: BlockNumber,
 ) -> PgResult<Option<PrefetchOutcome>> {
     collect_done();
-    let (buffer, found) = BufferAlloc(smgr, relpersistence, forknum, blkno, &None)?;
+    let (buffer, found) =
+        BufferAlloc(smgr, relpersistence, forknum, blkno, &None, IOContext::IOCONTEXT_NORMAL)?;
     let desc = GetBufferDescriptor(buffer - 1);
     if found {
         UnpinBuffer(desc);
@@ -32,11 +34,20 @@ pub fn start_read(
         UnpinBuffer(desc);
         return Ok(Some(PrefetchOutcome::Cached));
     }
+    let io_start = pgstat_prepare_io_time(crate::gucs::track_io_timing());
     match smgr_seams::smgr_start_buffer_read::call(smgr, forknum, blkno, buffer) {
         Ok(true) => {
             // Pin ownership moves to the ring slot (C: AIO holds its own pin);
             // collect/drain on this thread is the only unpinner.
             ForgetBufferPin(buffer);
+            pgstat_count_io_op_time(
+                IOObject::Relation,
+                IOContext::IOCONTEXT_NORMAL,
+                IOOp::Read,
+                io_start,
+                1,
+                BLCKSZ as u64,
+            );
             crate::counters::read();
             Ok(Some(PrefetchOutcome::Issued))
         }

@@ -367,7 +367,9 @@ pub fn pgstat_bestart_final() -> PgResult<()> {
     beentry.st_state.set(BackendState::STATE_UNDEFINED);
     end_write_activity(beentry);
 
-    // pgstat_create_backend lands with pgstat_backend.c, not stubbed here.
+    if pgstat::backend::pgstat_tracks_backend_bktype(btype) {
+        pgstat::backend::pgstat_create_backend(g::MyProcNumber());
+    }
 
     if guc_tables::vars::application_name.installed() {
         if let Some(appname) = guc_tables::vars::application_name.read() {

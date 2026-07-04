@@ -4,19 +4,9 @@
 
 use core::cell::{Cell, RefCell};
 
+use pgstat::bgwriter::with_pending_bgwriter_stats;
 use types_error::PgResult;
 use crate::write::{SyncOneBuffer, WritebackContext, BUF_REUSABLE, BUF_WRITTEN};
-
-// PendingBgWriterStats (C home pgstat_bgwriter.c, written from here as
-// extern); relocates when the pgstat activity unit ports.
-pub mod pending_bgwriter_stats {
-    use core::cell::Cell;
-    thread_local! {
-        pub static BUF_WRITTEN_CLEAN: Cell<u64> = const { Cell::new(0) };
-        pub static MAXWRITTEN_CLEAN: Cell<u64> = const { Cell::new(0) };
-        pub static BUF_ALLOC: Cell<u64> = const { Cell::new(0) };
-    }
-}
 
 thread_local! {
     static SAVED_INFO_VALID: Cell<bool> = const { Cell::new(false) };
@@ -39,7 +29,7 @@ pub fn bgwriter_writeback_context_init() {
 pub fn BgBufferSync() -> PgResult<bool> {
     let (strategy_buf_id, strategy_passes, recent_alloc) = crate::freelist::StrategySyncStart();
 
-    pending_bgwriter_stats::BUF_ALLOC.with(|c| c.set(c.get() + recent_alloc as u64));
+    with_pending_bgwriter_stats(|s| s.buf_alloc += recent_alloc as i64);
 
     let bgwriter_lru_maxpages = crate::gucs::bgwriter_lru_maxpages();
     if bgwriter_lru_maxpages <= 0 {
@@ -135,7 +125,7 @@ pub fn BgBufferSync() -> PgResult<bool> {
                 reusable_buffers += 1;
                 num_written += 1;
                 if num_written >= bgwriter_lru_maxpages {
-                    pending_bgwriter_stats::MAXWRITTEN_CLEAN.with(|c| c.set(c.get() + 1));
+                    with_pending_bgwriter_stats(|s| s.maxwritten_clean += 1);
                     break;
                 }
             } else if sync_state & BUF_REUSABLE != 0 {
@@ -145,7 +135,7 @@ pub fn BgBufferSync() -> PgResult<bool> {
         Ok(())
     })?;
 
-    pending_bgwriter_stats::BUF_WRITTEN_CLEAN.with(|c| c.set(c.get() + num_written as u64));
+    with_pending_bgwriter_stats(|s| s.buf_written_clean += num_written as i64);
 
     let new_strategy_delta = (bufs_to_lap - num_to_scan) as i64;
     let new_recent_alloc = reusable_buffers - reusable_buffers_est;

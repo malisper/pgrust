@@ -56,6 +56,27 @@ fn wal_sync_method() -> i32 {
     guc_tables::vars::wal_sync_method.read()
 }
 
+fn wal_io_start() -> i64 {
+    if pgstat_seams::pgstat_prepare_io_time::is_installed() {
+        pgstat_seams::pgstat_prepare_io_time::call(guc_tables::vars::track_wal_io_timing.read())
+    } else {
+        0
+    }
+}
+
+fn count_wal_io(io_context: u32, io_op: u32, start_ns: i64, bytes: u64) {
+    if pgstat_seams::pgstat_count_io_op_time::is_installed() {
+        pgstat_seams::pgstat_count_io_op_time::call(
+            pgstat_seams::IOOBJECT_WAL,
+            io_context,
+            io_op,
+            start_ns,
+            1,
+            bytes,
+        );
+    }
+}
+
 fn get_sync_bit(method: i32) -> i32 {
     if !init_small::globals::enableFsync() {
         return 0;
@@ -76,6 +97,7 @@ pub(crate) fn issue_xlog_fsync(fd: i32, segno: XLogSegNo, tli: TimeLineID) -> Pg
     {
         return Ok(());
     }
+    let start_ns = wal_io_start();
     let rc = match method {
         WAL_SYNC_METHOD_FSYNC => fd::pg_fsync_no_writethrough(fd),
         WAL_SYNC_METHOD_FSYNC_WRITETHROUGH => fd::pg_fsync_writethrough(fd),
@@ -88,6 +110,7 @@ pub(crate) fn issue_xlog_fsync(fd: i32, segno: XLogSegNo, tli: TimeLineID) -> Pg
             .errmsg(format!("could not fsync file \"{fname}\""))
             .finish(loc("issue_xlog_fsync"));
     }
+    count_wal_io(pgstat_seams::IOCONTEXT_NORMAL, pgstat_seams::IOOP_FSYNC, start_ns, 0);
     Ok(())
 }
 
@@ -159,7 +182,9 @@ fn XLogFileInitInternal(
 
     let wal_segsz = wal_segment_size();
     let mut save_err: Option<std::io::Error> = None;
-    if guc_tables::vars::wal_init_zero.read() {
+    let io_start = wal_io_start();
+    let init_zero = guc_tables::vars::wal_init_zero.read();
+    if init_zero {
         let rc = fd::io::pg_pwrite_zeros(f, wal_segsz as usize, 0);
         if rc < 0 {
             save_err = Some(std::io::Error::last_os_error());
@@ -171,6 +196,12 @@ fn XLogFileInitInternal(
             save_err = Some(std::io::Error::last_os_error());
         }
     }
+    count_wal_io(
+        pgstat_seams::IOCONTEXT_INIT,
+        pgstat_seams::IOOP_WRITE,
+        io_start,
+        if init_zero { wal_segsz as u64 } else { 1 },
+    );
     if let Some(e) = save_err {
         let _ = std::fs::remove_file(&tmppath);
         // SAFETY: fd owned here.
@@ -181,6 +212,7 @@ fn XLogFileInitInternal(
             .map(|_| -1);
     }
 
+    let io_start = wal_io_start();
     if fd::pg_fsync(f) != 0 {
         // SAFETY: fd owned here.
         unsafe { libc::close(f) };
@@ -189,6 +221,7 @@ fn XLogFileInitInternal(
             .finish(loc("XLogFileInitInternal"))
             .map(|_| -1);
     }
+    count_wal_io(pgstat_seams::IOCONTEXT_INIT, pgstat_seams::IOOP_FSYNC, io_start, 0);
     // SAFETY: fd owned here.
     if unsafe { libc::close(f) } != 0 {
         return ereport(ERROR)
@@ -339,12 +372,19 @@ pub(crate) fn XLogWrite(write_rqst: (XLogRecPtr, XLogRecPtr), tli: TimeLineID, f
             let mut from = ctl.page_ptr(startidx as usize);
             let mut nleft = npages * XLOG_BLCKSZ;
             loop {
+                let io_start = wal_io_start();
                 // SAFETY: [from, from+nleft) lies inside the WAL buffer
                 // array; the insert protocol guarantees these pages are
                 // fully written (WaitXLogInsertionsToFinish ran).
                 let written = unsafe {
                     libc::pwrite(OPEN_LOG_FILE.get(), from.cast(), nleft, startoffset as i64)
                 };
+                count_wal_io(
+                    pgstat_seams::IOCONTEXT_NORMAL,
+                    pgstat_seams::IOOP_WRITE,
+                    io_start,
+                    written.max(0) as u64,
+                );
                 if written <= 0 {
                     let e = std::io::Error::last_os_error();
                     if e.kind() == std::io::ErrorKind::Interrupted {

@@ -5,6 +5,7 @@ use types_core::{
     INIT_FORKNUM, RELPERSISTENCE_PERMANENT, RELPERSISTENCE_TEMP,
 };
 use types_error::{ErrorLocation, PgResult, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERROR};
+use pgstat::io::{pgstat_count_io_op_time, pgstat_prepare_io_time, IOObject, IOOp};
 use types_storage::buf::{
     BufferAccessStrategy, BM_DIRTY, BM_JUST_DIRTIED, BM_PERMANENT, BM_TAG_VALID, BM_VALID,
     BUF_USAGECOUNT_ONE,
@@ -15,7 +16,7 @@ use types_rel::rel::RelationData;
 
 use crate::buf_hdr::{BufferDescriptorGetBuffer, BufferGetBlockPtr, GetBufferDescriptor, LockBufHdr, UnlockBufHdr};
 use crate::buf_table::{BufMappingPartitionLock, BufTableHashCode, BufTableInsert};
-use crate::freelist::{GetPinLimit, StrategyFreeBuffer};
+use crate::freelist::{GetPinLimit, IOContextForStrategy, StrategyFreeBuffer};
 use crate::pin::{buffer_refcount, PinBuffer, UnpinBuffer};
 use crate::privref::{overflowed_count, ReservePrivateRefCountEntry, REFCOUNT_ARRAY_ENTRIES};
 use crate::read::{GetVictimBuffer, ReadBuffer_common, StartBufferIO, TerminateBufferIO};
@@ -210,13 +211,14 @@ fn ExtendBufferedRelShared(
     extend_upto: BlockNumber,
     buffers: &mut [Buffer],
 ) -> PgResult<(BlockNumber, u32)> {
+    let io_context = IOContextForStrategy(strategy);
     LimitAdditionalPins(&mut extend_by);
     debug_assert!(extend_by as usize <= buffers.len());
 
     // Victim acquisition and zeroing happen before the extension lock: the
     // pins keep these invalid buffers from being re-victimized.
     for slot in buffers.iter_mut().take(extend_by as usize) {
-        *slot = GetVictimBuffer(strategy)?;
+        *slot = GetVictimBuffer(strategy, io_context)?;
         // SAFETY: pinned, tag-invalid victim: this backend owns the image.
         unsafe { core::ptr::write_bytes(BufferGetBlockPtr(*slot), 0, BLCKSZ) };
     }
@@ -329,11 +331,22 @@ fn ExtendBufferedRelShared(
         }
     }
 
+    let io_start = pgstat_prepare_io_time(crate::gucs::track_io_timing());
+
     smgr_seams::smgr_zeroextend::call(smgr, fork, first_block, extend_by as i32, false)?;
 
     if hold_extension_lock {
         lmgr::UnlockRelationForExtension(rel.unwrap(), ExclusiveLock)?;
     }
+
+    pgstat_count_io_op_time(
+        IOObject::Relation,
+        io_context,
+        IOOp::Extend,
+        io_start,
+        1,
+        extend_by as u64 * BLCKSZ as u64,
+    );
 
     for i in 0..extend_by as usize {
         let buf = buffers[i];

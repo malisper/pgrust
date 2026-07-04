@@ -11,7 +11,7 @@ use ::mcx::{alloc_in, Mcx, MemoryContext, PgBox, PgVec};
 use ::types_error::{PgError, PgResult, ERRCODE_E_R_I_E_SRF_PROTOCOL_VIOLATED};
 use ::types_fmgr::{
     ExprDoneCond, FmgrInfo, LocalFcinfo, ReturnSetInfo, SetFunctionReturnMode, SFRM_Materialize,
-    SFRM_ValuePerCall,
+    SFRM_ValuePerCall, TRACK_FUNC_ALL,
 };
 use ::types_nodes::plannodes::ProjectSet;
 use ::types_slot::{TupleSlotKind, EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK};
@@ -328,10 +328,25 @@ fn exec_make_function_result_set<'mcx>(
     // SAFETY: re-armed before every invoke; the per-tuple context outlives
     // the call and its result is consumed before the next reset.
     unsafe { srf.fcinfo.set_result_mcx(per_tuple) };
+    // C: pgstat_init_function_usage's `pgstat_track_functions <= fn_stats`
+    // early-out, hoisted to the caller as the crate's API requires.
+    let fcu = if srf.flinfo.fn_stats < TRACK_FUNC_ALL
+        && ::pgstat::function::pgstat_track_functions() > srf.flinfo.fn_stats as i32
+    {
+        Some(::pgstat::function::pgstat_init_function_usage(srf.flinfo.fn_oid)?)
+    } else {
+        None
+    };
     srf.fcinfo.isnull = false;
     srf.rsinfo.returnMode = SetFunctionReturnMode::ValuePerCall;
     srf.rsinfo.isDone = ExprDoneCond::ExprSingleResult;
     let result = srf.flinfo.invoke(&mut srf.fcinfo)?;
+    if let Some(fcu) = &fcu {
+        ::pgstat::function::pgstat_end_function_usage(
+            fcu,
+            srf.rsinfo.isDone != ExprDoneCond::ExprMultipleResult,
+        );
+    }
 
     match srf.rsinfo.returnMode {
         SetFunctionReturnMode::ValuePerCall => {

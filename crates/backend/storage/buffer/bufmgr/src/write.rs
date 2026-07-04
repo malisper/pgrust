@@ -5,8 +5,12 @@ use init_small::globals;
 use lwlock::{LWLockAcquire, LWLockHeldByMe, LWLockRelease, LW_SHARED};
 use types_core::{BlockNumber, Buffer, Oid, BLCKSZ, INVALID_PROC_NUMBER};
 use types_error::PgResult;
+use pgstat::io::{
+    pgstat_count_io_op_time, pgstat_prepare_io_time, IOObject, IOOp,
+};
 use types_storage::buf::{
-    buftag, BM_CHECKPOINT_NEEDED, BM_DIRTY, BM_IO_ERROR, BM_JUST_DIRTIED, BM_PERMANENT, BM_VALID,
+    buftag, IOContext, BM_CHECKPOINT_NEEDED, BM_DIRTY, BM_IO_ERROR, BM_JUST_DIRTIED, BM_PERMANENT,
+    BM_VALID,
 };
 use types_storage::{RelFileLocator, RelFileLocatorBackend, IO_DIRECT_DATA};
 
@@ -52,11 +56,11 @@ thread_local! {
     static BACKEND_WB: RefCell<Option<WritebackContext>> = const { RefCell::new(None) };
 }
 
-pub(crate) fn schedule_backend_writeback(tag: &buftag) -> PgResult<()> {
+pub(crate) fn schedule_backend_writeback(io_context: IOContext, tag: &buftag) -> PgResult<()> {
     BACKEND_WB.with(|cell| {
         let mut slot = cell.borrow_mut();
         let wb = slot.get_or_insert_with(|| WritebackContext::new(crate::gucs::backend_flush_after));
-        ScheduleBufferTagForWriteback(wb, tag)
+        ScheduleBufferTagForWriteback(wb, io_context, tag)
     })
 }
 
@@ -71,7 +75,11 @@ fn tag_locator(tag: &buftag) -> RelFileLocatorBackend {
     }
 }
 
-pub fn ScheduleBufferTagForWriteback(wb: &mut WritebackContext, tag: &buftag) -> PgResult<()> {
+pub fn ScheduleBufferTagForWriteback(
+    wb: &mut WritebackContext,
+    io_context: IOContext,
+    tag: &buftag,
+) -> PgResult<()> {
     if fd::io_direct_flags() & IO_DIRECT_DATA != 0 || !globals::enableFsync() {
         return Ok(());
     }
@@ -82,7 +90,7 @@ pub fn ScheduleBufferTagForWriteback(wb: &mut WritebackContext, tag: &buftag) ->
         wb.nr_pending += 1;
     }
     if wb.nr_pending >= max_pending {
-        IssuePendingWritebacks(wb)?;
+        IssuePendingWritebacks(wb, io_context)?;
     }
     Ok(())
 }
@@ -91,7 +99,7 @@ fn rlocator_cmp(a: &buftag, b: &buftag) -> core::cmp::Ordering {
     (a.relNumber, a.dbOid, a.spcOid).cmp(&(b.relNumber, b.dbOid, b.spcOid))
 }
 
-pub fn IssuePendingWritebacks(wb: &mut WritebackContext) -> PgResult<()> {
+pub fn IssuePendingWritebacks(wb: &mut WritebackContext, io_context: IOContext) -> PgResult<()> {
     if wb.nr_pending == 0 {
         return Ok(());
     }
@@ -101,6 +109,8 @@ pub fn IssuePendingWritebacks(wb: &mut WritebackContext) -> PgResult<()> {
             .then((a.forkNum as i32).cmp(&(b.forkNum as i32)))
             .then(a.blockNum.cmp(&b.blockNum))
     });
+
+    let io_start = pgstat_prepare_io_time(crate::gucs::track_io_timing());
 
     let mut i = 0;
     while i < pending.len() {
@@ -135,6 +145,14 @@ pub fn IssuePendingWritebacks(wb: &mut WritebackContext) -> PgResult<()> {
             nblocks,
         )?;
     }
+    pgstat_count_io_op_time(
+        IOObject::Relation,
+        io_context,
+        IOOp::Writeback,
+        io_start,
+        wb.nr_pending as u32,
+        0,
+    );
     wb.nr_pending = 0;
     Ok(())
 }
@@ -235,7 +253,10 @@ pub(crate) fn with_checksummed_page<R>(
 }
 
 /// FlushBuffer (bufmgr.c): caller holds a pin and the content lock (any mode).
-pub(crate) fn FlushBuffer(desc: &crate::buf_hdr::BufferDesc) -> PgResult<()> {
+pub(crate) fn FlushBuffer(
+    desc: &crate::buf_hdr::BufferDesc,
+    io_context: IOContext,
+) -> PgResult<()> {
     if !StartBufferIO(desc, false, false, true)? {
         return Ok(());
     }
@@ -260,6 +281,7 @@ pub(crate) fn FlushBuffer(desc: &crate::buf_hdr::BufferDesc) -> PgResult<()> {
         }
     }
 
+    let io_start = pgstat_prepare_io_time(crate::gucs::track_io_timing());
     let write_result = with_checksummed_page(block, tag.blockNum, |page| {
         smgr_seams::smgr_write::call(tag_locator(&tag), tag.forkNum, tag.blockNum, page, false)
     });
@@ -268,6 +290,14 @@ pub(crate) fn FlushBuffer(desc: &crate::buf_hdr::BufferDesc) -> PgResult<()> {
         return Err(e);
     }
 
+    pgstat_count_io_op_time(
+        IOObject::Relation,
+        io_context,
+        IOOp::Write,
+        io_start,
+        1,
+        BLCKSZ as u64,
+    );
     counters::written();
     TerminateBufferIO(desc, true, 0, true);
     Ok(())
@@ -279,7 +309,7 @@ pub fn FlushOneBuffer(buffer: Buffer) -> PgResult<()> {
     debug_assert!(BufferIsPinned(buffer));
     let desc = GetBufferDescriptor(buffer - 1);
     debug_assert!(LWLockHeldByMe(&desc.content_lock));
-    FlushBuffer(desc)
+    FlushBuffer(desc, IOContext::IOCONTEXT_NORMAL)
 }
 
 /// FlushDatabaseBuffers (bufmgr.c): write out all dirty buffers of a database.
@@ -298,7 +328,7 @@ pub fn FlushDatabaseBuffers(dbid: types_core::Oid) -> PgResult<()> {
         if desc.tag().dbOid == dbid && buf_state & (BM_VALID | BM_DIRTY) == (BM_VALID | BM_DIRTY) {
             PinBuffer_Locked(desc);
             LWLockAcquire(&desc.content_lock, LW_SHARED, globals::MyProcNumber())?;
-            let flush_result = FlushBuffer(desc);
+            let flush_result = FlushBuffer(desc, IOContext::IOCONTEXT_NORMAL);
             LWLockRelease(&desc.content_lock)?;
             UnpinBuffer(desc);
             flush_result?;
@@ -353,7 +383,7 @@ pub fn FlushRelationsAllBuffers(rels: &[RelFileLocatorBackend]) -> PgResult<()> 
         {
             PinBuffer_Locked(desc);
             LWLockAcquire(&desc.content_lock, LW_SHARED, globals::MyProcNumber())?;
-            let flush_result = FlushBuffer(desc);
+            let flush_result = FlushBuffer(desc, IOContext::IOCONTEXT_NORMAL);
             LWLockRelease(&desc.content_lock)?;
             UnpinBuffer(desc);
             flush_result?;
@@ -387,13 +417,13 @@ pub(crate) fn SyncOneBuffer(buf_id: i32, skip_recently_used: bool, wb: &mut Writ
 
     PinBuffer_Locked(desc);
     LWLockAcquire(&desc.content_lock, LW_SHARED, globals::MyProcNumber())?;
-    let flush_result = FlushBuffer(desc);
+    let flush_result = FlushBuffer(desc, IOContext::IOCONTEXT_NORMAL);
     LWLockRelease(&desc.content_lock)?;
     let tag = desc.tag();
     UnpinBuffer(desc);
     flush_result?;
 
-    ScheduleBufferTagForWriteback(wb, &tag)?;
+    ScheduleBufferTagForWriteback(wb, IOContext::IOCONTEXT_NORMAL, &tag)?;
     Ok(result | BUF_WRITTEN)
 }
 
@@ -554,7 +584,7 @@ pub fn BufferSync(flags: i32) -> PgResult<()> {
             }
         }
 
-        IssuePendingWritebacks(&mut wb)?;
+        IssuePendingWritebacks(&mut wb, IOContext::IOCONTEXT_NORMAL)?;
         // CheckpointStats.ckpt_bufs_written pends the stats unit.
         Ok(())
     })
