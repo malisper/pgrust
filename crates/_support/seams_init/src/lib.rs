@@ -244,11 +244,12 @@ pub fn init_all() {
     adt_regexp::init_seams();
     ts_cache::init_hooks();
 
-    static EXTRA_BUILTINS: [&[types_fmgr::FmgrBuiltin]; 4] = [
+    static EXTRA_BUILTINS: [&[types_fmgr::FmgrBuiltin]; 5] = [
         adt_misc::builtins::MISC_BUILTINS,
         catalog_namespace::builtins::NAMESPACE_BUILTINS,
         format_type::builtins::FORMAT_TYPE_BUILTINS,
         ruleutils::builtins::RULEUTILS_BUILTINS,
+        statistics::builtins::STATISTICS_BUILTINS,
     ];
     fmgr_core::install_extra_builtins(&EXTRA_BUILTINS);
 }

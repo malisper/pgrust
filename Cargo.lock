@@ -11720,6 +11720,7 @@ dependencies = [
  "sql_functions",
  "stack_depth",
  "standby",
+ "statistics",
  "subtrans",
  "superuser",
  "sync",
