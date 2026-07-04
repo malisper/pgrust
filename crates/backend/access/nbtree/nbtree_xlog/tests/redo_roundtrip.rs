@@ -640,6 +640,20 @@ fn btree_redo_rebuilds_pages_byte_exact() {
     }
     assert_eq!(with_fake(|f| f.pages.len()), before, "dedup avoided the split");
 
+    // Posting-split+page-split coincidence: strided duplicate TIDs so every
+    // odd posid lands inside an existing posting list, then churn odd posids
+    // until dedup can no longer absorb the page and _bt_split runs with
+    // postingoff != 0.
+    let dupkey2 = dupkey + 2;
+    for i in 1..=800u16 {
+        insert_tid(dupkey2, i * 2);
+    }
+    let before2 = with_fake(|f| f.pages.len());
+    for i in 1..=799u16 {
+        insert_tid(dupkey2, i * 2 + 1);
+    }
+    assert!(with_fake(|f| f.pages.len()) > before2, "churn split the leaf");
+
     with_fake(|f| assert!(f.pins.iter().all(|p| *p == 0), "leaked pins"));
 
     let nblocks = with_fake(|f| f.pages.len());
@@ -668,29 +682,37 @@ fn btree_redo_rebuilds_pages_byte_exact() {
     reader.XLogBeginRead(end_of_log + 40);
 
     let mut seen = [0u32; 16];
+    let mut posting_splits = 0u32;
     while reader.v.EndRecPtr < last_lsn {
         reader.XLogReadRecord(&mut routine).unwrap().unwrap();
         assert_eq!(reader.XLogRecGetRmid(), RM_BTREE_ID);
         let info = reader.XLogRecGetInfo() & !0x0F;
         seen[(info >> 4) as usize] += 1;
+        if info == XLOG_BTREE_SPLIT_L || info == XLOG_BTREE_SPLIT_R {
+            // SAFETY: decode buffer is live until the next XLogReadRecord.
+            let d = unsafe { reader.v.record.as_ref().unwrap().main_data_bytes() };
+            if u16::from_ne_bytes(d[8..10].try_into().unwrap()) != 0 {
+                posting_splits += 1;
+            }
+        }
         (rmgr::GetRmgr(RM_BTREE_ID).unwrap().rm_redo)(&mut reader.v).unwrap();
     }
     assert_eq!(reader.v.EndRecPtr, last_lsn);
 
     assert!(seen[(XLOG_BTREE_INSERT_LEAF >> 4) as usize] > 0, "INSERT_LEAF replayed");
-    assert_eq!(seen[(XLOG_BTREE_INSERT_UPPER >> 4) as usize], 1, "INSERT_UPPER replayed");
-    assert_eq!(seen[(XLOG_BTREE_SPLIT_R >> 4) as usize], 1, "SPLIT_R replayed");
-    assert_eq!(seen[(XLOG_BTREE_SPLIT_L >> 4) as usize], 1, "SPLIT_L replayed");
+    assert!(seen[(XLOG_BTREE_INSERT_UPPER >> 4) as usize] >= 1, "INSERT_UPPER replayed");
+    assert!(seen[(XLOG_BTREE_SPLIT_R >> 4) as usize] >= 1, "SPLIT_R replayed");
+    assert!(seen[(XLOG_BTREE_SPLIT_L >> 4) as usize] >= 1, "SPLIT_L replayed");
     assert_eq!(seen[(XLOG_BTREE_NEWROOT >> 4) as usize], 2, "NEWROOT x2 replayed");
-    assert_eq!(
-        seen[(types_nbtree::XLOG_BTREE_INSERT_POST >> 4) as usize],
-        1,
+    assert!(
+        seen[(types_nbtree::XLOG_BTREE_INSERT_POST >> 4) as usize] >= 1,
         "INSERT_POST replayed"
     );
     assert!(
         seen[(types_nbtree::XLOG_BTREE_DEDUP >> 4) as usize] >= 1,
         "DEDUP replayed"
     );
+    assert!(posting_splits >= 1, "posting-split+page-split coincidence replayed");
 
     with_fake(|f| assert!(f.pins.iter().all(|p| *p == 0), "replay leaked pins"));
     assert_eq!(with_fake(|f| f.pages.len()), nblocks);
