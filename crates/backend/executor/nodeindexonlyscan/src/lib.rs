@@ -449,19 +449,11 @@ pub fn exec_rescan_index_only_scan<'mcx>(
     node: &mut IndexOnlyScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
-    if !node.ioss_RuntimeKeys.is_empty() {
-        let ecxt = node
-            .ioss_RuntimeContext
-            .expect("runtime keys have their econtext");
-        estate.reset_expr_context(ecxt);
-        exec_index_eval_runtime_keys(
-            estate,
-            ecxt,
-            &mut node.ioss_RuntimeKeys,
-            &mut node.ioss_ScanKeys,
-        )?;
+    if let Some(rt) = node.ioss_Runtime.as_deref_mut() {
+        estate.reset_expr_context(rt.ecxt);
+        exec_index_eval_runtime_keys(estate, rt.ecxt, &mut rt.keys, &mut node.ioss_ScanKeys)?;
+        rt.ready = true;
     }
-    node.ioss_RuntimeKeysReady = true;
     let IndexOnlyScanState {
         ioss_ScanDesc,
         ioss_ScanKeys,
