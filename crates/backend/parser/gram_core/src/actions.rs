@@ -8891,10 +8891,11 @@ impl<'mcx> Parser<'mcx> {
         Node::mk_column_ref(self.mcx, fields, location)
     }
 
-    // check_indirection: '*' is not allowed in subscripting contexts.
+    // check_indirection: '*' is legal only as the last indirection item.
     fn check_indirection(&self, indirection: &NodeList<'mcx>) -> PgResult<()> {
-        for el in indirection.iter() {
-            if el.as_a_star().is_some() {
+        let n = indirection.len();
+        for (i, el) in indirection.iter().enumerate() {
+            if el.as_a_star().is_some() && i + 1 != n {
                 return Err(self.parser_yyerror("improper use of \"*\""));
             }
         }
