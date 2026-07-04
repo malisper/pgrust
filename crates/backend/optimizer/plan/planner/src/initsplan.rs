@@ -1380,10 +1380,25 @@ fn make_outerjoininfo<'mcx>(
     clause: Option<Node<'mcx>>,
 ) -> PgResult<SpecialJoinInfo<'mcx>> {
     let mcx = run.mcx;
-    assert!(
-        run.parse().rowMarks.is_nil(),
-        "make_outerjoininfo (initsplan.c): FOR UPDATE/SHARE vs nullable side check unported"
-    );
+    // The executor cannot support row marks on the nullable side of an outer
+    // join; checked here (not the parser) because only after rewriting and
+    // flattening is the join structure known. Original RowMarkClause list, not
+    // PlanRowMarks.
+    for rc_node in &run.parse().rowMarks {
+        let rc = rc_node.as_row_mark_clause().expect("rowMarks cell");
+        if relids_is_member(rc.rti as i32, right_rels)
+            || (jointype == types_pathnodes::JOIN_FULL
+                && relids_is_member(rc.rti as i32, left_rels))
+        {
+            return Err(Box::new(
+                types_error::PgError::error(format!(
+                    "{} cannot be applied to the nullable side of an outer join",
+                    parser_analyze::LCS_asString(rc.strength)
+                ))
+                .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+            ));
+        }
+    }
 
     let mut sjinfo = SpecialJoinInfo {
         min_lefthand: None,
