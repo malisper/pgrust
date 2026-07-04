@@ -109,8 +109,25 @@ pub fn fc_to_date(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Da
     Ok(Datum::from_i32(dch_entry::to_date(mcx, val.data(), fmt.data())?))
 }
 
-pub fn fc_interval_to_char(_f: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    panic!("interval to_char (interval_to_char) not ported");
+pub fn fc_interval_to_char(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: strict fn — arg 0 is a non-null interval (typlen 16, typalign
+    // d), arg 1 a non-null text varlena; both live for the call.
+    let (it, fmt) = unsafe {
+        let p = fcinfo.arg_ptr(0);
+        (
+            ::adt_datetime::Interval {
+                time: (p as *const i64).read_unaligned(),
+                day: (p.add(8) as *const i32).read_unaligned(),
+                month: (p.add(12) as *const i32).read_unaligned(),
+            },
+            fcinfo.arg_varlena_packed(1)?,
+        )
+    };
+    if fmt.data().is_empty() || it.not_finite() {
+        return Ok(fcinfo.return_null());
+    }
+    let mcx = fcinfo.result_mcx();
+    Ok(varlena_result(dch_entry::interval_to_char(mcx, &it, fmt.data())?))
 }
 
 const fn b(foid: Oid, name: &'static str, func: PGFunction) -> FmgrBuiltin {

@@ -1131,6 +1131,129 @@ pub fn intervaltypmodout(typmod: i32, buf: &mut [u8; 64]) -> usize {
     len
 }
 
+// 0 = SECOND .. 5 = YEAR; the truncation granularity a typmod boils down to.
+pub fn intervaltypmodleastfield(typmod: i32) -> i32 {
+    if typmod < 0 {
+        return 0;
+    }
+    let fields = INTERVAL_RANGE(typmod);
+    if fields == INTERVAL_MASK(YEAR) {
+        5
+    } else if fields == INTERVAL_MASK(MONTH)
+        || fields == (INTERVAL_MASK(YEAR) | INTERVAL_MASK(MONTH))
+    {
+        4
+    } else if fields == INTERVAL_MASK(DAY) {
+        3
+    } else if fields == INTERVAL_MASK(HOUR)
+        || fields == (INTERVAL_MASK(DAY) | INTERVAL_MASK(HOUR))
+    {
+        2
+    } else if fields == INTERVAL_MASK(MINUTE)
+        || fields == (INTERVAL_MASK(DAY) | INTERVAL_MASK(HOUR) | INTERVAL_MASK(MINUTE))
+        || fields == (INTERVAL_MASK(HOUR) | INTERVAL_MASK(MINUTE))
+    {
+        1
+    } else if fields == INTERVAL_MASK(SECOND)
+        || fields
+            == (INTERVAL_MASK(DAY)
+                | INTERVAL_MASK(HOUR)
+                | INTERVAL_MASK(MINUTE)
+                | INTERVAL_MASK(SECOND))
+        || fields == (INTERVAL_MASK(HOUR) | INTERVAL_MASK(MINUTE) | INTERVAL_MASK(SECOND))
+        || fields == (INTERVAL_MASK(MINUTE) | INTERVAL_MASK(SECOND))
+        || fields == INTERVAL_FULL_RANGE
+    {
+        0
+    } else {
+        panic!("invalid INTERVAL typmod: {typmod:#x}");
+    }
+}
+
+#[allow(non_snake_case)]
+#[derive(Clone, Copy, Default)]
+pub struct IntervalAggState {
+    pub N: i64,
+    pub pInfcount: i64,
+    pub nInfcount: i64,
+    pub sumX: Interval,
+}
+
+pub fn do_interval_accum(state: &mut IntervalAggState, newval: &Interval) -> PgResult<()> {
+    if newval.is_nobegin() {
+        state.nInfcount += 1;
+        return Ok(());
+    }
+    if newval.is_noend() {
+        state.pInfcount += 1;
+        return Ok(());
+    }
+    state.sumX = finite_interval_pl(&state.sumX, newval)?;
+    state.N += 1;
+    Ok(())
+}
+
+pub fn do_interval_discard(state: &mut IntervalAggState, newval: &Interval) -> PgResult<()> {
+    if newval.is_nobegin() {
+        state.nInfcount -= 1;
+        return Ok(());
+    }
+    if newval.is_noend() {
+        state.pInfcount -= 1;
+        return Ok(());
+    }
+    state.N -= 1;
+    if state.N > 0 {
+        state.sumX = finite_interval_mi(&state.sumX, newval)?;
+    } else {
+        debug_assert_eq!(state.N, 0);
+        state.sumX = Interval::default();
+    }
+    Ok(())
+}
+
+pub fn interval_agg_combine(
+    state1: &mut IntervalAggState,
+    state2: &IntervalAggState,
+) -> PgResult<()> {
+    state1.N += state2.N;
+    state1.pInfcount += state2.pInfcount;
+    state1.nInfcount += state2.nInfcount;
+    if state2.N > 0 {
+        state1.sumX = finite_interval_pl(&state1.sumX, &state2.sumX)?;
+    }
+    Ok(())
+}
+
+pub fn interval_avg_final(state: &IntervalAggState) -> PgResult<Option<Interval>> {
+    if state.N + state.pInfcount + state.nInfcount == 0 {
+        return Ok(None);
+    }
+    if state.pInfcount > 0 || state.nInfcount > 0 {
+        if state.pInfcount > 0 && state.nInfcount > 0 {
+            return Err(interval_out_of_range());
+        }
+        return Ok(Some(if state.pInfcount > 0 { Interval::NOEND } else { Interval::NOBEGIN }));
+    }
+    Ok(Some(interval_div(&state.sumX, state.N as f64)?))
+}
+
+pub fn interval_sum_final(state: &IntervalAggState) -> PgResult<Option<Interval>> {
+    if state.N + state.pInfcount + state.nInfcount == 0 {
+        return Ok(None);
+    }
+    if state.pInfcount > 0 && state.nInfcount > 0 {
+        return Err(interval_out_of_range());
+    }
+    Ok(Some(if state.pInfcount > 0 {
+        Interval::NOEND
+    } else if state.nInfcount > 0 {
+        Interval::NOBEGIN
+    } else {
+        state.sumX
+    }))
+}
+
 pub fn make_interval(
     years: i32,
     months: i32,
@@ -1156,7 +1279,12 @@ pub fn make_interval(
     // hours and mins -> usecs cannot overflow 64 bits
     let mut time = hours as i64 * USECS_PER_HOUR + mins as i64 * USECS_PER_MINUTE;
 
-    let secs = (secs * USECS_PER_SEC as f64).round_ties_even();
+    // C float8_mul: finite inputs overflowing to inf raise 22003, not 22008.
+    let scaled = secs * USECS_PER_SEC as f64;
+    if scaled.is_infinite() {
+        return Err(Box::new(::float::float_overflow_error()));
+    }
+    let secs = scaled.round_ties_even();
     if !float8_fits_in_int64(secs) {
         return Err(interval_out_of_range());
     }

@@ -1,6 +1,6 @@
 //! DCH_from_char consumer + DCH_datetime_type (formatting.c:3165-3831).
-//! C-locale English names only; `TM`/localized names and `TZ`/`tz` named-zone
-//! lookup loudly panic (their sibling subsystems are unported here).
+//! C-locale English names only; `TM`/localized names loudly panic (the locale
+//! subsystem is unported here).
 
 use ::mcx::Mcx;
 use ::types_core::{InvalidOid, Oid};
@@ -28,9 +28,8 @@ fn tm_panic() -> ! {
     panic!("DCH TM/localized month-day names (cache_locale_time) not ported")
 }
 
-/// C: `TmFromChar` (formatting.c:440). The `pg_tz *tzp` / `char *abbrev` fields
-/// are omitted: the named-zone from_char path is unported and panics before it
-/// would set them.
+/// C: `TmFromChar` (formatting.c:440). `abbrev` is inline (max TOKMAXLEN
+/// bytes, the DecodeTimezoneAbbrevPrefix match cap) instead of C's pnstrdup.
 #[derive(Clone, Debug, Default)]
 pub struct TmFromChar {
     pub mode: FromCharDateMode,
@@ -59,6 +58,9 @@ pub struct TmFromChar {
     pub ff: i32,
     pub has_tz: bool,
     pub gmtoffset: i32,
+    pub tzp: Option<&'static ::adt_datetime::tz::PgTz>,
+    pub abbrev: [u8; ::adt_datetime::TOKMAXLEN],
+    pub abbrev_len: u8,
 }
 
 fn skip_thth(cur: &mut FromCharCursor, suffix: u8) {
@@ -313,10 +315,39 @@ pub fn dch_from_char<'mcx>(
             DCH_TZ_LOWER | DCH_TZ | DCH_OF => {
                 let mut fell_through = key_id == DCH_OF;
                 if key_id == DCH_TZ_LOWER || key_id == DCH_TZ {
-                    if cur.cur().is_ascii_alphabetic() {
-                        panic!("DCH TZ/tz named-zone from_char (DecodeTimezoneAbbrevPrefix) not ported");
+                    let mut gmtoffset = 0i32;
+                    let mut tzp = None;
+                    let tzlen = ::adt_datetime::DecodeTimezoneAbbrevPrefix(
+                        cur.rest(),
+                        &mut gmtoffset,
+                        &mut tzp,
+                    );
+                    if tzlen > 0 {
+                        out.has_tz = true;
+                        out.gmtoffset = gmtoffset;
+                        out.tzp = tzp;
+                        if tzp.is_some() {
+                            out.abbrev[..tzlen as usize]
+                                .copy_from_slice(&cur.rest()[..tzlen as usize]);
+                            out.abbrev_len = tzlen as u8;
+                        }
+                        out.tzsign = 0;
+                        cur.pos += tzlen as usize;
+                    } else if cur.cur().is_ascii_alphabetic() {
+                        errsave(
+                            escontext.as_deref_mut(),
+                            PgError::error(format!(
+                                "invalid value \"{}\" for \"{}\"",
+                                String::from_utf8_lossy(cur.rest()),
+                                node_name
+                            ))
+                            .with_sqlstate(ERRCODE_INVALID_DATETIME_FORMAT)
+                            .with_detail("Time zone abbreviation is not recognized."),
+                        )?;
+                        return Ok(false);
+                    } else {
+                        fell_through = true;
                     }
-                    fell_through = true;
                 }
                 if fell_through {
                     if cur.cur() == b'+' || cur.cur() == b'-' || cur.cur() == b' ' {

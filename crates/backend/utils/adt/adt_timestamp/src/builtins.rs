@@ -3,14 +3,14 @@
 //! finite, timestamp[tz] +/- interval, timestamp_mi, timestamp[tz]_bin
 //! 6177/6178) live in adt_date's table; this file adds only the rows
 //! adt_date lacks (typmod I/O, part/trunc, age, izone, make_interval,
-//! overlaps_timestamp 1304/2041, date_add/date_subtract 6221/6223,
+//! overlaps_timestamp 1304/2041, date_add/date_subtract 6221-6223/6273,
 //! generate_series_timestamp[tz][_at_zone] 938/939/6274 + prosupport 6354,
-//! float8_timestamptz 1158). Not registrable (established precedents):
-//! interval aggregates (agg frame), timestamptz_float8 (float lane),
-//! timestamp typmodin/typmodout 2905-2908, timestamp_support /
-//! interval_support / timestamp_sortsupport 3137 / skipsupport (planner
-//! nodes), to_timestamp 1778, pg_postmaster_start_time/pg_conf_load_time
-//! (backend globals), timestamptz_pl/mi_interval_at_zone 6449-6452.
+//! float8_timestamptz 1158, timestamp typmodin/typmodout 2905-2908,
+//! interval_support 3918, interval avg/sum aggregates 1843/1844/3325/3549/
+//! 6324-6326). Not registrable (established precedents): timestamptz_float8
+//! (float lane), timestamp_support 3917 / timestamp_sortsupport 3137 /
+//! skipsupport (planner nodes), to_timestamp 1778,
+//! pg_postmaster_start_time/pg_conf_load_time (backend globals).
 
 use ::datum::{Datum, Varlena, VarlenaRef};
 use ::types_core::{Oid, CSTRINGOID};
@@ -391,8 +391,14 @@ fn interval_result(fcinfo: &mut Fcinfo, iv: Interval) -> PgResult<Datum> {
     byref_result(fcinfo.result_mcx(), &img)
 }
 
-// ArrayGetIntegerTypmods (arrayutils.c) over the _cstring argument.
-fn array_get_integer_typmods(fcinfo: &Fcinfo, out: &mut [i32; 8]) -> PgResult<usize> {
+// ArrayGetIntegerTypmods (arrayutils.c) over the _cstring argument. C has no
+// element cap; `cap_msg` is the caller's own too-many-modifiers error, which
+// C would raise one frame up.
+pub fn array_get_integer_typmods(
+    fcinfo: &Fcinfo,
+    out: &mut [i32; 8],
+    cap_msg: &'static str,
+) -> PgResult<usize> {
     // SAFETY: strict fn — arg 0 is a non-null, detoasted cstring[] datum.
     let image = unsafe { VarlenaRef::from_ptr(fcinfo.arg_ptr(0)) }.as_bytes();
     let rd = |off: usize| i32::from_ne_bytes(image[off..off + 4].try_into().unwrap());
@@ -417,7 +423,7 @@ fn array_get_integer_typmods(fcinfo: &Fcinfo, out: &mut [i32; 8]) -> PgResult<us
     let n = rd(16) as usize;
     if n > out.len() {
         return Err(Box::new(
-            PgError::error("invalid INTERVAL type modifier")
+            PgError::error(cap_msg)
                 .with_sqlstate(::types_error::ERRCODE_INVALID_PARAMETER_VALUE),
         ));
     }
@@ -438,7 +444,7 @@ fn array_get_integer_typmods(fcinfo: &Fcinfo, out: &mut [i32; 8]) -> PgResult<us
 
 pub fn fc_intervaltypmodin(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let mut tl = [0i32; 8];
-    let n = array_get_integer_typmods(fcinfo, &mut tl)?;
+    let n = array_get_integer_typmods(fcinfo, &mut tl, "invalid INTERVAL type modifier")?;
     Ok(Datum::from_i32(crate::interval::intervaltypmodin(&tl[..n])?))
 }
 
@@ -456,6 +462,317 @@ pub fn fc_intervaltypmodout(
         buf[len] = 0;
         Ok(Datum::from_usize(buf.as_ptr() as usize))
     })
+}
+
+fn anytimestamp_typmodin(fcinfo: &Fcinfo, istz: bool) -> PgResult<Datum> {
+    let mut tl = [0i32; 8];
+    let n = array_get_integer_typmods(fcinfo, &mut tl, "invalid type modifier")?;
+    if n != 1 {
+        return Err(Box::new(
+            PgError::error("invalid type modifier")
+                .with_sqlstate(::types_error::ERRCODE_INVALID_PARAMETER_VALUE),
+        ));
+    }
+    Ok(Datum::from_i32(crate::anytimestamp_typmod_check(istz, tl[0])?))
+}
+
+pub fn fc_timestamptypmodin(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    anytimestamp_typmodin(fcinfo, false)
+}
+
+pub fn fc_timestamptztypmodin(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    anytimestamp_typmodin(fcinfo, true)
+}
+
+pub fn typmod_paren_suffix_out(typmod: i32, suffix: &[u8], buf: &mut [u8]) -> usize {
+    let mut len = 0;
+    if typmod >= 0 {
+        buf[len] = b'(';
+        len += 1;
+        let mut digits = [0u8; 10];
+        let mut n = 0;
+        let mut p = typmod as u32;
+        loop {
+            digits[n] = b'0' + (p % 10) as u8;
+            n += 1;
+            p /= 10;
+            if p == 0 {
+                break;
+            }
+        }
+        for i in (0..n).rev() {
+            buf[len] = digits[i];
+            len += 1;
+        }
+        buf[len] = b')';
+        len += 1;
+    }
+    buf[len..len + suffix.len()].copy_from_slice(suffix);
+    len + suffix.len()
+}
+
+fn anytimestamp_typmodout(fcinfo: &mut Fcinfo, istz: bool) -> PgResult<Datum> {
+    let typmod = fcinfo.arg_i32(0);
+    let tz: &[u8] = if istz { b" with time zone" } else { b" without time zone" };
+    OUT_SCRATCH.with(|c| {
+        // SAFETY: single-threaded backend; the sole live access is this call.
+        let buf = unsafe { &mut *c.get() };
+        let len = typmod_paren_suffix_out(typmod, tz, buf);
+        buf[len] = 0;
+        Ok(Datum::from_usize(buf.as_ptr() as usize))
+    })
+}
+
+pub fn fc_timestamptypmodout(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    anytimestamp_typmodout(fcinfo, false)
+}
+
+pub fn fc_timestamptztypmodout(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    anytimestamp_typmodout(fcinfo, true)
+}
+
+pub fn fc_timestamptz_pl_interval_at_zone(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let iv = arg_interval(fcinfo, 1);
+    // SAFETY: strict fn — arg 2 is a non-null text varlena.
+    let zone = unsafe { fcinfo.arg_varlena_packed(2)? };
+    let tzp = crate::lookup_timezone(zone.data())?;
+    Ok(Datum::from_i64(crate::interval::timestamptz_pl_interval_internal(
+        fcinfo.arg_i64(0),
+        &iv,
+        Some(tzp),
+    )?))
+}
+
+pub fn fc_timestamptz_mi_interval_at_zone(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let iv = arg_interval(fcinfo, 1);
+    // SAFETY: strict fn — arg 2 is a non-null text varlena.
+    let zone = unsafe { fcinfo.arg_varlena_packed(2)? };
+    let tzp = crate::lookup_timezone(zone.data())?;
+    Ok(Datum::from_i64(crate::interval::timestamptz_mi_interval_internal(
+        fcinfo.arg_i64(0),
+        &iv,
+        Some(tzp),
+    )?))
+}
+
+// interval_support (timestamp.c): SupportRequestSimplify only — an
+// interval_scale cast that cannot truncate becomes a RelabelType.
+pub fn fc_interval_support(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    use ::types_nodes::{supportnodes::SupportRequestSimplify, NodeTag};
+    use crate::interval::{intervaltypmodleastfield, INTERVAL_PRECISION};
+    let [a] = fcinfo.args_n::<1>();
+    let p = a.value.as_usize() as *const NodeTag;
+    // SAFETY: prosupport contract — arg points at a live tag-first node.
+    if unsafe { *p } != NodeTag::T_SupportRequestSimplify {
+        return Ok(Datum::from_usize(0));
+    }
+    // SAFETY: tag checked; the planner owns the request node for the call.
+    let req = unsafe { &*(a.value.as_usize() as *const SupportRequestSimplify) };
+    let fexpr = req
+        .fcall
+        .and_then(|n| n.as_func_expr())
+        .unwrap_or_else(|| panic!("interval_support: SupportRequestSimplify without a FuncExpr"));
+    assert!(fexpr.args.len() >= 2);
+    let Some(c) = fexpr.args.nth(1).as_const() else {
+        return Ok(Datum::from_usize(0));
+    };
+    if c.constisnull {
+        return Ok(Datum::from_usize(0));
+    }
+    let source = fexpr.args.nth(0);
+    let new_typmod = c.constvalue.as_i32();
+    let noop = if new_typmod < 0 {
+        true
+    } else {
+        let old_typmod = nodes_core::expr_typmod(source);
+        let old_least_field = intervaltypmodleastfield(old_typmod);
+        let new_least_field = intervaltypmodleastfield(new_typmod);
+        let old_precis = if old_typmod < 0 {
+            crate::interval::INTERVAL_FULL_PRECISION
+        } else {
+            INTERVAL_PRECISION(old_typmod)
+        };
+        let new_precis = INTERVAL_PRECISION(new_typmod);
+        new_least_field <= old_least_field
+            && (old_least_field > 0
+                || new_precis >= adt_datetime::MAX_INTERVAL_PRECISION
+                || new_precis >= old_precis)
+    };
+    if noop {
+        let mcx = req.mcx.expect("interval_support: request carries an mcx");
+        let ret = nodes_core::relabel_to_typmod(mcx, source, new_typmod)?;
+        return Ok(Datum::from_usize(ret.as_raw().as_ptr() as usize));
+    }
+    Ok(Datum::from_usize(0))
+}
+
+// The state lives in the agg context (the numeric agg_state_arg precedent).
+fn interval_agg_state_arg(
+    fcinfo: &Fcinfo,
+    arg0: ::datum::NullableDatum,
+) -> PgResult<*mut crate::interval::IntervalAggState> {
+    use crate::interval::IntervalAggState;
+    const { assert!(!core::mem::needs_drop::<IntervalAggState>()) }
+    // SAFETY: context, if set, is the evaltrans build's AggStateNode, live
+    // across every call through this frame.
+    let Some(agg_mcx) = (unsafe { fcinfo.agg_context() }) else {
+        return Err(Box::new(PgError::error("aggregate function called in non-aggregate context")));
+    };
+    if !arg0.isnull {
+        return Ok(arg0.value.as_usize() as *mut IntervalAggState);
+    }
+    let layout = core::alloc::Layout::new::<IntervalAggState>();
+    let raw = ::mcx::Allocator::allocate(&agg_mcx, layout).map_err(|_| agg_mcx.oom(layout.size()))?;
+    let p = raw.cast::<IntervalAggState>().as_ptr();
+    // SAFETY: fresh allocation of the exact layout.
+    unsafe { p.write(IntervalAggState::default()) };
+    Ok(p)
+}
+
+pub fn fc_interval_avg_accum(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let [a, b] = *fcinfo.args_n::<2>();
+    let state = interval_agg_state_arg(fcinfo, a)?;
+    if !b.isnull {
+        let iv = arg_interval(fcinfo, 1);
+        // SAFETY: a non-null arg0 is the aggcontext-lived state this transfn
+        // chain returned; no other reference is live during the call.
+        unsafe { crate::interval::do_interval_accum(&mut *state, &iv)? };
+    }
+    Ok(Datum::from_usize(state as usize))
+}
+
+pub fn fc_interval_avg_accum_inv(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let [a, b] = *fcinfo.args_n::<2>();
+    if a.isnull {
+        panic!("interval_avg_accum_inv called with NULL state");
+    }
+    let state = a.value.as_usize() as *mut crate::interval::IntervalAggState;
+    if !b.isnull {
+        let iv = arg_interval(fcinfo, 1);
+        // SAFETY: as fc_interval_avg_accum.
+        unsafe { crate::interval::do_interval_discard(&mut *state, &iv)? };
+    }
+    Ok(Datum::from_usize(state as usize))
+}
+
+pub fn fc_interval_avg_combine(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let [a, b] = *fcinfo.args_n::<2>();
+    if b.isnull {
+        // C PG_RETURN_POINTER(state1): a possibly-NULL pointer, isnull unset.
+        if a.isnull {
+            fcinfo.return_null();
+        }
+        return Ok(a.value);
+    }
+    // SAFETY: a non-null state arg is the aggcontext-lived state; state2 is
+    // read-only here.
+    let state2 = unsafe { &*(b.value.as_usize() as *const crate::interval::IntervalAggState) };
+    let state1 = interval_agg_state_arg(fcinfo, a)?;
+    if a.isnull {
+        // SAFETY: fresh aggcontext allocation from interval_agg_state_arg.
+        unsafe { *state1 = *state2 };
+    } else {
+        // SAFETY: as fc_interval_avg_accum.
+        unsafe { crate::interval::interval_agg_combine(&mut *state1, state2)? };
+    }
+    Ok(Datum::from_usize(state1 as usize))
+}
+
+macro_rules! fc_interval_agg_final {
+    ($($fc:ident: $core:ident;)*) => {$(
+        pub fn $fc(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+            let a = fcinfo.args_n::<1>()[0];
+            if a.isnull {
+                return Ok(fcinfo.return_null());
+            }
+            // SAFETY: a non-null arg0 is the aggcontext-lived state (transfn
+            // contract); read-only here.
+            let state = unsafe { &*(a.value.as_usize() as *const crate::interval::IntervalAggState) };
+            match crate::interval::$core(state)? {
+                None => Ok(fcinfo.return_null()),
+                Some(iv) => interval_result(fcinfo, iv),
+            }
+        }
+    )*};
+}
+
+fc_interval_agg_final! {
+    fc_interval_avg: interval_avg_final;
+    fc_interval_sum: interval_sum_final;
+}
+
+pub fn fc_interval_avg_serialize(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let a = fcinfo.args_n::<1>()[0];
+    // SAFETY: strict fn — arg 0 is the aggcontext-lived state.
+    let state = unsafe { &*(a.value.as_usize() as *const crate::interval::IntervalAggState) };
+    let mut img = [0u8; 40];
+    img[..8].copy_from_slice(&state.N.to_be_bytes());
+    img[8..16].copy_from_slice(&state.sumX.time.to_be_bytes());
+    img[16..20].copy_from_slice(&state.sumX.day.to_be_bytes());
+    img[20..24].copy_from_slice(&state.sumX.month.to_be_bytes());
+    img[24..32].copy_from_slice(&state.pInfcount.to_be_bytes());
+    img[32..].copy_from_slice(&state.nInfcount.to_be_bytes());
+    let mcx = fcinfo.result_mcx();
+    let mut image: ::mcx::PgVec<'_, u8> = ::mcx::vec_with_capacity_in(mcx, 4 + img.len())?;
+    ::mcx::vec_append_bytes(&mut image, &[0u8; 4])?;
+    ::mcx::vec_append_bytes(&mut image, &img)?;
+    Ok(varlena_result(Varlena::from_image(image)))
+}
+
+pub fn fc_interval_avg_deserialize(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    use crate::interval::IntervalAggState;
+    // SAFETY: agg deserialize contract — only reached inside an aggregate.
+    if unsafe { fcinfo.agg_context() }.is_none() {
+        return Err(Box::new(PgError::error("aggregate function called in non-aggregate context")));
+    }
+    // SAFETY: strict fn — arg 0 is a non-null bytea varlena.
+    let sstate = unsafe { fcinfo.arg_varlena_packed(0)? };
+    let d = sstate.data();
+    let rd8 = |off: usize| i64::from_be_bytes(d[off..off + 8].try_into().unwrap());
+    let rd4 = |off: usize| i32::from_be_bytes(d[off..off + 4].try_into().unwrap());
+    let state = IntervalAggState {
+        N: rd8(0),
+        sumX: Interval { time: rd8(8), day: rd4(16), month: rd4(20) },
+        pInfcount: rd8(24),
+        nInfcount: rd8(32),
+    };
+    let mcx = fcinfo.result_mcx();
+    let layout = core::alloc::Layout::new::<IntervalAggState>();
+    let raw = ::mcx::Allocator::allocate(&mcx, layout).map_err(|_| mcx.oom(layout.size()))?;
+    let p = raw.cast::<IntervalAggState>().as_ptr();
+    // SAFETY: fresh allocation of the exact layout.
+    unsafe { p.write(state) };
+    Ok(Datum::from_usize(p as usize))
 }
 
 pub fn fc_make_interval(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
@@ -821,6 +1138,20 @@ pub const TIMESTAMP_BUILTINS: &[FmgrBuiltin] = &[
     b(2070, "timestamp_izone", 2, fc_timestamp_izone),
     b(2903, "intervaltypmodin", 1, fc_intervaltypmodin),
     b(2904, "intervaltypmodout", 1, fc_intervaltypmodout),
+    b(2905, "timestamptypmodin", 1, fc_timestamptypmodin),
+    b(2906, "timestamptypmodout", 1, fc_timestamptypmodout),
+    b(2907, "timestamptztypmodin", 1, fc_timestamptztypmodin),
+    b(2908, "timestamptztypmodout", 1, fc_timestamptztypmodout),
+    b(3918, "interval_support", 1, fc_interval_support),
+    bn(1843, "interval_avg_accum", 2, fc_interval_avg_accum),
+    bn(1844, "interval_avg", 1, fc_interval_avg),
+    bn(3325, "interval_avg_combine", 2, fc_interval_avg_combine),
+    bn(3549, "interval_avg_accum_inv", 2, fc_interval_avg_accum_inv),
+    bn(6326, "interval_sum", 1, fc_interval_sum),
+    b(6324, "interval_avg_serialize", 1, fc_interval_avg_serialize),
+    b(6325, "interval_avg_deserialize", 2, fc_interval_avg_deserialize),
+    b(6222, "timestamptz_pl_interval_at_zone", 3, fc_timestamptz_pl_interval_at_zone),
+    b(6273, "timestamptz_mi_interval_at_zone", 3, fc_timestamptz_mi_interval_at_zone),
     b(3464, "make_interval", 7, fc_make_interval),
     b(6204, "extract_interval", 2, fc_extract_interval),
     b(6221, "timestamptz_pl_interval", 2, fc_timestamptz_pl_interval),
