@@ -502,10 +502,9 @@ fn markTargetListOrigin<'mcx>(
             }
         }
         RTEKind::RTE_CTE => {
-            // search/cycle extra columns and self-references are dead here
-            // (the recursive lane is loud upstream).
-            debug_assert!(!rte.self_reference);
-            if attnum != 0 {
+            // search/cycle extra columns are dead here (loud in the grammar);
+            // a self-reference has no analyzed subquery to copy up from.
+            if attnum != 0 && !rte.self_reference {
                 let cte_node = parse_relation::GetCTEForRTE(pstate, rte, netlevelsup);
                 let tl = &cte_node
                     .as_common_table_expr()
