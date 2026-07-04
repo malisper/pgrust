@@ -1742,6 +1742,7 @@ dependencies = [
  "types_rel",
  "types_slot",
  "types_tuple",
+ "xact_seams",
 ]
 
 [[package]]

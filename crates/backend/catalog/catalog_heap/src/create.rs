@@ -243,16 +243,15 @@ fn AddNewRelationTuple<'mcx>(
     InsertPgClassTuple(mcx, pg_class_desc, &form, new_rel_desc.rd_att.natts as i16, new_rel_oid)
 }
 
-pub fn insert_pg_attribute_tuple<'mcx>(
+fn form_pg_attribute_tuple<'mcx>(
     mcx: Mcx<'mcx>,
     pg_attribute_rel: &Relation<'mcx>,
     attrs: &FormData_pg_attribute,
     new_rel_oid: Oid,
-    indstate: &mut catalog_indexing::CatalogIndexState<'mcx>,
-) -> PgResult<()> {
+) -> PgResult<heaptuple::HeapTuple<'mcx>> {
     let mut values = [Datum::null(); Natts_pg_attribute];
     let mut nulls = [false; Natts_pg_attribute];
-    values[0] = Datum::from_oid(new_rel_oid);
+    values[0] = Datum::from_oid(if new_rel_oid != InvalidOid { new_rel_oid } else { attrs.attrelid });
     values[1] = name_datum(&attrs.attname);
     values[2] = Datum::from_oid(attrs.atttypid);
     values[3] = Datum::from_i16(attrs.attlen);
@@ -277,8 +276,47 @@ pub fn insert_pg_attribute_tuple<'mcx>(
         *n = true;
     }
 
-    let mut tup = heaptuple::heap_form_tuple(mcx, pg_attribute_rel.descr(), &values, &nulls)?;
-    catalog_indexing::CatalogTupleInsertWithInfo(mcx, pg_attribute_rel, &mut tup, indstate)
+    heaptuple::heap_form_tuple(mcx, pg_attribute_rel.descr(), &values, &nulls)
+}
+
+// InsertPgAttributeTuples (heap.c): batches of Heap2 MULTI_INSERT records.
+// FormExtraData (attstattarget/attoptions) unported — all call sites pass NULL.
+pub fn InsertPgAttributeTuples<'mcx>(
+    mcx: Mcx<'mcx>,
+    pg_attribute_rel: &Relation<'mcx>,
+    attrs: &[FormData_pg_attribute],
+    new_rel_oid: Oid,
+    indstate: Option<&mut catalog_indexing::CatalogIndexState<'mcx>>,
+) -> PgResult<()> {
+    // C sizeof(FormData_pg_attribute) == 100; Rust layout may differ.
+    let nslots = attrs
+        .len()
+        .min(catalog_indexing::MAX_CATALOG_MULTI_INSERT_BYTES / 100)
+        .max(1);
+    let mut opened = None;
+    let indstate = match indstate {
+        Some(st) => st,
+        None => {
+            opened = Some(catalog_indexing::CatalogOpenIndexes(mcx, pg_attribute_rel)?);
+            opened.as_mut().unwrap()
+        }
+    };
+    for chunk in attrs.chunks(nslots) {
+        let mut tuples = std::vec::Vec::with_capacity(chunk.len());
+        for att in chunk {
+            tuples.push(form_pg_attribute_tuple(mcx, pg_attribute_rel, att, new_rel_oid)?);
+        }
+        catalog_indexing::CatalogTuplesMultiInsertWithInfo(
+            mcx,
+            pg_attribute_rel,
+            tuples,
+            indstate,
+        )?;
+    }
+    if let Some(st) = opened {
+        catalog_indexing::CatalogCloseIndexes(st)?;
+    }
+    Ok(())
 }
 
 fn AddNewAttributeTuples<'mcx>(
@@ -290,10 +328,16 @@ fn AddNewAttributeTuples<'mcx>(
     let rel = table::table_open(mcx, ATTRIBUTE_RELATION_ID, RowExclusiveLock)?;
     let mut indstate = catalog_indexing::CatalogOpenIndexes(mcx, &rel)?;
 
+    InsertPgAttributeTuples(
+        mcx,
+        &rel,
+        &tupdesc.attrs[..tupdesc.natts as usize],
+        new_rel_oid,
+        Some(&mut indstate),
+    )?;
+
     for i in 0..tupdesc.natts as usize {
         let att = &tupdesc.attrs[i];
-        insert_pg_attribute_tuple(mcx, &rel, att, new_rel_oid, &mut indstate)?;
-
         let myself = ObjectAddress::sub_set(RELATION_RELATION_ID, new_rel_oid, i as i32 + 1);
         let referenced = ObjectAddress::set(TYPE_RELATION_ID, att.atttypid);
         pg_depend::recordDependencyOn(
@@ -314,9 +358,7 @@ fn AddNewAttributeTuples<'mcx>(
     }
 
     if relkind != RELKIND_VIEW && relkind != RELKIND_COMPOSITE_TYPE {
-        for att in SysAtt.iter() {
-            insert_pg_attribute_tuple(mcx, &rel, att, new_rel_oid, &mut indstate)?;
-        }
+        InsertPgAttributeTuples(mcx, &rel, &SysAtt, new_rel_oid, Some(&mut indstate))?;
     }
 
     catalog_indexing::CatalogCloseIndexes(indstate)?;
