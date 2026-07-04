@@ -10,9 +10,9 @@ use adt_acl::{
     ACL_MAINTAIN, ACL_MODECHG_ADD, ACL_MODECHG_DEL, ACL_NO_RIGHTS, ACL_REFERENCES, ACL_SELECT,
     ACL_SET, ACL_TRIGGER, ACL_TRUNCATE, ACL_UPDATE, ACL_USAGE,
 };
-use cache_syscache::cacheinfo::{ATTNAME, ATTNUM, RELOID};
+use cache_syscache::cacheinfo::{ATTNAME, ATTNUM, PARAMETERACLOID, RELOID};
 use cache_syscache::{
-    ReleaseSysCache, SearchSysCache2, SearchSysCacheLocked1, SysCacheGetAttr,
+    ReleaseSysCache, SearchSysCache1, SearchSysCache2, SearchSysCacheLocked1, SysCacheGetAttr,
     SysCacheGetAttrNotNull, SysCacheKey,
 };
 use datum::Datum;
@@ -21,7 +21,7 @@ use types_core::catalog::{
     ATTRIBUTE_RELATION_ID, DATABASE_RELATION_ID, LANGUAGE_RELATION_ID, NAMESPACE_RELATION_ID,
     PROCEDURE_RELATION_ID, RELATION_RELATION_ID, TYPE_RELATION_ID,
 };
-use types_core::Oid;
+use types_core::{Oid, OidIsValid};
 use types_error::{
     PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_GRANT_OPERATION,
     ERRCODE_SYNTAX_ERROR, ERRCODE_WARNING_PRIVILEGE_NOT_GRANTED,
@@ -202,9 +202,9 @@ fn restrict_and_check_grant(
         ObjectType::OBJECT_SCHEMA => ACL_ALL_RIGHTS_SCHEMA,
         ObjectType::OBJECT_TABLESPACE => ACL_ALL_RIGHTS_TABLESPACE,
         ObjectType::OBJECT_TYPE => ACL_ALL_RIGHTS_TYPE,
+        ObjectType::OBJECT_PARAMETER_ACL => ACL_ALL_RIGHTS_PARAMETER_ACL,
         other => panic!(
-            "restrict_and_check_grant (aclchk.c): object type {} arm unported \
-             (fdw/parameter lanes)",
+            "restrict_and_check_grant (aclchk.c): object type {} arm unported (fdw lanes)",
             other as i32
         ),
     };
@@ -292,7 +292,7 @@ pub fn ExecuteGrantStmt<'mcx>(mcx: Mcx<'mcx>, stmt: &GrantStmt<'_>) -> PgResult<
 
     let objects = match stmt.targtype {
         GrantTargetType::ACL_TARGET_OBJECT => {
-            object_names_to_oids(mcx, stmt.objtype, &stmt.objects)?
+            object_names_to_oids(mcx, stmt.objtype, &stmt.objects, stmt.is_grant)?
         }
         other => panic!(
             "ExecuteGrantStmt (aclchk.c): targtype {} unported (ALL ... IN SCHEMA lane)",
@@ -395,8 +395,9 @@ fn exec_grant_stmt_oids<'mcx>(mcx: Mcx<'mcx>, istmt: &mut InternalGrant<'_, '_>)
         ObjectType::OBJECT_LARGEOBJECT => exec_grant_largeobject(mcx, istmt),
         ObjectType::OBJECT_SCHEMA => exec_grant_common(mcx, istmt, &CLASS_NAMESPACE, None),
         ObjectType::OBJECT_TABLESPACE => exec_grant_common(mcx, istmt, &CLASS_TABLESPACE, None),
+        ObjectType::OBJECT_PARAMETER_ACL => exec_grant_parameter(mcx, istmt),
         other => panic!(
-            "ExecGrantStmt_oids (aclchk.c): objtype {} unported (fdw/parameter lanes)",
+            "ExecGrantStmt_oids (aclchk.c): objtype {} unported (fdw lanes)",
             other as i32
         ),
     }
@@ -410,6 +411,7 @@ fn object_names_to_oids<'mcx>(
     mcx: Mcx<'mcx>,
     objtype: ObjectType,
     objnames: &types_nodes::list::NodeList<'_>,
+    is_grant: bool,
 ) -> PgResult<PgVec<'mcx, Oid>> {
     let mut objects: PgVec<'mcx, Oid> = mcx::vec_with_capacity_in(mcx, objnames.len())?;
     match objtype {
@@ -512,8 +514,23 @@ fn object_names_to_oids<'mcx>(
                 objects.push(oid);
             }
         }
+        ObjectType::OBJECT_PARAMETER_ACL => {
+            // A GUC rides as its pg_parameter_acl OID, manufactured on GRANT;
+            // REVOKE skips GUCs without a row (no privileges to remove).
+            for cell in objnames.iter() {
+                let parameter = cell.as_string().expect("parameter name").sval;
+                let mut parameter_id = pg_parameter_acl::ParameterAclLookup(parameter, true)?;
+                if !OidIsValid(parameter_id) && is_grant {
+                    parameter_id = pg_parameter_acl::ParameterAclCreate(mcx, parameter)?;
+                    xact::CommandCounterIncrement()?;
+                }
+                if OidIsValid(parameter_id) {
+                    objects.push(parameter_id);
+                }
+            }
+        }
         other => panic!(
-            "objectNamesToOids (aclchk.c): objtype {} unported (tablespace/fdw/parameter lanes)",
+            "objectNamesToOids (aclchk.c): objtype {} unported (fdw lanes)",
             other as i32
         ),
     }
@@ -1374,6 +1391,139 @@ fn exec_grant_largeobject<'mcx>(mcx: Mcx<'mcx>, istmt: &mut InternalGrant<'_, '_
         )?;
 
         genam::systable_endscan(mcx, scan)?;
+
+        xact::CommandCounterIncrement()?;
+    }
+
+    relation.close(RowExclusiveLock)?;
+    Ok(())
+}
+
+fn text_attr(d: Datum) -> String {
+    use types_tuple::varatt;
+    let p = d.as_usize() as *const u8;
+    // SAFETY: non-null text attr datum inside a held catalog tuple; length is
+    // read from its own varlena header before slicing.
+    unsafe {
+        if varatt::varatt_is_1b_e(p) || (!varatt::varatt_is_1b(p) && !varatt::varatt_is_4b_u(p)) {
+            panic!("ExecGrant_Parameter: compressed/external parname varlena — detoast gap");
+        }
+        let (off, len) = if varatt::varatt_is_1b(p) {
+            (varatt::VARHDRSZ_SHORT, varatt::varsize_1b(p) - varatt::VARHDRSZ_SHORT)
+        } else {
+            (varatt::VARHDRSZ, varatt::varsize_4b(p) - varatt::VARHDRSZ)
+        };
+        String::from_utf8_lossy(core::slice::from_raw_parts(p.add(off), len)).into_owned()
+    }
+}
+
+// ExecGrant_Parameter (aclchk.c). recordExtensionInitPriv: no-op outside
+// CREATE EXTENSION, which is unported.
+fn exec_grant_parameter<'mcx>(mcx: Mcx<'mcx>, istmt: &mut InternalGrant<'_, '_>) -> PgResult<()> {
+    use pg_parameter_acl::{
+        Anum_pg_parameter_acl_paracl, Anum_pg_parameter_acl_parname, Natts_pg_parameter_acl,
+    };
+
+    if istmt.all_privs && istmt.privileges == ACL_NO_RIGHTS {
+        istmt.privileges = ACL_ALL_RIGHTS_PARAMETER_ACL;
+    }
+
+    let relation = table::table_open(mcx, catalog::ParameterAclRelationId, RowExclusiveLock)?;
+
+    for i in 0..istmt.objects.len() {
+        let parameter_id = istmt.objects[i];
+        let Some(tuple) =
+            SearchSysCache1(PARAMETERACLOID, SysCacheKey::Value(Datum::from_oid(parameter_id)))?
+        else {
+            return Err(Box::new(PgError::error(format!(
+                "cache lookup failed for parameter ACL {parameter_id}"
+            ))));
+        };
+
+        let parname = text_attr(SysCacheGetAttrNotNull(
+            PARAMETERACLOID,
+            &tuple,
+            Anum_pg_parameter_acl_parname,
+        )?);
+
+        // All parameters belong to the bootstrap superuser.
+        let owner_id = types_core::catalog::BOOTSTRAP_SUPERUSERID;
+
+        let (acl_datum, acl_is_null) =
+            SysCacheGetAttr(PARAMETERACLOID, &tuple, Anum_pg_parameter_acl_paracl)?;
+        let old_acl: PgVec<'mcx, AclItem> = if acl_is_null {
+            adt_acl::aclcopy(mcx, acldefault(AclObjectType::ParameterAcl, owner_id).as_slice())?
+        } else {
+            with_acl_datum(acl_datum, |acl| adt_acl::aclcopy(mcx, acl))?
+        };
+        let old_members: Option<PgVec<'mcx, Oid>> =
+            if acl_is_null { None } else { Some(aclmembers(mcx, &old_acl)?) };
+
+        let (grantor_id, avail_goptions) =
+            select_best_grantor(miscinit::GetUserId(), istmt.privileges, &old_acl, owner_id)?;
+
+        let this_privileges = restrict_and_check_grant(
+            istmt.is_grant,
+            avail_goptions,
+            istmt.all_privs,
+            istmt.privileges,
+            parameter_id,
+            grantor_id,
+            ObjectType::OBJECT_PARAMETER_ACL,
+            &parname,
+            0,
+            None,
+        )?;
+
+        let new_acl = merge_acl_with_grant(
+            mcx,
+            &old_acl,
+            istmt.is_grant,
+            istmt.grant_option,
+            istmt.behavior,
+            &istmt.grantees,
+            this_privileges,
+            grantor_id,
+            owner_id,
+        )?;
+        let new_members = aclmembers(mcx, &new_acl)?;
+
+        // A default-equal ACL row is degenerate: delete it instead.
+        if adt_acl::aclequal(&new_acl, acldefault(AclObjectType::ParameterAcl, owner_id).as_slice())
+        {
+            catalog_indexing::CatalogTupleDelete(&relation, &tuple.tuple().t_self)?;
+        } else {
+            let mut values = [Datum::null(); Natts_pg_parameter_acl];
+            let nulls = [false; Natts_pg_parameter_acl];
+            let mut replaces = [false; Natts_pg_parameter_acl];
+            let aidx = (Anum_pg_parameter_acl_paracl - 1) as usize;
+            let acl_img = acl_image(mcx, &new_acl)?;
+            values[aidx] = Datum::from_usize(acl_img.as_ptr() as usize);
+            replaces[aidx] = true;
+
+            let otid = tuple.tuple().t_self;
+            let mut newtuple = heaptuple::heap_modify_tuple(
+                mcx,
+                &tuple.tuple(),
+                relation.descr(),
+                &values,
+                &nulls,
+                &replaces,
+            )?;
+            catalog_indexing::CatalogTupleUpdate(mcx, &relation, &otid, &mut newtuple)?;
+        }
+
+        pg_depend::updateAclDependencies(
+            mcx,
+            catalog::ParameterAclRelationId,
+            parameter_id,
+            0,
+            owner_id,
+            old_members.as_deref().unwrap_or(&[]),
+            &new_members,
+        )?;
+
+        ReleaseSysCache(tuple);
 
         xact::CommandCounterIncrement()?;
     }

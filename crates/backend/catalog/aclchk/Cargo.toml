@@ -39,6 +39,7 @@ rel_vocab = { path = "../../../_support/types/rel_vocab" }
 elog = { path = "../../utils/error/elog" }
 
 pg_largeobject = { path = "../pg_largeobject" }
+pg_parameter_acl = { path = "../pg_parameter_acl" }
 snapmgr = { path = "../../utils/time/snapmgr" }
 guc_tables = { path = "../../utils/misc/guc_tables" }
 genam = { path = "../../access/index/genam" }
