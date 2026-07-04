@@ -197,6 +197,8 @@ fn walker<'w, 'mcx: 'w>(
         // result types; no dependency recorded).
         NodeTag::T_SQLValueFunction => Ok(()),
         NodeTag::T_BoolExpr => walk_list(&node.as_bool_expr().unwrap().args, context),
+        // C has no case for CoalesceExpr: expression_tree_walker walks args.
+        NodeTag::T_CoalesceExpr => walk_list(&node.as_coalesce_expr().unwrap().args, context),
         NodeTag::T_TargetEntry => walker(node.as_target_entry().unwrap().expr, context),
         NodeTag::T_RangeTblRef => Ok(()),
         NodeTag::T_Param => {

@@ -69,7 +69,9 @@ SELECT pg_typeof(id) FROM ju_a FULL JOIN ju_e USING (id) LIMIT 1;
 -- varchar/text typmod mix
 CREATE TABLE ju_f (name varchar(10), v int);
 INSERT INTO ju_f VALUES ('one', 111), ('four', 444);
+SET enable_hashjoin = off;
 SELECT * FROM ju_a JOIN ju_f USING (name) ORDER BY name;
+RESET enable_hashjoin;
 SELECT pg_typeof(name) FROM ju_a JOIN ju_f USING (name) LIMIT 1;
 -- errors: USING duplicates / missing / ambiguous
 SELECT * FROM ju_a JOIN ju_b USING (id, id);
