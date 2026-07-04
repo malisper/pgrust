@@ -1237,7 +1237,7 @@ fn make_fn_arguments<'mcx>(
                 Some(na) => Node::mk(
                     mcx,
                     NamedArgExpr {
-                        arg: coerce_one(na.arg)?,
+                        arg: Some(coerce_one(na.arg.expect("NamedArgExpr has an arg"))?),
                         name: na.name,
                         argnumber: na.argnumber,
                         location: na.location,
@@ -1394,7 +1394,10 @@ fn expr_location(node: Node<'_>) -> ParseLoc {
         }
         NodeTag::T_NamedArgExpr => {
             let na = node.as_named_arg_expr().unwrap();
-            leftmost(na.location, expr_location(na.arg))
+            leftmost(
+                na.location,
+                expr_location(na.arg.expect("NamedArgExpr has an arg")),
+            )
         }
         NodeTag::T_RelabelType => {
             let r = node.as_relabel_type().unwrap();
