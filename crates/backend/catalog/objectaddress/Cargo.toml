@@ -36,6 +36,7 @@ dbcommands_seams = { path = "../../commands/dbcommands_seams" }
 extension = { path = "../../commands/extension" }
 trigger = { path = "../../commands/trigger" }
 parse_oper = { path = "../../parser/parse_oper" }
+parse_func = { path = "../../parser/parse_func" }
 opclasscmds_seams = { path = "../../commands/opclasscmds_seams" }
 rewrite_define_seams = { path = "../../rewrite/rewrite_define_seams" }
 cache_syscache = { path = "../../utils/cache/cache_syscache" }

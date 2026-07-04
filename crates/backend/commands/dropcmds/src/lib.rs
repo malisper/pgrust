@@ -14,6 +14,8 @@ use types_nodes::rawnodes::TypeName;
 use types_nodes::{Node, NodeList};
 use types_rel::AccessExclusiveLock;
 
+const PROKIND_AGGREGATE: i8 = b'a' as i8;
+
 #[cold]
 #[inline(never)]
 fn unported(what: &str) -> ! {
@@ -121,6 +123,41 @@ fn does_not_exist_skipping(objtype: ObjectType, object: Node<'_>) -> PgResult<()
                 }
             }
         }
+        ObjectType::OBJECT_FUNCTION
+        | ObjectType::OBJECT_PROCEDURE
+        | ObjectType::OBJECT_ROUTINE
+        | ObjectType::OBJECT_AGGREGATE => {
+            let owa = object
+                .as_variant::<ObjectWithArgs>()
+                .expect("function object is an ObjectWithArgs");
+            match schema_does_not_exist_skipping(&owa.objname)? {
+                Some(msg) => msg,
+                None => match type_in_list_does_not_exist_skipping(&owa.objargs)? {
+                    Some(msg) => msg,
+                    None => {
+                        let noun = match objtype {
+                            ObjectType::OBJECT_PROCEDURE => "procedure",
+                            ObjectType::OBJECT_ROUTINE => "routine",
+                            ObjectType::OBJECT_AGGREGATE => "aggregate",
+                            _ => "function",
+                        };
+                        let mut args = String::new();
+                        for (i, n) in owa.objargs.iter().enumerate() {
+                            if i > 0 {
+                                args.push(',');
+                            }
+                            args.push_str(&catalog_objectaddress::TypeNameToString(
+                                n.as_variant::<TypeName>().expect("objargs holds TypeName nodes"),
+                            ));
+                        }
+                        format!(
+                            "{noun} {}({args}) does not exist, skipping",
+                            catalog_objectaddress::NameListToString(&owa.objname)
+                        )
+                    }
+                },
+            }
+        }
         ObjectType::OBJECT_OPERATOR => {
             let owa = object
                 .as_variant::<ObjectWithArgs>()
@@ -183,7 +220,20 @@ pub fn RemoveObjects<'mcx>(mcx: Mcx<'mcx>, stmt: &DropStmt<'mcx>) -> PgResult<()
         }
 
         if stmt.removeType == ObjectType::OBJECT_FUNCTION {
-            unported("RemoveObjects OBJECT_FUNCTION prokind gate");
+            // Historically DROP FUNCTION refuses aggregates.
+            if lsyscache::get_func_prokind(address.objectId)? == PROKIND_AGGREGATE {
+                let owa = object
+                    .as_variant::<ObjectWithArgs>()
+                    .expect("function object is an ObjectWithArgs");
+                return Err(Box::new(
+                    types_error::PgError::error(format!(
+                        "\"{}\" is an aggregate function",
+                        catalog_objectaddress::NameListToString(&owa.objname)
+                    ))
+                    .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE)
+                    .with_hint("Use DROP AGGREGATE to drop aggregate functions."),
+                ));
+            }
         }
 
         // C: namespace-owner shortcut, else check_object_ownership.

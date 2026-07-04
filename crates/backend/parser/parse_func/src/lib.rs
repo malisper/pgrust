@@ -17,6 +17,7 @@ use types_error::{
     ERRCODE_WRONG_OBJECT_TYPE, ERROR,
 };
 use types_nodes::primnodes::{Aggref, WindowFunc, AGGKIND_HYPOTHETICAL, AGGKIND_ORDERED_SET};
+use types_nodes::parsenodes::ObjectType;
 use types_nodes::rawnodes::FuncCall;
 use types_nodes::{CoercionForm, FuncExpr, Node, NodeList, NodeTag};
 
@@ -1360,7 +1361,7 @@ fn undefined_function(
 // LookupFuncNameInternal (parse_func.c), OBJECT_FUNCTION/OBJECT_ROUTINE
 // slice; include_out_arguments lanes (procedures) are unreachable here.
 fn lookup_func_name_internal(
-    ignore_procedures: bool,
+    objtype: ObjectType,
     parts: &[&str],
     nargs: i16,
     argtypes: &[Oid],
@@ -1373,8 +1374,15 @@ fn lookup_func_name_internal(
         if nargs > 0 && cand.args.as_slice()[..nargs as usize] != argtypes[..nargs as usize] {
             continue;
         }
-        if ignore_procedures && lsyscache::get_func_prokind(cand.oid)? == PROKIND_PROCEDURE {
-            continue;
+        let prokind = lsyscache::get_func_prokind(cand.oid)?;
+        match objtype {
+            ObjectType::OBJECT_FUNCTION | ObjectType::OBJECT_AGGREGATE
+                if prokind == PROKIND_PROCEDURE =>
+            {
+                continue
+            }
+            ObjectType::OBJECT_PROCEDURE if prokind != PROKIND_PROCEDURE => continue,
+            _ => {}
         }
         if OidIsValid(result) {
             return Ok(Err(true));
@@ -1421,7 +1429,7 @@ pub fn LookupFuncName(
 ) -> PgResult<Oid> {
     let mut buf = [""; 4];
     let parts = name_parts(funcname, &mut buf);
-    match lookup_func_name_internal(true, parts, nargs, argtypes)? {
+    match lookup_func_name_internal(ObjectType::OBJECT_FUNCTION, parts, nargs, argtypes)? {
         Ok(oid) => Ok(oid),
         Err(true) => Err(func_name_not_unique(parts)),
         Err(false) => {
@@ -1433,9 +1441,12 @@ pub fn LookupFuncName(
     }
 }
 
-// LookupFuncWithArgs (parse_func.c), OBJECT_FUNCTION slice over a grammar
-// ObjectWithArgs (objargs TypeNames; args_unspecified => any-arity lookup).
+// LookupFuncWithArgs (parse_func.c) over a grammar ObjectWithArgs (objargs
+// TypeNames; args_unspecified => any-arity lookup). Divergence: the
+// PROCEDURE/ROUTINE include_out_arguments second pass is not ported
+// (OUT-parameter procedures).
 pub fn LookupFuncWithArgs(
+    objtype: ObjectType,
     objname: &NodeList<'_>,
     objargs: &NodeList<'_>,
     args_unspecified: bool,
@@ -1443,10 +1454,12 @@ pub fn LookupFuncWithArgs(
 ) -> PgResult<Oid> {
     let argcount = objargs.len();
     if argcount > FUNC_MAX_ARGS {
+        let noun =
+            if objtype == ObjectType::OBJECT_PROCEDURE { "procedures" } else { "functions" };
         return Err(Box::new(
             ereport(ERROR)
                 .errcode(ERRCODE_TOO_MANY_ARGUMENTS)
-                .errmsg(format!("functions cannot have more than {FUNC_MAX_ARGS} arguments"))
+                .errmsg(format!("{noun} cannot have more than {FUNC_MAX_ARGS} arguments"))
                 .into_error(),
         ));
     }
@@ -1456,34 +1469,90 @@ pub fn LookupFuncWithArgs(
         let t = n
             .as_variant::<types_nodes::rawnodes::TypeName>()
             .expect("objargs holds TypeName nodes");
-        argoids[i] = parse_utilcmd::LookupTypeNameOid(scratch.mcx(), t)?;
+        argoids[i] = parse_utilcmd::LookupTypeNameOidExtended(scratch.mcx(), t, missing_ok)?;
+        if !OidIsValid(argoids[i]) {
+            debug_assert!(missing_ok);
+            return Ok(InvalidOid);
+        }
     }
     let nargs: i16 = if args_unspecified { -1 } else { argcount as i16 };
 
     let mut buf = [""; 4];
     let parts = name_parts(objname, &mut buf);
-    // With an arg list C disables the objtype filter (OBJECT_ROUTINE);
-    // args_unspecified keeps it (OBJECT_FUNCTION ignores procedures).
-    match lookup_func_name_internal(args_unspecified, parts, nargs, &argoids)? {
-        Ok(oid) => Ok(oid),
+    // With an argument list the objtype filter is disabled (OBJECT_ROUTINE):
+    // "object is of wrong type" beats "object doesn't exist".
+    let lookup_objtype =
+        if args_unspecified { objtype } else { ObjectType::OBJECT_ROUTINE };
+    match lookup_func_name_internal(lookup_objtype, parts, nargs, &argoids)? {
+        Ok(oid) => {
+            let prokind = lsyscache::get_func_prokind(oid)?;
+            match objtype {
+                ObjectType::OBJECT_FUNCTION if prokind == PROKIND_PROCEDURE => {
+                    Err(wrong_prokind("%s is not a function", parts, &argoids[..argcount])?)
+                }
+                ObjectType::OBJECT_PROCEDURE if prokind != PROKIND_PROCEDURE => {
+                    Err(wrong_prokind("%s is not a procedure", parts, &argoids[..argcount])?)
+                }
+                ObjectType::OBJECT_AGGREGATE if prokind != PROKIND_AGGREGATE => Err(wrong_prokind(
+                    "function %s is not an aggregate",
+                    parts,
+                    &argoids[..argcount],
+                )?),
+                _ => Ok(oid),
+            }
+        }
         Err(true) => Err(func_name_not_unique(parts)),
         Err(false) => {
             if missing_ok {
                 return Ok(InvalidOid);
             }
+            let (noun, named) = match objtype {
+                ObjectType::OBJECT_PROCEDURE => ("procedure", "a procedure"),
+                ObjectType::OBJECT_AGGREGATE => ("aggregate", "an aggregate"),
+                ObjectType::OBJECT_ROUTINE => ("routine", "a routine"),
+                _ => ("function", "a function"),
+            };
             if args_unspecified {
                 Err(Box::new(
                     ereport(ERROR)
                         .errcode(ERRCODE_UNDEFINED_FUNCTION)
                         .errmsg(format!(
-                            "could not find a function named \"{}\"",
+                            "could not find {named} named \"{}\"",
+                            name_list_to_string(parts)
+                        ))
+                        .into_error(),
+                ))
+            } else if objtype == ObjectType::OBJECT_AGGREGATE && argcount == 0 {
+                Err(Box::new(
+                    ereport(ERROR)
+                        .errcode(ERRCODE_UNDEFINED_FUNCTION)
+                        .errmsg(format!(
+                            "aggregate {}(*) does not exist",
                             name_list_to_string(parts)
                         ))
                         .into_error(),
                 ))
             } else {
-                Err(function_does_not_exist(parts, &argoids[..argcount])?)
+                Err(Box::new(
+                    ereport(ERROR)
+                        .errcode(ERRCODE_UNDEFINED_FUNCTION)
+                        .errmsg(format!(
+                            "{noun} {} does not exist",
+                            func_signature_string(parts, &argoids[..argcount])?
+                        ))
+                        .into_error(),
+                ))
             }
         }
     }
+}
+
+#[cold]
+fn wrong_prokind(template: &str, parts: &[&str], argtypes: &[Oid]) -> PgResult<Box<PgError>> {
+    Ok(Box::new(
+        ereport(ERROR)
+            .errcode(ERRCODE_WRONG_OBJECT_TYPE)
+            .errmsg(template.replacen("%s", &func_signature_string(parts, argtypes)?, 1))
+            .into_error(),
+    ))
 }

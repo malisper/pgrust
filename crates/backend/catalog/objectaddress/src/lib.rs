@@ -428,6 +428,24 @@ pub fn get_object_address<'mcx>(
             OBJECT_SCHEMA | OBJECT_EXTENSION => {
                 (get_object_address_unqualified(objtype, object, missing_ok)?, None)
             }
+            OBJECT_FUNCTION | OBJECT_PROCEDURE | OBJECT_ROUTINE | OBJECT_AGGREGATE => {
+                let owa = object
+                    .as_variant::<ObjectWithArgs>()
+                    .expect("function object is an ObjectWithArgs");
+                (
+                    ObjectAddress::set(
+                        ProcedureRelationId,
+                        parse_func::LookupFuncWithArgs(
+                            objtype,
+                            &owa.objname,
+                            &owa.objargs,
+                            owa.args_unspecified,
+                            missing_ok,
+                        )?,
+                    ),
+                    None,
+                )
+            }
             OBJECT_OPERATOR => {
                 let owa = object
                     .as_variant::<ObjectWithArgs>()
