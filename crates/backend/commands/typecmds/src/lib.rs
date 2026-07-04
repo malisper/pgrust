@@ -7,7 +7,7 @@
 use datum::Datum;
 use mcx::{Mcx, PgVec};
 use parser_small1::{make_parsestate, ParseExprKind, ParseState, PreColumnRefHook};
-use types_core::{AttrNumber, InvalidOid, Oid, NAMESPACE_RELATION_ID, TYPE_RELATION_ID};
+use types_core::{AttrNumber, InvalidOid, Oid, OidIsValid, NAMESPACE_RELATION_ID, TYPE_RELATION_ID};
 use types_error::{
     PgError, PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_DUPLICATE_OBJECT,
     ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INSUFFICIENT_PRIVILEGE,
@@ -210,10 +210,23 @@ pub fn DefineDomain<'mcx>(
     }
 
     let base_coll = base.typcollation;
-    if stmt.collClause.is_some() {
-        unported("DefineDomain (typecmds.c): COLLATE clause (get_collation_oid)");
+    let domaincoll = if let Some(cc) = stmt.collClause {
+        let cc = cc.as_collate_clause().expect("CollateClause");
+        catalog_namespace::get_collation_oid_list(&cc.collname, false)?
+    } else {
+        base_coll
+    };
+    if OidIsValid(domaincoll) && !OidIsValid(base_coll) {
+        return Err(domain_err(
+            pstate,
+            ERRCODE_DATATYPE_MISMATCH,
+            &format!(
+                "collations are not supported by type {}",
+                format_type::format_type_be(basetypeoid)?
+            ),
+            type_name.location,
+        ));
     }
-    let domaincoll = base_coll;
 
     if base.has_default {
         unported("DefineDomain (typecmds.c): inherited base-type typdefault");
