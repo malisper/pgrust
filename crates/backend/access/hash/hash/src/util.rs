@@ -1,6 +1,9 @@
 //! hashutil.c.
 
+use std::cell::RefCell;
+
 use ::datum::Datum;
+use ::mcx::{Mcx, MemoryContext};
 use ::types_core::{Oid, RegProcedure};
 use ::types_error::{PgError, PgResult, ERRCODE_INDEX_CORRUPTED};
 use ::types_fmgr::{FmgrInfo, LocalFcinfo};
@@ -51,25 +54,51 @@ pub fn hash_procinfo(rel: &Relation<'_>) -> PgResult<FmgrInfo> {
     Ok(fi)
 }
 
+thread_local! {
+    static HASH_PROC_SCRATCH: RefCell<MemoryContext> =
+        RefCell::new(MemoryContext::new("hash proc scratch"));
+}
+
 #[inline]
 fn invoke_hash_proc(finfo: &mut FmgrInfo, collation: Oid, key: Datum) -> PgResult<u32> {
     // Known-set kernel dispatch (rule 4): hashint4 is the M-workload column type.
     match finfo.fn_oid {
         450 => Ok(::hashfn::hash_bytes_uint32(key.as_i32() as u32)),
-        _ => {
-            let mut fcinfo = LocalFcinfo::<1>::new(0);
-            fcinfo.rearm(collation);
-            fcinfo.set_arg(0, key);
-            let r = finfo.invoke(&mut fcinfo)?;
-            if fcinfo.isnull {
-                return Err(Box::new(PgError::error(format!(
-                    "function {} returned NULL",
-                    finfo.fn_oid
-                ))));
+        _ => HASH_PROC_SCRATCH.with(|cell| match cell.try_borrow_mut() {
+            Ok(mut ctx) => {
+                ctx.reset();
+                invoke_hash_proc_slow(finfo, collation, key, ctx.mcx())
             }
-            Ok(r.as_u32())
-        }
+            Err(_) => {
+                let ctx = MemoryContext::new("hash proc scratch (reentrant)");
+                invoke_hash_proc_slow(finfo, collation, key, ctx.mcx())
+            }
+        }),
     }
+}
+
+// Toasted keys detoast into the armed scratch (C: CurrentMemoryContext); the
+// u32 result is by-val, so the copy dies with the reset on next acquisition.
+fn invoke_hash_proc_slow(
+    finfo: &mut FmgrInfo,
+    collation: Oid,
+    key: Datum,
+    mcx: Mcx<'_>,
+) -> PgResult<u32> {
+    let mut fcinfo = LocalFcinfo::<1>::new(0);
+    fcinfo.rearm(collation);
+    // SAFETY: the scratch context outlives the invoke; the by-val result
+    // carries no reference into it.
+    unsafe { fcinfo.set_result_mcx(mcx) };
+    fcinfo.set_arg(0, key);
+    let r = finfo.invoke(&mut fcinfo)?;
+    if fcinfo.isnull {
+        return Err(Box::new(PgError::error(format!(
+            "function {} returned NULL",
+            finfo.fn_oid
+        ))));
+    }
+    Ok(r.as_u32())
 }
 
 /// _hash_datum2hashkey.
