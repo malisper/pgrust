@@ -501,7 +501,35 @@ pub fn adjust_appendrel_attrs_multi<'mcx>(
             }
             NodeTag::T_Const => Ok(Some(Node::mk(mcx, *node.as_const().expect("Const"))?)),
             NodeTag::T_Param => Ok(Some(Node::mk(mcx, *node.as_param().expect("Param"))?)),
-            NodeTag::T_CurrentOfExpr | NodeTag::T_PlaceHolderVar => panic!(
+            NodeTag::T_PlaceHolderVar => {
+                let phv = node.as_place_holder_var().expect("PlaceHolderVar");
+                let new_expr = mutate(mcx, phv.phexpr, maps)?.unwrap_or(phv.phexpr);
+                let phrels = if phv.phlevelsup == 0 {
+                    // adjust_child_relids over phrels; phnullingrels needn't
+                    // change (C appendinfo.c).
+                    let mut out = types_nodes::Bitmapset::empty();
+                    for m in phv.phrels.iter() {
+                        match maps.iter().find(|mp| mp.parent_relid as i32 == m) {
+                            Some(mp) => out.add_member(mcx, mp.child_relid as i32)?,
+                            None => out.add_member(mcx, m)?,
+                        }
+                    }
+                    out
+                } else {
+                    phv.phrels.clone_in(mcx)?
+                };
+                Ok(Some(Node::mk(
+                    mcx,
+                    types_nodes::primnodes::PlaceHolderVar {
+                        phexpr: new_expr,
+                        phrels,
+                        phnullingrels: phv.phnullingrels.clone_in(mcx)?,
+                        phid: phv.phid,
+                        phlevelsup: phv.phlevelsup,
+                    },
+                )?))
+            }
+            NodeTag::T_CurrentOfExpr => panic!(
                 "adjust_appendrel_attrs_mutator (appendinfo.c): {:?} arm unported",
                 node.node_tag()
             ),

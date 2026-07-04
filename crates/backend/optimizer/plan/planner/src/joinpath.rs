@@ -89,11 +89,14 @@ pub fn add_paths_to_joinrel<'mcx>(
             )?
         }
     };
-    let (mergeclause_list, mergejoin_allowed) = if gucs::enable_mergejoin() {
-        select_mergejoin_clauses(run, joinrel, outerrel, innerrel, jointype, restrictlist)?
-    } else {
-        (PgVec::new_in(run.mcx), true)
-    };
+    // FULL joins compute mergeclauses regardless of the GUCs: there may be
+    // no other alternative (joinpath.c:210, 321).
+    let (mergeclause_list, mergejoin_allowed) =
+        if gucs::enable_mergejoin() || jointype == types_pathnodes::JOIN_FULL {
+            select_mergejoin_clauses(run, joinrel, outerrel, innerrel, jointype, restrictlist)?
+        } else {
+            (PgVec::new_in(run.mcx), true)
+        };
     let semifactors = if matches!(jointype, JOIN_SEMI | JOIN_ANTI) || inner_unique {
         Some(compute_semi_anti_join_factors(
             run, joinrel, outerrel, innerrel, jointype, sjinfo, restrictlist,
@@ -143,21 +146,16 @@ pub fn add_paths_to_joinrel<'mcx>(
         }
         relids_union(mcx, &psr, &run.root.rel(joinrel).lateral_relids)
     };
-    if gucs::enable_mergejoin() && mergejoin_allowed {
+    if mergejoin_allowed {
         sort_inner_and_outer(
             run, joinrel, outerrel, innerrel, jointype, inner_unique, sjinfo, restrictlist,
             &mergeclause_list, &param_source_rels, semifactors,
         )?;
-    }
-    if mergejoin_allowed {
+        // Nestloop can't do right/right-anti/right-semi/full joins, so
+        // skipping here suppresses nothing legal (joinpath.c:286-296).
         match_unsorted_outer(run, joinrel, outerrel, innerrel, jointype, inner_unique, sjinfo, restrictlist, &mergeclause_list, &param_source_rels, semifactors)?;
-    } else {
-        panic!(
-            "add_paths_to_joinrel (joinpath.c): !mergejoin_allowed nestloop-suppression arm \
-             (right/full join with non-mergeable clause)"
-        );
     }
-    if gucs::enable_hashjoin() {
+    if gucs::enable_hashjoin() || jointype == types_pathnodes::JOIN_FULL {
         hash_inner_and_outer(run, joinrel, outerrel, innerrel, jointype, inner_unique, sjinfo, restrictlist, &param_source_rels, semifactors)?;
     }
     Ok(())
@@ -674,10 +672,9 @@ fn match_unsorted_outer<'mcx>(
         }
         let Some(ict_for_merge) = inner_cheapest_total else { continue };
         // FULL may try a clauseless merge join (its only legal plan for
-        // FULL JOIN ON FALSE), per C.
-        if (!mergeclause_list.is_empty() || save_jointype == types_pathnodes::JOIN_FULL)
-            && gucs::enable_mergejoin()
-        {
+        // FULL JOIN ON FALSE), per C; enable_mergejoin=off is a disabled-cost
+        // matter (costsize), not a generation gate.
+        if !mergeclause_list.is_empty() || save_jointype == types_pathnodes::JOIN_FULL {
             generate_mergejoin_paths(
                 run,
                 joinrel,
