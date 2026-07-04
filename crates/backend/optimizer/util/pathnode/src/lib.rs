@@ -1035,6 +1035,21 @@ pub fn create_seqscan_path<'mcx>(
     Ok(id)
 }
 
+// get_cheapest_parallel_safe_total_inner (pathnode.c): first parallel-safe,
+// unparameterized path in a list ordered by ascending total cost.
+pub fn get_cheapest_parallel_safe_total_inner(
+    run: &PlannerRun<'_>,
+    paths: &[PathId],
+) -> Option<PathId> {
+    for &pid in paths {
+        let p = run.root.path(pid).base();
+        if p.parallel_safe && p.param_info.is_none() {
+            return Some(pid);
+        }
+    }
+    None
+}
+
 // add_partial_path (pathnode.c): simpler than add_path — partial paths are
 // never parameterized, row counts all agree, and startup cost is irrelevant
 // (parallel plans always run to completion).
@@ -3171,6 +3186,7 @@ pub fn create_hashjoin_path<'mcx>(
     sjinfo: &types_pathnodes::SpecialJoinInfo<'mcx>,
     outer_path: PathId,
     inner_path: PathId,
+    parallel_hash: bool,
     restrict_clauses: &[RinfoId],
     required_outer: &Relids<'mcx>,
     hashclauses: &[RinfoId],
@@ -3194,6 +3210,7 @@ pub fn create_hashjoin_path<'mcx>(
     let inner = run.root.path(inner_path).base();
     let parallel_safe =
         run.root.rel(joinrel).consider_parallel && outer.parallel_safe && inner.parallel_safe;
+    let parallel_aware = run.root.rel(joinrel).consider_parallel && parallel_hash;
     let parallel_workers = outer.parallel_workers;
 
     let mut path_hashclauses: PgVec<'mcx, RinfoId> = PgVec::new_in(mcx);
@@ -3205,7 +3222,7 @@ pub fn create_hashjoin_path<'mcx>(
         parent: joinrel,
         pathtarget_id: run.root.rel(joinrel).pathtarget_id,
         param_info,
-        parallel_aware: false,
+        parallel_aware,
         parallel_safe,
         parallel_workers,
         rows: 0.0,

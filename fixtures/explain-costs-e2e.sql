@@ -465,3 +465,29 @@ EXPLAIN SELECT x, y, count(*) FROM ec_gb GROUP BY x, y;
 EXPLAIN SELECT y, z, count(*) FROM ec_gb GROUP BY y, z;
 DROP TABLE ec_gb;
 DROP TABLE ec_sj;
+-- partial (parallel) join path shapes: partial hash join under a Gather, and
+-- the partial merge join alternative. EXPLAIN-only, so no parallel executor is
+-- entered; this pins the join-level parallel costing (get_parallel_divisor,
+-- initial_cost_hashjoin's inner_rows_total undo) byte-for-byte against C.
+SET max_parallel_workers_per_gather = 2;
+SET parallel_setup_cost = 0;
+SET parallel_tuple_cost = 0;
+SET min_parallel_table_scan_size = 0;
+CREATE TABLE pj_a (id int, v int);
+CREATE TABLE pj_b (id int, v int);
+INSERT INTO pj_a SELECT i, i % 500 FROM generate_series(1, 30000) i;
+INSERT INTO pj_b SELECT i, i % 500 FROM generate_series(1, 30000) i;
+ANALYZE pj_a; ANALYZE pj_b;
+EXPLAIN SELECT count(*) FROM pj_a a JOIN pj_b b ON a.v = b.v;
+SET enable_hashjoin = off;
+EXPLAIN SELECT count(*) FROM pj_a a JOIN pj_b b ON a.v = b.v;
+SET enable_parallel_hash = off;
+RESET enable_hashjoin;
+EXPLAIN SELECT count(*) FROM pj_a a JOIN pj_b b ON a.v = b.v;
+RESET enable_parallel_hash;
+RESET min_parallel_table_scan_size;
+RESET parallel_tuple_cost;
+RESET parallel_setup_cost;
+RESET max_parallel_workers_per_gather;
+DROP TABLE pj_a;
+DROP TABLE pj_b;

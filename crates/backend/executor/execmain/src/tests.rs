@@ -2367,7 +2367,7 @@ fn hashjoin_multibatch_matches_single_batch_results() {
 
     let saved_work_mem = guc_tables::vars::work_mem.read();
     guc_tables::vars::work_mem.write(64);
-    let (_b, nbatch, _s) = ::nodehash::exec_choose_hash_table_size(4000.0, 8, true);
+    let (_b, nbatch, _s) = ::nodehash::exec_choose_hash_table_size(4000.0, 8, true, false, 0);
     assert!(nbatch > 1, "fixture must force a multi-batch table, got nbatch={nbatch}");
 
     let inner_expected: Vec<Vec<i32>> =
