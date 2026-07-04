@@ -954,9 +954,23 @@ pub fn ExecuteCallStmt<'mcx>(
     // InvokeFunctionExecuteHook / pgstat_init_function_usage: no hook or
     // per-function stats surface exists (repo-wide).
     let mut flinfo = fmgr_seams::fmgr_info::call(fexpr.funcid)?;
-    // C fmgr_info_set_expr(fexpr): no fn_expr consumer exists on the CALL
-    // path (plpgsql polymorphic-arg resolution is unported).
-    flinfo.fn_expr = None;
+    // C fmgr_info_set_expr(fexpr): sql_functions resolves RECORD result
+    // shapes through fn_expr.
+    let fexpr_node = types_nodes::Node::mk(
+        mcx,
+        types_nodes::primnodes::FuncExpr {
+            funcid: fexpr.funcid,
+            funcresulttype: fexpr.funcresulttype,
+            funcretset: fexpr.funcretset,
+            funcvariadic: fexpr.funcvariadic,
+            funcformat: fexpr.funcformat,
+            funccollid: fexpr.funccollid,
+            inputcollid: fexpr.inputcollid,
+            args: fexpr.args.clone_in(mcx)?,
+            location: fexpr.location,
+        },
+    )?;
+    flinfo.fn_expr = Some(execexpr::erase_fn_expr(mcx, fexpr_node)?);
     let mut fcinfo = types_fmgr::LocalFcinfo::<FUNC_MAX_ARGS>::fresh(fexpr.inputcollid);
     fcinfo.init(nargs as i16, fexpr.inputcollid, callcontext.fm_node_ptr(), None);
     // SAFETY: mcx is the portal context; it outlives the call and its result reads.
