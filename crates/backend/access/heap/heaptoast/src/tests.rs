@@ -78,6 +78,12 @@ fn install_seams() {
     static INIT: Once = Once::new();
     INIT.call_once(|| {
         crate::init_seams();
+        guc_tables::vars::XLOGbuffers
+            .install(guc_tables::GucVarAccessors { get: || 64, set: |_| {} });
+        transam_xlog::XLOGShmemInit();
+        transam_xlog::ctl::XLogCtl()
+            .SharedRecoveryState
+            .store(transam_xlog::RECOVERY_STATE_DONE, std::sync::atomic::Ordering::Relaxed);
 
         bufmgr_seams::read_buffer::set(|rel, block| {
             with_fake(|f| {

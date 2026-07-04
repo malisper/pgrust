@@ -67,6 +67,18 @@ fn crash_fans_out_sigquit_and_reinit_completes() {
     });
     aclchk_seams::pg_parameter_aclcheck_set::set(|_, _| Ok(true));
     mbutils_seams::get_database_encoding::set(|| 6);
+    // AsyncShmemInit scans pg_notify/ during reinit; no datadir in this test.
+    file_seams::with_allocated_dir::set(|dirname, cb| {
+        let mut ret = false;
+        let Ok(entries) = std::fs::read_dir(dirname) else { return Ok(false) };
+        for entry in entries {
+            ret = cb(entry.unwrap().file_name().to_str().unwrap())?;
+            if ret {
+                break;
+            }
+        }
+        Ok(ret)
+    });
     backend_status_seams::backend_status_shmem_size::set(|| Ok(4096));
     backend_status_seams::backend_status_shmem_init::set(|| Ok(()));
     static BE_STATUS_RESETS: std::sync::atomic::AtomicUsize =

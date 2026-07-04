@@ -374,6 +374,7 @@ fn install_proc_boot_seams() {
     backend_status_seams::pgstat_report_xact_timestamp::set(|_| {});
     backend_status_seams::pgstat_report_query_id::set(|_, _| {});
     backend_status_seams::pgstat_report_plan_id::set(|_, _| {});
+    backend_status_seams::pgstat_clear_backend_status_snapshot::set(|| {});
     backend_progress_seams::pgstat_progress_end_command::set(|| {});
     sinval_seams::receive_shared_invalid_messages::set(|_, _| Ok(()));
     miscinit_seams::get_user_id::set(|| 10);
