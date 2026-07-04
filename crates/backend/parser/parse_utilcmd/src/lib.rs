@@ -74,8 +74,8 @@ fn typename_type_id_and_mod<'mcx>(
             _ => unported("shell types (typisdefined = false)"),
         }
         match syscache_seams::pg_type_typtype::call(tn.typeOid)? {
-            Some(t) if t == b'b' as i8 || t == b'e' as i8 => {}
-            _ => unported("non-base/enum pre-resolved column types"),
+            Some(t) if t == b'b' as i8 || t == b'e' as i8 || t == b'd' as i8 => {}
+            _ => unported("non-base/enum/domain pre-resolved column types"),
         }
         let typmod = typenameTypeMod(mcx, pstate, tn, tn.typeOid)?;
         return Ok((tn.typeOid, typmod));
