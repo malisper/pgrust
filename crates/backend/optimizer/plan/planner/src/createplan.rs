@@ -726,7 +726,13 @@ fn create_indexscan_plan<'mcx>(
         qpqual_rinfos.push(rid);
     }
     let ordered = order_qual_clauses(run, &qpqual_rinfos)?;
-    let qpqual = extract_actual_clauses(run, &ordered);
+    let mut qpqual = extract_actual_clauses(run, &ordered);
+
+    let mut stripped_indexquals = stripped_indexquals;
+    if run.root.path(best_path).base().param_info.is_some() {
+        stripped_indexquals = replace_nestloop_params_list(run, &stripped_indexquals)?;
+        qpqual = replace_nestloop_params_list(run, &qpqual)?;
+    }
 
     if indexonly {
         let indextlist = ios_indextlist_copy(run, best_path, true)?;
@@ -1082,6 +1088,7 @@ fn fix_indexqual_clause<'mcx>(
     clause: Node<'mcx>,
 ) -> PgResult<Node<'mcx>> {
     let mcx = run.mcx;
+    let clause = replace_nestloop_params(run, clause)?;
     match clause.node_tag() {
         NodeTag::T_OpExpr => {
             let o = clause.as_op_expr().unwrap();
