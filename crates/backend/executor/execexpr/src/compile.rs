@@ -2436,8 +2436,8 @@ pub(crate) fn ready_expr(state: &mut ExprState<'_>) {
     }
     state.flags |= crate::steps::EEO_FLAG_INTERPRETER_INITIALIZED;
     state.kernel = select_kernel(state);
-    // Kernelized programs never run their steps; skipping the peephole there
-    // keeps compile-per-query lanes (point/select1) free of the pass cost.
+    // Kernelized programs never run their steps: skipping the peephole keeps
+    // compile-per-query lanes (point/select1) free of the pass cost.
     if matches!(state.kernel, Kernel::Program) {
         fuse_program(state);
     }
@@ -2551,12 +2551,10 @@ fn try_fuse(a: &Step, b: &Step) -> Option<Step> {
     }
 }
 
-// Ready-time superinstruction peephole (dispatch-threading journal, further
-// lever 1): adjacent measured-dominant step pairs collapse into single fused
-// steps, cutting one dispatch + the arg-slot round trip per pair. Runs after
-// select_kernel so every kernel matcher still sees the raw program shape; a
-// pair whose second step is a jump target stays unfused (jumping to the
-// first executes both, as the raw program would).
+// Ready-time superinstruction peephole: measured-dominant adjacent step
+// pairs collapse into fused steps (one dispatch + arg-slot round trip per
+// pair). Runs after select_kernel (kernel matchers see raw shapes); a pair
+// whose second step is a jump target stays unfused.
 pub(crate) fn fuse_program(state: &mut ExprState<'_>) {
     let len = state.steps.len();
     if len < 3 {
@@ -2587,8 +2585,6 @@ pub(crate) fn fuse_program(state: &mut ExprState<'_>) {
         map.push(out.len() as u32);
         if i + 1 < len && !is_target[i + 1] {
             if let Some(f) = try_fuse(&steps[i], &steps[i + 1]) {
-                // The consumed second step keeps the fused step's index so a
-                // (prevented) jump to it would still be in bounds.
                 map.push(out.len() as u32);
                 out.push(f);
                 i += 2;
@@ -2607,8 +2603,6 @@ pub(crate) fn fuse_program(state: &mut ExprState<'_>) {
     state.steps = out;
 }
 
-// PGRUST_DUMP_EXPR_PROGRAMS: measurement-only step-sequence dump (fusion-lane
-// histogram rig); one relaxed load + branch per ready when off.
 fn dump_programs_enabled() -> bool {
     use core::sync::atomic::{AtomicU8, Ordering};
     static FLAG: AtomicU8 = AtomicU8::new(0);

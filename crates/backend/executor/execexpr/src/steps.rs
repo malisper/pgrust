@@ -220,9 +220,7 @@ pub enum Step {
         scratch: NonNull<u8>,
         out: OutRef,
     },
-    // Ready-time fused pairs (copyjit-superinstruction shape): semantics are
-    // exactly the two source steps back-to-back; emitted by fuse_program only
-    // where the second step is not a jump target.
+    // Ready-time fused pairs (fuse_program): the two source steps back-to-back.
     ScanVarFuncStrict2 { attnum: u16, argno: u8, vartype: Oid, call: Call2, out: OutRef },
     FuncFuncStrict2 { call1: Call2, argno: u8, call2: Call2, out: OutRef },
     FuncStrict2Qual { call: Call2, jumpdone: u32, out: OutRef },
@@ -283,8 +281,7 @@ pub struct IoCoerceCalls {
     pub in_strict: bool,
 }
 
-// FuncCall minus frame/nargs for the fused 2-arg steps: nargs is the
-// constant 2, so two of these + an OutRef stay inside the 64B Step budget.
+// FuncCall minus frame/nargs (a constant 2): keeps fused steps inside 64B.
 #[derive(Clone, Copy, Debug)]
 pub struct Call2 {
     pub(crate) fcinfo: NonNull<u8>,

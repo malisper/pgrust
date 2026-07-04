@@ -1174,8 +1174,7 @@ fn run_program<'mcx>(
             }
             Step::ScanVarFuncStrict2 { attnum, argno, call, out, .. } => {
                 let nd = read_var(need_slot(&mut scan), *attnum);
-                // SAFETY: argno/1-argno are args 0/1 of the call's live
-                // 2-arg fcinfo image (fuse_program invariant).
+                // SAFETY: argno/1-argno are args 0/1 of the live fcinfo image.
                 let other = unsafe {
                     crate::steps::arg_slot_of(call.fcinfo, *argno as usize).write(nd);
                     crate::steps::arg_slot_of(call.fcinfo, 1 - *argno as usize).read()
@@ -1213,8 +1212,7 @@ fn run_program<'mcx>(
             }
             Step::OuterVarNotDistinct { attnum, argno, call, out, .. } => {
                 let nd = read_var(need_slot(&mut outer), *attnum);
-                // SAFETY: argno/1-argno are args 0/1 of the call's live
-                // 2-arg fcinfo image (fuse_program invariant).
+                // SAFETY: as ScanVarFuncStrict2.
                 let other = unsafe {
                     crate::steps::arg_slot_of(call.fcinfo, *argno as usize).write(nd);
                     crate::steps::arg_slot_of(call.fcinfo, 1 - *argno as usize).read()
@@ -1254,8 +1252,7 @@ fn run_program<'mcx>(
             }
             Step::OuterVarAggTransByValIndirect { attnum, argno, call, base: pgbase, transno, .. } => {
                 let nd = read_var(need_slot(&mut outer), *attnum);
-                // SAFETY: argno is an arg of the call's live 2-arg fcinfo
-                // image; pgbase/transno as AggTransByValIndirect.
+                // SAFETY: as ScanVarFuncStrict2 + AggTransByValIndirect.
                 unsafe {
                     crate::steps::arg_slot_of(call.fcinfo, *argno as usize).write(nd);
                     let pg = pgbase.read().as_ptr().add(*transno as usize);
@@ -1642,11 +1639,9 @@ fn eval_array_expr(
     Ok((Datum::from_usize(img.leak().as_ptr() as usize), false))
 }
 
-// invoke() for the fused steps' slim carrier; nargs is the constant 2.
 #[inline(always)]
 fn invoke2(call: &crate::steps::Call2) -> PgResult<(Datum, bool)> {
-    // SAFETY: 'mcx-live mcx-boxed FmgrInfo + fcinfo image; sole references
-    // during the call.
+    // SAFETY: 'mcx-live mcx-boxed FmgrInfo + fcinfo image; sole references.
     let flinfo = unsafe { &mut *call.flinfo.as_ptr() };
     let fn_addr = flinfo.fn_addr;
     let fcinfo = unsafe { fcinfo_mut(call.fcinfo, 2) };
@@ -1655,7 +1650,6 @@ fn invoke2(call: &crate::steps::Call2) -> PgResult<(Datum, bool)> {
     Ok((d, fcinfo.isnull))
 }
 
-// The FuncExprStrict2 arm body, shared by the fused superinstructions.
 #[inline(always)]
 fn strict2_eval(call: &crate::steps::Call2) -> PgResult<NullableDatum> {
     // SAFETY: args 0/1 of the call's live fcinfo image.
