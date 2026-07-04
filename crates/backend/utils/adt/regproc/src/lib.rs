@@ -795,53 +795,6 @@ pub fn regclassout(mcx: Mcx<'_>, classid: Oid) -> PgResult<RegName<'_>> {
     quote_qualified(mcx, nspname.as_deref(), &relname)
 }
 
-// ts_cache's TSConfig/TSDictionary name resolution (missing_ok shape), local
-// copy: a ts_cache dep would cycle (ts_cache -> adt_regproc for name parsing).
-fn ts_search_path_lookup(
-    names: &[&str],
-    by_name: fn(&str, Oid) -> PgResult<Oid>,
-) -> PgResult<Oid> {
-    match names {
-        [name] => {
-            let scratch = mcx::MemoryContext::new("ts_search_path_lookup");
-            for nsp in namespace_seams::fetch_search_path::call(scratch.mcx(), true)?.iter() {
-                if namespace_seams::is_temp_namespace::call(*nsp) {
-                    continue;
-                }
-                let oid = by_name(name, *nsp)?;
-                if OidIsValid(oid) {
-                    return Ok(oid);
-                }
-            }
-            Ok(InvalidOid)
-        }
-        [schemaname, name] => {
-            let nsp = namespace_seams::lookup_explicit_namespace::call(schemaname, true)?;
-            if !OidIsValid(nsp) {
-                return Ok(InvalidOid);
-            }
-            by_name(name, nsp)
-        }
-        _ => Ok(InvalidOid),
-    }
-}
-
-fn ts_config_by_name(n: &str, nsp: Oid) -> PgResult<Oid> {
-    syscache_seams::lookup_pg_ts_config_oid_by_name::call(n, nsp)
-}
-
-fn ts_dict_by_name(n: &str, nsp: Oid) -> PgResult<Oid> {
-    syscache_seams::lookup_pg_ts_dict_oid_by_name::call(n, nsp)
-}
-
-
-
-
-
-
-
-
-
 pub fn regtypeout(mcx: Mcx<'_>, typid: Oid) -> PgResult<RegName<'_>> {
     if typid == InvalidOid {
         return cstr_in(mcx, &[b"-"]);
