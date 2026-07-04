@@ -44,13 +44,13 @@ pub struct IndexVacuumInfo<'a, 'mcx> {
     pub strategy: BufferAccessStrategy,
 }
 
-pub(crate) struct BTVacState<'a, 'mcx> {
+pub(crate) struct BTVacState<'a, 'cb, 'mcx> {
     pub info: &'a IndexVacuumInfo<'a, 'mcx>,
     pub stats: &'a mut IndexBulkDeleteResult,
     pub dead_items: Option<&'a [ItemPointerData]>,
     // C's IndexBulkDeleteCallback shape for callers that never delete
     // (validate_index): every live heap TID is reported, nothing is removed.
-    pub collect: Option<&'a mut (dyn FnMut(&ItemPointerData) -> PgResult<()> + 'a)>,
+    pub collect: Option<&'a mut (dyn FnMut(&ItemPointerData) -> PgResult<()> + 'cb)>,
     pub cycleid: BTCycleId,
     pub pendingpages: PgVec<'mcx, ::types_nbtree::BTPendingFSM>,
     pub maxbufsize: usize,
@@ -201,7 +201,7 @@ fn btvacuumscan<'mcx>(
 }
 
 fn btvacuumpage(
-    vstate: &mut BTVacState<'_, '_>,
+    vstate: &mut BTVacState<'_, '_, '_>,
     scratch: &mut MemoryContext,
     pin: BufferPin,
 ) -> PgResult<()> {
