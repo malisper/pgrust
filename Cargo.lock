@@ -940,6 +940,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "aggregatecmds"
+version = "0.0.0"
+dependencies = [
+ "aclchk",
+ "adt_acl",
+ "catalog_namespace",
+ "commands_define",
+ "elog",
+ "fmgr_core",
+ "format_type",
+ "functioncmds",
+ "lsyscache",
+ "mcx",
+ "miscinit",
+ "parse_utilcmd",
+ "parser_small1",
+ "pg_aggregate",
+ "pg_depend",
+ "pg_proc",
+ "superuser",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_nodes",
+]
+
+[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1972,6 +1999,7 @@ dependencies = [
  "cache_syscache",
  "catalog",
  "catalog_namespace",
+ "commands_amcmds",
  "commands_tablespace",
  "datum",
  "dbcommands",
@@ -2413,9 +2441,22 @@ name = "commands_amcmds"
 version = "0.0.0"
 dependencies = [
  "cache_syscache",
+ "catalog",
+ "catalog_indexing",
  "datum",
+ "format_type",
+ "heaptuple",
+ "lsyscache",
+ "mcx",
+ "parse_func",
+ "pg_depend",
+ "superuser",
+ "table",
  "types_core",
  "types_error",
+ "types_nodes",
+ "types_rel",
+ "types_tuple",
 ]
 
 [[package]]
@@ -4538,9 +4579,13 @@ version = "0.1.0"
 dependencies = [
  "aclchk",
  "aclchk_seams",
+ "adt_acl",
  "cache_syscache",
+ "catalog",
  "catalog_indexing",
  "catalog_namespace",
+ "catalog_objectaddress",
+ "coerce",
  "commands_define",
  "datum",
  "detoast_seams",
@@ -4553,12 +4598,17 @@ dependencies = [
  "format_type",
  "funcapi",
  "genam",
+ "heaptuple",
  "lsyscache",
  "mbutils",
  "mcx",
  "miscinit",
  "nodes_core",
+ "parse_func",
+ "parse_utilcmd",
  "parser_small1",
+ "pg_cast",
+ "pg_depend",
  "pg_proc",
  "pg_type",
  "pquery_seams",
@@ -4966,12 +5016,18 @@ dependencies = [
 name = "hash_validate"
 version = "0.0.0"
 dependencies = [
+ "adt_regproc",
+ "elog",
+ "format_type",
  "index_amvalidate",
  "lsyscache",
+ "mcx",
+ "syscache_seams",
  "types_core",
  "types_error",
  "types_hash",
  "types_relscan",
+ "types_scan",
  "xact",
 ]
 
@@ -8113,6 +8169,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "pg_aggregate"
+version = "0.0.0"
+dependencies = [
+ "aclchk",
+ "adt_acl",
+ "cache_syscache",
+ "catalog_indexing",
+ "catalog_namespace",
+ "coerce",
+ "commands_define",
+ "datum",
+ "format_type",
+ "heaptuple",
+ "lsyscache",
+ "mcx",
+ "miscinit",
+ "parse_func",
+ "parse_oper",
+ "pg_depend",
+ "pg_proc",
+ "syscache_seams",
+ "table",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_rel",
+ "types_tuple",
+ "varlena",
+]
+
+[[package]]
 name = "pg_attrdef"
 version = "0.1.0"
 dependencies = [
@@ -8139,6 +8226,24 @@ dependencies = [
 [[package]]
 name = "pg_b64"
 version = "0.1.0"
+
+[[package]]
+name = "pg_cast"
+version = "0.0.0"
+dependencies = [
+ "cache_syscache",
+ "catalog",
+ "catalog_indexing",
+ "datum",
+ "format_type",
+ "heaptuple",
+ "mcx",
+ "pg_depend",
+ "table",
+ "types_core",
+ "types_error",
+ "types_rel",
+]
 
 [[package]]
 name = "pg_class"
@@ -13460,6 +13565,7 @@ version = "0.1.0"
 dependencies = [
  "acl_seams",
  "aclchk",
+ "aggregatecmds",
  "catalog",
  "catalog_dependency",
  "catalog_namespace",
@@ -13468,6 +13574,7 @@ dependencies = [
  "cmdtag",
  "collationcmds",
  "commands_alter",
+ "commands_amcmds",
  "commands_analyze",
  "commands_async",
  "commands_cluster",

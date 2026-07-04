@@ -32,4 +32,3 @@ syscache_seams = { path = "../../utils/cache/syscache_seams" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
 superuser = { path = "../../utils/misc/superuser" }
 xact = { path = "../../access/transam/xact" }
-lsyscache = { path = "../../utils/cache/lsyscache" }
