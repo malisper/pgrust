@@ -652,12 +652,27 @@ pub fn cmp_elem_vals(mcx: Mcx<'_>, ri: &mut RangeInfo, a: Datum, b: Datum) -> Pg
 }
 
 /// range_cmp_bounds (rangetypes.c).
+///
+/// PgResult<i32>'s 4B payload forbids the two-register ScalarPair return: the
+/// outlined kernel returned through an sret slot whose dependent reload+cmp
+/// was the hottest instruction cluster in the rgist lanes. The i64-payload
+/// core keeps the return in x0/x1; the typed shim folds away on inlining.
+#[inline]
 pub fn range_cmp_bounds(
     mcx: Mcx<'_>,
     ri: &mut RangeInfo,
     b1: &RangeBound,
     b2: &RangeBound,
 ) -> PgResult<i32> {
+    Ok(range_cmp_bounds_wide(mcx, ri, b1, b2)? as i32)
+}
+
+fn range_cmp_bounds_wide(
+    mcx: Mcx<'_>,
+    ri: &mut RangeInfo,
+    b1: &RangeBound,
+    b2: &RangeBound,
+) -> PgResult<i64> {
     if b1.infinite && b2.infinite {
         return Ok(if b1.lower == b2.lower {
             0
@@ -688,16 +703,27 @@ pub fn range_cmp_bounds(
             return Ok(if b2.lower { -1 } else { 1 });
         }
     }
-    Ok(result)
+    Ok(result as i64)
 }
 
-/// range_cmp_bound_values (rangetypes.c).
+/// range_cmp_bound_values (rangetypes.c). Register-return core as
+/// [`range_cmp_bounds`].
+#[inline]
 pub fn range_cmp_bound_values(
     mcx: Mcx<'_>,
     ri: &mut RangeInfo,
     b1: &RangeBound,
     b2: &RangeBound,
 ) -> PgResult<i32> {
+    Ok(range_cmp_bound_values_wide(mcx, ri, b1, b2)? as i32)
+}
+
+fn range_cmp_bound_values_wide(
+    mcx: Mcx<'_>,
+    ri: &mut RangeInfo,
+    b1: &RangeBound,
+    b2: &RangeBound,
+) -> PgResult<i64> {
     if b1.infinite && b2.infinite {
         Ok(if b1.lower == b2.lower {
             0
@@ -711,6 +737,6 @@ pub fn range_cmp_bound_values(
     } else if b2.infinite {
         Ok(if b2.lower { 1 } else { -1 })
     } else {
-        cmp_elem_vals(mcx, ri, b1.val, b2.val)
+        Ok(cmp_elem_vals(mcx, ri, b1.val, b2.val)? as i64)
     }
 }
