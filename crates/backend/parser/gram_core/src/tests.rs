@@ -1870,6 +1870,9 @@ fn grant_on_function_shapes() {
 fn aggregate_output_args_rejected() {
     let err = parse_err("DROP AGGREGATE a(OUT x int)");
     assert!(err.message().contains("aggregates cannot have output arguments"), "{}", err.message());
+}
+
+#[test]
 fn create_fdw_and_server() {
     use types_nodes::parsenodes::DefElemAction;
     use types_nodes::rawnodes::{CreateFdwStmt, CreateForeignServerStmt};
