@@ -186,6 +186,7 @@ pub fn init_all() {
     plpgsql::init_seams();
     fmgr_core::register_late_builtins(adt_geo::builtins::GEO_BUILTINS);
     fmgr_core::register_late_builtins(gistproc::GISTPROC_BUILTINS);
+    fmgr_core::register_late_builtins(commands_constraint::CONSTRAINT_BUILTINS);
     fmgr_core::register_late_builtins(spgist_text::SPGIST_TEXT_BUILTINS);
     fmgr_core::register_late_builtins(brin_minmax_multi::MINMAX_MULTI_BUILTINS);
     fmgr_core::register_late_builtins(partitionfuncs::PARTITIONFUNCS_BUILTINS);

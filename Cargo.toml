@@ -243,6 +243,7 @@ members = [
     "crates/backend/statistics/statistics",
     "crates/backend/commands/commands_analyze_seams",
     "crates/backend/commands/vacuum_seams",
+    "crates/backend/commands/constraint_cmd",
     "crates/backend/commands/cluster",
     "crates/backend/commands/cluster_seams",
     "crates/backend/access/heap/rewriteheap",

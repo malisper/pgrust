@@ -981,6 +981,7 @@ fn merge_update_act<'mcx>(
         .as_ref()
         .expect("result relation opened");
     let slot = &mut es_tupleTable[slot_id.0 as usize];
+    let mut recheck_indexes: mcx::PgVec<'_, Oid> = mcx::PgVec::new_in(mcx);
     if let Some(indexes) = mt.indexes.as_mut() {
         if indexes.num_indices() > 0 && update_indexes != TU_UpdateIndexes::TU_None {
             if update_indexes == TU_UpdateIndexes::TU_Summarizing {
@@ -989,7 +990,7 @@ fn merge_update_act<'mcx>(
                      index maintenance (BRIN lane) not ported"
                 );
             }
-            execindexing::ExecInsertIndexTuples(
+            recheck_indexes = execindexing::ExecInsertIndexTuples(
                 mcx,
                 mt.index_eval_cx.as_ref().expect("index_eval_cx live until ExecEndNode").mcx(),
                 indexes,
@@ -1002,7 +1003,7 @@ fn merge_update_act<'mcx>(
         }
     }
     if let Some(td) = &mt.trigdesc {
-        ::trigger::ExecARUpdateTriggers(mcx, rel, td, *tupleid, slot.base().tts_tid)?;
+        ::trigger::ExecARUpdateTriggers(mcx, rel, td, *tupleid, slot.base().tts_tid, &recheck_indexes)?;
     }
     Ok(TM_Result::TM_Ok)
 }
@@ -1626,6 +1627,7 @@ fn exec_update<'mcx>(
         .as_ref()
         .expect("result relation opened");
     let slot = &mut es_tupleTable[slot_id.0 as usize];
+    let mut recheck_indexes: mcx::PgVec<'_, Oid> = mcx::PgVec::new_in(mcx);
     if let Some(indexes) = mt.indexes.as_mut() {
         if indexes.num_indices() > 0 && update_indexes != TU_UpdateIndexes::TU_None {
             if update_indexes == TU_UpdateIndexes::TU_Summarizing {
@@ -1634,7 +1636,7 @@ fn exec_update<'mcx>(
                      index maintenance (BRIN lane) not ported"
                 );
             }
-            execindexing::ExecInsertIndexTuples(
+            recheck_indexes = execindexing::ExecInsertIndexTuples(
                 mcx,
                 mt.index_eval_cx.as_ref().expect("index_eval_cx live until ExecEndNode").mcx(),
                 indexes,
@@ -1648,7 +1650,7 @@ fn exec_update<'mcx>(
     }
 
     if let Some(td) = &mt.trigdesc {
-        ::trigger::ExecARUpdateTriggers(mcx, rel, td, *tupleid, slot.base().tts_tid)?;
+        ::trigger::ExecARUpdateTriggers(mcx, rel, td, *tupleid, slot.base().tts_tid, &recheck_indexes)?;
     }
 
     if mt.canSetTag {
@@ -2077,6 +2079,7 @@ fn exec_insert<'mcx>(
     let mcx = estate.es_query_cxt;
     let output_cid = estate.es_output_cid;
     let onconflict = mt.plan.onConflictAction;
+    let mut recheck_indexes: mcx::PgVec<'_, Oid> = mcx::PgVec::new_in(mcx);
 
     if mt.trigdesc.as_ref().is_some_and(|td| td.trig_insert_before_row) {
         if !br_row_triggers(
@@ -2233,7 +2236,7 @@ fn exec_insert<'mcx>(
                 tableam::table_tuple_insert_speculative(
                     mcx, rel, slot, output_cid, 0, None, spec_token,
                 )?;
-                execindexing::ExecInsertIndexTuples(
+                recheck_indexes = execindexing::ExecInsertIndexTuples(
                     mcx,
                     mt.index_eval_cx.as_ref().expect("index_eval_cx live until ExecEndNode").mcx(),
                     indexes,
@@ -2279,7 +2282,7 @@ fn exec_insert<'mcx>(
 
         if let Some(indexes) = indexes.as_mut() {
             if indexes.num_indices() > 0 {
-                execindexing::ExecInsertIndexTuples(
+                recheck_indexes = execindexing::ExecInsertIndexTuples(
                     mcx,
                     mt.index_eval_cx.as_ref().expect("index_eval_cx live until ExecEndNode").mcx(),
                     indexes,
@@ -2299,7 +2302,7 @@ fn exec_insert<'mcx>(
             .as_ref()
             .expect("result relation opened");
         let slot = &es_tupleTable[slot_id.0 as usize];
-        ::trigger::ExecARInsertTriggers(mcx, rel, td, slot.base().tts_tid)?;
+        ::trigger::ExecARInsertTriggers(mcx, rel, td, slot.base().tts_tid, &recheck_indexes)?;
     }
 
     if mt.canSetTag {
