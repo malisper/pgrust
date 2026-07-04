@@ -1266,6 +1266,7 @@ fn DetachAddConstraintIfNeeded<'mcx>(
         n.seal(),
         true,
         false,
+        true,
         types_rel::ShareUpdateExclusiveLock,
         query_string,
     )
