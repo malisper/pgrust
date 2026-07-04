@@ -187,12 +187,15 @@ fn fill_plansource(
         stmt_len: 0,
     };
 
+    let mut pstate = parser_small1::make_parsestate(qmcx, None);
+    pstate.p_sourcetext = Some(mcx::slice_in(qmcx, source_text.as_bytes())?.leak());
     let mut argtypes: mcx::PgVec<'_, types_core::Oid> =
         mcx::vec_with_capacity_in(qmcx, reparsed.argtypes.len())?;
     for tn_node in reparsed.argtypes.iter() {
         let tn = tn_node.as_type_name().expect("PREPARE argtypes are TypeNames");
-        argtypes.push(parse_utilcmd::typenameTypeIdAndMod(qmcx, None, tn)?.0);
+        argtypes.push(parse_utilcmd::typenameTypeId(qmcx, Some(&pstate), tn)?);
     }
+    parser_small1::free_parsestate(pstate)?;
 
     let (query_list, resolved) = postgres::pg_analyze_and_rewrite_varparams(
         qmcx,
