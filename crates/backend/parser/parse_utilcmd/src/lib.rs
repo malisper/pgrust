@@ -227,13 +227,14 @@ fn shell_type(name: &str) -> Box<PgError> {
 }
 
 // typeStringToTypeName (parse_type.c); escontext=NULL shape (hard errors) —
-// misc.c's pg_input_* callers pass NULL there too. pts_error_callback's
-// CONTEXT line is not attached (divergence).
+// misc.c's pg_input_* callers pass NULL there too. pts_error_callback rides
+// as with_context on raw-parse errors only, matching the C callback's span.
 fn typeStringToTypeName<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<&'mcx TypeName<'mcx>> {
     if s.bytes().all(|c| matches!(c, b' ' | b'\t' | b'\n' | b'\r' | 0x0c | 0x0b)) {
         return Err(invalid_type_name(s));
     }
-    let list = gram_core::raw_parser(mcx, s, parser_seams::RawParseMode::RAW_PARSE_TYPE_NAME)?;
+    let list = gram_core::raw_parser(mcx, s, parser_seams::RawParseMode::RAW_PARSE_TYPE_NAME)
+        .map_err(|e| Box::new((*e).with_context(format!("invalid type name \"{s}\""))))?;
     debug_assert_eq!(list.len(), 1);
     let node = list.first().expect("TYPE_NAME parse yields one node");
     let tn = node.as_type_name().expect("TYPE_NAME parse yields TypeName");
