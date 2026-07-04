@@ -912,9 +912,6 @@ unsafe impl<'mcx> NodeVariant<'mcx> for RangeSubselect<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for RangeFunction<'mcx> {
     const TAG: NodeTag = NodeTag::T_RangeFunction;
 }
-unsafe impl<'mcx> NodeVariant<'mcx> for CompositeTypeStmt<'mcx> {
-    const TAG: NodeTag = NodeTag::T_CompositeTypeStmt;
-}
 unsafe impl<'mcx> NodeVariant<'mcx> for RangeTableFunc<'mcx> {
     const TAG: NodeTag = NodeTag::T_RangeTableFunc;
 }
