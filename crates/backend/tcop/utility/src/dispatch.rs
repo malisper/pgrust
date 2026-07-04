@@ -1136,6 +1136,19 @@ fn slow_switch<'mcx>(
                     collect_gap("CREATE OPERATOR");
                     operatorcmds::DefineOperator(mcx, &stmt.defnames, &stmt.definition)?;
                 }
+                types_nodes::parsenodes::ObjectType::OBJECT_TYPE => {
+                    debug_assert!(!stmt.oldstyle);
+                    let mut pstate = parser_small1::make_parsestate(mcx, None);
+                    {
+                        let mut v: mcx::PgVec<'mcx, u8> = mcx::PgVec::new_in(mcx);
+                        mcx::vec_append_bytes(&mut v, source_text.as_bytes())?;
+                        pstate.p_sourcetext = Some(v.leak());
+                    }
+                    // C: address = DefineType; the ported form returns no address.
+                    collect_gap("CREATE TYPE");
+                    typecmds::DefineType(mcx, &mut pstate, &stmt.defnames, &stmt.definition)?;
+                    parser_small1::free_parsestate(pstate)?;
+                }
                 types_nodes::parsenodes::ObjectType::OBJECT_TSDICTIONARY => {
                     // C: address = DefineTSDictionary; the ported form returns no address.
                     collect_gap("CREATE TEXT SEARCH DICTIONARY");

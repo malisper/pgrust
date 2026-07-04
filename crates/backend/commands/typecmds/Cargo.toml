@@ -27,6 +27,8 @@ coerce = { path = "../../parser/coerce" }
 vars = { path = "../../optimizer/util/vars" }
 outfuncs = { path = "../../nodes/outfuncs" }
 pg_type = { path = "../../catalog/pg_type" }
+commands_define = { path = "../commands_define" }
+parse_func = { path = "../../parser/parse_func" }
 pg_enum = { path = "../../catalog/pg_enum" }
 pg_constraint = { path = "../../catalog/pg_constraint" }
 catalog_namespace = { path = "../../catalog/catalog_namespace" }

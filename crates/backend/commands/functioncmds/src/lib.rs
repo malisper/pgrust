@@ -1,7 +1,7 @@
 // functioncmds.c CREATE FUNCTION/PROCEDURE lane. Loud: inline SQL bodies
 // (BEGIN ATOMIC / RETURN), parameter defaults, TABLE parameter mode,
-// WINDOW/TRANSFORM/SUPPORT/SET options, languages beyond sql+internal,
-// shell types, %TYPE / typmod / array-bound TypeNames, ALTER/DROP FUNCTION,
+// WINDOW/TRANSFORM/SUPPORT/SET options, languages beyond sql+internal+C+plpgsql,
+// %TYPE / typmod / array-bound TypeNames, ALTER/DROP FUNCTION,
 // CREATE CAST/TRANSFORM, DO.
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
@@ -240,7 +240,11 @@ fn compute_function_attributes<'mcx>(
 
 // LookupTypeName/typenameTypeId (parse_type.c) for function signatures:
 // setof rides on the TypeName; shell types and decorated names are loud.
-fn resolve_type_name<'mcx>(mcx: Mcx<'mcx>, tn: &TypeName<'_>) -> PgResult<Oid> {
+fn resolve_type_name<'mcx>(
+    mcx: Mcx<'mcx>,
+    tn: &TypeName<'_>,
+    languageOid: Oid,
+) -> PgResult<Oid> {
     let (typoid, typname) = resolve_type_oid(mcx, tn)?;
     if typoid == InvalidOid {
         return Err(err(
@@ -248,6 +252,7 @@ fn resolve_type_name<'mcx>(mcx: Mcx<'mcx>, tn: &TypeName<'_>) -> PgResult<Oid> {
             ERRCODE_UNDEFINED_OBJECT,
         ));
     }
+    shell_type_check(mcx, tn, typoid, languageOid, false)?;
     check_defined_and_acl(typoid)?;
     Ok(typoid)
 }
@@ -296,10 +301,6 @@ fn resolve_type_oid<'mcx, 'a>(mcx: Mcx<'mcx>, tn: &TypeName<'a>) -> PgResult<(Oi
 }
 
 fn check_defined_and_acl(typoid: Oid) -> PgResult<()> {
-    match syscache_seams::pg_type_isdefined::call(typoid)? {
-        Some(true) => {}
-        _ => unported("shell types in function signatures"),
-    }
     let aclresult = aclchk::object_aclcheck(
         TYPE_RELATION_ID,
         typoid,
@@ -312,22 +313,92 @@ fn check_defined_and_acl(typoid: Oid) -> PgResult<()> {
     Ok(())
 }
 
-// compute_return_type (functioncmds.c); shell-type creation is loud.
+fn shell_type_check<'mcx>(
+    mcx: Mcx<'mcx>,
+    tn: &TypeName<'_>,
+    typoid: Oid,
+    languageOid: Oid,
+    is_return: bool,
+) -> PgResult<()> {
+    if syscache_seams::pg_type_isdefined::call(typoid)?.unwrap_or(false) {
+        return Ok(());
+    }
+    let name = commands_define::TypeNameToString(mcx, tn)?;
+    if languageOid == SQLlanguageId {
+        let verb = if is_return { "return" } else { "accept" };
+        return Err(err(
+            format!("SQL function cannot {verb} shell type {}", name.as_str()),
+            ERRCODE_INVALID_FUNCTION_DEFINITION,
+        ));
+    }
+    let what = if is_return { "return type" } else { "argument type" };
+    elog::ereport(types_error::NOTICE)
+        .errcode(types_error::ERRCODE_WRONG_OBJECT_TYPE)
+        .errmsg(format!("{what} {} is only a shell", name.as_str()))
+        .finish(types_error::ErrorLocation::new("functioncmds.c", 0, "CreateFunction"))
+}
+
+// compute_return_type (functioncmds.c) incl. shell-type creation for
+// internal/C-language I/O functions.
 fn compute_return_type<'mcx>(
     mcx: Mcx<'mcx>,
     returnType: &TypeName<'_>,
     languageOid: Oid,
 ) -> PgResult<(Oid, bool)> {
-    let (rettype, typname) = resolve_type_oid(mcx, returnType)?;
-    if rettype == InvalidOid {
-        // C makes a shell type here for internal/C-language I/O functions.
-        if languageOid == INTERNALlanguageId || languageOid == ClanguageId {
-            unported("shell type creation for I/O function return types (TypeShellMake)");
+    let (mut rettype, _typname) = resolve_type_oid(mcx, returnType)?;
+    if rettype != InvalidOid {
+        shell_type_check(mcx, returnType, rettype, languageOid, true)?;
+    } else {
+        let typnam = commands_define::TypeNameToString(mcx, returnType)?;
+        // C: only C-coded functions can be I/O functions; anything else is a
+        // typo, not a shell request.
+        if languageOid != INTERNALlanguageId && languageOid != ClanguageId {
+            return Err(err(
+                format!("type \"{}\" does not exist", typnam.as_str()),
+                ERRCODE_UNDEFINED_OBJECT,
+            ));
         }
-        return Err(err(
-            format!("type \"{typname}\" does not exist"),
-            ERRCODE_UNDEFINED_OBJECT,
-        ));
+        if !returnType.typmods.is_nil() {
+            return Err(err(
+                format!(
+                    "type modifier cannot be specified for shell type \"{}\"",
+                    typnam.as_str()
+                ),
+                ERRCODE_SYNTAX_ERROR,
+            ));
+        }
+        elog::ereport(types_error::NOTICE)
+            .errcode(ERRCODE_UNDEFINED_OBJECT)
+            .errmsg(format!("type \"{}\" is not yet defined", typnam.as_str()))
+            .errdetail("Creating a shell type definition.")
+            .finish(types_error::ErrorLocation::new("functioncmds.c", 0, "CreateFunction"))?;
+        let mut buf = [""; 4];
+        let nnames = returnType.names.len();
+        assert!((1..=3).contains(&nnames), "improper qualified name");
+        for (i, n) in returnType.names.iter().enumerate() {
+            buf[i] = n.as_string().expect("TypeName names").sval;
+        }
+        let (namespaceId, typname_last) =
+            catalog_namespace::QualifiedNameGetCreationNamespace(mcx, &buf[..nnames])?;
+        let aclresult = aclchk::object_aclcheck(
+            NAMESPACE_RELATION_ID,
+            namespaceId,
+            miscinit::GetUserId(),
+            types_nodes::parsenodes::ACL_CREATE,
+        )?;
+        if aclresult != aclchk::ACLCHECK_OK {
+            let nspname = lsyscache::get_namespace_name(mcx, namespaceId)?
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+            aclchk_seams::aclcheck_error::call(
+                aclresult,
+                ObjectType::OBJECT_SCHEMA as i32,
+                &nspname,
+            )?;
+        }
+        let address =
+            pg_type::TypeShellMake(mcx, typname_last, namespaceId, miscinit::GetUserId())?;
+        rettype = address.objectId;
     }
     check_defined_and_acl(rettype)?;
     Ok((rettype, returnType.setof))
@@ -348,6 +419,7 @@ struct ParameterList<'mcx> {
 fn interpret_function_parameter_list<'mcx>(
     mcx: Mcx<'mcx>,
     stmt: &CreateFunctionStmt<'mcx>,
+    languageOid: Oid,
 ) -> PgResult<ParameterList<'mcx>> {
     use FunctionParameterMode::*;
     let is_procedure = stmt.is_procedure;
@@ -371,7 +443,7 @@ fn interpret_function_parameter_list<'mcx>(
         };
         let tn_node: Node<'mcx> = fp.argType.expect("FunctionParameter.argType");
         let tn = tn_node.as_variant::<TypeName>().expect("argType is a TypeName");
-        let toid = resolve_type_name(mcx, tn)?;
+        let toid = resolve_type_name(mcx, tn, languageOid)?;
         if tn.setof {
             let msg = if is_procedure {
                 "procedures cannot accept set arguments"
@@ -661,7 +733,7 @@ pub fn CreateFunction<'mcx>(
         ));
     }
 
-    let params = interpret_function_parameter_list(mcx, stmt)?;
+    let params = interpret_function_parameter_list(mcx, stmt, languageOid)?;
 
     let (prorettype, returnsSet) = if stmt.is_procedure {
         debug_assert!(stmt.returnType.is_none());

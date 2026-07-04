@@ -7807,6 +7807,17 @@ impl<'mcx> Parser<'mcx> {
             }
             1371 | 1373 => *yyval = def_elem(mcx, view.v(1).str_val(), Option::None, view.l(1))?,
             1372 => *yyval = def_elem(mcx, view.v(1).str_val(), view.v(3).node(), view.l(1))?,
+            // DefineStmt: CREATE TYPE_P any_name definition | CREATE TYPE_P
+            // any_name (shell)
+            851 | 852 => {
+                let mut n = Node::build::<parsenodes::DefineStmt>(mcx)?;
+                n.kind = ObjectType::OBJECT_TYPE;
+                n.defnames = view.v(3).list();
+                if rule == 851 {
+                    n.definition = view.v(4).list();
+                }
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
             // DefineStmt: CREATE TYPE_P any_name AS ENUM_P '(' opt_enum_val_list ')'
             854 => {
                 let mut n = Node::build::<CreateEnumStmt>(mcx)?;
