@@ -21,3 +21,5 @@ tablecmds = { path = "../tablecmds" }
 xact = { path = "../../access/transam/xact" }
 types_portal = { path = "../../../_support/types/portal" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
+parse_relation = { path = "../../parser/parse_relation" }
+elog = { path = "../../utils/error/elog" }
