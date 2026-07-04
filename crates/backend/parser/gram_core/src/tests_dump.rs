@@ -1067,6 +1067,27 @@ fn node(out: &mut String, n: Node<'_>) {
             None => out.push_str("<>"),
         }
         out.push('}');
+    } else if let Some(a) = n.as_variant::<types_nodes::parsenodes::AlterDomainStmt>() {
+        out.push_str("{ALTERDOMAINSTMT :subtype ");
+        out.push(a.subtype as char);
+        list_field(out, "typeName", &a.typeName);
+        string_field(out, "name", a.name);
+        node_field(out, "def", a.def);
+        int_field(out, "behavior", a.behavior as i32);
+        bool_field(out, "missing_ok", a.missing_ok);
+        out.push('}');
+    } else if let Some(a) = n.as_variant::<types_nodes::parsenodes::AlterObjectSchemaStmt>() {
+        out.push_str("{ALTEROBJECTSCHEMASTMT");
+        int_field(out, "objectType", a.objectType as i32);
+        out.push_str(" :relation ");
+        match a.relation {
+            Some(rv) => range_var(out, rv),
+            None => out.push_str("<>"),
+        }
+        node_field(out, "object", a.object);
+        string_field(out, "newschema", a.newschema);
+        bool_field(out, "missing_ok", a.missing_ok);
+        out.push('}');
     } else if let Some(a) = n.as_alter_function_stmt() {
         out.push_str("{ALTERFUNCTIONSTMT");
         int_field(out, "objtype", a.objtype as i32);
