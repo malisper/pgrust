@@ -36,6 +36,7 @@ pub fn init_all() {
     large_object::init_seams();
     catalog_namespace::init_seams();
     catalog_dependency::init_seams();
+    catalog_objectaddress::init_seams();
     tablecmds::init_seams();
     commands_cluster::init_seams();
     event_trigger::init_seams();
@@ -104,7 +105,6 @@ pub fn init_all() {
     rewrite_handler::init_seams();
     rewrite_define::init_seams();
     opclasscmds::init_seams();
-    catalog_objectaddress::init_seams();
     aio_config::init_seams();
     bufmgr::init_seams();
     fd::init_seams();

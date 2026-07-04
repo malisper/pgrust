@@ -204,7 +204,7 @@ pub(crate) fn transformTableLikeClause<'mcx>(
             for nnode in lst.iter() {
                 let nn = nnode.as_variant::<Constraint>().expect("Constraint");
                 let conname = nn.conname.expect("copied not-null conname");
-                let con_oid = pg_constraint::get_relation_constraint_oid(mcx, relid, conname)?;
+                let con_oid = pg_constraint::get_relation_constraint_oid(mcx, relid, conname, false)?;
                 if let Some(comment) =
                     commands_comment::GetComment(mcx, con_oid, CONSTRAINT_RELATION_ID, 0)?
                 {
@@ -393,6 +393,7 @@ pub fn expandTableLikeClause<'mcx>(
                         mcx,
                         relation.rd_id,
                         ccname,
+                        false,
                     )?;
                     if let Some(comment) =
                         commands_comment::GetComment(mcx, con_oid, CONSTRAINT_RELATION_ID, 0)?

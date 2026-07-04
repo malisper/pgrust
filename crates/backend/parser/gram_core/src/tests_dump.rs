@@ -505,6 +505,12 @@ fn node(out: &mut String, n: Node<'_>) {
         node_field(out, "defexpr", p.defexpr);
         int_field(out, "location", p.location);
         out.push('}');
+    } else if let Some(c) = n.as_comment_stmt() {
+        out.push_str("{COMMENTSTMT");
+        int_field(out, "objtype", c.objtype as i32);
+        node_field(out, "object", c.object);
+        string_field(out, "comment", c.comment);
+        out.push('}');
     } else if let Some(d) = n.as_drop_stmt() {
         out.push_str("{DROPSTMT");
         list_field(out, "objects", &d.objects);
@@ -1052,12 +1058,6 @@ fn node(out: &mut String, n: Node<'_>) {
         int_field(out, "mode", p.mode as i32);
         node_field(out, "defexpr", p.defexpr);
         int_field(out, "location", p.location);
-        out.push('}');
-    } else if let Some(c) = n.as_comment_stmt() {
-        out.push_str("{COMMENTSTMT");
-        int_field(out, "objtype", c.objtype as i32);
-        node_field(out, "object", c.object);
-        string_field(out, "comment", c.comment);
         out.push('}');
     } else if let Some(r) = n.as_variant::<types_nodes::parsenodes::RenameStmt>() {
         out.push_str("{RENAMESTMT");

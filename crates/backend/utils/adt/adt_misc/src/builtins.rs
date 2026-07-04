@@ -54,6 +54,28 @@ pub fn fc_col_description(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -
     description_result(fcinfo, objoid, RELATION_RELATION_ID, attnum)
 }
 
+pub fn fc_shobj_description(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let objoid = fcinfo.arg_oid(0);
+    // SAFETY: catalog arg 1 of shobj_description is a non-null name (strict fn).
+    let catalogname = unsafe { fcinfo.arg_name(1) };
+    let len = catalogname.iter().position(|&b| b == 0).unwrap_or(catalogname.len());
+    let catalogname = core::str::from_utf8(&catalogname[..len])
+        .expect("catalog names are valid UTF-8");
+    let classoid = lsyscache::get_relname_relid(catalogname, PG_CATALOG_NAMESPACE)?;
+    if classoid == InvalidOid {
+        return Ok(fcinfo.return_null());
+    }
+    let found = crate::introspect::get_shared_description(fcinfo.result_mcx(), objoid, classoid)?
+        .map(varlena_result);
+    match found {
+        Some(d) => Ok(d),
+        None => Ok(fcinfo.return_null()),
+    }
+}
+
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin {
         foid,
@@ -186,4 +208,5 @@ pub const MISC_BUILTINS: &[FmgrBuiltin] = &[
         retset: true,
         func: fc_pg_get_keywords,
     },
+    b(1993, "shobj_description", 2, fc_shobj_description),
 ];

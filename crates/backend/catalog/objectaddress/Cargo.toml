@@ -22,6 +22,8 @@ catalog = { path = "../catalog" }
 catalog_namespace = { path = "../catalog_namespace" }
 pg_depend = { path = "../pg_depend" }
 pg_attrdef = { path = "../pg_attrdef" }
+pg_constraint = { path = "../pg_constraint" }
+pg_largeobject = { path = "../pg_largeobject" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
 format_type = { path = "../../utils/adt/format_type" }
@@ -32,13 +34,18 @@ fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
 lmgr = { path = "../../storage/lmgr/lmgr" }
 sinval = { path = "../../storage/ipc/sinval" }
 miscinit = { path = "../../utils/init/miscinit" }
+superuser = { path = "../../utils/misc/superuser" }
+dbcommands = { path = "../../commands/dbcommands" }
 dbcommands_seams = { path = "../../commands/dbcommands_seams" }
+commands_tablespace = { path = "../../commands/tablespace" }
 extension = { path = "../../commands/extension" }
 trigger = { path = "../../commands/trigger" }
 parse_oper = { path = "../../parser/parse_oper" }
 parse_func = { path = "../../parser/parse_func" }
+parse_utilcmd = { path = "../../parser/parse_utilcmd" }
 opclasscmds_seams = { path = "../../commands/opclasscmds_seams" }
 rewrite_define_seams = { path = "../../rewrite/rewrite_define_seams" }
 cache_syscache = { path = "../../utils/cache/cache_syscache" }
 objectaddress_seams = { path = "../objectaddress_seams" }
+adt_acl = { path = "../../utils/adt/acl" }
 adt_regproc = { path = "../../utils/adt/regproc" }

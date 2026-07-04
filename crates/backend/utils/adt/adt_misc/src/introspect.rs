@@ -17,6 +17,9 @@ pub const PG_VERSION_STR: &str = "PostgreSQL 18.3 (pgrust)";
 const DESCRIPTION_RELATION_ID: Oid = 2609;
 const DESCRIPTION_OBJ_INDEX_ID: Oid = 2675;
 const ANUM_PG_DESCRIPTION_DESCRIPTION: i32 = 4;
+const SHARED_DESCRIPTION_RELATION_ID: Oid = 2396;
+const SHARED_DESCRIPTION_OBJ_INDEX_ID: Oid = 2397;
+const ANUM_PG_SHDESCRIPTION_DESCRIPTION: i32 = 3;
 
 pub fn current_database() -> PgResult<NameData> {
     let dbname = dbcommands::get_database_name(init_small::globals::MyDatabaseId())?
@@ -37,48 +40,69 @@ fn scankey(attno: usize, func: types_core::primitive::RegProcedure, arg: Datum) 
     key
 }
 
+fn description_scan<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+    indexid: Oid,
+    desc_attno: i32,
+    keys: &[ScanKeyData],
+) -> PgResult<Option<Varlena<'mcx>>> {
+    let rel = table::table_open(mcx, relid, AccessShareLock)?;
+    let mut result: Option<Varlena<'mcx>> = None;
+    genam_seams::systable_scan_catalog::call(&rel, indexid, true, keys, &mut |tup| {
+        let mut isnull = false;
+        // SAFETY: NOT NULL text column under the relation's own descriptor.
+        let d = unsafe { types_tuple::heap_getattr(tup, desc_attno, rel.descr(), &mut isnull) };
+        debug_assert!(!isnull);
+        // SAFETY: in-tuple varlena, live for this callback; from_ptr
+        // panics loudly on external/compressed images.
+        let payload =
+            unsafe { types_fmgr::PackedVarlena::from_ptr(d.as_usize() as *const u8) }.data();
+        let mut image =
+            mcx::vec_with_capacity_in(mcx, datum::varlena::VARHDRSZ + payload.len())?;
+        image.resize(datum::varlena::VARHDRSZ, 0);
+        mcx::vec_append_bytes(&mut image, payload)?;
+        result = Some(Varlena::from_image(image));
+        Ok(false)
+    })?;
+    rel.close(AccessShareLock)?;
+    Ok(result)
+}
+
 pub fn get_description<'mcx>(
     mcx: Mcx<'mcx>,
     objoid: Oid,
     classoid: Oid,
     objsubid: i32,
 ) -> PgResult<Option<Varlena<'mcx>>> {
-    let rel = table::table_open(mcx, DESCRIPTION_RELATION_ID, AccessShareLock)?;
     let keys = [
         scankey(1, types_core::fmgr::F_OIDEQ, Datum::from_oid(objoid)),
         scankey(2, types_core::fmgr::F_OIDEQ, Datum::from_oid(classoid)),
         scankey(3, types_core::fmgr::F_INT4EQ, Datum::from_i32(objsubid)),
     ];
-    let mut result: Option<Varlena<'mcx>> = None;
-    genam_seams::systable_scan_catalog::call(
-        &rel,
+    description_scan(
+        mcx,
+        DESCRIPTION_RELATION_ID,
         DESCRIPTION_OBJ_INDEX_ID,
-        true,
+        ANUM_PG_DESCRIPTION_DESCRIPTION,
         &keys,
-        &mut |tup| {
-            let mut isnull = false;
-            // SAFETY: NOT NULL text column under the relation's own descriptor.
-            let d = unsafe {
-                types_tuple::heap_getattr(
-                    tup,
-                    ANUM_PG_DESCRIPTION_DESCRIPTION,
-                    rel.descr(),
-                    &mut isnull,
-                )
-            };
-            debug_assert!(!isnull);
-            // SAFETY: in-tuple varlena, live for this callback; from_ptr
-            // panics loudly on external/compressed images.
-            let payload =
-                unsafe { types_fmgr::PackedVarlena::from_ptr(d.as_usize() as *const u8) }.data();
-            let mut image =
-                mcx::vec_with_capacity_in(mcx, datum::varlena::VARHDRSZ + payload.len())?;
-            image.resize(datum::varlena::VARHDRSZ, 0);
-            mcx::vec_append_bytes(&mut image, payload)?;
-            result = Some(Varlena::from_image(image));
-            Ok(false)
-        },
-    )?;
-    rel.close(AccessShareLock)?;
-    Ok(result)
+    )
+}
+
+pub fn get_shared_description<'mcx>(
+    mcx: Mcx<'mcx>,
+    objoid: Oid,
+    classoid: Oid,
+) -> PgResult<Option<Varlena<'mcx>>> {
+    let keys = [
+        scankey(1, types_core::fmgr::F_OIDEQ, Datum::from_oid(objoid)),
+        scankey(2, types_core::fmgr::F_OIDEQ, Datum::from_oid(classoid)),
+    ];
+    description_scan(
+        mcx,
+        SHARED_DESCRIPTION_RELATION_ID,
+        SHARED_DESCRIPTION_OBJ_INDEX_ID,
+        ANUM_PG_SHDESCRIPTION_DESCRIPTION,
+        &keys,
+    )
 }

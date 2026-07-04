@@ -5,7 +5,6 @@ edition.workspace = true
 publish.workspace = true
 
 [lib]
-name = "trigger"
 path = "src/lib.rs"
 
 [dependencies]
@@ -30,6 +29,7 @@ catalog = { path = "../../catalog/catalog" }
 catalog_indexing = { path = "../../catalog/catalog_indexing" }
 pg_depend = { path = "../../catalog/pg_depend" }
 relcache = { path = "../../utils/cache/relcache" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
 inval = { path = "../../utils/cache/inval" }
 miscinit = { path = "../../utils/init/miscinit" }
 types_nodes = { path = "../../../_support/types/nodes" }
@@ -42,7 +42,6 @@ parse_clause = { path = "../../parser/parse_clause" }
 parse_collate = { path = "../../parser/parse_collate" }
 catalog_namespace = { path = "../../catalog/catalog_namespace" }
 pg_constraint = { path = "../../catalog/pg_constraint" }
-lsyscache = { path = "../../utils/cache/lsyscache" }
 superuser = { path = "../../utils/misc/superuser" }
 init_small = { path = "../../utils/init/init_small" }
 lmgr = { path = "../../storage/lmgr/lmgr" }
