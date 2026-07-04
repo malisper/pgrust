@@ -200,10 +200,11 @@ fn restrict_and_check_grant(
         ObjectType::OBJECT_LANGUAGE => ACL_ALL_RIGHTS_LANGUAGE,
         ObjectType::OBJECT_LARGEOBJECT => ACL_ALL_RIGHTS_LARGEOBJECT,
         ObjectType::OBJECT_SCHEMA => ACL_ALL_RIGHTS_SCHEMA,
+        ObjectType::OBJECT_TABLESPACE => ACL_ALL_RIGHTS_TABLESPACE,
         ObjectType::OBJECT_TYPE => ACL_ALL_RIGHTS_TYPE,
         other => panic!(
             "restrict_and_check_grant (aclchk.c): object type {} arm unported \
-             (tablespace/fdw/parameter lanes)",
+             (fdw/parameter lanes)",
             other as i32
         ),
     };

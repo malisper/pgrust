@@ -146,6 +146,9 @@ pub fn CreateCommandTag(parsetree: Node<'_>) -> CommandTag {
                 | types_nodes::parsenodes::ObjectType::OBJECT_DOMCONSTRAINT => {
                     CMDTAG_ALTER_DOMAIN
                 }
+                types_nodes::parsenodes::ObjectType::OBJECT_TABLESPACE => {
+                    CMDTAG_ALTER_TABLESPACE
+                }
                 _ => payload_gap("CreateCommandTag", "RenameStmt non-table"),
             }
         }
@@ -177,6 +180,9 @@ pub fn CreateCommandTag(parsetree: Node<'_>) -> CommandTag {
                 }
                 types_nodes::parsenodes::ObjectType::OBJECT_DOMAIN => CMDTAG_ALTER_DOMAIN,
                 types_nodes::parsenodes::ObjectType::OBJECT_TYPE => CMDTAG_ALTER_TYPE,
+                types_nodes::parsenodes::ObjectType::OBJECT_TABLESPACE => {
+                    CMDTAG_ALTER_TABLESPACE
+                }
                 _ => payload_gap("CreateCommandTag", "AlterOwnerStmt"),
             }
         }
