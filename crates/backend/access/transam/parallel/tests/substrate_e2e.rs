@@ -394,7 +394,7 @@ fn launch_registered_workers() -> Vec<std::thread::JoinHandle<i32>> {
                 guc::store::initialize_guc_options_for_child(&guc_snapshot)
                     .and_then(|()| guc::store::restore_nondefault_variables(&guc_snapshot))
                     .unwrap();
-                fd::InitFileAccess();
+                // fd::InitFileAccess is BaseInit's job inside BackgroundWorkerMain.
                 waiteventset::InitializeWaitEventSupport().unwrap();
                 miscinit::InitProcessLocalLatch();
                 latch::InitializeLatchWaitSet().unwrap();
