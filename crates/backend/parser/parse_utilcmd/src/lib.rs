@@ -8,7 +8,6 @@ mod like;
 pub use like::{expandTableLikeClause, generateClonedIndexStmt};
 
 use mcx::{Mcx, PgString};
-use types_core::catalog::ATTRIBUTE_GENERATED_STORED;
 use types_core::{InvalidOid, Oid, INT2OID, INT4OID, INT8OID, NAMEDATALEN};
 use types_error::{
     PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_SYNTAX_ERROR,
@@ -576,9 +575,6 @@ fn transformColumnDefinition<'mcx>(
                         constraint.location,
                     ));
                 }
-                if constraint.generated_kind != ATTRIBUTE_GENERATED_STORED {
-                    unported("GENERATED ... VIRTUAL columns");
-                }
                 let kind = constraint.generated_kind;
                 let raw_expr = constraint.raw_expr;
                 debug_assert!(constraint.cooked_expr.is_none());
@@ -692,9 +688,6 @@ fn transformColumnDefinition<'mcx>(
         }
         let colname = column.colname.expect("ColumnDef.colname");
         nnconstraints.lappend(mcx, make_not_null_constraint(mcx, colname)?)?;
-    }
-    if column.identity != 0 || column.generated != 0 {
-        unported("identity/generated columns");
     }
     if column.is_from_type {
         unported("is_from_type columns (OF type / LIKE)");

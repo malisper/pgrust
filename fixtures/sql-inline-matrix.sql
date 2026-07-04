@@ -34,3 +34,11 @@ SELECT inl_rec(3);
 SELECT inl_multi(5), inl_strict_unused(4, 9), inl_agg(8);
 SELECT inl_setconf(2);
 SELECT id, b || id FROM inl_t WHERE inl_add(a, 1) = 5 ORDER BY id LIMIT 5;
+SELECT a.b AS x, b.b AS y, inl_lt_noninline(a.b, b.b) FROM inl_short a, inl_short b ORDER BY a.b, b.b;
+SET max_stack_depth = '2048kB';
+\set VERBOSITY sqlstate
+SELECT inl_selfrec(1);
+\set VERBOSITY terse
+SELECT inl_selfrec(1);
+\set VERBOSITY verbose
+RESET max_stack_depth;

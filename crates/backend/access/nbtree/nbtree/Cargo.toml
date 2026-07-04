@@ -22,6 +22,7 @@ types_fmgr = { path = "../../../../_support/types/fmgr" }
 types_relscan = { path = "../../index/relscan" }
 fmgr_core = { path = "../../../utils/fmgr/fmgr_core" }
 lsyscache = { path = "../../../utils/cache/lsyscache" }
+arrayfuncs = { path = "../../../utils/adt/arrayfuncs" }
 genam_seams = { path = "../../index/genam_seams" }
 nbt_compare = { path = "../compare" }
 varlena = { path = "../../../utils/adt/varlena" }

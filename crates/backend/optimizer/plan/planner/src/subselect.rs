@@ -1416,12 +1416,29 @@ fn hash_ok_operator(expr: &types_nodes::primnodes::OpExpr<'_>) -> PgResult<bool>
 
 // materialize_finished_plan (createplan.c) + cost_material (costsize.c):
 // Material shield so repeated rescans of an uncorrelated subplan are cheap.
-fn materialize_finished_plan<'mcx>(mcx: Mcx<'mcx>, subplan: Node<'mcx>) -> PgResult<Node<'mcx>> {
+pub(crate) fn materialize_finished_plan<'mcx>(mcx: Mcx<'mcx>, subplan: Node<'mcx>) -> PgResult<Node<'mcx>> {
+    // C's "horrid kluge": hoist the subplan's initPlans (and their cost
+    // delta) onto the Material node so SS_finalize_plan sees them at the top.
+    let mut initplan_cost = 0.0;
+    let mut unsafe_initplans = false;
+    // SAFETY: exclusive plan-tree ownership (clean_up_removed_plan_level
+    // precedent).
+    let init_plan = unsafe {
+        subplan.with_plan_mut(|p| {
+            for sp_node in &p.initPlan {
+                let sp = sp_node.as_sub_plan().expect("initPlan holds SubPlan nodes");
+                initplan_cost += sp.startup_cost + sp.per_call_cost;
+                if !sp.parallel_safe {
+                    unsafe_initplans = true;
+                }
+            }
+            p.startup_cost -= initplan_cost;
+            p.total_cost -= initplan_cost;
+            core::mem::take(&mut p.initPlan)
+        })
+    }
+    .expect("plan node");
     let sub = subplan.as_plan().expect("plan node");
-    assert!(
-        sub.initPlan.is_nil(),
-        "materialize_finished_plan (createplan.c): initPlan hoist not ported"
-    );
     let mut tlist = NodeList::nil();
     for te in &sub.targetlist {
         tlist.lappend(mcx, te)?;
@@ -1442,12 +1459,13 @@ fn materialize_finished_plan<'mcx>(mcx: Mcx<'mcx>, subplan: Node<'mcx>) -> PgRes
         let npages = (nbytes / 8192.0).ceil();
         run_cost += crate::gucs::seq_page_cost() * npages;
     }
-    plan.plan.startup_cost = startup_cost;
-    plan.plan.total_cost = startup_cost + run_cost;
+    plan.plan.initPlan = init_plan;
+    plan.plan.startup_cost = startup_cost + initplan_cost;
+    plan.plan.total_cost = startup_cost + run_cost + initplan_cost;
     plan.plan.plan_rows = sub.plan_rows;
     plan.plan.plan_width = sub.plan_width;
     plan.plan.parallel_aware = false;
-    plan.plan.parallel_safe = sub.parallel_safe;
+    plan.plan.parallel_safe = sub.parallel_safe && !unsafe_initplans;
     Ok(plan.seal())
 }
 

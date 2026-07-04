@@ -66,6 +66,20 @@ extern "C" fn crash_handler(sig: i32, info: *mut libc::siginfo_t, _uctx: *mut li
     // SAFETY: write(2) is async-signal-safe; fd 2 is the server log.
     unsafe {
         libc::write(2, w.buf.as_ptr() as *const libc::c_void, w.at);
+    }
+    // Best-effort frame dump (glibc backtrace is not async-signal-safe; the
+    // disposition is already restored, so a fault here dies under SIG_DFL).
+    #[cfg(target_os = "linux")]
+    // SAFETY: see above; addresses are written raw to fd 2.
+    unsafe {
+        let mut frames = [core::ptr::null_mut::<libc::c_void>(); 64];
+        let n = libc::backtrace(frames.as_mut_ptr(), frames.len() as i32);
+        if n > 0 {
+            libc::backtrace_symbols_fd(frames.as_ptr(), n, 2);
+        }
+    }
+    // SAFETY: raise(2) is async-signal-safe.
+    unsafe {
         libc::raise(sig);
     }
 }

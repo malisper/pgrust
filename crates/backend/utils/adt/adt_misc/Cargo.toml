@@ -28,3 +28,11 @@ table = { path = "../../../access/table/table" }
 dbcommands = { path = "../../../commands/dbcommands" }
 init_small = { path = "../../init/init_small" }
 varlena = { path = "../varlena" }
+elog = { path = "../../error/elog" }
+latch_seams = { path = "../../../storage/ipc/latch_seams" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
+timestamp_seams = { path = "../timestamp_seams" }
+waitevent = { path = "../../activity/waitevent" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+syscache_seams = { path = "../../cache/syscache_seams" }
+keywords = { path = "../../../../common/keywords" }

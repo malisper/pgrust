@@ -25,7 +25,9 @@ pub use case::{
     asc_initcap, asc_tolower, asc_toupper, get_th, index_seq_search, is_separator_char, str_numth,
     str_tolower, suff_search,
 };
-pub use dch_entry::{timestamp_to_char, timestamptz_to_char, to_date, to_timestamp};
+pub use dch_entry::{
+    parse_datetime, timestamp_to_char, timestamptz_to_char, to_date, to_timestamp, ParsedDatetime,
+};
 pub use fmgr_builtins::FORMATTING_BUILTINS;
 pub use num_entry::{
     float4_to_char, float8_to_char, int4_to_char, int8_to_char, numeric_to_char, numeric_to_number,

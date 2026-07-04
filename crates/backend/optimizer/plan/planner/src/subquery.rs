@@ -56,6 +56,12 @@ pub fn subquery_planner<'mcx>(
     {
         crate::prepjointree::pull_up_subqueries(mcx, &mut parse)?;
     }
+    if parse.rtable.iter().any(|n| {
+        let r = n.as_range_tbl_entry().expect("rtable cell");
+        r.rtekind == RTEKind::RTE_RELATION && matches!(r.relkind, b'r' | b'p')
+    }) {
+        crate::prepjointree::expand_virtual_generated_columns(mcx, &mut parse)?;
+    }
 
     let mut has_outer_joins = false;
     let mut has_result_rtes = false;

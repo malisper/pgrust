@@ -201,6 +201,17 @@ impl<'mcx> MinimalTuple<'mcx> {
         // SAFETY: the first extra bytes of the owned block.
         unsafe { core::slice::from_raw_parts_mut(self.base.as_ptr(), self.extra as usize) }
     }
+
+    /// Whole-allocation pointer (`extra` prefix at offset 0, tuple at
+    /// `extra`), full-image provenance — an `extra_mut()`-derived pointer
+    /// covers only the prefix and cannot reach the tuple. Forgets self:
+    /// the block is bulk-freed with its context (docs/no-drop.md).
+    #[inline]
+    pub fn forget_base(self) -> NonNull<u8> {
+        let p = self.base;
+        core::mem::forget(self);
+        p
+    }
 }
 
 impl Drop for MinimalTuple<'_> {

@@ -8,13 +8,19 @@ use backend_status_seams::BackendState;
 const PG_STAT_GET_ACTIVITY_COLS: usize = 31;
 const ROLE_PG_READ_ALL_STATS: Oid = 3375;
 
-fn text_datum(fcinfo: &Fcinfo, s: &str) -> PgResult<Datum> {
+pub(crate) fn text_datum(fcinfo: &Fcinfo, s: &str) -> PgResult<Datum> {
     Ok(varlena_result(varlena::cstring_to_text(fcinfo.result_mcx(), s.as_bytes())?))
+}
+
+pub(crate) fn has_pgstat_permissions(userid: Oid) -> PgResult<bool> {
+    let uid = miscinit::GetUserId();
+    Ok(acl_seams::has_privs_of_role::call(uid, ROLE_PG_READ_ALL_STATS)?
+        || acl_seams::has_privs_of_role::call(uid, userid)?)
 }
 
 // C: sockaddr_storage ss_family; on both linux and macos targets the libc
 // sockaddr_storage layout starts with (len,) family.
-fn ss_family(addr: &[u8]) -> i32 {
+pub(crate) fn ss_family(addr: &[u8]) -> i32 {
     let mut ss: libc::sockaddr_storage = unsafe { core::mem::zeroed() };
     let n = core::mem::size_of::<libc::sockaddr_storage>().min(addr.len());
     unsafe {
@@ -23,7 +29,7 @@ fn ss_family(addr: &[u8]) -> i32 {
     ss.ss_family as i32
 }
 
-fn aux_pid_get_proc(pid: i32) -> Option<&'static types_storage::storage::PGPROC> {
+pub(crate) fn aux_pid_get_proc(pid: i32) -> Option<&'static types_storage::storage::PGPROC> {
     let procs = &lmgr_proc::ProcGlobal().allProcs;
     procs
         .iter()
@@ -42,8 +48,6 @@ pub fn fc_pg_stat_get_activity(
     let mcx = unsafe { fcinfo.result_mcx_detached() };
     let mut srf = funcapi::InitMaterializedSRF(mcx, flinfo, fcinfo, 0)?;
     debug_assert_eq!(srf.tupdesc.natts as usize, PG_STAT_GET_ACTIVITY_COLS);
-
-    let uid = miscinit::GetUserId();
 
     for curr in 1..=num_backends {
         let Some(local) = backend_status::pgstat_get_local_beentry_by_index(curr) else {
@@ -84,8 +88,7 @@ pub fn fc_pg_stat_get_activity(
             nulls[16] = true;
         }
 
-        let has_perm = acl_seams::has_privs_of_role::call(uid, ROLE_PG_READ_ALL_STATS)?
-            || acl_seams::has_privs_of_role::call(uid, be.st_userid)?;
+        let has_perm = has_pgstat_permissions(be.st_userid)?;
         if has_perm {
             match be.st_state {
                 BackendState::STATE_STARTING => values[4] = text_datum(fcinfo, "starting")?,

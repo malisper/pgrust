@@ -3,9 +3,10 @@
 
 use mcx::PgVec;
 use types_error::PgResult;
+use types_nodes::parsenodes::Query;
 use types_pathnodes::{
     JoinlistNode, RelId, Relids, RinfoId, SpecialJoinInfo, UniqueRelInfo, JOIN_LEFT, JOIN_SEMI,
-    RELOPT_BASEREL, RTE_RELATION,
+    RELOPT_BASEREL, RTE_RELATION, RTE_SUBQUERY,
 };
 
 use crate::relnode::{
@@ -325,14 +326,29 @@ fn rel_supports_distinctness(run: &PlannerRun<'_>, rel: RelId) -> bool {
     if rel.reloptkind != RELOPT_BASEREL {
         return false;
     }
-    // C divergence: the RTE_SUBQUERY arm (query_supports_distinctness) is
-    // unported — a provably-distinct subquery RHS keeps its join / stays
-    // inner_unique=false where C could prove it.
-    rel.rtekind == RTE_RELATION
-        && rel
+    if rel.rtekind == RTE_RELATION {
+        return rel
             .indexlist
             .iter()
-            .any(|ind| ind.unique && ind.immediate && ind.indpred.is_empty())
+            .any(|ind| ind.unique && ind.immediate && ind.indpred.is_empty());
+    }
+    if rel.rtekind == RTE_SUBQUERY {
+        let rte = run.rte(rel.relid as usize);
+        return rte.subquery.is_some_and(query_supports_distinctness);
+    }
+    false
+}
+
+pub fn query_supports_distinctness(query: &Query<'_>) -> bool {
+    if query.hasTargetSRFs && query.distinctClause.is_nil() {
+        return false;
+    }
+    !query.distinctClause.is_nil()
+        || !query.groupClause.is_nil()
+        || !query.groupingSets.is_nil()
+        || query.hasAggs
+        || query.havingQual.is_some()
+        || query.setOperations.is_some()
 }
 
 fn rel_is_distinct_for(
@@ -343,10 +359,130 @@ fn rel_is_distinct_for(
     if run.root.rel(rel).reloptkind != RELOPT_BASEREL {
         return Ok(false);
     }
-    if run.root.rel(rel).rtekind != RTE_RELATION {
+    let rtekind = run.root.rel(rel).rtekind;
+    if rtekind == RTE_RELATION {
+        return crate::pathnode::relation_has_unique_index_for(run, rel, clause_list, &[], &[]);
+    }
+    if rtekind == RTE_SUBQUERY {
+        let relid = run.root.rel(rel).relid;
+        let Some(subquery) = run.rte(relid as usize).subquery else {
+            return Ok(false);
+        };
+        let mut colnos: PgVec<'_, i16> = PgVec::new_in(run.mcx);
+        let mut opids: PgVec<'_, types_core::Oid> = PgVec::new_in(run.mcx);
+        for &rid in clause_list {
+            let ri = run.root.rinfo(rid);
+            let clause = *run.root.expr_node(ri.clause);
+            // The caller's mergejoinability test selected only OpExprs.
+            let op = clause.as_op_expr().expect("mergejoinable clause is an OpExpr");
+            let side = if ri.outer_is_left { op.args.nth(1) } else { op.args.nth(0) };
+            let side = side.as_relabel_type().map_or(side, |r| r.arg);
+            let Some(v) = side.as_var() else { continue };
+            if v.varno != relid as i32 || v.varlevelsup != 0 {
+                continue;
+            }
+            colnos.push(v.varattno);
+            opids.push(op.opno);
+        }
+        return query_is_distinct_for(subquery, &colnos, &opids);
+    }
+    Ok(false)
+}
+
+fn get_sortgroupclause_tle<'mcx>(
+    sortgroupref: types_core::Index,
+    tlist: &types_nodes::NodeList<'mcx>,
+) -> &'mcx types_nodes::primnodes::TargetEntry<'mcx> {
+    tlist
+        .iter()
+        .find_map(|n| {
+            let t = n.as_target_entry().expect("tlist cell");
+            (t.ressortgroupref == sortgroupref).then_some(t)
+        })
+        .expect("ORDER/GROUP BY expression not found in targetlist")
+}
+
+fn distinct_col_search(colno: i16, colnos: &[i16], opids: &[types_core::Oid]) -> types_core::Oid {
+    colnos.iter().position(|&c| c == colno).map_or(0, |i| opids[i])
+}
+
+pub fn query_is_distinct_for(
+    query: &Query<'_>,
+    colnos: &[i16],
+    opids: &[types_core::Oid],
+) -> PgResult<bool> {
+    debug_assert!(colnos.len() == opids.len());
+
+    let all_match = |clauses: &types_nodes::NodeList<'_>| -> PgResult<bool> {
+        for n in clauses {
+            let sgc = n.as_sort_group_clause().expect("SortGroupClause cell");
+            let tle = get_sortgroupclause_tle(sgc.tleSortGroupRef, &query.targetList);
+            let opid = distinct_col_search(tle.resno, colnos, opids);
+            if opid == 0 || !lsyscache::equality_ops_are_compatible(opid, sgc.eqop)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    };
+
+    // DISTINCT (including DISTINCT ON) proves uniqueness even with SRFs in
+    // the tlist.
+    if !query.distinctClause.is_nil() && all_match(&query.distinctClause)? {
+        return Ok(true);
+    }
+    // A tlist SRF can duplicate rows after grouping.
+    if query.hasTargetSRFs {
         return Ok(false);
     }
-    crate::pathnode::relation_has_unique_index_for(run, rel, clause_list, &[], &[])
+    if !query.groupClause.is_nil() && query.groupingSets.is_nil() {
+        if all_match(&query.groupClause)? {
+            return Ok(true);
+        }
+    } else if !query.groupingSets.is_nil() {
+        if !query.groupClause.is_nil() {
+            return Ok(false);
+        }
+        // A single empty grouping set returns exactly one row.
+        return Ok(query.groupingSets.len() == 1
+            && query
+                .groupingSets
+                .nth(0)
+                .as_grouping_set()
+                .expect("groupingSets cell")
+                .kind
+                == types_nodes::parsenodes::GroupingSetKind::GROUPING_SET_EMPTY);
+    } else if query.hasAggs || query.havingQual.is_some() {
+        return Ok(true);
+    }
+
+    if let Some(setop_node) = query.setOperations {
+        let topop = setop_node.as_set_operation_stmt().expect("setOperations stmt");
+        if !topop.all {
+            let mut lg = 0usize;
+            let mut matched = true;
+            for n in &query.targetList {
+                let tle = n.as_target_entry().expect("tlist cell");
+                if tle.resjunk {
+                    continue;
+                }
+                let sgc = topop
+                    .groupClauses
+                    .nth(lg)
+                    .as_sort_group_clause()
+                    .expect("setop groupClauses cell");
+                lg += 1;
+                let opid = distinct_col_search(tle.resno, colnos, opids);
+                if opid == 0 || !lsyscache::equality_ops_are_compatible(opid, sgc.eqop)? {
+                    matched = false;
+                    break;
+                }
+            }
+            if matched {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -2687,6 +2687,57 @@ fn fix_join_expr_mutator<'mcx>(
                 fix_alternative_subplan(run, node.as_alternative_sub_plan().unwrap(), num_exec);
             fix_join_expr_mutator(run, chosen, outer_tlist, inner_tlist, rtoffset, nrm_match, acceptable_rel, num_exec)
         }
+        NodeTag::T_SubscriptingRef => {
+            let sr = node.as_subscripting_ref().unwrap();
+            let mut upper = types_nodes::OptNodeList::nil();
+            for e in &sr.refupperindexpr {
+                let e = match e {
+                    Some(e) => Some(fix_join_expr_mutator(
+                        run, e, outer_tlist, inner_tlist, rtoffset, nrm_match, acceptable_rel,
+                        num_exec,
+                    )?),
+                    None => None,
+                };
+                upper.lappend(mcx, e)?;
+            }
+            let mut lower = types_nodes::OptNodeList::nil();
+            for e in &sr.reflowerindexpr {
+                let e = match e {
+                    Some(e) => Some(fix_join_expr_mutator(
+                        run, e, outer_tlist, inner_tlist, rtoffset, nrm_match, acceptable_rel,
+                        num_exec,
+                    )?),
+                    None => None,
+                };
+                lower.lappend(mcx, e)?;
+            }
+            let refexpr = match sr.refexpr {
+                Some(e) => Some(fix_join_expr_mutator(
+                    run, e, outer_tlist, inner_tlist, rtoffset, nrm_match, acceptable_rel, num_exec,
+                )?),
+                None => None,
+            };
+            let refassgnexpr = match sr.refassgnexpr {
+                Some(e) => Some(fix_join_expr_mutator(
+                    run, e, outer_tlist, inner_tlist, rtoffset, nrm_match, acceptable_rel, num_exec,
+                )?),
+                None => None,
+            };
+            Node::mk(
+                mcx,
+                types_nodes::SubscriptingRef {
+                    refcontainertype: sr.refcontainertype,
+                    refelemtype: sr.refelemtype,
+                    refrestype: sr.refrestype,
+                    reftypmod: sr.reftypmod,
+                    refcollid: sr.refcollid,
+                    refupperindexpr: upper,
+                    reflowerindexpr: lower,
+                    refexpr,
+                    refassgnexpr,
+                },
+            )
+        }
         NodeTag::T_RowExpr => {
             let r = node.as_row_expr().unwrap();
             let mut args = NodeList::nil();

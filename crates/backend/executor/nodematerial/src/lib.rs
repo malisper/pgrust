@@ -1,5 +1,5 @@
 // nodeMaterial.c over the in-memory tuplestore; mark/restore (merge-join
-// inner) and backward scan are loud.
+// inner) is loud.
 #![allow(non_snake_case)]
 
 use std::rc::Rc;
@@ -34,8 +34,8 @@ pub fn exec_init_material<'mcx>(
     result_desc: Rc<TupleDescData<'static>>,
 ) -> PgResult<MaterialState<'mcx>> {
     assert!(
-        eflags & (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK) == 0,
-        "ExecInitMaterial (nodeMaterial.c): BACKWARD/MARK consumer; mark-restore lane unported"
+        eflags & EXEC_FLAG_MARK == 0,
+        "ExecInitMaterial (nodeMaterial.c): MARK consumer; mark-restore lane unported"
     );
     let ps_ResultTupleSlot =
         estate.exec_init_extra_tuple_slot(Some(result_desc.clone()), TupleSlotKind::MinimalTuple);
@@ -66,6 +66,8 @@ pub fn exec_material<'mcx, C: MaterialChild<'mcx>>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<ExecSlotId>> {
     let mcx = estate.es_query_cxt;
+    let forward =
+        matches!(estate.es_direction, ::types_scan::ScanDirection::ForwardScanDirection);
     if node.tuplestorestate.is_none() && node.eflags != 0 {
         let mut ts = Tuplestore::begin_heap(true, false, init_small::globals::work_mem());
         ts.set_eflags(node.eflags);
@@ -73,16 +75,31 @@ pub fn exec_material<'mcx, C: MaterialChild<'mcx>>(
         node.tuplestorestate = Some(ts);
     }
 
-    if let Some(ts) = node.tuplestorestate.as_mut() {
-        if !ts.ateof() {
-            let slot = node.ps_ResultTupleSlot;
-            if ts.gettupleslot(true, false, &mut estate.es_tupleTable[slot.0 as usize], mcx)? {
-                return Ok(Some(slot));
+    let mut eof_tuplestore = node.tuplestorestate.as_ref().is_none_or(Tuplestore::ateof);
+
+    if !forward && eof_tuplestore {
+        if !node.eof_underlying {
+            // C: skip one back so gettupleslot yields the pre-EOF tuple's predecessor.
+            let ts = node.tuplestorestate.as_mut().expect("backward read requires a store");
+            if !ts.advance(forward) {
+                return Ok(None);
             }
         }
-        if node.eof_underlying {
+        eof_tuplestore = false;
+    }
+
+    if !eof_tuplestore {
+        let ts = node.tuplestorestate.as_mut().expect("checked above");
+        let slot = node.ps_ResultTupleSlot;
+        if ts.gettupleslot(forward, false, &mut estate.es_tupleTable[slot.0 as usize], mcx)? {
+            return Ok(Some(slot));
+        }
+        if !forward {
             return Ok(None);
         }
+    }
+    if node.eof_underlying {
+        return Ok(None);
     }
 
     let Some(outer_slot) = child.exec_proc(estate)? else {
@@ -108,11 +125,8 @@ pub fn exec_end_material(node: &mut MaterialState<'_>) {
     node.ps_ResultTupleDesc = None;
 }
 
-/// `ExecReScanMaterial`; chgParam is always NULL until the Param lanes land,
-/// so a built store is simply rewound. Returns true when the caller must
-/// rescan the child (no store to replay).
-/// ExecReScanMaterial (nodeMaterial.c), chgParam-nonnull arm: params changed
-/// somewhere below, so the stored results are stale — drop and re-read.
+/// ExecReScanMaterial (nodeMaterial.c), chgParam-nonnull arm: stored results
+/// are stale — drop and re-read.
 pub fn exec_rescan_material_chg<'mcx>(
     node: &mut MaterialState<'mcx>,
     estate: &mut EStateData<'mcx>,

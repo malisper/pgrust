@@ -147,34 +147,41 @@ static KEEPER_POOL: KeeperPool = KeeperPool {
 };
 
 impl KeeperPool {
-    #[inline]
+    // Single CAS try, never spin: a contended pool is bypassed (fresh alloc /
+    // direct free) — see PoolMutex::try_with.
+    #[cfg(test)]
     fn with<R>(&self, f: impl FnOnce(&mut alloc::vec::Vec<alloc::vec::Vec<Block>>) -> R) -> R {
-        self.stack.with(f)
+        self.stack.try_with(f).expect("uncontended in single-threaded test")
     }
 
     fn take(&self) -> alloc::vec::Vec<Block> {
-        match self.with(|stack| stack.pop()) {
-            Some(blocks) => {
+        match self.stack.try_with(|stack| stack.pop()) {
+            Some(Some(blocks)) => {
                 #[cfg(feature = "aset-stats")]
                 stats::KEEPER_REUSES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 blocks
             }
-            None => alloc::vec::Vec::new(),
+            _ => alloc::vec::Vec::new(),
         }
     }
 
     // `blocks` is exactly [keeper] with used == 0; a full list drains wholesale first.
     fn recycle(&self, blocks: alloc::vec::Vec<Block>) {
-        let overflow = self.with(|stack| {
+        let mut give = Some(blocks);
+        let overflow = self.stack.try_with(|stack| {
             let drained = if stack.len() >= MAX_FREE_CONTEXTS {
                 core::mem::take(stack)
             } else {
                 alloc::vec::Vec::new()
             };
-            stack.push(blocks);
+            stack.push(give.take().expect("closure runs at most once"));
             drained
         });
-        for v in overflow {
+        let spill = match overflow {
+            Some(drained) => drained,
+            None => alloc::vec![give.take().expect("closure did not run")],
+        };
+        for v in spill {
             for b in v {
                 // SAFETY: parked keepers own their blocks; this is the sole free.
                 unsafe { b.free() };

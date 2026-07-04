@@ -753,13 +753,16 @@ fn runtime_key_qual_builds_deferred_scan_key() {
 }
 
 #[test]
-fn saop_qual_panics_loudly_at_init() {
+fn saop_runtime_array_qual_panics_loudly_at_init() {
     let _g = serial();
     with_mcx(|mcx| {
         let heap_oid = fresh_oid();
         let index_oid = fresh_oid();
         register_indexed_table(heap_oid, index_oid, &[1]);
         let index_rel = index_relation(mcx, index_oid, heap_oid);
+        // Const-array SAOP is live; a non-Const (runtime) array stays loud.
+        let lvar = Node::mk_var(mcx, INDEX_VAR, 1, INT4OID, -1, 0, 0).unwrap();
+        let rvar = Node::mk_var(mcx, 1, 1, INT4OID, -1, 0, 0).unwrap();
         let saop = Node::mk(
             mcx,
             ::types_nodes::primnodes::ScalarArrayOpExpr {
@@ -769,7 +772,7 @@ fn saop_qual_panics_loudly_at_init() {
                 negfuncid: 0,
                 useOr: true,
                 inputcollid: 0,
-                args: NodeList::nil(),
+                args: NodeList::make2(mcx, lvar, rvar).unwrap(),
                 location: -1,
             },
         )
@@ -785,6 +788,6 @@ fn saop_qual_panics_loudly_at_init() {
             .cloned()
             .or_else(|| err.downcast_ref::<&str>().map(|s| s.to_string()))
             .unwrap_or_default();
-        assert!(msg.contains("ScalarArrayOpExpr"), "unexpected panic: {msg}");
+        assert!(msg.contains("runtime array key"), "unexpected panic: {msg}");
     });
 }

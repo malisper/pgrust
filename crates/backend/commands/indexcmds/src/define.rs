@@ -33,11 +33,28 @@ const F_OIDEQ: RegProcedure = 184;
 const ACL_CREATE: u64 = 1 << 9;
 const INDOPTION_DESC: i16 = 1 << 0;
 const INDOPTION_NULLS_FIRST: i16 = 1 << 1;
+const ATTRIBUTE_GENERATED_VIRTUAL: i8 = b'v' as i8;
 
 #[cold]
 #[inline(never)]
 fn unported(what: &str) -> ! {
     panic!("unported: indexcmds {what}")
+}
+
+#[cold]
+#[inline(never)]
+fn virtual_generated_err(primary: bool, isconstraint: bool) -> Box<PgError> {
+    err(
+        if primary {
+            "primary keys on virtual generated columns are not supported"
+        } else if isconstraint {
+            "unique constraints on virtual generated columns are not supported"
+        } else {
+            "indexes on virtual generated columns are not supported"
+        }
+        .into(),
+        types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+    )
 }
 
 #[cold]
@@ -329,11 +346,19 @@ pub fn DefineIndex<'mcx>(
     }
 
     for i in 0..numberOfAttributes {
-        if indexInfo.ii_IndexAttrNumbers[i] < 0 {
+        let attno = indexInfo.ii_IndexAttrNumbers[i];
+        if attno < 0 {
             return Err(err(
                 "index creation on system columns is not supported".into(),
                 types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
             ));
+        }
+        // C divergence: expression columns (attno == 0) skipped — C reads
+        // attrs[-1]; the expression pass below screens them.
+        if attno > 0
+            && rel.rd_att.attr(attno as usize - 1).attgenerated == ATTRIBUTE_GENERATED_VIRTUAL
+        {
+            return Err(virtual_generated_err(stmt.primary, stmt.isconstraint));
         }
     }
     if !indexInfo.ii_Expressions.is_nil() || !indexInfo.ii_Predicate.is_nil() {
@@ -352,8 +377,28 @@ pub fn DefineIndex<'mcx>(
         };
         check(&indexInfo.ii_Expressions)?;
         check(&indexInfo.ii_Predicate)?;
-        // attgenerated is 0 on every ported lane, so the virtual-generated
-        // column error arm is dead.
+
+        let mut indexattrs = types_nodes::Bitmapset::empty();
+        for e in indexInfo.ii_Expressions.iter() {
+            vars::pull_varattnos(mcx, e, 1, &mut indexattrs)?;
+        }
+        for e in indexInfo.ii_Predicate.iter() {
+            vars::pull_varattnos(mcx, e, 1, &mut indexattrs)?;
+        }
+        let mut j = -1;
+        loop {
+            j = indexattrs.next_member(j);
+            if j < 0 {
+                break;
+            }
+            let attno = j + types_tuple::htup::FirstLowInvalidHeapAttributeNumber;
+            if attno > 0
+                && rel.rd_att.attr(attno as usize - 1).attgenerated
+                    == ATTRIBUTE_GENERATED_VIRTUAL
+            {
+                return Err(virtual_generated_err(false, stmt.isconstraint));
+            }
+        }
     }
 
     let mut colname_refs: PgVec<'_, &str> = PgVec::new_in(mcx);

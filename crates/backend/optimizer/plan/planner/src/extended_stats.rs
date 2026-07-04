@@ -284,10 +284,14 @@ fn statext_is_compatible_clause<'mcx>(
     if !compatible_internal(run, clause, relid, &mut attnums, &mut leakproof)? {
         return Ok(None);
     }
-    // Non-leakproof operators may reveal MCV values; require every row to be
-    // readable (aclcheck legs vacuous here; securityQuals is the live test).
-    if !leakproof && !crate::selfuncs::all_rows_selectable(run, relid) {
-        return Ok(None);
+    // Non-leakproof operators may reveal MCV values; require every row of
+    // the referenced columns to be readable.
+    if !leakproof {
+        let mut cols: PgVec<'_, i16> = PgVec::new_in(run.mcx);
+        cols.extend(crate::relnode::relids_members(&attnums).map(|a| a as i16));
+        if !crate::selfuncs::all_rows_selectable(run, &run.root, relid, Some(&cols))? {
+            return Ok(None);
+        }
     }
     Ok(Some(attnums))
 }

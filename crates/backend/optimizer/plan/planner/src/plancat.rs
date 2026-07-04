@@ -580,13 +580,14 @@ pub fn join_selectivity<'mcx>(
     const F_POSITIONJOINSEL: Oid = 1301;
     const F_CONTJOINSEL: Oid = 1303;
     const DEFAULT_INEQ_SEL: f64 = 0.3333333333333333;
-    let _ = inputcollid;
     let oprjoin = lsyscache::get_oprjoin(operatorid)?;
     if oprjoin == 0 {
         return Ok(0.5);
     }
     let result = match oprjoin {
-        F_EQJOINSEL => crate::selfuncs::eqjoinsel(run, operatorid, args, jointype, sjinfo)?,
+        F_EQJOINSEL => {
+            crate::selfuncs::eqjoinsel(run, operatorid, args, jointype, sjinfo, inputcollid)?
+        }
         F_SCALARLTJOINSEL | F_SCALARGTJOINSEL | F_SCALARLEJOINSEL | F_SCALARGEJOINSEL => {
             DEFAULT_INEQ_SEL
         }
@@ -596,7 +597,7 @@ pub fn join_selectivity<'mcx>(
         F_AREAJOINSEL => 0.005,
         F_POSITIONJOINSEL => 0.1,
         F_CONTJOINSEL => 0.001,
-        106 => crate::selfuncs::neqjoinsel(run, operatorid, args, jointype, sjinfo)?,
+        106 => crate::selfuncs::neqjoinsel(run, operatorid, args, jointype, sjinfo, inputcollid)?,
         3561 => crate::network_selfuncs::networkjoinsel(run, operatorid, args, sjinfo)?,
         // matchingjoinsel (selfuncs.c) punts.
         5041 => crate::selfuncs::DEFAULT_MATCHING_SEL,
@@ -817,10 +818,16 @@ pub fn get_relation_constraints<'mcx>(
                 }
             }
         }
-        assert!(
-            !constr.has_generated_virtual || result.is_empty(),
-            "get_relation_constraints (plancat.c): expand_generated_columns_in_expr unported"
-        );
+        if constr.has_generated_virtual {
+            for item in result.iter_mut() {
+                *item = crate::prepjointree::expand_generated_columns_in_expr(
+                    mcx,
+                    *item,
+                    &relation,
+                    varno as i32,
+                )?;
+            }
+        }
     }
     assert!(
         !(include_partition && relation.rd_rel.relispartition),

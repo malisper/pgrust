@@ -502,7 +502,23 @@ fn expand_insert_targetlist<'mcx>(
         let tle_node = match new_tle {
             Some(t) => t,
             None => {
-                let new_expr = if !att.attisdropped {
+                let new_expr = if att.attgenerated != 0 {
+                    // preptlist.c:455-468: NULL of the domain's base type, no
+                    // CoerceToDomain (the executor overwrites stored values).
+                    let mut base_typmod = att.atttypmod;
+                    let base_typid =
+                        lsyscache::typ::getBaseTypeAndTypmod(att.atttypid, &mut base_typmod)?;
+                    Node::mk_const(
+                        mcx,
+                        base_typid,
+                        base_typmod,
+                        att.attcollation,
+                        att.attlen as i32,
+                        datum::Datum::null(),
+                        true,
+                        att.attbyval,
+                    )?
+                } else if !att.attisdropped {
                     if lsyscache::typ::getBaseType(att.atttypid)? != att.atttypid {
                         panic!(
                             "expand_insert_targetlist (preptlist.c): \

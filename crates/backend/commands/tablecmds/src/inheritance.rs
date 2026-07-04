@@ -1,7 +1,7 @@
 // tablecmds.c traditional-inheritance slice: inheritOids lookup +
-// MergeAttributes (columns, NOT NULL, CHECK) + StoreCatalogInheritance.
-// Inherited defaults, generated, identity, compression and typed tables are
-// loud; partitions take the empty-column arm in lib.rs.
+// MergeAttributes (columns, NOT NULL, CHECK, generated) +
+// StoreCatalogInheritance. Plain inherited defaults, identity, compression
+// and typed tables are loud; partitions take the empty-column arm in lib.rs.
 use mcx::{Mcx, PgVec};
 use types_core::{AttrNumber, InvalidOid, Oid, RELATION_RELATION_ID};
 use types_error::{PgError, PgResult, ERROR, NOTICE};
@@ -32,6 +32,7 @@ pub(crate) struct MergedAttributes<'mcx> {
     pub columns: NodeList<'mcx>,
     pub checks: PgVec<'mcx, InheritedCheck<'mcx>>,
     pub notnulls: PgVec<'mcx, InheritedNotNull<'mcx>>,
+    pub gendefs: PgVec<'mcx, (AttrNumber, Node<'mcx>)>,
 }
 
 // DefineRelation's inhRelations loop (tablecmds.c:99-116).
@@ -100,8 +101,13 @@ pub(crate) fn MergeAttributes<'mcx>(
     // inh_defs entries are freshly built (never aliased into the parse tree),
     // so in-place merge edits go through plain owned structs.
     let mut inh_defs: PgVec<'mcx, ColumnDef<'mcx>> = PgVec::new_in(mcx);
+    // bogus[i]: inh_defs[i] inherited unequal defaults from multiple parents
+    // (C's bogus_marker); fatal below unless a local default overrides.
+    let mut bogus: PgVec<'mcx, bool> = PgVec::new_in(mcx);
+    let mut have_bogus_defaults = false;
     let mut checks: PgVec<'mcx, InheritedCheck<'mcx>> = PgVec::new_in(mcx);
     let mut notnulls: PgVec<'mcx, InheritedNotNull<'mcx>> = PgVec::new_in(mcx);
+    let mut gendefs: PgVec<'mcx, (AttrNumber, Node<'mcx>)> = PgVec::new_in(mcx);
     let mut child_attno: usize = 0;
 
     for &parent in supers {
@@ -164,6 +170,9 @@ pub(crate) fn MergeAttributes<'mcx>(
             nnnames.push(c.conname.expect("catalogued nn constraint has a name"));
         }
 
+        // Generation expressions can't be attno-mapped until newattmap is
+        // complete; remember (inh_defs index, parent attno) for the pass below.
+        let mut inherited_defaults: PgVec<'mcx, (usize, AttrNumber)> = PgVec::new_in(mcx);
         for parent_attno in 1..=tupdesc.natts as usize {
             let attribute = tupdesc.attr(parent_attno - 1);
             if attribute.attisdropped {
@@ -173,11 +182,8 @@ pub(crate) fn MergeAttributes<'mcx>(
                 mcx,
                 core::str::from_utf8(attribute.attname.name_str()).expect("attname UTF-8"),
             )?;
-            if attribute.atthasdef {
-                unported("inherited column defaults (TupleDescGetDefault lane)");
-            }
-            if attribute.attgenerated != 0 || attribute.attidentity != 0 {
-                unported("inherited generated/identity columns");
+            if attribute.attidentity != 0 {
+                unported("inherited identity columns");
             }
             if attribute.attcompression != 0 {
                 unported("inherited column compression (tablecmds.c:2788)");
@@ -190,6 +196,7 @@ pub(crate) fn MergeAttributes<'mcx>(
                 attribute.attcollation,
             )?;
             newdef.storage = attribute.attstorage as u8;
+            newdef.generated = attribute.attgenerated as u8;
 
             let exist = inh_defs
                 .iter()
@@ -204,6 +211,7 @@ pub(crate) fn MergeAttributes<'mcx>(
                     newdef.inhcount = 1;
                     newdef.is_local = false;
                     inh_defs.push(newdef);
+                    bogus.push(false);
                     child_attno += 1;
                     newattmap[parent_attno - 1] = child_attno as i16;
                     inh_defs.len() - 1
@@ -211,6 +219,45 @@ pub(crate) fn MergeAttributes<'mcx>(
             };
             if nncols.contains(&(parent_attno as AttrNumber)) {
                 inh_defs[merged_idx].is_not_null = true;
+            }
+            if attribute.atthasdef {
+                if attribute.attgenerated == 0 {
+                    unported("inherited column defaults (TupleDescGetDefault lane)");
+                }
+                inherited_defaults.push((merged_idx, parent_attno as AttrNumber));
+            }
+        }
+
+        for &(idx, parent_attno) in inherited_defaults.iter() {
+            let adbin = pg_attrdef::GetAttrDefaultBin(mcx, parent, parent_attno)?
+                .unwrap_or_else(|| {
+                    panic!(
+                        "default expression not found for attribute {parent_attno} of relation \"{relname}\""
+                    )
+                });
+            let raw = readfuncs::stringToNode(mcx, &adbin)?;
+            let (expr, found_whole_row) =
+                rewrite_manip::map_variable_attnos(mcx, raw, 1, 0, &newattmap)?;
+            let def = &mut inh_defs[idx];
+            if found_whole_row {
+                return Err(Box::new(
+                    PgError::new(ERROR, "cannot convert whole-row table reference".to_string())
+                        .with_detail(format!(
+                            "Generation expression for column \"{}\" contains a whole-row reference to table \"{relname}\".",
+                            def.colname.expect("colname")
+                        ))
+                        .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+                ));
+            }
+            debug_assert!(def.raw_default.is_none());
+            match def.cooked_default {
+                None => def.cooked_default = Some(expr),
+                Some(prev) => {
+                    if !types_nodes::equal::equal(prev, expr) {
+                        bogus[idx] = true;
+                        have_bogus_defaults = true;
+                    }
+                }
             }
         }
 
@@ -259,19 +306,36 @@ pub(crate) fn MergeAttributes<'mcx>(
             newcol_attno += 1;
             match inh_defs.iter().position(|d| d.colname == Some(att_name)) {
                 Some(idx) => {
-                    merge_child_attribute(mcx, &mut inh_defs, idx, newcol_attno, newdef)?
+                    merge_child_attribute(mcx, &mut inh_defs, idx, newcol_attno, newdef)?;
+                    if newdef.raw_default.is_some() {
+                        bogus[idx] = false;
+                    }
                 }
                 None => {
                     // Local columns append after all inherited ones; keep the
                     // parse-tree node so raw defaults survive untouched.
                     inh_defs.push(clone_column_def(mcx, newdef)?);
+                    bogus.push(false);
                 }
             }
         }
         if inh_defs.len() > MaxHeapAttributeNumber {
             return Err(too_many_columns());
         }
-        for def in inh_defs.drain(..) {
+        if have_bogus_defaults {
+            for (idx, def) in inh_defs.iter().enumerate() {
+                if bogus[idx] {
+                    return Err(conflicting_inherited_defaults(
+                        def.colname.expect("colname"),
+                        def.generated != 0,
+                    ));
+                }
+            }
+        }
+        for (i, mut def) in inh_defs.drain(..).enumerate() {
+            if let Some(expr) = def.cooked_default.take() {
+                gendefs.push(((i + 1) as AttrNumber, expr));
+            }
             merged.lappend(mcx, Node::mk(mcx, def)?)?;
         }
     } else {
@@ -280,7 +344,7 @@ pub(crate) fn MergeAttributes<'mcx>(
         }
     }
 
-    Ok(MergedAttributes { columns: merged, checks, notnulls })
+    Ok(MergedAttributes { columns: merged, checks, notnulls, gendefs })
 }
 
 // makeColumnDef (makefuncs.c): direct-OID TypeName.
@@ -401,7 +465,15 @@ fn merge_inherited_attribute<'mcx>(
         unported("inherited storage parameter conflicts (storage_name deparse)");
     }
     debug_assert!(prevdef.compression.is_none() && newdef.compression.is_none());
-    debug_assert!(prevdef.generated == 0 && newdef.generated == 0);
+    if prevdef.generated != newdef.generated {
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                format!("inherited column \"{attname}\" has a generation conflict"),
+            )
+            .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH),
+        ));
+    }
     if prevdef.inhcount == i16::MAX {
         return Err(too_many_parents());
     }
@@ -457,7 +529,23 @@ fn merge_child_attribute<'mcx>(
     debug_assert!(inhdef.compression.is_none());
     inhdef.compression = newdef.compression;
     inhdef.is_not_null |= newdef.is_not_null;
-    debug_assert!(inhdef.generated == 0 && newdef.generated == 0, "generated loud upstream");
+    if inhdef.generated != 0 {
+        if newdef.raw_default.is_some() && newdef.generated == 0 {
+            return Err(invalid_column_definition(format!(
+                "column \"{attname}\" inherits from generated column but specifies default"
+            )));
+        }
+        if newdef.identity != 0 {
+            return Err(invalid_column_definition(format!(
+                "column \"{attname}\" inherits from generated column but specifies identity"
+            )));
+        }
+    } else if newdef.generated != 0 {
+        return Err(child_generation_expression(attname));
+    }
+    if inhdef.generated != 0 && newdef.generated != 0 && newdef.generated != inhdef.generated {
+        return Err(generation_kind_conflict(attname, inhdef.generated, newdef.generated));
+    }
     if newdef.raw_default.is_some() {
         inhdef.raw_default = newdef.raw_default;
         inhdef.cooked_default = newdef.cooked_default;
@@ -629,6 +717,68 @@ fn too_many_parents() -> Box<PgError> {
     Box::new(
         PgError::new(ERROR, "too many inheritance parents".to_string())
             .with_sqlstate(types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn invalid_column_definition(msg: String) -> Box<PgError> {
+    Box::new(
+        PgError::new(ERROR, msg).with_sqlstate(types_error::ERRCODE_INVALID_COLUMN_DEFINITION),
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn child_generation_expression(attname: &str) -> Box<PgError> {
+    Box::new(
+        PgError::new(
+            ERROR,
+            format!("child column \"{attname}\" specifies generation expression"),
+        )
+        .with_hint("A child table column cannot be generated unless its parent column is.")
+        .with_sqlstate(types_error::ERRCODE_INVALID_COLUMN_DEFINITION),
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn generation_kind_conflict(attname: &str, parent: u8, child: u8) -> Box<PgError> {
+    let kind = |g: u8| {
+        if g == types_core::ATTRIBUTE_GENERATED_STORED { "STORED" } else { "VIRTUAL" }
+    };
+    Box::new(
+        PgError::new(
+            ERROR,
+            format!("column \"{attname}\" inherits from generated column of different kind"),
+        )
+        .with_detail(format!(
+            "Parent column is {}, child column is {}.",
+            kind(parent),
+            kind(child)
+        ))
+        .with_sqlstate(types_error::ERRCODE_INVALID_COLUMN_DEFINITION),
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn conflicting_inherited_defaults(colname: &str, generated: bool) -> Box<PgError> {
+    let (msg, hint) = if generated {
+        (
+            format!("column \"{colname}\" inherits conflicting generation expressions"),
+            "To resolve the conflict, specify a generation expression explicitly.",
+        )
+    } else {
+        (
+            format!("column \"{colname}\" inherits conflicting default values"),
+            "To resolve the conflict, specify a default explicitly.",
+        )
+    };
+    Box::new(
+        PgError::new(ERROR, msg)
+            .with_hint(hint)
+            .with_sqlstate(types_error::ERRCODE_INVALID_COLUMN_DEFINITION),
     )
 }
 
