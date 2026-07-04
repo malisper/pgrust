@@ -13,6 +13,9 @@ types_scan = { path = "../../../_support/types/types_scan" }
 indexam = { path = "../../access/index/indexam" }
 tableam = { path = "../../access/table/tableam" }
 fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
+datum = { path = "../../../_support/types/datum" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+detoast = { path = "../../access/common/detoast" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
 execscan = { path = "../execscan" }
 execexpr = { path = "../execexpr" }
@@ -21,14 +24,12 @@ exectuples = { path = "../exectuples" }
 init_small = { path = "../../utils/init/init_small" }
 
 [dev-dependencies]
-datum = { path = "../../../_support/types/datum" }
 types_core = { path = "../../../_support/types/types_core" }
 types_fmgr = { path = "../../../_support/types/fmgr" }
 types_nbtree = { path = "../../../_support/types/types_nbtree" }
 types_slot = { path = "../../../_support/types/types_slot" }
 types_snapshot = { path = "../../../_support/types/snapshot" }
 types_storage = { path = "../../../_support/types/types_storage" }
-types_tuple = { path = "../../../_support/types/types_tuple" }
 bufmgr_seams = { path = "../../storage/buffer/bufmgr_seams" }
 transam_xlog_seams = { path = "../../access/transam/transam_xlog_seams" }
 heapam_visibility_seams = { path = "../../access/heap/heapam_visibility_seams" }
