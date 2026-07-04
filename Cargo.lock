@@ -4722,6 +4722,54 @@ dependencies = [
 ]
 
 [[package]]
+name = "generic_xlog"
+version = "0.1.0"
+dependencies = [
+ "aio_seams",
+ "autovacuum_seams",
+ "bufmgr_seams",
+ "condition_variable_seams",
+ "controldata_utils",
+ "deadlock_seams",
+ "elog",
+ "fd",
+ "guc_tables",
+ "init_small",
+ "ipc_seams",
+ "latch_seams",
+ "lmgr_proc",
+ "lock_seams",
+ "lwlock",
+ "mcx",
+ "miscinit_seams",
+ "origin_seams",
+ "pg_sema_seams",
+ "pmsignal_seams",
+ "procarray",
+ "s_lock_seams",
+ "shmem",
+ "smgr_seams",
+ "syncrep_seams",
+ "timeout_seams",
+ "transam_xlog",
+ "transam_xlog_seams",
+ "types_core",
+ "types_error",
+ "types_rel",
+ "types_storage",
+ "types_tuple",
+ "varsup",
+ "waitevent_seams",
+ "xact_seams",
+ "xloginsert",
+ "xloginsert_seams",
+ "xlogreader",
+ "xlogreader_seams",
+ "xlogstats",
+ "xlogutils",
+]
+
+[[package]]
 name = "genfile"
 version = "0.1.0"
 dependencies = [
@@ -10888,6 +10936,7 @@ dependencies = [
  "clog",
  "dbcommands_seams",
  "elog",
+ "generic_xlog",
  "gin_xlog",
  "gist_xlog",
  "hash_xlog",
@@ -14405,6 +14454,14 @@ dependencies = [
  "seam_core",
  "types_core",
  "types_error",
+]
+
+[[package]]
+name = "xlogstats"
+version = "0.1.0"
+dependencies = [
+ "types_core",
+ "xlogreader_seams",
 ]
 
 [[package]]

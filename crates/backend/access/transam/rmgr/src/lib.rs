@@ -135,7 +135,6 @@ fn tblspc_redo(record: &mut XLogReaderState) -> PgResult<()> {
 unported_redo! {
     commit_ts_redo => "backend-access-transam-commit-ts";
     replorigin_redo => "backend-replication-origin";
-    generic_redo => "backend-access-transam-generic-xlog";
     logicalmsg_redo => "backend-replication-message";
 }
 
@@ -166,7 +165,6 @@ unported_mask! {
     gin_mask => "backend-access-gin-xlog";
     seq_mask => "backend-commands-sequence";
     brin_mask => "backend-access-brin-xlog";
-    generic_mask => "backend-access-transam-generic-xlog";
 }
 
 // rmgrlist.h rows, in declaration order (rm_decode column omitted; see crate
@@ -354,12 +352,12 @@ pub static RmgrTable: [RmgrData; RM_N_BUILTIN_IDS] = [
     },
     RmgrData {
         rm_name: "Generic",
-        rm_redo: generic_redo,
+        rm_redo: generic_xlog::generic_redo,
         rm_desc: rmgrdesc::genericdesc::generic_desc,
         rm_identify: rmgrdesc::genericdesc::generic_identify,
         rm_startup: None,
         rm_cleanup: None,
-        rm_mask: Some(generic_mask),
+        rm_mask: Some(generic_xlog::generic_mask),
     },
     RmgrData {
         rm_name: "LogicalMessage",
