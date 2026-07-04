@@ -6,7 +6,7 @@ use std::rc::Rc;
 
 use ::execexpr::{
     exec_build_hash32_from_exprs, exec_build_projection_info_subplans, exec_init_qual_subplans,
-    exec_project, exec_eval_expr, exec_qual, EvalSlots, ExprState, ParamBind,
+    exec_project, exec_eval_expr, exec_qual, EvalSlots, ExprState,
 };
 use ::executils::{EStateData, EcxtId, ExecSlotId};
 use ::mcx::{PgBox, PgVec};
@@ -218,6 +218,7 @@ pub fn exec_init_hash_join<'mcx>(
         collations.push(node.hashcollations.nth(i));
     }
 
+    let params = estate.param_bind();
     let outer_hash_expr = exec_build_hash32_from_exprs(
         mcx,
         outer_desc,
@@ -225,13 +226,12 @@ pub fn exec_init_hash_join<'mcx>(
         &outer_hashfns,
         &collations,
         0,
-        ParamBind::NONE,
+        params,
     )?;
 
     let ps_ExprContext = estate.exec_assign_expr_context();
     let ps_ResultTupleSlot =
         estate.exec_init_extra_tuple_slot(Some(result_desc.clone()), TupleSlotKind::Virtual);
-    let params = estate.param_bind();
     let (proj, hashclauses, joinqual, otherqual) =
         ::executils::with_subplan_compile_env(estate, |env| -> PgResult<_> {
             let proj = exec_build_projection_info_subplans(

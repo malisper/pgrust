@@ -5,7 +5,7 @@
 use core::ptr::NonNull;
 use std::rc::Rc;
 
-use ::execexpr::{exec_build_hash32_from_exprs, exec_eval_expr, EvalSlots, ExprState, ParamBind};
+use ::execexpr::{exec_build_hash32_from_exprs, exec_eval_expr, EvalSlots, ExprState};
 use ::executils::{AuxCxtId, EStateData, EcxtId, ExecSlotId};
 use ::fd::buffile::BufFile;
 use ::heaptuple::MinimalFormPlan;
@@ -817,7 +817,7 @@ pub fn exec_init_hash<'mcx>(
         inner_hashfn_oids,
         collations,
         0,
-        ParamBind::NONE,
+        estate.param_bind(),
     )?;
     let hash_tuple_slot =
         estate.exec_init_extra_tuple_slot(Some(inner_desc.clone()), TupleSlotKind::MinimalTuple);
