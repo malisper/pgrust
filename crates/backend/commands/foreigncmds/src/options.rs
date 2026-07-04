@@ -90,13 +90,14 @@ fn option_list_to_array<'mcx>(
                 .into_error()
                 .into());
         }
-        let mut buf: PgVec<'mcx, u8> =
-            mcx::vec_with_capacity_in(mcx, opt.name.len() + 1 + opt.value.len())?;
+        let total = 4 + opt.name.len() + 1 + opt.value.len();
+        let mut buf: PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, total)?;
+        mcx::vec_append_bytes(&mut buf, &datum::varlena::set_varsize_4b(total))?;
         mcx::vec_append_bytes(&mut buf, opt.name.as_bytes())?;
         mcx::vec_append_bytes(&mut buf, b"=")?;
         mcx::vec_append_bytes(&mut buf, opt.value.as_bytes())?;
-        let t = varlena::cstring_to_text(mcx, &buf)?;
-        elems.push(Datum::from_usize(t.as_bytes().as_ptr() as usize));
+        // Leaked: the element must outlive this loop for construct_array.
+        elems.push(Datum::from_usize(buf.leak().as_ptr() as usize));
     }
     let image = arrayfuncs::construct::construct_array(mcx, &elems, TEXTOID, -1, false, b'i')?;
     Ok(Some(image))
