@@ -53,8 +53,11 @@ pub fn EventTriggerSQLDropAddObject(
         obj.objname = lsyscache::misc::get_namespace_name(mcx, object.objectId)?
             .map(|s| s.as_str().to_string());
     } else if object.classId == ATTR_DEFAULT_RELATION_ID {
-        let colobject = pg_attrdef::GetAttrDefaultColumnAddress(mcx, object.objectId)?;
-        if OidIsValid(colobject.objectId) {
+        let (relid, attnum) = pg_attrdef::GetAttrDefaultColumnAddress(mcx, object.objectId)?;
+        if OidIsValid(relid) {
+            let mut colobject =
+                ObjectAddress::set(types_core::RELATION_RELATION_ID, relid);
+            colobject.objectSubId = attnum as i32;
             if !obtain_object_name_namespace(mcx, &colobject, &mut obj)? {
                 return Ok(());
             }
