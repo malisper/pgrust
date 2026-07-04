@@ -196,13 +196,6 @@ impl CompState {
         let (typinput, typioparam) = lsyscache::typ::getTypeInputInfo(typoid)?;
         let elem = lsyscache::typ::get_element_type(typoid)?;
         const RECORDOID: Oid = 2249;
-        if typtype == TYPTYPE_COMPOSITE {
-            panic!(
-                "plpgsql build_datatype (pl_comp.c): composite-type variables \
-                 (PLPGSQL_TTYPE_REC for named composites) unported — \
-                 unit backend-pl-plpgsql-comp"
-            );
-        }
         if typtype == TYPTYPE_DOMAIN
             && lsyscache::typ::get_typtype(lsyscache::typ::getBaseType(typoid)?)?
                 == TYPTYPE_COMPOSITE
@@ -212,7 +205,7 @@ impl CompState {
                  variables (PLPGSQL_TTYPE_REC) unported — unit backend-pl-plpgsql-comp"
             );
         }
-        let ttype = if typoid == RECORDOID {
+        let ttype = if typoid == RECORDOID || typtype == TYPTYPE_COMPOSITE {
             TypeKind::Rec
         } else if typtype == TYPTYPE_PSEUDO {
             TypeKind::Pseudo
@@ -242,7 +235,8 @@ impl CompState {
         add2namespace: bool,
     ) -> PgResult<Dno> {
         if datatype.ttype == TypeKind::Rec {
-            return Ok(self.build_rec(refname, lineno, add2namespace));
+            let rectypeid = datatype.typoid;
+            return Ok(self.build_rec_typed(refname, lineno, rectypeid, Some(datatype), add2namespace));
         }
         if datatype.ttype == TypeKind::Pseudo {
             return Err(comp_err(
@@ -271,11 +265,26 @@ impl CompState {
     }
 
     pub fn build_rec(&mut self, refname: &str, lineno: i32, add2namespace: bool) -> Dno {
+        const RECORDOID: Oid = 2249;
+        self.build_rec_typed(refname, lineno, RECORDOID, None, add2namespace)
+    }
+
+    // plpgsql_build_record.
+    pub fn build_rec_typed(
+        &mut self,
+        refname: &str,
+        lineno: i32,
+        rectypeid: Oid,
+        datatype: Option<PlType>,
+        add2namespace: bool,
+    ) -> Dno {
         let dno = self.datums.len() as Dno;
         self.datums.push(PlDatum::Rec(PlRec {
             dno,
             refname: refname.to_string(),
             lineno,
+            rectypeid,
+            datatype,
         }));
         if add2namespace {
             self.ns_additem(NsType::Rec, dno, refname);
@@ -327,16 +336,66 @@ impl CompState {
                 }
             }
             if item.itemtype == NsType::Rec {
-                panic!(
-                    "plpgsql_parse_wordtype (pl_comp.c): record %TYPE unported — \
-                     unit backend-pl-plpgsql-comp"
-                );
+                if let PlDatum::Rec(r) = &self.datums[item.itemno as usize] {
+                    if let Some(dt) = &r.datatype {
+                        return Ok(dt.clone());
+                    }
+                }
             }
         }
         Err(comp_err(
             ERRCODE_UNDEFINED_OBJECT,
             format!("variable \"{ident}\" does not exist"),
         ))
+    }
+
+    // plpgsql_parse_wordrowtype (pl_comp.c:1667).
+    pub fn parse_wordrowtype(&self, ident: &str) -> PgResult<PlType> {
+        let class_oid = catalog_namespace::RelnameGetRelid(ident)?;
+        if !OidIsValid(class_oid) {
+            return Err(comp_err(
+                types_error::ERRCODE_UNDEFINED_TABLE,
+                format!("relation \"{ident}\" does not exist"),
+            ));
+        }
+        Self::rowtype_of(class_oid, ident)
+    }
+
+    // plpgsql_parse_cwordrowtype (pl_comp.c:1704).
+    pub fn parse_cwordrowtype(&self, idents: &[String]) -> PgResult<PlType> {
+        let (schemaname, relname) = match idents.len() {
+            2 => (Some(idents[0].as_str()), idents[1].as_str()),
+            _ => {
+                return Err(comp_err(
+                    types_error::ERRCODE_SYNTAX_ERROR,
+                    format!(
+                        "improper qualified name (too many dotted names): {}",
+                        idents.join(".")
+                    ),
+                ));
+            }
+        };
+        let rv = rel_vocab::RangeVar {
+            catalogname: None,
+            schemaname,
+            relname,
+            inh: true,
+            relpersistence: b'p',
+            location: -1,
+        };
+        let class_oid = catalog_namespace::RangeVarGetRelid(&rv, types_rel::NoLock, false)?;
+        Self::rowtype_of(class_oid, relname)
+    }
+
+    fn rowtype_of(class_oid: Oid, relname: &str) -> PgResult<PlType> {
+        let typoid = lsyscache::relation::get_rel_type_id(class_oid)?;
+        if !OidIsValid(typoid) {
+            return Err(comp_err(
+                types_error::ERRCODE_WRONG_OBJECT_TYPE,
+                format!("relation \"{relname}\" does not have a composite type"),
+            ));
+        }
+        Self::build_datatype(typoid, -1, types_core::InvalidOid)
     }
 
     // plpgsql_parse_cwordtype: block-qualified var %TYPE, else table.column
@@ -354,10 +413,11 @@ impl CompState {
                         }
                     }
                     if item.itemtype == NsType::Rec && nnames == 2 {
-                        panic!(
-                            "plpgsql_parse_cwordtype (pl_comp.c): record %TYPE unported — \
-                             unit backend-pl-plpgsql-comp"
-                        );
+                        if let PlDatum::Rec(r) = &self.datums[item.itemno as usize] {
+                            if let Some(dt) = &r.datatype {
+                                return Ok(dt.clone());
+                            }
+                        }
                     }
                 }
                 (None, idents[0].as_str(), idents[1].as_str())

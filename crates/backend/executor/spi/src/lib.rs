@@ -24,7 +24,10 @@ pub use execute::{
     SPI_exec, SPI_execp, SPI_execute, SPI_execute_extended, SPI_execute_plan,
     SPI_execute_snapshot, SpiExecuteOptions,
 };
-pub use cursor::{SPI_cursor_close, SPI_cursor_fetch, SPI_cursor_open, SpiCursor};
+pub use cursor::{
+    SPI_cursor_close, SPI_cursor_close_portal, SPI_cursor_fetch, SPI_cursor_open,
+    SPI_cursor_open_extended, SPI_scroll_cursor_fetch, SPI_scroll_cursor_move, SpiCursor,
+};
 pub use plan::{
     SPI_freeplan, SPI_getargcount, SPI_getargtypeid, SPI_keepplan, SPI_plan_command_tags,
     SPI_plan_is_valid, SPI_plan_single_source, SPI_prepare, SPI_prepare_cursor,
@@ -348,7 +351,10 @@ pub fn debug_live_counts() -> (usize, usize) {
 // SPI-owned; SPI_cursor_close on it would free a NULL stmt handle — callers
 // only fetch (cursor_to_xml precedent).
 pub fn SPI_cursor_find(name: &str) -> Option<cursor::SpiCursor> {
-    portalmem::GetPortalByName(Some(name)).map(cursor::SpiCursor::found)
+    portalmem::GetPortalByName(Some(name)).map(cursor::SpiCursor::from_portal)
+}
+
+pub use cursor::SPI_cursor_find_portal;
 }
 
 pub fn SPI_register_trigger_data() -> ! {

@@ -27,7 +27,9 @@ pub struct SpiCursor {
 }
 
 impl SpiCursor {
-    pub(crate) fn found(portal: Portal<'static>) -> Self {
+    // Re-wrap an already-open portal (the portal owns its stmts handle;
+    // PortalDrop frees it).
+    pub fn from_portal(portal: Portal<'static>) -> SpiCursor {
         SpiCursor { portal, stmts: StmtListHandle::NULL }
     }
 }
@@ -210,4 +212,86 @@ pub fn SPI_cursor_close(cursor: SpiCursor) -> PgResult<()> {
     portalmem::PortalDrop(&cursor.portal, false)?;
     pquery::stmt_list::free(cursor.stmts);
     Ok(())
+}
+
+// SPI_cursor_find (spi.c): portal lookup by name.
+pub fn SPI_cursor_find_portal(name: &str) -> Option<Portal<'static>> {
+    portalmem::GetPortalByName(Some(name))
+}
+
+// SPI_cursor_close by portal (PortalDrop frees the portal-held stmts handle).
+pub fn SPI_cursor_close_portal(portal: &Portal<'static>) -> PgResult<()> {
+    portalmem::PortalDrop(portal, false)
+}
+
+fn cursor_operation(
+    portal: &Portal<'static>,
+    direction: FetchDirection,
+    count: i64,
+    fetch: bool,
+) -> PgResult<()> {
+    let res = _SPI_begin_call(true);
+    if res < 0 {
+        panic!("SPI cursor operation called while not connected");
+    }
+    set_spi_processed(0);
+    set_spi_tuptable(None);
+    with_current(|c| {
+        c.processed = 0;
+        c.tuptable = None;
+    });
+
+    let result = (|| -> PgResult<()> {
+        let nfetched = if fetch {
+            let mut dest = CreateDestReceiver(CommandDest::Spi);
+            pquery::PortalRunFetch(portal, direction, count, &mut dest)?
+        } else {
+            let mut dest = CreateDestReceiver(CommandDest::None);
+            pquery::PortalRunFetch(portal, direction, count, &mut dest)?
+        };
+        with_current(|c| c.processed = nfetched);
+        let (processed, tuptable) =
+            with_current(|c| (c.processed, c.tuptable.take())).expect("connected");
+        set_spi_processed(processed);
+        set_spi_tuptable(tuptable.map(TuptabHandle));
+        Ok(())
+    })();
+
+    _SPI_end_call(true);
+    result
+}
+
+// SPI_scroll_cursor_fetch (spi.c).
+pub fn SPI_scroll_cursor_fetch(
+    portal: &Portal<'static>,
+    direction: FetchDirection,
+    count: i64,
+) -> PgResult<()> {
+    cursor_operation(portal, direction, count, true)
+}
+
+// SPI_scroll_cursor_move (spi.c).
+pub fn SPI_scroll_cursor_move(
+    portal: &Portal<'static>,
+    direction: FetchDirection,
+    count: i64,
+) -> PgResult<()> {
+    cursor_operation(portal, direction, count, false)
+}
+
+// SPI_cursor_parse_open (spi.c): one-shot parse/plan of `src`, then the
+// portal-open tail; the SpiPlan is freed after the portal pins the cplan.
+pub fn SPI_cursor_open_extended(
+    name: Option<&str>,
+    src: &str,
+    argtypes: &[types_core::Oid],
+    values: &[Datum],
+    nulls: &[bool],
+    read_only: bool,
+    cursor_options: i32,
+) -> PgResult<SpiCursor> {
+    let plan = crate::plan::SPI_prepare_cursor(src, argtypes, cursor_options)?;
+    let result = SPI_cursor_open(name, plan, values, nulls, read_only);
+    crate::plan::SPI_freeplan(plan);
+    result
 }

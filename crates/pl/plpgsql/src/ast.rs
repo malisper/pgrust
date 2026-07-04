@@ -64,6 +64,9 @@ pub struct PlVar {
     pub notnull: bool,
     pub default_val: Option<PlExpr>,
     pub promise: i32,
+    pub cursor_explicit_expr: Option<PlExpr>,
+    pub cursor_explicit_argrow: Dno,
+    pub cursor_options: i32,
 }
 
 #[derive(Debug)]
@@ -80,6 +83,9 @@ pub struct PlRec {
     pub dno: Dno,
     pub refname: String,
     pub lineno: i32,
+    /// RECORDOID unless declared with a named composite type (%ROWTYPE etc.).
+    pub rectypeid: Oid,
+    pub datatype: Option<PlType>,
 }
 
 #[derive(Debug)]
@@ -133,6 +139,13 @@ pub struct NsItem {
     pub name: String,
     pub prev: i32,
 }
+
+// FetchDirection (parsenodes.h) + FETCH_ALL.
+pub const FETCH_FORWARD: i32 = 0;
+pub const FETCH_BACKWARD: i32 = 1;
+pub const FETCH_ABSOLUTE: i32 = 2;
+pub const FETCH_RELATIVE: i32 = 3;
+pub const FETCH_ALL: i64 = i64::MAX;
 
 pub const GETDIAG_ROW_COUNT: i32 = 0;
 pub const GETDIAG_ROUTINE_OID: i32 = 1;
@@ -264,6 +277,56 @@ pub enum PlStmt {
         target: Dno,
         params: Vec<PlExpr>,
     },
+    ReturnNext {
+        lineno: i32,
+        expr: Option<PlExpr>,
+        retvarno: Dno,
+    },
+    ReturnQuery {
+        lineno: i32,
+        query: Option<PlExpr>,
+        dynquery: Option<PlExpr>,
+        params: Vec<PlExpr>,
+    },
+    Open {
+        lineno: i32,
+        curvar: Dno,
+        cursor_options: i32,
+        argquery: Option<PlExpr>,
+        query: Option<PlExpr>,
+        dynquery: Option<PlExpr>,
+        params: Vec<PlExpr>,
+    },
+    Fetch {
+        lineno: i32,
+        target: Dno,
+        curvar: Dno,
+        direction: i32,
+        how_many: i64,
+        expr: Option<PlExpr>,
+        is_move: bool,
+        returns_multiple_rows: bool,
+    },
+    Close {
+        lineno: i32,
+        curvar: Dno,
+    },
+    ForC {
+        lineno: i32,
+        label: Option<String>,
+        var: Dno,
+        curvar: Dno,
+        argquery: Option<PlExpr>,
+        body: Vec<PlStmt>,
+    },
+    DynForS {
+        lineno: i32,
+        label: Option<String>,
+        var: Dno,
+        query: PlExpr,
+        params: Vec<PlExpr>,
+        body: Vec<PlStmt>,
+    },
 }
 
 /// PLpgSQL_condition; sqlerrstate 0 is OTHERS.
@@ -331,6 +394,13 @@ pub fn stmt_lineno(s: &PlStmt) -> i32 {
         | PlStmt::GetDiag { lineno, .. }
         | PlStmt::Case { lineno, .. }
         | PlStmt::ForEachA { lineno, .. }
+        | PlStmt::ReturnNext { lineno, .. }
+        | PlStmt::ReturnQuery { lineno, .. }
+        | PlStmt::Open { lineno, .. }
+        | PlStmt::Fetch { lineno, .. }
+        | PlStmt::Close { lineno, .. }
+        | PlStmt::ForC { lineno, .. }
+        | PlStmt::DynForS { lineno, .. }
         | PlStmt::DynExecute { lineno, .. } => *lineno,
     }
 }
@@ -357,6 +427,14 @@ pub fn stmt_typename(s: &PlStmt) -> &'static str {
         PlStmt::GetDiag { is_stacked: false, .. } => "GET DIAGNOSTICS",
         PlStmt::GetDiag { is_stacked: true, .. } => "GET STACKED DIAGNOSTICS",
         PlStmt::DynExecute { .. } => "EXECUTE",
+        PlStmt::ReturnNext { .. } => "RETURN NEXT",
+        PlStmt::ReturnQuery { .. } => "RETURN QUERY",
+        PlStmt::Open { .. } => "OPEN",
+        PlStmt::Fetch { is_move: false, .. } => "FETCH",
+        PlStmt::Fetch { is_move: true, .. } => "MOVE",
+        PlStmt::Close { .. } => "CLOSE",
+        PlStmt::ForC { .. } => "FOR over cursor",
+        PlStmt::DynForS { .. } => "FOR over EXECUTE statement",
     }
 }
 
@@ -387,10 +465,14 @@ pub struct PlFunction {
     pub fn_prokind: i8,
     pub fn_is_trigger: FnTrigger,
     pub fn_nargs: i16,
+    /// All signature args in order (IN and OUT); $n resolves through these.
     pub fn_argvarnos: Vec<Dno>,
+    /// Parallel to fn_argvarnos: does the arg consume an fcinfo slot.
+    pub fn_arg_is_input: Vec<bool>,
     pub new_varno: Dno,
     pub old_varno: Dno,
     pub found_varno: Dno,
+    pub out_param_varno: Dno,
     pub datums: Vec<PlDatum>,
     pub ns: Vec<NsItem>,
     pub action: PlBlock,

@@ -91,6 +91,9 @@ pub struct PlpgsqlHookState<'p> {
     /// Record/row variable names (incl. label-qualified) for the
     /// "record has no field" error arm of resolve_column_ref.
     pub recs: &'p [&'p str],
+    /// Valueless RECORD-typed recs: any field reference is 55000 at parse
+    /// (C make_datum_param -> exec_get_datum_type_info -> instantiate).
+    pub valueless_recs: &'p [&'p str],
     pub resolve_option: PlpgsqlResolveOption,
     /// Out-param: dnos the analysis referenced (C expr->paramnos).
     pub used: &'p RefCell<Vec<i32>>,
@@ -358,13 +361,22 @@ pub fn plpgsql_resolve_column_ref<'mcx>(
         return Ok(None);
     }
     let key = fields.join(".").to_ascii_lowercase();
-    if let Some(e) = parstate.names.iter().find(|e| e.key == key) {
-        if !OidIsValid(e.typoid) {
-            panic!(
-                "resolve_column_ref (pl_exec.c): whole-record reference \"{key}\" in a \
-                 SQL expression unported — unit backend-pl-plpgsql-exec"
-            );
+    if fields.len() >= 2 {
+        let prefix = fields[..fields.len() - 1].join(".").to_ascii_lowercase();
+        if parstate.valueless_recs.iter().any(|r| *r == prefix) {
+            let recname = fields[fields.len() - 2];
+            return Err(Box::new(
+                ereport(ERROR)
+                    .errcode(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+                    .errmsg(alloc::format!("record \"{recname}\" is not assigned yet"))
+                    .errdetail("The tuple structure of a not-yet-assigned record is indeterminate.")
+                    .errposition(parser_errposition(pstate, location, encoding))
+                    .into_error()
+                    .with_error_location(loc("resolve_column_ref")),
+            ));
         }
+    }
+    if let Some(e) = parstate.names.iter().find(|e| e.key == key) {
         parstate.mark_used(e.dno);
         return Ok(Some(Node::mk(
             mcx,
