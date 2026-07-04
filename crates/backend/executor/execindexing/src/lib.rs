@@ -1,7 +1,7 @@
-//! execIndexing.c, INSERT + ON CONFLICT arms: ExecOpenIndices/ExecCloseIndices/
-//! ExecInsertIndexTuples/ExecCheckIndexConstraints + FormIndexDatum
-//! (catalog/index.c) over the btree AM. Loud: exclusion constraints, deferred
-//! unique rechecks, summarizing-only updates.
+//! execIndexing.c, INSERT + ON CONFLICT + exclusion arms: ExecOpenIndices/
+//! ExecCloseIndices/ExecInsertIndexTuples/ExecCheckIndexConstraints/
+//! check_exclusion_constraint + FormIndexDatum (catalog/index.c). Loud:
+//! deferred unique rechecks, summarizing-only updates.
 #![allow(non_snake_case)]
 
 use ::datum::Datum;
@@ -49,6 +49,11 @@ pub struct IndexInfo<'mcx> {
     pub ii_UniqueOps: [Oid; INDEX_MAX_KEYS as usize],
     pub ii_UniqueProcs: [Oid; INDEX_MAX_KEYS as usize],
     pub ii_UniqueStrats: [u16; INDEX_MAX_KEYS as usize],
+    // C: ii_HasExclusion ⇔ ii_ExclusionOps != NULL.
+    pub ii_HasExclusion: bool,
+    pub ii_ExclusionOps: [Oid; INDEX_MAX_KEYS as usize],
+    pub ii_ExclusionProcs: [Oid; INDEX_MAX_KEYS as usize],
+    pub ii_ExclusionStrats: [u16; INDEX_MAX_KEYS as usize],
 }
 
 // RelationGetIndexExpressions (relcache.c): the Form caches the nodeToString
@@ -88,12 +93,50 @@ pub fn RelationGetIndexPredicate<'mcx>(
     clauses::make_ands_implicit(mcx, Some(folded))
 }
 
+/// RelationGetExclusionInfo (relcache.c). DIVERGENCE: C caches the arrays in
+/// rd_indexcxt; recomputed per BuildIndexInfo here (per-statement write path).
+pub fn RelationGetExclusionInfo(
+    mcx: Mcx<'_>,
+    index: &Relation<'_>,
+    ops: &mut [Oid; INDEX_MAX_KEYS as usize],
+    procs: &mut [Oid; INDEX_MAX_KEYS as usize],
+    strats: &mut [u16; INDEX_MAX_KEYS as usize],
+) -> PgResult<()> {
+    let indexstruct = index.rd_index.as_ref().expect("index relation");
+    let indnkeyatts = indexstruct.indnkeyatts as usize;
+    let conexclop = relcache_build_seams::scan_exclusion_ops::call(
+        mcx,
+        indexstruct.indrelid,
+        index.rd_id,
+    )?;
+    assert!(
+        conexclop.len() == indnkeyatts,
+        "conexclop is not a 1-D Oid array"
+    );
+    for i in 0..indnkeyatts {
+        ops[i] = conexclop[i];
+        procs[i] = lsyscache::operator::get_opcode(ops[i])?;
+        let strat = lsyscache::amop::get_op_opfamily_strategy(ops[i], index.rd_opfamily[i])?;
+        if strat == 0 {
+            panic!(
+                "could not find strategy for operator {} in family {}",
+                ops[i], index.rd_opfamily[i]
+            );
+        }
+        strats[i] = strat as u16;
+    }
+    Ok(())
+}
+
 /// BuildIndexInfo (catalog/index.c), pg_index arm.
 pub fn BuildIndexInfo<'mcx>(mcx: Mcx<'mcx>, index: &Relation<'_>) -> PgResult<IndexInfo<'mcx>> {
     let indexstruct = index.rd_index.as_ref().expect("index relation");
 
+    let mut excl_ops = [0 as Oid; INDEX_MAX_KEYS as usize];
+    let mut excl_procs = [0 as Oid; INDEX_MAX_KEYS as usize];
+    let mut excl_strats = [0u16; INDEX_MAX_KEYS as usize];
     if indexstruct.indisexclusion {
-        unported("exclusion constraints (BuildIndexInfo ii_ExclusionOps)");
+        RelationGetExclusionInfo(mcx, index, &mut excl_ops, &mut excl_procs, &mut excl_strats)?;
     }
 
     let numatts = indexstruct.indnatts as i32;
@@ -121,6 +164,10 @@ pub fn BuildIndexInfo<'mcx>(mcx: Mcx<'mcx>, index: &Relation<'_>) -> PgResult<In
         ii_UniqueOps: [0; INDEX_MAX_KEYS as usize],
         ii_UniqueProcs: [0; INDEX_MAX_KEYS as usize],
         ii_UniqueStrats: [0; INDEX_MAX_KEYS as usize],
+        ii_HasExclusion: indexstruct.indisexclusion,
+        ii_ExclusionOps: excl_ops,
+        ii_ExclusionProcs: excl_procs,
+        ii_ExclusionStrats: excl_strats,
     })
 }
 
@@ -289,8 +336,8 @@ pub fn index_predicate_passes<'mcx>(
 /// `onlySummarizing` are the UPDATE-hint and BRIN lanes). With `noDupErr`,
 /// arbiter (or all, if `arbiter_indexes` is empty) unique indexes get
 /// UNIQUE_CHECK_PARTIAL and a potential conflict sets `*spec_conflict`
-/// instead of erroring; C's recheck-oid result list only feeds the deferred
-/// lane, loud below.
+/// instead of erroring. Returns C's recheck-oid list (deferred-exclusion
+/// trigger filtering).
 pub fn ExecInsertIndexTuples<'mcx>(
     mcx: Mcx<'mcx>,
     eval_mcx: Mcx<'_>,
@@ -300,11 +347,12 @@ pub fn ExecInsertIndexTuples<'mcx>(
     noDupErr: bool,
     mut spec_conflict: Option<&mut bool>,
     arbiter_indexes: &[Oid],
-) -> PgResult<()> {
+) -> PgResult<PgVec<'mcx, Oid>> {
     let tupleid = slot.base().tts_tid;
     debug_assert!(ItemPointerIsValid(&tupleid));
     debug_assert!(slot.base().tts_tableOid == heap_relation.rd_id);
 
+    let mut recheck_indexes: PgVec<'mcx, Oid> = PgVec::new_in(mcx);
     let mut values = [Datum::null(); INDEX_MAX_KEYS as usize];
     let mut isnull = [false; INDEX_MAX_KEYS as usize];
 
@@ -323,7 +371,6 @@ pub fn ExecInsertIndexTuples<'mcx>(
         FormIndexDatum(mcx, eval_mcx, indexInfo, slot, &mut values, &mut isnull)?;
         let n_index_attrs = indexInfo.ii_NumIndexAttrs as usize;
 
-        let indexInfo = &state.infos[i];
         let indexRelation = &state.descs[i];
         let index_form = indexRelation.rd_index.as_ref().expect("index relation");
         let applyNoDupErr = noDupErr
@@ -338,8 +385,9 @@ pub fn ExecInsertIndexTuples<'mcx>(
         } else {
             unported("deferred unique constraint recheck (trigger queue)");
         };
+        let indimmediate = index_form.indimmediate;
 
-        let satisfiesConstraint = indexam::index_insert(
+        let mut satisfiesConstraint = indexam::index_insert(
             mcx,
             indexRelation,
             &values[..n_index_attrs],
@@ -351,8 +399,43 @@ pub fn ExecInsertIndexTuples<'mcx>(
             &mut state.infos[i].ii_AmCache,
         )?;
 
-        if checkUnique == IndexUniqueCheck::UNIQUE_CHECK_PARTIAL && !satisfiesConstraint {
-            if index_form.indimmediate {
+        if state.infos[i].ii_HasExclusion {
+            let (violation_ok, wait_mode) = if applyNoDupErr {
+                (true, CeoucWaitMode::LivelockPreventingWait)
+            } else if !indimmediate {
+                (true, CeoucWaitMode::NoWait)
+            } else {
+                (false, CeoucWaitMode::Wait)
+            };
+            let mut existing_slot = exectuples::make_tuple_table_slot(
+                mcx,
+                ::types_slot::TupleSlotKind::BufferHeapTuple,
+                Some(heap_relation.rd_att.clone()),
+            );
+            let indexRelation = &state.descs[i];
+            satisfiesConstraint = check_exclusion_or_unique_constraint(
+                mcx,
+                eval_mcx,
+                heap_relation,
+                indexRelation,
+                &mut state.infos[i],
+                &tupleid,
+                &values,
+                &isnull,
+                false,
+                wait_mode,
+                violation_ok,
+                &mut existing_slot,
+                None,
+            )?;
+        }
+
+        if (checkUnique == IndexUniqueCheck::UNIQUE_CHECK_PARTIAL
+            || state.infos[i].ii_HasExclusion)
+            && !satisfiesConstraint
+        {
+            recheck_indexes.push(index_form.indexrelid);
+            if indimmediate {
                 if let Some(flag) = spec_conflict.as_deref_mut() {
                     *flag = true;
                 }
@@ -360,7 +443,7 @@ pub fn ExecInsertIndexTuples<'mcx>(
         }
     }
 
-    Ok(())
+    Ok(recheck_indexes)
 }
 
 /// ExecCheckIndexConstraints: true if no arbiter (or any unique, when
@@ -388,8 +471,9 @@ pub fn ExecCheckIndexConstraints<'mcx>(
 
     for i in 0..state.descs.len() {
         let indexInfo = &mut state.infos[i];
-        // ii_ExclusionOps is loud at BuildIndexInfo, so unique-only here.
-        if !indexInfo.ii_Unique || !indexInfo.ii_ReadyForInserts {
+        if (!indexInfo.ii_Unique && !indexInfo.ii_HasExclusion)
+            || !indexInfo.ii_ReadyForInserts
+        {
             continue;
         }
         let indexRelation = &state.descs[i];
@@ -411,18 +495,21 @@ pub fn ExecCheckIndexConstraints<'mcx>(
         }
 
         FormIndexDatum(mcx, eval_mcx, indexInfo, slot, &mut values, &mut isnull)?;
-        let indexInfo = &state.infos[i];
 
-        if !check_unique_constraint(
+        if !check_exclusion_or_unique_constraint(
             mcx,
+            eval_mcx,
             heap_relation,
             indexRelation,
-            indexInfo,
+            &mut state.infos[i],
             tupleid,
             &values,
             &isnull,
+            false,
+            CeoucWaitMode::Wait,
+            true,
             existing_slot,
-            conflict_tid,
+            Some(conflict_tid),
         )? {
             return Ok(false);
         }
@@ -434,23 +521,39 @@ pub fn ExecCheckIndexConstraints<'mcx>(
     Ok(true)
 }
 
-/// check_exclusion_or_unique_constraint, unique-index pre-check arm
-/// (CEOUC_WAIT + violationOK, the only mode our callers use; the exclusion
-/// and deferred arms stay loud upstream). Probes the index under a dirty
-/// snapshot and waits out in-progress inserters/deleters before deciding.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum CeoucWaitMode {
+    Wait,
+    NoWait,
+    LivelockPreventingWait,
+}
+
+/// check_exclusion_or_unique_constraint. Probes the index under a dirty
+/// snapshot and (per waitMode) waits out in-progress inserters/deleters
+/// before deciding.
 #[allow(clippy::too_many_arguments)]
-fn check_unique_constraint<'mcx>(
+fn check_exclusion_or_unique_constraint<'mcx>(
     mcx: Mcx<'mcx>,
+    eval_mcx: Mcx<'_>,
     heap_relation: &Relation<'mcx>,
     index_relation: &Relation<'mcx>,
-    index_info: &IndexInfo<'mcx>,
+    index_info: &mut IndexInfo<'mcx>,
     tupleid: &ItemPointerData,
     values: &[Datum],
     isnull: &[bool],
+    new_index: bool,
+    wait_mode: CeoucWaitMode,
+    violation_ok: bool,
     existing_slot: &mut SlotData<'mcx>,
-    conflict_tid: &mut ItemPointerData,
+    mut conflict_tid: Option<&mut ItemPointerData>,
 ) -> PgResult<bool> {
     let indnkeyatts = index_info.ii_NumIndexKeyAttrs as usize;
+    let exclusion = index_info.ii_HasExclusion;
+    let (constr_procs, constr_strats) = if exclusion {
+        (index_info.ii_ExclusionProcs, index_info.ii_ExclusionStrats)
+    } else {
+        (index_info.ii_UniqueProcs, index_info.ii_UniqueStrats)
+    };
 
     if !index_info.ii_NullsNotDistinct {
         for &null in &isnull[..indnkeyatts] {
@@ -474,13 +577,16 @@ fn check_unique_constraint<'mcx>(
             0
         };
         key.sk_attno = (i + 1) as AttrNumber;
-        key.sk_strategy = index_info.ii_UniqueStrats[i];
+        key.sk_strategy = constr_strats[i];
         key.sk_subtype = 0;
         key.sk_collation = index_relation.rd_indcollation[i];
-        fmgr_core::fmgr_info_into(index_info.ii_UniqueProcs[i], &mut key.sk_func)?;
+        fmgr_core::fmgr_info_into(constr_procs[i], &mut key.sk_func)?;
         key.sk_argument = values[i];
         scankeys.push(key);
     }
+
+    let mut existing_values = [Datum::null(); INDEX_MAX_KEYS as usize];
+    let mut existing_isnull = [false; INDEX_MAX_KEYS as usize];
 
     'retry: loop {
         let mut conflict = false;
@@ -501,9 +607,6 @@ fn check_unique_constraint<'mcx>(
             ::types_scan::ScanDirection::ForwardScanDirection,
             existing_slot,
         )? {
-            if scan.xs_recheck {
-                unported("lossy-index recheck (index_recheck_constraint)");
-            }
             let existing_tid = existing_slot.base().tts_tid;
             if ItemPointerIsValid(tupleid) && ItemPointerEquals(tupleid, &existing_tid) {
                 assert!(
@@ -515,13 +618,43 @@ fn check_unique_constraint<'mcx>(
                 continue;
             }
 
+            FormIndexDatum(
+                mcx,
+                eval_mcx,
+                index_info,
+                existing_slot,
+                &mut existing_values,
+                &mut existing_isnull,
+            )?;
+
+            if scan.xs_recheck
+                && !index_recheck_constraint(
+                    index_relation,
+                    &constr_procs,
+                    &existing_values,
+                    &existing_isnull,
+                    values,
+                    indnkeyatts,
+                )?
+            {
+                continue;
+            }
+
             let (dirty_xmin, dirty_xmax, dirty_token) = (
                 dirty.dirty_xmin.get(),
                 dirty.dirty_xmax.get(),
                 dirty.dirty_speculative_token.get(),
             );
             let xwait = if dirty_xmin != 0 { dirty_xmin } else { dirty_xmax };
-            if xwait != 0 {
+            if xwait != 0
+                && (wait_mode == CeoucWaitMode::Wait
+                    || (wait_mode == CeoucWaitMode::LivelockPreventingWait
+                        && dirty_token != 0
+                        && ::types_core::xact::TransactionIdPrecedes(
+                            xact::GetCurrentTransactionId()?,
+                            xwait,
+                        )))
+            {
                 indexam::index_endscan(scan)?;
                 if dirty_token != 0 {
                     lmgr::SpeculativeInsertionWait(dirty_xmin, dirty_token)?;
@@ -530,21 +663,233 @@ fn check_unique_constraint<'mcx>(
                         xwait,
                         Some(heap_relation),
                         Some(&existing_tid),
-                        ::types_storage::lock::XLTW_Oper::InsertIndex,
+                        if exclusion {
+                            ::types_storage::lock::XLTW_Oper::RecheckExclusionConstr
+                        } else {
+                            ::types_storage::lock::XLTW_Oper::InsertIndex
+                        },
                     )?;
                 }
                 continue 'retry;
             }
 
-            conflict = true;
-            *conflict_tid = existing_tid;
-            break;
+            if violation_ok {
+                conflict = true;
+                if let Some(tid) = conflict_tid.as_deref_mut() {
+                    *tid = existing_tid;
+                }
+                break;
+            }
+
+            return Err(exclusion_violation(
+                mcx,
+                heap_relation,
+                index_relation,
+                new_index,
+                values,
+                isnull,
+                &existing_values,
+                &existing_isnull,
+            ));
         }
 
         indexam::index_endscan(scan)?;
         exectuples::exec_clear_tuple(existing_slot, mcx);
         return Ok(!conflict);
     }
+}
+
+/// IndexCheckExclusion (catalog/index.c): validate existing rows against a
+/// freshly built exclusion index (ALTER TABLE ADD EXCLUDE over live data).
+/// ResetReindexProcessing is elided (reindex-processing state is const-false
+/// in this port's genam).
+pub fn IndexCheckExclusion<'mcx>(
+    mcx: Mcx<'mcx>,
+    heap_relation: &Relation<'mcx>,
+    index_relation: &Relation<'mcx>,
+    index_info: &mut IndexInfo<'mcx>,
+) -> PgResult<()> {
+    let eval_cx = ::mcx::MemoryContext::new("IndexCheckExclusion");
+    let eval_mcx = eval_cx.mcx();
+    let mut slot = exectuples::make_tuple_table_slot(
+        mcx,
+        ::types_slot::TupleSlotKind::BufferHeapTuple,
+        Some(heap_relation.rd_att.clone()),
+    );
+    let mut existing_slot = exectuples::make_tuple_table_slot(
+        mcx,
+        ::types_slot::TupleSlotKind::BufferHeapTuple,
+        Some(heap_relation.rd_att.clone()),
+    );
+    let snapshot = snapmgr::RegisterSnapshot(Some(&snapmgr::GetLatestSnapshot()?))?
+        .expect("registered snapshot");
+    let flags = ::tableam_vocab::SO_TYPE_SEQSCAN
+        | ::tableam_vocab::SO_ALLOW_STRAT
+        | ::tableam_vocab::SO_ALLOW_SYNC
+        | ::tableam_vocab::SO_ALLOW_PAGEMODE;
+    let mut scan = heapam::heap_beginscan(
+        mcx,
+        heap_relation,
+        Some(snapshot.clone()),
+        0,
+        PgVec::new_in(mcx),
+        None,
+        flags,
+    )?;
+
+    let mut values = [Datum::null(); INDEX_MAX_KEYS as usize];
+    let mut isnull = [false; INDEX_MAX_KEYS as usize];
+    while heapam::heap_getnextslot(
+        mcx,
+        &mut scan,
+        ::types_scan::ScanDirection::ForwardScanDirection,
+        &mut slot,
+    )? {
+        if !index_info.ii_Predicate.is_nil()
+            && !index_predicate_passes(mcx, eval_mcx, index_info, &mut slot)?
+        {
+            continue;
+        }
+        FormIndexDatum(mcx, eval_mcx, index_info, &mut slot, &mut values, &mut isnull)?;
+        let tupleid = slot.base().tts_tid;
+        check_exclusion_or_unique_constraint(
+            mcx,
+            eval_mcx,
+            heap_relation,
+            index_relation,
+            index_info,
+            &tupleid,
+            &values,
+            &isnull,
+            true,
+            CeoucWaitMode::Wait,
+            false,
+            &mut existing_slot,
+            None,
+        )?;
+    }
+    heapam::heap_endscan(scan)?;
+    snapmgr::UnregisterSnapshot(Some(&snapshot));
+    Ok(())
+}
+
+/// check_exclusion_constraint (execIndexing.c), the external-caller wrapper.
+pub fn check_exclusion_constraint<'mcx>(
+    mcx: Mcx<'mcx>,
+    eval_mcx: Mcx<'_>,
+    heap_relation: &Relation<'mcx>,
+    index_relation: &Relation<'mcx>,
+    index_info: &mut IndexInfo<'mcx>,
+    tupleid: &ItemPointerData,
+    values: &[Datum],
+    isnull: &[bool],
+    new_index: bool,
+) -> PgResult<()> {
+    let mut existing_slot = exectuples::make_tuple_table_slot(
+        mcx,
+        ::types_slot::TupleSlotKind::BufferHeapTuple,
+        Some(heap_relation.rd_att.clone()),
+    );
+    check_exclusion_or_unique_constraint(
+        mcx,
+        eval_mcx,
+        heap_relation,
+        index_relation,
+        index_info,
+        tupleid,
+        values,
+        isnull,
+        new_index,
+        CeoucWaitMode::Wait,
+        false,
+        &mut existing_slot,
+        None,
+    )
+    .map(|_| ())
+}
+
+// index_recheck_constraint (execIndexing.c): exclusion operators assumed
+// strict; returns true on a real conflict.
+fn index_recheck_constraint(
+    index: &Relation<'_>,
+    constr_procs: &[Oid],
+    existing_values: &[Datum],
+    existing_isnull: &[bool],
+    new_values: &[Datum],
+    indnkeyatts: usize,
+) -> PgResult<bool> {
+    for i in 0..indnkeyatts {
+        if existing_isnull[i] {
+            return Ok(false);
+        }
+        let matched = fmgr_core::oid_function_call2_coll(
+            constr_procs[i],
+            index.rd_indcollation[i],
+            existing_values[i],
+            new_values[i],
+        )?
+        .as_bool();
+        if !matched {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+#[cold]
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn exclusion_violation(
+    mcx: Mcx<'_>,
+    heap: &Relation<'_>,
+    index: &Relation<'_>,
+    new_index: bool,
+    values: &[Datum],
+    isnull: &[bool],
+    existing_values: &[Datum],
+    existing_isnull: &[bool],
+) -> Box<PgError> {
+    let n = index.rd_index.as_ref().expect("index relation").indnkeyatts as usize;
+    let error_new =
+        genam_seams::build_index_value_description::call(index, &values[..n], &isnull[..n])
+            .ok()
+            .flatten();
+    let error_existing = genam_seams::build_index_value_description::call(
+        index,
+        &existing_values[..n],
+        &existing_isnull[..n],
+    )
+    .ok()
+    .flatten();
+    let (msg, detail) = if new_index {
+        (
+            format!("could not create exclusion constraint \"{}\"", index.name()),
+            match (&error_new, &error_existing) {
+                (Some(n), Some(e)) => format!("Key {n} conflicts with key {e}."),
+                _ => "Key conflicts exist.".to_string(),
+            },
+        )
+    } else {
+        (
+            format!(
+                "conflicting key value violates exclusion constraint \"{}\"",
+                index.name()
+            ),
+            match (&error_new, &error_existing) {
+                (Some(n), Some(e)) => format!("Key {n} conflicts with existing key {e}."),
+                _ => "Key conflicts with existing key.".to_string(),
+            },
+        )
+    };
+    let mut e = PgError::error(msg)
+        .with_sqlstate(types_error::ERRCODE_EXCLUSION_VIOLATION)
+        .with_detail(detail)
+        .with_table_name(heap.name().to_owned())
+        .with_constraint_name(index.name().to_owned());
+    if let Ok(Some(nsp)) = lsyscache::misc::get_namespace_name(mcx, heap.rd_rel.relnamespace) {
+        e = e.with_schema_name(nsp.as_str().to_owned());
+    }
+    Box::new(e)
 }
 
 #[cold]

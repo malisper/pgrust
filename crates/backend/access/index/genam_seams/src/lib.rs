@@ -1,8 +1,20 @@
 use datum::Datum;
+use mcx::Mcx;
+use types_core::Oid;
 use types_error::PgResult;
 use types_rel::RelationData;
 use types_scan::scankey::ScanKeyData;
 use types_tuple::HeapTupleData;
+
+seam_core::seam!(
+    // pg_get_indexdef_columns_extended(KEYS_ONLY) (ruleutils.c), for
+    // BuildIndexValueDescription's key-column list (expression columns
+    // deparse; ruleutils sits above genam).
+    pub fn pg_get_indexdef_columns_keys_only(
+        mcx: Mcx<'_>,
+        indexrelid: Oid,
+    ) -> PgResult<Option<String>>
+);
 
 seam_core::seam!(
     // BuildIndexValueDescription (genam.c) for callers below genam in the
