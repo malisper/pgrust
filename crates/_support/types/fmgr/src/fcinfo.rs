@@ -83,20 +83,27 @@ impl FnExtra {
         }
     }
 
+    // Release trusts the wiring (C's fn_extra stance: the memo type is
+    // statically bound to the resolved function, so a mismatch is the same
+    // wiring bug C corrupts memory on); debug builds + Miri panic loudly.
+    // The always-on compare cost ~12 insns/hit (16B inline TypeId constant +
+    // ldp + ccmp) on paths whose entire C budget is 4.
     #[inline]
     fn check<T: Any>(&self) {
-        // SAFETY: `ptr` points at a live FnExtraBox<_> whose header leads it.
-        if unsafe { self.ptr.as_ref() }.type_id != TypeId::of::<T>() {
+        if cfg!(debug_assertions)
+            // SAFETY: `ptr` points at a live FnExtraBox<_> whose header leads it.
+            && unsafe { self.ptr.as_ref() }.type_id != TypeId::of::<T>()
+        {
             fn_extra_type_mismatch::<T>();
         }
     }
 
-    // Type mismatch = the wiring bug C corrupts memory on: panic loudly.
     #[inline]
     pub fn downcast_ref<T: Any>(&self) -> &T {
         self.check::<T>();
-        // SAFETY: TypeId just verified the pointee is FnExtraBox<T>; shared
-        // borrow of self keeps it live and un-mutated.
+        // SAFETY: the pointee is FnExtraBox<T> per the wiring contract above
+        // (debug-checked via TypeId); shared borrow of self keeps it live and
+        // un-mutated.
         unsafe { &self.ptr.cast::<FnExtraBox<T>>().as_ref().value }
     }
 
