@@ -1,0 +1,522 @@
+// funccache.c (SQL slice) + sql_compile_callback/prepare_next_query
+// (functions.c). DIVERGENCE: RECORD results resolved from an expectedDesc
+// bypass the map (C hashes the resolved tupdesc identity into the key).
+use core::cell::{Cell, RefCell};
+use std::rc::Rc;
+
+use datum::Datum;
+use mcx::{bind, Mcx, McxOwned, MemoryContext, PgString, PgVec};
+use rustc_hash::FxHashMap;
+use types_core::catalog::VOIDOID;
+use types_core::Oid;
+use types_error::PgResult;
+use types_nodes::nodes_enums::CmdType;
+use types_nodes::parsenodes::Query;
+use types_nodes::{Node, NodeTag};
+use types_portal::{QueryEnvHandle, CURSOR_OPT_NO_SCROLL, CURSOR_OPT_PARALLEL_OK};
+use types_tuple::TupleDescData;
+
+use cache_syscache::{ReleaseSysCache, SearchSysCache1, SysCacheGetAttr, SysCacheKey, PROCOID};
+
+use crate::{
+    efn, is_polymorphic, lookup_failed, name_str, read_oidvector_attr, varlena_bytes, varlena_str,
+    ANUM_PG_PROC_PROARGMODES, ANUM_PG_PROC_PROARGNAMES, ANUM_PG_PROC_PROARGTYPES,
+    ANUM_PG_PROC_PROKIND, ANUM_PG_PROC_PRONAME, ANUM_PG_PROC_PRORETSET, ANUM_PG_PROC_PROSQLBODY,
+    ANUM_PG_PROC_PROSRC, ANUM_PG_PROC_PROVOLATILE,
+};
+
+pub(crate) const MAX_SQL_FN_ARGS: usize = 16;
+
+pub(crate) struct SqlFnEntryState<'mcx> {
+    pub fname: PgString<'mcx>,
+    pub src: PgString<'mcx>,
+    pub sqlbody: Option<PgString<'mcx>>,
+    pub argtypes: PgVec<'mcx, Oid>,
+    pub argnames: PgVec<'mcx, PgString<'mcx>>,
+    pub input_collation: Oid,
+    pub rettype: Oid,
+    pub typlen: i16,
+    pub typbyval: bool,
+    pub returns_set: bool,
+    pub returns_tuple: Cell<bool>,
+    pub readonly_func: bool,
+    pub prokind: i8,
+    pub rettupdesc: Option<Rc<TupleDescData<'mcx>>>,
+    pub num_queries: usize,
+    pub plansources: RefCell<PgVec<'mcx, plancache::CachedPlanSourceHandle>>,
+}
+
+bind!(pub(crate) SqlFnEntryTy => SqlFnEntryState<'mcx>);
+
+pub(crate) struct SqlFnEntry {
+    pub owned: McxOwned<SqlFnEntryTy>,
+    stamp: (u32, (u32, u16)),
+}
+
+impl Drop for SqlFnEntry {
+    fn drop(&mut self) {
+        self.owned.with(|s| {
+            for &h in s.plansources.borrow().iter() {
+                plancache::DropCachedPlan(h);
+            }
+        });
+    }
+}
+
+#[derive(PartialEq, Eq, Hash, Clone, Copy)]
+struct FnKey {
+    fn_oid: Oid,
+    collation: Oid,
+    argtypes: [Oid; MAX_SQL_FN_ARGS],
+    nargs: u8,
+}
+
+thread_local! {
+    // std map justified: funccache.c is itself an open-ended backend hash.
+    // ManuallyDrop: entry Drops reach the plancache/tuplestore TLS
+    // registries, whose teardown order at thread exit is unspecified; the
+    // map leaks with the backend, exactly like C's CacheMemoryContext.
+    static SQL_FN_CACHE: RefCell<core::mem::ManuallyDrop<FxHashMap<FnKey, Rc<SqlFnEntry>>>> =
+        RefCell::new(core::mem::ManuallyDrop::new(FxHashMap::default()));
+}
+
+fn proc_row_stamp(fn_oid: Oid) -> PgResult<(u32, (u32, u16))> {
+    let Some(tup) = SearchSysCache1(PROCOID, SysCacheKey::Value(Datum::from_oid(fn_oid)))? else {
+        return Err(lookup_failed(fn_oid));
+    };
+    let t = tup.tuple();
+    let xmin = t.t_data().xmin_raw();
+    let tid = (
+        ((t.t_self.ip_blkid.bi_hi as u32) << 16) | t.t_self.ip_blkid.bi_lo as u32,
+        t.t_self.ip_posid,
+    );
+    drop(t);
+    ReleaseSysCache(tup);
+    Ok((xmin, tid))
+}
+
+struct ProcRow<'mcx> {
+    proname: PgString<'mcx>,
+    prosrc: PgString<'mcx>,
+    prosqlbody: Option<PgString<'mcx>>,
+    argtypes: PgVec<'mcx, Oid>,
+    argnames: PgVec<'mcx, PgString<'mcx>>,
+    provolatile: i8,
+    prokind: i8,
+    proretset: bool,
+}
+
+// proargnames filtered to input args per get_func_input_arg_names
+// (funcapi.c): with proargmodes, only i/b/v entries are parameter names.
+pub(crate) fn read_input_argnames<'mcx>(
+    mcx: Mcx<'mcx>,
+    names_d: Datum,
+    names_null: bool,
+    modes_d: Datum,
+    modes_null: bool,
+    nargs: usize,
+) -> PgResult<PgVec<'mcx, PgString<'mcx>>> {
+    let mut out: PgVec<'mcx, PgString<'mcx>> = PgVec::new_in(mcx);
+    out.try_reserve_exact(nargs).map_err(|_| mcx.oom(nargs))?;
+    if names_null {
+        for _ in 0..nargs {
+            out.push(PgString::from_str_in("", mcx)?);
+        }
+        return Ok(out);
+    }
+    let scratch = MemoryContext::new("sqlfn argnames");
+    let smcx = scratch.mcx();
+    let img = varlena_bytes(smcx, names_d)?;
+    let elems = datum::array_build::deconstruct_array_image(smcx, &img, -1, false, b'i')?;
+    let modes: Option<PgVec<'_, Datum>> = if modes_null {
+        None
+    } else {
+        let mimg = varlena_bytes(smcx, modes_d)?;
+        Some(datum::array_build::deconstruct_array_image(smcx, &mimg, 1, true, b'c')?)
+    };
+    for (i, &e) in elems.iter().enumerate() {
+        if let Some(m) = &modes {
+            let mode = m[i].as_i8() as u8;
+            if !matches!(mode, b'i' | b'b' | b'v') {
+                continue;
+            }
+        }
+        if out.len() == nargs {
+            break;
+        }
+        out.push(varlena_str(mcx, e)?);
+    }
+    while out.len() < nargs {
+        out.push(PgString::from_str_in("", mcx)?);
+    }
+    Ok(out)
+}
+
+fn read_proc_row<'mcx>(mcx: Mcx<'mcx>, fn_oid: Oid) -> PgResult<ProcRow<'mcx>> {
+    let Some(tup) = SearchSysCache1(PROCOID, SysCacheKey::Value(Datum::from_oid(fn_oid)))? else {
+        return Err(lookup_failed(fn_oid));
+    };
+    let (prolang, _) = SysCacheGetAttr(PROCOID, &tup, crate::ANUM_PG_PROC_PROLANG)?;
+    assert_eq!(prolang.as_oid(), fmgr_core::SQL_LANGUAGE_ID, "fmgr_sql: not a SQL function");
+    let (proname_d, _) = SysCacheGetAttr(PROCOID, &tup, ANUM_PG_PROC_PRONAME)?;
+    let proname = name_str(mcx, proname_d)?;
+    let (provolatile, _) = SysCacheGetAttr(PROCOID, &tup, ANUM_PG_PROC_PROVOLATILE)?;
+    let (prokind, _) = SysCacheGetAttr(PROCOID, &tup, ANUM_PG_PROC_PROKIND)?;
+    let (proretset, _) = SysCacheGetAttr(PROCOID, &tup, ANUM_PG_PROC_PRORETSET)?;
+    let (argv, _) = SysCacheGetAttr(PROCOID, &tup, ANUM_PG_PROC_PROARGTYPES)?;
+    let argtypes = read_oidvector_attr(mcx, argv)?;
+    let (names_d, names_null) = SysCacheGetAttr(PROCOID, &tup, ANUM_PG_PROC_PROARGNAMES)?;
+    let (modes_d, modes_null) = SysCacheGetAttr(PROCOID, &tup, ANUM_PG_PROC_PROARGMODES)?;
+    let argnames =
+        read_input_argnames(mcx, names_d, names_null, modes_d, modes_null, argtypes.len())?;
+    let (prosrc_d, prosrc_null) = SysCacheGetAttr(PROCOID, &tup, ANUM_PG_PROC_PROSRC)?;
+    assert!(!prosrc_null, "null prosrc for function {fn_oid}");
+    let prosrc = varlena_str(mcx, prosrc_d)?;
+    let (sqlbody_d, sqlbody_null) = SysCacheGetAttr(PROCOID, &tup, ANUM_PG_PROC_PROSQLBODY)?;
+    let prosqlbody = if sqlbody_null { None } else { Some(varlena_str(mcx, sqlbody_d)?) };
+    ReleaseSysCache(tup);
+    Ok(ProcRow {
+        proname,
+        prosrc,
+        prosqlbody,
+        argtypes,
+        argnames,
+        provolatile: provolatile.as_i8(),
+        prokind: prokind.as_i8(),
+        proretset: proretset.as_bool(),
+    })
+}
+
+// prosqlbody unwrap (sql_compile_callback, functions.c:1152-1164): a List
+// whose first element is the query list, a List of queries, or one Query.
+pub(crate) fn sqlbody_queries<'mcx>(mcx: Mcx<'mcx>, body: &str) -> PgResult<Vec<Query<'mcx>>> {
+    let n = readfuncs::stringToNode(mcx, body)?;
+    let mut out = Vec::new();
+    match n.as_list() {
+        Some(outer) => {
+            if outer.is_nil() {
+                return Ok(out);
+            }
+            let first = outer.nth(0);
+            if first.node_tag() == NodeTag::T_List {
+                for q in first.as_list().expect("tag-checked").iter() {
+                    out.push(read_query(q));
+                }
+            } else {
+                for q in outer.iter() {
+                    out.push(read_query(q));
+                }
+            }
+        }
+        None => out.push(read_query(n)),
+    }
+    Ok(out)
+}
+
+fn read_query<'mcx>(n: Node<'mcx>) -> Query<'mcx> {
+    let q = n.as_query().expect("prosqlbody holds analyzed Query nodes");
+    Query { ..clone_query(q) }
+}
+
+fn clone_query<'mcx>(q: &Query<'mcx>) -> Query<'mcx> {
+    // Query is not Copy; field-wise move of shared interior refs (the node
+    // tree itself stays shared and is treated as read-only source material).
+    unsafe { core::ptr::read(q as *const Query<'mcx>) }
+}
+
+fn resolve_argtypes(
+    declared: &[Oid],
+    flinfo: &fmgr::FmgrInfo,
+) -> PgResult<[Oid; MAX_SQL_FN_ARGS]> {
+    let mut out = [types_core::InvalidOid; MAX_SQL_FN_ARGS];
+    for (i, &t) in declared.iter().enumerate() {
+        out[i] = if is_polymorphic(t) {
+            let r = funcapi::get_fn_expr_argtype(Some(flinfo), i);
+            if r == types_core::InvalidOid {
+                return Err(efn(
+                    types_error::ERRCODE_DATATYPE_MISMATCH,
+                    format!(
+                        "could not determine actual type of argument declared {}",
+                        format_type::format_type_be(t)?
+                    ),
+                ));
+            }
+            r
+        } else {
+            t
+        };
+    }
+    Ok(out)
+}
+
+pub(crate) fn cached_sql_function(
+    flinfo: &fmgr::FmgrInfo,
+    input_collation: Oid,
+    expected_desc: Option<&TupleDescData<'_>>,
+) -> PgResult<Rc<SqlFnEntry>> {
+    let fn_oid = flinfo.fn_oid;
+    let stamp = proc_row_stamp(fn_oid)?;
+
+    let scratch = MemoryContext::new("sqlfn key");
+    let (declared, nargs) = {
+        let Some(tup) = SearchSysCache1(PROCOID, SysCacheKey::Value(Datum::from_oid(fn_oid)))?
+        else {
+            return Err(lookup_failed(fn_oid));
+        };
+        let (argv, _) = SysCacheGetAttr(PROCOID, &tup, ANUM_PG_PROC_PROARGTYPES)?;
+        let a = read_oidvector_attr(scratch.mcx(), argv)?;
+        ReleaseSysCache(tup);
+        let n = a.len();
+        assert!(n <= MAX_SQL_FN_ARGS, "fmgr_sql: >{MAX_SQL_FN_ARGS} arguments unported");
+        (a, n)
+    };
+    let argtypes = resolve_argtypes(&declared, flinfo)?;
+    let key = FnKey { fn_oid, collation: input_collation, argtypes, nargs: nargs as u8 };
+
+    if let Some(hit) = SQL_FN_CACHE.with(|c| c.borrow().get(&key).cloned()) {
+        if hit.stamp == stamp {
+            return Ok(hit);
+        }
+        SQL_FN_CACHE.with(|c| {
+            c.borrow_mut().remove(&key);
+        });
+    }
+
+    let entry = Rc::new(compile_entry(
+        fn_oid,
+        stamp,
+        &argtypes[..nargs],
+        input_collation,
+        flinfo,
+        expected_desc,
+    )?);
+    let cacheable = entry.owned.with(|s| {
+        !(s.rettype == types_core::catalog::RECORDOID && s.rettupdesc.is_some())
+    });
+    if cacheable {
+        SQL_FN_CACHE.with(|c| {
+            c.borrow_mut().insert(key, entry.clone());
+        });
+    }
+    Ok(entry)
+}
+
+fn compile_entry(
+    fn_oid: Oid,
+    stamp: (u32, (u32, u16)),
+    argtypes: &[Oid],
+    input_collation: Oid,
+    flinfo: &fmgr::FmgrInfo,
+    expected_desc: Option<&TupleDescData<'_>>,
+) -> PgResult<SqlFnEntry> {
+    let owned = McxOwned::<SqlFnEntryTy>::try_new(MemoryContext::new("SQL function"), |mcx| {
+        let row = read_proc_row(mcx, fn_oid)?;
+        let fname_s = row.proname.as_str().to_string();
+        let src_s = row.prosrc.as_str().to_string();
+        let r = (|| -> PgResult<SqlFnEntryState<'_>> {
+            let resolved = funcapi::get_call_result_type(mcx, flinfo, expected_desc)?;
+            let rettype = resolved.result_type_id;
+            let rettupdesc = resolved.result_tuple_desc.map(Rc::new);
+            let (typlen, typbyval) = lsyscache::typ::get_typlenbyval(rettype)?;
+            let scratch = MemoryContext::new("sqlfn count");
+            let num_queries = match row.prosqlbody.as_ref() {
+                Some(body) => {
+                    let qs = sqlbody_queries(scratch.mcx(), body.as_str())?;
+                    qs.len()
+                }
+                None => {
+                    let raws = parser_seams::raw_parser::call(
+                        scratch.mcx(),
+                        row.prosrc.as_str(),
+                        parser_seams::RawParseMode::RAW_PARSE_DEFAULT,
+                    )?;
+                    raws.len()
+                }
+            };
+            if num_queries == 0 && rettype != VOIDOID {
+                return Err(crate::retval::retval_mismatch_final_stmt(rettype));
+            }
+            let mut at: PgVec<'_, Oid> = PgVec::new_in(mcx);
+            at.try_reserve_exact(argtypes.len().max(1)).map_err(|_| mcx.oom(1))?;
+            at.extend_from_slice(argtypes);
+            Ok(SqlFnEntryState {
+                fname: row.proname,
+                src: row.prosrc,
+                sqlbody: row.prosqlbody,
+                argtypes: at,
+                argnames: row.argnames,
+                input_collation,
+                rettype,
+                typlen,
+                typbyval,
+                returns_set: row.proretset,
+                returns_tuple: Cell::new(false),
+                readonly_func: row.provolatile != b'v' as i8,
+                prokind: row.prokind,
+                rettupdesc,
+                num_queries,
+                plansources: RefCell::new(PgVec::new_in(mcx)),
+            })
+        })();
+        r.map_err(|e| crate::startup_error_context(e, &fname_s, &src_s))
+    })?;
+    Ok(SqlFnEntry { owned, stamp })
+}
+
+// check_sql_fn_statement (functions.c:2051). CallStmt has no ported node
+// yet, so its outargs check cannot run; loud until CALL lands.
+pub(crate) fn check_sql_fn_statement(q: &Query<'_>) -> PgResult<()> {
+    if q.commandType == CmdType::CMD_UTILITY {
+        if let Some(u) = q.utilityStmt {
+            if u.node_tag() == NodeTag::T_CallStmt {
+                panic!("check_sql_fn_statement: CALL in SQL function bodies unported");
+            }
+        }
+    }
+    Ok(())
+}
+
+// prepare_next_query (functions.c:899): one CachedPlanSource per original
+// query, built lazily. The source is re-derived per index (raw re-parse or
+// prosqlbody re-read) so the entry keeps no mutable parse trees.
+pub(crate) fn prepare_next_query(entry: &SqlFnEntry) -> PgResult<()> {
+    entry.owned.with(|s| {
+        let qindex = s.plansources.borrow().len();
+        assert!(qindex < s.num_queries, "prepare_next_query past end");
+        let islast = qindex + 1 >= s.num_queries;
+
+        let psrc;
+        if let Some(body) = s.sqlbody.as_ref() {
+            let scratch = MemoryContext::new("sqlfn tag");
+            let q0 = {
+                let qs = sqlbody_queries(scratch.mcx(), body.as_str())?;
+                let tagq = &qs[qindex];
+                match tagq.utilityStmt {
+                    Some(u) => utility_seams::create_command_tag::call(u),
+                    None => crate::query_command_tag(tagq.commandType),
+                }
+            };
+            psrc = plancache::CreateCachedPlan(None, s.src.as_str(), q0)?;
+            let build = (|| -> PgResult<()> {
+                let qmcx = plancache::SourceQueryMcx(psrc);
+                let queries = sqlbody_queries(qmcx, body.as_str())?;
+                let query = queries.into_iter().nth(qindex).expect("counted at compile");
+                let mut query_list: PgVec<'static, Query<'static>> =
+                    if query.commandType == CmdType::CMD_UTILITY {
+                        let mut v = PgVec::new_in(qmcx);
+                        v.try_reserve_exact(1).map_err(|_| qmcx.oom(1))?;
+                        v.push(query);
+                        v
+                    } else {
+                        rewrite_handler_seams::acquire_rewrite_locks::call(
+                            qmcx, &query, true, false,
+                        )?;
+                        rewrite_handler_seams::query_rewrite::call(qmcx, query)?
+                    };
+                for q in query_list.iter() {
+                    check_sql_fn_statement(q)?;
+                }
+                if islast {
+                    let rt = crate::retval::check_sql_stmt_retval(
+                        qmcx,
+                        &mut query_list,
+                        s.rettype,
+                        s.rettupdesc.as_deref(),
+                        s.prokind,
+                        false,
+                    )?;
+                    s.returns_tuple.set(rt);
+                }
+                plancache::CompleteCachedPlan(
+                    psrc,
+                    query_list,
+                    &s.argtypes,
+                    CURSOR_OPT_PARALLEL_OK | CURSOR_OPT_NO_SCROLL,
+                    false,
+                )?;
+                plancache::SaveCachedPlan(psrc)?;
+                Ok(())
+            })();
+            if let Err(e) = build {
+                plancache::DropCachedPlan(psrc);
+                return Err(e);
+            }
+        } else {
+            let scratch = MemoryContext::new("sqlfn parse");
+            let raw_list = parser_seams::raw_parser::call(
+                scratch.mcx(),
+                s.src.as_str(),
+                parser_seams::RawParseMode::RAW_PARSE_DEFAULT,
+            )?;
+            let raw = raw_list.get(qindex).expect("counted at compile");
+            let stmt = raw.stmt.expect("RawStmt has a stmt");
+            let tag = utility_seams::create_command_tag::call(stmt);
+            psrc = plancache::CreateCachedPlan(Some(raw), s.src.as_str(), tag)?;
+            let build = (|| -> PgResult<()> {
+                let qmcx = plancache::SourceQueryMcx(psrc);
+                let src = plancache::CachedPlanQueryString(psrc);
+                let reparsed = parser_seams::raw_parser::call(
+                    qmcx,
+                    src,
+                    parser_seams::RawParseMode::RAW_PARSE_DEFAULT,
+                )?;
+                let raw2 = reparsed.get(qindex).expect("re-parse reproduces the statement");
+                let mut name_refs: PgVec<'_, &str> = PgVec::new_in(qmcx);
+                name_refs
+                    .try_reserve_exact(s.argnames.len())
+                    .map_err(|_| qmcx.oom(s.argnames.len()))?;
+                for n in s.argnames.iter() {
+                    name_refs.push(n.as_str());
+                }
+                let query = analyze_seams::parse_analyze_sql_fn::call(
+                    qmcx,
+                    raw2,
+                    src,
+                    s.fname.as_str(),
+                    &s.argtypes,
+                    &name_refs,
+                    s.input_collation,
+                    QueryEnvHandle::NULL,
+                )?;
+                let mut query_list: PgVec<'static, Query<'static>> =
+                    if query.commandType == CmdType::CMD_UTILITY {
+                        let mut v = PgVec::new_in(qmcx);
+                        v.try_reserve_exact(1).map_err(|_| qmcx.oom(1))?;
+                        v.push(query);
+                        v
+                    } else {
+                        rewrite_handler_seams::query_rewrite::call(qmcx, query)?
+                    };
+                for q in query_list.iter() {
+                    check_sql_fn_statement(q)?;
+                }
+                if islast {
+                    let rt = crate::retval::check_sql_stmt_retval(
+                        qmcx,
+                        &mut query_list,
+                        s.rettype,
+                        s.rettupdesc.as_deref(),
+                        s.prokind,
+                        false,
+                    )?;
+                    s.returns_tuple.set(rt);
+                }
+                plancache::CompleteCachedPlan(
+                    psrc,
+                    query_list,
+                    &s.argtypes,
+                    CURSOR_OPT_PARALLEL_OK | CURSOR_OPT_NO_SCROLL,
+                    false,
+                )?;
+                plancache::SaveCachedPlan(psrc)?;
+                Ok(())
+            })();
+            if let Err(e) = build {
+                plancache::DropCachedPlan(psrc);
+                return Err(e);
+            }
+        }
+        s.plansources.borrow_mut().push(psrc);
+        Ok(())
+    })
+}
