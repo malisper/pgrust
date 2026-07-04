@@ -89,7 +89,7 @@ pub fn standard_ProcessUtility<'p, 'a, 's, 'd, 'q, 'mcx>(
     qc: Option<&'q mut QueryCompletion>,
 ) -> PgResult<()> {
     let is_top_level = context == PROCESS_UTILITY_TOPLEVEL;
-    let is_atomic_context = !(context == PROCESS_UTILITY_TOPLEVEL
+    let _is_atomic_context = !(context == PROCESS_UTILITY_TOPLEVEL
         || context == PROCESS_UTILITY_QUERY_NONATOMIC)
         || xact::IsTransactionBlock();
 
@@ -179,6 +179,9 @@ fn dispatch_switch<'mcx>(
     qc: &mut Option<&mut QueryCompletion>,
 ) -> PgResult<()> {
     let is_top_level = context == PROCESS_UTILITY_TOPLEVEL;
+    let is_atomic_context = !(context == PROCESS_UTILITY_TOPLEVEL
+        || context == PROCESS_UTILITY_QUERY_NONATOMIC)
+        || xact::IsTransactionBlock();
     use NodeTag::*;
     match parsetree.node_tag() {
         T_TransactionStmt => {
