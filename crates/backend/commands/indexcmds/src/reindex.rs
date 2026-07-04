@@ -705,7 +705,7 @@ fn ReindexRelationConcurrently<'mcx>(
         index_ids[i].safe = safe;
         index_ids[i].table_id = heapRel.rd_id;
 
-        if indexRel.rd_rel.relpersistence == RELPERSISTENCE_TEMP {
+        if indexRel.rd_rel.relpersistence == RELPERSISTENCE_TEMP as u8 {
             panic!("cannot reindex a temporary table concurrently");
         }
 
