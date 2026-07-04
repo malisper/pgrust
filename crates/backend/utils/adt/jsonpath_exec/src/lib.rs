@@ -20,7 +20,7 @@ use adt_jsonb::container::{
 use adt_jsonb::iter::{JsonbIterator, WjbToken};
 use adt_jsonpath::path::{jsp_init, jsp_init_by_buffer, ItemType, JsonPathItem, JSONPATH_LAX};
 use adt_numeric::{Num, NumericImage};
-use adt_timestamp::Timestamp;
+use adt_datetime::consts::Timestamp;
 use datum::Datum;
 use mcx::{Mcx, PgVec};
 use stack_depth::check_stack_depth;
