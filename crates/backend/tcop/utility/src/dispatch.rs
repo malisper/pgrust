@@ -1027,6 +1027,7 @@ fn slow_switch<'mcx>(
                 .as_variant::<types_nodes::parsenodes::AlterDomainStmt>()
                 .expect("AlterDomainStmt");
             typecmds::AlterDomain(mcx, stmt)?;
+            Ok(None)
         }
         T_AlterObjectSchemaStmt => {
             // Retention contract as unify_stmt_lifetime.
@@ -1051,6 +1052,7 @@ fn slow_switch<'mcx>(
                 }
                 other => handler_gap(&format!("ExecAlterObjectSchemaStmt {other:?}")),
             }
+            Ok(None)
         }
         T_RuleStmt => {
             // Retention contract as unify_stmt_lifetime.
