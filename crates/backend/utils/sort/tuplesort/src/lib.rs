@@ -1297,12 +1297,10 @@ fn datum_put_slow<'m>(
     is_null: bool,
 ) -> PgResult<(*mut SortTuple, *mut SortTuple)> {
     let datum1 = if is_null { Datum::null() } else { val };
-    // Bounded: the window is permanently empty (watermark 0) and len is
-    // already flushed at `bound`, so every put lands here — skip the flush +
-    // puttuple_common re-dispatch and run the discard leg inline (C's shape:
-    // one comparetup behind the put call). Caller is putdatum_batch: variant
-    // is by-value Datum (asserted there), abbrev disarmed by set_bound, so
-    // datum1 decides alone and there is no tuple image to free.
+    // Bounded: window permanently empty, len pinned at bound — flush is a
+    // no-op and the discard leg runs inline (C's one-comparetup-per-put
+    // shape). Caller is putdatum_batch: byval Datum asserted, abbrev
+    // disarmed by set_bound ⇒ datum1 decides alone, no image to free.
     if st.status == TupSortStatus::Bounded {
         // SAFETY: TSS_BOUNDED holds exactly `bound` >= 1 tuples; Datum
         // variant carries a sort key (begin_datum asserts).
@@ -1519,11 +1517,9 @@ impl<'m> TuplesortData<'m> {
         // SAFETY: TSS_BOUNDED invariant — memtuples holds exactly `bound` >= 1
         // tuples from make_bounded_heap on.
         let heap_top = unsafe { *self.memtuples.get_unchecked(0) };
-        // datum1 decides alone when only_key, or for a Datum sort with abbrev
-        // disarmed (set_bound guarantees; tiebreak is 0) — result-identical to
-        // comparetup, minus the CmpCtx/dispatch ladder (~35 instr/put, m2
-        // orderby dist-prof, docs/optimizations/orderby.md). Generic arm
-        // outlined so its frame stays off this path.
+        // datum1 decides alone when only_key, or Datum with abbrev disarmed
+        // (set_bound; tiebreak 0) — result-identical minus the per-put CmpCtx/
+        // dispatch ladder (docs/optimizations/orderby.md); generic arm outlined.
         let compare = if self.only_key || matches!(self.variant, SortVariant::Datum { .. }) {
             debug_assert!(self.abbrev.is_none());
             // SAFETY: non-IndexHash variants carry >=1 key (begin_* asserts);
