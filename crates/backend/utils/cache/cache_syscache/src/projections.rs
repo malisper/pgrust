@@ -741,6 +741,18 @@ fn lookup_pg_type_oid_by_name(typname: &str, typnamespace: Oid) -> PgResult<Oid>
     )
 }
 
+fn lookup_pg_cast_oid(sourcetypeid: Oid, targettypeid: Oid) -> PgResult<Oid> {
+    const ANUM_PG_CAST_OID: i32 = 1;
+    GetSysCacheOid(
+        crate::cacheinfo::CASTSOURCETARGET,
+        ANUM_PG_CAST_OID,
+        SysCacheKey::Value(Datum::from_oid(sourcetypeid)),
+        SysCacheKey::Value(Datum::from_oid(targettypeid)),
+        SysCacheKey::UNUSED,
+        SysCacheKey::UNUSED,
+    )
+}
+
 fn lookup_pg_namespace_oid_by_name(nspname: &str) -> PgResult<Oid> {
     GetSysCacheOid(
         NAMESPACENAME,
@@ -2201,6 +2213,7 @@ pub(crate) fn install() {
     syscache_seams::lookup_pg_type_oid_by_name::set(lookup_pg_type_oid_by_name);
     syscache_seams::pg_namespace_nspname::set(pg_namespace_nspname);
     syscache_seams::lookup_pg_namespace_oid_by_name::set(lookup_pg_namespace_oid_by_name);
+    syscache_seams::lookup_pg_cast_oid::set(lookup_pg_cast_oid);
     syscache_seams::lookup_pg_operator_shape::set(lookup_pg_operator_shape);
     syscache_seams::pg_operator_oprname::set(pg_operator_oprname);
     syscache_seams::lookup_pg_opclass_oid_by_name::set(lookup_pg_opclass_oid_by_name);

@@ -5057,6 +5057,15 @@ impl<'mcx> Parser<'mcx> {
                 }
                 *yyval = YYSTYPE::Node(Some(param));
             }
+            1169 => {
+                let el = view.v(1).node().expect("aggr_arg");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, el)?);
+            }
+            1170 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(3).node().expect("aggr_arg"))?;
+                *yyval = YYSTYPE::List(list);
+            }
             1165..=1167 => {
                 let (args, numdirect) = match rule {
                     1165 => (NodeList::nil(), -1),
