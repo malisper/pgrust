@@ -17,6 +17,7 @@ fmgr_seams = { path = "../fmgr_seams" }
 adt_bool = { path = "../../adt/bool" }
 adt_domains = { path = "../../adt/domains" }
 arrayfuncs = { path = "../../adt/arrayfuncs" }
+array_userfuncs = { path = "../../adt/array_userfuncs" }
 adt_scalar = { path = "../../adt/scalar" }
 sequence_seams = { path = "../../../commands/sequence_seams" }
 extension_seams = { path = "../../../commands/extension_seams" }

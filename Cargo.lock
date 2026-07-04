@@ -1026,6 +1026,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "array_userfuncs"
+version = "0.1.0"
+dependencies = [
+ "arrayfuncs",
+ "arrayutils",
+ "datum",
+ "detoast_seams",
+ "fmgr_seams",
+ "format_type",
+ "init_small",
+ "lsyscache",
+ "mcx",
+ "pg_prng",
+ "tuplesort_seams",
+ "typcache",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+]
+
+[[package]]
 name = "arrayfuncs"
 version = "0.1.0"
 dependencies = [
@@ -1838,6 +1859,7 @@ dependencies = [
  "types_rel",
  "types_slot",
  "types_tuple",
+ "xact_seams",
 ]
 
 [[package]]
@@ -4160,6 +4182,7 @@ dependencies = [
  "adt_varchar",
  "adt_windowfuncs",
  "adt_xml",
+ "array_userfuncs",
  "arrayfuncs",
  "commands_async",
  "conv",
@@ -5436,6 +5459,7 @@ dependencies = [
  "shmem_seams",
  "sinval",
  "subtrans",
+ "syncscan",
  "transam_xlog",
  "twophase",
  "types_core",
@@ -10605,6 +10629,7 @@ dependencies = [
  "subtrans",
  "superuser",
  "sync",
+ "syncscan",
  "syslogger",
  "table",
  "tableam",
@@ -10637,6 +10662,7 @@ dependencies = [
  "xlogreader",
  "xlogrecovery",
  "xlogutils",
+ "xmlmap",
 ]
 
 [[package]]
@@ -11529,6 +11555,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "syncscan"
+version = "0.0.0"
+dependencies = [
+ "init_small",
+ "lwlock",
+ "pg_sema_seams",
+ "s_lock_seams",
+ "shmem",
+ "syncscan_seams",
+ "types_core",
+ "types_error",
+ "types_rel",
+ "types_storage",
+]
+
+[[package]]
 name = "syncscan_seams"
 version = "0.0.0"
 dependencies = [
@@ -12263,6 +12305,7 @@ dependencies = [
  "nbtree",
  "pg_locale",
  "postgres_seams",
+ "tuplesort_seams",
  "types_core",
  "types_error",
  "types_fmgr",
@@ -12272,6 +12315,17 @@ dependencies = [
  "types_slot",
  "types_tuple",
  "varlena",
+]
+
+[[package]]
+name = "tuplesort_seams"
+version = "0.0.0"
+dependencies = [
+ "datum",
+ "mcx",
+ "seam_core",
+ "types_core",
+ "types_error",
 ]
 
 [[package]]
@@ -13044,6 +13098,7 @@ dependencies = [
  "pg_locale_seams",
  "pqformat",
  "stringinfo",
+ "syscache_seams",
  "types_core",
  "types_error",
  "types_fmgr",
@@ -13582,6 +13637,31 @@ name = "xlogutils_seams"
 version = "0.0.0"
 dependencies = [
  "seam_core",
+]
+
+[[package]]
+name = "xmlmap"
+version = "0.1.0"
+dependencies = [
+ "adt_regproc",
+ "adt_xml",
+ "catalog_namespace",
+ "datum",
+ "dbcommands",
+ "elog",
+ "execexpr",
+ "init_small",
+ "lsyscache",
+ "mcx",
+ "spi",
+ "syscache_seams",
+ "table",
+ "tupdesc",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_storage",
+ "types_tuple",
 ]
 
 [[package]]

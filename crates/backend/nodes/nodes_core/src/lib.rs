@@ -187,6 +187,10 @@ pub fn expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
             let d = node.as_distinct_expr().unwrap();
             walk_list(&d.args, w)
         }
+        NodeTag::T_NullIfExpr => {
+            let d = node.as_null_if_expr().unwrap();
+            walk_list(&d.args, w)
+        }
         NodeTag::T_RowExpr => {
             // C notes: don't examine row_typeid/colnames.
             let r = node.as_row_expr().unwrap();
@@ -715,8 +719,16 @@ where
             };
             checker(opfuncid)
         }
-        t @ (NodeTag::T_NullIfExpr
-        | NodeTag::T_RowCompareExpr) => deferred("check_functions_in_node", t),
+        NodeTag::T_NullIfExpr => {
+            let d = node.as_null_if_expr().unwrap();
+            let opfuncid = if d.opfuncid == 0 {
+                lsyscache::operator::get_opcode(d.opno)?
+            } else {
+                d.opfuncid
+            };
+            checker(opfuncid)
+        }
+        t @ NodeTag::T_RowCompareExpr => deferred("check_functions_in_node", t),
         _ => Ok(false),
     }
 }
@@ -1130,6 +1142,25 @@ where
                 Some(args) => Ok(Some(Node::mk(
                     mcx,
                     types_nodes::DistinctExpr {
+                        opno: d.opno,
+                        opfuncid: d.opfuncid,
+                        opresulttype: d.opresulttype,
+                        opretset: d.opretset,
+                        opcollid: d.opcollid,
+                        inputcollid: d.inputcollid,
+                        args,
+                        location: d.location,
+                    },
+                )?)),
+            }
+        }
+        NodeTag::T_NullIfExpr => {
+            let d = node.as_null_if_expr().unwrap();
+            match mutate_list(mcx, &d.args, m)? {
+                None => Ok(None),
+                Some(args) => Ok(Some(Node::mk(
+                    mcx,
+                    types_nodes::NullIfExpr {
                         opno: d.opno,
                         opfuncid: d.opfuncid,
                         opresulttype: d.opresulttype,

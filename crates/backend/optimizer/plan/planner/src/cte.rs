@@ -17,6 +17,10 @@ use crate::run::PlannerRun;
 pub fn ss_process_ctes<'mcx>(run: &mut PlannerRun<'mcx>, parse: &Query<'mcx>) -> PgResult<()> {
     let mcx = run.mcx;
     debug_assert!(run.root.cte_plan_ids.is_empty());
+    // C reads cteroot->parse->cteList from child levels while this level is
+    // still mid-preprocessing; the sealed parse doesn't exist yet, so the
+    // list is snapshotted here (cells shared, positions == cte_plan_ids ndx).
+    run.root.cte_list = parse.cteList.clone_in(mcx)?;
 
     for cte_node in &parse.cteList {
         let cte = cte_node.as_common_table_expr().expect("cteList cell");
@@ -181,7 +185,7 @@ impl<'a, 'mcx> nodes_core::NodeWalker<'mcx> for InlineCteWalker<'a, 'mcx> {
                 if self.levelsup > 0 {
                     rewrite_manip::IncrementVarSublevelsUp(
                         newquery_node,
-                        self.levelsup as u32,
+                        self.levelsup as i32,
                         1,
                     )?;
                 }
@@ -292,7 +296,14 @@ fn str_in<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<&'mcx str> {
 // unported — a sorted CTE output loses its order hint, cost-only divergence).
 pub fn set_cte_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResult<()> {
     let rte = run.rte(rti);
-    let (plan_id, _) = cte_plan_id_and_param(run, rte);
+    let (plan_id, cte_param) = resolve_cte_plan(run, rte);
+    // createplan can't re-run the resolve: the suspended_roots chain this
+    // level walked is unwound before its plan is created.
+    run.root.cte_scan_params.push(types_pathnodes::CteScanParam {
+        rti: rti as u32,
+        plan_id,
+        cte_param,
+    });
     let cteplan = run.glob.subplans.nth((plan_id - 1) as usize);
     let plan_rows = cteplan.as_plan().expect("plan node").plan_rows;
     crate::costsize::set_cte_size_estimates(run, rel, plan_rows)?;
@@ -342,21 +353,23 @@ pub fn set_worktable_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) 
     Ok(())
 }
 
-pub(crate) fn cte_plan_id_and_param(run: &PlannerRun<'_>, rte: &RangeTblEntry<'_>) -> (i32, i32) {
+// set_cte_pathlist's cteroot walk (allpaths.c): levelsup steps up C's
+// parent_root chain == our suspended_roots (one push_root per C link).
+fn resolve_cte_plan(run: &PlannerRun<'_>, rte: &RangeTblEntry<'_>) -> (i32, i32) {
     debug_assert!(!rte.self_reference);
     let ctename = rte.ctename.expect("CTE RTE has ctename");
     let levelsup = rte.ctelevelsup as usize;
-    // Parent roots intern their parse Query only after preprocessing, so an
-    // up-level reference cannot resolve yet.
-    assert!(
-        levelsup == 0,
-        "set_cte_pathlist (allpaths.c): ctelevelsup {levelsup} for CTE \"{ctename}\" \
-         (reference from a sub-query level); M2 nested-CTE lane"
-    );
-    let cteroot: &PlannerInfo<'_> = &run.root;
-    let parse = run.queries[cteroot.parse.0 as usize];
-    let ndx = parse
-        .cteList
+    let cteroot: &PlannerInfo<'_> = if levelsup == 0 {
+        &run.root
+    } else {
+        assert!(
+            levelsup <= run.suspended_roots.len(),
+            "bad levelsup for CTE \"{ctename}\""
+        );
+        &run.suspended_roots[run.suspended_roots.len() - levelsup].root
+    };
+    let ndx = cteroot
+        .cte_list
         .iter()
         .position(|c| {
             c.as_common_table_expr().expect("cteList cell").ctename == Some(ctename)
@@ -381,4 +394,15 @@ pub(crate) fn cte_plan_id_and_param(run: &PlannerRun<'_>, rte: &RangeTblEntry<'_
         })
         .unwrap_or_else(|| panic!("could not find plan for CTE \"{ctename}\""));
     (plan_id, cte_param)
+}
+
+pub(crate) fn cte_plan_id_and_param(run: &PlannerRun<'_>, rti: usize) -> (i32, i32) {
+    run.root
+        .cte_scan_params
+        .iter()
+        .find(|p| p.rti == rti as u32)
+        .map(|p| (p.plan_id, p.cte_param))
+        .unwrap_or_else(|| {
+            panic!("create_ctescan_plan (createplan.c): rti {rti} has no resolved CTE plan")
+        })
 }

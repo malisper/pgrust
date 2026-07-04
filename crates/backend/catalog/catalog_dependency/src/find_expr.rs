@@ -199,6 +199,27 @@ fn walker<'w, 'mcx: 'w>(
         NodeTag::T_BoolExpr => walk_list(&node.as_bool_expr().unwrap().args, context),
         // C has no case for CoalesceExpr: expression_tree_walker walks args.
         NodeTag::T_CoalesceExpr => walk_list(&node.as_coalesce_expr().unwrap().args, context),
+        // C has no XmlExpr/TableFunc case: expression_tree_walker recursion
+        // only, no dependency recorded.
+        NodeTag::T_XmlExpr => {
+            let x = node.as_xml_expr().unwrap();
+            walk_list(&x.named_args, context)?;
+            walk_list(&x.args, context)
+        }
+        NodeTag::T_TableFunc => {
+            let tf = node.as_table_func().unwrap();
+            walk_list(&tf.ns_uris, context)?;
+            walk_opt(tf.docexpr, context)?;
+            walk_opt(tf.rowexpr, context)?;
+            for e in tf.colexprs.iter() {
+                walk_opt(e, context)?;
+            }
+            for e in tf.coldefexprs.iter() {
+                walk_opt(e, context)?;
+            }
+            walk_list(&tf.colvalexprs, context)?;
+            walk_list(&tf.passingvalexprs, context)
+        }
         NodeTag::T_TargetEntry => walker(node.as_target_entry().unwrap().expr, context),
         NodeTag::T_RangeTblRef => Ok(()),
         NodeTag::T_Param => {
@@ -308,7 +329,7 @@ fn walk_query<'w, 'mcx: 'w>(
             }
             // RTE_CTE/RTE_VALUES collations only duplicate ones referenced
             // elsewhere in the Query (C dependency.c:2153).
-            RTEKind::RTE_SUBQUERY | RTEKind::RTE_CTE => {}
+            RTEKind::RTE_SUBQUERY | RTEKind::RTE_CTE | RTEKind::RTE_TABLEFUNC => {}
             other => walker_unported(&format!("rtekind {other:?}")),
         }
     }
@@ -381,6 +402,9 @@ fn walk_query_fields<'w, 'mcx: 'w>(
                 walk_query(rte.subquery.expect("RTE_SUBQUERY has a subquery"), context)?
             }
             RTEKind::RTE_JOIN | RTEKind::RTE_CTE => {}
+            RTEKind::RTE_TABLEFUNC => {
+                walk_opt(rte.tablefunc, context)?
+            }
             other => walker_unported(&format!("rtekind {other:?}")),
         }
         walk_list(&rte.securityQuals, context)?;

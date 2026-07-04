@@ -9,6 +9,7 @@ pub mod element;
 pub mod expanded;
 pub mod foundation;
 pub mod io;
+pub mod ops;
 
 #[cfg(test)]
 mod tests;
@@ -28,3 +29,4 @@ pub use expanded::{
     expand_array, ArrayMetaState, ExpandedArrayHeader, EA_MAGIC,
 };
 pub use io::{array_in, array_out, array_recv, array_send, ArrayIoMeta};
+pub use ops::{array_cmp, array_eq_internal};

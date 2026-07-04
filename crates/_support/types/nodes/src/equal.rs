@@ -75,6 +75,7 @@ pub fn equal(a: Node<'_>, b: Node<'_>) -> bool {
         NodeTag::T_NullTest => cmp!(as_null_test),
         NodeTag::T_BooleanTest => cmp!(as_boolean_test),
         NodeTag::T_DistinctExpr => cmp!(as_distinct_expr),
+        NodeTag::T_NullIfExpr => cmp!(as_null_if_expr),
         NodeTag::T_CollateClause => cmp!(as_collate_clause),
         NodeTag::T_TargetEntry => cmp!(as_target_entry),
         NodeTag::T_RangeTblRef => cmp!(as_range_tbl_ref),
@@ -596,6 +597,18 @@ impl NodeEqual for BooleanTest<'_> {
 }
 
 impl NodeEqual for DistinctExpr<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.opno == b.opno
+            && (self.opfuncid == b.opfuncid || self.opfuncid == 0 || b.opfuncid == 0)
+            && self.opresulttype == b.opresulttype
+            && self.opretset == b.opretset
+            && self.opcollid == b.opcollid
+            && self.inputcollid == b.inputcollid
+            && self.args.node_equal(&b.args)
+    }
+}
+
+impl NodeEqual for crate::primnodes::NullIfExpr<'_> {
     fn node_equal(&self, b: &Self) -> bool {
         self.opno == b.opno
             && (self.opfuncid == b.opfuncid || self.opfuncid == 0 || b.opfuncid == 0)

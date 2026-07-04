@@ -695,59 +695,46 @@ pub struct FuncCandidate<'mcx> {
     pub args: mcx::PgVec<'mcx, Oid>,
 }
 
-const FUNC_MAX_ARGS: usize = 100;
-
-const FUNC_PARAM_IN: u8 = b'i';
-const FUNC_PARAM_INOUT: u8 = b'b';
-const FUNC_PARAM_VARIADIC: u8 = b'v';
-
-// MatchNamedCall (namespace.c), include_out_arguments=false leg only. None
-// mirrors C's `return false`. DIVERGENCE: C reads proargnames/proargmodes off
-// the already-fetched pg_proc tuple (get_func_arg_info); the candidate
-// projection doesn't carry them, so this re-probes PROCOID via the
-// pg_proc_result_arrays seam — same attrs, named-notation calls only.
-fn MatchNamedCall<'mcx>(
+// MatchNamedCall (namespace.c), include_out_arguments always false. Returns
+// the call-position -> proargtypes-position map, or None on no match.
+fn match_named_call<'mcx>(
     mcx: mcx::Mcx<'mcx>,
-    proc_oid: Oid,
-    pronargdefaults: i16,
+    cand: &syscache_seams::PgProcCandidate<'mcx>,
     nargs: i16,
     argnames: &[&str],
-    pronargs: i16,
 ) -> PgResult<Option<mcx::PgVec<'mcx, i32>>> {
+    const FUNC_PARAM_IN: i8 = b'i' as i8;
+    const FUNC_PARAM_INOUT: i8 = b'b' as i8;
+    const FUNC_PARAM_VARIADIC: i8 = b'v' as i8;
+    let pronargs = cand.pronargs as usize;
     let numposargs = nargs as usize - argnames.len();
-    let pronargs = pronargs as usize;
+    assert!(nargs as usize <= pronargs);
 
-    let Some(arrays) = syscache_seams::pg_proc_result_arrays::call(mcx, proc_oid)? else {
+    let Some(arrays) = syscache_seams::pg_proc_result_arrays::call(mcx, cand.oid)? else {
         return Ok(None);
     };
-    // C: ignore this function if its proargnames is null.
-    let Some(p_argnames) = arrays.proargnames.as_ref() else {
+    let Some(p_argnames) = arrays.proargnames else {
         return Ok(None);
     };
-    let p_argmodes = arrays.proargmodes.as_deref();
+    let p_argmodes = arrays.proargmodes;
     let pronallargs = p_argnames.len();
 
     let mut argnumbers: mcx::PgVec<'mcx, i32> = mcx::vec_with_capacity_in(mcx, pronargs)?;
-    let mut arggiven = [false; FUNC_MAX_ARGS];
-
+    let mut arggiven = [false; types_core::FUNC_MAX_ARGS];
     for ap in 0..numposargs {
         argnumbers.push(ap as i32);
         arggiven[ap] = true;
     }
-
     for argname in argnames {
         let mut pp = 0usize;
         let mut found = false;
         for i in 0..pronallargs {
-            // C: consider only input params (include_out_arguments false).
-            if let Some(modes) = p_argmodes {
-                let m = modes[i] as u8;
-                if m != FUNC_PARAM_IN && m != FUNC_PARAM_INOUT && m != FUNC_PARAM_VARIADIC {
+            if let Some(modes) = &p_argmodes {
+                if !matches!(modes[i], FUNC_PARAM_IN | FUNC_PARAM_INOUT | FUNC_PARAM_VARIADIC) {
                     continue;
                 }
             }
             if p_argnames[i].as_str() == *argname {
-                // C: fail if argname matches a positional argument.
                 if arggiven[pp] {
                     return Ok(None);
                 }
@@ -762,11 +749,10 @@ fn MatchNamedCall<'mcx>(
             return Ok(None);
         }
     }
-
     if (nargs as usize) < pronargs {
-        let first_arg_with_default = pronargs - pronargdefaults as usize;
-        for pp in numposargs..pronargs {
-            if arggiven[pp] {
+        let first_arg_with_default = pronargs - cand.pronargdefaults as usize;
+        for (pp, given) in arggiven.iter().enumerate().take(pronargs).skip(numposargs) {
+            if *given {
                 continue;
             }
             if pp < first_arg_with_default {
@@ -775,13 +761,15 @@ fn MatchNamedCall<'mcx>(
             argnumbers.push(pp as i32);
         }
     }
-
-    debug_assert_eq!(argnumbers.len(), pronargs);
+    assert_eq!(argnumbers.len(), pronargs);
     Ok(Some(argnumbers))
 }
 
-// FuncnameGetCandidates (namespace.c); include_out_arguments stays on the loud
-// path in parse_func. An oid of InvalidOid marks C's ambiguous-set placeholder.
+// FuncnameGetCandidates (namespace.c); include_out_arguments has no in-tree
+// caller and stays on the loud path in parse_func. An oid of InvalidOid marks
+// C's ambiguous-set placeholder. Divergence: C's argnumbers array is applied
+// to candidate args here but not returned (parse_func's named-call transform
+// is unported).
 pub fn FuncnameGetCandidates<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     names: &[&str],
@@ -855,13 +843,18 @@ pub fn FuncnameGetCandidatesExtended<'mcx>(
             }
         }
 
-        let (variadic, va_elem_type, use_defaults, argnumbers) = if !argnames.is_empty() {
-            // C: named/mixed notation can match a variadic function only if
-            // expand_variadic is off.
+        let mut argnumbers: Option<mcx::PgVec<'mcx, i32>> = None;
+        let (variadic, va_elem_type, use_defaults);
+        if !argnames.is_empty() {
+            // Named or mixed notation matches a variadic function only with
+            // expand_variadic off (C: no way to name the expanded params).
             if OidIsValid(cand.provariadic) && expand_variadic {
                 continue;
             }
-            let use_defaults = pronargs > nargs && expand_defaults && {
+            variadic = false;
+            va_elem_type = InvalidOid;
+            assert!(nargs >= 0);
+            use_defaults = pronargs > nargs && expand_defaults && {
                 if nargs + cand.pronargdefaults < pronargs {
                     continue;
                 }
@@ -870,32 +863,23 @@ pub fn FuncnameGetCandidatesExtended<'mcx>(
             if pronargs != nargs && !use_defaults {
                 continue;
             }
-            let Some(an) = MatchNamedCall(
-                mcx,
-                cand.oid,
-                cand.pronargdefaults,
-                nargs,
-                argnames,
-                pronargs,
-            )?
-            else {
-                continue;
-            };
-            // C: named argument matching is always "special".
+            match match_named_call(mcx, &cand, nargs, argnames)? {
+                None => continue,
+                some => argnumbers = some,
+            }
             any_special = true;
-            (false, InvalidOid, use_defaults, Some(an))
         } else {
             // C considers variadic expansion only when pronargs <= nargs; an
             // undersupplied variadic candidate falls through to the arg-count
             // skip (e.g. rank() never sees the hypothetical-set aggregate 3986).
-            let (variadic, va_elem_type) = if pronargs <= nargs && expand_variadic {
+            (variadic, va_elem_type) = if pronargs <= nargs && expand_variadic {
                 (OidIsValid(cand.provariadic), cand.provariadic)
             } else {
                 (false, InvalidOid)
             };
             any_special |= variadic;
 
-            let use_defaults = pronargs > nargs && expand_defaults && {
+            use_defaults = pronargs > nargs && expand_defaults && {
                 if nargs + cand.pronargdefaults < pronargs {
                     continue;
                 }
@@ -906,22 +890,18 @@ pub fn FuncnameGetCandidatesExtended<'mcx>(
             if nargs >= 0 && pronargs != nargs && !variadic && !use_defaults {
                 continue;
             }
-            (variadic, va_elem_type, use_defaults, None)
-        };
+        }
 
         let effective_nargs = pronargs.max(nargs);
         let mut args = mcx::vec_with_capacity_in(mcx, effective_nargs as usize)?;
-        match &argnumbers {
-            // C: re-order the argument types into call's logical order.
-            Some(an) => {
-                for &j in an.iter() {
-                    args.push(cand.proargtypes[j as usize]);
-                }
+        if let Some(argnumbers) = &argnumbers {
+            // Re-order the argument types into the call's logical order.
+            for &j in argnumbers.iter() {
+                args.push(cand.proargtypes[j as usize]);
             }
-            None => {
-                for &a in cand.proargtypes.iter() {
-                    args.push(a);
-                }
+        } else {
+            for &a in cand.proargtypes.iter() {
+                args.push(a);
             }
         }
         let nvargs = if variadic {

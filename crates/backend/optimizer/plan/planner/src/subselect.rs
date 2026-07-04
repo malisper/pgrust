@@ -718,6 +718,15 @@ fn offset_and_pull_down<'mcx>(
     node: Node<'mcx>,
     rtoffset: i32,
 ) -> PgResult<Node<'mcx>> {
+    // A nested SubLink needs the sublevel-tracking walkers; they mutate in
+    // place, so the shared clause is deep-copied first (C copyObject's the
+    // whole subselect up front).
+    if rewrite_manip::checkExprHasSubLink(node)? {
+        let copy = rewrite_manip::copy_node(mcx, node)?;
+        rewrite_manip::OffsetVarNodes(mcx, copy, rtoffset, 0)?;
+        rewrite_manip::IncrementVarSublevelsUp(copy, -1, 1)?;
+        return Ok(copy);
+    }
     fn mutate<'mcx>(
         mcx: Mcx<'mcx>,
         node: Node<'mcx>,
@@ -738,12 +747,7 @@ fn offset_and_pull_down<'mcx>(
             }
             return Ok(Some(Node::mk(mcx, nv)?));
         }
-        if node.node_tag() == NodeTag::T_SubLink {
-            panic!(
-                "IncrementVarSublevelsUp (rewriteManip.c): nested SubLink in pulled-up \
-                 EXISTS qual; sublink lane"
-            );
-        }
+        debug_assert!(node.node_tag() != NodeTag::T_SubLink);
         clauses::expression_tree_mutator(mcx, node, &mut |n| mutate(mcx, n, rtoffset))
     }
     Ok(mutate(mcx, node, rtoffset)?.unwrap_or(node))

@@ -869,7 +869,7 @@ fn create_ctescan_plan<'mcx>(
     debug_assert!(scan_relid > 0);
     let rte = run.rte(scan_relid as usize);
     debug_assert!(rte.rtekind == types_nodes::parsenodes::RTEKind::RTE_CTE);
-    let (plan_id, cte_param_id) = crate::cte::cte_plan_id_and_param(run, rte);
+    let (plan_id, cte_param_id) = crate::cte::cte_plan_id_and_param(run, scan_relid as usize);
 
     let ordered = order_qual_clauses(run, &scan_clauses)?;
     let qpqual = extract_actual_clauses(run, &ordered);
