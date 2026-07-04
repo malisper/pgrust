@@ -853,6 +853,30 @@ fn run_program<'mcx>(
                 let cur = read_out(*out);
                 crate::arrayops::sbsref_fetch_old(st, cur)?;
             }
+            Step::JsonbSbsrefSubscripts { state, jumpdone, out } => {
+                // SAFETY: as ArrayExprEval.
+                let st = unsafe { &mut *state.as_ptr() };
+                if !crate::jsonbsubs::check_subscripts(st)? {
+                    write_out(*out, Datum::null(), true);
+                    // SAFETY: jump targets validated < steps.len() at ready.
+                    sp = unsafe { base.add(*jumpdone as usize) };
+                    continue;
+                }
+            }
+            Step::JsonbSbsrefFetch { state, out } => {
+                // SAFETY: as ArrayExprEval.
+                let st = unsafe { &mut *state.as_ptr() };
+                let cur = read_out(*out);
+                let r = crate::jsonbsubs::fetch(st, cur)?;
+                write_out(*out, r.value, r.isnull);
+            }
+            Step::JsonbSbsrefAssign { state, out } => {
+                // SAFETY: as ArrayExprEval.
+                let st = unsafe { &mut *state.as_ptr() };
+                let cur = read_out(*out);
+                let r = crate::jsonbsubs::assign(st, cur)?;
+                write_out(*out, r.value, r.isnull);
+            }
             Step::SbsrefAssign { state, out } => {
                 // SAFETY: as ArrayExprEval.
                 let st = unsafe { &mut *state.as_ptr() };

@@ -4,7 +4,7 @@
 
 use mcx::Mcx;
 use parser_small1::{parser_errposition, transformContainerType, ParseExprKind, ParseState};
-use types_core::{InvalidOid, Oid, ParseLoc, INT4OID};
+use types_core::{InvalidOid, Oid, ParseLoc, INT4OID, JSONBOID, TEXTOID, UNKNOWNOID};
 use types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_PROGRAM_LIMIT_EXCEEDED,
     ERROR,
@@ -22,6 +22,7 @@ const F_JSONB_SUBSCRIPT_HANDLER: Oid = 6098;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SubscriptHandler {
     Array,
+    Jsonb,
 }
 
 pub fn subscript_handler_for(container_type: Oid) -> PgResult<Option<(SubscriptHandler, Oid)>> {
@@ -31,9 +32,7 @@ pub fn subscript_handler_for(container_type: Oid) -> PgResult<Option<(SubscriptH
         F_ARRAY_SUBSCRIPT_HANDLER | F_RAW_ARRAY_SUBSCRIPT_HANDLER => {
             Ok(Some((SubscriptHandler::Array, typelem)))
         }
-        F_JSONB_SUBSCRIPT_HANDLER => {
-            panic!("getSubscriptingRoutines: jsonb_subscript_handler unported — jsonb lane")
-        }
+        F_JSONB_SUBSCRIPT_HANDLER => Ok(Some((SubscriptHandler::Jsonb, typelem))),
         other => panic!("getSubscriptingRoutines: typsubscript handler {other} unported"),
     }
 }
@@ -115,6 +114,9 @@ pub fn transformContainerSubscripts<'mcx>(
         SubscriptHandler::Array => {
             array_subscript_transform(mcx, pstate, &mut sbsref, indirection, is_slice)?;
         }
+        SubscriptHandler::Jsonb => {
+            jsonb_subscript_transform(mcx, pstate, &mut sbsref, indirection, is_slice)?;
+        }
     }
 
     if sbsref.refrestype == InvalidOid {
@@ -183,6 +185,124 @@ fn array_subscript_transform<'mcx>(
     sbsref.reflowerindexpr = lower;
     sbsref.refrestype =
         if is_slice { sbsref.refcontainertype } else { sbsref.refelemtype };
+    Ok(())
+}
+
+#[cold]
+fn jsonb_no_slices(pstate: &ParseState<'_, '_>, location: ParseLoc) -> Box<PgError> {
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_DATATYPE_MISMATCH)
+            .errmsg("jsonb subscript does not support slices".to_string())
+            .errposition(parser_errposition(pstate, location, mbutils::GetDatabaseEncoding()))
+            .into_error()
+            .with_error_location(ErrorLocation::new(
+                "jsonbsubs.c",
+                0,
+                "jsonb_subscript_transform",
+            )),
+    )
+}
+
+#[cold]
+fn jsonb_bad_subscript_type(
+    pstate: &ParseState<'_, '_>,
+    subexpr_type: Oid,
+    hint: &'static str,
+    location: ParseLoc,
+) -> Box<PgError> {
+    let t = format_type::format_type_be(subexpr_type)
+        .unwrap_or_else(|_| subexpr_type.to_string());
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_DATATYPE_MISMATCH)
+            .errmsg(format!("subscript type {t} is not supported"))
+            .errhint(hint.to_string())
+            .errposition(parser_errposition(pstate, location, mbutils::GetDatabaseEncoding()))
+            .into_error()
+            .with_error_location(ErrorLocation::new(
+                "jsonbsubs.c",
+                0,
+                "jsonb_subscript_transform",
+            )),
+    )
+}
+
+// jsonbsubs.c jsonb_subscript_transform: coerce each subscript to exactly one
+// of int4/text (implicit context), no slices, result type always jsonb.
+fn jsonb_subscript_transform<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    sbsref: &mut SubscriptingRef<'mcx>,
+    indirection: &NodeList<'mcx>,
+    is_slice: bool,
+) -> PgResult<()> {
+    let mut upper: OptNodeList<'mcx> = OptNodeList::nil();
+    let expr_kind = pstate.p_expr_kind;
+
+    for el in indirection.iter() {
+        let ai = el.as_a_indices().unwrap();
+
+        if is_slice {
+            let expr = ai.uidx.or(ai.lidx);
+            return Err(jsonb_no_slices(
+                pstate,
+                expr.map_or(-1, expr_location),
+            ));
+        }
+        let Some(uidx) = ai.uidx else {
+            debug_assert!(is_slice && ai.is_slice);
+            return Err(jsonb_no_slices(pstate, -1));
+        };
+
+        let sub = crate::transformExpr(mcx, pstate, uidx, expr_kind)?;
+        let sub_type = expr_type(sub);
+        let target_type = if sub_type != UNKNOWNOID {
+            let mut target = UNKNOWNOID;
+            for cand in [INT4OID, TEXTOID] {
+                if coerce::can_coerce_type(&[sub_type], &[cand], coerce::COERCION_IMPLICIT)? {
+                    if target != UNKNOWNOID {
+                        return Err(jsonb_bad_subscript_type(
+                            pstate,
+                            sub_type,
+                            "jsonb subscript must be coercible to only one type, integer or text.",
+                            expr_location(sub),
+                        ));
+                    }
+                    target = cand;
+                }
+            }
+            if target == UNKNOWNOID {
+                return Err(jsonb_bad_subscript_type(
+                    pstate,
+                    sub_type,
+                    "jsonb subscript must be coercible to either integer or text.",
+                    expr_location(sub),
+                ));
+            }
+            target
+        } else {
+            TEXTOID
+        };
+
+        let coerced = coerce::coerce_type(
+            mcx,
+            pstate,
+            sub,
+            sub_type,
+            target_type,
+            -1,
+            coerce::COERCION_IMPLICIT,
+            types_nodes::CoercionForm::COERCE_IMPLICIT_CAST,
+            -1,
+        )?;
+        upper.lappend(mcx, Some(coerced))?;
+    }
+
+    sbsref.refupperindexpr = upper;
+    sbsref.reflowerindexpr = OptNodeList::nil();
+    sbsref.refrestype = JSONBOID;
+    sbsref.reftypmod = -1;
     Ok(())
 }
 

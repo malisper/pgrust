@@ -3911,6 +3911,7 @@ dependencies = [
  "mcx",
  "miscinit_seams",
  "namespace_seams",
+ "numutils",
  "pgstat",
  "pgtz",
  "sequence_seams",
@@ -3925,6 +3926,7 @@ dependencies = [
  "types_portal",
  "types_slot",
  "types_tuple",
+ "varlena",
  "xact_seams",
 ]
 

@@ -428,7 +428,7 @@ fn path_elems<'mcx>(
 }
 
 // C: JsonbToJsonbValue — scalar roots unwrap, containers ride as jbvBinary.
-fn root_item(payload: &[u8]) -> JsonbItem<'_> {
+pub(crate) fn root_item(payload: &[u8]) -> JsonbItem<'_> {
     match crate::io::extract_scalar(payload) {
         Some(v) => v,
         None => JsonbItem::Binary(payload),

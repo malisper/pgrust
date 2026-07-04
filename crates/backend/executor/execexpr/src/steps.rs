@@ -224,6 +224,13 @@ pub enum Step {
     SbsrefFetch { state: NonNull<crate::arrayops::SbsRefState>, slice: bool, out: OutRef },
     SbsrefOld { state: NonNull<crate::arrayops::SbsRefState>, out: OutRef },
     SbsrefAssign { state: NonNull<crate::arrayops::SbsRefState>, out: OutRef },
+    JsonbSbsrefSubscripts {
+        state: NonNull<crate::jsonbsubs::JsonbSbsState>,
+        jumpdone: u32,
+        out: OutRef,
+    },
+    JsonbSbsrefFetch { state: NonNull<crate::jsonbsubs::JsonbSbsState>, out: OutRef },
+    JsonbSbsrefAssign { state: NonNull<crate::jsonbsubs::JsonbSbsState>, out: OutRef },
     // slots: nelems compile-allocated NullableDatum arg targets (C's
     // d.minmax.values/nulls); call is the type's btree cmp proc.
     MinMax { call: FuncCall, slots: NonNull<NullableDatum>, nelems: u16, least: bool, out: OutRef },

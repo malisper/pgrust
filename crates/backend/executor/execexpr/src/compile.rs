@@ -2004,6 +2004,11 @@ impl HasResMcx for crate::arrayops::ArrayCoerceState {
         unsafe { core::ptr::addr_of_mut!((*p).resmcx) }
     }
 }
+impl HasResMcx for crate::jsonbsubs::JsonbSbsState {
+    unsafe fn resmcx_ptr(p: *mut Self) -> *mut crate::arrayops::ResMcx {
+        unsafe { core::ptr::addr_of_mut!((*p).resmcx) }
+    }
+}
 
 // C ExecInitExprRec T_XmlExpr: per-list arg slot arrays, args evaluated in
 // place before the XmlExprEval step runs.
@@ -2044,8 +2049,8 @@ fn init_xml_expr<'mcx>(
     push_step(state, mcx, Step::XmlExprEval { state: stp, out })
 }
 
-// C ExecInitSubscriptingRef over the closed array handler (arraysubs.c
-// array_exec_setup inlined: fetch_strict = true).
+// C ExecInitSubscriptingRef over the closed handler set (array_exec_setup /
+// jsonb_exec_setup inlined; fetch_strict = true for both).
 fn init_subscripting_ref<'mcx>(
     node: Node<'mcx>,
     state: &mut ExprState<'mcx>,
@@ -2057,6 +2062,11 @@ fn init_subscripting_ref<'mcx>(
 ) -> PgResult<()> {
     use crate::arrayops::MAXDIM;
     let sbsref = node.as_subscripting_ref().unwrap();
+    const F_JSONB_SUBSCRIPT_HANDLER: Oid = 6098;
+    let (typsubscript, _) = lsyscache::typ::get_typsubscript(sbsref.refcontainertype)?;
+    if typsubscript as Oid == F_JSONB_SUBSCRIPT_HANDLER {
+        return init_jsonb_subscripting_ref(node, state, mcx, out, agg, params, sub);
+    }
     let is_assignment = sbsref.refassgnexpr.is_some();
     let nupper = sbsref.refupperindexpr.len();
     let nlower = sbsref.reflowerindexpr.len();
@@ -2166,6 +2176,90 @@ fn init_subscripting_ref<'mcx>(
     for ix in adjust_jumps.iter() {
         match &mut state.steps[*ix] {
             Step::JumpIfNull { jumpdone, .. } | Step::SbsrefSubscripts { jumpdone, .. } => {
+                debug_assert_eq!(*jumpdone, u32::MAX);
+                *jumpdone = done;
+            }
+            _ => unreachable!(),
+        }
+    }
+    Ok(())
+}
+
+// C ExecInitSubscriptingRef + jsonb_exec_setup: unbounded subscript count,
+// per-subscript expr type recorded for the INT4→text exec conversion.
+fn init_jsonb_subscripting_ref<'mcx>(
+    node: Node<'mcx>,
+    state: &mut ExprState<'mcx>,
+    mcx: Mcx<'mcx>,
+    out: OutRef,
+    agg: Option<Bind<'_, 'mcx>>,
+    params: ParamBind<'mcx>,
+    sub: Option<SubplanCompileEnv>,
+) -> PgResult<()> {
+    let sbsref = node.as_subscripting_ref().unwrap();
+    let is_assignment = sbsref.refassgnexpr.is_some();
+    let nupper = sbsref.refupperindexpr.len();
+    assert!(sbsref.reflowerindexpr.len() == 0, "jsonb subscript does not support slices");
+
+    let upperindex: NonNull<::datum::NullableDatum> = alloc_array(mcx, nupper)?;
+    let index_oids: NonNull<Oid> = alloc_array(mcx, nupper)?;
+    let index: NonNull<::datum::Datum> = alloc_array(mcx, nupper)?;
+
+    let st = crate::jsonbsubs::JsonbSbsState {
+        isassignment: is_assignment,
+        expect_array: false,
+        nupper: nupper as u32,
+        upperindex,
+        index_oids,
+        index,
+        replace: ::datum::NullableDatum::null(),
+        resmcx: None,
+    };
+    let stp = alloc_state(mcx, st)?;
+    register_alloc_state(state, mcx, stp)?;
+
+    init_expr_rec(sbsref.refexpr.expect("SubscriptingRef.refexpr"), state, mcx, out, agg, params, sub)?;
+
+    let mut adjust_jumps: PgVec<'_, usize> = PgVec::new_in(mcx);
+    if !is_assignment {
+        // fetch_strict: NULL container => NULL result.
+        adjust_jumps.push(state.steps.len());
+        push_step(state, mcx, Step::JumpIfNull { jumpdone: u32::MAX, out })?;
+    }
+
+    for (i, e) in sbsref.refupperindexpr.iter().enumerate() {
+        match e {
+            Some(e) => {
+                // SAFETY: i < nupper slots of the fresh allocations.
+                unsafe { index_oids.as_ptr().add(i).write(expr_type(e)) };
+                let slot = unsafe { NonNull::new_unchecked(upperindex.as_ptr().add(i)) };
+                init_expr_rec(e, state, mcx, OutRef(slot), agg, params, sub)?;
+            }
+            None => unreachable!("jsonb subscripts are never omitted"),
+        }
+    }
+
+    adjust_jumps.push(state.steps.len());
+    push_step(state, mcx, Step::JsonbSbsrefSubscripts { state: stp, jumpdone: u32::MAX, out })?;
+
+    if is_assignment {
+        let assgn = sbsref.refassgnexpr.unwrap();
+        if assgn_needs_old(assgn) {
+            unported("EEOP_SBSREF_OLD (nested-assignment CaseTestExpr passing)");
+        }
+        let replace_slot = unsafe {
+            NonNull::new_unchecked(core::ptr::addr_of_mut!((*stp.as_ptr()).replace))
+        };
+        init_expr_rec(assgn, state, mcx, OutRef(replace_slot), agg, params, sub)?;
+        push_step(state, mcx, Step::JsonbSbsrefAssign { state: stp, out })?;
+    } else {
+        push_step(state, mcx, Step::JsonbSbsrefFetch { state: stp, out })?;
+    }
+
+    let done = state.steps.len() as u32;
+    for ix in adjust_jumps.iter() {
+        match &mut state.steps[*ix] {
+            Step::JumpIfNull { jumpdone, .. } | Step::JsonbSbsrefSubscripts { jumpdone, .. } => {
                 debug_assert_eq!(*jumpdone, u32::MAX);
                 *jumpdone = done;
             }
@@ -3228,7 +3322,9 @@ pub(crate) fn ready_expr(state: &mut ExprState<'_>) {
             | Step::JumpIfNotNull { jumpdone, .. } => {
                 assert!((*jumpdone as usize) < len, "case jump target out of range");
             }
-            Step::JumpIfNull { jumpdone, .. } | Step::SbsrefSubscripts { jumpdone, .. } => {
+            Step::JumpIfNull { jumpdone, .. }
+            | Step::SbsrefSubscripts { jumpdone, .. }
+            | Step::JsonbSbsrefSubscripts { jumpdone, .. } => {
                 assert!((*jumpdone as usize) < len, "sbsref jump target out of range");
             }
             Step::RowCompareStep { jumpnull, jumpdone, .. } => {
@@ -3285,6 +3381,7 @@ fn jump_field_mut(step: &mut Step) -> Option<&mut u32> {
         | Step::BoolOrStepFirst { jumpdone, .. }
         | Step::BoolOrStep { jumpdone, .. }
         | Step::SbsrefSubscripts { jumpdone, .. }
+        | Step::JsonbSbsrefSubscripts { jumpdone, .. }
         | Step::FuncStrict2Qual { jumpdone, .. }
         | Step::FuncStrict2QualThin { jumpdone, .. }
         | Step::NotDistinctQual { jumpdone, .. }
