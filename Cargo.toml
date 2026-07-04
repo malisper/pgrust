@@ -403,6 +403,7 @@ members = [
     "crates/backend/access/common/detoast_seams",
     "crates/backend/utils/adt/pg_locale_seams",
     "crates/backend/utils/adt/pg_locale",
+    "crates/backend/utils/adt/orderedsetaggs",
     "crates/backend/utils/adt/varlena",
     "crates/backend/utils/adt/varchar",
     "crates/backend/utils/adt/quote",

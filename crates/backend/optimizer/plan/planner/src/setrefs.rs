@@ -1094,7 +1094,13 @@ fn fix_upper_expr<'mcx>(
             }
             let a = node.as_aggref().expect("Aggref");
             record_plan_function_dependency(run, a.aggfnoid)?;
-            debug_assert!(a.aggdirectargs.is_nil());
+            let mut aggdirectargs = NodeList::nil();
+            for d in &a.aggdirectargs {
+                aggdirectargs.lappend(
+                    mcx,
+                    fix_upper_expr(run, d, subplan_tlist, rtoffset, newvarno, num_exec)?,
+                )?;
+            }
             let aggfilter = match a.aggfilter {
                 None => None,
                 Some(f) => {
@@ -1128,7 +1134,7 @@ fn fix_upper_expr<'mcx>(
                     inputcollid: a.inputcollid,
                     aggtranstype: a.aggtranstype,
                     aggargtypes: a.aggargtypes.clone_in(mcx)?,
-                    aggdirectargs: NodeList::nil(),
+                    aggdirectargs,
                     args,
                     // SortGroupClause cells pass through unchanged (C
                     // expression_tree_mutator leaves non-expression nodes).

@@ -27,10 +27,53 @@ pub fn transformAggregateCall<'mcx>(
     agg_distinct: bool,
 ) -> PgResult<()> {
     if agg.aggkind != types_nodes::primnodes::AGGKIND_NORMAL {
-        panic!(
-            "transformAggregateCall (parse_agg.c): ordered-set direct/aggregated arg split \
-             unported — backend-parser-agg ordered-set lane"
-        );
+        // Ordered-set agg: args = direct args ++ aggregated args; split them,
+        // and make one sortlist entry per aggregated arg (never resjunk).
+        let num_direct_args = args.len() - agg_order.len();
+        let mut direct = NodeList::nil();
+        let mut tlist = NodeList::nil();
+        let mut attno: i16 = 1;
+        for (i, arg) in args.iter().enumerate() {
+            if i < num_direct_args {
+                direct.lappend(mcx, arg)?;
+            } else {
+                let tle = Node::mk_target_entry(mcx, arg, attno, None, false)?;
+                tlist.lappend(mcx, tle)?;
+                attno += 1;
+            }
+        }
+        agg.aggdirectargs = direct;
+        let torder =
+            parse_clause_seams::transform_agg_within_group::call(mcx, pstate, &tlist, agg_order)?;
+        debug_assert!(!agg_distinct);
+        agg.aggorder = torder;
+        agg.aggdistinct = NodeList::nil();
+
+        // aggargtypes from the post-processing exprs (addTargetToSortList can
+        // resolve unknown literals); caller-computed arg_types unused here.
+        let _ = arg_types;
+        let mut argtypes = types_nodes::list::OidList::nil();
+        for d in &agg.aggdirectargs {
+            argtypes.lappend(mcx, nodes_core::expr_type(d))?;
+        }
+        for tle_node in &tlist {
+            let tle = tle_node.as_target_entry().expect("tlist cell");
+            if !tle.resjunk {
+                argtypes.lappend(mcx, nodes_core::expr_type(tle.expr))?;
+            }
+        }
+        agg.args = tlist;
+        agg.aggargtypes = argtypes;
+
+        agg.agglevelsup = check_agglevels_and_constraints(
+            pstate,
+            &agg.aggdirectargs,
+            &agg.args,
+            agg.aggfilter,
+            agg.location,
+            true,
+        )?;
+        return Ok(());
     }
     let mut tlist = NodeList::nil();
     let mut attno: i16 = 1;
@@ -74,8 +117,14 @@ pub fn transformAggregateCall<'mcx>(
     agg.args = tlist;
     agg.aggargtypes = argtypes;
 
-    agg.agglevelsup =
-        check_agglevels_and_constraints(pstate, &agg.args, agg.aggfilter, agg.location, true)?;
+    agg.agglevelsup = check_agglevels_and_constraints(
+        pstate,
+        &NodeList::nil(),
+        &agg.args,
+        agg.aggfilter,
+        agg.location,
+        true,
+    )?;
     Ok(())
 }
 
@@ -109,8 +158,14 @@ where
         result_list.lappend(mcx, transform_expr(mcx, pstate, arg)?)?;
     }
 
-    let agglevelsup =
-        check_agglevels_and_constraints(pstate, &result_list, None, p.location, false)?;
+    let agglevelsup = check_agglevels_and_constraints(
+        pstate,
+        &NodeList::nil(),
+        &result_list,
+        None,
+        p.location,
+        false,
+    )?;
     Node::mk(
         mcx,
         GroupingFunc {
@@ -125,12 +180,13 @@ where
 
 fn check_agglevels_and_constraints<'mcx>(
     pstate: &mut ParseState<'_, 'mcx>,
+    directargs: &NodeList<'mcx>,
     args: &NodeList<'mcx>,
     filter: Option<Node<'mcx>>,
     location: ParseLoc,
     is_agg: bool,
 ) -> PgResult<u32> {
-    let min_varlevel = check_agg_arguments(pstate, args, filter, location)?;
+    let min_varlevel = check_agg_arguments(pstate, directargs, args, filter, location)?;
     if min_varlevel > 0 {
         panic!(
             "check_agglevels_and_constraints (parse_agg.c): outer-level aggregate \
@@ -229,6 +285,7 @@ struct AggArgContext<'mcx> {
 
 fn check_agg_arguments<'mcx>(
     pstate: &ParseState<'_, 'mcx>,
+    directargs: &NodeList<'mcx>,
     args: &NodeList<'mcx>,
     filter: Option<Node<'mcx>>,
     agglocation: ParseLoc,
@@ -241,6 +298,9 @@ fn check_agg_arguments<'mcx>(
         min_cte_name: None,
         sublevels_up: 0,
     };
+    for node in directargs {
+        check_agg_arguments_walker(pstate, node, &mut ctx)?;
+    }
     for node in args {
         check_agg_arguments_walker(pstate, node, &mut ctx)?;
     }

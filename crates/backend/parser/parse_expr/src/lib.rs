@@ -2943,6 +2943,17 @@ fn transformFuncCall<'mcx>(
     for arg in &fc.args {
         fargs.lappend(mcx, transformExprRecurse(mcx, pstate, arg)?)?;
     }
+    // C: WITHIN GROUP ORDER BY expressions become trailing arguments for
+    // function lookup and coercion (ParseFuncOrColumn splits them back out).
+    if fc.agg_within_group {
+        debug_assert!(!fc.agg_order.is_nil());
+        for sb_node in &fc.agg_order {
+            let sortby = sb_node.as_sort_by().expect("agg_order holds SortBy nodes");
+            let arg = sortby.node.expect("SortBy.node is never NULL");
+            let t = transformExpr(mcx, pstate, arg, ParseExprKind::EXPR_KIND_ORDER_BY)?;
+            fargs.lappend(mcx, t)?;
+        }
+    }
     let mut arg_types: mcx::PgVec<'mcx, types_core::Oid> =
         mcx::vec_with_capacity_in(mcx, fargs.len())?;
     for arg in &fargs {

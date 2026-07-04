@@ -671,6 +671,7 @@ fn agg_trans_and_aggref_eval_steps() {
                 aggfilter: None,
                 pergroup: base,
                 ordered: None,
+                cur_agg: None,
             },
             // sum(int4): int4_sum (1841), non-strict, null init, 1 input.
             AggTransSpec {
@@ -685,6 +686,7 @@ fn agg_trans_and_aggref_eval_steps() {
                 // SAFETY: index 1 of the 2-element local array.
                 pergroup: unsafe { NonNull::new_unchecked(base.as_ptr().add(1)) },
                 ordered: None,
+                cur_agg: None,
             },
         ];
         let mut trans = exec_build_agg_trans(mcx, &specs, None, ParamBind::NONE).unwrap();
@@ -776,6 +778,7 @@ fn agg_trans_strict_input_check_skips_nulls() {
                 aggfilter: None,
                 pergroup: base,
                 ordered: None,
+                cur_agg: None,
             },
             // sum(int4): int4_sum (1841), non-strict, null init.
             AggTransSpec {
@@ -790,6 +793,7 @@ fn agg_trans_strict_input_check_skips_nulls() {
                 // SAFETY: index 1 of the 2-element local array.
                 pergroup: unsafe { NonNull::new_unchecked(base.as_ptr().add(1)) },
                 ordered: None,
+                cur_agg: None,
             },
         ];
         let mut trans = exec_build_agg_trans(mcx, &specs, None, ParamBind::NONE).unwrap();
@@ -1605,6 +1609,7 @@ fn thin_agg_count_star_kernel() {
             aggfilter: None,
             pergroup: base,
             ordered: None,
+            cur_agg: None,
         }];
         let mut trans = exec_build_agg_trans(mcx, &specs, None, ParamBind::NONE).unwrap();
         assert!(matches!(trans.kernel(), Kernel::AggTransByValThin { strict: true, .. }));

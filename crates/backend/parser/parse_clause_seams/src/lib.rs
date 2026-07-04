@@ -13,3 +13,12 @@ seam_core::seam!(
         agg_distinct: bool,
     ) -> PgResult<(NodeList<'mcx>, NodeList<'mcx>, mcx::PgVec<'mcx, Oid>)>
 );
+
+seam_core::seam!(
+    pub fn transform_agg_within_group<'a, 'p, 'mcx>(
+        mcx: Mcx<'mcx>,
+        pstate: &'a mut ParseState<'p, 'mcx>,
+        tlist: &'a NodeList<'mcx>,
+        agg_order: &'a NodeList<'mcx>,
+    ) -> PgResult<NodeList<'mcx>>
+);

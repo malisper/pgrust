@@ -7565,6 +7565,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "orderedsetaggs"
+version = "0.1.0"
+dependencies = [
+ "adt_datetime",
+ "adt_timestamp",
+ "arrayfuncs",
+ "datum",
+ "detoast_seams",
+ "execexpr",
+ "exectuples",
+ "fmgr_core",
+ "funcapi",
+ "init_small",
+ "lsyscache",
+ "mcx",
+ "nodeagg",
+ "nodes_core",
+ "tupdesc",
+ "tuplesort",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_nodes",
+ "types_slot",
+ "types_tuple",
+]
+
+[[package]]
 name = "origin_seams"
 version = "0.0.0"
 dependencies = [
@@ -7832,6 +7860,7 @@ dependencies = [
  "mbutils",
  "mcx",
  "miscinit_seams",
+ "nodes_core",
  "parse_agg",
  "parse_func_seams",
  "parse_relation",
@@ -11205,6 +11234,7 @@ dependencies = [
  "nodewindowagg",
  "opclasscmds",
  "operatorcmds",
+ "orderedsetaggs",
  "parallel",
  "parse_clause",
  "parse_collate",

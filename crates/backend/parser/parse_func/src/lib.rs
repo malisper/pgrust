@@ -49,7 +49,14 @@ enum FuncDetail<'mcx> {
         nvargs: i16,
         argdefaults: PgVec<'mcx, Node<'mcx>>,
     },
-    Aggregate { funcid: Oid, rettype: Oid, retset: bool, declared_arg_types: PgVec<'mcx, Oid> },
+    Aggregate {
+        funcid: Oid,
+        rettype: Oid,
+        retset: bool,
+        declared_arg_types: PgVec<'mcx, Oid>,
+        vatype: Oid,
+        nvargs: i16,
+    },
     Coercion { rettype: Oid },
     Multiple,
     Procedure {
@@ -392,19 +399,115 @@ pub fn ParseFuncOrColumn<'mcx>(
             }
             Ok(retval)
         }
-        FuncDetail::Aggregate { funcid, rettype, retset, declared_arg_types } => {
+        FuncDetail::Aggregate { funcid, rettype, retset, declared_arg_types, vatype, nvargs } => {
             let aggshape = syscache_seams::lookup_pg_aggregate_shape::call(funcid)?
                 .unwrap_or_else(|| {
                     panic!("cache lookup failed for aggregate {funcid} (parse_func.c)")
                 });
             let aggkind = aggshape.aggkind;
+            let cat_direct_args = aggshape.aggnumdirectargs as i64;
+            let mut fargs = fargs;
+            let mut actual_types_buf: PgVec<'mcx, Oid> = PgVec::new_in(mcx);
+            let mut actual_arg_types = actual_arg_types;
             if aggkind == AGGKIND_ORDERED_SET || aggkind == AGGKIND_HYPOTHETICAL {
-                panic!(
-                    "ParseFuncOrColumn (parse_func.c): ordered-set aggregate arm \
-                     (WITHIN GROUP direct-args split) unported — unit backend-parser-func"
-                );
-            }
-            if fn_call.agg_within_group {
+                if !fn_call.agg_within_group {
+                    return Err(wrong_object_type(
+                        pstate,
+                        format!(
+                            "WITHIN GROUP is required for ordered-set aggregate {}",
+                            name_list_to_string(parts)
+                        ),
+                        location,
+                    ));
+                }
+                if over.is_some() {
+                    return Err(feature_not_supported(
+                        pstate,
+                        format!(
+                            "OVER is not supported for ordered-set aggregate {}",
+                            name_list_to_string(parts)
+                        ),
+                        None,
+                        location,
+                    ));
+                }
+                // gram.y rejects DISTINCT/VARIADIC + WITHIN GROUP.
+                debug_assert!(!fn_call.agg_distinct);
+                debug_assert!(!fn_call.func_variadic);
+
+                let nargs = fargs.len() as i64;
+                let num_aggregated_args = fn_call.agg_order.len() as i64;
+                let num_direct_args = nargs - num_aggregated_args;
+                debug_assert!(num_direct_args >= 0);
+
+                if !OidIsValid(vatype) {
+                    if num_direct_args != cat_direct_args {
+                        return Err(ordered_set_direct_args_error(
+                            pstate,
+                            parts,
+                            argnames.as_slice(),
+                            actual_arg_types,
+                            cat_direct_args,
+                            num_direct_args,
+                            location,
+                        ));
+                    }
+                } else {
+                    let mut pronargs = nargs;
+                    if nvargs > 1 {
+                        pronargs -= nvargs as i64 - 1;
+                    }
+                    if cat_direct_args < pronargs {
+                        if num_direct_args != cat_direct_args {
+                            return Err(ordered_set_direct_args_error(
+                                pstate,
+                                parts,
+                                argnames.as_slice(),
+                                actual_arg_types,
+                                cat_direct_args,
+                                num_direct_args,
+                                location,
+                            ));
+                        }
+                    } else if aggkind == AGGKIND_HYPOTHETICAL {
+                        if nvargs as i64 != 2 * num_aggregated_args {
+                            return Err(hypothetical_args_mismatch_error(
+                                pstate,
+                                parts,
+                                argnames.as_slice(),
+                                actual_arg_types,
+                                nvargs as i64 - num_aggregated_args,
+                                num_aggregated_args,
+                                location,
+                            ));
+                        }
+                    } else if nvargs as i64 <= num_aggregated_args {
+                        return Err(ordered_set_min_direct_args_error(
+                            pstate,
+                            parts,
+                            argnames.as_slice(),
+                            actual_arg_types,
+                            cat_direct_args,
+                            location,
+                        ));
+                    }
+                }
+
+                if aggkind == AGGKIND_HYPOTHETICAL {
+                    for &t in actual_arg_types {
+                        actual_types_buf.push(t);
+                    }
+                    fargs = unify_hypothetical_args(
+                        mcx,
+                        pstate,
+                        fargs,
+                        num_aggregated_args as usize,
+                        actual_types_buf.as_mut_slice(),
+                        declared_arg_types.as_slice(),
+                    )?;
+                    actual_arg_types = actual_types_buf.as_slice();
+                }
+            } else if fn_call.agg_within_group {
                 return Err(wrong_object_type(
                     pstate,
                     format!(
@@ -529,6 +632,223 @@ pub fn ParseFuncOrColumn<'mcx>(
             location,
         )),
     }
+}
+
+// unify_hypothetical_args (parse_func.c): coerce each hypothetical direct
+// argument to the type of its corresponding aggregated argument when the
+// agg declared them ANY (make_fn_arguments will not touch ANY args).
+fn unify_hypothetical_args<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    fargs: NodeList<'mcx>,
+    num_aggregated_args: usize,
+    actual_arg_types: &mut [Oid],
+    declared_arg_types: &[Oid],
+) -> PgResult<NodeList<'mcx>> {
+    let num_args = fargs.len();
+    let num_direct_args = num_args - num_aggregated_args;
+    let Some(num_non_hypothetical_args) = num_direct_args.checked_sub(num_aggregated_args)
+    else {
+        return Err(Box::new(
+            elog::ereport(ERROR)
+                .errmsg("incorrect number of arguments to hypothetical-set aggregate")
+                .into_error()
+                .with_error_location(ErrorLocation::new(
+                    "parse_func.c",
+                    0,
+                    "unify_hypothetical_args",
+                )),
+        ));
+    };
+    let mut nodes: PgVec<'mcx, Node<'mcx>> = mcx::vec_with_capacity_in(mcx, num_args)?;
+    for n in fargs.iter() {
+        nodes.push(n);
+    }
+    let mut changed = false;
+    for hargpos in num_non_hypothetical_args..num_direct_args {
+        let aargpos = num_direct_args + (hargpos - num_non_hypothetical_args);
+        if declared_arg_types[hargpos] != declared_arg_types[aargpos] {
+            return Err(Box::new(
+                elog::ereport(ERROR)
+                    .errmsg(
+                        "hypothetical-set aggregate has inconsistent declared argument types",
+                    )
+                    .into_error()
+                    .with_error_location(ErrorLocation::new(
+                        "parse_func.c",
+                        0,
+                        "unify_hypothetical_args",
+                    )),
+            ));
+        }
+        if declared_arg_types[hargpos] != types_core::catalog::ANYOID {
+            continue;
+        }
+        // C prefers the aggregated argument's type (coerce the one direct
+        // value instead of every aggregated value).
+        let (harg, aarg) = (nodes[hargpos], nodes[aargpos]);
+        let commontype = coerce::select_common_type(
+            pstate,
+            &[
+                (nodes_core::expr_type(aarg), nodes_core::expr_location(aarg)),
+                (nodes_core::expr_type(harg), nodes_core::expr_location(harg)),
+            ],
+            Some("WITHIN GROUP"),
+        )?;
+        let commontypmod = coerce::select_common_typmod(
+            &[
+                (nodes_core::expr_type(aarg), nodes_core::expr_typmod(aarg)),
+                (nodes_core::expr_type(harg), nodes_core::expr_typmod(harg)),
+            ],
+            commontype,
+        );
+        nodes[hargpos] = coerce::coerce_type(
+            mcx,
+            pstate,
+            harg,
+            actual_arg_types[hargpos],
+            commontype,
+            commontypmod,
+            COERCION_IMPLICIT,
+            CoercionForm::COERCE_IMPLICIT_CAST,
+            -1,
+        )?;
+        actual_arg_types[hargpos] = commontype;
+        nodes[aargpos] = coerce::coerce_type(
+            mcx,
+            pstate,
+            aarg,
+            actual_arg_types[aargpos],
+            commontype,
+            commontypmod,
+            COERCION_IMPLICIT,
+            CoercionForm::COERCE_IMPLICIT_CAST,
+            -1,
+        )?;
+        actual_arg_types[aargpos] = commontype;
+        changed = true;
+    }
+    if changed {
+        NodeList::from_slice(mcx, nodes.as_slice())
+    } else {
+        Ok(fargs)
+    }
+}
+
+#[cold]
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn ordered_set_direct_args_error(
+    pstate: &ParseState<'_, '_>,
+    parts: &[&str],
+    argnames: &[&str],
+    argtypes: &[Oid],
+    cat_direct_args: i64,
+    num_direct_args: i64,
+    location: ParseLoc,
+) -> Box<PgError> {
+    let sig = match func_signature_string(parts, argnames, argtypes) {
+        Ok(sig) => sig,
+        Err(e) => return e,
+    };
+    let hint = if cat_direct_args == 1 {
+        format!(
+            "There is an ordered-set aggregate {}, but it requires {} direct argument, not {}.",
+            name_list_to_string(parts),
+            cat_direct_args,
+            num_direct_args
+        )
+    } else {
+        format!(
+            "There is an ordered-set aggregate {}, but it requires {} direct arguments, not {}.",
+            name_list_to_string(parts),
+            cat_direct_args,
+            num_direct_args
+        )
+    };
+    let encoding = mbutils::GetDatabaseEncoding();
+    Box::new(
+        ereport(ERROR)
+            .errcode(ERRCODE_UNDEFINED_FUNCTION)
+            .errmsg(format!("function {sig} does not exist"))
+            .errhint(hint)
+            .errposition(parser_errposition(pstate, location, encoding))
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_func.c", 0, "ParseFuncOrColumn")),
+    )
+}
+
+#[cold]
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn hypothetical_args_mismatch_error(
+    pstate: &ParseState<'_, '_>,
+    parts: &[&str],
+    argnames: &[&str],
+    argtypes: &[Oid],
+    num_hypothetical: i64,
+    num_ordering: i64,
+    location: ParseLoc,
+) -> Box<PgError> {
+    let sig = match func_signature_string(parts, argnames, argtypes) {
+        Ok(sig) => sig,
+        Err(e) => return e,
+    };
+    let encoding = mbutils::GetDatabaseEncoding();
+    Box::new(
+        ereport(ERROR)
+            .errcode(ERRCODE_UNDEFINED_FUNCTION)
+            .errmsg(format!("function {sig} does not exist"))
+            .errhint(format!(
+                "To use the hypothetical-set aggregate {}, the number of hypothetical direct \
+                 arguments (here {}) must match the number of ordering columns (here {}).",
+                name_list_to_string(parts),
+                num_hypothetical,
+                num_ordering
+            ))
+            .errposition(parser_errposition(pstate, location, encoding))
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_func.c", 0, "ParseFuncOrColumn")),
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn ordered_set_min_direct_args_error(
+    pstate: &ParseState<'_, '_>,
+    parts: &[&str],
+    argnames: &[&str],
+    argtypes: &[Oid],
+    cat_direct_args: i64,
+    location: ParseLoc,
+) -> Box<PgError> {
+    let sig = match func_signature_string(parts, argnames, argtypes) {
+        Ok(sig) => sig,
+        Err(e) => return e,
+    };
+    let hint = if cat_direct_args == 1 {
+        format!(
+            "There is an ordered-set aggregate {}, but it requires at least {} direct argument.",
+            name_list_to_string(parts),
+            cat_direct_args
+        )
+    } else {
+        format!(
+            "There is an ordered-set aggregate {}, but it requires at least {} direct arguments.",
+            name_list_to_string(parts),
+            cat_direct_args
+        )
+    };
+    let encoding = mbutils::GetDatabaseEncoding();
+    Box::new(
+        ereport(ERROR)
+            .errcode(ERRCODE_UNDEFINED_FUNCTION)
+            .errmsg(format!("function {sig} does not exist"))
+            .errhint(hint)
+            .errposition(parser_errposition(pstate, location, encoding))
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_func.c", 0, "ParseFuncOrColumn")),
+    )
 }
 
 #[cold]
@@ -1063,6 +1383,8 @@ fn func_get_detail<'mcx>(
             rettype: shape.prorettype,
             retset: shape.proretset,
             declared_arg_types,
+            vatype: shape.provariadic,
+            nvargs: best.nvargs,
         },
         PROKIND_FUNCTION => FuncDetail::Normal {
             funcid,

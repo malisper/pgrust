@@ -1,0 +1,29 @@
+[package]
+name = "orderedsetaggs"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+datum = { path = "../../../../_support/types/datum" }
+mcx = { path = "../../../../_support/mcx" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_fmgr = { path = "../../../../_support/types/fmgr" }
+types_nodes = { path = "../../../../_support/types/nodes" }
+types_slot = { path = "../../../../_support/types/types_slot" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+tupdesc = { path = "../../../access/common/tupdesc" }
+tuplesort = { path = "../../sort/tuplesort" }
+lsyscache = { path = "../../cache/lsyscache" }
+fmgr_core = { path = "../../fmgr/fmgr_core" }
+funcapi = { path = "../../fmgr/funcapi" }
+arrayfuncs = { path = "../arrayfuncs" }
+adt_timestamp = { path = "../adt_timestamp" }
+adt_datetime = { path = "../adt_datetime" }
+init_small = { path = "../../init/init_small" }
+nodeagg = { path = "../../../executor/nodeagg" }
+execexpr = { path = "../../../executor/execexpr" }
+exectuples = { path = "../../../executor/exectuples" }
+nodes_core = { path = "../../../nodes/nodes_core" }
+detoast_seams = { path = "../../../access/common/detoast_seams" }

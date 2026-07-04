@@ -857,11 +857,40 @@ fn fge_mutate<'mcx>(
         }
         NodeTag::T_Const | NodeTag::T_Param | NodeTag::T_CaseTestExpr => Ok(None),
         NodeTag::T_Aggref => {
+            // C: at the agg's own level only aggdirectargs can hold grouped
+            // Vars; args/order/filter are not recursed into.
             let a = node.as_aggref().unwrap();
-            if !a.aggdirectargs.is_nil() {
-                fge_unported("ordered-set aggregate direct args");
+            if a.agglevelsup != 0 {
+                fge_unported("outer-level aggregate");
             }
-            Ok(None)
+            match fge_list(mcx, query, &a.aggdirectargs)? {
+                None => Ok(None),
+                Some(aggdirectargs) => Ok(Some(Node::mk(
+                    mcx,
+                    pn::Aggref {
+                        aggfnoid: a.aggfnoid,
+                        aggtype: a.aggtype,
+                        aggcollid: a.aggcollid,
+                        inputcollid: a.inputcollid,
+                        aggtranstype: a.aggtranstype,
+                        aggargtypes: a.aggargtypes.clone_in(mcx)?,
+                        aggdirectargs,
+                        args: a.args.clone_in(mcx)?,
+                        aggorder: a.aggorder.clone_in(mcx)?,
+                        aggdistinct: a.aggdistinct.clone_in(mcx)?,
+                        aggfilter: a.aggfilter,
+                        aggstar: a.aggstar,
+                        aggvariadic: a.aggvariadic,
+                        aggkind: a.aggkind,
+                        aggpresorted: a.aggpresorted,
+                        agglevelsup: a.agglevelsup,
+                        aggsplit: a.aggsplit,
+                        aggno: a.aggno,
+                        aggtransno: a.aggtransno,
+                        location: a.location,
+                    },
+                )?)),
+            }
         }
         NodeTag::T_TargetEntry => {
             let tle = node.as_target_entry().unwrap();

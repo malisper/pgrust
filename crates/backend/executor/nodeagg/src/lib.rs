@@ -54,7 +54,7 @@ pub struct AggStateData<'mcx> {
     pub ps_ResultTupleSlot: ExecSlotId,
     proj: PgBox<'mcx, ExprState<'mcx>>,
     evaltrans: Option<PgBox<'mcx, ExprState<'mcx>>>,
-    peragg: PgVec<'mcx, PerAggData>,
+    peragg: PgVec<'mcx, PerAggData<'mcx>>,
     trans_init: PgVec<'mcx, NullableDatum>,
     trans_typ: PgVec<'mcx, TransTyp>,
     // Owners of once-allocated arrays; all element access goes through the
@@ -297,12 +297,15 @@ struct PerHashData<'mcx> {
 
 // C AggStatePerAggData finalize slice; result copy discipline rides the armed
 // result mcx instead of MemoryContextContains.
-struct PerAggData {
+struct PerAggData<'mcx> {
     transno: u32,
+    aggref: &'mcx Aggref<'mcx>,
+    trans_shared: bool,
     finalfn: Option<FmgrInfo>,
     num_final_args: u16,
     agg_collation: Oid,
     resulttype_len: i16,
+    direct_args: PgVec<'mcx, PgBox<'mcx, ExprState<'mcx>>>,
 }
 
 fn make_agg_state_node<'mcx>(
@@ -568,10 +571,10 @@ pub fn exec_init_agg<'mcx>(
     let userid = miscinit_seams::get_user_id::call();
     // Droppy FmgrInfo carriers: AggStateData's box owns the drops
     // (ExprState.frames precedent), hence no no-drop ctor.
-    let mut peragg: PgVec<'mcx, PerAggData> = PgVec::new_in(mcx);
+    let mut peragg: PgVec<'mcx, PerAggData<'mcx>> = PgVec::new_in(mcx);
     peragg
         .try_reserve(numaggs)
-        .map_err(|_| mcx.oom(numaggs * core::mem::size_of::<PerAggData>()))?;
+        .map_err(|_| mcx.oom(numaggs * core::mem::size_of::<PerAggData<'_>>()))?;
     let mut trans_init: PgVec<'mcx, NullableDatum> = vec_with_capacity_in(mcx, numtrans)?;
     trans_init.resize(numtrans, NullableDatum::null());
     let mut trans_aggref: PgVec<'mcx, Option<(Node<'mcx>, &'mcx Aggref<'mcx>)>> =
@@ -586,6 +589,9 @@ pub fn exec_init_agg<'mcx>(
     let mut ordered_specs: PgVec<'mcx, Option<AggOrderedSpec>> =
         vec_with_capacity_in(mcx, numtrans)?;
     ordered_specs.resize(numtrans, None);
+    let mut trans_shared: PgVec<'mcx, bool> = vec_with_capacity_in(mcx, numtrans)?;
+    trans_shared.resize(numtrans, false);
+    let params = estate.param_bind();
     for aggno in 0..numaggs {
         let (aggref_node, aggref) = by_aggno[aggno].expect("planner aggno numbering has gaps");
         let aclresult = aclchk_seams::object_aclcheck::call(
@@ -599,10 +605,12 @@ pub fn exec_init_agg<'mcx>(
         }
         let shape = syscache_seams::lookup_pg_aggregate_shape::call(aggref.aggfnoid)?
             .ok_or_else(|| agg_lookup_failed(aggref.aggfnoid))?;
-        if shape.aggkind != AGGKIND_NORMAL {
+        let is_ordered_set = shape.aggkind != AGGKIND_NORMAL;
+        debug_assert!(shape.aggkind == aggref.aggkind);
+        if is_ordered_set && has_grouping_sets {
             panic!(
-                "ExecInitAgg (nodeAgg.c): ordered-set/hypothetical aggkind {} not ported",
-                shape.aggkind
+                "ExecInitAgg (nodeAgg.c): ordered-set aggregate under grouping sets \
+                 not ported (per-set aggcontexts)"
             );
         }
         if (!aggref.aggorder.is_nil() || !aggref.aggdistinct.is_nil())
@@ -614,6 +622,12 @@ pub fn exec_init_agg<'mcx>(
         assert!(transtype != 0, "Aggref.aggtranstype unset (planner must resolve it)");
         let (translen, transbyval) = lsyscache::get_typlenbyval(transtype)?;
 
+        let num_direct_args = aggref.aggdirectargs.len();
+        let num_final_args = if shape.aggfinalextra {
+            aggref.aggargtypes.len() as u16 + 1
+        } else {
+            num_direct_args as u16 + 1
+        };
         let finalfn = if shape.aggfinalfn != 0 {
             // Divergence: C aclchecks as the aggregate owner (proowner
             // projection unported); differs only under SET ROLE.
@@ -626,34 +640,68 @@ pub fn exec_init_agg<'mcx>(
             if aclresult != ACLCHECK_OK {
                 return Err(agg_permission_denied(shape.aggfinalfn));
             }
-            Some(fmgr_core::fmgr_info(shape.aggfinalfn)?)
+            let mut flinfo = fmgr_core::fmgr_info(shape.aggfinalfn)?;
+            // build_aggregate_finalfn_expr: [transtype, input types..] for
+            // get_fn_expr_argtype consumers (hypothetical_check_argtypes).
+            let mut fnexpr_types: PgVec<'mcx, Oid> =
+                vec_with_capacity_in(mcx, num_final_args as usize)?;
+            fnexpr_types.push(aggref.aggtranstype);
+            for t in aggref.aggargtypes.iter().take(num_final_args as usize - 1) {
+                fnexpr_types.push(t);
+            }
+            // SAFETY: leaked into the query arena; the flinfo dies with the
+            // plan it serves (init_pertrans_sort's carrier precedent).
+            let fnexpr_types: &'static [Oid] =
+                unsafe { core::mem::transmute(fnexpr_types.leak()) };
+            let carrier =
+                ::mcx::alloc_leak_in(mcx, ::types_core::fmgr::AggFnArgTypes(fnexpr_types))?;
+            // SAFETY: carrier is arena-backed for the query, see above.
+            flinfo.fn_expr =
+                Some(unsafe { ::types_core::fmgr::FnExprErased::from_node_ref(carrier) });
+            Some(flinfo)
         } else {
             None
         };
-        let num_final_args =
-            if shape.aggfinalextra { aggref.aggargtypes.len() as u16 + 1 } else { 1 };
         let (resulttype_len, _resulttype_byval) = lsyscache::get_typlenbyval(aggref.aggtype)?;
+
+        let mut direct_args: PgVec<'mcx, PgBox<'mcx, ExprState<'mcx>>> = PgVec::new_in(mcx);
+        for d in aggref.aggdirectargs.iter() {
+            let mut es = ::execexpr::exec_init_expr(mcx, Some(d), params)?
+                .expect("aggdirectargs cell is a non-NULL expression");
+            // SAFETY: the ps_ExprContext outlives the program (same estate);
+            // C evaluates direct args in its per-tuple memory.
+            unsafe { es.arm_result_mcx_raw(estate.ecxt(ps_ExprContext).per_tuple_mcx()) };
+            direct_args.push(es);
+        }
 
         let transno = aggref.aggtransno as usize;
         peragg.push(PerAggData {
             transno: transno as u32,
+            aggref,
+            trans_shared: false,
             finalfn,
             num_final_args,
             agg_collation: aggref.inputcollid,
             resulttype_len,
+            direct_args,
         });
         match trans_aggref[transno] {
             // find_compatible_trans keys sharing on the transition state.
-            Some((_, prev)) => assert!(
-                trans_fnoid[transno] == shape.aggtransfn
-                    && prev.aggtranstype == aggref.aggtranstype,
-                "shared transno with diverging transition state"
-            ),
+            Some((_, prev)) => {
+                assert!(
+                    trans_fnoid[transno] == shape.aggtransfn
+                        && prev.aggtranstype == aggref.aggtranstype,
+                    "shared transno with diverging transition state"
+                );
+                trans_shared[transno] = true;
+            }
             None => {
                 trans_aggref[transno] = Some((aggref_node, aggref));
                 trans_fnoid[transno] = shape.aggtransfn;
                 trans_typ[transno] = TransTyp { len: translen, byval: transbyval };
-                if !aggref.aggorder.is_nil() || !aggref.aggdistinct.is_nil() {
+                if !is_ordered_set
+                    && (!aggref.aggorder.is_nil() || !aggref.aggdistinct.is_nil())
+                {
                     // C keeps one sortstate per grouping set; PerTransSortData
                     // is single-set — mis-aggregation, not a missing feature.
                     if has_grouping_sets {
@@ -700,6 +748,10 @@ pub fn exec_init_agg<'mcx>(
         }
     }
 
+    for pa in peragg.iter_mut() {
+        pa.trans_shared = trans_shared[pa.transno as usize];
+    }
+
     let mut pergroup: PgVec<'mcx, AggPerGroup> = vec_with_capacity_in(mcx, numtrans)?;
     pergroup.resize(
         numtrans,
@@ -723,12 +775,18 @@ pub fn exec_init_agg<'mcx>(
             trans_aggref[transno].expect("planner aggtransno numbering has gaps");
         // SAFETY: transno < numtrans elements of the once-allocated pergroup.
         let pg = unsafe { NonNull::new_unchecked(pergroup_base.as_ptr().add(transno)) };
+        let is_ordered_set = aggref.aggkind != AGGKIND_NORMAL;
+        // C: ordered-set transfns take only the aggregated args
+        // (numTransInputs = list_length(aggref->args)).
+        let num_direct_args = if is_ordered_set { aggref.aggdirectargs.len() } else { 0 };
         let mut arg_types: PgVec<'mcx, Oid> =
-            vec_with_capacity_in(mcx, aggref.aggargtypes.len() + 1)?;
+            vec_with_capacity_in(mcx, aggref.aggargtypes.len() - num_direct_args + 1)?;
         arg_types.push(aggref.aggtranstype);
-        for t in aggref.aggargtypes.iter() {
+        for t in aggref.aggargtypes.iter().skip(num_direct_args) {
             arg_types.push(t);
         }
+        let cur_agg =
+            is_ordered_set.then(|| (NonNull::from(aggref).cast::<()>(), trans_shared[transno]));
         specs.push(AggTransSpec {
             transfn_oid: trans_fnoid[transno],
             inputcollid: aggref.inputcollid,
@@ -740,9 +798,9 @@ pub fn exec_init_agg<'mcx>(
             transtype_byval: trans_typ[transno].byval,
             transtype_len: trans_typ[transno].len,
             ordered: ordered_specs[transno],
+            cur_agg,
         });
     }
-    let params = estate.param_bind();
     let (mut evaltrans, perhash, persort, gs) = if has_grouping_sets {
         let gs = gsets::init_grouping_sets(
             node, estate, outer_desc, &specs, numtrans, fm_agg_node, params, tmpcontext,
@@ -1664,7 +1722,7 @@ fn agg_fill_hash_table_batched<'mcx, S: AggBatchSource<'mcx>>(
     Ok(())
 }
 
-const MAX_FINAL_ARGS: usize = 4;
+const MAX_FINAL_ARGS: usize = 8;
 
 // finalize_aggregate(s) (nodeAgg.c): finalfn results land in ps_ExprContext's
 // per-tuple memory via the armed result mcx (C's MemoryContextContains +
@@ -1675,7 +1733,9 @@ pub(crate) fn finalize_aggregates<'mcx>(
     pergroup: NonNull<AggPerGroup>,
 ) -> PgResult<()> {
     let per_tuple = estate.ecxt(node.ps_ExprContext).per_tuple_mcx();
-    let AggStateData { peragg, trans_typ, agg_node, agg_values_base, agg_nulls_base, .. } = node;
+    let AggStateData {
+        peragg, trans_typ, agg_node, agg_values_base, agg_nulls_base, persort, ..
+    } = node;
     for (aggno, pa) in peragg.iter_mut().enumerate() {
         // SAFETY: transno < the once-allocated pergroup array length; base
         // pointers are the sole access paths (struct invariants).
@@ -1690,6 +1750,26 @@ pub(crate) fn finalize_aggregates<'mcx>(
         } else {
             pg.trans_value
         };
+        // C evaluates direct args even without a finalfn (side-effects); they
+        // run in the output econtext with the group's first tuple bound.
+        let mut direct: [NullableDatum; MAX_FINAL_ARGS] =
+            [NullableDatum::null(); MAX_FINAL_ARGS];
+        let mut anynull = false;
+        assert!(
+            pa.direct_args.len() < MAX_FINAL_ARGS,
+            "finalize_aggregate (nodeAgg.c): {} direct args not supported",
+            pa.direct_args.len()
+        );
+        for (i, es) in pa.direct_args.iter_mut().enumerate() {
+            let mut slots = EvalSlots {
+                scan: None,
+                inner: None,
+                outer: persort.as_mut().map(|ps| &mut ps.first_slot),
+            };
+            let nd = exec_eval_expr(es, &mut slots)?;
+            direct[i] = nd;
+            anynull |= nd.isnull;
+        }
         let (value, isnull) = match pa.finalfn.as_mut() {
             None => (trans_value, pg.trans_value_is_null),
             Some(flinfo) => {
@@ -1706,8 +1786,15 @@ pub(crate) fn finalize_aggregates<'mcx>(
                 unsafe { fcinfo.set_result_mcx(per_tuple) };
                 fcinfo.args[0] =
                     NullableDatum { value: trans_value, isnull: pg.trans_value_is_null };
-                let anynull = pg.trans_value_is_null || pa.num_final_args > 1;
-                if flinfo.fn_strict && anynull {
+                for i in 0..pa.direct_args.len() {
+                    fcinfo.args[i + 1] = direct[i];
+                }
+                anynull |= pg.trans_value_is_null
+                    || pa.num_final_args as usize > pa.direct_args.len() + 1;
+                // SAFETY: query-lifetime node; no &mut lives across the call.
+                let agg = unsafe { agg_node.as_ref() };
+                agg.set_current_agg(NonNull::from(pa.aggref).cast(), pa.trans_shared);
+                let out = if flinfo.fn_strict && anynull {
                     (Datum::null(), true)
                 } else {
                     let result = flinfo.invoke(&mut fcinfo)?;
@@ -1722,7 +1809,9 @@ pub(crate) fn finalize_aggregates<'mcx>(
                         result
                     };
                     (value, isnull)
-                }
+                };
+                agg.clear_current_agg();
+                out
             }
         };
         // SAFETY: aggno < the once-allocated result array lengths.
@@ -2089,12 +2178,66 @@ pub fn exec_rescan_agg<'mcx>(node: &mut AggStateData<'mcx>, _estate: &mut EState
     unsafe { node.agg_node.as_mut() }.reset();
 }
 
+/// C `AggGetAggref` (nodeAgg.c): the Aggref of the currently-executing
+/// aggregate trans/final fn, via the fcinfo context's cur-agg slot.
+///
+/// # Safety
+/// `fcinfo.context`, if set, points at a live node outliving `'a`; the
+/// cur-agg slot only ever holds `&'query Aggref` pointers (exec_init_agg /
+/// execexpr's AggSetCurrent are the sole writers).
+pub unsafe fn agg_get_aggref<'a>(
+    fcinfo: &::types_fmgr::FunctionCallInfoBaseData,
+) -> Option<&'a Aggref<'a>> {
+    // SAFETY: caller contract.
+    let node = unsafe { fcinfo.agg_state_node() }?;
+    let (p, _) = node.current_agg()?;
+    // SAFETY: writer invariant above.
+    Some(unsafe { p.cast::<Aggref<'a>>().as_ref() })
+}
+
+/// C `AggStateIsShared` (nodeAgg.c); true (conservative) outside an
+/// aggregate call.
+///
+/// # Safety
+/// As [`agg_get_aggref`].
+pub unsafe fn agg_state_is_shared(fcinfo: &::types_fmgr::FunctionCallInfoBaseData) -> bool {
+    // SAFETY: caller contract.
+    match unsafe { fcinfo.agg_state_node() } {
+        Some(node) => node.current_agg().map_or(true, |(_, shared)| shared),
+        None => true,
+    }
+}
+
+/// C `AggRegisterCallback` (nodeAgg.c): group-lifetime shutdown callback.
+///
+/// # Safety
+/// As [`agg_get_aggref`], plus `AggStateNode::register_shutdown_callback`'s
+/// contract on `func`/`arg`.
+pub unsafe fn agg_register_callback(
+    fcinfo: &::types_fmgr::FunctionCallInfoBaseData,
+    func: unsafe fn(*mut ()),
+    arg: *mut (),
+) -> PgResult<()> {
+    // SAFETY: caller contract.
+    match unsafe { fcinfo.agg_state_node() } {
+        Some(node) => {
+            // SAFETY: caller contract.
+            unsafe { node.register_shutdown_callback(func, arg) };
+            Ok(())
+        }
+        None => Err(Box::new(PgError::error(
+            "aggregate function cannot register a callback in this context",
+        ))),
+    }
+}
+
 mcx::forget_safe_nodrop!(TransTyp);
 
 // Exempt: all released in exec_end_agg (proj/evaltrans via release_frames).
 mcx::forget_safe_struct!(
-    PerAggData { transno, num_final_args, agg_collation, resulttype_len;
-        finalfn },
+    PerAggData<'_> { transno, aggref, trans_shared, num_final_args,
+        agg_collation, resulttype_len;
+        finalfn, direct_args },
     PerSortData<'_> { have_pending; first_slot, pending_slot, eq },
     PerHashData<'_> { num_cols, hash_grp_col_idx_input, largest_grp_col_idx,
         outer_natts, pergroup_cell, hash_ngroups_limit, hash_ngroups_current,

@@ -28,6 +28,7 @@ use types_nodes::{CoercionForm, Node, NodeList, NodeTag};
 
 pub fn init_seams() {
     parse_clause_seams::transform_agg_order_distinct::set(transform_agg_order_distinct);
+    parse_clause_seams::transform_agg_within_group::set(transform_agg_within_group);
 }
 
 // transformAggregateCall's ordered/DISTINCT arm (parse_agg.c), hosted here
@@ -74,6 +75,24 @@ fn transform_agg_order_distinct<'mcx>(
         }
     }
     Ok((torder, tdistinct, argtypes))
+}
+
+// transformAggregateCall's ordered-set arm tail (parse_agg.c): one
+// addTargetToSortList per (aggregated arg, SortBy) pair; hosted here like
+// transform_agg_order_distinct.
+fn transform_agg_within_group<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    tlist: &NodeList<'mcx>,
+    agg_order: &NodeList<'mcx>,
+) -> PgResult<NodeList<'mcx>> {
+    debug_assert_eq!(tlist.len(), agg_order.len());
+    let mut torder = NodeList::nil();
+    for (tle_node, sb_node) in tlist.iter().zip(agg_order.iter()) {
+        let sortby = sb_node.as_sort_by().expect("agg_order holds SortBy nodes");
+        torder = addTargetToSortList(mcx, pstate, tle_node, torder, tlist, sortby)?;
+    }
+    Ok(torder)
 }
 
 #[cold]

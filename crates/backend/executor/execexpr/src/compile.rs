@@ -44,6 +44,9 @@ pub struct AggTransSpec<'a, 'mcx> {
     pub transtype_byval: bool,
     pub transtype_len: i16,
     pub ordered: Option<AggOrderedSpec>,
+    // C execExprInterp's "set up aggstate->curpertrans for AggGetAggref()":
+    // erased &'query Aggref + pertrans aggshared, armed for ordered-set aggs.
+    pub cur_agg: Option<(NonNull<()>, bool)>,
 }
 
 // Non-presorted DISTINCT/ORDER BY spec (ExecBuildAggTrans ordered arms): the
@@ -581,6 +584,13 @@ fn build_agg_trans<'mcx>(
                 }
             }
         };
+        if let Some((aggref, shared)) = spec.cur_agg {
+            push_step(
+                &mut state,
+                mcx,
+                Step::AggSetCurrent { agg: agg_state_node(agg_node), aggref, shared },
+            )?;
+        }
         match &mode {
             PergroupMode::Fixed => push_step(&mut state, mcx, fixed_step(spec.pergroup))?,
             PergroupMode::Sets(bases) => {
