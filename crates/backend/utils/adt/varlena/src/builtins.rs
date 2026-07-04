@@ -54,12 +54,14 @@ fc_textcmp! {
     fc_bttextcmp: bttextcmp -> from_i32;
 }
 
-// hashtext/hashtextextended (hashfunc.c), deterministic-collation lane; the
-// nondeterministic (ICU sort-key) leg is loud.
+// hashtext/hashtextextended (hashfunc.c); nondeterministic collations hash
+// the pg_strnxfrm sort key (seam Ok(Some)), deterministic hash the raw bytes.
 pub fn fc_hashtext(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: catalog arg is a non-null text varlena (strict fn).
     let key = unsafe { fcinfo.arg_varlena_packed(0)? };
-    hashtext_check_collation(fcinfo.get_collation())?;
+    if let Some(h) = hashtext_nondeterministic(fcinfo.get_collation(), key.data(), None)? {
+        return Ok(Datum::from_u32(h as u32));
+    }
     Ok(Datum::from_u32(::hashfn::hash_bytes(key.data())))
 }
 
@@ -70,18 +72,23 @@ pub fn fc_hashtextextended(
     // SAFETY: catalog arg 0 is a non-null text varlena (strict fn).
     let key = unsafe { fcinfo.arg_varlena_packed(0)? };
     let [_, seed] = fcinfo.args_n::<2>();
-    hashtext_check_collation(fcinfo.get_collation())?;
-    Ok(Datum::from_u64(::hashfn::hash_bytes_extended(key.data(), seed.value.as_u64())))
+    let seed = seed.value.as_u64();
+    if let Some(h) = hashtext_nondeterministic(fcinfo.get_collation(), key.data(), Some(seed))? {
+        return Ok(Datum::from_u64(h));
+    }
+    Ok(Datum::from_u64(::hashfn::hash_bytes_extended(key.data(), seed)))
 }
 
-fn hashtext_check_collation(collid: types_core::Oid) -> PgResult<()> {
+fn hashtext_nondeterministic(
+    collid: types_core::Oid,
+    data: &[u8],
+    seed: Option<u64>,
+) -> PgResult<Option<u64>> {
     crate::check_collation_set_pub(collid)?;
-    if !crate::collation_is_c_known_pub(collid)
-        && !pg_locale_seams::collation_is_deterministic::call(collid)?
-    {
-        panic!("hashtext (hashfunc.c): nondeterministic collation hashing not ported");
+    if crate::collation_is_c_known_pub(collid) {
+        return Ok(None);
     }
-    Ok(())
+    pg_locale_seams::varstr_nondeterministic_hash::call(collid, data, seed)
 }
 
 macro_rules! fc_byteacmp {

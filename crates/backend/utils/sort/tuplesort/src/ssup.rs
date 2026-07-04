@@ -331,10 +331,16 @@ pub fn apply_sort_comparator_in(
 
 /// The `abbrev_converter` identities (closed set); mutable converter state
 /// lives in the sort's `AbbrevState`, not in the Copy SortSupport.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug)]
 pub enum AbbrevKind {
     VarStrC,
     BpcharC,
+    /// varstr_abbrev_convert non-C arm over pg_strnxfrm(_prefix) sort keys
+    /// (C: abbreviation stays on when pg_strxfrm_enabled — ICU).
+    VarStrXfrm {
+        locale: &'static pg_locale::PgLocale,
+        bpchar: bool,
+    },
     Uuid,
     Network,
 }
@@ -396,6 +402,12 @@ fn abbrev_arm_for(comparator: SortComparator) -> Option<AbbrevArm> {
     let kind = match comparator {
         SortComparator::TextC => AbbrevKind::VarStrC,
         SortComparator::BpcharC => AbbrevKind::BpcharC,
+        SortComparator::TextLocale(locale) if locale.pg_strxfrm_enabled() => {
+            AbbrevKind::VarStrXfrm { locale, bpchar: false }
+        }
+        SortComparator::BpcharLocale(locale) if locale.pg_strxfrm_enabled() => {
+            AbbrevKind::VarStrXfrm { locale, bpchar: true }
+        }
         SortComparator::Uuid => AbbrevKind::Uuid,
         SortComparator::Network => AbbrevKind::Network,
         _ => return None,

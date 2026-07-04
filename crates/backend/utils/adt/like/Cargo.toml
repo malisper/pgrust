@@ -12,6 +12,7 @@ mcx = { path = "../../../../_support/mcx" }
 mbutils = { path = "../../mb/mbutils" }
 pg_locale = { path = "../pg_locale" }
 stack_depth = { path = "../../misc/stack_depth" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
 types_core = { path = "../../../../_support/types/types_core" }
 types_error = { path = "../../../../_support/types/types_error" }
 types_fmgr = { path = "../../../../_support/types/fmgr" }

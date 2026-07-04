@@ -1,8 +1,7 @@
-//! collationcmds.c, DefineCollation. ICU divergences vs a USE_ICU build
-//! (journaled, notes/collate-residue-lane.md): no icu_language_tag
-//! canonicalization/NOTICE, no icu_validate_locale, collversion NULL for
-//! provider 'i' rows; using an ICU collation for comparison stays LOUD in
-//! pg_locale.
+//! collationcmds.c, DefineCollation, full ICU leg: icu_language_tag
+//! canonicalization + "using standard form" NOTICE, icu_validate_locale, and
+//! collversion via ucol_getVersion (the IsBinaryUpgrade preserve leg is
+//! unported; binary upgrade is unreachable repo-wide).
 
 #![allow(non_snake_case)]
 
@@ -230,9 +229,26 @@ pub fn DefineCollation<'mcx>(
                 return Err(param_required("lc_ctype"));
             }
         } else if collprovider == COLLPROVIDER_ICU {
-            if clocale.is_none() {
+            let Some(loc) = clocale.as_deref() else {
                 return Err(param_required("locale"));
+            };
+            let elevel =
+                types_error::ErrorLevel(guc_tables::vars::icu_validation_level.read());
+            if let Some(langtag) = pg_locale::icu_language_tag(loc, elevel)? {
+                if langtag != loc {
+                    elog::ereport(types_error::NOTICE)
+                        .errmsg(format!(
+                            "using standard form \"{langtag}\" for ICU locale \"{loc}\""
+                        ))
+                        .finish(types_error::ErrorLocation::new(
+                            "src/backend/commands/collationcmds.c",
+                            293,
+                            "DefineCollation",
+                        ))?;
+                    clocale = Some(langtag);
+                }
             }
+            pg_locale::icu_validate_locale(clocale.as_deref().expect("checked"))?;
         }
 
         if !collisdeterministic && collprovider != COLLPROVIDER_ICU {

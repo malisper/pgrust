@@ -27,22 +27,19 @@ impl VarStrAbbrevState {
         }
     }
 
-    /// `varstr_abbrev_convert`; `payload` is the detoasted varlena payload.
-    /// Returns the native-endian abbreviated key word.
-    pub fn convert(&mut self, payload: &[u8]) -> u64 {
-        let data = if self.is_bpchar {
+    /// bpchar-aware trailing-space trim (bpchartruelen arm of the C convert).
+    pub fn trimmed<'a>(&self, payload: &'a [u8]) -> &'a [u8] {
+        if self.is_bpchar {
             bpchar_truelen(payload)
         } else {
             payload
-        };
+        }
+    }
+
+    /// The HyperLogLog bookkeeping of `varstr_abbrev_convert`; `res` is the
+    /// pre-byteswap prefix word (C hashes it before DatumBigEndianToNative).
+    pub fn record(&mut self, data: &[u8], res: u64) {
         let len = data.len();
-
-        let mut prefix = [0u8; 8];
-        let n = len.min(8);
-        prefix[..n].copy_from_slice(&data[..n]);
-        // C's pre-byteswap Datum image: prefix bytes in memory order.
-        let res = u64::from_ne_bytes(prefix);
-
         let mut hash = hashfn::hash_bytes(&data[..len.min(PG_CACHE_LINE_SIZE)]);
         if len > PG_CACHE_LINE_SIZE {
             hash ^= hashfn::hash_bytes_uint32(len as u32);
@@ -51,6 +48,18 @@ impl VarStrAbbrevState {
 
         let hash = hashfn::hash_bytes_uint32(res as u32 ^ (res >> 32) as u32);
         self.abbr_card.add(hash);
+    }
+
+    /// `varstr_abbrev_convert`; `payload` is the detoasted varlena payload.
+    /// Returns the native-endian abbreviated key word.
+    pub fn convert(&mut self, payload: &[u8]) -> u64 {
+        let data = self.trimmed(payload);
+
+        let mut prefix = [0u8; 8];
+        let n = data.len().min(8);
+        prefix[..n].copy_from_slice(&data[..n]);
+        // C's pre-byteswap Datum image: prefix bytes in memory order.
+        self.record(data, u64::from_ne_bytes(prefix));
 
         // DatumBigEndianToNative: unsigned word compare == memcmp of prefix.
         u64::from_be_bytes(prefix)

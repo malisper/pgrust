@@ -39,6 +39,18 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // Nondeterministic-collation hashing (hashfunc.c hashtext*/varchar.c
+    // hashbpchar*): hash_any over the pg_strnxfrm sort key including its NUL
+    // terminator (C hashes bsize+1). Ok(None) = deterministic collation, the
+    // caller hashes the raw bytes. seed None = 32-bit hash zero-extended.
+    pub fn varstr_nondeterministic_hash(
+        collid: Oid,
+        data: &[u8],
+        seed: Option<u64>,
+    ) -> PgResult<Option<u64>>
+);
+
+seam_core::seam!(
     // get_collation_actual_version(collprovider, locale) (pg_locale.c);
     // Ok(None) is C's NULL (no version for this provider).
     pub fn get_collation_actual_version<'mcx>(
