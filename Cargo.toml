@@ -558,6 +558,13 @@ members = [
     "crates/backend/utils/adt/jsonpath",
     "crates/port/pg_strong_random",
     "crates/common/md5",
+    "crates/common/sha2",
+    "crates/common/hmac",
+    "crates/common/base64",
+    "crates/common/scram_common",
+    "crates/common/unicode_norm",
+    "crates/common/saslprep",
+    "crates/backend/libpq/auth_scram",
     "crates/backend/utils/adt/cryptohashfuncs",
     "crates/backend/utils/adt/pseudorandomfuncs",
 ]

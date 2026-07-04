@@ -922,6 +922,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "auth_scram"
+version = "0.1.0"
+dependencies = [
+ "elog",
+ "guc_tables",
+ "mcx",
+ "pg_b64",
+ "pg_sha2",
+ "pg_strong_random",
+ "postgres_seams",
+ "saslprep",
+ "scram_common",
+ "transam_xlog",
+ "types_error",
+]
+
+[[package]]
 name = "auth_seams"
 version = "0.0.0"
 dependencies = [
@@ -2692,6 +2709,15 @@ dependencies = [
 [[package]]
 name = "crypt"
 version = "0.0.0"
+dependencies = [
+ "auth_scram",
+ "elog",
+ "guc_tables",
+ "mcx",
+ "pg_md5",
+ "postgres_seams",
+ "types_error",
+]
 
 [[package]]
 name = "cryptohashfuncs"
@@ -2699,6 +2725,7 @@ version = "0.1.0"
 dependencies = [
  "datum",
  "pg_md5",
+ "pg_sha2",
  "types_core",
  "types_error",
  "types_fmgr",
@@ -6779,6 +6806,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "pg_b64"
+version = "0.1.0"
+
+[[package]]
 name = "pg_class"
 version = "0.1.0"
 dependencies = [
@@ -6960,6 +6991,13 @@ name = "pg_ffi_fgram"
 version = "0.0.0"
 dependencies = [
  "types_core",
+]
+
+[[package]]
+name = "pg_hmac"
+version = "0.1.0"
+dependencies = [
+ "pg_sha2",
 ]
 
 [[package]]
@@ -7156,6 +7194,10 @@ dependencies = [
  "seam_core",
  "types_core",
 ]
+
+[[package]]
+name = "pg_sha2"
+version = "0.1.0"
 
 [[package]]
 name = "pg_shdepend"
@@ -9150,6 +9192,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "saslprep"
+version = "0.1.0"
+dependencies = [
+ "mcx",
+ "types_error",
+ "unicode_norm",
+ "wchar",
+]
+
+[[package]]
 name = "scalar_seams"
 version = "0.0.0"
 dependencies = [
@@ -9193,6 +9245,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "scram_common"
+version = "0.1.0"
+dependencies = [
+ "mcx",
+ "pg_b64",
+ "pg_hmac",
+ "pg_sha2",
+ "postgres_seams",
+ "types_error",
+]
+
+[[package]]
 name = "seam_core"
 version = "0.1.0"
 
@@ -9212,6 +9276,7 @@ dependencies = [
  "adt_timestamp",
  "aio_config",
  "auth",
+ "auth_scram",
  "autovacuum",
  "auxprocess",
  "backend_startup",
@@ -9242,6 +9307,7 @@ dependencies = [
  "condition_variable",
  "conffiles",
  "costsize",
+ "crypt",
  "dbcommands",
  "deadlock",
  "detoast",
@@ -11226,6 +11292,15 @@ dependencies = [
 [[package]]
 name = "unicode_category"
 version = "0.1.0"
+
+[[package]]
+name = "unicode_norm"
+version = "0.1.0"
+dependencies = [
+ "mcx",
+ "types_error",
+ "wchar",
+]
 
 [[package]]
 name = "user"
