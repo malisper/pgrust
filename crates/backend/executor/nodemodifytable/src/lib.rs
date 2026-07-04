@@ -3453,7 +3453,7 @@ mcx::forget_safe_struct!(
     GeneratedExpr<'_> { attnum; state },
     VirtualNnExpr<'_> { attnum; state },
     WcoExpr<'_> { kind, relname, polname; state },
-    ModifyTableState<'_> { plan, canSetTag, mt_done, result_rti,
+    ModifyTableState<'_> { plan, canSetTag, mt_done, fireBSTriggers, result_relkind, result_rti,
         ri_newTupleSlot, ri_oldTupleSlot, ri_ReturningSlot,
         ri_projectNewInfoValid, ri_RowIdAttNo, update_cols, returning_slot;
         operation, indexes, snapshot_any, project_returning, on_conflict,
