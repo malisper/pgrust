@@ -898,6 +898,16 @@ fn run_program<'mcx>(
                 let r = read_out(*out);
                 write_out(*out, Datum::from_bool(!r.value.as_bool()), r.isnull);
             }
+            Step::NullTestRowIsNull { rn, frame, out } => {
+                let r = read_out(*out);
+                let b = eval_row_null(frames, *rn, *frame, r, true)?;
+                write_out(*out, Datum::from_bool(b), false);
+            }
+            Step::NullTestRowIsNotNull { rn, frame, out } => {
+                let r = read_out(*out);
+                let b = eval_row_null(frames, *rn, *frame, r, false)?;
+                write_out(*out, Datum::from_bool(b), false);
+            }
             Step::NullTestIsNull { out } => {
                 let r = read_out(*out);
                 write_out(*out, Datum::from_bool(r.isnull), false);
@@ -1578,15 +1588,17 @@ fn eval_hashed_scalar_array_op(
     if !tab.built {
         let hashcall = tab.hashcall;
         let p = arr.value.as_usize() as *const u8;
-        // SAFETY: non-null const array datum with an inline 4-byte header.
-        let b0 = unsafe { *p };
-        assert!(b0 != 0x01 && b0 & 0x03 == 0, "hashed scalararrayop: toasted/packed array image");
-        // SAFETY: 4-byte varlena header verified; the image is VARSIZE bytes.
-        let img = unsafe {
-            core::slice::from_raw_parts(
-                p,
-                ::arrayfuncs::foundation::arr_size(core::slice::from_raw_parts(p, 4)),
-            )
+        // DatumGetArrayTypeP (as the non-hashed SAOP walk): borrow in place on
+        // an inline 4-byte header, else detoast/unpack into the table's mcx.
+        // SAFETY: non-null array datum addresses a live varlena.
+        let img: &[u8] = unsafe {
+            if ::types_tuple::varatt::varatt_is_4b_u(p) {
+                core::slice::from_raw_parts(p, ::types_tuple::varatt::varsize_any(p))
+            } else {
+                let raw = core::slice::from_raw_parts(p, ::types_tuple::varatt::varsize_any(p));
+                let flat = ::detoast_seams::detoast_attr::call(*tab.map.allocator(), raw)?;
+                &*(flat.leak() as *const [u8])
+            }
         };
         let (ndim, dims, _lbs) = ::arrayfuncs::foundation::read_dims_lbounds(img);
         let mut nitems = 1i64;
@@ -1979,6 +1991,85 @@ fn errdatatype(e: &mut PgError, typid: u32) {
         }
         drop(nsp);
     }
+}
+
+// C ExecEvalRowNullInt: SQL-standard row IS [NOT] NULL — per-field primitive
+// attisnull tests, not recursive; zero-field rows vacuously satisfy both.
+fn eval_row_null(
+    frames: &mut [crate::steps::FuncFrame<'_>],
+    rn: core::ptr::NonNull<crate::steps::RowNullState>,
+    frame: u32,
+    r: NullableDatum,
+    checkisnull: bool,
+) -> PgResult<bool> {
+    if r.isnull {
+        return Ok(checkisnull);
+    }
+    let p = r.value.as_usize() as *const u8;
+    // SAFETY: a live varlena-headed composite image, per the datum contract.
+    let total = unsafe { ::types_tuple::varatt::varsize_any(p) };
+    // SAFETY: `total` readable bytes at p, per the datum contract.
+    let raw = unsafe { core::slice::from_raw_parts(p, total) };
+    // C PG_DETOAST_DATUM returns the original pointer for a plain 4B image;
+    // only the toasted leg touches the frame's per-eval mcx.
+    let detoasted;
+    let rec: &[u8] = if unsafe { ::types_tuple::varatt::varatt_is_4b_u(p) } {
+        raw
+    } else {
+        let f = &mut frames[frame as usize];
+        // SAFETY: the argless frame's fcinfo image is live; armed per eval.
+        let mcx = unsafe { fcinfo_mut(f.fcinfo, 0) }.result_mcx();
+        detoasted = ::detoast_seams::detoast_attr::call(mcx, raw)?;
+        &detoasted
+    };
+    // SAFETY: detoasted composite image; header prefix is in bounds.
+    let hdr = unsafe { &*(rec.as_ptr() as *const ::types_tuple::HeapTupleHeaderData) };
+    let tup_type = hdr.type_id();
+    let tup_typmod = hdr.typmod();
+    // SAFETY: compile-allocated state, single-threaded interpreter.
+    let rn = unsafe { &mut *rn.as_ptr() };
+    if rn.desc.is_none() || rn.tup_type != tup_type || rn.tup_typmod != tup_typmod {
+        use ::mcx::Allocator;
+        let desc = typcache::lookup_rowtype_tupdesc_copy(rn.mcx, tup_type, tup_typmod)?;
+        let desc_layout = core::alloc::Layout::new::<::types_tuple::TupleDescData<'static>>();
+        let desc_ptr: core::ptr::NonNull<::types_tuple::TupleDescData<'static>> = rn
+            .mcx
+            .allocate(desc_layout)
+            .map_err(|_| rn.mcx.oom(desc_layout.size()))?
+            .cast();
+        // SAFETY: fresh exact-layout allocation; the desc's referents live in
+        // rn.mcx, which outlives every eval of this step.
+        unsafe {
+            desc_ptr.as_ptr().write(core::mem::transmute::<
+                ::types_tuple::TupleDescData<'_>,
+                ::types_tuple::TupleDescData<'static>,
+            >(desc));
+        }
+        rn.desc = Some(desc_ptr);
+        rn.tup_type = tup_type;
+        rn.tup_typmod = tup_typmod;
+    }
+    // SAFETY: rn.mcx-allocated tupdesc, live for the plan.
+    let desc = unsafe { rn.desc.expect("refreshed above").as_ref() };
+    // SAFETY: detoasted MAXALIGN'd image of datum_length() bytes.
+    let tuple = unsafe {
+        ::types_tuple::HeapTupleData::from_raw_parts(
+            rec.as_ptr(),
+            hdr.datum_length(),
+            ::types_tuple::ItemPointerData::invalid(),
+            ::types_core::InvalidOid,
+        )
+    };
+    for att in 1..=desc.natts {
+        if desc.compact_attrs[(att - 1) as usize].attisdropped {
+            continue;
+        }
+        if ::types_tuple::heap_attisnull(&tuple, att, Some(desc)) == checkisnull {
+            continue;
+        }
+        return Ok(false);
+    }
+    Ok(true)
 }
 
 // C ExecEvalWholeRowVar, named-composite leg. First eval checks the slot's

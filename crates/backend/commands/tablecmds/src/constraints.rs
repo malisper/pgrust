@@ -65,7 +65,7 @@ pub(crate) fn add_relation_new_constraints<'mcx>(
             att.atttypmod,
             attname,
             generated,
-            rel,
+            Some(rel),
         )?;
         // C skips the pg_attrdef entry for a bare NULL Const default (never
         // for generated: cookDefault's coercion keeps the expression form).
@@ -357,7 +357,7 @@ pub(crate) fn add_relation_not_null_constraints<'mcx>(
     Ok(nncols)
 }
 
-fn cook_default<'mcx>(
+pub fn cook_default<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'_, 'mcx>,
     raw_default: Node<'mcx>,
@@ -365,7 +365,7 @@ fn cook_default<'mcx>(
     atttypmod: i32,
     attname: &str,
     attgenerated: u8,
-    rel: &Relation<'mcx>,
+    rel: Option<&Relation<'mcx>>,
 ) -> PgResult<Node<'mcx>> {
     let expr = parse_expr::transformExpr(
         mcx,
@@ -378,7 +378,7 @@ fn cook_default<'mcx>(
         },
     )?;
     if attgenerated != 0 {
-        check_nested_generated(pstate, rel, expr)?;
+        check_nested_generated(pstate, rel.expect("generated default cooks with its relation"), expr)?;
         // DIVERGENCE: C runs contain_mutable_functions_after_planning
         // (expression_planner inlines SQL functions first); this checks the
         // un-inlined tree.

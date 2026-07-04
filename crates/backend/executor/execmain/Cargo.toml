@@ -36,6 +36,9 @@ noderecursiveunion = { path = "../noderecursiveunion" }
 nodeworktablescan = { path = "../nodeworktablescan" }
 nodeseqscan = { path = "../nodeseqscan" }
 nodeindexscan = { path = "../nodeindexscan" }
+nodetidscan = { path = "../nodetidscan" }
+nodetidrangescan = { path = "../nodetidrangescan" }
+portalmem = { path = "../../utils/mmgr/portalmem" }
 nodeindexonlyscan = { path = "../nodeindexonlyscan" }
 nodebitmapindexscan = { path = "../nodebitmapindexscan" }
 nodebitmapheapscan = { path = "../nodebitmapheapscan" }
@@ -74,7 +77,7 @@ aclchk_seams = { path = "../../catalog/aclchk_seams" }
 datum = { path = "../../../_support/types/datum" }
 types_rel = { path = "../../../_support/types/rel" }
 nodelockrows = { path = "../nodelockrows" }
-
+types_snapshot = { path = "../../../_support/types/snapshot" }
 [dev-dependencies]
 fd = { path = "../../storage/file/fd" }
 resowner = { path = "../../utils/resowner/resowner" }
@@ -88,7 +91,6 @@ tuplestore = { path = "../../utils/sort/tuplestore" }
 tstore_receiver = { path = "../tstore_receiver" }
 datum = { path = "../../../_support/types/datum" }
 types_rel = { path = "../../../_support/types/rel" }
-types_snapshot = { path = "../../../_support/types/snapshot" }
 types_storage = { path = "../../../_support/types/types_storage" }
 tableam = { path = "../../access/table/tableam" }
 relation_seams = { path = "../../access/common/relation_seams" }

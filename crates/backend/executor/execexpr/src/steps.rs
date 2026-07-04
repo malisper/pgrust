@@ -109,6 +109,10 @@ pub enum Step {
     // typcache tupdesc resolves at compile; the slot-compat check runs once
     // at first eval, per C.
     WholeRow { src: SlotSrc, wr: NonNull<WholeRowState>, frame: u32, out: OutRef },
+    // EEOP_NULLTEST_ROWISNULL/ROWISNOTNULL; `frame` is an argless FuncFrame
+    // carried only for its armed per-eval mcx (detoast scratch).
+    NullTestRowIsNull { rn: NonNull<RowNullState>, frame: u32, out: OutRef },
+    NullTestRowIsNotNull { rn: NonNull<RowNullState>, frame: u32, out: OutRef },
     // EEOP_HASHED_SCALARARRAYOP: array operand is a non-null Const; the
     // element table (and its hash FuncCall) lives in state.saop_tables.
     HashedScalarArrayOp {
@@ -248,6 +252,16 @@ pub enum Step {
         base: NonNull<NonNull<AggPerGroup>>,
         transno: u16,
     },
+}
+
+// C ExprEvalStep d.nulltest_row.rowcache: last-seen rowtype's tupdesc,
+// refreshed from typcache when the header's (type, typmod) changes. `mcx` is
+// the compile mcx restamped 'static; it outlives every eval of this step.
+pub struct RowNullState {
+    pub tup_type: Oid,
+    pub tup_typmod: i32,
+    pub desc: Option<NonNull<::types_tuple::TupleDescData<'static>>>,
+    pub mcx: Mcx<'static>,
 }
 
 // C ExprEvalStep d.wholerow minus var/junkFilter: first-eval compat state.

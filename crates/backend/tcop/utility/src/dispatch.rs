@@ -681,12 +681,59 @@ fn dispatch_switch<'mcx>(
                 types_nodes::parsenodes::ObjectType::OBJECT_TABCONSTRAINT => {
                     tablecmds::RenameConstraint(mcx, stmt)?;
                 }
+                types_nodes::parsenodes::ObjectType::OBJECT_DOMAIN => {
+                    // Retention contract as unify_stmt_lifetime.
+                    let stmt = unsafe {
+                        core::mem::transmute::<
+                            &types_nodes::parsenodes::RenameStmt<'_>,
+                            &types_nodes::parsenodes::RenameStmt<'mcx>,
+                        >(stmt)
+                    };
+                    typecmds::RenameType(mcx, stmt)?;
+                }
+                types_nodes::parsenodes::ObjectType::OBJECT_DOMCONSTRAINT => {
+                    // Retention contract as unify_stmt_lifetime.
+                    let stmt = unsafe {
+                        core::mem::transmute::<
+                            &types_nodes::parsenodes::RenameStmt<'_>,
+                            &types_nodes::parsenodes::RenameStmt<'mcx>,
+                        >(stmt)
+                    };
+                    typecmds::RenameDomainConstraint(mcx, stmt)?;
+                }
                 other => panic!("unported: ExecRenameStmt {other:?}"),
             }
         }
 
         T_AlterFunctionStmt => handler_gap("AlterFunction (functioncmds lane)"),
-        T_AlterOwnerStmt => handler_gap("ExecAlterOwnerStmt (alter.c lane)"),
+        T_AlterOwnerStmt => {
+            let stmt = parsetree
+                .as_variant::<types_nodes::parsenodes::AlterOwnerStmt>()
+                .expect("AlterOwnerStmt");
+            match stmt.objectType {
+                types_nodes::parsenodes::ObjectType::OBJECT_DOMAIN
+                | types_nodes::parsenodes::ObjectType::OBJECT_TYPE => {
+                    // Retention contract as unify_stmt_lifetime.
+                    let stmt = unsafe {
+                        core::mem::transmute::<
+                            &types_nodes::parsenodes::AlterOwnerStmt<'_>,
+                            &types_nodes::parsenodes::AlterOwnerStmt<'mcx>,
+                        >(stmt)
+                    };
+                    let names = stmt
+                        .object
+                        .expect("AlterOwnerStmt.object")
+                        .as_list()
+                        .expect("name list");
+                    let newowner = aclchk::get_rolespec_oid(
+                        stmt.newowner.expect("AlterOwnerStmt.newowner"),
+                        false,
+                    )?;
+                    typecmds::AlterTypeOwner(mcx, names, newowner, stmt.objectType)?;
+                }
+                _ => handler_gap("ExecAlterOwnerStmt (alter.c lane)"),
+            }
+        }
 
         // Everything else — the GRANT/DROP/RENAME/ALTER.../COMMENT/SECURITY
         // LABEL fast paths and the event-trigger-fenced DDL fan-out.
@@ -896,6 +943,38 @@ fn dispatch_switch<'mcx>(
             let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
             let stmt = stmt_node.as_alter_enum_stmt().expect("AlterEnumStmt");
             typecmds::AlterEnum(mcx, stmt)?;
+        }
+        T_AlterDomainStmt => {
+            // Retention contract as unify_stmt_lifetime.
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::parsenodes::AlterDomainStmt>()
+                .expect("AlterDomainStmt");
+            typecmds::AlterDomain(mcx, stmt)?;
+        }
+        T_AlterObjectSchemaStmt => {
+            // Retention contract as unify_stmt_lifetime.
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::parsenodes::AlterObjectSchemaStmt>()
+                .expect("AlterObjectSchemaStmt");
+            match stmt.objectType {
+                types_nodes::parsenodes::ObjectType::OBJECT_DOMAIN
+                | types_nodes::parsenodes::ObjectType::OBJECT_TYPE => {
+                    let names = stmt
+                        .object
+                        .expect("AlterObjectSchemaStmt.object")
+                        .as_list()
+                        .expect("name list");
+                    typecmds::AlterTypeNamespace(
+                        mcx,
+                        names,
+                        stmt.newschema.expect("newschema"),
+                        stmt.objectType,
+                    )?;
+                }
+                other => handler_gap(&format!("ExecAlterObjectSchemaStmt {other:?}")),
+            }
         }
         T_RuleStmt => {
             // Retention contract as unify_stmt_lifetime.

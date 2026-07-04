@@ -164,6 +164,12 @@ pub fn create_index_paths<'mcx>(run: &mut PlannerRun<'mcx>, rel: RelId) -> PgRes
         match_restriction_clauses_to_index(run, &index, &mut rclauseset)?;
         get_index_paths(run, rel, &index, &rclauseset, &mut bitindexpaths)?;
 
+        // Without join or EC-join clauses both match passes are no-ops; skip
+        // their clause-set builds (strictly less work than C's stack MemSets).
+        if run.root.rel(rel).joininfo.is_empty() && !run.root.rel(rel).has_eclass_joins {
+            continue;
+        }
+
         // "Loose" join clauses not absorbed into ECs.
         let mut jclauseset = IndexClauseSet::new(mcx, index.nkeycolumns as usize);
         match_join_clauses_to_index(run, rel, &index, &mut jclauseset, &mut joinorclauses)?;
@@ -1253,15 +1259,20 @@ fn build_index_paths<'mcx>(
 
     let index_only_scan = !bitmap && check_index_only(run, rel, index);
 
+    let backward_arm = index_is_ordered && pathkeys_possibly_useful;
     if !index_clauses.is_empty()
         || !useful_pathkeys.is_empty()
         || useful_predicate
         || index_only_scan
     {
-        let forward_clauses = {
+        // C shares one clause list across both scan directions; clone only if
+        // the backward arm still needs it.
+        let forward_clauses = if backward_arm {
             let mut v: PgVec<'mcx, IndexClause<'mcx>> = PgVec::new_in(mcx);
             v.extend(index_clauses.iter().cloned());
             v
+        } else {
+            core::mem::replace(&mut index_clauses, PgVec::new_in(mcx))
         };
         let ipath = crate::pathnode::create_index_path(
             run,
@@ -1278,7 +1289,7 @@ fn build_index_paths<'mcx>(
         debug_assert!(run.root.rel(rel).partial_pathlist.is_empty());
     }
 
-    if index_is_ordered && pathkeys_possibly_useful {
+    if backward_arm {
         let index_pathkeys = crate::pathkeys::build_index_pathkeys(
             run,
             index,
@@ -1414,6 +1425,21 @@ fn collect_varattnos(
         NodeTag::T_CoerceViaIO => {
             collect_varattnos(run, node.as_coerce_via_io().unwrap().arg, relid, out)
         }
+        NodeTag::T_SubscriptingRef => {
+            let sr = node.as_subscripting_ref().unwrap();
+            for e in sr.refupperindexpr.iter().flatten() {
+                collect_varattnos(run, e, relid, out);
+            }
+            for e in sr.reflowerindexpr.iter().flatten() {
+                collect_varattnos(run, e, relid, out);
+            }
+            if let Some(e) = sr.refexpr {
+                collect_varattnos(run, e, relid, out);
+            }
+            if let Some(e) = sr.refassgnexpr {
+                collect_varattnos(run, e, relid, out);
+            }
+        }
         other => panic!("pull_varattnos (var.c) via check_index_only: {other:?}; M2 lane"),
     }
 }
@@ -1422,7 +1448,7 @@ fn collect_varattnos(
 // runs make_sub_restrictinfos (orclause stays None), so the arm rinfos are
 // built on first use; the per-arm selectivity memo is scoped to this planning
 // pass, the numerics are C's.
-fn or_arm_rinfo<'mcx>(
+pub(crate) fn or_arm_rinfo<'mcx>(
     run: &mut PlannerRun<'mcx>,
     parent: RinfoId,
     arm: Node<'mcx>,
