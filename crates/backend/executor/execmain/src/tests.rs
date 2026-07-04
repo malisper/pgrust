@@ -513,9 +513,12 @@ mod scanfix {
         });
 
         heapam_visibility_seams::heap_tuple_satisfies_visibility::set(|_h, _s, _b| Ok(true));
+        heapam_visibility_seams::heap_tuple_satisfies_mvcc_page::set(|_h, _s, _b, _m| Ok(true));
         heapam_visibility_seams::heap_tuple_is_surely_dead::set(|_h, _v| Ok(false));
         heapam_visibility_seams::heap_tuple_header_is_only_locked::set(|_h| Ok(false));
-        predicate_seams::check_for_serializable_conflict_out_needed::set(|_r, _s| false);
+        predicate_seams::check_for_serializable_conflict_out_needed::set(|_r, _s| Ok(false));
+        predicate_seams::check_table_for_serializable_conflict_in::set(|_rel| Ok(()));
+        predicate_seams::transfer_predicate_locks_to_heap_relation::set(|_rel| Ok(()));
         predicate_seams::predicate_lock_relation::set(|_r, _s| Ok(()));
         predicate_seams::predicate_lock_tid::set(|_r, _t, _s, _x| Ok(()));
         pruneheap_seams::heap_page_prune_opt::set(|_r, _b| Ok(()));
@@ -706,7 +709,7 @@ mod scanfix {
             rd_supportinfo: Default::default(),
             rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
-            rd_hastriggers: false,
+            rd_hastriggers: false, rd_hasrules: false,
         };
         Ok(Relation::open(data, Some(record_close)))
     }

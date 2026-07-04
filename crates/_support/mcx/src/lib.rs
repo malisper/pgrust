@@ -112,7 +112,7 @@ unsafe fn drop_glue_vec_elems<T>(addr: *mut u8) {
 
 // Subtree totals summed on demand (C's recursive MemoryContextMemAllocated); charge never walks ancestors.
 pub(crate) struct Acct {
-    name: &'static str,
+    name: Cell<&'static str>,
     ident: RefCell<Option<alloc::string::String>>,
     pub(crate) self_used: Cell<usize>,
     pub(crate) self_peak: Cell<usize>,
@@ -572,7 +572,7 @@ impl MemoryContext {
             p.limited_path.get() || p.limit.get() != usize::MAX
         });
         let acct = AcctRc::new(Acct {
-            name,
+            name: Cell::new(name),
             ident: RefCell::new(None),
             self_used: Cell::new(0),
             self_peak: Cell::new(0),
@@ -617,7 +617,12 @@ impl MemoryContext {
     }
 
     pub fn name(&self) -> &'static str {
-        self.acct.name
+        self.acct.name.get()
+    }
+
+    /// C's AllocSetContextCreate freelist reuse overwrites context->name.
+    pub fn set_name(&self, name: &'static str) {
+        self.acct.name.set(name);
     }
 
     pub fn set_ident(&self, id: Option<&str>) {
@@ -696,7 +701,7 @@ impl MemoryContext {
                 self.acct.self_used.get(),
                 0,
                 "context {:?} reset with {} bytes still charged (leaked allocation?)",
-                self.acct.name,
+                self.acct.name.get(),
                 self.acct.self_used.get(),
             );
         }
@@ -746,7 +751,7 @@ impl MemoryContext {
 
     pub fn stats(&self) -> ContextStats {
         ContextStats {
-            name: self.acct.name,
+            name: self.acct.name.get(),
             ident: self.ident(),
             used: self.acct.self_used.get(),
             peak: self.acct.self_peak.get(),
@@ -786,7 +791,7 @@ impl MemoryContext {
                 subtree_peak = subtree_peak.saturating_add(child.subtree_peak);
             }
             TreeStats {
-                name: acct.name,
+                name: acct.name.get(),
                 ident: acct.ident.borrow().clone(),
                 used,
                 peak,
@@ -804,7 +809,7 @@ impl MemoryContext {
 
     #[cold]
     pub fn oom(&self, request: usize) -> PgError {
-        crate::oom_named(self.acct.name, request)
+        crate::oom_named(self.acct.name.get(), request)
     }
 
     pub fn is_bumpforget(&self) -> bool {
@@ -850,7 +855,7 @@ impl MemoryContext {
         debug_assert!(
             acct.self_used.get() >= n,
             "context {:?} uncharging {} with only {} charged",
-            acct.name,
+            acct.name.get(),
             n,
             acct.self_used.get(),
         );
@@ -881,7 +886,7 @@ impl Drop for MemoryContext {
 impl fmt::Debug for MemoryContext {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("MemoryContext")
-            .field("name", &self.acct.name)
+            .field("name", &self.acct.name.get())
             .field("used", &self.acct.self_used.get())
             .field("subtree_used", &self.acct.subtree_sum())
             .field("peak", &self.acct.self_peak.get())
@@ -950,7 +955,7 @@ impl<'mcx> Mcx<'mcx> {
 
 impl fmt::Debug for Mcx<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Mcx({:?})", self.0.acct.name)
+        write!(f, "Mcx({:?})", self.0.acct.name.get())
     }
 }
 

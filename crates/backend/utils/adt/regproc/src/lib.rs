@@ -443,3 +443,121 @@ pub fn text_regclass(mcx: Mcx<'_>, s: &str) -> PgResult<Oid> {
     let rv = make_range_var(&names)?;
     range_var_get_relid(mcx, &rv, false)
 }
+
+
+// FunctionIsVisible / OperatorIsVisible search-path walk, local to this
+// crate (a catalog_namespace dep cycles through fmgr_core).
+// format_procedure (regproc.c): "name(argtype,argtype)", schema-qualified
+// when not visible on the search path.
+pub fn format_procedure(mcx: Mcx<'_>, procedure_oid: Oid) -> PgResult<String> {
+    let Some(namedata) = syscache_seams::pg_proc_proname::call(procedure_oid)? else {
+        return Ok(procedure_oid.to_string());
+    };
+    let proname = core::str::from_utf8(namedata.name_str())
+        .map_err(|_| Box::new(PgError::error("pg_proc.proname is not UTF-8")))?;
+    let (_rettype, argtypes) = lsyscache::get_func_signature(mcx, procedure_oid)?;
+
+    // FunctionIsVisible: only an identical-argtype candidate earlier on the
+    // path shadows this oid (FuncnameGetCandidates dedups by argument list).
+    let raw = syscache_seams::lookup_pg_proc_name_candidates::call(mcx, proname)?;
+    let path = namespace_seams::fetch_search_path::call(mcx, true)?;
+    let pos = |nsp: Oid| path.iter().position(|&p| p == nsp);
+    let mut visible = false;
+    let mut best: Option<(usize, Oid)> = None;
+    for cand in raw.iter() {
+        if cand.proargtypes.as_slice() != argtypes.as_slice() {
+            continue;
+        }
+        if let Some(p) = pos(cand.pronamespace) {
+            if best.map(|(bp, _)| p < bp).unwrap_or(true) {
+                best = Some((p, cand.oid));
+            }
+        }
+    }
+    if let Some((_, oid)) = best {
+        visible = oid == procedure_oid;
+    }
+    let nspname = if visible {
+        None
+    } else {
+        match syscache_seams::lookup_pg_proc_shape::call(procedure_oid)? {
+            Some(shape) => lsyscache::get_namespace_name(mcx, shape.pronamespace)?,
+            None => None,
+        }
+    };
+
+    let mut buf = String::new();
+    if let Some(nsp) = &nspname {
+        buf.push_str(&format_type::quote_identifier(nsp.as_str()));
+        buf.push('.');
+    }
+    buf.push_str(&format_type::quote_identifier(proname));
+    buf.push('(');
+    for (i, &t) in argtypes.iter().enumerate() {
+        if i > 0 {
+            buf.push(',');
+        }
+        buf.push_str(&format_type::format_type_be(t)?);
+    }
+    buf.push(')');
+    Ok(buf)
+}
+
+// format_operator (regproc.c): "name(lefttype,righttype)" with NONE for a
+// missing side; schema-qualified when not visible.
+pub fn format_operator(mcx: Mcx<'_>, operator_oid: Oid) -> PgResult<String> {
+    let Some(namedata) = syscache_seams::pg_operator_oprname::call(operator_oid)? else {
+        return Ok(operator_oid.to_string());
+    };
+    let oprname = core::str::from_utf8(namedata.name_str())
+        .map_err(|_| Box::new(PgError::error("pg_operator.oprname is not UTF-8")))?;
+    let (oprleft, oprright) = lsyscache::op_input_types(operator_oid)?;
+
+    // OperatorIsVisible: first exact (name,left,right) match on the path.
+    let cands =
+        syscache_seams::lookup_pg_operator_candidates::call(mcx, oprname, oprleft, oprright)?;
+    let path = namespace_seams::fetch_search_path::call(mcx, true)?;
+    let mut visible = false;
+    let mut my_nsp = InvalidOid;
+    'outer: for &nsp in path.iter() {
+        for &(oid, oprnamespace) in cands.iter() {
+            if oid == operator_oid {
+                my_nsp = oprnamespace;
+            }
+            if oprnamespace == nsp {
+                visible = oid == operator_oid;
+                break 'outer;
+            }
+        }
+    }
+    if my_nsp == InvalidOid {
+        for &(oid, oprnamespace) in cands.iter() {
+            if oid == operator_oid {
+                my_nsp = oprnamespace;
+            }
+        }
+    }
+
+    let mut buf = String::new();
+    if !visible {
+        if let Some(nsp) = lsyscache::get_namespace_name(mcx, my_nsp)? {
+            buf.push_str(&format_type::quote_identifier(nsp.as_str()));
+            buf.push('.');
+        }
+    }
+    buf.push_str(oprname);
+    buf.push('(');
+    if oprleft != InvalidOid {
+        buf.push_str(&format_type::format_type_be(oprleft)?);
+    } else {
+        buf.push_str("NONE");
+    }
+    buf.push(',');
+    if oprright != InvalidOid {
+        buf.push_str(&format_type::format_type_be(oprright)?);
+    } else {
+        buf.push_str("NONE");
+    }
+    buf.push(')');
+    Ok(buf)
+}

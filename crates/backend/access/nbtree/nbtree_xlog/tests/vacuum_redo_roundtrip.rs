@@ -184,6 +184,8 @@ fn install_seams() {
     });
 
     predicate_seams::check_for_serializable_conflict_in::set(|_rel, _tid, _blk| Ok(()));
+    predicate_seams::check_table_for_serializable_conflict_in::set(|_rel| Ok(()));
+    predicate_seams::transfer_predicate_locks_to_heap_relation::set(|_rel| Ok(()));
     predicate_seams::predicate_lock_page_split::set(|_rel, _o, _n| Ok(()));
     predicate_seams::predicate_lock_page_combine::set(|_rel, _o, _n| Ok(()));
     catalog_seams::is_catalog_relation::set(|_rel| false);
@@ -363,8 +365,6 @@ fn index_rel(mcx: Mcx<'_>) -> Relation<'_> {
         rd_id: REL_OID,
         rd_backend: INVALID_PROC_NUMBER,
         rd_islocaltemp: false,
-        rd_hastriggers: false,
-        rd_trigdesc: Default::default(),
         rd_isvalid: Cell::new(true),
         rd_createSubid: Cell::new(0),
         rd_newRelfilelocatorSubid: Cell::new(0),
@@ -423,8 +423,9 @@ fn index_rel(mcx: Mcx<'_>) -> Relation<'_> {
         pgstat_enabled: Cell::new(false),
         rd_amcache: Default::default(),
         rd_trigdesc: Default::default(),
-        rd_hastriggers: false,
+        rd_hastriggers: false, rd_hasrules: false,
         rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(), rd_amcache_spgist: Default::default(),
+        rd_support: PgVec::new_in(mcx),
         rd_supportinfo: Default::default(),
         rd_indexlist: Default::default(),
     };

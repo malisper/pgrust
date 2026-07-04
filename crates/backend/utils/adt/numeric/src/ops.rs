@@ -688,6 +688,23 @@ pub fn float4_numeric(val: f32) -> PgResult<NumericImage> {
     float_to_numeric(val as f64, 6)
 }
 
+pub fn numeric_float8_no_overflow(num: Num<'_>) -> f64 {
+    if num.is_special() {
+        return if num.is_pinf() {
+            f64::INFINITY
+        } else if num.is_ninf() {
+            f64::NEG_INFINITY
+        } else {
+            f64::NAN
+        };
+    }
+    let mut buf = Vec::with_capacity(32);
+    get_str_from_var(num.view(), &mut buf);
+    let s = core::str::from_utf8(&buf).expect("numeric text is ASCII");
+    // C strtod ignoring ERANGE: Rust parse saturates to +/-inf the same way.
+    s.parse::<f64>().expect("numeric text parses as f64")
+}
+
 pub fn numeric_float8(num: Num<'_>) -> PgResult<f64> {
     if num.is_special() {
         return Ok(if num.is_pinf() {

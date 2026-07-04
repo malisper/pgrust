@@ -1315,14 +1315,16 @@ impl<'m> TuplesortData<'m> {
         isnull1: bool,
         tuplen: i64,
     ) -> PgResult<()> {
-        if self.abbrev.is_some() && !isnull1 {
-            // C: converter never sees NULLs (datum1 keeps the zeroed word).
-            datum1 = self.abbrev_datum1(datum1);
-        }
         self.avail_mem -= tuplen;
 
         match self.status {
             TupSortStatus::Initial => {
+                // Abbrev can only be armed in Initial: set_bound disarms it
+                // before any put (C parity), so Bounded never pays this check.
+                if self.abbrev.is_some() && !isnull1 {
+                    // C: converter never sees NULLs (datum1 keeps the zeroed word).
+                    datum1 = self.abbrev_datum1(datum1);
+                }
                 if self.memtuples.len() >= self.memtuples.capacity() - 1 {
                     self.grow_memtuples();
                     debug_assert!(self.memtuples.len() < self.memtuples.capacity());
@@ -1354,6 +1356,7 @@ impl<'m> TuplesortData<'m> {
                 external_sort_unported();
             }
             TupSortStatus::Bounded => {
+                debug_assert!(self.abbrev.is_none());
                 self.puttuple_bounded(SortTuple { tuple, datum1, isnull1 })
             }
             TupSortStatus::SortedInMem => Err(invalid_state("tuplesort_puttuple_common")),
@@ -1363,6 +1366,9 @@ impl<'m> TuplesortData<'m> {
     /// `tuplesort_puttuple_common` useAbbrev arm: convert unless
     /// `consider_abort_common` fires, in which case datum1 representation is
     /// restored across every already-stored memtuple (REMOVEABBREV).
+    /// Out of line: inlined it doubled puttuple_full on no-abbrev lanes
+    /// (m3 sort_limit +22 instr/row, jobs -1783120589/-1783120595).
+    #[inline(never)]
     fn abbrev_datum1(&mut self, original: Datum) -> Datum {
         if !self.consider_abort_common() {
             // SAFETY: variant putters pass live non-null datums of the armed

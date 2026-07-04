@@ -10,7 +10,8 @@
 // xloginsert), records stay redo-compatible.
 use ::bufmgr_seams::{BufferPin, BUFFER_LOCK_EXCLUSIVE, BUFFER_LOCK_UNLOCK};
 use ::tableam_vocab::{
-    LockTupleMode, LockWaitPolicy, TM_FailureData, TM_Result, TU_UpdateIndexes,
+    BulkInsertStateData, LockTupleMode, LockWaitPolicy, TM_FailureData, TM_Result,
+    TU_UpdateIndexes,
 };
 use ::types_core::xact::{InvalidTransactionId, TransactionIdIsValid};
 use ::types_core::{CommandId, InvalidBlockNumber, TransactionId};
@@ -28,7 +29,7 @@ use ::types_tuple::{
     HEAP_XMAX_INVALID, HEAP_XMAX_IS_LOCKED_ONLY, HEAP_XMAX_IS_MULTI, HEAP_XMAX_KEYSHR_LOCK,
     HEAP_XMAX_LOCK_ONLY, HEAP_XMAX_SHR_LOCK, HEAP_LOCKED_UPGRADED,
 };
-use ::xloginsert_seams::{XLogRegBuf, REGBUF_KEEP_DATA, REGBUF_STANDARD, REGBUF_WILL_INIT};
+use ::xloginsert_seams::{REGBUF_KEEP_DATA, REGBUF_STANDARD, REGBUF_WILL_INIT};
 
 use crate::hio::{RelationGetBufferForTuple, RelationPutHeapTuple, HEAP_INSERT_SPECULATIVE};
 use crate::{unported, HeapTupleHeaderGetUpdateXid, MultiXactIdGetUpdateXid};
@@ -187,12 +188,12 @@ fn needs_toast(relation: &RelationData<'_>, tup: &HeapTupleData<'_>) -> bool {
 }
 
 /// `heap_insert`: stamps `tup` and stores it; `tup.t_self` receives the TID.
-/// BulkInsertState is the multi_insert phase-3 lane.
 pub fn heap_insert(
     relation: &RelationData<'_>,
     tup: &mut HeapTupleData<'_>,
     cid: CommandId,
     options: i32,
+    bistate: Option<&mut BulkInsertStateData>,
 ) -> PgResult<()> {
     let xid = xact_seams::get_current_transaction_id::call()?;
 
@@ -233,7 +234,8 @@ pub fn heap_insert(
         tup
     };
 
-    let pin = RelationGetBufferForTuple(relation, heaptup.t_len as usize, None, options, None, 0)?;
+    let pin =
+        RelationGetBufferForTuple(relation, heaptup.t_len as usize, None, options, bistate, 0)?;
 
     predicate_seams::check_for_serializable_conflict_in::call(
         relation,
@@ -297,17 +299,19 @@ pub fn heap_insert(
             )
         };
 
-        let recptr = xloginsert_seams::xlog_insert_record::call(
+        let recptr = crate::wal::insert_record(
             RM_HEAP_ID,
             info,
             XLOG_INCLUDE_ORIGIN,
             &[&xlrec],
-            &[XLogRegBuf {
-                block_id: 0,
-                buffer: pin.buffer(),
-                flags: bufflags,
-                bufdata: &[&xlhdr, body],
-            }],
+            &[crate::wal::reg_block(
+                0,
+                relation.rd_locator.get(),
+                ItemPointerGetBlockNumber(&heaptup.t_self),
+                pin.buffer(),
+                bufflags,
+                &[&xlhdr, body],
+            )],
         )?;
         // SAFETY: pinned + exclusively locked since RelationGetBufferForTuple.
         let mut pm = unsafe { PageMut::from_raw(bufmgr_seams::buffer_get_page::call(pin.buffer())) };
@@ -332,7 +336,7 @@ pub fn heap_insert(
 
 /// `simple_heap_insert`.
 pub fn simple_heap_insert(relation: &RelationData<'_>, tup: &mut HeapTupleData<'_>) -> PgResult<()> {
-    heap_insert(relation, tup, xact_seams::get_current_command_id::call(true)?, 0)
+    heap_insert(relation, tup, xact_seams::get_current_command_id::call(true)?, 0, None)
 }
 
 const XLOG_HEAP2_MULTI_INSERT: u8 = 0x50;
@@ -563,17 +567,19 @@ pub fn heap_multi_insert<'mcx>(
                 bufflags |= REGBUF_WILL_INIT;
             }
 
-            let recptr = xloginsert_seams::xlog_insert_record::call(
+            let recptr = crate::wal::insert_record(
                 RM_HEAP2_ID,
                 info,
                 XLOG_INCLUDE_ORIGIN,
                 &[&scratch[..tupledata_off]],
-                &[XLogRegBuf {
-                    block_id: 0,
-                    buffer: pin.buffer(),
-                    flags: bufflags,
-                    bufdata: &[&scratch[tupledata_off..off]],
-                }],
+                &[crate::wal::reg_block(
+                    0,
+                    relation.rd_locator.get(),
+                    ItemPointerGetBlockNumber(&heaptuples[ndone].t_self),
+                    pin.buffer(),
+                    bufflags,
+                    &[&scratch[tupledata_off..off]],
+                )],
             )?;
             // SAFETY: pinned + exclusively locked since RelationGetBufferForTuple.
             let mut pm =
@@ -975,17 +981,19 @@ pub fn heap_delete(
         xlrec[6] = compute_infobits(tp.t_data().t_infomask, tp.t_data().t_infomask2);
         xlrec[7] = flags;
 
-        let recptr = xloginsert_seams::xlog_insert_record::call(
+        let recptr = crate::wal::insert_record(
             RM_HEAP_ID,
             XLOG_HEAP_DELETE,
             XLOG_INCLUDE_ORIGIN,
             &[&xlrec],
-            &[XLogRegBuf {
-                block_id: 0,
-                buffer: pin.buffer(),
-                flags: REGBUF_STANDARD,
-                bufdata: &[],
-            }],
+            &[crate::wal::reg_block(
+                0,
+                relation.rd_locator.get(),
+                ItemPointerGetBlockNumber(&tp.t_self),
+                pin.buffer(),
+                REGBUF_STANDARD,
+                &[],
+            )],
         )?;
         // SAFETY: pin + exclusive lock held.
         let mut pm = unsafe { PageMut::from_raw(bufmgr_seams::buffer_get_page::call(pin.buffer())) };
@@ -1314,17 +1322,19 @@ pub fn heap_lock_tuple(
         xlrec[6] = compute_infobits(new_infomask, tp.t_data().t_infomask2);
         xlrec[7] = 0;
 
-        let recptr = xloginsert_seams::xlog_insert_record::call(
+        let recptr = crate::wal::insert_record(
             RM_HEAP_ID,
             XLOG_HEAP_LOCK,
             0,
             &[&xlrec],
-            &[XLogRegBuf {
-                block_id: 0,
-                buffer: pin.buffer(),
-                flags: REGBUF_STANDARD,
-                bufdata: &[],
-            }],
+            &[crate::wal::reg_block(
+                0,
+                relation.rd_locator.get(),
+                ItemPointerGetBlockNumber(&tp.t_self),
+                pin.buffer(),
+                REGBUF_STANDARD,
+                &[],
+            )],
         )?;
         // SAFETY: pin + exclusive lock held.
         let mut pm =
@@ -1388,17 +1398,19 @@ pub fn heap_finish_speculative(
 
     if relation_needs_wal(relation) {
         let xlrec = offnum.to_ne_bytes();
-        let recptr = xloginsert_seams::xlog_insert_record::call(
+        let recptr = crate::wal::insert_record(
             RM_HEAP_ID,
             XLOG_HEAP_CONFIRM,
             XLOG_INCLUDE_ORIGIN,
             &[&xlrec],
-            &[XLogRegBuf {
-                block_id: 0,
-                buffer: pin.buffer(),
-                flags: REGBUF_STANDARD,
-                bufdata: &[],
-            }],
+            &[crate::wal::reg_block(
+                0,
+                relation.rd_locator.get(),
+                ItemPointerGetBlockNumber(tid),
+                pin.buffer(),
+                REGBUF_STANDARD,
+                &[],
+            )],
         )?;
         // SAFETY: pin + exclusive lock held.
         let mut pm = unsafe { PageMut::from_raw(bufmgr_seams::buffer_get_page::call(pin.buffer())) };
@@ -1473,17 +1485,19 @@ pub fn heap_abort_speculative(
         xlrec[6] = compute_infobits(tp.t_data().t_infomask, tp.t_data().t_infomask2);
         xlrec[7] = XLH_DELETE_IS_SUPER;
 
-        let recptr = xloginsert_seams::xlog_insert_record::call(
+        let recptr = crate::wal::insert_record(
             RM_HEAP_ID,
             XLOG_HEAP_DELETE,
             0,
             &[&xlrec],
-            &[XLogRegBuf {
-                block_id: 0,
-                buffer: pin.buffer(),
-                flags: REGBUF_STANDARD,
-                bufdata: &[],
-            }],
+            &[crate::wal::reg_block(
+                0,
+                relation.rd_locator.get(),
+                ItemPointerGetBlockNumber(&tp.t_self),
+                pin.buffer(),
+                REGBUF_STANDARD,
+                &[],
+            )],
         )?;
         // SAFETY: pin + exclusive lock held.
         let mut pm = unsafe { PageMut::from_raw(bufmgr_seams::buffer_get_page::call(pin.buffer())) };
@@ -1582,35 +1596,35 @@ fn log_heap_update(
         )
     };
 
+    let rloc = relation.rd_locator.get();
     let same_buf = oldbuf.buffer() == newbuf.buffer();
-    let new_reg = XLogRegBuf {
-        block_id: 0,
-        buffer: newbuf.buffer(),
-        flags: bufflags,
-        bufdata: &[&xlhdr, body],
-    };
+    let new_bufdata: [&[u8]; 2] = [&xlhdr, body];
+    let new_reg = crate::wal::reg_block(
+        0,
+        rloc,
+        ItemPointerGetBlockNumber(&newtup.t_self),
+        newbuf.buffer(),
+        bufflags,
+        &new_bufdata,
+    );
     if same_buf {
-        xloginsert_seams::xlog_insert_record::call(
-            RM_HEAP_ID,
-            info,
-            XLOG_INCLUDE_ORIGIN,
-            &[&xlrec],
-            &[new_reg],
-        )
+        crate::wal::insert_record(RM_HEAP_ID, info, XLOG_INCLUDE_ORIGIN, &[&xlrec], &[new_reg])
     } else {
-        xloginsert_seams::xlog_insert_record::call(
+        crate::wal::insert_record(
             RM_HEAP_ID,
             info,
             XLOG_INCLUDE_ORIGIN,
             &[&xlrec],
             &[
                 new_reg,
-                XLogRegBuf {
-                    block_id: 1,
-                    buffer: oldbuf.buffer(),
-                    flags: REGBUF_STANDARD,
-                    bufdata: &[],
-                },
+                crate::wal::reg_block(
+                    1,
+                    rloc,
+                    ItemPointerGetBlockNumber(&oldtup.t_self),
+                    oldbuf.buffer(),
+                    REGBUF_STANDARD,
+                    &[],
+                ),
             ],
         )
     }
@@ -1893,17 +1907,19 @@ pub fn heap_update(
             } else {
                 0
             };
-            let recptr = xloginsert_seams::xlog_insert_record::call(
+            let recptr = crate::wal::insert_record(
                 RM_HEAP_ID,
                 XLOG_HEAP_LOCK,
                 0,
                 &[&xlrec],
-                &[XLogRegBuf {
-                    block_id: 0,
-                    buffer: pin.buffer(),
-                    flags: REGBUF_STANDARD,
-                    bufdata: &[],
-                }],
+                &[crate::wal::reg_block(
+                    0,
+                    relation.rd_locator.get(),
+                    ItemPointerGetBlockNumber(&oldtup.t_self),
+                    pin.buffer(),
+                    REGBUF_STANDARD,
+                    &[],
+                )],
             )?;
             // SAFETY: pin + exclusive lock held.
             let mut pm =
@@ -2368,17 +2384,19 @@ fn heap_lock_updated_tuple_rec(
                     xlrec[4..6].copy_from_slice(&offnum.to_ne_bytes());
                     xlrec[6] = compute_infobits(new_infomask, new_infomask2);
                     xlrec[7] = 0;
-                    let recptr = xloginsert_seams::xlog_insert_record::call(
+                    let recptr = crate::wal::insert_record(
                         RM_HEAP2_ID,
                         XLOG_HEAP2_LOCK_UPDATED,
                         0,
                         &[&xlrec],
-                        &[XLogRegBuf {
-                            block_id: 0,
-                            buffer: pin.buffer(),
-                            flags: REGBUF_STANDARD,
-                            bufdata: &[],
-                        }],
+                        &[crate::wal::reg_block(
+                            0,
+                            relation.rd_locator.get(),
+                            ItemPointerGetBlockNumber(&mytup.t_self),
+                            pin.buffer(),
+                            REGBUF_STANDARD,
+                            &[],
+                        )],
                     )?;
                     // SAFETY: pin + exclusive lock held.
                     let mut pm = unsafe {

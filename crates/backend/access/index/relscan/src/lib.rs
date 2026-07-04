@@ -86,6 +86,97 @@ impl IndexAmKind {
         }
     }
 
+    pub const fn amstrategies(self) -> i32 {
+        match self {
+            IndexAmKind::Btree => 5,
+            IndexAmKind::Hash => 1,
+            IndexAmKind::Gin => 0,
+            IndexAmKind::Gist => 0,
+            IndexAmKind::Spgist => 0,
+            IndexAmKind::Brin => 0,
+            #[cfg(feature = "mock")]
+            IndexAmKind::Mock => 5,
+        }
+    }
+
+    pub const fn amsupport(self) -> i32 {
+        match self {
+            IndexAmKind::Btree => 6,
+            IndexAmKind::Hash => 3,
+            IndexAmKind::Gin => 7,
+            IndexAmKind::Gist => 12,
+            IndexAmKind::Spgist => 7,
+            IndexAmKind::Brin => 15,
+            #[cfg(feature = "mock")]
+            IndexAmKind::Mock => 6,
+        }
+    }
+
+    pub const fn amoptsprocnum(self) -> i32 {
+        match self {
+            IndexAmKind::Btree => 5,
+            IndexAmKind::Hash => 3,
+            IndexAmKind::Gin => 7,
+            IndexAmKind::Gist => 10,
+            IndexAmKind::Spgist => 7,
+            IndexAmKind::Brin => 5,
+            #[cfg(feature = "mock")]
+            IndexAmKind::Mock => 5,
+        }
+    }
+
+    pub const fn amstorage(self) -> bool {
+        match self {
+            IndexAmKind::Btree => false,
+            IndexAmKind::Hash => false,
+            IndexAmKind::Gin => true,
+            IndexAmKind::Gist => true,
+            IndexAmKind::Spgist => true,
+            IndexAmKind::Brin => true,
+            #[cfg(feature = "mock")]
+            IndexAmKind::Mock => false,
+        }
+    }
+
+    pub const fn amcanorder(self) -> bool {
+        match self {
+            IndexAmKind::Btree => true,
+            IndexAmKind::Hash => false,
+            IndexAmKind::Gin => false,
+            IndexAmKind::Gist => false,
+            IndexAmKind::Spgist => false,
+            IndexAmKind::Brin => false,
+            #[cfg(feature = "mock")]
+            IndexAmKind::Mock => true,
+        }
+    }
+
+    pub const fn amcanhash(self) -> bool {
+        match self {
+            IndexAmKind::Btree => false,
+            IndexAmKind::Hash => true,
+            IndexAmKind::Gin => false,
+            IndexAmKind::Gist => false,
+            IndexAmKind::Spgist => false,
+            IndexAmKind::Brin => false,
+            #[cfg(feature = "mock")]
+            IndexAmKind::Mock => false,
+        }
+    }
+
+    pub const fn amcanorderbyop(self) -> bool {
+        match self {
+            IndexAmKind::Btree => false,
+            IndexAmKind::Hash => false,
+            IndexAmKind::Gin => false,
+            IndexAmKind::Gist => true,
+            IndexAmKind::Spgist => true,
+            IndexAmKind::Brin => false,
+            #[cfg(feature = "mock")]
+            IndexAmKind::Mock => false,
+        }
+    }
+
     pub const fn has_aminsertcleanup(self) -> bool {
         match self {
             IndexAmKind::Btree => false,
@@ -96,6 +187,36 @@ impl IndexAmKind {
             IndexAmKind::Brin => true,
             #[cfg(feature = "mock")]
             IndexAmKind::Mock => false,
+        }
+    }
+}
+
+// amapi.h OpFamilyMember: DDL carrier for opclass/opfamily member entries.
+#[derive(Clone, Copy, Debug)]
+pub struct OpFamilyMember {
+    pub is_func: bool,
+    pub object: Oid,
+    pub number: i16,
+    pub sortfamily: Oid,
+    pub lefttype: Oid,
+    pub righttype: Oid,
+    pub ref_is_hard: bool,
+    pub ref_is_family: bool,
+    pub refobjid: Oid,
+}
+
+impl Default for OpFamilyMember {
+    fn default() -> Self {
+        OpFamilyMember {
+            is_func: false,
+            object: 0,
+            number: 0,
+            sortfamily: 0,
+            lefttype: 0,
+            righttype: 0,
+            ref_is_hard: false,
+            ref_is_family: false,
+            refobjid: 0,
         }
     }
 }

@@ -18,6 +18,10 @@ pub fn exec_clean_type_from_tl(target_list: &NodeList<'_>) -> PgResult<Rc<TupleD
     execscan::exec_clean_type_from_tl(crate::desc_mcx(), target_list)
 }
 
+pub fn exec_type_from_expr_list(exprs: &NodeList<'_>) -> PgResult<Rc<TupleDescData<'static>>> {
+    execscan::exec_type_from_expr_list(crate::desc_mcx(), exprs)
+}
+
 pub(crate) fn exec_clean_type_from_tl_seam(
     pstmt: &PlannedStmt<'_>,
 ) -> PgResult<Rc<TupleDescData<'static>>> {

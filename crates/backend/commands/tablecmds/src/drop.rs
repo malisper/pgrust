@@ -48,7 +48,66 @@ fn makeRangeVarFromNameList<'mcx>(names: &NodeList<'mcx>) -> RangeVar<'mcx> {
     rv
 }
 
-fn DropErrorMsgNonExistent(rel: &RangeVar<'_>, missing_ok: bool) -> PgResult<()> {
+// dropmsgstringarray (tablecmds.c), reachable-relkind subset.
+struct DropMsgStrings {
+    nonexistent_msg: &'static str,
+    skipping_msg: &'static str,
+    nota_msg: &'static str,
+    drophint_msg: &'static str,
+}
+
+fn drop_msg_strings(relkind: u8) -> &'static DropMsgStrings {
+    match relkind {
+        RELKIND_RELATION => &DropMsgStrings {
+            nonexistent_msg: "table \"{}\" does not exist",
+            skipping_msg: "table \"{}\" does not exist, skipping",
+            nota_msg: "\"{}\" is not a table",
+            drophint_msg: "Use DROP TABLE to remove a table.",
+        },
+        types_rel::RELKIND_SEQUENCE => &DropMsgStrings {
+            nonexistent_msg: "sequence \"{}\" does not exist",
+            skipping_msg: "sequence \"{}\" does not exist, skipping",
+            nota_msg: "\"{}\" is not a sequence",
+            drophint_msg: "Use DROP SEQUENCE to remove a sequence.",
+        },
+        types_rel::RELKIND_VIEW => &DropMsgStrings {
+            nonexistent_msg: "view \"{}\" does not exist",
+            skipping_msg: "view \"{}\" does not exist, skipping",
+            nota_msg: "\"{}\" is not a view",
+            drophint_msg: "Use DROP VIEW to remove a view.",
+        },
+        types_rel::RELKIND_MATVIEW => &DropMsgStrings {
+            nonexistent_msg: "materialized view \"{}\" does not exist",
+            skipping_msg: "materialized view \"{}\" does not exist, skipping",
+            nota_msg: "\"{}\" is not a materialized view",
+            drophint_msg: "Use DROP MATERIALIZED VIEW to remove a materialized view.",
+        },
+        types_rel::RELKIND_INDEX => &DropMsgStrings {
+            nonexistent_msg: "index \"{}\" does not exist",
+            skipping_msg: "index \"{}\" does not exist, skipping",
+            nota_msg: "\"{}\" is not an index",
+            drophint_msg: "Use DROP INDEX to remove an index.",
+        },
+        other => panic!("drop_msg_strings: relkind {other} entry unported"),
+    }
+}
+
+fn fmt1(template: &str, arg: &str) -> String {
+    template.replacen("{}", arg, 1)
+}
+
+fn DropErrorMsgWrongType(relname: &str, wrongkind: u8, rightkind: u8) -> Box<PgError> {
+    let rentry = drop_msg_strings(rightkind);
+    let wentry = drop_msg_strings(wrongkind);
+    let mut e = PgError::new(ERROR, fmt1(rentry.nota_msg, relname))
+        .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE);
+    if !wentry.drophint_msg.is_empty() {
+        e = e.with_hint(wentry.drophint_msg);
+    }
+    Box::new(e)
+}
+
+fn DropErrorMsgNonExistent(rel: &RangeVar<'_>, rightkind: u8, missing_ok: bool) -> PgResult<()> {
     if let Some(schemaname) = rel.schemaname {
         if catalog_namespace::get_namespace_oid(schemaname, true)? == InvalidOid {
             if !missing_ok {
@@ -65,18 +124,15 @@ fn DropErrorMsgNonExistent(rel: &RangeVar<'_>, missing_ok: bool) -> PgResult<()>
             return Ok(());
         }
     }
+    let rentry = drop_msg_strings(rightkind);
     let relname = rel.relname;
     if !missing_ok {
         return Err(Box::new(
-            PgError::new(ERROR, format!("table \"{relname}\" does not exist"))
+            PgError::new(ERROR, fmt1(rentry.nonexistent_msg, relname))
                 .with_sqlstate(ERRCODE_UNDEFINED_TABLE),
         ));
     }
-    elog_seams::ereport_msg::call(
-        NOTICE,
-        format!("table \"{relname}\" does not exist, skipping"),
-        None,
-    )?;
+    elog_seams::ereport_msg::call(NOTICE, fmt1(rentry.skipping_msg, relname), None)?;
     Ok(())
 }
 
@@ -87,6 +143,7 @@ pub fn RemoveRelations<'mcx>(mcx: Mcx<'mcx>, drop: &DropStmt<'mcx>) -> PgResult<
     let expected_relkind = match drop.removeType {
         ObjectType::OBJECT_TABLE => RELKIND_RELATION,
         ObjectType::OBJECT_INDEX => types_rel::RELKIND_INDEX,
+        ObjectType::OBJECT_MATVIEW => types_rel::RELKIND_MATVIEW,
         other => unported(&format!(
             "RemoveRelations: removeType {other:?} (its DDL lane does not exist)"
         )),
@@ -111,7 +168,7 @@ pub fn RemoveRelations<'mcx>(mcx: Mcx<'mcx>, drop: &DropStmt<'mcx>) -> PgResult<
         )?;
 
         if relOid == InvalidOid {
-            DropErrorMsgNonExistent(&rel, drop.missing_ok)?;
+            DropErrorMsgNonExistent(&rel, expected_relkind, drop.missing_ok)?;
             continue;
         }
 
@@ -170,17 +227,15 @@ fn RangeVarCallbackForDropRelation<'mcx>(
     genam::systable_endscan(mcx, scan)?;
     pg_class.close(types_rel::AccessShareLock)?;
 
-    if relispartition {
-        unported("RangeVarCallbackForDropRelation: partition parent locking");
-    }
-
     let actual_expected = if relkind == RELKIND_PARTITIONED_TABLE {
         RELKIND_RELATION
+    } else if relkind == types_rel::RELKIND_PARTITIONED_INDEX {
+        types_rel::RELKIND_INDEX
     } else {
         relkind
     };
     if actual_expected != expected_relkind {
-        unported("RangeVarCallbackForDropRelation: DropErrorMsgWrongType (42809)");
+        return Err(DropErrorMsgWrongType(rel.relname, relkind, expected_relkind));
     }
 
     // object_ownercheck (aclchk.c): superuser fast path; role ACL walks are
@@ -212,6 +267,15 @@ fn RangeVarCallbackForDropRelation<'mcx>(
         let heap_oid = catalog_index::IndexGetRelation(mcx, relOid, true)?;
         if heap_oid != InvalidOid {
             lmgr::LockRelationOid(heap_oid, AccessExclusiveLock)?;
+        }
+    }
+
+    // Queries lock parents before partitions; same DIVERGENCE note as above
+    // for the retry bookkeeping (state->partParentOid).
+    if relispartition {
+        let part_parent_oid = pg_inherits::get_partition_parent(mcx, relOid, true)?;
+        if part_parent_oid != InvalidOid {
+            lmgr::LockRelationOid(part_parent_oid, AccessExclusiveLock)?;
         }
     }
     let _ = rel;

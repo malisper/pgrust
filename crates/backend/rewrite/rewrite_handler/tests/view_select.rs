@@ -257,9 +257,12 @@ fn install_xact_periphery_seams() {
     backend_status_seams::pgstat_report_plan_id::set(|_, _| {});
     backend_progress_seams::pgstat_progress_end_command::set(|| {});
     predicate_seams::pre_commit_check_for_serialization_failure::set(|| Ok(()));
+    predicate_seams::release_predicate_locks::set(|_, _| Ok(()));
     predicate_seams::register_predicate_locking_xid::set(|_| Ok(()));
     predicate_seams::check_for_serializable_conflict_in::set(|_rel, _tid, _blk| Ok(()));
-    predicate_seams::check_for_serializable_conflict_out_needed::set(|_r, _s| false);
+    predicate_seams::check_table_for_serializable_conflict_in::set(|_rel| Ok(()));
+    predicate_seams::transfer_predicate_locks_to_heap_relation::set(|_rel| Ok(()));
+    predicate_seams::check_for_serializable_conflict_out_needed::set(|_r, _s| Ok(false));
     predicate_seams::predicate_lock_relation::set(|_r, _s| Ok(()));
     predicate_seams::predicate_lock_tid::set(|_r, _t, _s, _x| Ok(()));
     pruneheap_seams::heap_page_prune_opt::set(|_r, _b| Ok(()));
@@ -362,6 +365,7 @@ fn test_relation<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> RelationData<'mcx> {
         rd_indexlist: Default::default(),
             rd_trigdesc: Default::default(),
             rd_hastriggers: false,
+            rd_hasrules: is_view,
     }
 }
 
@@ -449,6 +453,9 @@ fn install_parser_fixture_seams() {
     syscache_seams::lookup_pg_proc_shape::set(|funcid| {
         Ok(match funcid {
             INT4GT_PROC => Some(syscache_seams::PgProcShape {
+                prolang: 12,
+                prosecdef: false,
+                proconfig_isnull: true,
                 pronamespace: 11,
                 prorettype: 16,
                 provariadic: 0,

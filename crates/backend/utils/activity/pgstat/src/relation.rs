@@ -447,3 +447,116 @@ pub(crate) fn PostPrepare_PgStat_Relations(
         }
     }
 }
+
+pub(crate) const TWOPHASE_RM_PGSTAT_ID: u8 = 2;
+
+pub(crate) const SIZEOF_TWOPHASE_PGSTAT_RECORD: usize = 56;
+
+fn pgstat_record_bytes(
+    trans: &PgStat_TableXactStatus,
+    id: Oid,
+    shared: bool,
+) -> [u8; SIZEOF_TWOPHASE_PGSTAT_RECORD] {
+    let mut b = [0u8; SIZEOF_TWOPHASE_PGSTAT_RECORD];
+    b[0..8].copy_from_slice(&trans.tuples_inserted.to_ne_bytes());
+    b[8..16].copy_from_slice(&trans.tuples_updated.to_ne_bytes());
+    b[16..24].copy_from_slice(&trans.tuples_deleted.to_ne_bytes());
+    b[24..32].copy_from_slice(&trans.inserted_pre_truncdrop.to_ne_bytes());
+    b[32..40].copy_from_slice(&trans.updated_pre_truncdrop.to_ne_bytes());
+    b[40..48].copy_from_slice(&trans.deleted_pre_truncdrop.to_ne_bytes());
+    b[48..52].copy_from_slice(&id.to_ne_bytes());
+    b[52] = shared as u8;
+    b[53] = trans.truncdropped as u8;
+    b
+}
+
+struct TwoPhasePgStatRecord {
+    tuples_inserted: PgStat_Counter,
+    tuples_updated: PgStat_Counter,
+    tuples_deleted: PgStat_Counter,
+    inserted_pre_truncdrop: PgStat_Counter,
+    updated_pre_truncdrop: PgStat_Counter,
+    deleted_pre_truncdrop: PgStat_Counter,
+    id: Oid,
+    shared: bool,
+    truncdropped: bool,
+}
+
+fn decode_pgstat_record(recdata: &[u8]) -> TwoPhasePgStatRecord {
+    assert_eq!(recdata.len(), SIZEOF_TWOPHASE_PGSTAT_RECORD);
+    let rd_i64 = |o: usize| i64::from_ne_bytes(recdata[o..o + 8].try_into().unwrap());
+    TwoPhasePgStatRecord {
+        tuples_inserted: rd_i64(0),
+        tuples_updated: rd_i64(8),
+        tuples_deleted: rd_i64(16),
+        inserted_pre_truncdrop: rd_i64(24),
+        updated_pre_truncdrop: rd_i64(32),
+        deleted_pre_truncdrop: rd_i64(40),
+        id: Oid::from_ne_bytes(recdata[48..52].try_into().unwrap()),
+        shared: recdata[52] != 0,
+        truncdropped: recdata[53] != 0,
+    }
+}
+
+pub(crate) fn AtPrepare_PgStat_Relations(
+    st: &mut PgStatState,
+    xact_state: &xact::PgStat_SubXactStatus,
+) -> types_error::PgResult<()> {
+    for &key in &xact_state.first {
+        if !st.have_pending(key) {
+            continue;
+        }
+        let tabstat = table_mut(st, key);
+        let Some(trans) = tabstat.trans.last() else {
+            continue;
+        };
+        debug_assert_eq!(trans.nest_level, 1);
+        let record = pgstat_record_bytes(trans, tabstat.id, tabstat.shared);
+        twophase_seams::register_two_phase_record::call(TWOPHASE_RM_PGSTAT_ID, 0, &record)?;
+    }
+    Ok(())
+}
+
+pub fn pgstat_twophase_postcommit(
+    _xid: types_core::TransactionId,
+    _info: u16,
+    recdata: &[u8],
+) -> types_error::PgResult<()> {
+    let rec = decode_pgstat_record(recdata);
+    pending::with_state(|st| {
+        let t = pgstat_prep_relation_pending(st, rec.id, rec.shared);
+        t.counts.tuples_inserted += rec.tuples_inserted;
+        t.counts.tuples_updated += rec.tuples_updated;
+        t.counts.tuples_deleted += rec.tuples_deleted;
+        t.counts.truncdropped = rec.truncdropped;
+        if rec.truncdropped {
+            t.counts.delta_live_tuples = 0;
+            t.counts.delta_dead_tuples = 0;
+        }
+        t.counts.delta_live_tuples += rec.tuples_inserted - rec.tuples_deleted;
+        t.counts.delta_dead_tuples += rec.tuples_updated + rec.tuples_deleted;
+        t.counts.changed_tuples += rec.tuples_inserted + rec.tuples_updated + rec.tuples_deleted;
+    });
+    Ok(())
+}
+
+pub fn pgstat_twophase_postabort(
+    _xid: types_core::TransactionId,
+    _info: u16,
+    recdata: &[u8],
+) -> types_error::PgResult<()> {
+    let mut rec = decode_pgstat_record(recdata);
+    pending::with_state(|st| {
+        let t = pgstat_prep_relation_pending(st, rec.id, rec.shared);
+        if rec.truncdropped {
+            rec.tuples_inserted = rec.inserted_pre_truncdrop;
+            rec.tuples_updated = rec.updated_pre_truncdrop;
+            rec.tuples_deleted = rec.deleted_pre_truncdrop;
+        }
+        t.counts.tuples_inserted += rec.tuples_inserted;
+        t.counts.tuples_updated += rec.tuples_updated;
+        t.counts.tuples_deleted += rec.tuples_deleted;
+        t.counts.delta_dead_tuples += rec.tuples_inserted + rec.tuples_updated;
+    });
+    Ok(())
+}
