@@ -537,12 +537,13 @@ pub fn heapam_tuple_lock<'mcx>(
                     continue 'tuple_lock_retry;
                 }
 
-                let Some(pin) = res.pin.take() else {
-                    // t_data == NULL: line pointer gone, row deleted
-                    return Ok(TM_Result::TM_Deleted);
-                };
+                // Fields must be read before taking the pin: tuple()
+                // re-derives through the held pin.
                 let (xmin, t_ctid, self_is_ctid, upd_xmax) = {
-                    let t = res.tuple().expect("keep_buf pin without tuple");
+                    let Some(t) = res.tuple() else {
+                        // t_data == NULL: line pointer gone, row deleted
+                        return Ok(TM_Result::TM_Deleted);
+                    };
                     let hdr = t.t_data();
                     (
                         hdr.xmin(),
@@ -551,6 +552,7 @@ pub fn heapam_tuple_lock<'mcx>(
                         ::heapam::HeapTupleHeaderGetUpdateXid(hdr)?,
                     )
                 };
+                let pin = res.pin.take().expect("tuple() implies held pin");
                 if xmin != prior_xmax || self_is_ctid {
                     pin.release();
                     return Ok(TM_Result::TM_Deleted);
