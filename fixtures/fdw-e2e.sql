@@ -117,4 +117,3 @@ SELECT count(*) FROM pg_foreign_data_wrapper;
 SELECT count(*) FROM pg_foreign_server;
 SELECT count(*) FROM pg_user_mapping;
 SELECT count(*) FROM pg_foreign_table;
-DROP FUNCTION not_a_handler();
