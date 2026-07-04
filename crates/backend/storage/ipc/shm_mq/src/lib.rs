@@ -376,11 +376,16 @@ impl ShmMqHandle {
 
         if !self.mqh_counterparty_attached {
             if nowait {
-                if self.counterparty_gone() {
-                    return Ok(ShmMqRecv::Detached);
-                }
+                // Gone-check BEFORE the sender identity (C's attach/detach
+                // race note); a sender that attached and detached still gets
+                // drained below.
+                let counterparty_gone = self.counterparty_gone();
                 if self.mqh_queue.get_sender().is_none() {
-                    return Ok(ShmMqRecv::WouldBlock);
+                    return Ok(if counterparty_gone {
+                        ShmMqRecv::Detached
+                    } else {
+                        ShmMqRecv::WouldBlock
+                    });
                 }
             } else if !wait_internal(
                 &self.mqh_queue,
