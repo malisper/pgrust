@@ -398,6 +398,28 @@ pub struct AlterOwnerStmt<'mcx> {
     pub newowner: Option<&'mcx RoleSpec<'mcx>>,
 }
 
+// C: subtype T/N/O/C/X/V selects the ALTER DOMAIN arm; def is the default
+// expression or new Constraint.
+#[derive(Default)]
+pub struct AlterDomainStmt<'mcx> {
+    pub subtype: u8,
+    pub typeName: NodeList<'mcx>,
+    pub name: Option<&'mcx str>,
+    pub def: Option<Node<'mcx>>,
+    pub behavior: DropBehavior,
+    pub missing_ok: bool,
+}
+
+// C: relation is used by the table-like forms, object by everything else.
+#[derive(Default)]
+pub struct AlterObjectSchemaStmt<'mcx> {
+    pub objectType: ObjectType,
+    pub relation: Option<&'mcx crate::primnodes::RangeVar<'mcx>>,
+    pub object: Option<Node<'mcx>>,
+    pub newschema: Option<&'mcx str>,
+    pub missing_ok: bool,
+}
+
 // C: returnType is a TypeName; sql_body is a ReturnStmt or List of stmts.
 #[derive(Default)]
 pub struct CreateFunctionStmt<'mcx> {
@@ -1220,6 +1242,12 @@ unsafe impl<'mcx> NodeVariant<'mcx> for AlterFunctionStmt<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for AlterOwnerStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_AlterOwnerStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for AlterDomainStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_AlterDomainStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for AlterObjectSchemaStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_AlterObjectSchemaStmt;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for VariableSetStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_VariableSetStmt;

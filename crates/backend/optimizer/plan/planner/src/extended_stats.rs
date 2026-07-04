@@ -505,16 +505,18 @@ fn mcv_get_match_bitmap<'mcx>(
                     continue;
                 }
                 let m = if expronleft {
-                    types_fmgr::function_call2_coll(
+                    types_fmgr::function_call2_coll_in(
                         &mut opproc,
                         collid,
+                        run.mcx,
                         item.values[idx],
                         cst.constvalue,
                     )?
                 } else {
-                    types_fmgr::function_call2_coll(
+                    types_fmgr::function_call2_coll_in(
                         &mut opproc,
                         collid,
+                        run.mcx,
                         cst.constvalue,
                         item.values[idx],
                     )?
@@ -533,21 +535,7 @@ fn mcv_get_match_bitmap<'mcx>(
                 panic!("incompatible clause");
             }
             let elems = if !cst.constisnull {
-                let p = cst.constvalue.as_usize() as *const u8;
-                // SAFETY: non-null array datum; planner consts carry inline
-                // 4-byte headers (as scalararraysel).
-                let b0 = unsafe { *p };
-                assert!(
-                    b0 != 0x01 && b0 & 0x03 == 0,
-                    "mcv_get_match_bitmap (mcv.c): toasted/packed array const"
-                );
-                // SAFETY: 4-byte varlena header verified; image is VARSIZE bytes.
-                let img = unsafe {
-                    core::slice::from_raw_parts(
-                        p,
-                        arrayfuncs::arr_size(core::slice::from_raw_parts(p, 4)),
-                    )
-                };
+                let img = crate::selfuncs::varlena_image_any(run.mcx, cst.constvalue)?;
                 let elemtype = arrayfuncs::arr_elemtype(img);
                 let (elmlen, elmbyval, elmalign) = lsyscache::get_typlenbyvalalign(elemtype)?;
                 Some(arrayfuncs::deconstruct_array(
@@ -577,9 +565,10 @@ fn mcv_get_match_bitmap<'mcx>(
                     if result_is_final(m, saop.useOr) {
                         break;
                     }
-                    let em = types_fmgr::function_call2_coll(
+                    let em = types_fmgr::function_call2_coll_in(
                         &mut opproc,
                         collid,
+                        run.mcx,
                         item.values[idx],
                         elem_value,
                     )?;

@@ -118,10 +118,7 @@ fn predicate_classify<'mcx>(node: Node<'mcx>) -> (PredClass, PredIter<'mcx>) {
         if let Some(arraynode) = saop.args.as_slice().get(1).copied() {
             if let Some(c) = arraynode.as_const() {
                 if !c.constisnull {
-                    let img = const_array_image(c);
-                    let (ndim, dims, _) = arrayfuncs::read_dims_lbounds(img);
-                    let nelems = arrayutils::array_get_n_items(ndim, &dims)
-                        .expect("valid stored array");
+                    let nelems = const_array_nelems(c);
                     if nelems <= MAX_SAOP_ARRAY_SIZE {
                         return (class, PredIter::ArrayConst(saop));
                     }
@@ -136,16 +133,18 @@ fn predicate_classify<'mcx>(node: Node<'mcx>) -> (PredClass, PredIter<'mcx>) {
     (PredClass::Atom, PredIter::Atom)
 }
 
-// Planner array Consts carry inline, unpacked 4-byte-header images.
-fn const_array_image(c: &Const) -> &[u8] {
-    let p = c.constvalue.as_usize() as *const u8;
-    // SAFETY: non-null by-ref array datum with a verified 4-byte header;
-    // the image is arr_size bytes.
-    unsafe {
-        let b0 = *p;
-        assert!(b0 != 0x01 && b0 & 0x03 == 0, "predicate_classify: toasted/packed array const");
-        core::slice::from_raw_parts(p, arrayfuncs::arr_size(core::slice::from_raw_parts(p, 4)))
+// Header-relative dims read: works for 1B and 4B array images (bound-param
+// array consts can be short-form).
+fn const_array_nelems(c: &Const) -> i32 {
+    let body = crate::selfuncs::varlena_datum_payload(c.constvalue);
+    let rd = |off: usize| i32::from_ne_bytes(body[off..off + 4].try_into().unwrap());
+    let ndim = rd(0);
+    let mut dims = [0i32; arrayutils::MAXDIM as usize];
+    let n = ndim.clamp(0, arrayutils::MAXDIM) as usize;
+    for (i, d) in dims[..n].iter_mut().enumerate() {
+        *d = rd(12 + 4 * i);
     }
+    arrayutils::array_get_n_items(ndim, &dims[..n]).expect("valid stored array")
 }
 
 fn arrayconst_components<'mcx>(
@@ -154,7 +153,7 @@ fn arrayconst_components<'mcx>(
 ) -> PgResult<PgVec<'mcx, Node<'mcx>>> {
     let scalar = saop.args.nth(0);
     let arrayconst = saop.args.nth(1).as_const().expect("classified as Const array");
-    let img = const_array_image(arrayconst);
+    let img = crate::selfuncs::varlena_image_any(mcx, arrayconst.constvalue)?;
     let elemtype = arrayfuncs::arr_elemtype(img);
     let (elmlen, elmbyval, elmalign) = lsyscache::get_typlenbyvalalign(elemtype)?;
     let (values, nulls) =
@@ -639,9 +638,7 @@ fn clause_is_strict_for<'mcx>(
                 if c.constisnull {
                     return Ok(true);
                 }
-                let img = const_array_image(c);
-                let (ndim, dims, _) = arrayfuncs::read_dims_lbounds(img);
-                nelems = arrayutils::array_get_n_items(ndim, &dims).expect("valid stored array");
+                nelems = const_array_nelems(c);
             } else if let Some(a) = arraynode.as_array_expr() {
                 if !a.multidims {
                     nelems = a.elements.len() as i32;
