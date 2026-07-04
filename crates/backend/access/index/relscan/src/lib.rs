@@ -66,6 +66,7 @@ impl IndexAmKind {
             IndexAmKind::Hash => false,
             IndexAmKind::Gin => true,
             IndexAmKind::Gist => false,
+            IndexAmKind::Spgist => false,
             IndexAmKind::Brin => false,
             #[cfg(feature = "mock")]
             IndexAmKind::Mock => false,
