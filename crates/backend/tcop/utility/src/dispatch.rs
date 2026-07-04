@@ -932,6 +932,19 @@ fn dispatch_switch<'mcx>(
             typecmds::DefineDomain(mcx, &mut pstate, stmt)?;
             parser_small1::free_parsestate(pstate)?;
         }
+        T_CompositeTypeStmt => {
+            // Retention contract as unify_stmt_lifetime.
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::rawnodes::CompositeTypeStmt>()
+                .expect("CompositeTypeStmt");
+            typecmds::DefineCompositeType(
+                mcx,
+                stmt.typevar.expect("CompositeTypeStmt.typevar"),
+                stmt.coldeflist,
+                source_text,
+            )?;
+        }
         T_CreateEnumStmt => {
             // Retention contract as unify_stmt_lifetime: the statement arena
             // outlives the utility call; nothing derived escapes it.
