@@ -97,9 +97,10 @@ pub fn DefineIndex<'mcx>(
     if stmt.reset_default_tblspc {
         unported("DefineIndex: reset_default_tblspc");
     }
-    if !stmt.excludeOpNames.is_nil() || stmt.iswithoutoverlaps {
-        unported("DefineIndex: exclusion / WITHOUT OVERLAPS constraints");
+    if stmt.iswithoutoverlaps {
+        unported("DefineIndex: WITHOUT OVERLAPS constraints");
     }
+    let exclusion = !stmt.excludeOpNames.is_nil();
     if !stmt.indexIncludingParams.is_nil() {
         unported("DefineIndex: INCLUDE columns");
     }
@@ -109,8 +110,8 @@ pub fn DefineIndex<'mcx>(
     if stmt.tableSpace.is_some() {
         unported("DefineIndex: TABLESPACE");
     }
-    if stmt.deferrable || stmt.initdeferred {
-        unported("DefineIndex: DEFERRABLE constraint indexes");
+    if (stmt.deferrable || stmt.initdeferred) && !exclusion {
+        unported("DefineIndex: DEFERRABLE unique/pk constraint indexes");
     }
     if stmt.oldNumber != 0 || skip_build {
         unported("DefineIndex: skip_build / oldNumber reuse");
@@ -129,6 +130,13 @@ pub fn DefineIndex<'mcx>(
     if stmt.unique && !amcanunique {
         return Err(err(
             format!("access method \"{amname}\" does not support unique indexes"),
+            types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+        ));
+    }
+    // C: exclusion requires amRoutine->amgettuple (gin and brin lack it).
+    if exclusion && matches!(amname, "gin" | "brin") {
+        return Err(err(
+            format!("access method \"{amname}\" does not support exclusion constraints"),
             types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
         ));
     }
@@ -212,7 +220,8 @@ pub fn DefineIndex<'mcx>(
                 ChooseRelationName(mcx, rel.name(), None, "pkey", namespaceId, true)?
             } else if stmt.isconstraint {
                 let addition = ChooseIndexNameAddition(mcx, &indexColNames)?;
-                ChooseRelationName(mcx, rel.name(), Some(addition.as_str()), "key", namespaceId, true)?
+                let suffix = if exclusion { "excl" } else { "key" };
+                ChooseRelationName(mcx, rel.name(), Some(addition.as_str()), suffix, namespaceId, true)?
             } else {
                 ChooseIndexName(mcx, rel.name(), namespaceId, &indexColNames)?
             };
@@ -238,6 +247,10 @@ pub fn DefineIndex<'mcx>(
         ii_UniqueOps: [0; INDEX_MAX_KEYS as usize],
         ii_UniqueProcs: [0; INDEX_MAX_KEYS as usize],
         ii_UniqueStrats: [0; INDEX_MAX_KEYS as usize],
+        ii_HasExclusion: exclusion,
+        ii_ExclusionOps: [0; INDEX_MAX_KEYS as usize],
+        ii_ExclusionProcs: [0; INDEX_MAX_KEYS as usize],
+        ii_ExclusionStrats: [0; INDEX_MAX_KEYS as usize],
     };
 
     let mut collationIds = [InvalidOid; INDEX_MAX_KEYS as usize];
@@ -251,6 +264,7 @@ pub fn DefineIndex<'mcx>(
         &mut opclassIds,
         &mut coloptions,
         &stmt.indexParams,
+        &stmt.excludeOpNames,
         stmt.isconstraint,
         accessMethodId,
         amname,
@@ -264,9 +278,15 @@ pub fn DefineIndex<'mcx>(
 
     // A unique index on a partitioned table must cover the partition key
     // with the same notion of equality; global uniqueness has no other proof.
-    if partitioned && stmt.unique {
+    if partitioned && (stmt.unique || exclusion) {
         let key = partcache::RelationGetPartitionKey(&rel)?;
-        let constraint_type = if stmt.primary { "PRIMARY KEY" } else { "UNIQUE" };
+        let constraint_type = if stmt.primary {
+            "PRIMARY KEY"
+        } else if stmt.unique {
+            "UNIQUE"
+        } else {
+            "EXCLUDE"
+        };
         for i in 0..key.partnatts as usize {
             // Hash partitioning is loud upstream; list/range use btree.
             let ptkey_eqop = lsyscache::get_opfamily_member(
@@ -305,21 +325,40 @@ pub fn DefineIndex<'mcx>(
                 if key.partcollation[i] != collationIds[j] {
                     continue;
                 }
-                if let Some((idx_opfamily, idx_opcintype)) =
+                let idx_eqop = if exclusion {
+                    indexInfo.ii_ExclusionOps[j]
+                } else if let Some((idx_opfamily, idx_opcintype)) =
                     lsyscache::get_opclass_opfamily_and_input_type(opclassIds[j])?
                 {
-                    let idx_eqop = lsyscache::get_opfamily_member_for_cmptype(
+                    let op = lsyscache::get_opfamily_member_for_cmptype(
                         idx_opfamily,
                         idx_opcintype,
                         idx_opcintype,
                         lsyscache::COMPARE_EQ,
                     )?;
-                    if idx_eqop == InvalidOid {
+                    if op == InvalidOid {
                         unported("DefineIndex: no-equality-operator report (opfamily name)");
                     }
+                    op
+                } else {
+                    InvalidOid
+                };
+                if idx_eqop != InvalidOid {
                     if ptkey_eqop == idx_eqop {
                         found = true;
                         break;
+                    } else if exclusion {
+                        let opname = regproc::format_operator(mcx, idx_eqop)?;
+                        let att = rel.rd_att.attr(key.partattrs[i] as usize - 1);
+                        let attname = core::str::from_utf8(att.attname.name_str())
+                            .expect("attname");
+                        return Err(err(
+                            format!(
+                                "cannot match partition key to index on column \"{attname}\" \
+                                 using non-equal operator \"{opname}\""
+                            ),
+                            types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+                        ));
                     }
                 }
             }
@@ -436,7 +475,15 @@ pub fn DefineIndex<'mcx>(
         &coloptions[..numberOfAttributes],
         &IndexCreateExtra {
             flags,
-            constr_flags: 0,
+            constr_flags: (if stmt.deferrable {
+            catalog_index::INDEX_CONSTR_CREATE_DEFERRABLE
+        } else {
+            0
+        }) | (if stmt.initdeferred {
+            catalog_index::INDEX_CONSTR_CREATE_INIT_DEFERRED
+        } else {
+            0
+        }),
             allow_system_table_mods: false,
             is_internal: !check_rights,
             parent_index_relid: parentIndexId,
@@ -798,12 +845,15 @@ fn ComputeIndexAttrs<'mcx>(
     opclassIds: &mut [Oid],
     coloptions: &mut [i16],
     attList: &types_nodes::NodeList<'mcx>,
+    exclusionOpNames: &types_nodes::NodeList<'mcx>,
     isconstraint: bool,
     accessMethodId: Oid,
     amname: &str,
     amcanorder: bool,
     ddl_save_nestlevel: &mut i32,
 ) -> PgResult<()> {
+    debug_assert!(exclusionOpNames.is_nil() || exclusionOpNames.len() == attList.len());
+    let mut excl_iter = exclusionOpNames.iter();
     for (attn, node) in attList.iter().enumerate() {
         let attribute = node
             .as_variant::<IndexElem>()
@@ -909,6 +959,51 @@ fn ComputeIndexAttrs<'mcx>(
                     ERRCODE_UNDEFINED_OBJECT,
                 ));
             }
+        }
+
+        if let Some(opnode) = excl_iter.next() {
+            let opname = opnode.as_list().expect("exclusion op name list");
+            let pstate = parser_small1::make_parsestate(mcx, None);
+            let opid = parse_oper::compatible_oper_opid(&pstate, opname, atttype, atttype, false)?;
+            if lsyscache::get_commutator(opid)? != opid {
+                return Err(Box::new(
+                    (*err(
+                        format!(
+                            "operator {} is not commutative",
+                            regproc::format_operator(mcx, opid)?
+                        ),
+                        ERRCODE_WRONG_OBJECT_TYPE,
+                    ))
+                    .with_detail(
+                        "Only commutative operators can be used in exclusion constraints."
+                            .to_string(),
+                    ),
+                ));
+            }
+            let opfamily = lsyscache::get_opclass_family(opclassIds[attn])?;
+            let strat = lsyscache::get_op_opfamily_strategy(opid, opfamily)?;
+            if strat == 0 {
+                let famname = lsyscache::get_opfamily_name(mcx, opfamily, false)?
+                    .expect("opfamily name");
+                return Err(Box::new(
+                    (*err(
+                        format!(
+                            "operator {} is not a member of operator family \"{}\"",
+                            regproc::format_operator(mcx, opid)?,
+                            famname.as_str()
+                        ),
+                        ERRCODE_WRONG_OBJECT_TYPE,
+                    ))
+                    .with_detail(
+                        "The exclusion operator must be related to the index operator class \
+                         for the constraint."
+                            .to_string(),
+                    ),
+                ));
+            }
+            indexInfo.ii_ExclusionOps[attn] = opid;
+            indexInfo.ii_ExclusionProcs[attn] = lsyscache::get_opcode(opid)?;
+            indexInfo.ii_ExclusionStrats[attn] = strat as u16;
         }
 
         coloptions[attn] = 0;

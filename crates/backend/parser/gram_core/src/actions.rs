@@ -1161,6 +1161,50 @@ impl<'mcx> Parser<'mcx> {
                 n.initdeferred = cas.initdeferred;
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
+            // ConstraintElem: EXCLUDE access_method_clause '('
+            // ExclusionConstraintList ')' opt_c_include opt_definition
+            // OptConsTableSpace OptWhereClause ConstraintAttributeSpec
+            544 => {
+                let mut n = Node::build::<Constraint>(mcx)?;
+                n.contype = ConstrType::CONSTR_EXCLUSION;
+                n.location = view.l(1);
+                n.access_method = Some(view.v(2).str_val());
+                n.exclusions = view.v(4).list();
+                n.including = view.v(6).list();
+                n.options = view.v(7).list();
+                n.indexname = Option::None;
+                n.indexspace = opt_str(view.v(8));
+                n.where_clause = view.v(9).node();
+                let cas = self.process_cas_bits(
+                    view.v(10).ival(),
+                    view.l(10),
+                    "EXCLUDE",
+                    CasTargets { deferrable: true, initdeferred: true, is_enforced: false, not_valid: false, no_inherit: false, not_valid_exec: false },
+                )?;
+                n.deferrable = cas.deferrable;
+                n.initdeferred = cas.initdeferred;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // ExclusionConstraintList; ExclusionConstraintElem:
+            // index_elem WITH any_operator | index_elem WITH OPERATOR '(' any_operator ')'
+            569 => {
+                let el = view.v(1).node().expect("ExclusionConstraintElem");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, el)?);
+            }
+            570 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(3).node().expect("ExclusionConstraintElem"))?;
+                *yyval = YYSTYPE::List(list);
+            }
+            571 | 572 => {
+                let opno = if rule == 571 { 3 } else { 5 };
+                let elem = view.v(1).node().expect("index_elem");
+                let op = Node::mk_list(mcx, view.v(opno).list())?;
+                *yyval = YYSTYPE::Node(Some(Node::mk_list(
+                    mcx,
+                    NodeList::make2(mcx, elem, op)?,
+                )?));
+            }
             // ConstraintElem: FOREIGN KEY '(' columnList optionalPeriodName ')'
             // REFERENCES qualified_name opt_column_and_period_list key_match
             // key_actions ConstraintAttributeSpec
@@ -7024,12 +7068,13 @@ impl<'mcx> Parser<'mcx> {
             }
             out.is_enforced = true;
         }
-        // Deferrable TRIGGER/FOREIGN KEY nodes parse (trigger + firing lanes
-        // own them); the deferrable unique family stays loud
-        // (unique_key_recheck unported).
+        // Deferrable TRIGGER/FOREIGN KEY/EXCLUDE nodes parse (trigger, firing
+        // and exclusion lanes own them); deferrable unique/pk stays loud
+        // (unique_key_recheck deferred-unique arm unported).
         if (out.deferrable || out.initdeferred)
             && constr_type != "TRIGGER"
             && constr_type != "FOREIGN KEY"
+            && constr_type != "EXCLUDE"
         {
             panic!("gram_core: DEFERRABLE {constr_type} constraints unported");
         }

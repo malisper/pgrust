@@ -65,3 +65,13 @@ seam_core::seam!(
     // enum.c odd-OID comparison fallback consumer.
     pub fn compare_values_of_enum(type_id: Oid, arg1: Oid, arg2: Oid) -> PgResult<i32>
 );
+
+seam_core::seam!(
+    // lookup_type_cache(.., TYPECACHE_CMP_PROC).cmp_proc — the
+    // op_mergejoinable ARRAY_EQ/RECORD_EQ arms (lsyscache sits below typcache).
+    pub fn type_cache_cmp_proc(type_id: Oid) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    pub fn type_cache_hash_proc(type_id: Oid) -> PgResult<Oid>
+);
