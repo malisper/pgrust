@@ -627,6 +627,7 @@ pub fn anytime_typmod_check(istz: bool, typmod: i32) -> PgResult<i32> {
     }
     if typmod > MAX_TIME_PRECISION {
         elog::ereport(types_error::WARNING)
+            .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
             .errmsg(format!(
                 "TIME({typmod}){with_tz} precision reduced to maximum allowed, {MAX_TIME_PRECISION}"
             ))
