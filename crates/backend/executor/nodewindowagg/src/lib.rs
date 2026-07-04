@@ -548,6 +548,7 @@ pub fn exec_init_window_agg<'mcx>(
                 aggfilter: None,
                 pergroup: pg,
                 ordered: None,
+                cur_agg: None,
                 transtype_byval: true,
                 transtype_len: trans_typlen[aggno],
             });

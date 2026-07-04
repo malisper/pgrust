@@ -155,6 +155,13 @@ pub enum Step {
     // Ordered/DISTINCT agg row survived filter+strict checks: flag it for
     // nodeagg's tuplesort feed (scratch already holds the evaluated args).
     AggOrderedMark { flag: NonNull<bool> },
+    // C "set up aggstate->curpertrans for AggGetAggref()" (execExprInterp.c);
+    // pushed only for ordered-set aggs.
+    AggSetCurrent {
+        agg: NonNull<::types_fmgr::AggStateNode>,
+        aggref: NonNull<()>,
+        shared: bool,
+    },
     AggStrictInputCheck1 { arg: NonNull<NullableDatum>, jumpnull: u32 },
     AggPlainTransByVal { call: FuncCall, pergroup: NonNull<AggPerGroup> },
     AggPlainTransStrictByVal { call: FuncCall, pergroup: NonNull<AggPerGroup> },

@@ -1254,6 +1254,57 @@ impl Tuplesort {
         })
     }
 
+    /// `tuplesort_getdatum` with the abbreviated-key out-param: the second
+    /// word is the converted datum1 iff abbreviation is armed, else 0 (C
+    /// leaves the caller's initial value untouched).
+    #[inline]
+    pub fn getdatum_abbrev(
+        &mut self,
+        forward: bool,
+    ) -> PgResult<Option<(NullableDatum, Datum)>> {
+        self.0.with_mut(|st| {
+            debug_assert!(matches!(st.variant, SortVariant::Datum { .. }));
+            let abbrev_armed = st.abbrev.is_some();
+            Ok(st.gettuple_common(forward)?.map(|stup| {
+                let nd = NullableDatum {
+                    value: if abbrev_armed && !stup.isnull1 {
+                        Datum::from_usize(stup.tuple as usize)
+                    } else {
+                        stup.datum1
+                    },
+                    isnull: stup.isnull1,
+                };
+                let abbrev = if abbrev_armed && !stup.isnull1 {
+                    stup.datum1
+                } else {
+                    Datum::null()
+                };
+                (nd, abbrev)
+            }))
+        })
+    }
+
+    /// `tuplesort_skiptuples`, forward-only (the C backward arm needs
+    /// random access and has no in-tree caller).
+    pub fn skiptuples(&mut self, ntuples: i64, forward: bool) -> PgResult<bool> {
+        assert!(forward, "tuplesort_skiptuples: backward skip not ported");
+        if ntuples < 0 {
+            return Ok(false);
+        }
+        self.0.with_mut(|st| {
+            if st.status != TupSortStatus::SortedInMem {
+                return Err(invalid_state("tuplesort_skiptuples"));
+            }
+            if st.memtuples.len() - st.current >= ntuples as usize {
+                st.current += ntuples as usize;
+                return Ok(true);
+            }
+            st.current = st.memtuples.len();
+            st.eof_reached = true;
+            Ok(false)
+        })
+    }
+
     pub fn rescan(&mut self) {
         self.0.with_mut(|st| {
             debug_assert!(st.sortopt & TUPLESORT_RANDOMACCESS != 0);

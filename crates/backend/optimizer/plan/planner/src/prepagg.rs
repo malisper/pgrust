@@ -549,10 +549,11 @@ pub fn get_agg_clause_costs(
         }
         let aggref_node = *run.root.expr_node(aggref_id);
         let aggref = aggref_node.as_aggref().expect("AggInfo holds Aggrefs");
-        assert!(
-            aggref.aggdirectargs.is_nil(),
-            "get_agg_clause_costs (prepagg.c): direct args; M3 ordered-set lane"
-        );
+        for d in aggref.aggdirectargs.iter() {
+            let argcost = cost_qual_eval_node(d)?;
+            costs.finalCost.startup += argcost.startup;
+            costs.finalCost.per_tuple += argcost.per_tuple;
+        }
     }
     Ok(())
 }

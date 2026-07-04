@@ -517,7 +517,9 @@ fn pull_agg_input_vars<'mcx>(
         NodeTag::T_Const => {}
         NodeTag::T_Aggref => {
             let a = node.as_aggref().unwrap();
-            debug_assert!(a.aggdirectargs.is_nil());
+            for d in &a.aggdirectargs {
+                pull_agg_input_vars(d, out);
+            }
             for arg in &a.args {
                 pull_agg_input_vars(arg, out);
             }

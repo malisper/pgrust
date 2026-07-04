@@ -22,6 +22,7 @@ parse_relation = { path = "../parse_relation" }
 funcapi = { path = "../../utils/fmgr/funcapi" }
 mbutils = { path = "../../utils/mb/mbutils" }
 mcx = { path = "../../../_support/mcx" }
+nodes_core = { path = "../../nodes/nodes_core" }
 parse_agg = { path = "../parse_agg" }
 parser_small1 = { path = "../parser_small1" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }

@@ -46,7 +46,9 @@ pub(crate) fn pull_var_nodes<'mcx>(node: Node<'mcx>, out: &mut PgVec<'mcx, Node<
         NodeTag::T_Aggref => {
             let a = node.as_aggref().unwrap();
             debug_assert!(a.agglevelsup == 0);
-            debug_assert!(a.aggdirectargs.is_nil());
+            for d in &a.aggdirectargs {
+                pull_var_nodes(d, out);
+            }
             for arg in &a.args {
                 pull_var_nodes(arg, out);
             }

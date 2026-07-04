@@ -165,6 +165,7 @@ commands_constraint = { path = "../../backend/commands/constraint_cmd" }
 brin_minmax_multi = { path = "../../backend/access/brin/brin_minmax_multi" }
 adt_acl = { path = "../../backend/utils/adt/acl" }
 adt_misc = { path = "../../backend/utils/adt/adt_misc" }
+orderedsetaggs = { path = "../../backend/utils/adt/orderedsetaggs" }
 partitionfuncs = { path = "../../backend/utils/adt/partitionfuncs" }
 genfile = { path = "../../backend/utils/adt/genfile" }
 adt_rowtypes = { path = "../../backend/utils/adt/rowtypes" }

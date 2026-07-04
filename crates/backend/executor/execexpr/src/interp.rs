@@ -1043,6 +1043,11 @@ fn run_program<'mcx>(
                 }
                 write_out(*out, Datum::from_i32(result as i32), false);
             }
+            Step::AggSetCurrent { agg, aggref, shared } => {
+                // SAFETY: the caller's query-lifetime AggStateNode; no &mut
+                // is live across expression evaluation.
+                unsafe { agg.as_ref() }.set_current_agg(*aggref, *shared);
+            }
             Step::AggPlainTransByVal { call, pergroup } => {
                 // SAFETY: once-allocated stable pergroup; sole access here.
                 unsafe {
