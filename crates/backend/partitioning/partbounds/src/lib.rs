@@ -1,11 +1,17 @@
-// partbounds.c, LIST/RANGE/HASH create + search lane; merge/join pruning is
-// unported (loud).
+// partbounds.c, LIST/RANGE/HASH create + search lane, plus the planner-side
+// partitionwise-join merge kernel (merge module).
 #![allow(non_snake_case)]
 
+pub mod merge;
 mod qual;
+#[cfg(test)]
+mod merge_tests;
 #[cfg(test)]
 mod tests;
 
+pub use merge::{
+    partition_bounds_equal, partition_bounds_merge, MergeRel, PartitionBoundsMergeResult,
+};
 pub use qual::{
     check_default_partition_contents, get_proposed_default_constraint, get_qual_from_partbound,
     make_ands_explicit, read_boundspec, PARTBOUNDS_BUILTINS,
