@@ -1,0 +1,17 @@
+[package]
+name = "ts_locale"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+types_error = { path = "../../../_support/types/types_error" }
+types_core = { path = "../../../_support/types/types_core" }
+mbutils = { path = "../../utils/mb/mbutils" }
+wchar = { path = "../../../common/wchar" }
+pg_locale = { path = "../../utils/adt/pg_locale" }
+oracle_compat = { package = "adt_oracle_compat", path = "../../utils/adt/oracle_compat" }
+pg_path = { path = "../../../port/pg_path" }
+init_small = { path = "../../utils/init/init_small" }
+libc = "0.2"

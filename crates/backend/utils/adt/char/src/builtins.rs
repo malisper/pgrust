@@ -85,6 +85,19 @@ pub fn fc_char_text(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRe
     Ok(varlena_result(crate::char_text(mcx, a.value.as_char())?))
 }
 
+pub fn fc_hashchar(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let [a] = fcinfo.args_n::<1>();
+    Ok(Datum::from_u32(::hashfn::hash_bytes_uint32(a.value.as_char() as i32 as u32)))
+}
+
+pub fn fc_hashcharextended(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let [a, seed] = fcinfo.args_n::<2>();
+    Ok(Datum::from_u64(::hashfn::hash_bytes_uint32_extended(
+        a.value.as_char() as i32 as u32,
+        seed.value.as_i64() as u64,
+    )))
+}
+
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin { foid, name, nargs, strict: true, retset: false, func }
 }
@@ -92,6 +105,8 @@ const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrB
 // pg_proc.dat rows (all proisstrict, none retset), OID-ascending.
 pub const CHAR_BUILTINS: &[FmgrBuiltin] = &[
     b(33, "charout", 1, fc_charout),
+    b(454, "hashchar", 1, fc_hashchar),
+    b(446, "hashcharextended", 2, fc_hashcharextended),
     b(61, "chareq", 2, fc_chareq),
     b(70, "charne", 2, fc_charne),
     b(72, "charle", 2, fc_charle),

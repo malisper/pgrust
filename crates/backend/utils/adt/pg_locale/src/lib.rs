@@ -201,6 +201,11 @@ thread_local! {
     static LAST_COLLATION_CACHE: Cell<Option<(Oid, &'static PgLocale)>> = const { Cell::new(None) };
 }
 
+// Test-only: regress-shaped C-locale default without a catalog.
+pub fn set_default_locale_c_for_tests() {
+    DEFAULT_LOCALE.with(|d| d.set(Some(&C_LOCALE)));
+}
+
 #[cold]
 fn cache_lookup_failed(collid: Oid) -> Box<PgError> {
     PgError::error(format!("cache lookup failed for collation {collid}")).into()

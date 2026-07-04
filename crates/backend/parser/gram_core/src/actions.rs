@@ -46,6 +46,7 @@ use types_nodes::rawnodes::{AlterExtensionStmt, CreateExtensionStmt};
 use types_nodes::JoinType;
 use types_nodes::rawnodes::A_Expr_Kind::{self, AEXPR_OP};
 use types_nodes::rawnodes::{
+    AlterTSConfigType, AlterTSConfigurationStmt, AlterTSDictionaryStmt, CompositeTypeStmt,
     AlterEnumStmt, ColumnDef, Constraint, ConstrType, ConstraintsSetStmt, CreateEnumStmt,
     CreateSeqStmt, CreateStmt, CreateTableAsStmt, CreateTrigStmt, IndexElem, IndexStmt,
     IntoClause, OnCommitAction, TriggerTransition,
@@ -4759,7 +4760,6 @@ impl<'mcx> Parser<'mcx> {
             // alter_column_default: SET DEFAULT a_expr | DROP DEFAULT
             364 => *yyval = YYSTYPE::Node(view.v(3).node()),
             365 => *yyval = YYSTYPE::Node(Option::None),
-            // opt_collate_clause: /*EMPTY*/
             367 => *yyval = YYSTYPE::Node(Option::None),
             // alter_using: USING a_expr | /*EMPTY*/
             368 => *yyval = YYSTYPE::Node(view.v(2).node()),
@@ -6778,14 +6778,122 @@ impl<'mcx> Parser<'mcx> {
             // opt_if_not_exists: IF_P NOT EXISTS | /*EMPTY*/
             888 => *yyval = YYSTYPE::Boolean(true),
             889 => *yyval = YYSTYPE::Boolean(false),
-            1876 => {
-                let n = view.v(1).node().expect("relation_expr");
-                *yyval = YYSTYPE::List(NodeList::make1(mcx, n)?);
+            // CompositeTypeStmt: CREATE TYPE_P any_name AS '(' OptTableFuncElementList ')'
+            853 => {
+                let names = view.v(3).list();
+                let loc = view.l(3);
+                let mut parts = [None; 3];
+                for (i, el) in names.iter().enumerate() {
+                    if i < 3 {
+                        parts[i] = el.as_string().map(|s| s.sval);
+                    }
+                }
+                // makeRangeVarFromAnyName: makeNode zero-fill leaves inh=false.
+                let (catalogname, schemaname, relname) = match names.len() {
+                    1 => (None, None, parts[0]),
+                    2 => (None, parts[0], parts[1]),
+                    3 => (parts[0], parts[1], parts[2]),
+                    _ => return Err(self.improper_qualified_name(None, &names, loc)),
+                };
+                let rv = Node::mk_mut(
+                    mcx,
+                    RangeVar {
+                        catalogname,
+                        schemaname,
+                        relname,
+                        inh: false,
+                        relpersistence: RELPERSISTENCE_PERMANENT,
+                        alias: None,
+                        location: loc,
+                    },
+                )?
+                .seal_ref();
+                let mut n = Node::build::<CompositeTypeStmt>(mcx)?;
+                n.typevar = Some(rv);
+                n.coldeflist = view.v(6).list();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
             }
-            1877 => {
+            // DefineStmt: CREATE TEXT_P SEARCH {PARSER|DICTIONARY|TEMPLATE|CONFIGURATION}
+            // any_name definition
+            856..=859 => {
+                let mut n = Node::build::<DefineStmt>(mcx)?;
+                n.kind = match rule {
+                    856 => ObjectType::OBJECT_TSPARSER,
+                    857 => ObjectType::OBJECT_TSDICTIONARY,
+                    858 => ObjectType::OBJECT_TSTEMPLATE,
+                    _ => ObjectType::OBJECT_TSCONFIGURATION,
+                };
+                n.defnames = view.v(5).list();
+                n.definition = view.v(6).list();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // AlterTSDictionaryStmt: ALTER TEXT_P SEARCH DICTIONARY any_name definition
+            1539 => {
+                let mut n = Node::build::<AlterTSDictionaryStmt>(mcx)?;
+                n.dictname = view.v(5).list();
+                n.options = view.v(6).list();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // AlterTSConfigurationStmt: ALTER TEXT_P SEARCH CONFIGURATION any_name ...
+            1540 | 1541 => {
+                let mut n = Node::build::<AlterTSConfigurationStmt>(mcx)?;
+                n.kind = if rule == 1540 {
+                    AlterTSConfigType::ALTER_TSCONFIG_ADD_MAPPING
+                } else {
+                    AlterTSConfigType::ALTER_TSCONFIG_ALTER_MAPPING_FOR_TOKEN
+                };
+                n.cfgname = view.v(5).list();
+                n.tokentype = view.v(9).list();
+                n.dicts = view.v(11).list();
+                n.r#override = rule == 1541;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1542 | 1543 => {
+                let mut n = Node::build::<AlterTSConfigurationStmt>(mcx)?;
+                n.kind = if rule == 1542 {
+                    AlterTSConfigType::ALTER_TSCONFIG_REPLACE_DICT
+                } else {
+                    AlterTSConfigType::ALTER_TSCONFIG_REPLACE_DICT_FOR_TOKEN
+                };
+                n.cfgname = view.v(5).list();
+                let (d1, d2) = if rule == 1542 {
+                    (9, 11)
+                } else {
+                    n.tokentype = view.v(9).list();
+                    (11, 13)
+                };
+                let mut dicts = NodeList::make1(mcx, Node::mk_list(mcx, view.v(d1).list())?)?;
+                dicts.lappend(mcx, Node::mk_list(mcx, view.v(d2).list())?)?;
+                n.dicts = dicts;
+                n.replace = true;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            1544 | 1545 => {
+                let mut n = Node::build::<AlterTSConfigurationStmt>(mcx)?;
+                n.kind = AlterTSConfigType::ALTER_TSCONFIG_DROP_MAPPING;
+                n.cfgname = view.v(5).list();
+                n.missing_ok = rule == 1545;
+                n.tokentype = view.v(if rule == 1544 { 9 } else { 11 }).list();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // TableFuncElementList / TableFuncElement (1898/1899 ride DISPATCH)
+            1900 => {
+                let el = view.v(1).node().expect("TableFuncElement");
+                *yyval = YYSTYPE::List(NodeList::make1(mcx, el)?);
+            }
+            1901 => {
                 let mut list = view.v(1).list();
-                list.lappend(mcx, view.v(3).node().expect("relation_expr"))?;
+                list.lappend(mcx, view.v(3).node().expect("TableFuncElement"))?;
                 *yyval = YYSTYPE::List(list);
+            }
+            1902 => {
+                let mut n = Node::build::<ColumnDef>(mcx)?;
+                n.colname = Some(view.v(1).str_val());
+                n.typeName = view.v(2).node();
+                n.is_local = true;
+                n.collClause = view.v(3).node();
+                n.location = view.l(1);
+                *yyval = YYSTYPE::Node(Some(n.seal()));
             }
             // opt_interval single-field / X TO Y masks (values vs datetime.h).
             2003..=2007 | 2009..=2011 | 2013 => {

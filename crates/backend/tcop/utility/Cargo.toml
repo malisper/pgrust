@@ -81,6 +81,7 @@ opclasscmds = { path = "../../commands/opclasscmds" }
 extension = { path = "../../commands/extension" }
 catalog_dependency = { path = "../../catalog/catalog_dependency" }
 pg_depend = { path = "../../catalog/pg_depend" }
+tsearchcmds = { path = "../../commands/tsearchcmds" }
 
 [dev-dependencies]
 syscache_seams = { path = "../../utils/cache/syscache_seams" }

@@ -1107,3 +1107,77 @@ seam_core::seam!(
     // SearchSysCache2(ENUMTYPOIDNAME, typid, label).
     pub fn lookup_pg_enum_by_typid_label(typid: Oid, label: &str) -> PgResult<Option<PgEnumShape>>
 );
+
+#[derive(Clone, Copy)]
+pub struct PgTsParserShape {
+    pub prsstart: Oid,
+    pub prstoken: Oid,
+    pub prsend: Oid,
+    pub prsheadline: Oid,
+    pub prslextype: Oid,
+}
+
+seam_core::seam!(
+    pub fn lookup_pg_ts_parser_shape(prsid: Oid) -> PgResult<Option<PgTsParserShape>>
+);
+
+pub struct PgTsDictShape<'mcx> {
+    pub dictname: NameData,
+    pub dictnamespace: Oid,
+    pub dicttemplate: Oid,
+    // dictinitoption text payload (detoasted, header stripped); None = SQL NULL.
+    pub dictinitoption: Option<mcx::PgVec<'mcx, u8>>,
+}
+
+seam_core::seam!(
+    pub fn lookup_pg_ts_dict_shape<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        dictid: Oid,
+    ) -> PgResult<Option<PgTsDictShape<'mcx>>>
+);
+
+#[derive(Clone, Copy)]
+pub struct PgTsTemplateShape {
+    pub tmplinit: Oid,
+    pub tmpllexize: Oid,
+}
+
+seam_core::seam!(
+    pub fn lookup_pg_ts_template_shape(tmplid: Oid) -> PgResult<Option<PgTsTemplateShape>>
+);
+
+#[derive(Clone, Copy)]
+pub struct PgTsConfigShape {
+    pub cfgparser: Oid,
+    pub cfgnamespace: Oid,
+    pub cfgname: NameData,
+}
+
+seam_core::seam!(
+    pub fn lookup_pg_ts_config_shape(cfgid: Oid) -> PgResult<Option<PgTsConfigShape>>
+);
+
+seam_core::seam!(
+    // GetSysCacheOid2(TSCONFIGNAMENSP); InvalidOid on a miss.
+    pub fn lookup_pg_ts_config_oid_by_name(cfgname: &str, cfgnamespace: Oid) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    pub fn lookup_pg_ts_dict_oid_by_name(dictname: &str, dictnamespace: Oid) -> PgResult<Oid>
+);
+
+#[derive(Clone, Copy)]
+pub struct PgTsConfigMapShape {
+    pub maptokentype: i32,
+    pub mapseqno: i32,
+    pub mapdict: Oid,
+}
+
+seam_core::seam!(
+    // All pg_ts_config_map rows for cfgid, sorted (maptokentype, mapseqno) —
+    // the TSConfigMapIndexId scan order ts_cache relies on.
+    pub fn pg_ts_config_map_shapes<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        cfgid: Oid,
+    ) -> PgResult<mcx::PgVec<'mcx, PgTsConfigMapShape>>
+);

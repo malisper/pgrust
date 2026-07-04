@@ -1,0 +1,26 @@
+[package]
+name = "ts_cache"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+types_fmgr = { path = "../../../../_support/types/fmgr" }
+mcx = { path = "../../../../_support/mcx" }
+datum = { path = "../../../../_support/types/datum" }
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_guc = { path = "../../../../_support/types/types_guc" }
+syscache_seams = { path = "../syscache_seams" }
+lsyscache = { path = "../lsyscache" }
+inval = { path = "../inval" }
+fmgr_seams = { path = "../../fmgr/fmgr_seams" }
+guc_tables = { path = "../../misc/guc_tables" }
+elog = { path = "../../error/elog" }
+init_small = { path = "../../init/init_small" }
+xact_seams = { path = "../../../access/transam/xact_seams" }
+namespace_seams = { path = "../../../catalog/namespace_seams" }
+dbcommands_seams = { path = "../../../commands/dbcommands_seams" }
+adt_regproc = { path = "../../adt/regproc" }
+format_type = { path = "../../adt/format_type" }
+ts_locale = { path = "../../../tsearch/ts_locale" }

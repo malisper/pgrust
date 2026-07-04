@@ -2258,6 +2258,13 @@ fn lookup_pg_enum_by_typid_label(
 }
 
 pub(crate) fn install() {
+    syscache_seams::lookup_pg_ts_parser_shape::set(lookup_pg_ts_parser_shape);
+    syscache_seams::lookup_pg_ts_dict_shape::set(lookup_pg_ts_dict_shape);
+    syscache_seams::lookup_pg_ts_template_shape::set(lookup_pg_ts_template_shape);
+    syscache_seams::lookup_pg_ts_config_shape::set(lookup_pg_ts_config_shape);
+    syscache_seams::lookup_pg_ts_config_oid_by_name::set(lookup_pg_ts_config_oid_by_name);
+    syscache_seams::lookup_pg_ts_dict_oid_by_name::set(lookup_pg_ts_dict_oid_by_name);
+    syscache_seams::pg_ts_config_map_shapes::set(pg_ts_config_map_shapes);
     syscache_seams::lookup_pg_enum_by_oid::set(lookup_pg_enum_by_oid);
     syscache_seams::lookup_pg_enum_by_typid_label::set(lookup_pg_enum_by_typid_label);
     syscache_seams::pg_attribute_attoptions::set(pg_attribute_attoptions);
@@ -2359,4 +2366,177 @@ pub(crate) fn install_pg_statistic() {
     syscache_seams::decode_pg_statistic_values::set(decode_pg_statistic_values);
     syscache_seams::decode_pg_statistic_numbers::set(decode_pg_statistic_numbers);
     syscache_seams::pg_statistic_stawidth::set(pg_statistic_stawidth);
+}
+
+const ANUM_PG_TS_PARSER_PRSSTART: i32 = 4;
+const ANUM_PG_TS_PARSER_PRSTOKEN: i32 = 5;
+const ANUM_PG_TS_PARSER_PRSEND: i32 = 6;
+const ANUM_PG_TS_PARSER_PRSHEADLINE: i32 = 7;
+const ANUM_PG_TS_PARSER_PRSLEXTYPE: i32 = 8;
+const ANUM_PG_TS_DICT_DICTNAME: i32 = 2;
+const ANUM_PG_TS_DICT_DICTNAMESPACE: i32 = 3;
+const ANUM_PG_TS_DICT_DICTTEMPLATE: i32 = 5;
+const ANUM_PG_TS_DICT_DICTINITOPTION: i32 = 6;
+const ANUM_PG_TS_TEMPLATE_TMPLINIT: i32 = 4;
+const ANUM_PG_TS_TEMPLATE_TMPLLEXIZE: i32 = 5;
+const ANUM_PG_TS_CONFIG_OID: i32 = 1;
+const ANUM_PG_TS_CONFIG_CFGNAME: i32 = 2;
+const ANUM_PG_TS_CONFIG_CFGNAMESPACE: i32 = 3;
+const ANUM_PG_TS_CONFIG_CFGPARSER: i32 = 5;
+const ANUM_PG_TS_DICT_OID: i32 = 1;
+const ANUM_PG_TS_CONFIG_MAP_MAPTOKENTYPE: i32 = 2;
+const ANUM_PG_TS_CONFIG_MAP_MAPSEQNO: i32 = 3;
+const ANUM_PG_TS_CONFIG_MAP_MAPDICT: i32 = 4;
+
+fn lookup_pg_ts_parser_shape(
+    prsid: Oid,
+) -> PgResult<Option<syscache_seams::PgTsParserShape>> {
+    let Some(tuple) = SearchSysCache1(
+        crate::cacheinfo::TSPARSEROID,
+        SysCacheKey::Value(Datum::from_oid(prsid)),
+    )?
+    else {
+        return Ok(None);
+    };
+    let t = tuple.tuple();
+    let cid = crate::cacheinfo::TSPARSEROID;
+    let shape = syscache_seams::PgTsParserShape {
+        prsstart: getattr(&t, cid, ANUM_PG_TS_PARSER_PRSSTART).as_oid(),
+        prstoken: getattr(&t, cid, ANUM_PG_TS_PARSER_PRSTOKEN).as_oid(),
+        prsend: getattr(&t, cid, ANUM_PG_TS_PARSER_PRSEND).as_oid(),
+        prsheadline: getattr(&t, cid, ANUM_PG_TS_PARSER_PRSHEADLINE).as_oid(),
+        prslextype: getattr(&t, cid, ANUM_PG_TS_PARSER_PRSLEXTYPE).as_oid(),
+    };
+    drop(t);
+    ReleaseSysCache(tuple);
+    Ok(Some(shape))
+}
+
+fn lookup_pg_ts_dict_shape<'mcx>(
+    mcx: Mcx<'mcx>,
+    dictid: Oid,
+) -> PgResult<Option<syscache_seams::PgTsDictShape<'mcx>>> {
+    let Some(tuple) = SearchSysCache1(
+        crate::cacheinfo::TSDICTOID,
+        SysCacheKey::Value(Datum::from_oid(dictid)),
+    )?
+    else {
+        return Ok(None);
+    };
+    let cid = crate::cacheinfo::TSDICTOID;
+    let t = tuple.tuple();
+    let dn = getattr(&t, cid, ANUM_PG_TS_DICT_DICTNAME);
+    // SAFETY: dictname is a NameData column; the datum points at its 64-byte
+    // in-tuple image.
+    let dictname = unsafe { *(dn.as_usize() as *const NameData) };
+    let dictnamespace = getattr(&t, cid, ANUM_PG_TS_DICT_DICTNAMESPACE).as_oid();
+    let dicttemplate = getattr(&t, cid, ANUM_PG_TS_DICT_DICTTEMPLATE).as_oid();
+    let dictinitoption = match getattr_nullable(&t, cid, ANUM_PG_TS_DICT_DICTINITOPTION) {
+        None => None,
+        Some(d) => {
+            let p = d.as_usize() as *const u8;
+            // SAFETY: non-null varlena attr datum inside the live tuple.
+            let src = unsafe {
+                core::slice::from_raw_parts(p, types_tuple::varatt::varsize_any(p))
+            };
+            let flat = detoast::detoast_attr(mcx, src)?;
+            let mut out = mcx::vec_with_capacity_in(mcx, flat.len() - 4)?;
+            out.extend_from_slice(&flat[4..]);
+            Some(out)
+        }
+    };
+    drop(t);
+    ReleaseSysCache(tuple);
+    Ok(Some(syscache_seams::PgTsDictShape { dictname, dictnamespace, dicttemplate, dictinitoption }))
+}
+
+fn lookup_pg_ts_template_shape(
+    tmplid: Oid,
+) -> PgResult<Option<syscache_seams::PgTsTemplateShape>> {
+    let Some(tuple) = SearchSysCache1(
+        crate::cacheinfo::TSTEMPLATEOID,
+        SysCacheKey::Value(Datum::from_oid(tmplid)),
+    )?
+    else {
+        return Ok(None);
+    };
+    let cid = crate::cacheinfo::TSTEMPLATEOID;
+    let t = tuple.tuple();
+    let shape = syscache_seams::PgTsTemplateShape {
+        tmplinit: getattr(&t, cid, ANUM_PG_TS_TEMPLATE_TMPLINIT).as_oid(),
+        tmpllexize: getattr(&t, cid, ANUM_PG_TS_TEMPLATE_TMPLLEXIZE).as_oid(),
+    };
+    drop(t);
+    ReleaseSysCache(tuple);
+    Ok(Some(shape))
+}
+
+fn lookup_pg_ts_config_shape(
+    cfgid: Oid,
+) -> PgResult<Option<syscache_seams::PgTsConfigShape>> {
+    let Some(tuple) = SearchSysCache1(
+        crate::cacheinfo::TSCONFIGOID,
+        SysCacheKey::Value(Datum::from_oid(cfgid)),
+    )?
+    else {
+        return Ok(None);
+    };
+    let cid = crate::cacheinfo::TSCONFIGOID;
+    let t = tuple.tuple();
+    let d = getattr(&t, cid, ANUM_PG_TS_CONFIG_CFGNAME);
+    // SAFETY: cfgname is a NameData column; the datum points at its 64-byte
+    // in-tuple image.
+    let cfgname = unsafe { *(d.as_usize() as *const NameData) };
+    let shape = syscache_seams::PgTsConfigShape {
+        cfgparser: getattr(&t, cid, ANUM_PG_TS_CONFIG_CFGPARSER).as_oid(),
+        cfgnamespace: getattr(&t, cid, ANUM_PG_TS_CONFIG_CFGNAMESPACE).as_oid(),
+        cfgname,
+    };
+    drop(t);
+    ReleaseSysCache(tuple);
+    Ok(Some(shape))
+}
+
+fn lookup_pg_ts_config_oid_by_name(cfgname: &str, cfgnamespace: Oid) -> PgResult<Oid> {
+    GetSysCacheOid(
+        crate::cacheinfo::TSCONFIGNAMENSP,
+        ANUM_PG_TS_CONFIG_OID,
+        SysCacheKey::Str(cfgname),
+        SysCacheKey::Value(Datum::from_oid(cfgnamespace)),
+        SysCacheKey::UNUSED,
+        SysCacheKey::UNUSED,
+    )
+}
+
+fn lookup_pg_ts_dict_oid_by_name(dictname: &str, dictnamespace: Oid) -> PgResult<Oid> {
+    GetSysCacheOid(
+        crate::cacheinfo::TSDICTNAMENSP,
+        ANUM_PG_TS_DICT_OID,
+        SysCacheKey::Str(dictname),
+        SysCacheKey::Value(Datum::from_oid(dictnamespace)),
+        SysCacheKey::UNUSED,
+        SysCacheKey::UNUSED,
+    )
+}
+
+fn pg_ts_config_map_shapes<'mcx>(
+    mcx: Mcx<'mcx>,
+    cfgid: Oid,
+) -> PgResult<PgVec<'mcx, syscache_seams::PgTsConfigMapShape>> {
+    let cid = crate::cacheinfo::TSCONFIGMAP;
+    let list = SearchSysCacheList1(cid, SysCacheKey::Value(Datum::from_oid(cfgid)))?;
+    let n = list.n_members() as usize;
+    let mut out = mcx::vec_with_capacity_in(mcx, n)?;
+    for i in 0..n {
+        let m = list.member(i);
+        let t = m.tuple();
+        out.push(syscache_seams::PgTsConfigMapShape {
+            maptokentype: getattr(&t, cid, ANUM_PG_TS_CONFIG_MAP_MAPTOKENTYPE).as_i32(),
+            mapseqno: getattr(&t, cid, ANUM_PG_TS_CONFIG_MAP_MAPSEQNO).as_i32(),
+            mapdict: getattr(&t, cid, ANUM_PG_TS_CONFIG_MAP_MAPDICT).as_oid(),
+        });
+    }
+    ReleaseSysCacheList(list);
+    out.sort_unstable_by_key(|r| (r.maptokentype, r.mapseqno));
+    Ok(out)
 }

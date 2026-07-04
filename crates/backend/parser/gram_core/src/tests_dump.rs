@@ -825,6 +825,36 @@ fn node(out: &mut String, n: Node<'_>) {
         node_field(out, "collClause", c.collClause);
         list_field(out, "constraints", &c.constraints);
         out.push('}');
+    } else if let Some(c) = n.as_composite_type_stmt() {
+        out.push_str("{COMPOSITETYPESTMT :typevar ");
+        match c.typevar {
+            Some(rv) => range_var(out, rv),
+            None => out.push_str("<>"),
+        }
+        list_field(out, "coldeflist", &c.coldeflist);
+        out.push('}');
+    } else if let Some(a) = n.as_alter_ts_dictionary_stmt() {
+        out.push_str("{ALTERTSDICTIONARYSTMT");
+        list_field(out, "dictname", &a.dictname);
+        list_field(out, "options", &a.options);
+        out.push('}');
+    } else if let Some(a) = n.as_alter_ts_configuration_stmt() {
+        out.push_str("{ALTERTSCONFIGURATIONSTMT");
+        int_field(out, "kind", a.kind as i32);
+        list_field(out, "cfgname", &a.cfgname);
+        list_field(out, "tokentype", &a.tokentype);
+        list_field(out, "dicts", &a.dicts);
+        bool_field(out, "override", a.r#override);
+        bool_field(out, "replace", a.replace);
+        bool_field(out, "missing_ok", a.missing_ok);
+        out.push('}');
+    } else if let Some(a) = n.as_a_array_expr() {
+        out.push_str("{A_ARRAYEXPR");
+        list_field(out, "elements", &a.elements);
+        int_field(out, "list_start", a.list_start);
+        int_field(out, "list_end", a.list_end);
+        int_field(out, "location", a.location);
+        out.push('}');
     } else if let Some(c) = n.as_create_enum_stmt() {
         out.push_str("{CREATEENUMSTMT");
         list_field(out, "typeName", &c.typeName);

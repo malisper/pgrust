@@ -12,6 +12,8 @@ types_core = { path = "../../../_support/types/types_core" }
 types_error = { path = "../../../_support/types/types_error" }
 types_nodes = { path = "../../../_support/types/nodes" }
 types_rel = { path = "../../../_support/types/rel" }
+rel_vocab = { path = "../../../_support/types/rel_vocab" }
+tablecmds = { path = "../tablecmds" }
 types_scan = { path = "../../../_support/types/types_scan" }
 types_tuple = { path = "../../../_support/types/types_tuple" }
 datum = { path = "../../../_support/types/datum" }
@@ -19,6 +21,8 @@ parser_small1 = { path = "../../parser/parser_small1" }
 parse_expr = { path = "../../parser/parse_expr" }
 parse_collate = { path = "../../parser/parse_collate" }
 parse_utilcmd = { path = "../../parser/parse_utilcmd" }
+catalog_dependency = { path = "../../catalog/catalog_dependency" }
+pg_depend = { path = "../../catalog/pg_depend" }
 coerce = { path = "../../parser/coerce" }
 vars = { path = "../../optimizer/util/vars" }
 outfuncs = { path = "../../nodes/outfuncs" }

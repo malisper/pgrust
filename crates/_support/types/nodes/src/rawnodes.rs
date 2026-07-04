@@ -196,6 +196,40 @@ pub struct ResTarget<'mcx> {
 }
 
 #[derive(Default)]
+pub struct CompositeTypeStmt<'mcx> {
+    pub typevar: Option<&'mcx crate::primnodes::RangeVar<'mcx>>,
+    pub coldeflist: NodeList<'mcx>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum AlterTSConfigType {
+    #[default]
+    ALTER_TSCONFIG_ADD_MAPPING = 0,
+    ALTER_TSCONFIG_ALTER_MAPPING_FOR_TOKEN = 1,
+    ALTER_TSCONFIG_REPLACE_DICT = 2,
+    ALTER_TSCONFIG_REPLACE_DICT_FOR_TOKEN = 3,
+    ALTER_TSCONFIG_DROP_MAPPING = 4,
+}
+
+#[derive(Default)]
+pub struct AlterTSDictionaryStmt<'mcx> {
+    pub dictname: NodeList<'mcx>,
+    pub options: NodeList<'mcx>,
+}
+
+#[derive(Default)]
+pub struct AlterTSConfigurationStmt<'mcx> {
+    pub kind: AlterTSConfigType,
+    pub cfgname: NodeList<'mcx>,
+    pub tokentype: NodeList<'mcx>,
+    pub dicts: NodeList<'mcx>,
+    pub r#override: bool,
+    pub replace: bool,
+    pub missing_ok: bool,
+}
+
+#[derive(Default)]
 pub struct A_Expr<'mcx> {
     pub kind: A_Expr_Kind,
     pub name: NodeList<'mcx>,
@@ -744,6 +778,15 @@ unsafe impl<'mcx> NodeVariant<'mcx> for RawStmt<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for PLAssignStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_PLAssignStmt;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for CompositeTypeStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CompositeTypeStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for AlterTSDictionaryStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_AlterTSDictionaryStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for AlterTSConfigurationStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_AlterTSConfigurationStmt;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for CreateDomainStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_CreateDomainStmt;
 }
@@ -1202,7 +1245,17 @@ impl<'mcx> Node<'mcx> {
     }
 
     #[inline]
+    pub fn as_composite_type_stmt(self) -> Option<&'mcx CompositeTypeStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
     pub fn as_trigger_transition(self) -> Option<&'mcx TriggerTransition<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_alter_ts_dictionary_stmt(self) -> Option<&'mcx AlterTSDictionaryStmt<'mcx>> {
         self.as_variant()
     }
 
@@ -1213,6 +1266,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_constraints_set_stmt(self) -> Option<&'mcx ConstraintsSetStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_alter_ts_configuration_stmt(self) -> Option<&'mcx AlterTSConfigurationStmt<'mcx>> {
         self.as_variant()
     }
 

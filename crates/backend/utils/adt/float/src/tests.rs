@@ -502,3 +502,19 @@ fn fmgr_wrappers_and_table() {
         assert_eq!((c.1, c.2), (b.name, b.nargs), "OID {}", b.foid);
     }
 }
+
+// hashfloat4/8 (hashfunc.c): ±0 collapse, float4 widens to float8 (cross-type
+// joins), NaN bit patterns collapse to the standard NaN.
+#[test]
+fn float_hash_image_rules() {
+    use crate::builtins::float8_hash_image;
+    assert_eq!(float8_hash_image(f64::NAN), float8_hash_image(-f64::NAN));
+    assert_eq!(
+        float8_hash_image(1.5f32 as f64),
+        float8_hash_image(1.5f64),
+        "float4 widening must hash like the equal float8"
+    );
+    let h0 = ::hashfn::hash_bytes(&float8_hash_image(0.0));
+    let hneg0 = ::hashfn::hash_bytes(&float8_hash_image(-0.0));
+    assert_eq!(h0, hneg0);
+}

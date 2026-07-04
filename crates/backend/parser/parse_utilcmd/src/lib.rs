@@ -90,9 +90,9 @@ pub fn typenameTypeIdAndMod<'mcx>(
                 || t == b'e' as i8
                 || t == b'r' as i8
                 || t == b'm' as i8
+                || t == b'c' as i8
                 || t == b'd' as i8 => {}
         Some(t) => unported(match t as u8 {
-            b'c' => "composite column types",
             b'p' => "pseudo-type columns",
             _ => "unknown typtype",
         }),

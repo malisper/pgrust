@@ -827,7 +827,6 @@ unported! {
     numeric_recv_unported,
     numeric_send_unported,
     numeric_sortsupport_unported,
-    hash_numeric_unported,
     in_range_numeric_unported,
     generate_series_numeric_unported,
 }
