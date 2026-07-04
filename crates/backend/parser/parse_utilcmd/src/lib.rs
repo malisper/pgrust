@@ -2012,10 +2012,63 @@ pub fn transformAlterTableCmd<'mcx>(
         | AlterTableType::AT_SetStatistics
         | AlterTableType::AT_SetStorage => {}
         AlterTableType::AT_AlterColumnType => {
+            // The USING transform stays raw here; tablecmds'
+            // ATPrepAlterColumnType cooks it (C cooks in this arm).
             let defnode = cmd.def.expect("AT_AlterColumnType ColumnDef");
             let cd = defnode.as_variant::<ColumnDef>().expect("ColumnDef");
-            if cd.raw_default.is_some() {
-                unported("transformAlterTableStmt AT_AlterColumnType USING transform");
+            // Identity sequences hang off the top-level partitioned table.
+            if !rel.rd_rel.relispartition {
+                let colname = cmd.name.expect("AT_AlterColumnType name");
+                let attnum = lsyscache::get_attnum(rel.rd_id, colname)?;
+                if attnum == 0 {
+                    return Err(alter_undefined_column(colname, relname));
+                }
+                if attnum > 0 && rel.rd_att.attr(attnum as usize - 1).attidentity != 0 {
+                    let seq_relid =
+                        pg_depend::getIdentitySequence(mcx, rel.rd_id, attnum as i32, false)?;
+                    let tn = cd
+                        .typeName
+                        .expect("ColumnDef.typeName")
+                        .as_variant::<TypeName>()
+                        .expect("TypeName");
+                    let (type_oid, _) = typenameTypeIdAndMod(mcx, None, tn)?;
+                    let snamespaceid = lsyscache::get_rel_namespace(seq_relid)?;
+                    let snamespace = leak_str(
+                        lsyscache::get_namespace_name(mcx, snamespaceid)?.unwrap_or_else(
+                            || panic!("cache lookup failed for namespace {snamespaceid}"),
+                        ),
+                    );
+                    let sname = leak_str(
+                        lsyscache::get_rel_name(mcx, seq_relid)?.unwrap_or_else(|| {
+                            panic!("cache lookup failed for relation {seq_relid}")
+                        }),
+                    );
+                    let mut seq_rv = RangeVar::default();
+                    seq_rv.schemaname = Some(snamespace);
+                    seq_rv.relname = Some(sname);
+                    seq_rv.inh = true;
+                    seq_rv.relpersistence = types_core::RELPERSISTENCE_PERMANENT;
+                    seq_rv.location = -1;
+                    let mut newtn = Node::build::<TypeName>(mcx)?;
+                    newtn.typeOid = type_oid;
+                    newtn.typemod = -1;
+                    newtn.location = -1;
+                    let asdef = Node::mk(
+                        mcx,
+                        DefElem {
+                            defnamespace: None,
+                            defname: Some("as"),
+                            arg: Some(newtn.seal()),
+                            defaction: DefElemAction::DEFELEM_UNSPEC,
+                            location: -1,
+                        },
+                    )?;
+                    let mut altseqstmt = Node::build::<AlterSeqStmt>(mcx)?;
+                    altseqstmt.sequence = Some(Node::mk_mut(mcx, seq_rv)?.seal_ref());
+                    altseqstmt.options = NodeList::make1(mcx, asdef)?;
+                    altseqstmt.for_identity = true;
+                    cxt.blist.lappend(mcx, altseqstmt.seal())?;
+                }
             }
         }
         AlterTableType::AT_AddConstraint => {
