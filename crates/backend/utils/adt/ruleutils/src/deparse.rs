@@ -1334,10 +1334,24 @@ fn get_parameter<'mcx>(param: &Param, ctx: &mut DeparseContext<'mcx>) -> PgResul
         ));
         return Ok(());
     }
+    if param.paramkind == ParamKind::PARAM_EXTERN && !ctx.namespaces.is_empty() {
+        let dpns = ctx.namespaces.last().unwrap().clone();
+        if let Some(argnames) = &dpns.argnames {
+            if param.paramid > 0 && param.paramid as usize <= argnames.len() {
+                let argname = &argnames[param.paramid as usize - 1];
+                let should_qualify = ctx.namespaces.iter().any(|d| !d.rtable_names.is_empty());
+                if should_qualify {
+                    let funcname = dpns.funcname.as_deref().expect("function dpns has a name");
+                    ctx.buf.push_str(&quote_identifier(funcname));
+                    ctx.buf.push('.');
+                }
+                ctx.buf.push_str(&quote_identifier(argname));
+                return Ok(());
+            }
+        }
+    }
     match param.paramkind {
         ParamKind::PARAM_EXTERN | ParamKind::PARAM_EXEC => {
-            // The C argnames leg (function-body deparse) is unported; plain $n
-            // matches every context this engine reaches.
             ctx.buf.push_str(&format!("${}", param.paramid));
             Ok(())
         }

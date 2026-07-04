@@ -5,7 +5,11 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+amapi = { path = "../../../access/index/amapi" }
+arrayfuncs = { path = "../arrayfuncs" }
 cache_syscache = { path = "../../cache/cache_syscache" }
+partdesc = { path = "../../../partitioning/partdesc" }
+pg_depend = { path = "../../../catalog/pg_depend" }
 catalog_namespace = { path = "../../../catalog/catalog_namespace" }
 catcache = { path = "../../cache/catcache" }
 datum = { path = "../../../../_support/types/datum" }

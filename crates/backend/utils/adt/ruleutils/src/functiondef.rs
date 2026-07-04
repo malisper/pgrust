@@ -1,7 +1,7 @@
 //! pg_get_functiondef / pg_get_function_arguments / _identity_arguments /
 //! _result (ruleutils.c).
 
-use cache_syscache::{ReleaseSysCache, SearchSysCache1, SysCacheKey, PROCOID};
+use cache_syscache::{ReleaseSysCache, SearchSysCache1, SysCacheKey, AGGFNOID, PROCOID};
 use datum::Datum;
 use mcx::Mcx;
 use types_core::{InvalidOid, Oid};
@@ -9,8 +9,8 @@ use types_error::{PgError, PgResult, ERRCODE_WRONG_OBJECT_TYPE};
 
 use crate::deparse::simple_quote_literal;
 use crate::{
-    gap, generate_function_name, getattr, getattr_null, name_at, namespace_name_or_temp,
-    quote_identifier, quote_qualified_identifier, text_at,
+    generate_function_name, getattr, getattr_null, name_at, namespace_name_or_temp,
+    quote_identifier, quote_qualified_identifier, text_array_at, text_at,
 };
 
 const ANUM_PG_PROC_PRONAME: i32 = 2;
@@ -40,6 +40,10 @@ const ANUM_PG_PROC_PROBIN: i32 = 27;
 const ANUM_PG_PROC_PROSQLBODY: i32 = 28;
 const ANUM_PG_PROC_PROCONFIG: i32 = 29;
 
+const ANUM_PG_AGGREGATE_AGGKIND: i32 = 2;
+const ANUM_PG_AGGREGATE_AGGNUMDIRECTARGS: i32 = 3;
+const AGGKIND_NORMAL: u8 = b'n';
+
 const PROKIND_AGGREGATE: u8 = b'a';
 const PROKIND_WINDOW: u8 = b'w';
 const PROKIND_PROCEDURE: u8 = b'p';
@@ -63,6 +67,7 @@ const SQL_LANGUAGE_ID: Oid = 14;
 const INTERNALOID: Oid = 2281;
 
 struct PgProcRow {
+    oid: Oid,
     proname: String,
     pronamespace: Oid,
     prolang: Oid,
@@ -84,10 +89,10 @@ struct PgProcRow {
     proargmodes: Option<Vec<u8>>,
     proargnames: Option<Vec<String>>,
     proargdefaults: Option<String>,
-    has_trftypes: bool,
+    trftypes: Option<Vec<Oid>>,
     prosrc: String,
     probin: Option<String>,
-    has_sqlbody: bool,
+    prosqlbody: Option<String>,
     proconfig: Option<Vec<String>>,
 }
 
@@ -97,6 +102,7 @@ fn pg_proc_row(funcid: Oid) -> PgResult<Option<PgProcRow>> {
     };
     let t = ht.tuple();
     let row = PgProcRow {
+        oid: funcid,
         proname: name_at(getattr(&t, PROCOID, ANUM_PG_PROC_PRONAME)),
         pronamespace: getattr(&t, PROCOID, ANUM_PG_PROC_PRONAMESPACE).as_oid(),
         prolang: getattr(&t, PROCOID, ANUM_PG_PROC_PROLANG).as_oid(),
@@ -122,10 +128,10 @@ fn pg_proc_row(funcid: Oid) -> PgResult<Option<PgProcRow>> {
         proargmodes: getattr_null(&t, PROCOID, ANUM_PG_PROC_PROARGMODES).map(char_array_at),
         proargnames: getattr_null(&t, PROCOID, ANUM_PG_PROC_PROARGNAMES).map(text_array_at),
         proargdefaults: getattr_null(&t, PROCOID, ANUM_PG_PROC_PROARGDEFAULTS).map(text_at),
-        has_trftypes: getattr_null(&t, PROCOID, ANUM_PG_PROC_PROTRFTYPES).is_some(),
+        trftypes: getattr_null(&t, PROCOID, ANUM_PG_PROC_PROTRFTYPES).map(crate::oid_array_at),
         prosrc: text_at(getattr_null(&t, PROCOID, ANUM_PG_PROC_PROSRC).expect("prosrc NOT NULL")),
         probin: getattr_null(&t, PROCOID, ANUM_PG_PROC_PROBIN).map(text_at),
-        has_sqlbody: getattr_null(&t, PROCOID, ANUM_PG_PROC_PROSQLBODY).is_some(),
+        prosqlbody: getattr_null(&t, PROCOID, ANUM_PG_PROC_PROSQLBODY).map(text_at),
         proconfig: getattr_null(&t, PROCOID, ANUM_PG_PROC_PROCONFIG).map(text_array_at),
     };
     drop(t);
@@ -136,39 +142,6 @@ fn pg_proc_row(funcid: Oid) -> PgResult<Option<PgProcRow>> {
 // One-dimensional no-null "char" array body.
 fn char_array_at(d: Datum) -> Vec<u8> {
     crate::array_body(d, 1)
-}
-
-// One-dimensional no-null text array (TYPALIGN_INT elements).
-fn text_array_at(d: Datum) -> Vec<String> {
-    // SAFETY: catalog text[] datum; header fields read bytewise.
-    let v = unsafe { types_fmgr::PackedVarlena::from_ptr(d.as_usize() as *const u8) };
-    let b = v.data();
-    let ndim = i32::from_ne_bytes(b[0..4].try_into().unwrap());
-    if ndim == 0 {
-        return Vec::new();
-    }
-    let dataoffset = i32::from_ne_bytes(b[4..8].try_into().unwrap());
-    assert!(ndim == 1 && dataoffset == 0, "ruleutils: unexpected catalog text[] shape");
-    let dim1 = i32::from_ne_bytes(b[12..16].try_into().unwrap()) as usize;
-    let mut out = Vec::with_capacity(dim1);
-    let mut off = 20usize;
-    for _ in 0..dim1 {
-        // att_align_pointer: a zero pad byte means the element was aligned.
-        if b[off] == 0 {
-            off = (off + 3) & !3;
-        }
-        let b0 = b[off];
-        let (hdr, len) = if b0 & 0x01 != 0 {
-            (1usize, (((b0 >> 1) & 0x7F) as usize).saturating_sub(1))
-        } else {
-            let raw = u32::from_ne_bytes(b[off..off + 4].try_into().unwrap());
-            (4usize, (raw >> 2) as usize - 4)
-        };
-        out.push(String::from_utf8(b[off + hdr..off + hdr + len].to_vec())
-            .expect("non-UTF-8 text[] element"));
-        off += hdr + len;
-    }
-    out
 }
 
 // %g for the COST/ROWS values CREATE FUNCTION accepts.
@@ -223,14 +196,30 @@ fn print_function_arguments(
         }
     }
 
+    let mut insertorderbyat: i64 = -1;
     if proc.prokind == PROKIND_AGGREGATE {
-        gap("print_function_arguments", "aggregate signature (pg_aggregate arm)");
+        let Some(ht) =
+            SearchSysCache1(AGGFNOID, SysCacheKey::Value(Datum::from_oid(proc.oid)))?
+        else {
+            return Err(crate::cache_lookup_failed("aggregate", proc.oid));
+        };
+        let t = ht.tuple();
+        let aggkind = getattr(&t, AGGFNOID, ANUM_PG_AGGREGATE_AGGKIND).as_i8() as u8;
+        let aggnumdirectargs =
+            getattr(&t, AGGFNOID, ANUM_PG_AGGREGATE_AGGNUMDIRECTARGS).as_i16();
+        drop(t);
+        ReleaseSysCache(ht);
+        if aggkind != AGGKIND_NORMAL {
+            insertorderbyat = aggnumdirectargs as i64;
+        }
     }
 
     let mut argsprinted = 0usize;
     let mut inputargno = 0i32;
     let mut nextdefault = 0usize;
-    for i in 0..numargs {
+    let mut print_defaults = print_defaults;
+    let mut i = 0usize;
+    while i < numargs {
         let argtype = info.argtypes[i];
         let argname: Option<&str> = info
             .argnames
@@ -257,9 +246,15 @@ fn print_function_arguments(
             inputargno += 1;
         }
         if print_table_args != (argmode == PROARGMODE_TABLE) {
+            i += 1;
             continue;
         }
-        if argsprinted > 0 {
+        if argsprinted as i64 == insertorderbyat {
+            if argsprinted > 0 {
+                buf.push(' ');
+            }
+            buf.push_str("ORDER BY ");
+        } else if argsprinted > 0 {
             buf.push_str(", ");
         }
         buf.push_str(modename);
@@ -274,6 +269,13 @@ fn print_function_arguments(
             buf.push_str(&format!(" DEFAULT {text}"));
         }
         argsprinted += 1;
+
+        // nasty hack: print the last arg twice for variadic ordered-set agg
+        if argsprinted as i64 == insertorderbyat && i == numargs - 1 {
+            print_defaults = false;
+            continue;
+        }
+        i += 1;
     }
     Ok(argsprinted)
 }
@@ -329,8 +331,17 @@ pub fn pg_get_functiondef_worker(mcx: Mcx<'_>, funcid: Oid) -> PgResult<Option<S
         buf.push('\n');
     }
 
-    if proc.has_trftypes {
-        gap("pg_get_functiondef", "TRANSFORM types");
+    if let Some(trftypes) = &proc.trftypes {
+        if !trftypes.is_empty() {
+            buf.push_str(" TRANSFORM ");
+            for (i, t) in trftypes.iter().enumerate() {
+                if i != 0 {
+                    buf.push_str(", ");
+                }
+                buf.push_str(&format!("FOR TYPE {}", format_type::format_type_be(*t)?));
+            }
+            buf.push('\n');
+        }
     }
 
     let langname = lsyscache::get_language_name(mcx, proc.prolang, false)?
@@ -403,24 +414,72 @@ pub fn pg_get_functiondef_worker(mcx: Mcx<'_>, funcid: Oid) -> PgResult<Option<S
         }
     }
 
-    if proc.prolang == SQL_LANGUAGE_ID && proc.has_sqlbody {
-        gap("pg_get_functiondef", "SQL-standard body (print_function_sqlbody)");
+    if proc.prolang == SQL_LANGUAGE_ID && proc.prosqlbody.is_some() {
+        print_function_sqlbody(mcx, &mut buf, &proc)?;
+    } else {
+        buf.push_str("AS ");
+        if let Some(probin) = &proc.probin {
+            simple_quote_literal(&mut buf, probin);
+            buf.push_str(", ");
+        }
+        let tag = if isfunction { "function" } else { "procedure" };
+        let mut dq = format!("${tag}");
+        while proc.prosrc.contains(&dq) {
+            dq.push('x');
+        }
+        dq.push('$');
+        buf.push_str(&dq);
+        buf.push_str(&proc.prosrc);
+        buf.push_str(&dq);
     }
-    buf.push_str("AS ");
-    if let Some(probin) = &proc.probin {
-        simple_quote_literal(&mut buf, probin);
-        buf.push_str(", ");
-    }
-    let tag = if isfunction { "function" } else { "procedure" };
-    let mut dq = format!("${tag}");
-    while proc.prosrc.contains(&dq) {
-        dq.push('x');
-    }
-    dq.push('$');
-    buf.push_str(&dq);
-    buf.push_str(&proc.prosrc);
-    buf.push_str(&dq);
     buf.push('\n');
+    Ok(Some(buf))
+}
+
+// print_function_sqlbody (ruleutils.c:3556). C AcquireRewriteLocks each
+// query; lock acquisition is another lane (matches get_query_def note).
+fn print_function_sqlbody(mcx: Mcx<'_>, buf: &mut String, proc: &PgProcRow) -> PgResult<()> {
+    let info = func_arg_info(proc);
+    let mut dpns = crate::query::DeparseNamespace::empty(Vec::new());
+    dpns.funcname = Some(proc.proname.clone());
+    dpns.argnames = Some(info.argnames.clone().unwrap_or_default());
+    let src = proc.prosqlbody.as_deref().expect("caller checked prosqlbody");
+    let n = readfuncs::stringToNode(mcx, src)?;
+    let dpns = std::rc::Rc::new(dpns);
+    if let Some(list) = n.as_list() {
+        let stmts = list.nth(0).as_list().expect("prosqlbody stmt list");
+        buf.push_str("BEGIN ATOMIC\n");
+        for q in stmts.iter() {
+            let query = q.as_query().expect("prosqlbody stmt is a Query");
+            let mut ctx =
+                crate::deparse::DeparseContext::new(mcx, crate::PRETTYFLAG_INDENT);
+            ctx.namespaces.push(dpns.clone());
+            ctx.indent_level = 1;
+            crate::query::get_query_def(query, &mut ctx, None, false)?;
+            buf.push_str(&ctx.buf);
+            buf.push(';');
+            buf.push('\n');
+        }
+        buf.push_str("END");
+    } else {
+        let query = n.as_query().expect("prosqlbody is a Query");
+        let mut ctx = crate::deparse::DeparseContext::new(mcx, 0);
+        ctx.namespaces.push(dpns);
+        crate::query::get_query_def(query, &mut ctx, None, false)?;
+        buf.push_str(&ctx.buf);
+    }
+    Ok(())
+}
+
+pub fn pg_get_function_sqlbody_worker(mcx: Mcx<'_>, funcid: Oid) -> PgResult<Option<String>> {
+    let Some(proc) = pg_proc_row(funcid)? else {
+        return Ok(None);
+    };
+    if proc.prosqlbody.is_none() {
+        return Ok(None);
+    }
+    let mut buf = String::new();
+    print_function_sqlbody(mcx, &mut buf, &proc)?;
     Ok(Some(buf))
 }
 

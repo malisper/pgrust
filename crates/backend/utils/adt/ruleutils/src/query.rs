@@ -51,6 +51,9 @@ pub(crate) struct DeparseNamespace<'mcx> {
     pub using_names: Vec<String>,
     pub ctes: Vec<&'mcx types_nodes::parsenodes::CommonTableExpr<'mcx>>,
     pub subplans: Option<&'mcx NodeList<'mcx>>,
+    // SQL-function-body deparse (print_function_sqlbody).
+    pub funcname: Option<String>,
+    pub argnames: Option<Vec<String>>,
     // Indexed by child relid (0 unused), as C's palloc0'd array.
     pub appendrels: Option<Vec<Option<&'mcx types_nodes::plannodes::AppendRelInfo<'mcx>>>>,
     pub plan: core::cell::RefCell<crate::plan::DpnsPlan<'mcx>>,
@@ -66,6 +69,8 @@ impl<'mcx> DeparseNamespace<'mcx> {
             using_names: Vec::new(),
             ctes: Vec::new(),
             subplans: None,
+            funcname: None,
+            argnames: None,
             appendrels: None,
             plan: core::cell::RefCell::new(crate::plan::DpnsPlan::default()),
         }
@@ -570,15 +575,17 @@ fn set_join_column_names(dpns: &mut DeparseNamespace<'_>, idx: usize) -> PgResul
     let right = &dpns.rtable_columns[rightidx];
     let nnewcolumns =
         left.new_colnames.len() + right.new_colnames.len() - colinfo.using_names.len();
-    let mut new_colnames: Vec<String> = Vec::with_capacity(nnewcolumns);
-    let mut is_new_col: Vec<bool> = Vec::with_capacity(nnewcolumns);
+    colinfo.new_colnames = Vec::with_capacity(nnewcolumns);
+    colinfo.is_new_col = Vec::with_capacity(nnewcolumns);
 
     let mut leftmerged = vec![false; left.colnames.len() + 1];
     let mut rightmerged = vec![false; right.colnames.len() + 1];
     let mut i = 0usize;
     while i < noldcolumns && colinfo.leftattnos[i] != 0 && colinfo.rightattnos[i] != 0 {
-        new_colnames.push(colinfo.colnames[i].clone().expect("merged column name assigned"));
-        is_new_col.push(false);
+        colinfo
+            .new_colnames
+            .push(colinfo.colnames[i].clone().expect("merged column name assigned"));
+        colinfo.is_new_col.push(false);
         if colinfo.leftattnos[i] > 0 {
             leftmerged[colinfo.leftattnos[i] as usize] = true;
         }
@@ -588,10 +595,11 @@ fn set_join_column_names(dpns: &mut DeparseNamespace<'_>, idx: usize) -> PgResul
         i += 1;
     }
 
-    for (child, merged, attnos) in [
-        (left, &leftmerged, &colinfo.leftattnos),
-        (right, &rightmerged, &colinfo.rightattnos),
-    ] {
+    let leftattnos = colinfo.leftattnos.clone();
+    let rightattnos = colinfo.rightattnos.clone();
+    for (child, merged, attnos) in
+        [(left, &leftmerged, &leftattnos), (right, &rightmerged, &rightattnos)]
+    {
         let mut ic = 0usize;
         for jc in 0..child.new_colnames.len() {
             let child_colname = &child.new_colnames[jc];
@@ -609,24 +617,28 @@ fn set_join_column_names(dpns: &mut DeparseNamespace<'_>, idx: usize) -> PgResul
                 }
                 debug_assert!(i < colinfo.colnames.len());
                 debug_assert_eq!(ic as i32, attnos[i]);
-                new_colnames.push(colinfo.colnames[i].clone().expect("existing join column"));
-                is_new_col.push(child.is_new_col[jc]);
+                colinfo
+                    .new_colnames
+                    .push(colinfo.colnames[i].clone().expect("existing join column"));
+                colinfo.is_new_col.push(child.is_new_col[jc]);
                 i += 1;
             } else {
-                if rte.alias.is_some() {
-                    // Aliased-join new-column unique-ification mutates colinfo
-                    // while child is borrowed; the C corpus reaching it needs
-                    // ALTER TABLE ADD COLUMN under an aliased join.
-                    gap("set_join_column_names", "new columns under an aliased join");
-                }
-                new_colnames.push(child_colname.clone());
-                is_new_col.push(child.is_new_col[jc]);
+                let assigned = if rte.alias.is_some() {
+                    let unique =
+                        make_colname_unique(child_colname, &dpns.using_names, &colinfo);
+                    if !changed_any && unique != *child_colname {
+                        changed_any = true;
+                    }
+                    unique
+                } else {
+                    child_colname.clone()
+                };
+                colinfo.new_colnames.push(assigned);
+                colinfo.is_new_col.push(child.is_new_col[jc]);
             }
         }
     }
-    debug_assert_eq!(new_colnames.len(), nnewcolumns);
-    colinfo.new_colnames = new_colnames;
-    colinfo.is_new_col = is_new_col;
+    debug_assert_eq!(colinfo.new_colnames.len(), nnewcolumns);
 
     colinfo.printaliases = if rte.alias.is_some() { changed_any } else { false };
     dpns.rtable_columns[idx] = colinfo;
@@ -1494,9 +1506,6 @@ fn get_basic_select_query<'mcx>(
     }
 
     if !query.groupClause.is_nil() || !query.groupingSets.is_nil() {
-        if !query.groupingSets.is_nil() {
-            gap("get_basic_select_query", "GROUPING SETS/ROLLUP/CUBE deparse");
-        }
         append_context_keyword(ctx, " GROUP BY ", -PRETTYINDENT_STD, PRETTYINDENT_STD, 1);
         if query.groupDistinct {
             ctx.buf.push_str("DISTINCT ");
@@ -1504,11 +1513,20 @@ fn get_basic_select_query<'mcx>(
         let save = ctx.in_group_by;
         ctx.in_group_by = true;
         let mut sep = "";
-        for c in query.groupClause.iter() {
-            let grp = c.as_sort_group_clause().expect("groupClause entry");
-            ctx.buf.push_str(sep);
-            get_rule_sortgroupclause(grp.tleSortGroupRef, target_list, false, ctx)?;
-            sep = ", ";
+        if query.groupingSets.is_nil() {
+            for c in query.groupClause.iter() {
+                let grp = c.as_sort_group_clause().expect("groupClause entry");
+                ctx.buf.push_str(sep);
+                get_rule_sortgroupclause(grp.tleSortGroupRef, target_list, false, ctx)?;
+                sep = ", ";
+            }
+        } else {
+            for g in query.groupingSets.iter() {
+                let grp = g.as_grouping_set().expect("groupingSets entry");
+                ctx.buf.push_str(sep);
+                get_rule_groupingset(grp, target_list, true, ctx)?;
+                sep = ", ";
+            }
         }
         ctx.in_group_by = save;
     }
@@ -1831,6 +1849,84 @@ fn get_sortgroupref_tle<'mcx>(
     panic!("ORDER/GROUP BY expression not found in targetlist");
 }
 
+fn get_tablesample_def<'mcx>(
+    tablesample: &'mcx types_nodes::parsenodes::TableSampleClause<'mcx>,
+    ctx: &mut DeparseContext<'mcx>,
+) -> PgResult<()> {
+    const INTERNALOID: types_core::Oid = 2281;
+    let fname = crate::generate_function_name(
+        ctx.mcx,
+        tablesample.tsmhandler,
+        &[INTERNALOID],
+        &[],
+        false,
+    )?;
+    ctx.buf.push_str(&format!(" TABLESAMPLE {fname} ("));
+    let mut nargs = 0;
+    for arg in tablesample.args.iter() {
+        if nargs > 0 {
+            ctx.buf.push_str(", ");
+        }
+        nargs += 1;
+        get_rule_expr(arg, ctx, false)?;
+    }
+    ctx.buf.push(')');
+    if let Some(repeatable) = tablesample.repeatable {
+        ctx.buf.push_str(" REPEATABLE (");
+        get_rule_expr(repeatable, ctx, false)?;
+        ctx.buf.push(')');
+    }
+    Ok(())
+}
+
+// SIMPLE content carries Integer nodes (C: an int list of sortgrouprefs).
+fn get_rule_groupingset<'mcx>(
+    gset: &'mcx types_nodes::parsenodes::GroupingSet<'mcx>,
+    target_list: &'mcx NodeList<'mcx>,
+    omit_parens: bool,
+    ctx: &mut DeparseContext<'mcx>,
+) -> PgResult<()> {
+    use types_nodes::parsenodes::GroupingSetKind::*;
+    let mut omit_child_parens = true;
+    let mut sep = "";
+    match gset.kind {
+        GROUPING_SET_EMPTY => {
+            ctx.buf.push_str("()");
+            return Ok(());
+        }
+        GROUPING_SET_SIMPLE => {
+            let parens = !omit_parens || gset.content.len() != 1;
+            if parens {
+                ctx.buf.push('(');
+            }
+            for n in gset.content.iter() {
+                let sortref = n.as_integer().expect("SIMPLE grouping-set ref").ival as u32;
+                ctx.buf.push_str(sep);
+                get_rule_sortgroupclause(sortref, target_list, false, ctx)?;
+                sep = ", ";
+            }
+            if parens {
+                ctx.buf.push(')');
+            }
+            return Ok(());
+        }
+        GROUPING_SET_ROLLUP => ctx.buf.push_str("ROLLUP("),
+        GROUPING_SET_CUBE => ctx.buf.push_str("CUBE("),
+        GROUPING_SET_SETS => {
+            ctx.buf.push_str("GROUPING SETS (");
+            omit_child_parens = false;
+        }
+    }
+    for n in gset.content.iter() {
+        ctx.buf.push_str(sep);
+        let child = n.as_grouping_set().expect("nested GroupingSet");
+        get_rule_groupingset(child, target_list, omit_child_parens, ctx)?;
+        sep = ", ";
+    }
+    ctx.buf.push(')');
+    Ok(())
+}
+
 fn get_rule_sortgroupclause<'mcx>(
     sortref: u32,
     target_list: &'mcx NodeList<'mcx>,
@@ -2084,8 +2180,12 @@ fn get_from_clause_item<'mcx>(
                 }
                 _ => get_column_alias_list(varno, ctx),
             }
-            if rte.rtekind == RTEKind::RTE_RELATION && rte.tablesample.is_some() {
-                gap("get_from_clause_item", "TABLESAMPLE deparse");
+            if rte.rtekind == RTEKind::RTE_RELATION {
+                if let Some(ts) = rte.tablesample {
+                    let ts =
+                        ts.as_table_sample_clause().expect("tablesample is a TableSampleClause");
+                    get_tablesample_def(ts, ctx)?;
+                }
             }
             Ok(())
         }
