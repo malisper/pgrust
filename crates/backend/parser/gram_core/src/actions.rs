@@ -25,7 +25,7 @@ use types_nodes::parsenodes::{
     REPLICA_IDENTITY_NOTHING,
 };
 use types_nodes::primnodes::{
-    CaseExpr, CaseWhen, CoalesceExpr, CollateClause, GroupingFunc, JoinExpr, MinMaxExpr, MinMaxOp,
+    CaseExpr, CaseWhen, CoalesceExpr, CollateClause, CurrentOfExpr, GroupingFunc, JoinExpr, MinMaxExpr, MinMaxOp,
     OverridingKind, RowExpr,
     SQLValueFunction, SQLValueFunctionOp,
 };
@@ -2228,9 +2228,18 @@ impl<'mcx> Parser<'mcx> {
                 *yyval = YYSTYPE::Node(Some(rv));
             }
             // where_or_current_clause: WHERE CURRENT_P OF cursor_name
-            1896 => panic!(
-                "gram_core: WHERE CURRENT OF (CurrentOfExpr) not ported"
-            ),
+            1896 => {
+                // cvarno is filled in by parse analysis.
+                let n = Node::mk(
+                    mcx,
+                    CurrentOfExpr {
+                        cvarno: 0,
+                        cursor_name: Some(view.v(4).str_val()),
+                        cursor_param: 0,
+                    },
+                )?;
+                *yyval = YYSTYPE::Node(Some(n));
+            }
             // insert_target: qualified_name AS ColId
             1619 => {
                 let rv = view.v(1).node().expect("qualified_name");

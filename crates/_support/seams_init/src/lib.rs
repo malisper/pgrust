@@ -53,6 +53,8 @@ pub fn init_all() {
     execscan::init_seams();
     nodeseqscan::init_seams();
     nodeindexscan::init_seams();
+    nodetidscan::init_seams();
+    nodetidrangescan::init_seams();
     nodeindexonlyscan::init_seams();
     nodeagg::init_seams();
     nodewindowagg::init_seams();

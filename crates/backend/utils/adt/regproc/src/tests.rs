@@ -448,10 +448,16 @@ fn regprocedureout_formats() {
 }
 
 #[test]
-#[should_panic(expected = "parseTypeString")]
-fn regtypein_name_arm_is_loud() {
+fn regtypein_name_arm() {
     with_mcx(|mcx| {
-        let _ = regtypein(mcx, "integer", None);
+        assert_eq!(regtypein(mcx, "-", None).unwrap(), Some(0));
+        assert_eq!(regtypein(mcx, "23", None).unwrap(), Some(23));
+        assert_eq!(regtypein(mcx, "integer", None).unwrap(), Some(23));
+        let err = regtypein(mcx, "no_such_type", None).unwrap_err();
+        assert_eq!(err.sqlstate(), ERRCODE_UNDEFINED_OBJECT);
+        let mut soft = SoftErrorContext::new(false);
+        assert_eq!(regtypein(mcx, "no_such_type", Some(&mut soft)).unwrap(), None);
+        assert!(soft.error_occurred());
     });
 }
 
@@ -520,6 +526,10 @@ fn builtins_table_matches_pg_proc() {
         (1079, "text_regclass", 1),
         (2212, "regprocedurein", 1),
         (2213, "regprocedureout", 1),
+        (2214, "regoperin", 1),
+        (2215, "regoperout", 1),
+        (2216, "regoperatorin", 1),
+        (2217, "regoperatorout", 1),
         (2218, "regclassin", 1),
         (2219, "regclassout", 1),
         (2220, "regtypein", 1),
@@ -527,13 +537,27 @@ fn builtins_table_matches_pg_proc() {
         (2444, "regprocrecv", 1),
         (2445, "regprocsend", 1),
         (2446, "regprocedurerecv", 1),
+        (2448, "regoperrecv", 1),
+        (2449, "regopersend", 1),
+        (2450, "regoperatorrecv", 1),
+        (2451, "regoperatorsend", 1),
         (2447, "regproceduresend", 1),
         (2452, "regclassrecv", 1),
         (2453, "regclasssend", 1),
         (2454, "regtyperecv", 1),
         (2455, "regtypesend", 1),
+        (3476, "to_regoperator", 1),
         (3479, "to_regprocedure", 1),
+        (3492, "to_regoper", 1),
         (3493, "to_regtype", 1),
+        (3736, "regconfigin", 1),
+        (3737, "regconfigout", 1),
+        (3738, "regconfigrecv", 1),
+        (3739, "regconfigsend", 1),
+        (3771, "regdictionaryin", 1),
+        (3772, "regdictionaryout", 1),
+        (3773, "regdictionaryrecv", 1),
+        (3774, "regdictionarysend", 1),
         (3494, "to_regproc", 1),
         (3495, "to_regclass", 1),
         (4084, "regnamespacein", 1),
@@ -546,6 +570,11 @@ fn builtins_table_matches_pg_proc() {
         (4094, "regrolerecv", 1),
         (4095, "regrolesend", 1),
         (4098, "regrolein", 1),
+        (4193, "regcollationin", 1),
+        (4194, "regcollationout", 1),
+        (4195, "to_regcollation", 1),
+        (4196, "regcollationrecv", 1),
+        (4197, "regcollationsend", 1),
     ];
     assert_eq!(builtins::REGPROC_BUILTINS.len(), expected.len());
     for (b, (oid, name, nargs)) in builtins::REGPROC_BUILTINS.iter().zip(expected) {

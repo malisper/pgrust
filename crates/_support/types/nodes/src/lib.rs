@@ -33,12 +33,12 @@ pub use parsenodes::{
     AclMode, Query, QuerySource, RTEKind, RTEPermissionInfo, RangeTblEntry, RangeTblFunction,
     RowMarkClause, SetOperation,
 };
-pub use plannodes::{Plan, PlanVariant, PlannedStmt, Result};
+pub use plannodes::{Plan, PlanVariant, PlannedStmt, Result, TidRangeScan, TidScan};
 pub use plannodes::{BitmapAnd, BitmapHeapScan, BitmapIndexScan, BitmapOr};
 pub use primnodes::{
     Alias, ArrayExpr, BoolExpr, BoolExprType, BoolTestType, BooleanTest, CaseTestExpr,
     CoerceToDomain, CoerceToDomainValue, CoerceViaIO, CoercionForm, CollateExpr, Const,
-    DistinctExpr, FromExpr, FuncExpr, InferenceElem, JoinExpr, MergeAction, MergeMatchKind, NullTest, NullTestType,
+    CurrentOfExpr, DistinctExpr, FromExpr, FuncExpr, InferenceElem, JoinExpr, MergeAction, MergeMatchKind, NullTest, NullTestType,
     OnConflictAction, OnConflictExpr, OpExpr, OverridingKind, Param, ParamKind, RangeTblRef,
     RangeVar, RelabelType, RowExpr, SQLValueFunction, SQLValueFunctionOp, ScalarArrayOpExpr,
     SetToDefault, SubLink, SubLinkType, SubPlan, SubscriptingRef, TargetEntry, Var,

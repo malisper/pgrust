@@ -1873,6 +1873,7 @@ pub fn expression_returns_set(node: Node<'_>) -> bool {
         | NodeTag::T_Var
         | NodeTag::T_CaseTestExpr
         | NodeTag::T_SQLValueFunction
+        | NodeTag::T_CurrentOfExpr
         | NodeTag::T_CoerceToDomainValue => false,
         NodeTag::T_CoerceToDomain => {
             expression_returns_set(node.as_coerce_to_domain().unwrap().arg)

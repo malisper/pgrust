@@ -358,6 +358,14 @@ pub struct SetToDefault {
     pub location: ParseLoc,
 }
 
+// cvarno is a live RT index after parse analysis; varlevelsup is implicitly 0.
+#[derive(Clone, Copy, Default)]
+pub struct CurrentOfExpr<'mcx> {
+    pub cvarno: Index,
+    pub cursor_name: Option<&'mcx str>,
+    pub cursor_param: i32,
+}
+
 #[derive(Default)]
 pub struct OpExpr<'mcx> {
     pub opno: Oid,
@@ -723,6 +731,9 @@ unsafe impl NodeVariant<'_> for RangeTblRef {
 unsafe impl NodeVariant<'_> for SetToDefault {
     const TAG: NodeTag = NodeTag::T_SetToDefault;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for CurrentOfExpr<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CurrentOfExpr;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for JoinExpr<'mcx> {
     const TAG: NodeTag = NodeTag::T_JoinExpr;
 }
@@ -984,6 +995,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_join_expr(self) -> Option<&'mcx JoinExpr<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_current_of_expr(self) -> Option<&'mcx CurrentOfExpr<'mcx>> {
         self.as_variant()
     }
 
