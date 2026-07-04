@@ -2094,6 +2094,7 @@ dependencies = [
  "aclchk",
  "adt_acl",
  "adt_regproc",
+ "arrayfuncs",
  "cache_syscache",
  "catalog",
  "catalog_namespace",
@@ -2102,11 +2103,16 @@ dependencies = [
  "datum",
  "dbcommands",
  "dbcommands_seams",
+ "detoast",
  "extension",
+ "fmgr_core",
  "fmgr_seams",
+ "foreigncmds_seams",
  "format_type",
+ "funcapi",
  "genam",
  "guc_tables",
+ "heaptuple",
  "lmgr",
  "lsyscache",
  "mcx",
@@ -2135,10 +2141,12 @@ dependencies = [
  "trigger",
  "types_core",
  "types_error",
+ "types_fmgr",
  "types_nodes",
  "types_rel",
  "types_scan",
  "types_tuple",
+ "varlena",
 ]
 
 [[package]]
@@ -3687,16 +3695,23 @@ dependencies = [
 name = "dbsize"
 version = "0.1.0"
 dependencies = [
+ "acl_seams",
+ "aclchk_seams",
  "adt_numeric",
  "datum",
+ "dbcommands_seams",
  "mcx",
+ "miscinit_seams",
  "relation_seams",
  "smgr_seams",
+ "syscache_seams",
  "types_core",
  "types_error",
  "types_fmgr",
+ "types_nodes",
  "types_rel",
  "types_storage",
+ "varlena",
 ]
 
 [[package]]
@@ -12886,6 +12901,7 @@ dependencies = [
  "execexpr",
  "exectuples",
  "fmgr_seams",
+ "funcapi",
  "genam",
  "guc_tables",
  "heaptuple",
@@ -12904,6 +12920,7 @@ dependencies = [
  "types_scan",
  "types_slot",
  "types_tuple",
+ "varlena",
 ]
 
 [[package]]
