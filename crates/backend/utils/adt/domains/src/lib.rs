@@ -82,9 +82,14 @@ pub fn fc_domain_in(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRes
         return Ok(Datum::null());
     }
 
-    // Soft-error divergence: constraint failures always hard-error (C errsave
-    // routes them into an armed escontext).
-    typcache_seams::domain_check_input::call(value, string.is_none(), domainType)?;
+    // SAFETY: fcinfo.context, if set, is a live ErrorSaveNode armed for this call.
+    let esc = unsafe { fcinfo.error_save_node() };
+    typcache_seams::domain_check_input::call(
+        value,
+        string.is_none(),
+        domainType,
+        esc.map(|n| &mut n.ctx),
+    )?;
 
     if string.is_none() {
         fcinfo.isnull = true;
@@ -95,6 +100,21 @@ pub fn fc_domain_in(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRes
 
 pub fn fc_domain_recv(_flinfo: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     panic!("domain_recv (domains.c): binary input lane unported — unit backend-utils-adt-misc2");
+}
+
+// C's extra/mcxt per-callsite memo collapses into the engine's per-domain memo.
+pub fn domain_check(value: Datum, isnull: bool, domainType: Oid) -> PgResult<()> {
+    typcache_seams::domain_check_input::call(value, isnull, domainType, None)
+}
+
+pub fn domain_check_safe(
+    value: Datum,
+    isnull: bool,
+    domainType: Oid,
+    escontext: &mut types_error::SoftErrorContext,
+) -> PgResult<bool> {
+    typcache_seams::domain_check_input::call(value, isnull, domainType, Some(escontext))?;
+    Ok(!escontext.error_occurred())
 }
 
 pub const DOMAINS_BUILTINS: &[FmgrBuiltin] = &[
@@ -115,3 +135,38 @@ pub const DOMAINS_BUILTINS: &[FmgrBuiltin] = &[
         func: fc_domain_recv,
     },
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use types_error::SoftErrorContext;
+
+    fn fake_check(
+        value: Datum,
+        isnull: bool,
+        _domain_type: Oid,
+        escontext: Option<&mut SoftErrorContext>,
+    ) -> PgResult<()> {
+        if isnull || value.as_i32() < 0 {
+            let err = PgError::error("value for domain d violates check constraint")
+                .with_sqlstate(types_error::ERRCODE_CHECK_VIOLATION);
+            return types_error::ereturn(escontext, (), err);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn check_and_check_safe() {
+        typcache_seams::domain_check_input::set(fake_check);
+        assert!(domain_check(Datum::from_i32(7), false, 1).is_ok());
+        assert!(domain_check(Datum::from_i32(-1), false, 1).is_err());
+
+        let mut esc = SoftErrorContext::new(true);
+        assert!(domain_check_safe(Datum::from_i32(7), false, 1, &mut esc).unwrap());
+        let mut esc = SoftErrorContext::new(true);
+        assert!(!domain_check_safe(Datum::from_i32(-1), false, 1, &mut esc).unwrap());
+        assert!(esc.error_occurred());
+        let mut esc = SoftErrorContext::new(false);
+        assert!(!domain_check_safe(Datum::null(), true, 1, &mut esc).unwrap());
+    }
+}

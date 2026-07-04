@@ -24,6 +24,7 @@ pub(crate) fn matchLocks(
     event: CmdType,
     rules: &[RewriteRuleMeta],
     varno: i32,
+    rel_name: &str,
     parsetree: &Query<'_>,
     has_update: &mut bool,
 ) -> PgResult<Vec<usize>> {
@@ -43,6 +44,13 @@ pub(crate) fn matchLocks(
             debug_assert!(
                 rule.enabled == RULE_FIRES_ON_ORIGIN || rule.enabled == RULE_FIRES_ALWAYS
             );
+            if parsetree.commandType == CmdType::CMD_MERGE {
+                return Err(Box::new(
+                    PgError::error(format!("cannot execute MERGE on relation \"{rel_name}\""))
+                        .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED)
+                        .with_detail("MERGE is not supported for relations with rules."),
+                ));
+            }
         }
         if rule.event == event as i32 {
             matching.push(i);

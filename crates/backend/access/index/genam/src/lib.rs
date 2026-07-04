@@ -445,12 +445,9 @@ pub fn BuildIndexValueDescription<'mcx>(
         .expect("BuildIndexValueDescription on non-index relation");
     let indrelid = idxrec.indrelid;
 
-    // check_enable_rls (rls.c) is unported; relrowsecurity=false is its
-    // RLS_NONE outcome (a set flag hides the detail even from owners).
-    let heap = relation_seams::relation_open::call(mcx, indrelid, NoLock)?;
-    let rls_enabled = heap.rd_rel.relrowsecurity;
-    heap.close(NoLock)?;
-    if rls_enabled {
+    if rls_seams::check_enable_rls::call(indrelid, types_core::InvalidOid, true)?
+        == rls_seams::CheckEnableRls::RlsEnabled
+    {
         return Ok(None);
     }
 

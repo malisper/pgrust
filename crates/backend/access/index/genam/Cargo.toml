@@ -18,6 +18,7 @@ heapam = { path = "../../heap/heapam" }
 indexam = { path = "../indexam" }
 genam_seams = { path = "../genam_seams" }
 relation_seams = { path = "../../common/relation_seams" }
+rls_seams = { path = "../../../utils/misc/rls_seams" }
 tableam = { path = "../../table/tableam" }
 exectuples = { path = "../../../executor/exectuples" }
 heaptuple = { path = "../../common/heaptuple" }

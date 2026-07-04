@@ -201,8 +201,10 @@ fn have_relevant_joinclause(run: &PlannerRun<'_>, rel1: RelId, rel2: RelId) -> b
 }
 
 // is_dummy_rel (joinrels.c). C's dummy marker is a childless Append; ours is
-// a GroupResultPath (allpaths.rs set_dummy_rel_pathlist), which also fronts
-// the trivial RTE_RESULT rel — no current caller can see that rel.
+// a GroupResultPath whose single qual is constant FALSE (allpaths.rs
+// set_dummy_rel_pathlist). A quals-free GroupResultPath fronts a live no-FROM
+// result rel (set_subquery_pathlist's final rel under an unflattenable SRF
+// subquery) and must not read as dummy.
 pub fn is_dummy_rel(root: &types_pathnodes::PlannerInfo<'_>, rel: RelId) -> bool {
     let Some(&first) = root.rel(rel).pathlist.first() else { return false };
     let mut path = root.path(first);
@@ -217,7 +219,14 @@ pub fn is_dummy_rel(root: &types_pathnodes::PlannerInfo<'_>, rel: RelId) -> bool
             _ => break,
         }
     }
-    matches!(path, types_pathnodes::PathNode::GroupResultPath(_))
+    let types_pathnodes::PathNode::GroupResultPath(g) = path else {
+        return false;
+    };
+    g.quals.len() == 1
+        && matches!(
+            root.expr_node(g.quals[0]).as_const(),
+            Some(c) if !c.constisnull && !c.constvalue.as_bool()
+        )
 }
 
 pub fn make_join_rel(

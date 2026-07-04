@@ -8,13 +8,12 @@ publish.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+datum = { path = "../../../_support/types/datum" }
+detoast = { path = "../../access/common/detoast" }
+exectuples = { path = "../exectuples" }
+mcx = { path = "../../../_support/mcx" }
 types_error = { path = "../../../_support/types/types_error" }
 types_portal = { path = "../../../_support/types/portal" }
 types_slot = { path = "../../../_support/types/types_slot" }
 types_tuple = { path = "../../../_support/types/types_tuple" }
 tuplestore = { path = "../../utils/sort/tuplestore" }
-
-[dev-dependencies]
-datum = { path = "../../../_support/types/datum" }
-exectuples = { path = "../exectuples" }
-mcx = { path = "../../../_support/mcx" }

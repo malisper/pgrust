@@ -1,8 +1,8 @@
 // nodeProjectSet.c + execSRF.c's ExecMakeFunctionResultSet half
-// (ValuePerCall only; SFRM_Materialize results and set-returning operators
-// are loud).
+// (set-returning operators are loud).
 
 use std::ptr::NonNull;
+use std::rc::Rc;
 
 use ::datum::Datum;
 use ::execexpr::{exec_eval_expr, exec_init_expr, EvalSlots, ExprState};
@@ -23,13 +23,18 @@ use crate::typefromtl::exec_type_from_tl;
 
 const PROJECT_SET_MAX_ARGS: usize = 4;
 
-// SetExprState (ValuePerCall slice); args_valid is C's setArgsValid.
+// SetExprState; args_valid is C's setArgsValid, result_desc/result_slot/
+// result_store are funcResultDesc/funcResultSlot/funcResultStore.
 struct SrfElem<'mcx> {
     flinfo: FmgrInfo,
     args: PgVec<'mcx, PgBox<'mcx, ExprState<'mcx>>>,
     fcinfo: LocalFcinfo<PROJECT_SET_MAX_ARGS>,
     rsinfo: ReturnSetInfo,
     args_valid: bool,
+    result_desc: Option<Rc<::types_tuple::TupleDescData<'mcx>>>,
+    returns_tuple: bool,
+    result_slot: Option<::types_slot::SlotData<'mcx>>,
+    result_store: Option<::tuplestore::Tuplestore>,
 }
 
 enum Elem<'mcx> {
@@ -100,12 +105,51 @@ pub fn exec_init_project_set<'mcx>(
                 debug_assert!(flinfo.fn_retset);
                 let mut fcinfo = LocalFcinfo::<PROJECT_SET_MAX_ARGS>::new(fe.inputcollid);
                 fcinfo.nargs = fe.args.len() as i16;
+                let resolved = funcapi::get_expr_result_type(mcx, Some(expr))?;
+                let (result_desc, returns_tuple) = match resolved.class {
+                    funcapi::TypeFuncClass::Composite
+                    | funcapi::TypeFuncClass::CompositeDomain => (
+                        Some(Rc::new(resolved.result_tuple_desc.unwrap_or_else(|| {
+                            panic!("init_sexpr (execSRF.c): composite result without tupdesc")
+                        }))),
+                        true,
+                    ),
+                    funcapi::TypeFuncClass::Scalar => {
+                        let mut d = tupdesc::CreateTemplateTupleDesc(mcx, 1)?;
+                        tupdesc::TupleDescInitEntry(
+                            &mut d,
+                            1,
+                            None,
+                            resolved.result_type_id,
+                            -1,
+                            0,
+                        )?;
+                        tupdesc::TupleDescInitEntryCollation(
+                            &mut d,
+                            1,
+                            ::execscan::expr_collation(expr),
+                        );
+                        (Some(Rc::new(d)), false)
+                    }
+                    _ => (None, false),
+                };
+                let result_slot = result_desc.as_ref().map(|d| {
+                    ::exectuples::make_tuple_table_slot(
+                        mcx,
+                        TupleSlotKind::MinimalTuple,
+                        Some(d.clone()),
+                    )
+                });
                 Elem::Srf(SrfElem {
                     flinfo,
                     args,
                     fcinfo,
                     rsinfo: ReturnSetInfo::new(SFRM_ValuePerCall | SFRM_Materialize),
                     args_valid: false,
+                    result_desc,
+                    returns_tuple,
+                    result_slot,
+                    result_store: None,
                 })
             }
             _ => Elem::Scalar(
@@ -187,7 +231,7 @@ fn exec_project_srf<'mcx>(
                         (Datum::null(), true)
                     } else {
                         let (v, vnull, isdone) =
-                            exec_make_function_result_set(srf, slots, per_tuple)?;
+                            exec_make_function_result_set(srf, slots, per_tuple, mcx)?;
                         elemdone[i] = isdone;
                         if isdone != ExprDoneCond::ExprEndResult {
                             hasresult = true;
@@ -218,12 +262,44 @@ fn exec_project_srf<'mcx>(
     })
 }
 
-/// `ExecMakeFunctionResultSet` (execSRF.c), ValuePerCall arm.
+// C's "restart:" store-read leg: pop the next materialized row, or clear the
+// exhausted store.
+fn read_result_store<'mcx>(
+    srf: &mut SrfElem<'mcx>,
+    per_tuple: Mcx<'_>,
+    query_mcx: Mcx<'mcx>,
+) -> PgResult<(Datum, bool, ExprDoneCond)> {
+    let store = srf.result_store.as_mut().expect("caller checked");
+    let slot = srf
+        .result_slot
+        .as_mut()
+        .expect("materialize SRF result without a resolved result tupdesc");
+    if store.gettupleslot(true, false, slot, query_mcx)? {
+        if srf.returns_tuple {
+            let d = ::exectuples::exec_fetch_slot_heap_tuple_datum(slot, query_mcx, per_tuple)?;
+            Ok((d, false, ExprDoneCond::ExprMultipleResult))
+        } else {
+            let mut isnull = false;
+            let d = ::exectuples::slot_getattr(slot, 1, &mut isnull);
+            Ok((d, isnull, ExprDoneCond::ExprMultipleResult))
+        }
+    } else {
+        srf.result_store = None;
+        Ok((Datum::null(), true, ExprDoneCond::ExprEndResult))
+    }
+}
+
+/// `ExecMakeFunctionResultSet` (execSRF.c).
 fn exec_make_function_result_set<'mcx>(
     srf: &mut SrfElem<'mcx>,
     slots: &mut EvalSlots<'_, 'mcx>,
     per_tuple: Mcx<'_>,
+    query_mcx: Mcx<'mcx>,
 ) -> PgResult<(Datum, bool, ExprDoneCond)> {
+    if srf.result_store.is_some() {
+        return read_result_store(srf, per_tuple, query_mcx);
+    }
+
     if !srf.args_valid {
         for i in 0..srf.args.len() {
             let nd = exec_eval_expr(&mut srf.args[i], slots)?;
@@ -243,6 +319,12 @@ fn exec_make_function_result_set<'mcx>(
     }
 
     srf.fcinfo.resultinfo = srf.rsinfo.as_fmnode_ptr();
+    // SAFETY: Rc keeps the desc image stable while the rsinfo aliases it for
+    // this call.
+    srf.rsinfo.expectedDesc = srf
+        .result_desc
+        .as_ref()
+        .map(|d| NonNull::from(&**d).cast::<core::ffi::c_void>());
     // SAFETY: re-armed before every invoke; the per-tuple context outlives
     // the call and its result is consumed before the next reset.
     unsafe { srf.fcinfo.set_result_mcx(per_tuple) };
@@ -262,11 +344,32 @@ fn exec_make_function_result_set<'mcx>(
             }
             Ok((result, srf.fcinfo.isnull, isdone))
         }
-        SetFunctionReturnMode::Materialize => panic!(
-            "ExecMakeFunctionResultSet (execSRF.c): SFRM_Materialize function result \
-             — tuplestore-returning SRFs unported"
-        ),
+        SetFunctionReturnMode::Materialize => {
+            if srf.rsinfo.isDone != ExprDoneCond::ExprSingleResult || !srf.flinfo.fn_retset {
+                return Err(materialize_violated());
+            }
+            match srf.rsinfo.setResult.take() {
+                Some(set_result) => {
+                    let mut store = *set_result
+                        .downcast::<::tuplestore::Tuplestore>()
+                        .expect("rsinfo.setResult downcasts to Tuplestore");
+                    store.rescan();
+                    srf.result_store = Some(store);
+                    read_result_store(srf, per_tuple, query_mcx)
+                }
+                None => Ok((Datum::null(), true, ExprDoneCond::ExprEndResult)),
+            }
+        }
     }
+}
+
+#[cold]
+#[inline(never)]
+fn materialize_violated() -> Box<PgError> {
+    Box::new(
+        PgError::error("table-function protocol for materialize mode was not followed")
+            .with_sqlstate(ERRCODE_E_R_I_E_SRF_PROTOCOL_VIOLATED),
+    )
 }
 
 #[cold]
@@ -296,6 +399,7 @@ pub fn exec_re_scan_project_set_local(node: &mut ProjectSetState<'_>) {
         if let Elem::Srf(srf) = elem {
             srf.args_valid = false;
             srf.flinfo.fn_extra = None;
+            srf.result_store = None;
             elemdone[i] = ExprDoneCond::ExprSingleResult;
         }
     }

@@ -127,6 +127,28 @@ pub struct ReturningClause<'mcx> {
     pub exprs: NodeList<'mcx>,
 }
 
+/// `relation` is a RangeVar node; `sourceRelation` a table_ref;
+/// `mergeWhenClauses` cells are MergeWhenClause.
+#[derive(Default)]
+pub struct MergeStmt<'mcx> {
+    pub relation: Option<Node<'mcx>>,
+    pub sourceRelation: Option<Node<'mcx>>,
+    pub joinCondition: Option<Node<'mcx>>,
+    pub mergeWhenClauses: NodeList<'mcx>,
+    pub returningClause: Option<Node<'mcx>>,
+    pub withClause: Option<Node<'mcx>>,
+}
+
+#[derive(Default)]
+pub struct MergeWhenClause<'mcx> {
+    pub matchKind: crate::primnodes::MergeMatchKind,
+    pub commandType: crate::nodes_enums::CmdType,
+    pub r#override: crate::primnodes::OverridingKind,
+    pub condition: Option<Node<'mcx>>,
+    pub targetList: NodeList<'mcx>,
+    pub values: NodeList<'mcx>,
+}
+
 /// `infer` is an InferClause node; `targetList` cells are ResTarget.
 #[derive(Default)]
 pub struct OnConflictClause<'mcx> {
@@ -230,6 +252,27 @@ pub struct ParamRef {
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct A_Star;
+
+#[derive(Default)]
+pub struct A_Indices<'mcx> {
+    pub is_slice: bool,
+    pub lidx: Option<Node<'mcx>>,
+    pub uidx: Option<Node<'mcx>>,
+}
+
+#[derive(Default)]
+pub struct A_Indirection<'mcx> {
+    pub arg: Option<Node<'mcx>>,
+    pub indirection: NodeList<'mcx>,
+}
+
+#[derive(Default)]
+pub struct A_ArrayExpr<'mcx> {
+    pub elements: NodeList<'mcx>,
+    pub list_start: ParseLoc,
+    pub list_end: ParseLoc,
+    pub location: ParseLoc,
+}
 
 #[derive(Default)]
 pub struct SortBy<'mcx> {
@@ -721,6 +764,12 @@ unsafe impl<'mcx> NodeVariant<'mcx> for InsertStmt<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for ReturningClause<'mcx> {
     const TAG: NodeTag = NodeTag::T_ReturningClause;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for MergeStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_MergeStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for MergeWhenClause<'mcx> {
+    const TAG: NodeTag = NodeTag::T_MergeWhenClause;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for OnConflictClause<'mcx> {
     const TAG: NodeTag = NodeTag::T_OnConflictClause;
 }
@@ -753,6 +802,15 @@ unsafe impl NodeVariant<'_> for ParamRef {
 }
 unsafe impl NodeVariant<'_> for A_Star {
     const TAG: NodeTag = NodeTag::T_A_Star;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for A_Indices<'mcx> {
+    const TAG: NodeTag = NodeTag::T_A_Indices;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for A_Indirection<'mcx> {
+    const TAG: NodeTag = NodeTag::T_A_Indirection;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for A_ArrayExpr<'mcx> {
+    const TAG: NodeTag = NodeTag::T_A_ArrayExpr;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for SortBy<'mcx> {
     const TAG: NodeTag = NodeTag::T_SortBy;
@@ -845,6 +903,69 @@ unsafe impl<'mcx> NodeVariant<'mcx> for StatsElem<'mcx> {
     const TAG: NodeTag = NodeTag::T_StatsElem;
 }
 
+// timing/events use the TRIGGER_TYPE bits of catalog/pg_trigger.h.
+#[derive(Default)]
+pub struct CreateTrigStmt<'mcx> {
+    pub replace: bool,
+    pub isconstraint: bool,
+    pub trigname: Option<&'mcx str>,
+    pub relation: Option<&'mcx crate::primnodes::RangeVar<'mcx>>,
+    pub funcname: NodeList<'mcx>,
+    pub args: NodeList<'mcx>,
+    pub row: bool,
+    pub timing: i16,
+    pub events: i16,
+    pub columns: NodeList<'mcx>,
+    pub whenClause: Option<Node<'mcx>>,
+    pub transitionRels: NodeList<'mcx>,
+    pub deferrable: bool,
+    pub initdeferred: bool,
+    pub constrrel: Option<&'mcx crate::primnodes::RangeVar<'mcx>>,
+}
+
+#[derive(Default)]
+pub struct TriggerTransition<'mcx> {
+    pub name: Option<&'mcx str>,
+    pub isNew: bool,
+    pub isTable: bool,
+}
+
+#[derive(Default)]
+pub struct ConstraintsSetStmt<'mcx> {
+    pub constraints: NodeList<'mcx>,
+    pub deferred: bool,
+}
+
+unsafe impl<'mcx> NodeVariant<'mcx> for CreateTrigStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CreateTrigStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for TriggerTransition<'mcx> {
+    const TAG: NodeTag = NodeTag::T_TriggerTransition;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for ConstraintsSetStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_ConstraintsSetStmt;
+}
+
+#[derive(Default)]
+pub struct CreateExtensionStmt<'mcx> {
+    pub extname: Option<&'mcx str>,
+    pub if_not_exists: bool,
+    pub options: NodeList<'mcx>,
+}
+
+#[derive(Default)]
+pub struct AlterExtensionStmt<'mcx> {
+    pub extname: Option<&'mcx str>,
+    pub options: NodeList<'mcx>,
+}
+
+unsafe impl<'mcx> NodeVariant<'mcx> for CreateExtensionStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_CreateExtensionStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for AlterExtensionStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_AlterExtensionStmt;
+}
+
 impl<'mcx> Node<'mcx> {
     pub fn mk_raw_stmt(
         mcx: Mcx<'mcx>,
@@ -931,6 +1052,16 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_on_conflict_clause(self) -> Option<&'mcx OnConflictClause<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_merge_stmt(self) -> Option<&'mcx MergeStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_merge_when_clause(self) -> Option<&'mcx MergeWhenClause<'mcx>> {
         self.as_variant()
     }
 
@@ -1047,6 +1178,36 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_create_domain_stmt(self) -> Option<&'mcx CreateDomainStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_create_trig_stmt(self) -> Option<&'mcx CreateTrigStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_a_indices(self) -> Option<&'mcx A_Indices<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_trigger_transition(self) -> Option<&'mcx TriggerTransition<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_a_indirection(self) -> Option<&'mcx A_Indirection<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_constraints_set_stmt(self) -> Option<&'mcx ConstraintsSetStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_a_array_expr(self) -> Option<&'mcx A_ArrayExpr<'mcx>> {
         self.as_variant()
     }
 }

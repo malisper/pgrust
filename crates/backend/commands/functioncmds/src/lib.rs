@@ -366,10 +366,29 @@ fn interpret_AS_clause<'a>(
             ERRCODE_INVALID_FUNCTION_DEFINITION,
         ));
     };
-    if languageOid == ClanguageId {
-        unported("LANGUAGE c (probin/dlopen)");
-    }
     let items = as_item.arg.expect("AS DefElem arg").as_list().expect("func_as is a List");
+    if languageOid == ClanguageId {
+        // File name in probin, link symbol in prosrc; omitted or "-" symbol
+        // substitutes the function name.
+        let mut it = items.iter();
+        let probin = it
+            .next()
+            .and_then(|n| n.as_string())
+            .expect("func_as items are Strings")
+            .sval;
+        let prosrc = match it.next() {
+            None => funcname,
+            Some(n) => {
+                let s = n.as_string().expect("func_as items are Strings").sval;
+                if s == "-" {
+                    funcname
+                } else {
+                    s
+                }
+            }
+        };
+        return Ok(AsClause { prosrc, probin: Some(probin) });
+    }
     if items.len() != 1 {
         return Err(err(
             format!("only one AS item needed for language \"{languageName}\""),
@@ -485,9 +504,9 @@ pub fn CreateFunction<'mcx>(
     cache_syscache::ReleaseSysCache(lang_tuple);
 
     if languageOid != SQLlanguageId && languageOid != INTERNALlanguageId
-        && language != "plpgsql"
+        && languageOid != ClanguageId && language != "plpgsql"
     {
-        unported("languages beyond sql, internal and plpgsql (c, ...)");
+        unported("languages beyond sql, internal, c and plpgsql");
     }
 
     if lanpltrusted {
@@ -586,4 +605,43 @@ pub fn CreateFunction<'mcx>(
             prorows,
         },
     )
+}
+
+// Guts of function deletion (functioncmds.c RemoveFunctionById); aggregates
+// and per-function pgstat drop are loud/no-op until their lanes land.
+pub fn RemoveFunctionById<'mcx>(mcx: Mcx<'mcx>, funcOid: Oid) -> PgResult<()> {
+    const Anum_pg_proc_prokind: i32 = 21;
+    const PROKIND_AGGREGATE: i8 = b'a' as i8;
+
+    let relation = table::table_open(
+        mcx,
+        types_core::PROCEDURE_RELATION_ID,
+        types_rel::RowExclusiveLock,
+    )?;
+    let mut key = types_scan::scankey::ScanKeyData::empty();
+    key.sk_attno = 1;
+    key.sk_strategy = types_scan::scankey::BTEqualStrategyNumber;
+    key.sk_collation = 0;
+    key.sk_func = fmgr_seams::fmgr_info::call(types_core::fmgr::F_OIDEQ)
+        .unwrap_or_else(|e| panic!("fmgr_info(F_OIDEQ) failed: {e:?}"));
+    key.sk_argument = datum::Datum::from_oid(funcOid);
+    let mut scan =
+        genam::systable_beginscan(mcx, &relation, pg_proc::ProcedureOidIndexId, true, None, &[key])?;
+    let tup = genam::systable_getnext(mcx, &mut scan)?
+        .unwrap_or_else(|| panic!("cache lookup failed for function {funcOid}"));
+    let tid = tup.t_self;
+    let mut isnull = false;
+    // SAFETY: prokind is a fixed NOT NULL pg_proc column.
+    let prokind = unsafe {
+        types_tuple::heap_getattr(tup, Anum_pg_proc_prokind, relation.descr(), &mut isnull)
+    }
+    .as_i8();
+    catalog_indexing::CatalogTupleDelete(&relation, &tid)?;
+    genam::systable_endscan(mcx, scan)?;
+    relation.close(types_rel::RowExclusiveLock)?;
+    // pgstat_drop_function: skipped (per-function stats unported).
+    if prokind == PROKIND_AGGREGATE {
+        unported("RemoveFunctionById: pg_aggregate tuple deletion (aggregate DDL lane)");
+    }
+    Ok(())
 }

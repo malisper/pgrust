@@ -70,6 +70,7 @@ pub const JOIN_UNIQUE_INNER: JoinType = 9;
 
 pub type RTEKind = u32;
 pub const RTE_RELATION: RTEKind = 0;
+pub const RTE_SUBQUERY: RTEKind = 1;
 pub const RTE_FUNCTION: RTEKind = 3;
 pub const RTE_VALUES: RTEKind = 5;
 pub const RTE_CTE: RTEKind = 6;
@@ -913,7 +914,7 @@ pub struct ModifyTablePath<'mcx> {
     pub onconflict: Option<NodeId>,
     pub epqParam: i32,
     pub mergeActionLists: PgVec<'mcx, PgVec<'mcx, NodeId>>,
-    pub mergeJoinConditions: PgVec<'mcx, PgVec<'mcx, NodeId>>,
+    pub mergeJoinConditions: PgVec<'mcx, Option<NodeId>>,
 }
 
 #[derive(Clone, Debug)]

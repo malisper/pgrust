@@ -15,6 +15,7 @@ types_fmgr = { path = "../../../../_support/types/fmgr" }
 funcapi = { path = "../../fmgr/funcapi" }
 varlena = { path = "../varlena" }
 acl_seams = { path = "../acl_seams" }
+catalog_seams = { path = "../../../catalog/catalog_seams" }
 
 init_small = { path = "../../init/init_small" }
 miscinit = { path = "../../init/miscinit" }

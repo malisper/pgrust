@@ -76,7 +76,7 @@ impl<const N: usize> BuiltinOidIndex<N> {
 // Builtin tables from crates that sit above fmgr_core in the crate graph
 // (adt_acl needs syscache). Consulted only where the entry would otherwise
 // panic as unported; fn metadata still comes from the canonical row.
-const MAX_LATE_TABLES: usize = 16;
+const MAX_LATE_TABLES: usize = 32;
 static LATE_TABLE_PTR: [core::sync::atomic::AtomicPtr<FmgrBuiltin>; MAX_LATE_TABLES] =
     [const { core::sync::atomic::AtomicPtr::new(core::ptr::null_mut()) }; MAX_LATE_TABLES];
 static LATE_TABLE_LEN: [core::sync::atomic::AtomicUsize; MAX_LATE_TABLES] =
@@ -388,16 +388,22 @@ fn fmgr_info_pg_proc(function_id: Oid, finfo: &mut FmgrInfo) -> PgResult<()> {
         }
         C_LANGUAGE_ID => {
             // fmgr_info_C_lang: the dlopen'd symbol is the prosrc name;
-            // resolve against the registered PL entry points.
+            // resolve against the registered PL entry points, then the
+            // in-process ported-library registry keyed by probin (dfmgr).
             let cx = ::mcx::MemoryContext::new("fmgr_info prosrc");
             let prosrc = syscache_seams::lookup_pg_proc_prosrc::call(cx.mcx(), function_id)?
                 .unwrap_or_else(|| panic!("fmgr: null prosrc for function {function_id}"));
             match registered_c_lang_fn(&prosrc) {
                 Some(f) => f,
-                None => panic!(
-                    "fmgr: C-language function \"{}\" not registered (function {function_id})",
-                    prosrc.as_str()
-                ),
+                None => {
+                    let probin =
+                        syscache_seams::lookup_pg_proc_probin::call(cx.mcx(), function_id)?
+                            .unwrap_or_else(|| {
+                                panic!("fmgr: null probin for C function {function_id}")
+                            });
+                    ::dfmgr::load_external_function(&probin, &prosrc, true)?
+                        .expect("signal_not_found=true returned no function")
+                }
             }
         }
         lang => {

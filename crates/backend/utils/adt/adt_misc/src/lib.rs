@@ -222,6 +222,63 @@ pub fn fc_pg_typeof(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRes
     Ok(Datum::from_oid(funcapi::get_fn_expr_argtype(flinfo.as_deref(), 0)))
 }
 
+pub fn fc_current_query(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    match elog::sink::backend_log_context().and_then(|c| c.query_string()) {
+        Some(q) => {
+            let mcx = fcinfo.result_mcx();
+            text_datum(mcx, q.as_bytes())
+        }
+        None => Ok(fcinfo.return_null()),
+    }
+}
+
+pub fn fc_pg_basetype(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    const TYPTYPE_DOMAIN: i8 = b'd' as i8;
+    let mut typid = fcinfo.arg(0).as_oid();
+    loop {
+        match syscache_seams::pg_type_base_shape::call(typid)? {
+            None => return Ok(fcinfo.return_null()),
+            Some(t) if t.typtype != TYPTYPE_DOMAIN => return Ok(Datum::from_oid(typid)),
+            Some(t) => typid = t.typbasetype,
+        }
+    }
+}
+
+pub fn fc_pg_sleep(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    use types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_TIMEOUT};
+    const WAIT_EVENT_PG_SLEEP: u32 = waitevent::PG_WAIT_TIMEOUT | 2;
+    let secs = fcinfo.arg(0).as_f64();
+    let now = || timestamp_seams::get_current_timestamp::call() as f64 / 1_000_000.0;
+    // Stop time computed once: no delay accumulation across wakeups (C shape).
+    let endtime = now() + secs;
+    loop {
+        postgres_seams::check_for_interrupts::call()?;
+        let delay = endtime - now();
+        let delay_ms: i64 = if delay >= 600.0 {
+            600_000
+        } else if delay > 0.0 {
+            (delay * 1000.0).ceil() as i64
+        } else {
+            break;
+        };
+        latch_seams::wait_latch_my_latch::call(
+            WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
+            delay_ms,
+            WAIT_EVENT_PG_SLEEP,
+        );
+        latch_seams::reset_latch_my_latch::call();
+    }
+    Ok(Datum::null())
+}
+
+pub fn fc_any_value_transfn(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    fcinfo.isnull = fcinfo.args[0].isnull;
+    Ok(fcinfo.arg(0))
+}
+
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin { foid, name, nargs, strict: true, retset: false, func }
 }
@@ -236,4 +293,8 @@ pub const MISC_BUILTINS: &[FmgrBuiltin] = &[
     b(1619, "pg_typeof", 1, fc_pg_typeof),
     b(6210, "pg_input_is_valid", 2, fc_pg_input_is_valid),
     b(6211, "pg_input_error_info", 2, fc_pg_input_error_info),
+    bn(817, "current_query", 0, fc_current_query),
+    b(2626, "pg_sleep", 1, fc_pg_sleep),
+    b(6292, "any_value_transfn", 2, fc_any_value_transfn),
+    b(6315, "pg_basetype", 1, fc_pg_basetype),
 ];

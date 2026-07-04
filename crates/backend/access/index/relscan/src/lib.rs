@@ -60,6 +60,19 @@ impl IndexAmKind {
         }
     }
 
+    pub const fn amsearcharray(self) -> bool {
+        match self {
+            IndexAmKind::Btree => true,
+            IndexAmKind::Hash => false,
+            IndexAmKind::Gin => true,
+            IndexAmKind::Gist => false,
+            IndexAmKind::Spgist => false,
+            IndexAmKind::Brin => false,
+            #[cfg(feature = "mock")]
+            IndexAmKind::Mock => false,
+        }
+    }
+
     pub const fn has_ammarkpos(self) -> bool {
         match self {
             IndexAmKind::Btree => true,
@@ -295,6 +308,46 @@ impl<'mcx> IndexFetchTableData<'mcx> {
     }
 }
 
+/// Heap-readahead state for plain index scans (upstream index-prefetching
+/// series, CF 4351, adapted). Advisory only: issuance never changes what the
+/// scan reads, only when the kernel sees the block coming. Dormant (`!active`)
+/// until the scan proves it does real I/O — warm scans pay one block compare
+/// per heap-block switch and nothing else.
+#[derive(Clone, Copy, Debug)]
+pub struct IndexPrefetchState {
+    /// shared_blks_read snapshot at first block switch; delta > 0 arms issuance.
+    pub read_base: u64,
+    pub last_block: u32,
+    pub last_issued: u32,
+    /// Leaf page + item cursor the issuance walk has covered.
+    pub leaf_page: u32,
+    pub issued_idx: i32,
+    pub distance: u16,
+    pub inflight: u16,
+    pub switches: u16,
+    pub cached_streak: u16,
+    pub active: bool,
+}
+
+impl IndexPrefetchState {
+    pub const fn reset() -> Self {
+        IndexPrefetchState {
+            read_base: 0,
+            last_block: u32::MAX,
+            last_issued: u32::MAX,
+            leaf_page: u32::MAX,
+            issued_idx: 0,
+            distance: 0,
+            inflight: 0,
+            switches: 0,
+            cached_streak: 0,
+            active: false,
+        }
+    }
+}
+
+const _: () = assert!(!core::mem::needs_drop::<IndexPrefetchState>());
+
 // Trimmed to the amgettuple shape; a rule-3 by-value resource owner.
 pub struct IndexScanDescData<'mcx> {
     pub heapRelation: Option<Relation<'mcx>>,
@@ -321,6 +374,7 @@ pub struct IndexScanDescData<'mcx> {
     pub xs_heap_continue: bool,
     pub xs_heapfetch: Option<IndexFetchTableData<'mcx>>,
     pub xs_recheck: bool,
+    pub xs_prefetch: IndexPrefetchState,
 
     pub xs_pgstat_index_tuples: u64,
     pub xs_pgstat_heap_fetches: u64,
@@ -368,6 +422,7 @@ pub fn relation_get_index_scan<'mcx>(
         xs_heap_continue: false,
         xs_heapfetch: None,
         xs_recheck: false,
+        xs_prefetch: IndexPrefetchState::reset(),
         xs_pgstat_index_tuples: 0,
         xs_pgstat_heap_fetches: 0,
         xs_pgstat_index_scans: 0,

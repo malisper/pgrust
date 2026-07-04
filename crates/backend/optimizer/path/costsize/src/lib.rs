@@ -148,19 +148,28 @@ fn cost_qual_eval_walker(node: Node<'_>, cost: &mut QualCost) -> PgResult<()> {
             } else {
                 sa.opfuncid
             };
-            if sa.hashfuncid != 0 {
-                panic!("cost_qual_eval_walker (costsize.c): hashed SAOP; M2 lane");
-            }
             let arraynode = sa.args.nth(1);
             let mut sacosts = QualCost {
                 startup: 0.0,
                 per_tuple: 0.0,
             };
             planner_seams::add_function_cost::call(opfuncid, &mut sacosts)?;
-            // C: the operator runs against about half the array elements.
-            cost.startup += sacosts.startup;
-            cost.per_tuple +=
-                sacosts.per_tuple * planner_seams::estimate_array_length::call(arraynode) * 0.5;
+            if sa.hashfuncid != 0 {
+                // Hashed SAOP: build the table at startup, then one hash +
+                // one comparison per tuple.
+                let mut hcosts = QualCost { startup: 0.0, per_tuple: 0.0 };
+                planner_seams::add_function_cost::call(sa.hashfuncid, &mut hcosts)?;
+                cost.startup += sacosts.startup + hcosts.startup;
+                cost.startup +=
+                    planner_seams::estimate_array_length::call(arraynode) * hcosts.per_tuple;
+                cost.per_tuple += hcosts.per_tuple + sacosts.per_tuple;
+            } else {
+                // C: the operator runs against about half the array elements.
+                cost.startup += sacosts.startup;
+                cost.per_tuple += sacosts.per_tuple
+                    * planner_seams::estimate_array_length::call(arraynode)
+                    * 0.5;
+            }
             for arg in sa.args.iter() {
                 cost_qual_eval_walker(arg, cost)?;
             }
@@ -168,6 +177,23 @@ fn cost_qual_eval_walker(node: Node<'_>, cost: &mut QualCost) -> PgResult<()> {
         }
         NodeTag::T_ArrayExpr => {
             for e in node.as_array_expr().unwrap().elements.iter() {
+                cost_qual_eval_walker(e, cost)?;
+            }
+            Ok(())
+        }
+        // SubscriptingRef carries no per-node charge in C; recurse.
+        NodeTag::T_SubscriptingRef => {
+            let sr = node.as_subscripting_ref().unwrap();
+            for e in sr.refupperindexpr.iter().flatten() {
+                cost_qual_eval_walker(e, cost)?;
+            }
+            for e in sr.reflowerindexpr.iter().flatten() {
+                cost_qual_eval_walker(e, cost)?;
+            }
+            if let Some(e) = sr.refexpr {
+                cost_qual_eval_walker(e, cost)?;
+            }
+            if let Some(e) = sr.refassgnexpr {
                 cost_qual_eval_walker(e, cost)?;
             }
             Ok(())
@@ -1055,10 +1081,15 @@ pub fn cost_agg_shape(
         startup_cost += aggcosts.finalCost.per_tuple;
         total_cost = startup_cost + gucs::cpu_tuple_cost();
         output_tuples = 1.0;
-    } else if aggstrategy == types_pathnodes::AGG_SORTED {
+    } else if aggstrategy == types_pathnodes::AGG_SORTED
+        || aggstrategy == types_pathnodes::AGG_MIXED
+    {
         // Output is delivered on-the-fly, one group at a time.
         startup_cost = input_startup_cost;
         total_cost = input_total_cost;
+        if aggstrategy == types_pathnodes::AGG_MIXED && !gucs::enable_hashagg() {
+            disabled_nodes += 1;
+        }
         total_cost += aggcosts.transCost.startup;
         total_cost += aggcosts.transCost.per_tuple * input_tuples;
         total_cost += gucs::cpu_operator_cost() * num_group_cols as f64 * input_tuples;
@@ -1080,10 +1111,10 @@ pub fn cost_agg_shape(
         total_cost += gucs::cpu_tuple_cost() * num_groups;
         output_tuples = num_groups;
     } else {
-        panic!("cost_agg (costsize.c): AGG_MIXED; M3 grouping-sets lane");
+        unreachable!("cost_agg (costsize.c): aggstrategy {aggstrategy}");
     }
 
-    if aggstrategy == types_pathnodes::AGG_HASHED {
+    if aggstrategy == types_pathnodes::AGG_HASHED || aggstrategy == types_pathnodes::AGG_MIXED {
         let hashentrysize = ::nodeagg::hash_agg_entry_size(
             run.root.aggtransinfos.len(),
             input_width.max(0) as usize,
@@ -1281,9 +1312,11 @@ pub fn expr_type_typmod(node: Node<'_>) -> (u32, i32) {
             use types_nodes::primnodes::SubLinkType;
             let sp = node.as_sub_plan().unwrap();
             match sp.subLinkType {
-                SubLinkType::EXPR_SUBLINK | SubLinkType::ARRAY_SUBLINK => {
-                    (sp.firstColType, sp.firstColTypmod)
-                }
+                SubLinkType::EXPR_SUBLINK => (sp.firstColType, sp.firstColTypmod),
+                SubLinkType::ARRAY_SUBLINK => (
+                    nodes_core::node_funcs::promoted_array_type(sp.firstColType),
+                    sp.firstColTypmod,
+                ),
                 SubLinkType::MULTIEXPR_SUBLINK => {
                     panic!("exprType (nodeFuncs.c): MULTIEXPR SubPlan not ported")
                 }
@@ -1297,6 +1330,30 @@ pub fn expr_type_typmod(node: Node<'_>) -> (u32, i32) {
                 .first()
                 .expect("alternatives"),
         ),
+        NodeTag::T_SubLink => {
+            use types_nodes::primnodes::SubLinkType;
+            let sl = node.as_sub_link().unwrap();
+            match sl.subLinkType {
+                SubLinkType::EXPR_SUBLINK | SubLinkType::ARRAY_SUBLINK => {
+                    let tent = sl
+                        .subselect
+                        .as_query()
+                        .unwrap_or_else(|| panic!("cannot get type for untransformed sublink"))
+                        .targetList
+                        .first()
+                        .expect("sublink tlist")
+                        .as_target_entry()
+                        .expect("tlist entry");
+                    let (ty, tm) = expr_type_typmod(tent.expr);
+                    if sl.subLinkType == SubLinkType::ARRAY_SUBLINK {
+                        (nodes_core::node_funcs::promoted_array_type(ty), tm)
+                    } else {
+                        (ty, tm)
+                    }
+                }
+                _ => (types_core::catalog::BOOLOID, -1),
+            }
+        }
         NodeTag::T_CaseTestExpr => {
             let ct = node.as_case_test_expr().unwrap();
             (ct.typeId, ct.typeMod)
@@ -1988,7 +2045,66 @@ pub struct JoinCostWorkspace {
     pub inner_rescan_run_cost: f64,
 }
 
-pub fn cost_rescan(run: &PlannerRun<'_>, path: PathId) -> (f64, f64) {
+// cost_memoize_rescan (costsize.c); writes back mpath->est_entries.
+fn cost_memoize_rescan(run: &mut PlannerRun<'_>, path: PathId) -> PgResult<(f64, f64)> {
+    let (subpath, calls, param_exprs) = match run.root.path(path) {
+        types_pathnodes::PathNode::MemoizePath(mp) => (
+            mp.subpath.expect("Memoize subpath"),
+            mp.calls,
+            types_pathnodes::relids::pgvec_clone_shallow(run.mcx, &mp.param_exprs),
+        ),
+        other => panic!("cost_memoize_rescan: pathtype {}", other.base().pathtype),
+    };
+    let (input_startup_cost, input_total_cost, tuples) = {
+        let sub = run.root.path(subpath).base();
+        (sub.startup_cost, sub.total_cost, sub.rows)
+    };
+    let width = run.root.path_pathtarget(subpath).width;
+
+    let hash_mem_bytes = nodehash::get_hash_memory_limit() as f64;
+    let mut est_entry_bytes = crate::relation_byte_size(tuples, width)
+        + nodememoize::exec_estimate_cache_entry_overhead_bytes(tuples);
+    for &e in param_exprs.iter() {
+        est_entry_bytes += get_expr_width(run, e)? as f64;
+    }
+    let est_cache_entries = (hash_mem_bytes / est_entry_bytes).floor();
+
+    let mut group_exprs: PgVec<'_, (NodeId, Node<'_>)> = PgVec::new_in(run.mcx);
+    for &e in param_exprs.iter() {
+        group_exprs.push((e, *run.root.expr_node(e)));
+    }
+    let (mut ndistinct, used_default) =
+        planner_seams::estimate_num_groups_estinfo::call(run, &group_exprs, calls)?;
+    // A default ndistinct makes memoization too risky: assume every call has
+    // unique parameters so the path never survives add_path.
+    if used_default {
+        ndistinct = calls;
+    }
+
+    let est_entries = ndistinct.min(est_cache_entries).min(u32::MAX as f64) as u32;
+    match run.root.path_mut(path) {
+        types_pathnodes::PathNode::MemoizePath(mp) => mp.est_entries = est_entries,
+        _ => unreachable!(),
+    }
+
+    let evict_ratio = 1.0 - est_cache_entries.min(ndistinct) / ndistinct;
+    let hit_ratio =
+        ((calls - ndistinct) / calls) * (est_cache_entries / ndistinct.max(est_cache_entries));
+    debug_assert!((0.0..=1.0).contains(&hit_ratio));
+
+    let mut total_cost = input_total_cost * (1.0 - hit_ratio) + gucs::cpu_operator_cost();
+    total_cost += gucs::cpu_tuple_cost() * evict_ratio;
+    // Per-tuple eviction is just a pfree: a tenth of cpu_operator_cost.
+    total_cost += gucs::cpu_operator_cost() / 10.0 * evict_ratio * tuples;
+    total_cost += gucs::cpu_tuple_cost() + gucs::cpu_operator_cost() * tuples;
+
+    let mut startup_cost = input_startup_cost * (1.0 - hit_ratio);
+    startup_cost += gucs::cpu_tuple_cost();
+
+    Ok((startup_cost, total_cost))
+}
+
+pub fn cost_rescan(run: &mut PlannerRun<'_>, path: PathId) -> PgResult<(f64, f64)> {
     let p = run.root.path(path).base();
     let pathtype = p.pathtype;
     if pathtype == tag16(NodeTag::T_Material)
@@ -2013,11 +2129,11 @@ pub fn cost_rescan(run: &PlannerRun<'_>, path: PathId) -> (f64, f64) {
             let npages = (nbytes / 8192.0).ceil();
             run_cost += gucs::seq_page_cost() * npages;
         }
-        (0.0, run_cost)
+        Ok((0.0, run_cost))
     } else if pathtype == tag16(NodeTag::T_FunctionScan) {
         // nodeFunctionscan materializes into a tuplestore: function eval is
         // all startup cost, rescans pay only the per-row freight.
-        (0.0, p.total_cost - p.startup_cost)
+        Ok((0.0, p.total_cost - p.startup_cost))
     } else if pathtype == tag16(NodeTag::T_HashJoin) {
         // Rescan of a single-batch hashjoin repays only the run cost.
         let num_batches = match run.root.path(path) {
@@ -2025,30 +2141,29 @@ pub fn cost_rescan(run: &PlannerRun<'_>, path: PathId) -> (f64, f64) {
             _ => panic!("cost_rescan: T_HashJoin pathtype on non-HashPath"),
         };
         if num_batches == 1 {
-            (0.0, p.total_cost - p.startup_cost)
+            Ok((0.0, p.total_cost - p.startup_cost))
         } else {
-            (p.startup_cost, p.total_cost)
+            Ok((p.startup_cost, p.total_cost))
         }
     } else if pathtype == tag16(NodeTag::T_Memoize) {
-        panic!("cost_rescan (costsize.c): pathtype {pathtype}; M2 lane");
+        cost_memoize_rescan(run, path)
     } else {
-        (p.startup_cost, p.total_cost)
+        Ok((p.startup_cost, p.total_cost))
     }
 }
 
 pub fn initial_cost_nestloop(
-    run: &PlannerRun<'_>,
+    run: &mut PlannerRun<'_>,
     jointype: u32,
     inner_unique: bool,
     outer_path: PathId,
     inner_path: PathId,
-) -> JoinCostWorkspace {
+) -> PgResult<JoinCostWorkspace> {
+    let (inner_rescan_start, inner_rescan_total) = cost_rescan(run, inner_path)?;
     let outer = run.root.path(outer_path).base();
     let inner = run.root.path(inner_path).base();
     let mut disabled_nodes = if gucs::enable_nestloop() { 0 } else { 1 };
     disabled_nodes += inner.disabled_nodes + outer.disabled_nodes;
-
-    let (inner_rescan_start, inner_rescan_total) = cost_rescan(run, inner_path);
 
     let mut startup_cost = 0.0;
     let mut run_cost = 0.0;
@@ -2072,7 +2187,7 @@ pub fn initial_cost_nestloop(
         }
     }
 
-    JoinCostWorkspace {
+    Ok(JoinCostWorkspace {
         startup_cost,
         total_cost: startup_cost + run_cost,
         run_cost,
@@ -2085,7 +2200,7 @@ pub fn initial_cost_nestloop(
             0.0
         },
         ..Default::default()
-    }
+    })
 }
 
 pub fn final_cost_nestloop(
@@ -2183,8 +2298,12 @@ pub fn initial_cost_hashjoin(
     let mut startup_cost = o_startup;
     let mut run_cost = o_total - o_startup;
     startup_cost += i_total;
-    startup_cost += (gucs::cpu_operator_cost() * num_hashclauses + gucs::cpu_tuple_cost()) * i_rows;
-    run_cost += gucs::cpu_operator_cost() * num_hashclauses * o_rows;
+    // mul_add mirrors the C referee's fmadd (GCC fp-contract on aarch64
+    // fuses `cost += expr * rows`); EXPLAIN costs are byte-compared and a
+    // 42.425-style display boundary exposes the one-ulp difference.
+    startup_cost = (gucs::cpu_operator_cost() * num_hashclauses + gucs::cpu_tuple_cost())
+        .mul_add(i_rows, startup_cost);
+    run_cost = (gucs::cpu_operator_cost() * num_hashclauses).mul_add(o_rows, run_cost);
 
     let inner_width = run.root.path_pathtarget(inner_path).width;
     let (numbuckets, numbatches, _skew) =
@@ -2250,22 +2369,25 @@ pub fn final_cost_hashjoin(
 
     let virtualbuckets = numbuckets as f64 * numbatches as f64;
 
-    // No extended stats on this lane: estimate_multivariate_bucketsize is
-    // the identity (returns every hashclause) and each clause's bucketsize
-    // comes from estimate_hash_bucket_stats. A unique-ified inner is assumed
-    // perfectly hashable (C's UniquePath arm).
+    // A unique-ified inner is assumed perfectly hashable (C's UniquePath arm).
     let mut innerbucketsize = 1.0f64;
     let mut innermcvfreq = 1.0f64;
-    if inner_is_unique_path {
-        innerbucketsize = 1.0 / virtualbuckets;
-        innermcvfreq = 0.0;
-    }
     let inner_relids = run.root.rel(inner_parent).relids.clone();
     let hcls = types_pathnodes::relids::pgvec_clone_shallow(run.mcx, &path.path_hashclauses);
-    for &hcl in hcls.iter() {
-        if inner_is_unique_path {
-            break;
-        }
+    let otherclauses = if inner_is_unique_path {
+        innerbucketsize = 1.0 / virtualbuckets;
+        innermcvfreq = 0.0;
+        PgVec::new_in(run.mcx)
+    } else {
+        let (other, bs) = planner_seams::estimate_multivariate_bucketsize::call(
+            run,
+            inner_parent,
+            &hcls,
+        )?;
+        innerbucketsize = bs;
+        other
+    };
+    for &hcl in otherclauses.iter() {
         let right_is_inner = {
             let r = run.root.rinfo(hcl);
             types_pathnodes::relids::relids_is_subset(&r.right_relids, &inner_relids)

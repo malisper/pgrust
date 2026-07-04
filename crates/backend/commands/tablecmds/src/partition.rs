@@ -25,6 +25,7 @@ pub(crate) fn compute_partition_key<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     partspec: &PartitionSpec<'mcx>,
+    query_string: &str,
 ) -> PgResult<PartKeyInfo<'mcx>> {
     let strategy = partspec.strategy;
     if strategy == PartitionStrategy::Hash {
@@ -72,12 +73,14 @@ pub(crate) fn compute_partition_key<'mcx>(
         let mut attnum: AttrNumber = 0;
         let mut atttype: Oid = InvalidOid;
         let mut attcollation: Oid = InvalidOid;
+        let mut attgenerated: i8 = 0;
         for i in 0..rel.rd_att.natts as usize {
             let att = rel.rd_att.attr(i);
             if att.attname.name_str() == name.as_bytes() && !att.attisdropped {
                 attnum = att.attnum;
                 atttype = att.atttypid;
                 attcollation = att.attcollation;
+                attgenerated = att.attgenerated;
                 break;
             }
         }
@@ -97,6 +100,18 @@ pub(crate) fn compute_partition_key<'mcx>(
                     format!("cannot use system column \"{name}\" in partition key"),
                 )
                 .with_sqlstate(types_error::ERRCODE_INVALID_OBJECT_DEFINITION),
+            ));
+        }
+        if attgenerated != 0 {
+            return Err(Box::new(
+                PgError::new(ERROR, "cannot use generated column in partition key".to_string())
+                    .with_detail(format!("Column \"{name}\" is a generated column."))
+                    .with_sqlstate(types_error::ERRCODE_INVALID_OBJECT_DEFINITION)
+                    .with_cursor_position(parser_small1::parser_errposition_source(
+                        Some(query_string.as_bytes()),
+                        pelem.location,
+                        mbutils::GetDatabaseEncoding(),
+                    )),
             ));
         }
         info.partattrs.push(attnum);
@@ -150,7 +165,7 @@ pub(crate) fn store_catalog_inheritance1<'mcx>(
 }
 
 // SetRelationHasSubclass (tablecmds.c).
-pub(crate) fn SetRelationHasSubclass<'mcx>(
+pub fn SetRelationHasSubclass<'mcx>(
     mcx: Mcx<'mcx>,
     relation_id: Oid,
     relhassubclass: bool,

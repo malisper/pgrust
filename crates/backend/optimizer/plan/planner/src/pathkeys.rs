@@ -810,9 +810,11 @@ pub fn expr_collation(node: Node<'_>) -> u32 {
         NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resultcollid,
         NodeTag::T_OpExpr => node.as_op_expr().unwrap().opcollid,
         NodeTag::T_DistinctExpr => node.as_distinct_expr().unwrap().opcollid,
-        NodeTag::T_BooleanTest | NodeTag::T_RowExpr | NodeTag::T_BoolExpr | NodeTag::T_NullTest => {
-            0
-        }
+        NodeTag::T_BooleanTest
+        | NodeTag::T_RowExpr
+        | NodeTag::T_BoolExpr
+        | NodeTag::T_GroupingFunc
+        | NodeTag::T_NullTest => 0,
         NodeTag::T_FuncExpr => node.as_func_expr().unwrap().funccollid,
         NodeTag::T_Param => node.as_param().unwrap().paramcollid,
         NodeTag::T_Aggref => node.as_aggref().unwrap().aggcollid,
@@ -835,6 +837,27 @@ pub fn expr_collation(node: Node<'_>) -> u32 {
                 .first()
                 .expect("alternatives"),
         ),
+        NodeTag::T_SubLink => {
+            use types_nodes::primnodes::SubLinkType;
+            let sl = node.as_sub_link().unwrap();
+            match sl.subLinkType {
+                SubLinkType::EXPR_SUBLINK | SubLinkType::ARRAY_SUBLINK => {
+                    let tent = sl
+                        .subselect
+                        .as_query()
+                        .unwrap_or_else(|| {
+                            panic!("cannot get collation for untransformed sublink")
+                        })
+                        .targetList
+                        .first()
+                        .expect("sublink tlist")
+                        .as_target_entry()
+                        .expect("tlist entry");
+                    expr_collation(tent.expr)
+                }
+                _ => 0,
+            }
+        }
         NodeTag::T_CaseExpr => node.as_case_expr().unwrap().casecollid,
         NodeTag::T_CaseTestExpr => node.as_case_test_expr().unwrap().collation,
         NodeTag::T_CoerceViaIO => node.as_coerce_via_io().unwrap().resultcollid,

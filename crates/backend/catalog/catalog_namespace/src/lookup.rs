@@ -598,12 +598,26 @@ pub fn FuncnameGetCandidates<'mcx>(
     expand_variadic: bool,
     expand_defaults: bool,
 ) -> PgResult<mcx::PgVec<'mcx, FuncCandidate<'mcx>>> {
+    FuncnameGetCandidatesExtended(mcx, names, nargs, expand_variadic, expand_defaults, false)
+}
+
+pub fn FuncnameGetCandidatesExtended<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    names: &[&str],
+    nargs: i16,
+    expand_variadic: bool,
+    expand_defaults: bool,
+    missing_ok: bool,
+) -> PgResult<mcx::PgVec<'mcx, FuncCandidate<'mcx>>> {
     // nargs == -1: any arity, no variadic/default expansion (C convention).
     let (schemaname, funcname) = DeconstructQualifiedName(names)?;
 
     let namespace_id = match schemaname {
         Some(schemaname) => {
-            let id = LookupExplicitNamespace(schemaname, false)?;
+            let id = LookupExplicitNamespace(schemaname, missing_ok)?;
+            if id == InvalidOid {
+                return Ok(mcx::PgVec::new_in(mcx));
+            }
             Some(id)
         }
         None => {

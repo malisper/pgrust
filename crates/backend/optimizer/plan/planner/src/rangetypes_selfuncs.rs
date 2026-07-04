@@ -213,7 +213,15 @@ fn calc_hist_selectivity<'mcx>(
     constval: &[u8],
     operator: Oid,
 ) -> PgResult<f64> {
-    // statistic_proc_security_check is true on this single-role substrate.
+    // Can't use the histogram with insecure range support functions.
+    if !crate::selfuncs::statistic_proc_security_check(vardata, ctx.ri.cmp.fn_oid)? {
+        return Ok(-1.0);
+    }
+    if let Some(sd) = &ctx.subdiff {
+        if !crate::selfuncs::statistic_proc_security_check(vardata, sd.fn_oid)? {
+            return Ok(-1.0);
+        }
+    }
     let Some(hslot) = vardata.slot(STATISTIC_KIND_BOUNDS_HISTOGRAM, 0) else {
         return Ok(-1.0);
     };

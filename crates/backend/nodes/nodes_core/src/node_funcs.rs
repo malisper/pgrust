@@ -35,6 +35,7 @@ pub fn expr_type(node: Node<'_>) -> Oid {
         NodeTag::T_SetToDefault => node.as_set_to_default().unwrap().typeId,
         NodeTag::T_CollateExpr => expr_type(node.as_collate_expr().unwrap().arg),
         NodeTag::T_SQLValueFunction => node.as_sql_value_function().unwrap().r#type,
+        NodeTag::T_SubscriptingRef => node.as_subscripting_ref().unwrap().refrestype,
         NodeTag::T_CaseTestExpr => node.as_case_test_expr().unwrap().typeId,
         NodeTag::T_CaseExpr => node.as_case_expr().unwrap().casetype,
         NodeTag::T_CoalesceExpr => node.as_coalesce_expr().unwrap().coalescetype,
@@ -47,7 +48,7 @@ pub fn expr_type(node: Node<'_>) -> Oid {
             match sl.subLinkType {
                 types_nodes::SubLinkType::EXPR_SUBLINK => expr_type(tent.expect("EXPR").expr),
                 types_nodes::SubLinkType::ARRAY_SUBLINK => {
-                    deferred("exprType: ARRAY_SUBLINK", NodeTag::T_SubLink)
+                    promoted_array_type(expr_type(tent.expect("ARRAY").expr))
                 }
                 _ => types_core::catalog::BOOLOID,
             }
@@ -56,13 +57,31 @@ pub fn expr_type(node: Node<'_>) -> Oid {
             let sp = node.as_sub_plan().unwrap();
             match sp.subLinkType {
                 types_nodes::SubLinkType::EXPR_SUBLINK
-                | types_nodes::SubLinkType::ARRAY_SUBLINK
                 | types_nodes::SubLinkType::MULTIEXPR_SUBLINK => sp.firstColType,
+                types_nodes::SubLinkType::ARRAY_SUBLINK => {
+                    promoted_array_type(sp.firstColType)
+                }
                 _ => types_core::catalog::BOOLOID,
             }
         }
+        NodeTag::T_AlternativeSubPlan => expr_type(
+            node.as_alternative_sub_plan().unwrap().subplans.first().expect("subplans non-empty"),
+        ),
         other => deferred("exprType", other),
     }
+}
+
+// DIVERGENCE: C ereports 42704 for an arrayless element type (e.g. ARRAY
+// over a void-returning select); loud panic here since expr_type is
+// infallible by signature.
+pub fn promoted_array_type(elemtype: Oid) -> Oid {
+    let arraytype = lsyscache::get_promoted_array_type(elemtype)
+        .unwrap_or_else(|e| panic!("get_promoted_array_type({elemtype}): {e}"));
+    assert!(
+        arraytype != types_core::InvalidOid,
+        "could not find array type for data type {elemtype}"
+    );
+    arraytype
 }
 
 // C exprType's untransformed-sublink elog is a panic here (parse always
@@ -112,6 +131,7 @@ pub fn expr_typmod(node: Node<'_>) -> i32 {
         NodeTag::T_FuncExpr => length_coercion_typmod(node.as_func_expr().unwrap()),
         NodeTag::T_CoerceToDomain => node.as_coerce_to_domain().unwrap().resulttypmod,
         NodeTag::T_CoerceToDomainValue => node.as_coerce_to_domain_value().unwrap().typeMod,
+        NodeTag::T_SubscriptingRef => node.as_subscripting_ref().unwrap().reftypmod,
         NodeTag::T_OpExpr
         | NodeTag::T_ScalarArrayOpExpr
         | NodeTag::T_ArrayExpr
@@ -155,17 +175,24 @@ pub fn expr_typmod(node: Node<'_>) -> i32 {
         NodeTag::T_SubLink => {
             let (sl, tent) = sublink_first_col(node);
             match sl.subLinkType {
-                types_nodes::SubLinkType::EXPR_SUBLINK => expr_typmod(tent.expect("EXPR").expr),
+                types_nodes::SubLinkType::EXPR_SUBLINK
+                | types_nodes::SubLinkType::ARRAY_SUBLINK => {
+                    expr_typmod(tent.expect("EXPR/ARRAY").expr)
+                }
                 _ => -1,
             }
         }
         NodeTag::T_SubPlan => {
             let sp = node.as_sub_plan().unwrap();
             match sp.subLinkType {
-                types_nodes::SubLinkType::EXPR_SUBLINK => sp.firstColTypmod,
+                types_nodes::SubLinkType::EXPR_SUBLINK
+                | types_nodes::SubLinkType::ARRAY_SUBLINK => sp.firstColTypmod,
                 _ => -1,
             }
         }
+        NodeTag::T_AlternativeSubPlan => expr_typmod(
+            node.as_alternative_sub_plan().unwrap().subplans.first().expect("subplans non-empty"),
+        ),
         other => deferred("exprTypmod", other),
     }
 }
@@ -194,6 +221,7 @@ pub fn expr_collation(node: Node<'_>) -> Oid {
         NodeTag::T_CoerceToDomainValue => node.as_coerce_to_domain_value().unwrap().collation,
         NodeTag::T_SetToDefault => node.as_set_to_default().unwrap().collation,
         NodeTag::T_CollateExpr => node.as_collate_expr().unwrap().collOid,
+        NodeTag::T_SubscriptingRef => node.as_subscripting_ref().unwrap().refcollid,
         NodeTag::T_CaseTestExpr => node.as_case_test_expr().unwrap().collation,
         NodeTag::T_SQLValueFunction => {
             if node.as_sql_value_function().unwrap().r#type == types_core::catalog::NAMEOID {
@@ -224,6 +252,9 @@ pub fn expr_collation(node: Node<'_>) -> Oid {
                 _ => 0,
             }
         }
+        NodeTag::T_AlternativeSubPlan => expr_collation(
+            node.as_alternative_sub_plan().unwrap().subplans.first().expect("subplans non-empty"),
+        ),
         other => deferred("exprCollation", other),
     }
 }
@@ -288,6 +319,14 @@ pub fn expr_location(node: Node<'_>) -> ParseLoc {
         NodeTag::T_FuncCall => {
             let f = node.as_func_call().unwrap();
             leftmost_loc(f.location, expr_location_list(&f.args))
+        }
+        // C: SubscriptingRef has no location; report the container's.
+        NodeTag::T_SubscriptingRef => {
+            node.as_subscripting_ref().unwrap().refexpr.map_or(-1, expr_location)
+        }
+        NodeTag::T_A_ArrayExpr => node.as_a_array_expr().unwrap().location,
+        NodeTag::T_A_Indirection => {
+            node.as_a_indirection().unwrap().arg.map_or(-1, expr_location)
         }
         NodeTag::T_ParamRef => node.as_param_ref().unwrap().location,
         NodeTag::T_ResTarget => node.as_res_target().unwrap().location,
@@ -415,4 +454,54 @@ pub fn apply_relabel_type<'mcx>(
             location: rlocation,
         },
     )
+}
+
+pub fn expr_input_collation(node: Node<'_>) -> Oid {
+    match node.node_tag() {
+        NodeTag::T_Aggref => node.as_aggref().unwrap().inputcollid,
+        NodeTag::T_WindowFunc => node.as_window_func().unwrap().inputcollid,
+        NodeTag::T_FuncExpr => node.as_func_expr().unwrap().inputcollid,
+        NodeTag::T_OpExpr => node.as_op_expr().unwrap().inputcollid,
+        NodeTag::T_DistinctExpr => node.as_distinct_expr().unwrap().inputcollid,
+        NodeTag::T_ScalarArrayOpExpr => node.as_scalar_array_op_expr().unwrap().inputcollid,
+        NodeTag::T_MinMaxExpr => node.as_min_max_expr().unwrap().inputcollid,
+        _ => types_core::InvalidOid,
+    }
+}
+
+pub fn relabel_to_typmod<'mcx>(
+    mcx: ::mcx::Mcx<'mcx>,
+    expr: Node<'mcx>,
+    typmod: i32,
+) -> types_error::PgResult<Node<'mcx>> {
+    apply_relabel_type(
+        mcx,
+        expr,
+        expr_type(expr),
+        typmod,
+        expr_collation(expr),
+        types_nodes::CoercionForm::COERCE_EXPLICIT_CAST,
+        -1,
+    )
+}
+
+// C set_opfuncid/set_sa_opfuncid memo-write into the node; sealed nodes are
+// immutable here, so the resolved oid is returned (check_functions_in_node
+// precedent).
+pub fn set_opfuncid(o: &types_nodes::primnodes::OpExpr<'_>) -> types_error::PgResult<Oid> {
+    if o.opfuncid == types_core::InvalidOid {
+        lsyscache::operator::get_opcode(o.opno)
+    } else {
+        Ok(o.opfuncid)
+    }
+}
+
+pub fn set_sa_opfuncid(
+    o: &types_nodes::primnodes::ScalarArrayOpExpr<'_>,
+) -> types_error::PgResult<Oid> {
+    if o.opfuncid == types_core::InvalidOid {
+        lsyscache::operator::get_opcode(o.opno)
+    } else {
+        Ok(o.opfuncid)
+    }
 }

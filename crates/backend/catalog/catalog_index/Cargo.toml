@@ -11,6 +11,9 @@ catalog = { path = "../catalog" }
 catalog_heap = { path = "../catalog_heap" }
 catalog_index_seams = { path = "../catalog_index_seams" }
 catalog_indexing = { path = "../catalog_indexing" }
+pg_inherits = { path = "../pg_inherits" }
+tablecmds_seams = { path = "../../commands/tablecmds_seams" }
+rewrite_manip = { path = "../../rewrite/rewrite_manip" }
 datum = { path = "../../../_support/types/datum" }
 execindexing = { path = "../../executor/execindexing" }
 elog = { path = "../../utils/error/elog" }
@@ -55,3 +58,4 @@ tableam = { path = "../../access/table/tableam" }
 elog_seams = { path = "../../utils/error/elog_seams" }
 smgr = { path = "../../storage/smgr/smgr" }
 ginbuild = { path = "../../access/gin/ginbuild" }
+predicate_seams = { path = "../../storage/lmgr/predicate_seams" }

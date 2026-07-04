@@ -10,6 +10,9 @@ use ::types_error::PgResult;
 use ::types_snapshot::HTSV_Result::{self, *};
 use ::types_snapshot::SnapshotData;
 use ::types_snapshot::SnapshotType::*;
+use ::types_snapshot::{
+    XidVisMemo, XVM_COMMITTED, XVM_COMMIT_VALID, XVM_HINT_OK, XVM_IN_SNAPSHOT, XVM_SNAP_VALID,
+};
 use ::types_tuple::{
     HeapTupleData, HeapTupleHeaderData, ItemPointerEquals, ItemPointerIsValid,
     HEAP_LOCKED_UPGRADED, HEAP_MOVED_IN, HEAP_MOVED_OFF, HEAP_XMAX_COMMITTED, HEAP_XMAX_INVALID,
@@ -623,10 +626,128 @@ pub fn HeapTupleSatisfiesDirty(
     Ok(false)
 }
 
+// The MVCC xid-status probes behind resolver seats: Direct is C's per-tuple
+// evaluation; PageMemo resolves each distinct xid once per page-collect walk
+// (batch visibility). Hint denials stay uncached (page LSN may advance).
+trait MvccXidResolve {
+    fn in_snapshot(&mut self, xid: TransactionId, snapshot: &SnapshotData<'_>) -> PgResult<bool>;
+    fn did_commit(&mut self, xid: TransactionId) -> PgResult<bool>;
+    fn set_hint_bits(
+        &mut self,
+        tuple: &mut HeapTupleHeaderData,
+        buffer: Buffer,
+        infomask: u16,
+        xid: TransactionId,
+    ) -> PgResult<()>;
+}
+
+struct DirectResolve;
+
+impl MvccXidResolve for DirectResolve {
+    #[inline(always)]
+    fn in_snapshot(&mut self, xid: TransactionId, snapshot: &SnapshotData<'_>) -> PgResult<bool> {
+        XidInMVCCSnapshot(xid, snapshot)
+    }
+
+    #[inline(always)]
+    fn did_commit(&mut self, xid: TransactionId) -> PgResult<bool> {
+        TransactionIdDidCommit(xid)
+    }
+
+    #[inline(always)]
+    fn set_hint_bits(
+        &mut self,
+        tuple: &mut HeapTupleHeaderData,
+        buffer: Buffer,
+        infomask: u16,
+        xid: TransactionId,
+    ) -> PgResult<()> {
+        SetHintBits(tuple, buffer, infomask, xid)
+    }
+}
+
+struct PageMemoResolve<'a> {
+    memo: &'a mut XidVisMemo,
+}
+
+impl MvccXidResolve for PageMemoResolve<'_> {
+    #[inline]
+    fn in_snapshot(&mut self, xid: TransactionId, snapshot: &SnapshotData<'_>) -> PgResult<bool> {
+        // XidInMVCCSnapshot's first branch, hoisted: hinted pages resolve here
+        // at the direct path's cost; the memo serves only >= xmin xids.
+        if TransactionIdPrecedes(xid, snapshot.xmin) {
+            return Ok(false);
+        }
+        let f = self.memo.get(xid);
+        if f & XVM_SNAP_VALID != 0 {
+            return Ok(f & XVM_IN_SNAPSHOT != 0);
+        }
+        let r = XidInMVCCSnapshot(xid, snapshot)?;
+        self.memo.merge(xid, XVM_SNAP_VALID | if r { XVM_IN_SNAPSHOT } else { 0 });
+        Ok(r)
+    }
+
+    #[inline]
+    fn did_commit(&mut self, xid: TransactionId) -> PgResult<bool> {
+        let f = self.memo.get(xid);
+        if f & XVM_COMMIT_VALID != 0 {
+            return Ok(f & XVM_COMMITTED != 0);
+        }
+        let r = TransactionIdDidCommit(xid)?;
+        self.memo.merge(xid, XVM_COMMIT_VALID | if r { XVM_COMMITTED } else { 0 });
+        Ok(r)
+    }
+
+    #[inline]
+    fn set_hint_bits(
+        &mut self,
+        tuple: &mut HeapTupleHeaderData,
+        buffer: Buffer,
+        infomask: u16,
+        xid: TransactionId,
+    ) -> PgResult<()> {
+        if TransactionIdIsValid(xid) && self.memo.get(xid) & XVM_HINT_OK == 0 {
+            /* NB: xid must be known committed here! */
+            let commit_lsn = transam_seams::transaction_id_get_commit_lsn::call(xid)?;
+            if bufmgr_seams::buffer_is_permanent::call(buffer)
+                && transam_xlog_seams::xlog_needs_flush::call(commit_lsn)
+                && bufmgr_seams::buffer_get_lsn_atomic::call(buffer) < commit_lsn
+            {
+                return Ok(());
+            }
+            self.memo.merge(xid, XVM_HINT_OK);
+        }
+        tuple.t_infomask |= infomask;
+        bufmgr_seams::mark_buffer_dirty_hint::call(buffer, true)
+    }
+}
+
 pub fn HeapTupleSatisfiesMVCC(
     htup: &mut HeapTupleData<'_>,
     snapshot: &SnapshotData<'_>,
     buffer: Buffer,
+) -> PgResult<bool> {
+    satisfies_mvcc_res(htup, snapshot, buffer, &mut DirectResolve)
+}
+
+pub fn HeapTupleSatisfiesMVCCPage(
+    htup: &mut HeapTupleData<'_>,
+    snapshot: &SnapshotData<'_>,
+    buffer: Buffer,
+    memo: &mut XidVisMemo,
+) -> PgResult<bool> {
+    satisfies_mvcc_res(htup, snapshot, buffer, &mut PageMemoResolve { memo })
+}
+
+// inline(always): each resolver seat collapses into its wrapper, keeping the
+// Direct seat's codegen the pre-generic concrete body (index-fetch lanes are
+// sensitive to the extra call edge).
+#[inline(always)]
+fn satisfies_mvcc_res<R: MvccXidResolve>(
+    htup: &mut HeapTupleData<'_>,
+    snapshot: &SnapshotData<'_>,
+    buffer: Buffer,
+    r: &mut R,
 ) -> PgResult<bool> {
     debug_assert!(snapshot.regd_count.get() > 0 || snapshot.active_count.get() > 0);
     debug_assert!(ItemPointerIsValid(&htup.t_self));
@@ -644,24 +765,24 @@ pub fn HeapTupleSatisfiesMVCC(
             if TransactionIdIsCurrentTransactionId(xvac) {
                 return Ok(false);
             }
-            if !XidInMVCCSnapshot(xvac, snapshot)? {
-                if TransactionIdDidCommit(xvac)? {
-                    SetHintBits(tuple, buffer, HEAP_XMIN_INVALID, InvalidTransactionId)?;
+            if !r.in_snapshot(xvac, snapshot)? {
+                if r.did_commit(xvac)? {
+                    r.set_hint_bits(tuple, buffer, HEAP_XMIN_INVALID, InvalidTransactionId)?;
                     return Ok(false);
                 }
-                SetHintBits(tuple, buffer, HEAP_XMIN_COMMITTED, InvalidTransactionId)?;
+                r.set_hint_bits(tuple, buffer, HEAP_XMIN_COMMITTED, InvalidTransactionId)?;
             }
         } else if (tuple.t_infomask & HEAP_MOVED_IN) != 0 {
             let xvac = tuple.xvac();
 
             if !TransactionIdIsCurrentTransactionId(xvac) {
-                if XidInMVCCSnapshot(xvac, snapshot)? {
+                if r.in_snapshot(xvac, snapshot)? {
                     return Ok(false);
                 }
-                if TransactionIdDidCommit(xvac)? {
-                    SetHintBits(tuple, buffer, HEAP_XMIN_COMMITTED, InvalidTransactionId)?;
+                if r.did_commit(xvac)? {
+                    r.set_hint_bits(tuple, buffer, HEAP_XMIN_COMMITTED, InvalidTransactionId)?;
                 } else {
-                    SetHintBits(tuple, buffer, HEAP_XMIN_INVALID, InvalidTransactionId)?;
+                    r.set_hint_bits(tuple, buffer, HEAP_XMIN_INVALID, InvalidTransactionId)?;
                     return Ok(false);
                 }
             }
@@ -695,7 +816,7 @@ pub fn HeapTupleSatisfiesMVCC(
 
             if !TransactionIdIsCurrentTransactionId(tuple.xmax_raw()) {
                 /* deleting subtransaction must have aborted */
-                SetHintBits(tuple, buffer, HEAP_XMAX_INVALID, InvalidTransactionId)?;
+                r.set_hint_bits(tuple, buffer, HEAP_XMAX_INVALID, InvalidTransactionId)?;
                 return Ok(true);
             }
 
@@ -704,19 +825,19 @@ pub fn HeapTupleSatisfiesMVCC(
             } else {
                 return Ok(false); /* deleted before scan started */
             }
-        } else if XidInMVCCSnapshot(tuple.xmin_raw(), snapshot)? {
+        } else if r.in_snapshot(tuple.xmin_raw(), snapshot)? {
             return Ok(false);
-        } else if TransactionIdDidCommit(tuple.xmin_raw())? {
+        } else if r.did_commit(tuple.xmin_raw())? {
             let raw_xmin = tuple.xmin_raw();
-            SetHintBits(tuple, buffer, HEAP_XMIN_COMMITTED, raw_xmin)?;
+            r.set_hint_bits(tuple, buffer, HEAP_XMIN_COMMITTED, raw_xmin)?;
         } else {
             /* it must have aborted or crashed */
-            SetHintBits(tuple, buffer, HEAP_XMIN_INVALID, InvalidTransactionId)?;
+            r.set_hint_bits(tuple, buffer, HEAP_XMIN_INVALID, InvalidTransactionId)?;
             return Ok(false);
         }
     } else {
         /* xmin is committed, but maybe not according to our snapshot */
-        if !tuple.xmin_frozen() && XidInMVCCSnapshot(tuple.xmin_raw(), snapshot)? {
+        if !tuple.xmin_frozen() && r.in_snapshot(tuple.xmin_raw(), snapshot)? {
             return Ok(false); /* treat as still in progress */
         }
     }
@@ -745,10 +866,10 @@ pub fn HeapTupleSatisfiesMVCC(
                 return Ok(false); /* deleted before scan started */
             }
         }
-        if XidInMVCCSnapshot(xmax, snapshot)? {
+        if r.in_snapshot(xmax, snapshot)? {
             return Ok(true);
         }
-        if TransactionIdDidCommit(xmax)? {
+        if r.did_commit(xmax)? {
             return Ok(false);
         }
         return Ok(true);
@@ -763,21 +884,21 @@ pub fn HeapTupleSatisfiesMVCC(
             }
         }
 
-        if XidInMVCCSnapshot(tuple.xmax_raw(), snapshot)? {
+        if r.in_snapshot(tuple.xmax_raw(), snapshot)? {
             return Ok(true);
         }
 
-        if !TransactionIdDidCommit(tuple.xmax_raw())? {
+        if !r.did_commit(tuple.xmax_raw())? {
             /* it must have aborted or crashed */
-            SetHintBits(tuple, buffer, HEAP_XMAX_INVALID, InvalidTransactionId)?;
+            r.set_hint_bits(tuple, buffer, HEAP_XMAX_INVALID, InvalidTransactionId)?;
             return Ok(true);
         }
 
         let raw_xmax = tuple.xmax_raw();
-        SetHintBits(tuple, buffer, HEAP_XMAX_COMMITTED, raw_xmax)?;
+        r.set_hint_bits(tuple, buffer, HEAP_XMAX_COMMITTED, raw_xmax)?;
     } else {
         /* xmax is committed, but maybe not according to our snapshot */
-        if XidInMVCCSnapshot(tuple.xmax_raw(), snapshot)? {
+        if r.in_snapshot(tuple.xmax_raw(), snapshot)? {
             return Ok(true); /* treat as still in progress */
         }
     }
@@ -1099,6 +1220,7 @@ pub fn init_seams() {
     heapam_visibility_seams::heap_tuple_satisfies_visibility::set(
         heap_tuple_satisfies_visibility_read,
     );
+    heapam_visibility_seams::heap_tuple_satisfies_mvcc_page::set(HeapTupleSatisfiesMVCCPage);
     heapam_visibility_seams::heap_tuple_satisfies_dirty::set(HeapTupleSatisfiesDirty);
     heapam_visibility_seams::heap_tuple_satisfies_vacuum::set(HeapTupleSatisfiesVacuum);
     heapam_visibility_seams::heap_tuple_satisfies_update::set(HeapTupleSatisfiesUpdate);

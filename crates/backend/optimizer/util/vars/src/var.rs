@@ -224,6 +224,42 @@ pub fn contain_vars_of_level(node: Node<'_>, levelsup: i32) -> PgResult<bool> {
     query_or_expression_tree_walker(node, &mut cx, 0)
 }
 
+struct ContainUplevelVars {
+    sublevels_up: i64,
+}
+
+impl<'mcx> NodeWalker<'mcx> for ContainUplevelVars {
+    fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+        match node.node_tag() {
+            NodeTag::T_Var => Ok(node.as_var().unwrap().varlevelsup as i64 >= self.sublevels_up),
+            NodeTag::T_CurrentOfExpr => Ok(false),
+            t @ NodeTag::T_PlaceHolderVar => deferred("contain_uplevel_vars_walker", t),
+            NodeTag::T_Query => {
+                let q = node.as_query().unwrap();
+                self.sublevels_up += 1;
+                let r = query_tree_walker(q, self, 0);
+                self.sublevels_up -= 1;
+                r
+            }
+            _ => expression_tree_walker(node, self),
+        }
+    }
+
+    fn visit_query_ref(&mut self, q: &'mcx Query<'mcx>) -> PgResult<bool> {
+        self.sublevels_up += 1;
+        let r = query_tree_walker(q, self, 0);
+        self.sublevels_up -= 1;
+        r
+    }
+}
+
+/// Any Var escaping `node` (varlevelsup >= 1 relative to it); the gate for
+/// C's IncrementVarSublevelsUp being a no-op.
+pub fn contain_uplevel_vars(node: Node<'_>) -> PgResult<bool> {
+    let mut cx = ContainUplevelVars { sublevels_up: 1 };
+    query_or_expression_tree_walker(node, &mut cx, 0)
+}
+
 struct ContainVarsReturningOldOrNew;
 
 impl<'mcx> NodeWalker<'mcx> for ContainVarsReturningOldOrNew {

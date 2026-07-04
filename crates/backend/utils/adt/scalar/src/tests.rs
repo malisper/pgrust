@@ -69,3 +69,99 @@ fn xid8_ops() {
     assert_eq!(xid8cmp(43, 42), 1);
     assert_eq!(xid8cmp(7, 7), 0);
 }
+
+mod datum_ops_tests {
+    use crate::datum_ops::*;
+    use datum::{set_varsize_4b, Datum, VARHDRSZ};
+    use mcx::MemoryContext;
+
+    fn varlena(payload: &[u8]) -> Vec<u8> {
+        let mut v = Vec::from(set_varsize_4b(VARHDRSZ + payload.len()));
+        v.extend_from_slice(payload);
+        v
+    }
+
+    #[test]
+    fn get_size_arms() {
+        assert_eq!(datum_get_size(Datum::from_i32(7), true, 4).unwrap(), 4);
+        assert_eq!(datum_get_size(Datum::from_i32(7), true, 8).unwrap(), 8);
+        let img = varlena(b"hello");
+        let d = Datum::from_usize(img.as_ptr() as usize);
+        assert_eq!(datum_get_size(d, false, -1).unwrap(), VARHDRSZ + 5);
+        let cs = b"abc\0";
+        let d = Datum::from_usize(cs.as_ptr() as usize);
+        assert_eq!(datum_get_size(d, false, -2).unwrap(), 4);
+        let d16 = [0u8; 16];
+        let d = Datum::from_usize(d16.as_ptr() as usize);
+        assert_eq!(datum_get_size(d, false, 16).unwrap(), 16);
+        assert!(datum_get_size(Datum::null(), false, -1).is_err());
+        assert!(datum_get_size(Datum::from_i32(1), false, -3).is_err());
+    }
+
+    #[test]
+    fn copy_is_deep() {
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+        let img = varlena(b"payload");
+        let src = Datum::from_usize(img.as_ptr() as usize);
+        let cp = datum_copy(mcx, src, false, -1).unwrap();
+        assert_ne!(cp.as_usize(), src.as_usize());
+        let out = unsafe {
+            core::slice::from_raw_parts(cp.as_usize() as *const u8, img.len())
+        };
+        assert_eq!(out, &img[..]);
+        assert_eq!(datum_copy(mcx, Datum::from_i32(-5), true, 4).unwrap().as_i32(), -5);
+    }
+
+    #[test]
+    fn serialize_layout_and_roundtrip() {
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+        let mut out = mcx::PgVec::new_in(mcx);
+
+        datum_serialize(Datum::from_usize(42), false, true, 4, &mut out).unwrap();
+        let mut expect = Vec::new();
+        expect.extend_from_slice(&(-1i32).to_ne_bytes());
+        expect.extend_from_slice(&42u64.to_ne_bytes());
+        assert_eq!(&out[..], &expect[..]);
+        assert_eq!(out.len(), datum_estimate_space(Datum::from_usize(42), false, true, 4).unwrap());
+
+        out.clear();
+        datum_serialize(Datum::null(), true, false, -1, &mut out).unwrap();
+        assert_eq!(&out[..], &(-2i32).to_ne_bytes());
+        assert_eq!(out.len(), datum_estimate_space(Datum::null(), true, false, -1).unwrap());
+
+        out.clear();
+        let img = varlena(b"xyz");
+        let d = Datum::from_usize(img.as_ptr() as usize);
+        datum_serialize(d, false, false, -1, &mut out).unwrap();
+        let mut expect = Vec::new();
+        expect.extend_from_slice(&(img.len() as i32).to_ne_bytes());
+        expect.extend_from_slice(&img);
+        assert_eq!(&out[..], &expect[..]);
+        assert_eq!(out.len(), datum_estimate_space(d, false, false, -1).unwrap());
+
+        let mut cur: &[u8] = &out;
+        let (rv, rn) = datum_restore(mcx, &mut cur).unwrap();
+        assert!(!rn && cur.is_empty());
+        let rimg = unsafe {
+            core::slice::from_raw_parts(rv.as_usize() as *const u8, img.len())
+        };
+        assert_eq!(rimg, &img[..]);
+    }
+
+    #[test]
+    fn restore_null_and_byval() {
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(-2i32).to_ne_bytes());
+        buf.extend_from_slice(&(-1i32).to_ne_bytes());
+        buf.extend_from_slice(&7u64.to_ne_bytes());
+        let mut cur: &[u8] = &buf;
+        let (v, isnull) = datum_restore(mcx, &mut cur).unwrap();
+        assert!(isnull && v.as_usize() == 0);
+        let (v, isnull) = datum_restore(mcx, &mut cur).unwrap();
+        assert!(!isnull && v.as_usize() == 7 && cur.is_empty());
+    }
+}

@@ -11,8 +11,9 @@ mod oncommit;
 mod rename;
 mod truncate;
 pub use alter::{AlterTable, AlterTableGetLockLevel, AlterTableLookupRelation};
-pub use rename::{renameatt, RenameRelation, RenameRelationInternal};
+pub use rename::{renameatt, RenameConstraint, RenameRelation, RenameRelationInternal};
 pub use drop::RemoveRelations;
+pub use partition::SetRelationHasSubclass;
 pub use oncommit::{
     register_on_commit_action, remove_on_commit_action, AtEOSubXact_on_commit_actions,
     AtEOXact_on_commit_actions, PreCommit_on_commit_actions,
@@ -26,6 +27,7 @@ pub fn init_seams() {
     tablecmds_seams::at_eoxact_on_commit_actions::set(AtEOXact_on_commit_actions);
     tablecmds_seams::at_eosubxact_on_commit_actions::set(AtEOSubXact_on_commit_actions);
     tablecmds_seams::remove_on_commit_action::set(remove_on_commit_action);
+    tablecmds_seams::set_relation_has_subclass::set(partition::SetRelationHasSubclass);
 }
 
 use mcx::Mcx;
@@ -255,9 +257,14 @@ pub fn DefineRelation<'mcx>(
         None
     };
 
+    let mut partition_notnulls: mcx::PgVec<'mcx, inheritance::InheritedNotNull<'mcx>> =
+        mcx::PgVec::new_in(mcx);
+    let mut partition_gendefs: mcx::PgVec<'mcx, (AttrNumber, types_nodes::Node<'mcx>)> =
+        mcx::PgVec::new_in(mcx);
     let descriptor = match parent_oid {
         // MergeAttributes, empty-column partition arm: the partition's
-        // columns are exactly the parent's (attislocal=false, attinhcount=1).
+        // columns are exactly the parent's (attislocal=false, attinhcount=1),
+        // so parent generation expressions ride unmapped.
         Some(parent_oid) => {
             assert!(stmt.tableElts.is_nil(), "loud in transformCreateStmt");
             let parent = table::table_open(mcx, parent_oid, types_rel::NoLock)?;
@@ -269,21 +276,51 @@ pub fn DefineRelation<'mcx>(
                 ));
             }
             if let Some(constr) = parent.rd_att.constr.as_deref() {
-                if constr.num_check > 0 || constr.has_generated_stored {
-                    unported("inherited CHECK/generated constraints on partitions");
+                if constr.num_check > 0 {
+                    unported("inherited CHECK constraints on partitions");
                 }
+            }
+            // The parent's catalogued not-null constraints ride to the
+            // partition (identical attnos: the descriptor is a full copy).
+            for cnode in pg_constraint::RelationGetNotNullConstraints(mcx, &parent, false)?.iter()
+            {
+                let c = cnode
+                    .as_variant::<types_nodes::rawnodes::Constraint>()
+                    .expect("Constraint");
+                let colname = c.keys.nth(0).as_string().expect("nn keys").sval;
+                let attnum = (0..parent.rd_att.natts as usize)
+                    .find(|&i| parent.rd_att.attr(i).attname.name_str() == colname.as_bytes())
+                    .map(|i| (i + 1) as AttrNumber)
+                    .unwrap_or_else(|| panic!("not-null column {colname:?} not found"));
+                partition_notnulls.push(inheritance::InheritedNotNull {
+                    name: c.conname.expect("catalogued nn constraint has a name"),
+                    attnum,
+                });
             }
             let mut desc = tupdesc::CreateTupleDescCopy(mcx, parent.descr())?;
             for i in 0..desc.natts as usize {
                 let parent_att = parent.rd_att.attr(i);
-                if parent_att.atthasdef {
-                    unported("inherited column defaults on partitions");
+                if parent_att.attisdropped {
+                    continue;
                 }
-                if parent_att.attidentity != 0 || parent_att.attgenerated != 0 {
-                    unported("identity/generated columns on partitions");
+                if parent_att.attidentity != 0 {
+                    unported("identity columns on partitions");
+                }
+                if parent_att.atthasdef {
+                    if parent_att.attgenerated == 0 {
+                        unported("inherited column defaults on partitions");
+                    }
+                    let adbin =
+                        pg_attrdef::GetAttrDefaultBin(mcx, parent_oid, (i + 1) as AttrNumber)?
+                            .unwrap_or_else(|| {
+                                panic!("default expression not found for attribute {}", i + 1)
+                            });
+                    let expr = readfuncs::stringToNode(mcx, &adbin)?;
+                    partition_gendefs.push(((i + 1) as AttrNumber, expr));
                 }
                 let att = desc.attr_mut(i);
                 att.attnotnull = parent_att.attnotnull;
+                att.attgenerated = parent_att.attgenerated;
                 att.attislocal = false;
                 att.attinhcount = 1;
                 tupdesc::populate_compact_attribute(&mut desc, i);
@@ -313,9 +350,25 @@ pub fn DefineRelation<'mcx>(
     )?;
 
     // C StoreConstraints runs inside heap_create_with_catalog: inherited
-    // cooked CHECKs land before pg_inherits/pg_depend rows.
+    // cooked CHECKs and generation expressions land before pg_inherits rows.
     if let Some(m) = &merged {
         inheritance::store_inherited_checks(mcx, relation_id, &m.checks)?;
+        if !m.gendefs.is_empty() {
+            xact::CommandCounterIncrement()?;
+            let rel = table::table_open(mcx, relation_id, types_rel::NoLock)?;
+            for &(attnum, expr) in m.gendefs.iter() {
+                pg_attrdef::StoreAttrDefault(mcx, &rel, attnum, expr)?;
+            }
+            table::table_close(rel, types_rel::NoLock)?;
+        }
+    }
+    if !partition_gendefs.is_empty() {
+        xact::CommandCounterIncrement()?;
+        let rel = table::table_open(mcx, relation_id, types_rel::NoLock)?;
+        for &(attnum, expr) in partition_gendefs.iter() {
+            pg_attrdef::StoreAttrDefault(mcx, &rel, attnum, expr)?;
+        }
+        table::table_close(rel, types_rel::NoLock)?;
     }
 
     register_on_commit_action(relation_id, stmt.oncommit);
@@ -352,11 +405,6 @@ pub fn DefineRelation<'mcx>(
         }
         catalog_heap::StorePartitionBound(mcx, &rel, &parent, bound)?;
         partition::store_catalog_inheritance1(mcx, relation_id, parent_oid)?;
-        if parent.rd_rel.relhasindex
-            && !relcache::RelationGetIndexList(mcx, parent_oid)?.is_empty()
-        {
-            unported("cloning parent indexes onto new partitions (DefineIndex recursion)");
-        }
         rel.close(types_rel::NoLock)?;
         parent.close(types_rel::NoLock)?;
         xact::CommandCounterIncrement()?;
@@ -370,7 +418,7 @@ pub fn DefineRelation<'mcx>(
             .as_variant::<types_nodes::rawnodes::PartitionSpec>()
             .expect("PartitionSpec");
         let rel = table::table_open(mcx, relation_id, types_rel::AccessExclusiveLock)?;
-        let info = partition::compute_partition_key(mcx, &rel, spec)?;
+        let info = partition::compute_partition_key(mcx, &rel, spec, query_string)?;
         catalog_heap::StorePartitionKey(
             mcx,
             &rel,
@@ -389,13 +437,51 @@ pub fn DefineRelation<'mcx>(
         xact::CommandCounterIncrement()?;
     }
 
+    // Create in the new partition every index (and index-backed constraint)
+    // the parent carries; triggers and FKs have no cloning lane yet.
+    if let Some(parent_oid) = parent_oid {
+        let parent = table::table_open(mcx, parent_oid, types_rel::NoLock)?;
+        let rel = table::table_open(mcx, relation_id, types_rel::NoLock)?;
+        let idxlist = relcache::RelationGetIndexList(mcx, parent_oid)?;
+        for &idxoid in idxlist.iter() {
+            let idx_rel = indexam::index_open(mcx, idxoid, types_rel::AccessShareLock)?;
+            let attmap = tupdesc::build_attrmap_by_name(mcx, rel.descr(), parent.descr())?;
+            let (idxstmt, constraint_oid) =
+                parse_utilcmd::generateClonedIndexStmt(mcx, None, &idx_rel, &attmap)?;
+            indexcmds_seams::define_index::call(
+                mcx,
+                relation_id,
+                &idxstmt,
+                InvalidOid,
+                idxoid,
+                constraint_oid,
+                false,
+                false,
+                false,
+                false,
+                false,
+            )?;
+            indexam::index_close(idx_rel, types_rel::AccessShareLock)?;
+        }
+        if parent.rd_hastriggers {
+            unported("CloneRowTriggersToPartition");
+        }
+        if rel_has_fk_constraints(mcx, parent_oid)? {
+            unported("CloneForeignKeyConstraints onto new partitions");
+        }
+        rel.close(types_rel::NoLock)?;
+        parent.close(types_rel::NoLock)?;
+    }
+
     // Merged columns re-number local attributes; raw defaults ride them.
     let raw_defaults = match &merged {
         Some(m) => constraints::collect_raw_defaults(mcx, &m.columns)?,
         None => constraints::collect_raw_defaults(mcx, &stmt.tableElts)?,
     };
-    let old_notnulls: &[inheritance::InheritedNotNull<'mcx>] =
-        merged.as_ref().map(|m| &m.notnulls[..]).unwrap_or(&[]);
+    let old_notnulls: &[inheritance::InheritedNotNull<'mcx>] = match &merged {
+        Some(m) => &m.notnulls[..],
+        None => &partition_notnulls[..],
+    };
     if !raw_defaults.is_empty()
         || !stmt.constraints.is_nil()
         || !stmt.nnconstraints.is_nil()
@@ -457,4 +543,88 @@ pub fn DefineRelation<'mcx>(
         xact::CommandCounterIncrement()?;
     }
     Ok(relation_id)
+}
+
+// CloneForeignKeyConstraints detector: any FK on or referencing the parent
+// means the cloning lane is required.
+fn rel_has_fk_constraints(mcx: Mcx<'_>, relid: Oid) -> PgResult<bool> {
+    let con_rel = table::table_open(
+        mcx,
+        types_core::CONSTRAINT_RELATION_ID,
+        types_rel::AccessShareLock,
+    )?;
+    let mut key = types_scan::scankey::ScanKeyData::empty();
+    key.sk_attno = pg_constraint::Anum_pg_constraint_conrelid;
+    key.sk_strategy = types_scan::scankey::BTEqualStrategyNumber;
+    key.sk_collation = 0;
+    key.sk_func = fmgr_seams::fmgr_info::call(types_core::fmgr::F_OIDEQ)
+        .unwrap_or_else(|e| panic!("fmgr_info(F_OIDEQ) failed: {e:?}"));
+    key.sk_argument = ::datum::Datum::from_oid(relid);
+    let mut scan = genam::systable_beginscan(
+        mcx,
+        &con_rel,
+        pg_constraint::ConstraintRelidTypidNameIndexId,
+        true,
+        None,
+        &[key],
+    )?;
+    let mut found = false;
+    let desc = con_rel.descr();
+    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+        let mut isnull = false;
+        // SAFETY: contype is a fixed NOT NULL pg_constraint column.
+        let contype = unsafe {
+            types_tuple::heap_getattr(
+                tup,
+                pg_constraint::Anum_pg_constraint_contype as i32,
+                desc,
+                &mut isnull,
+            )
+        }
+        .as_i8() as u8;
+        if contype == pg_constraint::CONSTRAINT_FOREIGN {
+            found = true;
+            break;
+        }
+    }
+    genam::systable_endscan(mcx, scan)?;
+    if !found {
+        // CloneFkReferenced side: FKs pointing AT the parent (confrelid);
+        // seqscan, no index on confrelid exists (C shape).
+        let mut scan =
+            genam::systable_beginscan(mcx, &con_rel, types_core::InvalidOid, false, None, &[])?;
+        while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+            let mut isnull = false;
+            // SAFETY (each): fixed NOT NULL pg_constraint columns.
+            let contype = unsafe {
+                types_tuple::heap_getattr(
+                    tup,
+                    pg_constraint::Anum_pg_constraint_contype as i32,
+                    desc,
+                    &mut isnull,
+                )
+            }
+            .as_i8() as u8;
+            if contype != pg_constraint::CONSTRAINT_FOREIGN {
+                continue;
+            }
+            // SAFETY: as above.
+            let confrelid = unsafe {
+                types_tuple::heap_getattr(
+                    tup,
+                    pg_constraint::Anum_pg_constraint_confrelid as i32,
+                    desc,
+                    &mut isnull,
+                )
+            }
+            .as_oid();
+            if confrelid == relid {
+                found = true;
+                break;
+            }
+        }
+        genam::systable_endscan(mcx, scan)?;
+    }
+    con_rel.close(types_rel::AccessShareLock)?;
+    Ok(found)
 }

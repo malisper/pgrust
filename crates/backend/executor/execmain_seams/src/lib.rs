@@ -9,7 +9,8 @@ use types_portal::{ParamListHandle, QueryDescHandle, QueryEnvHandle};
 use types_scan::sdir::ScanDirection;
 use types_core::instrument::{
     AggregateInstrumentation, BitmapHeapScanInstrumentation, HashInstrumentation,
-    IncrementalSortInfo, Instrumentation, TuplesortInstrumentation, TuplestoreInstrumentation,
+    IncrementalSortInfo, Instrumentation, MemoizeInstrumentation, TuplesortInstrumentation,
+    TuplestoreInstrumentation,
 };
 use types_snapshot::SnapshotData;
 use types_tuple::TupleDescData;
@@ -134,6 +135,13 @@ seam_core::seam!(
         query_desc: QueryDescHandle,
         plan_node_id: i32,
     ) -> Option<TuplestoreInstrumentation>
+);
+
+seam_core::seam!(
+    pub fn query_desc_memoize_instrument(
+        query_desc: QueryDescHandle,
+        plan_node_id: i32,
+    ) -> Option<MemoizeInstrumentation>
 );
 
 seam_core::seam!(

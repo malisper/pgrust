@@ -9,6 +9,7 @@ name = "opclasscmds"
 path = "src/lib.rs"
 
 [dependencies]
+opclasscmds_seams = { path = "../opclasscmds_seams" }
 mcx = { path = "../../../_support/mcx" }
 datum = { path = "../../../_support/types/datum" }
 types_core = { path = "../../../_support/types/types_core" }

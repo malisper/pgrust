@@ -26,7 +26,9 @@ use ::types_scan::scankey::{
 use ::types_scan::sdir::{ScanDirection, ScanDirectionIsBackward, ScanDirectionIsForward};
 use ::types_snapshot::SnapshotData;
 use ::types_storage::bufpage::PageRef;
-use ::types_tuple::itemptr::{ItemPointerCompare, ItemPointerData};
+use ::types_tuple::itemptr::{
+    ItemPointerCompare, ItemPointerData, ItemPointerGetBlockNumberNoCheck,
+};
 use ::types_tuple::TupleDescData;
 
 use crate::fcframe::OrderProcFrame;
@@ -38,7 +40,9 @@ use crate::itup::{
 use crate::page::{
     bt_getbuf, bt_getroot, bt_metaversion, bt_relandgetbuf, bt_relbuf, page_item, page_opaque,
 };
-use crate::utils::{bt_checkkeys, bt_killitems, bt_set_startikey};
+use crate::utils::{
+    bt_checkkeys, bt_killitems, bt_scanbehind_checkkeys, bt_set_startikey, bt_start_array_keys,
+};
 use crate::{check_for_interrupts, unported_phase2};
 
 const INVERT_COMPARE_RESULT: fn(i32) -> i32 = |r| if r < 0 { 1 } else { -r };
@@ -404,7 +408,10 @@ pub(crate) fn bt_first(ctx: &mut ScanCtx<'_, '_>, dir: ScanDirection) -> PgResul
         debug_assert!(!ctx.so.needPrimScan);
         return Ok(false);
     }
-    debug_assert!(ctx.so.numArrayKeys == 0, "array lane is phase 2");
+
+    if ctx.so.numArrayKeys != 0 && !ctx.so.needPrimScan {
+        crate::utils::bt_start_array_keys(ctx.so, dir);
+    }
 
     if rel.pgstat_enabled.get() {
         *ctx.xs_pgstat_index_scans += 1;
@@ -655,12 +662,19 @@ pub(crate) fn bt_next(ctx: &mut ScanCtx<'_, '_>, dir: ScanDirection) -> PgResult
 pub(crate) struct BtReadPageState<'p> {
     pub minoff: OffsetNumber,
     pub maxoff: OffsetNumber,
+    // High key (forward) / first non-pivot tuple (backward); None on the
+    // rightmost (leftmost) page. Borrowed from the pinned+locked page.
+    pub finaltup: Option<ITup>,
     pub page: PageRef<'p>,
     pub firstpage: bool,
     pub forcenonrequired: bool,
     pub startikey: i32,
+    pub offnum: OffsetNumber,
+    pub skip: OffsetNumber,
     pub continuescan: bool,
-    // C's finaltup/offnum/skip/rechecks fields drive the array lane (phase 2).
+    pub rechecks: i32,
+    pub targetdistance: i32,
+    pub nskipadvances: i32,
 }
 
 /// _bt_readpage: load all matching items from the currPos page.
@@ -696,23 +710,50 @@ fn bt_readpage(
     }
 
     let indnatts = rel.indnatts();
-    debug_assert!(so.numArrayKeys == 0, "array lane is phase 2");
+    let array_keys = so.numArrayKeys != 0;
     let minoff = P_FIRSTDATAKEY(&opaque);
     let maxoff = page.max_offset_number();
 
     let mut pstate = BtReadPageState {
         minoff,
         maxoff,
+        finaltup: None,
         page,
         firstpage,
         forcenonrequired: false,
         startikey: 0,
+        offnum: 0,
+        skip: 0,
         continuescan: true,
+        rechecks: 0,
+        targetdistance: 0,
+        nskipadvances: 0,
     };
 
     let mut item_index: i32;
 
     if ScanDirectionIsForward(dir) {
+        if array_keys {
+            if !P_RIGHTMOST(&opaque) {
+                let itup = page_item(&pstate.page, pstate.page.item_id(P_HIKEY));
+                pstate.finaltup = Some(itup);
+
+                // SAFETY: pinned+locked page item for this whole call.
+                if so.scanBehind
+                    && !unsafe {
+                        bt_scanbehind_checkkeys(rel, so, dir, itup, &mut ctx.frame)?
+                    }
+                {
+                    // Schedule another primitive index scan after all.
+                    so.currPos.moreRight = false;
+                    so.needPrimScan = true;
+                    return Ok(false);
+                }
+            }
+            so.scanBehind = false;
+            so.oppositeDirCheck = false;
+        }
+
         if !pstate.firstpage && minoff < maxoff {
             // SAFETY: page pinned+locked for this call.
             unsafe { bt_set_startikey(rel, so, &mut pstate, &mut ctx.frame)? };
@@ -734,8 +775,19 @@ fn bt_readpage(
             unsafe {
                 debug_assert!(!bt_tuple_is_pivot(itup));
 
-                let passes_quals =
-                    bt_checkkeys(rel, so, &mut pstate, false, itup, indnatts, &mut ctx.frame)?;
+                pstate.offnum = offnum;
+                let passes_quals = bt_checkkeys(
+                    rel, so, &mut pstate, array_keys, itup, indnatts, &mut ctx.frame,
+                )?;
+
+                if array_keys && pstate.skip != 0 {
+                    debug_assert!(!passes_quals && pstate.continuescan);
+                    debug_assert!(offnum < pstate.skip);
+                    debug_assert!(!pstate.forcenonrequired);
+                    offnum = pstate.skip;
+                    pstate.skip = 0;
+                    continue;
+                }
 
                 if passes_quals {
                     if !bt_tuple_is_posting(itup) {
@@ -766,11 +818,16 @@ fn bt_readpage(
 
         if pstate.continuescan && !so.scanBehind && !P_RIGHTMOST(&opaque) {
             let itup = page_item(&page, page.item_id(P_HIKEY));
+            // Reset arrays, per _bt_set_startikey contract.
+            if pstate.forcenonrequired {
+                bt_start_array_keys(so, dir);
+            }
+            pstate.forcenonrequired = false;
             pstate.startikey = 0; // _bt_set_startikey ignores P_HIKEY
             // SAFETY: pinned+locked page item.
             unsafe {
                 let truncatt = bt_tuple_get_natts(itup, indnatts);
-                bt_checkkeys(rel, so, &mut pstate, false, itup, truncatt, &mut ctx.frame)?;
+                bt_checkkeys(rel, so, &mut pstate, array_keys, itup, truncatt, &mut ctx.frame)?;
             }
         }
 
@@ -783,6 +840,27 @@ fn bt_readpage(
         so.currPos.lastItem = item_index - 1;
         so.currPos.itemIndex = 0;
     } else {
+        if array_keys {
+            if minoff <= maxoff && !P_LEFTMOST(&opaque) {
+                let itup = page_item(&pstate.page, pstate.page.item_id(minoff));
+                pstate.finaltup = Some(itup);
+
+                // SAFETY: pinned+locked page item for this whole call.
+                if so.scanBehind
+                    && !unsafe {
+                        bt_scanbehind_checkkeys(rel, so, dir, itup, &mut ctx.frame)?
+                    }
+                {
+                    // Schedule another primitive index scan after all.
+                    so.currPos.moreLeft = false;
+                    so.needPrimScan = true;
+                    return Ok(false);
+                }
+            }
+            so.scanBehind = false;
+            so.oppositeDirCheck = false;
+        }
+
         if !pstate.firstpage && minoff < maxoff {
             // SAFETY: page pinned+locked for this call.
             unsafe { bt_set_startikey(rel, so, &mut pstate, &mut ctx.frame)? };
@@ -808,8 +886,32 @@ fn bt_readpage(
             unsafe {
                 debug_assert!(!bt_tuple_is_pivot(itup));
 
-                let passes_quals =
-                    bt_checkkeys(rel, so, &mut pstate, false, itup, indnatts, &mut ctx.frame)?;
+                pstate.offnum = offnum;
+                if array_keys && offnum == minoff && pstate.forcenonrequired {
+                    // Reset arrays, per _bt_set_startikey contract.
+                    pstate.forcenonrequired = false;
+                    pstate.startikey = 0;
+                    bt_start_array_keys(so, dir);
+                }
+                let passes_quals = bt_checkkeys(
+                    rel, so, &mut pstate, array_keys, itup, indnatts, &mut ctx.frame,
+                )?;
+
+                if array_keys && so.scanBehind {
+                    // Done with this page, but not with the current primscan.
+                    debug_assert!(!passes_quals && pstate.continuescan);
+                    debug_assert!(!pstate.forcenonrequired);
+                    break;
+                }
+
+                if array_keys && pstate.skip != 0 {
+                    debug_assert!(!passes_quals && pstate.continuescan);
+                    debug_assert!(offnum > pstate.skip);
+                    debug_assert!(!pstate.forcenonrequired);
+                    offnum = pstate.skip;
+                    pstate.skip = 0;
+                    continue;
+                }
 
                 if passes_quals && tuple_alive {
                     if !bt_tuple_is_posting(itup) {
@@ -954,6 +1056,37 @@ fn bt_returnitem(ctx: &mut ScanCtx<'_, '_>) {
     }
 }
 
+/// Upcoming currPos TIDs on the same heap block as items[itemIndex], in
+/// consumption order (currPos.dir), excluding the current item. Pure read of
+/// the materialized page batch: killed-item filtering already happened at
+/// _bt_readpage, so plain continuation returns exactly these TIDs next.
+pub fn bt_peek_same_block_tids(
+    so: &BTScanOpaqueData<'_>,
+    out: &mut [MaybeUninit<ItemPointerData>],
+) -> usize {
+    let pos = &so.currPos;
+    if !BTScanPosIsValid(pos) || pos.itemIndex < pos.firstItem || pos.itemIndex > pos.lastItem {
+        return 0;
+    }
+    // SAFETY: indexes stay within [firstItem, lastItem]: written slots.
+    let cur = unsafe { pos.item(pos.itemIndex as usize) }.heapTid;
+    let blk = ItemPointerGetBlockNumberNoCheck(&cur);
+    let step: i32 = if ScanDirectionIsForward(pos.dir) { 1 } else { -1 };
+    let mut n = 0usize;
+    let mut j = pos.itemIndex + step;
+    while j >= pos.firstItem && j <= pos.lastItem && n < out.len() {
+        // SAFETY: j within [firstItem, lastItem] (loop bound).
+        let tid = unsafe { pos.item(j as usize) }.heapTid;
+        if ItemPointerGetBlockNumberNoCheck(&tid) != blk {
+            break;
+        }
+        out[n].write(tid);
+        n += 1;
+        j += step;
+    }
+    n
+}
+
 /// _bt_steppage.
 fn bt_steppage(ctx: &mut ScanCtx<'_, '_>, dir: ScanDirection) -> PgResult<bool> {
     let so = &mut *ctx.so;
@@ -971,8 +1104,14 @@ fn bt_steppage(ctx: &mut ScanCtx<'_, '_>, dir: ScanDirection) -> PgResult<bool> 
         so.markPos.itemIndex = so.markItemIndex;
         so.markItemIndex = -1;
 
+        // btrestrpos re-starts the arrays; leave the marked page's
+        // moreRight/moreLeft open so the restored scan can keep reading.
         if so.needPrimScan {
-            unported_phase2("mark/restore across primitive index scans");
+            if ScanDirectionIsForward(so.currPos.dir) {
+                so.markPos.moreRight = true;
+            } else {
+                so.markPos.moreLeft = true;
+            }
         }
     }
 
@@ -1056,7 +1195,10 @@ fn bt_readfirstpage(
     ctx.so.markItemIndex = -1; // ditto
 
     if ctx.so.needPrimScan {
-        unported_phase2("primitive rescans (_bt_readfirstpage)");
+        debug_assert!(ctx.so.numArrayKeys > 0);
+        ctx.so.currPos.moreLeft = true;
+        ctx.so.currPos.moreRight = true;
+        ctx.so.needPrimScan = false;
     } else if ScanDirectionIsForward(dir) {
         ctx.so.currPos.moreLeft = false;
         ctx.so.currPos.moreRight = true;

@@ -67,7 +67,7 @@ fn warn(msg: String, sqlstate: types_error::SqlState) -> PgResult<()> {
 }
 
 // get_rolespec_oid (acl.c).
-fn get_rolespec_oid(role: &RoleSpec<'_>, missing_ok: bool) -> PgResult<Oid> {
+pub fn get_rolespec_oid(role: &RoleSpec<'_>, missing_ok: bool) -> PgResult<Oid> {
     use RoleSpecType::*;
     match role.roletype {
         ROLESPEC_CSTRING => {
@@ -357,7 +357,9 @@ fn object_names_to_oids<'mcx>(
     objtype: ObjectType,
     objnames: &types_nodes::list::NodeList<'_>,
 ) -> PgResult<PgVec<'mcx, Oid>> {
-    debug_assert!(matches!(objtype, ObjectType::OBJECT_TABLE | ObjectType::OBJECT_SEQUENCE));
+    if !matches!(objtype, ObjectType::OBJECT_TABLE | ObjectType::OBJECT_SEQUENCE) {
+        panic!("object_names_to_oids (aclchk.c): objtype {objtype:?} unported (function-grant lane)");
+    }
     let mut objects: PgVec<'mcx, Oid> = mcx::vec_with_capacity_in(mcx, objnames.len())?;
     for cell in objnames.iter() {
         let relvar = cell.as_range_var().expect("RangeVar");
@@ -540,13 +542,14 @@ fn exec_grant_relation<'mcx>(mcx: Mcx<'mcx>, istmt: &mut InternalGrant<'_, '_>) 
             // is unported.
 
             pg_depend::updateAclDependencies(
+                mcx,
                 RELATION_RELATION_ID,
                 rel_oid,
                 0,
                 owner_id,
                 old_members.as_deref().unwrap_or(&[]),
                 &new_members,
-            );
+            )?;
         } else {
             unlock_class_tuple(&otid)?;
         }
@@ -720,13 +723,14 @@ fn exec_grant_attribute<'mcx>(
         catalog_indexing::CatalogTupleUpdate(mcx, att_relation, &otid, &mut newtuple)?;
 
         pg_depend::updateAclDependencies(
+            mcx,
             RELATION_RELATION_ID,
             rel_oid,
             attnum as i32,
             owner_id,
             old_members.as_deref().unwrap_or(&[]),
             &new_members,
-        );
+        )?;
     }
 
     ReleaseSysCache(attr_tuple);

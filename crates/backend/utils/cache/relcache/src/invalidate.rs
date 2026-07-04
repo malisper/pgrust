@@ -23,6 +23,7 @@ pub(crate) fn RelationInvalidateRelation(rel: &RelationData<'static>) {
     *rel.rd_indexlist.borrow_mut() = None;
     *rel.rd_trigdesc.borrow_mut() = None;
     crate::rules::forget(rel.rd_id);
+    crate::rowsecurity::forget(rel.rd_id);
     crate::indexattr::forget(rel.rd_id);
     crate::statextlist::forget(rel.rd_id);
 }
@@ -285,6 +286,7 @@ pub fn RelationForgetRelation(rid: Oid) -> PgResult<()> {
 pub fn RelationCacheInvalidateEntry(relationId: Oid) -> PgResult<()> {
     // The rules side-cache can hold relids that never entered id_cache.
     crate::rules::forget(relationId);
+    crate::rowsecurity::forget(relationId);
     crate::indexattr::forget(relationId);
     crate::statextlist::forget(relationId);
     let cached = with_state(|st| st.id_cache.contains_key(&relationId));
@@ -310,6 +312,7 @@ pub fn RelationCacheInvalidate(debug_discard: bool) -> PgResult<()> {
     relmapper_seams::relation_map_invalidate_all::call()?;
     with_state(|st| {
         st.rules_cache.clear();
+        st.policies_cache.clear();
         st.indexattr_cache.clear();
         st.statext_cache.clear();
     });

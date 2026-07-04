@@ -579,51 +579,12 @@ pub fn fc_int8_avg(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRes
 
 
 pub fn fc_numerictypmodin(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    use ::types_error::{PgError, ERRCODE_INVALID_PARAMETER_VALUE};
     let mcx = fcinfo.result_mcx();
     // SAFETY: catalog arg 0 of numerictypmodin is a non-null cstring[] datum
     // (strict fn); typenameTypeMod builds it flat (never toasted).
     let arr = unsafe { fcinfo.arg_varlena_raw(0) };
     let tl = ::arrayfuncs::array_get_integer_typmods(mcx, arr)?;
-
-    #[cold]
-    #[inline(never)]
-    fn param_err(msg: String) -> PgResult<Datum> {
-        Err(Box::new(
-            PgError::error(msg).with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE),
-        ))
-    }
-
-    let typmod = match tl.len() {
-        2 => {
-            if tl[0] < 1 || tl[0] > crate::NUMERIC_MAX_PRECISION {
-                return param_err(format!(
-                    "NUMERIC precision {} must be between 1 and {}",
-                    tl[0], crate::NUMERIC_MAX_PRECISION
-                ));
-            }
-            if tl[1] < crate::NUMERIC_MIN_SCALE || tl[1] > crate::NUMERIC_MAX_SCALE {
-                return param_err(format!(
-                    "NUMERIC scale {} must be between {} and {}",
-                    tl[1], crate::NUMERIC_MIN_SCALE, crate::NUMERIC_MAX_SCALE
-                ));
-            }
-            crate::ops::make_numeric_typmod(tl[0], tl[1])
-        }
-        1 => {
-            if tl[0] < 1 || tl[0] > crate::NUMERIC_MAX_PRECISION {
-                return param_err(format!(
-                    "NUMERIC precision {} must be between 1 and {}",
-                    tl[0], crate::NUMERIC_MAX_PRECISION
-                ));
-            }
-            crate::ops::make_numeric_typmod(tl[0], 0)
-        }
-        _ => {
-            return param_err(String::from("invalid NUMERIC type modifier"));
-        }
-    };
-    Ok(Datum::from_i32(typmod))
+    Ok(Datum::from_i32(crate::ops::numerictypmodin_core(&tl)?))
 }
 
 pub fn fc_numeric_round(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {

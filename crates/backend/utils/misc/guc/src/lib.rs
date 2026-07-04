@@ -243,6 +243,12 @@ pub fn GetConfigOption(
     .expect("GUC store not initialized")
 }
 
+// GetConfigOptionFlags (guc.c:4438).
+pub fn GetConfigOptionFlags(name: &str, missing_ok: bool) -> PgResult<i32> {
+    store::with_store(|reg| get_config_option_flags(reg, name, missing_ok))
+        .expect("GUC store not initialized")
+}
+
 // GetConfigOptionResetString (guc.c:4405), minus the same privilege gate.
 pub fn GetConfigOptionResetString(name: &str) -> Option<String> {
     store::with_store(|reg| reg.find_option(name).and_then(reset_value_string))

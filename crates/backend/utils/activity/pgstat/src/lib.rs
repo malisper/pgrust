@@ -1,8 +1,9 @@
 // backend-utils-activity-pgstat — pgstat.c's per-backend half: the pending-entry
 // model, pgstat_report_stat batching, the relation/xact/database/slru/
 // checkpointer counting layers, and the shared store the flush paths apply
-// into plus its fetch/snapshot readers. Still unported: stats reset, 2PC
-// record registration, and connstat session times (needs MyBackendType).
+// into plus its fetch/snapshot readers and variable-kind reset. Still
+// unported: fixed-kind reset, 2PC record registration, and connstat session
+// times (needs MyBackendType).
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 #![allow(non_camel_case_types)]
@@ -20,9 +21,39 @@ pub mod xact;
 pub use database::pgstat_fetch_stat_dbentry;
 pub use pending::pgstat_clear_snapshot;
 pub use relation::{pgstat_fetch_stat_tabentry, pgstat_fetch_stat_tabentry_ext};
-pub use shmem::{pgstat_have_entry, PgStat_StatTabEntry};
+pub use shmem::{
+    pgstat_get_stat_snapshot_timestamp, pgstat_have_entry, pgstat_reset, pgstat_reset_counters,
+    pgstat_reset_of_kind, PgStat_StatTabEntry,
+};
 
 pub type PgStat_Counter = i64;
+
+pub fn pgstat_get_kind_from_str(kind_str: &str) -> types_error::PgResult<pending::PgStat_Kind> {
+    use pending::*;
+    const NAMES: [(&str, PgStat_Kind); 12] = [
+        ("database", PGSTAT_KIND_DATABASE),
+        ("relation", PGSTAT_KIND_RELATION),
+        ("function", PGSTAT_KIND_FUNCTION),
+        ("replslot", PGSTAT_KIND_REPLSLOT),
+        ("subscription", PGSTAT_KIND_SUBSCRIPTION),
+        ("backend", PGSTAT_KIND_BACKEND),
+        ("archiver", PGSTAT_KIND_ARCHIVER),
+        ("bgwriter", PGSTAT_KIND_BGWRITER),
+        ("checkpointer", PGSTAT_KIND_CHECKPOINTER),
+        ("io", PGSTAT_KIND_IO),
+        ("slru", PGSTAT_KIND_SLRU),
+        ("wal", PGSTAT_KIND_WAL),
+    ];
+    for (name, kind) in NAMES {
+        if kind_str.eq_ignore_ascii_case(name) {
+            return Ok(kind);
+        }
+    }
+    Err(Box::new(
+        types_error::PgError::error(format!("invalid statistics kind: \"{kind_str}\""))
+            .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE),
+    ))
+}
 
 pub const PGSTAT_FETCH_CONSISTENCY_NONE: i32 = 0;
 pub const PGSTAT_FETCH_CONSISTENCY_CACHE: i32 = 1;

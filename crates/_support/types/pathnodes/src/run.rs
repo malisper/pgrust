@@ -369,21 +369,21 @@ impl<'mcx> PlannerRun<'mcx> {
     }
 }
 
-// grouping_sets_data (planner.c); hash_sets_idx omitted (its consumers are
-// the hashed-strategy legs, which panic before reading it).
+// grouping_sets_data (planner.c).
 pub struct GroupingSetsData<'mcx> {
     pub rollups: PgVec<'mcx, crate::RollupData<'mcx>>,
     pub any_hashable: bool,
     pub unsortable_refs: PgVec<'mcx, u32>,
     pub unhashable_refs: PgVec<'mcx, u32>,
     pub unsortable_sets: PgVec<'mcx, crate::GroupingSetData<'mcx>>,
+    pub hash_sets_idx: PgVec<'mcx, PgVec<'mcx, i32>>,
     pub tleref_to_colnum_map: PgVec<'mcx, i32>,
     pub dNumHashGroups: f64,
 }
 
 mcx::forget_safe_struct!(GroupingSetsData<'_> {
     rollups, any_hashable, unsortable_refs, unhashable_refs, unsortable_sets,
-    tleref_to_colnum_map, dNumHashGroups,
+    hash_sets_idx, tleref_to_colnum_map, dNumHashGroups,
 });
 
 

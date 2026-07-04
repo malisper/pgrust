@@ -185,6 +185,8 @@ fn install_fake_bufmgr() {
     multixact_seams::multi_xact_id_set_oldest_member::set(|| Ok(()));
     multixact_seams::multi_xact_id_is_running::set(|_, _| Ok(false));
     predicate_seams::check_for_serializable_conflict_in::set(|_rel, _tid, _blk| Ok(()));
+    predicate_seams::check_table_for_serializable_conflict_in::set(|_rel| Ok(()));
+    predicate_seams::transfer_predicate_locks_to_heap_relation::set(|_rel| Ok(()));
     predicate_seams::register_predicate_locking_xid::set(|_| Ok(()));
     pruneheap_seams::heap_page_prune_opt::set(|_r, _b| Ok(()));
     freespace_seams::get_page_with_free_space::set(|_rel, _need| Ok(InvalidBlockNumber));

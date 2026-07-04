@@ -12,6 +12,7 @@ path = "src/lib.rs"
 operatorcmds = { path = "../../backend/commands/operatorcmds" }
 opclasscmds = { path = "../../backend/commands/opclasscmds" }
 sequence = { path = "../../backend/commands/sequence" }
+extension = { path = "../../backend/commands/extension" }
 detoast = { path = "../../backend/access/common/detoast" }
 heaptoast = { path = "../../backend/access/heap/heaptoast" }
 printtup = { path = "../../backend/access/common/printtup" }
@@ -38,8 +39,13 @@ xlogreader = { path = "../../backend/access/transam/xlogreader" }
 xlogrecovery = { path = "../../backend/access/transam/xlogrecovery" }
 xlogutils = { path = "../../backend/access/transam/xlogutils" }
 aclchk = { path = "../../backend/catalog/aclchk" }
+rls = { path = "../../backend/utils/misc/rls" }
+commands_policy = { path = "../../backend/commands/policy" }
+be_fsstubs = { path = "../../backend/libpq/be_fsstubs" }
+large_object = { path = "../../backend/storage/large_object" }
 catalog_namespace = { path = "../../backend/catalog/catalog_namespace" }
 catalog_dependency = { path = "../../backend/catalog/catalog_dependency" }
+catalog_objectaddress = { path = "../../backend/catalog/objectaddress" }
 commands_cluster = { path = "../../backend/commands/cluster" }
 tablecmds = { path = "../../backend/commands/tablecmds" }
 clauses = { path = "../../backend/optimizer/util/clauses" }
@@ -68,8 +74,11 @@ nodelockrows = { path = "../../backend/executor/nodelockrows" }
 nodenestloop = { path = "../../backend/executor/nodenestloop" }
 nodemergejoin = { path = "../../backend/executor/nodemergejoin" }
 nodematerial = { path = "../../backend/executor/nodematerial" }
+nodememoize = { path = "../../backend/executor/nodememoize" }
 tuplesort = { path = "../../backend/utils/sort/tuplesort" }
 auth = { path = "../../backend/libpq/auth" }
+auth_scram = { path = "../../backend/libpq/auth_scram" }
+crypt = { path = "../../backend/libpq/crypt" }
 be_secure = { path = "../../backend/libpq/be_secure" }
 hba = { path = "../../backend/libpq/hba" }
 libpq_pqsignal = { path = "../../backend/libpq/libpq_pqsignal" }
@@ -114,6 +123,8 @@ predicate = { path = "../../backend/storage/lmgr/predicate" }
 parallel = { path = "../../backend/access/transam/parallel" }
 spi = { path = "../../backend/executor/spi" }
 sql_functions = { path = "../../backend/executor/sql_functions" }
+pg_proc = { path = "../../backend/catalog/pg_proc" }
+regress_lib = { path = "../../backend/test_regress" }
 plpgsql = { path = "../../pl/plpgsql" }
 trigger = { path = "../../backend/commands/trigger" }
 ri_triggers = { path = "../../backend/utils/adt/ri_triggers" }
@@ -144,6 +155,8 @@ gistproc = { path = "../../backend/access/gist/gistproc" }
 brin_minmax_multi = { path = "../../backend/access/brin/brin_minmax_multi" }
 adt_acl = { path = "../../backend/utils/adt/acl" }
 adt_misc = { path = "../../backend/utils/adt/adt_misc" }
+partitionfuncs = { path = "../../backend/utils/adt/partitionfuncs" }
+genfile = { path = "../../backend/utils/adt/genfile" }
 adt_rowtypes = { path = "../../backend/utils/adt/rowtypes" }
 adt_timestamp = { path = "../../backend/utils/adt/adt_timestamp" }
 pgtz = { path = "../../backend/timezone/pgtz" }
@@ -175,6 +188,7 @@ guc_tables = { path = "../../backend/utils/misc/guc_tables" }
 guc = { path = "../../backend/utils/misc/guc" }
 guc_funcs = { path = "../../backend/utils/misc/guc_funcs" }
 variable = { path = "../../backend/commands/variable" }
+user = { path = "../../backend/commands/user" }
 ps_status = { path = "../../backend/utils/misc/ps_status" }
 queryenvironment = { path = "../../backend/utils/misc/queryenvironment" }
 stack_depth = { path = "../../backend/utils/misc/stack_depth" }
@@ -187,6 +201,7 @@ snapmgr = { path = "../../backend/utils/time/snapmgr" }
 pg_prng = { path = "../../common/pg_prng" }
 regex_core = { path = "../../backend/regex/regex_core" }
 adt_regexp = { path = "../../backend/utils/adt/regexp" }
+twophase = { path = "../../backend/access/transam/twophase" }
 twophase_config = { path = "../../backend/access/transam/twophase_config" }
 pg_sema = { path = "../../backend/port/pg_sema" }
 autovacuum = { path = "../../backend/postmaster/autovacuum" }

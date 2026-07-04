@@ -3,7 +3,8 @@
 //! C divergences: the mutator is identity-preserving (walker.rs module doc);
 //! `root` is unthreaded — its boundParams read is an explicit ParamListHandle
 //! argument here; invalItems recording is not modeled (the evaluate_expr seam
-//! installer must record invalItems).
+//! installer must record invalItems); inline_function likewise skips
+//! record_plan_function_dependency (same root-unthreaded gap).
 
 use datum::Datum;
 use lsyscache::get_typlenbyval;
@@ -38,6 +39,23 @@ struct EceContext<'mcx> {
     // C context->case_val: the constant test value of the innermost
     // simple-form CASE being simplified (save/restore in the CASE arm).
     case_val: core::cell::Cell<Option<Node<'mcx>>>,
+    // C context->active_fns: SQL functions currently being inlined
+    // (inline_function's recursion guard).
+    active_fns: core::cell::RefCell<mcx::PgVec<'mcx, Oid>>,
+}
+
+fn ece_context<'mcx>(
+    mcx: Mcx<'mcx>,
+    estimate: bool,
+    bound_params: ParamListHandle,
+) -> EceContext<'mcx> {
+    EceContext {
+        mcx,
+        estimate,
+        bound_params,
+        case_val: core::cell::Cell::new(None),
+        active_fns: core::cell::RefCell::new(mcx::PgVec::new_in(mcx)),
+    }
 }
 
 pub fn eval_const_expressions<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>) -> PgResult<Node<'mcx>> {
@@ -49,8 +67,7 @@ pub fn eval_const_expressions_with_params<'mcx>(
     node: Node<'mcx>,
     bound_params: ParamListHandle,
 ) -> PgResult<Node<'mcx>> {
-    let cx =
-        EceContext { mcx, estimate: false, bound_params, case_val: core::cell::Cell::new(None) };
+    let cx = ece_context(mcx, false, bound_params);
     Ok(ece_mutator(node, &cx)?.unwrap_or(node))
 }
 
@@ -58,12 +75,7 @@ pub fn estimate_expression_value<'mcx>(
     mcx: Mcx<'mcx>,
     node: Node<'mcx>,
 ) -> PgResult<Node<'mcx>> {
-    let cx = EceContext {
-        mcx,
-        estimate: true,
-        bound_params: ParamListHandle::NULL,
-        case_val: core::cell::Cell::new(None),
-    };
+    let cx = ece_context(mcx, true, ParamListHandle::NULL);
     Ok(ece_mutator(node, &cx)?.unwrap_or(node))
 }
 
@@ -112,8 +124,9 @@ fn substitute_bound_param<'mcx>(
     )?))
 }
 
-// datumCopy (datum.c) scoped to bound-parameter substitution; by-ref sources
-// here are input-function results (4B-header varlenas, never toast pointers).
+// datumCopy (datum.c) scoped to bound-parameter substitution; by-ref varlena
+// sources carry any header form (fmgr_sql binds raw tuple datums: short 1B
+// headers and toast pointers included), so the -1 arm is C's VARSIZE_ANY.
 fn datum_copy_in<'mcx>(mcx: Mcx<'mcx>, value: Datum, typlen: i16) -> PgResult<Datum> {
     let p = value.as_usize() as *const u8;
     if p.is_null() {
@@ -121,8 +134,27 @@ fn datum_copy_in<'mcx>(mcx: Mcx<'mcx>, value: Datum, typlen: i16) -> PgResult<Da
     }
     let size = match typlen {
         -1 => {
-            // SAFETY: non-null by-ref varlena datum (see above).
-            unsafe { datum::VarlenaRef::from_ptr(p).varsize() }
+            // SAFETY: non-null by-ref varlena datum, readable for its
+            // header-declared (VARSIZE_ANY) size.
+            unsafe {
+                let b0 = *p;
+                if b0 == 0x01 {
+                    // VARHDRSZ_EXTERNAL + VARTAG_SIZE (postgres.h); the toast
+                    // pointer itself is copied, exactly datumCopy.
+                    2 + match *p.add(1) {
+                        18 => 16,
+                        1 => 8,
+                        2 | 3 => panic!(
+                            "datum_copy_in: expanded-object flatten (EOH_flatten_into) unported"
+                        ),
+                        tag => panic!("datum_copy_in: unknown vartag {tag}"),
+                    }
+                } else if b0 & 0x01 != 0 {
+                    (b0 as usize >> 1) & 0x7F
+                } else {
+                    datum::VarlenaRef::from_ptr(p).varsize()
+                }
+            }
         }
         -2 => {
             let mut n = 0usize;
@@ -144,6 +176,7 @@ fn datum_copy_in<'mcx>(mcx: Mcx<'mcx>, value: Datum, typlen: i16) -> PgResult<Da
 }
 
 fn ece_mutator<'mcx>(node: Node<'mcx>, cx: &EceContext<'mcx>) -> PgResult<Option<Node<'mcx>>> {
+    stack_depth::check_stack_depth()?;
     match node.node_tag() {
         NodeTag::T_Param => substitute_bound_param(node, cx),
         NodeTag::T_RelabelType => {
@@ -621,6 +654,93 @@ fn ece_mutator<'mcx>(node: Node<'mcx>, cx: &EceContext<'mcx>) -> PgResult<Option
             }
             Ok(new)
         }
+        NodeTag::T_ArrayExpr => {
+            let new = expression_tree_mutator(cx.mcx, node, &mut |n| ece_mutator(n, cx))?;
+            let eff = new.unwrap_or(node);
+            if all_arguments_const(eff)? {
+                let a = eff.as_array_expr().unwrap();
+                return clauses_seams::evaluate_expr::call(
+                    cx.mcx,
+                    eff,
+                    a.array_typeid,
+                    -1,
+                    a.array_collid,
+                )
+                .map(Some);
+            }
+            Ok(new)
+        }
+        NodeTag::T_ScalarArrayOpExpr => {
+            let new = expression_tree_mutator(cx.mcx, node, &mut |n| ece_mutator(n, cx))?;
+            let eff = new.unwrap_or(node);
+            let sa = eff.as_scalar_array_op_expr().unwrap();
+            // set_sa_opfuncid, without C's memo write-back (walker.rs).
+            let opfuncid =
+                if sa.opfuncid == 0 { lsyscache::get_opcode(sa.opno)? } else { sa.opfuncid };
+            // ece_function_is_safe: non-volatile folds (estimation lane off).
+            const PROVOLATILE_VOLATILE: i8 = b'v' as i8;
+            if lsyscache::func_volatile(opfuncid)? != PROVOLATILE_VOLATILE
+                && all_arguments_const(eff)?
+            {
+                let refolded = if opfuncid != sa.opfuncid || new.is_none() {
+                    Node::mk(
+                        cx.mcx,
+                        types_nodes::ScalarArrayOpExpr {
+                            opno: sa.opno,
+                            opfuncid,
+                            hashfuncid: sa.hashfuncid,
+                            negfuncid: sa.negfuncid,
+                            useOr: sa.useOr,
+                            inputcollid: sa.inputcollid,
+                            args: sa.args.clone_in(cx.mcx)?,
+                            location: sa.location,
+                        },
+                    )?
+                } else {
+                    eff
+                };
+                return clauses_seams::evaluate_expr::call(
+                    cx.mcx,
+                    refolded,
+                    types_core::catalog::BOOLOID,
+                    -1,
+                    InvalidOid,
+                )
+                .map(Some);
+            }
+            if opfuncid != sa.opfuncid {
+                return Ok(Some(Node::mk(
+                    cx.mcx,
+                    types_nodes::ScalarArrayOpExpr {
+                        opno: sa.opno,
+                        opfuncid,
+                        hashfuncid: sa.hashfuncid,
+                        negfuncid: sa.negfuncid,
+                        useOr: sa.useOr,
+                        inputcollid: sa.inputcollid,
+                        args: sa.args.clone_in(cx.mcx)?,
+                        location: sa.location,
+                    },
+                )?));
+            }
+            Ok(new)
+        }
+        NodeTag::T_SubscriptingRef => {
+            let new = expression_tree_mutator(cx.mcx, node, &mut |n| ece_mutator(n, cx))?;
+            let eff = new.unwrap_or(node);
+            let sr = eff.as_subscripting_ref().unwrap();
+            if sr.refassgnexpr.is_none() && all_arguments_const(eff)? {
+                return clauses_seams::evaluate_expr::call(
+                    cx.mcx,
+                    eff,
+                    sr.refrestype,
+                    sr.reftypmod,
+                    sr.refcollid,
+                )
+                .map(Some);
+            }
+            Ok(new)
+        }
         NodeTag::T_NullTest => {
             use types_nodes::primnodes::{NullTest, NullTestType};
             let nt = node.as_null_test().unwrap();
@@ -860,7 +980,7 @@ fn func_lookup_failed(funcid: Oid) -> Box<PgError> {
 /// Returns (simplified-expression,
 /// possibly-rewritten args); `None` args = unchanged. The executor-evaluation
 /// leg rides the clauses_seams::evaluate_expr seam; a prosupport
-/// SupportRequestSimplify rewrite and SQL-function inlining defer loud.
+/// SupportRequestSimplify rewrite defers loud.
 #[allow(clippy::too_many_arguments)]
 fn simplify_function<'mcx>(
     cx: &EceContext<'mcx>,
@@ -923,10 +1043,99 @@ fn simplify_function<'mcx>(
             );
         }
     }
-    // DIVERGENCE: C's inline_function inlines simple SQL-language bodies for
-    // non-builtin funcids here; unported, so SQL functions always execute via
-    // the fmgr call. Non-SQL languages match C (inline_function returns NULL).
+    let newexpr = match newexpr {
+        None if allow_non_const => inline_function(
+            cx,
+            funcid,
+            result_type,
+            result_collid,
+            input_collid,
+            eff_args,
+            &shape,
+        )?,
+        e => e,
+    };
     Ok((newexpr, new_args))
+}
+
+const PROKIND_FUNCTION: i8 = b'f' as i8;
+const ACL_EXECUTE: u64 = 1 << 7;
+const ACLCHECK_OK: i32 = 0;
+
+// inline_function (clauses.c): expand a simple SQL-language function call
+// in place. The parser-dependent middle (body parse/analyze, simple-SELECT
+// gate, check_sql_fn_retval, parameter substitution) rides the
+// inline_sql_function seam; record_plan_function_dependency is not modeled
+// (module doc, same gap as invalItems).
+fn inline_function<'mcx>(
+    cx: &EceContext<'mcx>,
+    funcid: Oid,
+    result_type: Oid,
+    result_collid: Oid,
+    input_collid: Oid,
+    args: &NodeList<'mcx>,
+    shape: &PgProcShape,
+) -> PgResult<Option<Node<'mcx>>> {
+    if shape.prolang != fmgr_core::SQL_LANGUAGE_ID
+        || shape.prokind != PROKIND_FUNCTION
+        || shape.prosecdef
+        || shape.proretset
+        || shape.prorettype == RECORDOID
+        || !shape.proconfig_isnull
+        || shape.pronargs as usize != args.len()
+    {
+        return Ok(None);
+    }
+    if cx.active_fns.borrow().contains(&funcid) {
+        return Ok(None);
+    }
+    let userid = miscinit_seams::get_user_id::call();
+    let aclresult = aclchk_seams::object_aclcheck::call(
+        types_core::catalog::PROCEDURE_RELATION_ID,
+        funcid,
+        userid,
+        ACL_EXECUTE,
+    )?;
+    if aclresult != ACLCHECK_OK {
+        return Ok(None);
+    }
+    let Some(newexpr) = clauses_seams::inline_sql_function::call(
+        cx.mcx,
+        funcid,
+        result_type,
+        result_collid,
+        input_collid,
+        args,
+    )?
+    else {
+        return Ok(None);
+    };
+    {
+        let mut af = cx.active_fns.borrow_mut();
+        af.try_reserve(1).map_err(|_| cx.mcx.oom(1))?;
+        af.push(funcid);
+    }
+    let result = ece_mutator(newexpr, cx);
+    cx.active_fns.borrow_mut().pop();
+    // C's sql_inline_error_callback is still installed across the recursive
+    // re-simplification; the parse-region legs run inside the seam body.
+    let result = result.map_err(|e| sql_inline_recursion_error(cx.mcx, funcid, e))?;
+    Ok(Some(result.unwrap_or(newexpr)))
+}
+
+#[cold]
+fn sql_inline_recursion_error<'mcx>(
+    mcx: Mcx<'mcx>,
+    funcid: Oid,
+    e: Box<PgError>,
+) -> Box<PgError> {
+    let mut err = *e;
+    let name = match lsyscache::function::get_func_name(mcx, funcid) {
+        Ok(Some(n)) => n.as_str().to_string(),
+        _ => funcid.to_string(),
+    };
+    err.add_context_line(format!("SQL function \"{name}\" during inlining"));
+    Box::new(err)
 }
 
 /// Pass-through case (positional, no defaults) returns args unchanged;

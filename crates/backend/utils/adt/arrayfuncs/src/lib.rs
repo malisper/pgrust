@@ -5,6 +5,8 @@ extern crate alloc;
 pub mod build;
 pub mod builtins;
 pub mod construct;
+pub mod element;
+pub mod expanded;
 pub mod foundation;
 pub mod io;
 
@@ -19,5 +21,10 @@ pub use construct::{
 pub use foundation::{
     arr_data_offset, arr_dim, arr_elemtype, arr_hasnull, arr_lbound, arr_ndim, arr_size,
     read_dims_lbounds, MAXDIM,
+};
+pub use element::{array_get_element, array_get_slice, array_set_element};
+pub use expanded::{
+    datum_get_expanded_array, datum_get_expanded_array_x, deconstruct_expanded_array,
+    expand_array, ArrayMetaState, ExpandedArrayHeader, EA_MAGIC,
 };
 pub use io::{array_in, array_out, array_recv, array_send, ArrayIoMeta};

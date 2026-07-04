@@ -23,6 +23,7 @@ pmsignal = { path = "../../../storage/ipc/pmsignal" }
 slru = { path = "../slru" }
 transam_seams = { path = "../transam_seams" }
 multixact_seams = { path = "../multixact_seams" }
+twophase_seams = { path = "../twophase_seams" }
 varsup_seams = { path = "../varsup_seams" }
 transam_xlog_seams = { path = "../transam_xlog_seams" }
 xloginsert_seams = { path = "../xloginsert_seams" }

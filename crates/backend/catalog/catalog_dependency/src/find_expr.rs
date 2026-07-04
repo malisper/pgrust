@@ -192,6 +192,10 @@ fn walker<'w, 'mcx: 'w>(
             }
             walker(relab.arg, context)
         }
+        // C has no find_expr_references_walker case for SQLValueFunction: it
+        // falls through to expression_tree_walker as a leaf (built-in pinned
+        // result types; no dependency recorded).
+        NodeTag::T_SQLValueFunction => Ok(()),
         NodeTag::T_BoolExpr => walk_list(&node.as_bool_expr().unwrap().args, context),
         NodeTag::T_TargetEntry => walker(node.as_target_entry().unwrap().expr, context),
         NodeTag::T_RangeTblRef => Ok(()),

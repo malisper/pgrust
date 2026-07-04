@@ -19,6 +19,7 @@ adt_domains = { path = "../../adt/domains" }
 arrayfuncs = { path = "../../adt/arrayfuncs" }
 adt_scalar = { path = "../../adt/scalar" }
 sequence_seams = { path = "../../../commands/sequence_seams" }
+extension_seams = { path = "../../../commands/extension_seams" }
 adt_regproc = { path = "../../adt/regproc" }
 adt_cash = { path = "../../adt/cash" }
 adt_char = { path = "../../adt/char" }
@@ -33,6 +34,7 @@ adt_int8 = { path = "../../adt/int8" }
 adt_json = { path = "../../adt/json" }
 adt_jsonb = { path = "../../adt/jsonb" }
 adt_jsonpath = { path = "../../adt/jsonpath" }
+adt_jsonpath_exec = { path = "../../adt/jsonpath_exec" }
 adt_mac = { path = "../../adt/mac" }
 adt_mac8 = { path = "../../adt/mac8" }
 adt_pg_lsn = { path = "../../adt/pg_lsn" }
@@ -50,6 +52,7 @@ adt_pseudotypes = { path = "../../adt/pseudotypes" }
 adt_quote = { path = "../../adt/quote" }
 adt_varchar = { path = "../../adt/varchar" }
 pgstatfuncs = { path = "../../adt/pgstatfuncs" }
+portalmem = { path = "../../mmgr/portalmem" }
 name = { path = "../../adt/name" }
 nbt_compare = { path = "../../../access/nbtree/compare" }
 varlena = { path = "../../adt/varlena" }
@@ -57,9 +60,11 @@ commands_async = { path = "../../../commands/commands_async" }
 adt_windowfuncs = { path = "../../adt/windowfuncs" }
 cryptohashfuncs = { path = "../../adt/cryptohashfuncs" }
 pseudorandomfuncs = { path = "../../adt/pseudorandomfuncs" }
+trigfuncs = { path = "../../adt/trigfuncs" }
 conv = { path = "../../mb/conv" }
 mcx = { path = "../../../../_support/mcx" }
 syscache_seams = { path = "../../cache/syscache_seams" }
+dfmgr = { path = "../dfmgr" }
 
 [dev-dependencies]
 stringinfo = { path = "../../../../_support/types/stringinfo" }

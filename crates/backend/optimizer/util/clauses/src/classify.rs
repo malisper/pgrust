@@ -1,7 +1,7 @@
 use lsyscache::{func_parallel, func_strict, func_volatile, get_func_leakproof};
 use types_core::Oid;
 use types_error::PgResult;
-use types_nodes::primnodes::{Param, ParamKind};
+use types_nodes::primnodes::{Param, ParamKind, ScalarArrayOpExpr};
 use types_nodes::{Bitmapset, Node, NodeTag};
 
 use crate::walker::{
@@ -342,9 +342,21 @@ impl<'mcx> NodeWalker<'mcx> for ContainNonstrict {
                     return Ok(true);
                 }
             }
-            t @ (NodeTag::T_SubscriptingRef
-            | NodeTag::T_CoerceViaIO
-            | NodeTag::T_ArrayCoerceExpr) => {
+            NodeTag::T_SubscriptingRef => {
+                // C: subscripting assignment is nonstrict; fetch is strict
+                // only per typsubscript — conservatively nonstrict unless the
+                // closed array handler (fetch_strict = true).
+                let sr = node.as_subscripting_ref().unwrap();
+                if sr.refassgnexpr.is_some() {
+                    return Ok(true);
+                }
+            }
+            // CoerceViaIO is strict regardless of its I/O functions; look
+            // only at its argument (checking the functions could be wrong).
+            NodeTag::T_CoerceViaIO => {
+                return self.visit(node.as_coerce_via_io().unwrap().arg);
+            }
+            t @ NodeTag::T_ArrayCoerceExpr => {
                 deferred("contain_nonstrict_functions_walker", t)
             }
             _ => {}
@@ -433,8 +445,10 @@ impl<'mcx> NodeWalker<'mcx> for ContainLeakedVars {
                     return Ok(true);
                 }
             }
-            t @ (NodeTag::T_SubscriptingRef
-            | NodeTag::T_RowCompareExpr
+            // C: SubscriptingRef fetch is leakproof for the array handler;
+            // assignment (store) is not, but stores never reach quals.
+            NodeTag::T_SubscriptingRef => {}
+            t @ (NodeTag::T_RowCompareExpr
             | NodeTag::T_MinMaxExpr) => deferred("contain_leaked_vars_walker", t),
             NodeTag::T_CurrentOfExpr => return Ok(false),
             // Unrecognized node: assume it might be leaky (C default arm).
@@ -508,19 +522,52 @@ impl<'mcx> NodeWalker<'mcx> for ConvertSaop {
             return walk_grouping_func_args(node, self);
         }
         if let Some(sa) = node.as_scalar_array_op_expr() {
-            // convert_saop_to_hashed_saop_walker: C hashes ANY over a Const
-            // array of >= 9 elements when the operator is hashable.
             const MIN_ARRAY_SIZE_FOR_HASHED_SAOP: i64 = 9;
-            if sa.useOr {
-                if let Some(c) = sa.args.nth(1).as_const() {
-                    if !c.constisnull
-                        && saop_const_array_nitems(c.constvalue)
-                            >= MIN_ARRAY_SIZE_FOR_HASHED_SAOP
-                    {
-                        panic!(
-                            "convert_saop_to_hashed_saop (clauses.c): hashed-SAOP \
-                             conversion unported"
-                        );
+            if let Some(c) = sa.args.nth(1).as_const() {
+                if !c.constisnull {
+                    if sa.useOr {
+                        if let Some((l, r)) = lsyscache::get_op_hash_functions(sa.opno)? {
+                            if l == r {
+                                if saop_const_array_nitems(c.constvalue)
+                                    >= MIN_ARRAY_SIZE_FOR_HASHED_SAOP
+                                {
+                                    // SAFETY: caller holds the just-planned tree
+                                    // exclusively (fix_opfuncids precedent).
+                                    unsafe {
+                                        node.with_mut::<ScalarArrayOpExpr, _>(|s| {
+                                            s.hashfuncid = l;
+                                        })
+                                        .unwrap();
+                                    }
+                                }
+                                // C returns false here: matched-const arms
+                                // do not descend into this node's children.
+                                return Ok(false);
+                            }
+                        }
+                    } else {
+                        // NOT IN whose negator is hashable: hash-and-negate.
+                        let negator = lsyscache::get_negator(sa.opno)?;
+                        if negator != 0 {
+                            if let Some((l, r)) = lsyscache::get_op_hash_functions(negator)? {
+                                if l == r {
+                                    if saop_const_array_nitems(c.constvalue)
+                                        >= MIN_ARRAY_SIZE_FOR_HASHED_SAOP
+                                    {
+                                        let negfuncid = lsyscache::get_opcode(negator)?;
+                                        // SAFETY: as above.
+                                        unsafe {
+                                            node.with_mut::<ScalarArrayOpExpr, _>(|s| {
+                                                s.hashfuncid = l;
+                                                s.negfuncid = negfuncid;
+                                            })
+                                            .unwrap();
+                                        }
+                                    }
+                                    return Ok(false);
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -792,12 +839,22 @@ fn nonnullable_rels_args<'mcx>(
 /// `-FIRST_LOW_INVALID_HEAP_ATTR`.
 pub type MultiBitmapset<'mcx> = mcx::PgVec<'mcx, Bitmapset<'mcx>>;
 
+#[cold]
+#[inline(never)]
+fn negative_mbms_index() -> ! {
+    // C divergence: elog(ERROR, "negative multibitmapset member index not allowed").
+    panic!("negative multibitmapset member index not allowed");
+}
+
 pub fn mbms_add_member<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     a: &mut MultiBitmapset<'mcx>,
     listidx: i32,
     bitidx: i32,
 ) -> PgResult<()> {
+    if listidx < 0 || bitidx < 0 {
+        negative_mbms_index();
+    }
     while a.len() <= listidx as usize {
         a.push(Bitmapset::empty());
     }
@@ -831,6 +888,24 @@ pub fn mbms_overlap_sets<'mcx>(
         }
     }
     Ok(result)
+}
+
+/// mbms_int_members: recycling intersect — reduce a to its intersection with b.
+pub fn mbms_int_members<'mcx>(a: &mut MultiBitmapset<'mcx>, b: &MultiBitmapset<'mcx>) {
+    a.truncate(b.len());
+    for (i, bs) in a.iter_mut().enumerate() {
+        bs.int_members(&b[i]);
+    }
+}
+
+pub fn mbms_is_member(listidx: i32, bitidx: i32, a: &MultiBitmapset<'_>) -> bool {
+    if listidx < 0 || bitidx < 0 {
+        negative_mbms_index();
+    }
+    if listidx as usize >= a.len() {
+        return false;
+    }
+    a[listidx as usize].is_member(bitidx)
 }
 
 pub fn find_nonnullable_vars<'mcx>(

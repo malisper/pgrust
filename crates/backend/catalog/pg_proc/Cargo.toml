@@ -26,5 +26,7 @@ cache_syscache = { path = "../../utils/cache/cache_syscache" }
 varlena = { path = "../../utils/adt/varlena" }
 format_type = { path = "../../utils/adt/format_type" }
 fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
+dfmgr = { path = "../../utils/fmgr/dfmgr" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
 superuser = { path = "../../utils/misc/superuser" }
 xact = { path = "../../access/transam/xact" }

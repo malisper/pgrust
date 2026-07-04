@@ -89,6 +89,13 @@ pub fn exec_re_scan<'mcx>(
             }
             Ok(())
         }
+        // ExecReScanMemoize, chgParam-NULL arm: no purge (an empty chgParam
+        // has no members outside keyparamids).
+        PlanStateNode::Memoize(m) => {
+            let m = &mut **m;
+            ::nodememoize::exec_rescan_memoize(&mut m.state);
+            exec_re_scan(&mut m.outer, estate)
+        }
         // ExecReScanSort: child rescanned only when the sort must be redone
         // (chgParam NULL until the Param lanes land).
         PlanStateNode::Sort(s) => {
@@ -300,6 +307,25 @@ pub fn exec_re_scan_with_chg<'mcx>(
             let m = &mut **m;
             ::nodematerial::exec_rescan_material_chg(&mut m.state, estate);
             exec_re_scan_with_chg(&mut m.outer, base.lefttree.expect("Material outer plan"), estate, chg)?;
+        }
+        PlanStateNode::Memoize(m) => {
+            let m = &mut **m;
+            ::nodememoize::exec_rescan_memoize(&mut m.state);
+            let outer_plan = base.lefttree.expect("Memoize outer plan");
+            // C purges when outerPlan->chgParam (= chg ∩ outer allParam) has
+            // members outside the cache keys; alloc-free member walk (this
+            // runs per outer tuple).
+            let outer_allparam = &outer_plan.as_plan().expect("plan node").allParam;
+            let keyparamids = ::nodememoize::keyparamids(&m.state);
+            let mut x = chg.next_member(-1);
+            while x >= 0 {
+                if outer_allparam.is_member(x) && !keyparamids.is_member(x) {
+                    ::nodememoize::exec_rescan_memoize_purge(&mut m.state);
+                    break;
+                }
+                x = chg.next_member(x);
+            }
+            exec_re_scan_with_chg(&mut m.outer, outer_plan, estate, chg)?;
         }
         PlanStateNode::Sort(s) => {
             ::nodesort::exec_rescan_sort_chg(&mut s.state, estate);

@@ -1,8 +1,8 @@
 //! outfuncs.c nodeToString for the node sets stored in pg_attrdef.adbin /
-//! pg_constraint.conbin (DEFAULT/CHECK corpus) and pg_rewrite.ev_action
-//! (view SELECT-rule Query trees). Every other node tag is a loud panic
-//! naming the C writer. Output is byte-compatible with C 18.3 nodeToString
-//! (write_location_fields=false: every location renders as -1).
+//! pg_constraint.conbin (DEFAULT/CHECK corpus), pg_trigger.tgqual, and
+//! pg_rewrite.ev_action (view SELECT-rule Query trees). Every other node tag
+//! is a loud panic naming the C writer. Output is byte-compatible with C 18.3
+//! nodeToString (write_location_fields=false: every location renders as -1).
 
 #![allow(non_snake_case)]
 
@@ -52,6 +52,9 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
         NodeTag::T_BoolExpr => {
             out_bool_expr(out, node.as_variant::<BoolExpr>().expect("BoolExpr"))?
         }
+        NodeTag::T_NullTest => {
+            out_null_test(out, node.as_variant::<NullTest>().expect("NullTest"))?
+        }
         NodeTag::T_RelabelType => {
             out_relabel_type(out, node.as_variant::<RelabelType>().expect("RelabelType"))?
         }
@@ -71,8 +74,15 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
                 v.typeId, v.typeMod, v.collation
             );
         }
-        NodeTag::T_NullTest => {
-            out_null_test(out, node.as_variant::<NullTest>().expect("NullTest"))?
+        NodeTag::T_SQLValueFunction => {
+            let v = node
+                .as_variant::<types_nodes::primnodes::SQLValueFunction>()
+                .expect("SQLValueFunction");
+            w!(
+                out,
+                "{{SQLVALUEFUNCTION :op {} :type {} :typmod {} :location -1}}",
+                v.op as u32, v.r#type, v.typmod
+            );
         }
         NodeTag::T_ScalarArrayOpExpr => out_scalar_array_op_expr(
             out,
@@ -131,7 +141,6 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
         ),
         NodeTag::T_Aggref => out_aggref(out, node.as_variant::<Aggref>().expect("Aggref"))?,
         NodeTag::T_SubLink => out_sub_link(out, node.as_variant::<SubLink>().expect("SubLink"))?,
-        NodeTag::T_List => out_list(out, node.as_list().expect("List"))?,
         NodeTag::T_IntList => out_int_list(out, node.as_int_list().expect("IntList")),
         NodeTag::T_OidList => out_oid_list(out, node.as_oid_list().expect("OidList")),
         NodeTag::T_String => out_string_node(out, node.as_string().expect("String").sval),
@@ -306,6 +315,18 @@ fn out_bool_expr(out: &mut PgString<'_>, b: &BoolExpr<'_>) -> PgResult<()> {
     };
     w!(out, "{{BOOLEXPR :boolop {opstr} :args ");
     out_list(out, &b.args)?;
+    w!(out, " :location -1}}");
+    Ok(())
+}
+
+fn out_null_test(out: &mut PgString<'_>, n: &NullTest<'_>) -> PgResult<()> {
+    w!(out, "{{NULLTEST :arg ");
+    match n.arg {
+        Some(arg) => out_node(out, arg)?,
+        None => w!(out, "<>"),
+    }
+    w!(out, " :nulltesttype {} :argisrow ", n.nulltesttype as u32);
+    out_bool(out, n.argisrow);
     w!(out, " :location -1}}");
     Ok(())
 }
@@ -768,18 +789,6 @@ fn out_sub_link(out: &mut PgString<'_>, s: &SubLink<'_>) -> PgResult<()> {
     out_list(out, &s.operName)?;
     w!(out, " :subselect ");
     out_node(out, s.subselect)?;
-    w!(out, " :location -1}}");
-    Ok(())
-}
-
-fn out_null_test(out: &mut PgString<'_>, n: &NullTest<'_>) -> PgResult<()> {
-    w!(out, "{{NULLTEST :arg ");
-    match n.arg {
-        Some(a) => out_node(out, a)?,
-        None => w!(out, "<>"),
-    }
-    w!(out, " :nulltesttype {} :argisrow ", n.nulltesttype as u32);
-    out_bool(out, n.argisrow);
     w!(out, " :location -1}}");
     Ok(())
 }

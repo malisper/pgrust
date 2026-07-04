@@ -92,12 +92,9 @@ pub fn get_relation_info<'mcx>(
 
     run.root.rel_mut(rel).rel_parallel_workers = relation.get_parallel_workers(-1);
 
-    let hasindex = if inhparent {
-        assert!(
-            !(relkind == types_rel::RELKIND_PARTITIONED_TABLE && relation.rd_rel.relhasindex),
-            "get_relation_info (plancat.c): partitioned indexes as unique proofs; \
-             partitioned-index lane"
-        );
+    // A partitioned parent keeps its (partitioned) indexes in indexlist for
+    // uniqueness proofs; a traditional inheritance parent keeps none.
+    let hasindex = if inhparent && relkind != types_rel::RELKIND_PARTITIONED_TABLE {
         false
     } else {
         relation.rd_rel.relhasindex
@@ -121,9 +118,12 @@ pub fn get_relation_info<'mcx>(
             }
             // indcheckxmin gate: M2 concurrent-build lane (Form lacks it).
 
-            if index_rel.rd_rel.relkind != types_rel::RELKIND_INDEX {
-                panic!("get_relation_info (plancat.c): partitioned index; M2 partition lane");
-            }
+            let is_partitioned_index =
+                index_rel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_INDEX;
+            assert!(
+                index_rel.rd_rel.relkind == types_rel::RELKIND_INDEX || is_partitioned_index,
+                "get_relation_info (plancat.c): unexpected index relkind"
+            );
             let relam = index_rel.rd_rel.relam;
             let am_is_btree = relam == BTREE_AM_OID;
             let am_is_gin = relam == types_core::GIN_AM_OID;
@@ -166,25 +166,28 @@ pub fn get_relation_info<'mcx>(
                 });
             }
             info.relam = relam;
-            // Per-AM IndexAmRoutine flags (bt/hash/gin/gist/brin handlers).
-            info.amcanorderbyop = am_is_gist || am_is_spgist;
-            info.amoptionalkey =
-                am_is_btree || am_is_gin || am_is_gist || am_is_spgist || am_is_brin;
-            info.amsearcharray = am_is_btree;
-            info.amsearchnulls = am_is_btree || am_is_gist || am_is_spgist || am_is_brin;
-            info.amcanparallel = am_is_btree;
-            info.amhasgettuple = !am_is_gin && !am_is_brin;
-            info.amhasgetbitmap = true;
-            info.amcanmarkpos = am_is_btree;
+            // Per-AM IndexAmRoutine flags (bt/hash/gin/gist/brin handlers);
+            // a partitioned index has no AM (C NULLifies these fields).
+            if !is_partitioned_index {
+                info.amcanorderbyop = am_is_gist || am_is_spgist;
+                info.amoptionalkey =
+                    am_is_btree || am_is_gin || am_is_gist || am_is_spgist || am_is_brin;
+                info.amsearcharray = am_is_btree;
+                info.amsearchnulls = am_is_btree || am_is_gist || am_is_spgist || am_is_brin;
+                info.amcanparallel = am_is_btree;
+                info.amhasgettuple = !am_is_gin && !am_is_brin;
+                info.amhasgetbitmap = true;
+                info.amcanmarkpos = am_is_btree;
 
-            // amcanorder arm: a non-ordering AM leaves the sort vectors empty
-            // (C's NULL sortopfamily).
-            if am_is_btree {
-                for i in 0..nkeycolumns as usize {
-                    let opt = index_rel.rd_indoption[i];
-                    info.sortopfamily.push(info.opfamily[i]);
-                    info.reverse_sort.push(opt & INDOPTION_DESC != 0);
-                    info.nulls_first.push(opt & INDOPTION_NULLS_FIRST != 0);
+                // amcanorder arm: a non-ordering AM leaves the sort vectors
+                // empty (C's NULL sortopfamily).
+                if am_is_btree {
+                    for i in 0..nkeycolumns as usize {
+                        let opt = index_rel.rd_indoption[i];
+                        info.sortopfamily.push(info.opfamily[i]);
+                        info.reverse_sort.push(opt & INDOPTION_DESC != 0);
+                        info.nulls_first.push(opt & INDOPTION_NULLS_FIRST != 0);
+                    }
                 }
             }
 
@@ -255,23 +258,29 @@ pub fn get_relation_info<'mcx>(
             info.immediate = ind.indimmediate;
             info.hypothetical = false;
 
-            if info.indpred.is_empty() {
-                info.pages = bufmgr_seams::relation_get_number_of_blocks_in_fork::call(
-                    &index_rel,
-                    types_core::ForkNumber::MAIN_FORKNUM,
-                )?;
-                info.tuples = run.root.rel(rel).tuples;
+            if is_partitioned_index {
+                info.pages = 0;
+                info.tuples = 0.0;
+                info.tree_height = Cell::new(-1);
             } else {
-                let (pages, tuples, _) = estimate_rel_size(&index_rel, None, 1)?;
-                info.pages = pages;
-                info.tuples = tuples.min(run.root.rel(rel).tuples);
+                if info.indpred.is_empty() {
+                    info.pages = bufmgr_seams::relation_get_number_of_blocks_in_fork::call(
+                        &index_rel,
+                        types_core::ForkNumber::MAIN_FORKNUM,
+                    )?;
+                    info.tuples = run.root.rel(rel).tuples;
+                } else {
+                    let (pages, tuples, _) = estimate_rel_size(&index_rel, None, 1)?;
+                    info.pages = pages;
+                    info.tuples = tuples.min(run.root.rel(rel).tuples);
+                }
+                info.tree_height = Cell::new(if am_is_btree {
+                    nbtree::bt_getrootheight(&index_rel)?
+                } else {
+                    -1
+                });
             }
-            info.tree_height = Cell::new(if am_is_btree {
-                nbtree::bt_getrootheight(&index_rel)?
-            } else {
-                -1
-            });
-            if am_is_gin {
+            if am_is_gin && !is_partitioned_index {
                 let gs = gin::ginGetStats(&index_rel)?;
                 info.gin_stats = Some(types_pathnodes::GinIndexStats {
                     pending_pages: gs.nPendingPages,
@@ -571,13 +580,14 @@ pub fn join_selectivity<'mcx>(
     const F_POSITIONJOINSEL: Oid = 1301;
     const F_CONTJOINSEL: Oid = 1303;
     const DEFAULT_INEQ_SEL: f64 = 0.3333333333333333;
-    let _ = inputcollid;
     let oprjoin = lsyscache::get_oprjoin(operatorid)?;
     if oprjoin == 0 {
         return Ok(0.5);
     }
     let result = match oprjoin {
-        F_EQJOINSEL => crate::selfuncs::eqjoinsel(run, operatorid, args, jointype, sjinfo)?,
+        F_EQJOINSEL => {
+            crate::selfuncs::eqjoinsel(run, operatorid, args, jointype, sjinfo, inputcollid)?
+        }
         F_SCALARLTJOINSEL | F_SCALARGTJOINSEL | F_SCALARLEJOINSEL | F_SCALARGEJOINSEL => {
             DEFAULT_INEQ_SEL
         }
@@ -587,7 +597,7 @@ pub fn join_selectivity<'mcx>(
         F_AREAJOINSEL => 0.005,
         F_POSITIONJOINSEL => 0.1,
         F_CONTJOINSEL => 0.001,
-        106 => crate::selfuncs::neqjoinsel(run, operatorid, args, jointype, sjinfo)?,
+        106 => crate::selfuncs::neqjoinsel(run, operatorid, args, jointype, sjinfo, inputcollid)?,
         3561 => crate::network_selfuncs::networkjoinsel(run, operatorid, args, sjinfo)?,
         // matchingjoinsel (selfuncs.c) punts.
         5041 => crate::selfuncs::DEFAULT_MATCHING_SEL,
@@ -808,10 +818,16 @@ pub fn get_relation_constraints<'mcx>(
                 }
             }
         }
-        assert!(
-            !constr.has_generated_virtual || result.is_empty(),
-            "get_relation_constraints (plancat.c): expand_generated_columns_in_expr unported"
-        );
+        if constr.has_generated_virtual {
+            for item in result.iter_mut() {
+                *item = crate::prepjointree::expand_generated_columns_in_expr(
+                    mcx,
+                    *item,
+                    &relation,
+                    varno as i32,
+                )?;
+            }
+        }
     }
     assert!(
         !(include_partition && relation.rd_rel.relispartition),

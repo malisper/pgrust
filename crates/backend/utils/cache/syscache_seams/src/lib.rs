@@ -89,6 +89,12 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // lookup_authid_rolname, NameData-by-value shape (no allocation; the
+    // executor's CURRENT_USER family reads it per eval).
+    pub fn lookup_authid_rolname_data(roleid: Oid) -> PgResult<Option<types_tuple::NameData>>
+);
+
+seam_core::seam!(
     // SearchSysCache1(AUTHNAME, rolname) projected to (oid, rolsuper) — the
     // check_session_authorization/check_role read; None mirrors !HeapTupleIsValid.
     pub fn lookup_authid_by_rolname(rolname: &str) -> PgResult<Option<(Oid, bool)>>
@@ -169,6 +175,14 @@ pub struct PgConstraintShape {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PgConstraintDescShape {
+    pub conname: NameData,
+    pub connamespace: Oid,
+    pub conrelid: Oid,
+    pub contypid: Oid,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PgOpclassShape {
     pub opcmethod: Oid,
     pub opcfamily: Oid,
@@ -201,6 +215,7 @@ pub struct PgProcShape {
     pub prorettype: Oid,
     pub provariadic: Oid,
     pub prosupport: Oid,
+    pub prolang: Oid,
     pub pronargs: i16,
     pub prokind: i8,
     pub provolatile: i8,
@@ -208,6 +223,8 @@ pub struct PgProcShape {
     pub proretset: bool,
     pub proisstrict: bool,
     pub proleakproof: bool,
+    pub prosecdef: bool,
+    pub proconfig_isnull: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -448,6 +465,15 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    pub fn lookup_pg_constraint_desc_shape(conoid: Oid) -> PgResult<Option<PgConstraintDescShape>>
+);
+
+seam_core::seam!(
+    // SearchSysCache1(TYPEOID) -> (typname, typnamespace).
+    pub fn pg_type_name_namespace(typid: Oid) -> PgResult<Option<(NameData, Oid)>>
+);
+
+seam_core::seam!(
     pub fn lookup_pg_language_name(langoid: Oid) -> PgResult<Option<NameData>>
 );
 
@@ -538,6 +564,13 @@ seam_core::seam!(
 
 seam_core::seam!(
     pub fn lookup_pg_proc_prosrc<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        funcid: Oid,
+    ) -> PgResult<Option<mcx::PgString<'mcx>>>
+);
+
+seam_core::seam!(
+    pub fn lookup_pg_proc_probin<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         funcid: Oid,
     ) -> PgResult<Option<mcx::PgString<'mcx>>>
@@ -886,6 +919,11 @@ seam_core::seam!(
 seam_core::seam!(
     // RelationHasSysCache (syscache.c).
     pub fn relation_has_sys_cache(relid: Oid) -> bool
+);
+
+seam_core::seam!(
+    // RelationSupportsSysCache (syscache.c): rel OR supporting-index oid.
+    pub fn relation_supports_sys_cache(relid: Oid) -> bool
 );
 
 // The pg_type columns lookup_type_cache copies into a TypeCacheEntry, plus

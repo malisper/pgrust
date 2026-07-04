@@ -6,6 +6,7 @@ use types_core::{InvalidOid, Oid};
 use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR, ERRCODE_INVALID_OBJECT_DEFINITION};
 use types_nodes::node_tree::Node;
 use types_nodes::nodes_enums::CmdType;
+use types_nodes::NodeList;
 use types_nodes::parsenodes::{Query, QuerySource, RTEKind, RTEPermissionInfo, RangeTblEntry};
 use types_nodes::NodeTag;
 use types_rel::{
@@ -37,7 +38,14 @@ pub fn QueryRewrite<'mcx>(
 
     for query in results.iter_mut() {
         let mut active_rirs: PgVec<'mcx, Oid> = PgVec::new_in(mcx);
-        fireRIRrules(mcx, query, &mut active_rirs)?;
+        let rir = fireRIRrules(mcx, query, &mut active_rirs)?;
+        query.hasRowSecurity |= rir.has_row_security;
+        query.hasSubLinks |= rir.has_sub_links;
+        if !rir.with_check_options.is_empty() {
+            let mut wcos = NodeList::from_slice(mcx, &rir.with_check_options)?;
+            wcos.concat(mcx, &query.withCheckOptions)?;
+            query.withCheckOptions = wcos;
+        }
         query.queryId = input_query_id;
     }
 
@@ -103,11 +111,11 @@ fn RewriteQuery<'mcx>(
     let mut product_count = 0usize;
     let mut has_update = false;
     if event != CmdType::CMD_SELECT && event != CmdType::CMD_UTILITY {
-        if !matches!(event, CmdType::CMD_INSERT | CmdType::CMD_UPDATE | CmdType::CMD_DELETE) {
-            panic!(
-                "RewriteQuery (rewriteHandler.c): {event:?} rewrite needs the \
-                 mergeActionList arm (MERGE vocab unported)"
-            );
+        if !matches!(
+            event,
+            CmdType::CMD_INSERT | CmdType::CMD_UPDATE | CmdType::CMD_DELETE | CmdType::CMD_MERGE
+        ) {
+            panic!("unrecognized commandType: {event:?}");
         }
         let result_relation = parsetree.resultRelation;
         debug_assert!(result_relation != 0);
@@ -206,6 +214,39 @@ fn RewriteQuery<'mcx>(
                 )?;
             }
             CmdType::CMD_DELETE => {}
+            CmdType::CMD_MERGE => {
+                debug_assert!(
+                    parsetree.r#override == types_nodes::OverridingKind::OVERRIDING_NOT_SET
+                );
+                for action_node in &parsetree.mergeActionList {
+                    let action = action_node
+                        .as_merge_action()
+                        .expect("mergeActionList cell is a MergeAction");
+                    match action.commandType {
+                        CmdType::CMD_NOTHING | CmdType::CMD_DELETE => {}
+                        CmdType::CMD_UPDATE | CmdType::CMD_INSERT => {
+                            // MERGE actions do not permit multi-row INSERTs: no VALUES RTE.
+                            let new_tlist = rewriteTargetListIU(
+                                mcx,
+                                &action.targetList,
+                                action.commandType,
+                                action.r#override,
+                                &rel,
+                                None,
+                                None,
+                            )?;
+                            // SAFETY: exclusive Query-tree ownership during rewrite.
+                            unsafe {
+                                action_node.with_mut::<types_nodes::MergeAction, _>(|a| {
+                                    a.targetList = new_tlist;
+                                })
+                            }
+                            .expect("MergeAction node");
+                        }
+                        other => panic!("unrecognized commandType: {other:?}"),
+                    }
+                }
+            }
             _ => unreachable!(),
         }
 
@@ -220,7 +261,7 @@ fn RewriteQuery<'mcx>(
             None => &empty,
         };
         let locks =
-            fire::matchLocks(event, rules, result_relation, &parsetree, &mut has_update)?;
+            fire::matchLocks(event, rules, result_relation, rel.name(), &parsetree, &mut has_update)?;
 
         let product_orig_rt_length = parsetree.rtable.len();
         let product_queries = fire::fireRules(
@@ -692,6 +733,25 @@ pub fn build_column_default<'mcx>(
     }
 }
 
+// build_generation_expression (rewriteHandler.c:4520).
+pub fn build_generation_expression<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &types_rel::Relation<'mcx>,
+    attrno: usize,
+) -> PgResult<Node<'mcx>> {
+    let att = rel.rd_att.attr(attrno - 1);
+    debug_assert!(att.attgenerated != 0);
+    let defexpr = build_column_default(mcx, rel, attrno)?;
+    let attcollid = att.attcollation;
+    if attcollid != InvalidOid && attcollid != nodes_core::node_funcs::expr_collation(defexpr) {
+        return Node::mk(
+            mcx,
+            types_nodes::primnodes::CollateExpr { arg: defexpr, collOid: attcollid, location: -1 },
+        );
+    }
+    Ok(defexpr)
+}
+
 #[cold]
 #[inline(never)]
 fn generated_always_insert_error(
@@ -760,17 +820,54 @@ fn default_type_mismatch(attname: &[u8], atttypid: Oid, exprtype: Oid) -> Box<Pg
     )
 }
 
+// C sets hasRowSecurity/hasSubLinks/withCheckOptions on each Query in place;
+// here each fireRIRrules level RETURNS them and the caller stamps the callee's
+// Query through the Node it holds (nested Query headers are re-issued where no
+// Node is held — see the RTE_SUBQUERY arm).
+struct RirOut<'mcx> {
+    has_row_security: bool,
+    has_sub_links: bool,
+    with_check_options: PgVec<'mcx, Node<'mcx>>,
+}
+
+fn stamp_query_flags(qnode: Node<'_>, rir: &RirOut<'_>) {
+    if rir.has_row_security || rir.has_sub_links {
+        // SAFETY: the rewriter owns the just-analyzed tree single-threaded; no
+        // reference derived from `qnode` is live across this write.
+        unsafe {
+            qnode.with_mut::<Query, _>(|q| {
+                q.hasRowSecurity |= rir.has_row_security;
+                q.hasSubLinks |= rir.has_sub_links;
+            })
+        }
+        .expect("Query node");
+    }
+    assert!(
+        rir.with_check_options.is_empty(),
+        "fireRIRrules (rewriteHandler.c): RLS WithCheckOptions on a nested Query \
+         (DML in CTE) not ported"
+    );
+}
+
 fn fireRIRrules<'mcx>(
     mcx: Mcx<'mcx>,
     parsetree: &Query<'mcx>,
     active_rirs: &mut PgVec<'mcx, Oid>,
-) -> PgResult<()> {
+) -> PgResult<RirOut<'mcx>> {
+    let mut out = RirOut {
+        has_row_security: false,
+        has_sub_links: false,
+        with_check_options: PgVec::new_in(mcx),
+    };
     // C reassigns cte->ctequery = fireRIRrules(...); fireRIRrules returns its
     // argument mutated in place, so the shared-ref recursion is equivalent.
     for cte_node in &parsetree.cteList {
         let cte = cte_node.as_common_table_expr().expect("cteList cell");
-        let ctequery = cte.ctequery.and_then(|n| n.as_query()).expect("analyzed CTE query");
-        fireRIRrules(mcx, ctequery, active_rirs)?;
+        let cte_query_node = cte.ctequery.expect("analyzed CTE query");
+        let ctequery = cte_query_node.as_query().expect("analyzed CTE query");
+        let rir = fireRIRrules(mcx, ctequery, active_rirs)?;
+        stamp_query_flags(cte_query_node, &rir);
+        out.has_row_security |= rir.has_row_security;
         if cte.search_clause.is_some() || cte.cycle_clause.is_some() {
             panic!("rewriteSearchAndCycle (rewriteSearchCycle.c): SEARCH/CYCLE lane");
         }
@@ -791,8 +888,29 @@ fn fireRIRrules<'mcx>(
 
         if rte.rtekind == RTEKind::RTE_SUBQUERY {
             let sub = rte.subquery.expect("subquery RTE has a subquery");
-            fireRIRrules(mcx, sub, active_rirs)?;
-            debug_assert!(!sub.hasRowSecurity);
+            let rir = fireRIRrules(mcx, sub, active_rirs)?;
+            if rir.has_row_security || rir.has_sub_links {
+                assert!(
+                    rir.with_check_options.is_empty(),
+                    "fireRIRrules (rewriteHandler.c): RLS WithCheckOptions on a \
+                     subquery RTE"
+                );
+                // No Node handle on rte.subquery: re-issue the Query header
+                // with the flags set and re-point the RTE (the old header goes
+                // unreferenced; its lists are moved, not aliased live).
+                // SAFETY: Query is !Drop arena data; `sub` is bitwise-copied
+                // once and the source reference is dead after the re-point.
+                let mut q2: Query<'mcx> = unsafe { core::ptr::read(sub) };
+                q2.hasRowSecurity |= rir.has_row_security;
+                q2.hasSubLinks |= rir.has_sub_links;
+                let q2node = Node::mk(mcx, q2)?;
+                let q2ref = q2node.as_query().expect("Query node");
+                // SAFETY: rewriter-owned tree; no live refs derived from `node`.
+                unsafe {
+                    node.with_mut::<RangeTblEntry, _>(|r| r.subquery = Some(q2ref))
+                };
+                out.has_row_security |= rir.has_row_security;
+            }
             continue;
         }
         if rte.rtekind != RTEKind::RTE_RELATION {
@@ -834,6 +952,7 @@ fn fireRIRrules<'mcx>(
                             node,
                             &rel,
                             active_rirs,
+                            &mut out.has_row_security,
                         )?;
                     }
                     active_rirs.pop();
@@ -851,12 +970,15 @@ fn fireRIRrules<'mcx>(
         struct W<'a, 'mcx> {
             mcx: Mcx<'mcx>,
             active_rirs: &'a mut PgVec<'mcx, Oid>,
+            has_row_security: bool,
         }
         impl<'mcx> nodes_core::NodeWalker<'mcx> for W<'_, 'mcx> {
             fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
                 if let Some(sl) = node.as_sub_link() {
                     let sub = sl.subselect.as_query().expect("analyzed sublink sub-select");
-                    fireRIRrules(self.mcx, sub, self.active_rirs)?;
+                    let rir = fireRIRrules(self.mcx, sub, self.active_rirs)?;
+                    stamp_query_flags(sl.subselect, &rir);
+                    self.has_row_security |= rir.has_row_security;
                 }
                 nodes_core::expression_tree_walker(node, self)
             }
@@ -886,7 +1008,7 @@ fn fireRIRrules<'mcx>(
             Ok(())
         }
         use nodes_core::NodeWalker as _;
-        let mut w = W { mcx, active_rirs };
+        let mut w = W { mcx, active_rirs, has_row_security: false };
         for te in &parsetree.targetList {
             w.visit(te)?;
         }
@@ -910,9 +1032,14 @@ fn fireRIRrules<'mcx>(
         if let Some(n) = parsetree.limitCount {
             w.visit(n)?;
         }
+        out.has_row_security |= w.has_row_security;
     }
 
+    // Apply row-level security policies last: the new quals need their own
+    // recursion detection and must not be re-walked by the sublink pass above.
+    let mut rt_index = 0i32;
     for node in parsetree.rtable.iter() {
+        rt_index += 1;
         let rte = rte_of(node);
         if rte.rtekind != RTEKind::RTE_RELATION
             || (rte.relkind != RELKIND_RELATION && rte.relkind != RELKIND_PARTITIONED_TABLE)
@@ -920,16 +1047,121 @@ fn fireRIRrules<'mcx>(
             continue;
         }
         let rel = table::table_open(mcx, rte.relid, NoLock)?;
-        if rel.rd_rel.relrowsecurity {
-            panic!(
-                "fireRIRrules (rewriteHandler.c): row-level security needs \
-                 get_row_security_policies (rowsecurity.c unported)"
-            );
+        // relrowsecurity=false is check_enable_rls's RLS_NONE outcome
+        // (rls.c:78); skipping here spares the perminfo/user probes per RTE.
+        if !rel.rd_rel.relrowsecurity {
+            table::table_close(rel, NoLock)?;
+            continue;
         }
+
+        let rls = rowsecurity::get_row_security_policies(mcx, parsetree, rte, rt_index)?;
+
+        if !rls.security_quals.is_empty() || !rls.with_check_options.is_empty() {
+            if rls.has_sub_links {
+                if active_rirs.contains(&rte.relid) {
+                    let err = infinite_recursion_policy(rel.name());
+                    table::table_close(rel, NoLock)?;
+                    return Err(err);
+                }
+                active_rirs.push(rte.relid);
+
+                // securityQuals/withCheckOptions arrive post-parsing: lock any
+                // relations their sublinks reference, then fire RIR rules on
+                // them (acquireLocksOnSubLinks + fireRIRonSubLink in C).
+                struct L<'mcx> {
+                    mcx: Mcx<'mcx>,
+                }
+                impl<'mcx> nodes_core::NodeWalker<'mcx> for L<'mcx> {
+                    fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+                        if node.node_tag() == NodeTag::T_Query {
+                            // AcquireRewriteLocks already covers nested levels.
+                            return Ok(false);
+                        }
+                        if let Some(sl) = node.as_sub_link() {
+                            let sub =
+                                sl.subselect.as_query().expect("analyzed sublink sub-select");
+                            AcquireRewriteLocks(self.mcx, sub, true, false)?;
+                        }
+                        nodes_core::expression_tree_walker(node, self)
+                    }
+                }
+                struct F<'a, 'mcx> {
+                    mcx: Mcx<'mcx>,
+                    active_rirs: &'a mut PgVec<'mcx, Oid>,
+                }
+                impl<'mcx> nodes_core::NodeWalker<'mcx> for F<'_, 'mcx> {
+                    fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+                        if let Some(sl) = node.as_sub_link() {
+                            let sub =
+                                sl.subselect.as_query().expect("analyzed sublink sub-select");
+                            let rir = fireRIRrules(self.mcx, sub, self.active_rirs)?;
+                            // has_row_security discard: only reachable with the
+                            // RTE's own has_row_security already true (C asserts).
+                            stamp_query_flags(sl.subselect, &rir);
+                        }
+                        nodes_core::expression_tree_walker(node, self)
+                    }
+                }
+                use nodes_core::NodeWalker as _;
+                let mut l = L { mcx };
+                for &q in rls.security_quals.iter() {
+                    l.visit(q)?;
+                }
+                for &wnode in rls.with_check_options.iter() {
+                    l.visit(wnode)?;
+                }
+                let mut f = F { mcx, active_rirs: &mut *active_rirs };
+                for &q in rls.security_quals.iter() {
+                    f.visit(q)?;
+                }
+                for &wnode in rls.with_check_options.iter() {
+                    f.visit(wnode)?;
+                }
+
+                active_rirs.pop();
+            }
+
+            if !rls.security_quals.is_empty() {
+                // New RLS quals go before existing (security-barrier view)
+                // quals so they get applied first.
+                let mut quals = NodeList::from_slice(mcx, &rls.security_quals)?;
+                // SAFETY: rewriter-owned tree; no live refs derived from `node`.
+                unsafe {
+                    node.with_mut::<RangeTblEntry, _>(|r| -> PgResult<()> {
+                        quals.concat(mcx, &r.securityQuals)?;
+                        r.securityQuals = quals;
+                        Ok(())
+                    })
+                }
+                .expect("RangeTblEntry node")?;
+            }
+            for &wnode in rls.with_check_options.iter() {
+                out.with_check_options.push(wnode);
+            }
+        }
+
+        if rls.has_row_security {
+            out.has_row_security = true;
+        }
+        if rls.has_sub_links {
+            out.has_sub_links = true;
+        }
+
         table::table_close(rel, NoLock)?;
     }
 
-    Ok(())
+    Ok(out)
+}
+
+#[cold]
+#[inline(never)]
+fn infinite_recursion_policy(relname: &str) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!(
+            "infinite recursion detected in policy for relation \"{relname}\""
+        ))
+        .with_sqlstate(ERRCODE_INVALID_OBJECT_DEFINITION),
+    )
 }
 
 // ApplyRetrieveRule (rewriteHandler.c), SELECT-only arm: the DML-on-view
@@ -945,6 +1177,7 @@ fn ApplyRetrieveRule<'mcx>(
     rte_node: Node<'mcx>,
     relation: &Relation<'mcx>,
     active_rirs: &mut PgVec<'mcx, Oid>,
+    caller_has_row_security: &mut bool,
 ) -> PgResult<()> {
     if rule.qual_src.is_some() {
         return Err(internal_error("cannot handle qualified ON SELECT rule"));
@@ -984,10 +1217,10 @@ fn ApplyRetrieveRule<'mcx>(
 
     AcquireRewriteLocks(mcx, rule_action, true, false)?;
 
-    fireRIRrules(mcx, rule_action, active_rirs)?;
-    // parsetree->hasRowSecurity propagation: the RLS arm below is loud, so a
-    // true flag cannot reach here.
-    debug_assert!(!rule_action.hasRowSecurity);
+    let rir = fireRIRrules(mcx, rule_action, active_rirs)?;
+    stamp_query_flags(action_node, &rir);
+    *caller_has_row_security |= rir.has_row_security;
+    let rule_action = action_node.as_query().expect("rule action is a Query");
 
     let rte = rte_of(rte_node);
     let num_cols = rule_action

@@ -26,6 +26,7 @@ const Anum_pg_class_relacl: usize = 32;
 const Anum_pg_class_reloptions: usize = 33;
 const Anum_pg_class_relpartbound: usize = 34;
 const Natts_pg_attribute: usize = 25;
+const ATTRIBUTE_GENERATED_VIRTUAL: i8 = b'v' as i8;
 
 #[cold]
 #[inline(never)]
@@ -57,6 +58,29 @@ pub fn CheckAttributeNamesTypes(tupdesc: &TupleDescData<'_>, relkind: u8) -> PgR
         }
         if !att.attisdropped && att.atttypid == InvalidOid {
             panic!("CheckAttributeType (heap.c): full type validation unported; got InvalidOid for \"{name}\"");
+        }
+        // C divergence: CheckAttributeType's CHKATYPE_IS_VIRTUAL checks applied
+        // flat here, without recursing through domains/composites/ranges/arrays.
+        if !att.attisdropped && att.attgenerated == ATTRIBUTE_GENERATED_VIRTUAL {
+            if lsyscache::typ::get_typtype(att.atttypid)? == lsyscache::typ::TYPTYPE_DOMAIN {
+                return Err(err(
+                    format!("virtual generated column \"{name}\" cannot have a domain type"),
+                    types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+                ));
+            }
+            if att.atttypid >= types_core::FirstUnpinnedObjectId {
+                return Err(Box::new(
+                    (*err(
+                        format!(
+                            "virtual generated column \"{name}\" cannot have a user-defined type"
+                        ),
+                        types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+                    ))
+                    .with_detail(
+                        "Virtual generated columns that make use of user-defined types are not yet supported.",
+                    ),
+                ));
+            }
         }
     }
     Ok(())
@@ -465,11 +489,10 @@ pub fn heap_create_with_catalog<'mcx>(
         && !miscinit_seams::is_bootstrap_processing_mode::call()
     {
         let myself = ObjectAddress::set(RELATION_RELATION_ID, relid);
-        pg_depend::recordDependencyOnOwner(RELATION_RELATION_ID, relid, p.ownerid);
+        pg_depend::recordDependencyOnOwner(mcx, RELATION_RELATION_ID, relid, p.ownerid)?;
         // recordDependencyOnNewAcl: relacl is always NULL here (divergence
         // above) and the owner needs no entry, so C records nothing.
-        // recordDependencyOnCurrentExtension: extension.c unported; C no-ops
-        // outside CREATE EXTENSION scripts.
+        pg_depend::recordDependencyOnCurrentExtension(mcx, &myself, false)?;
         let mut addrs: [ObjectAddress; 2] = [
             ObjectAddress::set(catalog::NamespaceRelationId, p.relnamespace),
             ObjectAddress::set(AccessMethodRelationId, p.accessmtd),

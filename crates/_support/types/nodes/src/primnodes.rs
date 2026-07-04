@@ -8,7 +8,7 @@ use types_core::{AttrNumber, Index, Oid, ParseLoc};
 use types_error::PgResult;
 
 use crate::bitmapset::Bitmapset;
-use crate::list::NodeList;
+use crate::list::{NodeList, OptNodeList};
 use crate::node_tree::{Node, NodeVariant};
 use crate::tags::NodeTag;
 
@@ -603,6 +603,28 @@ pub struct InferenceElem<'mcx> {
     pub inferopclass: Oid,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum MergeMatchKind {
+    #[default]
+    MERGE_WHEN_MATCHED = 0,
+    MERGE_WHEN_NOT_MATCHED_BY_SOURCE = 1,
+    MERGE_WHEN_NOT_MATCHED_BY_TARGET = 2,
+}
+
+pub const NUM_MERGE_MATCH_KINDS: usize = 3;
+
+/// `targetList` cells are TargetEntry; `updateColnos` set for UPDATE actions.
+#[derive(Default)]
+pub struct MergeAction<'mcx> {
+    pub matchKind: MergeMatchKind,
+    pub commandType: crate::nodes_enums::CmdType,
+    pub r#override: OverridingKind,
+    pub qual: Option<Node<'mcx>>,
+    pub targetList: NodeList<'mcx>,
+    pub updateColnos: crate::list::IntList<'mcx>,
+}
+
 /// `arbiterElems` cells are InferenceElem; `onConflictSet`/`exclRelTlist`
 /// cells are TargetEntry.
 #[derive(Default)]
@@ -622,6 +644,19 @@ pub struct CollateClause<'mcx> {
     pub arg: Option<Node<'mcx>>,
     pub collname: NodeList<'mcx>,
     pub location: ParseLoc,
+}
+
+#[derive(Default)]
+pub struct SubscriptingRef<'mcx> {
+    pub refcontainertype: Oid,
+    pub refelemtype: Oid,
+    pub refrestype: Oid,
+    pub reftypmod: i32,
+    pub refcollid: Oid,
+    pub refupperindexpr: OptNodeList<'mcx>,
+    pub reflowerindexpr: OptNodeList<'mcx>,
+    pub refexpr: Option<Node<'mcx>>,
+    pub refassgnexpr: Option<Node<'mcx>>,
 }
 
 #[derive(Default)]
@@ -695,6 +730,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for ArrayExpr<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for FuncExpr<'mcx> {
     const TAG: NodeTag = NodeTag::T_FuncExpr;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for SubscriptingRef<'mcx> {
+    const TAG: NodeTag = NodeTag::T_SubscriptingRef;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for RelabelType<'mcx> {
     const TAG: NodeTag = NodeTag::T_RelabelType;
 }
@@ -757,6 +795,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for InferenceElem<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for OnConflictExpr<'mcx> {
     const TAG: NodeTag = NodeTag::T_OnConflictExpr;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for MergeAction<'mcx> {
+    const TAG: NodeTag = NodeTag::T_MergeAction;
 }
 
 impl<'mcx> Node<'mcx> {
@@ -916,6 +957,11 @@ impl<'mcx> Node<'mcx> {
     }
 
     #[inline]
+    pub fn as_merge_action(self) -> Option<&'mcx MergeAction<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
     pub fn as_range_tbl_ref(self) -> Option<&'mcx RangeTblRef> {
         self.as_variant()
     }
@@ -974,6 +1020,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_func_expr(self) -> Option<&'mcx FuncExpr<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_subscripting_ref(self) -> Option<&'mcx SubscriptingRef<'mcx>> {
         self.as_variant()
     }
 

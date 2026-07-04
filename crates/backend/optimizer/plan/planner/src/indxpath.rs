@@ -817,28 +817,10 @@ fn match_clause_to_indexcol<'mcx>(
             }
             Ok(None)
         }
-        NodeTag::T_ScalarArrayOpExpr => {
-            // match_saopclause_to_indexcol (indxpath.c): loud exactly where C
-            // builds an amsearcharray index clause, None exactly where C also
-            // fails. Building the clause needs ExecIndexBuildScanKeys' SAOP
-            // arm + _bt_preprocess_array_keys, both unported.
-            let sa = clause.as_scalar_array_op_expr().unwrap();
-            let index_relid = run.root.rel(index.rel.expect("index rel set")).relid;
-            if sa.useOr
-                && index.amsearcharray
-                && match_index_to_operand(run, sa.args.nth(0), indexcol, index)
-                && !vars::pull_varnos(run.mcx, sa.args.nth(1))?.is_member(index_relid as i32)
-                && !clauses::contain_volatile_functions(sa.args.nth(1))?
-                && index_coll_matches_expr_coll(index.indexcollations[indexcol], sa.inputcollid)
-                && lsyscache::op_in_opfamily(sa.opno, index.opfamily[indexcol])?
-            {
-                panic!(
-                    "match_saopclause_to_indexcol (indxpath.c): SAOP indexqual needs \
-                     the executor SAOP scankey + nbtree array-keys lanes"
-                );
-            }
-            Ok(None)
+        NodeTag::T_ScalarArrayOpExpr if index.amsearcharray => {
+            match_saopclause_to_indexcol(run, rinfo, indexcol, index)
         }
+        NodeTag::T_ScalarArrayOpExpr => Ok(None),
         // RowCompare/NullTest/OR can't be built by the live qual lane.
         _ => Ok(None),
     }
@@ -917,6 +899,45 @@ fn match_opclause_to_indexcol<'mcx>(
         }
     }
 
+    Ok(None)
+}
+
+// match_saopclause_to_indexcol (indxpath.c).
+fn match_saopclause_to_indexcol<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rinfo: RinfoId,
+    indexcol: usize,
+    index: &IndexOptInfo<'mcx>,
+) -> PgResult<Option<IndexClause<'mcx>>> {
+    let index_relid = run.root.rel(index.rel.expect("index rel set")).relid;
+    let clause = *run.root.expr_node(run.root.rinfo(rinfo).clause);
+    let saop = clause.as_scalar_array_op_expr().expect("ScalarArrayOpExpr");
+
+    if !saop.useOr || saop.args.len() != 2 {
+        return Ok(None);
+    }
+    let leftop = saop.args.nth(0);
+    let rightop = saop.args.nth(1);
+    let right_relids = vars::pull_varnos(run.mcx, rightop)?;
+
+    if match_index_to_operand(run, leftop, indexcol, index)
+        && !right_relids.is_member(index_relid as i32)
+        && !clauses::contain_volatile_functions(rightop)?
+        && index_coll_matches_expr_coll(index.indexcollations[indexcol], saop.inputcollid)
+        && lsyscache::op_in_opfamily(saop.opno, index.opfamily[indexcol])?
+    {
+        return Ok(Some(IndexClause {
+            rinfo: Some(rinfo),
+            indexquals: {
+                let mut v = PgVec::new_in(run.mcx);
+                v.push(rinfo);
+                v
+            },
+            lossy: false,
+            indexcol: indexcol as i16,
+            indexcols: PgVec::new_in(run.mcx),
+        }));
+    }
     Ok(None)
 }
 

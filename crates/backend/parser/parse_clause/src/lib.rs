@@ -1844,16 +1844,75 @@ pub fn transformDistinctClause<'mcx>(
     Ok(result)
 }
 
+/// C `transformDistinctOnClause`: ORDER BY items matching a DISTINCT ON
+/// expression donate their sort semantics; DISTINCT ON must stay a prefix of
+/// ORDER BY or it is an error.
 pub fn transformDistinctOnClause<'mcx>(
-    _pstate: &mut ParseState<'_, 'mcx>,
-    _distinctlist: &NodeList<'mcx>,
-    _targetlist: &mut NodeList<'mcx>,
-    _sort_clause: &NodeList<'mcx>,
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    distinctlist: &NodeList<'mcx>,
+    targetlist: &mut NodeList<'mcx>,
+    sort_clause: &NodeList<'mcx>,
 ) -> PgResult<NodeList<'mcx>> {
-    panic!(
-        "transformDistinctOnClause (parse_clause.c): DISTINCT ON transformation unported — \
-         unit backend-parser-clause"
-    );
+    let mut result = NodeList::nil();
+    let mut sortgrouprefs: mcx::PgVec<'mcx, Index> = mcx::PgVec::new_in(mcx);
+    for dexpr in distinctlist {
+        let tle = findTargetlistEntrySQL92(
+            mcx,
+            pstate,
+            dexpr,
+            targetlist,
+            ParseExprKind::EXPR_KIND_DISTINCT_ON,
+        )?;
+        sortgrouprefs.push(assignSortGroupRef(tle, targetlist));
+    }
+
+    let mut skipped_sortitem = false;
+    for sc_node in sort_clause {
+        let scl = sc_node.as_sort_group_clause().expect("sortClause cell");
+        if sortgrouprefs.contains(&scl.tleSortGroupRef) {
+            if skipped_sortitem {
+                return Err(distinct_on_orderby_mismatch(
+                    pstate,
+                    get_matching_location(scl.tleSortGroupRef, &sortgrouprefs, distinctlist),
+                ));
+            }
+            result.lappend(mcx, Node::mk(mcx, *scl)?)?;
+        } else {
+            skipped_sortitem = true;
+        }
+    }
+
+    for (i, dexpr) in distinctlist.iter().enumerate() {
+        let sortgroupref = sortgrouprefs[i];
+        let tle_node = targetlist
+            .iter()
+            .find(|n| n.as_target_entry().expect("tlist cell").ressortgroupref == sortgroupref)
+            .expect("DISTINCT ON expression was added to the targetlist above");
+        if targetIsInSortList(tle_node.as_target_entry().unwrap(), InvalidOid, &result)? {
+            continue;
+        }
+        if skipped_sortitem {
+            return Err(distinct_on_orderby_mismatch(pstate, expr_location(dexpr)));
+        }
+        addTargetToGroupList(mcx, pstate, tle_node, &mut result, targetlist, expr_location(dexpr))?;
+    }
+
+    assert!(!result.is_nil(), "grammar forbids an empty DISTINCT ON list");
+    Ok(result)
+}
+
+fn get_matching_location(
+    sortgroupref: Index,
+    sortgrouprefs: &[Index],
+    exprs: &NodeList<'_>,
+) -> ParseLoc {
+    for (i, expr) in exprs.iter().enumerate() {
+        if sortgrouprefs[i] == sortgroupref {
+            return expr_location(expr);
+        }
+    }
+    unreachable!("get_matching_location: no matching sortgroupref");
 }
 
 fn findWindowClause<'a, 'mcx>(
@@ -2471,6 +2530,26 @@ fn distinct_orderby_mismatch(
                 "parse_clause.c",
                 0,
                 "transformDistinctClause",
+            )),
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn distinct_on_orderby_mismatch(pstate: &ParseState<'_, '_>, location: ParseLoc) -> Box<PgError> {
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_INVALID_COLUMN_REFERENCE)
+            .errmsg(
+                "SELECT DISTINCT ON expressions must match initial ORDER BY expressions"
+                    .to_string(),
+            )
+            .errposition(parser_errposition(pstate, location, mbutils::GetDatabaseEncoding()))
+            .into_error()
+            .with_error_location(ErrorLocation::new(
+                "parse_clause.c",
+                0,
+                "transformDistinctOnClause",
             )),
     )
 }

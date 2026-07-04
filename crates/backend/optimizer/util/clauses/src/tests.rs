@@ -25,9 +25,14 @@ const F_FAKE_NONSTRICT: u32 = 9994;
 const OP_FAKE_EQ: u32 = 9901;
 const OP_FAKE_NE: u32 = 9902;
 const F_TEXTREGEXEQ_SUPPORT: u32 = 1364;
+const F_FAKE_SQL_INLINE: u32 = 9995;
+const F_FAKE_SQL_REC: u32 = 9996;
 
 fn shape(provolatile: u8, proparallel: u8, strict: bool, rettype: u32) -> PgProcShape {
     PgProcShape {
+        prolang: 12,
+        prosecdef: false,
+        proconfig_isnull: true,
         pronamespace: 11,
         prorettype: rettype,
         provariadic: 0,
@@ -59,6 +64,12 @@ fn install_fixtures() {
                     Some(sh)
                 }
                 F_FAKE_NONSTRICT => Some(shape(b'i', b's', false, 16)),
+                F_FAKE_SQL_INLINE | F_FAKE_SQL_REC => {
+                    let mut sh = shape(b'v', b'u', false, 23);
+                    sh.prolang = 14;
+                    sh.pronargs = 1;
+                    Some(sh)
+                }
                 _ => None,
             })
         });
@@ -94,6 +105,17 @@ fn install_fixtures() {
             })
         });
         var_seams::contain_var_clause::set(fixture_contain_var_clause);
+        miscinit_seams::get_user_id::set(|| 10);
+        aclchk_seams::object_aclcheck::set(|_, _, _, _| Ok(0));
+        clauses_seams::inline_sql_function::set(|mcx, funcid, _, _, _, args| {
+            Ok(match funcid {
+                F_FAKE_SQL_INLINE => {
+                    Some(op_expr(mcx, 551, F_INT4PL, 23, &[args.nth(0), int4_const(mcx, Some(1))]))
+                }
+                F_FAKE_SQL_REC => Some(func_expr(mcx, F_FAKE_SQL_REC, &[args.nth(0)])),
+                _ => None,
+            })
+        });
     });
 }
 
@@ -754,4 +776,77 @@ fn find_nonnullable_rels_uses_strict_saop() {
     let lax = saop(mcx, OP_FAKE_EQ, F_FAKE_NONSTRICT, true, &[var, param]);
     let rels = find_nonnullable_rels(mcx, Some(lax)).unwrap();
     assert!(rels.is_empty());
+}
+
+#[test]
+fn inline_replaces_sql_function_call() {
+    let ctx = cx();
+    let mcx = ctx.mcx();
+    let var = Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap();
+    let call = func_expr(mcx, F_FAKE_SQL_INLINE, &[var]);
+    let out = eval_const_expressions(mcx, call).unwrap();
+    let o = out.as_op_expr().expect("inlined to the seam-provided OpExpr");
+    assert_eq!(o.opfuncid, F_INT4PL);
+    assert!(o.args.nth(0).as_var().is_some());
+    assert_eq!(o.args.nth(1).as_const().unwrap().constvalue.as_i32(), 1);
+}
+
+#[test]
+fn inline_recursion_guard_stops_self_expansion() {
+    let ctx = cx();
+    let mcx = ctx.mcx();
+    let var = Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap();
+    let call = func_expr(mcx, F_FAKE_SQL_REC, &[var]);
+    let out = eval_const_expressions(mcx, call).unwrap();
+    let f = out.as_func_expr().expect("one expansion, inner call kept");
+    assert_eq!(f.funcid, F_FAKE_SQL_REC);
+}
+
+#[test]
+fn mbms_int_members_and_is_member() {
+    let ctx = MemoryContext::new_bump("clauses-test");
+    let mcx = ctx.mcx();
+
+    let mut a: MultiBitmapset<'_> = mcx::PgVec::new_in(mcx);
+    mbms_add_member(mcx, &mut a, 0, 3).unwrap();
+    mbms_add_member(mcx, &mut a, 1, 7).unwrap();
+    mbms_add_member(mcx, &mut a, 2, 70).unwrap();
+
+    assert!(mbms_is_member(0, 3, &a));
+    assert!(mbms_is_member(2, 70, &a));
+    assert!(!mbms_is_member(2, 71, &a));
+    assert!(!mbms_is_member(3, 0, &a));
+
+    let mut b: MultiBitmapset<'_> = mcx::PgVec::new_in(mcx);
+    mbms_add_member(mcx, &mut b, 0, 3).unwrap();
+    mbms_add_member(mcx, &mut b, 1, 8).unwrap();
+
+    mbms_int_members(&mut a, &b);
+    assert_eq!(a.len(), 2);
+    assert!(mbms_is_member(0, 3, &a));
+    assert!(!mbms_is_member(1, 7, &a));
+    assert!(!mbms_is_member(2, 70, &a));
+
+    let empty: MultiBitmapset<'_> = mcx::PgVec::new_in(mcx);
+    mbms_int_members(&mut a, &empty);
+    assert!(a.is_empty());
+}
+
+#[test]
+#[should_panic(expected = "negative multibitmapset member index")]
+fn mbms_is_member_negative_is_loud() {
+    let ctx = MemoryContext::new_bump("clauses-test");
+    let mcx = ctx.mcx();
+    let mut a: MultiBitmapset<'_> = mcx::PgVec::new_in(mcx);
+    mbms_add_member(mcx, &mut a, 0, 1).unwrap();
+    mbms_is_member(0, -1, &a);
+}
+
+#[test]
+#[should_panic(expected = "negative multibitmapset member index")]
+fn mbms_add_member_negative_is_loud() {
+    let ctx = MemoryContext::new_bump("clauses-test");
+    let mcx = ctx.mcx();
+    let mut a: MultiBitmapset<'_> = mcx::PgVec::new_in(mcx);
+    let _ = mbms_add_member(mcx, &mut a, -1, 1);
 }

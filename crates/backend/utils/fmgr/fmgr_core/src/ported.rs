@@ -17,6 +17,7 @@ const TABLES: &[&[FmgrBuiltin]] = &[
     ::adt_json::builtins::JSON_BUILTINS,
     ::adt_jsonb::builtins::JSONB_BUILTINS,
     ::adt_jsonpath::builtins::JSONPATH_BUILTINS,
+    ::adt_jsonpath_exec::builtins::JSONPATH_EXEC_BUILTINS,
     ::adt_like::builtins::LIKE_BUILTINS,
     ::adt_regexp::builtins::REGEXP_BUILTINS,
     ::adt_mac::builtins::MAC_BUILTINS,
@@ -35,9 +36,11 @@ const TABLES: &[&[FmgrBuiltin]] = &[
     ::adt_quote::builtins::QUOTE_BUILTINS,
     ::adt_varchar::builtins::VARCHAR_BUILTINS,
     ::pgstatfuncs::PGSTATFUNCS_BUILTINS,
+    ::portalmem::PORTALMEM_BUILTINS,
     ::adt_scalar::builtins::SCALAR_BUILTINS,
     ::adt_timestamp::builtins::TIMESTAMP_BUILTINS,
     ::sequence_seams::builtins::SEQUENCE_BUILTINS,
+    ::extension_seams::builtins::EXTENSION_BUILTINS,
     ::name::builtins::NAME_BUILTINS,
     ::nbt_compare::builtins::NBT_BUILTINS,
     ::varlena::builtins::VARLENA_BUILTINS,
@@ -45,6 +48,7 @@ const TABLES: &[&[FmgrBuiltin]] = &[
     ::commands_async::builtins::ASYNC_BUILTINS,
     ::cryptohashfuncs::CRYPTOHASH_BUILTINS,
     ::pseudorandomfuncs::builtins::PSEUDORANDOM_BUILTINS,
+    ::trigfuncs::TRIGFUNCS_BUILTINS,
 ];
 
 const fn total() -> usize {
