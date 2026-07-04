@@ -253,6 +253,19 @@ pub fn ExecAlterOwnerStmt<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterOwnerStmt<'mcx>) -> 
                 .sval;
             subscriptioncmds::AlterSubscriptionOwner(mcx, name, newowner)
         }
+        ObjectType::OBJECT_DATABASE => {
+            let name = stmt
+                .object
+                .and_then(|o| o.as_string())
+                .expect("ALTER DATABASE OWNER object is a String")
+                .sval;
+            let db_id = dbcommands::AlterDatabaseOwner(mcx, name, newowner)?;
+            Ok(ObjectAddress {
+                classId: DATABASE_RELATION_ID,
+                objectId: db_id,
+                objectSubId: 0,
+            })
+        }
         other => panic!("ExecAlterOwnerStmt (alter.c): object type {other:?} unported"),
     }
 }

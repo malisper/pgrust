@@ -4,6 +4,7 @@
 // guc.c runtime. GUC storage is C guc_malloc (raw malloc, never palloc), so
 // the store uses std String/Vec on mimalloc — the same cost shape.
 
+pub mod array;
 pub mod cnum;
 pub mod enum_lookup;
 pub mod model;
@@ -270,6 +271,11 @@ fn unrecognized(name: &str) -> PgError {
 const GUC_QUALIFIER_SEPARATOR: char = '.';
 
 // valid_custom_variable_name (guc.c:1076).
+pub use array::{
+    GUCArrayAdd, GUCArrayDelete, GUCArrayReset, ProcessGUCArray, TransformGUCArray,
+    validate_option_array_item,
+};
+
 pub fn valid_custom_variable_name(name: &str) -> bool {
     let mut saw_sep = false;
     let mut name_start = true;

@@ -58,3 +58,11 @@ explain = { path = "../explain" }
 numutils = { path = "../../utils/adt/numutils" }
 guc_tables = { path = "../../utils/misc/guc_tables" }
 xlogrecovery_seams = { path = "../../access/transam/xlogrecovery_seams" }
+relmapper = { path = "../../utils/cache/relmapper" }
+snapmgr = { path = "../../utils/time/snapmgr" }
+commands_tablespace = { path = "../tablespace" }
+aclchk = { path = "../../catalog/aclchk" }
+pg_db_role_setting = { path = "../../catalog/pg_db_role_setting" }
+guc_funcs = { path = "../../utils/misc/guc_funcs" }
+heapam_visibility_seams = { path = "../../access/heap/heapam_visibility_seams" }
+postgres_seams = { path = "../../tcop/postgres_seams" }

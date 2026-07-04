@@ -1,4 +1,5 @@
 use mcx::{Mcx, PgVec};
+use types_core::primitive::ForkNumber;
 use types_error::PgResult;
 use types_storage::RelFileLocator;
 
@@ -43,4 +44,16 @@ seam_core::seam!(
     // RelationPreserveStorage(rlocator, atCommit) (storage.c): unlinks pending
     // deletes for rlocator; list surgery only, no ereport.
     pub fn relation_preserve_storage(rlocator: RelFileLocator, at_commit: bool)
+);
+
+seam_core::seam!(
+    pub fn relation_create_storage(
+        rlocator: RelFileLocator,
+        relpersistence: u8,
+        register_delete: bool,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    pub fn log_smgrcreate(rlocator: RelFileLocator, fork_num: ForkNumber) -> PgResult<()>
 );

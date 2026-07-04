@@ -1374,6 +1374,97 @@ pub fn CountOtherDBBackends(databaseid: types_core::Oid) -> PgResult<Option<(i32
     Ok(Some((nbackends, nprepared)))
 }
 
+const ROLE_PG_SIGNAL_BACKEND: types_core::Oid = 4200;
+
+pub fn TerminateOtherDBBackends(databaseId: types_core::Oid) -> PgResult<()> {
+    let arrayP = procArray();
+    let hdr = ProcGlobal();
+    let my_procno = MyProc().expect("no MyProc");
+
+    let mut pids: Vec<i32> = Vec::new();
+    let mut nprepared: u64 = 0;
+
+    LWLockAcquire(ProcArrayLock(), LW_SHARED, my_procno)?;
+    for index in 0..arrayP.numProcs.get() as usize {
+        let pgprocno = arrayP.pgprocnos[index].get();
+        let proc = &hdr.allProcs[pgprocno as usize];
+        if proc.databaseId.load(Relaxed) != databaseId {
+            continue;
+        }
+        if pgprocno == my_procno {
+            continue;
+        }
+        let pid = proc.pid.load(Relaxed);
+        if pid != 0 {
+            pids.push(pid);
+        } else {
+            nprepared += 1;
+        }
+    }
+    LWLockRelease(ProcArrayLock())?;
+
+    if nprepared > 0 {
+        let dbname = dbcommands_seams::get_database_name::call(databaseId)?
+            .unwrap_or_else(|| panic!("cache lookup failed for database {databaseId}"));
+        return Err(elog::ereport(types_error::ERROR)
+            .errcode(types_error::ERRCODE_OBJECT_IN_USE)
+            .errmsg(format!(
+                "database \"{dbname}\" is being used by prepared transactions"
+            ))
+            .errdetail(if nprepared == 1 {
+                format!("There is {nprepared} prepared transaction using the database.")
+            } else {
+                format!("There are {nprepared} prepared transactions using the database.")
+            })
+            .into_error()
+            .into());
+    }
+
+    let user_id = miscinit_seams::get_user_id::call();
+    for &pid in &pids {
+        let Some(proc) = BackendPidGetProc(pid) else { continue };
+        let role_id = proc.roleId.load(Relaxed);
+
+        if superuser_seams::superuser_arg::call(role_id)?
+            && !superuser_seams::superuser::call()?
+        {
+            return Err(elog::ereport(types_error::ERROR)
+                .errcode(types_error::ERRCODE_INSUFFICIENT_PRIVILEGE)
+                .errmsg("permission denied to terminate process".to_string())
+                .errdetail(
+                    "Only roles with the SUPERUSER attribute may terminate processes of \
+                     roles with the SUPERUSER attribute."
+                        .to_string(),
+                )
+                .into_error()
+                .into());
+        }
+
+        if !acl_seams::has_privs_of_role::call(user_id, role_id)?
+            && !acl_seams::has_privs_of_role::call(user_id, ROLE_PG_SIGNAL_BACKEND)?
+        {
+            return Err(elog::ereport(types_error::ERROR)
+                .errcode(types_error::ERRCODE_INSUFFICIENT_PRIVILEGE)
+                .errmsg("permission denied to terminate process".to_string())
+                .errdetail(
+                    "Only roles with privileges of the role whose process is being \
+                     terminated or with privileges of the \"pg_signal_backend\" role may \
+                     terminate this process."
+                        .to_string(),
+                )
+                .into_error()
+                .into());
+        }
+    }
+
+    for &pid in &pids {
+        if BackendPidGetProc(pid).is_some() {
+            let _ = procsignal::SendThreadSignal(pid, libc::SIGTERM);
+        }
+    }
+    Ok(())
+}
+
 pub fn init_seams() {
     procarray_seams::proc_array_add::set(ProcArrayAdd);
     procarray_seams::proc_array_remove::set(ProcArrayRemove);

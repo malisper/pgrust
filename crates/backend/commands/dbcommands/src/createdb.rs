@@ -190,7 +190,17 @@ fn CreateDatabaseUsingFileCopy(
     Ok(())
 }
 
-fn createdb_failure_cleanup(mcx: Mcx<'_>, src_dboid: Oid, dst_dboid: Oid) -> PgResult<()> {
+fn createdb_failure_cleanup(
+    mcx: Mcx<'_>,
+    src_dboid: Oid,
+    dst_dboid: Oid,
+    strategy: CreateDBStrategy,
+) -> PgResult<()> {
+    if strategy == CreateDBStrategy::WalLog {
+        bufmgr::DropDatabaseBuffers(dst_dboid)?;
+        smgr::ForgetDatabaseSyncRequests(dst_dboid)?;
+        lmgr::UnlockSharedObject(DATABASE_RELATION_ID, dst_dboid, 0, AccessShareLock)?;
+    }
     lmgr::UnlockSharedObject(DATABASE_RELATION_ID, src_dboid, 0, ShareLock)?;
     crate::remove_dbtablespaces(mcx, dst_dboid)
 }
@@ -430,9 +440,7 @@ pub fn createdb<'mcx>(mcx: Mcx<'mcx>, stmt: &CreatedbStmt<'mcx>) -> PgResult<Oid
             .into());
     }
 
-    // C's default is WAL_LOG; the WAL_LOG block-level copy engine is unported,
-    // so the default here is FILE_COPY (on-disk and catalog results identical).
-    let mut dbstrategy = CreateDBStrategy::FileCopy;
+    let mut dbstrategy = CreateDBStrategy::WalLog;
     if let Some(strategy) = arg_str(strategy_el)? {
         if strategy.eq_ignore_ascii_case("wal_log") {
             dbstrategy = CreateDBStrategy::WalLog;
@@ -446,9 +454,6 @@ pub fn createdb<'mcx>(mcx: Mcx<'mcx>, stmt: &CreatedbStmt<'mcx>) -> PgResult<Oid
                 .into_error()
                 .into());
         }
-    }
-    if dbstrategy == CreateDBStrategy::WalLog {
-        panic!("createdb: STRATEGY WAL_LOG unported (ScanSourceDatabasePgClass copy engine)");
     }
 
     if encoding < 0 {
@@ -610,11 +615,52 @@ pub fn createdb<'mcx>(mcx: Mcx<'mcx>, stmt: &CreatedbStmt<'mcx>) -> PgResult<Oid
         dbcollversion_s = pg_locale::get_collation_actual_version(dblocprovider, &dbcollate_s)?;
     }
 
-    if tablespacename_el.is_some() {
-        panic!("createdb: TABLESPACE option unported (tablespace lane)");
-    }
     let src_deftablespace = src.dattablespace;
-    let dst_deftablespace = src_deftablespace;
+    let dst_deftablespace = match tablespacename_el {
+        Some(el) if el.arg.is_some() => {
+            let tablespacename = explain::defGetString(mcx, el)?;
+            let dst = commands_tablespace::get_tablespace_oid(mcx, tablespacename, false)?;
+            let aclresult = aclchk::object_aclcheck(
+                TableSpaceRelationId,
+                dst,
+                miscinit::GetUserId(),
+                adt_acl::ACL_CREATE,
+            )?;
+            if aclresult != aclchk::ACLCHECK_OK {
+                aclchk::aclcheck_error(
+                    aclresult,
+                    types_nodes::parsenodes::ObjectType::OBJECT_TABLESPACE,
+                    tablespacename,
+                )?;
+            }
+            if dst == GLOBALTABLESPACE_OID {
+                return Err(ereport(ERROR)
+                    .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+                    .errmsg("pg_global cannot be used as default tablespace".to_string())
+                    .into_error()
+                    .into());
+            }
+            if dst != src_deftablespace {
+                let srcpath = relpath::GetDatabasePath(mcx, src_dboid, dst)?;
+                if matches!(std::fs::metadata(srcpath.as_str()), Ok(md) if md.is_dir())
+                    && !fd::directory_is_empty(srcpath.as_str())?
+                {
+                    return Err(ereport(ERROR)
+                        .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                        .errmsg(format!(
+                            "cannot assign new default tablespace \"{tablespacename}\""
+                        ))
+                        .errdetail(format!(
+                            "There is a conflict because database \"{dbtemplate}\" already has some tables in this tablespace."
+                        ))
+                        .into_error()
+                        .into());
+                }
+            }
+            dst
+        }
+        _ => src_deftablespace,
+    };
 
     if crate::get_database_oid(mcx, dbname, true)? != InvalidOid {
         return Err(ereport(ERROR)
@@ -712,15 +758,28 @@ pub fn createdb<'mcx>(mcx: Mcx<'mcx>, stmt: &CreatedbStmt<'mcx>) -> PgResult<Oid
     pg_depend::recordDependencyOnOwner(mcx, DATABASE_RELATION_ID, dboid, datdba)?;
     pg_shdepend::copyTemplateDependencies(mcx, src_dboid, dboid)?;
 
-    let copy = CreateDatabaseUsingFileCopy(
-        mcx,
-        src_dboid,
-        dboid,
-        src_deftablespace,
-        dst_deftablespace,
-    );
+    if dbstrategy == CreateDBStrategy::WalLog {
+        lmgr::LockSharedObject(DATABASE_RELATION_ID, dboid, 0, AccessShareLock)?;
+    }
+
+    let copy = match dbstrategy {
+        CreateDBStrategy::WalLog => crate::walcopy::CreateDatabaseUsingWalLog(
+            mcx,
+            src_dboid,
+            dboid,
+            src_deftablespace,
+            dst_deftablespace,
+        ),
+        CreateDBStrategy::FileCopy => CreateDatabaseUsingFileCopy(
+            mcx,
+            src_dboid,
+            dboid,
+            src_deftablespace,
+            dst_deftablespace,
+        ),
+    };
     if let Err(e) = copy {
-        let _ = createdb_failure_cleanup(mcx, src_dboid, dboid);
+        let _ = createdb_failure_cleanup(mcx, src_dboid, dboid, dbstrategy);
         return Err(e);
     }
 

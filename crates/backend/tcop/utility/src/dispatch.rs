@@ -399,11 +399,45 @@ fn dispatch_switch<'mcx>(
             };
             dbcommands::createdb(mcx, stmt)?;
         }
-        T_AlterDatabaseStmt => handler_gap("AlterDatabase (dbcommands lane)"),
-        T_AlterDatabaseRefreshCollStmt => {
-            handler_gap("AlterDatabaseRefreshColl (dbcommands lane)")
+        T_AlterDatabaseStmt => {
+            let stmt = parsetree
+                .as_variant::<types_nodes::parsenodes::AlterDatabaseStmt>()
+                .expect("AlterDatabaseStmt");
+            // Retention contract as unify_stmt_lifetime.
+            let stmt = unsafe {
+                core::mem::transmute::<
+                    &types_nodes::parsenodes::AlterDatabaseStmt<'_>,
+                    &types_nodes::parsenodes::AlterDatabaseStmt<'mcx>,
+                >(stmt)
+            };
+            dbcommands::AlterDatabase(mcx, stmt, is_top_level)?;
         }
-        T_AlterDatabaseSetStmt => handler_gap("AlterDatabaseSet (dbcommands lane)"),
+        T_AlterDatabaseRefreshCollStmt => {
+            let stmt = parsetree
+                .as_variant::<types_nodes::parsenodes::AlterDatabaseRefreshCollStmt>()
+                .expect("AlterDatabaseRefreshCollStmt");
+            // Retention contract as unify_stmt_lifetime.
+            let stmt = unsafe {
+                core::mem::transmute::<
+                    &types_nodes::parsenodes::AlterDatabaseRefreshCollStmt<'_>,
+                    &types_nodes::parsenodes::AlterDatabaseRefreshCollStmt<'mcx>,
+                >(stmt)
+            };
+            dbcommands::AlterDatabaseRefreshColl(mcx, stmt)?;
+        }
+        T_AlterDatabaseSetStmt => {
+            let stmt = parsetree
+                .as_variant::<types_nodes::parsenodes::AlterDatabaseSetStmt>()
+                .expect("AlterDatabaseSetStmt");
+            // Retention contract as unify_stmt_lifetime.
+            let stmt = unsafe {
+                core::mem::transmute::<
+                    &types_nodes::parsenodes::AlterDatabaseSetStmt<'_>,
+                    &types_nodes::parsenodes::AlterDatabaseSetStmt<'mcx>,
+                >(stmt)
+            };
+            dbcommands::AlterDatabaseSet(mcx, stmt)?;
+        }
         T_DropdbStmt => {
             xact::PreventInTransactionBlock(is_top_level, "DROP DATABASE")?;
             let stmt = parsetree.as_dropdb_stmt().unwrap();
@@ -1601,6 +1635,13 @@ fn exec_rename_stmt_inner<'mcx>(
     stmt: &types_nodes::parsenodes::RenameStmt<'_>,
 ) -> PgResult<()> {
     match stmt.renameType {
+        types_nodes::parsenodes::ObjectType::OBJECT_DATABASE => {
+            dbcommands::RenameDatabase(
+                mcx,
+                stmt.subname.expect("RENAME DATABASE subname"),
+                stmt.newname.expect("RENAME DATABASE newname"),
+            )?;
+        }
         types_nodes::parsenodes::ObjectType::OBJECT_TABLE => {
             tablecmds::RenameRelation(mcx, stmt)?;
         }
