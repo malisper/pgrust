@@ -43,6 +43,7 @@ pub const PolicyRelationId: Oid = 3256;
 pub const EventTriggerRelationId: Oid = 3466;
 pub const CollationRelationId: Oid = 3456;
 pub const CastRelationId: Oid = 2605;
+pub const AccessMethodRelationId: Oid = 2601;
 pub const LargeObjectRelationId: Oid = 2613;
 
 pub fn init_seams() {
@@ -378,6 +379,10 @@ fn get_object_address_unqualified<'mcx>(
         ObjectType::OBJECT_SUBSCRIPTION => Ok(ObjectAddress::set(
             SubscriptionRelationId,
             lsyscache::get_subscription_oid(name, missing_ok)?,
+        )),
+        ObjectType::OBJECT_ACCESS_METHOD => Ok(ObjectAddress::set(
+            AccessMethodRelationId,
+            commands_amcmds::get_am_oid(name, missing_ok)?,
         )),
         other => unported(&format!("get_object_address_unqualified {other:?}")),
     }
@@ -805,7 +810,8 @@ pub fn get_object_namespace(address: &ObjectAddress) -> PgResult<Oid> {
         NAMESPACE_RELATION_ID | DATABASE_RELATION_ID | AUTH_ID_RELATION_ID
         | RewriteRelationId | TriggerRelationId | EventTriggerRelationId
         | PublicationRelationId | PublicationRelRelationId
-        | PublicationNamespaceRelationId | SubscriptionRelationId => Ok(InvalidOid),
+        | PublicationNamespaceRelationId | SubscriptionRelationId
+        | AccessMethodRelationId => Ok(InvalidOid),
         ProcedureRelationId => Ok(syscache_seams::lookup_pg_proc_shape::call(address.objectId)?
             .map(|s| s.pronamespace)
             .unwrap_or(InvalidOid)),

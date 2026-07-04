@@ -109,6 +109,10 @@ fn does_not_exist_skipping(objtype: ObjectType, object: Node<'_>) -> PgResult<()
             let name = object.as_string().expect("event trigger name is a String node").sval;
             format!("event trigger \"{name}\" does not exist, skipping")
         }
+        ObjectType::OBJECT_ACCESS_METHOD => {
+            let name = object.as_string().expect("access method name is a String node").sval;
+            format!("access method \"{name}\" does not exist, skipping")
+        }
         ObjectType::OBJECT_PUBLICATION => {
             let name = object.as_string().expect("publication name is a String node").sval;
             format!("publication \"{name}\" does not exist, skipping")

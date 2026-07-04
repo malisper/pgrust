@@ -1284,6 +1284,26 @@ fn slow_switch<'mcx>(
                     typecmds::DefineType(mcx, &mut pstate, &stmt.defnames, &stmt.definition)?;
                     parser_small1::free_parsestate(pstate)?;
                 }
+                types_nodes::parsenodes::ObjectType::OBJECT_AGGREGATE => {
+                    let mut pstate = parser_small1::make_parsestate(mcx, None);
+                    {
+                        let mut v: mcx::PgVec<'mcx, u8> = mcx::PgVec::new_in(mcx);
+                        mcx::vec_append_bytes(&mut v, source_text.as_bytes())?;
+                        pstate.p_sourcetext = Some(v.leak());
+                    }
+                    // C: address = DefineAggregate; the ported form returns no address.
+                    collect_gap("CREATE AGGREGATE");
+                    aggregatecmds::DefineAggregate(
+                        mcx,
+                        &mut pstate,
+                        &stmt.defnames,
+                        &stmt.args,
+                        stmt.oldstyle,
+                        &stmt.definition,
+                        stmt.replace,
+                    )?;
+                    parser_small1::free_parsestate(pstate)?;
+                }
                 types_nodes::parsenodes::ObjectType::OBJECT_TSDICTIONARY => {
                     // C: address = DefineTSDictionary; the ported form returns no address.
                     collect_gap("CREATE TEXT SEARCH DICTIONARY");
@@ -1490,6 +1510,39 @@ fn slow_switch<'mcx>(
                 .expect("AlterOperatorStmt");
             collect_gap("ALTER OPERATOR");
             operatorcmds::AlterOperator(mcx, stmt)?;
+            Ok(None)
+        }
+
+        T_CreateCastStmt => {
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::parsenodes::CreateCastStmt>()
+                .expect("CreateCastStmt");
+            // C: address = CreateCast; the ported form's address is uncollected.
+            collect_gap("CREATE CAST");
+            functioncmds::CreateCast(mcx, stmt)?;
+            Ok(None)
+        }
+
+        T_CreateTransformStmt => {
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::parsenodes::CreateTransformStmt>()
+                .expect("CreateTransformStmt");
+            // C: address = CreateTransform; the ported form's address is uncollected.
+            collect_gap("CREATE TRANSFORM");
+            functioncmds::CreateTransform(mcx, stmt)?;
+            Ok(None)
+        }
+
+        T_CreateAmStmt => {
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::parsenodes::CreateAmStmt>()
+                .expect("CreateAmStmt");
+            // C: address = CreateAccessMethod; the ported form's address is uncollected.
+            collect_gap("CREATE ACCESS METHOD");
+            commands_amcmds::CreateAccessMethod(mcx, stmt)?;
             Ok(None)
         }
 

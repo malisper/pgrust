@@ -16,3 +16,9 @@ types_relscan = { path = "../../index/relscan" }
 index_amvalidate = { path = "../../index/index_amvalidate" }
 lsyscache = { path = "../../../utils/cache/lsyscache" }
 xact = { path = "../../transam/xact" }
+mcx = { path = "../../../../_support/mcx" }
+types_scan = { path = "../../../../_support/types/types_scan" }
+elog = { path = "../../../utils/error/elog" }
+syscache_seams = { path = "../../../utils/cache/syscache_seams" }
+adt_regproc = { path = "../../../utils/adt/regproc" }
+format_type = { path = "../../../utils/adt/format_type" }

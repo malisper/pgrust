@@ -60,6 +60,14 @@ pub struct JoinQualUsing<'mcx> {
     pub alias: Option<&'mcx Alias<'mcx>>,
 }
 
+// transform_element_list's list_make2(fromsql, tosql); cells may be C-NULL,
+// which NodeList cannot carry.
+#[derive(Default)]
+pub struct TransformElements<'mcx> {
+    pub fromsql: Option<Node<'mcx>>,
+    pub tosql: Option<Node<'mcx>>,
+}
+
 pub struct YYSTYPE<'mcx> {
     p: *mut u8,
     meta: u64,
@@ -87,6 +95,7 @@ const T_KEY_ACTIONS: u32 = 14;
 const T_FUNC_ALIAS_COLS: u32 = 15;
 const T_JOIN_USING: u32 = 16;
 const T_JSON_BEHAVIORS: u32 = 17;
+const T_TRANSFORM_ELEMS: u32 = 18;
 
 #[cold]
 #[inline(never)]
@@ -241,6 +250,19 @@ impl<'mcx> YYSTYPE<'mcx> {
         }
         // SAFETY: built by JsonBehaviorsV from &'mcx mut; moved, never duplicated.
         unsafe { &mut *(self.p as *mut JsonBehaviors<'mcx>) }
+    }
+
+    #[inline(always)]
+    pub fn TransformElementsV(a: &'mcx mut TransformElements<'mcx>) -> Self {
+        Self::mk(a as *mut TransformElements<'mcx> as *mut u8, T_TRANSFORM_ELEMS, 0)
+    }
+
+    pub fn transform_elements(self) -> &'mcx mut TransformElements<'mcx> {
+        if self.tag() != T_TRANSFORM_ELEMS {
+            confusion("TransformElements");
+        }
+        // SAFETY: built by TransformElementsV from &'mcx mut; moved, never duplicated.
+        unsafe { &mut *(self.p as *mut TransformElements<'mcx>) }
     }
 
     pub fn key_actions(self) -> &'mcx mut KeyActions<'mcx> {

@@ -29,6 +29,7 @@ schemacmds = { path = "../../commands/schemacmds" }
 dbcommands = { path = "../../commands/dbcommands" }
 commands_tablespace = { path = "../../commands/tablespace" }
 functioncmds = { path = "../../commands/functioncmds" }
+commands_amcmds = { path = "../../commands/amcmds" }
 statscmds = { path = "../../commands/statscmds" }
 commands_comment = { path = "../../commands/comment" }
 user = { path = "../../commands/user" }
@@ -80,6 +81,7 @@ init_small = { path = "../../utils/init/init_small" }
 rel_vocab = { path = "../../../_support/types/rel_vocab" }
 
 operatorcmds = { path = "../../commands/operatorcmds" }
+aggregatecmds = { path = "../../commands/aggregatecmds" }
 opclasscmds = { path = "../../commands/opclasscmds" }
 extension = { path = "../../commands/extension" }
 catalog_dependency = { path = "../../catalog/catalog_dependency" }

@@ -23,6 +23,16 @@ pub enum OverridingKind {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[repr(u32)]
+pub enum CoercionContext {
+    #[default]
+    COERCION_IMPLICIT = 0,
+    COERCION_ASSIGNMENT = 1,
+    COERCION_PLPGSQL = 2,
+    COERCION_EXPLICIT = 3,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u32)]
 pub enum CoercionForm {
     #[default]
     COERCE_EXPLICIT_CALL = 0,
