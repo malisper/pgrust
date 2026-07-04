@@ -346,7 +346,7 @@ fn test_relation<'mcx>(mcx: Mcx<'mcx>) -> RelationData<'mcx> {
         relfrozenxid: 3,
         relminmxid: 1,
     };
-    RelationData { rd_locator: Default::default(), rd_smgr: Default::default(),
+    RelationData { rd_locator: Cell::new(RLOC), rd_smgr: Default::default(),
         rd_id: REL_OID,
         rd_backend: INVALID_PROC_NUMBER,
         rd_islocaltemp: false,
