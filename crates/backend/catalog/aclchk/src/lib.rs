@@ -864,7 +864,7 @@ pub fn object_ownercheck(classid: Oid, objectid: Oid, roleid: Oid) -> PgResult<b
             ReleaseSysCache(tuple);
             owner
         }
-        DATABASE_RELATION_ID_OWNERCHECK => {
+        DATABASE_RELATION_ID => {
             let Some(tuple) = SearchSysCache1(
                 cache_syscache::cacheinfo::DATABASEOID,
                 SysCacheKey::Value(Datum::from_oid(objectid)),
@@ -888,8 +888,6 @@ pub fn object_ownercheck(classid: Oid, objectid: Oid, roleid: Oid) -> PgResult<b
     has_privs_of_role(roleid, owner_id)
 }
 
-const DATABASE_RELATION_ID_OWNERCHECK: Oid = 1262;
-const ANUM_PG_DATABASE_DATDBA: i32 = 3;
 
 const PublicationRelationId: Oid = 6104;
 const SubscriptionRelationId: Oid = 6100;
