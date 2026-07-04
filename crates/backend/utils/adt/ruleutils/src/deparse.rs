@@ -189,6 +189,16 @@ pub(crate) fn walk_varnos(node: Node<'_>, f: &mut impl FnMut(i32, u32)) {
         }
         NodeTag::T_RelabelType => walk_varnos(node.as_relabel_type().unwrap().arg, f),
         NodeTag::T_CoerceViaIO => walk_varnos(node.as_coerce_via_io().unwrap().arg, f),
+        NodeTag::T_ArrayCoerceExpr => {
+            let a = node.as_array_coerce_expr().unwrap();
+            walk_varnos(a.arg, f);
+            if let Some(e) = a.elemexpr {
+                walk_varnos(e, f);
+            }
+        }
+        NodeTag::T_ConvertRowtypeExpr => {
+            walk_varnos(node.as_convert_rowtype_expr().unwrap().arg, f)
+        }
         NodeTag::T_CollateExpr => walk_varnos(node.as_collate_expr().unwrap().arg, f),
         NodeTag::T_NullTest => {
             if let Some(arg) = node.as_null_test().unwrap().arg {
@@ -274,6 +284,22 @@ pub(crate) fn get_rule_expr<'mcx>(
                 get_rule_expr_paren(ioc.arg, ctx, false, Some(node))
             } else {
                 get_coercion_expr(ioc.arg, ctx, ioc.resulttype, -1, node)
+            }
+        }
+        NodeTag::T_ArrayCoerceExpr => {
+            let acoerce = node.as_array_coerce_expr().unwrap();
+            if acoerce.coerceformat == CoercionForm::COERCE_IMPLICIT_CAST && !showimplicit {
+                get_rule_expr_paren(acoerce.arg, ctx, false, Some(node))
+            } else {
+                get_coercion_expr(acoerce.arg, ctx, acoerce.resulttype, acoerce.resulttypmod, node)
+            }
+        }
+        NodeTag::T_ConvertRowtypeExpr => {
+            let convert = node.as_convert_rowtype_expr().unwrap();
+            if convert.convertformat == CoercionForm::COERCE_IMPLICIT_CAST && !showimplicit {
+                get_rule_expr_paren(convert.arg, ctx, false, Some(node))
+            } else {
+                get_coercion_expr(convert.arg, ctx, convert.resulttype, -1, node)
             }
         }
         NodeTag::T_CurrentOfExpr => {
@@ -968,6 +994,12 @@ fn is_simple_node(node: Node<'_>, parent: Option<Node<'_>>, pretty_flags: i32) -
         }
         NodeTag::T_CoerceViaIO => {
             is_simple_node(node.as_coerce_via_io().unwrap().arg, Some(node), pretty_flags)
+        }
+        NodeTag::T_ArrayCoerceExpr => {
+            is_simple_node(node.as_array_coerce_expr().unwrap().arg, Some(node), pretty_flags)
+        }
+        NodeTag::T_ConvertRowtypeExpr => {
+            is_simple_node(node.as_convert_rowtype_expr().unwrap().arg, Some(node), pretty_flags)
         }
 
         NodeTag::T_OpExpr => {
@@ -1882,6 +1914,20 @@ pub(crate) fn strip_implicit_coercions(node: Node<'_>) -> Node<'_> {
         NodeTag::T_CoerceViaIO => {
             let c = node.as_coerce_via_io().unwrap();
             if c.coerceformat == CoercionForm::COERCE_IMPLICIT_CAST {
+                return strip_implicit_coercions(c.arg);
+            }
+            node
+        }
+        NodeTag::T_ArrayCoerceExpr => {
+            let a = node.as_array_coerce_expr().unwrap();
+            if a.coerceformat == CoercionForm::COERCE_IMPLICIT_CAST {
+                return strip_implicit_coercions(a.arg);
+            }
+            node
+        }
+        NodeTag::T_ConvertRowtypeExpr => {
+            let c = node.as_convert_rowtype_expr().unwrap();
+            if c.convertformat == CoercionForm::COERCE_IMPLICIT_CAST {
                 return strip_implicit_coercions(c.arg);
             }
             node

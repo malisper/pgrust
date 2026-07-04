@@ -516,6 +516,84 @@ fn ece_mutator<'mcx>(node: Node<'mcx>, cx: &EceContext<'mcx>) -> PgResult<Option
                 },
             )?))
         }
+        NodeTag::T_ArrayCoerceExpr => {
+            let ac = node.as_array_coerce_expr().unwrap();
+            let arg = ece_mutator(ac.arg, cx)?.unwrap_or(ac.arg);
+            // The elemexpr's CaseTestExpr must not absorb an outer CASE value.
+            let save_case_val = cx.case_val.replace(None);
+            let elemexpr = match ac.elemexpr {
+                Some(e) => {
+                    let r = ece_mutator(e, cx);
+                    cx.case_val.set(save_case_val);
+                    Some(r?.unwrap_or(e))
+                }
+                None => {
+                    cx.case_val.set(save_case_val);
+                    None
+                }
+            };
+            let new = Node::mk(
+                cx.mcx,
+                types_nodes::ArrayCoerceExpr {
+                    arg,
+                    elemexpr,
+                    resulttype: ac.resulttype,
+                    resulttypmod: ac.resulttypmod,
+                    resultcollid: ac.resultcollid,
+                    coerceformat: ac.coerceformat,
+                    location: ac.location,
+                },
+            )?;
+            // A CoerceToDomain elemexpr keeps the domain's runtime checks.
+            if arg.node_tag() == NodeTag::T_Const
+                && elemexpr
+                    .is_some_and(|e| e.node_tag() != NodeTag::T_CoerceToDomain)
+                && !crate::classify::contain_mutable_functions(elemexpr.unwrap())?
+            {
+                return clauses_seams::evaluate_expr::call(
+                    cx.mcx,
+                    new,
+                    ac.resulttype,
+                    ac.resulttypmod,
+                    ac.resultcollid,
+                )
+                .map(Some);
+            }
+            Ok(Some(new))
+        }
+        NodeTag::T_ConvertRowtypeExpr => {
+            let cr = node.as_convert_rowtype_expr().unwrap();
+            let mut arg = ece_mutator(cr.arg, cx)?.unwrap_or(cr.arg);
+            let mut convertformat = cr.convertformat;
+            // C: a nested ConvertRowtypeExpr is redundant (by-name mapping
+            // composes); keep the inner format under an implicit outer cast.
+            if let Some(inner) = arg.as_convert_rowtype_expr() {
+                arg = inner.arg;
+                if convertformat == CoercionForm::COERCE_IMPLICIT_CAST {
+                    convertformat = inner.convertformat;
+                }
+            }
+            let new = Node::mk(
+                cx.mcx,
+                types_nodes::ConvertRowtypeExpr {
+                    arg,
+                    resulttype: cr.resulttype,
+                    convertformat,
+                    location: cr.location,
+                },
+            )?;
+            if arg.node_tag() == NodeTag::T_Const {
+                return clauses_seams::evaluate_expr::call(
+                    cx.mcx,
+                    new,
+                    cr.resulttype,
+                    -1,
+                    InvalidOid,
+                )
+                .map(Some);
+            }
+            Ok(Some(new))
+        }
         NodeTag::T_CaseExpr => {
             let ce = node.as_case_expr().unwrap();
             let mut newarg = match ce.arg {

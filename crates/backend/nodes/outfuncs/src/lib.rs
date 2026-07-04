@@ -17,9 +17,10 @@ use types_nodes::parsenodes::{
     CommonTableExpr, Query, RTEKind, RTEPermissionInfo, RangeTblEntry, SortGroupClause,
 };
 use types_nodes::primnodes::{
-    Aggref, Alias, BoolExpr, BoolExprType, CoerceToDomain, CoerceToDomainValue, CoerceViaIO,
-    Const, FromExpr, FuncExpr, JoinExpr, NamedArgExpr, NullTest, OpExpr, RangeTblRef, RelabelType,
-    ScalarArrayOpExpr, SubLink, TableFunc, TargetEntry, Var, XmlExpr,
+    Aggref, Alias, ArrayCoerceExpr, BoolExpr, BoolExprType, CoerceToDomain, CoerceToDomainValue,
+    CoerceViaIO, Const, ConvertRowtypeExpr, FromExpr, FuncExpr, JoinExpr, NamedArgExpr, NullTest,
+    OpExpr, RangeTblRef, RelabelType, ScalarArrayOpExpr, SubLink, TableFunc, TargetEntry, Var,
+    XmlExpr,
 };
 use types_nodes::rawnodes::{PartitionBoundSpec, PartitionRangeDatum};
 use types_nodes::{Boolean, Float, Integer, Node, NodeTag};
@@ -107,6 +108,14 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
         NodeTag::T_CoerceViaIO => {
             out_coerce_via_io(out, node.as_variant::<CoerceViaIO>().expect("CoerceViaIO"))?
         }
+        NodeTag::T_ArrayCoerceExpr => out_array_coerce_expr(
+            out,
+            node.as_variant::<ArrayCoerceExpr>().expect("ArrayCoerceExpr"),
+        )?,
+        NodeTag::T_ConvertRowtypeExpr => out_convert_rowtype_expr(
+            out,
+            node.as_variant::<ConvertRowtypeExpr>().expect("ConvertRowtypeExpr"),
+        )?,
         NodeTag::T_CoerceToDomain => out_coerce_to_domain(
             out,
             node.as_variant::<CoerceToDomain>().expect("CoerceToDomain"),
@@ -560,6 +569,30 @@ fn out_coerce_via_io(out: &mut PgString<'_>, c: &CoerceViaIO<'_>) -> PgResult<()
         out,
         " :resulttype {} :resultcollid {} :coerceformat {} :location -1}}",
         c.resulttype, c.resultcollid, c.coerceformat as u32
+    );
+    Ok(())
+}
+
+fn out_array_coerce_expr(out: &mut PgString<'_>, a: &ArrayCoerceExpr<'_>) -> PgResult<()> {
+    w!(out, "{{ARRAYCOERCEEXPR :arg ");
+    out_node(out, a.arg)?;
+    w!(out, " :elemexpr ");
+    out_opt_node(out, a.elemexpr)?;
+    w!(
+        out,
+        " :resulttype {} :resulttypmod {} :resultcollid {} :coerceformat {} :location -1}}",
+        a.resulttype, a.resulttypmod, a.resultcollid, a.coerceformat as u32
+    );
+    Ok(())
+}
+
+fn out_convert_rowtype_expr(out: &mut PgString<'_>, c: &ConvertRowtypeExpr<'_>) -> PgResult<()> {
+    w!(out, "{{CONVERTROWTYPEEXPR :arg ");
+    out_node(out, c.arg)?;
+    w!(
+        out,
+        " :resulttype {} :convertformat {} :location -1}}",
+        c.resulttype, c.convertformat as u32
     );
     Ok(())
 }

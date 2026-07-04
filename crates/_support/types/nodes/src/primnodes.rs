@@ -453,6 +453,27 @@ pub struct CoerceViaIO<'mcx> {
     pub location: ParseLoc,
 }
 
+// C `Expr *arg` is never NULL in a live ArrayCoerceExpr; elemexpr can be
+// NULL when the element coercion is binary-compatible.
+pub struct ArrayCoerceExpr<'mcx> {
+    pub arg: Node<'mcx>,
+    pub elemexpr: Option<Node<'mcx>>,
+    pub resulttype: Oid,
+    pub resulttypmod: i32,
+    pub resultcollid: Oid,
+    pub coerceformat: CoercionForm,
+    pub location: ParseLoc,
+}
+
+// C `Expr *arg` is never NULL in a live ConvertRowtypeExpr; modeled
+// non-optional. No typmod/collation fields, like RowExpr.
+pub struct ConvertRowtypeExpr<'mcx> {
+    pub arg: Node<'mcx>,
+    pub resulttype: Oid,
+    pub convertformat: CoercionForm,
+    pub location: ParseLoc,
+}
+
 // C `Expr *arg` is never NULL in a live CoerceToDomain; modeled non-optional.
 pub struct CoerceToDomain<'mcx> {
     pub arg: Node<'mcx>,
@@ -1117,6 +1138,12 @@ unsafe impl<'mcx> NodeVariant<'mcx> for FieldSelect<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for CoerceViaIO<'mcx> {
     const TAG: NodeTag = NodeTag::T_CoerceViaIO;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for ArrayCoerceExpr<'mcx> {
+    const TAG: NodeTag = NodeTag::T_ArrayCoerceExpr;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for ConvertRowtypeExpr<'mcx> {
+    const TAG: NodeTag = NodeTag::T_ConvertRowtypeExpr;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for CoerceToDomain<'mcx> {
     const TAG: NodeTag = NodeTag::T_CoerceToDomain;
 }
@@ -1447,6 +1474,16 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_coerce_via_io(self) -> Option<&'mcx CoerceViaIO<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_array_coerce_expr(self) -> Option<&'mcx ArrayCoerceExpr<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_convert_rowtype_expr(self) -> Option<&'mcx ConvertRowtypeExpr<'mcx>> {
         self.as_variant()
     }
 

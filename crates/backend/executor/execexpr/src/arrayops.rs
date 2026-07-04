@@ -428,3 +428,129 @@ pub fn sbsref_fetch_old(st: &mut SbsRefState, cur: NullableDatum) -> PgResult<()
     }
     Ok(())
 }
+
+// C ExprEvalStep d.arraycoerce + ArrayMapState: the elemexpr program reads
+// one source element through its CaseTestVal slot. `elem == None` is C's
+// NULL elemexprstate (binary-compatible element coercion: header relabel).
+// inp_* memoizes get_typlenbyvalalign keyed on the runtime element type
+// (C amstate.inp_extra); ret_* is compile-resolved (resultelemtype is fixed).
+pub struct ArrayCoerceState {
+    pub resultelemtype: Oid,
+    pub ret_typlen: i16,
+    pub ret_typbyval: bool,
+    pub ret_typalign: u8,
+    pub inp_elemtype: Oid,
+    pub inp_typlen: i16,
+    pub inp_typbyval: bool,
+    pub inp_typalign: u8,
+    pub elem: Option<ArrayCoerceElem>,
+    pub resmcx: ResMcx,
+}
+
+pub struct ArrayCoerceElem {
+    pub slot: NonNull<NullableDatum>,
+    // Compile-mcx ExprState restamped 'static; outlives every eval.
+    pub state: NonNull<crate::steps::ExprState<'static>>,
+}
+
+// ExecEvalArrayCoerce (execExprInterp.c) + array_map (arrayfuncs.c); caller
+// has handled the NULL-array case.
+pub fn eval_array_coerce(st: &mut ArrayCoerceState, arrd: Datum) -> PgResult<NullableDatum> {
+    let mcx = res_mcx(&st.resmcx);
+    let img = datum_array_image(arrd, &st.resmcx)?;
+
+    let Some(elem) = &st.elem else {
+        // DatumGetArrayTypePCopy + ARR_ELEMTYPE overwrite.
+        let mut copy = ::mcx::slice_in(mcx, img)?;
+        copy[12..16].copy_from_slice(&(st.resultelemtype as u32).to_ne_bytes());
+        return Ok(NullableDatum {
+            value: Datum::from_usize(copy.leak().as_ptr() as usize),
+            isnull: false,
+        });
+    };
+
+    let elemtype = arrayfuncs::arr_elemtype(img);
+    if elemtype != st.inp_elemtype {
+        let (l, bv, al) = lsyscache::get_typlenbyvalalign(elemtype)?;
+        st.inp_elemtype = elemtype;
+        st.inp_typlen = l;
+        st.inp_typbyval = bv;
+        st.inp_typalign = al as u8;
+    }
+
+    let (ndim, dims, lbs) = arrayfuncs::read_dims_lbounds(img);
+    let (values, nulls) = arrayfuncs::deconstruct_array(
+        mcx,
+        img,
+        st.inp_typlen as i32,
+        st.inp_typbyval,
+        st.inp_typalign,
+        true,
+    )?;
+    let n = values.len();
+    if n == 0 {
+        let empty = arrayfuncs::construct_empty_array(mcx, st.resultelemtype)?;
+        return Ok(NullableDatum {
+            value: Datum::from_usize(empty.leak().as_ptr() as usize),
+            isnull: false,
+        });
+    }
+
+    // SAFETY: compile-allocated program + slot, sole live access (elemexpr
+    // cannot contain another reference to this step's state).
+    let sub = unsafe { &mut *elem.state.as_ptr() };
+    sub.arm_result_mcx(mcx);
+
+    let mut out_values: PgVec<'_, Datum> = vec_with_capacity_in(mcx, n)?;
+    let mut out_nulls: PgVec<'_, bool> = vec_with_capacity_in(mcx, n)?;
+    let mut hasnulls = false;
+    for i in 0..n {
+        // SAFETY: slot is a live compile-mcx cell owned by this step.
+        unsafe {
+            elem.slot.write(NullableDatum { value: values[i], isnull: nulls[i] });
+        }
+        let mut slots = crate::interp::EvalSlots::default();
+        let r = crate::interp::exec_eval_expr(sub, &mut slots)?;
+        let v = if r.isnull {
+            hasnulls = true;
+            Datum::null()
+        } else if st.ret_typlen == -1 {
+            // PG_DETOAST_DATUM on the per-element result.
+            let p = r.value.as_usize() as *const u8;
+            // SAFETY: non-null by-ref varlena result.
+            unsafe {
+                if ::types_tuple::varatt::varatt_is_4b_u(p) {
+                    r.value
+                } else {
+                    let raw =
+                        core::slice::from_raw_parts(p, ::types_tuple::varatt::varsize_any(p));
+                    let flat = ::detoast_seams::detoast_attr::call(mcx, raw)?;
+                    Datum::from_usize(flat.leak().as_ptr() as usize)
+                }
+            }
+        } else {
+            r.value
+        };
+        out_values.push(v);
+        out_nulls.push(r.isnull);
+    }
+
+    // Source dims/lbounds preserved exactly; construct_md_array enforces the
+    // MaxAllocSize ceiling (C array_map's ERRCODE_PROGRAM_LIMIT_EXCEEDED).
+    let result = arrayfuncs::construct_md_array(
+        mcx,
+        &out_values,
+        if hasnulls { Some(&out_nulls) } else { Option::None },
+        ndim,
+        &dims[..ndim as usize],
+        &lbs[..ndim as usize],
+        st.resultelemtype,
+        st.ret_typlen as i32,
+        st.ret_typbyval,
+        st.ret_typalign,
+    )?;
+    Ok(NullableDatum {
+        value: Datum::from_usize(result.leak().as_ptr() as usize),
+        isnull: false,
+    })
+}

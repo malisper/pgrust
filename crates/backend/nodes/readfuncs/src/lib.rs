@@ -377,6 +377,8 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
             b"SQLVALUEFUNCTION" => self.read_sql_value_function(),
             b"RELABELTYPE" => self.read_relabel_type(),
             b"COERCEVIAIO" => self.read_coerce_via_io(),
+            b"ARRAYCOERCEEXPR" => self.read_array_coerce_expr(),
+            b"CONVERTROWTYPEEXPR" => self.read_convert_rowtype_expr(),
             b"COERCETODOMAIN" => self.read_coerce_to_domain(),
             b"COERCETODOMAINVALUE" => self.read_coerce_to_domain_value(),
             b"PARTITIONBOUNDSPEC" => self.read_partition_bound_spec(),
@@ -1145,6 +1147,32 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
             resulttype: self.read_u32("resulttype"),
             resultcollid: self.read_u32("resultcollid"),
             coerceformat: coercion_form(self.read_u32("coerceformat")),
+            location: self.read_location("location"),
+        };
+        Node::mk(self.mcx, c)
+    }
+
+    fn read_array_coerce_expr(&mut self) -> PgResult<Node<'mcx>> {
+        let arg = self.read_node("arg")?.expect("ArrayCoerceExpr has an arg");
+        let elemexpr = self.read_node("elemexpr")?;
+        let a = types_nodes::ArrayCoerceExpr {
+            arg,
+            elemexpr,
+            resulttype: self.read_u32("resulttype"),
+            resulttypmod: self.read_i32("resulttypmod"),
+            resultcollid: self.read_u32("resultcollid"),
+            coerceformat: coercion_form(self.read_u32("coerceformat")),
+            location: self.read_location("location"),
+        };
+        Node::mk(self.mcx, a)
+    }
+
+    fn read_convert_rowtype_expr(&mut self) -> PgResult<Node<'mcx>> {
+        let arg = self.read_node("arg")?.expect("ConvertRowtypeExpr has an arg");
+        let c = types_nodes::ConvertRowtypeExpr {
+            arg,
+            resulttype: self.read_u32("resulttype"),
+            convertformat: coercion_form(self.read_u32("convertformat")),
             location: self.read_location("location"),
         };
         Node::mk(self.mcx, c)

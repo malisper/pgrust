@@ -24,8 +24,8 @@ use types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_QUERY_CANCELED, ERROR,
 };
 use types_nodes::{
-    CoerceToDomain, CoerceViaIO, CoercionForm, CollateExpr, Const, FuncExpr, Node, NodeList, NodeTag, Param,
-    RelabelType,
+    ArrayCoerceExpr, CaseTestExpr, CoerceToDomain, CoerceViaIO, CoercionForm, CollateExpr, Const,
+    ConvertRowtypeExpr, FuncExpr, Node, NodeList, NodeTag, Param, RelabelType,
 };
 
 // primnodes.h CoercionContext; ordering is load-bearing (ccontext >= castcontext).
@@ -246,12 +246,51 @@ pub fn coerce_type<'mcx>(
         return Ok(node);
     }
     if targetTypeId == RECORDARRAYOID && is_complex_array(inputTypeId)? {
-        unported("coerce_type (parse_coerce.c): complex-array-to-RECORDARRAY arm");
+        // C: no RelabelType here.
+        return Ok(node);
     }
-    if is_complex(inputTypeId)? && is_complex(targetTypeId)? {
-        unported("coerce_type (parse_coerce.c): typeInheritsFrom/ConvertRowtypeExpr arm");
+    if pg_inherits::typeInheritsFrom(inputTypeId, targetTypeId)?
+        || type_is_of_typed_table(inputTypeId, targetTypeId)?
+    {
+        // C: ConvertRowtypeExpr works only between plain composite types; a
+        // domain-over-subclass input is smashed to its base type first.
+        let baseTypeId = lsyscache::getBaseType(inputTypeId)?;
+        let arg = if baseTypeId != inputTypeId {
+            Node::mk(
+                mcx,
+                RelabelType {
+                    arg: node,
+                    resulttype: baseTypeId,
+                    resulttypmod: -1,
+                    resultcollid: InvalidOid,
+                    relabelformat: CoercionForm::COERCE_IMPLICIT_CAST,
+                    location,
+                },
+            )?
+        } else {
+            node
+        };
+        return Node::mk(
+            mcx,
+            ConvertRowtypeExpr { arg, resulttype: targetTypeId, convertformat: cformat, location },
+        );
     }
     Err(conversion_not_found(inputTypeId, targetTypeId))
+}
+
+// typeIsOfTypedTable (parse_coerce.c): is reltypeId the rowtype of a typed
+// table OF reloftypeId (or a domain over one)?
+fn type_is_of_typed_table(reltypeId: Oid, reloftypeId: Oid) -> PgResult<bool> {
+    let relid = lsyscache::get_typ_typrelid(lsyscache::getBaseType(reltypeId)?)?;
+    if !OidIsValid(relid) {
+        return Ok(false);
+    }
+    match syscache_seams::pg_class_reloftype::call(relid)? {
+        Some(reloftype) => Ok(reloftype == reloftypeId),
+        None => Err(Box::new(PgError::error(format!(
+            "cache lookup failed for relation {relid}"
+        )))),
+    }
 }
 
 // coerce_record_to_complex (parse_coerce.c), RowExpr-source leg; the
@@ -526,10 +565,13 @@ pub fn can_coerce_type(
         {
             continue;
         }
-        if (targetTypeId == RECORDARRAYOID && is_complex_array(inputTypeId)?)
-            || (is_complex(inputTypeId)? && is_complex(targetTypeId)?)
+        if targetTypeId == RECORDARRAYOID && is_complex_array(inputTypeId)? {
+            continue;
+        }
+        if pg_inherits::typeInheritsFrom(inputTypeId, targetTypeId)?
+            || type_is_of_typed_table(inputTypeId, targetTypeId)?
         {
-            unported("can_coerce_type (parse_coerce.c): RECORDARRAY/inheritance arms");
+            continue;
         }
         return Ok(false);
     }
@@ -1639,7 +1681,56 @@ fn build_coercion_expression<'mcx>(
             )
         }
         COERCION_PATH_ARRAYCOERCE => {
-            unported("build_coercion_expression (parse_coerce.c): ArrayCoerceExpr path")
+            // Look through any domain over the source array type; the target
+            // is a plain array (a domain target reaches coerce_to_domain
+            // later). The CaseTestExpr stands in for one source element —
+            // safe because the finished elemexpr can contain no CaseExpr or
+            // ArrayCoerceExpr.
+            let mut sourceBaseTypeMod = expr_typmod(node);
+            let sourceBaseTypeId =
+                lsyscache::getBaseTypeAndTypmod(expr_type(node), &mut sourceBaseTypeMod)?;
+            let ctest_type = lsyscache::get_element_type(sourceBaseTypeId)?;
+            debug_assert!(OidIsValid(ctest_type));
+            let ctest = Node::mk(
+                mcx,
+                CaseTestExpr {
+                    typeId: ctest_type,
+                    typeMod: sourceBaseTypeMod,
+                    collation: InvalidOid,
+                },
+            )?;
+            let targetElementType = lsyscache::get_element_type(targetTypeId)?;
+            debug_assert!(OidIsValid(targetElementType));
+            // C passes a NULL pstate for the elemexpr coercion.
+            let pstate = parser_small1::make_parsestate(mcx, Option::None);
+            let elemexpr = coerce_to_target_type(
+                mcx,
+                &pstate,
+                ctest,
+                ctest_type,
+                targetElementType,
+                targetTypMod,
+                ccontext,
+                cformat,
+                location,
+            )?
+            .ok_or_else(|| {
+                Box::new(PgError::error(
+                    "failed to coerce array element type as expected".to_string(),
+                ))
+            })?;
+            Node::mk(
+                mcx,
+                ArrayCoerceExpr {
+                    arg: node,
+                    elemexpr: Some(elemexpr),
+                    resulttype: targetTypeId,
+                    resulttypmod: expr_typmod(elemexpr),
+                    resultcollid: InvalidOid,
+                    coerceformat: cformat,
+                    location,
+                },
+            )
         }
         COERCION_PATH_COERCEVIAIO => {
             debug_assert!(!OidIsValid(funcId));
@@ -1811,6 +1902,16 @@ fn hide_coercion_node(node: Node<'_>) {
                 })
                 .is_some()
             || node
+                .with_mut::<ArrayCoerceExpr, _>(|a| {
+                    a.coerceformat = CoercionForm::COERCE_IMPLICIT_CAST
+                })
+                .is_some()
+            || node
+                .with_mut::<ConvertRowtypeExpr, _>(|c| {
+                    c.convertformat = CoercionForm::COERCE_IMPLICIT_CAST
+                })
+                .is_some()
+            || node
                 .with_mut::<CoerceToDomain, _>(|c| {
                     c.coercionformat = CoercionForm::COERCE_IMPLICIT_CAST
                 })
@@ -1822,21 +1923,25 @@ fn hide_coercion_node(node: Node<'_>) {
     panic!("unsupported node type in hide_coercion_node: {:?}", node.node_tag());
 }
 
-// find_typmod_coercion_function (parse_coerce.c); array-element lane loud.
+// find_typmod_coercion_function (parse_coerce.c): a true array type's length
+// coercion applies the element type's function through ArrayCoerceExpr.
 fn find_typmod_coercion_function(typeId: Oid) -> PgResult<(CoercionPathType, Oid)> {
-    let shape = syscache_seams::lookup_pg_type_shape::call(typeId)?
-        .unwrap_or_else(|| unported("find_typmod_coercion_function: missing pg_type row"));
-    if shape.typlen == -1 {
-        if let Some(el) = syscache_seams::pg_type_element_shape::call(typeId)? {
-            if OidIsValid(el.typelem) {
-                unported("find_typmod_coercion_function: array length coercion (ARRAYCOERCE)");
-            }
-        }
+    let Some(el) = syscache_seams::pg_type_element_shape::call(typeId)? else {
+        return Err(type_lookup_failed(typeId));
+    };
+    let (typeId, mut result) = if lsyscache::is_true_array_type(el.typelem, el.typsubscript) {
+        (el.typelem, COERCION_PATH_ARRAYCOERCE)
+    } else {
+        (typeId, COERCION_PATH_FUNC)
+    };
+    let funcid = match syscache_seams::lookup_pg_cast_shape::call(typeId, typeId)? {
+        Some(cast) => cast.castfunc,
+        None => InvalidOid,
+    };
+    if !OidIsValid(funcid) {
+        result = COERCION_PATH_NONE;
     }
-    match syscache_seams::lookup_pg_cast_shape::call(typeId, typeId)? {
-        Some(cast) => Ok((COERCION_PATH_FUNC, cast.castfunc)),
-        None => Ok((COERCION_PATH_NONE, InvalidOid)),
-    }
+    Ok((result, funcid))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1977,6 +2082,13 @@ pub fn expression_returns_set(node: Node<'_>) -> bool {
         }
         NodeTag::T_RelabelType => expression_returns_set(node.as_relabel_type().unwrap().arg),
         NodeTag::T_CoerceViaIO => expression_returns_set(node.as_coerce_via_io().unwrap().arg),
+        NodeTag::T_ArrayCoerceExpr => {
+            let a = node.as_array_coerce_expr().unwrap();
+            expression_returns_set(a.arg) || a.elemexpr.is_some_and(expression_returns_set)
+        }
+        NodeTag::T_ConvertRowtypeExpr => {
+            expression_returns_set(node.as_convert_rowtype_expr().unwrap().arg)
+        }
         NodeTag::T_CollateExpr => expression_returns_set(node.as_collate_expr().unwrap().arg),
         NodeTag::T_CoalesceExpr => {
             node.as_coalesce_expr().unwrap().args.iter().any(expression_returns_set)

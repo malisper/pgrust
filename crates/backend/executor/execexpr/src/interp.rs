@@ -928,6 +928,24 @@ fn run_program<'mcx>(
                     write_out(*out, value, isnull);
                 }
             }
+            Step::ArrayCoerce { state: acs, out } => {
+                let r = read_out(*out);
+                if !r.isnull {
+                    // SAFETY: compile-allocated state, sole live access.
+                    let st = unsafe { &mut *acs.as_ptr() };
+                    let nd = crate::arrayops::eval_array_coerce(st, r.value)?;
+                    write_out(*out, nd.value, nd.isnull);
+                }
+            }
+            Step::ConvertRowtype { state: crs, frame, out } => {
+                let r = read_out(*out);
+                if !r.isnull {
+                    // SAFETY: compile-allocated state, sole live access.
+                    let st = unsafe { crs.as_ref() };
+                    let v = eval_convert_rowtype(frames, st, *frame, r.value)?;
+                    write_out(*out, v, false);
+                }
+            }
             Step::NullTestIsNull { out } => {
                 let r = read_out(*out);
                 write_out(*out, Datum::from_bool(r.isnull), false);
@@ -2054,6 +2072,73 @@ fn eval_field_select(
     let v = unsafe { ::types_tuple::heap_getattr(&tuple, fieldnum as i32, &tupdesc, &mut isnull) };
     core::mem::forget(tuple);
     Ok((v, isnull))
+}
+
+// ExecEvalConvertRowtype (execExprInterp.c) + execute_attr_map_tuple
+// (tupconvert.c); caller has handled the NULL case.
+#[inline(never)]
+#[cold]
+fn eval_convert_rowtype(
+    frames: &mut [crate::steps::FuncFrame<'_>],
+    st: &crate::steps::ConvertRowtypeState,
+    frame: u32,
+    value: Datum,
+) -> PgResult<Datum> {
+    use ::types_tuple::{HeapTupleData, HeapTupleHeaderData, ItemPointerData};
+    let f = &mut frames[frame as usize];
+    // SAFETY: the argless frame's fcinfo image is live; armed per eval.
+    let mcx = unsafe { fcinfo_mut(f.fcinfo, 0) }.result_mcx();
+    let p = value.as_usize() as *const u8;
+    // SAFETY: non-null composite datum; detoast covers short/compressed forms.
+    let raw = unsafe { core::slice::from_raw_parts(p, ::types_tuple::varatt::varsize_any(p)) };
+    let rec = ::detoast_seams::detoast_attr::call(mcx, raw)?;
+    // SAFETY: detoasted composite image; header prefix is in bounds.
+    let hdr = unsafe { &*(rec.as_ptr() as *const HeapTupleHeaderData) };
+    // SAFETY: MAXALIGN'd detoasted image of datum_length() bytes.
+    let tuple = unsafe {
+        HeapTupleData::from_raw_parts(
+            rec.as_ptr(),
+            hdr.datum_length(),
+            ItemPointerData::invalid(),
+            ::types_core::InvalidOid,
+        )
+    };
+    // SAFETY: plan-mcx tupdescs, live for every eval of this step.
+    let indesc = unsafe { st.indesc.as_ref() };
+    let outdesc = unsafe { st.outdesc.as_ref() };
+    let result = match st.map {
+        Some(map) => {
+            // SAFETY: plan-mcx map slice.
+            let map = unsafe { map.as_ref() };
+            let innatts = indesc.natts as usize;
+            let mut invalues: ::mcx::PgVec<'_, Datum> = ::mcx::vec_with_capacity_in(mcx, innatts)?;
+            let mut innulls: ::mcx::PgVec<'_, bool> = ::mcx::vec_with_capacity_in(mcx, innatts)?;
+            invalues.resize(innatts, Datum::null());
+            innulls.resize(innatts, true);
+            ::types_tuple::heap_deform_tuple(&tuple, indesc, &mut invalues, &mut innulls);
+            let outnatts = outdesc.natts as usize;
+            let mut outvalues: ::mcx::PgVec<'_, Datum> =
+                ::mcx::vec_with_capacity_in(mcx, outnatts)?;
+            let mut outnulls: ::mcx::PgVec<'_, bool> =
+                ::mcx::vec_with_capacity_in(mcx, outnatts)?;
+            for &attno in map {
+                if attno > 0 {
+                    outvalues.push(invalues[(attno - 1) as usize]);
+                    outnulls.push(innulls[(attno - 1) as usize]);
+                } else {
+                    outvalues.push(Datum::null());
+                    outnulls.push(true);
+                }
+            }
+            let out_tuple = ::heaptuple::heap_form_tuple(mcx, outdesc, &outvalues, &outnulls)?;
+            let d = Datum::from_usize(out_tuple.image().as_ptr() as usize);
+            core::mem::forget(out_tuple);
+            d
+        }
+        None => ::heaptuple::heap_copy_tuple_as_datum(mcx, &tuple, outdesc)?,
+    };
+    core::mem::forget(tuple);
+    Ok(result)
 }
 
 // ExecEvalArrayExpr (execExprInterp.c), 1-D leg; the result array lives in

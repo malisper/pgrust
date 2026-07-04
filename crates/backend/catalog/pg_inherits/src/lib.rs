@@ -202,6 +202,69 @@ pub fn has_superclass(mcx: Mcx<'_>, relation_id: Oid) -> PgResult<bool> {
     Ok(found)
 }
 
+// typeInheritsFrom (pg_inherits.c): BFS up the inheritance graph from the
+// subclass relation; the subclass side may be a domain over a complex type,
+// the superclass side may not. Cold path (coercion fallback + DDL); scans run
+// in a local scratch context.
+pub fn typeInheritsFrom(subclass_type_id: Oid, superclass_type_id: Oid) -> PgResult<bool> {
+    let subclass_relid =
+        lsyscache::get_typ_typrelid(lsyscache::getBaseType(subclass_type_id)?)?;
+    if subclass_relid == InvalidOid {
+        return Ok(false);
+    }
+    let superclass_relid = lsyscache::get_typ_typrelid(superclass_type_id)?;
+    if superclass_relid == InvalidOid {
+        return Ok(false);
+    }
+    if !has_subclass(superclass_relid)? {
+        return Ok(false);
+    }
+
+    let cx = mcx::MemoryContext::new_bump("typeInheritsFrom");
+    let mcx = cx.mcx();
+    let mut result = false;
+    let mut queue: PgVec<'_, Oid> = PgVec::new_in(mcx);
+    let mut visited: PgVec<'_, Oid> = PgVec::new_in(mcx);
+    queue.push(subclass_relid);
+
+    let rel = table::table_open(mcx, InheritsRelationId, AccessShareLock)?;
+    let desc = rel.descr();
+    let mut i = 0;
+    'search: while i < queue.len() {
+        let this_relid = queue[i];
+        i += 1;
+        if visited.iter().any(|&r| r == this_relid) {
+            continue;
+        }
+        visited.push(this_relid);
+        let keys = [eq_key(Anum_pg_inherits_inhrelid, F_OIDEQ, Datum::from_oid(this_relid))];
+        let mut scan =
+            genam::systable_beginscan(mcx, &rel, InheritsRelidSeqnoIndexId, true, None, &keys)?;
+        while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+            let mut isnull = false;
+            // SAFETY: fixed NOT NULL pg_inherits columns under its descriptor.
+            let inhparent = unsafe {
+                types_tuple::heap_getattr(
+                    tup,
+                    Anum_pg_inherits_inhparent as i32,
+                    desc,
+                    &mut isnull,
+                )
+            }
+            .as_oid();
+            if inhparent == superclass_relid {
+                result = true;
+                genam::systable_endscan(mcx, scan)?;
+                break 'search;
+            }
+            queue.push(inhparent);
+        }
+        genam::systable_endscan(mcx, scan)?;
+    }
+    rel.close(AccessShareLock)?;
+    Ok(result)
+}
+
 pub fn DeleteInheritsTuple<'mcx>(
     mcx: Mcx<'mcx>,
     inhrelid: Oid,

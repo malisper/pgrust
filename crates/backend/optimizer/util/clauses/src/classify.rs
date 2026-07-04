@@ -374,8 +374,10 @@ impl<'mcx> NodeWalker<'mcx> for ContainNonstrict {
             NodeTag::T_CoerceViaIO => {
                 return self.visit(node.as_coerce_via_io().unwrap().arg);
             }
-            t @ NodeTag::T_ArrayCoerceExpr => {
-                deferred("contain_nonstrict_functions_walker", t)
+            // C: ArrayCoerceExpr is strict at the array level regardless of
+            // the per-element expression.
+            NodeTag::T_ArrayCoerceExpr => {
+                return self.visit(node.as_array_coerce_expr().unwrap().arg);
             }
             _ => {}
         }
@@ -853,10 +855,23 @@ fn find_nonnullable_rels_walker<'mcx>(
                 top_level,
             )?;
         }
-        NodeTag::T_SubPlan
-        | NodeTag::T_PlaceHolderVar
-        | NodeTag::T_ArrayCoerceExpr
-        | NodeTag::T_ConvertRowtypeExpr => panic!(
+        // C: ArrayCoerceExpr is strict at the array level; elemexpr ignored.
+        // ConvertRowtypeExpr: "not clear this is useful, but it can't hurt".
+        NodeTag::T_ArrayCoerceExpr => {
+            result = find_nonnullable_rels_walker(
+                mcx,
+                Some(node.as_array_coerce_expr().unwrap().arg),
+                top_level,
+            )?;
+        }
+        NodeTag::T_ConvertRowtypeExpr => {
+            result = find_nonnullable_rels_walker(
+                mcx,
+                Some(node.as_convert_rowtype_expr().unwrap().arg),
+                top_level,
+            )?;
+        }
+        NodeTag::T_SubPlan | NodeTag::T_PlaceHolderVar => panic!(
             "find_nonnullable_rels_walker (clauses.c): {:?} strictness arm unported",
             node.node_tag()
         ),
@@ -1077,10 +1092,21 @@ fn find_nonnullable_vars_walker<'mcx>(
                 }
             }
         }
-        NodeTag::T_SubPlan
-        | NodeTag::T_PlaceHolderVar
-        | NodeTag::T_ArrayCoerceExpr
-        | NodeTag::T_ConvertRowtypeExpr => panic!(
+        NodeTag::T_ArrayCoerceExpr => {
+            result = find_nonnullable_vars_walker(
+                mcx,
+                Some(node.as_array_coerce_expr().unwrap().arg),
+                top_level,
+            )?;
+        }
+        NodeTag::T_ConvertRowtypeExpr => {
+            result = find_nonnullable_vars_walker(
+                mcx,
+                Some(node.as_convert_rowtype_expr().unwrap().arg),
+                top_level,
+            )?;
+        }
+        NodeTag::T_SubPlan | NodeTag::T_PlaceHolderVar => panic!(
             "find_nonnullable_vars_walker (clauses.c): {:?} strictness arm unported",
             node.node_tag()
         ),
