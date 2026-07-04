@@ -78,6 +78,14 @@ SELECT ARRAY[ROW(1,'x')::coerce_ct]::record[];
 -- publication with a column list (the \dRp+ deparse arm)
 CREATE TABLE coerce_pubt (id int primary key, tags text[], note text);
 CREATE PUBLICATION coerce_pub FOR TABLE coerce_pubt (id, tags) WHERE (id > 0);
+SELECT c.relname,
+  (CASE WHEN pr.prattrs IS NOT NULL THEN
+     (SELECT pg_catalog.string_agg(a.attname, ', ')
+        FROM pg_catalog.generate_series(0, pg_catalog.array_upper(pr.prattrs::pg_catalog.int2[], 1)) s(i),
+             pg_catalog.pg_attribute a
+       WHERE a.attrelid = pr.prrelid AND a.attnum = (pr.prattrs::pg_catalog.int2[])[s.i])
+   END) AS attnames
+FROM pg_catalog.pg_publication_rel pr JOIN pg_catalog.pg_class c ON c.oid = pr.prrelid;
 \dRp+ coerce_pub
 SELECT * FROM pg_publication_tables WHERE pubname = 'coerce_pub';
 DROP PUBLICATION coerce_pub;

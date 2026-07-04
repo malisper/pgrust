@@ -192,6 +192,8 @@ fn walker<'w, 'mcx: 'w>(
             }
             walker(relab.arg, context)
         }
+        // C has no CaseTestExpr case: expression_tree_walker leaf, no deps.
+        NodeTag::T_CaseTestExpr => Ok(()),
         NodeTag::T_ArrayCoerceExpr => {
             let ac = node.as_array_coerce_expr().unwrap();
             context.add(TYPE_RELATION_ID, ac.resulttype, 0);

@@ -3643,8 +3643,44 @@ pub fn scalararraysel<'mcx>(
             s1 = s1disjoint;
         }
     } else {
-        // C estimates a dummy CaseTestExpr comparison over 10 elements.
-        panic!("scalararraysel (selfuncs.c): non-constant array operand; M2 lane");
+        // C: a dummy CaseTestExpr rightop, assumed 10 elements; no
+        // disjoint-probability shortcut on this arm.
+        let dummy = Node::mk(
+            run.mcx,
+            types_nodes::CaseTestExpr {
+                typeId: nominal_element_type,
+                typeMod: -1,
+                collation: clause.inputcollid,
+            },
+        )?;
+        let dummy_id = run.intern_expr(dummy);
+        let args = [left_id, dummy_id];
+        let s2 = if is_join_clause {
+            crate::plancat::join_selectivity(
+                run,
+                operator,
+                &args,
+                clause.inputcollid,
+                jointype,
+                sjinfo,
+            )?
+        } else {
+            crate::plancat::restriction_selectivity(
+                run,
+                operator,
+                &args,
+                clause.inputcollid,
+                varrelid,
+            )?
+        };
+        s1 = if use_or { 0.0 } else { 1.0 };
+        for _ in 0..10 {
+            if use_or {
+                s1 = s1 + s2 - s1 * s2;
+            } else {
+                s1 *= s2;
+            }
+        }
     }
 
     Ok(clamp_probability(s1))
