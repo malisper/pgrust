@@ -752,6 +752,8 @@ fn satisfies_mvcc_res<R: MvccXidResolve>(
     debug_assert!(snapshot.regd_count.get() > 0 || snapshot.active_count.get() > 0);
     debug_assert!(ItemPointerIsValid(&htup.t_self));
     debug_assert!(htup.t_tableOid != InvalidOid);
+    let probe_tid = htup.t_self;
+    let probe_len = htup.t_len;
     let tuple = htup.t_data_mut();
 
     if tuple.xmin_raw() == 0 && !tuple.xmin_committed() && !tuple.xmin_invalid() {
@@ -760,8 +762,8 @@ fn satisfies_mvcc_res<R: MvccXidResolve>(
             unsafe { core::slice::from_raw_parts(tuple as *const _ as *const u8, 24) };
         std::eprintln!(
             "TOASTPROBE vis xmin=0: tid={:?} len={} infomask={:#x} infomask2={:#x} hoff={} hdr={:02x?}",
-            htup.t_self,
-            htup.t_len,
+            probe_tid,
+            probe_len,
             tuple.t_infomask,
             tuple.t_infomask2,
             tuple.t_hoff,
