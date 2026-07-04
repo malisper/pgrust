@@ -106,6 +106,14 @@ pub fn typenameTypeIdAndMod<'mcx>(
 // LookupTypeNameOid (parse_type.c): plain resolution, no column-lane typtype
 // restriction (operator/opclass DDL accepts pseudo-types like internal).
 pub fn LookupTypeNameOid<'mcx>(mcx: Mcx<'mcx>, tn: &TypeName<'_>) -> PgResult<Oid> {
+    LookupTypeNameOidExtended(mcx, tn, false)
+}
+
+pub fn LookupTypeNameOidExtended<'mcx>(
+    mcx: Mcx<'mcx>,
+    tn: &TypeName<'_>,
+    missing_ok: bool,
+) -> PgResult<Oid> {
     if tn.pct_type || tn.setof {
         unported("LookupTypeName %TYPE / SETOF");
     }
@@ -114,6 +122,9 @@ pub fn LookupTypeNameOid<'mcx>(mcx: Mcx<'mcx>, tn: &TypeName<'_>) -> PgResult<Oi
     }
     let (typoid, typname) = resolveTypeNames(mcx, tn)?;
     if typoid == InvalidOid {
+        if missing_ok {
+            return Ok(InvalidOid);
+        }
         return Err(type_does_not_exist(typname));
     }
     let typoid = if tn.arrayBounds.is_nil() {

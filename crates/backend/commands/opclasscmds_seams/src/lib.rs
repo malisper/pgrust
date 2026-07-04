@@ -3,8 +3,7 @@ use types_error::PgResult;
 use types_nodes::NodeList;
 
 seam_core::seam!(
-    // get_object_address_opcf's AM resolve (objectaddress <- opclasscmds cycle
-    // via catalog_dependency).
+    // objectaddress <- opclasscmds cycle via catalog_dependency.
     pub fn get_index_am_oid(amname: &str) -> PgResult<Oid>
 );
 

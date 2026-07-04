@@ -796,6 +796,18 @@ fn doDeletion<'mcx>(mcx: Mcx<'mcx>, object: &ObjectAddress, flags: i32) -> PgRes
         types_core::OPERATOR_RELATION_ID => {
             dependency_seams::remove_operator_by_id::call(mcx, object.objectId)?
         }
+        types_core::OPERATOR_CLASS_RELATION_ID => drop_row_by_oid(
+            mcx,
+            types_core::OPERATOR_CLASS_RELATION_ID,
+            types_core::OPCLASS_OID_INDEX_ID,
+            object.objectId,
+        )?,
+        types_core::OPERATOR_FAMILY_RELATION_ID => drop_row_by_oid(
+            mcx,
+            types_core::OPERATOR_FAMILY_RELATION_ID,
+            types_core::OPFAMILY_OID_INDEX_ID,
+            object.objectId,
+        )?,
         types_core::ACCESS_METHOD_OPERATOR_RELATION_ID => drop_row_by_oid(
             mcx,
             types_core::ACCESS_METHOD_OPERATOR_RELATION_ID,
