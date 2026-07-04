@@ -36,9 +36,9 @@ pub use parsenodes::{
 pub use plannodes::{AppendRelInfo, Plan, PlanVariant, PlannedStmt, Result, TidRangeScan, TidScan};
 pub use plannodes::{BitmapAnd, BitmapHeapScan, BitmapIndexScan, BitmapOr};
 pub use primnodes::{
-    Alias, ArrayExpr, BoolExpr, BoolExprType, BoolTestType, BooleanTest, CaseTestExpr,
-    CoerceToDomain, CoerceToDomainValue, CoerceViaIO, CoercionForm, CollateExpr, Const,
-    CurrentOfExpr, DistinctExpr, FieldSelect, FieldStore, FromExpr, FuncExpr, InferenceElem, JoinExpr, MergeAction,
+    Alias, ArrayCoerceExpr, ArrayExpr, BoolExpr, BoolExprType, BoolTestType, BooleanTest,
+    CaseTestExpr, CoerceToDomain, CoerceToDomainValue, CoerceViaIO, CoercionForm, CollateExpr,
+    Const, ConvertRowtypeExpr, CurrentOfExpr, DistinctExpr, FieldSelect, FieldStore, FromExpr, FuncExpr, InferenceElem, JoinExpr, MergeAction,
     MergeMatchKind, NamedArgExpr, NullIfExpr, NullTest, NullTestType,
     JsonBehavior, JsonBehaviorType, JsonConstructorExpr, JsonConstructorType, JsonEncoding,
     JsonExpr, JsonExprOp, JsonFormat, JsonFormatType, JsonIsPredicate, JsonReturning,

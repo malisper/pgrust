@@ -377,6 +377,8 @@ fn assign_collations_walker<'mcx>(
         | NodeTag::T_NamedArgExpr
         | NodeTag::T_RelabelType
         | NodeTag::T_CoerceViaIO
+        | NodeTag::T_ArrayCoerceExpr
+        | NodeTag::T_ConvertRowtypeExpr
         | NodeTag::T_BoolExpr
         | NodeTag::T_CaseExpr
         | NodeTag::T_CoalesceExpr
@@ -446,6 +448,19 @@ fn assign_collations_walker<'mcx>(
                 NodeTag::T_CoerceViaIO => {
                     assign_collations_walker(
                         node.as_coerce_via_io().unwrap().arg,
+                        &mut loccontext,
+                    )?;
+                }
+                NodeTag::T_ArrayCoerceExpr => {
+                    let a = node.as_array_coerce_expr().unwrap();
+                    assign_collations_walker(a.arg, &mut loccontext)?;
+                    if let Some(e) = a.elemexpr {
+                        assign_collations_walker(e, &mut loccontext)?;
+                    }
+                }
+                NodeTag::T_ConvertRowtypeExpr => {
+                    assign_collations_walker(
+                        node.as_convert_rowtype_expr().unwrap().arg,
                         &mut loccontext,
                     )?;
                 }
@@ -682,6 +697,15 @@ fn assign_collations_walker<'mcx>(
                     NodeTag::T_CoerceViaIO => node
                         .with_mut::<types_nodes::CoerceViaIO, _>(|c| c.resultcollid = set_coll)
                         .unwrap(),
+                    NodeTag::T_ArrayCoerceExpr => node
+                        .with_mut::<types_nodes::ArrayCoerceExpr, _>(|a| {
+                            a.resultcollid = set_coll
+                        })
+                        .unwrap(),
+                    // exprSetCollation(ConvertRowtypeExpr) is assert-only in C.
+                    NodeTag::T_ConvertRowtypeExpr => {
+                        debug_assert!(!OidIsValid(set_coll))
+                    }
                     // exprSetCollation(BoolExpr/NullTest/GroupingFunc/BooleanTest)
                     // is assert-only in C.
                     NodeTag::T_BoolExpr
@@ -833,6 +857,9 @@ unsafe fn expr_set_collation(node: Node<'_>, coll: Oid) {
                 .unwrap(),
             NodeTag::T_CoerceViaIO => node
                 .with_mut::<types_nodes::CoerceViaIO, _>(|c| c.resultcollid = coll)
+                .unwrap(),
+            NodeTag::T_ArrayCoerceExpr => node
+                .with_mut::<types_nodes::ArrayCoerceExpr, _>(|a| a.resultcollid = coll)
                 .unwrap(),
             NodeTag::T_CoerceToDomain => node
                 .with_mut::<types_nodes::CoerceToDomain, _>(|c| c.resultcollid = coll)

@@ -663,6 +663,10 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    pub fn pg_class_reloftype(relid: Oid) -> PgResult<Option<Oid>>
+);
+
+seam_core::seam!(
     pub fn lookup_pg_transform_shape(typid: Oid, langid: Oid) -> PgResult<Option<PgTransformShape>>
 );
 

@@ -132,6 +132,24 @@ fn cost_qual_eval_walker(node: Node<'_>, cost: &mut QualCost) -> PgResult<()> {
         NodeTag::T_CoerceToDomain => {
             cost_qual_eval_walker(node.as_coerce_to_domain().unwrap().arg, cost)
         }
+        // C charges the per-element expression once per estimated element,
+        // then its fall-through walks both children generically as well.
+        NodeTag::T_ArrayCoerceExpr => {
+            let a = node.as_array_coerce_expr().unwrap();
+            if let Some(elemexpr) = a.elemexpr {
+                let perelem = cost_qual_eval_node(elemexpr)?;
+                cost.startup += perelem.startup;
+                if perelem.per_tuple > 0.0 {
+                    cost.per_tuple +=
+                        perelem.per_tuple * planner_seams::estimate_array_length::call(a.arg);
+                }
+                cost_qual_eval_walker(elemexpr, cost)?;
+            }
+            cost_qual_eval_walker(a.arg, cost)
+        }
+        NodeTag::T_ConvertRowtypeExpr => {
+            cost_qual_eval_walker(node.as_convert_rowtype_expr().unwrap().arg, cost)
+        }
         // Boolean connectives are free in C; NullTest is "cheap" (no charge).
         NodeTag::T_BoolExpr => {
             for arg in &node.as_bool_expr().unwrap().args {

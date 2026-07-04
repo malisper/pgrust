@@ -275,6 +275,21 @@ pub enum Step {
     RowCompareStep { call: Call2, strict: bool, jumpnull: u32, jumpdone: u32, out: OutRef },
     // C EEOP_ROWCOMPARE_FINAL; cmptype is CompareType (EQ/NE never appear).
     RowCompareFinal { cmptype: i32, out: OutRef },
+    // C EEOP_ARRAYCOERCE: reads the array datum from `out`, rewrites it.
+    // Appended last: preserves the hot variants' discriminants.
+    ArrayCoerce { state: NonNull<crate::arrayops::ArrayCoerceState>, out: OutRef },
+    // C EEOP_CONVERT_ROWTYPE; the argless frame supplies the per-eval mcx.
+    ConvertRowtype { state: NonNull<ConvertRowtypeState>, frame: u32, out: OutRef },
+}
+
+// C ExprEvalStep d.convert_rowtype: tupdescs + by-name attribute map are
+// compile-resolved (C builds them at first eval; plan invalidation covers
+// DDL in between). `map == None` is C's NULL map: header relabel only.
+// map[out_i] = 1-based input attno, 0 = NULL/dropped column.
+pub struct ConvertRowtypeState {
+    pub indesc: NonNull<::types_tuple::TupleDescData<'static>>,
+    pub outdesc: NonNull<::types_tuple::TupleDescData<'static>>,
+    pub map: Option<NonNull<[i16]>>,
 }
 
 // C JsonConstructorExprState: resolved-once metadata for the

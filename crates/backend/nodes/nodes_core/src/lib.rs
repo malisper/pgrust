@@ -187,6 +187,13 @@ pub fn expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
         NodeTag::T_FieldSelect => w.visit(node.as_field_select().unwrap().arg),
         NodeTag::T_CollateExpr => w.visit(node.as_collate_expr().unwrap().arg),
         NodeTag::T_CoerceViaIO => w.visit(node.as_coerce_via_io().unwrap().arg),
+        NodeTag::T_ArrayCoerceExpr => {
+            let a = node.as_array_coerce_expr().unwrap();
+            Ok(w.visit(a.arg)? || walk_opt(a.elemexpr, w)?)
+        }
+        NodeTag::T_ConvertRowtypeExpr => {
+            w.visit(node.as_convert_rowtype_expr().unwrap().arg)
+        }
         NodeTag::T_BooleanTest => walk_opt(node.as_boolean_test().unwrap().arg, w),
         NodeTag::T_DistinctExpr => {
             let d = node.as_distinct_expr().unwrap();
@@ -780,6 +787,20 @@ pub fn strip_implicit_coercions(node: Node<'_>) -> Node<'_> {
             }
             node
         }
+        NodeTag::T_ArrayCoerceExpr => {
+            let a = node.as_array_coerce_expr().unwrap();
+            if a.coerceformat == CoercionForm::COERCE_IMPLICIT_CAST {
+                return strip_implicit_coercions(a.arg);
+            }
+            node
+        }
+        NodeTag::T_ConvertRowtypeExpr => {
+            let c = node.as_convert_rowtype_expr().unwrap();
+            if c.convertformat == CoercionForm::COERCE_IMPLICIT_CAST {
+                return strip_implicit_coercions(c.arg);
+            }
+            node
+        }
         _ => node,
     }
 }
@@ -1133,6 +1154,35 @@ where
                 Some(arg) => Ok(Some(Node::mk(
                     mcx,
                     types_nodes::primnodes::CoerceViaIO { arg, ..*c },
+                )?)),
+            }
+        }
+        NodeTag::T_ArrayCoerceExpr => {
+            let a = node.as_array_coerce_expr().unwrap();
+            let arg = m(a.arg)?;
+            let elemexpr = match a.elemexpr {
+                Some(e) => m(e)?,
+                None => None,
+            };
+            if arg.is_none() && elemexpr.is_none() {
+                return Ok(None);
+            }
+            Ok(Some(Node::mk(
+                mcx,
+                types_nodes::primnodes::ArrayCoerceExpr {
+                    arg: arg.unwrap_or(a.arg),
+                    elemexpr: elemexpr.or(a.elemexpr),
+                    ..*a
+                },
+            )?))
+        }
+        NodeTag::T_ConvertRowtypeExpr => {
+            let c = node.as_convert_rowtype_expr().unwrap();
+            match m(c.arg)? {
+                None => Ok(None),
+                Some(arg) => Ok(Some(Node::mk(
+                    mcx,
+                    types_nodes::primnodes::ConvertRowtypeExpr { arg, ..*c },
                 )?)),
             }
         }

@@ -29,6 +29,8 @@ pub fn expr_type(node: Node<'_>) -> Oid {
         NodeTag::T_FieldSelect => node.as_field_select().unwrap().resulttype,
         NodeTag::T_CollateExpr => expr_type(node.as_collate_expr().unwrap().arg),
         NodeTag::T_CoerceViaIO => node.as_coerce_via_io().unwrap().resulttype,
+        NodeTag::T_ArrayCoerceExpr => node.as_array_coerce_expr().unwrap().resulttype,
+        NodeTag::T_ConvertRowtypeExpr => node.as_convert_rowtype_expr().unwrap().resulttype,
         NodeTag::T_BoolExpr
         | NodeTag::T_NullTest
         | NodeTag::T_BooleanTest
@@ -124,8 +126,8 @@ fn sublink_first_col<'mcx>(
     (sl, tent)
 }
 
-// exprIsLengthCoercion (nodeFuncs.c) restricted to FuncExpr (the
-// ArrayCoerceExpr arm has no node in this vocabulary yet); -1 = not one.
+// exprIsLengthCoercion (nodeFuncs.c) FuncExpr arm; the ArrayCoerceExpr arm
+// is exprTypmod's direct resulttypmod read. -1 = not one.
 fn length_coercion_typmod(f: &types_nodes::FuncExpr<'_>) -> i32 {
     if !matches!(
         f.funcformat,
@@ -157,6 +159,7 @@ pub fn expr_typmod(node: Node<'_>) -> i32 {
         NodeTag::T_NamedArgExpr => {
             expr_typmod(node.as_named_arg_expr().unwrap().arg.expect("NamedArgExpr has an arg"))
         }
+        NodeTag::T_ArrayCoerceExpr => node.as_array_coerce_expr().unwrap().resulttypmod,
         NodeTag::T_CoerceToDomain => node.as_coerce_to_domain().unwrap().resulttypmod,
         NodeTag::T_CoerceToDomainValue => node.as_coerce_to_domain_value().unwrap().typeMod,
         NodeTag::T_SubscriptingRef => node.as_subscripting_ref().unwrap().reftypmod,
@@ -167,6 +170,7 @@ pub fn expr_typmod(node: Node<'_>) -> i32 {
         | NodeTag::T_GroupingFunc
         | NodeTag::T_WindowFunc
         | NodeTag::T_CoerceViaIO
+        | NodeTag::T_ConvertRowtypeExpr
         | NodeTag::T_BoolExpr
         | NodeTag::T_NullTest
         | NodeTag::T_BooleanTest
@@ -259,6 +263,8 @@ pub fn expr_collation(node: Node<'_>) -> Oid {
         NodeTag::T_FieldSelect => node.as_field_select().unwrap().resultcollid,
         NodeTag::T_CollateExpr => node.as_collate_expr().unwrap().collOid,
         NodeTag::T_CoerceViaIO => node.as_coerce_via_io().unwrap().resultcollid,
+        NodeTag::T_ArrayCoerceExpr => node.as_array_coerce_expr().unwrap().resultcollid,
+        NodeTag::T_ConvertRowtypeExpr => types_core::InvalidOid,
         NodeTag::T_BoolExpr
         | NodeTag::T_NullTest
         | NodeTag::T_GroupingFunc
@@ -423,6 +429,14 @@ pub fn expr_location(node: Node<'_>) -> ParseLoc {
         NodeTag::T_CurrentOfExpr => -1,
         NodeTag::T_CoerceViaIO => {
             let c = node.as_coerce_via_io().unwrap();
+            leftmost_loc(c.location, expr_location(c.arg))
+        }
+        NodeTag::T_ArrayCoerceExpr => {
+            let a = node.as_array_coerce_expr().unwrap();
+            leftmost_loc(a.location, expr_location(a.arg))
+        }
+        NodeTag::T_ConvertRowtypeExpr => {
+            let c = node.as_convert_rowtype_expr().unwrap();
             leftmost_loc(c.location, expr_location(c.arg))
         }
         NodeTag::T_CoerceToDomain => {

@@ -1009,6 +1009,8 @@ pub fn expr_type(node: Node<'_>) -> Oid {
         NodeTag::T_CoalesceExpr => node.as_coalesce_expr().unwrap().coalescetype,
         NodeTag::T_CaseTestExpr => node.as_case_test_expr().unwrap().typeId,
         NodeTag::T_CoerceViaIO => node.as_coerce_via_io().unwrap().resulttype,
+        NodeTag::T_ArrayCoerceExpr => node.as_array_coerce_expr().unwrap().resulttype,
+        NodeTag::T_ConvertRowtypeExpr => node.as_convert_rowtype_expr().unwrap().resulttype,
         NodeTag::T_CoerceToDomain => node.as_coerce_to_domain().unwrap().resulttype,
         NodeTag::T_CoerceToDomainValue => node.as_coerce_to_domain_value().unwrap().typeId,
         NodeTag::T_JsonValueExpr => {
@@ -1159,6 +1161,16 @@ fn setup_walker(node: Node<'_>, info: &mut SetupInfo) {
         }
         NodeTag::T_RelabelType => setup_walker(node.as_relabel_type().unwrap().arg, info),
         NodeTag::T_CoerceViaIO => setup_walker(node.as_coerce_via_io().unwrap().arg, info),
+        NodeTag::T_ArrayCoerceExpr => {
+            let a = node.as_array_coerce_expr().unwrap();
+            setup_walker(a.arg, info);
+            if let Some(e) = a.elemexpr {
+                setup_walker(e, info);
+            }
+        }
+        NodeTag::T_ConvertRowtypeExpr => {
+            setup_walker(node.as_convert_rowtype_expr().unwrap().arg, info)
+        }
         NodeTag::T_ScalarArrayOpExpr => {
             for a in node.as_scalar_array_op_expr().unwrap().args.iter() {
                 setup_walker(a, info);
@@ -1614,6 +1626,10 @@ pub(crate) fn init_expr_rec<'mcx>(
             )
         }
         NodeTag::T_CoerceViaIO => init_coerce_via_io(node, state, mcx, out, agg, params, sub),
+        NodeTag::T_ArrayCoerceExpr => init_array_coerce(node, state, mcx, out, agg, params, sub),
+        NodeTag::T_ConvertRowtypeExpr => {
+            init_convert_rowtype(node, state, mcx, out, agg, params, sub)
+        }
         NodeTag::T_ScalarArrayOpExpr => {
             let saop = node.as_scalar_array_op_expr().unwrap();
             let step = init_scalar_array_op(node, saop, state, mcx, out, agg, params, sub)?;
@@ -1969,6 +1985,11 @@ impl HasResMcx for crate::arrayops::SbsRefState {
     }
 }
 impl HasResMcx for crate::xmlops::XmlExprState {
+    unsafe fn resmcx_ptr(p: *mut Self) -> *mut crate::arrayops::ResMcx {
+        unsafe { core::ptr::addr_of_mut!((*p).resmcx) }
+    }
+}
+impl HasResMcx for crate::arrayops::ArrayCoerceState {
     unsafe fn resmcx_ptr(p: *mut Self) -> *mut crate::arrayops::ResMcx {
         unsafe { core::ptr::addr_of_mut!((*p).resmcx) }
     }
@@ -2864,6 +2885,217 @@ fn init_coerce_via_io<'mcx>(
     // SAFETY: fresh allocation of the exact layout.
     unsafe { p.write(calls) };
     push_step(state, mcx, Step::IoCoerce { calls: p, out })
+}
+
+// C ExecInitExprRec T_ArrayCoerceExpr: arg into this step's out slot; the
+// elemexpr becomes a standalone program reading one element through its
+// CaseTestVal slot; a 1-step CASE_TESTVAL program is C's NULL elemexprstate.
+#[allow(clippy::too_many_arguments)]
+fn init_array_coerce<'mcx>(
+    node: Node<'mcx>,
+    state: &mut ExprState<'mcx>,
+    mcx: Mcx<'mcx>,
+    out: OutRef,
+    agg: Option<Bind<'_, 'mcx>>,
+    params: ParamBind<'mcx>,
+    sub: Option<SubplanCompileEnv>,
+) -> PgResult<()> {
+    let ace = node.as_array_coerce_expr().unwrap();
+    init_expr_rec(ace.arg, state, mcx, out, agg, params, sub)?;
+
+    let resultelemtype = ::lsyscache::get_element_type(ace.resulttype)?;
+    if !::types_core::OidIsValid(resultelemtype) {
+        return Err(::types_error::PgError::error("target type is not an array".to_string())
+            .with_sqlstate(::types_error::ERRCODE_INVALID_PARAMETER_VALUE)
+            .into());
+    }
+    let (ret_typlen, ret_typbyval, ret_typalign) =
+        ::lsyscache::get_typlenbyvalalign(resultelemtype)?;
+
+    let elemexpr = ace.elemexpr.expect("ArrayCoerceExpr has an elemexpr");
+    let slot = alloc_nullable_datum(mcx)?;
+    let mut substate = ExprState::new_boxed_in(mcx)?;
+    create_expr_setup_steps(&mut substate, mcx, &[elemexpr])?;
+    substate.innermost_case = Some(slot);
+    let rout = substate.result_out();
+    init_expr_rec(elemexpr, &mut substate, mcx, rout, None, ParamBind::NONE, None)?;
+
+    let trivial =
+        substate.steps.len() == 1 && matches!(substate.steps[0], Step::CaseTestVal { .. });
+    let elem = if trivial {
+        None
+    } else {
+        push_step(&mut substate, mcx, Step::DoneReturn)?;
+        ready_expr(&mut substate);
+        let stp: NonNull<ExprState<'static>> = NonNull::from(&mut *substate).cast();
+        // The program leaks into the plan mcx (wholesale reset reclaims it).
+        core::mem::forget(substate);
+        // SAFETY: plan-mcx state restamped 'static; the plan mcx outlives
+        // every eval of this step.
+        Some(crate::arrayops::ArrayCoerceElem { slot, state: stp })
+    };
+
+    let acs = crate::arrayops::ArrayCoerceState {
+        resultelemtype,
+        ret_typlen,
+        ret_typbyval,
+        ret_typalign: ret_typalign as u8,
+        inp_elemtype: ::types_core::InvalidOid,
+        inp_typlen: 0,
+        inp_typbyval: false,
+        inp_typalign: 0,
+        elem,
+        resmcx: None,
+    };
+    let p = alloc_state(mcx, acs)?;
+    register_alloc_state(state, mcx, p)?;
+    push_step(state, mcx, Step::ArrayCoerce { state: p, out })
+}
+
+// C ExecInitExprRec T_ConvertRowtypeExpr + convert_tuples_by_name: tupdescs
+// and the by-name attribute map resolve at compile (C defers to first eval;
+// plan invalidation covers DDL in between).
+#[allow(clippy::too_many_arguments)]
+fn init_convert_rowtype<'mcx>(
+    node: Node<'mcx>,
+    state: &mut ExprState<'mcx>,
+    mcx: Mcx<'mcx>,
+    out: OutRef,
+    agg: Option<Bind<'_, 'mcx>>,
+    params: ParamBind<'mcx>,
+    sub: Option<SubplanCompileEnv>,
+) -> PgResult<()> {
+    let convert = node.as_convert_rowtype_expr().unwrap();
+    init_expr_rec(convert.arg, state, mcx, out, agg, params, sub)?;
+
+    let intype = expr_type(convert.arg);
+    let indesc = ::typcache::lookup_rowtype_tupdesc_copy(mcx, intype, -1)?;
+    let outdesc = ::typcache::lookup_rowtype_tupdesc_copy(mcx, convert.resulttype, -1)?;
+
+    let map = build_attrmap_by_name(mcx, &indesc, &outdesc)?;
+
+    let alloc_desc = |desc: TupleDescData<'mcx>| -> PgResult<NonNull<TupleDescData<'static>>> {
+        let layout = core::alloc::Layout::new::<TupleDescData<'static>>();
+        let p: NonNull<TupleDescData<'static>> =
+            mcx.allocate(layout).map_err(|_| mcx.oom(layout.size()))?.cast();
+        // SAFETY: fresh exact-layout allocation; the plan mcx outlives every
+        // eval of this step, so the 'static restamp never escapes it.
+        unsafe {
+            p.as_ptr().write(core::mem::transmute::<
+                TupleDescData<'mcx>,
+                TupleDescData<'static>,
+            >(desc));
+        }
+        Ok(p)
+    };
+    let outdesc_ptr = alloc_desc(outdesc)?;
+    let indesc_ptr = alloc_desc(indesc)?;
+
+    let frame_ix = state.frames.len() as u32;
+    let frame = FuncFrame::new_in(mcx, FmgrInfo::unresolved(), 0, 0)?;
+    state.frames.try_reserve(1).map_err(|_| mcx.oom(core::mem::size_of::<FuncFrame<'_>>()))?;
+    state.frames.push(frame);
+
+    let crs = crate::steps::ConvertRowtypeState { indesc: indesc_ptr, outdesc: outdesc_ptr, map };
+    let p = alloc_state(mcx, crs)?;
+    push_step(state, mcx, Step::ConvertRowtype { state: p, frame: frame_ix, out })
+}
+
+// attmap.c build_attrmap_by_name + tupconvert.c convert_tuples_by_name's
+// identity elision: Ok(None) = physically compatible, relabel only.
+fn build_attrmap_by_name<'mcx>(
+    mcx: Mcx<'mcx>,
+    indesc: &TupleDescData<'_>,
+    outdesc: &TupleDescData<'_>,
+) -> PgResult<Option<NonNull<[i16]>>> {
+    let outnatts = outdesc.natts as usize;
+    let innatts = indesc.natts as usize;
+    let mut map: ::mcx::PgVec<'mcx, i16> = ::mcx::vec_with_capacity_in(mcx, outnatts)?;
+    map.resize(outnatts, 0);
+    let mut nextindesc: isize = -1;
+    for i in 0..outnatts {
+        let outatt = &outdesc.attrs[i];
+        if outatt.attisdropped {
+            continue;
+        }
+        for _ in 0..innatts {
+            nextindesc += 1;
+            if nextindesc >= innatts as isize {
+                nextindesc = 0;
+            }
+            let inatt = &indesc.attrs[nextindesc as usize];
+            if inatt.attisdropped {
+                continue;
+            }
+            if inatt.attname.name_str() == outatt.attname.name_str() {
+                if outatt.atttypid != inatt.atttypid || outatt.atttypmod != inatt.atttypmod {
+                    return Err(row_convert_error(
+                        outatt.attname.name_str(),
+                        outdesc.tdtypeid,
+                        indesc.tdtypeid,
+                        true,
+                    ));
+                }
+                map[i] = inatt.attnum;
+                break;
+            }
+        }
+        if map[i] == 0 {
+            return Err(row_convert_error(
+                outatt.attname.name_str(),
+                outdesc.tdtypeid,
+                indesc.tdtypeid,
+                false,
+            ));
+        }
+    }
+    // check_attrmap_match (attmap.c): same column order and layout means the
+    // tuple converts by header relabel alone.
+    if innatts == outnatts {
+        let identity = (0..outnatts).all(|i| {
+            if map[i] == (i + 1) as i16 {
+                return true;
+            }
+            let inatt = &indesc.attrs[i];
+            let outatt = &outdesc.attrs[i];
+            map[i] == 0
+                && inatt.attisdropped
+                && outatt.attisdropped
+                && inatt.attlen == outatt.attlen
+                && inatt.attalign == outatt.attalign
+        });
+        if identity {
+            return Ok(None);
+        }
+    }
+    let leaked: &'mcx mut [i16] = map.leak();
+    Ok(Some(NonNull::from(leaked)))
+}
+
+#[cold]
+#[inline(never)]
+fn row_convert_error(
+    attname: &[u8],
+    outtype: Oid,
+    intype: Oid,
+    mismatch: bool,
+) -> alloc::boxed::Box<::types_error::PgError> {
+    let name = alloc::string::String::from_utf8_lossy(attname).into_owned();
+    let outn = ::format_type::format_type_be(outtype).unwrap_or_else(|_| outtype.to_string());
+    let inn = ::format_type::format_type_be(intype).unwrap_or_else(|_| intype.to_string());
+    let detail = if mismatch {
+        format!(
+            "Attribute \"{name}\" of type {outn} does not match corresponding attribute of \
+             type {inn}."
+        )
+    } else {
+        format!("Attribute \"{name}\" of type {outn} does not exist in type {inn}.")
+    };
+    Box::new(
+        PgError::error("could not convert row type".to_string())
+            .with_detail(detail)
+            .with_sqlstate(::types_error::ERRCODE_DATATYPE_MISMATCH),
+    )
 }
 
 fn init_func<'mcx>(

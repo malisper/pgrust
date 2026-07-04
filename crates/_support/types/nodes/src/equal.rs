@@ -16,8 +16,8 @@ use crate::parsenodes::{
 };
 use crate::list::OptNodeList;
 use crate::primnodes::{
-    Aggref, Alias, ArrayExpr, BoolExpr, BooleanTest, CoalesceExpr, CoerceViaIO, CollateExpr, Const,
-    CurrentOfExpr, DistinctExpr, FieldSelect, FieldStore, FromExpr, FuncExpr, GroupingFunc, NamedArgExpr,
+    Aggref, Alias, ArrayCoerceExpr, ArrayExpr, BoolExpr, BooleanTest, CoalesceExpr, CoerceViaIO,
+    CollateExpr, Const, ConvertRowtypeExpr, CurrentOfExpr, DistinctExpr, FieldSelect, FieldStore, FromExpr, FuncExpr, GroupingFunc, NamedArgExpr,
     NullTest, OpExpr, Param, RangeTblRef, RangeVar, RelabelType, RowCompareExpr, RowExpr,
     SQLValueFunction, ScalarArrayOpExpr, SubscriptingRef, TableFunc, TargetEntry, Var, WindowFunc,
     XmlExpr,
@@ -73,6 +73,8 @@ pub fn equal(a: Node<'_>, b: Node<'_>) -> bool {
         NodeTag::T_RelabelType => cmp!(as_relabel_type),
         NodeTag::T_CollateExpr => cmp!(as_collate_expr),
         NodeTag::T_CoerceViaIO => cmp!(as_coerce_via_io),
+        NodeTag::T_ArrayCoerceExpr => cmp!(as_array_coerce_expr),
+        NodeTag::T_ConvertRowtypeExpr => cmp!(as_convert_rowtype_expr),
         NodeTag::T_CoalesceExpr => cmp!(as_coalesce_expr),
         NodeTag::T_NullTest => cmp!(as_null_test),
         NodeTag::T_BooleanTest => cmp!(as_boolean_test),
@@ -529,6 +531,22 @@ impl NodeEqual for CoerceViaIO<'_> {
         equal(self.arg, b.arg)
             && self.resulttype == b.resulttype
             && self.resultcollid == b.resultcollid
+    }
+}
+
+impl NodeEqual for ArrayCoerceExpr<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        equal(self.arg, b.arg)
+            && equal_opt(self.elemexpr, b.elemexpr)
+            && self.resulttype == b.resulttype
+            && self.resulttypmod == b.resulttypmod
+            && self.resultcollid == b.resultcollid
+    }
+}
+
+impl NodeEqual for ConvertRowtypeExpr<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        equal(self.arg, b.arg) && self.resulttype == b.resulttype
     }
 }
 

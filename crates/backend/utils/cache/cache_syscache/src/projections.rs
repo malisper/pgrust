@@ -980,6 +980,7 @@ const ANUM_PG_CLASS_RELKIND: i32 = 18;
 const ANUM_PG_CLASS_RELNATTS: i32 = 19;
 const ANUM_PG_CLASS_RELISPARTITION: i32 = 28;
 const ANUM_PG_CLASS_RELHASSUBCLASS: i32 = 23;
+const ANUM_PG_CLASS_RELOFTYPE: i32 = 5;
 const ANUM_PG_OPFAMILY_OPFMETHOD: i32 = 2;
 const ANUM_PG_OPFAMILY_OPFNAME: i32 = 3;
 
@@ -1002,6 +1003,17 @@ fn lookup_pg_class_ls_shape(relid: Oid) -> PgResult<Option<syscache_seams::PgCla
     drop(t);
     ReleaseSysCache(tuple);
     Ok(Some(shape))
+}
+
+fn pg_class_reloftype(relid: Oid) -> PgResult<Option<Oid>> {
+    let Some(tuple) = SearchSysCache1(RELOID, SysCacheKey::Value(Datum::from_oid(relid)))? else {
+        return Ok(None);
+    };
+    let t = tuple.tuple();
+    let reloftype = getattr(&t, RELOID, ANUM_PG_CLASS_RELOFTYPE).as_oid();
+    drop(t);
+    ReleaseSysCache(tuple);
+    Ok(Some(reloftype))
 }
 
 fn lookup_pg_amop_by_operator(
@@ -2468,6 +2480,7 @@ pub(crate) fn install() {
     syscache_seams::lookup_pg_amproc::set(lookup_pg_amproc);
     syscache_seams::lookup_pg_amproc_members::set(lookup_pg_amproc_members);
     syscache_seams::lookup_pg_class_ls_shape::set(lookup_pg_class_ls_shape);
+    syscache_seams::pg_class_reloftype::set(pg_class_reloftype);
     syscache_seams::lookup_pg_index_ls_shape::set(lookup_pg_index_ls_shape);
     syscache_seams::pg_index_indclass_element::set(pg_index_indclass_element);
     syscache_seams::lookup_pg_amop_by_operator::set(lookup_pg_amop_by_operator);
