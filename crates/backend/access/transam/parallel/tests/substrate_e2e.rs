@@ -196,6 +196,7 @@ fn setup() {
         adt_bool::init_seams();
         adt_float::init_seams();
         transam_xlog::init_seams();
+        xloginsert::init_seams();
         xlogutils::init_seams();
         heapam_visibility::init_seams();
         clog::init_seams();
